@@ -1,0 +1,188 @@
+# data-collect-demand 共用数据采集模块需求
+
+事项编号：`data-collect-demand`。
+
+本文定义当前项目 `./data-collect/` 的共用数据采集模块需求。`./data-collect/` 只负责把外部市场源转化为可审计、可回放、可验证覆盖率的原始采集证据，服务训练、paper trade 和 live trade 三类消费者；本文不包含实现计划，不修改代码，也不定义 `data-pipeline` 的训练样本加工逻辑。
+
+## 一、范围与非范围
+
+### 1.1 data-collect 范围
+
+`./data-collect/` 必须负责：
+
+1. 采集 Polymarket `btc-updown-5m` market channel、Binance `BTCUSDT` orderbook/depth、Binance `BTCUSDT` aggTrade、Polymarket RTDS Chainlink `btc/usd` 四类源。
+2. 保存每条原始事件的 raw evidence，包括原始 payload 或等价可还原 `raw_json`、source kind、source event type、source identifier、采集主机、采集区域和 `recv_time_utc`。
+3. 为每条源事件记录本地接收时间 `recv_time_utc`，同时保留各 source 原始 timestamp；Polymarket market event 必须保留平台原始 `timestamp` 字段，两者不得互相覆盖。
+4. 保存 market discovery / market metadata，包括 `new_market`、condition id、token id / asset id、CLOB market id、slug、start/end、active/acceptingOrders、`market_lifecycle_state`（candidate / prefetched / active / retired）、tick size、min size、fee / rebate / reward eligibility 相关原始字段；该状态只描述 market lifecycle，不得与 ModelRegistry 的 candidate / active / retired 混用。
+5. 输出 typed raw parquet、source coverage、source health、source gap、reconnect trace、run manifest、schema version、row count、sha256、ResourceWatermark 证据。
+6. 通过 temp/running 分段文件、close/finalize、atomic rename 发布 finalized artifact，禁止消费者读取 partial artifact。
+7. 记录网络韧性、资源水位、writer queue、flush latency、RSS/CPU/disk watermark、backpressure 和异常恢复证据。
+8. 覆盖当前 active market，并从目标 market start 前 `T-30s` 开始采集 prefetched next market；`T-30s` 采集覆盖必须与 `T-30` 样本加工非范围明确区分。
+
+### 1.2 data-collect 非范围
+
+`./data-collect/` 不负责：
+
+1. `data-pipeline` 的 labels、features、tick_stream、训练切分、canonical split、purged/embargo split 或 T-30 样本加工。
+2. 训练标签、execution feedback label、reward、PnL、NAV、ledger、订单生命周期归一化或策略评估。
+3. paper/live 交易决策、下单、撤单、风控、模型 intent 改写或 Polymarket submit/cancel 路径。
+4. 用 parquet 存在性替代 runtime append-only event log，或用 manifest 替代 label / validation / tick_stream 的消费合同。
+5. 在 Polymarket Rust SDK 未覆盖能力时，自行引入 raw REST、manual signing、自建 SDK 或 shadow implementation；后续如发现 SDK 缺口，必须先形成缺口说明、影响范围和可选方案，获得用户同意后才能进入实现。
+6. 发布后归档、远端上传、gzip 压缩或对象存储 listing 验证；若未来需要纳入，必须另开 archive demand/plan/changelog 并补充 archive integrity 验收。
+7. paper/live append-only log、rotation artifact、live artifacts、order evidence、NormalizedOrderEvent、ledger、execution feedback ingestion 或训练反馈标签；这些由 paper/live、NOE/Ledger 或后续 data-pipeline/feedback 需求承接。
+
+## 二、时间语义与延迟证据
+
+1. 每条源事件必须保留 source timestamp 或可证明该源没有 exchange timestamp 的快照边界；每条源事件必须记录 `recv_time_utc`。
+2. `recv_time_utc` 表示当前采集进程所在主机收到业务消息的 UTC 时间，不等于 Polymarket 平台时间、Binance event time、RTDS payload timestamp，也不等于爱尔兰交易服务器收到消息的时间。
+3. 延迟统计必须记录 `collector_host_id`、`collector_region`、`host_clock_sync_status`、source endpoint、source timestamp、`recv_time_utc` 和计算口径版本。
+4. 非爱尔兰采集主机的 `recv_time_utc` 只能用于该采集主机视角的接收延迟分析，不得冒充 AWS 爱尔兰 paper/live 交易服务器的真实接收延迟。
+5. 当需要评估 paper/live 交易视角延迟时，必须使用对应 paper/live 主机采集或运行 artifact 中的接收时间；跨区域数据只能作为对照证据。
+
+## 三、数据源覆盖要求
+
+### 3.1 Polymarket market channel
+
+1. 必须覆盖 `book`、`price_change`、`last_trade_price`、`best_bid_ask`、`tick_size_change`、`new_market`、`market_resolved` 等 market channel 业务事件。
+2. 订阅必须显式记录 token / asset id 列表、raw subscription JSON、custom feature 开关、订阅确认证据或异常返回；market channel subscription payload 必须使用官方字段 `assets_ids`、`type: "market"`，验收 `best_bid_ask`、`new_market`、`market_resolved` 时必须启用 `custom_feature_enabled: true`。订阅确认证据可以是官方定义的 ack/response，也可以是首个匹配订阅资产的业务事件；缺少独立 ack 本身不能单独判定 incomplete，但无法证明订阅已发送、custom feature 已启用、SDK 支持状态或首个业务事件/明确异常时，manifest 必须标记 source gap / incomplete。
+3. `new_market` 不能被过滤；其 payload 中的 market metadata、condition id、asset id / token id、active 状态、fee schedule、tick size 等必须落盘为 raw evidence 和 typed raw parquet 字段或可追溯 raw_json。
+4. market discovery 必须支持 candidate slug 与 active scan / metadata snapshot 双路径；slug 只能生成 candidate，active scan 和 metadata snapshot 必须补齐 condition id、token id / asset id、start/end、active/acceptingOrders、tick/min size、fee/reward、clock drift 证据。
+5. market lifecycle 必须至少表达 `market_lifecycle_state`（candidate、prefetched、active、retired）四态；prefetched 只能表示预加载数据上下文，不能授权交易 submit path。
+6. 必须记录目标 market、planned market start、preload start、subscription confirmation evidence、first business event、coverage window，并证明 current active market 与 `T-30s` prefetched next market 的覆盖边界；每次 market lifecycle / rollover 必须记录 current -> retired、prefetched -> active 的边界证据。
+7. `market_resolved` 是目标覆盖项，但不得把未观测到该事件直接解释为未 resolved；必须记录订阅配置、未观测计数、fallback metadata 校验、source gap 或 stale 状态。
+8. market retired 判定必须拆分为两个互斥证据路径：`market_resolved` 事件路径必须记录同一 target condition/market 的 `subscribed_asset_ids_for_market`、`resolved_event_asset_ids`、`winning_asset_id`、`winning_outcome`、`close_reason_if_present` 或 nullable close reason，并校验事件 `market` / condition 与目标 market 匹配；fallback metadata 路径只在 `market_resolved` 缺失、stale 或 source gap 时启用，必须记录 `market_resolved_missing_reason`、同一 target condition/market 的 `fallback_metadata_asset_ids`、fallback freshness、same condition/market 校验和 close/resolution 证据，且不得伪造 `resolved_event_asset_ids`。
+9. retired predicate 必须满足：事件路径中 `resolved_event_asset_ids` 等于或覆盖 `subscribed_asset_ids_for_market`，`winning_asset_id` 属于该 target condition/market 的 subscribed/resolved asset set；fallback metadata 路径中 `fallback_metadata_asset_ids` 等于或覆盖 `subscribed_asset_ids_for_market`，metadata 必须与同一 condition/market 匹配、fresh，并包含 `closed`、`active`、`acceptingOrders`、`closedTime`、`resolution` 或等价关闭证据；任一路径证据不满足时只能记录 stale/gap，不能进入 retired。
+10. Polymarket 官方文档和社区 issue 已显示 ping/pong 正常不等于业务数据新鲜；market channel freshness 必须以业务消息、snapshot 到达、source gap 和 stale 检测为准。
+11. Polymarket 相关采集路径必须先核对官方 Polymarket Rust SDK 能力；若 SDK 不覆盖 market channel、RTDS、market discovery 或相关 metadata 能力，必须先记录缺口、影响范围和可选方案，经用户同意后才能实现缺口方案。
+
+### 3.2 Binance BTCUSDT orderbook/depth 与 aggTrade
+
+1. 必须采集 Binance 官方 `BTCUSDT` orderbook/depth 和 `BTCUSDT` aggTrade 源，并记录 WebSocket stream name、event type、source sequence / trade id、source event time 和 `recv_time_utc`。
+2. live Binance 源只能来自 Binance 官方 WebSocket stream，例如 `btcusdt@depth`、`btcusdt@aggTrade`；depth snapshot 必须来自 Binance 官方 REST `/api/v3/depth` 或当前官方等价端点。RTDS、archive、relay、proxy、cached feed 或历史 backfill 只能作为旁证或补数，不能冒充 live official source。
+3. 本地 orderbook 最小重建状态只用于 source integrity / gap detection；不得生成 labels、features、tick_stream 或模型输入。
+4. depth update 必须保留 WS raw/typed 字段 `e`、`E`、`s`、`U`、`u`、`b`、`a`；REST snapshot 必须保留 `lastUpdateId`、`bids`、`asks`、`snapshot_fetch_start_utc`、`snapshot_recv_time_utc`，不得伪造 exchange timestamp；若使用 combined stream，必须保留 wrapper `stream` / `data`。
+5. 本地 orderbook source integrity 检测必须能记录 snapshot 获取、buffered updates、缺序、重建开始、重建成功和重建失败证据。
+6. depth stitch predicate 必须验证：丢弃 `u <= lastUpdateId` 的 buffered update，首个可用 update 必须满足 `U <= lastUpdateId + 1 <= u`；后续 update 必须先处理 `u <= local_u` 的 stale/duplicate update 并记录/忽略，再处理 `U > local_u + 1` 的 source gap 并重新 snapshot，其余 update 才能应用并推进 `local_u`。
+7. aggTrade 必须保留原始字段 `e`、`E`、`s`、`a`、`p`、`q`、`f`、`l`、`T`、`m` 和 `recv_time_utc`；`m` 应保存为 `buyer_is_maker` 或等价原始布尔字段，如需要可另存派生 aggressor side。
+8. 当 update id 不连续、snapshot 缺失、服务器 shutdown、rate limit、订阅错误、aggTrade 长时间无业务消息或 source stale 时，必须写入 source health、source gap 和 reconnect trace。
+
+### 3.3 Polymarket RTDS Chainlink BTC/USD
+
+1. 必须采集 Polymarket RTDS Chainlink `btc/usd` 更新，保留 RTDS message timestamp、payload timestamp、symbol、value、source topic 和 `recv_time_utc`。
+2. 初始订阅必须记录 raw subscription JSON、subscribe send time、ack/first message 或 close/error 证据；Chainlink BTC/USD subscription payload 必须能追溯 `action: "subscribe"`、`topic: "crypto_prices_chainlink"`、`type: "*"` 和 `filters: "{\"symbol\":\"btc/usd\"}"`。
+3. RTDS Chainlink BTC/USD 是 Chainlink 价格证据，不是 Binance 官方 orderbook/depth 的替代源。
+4. RTDS 也必须使用业务数据 freshness 检测；ping/pong 或连接 open 不能单独证明 source coverage 完整。
+
+## 四、存储、分区与发布
+
+1. 数据保存格式必须是 `.parquet` typed raw mirror；每条 JSON-like 源必须保留 parseable `raw_json` 或等价原始证据引用。
+2. 训练用原始采集数据在数据服务器按 UTC day 分区保存；本文不发明最终落盘根路径，只要求分区、manifest 和 sha256 证据能证明按天边界。
+3. `data-collect` 只提供外部市场源 finalized mirror、coverage、health、gap 和 manifest；paper/live 自身 append-only event log、rotation artifact、order evidence、NOE/ledger 和 compact mirror 由对应模块需求定义，本文只声明接入边界。
+4. Parquet 连续写入必须写入 `*.tmp`、`*-running.parquet` 或等价 running segment；close/finalize 后才能通过 atomic rename 发布 finalized `.parquet`。
+5. 每个 source parquet 必须写入 typed raw schema version / source kind metadata，至少包括 `parquet_raw_layout_version` 和 `parquet_raw_source_kind`；兼容当前 V2 typed raw mirror 是迁移基线，但本文不把 V2 data-pipeline schema 变成 `data-collect` 的加工职责。
+6. manifest 必须记录 artifact path、row count、sha256、schema version、code version / git commit、collector binary sha256、source config digest、validation verdict、source coverage、source gap、health/gap/reconnect artifact path 或 digest、start/end time、coverage window、collector host/region、ResourceWatermark、writer queue 高水位和 flush latency。
+7. manifest 必须包含 `required_files[]` 或等价文件角色清单；每项至少记录 file role、path、finalized status、row count、sha256/digest、schema version、missing reason，总 manifest 必须给出 complete/incomplete verdict。
+8. 消费者只能读取 finalized parquet 和对应 manifest；temp/running、`.rsync-partial`、外部同步/发布链路生成的未完成标记文件、未 finalize 文件不得进入 discovery，`data-collect` 不负责 upload/listing。
+9. atomic rename 失败、sha256 缺失、row count 缺失、schema version 缺失、source coverage 缺失或 manifest 不一致时，artifact 必须标记为 incomplete，不得假装完整。
+10. 当前需求只要求 finalized artifact 不被 partial、running 或 `.rsync-partial` 误发现。
+
+## 五、网络异常与恢复要求
+
+### 5.1 必须显式记录的异常
+
+以下情况不得静默丢失，不得把数据写成完整覆盖：
+
+1. 连接失败。
+2. 断链或异常 close。
+3. server shutdown。
+4. 订阅返回错误、HTTP/WS 返回错误或协议错误。
+5. 返回空 payload、空数组或空 snapshot。
+6. 长时间无业务消息。
+7. ping/pong 正常但业务数据静默。
+8. rate limit、连接数限制、订阅数限制或服务端 throttling。
+9. snapshot 缺失、snapshot 过旧、update id 缺口。
+10. source stale、source gap、source coverage drop。
+11. writer queue 堵塞、backpressure 触发、磁盘/内存/CPU 水位越线。
+
+每个异常必须形成 source health、source gap 或 reconnect trace 记录，且能进入 manifest 或对应 health artifact。
+
+### 5.2 恢复策略需求
+
+1. 网络恢复必须使用有限重试，不允许无限 tight loop。
+2. 重试必须使用指数 backoff + jitter，并有可配置且带默认值的 max attempts、max elapsed、backoff ceiling 和 retry exhausted 状态。
+3. 必须记录每次 attempt、sleep、错误类别和最终状态；源级状态至少覆盖 open、half-open、recovered、exhausted。
+4. 各 source 独立熔断和恢复；Polymarket、Binance、RTDS Chainlink 任一源故障不得被其他源健康状态掩盖。
+5. 重连后必须重新校验订阅、snapshot、新鲜业务消息和 source coverage；不能只因连接 open 或 PONG 正常就恢复为 healthy。
+6. Polymarket 静默连接必须使用业务数据 freshness 检测；ping/pong 只作为连接层证据，不能作为 market data 完整性证据。
+7. Binance orderbook/depth 重连后必须重新获取 snapshot 并验证 update id 衔接；后续 depth update 必须记录 stale/duplicate 忽略和 gap/resnapshot 证据；Binance aggTrade 重连后必须验证 stream name、event time、trade id 连续性可解释性和 source stale 状态；缺口必须记录为 source gap。
+8. RTDS Chainlink 重连后必须重新验证 topic、symbol filter、payload timestamp、业务消息 freshness 和 source stale 状态。
+
+## 六、Rust async/non-blocking 运行要求
+
+1. 实现必须使用 Rust，并基于 Tokio 或等价 async runtime。
+2. WebSocket、HTTP、timer、channel、manifest 写入、health 写入和 parquet writer 调度不得阻塞主事件循环；需求层验收词为 async 和 non-blocking。
+3. 文件 I/O、parquet close/finalize、data-collect 内部 parquet compression、local directory scan、sha256、large manifest aggregation、本地旧 segment 清理等可能阻塞或重 CPU 工作必须隔离到后台任务或 blocking pool；不包含 gzip 归档压缩、远端上传、对象存储 listing 或归档保留清理。
+4. 所有跨任务队列必须是 bounded queue，并同时受 row count、byte count、oldest event age、writer lag 和 memory watermark 约束。
+5. 当 bounded queue 达到水位时，系统必须触发 backpressure、source health 降级、source gap 记录或受控停采；禁止 unbounded queue 导致 OOM 或 silent loss。
+6. Parquet writer 必须记录 row group / buffer 的内存估算、flush latency、bytes written 和 finalize 结果；未 finalize 不得发布。
+7. HTTP client 必须有 connect/read/total timeout 或等价超时语义；默认无超时不能作为生产需求。
+
+## 七、性能与资源验收基线
+
+1. Polymarket `btc-updown-5m` 事件量验收以现有估算为基线：单 5 分钟市场 p95 约 275k events，max 约 394k events；加 T-30 秒预加载后 p95 约 302k events，max 约 433k events。
+2. 工程吞吐基线必须按四源合并 `2k-5k events/s` 解析、排队、写入和 health 统计能力设计，并在 manifest 中分别记录 Polymarket、Binance depth、Binance aggTrade、RTDS Chainlink 与四源合并的实际吞吐、p95/max burst、drop/gap 情况。
+3. writer queue 必须记录 row/byte 高水位、queue age、backpressure 次数、flush latency p50/p95/max、finalize latency 和失败次数。
+4. ResourceWatermark 必须至少覆盖 RSS、CPU、disk free、artifact dir bytes、journal/log bytes、journal 限额状态、open files、queue bytes、queue age、parquet writer memory estimate、cgroup `memory.current` / `memory.stat` / `memory.events`、PSI、anon/file/slab 和 stage latency / TTL；在非 Linux 或指标不可用环境中必须记录 unavailable reason。
+5. 数据采集服务器和交易服务器必须分别记录 hardware tier；live 交易小主机不得承担训练式重处理、历史全量 parquet 扫描、压缩归档批处理或 Rust 编译。
+6. AWS 爱尔兰 live-trade 服务器是运行目标，不是构建机；`data-collect` 相关 Rust 编译、cargo test/check/fmt 和重处理必须在具备硬件条件的构建/数据服务器完成。
+7. ResourceWatermark 超过硬阈值时，必须记录降级、停止新市场采集、保护已采数据、优先 atomic publish 和 sha256 manifest 的保全动作。
+8. 后续计划或实现必须给出 threshold policy receipt，至少覆盖 RSS、CPU、disk free、artifact bytes、journal bytes/limit、open files、queue bytes/age、cgroup memory events 和 PSI window 的阈值、单位、采样窗口、触发动作与结果。
+
+## 八、消费者边界
+
+1. 训练消费者读取的是按天分区的 finalized typed raw parquet、manifest、source coverage 和后续 `data-pipeline` 生成的 labels/features/tick_stream；`data-collect` 不直接生成这些训练消费产物。
+2. paper/live 消费者若需要自身 append-only event log、rotation artifact、order evidence、NOE/ledger 或 compact mirror，必须由对应 paper/live 模块需求定义；`data-collect` 只能为这些消费者提供外部市场源证据和 coverage 边界。
+3. paper/live append-only log、live artifacts、order evidence、NOE/ledger 和 execution feedback ingestion 不由 `data-collect` 生成或解释。
+4. data-pipeline 可以消费 `data-collect` 的 typed raw parquet 和 manifest，但必须自行生成 labels、validation、tick_stream、features 和训练切分证据。
+5. 采集成功不等于训练批准，finalized parquet 完整不等于 labels/features/tick_stream 已完成，source coverage 完整不等于 live/paper 交易逻辑健康。
+
+## 九、验收标准
+
+`data-collect-demand` 后续实现或计划至少必须能验证：
+
+1. `./data-collect/` 的职责边界不得超出外部市场源采集证据边界；允许范围包括 raw evidence、`recv_time_utc`、typed raw parquet、source coverage、source health、source gap、reconnect trace、manifest、atomic rename、paper/live 消费者接入边界声明、网络韧性和 ResourceWatermark。
+2. 每条源事件都保留 `recv_time_utc`；Polymarket 每条 market event 同时保留平台 `timestamp` 和本地 `recv_time_utc`，并记录采集主机/区域。
+3. 非爱尔兰采集主机延迟不会被报告成爱尔兰 paper/live 交易主机接收延迟。
+4. 启动、重启和每次 market lifecycle / rollover 必须覆盖当前 active market；next market 必须从 planned market start 前 `T-30s` 开始采集，并记录 target market、planned market start、preload start、subscription confirmation evidence、first business event、coverage window、current -> retired、prefetched -> active 边界证据。
+5. `new_market`、market metadata、condition id、token id / asset id、start/end、`market_lifecycle_state`（candidate / prefetched / active / retired）全部可从 artifact 追溯；该状态不得与 ModelRegistry 状态混用。
+6. market discovery 必须证明 candidate slug + active scan / metadata snapshot 双路径，slug-only 不能作为完整 discovery 成功。
+7. Polymarket、Binance BTCUSDT orderbook/depth、Binance BTCUSDT aggTrade、RTDS Chainlink BTC/USD 四源均有 source coverage、source health、source gap 和 reconnect trace；验收必须逐源检查 required event types、required ids/timestamps、raw_json/typed fields 覆盖。
+8. `market_resolved` / retired 验收必须证明事件路径或 fallback metadata 路径之一满足 retired predicate；事件路径必须记录同一 target condition/market 的 `subscribed_asset_ids_for_market`、`resolved_event_asset_ids`、`winning_asset_id`、`winning_outcome`、nullable `close_reason_if_present`，fallback metadata 路径必须记录 `market_resolved_missing_reason`、同一 target condition/market 的 `fallback_metadata_asset_ids`、freshness、same condition/market 校验和 close/resolution 证据。
+9. `best_bid_ask`、`new_market`、`market_resolved` 验收必须证明 `custom_feature_enabled: true`、订阅确认证据（官方 ack/response 或首个匹配订阅资产的业务事件）和 SDK 支持状态；未满足时 manifest 必须为 source gap / incomplete。
+10. Binance live 源必须来自 Binance 官方 WS/REST；aggTrade 必须保留原始 `e,E,s,a,p,q,f,l,T,m`，depth update 必须保留 `e,E,s,U,u,b,a`，snapshot 必须保留 `lastUpdateId,bids,asks` 且不得伪造 exchange timestamp，并且 depth stitch predicate 必须可审计。
+11. 连续 parquet 写入通过 running/temp segment 承载，close/finalize 后 atomic rename，消费者只读 finalized parquet；每个 source parquet 必须带 typed raw schema version 和 source kind metadata，至少包括 `parquet_raw_layout_version` 和 `parquet_raw_source_kind`。
+12. manifest 至少包含 artifact path、row count、sha256、schema version、code version / git commit、collector binary sha256、source config digest、validation verdict、source coverage、source gap、health/gap/reconnect artifact path 或 digest、start/end time、coverage window、ResourceWatermark、writer queue 高水位、flush latency、采集主机/区域、`required_files[]` 和 complete/incomplete verdict。
+13. paper/live 自身 append-only event log、rotation artifact、live artifacts、order evidence、NOE/ledger 和 execution feedback ingestion 必须由其他模块需求承接；`data-collect` 只能提供外部市场源 finalized mirror、coverage、health、gap 和 manifest，不能私自解释交易运行证据。
+14. 网络异常、返回空、长时间业务静默、ping/pong 正常但无数据、rate limit、server shutdown、snapshot 缺失和 source stale 都会写入 health/gap/reconnect 证据。
+15. 恢复策略使用有限重试、backoff、jitter、max attempts、max elapsed、backoff ceiling，按源独立熔断/恢复，并在重连后验证订阅、snapshot、新鲜业务消息、source coverage、RTDS topic/symbol/payload timestamp 和 Binance update/trade id 状态。
+16. reconnect trace 必须记录每次 attempt、sleep、错误类别、最终状态，以及 open、half-open、recovered、exhausted 源级状态。
+17. Rust async/non-blocking 边界成立：主事件循环不做阻塞 I/O、重 CPU、data-collect 内部 parquet compression、local directory scan、sha256 或本地旧 segment 清理；所有队列都是 bounded queue，并具备 backpressure。archive/upload/listing/gzip 不属于当前 `data-collect` 验收项。
+18. 性能验收覆盖 Polymarket p95/max 事件量、四源合并 `2k-5k events/s` 工程吞吐、逐源吞吐/burst/drop/gap、writer queue、flush latency、RSS/CPU/disk watermark、cgroup/PSI/journal ResourceWatermark 和 hardware tier。
+19. ResourceWatermark 硬阈值验收必须包含 threshold policy receipt，并证明触发条件、降级或停止新市场采集、保护已采数据、优先 finalize/sha256/manifest 的动作与结果。
+20. archive/upload/listing/gzip 不属于当前 `data-collect` 验收项；若未来改变范围，以 1.2 非范围的决策门为准。
+21. Polymarket 相关采集路径必须先有官方 Rust SDK 能力核对记录；SDK 缺口方案必须先获用户同意。
+22. 文档、计划或实现不得把 data-pipeline 的 labels、features、tick_stream、训练切分、T-30 样本加工、paper/live 交易逻辑或 SDK 旁路实现写进 `data-collect` 范围。
+
+## 十、证据来源
+
+本需求依据以下本地证据与外部资料整理：
+
+1. `demand/rebuild-core-demand.md`
+2. `mistake-log/poly-tx/数据采集处理消费问题总报告.md`
+3. `mistake-log/poly-tx/证据来源台账.tsv`
+4. `mistake-log/2026-07-03-重构前错误汇总与优先级.md`
+5. `5分钟持续加载市场数据的硬件消耗预估.md`
+6. Polymarket WebSocket docs：`https://docs.polymarket.com/market-data/websocket/overview`、`https://docs.polymarket.com/market-data/websocket/market-channel`、`https://docs.polymarket.com/market-data/websocket/rtds`，核对日期：2026-07-06。
+7. Binance WebSocket Streams docs：`https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams`，核对日期：2026-07-06。
+8. Polymarket GitHub issues：`https://github.com/Polymarket/py-clob-client/issues/292`、`https://github.com/Polymarket/real-time-data-client/issues/26`，核对日期：2026-07-06。
+9. Rust docs：`https://docs.rs/reqwest/latest/reqwest/struct.ClientBuilder.html`、`https://docs.rs/tokio/latest/tokio/sync/mpsc/fn.channel.html`、Apache Arrow Rust parquet writer close/finalize docs，核对日期：2026-07-06。
