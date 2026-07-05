@@ -19,7 +19,7 @@
 
 ### 审查反馈修复
 
-- 根据 subagent 审查结果修复 `plan/data-collect-plan.md`：明确当前仓库只落文档，后续代码编写、本地构建、`cargo` 测试和 bench 的目标路径是 `/home/ubuntu/btc-updown-marketmaker`。
+- 根据 subagent 审查结果修复 `plan/data-collect-plan.md`：明确当前仓库只落文档，后续代码编写、本地构建、`cargo` 测试和 bench 的目标路径；该条后续被证明混淆了本地路径与服务器路径，见“路径口径再修复”。
 - 在计划中补充阶段推进通用 gate：每个阶段完成后必须自审、更新 changelog、派生独立审查、修复并复审、commit/push 后才能进入下一阶段；阶段 0 还必须经用户审查通过。
 - 在计划中补充 `data_collect_run_root`、`data_collect_artifact_root`、训练 UTC day 分区根、paper/live handoff artifact 根和权限边界 receipt 要求；路径未获用户批准时阶段 0 verdict 必须为 `BLOCKED_NEEDS_DECISION`。
 - 补充四源 typed raw 数据格式合同，明确 Polymarket market channel、Polymarket market metadata / `new_market`、Binance depth update/snapshot、Binance aggTrade、Polymarket RTDS Chainlink BTC/USD 的必备 typed 字段、raw evidence 和消费者边界。
@@ -35,3 +35,9 @@
 - 修正 `PASS_WITH_LIMITS` 表述：它不再自动允许进入正式开发，必须列出限制和风险，并经用户明确批准后才能进入阶段 1。
 - 根据复审 minor 反馈继续收窄 `BackpressureDegraded` 表格措辞：soft watermark 只记录 backpressure、降级、恢复观察和 gap；暂停新市场或单源 intake 只能发生在 hard threshold 连续越线且无法恢复之后。
 - 修正计划文档自身验证命令：用 `awk` 直接检查 trailing whitespace，避免 `git diff --no-index --check /dev/null ...` 因正常文件差异返回非零而在 `set -e` 下被误判为失败。
+
+### 路径口径再修复
+
+- 根据用户指出的问题，修复 `plan/data-collect-plan.md` 中把远端服务器路径 `/home/ubuntu/btc-updown-marketmaker` 误写成本地开发、代码编写、本地构建、`cargo` 测试和 bench 目标路径的错误。
+- 修复后的口径：本地开发、文档落盘、代码编写、本地构建、`cargo` 测试和 bench 均在 `/home/chillchill/btc-updown-marketmaker`；各远端服务器源码/工作目录统一写作 `~/btc-updown-marketmaker`。
+- 保留 AWS live-trade 服务器不是构建机的限制；`/home/ubuntu/live-trade` 仍只表示 live 服务器上的运行产物根，不代表本地开发路径。

@@ -22,16 +22,17 @@
 
 ## 零、路径执行口径
 
-1. 当前文档落盘仓库是 `/home/chillchill/btc-updown-marketmaker`；本文档、对应需求和 changelog 在该仓库维护。
-2. 后续代码编写、本地构建、`cargo` 测试和 bench 的目标路径是 `/home/ubuntu/btc-updown-marketmaker`；下文所有 `data-collect/...` 代码、测试、bench 和运行文档路径，除非明确写成 `demand/`、`plan/`、`changelog/`，均表示 `/home/ubuntu/btc-updown-marketmaker/data-collect/...` 下的实现路径。
-3. 下文命令块中的 `cargo ...` 为可读性省略了工作目录；执行时必须以 `/home/ubuntu/btc-updown-marketmaker` 为 workdir，不得在 `/home/chillchill/btc-updown-marketmaker` 文档仓库或 AWS live-trade 小主机上运行。
-4. AWS 爱尔兰 live-trade 服务器只允许低影响运行边界核对和已构建二进制运行；不得在该服务器运行 `cargo build`、`cargo test`、`cargo check`、`cargo fmt`、训练式重处理、历史全量 parquet 扫描或归档压缩。
-5. 阶段 0 必须产出 `data_collect_run_root`、`data_collect_artifact_root`、训练 UTC day 分区根、paper/live handoff artifact 根和权限边界 receipt；本文不发明最终数据服务器落盘根路径，receipt 未经用户审查通过时 verdict 必须是 `BLOCKED_NEEDS_DECISION`。
-6. 所有运行根和 artifact 根必须是绝对路径，必须解析在用户批准的根目录内；路径越界、权限不匹配、owner/group 不符合 receipt、或解析到 `/home/ubuntu/live-trade` 非授权子路径时必须 fail closed。
+1. 当前本地开发、文档落盘、代码编写、本地构建、`cargo` 测试和 bench 的仓库是 `/home/chillchill/btc-updown-marketmaker`；本文档、对应需求和 changelog 也在该仓库维护。
+2. 各远端服务器上的源码/工作目录统一写作 `~/btc-updown-marketmaker`；在 `ubuntu` 用户服务器上该路径通常解析为 `/home/ubuntu/btc-updown-marketmaker`，但计划、命令和 changelog 不得把展开后的远端路径误写成本地开发路径。
+3. 下文所有 `data-collect/...` 代码、测试、bench 和运行文档路径，除非明确写成 `demand/`、`plan/`、`changelog/`，均表示本地 `/home/chillchill/btc-updown-marketmaker/data-collect/...` 下的实现路径；远端验证时对应服务器 `~/btc-updown-marketmaker/data-collect/...`。
+4. 下文命令块中的 `cargo ...` 为可读性省略了工作目录；本地执行时必须以 `/home/chillchill/btc-updown-marketmaker` 为 workdir。只有在明确进入数据采集服务器验证时，才允许在该服务器 `~/btc-updown-marketmaker` 下执行；不得在 AWS live-trade 小主机上运行。
+5. AWS 爱尔兰 live-trade 服务器只允许低影响运行边界核对和已构建二进制运行；不得在该服务器运行 `cargo build`、`cargo test`、`cargo check`、`cargo fmt`、训练式重处理、历史全量 parquet 扫描或归档压缩。
+6. 阶段 0 必须产出 `data_collect_run_root`、`data_collect_artifact_root`、训练 UTC day 分区根、paper/live handoff artifact 根和权限边界 receipt；本文不发明最终数据服务器落盘根路径，receipt 未经用户审查通过时 verdict 必须是 `BLOCKED_NEEDS_DECISION`。
+7. 所有运行根和 artifact 根必须是绝对路径，必须解析在用户批准的根目录内；路径越界、权限不匹配、owner/group 不符合 receipt、或解析到 `/home/ubuntu/live-trade` 非授权子路径时必须 fail closed。
 
 ## 一、计划定位
 
-本计划是 `data-collect-demand` 的模块计划文档，范围限定为实现仓库 `/home/ubuntu/btc-updown-marketmaker/data-collect/` 中的 `./data-collect/` 模块；当前仓库只落盘需求、计划、changelog 和审查记录。
+本计划是 `data-collect-demand` 的模块计划文档，范围限定为本地仓库 `/home/chillchill/btc-updown-marketmaker/data-collect/` 中的 `./data-collect/` 模块；远端验证时同一相对路径对应服务器 `~/btc-updown-marketmaker/data-collect/`。
 
 它负责回答：
 
@@ -63,7 +64,7 @@
 
 ## 三、候选文件结构
 
-以下文件结构是后续正式开发的计划边界，均相对 `/home/ubuntu/btc-updown-marketmaker`。执行时如果真实 Rust workspace 与本计划不一致，必须按“方案不一致决策门”停下来记录事实、影响和选项。
+以下文件结构是后续正式开发的计划边界，均相对本地仓库 `/home/chillchill/btc-updown-marketmaker`；远端验证时均相对服务器 `~/btc-updown-marketmaker`。执行时如果真实 Rust workspace 与本计划不一致，必须按“方案不一致决策门”停下来记录事实、影响和选项。
 
 | 路径 | 责任 |
 | --- | --- |
@@ -157,7 +158,7 @@
 2. 更新 `changelog/data-collect-changelog.md`，记录阶段事实、命令、退出码、artifact 路径、sha256、与计划不一致处和最终决策。
 3. 派生独立审查 subagent，使用 `gpt-5.5` 和 `xhigh`，检查需求覆盖、正确性、边界、过度设计、遗漏、测试和与 `rebuild-core-demand` 的一致性。
 4. 修复审查发现的范围内问题，并重复审查直到通过；若反馈要求改变 SDK-first、服务器角色、吞吐验收、运行根、artifact 根、消费者边界或非范围，必须先请求用户决策。
-5. 阶段审查通过后，在实现仓库 `/home/ubuntu/btc-updown-marketmaker` 创建 commit 并 push；未 commit/push 不进入下一阶段。
+5. 阶段审查通过后，在本地实现仓库 `/home/chillchill/btc-updown-marketmaker` 创建 commit 并 push；未 commit/push 不进入下一阶段。
 6. 阶段 0 额外要求用户审查通过；`PASS_WITH_LIMITS` 或 `BLOCKED_NEEDS_DECISION` 不得自动进入阶段 1。
 
 ## 五、阶段 0：技术测试与性能验证
@@ -1035,7 +1036,7 @@
 计划文档自身验证：
 
 ```bash
-rg -n "/home/ubuntu/btc-updown-marketmaker|路径执行口径|data_collect_run_root|data_collect_artifact_root|阶段推进通用 gate|数据格式合同|运行时校验分级|ProcessFatal|ArtifactIncomplete|SourceDegraded|BackpressureDegraded|hysteresis|source_format_contract|consumer_format_compatibility_contract|demand/data-collect-demand.md|阶段 0|技术测试|性能验证|2k-5k events/s|bounded queue|backpressure|ResourceWatermark|atomic rename|source gap|recv_time_utc|Polymarket market channel|Binance BTCUSDT aggTrade|RTDS Chainlink|SDK 缺口|用户审查" plan/data-collect-plan.md changelog/data-collect-changelog.md
+rg -n "/home/chillchill/btc-updown-marketmaker|~/btc-updown-marketmaker|路径执行口径|data_collect_run_root|data_collect_artifact_root|阶段推进通用 gate|数据格式合同|运行时校验分级|ProcessFatal|ArtifactIncomplete|SourceDegraded|BackpressureDegraded|hysteresis|source_format_contract|consumer_format_compatibility_contract|demand/data-collect-demand.md|阶段 0|技术测试|性能验证|2k-5k events/s|bounded queue|backpressure|ResourceWatermark|atomic rename|source gap|recv_time_utc|Polymarket market channel|Binance BTCUSDT aggTrade|RTDS Chainlink|SDK 缺口|用户审查" plan/data-collect-plan.md changelog/data-collect-changelog.md
 rg -n "[T]ODO|[T]BD|待[补]|以后再[填]|[p]laceholder" plan/data-collect-plan.md changelog/data-collect-changelog.md
 awk '/[ \t]$/ { print FILENAME ":" FNR ": trailing whitespace"; bad=1 } END { exit bad }' plan/data-collect-plan.md changelog/data-collect-changelog.md
 ```
@@ -1043,7 +1044,7 @@ awk '/[ \t]$/ { print FILENAME ":" FNR ": trailing whitespace"; bad=1 } END { ex
 后续实现完成前最低验证：
 
 ```bash
-cd /home/ubuntu/btc-updown-marketmaker
+cd /home/chillchill/btc-updown-marketmaker
 cargo fmt --check -p data-collect
 cargo clippy -p data-collect --all-targets -- -D warnings
 cargo test -p data-collect --all-targets
