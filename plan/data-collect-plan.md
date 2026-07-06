@@ -1479,15 +1479,15 @@
 - 修改/扩展：`data-collect/src/writer.rs`
 - 创建：`data-collect/tests/parquet_writer_contract.rs`
 
-- [ ] **步骤 3.1.1：写 parquet schema metadata 测试**
+- [x] **步骤 3.1.1：写 parquet schema metadata 测试**
 
   测试断言每个 source parquet 带 `parquet_raw_layout_version` 和 `parquet_raw_source_kind`，并保存 parseable `raw_json` 或等价原始证据引用。
 
-- [ ] **步骤 3.1.2：实现 async 调度与 blocking 隔离**
+- [x] **步骤 3.1.2：实现 async 调度与 blocking 隔离**
 
   WebSocket、HTTP、timer、channel、manifest 写入、health 写入和 writer 调度不得阻塞主事件循环；文件 I/O、parquet close/finalize、data-collect 内部 parquet compression、local directory scan、sha256、large manifest aggregation、本地旧 segment 清理必须进入后台任务或 blocking pool。
 
-- [ ] **步骤 3.1.3：运行 writer 测试**
+- [x] **步骤 3.1.3：运行 writer 测试**
 
   计划执行命令：
 
@@ -1498,6 +1498,8 @@
 
   预期：主事件循环没有阻塞 I/O 或重 CPU；writer 记录 row group/buffer 内存估算、flush latency、bytes written 和 finalize 结果。
 
+  执行结果：已新增 `data-collect/tests/parquet_writer_contract.rs`，并扩展 `data-collect/src/writer.rs`。`ParquetSegmentWriter::create_for_source()` 写入 parquet file key-value metadata：`parquet_raw_layout_version`、`parquet_raw_source_kind`、`data_collect_artifact_kind=typed_raw_parquet`；`write_events_with_stats()` 返回 rows、estimated bytes、write latency 和 row group memory estimate，并拒绝与单源 segment 不匹配的 `parquet_raw_source_kind`；parseable `raw_json` 仍由 event/source-format 合同保证，writer 不在热写入路径重复 JSON parse。`write_segment_on_blocking_pool_for_source()` 保留文件 I/O、parquet close/finalize、sha256 和 rename 在 blocking pool 中执行的边界。`cargo test -p data-collect --test parquet_writer_contract -- --nocapture` 通过 3 条测试。
+
 ### 任务 3.2：按 UTC day 分区与 paper/live 边界
 
 **文件：**
@@ -1505,15 +1507,15 @@
 - 创建：`data-collect/src/publish.rs`
 - 创建：`data-collect/tests/partition_publish_contract.rs`
 
-- [ ] **步骤 3.2.1：写按天分区测试**
+- [x] **步骤 3.2.1：写按天分区测试**
 
   训练用原始采集数据在数据服务器本机 `~/btc-updown-marketmaker/datasets/` 下按 UTC day 分区保存；测试验证 server-local 根路径、partition key、manifest 和 sha256 能证明按天边界。
 
-- [ ] **步骤 3.2.2：写 paper/live 边界测试**
+- [x] **步骤 3.2.2：写 paper/live 边界测试**
 
   测试断言 `data-collect` 只发布外部市场源 finalized mirror、coverage、health、gap 和 manifest；不生成 paper/live append-only log、rotation artifact、order evidence、NOE/ledger 或 execution feedback ingestion。
 
-- [ ] **步骤 3.2.3：运行分区与边界测试**
+- [x] **步骤 3.2.3：运行分区与边界测试**
 
   计划执行命令：
 
@@ -1524,6 +1526,8 @@
 
   预期：训练、paper/live 消费边界清晰，`data-pipeline` 才生成 labels/features/tick_stream。
 
+  执行结果：已新增 `data-collect/src/publish.rs` 和 `data-collect/tests/partition_publish_contract.rs`。`training_utc_day_partition()` 要求 server-local absolute dataset root，使用成熟 `time` crate 按 `recv_time_utc_ms` 生成 UTC day 分区路径 `training/typed_raw/source_kind=.../utc_day=YYYY-MM-DD`，并拒绝 source kind 路径穿越。`paper_live_handoff_boundary()` 只允许 finalized typed raw parquet、manifest、source coverage、source health、source gap 和 reconnect trace 等 data-collect 外部市场源 artifact；明确禁止 paper/live append-only event log、rotation artifact、order evidence、NOE/ledger、execution feedback ingestion 和 trading decision。`cargo test -p data-collect --test partition_publish_contract -- --nocapture` 通过 3 条测试。
+
 ### 任务 3.3：atomic rename 和 finalized-only discovery
 
 **文件：**
@@ -1531,7 +1535,7 @@
 - 修改：`data-collect/src/publish.rs`
 - 创建：`data-collect/tests/finalized_discovery_contract.rs`
 
-- [ ] **步骤 3.3.1：写 partial 排除测试**
+- [x] **步骤 3.3.1：写 partial 排除测试**
 
   测试断言消费者 discovery 排除：
 
@@ -1540,11 +1544,11 @@
   - 外部同步/发布链路生成的未完成标记文件。
   - 未 finalize parquet。
 
-- [ ] **步骤 3.3.2：实现 atomic publish**
+- [x] **步骤 3.3.2：实现 atomic publish**
 
   close/finalize 后才 atomic rename；rename、sha256、row count、schema version 任一失败时 artifact verdict 为 incomplete，且不得发布为 complete。source coverage 不完整时记录 `coverage_incomplete`、source gap 和 missing reason；它限制消费者使用语义，但不得单独导致 collector 进程失败。只有 artifact 根不可写、路径越界、partial artifact 被发布或已采 segment 无法保全时才进入 `ProcessFatal`。
 
-- [ ] **步骤 3.3.3：运行 publish 测试**
+- [x] **步骤 3.3.3：运行 publish 测试**
 
   计划执行命令：
 
@@ -1555,6 +1559,12 @@
   ```
 
   预期：消费者只读 finalized parquet 和对应 manifest；coverage incomplete 产物可保全但不能被发现为 complete。
+
+  执行结果：`discover_finalized_artifacts()` 只发现 finalized parquet 与对应 `.manifest.json` sidecar，排除 temp/running/digesting、`.rsync-partial`、`.partial`、`.incomplete`、无 manifest 的 parquet、garbage manifest 和 effective verdict incomplete manifest。discovery 会反序列化 `ManifestDraft`，要求 manifest effective verdict complete，且 manifest artifact path / required file 指向同一 parquet；旧的 writer-level `discover_finalized_parquet()` 已移除，避免消费者绕过 manifest sidecar 合同。`failed_atomic_publish_decision()` 将 rename/sha256/row count/schema version 等 publish 失败映射为 `ArtifactIncomplete` 和 `RequiredFile.missing_reason`，不会发布为 complete；`manifest_discoverable_as_complete()` 要求 manifest effective verdict complete。`coverage_incomplete_does_not_publish_as_complete_or_stop_collector` 证明 source coverage incomplete 会限制消费者使用，但不触发 process fatal。`cargo test -p data-collect --test finalized_discovery_contract -- --nocapture` 通过 3 条测试。
+
+### 阶段 3 当前本地验证
+
+本地验证通过：`cargo fmt --all`、`CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo test -p data-collect --lib --tests -- --nocapture`（75 条测试）、`CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo clippy -p data-collect --all-targets -- -D warnings` 和 release bench targets `market_discovery_probe`、`real_source_alignment_probe`、`parquet_writer_probe`、`throughput_probe`、`websocket_smoke_probe` 构建。阶段 3 第一轮独立复审为 2 个 `PASS_WITH_NOTES`、1 个 `FAIL`；修复 discovery 旁路后，针对性复审为 2 个 `PASS_WITH_NOTES` 且无阻塞项。阶段 3 完成 commit/push 后进入阶段 4。
 
 ## 九、阶段 4：runtime 韧性、bounded queue 与 ResourceWatermark
 

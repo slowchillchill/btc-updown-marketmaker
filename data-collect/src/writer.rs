@@ -7,6 +7,7 @@ use std::time::Instant;
 use arrow_array::{ArrayRef, RecordBatch, StringArray, TimestampMillisecondArray, UInt32Array};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use parquet::arrow::ArrowWriter;
+use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
@@ -46,6 +47,14 @@ pub struct FinalizeTiming {
     pub finalize_total_us: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct WriterWriteStats {
+    pub rows: u64,
+    pub estimated_event_bytes: u64,
+    pub write_events_us: u64,
+    pub row_group_memory_estimate_bytes: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InstrumentedPublishedSegment {
     pub segment: PublishedSegment,
@@ -57,6 +66,7 @@ pub struct ParquetSegmentWriter {
     digesting_path: PathBuf,
     final_path: PathBuf,
     schema_version: String,
+    parquet_raw_source_kind: String,
     schema: Arc<Schema>,
     writer: Option<ArrowWriter<File>>,
     row_count: u64,
@@ -64,6 +74,16 @@ pub struct ParquetSegmentWriter {
 
 impl ParquetSegmentWriter {
     pub fn create(root: &Path, stem: &str, schema_version: &str) -> Result<Self> {
+        Self::create_for_source(root, stem, schema_version, "mixed")
+    }
+
+    pub fn create_for_source(
+        root: &Path,
+        stem: &str,
+        schema_version: &str,
+        parquet_raw_source_kind: &str,
+    ) -> Result<Self> {
+        validate_segment_stem(stem)?;
         fs::create_dir_all(root)?;
 
         let running_path = root.join(format!("{stem}-running.parquet"));
@@ -99,7 +119,22 @@ impl ParquetSegmentWriter {
             .create_new(true)
             .open(&running_path)?;
         let schema = raw_event_schema();
-        let properties = WriterProperties::builder().build();
+        let properties = WriterProperties::builder()
+            .set_key_value_metadata(Some(vec![
+                KeyValue::new(
+                    "parquet_raw_layout_version".to_owned(),
+                    schema_version.to_owned(),
+                ),
+                KeyValue::new(
+                    "parquet_raw_source_kind".to_owned(),
+                    parquet_raw_source_kind.to_owned(),
+                ),
+                KeyValue::new(
+                    "data_collect_artifact_kind".to_owned(),
+                    "typed_raw_parquet".to_owned(),
+                ),
+            ]))
+            .build();
         let writer = ArrowWriter::try_new(file, Arc::clone(&schema), Some(properties))?;
 
         Ok(Self {
@@ -107,6 +142,7 @@ impl ParquetSegmentWriter {
             digesting_path,
             final_path,
             schema_version: schema_version.to_owned(),
+            parquet_raw_source_kind: parquet_raw_source_kind.to_owned(),
             schema,
             writer: Some(writer),
             row_count: 0,
@@ -118,10 +154,36 @@ impl ParquetSegmentWriter {
     }
 
     pub fn write_events(&mut self, events: &[RawEvent]) -> Result<()> {
+        self.write_events_with_stats(events).map(|_| ())
+    }
+
+    pub fn write_events_with_stats(&mut self, events: &[RawEvent]) -> Result<WriterWriteStats> {
         if events.is_empty() {
-            return Ok(());
+            return Ok(WriterWriteStats {
+                rows: 0,
+                estimated_event_bytes: 0,
+                write_events_us: 0,
+                row_group_memory_estimate_bytes: 0,
+            });
         }
 
+        for event in events {
+            if self.parquet_raw_source_kind != "mixed"
+                && event.parquet_raw_source_kind != self.parquet_raw_source_kind
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "event source kind {} does not match segment source kind {}",
+                        event.parquet_raw_source_kind, self.parquet_raw_source_kind
+                    ),
+                )
+                .into());
+            }
+        }
+
+        let write_started = Instant::now();
+        let estimated_event_bytes = events.iter().map(estimated_event_bytes).sum();
         let batch = events_to_batch(Arc::clone(&self.schema), events)?;
         let writer = self
             .writer
@@ -129,7 +191,13 @@ impl ParquetSegmentWriter {
             .ok_or_else(|| io::Error::other("parquet segment already finalized"))?;
         writer.write(&batch)?;
         self.row_count += events.len() as u64;
-        Ok(())
+        let write_events_us = elapsed_us(write_started);
+        Ok(WriterWriteStats {
+            rows: events.len() as u64,
+            estimated_event_bytes,
+            write_events_us,
+            row_group_memory_estimate_bytes: estimated_event_bytes,
+        })
     }
 
     pub fn finalize(self) -> Result<PublishedSegment> {
@@ -198,33 +266,27 @@ pub async fn write_segment_on_blocking_pool(
     .map_err(|error| io::Error::other(format!("writer blocking task failed: {error}")))?
 }
 
-pub fn discover_finalized_parquet(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
+pub async fn write_segment_on_blocking_pool_for_source(
+    root: PathBuf,
+    stem: String,
+    schema_version: String,
+    parquet_raw_source_kind: String,
+    event_chunks: Vec<Vec<RawEvent>>,
+) -> Result<PublishedSegment> {
+    tokio::task::spawn_blocking(move || {
+        let mut writer = ParquetSegmentWriter::create_for_source(
+            &root,
+            &stem,
+            &schema_version,
+            &parquet_raw_source_kind,
+        )?;
+        for events in event_chunks {
+            writer.write_events(&events)?;
         }
-
-        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-
-        if file_name == ".rsync-partial"
-            || file_name.ends_with(".tmp")
-            || file_name.ends_with("-running.parquet")
-            || file_name.ends_with("-digesting.parquet")
-        {
-            continue;
-        }
-
-        if path.extension().and_then(|ext| ext.to_str()) == Some("parquet") {
-            files.push(path);
-        }
-    }
-    files.sort();
-    Ok(files)
+        writer.finalize()
+    })
+    .await
+    .map_err(|error| io::Error::other(format!("writer blocking task failed: {error}")))?
 }
 
 pub fn sha256_file(path: &Path) -> Result<String> {
@@ -306,4 +368,39 @@ fn events_to_batch(schema: Arc<Schema>, events: &[RawEvent]) -> Result<RecordBat
     ];
 
     Ok(RecordBatch::try_new(schema, columns)?)
+}
+
+fn validate_segment_stem(stem: &str) -> Result<()> {
+    if stem.trim().is_empty()
+        || stem == "."
+        || stem == ".."
+        || stem.contains('/')
+        || stem.contains('\\')
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "parquet segment stem is not a safe path component",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn estimated_event_bytes(event: &RawEvent) -> u64 {
+    [
+        event.source_kind.as_str(),
+        event.source_event_type.as_str(),
+        event.source_identifier.as_str(),
+        event.source_ts.as_deref().unwrap_or_default(),
+        event.collector_host_id.as_str(),
+        event.collector_region.as_str(),
+        event.source_endpoint.as_str(),
+        event.raw_json.as_str(),
+        event.parquet_raw_source_kind.as_str(),
+    ]
+    .iter()
+    .map(|value| value.len() as u64)
+    .sum::<u64>()
+        + std::mem::size_of::<i64>() as u64
+        + std::mem::size_of::<u32>() as u64
 }

@@ -1,14 +1,16 @@
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use crate::resource::ResourceWatermark;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ValidationVerdict {
     Complete,
     Incomplete,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SourceCoverage {
     pub source_kind: String,
     pub first_recv_time_utc_ms: i64,
@@ -16,7 +18,7 @@ pub struct SourceCoverage {
     pub rows: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueWatermark {
     pub rows: u64,
     pub bytes: u64,
@@ -24,7 +26,7 @@ pub struct QueueWatermark {
     pub writer_lag_ms: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequiredFile {
     pub file_role: String,
     pub path: PathBuf,
@@ -35,7 +37,7 @@ pub struct RequiredFile {
     pub missing_reason: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimeWindow {
     pub start_utc_ms: i64,
     pub end_utc_ms: i64,
@@ -55,13 +57,13 @@ impl SourceCoverage {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SourceGapSeverity {
     SourceDegraded,
     BackpressureDegraded,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestSourceGap {
     pub source_kind: String,
     pub reason: String,
@@ -70,14 +72,14 @@ pub struct ManifestSourceGap {
     pub recovered_at_utc_ms: Option<i64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManifestFailureClass {
     Complete,
     ArtifactIncomplete,
     ProcessFatal,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ManifestDraft {
     pub artifact_path: Option<PathBuf>,
     pub row_count: Option<u64>,

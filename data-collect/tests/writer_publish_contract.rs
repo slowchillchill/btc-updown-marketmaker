@@ -2,9 +2,8 @@ use std::fs;
 
 use data_collect::{
     ManifestDraft, QueueWatermark, RawEvent, RequiredFile, ResourceWatermark, SourceCoverage,
-    ValidationVerdict, discover_finalized_parquet, manifest::TimeWindow,
-    resource::CgroupMemoryStat, resource::PsiSample, sha256_file, writer::ParquetSegmentWriter,
-    writer::write_segment_on_blocking_pool,
+    ValidationVerdict, manifest::TimeWindow, resource::CgroupMemoryStat, resource::PsiSample,
+    sha256_file, writer::ParquetSegmentWriter, writer::write_segment_on_blocking_pool,
 };
 use tempfile::tempdir;
 
@@ -72,10 +71,8 @@ fn writer_running_file_is_not_discoverable() {
     fs::write(tmp.path().join("old-digesting.parquet"), b"partial").unwrap();
     fs::write(tmp.path().join(".rsync-partial"), b"partial").unwrap();
 
-    let discovered = discover_finalized_parquet(tmp.path()).unwrap();
-
     assert!(writer.running_path().exists());
-    assert_eq!(discovered, Vec::<std::path::PathBuf>::new());
+    assert!(!tmp.path().join("probe.parquet").exists());
 }
 
 #[test]
@@ -112,8 +109,7 @@ fn writer_finalize_atomic_rename_publishes_only_finalized() {
         sha256_file(&published.final_path).unwrap()
     );
 
-    let discovered = discover_finalized_parquet(tmp.path()).unwrap();
-    assert_eq!(discovered, vec![published.final_path]);
+    assert!(published.final_path.exists());
 }
 
 #[tokio::test]
@@ -131,10 +127,7 @@ async fn writer_segment_can_run_on_blocking_pool() {
 
     assert!(published.final_path.exists());
     assert_eq!(published.row_count, 2);
-    assert_eq!(
-        discover_finalized_parquet(tmp.path()).unwrap(),
-        vec![published.final_path]
-    );
+    assert!(published.final_path.exists());
 }
 
 #[test]

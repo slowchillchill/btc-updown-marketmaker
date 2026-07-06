@@ -1,23 +1,25 @@
-#[derive(Clone, Debug, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetricUnavailable {
     pub metric: String,
     pub reason: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CgroupMemoryStat {
     pub anon_bytes: u64,
     pub file_bytes: u64,
     pub slab_bytes: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PsiSample {
     pub some_avg10: f64,
     pub full_avg10: f64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ResourceSample {
     pub rss_bytes: Option<u64>,
     pub cpu_percent: Option<f64>,
@@ -66,7 +68,7 @@ impl ResourceSample {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ResourceWatermark {
     pub rss_bytes: Option<u64>,
     pub cpu_percent: Option<f64>,
