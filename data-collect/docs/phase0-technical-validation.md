@@ -746,3 +746,11 @@ git diff --check
 Phase 0 当前状态：`PHASE0_COMPLETE_READY_FOR_PHASE1`。
 
 剩余注意项不阻塞 Phase 0：正式 collector 阶段仍需补齐 host clock sync status、生产级 ResourceWatermark runtime manifest、actual Polymarket outbound request evidence 或明确 unavailable reason、完整 source health/reconnect trace，以及 paper/live 主机 runtime receive timestamp 证据。
+
+### 12.12 Phase 6 Local Delivery Cross-check
+
+Phase 6 新增本地交付核对，不改变 Phase 0 远端技术 verdict：
+
+- `data-collect/tests/e2e_collect_contract.rs` 用本地 synthetic 四源写入验证 typed raw parquet、manifest sidecar、health/gap/reconnect evidence、finalized-only discovery、consumer boundary declarations，以及 current active / planned next preload coverage 对齐。
+- `data-collect/docs/acceptance-matrix.md` 将 `demand/data-collect-demand.md` 第九节 24 个验收标准逐条映射到合同测试、Phase 0 远端 artifact 或 Phase 6 扫描。
+- Phase 6 本地 e2e contract 不替代 0.6.10 / 0.6.11 的真实四源远端长跑；它用于防止交付阶段遗漏 manifest、finalized-only、消费者边界或验收矩阵。

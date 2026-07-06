@@ -1741,21 +1741,27 @@ Phase 5 执行结果：
 - 修改：`data-collect/docs/phase0-technical-validation.md`
 - 修改：`changelog/data-collect-changelog.md`
 
-- [ ] **步骤 6.1.1：运行短窗口四源采集 dry run**
+- [x] **步骤 6.1.1：运行短窗口四源采集 dry run**
 
   计划执行命令：
 
   ```bash
-  cargo test -p data-collect e2e_four_source_collect_contract -- --nocapture
+  cargo test -p data-collect --test e2e_collect_contract -- --nocapture
   ```
 
   预期：四源均生成 typed raw parquet、source coverage、source health、source gap、reconnect trace 和 manifest；artifact finalized-only。
 
-- [ ] **步骤 6.1.2：运行长窗口 soak test**
+  执行结果：新增 `data-collect/tests/e2e_collect_contract.rs`，本地 synthetic 四源 dry run 写出四个 typed raw parquet、manifest sidecar、health/gap/reconnect evidence，验证 discovery 只发现 finalized parquet；同一测试也验证 current active 与 planned next preload 的四源 coverage 对齐。`cargo test -p data-collect --test e2e_collect_contract -- --nocapture` 通过 1 条测试。
+
+  审查修复：第一轮 Phase 6 审查指出 e2e coverage report 曾独立于写出的 parquet/manifest 构造，存在假阳性；已改为 manifest sidecar 写入 current active 与 planned next preload 两段 coverage，test 通过 finalized discovery 读回 sidecar 后再构造 scheduler report。同时加入 running / rsync-partial fixture，确认 discovery 只返回 finalized parquet + complete manifest。针对性复审又指出 manifest `end_time_utc_ms` 未覆盖 preload coverage；已修成 end time 覆盖 max source coverage，并在读回 sidecar 后断言 manifest start/end 包住全部 `source_coverage`。
+
+- [x] **步骤 6.1.2：运行长窗口 soak test**
 
   soak test 至少覆盖一个完整 `btc-updown-5m` market 与下一市场 `T-30s` prefetched window。
 
   预期：manifest 可证明 current -> retired、prefetched -> active、coverage window、first business event、subscription confirmation evidence 和 source freshness。
+
+  执行结果：Phase 6 不重复启动数据服务器长跑；复核 Phase 0 已完成真实远端证据：0.6.10 真实四源 60 分钟 run、targeted rollover run、0.6.11 hot/durable path 60 分钟 run 和 0.6.12 collector region smoke。Phase 6 新增 `data-collect/docs/phase0-technical-validation.md` 12.12 交叉引用，说明本地 e2e contract 是交付核对，不替代 Phase 0 真实四源远端长跑。
 
 ### 任务 6.2：需求验收矩阵复核
 
@@ -1764,11 +1770,13 @@ Phase 5 执行结果：
 - 创建：`data-collect/docs/acceptance-matrix.md`
 - 修改：`changelog/data-collect-changelog.md`
 
-- [ ] **步骤 6.2.1：逐条映射需求验收**
+- [x] **步骤 6.2.1：逐条映射需求验收**
 
   `data-collect/docs/acceptance-matrix.md` 必须逐条映射 `demand/data-collect-demand.md` 第九节 24 个验收标准到测试、artifact 或报告。
 
-- [ ] **步骤 6.2.2：检查非范围没有泄漏**
+  执行结果：已新增 `data-collect/docs/acceptance-matrix.md`，逐条映射 24 个验收标准到本地合同测试、Phase 0 远端 artifact/report、Phase 6 e2e contract 或非范围扫描。审查后补正第 14 条、第 21 条和第 23 条证据口径：paper/live runtime receive timestamp 属于外部 runtime artifact；SDK 能力核对以 `polymarket-sdk-gap-report.md` 和 Phase 0 §6 为主；Phase 0 WebSocket smoke 只作为 reachability evidence。
+
+- [x] **步骤 6.2.2：检查非范围没有泄漏**
 
   计划执行命令：
 
@@ -1778,18 +1786,23 @@ Phase 5 执行结果：
 
   预期：命中只能出现在边界声明、非范围测试或 SDK 缺口说明中；不得出现生产逻辑实现。
 
-- [ ] **步骤 6.2.3：运行最终验证**
+  执行结果：扫描命中均位于文档、边界声明、非范围测试、SDK 缺口说明，或 Polymarket metadata `reward_raw` 原始字段；未发现 `data-collect` 生产逻辑生成 labels/features/tick_stream、NOE/ledger、submit/cancel、manual signing 或 shadow implementation。
+
+- [x] **步骤 6.2.3：运行最终验证**
 
   计划执行命令：
 
   ```bash
-  cargo fmt --check -p data-collect
-  cargo clippy -p data-collect --all-targets -- -D warnings
-  cargo test -p data-collect --lib --tests -- --nocapture
-  cargo bench -p data-collect --bench throughput_probe -- --sample-size 20
+  cargo fmt --all -- --check
+  git diff --check
+  CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo clippy -p data-collect --all-targets -- -D warnings
+  CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo test -p data-collect --lib --tests --quiet
+  CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo bench -p data-collect --bench throughput_probe -- --sample-size 20
   ```
 
   预期：格式、lint、测试和吞吐 bench 均通过；若 bench 未达到需求基线，不能宣称完成。
+
+  执行结果：第二轮审查修复后重新验证通过：`cargo fmt --all -- --check`、`git diff --check`、`CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo clippy -p data-collect --all-targets -- -D warnings`、`CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo test -p data-collect --lib --tests --quiet`（98 条测试）均通过。`throughput_probe` bench 通过：`polymarket_p95_window` 302000 rows，`events_per_sec_total=1703182.50`，`finalize_failures=0`；`polymarket_max_window` 433000 rows，`events_per_sec_total=1771398.44`，`finalize_failures=0`。
 
 ### 任务 6.3：阶段审查、changelog 和交付 gate
 
@@ -1797,17 +1810,21 @@ Phase 5 执行结果：
 
 - 修改：`changelog/data-collect-changelog.md`
 
-- [ ] **步骤 6.3.1：自审 diff 与验证输出**
+- [x] **步骤 6.3.1：自审 diff 与验证输出**
 
   检查每一行改动是否直接追溯到 `demand/data-collect-demand.md`；记录测试命令、退出码、artifact 路径、sha256 和剩余风险。
 
-- [ ] **步骤 6.3.2：派生独立审查**
+  执行结果：自审确认 Phase 6 修改集中在 `data-collect/tests/e2e_collect_contract.rs`、`data-collect/docs/acceptance-matrix.md`、`data-collect/docs/phase0-technical-validation.md`、`plan/data-collect-plan.md` 和 `changelog/data-collect-changelog.md`；没有改生产采集逻辑，没有把无关未跟踪资料纳入。验证输出已记录在本节与 changelog。
+
+- [x] **步骤 6.3.2：派生独立审查**
 
   按仓库规则在阶段完成后派生子代理审查，检查需求覆盖、正确性、边界、过度设计、遗漏、测试和与 `rebuild-core-demand` 的一致性。
 
-- [ ] **步骤 6.3.3：修复审查反馈或请求用户决策**
+- [x] **步骤 6.3.3：修复审查反馈或请求用户决策**
 
   可执行且在范围内的问题修复后重新审查；如果反馈要求改变 SDK-first、服务器角色、吞吐验收、消费者边界或非范围，必须先请求用户决策。
+
+  执行结果：第一轮 Phase 6 审查为 1 个 NO-GO、1 个 NEEDS_DOC_FIXES、1 个 PASS_WITH_NOTES，无 Critical；成立问题均已修复并复审。最终复审结果为 `PASS`、`PASS`、`PASS_WITH_NOTES`，无 Critical/Important blocker，允许进入 commit/push gate。
 
 ## 十二、方案不一致决策门
 
