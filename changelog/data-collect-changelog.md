@@ -301,3 +301,17 @@
 - 已按阶段推进规则创建并推送 Phase 0 收尾提交。
 - `plan/data-collect-plan.md` 和 `data-collect/docs/phase0-technical-validation.md` 已同步为 `PHASE0_COMPLETE_READY_FOR_PHASE1`。
 - 未纳入本次提交的未跟踪资料包括 `TimesFM与流式增量模型讨论结论.md`、`mistake-log/V2/`、`mistake-log/never-full-load/`、`mistake-log/online-feedback/`、`mistake-log/sdk-live-trade/`；这些不属于本次 data-collect Phase 0 收尾范围。
+
+### Phase 1 合同与 schema 冻结实现
+
+- 按 TDD 为阶段 1 新增合同测试；RED 阶段失败于缺少 `data_collect::event`、`data_collect::source_format`、manifest 扩展字段和 health/gap 正式合同类型，确认测试覆盖尚未实现的阶段 1 内容。
+- 新增 `data-collect/src/event.rs` 和 `data-collect/tests/event_envelope_contract.rs`：固定 `source_kind`、`source_event_type`、`source_identifier`、source timestamp / no-source-timestamp evidence、`recv_time_utc`、collector host/region、host clock sync、raw_json / equivalent reference、`parquet_raw_layout_version` 和 `parquet_raw_source_kind` 合同。
+- 新增 `data-collect/src/source_format.rs`、`data-collect/tests/source_format_contract.rs` 和 `data-collect/tests/consumer_format_compatibility_contract.rs`：固定 Polymarket market / metadata、Binance depth update / snapshot、Binance aggTrade、RTDS Chainlink BTC/USD 的 typed raw 字段和消费者边界；确认 `data-collect` 不生成 labels/features/tick_stream/split、paper/live append-only log、NOE/ledger 或交易决策。
+- 扩展 Phase 0 既有 `data-collect/src/manifest.rs`，新增 health/gap/reconnect artifact reference、start/end、coverage window、manifest source gap、coverage incomplete reason 和 failure class；incomplete manifest 归类为 `ArtifactIncomplete`，不会默认升级为 `ProcessFatal`。
+- 扩展 Phase 0 既有 `data-collect/src/health.rs`，新增需求级异常清单、`SourceHealthEvent`、`CoverageVerdict` 和 `RuntimeFailureClass`；writer queue/backpressure/resource watermark 进入 `BackpressureDegraded`，source gap/stale 进入 `SourceDegraded`，均不默认触发进程级失败。
+- 修正计划文档后续阶段文件动作口径：Phase 0 已创建的 `manifest.rs`、`health.rs`、`writer.rs`、`resource.rs` 在后续阶段按“修改/扩展”执行，不再写成从零“创建”，避免执行阶段误判真实文件状态。
+- 阶段 1 第一轮审查结果：1 个 subagent `FAIL`、2 个 subagents `PASS_WITH_NOTES`。成立问题包括 Binance depth direct stream 被错误要求 combined wrapper、manifest source coverage 有效性校验不足、`parquet_raw_layout_version` 在 envelope 与 writer 间类型不一致、event envelope 缺 `source_endpoint`、`market_resolved` typed schema 风险，以及 paper/live hot path 语义不够显式。
+- 已修复审查问题：`EventEnvelope` 新增 `source_endpoint`，`parquet_raw_layout_version` 改为与 writer schema 一致的 numeric version；Binance depth update 新增必填 official `stream_name`，`combined_stream` 只在使用 combined wrapper 时保留；manifest 校验每条 source coverage 的 source kind、row count 和 recv window；新增最小 `PolymarketMarketResolutionRaw` 合同固定 `market_resolved` retired event predicate 字段；paper/live consumer boundary 新增 `requires_realtime_handoff`。
+- 复审 notes 继续收敛：`PolymarketMarketResolutionRaw` 显式要求 `source_event_type == "market_resolved"`；`writer::RawEvent` 和 parquet writer schema 新增 `source_endpoint` 字段，避免 event envelope 与 durable typed raw mirror 分叉；`combined_stream` 若存在但仅为空白也判为 incomplete。
+- 阶段 1 新增测试通过：`cargo test -p data-collect --test event_envelope_contract -- --nocapture`（5 条）、`cargo test -p data-collect --test source_format_contract -- --nocapture`（6 条）、`cargo test -p data-collect --test consumer_format_compatibility_contract -- --nocapture`（4 条）、`cargo test -p data-collect --test manifest_contract -- --nocapture`（3 条）、`cargo test -p data-collect --test health_gap_contract -- --nocapture`（4 条）。
+- 阶段 1 最终复审结果：需求/计划一致性审查为 `PASS_WITH_NOTES` 且无 Critical/Important；Rust 代码/测试质量审查从第一轮 `FAIL` 修复后转为 `PASS`；schema/消费者边界审查从 `PASS_WITH_NOTES` 修复后转为 `PASS`。最终无阻塞 commit/push gate 的问题。

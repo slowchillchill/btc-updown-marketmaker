@@ -22,6 +22,11 @@ pub enum NetworkFailure {
     SourceStale,
     SourceGap,
     CoverageDrop,
+    WriterQueueBlocked,
+    BackpressureTriggered,
+    DiskWatermarkExceeded,
+    MemoryWatermarkExceeded,
+    CpuWatermarkExceeded,
 }
 
 impl NetworkFailure {
@@ -50,6 +55,18 @@ impl NetworkFailure {
         ]
     }
 
+    pub fn required_demand_cases() -> Vec<Self> {
+        let mut cases = Self::required_phase0_cases();
+        cases.extend([
+            Self::WriterQueueBlocked,
+            Self::BackpressureTriggered,
+            Self::DiskWatermarkExceeded,
+            Self::MemoryWatermarkExceeded,
+            Self::CpuWatermarkExceeded,
+        ]);
+        cases
+    }
+
     pub fn artifact_signal(self) -> ArtifactSignal {
         match self {
             Self::ConnectionFailed
@@ -68,7 +85,12 @@ impl NetworkFailure {
             | Self::SnapshotStale
             | Self::UpdateIdGap
             | Self::SourceGap
-            | Self::CoverageDrop => ArtifactSignal::SourceGap,
+            | Self::CoverageDrop
+            | Self::WriterQueueBlocked
+            | Self::BackpressureTriggered
+            | Self::DiskWatermarkExceeded
+            | Self::MemoryWatermarkExceeded
+            | Self::CpuWatermarkExceeded => ArtifactSignal::SourceGap,
             Self::NoBusinessMessages | Self::PongButDataSilent | Self::SourceStale => {
                 ArtifactSignal::SourceHealth
             }
@@ -245,6 +267,97 @@ pub enum FreshnessStatus {
     Reconnecting,
     Healthy,
     Stale,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoverageVerdict {
+    Complete,
+    Incomplete,
+    Gap,
+    Stale,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeFailureClass {
+    SourceDegraded,
+    BackpressureDegraded,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceHealthEvent {
+    pub source_kind: String,
+    pub failure: NetworkFailure,
+    pub signal: ArtifactSignal,
+    pub attempt: Option<u32>,
+    pub sleep_ms: Option<u64>,
+    pub final_state: CircuitState,
+    pub freshness_verdict: FreshnessStatus,
+    pub coverage_verdict: CoverageVerdict,
+    pub runtime_failure_class: RuntimeFailureClass,
+    pub process_fatal: bool,
+}
+
+impl SourceHealthEvent {
+    pub fn from_failure(
+        source_kind: impl Into<String>,
+        failure: NetworkFailure,
+        attempt: Option<u32>,
+        sleep_ms: Option<u64>,
+        final_state: CircuitState,
+    ) -> Self {
+        let signal = failure.artifact_signal();
+        let freshness_verdict = match failure {
+            NetworkFailure::NoBusinessMessages
+            | NetworkFailure::PongButDataSilent
+            | NetworkFailure::SourceStale => FreshnessStatus::Stale,
+            NetworkFailure::ConnectionFailed
+            | NetworkFailure::Disconnected
+            | NetworkFailure::ServerShutdown
+            | NetworkFailure::SubscriptionError
+            | NetworkFailure::HttpError
+            | NetworkFailure::WsProtocolError
+            | NetworkFailure::RateLimit
+            | NetworkFailure::ConnectionLimit
+            | NetworkFailure::SubscriptionLimit => FreshnessStatus::Reconnecting,
+            _ => FreshnessStatus::Healthy,
+        };
+        let coverage_verdict = match failure {
+            NetworkFailure::NoBusinessMessages
+            | NetworkFailure::PongButDataSilent
+            | NetworkFailure::SourceStale => CoverageVerdict::Stale,
+            NetworkFailure::ConnectionFailed
+            | NetworkFailure::Disconnected
+            | NetworkFailure::ServerShutdown
+            | NetworkFailure::SubscriptionError
+            | NetworkFailure::HttpError
+            | NetworkFailure::WsProtocolError
+            | NetworkFailure::RateLimit
+            | NetworkFailure::ConnectionLimit
+            | NetworkFailure::SubscriptionLimit => CoverageVerdict::Incomplete,
+            _ => CoverageVerdict::Gap,
+        };
+        let runtime_failure_class = match failure {
+            NetworkFailure::WriterQueueBlocked
+            | NetworkFailure::BackpressureTriggered
+            | NetworkFailure::DiskWatermarkExceeded
+            | NetworkFailure::MemoryWatermarkExceeded
+            | NetworkFailure::CpuWatermarkExceeded => RuntimeFailureClass::BackpressureDegraded,
+            _ => RuntimeFailureClass::SourceDegraded,
+        };
+
+        Self {
+            source_kind: source_kind.into(),
+            failure,
+            signal,
+            attempt,
+            sleep_ms,
+            final_state,
+            freshness_verdict,
+            coverage_verdict,
+            runtime_failure_class,
+            process_fatal: false,
+        }
+    }
 }
 
 pub struct SourceHealthTracker {

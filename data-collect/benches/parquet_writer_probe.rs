@@ -41,6 +41,7 @@ fn synthetic_event(seq: u64) -> RawEvent {
         recv_time_utc_ms: 1_766_789_469_999 + seq as i64,
         collector_host_id: "collector-local".to_owned(),
         collector_region: "local-dev".to_owned(),
+        source_endpoint: "synthetic://polymarket-market".to_owned(),
         raw_json: format!(r#"{{"event_type":"book","asset_id":"asset-{seq}"}}"#),
         parquet_raw_layout_version: 1,
         parquet_raw_source_kind: "polymarket_market".to_owned(),

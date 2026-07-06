@@ -2,8 +2,9 @@ use std::fs;
 
 use data_collect::{
     ManifestDraft, QueueWatermark, RawEvent, RequiredFile, ResourceWatermark, SourceCoverage,
-    ValidationVerdict, discover_finalized_parquet, resource::CgroupMemoryStat, resource::PsiSample,
-    sha256_file, writer::ParquetSegmentWriter, writer::write_segment_on_blocking_pool,
+    ValidationVerdict, discover_finalized_parquet, manifest::TimeWindow,
+    resource::CgroupMemoryStat, resource::PsiSample, sha256_file, writer::ParquetSegmentWriter,
+    writer::write_segment_on_blocking_pool,
 };
 use tempfile::tempdir;
 
@@ -16,6 +17,7 @@ fn synthetic_event(seq: u64) -> RawEvent {
         recv_time_utc_ms: 1_766_789_469_999 + seq as i64,
         collector_host_id: "collector-local".to_owned(),
         collector_region: "local-dev".to_owned(),
+        source_endpoint: "synthetic://polymarket-market".to_owned(),
         raw_json: format!(r#"{{"event_type":"book","asset_id":"asset-{seq}"}}"#),
         parquet_raw_layout_version: 1,
         parquet_raw_source_kind: "polymarket_market".to_owned(),
@@ -153,6 +155,20 @@ fn manifest_requires_row_count_sha256_schema_source_coverage() {
             rows: 2,
         }],
         source_gaps: Vec::new(),
+        manifest_source_gaps: Vec::new(),
+        coverage_incomplete_reason: None,
+        health_artifact_path: Some("health.jsonl".into()),
+        health_artifact_digest: None,
+        gap_artifact_path: Some("gap.jsonl".into()),
+        gap_artifact_digest: None,
+        reconnect_artifact_path: Some("reconnect.jsonl".into()),
+        reconnect_artifact_digest: None,
+        start_time_utc_ms: Some(1),
+        end_time_utc_ms: Some(2),
+        coverage_window: Some(TimeWindow {
+            start_utc_ms: 1,
+            end_utc_ms: 2,
+        }),
         resource_watermark: Some(complete_resource_watermark()),
         writer_queue_high_watermark: Some(QueueWatermark {
             rows: 2,

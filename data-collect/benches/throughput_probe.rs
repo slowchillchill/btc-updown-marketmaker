@@ -299,6 +299,7 @@ fn synthetic_event(seq: u64) -> RawEvent {
         recv_time_utc_ms: 1_766_789_469_999 + seq as i64,
         collector_host_id: "collector-local".to_owned(),
         collector_region: "local-dev".to_owned(),
+        source_endpoint: format!("synthetic://{source_kind}"),
         raw_json: format!(r#"{{"source":"{source_kind}","seq":{seq}}}"#),
         parquet_raw_layout_version: 1,
         parquet_raw_source_kind: source_kind.to_owned(),
@@ -313,6 +314,7 @@ fn estimated_event_bytes(event: &RawEvent) -> u64 {
         event.source_ts.as_deref().unwrap_or_default(),
         event.collector_host_id.as_str(),
         event.collector_region.as_str(),
+        event.source_endpoint.as_str(),
         event.raw_json.as_str(),
         event.parquet_raw_source_kind.as_str(),
     ]

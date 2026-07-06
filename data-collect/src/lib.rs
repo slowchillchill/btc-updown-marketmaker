@@ -1,10 +1,12 @@
 pub mod backpressure;
 pub mod collector_identity;
+pub mod event;
 pub mod health;
 pub mod latency;
 pub mod manifest;
 pub mod market_discovery;
 pub mod resource;
+pub mod source_format;
 pub mod writer;
 
 pub use manifest::{

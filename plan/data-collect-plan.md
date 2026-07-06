@@ -1181,7 +1181,7 @@
 - 创建：`data-collect/src/event.rs`
 - 创建：`data-collect/tests/event_envelope_contract.rs`
 
-- [ ] **步骤 1.1.1：写 event envelope contract 测试**
+- [x] **步骤 1.1.1：写 event envelope contract 测试**
 
   测试必须断言每条源事件都包含：
 
@@ -1192,22 +1192,25 @@
   - `recv_time_utc`
   - `collector_host_id`
   - `collector_region`
+  - `source_endpoint` 或 endpoint digest
   - `host_clock_sync_status`
   - `raw_json` 或等价原始证据引用
 
-- [ ] **步骤 1.1.2：实现最小 envelope 类型**
+- [x] **步骤 1.1.2：实现最小 envelope 类型**
 
   实现只承载采集证据；不得加入 label、feature、tick_stream、reward、PnL、NAV、ledger 或模型输入字段。
 
-- [ ] **步骤 1.1.3：运行合同测试**
+- [x] **步骤 1.1.3：运行合同测试**
 
   计划执行命令：
 
   ```bash
-  cargo test -p data-collect event_envelope_requires_recv_time_and_source_timestamp_boundary -- --nocapture
+  cargo test -p data-collect --test event_envelope_contract -- --nocapture
   ```
 
   预期：缺少 `recv_time_utc`、collector host/region 或 source timestamp 证据时失败；Polymarket platform `timestamp` 不会覆盖 `recv_time_utc`。
+
+  执行结果：已新增 `data-collect/src/event.rs` 和 `data-collect/tests/event_envelope_contract.rs`；`cargo test -p data-collect --test event_envelope_contract -- --nocapture` 通过，5 条测试覆盖 `recv_time_utc`、source timestamp / no-source-timestamp evidence、collector host/region、`source_endpoint`、clock sync、raw_json / equivalent reference、numeric `parquet_raw_layout_version`，以及 Polymarket platform `timestamp` 不覆盖 `recv_time_utc`。
 
 ### 任务 1.2：定义逐源数据格式与消费者兼容合同
 
@@ -1215,8 +1218,9 @@
 
 - 创建：`data-collect/tests/source_format_contract.rs`
 - 创建：`data-collect/tests/consumer_format_compatibility_contract.rs`
+- 创建：`data-collect/src/source_format.rs`
 
-- [ ] **步骤 1.2.1：写逐源 typed raw 格式测试**
+- [x] **步骤 1.2.1：写逐源 typed raw 格式测试**
 
   测试必须逐源断言：
 
@@ -1227,11 +1231,11 @@
   - Binance aggTrade 保留 `e,E,s,a,p,q,f,l,T,m,buyer_is_maker,recv_time_utc`，防止只写 4 列的缩水 schema。
   - RTDS Chainlink BTC/USD 保留 RTDS message timestamp、payload timestamp、symbol、value、source topic、subscription raw JSON、ack/first message 或 close/error evidence 和 `recv_time_utc`。
 
-- [ ] **步骤 1.2.2：写 data-pipeline 格式兼容测试**
+- [x] **步骤 1.2.2：写 data-pipeline 格式兼容测试**
 
   测试断言所有 JSON-like typed raw parquet 都带 parseable `raw_json`、`parquet_raw_layout_version`、`parquet_raw_source_kind`、schema version、source coverage 和 manifest；`data-pipeline` labels、validation、tick_stream、features 和训练切分不由 `data-collect` 生成。
 
-- [ ] **步骤 1.2.3：写训练、paper、live 消费边界格式测试**
+- [x] **步骤 1.2.3：写训练、paper、live 消费边界格式测试**
 
   测试断言：
 
@@ -1239,25 +1243,27 @@
   - paper/live 只能把 `data-collect` 输出当作外部市场源证据、coverage 和 manifest，不得替代 paper/live 自身 append-only event log、runtime receive timestamp、Market Context Builder、NOE/Ledger 或交易逻辑。
   - source kind、schema version、manifest、coverage window 和 timestamp namespace 对训练、paper、live 保持一致；字段为空时必须有 nullable 语义或 unavailable reason。
 
-- [ ] **步骤 1.2.4：运行格式兼容测试**
+- [x] **步骤 1.2.4：运行格式兼容测试**
 
   计划执行命令：
 
   ```bash
-  cargo test -p data-collect source_format_contract -- --nocapture
-  cargo test -p data-collect consumer_format_compatibility_contract -- --nocapture
+  cargo test -p data-collect --test source_format_contract -- --nocapture
+  cargo test -p data-collect --test consumer_format_compatibility_contract -- --nocapture
   ```
 
   预期：每个 source 的字段级格式可被测试固定；data-pipeline、训练、paper、live 的消费边界不会被 `data-collect` 改写。
+
+  执行结果：已新增 `data-collect/src/source_format.rs`、`data-collect/tests/source_format_contract.rs` 和 `data-collect/tests/consumer_format_compatibility_contract.rs`；`cargo test -p data-collect --test source_format_contract -- --nocapture` 通过 6 条逐源格式测试，`cargo test -p data-collect --test consumer_format_compatibility_contract -- --nocapture` 通过 4 条消费者边界测试。测试固定 Polymarket market / metadata / `market_resolved`、Binance depth update / snapshot、Binance aggTrade、RTDS Chainlink BTC/USD 字段，并证明 `data-collect` 不生成 labels/features/tick_stream/split、paper/live append-only log、NOE/ledger 或交易决策。Binance depth direct WS stream 不要求 combined wrapper；只有使用 combined stream 时才保留 wrapper 证据。
 
 ### 任务 1.3：定义 manifest、coverage 和 required_files[] 合同
 
 **文件：**
 
-- 创建：`data-collect/src/manifest.rs`
+- 修改/扩展：`data-collect/src/manifest.rs`
 - 创建：`data-collect/tests/manifest_contract.rs`
 
-- [ ] **步骤 1.3.1：写 manifest 合同测试**
+- [x] **步骤 1.3.1：写 manifest 合同测试**
 
   测试必须覆盖 manifest 字段：
 
@@ -1269,46 +1275,50 @@
   - ResourceWatermark、writer queue 高水位、flush latency。
   - `required_files[]` 的 file role、path、finalized status、row count、sha256/digest、schema version、missing reason。
 
-- [ ] **步骤 1.3.2：实现 manifest 类型和 incomplete verdict**
+- [x] **步骤 1.3.2：实现 manifest 类型和 incomplete verdict**
 
   当 atomic rename 失败、sha256 缺失、row count 缺失、schema version 缺失或 manifest 不一致时，manifest 必须为 incomplete，且不得发布为 complete。source coverage 缺失或不完整时，manifest 必须记录 `coverage_incomplete`、source gap 和 missing reason；这属于 `ArtifactIncomplete` / `SourceDegraded`，不得单独触发 collector 进程退出。
 
-- [ ] **步骤 1.3.3：运行 manifest 测试**
+- [x] **步骤 1.3.3：运行 manifest 测试**
 
   计划执行命令：
 
   ```bash
-  cargo test -p data-collect manifest_contract -- --nocapture
+  cargo test -p data-collect --test manifest_contract -- --nocapture
   cargo test -p data-collect incomplete_manifest_does_not_imply_process_fatal -- --nocapture
   ```
 
   预期：complete/incomplete verdict 可由测试数据稳定复现；incomplete manifest 会阻止消费者当作 complete 使用，但不会默认把 collector 标记为进程级失败。
 
+  执行结果：已扩展 Phase 0 既有 `data-collect/src/manifest.rs`，补齐 health/gap/reconnect artifact reference、start/end、coverage window、manifest source gap、coverage incomplete reason、source coverage 字段有效性校验和 failure class；`cargo test -p data-collect --test manifest_contract -- --nocapture` 通过 3 条测试。`incomplete manifest` 当前归类为 `ArtifactIncomplete`，不会默认升级为 `ProcessFatal`。
+
 ### 任务 1.4：定义 source health、source gap 和 reconnect trace 合同
 
 **文件：**
 
-- 创建：`data-collect/src/health.rs`
+- 修改/扩展：`data-collect/src/health.rs`
 - 创建：`data-collect/tests/health_gap_contract.rs`
 
-- [ ] **步骤 1.4.1：写异常语义测试**
+- [x] **步骤 1.4.1：写异常语义测试**
 
   测试覆盖需求文档 5.1 的全部异常，并断言每个异常至少进入 source health、source gap 或 reconnect trace 之一。
 
-- [ ] **步骤 1.4.2：实现最小 health/gap/reconnect 类型**
+- [x] **步骤 1.4.2：实现最小 health/gap/reconnect 类型**
 
   类型必须包含 source、attempt、sleep、错误类别、最终状态、open/half-open/recovered/exhausted、freshness verdict 和 coverage verdict。
 
-- [ ] **步骤 1.4.3：运行 health/gap 合同测试**
+- [x] **步骤 1.4.3：运行 health/gap 合同测试**
 
   计划执行命令：
 
   ```bash
-  cargo test -p data-collect health_gap_contract -- --nocapture
+  cargo test -p data-collect --test health_gap_contract -- --nocapture
   cargo test -p data-collect source_gap_and_stale_are_degraded_not_process_fatal -- --nocapture
   ```
 
   预期：异常不会被静默吞掉；ping/pong 正常但业务数据静默时写入 stale 或 gap；单源 degraded 不会掩盖其他源健康状态，也不会默认导致 collector 进程退出。
+
+  执行结果：已扩展 Phase 0 既有 `data-collect/src/health.rs`，新增需求级异常清单、`SourceHealthEvent`、`CoverageVerdict` 和 `RuntimeFailureClass`；`cargo test -p data-collect --test health_gap_contract -- --nocapture` 通过 4 条测试。writer queue/backpressure/resource watermark 进入 `BackpressureDegraded`，source gap/stale 进入 `SourceDegraded`，均不默认触发进程级失败。
 
 ## 七、阶段 2：source adapter 实现
 
@@ -1454,7 +1464,7 @@
 
 **文件：**
 
-- 创建：`data-collect/src/writer.rs`
+- 修改/扩展：`data-collect/src/writer.rs`
 - 创建：`data-collect/tests/parquet_writer_contract.rs`
 
 - [ ] **步骤 3.1.1：写 parquet schema metadata 测试**
@@ -1593,7 +1603,7 @@
 
 **文件：**
 
-- 创建：`data-collect/src/resource.rs`
+- 修改/扩展：`data-collect/src/resource.rs`
 - 创建：`data-collect/tests/resource_watermark_contract.rs`
 
 - [ ] **步骤 4.3.1：写 ResourceWatermark 合同测试**

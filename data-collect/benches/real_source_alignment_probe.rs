@@ -678,6 +678,10 @@ async fn collect_polymarket_pair(
     let client = MarketWsClient::new(MARKET_WS_ENDPOINT, bounded_ws_config())?;
     let mut bba_stream = Box::pin(client.subscribe_best_bid_ask(assets.clone())?);
     let mut book_stream = Box::pin(client.subscribe_orderbook(assets)?);
+    let collector_identity = CollectorIdentity {
+        host_id: collector_host_id.to_owned(),
+        region: collector_region.to_owned(),
+    };
     wait_market_connected(&client, Duration::from_secs(20)).await?;
 
     let switch_event = RawEvent {
@@ -688,6 +692,7 @@ async fn collect_polymarket_pair(
         recv_time_utc_ms: now_ms(),
         collector_host_id: collector_host_id.to_owned(),
         collector_region: collector_region.to_owned(),
+        source_endpoint: MARKET_WS_ENDPOINT.to_owned(),
         raw_json: serde_json::to_string(&json!({
             "event_type": "market_discovery_switch",
             "current": pair.current,
@@ -722,8 +727,8 @@ async fn collect_polymarket_pair(
                             "best_bid_ask",
                             &format!("{}:{}", slug, event.asset_id),
                             Some(event.timestamp.to_string()),
-                            collector_host_id,
-                            collector_region,
+                            MARKET_WS_ENDPOINT,
+                            &collector_identity,
                             raw,
                         )).await;
                     }
@@ -754,8 +759,8 @@ async fn collect_polymarket_pair(
                             "book",
                             &format!("{}:{}", slug, event.asset_id),
                             Some(event.timestamp.to_string()),
-                            collector_host_id,
-                            collector_region,
+                            MARKET_WS_ENDPOINT,
+                            &collector_identity,
                             raw,
                         )).await;
                     }
@@ -814,8 +819,8 @@ async fn run_rtds_source(
                         "update",
                         "btc/usd",
                         Some(source_ts.to_string()),
-                        &collector_identity.host_id,
-                        &collector_identity.region,
+                        RTDS_WS_ENDPOINT,
+                        &collector_identity,
                         raw,
                     ),
                 )
@@ -857,8 +862,8 @@ async fn run_binance_depth_source(
                         "snapshot",
                         "BTCUSDT",
                         None,
-                        &collector_identity.host_id,
-                        &collector_identity.region,
+                        BINANCE_DEPTH_SNAPSHOT,
+                        &collector_identity,
                         json!({"endpoint": BINANCE_DEPTH_SNAPSHOT, "raw": text}),
                     ),
                 )
@@ -937,6 +942,7 @@ async fn run_binance_ws_source(
                         recv_time_utc_ms: now_ms(),
                         collector_host_id: collector_identity.host_id.clone(),
                         collector_region: collector_identity.region.clone(),
+                        source_endpoint: spec.url.clone(),
                         raw_json,
                         parquet_raw_layout_version: 1,
                         parquet_raw_source_kind: spec.source_kind.clone(),
@@ -1294,8 +1300,8 @@ fn raw_event(
     source_event_type: &str,
     source_identifier: &str,
     source_ts: Option<String>,
-    collector_host_id: &str,
-    collector_region: &str,
+    source_endpoint: &str,
+    collector_identity: &CollectorIdentity,
     raw: Value,
 ) -> RawEvent {
     RawEvent {
@@ -1304,8 +1310,9 @@ fn raw_event(
         source_identifier: source_identifier.to_owned(),
         source_ts,
         recv_time_utc_ms: now_ms(),
-        collector_host_id: collector_host_id.to_owned(),
-        collector_region: collector_region.to_owned(),
+        collector_host_id: collector_identity.host_id.clone(),
+        collector_region: collector_identity.region.clone(),
+        source_endpoint: source_endpoint.to_owned(),
         raw_json: raw.to_string(),
         parquet_raw_layout_version: 1,
         parquet_raw_source_kind: source_kind.to_owned(),
@@ -1756,6 +1763,7 @@ fn estimated_event_bytes(event: &RawEvent) -> u64 {
         + event.source_ts.as_deref().unwrap_or_default().len() as u64
         + event.collector_host_id.len() as u64
         + event.collector_region.len() as u64
+        + event.source_endpoint.len() as u64
         + event.raw_json.len() as u64
         + event.parquet_raw_source_kind.len() as u64
 }

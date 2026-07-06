@@ -22,6 +22,7 @@ pub struct RawEvent {
     pub recv_time_utc_ms: i64,
     pub collector_host_id: String,
     pub collector_region: String,
+    pub source_endpoint: String,
     pub raw_json: String,
     pub parquet_raw_layout_version: u32,
     pub parquet_raw_source_kind: String,
@@ -255,6 +256,7 @@ fn raw_event_schema() -> Arc<Schema> {
         ),
         Field::new("collector_host_id", DataType::Utf8, false),
         Field::new("collector_region", DataType::Utf8, false),
+        Field::new("source_endpoint", DataType::Utf8, false),
         Field::new("raw_json", DataType::Utf8, false),
         Field::new("parquet_raw_layout_version", DataType::UInt32, false),
         Field::new("parquet_raw_source_kind", DataType::Utf8, false),
@@ -286,6 +288,9 @@ fn events_to_batch(schema: Arc<Schema>, events: &[RawEvent]) -> Result<RecordBat
         )),
         Arc::new(StringArray::from_iter_values(
             events.iter().map(|event| event.collector_region.as_str()),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            events.iter().map(|event| event.source_endpoint.as_str()),
         )),
         Arc::new(StringArray::from_iter_values(
             events.iter().map(|event| event.raw_json.as_str()),
