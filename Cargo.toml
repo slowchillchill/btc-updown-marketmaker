@@ -1,0 +1,3 @@
+[workspace]
+members = ["data-collect"]
+resolver = "3"

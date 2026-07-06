@@ -1,0 +1,45 @@
+[package]
+name = "data-collect"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "data_collect"
+path = "src/lib.rs"
+bench = false
+
+[[bench]]
+name = "parquet_writer_probe"
+harness = false
+
+[[bench]]
+name = "throughput_probe"
+harness = false
+
+[[bench]]
+name = "websocket_smoke_probe"
+harness = false
+
+[dependencies]
+arrow-array = "59.0.0"
+arrow-schema = "59.0.0"
+futures = "0.3"
+parquet = "59.0.0"
+polymarket_client_sdk_v2 = { version = "0.6.0", features = ["clob", "gamma", "rtds", "ws"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1.49.0", features = ["macros", "rt", "sync", "time"] }
+tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-native-roots"] }
+
+[[bench]]
+name = "market_discovery_probe"
+harness = false
+
+[[bench]]
+name = "real_source_alignment_probe"
+harness = false
+
+[dev-dependencies]
+tempfile = "3.27.0"

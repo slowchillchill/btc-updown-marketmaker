@@ -18,6 +18,7 @@
 6. 通过 temp/running 分段文件、close/finalize、atomic rename 发布 finalized artifact，禁止消费者读取 partial artifact。
 7. 记录网络韧性、资源水位、writer queue、flush latency、RSS/CPU/disk watermark、backpressure 和异常恢复证据。
 8. 覆盖当前 active market，并从目标 market start 前 `T-30s` 开始采集 prefetched next market；`T-30s` 采集覆盖必须与 `T-30` 样本加工非范围明确区分。
+9. 技术验证必须覆盖真实 `btc-updown-5m` 冷启动 market discovery、current active market、prefetched next market、market rollover、以及 Polymarket / Binance depth / Binance aggTrade / RTDS Chainlink 四源在同一时间线上的长时间采集；generic BTC/Bitcoin open market smoke、HTTP reachability、单条业务消息或 synthetic throughput 不能替代该验收。
 
 ### 1.2 data-collect 非范围
 
@@ -30,6 +31,12 @@
 5. 在 Polymarket Rust SDK 未覆盖能力时，自行引入 raw REST、manual signing、自建 SDK 或 shadow implementation；后续如发现 SDK 缺口，必须先形成缺口说明、影响范围和可选方案，获得用户同意后才能进入实现。
 6. 发布后归档、远端上传、gzip 压缩或对象存储 listing 验证；若未来需要纳入，必须另开 archive demand/plan/changelog 并补充 archive integrity 验收。
 7. paper/live append-only log、rotation artifact、live artifacts、order evidence、NormalizedOrderEvent、ledger、execution feedback ingestion 或训练反馈标签；这些由 paper/live、NOE/Ledger 或后续 data-pipeline/feedback 需求承接。
+
+### 1.3 本地 Polymarket 网络环境约束
+
+1. 本地电脑网络环境不能直接访问 Polymarket；后续如果需要在本地电脑测试或采集 Polymarket 数据，必须使用用户已在本地电脑环境中设置好的香港 VPN 线路。
+2. 本地直连 Polymarket 失败不得被误判为 Polymarket Rust SDK 缺口、采集程序错误或 source stale；必须先记录网络线路、VPN 状态、endpoint、错误类别和重试证据。
+3. 该约束只影响本地 Polymarket live-source 测试/采集路径；不改变数据采集服务器、AWS paper/live 服务器或本地 synthetic probe 的验收语义。
 
 ## 二、时间语义与延迟证据
 
@@ -76,15 +83,16 @@
 ## 四、存储、分区与发布
 
 1. 数据保存格式必须是 `.parquet` typed raw mirror；每条 JSON-like 源必须保留 parseable `raw_json` 或等价原始证据引用。
-2. 训练用原始采集数据在数据服务器按 UTC day 分区保存；本文不发明最终落盘根路径，只要求分区、manifest 和 sha256 证据能证明按天边界。
-3. `data-collect` 只提供外部市场源 finalized mirror、coverage、health、gap 和 manifest；paper/live 自身 append-only event log、rotation artifact、order evidence、NOE/ledger 和 compact mirror 由对应模块需求定义，本文只声明接入边界。
-4. Parquet 连续写入必须写入 `*.tmp`、`*-running.parquet` 或等价 running segment；close/finalize 后才能通过 atomic rename 发布 finalized `.parquet`。
-5. 每个 source parquet 必须写入 typed raw schema version / source kind metadata，至少包括 `parquet_raw_layout_version` 和 `parquet_raw_source_kind`；兼容当前 V2 typed raw mirror 是迁移基线，但本文不把 V2 data-pipeline schema 变成 `data-collect` 的加工职责。
-6. manifest 必须记录 artifact path、row count、sha256、schema version、code version / git commit、collector binary sha256、source config digest、validation verdict、source coverage、source gap、health/gap/reconnect artifact path 或 digest、start/end time、coverage window、collector host/region、ResourceWatermark、writer queue 高水位和 flush latency。
-7. manifest 必须包含 `required_files[]` 或等价文件角色清单；每项至少记录 file role、path、finalized status、row count、sha256/digest、schema version、missing reason，总 manifest 必须给出 complete/incomplete verdict。
-8. 消费者只能读取 finalized parquet 和对应 manifest；temp/running、`.rsync-partial`、外部同步/发布链路生成的未完成标记文件、未 finalize 文件不得进入 discovery，`data-collect` 不负责 upload/listing。
-9. atomic rename 失败、sha256 缺失、row count 缺失、schema version 缺失、source coverage 缺失或 manifest 不一致时，artifact 必须标记为 incomplete，不得假装完整。
-10. 当前需求只要求 finalized artifact 不被 partial、running 或 `.rsync-partial` 误发现。
+2. 生产数据根路径由用户决定为各运行服务器本机 `~/btc-updown-marketmaker/datasets/`；数据服务器上的训练用原始采集数据必须在该根路径下按 UTC day 分区保存，其中 `~` 按当前服务器用户解析，不得写成本地开发机路径。
+3. paper/live 交易服务器如需接收 `data-collect` handoff mirror、coverage 或 manifest，也必须放在对应交易服务器本机 `~/btc-updown-marketmaker/datasets/` 下；该根路径只承载外部市场源证据，不替代 paper/live 自身 append-only event log、rotation artifact、order evidence、NOE/ledger 或 compact mirror。
+4. `data-collect` 只提供外部市场源 cold mirror（finalized parquet / coverage / health / gap / manifest）和 hot path handoff 边界证据；paper/live 自身 append-only event log、rotation artifact、order evidence、NOE/ledger、Market Context Builder 输出和 compact mirror 由对应模块需求定义，本文只声明接入边界。
+5. Parquet 连续写入必须写入 `*.tmp`、`*-running.parquet` 或等价 running segment；close/finalize 后才能通过 atomic rename 发布 finalized `.parquet`。
+6. 每个 source parquet 必须写入 typed raw schema version / source kind metadata，至少包括 `parquet_raw_layout_version` 和 `parquet_raw_source_kind`；兼容当前 V2 typed raw mirror 是迁移基线，但本文不把 V2 data-pipeline schema 变成 `data-collect` 的加工职责。
+7. manifest 必须记录 artifact path、row count、sha256、schema version、code version / git commit、collector binary sha256、source config digest、validation verdict、source coverage、source gap、health/gap/reconnect artifact path 或 digest、start/end time、coverage window、collector host/region、ResourceWatermark、writer queue 高水位和 flush latency。
+8. manifest 必须包含 `required_files[]` 或等价文件角色清单；每项至少记录 file role、path、finalized status、row count、sha256/digest、schema version、missing reason，总 manifest 必须给出 complete/incomplete verdict。
+9. parquet / manifest 文件发现路径的消费者只能读取 finalized parquet 和对应 manifest；temp/running、`.rsync-partial`、外部同步/发布链路生成的未完成标记文件、未 finalize 文件不得进入 discovery，`data-collect` 不负责 upload/listing。
+10. atomic rename 失败、sha256 缺失、row count 缺失、schema version 缺失、source coverage 缺失或 manifest 不一致时，artifact 必须标记为 incomplete，不得假装完整。
+11. 当前需求只要求 finalized artifact 不被 partial、running 或 `.rsync-partial` 误发现。
 
 ## 五、网络异常与恢复要求
 
@@ -140,11 +148,12 @@
 
 ## 八、消费者边界
 
-1. 训练消费者读取的是按天分区的 finalized typed raw parquet、manifest、source coverage 和后续 `data-pipeline` 生成的 labels/features/tick_stream；`data-collect` 不直接生成这些训练消费产物。
-2. paper/live 消费者若需要自身 append-only event log、rotation artifact、order evidence、NOE/ledger 或 compact mirror，必须由对应 paper/live 模块需求定义；`data-collect` 只能为这些消费者提供外部市场源证据和 coverage 边界。
-3. paper/live append-only log、live artifacts、order evidence、NOE/ledger 和 execution feedback ingestion 不由 `data-collect` 生成或解释。
-4. data-pipeline 可以消费 `data-collect` 的 typed raw parquet 和 manifest，但必须自行生成 labels、validation、tick_stream、features 和训练切分证据。
-5. 采集成功不等于训练批准，finalized parquet 完整不等于 labels/features/tick_stream 已完成，source coverage 完整不等于 live/paper 交易逻辑健康。
+1. 训练消费者走 cold path：读取按天分区的 finalized typed raw parquet、manifest、source coverage，并由后续 `data-pipeline` 生成 labels/features/tick_stream/replay context/训练切分；`data-collect` 不直接生成这些训练消费产物。
+2. paper/live 消费者走 hot path：paper/live 的 Market Context Builder / runtime 必须通过实时 handoff、内存 bounded channel、IPC、local stream 或等价低延迟事件流消费外部市场源事件和 source health/gap 状态；不得把等待 finalized parquet、manifest 或离线 discovery 作为 paper/live 热路径唯一事实来源。
+3. `data-collect` 的 hot path 职责只到外部市场源事件、timestamp namespace、source coverage、source health/gap、reconnect/backpressure 状态和 handoff 边界证据；paper/live append-only event log、rotation artifact、live artifacts、order evidence、NOE/ledger、Market Context Builder 输出、模型输入组装和 execution feedback ingestion 不由 `data-collect` 生成或解释。
+4. paper/live 延迟验收必须区分 `collector_recv_time_utc(host,region)`、handoff send time、paper/live runtime receive time、decision time 和 causal cutoff；非爱尔兰 collector 的 `recv_time_utc` 不能冒充 paper/live 爱尔兰主机实时接收延迟。
+5. data-pipeline 可以消费 `data-collect` 的 typed raw parquet 和 manifest，但必须自行生成 labels、validation、tick_stream、features 和训练切分证据。
+6. 采集成功不等于训练批准，finalized parquet 完整不等于 labels/features/tick_stream 已完成，source coverage 完整不等于 live/paper 交易逻辑健康，hot path handoff 健康也不等于 paper/live 交易决策、NOE/ledger 或订单执行健康。
 
 ## 九、验收标准
 
@@ -160,18 +169,20 @@
 8. `market_resolved` / retired 验收必须证明事件路径或 fallback metadata 路径之一满足 retired predicate；事件路径必须记录同一 target condition/market 的 `subscribed_asset_ids_for_market`、`resolved_event_asset_ids`、`winning_asset_id`、`winning_outcome`、nullable `close_reason_if_present`，fallback metadata 路径必须记录 `market_resolved_missing_reason`、同一 target condition/market 的 `fallback_metadata_asset_ids`、freshness、same condition/market 校验和 close/resolution 证据。
 9. `best_bid_ask`、`new_market`、`market_resolved` 验收必须证明 `custom_feature_enabled: true`、订阅确认证据（官方 ack/response 或首个匹配订阅资产的业务事件）和 SDK 支持状态；未满足时 manifest 必须为 source gap / incomplete。
 10. Binance live 源必须来自 Binance 官方 WS/REST；aggTrade 必须保留原始 `e,E,s,a,p,q,f,l,T,m`，depth update 必须保留 `e,E,s,U,u,b,a`，snapshot 必须保留 `lastUpdateId,bids,asks` 且不得伪造 exchange timestamp，并且 depth stitch predicate 必须可审计。
-11. 连续 parquet 写入通过 running/temp segment 承载，close/finalize 后 atomic rename，消费者只读 finalized parquet；每个 source parquet 必须带 typed raw schema version 和 source kind metadata，至少包括 `parquet_raw_layout_version` 和 `parquet_raw_source_kind`。
+11. 连续 parquet 写入通过 running/temp segment 承载，close/finalize 后 atomic rename；parquet / manifest 文件发现路径只读 finalized parquet；每个 source parquet 必须带 typed raw schema version 和 source kind metadata，至少包括 `parquet_raw_layout_version` 和 `parquet_raw_source_kind`。
 12. manifest 至少包含 artifact path、row count、sha256、schema version、code version / git commit、collector binary sha256、source config digest、validation verdict、source coverage、source gap、health/gap/reconnect artifact path 或 digest、start/end time、coverage window、ResourceWatermark、writer queue 高水位、flush latency、采集主机/区域、`required_files[]` 和 complete/incomplete verdict。
-13. paper/live 自身 append-only event log、rotation artifact、live artifacts、order evidence、NOE/ledger 和 execution feedback ingestion 必须由其他模块需求承接；`data-collect` 只能提供外部市场源 finalized mirror、coverage、health、gap 和 manifest，不能私自解释交易运行证据。
-14. 网络异常、返回空、长时间业务静默、ping/pong 正常但无数据、rate limit、server shutdown、snapshot 缺失和 source stale 都会写入 health/gap/reconnect 证据。
-15. 恢复策略使用有限重试、backoff、jitter、max attempts、max elapsed、backoff ceiling，按源独立熔断/恢复，并在重连后验证订阅、snapshot、新鲜业务消息、source coverage、RTDS topic/symbol/payload timestamp 和 Binance update/trade id 状态。
-16. reconnect trace 必须记录每次 attempt、sleep、错误类别、最终状态，以及 open、half-open、recovered、exhausted 源级状态。
-17. Rust async/non-blocking 边界成立：主事件循环不做阻塞 I/O、重 CPU、data-collect 内部 parquet compression、local directory scan、sha256 或本地旧 segment 清理；所有队列都是 bounded queue，并具备 backpressure。archive/upload/listing/gzip 不属于当前 `data-collect` 验收项。
-18. 性能验收覆盖 Polymarket p95/max 事件量、四源合并 `2k-5k events/s` 工程吞吐、逐源吞吐/burst/drop/gap、writer queue、flush latency、RSS/CPU/disk watermark、cgroup/PSI/journal ResourceWatermark 和 hardware tier。
-19. ResourceWatermark 硬阈值验收必须包含 threshold policy receipt，并证明触发条件、降级或停止新市场采集、保护已采数据、优先 finalize/sha256/manifest 的动作与结果。
-20. archive/upload/listing/gzip 不属于当前 `data-collect` 验收项；若未来改变范围，以 1.2 非范围的决策门为准。
-21. Polymarket 相关采集路径必须先有官方 Rust SDK 能力核对记录；SDK 缺口方案必须先获用户同意。
-22. 文档、计划或实现不得把 data-pipeline 的 labels、features、tick_stream、训练切分、T-30 样本加工、paper/live 交易逻辑或 SDK 旁路实现写进 `data-collect` 范围。
+13. paper/live 自身 append-only event log、rotation artifact、live artifacts、order evidence、NOE/ledger 和 execution feedback ingestion 必须由其他模块需求承接；`data-collect` 只能提供外部市场源 finalized mirror、coverage、health、gap、manifest 和 hot path handoff 边界证据，不能私自解释交易运行证据。
+14. 训练 cold path 与 paper/live hot path 的接入边界必须可验证：训练消费 finalized typed raw parquet + manifest + `data-pipeline` 输出；paper/live 消费 realtime handoff 或等价低延迟事件流，并在对应 paper/live 主机记录 runtime receive timestamp；Phase 0 或后续验收不得用 finalized parquet 可见时间替代 paper/live 实时接收延迟。
+15. 网络异常、返回空、长时间业务静默、ping/pong 正常但无数据、rate limit、server shutdown、snapshot 缺失和 source stale 都会写入 health/gap/reconnect 证据。
+16. 恢复策略使用有限重试、backoff、jitter、max attempts、max elapsed、backoff ceiling，按源独立熔断/恢复，并在重连后验证订阅、snapshot、新鲜业务消息、source coverage、RTDS topic/symbol/payload timestamp 和 Binance update/trade id 状态。
+17. reconnect trace 必须记录每次 attempt、sleep、错误类别、最终状态，以及 open、half-open、recovered、exhausted 源级状态。
+18. Rust async/non-blocking 边界成立：主事件循环不做阻塞 I/O、重 CPU、data-collect 内部 parquet compression、local directory scan、sha256 或本地旧 segment 清理；所有队列都是 bounded queue，并具备 backpressure。archive/upload/listing/gzip 不属于当前 `data-collect` 验收项。
+19. 性能验收覆盖 Polymarket p95/max 事件量、四源合并 `2k-5k events/s` 工程吞吐、逐源吞吐/burst/drop/gap、writer queue、flush latency、RSS/CPU/disk watermark、cgroup/PSI/journal ResourceWatermark、hot path handoff latency、durable parquet write latency 和 hardware tier。
+20. 阶段 0 技术验收必须真实验证 `btc-updown-5m` 冷启动发现、跨至少一个 market rollover 的 current -> retired / prefetched -> active 切换、四源真实数据流、同一 UTC window 的 coverage 对齐、逐源吞吐、ResourceWatermark、训练 cold path / paper-live hot path 边界、`source_recv_to_hot_delivery_ms` 和 `source_recv_to_write_done_ms`；只通过 synthetic throughput、generic orderbook smoke、HTTP endpoint smoke、RTDS 单消息 smoke 或 finalized parquet 证据时，不得宣称阶段 0 技术路径通过。
+21. ResourceWatermark 硬阈值验收必须包含 threshold policy receipt，并证明触发条件、降级或停止新市场采集、保护已采数据、优先 finalize/sha256/manifest 的动作与结果。
+22. archive/upload/listing/gzip 不属于当前 `data-collect` 验收项；若未来改变范围，以 1.2 非范围的决策门为准。
+23. Polymarket 相关采集路径必须先有官方 Rust SDK 能力核对记录；SDK 缺口方案必须先获用户同意。
+24. 文档、计划或实现不得把 data-pipeline 的 labels、features、tick_stream、训练切分、T-30 样本加工、paper/live 交易逻辑或 SDK 旁路实现写进 `data-collect` 范围。
 
 ## 十、证据来源
 
