@@ -1164,13 +1164,13 @@
 
   当前执行结果：0.6.9 cold-start discovery、0.6.10 真实四源 60 分钟长跑、审查后 targeted rollover 补证、0.6.11 远端真实四源 60 分钟 hot path / parquet path 延迟补证和 0.6.12 collector region 自动识别补证均已完成。0.6.11 证明 hot path receipt 与 durable parquet path 可用同一 `event_seq` 对齐，hot path p95 为 `1ms`，durable write-done p95 为 `1004ms` 且主要受 `max_flush_interval_ms=1000` 影响，本地 `write_events_us` p95 为 `382us`。远端 sidecar 补齐 CPU/RSS/disk/open files/artifact dir bytes/PSI 采样且无 hard-threshold 压力；0.6.12 证明同一数据采集服务器在未设置 `COLLECTOR_REGION` 时可通过 AWS IMDS 写出 `collector_region=eu-west-1`。
 
-  远端 Phase 0 当前 verdict：`PASS_TO_PHASE1_REVIEW`。原因是技术路径已足以进入用户审查，且 0.6.12 已在阶段 0 内修复并验证 `collector_region=unknown` 缺口。完整 host clock sync status 与生产级 ResourceWatermark runtime manifest 仍必须在后续正式 collector 阶段实现，但不再阻塞阶段 0 技术 gate 进入用户审查；0.7.3 用户审查 gate 结论见下一步骤，阶段收尾 commit/push 完成前不得进入阶段 1。
+  远端 Phase 0 当前 verdict：`PASS_TO_PHASE1_REVIEW`。原因是技术路径已足以进入用户审查，且 0.6.12 已在阶段 0 内修复并验证 `collector_region=unknown` 缺口。完整 host clock sync status 与生产级 ResourceWatermark runtime manifest 仍必须在后续正式 collector 阶段实现，但不再阻塞阶段 0 技术 gate 进入用户审查；0.7.3 用户审查 gate 与阶段收尾 commit/push 已完成。
 
 - [x] **步骤 0.7.3：用户审查 gate**
 
   用户在会话中明确要求“派生 subagents 替我完成用户审查 gate”。已按该授权派生 4 个独立审查代理，分别审查需求/计划/报告一致性、代码/测试/SDK-first 证据、远端性能/资源/验收证据、范围纪律/过度设计/路径规则。四个审查结论均为 `PASS_WITH_NOTES`，gate recommendation 均为 `ACCEPT_WITH_NOTES`，未发现 Critical 或阻塞 Important 问题。
 
-  综合结论：0.7.3 用户审查 gate 已接受，Phase 0 当前状态更新为 `PHASE0_ACCEPTED_PENDING_STAGE_CLOSEOUT`。注意项不阻塞阶段 0：正式 collector 阶段仍需补齐 host clock sync status、生产级 ResourceWatermark runtime manifest、actual Polymarket outbound request evidence 或明确 unavailable reason、完整 source health/reconnect trace，以及 paper/live 主机 runtime receive timestamp 证据。进入阶段 1 前仍必须按阶段推进规则完成阶段收尾 commit/push；不得自行扩大范围、切换 SDK 旁路、降低吞吐验收、跳过后续阶段审查、或把 live 小主机改成构建/重处理机器。
+  综合结论：0.7.3 用户审查 gate 已接受，阶段收尾 commit/push 已完成，Phase 0 当前状态更新为 `PHASE0_COMPLETE_READY_FOR_PHASE1`。注意项不阻塞阶段 0：正式 collector 阶段仍需补齐 host clock sync status、生产级 ResourceWatermark runtime manifest、actual Polymarket outbound request evidence 或明确 unavailable reason、完整 source health/reconnect trace，以及 paper/live 主机 runtime receive timestamp 证据。后续从阶段 1 开始时仍不得自行扩大范围、切换 SDK 旁路、降低吞吐验收、跳过后续阶段审查、或把 live 小主机改成构建/重处理机器。
 
 ## 六、阶段 1：合同与 schema 冻结
 

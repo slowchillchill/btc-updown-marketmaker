@@ -292,6 +292,12 @@
 
 - 用户要求“派生 subagents 替我完成用户审查 gate”。已派生 4 个独立子代理分别审查需求/计划/报告一致性、代码/测试/SDK-first 证据、远端性能/资源/验收证据、范围纪律/过度设计/路径规则。
 - 四个审查结论均为 `PASS_WITH_NOTES`，gate recommendation 均为 `ACCEPT_WITH_NOTES`，未发现 Critical 或阻塞 Important 问题；综合 verdict 为 `ACCEPT_WITH_NOTES`。
-- 已更新 `plan/data-collect-plan.md`：0.7.3 用户审查 gate 标记完成，Phase 0 当前状态为 `PHASE0_ACCEPTED_PENDING_STAGE_CLOSEOUT`。
-- 已更新 `data-collect/docs/phase0-technical-validation.md`：新增 12.11 用户审查 gate 记录，并把当前状态从 `PHASE0_REMOTE_PASS_PENDING_USER_REVIEW` 更新为 `PHASE0_ACCEPTED_PENDING_STAGE_CLOSEOUT`。
+- 已更新 `plan/data-collect-plan.md`：0.7.3 用户审查 gate 标记完成，Phase 0 当前状态为 `PHASE0_COMPLETE_READY_FOR_PHASE1`。
+- 已更新 `data-collect/docs/phase0-technical-validation.md`：新增 12.11 用户审查 gate 记录，并把当前状态从 `PHASE0_REMOTE_PASS_PENDING_USER_REVIEW` 更新为 `PHASE0_COMPLETE_READY_FOR_PHASE1`。
 - 保留阶段收尾约束：进入阶段 1 前仍必须完成 commit/push；不得把 Phase 0 probe 当成生产 collector，正式 collector 阶段仍需补齐 host clock sync status、生产级 ResourceWatermark runtime manifest、actual Polymarket outbound request evidence 或明确 unavailable reason、完整 source health/reconnect trace，以及 paper/live 主机 runtime receive timestamp 证据。
+
+### Phase 0 阶段收尾 commit/push
+
+- 已按阶段推进规则创建并推送 Phase 0 收尾提交。
+- `plan/data-collect-plan.md` 和 `data-collect/docs/phase0-technical-validation.md` 已同步为 `PHASE0_COMPLETE_READY_FOR_PHASE1`。
+- 未纳入本次提交的未跟踪资料包括 `TimesFM与流式增量模型讨论结论.md`、`mistake-log/V2/`、`mistake-log/never-full-load/`、`mistake-log/online-feedback/`、`mistake-log/sdk-live-trade/`；这些不属于本次 data-collect Phase 0 收尾范围。

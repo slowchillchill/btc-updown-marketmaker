@@ -11,7 +11,7 @@
 - 执行授权：用户已在 2026-07-06 明确批准执行 `plan/data-collect-plan.md`。
 - 服务器测试授权：本地开发与测试通过后，允许使用数据采集服务器 `ubuntu@3.255.156.183` 做测试验证。
 - 数据采集服务器清理授权：为新采集程序测试验证腾出磁盘空间时，允许终止数据采集服务器上当前运行的采集程序，并允许删除该服务器上的旧采集程序和旧采集数据。
-- 当前阶段：Phase 0 技术测试与性能验证。0.6.11 hot path / parquet path 远端真实四源 60 分钟补证已完成；0.6.12 已在阶段 0 内修复并验证 `collector_region=unknown` 缺口；0.7.2 远端 verdict 已重新汇总为 `PASS_TO_PHASE1_REVIEW`。0.7.3 用户审查 gate 已按用户要求由 4 个独立子代理完成，综合结论为 `ACCEPT_WITH_NOTES`；进入阶段 1 前仍需完成阶段收尾 commit/push，不得创建正式 collector runtime、不得部署、不得接入 paper/live。
+- 当前阶段：Phase 0 技术测试与性能验证已完成。0.6.11 hot path / parquet path 远端真实四源 60 分钟补证已完成；0.6.12 已在阶段 0 内修复并验证 `collector_region=unknown` 缺口；0.7.2 远端 verdict 已重新汇总为 `PASS_TO_PHASE1_REVIEW`。0.7.3 用户审查 gate 已按用户要求由 4 个独立子代理完成，综合结论为 `ACCEPT_WITH_NOTES`；阶段收尾 commit/push 已完成。后续可从阶段 1 开始，但仍不得创建超出计划的正式 collector runtime、不得部署、不得接入 paper/live。
 - Polymarket 约束：Polymarket 相关实现必须官方 Rust SDK-first；若 SDK 能力不足，必须先形成缺口报告并获得用户同意，不得自行启用 raw REST、manual signing、自建 SDK 或 shadow implementation。
 - 本地网络约束：用户已说明本地电脑网络环境不能直接访问 Polymarket；后续如需在本地电脑测试或采集 Polymarket live-source 数据，必须使用本地已配置的香港 VPN 线路。当前 Phase 0 synthetic writer/throughput/network/resource 合同测试没有发起本地 Polymarket live-source 采集；若未来本地直连失败，必须先记录 VPN/线路状态，不得直接归因于 SDK 或采集程序。
 
@@ -56,7 +56,7 @@
 | `allowed_reader_roles` | Phase 0 仅本地操作者通过 SSH 以服务器 `ubuntu` 用户读取测试证据；未授权 paper/live/训练消费者读取该临时根 | 已确认，仅限 Phase 0 |
 | `allowed_writer_roles` | Phase 0 仅本地操作者通过 SSH 以服务器 `ubuntu` 用户写入测试证据；正式 collector writer 角色待后续阶段定义 | 已确认，仅限 Phase 0 |
 | `fail_closed_policy` | 路径越界、权限不匹配、owner/group 不符合 receipt、解析到 `/home/ubuntu/live-trade` 非授权子路径时 fail closed | 已定义 |
-| `user_review_verdict` | 0.7.2 已重新汇总为 `PASS_TO_PHASE1_REVIEW`；0.7.3 用户审查 gate 已按用户要求由 4 个独立子代理完成，综合结论 `ACCEPT_WITH_NOTES`；进入阶段 1 前仍需阶段收尾 commit/push | 已接受，待阶段收尾 |
+| `user_review_verdict` | 0.7.2 已重新汇总为 `PASS_TO_PHASE1_REVIEW`；0.7.3 用户审查 gate 已按用户要求由 4 个独立子代理完成，综合结论 `ACCEPT_WITH_NOTES`；阶段收尾 commit/push 已完成 | 已接受，阶段收尾完成 |
 
 ## 4. 只读环境核对
 
@@ -107,7 +107,7 @@ local probe verdict：`LOCAL_PROBE_PASS_FOR_SYNTHETIC_CONTRACTS`
 
 remote Phase 0 verdict：`PASS_TO_PHASE1_REVIEW`；旧 generic WebSocket smoke 形成的 `PASS_TO_PHASE1_REVIEW` 曾被撤销，0.6.9/0.6.10/targeted rollover 曾重新打开 durable mirror / 四源 coverage 维度，0.6.11 补齐 hot path / parquet path 延迟证据，0.6.12 已修复并验证 `collector_region=unknown` 缺口。
 
-overall Phase 0 status：`PHASE0_ACCEPTED_PENDING_STAGE_CLOSEOUT`；远端技术验证已满足进入阶段 1 的技术条件，0.7.3 用户审查 gate 已按用户要求由 4 个独立子代理完成，进入阶段 1 前仍需阶段收尾 commit/push。
+overall Phase 0 status：`PHASE0_COMPLETE_READY_FOR_PHASE1`；远端技术验证已满足进入阶段 1 的技术条件，0.7.3 用户审查 gate 已按用户要求由 4 个独立子代理完成，阶段收尾 commit/push 已完成。
 
 含义：本地 SDK 能力核对、writer/publish、synthetic throughput/backpressure、network recovery contract、ResourceWatermark contract 和 clippy 验证已经通过；数据采集服务器已完成清理 receipt、5-10 分钟 smoke、45 分钟 synthetic throughput / ResourceWatermark 预检、HTTP reachability smoke、0.6.9 真实 `btc-updown-5m` cold-start discovery、0.6.10 真实四源 60 分钟长跑、审查后 15 分钟 targeted rollover 补证、0.6.11 真实四源 60 分钟 hot path / parquet path 延迟补证，以及 0.6.12 collector region 自动识别补证。旧 generic WebSocket smoke 仍只作为 reachability evidence，不再作为真实源通过依据。
 
@@ -367,7 +367,7 @@ Phase 0 本地 probe 当前结论：`LOCAL_PROBE_PASS_FOR_SYNTHETIC_CONTRACTS`
 
 Phase 0 远端执行当前结论：`PASS_TO_PHASE1_REVIEW`；旧 generic WebSocket smoke 形成的 `PASS_TO_PHASE1_REVIEW` 曾被撤销，0.6.9/0.6.10 真实源证据和 targeted rollover 补证曾重新打开 durable mirror / 四源 coverage 维度，0.6.11 已补齐 hot path / parquet path 延迟证据，0.6.12 已补齐 collector region 自动识别证据。
 
-Phase 0 整体当前状态：`PHASE0_ACCEPTED_PENDING_STAGE_CLOSEOUT`；0.7.3 用户审查 gate 已完成，进入阶段 1 前仍需阶段收尾 commit/push。
+Phase 0 整体当前状态：`PHASE0_COMPLETE_READY_FOR_PHASE1`；0.7.3 用户审查 gate 与阶段收尾 commit/push 均已完成。
 
 技术 probe 状态：
 
@@ -388,15 +388,15 @@ Phase 0 整体当前状态：`PHASE0_ACCEPTED_PENDING_STAGE_CLOSEOUT`；0.7.3 �
 | hot path / durable parquet path 延迟补证 | `PASS`; 0.6.11 60 分钟真实四源补证 `probe_exit=0`，hot p95 `1ms`，durable write-done p95 `1004ms`，本地 `write_events_us` p95 `382us` |
 | collector region 自动识别补证 | `PASS`; 0.6.12 短 smoke 在未设置 `COLLECTOR_REGION` 时通过 AWS IMDS 写出 `collector_region=eu-west-1` |
 
-Phase 1 进入前剩余阶段收尾：
+Phase 1 进入前约束：
 
-1. 远端技术 gate 已达到 `PASS_TO_PHASE1_REVIEW`，且计划 0.7.3 已按用户要求由 4 个独立子代理审查通过；进入阶段 1 前仍需按阶段推进规则完成 commit/push。
+1. 远端技术 gate 已达到 `PASS_TO_PHASE1_REVIEW`，计划 0.7.3 已按用户要求由 4 个独立子代理审查通过，阶段收尾 commit/push 已完成。
 2. Phase 0 probe 已验证真实 discovery、rollover、四源 coverage、hot path / durable path 隔离、finalized parquet、manifest 和 sha256；正式 collector 阶段仍需补齐生产级 source adapter、网络恢复、ResourceWatermark 采样和持续发布机制。
 3. 0.6.12 已修复 collector region 自动识别；ResourceWatermark JSON 仍不是生产完整采样，不得在后续阶段把该 probe 当成生产完整监控实现。
 
-Phase 1 执行前提醒：
+Phase 1 执行提醒：
 
-1. 按计划规则在阶段审查和 commit/push 后再进入阶段 1。
+1. 后续从阶段 1 的计划任务开始执行。
 2. paper/live 服务器的 `~/btc-updown-marketmaker/datasets/` 只在后续 handoff 阶段验证，不在 Phase 0 冒充运行期 append-only log。
 
 ## 12. Phase 0 Remote Validation Execution
@@ -632,9 +632,9 @@ ResourceWatermark receipt：
 远端 Phase 0 技术 verdict（0.6.10 旧结论）：
 
 - 0.6.10 旧远端 verdict：`PASS_TO_PHASE1_REVIEW`
-- 当前 overall status：已由 12.11 用户审查 gate 更新为 `PHASE0_ACCEPTED_PENDING_STAGE_CLOSEOUT`。
+- 当前 overall status：已由 12.11 用户审查 gate 和阶段收尾更新为 `PHASE0_COMPLETE_READY_FOR_PHASE1`。
 - 撤销/重新打开原因：0.6.10 未证明 paper/live 实时 hot path、`source_recv_to_hot_delivery_ms`、`source_recv_to_write_done_ms`、queue high 持续时间和 parquet writer 与 hot path 隔离。
-- 0.6.11 远端真实四源 60 分钟 hot path / parquet path 延迟补证已完成，并已重新执行 0.7.2；0.7.3 用户审查 gate 已由 12.11 完成，阶段收尾 commit/push 前不得进入阶段 1。
+- 0.6.11 远端真实四源 60 分钟 hot path / parquet path 延迟补证已完成，并已重新执行 0.7.2；0.7.3 用户审查 gate 和阶段收尾 commit/push 已由 12.11 完成。
 
 ### 12.9 Local Hot Path / Parquet Path Latency Implementation
 
@@ -703,7 +703,7 @@ git diff --check
 - 当前 verdict：已由 0.6.12 补证更新为 `PASS_TO_PHASE1_REVIEW`，见 12.10。
 - 可以进入用户审查的证据：0.6.9 cold-start discovery、0.6.10 真实四源 60 分钟长跑、targeted rollover 补证、0.6.11 hot/durable path 60 分钟补证和 0.6.12 collector region 自动识别补证均已完成。
 - 后续硬要求：正式 collector 阶段必须补齐 host clock sync status、生产级 ResourceWatermark runtime manifest、actual Polymarket request evidence，以及完整生产 source health / reconnect trace。
-- 0.7.3 用户审查 gate 已由 12.11 完成；阶段收尾 commit/push 前不得进入阶段 1。
+- 0.7.3 用户审查 gate 已由 12.11 完成；阶段收尾 commit/push 已完成。
 
 ### 12.10 Collector Region Evidence Fix
 
@@ -725,7 +725,7 @@ git diff --check
 - initial discovery receipt：`collector_host_id=ip-172-26-10-0`，`collector_region=eu-west-1`。
 - coverage：Polymarket market `2568` 行并覆盖 `2` 个 market window；Binance depth `1189` 行；Binance aggTrade `554` 行；RTDS Chainlink `119` 行。
 
-结论：`collector_region=unknown` 已在阶段 0 修复并测试通过。0.6.11 的 60 分钟性能 run 不因该字段问题重跑；0.6.12 是针对 collector identity evidence 的真实源短 smoke 补证。远端 Phase 0 技术 verdict 更新为 `PASS_TO_PHASE1_REVIEW`；0.7.3 用户审查 gate 结论见 12.11，阶段收尾 commit/push 前不得进入阶段 1。
+结论：`collector_region=unknown` 已在阶段 0 修复并测试通过。0.6.11 的 60 分钟性能 run 不因该字段问题重跑；0.6.12 是针对 collector identity evidence 的真实源短 smoke 补证。远端 Phase 0 技术 verdict 更新为 `PASS_TO_PHASE1_REVIEW`；0.7.3 用户审查 gate 和阶段收尾结论见 12.11。
 
 ### 12.11 User Review Gate Delegated Subagent Review
 
@@ -740,6 +740,8 @@ git diff --check
 
 综合 verdict：`ACCEPT_WITH_NOTES`。
 
-Phase 0 当前状态：`PHASE0_ACCEPTED_PENDING_STAGE_CLOSEOUT`。
+阶段收尾：已创建并推送 Phase 0 收尾提交。
 
-剩余注意项不阻塞 Phase 0：正式 collector 阶段仍需补齐 host clock sync status、生产级 ResourceWatermark runtime manifest、actual Polymarket outbound request evidence 或明确 unavailable reason、完整 source health/reconnect trace，以及 paper/live 主机 runtime receive timestamp 证据。进入阶段 1 前仍必须按阶段推进规则完成 commit/push。
+Phase 0 当前状态：`PHASE0_COMPLETE_READY_FOR_PHASE1`。
+
+剩余注意项不阻塞 Phase 0：正式 collector 阶段仍需补齐 host clock sync status、生产级 ResourceWatermark runtime manifest、actual Polymarket outbound request evidence 或明确 unavailable reason、完整 source health/reconnect trace，以及 paper/live 主机 runtime receive timestamp 证据。
