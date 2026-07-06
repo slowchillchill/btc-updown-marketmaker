@@ -131,6 +131,22 @@ fn pong_without_business_data_marks_stale_not_healthy() {
 }
 
 #[test]
+fn reconnect_does_not_reuse_pong_from_previous_connection() {
+    let mut tracker = SourceHealthTracker::new("polymarket_market", 1_000);
+    tracker.record_connected(0);
+    tracker.record_pong(900);
+
+    assert_eq!(
+        tracker.evaluate_freshness(950),
+        FreshnessStatus::Reconnecting
+    );
+
+    tracker.record_connected(1_000);
+    assert_eq!(tracker.evaluate_freshness(2_001), FreshnessStatus::Stale);
+    assert_eq!(tracker.last_stale_reason(), Some("no_business_data"));
+}
+
+#[test]
 fn reconnect_requires_subscription_snapshot_and_fresh_business_data() {
     let mut gate = ReconnectGate::new("binance_depth_update", 1_000);
 
@@ -144,6 +160,9 @@ fn reconnect_requires_subscription_snapshot_and_fresh_business_data() {
     assert_eq!(gate.status(400), FreshnessStatus::Reconnecting);
 
     gate.record_business_message(500);
+    assert_eq!(gate.status(600), FreshnessStatus::Reconnecting);
+
+    gate.record_source_coverage(550);
     assert_eq!(gate.status(600), FreshnessStatus::Healthy);
 
     assert_eq!(gate.status(1_700), FreshnessStatus::Stale);

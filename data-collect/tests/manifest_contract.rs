@@ -1,7 +1,11 @@
+use data_collect::backpressure::BackpressureReceipt;
 use data_collect::manifest::{
     ManifestFailureClass, ManifestSourceGap, SourceGapSeverity, TimeWindow,
 };
-use data_collect::resource::{CgroupMemoryStat, PsiSample};
+use data_collect::resource::{
+    CgroupMemoryStat, PsiSample, ResourceAction, ResourceSeverity, ResourceThresholdPolicyReceipt,
+    ResourceThresholds,
+};
 use data_collect::{
     ManifestDraft, QueueWatermark, RequiredFile, ResourceWatermark, SourceCoverage,
     ValidationVerdict,
@@ -44,6 +48,51 @@ fn complete_resource_watermark() -> ResourceWatermark {
     }
 }
 
+fn complete_resource_threshold_policy_receipt() -> ResourceThresholdPolicyReceipt {
+    let thresholds = ResourceThresholds {
+        min_disk_free_bytes: 1,
+        max_rss_bytes: 1_000_000,
+        max_cpu_percent: 95.0,
+        max_artifact_dir_bytes: 1_000_000,
+        max_journal_log_bytes: 1_000_000,
+        max_open_files: 1_000,
+        max_queue_bytes: 1_000_000,
+        max_queue_age_ms: 1_000,
+        max_parquet_writer_memory_estimate_bytes: 1_000_000,
+        max_cgroup_memory_current_bytes: 1_000_000,
+        max_cgroup_memory_anon_bytes: 1_000_000,
+        max_cgroup_memory_file_bytes: 1_000_000,
+        max_cgroup_memory_slab_bytes: 1_000_000,
+        max_psi_some_avg10: 90.0,
+        max_psi_full_avg10: 50.0,
+        max_stage_latency_ms: 1_000,
+        max_ttl_ms: 10_000,
+    };
+
+    ResourceThresholdPolicyReceipt {
+        soft_thresholds: thresholds,
+        hard_thresholds: thresholds,
+        threshold_unit: "bytes/percent/count/milliseconds/psi_avg10".to_owned(),
+        hard_hysteresis_samples: 2,
+        recovery_hysteresis_samples: 2,
+        soft_actions: vec![
+            ResourceAction::RecordBackpressure,
+            ResourceAction::ObserveRecovery,
+        ],
+        hard_actions: vec![
+            ResourceAction::StopNewIntake,
+            ResourceAction::FinalizeOpenSegments,
+            ResourceAction::WriteIncompleteManifest,
+        ],
+        recovery_actions: vec![
+            ResourceAction::ObserveRecovery,
+            ResourceAction::ResumeIntake,
+        ],
+        recovery_condition: "below soft thresholds for recovery_hysteresis_samples".to_owned(),
+        last_result: ResourceSeverity::Healthy,
+    }
+}
+
 fn complete_manifest() -> ManifestDraft {
     ManifestDraft {
         artifact_path: Some("probe.parquet".into()),
@@ -76,12 +125,14 @@ fn complete_manifest() -> ManifestDraft {
             end_utc_ms: 2,
         }),
         resource_watermark: Some(complete_resource_watermark()),
+        resource_threshold_policy_receipt: Some(complete_resource_threshold_policy_receipt()),
         writer_queue_high_watermark: Some(QueueWatermark {
             rows: 2,
             bytes: 512,
             oldest_event_age_ms: 10,
             writer_lag_ms: 5,
         }),
+        backpressure_receipt: Some(BackpressureReceipt::empty("polymarket_market")),
         flush_latency_ms: Some(3),
         collector_host_id: Some("collector-local".to_owned()),
         collector_region: Some("eu-west-1".to_owned()),
@@ -116,12 +167,89 @@ fn manifest_contract_requires_files_coverage_health_resource_and_time_windows() 
         ValidationVerdict::Incomplete
     );
 
+    let mut missing_backpressure = complete.clone();
+    missing_backpressure.backpressure_receipt = None;
+    assert_eq!(
+        missing_backpressure.effective_verdict(),
+        ValidationVerdict::Incomplete
+    );
+
+    let mut fatal_backpressure = complete.clone();
+    let mut receipt = BackpressureReceipt::empty("polymarket_market");
+    receipt.process_fatal = true;
+    fatal_backpressure.backpressure_receipt = Some(receipt);
+    assert_eq!(
+        fatal_backpressure.effective_verdict(),
+        ValidationVerdict::Incomplete
+    );
+
+    let mut timeout_backpressure = complete.clone();
+    let mut receipt = BackpressureReceipt::empty("polymarket_market");
+    receipt.send_timeout_count = 1;
+    timeout_backpressure.backpressure_receipt = Some(receipt);
+    assert_eq!(
+        timeout_backpressure.effective_verdict(),
+        ValidationVerdict::Incomplete
+    );
+
+    let mut dropped_backpressure = complete.clone();
+    let mut receipt = BackpressureReceipt::empty("polymarket_market");
+    receipt.drop_count = 1;
+    dropped_backpressure.backpressure_receipt = Some(receipt);
+    assert_eq!(
+        dropped_backpressure.effective_verdict(),
+        ValidationVerdict::Incomplete
+    );
+
+    let mut paused_backpressure = complete.clone();
+    let mut receipt = BackpressureReceipt::empty("polymarket_market");
+    receipt.pause_intake_count = 1;
+    paused_backpressure.backpressure_receipt = Some(receipt);
+    assert_eq!(
+        paused_backpressure.effective_verdict(),
+        ValidationVerdict::Incomplete
+    );
+
+    let mut missing_policy_receipt = complete.clone();
+    missing_policy_receipt.resource_threshold_policy_receipt = None;
+    assert_eq!(
+        missing_policy_receipt.effective_verdict(),
+        ValidationVerdict::Incomplete
+    );
+
+    let mut incomplete_policy_receipt = complete.clone();
+    let mut receipt = complete_resource_threshold_policy_receipt();
+    receipt.hard_hysteresis_samples = 0;
+    incomplete_policy_receipt.resource_threshold_policy_receipt = Some(receipt);
+    assert_eq!(
+        incomplete_policy_receipt.effective_verdict(),
+        ValidationVerdict::Incomplete
+    );
+
     let mut missing_required_file_sha = complete;
     missing_required_file_sha.required_files[0].sha256 = None;
     assert_eq!(
         missing_required_file_sha.effective_verdict(),
         ValidationVerdict::Incomplete
     );
+}
+
+#[test]
+fn manifest_backpressure_receipt_must_cover_all_source_coverage_kinds() {
+    let mut manifest = complete_manifest();
+    manifest.source_coverage.push(SourceCoverage {
+        source_kind: "binance_depth_update".to_owned(),
+        first_recv_time_utc_ms: 1,
+        last_recv_time_utc_ms: 2,
+        rows: 10,
+    });
+
+    assert_eq!(manifest.effective_verdict(), ValidationVerdict::Incomplete);
+
+    let mut receipt = BackpressureReceipt::empty("polymarket_market");
+    receipt.source_kinds.push("binance_depth_update".to_owned());
+    manifest.backpressure_receipt = Some(receipt);
+    assert_eq!(manifest.effective_verdict(), ValidationVerdict::Complete);
 }
 
 #[test]

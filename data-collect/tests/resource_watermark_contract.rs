@@ -1,6 +1,6 @@
 use data_collect::resource::{
-    CgroupMemoryStat, MetricUnavailable, PsiSample, ResourceAction, ResourcePolicy, ResourceSample,
-    ResourceSeverity, ResourceThresholds,
+    CgroupMemoryStat, MetricUnavailable, PsiSample, ResourceAction, ResourcePolicy,
+    ResourcePolicyMonitor, ResourceSample, ResourceSeverity, ResourceThresholds,
 };
 
 fn complete_sample() -> ResourceSample {
@@ -121,7 +121,7 @@ fn resource_watermark_records_required_metrics_or_unavailable_reason() {
 }
 
 #[test]
-fn hard_threshold_records_degrade_stop_and_finalize_actions() {
+fn stateless_hard_threshold_records_observation_without_stop_action() {
     let policy = ResourcePolicy::new(hard_thresholds(), soft_thresholds());
     let mut sample = complete_sample();
     sample.disk_free_bytes = Some(500);
@@ -130,14 +130,20 @@ fn hard_threshold_records_degrade_stop_and_finalize_actions() {
 
     assert_eq!(verdict.severity, ResourceSeverity::HardDegraded);
     assert!(!verdict.process_fatal);
-    assert!(verdict.actions.contains(&ResourceAction::StopNewIntake));
     assert!(
         verdict
+            .actions
+            .contains(&ResourceAction::RecordBackpressure)
+    );
+    assert!(verdict.actions.contains(&ResourceAction::ObserveRecovery));
+    assert!(!verdict.actions.contains(&ResourceAction::StopNewIntake));
+    assert!(
+        !verdict
             .actions
             .contains(&ResourceAction::FinalizeOpenSegments)
     );
     assert!(
-        verdict
+        !verdict
             .actions
             .contains(&ResourceAction::WriteIncompleteManifest)
     );
@@ -189,4 +195,90 @@ fn resource_policy_evaluates_non_disk_watermarks() {
         policy.evaluate(sample.into_watermark()).severity,
         ResourceSeverity::HardDegraded
     );
+}
+
+#[test]
+fn resource_threshold_policy_receipt_records_thresholds_hysteresis_actions_and_recovery() {
+    let policy = ResourcePolicy::new(hard_thresholds(), soft_thresholds());
+    let monitor = ResourcePolicyMonitor::new(policy, 2, 2);
+
+    let receipt = monitor.policy_receipt();
+    assert_eq!(receipt.hard_hysteresis_samples, 2);
+    assert_eq!(receipt.recovery_hysteresis_samples, 2);
+    assert_eq!(
+        receipt.threshold_unit,
+        "bytes/percent/count/milliseconds/psi_avg10"
+    );
+    assert!(
+        receipt
+            .hard_actions
+            .contains(&ResourceAction::FinalizeOpenSegments)
+    );
+    assert!(
+        receipt
+            .soft_actions
+            .contains(&ResourceAction::RecordBackpressure)
+    );
+    assert!(
+        receipt
+            .recovery_actions
+            .contains(&ResourceAction::ResumeIntake)
+    );
+    assert!(!receipt.recovery_condition.is_empty());
+}
+
+#[test]
+fn resource_hard_threshold_requires_consecutive_samples_before_stop_action() {
+    let policy = ResourcePolicy::new(hard_thresholds(), soft_thresholds());
+    let mut monitor = ResourcePolicyMonitor::new(policy, 2, 2);
+
+    let mut hard_sample = complete_sample();
+    hard_sample.disk_free_bytes = Some(500);
+
+    let first = monitor.observe(hard_sample.clone().into_watermark());
+    assert_eq!(first.severity, ResourceSeverity::HardDegraded);
+    assert!(!first.actions.contains(&ResourceAction::StopNewIntake));
+    assert!(first.actions.contains(&ResourceAction::RecordBackpressure));
+
+    let second = monitor.observe(hard_sample.clone().into_watermark());
+    assert_eq!(second.severity, ResourceSeverity::HardDegraded);
+    assert!(second.actions.contains(&ResourceAction::StopNewIntake));
+    assert!(
+        second
+            .actions
+            .contains(&ResourceAction::FinalizeOpenSegments)
+    );
+
+    let third = monitor.observe(hard_sample.into_watermark());
+    assert_eq!(third.severity, ResourceSeverity::HardDegraded);
+    assert!(third.actions.contains(&ResourceAction::StopNewIntake));
+    assert!(
+        !third
+            .actions
+            .contains(&ResourceAction::FinalizeOpenSegments)
+    );
+    assert!(
+        !third
+            .actions
+            .contains(&ResourceAction::WriteIncompleteManifest)
+    );
+
+    let first_recovery = monitor.observe(complete_sample().into_watermark());
+    assert!(
+        !first_recovery
+            .actions
+            .contains(&ResourceAction::ResumeIntake)
+    );
+
+    let second_recovery = monitor.observe(complete_sample().into_watermark());
+    assert!(
+        second_recovery
+            .actions
+            .contains(&ResourceAction::ResumeIntake)
+    );
+}
+
+#[test]
+fn resource_watermark_soft_threshold_degrades_without_process_fatal() {
+    soft_threshold_records_degraded_without_process_fatal();
 }

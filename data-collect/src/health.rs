@@ -96,6 +96,33 @@ impl NetworkFailure {
             }
         }
     }
+
+    pub fn error_class(self) -> ErrorClass {
+        match self {
+            Self::RateLimit | Self::ConnectionLimit | Self::SubscriptionLimit => {
+                ErrorClass::RateLimited
+            }
+            Self::HttpError => ErrorClass::Http,
+            Self::WsProtocolError => ErrorClass::WebSocketProtocol,
+            Self::SnapshotMissing | Self::SnapshotStale | Self::EmptySnapshot => {
+                ErrorClass::Snapshot
+            }
+            Self::UpdateIdGap | Self::SourceGap | Self::CoverageDrop => ErrorClass::Coverage,
+            Self::WriterQueueBlocked
+            | Self::BackpressureTriggered
+            | Self::DiskWatermarkExceeded
+            | Self::MemoryWatermarkExceeded
+            | Self::CpuWatermarkExceeded => ErrorClass::Backpressure,
+            Self::NoBusinessMessages | Self::PongButDataSilent | Self::SourceStale => {
+                ErrorClass::Freshness
+            }
+            Self::EmptyPayload | Self::EmptyArray => ErrorClass::Payload,
+            Self::ConnectionFailed
+            | Self::Disconnected
+            | Self::ServerShutdown
+            | Self::SubscriptionError => ErrorClass::Connection,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,6 +130,19 @@ pub enum ArtifactSignal {
     SourceHealth,
     SourceGap,
     ReconnectTrace,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorClass {
+    Connection,
+    Http,
+    WebSocketProtocol,
+    Payload,
+    Freshness,
+    RateLimited,
+    Snapshot,
+    Coverage,
+    Backpressure,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,12 +160,19 @@ pub struct RetryPolicy {
 pub struct ReconnectAttempt {
     pub source_kind: String,
     pub failure: NetworkFailure,
+    pub error_class: ErrorClass,
     pub attempt: u32,
     pub sleep_ms: u64,
+    pub max_backoff_ms: u64,
     pub max_elapsed_ms: u64,
     pub cumulative_elapsed_ms: u64,
     pub jitter_bps: u32,
     pub jitter_seed: u64,
+    pub final_state: CircuitState,
+    pub subscription_recheck_required: bool,
+    pub snapshot_recheck_required: bool,
+    pub business_freshness_recheck_required: bool,
+    pub coverage_recheck_required: bool,
     pub retry_exhausted: bool,
 }
 
@@ -138,6 +185,7 @@ pub fn plan_retry_trace(
     let attempts = policy.max_attempts.max(1);
     let multiplier = policy.multiplier.max(1);
     let max_elapsed_ms = policy.max_elapsed_ms.max(1);
+    let max_backoff_ms = policy.max_backoff_ms.max(1);
     let mut trace = Vec::with_capacity(attempts as usize);
     let mut base_sleep = policy.initial_backoff_ms.max(1);
     let mut elapsed_ms = 0_u64;
@@ -154,19 +202,30 @@ pub fn plan_retry_trace(
             policy.jitter_seed,
         );
         let remaining_ms = max_elapsed_ms - elapsed_ms;
-        let sleep_ms = jittered.min(policy.max_backoff_ms.max(1)).min(remaining_ms);
+        let sleep_ms = jittered.min(max_backoff_ms).min(remaining_ms);
         elapsed_ms = elapsed_ms.saturating_add(sleep_ms);
         let retry_exhausted = attempt == attempts || elapsed_ms >= max_elapsed_ms;
 
         trace.push(ReconnectAttempt {
             source_kind: source_kind.clone(),
             failure,
+            error_class: failure.error_class(),
             attempt,
             sleep_ms,
+            max_backoff_ms,
             max_elapsed_ms,
             cumulative_elapsed_ms: elapsed_ms,
             jitter_bps: policy.jitter_bps,
             jitter_seed: policy.jitter_seed,
+            final_state: if retry_exhausted {
+                CircuitState::Exhausted
+            } else {
+                CircuitState::Open
+            },
+            subscription_recheck_required: true,
+            snapshot_recheck_required: true,
+            business_freshness_recheck_required: true,
+            coverage_recheck_required: true,
             retry_exhausted,
         });
         if retry_exhausted {
@@ -259,6 +318,10 @@ impl SourceHealthRegistry {
 
     pub fn state(&self, source_kind: &str) -> Option<CircuitState> {
         self.states.get(source_kind).copied()
+    }
+
+    pub fn failure(&self, source_kind: &str) -> Option<NetworkFailure> {
+        self.failures.get(source_kind).copied()
     }
 }
 
@@ -383,6 +446,8 @@ impl SourceHealthTracker {
 
     pub fn record_connected(&mut self, at_ms: i64) {
         self.connected_at_ms = Some(at_ms);
+        self.last_pong_at_ms = None;
+        self.last_business_at_ms = None;
         self.last_stale_reason = None;
     }
 
@@ -439,6 +504,7 @@ pub struct ReconnectGate {
     tracker: SourceHealthTracker,
     subscription_ack_at_ms: Option<i64>,
     snapshot_at_ms: Option<i64>,
+    source_coverage_at_ms: Option<i64>,
 }
 
 impl ReconnectGate {
@@ -447,6 +513,7 @@ impl ReconnectGate {
             tracker: SourceHealthTracker::new(source_kind, freshness_timeout_ms),
             subscription_ack_at_ms: None,
             snapshot_at_ms: None,
+            source_coverage_at_ms: None,
         }
     }
 
@@ -454,6 +521,7 @@ impl ReconnectGate {
         self.tracker.record_connected(at_ms);
         self.subscription_ack_at_ms = None;
         self.snapshot_at_ms = None;
+        self.source_coverage_at_ms = None;
     }
 
     pub fn record_subscription_ack(&mut self, at_ms: i64) {
@@ -468,10 +536,15 @@ impl ReconnectGate {
         self.tracker.record_business_message(at_ms);
     }
 
+    pub fn record_source_coverage(&mut self, at_ms: i64) {
+        self.source_coverage_at_ms = Some(at_ms);
+    }
+
     pub fn status(&mut self, now_ms: i64) -> FreshnessStatus {
         if self.subscription_ack_at_ms.is_none()
             || self.snapshot_at_ms.is_none()
             || self.tracker.last_business_at_ms.is_none()
+            || self.source_coverage_at_ms.is_none()
         {
             return FreshnessStatus::Reconnecting;
         }

@@ -1,5 +1,6 @@
 pub mod backpressure;
 pub mod collector_identity;
+pub mod config;
 pub mod event;
 pub mod health;
 pub mod latency;

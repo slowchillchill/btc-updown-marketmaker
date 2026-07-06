@@ -22,7 +22,7 @@ fn synthetic_event(seq: u64) -> RawEvent {
 }
 
 #[tokio::test]
-async fn bounded_queue_records_backpressure_and_source_gap() {
+async fn bounded_queue_records_backpressure_observation_without_source_gap() {
     let (tx, rx) = bounded_event_queue::<RawEvent>(1).unwrap();
     assert_eq!(rx.capacity(), 1);
 
@@ -59,8 +59,8 @@ async fn bounded_queue_records_backpressure_and_source_gap() {
     assert_eq!(verdict.severity, BackpressureSeverity::SoftDegraded);
     assert_eq!(verdict.action, RuntimeAction::Continue);
     assert!(!verdict.process_fatal);
-    assert_eq!(monitor.source_gaps().len(), 1);
-    assert_eq!(monitor.source_gaps()[0].reason, "bounded_queue_full");
+    assert_eq!(monitor.source_gaps().len(), 0);
+    assert_eq!(monitor.receipt().queue_full_observation_count, 1);
 }
 
 #[test]

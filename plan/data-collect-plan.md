@@ -327,7 +327,7 @@
   计划执行命令：
 
   ```bash
-  cargo test -p data-collect bounded_queue_records_backpressure_and_source_gap -- --nocapture
+  cargo test -p data-collect bounded_queue_records_backpressure_observation_without_source_gap -- --nocapture
   cargo test -p data-collect queue_watermarks_include_rows_bytes_age_writer_lag -- --nocapture
   cargo bench -p data-collect --bench throughput_probe -- --sample-size 20
   ```
@@ -425,7 +425,8 @@
 
 	  ```bash
 	  cargo test -p data-collect resource_watermark_records_required_metrics_or_unavailable_reason -- --nocapture
-	  cargo test -p data-collect hard_threshold_records_degrade_stop_and_finalize_actions -- --nocapture
+	  cargo test -p data-collect stateless_hard_threshold_records_observation_without_stop_action -- --nocapture
+	  cargo test -p data-collect resource_hard_threshold_requires_consecutive_samples_before_stop_action -- --nocapture
 	  cargo test -p data-collect soft_threshold_records_degraded_without_process_fatal -- --nocapture
 	  ```
 
@@ -1575,20 +1576,20 @@
 - 修改：`data-collect/src/health.rs`
 - 创建：`data-collect/tests/reconnect_trace_contract.rs`
 
-- [ ] **步骤 4.1.1：写重试和熔断测试**
+- [x] **步骤 4.1.1：写重试和熔断测试**
 
   测试断言有限重试、指数 backoff + jitter、max attempts、max elapsed、backoff ceiling、retry exhausted、attempt、sleep、错误类别和最终状态全部进入 reconnect trace。
 
-- [ ] **步骤 4.1.2：实现按源独立状态机**
+- [x] **步骤 4.1.2：实现按源独立状态机**
 
   Polymarket、Binance depth、Binance aggTrade、RTDS Chainlink 任一源故障不得被其他源健康状态掩盖；源级状态覆盖 open、half-open、recovered、exhausted。
 
-- [ ] **步骤 4.1.3：运行 reconnect 测试**
+- [x] **步骤 4.1.3：运行 reconnect 测试**
 
   计划执行命令：
 
   ```bash
-  cargo test -p data-collect reconnect_trace_contract -- --nocapture
+  cargo test -p data-collect --test reconnect_trace_contract -- --nocapture
   ```
 
   预期：重连后重新校验订阅、snapshot、新鲜业务消息和 source coverage。
@@ -1601,21 +1602,21 @@
 - 修改：`data-collect/src/writer.rs`
 - 创建：`data-collect/tests/bounded_queue_contract.rs`
 
-- [ ] **步骤 4.2.1：写 bounded queue 合同测试**
+- [x] **步骤 4.2.1：写 bounded queue 合同测试**
 
   测试断言所有跨任务队列受 row count、byte count、oldest event age、writer lag 和 memory watermark 约束。
 
-- [ ] **步骤 4.2.2：实现 backpressure 动作**
+- [x] **步骤 4.2.2：实现 backpressure 动作**
 
   达到 soft watermark 时必须触发 backpressure、source health 降级或 source gap 记录；达到 hard watermark 且连续采样窗口内无法恢复时，才允许受控暂停新市场或单源 intake。禁止 unbounded queue 导致 OOM 或 silent loss，也禁止短暂水位尖峰直接造成进程级失败。
   正式实现不得复用 Phase 0 probe 的简化 verdict 语义：可恢复 queue full / bounded wait 成功必须进入 `backpressure_observations` 或等价资源观察字段，只有 send timeout、drop、持续 hard threshold 或无法保全 segment 时，才进入阻塞 complete verdict 的 `source_gap` / `ArtifactIncomplete` / `ProcessFatal` 路径。
 
-- [ ] **步骤 4.2.3：运行 bounded queue 测试**
+- [x] **步骤 4.2.3：运行 bounded queue 测试**
 
   计划执行命令：
 
   ```bash
-  cargo test -p data-collect bounded_queue_contract -- --nocapture
+  cargo test -p data-collect --test bounded_queue_contract -- --nocapture
   cargo test -p data-collect backpressure_hysteresis_prevents_flapping_stop_start -- --nocapture
   ```
 
@@ -1628,24 +1629,36 @@
 - 修改/扩展：`data-collect/src/resource.rs`
 - 创建：`data-collect/tests/resource_watermark_contract.rs`
 
-- [ ] **步骤 4.3.1：写 ResourceWatermark 合同测试**
+- [x] **步骤 4.3.1：写 ResourceWatermark 合同测试**
 
   测试覆盖需求文档第七节全部指标，并要求 threshold policy receipt 记录 soft/hard 阈值、单位、采样窗口、hysteresis、触发动作、恢复条件和结果。
 
-- [ ] **步骤 4.3.2：实现 hard threshold action**
+- [x] **步骤 4.3.2：实现 hard threshold action**
 
   超过 soft 阈值时只记录降级、backpressure 和恢复观察；连续超过 hard 阈值且无法恢复时，才停止新市场采集或暂停单源 intake，保护已采数据，优先 atomic publish 和 sha256 manifest。只有无法保全已采 segment、artifact 根不可写或路径越界时，才进入 `ProcessFatal`。
 
-- [ ] **步骤 4.3.3：运行 ResourceWatermark 测试**
+- [x] **步骤 4.3.3：运行 ResourceWatermark 测试**
 
   计划执行命令：
 
   ```bash
-  cargo test -p data-collect resource_watermark_contract -- --nocapture
+  cargo test -p data-collect --test resource_watermark_contract -- --nocapture
   cargo test -p data-collect resource_watermark_soft_threshold_degrades_without_process_fatal -- --nocapture
   ```
 
   预期：Linux 指标不可用时记录 unavailable reason；soft threshold 不触发进程级失败；live 交易小主机不会被计划为编译或重处理机器。
+
+Phase 4 执行结果：
+
+1. 已新增 `data-collect/tests/reconnect_trace_contract.rs`、`data-collect/tests/bounded_queue_contract.rs`，并扩展 `data-collect/tests/resource_watermark_contract.rs` 与 manifest 合同测试。TDD RED 先失败于缺少 `ErrorClass`、reconnect trace 字段、`config` 模块、backpressure receipt、recoverable wait observation、`ResourcePolicyMonitor` 和 resume 动作。
+2. 已实现 `data-collect/src/config.rs`、扩展 `health.rs` / `backpressure.rs` / `resource.rs` / `manifest.rs`：reconnect trace 记录 error class、backoff ceiling、final state 和重连后 subscription/snapshot/business freshness/coverage recheck requirement；每个 source 的 circuit state 和 failure 独立保存；cross-task queue config 必须有 rows/bytes/age/writer lag 上限；recoverable bounded wait 进入 backpressure receipt，不进入 source gap；send timeout/drop 才记录 source gap；hard watermark 需要连续样本触发 pause，恢复需要健康样本触发 resume；manifest complete 需要 backpressure receipt。
+3. 成熟工具评估：`cargo info backoff` 显示 `backoff 0.4.0` 支持 exponential backoff 和 tokio feature，且 `cargo tree -p data-collect` 显示它已通过官方 Polymarket Rust SDK 作为传递依赖存在；`cargo info tokio-retry` 显示 `tokio-retry 0.3.2` 可用。Phase 4 当前实现是可审计 trace/policy 合同和状态 receipt，不是实际 sleep executor；为避免增加第二套 retry 执行路径和隐藏证据字段，本阶段不新增直接 retry crate。后续真实 source loop 若需要执行重试 sleep，应优先复用 SDK/backoff 能力或在 changelog 记录直接依赖取舍。
+4. 修正本阶段计划命令：`cargo test -p data-collect reconnect_trace_contract` / `bounded_queue_contract` / `resource_watermark_contract` 会按测试名过滤并可能执行 0 条测试；已改为 `cargo test -p data-collect --test ... -- --nocapture`，并用正确命令重新验证。
+5. 第一轮 Phase 4 独立复审为 3 个 `FAIL`，无 Critical。成立问题已修复：`ReconnectGate` 增加 source coverage gate；`ResourcePolicy::evaluate()` 收敛为无状态分类/观察，不再单次 hard threshold 停采；`ResourcePolicyMonitor` 只在首次进入 hard-active 时触发 finalize / incomplete manifest，持续 hard 只保持 pause + observation；`record_queue_full()` 改为可恢复 backpressure observation，不写 source gap；manifest complete 要求 `BackpressureReceipt` 覆盖所有 `source_coverage.source_kind`，且 `send_timeout_count` / `drop_count` / `pause_intake_count` / `process_fatal` 均为 0；manifest complete 新增 `ResourceThresholdPolicyReceipt` 条件；cross-task queue config 增加 `max_memory_watermark_bytes` 且要求 bytes 上限不超过 memory watermark。
+6. 针对性复审结果：1 个 targeted reviewer 先给 `FAIL`，指出重连时旧 business timestamp 可能泄漏到新连接；已修复 `SourceHealthTracker::record_connected()` 清空旧 pong/business，并新增 `reconnect_recovery_does_not_reuse_business_message_from_previous_connection` 反例测试。另 1 个 targeted reviewer 为 `PASS_WITH_NOTES`，仅剩 minor：Phase 0 技术验证文档 queue full 旧语义、manifest 多源 coverage 反例缺失；已同步文档并新增 `manifest_backpressure_receipt_must_cover_all_source_coverage_kinds`。
+7. 本地指定验证通过：`CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo test -p data-collect --test reconnect_trace_contract -- --nocapture`（4 条测试）、`CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo test -p data-collect --test bounded_queue_contract -- --nocapture`（5 条测试）、`CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo test -p data-collect --test resource_watermark_contract -- --nocapture`（7 条测试）。命名单测过滤验证也通过：`backpressure_hysteresis_prevents_flapping_stop_start`（1 条）和 `resource_watermark_soft_threshold_degrades_without_process_fatal`（1 条）。
+8. 最终窄范围复审为 `PASS_WITH_NOTES`，无 Critical/Important blocker；notes 已修复：新增旧 pong 不可复用反例测试，并修正 Phase 0 技术验证文档残留旧 backpressure 测试名。
+9. 本地全量验证通过：`cargo fmt --all -- --check`、`git diff --check`、`CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo test -p data-collect --lib --tests --quiet`（89 条测试）、`CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo clippy -p data-collect --all-targets -- -D warnings` 和 release bench targets `market_discovery_probe`、`real_source_alignment_probe`、`parquet_writer_probe`、`throughput_probe`、`websocket_smoke_probe` 构建。进入下一阶段前仍需完成最终状态检查、commit/push。
 
 ## 十、阶段 5：消费者边界与接入合同
 

@@ -205,7 +205,7 @@ rows=10000 elapsed_ms=3 final_path=/tmp/data-collect-parquet-writer-probe-107364
 ### 8.1 TDD RED
 
 ```bash
-CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo test -p data-collect bounded_queue_records_backpressure_and_source_gap -- --nocapture
+CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo test -p data-collect bounded_queue_records_backpressure_observation_without_source_gap -- --nocapture
 ```
 
 结果：失败于缺少 `data_collect::backpressure`，符合“backpressure 功能未实现”的 RED 预期。
@@ -213,7 +213,7 @@ CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo test -p data-collect b
 ### 8.2 Bounded Queue / Backpressure 合同测试
 
 ```bash
-CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo test -p data-collect bounded_queue_records_backpressure_and_source_gap -- --nocapture
+CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo test -p data-collect bounded_queue_records_backpressure_observation_without_source_gap -- --nocapture
 CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo test -p data-collect queue_watermarks_include_rows_bytes_age_writer_lag -- --nocapture
 CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo test -p data-collect bounded_queue_rejects_zero_capacity_without_panic -- --nocapture
 ```
@@ -223,7 +223,7 @@ CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo test -p data-collect b
 覆盖事实：
 
 1. `tokio::sync::mpsc::channel(capacity)` 用作 bounded event queue；`try_send` 在队列满时返回 full error，不静默丢事件。
-2. queue full 会记录 source gap，verdict 为 `SoftDegraded`，运行动作是 `Continue`，不是 `ProcessFatal`。
+2. 可恢复 queue full 和 bounded wait success 只记录 backpressure observation，verdict 为 `SoftDegraded`，运行动作是 `Continue`，不是 `ProcessFatal`；send timeout / drop 才记录 source gap。
 3. Queue watermark 显式包含 rows、bytes、oldest event age 和 writer lag。
 4. zero capacity queue config 返回可记录错误，不 panic，避免配置错误造成不可解释的进程级失败。
 5. soft watermark 只降级并继续；连续 hard watermark 达到配置次数后才给出 `PauseIntake`，且仍不标记 `process_fatal`。
@@ -346,12 +346,13 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 ubuntu@108.130.74.143 'uname -a; nproc
 
 ```bash
 CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo test -p data-collect resource_watermark_records_required_metrics_or_unavailable_reason -- --nocapture
-CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo test -p data-collect hard_threshold_records_degrade_stop_and_finalize_actions -- --nocapture
+CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo test -p data-collect stateless_hard_threshold_records_observation_without_stop_action -- --nocapture
+CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo test -p data-collect resource_hard_threshold_requires_consecutive_samples_before_stop_action -- --nocapture
 CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo test -p data-collect soft_threshold_records_degraded_without_process_fatal -- --nocapture
 CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo test -p data-collect resource_policy_evaluates_non_disk_watermarks -- --nocapture
 ```
 
-结果：四条测试均通过。
+结果：五条测试均通过。
 
 覆盖事实：
 

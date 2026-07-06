@@ -138,7 +138,7 @@ impl ResourceWatermark {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ResourceThresholds {
     pub min_disk_free_bytes: u64,
     pub max_rss_bytes: u64,
@@ -171,19 +171,18 @@ impl ResourcePolicy {
     }
 
     pub fn evaluate(&self, watermark: ResourceWatermark) -> ResourceVerdict {
-        if self.crosses_hard(&watermark) {
+        if self.severity_for(&watermark) == ResourceSeverity::HardDegraded {
             return ResourceVerdict {
                 severity: ResourceSeverity::HardDegraded,
                 actions: vec![
-                    ResourceAction::StopNewIntake,
-                    ResourceAction::FinalizeOpenSegments,
-                    ResourceAction::WriteIncompleteManifest,
+                    ResourceAction::RecordBackpressure,
+                    ResourceAction::ObserveRecovery,
                 ],
                 process_fatal: false,
             };
         }
 
-        if self.crosses_soft(&watermark) {
+        if self.severity_for(&watermark) == ResourceSeverity::SoftDegraded {
             return ResourceVerdict {
                 severity: ResourceSeverity::SoftDegraded,
                 actions: vec![
@@ -198,6 +197,16 @@ impl ResourcePolicy {
             severity: ResourceSeverity::Healthy,
             actions: Vec::new(),
             process_fatal: false,
+        }
+    }
+
+    fn severity_for(&self, watermark: &ResourceWatermark) -> ResourceSeverity {
+        if self.crosses_hard(watermark) {
+            ResourceSeverity::HardDegraded
+        } else if self.crosses_soft(watermark) {
+            ResourceSeverity::SoftDegraded
+        } else {
+            ResourceSeverity::Healthy
         }
     }
 
@@ -291,20 +300,21 @@ fn cgroup_events_indicate_hard_pressure(watermark: &ResourceWatermark) -> bool {
         })
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResourceSeverity {
     Healthy,
     SoftDegraded,
     HardDegraded,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResourceAction {
     RecordBackpressure,
     ObserveRecovery,
     StopNewIntake,
     FinalizeOpenSegments,
     WriteIncompleteManifest,
+    ResumeIntake,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -312,4 +322,170 @@ pub struct ResourceVerdict {
     pub severity: ResourceSeverity,
     pub actions: Vec<ResourceAction>,
     pub process_fatal: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ResourceThresholdPolicyReceipt {
+    pub soft_thresholds: ResourceThresholds,
+    pub hard_thresholds: ResourceThresholds,
+    pub threshold_unit: String,
+    pub hard_hysteresis_samples: u32,
+    pub recovery_hysteresis_samples: u32,
+    pub soft_actions: Vec<ResourceAction>,
+    pub hard_actions: Vec<ResourceAction>,
+    pub recovery_actions: Vec<ResourceAction>,
+    pub recovery_condition: String,
+    pub last_result: ResourceSeverity,
+}
+
+impl ResourceThresholdPolicyReceipt {
+    pub fn is_valid_for_complete_manifest(&self) -> bool {
+        !self.threshold_unit.trim().is_empty()
+            && self.hard_hysteresis_samples > 0
+            && self.recovery_hysteresis_samples > 0
+            && !self.recovery_condition.trim().is_empty()
+            && self
+                .soft_actions
+                .contains(&ResourceAction::RecordBackpressure)
+            && self.soft_actions.contains(&ResourceAction::ObserveRecovery)
+            && self.hard_actions.contains(&ResourceAction::StopNewIntake)
+            && self
+                .hard_actions
+                .contains(&ResourceAction::FinalizeOpenSegments)
+            && self
+                .hard_actions
+                .contains(&ResourceAction::WriteIncompleteManifest)
+            && self
+                .recovery_actions
+                .contains(&ResourceAction::ResumeIntake)
+    }
+}
+
+pub struct ResourcePolicyMonitor {
+    policy: ResourcePolicy,
+    hard_hysteresis_samples: u32,
+    recovery_hysteresis_samples: u32,
+    consecutive_hard_samples: u32,
+    consecutive_recovery_samples: u32,
+    hard_action_active: bool,
+    last_result: ResourceSeverity,
+}
+
+impl ResourcePolicyMonitor {
+    pub fn new(
+        policy: ResourcePolicy,
+        hard_hysteresis_samples: u32,
+        recovery_hysteresis_samples: u32,
+    ) -> Self {
+        Self {
+            policy,
+            hard_hysteresis_samples: hard_hysteresis_samples.max(1),
+            recovery_hysteresis_samples: recovery_hysteresis_samples.max(1),
+            consecutive_hard_samples: 0,
+            consecutive_recovery_samples: 0,
+            hard_action_active: false,
+            last_result: ResourceSeverity::Healthy,
+        }
+    }
+
+    pub fn observe(&mut self, watermark: ResourceWatermark) -> ResourceVerdict {
+        let severity = self.policy.severity_for(&watermark);
+        self.last_result = severity.clone();
+
+        match severity {
+            ResourceSeverity::HardDegraded => {
+                self.consecutive_hard_samples = self.consecutive_hard_samples.saturating_add(1);
+                self.consecutive_recovery_samples = 0;
+
+                if self.consecutive_hard_samples >= self.hard_hysteresis_samples {
+                    if self.hard_action_active {
+                        return ResourceVerdict {
+                            severity,
+                            actions: vec![
+                                ResourceAction::StopNewIntake,
+                                ResourceAction::RecordBackpressure,
+                                ResourceAction::ObserveRecovery,
+                            ],
+                            process_fatal: false,
+                        };
+                    }
+                    self.hard_action_active = true;
+                    ResourceVerdict {
+                        severity,
+                        actions: vec![
+                            ResourceAction::StopNewIntake,
+                            ResourceAction::FinalizeOpenSegments,
+                            ResourceAction::WriteIncompleteManifest,
+                        ],
+                        process_fatal: false,
+                    }
+                } else {
+                    ResourceVerdict {
+                        severity,
+                        actions: vec![
+                            ResourceAction::RecordBackpressure,
+                            ResourceAction::ObserveRecovery,
+                        ],
+                        process_fatal: false,
+                    }
+                }
+            }
+            ResourceSeverity::SoftDegraded => {
+                self.consecutive_hard_samples = 0;
+                self.consecutive_recovery_samples = 0;
+                ResourceVerdict {
+                    severity,
+                    actions: vec![
+                        ResourceAction::RecordBackpressure,
+                        ResourceAction::ObserveRecovery,
+                    ],
+                    process_fatal: false,
+                }
+            }
+            ResourceSeverity::Healthy => {
+                self.consecutive_hard_samples = 0;
+                let mut actions = Vec::new();
+                if self.hard_action_active {
+                    self.consecutive_recovery_samples =
+                        self.consecutive_recovery_samples.saturating_add(1);
+                    actions.push(ResourceAction::ObserveRecovery);
+                    if self.consecutive_recovery_samples >= self.recovery_hysteresis_samples {
+                        self.hard_action_active = false;
+                        self.consecutive_recovery_samples = 0;
+                        actions.push(ResourceAction::ResumeIntake);
+                    }
+                }
+                ResourceVerdict {
+                    severity,
+                    actions,
+                    process_fatal: false,
+                }
+            }
+        }
+    }
+
+    pub fn policy_receipt(&self) -> ResourceThresholdPolicyReceipt {
+        ResourceThresholdPolicyReceipt {
+            soft_thresholds: self.policy.soft,
+            hard_thresholds: self.policy.hard,
+            threshold_unit: "bytes/percent/count/milliseconds/psi_avg10".to_owned(),
+            hard_hysteresis_samples: self.hard_hysteresis_samples,
+            recovery_hysteresis_samples: self.recovery_hysteresis_samples,
+            soft_actions: vec![
+                ResourceAction::RecordBackpressure,
+                ResourceAction::ObserveRecovery,
+            ],
+            hard_actions: vec![
+                ResourceAction::StopNewIntake,
+                ResourceAction::FinalizeOpenSegments,
+                ResourceAction::WriteIncompleteManifest,
+            ],
+            recovery_actions: vec![
+                ResourceAction::ObserveRecovery,
+                ResourceAction::ResumeIntake,
+            ],
+            recovery_condition: "below soft thresholds for recovery_hysteresis_samples".to_owned(),
+            last_result: self.last_result.clone(),
+        }
+    }
 }

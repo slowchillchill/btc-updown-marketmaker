@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::resource::ResourceWatermark;
+use crate::backpressure::BackpressureReceipt;
+use crate::resource::{ResourceThresholdPolicyReceipt, ResourceWatermark};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ValidationVerdict {
@@ -103,7 +104,9 @@ pub struct ManifestDraft {
     pub end_time_utc_ms: Option<i64>,
     pub coverage_window: Option<TimeWindow>,
     pub resource_watermark: Option<ResourceWatermark>,
+    pub resource_threshold_policy_receipt: Option<ResourceThresholdPolicyReceipt>,
     pub writer_queue_high_watermark: Option<QueueWatermark>,
+    pub backpressure_receipt: Option<BackpressureReceipt>,
     pub flush_latency_ms: Option<u64>,
     pub collector_host_id: Option<String>,
     pub collector_region: Option<String>,
@@ -148,7 +151,18 @@ impl ManifestDraft {
                 .resource_watermark
                 .as_ref()
                 .is_some_and(ResourceWatermark::has_required_contract_metrics)
+            || !self
+                .resource_threshold_policy_receipt
+                .as_ref()
+                .is_some_and(ResourceThresholdPolicyReceipt::is_valid_for_complete_manifest)
             || self.writer_queue_high_watermark.is_none()
+            || !self.backpressure_receipt.as_ref().is_some_and(|receipt| {
+                receipt.is_valid_for_complete_manifest()
+                    && self
+                        .source_coverage
+                        .iter()
+                        .all(|coverage| receipt.covers_source_kind(&coverage.source_kind))
+            })
             || self.flush_latency_ms.is_none()
             || self.collector_host_id.as_deref().is_none_or(str::is_empty)
             || self.collector_region.as_deref().is_none_or(str::is_empty)

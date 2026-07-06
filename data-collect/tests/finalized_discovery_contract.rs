@@ -1,5 +1,6 @@
 use std::fs;
 
+use data_collect::backpressure::BackpressureReceipt;
 use data_collect::manifest::{
     ManifestDraft, ManifestSourceGap, QueueWatermark, RequiredFile, SourceCoverage,
     SourceGapSeverity, TimeWindow,
@@ -8,7 +9,10 @@ use data_collect::publish::{
     complete_publish_decision, discover_finalized_artifacts, failed_atomic_publish_decision,
     manifest_discoverable_as_complete, manifest_path_for_parquet,
 };
-use data_collect::resource::{CgroupMemoryStat, PsiSample};
+use data_collect::resource::{
+    CgroupMemoryStat, PsiSample, ResourceAction, ResourceSeverity, ResourceThresholdPolicyReceipt,
+    ResourceThresholds,
+};
 use data_collect::{PublishedSegment, ResourceWatermark, ValidationVerdict};
 use tempfile::tempdir;
 
@@ -49,6 +53,51 @@ fn complete_resource_watermark() -> ResourceWatermark {
     }
 }
 
+fn complete_resource_threshold_policy_receipt() -> ResourceThresholdPolicyReceipt {
+    let thresholds = ResourceThresholds {
+        min_disk_free_bytes: 1,
+        max_rss_bytes: 1_000_000,
+        max_cpu_percent: 95.0,
+        max_artifact_dir_bytes: 1_000_000,
+        max_journal_log_bytes: 1_000_000,
+        max_open_files: 1_000,
+        max_queue_bytes: 1_000_000,
+        max_queue_age_ms: 1_000,
+        max_parquet_writer_memory_estimate_bytes: 1_000_000,
+        max_cgroup_memory_current_bytes: 1_000_000,
+        max_cgroup_memory_anon_bytes: 1_000_000,
+        max_cgroup_memory_file_bytes: 1_000_000,
+        max_cgroup_memory_slab_bytes: 1_000_000,
+        max_psi_some_avg10: 90.0,
+        max_psi_full_avg10: 50.0,
+        max_stage_latency_ms: 1_000,
+        max_ttl_ms: 10_000,
+    };
+
+    ResourceThresholdPolicyReceipt {
+        soft_thresholds: thresholds,
+        hard_thresholds: thresholds,
+        threshold_unit: "bytes/percent/count/milliseconds/psi_avg10".to_owned(),
+        hard_hysteresis_samples: 2,
+        recovery_hysteresis_samples: 2,
+        soft_actions: vec![
+            ResourceAction::RecordBackpressure,
+            ResourceAction::ObserveRecovery,
+        ],
+        hard_actions: vec![
+            ResourceAction::StopNewIntake,
+            ResourceAction::FinalizeOpenSegments,
+            ResourceAction::WriteIncompleteManifest,
+        ],
+        recovery_actions: vec![
+            ResourceAction::ObserveRecovery,
+            ResourceAction::ResumeIntake,
+        ],
+        recovery_condition: "below soft thresholds for recovery_hysteresis_samples".to_owned(),
+        last_result: ResourceSeverity::Healthy,
+    }
+}
+
 fn complete_manifest() -> ManifestDraft {
     complete_manifest_for("probe.parquet")
 }
@@ -85,12 +134,14 @@ fn complete_manifest_for(parquet_file_name: &str) -> ManifestDraft {
             end_utc_ms: 2,
         }),
         resource_watermark: Some(complete_resource_watermark()),
+        resource_threshold_policy_receipt: Some(complete_resource_threshold_policy_receipt()),
         writer_queue_high_watermark: Some(QueueWatermark {
             rows: 2,
             bytes: 512,
             oldest_event_age_ms: 10,
             writer_lag_ms: 5,
         }),
+        backpressure_receipt: Some(BackpressureReceipt::empty("polymarket_market")),
         flush_latency_ms: Some(3),
         collector_host_id: Some("collector-local".to_owned()),
         collector_region: Some("local-dev".to_owned()),
