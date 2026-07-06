@@ -5,7 +5,10 @@ use std::path::{Component, Path, PathBuf};
 
 use time::OffsetDateTime;
 
-use crate::manifest::{ManifestDraft, ManifestFailureClass, RequiredFile, ValidationVerdict};
+use crate::manifest::{
+    ManifestDraft, ManifestFailureClass, PAPER_LIVE_FORBIDDEN_DATA_COLLECT_ROLES, RequiredFile,
+    ValidationVerdict,
+};
 use crate::writer::PublishedSegment;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -17,16 +20,13 @@ pub const DATA_COLLECT_ALLOWED_ARTIFACT_ROLES: &[&str] = &[
     "source_health",
     "source_gap",
     "reconnect_trace",
+    "backpressure_state",
+    "external_market_event",
+    "timestamp_namespace",
+    "realtime_handoff_boundary_evidence",
 ];
 
-pub const PAPER_LIVE_FORBIDDEN_RUNTIME_ROLES: &[&str] = &[
-    "paper_live_append_only_event_log",
-    "rotation_artifact",
-    "order_evidence",
-    "noe_ledger",
-    "execution_feedback_ingestion",
-    "trading_decision",
-];
+pub const PAPER_LIVE_FORBIDDEN_RUNTIME_ROLES: &[&str] = PAPER_LIVE_FORBIDDEN_DATA_COLLECT_ROLES;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UtcDayPartition {

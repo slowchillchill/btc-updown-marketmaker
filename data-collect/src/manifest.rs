@@ -11,6 +11,230 @@ pub enum ValidationVerdict {
     Incomplete,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConsumerBoundaryKind {
+    Training,
+    PaperLive,
+}
+
+pub const TRAINING_ALLOWED_DATA_COLLECT_ROLES: &[&str] = &[
+    "finalized_typed_raw_parquet",
+    "manifest",
+    "source_coverage",
+    "source_health",
+    "source_gap",
+    "reconnect_trace",
+    "backpressure_state",
+];
+
+pub const TRAINING_REQUIRED_EXTERNAL_ROLES: &[&str] = &[
+    "data_pipeline_labels",
+    "data_pipeline_features",
+    "data_pipeline_tick_stream",
+    "data_pipeline_training_split",
+];
+
+pub const TRAINING_FORBIDDEN_DATA_COLLECT_ROLES: &[&str] = &[
+    "labels",
+    "features",
+    "tick_stream",
+    "canonical_split",
+    "purged_embargo_split",
+    "t30_training_sample",
+    "training_approval",
+];
+
+pub const PAPER_LIVE_ALLOWED_DATA_COLLECT_ROLES: &[&str] = &[
+    "external_market_event",
+    "timestamp_namespace",
+    "source_coverage",
+    "source_health",
+    "source_gap",
+    "reconnect_trace",
+    "backpressure_state",
+    "manifest",
+    "realtime_handoff_boundary_evidence",
+];
+
+pub const PAPER_LIVE_REQUIRED_EXTERNAL_ROLES: &[&str] = &[
+    "paper_live_runtime_receive_timestamp",
+    "paper_live_append_only_event_log",
+    "paper_live_market_context_builder",
+    "paper_live_noe_ledger",
+];
+
+pub const PAPER_LIVE_FORBIDDEN_DATA_COLLECT_ROLES: &[&str] = &[
+    "paper_live_append_only_event_log",
+    "rotation_artifact",
+    "live_artifact",
+    "order_evidence",
+    "NormalizedOrderEvent",
+    "ledger",
+    "noe_ledger",
+    "execution_feedback_ingestion",
+    "trading_decision",
+    "risk_control",
+    "submit_cancel_path",
+    "model_input_assembly",
+];
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsumerBoundaryDeclaration {
+    pub consumer: ConsumerBoundaryKind,
+    pub allowed_data_collect_roles: Vec<String>,
+    pub required_external_roles: Vec<String>,
+    pub forbidden_data_collect_roles: Vec<String>,
+    pub requires_realtime_handoff: bool,
+    pub requires_consumer_host_runtime_receive_timestamp: bool,
+    pub finalized_parquet_is_hot_path_source_of_truth: bool,
+    pub data_collect_output_is_training_approved: bool,
+    pub may_emit_trading_decision: bool,
+}
+
+impl ConsumerBoundaryDeclaration {
+    pub fn allows_data_collect_role(&self, role: &str) -> bool {
+        contains_role(&self.allowed_data_collect_roles, role)
+    }
+
+    pub fn requires_external_role(&self, role: &str) -> bool {
+        contains_role(&self.required_external_roles, role)
+    }
+
+    pub fn forbids_data_collect_role(&self, role: &str) -> bool {
+        contains_role(&self.forbidden_data_collect_roles, role)
+    }
+
+    pub fn is_valid_for_manifest(&self) -> bool {
+        if self.allowed_data_collect_roles.is_empty()
+            || self.forbidden_data_collect_roles.is_empty()
+            || self
+                .allowed_data_collect_roles
+                .iter()
+                .any(|role| role.trim().is_empty())
+            || self
+                .forbidden_data_collect_roles
+                .iter()
+                .any(|role| role.trim().is_empty())
+            || self
+                .allowed_data_collect_roles
+                .iter()
+                .any(|role| self.forbids_data_collect_role(role))
+            || self.may_emit_trading_decision
+        {
+            return false;
+        }
+
+        match self.consumer {
+            ConsumerBoundaryKind::Training => {
+                !self.requires_realtime_handoff
+                    && !self.requires_consumer_host_runtime_receive_timestamp
+                    && !self.finalized_parquet_is_hot_path_source_of_truth
+                    && !self.data_collect_output_is_training_approved
+                    && has_exact_roles(
+                        &self.allowed_data_collect_roles,
+                        TRAINING_ALLOWED_DATA_COLLECT_ROLES,
+                    )
+                    && has_exact_roles(
+                        &self.required_external_roles,
+                        TRAINING_REQUIRED_EXTERNAL_ROLES,
+                    )
+                    && has_exact_roles(
+                        &self.forbidden_data_collect_roles,
+                        TRAINING_FORBIDDEN_DATA_COLLECT_ROLES,
+                    )
+            }
+            ConsumerBoundaryKind::PaperLive => {
+                self.requires_realtime_handoff
+                    && self.requires_consumer_host_runtime_receive_timestamp
+                    && !self.finalized_parquet_is_hot_path_source_of_truth
+                    && !self.data_collect_output_is_training_approved
+                    && has_exact_roles(
+                        &self.allowed_data_collect_roles,
+                        PAPER_LIVE_ALLOWED_DATA_COLLECT_ROLES,
+                    )
+                    && has_exact_roles(
+                        &self.required_external_roles,
+                        PAPER_LIVE_REQUIRED_EXTERNAL_ROLES,
+                    )
+                    && has_exact_roles(
+                        &self.forbidden_data_collect_roles,
+                        PAPER_LIVE_FORBIDDEN_DATA_COLLECT_ROLES,
+                    )
+            }
+        }
+    }
+}
+
+pub fn training_consumer_boundary_declaration() -> ConsumerBoundaryDeclaration {
+    ConsumerBoundaryDeclaration {
+        consumer: ConsumerBoundaryKind::Training,
+        allowed_data_collect_roles: roles(TRAINING_ALLOWED_DATA_COLLECT_ROLES),
+        required_external_roles: roles(TRAINING_REQUIRED_EXTERNAL_ROLES),
+        forbidden_data_collect_roles: roles(TRAINING_FORBIDDEN_DATA_COLLECT_ROLES),
+        requires_realtime_handoff: false,
+        requires_consumer_host_runtime_receive_timestamp: false,
+        finalized_parquet_is_hot_path_source_of_truth: false,
+        data_collect_output_is_training_approved: false,
+        may_emit_trading_decision: false,
+    }
+}
+
+pub fn paper_live_consumer_boundary_declaration() -> ConsumerBoundaryDeclaration {
+    ConsumerBoundaryDeclaration {
+        consumer: ConsumerBoundaryKind::PaperLive,
+        allowed_data_collect_roles: roles(PAPER_LIVE_ALLOWED_DATA_COLLECT_ROLES),
+        required_external_roles: roles(PAPER_LIVE_REQUIRED_EXTERNAL_ROLES),
+        forbidden_data_collect_roles: roles(PAPER_LIVE_FORBIDDEN_DATA_COLLECT_ROLES),
+        requires_realtime_handoff: true,
+        requires_consumer_host_runtime_receive_timestamp: true,
+        finalized_parquet_is_hot_path_source_of_truth: false,
+        data_collect_output_is_training_approved: false,
+        may_emit_trading_decision: false,
+    }
+}
+
+pub fn required_consumer_boundary_declarations() -> Vec<ConsumerBoundaryDeclaration> {
+    vec![
+        training_consumer_boundary_declaration(),
+        paper_live_consumer_boundary_declaration(),
+    ]
+}
+
+fn has_required_consumer_boundary_declarations(
+    declarations: &[ConsumerBoundaryDeclaration],
+) -> bool {
+    if declarations.len() != 2
+        || declarations
+            .iter()
+            .any(|declaration| !declaration.is_valid_for_manifest())
+    {
+        return false;
+    }
+
+    declarations
+        .iter()
+        .filter(|declaration| declaration.consumer == ConsumerBoundaryKind::Training)
+        .count()
+        == 1
+        && declarations
+            .iter()
+            .filter(|declaration| declaration.consumer == ConsumerBoundaryKind::PaperLive)
+            .count()
+            == 1
+}
+
+fn roles(values: &[&str]) -> Vec<String> {
+    values.iter().map(|role| (*role).to_owned()).collect()
+}
+
+fn contains_role(roles: &[String], role: &str) -> bool {
+    roles.iter().any(|candidate| candidate == role)
+}
+
+fn has_exact_roles(actual: &[String], expected: &[&str]) -> bool {
+    actual.len() == expected.len() && expected.iter().all(|role| contains_role(actual, role))
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SourceCoverage {
     pub source_kind: String,
@@ -90,6 +314,8 @@ pub struct ManifestDraft {
     pub collector_binary_sha256: Option<String>,
     pub source_config_digest: Option<String>,
     pub validation_verdict: ValidationVerdict,
+    #[serde(default)]
+    pub consumer_boundary_declarations: Vec<ConsumerBoundaryDeclaration>,
     pub source_coverage: Vec<SourceCoverage>,
     pub source_gaps: Vec<String>,
     pub manifest_source_gaps: Vec<ManifestSourceGap>,
@@ -132,6 +358,7 @@ impl ManifestDraft {
                 .source_config_digest
                 .as_deref()
                 .is_none_or(str::is_empty)
+            || !has_required_consumer_boundary_declarations(&self.consumer_boundary_declarations)
             || self.source_coverage.is_empty()
             || self
                 .source_coverage

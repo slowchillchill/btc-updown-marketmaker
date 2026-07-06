@@ -3,7 +3,7 @@ use std::fs;
 use data_collect::backpressure::BackpressureReceipt;
 use data_collect::manifest::{
     ManifestDraft, ManifestSourceGap, QueueWatermark, RequiredFile, SourceCoverage,
-    SourceGapSeverity, TimeWindow,
+    SourceGapSeverity, TimeWindow, required_consumer_boundary_declarations,
 };
 use data_collect::publish::{
     complete_publish_decision, discover_finalized_artifacts, failed_atomic_publish_decision,
@@ -112,6 +112,7 @@ fn complete_manifest_for(parquet_file_name: &str) -> ManifestDraft {
         collector_binary_sha256: Some("binary-sha256".to_owned()),
         source_config_digest: Some("source-config-digest".to_owned()),
         validation_verdict: ValidationVerdict::Complete,
+        consumer_boundary_declarations: required_consumer_boundary_declarations(),
         source_coverage: vec![SourceCoverage {
             source_kind: "polymarket_market".to_owned(),
             first_recv_time_utc_ms: 1,

@@ -1669,23 +1669,25 @@ Phase 4 执行结果：
 - 创建：`data-collect/tests/training_consumer_boundary_contract.rs`
 - 修改：`data-collect/src/manifest.rs`
 
-- [ ] **步骤 5.1.1：写训练边界测试**
+- [x] **步骤 5.1.1：写训练边界测试**
 
   测试断言训练消费者只能读取按 UTC day 分区的 finalized typed raw parquet、manifest、source coverage 和后续 `data-pipeline` 生成的 labels/features/tick_stream。
 
-- [ ] **步骤 5.1.2：实现 manifest 中的训练边界声明**
+- [x] **步骤 5.1.2：实现 manifest 中的训练边界声明**
 
   manifest 可以声明 source coverage 和 finalized mirror，不提供 labels、features、tick_stream、canonical split 或 T-30 样本加工。
 
-- [ ] **步骤 5.1.3：运行训练边界测试**
+- [x] **步骤 5.1.3：运行训练边界测试**
 
   计划执行命令：
 
   ```bash
-  cargo test -p data-collect training_consumer_boundary_contract -- --nocapture
+  cargo test -p data-collect --test training_consumer_boundary_contract -- --nocapture
   ```
 
   预期：采集成功不等于训练批准，finalized parquet 完整不等于 labels/features/tick_stream 已完成。
+
+  执行结果：已新增 `ConsumerBoundaryDeclaration`、`ConsumerBoundaryKind`、`training_consumer_boundary_declaration()` 和 `required_consumer_boundary_declarations()`；complete manifest 现在必须包含 canonical 训练与 paper/live 边界声明，否则 `effective_verdict()` 为 incomplete。`cargo test -p data-collect --test training_consumer_boundary_contract -- --nocapture` 通过 4 条测试。
 
 ### 任务 5.2：paper/live 消费者接入边界
 
@@ -1694,7 +1696,7 @@ Phase 4 执行结果：
 - 创建：`data-collect/tests/paper_live_boundary_contract.rs`
 - 修改：`data-collect/src/manifest.rs`
 
-- [ ] **步骤 5.2.1：写 paper/live 非范围测试**
+- [x] **步骤 5.2.1：写 paper/live 非范围测试**
 
   测试断言 `data-collect` 不生成或解释：
 
@@ -1707,19 +1709,27 @@ Phase 4 执行结果：
   - execution feedback ingestion。
   - 交易决策、风控、submit/cancel path。
 
-- [ ] **步骤 5.2.2：实现接入边界声明**
+- [x] **步骤 5.2.2：实现接入边界声明**
 
   `data-collect` 只为 paper/live 提供外部市场源事件、timestamp namespace、coverage、health/gap、reconnect/backpressure 状态、manifest 和 hot path handoff 边界证据；paper/live Market Context Builder / runtime 必须通过 realtime handoff、bounded channel、IPC、local stream 或等价低延迟事件流消费外部市场源事件，不得把 finalized parquet 当作 paper/live 热路径唯一事实来源。paper/live 热路径延迟必须来自对应 paper/live 主机 artifact，不能使用非爱尔兰采集主机 `recv_time_utc` 冒充。
 
-- [ ] **步骤 5.2.3：运行 paper/live 边界测试**
+- [x] **步骤 5.2.3：运行 paper/live 边界测试**
 
   计划执行命令：
 
   ```bash
-  cargo test -p data-collect paper_live_boundary_contract -- --nocapture
+  cargo test -p data-collect --test paper_live_boundary_contract -- --nocapture
   ```
 
   预期：计划和实现不把 paper/live 交易逻辑写入 `data-collect`；hot path handoff 边界可验证，但 paper/live append-only log、NOE/ledger、模型输入组装和 execution feedback 仍由对应模块承接。
+
+  执行结果：已新增 `paper_live_consumer_boundary_declaration()`，声明 `data-collect` 只提供外部市场源事件、timestamp namespace、coverage、health/gap、reconnect/backpressure、manifest 与 realtime handoff 边界证据；paper/live runtime receive timestamp、append-only log、Market Context Builder 与 NOE/ledger 属于外部角色，交易决策、风控、submit/cancel path 等属于 forbidden data-collect roles。第一轮独立审查为 NO-GO 后，已收紧 manifest complete gate：consumer boundary declarations 必须恰好为 canonical Training + PaperLive 两项，不允许额外冲突声明；publish boundary 已补齐 `backpressure_state`、`realtime_handoff_boundary_evidence` 和 paper/live forbidden aliases。旧 manifest 缺少 consumer boundary declaration 会被判 `ArtifactIncomplete`，这是 Phase 5 后的消费者门禁，不是 collector process fatal。`cargo test -p data-collect --test paper_live_boundary_contract -- --nocapture` 通过 4 条测试。
+
+Phase 5 执行结果：
+
+1. 本地全量验证通过：`cargo fmt --all -- --check`、`git diff --check`、`CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo test -p data-collect --lib --tests --quiet`（97 条测试）、`CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo clippy -p data-collect --all-targets -- -D warnings` 和 release bench targets `market_discovery_probe`、`real_source_alignment_probe`、`parquet_writer_probe`、`throughput_probe`、`websocket_smoke_probe` 构建。
+2. 第一轮独立审查为 3 个 NO-GO/FAIL，无 Critical；成立问题已修复：manifest consumer boundary gate 不再允许缩水/冲突声明，paper/live publish boundary 与 manifest/demand role 表已对齐。
+3. 针对性复审结果为 2 个 `PASS_WITH_NOTES`、1 个 `PASS`，无 Critical/Important blocker，允许进入 commit/push gate。
 
 ## 十一、阶段 6：端到端验收与交付
 

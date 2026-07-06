@@ -3,8 +3,9 @@ use std::fs;
 use data_collect::backpressure::BackpressureReceipt;
 use data_collect::{
     ManifestDraft, QueueWatermark, RawEvent, RequiredFile, ResourceWatermark, SourceCoverage,
-    ValidationVerdict, manifest::TimeWindow, resource::CgroupMemoryStat, resource::PsiSample,
-    resource::ResourceAction, resource::ResourceSeverity, resource::ResourceThresholdPolicyReceipt,
+    ValidationVerdict, manifest::TimeWindow, manifest::required_consumer_boundary_declarations,
+    resource::CgroupMemoryStat, resource::PsiSample, resource::ResourceAction,
+    resource::ResourceSeverity, resource::ResourceThresholdPolicyReceipt,
     resource::ResourceThresholds, sha256_file, writer::ParquetSegmentWriter,
     writer::write_segment_on_blocking_pool,
 };
@@ -189,6 +190,7 @@ fn manifest_requires_row_count_sha256_schema_source_coverage() {
         collector_binary_sha256: Some("binary-sha256".to_owned()),
         source_config_digest: Some("source-config-digest".to_owned()),
         validation_verdict: ValidationVerdict::Complete,
+        consumer_boundary_declarations: required_consumer_boundary_declarations(),
         source_coverage: vec![SourceCoverage {
             source_kind: "polymarket_market".to_owned(),
             first_recv_time_utc_ms: 1,

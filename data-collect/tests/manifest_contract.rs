@@ -1,6 +1,7 @@
 use data_collect::backpressure::BackpressureReceipt;
 use data_collect::manifest::{
     ManifestFailureClass, ManifestSourceGap, SourceGapSeverity, TimeWindow,
+    paper_live_consumer_boundary_declaration, required_consumer_boundary_declarations,
 };
 use data_collect::resource::{
     CgroupMemoryStat, PsiSample, ResourceAction, ResourceSeverity, ResourceThresholdPolicyReceipt,
@@ -103,6 +104,7 @@ fn complete_manifest() -> ManifestDraft {
         collector_binary_sha256: Some("binary-sha256".to_owned()),
         source_config_digest: Some("source-config-digest".to_owned()),
         validation_verdict: ValidationVerdict::Complete,
+        consumer_boundary_declarations: required_consumer_boundary_declarations(),
         source_coverage: vec![SourceCoverage {
             source_kind: "polymarket_market".to_owned(),
             first_recv_time_utc_ms: 1,
@@ -166,6 +168,71 @@ fn manifest_contract_requires_files_coverage_health_resource_and_time_windows() 
         missing_window.effective_verdict(),
         ValidationVerdict::Incomplete
     );
+
+    let mut missing_consumer_boundary = complete.clone();
+    missing_consumer_boundary
+        .consumer_boundary_declarations
+        .clear();
+    assert_eq!(
+        missing_consumer_boundary.effective_verdict(),
+        ValidationVerdict::Incomplete
+    );
+
+    let mut legacy_without_consumer_boundary_json = serde_json::to_value(complete.clone()).unwrap();
+    legacy_without_consumer_boundary_json
+        .as_object_mut()
+        .unwrap()
+        .remove("consumer_boundary_declarations");
+    let legacy_without_consumer_boundary: ManifestDraft =
+        serde_json::from_value(legacy_without_consumer_boundary_json).unwrap();
+    assert_eq!(
+        legacy_without_consumer_boundary.effective_verdict(),
+        ValidationVerdict::Incomplete
+    );
+    assert_eq!(
+        legacy_without_consumer_boundary.failure_class(),
+        ManifestFailureClass::ArtifactIncomplete
+    );
+
+    let mut conflicting_consumer_boundary = complete.clone();
+    let mut conflicting_paper_live = paper_live_consumer_boundary_declaration();
+    conflicting_paper_live.may_emit_trading_decision = true;
+    conflicting_consumer_boundary
+        .consumer_boundary_declarations
+        .push(conflicting_paper_live);
+    assert_eq!(
+        conflicting_consumer_boundary.effective_verdict(),
+        ValidationVerdict::Incomplete
+    );
+
+    for missing_role in [
+        "backpressure_state",
+        "paper_live_market_context_builder",
+        "risk_control",
+    ] {
+        let mut missing_canonical_role = complete.clone();
+        let paper_live = missing_canonical_role
+            .consumer_boundary_declarations
+            .iter_mut()
+            .find(|declaration| {
+                declaration.consumer == data_collect::manifest::ConsumerBoundaryKind::PaperLive
+            })
+            .unwrap();
+        paper_live
+            .allowed_data_collect_roles
+            .retain(|role| role != missing_role);
+        paper_live
+            .required_external_roles
+            .retain(|role| role != missing_role);
+        paper_live
+            .forbidden_data_collect_roles
+            .retain(|role| role != missing_role);
+        assert_eq!(
+            missing_canonical_role.effective_verdict(),
+            ValidationVerdict::Incomplete,
+            "{missing_role} must be part of the canonical paper/live boundary"
+        );
+    }
 
     let mut missing_backpressure = complete.clone();
     missing_backpressure.backpressure_receipt = None;
