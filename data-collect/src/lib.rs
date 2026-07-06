@@ -6,7 +6,9 @@ pub mod latency;
 pub mod manifest;
 pub mod market_discovery;
 pub mod resource;
+pub mod scheduler;
 pub mod source_format;
+pub mod sources;
 pub mod writer;
 
 pub use manifest::{

@@ -218,6 +218,14 @@ impl PolymarketMarketResolutionRaw {
                 .source_gaps
                 .push("winning_asset_not_in_resolved_assets".to_owned());
         }
+        if !self
+            .subscribed_asset_ids_for_market
+            .contains(&self.winning_asset_id)
+        {
+            report
+                .source_gaps
+                .push("winning_asset_not_in_subscribed_assets".to_owned());
+        }
         report.finish()
     }
 }
@@ -287,10 +295,14 @@ pub struct BinanceDepthLevel {
     pub quantity: String,
 }
 
-fn depth_levels_complete(levels: &[BinanceDepthLevel]) -> bool {
+fn depth_levels_well_formed(levels: &[BinanceDepthLevel]) -> bool {
     levels
         .iter()
         .all(|level| !level.price.trim().is_empty() && !level.quantity.trim().is_empty())
+}
+
+fn depth_levels_non_empty_complete(levels: &[BinanceDepthLevel]) -> bool {
+    !levels.is_empty() && depth_levels_well_formed(levels)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -325,11 +337,14 @@ impl BinanceDepthUpdateRaw {
         if self.final_update_id < self.first_update_id {
             report.missing_fields.push("u".to_owned());
         }
-        if !depth_levels_complete(&self.bids) {
+        if !depth_levels_well_formed(&self.bids) {
             report.missing_fields.push("b".to_owned());
         }
-        if !depth_levels_complete(&self.asks) {
+        if !depth_levels_well_formed(&self.asks) {
             report.missing_fields.push("a".to_owned());
+        }
+        if self.bids.is_empty() && self.asks.is_empty() {
+            report.missing_fields.push("b_or_a".to_owned());
         }
         if self
             .combined_stream
@@ -369,10 +384,10 @@ impl BinanceDepthSnapshotRaw {
         if self.last_update_id == 0 {
             report.missing_fields.push("lastUpdateId".to_owned());
         }
-        if !depth_levels_complete(&self.bids) {
+        if !depth_levels_non_empty_complete(&self.bids) {
             report.missing_fields.push("bids".to_owned());
         }
-        if !depth_levels_complete(&self.asks) {
+        if !depth_levels_non_empty_complete(&self.asks) {
             report.missing_fields.push("asks".to_owned());
         }
         if self.snapshot_fetch_start_utc_ms <= 0 {
@@ -492,13 +507,20 @@ fn rtds_subscription_matches(raw_json: &str, symbol: &str) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(raw_json) else {
         return false;
     };
-    if value.get("action").and_then(Value::as_str) != Some("subscribe")
-        || value.get("topic").and_then(Value::as_str) != Some("crypto_prices_chainlink")
-        || value.get("type").and_then(Value::as_str) != Some("*")
+    if value.get("action").and_then(Value::as_str) != Some("subscribe") {
+        return false;
+    }
+    let subscription = value
+        .get("subscriptions")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .unwrap_or(&value);
+    if subscription.get("topic").and_then(Value::as_str) != Some("crypto_prices_chainlink")
+        || subscription.get("type").and_then(Value::as_str) != Some("*")
     {
         return false;
     }
-    let Some(filters) = value.get("filters").and_then(Value::as_str) else {
+    let Some(filters) = subscription.get("filters").and_then(Value::as_str) else {
         return false;
     };
     let Ok(filters) = serde_json::from_str::<Value>(filters) else {

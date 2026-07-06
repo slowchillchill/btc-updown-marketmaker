@@ -108,6 +108,32 @@ fn polymarket_market_resolved_schema_records_retired_event_predicate_fields() {
             .source_gaps
             .contains(&"resolved_assets_do_not_cover_subscription".to_owned())
     );
+
+    let extra_winner = PolymarketMarketResolutionRaw {
+        envelope: envelope(
+            SourceKind::PolymarketMarket,
+            "market_resolved",
+            r#"{"event_type":"market_resolved","market":"condition-1","asset_id":"asset-3"}"#,
+        ),
+        condition_id: "condition-1".to_owned(),
+        market_id: Some("market-1".to_owned()),
+        subscribed_asset_ids_for_market: vec!["asset-1".to_owned(), "asset-2".to_owned()],
+        resolved_event_asset_ids: vec![
+            "asset-1".to_owned(),
+            "asset-2".to_owned(),
+            "asset-3".to_owned(),
+        ],
+        winning_asset_id: "asset-3".to_owned(),
+        winning_outcome: "Other".to_owned(),
+        close_reason_if_present: None,
+    };
+    let report = extra_winner.validate_contract();
+    assert_eq!(report.verdict, ValidationVerdict::Incomplete);
+    assert!(
+        report
+            .source_gaps
+            .contains(&"winning_asset_not_in_subscribed_assets".to_owned())
+    );
 }
 
 #[test]
@@ -186,6 +212,20 @@ fn binance_depth_update_and_snapshot_schema_keep_official_fields() {
         update.validate_contract().verdict,
         ValidationVerdict::Complete
     );
+
+    let mut one_sided_update = update.clone();
+    one_sided_update.asks.clear();
+    assert_eq!(
+        one_sided_update.validate_contract().verdict,
+        ValidationVerdict::Complete
+    );
+
+    let mut empty_update = update.clone();
+    empty_update.bids.clear();
+    empty_update.asks.clear();
+    let report = empty_update.validate_contract();
+    assert_eq!(report.verdict, ValidationVerdict::Incomplete);
+    assert!(report.missing_fields.contains(&"b_or_a".to_owned()));
 
     let mut missing_stream = update.clone();
     missing_stream.stream_name.clear();

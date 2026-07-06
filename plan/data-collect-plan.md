@@ -1329,15 +1329,15 @@
 - 创建：`data-collect/src/scheduler.rs`
 - 创建：`data-collect/tests/source_scheduler_contract.rs`
 
-- [ ] **步骤 2.0.1：写辅助源独立启动测试**
+- [x] **步骤 2.0.1：写辅助源独立启动测试**
 
   测试必须复现 poly-tx 旧问题：首个 Polymarket worker 因 asset ids / metadata discovery 延迟或失败而未启动时，Binance depth、Binance aggTrade 和 RTDS Chainlink 仍必须按计划独立启动或记录自身 source gap，不得等待 Polymarket worker 成功。
 
-- [ ] **步骤 2.0.2：写四源 preload 覆盖对齐测试**
+- [x] **步骤 2.0.2：写四源 preload 覆盖对齐测试**
 
   测试断言 current active market 和 planned next market `T-30s` preload window 中，Polymarket market channel、Binance depth、Binance aggTrade、RTDS Chainlink 都有各自 coverage window、first business event 或明确 source gap；不能只证明 Polymarket 单源 T-30s。
 
-- [ ] **步骤 2.0.3：运行 source scheduler 测试**
+- [x] **步骤 2.0.3：运行 source scheduler 测试**
 
   计划执行命令：
 
@@ -1348,6 +1348,8 @@
 
   预期：辅助源启动不依赖首个 Polymarket worker；任一源缺失必须进入 source coverage/source gap/reconnect trace。
 
+  执行结果：已新增 `data-collect/src/scheduler.rs` 和 `data-collect/tests/source_scheduler_contract.rs`。`SourceScheduler::four_source()` 明确 Polymarket market、Binance depth、Binance aggTrade、RTDS Chainlink 四源计划；Polymarket asset ids / metadata 未就绪时，仅 Polymarket market 记录 `polymarket_asset_ids_or_metadata_not_ready` source gap，三个辅助源仍返回 `Start`。`four_sources_have_aligned_t30_preload_coverage_or_gap` 同时检查 current active 与 planned next `T-30s` window，每个源每个 window 必须绑定目标 market slug，且有覆盖 required window end 的 coverage + first business event；source gap 不能只有 reason 字符串，必须附带 gap/reconnect/freshness evidence。审查后新增 late-start preload、gap-without-evidence、missing planned next window 和 gap slug mismatch 反例，防止 missed `T-30s` preload、缺证据 gap、缺少 next preload window 或错误 market 的 gap 被误判完整。`cargo test -p data-collect --test source_scheduler_contract -- --nocapture` 通过 4 条测试。
+
 ### 任务 2.1：Polymarket market channel 与 market lifecycle
 
 **文件：**
@@ -1356,7 +1358,7 @@
 - 创建：`data-collect/src/sources/polymarket.rs`
 - 创建：`data-collect/tests/polymarket_contract.rs`
 
-- [ ] **步骤 2.1.1：写 Polymarket 合同测试**
+- [x] **步骤 2.1.1：写 Polymarket 合同测试**
 
   测试覆盖：
 
@@ -1370,11 +1372,11 @@
   - retired predicate 的事件路径与 fallback metadata 路径；事件路径必须断言 `subscribed_asset_ids_for_market`、`resolved_event_asset_ids`、`winning_asset_id`、`winning_outcome`、nullable `close_reason_if_present`，fallback 路径必须断言 `market_resolved_missing_reason`、`fallback_metadata_asset_ids`、fallback freshness、same condition/market 校验和 close/resolution 证据；单腿 resolved、asset set 不等于/不覆盖、winning asset 不属于目标 market、fallback stale 或 same condition 校验失败时，只能记录 stale/gap，不得进入 retired。
   - discovery / asset_ids miss 过期后必须记录 miss、`discovery_miss_rate`、跳过过期 target 或按当前时间重算目标；不得无限卡住同一 market。
 
-- [ ] **步骤 2.1.2：实现 SDK-first adapter**
+- [x] **步骤 2.1.2：实现 SDK-first adapter**
 
   只使用阶段 0 已批准的 SDK 能力。若执行时发现 SDK 行为与阶段 0 报告不一致，立即停止并更新 SDK gap 报告，不自行启用 raw WS/REST 旁路。
 
-- [ ] **步骤 2.1.3：运行 Polymarket 测试**
+- [x] **步骤 2.1.3：运行 Polymarket 测试**
 
   计划执行命令：
 
@@ -1388,6 +1390,8 @@
 
   预期：`recv_time_utc` 与 Polymarket platform `timestamp` 同时保留；非爱尔兰 collector 延迟不会被标成 paper/live 爱尔兰接收延迟。
 
+  执行结果：已新增 `data-collect/src/sources/polymarket.rs` 和 `data-collect/tests/polymarket_contract.rs`。adapter 只复用官方 `polymarket_client_sdk_v2` 生成 market subscription evidence，未实现 raw WebSocket / raw REST / manual signing 旁路；记录的官方 market channel endpoint 为 `wss://ws-subscriptions-clob.polymarket.com/ws/market`，但 SDK `Client::new()` 仍使用 base endpoint 并由 SDK 自动 append channel path。支持事件集固定为 `book`、`price_change`、`last_trade_price`、`best_bid_ask`、`tick_size_change`、`new_market`、`market_resolved`。测试覆盖 SDK subscription JSON 的 `type=market`、`assets_ids`、`custom_feature_enabled=true`，active scan / metadata snapshot 双路径、slug-only discovery incomplete、candidate/prefetched/active/retired 四态、`T-30s` prefetch window、resolved event 与 fallback metadata 两条 retired predicate 路径、过期 discovery miss 不阻塞后续 market。审查后修复 time-only retired false positive：`classify_lifecycle()` 只有在 retired predicate 已给出 evidence 时才返回 `Retired`；事件路径要求 `winning_asset_id` 属于目标 subscribed asset set；fallback metadata 要求非空目标 subscribed asset set、`closed=true`、`active=false`、`accepting_orders=false`、`closed_time_utc_ms` 和非空 resolution evidence。`cargo test -p data-collect --test polymarket_contract -- --nocapture` 通过 5 条测试。
+
 ### 任务 2.2：Binance BTCUSDT depth 和 aggTrade
 
 **文件：**
@@ -1395,7 +1399,7 @@
 - 创建：`data-collect/src/sources/binance.rs`
 - 创建：`data-collect/tests/binance_contract.rs`
 
-- [ ] **步骤 2.2.1：写 Binance depth stitch 测试**
+- [x] **步骤 2.2.1：写 Binance depth stitch 测试**
 
   测试覆盖：
 
@@ -1407,15 +1411,15 @@
   - stale/duplicate update 记录并忽略。
   - `U > local_u + 1` 记录 source gap 并重新 snapshot。
 
-- [ ] **步骤 2.2.2：写 aggTrade 测试**
+- [x] **步骤 2.2.2：写 aggTrade 测试**
 
   测试断言保存原始字段 `e,E,s,a,p,q,f,l,T,m`，并把 `m` 保存为 `buyer_is_maker` 或等价原始布尔字段。
 
-- [ ] **步骤 2.2.3：实现 Binance official source adapter**
+- [x] **步骤 2.2.3：实现 Binance official source adapter**
 
   live Binance 源只来自 Binance 官方 WebSocket stream 和官方 REST depth snapshot；RTDS、archive、relay、proxy、cached feed 或历史 backfill 只能作为旁证或补数，不能冒充 live official source。
 
-- [ ] **步骤 2.2.4：运行 Binance 测试**
+- [x] **步骤 2.2.4：运行 Binance 测试**
 
   计划执行命令：
 
@@ -1426,6 +1430,8 @@
 
   预期：snapshot 缺失、update id 缺口、rate limit、server shutdown 和 aggTrade 长时间无业务消息都会写入 source health/gap/reconnect 证据。
 
+  执行结果：已新增 `data-collect/src/sources/binance.rs` 和 `data-collect/tests/binance_contract.rs`。adapter 解析 Binance 官方 depth WS raw 字段 `e,E,s,U,u,b,a`，保留 combined stream `stream/data` wrapper，解析官方 REST snapshot `lastUpdateId,bids,asks` 与 fetch/recv 边界；`stitch_depth_update()` 覆盖 `u <= lastUpdateId` 丢弃、首个 update `U <= lastUpdateId + 1 <= u`、stale/duplicate 忽略、`U > local_u + 1` 触发 resnapshot gap。审查后修复 false complete：单条 depth WS update parse 后不会自动写入 `local_u` / `stitch_evidence`，必须通过 `apply_depth_stitch_evidence()` 才能成为 complete typed raw；diff depth update 允许单侧 bid 或 ask 为空，但双侧同时为空判 incomplete；REST snapshot bids/asks 仍必须双侧非空。aggTrade 解析并保存 `e,E,s,a,p,q,f,l,T,m`，其中 `m` 保存为 `buyer_is_maker`。`BinanceOfficialSourceConfig::validate_official()` 改为按 URL scheme/host/path/query allowlist 校验官方 WS host `stream.binance.com`、`data-stream.binance.vision` 和官方 REST host `api.binance.com`、`api-gcp.binance.com`、`api1-4.binance.com`、`data-api.binance.vision`，拒绝 `binance.com.evil` 等 relay/proxy；parser 也拒绝非 `BTCUSDT` 或错误 stream。新增 snapshot missing、rate limit、server shutdown、no business messages 的 health/gap/reconnect 分类测试。`cargo test -p data-collect --test binance_contract -- --nocapture` 通过 3 条测试。
+
 ### 任务 2.3：Polymarket RTDS Chainlink BTC/USD
 
 **文件：**
@@ -1433,7 +1439,7 @@
 - 创建：`data-collect/src/sources/rtds.rs`
 - 创建：`data-collect/tests/rtds_contract.rs`
 
-- [ ] **步骤 2.3.1：写 RTDS subscription 测试**
+- [x] **步骤 2.3.1：写 RTDS subscription 测试**
 
   测试断言 subscription raw JSON 可追溯：
 
@@ -1443,11 +1449,11 @@
   - `filters: "{\"symbol\":\"btc/usd\"}"`
   - 重连后必须重新验证 topic、symbol filter、payload timestamp、业务消息 freshness 和 source stale 状态。
 
-- [ ] **步骤 2.3.2：实现 RTDS adapter**
+- [x] **步骤 2.3.2：实现 RTDS adapter**
 
   adapter 保存 RTDS message timestamp、payload timestamp、symbol、value、source topic 和 `recv_time_utc`；RTDS Chainlink BTC/USD 只能作为 Chainlink 价格证据，不替代 Binance 官方 depth 或 aggTrade。
 
-- [ ] **步骤 2.3.3：运行 RTDS 测试**
+- [x] **步骤 2.3.3：运行 RTDS 测试**
 
   计划执行命令：
 
@@ -1457,6 +1463,12 @@
   ```
 
   预期：RTDS ping/pong 或连接 open 不能单独证明 coverage 完整；业务数据 freshness 才能恢复 healthy。
+
+  执行结果：已新增 `data-collect/src/sources/rtds.rs` 和 `data-collect/tests/rtds_contract.rs`。adapter 使用官方 SDK `Subscription::chainlink_prices(Some("btc/usd"))` 与 `SubscriptionRequest::subscribe(...)` 生成 subscription raw JSON；`source_format` 的 RTDS validator 已兼容官方 SDK 实际 `subscriptions[]` 结构，同时保留既有扁平测试样例。测试断言 `action=subscribe`、`topic=crypto_prices_chainlink`、`type=*`、`filters="{\"symbol\":\"btc/usd\"}"`，并要求重连恢复必须重新验证 topic、symbol filter、payload timestamp 和业务消息 freshness；仅连接 open / ping-pong 不足以恢复 healthy。`cargo test -p data-collect --test rtds_contract -- --nocapture` 通过 2 条测试。
+
+### 阶段 2 收口
+
+第一轮阶段 2 独立审查为 3 个 `FAIL`；完成修复后第二轮审查为 1 个 `PASS_WITH_NOTES`、2 个 `FAIL`。第二轮问题已按最小范围修复：四源 coverage 现在强制 current active 与 planned next preload 两个 phase 均存在，source gap 也必须绑定目标 market slug；Polymarket fallback retired predicate 拒绝空目标 subscribed asset set；Binance diff depth update 不再要求 bid/ask 双侧同时非空，官方 endpoint allowlist 补齐官方备用 host。当前本地验证通过 `cargo fmt --all -- --check`、`CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo test -p data-collect --lib --tests -- --nocapture`（66 条测试）、`CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo clippy -p data-collect --all-targets -- -D warnings` 和 release bench targets 构建；最终阶段 2 复审结果为 3 个 `PASS_WITH_NOTES` 且无阻塞项，结果已记录在 changelog。阶段 2 完成 commit/push 后进入阶段 3。
 
 ## 八、阶段 3：writer、分区与 atomic publish
 
