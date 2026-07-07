@@ -19,6 +19,7 @@
 7. 记录网络韧性、资源水位、writer queue、flush latency、RSS/CPU/disk watermark、backpressure 和异常恢复证据。
 8. 覆盖当前 active market，并从目标 market start 前 `T-30s` 开始采集 prefetched next market；`T-30s` 采集覆盖必须与 `T-30` 样本加工非范围明确区分。
 9. 技术验证必须覆盖真实 `btc-updown-5m` 冷启动 market discovery、current active market、prefetched next market、market rollover、以及 Polymarket / Binance depth / Binance aggTrade / RTDS Chainlink 四源在同一时间线上的长时间采集；generic BTC/Bitcoin open market smoke、HTTP reachability、单条业务消息或 synthetic throughput 不能替代该验收。
+10. 按训练、paper trade、live trade 三种独立运行拓扑导出独立二进制和部署/接入文档；训练二进制用于数据采集服务器持续写训练 raw mirror，paper/live 二进制用于各自交易服务器本机 hot path handoff 和外部市场源证据，不得混入交易决策、下单、撤单、NOE/ledger 或模型输入组装。
 
 ### 1.2 data-collect 非范围
 
@@ -45,6 +46,9 @@
 3. 延迟统计必须记录 `collector_host_id`、`collector_region`、`host_clock_sync_status`、source endpoint、source timestamp、`recv_time_utc` 和计算口径版本。
 4. 非爱尔兰采集主机的 `recv_time_utc` 只能用于该采集主机视角的接收延迟分析，不得冒充 AWS 爱尔兰 paper/live 交易服务器的真实接收延迟。
 5. 当需要评估 paper/live 交易视角延迟时，必须使用对应 paper/live 主机采集或运行 artifact 中的接收时间；跨区域数据只能作为对照证据。
+6. `data-collect` 必须保留双时间轴：`recv_time_utc` / runtime receive time 表示数据对当前进程可见的时间，source/platform timestamp 表示源平台声明的事件时间；两者都必须进入 typed raw 和 manifest 可追溯证据，不得互相替代。
+7. 训练数据服务器的存储分区和训练冷路径默认使用数据采集服务器本机 `recv_time_utc` 作为 availability time；source/platform timestamp 只能作为源事实字段、排序辅助和延迟分析输入，不能让实际晚收到的事件提前进入训练样本 causal cutoff。
+8. paper/live hot path 必须在对应 paper/live 服务器本机记录 runtime receive timestamp；paper/live 模型的因果可见性必须以本机 runtime receive timestamp / handoff receive time 为准，不能使用训练数据服务器的 `recv_time_utc` 冒充。
 
 ## 三、数据源覆盖要求
 
@@ -86,13 +90,16 @@
 2. 生产数据根路径由用户决定为各运行服务器本机 `~/btc-updown-marketmaker/datasets/`；数据服务器上的训练用原始采集数据必须在该根路径下按 UTC day 分区保存，其中 `~` 按当前服务器用户解析，不得写成本地开发机路径。
 3. paper/live 交易服务器如需接收 `data-collect` handoff mirror、coverage 或 manifest，也必须放在对应交易服务器本机 `~/btc-updown-marketmaker/datasets/` 下；该根路径只承载外部市场源证据，不替代 paper/live 自身 append-only event log、rotation artifact、order evidence、NOE/ledger 或 compact mirror。
 4. `data-collect` 只提供外部市场源 cold mirror（finalized parquet / coverage / health / gap / manifest）和 hot path handoff 边界证据；paper/live 自身 append-only event log、rotation artifact、order evidence、NOE/ledger、Market Context Builder 输出和 compact mirror 由对应模块需求定义，本文只声明接入边界。
-5. Parquet 连续写入必须写入 `*.tmp`、`*-running.parquet` 或等价 running segment；close/finalize 后才能通过 atomic rename 发布 finalized `.parquet`。
-6. 每个 source parquet 必须写入 typed raw schema version / source kind metadata，至少包括 `parquet_raw_layout_version` 和 `parquet_raw_source_kind`；兼容当前 V2 typed raw mirror 是迁移基线，但本文不把 V2 data-pipeline schema 变成 `data-collect` 的加工职责。
-7. manifest 必须记录 artifact path、row count、sha256、schema version、code version / git commit、collector binary sha256、source config digest、validation verdict、source coverage、source gap、health/gap/reconnect artifact path 或 digest、start/end time、coverage window、collector host/region、ResourceWatermark、writer queue 高水位和 flush latency。
-8. manifest 必须包含 `required_files[]` 或等价文件角色清单；每项至少记录 file role、path、finalized status、row count、sha256/digest、schema version、missing reason，总 manifest 必须给出 complete/incomplete verdict。
-9. parquet / manifest 文件发现路径的消费者只能读取 finalized parquet 和对应 manifest；temp/running、`.rsync-partial`、外部同步/发布链路生成的未完成标记文件、未 finalize 文件不得进入 discovery，`data-collect` 不负责 upload/listing。
-10. atomic rename 失败、sha256 缺失、row count 缺失、schema version 缺失、source coverage 缺失或 manifest 不一致时，artifact 必须标记为 incomplete，不得假装完整。
-11. 当前需求只要求 finalized artifact 不被 partial、running 或 `.rsync-partial` 误发现。
+5. 训练 cold mirror 按 `source_kind + recv_time_utc UTC day` 分区；每个 `source_kind/utc_day` 下允许生成多个 finalized parquet segment，不承诺一天固定四个 `.parquet` 文件，也不要求四源写入同一个 parquet 文件。
+6. 每个 segment 的 manifest 必须记录 `recv_time_utc` 覆盖窗口、source/platform timestamp 范围、market slug/window、source kind、segment seq、rollover reason、row count、sha256 和 complete/incomplete verdict。
+7. `max_rows`、`max_bytes`、`max_segment_duration`、UTC day boundary 和 shutdown 只能作为 segment soft rollover / finalize 条件；行情暴增时应生成更多 segment，并记录 burst、queue watermark、flush latency 和 backpressure observation，不得因触发 soft rollover 自动停机。
+8. Parquet 连续写入必须写入 `*.tmp`、`*-running.parquet` 或等价 running segment；close/finalize 后才能通过 atomic rename 发布 finalized `.parquet`。
+9. 每个 source parquet 必须写入 typed raw schema version / source kind metadata，至少包括 `parquet_raw_layout_version` 和 `parquet_raw_source_kind`；兼容当前 V2 typed raw mirror 是迁移基线，但本文不把 V2 data-pipeline schema 变成 `data-collect` 的加工职责。
+10. manifest 必须记录 artifact path、row count、sha256、schema version、code version / git commit、collector binary sha256、source config digest、validation verdict、source coverage、source gap、health/gap/reconnect artifact path 或 digest、start/end time、coverage window、collector host/region、ResourceWatermark、writer queue 高水位和 flush latency。
+11. manifest 必须包含 `required_files[]` 或等价文件角色清单；每项至少记录 file role、path、finalized status、row count、sha256/digest、schema version、missing reason，总 manifest 必须给出 complete/incomplete verdict。
+12. parquet / manifest 文件发现路径的消费者只能读取 finalized parquet 和对应 manifest；temp/running、`.rsync-partial`、外部同步/发布链路生成的未完成标记文件、未 finalize 文件不得进入 discovery，`data-collect` 不负责 upload/listing。
+13. atomic rename 失败、sha256 缺失、row count 缺失、schema version 缺失、source coverage 缺失或 manifest 不一致时，artifact 必须标记为 incomplete，不得假装完整。
+14. 当前需求只要求 finalized artifact 不被 partial、running 或 `.rsync-partial` 误发现。
 
 ## 五、网络异常与恢复要求
 
@@ -131,7 +138,7 @@
 2. WebSocket、HTTP、timer、channel、manifest 写入、health 写入和 parquet writer 调度不得阻塞主事件循环；需求层验收词为 async 和 non-blocking。
 3. 文件 I/O、parquet close/finalize、data-collect 内部 parquet compression、local directory scan、sha256、large manifest aggregation、本地旧 segment 清理等可能阻塞或重 CPU 工作必须隔离到后台任务或 blocking pool；不包含 gzip 归档压缩、远端上传、对象存储 listing 或归档保留清理。
 4. 所有跨任务队列必须是 bounded queue，并同时受 row count、byte count、oldest event age、writer lag 和 memory watermark 约束。
-5. 当 bounded queue 达到水位时，系统必须触发 backpressure、source health 降级、source gap 记录或受控停采；禁止 unbounded queue 导致 OOM 或 silent loss。
+5. 当 bounded queue 达到 soft watermark 或短暂水位尖峰时，系统必须记录 backpressure、source health 降级和恢复观察；只有 send timeout、drop、不可恢复 source 缺失，或 hard threshold 连续越线且无法恢复时，才记录 source gap 或执行受控停采；禁止 unbounded queue 导致 OOM 或 silent loss。
 6. Parquet writer 必须记录 row group / buffer 的内存估算、flush latency、bytes written 和 finalize 结果；未 finalize 不得发布。
 7. HTTP client 必须有 connect/read/total timeout 或等价超时语义；默认无超时不能作为生产需求。
 
@@ -149,11 +156,12 @@
 ## 八、消费者边界
 
 1. 训练消费者走 cold path：读取按天分区的 finalized typed raw parquet、manifest、source coverage，并由后续 `data-pipeline` 生成 labels/features/tick_stream/replay context/训练切分；`data-collect` 不直接生成这些训练消费产物。
-2. paper/live 消费者走 hot path：paper/live 的 Market Context Builder / runtime 必须通过实时 handoff、内存 bounded channel、IPC、local stream 或等价低延迟事件流消费外部市场源事件和 source health/gap 状态；不得把等待 finalized parquet、manifest 或离线 discovery 作为 paper/live 热路径唯一事实来源。
+2. paper/live 消费者走 hot path：paper/live 的 Market Context Builder / runtime 必须通过各自服务器本机运行的 `data-collect` paper/live 二进制提供的实时 handoff、内存 bounded channel、IPC、local stream 或等价低延迟事件流消费外部市场源事件和 source health/gap 状态；不得把等待 finalized parquet、manifest 或离线 discovery 作为 paper/live 热路径唯一事实来源。
 3. `data-collect` 的 hot path 职责只到外部市场源事件、timestamp namespace、source coverage、source health/gap、reconnect/backpressure 状态和 handoff 边界证据；paper/live append-only event log、rotation artifact、live artifacts、order evidence、NOE/ledger、Market Context Builder 输出、模型输入组装和 execution feedback ingestion 不由 `data-collect` 生成或解释。
 4. paper/live 延迟验收必须区分 `collector_recv_time_utc(host,region)`、handoff send time、paper/live runtime receive time、decision time 和 causal cutoff；非爱尔兰 collector 的 `recv_time_utc` 不能冒充 paper/live 爱尔兰主机实时接收延迟。
 5. data-pipeline 可以消费 `data-collect` 的 typed raw parquet 和 manifest，但必须自行生成 labels、validation、tick_stream、features 和训练切分证据。
 6. 采集成功不等于训练批准，finalized parquet 完整不等于 labels/features/tick_stream 已完成，source coverage 完整不等于 live/paper 交易逻辑健康，hot path handoff 健康也不等于 paper/live 交易决策、NOE/ledger 或订单执行健康。
+7. 训练、paper、live 三类运行形态必须导出独立二进制：训练二进制只服务数据采集服务器训练 raw mirror；paper 二进制只服务 paper 服务器热路径外部市场源 handoff；live 二进制只服务 live 服务器热路径外部市场源 handoff。三者共享 schema/manifest/source adapter 合同，但不得共享运行根、钱包、交易状态或消费者 artifact 语义。
 
 ## 九、验收标准
 
@@ -183,6 +191,11 @@
 22. archive/upload/listing/gzip 不属于当前 `data-collect` 验收项；若未来改变范围，以 1.2 非范围的决策门为准。
 23. Polymarket 相关采集路径必须先有官方 Rust SDK 能力核对记录；SDK 缺口方案必须先获用户同意。
 24. 文档、计划或实现不得把 data-pipeline 的 labels、features、tick_stream、训练切分、T-30 样本加工、paper/live 交易逻辑或 SDK 旁路实现写进 `data-collect` 范围。
+25. 训练、paper、live 三类运行形态均能独立导出 release 二进制、sha256 和运行说明；训练数据采集必须有独立部署 README，paper/live hot path 必须有独立接入技术文档。
+26. 训练 cold mirror 按 `source_kind + recv_time_utc UTC day` 分区，每个 source/day 可包含多个 finalized segment；manifest 能证明 segment 的 recv window、source timestamp range、market/window、soft rollover reason、row count 和 sha256。
+27. `max_rows`、`max_bytes`、`max_segment_duration`、UTC day boundary 和 shutdown finalize 只触发 soft rollover 或保全发布；正常行情放大不得因 soft rollover 自动停机，只有不可写、无法保全、持续 hard threshold、drop/send timeout 或 partial artifact 被发布等条件才能进入 fatal 动作。
+28. 训练样本因果可见性必须以采集服务器 `recv_time_utc` / availability time 为默认主轴；paper/live 因果可见性必须以对应 paper/live 服务器本机 runtime receive timestamp 为主轴；source/platform timestamp 不能替代 receive/available time。
+29. paper/live 二进制的 hot path 接入文档必须明确 IPC/local stream/bounded handoff 协议、event seq、timestamp namespace、backpressure/status 消息、runtime receive timestamp 记录点和非范围边界，且不得生成交易决策、NOE/ledger、order evidence 或 execution feedback。
 
 ## 十、证据来源
 

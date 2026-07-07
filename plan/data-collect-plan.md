@@ -59,7 +59,7 @@
 
 ## 二、前置成功标准
 
-正式开发前必须先通过阶段 0。阶段 0 不通过时，不进入阶段 1-6。
+正式开发前必须先通过阶段 0。阶段 0 不通过时，不进入阶段 1-7。
 
 阶段 0 通过标准：
 
@@ -80,7 +80,11 @@
 | 路径 | 责任 |
 | --- | --- |
 | `data-collect/Cargo.toml` | `data-collect` Rust crate 依赖、feature、binary 定义 |
-| `data-collect/src/main.rs` | collector binary 入口，只做配置加载、runtime 启动、任务编排和 shutdown |
+| `data-collect/src/bin/data_collect_training_collector.rs` | 训练数据采集服务器二进制入口，只做训练 cold mirror 配置加载、runtime 启动、任务编排和 shutdown |
+| `data-collect/src/bin/data_collect_paper_hot.rs` | paper 服务器 hot path 二进制入口，只做外部市场源实时 handoff、coverage/manifest 边界证据和 shutdown |
+| `data-collect/src/bin/data_collect_live_hot.rs` | live 服务器 hot path 二进制入口，只做外部市场源实时 handoff、coverage/manifest 边界证据和 shutdown；live 小主机不得编译 |
+| `data-collect/src/runtime.rs` | 三类二进制共享 runtime 编排、signal handling、source task lifecycle 和 graceful shutdown |
+| `data-collect/src/segment.rs` | 训练 cold mirror segment soft rollover、UTC day boundary、segment naming 和 finalize policy |
 | `data-collect/src/config.rs` | source endpoint、market target、queue 水位、timeout、retry、resource threshold 和 artifact root 配置 |
 | `data-collect/src/event.rs` | `recv_time_utc`、source timestamp、collector host/region、raw_json、source kind、event type 的统一 envelope |
 | `data-collect/src/sources/polymarket.rs` | Polymarket market channel、market discovery、metadata、new_market、retired predicate 和 SDK 缺口接入边界 |
@@ -94,6 +98,9 @@
 | `data-collect/tests/` | contract、writer、manifest、network recovery、resource watermark 和 boundary 测试 |
 | `data-collect/benches/` | 阶段 0 和性能验收复用的吞吐、writer、resource microbench |
 | `data-collect/docs/phase0-technical-validation.md` | 阶段 0 技术测试报告；正式开发前必须先生成 |
+| `data-collect/docs/training-collector-deploy-readme.md` | 训练数据采集二进制导出、上传、前台 smoke、systemd user service、15 分钟 smoke 和 2 小时验收运行手册 |
+| `data-collect/docs/paper-live-hot-path-integration.md` | paper/live 独立二进制 hot path 调用协议、IPC/local stream、timestamp namespace、backpressure/status 和非范围边界 |
+| `data-collect/deploy/systemd/data-collect-training-collector.service.example` | 数据采集服务器 user systemd service 示例，使用 `%h/btc-updown-marketmaker` server-local 路径 |
 
 ## 数据格式合同
 
@@ -144,7 +151,7 @@
 | `ProcessFatal` | 运行根或 artifact 根越界、未授权路径、持久化边界完全不可写、partial artifact 被发布、SDK-first 被绕过、硬资源阈值持续越线且无法 finalize 已采数据 | fail closed，停止当前危险动作，保护已采 segment，写入 fatal record，等待用户或运维处理 | 不发布伪完整产物 |
 | `ArtifactIncomplete` | 单个 segment/window 缺少 row count、sha256、schema version、manifest 一致性证据，或 source coverage 不完整 | finalize 可保全数据，manifest 标记 incomplete；collector 继续采集后续 window/source | 消费者不得把该 artifact 当 complete 使用 |
 | `SourceDegraded` | 连接失败、rate limit、空 payload、业务静默、snapshot 缺失、source stale、source gap、订阅证据不足 | 按源记录 health/gap/reconnect trace，独立 backoff/circuit breaker；其他源继续运行 | coverage/health 降级，不代表全局采集失败 |
-| `BackpressureDegraded` | bounded queue、writer lag、memory/disk/resource soft watermark 越线 | 记录 backpressure、source health 降级、恢复观察和 source gap；只有 hard threshold 连续越线且无法恢复时，才暂停新市场或单源 intake 并进入保全停采 | manifest 记录水位、动作和恢复状态 |
+| `BackpressureDegraded` | bounded queue、writer lag、memory/disk/resource soft watermark 越线 | 记录 backpressure、source health 降级和恢复观察；只有 send timeout、drop、不可恢复 source 缺失，或 hard threshold 连续越线且无法恢复时，才记录 source gap、暂停新市场或单源 intake 并进入保全停采 | manifest 记录水位、动作和恢复状态 |
 | `PhaseGateBlocked` | 阶段 0 技术路径、SDK 能力、吞吐、服务器角色或需求边界未通过 | 阻止进入下一阶段或正式开发，提交事实和选项给用户 | 不代表已有采集 artifact 失效 |
 
 默认规则：`source gap`、`stale`、`coverage drop`、`incomplete manifest` 是质量和覆盖证据，不得单独触发 collector 进程退出；只有 `ProcessFatal` 或持续硬阈值保全条件才能停止危险动作。所有降级必须带恢复条件、连续采样窗口或 hysteresis，避免短暂尖峰导致频繁停采。
@@ -160,6 +167,7 @@
 | 阶段 4 | runtime 韧性与 backpressure | bounded queue、retry/backoff+jitter、circuit breaker、resource hard action | 网络异常和资源越线测试通过，且满足阶段推进通用 gate |
 | 阶段 5 | 消费者边界与分区 | 训练 UTC day 分区、paper/live artifact 边界声明、finalized-only discovery | 不生成 labels/features/trading logic，且满足阶段推进通用 gate |
 | 阶段 6 | 端到端验收与交付 | soak test、source coverage、ResourceWatermark、final review、changelog | 需求验收项逐条可追溯，且满足阶段推进通用 gate |
+| 阶段 7 | 部署能力与三运行形态交付 | 训练/paper/live 独立二进制、训练部署 README、paper/live hot path 技术文档、systemd 示例、远端 smoke/2h 验收 | 三类二进制可导出，训练采集服务器持续采集验收通过，paper/live 接入边界文档明确，且满足阶段推进通用 gate |
 
 ### 阶段推进通用 gate
 
@@ -332,7 +340,7 @@
   cargo bench -p data-collect --bench throughput_probe -- --sample-size 20
   ```
 
-  预期：所有跨任务队列都是 bounded queue；row count、byte count、oldest event age、writer lag 和 memory watermark 越线时，先按 soft/hard threshold、连续采样窗口和 hysteresis 写入 backpressure、source health 降级或 source gap；只有持续 hard threshold 且无法通过 backpressure 恢复时，才受控暂停新市场或单源 intake，并保护已采 segment；无 unbounded queue、silent loss 或短暂尖峰导致的进程级频繁失败。
+  预期：所有跨任务队列都是 bounded queue；row count、byte count、oldest event age、writer lag 和 memory watermark 越线时，先按 soft/hard threshold、连续采样窗口和 hysteresis 写入 backpressure、source health 降级和恢复观察；只有 send timeout、drop、不可恢复 source 缺失，或持续 hard threshold 且无法通过 backpressure 恢复时，才记录 source gap、受控暂停新市场或单源 intake，并保护已采 segment；无 unbounded queue、silent loss 或短暂尖峰导致的进程级频繁失败。
 
 - [x] **步骤 0.4.3：记录通过/失败阈值**
 
@@ -1608,7 +1616,7 @@
 
 - [x] **步骤 4.2.2：实现 backpressure 动作**
 
-  达到 soft watermark 时必须触发 backpressure、source health 降级或 source gap 记录；达到 hard watermark 且连续采样窗口内无法恢复时，才允许受控暂停新市场或单源 intake。禁止 unbounded queue 导致 OOM 或 silent loss，也禁止短暂水位尖峰直接造成进程级失败。
+  达到 soft watermark 时必须触发 backpressure、source health 降级和恢复观察；只有 send timeout、drop、不可恢复 source 缺失，或 hard watermark 在连续采样窗口内无法恢复时，才允许记录 source gap、受控暂停新市场或单源 intake。禁止 unbounded queue 导致 OOM 或 silent loss，也禁止短暂水位尖峰直接造成进程级失败。
   正式实现不得复用 Phase 0 probe 的简化 verdict 语义：可恢复 queue full / bounded wait 成功必须进入 `backpressure_observations` 或等价资源观察字段，只有 send timeout、drop、持续 hard threshold 或无法保全 segment 时，才进入阻塞 complete verdict 的 `source_gap` / `ArtifactIncomplete` / `ProcessFatal` 路径。
 
 - [x] **步骤 4.2.3：运行 bounded queue 测试**
@@ -1826,7 +1834,611 @@ Phase 5 执行结果：
 
   执行结果：第一轮 Phase 6 审查为 1 个 NO-GO、1 个 NEEDS_DOC_FIXES、1 个 PASS_WITH_NOTES，无 Critical；成立问题均已修复并复审。最终复审结果为 `PASS`、`PASS`、`PASS_WITH_NOTES`，无 Critical/Important blocker，允许进入 commit/push gate。
 
-## 十二、方案不一致决策门
+## 十二、阶段 7：部署能力与三运行形态交付
+
+### 阶段目标
+
+阶段 7 的目标是把当前 `data-collect` 从“合同与 probe 已验证”推进到“可部署运行”的工程形态：
+
+1. 训练数据采集服务器获得可独立导出的正式 release binary、部署 README、systemd user service 示例，并通过远端 15 分钟 smoke 与 2 小时连续采集验收。
+2. paper trade 和 live trade 获得各自独立的 hot path binary export 和技术接入文档，明确 paper/live runtime 如何调用 `data-collect` 热路径、如何记录本机 runtime receive timestamp、如何处理 backpressure/status，以及哪些内容不属于 `data-collect`。
+3. 三类二进制共享 source adapter、event envelope、manifest、health/gap/reconnect、ResourceWatermark、timestamp namespace 和 SDK-first 合同，但运行根、部署文档、资源阈值和消费者边界相互独立。
+
+阶段 7 不授权真实下单、撤单、资金操作、paper/live 交易逻辑接入、NOE/ledger 生成、模型输入组装、execution feedback ingestion、archive/upload/listing/gzip 或对象存储完整性验证。paper/live 服务器远端部署必须在本阶段计划之外获得单独用户批准；本阶段只导出二进制和写清 hot path 接入合同。
+
+### 设计原则
+
+1. **三二进制独立导出**：`data-collect-training-collector`、`data-collect-paper-hot`、`data-collect-live-hot` 分别构建、分别记录 sha256、分别使用自己的运行配置；不得用一个二进制通过未审查 flag 混跑三个服务器角色。
+2. **训练 cold path 按 availability time 落盘**：训练数据服务器用本机 `recv_time_utc` 作为分区和 causal availability 主轴；source/platform timestamp 必须保留，但不能让实际晚收到的数据提前进入训练样本 causal cutoff。
+3. **paper/live hot path 按本机 runtime receive time 判定可见性**：paper/live 服务器必须记录本机 runtime receive timestamp；训练服务器 `recv_time_utc` 只能作为跨区域对照，不得冒充 paper/live 真实接收延迟。
+4. **segment soft rollover 不停机**：`max_rows`、`max_bytes`、`max_segment_duration`、UTC day boundary 和 shutdown 只触发 segment finalize + 开新 segment。行情放大时应表现为更多 segment、较高 queue watermark、burst/backpressure observation，而不是自动停机。
+5. **fatal 只保护数据边界**：只有路径越界、持久化不可写、无法保全 running segment、partial artifact 被发布、持续 hard threshold 且无法恢复、send timeout/drop 已经破坏不可丢边界、SDK-first 被绕过时，才进入 `ProcessFatal` 或受控停采。
+
+### 任务 7.1：部署模式、CLI 与三二进制合同
+
+**文件：**
+
+- 修改：`data-collect/Cargo.toml`
+- 创建：`data-collect/src/bin/data_collect_training_collector.rs`
+- 创建：`data-collect/src/bin/data_collect_paper_hot.rs`
+- 创建：`data-collect/src/bin/data_collect_live_hot.rs`
+- 创建：`data-collect/src/runtime.rs`
+- 修改：`data-collect/src/config.rs`
+- 创建：`data-collect/tests/deployment_binary_contract.rs`
+- 修改：`changelog/data-collect-changelog.md`
+
+- [x] **步骤 7.1.1：写三运行形态合同测试**
+
+  测试必须覆盖：
+
+  - `CollectorBinaryRole::TrainingCold` 只允许训练 cold mirror 输出根 `training/typed_raw/...`。
+  - `CollectorBinaryRole::PaperHot` 只允许 paper hot handoff 输出根 `paper/data_collect_handoff/...`。
+  - `CollectorBinaryRole::LiveHot` 只允许 live hot handoff 输出根 `live/data_collect_handoff/...`。
+  - 三类 role 都要求 server-local absolute `dataset_root`，并拒绝路径穿越。
+  - paper/live role 必须声明 runtime receive timestamp 由对应 paper/live runtime 记录，不能使用训练服务器 `recv_time_utc` 代替。
+  - live role 的默认配置不得启用训练式历史扫描、重处理、parquet 全量 discovery 或 Rust 编译依赖。
+
+  计划执行命令：
+
+  ```bash
+  CARGO_TARGET_DIR=target/data-collect-ci \
+    cargo test -p data-collect --test deployment_binary_contract -- --nocapture
+  ```
+
+  预期：RED 阶段先失败于缺少三类 binary role / config contract；GREEN 后上述合同全部通过。
+
+  执行结果：已新增 `deployment_binary_contract`，覆盖 training / paper / live 三 role 的运行根、路径越界拒绝、runtime receive timestamp 边界和 live 小主机非构建/非重处理边界。
+
+- [x] **步骤 7.1.2：实现最小 deployment config 与 binary role**
+
+  实现要求：
+
+  - `data-collect/Cargo.toml` 显式声明三个 `[[bin]]`：
+    - `name = "data-collect-training-collector"`
+    - `name = "data-collect-paper-hot"`
+    - `name = "data-collect-live-hot"`
+  - `tokio` features 必须覆盖 `signal` 与 `net`，以支持 SIGTERM/SIGINT graceful shutdown 和 Unix domain socket / local stream；若实现选择不依赖 Tokio `signal` 或 `net`，必须在 changelog 记录采用的成熟替代方案、原因和验证命令。
+  - 三个 bin 入口只负责解析参数、加载配置、调用共享 runtime，不复制 source adapter 或 writer 逻辑。
+  - CLI 至少支持：
+    - `--dataset-root <absolute-path>`
+    - `--run-id <id>`
+    - `--max-runtime-secs <seconds>`，仅用于 smoke/验收；生产持续运行不设置该参数。
+    - `--collector-region <region>` 可选；未设置时复用 `collector_identity` 自动识别。
+    - `--config <path>` 可选；配置文件缺失或路径越界必须 fail closed。
+  - 三个二进制启动时必须写出 binary role、git commit、binary sha256、config digest、dataset root canonical path 和 collector host/region receipt。
+
+  执行结果：已新增 `data_collect_training_collector`、`data_collect_paper_hot`、`data_collect_live_hot` 三个 bin；`runtime` 启动 receipt 记录 binary role、git commit、binary sha256、config digest、dataset root canonical path、collector host id 和 collector region。`tokio` features 已包含 `signal` 与 `net`。
+
+- [x] **步骤 7.1.3：验证三二进制可构建**
+
+  计划执行命令：
+
+  ```bash
+  cd /home/chillchill/btc-updown-marketmaker
+  CARGO_TARGET_DIR=target/data-collect-ci \
+    cargo build -p data-collect --release \
+      --bin data-collect-training-collector \
+      --bin data-collect-paper-hot \
+      --bin data-collect-live-hot
+  ```
+
+  预期：本地 release build 通过；不得在 AWS live-trade 小主机上运行任何 cargo 命令。
+
+  执行结果：本地三二进制 release build 通过；未在 AWS live-trade 小主机运行 cargo/build/test。
+
+### 任务 7.2：训练 cold mirror segment 与双时间轴
+
+**文件：**
+
+- 创建：`data-collect/src/segment.rs`
+- 修改：`data-collect/src/publish.rs`
+- 修改：`data-collect/src/writer.rs`
+- 创建：`data-collect/tests/segment_rollover_contract.rs`
+- 创建：`data-collect/tests/causal_time_contract.rs`
+- 修改：`changelog/data-collect-changelog.md`
+
+- [x] **步骤 7.2.1：写分区与因果时间合同测试**
+
+  测试必须覆盖：
+
+  - 训练分区使用 `recv_time_utc_ms` 计算 `utc_day=YYYY-MM-DD`，不使用 Polymarket platform timestamp、Binance `E/T` 或 RTDS payload timestamp。
+  - 当 source timestamp 与 `recv_time_utc_ms` 跨 UTC day 时，文件分区跟随 `recv_time_utc_ms`，manifest 同时记录 source timestamp range。
+  - `event_available_time_ms` 对训练 cold path 等于数据采集服务器 `recv_time_utc_ms`；paper/live 的 available time 字段必须声明为外部 runtime receive timestamp。
+  - data-pipeline 后续只能在 `event_available_time_ms <= causal_cutoff_ms` 时把事件纳入训练样本；`source_ts < cutoff` 但 `recv_time_utc_ms > cutoff` 的事件不能被提前使用。
+
+  计划执行命令：
+
+  ```bash
+  CARGO_TARGET_DIR=target/data-collect-ci \
+    cargo test -p data-collect --test causal_time_contract -- --nocapture
+  ```
+
+- [x] **步骤 7.2.2：写 soft rollover 合同测试**
+
+  测试必须覆盖：
+
+  - `max_rows` 达到阈值时 finalize 当前 segment，并立即打开同 source/day 的下一 segment；verdict 不变成 process fatal。
+  - `max_bytes` 达到阈值时行为同上。
+  - `max_segment_duration` 到期时行为同上。
+  - UTC day boundary 到达时先 finalize 旧 day segment，再写入新 day segment。
+  - `SIGTERM` / shutdown 时停止新 intake、drain bounded queue、flush/finalize 已采 segment；超时无法 complete 时写 incomplete manifest，不发布伪 complete。
+  - 短时 burst 只记录 `rollover_reason=soft_limit`、queue watermark、flush latency 和 backpressure observation；不触发停机。
+
+  计划执行命令：
+
+  ```bash
+  CARGO_TARGET_DIR=target/data-collect-ci \
+    cargo test -p data-collect --test segment_rollover_contract -- --nocapture
+  ```
+
+- [x] **步骤 7.2.3：实现 segment naming 与 manifest 字段**
+
+  segment 路径必须满足：
+
+  ```text
+  ~/btc-updown-marketmaker/datasets/
+    training/
+      typed_raw/
+        source_kind=<source_kind>/
+          utc_day=<YYYY-MM-DD>/
+            segment_start_recv_ms=<ms>--segment_seq=<n>--<short_run_id>-running.parquet
+            segment_start_recv_ms=<ms>--segment_seq=<n>--<short_run_id>.parquet
+            segment_start_recv_ms=<ms>--segment_seq=<n>--<short_run_id>.manifest.json
+  ```
+
+  manifest 至少新增或确认以下字段：
+
+  - `recv_time_window_ms`
+  - `source_timestamp_range`
+  - `event_available_time_semantics`
+  - `market_slug_window`
+  - `segment_seq`
+  - `rollover_reason`
+  - `soft_rollover_not_process_fatal`
+  - `shutdown_finalize_result`
+
+  执行结果：已新增 `segment` 合同实现；训练 cold mirror 使用 `training/typed_raw/source_kind=<source_kind>/utc_day=<YYYY-MM-DD>/segment_start_recv_ms=...--segment_seq=...--<run>.parquet`，并写出对应 manifest。soft rollover 是 finalize + 新 segment，不是停机条件。
+
+### 任务 7.3：正式训练 collector runtime
+
+**文件：**
+
+- 修改：`data-collect/src/runtime.rs`
+- 修改：`data-collect/src/sources/polymarket.rs`
+- 修改：`data-collect/src/sources/binance.rs`
+- 修改：`data-collect/src/sources/rtds.rs`
+- 修改：`data-collect/src/health.rs`
+- 修改：`data-collect/src/resource.rs`
+- 创建：`data-collect/tests/training_collector_runtime_contract.rs`
+- 修改：`changelog/data-collect-changelog.md`
+
+- [x] **步骤 7.3.1：写训练 runtime 合同测试**
+
+  测试必须覆盖：
+
+  - cold start 发现当前 `btc-updown-5m` active market 和 prefetched next market。
+  - 四源 source task 独立启动；Binance / RTDS 不等待 Polymarket asset discovery 成功。
+  - source event 进入 bounded queue 后按 source kind 分发给对应 writer worker。
+  - writer worker 不阻塞 source receive 主循环；parquet close/finalize/sha256/directory scan 进入 blocking pool 或后台 worker。
+  - source health/gap/reconnect trace 与 segment manifest 能按 run id 和 source kind 对齐。
+  - ResourceWatermark runtime manifest 覆盖 CPU、RSS、disk free、artifact dir bytes、open files、queue bytes/age、cgroup memory events、PSI；指标不可用时写 unavailable reason。
+
+  计划执行命令：
+
+  ```bash
+  CARGO_TARGET_DIR=target/data-collect-ci \
+    cargo test -p data-collect --test training_collector_runtime_contract -- --nocapture
+  ```
+
+- [x] **步骤 7.3.2：实现持续运行编排**
+
+  runtime 必须实现：
+
+  - source supervisor：Polymarket market channel、Binance depth、Binance aggTrade、RTDS Chainlink 分源独立 task、独立 reconnect/backoff/jitter/circuit breaker。
+  - market lifecycle supervisor：启动、重启、rollover 时覆盖 current active；next market 从 planned start 前 `T-30s` preload。
+  - writer supervisor：按 source kind/day 管理 segment writer，soft rollover 后立即打开新 segment。
+  - manifest/coverage supervisor：持续写 health/gap/reconnect、source coverage、ResourceWatermark、segment manifest 和 run-level manifest。
+  - shutdown supervisor：收到 SIGTERM/SIGINT 时停止新 intake、drain、finalize、sha256、manifest，超时则 incomplete，不发布伪 complete。
+
+  执行结果：已实现 `TrainingRuntimeMode::{Synthetic, Live}`。live runtime 覆盖 Polymarket market channel、Binance depth、Binance aggTrade、RTDS Chainlink BTC/USD 四类源；按源独立 writer worker 写 source/day segment；写出 `source_coverage.json`、`source_gaps.json`、`rollover_edges.json`、`queue_samples.jsonl`、`write_receipts.jsonl`、`latency_summary.json` 和 run manifest。阶段审查后修复 source kind 合同：Binance depth 在 live runtime 中拆分为 `binance_depth_snapshot` 与 `binance_depth_update`，不再写旧的聚合 `binance_depth`；可恢复 `bounded_queue_backpressure_wait` / `writer_queue_backpressure_wait` 不再写入 `source_gaps`，只有 timeout、drop、disconnect 或不可恢复缺口才进入 source gap。第二轮审查后修复 source event queue 可观测性：可恢复 bounded wait 现在进入 `ResourceWatermark.source_event_queue.backpressure_wait_count`，timeout/drop 进入 `backpressure_timeout_count` / `dropped_rows` 并保持 source gap。最终代码运行时复审后继续修复三项成立问题：live runtime segment manifest 现在写出既有 `ManifestDraft` complete sidecar，并用 manifest tmp + atomic rename 发布；runtime soft rollover 复用 `SegmentPolicy` 并补上 `max_bytes`；writer-side missing/disconnected/timeout 造成 batch loss 时记录 `writer_chunk_queue.dropped_rows`。修复前远端 2 小时 systemd run 已验证四类源均有 coverage、source gaps 为空、shutdown 后 partial_count 为 `0`；source kind 与 backpressure observation 修复后必须用最终二进制重新补验，不能只沿用修复前 binary 证据。
+
+  限制说明：Phase 7 runtime 目前使用 row-bounded source/writer queue，并记录 bytes、queue age、writer queue 高水位和 backpressure/drop 观察；尚未把 byte count、oldest event age、writer lag、memory watermark 全部做成运行时 hard constraint。该项不应在本阶段被写成已完整满足需求第六节的生产级资源门控；后续持续采集生产硬化必须补齐 full bounded queue policy，而不是把当前 Phase 7 部署能力 gate 等同于无限期无人值守生产 gate。
+
+- [x] **步骤 7.3.3：本地 synthetic runtime dry run**
+
+  计划执行命令：
+
+  ```bash
+  RUN_ROOT=/tmp/data-collect-training-runtime-dry-run
+  rm -rf "$RUN_ROOT"
+  mkdir -p "$RUN_ROOT"
+  CARGO_TARGET_DIR=target/data-collect-ci \
+    cargo test -p data-collect --test training_collector_runtime_contract -- --nocapture
+  CARGO_TARGET_DIR=target/data-collect-ci \
+    target/data-collect-ci/release/data-collect-training-collector \
+      --dataset-root "$RUN_ROOT/datasets" \
+      --run-id local-training-runtime-dry-run \
+      --max-runtime-secs 120
+  ```
+
+  预期：本地 synthetic 或 fake-source 模式能写出按 source kind/day 分区的 finalized parquet + manifest；真实 Polymarket live-source 本地测试如需要访问 Polymarket，必须使用用户已配置的香港 VPN，并记录线路状态。
+
+  执行结果：本地 synthetic dry run 写出四个 source/day finalized parquet + manifest，并写出 run manifest；本地 live-zero dry run 写出 control manifest、startup receipt 和明确 missing source coverage gaps，没有把零时长 live 运行伪装成完整采集。
+
+### 任务 7.4：paper/live hot path 二进制与接入合同
+
+**文件：**
+
+- 修改：`data-collect/src/runtime.rs`
+- 创建：`data-collect/src/handoff.rs`
+- 创建：`data-collect/tests/hot_path_handoff_contract.rs`
+- 创建：`data-collect/docs/paper-live-hot-path-integration.md`
+- 修改：`changelog/data-collect-changelog.md`
+
+- [x] **步骤 7.4.1：写 hot path handoff 合同测试**
+
+  测试必须覆盖：
+
+  - `data-collect-paper-hot` 与 `data-collect-live-hot` 使用同一 envelope/source schema，但写入不同 server-local handoff root。
+  - handoff frame 至少包含 `frame_type`、`event_seq`、`source_kind`、`source_event_type`、`source_identifier`、`source_timestamp`、`collector_recv_time_utc_ms`、`handoff_send_time_utc_ms`、`collector_host_id`、`collector_region`、`raw_json` 或 raw evidence reference。
+  - fake paper/live consumer 收到 frame 时写入 `runtime_receive_time_utc_ms`；该字段由 consumer/runtime 生成，不由训练服务器提供。
+  - source status / backpressure / reconnect / gap frame 能通过同一 local channel 传给 consumer。
+  - hot path 不等待 parquet finalize、manifest sha256 或 training cold mirror discovery。
+  - handoff queue 满时记录 backpressure/status；只有 send timeout/drop 或持续 hard threshold 才升级为不可丢边界破坏。
+
+  计划执行命令：
+
+  ```bash
+  CARGO_TARGET_DIR=target/data-collect-ci \
+    cargo test -p data-collect --test hot_path_handoff_contract -- --nocapture
+  ```
+
+- [x] **步骤 7.4.2：实现 paper/live hot binary 的本地 handoff 协议**
+
+  默认协议采用 Linux 本机 Unix domain socket / local stream，路径位于：
+
+  ```text
+  ~/btc-updown-marketmaker/datasets/paper/data_collect_handoff/hot.sock
+  ~/btc-updown-marketmaker/datasets/live/data_collect_handoff/hot.sock
+  ```
+
+  frame 使用 newline-delimited JSON，至少包含：
+
+  - `external_market_event`
+  - `source_status`
+  - `source_gap`
+  - `reconnect_trace`
+  - `backpressure_state`
+  - `heartbeat`
+
+  文档必须明确：paper/live runtime 连接本机 socket 后，收到每个 frame 的第一件事是记录本机 `runtime_receive_time_utc_ms`，再写入自身 append-only event log 或 Market Context Builder 输入。`data-collect` 不生成 paper/live append-only log、NOE/ledger、order evidence、model input assembly、submit/cancel path 或 execution feedback。
+
+  执行结果：已新增 `handoff` 模块和 Unix socket newline-delimited JSON handoff 合同；fake consumer 在接收侧记录 `runtime_receive_time_utc_ms`；paper/live bin 当前提供最小 heartbeat/status handoff server，不部署到 paper/live 服务器、不接入交易逻辑。阶段审查后已明确：当前阶段不把 heartbeat/status server 冒充为已验收真实 `external_market_event` runtime；真实 paper/live 外部市场源 handoff 部署必须另行获得用户批准并重新验收。
+
+- [x] **步骤 7.4.3：写 paper/live hot path 独立技术文档**
+
+  `data-collect/docs/paper-live-hot-path-integration.md` 必须包含：
+
+  - 三服务器拓扑：训练数据采集服务器、paper 服务器、live 服务器相互独立。
+  - 三二进制职责表：training / paper / live。
+  - hot path 启动命令模板。
+  - local socket 路径、frame schema、status/backpressure frame 示例。
+  - runtime receive timestamp 记录点。
+  - causal cutoff 规则：paper/live 以本机 runtime receive timestamp 为模型可见性主轴。
+  - fail closed 条件与 degraded 条件。
+  - 明确不接管交易逻辑、钱包、下单、撤单、NOE/ledger、execution feedback。
+
+  执行结果：已新增 `data-collect/docs/paper-live-hot-path-integration.md`，明确三服务器拓扑、paper/live 本机 socket、frame schema、runtime receive timestamp 记录点、backpressure/status 处理和非范围边界。阶段审查后补充 paper/live hot path 启动命令模板，并区分 CLI dataset root 与 effective output root；文档明确当前阶段只验证 frame contract、heartbeat/status server 和 fake consumer，不宣称 paper/live 二进制已在交易服务器完成真实 Polymarket/Binance/RTDS `external_market_event` 长跑验收。
+
+### 任务 7.5：release export、训练部署 README 与 systemd 示例
+
+**文件：**
+
+- 创建：`data-collect/scripts/export-release-artifacts.sh`
+- 创建：`data-collect/docs/training-collector-deploy-readme.md`
+- 创建：`data-collect/deploy/systemd/data-collect-training-collector.service.example`
+- 创建：`data-collect/tests/deploy_readme_contract.rs`
+- 修改：`changelog/data-collect-changelog.md`
+
+- [x] **步骤 7.5.1：写 deploy README 合同测试**
+
+  测试必须检查 README 和 systemd 示例包含：
+
+  - 本地 build 命令，工作目录为 `/home/chillchill/btc-updown-marketmaker`。
+  - 三个 release binary 名称和 sha256 生成命令。
+  - 数据采集服务器上传路径使用 `~/btc-updown-marketmaker`，不把远端路径误写成本地开发路径。
+  - 训练数据根为 `~/btc-updown-marketmaker/datasets/`。
+  - 15 分钟 foreground smoke 命令。
+  - 2 小时 systemd user service 验收命令。
+  - release export 必须包含 `deploy/systemd/data-collect-training-collector.service.example`，确保 `current/deploy/systemd/...` 在远端存在。
+  - 首次上传前必须创建 `~/btc-updown-marketmaker/data-collect/releases` 父目录。
+  - systemd 验收停止服务后必须使用 `systemctl show` / `is-active` 等不会把正常 stopped 状态误判为脚本失败的命令。
+  - 15 分钟 smoke 和 2 小时验收必须阻断检查 binary sha256、git commit、config digest、dataset root canonical path、collector host/region 和 binary role receipt。
+  - 未经用户批准不得 `enable --now` 开机自启。
+  - paper/live 服务器不得运行 cargo；live 小主机不得承担训练重处理或全量 parquet 扫描。
+
+  计划执行命令：
+
+  ```bash
+  CARGO_TARGET_DIR=target/data-collect-ci \
+    cargo test -p data-collect --test deploy_readme_contract -- --nocapture
+  ```
+
+- [x] **步骤 7.5.2：写训练部署 README 和 user systemd 示例**
+
+  README 必须提供以下操作序列：
+
+  ```bash
+  cd /home/chillchill/btc-updown-marketmaker
+  data-collect/scripts/export-release-artifacts.sh
+  COMMIT="$(git rev-parse --short=12 HEAD)"
+  ssh ubuntu@3.255.156.183 \
+    'mkdir -p ~/btc-updown-marketmaker/data-collect/releases'
+  rsync -av "target/data-collect-release/$COMMIT/" \
+    ubuntu@3.255.156.183:~/btc-updown-marketmaker/data-collect/releases/"$COMMIT"/
+  ssh ubuntu@3.255.156.183 \
+    'cd ~/btc-updown-marketmaker/data-collect/releases/'"$COMMIT"' && sha256sum -c SHA256SUMS'
+  ssh ubuntu@3.255.156.183 \
+    'ln -sfn ~/btc-updown-marketmaker/data-collect/releases/'"$COMMIT"' ~/btc-updown-marketmaker/data-collect/current'
+  ```
+
+  foreground smoke 命令必须使用 15 分钟运行：
+
+  ```bash
+  ssh ubuntu@3.255.156.183 '
+    set -euo pipefail
+    BIN="$HOME/btc-updown-marketmaker/data-collect/current/bin/data-collect-training-collector"
+    DATASET_ROOT="$HOME/btc-updown-marketmaker/datasets"
+    "$BIN" \
+      --dataset-root "$DATASET_ROOT" \
+      --run-id "training-smoke-$(date -u +%Y%m%dT%H%M%SZ)" \
+      --max-runtime-secs 900
+  '
+  ```
+
+  user systemd 示例必须使用 `%h/btc-updown-marketmaker`，避免把本地开发路径写进远端 service：
+
+  ```ini
+  [Service]
+  WorkingDirectory=%h/btc-updown-marketmaker
+  ExecStart=%h/btc-updown-marketmaker/data-collect/current/bin/data-collect-training-collector --dataset-root %h/btc-updown-marketmaker/datasets
+  ```
+
+  是否执行 `loginctl enable-linger ubuntu` 或 `systemctl --user enable --now data-collect-training-collector.service` 必须在 README 中作为单独用户批准 gate。
+
+  执行结果：已新增 `data-collect/docs/training-collector-deploy-readme.md` 与 `data-collect/deploy/systemd/data-collect-training-collector.service.example`。systemd 示例使用动态 run id：`training-systemd-$(date -u +%Y%m%dT%H%M%SZ)`，避免重启复用同一 run id；示例不启用开机自启。
+
+- [x] **步骤 7.5.3：实现 release export 脚本**
+
+  脚本必须执行：
+
+  ```bash
+  cd /home/chillchill/btc-updown-marketmaker
+  COMMIT="$(git rev-parse --short=12 HEAD)"
+  TARGET_DIR="${CARGO_TARGET_DIR:-target/data-collect-ci}"
+  EXPORT_ROOT="target/data-collect-release/$COMMIT"
+  CARGO_TARGET_DIR="$TARGET_DIR" cargo build -p data-collect --release \
+    --bin data-collect-training-collector \
+    --bin data-collect-paper-hot \
+    --bin data-collect-live-hot
+  install -Dm755 "$TARGET_DIR/release/data-collect-training-collector" "$EXPORT_ROOT/bin/data-collect-training-collector"
+  install -Dm755 "$TARGET_DIR/release/data-collect-paper-hot" "$EXPORT_ROOT/bin/data-collect-paper-hot"
+  install -Dm755 "$TARGET_DIR/release/data-collect-live-hot" "$EXPORT_ROOT/bin/data-collect-live-hot"
+  install -Dm644 data-collect/deploy/systemd/data-collect-training-collector.service.example \
+    "$EXPORT_ROOT/deploy/systemd/data-collect-training-collector.service.example"
+  install -Dm644 data-collect/docs/training-collector-deploy-readme.md \
+    "$EXPORT_ROOT/docs/training-collector-deploy-readme.md"
+  install -Dm644 data-collect/docs/paper-live-hot-path-integration.md \
+    "$EXPORT_ROOT/docs/paper-live-hot-path-integration.md"
+  printf "git_commit=%s\n" "$(git rev-parse HEAD)" > "$EXPORT_ROOT/RELEASE_INFO.env"
+  (cd "$EXPORT_ROOT" && sha256sum \
+    bin/data-collect-training-collector \
+    bin/data-collect-paper-hot \
+    bin/data-collect-live-hot \
+    deploy/systemd/data-collect-training-collector.service.example \
+    docs/training-collector-deploy-readme.md \
+    docs/paper-live-hot-path-integration.md \
+    RELEASE_INFO.env > SHA256SUMS)
+  ```
+
+  脚本不得读取钱包文件，不得复制模型文件，不得上传到 paper/live 服务器。脚本必须在 README、paper/live hot path 文档和 service 示例均存在时才成功，避免导出缺少部署说明或 service 文件的 release 包。
+
+  执行结果：已新增 `data-collect/scripts/export-release-artifacts.sh`。执行中发现 `/tmp/btc-updown-marketmaker-target` 增长到约 `18G` 后触发 `Disk quota exceeded` / linker bus error，因此脚本默认 target 改为仓库内 `target/data-collect-ci`。脚本还修复了 uutils `date +%s%3N` 生成 19 位时间戳的问题，并在构建范围未提交时给 `git_commit` / `git_commit_short` 加 `-dirty`，避免 traceability 误报。
+
+### 任务 7.6：数据采集服务器训练持续采集验收
+
+**文件：**
+
+- 修改：`data-collect/docs/training-collector-deploy-readme.md`
+- 修改：`data-collect/docs/acceptance-matrix.md`
+- 修改：`changelog/data-collect-changelog.md`
+
+- [x] **步骤 7.6.1：远端 15 分钟 foreground smoke**
+
+  计划执行：
+
+  - 本地导出 release artifact。
+  - 上传到数据采集服务器。
+  - 远端 `sha256sum -c SHA256SUMS`。
+  - 运行 `data-collect-training-collector --max-runtime-secs 900`。
+  - 收集 run manifest、segment manifests、source coverage、source gaps、ResourceWatermark、journal/log excerpt、file list 和 sha256。
+
+  通过标准：
+
+  - `probe_exit` 或 runtime exit 为 `0`。
+  - 远端 `sha256sum -c SHA256SUMS` 通过，启动 receipt 中记录的 binary sha256 与 release manifest 一致。
+  - 启动 receipt 必须记录 `binary_role=training_cold`、git commit、config digest、dataset root canonical path、collector host id、collector region，以及 host clock sync status 或 unavailable reason。
+  - 至少写出 Polymarket market、Binance depth、Binance aggTrade、RTDS Chainlink 的 source coverage 或明确 source gap evidence。
+  - 训练 parquet 位于 `~/btc-updown-marketmaker/datasets/training/typed_raw/source_kind=.../utc_day=.../`。
+  - 没有 temp/running/rsync-partial 被 finalized discovery 发现。
+  - soft rollover 不触发 process fatal。
+
+  执行结果：远端数据采集服务器 15 分钟 foreground smoke 通过，run id 为 `training-smoke-20260706T180536Z`，run manifest 为 `~/btc-updown-marketmaker/datasets/training/run_manifests/training-smoke-20260706T180536Z.manifest.json`，verdict 为 `PASS`。`collector_region=eu-west-1`，`collector_host_id=ip-172-26-10-0`，source gaps 为 `[]`；coverage 为 Polymarket market `35992` 行、Binance depth `8990` 行、Binance aggTrade `6792` 行、RTDS Chainlink BTC/USD `889` 行；Polymarket 覆盖 `5` 个 market window；partial_count 为 `0`。资源证据：RSS `65064960` bytes，artifact dir `7981886` bytes，queue_rows_high `325`，source_event_queue rows_high `17` 且 dropped_rows `0`，writer_chunk_queue rows_high `325` 且 dropped_rows `0`，write_events_us p50/p95/p99 为 `16/49/83`。
+
+  审查修复后重新执行 15 分钟 foreground smoke，run id 为 `training-smoke-phase7fix-20260706T235126Z`，verdict 为 `PASS`，source gaps 为 `[]`，coverage 为 Polymarket market `42651` 行、Binance depth snapshot `1` 行、Binance depth update `8989` 行、Binance aggTrade `5449` 行、RTDS Chainlink BTC/USD `884` 行；segment_count `9`，source_event_queue rows_high `6`，writer_chunk_queue rows_high `613`，两类队列 dropped_rows / backpressure_timeout_count 均为 `0`，partial 扫描无输出。
+
+- [x] **步骤 7.6.2：远端 2 小时 systemd user service 验收**
+
+  计划执行：
+
+  ```bash
+  ssh ubuntu@3.255.156.183 '
+    set -euo pipefail
+    mkdir -p ~/.config/systemd/user
+    cp ~/btc-updown-marketmaker/data-collect/current/deploy/systemd/data-collect-training-collector.service.example \
+      ~/.config/systemd/user/data-collect-training-collector.service
+    systemctl --user daemon-reload
+    systemctl --user start data-collect-training-collector.service
+    systemctl --user is-active --quiet data-collect-training-collector.service
+    sleep 7200
+    systemctl --user stop data-collect-training-collector.service
+    systemctl --user show data-collect-training-collector.service \
+      --property=ActiveState,SubState,Result,ExecMainStatus --no-pager
+    if systemctl --user is-active --quiet data-collect-training-collector.service; then
+      echo "service still active after stop"
+      exit 1
+    fi
+    journalctl --user -u data-collect-training-collector.service \
+      --since "-130 minutes" --no-pager | tail -n 200
+  '
+  ```
+
+  通过标准：
+
+  - 2 小时内至少覆盖 20 个以上 `btc-updown-5m` window，并至少跨一个 current -> retired / prefetched -> active rollover。
+  - 四源均有 coverage；实际 source gap 可以存在，但必须有 health/gap/reconnect evidence 和 manifest verdict，不能静默丢失或伪 complete。
+  - `dropped_rows=0`、不可恢复 send timeout 为 `0`；如出现 backpressure observation，必须证明队列回落且未破坏 hot/cold 不可丢边界。
+  - RSS、CPU、disk free、artifact dir bytes、open files、queue bytes/age、cgroup memory events、PSI 均有值或 unavailable reason；hard threshold 未持续越线。
+  - 每个 finalized segment 都有 manifest、row count、sha256、schema version、source coverage 和 `required_files[]`。
+  - shutdown 后 running segment 被 finalized 或写出 incomplete manifest；不得留下被消费者误读的 partial artifact。
+  - 2 小时 run receipt 必须记录 release binary sha256、git commit、config digest、dataset root canonical path、collector host id、collector region、binary role 和 host clock sync status 或 unavailable reason。
+
+  执行结果：第一轮 2 小时 systemd run 数据本身满足四源 coverage、rollover 和 partial artifact 要求，但正常 `SIGTERM`/systemd stop 被错误写成 `controlled_shutdown_signal` source gap，导致 verdict 为 `SOURCE_GAP`。该问题被判定为过度校验并已修复：正常受控停止不再写 source gap，systemd 示例改用动态 run id。修复后重新执行 2 小时 systemd run，run id 为 `training-systemd-20260706T202542Z`，service 最终 `ActiveState=inactive`、`SubState=dead`、`Result=success`、`ExecMainStatus=0`，run manifest 为 `~/btc-updown-marketmaker/datasets/training/run_manifests/training-systemd-20260706T202542Z.manifest.json`，verdict 为 `PASS`。
+
+  修复后 2 小时 run 证据：`collector_region=eu-west-1`，`collector_host_id=ip-172-26-10-0`，source gaps 为 `[]`；coverage 为 Polymarket market `285850` 行、Binance depth `72122` 行、Binance aggTrade `88803` 行、RTDS Chainlink BTC/USD `6968` 行；写出 `35` 个 finalized segment，按源分别为 Polymarket `9`、Binance depth `9`、Binance aggTrade `9`、RTDS `8`；覆盖 `26` 个 `btc-updown-5m` window，事件类型 `best_bid_ask=153026`、`book=132799`、`market_discovery_switch=25`；rollover_count `24`、valid_rollover_count `24`；partial_count `0`。资源证据：RSS `138694656` bytes，journal memory peak `318.0M`，CPU time `8min 34.773s`，swap peak `0B`，artifact dir `68268844` bytes，queue_rows_high `2666`，source_event_queue rows_high `24` 且 dropped_rows / backpressure timeout 为 `0`，writer_chunk_queue rows_high `2666` 且 dropped_rows / backpressure timeout 为 `0`，write_events_us count `453743`、p50/p95/p99/max 为 `15/47/74/13234`。
+
+  审查修复后使用最终二进制重新执行 2 小时 systemd run，run id 为 `training-systemd-20260707T000659Z`，service 最终 `ActiveState=inactive`、`SubState=dead`、`Result=success`、`ExecMainStatus=0`，manifest verdict 为 `PASS`，source gaps 为 `[]`。coverage 为 Polymarket market `251578` 行、Binance depth snapshot `1` 行、Binance depth update `71987` 行、Binance aggTrade `63268` 行、RTDS Chainlink BTC/USD `6964` 行；写出 `33` 个 finalized segment，按源分别为 Polymarket `8`、Binance depth snapshot `1`、Binance depth update `8`、Binance aggTrade `8`、RTDS `8`；rollover_count `24`、valid_rollover_count `24`；partial_count `0`。资源证据：RSS `133279744` bytes，journal CPU time `8min 14.831s`，journal memory peak `1.3M`，swap peak `0B`，artifact dir `60531861` bytes，queue_rows_high `662`，source_event_queue rows_high `33` 且 dropped_rows / backpressure wait / backpressure timeout 均为 `0`，writer_chunk_queue rows_high `662` 且 dropped_rows / backpressure wait / backpressure timeout 均为 `0`，write_events_us count `393798`、p50/p95/p99/max 为 `15/49/74/26795`。sha256：manifest `26963eb3658873e6d8473b8a806d5ebd0dca0f5c18631e0ce677a1829ceec086`，source coverage `3baef5736aba20b72e59b9945ccf2d96007073a493e0bf2e30fd2df27fe895a3`，source gaps `4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945`，latency summary `58a797d43576b16776b300ef3991834cd394b269551a608d8805c5ee1a36789d`，rollover edges `83b1750574bc86b4019de46ef106d295e9857e32b90487acf6a5426472879c9a`，remote training binary `99cd3a54f8bbb75f4ea34a74df17c39f85f8816e91fdc0977e7a3a3fc797887c`。
+
+  最终代码运行时复审修复 segment manifest/max_bytes/writer dropped_rows 后，又使用最新二进制执行 2 小时 systemd run，run id 为 `training-systemd-phase7manifest-20260707T052135Z`，service 最终 `ActiveState=inactive`、`SubState=dead`、`Result=success`、`ExecMainStatus=0`，manifest verdict 为 `PASS`，collector region 为 `eu-west-1`，collector host id 为 `ip-172-26-10-0`，source gaps 为 `[]`。coverage 为 Polymarket market `283696` 行、Binance depth snapshot `1` 行、Binance depth update `71990` 行、Binance aggTrade `54283` 行、RTDS Chainlink BTC/USD `7095` 行；写出 `33` 个 finalized segment，按源分别为 Polymarket `8`、Binance depth snapshot `1`、Binance depth update `8`、Binance aggTrade `8`、RTDS `8`；rollover_count `24`、valid_rollover_count `24`；partial_count `0`。资源证据：RSS `131325952` bytes，artifact dir `63779132` bytes，queue_rows_high `559`，source_event_queue rows_high `28` 且 wait/timeout/drop 均为 `0`，writer_chunk_queue rows_high `559` 且 wait/timeout/drop 均为 `0`，write_events_us count/p50/p95/p99/max 为 `417065/15/48/76/12277`。抽查 segment manifest 为 `validation_verdict=Complete`，包含 `collector_binary_sha256=4f0304f6370ff379284778977f831929b9557cc72ace60ec0eb9d7c6efc55148`、source config digest、2 个 consumer boundary declaration、required finalized parquet file、`rollover_reason=max_segment_duration`、ResourceWatermark 与 writer queue watermark。sha256：manifest `27b6ef1030710a4ff71b7f91a1b28af6379a9f1d63d9e5d6edcc009aa1669030`，source coverage `9e91b9b8b56ebf8b9c700c83c382f650e9736bab926a8b045c016e13f0202414`，source gaps `4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945`，latency summary `714296443bd8518c398c531cd857134a595d11ffb5c8e44ef9f21a8a1590d0d6`，rollover edges `d29e9cba7a1d4491416dd6f81cba30f3579b08769b340d755cb075e528934051`，sample segment manifest `a04ef92eec95e4033ddd10ca1dd80990b1879397884115f82c4ac6c1ca164f13`，remote training binary `4f0304f6370ff379284778977f831929b9557cc72ace60ec0eb9d7c6efc55148`。
+
+- [x] **步骤 7.6.3：异常条件升级规则**
+
+  以下任一条件发生时，阶段 7 不得宣称训练持续采集部署通过，必须回到方案不一致决策门：
+
+  - 数据采集服务器资源无法承受真实四源持续运行。
+  - market discovery 无法稳定发现 current / next 或 rollover 证据缺失。
+  - soft rollover 被实现成停机或 fatal。
+  - 训练分区错误使用 source/platform timestamp 作为 `utc_day` 主轴。
+  - paper/live hot path 文档把训练服务器 `recv_time_utc` 当成 paper/live runtime receive timestamp。
+  - 出现 drop/send timeout 且无法证明数据边界保全。
+  - partial/running artifact 被 finalized discovery 发现。
+
+  执行结果：阶段 7 执行中触发过一次“过度 source gap”诊断，但不是需求级 source 缺失，而是受控停止被错误记为 gap；已按最小范围修复并通过 2 小时复测。修复后未触发上述升级条件。host clock sync status 当前以 unavailable reason 记录，不阻塞阶段 7，因为需求允许不可用指标写明 reason；后续如要做生产硬化，可补 chrony/systemd-timesyncd 探测。
+
+### 任务 7.7：paper/live 二进制导出验证与非部署 gate
+
+**文件：**
+
+- 修改：`data-collect/docs/paper-live-hot-path-integration.md`
+- 修改：`data-collect/docs/acceptance-matrix.md`
+- 修改：`changelog/data-collect-changelog.md`
+
+- [x] **步骤 7.7.1：本地 fake consumer 验证 paper/live hot binary**
+
+  计划执行命令：
+
+  ```bash
+  CARGO_TARGET_DIR=target/data-collect-ci \
+    cargo test -p data-collect --test hot_path_handoff_contract -- --nocapture
+  CARGO_TARGET_DIR=target/data-collect-ci \
+    cargo build -p data-collect --release \
+      --bin data-collect-paper-hot \
+      --bin data-collect-live-hot
+  ```
+
+  预期：fake consumer 能收到外部市场源事件和 status/backpressure frame，并在 consumer 侧写入 `runtime_receive_time_utc_ms`；二进制可导出 sha256。
+
+  执行结果：`hot_path_handoff_contract` 通过；paper/live 二进制 release build 通过；release export 生成三二进制 sha256。paper/live 只完成本地 fake consumer、heartbeat/status server 和导出验证，未部署到 paper/live 服务器，未声明真实 paper/live 外部市场源长跑通过。
+
+- [x] **步骤 7.7.2：明确 paper/live 远端非部署 gate**
+
+  `paper-live-hot-path-integration.md` 必须明确：
+
+  - 本阶段不自动部署到 AWS paper/live 服务器。
+  - 如未来部署 paper/live binary，必须先获得用户单独批准。
+  - live 服务器仍是运行目标，不是构建机；只能复制已构建 binary 和必要 runtime config。
+  - paper/live runtime 接入后必须由对应 runtime 写自身 append-only event log、runtime receive timestamp、Market Context Builder 输出、NOE/ledger 或交易证据；`data-collect` 只提供外部市场源 handoff。
+
+  执行结果：`paper-live-hot-path-integration.md` 已明确本阶段不部署到 paper/live 服务器，未来部署必须单独获得用户批准；live 服务器仍不是构建机。
+
+### 任务 7.8：最终验证、审查和交付 gate
+
+**文件：**
+
+- 修改：`data-collect/docs/acceptance-matrix.md`
+- 修改：`plan/data-collect-plan.md`
+- 修改：`changelog/data-collect-changelog.md`
+
+- [x] **步骤 7.8.1：更新验收矩阵**
+
+  `data-collect/docs/acceptance-matrix.md` 必须补充 `demand/data-collect-demand.md` 第九节新增验收 25-29：
+
+  - 三二进制 release export 和部署/接入文档。
+  - 多 segment / source kind / recv day 分区。
+  - soft rollover 非停机语义。
+  - training availability time 与 paper/live runtime receive time 区分。
+  - paper/live hot path IPC/local stream 接入合同。
+
+  执行结果：`data-collect/docs/acceptance-matrix.md` 已补充需求第 25-29 条映射，并新增 Phase 7 验证命令。阶段审查后已收窄第 25、29 条证据口径：paper/live 当前阶段只验证 frame contract、heartbeat/status server 和 fake consumer，不把它写成真实 paper/live source event runtime 已完成。当前矩阵仍保持 `data-collect` 与 `data-pipeline`、paper/live 交易逻辑、SDK 旁路的边界。
+
+- [x] **步骤 7.8.2：运行本地全量验证**
+
+  计划执行命令：
+
+  ```bash
+  cd /home/chillchill/btc-updown-marketmaker
+  cargo fmt --all -- --check
+  git diff --check
+  CARGO_TARGET_DIR=target/data-collect-ci \
+    cargo clippy -p data-collect --all-targets -- -D warnings
+  CARGO_TARGET_DIR=target/data-collect-ci \
+    cargo test -p data-collect --lib --tests --quiet
+  CARGO_TARGET_DIR=target/data-collect-ci \
+    cargo build -p data-collect --release \
+      --bin data-collect-training-collector \
+      --bin data-collect-paper-hot \
+      --bin data-collect-live-hot
+  data-collect/scripts/export-release-artifacts.sh
+  ```
+
+  预期：格式、diff、clippy、测试、三二进制 release build 和 export 均通过。
+
+  执行结果：审查修复前的本地验证通过：`cargo fmt --all -- --check`、`git diff --check`、`CARGO_TARGET_DIR=target/data-collect-ci cargo clippy -p data-collect --all-targets -- -D warnings`、`CARGO_TARGET_DIR=target/data-collect-ci cargo test -p data-collect --lib --tests --quiet`、三二进制 release build、`data-collect/scripts/export-release-artifacts.sh` 和导出包 `sha256sum -c SHA256SUMS` 均通过。阶段审查后已修改 live runtime source kind、backpressure gap 语义和 paper/live 文档，因此本步骤重新打开并已重新执行最终本地验证：`cargo fmt --all -- --check`、`git diff --check`、`CARGO_TARGET_DIR=target/data-collect-ci cargo clippy -p data-collect --all-targets -- -D warnings`、`CARGO_TARGET_DIR=target/data-collect-ci cargo test -p data-collect --lib --tests --quiet`、三二进制 release build、`data-collect/scripts/export-release-artifacts.sh` 和导出包 `sha256sum -c SHA256SUMS` 均通过。第二轮审查修复 source queue backpressure observation 后再次执行本地最终验证：先新增 `source_queue_recoverable_wait_is_recorded_without_source_gap` 回归测试并确认 RED，修复后 `CARGO_TARGET_DIR=target/data-collect-ci cargo test -p data-collect source_queue_recoverable_wait_is_recorded_without_source_gap -- --nocapture` 通过；随后 `cargo fmt --all -- --check`、`git diff --check`、`CARGO_TARGET_DIR=target/data-collect-ci cargo test -p data-collect --test training_collector_runtime_contract -- --nocapture`、`CARGO_TARGET_DIR=target/data-collect-ci cargo test -p data-collect --lib --tests --quiet`、`CARGO_TARGET_DIR=target/data-collect-ci cargo clippy -p data-collect --all-targets -- -D warnings`、三二进制 release build、`data-collect/scripts/export-release-artifacts.sh` 和导出包 `sha256sum -c SHA256SUMS` 均通过；最终 training binary sha256 为 `92a433e1854e3214ce5f8ce8c2f709e7bd6225e19791b4e1b315d8eac53c1b1a`。最终代码运行时复审修复 segment manifest/max_bytes/writer dropped_rows 后，本地验证再次通过：`cargo fmt --all -- --check`、`git diff --check`、`CARGO_TARGET_DIR=target/data-collect-ci cargo test -p data-collect live_runtime::tests -- --nocapture`、`CARGO_TARGET_DIR=target/data-collect-ci cargo test -p data-collect --test training_collector_runtime_contract -- --nocapture`、`CARGO_TARGET_DIR=target/data-collect-ci cargo test -p data-collect --lib --tests --quiet`、`CARGO_TARGET_DIR=target/data-collect-ci cargo clippy -p data-collect --all-targets -- -D warnings`、三二进制 release build、`data-collect/scripts/export-release-artifacts.sh` 和导出包 `sha256sum -c SHA256SUMS` 均通过；最终 training binary sha256 更新为 `4f0304f6370ff379284778977f831929b9557cc72ace60ec0eb9d7c6efc55148`。
+
+- [x] **步骤 7.8.3：运行远端训练部署验收**
+
+  执行 7.6 的 15 分钟 foreground smoke 和 2 小时 systemd user service 验收。若 2 小时内出现资源水位、writer backlog、source gap、rollover、磁盘趋势或网络异常无法解释，升级为 `PASS_WITH_LIMITS_NEEDS_USER_APPROVAL` 或 `BLOCKED_NEEDS_DECISION`，不得直接宣称可长期无人值守。
+
+  执行结果：审查修复前，7.6 的 15 分钟 foreground smoke 与修复后的 2 小时 systemd user service 验收均为 `PASS`；第一轮 2 小时 run 暴露的受控停止误记 source gap 已修复并复测通过。阶段审查后已修改 live runtime source kind 与 backpressure gap 语义，最终二进制已重新远端补验：15 分钟 foreground smoke `training-smoke-phase7fix-20260706T235126Z` 与 2 小时 systemd run `training-systemd-20260707T000659Z` 均为 `PASS`，source gaps `[]`，partial_count `0`，覆盖拆分后的 `binance_depth_snapshot` / `binance_depth_update` source kind。第二轮审查修复 source queue backpressure observation 后，最终二进制再次完成远端 gate：15 分钟 foreground smoke `training-smoke-phase7obs-20260707T022854Z` 为 `PASS`，source gaps `[]`，partial_count `0`，coverage 为 Polymarket market `31019`、Binance depth snapshot `1`、Binance depth update `8990`、Binance aggTrade `8569`、RTDS Chainlink `883`；2 小时 systemd run `training-systemd-phase7obs-20260707T024630Z` service 最终 `inactive/dead`、`Result=success`、`ExecMainStatus=0`，manifest verdict `PASS`，source gaps `[]`，coverage 为 Polymarket market `273359`、Binance depth snapshot `1`、Binance depth update `71989`、Binance aggTrade `50767`、RTDS Chainlink `7095`；segment_count `33`，rollover_count `24`、valid_rollover_count `24`，partial_count `0`。最终 2 小时 ResourceWatermark：RSS `128532480` bytes，artifact dir `61885162` bytes，queue_rows_high `899`，source_event_queue rows_high `39` 且 wait/timeout/drop 均为 `0`，writer_chunk_queue rows_high `899` 且 wait/timeout/drop 均为 `0`，write_events_us count/p50/p95/p99/max 为 `403211/16/50/78/8415`；manifest sha256 `78e96c62beb42dda8ca1b11c166e75af9e2b9fa17436b128294b544e04814c3f`，source coverage sha256 `fae3913fb3a6548b9de3869e82bbbbbfe82f68614a1c9291007d1900dbf4bd0b`，source gaps sha256 `4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945`，latency summary sha256 `3e78ec39dd048d2363be9e587a4c91c9a8856b147c2a32c423710f10e8d78b17`，rollover edges sha256 `23d76f8291b2cbf9dc44105697beb8f544c27638adacfc3438c45c5746d4e22e`，remote training binary sha256 `92a433e1854e3214ce5f8ce8c2f709e7bd6225e19791b4e1b315d8eac53c1b1a`。最终代码运行时复审修复 segment manifest/max_bytes/writer dropped_rows 后，执行 5 分钟远端 smoke `training-smoke-phase7manifest-20260707T050749Z`，manifest verdict `PASS`，source gaps `[]`，partial_count `0`，coverage 为 Polymarket market `13625`、Binance depth snapshot `1`、Binance depth update `2990`、Binance aggTrade `3709`、RTDS Chainlink `300`。抽查 segment manifest 已包含 `validation_verdict=Complete`、`collector_binary_sha256=4f0304f6370ff379284778977f831929b9557cc72ace60ec0eb9d7c6efc55148`、source config digest、2 个 consumer boundary declaration、required finalized parquet file、`rollover_reason=shutdown_finalize`、ResourceWatermark 与 writer queue watermark；run manifest sha256 `06bec342bb7e6062b7476b9eddfdb652050c860e3dabbe7ae75adae1125180d3`，sample segment manifest sha256 `03d7df1e076d4b6b879a64295ab4f4d8145ab0a2c16ddf5e8e70a0c6a5cf0cc6`，remote training binary sha256 `4f0304f6370ff379284778977f831929b9557cc72ace60ec0eb9d7c6efc55148`。
+
+  最新二进制的 5 分钟 smoke 之后，已按审查要求追加完整 2 小时 systemd gate：run id `training-systemd-phase7manifest-20260707T052135Z`，service 最终 `inactive/dead`、`Result=success`、`ExecMainStatus=0`，manifest verdict `PASS`，collector region `eu-west-1`，collector host id `ip-172-26-10-0`，source gaps `[]`，partial_count `0`。coverage 为 Polymarket market `283696`、Binance depth snapshot `1`、Binance depth update `71990`、Binance aggTrade `54283`、RTDS Chainlink `7095`；segment_count `33`，按源分别为 Polymarket `8`、Binance depth snapshot `1`、Binance depth update `8`、Binance aggTrade `8`、RTDS `8`；rollover_count `24`、valid_rollover_count `24`。最终 ResourceWatermark：RSS `131325952` bytes，artifact dir `63779132` bytes，queue_rows_high `559`，source_event_queue rows_high `28` 且 wait/timeout/drop 均为 `0`，writer_chunk_queue rows_high `559` 且 wait/timeout/drop 均为 `0`，write_events_us count/p50/p95/p99/max 为 `417065/15/48/76/12277`；manifest sha256 `27b6ef1030710a4ff71b7f91a1b28af6379a9f1d63d9e5d6edcc009aa1669030`，source coverage sha256 `9e91b9b8b56ebf8b9c700c83c382f650e9736bab926a8b045c016e13f0202414`，source gaps sha256 `4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945`，latency summary sha256 `714296443bd8518c398c531cd857134a595d11ffb5c8e44ef9f21a8a1590d0d6`，rollover edges sha256 `d29e9cba7a1d4491416dd6f81cba30f3579b08769b340d755cb075e528934051`，sample segment manifest sha256 `a04ef92eec95e4033ddd10ca1dd80990b1879397884115f82c4ac6c1ca164f13`，remote training binary sha256 `4f0304f6370ff379284778977f831929b9557cc72ace60ec0eb9d7c6efc55148`。
+
+- [x] **步骤 7.8.4：阶段 7 自审与独立审查**
+
+  自审检查：
+
+  - 三二进制职责是否清晰且没有影子实现。
+  - 训练 cold path 与 paper/live hot path 是否仍保持边界。
+  - soft rollover 是否被实现为非 fatal。
+  - timestamp / causal cutoff 语义是否和需求一致。
+  - README 命令是否使用本地 `/home/chillchill/btc-updown-marketmaker` 构建、远端 `~/btc-updown-marketmaker` 运行。
+  - 是否没有把 wallet、model、交易逻辑、NOE/ledger、archive/upload/gzip 纳入 `data-collect`。
+
+  阶段完成前必须按阶段推进通用 gate 派生独立审查 subagent；审查通过后才能 commit/push，并进入下一步部署或持续运行用户决策。
+
+  执行结果：阶段 7 最终复审已完成，三个独立 subagent 均返回 `PASS_WITH_NOTES`，未发现阻塞问题。部署 gate 复审确认此前“最新二进制缺 2 小时 gate”的 blocker 已由 `training-systemd-phase7manifest-20260707T052135Z` 补齐；需求/文档一致性复审确认 `data-collect` 边界、训练 cold path、paper/live hot path、路径口径和 Phase 7 资源门控限制说明一致；代码/运行时质量复审确认 source kind 拆分、可恢复 backpressure wait、segment manifest atomic sidecar、soft rollover 和 release export 合同成立。非阻塞 notes：paper/live hot binary 当前仍只验收 heartbeat/status handoff server 与 fake consumer，不是正式交易服务器 `external_market_event` 长跑；完整 byte/age/writer-lag/memory hard constraint 属于后续生产硬化，不作为本阶段已完成项；提交时必须排除无关未跟踪文件。
+
+## 十三、方案不一致决策门
 
 执行中出现以下任一计划级不一致或 fatal 条件，必须停止当前方向，记录事实、影响、可选项和推荐选项，并让用户决定。普通 `source gap`、`stale`、`coverage drop`、单个 artifact incomplete 或可恢复 backpressure 属于运行时质量/覆盖信号，按“运行时校验分级与失败动作”记录和恢复，不得直接升级为本决策门：
 
@@ -1837,13 +2449,15 @@ Phase 5 执行结果：
 5. 为满足 writer、manifest、atomic rename、source coverage 或 health/gap/reconnect 需求，需要扩大到 archive/upload/listing/gzip 或对象存储完整性。
 6. 实现需要把 labels、features、tick_stream、训练切分、T-30 样本加工、paper/live append-only log、order evidence、NOE/ledger、execution feedback ingestion 或交易逻辑写进 `data-collect`。
 7. 测试或 runtime 结果系统性显示需求验收标准不成立，且不能通过本计划范围内的分级降级、重试、gap 记录、manifest incomplete 或 source-level 恢复满足验收。
+8. 训练、paper、live 三类二进制无法在不复制 source adapter / writer / manifest 逻辑的前提下保持一致合同，或 paper/live hot binary 需要接管交易 runtime 职责才能工作。
+9. 数据采集服务器 2 小时持续采集显示 soft rollover 会导致停机、drop/send timeout 无法恢复、partial artifact 被消费者发现、或真实四源吞吐与资源水位无法满足需求基线。
 
-## 十三、最小验证命令清单
+## 十四、最小验证命令清单
 
 计划文档自身验证：
 
 ```bash
-rg -n "/home/chillchill/btc-updown-marketmaker|~/btc-updown-marketmaker|datasets|路径执行口径|data_collect_run_root|data_collect_artifact_root|阶段推进通用 gate|数据格式合同|运行时校验分级|ProcessFatal|ArtifactIncomplete|SourceDegraded|BackpressureDegraded|hysteresis|source_format_contract|consumer_format_compatibility_contract|demand/data-collect-demand.md|阶段 0|技术测试|性能验证|远端 Phase 0|30-60 分钟|5-10 分钟|2-4 小时|真实网络 reachability|market_discovery_probe|real_source_alignment_probe|custom_feature_enabled|PASS_TO_PHASE1_REVIEW|2k-5k events/s|bounded queue|backpressure|ResourceWatermark|atomic rename|source gap|recv_time_utc|Polymarket market channel|Binance BTCUSDT aggTrade|RTDS Chainlink|SDK 缺口|用户审查" plan/data-collect-plan.md changelog/data-collect-changelog.md
+rg -n "/home/chillchill/btc-updown-marketmaker|~/btc-updown-marketmaker|datasets|路径执行口径|data_collect_run_root|data_collect_artifact_root|阶段推进通用 gate|数据格式合同|运行时校验分级|ProcessFatal|ArtifactIncomplete|SourceDegraded|BackpressureDegraded|hysteresis|source_format_contract|consumer_format_compatibility_contract|demand/data-collect-demand.md|阶段 0|阶段 7|技术测试|性能验证|远端 Phase 0|30-60 分钟|5-10 分钟|2-4 小时|15 分钟|2 小时|真实网络 reachability|market_discovery_probe|real_source_alignment_probe|data-collect-training-collector|data-collect-paper-hot|data-collect-live-hot|training-collector-deploy-readme|paper-live-hot-path-integration|soft rollover|runtime receive timestamp|event_available_time|custom_feature_enabled|PASS_TO_PHASE1_REVIEW|2k-5k events/s|bounded queue|backpressure|ResourceWatermark|atomic rename|source gap|recv_time_utc|Polymarket market channel|Binance BTCUSDT aggTrade|RTDS Chainlink|SDK 缺口|用户审查" plan/data-collect-plan.md changelog/data-collect-changelog.md
 rg -n "[T]ODO|[T]BD|待[补]|以后再[填]|[p]laceholder" plan/data-collect-plan.md changelog/data-collect-changelog.md
 awk '/[ \t]$/ { print FILENAME ":" FNR ": trailing whitespace"; bad=1 } END { exit bad }' plan/data-collect-plan.md changelog/data-collect-changelog.md
 ```
@@ -1852,13 +2466,13 @@ awk '/[ \t]$/ { print FILENAME ":" FNR ": trailing whitespace"; bad=1 } END { ex
 
 ```bash
 cd /home/chillchill/btc-updown-marketmaker
-cargo fmt --check -p data-collect
+cargo fmt --all -- --check
 cargo clippy -p data-collect --all-targets -- -D warnings
 cargo test -p data-collect --lib --tests -- --nocapture
 cargo bench -p data-collect --bench throughput_probe -- --sample-size 20
 ```
 
-## 十四、需求覆盖索引
+## 十五、需求覆盖索引
 
 | 需求第九节编号 | 需求主题 | 覆盖阶段 / 任务 | 证明方式 |
 | --- | --- | --- | --- |
@@ -1883,15 +2497,20 @@ cargo bench -p data-collect --bench throughput_probe -- --sample-size 20
 | 19 | 性能验收、`2k-5k events/s`、writer queue、ResourceWatermark、hardware tier、hot/durable latency | 任务 0.4、0.6、4.2、4.3、6.2 | throughput bench、本地/远端 hardware validation、0.6.11 hot/parquet latency run、ResourceWatermark soft/hard threshold contract |
 | 20 | 真实 `btc-updown-5m` Phase 0 discovery、rollover、四源长跑、时间线对齐和 hot/durable path 验证 | 任务 0.6.9、0.6.10、0.6.11、0.7.2 | market discovery receipt、real-source long-run manifest、hot/parquet latency summary、coverage/resource/gap evidence、远端 verdict |
 | 21 | ResourceWatermark hard threshold policy receipt | 任务 0.6、4.3、运行时校验分级 | threshold policy receipt、soft/hard threshold action tests |
-| 22 | archive/upload/listing/gzip 非范围 | 路径执行口径、第十二节决策门、6.2 | 非范围声明、决策门、非范围泄漏扫描 |
-| 23 | Polymarket Rust SDK-first 和 SDK 缺口审批 | 任务 0.2、2.1、第十二节决策门 | SDK gap report、SDK-first adapter gate |
+| 22 | archive/upload/listing/gzip 非范围 | 路径执行口径、第十三节决策门、6.2 | 非范围声明、决策门、非范围泄漏扫描 |
+| 23 | Polymarket Rust SDK-first 和 SDK 缺口审批 | 任务 0.2、2.1、第十三节决策门 | SDK gap report、SDK-first adapter gate |
 | 24 | 不把 data-pipeline、paper/live 交易逻辑、SDK 旁路写进 data-collect | 任务 1.2、5.1、5.2、6.2 | consumer compatibility contract、training/paper/live boundary tests、非范围扫描 |
+| 25 | 三运行形态独立二进制、sha256、部署/接入文档 | 任务 7.1、7.4、7.5、7.7 | release build、export script、deploy README contract、paper/live hot path doc contract |
+| 26 | source kind + recv UTC day 多 segment 分区与 manifest 证据 | 任务 7.2、7.3、7.6 | segment rollover contract、causal time contract、远端 segment manifests |
+| 27 | max rows/bytes/time/day/shutdown soft rollover 非停机 | 任务 7.2、7.6 | soft rollover tests、2 小时远端运行、backpressure/resource evidence |
+| 28 | 训练 availability time 与 paper/live runtime receive time 区分 | 任务 7.2、7.4、7.7 | causal time contract、hot handoff fake consumer、paper/live integration doc |
+| 29 | paper/live hot path IPC/local stream 接入合同与非范围边界 | 任务 7.4、7.7 | hot path handoff contract、paper/live hot path integration doc、非部署 gate |
 
-## 十五、数据格式与消费者兼容性检查
+## 十六、数据格式与消费者兼容性检查
 
 | 消费方 | 是否直接消费 `data-collect` typed raw parquet | 必须满足的数据格式 | 不允许的误用 |
 | --- | --- | --- | --- |
 | `data-pipeline` | 是，作为外部市场源 typed raw mirror 输入 | 逐源 parquet source kind、parseable `raw_json`、schema version、source timestamp、`recv_time_utc`、source coverage、manifest、UTC day 分区 | 把 `data-collect` 当成 labels/features/tick_stream/训练切分生成器 |
-| 训练 | 不直接把 raw parquet 当训练样本；通过 `data-pipeline` 后消费 | `data-pipeline` 生成 labels/features/tick_stream/split 后，训练再消费；raw parquet 完整只证明外部源可处理 | parquet 完整即训练批准、source coverage 完整即 label 完整 |
-| paper | hot path 消费 realtime handoff 或等价低延迟事件流；cold mirror 只能作外部市场源证据、coverage、manifest | 与训练/live 共用 source kind、schema version、timestamp namespace；paper runtime receive timestamp 由 paper 主机 artifact 提供 | 用非爱尔兰 collector `recv_time_utc` 冒充 paper runtime receive timestamp，用 finalized parquet 作为 paper 热路径唯一事实来源，或用 parquet 替代 append-only log |
-| live | hot path 消费 realtime handoff 或等价低延迟事件流；cold mirror 只能作外部市场源证据、coverage、manifest | 与训练/paper 共用 source kind、schema version、timestamp namespace；live runtime receive timestamp 由 live 主机 artifact 提供 | 在 live 小主机编译/重处理，用 finalized parquet 作为 live 热路径唯一事实来源，或用 `data-collect` 生成交易决策、NOE/ledger、execution feedback label |
+| 训练 | 不直接把 raw parquet 当训练样本；通过 `data-pipeline` 后消费 | 训练 raw mirror 由 `data-collect-training-collector` 写入；按 `source_kind + recv_time_utc UTC day` 多 segment 分区；`event_available_time` 默认等于采集服务器 `recv_time_utc`；`data-pipeline` 生成 labels/features/tick_stream/split 后，训练再消费 | parquet 完整即训练批准、source coverage 完整即 label 完整，或用 source/platform timestamp 让晚收到事件提前进入 causal cutoff |
+| paper | hot path 消费 `data-collect-paper-hot` 的 realtime handoff 或等价低延迟事件流；cold mirror 只能作外部市场源证据、coverage、manifest | 与训练/live 共用 source kind、schema version、timestamp namespace；paper runtime receive timestamp 由 paper 主机 runtime/consumer 在收到 handoff frame 时记录 | 用训练服务器 `recv_time_utc` 冒充 paper runtime receive timestamp，用 finalized parquet 作为 paper 热路径唯一事实来源，或用 parquet 替代 append-only log |
+| live | hot path 消费 `data-collect-live-hot` 的 realtime handoff 或等价低延迟事件流；cold mirror 只能作外部市场源证据、coverage、manifest | 与训练/paper 共用 source kind、schema version、timestamp namespace；live runtime receive timestamp 由 live 主机 runtime/consumer 在收到 handoff frame 时记录 | 在 live 小主机编译/重处理，用 finalized parquet 作为 live 热路径唯一事实来源，或用 `data-collect` 生成交易决策、NOE/ledger、execution feedback label |

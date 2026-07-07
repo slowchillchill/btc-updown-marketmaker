@@ -1,0 +1,231 @@
+use std::io;
+use std::path::{Component, Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CollectorBinaryRole {
+    TrainingCold,
+    PaperHot,
+    LiveHot,
+}
+
+impl CollectorBinaryRole {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TrainingCold => "training_cold",
+            Self::PaperHot => "paper_hot",
+            Self::LiveHot => "live_hot",
+        }
+    }
+
+    pub const fn binary_name(self) -> &'static str {
+        match self {
+            Self::TrainingCold => "data-collect-training-collector",
+            Self::PaperHot => "data-collect-paper-hot",
+            Self::LiveHot => "data-collect-live-hot",
+        }
+    }
+
+    pub const fn output_suffix(self) -> &'static str {
+        match self {
+            Self::TrainingCold => "training/typed_raw",
+            Self::PaperHot => "paper/data_collect_handoff",
+            Self::LiveHot => "live/data_collect_handoff",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeploymentRuntimeConfig {
+    pub role: CollectorBinaryRole,
+    pub dataset_root: PathBuf,
+    pub output_root: PathBuf,
+    pub run_id: String,
+    pub max_runtime_secs: Option<u64>,
+    pub collector_region_override: Option<String>,
+    pub config_path: Option<PathBuf>,
+    pub requires_consumer_runtime_receive_timestamp: bool,
+    pub allows_training_cold_mirror: bool,
+    pub allows_hot_handoff: bool,
+    pub allows_training_reprocess: bool,
+    pub allows_parquet_full_discovery: bool,
+    pub requires_rust_toolchain_on_runtime_host: bool,
+}
+
+impl DeploymentRuntimeConfig {
+    pub fn for_role(
+        role: CollectorBinaryRole,
+        dataset_root: PathBuf,
+        run_id: impl Into<String>,
+    ) -> Result<Self> {
+        let dataset_root = normalize_absolute_root(&dataset_root)?;
+        let output_root = role
+            .output_suffix()
+            .split('/')
+            .fold(dataset_root.clone(), |path, component| path.join(component));
+        let config = Self {
+            role,
+            dataset_root,
+            output_root,
+            run_id: run_id.into(),
+            max_runtime_secs: None,
+            collector_region_override: None,
+            config_path: None,
+            requires_consumer_runtime_receive_timestamp: matches!(
+                role,
+                CollectorBinaryRole::PaperHot | CollectorBinaryRole::LiveHot
+            ),
+            allows_training_cold_mirror: role == CollectorBinaryRole::TrainingCold,
+            allows_hot_handoff: matches!(
+                role,
+                CollectorBinaryRole::PaperHot | CollectorBinaryRole::LiveHot
+            ),
+            allows_training_reprocess: false,
+            allows_parquet_full_discovery: false,
+            requires_rust_toolchain_on_runtime_host: false,
+        };
+        validate_runtime_config(&config)?;
+        Ok(config)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeReceipt {
+    pub binary_role: String,
+    pub binary_name: String,
+    pub run_id: String,
+    pub git_commit: String,
+    pub binary_sha256: String,
+    pub config_digest: String,
+    pub dataset_root_canonical: PathBuf,
+    pub output_root: PathBuf,
+    pub collector_host_id: String,
+    pub collector_region: String,
+    pub host_clock_sync_status: String,
+}
+
+impl RuntimeReceipt {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        config: &DeploymentRuntimeConfig,
+        git_commit: impl Into<String>,
+        binary_sha256: impl Into<String>,
+        config_digest: impl Into<String>,
+        collector_host_id: impl Into<String>,
+        collector_region: impl Into<String>,
+        host_clock_sync_status: impl Into<String>,
+    ) -> Result<Self> {
+        validate_runtime_config(config)?;
+        let receipt = Self {
+            binary_role: config.role.as_str().to_owned(),
+            binary_name: config.role.binary_name().to_owned(),
+            run_id: config.run_id.clone(),
+            git_commit: git_commit.into(),
+            binary_sha256: binary_sha256.into(),
+            config_digest: config_digest.into(),
+            dataset_root_canonical: config.dataset_root.clone(),
+            output_root: config.output_root.clone(),
+            collector_host_id: collector_host_id.into(),
+            collector_region: collector_region.into(),
+            host_clock_sync_status: host_clock_sync_status.into(),
+        };
+        receipt.validate()?;
+        Ok(receipt)
+    }
+
+    fn validate(&self) -> Result<()> {
+        for (field, value) in [
+            ("binary_role", self.binary_role.as_str()),
+            ("binary_name", self.binary_name.as_str()),
+            ("run_id", self.run_id.as_str()),
+            ("git_commit", self.git_commit.as_str()),
+            ("binary_sha256", self.binary_sha256.as_str()),
+            ("config_digest", self.config_digest.as_str()),
+            ("collector_host_id", self.collector_host_id.as_str()),
+            ("collector_region", self.collector_region.as_str()),
+            (
+                "host_clock_sync_status",
+                self.host_clock_sync_status.as_str(),
+            ),
+        ] {
+            if value.trim().is_empty() {
+                return Err(invalid_input(format!("{field} must be non-empty")).into());
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn validate_runtime_config(config: &DeploymentRuntimeConfig) -> Result<()> {
+    if config.run_id.trim().is_empty() {
+        return Err(invalid_input("run_id must be non-empty").into());
+    }
+    validate_path("dataset_root", &config.dataset_root)?;
+    validate_path("output_root", &config.output_root)?;
+    if !config.output_root.starts_with(&config.dataset_root) {
+        return Err(invalid_input(format!(
+            "output root {} escapes dataset root {}",
+            config.output_root.display(),
+            config.dataset_root.display()
+        ))
+        .into());
+    }
+    if let Some(config_path) = config.config_path.as_ref() {
+        validate_path("config_path", config_path)?;
+        if !config_path.is_file() {
+            return Err(invalid_input(format!(
+                "config file does not exist: {}",
+                config_path.display()
+            ))
+            .into());
+        }
+    }
+    match config.role {
+        CollectorBinaryRole::TrainingCold => {
+            if !config.allows_training_cold_mirror || config.allows_hot_handoff {
+                return Err(invalid_input("training role boundary mismatch").into());
+            }
+        }
+        CollectorBinaryRole::PaperHot | CollectorBinaryRole::LiveHot => {
+            if !config.allows_hot_handoff
+                || config.allows_training_cold_mirror
+                || !config.requires_consumer_runtime_receive_timestamp
+            {
+                return Err(invalid_input("paper/live role boundary mismatch").into());
+            }
+        }
+    }
+    if config.role == CollectorBinaryRole::LiveHot
+        && (config.allows_training_reprocess
+            || config.allows_parquet_full_discovery
+            || config.requires_rust_toolchain_on_runtime_host)
+    {
+        return Err(invalid_input("live role must not require build or training reprocess").into());
+    }
+    Ok(())
+}
+
+fn normalize_absolute_root(path: &Path) -> Result<PathBuf> {
+    validate_path("dataset_root", path)?;
+    Ok(path.to_path_buf())
+}
+
+fn validate_path(field: &str, path: &Path) -> Result<()> {
+    if !path.is_absolute() {
+        return Err(invalid_input(format!("{field} must be absolute: {}", path.display())).into());
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(invalid_input(format!("{field} must not contain parent components")).into());
+    }
+    Ok(())
+}
+
+fn invalid_input(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message.into())
+}

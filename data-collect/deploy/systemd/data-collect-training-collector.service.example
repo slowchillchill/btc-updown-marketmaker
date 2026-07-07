@@ -1,0 +1,15 @@
+[Unit]
+Description=data-collect training collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/btc-updown-marketmaker
+Environment=DATA_COLLECT_RUNTIME_MODE=live
+ExecStart=/usr/bin/env bash -lc 'exec %h/btc-updown-marketmaker/data-collect/current/bin/data-collect-training-collector --dataset-root %h/btc-updown-marketmaker/datasets --run-id training-systemd-$(date -u +%%Y%%m%%dT%%H%%M%%SZ)'
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
