@@ -251,10 +251,15 @@ fn oldest_complete_day_candidate(
         check_retention_deadline(deadline)?;
         let entry = entry?;
         let day_path = entry.path();
+        let file_type = entry.file_type()?;
         let Some(file_name) = day_path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if !day_path.is_dir() || !file_name.starts_with("utc_day=") {
+        if file_type.is_symlink() {
+            non_deletable_reasons.push(format!("symlink_day_entry:{}", day_path.display()));
+            continue;
+        }
+        if !file_type.is_dir() || !file_name.starts_with("utc_day=") {
             non_deletable_reasons.push(format!("non_day_entry:{}", day_path.display()));
             continue;
         }
@@ -279,6 +284,9 @@ fn complete_day_candidate(
     deadline: Option<Instant>,
 ) -> Result<Option<RetentionCandidate>> {
     check_retention_deadline(deadline)?;
+    if fs::symlink_metadata(day_path)?.file_type().is_symlink() {
+        return Ok(None);
+    }
     let canonical_day = day_path.canonicalize()?;
     let canonical_root = typed_raw_root.canonicalize()?;
     if !canonical_day.starts_with(&canonical_root)
@@ -294,10 +302,11 @@ fn complete_day_candidate(
         check_retention_deadline(deadline)?;
         let entry = entry?;
         let path = entry.path();
+        let file_type = entry.file_type()?;
         let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
             return Ok(None);
         };
-        if !path.is_dir() || !file_name.starts_with("source_kind=") {
+        if file_type.is_symlink() || !file_type.is_dir() || !file_name.starts_with("source_kind=") {
             return Ok(None);
         }
         source_dirs = source_dirs.saturating_add(1);
@@ -326,6 +335,10 @@ fn source_dir_is_complete(source_dir: &Path, deadline: Option<Instant>) -> Resul
         check_retention_deadline(deadline)?;
         let entry = entry?;
         let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            return Ok(false);
+        }
         if path.is_dir() {
             return Ok(false);
         }
@@ -379,6 +392,10 @@ fn contains_partial_artifact(root: &Path, deadline: Option<Instant>) -> Result<b
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or_default();
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            return Ok(true);
+        }
         if file_name == ".rsync-partial"
             || file_name.contains(".rsync-partial")
             || file_name.ends_with(".tmp")
@@ -389,7 +406,7 @@ fn contains_partial_artifact(root: &Path, deadline: Option<Instant>) -> Result<b
         {
             return Ok(true);
         }
-        if path.is_dir() && contains_partial_artifact(&path, deadline)? {
+        if file_type.is_dir() && contains_partial_artifact(&path, deadline)? {
             return Ok(true);
         }
     }
@@ -406,8 +423,10 @@ fn dir_size_bytes(root: &Path, deadline: Option<Instant>) -> Result<u64> {
         check_retention_deadline(deadline)?;
         let entry = entry?;
         let path = entry.path();
-        let metadata = entry.metadata()?;
-        if metadata.is_dir() {
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            bytes = bytes.saturating_add(metadata.len());
+        } else if metadata.is_dir() {
             bytes = bytes.saturating_add(dir_size_bytes(&path, deadline)?);
         } else {
             bytes = bytes.saturating_add(metadata.len());
@@ -421,11 +440,26 @@ fn remove_dir_all_with_deadline(root: &Path, deadline: Option<Instant>) -> Resul
     if !root.exists() {
         return Ok(());
     }
+    if fs::symlink_metadata(root)?.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("retention delete refuses symlink path: {}", root.display()),
+        )
+        .into());
+    }
     for entry in fs::read_dir(root)? {
         check_retention_deadline(deadline)?;
         let entry = entry?;
         let path = entry.path();
-        if path.is_dir() {
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("retention delete refuses symlink path: {}", path.display()),
+            )
+            .into());
+        }
+        if metadata.is_dir() {
             remove_dir_all_with_deadline(&path, deadline)?;
         } else {
             fs::remove_file(&path)?;

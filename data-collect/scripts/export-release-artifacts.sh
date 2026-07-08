@@ -33,10 +33,12 @@ mkdir -p "$EXPORT_ROOT/bin" "$EXPORT_ROOT/deploy/systemd" "$EXPORT_ROOT/docs"
 DATA_COLLECT_GIT_COMMIT="$BUILD_GIT_COMMIT" \
 CARGO_TARGET_DIR="$TARGET_DIR" cargo build -p data-collect --release \
   --bin data-collect-training-collector \
+  --bin data-collect-retention-admin \
   --bin data-collect-paper-hot \
   --bin data-collect-live-hot
 
 install -Dm755 "$TARGET_DIR/release/data-collect-training-collector" "$EXPORT_ROOT/bin/data-collect-training-collector"
+install -Dm755 "$TARGET_DIR/release/data-collect-retention-admin" "$EXPORT_ROOT/bin/data-collect-retention-admin"
 install -Dm755 "$TARGET_DIR/release/data-collect-paper-hot" "$EXPORT_ROOT/bin/data-collect-paper-hot"
 install -Dm755 "$TARGET_DIR/release/data-collect-live-hot" "$EXPORT_ROOT/bin/data-collect-live-hot"
 install -Dm644 data-collect/deploy/systemd/data-collect-training-collector.service.example \
@@ -59,6 +61,7 @@ install -Dm644 data-collect/docs/paper-live-hot-path-integration.md \
 
 (cd "$EXPORT_ROOT" && sha256sum \
   bin/data-collect-training-collector \
+  bin/data-collect-retention-admin \
   bin/data-collect-paper-hot \
   bin/data-collect-live-hot \
   deploy/systemd/data-collect-training-collector.service.example \

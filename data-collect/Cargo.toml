@@ -43,6 +43,10 @@ name = "data-collect-training-collector"
 path = "src/bin/data_collect_training_collector.rs"
 
 [[bin]]
+name = "data-collect-retention-admin"
+path = "src/bin/data_collect_retention_admin.rs"
+
+[[bin]]
 name = "data-collect-paper-hot"
 path = "src/bin/data_collect_paper_hot.rs"
 

@@ -15,6 +15,7 @@ pub mod polymarket_orderbook_layout;
 pub mod publish;
 pub mod resource;
 pub mod retention;
+pub mod retention_admin;
 pub mod runtime;
 pub mod scheduler;
 pub mod segment;

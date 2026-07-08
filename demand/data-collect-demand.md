@@ -108,6 +108,7 @@
 18. Binance depth snapshot/update、Binance aggTrade、RTDS Chainlink 必须进入 hourly typed layout 修改范围，分别使用官方字段的 source-specific schema：`binance_depth_snapshot` 保留 `timestamp_received`、`lastUpdateId` 和完整 `bids/asks`，`binance_depth_update` 保留 `timestamp_received`、`e/E/s/U/u/b/a` 与 stitch evidence，`binance_aggtrade` 保留 `timestamp_received`、`event_time`、`e/s/a/p/q/f/l/m` 的 typed 字段并通过 raw evidence/parser 校验官方 `T`，`polymarket_rtds_chainlink_btc_usd` 保留 `timestamp_received`、message timestamp、payload timestamp、symbol、value、topic 和 subscription filter。
 19. 训练 dataset retention threshold 为 `50_000_000_000` bytes，作用域是 `datasets/training`。默认生产策略只写 run-level dry-run/no-op retention policy receipt；真实删除只允许在显式启用 delete mode 或用户单独批准后删除 `training/typed_raw/utc_day=*` 下最老 finalized complete UTC day。
 20. finalized complete UTC day 的删除判定必须 fail closed：current day、running/digesting/tmp/`.rsync-partial`、incomplete day、manual-inspection、run manifests、startup receipts、未知文件角色和非 `training/typed_raw/utc_day=*` 路径均不得删除；超过阈值但无可删 complete day 时必须写 ResourceWatermark hard-threshold evidence 并受控停止新采集。
+21. retention 远端安全验证不得为了触发 50GB 阈值制造大文件。生产 `~/btc-updown-marketmaker/datasets/` 首次只允许 dry-run/no-op 验证；真实删除路径只能在数据采集服务器的独立临时验证根下用小阈值验证，且必须先通过 canonical path、symlink、相似前缀路径和 receipt path containment 防护。验证通过后必须删除该临时验证根、临时 receipt、fixture、测试脚本副本、临时日志和临时上传 binary/release，并把清理证据拉回本地。
 
 ## 五、网络异常与恢复要求
 
@@ -207,7 +208,7 @@
 30. PMXT-inspired Polymarket orderbook hourly parquet 必须证明 `book` rows 全部保留可解析 `bids` / `asks` 数组字段；真实市场中单侧空数组可以是盘口状态，必须在人工检查报告中单独计数，不得把完整 price-size 数组缩水成 `bids_len` / `asks_len` 后伪装完整。`price_change`、`last_trade_price`、`tick_size_change`、`best_bid_ask`、`new_market`、`market_resolved` 必须有对应 typed 字段、raw-equivalent evidence 或 nullable unavailable reason。
 31. Binance depth snapshot/update、Binance aggTrade、RTDS Chainlink hourly parquet 必须分别证明 required typed fields 存在，且不能只依赖 opaque `source_kind/raw_json` 宽表；Binance depth 还必须证明 snapshot/update stitch predicate、`local_u` 单调推进或 gap/resnapshot 可解释。
 32. 训练 cold path finalized discovery 必须使用 day-first `utc_day=YYYY-MM-DD/source_kind=<source_kind>` 路径；legacy source-first 路径只能作为历史只读兼容被显式标记，不能与新产物混写。
-33. 50GB retention 验收必须证明 dry-run/no-op receipt、可选 deletion receipt、最老 finalized complete UTC day 删除边界、受保护目录不删除，以及无可删 complete day 时 fail closed。
+33. 50GB retention 验收必须证明 dry-run/no-op receipt、可选 deletion receipt、最老 finalized complete UTC day 删除边界、受保护目录不删除，以及无可删 complete day 时 fail closed；远端小阈值 enabled 验证只能发生在独立临时验证根，必须证明 canonical/symlink/receipt containment 安全门成立，并在完成前删除数据采集服务器上的测试产物和相关文件。
 
 ## 十、证据来源
 

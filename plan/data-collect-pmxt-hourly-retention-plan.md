@@ -1094,9 +1094,140 @@
 
   目标窗口检查结果：Polymarket selected parquet `295059` 行，事件计数为 `price_change=278514`、`best_bid_ask=7611`、`book=6100`、`last_trade_price=2833`、`new_market=1`；两个 asset id 均覆盖，`book` 的 `bids` / `asks` 字段均有效 `6100/6100`，其中 `6024` 行两侧非空、`76` 行单侧为空数组，按真实盘口状态单独记录。解释性 replay 精确匹配 `274818/278502` 条已检查 `price_change`，剩余 `3684` 条记录为 typed-row 展开缺少 message-level sequence id 的解释限制。Binance aggTrade selected parquet `3490` 行；Binance depth update selected parquet `3400` 行，`local_u_after` 单调不降，`stitch_gap_reason_non_null=0`，`stitch_verdict_counts={"continuous_depth_update":3400}`；Binance bootstrap snapshot `1` 行，`last_update_id=97121605990`；RTDS selected parquet `335` 行，最大接收间隔 `3552ms`，`>60000ms` 断档数 `0`。metadata 证据来自 `polymarket_market` 的 `new_market` 行，可提供 slug、condition/market id 和 subscribed asset ids；active/acceptingOrders/tick/min-size 全字段不在当前 run 的独立 metadata source 中，作为剩余 schema 风险记录，不阻塞本 step 的“拉回数据供人工分析”目标。
 
-- [ ] **Step 10.6: retention 远端安全验证**
+- [x] **Step 10.6: retention 远端安全验证**
 
-  不直接制造 50GB 大文件。使用独立临时测试根和小阈值验证 deletion 行为；生产 datasets 根首次只做 dry-run 统计。真实删除只允许在 `training/typed_raw/utc_day=*` 且 day complete predicate 通过的路径执行，并且需要显式配置 `retention_delete_mode=enabled` 或单独用户批准。
+  目标：在数据采集服务器验证 retention 的生产默认 dry-run 行为、真实删除边界、fail-closed 边界和测试产物清理，不为了触发 `50_000_000_000` bytes 阈值制造大文件。
+
+  当前代码事实：`TrainingRetentionPolicy` 已支持 `threshold_bytes`、`delete_mode=dry_run/enabled`、oldest complete UTC day candidate、current/running/incomplete/manual-inspection/run manifest/startup receipt 保护和 fail-closed receipt；但正式 `data-collect-training-collector` 只按默认 50GB dry-run 在运行期触发，没有暴露 retention-only、小阈值、显式 delete mode 的远端验证入口。因此 10.6 先补一个窄用途 retention admin 入口，再做远端验证；不得用完整 live collector 冒充 enabled deletion 验证。
+
+  - [x] **Step 10.6.1: 增加 retention-only admin 入口**
+
+    新增一个不启动任何市场源、不连接网络、不写 hourly parquet 的窄二进制或等价子命令，例如 `data-collect-retention-admin`。参数至少包括：
+
+    - `--dataset-root <abs-path>`
+    - `--receipt-path <abs-path>`
+    - `--threshold-bytes <u64>`
+    - `--delete-mode dry-run|enabled`
+    - `--current-utc-day YYYY-MM-DD`
+    - `--allow-enabled-delete-validation-root`
+    - `--validation-root <abs-path>`，仅 `delete-mode=enabled` 时允许使用。
+    - `--validate-options-only`，只校验参数和安全门，不调用 retention scan，不写 receipt，不删除任何文件。
+
+    安全边界：
+
+    - `dataset_root`、`receipt_path` 和 `validation_root` 必须是绝对路径，拒绝 `..` 路径逃逸。
+    - `delete-mode=enabled` 必须 fail closed，除非同时满足：显式传入 `--allow-enabled-delete-validation-root`，传入 `--validation-root`，`validation_root` / `dataset_root` / `receipt_path` 的 parent 均可 canonicalize，且 canonical `dataset_root` 是 canonical `validation_root` 的子路径。
+    - enabled safety predicate 必须用 canonical `Path` containment 判断，不得用字符串 contains / starts_with。生产 `~/btc-updown-marketmaker/datasets`、相似前缀路径、symlink 指向验证根外、`..` 逃逸、receipt path 位于候选删除 day 下，均必须 fail closed。
+    - enabled 删除前必须检查 candidate deletion subtree；如果 `validation_root`、`dataset_root`、`receipt_path` parent 或 candidate subtree 任意位置出现 symlink，必须 fail closed，不得跟随 symlink 删除。
+    - `receipt_path` 必须位于 `validation_root/evidence/...` 或生产 dry-run 的等价 evidence 目录，且不得位于 `training/typed_raw/utc_day=*`、candidate day 或其他可能被删除的路径下。
+    - 10.6 不允许对生产 `~/btc-updown-marketmaker/datasets/` 执行 `enabled`。生产根只做默认 50GB dry-run/no-op 验证。
+    - admin 入口只调用现有 `TrainingRetentionPolicy`，不得实现第二套删除扫描逻辑。
+
+    本地测试：
+
+    - CLI/参数合同：相对路径、路径逃逸、缺 receipt path、非法 delete mode 均失败。
+    - enabled safety 合同：生产样式根、相似前缀根、symlink 根、未传 allow flag、未传 validation root、receipt path 落在 `training/typed_raw/utc_day=*` 均拒绝 enabled；独立验证根 + allow flag + canonical containment 才允许 enabled。
+    - `--validate-options-only` 合同：生产根 enabled 负例必须在进入 retention scan 前失败，且不创建 receipt、不删除文件。
+    - symlink 合同：candidate deletion subtree 中存在 symlink 时 fail closed，不删除 symlink 目标。
+    - 行为合同复用 `training_retention_contract`：dry-run 不删除、enabled 只删除最老 complete UTC day、无可删 day fail closed。
+
+  - [x] **Step 10.6.2: 本地验证与 release 导出**
+
+    - 运行 `cargo fmt --all -- --check`。
+    - 运行 `git diff --check`。
+    - 运行 `TMPDIR=/home/chillchill/tmp CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=target cargo test -p data-collect --test training_retention_contract -- --nocapture`。
+    - 运行新增 admin CLI 合同测试。
+    - 运行 `TMPDIR=/home/chillchill/tmp CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=target cargo clippy -p data-collect --all-targets -- -D warnings`。
+    - `data-collect/Cargo.toml` 必须声明 admin bin；`data-collect/scripts/export-release-artifacts.sh` 必须 build、install、checksum admin bin；release `SHA256SUMS` 必须包含 `data-collect-retention-admin`。
+    - 导出 release，并在本地记录 admin 二进制、training collector 二进制、git commit、sha256 和 release 目录。数据采集服务器仍使用 binary-only 上传；远端不运行 cargo 编译。
+    - 10.6 远端验证优先把 admin binary 上传到 `$VALIDATION_ROOT/bin/` 并在清理阶段删除；不需要切换生产 `current` symlink。若执行中必须上传 release dir，必须记录 release dir、是否改动 `current` symlink，并在清理阶段删除未作为生产 current 的临时 release。
+
+  - [x] **Step 10.6.3: 数据采集服务器生产根 dry-run 验证**
+
+    在数据采集服务器只读式验证生产根：
+
+    - 设置 `VALIDATION_ROOT=~/btc-updown-marketmaker/datasets-retention-validation/<run_id>`，并在其下创建 `bin/`、`evidence/production-dry-run/`、`logs/`。所有 10.6 receipt/log 先写入该 root，拉回本地后再整体删除。
+    - 验证 training collector service 当前未运行；若仍在运行，先记录状态并进入决策门，不在活动写入时做 before/after tree digest。
+    - 上传 admin binary 到 `$VALIDATION_ROOT/bin/data-collect-retention-admin`，记录 sha256；不切换 `~/btc-updown-marketmaker/data-collect/releases/current`。
+    - 记录 `~/btc-updown-marketmaker/datasets/` 和 `~/btc-updown-marketmaker/datasets/training` 的 `du -sb` before。
+    - 记录生产根 before inventory digest：`find ~/btc-updown-marketmaker/datasets/training -xdev -printf '%P\t%y\t%s\t%T@\\n' | sort | sha256sum`，并保存原始 inventory。
+    - 运行 admin 入口：`--dataset-root ~/btc-updown-marketmaker/datasets --receipt-path $VALIDATION_ROOT/evidence/production-dry-run/retention_policy_receipt.json --threshold-bytes 50000000000 --delete-mode dry-run --current-utc-day <today-utc>`。
+    - receipt 必须显示 `delete_mode=dry_run`，`action=noop` 或 `action=dry_run`，且不得出现 production deletion。
+    - 运行生产根 enabled 负例的非破坏性预检：`--dataset-root ~/btc-updown-marketmaker/datasets --receipt-path $VALIDATION_ROOT/evidence/production-enabled-negative/retention_policy_receipt.json --threshold-bytes 1 --delete-mode enabled --current-utc-day <today-utc> --validate-options-only`。该命令必须非 0 退出，且不得创建 receipt、不得调用 retention scan、不得删除文件。
+    - 记录 `du -sb` after、after inventory digest，生产根 inventory digest 必须与 before 一致；如服务未运行但 digest 变化，Step 10.6 失败并进入调查。
+    - 把 receipt、命令日志、before/after size、release sha256 拉回本地 `target/manual-inspection/retention-validation-<run_id>/production-dry-run/`。
+
+  - [x] **Step 10.6.4: 构造独立远端小 fixture 验证根**
+
+    在数据采集服务器创建独立临时验证根：
+
+    - `VALIDATION_ROOT=~/btc-updown-marketmaker/datasets-retention-validation/<run_id>`
+    - `DATASET_ROOT=$VALIDATION_ROOT/dataset`
+    - fixture 只在 `$DATASET_ROOT/training/typed_raw/utc_day=*` 下创建小文件和完整 manifest，不引用生产 datasets。
+    - fixture manifest 必须复用 `training_retention_contract` 中 complete day helper 的完整 `ManifestDraft` 口径，或抽取等价 fixture builder；不得手写缺字段的“最小 JSON”导致 complete-day predicate 假失败。
+    - 至少包含：
+      - 两个 finalized complete UTC day：较老 day 和较新 day。
+      - 一个 current UTC day，必须被保护。
+      - 一个 incomplete day，必须被保护。
+      - running/digesting/tmp/`.rsync-partial` 负例，必须被保护；这些负例不得放进预期要删除的 complete day 内，否则会把 candidate 变成 incomplete。
+      - manual-inspection、training/run_manifests、runtime_artifacts/startup receipt 负例，必须被保护。
+      - symlink 负例，用于证明 enabled 删除前 fail closed 或明确跳过，不得跟随 symlink 删除验证根外目标。
+    - 记录 fixture tree、sha256、`du -sb` before。
+
+  - [x] **Step 10.6.5: 独立验证根 dry-run 小阈值验证**
+
+    - 对 `DATASET_ROOT` 运行 admin：`--dataset-root $DATASET_ROOT --receipt-path $VALIDATION_ROOT/evidence/validation-dry-run/retention_policy_receipt.json --threshold-bytes 1 --delete-mode dry-run --current-utc-day <fixture-current-day>`。
+    - receipt 必须显示会选择最老 finalized complete UTC day。
+    - tree diff 必须证明没有任何文件被删除。
+    - 把 receipt 和 tree diff 拉回本地。
+
+  - [x] **Step 10.6.6: 独立验证根 enabled 删除验证**
+
+    - 对同一 `DATASET_ROOT` 运行 admin：`--dataset-root $DATASET_ROOT --receipt-path $VALIDATION_ROOT/evidence/validation-enabled/retention_policy_receipt.json --threshold-bytes 1 --delete-mode enabled --allow-enabled-delete-validation-root --validation-root $VALIDATION_ROOT --current-utc-day <fixture-current-day>`。
+    - receipt 必须显示只删除最老 finalized complete UTC day。
+    - tree diff 必须证明较新 complete day、current day、incomplete day、manual-inspection、run_manifests、startup receipt、running/digesting/tmp/`.rsync-partial` 均未删除。
+    - top-level retention receipt 必须包含 `non_deletable_reasons`；nested deletion receipt 必须包含删除路径、删除前后 bytes、candidate day/reason 和 verdict；保护项由 top-level receipt 与 tree diff 共同证明。
+
+  - [x] **Step 10.6.7: 独立验证根 fail-closed 验证**
+
+    使用第二个小 fixture 或清理后的子 fixture，构造“超过阈值但没有 finalized complete UTC day 可删”的场景：
+
+    - `--dataset-root $FAIL_CLOSED_DATASET_ROOT --receipt-path $VALIDATION_ROOT/evidence/fail-closed/retention_policy_receipt.json --threshold-bytes 1 --delete-mode enabled --allow-enabled-delete-validation-root --validation-root $VALIDATION_ROOT --current-utc-day <fixture-current-day>`
+    - receipt 必须显示 `action=fail_closed` 或等价 verdict：无可删 finalized complete UTC day。
+    - tree diff 必须证明没有删除任何受保护文件。
+
+  - [x] **Step 10.6.8: 清理数据采集服务器测试产物**
+
+    10.6 判定通过前必须先完成远端清理：
+
+    - 将 10.6 证据拉回本地 `target/manual-inspection/retention-validation-<run_id>/`。
+    - 删除数据采集服务器上的 `$VALIDATION_ROOT`，其中包括 `bin/data-collect-retention-admin`、fixture、receipt、命令日志、测试脚本副本、inventory 文件和 evidence 子目录；不得删除生产 `~/btc-updown-marketmaker/datasets/`。
+    - 如果执行中额外上传了 release dir，记录 `REMOTE_RELEASE_DIR`、`current` symlink before/after；删除未被 `current` 指向、仅为 10.6 创建的临时 release dir。
+    - 记录清理命令、`test ! -e "$VALIDATION_ROOT"`、`find ~/btc-updown-marketmaker/datasets-retention-validation -maxdepth 2 -type d -print`、父目录 `du -sb` after、远端 `current` symlink after 和剩余文件列表。
+    - 如果清理失败或仍有本次 10.6 临时产物残留，Step 10.6 不能标记完成。
+
+  - [x] **Step 10.6.9: 文档、报告与审查**
+
+    - 本地写入 `target/manual-inspection/retention-validation-<run_id>/retention_validation_report.{json,md}`，记录 production dry-run、validation dry-run、validation enabled delete、fail-closed、远端清理证据。
+    - 同步更新本计划和 changelog 的执行结果；若实际实现与本计划不一致，先进入决策门。
+    - 派生 subagents 审查 10.6 实现与证据，重点检查：生产根是否没有 enabled delete、真实删除是否只发生在独立验证根、complete-day predicate 是否正确、fail-closed 是否正确、远端测试产物是否已清理、是否引入 shadow 删除逻辑或过度设计。
+    - 审查通过后才允许标记 Step 10.6 完成。
+
+  执行记录：已新增 `data-collect-retention-admin` 窄入口，生产根 `enabled` 默认 fail closed，`--validate-options-only` 不进入 retention scan、不写 receipt、不删除文件；enabled delete 必须带 `--allow-enabled-delete-validation-root` 和 canonical `--validation-root`，且 dataset root / receipt path parent 必须位于 validation root / evidence root 下，生产根、相似前缀、symlink 组件、`..` 逃逸和 receipt 落入 `training/typed_raw` 均拒绝。`TrainingRetentionPolicy` 的 day/source 发现、partial 扫描、size 统计和递归删除改用 `symlink_metadata`，candidate 中 symlink 会 fail closed，不跟随 symlink 删除。
+
+  本地验证通过：`cargo fmt --all -- --check`、`git diff --check`、`TMPDIR=/home/chillchill/tmp CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=target cargo test -p data-collect --test retention_admin_contract -- --nocapture`（4 项）、`... cargo test -p data-collect --test training_retention_contract -- --nocapture`（3 项）、`... cargo clippy -p data-collect --all-targets -- -D warnings`、`... cargo test -p data-collect --lib --tests --quiet`。release 导出目录 `target/data-collect-release/74ed9c72cda6/`，`SHA256SUMS` 包含 `bin/data-collect-retention-admin`，admin sha256 为 `dc816a1bfc83b86642fe7e8dd2190ba9b2276bbd9b4966df040bfed3e34b91db`。
+
+  最终实现审查曾发现两个 Important：enabled delete 可能先删除、后因 receipt path 是 symlink/目录导致 receipt 写失败；dry-run receipt path 只在 enabled 路径做 containment，可能污染 `training/typed_raw`。已修复：所有模式都拒绝 receipt path 位于 `training/typed_raw`，拒绝 receipt path 已存在为 symlink 或目录；enabled delete 在进入 retention scan 前会写入并删除 receipt parent probe 文件，验证 evidence 目录可写。新增回归后本地验证通过：`cargo fmt --all -- --check`、`git diff --check`、`cargo test -p data-collect --test retention_admin_contract -- --nocapture`（7 项）、`cargo test -p data-collect --test training_retention_contract -- --nocapture`（3 项）、`cargo clippy -p data-collect --all-targets -- -D warnings`、`cargo test -p data-collect --lib --tests --quiet`。
+
+  针对性复审继续发现 dry-run receipt parent symlink 可绕过字符串层 `training/typed_raw` 检查。已再次修复：所有模式都会拒绝 receipt parent 任意路径组件为 symlink；当 dataset root 和 receipt parent 已存在时，会 canonicalize receipt parent 和 dataset `training/typed_raw`，若 receipt parent 解析到 `training/typed_raw` 下则 fail closed。新增 `admin_rejects_dry_run_receipt_parent_symlink_to_typed_raw_day` 回归后本地验证通过：`cargo fmt --all -- --check`、`git diff --check`、`cargo test -p data-collect --test retention_admin_contract -- --nocapture`（8 项）、`cargo test -p data-collect --test training_retention_contract -- --nocapture`（3 项）、`cargo clippy -p data-collect --all-targets -- -D warnings`、`cargo test -p data-collect --lib --tests --quiet`。
+
+  最终 targeted 复审为 `PASS`，确认 dry-run receipt parent symlink 漏洞已关闭，未发现新的 Critical/Important。Step 10.6 完成。
+
+  远端验证 run id 为 `retention-validation-20260708T120455Z`，数据采集服务器为 `ubuntu@3.255.156.183`。上传的 admin binary 只放在 `$VALIDATION_ROOT/bin/`，未切换生产 `data-collect/releases/current`。production dry-run 对 `~/btc-updown-marketmaker/datasets` 运行 50GB dry-run，receipt 为 `delete_mode=dry_run`、`action=noop`、`verdict=within_threshold`、`deletion_receipt=null`；production enabled 负例 `--validate-options-only` 非 0 退出，未创建 receipt，production training inventory before/after sha256 完全一致。
+
+  独立 validation root 小 fixture 验证通过：dry-run 小阈值选中 `2026-07-05` 且 tree before/after 一致；enabled 小阈值只删除最老 finalized complete day `2026-07-05`；较新 complete day、current running day、incomplete day、manual-inspection、run manifest、startup receipt 均保留；fail-closed fixture 含 symlink/incomplete/current running，receipt 为 `action=fail_closed`、`verdict=no_deletable_finalized_complete_utc_day`，tree before/after 一致，symlink target 保留。
+
+  证据已拉回本地 `target/manual-inspection/retention-validation-20260708T120455Z/`，包含 `retention_validation_report.json`、`retention_validation_report.md`、production/validation/fail-closed receipts、tree inventory/diff、命令 stdout/stderr、`SHA256SUMS`、`RELEASE_INFO.env` 和 `cleanup.log`。远端 `$VALIDATION_ROOT` 已删除，post-cleanup verification 显示 `validation_root_removed=true`、父目录 `datasets-retention-validation` 为空、`parent_du_after=0`，远端 `/tmp` cleanup log 已拉回后删除。
 
 ## 六、验收标准
 
@@ -1118,6 +1249,7 @@
 14. 本地 `cargo fmt`、`git diff --check`、`cargo clippy -D warnings`、`cargo test -p data-collect --lib --tests --quiet` 全部通过。
 15. 数据采集服务器 15 分钟 smoke 和跨小时 2 小时 run 通过；若排序/压缩导致 CPU、RSS、finalize latency 或 writer queue 不可接受，必须停止并给用户决策，不得强行宣称通过。
 16. 数据采集服务器已有 PASS live run 或后续等价 run 中必须能选出一个完整 `btc-updown-5m` market 窗口，并把对应 hourly parquet、segment manifest、run manifest、run-level retention policy/no-op receipt、可选 deletion receipt 和 SHA256SUMS 拉回本地 `target/manual-inspection/<run_id>/`；coverage/gap 必须从 run manifest 字段读取，不再依赖 sidecar JSON。本地 sha256 校验、Polymarket 双 token book/price_change/best_bid_ask/new_market 可读性、解释性最小 replay、可用 metadata 字段与缺失字段说明、Binance stitch 和 RTDS freshness 检查完成后，用户可人工审查数据产物。
+17. Step 10.6 必须完成 retention 远端安全验证：生产 datasets 根只执行 50GB dry-run/no-op；小阈值 enabled delete 只在独立临时验证根发生；验证证明只删除最老 finalized complete UTC day，保护 current/running/incomplete/manual-inspection/run manifests/startup receipts；无可删 day 时 fail closed；完成前必须删除数据采集服务器上的本次测试产物并拉回清理证据。
 
 ## 七、执行风险与决策门
 
