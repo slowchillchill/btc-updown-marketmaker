@@ -527,7 +527,6 @@ pub async fn run_live_training_runtime(
                 source_queue_bytes,
                 writer_queue_rows,
                 writer_queue_bytes,
-                monotonic_ms(run_started),
             ));
             if resource_verdict_triggers_runtime_shutdown(&resource_verdict) {
                 record_gap(
@@ -1662,7 +1661,6 @@ fn runtime_policy_watermark(
     source_queue_bytes: u64,
     writer_queue_rows: u64,
     writer_queue_bytes: u64,
-    queue_age_ms: u64,
 ) -> ResourceWatermark {
     let queue_bytes = source_queue_bytes.saturating_add(writer_queue_bytes);
     let total_queue_rows = source_queue_rows.saturating_add(writer_queue_rows);
@@ -1675,7 +1673,7 @@ fn runtime_policy_watermark(
         journal_limit_status: None,
         open_files: None,
         queue_bytes: Some(queue_bytes),
-        queue_age_ms: Some(queue_age_ms),
+        queue_age_ms: None,
         parquet_writer_memory_estimate_bytes: Some(
             writer_queue_bytes.max(total_queue_rows.saturating_mul(512)),
         ),
@@ -4662,10 +4660,10 @@ mod tests {
         std::fs::write(tmp.path().join("artifact.bin"), [0_u8; 2]).unwrap();
         let mut monitor = runtime_resource_policy_monitor(Some(1));
 
-        let first = monitor.observe(runtime_policy_watermark(tmp.path(), 0, 0, 0, 0, 0));
+        let first = monitor.observe(runtime_policy_watermark(tmp.path(), 0, 0, 0, 0));
         assert!(!resource_verdict_triggers_runtime_shutdown(&first));
 
-        let second = monitor.observe(runtime_policy_watermark(tmp.path(), 0, 0, 0, 0, 0));
+        let second = monitor.observe(runtime_policy_watermark(tmp.path(), 0, 0, 0, 0));
         assert!(resource_verdict_triggers_runtime_shutdown(&second));
         assert!(second.actions.contains(&ResourceAction::StopNewIntake));
         assert!(
@@ -4678,6 +4676,22 @@ mod tests {
                 .actions
                 .contains(&ResourceAction::WriteIncompleteManifest)
         );
+    }
+
+    #[test]
+    fn runtime_resource_monitor_does_not_treat_runtime_uptime_as_queue_age() {
+        let tmp = tempdir().unwrap();
+        let mut monitor = runtime_resource_policy_monitor(Some(1_000_000));
+
+        for _ in 0..10 {
+            let watermark = runtime_policy_watermark(tmp.path(), 0, 0, 0, 0);
+            assert_eq!(watermark.queue_age_ms, None);
+            let verdict = monitor.observe(watermark);
+            assert!(
+                !resource_verdict_triggers_runtime_shutdown(&verdict),
+                "empty queues and small artifacts must not hard-stop just because the process has been running"
+            );
+        }
     }
 
     #[test]
