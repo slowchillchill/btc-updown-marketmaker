@@ -29,6 +29,17 @@ fn training_deploy_readme_contains_binary_only_remote_flow() {
         "collector host",
         "collector region",
         "binary role",
+        "不再检查 source_coverage.json",
+        "不再检查 source_gaps.json",
+        "不再检查 rollover_edges.json",
+        "不得生成 write_receipts.jsonl",
+        "不得生成 queue_samples.jsonl",
+        "不得生成 retention_after_finalize_",
+        "source_writer_stats",
+        "shutdown_stage_timings",
+        "shutdown_retention_scan_budget_ms",
+        "retention_shutdown_scan.status=skipped",
+        "run_manifest_atomic_write",
         "不得 enable --now",
         "paper/live 服务器不得运行 cargo",
         "live 小主机不得承担训练重处理",
@@ -49,6 +60,7 @@ fn systemd_example_uses_server_local_home_paths_and_live_mode() {
         "%h/btc-updown-marketmaker/data-collect/current/bin/data-collect-training-collector"
     ));
     assert!(systemd.contains("--dataset-root %h/btc-updown-marketmaker/datasets"));
+    assert!(systemd.contains("--collector-region eu-west-1"));
     assert!(!systemd.contains("/home/chillchill/btc-updown-marketmaker"));
 }
 

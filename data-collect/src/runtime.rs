@@ -15,6 +15,7 @@ use crate::handoff::{HandoffRuntimeConfig, run_heartbeat_handoff_server};
 use crate::live_runtime::{LiveTrainingRuntimeConfig, run_live_training_runtime};
 use crate::manifest::SourceCoverage;
 use crate::publish::PaperLiveEnvironment;
+use crate::retention::TrainingRetentionPolicy;
 use crate::segment::SegmentNaming;
 use crate::writer::{RawEvent, sha256_file, write_segment_on_blocking_pool_for_source};
 
@@ -32,6 +33,7 @@ pub struct CliArgs {
     pub max_runtime_secs: Option<u64>,
     pub collector_region: Option<String>,
     pub config_path: Option<PathBuf>,
+    pub stop_after_complete_polymarket_market: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,6 +52,7 @@ pub struct TrainingRuntimeConfig {
     pub code_version: Option<String>,
     pub collector_binary_sha256: Option<String>,
     pub source_config_digest: Option<String>,
+    pub stop_after_complete_polymarket_market: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,6 +140,7 @@ where
             code_version: Some(receipt.git_commit),
             collector_binary_sha256: Some(receipt.binary_sha256),
             source_config_digest: Some(receipt.config_digest),
+            stop_after_complete_polymarket_market: cli.stop_after_complete_polymarket_market,
         };
         run_training_runtime(training_config).await?;
     } else {
@@ -165,9 +169,18 @@ pub async fn run_training_runtime(config: TrainingRuntimeConfig) -> Result<Train
         .collector_region
         .clone()
         .unwrap_or_else(|| "unknown".to_owned());
+    let retention_policy_receipt_path =
+        enforce_startup_retention_policy(&dataset_root, &config.run_id)?;
     match config.mode {
         TrainingRuntimeMode::Synthetic => {
-            run_synthetic_training_runtime(&dataset_root, &config.run_id, &collector_region).await
+            run_synthetic_training_runtime(
+                &dataset_root,
+                &config.run_id,
+                &collector_region,
+                config.stop_after_complete_polymarket_market,
+                &retention_policy_receipt_path,
+            )
+            .await
         }
         TrainingRuntimeMode::Live => {
             let receipt = run_live_training_runtime(LiveTrainingRuntimeConfig {
@@ -185,6 +198,8 @@ pub async fn run_training_runtime(config: TrainingRuntimeConfig) -> Result<Train
                 source_config_digest: config
                     .source_config_digest
                     .unwrap_or_else(|| "test-source-config-digest".to_owned()),
+                stop_after_complete_polymarket_market: config.stop_after_complete_polymarket_market,
+                retention_policy_receipt_path: Some(retention_policy_receipt_path),
             })
             .await?;
             Ok(TrainingRuntimeReceipt {
@@ -222,8 +237,12 @@ where
             .into_string()
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "argument is not utf-8"))?;
         match arg.as_str() {
-            "--dataset-root" | "--run-id" | "--max-runtime-secs" | "--collector-region"
-            | "--config" => {
+            "--dataset-root"
+            | "--run-id"
+            | "--max-runtime-secs"
+            | "--collector-region"
+            | "--config"
+            | "--stop-after-complete-polymarket-market" => {
                 let value = iter.next().ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -262,12 +281,17 @@ where
         .map(|value| value.parse::<u64>())
         .transpose()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let stop_after_complete_polymarket_market = values
+        .remove("--stop-after-complete-polymarket-market")
+        .map(|value| parse_positive_u32("--stop-after-complete-polymarket-market", &value))
+        .transpose()?;
     Ok(CliArgs {
         dataset_root: PathBuf::from(dataset_root),
         run_id,
         max_runtime_secs,
         collector_region: values.remove("--collector-region"),
         config_path: values.remove("--config").map(PathBuf::from),
+        stop_after_complete_polymarket_market,
     })
 }
 
@@ -333,17 +357,30 @@ fn host_clock_sync_status() -> String {
 }
 
 fn usage() -> &'static str {
-    "usage: --dataset-root <absolute-path> --run-id <id> [--max-runtime-secs <seconds>] [--collector-region <region>] [--config <path>]"
+    "usage: --dataset-root <absolute-path> --run-id <id> [--max-runtime-secs <seconds>] [--collector-region <region>] [--config <path>] [--stop-after-complete-polymarket-market <count>]"
 }
 
 async fn run_synthetic_training_runtime(
     dataset_root: &Path,
     run_id: &str,
     collector_region: &str,
+    stop_after_complete_polymarket_market: Option<u32>,
+    retention_policy_receipt_path: &Path,
 ) -> Result<TrainingRuntimeReceipt> {
     let run_started_ms = now_ms();
     let mut finalized_segments = Vec::new();
     let mut source_coverage = Vec::new();
+    let manual_review = stop_after_complete_polymarket_market.map(manual_review_receipt);
+    let mode = if manual_review.is_some() {
+        "manual_review_complete_market"
+    } else {
+        "synthetic"
+    };
+    let rollover_reason = if manual_review.is_some() {
+        "manual_review_complete_market_shutdown"
+    } else {
+        "shutdown_finalize"
+    };
 
     for (index, source_kind) in SYNTHETIC_SOURCES.iter().enumerate() {
         let recv_time_utc_ms = run_started_ms + index as i64;
@@ -379,7 +416,7 @@ async fn run_synthetic_training_runtime(
                 None
             },
             "segment_seq": 0,
-            "rollover_reason": "shutdown_finalize",
+            "rollover_reason": rollover_reason,
             "soft_rollover_not_process_fatal": true,
             "shutdown_finalize_result": "finalized"
         });
@@ -405,7 +442,9 @@ async fn run_synthetic_training_runtime(
     let run_manifest_path = run_manifest_dir.join(format!("{run_id}.manifest.json"));
     let run_manifest = serde_json::json!({
         "run_id": run_id,
-        "mode": "synthetic",
+        "mode": mode,
+        "manual_review_complete_market": manual_review,
+        "retention_policy_receipt_path": retention_policy_receipt_path,
         "source_coverage": source_coverage,
         "source_gaps": [],
         "resource_watermark": {
@@ -428,6 +467,33 @@ async fn run_synthetic_training_runtime(
         source_gaps: Vec::new(),
         resource_watermark_recorded: true,
         writer_used_blocking_pool: true,
+    })
+}
+
+fn parse_positive_u32(flag: &str, value: &str) -> Result<u32> {
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    if parsed == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{flag} must be greater than zero"),
+        )
+        .into());
+    }
+    Ok(parsed)
+}
+
+fn manual_review_receipt(target_market_count: u32) -> serde_json::Value {
+    serde_json::json!({
+        "target_market_count": target_market_count,
+        "selected_market_slug": null,
+        "selected_condition_id": null,
+        "subscribed_asset_ids_for_market": [],
+        "planned_start_utc": null,
+        "planned_end_utc": null,
+        "preload_start_utc": null,
+        "stop_reason": "manual_review_complete_market_shutdown"
     })
 }
 
@@ -462,4 +528,14 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+fn enforce_startup_retention_policy(dataset_root: &Path, run_id: &str) -> Result<PathBuf> {
+    let relative_path = PathBuf::from("training")
+        .join("runtime_artifacts")
+        .join(run_id)
+        .join("retention_policy_receipt.json");
+    let absolute_path = dataset_root.join(&relative_path);
+    TrainingRetentionPolicy::new(dataset_root)?.enforce(&absolute_path)?;
+    Ok(relative_path)
 }

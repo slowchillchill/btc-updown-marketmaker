@@ -253,7 +253,7 @@ fn manifest_requires_row_count_sha256_schema_source_coverage() {
 
     let mut missing_resource_metric = complete.clone();
     let resource_watermark = missing_resource_metric.resource_watermark.as_mut().unwrap();
-    resource_watermark.psi_io = None;
+    resource_watermark.queue_bytes = None;
     assert_eq!(
         missing_resource_metric.effective_verdict(),
         ValidationVerdict::Incomplete

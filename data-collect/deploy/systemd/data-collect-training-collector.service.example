@@ -7,7 +7,9 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h/btc-updown-marketmaker
 Environment=DATA_COLLECT_RUNTIME_MODE=live
-ExecStart=/usr/bin/env bash -lc 'exec %h/btc-updown-marketmaker/data-collect/current/bin/data-collect-training-collector --dataset-root %h/btc-updown-marketmaker/datasets --run-id training-systemd-$(date -u +%%Y%%m%%dT%%H%%M%%SZ)'
+ExecStart=/usr/bin/env bash -lc 'exec %h/btc-updown-marketmaker/data-collect/current/bin/data-collect-training-collector --dataset-root %h/btc-updown-marketmaker/datasets --run-id training-systemd-$(date -u +%%Y%%m%%dT%%H%%M%%SZ) --collector-region eu-west-1'
+# Manual review one-market command:
+# ExecStart=/usr/bin/env bash -lc 'exec %h/btc-updown-marketmaker/data-collect/current/bin/data-collect-training-collector --dataset-root %h/btc-updown-marketmaker/datasets --run-id manual-review-$(date -u +%%Y%%m%%dT%%H%%M%%SZ) --collector-region eu-west-1 --stop-after-complete-polymarket-market 1'
 Restart=on-failure
 RestartSec=10
 

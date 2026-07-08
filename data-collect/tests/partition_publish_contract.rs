@@ -17,7 +17,7 @@ fn utc_day_partition_contract() {
     assert!(
         partition
             .partition_path
-            .ends_with("training/typed_raw/source_kind=polymarket_market/utc_day=1970-01-02")
+            .ends_with("training/typed_raw/utc_day=1970-01-02/source_kind=polymarket_market")
     );
 }
 

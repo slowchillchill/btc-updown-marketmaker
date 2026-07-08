@@ -364,20 +364,20 @@ impl ManifestDraft {
                 .source_coverage
                 .iter()
                 .any(|coverage| !coverage.is_valid())
+            || !self.source_gaps.is_empty()
+            || !self.manifest_source_gaps.is_empty()
             || self.coverage_incomplete_reason.is_some()
-            || !has_artifact_reference(&self.health_artifact_path, &self.health_artifact_digest)
-            || !has_artifact_reference(&self.gap_artifact_path, &self.gap_artifact_digest)
-            || !has_artifact_reference(
-                &self.reconnect_artifact_path,
-                &self.reconnect_artifact_digest,
-            )
+            || references_deleted_runtime_sidecar(&self.health_artifact_path)
+            || references_deleted_runtime_sidecar(&self.gap_artifact_path)
+            || references_deleted_runtime_sidecar(&self.reconnect_artifact_path)
             || self.start_time_utc_ms.is_none()
             || self.end_time_utc_ms.is_none()
             || !self.coverage_window.is_some_and(TimeWindow::is_valid)
-            || !self
-                .resource_watermark
-                .as_ref()
-                .is_some_and(ResourceWatermark::has_required_contract_metrics)
+            || !self.resource_watermark.as_ref().is_some_and(|watermark| {
+                watermark.has_required_contract_metrics()
+                    || (self.allows_compact_runtime_resource_watermark()
+                        && watermark.has_compact_runtime_metrics())
+            })
             || !self
                 .resource_threshold_policy_receipt
                 .as_ref()
@@ -413,6 +413,15 @@ impl ManifestDraft {
         ValidationVerdict::Complete
     }
 
+    fn allows_compact_runtime_resource_watermark(&self) -> bool {
+        self.health_artifact_path.is_none()
+            && self.gap_artifact_path.is_none()
+            && self.reconnect_artifact_path.is_none()
+            && self.source_coverage.len() == 1
+            && self.required_files.len() == 1
+            && self.required_files[0].file_role == "typed_raw_parquet"
+    }
+
     pub fn failure_class(&self) -> ManifestFailureClass {
         if self.effective_verdict() == ValidationVerdict::Complete {
             ManifestFailureClass::Complete
@@ -426,10 +435,19 @@ impl ManifestDraft {
     }
 }
 
-fn has_artifact_reference(path: &Option<PathBuf>, digest: &Option<String>) -> bool {
-    path.as_ref()
-        .is_some_and(|path| !path.as_os_str().is_empty())
-        || digest
-            .as_deref()
-            .is_some_and(|digest| !digest.trim().is_empty())
+fn references_deleted_runtime_sidecar(path: &Option<PathBuf>) -> bool {
+    let Some(path) = path else {
+        return false;
+    };
+    let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    matches!(
+        file_name,
+        "source_coverage.json"
+            | "source_gaps.json"
+            | "rollover_edges.json"
+            | "write_receipts.jsonl"
+            | "queue_samples.jsonl"
+    )
 }

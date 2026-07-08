@@ -17,6 +17,10 @@ name = "throughput_probe"
 harness = false
 
 [[bench]]
+name = "source_hourly_layout_probe"
+harness = false
+
+[[bench]]
 name = "websocket_smoke_probe"
 harness = false
 

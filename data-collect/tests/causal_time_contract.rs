@@ -22,7 +22,7 @@ fn training_partition_and_availability_use_collector_recv_time() {
     assert!(
         availability
             .partition_path
-            .ends_with("training/typed_raw/source_kind=polymarket_market/utc_day=2026-01-01")
+            .ends_with("training/typed_raw/utc_day=2026-01-01/source_kind=polymarket_market")
     );
     assert_eq!(
         availability.event_available_time_ms,

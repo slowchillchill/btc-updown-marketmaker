@@ -114,11 +114,11 @@ fn complete_manifest() -> ManifestDraft {
         source_gaps: Vec::new(),
         manifest_source_gaps: Vec::new(),
         coverage_incomplete_reason: None,
-        health_artifact_path: Some("health.jsonl".into()),
+        health_artifact_path: None,
         health_artifact_digest: None,
-        gap_artifact_path: Some("gap.jsonl".into()),
+        gap_artifact_path: None,
         gap_artifact_digest: None,
-        reconnect_artifact_path: Some("reconnect.jsonl".into()),
+        reconnect_artifact_path: None,
         reconnect_artifact_digest: None,
         start_time_utc_ms: Some(1),
         end_time_utc_ms: Some(2),
@@ -154,13 +154,6 @@ fn complete_manifest() -> ManifestDraft {
 fn manifest_contract_requires_files_coverage_health_resource_and_time_windows() {
     let complete = complete_manifest();
     assert_eq!(complete.effective_verdict(), ValidationVerdict::Complete);
-
-    let mut missing_reconnect = complete.clone();
-    missing_reconnect.reconnect_artifact_path = None;
-    assert_eq!(
-        missing_reconnect.effective_verdict(),
-        ValidationVerdict::Incomplete
-    );
 
     let mut missing_window = complete.clone();
     missing_window.coverage_window = None;
@@ -302,6 +295,46 @@ fn manifest_contract_requires_files_coverage_health_resource_and_time_windows() 
 }
 
 #[test]
+fn segment_manifest_must_not_depend_on_deleted_runtime_sidecars() {
+    let complete = complete_manifest();
+    assert_eq!(
+        complete.effective_verdict(),
+        ValidationVerdict::Complete,
+        "source coverage, gap, reconnect, and resource evidence can be self-contained"
+    );
+
+    for forbidden in [
+        "training/runtime_artifacts/run/source_coverage.json",
+        "training/runtime_artifacts/run/source_gaps.json",
+        "training/runtime_artifacts/run/rollover_edges.json",
+    ] {
+        let mut manifest = complete.clone();
+        manifest.health_artifact_path = Some(forbidden.into());
+        assert_eq!(
+            manifest.effective_verdict(),
+            ValidationVerdict::Incomplete,
+            "{forbidden} must not be accepted as required segment evidence"
+        );
+
+        let mut manifest = complete.clone();
+        manifest.gap_artifact_path = Some(forbidden.into());
+        assert_eq!(
+            manifest.effective_verdict(),
+            ValidationVerdict::Incomplete,
+            "{forbidden} must not be accepted as required gap evidence"
+        );
+
+        let mut manifest = complete.clone();
+        manifest.reconnect_artifact_path = Some(forbidden.into());
+        assert_eq!(
+            manifest.effective_verdict(),
+            ValidationVerdict::Incomplete,
+            "{forbidden} must not be accepted as required reconnect evidence"
+        );
+    }
+}
+
+#[test]
 fn manifest_backpressure_receipt_must_cover_all_source_coverage_kinds() {
     let mut manifest = complete_manifest();
     manifest.source_coverage.push(SourceCoverage {
@@ -332,6 +365,12 @@ fn manifest_rejects_invalid_source_coverage() {
     let mut manifest = complete_manifest();
     manifest.source_coverage[0].first_recv_time_utc_ms = 3;
     manifest.source_coverage[0].last_recv_time_utc_ms = 2;
+    assert_eq!(manifest.effective_verdict(), ValidationVerdict::Incomplete);
+
+    let mut manifest = complete_manifest();
+    manifest
+        .source_gaps
+        .push("binance_depth_stitch_gap".to_owned());
     assert_eq!(manifest.effective_verdict(), ValidationVerdict::Incomplete);
 }
 

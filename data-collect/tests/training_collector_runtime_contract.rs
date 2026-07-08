@@ -68,12 +68,19 @@ async fn synthetic_training_runtime_writes_segment_manifest_and_coverage() {
         code_version: None,
         collector_binary_sha256: None,
         source_config_digest: None,
+        stop_after_complete_polymarket_market: None,
     };
 
     let receipt = run_training_runtime(config).await.unwrap();
 
     assert_eq!(receipt.run_id, "runtime-contract");
     assert!(receipt.run_manifest_path.is_file());
+    let run_manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&receipt.run_manifest_path).unwrap()).unwrap();
+    let retention_path = run_manifest["retention_policy_receipt_path"]
+        .as_str()
+        .expect("run manifest records retention policy receipt path");
+    assert!(dataset_root.join(retention_path).is_file());
     assert_eq!(receipt.source_coverage.len(), 4);
     assert!(receipt.source_gaps.is_empty());
     assert!(receipt.resource_watermark_recorded);
@@ -112,6 +119,7 @@ async fn live_training_runtime_zero_duration_writes_control_manifest() {
         code_version: None,
         collector_binary_sha256: None,
         source_config_digest: None,
+        stop_after_complete_polymarket_market: None,
     };
 
     let receipt = run_training_runtime(config).await.unwrap();
@@ -125,5 +133,102 @@ async fn live_training_runtime_zero_duration_writes_control_manifest() {
             .source_gaps
             .iter()
             .any(|gap| gap.contains("missing_source_coverage"))
+    );
+
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&receipt.run_manifest_path).unwrap()).unwrap();
+    let artifact_dir = manifest["artifact_dir"]
+        .as_str()
+        .expect("run manifest records artifact dir");
+    let artifact_dir = std::path::PathBuf::from(artifact_dir);
+    assert!(artifact_dir.is_dir());
+    for forbidden in [
+        "source_coverage.json",
+        "source_gaps.json",
+        "rollover_edges.json",
+        "write_receipts.jsonl",
+        "queue_samples.jsonl",
+    ] {
+        assert!(
+            !artifact_dir.join(forbidden).exists(),
+            "{forbidden} must not be produced in the default runtime artifact dir"
+        );
+    }
+    assert!(
+        std::fs::read_dir(&artifact_dir).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("retention_after_finalize_")),
+        "source-specific retention_after_finalize receipts must not be produced"
+    );
+
+    assert!(manifest["source_coverage"].is_array());
+    assert!(manifest["source_gaps"].is_array());
+    assert!(manifest["rollover_edges"].is_array());
+    assert!(manifest["finalized_segments"].is_array());
+    assert!(
+        manifest["source_writer_stats"].is_array(),
+        "run manifest must carry aggregated writer stats instead of write_receipts.jsonl"
+    );
+    assert_eq!(
+        manifest["queue_summary"]["source_event_queue"]["queue_name"],
+        "source_event_queue"
+    );
+    assert_eq!(
+        manifest["queue_summary"]["writer_chunk_queue"]["queue_name"],
+        "writer_chunk_queue"
+    );
+
+    let stages = manifest["shutdown_stage_timings"]
+        .as_object()
+        .expect("shutdown_stage_timings must be a stage-name keyed object");
+    for required_stage in [
+        "source_task_stop",
+        "event_queue_drain",
+        "flush_batches",
+        "writer_finalize",
+        "retention_shutdown_scan",
+        "run_manifest_atomic_write",
+        "post_manifest_cleanup",
+    ] {
+        let stage = stages
+            .get(required_stage)
+            .unwrap_or_else(|| panic!("missing shutdown stage {required_stage}"));
+        assert!(stage["started_utc_ms"].is_i64());
+        assert!(stage["ended_utc_ms"].is_i64());
+        assert!(stage["duration_ms"].is_u64());
+        assert!(matches!(
+            stage["status"].as_str(),
+            Some("success" | "skipped" | "timeout" | "failed")
+        ));
+        assert!(stage.get("error").is_some());
+    }
+    assert_eq!(
+        stages["run_manifest_atomic_write"]["status"], "success",
+        "manifest atomic write must be explicitly recorded as successful"
+    );
+    assert_eq!(
+        stages["run_manifest_atomic_write"]["manifest_path"],
+        receipt.run_manifest_path.to_string_lossy().as_ref(),
+        "manifest atomic write stage must record the final manifest path"
+    );
+    let retention_budget = manifest["shutdown_retention_scan_budget_ms"]
+        .as_u64()
+        .expect("run manifest records retention shutdown scan budget");
+    if stages["retention_shutdown_scan"]["status"] == "success" {
+        assert!(
+            stages["retention_shutdown_scan"]["duration_ms"]
+                .as_u64()
+                .unwrap()
+                <= retention_budget,
+            "successful shutdown retention scan must fit the fixed budget"
+        );
+    }
+    assert!(
+        manifest["resource_watermark"]["unavailable"]
+            .as_array()
+            .is_none_or(|items| items.is_empty()),
+        "runtime resource_watermark must not carry noisy not-measured placeholders"
     );
 }

@@ -408,6 +408,7 @@ impl QueueDurationSummary {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct LatencyStats {
     pub count: u64,
+    pub min: u64,
     pub p50: u64,
     pub p95: u64,
     pub p99: u64,
@@ -419,6 +420,7 @@ impl LatencyStats {
         if values.is_empty() {
             return Self {
                 count: 0,
+                min: 0,
                 p50: 0,
                 p95: 0,
                 p99: 0,
@@ -429,6 +431,7 @@ impl LatencyStats {
         sorted.sort_unstable();
         Self {
             count: sorted.len() as u64,
+            min: *sorted.first().expect("non-empty sorted latency values"),
             p50: percentile(&sorted, 50),
             p95: percentile(&sorted, 95),
             p99: percentile(&sorted, 99),

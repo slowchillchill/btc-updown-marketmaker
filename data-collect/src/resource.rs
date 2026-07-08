@@ -93,6 +93,10 @@ pub struct ResourceWatermark {
 
 impl ResourceWatermark {
     pub fn has_required_contract_metrics(&self) -> bool {
+        self.has_full_contract_metrics()
+    }
+
+    fn has_full_contract_metrics(&self) -> bool {
         self.metric_recorded("rss_bytes", self.rss_bytes.is_some())
             && self.metric_recorded("cpu_percent", self.cpu_percent.is_some())
             && self.metric_recorded("disk_free_bytes", self.disk_free_bytes.is_some())
@@ -127,6 +131,15 @@ impl ResourceWatermark {
             && self.metric_recorded("psi_io", self.psi_io.is_some())
             && self.metric_recorded("stage_latency_ms", self.stage_latency_ms.is_some())
             && self.metric_recorded("ttl_ms", self.ttl_ms.is_some())
+    }
+
+    pub fn has_compact_runtime_metrics(&self) -> bool {
+        self.artifact_dir_bytes.is_some()
+            && self.queue_bytes.is_some()
+            && self.queue_age_ms.is_some()
+            && self.parquet_writer_memory_estimate_bytes.is_some()
+            && self.stage_latency_ms.is_some()
+            && self.ttl_ms.is_some()
     }
 
     fn metric_recorded(&self, metric: &str, present: bool) -> bool {

@@ -109,8 +109,8 @@ pub fn training_utc_day_partition(
     let partition_path = dataset_root
         .join("training")
         .join("typed_raw")
-        .join(format!("source_kind={source_kind}"))
-        .join(format!("utc_day={utc_day}"));
+        .join(format!("utc_day={utc_day}"))
+        .join(format!("source_kind={source_kind}"));
     ensure_under_root(&dataset_root, &partition_path)?;
 
     Ok(UtcDayPartition {

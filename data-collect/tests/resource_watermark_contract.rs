@@ -121,6 +121,28 @@ fn resource_watermark_records_required_metrics_or_unavailable_reason() {
 }
 
 #[test]
+fn compact_runtime_watermark_does_not_need_not_measured_placeholders() {
+    let mut watermark = complete_sample().into_watermark();
+    watermark.rss_bytes = None;
+    watermark.cpu_percent = None;
+    watermark.disk_free_bytes = None;
+    watermark.journal_log_bytes = None;
+    watermark.journal_limit_status = None;
+    watermark.open_files = None;
+    watermark.cgroup_memory_current_bytes = None;
+    watermark.cgroup_memory_stat = None;
+    watermark.cgroup_memory_events = None;
+    watermark.psi_cpu = None;
+    watermark.psi_memory = None;
+    watermark.psi_io = None;
+    watermark.unavailable.clear();
+
+    assert!(!watermark.has_required_contract_metrics());
+    assert!(watermark.has_compact_runtime_metrics());
+    assert!(watermark.unavailable.is_empty());
+}
+
+#[test]
 fn stateless_hard_threshold_records_observation_without_stop_action() {
     let policy = ResourcePolicy::new(hard_thresholds(), soft_thresholds());
     let mut sample = complete_sample();

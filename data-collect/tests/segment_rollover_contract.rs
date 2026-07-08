@@ -20,7 +20,7 @@ fn segment_naming_uses_source_kind_recv_day_and_safe_stem() {
     assert!(
         naming
             .partition_path
-            .ends_with("training/typed_raw/source_kind=binance_aggtrade/utc_day=2026-01-01")
+            .ends_with("training/typed_raw/utc_day=2026-01-01/source_kind=binance_aggtrade")
     );
     assert!(naming.running_path.ends_with(
         "segment_start_recv_ms=1767225600001--segment_seq=7--run-with-slash-running.parquet"
