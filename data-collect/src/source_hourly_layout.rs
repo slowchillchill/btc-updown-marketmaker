@@ -36,8 +36,6 @@ impl SourceHourlyValidation {
 pub struct BinanceDepthSnapshotHourlyRow {
     pub timestamp_received: i64,
     pub snapshot_fetch_start_utc: i64,
-    pub snapshot_recv_time_utc: i64,
-    pub recv_time_utc: i64,
     pub last_update_id: u64,
     pub bids: String,
     pub asks: String,
@@ -55,8 +53,6 @@ impl BinanceDepthSnapshotHourlyRow {
         Self {
             timestamp_received,
             snapshot_fetch_start_utc: raw.snapshot_fetch_start_utc_ms,
-            snapshot_recv_time_utc: raw.snapshot_recv_time_utc_ms,
-            recv_time_utc: timestamp_received,
             last_update_id: raw.last_update_id,
             bids: depth_levels_to_json(&raw.bids),
             asks: depth_levels_to_json(&raw.asks),
@@ -65,7 +61,7 @@ impl BinanceDepthSnapshotHourlyRow {
             snapshot_status: "complete".to_owned(),
             collector_host_id: raw.envelope.collector_host_id.clone(),
             collector_region: raw.envelope.collector_region.clone(),
-            schema_version: "binance_depth_snapshot_v1".to_owned(),
+            schema_version: "binance_depth_snapshot_v2".to_owned(),
         }
     }
 
@@ -77,11 +73,6 @@ impl BinanceDepthSnapshotHourlyRow {
         require_positive_i64(
             "snapshot_fetch_start_utc",
             self.snapshot_fetch_start_utc,
-            &mut report,
-        );
-        require_positive_i64(
-            "snapshot_recv_time_utc",
-            self.snapshot_recv_time_utc,
             &mut report,
         );
         if self.last_update_id == 0 {
@@ -102,7 +93,6 @@ impl BinanceDepthSnapshotHourlyRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BinanceDepthUpdateHourlyRow {
     pub timestamp_received: i64,
-    pub recv_time_utc: i64,
     pub event_type: String,
     pub event_time: i64,
     pub symbol: String,
@@ -131,7 +121,6 @@ impl BinanceDepthUpdateHourlyRow {
         let timestamp_received = recv_time(&raw.envelope);
         Self {
             timestamp_received,
-            recv_time_utc: timestamp_received,
             event_type: raw.event_type.clone(),
             event_time: raw.event_time_ms,
             symbol: raw.symbol.clone(),
@@ -148,7 +137,7 @@ impl BinanceDepthUpdateHourlyRow {
             collector_host_id: raw.envelope.collector_host_id.clone(),
             collector_region: raw.envelope.collector_region.clone(),
             source_endpoint: raw.envelope.source_endpoint.clone(),
-            schema_version: "binance_depth_update_v1".to_owned(),
+            schema_version: "binance_depth_update_v2".to_owned(),
         }
     }
 
@@ -190,10 +179,8 @@ impl BinanceDepthUpdateHourlyRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BinanceAggTradeHourlyRow {
     pub timestamp_received: i64,
-    pub recv_time_utc: i64,
     pub event_type: String,
     pub event_time: i64,
-    pub trade_time: i64,
     pub symbol: String,
     pub aggregate_trade_id: u64,
     pub price: String,
@@ -213,10 +200,8 @@ impl BinanceAggTradeHourlyRow {
         let timestamp_received = recv_time(&raw.envelope);
         Self {
             timestamp_received,
-            recv_time_utc: timestamp_received,
             event_type: raw.event_type.clone(),
             event_time: raw.event_time_ms,
-            trade_time: raw.trade_time_ms,
             symbol: raw.symbol.clone(),
             aggregate_trade_id: raw.aggregate_trade_id,
             price: raw.price.clone(),
@@ -228,7 +213,7 @@ impl BinanceAggTradeHourlyRow {
             collector_host_id: raw.envelope.collector_host_id.clone(),
             collector_region: raw.envelope.collector_region.clone(),
             source_endpoint: raw.envelope.source_endpoint.clone(),
-            schema_version: "binance_aggtrade_v1".to_owned(),
+            schema_version: "binance_aggtrade_v2".to_owned(),
         }
     }
 
@@ -239,7 +224,6 @@ impl BinanceAggTradeHourlyRow {
         require_positive_i64("timestamp_received", self.timestamp_received, &mut report);
         report.require_non_empty("event_type", &self.event_type);
         require_positive_i64("event_time", self.event_time, &mut report);
-        require_positive_i64("trade_time", self.trade_time, &mut report);
         report.require_non_empty("symbol", &self.symbol);
         if self.aggregate_trade_id == 0 {
             report.missing_fields.push("aggregate_trade_id".to_owned());
@@ -264,7 +248,6 @@ impl BinanceAggTradeHourlyRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RtdsChainlinkBtcUsdHourlyRow {
     pub timestamp_received: i64,
-    pub recv_time_utc: i64,
     pub message_timestamp: i64,
     pub payload_timestamp: i64,
     pub symbol: String,
@@ -282,7 +265,6 @@ impl RtdsChainlinkBtcUsdHourlyRow {
         let timestamp_received = recv_time(&raw.envelope);
         Self {
             timestamp_received,
-            recv_time_utc: timestamp_received,
             message_timestamp: raw.message_timestamp_ms,
             payload_timestamp: raw.payload_timestamp_ms,
             symbol: raw.symbol.clone(),
@@ -292,7 +274,7 @@ impl RtdsChainlinkBtcUsdHourlyRow {
             collector_host_id: raw.envelope.collector_host_id.clone(),
             collector_region: raw.envelope.collector_region.clone(),
             source_endpoint: raw.envelope.source_endpoint.clone(),
-            schema_version: "polymarket_rtds_chainlink_btc_usd_v1".to_owned(),
+            schema_version: "polymarket_rtds_chainlink_btc_usd_v2".to_owned(),
         }
     }
 
@@ -413,8 +395,6 @@ pub fn binance_depth_snapshot_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         timestamp_field("timestamp_received", false),
         timestamp_field("snapshot_fetch_start_utc", false),
-        timestamp_field("snapshot_recv_time_utc", false),
-        timestamp_field("recv_time_utc", false),
         Field::new("last_update_id", DataType::UInt64, false),
         Field::new("bids", DataType::Utf8, false),
         Field::new("asks", DataType::Utf8, false),
@@ -430,7 +410,6 @@ pub fn binance_depth_snapshot_schema() -> Arc<Schema> {
 pub fn binance_depth_update_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         timestamp_field("timestamp_received", false),
-        timestamp_field("recv_time_utc", false),
         Field::new("event_type", DataType::Utf8, false),
         timestamp_field("event_time", false),
         Field::new("symbol", DataType::Utf8, false),
@@ -454,10 +433,8 @@ pub fn binance_depth_update_schema() -> Arc<Schema> {
 pub fn binance_aggtrade_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         timestamp_field("timestamp_received", false),
-        timestamp_field("recv_time_utc", false),
         Field::new("event_type", DataType::Utf8, false),
         timestamp_field("event_time", false),
-        timestamp_field("trade_time", false),
         Field::new("symbol", DataType::Utf8, false),
         Field::new("aggregate_trade_id", DataType::UInt64, false),
         Field::new("price", DataType::Utf8, false),
@@ -476,7 +453,6 @@ pub fn binance_aggtrade_schema() -> Arc<Schema> {
 pub fn rtds_chainlink_btc_usd_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         timestamp_field("timestamp_received", false),
-        timestamp_field("recv_time_utc", false),
         timestamp_field("message_timestamp", false),
         timestamp_field("payload_timestamp", false),
         Field::new("symbol", DataType::Utf8, false),

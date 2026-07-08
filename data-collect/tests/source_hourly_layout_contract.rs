@@ -68,8 +68,6 @@ fn binance_depth_snapshot_hourly_row_keeps_snapshot_boundary_and_full_depth() {
     assert_eq!(row.bids, r#"[["99.00","1.5"]]"#);
     assert_eq!(row.asks, r#"[["102.00","2.5"]]"#);
     assert_eq!(row.snapshot_fetch_start_utc, 1_766_789_469_100);
-    assert_eq!(row.snapshot_recv_time_utc, 1_766_789_469_200);
-    assert_eq!(row.recv_time_utc, 1_766_789_469_999);
     assert!(row.validate().is_complete());
 }
 
@@ -115,7 +113,7 @@ fn binance_depth_update_hourly_row_keeps_official_fields_and_stitch_evidence() {
 }
 
 #[test]
-fn binance_aggtrade_hourly_row_keeps_trade_fields() {
+fn binance_aggtrade_hourly_row_keeps_event_time_and_trade_identifiers() {
     let raw_trade = r#"{
         "e":"aggTrade","E":1766789469958,"s":"BTCUSDT","a":123,
         "p":"100.50","q":"0.1","f":10,"l":12,"T":1766789469000,"m":true
@@ -135,7 +133,6 @@ fn binance_aggtrade_hourly_row_keeps_trade_fields() {
     assert_eq!(row.quantity, "0.1");
     assert_eq!(row.first_trade_id, 10);
     assert_eq!(row.last_trade_id, 12);
-    assert_eq!(row.trade_time, 1_766_789_469_000);
     assert!(row.buyer_is_maker);
     assert!(row.validate().is_complete());
 }
@@ -167,7 +164,6 @@ fn rtds_chainlink_hourly_row_keeps_timestamps_topic_filter_and_value() {
     assert_eq!(row.value, "100000");
     assert_eq!(row.topic, "crypto_prices_chainlink");
     assert!(row.subscription_filter.contains("btc/usd"));
-    assert_eq!(row.recv_time_utc, 1_766_789_469_999);
     assert!(row.validate().is_complete());
 }
 
@@ -189,7 +185,6 @@ fn schemas_contain_source_specific_typed_fields() {
             vec![
                 "timestamp_received",
                 "snapshot_fetch_start_utc",
-                "snapshot_recv_time_utc",
                 "last_update_id",
                 "bids",
                 "asks",
@@ -218,7 +213,6 @@ fn schemas_contain_source_specific_typed_fields() {
             vec![
                 "timestamp_received",
                 "event_time",
-                "trade_time",
                 "symbol",
                 "aggregate_trade_id",
                 "price",
@@ -252,4 +246,35 @@ fn schemas_contain_source_specific_typed_fields() {
             DataType::Timestamp(_, Some(timezone)) if timezone.as_ref() == "UTC"
         ));
     }
+}
+
+#[test]
+fn source_hourly_schemas_do_not_duplicate_receive_or_trade_time_aliases() {
+    for (source_kind, schema) in [
+        ("binance_depth_snapshot", binance_depth_snapshot_schema()),
+        ("binance_depth_update", binance_depth_update_schema()),
+        ("binance_aggtrade", binance_aggtrade_schema()),
+        (
+            "polymarket_rtds_chainlink_btc_usd",
+            rtds_chainlink_btc_usd_schema(),
+        ),
+    ] {
+        assert!(
+            schema.field_with_name("recv_time_utc").is_err(),
+            "{source_kind} must use timestamp_received as the only collector receive timestamp"
+        );
+    }
+
+    assert!(
+        binance_aggtrade_schema()
+            .field_with_name("trade_time")
+            .is_err(),
+        "binance_aggtrade must keep event_time and not duplicate it with trade_time"
+    );
+    assert!(
+        binance_depth_snapshot_schema()
+            .field_with_name("snapshot_recv_time_utc")
+            .is_err(),
+        "binance_depth_snapshot must use timestamp_received as the snapshot receive timestamp"
+    );
 }

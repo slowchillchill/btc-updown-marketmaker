@@ -527,8 +527,6 @@ fn binance_depth_snapshot_rows_to_batch(
     let columns: Vec<ArrayRef> = vec![
         timestamp_values(rows.iter().map(|row| row.timestamp_received)),
         timestamp_values(rows.iter().map(|row| row.snapshot_fetch_start_utc)),
-        timestamp_values(rows.iter().map(|row| row.snapshot_recv_time_utc)),
-        timestamp_values(rows.iter().map(|row| row.recv_time_utc)),
         uint64_values(rows.iter().map(|row| row.last_update_id)),
         string_values(rows.iter().map(|row| row.bids.as_str())),
         string_values(rows.iter().map(|row| row.asks.as_str())),
@@ -548,7 +546,6 @@ fn binance_depth_update_rows_to_batch(
 ) -> Result<RecordBatch> {
     let columns: Vec<ArrayRef> = vec![
         timestamp_values(rows.iter().map(|row| row.timestamp_received)),
-        timestamp_values(rows.iter().map(|row| row.recv_time_utc)),
         string_values(rows.iter().map(|row| row.event_type.as_str())),
         timestamp_values(rows.iter().map(|row| row.event_time)),
         string_values(rows.iter().map(|row| row.symbol.as_str())),
@@ -576,10 +573,8 @@ fn binance_aggtrade_rows_to_batch(
 ) -> Result<RecordBatch> {
     let columns: Vec<ArrayRef> = vec![
         timestamp_values(rows.iter().map(|row| row.timestamp_received)),
-        timestamp_values(rows.iter().map(|row| row.recv_time_utc)),
         string_values(rows.iter().map(|row| row.event_type.as_str())),
         timestamp_values(rows.iter().map(|row| row.event_time)),
-        timestamp_values(rows.iter().map(|row| row.trade_time)),
         string_values(rows.iter().map(|row| row.symbol.as_str())),
         uint64_values(rows.iter().map(|row| row.aggregate_trade_id)),
         string_values(rows.iter().map(|row| row.price.as_str())),
@@ -604,7 +599,6 @@ fn rtds_chainlink_btc_usd_rows_to_batch(
 ) -> Result<RecordBatch> {
     let columns: Vec<ArrayRef> = vec![
         timestamp_values(rows.iter().map(|row| row.timestamp_received)),
-        timestamp_values(rows.iter().map(|row| row.recv_time_utc)),
         timestamp_values(rows.iter().map(|row| row.message_timestamp)),
         timestamp_values(rows.iter().map(|row| row.payload_timestamp)),
         string_values(rows.iter().map(|row| row.symbol.as_str())),

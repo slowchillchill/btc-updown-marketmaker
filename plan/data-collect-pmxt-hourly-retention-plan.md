@@ -49,7 +49,7 @@
 | --- | --- | --- |
 | Polymarket market channel | 高度借鉴 PMXT orderbook schema：`timestamp_received`、source `timestamp`、`market`、`asset_id`、`event_type`、`bids`、`asks`、`price`、`size`、`side`、`best_bid`、`best_ask`，并补充本项目 collector/slug/coverage 字段。 | 不订阅 every live asset，不把 PMXT archive 当 live source，不丢弃 source health/gap/reconnect。 |
 | Binance depth snapshot/update | 类比 PMXT 的 orderbook typed parquet：snapshot 保存完整 `bids/asks`，update 保存 `U/u/b/a`，以 Binance 官方 sequence/stitch 语义重建 Binance orderbook。 | 不使用 Polymarket 字段名冒充 Binance 字段，不用 PMXT market/asset_id schema。 |
-| Binance aggTrade | 借鉴 PMXT 的 typed columnar hourly parquet 和压缩/manifest 方法，字段使用 Binance 官方 aggTrade：`E/T/a/p/q/f/l/m`。 | 不把成交流伪装成 orderbook，不生成 `bids/asks`。 |
+| Binance aggTrade | 借鉴 PMXT 的 typed columnar hourly parquet 和压缩/manifest 方法，字段使用 Binance 官方 aggTrade；输出保留 `event_time=E`、trade ids、price/quantity 和 `buyer_is_maker`，raw evidence/parser 继续校验官方 `T`。 | 不把成交流伪装成 orderbook，不生成 `bids/asks`，不再输出与 `event_time` 近似重复的 `trade_time` 列。 |
 | RTDS Chainlink BTC/USD | 借鉴 PMXT 的 typed time-series hourly parquet、双时间轴和 finalized publish 方法，字段使用 RTDS topic/symbol/value/message timestamp/payload timestamp。 | 不把 Chainlink price 当 Binance depth 或 Polymarket book，不生成盘口字段。 |
 
 ### 2.1 应采纳
@@ -58,7 +58,7 @@
 | --- | --- | --- |
 | Polymarket orderbook 使用 typed parquet，而不是每行大 `raw_json` | 采纳 | typed 列可显著降低体积，并让 data-pipeline 读取更稳定。新增 Polymarket orderbook hourly schema，保留完整 raw-equivalent native fields。 |
 | typed columnar parquet 替代全源共用 `raw_json` 宽表 | 采纳 | Polymarket 采用 PMXT-inspired orderbook schema；Binance depth/snapshot、aggTrade、RTDS Chainlink 分别采用官方字段 typed schema。共用 envelope 继续通过 metadata/manifest 保留。 |
-| `timestamp_received` + source `timestamp` 双时间轴 | 采纳 | 映射为 `recv_time_utc` / `timestamp_received` 和各 source 原始时间戳，符合需求文档时间语义。Polymarket 是平台 `timestamp`，Binance 是 `E/T` 或 snapshot boundary，RTDS 是 message/payload timestamp。 |
+| `timestamp_received` + source `timestamp` 双时间轴 | 采纳 | source-specific parquet 的 collector receive time 统一为 `timestamp_received`；`recv_time_utc` 只保留为 envelope/manifest/partition 语义名，不在同一 parquet 中重复写别名列。Polymarket 是平台 `timestamp`，Binance typed 输出使用 `E` / snapshot boundary，RTDS 是 message/payload timestamp。 |
 | `market` 为 condition id，`asset_id` 为 outcome token id | 采纳 | 这是重建每个 Up/Down token orderbook 的关键主键。manifest 继续记录 slug、market window、current/prefetched lifecycle。 |
 | `book` 行保存完整 `bids` / `asks` depth | 必须采纳 | 当前缺口的直接修复点；禁止只保存 `bids_len` / `asks_len`。 |
 | `price_change` 行保存 `price`、`size`、`side`、`best_bid`、`best_ask` | 采纳 | 用于在 `book` 快照之间推进本地 orderbook 状态。 |
@@ -96,9 +96,9 @@
 
 1. Polymarket `book` 事件必须完整保存 `bids` / `asks` price-size depth，能从 finalized parquet 还原某个 token 的 orderbook。
 2. Polymarket `price_change`、`last_trade_price`、`tick_size_change`、`best_bid_ask`、`new_market`、`market_resolved` 必须按事件语义保存 typed 字段和 source evidence；`polymarket_market_metadata` 必须保存 condition id、CLOB market id、token/asset id、slug、start/end、active/acceptingOrders、lifecycle、tick/min size、fee/reward 等字段；不能因为采用 PMXT 结构而丢失需求字段。
-3. Binance depth snapshot/update 必须保留官方 `lastUpdateId`、`bids`、`asks`、`e`、`E`、`s`、`U`、`u`、`b`、`a`、snapshot fetch/recv boundary 和 stitch evidence。
-4. Binance aggTrade 必须保留官方 `e`、`E`、`s`、`a`、`p`、`q`、`f`、`l`、`T`、`m` / `buyer_is_maker`。
-5. RTDS Chainlink BTC/USD 必须保留 message timestamp、payload timestamp、symbol、value、topic、subscription filter 和 `recv_time_utc`。
+3. Binance depth snapshot/update 必须保留官方 `lastUpdateId`、`bids`、`asks`、`e`、`E`、`s`、`U`、`u`、`b`、`a`、snapshot fetch boundary、`timestamp_received` 和 stitch evidence。
+4. Binance aggTrade 必须保留 `timestamp_received`、`event_time=E`、`e`、`s`、`a`、`p`、`q`、`f`、`l`、`m` / `buyer_is_maker`；官方 `T` 由 raw evidence/parser 校验，不作为 hourly parquet 的独立 `trade_time` 列。
+5. RTDS Chainlink BTC/USD 必须保留 `timestamp_received`、message timestamp、payload timestamp、symbol、value、topic 和 subscription filter。
 6. 训练 cold path 改为 UTC day 文件夹，每个 source kind 每小时一个逻辑 partition；正常一个 finalized parquet，保护性 soft rollover 可产生多个 `part=N`，manifest 记录 hour window、UTC day、source coverage、row count、sha256、schema version、hour part count 和 retention policy/evidence。
 7. paper/live hot path 不等待 hourly parquet；继续通过实时 handoff 提供外部市场源事件和 health/gap/status。
 8. 训练采集增加 50GB 滚动磁盘保护：超过阈值时默认写 dry-run/no-op policy receipt；真实删除只限最老 finalized complete UTC day，并写 deletion receipt。
@@ -296,10 +296,10 @@
 
   新增测试断言：
 
-  - `binance_depth_snapshot` hourly row 必须有 `last_update_id`、`bids`、`asks`、`snapshot_fetch_start_utc`、`snapshot_recv_time_utc`、`recv_time_utc`、`source_endpoint`。
-  - `binance_depth_update` hourly row 必须有 `event_type=e`、`event_time=E`、`symbol=s`、`first_update_id=U`、`final_update_id=u`、`bids=b`、`asks=a`、`recv_time_utc`、`snapshot_last_update_id`、`local_u_before`、`local_u_after`、`stitch_verdict`。
-  - `binance_aggtrade` hourly row 必须有 `e`、`E`、`s`、`a`、`p`、`q`、`f`、`l`、`T`、`m` / `buyer_is_maker`、`recv_time_utc`。
-  - `polymarket_rtds_chainlink_btc_usd` hourly row 必须有 RTDS message timestamp、payload timestamp、symbol、value、topic、subscription filter、`recv_time_utc`。
+  - `binance_depth_snapshot` hourly row 必须有 `timestamp_received`、`last_update_id`、`bids`、`asks`、`snapshot_fetch_start_utc`、`source_endpoint`，且不得重复写 `recv_time_utc` / `snapshot_recv_time_utc`。
+  - `binance_depth_update` hourly row 必须有 `timestamp_received`、`event_type=e`、`event_time=E`、`symbol=s`、`first_update_id=U`、`final_update_id=u`、`bids=b`、`asks=a`、`snapshot_last_update_id`、`local_u_before`、`local_u_after`、`stitch_verdict`，且不得重复写 `recv_time_utc`。
+  - `binance_aggtrade` hourly row 必须有 `timestamp_received`、`e`、`E`、`s`、`a`、`p`、`q`、`f`、`l`、`m` / `buyer_is_maker`，且不得重复写 `recv_time_utc` / `trade_time`。
+  - `polymarket_rtds_chainlink_btc_usd` hourly row 必须有 `timestamp_received`、RTDS message timestamp、payload timestamp、symbol、value、topic、subscription filter，且不得重复写 `recv_time_utc`。
   - 只有 `source_kind/raw_json` 而缺少上述 typed 字段时，contract 必须失败。
 
   验证 RED：
@@ -314,9 +314,9 @@
 
   | Row 类型 | 必须字段 |
   | --- | --- |
-  | `BinanceDepthSnapshotRow` | `timestamp_received`、`snapshot_fetch_start_utc`、`snapshot_recv_time_utc`、`last_update_id`、`bids`、`asks`、`symbol`、`source_endpoint`、snapshot status、collector 字段、schema metadata |
+  | `BinanceDepthSnapshotRow` | `timestamp_received`、`snapshot_fetch_start_utc`、`last_update_id`、`bids`、`asks`、`symbol`、`source_endpoint`、snapshot status、collector 字段、schema metadata |
   | `BinanceDepthUpdateRow` | `timestamp_received`、`event_time`、`symbol`、`first_update_id`、`final_update_id`、`bids`、`asks`、`stream`、`snapshot_last_update_id`、`local_u_before`、`local_u_after`、`stitch_verdict`、`stitch_gap_reason` nullable、collector 字段、schema metadata |
-  | `BinanceAggTradeRow` | `timestamp_received`、`event_time`、`trade_time`、`symbol`、`aggregate_trade_id`、`price`、`quantity`、`first_trade_id`、`last_trade_id`、`buyer_is_maker`、collector 字段、schema metadata |
+  | `BinanceAggTradeRow` | `timestamp_received`、`event_time`、`symbol`、`aggregate_trade_id`、`price`、`quantity`、`first_trade_id`、`last_trade_id`、`buyer_is_maker`、collector 字段、schema metadata |
   | `RtdsChainlinkBtcUsdRow` | `timestamp_received`、message timestamp、payload timestamp、`symbol`、`value`、`topic`、subscription filter、collector 字段、schema metadata |
 
   数组字段 `bids` / `asks` 必须保留 price-size levels，不能只保存长度。
@@ -1069,31 +1069,30 @@
 
   最终复跑执行记录：重新导出并上传 release `a35582b5488a-rtdsloop2-20260708T044122Z`，`RELEASE_INFO.env` 为 `git_commit=a35582b5488a3b71f8505f391e7465b074e0e97c-dirty`，远端 `sha256sum -c SHA256SUMS` 通过，training binary sha256 为 `87fb8ba7c35f13e12d04323f9d7b2cd70bb196d9cd1bba4b5cf9958de103d2af`。2 小时 systemd run `training-systemd-20260708T044217Z` 从 `2026-07-08T04:42:17Z` 运行到 `2026-07-08T06:42:20Z`，stop 后 `ActiveState=inactive`、`SubState=dead`、`Result=success`、`ExecMainStatus=0`、`NRestarts=0`，journal 记录 CPU time `14min 52.929s`、memory peak `270.8M`、swap peak `0B`。run manifest 写出到 `training/run_manifests/training-systemd-20260708T044217Z.manifest.json`，`verdict=PASS`、`source_gaps=[]`；runtime artifact dir 只有 `retention_policy_receipt.json`，旧 sidecar 数量为 `0`，当前 run `.running` / `.digesting` 残留为 `0`。source coverage 覆盖五个 runtime source：`binance_aggtrade=62483`、`binance_depth_snapshot=1`、`binance_depth_update=72018`、`polymarket_market=3639843` raw events / `6957348` typed rows、`polymarket_rtds_chainlink_btc_usd=7033`。本 run 未跨 UTC day，因此 `binance_depth_snapshot=1` 是启动 bootstrap snapshot，符合不按小时强制 snapshot 的口径。所有 `source_writer_stats` 满足 `events_received == events_written + events_dropped` 且 `typed_rows_written == finalized_segment_rows`；所有 segment manifest `required_typed_fields_present=true`、`validation_verdict=Complete`，`source_gaps=[]`，且不引用已删除 runtime sidecar。Polymarket manifest 汇总 `book_rows=120044` 且 `book_rows_with_bids_asks=120044`。本地拉回 3 个 RTDS parquet 复算 `timestamp_received`：共 `7033` 行，最大接收间隔 `9504ms`，`>60000ms` 断档数为 `0`。retention receipt 为 `delete_mode=dry_run`、`action=noop`、`verdict=within_threshold`、`dataset_bytes_before=3220402879`。Step 10.4.8 与父级 Step 10.4 完成。
 
-- [ ] **Step 10.5: 完整 5 分钟 market 人工审查 run 并拉回本地**
+- [x] **Step 10.5: 完整 5 分钟 market 数据拉回并形成人工审查包**
 
-  在数据采集服务器运行本阶段实现后的训练 collector，使用 Step 5.4 的人工审查运行模式，采集一个完整 `btc-updown-5m` market。运行要求：
+  口径修正：本 step 的真实目标是把一个完整 `btc-updown-5m` market 的真实四源数据拉回本地供人工分析，不是重新验证早期 Step 5.4 的 `manual_review_complete_market` 运行模式。旧计划文字要求“另起 manual review run 并在 run manifest 写 `selected_market_slug`/manual shutdown reason”已落后于当前状态；Step 10.4 最终 2 小时 live run 已经 `PASS`、`source_gaps=[]`，并覆盖多个完整 5 分钟 market，因此 10.5 可直接从该已验证 live run 中选择完整窗口切片。
 
-  - 不使用启动时已经过半的 partial market；必须选择下一完整 market 或明确记录 `selected_market_slug`、`planned_start_utc`、`planned_end_utc`、`preload_start_utc`。
-  - 覆盖 `preload_start_utc = planned_start_utc - 30s` 到 `planned_end_utc + 10s` 或 resolved/fallback close evidence。
-  - Polymarket `book_rows > 0`，且 `book_rows_with_bids_asks == book_rows`。
-  - 目标 market 的两个 subscribed asset id 都必须有可读取的完整 book depth；缺一方只能判 incomplete 或给出 source gap/unavailable reason。
-  - 对目标 market 做最小 replay：从第一条 `book` 开始应用后续 `price_change`，校验本地 best bid/ask 与事件字段可解释；不能只检查字段非空。
-  - `polymarket_market_metadata` 必须覆盖 selected condition/market 的 condition id、token/asset ids、start/end、active/acceptingOrders、lifecycle、tick/min size；缺字段必须写 unavailable reason，不得伪装完整。
-  - Binance depth snapshot/update 在目标 market window 内有 typed rows 和 stitch receipt；`local_u` 单调推进或 gap/resnapshot 可解释。
-  - Binance aggTrade、RTDS Chainlink 在目标 market window 内都有 typed rows。
-  - source gaps 为空；如不为空，必须逐条解释，不得宣称完整通过。
-  - 当前 hourly part 必须通过受控 shutdown finalize，manifest 标记 `manual_review_complete_market`，并记录 `rollover_reason=manual_review_complete_market_shutdown` 或等价 reason。
+  修正后的拉回与检查要求：
 
-  拉回本地要求：
-
-  - 从数据采集服务器把该 run 的 parquet、segment manifest、run manifest、run-level retention policy/no-op receipt、可选 deletion receipt、SHA256SUMS 拉回；source coverage/source gaps 只从 run manifest 字段读取，不再拉回 `source_coverage.json` / `source_gaps.json` sidecar：
+  - 从已通过的 live run 或后续等价 PASS run 中选择一个完整 market，窗口至少覆盖 `planned_start_utc - 30s` 到 `planned_end_utc + 10s`。
+  - 拉回目标小时原始 hourly parquet、segment manifest、run manifest、run-level retention policy/no-op receipt、`SHA256SUMS`；source coverage/source gaps 只从 run manifest 字段读取，不再拉回 `source_coverage.json` / `source_gaps.json` sidecar：
 
   ```text
   /home/chillchill/btc-updown-marketmaker/target/manual-inspection/<run_id>/
   ```
 
-  - 本地执行 sha256 校验，生成 `filelist.txt` 和人工检查说明。
-  - 最终向用户汇报本地目录、总大小、各 source parquet 行数、Polymarket book 完整 depth 计数、metadata 覆盖、最小 replay 检查、Binance stitch receipt、run manifest 内的 source coverage/source gaps、四源覆盖窗口和未解决风险。
+  - 本地执行 sha256 校验，生成 `filelist.txt`、`inspection_report.json` 和 `inspection_report.md`。
+  - 生成便于人工查看的 `selected_window/<market_slug>/` 过滤 parquet，同时保留拉回的原始 hourly parquet。
+  - 检查 Polymarket 两个 asset id 的 `book` / `price_change` / `best_bid_ask` / `last_trade_price` / `new_market` 行；`book` 必须保留可解析 `bids` / `asks` 数组。真实市场中单侧为空数组可以是盘口状态，需单独计数，不得误判为字段缩水。
+  - 做解释性最小 replay：从 `book` 快照建立本地盘口，应用后续 `price_change`，报告 best bid/ask 精确匹配数量和 typed-row 展开造成的剩余解释限制。当前 typed parquet 未保留 message-level sequence id，因此不把逐行 100% replay 作为 10.5 阻塞条件。
+  - 检查 Binance depth update 在窗口内有 typed rows、`local_u` 单调推进且 stitch gap 为 0；Binance snapshot 用本 run 的 bootstrap snapshot 作为衔接证据，不要求目标窗口内额外 snapshot。
+  - 检查 Binance aggTrade、RTDS Chainlink 在窗口内都有 typed rows；RTDS 接收间隔不得触发 60s source gap。
+  - 如 metadata 仅来自 `polymarket_market` 的 `new_market` 行，应如实记录可用字段和缺失字段；当前代码没有独立 `polymarket_market_metadata` source，不得把缺少 active/acceptingOrders/tick/min-size 全字段伪装为完整 metadata。
+
+  执行记录：已从 Step 10.4 最终 PASS live run `training-systemd-20260708T044217Z` 中选择完整 market `btc-updown-5m-1783488600`，窗口为 `2026-07-08T05:29:30Z` 到 `2026-07-08T05:35:10Z`，planned market 为 `2026-07-08T05:30:00Z` 到 `2026-07-08T05:35:00Z`。本地拉回目录为 `target/manual-inspection/training-systemd-20260708T044217Z/`，总大小约 `112M`，含原始 T05 hourly parquet/manifest、T04 Binance bootstrap snapshot、run manifest、run-level retention receipt、release `SHA256SUMS` / `RELEASE_INFO.env`、`filelist.txt`、`inspection_report.json`、`inspection_report.md` 和 `selected_window/btc-updown-5m-1783488600/` 过滤 parquet。run manifest 为 `mode=live`、`verdict=PASS`、`source_gaps=[]`；拉回 parquet sha256 与 run manifest 全部匹配。
+
+  目标窗口检查结果：Polymarket selected parquet `295059` 行，事件计数为 `price_change=278514`、`best_bid_ask=7611`、`book=6100`、`last_trade_price=2833`、`new_market=1`；两个 asset id 均覆盖，`book` 的 `bids` / `asks` 字段均有效 `6100/6100`，其中 `6024` 行两侧非空、`76` 行单侧为空数组，按真实盘口状态单独记录。解释性 replay 精确匹配 `274818/278502` 条已检查 `price_change`，剩余 `3684` 条记录为 typed-row 展开缺少 message-level sequence id 的解释限制。Binance aggTrade selected parquet `3490` 行；Binance depth update selected parquet `3400` 行，`local_u_after` 单调不降，`stitch_gap_reason_non_null=0`，`stitch_verdict_counts={"continuous_depth_update":3400}`；Binance bootstrap snapshot `1` 行，`last_update_id=97121605990`；RTDS selected parquet `335` 行，最大接收间隔 `3552ms`，`>60000ms` 断档数 `0`。metadata 证据来自 `polymarket_market` 的 `new_market` 行，可提供 slug、condition/market id 和 subscribed asset ids；active/acceptingOrders/tick/min-size 全字段不在当前 run 的独立 metadata source 中，作为剩余 schema 风险记录，不阻塞本 step 的“拉回数据供人工分析”目标。
 
 - [ ] **Step 10.6: retention 远端安全验证**
 
@@ -1106,9 +1105,9 @@
 1. `polymarket_market` 的 `book` rows 全部保留完整 `bids` / `asks` depth；不存在只保存 `bids_len` / `asks_len` 却标记为 complete book 的产物。
 2. Polymarket orderbook hourly parquet 至少包含 `timestamp_received`、`timestamp`、`market`、`event_type`、`asset_id`、`bids`、`asks`、`price`、`size`、`side`、`best_bid`、`best_ask`，并覆盖 `price_change`、`last_trade_price`、`tick_size_change`、`best_bid_ask`、`market_resolved` 的 typed fields 或 nullable unavailable reason。
 3. `polymarket_market_metadata` hourly parquet 至少包含 condition id、CLOB market id、slug、token/asset ids、start/end、active/acceptingOrders、market lifecycle、tick/min size、fee/reward metadata 或 source unavailable reason。
-4. `binance_depth_snapshot` 只在 bootstrap、UTC day boundary、reconnect/resync、stitch gap/resync 时要求生成；生成时对应 parquet 至少包含 `timestamp_received`、`snapshot_fetch_start_utc`、`snapshot_recv_time_utc`、`last_update_id`、`bids`、`asks`、`symbol`、`source_endpoint`。
+4. `binance_depth_snapshot` 只在 bootstrap、UTC day boundary、reconnect/resync、stitch gap/resync 时要求生成；生成时对应 parquet 至少包含 `timestamp_received`、`snapshot_fetch_start_utc`、`last_update_id`、`bids`、`asks`、`symbol`、`source_endpoint`，不得重复写 `recv_time_utc` / `snapshot_recv_time_utc`。
 5. `binance_depth_update` hourly parquet 至少包含 `timestamp_received`、`event_time`、`symbol`、`first_update_id`、`final_update_id`、`bids`、`asks`、`stream`、`snapshot_last_update_id`、`local_u_before`、`local_u_after`、`stitch_verdict`，并有 stitch receipt 证明 snapshot/update 衔接、`local_u` 单调推进或 gap/resnapshot 可解释。
-6. `binance_aggtrade` hourly parquet 至少包含 `timestamp_received`、`event_time`、`trade_time`、`symbol`、`aggregate_trade_id`、`price`、`quantity`、`first_trade_id`、`last_trade_id`、`buyer_is_maker`。
+6. `binance_aggtrade` hourly parquet 至少包含 `timestamp_received`、`event_time`、`symbol`、`aggregate_trade_id`、`price`、`quantity`、`first_trade_id`、`last_trade_id`、`buyer_is_maker`，不得重复写 `recv_time_utc` / `trade_time`。
 7. `polymarket_rtds_chainlink_btc_usd` hourly parquet 至少包含 `timestamp_received`、message timestamp、payload timestamp、`symbol`、`value`、`topic`、subscription filter。
 8. 训练 cold path 按 `utc_day=YYYY-MM-DD/source_kind=<source_kind>/<source_kind>_YYYY-MM-DDTHH[--part=N].parquet` 生成 finalized hourly logical partitions；正常每小时一个文件，保护性 soft rollover 可产生多个 part。
 9. 每个 hourly file 都有 manifest，manifest 包含 row count、sha256、schema version、source coverage、covered markets/assets 或 source-specific ids、compression/sort receipt、ResourceWatermark、`required_files[]`、complete/incomplete verdict、source health/gap/reconnect compact summary 或 run manifest reference/digest、code version / git commit、collector binary sha256、source config digest、collector host/region 和 retention policy digest；deletion receipt 只在真实删除发生时要求非空。segment manifest 不得引用默认已删除的 `source_coverage.json`、`source_gaps.json` 或 `rollover_edges.json`。
@@ -1118,7 +1117,7 @@
 13. 本计划不生成 labels、features、tick_stream、replay context 或训练切分；`data-pipeline` 只消费 finalized typed raw parquet、manifest 和 coverage 作为输入。
 14. 本地 `cargo fmt`、`git diff --check`、`cargo clippy -D warnings`、`cargo test -p data-collect --lib --tests --quiet` 全部通过。
 15. 数据采集服务器 15 分钟 smoke 和跨小时 2 小时 run 通过；若排序/压缩导致 CPU、RSS、finalize latency 或 writer queue 不可接受，必须停止并给用户决策，不得强行宣称通过。
-16. 数据采集服务器完成一个完整 `btc-updown-5m` market 人工审查 run，并把 parquet、segment manifest、run manifest、run-level retention policy/no-op receipt、可选 deletion receipt 和 SHA256SUMS 拉回本地 `target/manual-inspection/<run_id>/`；coverage/gap 必须从 run manifest 字段读取，不再依赖 sidecar JSON。本地 sha256 校验、Polymarket 双 token 完整 depth、最小 orderbook replay、metadata 覆盖和 Binance stitch 检查通过后，用户可人工审查数据产物。
+16. 数据采集服务器已有 PASS live run 或后续等价 run 中必须能选出一个完整 `btc-updown-5m` market 窗口，并把对应 hourly parquet、segment manifest、run manifest、run-level retention policy/no-op receipt、可选 deletion receipt 和 SHA256SUMS 拉回本地 `target/manual-inspection/<run_id>/`；coverage/gap 必须从 run manifest 字段读取，不再依赖 sidecar JSON。本地 sha256 校验、Polymarket 双 token book/price_change/best_bid_ask/new_market 可读性、解释性最小 replay、可用 metadata 字段与缺失字段说明、Binance stitch 和 RTDS freshness 检查完成后，用户可人工审查数据产物。
 
 ## 七、执行风险与决策门
 

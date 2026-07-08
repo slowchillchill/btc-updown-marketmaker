@@ -240,12 +240,12 @@ fn typed_writer_constructors_publish_source_specific_schema_metadata() {
             "polymarket_market_metadata",
             "polymarket_market_metadata_v1",
         ),
-        ("binance_depth_snapshot", "binance_depth_snapshot_v1"),
-        ("binance_depth_update", "binance_depth_update_v1"),
-        ("binance_aggtrade", "binance_aggtrade_v1"),
+        ("binance_depth_snapshot", "binance_depth_snapshot_v2"),
+        ("binance_depth_update", "binance_depth_update_v2"),
+        ("binance_aggtrade", "binance_aggtrade_v2"),
         (
             "polymarket_rtds_chainlink_btc_usd",
-            "polymarket_rtds_chainlink_btc_usd_v1",
+            "polymarket_rtds_chainlink_btc_usd_v2",
         ),
     ];
 
@@ -279,6 +279,51 @@ fn typed_writer_constructors_publish_source_specific_schema_metadata() {
                 .get("parquet_raw_source_kind")
                 .and_then(|value| value.as_deref()),
             Some(source_kind)
+        );
+    }
+}
+
+#[test]
+fn typed_writer_source_specific_schemas_omit_duplicate_time_columns() {
+    let cases = [
+        (
+            "binance_depth_snapshot",
+            vec!["recv_time_utc", "snapshot_recv_time_utc"],
+        ),
+        ("binance_depth_update", vec!["recv_time_utc"]),
+        ("binance_aggtrade", vec!["recv_time_utc", "trade_time"]),
+        ("polymarket_rtds_chainlink_btc_usd", vec!["recv_time_utc"]),
+    ];
+
+    for (source_kind, removed_fields) in cases {
+        let tmp = tempdir().unwrap();
+        let writer = TypedParquetSegmentWriter::create_for_typed_source(
+            tmp.path(),
+            source_kind,
+            "schema-under-test",
+            source_kind,
+        )
+        .unwrap();
+        let published = writer.finalize().unwrap();
+        let reader = SerializedFileReader::new(File::open(&published.final_path).unwrap()).unwrap();
+        let fields = reader
+            .metadata()
+            .file_metadata()
+            .schema_descr()
+            .columns()
+            .iter()
+            .map(|column| column.name().to_owned())
+            .collect::<Vec<_>>();
+
+        for removed_field in removed_fields {
+            assert!(
+                !fields.contains(&removed_field.to_owned()),
+                "{source_kind} still writes duplicate field {removed_field}"
+            );
+        }
+        assert!(
+            fields.contains(&"timestamp_received".to_owned()),
+            "{source_kind} must retain timestamp_received"
         );
     }
 }
