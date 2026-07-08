@@ -1,5 +1,6 @@
 use std::fs;
 
+use data_collect::retention::RetentionDeleteMode;
 use data_collect::runtime::{
     TrainingRuntimeConfig, TrainingRuntimeMode, parse_args, run_training_runtime,
 };
@@ -20,6 +21,8 @@ fn manual_review_cli_flag_parses_and_rejects_zero() {
     .unwrap();
 
     assert_eq!(cli.stop_after_complete_polymarket_market, Some(1));
+    assert!(!cli.run_forever);
+    assert_eq!(cli.retention_delete_mode, RetentionDeleteMode::DryRun);
     assert!(
         parse_args([
             "--dataset-root",
@@ -28,6 +31,40 @@ fn manual_review_cli_flag_parses_and_rejects_zero() {
             "manual-review-contract",
             "--stop-after-complete-polymarket-market",
             "0",
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn production_cli_flags_parse_and_reject_bounded_forever_mix() {
+    let cli = parse_args([
+        "--dataset-root",
+        "/tmp/data-collect-datasets",
+        "--run-id",
+        "production-contract",
+        "--run-forever",
+        "--retention-delete-mode",
+        "enabled",
+        "--retention-threshold-bytes",
+        "1024",
+    ])
+    .unwrap();
+
+    assert!(cli.run_forever);
+    assert_eq!(cli.max_runtime_secs, None);
+    assert_eq!(cli.retention_delete_mode, RetentionDeleteMode::Enabled);
+    assert_eq!(cli.retention_threshold_bytes, Some(1024));
+
+    assert!(
+        parse_args([
+            "--dataset-root",
+            "/tmp/data-collect-datasets",
+            "--run-id",
+            "bad-production-contract",
+            "--run-forever",
+            "--max-runtime-secs",
+            "7200",
         ])
         .is_err()
     );
@@ -42,11 +79,14 @@ async fn manual_review_runtime_records_mode_and_shutdown_finalize_reason() {
         run_id: "manual-review-contract".to_owned(),
         mode: TrainingRuntimeMode::Synthetic,
         max_runtime_secs: Some(1),
+        run_forever: false,
         collector_region: Some("local-test".to_owned()),
         code_version: None,
         collector_binary_sha256: None,
         source_config_digest: None,
         stop_after_complete_polymarket_market: Some(1),
+        retention_delete_mode: RetentionDeleteMode::DryRun,
+        retention_threshold_bytes: None,
     })
     .await
     .unwrap();

@@ -168,6 +168,7 @@
 | 阶段 5 | 消费者边界与分区 | 训练 UTC day 分区、paper/live artifact 边界声明、finalized-only discovery | 不生成 labels/features/trading logic，且满足阶段推进通用 gate |
 | 阶段 6 | 端到端验收与交付 | soak test、source coverage、ResourceWatermark、final review、changelog | 需求验收项逐条可追溯，且满足阶段推进通用 gate |
 | 阶段 7 | 部署能力与三运行形态交付 | 训练/paper/live 独立二进制、训练部署 README、paper/live hot path 技术文档、systemd 示例、远端 smoke/2h 验收 | 三类二进制可导出，训练采集服务器持续采集验收通过，paper/live 接入边界文档明确，且满足阶段推进通用 gate |
+| 阶段 8 | 训练数据采集生产就绪与正式长跑上线 | 长期运行策略、3 秒 RTDS 重试、生产 retention 闭环、Resource hard-threshold、`polymarket_market_metadata` source、release/README 合同、正式 `train-data-collect-ver1-0`、远端清理和长跑 service | 最新代码 2 小时 systemd gate 通过，正式版本可追溯，旧测试产物已清理，长期采集 service active 且磁盘治理闭环成立 |
 
 ### 阶段推进通用 gate
 
@@ -2438,7 +2439,242 @@ Phase 5 执行结果：
 
   执行结果：阶段 7 最终复审已完成，三个独立 subagent 均返回 `PASS_WITH_NOTES`，未发现阻塞问题。部署 gate 复审确认此前“最新二进制缺 2 小时 gate”的 blocker 已由 `training-systemd-phase7manifest-20260707T052135Z` 补齐；需求/文档一致性复审确认 `data-collect` 边界、训练 cold path、paper/live hot path、路径口径和 Phase 7 资源门控限制说明一致；代码/运行时质量复审确认 source kind 拆分、可恢复 backpressure wait、segment manifest atomic sidecar、soft rollover 和 release export 合同成立。非阻塞 notes：paper/live hot binary 当前仍只验收 heartbeat/status handoff server 与 fake consumer，不是正式交易服务器 `external_market_event` 长跑；完整 byte/age/writer-lag/memory hard constraint 属于后续生产硬化，不作为本阶段已完成项；提交时必须排除无关未跟踪文件。
 
-## 十三、方案不一致决策门
+## 十三、阶段 8：训练数据采集生产就绪与正式长跑上线
+
+本阶段承接用户对正式训练数据采集的部署批准，但前置审查已确认当前代码仍不能直接作为长期生产服务上线。阶段 8 的目标不是重复阶段 7 的“能导出、能跑 2 小时”，而是补齐长期运行、磁盘治理、metadata source、RTDS 3 秒重试、resource hard-threshold、正式版本命名和远端清理后，再启动数据采集服务器的长期采集。
+
+### 阶段 8 目标
+
+1. 训练 collector 可作为长期 systemd user service 运行，不因默认 7 天正常退出而静默停止。
+2. RTDS Chainlink `btc/usd` 业务静默恢复改为每 `3s` 循环重发同一 subscription；`RTDS_FRESHNESS_TIMEOUT_SECS=60` 仍是 source gap 判定线，一个 60 秒窗口最多 20 次重发，每 2 次重发后主动重建 SDK client/connection。
+3. 生产 retention 从 dry-run-only 变成显式可启用的磁盘闭环：正式长跑 service 必须显式启用生产 retention delete mode，只允许删除最老 finalized complete UTC day；无可删 day 或保护条件不满足时 fail closed 并受控停采。
+4. live runtime 接入可执行的 resource hard-threshold：磁盘、dataset/training bytes、writer/source queue、RSS 或可测资源连续硬阈值越线时，先尝试 retention；仍不可恢复时 finalize 已采 segment、写 manifest、停止新采集，不发布伪完整产物。
+5. `polymarket_market_metadata` 成为真实 live source/artifact，而不是只把 `new_market` 混写在 `polymarket_market`：metadata rows 至少来自 discovery/current+next snapshot、`new_market`、periodic active scan 或 fallback close snapshot；无法由 SDK/Gamma 暴露的字段必须写 nullable unavailable reason 或 source gap，不能伪装 complete。
+6. release、README、systemd 示例、contract tests 与实际二进制清单一致，包含 `data-collect-retention-admin`，并生成正式训练采集版本 `data-collect/releases/train-data-collect-ver1-0/`，其中正式启动二进制名为 `train-data-collect-ver1-0`。
+7. 最新代码重新完成本地验证、15 分钟 smoke、2 小时 systemd gate；通过后清理数据采集服务器旧测试 release、Phase 0/validation/test datasets/runtime artifacts，再启动长期采集 service。
+
+### 阶段 8 修复思路
+
+- 保持 SDK-first：Polymarket market channel、RTDS、Gamma/market metadata 仍通过官方 Polymarket Rust SDK 或当前 SDK 暴露的 public Gamma client 能力；若 SDK 无法暴露必要 metadata 字段，先记录缺口和 nullable unavailable reason，不新增 raw REST/manual signing/shadow SDK。
+- 把长期生产运行做成显式模式：保留 bounded smoke/gate 的 `--max-runtime-secs`；新增或等价实现 `--run-forever`，正式 systemd service 必须使用长期模式和 `Restart=always`，测试 gate 仍使用 bounded runtime。
+- 把 retention 和 resource gate 串成闭环：startup、periodic、finalize/shutdown 都写 run-level receipt；生产 enabled delete 只能作用于 `datasets/training/typed_raw/utc_day=*` 下 finalized complete day，并复用 10.6 已验证的 symlink/canonical path/fail-closed 防护。
+- 把 metadata 拆成独立 source kind：`LIVE_SOURCES` 包含 `polymarket_market_metadata`，writer worker 创建对应 parquet，`write_typed_live_event()` 支持 metadata rows，manifest/source coverage 单独统计 metadata 行数和 source gap。
+- 把 release 合同当作测试对象：当前 README/script/service 仍是阶段 7 产物，已知与正式 `train-data-collect-ver1-0` 长跑要求不一致；8.6 必须修到 export script、README、systemd 示例、deploy_readme_contract、deployment_binary_contract 完全一致后，才允许进入正式 release。正式版本目录、sha256、RELEASE_INFO、README 不得依赖手工记忆。
+
+### 任务 8.1：更新需求、文档合同和 RTDS 3 秒恢复口径
+
+**执行步骤：**
+
+- 将 `demand/data-collect-demand.md`、本计划、`data-collect/docs/acceptance-matrix.md` 中 RTDS Chainlink 恢复口径从 10 秒改为 3 秒。
+- 修改或新增回归测试，锁定 `3/6/.../60s` 共 20 次重发、每 2 次重发后主动重建 SDK client/connection、60 秒才记录 `rtds_business_message_timeout`。
+- 保留现有约束：同 session 内重发必须真正发出网络 subscription，不能只增加 SDK 本地 refcount；主动重连仍采用 SDK-first 的新建 `RtdsClient` + 同一 subscription 重新订阅。
+- 测试必须固定 `t=60s` 边界顺序：第 20 次 3 秒节拍重发属于 60 秒窗口内的最后一次重发，不得实现成 19 次重发，也不得在第 20 次重发后额外生成第二个 gap。
+
+**测试：**
+
+```bash
+CARGO_TARGET_DIR=target/data-collect-ci \
+  cargo test -p data-collect rtds_freshness --lib -- --nocapture
+```
+
+**验收：** 测试能证明 60 秒 freshness window 内最多 20 次 3 秒节拍重发、10 次主动重连节拍，且 60 秒前不写 `rtds_business_message_timeout` source gap。
+
+### 任务 8.2：修复长期运行策略和 systemd 长跑模式
+
+**执行步骤：**
+
+- 为训练 collector 增加显式长期运行模式，例如 `--run-forever`；bounded smoke/manual gate 继续使用 `--max-runtime-secs`。
+- systemd 长跑示例使用 `--run-forever`、`Restart=always`、`RestartSec=10`、`RestartPreventExitStatus=75`；bounded 2 小时 gate 使用独立 service 示例，不把 `Restart=always` 误用于验收停止流程。
+- run manifest 记录 runtime mode、start time、是否 run_forever、service unit name、systemd restart policy 和 binary sha256。
+
+**测试：**
+
+```bash
+CARGO_TARGET_DIR=target/data-collect-ci \
+  cargo test -p data-collect --test training_collector_runtime_contract -- --nocapture
+CARGO_TARGET_DIR=target/data-collect-ci \
+  cargo test -p data-collect live_runtime --lib -- --nocapture
+```
+
+**验收：** 未传长期模式的测试仍可 bounded 结束；正式 service 命令不会 7 天后正常退出并停住；systemd 文档清楚区分 2 小时 gate 和长期 service。
+
+### 任务 8.3：接入生产 retention enabled delete 与受控停采闭环
+
+**执行步骤：**
+
+- 为 training collector 增加显式 retention 配置：默认仍为 dry-run；正式长跑 service 显式传入 production enabled delete。
+- 生产 enabled delete 只允许在 canonical `~/btc-updown-marketmaker/datasets/training/typed_raw/utc_day=*` 下删除最老 finalized complete UTC day；保护 current day、running/digesting/tmp/`.rsync-partial`、incomplete day、manual-inspection、run manifests、runtime_artifacts/startup receipts。
+- 若 `datasets/training` 超过 50GB 且 enabled delete 成功，manifest 记录删除 receipt；若超过阈值但无可删 day 或 protection fail，runtime 写 ResourceWatermark hard-threshold evidence，finalize open segments，并受控停止新采集。
+- 复用 10.6 admin 的 canonical path、symlink、receipt containment 保护；不得新增第二套 shadow 删除逻辑。
+
+**测试：**
+
+```bash
+CARGO_TARGET_DIR=target/data-collect-ci \
+  cargo test -p data-collect --test training_retention_contract -- --nocapture
+CARGO_TARGET_DIR=target/data-collect-ci \
+  cargo test -p data-collect --test retention_admin_contract -- --nocapture
+CARGO_TARGET_DIR=target/data-collect-ci \
+  cargo test -p data-collect retention live_runtime --lib -- --nocapture
+```
+
+**验收：** dry-run 默认不删；production enabled 必须显式开启；删除只发生在最老 finalized complete UTC day；无可删 day 时 fail closed 并保护已采数据；manifest/receipt 可追溯。
+
+### 任务 8.4：接入 Resource hard-threshold 运行时动作
+
+**执行步骤：**
+
+- runtime 周期性记录实际可测的 artifact dir bytes、RSS、source queue/writer queue high watermark、wait/timeout/drop、flush/finalize latency；`datasets/training` bytes 由 startup/periodic retention scan receipt 管理。未接入的可用磁盘/cgroup/PSI 等指标不得用 `not measured` 噪音伪装成已测。
+- hard threshold 连续越线时进入受控停采：停止 intake、finalize writer、写 run manifest，verdict 不得为 PASS；若原因是 `datasets/training` 超阈值，则先走 retention scan，仍无法删除时 fail closed。
+- 对未能测量的指标只写实际 unavailable reason，不生成大段 `not measured` 噪音。
+- 必须增加确定性低阈值/fixture runtime 测试，覆盖 “over threshold + no deletable finalized complete day -> 不继续采集 -> finalize 已采 segment -> run manifest 非 PASS”。健康 2 小时 gate 只能证明正常路径，不能替代失败路径测试。
+
+**测试：**
+
+```bash
+CARGO_TARGET_DIR=target/data-collect-ci \
+  cargo test -p data-collect --test resource_watermark_contract -- --nocapture
+CARGO_TARGET_DIR=target/data-collect-ci \
+  cargo test -p data-collect resource live_runtime --lib -- --nocapture
+```
+
+**验收：** resource soft watermark 不误报 source gap；连续 hard threshold 有明确动作；over-threshold + no deletion 不会继续无限采集到磁盘耗尽；resource hard-threshold fail-closed 使用专用非零退出码并被 systemd 配置为不自动重启。
+
+### 任务 8.5：实现 `polymarket_market_metadata` live source
+
+**执行步骤：**
+
+- `LIVE_SOURCES` 增加 `polymarket_market_metadata`，writer 创建独立 parquet 和 manifest。
+- 将 discovery pair 的 current/next Gamma metadata snapshot 写成 `metadata_source=metadata_snapshot` 或 `active_scan` rows，包含 slug、condition id、asset ids、start/end、active、acceptingOrders、lifecycle。
+- `new_market` 事件同时继续保留在 `polymarket_market` 事件流，并生成对应 `polymarket_market_metadata` row；不得只在 orderbook schema 里用 `new_market` 代替 metadata source。
+- 当 `market_resolved` 缺失、stale 或 source gap 时，只有在 SDK/Gamma fallback close snapshot 同时满足 same-condition、asset set、freshness、`closed=true`、`active=false`、`acceptingOrders=false`、closed time 和 resolution evidence 时，才能生成 `fallback_close` / `retired` row；不满足 retired predicate 时只能记录 `metadata_unavailable_reason` / unavailable observation，不得以 window end 或 stale discovery 伪造 retired。
+- 对 SDK 暴露不到的 tick size、min size、fee/reward 字段，优先通过 SDK/Gamma 类型补齐；无法补齐时必须在 typed schema、raw evidence 或 segment/run manifest 中写 `metadata_unavailable_reason` / `field_unavailable_reasons` / limitation 等等价证据，不能只写 null 后仍把 metadata 判为 complete。
+
+**测试：**
+
+```bash
+CARGO_TARGET_DIR=target/data-collect-ci \
+  cargo test -p data-collect --test polymarket_metadata_layout_contract -- --nocapture
+CARGO_TARGET_DIR=target/data-collect-ci \
+  cargo test -p data-collect --test parquet_writer_contract -- --nocapture
+CARGO_TARGET_DIR=target/data-collect-ci \
+  cargo test -p data-collect live_runtime --lib -- --nocapture
+```
+
+**验收：** 2 小时 live run 的 `source_coverage` 包含 `polymarket_market_metadata`；metadata parquet 存在 finalized 文件和 manifest；至少 current/next market metadata 可读，缺失字段有明确 unavailable/gap reason。
+
+### 任务 8.6：同步 release/README/systemd/contract
+
+**执行步骤：**
+
+- `data-collect/scripts/export-release-artifacts.sh`、`training-collector-deploy-readme.md`、production/gate systemd 示例、deploy tests 同步为四个二进制：training collector、retention admin、paper hot、live hot；同时新增正式版本模式，生成 `data-collect/releases/train-data-collect-ver1-0/` 和别名二进制 `train-data-collect-ver1-0`。
+- 新增正式版本 README 模板，说明 `train-data-collect-ver1-0` 来源 commit、sha256、启动命令、retention enabled 边界、停止/查看状态、清理旧测试产物和回滚方法。
+- 正式版本生成在 `data-collect/releases/train-data-collect-ver1-0/`；二进制名为 `train-data-collect-ver1-0`，同时保留 `SHA256SUMS`、`RELEASE_INFO.env`、README 和 systemd unit。
+- dirty worktree 的正式版本不得伪装成干净 commit：若 `RELEASE_INFO.env` 标记 `-dirty`，正式 README 和目录名必须同样带 dirty 标记，或者阻止正式版本生成并要求先提交。
+
+**测试：**
+
+```bash
+CARGO_TARGET_DIR=target/data-collect-ci \
+  cargo test -p data-collect --test deploy_readme_contract -- --nocapture
+CARGO_TARGET_DIR=target/data-collect-ci \
+  cargo test -p data-collect --test deployment_binary_contract -- --nocapture
+data-collect/scripts/export-release-artifacts.sh
+```
+
+**验收：** 文档、脚本、测试和实际 release 包清单一致；README 不再写“三个二进制”；正式版本名与用户要求一致。
+
+### 任务 8.7：本地最终验证与阶段审查
+
+**执行步骤：**
+
+- 执行格式、diff、clippy、全量测试和 release build。
+- 派生 subagents 对实现进行阶段审查，重点检查：长期运行是否真实、production retention 是否安全、metadata source 是否真实、3 秒 RTDS 语义是否准确、resource hard-threshold 是否能阻止磁盘耗尽、是否引入 SDK 旁路或 shadow 删除逻辑。
+- 审查发现可执行问题则修复并重复审查；若需要改变 SDK-first、生产删除边界、远端路径或验收标准，触发用户决策门。
+
+**测试：**
+
+```bash
+cargo fmt --all -- --check
+git diff --check
+CARGO_TARGET_DIR=target/data-collect-ci \
+  cargo clippy -p data-collect --all-targets -- -D warnings
+CARGO_TARGET_DIR=target/data-collect-ci \
+  cargo test -p data-collect --lib --tests --quiet
+CARGO_TARGET_DIR=target/data-collect-ci \
+  cargo build -p data-collect --release \
+    --bin data-collect-training-collector \
+    --bin data-collect-retention-admin \
+    --bin data-collect-paper-hot \
+    --bin data-collect-live-hot
+```
+
+**验收：** 本地验证和独立审查均通过后，commit/push，再进入远端 gate。
+
+### 任务 8.8：远端最新代码 15 分钟 smoke 与 2 小时 systemd gate
+
+**执行步骤：**
+
+- 本地构建 release，上传到数据采集服务器 `~/btc-updown-marketmaker/data-collect/releases/<release-id>/`，远端只运行 binary，不运行 cargo。
+- 运行 15 分钟 foreground smoke，检查 source coverage、source gaps、metadata source、RTDS 3 秒恢复 evidence、retention/resource receipt、partial/running 残留、磁盘趋势。
+- 运行 2 小时 bounded systemd gate；停止后必须 `ActiveState=inactive`、`Result=success`、`ExecMainStatus=0`，run manifest 写出且 verdict PASS。
+- 拉回 run manifest、segment manifests、selected parquet、retention/resource receipts、SHA256SUMS、RELEASE_INFO 和检查报告。
+
+**验收：**
+
+- `source_gaps=[]`。
+- `source_coverage` 至少包含 `polymarket_market`、`polymarket_market_metadata`、`binance_depth_snapshot`、`binance_depth_update`、`binance_aggtrade`、`polymarket_rtds_chainlink_btc_usd`。
+- RTDS parquet 复算没有 `>60000ms` 接收断档；3 秒重发/每 2 次重连 evidence 符合测试口径。
+- metadata parquet 有 current/next market rows，缺失字段如实记录。
+- retention/resource watermark 不显示未闭环 hard threshold。
+- 无 `.running` / `.digesting` / `.tmp` / `.rsync-partial` 残留进入 finalized discovery。
+
+### 任务 8.9：生成正式 `train-data-collect-ver1-0` 并清理远端旧测试产物
+
+**执行步骤：**
+
+- 在本地 `data-collect/releases/train-data-collect-ver1-0/` 生成正式版本：`train-data-collect-ver1-0`、README、`SHA256SUMS`、`RELEASE_INFO.env`、systemd unit。
+- 上传正式版本到数据采集服务器 `~/btc-updown-marketmaker/data-collect/releases/train-data-collect-ver1-0/`，远端执行 `sha256sum -c SHA256SUMS`。
+- 清理旧测试产物前记录 inventory 和 `du -sh`，并生成 `cleanup_allowlist.json`；只允许删除 allowlist 中逐条列明的精确路径，每条必须包含 path、type、bytes_before、sha256_or_inventory_digest、reason、matched_run_id_or_release_id、local_evidence_copy 状态。
+- 允许进入 allowlist 的范围仅限：
+  - `data-collect/phase0-runs/*`。
+  - `datasets/phase0-validation/*`。
+  - `datasets-retention-validation/<known-validation-run-id>` 或空父目录。
+  - 未被 `current` 指向、不是 `train-data-collect-ver1-0`、且 release id 明确匹配历史 smoke/systemd/validation 的旧 release 目录。
+  - `training/runtime_artifacts/<known-test-run-id>`，前提是对应 run manifest、receipt 和检查报告已经拉回本地，且不是当前长期 service run id。
+  - `training/typed_raw/utc_day=<YYYY-MM-DD>`，仅当该 UTC day 完全属于阶段 8 前测试数据、服务已停止、无 `.running` / `.digesting` / `.tmp` / `.rsync-partial`、不是 current UTC day、且本地已保存该 day 所需审查证据；否则不得删除。
+- 默认保护：`training/run_manifests` 不删除，因为体积小且可能是历史 PASS、selected-window evidence 或 retention complete predicate 追溯依据；如未来确需删除，必须按 run id 单独列入 allowlist 并证明本地已拉回。
+- 保护正式 release、`current` symlink、新长期 service 目录、正在写入的 current day、manual-inspection、本次 phase8 evidence、历史 PASS run/selected-window evidence、retention validation evidence 和用户未明确授权的非 data-collect 文件。
+- 清理脚本必须先 dry-run 打印 allowlist 和 protected list；如果发现候选路径无法归因到 run id / release id / UTC day，或无法证明本地 evidence copy，立即停止，不执行删除。
+
+**验收：** 清理后磁盘占用下降或保持合理；正式 release sha256 通过；删除记录逐条对应 `cleanup_allowlist.json`；protected list 全部仍存在；没有删除正式版本、历史 PASS/人工检查证据和即将启动的生产目录；清理证据拉回本地 `target/manual-inspection/train-data-collect-ver1-0-deploy-<ts>/cleanup/`。
+
+### 任务 8.10：启动长期采集并做上线后观察
+
+**执行步骤：**
+
+- 安装/更新 user systemd service，`ExecStart` 指向正式 `train-data-collect-ver1-0`，使用 `--run-forever`、production retention enabled、collector region `eu-west-1` 和 canonical dataset root；启动前向用户报告 production retention enabled delete 已启用，且边界只允许删除最老 finalized complete UTC day。
+- 确认 `loginctl show-user ubuntu -p Linger`；如未启用，启用 linger 并记录证据。
+- `systemctl --user daemon-reload`，`systemctl --user enable --now data-collect-training-collector.service`。
+- 观察至少 15 分钟：服务 active、RSS/CPU/disk 正常、journal 无 panic/error loop、source rows 增长、无 source gap、无 partial 被发布。
+- 记录长期 run id、service status、journal 摘要、disk before/after、current symlink、binary sha256、初始 artifact 路径。
+
+**验收：** 服务保持 `active/running`，`NRestarts` 无异常增长，磁盘治理处于 enabled 且 receipt 可写，初始数据写入正常；最终向用户报告长期服务已启动、run id、正式版本 sha256、远端清理结果和观察证据。
+
+### 阶段 8 阻断条件
+
+任一条件出现时不得生成正式版本、不得启用长期采集：
+
+1. 阶段 8 计划或实现审查存在 Critical/Important blocker。
+2. 本地 clippy/test/build 未通过。
+3. 最新代码 2 小时 systemd gate 未通过，或 schema v2/metadata source 证据不是最新代码产生。
+4. retention 仍为 dry-run-only，或 production enabled delete 没有 fail-closed 保护。
+5. resource hard-threshold 无法阻止 over-threshold 持续采集。
+6. `polymarket_market_metadata` 仍只存在 schema/writer，没有 live source coverage。
+7. 远端旧测试产物清理范围无法安全确认。
+8. 正式 release sha256、README、systemd unit 或 `current` symlink 不一致。
+
+## 十四、方案不一致决策门
 
 执行中出现以下任一计划级不一致或 fatal 条件，必须停止当前方向，记录事实、影响、可选项和推荐选项，并让用户决定。普通 `source gap`、`stale`、`coverage drop`、单个 artifact incomplete 或可恢复 backpressure 属于运行时质量/覆盖信号，按“运行时校验分级与失败动作”记录和恢复，不得直接升级为本决策门：
 
@@ -2452,12 +2688,12 @@ Phase 5 执行结果：
 8. 训练、paper、live 三类二进制无法在不复制 source adapter / writer / manifest 逻辑的前提下保持一致合同，或 paper/live hot binary 需要接管交易 runtime 职责才能工作。
 9. 数据采集服务器 2 小时持续采集显示 soft rollover 会导致停机、drop/send timeout 无法恢复、partial artifact 被消费者发现、或真实四源吞吐与资源水位无法满足需求基线。
 
-## 十四、最小验证命令清单
+## 十五、最小验证命令清单
 
 计划文档自身验证：
 
 ```bash
-rg -n "/home/chillchill/btc-updown-marketmaker|~/btc-updown-marketmaker|datasets|路径执行口径|data_collect_run_root|data_collect_artifact_root|阶段推进通用 gate|数据格式合同|运行时校验分级|ProcessFatal|ArtifactIncomplete|SourceDegraded|BackpressureDegraded|hysteresis|source_format_contract|consumer_format_compatibility_contract|demand/data-collect-demand.md|阶段 0|阶段 7|技术测试|性能验证|远端 Phase 0|30-60 分钟|5-10 分钟|2-4 小时|15 分钟|2 小时|真实网络 reachability|market_discovery_probe|real_source_alignment_probe|data-collect-training-collector|data-collect-paper-hot|data-collect-live-hot|training-collector-deploy-readme|paper-live-hot-path-integration|soft rollover|runtime receive timestamp|event_available_time|custom_feature_enabled|PASS_TO_PHASE1_REVIEW|2k-5k events/s|bounded queue|backpressure|ResourceWatermark|atomic rename|source gap|recv_time_utc|Polymarket market channel|Binance BTCUSDT aggTrade|RTDS Chainlink|SDK 缺口|用户审查" plan/data-collect-plan.md changelog/data-collect-changelog.md
+rg -n "/home/chillchill/btc-updown-marketmaker|~/btc-updown-marketmaker|datasets|路径执行口径|data_collect_run_root|data_collect_artifact_root|阶段推进通用 gate|数据格式合同|运行时校验分级|ProcessFatal|ArtifactIncomplete|SourceDegraded|BackpressureDegraded|hysteresis|source_format_contract|consumer_format_compatibility_contract|demand/data-collect-demand.md|阶段 0|阶段 7|阶段 8|技术测试|性能验证|远端 Phase 0|30-60 分钟|5-10 分钟|2-4 小时|15 分钟|2 小时|真实网络 reachability|market_discovery_probe|real_source_alignment_probe|data-collect-training-collector|train-data-collect-ver1-0|data-collect-retention-admin|data-collect-paper-hot|data-collect-live-hot|training-collector-deploy-readme|paper-live-hot-path-integration|soft rollover|runtime receive timestamp|event_available_time|custom_feature_enabled|PASS_TO_PHASE1_REVIEW|2k-5k events/s|bounded queue|backpressure|ResourceWatermark|atomic rename|source gap|recv_time_utc|Polymarket market channel|polymarket_market_metadata|Binance BTCUSDT aggTrade|RTDS Chainlink|3s|SDK 缺口|用户审查" plan/data-collect-plan.md changelog/data-collect-changelog.md
 rg -n "[T]ODO|[T]BD|待[补]|以后再[填]|[p]laceholder" plan/data-collect-plan.md changelog/data-collect-changelog.md
 awk '/[ \t]$/ { print FILENAME ":" FNR ": trailing whitespace"; bad=1 } END { exit bad }' plan/data-collect-plan.md changelog/data-collect-changelog.md
 ```
@@ -2472,7 +2708,7 @@ cargo test -p data-collect --lib --tests -- --nocapture
 cargo bench -p data-collect --bench throughput_probe -- --sample-size 20
 ```
 
-## 十五、需求覆盖索引
+## 十六、需求覆盖索引
 
 | 需求第九节编号 | 需求主题 | 覆盖阶段 / 任务 | 证明方式 |
 | --- | --- | --- | --- |
@@ -2497,16 +2733,17 @@ cargo bench -p data-collect --bench throughput_probe -- --sample-size 20
 | 19 | 性能验收、`2k-5k events/s`、writer queue、ResourceWatermark、hardware tier、hot/durable latency | 任务 0.4、0.6、4.2、4.3、6.2 | throughput bench、本地/远端 hardware validation、0.6.11 hot/parquet latency run、ResourceWatermark soft/hard threshold contract |
 | 20 | 真实 `btc-updown-5m` Phase 0 discovery、rollover、四源长跑、时间线对齐和 hot/durable path 验证 | 任务 0.6.9、0.6.10、0.6.11、0.7.2 | market discovery receipt、real-source long-run manifest、hot/parquet latency summary、coverage/resource/gap evidence、远端 verdict |
 | 21 | ResourceWatermark hard threshold policy receipt | 任务 0.6、4.3、运行时校验分级 | threshold policy receipt、soft/hard threshold action tests |
-| 22 | archive/upload/listing/gzip 非范围 | 路径执行口径、第十三节决策门、6.2 | 非范围声明、决策门、非范围泄漏扫描 |
-| 23 | Polymarket Rust SDK-first 和 SDK 缺口审批 | 任务 0.2、2.1、第十三节决策门 | SDK gap report、SDK-first adapter gate |
+| 22 | archive/upload/listing/gzip 非范围 | 路径执行口径、第十四节决策门、6.2 | 非范围声明、决策门、非范围泄漏扫描 |
+| 23 | Polymarket Rust SDK-first 和 SDK 缺口审批 | 任务 0.2、2.1、第十四节决策门 | SDK gap report、SDK-first adapter gate |
 | 24 | 不把 data-pipeline、paper/live 交易逻辑、SDK 旁路写进 data-collect | 任务 1.2、5.1、5.2、6.2 | consumer compatibility contract、training/paper/live boundary tests、非范围扫描 |
 | 25 | 三运行形态独立二进制、sha256、部署/接入文档 | 任务 7.1、7.4、7.5、7.7 | release build、export script、deploy README contract、paper/live hot path doc contract |
 | 26 | source kind + recv UTC day 多 segment 分区与 manifest 证据 | 任务 7.2、7.3、7.6 | segment rollover contract、causal time contract、远端 segment manifests |
 | 27 | max rows/bytes/time/day/shutdown soft rollover 非停机 | 任务 7.2、7.6 | soft rollover tests、2 小时远端运行、backpressure/resource evidence |
 | 28 | 训练 availability time 与 paper/live runtime receive time 区分 | 任务 7.2、7.4、7.7 | causal time contract、hot handoff fake consumer、paper/live integration doc |
 | 29 | paper/live hot path IPC/local stream 接入合同与非范围边界 | 任务 7.4、7.7 | hot path handoff contract、paper/live hot path integration doc、非部署 gate |
+| 30 | 训练采集长期生产运行、3 秒 RTDS 恢复、metadata source、retention/resource 闭环和正式长跑上线 | 阶段 8 | 3 秒 RTDS 回归、本地全量验证、15 分钟 smoke、最新代码 2 小时 systemd gate、正式 release/README、远端清理证据、长期 service 观察 |
 
-## 十六、数据格式与消费者兼容性检查
+## 十七、数据格式与消费者兼容性检查
 
 | 消费方 | 是否直接消费 `data-collect` typed raw parquet | 必须满足的数据格式 | 不允许的误用 |
 | --- | --- | --- | --- |

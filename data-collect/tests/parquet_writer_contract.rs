@@ -3,6 +3,9 @@ use std::fs::File;
 
 use arrow_array::StringArray;
 use data_collect::RawEvent;
+use data_collect::polymarket_market_metadata_layout::{
+    PolymarketMarketMetadataContext, PolymarketMarketMetadataRow,
+};
 use data_collect::polymarket_orderbook_layout::{
     PolymarketOrderbookContext, PolymarketOrderbookRow,
 };
@@ -231,6 +234,72 @@ fn parquet_writer_writes_pmxt_like_orderbook_schema() {
         .unwrap();
     assert_eq!(bids.value(0), r#"[["0.49","120.5"]]"#);
     assert_eq!(asks.value(0), r#"[["0.51","88"]]"#);
+}
+
+#[test]
+fn typed_writer_writes_polymarket_market_metadata_rows() {
+    let tmp = tempdir().unwrap();
+    let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
+        tmp.path(),
+        "metadata",
+        "polymarket_market_metadata_v1",
+        "polymarket_market_metadata",
+    )
+    .unwrap();
+    let row = PolymarketMarketMetadataRow::active_scan(
+        "btc-updown-5m-1783392300",
+        "condition-1",
+        Some("clob-market-1"),
+        &["asset-1".to_owned(), "asset-2".to_owned()],
+        Some(1_783_392_300_000),
+        Some(1_783_392_600_000),
+        Some(true),
+        Some(true),
+        "active",
+        None,
+        None,
+        None,
+        None,
+        Some(true),
+        PolymarketMarketMetadataContext {
+            timestamp_received_ms: 1_783_392_404_599,
+            metadata_fetch_start_utc_ms: Some(1_783_392_404_100),
+            metadata_recv_time_utc_ms: Some(1_783_392_404_599),
+            collector_host_id: "collector-host".to_owned(),
+            collector_region: "eu-west-1".to_owned(),
+            source_endpoint: "https://gamma-api.polymarket.com/markets".to_owned(),
+            schema_version: "polymarket_market_metadata_v1".to_owned(),
+        },
+    )
+    .with_metadata_unavailable_reason(Some(
+        "gamma_discovery_snapshot_lacks_tick_size_min_size_fee_schedule_reward_eligibility"
+            .to_owned(),
+    ));
+
+    writer
+        .write_polymarket_market_metadata_rows(&[row])
+        .unwrap();
+    let published = writer.finalize().unwrap();
+
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(File::open(&published.final_path).unwrap())
+            .unwrap();
+    let mut batch_reader = builder.build().unwrap();
+    let batch = batch_reader.next().unwrap().unwrap();
+    let reasons = batch
+        .column(
+            batch
+                .schema()
+                .index_of("metadata_unavailable_reason")
+                .unwrap(),
+        )
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(
+        reasons.value(0),
+        "gamma_discovery_snapshot_lacks_tick_size_min_size_fee_schedule_reward_eligibility"
+    );
 }
 
 #[test]

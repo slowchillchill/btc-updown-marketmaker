@@ -1,6 +1,8 @@
 use data_collect::live_runtime::{LIVE_SOURCES, is_live_runtime_source_gap_reason};
+use data_collect::retention::RetentionDeleteMode;
 use data_collect::runtime::{
-    SourceTaskPlan, TrainingRuntimeConfig, TrainingRuntimeMode, run_training_runtime,
+    RESOURCE_HARD_THRESHOLD_EXIT_CODE, SourceTaskPlan, TrainingRuntimeConfig, TrainingRuntimeMode,
+    collector_exit_code, run_training_runtime,
 };
 use tempfile::tempdir;
 
@@ -33,6 +35,7 @@ fn source_task_plan_starts_aux_sources_without_polymarket_discovery() {
 fn live_runtime_sources_match_typed_raw_source_kind_contract() {
     assert!(LIVE_SOURCES.contains(&"binance_depth_snapshot"));
     assert!(LIVE_SOURCES.contains(&"binance_depth_update"));
+    assert!(LIVE_SOURCES.contains(&"polymarket_market_metadata"));
     assert!(!LIVE_SOURCES.contains(&"binance_depth"));
 }
 
@@ -64,11 +67,14 @@ async fn synthetic_training_runtime_writes_segment_manifest_and_coverage() {
         run_id: "runtime-contract".to_owned(),
         mode: TrainingRuntimeMode::Synthetic,
         max_runtime_secs: Some(1),
+        run_forever: false,
         collector_region: Some("local-test".to_owned()),
         code_version: None,
         collector_binary_sha256: None,
         source_config_digest: None,
         stop_after_complete_polymarket_market: None,
+        retention_delete_mode: RetentionDeleteMode::DryRun,
+        retention_threshold_bytes: None,
     };
 
     let receipt = run_training_runtime(config).await.unwrap();
@@ -115,11 +121,14 @@ async fn live_training_runtime_zero_duration_writes_control_manifest() {
         run_id: "live-zero-duration-contract".to_owned(),
         mode: TrainingRuntimeMode::Live,
         max_runtime_secs: Some(0),
+        run_forever: false,
         collector_region: Some("local-test".to_owned()),
         code_version: None,
         collector_binary_sha256: None,
         source_config_digest: None,
         stop_after_complete_polymarket_market: None,
+        retention_delete_mode: RetentionDeleteMode::DryRun,
+        retention_threshold_bytes: None,
     };
 
     let receipt = run_training_runtime(config).await.unwrap();
@@ -166,6 +175,16 @@ async fn live_training_runtime_zero_duration_writes_control_manifest() {
     assert!(manifest["source_coverage"].is_array());
     assert!(manifest["source_gaps"].is_array());
     assert!(manifest["rollover_edges"].is_array());
+    assert_eq!(manifest["runtime_mode"], "bounded");
+    assert!(manifest["run_started_utc_ms"].is_i64());
+    assert_eq!(manifest["code_version"], "test-code-version");
+    assert_eq!(manifest["collector_binary_sha256"], "test-binary-sha256");
+    assert_eq!(
+        manifest["source_config_digest"],
+        "test-source-config-digest"
+    );
+    assert!(manifest["systemd_unit_name"].is_string());
+    assert!(manifest["systemd_restart_policy"].is_string());
     assert!(manifest["finalized_segments"].is_array());
     assert!(
         manifest["source_writer_stats"].is_array(),
@@ -230,5 +249,69 @@ async fn live_training_runtime_zero_duration_writes_control_manifest() {
             .as_array()
             .is_none_or(|items| items.is_empty()),
         "runtime resource_watermark must not carry noisy not-measured placeholders"
+    );
+}
+
+#[tokio::test]
+async fn live_runtime_startup_retention_fail_closed_writes_resource_hard_manifest() {
+    let run_root = tempdir().unwrap();
+    let dataset_root = run_root.path().join("datasets");
+    let incomplete_source = dataset_root
+        .join("training")
+        .join("typed_raw")
+        .join("utc_day=2026-07-08")
+        .join("source_kind=polymarket_market");
+    std::fs::create_dir_all(&incomplete_source).unwrap();
+    std::fs::write(
+        incomplete_source.join("polymarket_market_2026-07-08T00-running.parquet"),
+        b"incomplete bytes above threshold",
+    )
+    .unwrap();
+
+    let config = TrainingRuntimeConfig {
+        dataset_root: dataset_root.clone(),
+        run_id: "live-retention-fail-closed-contract".to_owned(),
+        mode: TrainingRuntimeMode::Live,
+        max_runtime_secs: Some(60),
+        run_forever: false,
+        collector_region: Some("local-test".to_owned()),
+        code_version: Some("git-commit".to_owned()),
+        collector_binary_sha256: Some("binary-sha256".to_owned()),
+        source_config_digest: Some("source-config-digest".to_owned()),
+        stop_after_complete_polymarket_market: None,
+        retention_delete_mode: RetentionDeleteMode::Enabled,
+        retention_threshold_bytes: Some(1),
+    };
+
+    let receipt = run_training_runtime(config).await.unwrap();
+
+    assert!(receipt.finalized_segments.is_empty());
+    assert!(receipt.source_coverage.is_empty());
+    assert!(
+        receipt.source_gaps.iter().any(|gap| gap
+            == "resource_hard_threshold_fail_closed:no_deletable_finalized_complete_utc_day")
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&receipt.run_manifest_path).unwrap()).unwrap();
+    assert_eq!(manifest["verdict"], "SOURCE_GAP");
+    assert_eq!(manifest["code_version"], "git-commit");
+    assert_eq!(manifest["collector_binary_sha256"], "binary-sha256");
+    assert_eq!(manifest["source_config_digest"], "source-config-digest");
+    assert!(
+        manifest["source_gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gap| gap
+                == "resource_hard_threshold_fail_closed:no_deletable_finalized_complete_utc_day")
+    );
+
+    let error = std::io::Error::other(format!(
+        "resource_hard_threshold_shutdown:{}",
+        receipt.run_manifest_path.display()
+    ));
+    assert_eq!(
+        collector_exit_code(&error),
+        RESOURCE_HARD_THRESHOLD_EXIT_CODE
     );
 }

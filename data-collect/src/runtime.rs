@@ -15,7 +15,7 @@ use crate::handoff::{HandoffRuntimeConfig, run_heartbeat_handoff_server};
 use crate::live_runtime::{LiveTrainingRuntimeConfig, run_live_training_runtime};
 use crate::manifest::SourceCoverage;
 use crate::publish::PaperLiveEnvironment;
-use crate::retention::TrainingRetentionPolicy;
+use crate::retention::{RetentionDeleteMode, TrainingRetentionPolicy, TrainingRetentionReceipt};
 use crate::segment::SegmentNaming;
 use crate::writer::{RawEvent, sha256_file, write_segment_on_blocking_pool_for_source};
 
@@ -25,15 +25,19 @@ const SYNTHETIC_SOURCES: &[&str] = &[
     "binance_aggtrade",
     "polymarket_rtds_chainlink_btc_usd",
 ];
+pub const RESOURCE_HARD_THRESHOLD_EXIT_CODE: i32 = 75;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CliArgs {
     pub dataset_root: PathBuf,
     pub run_id: String,
     pub max_runtime_secs: Option<u64>,
+    pub run_forever: bool,
     pub collector_region: Option<String>,
     pub config_path: Option<PathBuf>,
     pub stop_after_complete_polymarket_market: Option<u32>,
+    pub retention_delete_mode: RetentionDeleteMode,
+    pub retention_threshold_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,11 +52,14 @@ pub struct TrainingRuntimeConfig {
     pub run_id: String,
     pub mode: TrainingRuntimeMode,
     pub max_runtime_secs: Option<u64>,
+    pub run_forever: bool,
     pub collector_region: Option<String>,
     pub code_version: Option<String>,
     pub collector_binary_sha256: Option<String>,
     pub source_config_digest: Option<String>,
     pub stop_after_complete_polymarket_market: Option<u32>,
+    pub retention_delete_mode: RetentionDeleteMode,
+    pub retention_threshold_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,13 +143,27 @@ where
             run_id: config.run_id.clone(),
             mode: training_mode,
             max_runtime_secs: config.max_runtime_secs,
+            run_forever: cli.run_forever,
             collector_region: Some(receipt.collector_region),
             code_version: Some(receipt.git_commit),
             collector_binary_sha256: Some(receipt.binary_sha256),
             source_config_digest: Some(receipt.config_digest),
             stop_after_complete_polymarket_market: cli.stop_after_complete_polymarket_market,
+            retention_delete_mode: cli.retention_delete_mode,
+            retention_threshold_bytes: cli.retention_threshold_bytes,
         };
-        run_training_runtime(training_config).await?;
+        let training_receipt = run_training_runtime(training_config).await?;
+        if training_receipt
+            .source_gaps
+            .iter()
+            .any(|gap| gap.starts_with("resource_hard_threshold_"))
+        {
+            return Err(io::Error::other(format!(
+                "resource_hard_threshold_shutdown:{}",
+                training_receipt.run_manifest_path.display()
+            ))
+            .into());
+        }
     } else {
         let environment = match role {
             CollectorBinaryRole::PaperHot => PaperLiveEnvironment::Paper,
@@ -162,6 +183,14 @@ where
     Ok(())
 }
 
+pub fn collector_exit_code(error: &(dyn std::error::Error + 'static)) -> i32 {
+    if error.to_string().contains("resource_hard_threshold_") {
+        RESOURCE_HARD_THRESHOLD_EXIT_CODE
+    } else {
+        1
+    }
+}
+
 pub async fn run_training_runtime(config: TrainingRuntimeConfig) -> Result<TrainingRuntimeReceipt> {
     fs::create_dir_all(&config.dataset_root)?;
     let dataset_root = config.dataset_root.canonicalize()?;
@@ -169,8 +198,13 @@ pub async fn run_training_runtime(config: TrainingRuntimeConfig) -> Result<Train
         .collector_region
         .clone()
         .unwrap_or_else(|| "unknown".to_owned());
-    let retention_policy_receipt_path =
-        enforce_startup_retention_policy(&dataset_root, &config.run_id)?;
+    let (retention_policy_receipt_path, startup_retention_receipt) =
+        enforce_startup_retention_policy(
+            &dataset_root,
+            &config.run_id,
+            config.retention_delete_mode,
+            config.retention_threshold_bytes,
+        )?;
     match config.mode {
         TrainingRuntimeMode::Synthetic => {
             run_synthetic_training_runtime(
@@ -187,6 +221,7 @@ pub async fn run_training_runtime(config: TrainingRuntimeConfig) -> Result<Train
                 dataset_root: dataset_root.clone(),
                 run_id: config.run_id,
                 duration_secs: config.max_runtime_secs,
+                run_forever: config.run_forever,
                 collector_host_id: hostname(),
                 collector_region,
                 code_version: config
@@ -200,6 +235,9 @@ pub async fn run_training_runtime(config: TrainingRuntimeConfig) -> Result<Train
                     .unwrap_or_else(|| "test-source-config-digest".to_owned()),
                 stop_after_complete_polymarket_market: config.stop_after_complete_polymarket_market,
                 retention_policy_receipt_path: Some(retention_policy_receipt_path),
+                startup_retention_receipt: Some(startup_retention_receipt),
+                retention_delete_mode: config.retention_delete_mode,
+                retention_threshold_bytes: config.retention_threshold_bytes,
             })
             .await?;
             Ok(TrainingRuntimeReceipt {
@@ -231,18 +269,24 @@ where
     S: Into<std::ffi::OsString>,
 {
     let mut values = BTreeMap::new();
+    let mut run_forever = false;
     let mut iter = args.into_iter().map(Into::into);
     while let Some(arg) = iter.next() {
         let arg = arg
             .into_string()
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "argument is not utf-8"))?;
         match arg.as_str() {
+            "--run-forever" => {
+                run_forever = true;
+            }
             "--dataset-root"
             | "--run-id"
             | "--max-runtime-secs"
             | "--collector-region"
             | "--config"
-            | "--stop-after-complete-polymarket-market" => {
+            | "--stop-after-complete-polymarket-market"
+            | "--retention-delete-mode"
+            | "--retention-threshold-bytes" => {
                 let value = iter.next().ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -281,17 +325,36 @@ where
         .map(|value| value.parse::<u64>())
         .transpose()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    if run_forever && max_runtime_secs.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--run-forever cannot be combined with --max-runtime-secs",
+        )
+        .into());
+    }
     let stop_after_complete_polymarket_market = values
         .remove("--stop-after-complete-polymarket-market")
         .map(|value| parse_positive_u32("--stop-after-complete-polymarket-market", &value))
+        .transpose()?;
+    let retention_delete_mode = values
+        .remove("--retention-delete-mode")
+        .map(|value| parse_retention_delete_mode(&value))
+        .transpose()?
+        .unwrap_or(RetentionDeleteMode::DryRun);
+    let retention_threshold_bytes = values
+        .remove("--retention-threshold-bytes")
+        .map(|value| parse_positive_u64("--retention-threshold-bytes", &value))
         .transpose()?;
     Ok(CliArgs {
         dataset_root: PathBuf::from(dataset_root),
         run_id,
         max_runtime_secs,
+        run_forever,
         collector_region: values.remove("--collector-region"),
         config_path: values.remove("--config").map(PathBuf::from),
         stop_after_complete_polymarket_market,
+        retention_delete_mode,
+        retention_threshold_bytes,
     })
 }
 
@@ -357,7 +420,7 @@ fn host_clock_sync_status() -> String {
 }
 
 fn usage() -> &'static str {
-    "usage: --dataset-root <absolute-path> --run-id <id> [--max-runtime-secs <seconds>] [--collector-region <region>] [--config <path>] [--stop-after-complete-polymarket-market <count>]"
+    "usage: --dataset-root <absolute-path> --run-id <id> [--max-runtime-secs <seconds> | --run-forever] [--collector-region <region>] [--config <path>] [--stop-after-complete-polymarket-market <count>] [--retention-delete-mode dry-run|enabled] [--retention-threshold-bytes <bytes>]"
 }
 
 async fn run_synthetic_training_runtime(
@@ -484,6 +547,32 @@ fn parse_positive_u32(flag: &str, value: &str) -> Result<u32> {
     Ok(parsed)
 }
 
+fn parse_positive_u64(flag: &str, value: &str) -> Result<u64> {
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    if parsed == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{flag} must be greater than zero"),
+        )
+        .into());
+    }
+    Ok(parsed)
+}
+
+fn parse_retention_delete_mode(value: &str) -> Result<RetentionDeleteMode> {
+    match value {
+        "dry-run" | "dry_run" => Ok(RetentionDeleteMode::DryRun),
+        "enabled" => Ok(RetentionDeleteMode::Enabled),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("unknown retention delete mode: {other}"),
+        )
+        .into()),
+    }
+}
+
 fn manual_review_receipt(target_market_count: u32) -> serde_json::Value {
     serde_json::json!({
         "target_market_count": target_market_count,
@@ -530,12 +619,21 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
-fn enforce_startup_retention_policy(dataset_root: &Path, run_id: &str) -> Result<PathBuf> {
+fn enforce_startup_retention_policy(
+    dataset_root: &Path,
+    run_id: &str,
+    delete_mode: RetentionDeleteMode,
+    threshold_bytes: Option<u64>,
+) -> Result<(PathBuf, TrainingRetentionReceipt)> {
     let relative_path = PathBuf::from("training")
         .join("runtime_artifacts")
         .join(run_id)
         .join("retention_policy_receipt.json");
     let absolute_path = dataset_root.join(&relative_path);
-    TrainingRetentionPolicy::new(dataset_root)?.enforce(&absolute_path)?;
-    Ok(relative_path)
+    let mut policy = TrainingRetentionPolicy::new(dataset_root)?.with_delete_mode(delete_mode);
+    if let Some(threshold_bytes) = threshold_bytes {
+        policy = policy.with_threshold_bytes(threshold_bytes);
+    }
+    let receipt = policy.enforce(&absolute_path)?;
+    Ok((relative_path, receipt))
 }

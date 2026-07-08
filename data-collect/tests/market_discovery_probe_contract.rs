@@ -25,7 +25,12 @@ fn rejects_generic_btc_markets_instead_of_fallback() {
         archived: Some(false),
         enable_order_book: Some(true),
         accepting_orders: Some(true),
+        tick_size: Some("0.01".to_owned()),
+        min_size: Some("1".to_owned()),
+        fee_schedule_raw: Some(r#"{"fee":"0"}"#.to_owned()),
+        reward_eligibility_raw: Some(r#"{"rewards_min_size":"1"}"#.to_owned()),
         raw_json_sha256: Some("generic-digest".to_owned()),
+        raw_json: Some(r#"{"id":"generic-btc"}"#.to_owned()),
     };
 
     let error = select_btc_updown_pair(NOW_MS, &[generic], &[]).expect_err("must fail closed");
@@ -153,6 +158,11 @@ fn candidate_for_window(
         archived: Some(false),
         enable_order_book: Some(true),
         accepting_orders: Some(true),
+        tick_size: Some("0.01".to_owned()),
+        min_size: Some("1".to_owned()),
+        fee_schedule_raw: Some(r#"{"fee":"0"}"#.to_owned()),
+        reward_eligibility_raw: Some(r#"{"rewards_min_size":"1"}"#.to_owned()),
         raw_json_sha256: Some(format!("{id}-digest")),
+        raw_json: Some(format!(r#"{{"id":"{id}"}}"#)),
     }
 }

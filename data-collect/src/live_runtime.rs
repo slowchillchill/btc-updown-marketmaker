@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
 use std::error::Error;
 use std::fs;
 use std::io;
@@ -40,12 +41,18 @@ use crate::manifest::{
 use crate::market_discovery::{
     BtcUpdownDiscoveryPair, BtcUpdownMarketCandidate, discovery_windows, select_btc_updown_pair,
 };
+use crate::polymarket_market_metadata_layout::{
+    PolymarketMarketMetadataContext, PolymarketMarketMetadataRow,
+};
 use crate::polymarket_orderbook_layout::{PolymarketOrderbookContext, PolymarketOrderbookRow};
 use crate::resource::{
-    ResourceAction, ResourceSeverity, ResourceThresholdPolicyReceipt, ResourceThresholds,
-    ResourceWatermark,
+    ResourceAction, ResourcePolicy, ResourcePolicyMonitor, ResourceSeverity,
+    ResourceThresholdPolicyReceipt, ResourceThresholds, ResourceVerdict, ResourceWatermark,
 };
-use crate::retention::TrainingRetentionPolicy;
+use crate::retention::{
+    DEFAULT_TRAINING_DATASET_MAX_BYTES, RetentionDeleteMode, TrainingRetentionPolicy,
+    TrainingRetentionReceipt,
+};
 use crate::source_format::RtdsChainlinkBtcUsdRaw;
 use crate::source_hourly_layout::{
     BinanceAggTradeHourlyRow, BinanceDepthSnapshotHourlyRow, BinanceDepthUpdateHourlyRow,
@@ -78,6 +85,8 @@ const RETENTION_SCAN_INTERVAL_SECS: u64 = 60;
 const RETENTION_SCAN_BUDGET_MS: u64 = 5_000;
 const SHUTDOWN_RETENTION_SCAN_BUDGET_MS: u64 = RETENTION_SCAN_BUDGET_MS;
 const WRITER_FINALIZE_BUDGET_MS: u64 = 30_000;
+const RESOURCE_HARD_HYSTERESIS_SAMPLES: u32 = 2;
+const RESOURCE_RECOVERY_HYSTERESIS_SAMPLES: u32 = 2;
 const MAX_RECORDED_SOURCE_GAPS: usize = 256;
 const SOURCE_GAP_OVERFLOW_PREFIX: &str = "source_gap_overflow_count:";
 const BINANCE_DEPTH_MAX_RECONNECTS: u32 = 12;
@@ -85,15 +94,16 @@ const SOURCE_SEND_TIMEOUT_MS: u64 = 2_000;
 const BINANCE_HTTP_CONNECT_TIMEOUT_SECS: u64 = 5;
 const BINANCE_HTTP_TOTAL_TIMEOUT_SECS: u64 = 15;
 const WS_CONNECT_TIMEOUT_SECS: u64 = 20;
-const RTDS_RESUBSCRIBE_INTERVAL_SECS: u64 = 10;
+const RTDS_RESUBSCRIBE_INTERVAL_SECS: u64 = 3;
 const RTDS_RESUBSCRIBES_PER_RECONNECT: u64 = 2;
-const RTDS_RESUBSCRIBE_ATTEMPTS_PER_FRESHNESS_WINDOW: usize = 6;
+const RTDS_RESUBSCRIBE_ATTEMPTS_PER_FRESHNESS_WINDOW: usize = 20;
 const RTDS_FRESHNESS_TIMEOUT_SECS: u64 = 60;
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 pub const LIVE_SOURCES: &[&str] = &[
     "polymarket_market",
+    "polymarket_market_metadata",
     "binance_depth_snapshot",
     "binance_depth_update",
     "binance_aggtrade",
@@ -210,6 +220,7 @@ pub struct LiveTrainingRuntimeConfig {
     pub dataset_root: PathBuf,
     pub run_id: String,
     pub duration_secs: Option<u64>,
+    pub run_forever: bool,
     pub collector_host_id: String,
     pub collector_region: String,
     pub code_version: String,
@@ -217,6 +228,9 @@ pub struct LiveTrainingRuntimeConfig {
     pub source_config_digest: String,
     pub stop_after_complete_polymarket_market: Option<u32>,
     pub retention_policy_receipt_path: Option<PathBuf>,
+    pub startup_retention_receipt: Option<TrainingRetentionReceipt>,
+    pub retention_delete_mode: RetentionDeleteMode,
+    pub retention_threshold_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -229,6 +243,30 @@ pub struct LiveTrainingRuntimeReceipt {
     pub resource_watermark_recorded: bool,
     pub writer_used_blocking_pool: bool,
     pub verdict: String,
+}
+
+fn deadline_reached(deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|deadline| Instant::now() >= deadline)
+}
+
+fn deadline_remaining(deadline: Option<Instant>) -> Option<Duration> {
+    deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()))
+}
+
+fn retention_receipt_triggers_resource_hard_shutdown(receipt: &TrainingRetentionReceipt) -> bool {
+    receipt.action == "fail_closed"
+        && receipt.dataset_bytes_before > receipt.threshold_bytes
+        && receipt.verdict == "no_deletable_finalized_complete_utc_day"
+}
+
+fn resource_verdict_triggers_runtime_shutdown(verdict: &ResourceVerdict) -> bool {
+    verdict.actions.contains(&ResourceAction::StopNewIntake)
+        && verdict
+            .actions
+            .contains(&ResourceAction::FinalizeOpenSegments)
+        && verdict
+            .actions
+            .contains(&ResourceAction::WriteIncompleteManifest)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -253,14 +291,16 @@ pub async fn run_live_training_runtime(
     let duration_secs = config
         .duration_secs
         .unwrap_or(DEFAULT_CONTINUOUS_DURATION_SECS);
-    let min_market_windows = if duration_secs >= 7_200 {
+    let run_started_utc_ms = now_ms();
+    let bounded_run = !config.run_forever;
+    let min_market_windows = if config.run_forever || duration_secs >= 7_200 {
         DEFAULT_MIN_LONG_RUN_WINDOWS
     } else {
         1
     };
-    let min_rollover_edges = usize::from(duration_secs >= 1_800);
+    let min_rollover_edges = usize::from(config.run_forever || duration_secs >= 1_800);
 
-    if duration_secs == 0 {
+    if bounded_run && duration_secs == 0 {
         return write_control_manifest(
             &dataset_root,
             &artifact_dir,
@@ -281,12 +321,45 @@ pub async fn run_live_training_runtime(
                 .collect(),
             default_shutdown_stage_timings("zero_duration_control_manifest"),
             SHUTDOWN_RETENTION_SCAN_BUDGET_MS,
+            run_started_utc_ms,
+        );
+    }
+
+    if let Some(receipt) = config.startup_retention_receipt.as_ref()
+        && retention_receipt_triggers_resource_hard_shutdown(receipt)
+    {
+        let mut source_gaps = LIVE_SOURCES
+            .iter()
+            .map(|source| format!("missing_source_coverage:{source}"))
+            .collect::<Vec<_>>();
+        source_gaps.push(format!(
+            "resource_hard_threshold_fail_closed:{}",
+            receipt.verdict
+        ));
+        return write_control_manifest(
+            &dataset_root,
+            &artifact_dir,
+            &config,
+            "SOURCE_GAP",
+            source_gaps,
+            Vec::new(),
+            Vec::new(),
+            empty_queue_summary("source_event_queue"),
+            empty_queue_summary("writer_chunk_queue"),
+            Vec::new(),
+            LIVE_SOURCES
+                .iter()
+                .map(|source| SourceWriterStats::empty((*source).to_owned()))
+                .collect(),
+            default_shutdown_stage_timings("startup_retention_hard_threshold"),
+            SHUTDOWN_RETENTION_SCAN_BUDGET_MS,
+            run_started_utc_ms,
         );
     }
 
     let run_started = Instant::now();
-    let deadline = run_started + Duration::from_secs(duration_secs);
-    let deadline_ms = now_ms().saturating_add((duration_secs * 1000) as i64);
+    let deadline = bounded_run.then(|| run_started + Duration::from_secs(duration_secs));
+    let deadline_ms = bounded_run.then(|| now_ms().saturating_add((duration_secs * 1000) as i64));
     let source_gaps = Arc::new(Mutex::new(Vec::<String>::new()));
     let source_queue_backpressure = Arc::new(SourceQueueBackpressureStats::default());
     let rollover_edges = Arc::new(Mutex::new(Vec::<RolloverEdge>::new()));
@@ -372,6 +445,7 @@ pub async fn run_live_training_runtime(
                 .join(&config.run_id)
                 .join("retention_policy_receipt.json")
         });
+    let mut resource_monitor = runtime_resource_policy_monitor(config.retention_threshold_bytes);
     let mut average_event_bytes = 512_u64;
     let mut received_rows = 0_u64;
     let mut controlled_shutdown = false;
@@ -379,7 +453,7 @@ pub async fn run_live_training_runtime(
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
 
-    while Instant::now() < deadline {
+    while !deadline_reached(deadline) {
         tokio::select! {
             () = &mut shutdown => {
                 controlled_shutdown = true;
@@ -434,22 +508,46 @@ pub async fn run_live_training_runtime(
                 .values()
                 .map(|handle| handle.queue_rows.load(Ordering::Relaxed))
                 .sum::<u64>();
+            let source_queue_rows = event_rx.len() as u64;
+            let source_queue_bytes = source_queue_rows.saturating_mul(average_event_bytes);
+            let writer_queue_bytes = writer_queue_rows.saturating_mul(average_event_bytes);
             source_queue_tracker.observe(
                 monotonic_ms(run_started),
-                event_rx.len() as u64,
-                (event_rx.len() as u64).saturating_mul(average_event_bytes),
+                source_queue_rows,
+                source_queue_bytes,
             );
             writer_queue_tracker.observe(
                 monotonic_ms(run_started),
                 writer_queue_rows,
-                writer_queue_rows.saturating_mul(average_event_bytes),
+                writer_queue_bytes,
             );
+            let resource_verdict = resource_monitor.observe(runtime_policy_watermark(
+                &artifact_dir,
+                source_queue_rows,
+                source_queue_bytes,
+                writer_queue_rows,
+                writer_queue_bytes,
+                monotonic_ms(run_started),
+            ));
+            if resource_verdict_triggers_runtime_shutdown(&resource_verdict) {
+                record_gap(
+                    &source_gaps,
+                    format!(
+                        "resource_hard_threshold_stop_new_intake:{:?}",
+                        resource_verdict.severity
+                    ),
+                );
+                controlled_shutdown = true;
+                break;
+            }
             next_queue_sample += Duration::from_secs(1);
         }
         if Instant::now() >= next_retention_scan {
             let retention_scan = run_retention_scan_on_blocking_pool(
                 dataset_root.clone(),
                 retention_policy_receipt_path.clone(),
+                config.retention_delete_mode,
+                config.retention_threshold_bytes,
                 RETENTION_SCAN_BUDGET_MS,
             );
             tokio::pin!(retention_scan);
@@ -459,11 +557,25 @@ pub async fn run_live_training_runtime(
                     break;
                 }
                 result = &mut retention_scan => {
-                    if let Err(error) = result {
+                    match result {
+                        Ok(receipt) if retention_receipt_triggers_resource_hard_shutdown(&receipt) => {
+                            record_gap(
+                                &source_gaps,
+                                format!(
+                                    "resource_hard_threshold_fail_closed:{}",
+                                    receipt.verdict
+                                ),
+                            );
+                            controlled_shutdown = true;
+                            break;
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
                         record_gap(
                             &source_gaps,
                             format!("retention_periodic_scan_error:{error}"),
                         );
+                        }
                     }
                 }
             }
@@ -670,6 +782,7 @@ pub async fn run_live_training_runtime(
         source_writer_stats,
         shutdown_stage_timings,
         SHUTDOWN_RETENTION_SCAN_BUDGET_MS,
+        run_started_utc_ms,
     )
 }
 
@@ -909,17 +1022,20 @@ async fn stop_writer_workers_with_budget(
 async fn run_retention_scan_on_blocking_pool(
     dataset_root: PathBuf,
     receipt_path: PathBuf,
+    delete_mode: RetentionDeleteMode,
+    threshold_bytes: Option<u64>,
     budget_ms: u64,
-) -> Result<()> {
-    tokio::task::spawn_blocking(move || -> Result<()> {
+) -> Result<TrainingRetentionReceipt> {
+    tokio::task::spawn_blocking(move || -> Result<TrainingRetentionReceipt> {
         let deadline = Instant::now() + Duration::from_millis(budget_ms);
-        TrainingRetentionPolicy::new(&dataset_root)?
-            .enforce_with_deadline(&receipt_path, deadline)
-            .map(|_| ())
+        let mut policy = TrainingRetentionPolicy::new(&dataset_root)?.with_delete_mode(delete_mode);
+        if let Some(threshold_bytes) = threshold_bytes {
+            policy = policy.with_threshold_bytes(threshold_bytes);
+        }
+        policy.enforce_with_deadline(&receipt_path, deadline)
     })
     .await
-    .map_err(|err| io::Error::other(format!("retention scan join failed: {err}")))??;
-    Ok(())
+    .map_err(|err| io::Error::other(format!("retention scan join failed: {err}")))?
 }
 
 fn source_writer_worker(
@@ -1072,6 +1188,8 @@ struct SegmentManifestContext {
     depth_local_u_max: Option<u64>,
     depth_first_update_bridged_snapshot: bool,
     depth_source_gaps: BTreeSet<String>,
+    metadata_complete_rows: u64,
+    metadata_unavailable_rows: u64,
 }
 
 impl SegmentManifestContext {
@@ -1102,6 +1220,8 @@ impl SegmentManifestContext {
             depth_local_u_max: segment.depth_local_u_max,
             depth_first_update_bridged_snapshot: segment.depth_first_update_bridged_snapshot,
             depth_source_gaps: segment.depth_source_gaps.clone(),
+            metadata_complete_rows: segment.metadata_complete_rows,
+            metadata_unavailable_rows: segment.metadata_unavailable_rows,
         }
     }
 }
@@ -1284,6 +1404,14 @@ fn segment_manifest_payload(
             json!(event_count(segment, "update")),
         );
         object.insert(
+            "metadata_complete_rows".to_owned(),
+            json!(segment.metadata_complete_rows),
+        );
+        object.insert(
+            "metadata_unavailable_rows".to_owned(),
+            json!(segment.metadata_unavailable_rows),
+        );
+        object.insert(
             "covered_market_slugs".to_owned(),
             json!(segment.covered_market_slugs),
         );
@@ -1324,10 +1452,10 @@ fn event_count(segment: &SegmentManifestContext, event_type: &str) -> u64 {
 }
 
 fn layout_family_for_source(source_kind: &str) -> &'static str {
-    if source_kind == "polymarket_market" {
-        "pmxt_inspired_polymarket_orderbook"
-    } else {
-        "source_specific_hourly_typed_raw"
+    match source_kind {
+        "polymarket_market" => "pmxt_inspired_polymarket_orderbook",
+        "polymarket_market_metadata" => "pmxt_inspired_polymarket_market_metadata",
+        _ => "source_specific_hourly_typed_raw",
     }
 }
 
@@ -1341,6 +1469,7 @@ fn required_typed_fields_present(segment: &SegmentManifestContext) -> bool {
         "binance_depth_update" => event_count(segment, "depth_update") > 0,
         "binance_aggtrade" => event_count(segment, "aggTrade") > 0,
         "polymarket_rtds_chainlink_btc_usd" => event_count(segment, "update") > 0,
+        "polymarket_market_metadata" => segment.metadata_complete_rows > 0,
         _ => segment.rows > 0,
     }
 }
@@ -1460,17 +1589,119 @@ fn segment_resource_threshold_policy_receipt() -> ResourceThresholdPolicyReceipt
     }
 }
 
+fn runtime_resource_policy_monitor(threshold_bytes: Option<u64>) -> ResourcePolicyMonitor {
+    ResourcePolicyMonitor::new(
+        ResourcePolicy::new(
+            runtime_resource_thresholds(threshold_bytes, true),
+            runtime_resource_thresholds(threshold_bytes, false),
+        ),
+        RESOURCE_HARD_HYSTERESIS_SAMPLES,
+        RESOURCE_RECOVERY_HYSTERESIS_SAMPLES,
+    )
+}
+
+fn runtime_resource_thresholds(threshold_bytes: Option<u64>, hard: bool) -> ResourceThresholds {
+    let dataset_threshold = threshold_bytes.unwrap_or(DEFAULT_TRAINING_DATASET_MAX_BYTES);
+    let queue_threshold = if hard {
+        DEFAULT_MAX_SEGMENT_BYTES.saturating_mul(4)
+    } else {
+        DEFAULT_MAX_SEGMENT_BYTES.saturating_mul(2)
+    };
+    ResourceThresholds {
+        min_disk_free_bytes: if hard { 1 } else { 256 * 1024 * 1024 },
+        max_rss_bytes: if hard {
+            2 * 1024 * 1024 * 1024
+        } else {
+            1536 * 1024 * 1024
+        },
+        max_cpu_percent: if hard { 98.0 } else { 90.0 },
+        max_artifact_dir_bytes: dataset_threshold,
+        max_journal_log_bytes: 1024 * 1024 * 1024,
+        max_open_files: if hard { 8192 } else { 4096 },
+        max_queue_bytes: queue_threshold,
+        max_queue_age_ms: if hard {
+            DEFAULT_MAX_SEGMENT_DURATION_MS as u64
+        } else {
+            (DEFAULT_MAX_SEGMENT_DURATION_MS as u64) / 2
+        },
+        max_parquet_writer_memory_estimate_bytes: queue_threshold,
+        max_cgroup_memory_current_bytes: if hard {
+            2 * 1024 * 1024 * 1024
+        } else {
+            1536 * 1024 * 1024
+        },
+        max_cgroup_memory_anon_bytes: if hard {
+            2 * 1024 * 1024 * 1024
+        } else {
+            1536 * 1024 * 1024
+        },
+        max_cgroup_memory_file_bytes: if hard {
+            2 * 1024 * 1024 * 1024
+        } else {
+            1536 * 1024 * 1024
+        },
+        max_cgroup_memory_slab_bytes: if hard {
+            512 * 1024 * 1024
+        } else {
+            384 * 1024 * 1024
+        },
+        max_psi_some_avg10: if hard { 90.0 } else { 70.0 },
+        max_psi_full_avg10: if hard { 50.0 } else { 20.0 },
+        max_stage_latency_ms: if hard { 5_000 } else { 1_000 },
+        max_ttl_ms: (DEFAULT_MAX_SEGMENT_DURATION_MS as u64).saturating_mul(if hard {
+            2
+        } else {
+            1
+        }),
+    }
+}
+
+fn runtime_policy_watermark(
+    artifact_dir: &Path,
+    source_queue_rows: u64,
+    source_queue_bytes: u64,
+    writer_queue_rows: u64,
+    writer_queue_bytes: u64,
+    queue_age_ms: u64,
+) -> ResourceWatermark {
+    let queue_bytes = source_queue_bytes.saturating_add(writer_queue_bytes);
+    let total_queue_rows = source_queue_rows.saturating_add(writer_queue_rows);
+    ResourceWatermark {
+        rss_bytes: read_rss_bytes(),
+        cpu_percent: None,
+        disk_free_bytes: None,
+        artifact_dir_bytes: dir_size_bytes(artifact_dir).ok(),
+        journal_log_bytes: None,
+        journal_limit_status: None,
+        open_files: None,
+        queue_bytes: Some(queue_bytes),
+        queue_age_ms: Some(queue_age_ms),
+        parquet_writer_memory_estimate_bytes: Some(
+            writer_queue_bytes.max(total_queue_rows.saturating_mul(512)),
+        ),
+        cgroup_memory_current_bytes: None,
+        cgroup_memory_stat: None,
+        cgroup_memory_events: None,
+        psi_cpu: None,
+        psi_memory: None,
+        psi_io: None,
+        stage_latency_ms: Some(0),
+        ttl_ms: Some(DEFAULT_MAX_SEGMENT_DURATION_MS as u64),
+        unavailable: Vec::new(),
+    }
+}
+
 async fn run_polymarket_source(
     sink: SourceEventSink,
     rollover_edges: Arc<Mutex<Vec<RolloverEdge>>>,
     collector_identity: CollectorIdentity,
-    deadline_ms: i64,
+    deadline_ms: Option<i64>,
     discovery_wait_secs: u64,
     run_started: Instant,
 ) -> Result<()> {
     let gamma = GammaClient::default();
     let mut previous_pair = None::<BtcUpdownDiscoveryPair>;
-    while now_ms() < deadline_ms {
+    while deadline_ms.is_none_or(|deadline_ms| now_ms() < deadline_ms) {
         let pair = match discover_pair_with_wait(&gamma, discovery_wait_secs).await {
             Ok(pair) => pair,
             Err(err) => {
@@ -1486,7 +1717,10 @@ async fn run_polymarket_source(
                 .push(RolloverEdge::from_pairs(previous, &pair));
         }
         previous_pair = Some(pair.clone());
-        let segment_end_ms = (pair.current.end_ts_s * 1000 + 5_000).min(deadline_ms);
+        let pair_end_ms = pair.current.end_ts_s * 1000 + 5_000;
+        let segment_end_ms = deadline_ms
+            .map(|deadline_ms| pair_end_ms.min(deadline_ms))
+            .unwrap_or(pair_end_ms);
         collect_polymarket_pair(
             &pair,
             &sink,
@@ -1544,7 +1778,18 @@ async fn collect_polymarket_pair(
         },
     )
     .await;
+    send_polymarket_metadata_event(
+        sink,
+        run_started,
+        &pair.current,
+        "current",
+        collector_identity,
+    )
+    .await?;
+    send_polymarket_metadata_event(sink, run_started, &pair.next, "next", collector_identity)
+        .await?;
 
+    let mut current_market_resolved = false;
     while now_ms() < segment_end_ms {
         tokio::select! {
             maybe_bba = bba_stream.next() => {
@@ -1672,6 +1917,7 @@ async fn collect_polymarket_pair(
             maybe_new_market = new_market_stream.next() => {
                 match maybe_new_market {
                     Some(Ok(event)) => {
+                        let metadata_raw_json = polymarket_new_market_raw_json(&event);
                         send_event(sink, run_started, raw_event(
                             "polymarket_market",
                             "new_market",
@@ -1679,7 +1925,16 @@ async fn collect_polymarket_pair(
                             Some(event.timestamp.to_string()),
                             MARKET_WS_ENDPOINT,
                             collector_identity,
-                            polymarket_new_market_raw_json(&event),
+                            metadata_raw_json.clone(),
+                        )).await;
+                        send_event(sink, run_started, raw_event(
+                            "polymarket_market_metadata",
+                            "new_market",
+                            &event.slug,
+                            Some(event.timestamp.to_string()),
+                            MARKET_WS_ENDPOINT,
+                            collector_identity,
+                            metadata_raw_json,
                         )).await;
                     }
                     Some(Err(err)) => record_gap(&sink.gaps, format!("polymarket_new_market_stream_error:{err}")),
@@ -1702,6 +1957,18 @@ async fn collect_polymarket_pair(
                             collector_identity,
                             polymarket_market_resolved_raw_json(&event),
                         )).await;
+                        if event.market.to_string() == pair.current.condition_id {
+                            current_market_resolved = true;
+                        }
+                        send_event(sink, run_started, raw_event(
+                            "polymarket_market_metadata",
+                            "fallback_close",
+                            &source_identifier,
+                            Some(event.timestamp.to_string()),
+                            MARKET_WS_ENDPOINT,
+                            collector_identity,
+                            polymarket_fallback_close_raw_json_from_resolved(&event),
+                        )).await;
                     }
                     Some(Err(err)) => record_gap(&sink.gaps, format!("polymarket_market_resolved_stream_error:{err}")),
                     None => {
@@ -1713,13 +1980,120 @@ async fn collect_polymarket_pair(
             () = sleep(Duration::from_millis(250)) => {}
         }
     }
+    if !current_market_resolved {
+        send_event(
+            sink,
+            run_started,
+            raw_event(
+                "polymarket_market_metadata",
+                "active_scan",
+                &pair.current.slug,
+                Some(now_ms().to_string()),
+                "https://gamma-api.polymarket.com/markets",
+                collector_identity,
+                polymarket_window_end_observation_raw_json_from_discovery(&pair.current),
+            ),
+        )
+        .await;
+    }
     Ok(())
+}
+
+async fn send_polymarket_metadata_event(
+    sink: &SourceEventSink,
+    run_started: Instant,
+    market: &crate::market_discovery::DiscoveredBtcUpdownMarket,
+    discovery_slot: &str,
+    collector_identity: &CollectorIdentity,
+) -> Result<()> {
+    send_event(
+        sink,
+        run_started,
+        raw_event(
+            "polymarket_market_metadata",
+            "active_scan",
+            &market.slug,
+            Some(now_ms().to_string()),
+            "https://gamma-api.polymarket.com/markets",
+            collector_identity,
+            polymarket_metadata_snapshot_raw_json(market, discovery_slot),
+        ),
+    )
+    .await;
+    Ok(())
+}
+
+fn polymarket_metadata_snapshot_raw_json(
+    market: &crate::market_discovery::DiscoveredBtcUpdownMarket,
+    discovery_slot: &str,
+) -> Value {
+    json!({
+        "event_type": "active_scan",
+        "metadata_source": "active_scan",
+        "discovery_slot": discovery_slot,
+        "slug": market.slug,
+        "condition_id": market.condition_id,
+        "clob_market_id": market.id,
+        "asset_ids": [market.up_asset_id, market.down_asset_id],
+        "token_ids": [market.up_asset_id, market.down_asset_id],
+        "market_start_utc": market.start_ts_s * 1000,
+        "market_end_utc": market.end_ts_s * 1000,
+        "active": market.active,
+        "accepting_orders": market.accepting_orders,
+        "market_lifecycle_state": if market.active { "active" } else { "candidate" },
+        "tick_size": market.tick_size,
+        "min_size": market.min_size,
+        "fee_schedule_raw": market.fee_schedule_raw,
+        "reward_eligibility_raw": market.reward_eligibility_raw,
+        "metadata_unavailable_reason": missing_metadata_reason(market),
+        "same_condition_market_verified": true,
+        "raw_json_sha256": market.raw_json_sha256,
+        "gamma_market_raw_json": market.raw_json,
+    })
+}
+
+fn polymarket_window_end_observation_raw_json_from_discovery(
+    market: &crate::market_discovery::DiscoveredBtcUpdownMarket,
+) -> Value {
+    let mut value = polymarket_metadata_snapshot_raw_json(market, "current_window_end_unresolved");
+    let reason = "market_resolved_not_observed_before_window_end";
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "market_lifecycle_state".to_owned(),
+            json!("unresolved_window_end_observation"),
+        );
+        object.insert("window_end_observation_reason".to_owned(), json!(reason));
+        let mut reasons = missing_metadata_reason(market)
+            .into_iter()
+            .collect::<Vec<_>>();
+        reasons.push(reason.to_owned());
+        object.insert("metadata_unavailable_reason".to_owned(), json!(reasons));
+    }
+    value
+}
+
+fn missing_metadata_reason(
+    market: &crate::market_discovery::DiscoveredBtcUpdownMarket,
+) -> Option<String> {
+    let missing = [
+        ("tick_size", market.tick_size.is_none()),
+        ("min_size", market.min_size.is_none()),
+        ("fee_schedule_raw", market.fee_schedule_raw.is_none()),
+        (
+            "reward_eligibility_raw",
+            market.reward_eligibility_raw.is_none(),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(field, missing)| missing.then_some(field))
+    .collect::<Vec<_>>();
+    (!missing.is_empty()).then(|| format!("gamma_market_fields_unavailable:{}", missing.join(",")))
 }
 
 async fn run_rtds_source(
     sink: SourceEventSink,
     collector_identity: CollectorIdentity,
-    deadline: Instant,
+    deadline: Option<Instant>,
     run_started: Instant,
 ) -> Result<()> {
     let subscription = Subscription::chainlink_prices(Some("btc/usd".to_owned()));
@@ -1728,7 +2102,7 @@ async fn run_rtds_source(
     let mut action_index = 0_usize;
 
     'source: loop {
-        if Instant::now() >= deadline {
+        if deadline_reached(deadline) {
             break;
         }
 
@@ -1740,13 +2114,15 @@ async fn run_rtds_source(
         }
 
         loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
+            let remaining = deadline_remaining(deadline);
+            if remaining.is_some_and(|remaining| remaining.is_zero()) {
                 break 'source;
             }
             let action = actions[action_index];
-            let limited_by_deadline = remaining < action.wait;
-            let wait_duration = action.wait.min(remaining);
+            let limited_by_deadline = remaining.is_some_and(|remaining| remaining < action.wait);
+            let wait_duration = remaining
+                .map(|remaining| action.wait.min(remaining))
+                .unwrap_or(action.wait);
 
             match timeout(wait_duration, stream.next()).await {
                 Ok(Some(Ok(message))) => {
@@ -1827,7 +2203,7 @@ async fn run_rtds_source(
 async fn run_binance_depth_source(
     sink: SourceEventSink,
     collector_identity: CollectorIdentity,
-    deadline: Instant,
+    deadline: Option<Instant>,
     run_started: Instant,
 ) -> Result<()> {
     let http_client = reqwest::Client::builder()
@@ -1836,7 +2212,7 @@ async fn run_binance_depth_source(
         .build()?;
     let mut snapshot_trigger_reason = "bootstrap".to_owned();
     let mut reconnect_attempts = 0_u32;
-    while Instant::now() < deadline {
+    while !deadline_reached(deadline) {
         let (depth_stream, _) = match timeout(
             Duration::from_secs(WS_CONNECT_TIMEOUT_SECS),
             connect_async(BINANCE_DEPTH_WS),
@@ -2052,7 +2428,7 @@ async fn run_binance_depth_update_ws_source(
     mut context: BinanceDepthUpdateContext,
 ) -> Result<BinanceDepthUpdateExit> {
     let mut local_u = None::<u64>;
-    while Instant::now() < context.deadline {
+    while !deadline_reached(context.deadline) {
         match timeout(Duration::from_secs(30), stream.next()).await {
             Ok(Some(Ok(Message::Text(text)))) => {
                 let raw_json = text.to_string();
@@ -2238,7 +2614,7 @@ async fn run_binance_ws_source(
     spec: BinanceWsSpec,
     sink: SourceEventSink,
     collector_identity: CollectorIdentity,
-    deadline: Instant,
+    deadline: Option<Instant>,
     run_started: Instant,
 ) -> Result<()> {
     let (mut stream, _) = match timeout(
@@ -2263,7 +2639,7 @@ async fn run_binance_ws_source(
             return Ok(());
         }
     };
-    while Instant::now() < deadline {
+    while !deadline_reached(deadline) {
         match timeout(
             Duration::from_secs(spec.freshness_timeout_secs),
             stream.next(),
@@ -2558,6 +2934,7 @@ fn polymarket_new_market_raw_json(event: &NewMarket) -> Value {
             .map(ToString::to_string)
             .collect::<Vec<_>>(),
         "outcomes": event.outcomes,
+        "metadata_unavailable_reason": "market_ws_new_market_payload_lacks_market_start_end_active_accepting_orders_tick_size_min_size_fee_schedule_reward_eligibility",
         "event_message": event.event_message.as_ref().map(|message| {
             json!({
                 "id": message.id,
@@ -2567,6 +2944,38 @@ fn polymarket_new_market_raw_json(event: &NewMarket) -> Value {
                 "description": message.description,
             })
         }),
+        "timestamp": event.timestamp,
+    })
+}
+
+fn polymarket_fallback_close_raw_json_from_resolved(event: &MarketResolved) -> Value {
+    let asset_ids = event
+        .asset_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    json!({
+        "event_type": "fallback_close",
+        "metadata_source": "fallback_close",
+        "id": event.id,
+        "question": event.question,
+        "condition_id": event.market.to_string(),
+        "clob_market_id": event.id,
+        "market": event.market.to_string(),
+        "slug": event.slug.clone().unwrap_or_else(|| event.market.to_string()),
+        "description": event.description,
+        "asset_ids": asset_ids.clone(),
+        "token_ids": asset_ids,
+        "active": false,
+        "accepting_orders": false,
+        "market_lifecycle_state": "retired",
+        "tick_size": Value::Null,
+        "min_size": Value::Null,
+        "fee_schedule_raw": Value::Null,
+        "reward_eligibility_raw": Value::Null,
+        "metadata_unavailable_reason": "market_resolved_ws_payload_lacks_market_start_end_tick_size_min_size_fee_schedule_reward_eligibility",
+        "same_condition_market_verified": true,
+        "fallback_close_reason": "market_resolved",
         "timestamp": event.timestamp,
     })
 }
@@ -2618,6 +3027,7 @@ fn write_control_manifest(
     source_writer_stats: Vec<SourceWriterStats>,
     shutdown_stage_timings: BTreeMap<String, ShutdownStageTiming>,
     shutdown_retention_scan_budget_ms: u64,
+    run_started_utc_ms: i64,
 ) -> Result<LiveTrainingRuntimeReceipt> {
     let run_manifest_dir = dataset_root.join("training").join("run_manifests");
     fs::create_dir_all(&run_manifest_dir)?;
@@ -2656,8 +3066,19 @@ fn write_control_manifest(
     let final_manifest = json!({
         "run_id": config.run_id,
         "mode": mode,
+        "runtime_mode": if config.run_forever { "run_forever" } else { "bounded" },
+        "run_started_utc_ms": run_started_utc_ms,
+        "run_forever": config.run_forever,
+        "duration_secs": config.duration_secs,
+        "code_version": config.code_version,
+        "collector_binary_sha256": config.collector_binary_sha256,
+        "source_config_digest": config.source_config_digest,
+        "systemd_unit_name": env::var("DATA_COLLECT_SYSTEMD_UNIT").unwrap_or_else(|_| "unknown".to_owned()),
+        "systemd_restart_policy": env::var("DATA_COLLECT_SYSTEMD_RESTART_POLICY").unwrap_or_else(|_| "unknown".to_owned()),
         "manual_review_complete_market": manual_review,
         "retention_policy_receipt_path": retention_policy_receipt_path,
+        "retention_delete_mode": config.retention_delete_mode.as_str(),
+        "retention_threshold_bytes": config.retention_threshold_bytes,
         "verdict": verdict,
         "dataset_root": dataset_root,
         "artifact_dir": artifact_dir,
@@ -2675,6 +3096,7 @@ fn write_control_manifest(
         "shutdown_retention_scan_budget_ms": shutdown_retention_scan_budget_ms,
         "shutdown_stage_timings": shutdown_stage_timings,
         "resource_watermark": resource_watermark,
+        "resource_threshold_policy_receipt": runtime_resource_policy_monitor(config.retention_threshold_bytes).policy_receipt(),
         "writer_used_blocking_pool": true,
         "recv_time_utc_ms": now_ms()
     });
@@ -2954,7 +3376,7 @@ struct BinanceDepthUpdateContext {
     http_client: reqwest::Client,
     sink: SourceEventSink,
     collector_identity: CollectorIdentity,
-    deadline: Instant,
+    deadline: Option<Instant>,
     run_started: Instant,
     snapshot_last_update_id: u64,
     snapshot_utc_day: String,
@@ -3150,6 +3572,8 @@ struct ActiveSegment {
     depth_local_u_max: Option<u64>,
     depth_first_update_bridged_snapshot: bool,
     depth_source_gaps: BTreeSet<String>,
+    metadata_complete_rows: u64,
+    metadata_unavailable_rows: u64,
 }
 
 impl ActiveSegment {
@@ -3183,6 +3607,8 @@ impl ActiveSegment {
             depth_local_u_max: None,
             depth_first_update_bridged_snapshot: false,
             depth_source_gaps: BTreeSet::new(),
+            metadata_complete_rows: 0,
+            metadata_unavailable_rows: 0,
         })
     }
 
@@ -3263,6 +3689,15 @@ impl ActiveSegment {
             self.book_rows_with_bids_asks =
                 self.book_rows_with_bids_asks.saturating_add(typed_rows);
         }
+        if event.source_kind == "polymarket_market_metadata" {
+            if metadata_unavailable_reason(&value).is_some() {
+                self.metadata_unavailable_rows =
+                    self.metadata_unavailable_rows.saturating_add(typed_rows);
+            } else {
+                self.metadata_complete_rows =
+                    self.metadata_complete_rows.saturating_add(typed_rows);
+            }
+        }
         if let Some(slug) = value
             .get("slug")
             .and_then(Value::as_str)
@@ -3339,6 +3774,7 @@ impl LiveSegmentWriter {
 fn typed_schema_version(source_kind: &str) -> &'static str {
     match source_kind {
         "polymarket_market" => "polymarket_orderbook_v1",
+        "polymarket_market_metadata" => "polymarket_market_metadata_v1",
         "binance_depth_snapshot" => "binance_depth_snapshot_v2",
         "binance_depth_update" => "binance_depth_update_v2",
         "binance_aggtrade" => "binance_aggtrade_v2",
@@ -3353,6 +3789,12 @@ fn write_typed_live_event(writer: &mut TypedParquetSegmentWriter, event: &RawEve
             let rows = polymarket_orderbook_rows_from_event(event)?;
             let written = rows.len() as u64;
             writer.write_polymarket_orderbook_rows(&rows)?;
+            Ok(written)
+        }
+        "polymarket_market_metadata" => {
+            let rows = polymarket_metadata_rows_from_event(event)?;
+            let written = rows.len() as u64;
+            writer.write_polymarket_market_metadata_rows(&rows)?;
             Ok(written)
         }
         "binance_depth_snapshot" => {
@@ -3381,6 +3823,137 @@ fn write_typed_live_event(writer: &mut TypedParquetSegmentWriter, event: &RawEve
         )
         .into()),
     }
+}
+
+fn polymarket_metadata_rows_from_event(
+    event: &RawEvent,
+) -> Result<Vec<PolymarketMarketMetadataRow>> {
+    let value = serde_json::from_str::<Value>(&event.raw_json)?;
+    let event_type = value
+        .get("event_type")
+        .and_then(Value::as_str)
+        .unwrap_or(event.source_event_type.as_str());
+    let row = match event_type {
+        "active_scan" => metadata_row_from_value(event, &value, "active_scan")?,
+        "new_market" => metadata_row_from_value(event, &value, "new_market")?,
+        "fallback_close" => metadata_row_from_value(event, &value, "fallback_close")?,
+        other => {
+            return Err(invalid_data(format!(
+                "unsupported polymarket metadata event type: {other}"
+            ))
+            .into());
+        }
+    };
+    Ok(vec![row])
+}
+
+fn metadata_row_from_value(
+    event: &RawEvent,
+    value: &Value,
+    metadata_source: &str,
+) -> Result<PolymarketMarketMetadataRow> {
+    let context = PolymarketMarketMetadataContext {
+        timestamp_received_ms: event.recv_time_utc_ms,
+        metadata_fetch_start_utc_ms: value
+            .get("metadata_fetch_start_utc")
+            .and_then(Value::as_i64)
+            .or(Some(event.recv_time_utc_ms)),
+        metadata_recv_time_utc_ms: value
+            .get("metadata_recv_time_utc")
+            .and_then(Value::as_i64)
+            .or(Some(event.recv_time_utc_ms)),
+        collector_host_id: event.collector_host_id.clone(),
+        collector_region: event.collector_region.clone(),
+        source_endpoint: event.source_endpoint.clone(),
+        schema_version: "polymarket_market_metadata_v1".to_owned(),
+    };
+    let slug = required_value_string(value, "slug")?;
+    let condition_id = value
+        .get("condition_id")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("market").and_then(Value::as_str))
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| invalid_data("condition_id missing"))?;
+    let clob_market_id = value
+        .get("clob_market_id")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("id").and_then(Value::as_str));
+    let asset_ids = json_string_vec(value, "asset_ids")?;
+    let market_start_utc = optional_i64(value, "market_start_utc");
+    let market_end_utc = optional_i64(value, "market_end_utc");
+    let active = optional_bool(value, "active");
+    let accepting_orders = optional_bool(value, "accepting_orders");
+    let market_lifecycle_state = value
+        .get("market_lifecycle_state")
+        .and_then(Value::as_str)
+        .unwrap_or(match metadata_source {
+            "new_market" => "prefetched",
+            "fallback_close" => "retired",
+            _ => "active",
+        });
+    let mut row = match metadata_source {
+        "new_market" => PolymarketMarketMetadataRow::new_market(
+            &slug,
+            condition_id,
+            clob_market_id,
+            &asset_ids,
+            market_start_utc,
+            market_end_utc,
+            active,
+            accepting_orders,
+            market_lifecycle_state,
+            optional_json_string(value, "tick_size").as_deref(),
+            optional_json_string(value, "min_size").as_deref(),
+            optional_json_string(value, "fee_schedule_raw").as_deref(),
+            optional_json_string(value, "reward_eligibility_raw").as_deref(),
+            optional_bool(value, "same_condition_market_verified").or(Some(true)),
+            context,
+        ),
+        "fallback_close" => PolymarketMarketMetadataRow::fallback_close(
+            &slug,
+            condition_id,
+            clob_market_id,
+            &asset_ids,
+            market_start_utc,
+            market_end_utc,
+            active,
+            accepting_orders,
+            market_lifecycle_state,
+            optional_json_string(value, "tick_size").as_deref(),
+            optional_json_string(value, "min_size").as_deref(),
+            optional_json_string(value, "fee_schedule_raw").as_deref(),
+            optional_json_string(value, "reward_eligibility_raw").as_deref(),
+            optional_bool(value, "same_condition_market_verified").or(Some(true)),
+            context,
+        ),
+        _ => PolymarketMarketMetadataRow::active_scan(
+            &slug,
+            condition_id,
+            clob_market_id,
+            &asset_ids,
+            market_start_utc,
+            market_end_utc,
+            active,
+            accepting_orders,
+            market_lifecycle_state,
+            optional_json_string(value, "tick_size").as_deref(),
+            optional_json_string(value, "min_size").as_deref(),
+            optional_json_string(value, "fee_schedule_raw").as_deref(),
+            optional_json_string(value, "reward_eligibility_raw").as_deref(),
+            optional_bool(value, "same_condition_market_verified").or(Some(true)),
+            context,
+        ),
+    };
+    row.metadata_unavailable_reason = metadata_unavailable_reason(value);
+    let validation = row.validate();
+    if !validation.is_complete() && row.metadata_unavailable_reason.is_none() {
+        return Err(invalid_data(format!(
+            "polymarket metadata row missing fields without unavailable reason: {:?}",
+            validation.missing_fields
+        ))
+        .into());
+    }
+    Ok(row)
 }
 
 fn polymarket_orderbook_rows_from_event(event: &RawEvent) -> Result<Vec<PolymarketOrderbookRow>> {
@@ -3722,6 +4295,45 @@ fn optional_string(value: &Value, field: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn optional_json_string(value: &Value, field: &str) -> Option<String> {
+    value.get(field).and_then(|value| {
+        if value.is_null() {
+            None
+        } else if let Some(value) = value.as_str() {
+            (!value.trim().is_empty()).then(|| value.to_owned())
+        } else {
+            Some(value.to_string())
+        }
+    })
+}
+
+fn optional_bool(value: &Value, field: &str) -> Option<bool> {
+    value.get(field).and_then(Value::as_bool)
+}
+
+fn json_string_vec(value: &Value, field: &str) -> Result<Vec<String>> {
+    let Some(values) = value.get(field).and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    values.iter().map(json_scalar_to_string).collect()
+}
+
+fn metadata_unavailable_reason(value: &Value) -> Option<String> {
+    match value.get("metadata_unavailable_reason") {
+        Some(Value::String(reason)) if !reason.trim().is_empty() => Some(reason.clone()),
+        Some(Value::Array(reasons)) if !reasons.is_empty() => {
+            let reasons = reasons
+                .iter()
+                .map(json_scalar_to_string)
+                .collect::<Result<Vec<_>>>()
+                .ok()?;
+            Some(reasons.join(";"))
+        }
+        Some(other) if !other.is_null() => Some(other.to_string()),
+        _ => None,
+    }
+}
+
 fn required_i64(value: &Value, field: &str) -> Result<i64> {
     optional_i64(value, field).ok_or_else(|| invalid_data(format!("{field} missing")).into())
 }
@@ -3960,7 +4572,7 @@ mod tests {
     }
 
     #[test]
-    fn rtds_freshness_schedule_resubscribes_every_10s_reconnects_every_2_and_gaps_at_60() {
+    fn rtds_freshness_schedule_resubscribes_every_3s_reconnects_every_2_and_gaps_at_60() {
         let observed = rtds_freshness_actions()
             .iter()
             .map(|action| {
@@ -3973,16 +4585,17 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
+        assert_eq!(observed.len(), 20);
+        assert_eq!(observed.first(), Some(&(3, 1, false, false)));
+        assert_eq!(observed.get(1), Some(&(6, 2, true, false)));
+        assert_eq!(observed.get(18), Some(&(57, 19, false, false)));
+        assert_eq!(observed.last(), Some(&(60, 20, true, true)));
         assert_eq!(
-            observed,
-            vec![
-                (10, 1, false, false),
-                (20, 2, true, false),
-                (30, 3, false, false),
-                (40, 4, true, false),
-                (50, 5, false, false),
-                (60, 6, true, true)
-            ]
+            observed
+                .iter()
+                .filter(|(_, _, reconnect, _)| *reconnect)
+                .count(),
+            10
         );
     }
 
@@ -4001,16 +4614,69 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
+        assert_eq!(observed.len(), 20);
+        assert_eq!(observed.first(), Some(&(3, true, true, false)));
+        assert_eq!(observed.get(1), Some(&(6, true, false, true)));
+        assert_eq!(observed.last(), Some(&(60, true, false, true)));
         assert_eq!(
-            observed,
-            vec![
-                (10, true, true, false),
-                (20, true, false, true),
-                (30, true, true, false),
-                (40, true, false, true),
-                (50, true, true, false),
-                (60, true, false, true)
-            ]
+            observed
+                .iter()
+                .filter(|(_, _, _, reconnect)| *reconnect)
+                .count(),
+            10
+        );
+    }
+
+    #[test]
+    fn retention_fail_closed_over_threshold_triggers_resource_hard_shutdown() {
+        let receipt = TrainingRetentionReceipt {
+            threshold_bytes: 10,
+            dataset_bytes_before: 11,
+            filesystem_free_bytes_before: None,
+            dataset_bytes_after: 11,
+            filesystem_free_bytes_after: None,
+            action: "fail_closed".to_owned(),
+            verdict: "no_deletable_finalized_complete_utc_day".to_owned(),
+            delete_mode: RetentionDeleteMode::Enabled,
+            candidate_utc_day: None,
+            candidate_path: None,
+            would_delete_utc_day: None,
+            would_delete_path: None,
+            would_free_bytes: None,
+            deletion_receipt: None,
+            non_deletable_reasons: vec!["current_day".to_owned()],
+        };
+
+        assert!(retention_receipt_triggers_resource_hard_shutdown(&receipt));
+
+        let mut within_threshold = receipt;
+        within_threshold.dataset_bytes_before = 10;
+        assert!(!retention_receipt_triggers_resource_hard_shutdown(
+            &within_threshold
+        ));
+    }
+
+    #[test]
+    fn runtime_resource_monitor_requests_stop_finalize_after_consecutive_hard_samples() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join("artifact.bin"), [0_u8; 2]).unwrap();
+        let mut monitor = runtime_resource_policy_monitor(Some(1));
+
+        let first = monitor.observe(runtime_policy_watermark(tmp.path(), 0, 0, 0, 0, 0));
+        assert!(!resource_verdict_triggers_runtime_shutdown(&first));
+
+        let second = monitor.observe(runtime_policy_watermark(tmp.path(), 0, 0, 0, 0, 0));
+        assert!(resource_verdict_triggers_runtime_shutdown(&second));
+        assert!(second.actions.contains(&ResourceAction::StopNewIntake));
+        assert!(
+            second
+                .actions
+                .contains(&ResourceAction::FinalizeOpenSegments)
+        );
+        assert!(
+            second
+                .actions
+                .contains(&ResourceAction::WriteIncompleteManifest)
         );
     }
 
@@ -4582,6 +5248,183 @@ mod tests {
         assert_eq!(raw["resolved_event_asset_ids"].as_array().unwrap().len(), 2);
     }
 
+    #[test]
+    fn polymarket_metadata_runtime_conversion_marks_unavailable_rows() {
+        let active = test_metadata_raw_event(
+            "active_scan",
+            json!({
+                "event_type": "active_scan",
+                "slug": "btc-updown-5m-1783392300",
+                "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000002",
+                "clob_market_id": "123",
+                "asset_ids": ["1", "2"],
+                "market_start_utc": 1_783_392_300_000_i64,
+                "market_end_utc": 1_783_392_600_000_i64,
+                "active": true,
+                "accepting_orders": true,
+                "market_lifecycle_state": "active",
+                "tick_size": "0.01",
+                "min_size": "1",
+                "fee_schedule_raw": r#"{"fee":"0"}"#,
+                "reward_eligibility_raw": r#"{"rewards_min_size":"1"}"#,
+                "same_condition_market_verified": true
+            }),
+        );
+        let rows = polymarket_metadata_rows_from_event(&active).unwrap();
+        assert_eq!(rows[0].metadata_source, "active_scan");
+        assert_eq!(rows[0].metadata_unavailable_reason, None);
+        assert!(rows[0].validate().is_complete());
+
+        let new_market = test_metadata_raw_event(
+            "new_market",
+            json!({
+                "event_type": "new_market",
+                "slug": "btc-updown-5m-1783392600",
+                "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000003",
+                "asset_ids": ["3", "4"],
+                "metadata_unavailable_reason": "market_ws_new_market_payload_lacks_market_start_end_active_accepting_orders_tick_size_min_size_fee_schedule_reward_eligibility",
+                "same_condition_market_verified": true
+            }),
+        );
+        let rows = polymarket_metadata_rows_from_event(&new_market).unwrap();
+        assert_eq!(rows[0].metadata_source, "new_market");
+        assert!(
+            rows[0]
+                .metadata_unavailable_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("market_ws_new_market_payload_lacks"))
+        );
+
+        let fallback = test_metadata_raw_event(
+            "fallback_close",
+            json!({
+                "event_type": "fallback_close",
+                "slug": "btc-updown-5m-1783392300",
+                "market": "0x0000000000000000000000000000000000000000000000000000000000000002",
+                "asset_ids": ["1", "2"],
+                "metadata_unavailable_reason": "market_resolved_ws_payload_lacks_market_start_end_tick_size_min_size_fee_schedule_reward_eligibility",
+                "same_condition_market_verified": true,
+                "fallback_close_reason": "market_resolved"
+            }),
+        );
+        let rows = polymarket_metadata_rows_from_event(&fallback).unwrap();
+        assert_eq!(rows[0].metadata_source, "fallback_close");
+        assert_eq!(rows[0].market_lifecycle_state, "retired");
+        assert!(
+            rows[0]
+                .metadata_unavailable_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("market_resolved_ws_payload_lacks"))
+        );
+    }
+
+    #[test]
+    fn window_end_without_resolved_is_observation_not_retired_close() {
+        let market = crate::market_discovery::DiscoveredBtcUpdownMarket {
+            id: "123".to_owned(),
+            slug: "btc-updown-5m-1783392300".to_owned(),
+            condition_id: "0x0000000000000000000000000000000000000000000000000000000000000002"
+                .to_owned(),
+            up_asset_id: "1".to_owned(),
+            down_asset_id: "2".to_owned(),
+            start_ts_s: 1_783_392_300,
+            end_ts_s: 1_783_392_600,
+            candidate_start_ts_s: 1_783_392_300,
+            candidate_end_ts_s: 1_783_392_600,
+            active: true,
+            accepting_orders: true,
+            tick_size: Some("0.01".to_owned()),
+            min_size: Some("1".to_owned()),
+            fee_schedule_raw: Some(r#"{"fee":"0"}"#.to_owned()),
+            reward_eligibility_raw: Some(r#"{"rewards_min_size":"1"}"#.to_owned()),
+            raw_json_sha256: Some("raw-sha256".to_owned()),
+            raw_json: Some(r#"{"id":"123"}"#.to_owned()),
+        };
+        let raw = polymarket_window_end_observation_raw_json_from_discovery(&market);
+
+        assert_eq!(raw["event_type"], "active_scan");
+        assert_eq!(raw["metadata_source"], "active_scan");
+        assert_eq!(
+            raw["market_lifecycle_state"],
+            "unresolved_window_end_observation"
+        );
+        assert_ne!(raw["market_lifecycle_state"], "retired");
+        assert!(
+            raw["metadata_unavailable_reason"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason == "market_resolved_not_observed_before_window_end")
+        );
+
+        let event = test_metadata_raw_event("active_scan", raw);
+        let rows = polymarket_metadata_rows_from_event(&event).unwrap();
+        assert_eq!(rows[0].metadata_source, "active_scan");
+        assert_eq!(
+            rows[0].market_lifecycle_state,
+            "unresolved_window_end_observation"
+        );
+        assert!(
+            rows[0]
+                .metadata_unavailable_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("market_resolved_not_observed"))
+        );
+    }
+
+    #[test]
+    fn metadata_manifest_distinguishes_complete_and_unavailable_rows() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let naming = HourlyPartitionPolicy::new(&dataset_root)
+            .unwrap()
+            .partition("polymarket_market_metadata", 1_783_392_300_000, None)
+            .unwrap();
+        let mut segment = ActiveSegment::new(naming, "polymarket_market_metadata", 0).unwrap();
+
+        let unavailable = test_metadata_raw_event(
+            "active_scan",
+            json!({
+                "event_type": "active_scan",
+                "slug": "btc-updown-5m-1783392300",
+                "condition_id": "condition-1",
+                "asset_ids": ["1", "2"],
+                "metadata_unavailable_reason": "market_resolved_not_observed_before_window_end",
+                "same_condition_market_verified": true
+            }),
+        );
+        segment.observe(&unavailable, 1);
+        let context = SegmentManifestContext::from_segment(&segment);
+        assert_eq!(context.metadata_unavailable_rows, 1);
+        assert_eq!(context.metadata_complete_rows, 0);
+        assert!(!required_typed_fields_present(&context));
+
+        let complete = test_metadata_raw_event(
+            "active_scan",
+            json!({
+                "event_type": "active_scan",
+                "slug": "btc-updown-5m-1783392300",
+                "condition_id": "condition-1",
+                "asset_ids": ["1", "2"],
+                "market_start_utc": 1_783_392_300_000_i64,
+                "market_end_utc": 1_783_392_600_000_i64,
+                "active": true,
+                "accepting_orders": true,
+                "market_lifecycle_state": "active",
+                "tick_size": "0.01",
+                "min_size": "1",
+                "fee_schedule_raw": r#"{"fee":"0"}"#,
+                "reward_eligibility_raw": r#"{"rewards_min_size":"1"}"#,
+                "same_condition_market_verified": true
+            }),
+        );
+        segment.observe(&complete, 1);
+        let context = SegmentManifestContext::from_segment(&segment);
+        assert_eq!(context.metadata_unavailable_rows, 1);
+        assert_eq!(context.metadata_complete_rows, 1);
+        assert!(required_typed_fields_present(&context));
+    }
+
     #[tokio::test]
     async fn writer_side_batch_loss_records_dropped_rows() {
         let mut writers = BTreeMap::new();
@@ -4635,6 +5478,26 @@ mod tests {
             .to_string(),
             parquet_raw_layout_version: 1,
             parquet_raw_source_kind: source_kind.to_owned(),
+        }
+    }
+
+    fn test_metadata_raw_event(source_event_type: &str, raw_json: Value) -> RawEvent {
+        RawEvent {
+            source_kind: "polymarket_market_metadata".to_owned(),
+            source_event_type: source_event_type.to_owned(),
+            source_identifier: raw_json
+                .get("slug")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_owned(),
+            source_ts: Some("1783392300000".to_owned()),
+            recv_time_utc_ms: 1_783_392_300_000,
+            collector_host_id: "collector-test".to_owned(),
+            collector_region: "local-test".to_owned(),
+            source_endpoint: "https://gamma-api.polymarket.com/markets".to_owned(),
+            raw_json: raw_json.to_string(),
+            parquet_raw_layout_version: 1,
+            parquet_raw_source_kind: "polymarket_market_metadata".to_owned(),
         }
     }
 

@@ -41,15 +41,19 @@ pub struct BtcUpdownMarketCandidate {
     pub archived: Option<bool>,
     pub enable_order_book: Option<bool>,
     pub accepting_orders: Option<bool>,
+    pub tick_size: Option<String>,
+    pub min_size: Option<String>,
+    pub fee_schedule_raw: Option<String>,
+    pub reward_eligibility_raw: Option<String>,
     pub raw_json_sha256: Option<String>,
+    pub raw_json: Option<String>,
 }
 
 impl BtcUpdownMarketCandidate {
     pub fn from_sdk_market(market: &SdkGammaMarket) -> Self {
         let event = market.events.as_ref().and_then(|events| events.first());
-        let raw_json_sha256 = serde_json::to_vec(market)
-            .ok()
-            .map(|bytes| sha256_hex(&bytes));
+        let raw_json = serde_json::to_string(market).ok();
+        let raw_json_sha256 = raw_json.as_deref().map(|raw| sha256_hex(raw.as_bytes()));
 
         Self {
             id: market.id.clone(),
@@ -75,7 +79,15 @@ impl BtcUpdownMarketCandidate {
             archived: market.archived,
             enable_order_book: market.enable_order_book,
             accepting_orders: market.accepting_orders,
+            tick_size: market
+                .order_price_min_tick_size
+                .as_ref()
+                .map(ToString::to_string),
+            min_size: market.order_min_size.as_ref().map(ToString::to_string),
+            fee_schedule_raw: fee_schedule_raw(market),
+            reward_eligibility_raw: reward_eligibility_raw(market),
             raw_json_sha256,
+            raw_json,
         }
     }
 }
@@ -93,7 +105,12 @@ pub struct DiscoveredBtcUpdownMarket {
     pub candidate_end_ts_s: i64,
     pub active: bool,
     pub accepting_orders: bool,
+    pub tick_size: Option<String>,
+    pub min_size: Option<String>,
+    pub fee_schedule_raw: Option<String>,
+    pub reward_eligibility_raw: Option<String>,
     pub raw_json_sha256: Option<String>,
+    pub raw_json: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -328,8 +345,41 @@ fn validate_candidate(
         candidate_end_ts_s,
         active: true,
         accepting_orders: true,
+        tick_size: candidate.tick_size.clone(),
+        min_size: candidate.min_size.clone(),
+        fee_schedule_raw: candidate.fee_schedule_raw.clone(),
+        reward_eligibility_raw: candidate.reward_eligibility_raw.clone(),
         raw_json_sha256: candidate.raw_json_sha256.clone(),
+        raw_json: candidate.raw_json.clone(),
     })
+}
+
+fn fee_schedule_raw(market: &SdkGammaMarket) -> Option<String> {
+    let value = serde_json::json!({
+        "fee": market.fee.as_ref().map(ToString::to_string),
+        "maker_base_fee": market.maker_base_fee,
+        "taker_base_fee": market.taker_base_fee,
+        "maker_rebates_fee_share_bps": market.maker_rebates_fee_share_bps,
+        "fees_enabled": market.fees_enabled,
+    });
+    (!json_object_values_all_null(&value)).then(|| value.to_string())
+}
+
+fn reward_eligibility_raw(market: &SdkGammaMarket) -> Option<String> {
+    let value = serde_json::json!({
+        "uma_reward": market.uma_reward.as_ref().map(ToString::to_string),
+        "rewards_min_size": market.rewards_min_size.as_ref().map(ToString::to_string),
+        "rewards_max_spread": market.rewards_max_spread.as_ref().map(ToString::to_string),
+        "holding_rewards_enabled": market.holding_rewards_enabled,
+        "clob_rewards": market.clob_rewards,
+    });
+    (!json_object_values_all_null(&value)).then(|| value.to_string())
+}
+
+fn json_object_values_all_null(value: &serde_json::Value) -> bool {
+    value
+        .as_object()
+        .is_none_or(|object| object.values().all(serde_json::Value::is_null))
 }
 
 fn validate_btc_updown_5m_metadata(

@@ -1229,6 +1229,17 @@
 
   证据已拉回本地 `target/manual-inspection/retention-validation-20260708T120455Z/`，包含 `retention_validation_report.json`、`retention_validation_report.md`、production/validation/fail-closed receipts、tree inventory/diff、命令 stdout/stderr、`SHA256SUMS`、`RELEASE_INFO.env` 和 `cleanup.log`。远端 `$VALIDATION_ROOT` 已删除，post-cleanup verification 显示 `validation_root_removed=true`、父目录 `datasets-retention-validation` 为空、`parent_du_after=0`，远端 `/tmp` cleanup log 已拉回后删除。
 
+## 阶段 8 交叉引用：生产就绪与正式长跑上线
+
+本 PMXT/hourly/retention 子计划已经完成 Step 10.6 的远端 retention 安全验证，但后续“正式 `train-data-collect-ver1-0` 长期生产采集”不再继续塞进 Step 10.x。权威执行入口改为主计划 `plan/data-collect-plan.md` 的 **阶段 8：训练数据采集生产就绪与正式长跑上线**。
+
+阶段 8 需要在本子计划既有成果之上继续修复：
+
+- RTDS Chainlink `btc/usd` 恢复节拍从 `10s` 改为 `3s`，60 秒 source gap 窗口最多 20 次重发，每 2 次重发后主动重建 SDK client/connection。
+- `polymarket_market_metadata` 从 schema/writer 能力升级为真实 live source/artifact。
+- 生产长跑 service 必须有 retention enabled delete 与 Resource hard-threshold 闭环，不得只依赖 dry-run receipt。
+- 最新代码重新通过 15 分钟 smoke 和 2 小时 systemd gate 后，才允许生成正式 `data-collect/releases/train-data-collect-ver1-0/`、按主计划阶段 8 的精确 `cleanup_allowlist.json` 清理远端旧测试产物，并启动长期采集。
+
 ## 六、验收标准
 
 计划执行完成后必须满足：

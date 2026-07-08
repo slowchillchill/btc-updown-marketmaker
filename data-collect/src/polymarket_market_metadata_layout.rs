@@ -56,6 +56,7 @@ pub struct PolymarketMarketMetadataRow {
     pub min_size: Option<String>,
     pub fee_schedule_raw: Option<String>,
     pub reward_eligibility_raw: Option<String>,
+    pub metadata_unavailable_reason: Option<String>,
     pub metadata_source: String,
     pub same_condition_market_verified: Option<bool>,
     pub collector_host_id: String,
@@ -217,18 +218,22 @@ impl PolymarketMarketMetadataRow {
         report.require_non_empty("condition_id", Some(&self.condition_id));
         report.require_non_empty("asset_ids", self.asset_ids.as_deref());
         report.require_non_empty("token_ids", self.token_ids.as_deref());
-        report.require_some("market_start_utc", self.market_start_utc);
-        report.require_some("market_end_utc", self.market_end_utc);
-        report.require_some("active", self.active);
-        report.require_some("accepting_orders", self.accepting_orders);
+        if !self.has_metadata_unavailable_reason() {
+            report.require_some("market_start_utc", self.market_start_utc);
+            report.require_some("market_end_utc", self.market_end_utc);
+            report.require_some("active", self.active);
+            report.require_some("accepting_orders", self.accepting_orders);
+        }
         report.require_non_empty("market_lifecycle_state", Some(&self.market_lifecycle_state));
-        report.require_non_empty("tick_size", self.tick_size.as_deref());
-        report.require_non_empty("min_size", self.min_size.as_deref());
-        report.require_non_empty("fee_schedule_raw", self.fee_schedule_raw.as_deref());
-        report.require_non_empty(
-            "reward_eligibility_raw",
-            self.reward_eligibility_raw.as_deref(),
-        );
+        if !self.has_metadata_unavailable_reason() {
+            report.require_non_empty("tick_size", self.tick_size.as_deref());
+            report.require_non_empty("min_size", self.min_size.as_deref());
+            report.require_non_empty("fee_schedule_raw", self.fee_schedule_raw.as_deref());
+            report.require_non_empty(
+                "reward_eligibility_raw",
+                self.reward_eligibility_raw.as_deref(),
+            );
+        }
         report.require_non_empty("metadata_source", Some(&self.metadata_source));
         report.require_some(
             "same_condition_market_verified",
@@ -256,6 +261,17 @@ impl PolymarketMarketMetadataRow {
             report.missing_fields.push("market_start_end".to_owned());
         }
         report
+    }
+
+    pub fn with_metadata_unavailable_reason(mut self, reason: Option<String>) -> Self {
+        self.metadata_unavailable_reason = reason;
+        self
+    }
+
+    fn has_metadata_unavailable_reason(&self) -> bool {
+        self.metadata_unavailable_reason
+            .as_deref()
+            .is_some_and(|reason| !reason.trim().is_empty())
     }
 }
 
@@ -298,6 +314,7 @@ pub fn polymarket_market_metadata_schema() -> Arc<Schema> {
         Field::new("min_size", DataType::Utf8, true),
         Field::new("fee_schedule_raw", DataType::Utf8, true),
         Field::new("reward_eligibility_raw", DataType::Utf8, true),
+        Field::new("metadata_unavailable_reason", DataType::Utf8, true),
         Field::new("metadata_source", DataType::Utf8, false),
         Field::new("same_condition_market_verified", DataType::Boolean, true),
         Field::new("collector_host_id", DataType::Utf8, false),
@@ -345,6 +362,7 @@ fn metadata_row(
         min_size: min_size.map(ToOwned::to_owned),
         fee_schedule_raw: fee_schedule_raw.map(ToOwned::to_owned),
         reward_eligibility_raw: reward_eligibility_raw.map(ToOwned::to_owned),
+        metadata_unavailable_reason: None,
         metadata_source: metadata_source.to_owned(),
         same_condition_market_verified,
         collector_host_id: context.collector_host_id,

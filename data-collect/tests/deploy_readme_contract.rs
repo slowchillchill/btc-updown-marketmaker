@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 const README: &str = "data-collect/docs/training-collector-deploy-readme.md";
 const HOT_DOC: &str = "data-collect/docs/paper-live-hot-path-integration.md";
 const SYSTEMD: &str = "data-collect/deploy/systemd/data-collect-training-collector.service.example";
+const GATE_SYSTEMD: &str =
+    "data-collect/deploy/systemd/data-collect-training-collector-gate.service.example";
 const EXPORT_SCRIPT: &str = "data-collect/scripts/export-release-artifacts.sh";
 
 #[test]
@@ -14,12 +16,18 @@ fn training_deploy_readme_contains_binary_only_remote_flow() {
         "cd /home/chillchill/btc-updown-marketmaker",
         "data-collect/scripts/export-release-artifacts.sh",
         "data-collect-training-collector",
+        "train-data-collect-ver1-0",
+        "data-collect-retention-admin",
         "data-collect-paper-hot",
         "data-collect-live-hot",
         "sha256sum -c SHA256SUMS",
         "mkdir -p ~/btc-updown-marketmaker/data-collect/releases",
+        "data-collect/releases/$RELEASE_ID",
         "~/btc-updown-marketmaker/datasets",
         "--max-runtime-secs 900",
+        "--run-forever",
+        "--retention-delete-mode enabled",
+        "--retention-threshold-bytes 50000000000",
         "systemctl --user show",
         "systemctl --user is-active --quiet",
         "binary sha256",
@@ -39,7 +47,17 @@ fn training_deploy_readme_contains_binary_only_remote_flow() {
         "shutdown_stage_timings",
         "shutdown_retention_scan_budget_ms",
         "retention_shutdown_scan.status=skipped",
+        "metadata source coverage",
+        "cleanup_allowlist.json",
+        "回滚方法",
+        "PREVIOUS_RELEASE",
+        "runtime_mode=run_forever",
+        "run_started_utc_ms",
+        "systemd_unit_name=data-collect-training-collector.service",
+        "systemd_restart_policy",
+        "RestartPreventExitStatus=75",
         "run_manifest_atomic_write",
+        "systemctl --user enable --now data-collect-training-collector.service",
         "不得 enable --now",
         "paper/live 服务器不得运行 cargo",
         "live 小主机不得承担训练重处理",
@@ -56,12 +74,32 @@ fn systemd_example_uses_server_local_home_paths_and_live_mode() {
 
     assert!(systemd.contains("WorkingDirectory=%h/btc-updown-marketmaker"));
     assert!(systemd.contains("DATA_COLLECT_RUNTIME_MODE=live"));
+    assert!(systemd.contains("DATA_COLLECT_SYSTEMD_UNIT=data-collect-training-collector.service"));
     assert!(systemd.contains(
-        "%h/btc-updown-marketmaker/data-collect/current/bin/data-collect-training-collector"
+        "DATA_COLLECT_SYSTEMD_RESTART_POLICY=Restart=always;RestartPreventExitStatus=75"
     ));
+    assert!(
+        systemd.contains(
+            "%h/btc-updown-marketmaker/data-collect/current/bin/train-data-collect-ver1-0"
+        )
+    );
     assert!(systemd.contains("--dataset-root %h/btc-updown-marketmaker/datasets"));
     assert!(systemd.contains("--collector-region eu-west-1"));
+    assert!(systemd.contains("--run-forever"));
+    assert!(systemd.contains("--retention-delete-mode enabled"));
+    assert!(systemd.contains("Restart=always"));
+    assert!(systemd.contains("RestartPreventExitStatus=75"));
     assert!(!systemd.contains("/home/chillchill/btc-updown-marketmaker"));
+
+    let gate = read(GATE_SYSTEMD);
+    assert!(
+        gate.contains("DATA_COLLECT_SYSTEMD_UNIT=data-collect-training-collector-gate.service")
+    );
+    assert!(gate.contains("DATA_COLLECT_SYSTEMD_RESTART_POLICY=Restart=no"));
+    assert!(gate.contains("--max-runtime-secs 7200"));
+    assert!(gate.contains("--retention-delete-mode dry-run"));
+    assert!(gate.contains("Restart=no"));
+    assert!(!gate.contains("--run-forever"));
 }
 
 #[test]
@@ -71,16 +109,22 @@ fn export_script_packages_binaries_docs_service_and_sha256s() {
     for expected in [
         "cargo build -p data-collect --release",
         "--bin data-collect-training-collector",
+        "--bin data-collect-retention-admin",
         "--bin data-collect-paper-hot",
         "--bin data-collect-live-hot",
         "bin/data-collect-training-collector",
+        "bin/train-data-collect-ver1-0",
+        "bin/data-collect-retention-admin",
         "bin/data-collect-paper-hot",
         "bin/data-collect-live-hot",
         "deploy/systemd/data-collect-training-collector.service.example",
+        "deploy/systemd/data-collect-training-collector-gate.service.example",
         "docs/training-collector-deploy-readme.md",
         "docs/paper-live-hot-path-integration.md",
         "RELEASE_INFO.env",
         "SHA256SUMS",
+        "refusing formal train-data-collect-ver1-0 release from dirty worktree",
+        "data-collect/releases/$RELEASE_ID",
     ] {
         assert!(script.contains(expected), "script missing {expected}");
     }

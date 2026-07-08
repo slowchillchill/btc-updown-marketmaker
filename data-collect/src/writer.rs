@@ -16,7 +16,9 @@ use parquet::file::properties::WriterProperties;
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
-use crate::polymarket_market_metadata_layout::polymarket_market_metadata_schema;
+use crate::polymarket_market_metadata_layout::{
+    PolymarketMarketMetadataRow, polymarket_market_metadata_schema,
+};
 use crate::polymarket_orderbook_layout::{PolymarketOrderbookRow, polymarket_orderbook_schema};
 use crate::source_hourly_layout::{
     BinanceAggTradeHourlyRow, BinanceDepthSnapshotHourlyRow, BinanceDepthUpdateHourlyRow,
@@ -367,6 +369,17 @@ impl TypedParquetSegmentWriter {
         self.write_batch(&batch)
     }
 
+    pub fn write_polymarket_market_metadata_rows(
+        &mut self,
+        rows: &[PolymarketMarketMetadataRow],
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let batch = polymarket_market_metadata_rows_to_batch(Arc::clone(&self.schema), rows)?;
+        self.write_batch(&batch)
+    }
+
     pub fn write_binance_depth_snapshot_rows(
         &mut self,
         rows: &[BinanceDepthSnapshotHourlyRow],
@@ -520,6 +533,42 @@ fn polymarket_orderbook_rows_to_batch(
     Ok(RecordBatch::try_new(schema, columns)?)
 }
 
+fn polymarket_market_metadata_rows_to_batch(
+    schema: Arc<Schema>,
+    rows: &[PolymarketMarketMetadataRow],
+) -> Result<RecordBatch> {
+    let columns: Vec<ArrayRef> = vec![
+        timestamp_values(rows.iter().map(|row| row.timestamp_received)),
+        optional_timestamp_values(rows.iter().map(|row| row.metadata_fetch_start_utc)),
+        optional_timestamp_values(rows.iter().map(|row| row.metadata_recv_time_utc)),
+        string_values(rows.iter().map(|row| row.slug.as_str())),
+        string_values(rows.iter().map(|row| row.condition_id.as_str())),
+        optional_strings(rows.iter().map(|row| row.clob_market_id.as_deref())),
+        optional_strings(rows.iter().map(|row| row.asset_ids.as_deref())),
+        optional_strings(rows.iter().map(|row| row.token_ids.as_deref())),
+        optional_timestamp_values(rows.iter().map(|row| row.market_start_utc)),
+        optional_timestamp_values(rows.iter().map(|row| row.market_end_utc)),
+        optional_bool_values(rows.iter().map(|row| row.active)),
+        optional_bool_values(rows.iter().map(|row| row.accepting_orders)),
+        string_values(rows.iter().map(|row| row.market_lifecycle_state.as_str())),
+        optional_strings(rows.iter().map(|row| row.tick_size.as_deref())),
+        optional_strings(rows.iter().map(|row| row.min_size.as_deref())),
+        optional_strings(rows.iter().map(|row| row.fee_schedule_raw.as_deref())),
+        optional_strings(rows.iter().map(|row| row.reward_eligibility_raw.as_deref())),
+        optional_strings(
+            rows.iter()
+                .map(|row| row.metadata_unavailable_reason.as_deref()),
+        ),
+        string_values(rows.iter().map(|row| row.metadata_source.as_str())),
+        optional_bool_values(rows.iter().map(|row| row.same_condition_market_verified)),
+        string_values(rows.iter().map(|row| row.collector_host_id.as_str())),
+        string_values(rows.iter().map(|row| row.collector_region.as_str())),
+        string_values(rows.iter().map(|row| row.source_endpoint.as_str())),
+        string_values(rows.iter().map(|row| row.schema_version.as_str())),
+    ];
+    Ok(RecordBatch::try_new(schema, columns)?)
+}
+
 fn binance_depth_snapshot_rows_to_batch(
     schema: Arc<Schema>,
     rows: &[BinanceDepthSnapshotHourlyRow],
@@ -617,6 +666,10 @@ fn timestamp_values(values: impl Iterator<Item = i64>) -> ArrayRef {
     Arc::new(TimestampMillisecondArray::from_iter_values(values).with_timezone("UTC"))
 }
 
+fn optional_timestamp_values(values: impl Iterator<Item = Option<i64>>) -> ArrayRef {
+    Arc::new(TimestampMillisecondArray::from_iter(values).with_timezone("UTC"))
+}
+
 fn uint64_values(values: impl Iterator<Item = u64>) -> ArrayRef {
     Arc::new(UInt64Array::from_iter_values(values))
 }
@@ -631,6 +684,10 @@ fn string_values<'a>(values: impl Iterator<Item = &'a str>) -> ArrayRef {
 
 fn optional_strings<'a>(values: impl Iterator<Item = Option<&'a str>>) -> ArrayRef {
     Arc::new(StringArray::from_iter(values))
+}
+
+fn optional_bool_values(values: impl Iterator<Item = Option<bool>>) -> ArrayRef {
+    Arc::new(BooleanArray::from_iter(values))
 }
 
 fn elapsed_us(started: Instant) -> u64 {

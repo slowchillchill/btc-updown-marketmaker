@@ -136,6 +136,7 @@ fn schema_contains_metadata_columns() {
         "min_size",
         "fee_schedule_raw",
         "reward_eligibility_raw",
+        "metadata_unavailable_reason",
         "metadata_source",
         "same_condition_market_verified",
     ] {
