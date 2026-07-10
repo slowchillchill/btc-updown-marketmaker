@@ -2,7 +2,7 @@
 
 事项编号：`rebuild-core-new-data-only`
 
-状态：`基础准备计划；当前只执行文档阶段 0；FinalDatasetBoundaryStatus=RESOLVED_OPTION_B；CollectionStartReadinessStatus=DOCS_ONLY_NOT_EXECUTED`
+状态：`基础准备修订与采集 schema 更新；FinalDatasetBoundaryStatus=DEFERRED_TO_OBSERVED_COLLECTION；CollectionStartReadinessStatus=SCHEMA_V3_AND_REDEPLOY_AUTHORIZED`
 
 对应需求：`/home/chillchill/btc-updown-marketmaker/demand/rebuild-core-new-data-only-demand.md`
 
@@ -12,29 +12,31 @@
 
 ## 1. 当前授权边界与成功标准
 
-当前 UTC 日期是 `2026-07-10`，目标数据尚未采完。本轮只允许完成：
+当前 UTC 日期是 `2026-07-10`，正式目标日期尚未选择。本轮允许完成：
 
 - 新数据-only需求文档；
 - 本执行计划；
 - 核心训练框架；
 - 同事项 changelog；
 - 只读代码、数据、服务和官方资料核对；
+- Binance aggTrade `trade_time=T` schema v3、测试、release 构建、数据采集服务器重新部署与新段验证；
+- 只拉昨天 D 的 D+1 UTC 02:00 日归档、Gamma `priceToBeat/finalPrice` 两字段文件、历史 partial 不读但不整日阻断、同名云文件幂等修复；
 - 文档自审、机械检查与独立审查。
 
-当前不允许修改/部署 collector，不允许处理目标数据、实现 simulator/model、启动训练、paper/live 或资金操作。阶段 1 之后均是未来执行计划，必须另行获得用户授权；日期边界虽然已经解决，但不能把“计划可执行”误写成“本轮已授权”。
+当前不允许实现 simulator/model、启动训练、paper/live 或资金操作；也不允许把本轮 schema 重新部署后的任意日期自动命名为正式 cohort。完整 canonical/data-pipeline 处理脚本后续写在本仓库 `data-pipeline/` 并部署到 5090 执行，不塞入每日归档脚本。
 
-本轮成功标准：四份文档同 slug 对齐；事实、推断和建议分开；训练框架、数据额外需求、simulator、reward、split 和 `mistake-log` 闭环在采集/训练实现前冻结；没有把未来数据写成已完成事实。
+本轮成功标准：四份文档同 slug 对齐；事实、推断和建议分开；训练框架、数据额外需求、simulator、reward、split 和 `mistake-log` 闭环在训练实现前冻结；Binance aggTrade v3 本地门通过后从干净 commit 构建并重新部署，真实 finalized segment 证明 `E/T` 双列；D+1 脚本仅处理昨天并通过 Gamma/partial/云端同名包合同测试；没有把未来 cohort 写成已完成事实。
 
 ## 2. 为什么按这个顺序执行
 
 ```text
 需求/训练合同
     ↓
-固定开始日 readiness + 非训练准备纵切
+schema v3 readiness + 非训练准备纵切
     ↓
-完成目标 cohort + label/account tail
+按实际质量选择并完成目标 cohort + label/account tail
     ↓
-应用已解决的方案 B 边界并冻结 dataset manifest/eligibility/split
+由用户冻结最终边界并生成 dataset manifest/eligibility/split
     ↓
 正式 cohort 小切片复验 canonical event → simulator → NOE → ledger → reward
     ↓
@@ -51,7 +53,7 @@ frozen holdout
 
 顺序收益：
 
-1. 先冻结训练合同并用 7月8-9日新样本做非训练准备纵切，避免数据采完才发现没有 transport identity、p2b、T-30、winner label 或所需 action semantics。
+1. 先冻结训练合同并用 7月8-9日新样本做非训练准备纵切，避免数据采完才发现没有 transport identity、p2b/finalPrice、T-30、成熟 outcome label 或所需 action semantics。
 2. 采集前只处理不可事后可靠恢复的字段；label maturity 可异步回填，不把所有未来工作挤进 collector。
 3. cohort 完成后先冻结 boundary/split，防止看到收益后换日期、换 market 或调整 holdout。
 4. 先做纵向切片，能用少量 market 暴露 event order、账本、reward 和 simulator 错误，避免全量扫描后返工。
@@ -63,9 +65,9 @@ frozen holdout
 
 | 阶段 | 目标 | 当前状态 | 进入条件 | 退出证据 |
 |---|---|---|---|---|
-| 0 | 基础文档与框架冻结 | 当前执行 | 用户提出准备任务 | 四文档审查通过，方案 B 日期边界同步一致 |
-| 1 | 固定开始日前可训练性准备与非训练纵切 | 未授权/未开始 | 方案 B 边界已固定、用户另行授权 | identity/p2b/clock/schema/retention与准备纵切receipt |
-| 2 | 目标 cohort 采集与日级保护 | 未开始 | 阶段 1 PASS 或批准降级 | 每日 finalized raw/manifest/hash/health evidence |
+| 0 | 基础文档与框架冻结 | 修订中 | 用户更新采集与日期要求 | 四文档记录日期 deferred、两套 P2B、最小 Gamma 回填与 schema v3 授权 |
+| 1 | schema v3 可训练性准备与非训练纵切 | 部分已授权/执行中 | 用户批准 T 字段、归档修复与重新部署 | T typed schema、两字段归档、release/deploy 与新段 receipt |
+| 2 | 候选数据持续采集与日级保护 | 待阶段 1 部署后继续 | 阶段 1 部署验证通过 | 每日 finalized raw/manifest/hash/health evidence |
 | 3 | cohort boundary、maturity 与 split 冻结 | 未开始 | cohort + tail 完成 | DatasetBoundary/EpisodeEligibility/Split manifests |
 | 4 | 端到端纵向切片 | 未开始 | 阶段 3 boundary 冻结 | canonical→simulator→NOE→ledger→reward closure |
 | 5 | bounded 全量 canonical pipeline | 未开始 | 阶段 4 PASS | 全量 features/labels/trajectories 与资源报告 |
@@ -85,11 +87,11 @@ frozen holdout
 - 步骤 0.1.3：检索模型、LOB、序列建模、action ranking、offline RL、simulation 和当前 Polymarket 官方规则。
   验证：技术选择优先引用论文、官方文档和成熟工具，而不是凭记忆。
 
-### 任务 0.2：冻结方案 B 日期边界
+### 任务 0.2：撤销旧方案 B 并延后日期冻结
 
-- 步骤 0.2.1：记录用户于 `2026-07-10 UTC` 确认方案 B：`[2026-07-11T00:00:00Z, 2026-07-25T00:00:00Z)`，14 个完整 UTC 日，名义 4032 个 5 分钟 market。
-- 步骤 0.2.2：机械冻结 development=`2026-07-11..2026-07-21`、calibration=`2026-07-22`、holdout=`2026-07-23..2026-07-24`。
-  验证：所有文档均为 `FinalDatasetBoundaryStatus=RESOLVED_OPTION_B`；不再把候选 A、13 日或未确认占位符当作当前配置。
+- 步骤 0.2.1：记录用户撤销固定方案 B，改为 schema v3 重新部署并观察实际数据后另行选择正式日期。
+- 步骤 0.2.2：清除旧日期、14 日和 4032 个 market 的默认配置权威；保留历史记录但不得回流。
+  验证：所有文档均为 `FinalDatasetBoundaryStatus=DEFERRED_TO_OBSERVED_COLLECTION`，正式 manifest/split 在用户再次选择前不能生成。
 
 ### 任务 0.3：冻结技术方向
 
@@ -111,18 +113,18 @@ frozen holdout
 - 步骤 0.4.4：按项目阶段规则，只在确认提交范围仅包含本事项文档且不卷入用户其他脏改动后，创建独立 commit/push；若提交范围与用户现有改动无法安全隔离，则停止并报告冲突。
   验证：commit 只包含四份新文档；push 结果和 commit hash 可追溯。
 
-阶段 0 退出条件：四文档审查通过且方案 B 日期边界同步一致。`FinalDatasetBoundaryGate` 的日期决策已解决，但目标数据、final manifest 和 eligible market 尚未形成；退出阶段 0 不授权阶段 1。
+阶段 0 退出条件：四文档同步记录 schema v3、最小两字段回填和日期 deferred。退出阶段 0 只授权本轮明确列出的 schema/归档/重新部署，不自动授权训练或其他阶段实现。
 
 ## 阶段 1：cohort 开始前可训练性准备
 
-> 本阶段涉及代码/schema/deploy和非训练纵切，当前未授权。方案 B 已固定从7月11日开始；若开始前未完成，必须选择批准降级或承认受影响数据不具备 `policy_training_eligible` 能力，不能事后伪造证据。
+> 本阶段中的 Binance aggTrade `trade_time=T`、D+1 归档修复和重新部署已获授权；其他 identity/simulator/data-pipeline 实现仍需按计划后续执行。正式 cohort 起点不预设为部署时刻。
 
 ### 任务 1.1：拆分开始 readiness 与最终边界
 
-- 步骤 1.1.1：冻结 `CollectionStartReadinessGate`：start=`2026-07-11T00:00:00Z`、model context=T-30、state reconstruction lookback、identity/p2b/clock/schema/retention。
-  验证：结束边界已经确定，但当前 readiness 状态仍为NOT_EXECUTED，不能把日期决策冒充开始准入。
-- 步骤 1.1.2：应用已解决的 `FinalDatasetBoundaryGate`：end=`2026-07-25T00:00:00Z`、名义market数=`4032`、calibration=`2026-07-22`、holdout=`2026-07-23..2026-07-24`。
-  验证：停止边界、final manifest和split只能使用方案 B；实际数据完整性仍在阶段 3 验证。
+- 步骤 1.1.1：冻结 `CollectionStartReadinessGate`：Binance aggTrade v3 必须保存 T、本地测试通过、远端新 release 生效并产生可读 v3 finalized segment。
+  验证：记录 commit、binary sha256、切换时间、新 segment schema/row count/hash；只形成候选数据版本起点。
+- 步骤 1.1.2：保持 `FinalDatasetBoundaryGate=DEFERRED`。
+  验证：未出现固定 end、14 日、4032 或预选 calibration/holdout 日期。
 - 步骤 1.1.3：冻结 collector git commit、release binary sha256、systemd unit、CLI/config digest、schema versions、host/region 和官方 SDK version。
   验证：startup receipt 与实际进程 `/proc`/systemd 配置一致。
 - 步骤 1.1.4：中途升级策略设为显式 cutover/regime，不允许覆盖同路径或静默混训。
@@ -139,12 +141,12 @@ frozen holdout
 
 ### 任务 1.3：冻结 PriceToBeatAuthorityContract
 
-- 步骤 1.3.1：用官方 Rust SDK RTDS Chainlink类型定义精确派生：`btc/usd` 且 `payload_timestamp == market_start` 的full-precision value；start取slug epoch/Gamma Event startTime。
-  验证：收到前为p2b_pending且hard boundary禁止新submit，因果可见时间只用collector receive；禁止nearest/forward-fill/interpolate/Binance替代。
-- 步骤 1.3.2：用7月8-9日准备样本对照 exact start/end RTDS rows、市场规则、winner与已有官方event结果，不把它们用于目标训练/选模。
-  验证：完整精度、condition/slug、row locator和hash一致；缺exact row负例变unresolved。
-- 步骤 1.3.3：记录SDK能力：RTDS派生可用；Gamma eventMetadata显式p2b/final字段当前SDK缺失。
-  验证：derived_observed允许研究训练；official_confirmed/promotion标记BLOCKED_SDK_FIELD_GAP，不自行使用raw Gamma REST或网页/internal endpoint。
+- 步骤 1.3.1：D+1 UTC 02:00 对昨天 D 的目标 slug 调用经用户批准的官方 Gamma JSON 路径，将 `priceToBeat` 与 `finalPrice` 无精度损失地保存为十进制字符串。
+  验证：只有这两个字段是否存在决定该市场回填成功；closed/resolved/winner 等诊断信息不阻断字段落盘或整日流程。
+- 步骤 1.3.2：单次执行，不增加 D+2、语义重试或网页 internal endpoint；单市场缺字段写 `fetch_succeeded=false` 与 `diagnostic_error=p2b_final_missing`。D 的完整 288-slug 文件已存在时直接复用并且不发起 Gamma 请求；现有文件不匹配 D 合同时明确失败，不自动修复或重请。
+  验证：其他市场仍可验证、打包、上传；不存在一个缺失字段导致整日暂停；连续执行两次时第二次的 Gamma 请求数为零且 P2B 文件 hash 不变。
+- 步骤 1.3.3：冻结 cold/hot 分界。cold 日文件用于训练参考；future paper/live handoff v2 必须传两个 nullable decimal-string 字段并按 runtime receive time 更新，当前 heartbeat-only 实现明确为未完成。
+  验证：缺 closed/resolved/winner 仍能传字段；cold fetch time 不冒充 hot receive time。
 
 ### 任务 1.4：冻结时间、逐源准入与 source semantics
 
@@ -152,26 +154,30 @@ frozen holdout
   验证：文档、schema metadata 和 causal builder 不称其为 wire ingress/纯 network latency。
 - 步骤 1.4.2：部署连续 clock/NTP receipt 与异常/cutover记录。
   验证：故意注入 clock status unknown 时，episode capability 降级而不是静默 PASS。
-- 步骤 1.4.3：决定 Binance aggTrade `T`：推荐新增 typed 列/sidecar；若不做，明确模型只使用 receive+E。
-  验证：两条路线都不能把 E 重命名成 T，且这一项不单独阻断 collector 启动。
-- 步骤 1.4.4：在目标outcome不可见时预注册并hash逐源准入式和阈值：PM双token/initial state、depth continuity、aggTrade ID gap、RTDS freshness/exact p2b row、clock/reconnect/cutover、capability downgrade。
+- 步骤 1.4.3：新增 Binance aggTrade `trade_time=T` 必填 typed 列并升级为 `binance_aggtrade_v3`，立即重新部署采集。
+  验证：E/T 分列写入真实 parquet；旧 v2 不被伪装成 v3；新 release 产生可读非空 v3 finalized segment。
+- 步骤 1.4.4：在目标outcome不可见时预注册并hash逐源准入式和阈值：PM双token/initial state、depth continuity、aggTrade ID gap、RTDS freshness、clock/reconnect/cutover、capability downgrade。Gamma 两字段回填只按任务 1.3 判定，不得被这些逐源诊断阈值阻断。
   验证：7月8-9日只用于运行正反例，不能根据目标cohort收益重调阈值。
 
 ### 任务 1.5：保护 canonical raw 与日级拉取
 
-- 步骤 1.5.1：确认本地日归档每天拉取完整 `typed_raw/utc_day=...` 与 segment manifests，而不是只保留压缩 archive 中的 `validated_markets`。
+- 步骤 1.5.1：确认本地日归档在 D+1 只拉昨天 D 的完整 `typed_raw/utc_day=...` 与 segment manifests，不拉仍在采集的当天分区，也不只保留压缩 archive 中的 `validated_markets`。
   验证：远端 50GB retention 删除前，本地 finalized raw、manifest、sha256 和 row counts 已落盘并校验。
 - 步骤 1.5.2：冻结 remote retention、local free-space 和 archive failure alert。
   验证：日拉取失败时阻断远端对应 day 的安全删除判断；不得假定 tar.gz 包含 canonical raw。
-- 步骤 1.5.3：为 14 日容量和双版本 staging 计算磁盘水位。
+- 步骤 1.5.3：按最终待选日期范围和双版本 staging 计算磁盘水位。
   验证：保留 raw、derived、failed staging、simulator labels 和恢复余量，不因空间不足提前删证据。
+- 步骤 1.5.4：归档发现历史 `running/digesting/partial` 时绝不读取该文件，但不因孤立历史 partial 整日退出；将其写入报告并由现有逐 market gap 规则决定受影响市场。上传同名昨天包时验证新内容而非只验证旧文件名存在。
+  验证：已知 T08 四字节事故文件不进入 parquet reader且不阻断其他健康市场；云端旧同名包不能造成假成功。
+- 步骤 1.5.5：完整 canonical/feature/label/trajectory 处理只在本仓库 `data-pipeline/` 实现并部署到 5090 的 `~/btc-updown-marketmaker/data-pipeline` 执行。
+  验证：日归档脚本只负责拉取、两字段文件、基础市场筛选、打包和上传，不膨胀为训练 pipeline。
 
 ### 任务 1.6：pre-cohort 非训练合同纵向切片
 
 - 步骤 1.6.1：只使用明确允许作准备验证的7月8-9日新样本，不访问目标outcome做选模，打通numeric part/order、exact/approx atomicity、T-30与snapshot→checkpoint重建。
   验证：row reorder、gap、missing snapshot、multi-child和multi-market负例fail closed。
-- 步骤 1.6.2：用最小stub验证p2b_pending→derived_observed、完整candidate→simulator raw evidence→NOE→AccountRunTrajectory ledger→reward/valuation closure与output consumer。
-  验证：这不是训练、leaderboard或目标cohort验收；只验证合同可实现及不可恢复字段是否齐全。
+- 步骤 1.6.2：用最小 stub 分别验证 cold `p2b_final_missing→Gamma backfilled` 和 future hot `null→runtime received`的 availability 语义，再验证完整 candidate→simulator raw evidence→NOE→AccountRunTrajectory ledger→reward/valuation closure 与 output consumer。
+  验证：cold fetch time 不冒充 hot receive time，缺 closed/resolved/winner 不影响两字段状态转换；这不是训练、leaderboard 或目标 cohort 验收。
 - 步骤 1.6.3：profile有效事件密度、single-writer/state-version、candidate生成和最小rollout吞吐。
   验证：形成未来CounterfactualRolloutBudgetContract的保守初值，不改变逐有效事件runtime评估语义。
 
@@ -198,8 +204,8 @@ frozen holdout
   验证：事故前后不被拼成无缝 coverage；坏 market 隔离，不默认丢整日。
 - 步骤 2.2.3：不在 cohort 未完成时启动正式 feature fitting、split、simulator leaderboard 或模型训练。
   验证：training run inventory 为空；任何 exploratory probe 明确不写正式 artifact。
-- 步骤 2.2.4：逐market记录exact start/end Chainlink boundary row是否到达及collector receive time；缺失只标p2b/final unresolved，不在线猜补。
-  验证：每日报告区分p2b_pending、derived_observed、official-confirmation pending和censored。
+- 步骤 2.2.4：每日 D+1 文件记录 Gamma `priceToBeat/finalPrice` 两字段是否取得；RTDS 继续保留为独立实时价格证据，不作为这两个字段回填的额外阻断门。
+  验证：报告区分两字段 present/missing；不加入 closed/resolved/winner gate。
 
 ### 任务 2.3：每日 canonical 拉取与校验
 
@@ -240,8 +246,8 @@ frozen holdout
 
 ### 任务 3.3：异步 outcome/settlement maturity
 
-- 步骤 3.3.1：优先使用官方 Rust SDK 可覆盖路径查询/订阅最终 outcome；SDK能力不足时停下报告，不擅自用 raw REST/Gamma shadow path。
-  验证：exact start/end SDK-RTDS full precision、winner token、condition、outcome、source和maturity time一致；eventMetadata显式确认缺口单列。
+- 步骤 3.3.1：从已批准的 D+1 Gamma 文件读取 `polymarket_price_to_beat` 与 `polymarket_final_price`，按 `polymarket_label_up = polymarket_final_price >= polymarket_price_to_beat` 生成 Polymarket outcome label，并记录 source、fetch/maturity time 和 artifact hash。
+  验证：只以这两个字段存在及可解析判定该 label 成熟；SDK settlement/winner、RTDS boundary 或公式交叉检查如果后续保留只是独立诊断，不是 Gamma 两字段或 label 的准入门。
 - 步骤 3.3.2：记录 unresolved、conflict、late maturity 与 censoring。
   验证：未成熟 market 不进入 policy/reward/holdout；不会默认写零。
 
@@ -425,12 +431,12 @@ frozen holdout
 
 任一条件成立即停止对应阶段：
 
-1. 任一正式 cohort/split 使用的边界与方案 B 不一致，或重新出现候选 A/未确认占位符；
+1. 在用户重新选择前任一正式 cohort/split 写入固定日期、14 日、4032 或旧方案 B 默认值；
 2. 目标数据实际 schema、collector/runtime行为与已批准合同冲突；
 3. 需要官方 Rust SDK 不支持的能力且尚未获得用户批准替代方案；
 4. canonical raw 在远端 retention 前未安全拉回或 hash 不一致；
 5. transport identity 不存在且用户未批准 approximate microbatch；
-6. exact price-to-beat/final boundary row、label maturity或condition-token winner冲突；
+6. 缺失训练所需的 `priceToBeat/finalPrice` 或 label maturity；Gamma 回填不得因 closed/resolved/winner 或公式交叉验证被额外阻断；
 7. old-data/旧 bundle 被访问；
 8. fixed tick、random-row split、holdout调参、full-load或physical-row-order假设出现；
 9. simulator/NOE/AccountRunTrajectory ledger/reward/valuation不闭合；

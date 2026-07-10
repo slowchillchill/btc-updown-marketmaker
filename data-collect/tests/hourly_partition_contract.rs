@@ -126,7 +126,7 @@ fn complete_manifest_for(parquet_file_name: &str) -> ManifestDraft {
         artifact_path: Some(parquet_file_name.into()),
         row_count: Some(2),
         sha256: Some("0123456789abcdef".to_owned()),
-        schema_version: Some("binance_aggtrade_v2".to_owned()),
+        schema_version: Some("binance_aggtrade_v3".to_owned()),
         code_version: Some("test-code-version".to_owned()),
         collector_binary_sha256: Some("binary-sha256".to_owned()),
         source_config_digest: Some("source-config-digest".to_owned()),
@@ -204,7 +204,7 @@ fn complete_manifest_for(parquet_file_name: &str) -> ManifestDraft {
             finalized: true,
             row_count: Some(2),
             sha256: Some("0123456789abcdef".to_owned()),
-            schema_version: Some("binance_aggtrade_v2".to_owned()),
+            schema_version: Some("binance_aggtrade_v3".to_owned()),
             missing_reason: None,
         }],
     }

@@ -624,6 +624,7 @@ fn binance_aggtrade_rows_to_batch(
         timestamp_values(rows.iter().map(|row| row.timestamp_received)),
         string_values(rows.iter().map(|row| row.event_type.as_str())),
         timestamp_values(rows.iter().map(|row| row.event_time)),
+        timestamp_values(rows.iter().map(|row| row.trade_time)),
         string_values(rows.iter().map(|row| row.symbol.as_str())),
         uint64_values(rows.iter().map(|row| row.aggregate_trade_id)),
         string_values(rows.iter().map(|row| row.price.as_str())),

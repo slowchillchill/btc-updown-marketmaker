@@ -1,0 +1,15 @@
+[Unit]
+Description=data-collect daily new-datasets archive
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/chillchill/btc-updown-marketmaker
+Environment=DATA_COLLECT_ARCHIVE_HK_PROXY=1
+Environment=DATA_COLLECT_ARCHIVE_HK_SOCKS_ADDR=127.0.0.1:20810
+Environment=DATA_COLLECT_NEW_DATASETS_ROOT=/home/chillchill/new-datasets
+ExecStart=/home/chillchill/btc-updown-marketmaker/data-collect/scripts/run_daily_new_datasets_archive.sh
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6

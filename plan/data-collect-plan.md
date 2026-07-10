@@ -18,7 +18,31 @@
 
 > 事项编号：`data-collect-demand`
 
-> 状态：用户已在 2026-07-06 批准执行本文档；执行仍限定为 data-collect 本地开发、测试和经授权的数据采集服务器验证，不授权 paper、live、真实下单、撤单或资金操作。
+> 状态：用户已在 2026-07-06 批准执行本文档；2026-07-10 又批准 Binance aggTrade schema v3、D+1 昨天归档修正、立即重新部署与重启采集。执行仍不授权 paper/live 真实市场接入、真实下单、撤单或资金操作。
+
+## 2026-07-10 已批准增量执行
+
+### 增量阶段 A：Binance aggTrade schema v3 与立即重新部署
+
+- 任务 A.1：先将原始 `T` 写入 hourly typed row 的独立 `trade_time` 列，保留 `event_time=E`，并将 schema version 升为 `binance_aggtrade_v3`。
+  - 步骤 A.1.1：先写 row 转换、Arrow schema、Parquet writer 和 schema metadata 回归测试。 -> 验证：两列可被读取且值不同，v2 期望测试必须更新为 v3。
+  - 步骤 A.1.2：实现最小 schema/writer 改动，不修改其他 source schema。 -> 验证：`cargo fmt`、`clippy -D warnings` 和 data-collect 全量 lib/tests 通过。
+- 任务 A.2：从干净 commit 本地构建 release，上传到数据采集服务器并重启现有 user service。
+  - 步骤 A.2.1：记录 commit、本地 artifact path 和 binary sha256；远端只运行已构建二进制。 -> 验证：远端 release/current/process sha256 一致。
+  - 步骤 A.2.2：受控重启并等待新 segment finalize。 -> 验证：服务 active、restart/exit 无异常，新 finalized aggTrade parquet metadata 为 v3 且 `event_time/trade_time` 都可读。
+
+### 增量阶段 B：D+1 昨天归档与 Gamma 两字段
+
+- 任务 B.1：定时器改为 UTC 02:00，脚本默认且定时执行只拉取昨天 D 的 `typed_raw/utc_day=D` 及同名 segment manifests，不拉当天分区或整个当前 `run_manifests/`。 -> 验证：默认日期是 `date -u -d yesterday`，rsync 数据根只指向 D 分区。
+- 任务 B.2：对 D 的 288 个名义 slug 首次各请求一次 Gamma，生成 `price_to_beat.parquet`；完整 D 文件已存在时原样复用。 -> 验证：只有 `priceToBeat + finalPrice` 同时存在才使该 market 回填成功；closed/resolved/winner 只能是诊断，无 D+2 且无语义重试；连续执行第二次时 Gamma 请求数为零且 P2B hash 不变。
+- 任务 B.3：忽略但记录历史 partial，按现有逐 market 窗口规则选择可用 market，将昨天报告、P2B 文件和有效 market 打包上传。 -> 验证：已知四字节 T08 running 文件不进 parquet reader；云端同名旧包按内容 SHA1 覆盖且与本地一致。
+- 任务 B.4：完整 canonical/feature/label/trajectory 处理保持在 `data-pipeline/`，后续部署到 5090 执行。 -> 验证：日级归档脚本不生成训练 feature/label/split。
+
+### 增量阶段 C：future hot path 合同留档
+
+- 任务 C.1：在需求与计划中冻结 future `external_market_event` 的 nullable `price_to_beat/final_price` 字段和非阻断语义。 -> 验证：文档明确当前仅 heartbeat/status，本轮不修改 handoff runtime、不部署 paper/live。
+
+阶段 A/B 完成后必须自审差异、运行完整验证、派独立审查，修复 Critical/High 后创建精确 commit 并 push，然后才能用该 commit 构建和重新部署。
 
 ## 零、路径执行口径
 
@@ -805,7 +829,7 @@
 
   - Polymarket `btc-updown-5m` market channel：current active + prefetched next，记录 business event、真实发出的 subscription JSON/digest 或 SDK request evidence、`custom_feature_enabled: true`、real current/prefetched asset ids、source timestamp、`recv_time_utc`、rollover 边界；若官方 SDK 不暴露 actual outbound frame receipt，必须写明 unavailable reason，并在正式 adapter 阶段补齐 request evidence。
   - Binance `BTCUSDT` depth：官方 WS depth + REST snapshot stitch，记录 `lastUpdateId`、`U/u` 连续性、resnapshot、stale/duplicate/gap。
-  - Binance `BTCUSDT` aggTrade：官方 WS aggTrade，记录 event time、trade id、source stale/gap。
+  - Binance `BTCUSDT` aggTrade：官方 WS aggTrade，记录 `event_time=E`、`trade_time=T`、trade id、source stale/gap。
   - RTDS Chainlink `btc/usd`：记录 RTDS message timestamp、payload timestamp、symbol、value、source topic、`recv_time_utc`、symbol filter、business freshness 和 stale/gap。
 
   最小 source loop / output schema：

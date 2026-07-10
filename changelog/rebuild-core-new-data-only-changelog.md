@@ -2,7 +2,7 @@
 
 事项编号：`rebuild-core-new-data-only`
 
-状态：`基础准备记录；FinalDatasetBoundaryStatus=RESOLVED_OPTION_B；CollectionStartReadinessStatus=DOCS_ONLY_NOT_EXECUTED；未开始实现或训练`
+状态：`基础准备修订与采集增量执行；FinalDatasetBoundaryStatus=DEFERRED_TO_OBSERVED_COLLECTION；BinanceAggTradeSchemaStatus=V3_AUTHORIZED_FOR_IMMEDIATE_DEPLOY；未开始模拟或训练`
 
 对应需求：`/home/chillchill/btc-updown-marketmaker/demand/rebuild-core-new-data-only-demand.md`
 
@@ -220,3 +220,40 @@
 - 第一轮限定复核：`0 Critical / 0 High / 1 Medium`；发现计划主时序图仍写“解决结束日”，可能重新打开已冻结选择。
 - 已改为“应用已解决的方案 B 边界并冻结 dataset manifest/eligibility/split”。
 - 最终定点复核：`0 Critical / 0 High / 0 Medium`，PASS；确认日期、名义 market 数、split、四文档状态和未授权边界一致。
+
+## 2026-07-10：撤销方案 B、收紧 Gamma 回填并授权 schema v3 立即重新部署
+
+### 本节取代的旧决定
+
+- 用户明确撤销固定 `[2026-07-11T00:00:00Z, 2026-07-25T00:00:00Z)`、14 个完整 UTC 日和 4032 个名义 market 的方案 B 权威。
+- 新状态为 `FinalDatasetBoundaryStatus=DEFERRED_TO_OBSERVED_COLLECTION`：先完成 Binance aggTrade schema v3 重新部署并持续观察，再由用户根据实际数据完整性选择训练日期。
+- 旧方案 B 在本文上一节仅作历史决策记录，不再是配置、cohort、split 或 holdout 默认值。
+
+### Gamma 回填过度校验修正
+
+- 用户否决了必须同时满足 closed、acceptingOrders=false、UMA resolved、winner one-hot 和公式一致性才视为 MATURE 的方案；该方案会把非核心诊断放大成数据不可用或整日终止风险。
+- 新核心条件只有同一 slug 的 `eventMetadata.priceToBeat` 和 `eventMetadata.finalPrice` 同时存在。closed/resolved/winner 字段如果保留只能作诊断，不得阻断两个目标字段落盘。
+- 回填仅在 D+1 UTC 02:00 对昨天 D 执行一次；不增加 D+2、不做语义重试、不扩展到网页 internal endpoint。完整 288-slug D 文件已存在时原样复用且不再请求，避免重跑用空值覆盖已取得的两字段。
+
+### hot path 实现审计
+
+- 当前 `runtime.rs` 的 `PaperHot/LiveHot` 只启动 heartbeat/status handoff server，`handoff.rs` 的 frame 不包含 `price_to_beat` 或 `final_price`；paper/live 目录也没有真实市场事件生产路径。
+- future hot path 需求已冻结为两个 nullable decimal-string 字段，缺失不阻断 handoff，不增加 closed/resolved/winner 门。本轮不将此文档需求冒充为已实现热路径。
+
+### Binance 两类价格证据与 schema 决定
+
+- Polymarket 平台字段保持命名为 `polymarket_price_to_beat/polymarket_final_price`；Binance aggTrade 边界价另名为 `binance_start_reference_price/binance_end_reference_price`，不冒充 Chainlink/Polymarket 结算权威。
+- Binance 边界选取规则冻结为 `T <= boundary` 的最后一笔；同 `T` 取 aggregate trade ID 最大者。起止价生成独立 Binance Up/Down label，与 Polymarket label 不一致时保留 disagreement，不改写平台 settlement/reward。
+- 旧 `binance_aggtrade_v2` 仅将 `E` 写为 `event_time`，尽管 parser 已读取 `T`。用户选择方案 1 并授权立即实现 `trade_time=T`、升级 `binance_aggtrade_v3`、重新部署与重启采集。
+
+### D+1 归档和 data-pipeline 边界
+
+- 远端 2026-07-09 T08 四字节 `*-running.parquet` 仍物理存在；旧日归档脚本会因发现任意 partial 全局退出，因此即使采集源 bug 已修复，该历史产物仍会阻断昨天归档。用户已批准该归档修复。
+- 修正语义：只拉取昨天 `typed_raw/utc_day=D` 及其同名 segment manifests，不拉当天分区或整个当前 `run_manifests/`；partial 只写报告且绝不读取，市场是否保留交由现有逐 market gap 规则。v2/v3 混合日改为逐文件读取后按字段并集拼接，旧 v2 rows 的 `trade_time=null`，新 v3 rows 保留真实 `T`。
+- 云端同名昨天包必须按当前本地/远端 SHA1 核对，不能只看名字就报告成功。
+- 完整 canonical/feature/label/trajectory 处理脚本属于本仓库 `data-pipeline/`，后续部署到 5090 的 `~/btc-updown-marketmaker/data-pipeline` 执行；不继续把每日归档脚本扩成训练 pipeline。
+
+### 当前授权边界
+
+- 已授权：文档对齐、schema v3 最小实现与测试、D+1 昨天归档/Gamma 两字段修正、commit/push、本地 release build、数据采集服务器重新部署和重启采集。
+- 未授权：future paper/live 真实 market handoff 实现或部署、`data-pipeline` 实现、simulator/model 实现、训练、paper/live 交易和资金操作。

@@ -14,6 +14,17 @@
 
 验收标准：故障注入测试必须证明 raw/combined `serverShutdown`、`Close`、EOF 和持续 Ping 但无业务消息后，第二条连接仍能收到合法 aggTrade；控制事件写入业务队列的行数为 `0`，source task 完成可被检测，writer channel 断开和 writer parser/finalize 失败均返回错误。本地全量测试通过后，才允许部署到数据采集服务器，并以新 aggTrade parquet 持续增长、服务 active、进程/发布二进制 sha256 一致作为部署验收。
 
+## DC-INCREMENT-20260710-P2B-T-V3-ARCHIVE 增量需求
+
+1. Binance aggTrade hourly typed parquet 必须同时保存官方 `E` 为 `event_time` 和官方 `T` 为 `trade_time`；两列不得合并或相互代替，schema version 升为 `binance_aggtrade_v3`。
+2. 本增量的 schema v3 修改经本地完整验证后必须立即重新部署到数据采集服务器并重启采集；必须以新 finalized v3 segment 中 `event_time` 和 `trade_time` 的真实可读值验收，不得修改或伪装旧 v2 产物。
+3. future paper/live hot path 的真实 external market event handoff 必须显式传输同一 slug 下可空 decimal-string `price_to_beat` 和 `final_price`。缺少任一字段不得阻断 handoff，也不得增加 closed/resolved/winner 门；当前 paper/live 二进制仅实现 heartbeat/status，该字段合同本轮只写入需求与计划，不冒充已实现。
+4. 经用户批准的日级运维辅助脚本只在 D+1 UTC 02:00 处理昨天 D：每个目标 slug 只请求一次 Gamma，仅以 `eventMetadata.priceToBeat` 和 `eventMetadata.finalPrice` 同时存在作为该 market 的回填成功条件。完整 D 文件已存在时原样复用且请求数为零；不设 D+2、不做语义重试，closed/resolved/winner 及结果一致性不得成为阻断门。
+5. 日级辅助脚本发现历史 running/digesting/partial 文件时只写入诊断报告并且绝不读取；不得因一个孤立历史 partial 使昨天整日归档提前终止。上传同名昨天包时必须核对当前本地与云端内容 digest，不得仅因云端已有同名文件就报告成功。
+6. 完整 canonical/feature/label/trajectory 处理不属于日级归档脚本；必须在本仓库 `data-pipeline/` 实现，再部署到 5090 服务器的 `~/btc-updown-marketmaker/data-pipeline` 执行。
+
+验收标准：本地测试和真实新 segment 证明 schema v3 同时保留不同的 `event_time/trade_time`；日级归档合同测试证明 D 的 288 个名义 slug 首次各请求一次、第二次执行请求数为零且 P2B hash 不变、Gamma 只用两个目标字段判定回填、历史 partial 不进入 reader、新同名包按 digest 覆盖并验证；热路径两字段保持明确的未实现状态。
+
 ## 一、范围与非范围
 
 ### 1.1 data-collect 范围
@@ -40,7 +51,7 @@
 3. paper/live 交易决策、下单、撤单、风控、模型 intent 改写或 Polymarket submit/cancel 路径。
 4. 用 parquet 存在性替代 runtime append-only event log，或用 manifest 替代 label / validation / tick_stream 的消费合同。
 5. 在 Polymarket Rust SDK 未覆盖能力时，自行引入 raw REST、manual signing、自建 SDK 或 shadow implementation；后续如发现 SDK 缺口，必须先形成缺口说明、影响范围和可选方案，获得用户同意后才能进入实现。
-6. 发布后归档、远端上传、gzip 压缩或对象存储 listing 验证；若未来需要纳入，必须另开 archive demand/plan/changelog 并补充 archive integrity 验收。
+6. collector runtime 内的发布后归档、远端上传、gzip 压缩或对象存储 listing 验证；唯一已批准例外是 `DC-INCREMENT-20260710-P2B-T-V3-ARCHIVE` 所定义的独立日级运维脚本，不得将其并入采集热路径。
 7. paper/live append-only log、rotation artifact、live artifacts、order evidence、NormalizedOrderEvent、ledger、execution feedback ingestion 或训练反馈标签；这些由 paper/live、NOE/Ledger 或后续 data-pipeline/feedback 需求承接。
 
 ### 1.3 本地 Polymarket 网络环境约束
@@ -85,7 +96,7 @@
 4. depth update 必须保留 WS raw/typed 字段 `e`、`E`、`s`、`U`、`u`、`b`、`a`；REST snapshot parquet 必须保留 `timestamp_received`、`lastUpdateId`、`bids`、`asks`、`snapshot_fetch_start_utc`，不得再写与 `timestamp_received` 等价的 `snapshot_recv_time_utc` 别名列，不得伪造 exchange timestamp；若使用 combined stream，必须保留 wrapper `stream` / `data`。
 5. 本地 orderbook source integrity 检测必须能记录 snapshot 获取、buffered updates、缺序、重建开始、重建成功和重建失败证据。
 6. depth stitch predicate 必须验证：丢弃 `u <= lastUpdateId` 的 buffered update，首个可用 update 必须满足 `U <= lastUpdateId + 1 <= u`；后续 update 必须先处理 `u <= local_u` 的 stale/duplicate update 并记录/忽略，再处理 `U > local_u + 1` 的 source gap 并重新 snapshot，其余 update 才能应用并推进 `local_u`。
-7. aggTrade raw evidence/parser 必须能校验原始字段 `e`、`E`、`s`、`a`、`p`、`q`、`f`、`l`、`T`、`m`；hourly parquet 只输出 `timestamp_received`、`event_time`、`symbol`、`aggregate_trade_id`、`price`、`quantity`、`first_trade_id`、`last_trade_id`、`buyer_is_maker`，不得再额外输出与 `event_time` 近似重复的 `trade_time` 列。
+7. aggTrade raw evidence/parser 必须能校验原始字段 `e`、`E`、`s`、`a`、`p`、`q`、`f`、`l`、`T`、`m`；hourly parquet 必须输出 `timestamp_received`、`event_time`、`trade_time`、`symbol`、`aggregate_trade_id`、`price`、`quantity`、`first_trade_id`、`last_trade_id`、`buyer_is_maker`。`event_time` 映射官方 `E`，`trade_time` 映射官方 `T`，两者是不同语义并必须同时保留。
 8. 当 update id 不连续、snapshot 缺失、服务器 shutdown、rate limit、订阅错误、aggTrade 长时间无业务消息或 source stale 时，必须写入 source health、source gap 和 reconnect trace。
 
 ### 3.3 Polymarket RTDS Chainlink BTC/USD
@@ -115,7 +126,7 @@
 15. 训练 cold path 必须迁移为 UTC day 文件夹 + 每 source kind 每小时一个逻辑 partition：`training/typed_raw/utc_day=YYYY-MM-DD/source_kind=<source_kind>/<source_kind>_YYYY-MM-DDTHH[--part=N].parquet`。正常目标是一小时一个 finalized parquet；`max_rows` / `max_bytes` 只允许作为保护性 soft rollover 生成同一小时的 `part=N`，不得停机或丢数据。
 16. Polymarket `book` 事件必须保存完整 `bids` / `asks` price-size depth，能还原 token orderbook；不得只保存 `bids_len` / `asks_len` 却标记为 complete book。PMXT-like schema 只作为 Polymarket orderbook typed layout、hourly parquet、compression/sort 和 manifest 参考，不引入 PMXT archive source。
 17. Polymarket hourly typed layout 必须覆盖 `book`、`price_change`、`last_trade_price`、`tick_size_change`、`best_bid_ask`、`new_market`、`market_resolved` 的 typed 字段或 nullable unavailable reason，并保留 collector host/region、slug、condition id、asset id、coverage 和 source evidence。
-18. Binance depth snapshot/update、Binance aggTrade、RTDS Chainlink 必须进入 hourly typed layout 修改范围，分别使用官方字段的 source-specific schema：`binance_depth_snapshot` 保留 `timestamp_received`、`lastUpdateId` 和完整 `bids/asks`，`binance_depth_update` 保留 `timestamp_received`、`e/E/s/U/u/b/a` 与 stitch evidence，`binance_aggtrade` 保留 `timestamp_received`、`event_time`、`e/s/a/p/q/f/l/m` 的 typed 字段并通过 raw evidence/parser 校验官方 `T`，`polymarket_rtds_chainlink_btc_usd` 保留 `timestamp_received`、message timestamp、payload timestamp、symbol、value、topic 和 subscription filter。
+18. Binance depth snapshot/update、Binance aggTrade、RTDS Chainlink 必须进入 hourly typed layout 修改范围，分别使用官方字段的 source-specific schema：`binance_depth_snapshot` 保留 `timestamp_received`、`lastUpdateId` 和完整 `bids/asks`，`binance_depth_update` 保留 `timestamp_received`、`e/E/s/U/u/b/a` 与 stitch evidence，`binance_aggtrade_v3` 保留 `timestamp_received`、`event_time=E`、`trade_time=T`、`e/s/a/p/q/f/l/m` 的 typed 字段，`polymarket_rtds_chainlink_btc_usd` 保留 `timestamp_received`、message timestamp、payload timestamp、symbol、value、topic 和 subscription filter。
 19. 训练 dataset retention threshold 为 `50_000_000_000` bytes，作用域是 `datasets/training`。默认生产策略只写 run-level dry-run/no-op retention policy receipt；真实删除只允许在显式启用 delete mode 或用户单独批准后删除 `training/typed_raw/utc_day=*` 下最老 finalized complete UTC day。
 20. finalized complete UTC day 的删除判定必须 fail closed：current day、running/digesting/tmp/`.rsync-partial`、incomplete day、manual-inspection、run manifests、startup receipts、未知文件角色和非 `training/typed_raw/utc_day=*` 路径均不得删除；超过阈值但无可删 complete day 时必须写 ResourceWatermark hard-threshold evidence 并受控停止新采集。
 21. retention 远端安全验证不得为了触发 50GB 阈值制造大文件。生产 `~/btc-updown-marketmaker/datasets/` 首次只允许 dry-run/no-op 验证；真实删除路径只能在数据采集服务器的独立临时验证根下用小阈值验证，且必须先通过 canonical path、symlink、相似前缀路径和 receipt path containment 防护。验证通过后必须删除该临时验证根、临时 receipt、fixture、测试脚本副本、临时日志和临时上传 binary/release，并把清理证据拉回本地。
@@ -207,7 +218,7 @@
 19. 性能验收覆盖 Polymarket p95/max 事件量、四源合并 `2k-5k events/s` 工程吞吐、逐源吞吐/burst/drop/gap、writer queue、flush latency、RSS/CPU/disk watermark、cgroup/PSI/journal ResourceWatermark、hot path handoff latency、durable parquet write latency 和 hardware tier。
 20. 阶段 0 技术验收必须真实验证 `btc-updown-5m` 冷启动发现、跨至少一个 market rollover 的 current -> retired / prefetched -> active 切换、四源真实数据流、同一 UTC window 的 coverage 对齐、逐源吞吐、ResourceWatermark、训练 cold path / paper-live hot path 边界、`source_recv_to_hot_delivery_ms` 和 `source_recv_to_write_done_ms`；只通过 synthetic throughput、generic orderbook smoke、HTTP endpoint smoke、RTDS 单消息 smoke 或 finalized parquet 证据时，不得宣称阶段 0 技术路径通过。
 21. ResourceWatermark 硬阈值验收必须包含 threshold policy receipt，并证明触发条件、降级或停止新市场采集、保护已采数据、优先 finalize/sha256/manifest 的动作与结果。
-22. archive/upload/listing/gzip 不属于当前 `data-collect` 验收项；若未来改变范围，以 1.2 非范围的决策门为准。
+22. archive/upload/listing/gzip 不属于 collector runtime 验收项；已批准的 D+1 独立日级脚本仅按 `DC-INCREMENT-20260710-P2B-T-V3-ARCHIVE` 验收，不得扩张进 runtime。
 23. Polymarket 相关采集路径必须先有官方 Rust SDK 能力核对记录；SDK 缺口方案必须先获用户同意。
 24. 文档、计划或实现不得把 data-pipeline 的 labels、features、tick_stream、训练切分、T-30 样本加工、paper/live 交易逻辑或 SDK 旁路实现写进 `data-collect` 范围。
 25. 训练、paper、live 三类运行形态均能独立导出 release 二进制、sha256 和运行说明；训练数据采集必须有独立部署 README，paper/live hot path 必须有独立接入技术文档。
@@ -216,7 +227,7 @@
 28. 训练样本因果可见性必须以采集服务器 `recv_time_utc` / availability time 为默认主轴；paper/live 因果可见性必须以对应 paper/live 服务器本机 runtime receive timestamp 为主轴；source/platform timestamp 不能替代 receive/available time。
 29. paper/live 二进制的 hot path 接入文档必须明确 IPC/local stream/bounded handoff 协议、event seq、timestamp namespace、backpressure/status 消息、runtime receive timestamp 记录点和非范围边界，且不得生成交易决策、NOE/ledger、order evidence 或 execution feedback。
 30. PMXT-inspired Polymarket orderbook hourly parquet 必须证明 `book` rows 全部保留可解析 `bids` / `asks` 数组字段；真实市场中单侧空数组可以是盘口状态，必须在人工检查报告中单独计数，不得把完整 price-size 数组缩水成 `bids_len` / `asks_len` 后伪装完整。`price_change`、`last_trade_price`、`tick_size_change`、`best_bid_ask`、`new_market`、`market_resolved` 必须有对应 typed 字段、raw-equivalent evidence 或 nullable unavailable reason。
-31. Binance depth snapshot/update、Binance aggTrade、RTDS Chainlink hourly parquet 必须分别证明 required typed fields 存在，且不能只依赖 opaque `source_kind/raw_json` 宽表；Binance depth 还必须证明 snapshot/update stitch predicate、`local_u` 单调推进或 gap/resnapshot 可解释。
+31. Binance depth snapshot/update、Binance aggTrade、RTDS Chainlink hourly parquet 必须分别证明 required typed fields 存在，且不能只依赖 opaque `source_kind/raw_json` 宽表；Binance aggTrade v3 必须证明 `event_time=E` 与 `trade_time=T` 都落盘且未被归档输出丢弃，Binance depth 还必须证明 snapshot/update stitch predicate、`local_u` 单调推进或 gap/resnapshot 可解释。
 32. 训练 cold path finalized discovery 必须使用 day-first `utc_day=YYYY-MM-DD/source_kind=<source_kind>` 路径；legacy source-first 路径只能作为历史只读兼容被显式标记，不能与新产物混写。
 33. 50GB retention 验收必须证明 dry-run/no-op receipt、可选 deletion receipt、最老 finalized complete UTC day 删除边界、受保护目录不删除，以及无可删 complete day 时 fail closed；远端小阈值 enabled 验证只能发生在独立临时验证根，必须证明 canonical/symlink/receipt containment 安全门成立，并在完成前删除数据采集服务器上的测试产物和相关文件。
 

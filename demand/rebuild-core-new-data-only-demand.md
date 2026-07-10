@@ -2,7 +2,7 @@
 
 事项编号：`rebuild-core-new-data-only`
 
-状态：`基础准备草案；FinalDatasetBoundaryStatus=RESOLVED_OPTION_B；CollectionStartReadinessStatus=DOCS_ONLY_NOT_EXECUTED；不授权数据处理、模拟、训练、paper、live、部署或资金操作`
+状态：`基础准备修订中；FinalDatasetBoundaryStatus=DEFERRED_TO_OBSERVED_COLLECTION；CollectionStartReadinessStatus=SCHEMA_V3_AND_REDEPLOY_AUTHORIZED；不授权模拟、训练、paper、live或资金操作`
 
 对应执行计划：`/home/chillchill/btc-updown-marketmaker/plan/rebuild-core-new-data-only-plan.md`
 
@@ -17,7 +17,7 @@
 ## 1. 文档权威、当前时点与总目标
 
 1. 本文是“完全不使用旧数据集，只使用未来新采集数据训练”决策下的新需求权威，不在 `/home/chillchill/btc-updown-marketmaker/demand/rebuild-core-demand.md` 或旧数据唯一训练源文档上继续修改。
-2. 当前事实时点为 `2026-07-10 UTC`。目标 cohort 尚未采集完成；本事项当前只准备需求、计划、训练核心框架和 changelog，不开始数据处理、模拟、训练或部署。
+2. 当前事实时点为 `2026-07-10 UTC`。目标 cohort 尚未确定；用户已授权补充 Binance aggTrade `trade_time=T`、立即重新部署采集，并根据新版本实际采集质量另行选择正式训练日期。当前不开始模拟、训练、paper、live 或资金操作。
 3. 总目标是建立从新采集市场事实到事件驱动模型、离散事件模拟平台、Model Intent、NormalizedOrderEvent、ledger、reward 和评估的完整可验证链路，并阻断 `mistake-log` 已记录的时间泄漏、固定 tick、短视状态、动作塌缩、输出未消费、reward 错位、账本不闭合、模拟器过度乐观和 leaderboard 误读。
 4. 本文定义需求、不变量、能力门和验收标准；具体模型结构、损失、reward 公式和技术取舍由对应核心训练框架定义；阶段、任务、步骤和验证由对应执行计划定义。
 5. `/home/chillchill/btc-updown-marketmaker/mistake-log/`、V2 旧实现和旧报告只作为失败证据与设计约束，不是训练样本来源，也不授权复用旧 feature、label、normalizer、模型 bundle、阈值或 leaderboard。
@@ -25,26 +25,24 @@
 
 ## 2. 数据日期边界合同
 
-用户已于 `2026-07-10 UTC` 明确选择推荐方案 B。`FinalDatasetBoundaryStatus=RESOLVED_OPTION_B`，不得再使用候选 A 或占位符 `DATASET_COHORT_END_EXCLUSIVE_UTC` 生成正式 cohort、split 或训练配置。
+用户于 `2026-07-10 UTC` 撤销此前固定方案 B 日期，改为在 Binance aggTrade schema v3 部署并重新采集后，根据实际完整性再选择正式训练日期。`FinalDatasetBoundaryStatus=DEFERRED_TO_OBSERVED_COLLECTION`；任何旧的固定日期或名义 market 数都不能继续作为正式 cohort、split 或训练配置。
 
-| 字段 | 冻结值 |
+| 字段 | 当前值 |
 |---|---|
 | `date_basis` | `UTC` |
-| `market_start_time_start_inclusive` | `2026-07-11T00:00:00Z` |
-| `market_start_time_end_exclusive` | `2026-07-25T00:00:00Z` |
-| 覆盖的完整 UTC 日 | `2026-07-11` 至 `2026-07-24` |
-| UTC 日数 | `14` |
-| 名义 5 分钟 market 数 | `4032` |
-| model development | `2026-07-11` 至 `2026-07-21`（11 日） |
-| dedicated calibration | `2026-07-22`（1 日） |
-| frozen final holdout | `2026-07-23` 至 `2026-07-24`（2 日） |
+| `market_start_time_start_inclusive` | `TBD_AFTER_SCHEMA_V3_COLLECTION_EVIDENCE` |
+| `market_start_time_end_exclusive` | `TBD_AFTER_SCHEMA_V3_COLLECTION_EVIDENCE` |
+| 覆盖的完整 UTC 日 | `TBD` |
+| UTC 日数 | `TBD`；不再强制 14 日 |
+| 名义 5 分钟 market 数 | 由最终冻结的完整 UTC 日机械计算 |
+| model development / calibration / holdout | 在最终日期冻结后按时间前推原则生成 |
 
-上述 4032 只是按 14×24×12 计算的名义 market 数；实际训练准入数量仍由数据完整性、能力等级、label maturity 和 split 合同决定。
+旧方案 B 的 `[2026-07-11T00:00:00Z, 2026-07-25T00:00:00Z)` 与 4032 个名义 market 只保留为已撤销历史，不得作为默认值回流。
 
-开始日 `2026-07-11T00:00:00Z` 已经明确，因此必须把两个 gate 分开：
+必须把两个 gate 分开：
 
-- `CollectionStartReadinessGate`：只判断固定开始日前不可事后恢复的 event identity、clock receipt、schema/version、price-to-beat authority 和 canonical raw retention；它与已解决的结束日期决定相互独立，当前仍因本轮只授权写文档而处于 `NOT_EXECUTED`。
-- `FinalDatasetBoundaryGate`：方案 B 的日期定义已 `RESOLVED`；目标数据尚未形成，因此 final manifest、实际 eligible market 集和数据准入仍必须在采集完成后的阶段 3 生成与验证，不能因边界已确定而标记数据 PASS。
+- `CollectionStartReadinessGate`：当前必须先完成 Binance aggTrade schema v3 的 `trade_time=T`、本地测试、重新部署和真实新段验证；该 gate 的通过时刻只形成候选数据版本起点，不自动冻结正式 cohort。
+- `FinalDatasetBoundaryGate`：待新版本运行并积累实际数据后由用户重新选择完整 UTC 日期；在此之前保持 `DEFERRED`，不得生成正式 split 或训练。
 
 日期合同还必须满足：
 
@@ -53,7 +51,7 @@
 3. `model_context_halo = 30s`：模型可见 event sequence 从 T-30 开始；首个 cohort market 的 T-30 证据可来自 cohort 起点前 30 秒，但只能作为该 market 的因果上下文，不能成为区间外独立训练 episode。
 4. `state_reconstruction_lookback` 与 model context 分离：为在 T-30 得到正确 Binance L2，允许向前回溯到最近有效 snapshot/checkpoint并连续应用全部 updates。T-30 之前的更早新数据只用于生成带 lineage/hash 的 checkpoint，不进入模型可见 30 秒序列或独立 episode。
 5. cohort/split 起点若没有可连续重建的 snapshot→T-30 链，必须丢弃边界 market，直到出现完全属于该 split 的有效 checkpoint 链；不得跨 split 复用训练事件构造 validation/holdout 初始状态。
-6. `label_maturity_tail` 延伸到 cohort 结束之后，直到最后一个 market 的 outcome、resolution、未结订单和经济 reward 全部成熟或被明确标记为 censored；tail 只用于闭合标签/账户状态，不创建区间外训练 episode。
+6. `label_maturity_tail` 延伸到 cohort 结束之后，直到最后一个 market 的 outcome、resolution、未结订单和经济 reward 全部成熟或被明确标记为 censored；tail 只用于闭合标签/账户状态，不创建区间外训练 episode。每日归档仍只拉 D+1 执行时的昨天 D，不把正在采集的当天分区并入昨天包。
 7. 若用户最终禁止读取 cohort 外的新数据，必须剔除缺少完整 context、state reconstruction 或 maturity 的首尾 market，不能伪造、回填或静默缩短上下文。
 
 ## 3. 新数据唯一训练源边界
@@ -69,16 +67,17 @@
 5. 新数据已经具有采集器记录的 `timestamp_received`。本事项不生成 `simulated_received_time`，也不沿用旧数据延迟回填方案。
 6. 官方平台规则和经用户批准的 simulator rule artifact 不属于训练市场数据，但必须单独记录 provenance，不能伪装成新数据观察到的执行事实。
 7. 在没有真实本账户 execution feedback 的情况下，queue position、fill、partial fill、cancel race、sellable maturity 等不可识别量只能是 `assumed` 或 `stress` simulator 参数；由其生成的策略候选默认 `non-promotable`。任何旧执行 artifact 若未来用于校准，必须另行取得用户批准，且不能作为模型直接输入。
-8. `price-to-beat` 是 BTC 5 分钟 Up/Down market 的必需状态与最终结果解释依据。当前 metadata typed schema 未保存平台显式字段；不得把任意开盘附近 RTDS/Binance tick 猜成 price-to-beat。必须建立独立 `PriceToBeatAuthorityContract`，记录 market/condition/slug、数值、完整精度、官方规则/来源、payload/receive time、row locator、首次可用时间、修订/maturity、collector/schema版本与 hash。
-9. 默认 SDK-first 派生规则（由官方市场规则、官方RTDS字段语义和本地多market精确对账共同支持的推断，不冒充平台显式字段）是：使用官方 Rust SDK RTDS `crypto_prices_chainlink` 中 `symbol=btc/usd` 且 `payload_timestamp == market_start_utc_ms` 的 full-precision value。`market_start_utc_ms` 来自 slug epoch或Gamma Event `startTime`，不得误用市场创建时间。模型在该 row 的 collector `timestamp_received` 之前只能看到 `p2b_pending`，收到后才变为 `p2b_derived_observed`；不得把 payload timestamp 回拨为提前可见。`p2b_pending` 时只能更新state并允许no-op/no-submit/cancel/risk intent，hard boundary禁止新submit。
-10. 缺 exact start-boundary Chainlink row 时，禁止 nearest、forward-fill、interpolate 或 Binance替代，只能 `p2b_unresolved/censored` 并排除 policy/reward。结束边界同样使用 exact full-precision Chainlink row；`final >= p2b => Up`，否则 Down。
-11. maturity 分为 `derived_observed` 与 `official_confirmed`。当前官方 Rust SDK可完成 RTDS派生，但尚不暴露Gamma实际响应中的 `eventMetadata.priceToBeat/finalPrice`；这不阻断有exact row的研究性 policy training，却使平台显式确认/promotion gate 标记 `BLOCKED_SDK_FIELD_GAP`。若 promotion 硬要求该字段，必须等待官方SDK支持/经审查的官方新版，或向用户报告并取得例外批准；不得自行使用raw Gamma REST、网页/internal endpoint或自建反序列化旁路。
+8. `price-to-beat` 是 BTC 5 分钟 Up/Down market 的必需状态与最终结果解释依据。用户已批准一个范围受限的 SDK 例外：本地 D+1 日归档任务可从官方 `gamma-api.polymarket.com` 读取已结束目标市场的 `eventMetadata.priceToBeat` 与 `eventMetadata.finalPrice`，不得扩展到网页 internal endpoint、下单路径或影子 SDK。
+9. Gamma 日级回填的核心成功条件只有两个：同一目标 slug 的 `priceToBeat` 和 `finalPrice` 都存在并可无精度损失地保存为十进制字符串。`closed`、`acceptingOrders`、`umaResolutionStatus`、winner 或公式一致性只能作为可选诊断字段，缺失或不一致不得阻断这两个目标字段落盘、整日归档或其他市场可用性。
+10. 日级回填只在 D+1 UTC 02:00 对昨天 D 执行一次，不设置 D+2 final audit 或语义重试。单个市场缺任一目标字段时只标记 `fetch_succeeded=false` 与 `diagnostic_error=p2b_final_missing`，不得暂停整日流程。若 D 的完整 288-slug `price_to_beat.parquet` 已存在，重跑必须原样复用并且 Gamma 请求数为零；现有文件不符合该 D 合同时应明确失败，不自动二次请求。
+11. RTDS Chainlink 仍作为实时价格流与因果时间证据保存，但不得再用 RTDS exact-row、winner、closed/resolved 等额外条件阻断 Gamma 两字段回填。Polymarket 与 Binance 两套基准必须分名：`polymarket_price_to_beat` / `polymarket_final_price` 与 `binance_start_reference_price` / `binance_end_reference_price`。
+12. future paper/live hot path 必须显式传输同一 slug 下两个 nullable decimal-string 字段：交易期间可用的 `price_to_beat` 与结束后出现的 `final_price`。缺字段只保持 nullable/pending，不新增 closed/resolved/winner 阻断门；consumer 以本机 runtime receive time 更新状态。当前 data-collect paper/live 二进制只有 heartbeat，尚未实现真实 external market event 或这两个字段，不能宣称已支持。
 
 ## 4. Canonical 数据证据与 episode 准入
 
 ### 4.1 权威输入
 
-1. canonical 训练证据必须从 `training/typed_raw/utc_day=.../source_kind=...` 下 finalized typed Parquet、同名 segment manifest、run receipt、clock receipt 和 source/writer health evidence 构建。
+1. canonical 训练证据必须从 `training/typed_raw/utc_day=.../source_kind=...` 下 finalized typed Parquet、同名 segment manifest、run receipt、clock receipt 和 source/writer health evidence 构建；完整处理脚本属于本仓库 `/home/chillchill/btc-updown-marketmaker/data-pipeline`，后续部署到 5090 的 `~/btc-updown-marketmaker/data-pipeline` 执行，不继续膨胀每日归档脚本。
 2. 当前日归档中的 `validated_markets` 只能作为诊断候选，不能成为训练真相：它裁剪为 `[market_start, market_end)`、不保留完整 T-30，且物理 row order 已实证可能因 part 文件字典序而倒退。
 3. exact identity 模式下，训练 pipeline 必须使用 manifest 中数值化的 hour/part、source row ordinal、`timestamp_received`、event sequence 和 child ordinal 确定性重建顺序；approximate 模式使用第 5 节单独定义的 batch key/order。两种模式都不得依赖 Parquet 文件名字符串顺序或物理 row order。
 4. `validation_verdict = Complete` 只说明 segment 写入结束，不自动等于 training PASS。训练准入必须重新计算 effective verdict，至少覆盖 hash、schema、row count、partial artifact、source gaps、sequence continuity、时间边界、clock、health 和版本一致性。
@@ -137,7 +136,7 @@
    - SDK envelope/payload digest 或可审计引用。
 6. 若上述身份不能在 cohort 开始前生效，唯一可批准降级是 approximate schema。source内batch key至少包含 `source_kind + timestamp_received_ms + collector_run_id + connection_scope_if_available`，成员由稳定row locator列举但视为simultaneous；若不同source同receive-ms且没有global_ingress_seq，还必须形成`CrossSourceTieGroup`，原子应用全部source batches，不声称组内因果顺序。
 7. approximate batch 可能合并同毫秒多个真实 frame。原子应用 batch 后，必须对每个受影响的 active market 分别产生一次 model-visible event；prefetched market只更新 hidden，不产生 submit intent。不得把每个 fan-out child row当成独立决策事件，也不得把全局多 market 动作含糊合成“一次模型调用”。
-8. Binance aggTrade typed 数据当前只保存 `E`，虽 parser 读取 `T`。保存 `T` 是强烈建议；若不改 schema，必须冻结“模型只使用 receive time 与 E，不宣称拥有 trade occurrence time T”的降级合同，不能事后重解释。
+8. Binance aggTrade typed 数据必须保存官方 `T` 为独立 `trade_time`，不得用 `E` 冒充。用户已选择 schema v3 路线并授权修改后立即重新部署采集；正式训练日期只能从新 schema 实际数据中另行选择，旧 v2 数据是否保留只按实际用途决定。
 
 ## 6. 严格事件触发与 persistent state
 
@@ -228,7 +227,7 @@
 9. 已知非法动作应在硬约束层移出 candidate；真实不可预测 reject、late/stale 和 cancel race 由 simulator lifecycle 产生经济后果并单独报告，避免重复惩罚。
 10. 每个 trajectory 必须保留 reward vector，不得只保留 scalar：realized/unrealized PnL、fees、eligible rebates/rewards、inventory exposure、drawdown、adverse selection、fill、cancel、reject、capital use、settlement、censoring 和 maturity。
 11. candidate scorer 必须学习经济回报分布与非负 downside loss。`q05` 不得错误称为 CVaR；CVaR/expected-shortfall 必须来自足够的 empirical rollout lower tail、足够密集的 tail quantiles 或独立校准 head。risk profile 的单位、归一化、权重、tail alpha 和变更规则必须在 frozen holdout 前冻结。
-12. settlement/outcome 必须由官方 SDK 可覆盖的 metadata/settlement 路径或经批准的官方结果来源异步回填，记录 winning token、source、maturity timestamp 和 condition/token 一致性。未成熟或冲突 market 不得进入 policy/reward/holdout 统计。
+12. Polymarket outcome label 由已批准的 Gamma 两字段异步回填生成：`polymarket_label_up = polymarket_final_price >= polymarket_price_to_beat`，并记录 source、fetch/maturity timestamp 和 artifact hash。只有缺失或无法解析这两个字段才使 label 未成熟；SDK settlement/winner、RTDS boundary 或 condition/token 交叉检查如果保留只能作独立诊断，不得阻断 Gamma 两字段落盘、label 生成或整日归档。
 13. 必须分别记录 exactly-one `market_decision_done`、`market_settlement_done` 和 `account_run_done`。AccountRunTrajectory reward 分量必须与 ledger/NAV 闭合；全部 per-market attribution 加 residual/external-flow bridge 后才允许与 account-run 总额对账。
 
 ## 11. Split、评估与 promotion 边界
@@ -236,15 +235,15 @@
 1. 独立统计单位是完整 market 和 UTC 日，不是数亿 event rows。名义事件量不能被描述为同等数量的独立样本。
 2. 全部 source、T-30 context、labels、simulator scenarios 和 replicas 必须随同一个 market 进入同一 split；一个 AccountRunTrajectory 也不得跨 split。
 3. split 严格按时间前推，禁止 row random split、per-file split 后拼接或按 label/收益挑日期。
-4. `2026-07-23` 与 `2026-07-24` 固定为 calendar-frozen final holdout，`2026-07-22` 固定为 dedicated calibration，`2026-07-11` 至 `2026-07-21` 才是 model development。coverage 不足只会使对应数据 gate 失败，不得看到结果后换日期。
+4. 最终日期由用户基于新 schema 实际采集情况另行冻结；冻结后最后两个完整 UTC 日作为 calendar-frozen final holdout、倒数第三个完整 UTC 日作为 dedicated calibration，更早日期作为 model development。冻结前不得预看收益选择日期，冻结后 coverage 不足只会使对应数据 gate 失败。
 5. model development 使用 anchored expanding-window folds 做架构/超参选择；dedicated calibration 只冻结 probability calibration、selection threshold 和 risk profile；最终 holdout 只允许一次正式验收。
 6. 每个 split 必须从冻结、与其他 split 独立的 account fixture 开始，按时间在 split 内 carry account state。训练 policy 产生的 cash/position/order state不得带入 calibration/holdout；split 结束若仍有 open/pending/unsettled 状态，必须延伸 maturity tail 完成、或隔离受影响 market，不能把未闭合状态跨界。
 7. split boundary 的 purge/embargo 必须至少覆盖 `max(model_context, state reconstruction dependency, feature dependency, label horizon, action TTL, reward maturity dependency)`；同一原始事件不得同时出现在相邻 split 的训练输入中。若 reconstruction chain 太长，丢弃边界 market直到 split 内 checkpoint可用。
 8. normalization、feature statistics、candidate priors 和 calibration 只能在对应 train fold/dedicated calibration 拟合；final holdout 不能参与 feature、simulator、threshold、risk weight 或模型选择。
 9. 必须比较 no-action、naive directional、简单规则 maker、XGBoost ranker、ESAR-v1 GRU 和同预算 TCN；报告全部 seed、失败 trial 和 selection history。paired counterfactual tie 必须基于 `ΔJ` 的 paired-difference interval 是否完全落入预注册 equivalence band；边际区间重叠不等于 tie。
-10. final 只有两个 UTC day clusters，禁止宣称可靠的 day-level bootstrap/cluster confidence interval。必须逐日报告，并用预注册的 contiguous-market block/paired-market interval 作为条件性不确定性；regime稳定性主要来自 development folds。
+10. 若最终仍只保留两个 UTC day clusters 作为 final，禁止宣称可靠的 day-level bootstrap/cluster confidence interval。必须逐日报告，并用预注册的 contiguous-market block/paired-market interval 作为条件性不确定性；regime稳定性主要来自 development folds。
 11. action-surface audit、reward/ledger closure、simulator sensitivity 和 runtime consumption parity 均先于 PnL leaderboard。
-12. 只有 14 个 UTC 日的首批数据只能支持开发与候选比较，不足以单独证明跨季节、跨网络、跨平台规则 regime 的 live 稳健性。完成 training bundle、replay 或 frozen holdout 不自动授权 paper、live 或资金操作。
+12. 首批最终选定日期的数据只能支持开发与候选比较，不足以单独证明跨季节、跨网络、跨平台规则 regime 的 live 稳健性。完成 training bundle、replay 或 frozen holdout 不自动授权 paper、live 或资金操作。
 13. final holdout一旦被观察，任何改变dataset/split/simulator/reward/model contract的修复都会使其失去pristine资格；旧两日只能降为diagnostic。重新正式验收必须取得新的未来未读holdout和用户批准，不得在同两日反复重跑挑最好结果。
 
 ## 12. 工具、资源与产物边界
@@ -258,24 +257,24 @@
 
 ## 13. 明确非范围
 
-本文及当前基础准备不授权：
+本文及当前执行不授权：
 
-- 修改或部署 data-collect；
-- 实际开始或停止 7 月 11 日采集；
-- 处理、复制、删除或重写任何新旧数据；
+- 除 Binance aggTrade `trade_time=T` schema v3、已批准的 D+1 归档修复和对应重新部署外，扩大修改 data-collect；
+- 把重新部署时刻自动解释为正式 cohort 固定起点；
+- 除已批准的昨天 D 拉取、基础市场筛选、两字段文件、打包与上传外，处理或复制其他训练数据；仍禁止删除、覆盖或重写 raw/old dataset；
 - 构建 simulator、data-pipeline 或模型代码；
 - 运行 GPU 训练、paper、shadow、live 或资金操作；
 - 复用旧数据、旧 bundle 或旧 leaderboard；
-- 因官方 SDK 缺口自行切换 raw REST/manual signing/shadow SDK；
-- 因日期冲突替用户静默选择 13 天或 14 天。
+- 将已批准的 Gamma 两字段日级回填例外扩大为 raw REST/manual signing/shadow SDK；
+- 替用户静默选择固定起止日、14 日或 4032 个 market。
 
 ## 14. 验收标准
 
 ### 14.1 基础准备文档验收
 
 - [ ] 需求、计划、核心训练框架和 changelog 使用同一事项编号并互相引用。
-- [ ] 三类文档明确当前只做准备，不声称目标数据已存在或训练已开始。
-- [ ] 用户选择方案 B 的决定以 `RESOLVED_OPTION_B` 记录，四文档、manifest 和 split 使用同一冻结边界。
+- [ ] 三类文档明确当前训练仍处于准备阶段，只有 schema v3、D+1 归档和重新部署是本轮已授权实现；不声称目标 cohort 已存在或训练已开始。
+- [ ] 四文档均记录旧方案 B 已撤销，正式日期等待新 schema 实际采集后由用户重新选择。
 - [ ] 完全禁止 old-datasets、旧 normalizer、旧 bundle 和旧 split 进入正式训练。
 - [ ] `mistake-log` 中的固定 tick、短状态、action collapse、未消费 head、reward interval、账本和 split 泄漏均有对应阻断门。
 
@@ -283,7 +282,7 @@
 
 - [ ] 目标 UTC cohort、model context halo、state reconstruction lookback、label/account tail、collector/version regime 和全部文件 hash 已冻结。
 - [ ] canonical builder 从 finalized typed raw + manifests + health/clock evidence 读取，不依赖 `validated_markets` 或物理 row order。
-- [ ] price-to-beat exact boundary SDK-RTDS派生、causal receive maturity、full precision和SDK显式确认缺口已形成 authority artifact；缺row未用nearest/Binance伪造。
+- [ ] D+1 Gamma 日文件将 `priceToBeat` 与 `finalPrice` 无精度损失地保存为十进制字符串；只以这两个字段是否存在判定该回填目标，其他诊断字段不阻断归档；重跑复用既有完整 D 文件且不再请求 Gamma。
 - [ ] Polymarket transport identity 已生效；或用户明确批准同毫秒原子 microbatch 降级并接受 `representation_only/non-promotable` 能力。
 - [ ] 每个 market 的 T-30、depth checkpoint、四连续源 coverage、source gap、sequence、metadata lineage、price-to-beat 和 label maturity 已形成 `EpisodeEligibilityRecord`。
 - [ ] unresolved、partial、clock-unknown、identity-unknown 和 version-mixed episode 未被静默收入 `policy_training_eligible`。
@@ -302,4 +301,4 @@
 - [ ] final holdout 未用于调参，所有失败 trial 和 selection history 已保留。
 - [ ] holdout若因合同修复失效，旧两日已降为diagnostic；没有把同两日重跑冒充新pristine验收。
 - [ ] 单一 AUC、单一 PnL、command exit 0 或 bundle 存在均不能单独通过 promotion。
-- [ ] 首批 14 日结果只形成 training/evaluation candidate；paper、live 和资金操作仍需后续独立需求、证据和用户授权。
+- [ ] 首批最终选定日期的数据只形成 training/evaluation candidate；paper、live 和资金操作仍需后续独立需求、证据和用户授权。

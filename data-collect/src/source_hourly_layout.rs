@@ -181,6 +181,7 @@ pub struct BinanceAggTradeHourlyRow {
     pub timestamp_received: i64,
     pub event_type: String,
     pub event_time: i64,
+    pub trade_time: i64,
     pub symbol: String,
     pub aggregate_trade_id: u64,
     pub price: String,
@@ -202,6 +203,7 @@ impl BinanceAggTradeHourlyRow {
             timestamp_received,
             event_type: raw.event_type.clone(),
             event_time: raw.event_time_ms,
+            trade_time: raw.trade_time_ms,
             symbol: raw.symbol.clone(),
             aggregate_trade_id: raw.aggregate_trade_id,
             price: raw.price.clone(),
@@ -213,7 +215,7 @@ impl BinanceAggTradeHourlyRow {
             collector_host_id: raw.envelope.collector_host_id.clone(),
             collector_region: raw.envelope.collector_region.clone(),
             source_endpoint: raw.envelope.source_endpoint.clone(),
-            schema_version: "binance_aggtrade_v2".to_owned(),
+            schema_version: "binance_aggtrade_v3".to_owned(),
         }
     }
 
@@ -224,6 +226,7 @@ impl BinanceAggTradeHourlyRow {
         require_positive_i64("timestamp_received", self.timestamp_received, &mut report);
         report.require_non_empty("event_type", &self.event_type);
         require_positive_i64("event_time", self.event_time, &mut report);
+        require_positive_i64("trade_time", self.trade_time, &mut report);
         report.require_non_empty("symbol", &self.symbol);
         if self.aggregate_trade_id == 0 {
             report.missing_fields.push("aggregate_trade_id".to_owned());
@@ -435,6 +438,7 @@ pub fn binance_aggtrade_schema() -> Arc<Schema> {
         timestamp_field("timestamp_received", false),
         Field::new("event_type", DataType::Utf8, false),
         timestamp_field("event_time", false),
+        timestamp_field("trade_time", false),
         Field::new("symbol", DataType::Utf8, false),
         Field::new("aggregate_trade_id", DataType::UInt64, false),
         Field::new("price", DataType::Utf8, false),

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 
-use arrow_array::StringArray;
+use arrow_array::{StringArray, TimestampMillisecondArray};
 use data_collect::RawEvent;
 use data_collect::polymarket_market_metadata_layout::{
     PolymarketMarketMetadataContext, PolymarketMarketMetadataRow,
@@ -9,6 +9,7 @@ use data_collect::polymarket_market_metadata_layout::{
 use data_collect::polymarket_orderbook_layout::{
     PolymarketOrderbookContext, PolymarketOrderbookRow,
 };
+use data_collect::source_hourly_layout::BinanceAggTradeHourlyRow;
 use data_collect::writer::{
     ParquetSegmentWriter, TypedParquetSegmentWriter, write_segment_on_blocking_pool_for_source,
 };
@@ -311,7 +312,7 @@ fn typed_writer_constructors_publish_source_specific_schema_metadata() {
         ),
         ("binance_depth_snapshot", "binance_depth_snapshot_v2"),
         ("binance_depth_update", "binance_depth_update_v2"),
-        ("binance_aggtrade", "binance_aggtrade_v2"),
+        ("binance_aggtrade", "binance_aggtrade_v3"),
         (
             "polymarket_rtds_chainlink_btc_usd",
             "polymarket_rtds_chainlink_btc_usd_v2",
@@ -360,7 +361,7 @@ fn typed_writer_source_specific_schemas_omit_duplicate_time_columns() {
             vec!["recv_time_utc", "snapshot_recv_time_utc"],
         ),
         ("binance_depth_update", vec!["recv_time_utc"]),
-        ("binance_aggtrade", vec!["recv_time_utc", "trade_time"]),
+        ("binance_aggtrade", vec!["recv_time_utc"]),
         ("polymarket_rtds_chainlink_btc_usd", vec!["recv_time_utc"]),
     ];
 
@@ -395,4 +396,55 @@ fn typed_writer_source_specific_schemas_omit_duplicate_time_columns() {
             "{source_kind} must retain timestamp_received"
         );
     }
+}
+
+#[test]
+fn typed_writer_binance_aggtrade_schema_keeps_distinct_event_and_trade_times() {
+    let tmp = tempdir().unwrap();
+    let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
+        tmp.path(),
+        "binance_aggtrade",
+        "binance_aggtrade_v3",
+        "binance_aggtrade",
+    )
+    .unwrap();
+    writer
+        .write_binance_aggtrade_rows(&[BinanceAggTradeHourlyRow {
+            timestamp_received: 1_766_789_470_100,
+            event_type: "aggTrade".to_owned(),
+            event_time: 1_766_789_469_958,
+            trade_time: 1_766_789_469_000,
+            symbol: "BTCUSDT".to_owned(),
+            aggregate_trade_id: 123,
+            price: "100.50".to_owned(),
+            quantity: "0.1".to_owned(),
+            first_trade_id: 10,
+            last_trade_id: 12,
+            buyer_is_maker: true,
+            stream: "btcusdt@aggTrade".to_owned(),
+            collector_host_id: "collector-host".to_owned(),
+            collector_region: "eu-west-1".to_owned(),
+            source_endpoint: "wss://stream.binance.com:9443/ws/btcusdt@aggTrade".to_owned(),
+            schema_version: "binance_aggtrade_v3".to_owned(),
+        }])
+        .unwrap();
+    let published = writer.finalize().unwrap();
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(File::open(&published.final_path).unwrap())
+            .unwrap();
+    let mut batch_reader = builder.build().unwrap();
+    let batch = batch_reader.next().unwrap().unwrap();
+    let event_time = batch
+        .column(batch.schema().index_of("event_time").unwrap())
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .unwrap();
+    let trade_time = batch
+        .column(batch.schema().index_of("trade_time").unwrap())
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .unwrap();
+
+    assert_eq!(event_time.value(0), 1_766_789_469_958);
+    assert_eq!(trade_time.value(0), 1_766_789_469_000);
 }

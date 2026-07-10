@@ -3913,7 +3913,7 @@ fn typed_schema_version(source_kind: &str) -> &'static str {
         "polymarket_market_metadata" => "polymarket_market_metadata_v1",
         "binance_depth_snapshot" => "binance_depth_snapshot_v2",
         "binance_depth_update" => "binance_depth_update_v2",
-        "binance_aggtrade" => "binance_aggtrade_v2",
+        "binance_aggtrade" => "binance_aggtrade_v3",
         "polymarket_rtds_chainlink_btc_usd" => "polymarket_rtds_chainlink_btc_usd_v2",
         _ => "unknown_typed_layout",
     }

@@ -113,7 +113,7 @@ fn binance_depth_update_hourly_row_keeps_official_fields_and_stitch_evidence() {
 }
 
 #[test]
-fn binance_aggtrade_hourly_row_keeps_event_time_and_trade_identifiers() {
+fn binance_aggtrade_hourly_row_keeps_event_and_trade_times_with_identifiers() {
     let raw_trade = r#"{
         "e":"aggTrade","E":1766789469958,"s":"BTCUSDT","a":123,
         "p":"100.50","q":"0.1","f":10,"l":12,"T":1766789469000,"m":true
@@ -127,6 +127,7 @@ fn binance_aggtrade_hourly_row_keeps_event_time_and_trade_identifiers() {
 
     assert_eq!(row.event_type, "aggTrade");
     assert_eq!(row.event_time, 1_766_789_469_958);
+    assert_eq!(row.trade_time, 1_766_789_469_000);
     assert_eq!(row.symbol, "BTCUSDT");
     assert_eq!(row.aggregate_trade_id, 123);
     assert_eq!(row.price, "100.50");
@@ -213,6 +214,7 @@ fn schemas_contain_source_specific_typed_fields() {
             vec![
                 "timestamp_received",
                 "event_time",
+                "trade_time",
                 "symbol",
                 "aggregate_trade_id",
                 "price",
@@ -249,7 +251,7 @@ fn schemas_contain_source_specific_typed_fields() {
 }
 
 #[test]
-fn source_hourly_schemas_do_not_duplicate_receive_or_trade_time_aliases() {
+fn source_hourly_schemas_do_not_duplicate_receive_time_aliases() {
     for (source_kind, schema) in [
         ("binance_depth_snapshot", binance_depth_snapshot_schema()),
         ("binance_depth_update", binance_depth_update_schema()),
@@ -267,9 +269,13 @@ fn source_hourly_schemas_do_not_duplicate_receive_or_trade_time_aliases() {
 
     assert!(
         binance_aggtrade_schema()
+            .field_with_name("event_time")
+            .is_ok()
+    );
+    assert!(
+        binance_aggtrade_schema()
             .field_with_name("trade_time")
-            .is_err(),
-        "binance_aggtrade must keep event_time and not duplicate it with trade_time"
+            .is_ok()
     );
     assert!(
         binance_depth_snapshot_schema()
