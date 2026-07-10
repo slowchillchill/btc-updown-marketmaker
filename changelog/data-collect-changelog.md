@@ -6,6 +6,21 @@
 
 > 对应计划文档：`/home/chillchill/btc-updown-marketmaker/plan/data-collect-plan.md`
 
+## 2026-07-10
+
+### DC-INCIDENT-20260709-AGGTRADE-T08 最小修复
+
+- 事故文件只有 `PAR1` 四字节且无 footer/row group；远端服务主进程未退出，但六个 writer 只剩五个，`binance_aggtrade` 自 `2026-07-09T08` 后停止落盘。
+- 根因路径为 Binance `serverShutdown` text frame 被当作 aggTrade 送入 writer，parser 错误结束 writer；主循环未在运行期发现 source task 完成，writer channel 断开又被吞为成功。
+- 用户否决此前扩大的通用恢复/manifest/quarantine 方案，批准最小边界：Binance 控制帧与断线重连、source task 提前结束上报、writer disconnected 错误传播、聚焦故障测试、本地构建后部署。
+- 已先写 RED 测试复现 `serverShutdown` 被写入业务队列和 writer disconnected 返回成功；实现后聚焦测试转绿。另增加服务端 `Close` 后重连测试，覆盖 Binance 单连接最长 24 小时的断开路径。
+- 第一轮 `gpt-5.6-sol/ultra` 独立审查为 FAIL、Critical=0、Important=3。成立的两项是 Ping 会反复重置逐帧 timeout，以及 writer shutdown/finalize error 被转成 gap 后仍返回成功；已改为固定业务 freshness deadline，并让 writer stop error 设置 process failure。
+- 审查提出的 bounded-run deadline 竞态不影响本次 `--run-forever` 生产路径；但 source task 返回 `Err` 或 join error 现在也会设置 process failure，避免 bounded shutdown 恰好掩盖明确错误。补充测试覆盖 combined `serverShutdown`、EOF、持续 Ping 无业务消息和 writer parser failure。
+- 第二轮同一审查代理确认生产实现 finding 已关闭且没有过度设计，但指出测试 helper 主动关闭首连接会让 EOF 路径掩盖真实重连原因，以及 writer 测试只验证旧有 stop error、没有锁定调用方的 process failure。现已让 `serverShutdown`/Ping 测试保持首连接打开直至客户端主动建立第二条连接，并让 writer parser 测试断言调用方写入 `runtime_failure`。
+- 后续复审指出共享 helper 的 `1s` freshness 仍可能让 `serverShutdown` 测试通过错误原因；已将该 helper 的 freshness 调为 `10s`，大于 `2s` 测试等待窗口，确保 raw/combined 控制帧测试只能由主动识别触发重连。最终 `gpt-5.6-sol/ultra` 复审为 PASS，允许 commit/push。
+- 最终本地质量门通过：`cargo fmt --all -- --check`、完整 `cargo test -p data-collect --lib --tests --quiet`、`cargo clippy -p data-collect --all-targets -- -D warnings` 和 `git diff --check`。
+- 专项需求见 `demand/data-collect-demand.md` 的同名增量需求，执行计划见 `plan/data-collect-source-writer-supervision-repair-plan.md`。事故文件不修改、不伪造完整性，历史缺口不包含在本次代码修复中。
+
 ## 2026-07-07
 
 ### PMXT 参考 hourly typed layout 与 50GB retention 计划

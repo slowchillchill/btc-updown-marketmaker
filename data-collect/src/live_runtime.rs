@@ -94,6 +94,8 @@ const SOURCE_SEND_TIMEOUT_MS: u64 = 2_000;
 const BINANCE_HTTP_CONNECT_TIMEOUT_SECS: u64 = 5;
 const BINANCE_HTTP_TOTAL_TIMEOUT_SECS: u64 = 15;
 const WS_CONNECT_TIMEOUT_SECS: u64 = 20;
+const BINANCE_WS_RECONNECT_BASE_MS: u64 = 500;
+const BINANCE_WS_RECONNECT_MAX_MS: u64 = 5_000;
 const RTDS_RESUBSCRIBE_INTERVAL_SECS: u64 = 3;
 const RTDS_RESUBSCRIBES_PER_RECONNECT: u64 = 2;
 const RTDS_RESUBSCRIBE_ATTEMPTS_PER_FRESHNESS_WINDOW: usize = 20;
@@ -383,39 +385,51 @@ pub async fn run_live_training_runtime(
     };
     let mut writer_handles = start_writer_workers(&dataset_root, &provenance)?;
 
-    let handles = vec![
-        tokio::spawn(run_polymarket_source(
-            event_sink.clone(),
-            Arc::clone(&rollover_edges),
-            collector_identity.clone(),
-            deadline_ms,
-            DEFAULT_DISCOVERY_WAIT_SECS,
-            run_started,
-        )),
-        tokio::spawn(run_rtds_source(
-            event_sink.clone(),
-            collector_identity.clone(),
-            deadline,
-            run_started,
-        )),
-        tokio::spawn(run_binance_depth_source(
-            event_sink.clone(),
-            collector_identity.clone(),
-            deadline,
-            run_started,
-        )),
-        tokio::spawn(run_binance_ws_source(
-            BinanceWsSpec {
-                source_kind: "binance_aggtrade".to_owned(),
-                default_event_type: "aggTrade".to_owned(),
-                url: BINANCE_AGGTRADE_WS.to_owned(),
-                freshness_timeout_secs: 60,
-            },
-            event_sink.clone(),
-            collector_identity.clone(),
-            deadline,
-            run_started,
-        )),
+    let handles: Vec<SourceTaskHandle> = vec![
+        (
+            "polymarket_market",
+            tokio::spawn(run_polymarket_source(
+                event_sink.clone(),
+                Arc::clone(&rollover_edges),
+                collector_identity.clone(),
+                deadline_ms,
+                DEFAULT_DISCOVERY_WAIT_SECS,
+                run_started,
+            )),
+        ),
+        (
+            "polymarket_rtds_chainlink_btc_usd",
+            tokio::spawn(run_rtds_source(
+                event_sink.clone(),
+                collector_identity.clone(),
+                deadline,
+                run_started,
+            )),
+        ),
+        (
+            "binance_depth_update",
+            tokio::spawn(run_binance_depth_source(
+                event_sink.clone(),
+                collector_identity.clone(),
+                deadline,
+                run_started,
+            )),
+        ),
+        (
+            "binance_aggtrade",
+            tokio::spawn(run_binance_ws_source(
+                BinanceWsSpec {
+                    source_kind: "binance_aggtrade".to_owned(),
+                    default_event_type: "aggTrade".to_owned(),
+                    url: BINANCE_AGGTRADE_WS.to_owned(),
+                    freshness_timeout_secs: 60,
+                },
+                event_sink.clone(),
+                collector_identity.clone(),
+                deadline,
+                run_started,
+            )),
+        ),
     ];
     drop(event_sink);
 
@@ -449,6 +463,7 @@ pub async fn run_live_training_runtime(
     let mut average_event_bytes = 512_u64;
     let mut received_rows = 0_u64;
     let mut controlled_shutdown = false;
+    let mut runtime_failure = None::<String>;
     let mut shutdown_stage_timings = BTreeMap::<String, ShutdownStageTiming>::new();
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
@@ -485,10 +500,25 @@ pub async fn run_live_training_runtime(
                             .await?;
                         }
                     }
-                    Ok(None) => break,
+                    Ok(None) if deadline_reached(deadline) => break,
+                    Ok(None) => {
+                        let message = "source_event_queue_closed_unexpectedly".to_owned();
+                        record_gap(&source_gaps, message.clone());
+                        runtime_failure = Some(message);
+                        break;
+                    }
                     Err(_) => {}
                 }
             }
+        }
+
+        if let Some(source_kind) = finished_source_task(&handles)
+            && !deadline_reached(deadline)
+        {
+            let message = format!("source_task_ended_unexpectedly:{source_kind}");
+            record_gap(&source_gaps, message.clone());
+            runtime_failure = Some(message);
+            break;
         }
 
         if Instant::now() >= next_flush {
@@ -586,30 +616,37 @@ pub async fn run_live_training_runtime(
     let source_task_stage_started = Instant::now();
     let mut source_task_status = "success";
     let mut source_task_errors = Vec::new();
-    if controlled_shutdown {
-        for handle in &handles {
+    if let Some(error) = runtime_failure.as_ref() {
+        source_task_status = "failed";
+        source_task_errors.push(error.clone());
+    }
+    let aborting_source_tasks = controlled_shutdown || runtime_failure.is_some();
+    if aborting_source_tasks {
+        for (_, handle) in &handles {
             handle.abort();
         }
     }
-    for handle in handles {
+    for (source_kind, handle) in handles {
         match timeout(Duration::from_secs(15), handle).await {
             Ok(Ok(Ok(()))) => {}
             Ok(Ok(Err(err))) => {
                 source_task_status = "failed";
-                let message = format!("source_task_error:{err}");
+                let message = format!("source_task_error:{source_kind}:{err}");
+                runtime_failure = Some(message.clone());
                 source_task_errors.push(message.clone());
                 record_gap(&source_gaps, message);
             }
-            Ok(Err(err)) if err.is_cancelled() && controlled_shutdown => {}
+            Ok(Err(err)) if err.is_cancelled() && aborting_source_tasks => {}
             Ok(Err(err)) => {
                 source_task_status = "failed";
-                let message = format!("source_task_join_error:{err}");
+                let message = format!("source_task_join_error:{source_kind}:{err}");
+                runtime_failure = Some(message.clone());
                 source_task_errors.push(message.clone());
                 record_gap(&source_gaps, message);
             }
             Err(_) => {
                 source_task_status = "timeout";
-                let message = "source_task_join_timeout".to_owned();
+                let message = format!("source_task_join_timeout:{source_kind}");
                 source_task_errors.push(message.clone());
                 record_gap(&source_gaps, message);
             }
@@ -683,13 +720,8 @@ pub async fn run_live_training_runtime(
             .err()
             .map(|error| error.to_string()),
     );
-    let writer_outputs = match writer_outputs_result {
-        Ok(outputs) => outputs,
-        Err(error) => {
-            record_gap(&source_gaps, format!("writer_finalize_failed:{error}"));
-            Vec::new()
-        }
-    };
+    let writer_outputs =
+        writer_outputs_or_record_failure(writer_outputs_result, &source_gaps, &mut runtime_failure);
 
     let retention_stage_started_utc_ms = now_ms();
     let retention_stage_started = Instant::now();
@@ -767,7 +799,7 @@ pub async fn run_live_training_runtime(
         "skipped",
         Some("default runtime sidecars are not written".to_owned()),
     );
-    write_control_manifest(
+    let receipt = write_control_manifest(
         &dataset_root,
         &artifact_dir,
         &config,
@@ -782,7 +814,11 @@ pub async fn run_live_training_runtime(
         shutdown_stage_timings,
         SHUTDOWN_RETENTION_SCAN_BUDGET_MS,
         run_started_utc_ms,
-    )
+    )?;
+    match runtime_failure {
+        Some(error) => Err(io::Error::other(error).into()),
+        None => Ok(receipt),
+    }
 }
 
 fn start_writer_workers(
@@ -917,8 +953,9 @@ async fn flush_source_batch(
             Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
                 writer.queue_rows.fetch_sub(rows, Ordering::Relaxed);
                 writer_queue_tracker.record_drop(rows);
-                record_gap(gaps, format!("writer_queue_disconnected:{source_kind}"));
-                return Ok(());
+                let gap = format!("writer_queue_disconnected:{source_kind}");
+                record_gap(gaps, gap.clone());
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, gap).into());
             }
         }
         if monotonic_ms(run_started) > SOURCE_SEND_TIMEOUT_MS {
@@ -943,7 +980,8 @@ async fn flush_source_batch(
             {
                 Ok(Some(gap)) => {
                     writer_queue_tracker.record_drop(rows);
-                    record_gap(gaps, gap);
+                    record_gap(gaps, gap.clone());
+                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, gap).into());
                 }
                 Ok(None) => return Ok(()),
                 Err(_) => {
@@ -1016,6 +1054,22 @@ async fn stop_writer_workers_with_budget(
         }
     }
     Ok(outputs)
+}
+
+fn writer_outputs_or_record_failure(
+    result: Result<Vec<SourceWriterOutput>>,
+    source_gaps: &Arc<Mutex<Vec<String>>>,
+    runtime_failure: &mut Option<String>,
+) -> Vec<SourceWriterOutput> {
+    match result {
+        Ok(outputs) => outputs,
+        Err(error) => {
+            let message = format!("writer_finalize_failed:{error}");
+            record_gap(source_gaps, message.clone());
+            *runtime_failure = Some(message);
+            Vec::new()
+        }
+    }
 }
 
 async fn run_retention_scan_on_blocking_pool(
@@ -2615,91 +2669,167 @@ async fn run_binance_ws_source(
     deadline: Option<Instant>,
     run_started: Instant,
 ) -> Result<()> {
-    let (mut stream, _) = match timeout(
-        Duration::from_secs(WS_CONNECT_TIMEOUT_SECS),
-        connect_async(&spec.url),
-    )
-    .await
-    {
-        Ok(Ok(connected)) => connected,
-        Ok(Err(err)) => {
-            record_gap(
-                &sink.gaps,
-                format!("{}_ws_connect_error:{err}", spec.source_kind),
-            );
-            return Ok(());
-        }
-        Err(_) => {
-            record_gap(
-                &sink.gaps,
-                format!("{}_ws_connect_timeout", spec.source_kind),
-            );
-            return Ok(());
-        }
-    };
+    let mut reconnect_attempts = 0_u32;
     while !deadline_reached(deadline) {
-        match timeout(
-            Duration::from_secs(spec.freshness_timeout_secs),
-            stream.next(),
-        )
-        .await
-        {
-            Ok(Some(Ok(Message::Text(text)))) => {
-                let raw_json = text.to_string();
-                let value = serde_json::from_str::<Value>(&raw_json).unwrap_or(Value::Null);
-                let event_type = value
-                    .get("e")
-                    .and_then(Value::as_str)
-                    .unwrap_or(&spec.default_event_type);
-                let source_ts = value
-                    .get("E")
-                    .or_else(|| value.get("T"))
-                    .and_then(Value::as_i64)
-                    .map(|ts| ts.to_string());
-                send_event(
-                    &sink,
-                    run_started,
-                    RawEvent {
-                        source_kind: spec.source_kind.clone(),
-                        source_event_type: event_type.to_owned(),
-                        source_identifier: "BTCUSDT".to_owned(),
-                        source_ts,
-                        recv_time_utc_ms: now_ms(),
-                        collector_host_id: collector_identity.host_id.clone(),
-                        collector_region: collector_identity.region.clone(),
-                        source_endpoint: spec.url.clone(),
-                        raw_json,
-                        parquet_raw_layout_version: 1,
-                        parquet_raw_source_kind: spec.source_kind.clone(),
-                    },
-                )
-                .await;
-            }
-            Ok(Some(Ok(Message::Ping(payload)))) => {
-                let _ = stream.send(Message::Pong(payload)).await;
-            }
-            Ok(Some(Ok(Message::Close(frame)))) => {
+        let connect_timeout = deadline_remaining(deadline)
+            .map(|remaining| remaining.min(Duration::from_secs(WS_CONNECT_TIMEOUT_SECS)))
+            .unwrap_or_else(|| Duration::from_secs(WS_CONNECT_TIMEOUT_SECS));
+        if connect_timeout.is_zero() {
+            break;
+        }
+        let (mut stream, _) = match timeout(connect_timeout, connect_async(&spec.url)).await {
+            Ok(Ok(connected)) => connected,
+            Ok(Err(err)) => {
                 record_gap(
                     &sink.gaps,
-                    format!("{}_ws_closed:{frame:?}", spec.source_kind),
+                    format!("{}_ws_connect_error:{err}", spec.source_kind),
                 );
-                break;
+                if !wait_before_binance_ws_reconnect(&mut reconnect_attempts, deadline).await {
+                    break;
+                }
+                continue;
             }
-            Ok(Some(Ok(_))) => {}
-            Ok(Some(Err(err))) => {
-                record_gap(&sink.gaps, format!("{}_ws_error:{err}", spec.source_kind));
+            Err(_) => {
+                if deadline_reached(deadline) {
+                    break;
+                }
+                record_gap(
+                    &sink.gaps,
+                    format!("{}_ws_connect_timeout", spec.source_kind),
+                );
+                if !wait_before_binance_ws_reconnect(&mut reconnect_attempts, deadline).await {
+                    break;
+                }
+                continue;
             }
-            Ok(None) => {
-                record_gap(&sink.gaps, format!("{}_ws_stream_ended", spec.source_kind));
-                break;
+        };
+
+        let freshness_window = Duration::from_secs(spec.freshness_timeout_secs);
+        let mut business_message_deadline = Instant::now() + freshness_window;
+        let reconnect_reason = loop {
+            if deadline_reached(deadline) {
+                return Ok(());
             }
-            Err(_) => record_gap(
+            let freshness_remaining =
+                business_message_deadline.saturating_duration_since(Instant::now());
+            if freshness_remaining.is_zero() {
+                break "business_message_timeout".to_owned();
+            }
+            let read_timeout = deadline_remaining(deadline)
+                .map(|remaining| remaining.min(freshness_remaining))
+                .unwrap_or(freshness_remaining);
+            match timeout(read_timeout, stream.next()).await {
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    let raw_json = text.to_string();
+                    let value = match serde_json::from_str::<Value>(&raw_json) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            record_gap(
+                                &sink.gaps,
+                                format!("{}_ws_invalid_json:{err}", spec.source_kind),
+                            );
+                            continue;
+                        }
+                    };
+                    let payload = binance_ws_payload(&value);
+                    let Some(event_type) = payload.get("e").and_then(Value::as_str) else {
+                        record_gap(
+                            &sink.gaps,
+                            format!("{}_ws_missing_event_type", spec.source_kind),
+                        );
+                        continue;
+                    };
+                    if event_type == "serverShutdown" {
+                        break "server_shutdown".to_owned();
+                    }
+                    if event_type != spec.default_event_type {
+                        record_gap(
+                            &sink.gaps,
+                            format!("{}_ws_unexpected_event_type:{event_type}", spec.source_kind),
+                        );
+                        continue;
+                    }
+                    let source_ts = payload
+                        .get("E")
+                        .or_else(|| payload.get("T"))
+                        .and_then(Value::as_i64)
+                        .map(|ts| ts.to_string());
+                    send_event(
+                        &sink,
+                        run_started,
+                        RawEvent {
+                            source_kind: spec.source_kind.clone(),
+                            source_event_type: event_type.to_owned(),
+                            source_identifier: "BTCUSDT".to_owned(),
+                            source_ts,
+                            recv_time_utc_ms: now_ms(),
+                            collector_host_id: collector_identity.host_id.clone(),
+                            collector_region: collector_identity.region.clone(),
+                            source_endpoint: spec.url.clone(),
+                            raw_json,
+                            parquet_raw_layout_version: 1,
+                            parquet_raw_source_kind: spec.source_kind.clone(),
+                        },
+                    )
+                    .await;
+                    reconnect_attempts = 0;
+                    business_message_deadline = Instant::now() + freshness_window;
+                }
+                Ok(Some(Ok(Message::Ping(payload)))) => {
+                    if let Err(err) = stream.send(Message::Pong(payload)).await {
+                        break format!("pong_send_error:{err}");
+                    }
+                }
+                Ok(Some(Ok(Message::Close(frame)))) => {
+                    break format!("closed:{frame:?}");
+                }
+                Ok(Some(Ok(_))) => {}
+                Ok(Some(Err(err))) => break format!("error:{err}"),
+                Ok(None) => break "stream_ended".to_owned(),
+                Err(_) if deadline_reached(deadline) => return Ok(()),
+                Err(_) => break "business_message_timeout".to_owned(),
+            }
+        };
+
+        if reconnect_reason == "server_shutdown" {
+            eprintln!("{}_ws_reconnect:server_shutdown", spec.source_kind);
+            reconnect_attempts = 0;
+        } else {
+            record_gap(
                 &sink.gaps,
-                format!("{}_business_message_timeout", spec.source_kind),
-            ),
+                format!("{}_ws_reconnect:{reconnect_reason}", spec.source_kind),
+            );
+            if !wait_before_binance_ws_reconnect(&mut reconnect_attempts, deadline).await {
+                break;
+            }
         }
     }
     Ok(())
+}
+
+fn binance_ws_payload(value: &Value) -> &Value {
+    value.get("data").unwrap_or(value)
+}
+
+async fn wait_before_binance_ws_reconnect(
+    reconnect_attempts: &mut u32,
+    deadline: Option<Instant>,
+) -> bool {
+    *reconnect_attempts = reconnect_attempts.saturating_add(1);
+    let multiplier = 1_u64 << reconnect_attempts.saturating_sub(1).min(4);
+    let backoff = Duration::from_millis(
+        BINANCE_WS_RECONNECT_BASE_MS
+            .saturating_mul(multiplier)
+            .min(BINANCE_WS_RECONNECT_MAX_MS),
+    );
+    let wait = deadline_remaining(deadline)
+        .map(|remaining| remaining.min(backoff))
+        .unwrap_or(backoff);
+    if wait.is_zero() {
+        return false;
+    }
+    sleep(wait).await;
+    !deadline_reached(deadline)
 }
 
 async fn discover_pair_with_wait(
@@ -3379,6 +3509,14 @@ struct BinanceDepthUpdateContext {
     snapshot_last_update_id: u64,
     snapshot_utc_day: String,
     pending_snapshot_trigger_reason: Option<String>,
+}
+
+type SourceTaskHandle = (&'static str, tokio::task::JoinHandle<Result<()>>);
+
+fn finished_source_task(handles: &[SourceTaskHandle]) -> Option<&'static str> {
+    handles
+        .iter()
+        .find_map(|(source_kind, handle)| handle.is_finished().then_some(*source_kind))
 }
 
 struct SourceWriterHandle {
@@ -4532,6 +4670,8 @@ mod tests {
     use polymarket_client_sdk_v2::clob::ws::WsMessage;
     use std::fs::File;
     use tempfile::tempdir;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::accept_async;
 
     #[test]
     fn source_queue_recoverable_wait_is_recorded_without_source_gap() {
@@ -4567,6 +4707,21 @@ mod tests {
                 .last()
                 .is_some_and(|gap| gap.starts_with(SOURCE_GAP_OVERFLOW_PREFIX))
         );
+    }
+
+    #[tokio::test]
+    async fn completed_source_task_is_detected_during_runtime() {
+        let handle = tokio::spawn(async { Ok::<(), Box<dyn Error + Send + Sync>>(()) });
+        timeout(Duration::from_secs(1), async {
+            while !handle.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let handles = vec![("binance_aggtrade", handle)];
+
+        assert_eq!(finished_source_task(&handles), Some("binance_aggtrade"));
     }
 
     #[test]
@@ -5465,6 +5620,225 @@ mod tests {
                 .iter()
                 .any(|gap| gap == "writer_missing_for_source:binance_aggtrade")
         );
+    }
+
+    #[tokio::test]
+    async fn disconnected_writer_channel_is_a_runtime_error() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        drop(rx);
+        let (_result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        let mut writers = BTreeMap::from([(
+            "binance_aggtrade".to_owned(),
+            SourceWriterHandle {
+                tx,
+                queue_rows: Arc::new(AtomicU64::new(0)),
+                result_rx,
+            },
+        )]);
+        let gaps = Arc::new(Mutex::new(Vec::<String>::new()));
+        let mut tracker = QueueDurationTracker::new("writer_chunk_queue");
+        let mut batch = vec![test_raw_event("binance_aggtrade", 1_783_392_404_599)];
+
+        let error = flush_source_batch(
+            &mut writers,
+            "binance_aggtrade",
+            &mut batch,
+            &gaps,
+            &mut tracker,
+            Instant::now(),
+        )
+        .await
+        .expect_err("a disconnected writer must stop the runtime");
+
+        assert!(error.to_string().contains("writer_queue_disconnected"));
+        assert_eq!(tracker.finish(0).dropped_rows, 1);
+    }
+
+    #[tokio::test]
+    async fn writer_parser_failure_is_reported_when_workers_stop() {
+        let tmp = tempdir().unwrap();
+        let provenance = test_runtime_provenance("writer-parser-failure");
+        let mut writers = start_writer_workers(tmp.path(), &provenance).unwrap();
+        let gaps = Arc::new(Mutex::new(Vec::<String>::new()));
+        let mut tracker = QueueDurationTracker::new("writer_chunk_queue");
+        let mut event = test_raw_event("binance_aggtrade", 1_783_392_404_599);
+        event.raw_json = json!({"e": "serverShutdown", "E": 1_783_392_404_599_i64}).to_string();
+        let mut batch = vec![event];
+
+        flush_source_batch(
+            &mut writers,
+            "binance_aggtrade",
+            &mut batch,
+            &gaps,
+            &mut tracker,
+            Instant::now(),
+        )
+        .await
+        .unwrap();
+        let mut runtime_failure = None;
+        let outputs = writer_outputs_or_record_failure(
+            stop_writer_workers(writers).await,
+            &gaps,
+            &mut runtime_failure,
+        );
+
+        assert!(outputs.is_empty());
+        assert!(
+            runtime_failure
+                .is_some_and(|error| { error.contains("binance_aggtrade writer finalize failed") })
+        );
+    }
+
+    #[tokio::test]
+    async fn binance_server_shutdown_reconnects_before_forwarding_business_data() {
+        assert_binance_reconnects_after(Some(Message::Text(
+            json!({"e": "serverShutdown", "E": 1_783_392_404_500_i64})
+                .to_string()
+                .into(),
+        )))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn binance_combined_server_shutdown_reconnects_before_business_data() {
+        assert_binance_reconnects_after(Some(Message::Text(
+            json!({
+                "stream": "!serverShutdown",
+                "data": {"e": "serverShutdown", "E": 1_783_392_404_500_i64}
+            })
+            .to_string()
+            .into(),
+        )))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn binance_server_close_reconnects_for_24_hour_connection_rotation() {
+        assert_binance_reconnects_after(Some(Message::Close(None))).await;
+    }
+
+    #[tokio::test]
+    async fn binance_eof_reconnects_before_forwarding_business_data() {
+        assert_binance_reconnects_after(None).await;
+    }
+
+    async fn assert_binance_reconnects_after(first_message: Option<Message>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (first, _) = listener.accept().await.unwrap();
+            let mut first = accept_async(first).await.unwrap();
+            match first_message {
+                Some(first_message) => first.send(first_message).await.unwrap(),
+                None => drop(first),
+            }
+
+            let (second, _) = listener.accept().await.unwrap();
+            let mut second = accept_async(second).await.unwrap();
+            second.send(test_aggtrade_message()).await.unwrap();
+        });
+
+        let (tx, mut rx) = bounded_event_queue::<TimedRawEvent>(8).unwrap();
+        let sink = SourceEventSink {
+            tx,
+            gaps: Arc::new(Mutex::new(Vec::new())),
+            source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+        };
+        let source = tokio::spawn(run_binance_ws_source(
+            BinanceWsSpec {
+                source_kind: "binance_aggtrade".to_owned(),
+                default_event_type: "aggTrade".to_owned(),
+                url,
+                freshness_timeout_secs: 10,
+            },
+            sink,
+            CollectorIdentity {
+                host_id: "collector-test".to_owned(),
+                region: "local-test".to_owned(),
+            },
+            Some(Instant::now() + Duration::from_secs(3)),
+            Instant::now(),
+        ));
+
+        let event = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("aggTrade should arrive after reconnect")
+            .expect("source queue should stay open")
+            .event;
+
+        assert_eq!(event.source_event_type, "aggTrade");
+        assert_eq!(event.source_ts.as_deref(), Some("1783392404599"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&event.raw_json).unwrap()["e"],
+            "aggTrade"
+        );
+        source.abort();
+        let _ = source.await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn binance_ping_does_not_reset_business_message_freshness() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (first, _) = listener.accept().await.unwrap();
+            let mut first = accept_async(first).await.unwrap();
+            let (second, _) = loop {
+                tokio::select! {
+                    accepted = listener.accept() => break accepted.unwrap(),
+                    () = sleep(Duration::from_millis(50)) => {
+                        first
+                            .send(Message::Ping(Vec::<u8>::new().into()))
+                            .await
+                            .unwrap();
+                    }
+                }
+            };
+
+            let mut second = accept_async(second).await.unwrap();
+            second.send(test_aggtrade_message()).await.unwrap();
+        });
+
+        let (tx, mut rx) = bounded_event_queue::<TimedRawEvent>(8).unwrap();
+        let source = tokio::spawn(run_binance_ws_source(
+            BinanceWsSpec {
+                source_kind: "binance_aggtrade".to_owned(),
+                default_event_type: "aggTrade".to_owned(),
+                url,
+                freshness_timeout_secs: 1,
+            },
+            SourceEventSink {
+                tx,
+                gaps: Arc::new(Mutex::new(Vec::new())),
+                source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+            },
+            CollectorIdentity {
+                host_id: "collector-test".to_owned(),
+                region: "local-test".to_owned(),
+            },
+            Some(Instant::now() + Duration::from_secs(4)),
+            Instant::now(),
+        ));
+
+        let event = timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("freshness timeout should reconnect despite Ping frames")
+            .expect("source queue should stay open")
+            .event;
+        assert_eq!(event.source_event_type, "aggTrade");
+
+        source.abort();
+        let _ = source.await;
+        server.await.unwrap();
+    }
+
+    fn test_aggtrade_message() -> Message {
+        Message::Text(
+            test_raw_event("binance_aggtrade", 1_783_392_404_599)
+                .raw_json
+                .into(),
+        )
     }
 
     fn test_raw_event(source_kind: &str, recv_time_utc_ms: i64) -> RawEvent {

@@ -4,6 +4,16 @@
 
 本文定义当前项目 `./data-collect/` 的共用数据采集模块需求。`./data-collect/` 只负责把外部市场源转化为可审计、可回放、可验证覆盖率的原始采集证据，服务训练、paper trade 和 live trade 三类消费者；本文不包含实现计划，不修改代码，也不定义 `data-pipeline` 的训练样本加工逻辑。
 
+## DC-INCIDENT-20260709-AGGTRADE-T08 增量需求
+
+1. Binance aggTrade 收到 raw 或 combined `serverShutdown` 时，不得把控制事件送入业务 writer，必须立即建立新连接并继续采集。
+2. Binance aggTrade WebSocket 收到 `Close`、EOF、协议/网络错误或业务消息超时后，必须使用有界退避重连；该行为必须覆盖 Binance 单连接最长 24 小时后的服务端断开。
+3. 任一生产 source task 在长期运行期间提前结束时，主进程必须发现并非零退出，以便现有 systemd `Restart=always` 接管。
+4. writer channel 已断开，或 writer parser/finalize 返回错误时，不得只记录 gap 后返回成功，错误必须传播到主循环并使进程失败退出。
+5. 修复不得伪造或补写事故文件；`binance_aggtrade_2026-07-09T08-running.parquet` 仍按不可读 partial artifact 处理，历史缺口另行标记或回补。
+
+验收标准：故障注入测试必须证明 raw/combined `serverShutdown`、`Close`、EOF 和持续 Ping 但无业务消息后，第二条连接仍能收到合法 aggTrade；控制事件写入业务队列的行数为 `0`，source task 完成可被检测，writer channel 断开和 writer parser/finalize 失败均返回错误。本地全量测试通过后，才允许部署到数据采集服务器，并以新 aggTrade parquet 持续增长、服务 active、进程/发布二进制 sha256 一致作为部署验收。
+
 ## 一、范围与非范围
 
 ### 1.1 data-collect 范围
