@@ -2,7 +2,7 @@
 
 事项编号：`rebuild-core-new-data-only`
 
-状态：`基础准备草案；FinalDatasetBoundaryStatus=DECISION_REQUIRED；CollectionStartReadinessStatus=DOCS_ONLY_NOT_EXECUTED；不授权数据处理、模拟、训练、paper、live、部署或资金操作`
+状态：`基础准备草案；FinalDatasetBoundaryStatus=RESOLVED_OPTION_B；CollectionStartReadinessStatus=DOCS_ONLY_NOT_EXECUTED；不授权数据处理、模拟、训练、paper、live、部署或资金操作`
 
 对应执行计划：`/home/chillchill/btc-updown-marketmaker/plan/rebuild-core-new-data-only-plan.md`
 
@@ -23,23 +23,28 @@
 5. `/home/chillchill/btc-updown-marketmaker/mistake-log/`、V2 旧实现和旧报告只作为失败证据与设计约束，不是训练样本来源，也不授权复用旧 feature、label、normalizer、模型 bundle、阈值或 leaderboard。
 6. 平台规则、费用、奖励资格、订单状态和 SDK 能力必须在实施时按当前官方资料重新冻结。Polymarket 相关能力继续遵循官方 Rust SDK first；SDK 缺口必须先报告并获得用户批准，不得自行建立 raw REST、manual signing、自建 SDK 或 shadow implementation。
 
-## 2. 数据日期边界决策门
+## 2. 数据日期边界合同
 
-用户原始表达“2026-07-11 到 2026-07-23 合计 14 天”存在客观冲突：UTC 首尾包含实际是 13 个自然日，不是 14 个自然日。
+用户已于 `2026-07-10 UTC` 明确选择推荐方案 B。`FinalDatasetBoundaryStatus=RESOLVED_OPTION_B`，不得再使用候选 A 或占位符 `DATASET_COHORT_END_EXCLUSIVE_UTC` 生成正式 cohort、split 或训练配置。
 
-在用户确认前，只允许在文档和工具中使用占位符 `DATASET_COHORT_END_EXCLUSIVE_UTC`，不得把任一候选静默写成最终边界：
+| 字段 | 冻结值 |
+|---|---|
+| `date_basis` | `UTC` |
+| `market_start_time_start_inclusive` | `2026-07-11T00:00:00Z` |
+| `market_start_time_end_exclusive` | `2026-07-25T00:00:00Z` |
+| 覆盖的完整 UTC 日 | `2026-07-11` 至 `2026-07-24` |
+| UTC 日数 | `14` |
+| 名义 5 分钟 market 数 | `4032` |
+| model development | `2026-07-11` 至 `2026-07-21`（11 日） |
+| dedicated calibration | `2026-07-22`（1 日） |
+| frozen final holdout | `2026-07-23` 至 `2026-07-24`（2 日） |
 
-| 选项 | 目标 market anchor 半开区间 | UTC 日数 | 名义 5 分钟 market 数 | 保留的用户表达 |
-|---|---|---:|---:|---|
-| A | `[2026-07-11T00:00:00Z, 2026-07-24T00:00:00Z)` | 13 | 3744 | 保留“截至 7 月 23 日” |
-| B | `[2026-07-11T00:00:00Z, 2026-07-25T00:00:00Z)` | 14 | 4032 | 保留“从 7 月 11 日开始采满 14 天” |
-
-本文推荐选项 B，因为它同时保留已明确的开始日和“合计 14 天”的持续时间；但该推荐不是替用户作出的决定。`FinalDatasetBoundaryGate` 在用户确认前保持 `BLOCKED`。
+上述 4032 只是按 14×24×12 计算的名义 market 数；实际训练准入数量仍由数据完整性、能力等级、label maturity 和 split 合同决定。
 
 开始日 `2026-07-11T00:00:00Z` 已经明确，因此必须把两个 gate 分开：
 
-- `CollectionStartReadinessGate`：只判断固定开始日前不可事后恢复的 event identity、clock receipt、schema/version、price-to-beat authority 和 canonical raw retention；它不依赖 A/B 结束日，但当前仍因本轮只授权写文档而处于 `NOT_EXECUTED`。
-- `FinalDatasetBoundaryGate`：决定 13 日或 14 日的结束边界、最终 cohort、calibration/holdout 日期和 manifest；最迟必须在停止目标采集和生成正式 split 前由用户解决。
+- `CollectionStartReadinessGate`：只判断固定开始日前不可事后恢复的 event identity、clock receipt、schema/version、price-to-beat authority 和 canonical raw retention；它与已解决的结束日期决定相互独立，当前仍因本轮只授权写文档而处于 `NOT_EXECUTED`。
+- `FinalDatasetBoundaryGate`：方案 B 的日期定义已 `RESOLVED`；目标数据尚未形成，因此 final manifest、实际 eligible market 集和数据准入仍必须在采集完成后的阶段 3 生成与验证，不能因边界已确定而标记数据 PASS。
 
 日期合同还必须满足：
 
@@ -231,7 +236,7 @@
 1. 独立统计单位是完整 market 和 UTC 日，不是数亿 event rows。名义事件量不能被描述为同等数量的独立样本。
 2. 全部 source、T-30 context、labels、simulator scenarios 和 replicas 必须随同一个 market 进入同一 split；一个 AccountRunTrajectory 也不得跨 split。
 3. split 严格按时间前推，禁止 row random split、per-file split 后拼接或按 label/收益挑日期。
-4. 最后两个目标 UTC 日作为 calendar-frozen final holdout；倒数第三个目标日是 dedicated calibration；更早日期才是 model development。具体日期只能在 `FinalDatasetBoundaryGate` 解决后机械派生。coverage 不足只会使 gate 失败，不得看到结果后换日期。
+4. `2026-07-23` 与 `2026-07-24` 固定为 calendar-frozen final holdout，`2026-07-22` 固定为 dedicated calibration，`2026-07-11` 至 `2026-07-21` 才是 model development。coverage 不足只会使对应数据 gate 失败，不得看到结果后换日期。
 5. model development 使用 anchored expanding-window folds 做架构/超参选择；dedicated calibration 只冻结 probability calibration、selection threshold 和 risk profile；最终 holdout 只允许一次正式验收。
 6. 每个 split 必须从冻结、与其他 split 独立的 account fixture 开始，按时间在 split 内 carry account state。训练 policy 产生的 cash/position/order state不得带入 calibration/holdout；split 结束若仍有 open/pending/unsettled 状态，必须延伸 maturity tail 完成、或隔离受影响 market，不能把未闭合状态跨界。
 7. split boundary 的 purge/embargo 必须至少覆盖 `max(model_context, state reconstruction dependency, feature dependency, label horizon, action TTL, reward maturity dependency)`；同一原始事件不得同时出现在相邻 split 的训练输入中。若 reconstruction chain 太长，丢弃边界 market直到 split 内 checkpoint可用。
@@ -239,7 +244,7 @@
 9. 必须比较 no-action、naive directional、简单规则 maker、XGBoost ranker、ESAR-v1 GRU 和同预算 TCN；报告全部 seed、失败 trial 和 selection history。paired counterfactual tie 必须基于 `ΔJ` 的 paired-difference interval 是否完全落入预注册 equivalence band；边际区间重叠不等于 tie。
 10. final 只有两个 UTC day clusters，禁止宣称可靠的 day-level bootstrap/cluster confidence interval。必须逐日报告，并用预注册的 contiguous-market block/paired-market interval 作为条件性不确定性；regime稳定性主要来自 development folds。
 11. action-surface audit、reward/ledger closure、simulator sensitivity 和 runtime consumption parity 均先于 PnL leaderboard。
-12. 只有约 13/14 个 UTC 日的首批数据只能支持开发与候选比较，不足以单独证明跨季节、跨网络、跨平台规则 regime 的 live 稳健性。完成 training bundle、replay 或 frozen holdout 不自动授权 paper、live 或资金操作。
+12. 只有 14 个 UTC 日的首批数据只能支持开发与候选比较，不足以单独证明跨季节、跨网络、跨平台规则 regime 的 live 稳健性。完成 training bundle、replay 或 frozen holdout 不自动授权 paper、live 或资金操作。
 13. final holdout一旦被观察，任何改变dataset/split/simulator/reward/model contract的修复都会使其失去pristine资格；旧两日只能降为diagnostic。重新正式验收必须取得新的未来未读holdout和用户批准，不得在同两日反复重跑挑最好结果。
 
 ## 12. 工具、资源与产物边界
@@ -270,7 +275,7 @@
 
 - [ ] 需求、计划、核心训练框架和 changelog 使用同一事项编号并互相引用。
 - [ ] 三类文档明确当前只做准备，不声称目标数据已存在或训练已开始。
-- [ ] 日期冲突以 `DECISION_REQUIRED` 硬门表达，未静默选边界。
+- [ ] 用户选择方案 B 的决定以 `RESOLVED_OPTION_B` 记录，四文档、manifest 和 split 使用同一冻结边界。
 - [ ] 完全禁止 old-datasets、旧 normalizer、旧 bundle 和旧 split 进入正式训练。
 - [ ] `mistake-log` 中的固定 tick、短状态、action collapse、未消费 head、reward interval、账本和 split 泄漏均有对应阻断门。
 
@@ -297,4 +302,4 @@
 - [ ] final holdout 未用于调参，所有失败 trial 和 selection history 已保留。
 - [ ] holdout若因合同修复失效，旧两日已降为diagnostic；没有把同两日重跑冒充新pristine验收。
 - [ ] 单一 AUC、单一 PnL、command exit 0 或 bundle 存在均不能单独通过 promotion。
-- [ ] 首批 13/14 日结果只形成 training/evaluation candidate；paper、live 和资金操作仍需后续独立需求、证据和用户授权。
+- [ ] 首批 14 日结果只形成 training/evaluation candidate；paper、live 和资金操作仍需后续独立需求、证据和用户授权。

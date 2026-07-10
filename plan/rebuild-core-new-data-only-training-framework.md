@@ -2,7 +2,7 @@
 
 事项编号：`rebuild-core-new-data-only`
 
-状态：`基础准备技术设计；FinalDatasetBoundaryStatus=DECISION_REQUIRED；CollectionStartReadinessStatus=DOCS_ONLY_NOT_EXECUTED；全部 Training Stage T0-T6 未授权`
+状态：`基础准备技术设计；FinalDatasetBoundaryStatus=RESOLVED_OPTION_B；CollectionStartReadinessStatus=DOCS_ONLY_NOT_EXECUTED；全部 Training Stage T0-T6 未授权`
 
 对应需求：`/home/chillchill/btc-updown-marketmaker/demand/rebuild-core-new-data-only-demand.md`
 
@@ -72,7 +72,7 @@ Transformer/TLOB、Mamba/SSM、Neural CDE、CQL/IQL、Decision Transformer、PPO
 
 [DeepLOB](https://arxiv.org/abs/1808.03668) 说明 CNN 可提取 LOB 空间结构、LSTM 可提取时间依赖，因此 ESAR-v1 只借用“小型 book spatial encoder”思想，不照搬其固定股票 LOB 输入和完整网络。
 
-[TLOB](https://arxiv.org/abs/2502.15757) 一方面报告 Transformer LOB 模型的收益，另一方面也报告简单 MLP 可超过既有复杂模型，且加入 spread 成本后预测表现明显恶化。这正说明“更复杂的方向预测网络”不等于“更好的可交易策略”。当前只有 13/14 个独立 UTC 日，先用小模型和强基线更稳妥。
+[TLOB](https://arxiv.org/abs/2502.15757) 一方面报告 Transformer LOB 模型的收益，另一方面也报告简单 MLP 可超过既有复杂模型，且加入 spread 成本后预测表现明显恶化。这正说明“更复杂的方向预测网络”不等于“更好的可交易策略”。当前只有 14 个独立 UTC 日，先用小模型和强基线更稳妥。
 
 [TCN 的系统比较](https://arxiv.org/abs/1803.01271) 表明简单 causal convolution 在多类序列任务上可成为强起点，因此 TCN 是强制 challenger，而不是可有可无的附加实验。
 
@@ -540,7 +540,7 @@ no-action 的经济 reward 可为零，但它仍与其他 candidate 的完整 co
 
 ### Training Stage T0：边界和合同冻结
 
-- 解决 13/14 final boundary；
+- 应用已解决的方案 B final boundary；
 - 冻结 canonical events、p2b、features、splits和account fixtures；冻结candidate/output-consumer、simulator、market-impact、rollout-budget、valuation/reward的draft schema、接口和fail-closed边界，供纵向切片验证；
 - 不运行模型训练或leaderboard。
 
@@ -589,17 +589,18 @@ no-action 的经济 reward 可为零，但它仍与其他 candidate 的完整 co
 
 ## 10. Split 与统计设计
 
-在用户确认日期后，将目标 UTC 日机械编号为 `D1...Dn`：
+用户已选择方案 B。目标 market anchor 半开区间固定为 `[2026-07-11T00:00:00Z, 2026-07-25T00:00:00Z)`，将 14 个目标 UTC 日机械编号为 `D1...D14`：
 
-- `n=13` 对应选项 A；
-- `n=14` 对应选项 B。
+- `D1...D11` = `2026-07-11...2026-07-21`；
+- `D12` = `2026-07-22`；
+- `D13...D14` = `2026-07-23...2026-07-24`。
 
 固定分配：
 
 ```text
-model-development days = D1 ... D(n-3)
-calibration day         = D(n-2)
-frozen final holdout    = D(n-1), Dn
+model-development days = D1 ... D11  = 2026-07-11 ... 2026-07-21
+calibration day         = D12         = 2026-07-22
+frozen final holdout    = D13, D14    = 2026-07-23, 2026-07-24
 ```
 
 model-development 内使用 anchored expanding folds：最少 5 个完整 eligible 日作为初始 train，下一完整 calendar 日作 validation，随后逐日扩展。不能因为某天结果难看而跳过；coverage 不足只会使对应 gate 失败或 capability 降级。
@@ -615,7 +616,7 @@ model-development 内使用 anchored expanding folds：最少 5 个完整 eligib
 - normalization 仅 fit train；
 - final holdout 的 market、label、指标和 simulator outcomes 不用于架构、阈值、risk weight 或规则调参。
 
-只有 13/14 个 UTC 日意味着独立 regime 数很少。final只有两个UTC day clusters，不能宣称可靠day-level bootstrap/cluster CI；必须逐日报告，使用预注册的contiguous-market block和paired-market intervals作条件性不确定性，regime稳定性主要来自development folds。数亿rows不得当IID样本。
+只有 14 个 UTC 日意味着独立 regime 数仍很少。final只有两个UTC day clusters，不能宣称可靠day-level bootstrap/cluster CI；必须逐日报告，使用预注册的contiguous-market block和paired-market intervals作条件性不确定性，regime稳定性主要来自development folds。数亿rows不得当IID样本。
 
 final holdout 一旦被观察，后续若修复改变 dataset/split/simulator/reward/model contract，原两日只能降为 diagnostic，不能再次称为 pristine holdout；重新正式验收需要新的未来未读 holdout 和用户批准。
 
@@ -651,7 +652,7 @@ final holdout 一旦被观察，后续若修复改变 dataset/split/simulator/re
 | risk head 随机或被覆盖 | risk distribution 参与 loss；risk profile 版本化并直接选 candidate | risk 权重仍需用户/证据冻结 |
 | reward 按 tick累积、settlement clip | AccountRunTrajectory、ValuationContract、真实 delta_t 风险积分、无固定 clip | conservative liquidation仍依赖可执行深度质量 |
 | churn 把 guard cancel 算进模型 | authority-tagged cancel；默认运营指标不进 scalar | 平台隐性成本可能尚不可见 |
-| per-file/random split 泄漏 | market/account-run group、time-forward、purge/embargo、frozen holdout | 13/14 日统计能力仍弱 |
+| per-file/random split 泄漏 | market/account-run group、time-forward、purge/embargo、frozen holdout | 14 日统计能力仍弱 |
 | full-range 被误作泛化 | final 两个 calendar 日只验收一次；全部 selection history 留痕 | 单次 holdout 仍不覆盖长期 regime |
 | simulator 过度乐观 | provenance + capability/impact contracts + conservative/base/stress + non-promotable | 私有规则、真实 queue与市场冲击仍不可识别 |
 | 订单/账本闭环错误 | raw evidence → NOE → ledger；property tests；reward closure | 程序 bug 只能靠实现测试发现 |
@@ -745,4 +746,4 @@ bundle 存在不等于通过。每个 manifest 必须互相引用 hash，任何�
 
 ### 15.3 本事项当前终点
 
-当前终点仅是四份基础准备文档完成并通过审查。目标 cohort 尚未形成，`FinalDatasetBoundaryGate` 尚未解决，`CollectionStartReadinessGate` 也未获执行授权；全部 Training Stage T0-T6 都没有开始。
+当前终点仅是四份基础准备文档完成、通过审查并同步方案 B。目标 cohort 尚未形成；`FinalDatasetBoundaryGate` 的日期决策已经解决，但 `CollectionStartReadinessGate` 仍未获执行授权，全部 Training Stage T0-T6 都没有开始。

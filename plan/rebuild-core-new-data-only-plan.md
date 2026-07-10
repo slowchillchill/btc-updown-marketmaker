@@ -2,7 +2,7 @@
 
 事项编号：`rebuild-core-new-data-only`
 
-状态：`基础准备计划；当前只执行文档阶段 0；FinalDatasetBoundaryStatus=DECISION_REQUIRED；CollectionStartReadinessStatus=DOCS_ONLY_NOT_EXECUTED`
+状态：`基础准备计划；当前只执行文档阶段 0；FinalDatasetBoundaryStatus=RESOLVED_OPTION_B；CollectionStartReadinessStatus=DOCS_ONLY_NOT_EXECUTED`
 
 对应需求：`/home/chillchill/btc-updown-marketmaker/demand/rebuild-core-new-data-only-demand.md`
 
@@ -21,7 +21,7 @@
 - 只读代码、数据、服务和官方资料核对；
 - 文档自审、机械检查与独立审查。
 
-当前不允许修改/部署 collector，不允许处理目标数据、实现 simulator/model、启动训练、paper/live 或资金操作。阶段 1 之后均是未来执行计划，必须另行获得用户授权；与结束日无关的开始准备不需要等待A/B决定，但不能把“计划可执行”误写成“本轮已授权”。
+当前不允许修改/部署 collector，不允许处理目标数据、实现 simulator/model、启动训练、paper/live 或资金操作。阶段 1 之后均是未来执行计划，必须另行获得用户授权；日期边界虽然已经解决，但不能把“计划可执行”误写成“本轮已授权”。
 
 本轮成功标准：四份文档同 slug 对齐；事实、推断和建议分开；训练框架、数据额外需求、simulator、reward、split 和 `mistake-log` 闭环在采集/训练实现前冻结；没有把未来数据写成已完成事实。
 
@@ -34,7 +34,7 @@
     ↓
 完成目标 cohort + label/account tail
     ↓
-解决结束日并冻结 dataset boundary/eligibility/split
+应用已解决的方案 B 边界并冻结 dataset manifest/eligibility/split
     ↓
 正式 cohort 小切片复验 canonical event → simulator → NOE → ledger → reward
     ↓
@@ -63,8 +63,8 @@ frozen holdout
 
 | 阶段 | 目标 | 当前状态 | 进入条件 | 退出证据 |
 |---|---|---|---|---|
-| 0 | 基础文档与框架冻结 | 当前执行 | 用户提出准备任务 | 四文档审查通过，结束日期冲突显式BLOCKED |
-| 1 | 固定开始日前可训练性准备与非训练纵切 | 未授权/未开始 | 开始日已固定、用户另行授权；不依赖A/B结束日 | identity/p2b/clock/schema/retention与准备纵切receipt |
+| 0 | 基础文档与框架冻结 | 当前执行 | 用户提出准备任务 | 四文档审查通过，方案 B 日期边界同步一致 |
+| 1 | 固定开始日前可训练性准备与非训练纵切 | 未授权/未开始 | 方案 B 边界已固定、用户另行授权 | identity/p2b/clock/schema/retention与准备纵切receipt |
 | 2 | 目标 cohort 采集与日级保护 | 未开始 | 阶段 1 PASS 或批准降级 | 每日 finalized raw/manifest/hash/health evidence |
 | 3 | cohort boundary、maturity 与 split 冻结 | 未开始 | cohort + tail 完成 | DatasetBoundary/EpisodeEligibility/Split manifests |
 | 4 | 端到端纵向切片 | 未开始 | 阶段 3 boundary 冻结 | canonical→simulator→NOE→ledger→reward closure |
@@ -85,13 +85,11 @@ frozen holdout
 - 步骤 0.1.3：检索模型、LOB、序列建模、action ranking、offline RL、simulation 和当前 Polymarket 官方规则。
   验证：技术选择优先引用论文、官方文档和成熟工具，而不是凭记忆。
 
-### 任务 0.2：解决或显式保留日期冲突
+### 任务 0.2：冻结方案 B 日期边界
 
-- 步骤 0.2.1：向用户呈现：
-  - A：`[2026-07-11, 2026-07-24)`，13 日；
-  - B：`[2026-07-11, 2026-07-25)`，14 日。
-- 步骤 0.2.2：用户确认前统一使用 `DATASET_COHORT_END_EXCLUSIVE_UTC`。
-  验证：所有文档均为 `FinalDatasetBoundaryStatus=DECISION_REQUIRED`，没有机械 split 或训练命令使用未确认结束日。
+- 步骤 0.2.1：记录用户于 `2026-07-10 UTC` 确认方案 B：`[2026-07-11T00:00:00Z, 2026-07-25T00:00:00Z)`，14 个完整 UTC 日，名义 4032 个 5 分钟 market。
+- 步骤 0.2.2：机械冻结 development=`2026-07-11..2026-07-21`、calibration=`2026-07-22`、holdout=`2026-07-23..2026-07-24`。
+  验证：所有文档均为 `FinalDatasetBoundaryStatus=RESOLVED_OPTION_B`；不再把候选 A、13 日或未确认占位符当作当前配置。
 
 ### 任务 0.3：冻结技术方向
 
@@ -113,18 +111,18 @@ frozen holdout
 - 步骤 0.4.4：按项目阶段规则，只在确认提交范围仅包含本事项文档且不卷入用户其他脏改动后，创建独立 commit/push；若提交范围与用户现有改动无法安全隔离，则停止并报告冲突。
   验证：commit 只包含四份新文档；push 结果和 commit hash 可追溯。
 
-阶段 0 退出条件：四文档审查通过；FinalDatasetBoundaryGate仍可保持显式 BLOCKED，但不能被遗忘。退出阶段 0 不授权阶段 1。
+阶段 0 退出条件：四文档审查通过且方案 B 日期边界同步一致。`FinalDatasetBoundaryGate` 的日期决策已解决，但目标数据、final manifest 和 eligible market 尚未形成；退出阶段 0 不授权阶段 1。
 
 ## 阶段 1：cohort 开始前可训练性准备
 
-> 本阶段涉及代码/schema/deploy和非训练纵切，当前未授权。开始日已固定为7月11日，本阶段不等待A/B结束日；若开始前未完成，必须选择批准降级或承认受影响数据不具备 `policy_training_eligible` 能力，不能事后伪造证据。
+> 本阶段涉及代码/schema/deploy和非训练纵切，当前未授权。方案 B 已固定从7月11日开始；若开始前未完成，必须选择批准降级或承认受影响数据不具备 `policy_training_eligible` 能力，不能事后伪造证据。
 
 ### 任务 1.1：拆分开始 readiness 与最终边界
 
 - 步骤 1.1.1：冻结 `CollectionStartReadinessGate`：start=`2026-07-11T00:00:00Z`、model context=T-30、state reconstruction lookback、identity/p2b/clock/schema/retention。
-  验证：A/B尚未决定也能判断开始前不可恢复项；当前文档状态仍为NOT_EXECUTED。
-- 步骤 1.1.2：保留 `FinalDatasetBoundaryGate`：用户确认A/B后才冻结end、名义market数、dedicated calibration与最后两日holdout。
-  验证：结束日未确认时禁止停止计划、final manifest和split，但不阻断固定开始日采集。
+  验证：结束边界已经确定，但当前 readiness 状态仍为NOT_EXECUTED，不能把日期决策冒充开始准入。
+- 步骤 1.1.2：应用已解决的 `FinalDatasetBoundaryGate`：end=`2026-07-25T00:00:00Z`、名义market数=`4032`、calibration=`2026-07-22`、holdout=`2026-07-23..2026-07-24`。
+  验证：停止边界、final manifest和split只能使用方案 B；实际数据完整性仍在阶段 3 验证。
 - 步骤 1.1.3：冻结 collector git commit、release binary sha256、systemd unit、CLI/config digest、schema versions、host/region 和官方 SDK version。
   验证：startup receipt 与实际进程 `/proc`/systemd 配置一致。
 - 步骤 1.1.4：中途升级策略设为显式 cutover/regime，不允许覆盖同路径或静默混训。
@@ -427,7 +425,7 @@ frozen holdout
 
 任一条件成立即停止对应阶段：
 
-1. 13/14 日边界未解决却需要生成 final cohort/split；
+1. 任一正式 cohort/split 使用的边界与方案 B 不一致，或重新出现候选 A/未确认占位符；
 2. 目标数据实际 schema、collector/runtime行为与已批准合同冲突；
 3. 需要官方 Rust SDK 不支持的能力且尚未获得用户批准替代方案；
 4. canonical raw 在远端 retention 前未安全拉回或 hash 不一致；

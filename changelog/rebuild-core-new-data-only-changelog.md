@@ -2,7 +2,7 @@
 
 事项编号：`rebuild-core-new-data-only`
 
-状态：`基础准备记录；FinalDatasetBoundaryStatus=DECISION_REQUIRED；CollectionStartReadinessStatus=DOCS_ONLY_NOT_EXECUTED；未开始实现或训练`
+状态：`基础准备记录；FinalDatasetBoundaryStatus=RESOLVED_OPTION_B；CollectionStartReadinessStatus=DOCS_ONLY_NOT_EXECUTED；未开始实现或训练`
 
 对应需求：`/home/chillchill/btc-updown-marketmaker/demand/rebuild-core-new-data-only-demand.md`
 
@@ -177,14 +177,12 @@
 - 未启动、停止或重启远端 service。
 - 未处理、删除、重写或上传任何数据。
 - 未运行训练、paper、shadow、live 或资金操作。
-- 未替用户选择 13 日或 14 日。
 - 未把当前 active service 或 7 月 8/9 样本解释为目标 cohort 已完成。
 
-### 待用户决策
+### 仍待后续决策
 
-1. 日期选择：A（截至 7 月 23 日、13 日）或 B（从 7 月 11 日采满 14 日、截至 7 月 24 日）。
-2. 若 cohort 开始前无法补 transport identity，是否接受同 receive 毫秒 atomic microbatch 的 approximate 降级；推荐补 identity，不推荐长期依赖降级。
-3. Binance aggTrade `T` 是否在 cohort 前补入 typed schema；框架可在只有 receive+E 时工作，但必须接受无法使用真实 trade occurrence time 的限制。
+1. 若 cohort 开始前无法补 transport identity，是否接受同 receive 毫秒 atomic microbatch 的 approximate 降级；推荐补 identity，不推荐长期依赖降级。
+2. Binance aggTrade `T` 是否在 cohort 前补入 typed schema；框架可在只有 receive+E 时工作，但必须接受无法使用真实 trade occurrence time 的限制。
 
 ### 审查记录
 
@@ -201,3 +199,24 @@
 - 第四轮训练定点复审：`0 Critical / 0 High / 0 Medium`，PASS。
 - 第二轮全局复审曾发现`0 Critical / 1 High / 4 Medium`：causal receive与global ingress分配可能乱序、stale watermark作用域过宽、主时序图漏画模拟器冻结、split边界重建归属不清和changelog待同步。已将causal receive/run/sequence改为共享causal-ingress临界区原子分配并断言时间单调，watermark改为market/domain相关pending，补齐模拟器步骤，并把重建前缀限定为split独占且从相邻split purge。
 - 最终全局对抗复审：`0 Critical / 0 High / 0 Medium`，PASS；确认当前仅授权基础文档、13/14日边界仍为`BLOCKED`且start readiness独立、全链路new-data-only，并确认event触发、p2b、阶段顺序、holdout失效、权限命名空间、causal ingress、stale watermark与branch terminal/horizon合同闭环。
+
+## 2026-07-10：用户确认方案 B
+
+### 日期决定
+
+- 用户明确选择推荐方案 B，原 `FinalDatasetBoundaryStatus=DECISION_REQUIRED` 更新为 `RESOLVED_OPTION_B`。
+- 正式 target market anchor 半开区间冻结为 `[2026-07-11T00:00:00Z, 2026-07-25T00:00:00Z)`，覆盖 `2026-07-11` 至 `2026-07-24` 共 14 个完整 UTC 日，名义 4032 个 5 分钟 market。
+- split 日期机械冻结为：model development=`2026-07-11..2026-07-21`，dedicated calibration=`2026-07-22`，frozen final holdout=`2026-07-23..2026-07-24`。
+- 候选 A 与 `DATASET_COHORT_END_EXCLUSIVE_UTC` 占位符不再是当前配置；后续正式 manifest、split 与训练配置若使用其他边界必须 fail closed。
+
+### 授权边界不变
+
+- 本次决定只解决日期边界，不代表目标 cohort 已形成，也不代表数据完整性或训练准入已 PASS。
+- `CollectionStartReadinessStatus` 仍为 `DOCS_ONLY_NOT_EXECUTED`；未授权修改/deploy collector、数据处理、模拟器实现、训练、paper、live 或资金操作。
+- 原审查记录中“13/14 日边界 BLOCKED”描述的是方案 B 确认前的审查时状态，由本节决定正式取代。
+
+### 决策同步审查
+
+- 第一轮限定复核：`0 Critical / 0 High / 1 Medium`；发现计划主时序图仍写“解决结束日”，可能重新打开已冻结选择。
+- 已改为“应用已解决的方案 B 边界并冻结 dataset manifest/eligibility/split”。
+- 最终定点复核：`0 Critical / 0 High / 0 Medium`，PASS；确认日期、名义 market 数、split、四文档状态和未授权边界一致。
