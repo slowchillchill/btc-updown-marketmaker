@@ -259,6 +259,9 @@
 - 数据采集服务器已完成整包 SHA 验证、`current` 切换和受控重启。当前 PID `951266`、进程 SHA 一致、service `active/running`、`NRestarts=0`，6 个 writer 全部打开。
 - 真实 `binance_aggtrade_2026-07-10T14--part=1.parquet` 为 `binance_aggtrade_v3`、`Complete`、`1298` rows、E/T 都无 null、`source_gaps=[]`；`566` rows 的 E/T 不同，差值范围 `0..3ms`。因此 `CollectionStartReadinessStatus` 已更新为 `SCHEMA_V3_DEPLOYED_AND_VERIFIED`，但这不自动冻结正式 cohort 起点。
 - 本地 D+1 timer 已启用为 UTC `02:00`。首次 Persistent 补触发读取的是昨天 `2026-07-09`；在打包上传前因用户更新“TLS 瞬时错误应重试”而受控停止，没有上传该次未完整结果。
+- 瞬时重试修正已由提交 `4863baaa73d2698dd50ef21a84f15bc95bde6fcb` 推送。重新执行同一 D 日时复用既有 artifact，只请求原 TLS timeout row `1` 次并成功；逐行对比确认其余 287 rows 的核心值未变化。最终 `price-to-beat-gamma-v2` 为 `288/288` 成功、attempt count 无 null，P2B artifact SHA256=`aad4052de1d00f945e23d458019a828ef997fd600aa202da39962c6d84a26bd4`。
+- D=`2026-07-09` 实际归档以 status `0/SUCCESS` 完成：名义/观察市场 `288/288`、accepted=`96`、rejected=`192`；192 个拒绝全部且仅因已知 T08 事故后的 Binance aggTrade 无 rows，不是 Gamma P2B/finalPrice 缺失。802 MiB tar SHA256=`b3a97269adbbe97d0fa0c4555dd36cfca95dcde0bc6d8f6da9a9c859712b2352`；AliyunPan 同名文件 SHA1=`46C20AAA47DEA139EC4438D0178F27A3EE3DECE3` 与本地一致，tar 不含仍在采集的 2026-07-10 数据。timer 保持 enabled/active/waiting，下一次触发为 `2026-07-11T02:00:00Z`。
+- 本次实际归档 wall time `9m29.844s`、memory peak `79.4GiB`。该值只记录为后续运维性能观察，不改变当前数据准入、P2B 双字段目标或训练 cohort 决策；正式 cohort 仍等待 schema v3 后续采集质量由用户另行冻结。
 
 ### 当前授权边界
 
