@@ -19,11 +19,11 @@
 1. Binance aggTrade hourly typed parquet 必须同时保存官方 `E` 为 `event_time` 和官方 `T` 为 `trade_time`；两列不得合并或相互代替，schema version 升为 `binance_aggtrade_v3`。
 2. 本增量的 schema v3 修改经本地完整验证后必须立即重新部署到数据采集服务器并重启采集；必须以新 finalized v3 segment 中 `event_time` 和 `trade_time` 的真实可读值验收，不得修改或伪装旧 v2 产物。
 3. future paper/live hot path 的真实 external market event handoff 必须显式传输同一 slug 下可空 decimal-string `price_to_beat` 和 `final_price`。缺少任一字段不得阻断 handoff，也不得增加 closed/resolved/winner 门；当前 paper/live 二进制仅实现 heartbeat/status，该字段合同本轮只写入需求与计划，不冒充已实现。
-4. 经用户批准的日级运维辅助脚本只在 D+1 UTC 02:00 处理昨天 D：每个目标 slug 只请求一次 Gamma，仅以 `eventMetadata.priceToBeat` 和 `eventMetadata.finalPrice` 同时存在作为该 market 的回填成功条件。完整 D 文件已存在时原样复用且请求数为零；不设 D+2、不做语义重试，closed/resolved/winner 及结果一致性不得成为阻断门。
+4. 经用户批准的日级运维辅助脚本只在 D+1 UTC 02:00 处理昨天 D：每个目标 slug 发起一个逻辑 Gamma 读取，仅以 `eventMetadata.priceToBeat` 和 `eventMetadata.finalPrice` 同时存在作为该 market 的回填成功条件。TLS/timeout/connection reset/`URLError` 只在本次任务内有界重试，最多 3 attempts 且单次等待不超过 5 秒；HTTP 已到达但字段缺失不做语义重试。P2B artifact 使用 `price-to-beat-gamma-v2`，每 row 写入 `gamma_http_attempt_count`。已有完整 D 文件时只重请其中的瞬时传输失败 rows；不设 D+2，closed/resolved/winner 及结果一致性不得成为阻断门。
 5. 日级辅助脚本发现历史 running/digesting/partial 文件时只写入诊断报告并且绝不读取；不得因一个孤立历史 partial 使昨天整日归档提前终止。上传同名昨天包时必须核对当前本地与云端内容 digest，不得仅因云端已有同名文件就报告成功。
 6. 完整 canonical/feature/label/trajectory 处理不属于日级归档脚本；必须在本仓库 `data-pipeline/` 实现，再部署到 5090 服务器的 `~/btc-updown-marketmaker/data-pipeline` 执行。
 
-验收标准：本地测试和真实新 segment 证明 schema v3 同时保留不同的 `event_time/trade_time`；日级归档合同测试证明 D 的 288 个名义 slug 首次各请求一次、第二次执行请求数为零且 P2B hash 不变、Gamma 只用两个目标字段判定回填、历史 partial 不进入 reader、新同名包按 digest 覆盖并验证；热路径两字段保持明确的未实现状态。
+验收标准：本地测试和真实新 segment 证明 schema v3 同时保留不同的 `event_time/trade_time`；日级归档合同测试证明 D 的 288 个逻辑 slug 全部覆盖、瞬时传输断线可在第二次 attempt 成功、字段缺失仍只请求一次、已有 D 文件只重请瞬时失败 row、Gamma 只用两个目标字段判定回填、历史 partial 不进入 reader、新同名包按 digest 覆盖并验证；热路径两字段保持明确的未实现状态。
 
 ## 一、范围与非范围
 

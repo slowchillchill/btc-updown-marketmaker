@@ -33,6 +33,8 @@ SET_NEXT_RTC_WAKE="${DATA_COLLECT_ARCHIVE_SET_NEXT_RTC_WAKE:-0}"
 GAMMA_BASE_URL="${DATA_COLLECT_ARCHIVE_GAMMA_BASE_URL:-https://gamma-api.polymarket.com/events/slug}"
 GAMMA_TIMEOUT_SECONDS="${DATA_COLLECT_ARCHIVE_GAMMA_TIMEOUT_SECONDS:-10}"
 GAMMA_WORKERS="${DATA_COLLECT_ARCHIVE_GAMMA_WORKERS:-4}"
+GAMMA_TRANSIENT_MAX_ATTEMPTS="${DATA_COLLECT_ARCHIVE_GAMMA_TRANSIENT_MAX_ATTEMPTS:-3}"
+GAMMA_TRANSIENT_RETRY_DELAY_SECONDS="${DATA_COLLECT_ARCHIVE_GAMMA_TRANSIENT_RETRY_DELAY_SECONDS:-1}"
 
 THREADS="${DATA_COLLECT_ARCHIVE_THREADS:-$(nproc)}"
 
@@ -182,6 +184,8 @@ validate_and_select_markets() {
   GAMMA_BASE_URL="$GAMMA_BASE_URL" \
   GAMMA_TIMEOUT_SECONDS="$GAMMA_TIMEOUT_SECONDS" \
   GAMMA_WORKERS="$GAMMA_WORKERS" \
+  GAMMA_TRANSIENT_MAX_ATTEMPTS="$GAMMA_TRANSIENT_MAX_ATTEMPTS" \
+  GAMMA_TRANSIENT_RETRY_DELAY_SECONDS="$GAMMA_TRANSIENT_RETRY_DELAY_SECONDS" \
   python3 - <<'PY'
 import concurrent.futures
 import datetime as dt
@@ -192,7 +196,9 @@ import os
 import pathlib
 import re
 import shutil
+import ssl
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -211,6 +217,13 @@ verify_sha256 = os.environ.get("VERIFY_SHA256", "1") == "1"
 gamma_base_url = os.environ["GAMMA_BASE_URL"].rstrip("/")
 gamma_timeout_seconds = float(os.environ.get("GAMMA_TIMEOUT_SECONDS", "10"))
 gamma_workers = max(1, int(os.environ.get("GAMMA_WORKERS", "4")))
+gamma_transient_max_attempts = min(
+    3, max(1, int(os.environ.get("GAMMA_TRANSIENT_MAX_ATTEMPTS", "3")))
+)
+gamma_transient_retry_delay_seconds = min(
+    5.0,
+    max(0.0, float(os.environ.get("GAMMA_TRANSIENT_RETRY_DELAY_SECONDS", "1"))),
+)
 
 source_kinds = [
     "polymarket_market",
@@ -333,32 +346,94 @@ def decimal_text(value):
 def diagnostic_bool(value):
     return value if isinstance(value, bool) else None
 
+price_to_beat_schema = pa.schema([
+    ("schema_version", pa.string()),
+    ("date_utc", pa.string()),
+    ("slug", pa.string()),
+    ("market_start_utc", pa.timestamp("ms", tz="UTC")),
+    ("market_end_utc", pa.timestamp("ms", tz="UTC")),
+    ("observed", pa.bool_()),
+    ("fetch_succeeded", pa.bool_()),
+    ("polymarket_price_to_beat", pa.string()),
+    ("polymarket_final_price", pa.string()),
+    ("source_url", pa.string()),
+    ("fetched_at_utc", pa.timestamp("ms", tz="UTC")),
+    ("http_status", pa.int32()),
+    ("gamma_http_attempt_count", pa.int32()),
+    ("gamma_event_id", pa.string()),
+    ("gamma_closed", pa.bool_()),
+    ("gamma_active", pa.bool_()),
+    ("diagnostic_error", pa.string()),
+])
+
+def write_price_to_beat_rows(rows):
+    table = pa.Table.from_pylist(rows, schema=price_to_beat_schema)
+    p2b_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = p2b_path.with_name(f"{p2b_path.name}.tmp")
+    temporary_path.unlink(missing_ok=True)
+    pq.write_table(table, temporary_path, compression="zstd", compression_level=3)
+    os.replace(temporary_path, p2b_path)
+
+def is_transient_transport_error(error):
+    if not error:
+        return False
+    return error.startswith("transient_transport_error:") or error.startswith(
+        (
+            "request_error:URLError:",
+            "request_error:TimeoutError:",
+            "request_error:SSLError:",
+            "request_error:RemoteDisconnected:",
+            "request_error:ConnectionResetError:",
+        )
+    )
+
 def fetch_gamma_record(item):
     slug, market = item
     source_url = f"{gamma_base_url}/{urllib.parse.quote(slug, safe='')}"
-    fetched_at = None
     http_status = None
     payload = None
     error = None
-    request = urllib.request.Request(
-        source_url,
-        headers={"Accept": "application/json", "User-Agent": "btc-updown-data-archive/1"},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=gamma_timeout_seconds) as response:
-            http_status = int(response.status)
-            raw = response.read()
-        payload = json.loads(raw.decode("utf-8"), parse_float=decimal.Decimal)
-        if not isinstance(payload, dict):
-            error = "response_not_object"
-            payload = None
-    except urllib.error.HTTPError as exc:
-        http_status = int(exc.code)
-        error = f"http_error:{exc.code}"
-    except Exception as exc:
-        error = f"request_error:{type(exc).__name__}:{exc}"
-    finally:
-        fetched_at = dt.datetime.now(tz=dt.timezone.utc)
+    raw = None
+    attempt_count = 0
+    for attempt_count in range(1, gamma_transient_max_attempts + 1):
+        request = urllib.request.Request(
+            source_url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "btc-updown-data-archive/1",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=gamma_timeout_seconds) as response:
+                http_status = int(response.status)
+                raw = response.read()
+            error = None
+            break
+        except urllib.error.HTTPError as exc:
+            http_status = int(exc.code)
+            error = f"http_error:{exc.code}"
+            break
+        except (urllib.error.URLError, TimeoutError, ssl.SSLError, ConnectionError) as exc:
+            error = f"transient_transport_error:{type(exc).__name__}:{exc}"
+            if attempt_count < gamma_transient_max_attempts:
+                time.sleep(
+                    min(5.0, gamma_transient_retry_delay_seconds * attempt_count)
+                )
+                continue
+            break
+        except Exception as exc:
+            error = f"request_error_non_transient:{type(exc).__name__}:{exc}"
+            break
+
+    fetched_at = dt.datetime.now(tz=dt.timezone.utc)
+    if raw is not None:
+        try:
+            payload = json.loads(raw.decode("utf-8"), parse_float=decimal.Decimal)
+            if not isinstance(payload, dict):
+                error = "response_not_object"
+                payload = None
+        except Exception as exc:
+            error = f"response_parse_error:{type(exc).__name__}:{exc}"
 
     metadata = payload.get("eventMetadata") if isinstance(payload, dict) else None
     metadata = metadata if isinstance(metadata, dict) else {}
@@ -370,7 +445,7 @@ def fetch_gamma_record(item):
 
     event_id = payload.get("id") if isinstance(payload, dict) else None
     return {
-        "schema_version": "price-to-beat-gamma-v1",
+        "schema_version": "price-to-beat-gamma-v2",
         "date_utc": date_iso,
         "slug": slug,
         "market_start_utc": ms_dt(market["start_ms"]),
@@ -382,6 +457,7 @@ def fetch_gamma_record(item):
         "source_url": source_url,
         "fetched_at_utc": fetched_at,
         "http_status": http_status,
+        "gamma_http_attempt_count": attempt_count,
         "gamma_event_id": str(event_id) if event_id is not None else None,
         "gamma_closed": diagnostic_bool(payload.get("closed")) if isinstance(payload, dict) else None,
         "gamma_active": diagnostic_bool(payload.get("active")) if isinstance(payload, dict) else None,
@@ -408,35 +484,37 @@ def fetch_gamma_price_to_beat(target_markets):
                 f"missing_columns={missing_columns} rows={existing.num_rows} "
                 f"expected_rows={len(expected_slugs)}"
             )
-        return existing.to_pylist(), True, 0
+        existing_rows = existing.to_pylist()
+        for row in existing_rows:
+            row["schema_version"] = "price-to-beat-gamma-v2"
+            row["gamma_http_attempt_count"] = int(
+                row.get("gamma_http_attempt_count") or 1
+            )
+        retry_indexes = [
+            index
+            for index, row in enumerate(existing_rows)
+            if not row["fetch_succeeded"]
+            and is_transient_transport_error(row.get("diagnostic_error"))
+        ]
+        if not retry_indexes:
+            return existing_rows, True, 0, 0
+        retry_items = [ordered[index] for index in retry_indexes]
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(gamma_workers, len(retry_items))
+        ) as executor:
+            retried_rows = list(executor.map(fetch_gamma_record, retry_items))
+        for index, row in zip(retry_indexes, retried_rows):
+            existing_rows[index] = row
+        write_price_to_beat_rows(existing_rows)
+        request_count = sum(row["gamma_http_attempt_count"] for row in retried_rows)
+        return existing_rows, True, request_count, len(retry_indexes)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(gamma_workers, len(ordered))) as executor:
         rows = list(executor.map(fetch_gamma_record, ordered))
-    schema = pa.schema([
-        ("schema_version", pa.string()),
-        ("date_utc", pa.string()),
-        ("slug", pa.string()),
-        ("market_start_utc", pa.timestamp("ms", tz="UTC")),
-        ("market_end_utc", pa.timestamp("ms", tz="UTC")),
-        ("observed", pa.bool_()),
-        ("fetch_succeeded", pa.bool_()),
-        ("polymarket_price_to_beat", pa.string()),
-        ("polymarket_final_price", pa.string()),
-        ("source_url", pa.string()),
-        ("fetched_at_utc", pa.timestamp("ms", tz="UTC")),
-        ("http_status", pa.int32()),
-        ("gamma_event_id", pa.string()),
-        ("gamma_closed", pa.bool_()),
-        ("gamma_active", pa.bool_()),
-        ("diagnostic_error", pa.string()),
-    ])
-    table = pa.Table.from_pylist(rows, schema=schema)
-    p2b_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = p2b_path.with_name(f"{p2b_path.name}.tmp")
-    temporary_path.unlink(missing_ok=True)
-    pq.write_table(table, temporary_path, compression="zstd", compression_level=3)
-    os.replace(temporary_path, p2b_path)
-    return rows, False, len(rows)
+    write_price_to_beat_rows(rows)
+    request_count = sum(row["gamma_http_attempt_count"] for row in rows)
+    retry_target_count = sum(row["gamma_http_attempt_count"] > 1 for row in rows)
+    return rows, False, request_count, retry_target_count
 
 def timestamp_list(table, timestamp_col="timestamp_received"):
     if table is None or timestamp_col not in table.column_names:
@@ -576,9 +654,12 @@ off_grid_market_slugs = {
     slug for slug, market in markets.items()
     if (market["start_ms"] - day_start) % market_window_ms != 0
 }
-p2b_rows, p2b_artifact_reused, gamma_http_request_count = (
-    fetch_gamma_price_to_beat(nominal_markets)
-)
+(
+    p2b_rows,
+    p2b_artifact_reused,
+    gamma_http_request_count,
+    transient_retry_target_count,
+) = fetch_gamma_price_to_beat(nominal_markets)
 p2b_by_slug = {row["slug"]: row for row in p2b_rows}
 p2b_summary = {
     "artifact": p2b_path.name,
@@ -589,13 +670,14 @@ p2b_summary = {
     "off_grid_observed_market_count": len(off_grid_market_slugs),
     "target_market_count": len(p2b_rows),
     "gamma_http_request_count": gamma_http_request_count,
+    "transient_retry_target_count": transient_retry_target_count,
     "artifact_reused": p2b_artifact_reused,
     "successful_market_count": sum(row["fetch_succeeded"] for row in p2b_rows),
     "successful_observed_market_count": sum(
         row["fetch_succeeded"] for row in p2b_rows if row["observed"]
     ),
     "required_fields": ["eventMetadata.priceToBeat", "eventMetadata.finalPrice"],
-    "retry_policy": "one request per D market; an existing complete D artifact is reused; no retry and no D+2 fetch",
+    "retry_policy": "bounded retry for transient transport errors only; no semantic-field retry and no D+2 fetch",
     "diagnostic_fields_do_not_gate": ["gamma_event_id", "gamma_closed", "gamma_active"],
 }
 

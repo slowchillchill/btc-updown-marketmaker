@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import pathlib
+import socket
 import subprocess
 import tarfile
 import tempfile
@@ -23,6 +24,7 @@ DAY_START = int(
     dt.datetime.fromisoformat(DATE_ISO).replace(tzinfo=dt.timezone.utc).timestamp()
 )
 OBSERVED_SLUG = f"btc-updown-5m-{DAY_START}"
+TRANSIENT_SLUG = f"btc-updown-5m-{DAY_START + 600}"
 
 
 def utc_timestamp_array(epoch_seconds):
@@ -159,11 +161,24 @@ def make_aggtrade_day_mixed_v2_v3(local_root):
 class GammaHandler(BaseHTTPRequestHandler):
     requests = []
     lock = threading.Lock()
+    transient_failures_before_success = 1
 
     def do_GET(self):
         with self.lock:
             self.requests.append(self.path)
+            request_attempt = self.requests.count(self.path)
         slug = self.path.rsplit("/", 1)[-1]
+        if (
+            slug == TRANSIENT_SLUG
+            and request_attempt <= self.transient_failures_before_success
+        ):
+            self.close_connection = True
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            self.connection.close()
+            return
         if slug == OBSERVED_SLUG:
             body = {
                 "id": "event-1",
@@ -177,6 +192,13 @@ class GammaHandler(BaseHTTPRequestHandler):
             }
         elif slug == f"btc-updown-5m-{DAY_START + 300}":
             body = {"eventMetadata": {"priceToBeat": 1.25}}
+        elif slug == TRANSIENT_SLUG:
+            body = {
+                "eventMetadata": {
+                    "priceToBeat": 60182.25,
+                    "finalPrice": 60182.50,
+                }
+            }
         else:
             body = {}
         payload = json.dumps(body).encode()
@@ -228,8 +250,13 @@ else:
     cli.chmod(0o755)
 
 
-def run_archive_with_gamma(local_root, env_overrides=None):
+def run_archive_with_gamma(
+    local_root,
+    env_overrides=None,
+    transient_failures_before_success=1,
+):
     GammaHandler.requests = []
+    GammaHandler.transient_failures_before_success = transient_failures_before_success
     server = ThreadingHTTPServer(("127.0.0.1", 0), GammaHandler)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
@@ -245,6 +272,8 @@ def run_archive_with_gamma(local_root, env_overrides=None):
                 ),
                 "DATA_COLLECT_ARCHIVE_GAMMA_WORKERS": "4",
                 "DATA_COLLECT_ARCHIVE_GAMMA_TIMEOUT_SECONDS": "2",
+                "DATA_COLLECT_ARCHIVE_GAMMA_TRANSIENT_MAX_ATTEMPTS": "3",
+                "DATA_COLLECT_ARCHIVE_GAMMA_TRANSIENT_RETRY_DELAY_SECONDS": "0",
                 "DATA_COLLECT_ARCHIVE_THREADS": "1",
             }
         )
@@ -300,9 +329,18 @@ class DailyArchiveContractTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             request_counts = collections.Counter(requests)
-            self.assertEqual(sum(request_counts.values()), 288)
+            self.assertEqual(sum(request_counts.values()), 289)
             self.assertEqual(len(request_counts), 288)
-            self.assertTrue(all(count == 1 for count in request_counts.values()))
+            self.assertEqual(
+                request_counts[f"/events/slug/{TRANSIENT_SLUG}"], 2
+            )
+            self.assertTrue(
+                all(
+                    count == 1
+                    for path, count in request_counts.items()
+                    if path != f"/events/slug/{TRANSIENT_SLUG}"
+                )
+            )
             requested_epochs = sorted(int(path.rsplit("-", 1)[-1]) for path in request_counts)
             self.assertEqual(requested_epochs[0], DAY_START)
             self.assertEqual(requested_epochs[-1], DAY_START + (287 * 300))
@@ -313,9 +351,10 @@ class DailyArchiveContractTest(unittest.TestCase):
             self.assertEqual(report["rejected_market_count"], 0)
             self.assertIn(str(partial.relative_to(local_root / DATE_ISO)), report["partial_artifacts"])
             self.assertEqual(report["price_to_beat"]["target_market_count"], 288)
-            self.assertEqual(report["price_to_beat"]["gamma_http_request_count"], 288)
+            self.assertEqual(report["price_to_beat"]["gamma_http_request_count"], 289)
+            self.assertEqual(report["price_to_beat"]["transient_retry_target_count"], 1)
             self.assertFalse(report["price_to_beat"]["artifact_reused"])
-            self.assertEqual(report["price_to_beat"]["successful_market_count"], 1)
+            self.assertEqual(report["price_to_beat"]["successful_market_count"], 2)
 
             p2b_path = local_root / DATE_ISO / "price_to_beat.parquet"
             p2b = pq.read_table(p2b_path)
@@ -336,6 +375,11 @@ class DailyArchiveContractTest(unittest.TestCase):
             ][0]
             self.assertFalse(incomplete["fetch_succeeded"])
             self.assertEqual(incomplete["diagnostic_error"], "p2b_final_missing")
+            transient = [
+                row for row in p2b.to_pylist() if row["slug"] == TRANSIENT_SLUG
+            ][0]
+            self.assertTrue(transient["fetch_succeeded"])
+            self.assertEqual(transient["gamma_http_attempt_count"], 2)
 
             archive_path = local_root / "archives" / archive_name
             with tarfile.open(archive_path, "r:gz") as archive:
@@ -394,6 +438,122 @@ class DailyArchiveContractTest(unittest.TestCase):
             )
             self.assertTrue(rerun_report["price_to_beat"]["artifact_reused"])
 
+    def test_existing_artifact_retries_only_transient_transport_failures(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            local_root = pathlib.Path(temporary) / "new-datasets"
+            build_day_fixture(local_root)
+
+            first, first_requests = run_archive_with_gamma(
+                local_root,
+                {
+                    "DATA_COLLECT_ARCHIVE_SKIP_UPLOAD": "1",
+                    "DATA_COLLECT_ARCHIVE_GAMMA_TRANSIENT_MAX_ATTEMPTS": "1",
+                },
+            )
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            self.assertEqual(len(first_requests), 288)
+
+            p2b_path = local_root / DATE_ISO / "price_to_beat.parquet"
+            first_rows = {row["slug"]: row for row in pq.read_table(p2b_path).to_pylist()}
+            self.assertFalse(first_rows[TRANSIENT_SLUG]["fetch_succeeded"])
+            self.assertTrue(
+                first_rows[TRANSIENT_SLUG]["diagnostic_error"].startswith(
+                    "transient_transport_error:"
+                )
+            )
+            self.assertEqual(
+                first_rows[f"btc-updown-5m-{DAY_START + 300}"]["diagnostic_error"],
+                "p2b_final_missing",
+            )
+
+            legacy_rows = list(first_rows.values())
+            for row in legacy_rows:
+                row.pop("gamma_http_attempt_count", None)
+                row["schema_version"] = "price-to-beat-gamma-v1"
+            legacy_rows[
+                next(
+                    index
+                    for index, row in enumerate(legacy_rows)
+                    if row["slug"] == TRANSIENT_SLUG
+                )
+            ]["diagnostic_error"] = (
+                "request_error:TimeoutError:<urlopen error _ssl.c:1063: "
+                "The handshake operation timed out>"
+            )
+            pq.write_table(pa.Table.from_pylist(legacy_rows), p2b_path)
+
+            second, second_requests = run_archive_with_gamma(
+                local_root,
+                {"DATA_COLLECT_ARCHIVE_SKIP_UPLOAD": "1"},
+            )
+            self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+            self.assertEqual(
+                second_requests,
+                [
+                    f"/events/slug/{TRANSIENT_SLUG}",
+                    f"/events/slug/{TRANSIENT_SLUG}",
+                ],
+            )
+            migrated = pq.read_table(p2b_path)
+            self.assertEqual(migrated.num_rows, 288)
+            self.assertIn("gamma_http_attempt_count", migrated.column_names)
+            self.assertEqual(migrated["gamma_http_attempt_count"].null_count, 0)
+            second_rows = {row["slug"]: row for row in migrated.to_pylist()}
+            self.assertEqual(
+                {row["schema_version"] for row in second_rows.values()},
+                {"price-to-beat-gamma-v2"},
+            )
+            self.assertTrue(second_rows[TRANSIENT_SLUG]["fetch_succeeded"])
+            self.assertEqual(second_rows[TRANSIENT_SLUG]["gamma_http_attempt_count"], 2)
+            self.assertFalse(
+                second_rows[f"btc-updown-5m-{DAY_START + 300}"]["fetch_succeeded"]
+            )
+            for slug, first_row in first_rows.items():
+                if slug == TRANSIENT_SLUG:
+                    continue
+                for field in (
+                    "fetch_succeeded",
+                    "polymarket_price_to_beat",
+                    "polymarket_final_price",
+                    "diagnostic_error",
+                ):
+                    self.assertEqual(second_rows[slug][field], first_row[field])
+            report = json.loads(
+                (local_root / DATE_ISO / "validation_report.json").read_text()
+            )
+            self.assertTrue(report["price_to_beat"]["artifact_reused"])
+            self.assertEqual(report["price_to_beat"]["gamma_http_request_count"], 2)
+            self.assertEqual(report["price_to_beat"]["transient_retry_target_count"], 1)
+
+    def test_transient_attempt_override_is_clamped_to_three(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            local_root = pathlib.Path(temporary) / "new-datasets"
+            build_day_fixture(local_root)
+            result, requests = run_archive_with_gamma(
+                local_root,
+                {
+                    "DATA_COLLECT_ARCHIVE_SKIP_UPLOAD": "1",
+                    "DATA_COLLECT_ARCHIVE_GAMMA_TRANSIENT_MAX_ATTEMPTS": "100",
+                },
+                transient_failures_before_success=3,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(requests.count(f"/events/slug/{TRANSIENT_SLUG}"), 3)
+            rows = {
+                row["slug"]: row
+                for row in pq.read_table(
+                    local_root / DATE_ISO / "price_to_beat.parquet"
+                ).to_pylist()
+            }
+            self.assertFalse(rows[TRANSIENT_SLUG]["fetch_succeeded"])
+            self.assertEqual(rows[TRANSIENT_SLUG]["gamma_http_attempt_count"], 3)
+            self.assertTrue(
+                rows[TRANSIENT_SLUG]["diagnostic_error"].startswith(
+                    "transient_transport_error:"
+                )
+            )
+
     def test_slug_epoch_is_the_market_boundary_and_metadata_mismatch_is_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             local_root = pathlib.Path(temporary) / "new-datasets"
@@ -404,7 +564,8 @@ class DailyArchiveContractTest(unittest.TestCase):
             )
 
             self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(len(requests), 288)
+            self.assertEqual(len(set(requests)), 288)
+            self.assertEqual(requests.count(f"/events/slug/{TRANSIENT_SLUG}"), 2)
             report = json.loads(
                 (local_root / DATE_ISO / "validation_report.json").read_text()
             )
@@ -427,7 +588,8 @@ class DailyArchiveContractTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(len(requests), 288)
+            self.assertEqual(len(set(requests)), 288)
+            self.assertEqual(requests.count(f"/events/slug/{TRANSIENT_SLUG}"), 2)
             self.assertNotIn(f"/events/slug/{off_grid_slug}", requests)
             report = json.loads(
                 (local_root / DATE_ISO / "validation_report.json").read_text()

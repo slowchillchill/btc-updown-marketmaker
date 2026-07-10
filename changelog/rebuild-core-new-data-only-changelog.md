@@ -2,7 +2,7 @@
 
 事项编号：`rebuild-core-new-data-only`
 
-状态：`基础准备修订与采集增量执行；FinalDatasetBoundaryStatus=DEFERRED_TO_OBSERVED_COLLECTION；BinanceAggTradeSchemaStatus=V3_AUTHORIZED_FOR_IMMEDIATE_DEPLOY；未开始模拟或训练`
+状态：`基础准备修订与 D+1 归档验证；FinalDatasetBoundaryStatus=DEFERRED_TO_OBSERVED_COLLECTION；BinanceAggTradeSchemaStatus=V3_DEPLOYED_AND_VERIFIED；未开始模拟或训练`
 
 对应需求：`/home/chillchill/btc-updown-marketmaker/demand/rebuild-core-new-data-only-demand.md`
 
@@ -233,7 +233,7 @@
 
 - 用户否决了必须同时满足 closed、acceptingOrders=false、UMA resolved、winner one-hot 和公式一致性才视为 MATURE 的方案；该方案会把非核心诊断放大成数据不可用或整日终止风险。
 - 新核心条件只有同一 slug 的 `eventMetadata.priceToBeat` 和 `eventMetadata.finalPrice` 同时存在。closed/resolved/winner 字段如果保留只能作诊断，不得阻断两个目标字段落盘。
-- 回填仅在 D+1 UTC 02:00 对昨天 D 执行一次；不增加 D+2、不做语义重试、不扩展到网页 internal endpoint。完整 288-slug D 文件已存在时原样复用且不再请求，避免重跑用空值覆盖已取得的两字段。
+- 回填仅在 D+1 UTC 02:00 对昨天 D 执行；不增加 D+2、不扩展到网页 internal endpoint。用户随后明确更正：TLS handshake timeout 这类瞬时传输错误应当重试；只有 HTTP 已到达但 `priceToBeat/finalPrice` 缺失才不做语义重试。因此实现改为瞬时传输错误最多 3 attempts，已有 D 文件只重请瞬时失败 rows，不覆盖已成功或语义缺失 rows。P2B artifact 升为 `price-to-beat-gamma-v2`，逐 row 记录 `gamma_http_attempt_count`。
 
 ### hot path 实现审计
 
@@ -252,6 +252,13 @@
 - 修正语义：只拉取昨天 `typed_raw/utc_day=D` 及其同名 segment manifests，不拉当天分区或整个当前 `run_manifests/`；partial 只写报告且绝不读取，市场是否保留交由现有逐 market gap 规则。v2/v3 混合日改为逐文件读取后按字段并集拼接，旧 v2 rows 的 `trade_time=null`，新 v3 rows 保留真实 `T`。
 - 云端同名昨天包必须按当前本地/远端 SHA1 核对，不能只看名字就报告成功。
 - 完整 canonical/feature/label/trajectory 处理脚本属于本仓库 `data-pipeline/`，后续部署到 5090 的 `~/btc-updown-marketmaker/data-pipeline` 执行；不继续把每日归档脚本扩成训练 pipeline。
+
+### schema v3 提交、部署与真实数据验收
+
+- 首次提交/push 为 `3a1b7254fc1cef00ab950acb906181ad7cbd1e3d`；从该 commit 干净 worktree 本地构建 release `3a1b7254fc1c-aggtrade-v3-20260710T143830Z`，training binary SHA256=`78c59f31ce8a9803d72c791c1ff066ced6660f7072137e6719b0dd9570c3058e`。
+- 数据采集服务器已完成整包 SHA 验证、`current` 切换和受控重启。当前 PID `951266`、进程 SHA 一致、service `active/running`、`NRestarts=0`，6 个 writer 全部打开。
+- 真实 `binance_aggtrade_2026-07-10T14--part=1.parquet` 为 `binance_aggtrade_v3`、`Complete`、`1298` rows、E/T 都无 null、`source_gaps=[]`；`566` rows 的 E/T 不同，差值范围 `0..3ms`。因此 `CollectionStartReadinessStatus` 已更新为 `SCHEMA_V3_DEPLOYED_AND_VERIFIED`，但这不自动冻结正式 cohort 起点。
+- 本地 D+1 timer 已启用为 UTC `02:00`。首次 Persistent 补触发读取的是昨天 `2026-07-09`；在打包上传前因用户更新“TLS 瞬时错误应重试”而受控停止，没有上传该次未完整结果。
 
 ### 当前授权边界
 

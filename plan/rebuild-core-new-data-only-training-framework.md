@@ -2,7 +2,7 @@
 
 事项编号：`rebuild-core-new-data-only`
 
-状态：`基础准备技术设计；FinalDatasetBoundaryStatus=DEFERRED_TO_OBSERVED_COLLECTION；BinanceAggTradeSchemaStatus=V3_AUTHORIZED_FOR_IMMEDIATE_DEPLOY；全部 Training Stage T0-T6 未授权`
+状态：`基础准备技术设计；FinalDatasetBoundaryStatus=DEFERRED_TO_OBSERVED_COLLECTION；BinanceAggTradeSchemaStatus=V3_DEPLOYED_AND_VERIFIED；全部 Training Stage T0-T6 未授权`
 
 对应需求：`/home/chillchill/btc-updown-marketmaker/demand/rebuild-core-new-data-only-demand.md`
 
@@ -155,7 +155,7 @@ allowance、wallet权限和 `PermissionVerdict` 不进入模型 AccountExecution
 
 ### 4.3 两类边界价格与状态重建
 
-`PriceToBeatAuthorityContract` 仅围绕 Polymarket 平台字段保存：slug/market boundary、`polymarket_price_to_beat`、`polymarket_final_price`、无精度损失的十进制字符串、fetch time、HTTP/缺失状态、source URL、schema version 和整体 artifact hash。D+1 UTC 02:00 对昨天 D 的每个目标 slug 调用一次 Gamma `GET /events/slug/{slug}`；只有 `priceToBeat` 和 `finalPrice` 同时存在才记为该 market 回填成功。`closed`、`acceptingOrders`、`umaResolutionStatus`、winner one-hot 或结果交叉验证都不是准入门，不得使整日流程停止。D 的完整 288-slug 文件已存在时原样复用且不再请求；不设 D+2，不做语义重试。这是用户已批准的 Gamma 日级冷路径 SDK 缺口例外，不扩展为生产热路径的 raw REST 旁路。
+`PriceToBeatAuthorityContract` 仅围绕 Polymarket 平台字段保存：slug/market boundary、`polymarket_price_to_beat`、`polymarket_final_price`、无精度损失的十进制字符串、fetch time、HTTP/缺失状态、`gamma_http_attempt_count`、source URL、`price-to-beat-gamma-v2` schema 和整体 artifact hash。D+1 UTC 02:00 对昨天 D 的每个目标 slug 发起 Gamma `GET /events/slug/{slug}`；只有 `priceToBeat` 和 `finalPrice` 同时存在才记为该 market 回填成功。`closed`、`acceptingOrders`、`umaResolutionStatus`、winner one-hot 或结果交叉验证都不是准入门，不得使整日流程停止。瞬时传输错误有界重试，HTTP 响应已到达但字段缺失时不重试；已有 D 文件只重请瞬时失败 rows。不设 D+2。这是用户已批准的 Gamma 日级冷路径 SDK 缺口例外，不扩展为生产热路径的 raw REST 旁路。
 
 未来 paper/live 热路径 handoff 合同必须显式传输可空的 `price_to_beat` 和 `final_price`，但不因缺失而阻断传输。冷路径回填值与热路径当时可见值必须保留各自的 available/receive time：`final_price` 和市场结束后才回填的 `price_to_beat` 只是 label/evaluation 证据，不得泄漏到更早的模型状态。
 

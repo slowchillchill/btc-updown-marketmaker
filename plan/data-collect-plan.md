@@ -34,7 +34,7 @@
 ### 增量阶段 B：D+1 昨天归档与 Gamma 两字段
 
 - 任务 B.1：定时器改为 UTC 02:00，脚本默认且定时执行只拉取昨天 D 的 `typed_raw/utc_day=D` 及同名 segment manifests，不拉当天分区或整个当前 `run_manifests/`。 -> 验证：默认日期是 `date -u -d yesterday`，rsync 数据根只指向 D 分区。
-- 任务 B.2：对 D 的 288 个名义 slug 首次各请求一次 Gamma，生成 `price_to_beat.parquet`；完整 D 文件已存在时原样复用。 -> 验证：只有 `priceToBeat + finalPrice` 同时存在才使该 market 回填成功；closed/resolved/winner 只能是诊断，无 D+2 且无语义重试；连续执行第二次时 Gamma 请求数为零且 P2B hash 不变。
+- 任务 B.2：对 D 的 288 个名义 slug 发起 Gamma 逻辑读取，以 `price-to-beat-gamma-v2` 生成带 `gamma_http_attempt_count` 的 `price_to_beat.parquet`。 -> 验证：只有 `priceToBeat + finalPrice` 同时存在才使该 market 回填成功；closed/resolved/winner 只能是诊断；TLS/timeout/connection reset/`URLError` 最多 3 次传输 attempts 且单次等待最多 5 秒，但字段缺失只有 1 次 HTTP attempt；无 D+2；已有 D 文件只重请瞬时失败 rows。
 - 任务 B.3：忽略但记录历史 partial，按现有逐 market 窗口规则选择可用 market，将昨天报告、P2B 文件和有效 market 打包上传。 -> 验证：已知四字节 T08 running 文件不进 parquet reader；云端同名旧包按内容 SHA1 覆盖且与本地一致。
 - 任务 B.4：完整 canonical/feature/label/trajectory 处理保持在 `data-pipeline/`，后续部署到 5090 执行。 -> 验证：日级归档脚本不生成训练 feature/label/split。
 

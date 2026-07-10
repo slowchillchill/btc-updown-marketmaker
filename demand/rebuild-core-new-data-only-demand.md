@@ -2,7 +2,7 @@
 
 事项编号：`rebuild-core-new-data-only`
 
-状态：`基础准备修订中；FinalDatasetBoundaryStatus=DEFERRED_TO_OBSERVED_COLLECTION；CollectionStartReadinessStatus=SCHEMA_V3_AND_REDEPLOY_AUTHORIZED；不授权模拟、训练、paper、live或资金操作`
+状态：`基础准备修订中；FinalDatasetBoundaryStatus=DEFERRED_TO_OBSERVED_COLLECTION；CollectionStartReadinessStatus=SCHEMA_V3_DEPLOYED_AND_VERIFIED；不授权模拟、训练、paper、live或资金操作`
 
 对应执行计划：`/home/chillchill/btc-updown-marketmaker/plan/rebuild-core-new-data-only-plan.md`
 
@@ -69,7 +69,7 @@
 7. 在没有真实本账户 execution feedback 的情况下，queue position、fill、partial fill、cancel race、sellable maturity 等不可识别量只能是 `assumed` 或 `stress` simulator 参数；由其生成的策略候选默认 `non-promotable`。任何旧执行 artifact 若未来用于校准，必须另行取得用户批准，且不能作为模型直接输入。
 8. `price-to-beat` 是 BTC 5 分钟 Up/Down market 的必需状态与最终结果解释依据。用户已批准一个范围受限的 SDK 例外：本地 D+1 日归档任务可从官方 `gamma-api.polymarket.com` 读取已结束目标市场的 `eventMetadata.priceToBeat` 与 `eventMetadata.finalPrice`，不得扩展到网页 internal endpoint、下单路径或影子 SDK。
 9. Gamma 日级回填的核心成功条件只有两个：同一目标 slug 的 `priceToBeat` 和 `finalPrice` 都存在并可无精度损失地保存为十进制字符串。`closed`、`acceptingOrders`、`umaResolutionStatus`、winner 或公式一致性只能作为可选诊断字段，缺失或不一致不得阻断这两个目标字段落盘、整日归档或其他市场可用性。
-10. 日级回填只在 D+1 UTC 02:00 对昨天 D 执行一次，不设置 D+2 final audit 或语义重试。单个市场缺任一目标字段时只标记 `fetch_succeeded=false` 与 `diagnostic_error=p2b_final_missing`，不得暂停整日流程。若 D 的完整 288-slug `price_to_beat.parquet` 已存在，重跑必须原样复用并且 Gamma 请求数为零；现有文件不符合该 D 合同时应明确失败，不自动二次请求。
+10. 日级回填只在 D+1 UTC 02:00 对昨天 D 执行，不设置 D+2 final audit。TLS handshake timeout、timeout、connection reset 或 `URLError` 这类瞬时传输错误必须在本次 D+1 执行内做有界重试；HTTP 业务响应已到达但缺任一目标字段时不做语义重试，只标记 `fetch_succeeded=false` 与 `diagnostic_error=p2b_final_missing`，不得暂停整日流程。P2B artifact schema 升为 `price-to-beat-gamma-v2`，必须逐 row 保存 `gamma_http_attempt_count`。若已有完整 288-slug D 文件，已成功和语义缺失 rows 必须原样复用；仅允许重请文件中标记为瞬时传输错误的 slug。现有文件不符合该 D 合同时应明确失败，不自动重建全部文件。
 11. RTDS Chainlink 仍作为实时价格流与因果时间证据保存，但不得再用 RTDS exact-row、winner、closed/resolved 等额外条件阻断 Gamma 两字段回填。Polymarket 与 Binance 两套基准必须分名：`polymarket_price_to_beat` / `polymarket_final_price` 与 `binance_start_reference_price` / `binance_end_reference_price`。
 12. future paper/live hot path 必须显式传输同一 slug 下两个 nullable decimal-string 字段：交易期间可用的 `price_to_beat` 与结束后出现的 `final_price`。缺字段只保持 nullable/pending，不新增 closed/resolved/winner 阻断门；consumer 以本机 runtime receive time 更新状态。当前 data-collect paper/live 二进制只有 heartbeat，尚未实现真实 external market event 或这两个字段，不能宣称已支持。
 
@@ -273,7 +273,7 @@
 ### 14.1 基础准备文档验收
 
 - [ ] 需求、计划、核心训练框架和 changelog 使用同一事项编号并互相引用。
-- [ ] 三类文档明确当前训练仍处于准备阶段，只有 schema v3、D+1 归档和重新部署是本轮已授权实现；不声称目标 cohort 已存在或训练已开始。
+- [ ] 三类文档明确当前训练仍处于准备阶段，schema v3 与重新部署已完成，D+1 归档按当前合同执行；不声称目标 cohort 已存在或训练已开始。
 - [ ] 四文档均记录旧方案 B 已撤销，正式日期等待新 schema 实际采集后由用户重新选择。
 - [ ] 完全禁止 old-datasets、旧 normalizer、旧 bundle 和旧 split 进入正式训练。
 - [ ] `mistake-log` 中的固定 tick、短状态、action collapse、未消费 head、reward interval、账本和 split 泄漏均有对应阻断门。
@@ -282,7 +282,7 @@
 
 - [ ] 目标 UTC cohort、model context halo、state reconstruction lookback、label/account tail、collector/version regime 和全部文件 hash 已冻结。
 - [ ] canonical builder 从 finalized typed raw + manifests + health/clock evidence 读取，不依赖 `validated_markets` 或物理 row order。
-- [ ] D+1 Gamma 日文件将 `priceToBeat` 与 `finalPrice` 无精度损失地保存为十进制字符串；只以这两个字段是否存在判定该回填目标，其他诊断字段不阻断归档；重跑复用既有完整 D 文件且不再请求 Gamma。
+- [ ] D+1 Gamma 日文件将 `priceToBeat` 与 `finalPrice` 无精度损失地保存为十进制字符串；只以这两个字段是否存在判定回填目标，其他诊断字段不阻断归档；瞬时传输错误有界重试，字段缺失不重试，重跑只重请已有 D 文件中的瞬时失败 rows。
 - [ ] Polymarket transport identity 已生效；或用户明确批准同毫秒原子 microbatch 降级并接受 `representation_only/non-promotable` 能力。
 - [ ] 每个 market 的 T-30、depth checkpoint、四连续源 coverage、source gap、sequence、metadata lineage、price-to-beat 和 label maturity 已形成 `EpisodeEligibilityRecord`。
 - [ ] unresolved、partial、clock-unknown、identity-unknown 和 version-mixed episode 未被静默收入 `policy_training_eligible`。

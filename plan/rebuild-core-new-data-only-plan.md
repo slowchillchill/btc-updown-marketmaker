@@ -2,7 +2,7 @@
 
 事项编号：`rebuild-core-new-data-only`
 
-状态：`基础准备修订与采集 schema 更新；FinalDatasetBoundaryStatus=DEFERRED_TO_OBSERVED_COLLECTION；CollectionStartReadinessStatus=SCHEMA_V3_AND_REDEPLOY_AUTHORIZED`
+状态：`基础准备修订与 D+1 归档验证；FinalDatasetBoundaryStatus=DEFERRED_TO_OBSERVED_COLLECTION；CollectionStartReadinessStatus=SCHEMA_V3_DEPLOYED_AND_VERIFIED`
 
 对应需求：`/home/chillchill/btc-updown-marketmaker/demand/rebuild-core-new-data-only-demand.md`
 
@@ -143,8 +143,8 @@ frozen holdout
 
 - 步骤 1.3.1：D+1 UTC 02:00 对昨天 D 的目标 slug 调用经用户批准的官方 Gamma JSON 路径，将 `priceToBeat` 与 `finalPrice` 无精度损失地保存为十进制字符串。
   验证：只有这两个字段是否存在决定该市场回填成功；closed/resolved/winner 等诊断信息不阻断字段落盘或整日流程。
-- 步骤 1.3.2：单次执行，不增加 D+2、语义重试或网页 internal endpoint；单市场缺字段写 `fetch_succeeded=false` 与 `diagnostic_error=p2b_final_missing`。D 的完整 288-slug 文件已存在时直接复用并且不发起 Gamma 请求；现有文件不匹配 D 合同时明确失败，不自动修复或重请。
-  验证：其他市场仍可验证、打包、上传；不存在一个缺失字段导致整日暂停；连续执行两次时第二次的 Gamma 请求数为零且 P2B 文件 hash 不变。
+- 步骤 1.3.2：不增加 D+2 或网页 internal endpoint。TLS handshake timeout/timeout/connection reset/`URLError` 使用最多 3 次、单次等待不超过 5 秒的传输重试；HTTP 响应已到达但缺字段时不做语义重试，只写 `fetch_succeeded=false` 与 `diagnostic_error=p2b_final_missing`。P2B schema 使用 `price-to-beat-gamma-v2`，每 row 写 `gamma_http_attempt_count`。已有完整 D 文件时只重请其中的瞬时传输失败 rows；现有文件不匹配 D 合同时明确失败。
+  验证：故意断开首次连接时同 slug 第二次成功；只缺 `finalPrice` 的 slug 仍只有一次 HTTP 请求；已有 v1 D 文件中只重请瞬时失败 slug，迁移后 288 rows 全部为 v2、attempt count 非空且其他价格/状态不变；把 max-attempt override 设为 100 仍只发起 3 attempts。
 - 步骤 1.3.3：冻结 cold/hot 分界。cold 日文件用于训练参考；future paper/live handoff v2 必须传两个 nullable decimal-string 字段并按 runtime receive time 更新，当前 heartbeat-only 实现明确为未完成。
   验证：缺 closed/resolved/winner 仍能传字段；cold fetch time 不冒充 hot receive time。
 

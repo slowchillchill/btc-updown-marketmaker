@@ -15,11 +15,15 @@
 - 回归测试新增真实区分 `E/T` 的 row 转换和 Parquet 读回断言，并更新 hourly partition/manifest 的 v3 期望。聚焦 Rust 测试通过 `19/19`。
 - 审计确认当前 paper/live hot binary 仅运行 heartbeat/status server，`HandoffFrame` 不含 `price_to_beat/final_price`，生产路径也没有真实 `external_market_event` producer。已在 demand/plan 冻结 future 两个 nullable decimal-string 字段与非阻断语义；本轮未修改 hot handoff runtime，未部署 paper/live。
 - 日级运维脚本修正为 UTC 02:00 执行、默认仅同步昨天 D 的 `typed_raw/utc_day=D` 和同名 segment manifests；不再拉取整个 `training/run_manifests/`，因为该目录会包含仍在更新的 D+1 长跑记录且日归档本身不消费该目录。
-- Gamma 回填首次固定请求 D 日 288 个 nominal slug，每个只请求一次。只有 `eventMetadata.priceToBeat` 与 `eventMetadata.finalPrice` 同时存在才使该 market 回填成功；closed/active/event id 仅作诊断，不设 D+2 或语义重试。产物以 `polymarket_price_to_beat/polymarket_final_price` 无精度损失十进制字符串写入 `price_to_beat.parquet` 并纳入昨天 tar；完整 D 文件已存在时重跑直接复用，不再请求 Gamma。
+- Gamma 回填固定覆盖 D 日 288 个 nominal slug。只有 `eventMetadata.priceToBeat` 与 `eventMetadata.finalPrice` 同时存在才使该 market 回填成功；closed/active/event id 仅作诊断，不设 D+2。用户在首次真实运行观察到 1 个 TLS handshake timeout 后明确修正为：TLS/timeout/connection reset/`URLError` 在本次任务内最多 3 attempts，HTTP 响应已到达但字段缺失不重试；已有 D 文件只重请瞬时失败 rows。产物升为 `price-to-beat-gamma-v2`，以 `polymarket_price_to_beat/polymarket_final_price` 十进制字符串和 `gamma_http_attempt_count` 写入 `price_to_beat.parquet` 并纳入昨天 tar。
 - 历史 `running/digesting/.tmp/.rsync-partial` 只记录而不读取，不再因孤立四字节 T08 running 文件全局退出；市场可用性仍由现有逐 market gap 规则决定。归档输出同时保留 v3 的 `event_time/trade_time`，不再把 `trade_time` 当作重复别名丢弃。
 - AliyunPan 同名上传使用 `--ow`，并将远端 listing SHA1 与当前本地 SHA1 比较；云端存在旧同名文件不再被误判为当前上传成功。
-- 归档合同测试通过 `4/4`：覆盖首次 288 个单次 Gamma 请求、第二次零请求且 P2B hash 不变、两字段门、P2B 入包、T08 partial 不进 reader、v2/v3 混合日不丢 `trade_time`、metadata 边界冲突、off-grid slug 不扩大请求和云端旧同名包覆盖；`bash -n` 和 systemd unit verify 通过。
+- 归档合同测试通过 `6/6`：覆盖 288 个逻辑 Gamma 目标、瞬时断线的第二 attempt 成功、字段缺失不重试、真实 v1 TLS-error artifact 只重请瞬时失败 row 并完整迁移为 v2、attempt override=100 仍 clamp 为 3、两字段门、P2B 入包、T08 partial 不进 reader、v2/v3 混合日不丢 `trade_time`、metadata 边界冲突、off-grid slug 不扩大逻辑目标和云端旧同名包覆盖；`bash -n` 和 systemd unit verify 通过。
 - 完整 canonical/feature/label/trajectory 处理仍明确属于本仓库 `data-pipeline/`，后续部署到 5090 服务器执行；本次不把日归档脚本扩成训练 pipeline。
+- 实现与文档首次提交/push 为 `3a1b7254fc1cef00ab950acb906181ad7cbd1e3d`。从该 commit 的干净 detached worktree 本地构建 release `3a1b7254fc1c-aggtrade-v3-20260710T143830Z`，training binary SHA256 为 `78c59f31ce8a9803d72c791c1ff066ced6660f7072137e6719b0dd9570c3058e`；远端整包 `sha256sum -c` 全部通过，数据服务器未运行 Cargo。
+- 远端 `current` 已从 `5c0d8907b54b-aggtrade-20260710T062005Z` 切换到 v3 release。两次受控 restart 后当前 PID `951266`，进程 SHA256 与发布值一致，`active/running`、`ExecMainStatus=0`、`NRestarts=0`，6 个 running writer 全部打开且 journal 无 error/panic/disconnected。
+- 真实 v3 验收文件为远端 `binance_aggtrade_2026-07-10T14--part=1.parquet`，拉回本地 `target/manual-inspection/3a1b7254fc1c-aggtrade-v3/`。Parquet SHA256=`4b2fd6b799f32cfcbd8307439ff2e4e6e987c58f435d6cfe38c555bef4c10551`，manifest SHA256=`12854112a907a306d3e28a4c9a658d93f8cae3766294c8f09916c92f2bb8a02a`；`Complete`、`row_count=1298`、`schema_version=binance_aggtrade_v3`、`source_gaps=[]`，E/T 都无 null。其中 `566/1298` rows 的 `E-T` 为非零，实测差值范围 `0..3ms`，证明两列不是伪造重复列。
+- 本地 archive timer 已安装并启用为 UTC `02:00`，下次为 `2026-07-11T02:00:00Z`。因 `Persistent=true` 立即补触发的 D=`2026-07-09` 首轮真实运行在打包上传前被受控停止：P2B 文件已形成 288 rows，287 成功、1 个 TLS handshake timeout，没有生成/上传 tar。用户因此明确瞬时传输错误必须重试，上述 5 项回归和实现已按该决定修正。
 
 ### DC-INCIDENT-20260709-AGGTRADE-T08 最小修复
 
