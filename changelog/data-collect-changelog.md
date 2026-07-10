@@ -19,6 +19,11 @@
 - 第二轮同一审查代理确认生产实现 finding 已关闭且没有过度设计，但指出测试 helper 主动关闭首连接会让 EOF 路径掩盖真实重连原因，以及 writer 测试只验证旧有 stop error、没有锁定调用方的 process failure。现已让 `serverShutdown`/Ping 测试保持首连接打开直至客户端主动建立第二条连接，并让 writer parser 测试断言调用方写入 `runtime_failure`。
 - 后续复审指出共享 helper 的 `1s` freshness 仍可能让 `serverShutdown` 测试通过错误原因；已将该 helper 的 freshness 调为 `10s`，大于 `2s` 测试等待窗口，确保 raw/combined 控制帧测试只能由主动识别触发重连。最终 `gpt-5.6-sol/ultra` 复审为 PASS，允许 commit/push。
 - 最终本地质量门通过：`cargo fmt --all -- --check`、完整 `cargo test -p data-collect --lib --tests --quiet`、`cargo clippy -p data-collect --all-targets -- -D warnings` 和 `git diff --check`。
+- 修复已提交并推送，commit 为 `5c0d8907b54be9f8a9a1ef3ccf95fd4de98810c6`。从该 commit 的干净临时 worktree 本地构建 release `5c0d8907b54b-aggtrade-20260710T062005Z`，训练 binary sha256 为 `8279b338ffbb2f9bf5ec480df458cdea9569c0dad400a0320c63f62bbf53efff`；远端未运行 Cargo。
+- 远端整包 SHA 校验通过后，`current` 从 `train-data-collect-ver1-0` 切换到新 release 并重启 user service。首次新 PID 为 `942675`，六个 writer 全部恢复；运行约 `111s` 后受控 restart/finalize，生成 `17191` bytes 的 T06 aggTrade parquet。对应 segment manifest 为 `Complete`、`row_count=789`、`aggtrade_rows=789`、`source_gaps=[]`；独立解析为 1 个 row group、789 行、无 null，aggregate trade id `4010919603..4010920391` 连续。
+- 该受控短 run `training-longrun-20260710T062226Z` 的 run manifest 为 `SOURCE_GAP`，仅因 `insufficient_polymarket_market_windows: observed=2 required=20` 和 `insufficient_rollover_edges: observed=0 required=1`；这是 `--run-forever` 在 111 秒后被人为停止时未满足长跑覆盖门槛，不代表 aggTrade segment 不完整，也不把该 run 记为整体 PASS。
+- 部署后当前 PID 为 `942838`，运行 binary sha256 与本地发布值一致，`ActiveState=active`、`SubState=running`、`ExecMainStatus=0`、`NRestarts=0`；30 秒稳定性检查 PID 未变化、writer 数为六、journal 无相关错误，新的 T06 part=1 running 文件已由 aggTrade writer 打开。旧 T08 四字节事故文件保持原状。
+- 阶段 2 `gpt-5.6-sol/ultra` 独立审查核对本地/远端 SHA、current symlink、service、socket bytes、parquet、segment/run manifest 和事故文件；补清 segment Complete 与短 run SOURCE_GAP 边界后最终 PASS，允许提交部署 receipt。
 - 专项需求见 `demand/data-collect-demand.md` 的同名增量需求，执行计划见 `plan/data-collect-source-writer-supervision-repair-plan.md`。事故文件不修改、不伪造完整性，历史缺口不包含在本次代码修复中。
 
 ## 2026-07-07

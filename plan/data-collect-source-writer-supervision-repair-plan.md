@@ -6,7 +6,7 @@
 >
 > 事项编号：`DC-INCIDENT-20260709-AGGTRADE-T08`
 >
-> 状态：`PHASE_1_REVIEW_PASSED`
+> 状态：`DEPLOYED_VERIFIED`
 
 ## 目标
 
@@ -114,6 +114,17 @@ git diff --check
 - Binance 24 小时断开、`serverShutdown` 和普通网络断线均可继续采集。
 - source/writer 静默退出不再让主进程伪装 healthy。
 - 新 aggTrade 数据恢复落盘；历史事故文件和缺口没有被伪装为 complete。
+
+## 执行结果
+
+- 修复 commit `5c0d8907b54be9f8a9a1ef3ccf95fd4de98810c6` 已推送到 `origin/data-collect-pmxt-hourly-retention`。
+- 本地从该 commit 的干净临时 worktree 构建 release `5c0d8907b54b-aggtrade-20260710T062005Z`；训练 binary sha256 为 `8279b338ffbb2f9bf5ec480df458cdea9569c0dad400a0320c63f62bbf53efff`。
+- 远端 `sha256sum -c SHA256SUMS` 全部通过；旧 `current` 为 `train-data-collect-ver1-0`，已切换到新 release。远端没有运行 Cargo 命令。
+- 首次重启后 PID 从 `922846` 变为 `942675`，六个 writer 全部存在；观察后再次受控重启完成短段 finalize。
+- finalized `binance_aggtrade_2026-07-10T06.parquet` 为 `17191` bytes，头尾均为 `PAR1`；对应 **segment manifest** 为 `Complete`、`row_count=789`、`aggtrade_rows=789`、`source_gaps=[]`。独立解析确认 1 个 row group、789 行、无 null，aggregate trade id 从 `4010919603` 连续到 `4010920391`。
+- 该段所属短 run `training-longrun-20260710T062226Z` 只运行约 `111s` 后为验证 finalize 而受控停止；其 **run manifest** 为 `SOURCE_GAP`，仅包含 `insufficient_polymarket_market_windows: observed=2 required=20` 和 `insufficient_rollover_edges: observed=0 required=1`。这是长跑覆盖门槛未满足，不是 aggTrade segment 缺口；本计划不把该短 run 表述为整体 PASS。
+- 当前 PID `942838`，`ActiveState=active`、`SubState=running`、`ExecMainStatus=0`、`NRestarts=0`；30 秒稳定性检查 PID 未变化，六个 writer 仍存在，journal 无相关错误。
+- 当前 aggTrade writer 已打开 `binance_aggtrade_2026-07-10T06--part=1-running.parquet` 继续采集；旧 T08 事故文件仍为 `4` bytes，未修改。
 
 ## 外部依据
 
