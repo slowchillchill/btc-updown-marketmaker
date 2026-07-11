@@ -23,7 +23,8 @@ DATE_ISO = "2026-07-09"
 DAY_START = int(
     dt.datetime.fromisoformat(DATE_ISO).replace(tzinfo=dt.timezone.utc).timestamp()
 )
-OBSERVED_SLUG = f"btc-updown-5m-{DAY_START}"
+OBSERVED_START = DAY_START + 900
+OBSERVED_SLUG = f"btc-updown-5m-{OBSERVED_START}"
 TRANSIENT_SLUG = f"btc-updown-5m-{DAY_START + 600}"
 
 
@@ -46,7 +47,7 @@ def write_parquet_with_manifest(path, table):
 def build_day_fixture(local_root, metadata_start_offset=0, metadata_end_offset=300):
     raw_day = local_root / DATE_ISO / "typed_raw" / f"utc_day={DATE_ISO}"
     offsets = list(range(0, 300, 30))
-    event_seconds = [DAY_START + offset for offset in offsets]
+    event_seconds = [OBSERVED_START + offset for offset in offsets]
     received = utc_timestamp_array(event_seconds)
 
     polymarket = pa.table(
@@ -58,8 +59,12 @@ def build_day_fixture(local_root, metadata_start_offset=0, metadata_end_offset=3
     metadata = pa.table(
         {
             "slug": pa.array([OBSERVED_SLUG]),
-            "market_start_utc": utc_timestamp_array([DAY_START + metadata_start_offset]),
-            "market_end_utc": utc_timestamp_array([DAY_START + metadata_end_offset]),
+            "market_start_utc": utc_timestamp_array(
+                [OBSERVED_START + metadata_start_offset]
+            ),
+            "market_end_utc": utc_timestamp_array(
+                [OBSERVED_START + metadata_end_offset]
+            ),
         }
     )
     continuous = pa.table({"timestamp_received": received})
@@ -70,13 +75,77 @@ def build_day_fixture(local_root, metadata_start_offset=0, metadata_end_offset=3
             "trade_time": utc_timestamp_array([value - 2 for value in event_seconds]),
         }
     )
-    snapshot = pa.table({"timestamp_received": utc_timestamp_array([DAY_START])})
+    snapshot = pa.table(
+        {
+            "timestamp_received": utc_timestamp_array(
+                [OBSERVED_START - 2, OBSERVED_START + 45]
+            ),
+            "snapshot_fetch_start_utc": utc_timestamp_array(
+                [OBSERVED_START - 3, OBSERVED_START + 44]
+            ),
+            "last_update_id": pa.array([100, 200], type=pa.uint64()),
+            "bids": pa.array(
+                ['[["100.00","1.00"]]', '[["99.00","3.00"]]']
+            ),
+            "asks": pa.array(
+                ['[["101.00","1.00"]]', '[["102.00","4.00"]]']
+            ),
+            "symbol": pa.array(["BTCUSDT", "BTCUSDT"]),
+            "source_endpoint": pa.array(["https://api.binance.test/depth"] * 2),
+            "snapshot_status": pa.array(["complete", "complete"]),
+            "collector_host_id": pa.array(["fixture-host"] * 2),
+            "collector_region": pa.array(["fixture-region"] * 2),
+            "schema_version": pa.array(["binance_depth_snapshot_v2"] * 2),
+        }
+    )
+    update_offsets = [-1, *offsets]
+    update_ids = [101, 102, 103, 201, 202, 203, 204, 205, 206, 207, 208]
+    local_u_before = [None, 101, 102, None, 201, 202, 203, 204, 205, 206, 207]
+    snapshot_ids = [100, 100, 100, 200, 200, 200, 200, 200, 200, 200, 200]
+    depth_update = pa.table(
+        {
+            "timestamp_received": utc_timestamp_array(
+                [OBSERVED_START + offset for offset in update_offsets]
+            ),
+            "event_type": pa.array(["depthUpdate"] * len(update_offsets)),
+            "event_time": utc_timestamp_array(
+                [OBSERVED_START + offset for offset in update_offsets]
+            ),
+            "symbol": pa.array(["BTCUSDT"] * len(update_offsets)),
+            "first_update_id": pa.array(update_ids, type=pa.uint64()),
+            "final_update_id": pa.array(update_ids, type=pa.uint64()),
+            "bids": pa.array(['[["100.00","2.00"]]'] * len(update_offsets)),
+            "asks": pa.array(
+                ['[["101.00","0.00"]]', *(["[]"] * (len(update_offsets) - 1))]
+            ),
+            "stream": pa.array(["btcusdt@depth"] * len(update_offsets)),
+            "snapshot_last_update_id": pa.array(snapshot_ids, type=pa.uint64()),
+            "local_u_before": pa.array(local_u_before, type=pa.uint64()),
+            "local_u_after": pa.array(update_ids, type=pa.uint64()),
+            "stitch_verdict": pa.array(
+                [
+                    "first_update_bridged_snapshot",
+                    "continuous_depth_update",
+                    "continuous_depth_update",
+                    "first_update_bridged_snapshot",
+                    *(["continuous_depth_update"] * 7),
+                ]
+            ),
+            "stitch_gap_reason": pa.array([None] * len(update_offsets), type=pa.string()),
+            "collector_host_id": pa.array(["fixture-host"] * len(update_offsets)),
+            "collector_region": pa.array(["fixture-region"] * len(update_offsets)),
+            "source_endpoint": pa.array(
+                ["wss://stream.binance.test/btcusdt@depth"] * len(update_offsets)
+            ),
+            "schema_version": pa.array(["binance_depth_update_v2"] * len(update_offsets)),
+        }
+    )
 
     tables = {
         "polymarket_market": polymarket,
         "polymarket_market_metadata": metadata,
         "binance_depth_snapshot": snapshot,
-        "binance_depth_update": continuous,
+        "binance_depth_update": depth_update,
         "binance_aggtrade": aggtrade,
         "polymarket_rtds_chainlink_btc_usd": continuous,
     }
@@ -405,6 +474,81 @@ class DailyArchiveContractTest(unittest.TestCase):
                 selected_aggtrade["trade_time"][v3_index].as_py(),
             )
 
+            market_dir = (
+                local_root / DATE_ISO / "validated_markets" / OBSERVED_SLUG
+            )
+            checkpoint = pq.read_table(
+                market_dir / "binance_depth_snapshot_bootstrap.parquet"
+            )
+            selected_depth = pq.read_table(
+                market_dir / "binance_depth_update_selected_window.parquet"
+            ).sort_by([("timestamp_received", "ascending")])
+            self.assertEqual(checkpoint.num_rows, 1)
+            self.assertIn("timestamp_received", checkpoint.column_names)
+            self.assertNotIn("snapshot_fetch_start_utc", checkpoint.column_names)
+            checkpoint_id = checkpoint["last_update_id"][0].as_py()
+            self.assertEqual(
+                checkpoint["timestamp_received"][0].as_py(),
+                dt.datetime.fromtimestamp(OBSERVED_START - 1, tz=dt.timezone.utc),
+            )
+            self.assertEqual(
+                checkpoint["snapshot_status"][0].as_py(),
+                "derived_market_start_checkpoint",
+            )
+            self.assertEqual(
+                checkpoint["schema_version"][0].as_py(),
+                "binance_depth_market_checkpoint_v1",
+            )
+            self.assertEqual(
+                json.loads(checkpoint["bids"][0].as_py()),
+                [["100.00", "2.00"]],
+            )
+            self.assertEqual(json.loads(checkpoint["asks"][0].as_py()), [])
+            first_update = selected_depth.slice(0, 1).to_pylist()[0]
+            self.assertEqual(checkpoint_id, 101)
+            self.assertEqual(checkpoint_id, first_update["local_u_before"])
+            self.assertLessEqual(first_update["first_update_id"], checkpoint_id + 1)
+            self.assertLessEqual(checkpoint_id + 1, first_update["final_update_id"])
+
+            resync_snapshots = pq.read_table(
+                market_dir / "binance_depth_snapshot_resync_window.parquet"
+            )
+            self.assertEqual(resync_snapshots.num_rows, 1)
+            self.assertIn("timestamp_received", resync_snapshots.column_names)
+            self.assertNotIn(
+                "snapshot_fetch_start_utc", resync_snapshots.column_names
+            )
+            self.assertEqual(resync_snapshots["last_update_id"][0].as_py(), 200)
+            first_after_resync = next(
+                row
+                for row in selected_depth.to_pylist()
+                if row["snapshot_last_update_id"] == 200
+            )
+            self.assertIsNone(first_after_resync["local_u_before"])
+            self.assertLessEqual(first_after_resync["first_update_id"], 201)
+            self.assertLessEqual(201, first_after_resync["final_update_id"])
+
+            market_window = json.loads(
+                (market_dir / "market_window.json").read_text()
+            )
+            reconstruction = market_window["binance_depth_reconstruction"]
+            self.assertEqual(reconstruction["status"], "valid")
+            self.assertEqual(reconstruction["checkpoint_last_update_id"], 101)
+            self.assertEqual(reconstruction["in_window_resnapshot_count"], 1)
+            self.assertEqual(
+                reconstruction["checkpoint_to_first_update_receive_gap_ms"], 1000
+            )
+
+            raw_snapshot = pq.read_table(
+                local_root
+                / DATE_ISO
+                / "typed_raw"
+                / f"utc_day={DATE_ISO}"
+                / "source_kind=binance_depth_snapshot"
+                / f"binance_depth_snapshot_{DATE_ISO}T00.parquet"
+            )
+            self.assertIn("snapshot_fetch_start_utc", raw_snapshot.column_names)
+
             remote_archive = remote_dir / archive_name
             self.assertEqual(
                 hashlib.sha1(remote_archive.read_bytes()).hexdigest(),
@@ -572,7 +716,7 @@ class DailyArchiveContractTest(unittest.TestCase):
             self.assertEqual(report["accepted_market_count"], 0)
             self.assertEqual(report["rejected_market_count"], 1)
             rejected = report["rejected_markets"][0]
-            self.assertEqual(rejected["start_utc_ms"], DAY_START * 1000)
+            self.assertEqual(rejected["start_utc_ms"], OBSERVED_START * 1000)
             self.assertTrue(
                 any("market_start_mismatch" in reason for reason in rejected["reasons"])
             )
@@ -601,6 +745,118 @@ class DailyArchiveContractTest(unittest.TestCase):
             self.assertIn(
                 "market_identity:slug_not_on_utc_5m_grid",
                 report["rejected_markets"][0]["reasons"],
+            )
+
+    def test_depth_chain_rejects_missing_in_window_resync_snapshot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            local_root = pathlib.Path(temporary) / "new-datasets"
+            build_day_fixture(local_root)
+            snapshot_path = (
+                local_root
+                / DATE_ISO
+                / "typed_raw"
+                / f"utc_day={DATE_ISO}"
+                / "source_kind=binance_depth_snapshot"
+                / f"binance_depth_snapshot_{DATE_ISO}T00.parquet"
+            )
+            snapshots = pq.ParquetFile(snapshot_path).read()
+            write_parquet_with_manifest(snapshot_path, snapshots.slice(0, 1))
+
+            result, _requests = run_archive_with_gamma(
+                local_root,
+                {"DATA_COLLECT_ARCHIVE_SKIP_UPLOAD": "1"},
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            report = json.loads(
+                (local_root / DATE_ISO / "validation_report.json").read_text()
+            )
+            self.assertEqual(report["accepted_market_count"], 0)
+            self.assertTrue(
+                any(
+                    reason.startswith(
+                        "binance_depth_reconstruction:missing_snapshot_anchor"
+                    )
+                    for reason in report["rejected_markets"][0]["reasons"]
+                )
+            )
+
+    def test_depth_chain_rejects_checkpoint_to_first_update_id_mismatch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            local_root = pathlib.Path(temporary) / "new-datasets"
+            build_day_fixture(local_root)
+            update_path = (
+                local_root
+                / DATE_ISO
+                / "typed_raw"
+                / f"utc_day={DATE_ISO}"
+                / "source_kind=binance_depth_update"
+                / f"binance_depth_update_{DATE_ISO}T00.parquet"
+            )
+            updates = pq.ParquetFile(update_path).read()
+            rows = updates.to_pylist()
+            rows[1]["local_u_before"] = 999
+            write_parquet_with_manifest(
+                update_path,
+                pa.Table.from_pylist(rows, schema=updates.schema),
+            )
+
+            result, _requests = run_archive_with_gamma(
+                local_root,
+                {"DATA_COLLECT_ARCHIVE_SKIP_UPLOAD": "1"},
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            report = json.loads(
+                (local_root / DATE_ISO / "validation_report.json").read_text()
+            )
+            self.assertEqual(report["accepted_market_count"], 0)
+            self.assertTrue(
+                any(
+                    reason.startswith(
+                        "binance_depth_reconstruction:local_u_before_mismatch"
+                    )
+                    for reason in report["rejected_markets"][0]["reasons"]
+                )
+            )
+
+    def test_depth_chain_rejects_malformed_in_window_resync_snapshot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            local_root = pathlib.Path(temporary) / "new-datasets"
+            build_day_fixture(local_root)
+            snapshot_path = (
+                local_root
+                / DATE_ISO
+                / "typed_raw"
+                / f"utc_day={DATE_ISO}"
+                / "source_kind=binance_depth_snapshot"
+                / f"binance_depth_snapshot_{DATE_ISO}T00.parquet"
+            )
+            snapshots = pq.ParquetFile(snapshot_path).read()
+            rows = snapshots.to_pylist()
+            rows[1]["bids"] = "not-json"
+            write_parquet_with_manifest(
+                snapshot_path,
+                pa.Table.from_pylist(rows, schema=snapshots.schema),
+            )
+
+            result, _requests = run_archive_with_gamma(
+                local_root,
+                {"DATA_COLLECT_ARCHIVE_SKIP_UPLOAD": "1"},
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            report = json.loads(
+                (local_root / DATE_ISO / "validation_report.json").read_text()
+            )
+            self.assertEqual(report["accepted_market_count"], 0)
+            self.assertTrue(
+                any(
+                    reason.startswith(
+                        "binance_depth_reconstruction:invalid_resnapshot"
+                    )
+                    for reason in report["rejected_markets"][0]["reasons"]
+                )
             )
 
 

@@ -190,6 +190,7 @@ validate_and_select_markets() {
 import concurrent.futures
 import datetime as dt
 import decimal
+import bisect
 import hashlib
 import json
 import os
@@ -328,6 +329,8 @@ def normalize_output_table(table):
         for legacy, replacement in legacy_replacements
         if legacy in table.column_names and replacement in table.column_names
     }
+    if "snapshot_fetch_start_utc" in table.column_names:
+        drop_columns.add("snapshot_fetch_start_utc")
     if drop_columns:
         table = table.select([name for name in table.column_names if name not in drop_columns])
     return table
@@ -544,11 +547,470 @@ def slug_filter(table, slug):
         mask = pc.or_(mask, extra)
     return table.filter(mask)
 
+def sort_table_by_receive_time(table):
+    if (
+        table is None
+        or table.num_rows <= 1
+        or "timestamp_received" not in table.column_names
+    ):
+        return table
+    sort_keys = [("timestamp_received", "ascending")]
+    for name in ("last_update_id", "first_update_id", "final_update_id"):
+        if name in table.column_names:
+            sort_keys.append((name, "ascending"))
+    return table.sort_by(sort_keys)
+
+class DepthReplay:
+    batch_size = 4096
+
+    def __init__(self, snapshot_table, update_table):
+        self.snapshot_table = snapshot_table
+        self.update_table = update_table
+        self.schema_issue = None
+        snapshot_required = {
+            "timestamp_received",
+            "last_update_id",
+            "bids",
+            "asks",
+        }
+        update_required = {
+            "timestamp_received",
+            "first_update_id",
+            "final_update_id",
+            "bids",
+            "asks",
+            "snapshot_last_update_id",
+            "local_u_before",
+            "local_u_after",
+        }
+        if snapshot_table is None:
+            self.schema_issue = "missing_snapshot_table"
+        elif not snapshot_required.issubset(snapshot_table.column_names):
+            missing = sorted(snapshot_required - set(snapshot_table.column_names))
+            self.schema_issue = f"missing_snapshot_columns:{','.join(missing)}"
+        elif update_table is None:
+            self.schema_issue = "missing_update_table"
+        elif not update_required.issubset(update_table.column_names):
+            missing = sorted(update_required - set(update_table.column_names))
+            self.schema_issue = f"missing_update_columns:{','.join(missing)}"
+
+        self.snapshots = []
+        self.snapshot_times = []
+        self.update_order = None
+        self.update_times = []
+        if self.schema_issue is None:
+            ordered_snapshots = sort_table_by_receive_time(snapshot_table)
+            self.snapshots = ordered_snapshots.to_pylist()
+            self.snapshot_times = [
+                utc_ms(row.get("timestamp_received")) for row in self.snapshots
+            ]
+            sort_keys = [("timestamp_received", "ascending")]
+            for name in ("first_update_id", "final_update_id"):
+                if name in update_table.column_names:
+                    sort_keys.append((name, "ascending"))
+            self.update_order = pc.sort_indices(update_table, sort_keys=sort_keys)
+            ordered_times = pc.take(
+                update_table["timestamp_received"], self.update_order
+            )
+            self.update_times = pc.cast(ordered_times, pa.int64()).to_pylist()
+
+        self.initialized = False
+        self.snapshot_position = 0
+        self.update_position = 0
+        self.update_buffer_start = -1
+        self.update_buffer = []
+        self.current_snapshot_row = None
+        self.current_snapshot_last_update_id = None
+        self.current_snapshot_received_ms = None
+        self.local_u = None
+        self.last_applied_received_ms = None
+        self.applied_update_count = 0
+        self.bids = {}
+        self.asks = {}
+        self.book_valid = False
+        self.current_issue = self.schema_issue
+
+    @staticmethod
+    def _parse_levels(raw_levels):
+        levels = json.loads(raw_levels) if isinstance(raw_levels, str) else raw_levels
+        if not isinstance(levels, list):
+            raise ValueError("levels_not_list")
+        book = {}
+        for level in levels:
+            if not isinstance(level, (list, tuple)) or len(level) < 2:
+                raise ValueError("invalid_level")
+            price = str(level[0])
+            quantity = str(level[1])
+            decimal.Decimal(price)
+            quantity_decimal = decimal.Decimal(quantity)
+            if quantity_decimal != 0:
+                book[price] = quantity
+        return book
+
+    @staticmethod
+    def _apply_levels(book, raw_levels):
+        levels = json.loads(raw_levels) if isinstance(raw_levels, str) else raw_levels
+        if not isinstance(levels, list):
+            raise ValueError("levels_not_list")
+        for level in levels:
+            if not isinstance(level, (list, tuple)) or len(level) < 2:
+                raise ValueError("invalid_level")
+            price = str(level[0])
+            quantity = str(level[1])
+            decimal.Decimal(price)
+            quantity_decimal = decimal.Decimal(quantity)
+            if quantity_decimal == 0:
+                book.pop(price, None)
+            else:
+                book[price] = quantity
+
+    @staticmethod
+    def _serialize_book(book, reverse):
+        levels = sorted(
+            book.items(),
+            key=lambda item: decimal.Decimal(item[0]),
+            reverse=reverse,
+        )
+        return json.dumps([[price, quantity] for price, quantity in levels], separators=(",", ":"))
+
+    def _invalidate(self, reason):
+        self.book_valid = False
+        self.current_issue = reason
+
+    def _apply_snapshot(self, row):
+        try:
+            self.bids = self._parse_levels(row.get("bids"))
+            self.asks = self._parse_levels(row.get("asks"))
+            if not self.bids or not self.asks:
+                raise ValueError("empty_snapshot_side")
+            snapshot_last_update_id = int(row.get("last_update_id"))
+            snapshot_received_ms = utc_ms(row.get("timestamp_received"))
+            if snapshot_received_ms is None:
+                raise ValueError("missing_timestamp_received")
+        except Exception as exc:
+            self.current_snapshot_row = row
+            self.current_snapshot_last_update_id = None
+            self.current_snapshot_received_ms = None
+            self._invalidate(f"invalid_snapshot:{type(exc).__name__}:{exc}")
+            return
+        self.current_snapshot_row = row
+        self.current_snapshot_last_update_id = snapshot_last_update_id
+        self.current_snapshot_received_ms = snapshot_received_ms
+        self.local_u = None
+        self.last_applied_received_ms = snapshot_received_ms
+        self.applied_update_count = 0
+        self.book_valid = True
+        self.current_issue = None
+
+    def _apply_update(self, row):
+        if self.current_snapshot_row is None or not self.book_valid:
+            return
+        try:
+            first_update_id = int(row.get("first_update_id"))
+            final_update_id = int(row.get("final_update_id"))
+            snapshot_last_update_id = int(row.get("snapshot_last_update_id"))
+            local_u_before = row.get("local_u_before")
+            local_u_before = int(local_u_before) if local_u_before is not None else None
+            local_u_after = int(row.get("local_u_after"))
+            received_ms = utc_ms(row.get("timestamp_received"))
+        except Exception as exc:
+            self._invalidate(f"invalid_update:{type(exc).__name__}:{exc}")
+            return
+
+        if snapshot_last_update_id != self.current_snapshot_last_update_id:
+            self._invalidate(
+                "missing_snapshot_anchor:"
+                f"expected={self.current_snapshot_last_update_id}:"
+                f"actual={snapshot_last_update_id}"
+            )
+            return
+        if self.local_u is None:
+            if local_u_before is not None:
+                self._invalidate(
+                    f"local_u_before_mismatch:expected=null:actual={local_u_before}"
+                )
+                return
+            expected_update_id = self.current_snapshot_last_update_id + 1
+        else:
+            if local_u_before != self.local_u:
+                self._invalidate(
+                    f"local_u_before_mismatch:expected={self.local_u}:actual={local_u_before}"
+                )
+                return
+            expected_update_id = self.local_u + 1
+        if not first_update_id <= expected_update_id <= final_update_id:
+            self._invalidate(
+                "update_id_gap:"
+                f"U={first_update_id}:expected={expected_update_id}:u={final_update_id}"
+            )
+            return
+        if local_u_after != final_update_id:
+            self._invalidate(
+                f"local_u_after_mismatch:after={local_u_after}:u={final_update_id}"
+            )
+            return
+        if row.get("stitch_gap_reason"):
+            self._invalidate(f"collector_stitch_gap:{row.get('stitch_gap_reason')}")
+            return
+        try:
+            self._apply_levels(self.bids, row.get("bids"))
+            self._apply_levels(self.asks, row.get("asks"))
+        except Exception as exc:
+            self._invalidate(f"invalid_update_levels:{type(exc).__name__}:{exc}")
+            return
+        self.local_u = final_update_id
+        self.last_applied_received_ms = received_ms
+        self.applied_update_count += 1
+
+    def _update_row(self):
+        if not (
+            self.update_buffer_start
+            <= self.update_position
+            < self.update_buffer_start + len(self.update_buffer)
+        ):
+            length = min(
+                self.batch_size,
+                len(self.update_times) - self.update_position,
+            )
+            indices = self.update_order.slice(self.update_position, length)
+            self.update_buffer = self.update_table.take(indices).to_pylist()
+            self.update_buffer_start = self.update_position
+        return self.update_buffer[self.update_position - self.update_buffer_start]
+
+    def _initialize_at(self, target_ms):
+        self.initialized = True
+        if self.schema_issue is not None:
+            self._invalidate(self.schema_issue)
+            return
+        snapshot_index = bisect.bisect_right(self.snapshot_times, target_ms) - 1
+        if snapshot_index < 0:
+            self._invalidate("no_snapshot_at_or_before_market_start")
+            return
+        self.snapshot_position = snapshot_index + 1
+        snapshot_row = self.snapshots[snapshot_index]
+        snapshot_ms = self.snapshot_times[snapshot_index]
+        self.update_position = bisect.bisect_left(self.update_times, snapshot_ms)
+        self.update_buffer_start = -1
+        self.update_buffer = []
+        self._apply_snapshot(snapshot_row)
+
+    def advance_to(self, target_ms):
+        if not self.initialized:
+            self._initialize_at(target_ms)
+        if self.current_snapshot_row is None:
+            return self.checkpoint_info()
+
+        while True:
+            next_snapshot_ms = (
+                self.snapshot_times[self.snapshot_position]
+                if self.snapshot_position < len(self.snapshot_times)
+                else None
+            )
+            next_update_ms = (
+                self.update_times[self.update_position]
+                if self.update_position < len(self.update_times)
+                else None
+            )
+            candidates = [
+                value for value in (next_snapshot_ms, next_update_ms) if value is not None
+            ]
+            if not candidates or min(candidates) >= target_ms:
+                break
+            if next_snapshot_ms is not None and (
+                next_update_ms is None or next_snapshot_ms <= next_update_ms
+            ):
+                row = self.snapshots[self.snapshot_position]
+                self.snapshot_position += 1
+                self._apply_snapshot(row)
+            else:
+                row = self._update_row()
+                self.update_position += 1
+                self._apply_update(row)
+        return self.checkpoint_info()
+
+    def checkpoint_info(self):
+        if self.current_snapshot_row is None or not self.book_valid:
+            return {
+                "valid": False,
+                "reason": self.current_issue or "checkpoint_unavailable",
+            }
+        checkpoint_last_update_id = (
+            self.local_u
+            if self.local_u is not None
+            else self.current_snapshot_last_update_id
+        )
+        return {
+            "valid": True,
+            "base_snapshot_last_update_id": self.current_snapshot_last_update_id,
+            "base_snapshot_timestamp_received_ms": self.current_snapshot_received_ms,
+            "checkpoint_last_update_id": checkpoint_last_update_id,
+            "checkpoint_local_u": self.local_u,
+            "checkpoint_timestamp_received_ms": self.last_applied_received_ms,
+            "pre_market_update_count": self.applied_update_count,
+        }
+
+    def checkpoint_table(self, checkpoint):
+        if not checkpoint.get("valid"):
+            raise ValueError("cannot write invalid depth checkpoint")
+        fields = [
+            field
+            for field in self.snapshot_table.schema
+            if field.name != "snapshot_fetch_start_utc"
+        ]
+        schema = pa.schema(fields)
+        row = {
+            field.name: self.current_snapshot_row.get(field.name)
+            for field in fields
+        }
+        row["timestamp_received"] = ms_dt(
+            checkpoint["checkpoint_timestamp_received_ms"]
+        )
+        row["last_update_id"] = checkpoint["checkpoint_last_update_id"]
+        row["bids"] = self._serialize_book(self.bids, reverse=True)
+        row["asks"] = self._serialize_book(self.asks, reverse=False)
+        if "snapshot_status" in row:
+            row["snapshot_status"] = "derived_market_start_checkpoint"
+        if "schema_version" in row:
+            row["schema_version"] = "binance_depth_market_checkpoint_v1"
+        return pa.Table.from_pylist([row], schema=schema)
+
+def validate_depth_window(checkpoint, update_table, resnapshot_table):
+    report = {
+        "status": "invalid",
+        "archive_checkpoint_kind": "derived_market_start_checkpoint",
+        "archive_snapshot_time_columns": ["timestamp_received"],
+        "selected_update_count": update_table.num_rows if update_table is not None else 0,
+        "in_window_resnapshot_count": (
+            resnapshot_table.num_rows if resnapshot_table is not None else 0
+        ),
+    }
+    if not checkpoint.get("valid"):
+        issue = f"checkpoint_unavailable:{checkpoint.get('reason')}"
+        report["reason"] = issue
+        return report, issue
+
+    report.update(
+        {
+            "base_snapshot_last_update_id": checkpoint[
+                "base_snapshot_last_update_id"
+            ],
+            "base_snapshot_timestamp_received_ms": checkpoint[
+                "base_snapshot_timestamp_received_ms"
+            ],
+            "checkpoint_last_update_id": checkpoint[
+                "checkpoint_last_update_id"
+            ],
+            "checkpoint_timestamp_received_ms": checkpoint[
+                "checkpoint_timestamp_received_ms"
+            ],
+            "pre_market_update_count": checkpoint["pre_market_update_count"],
+        }
+    )
+    update_rows = (
+        sort_table_by_receive_time(update_table).to_pylist()
+        if update_table is not None
+        else []
+    )
+    snapshot_rows = (
+        sort_table_by_receive_time(resnapshot_table).to_pylist()
+        if resnapshot_table is not None
+        else []
+    )
+    if update_rows:
+        first_update_ms = utc_ms(update_rows[0].get("timestamp_received"))
+        report["first_selected_update_timestamp_received_ms"] = first_update_ms
+        report["first_selected_update_local_u_before"] = update_rows[0].get(
+            "local_u_before"
+        )
+        report["checkpoint_to_first_update_receive_gap_ms"] = (
+            first_update_ms - checkpoint["checkpoint_timestamp_received_ms"]
+        )
+
+    events = []
+    events.extend(
+        (utc_ms(row.get("timestamp_received")), 0, "snapshot", row)
+        for row in snapshot_rows
+    )
+    events.extend(
+        (utc_ms(row.get("timestamp_received")), 1, "update", row)
+        for row in update_rows
+    )
+    events.sort(key=lambda item: (item[0], item[1]))
+
+    current_anchor = checkpoint["base_snapshot_last_update_id"]
+    current_u = checkpoint["checkpoint_local_u"]
+    issue = None
+    for _received_ms, _order, event_kind, row in events:
+        if event_kind == "snapshot":
+            try:
+                snapshot_received_ms = utc_ms(row.get("timestamp_received"))
+                if snapshot_received_ms is None:
+                    raise ValueError("missing_timestamp_received")
+                snapshot_bids = DepthReplay._parse_levels(row.get("bids"))
+                snapshot_asks = DepthReplay._parse_levels(row.get("asks"))
+                if not snapshot_bids or not snapshot_asks:
+                    raise ValueError("empty_snapshot_side")
+                current_anchor = int(row.get("last_update_id"))
+            except Exception as exc:
+                issue = f"invalid_resnapshot:{type(exc).__name__}:{exc}"
+                break
+            current_u = None
+            continue
+
+        try:
+            row_anchor = int(row.get("snapshot_last_update_id"))
+            first_update_id = int(row.get("first_update_id"))
+            final_update_id = int(row.get("final_update_id"))
+            row_before = row.get("local_u_before")
+            row_before = int(row_before) if row_before is not None else None
+            row_after = int(row.get("local_u_after"))
+        except Exception as exc:
+            issue = f"invalid_update:{type(exc).__name__}:{exc}"
+            break
+        if row_anchor != current_anchor:
+            issue = f"missing_snapshot_anchor:expected={current_anchor}:actual={row_anchor}"
+            break
+        if current_u is None:
+            if row_before is not None:
+                issue = f"local_u_before_mismatch:expected=null:actual={row_before}"
+                break
+            expected_update_id = current_anchor + 1
+        else:
+            if row_before != current_u:
+                issue = f"local_u_before_mismatch:expected={current_u}:actual={row_before}"
+                break
+            expected_update_id = current_u + 1
+        if not first_update_id <= expected_update_id <= final_update_id:
+            issue = (
+                f"update_id_gap:U={first_update_id}:"
+                f"expected={expected_update_id}:u={final_update_id}"
+            )
+            break
+        if row_after != final_update_id:
+            issue = f"local_u_after_mismatch:after={row_after}:u={final_update_id}"
+            break
+        if row.get("stitch_gap_reason"):
+            issue = f"collector_stitch_gap:{row.get('stitch_gap_reason')}"
+            break
+        current_u = row_after
+
+    if issue is not None:
+        report["reason"] = issue
+        return report, issue
+    report["status"] = "valid"
+    report["validation"] = "checkpoint_and_resnapshot_update_ids_contiguous"
+    report["final_local_u"] = current_u
+    report["resnapshot_last_update_ids"] = [
+        int(row["last_update_id"]) for row in snapshot_rows
+    ]
+    return report, None
+
 def write_table(table, path):
     path.parent.mkdir(parents=True, exist_ok=True)
     if table is None:
         return
     table = normalize_output_table(table)
+    table = sort_table_by_receive_time(table)
     pq.write_table(table, path, compression="zstd", compression_level=3)
 
 def gap_report(times, start_ms, end_ms):
@@ -721,6 +1183,9 @@ selected_root.mkdir(parents=True, exist_ok=True)
 metadata_slugs = set()
 if metadata_table is not None and "slug" in metadata_table.column_names:
     metadata_slugs = {str(v) for v in metadata_table["slug"].to_pylist() if v}
+snapshot_table = tables.get("binance_depth_snapshot")
+depth_update_table = tables.get("binance_depth_update")
+depth_replay = DepthReplay(snapshot_table, depth_update_table)
 
 for slug, market in sorted(markets.items(), key=lambda item: item[1]["start_ms"]):
     start_ms = market["start_ms"]
@@ -752,6 +1217,29 @@ for slug, market in sorted(markets.items(), key=lambda item: item[1]["start_ms"]
         diagnostic_error = p2b_row["diagnostic_error"] if p2b_row is not None else "missing_target_record"
         reasons.append(f"price_to_beat:{diagnostic_error}")
 
+    checkpoint = None
+    depth_selected = None
+    resync_snapshots = None
+    depth_reconstruction = {
+        "status": "not_evaluated",
+        "reason": "prior_market_gate_rejection",
+    }
+    if not reasons:
+        checkpoint = depth_replay.advance_to(start_ms)
+        depth_selected = sort_table_by_receive_time(
+            time_filter(depth_update_table, start_ms, end_ms)
+        )
+        resync_snapshots = sort_table_by_receive_time(
+            time_filter(snapshot_table, start_ms, end_ms)
+        )
+        depth_reconstruction, depth_issue = validate_depth_window(
+            checkpoint,
+            depth_selected,
+            resync_snapshots,
+        )
+        if depth_issue is not None:
+            reasons.append(f"binance_depth_reconstruction:{depth_issue}")
+
     market_record = {
         "slug": slug,
         "start_utc_ms": start_ms,
@@ -759,6 +1247,7 @@ for slug, market in sorted(markets.items(), key=lambda item: item[1]["start_ms"]
         "start_utc": ms_dt(start_ms).isoformat(),
         "end_utc": ms_dt(end_ms).isoformat(),
         "source_reports": source_reports,
+        "binance_depth_reconstruction": depth_reconstruction,
         "price_to_beat": {
             "fetch_succeeded": p2b_row["fetch_succeeded"] if p2b_row is not None else False,
             "polymarket_price_to_beat": p2b_row["polymarket_price_to_beat"] if p2b_row is not None else None,
@@ -788,17 +1277,21 @@ for slug, market in sorted(markets.items(), key=lambda item: item[1]["start_ms"]
         write_table(metadata_selected, market_dir / "polymarket_market_metadata_selected_window.parquet")
 
     for source in ("binance_depth_update", "binance_aggtrade", "polymarket_rtds_chainlink_btc_usd"):
-        selected = time_filter(tables.get(source), start_ms, end_ms)
+        selected = (
+            depth_selected
+            if source == "binance_depth_update"
+            else time_filter(tables.get(source), start_ms, end_ms)
+        )
         write_table(selected, market_dir / f"{source}_selected_window.parquet")
 
-    snapshot_table = tables.get("binance_depth_snapshot")
-    if snapshot_table is not None and "timestamp_received" in snapshot_table.column_names:
-        rows = snapshot_table.to_pylist()
-        eligible = [(utc_ms(row.get("timestamp_received")), idx) for idx, row in enumerate(rows)]
-        eligible = [(ts, idx) for ts, idx in eligible if ts is not None and ts <= start_ms]
-        if eligible:
-            _, idx = max(eligible)
-            write_table(snapshot_table.slice(idx, 1), market_dir / "binance_depth_snapshot_bootstrap.parquet")
+    write_table(
+        depth_replay.checkpoint_table(checkpoint),
+        market_dir / "binance_depth_snapshot_bootstrap.parquet",
+    )
+    write_table(
+        resync_snapshots,
+        market_dir / "binance_depth_snapshot_resync_window.parquet",
+    )
 
     accepted.append(market_record)
 

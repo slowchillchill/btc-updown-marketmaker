@@ -18,7 +18,7 @@
 
 > 事项编号：`data-collect-demand`
 
-> 状态：用户已在 2026-07-06 批准执行本文档；2026-07-10 又批准 Binance aggTrade schema v3、D+1 昨天归档修正、立即重新部署与重启采集。执行仍不授权 paper/live 真实市场接入、真实下单、撤单或资金操作。
+> 状态：用户已在 2026-07-06 批准执行本文档；2026-07-10 又批准 Binance aggTrade schema v3、D+1 昨天归档修正、立即重新部署与重启采集；2026-07-11 批准只修复归档 depth checkpoint 并本地重跑，明确禁止审核前上传。本次执行仍不授权 paper/live 真实市场接入、真实下单、撤单或资金操作。
 
 ## 2026-07-10 已批准增量执行
 
@@ -41,6 +41,22 @@
 ### 增量阶段 C：future hot path 合同留档
 
 - 任务 C.1：在需求与计划中冻结 future `external_market_event` 的 nullable `price_to_beat/final_price` 字段和非阻断语义。 -> 验证：文档明确当前仅 heartbeat/status，本轮不修改 handoff runtime、不部署 paper/live。
+
+### DC-INCREMENT-20260711-ARCHIVE-DEPTH-CHECKPOINT：归档深度链修复
+
+- 任务 D.1：先用真实字段 fixture 复现“起点前 bridge 被裁掉”和“窗口内第二个 snapshot 未归档”。
+  - 步骤 D.1.1：fixture 包含市场前 snapshot、pre-market update、首条 selected update、窗口内 resnapshot 与新链首条 update。 -> 验证：修复前 checkpoint ID 不衔接、resync 文件缺失、归档仍含 `snapshot_fetch_start_utc`。
+  - 步骤 D.1.2：增加缺失 resnapshot 和错误 `local_u_before` 负例。 -> 验证：修复前二者仍被时间 gap 门错误接受；修复后均 fail closed。
+- 任务 D.2：在日归档内按接收时间一次重放 depth 并生成紧凑市场起点 checkpoint，不改采集器或 raw 文件。
+  - 步骤 D.2.1：从最近有效 snapshot 重建 bids/asks，按 Binance 绝对数量语义应用 update，零数量删除价位。 -> 验证：checkpoint `last_update_id` 等于首条 selected update 的 `local_u_before`，时间为最后实际应用事件的 `timestamp_received`。
+  - 步骤 D.2.2：保存 `[start,end)` 内全部 resnapshot，并用 `lastUpdateId/U/u/local_u_before/local_u_after` 校验每段链。 -> 验证：缺 anchor、ID gap、local-u 不一致均将对应 market 放入 rejected。
+  - 步骤 D.2.3：归档写出统一删除 `snapshot_fetch_start_utc` 并显式按接收时间排序。 -> 验证：bootstrap/resync 文件只保留 `timestamp_received`；同一 fixture 的 raw snapshot 仍保留原字段。
+- 任务 D.3：本地重跑 `2026-07-10`，不得 pull 或 upload。
+  - 步骤 D.3.1：设置 `DATA_COLLECT_ARCHIVE_SKIP_PULL=1` 与 `DATA_COLLECT_ARCHIVE_SKIP_UPLOAD=1` 执行现有脚本。 -> 验证：报告 PASS、accepted market 的 depth reconstruction 全部 valid、本地 tar/sidecar SHA-256 可复核，日志明确 `skip upload`。
+  - 步骤 D.3.2：抽查用户指出的 `btc-updown-5m-1783694400`。 -> 验证：checkpoint 时间/ID 与首条 selected update 直接连续，第二个 snapshot ID `97250276077` 存在于 resync 文件并与新链首条 update 连续。
+- 任务 D.4：自审、独立 `gpt-5.6-sol/ultra` 审查并精确提交本增量文件。 -> 验证：修复审查问题后测试、`bash -n`、`git diff --check` 通过；Git push 不等于数据归档上传，阿里云仍保持未上传等待用户审核。
+
+执行结果：D.1-D.3 已完成。合同测试 `9/9` 通过；真实 `2026-07-10` 以 `skip pull + skip upload` 重跑为 PASS，`112/112` accepted markets 的 depth reconstruction 均为 valid，起点 checkpoint 到首条 selected update 的接收间隔为 `98..119ms`。D.4 首轮独立审查发现 malformed resnapshot 未 fail closed，修复并增加负例后 targeted 复审 PASS、无剩余 Critical/Important；提交范围已锁定为本事项 5 个文件。最终本地 tar 与 SHA-256 已生成，阿里云上传保持关闭。
 
 阶段 A/B 完成后必须自审差异、运行完整验证、派独立审查，修复 Critical/High 后创建精确 commit 并 push，然后才能用该 commit 构建和重新部署。
 

@@ -6,6 +6,21 @@
 
 > 对应计划文档：`/home/chillchill/btc-updown-marketmaker/plan/data-collect-plan.md`
 
+## 2026-07-11
+
+### DC-INCREMENT-20260711-ARCHIVE-DEPTH-CHECKPOINT
+
+- 用户指出 `btc-updown-5m-1783694400` 的归档 bootstrap snapshot 接收时间为 `2026-07-10T14:39:44.020Z`，而首条 selected update 接收时间为 `14:40:00.016Z`。只读核实证明采集 raw 链并未断裂：中间存在 `159` 条连续 bridge updates，最后推进到 `local_u=97250207375`，首条 selected update 为 `U=97250207376`；错误是归档只复制 `[market_start, market_end)` update，却仍配市场前原始 snapshot，导致市场目录不能独立重建。
+- 同一窗口在 `14:40:46.579Z` 出现第二个 snapshot `last_update_id=97250276077`，后续 `2534` 条 selected updates 引用该 anchor；旧归档只保留市场前一个 snapshot，第二个 anchor 同样缺失。现有时间 gap 门只证明消息接收新鲜度，不能替代 Binance 更新 ID 链校验。
+- 第二个 snapshot 的触发原因已从原始部署会话和 journal 锁定：为强制 finalize 新 v3 aggTrade parquet 并读取验证 `event_time/trade_time`，验收流程在 `14:40:45.144Z` 人工停止、`14:40:45.202795Z` 再次启动整个 collector；depth 因进程重新进入 bootstrap 于约 `1.38s` 后取 snapshot。两段 depth manifest 均为 `gap_rows=0`、`resnapshot_count=0`、`source_gaps=[]`，可排除 stitch gap、WebSocket 异常、UTC 日边界和 systemd 自动故障重启。
+- 已先增加 RED 合同：真实 depth v2 fixture 覆盖市场前 bridge、窗口内 resnapshot、缺失 anchor 和错误 `local_u_before`。修复前分别表现为 checkpoint 仍含 `snapshot_fetch_start_utc`、resync 文件不存在，以及两个坏链 market 仍被接受。
+- 批准边界是只修复日归档：不修改/部署采集器，不改远端或本地 `typed_raw`；归档将生成派生市场起点 checkpoint、保存窗口内 resnapshot、按 ID 链 fail closed，并仅从归档投影删除 `snapshot_fetch_start_utc`。真实重跑必须 `skip pull + skip upload`，本地 tar/sidecar 生成后等待用户审核。
+- 首轮独立审查为 FAIL、Critical=`0`、Important=`1`：窗口内 resnapshot 只校验 ID，没有校验 `bids/asks` 是否可解析，坏 JSON 仍会被接受。已复用 snapshot 结构门同时校验时间、ID、两侧 JSON 和非空盘口；新增 malformed resnapshot 负例先 RED 后转绿，并增加零数量删除价位断言。targeted 复审 PASS，无剩余 Critical/Important。
+- 最终归档合同测试 `9/9` 通过：派生 checkpoint 的 ID、实际接收时间、book 应用结果和 schema 均可读；窗口内 resnapshot 被保存；缺失 anchor、错误 `local_u_before` 与 malformed resnapshot 均使 market fail closed；raw snapshot 仍保留 `snapshot_fetch_start_utc`。`bash -n` 与 `git diff --check` 同步通过。
+- 真实 `2026-07-10` 使用 `DATA_COLLECT_ARCHIVE_SKIP_PULL=1`、`DATA_COLLECT_ARCHIVE_SKIP_UPLOAD=1` 重跑成功：报告 PASS、accepted=`112`、rejected=`176`，`112/112` accepted markets 的 depth reconstruction 均为 valid、checkpoint 全部直接等于首条 update 的 `local_u_before`，接收时间间隔范围 `98..119ms`；selected updates 全部按接收时间升序。归档中有 `112` 个 checkpoint 文件和 `112` 个 resync 文件，窗口内实际 resnapshot 共 `1` 行；所有归档 snapshot 均无 `snapshot_fetch_start_utc`，5 个 raw snapshot 文件仍全部保留该列。
+- 用户指出的首个 market 现在从 base snapshot `97250195255` 应用 `159` 条 pre-market updates，生成 `2026-07-10T14:39:59.914Z` / `last_update_id=97250207375` 的起点 checkpoint；首条 selected update 在 `14:40:00.016Z`，`U=97250207376`、`local_u_before=97250207375`，相差 `102ms`。窗口内 resnapshot `97250276077` 已保存，其后首条 update 为 `U=97250276078`、`local_u_before=null`，满足 first-bridge。
+- 最终修复代码重跑生成的新本地归档为 `/home/chillchill/new-datasets/archives/new-datasets-2026-07-10.tar.gz`，大小 `1011028175` bytes，SHA256=`f19f20ea723bf5180471dd06f1900eafbe7fd7aa91e41feebbacf5e055ee4399`，sidecar 校验通过。脚本明确输出 `skip upload because DATA_COLLECT_ARCHIVE_SKIP_UPLOAD=1`；未上传阿里云，等待用户审核。
+
 ## 2026-07-10
 
 ### DC-INCREMENT-20260710-P2B-T-V3-ARCHIVE

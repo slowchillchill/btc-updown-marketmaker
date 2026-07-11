@@ -25,6 +25,17 @@
 
 验收标准：本地测试和真实新 segment 证明 schema v3 同时保留不同的 `event_time/trade_time`；日级归档合同测试证明 D 的 288 个逻辑 slug 全部覆盖、瞬时传输断线可在第二次 attempt 成功、字段缺失仍只请求一次、已有 D 文件只重请瞬时失败 row、Gamma 只用两个目标字段判定回填、历史 partial 不进入 reader、新同名包按 digest 覆盖并验证；热路径两字段保持明确的未实现状态。
 
+## DC-INCREMENT-20260711-ARCHIVE-DEPTH-CHECKPOINT 增量需求
+
+1. 本增量只修复日级归档，不修改或重新部署采集器；数据采集服务器与本地 `typed_raw` 中的 Binance snapshot/update 原始证据不得删除、改写或伪造。
+2. 归档必须按 `timestamp_received` 重放 Binance depth：从市场起点前最近的有效 REST snapshot 开始，依次应用起点前全部连续 update，并为市场生成派生起点 checkpoint。checkpoint 的 `last_update_id` 必须表示重放后的 `local_u`，`timestamp_received` 必须是实际最后应用事件的接收时间，不得伪造成 market start。
+3. 市场窗口 `[market_start, market_end)` 内出现的每个再次 snapshot 必须随归档保存；其后的第一条 update 必须满足 `U <= lastUpdateId + 1 <= u`，同一链后续 update 的 `local_u_before/local_u_after` 与 `U/u` 必须连续。缺失 snapshot anchor、ID gap 或 local-u 不一致时必须拒绝该 market，不能只凭接收时间 gap 放行。
+4. 归档 snapshot/checkpoint 投影必须删除 `snapshot_fetch_start_utc`，只保留 `timestamp_received` 作为该产物的接收时间列；该裁剪不得反向修改 `typed_raw` 原始 snapshot schema。
+5. `binance_depth_update_selected_window.parquet` 及归档 snapshot 文件必须显式按 `timestamp_received` 排序，不能依赖 hourly/part 文件名字典序。
+6. 修复后的 `2026-07-10` 日归档必须在本地使用既有数据重新校验和打包，明确设置 skip-pull 与 skip-upload；在用户人工审核前不得上传阿里云，不得以本次归档修复为由重启远端采集服务。
+
+验收标准：合同测试必须覆盖市场前 snapshot + bridge update、起点 checkpoint 直连首条 selected update、窗口内第二个 snapshot、缺失 anchor 与错误 `local_u_before` 的拒绝路径，以及归档删除但 raw 保留 `snapshot_fetch_start_utc`；真实 `2026-07-10` 重跑必须报告每个 accepted market 的 checkpoint ID、首条 update ID 连续性、窗口内 resnapshot 数，生成本地 tar 与 SHA-256 后停在用户审核 gate，上传次数为 `0`。
+
 ## 一、范围与非范围
 
 ### 1.1 data-collect 范围
