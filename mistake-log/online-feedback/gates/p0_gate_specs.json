@@ -1,0 +1,650 @@
+{
+  "gate_spec_version": "online-feedback-p0-gates-2026-06-28",
+  "generated_at_jst": "2026-06-28T00:00:00+09:00",
+  "online_rule_version": "online-feedback-2026-06-28-p0",
+  "common_output_schema": "schemas/gate_report.schema.json",
+  "scope": {
+    "purpose": "把 online-feedback 的 OF-01..OF-35 转成 paper/live/training 前置门禁规格。",
+    "authorization_boundary": "本规格只授权文档、schema、台账和门禁定义；不授权实盘、paper runtime、训练、部署、资金、下单或撤单。",
+    "fail_closed_principle": "缺少关键输入、规则版本无法反查、状态不可解释或外部代码未隔离时，默认 fail-closed 或 no-submit。"
+  },
+  "verdict_order": [
+    "pass",
+    "warning",
+    "no-submit",
+    "cancel-only",
+    "fail-closed"
+  ],
+  "gates": [
+    {
+      "gate_name": "OnlineFeedbackGate",
+      "purpose": "每次 paper/live/training report 前确认当前执行规则、官方文档变更、SDK/平台状态和本地账本假设没有漂移。",
+      "checked_rules": [
+        "OF-01",
+        "OF-02",
+        "OF-03",
+        "OF-04",
+        "OF-05",
+        "OF-06",
+        "OF-07",
+        "OF-08",
+        "OF-09",
+        "OF-10",
+        "OF-11",
+        "OF-12",
+        "OF-13",
+        "OF-14",
+        "OF-17",
+        "OF-35"
+      ],
+      "required_inputs": [
+        "online_rule_version",
+        "official_changelog_last_checked_date",
+        "sdk_version",
+        "clob_api_version_or_order_version",
+        "rate_limit_bucket_config",
+        "fee_rebate_source",
+        "market_metadata_snapshot",
+        "wallet_source_map",
+        "balance_allowance_preflight",
+        "wss_market_snapshot_seen",
+        "wss_user_channel_auth_status",
+        "accepted_classifier_version",
+        "normalized_order_event_schema_version"
+      ],
+      "pass_criteria": [
+        "online_rule_version 等于当前规则版本。",
+        "官方 changelog、rate limit、fee/rebate、market metadata 已在本报告周期内刷新。",
+        "accepted classifier 能区分 transport success、item success、accepted、rejected 和 unknown outcome。",
+        "wallet source map、signature_type、funder、CLOB balance/allowance 一致。",
+        "WSS market snapshot 与 user channel 权限均可验证。"
+      ],
+      "warning_conditions": [
+        "SELL balance/allowance reject 仅作为 order-local maturity probe，且没有覆盖 local ledger。",
+        "liquidity reward 字段缺失但当前策略未把 reward 计入 EV 或训练标签。"
+      ],
+      "no_submit_conditions": [
+        "matching engine restart、Service is not ready、rate limit bucket 不可用或 WSS snapshot 缺失。",
+        "timeout 后存在 UnknownSubmitOutcome 且尚未完成 order/trades/user-channel reconciliation。",
+        "fee/rebate/tick/min_size 来源不是当前目标 market 的快照。"
+      ],
+      "fail_closed_conditions": [
+        "online_rule_version 缺失或无法反查规则台账。",
+        "SDK/order version 与官方 changelog 重大变更冲突。",
+        "accepted path 出现空 order id、UNKNOWN 状态或错误文本仍进入 ledger reservation。",
+        "wallet/funder/signature_type 与配置模式不一致。"
+      ],
+      "required_artifacts": [
+        "gate_report.json",
+        "market_info_snapshot.jsonl",
+        "wallet_source_map.json",
+        "balance_allowance_preflight.json",
+        "normalized_order_events.jsonl",
+        "unknown_submit_outcome.jsonl"
+      ]
+    },
+    {
+      "gate_name": "ModelBundlePreflight",
+      "purpose": "确认模型 bundle、特征 schema、normalizer、ONNX Runtime session 和 warmup 延迟满足上线或 paper 前置要求。",
+      "checked_rules": [
+        "OF-21",
+        "OF-22",
+        "OF-23",
+        "OF-24",
+        "OF-29",
+        "OF-35"
+      ],
+      "required_inputs": [
+        "model_bundle_id",
+        "model_file_sha256",
+        "feature_schema_version",
+        "feature_order_sha256",
+        "normalizer_sha256",
+        "seq_len",
+        "input_names",
+        "output_names",
+        "onnxruntime_version",
+        "ort_execution_mode",
+        "ort_intra_op_num_threads",
+        "ort_inter_op_num_threads",
+        "ort_graph_optimization_level",
+        "ort_thread_spinning",
+        "warmup_sample_id",
+        "warmup_latency_ms_p50",
+        "warmup_latency_ms_p95",
+        "warmup_latency_ms_p99",
+        "rss_after_load_mib",
+        "cpu_after_warmup_pct"
+      ],
+      "pass_criteria": [
+        "模型、feature order、normalizer 的 sha256 与 manifest 一致。",
+        "input/output name、seq_len、feature_schema_version 与当前训练报告一致。",
+        "warmup inference 已执行，p95/p99 低于策略 TTL 的 50%。",
+        "ORT 线程数符合当前 HardwareTierGate 上限。",
+        "active/shadow/retired 状态由 ModelRegistry 显式记录。"
+      ],
+      "warning_conditions": [
+        "新模型只允许 shadow 产出，尚未完成 calibration 或 latency 对比。",
+        "thread spinning 启用但 CPU、feed age、event loop lag 仍在 warning 阈值内。"
+      ],
+      "no_submit_conditions": [
+        "warmup p99 超过策略 TTL 的 50%，或 first-run latency 未记录。",
+        "shadow 模型占用导致 WSS feed age、event loop lag 或 REST backlog 变差。"
+      ],
+      "fail_closed_conditions": [
+        "sha256、feature_order、normalizer、input/output name 任一缺失或不匹配。",
+        "active session 被原地替换，无法证明 side-by-side hot swap。",
+        "ORT 线程数超过当前 host_class 上限。"
+      ],
+      "required_artifacts": [
+        "model_bundle_manifest.json",
+        "model_registry_snapshot.json",
+        "model_preload_report.json",
+        "warmup_inference_profile.jsonl"
+      ]
+    },
+    {
+      "gate_name": "MarketDiscoveryGate",
+      "purpose": "用候选 slug、Gamma active scan 和 CLOB market info 共同确认目标 5m 市场存在、可交易且字段完整。",
+      "checked_rules": [
+        "OF-06",
+        "OF-09",
+        "OF-10",
+        "OF-11",
+        "OF-18",
+        "OF-20",
+        "OF-30",
+        "OF-35"
+      ],
+      "required_inputs": [
+        "candidate_slug",
+        "gamma_market_id",
+        "condition_id",
+        "clob_market_id",
+        "up_token_id",
+        "down_token_id",
+        "active",
+        "closed",
+        "resolved",
+        "accepting_orders",
+        "start_ts",
+        "end_ts",
+        "server_time_ts",
+        "ntp_drift_ms",
+        "tick_size",
+        "min_order_size",
+        "fee_rate_bps",
+        "maker_rebate_config",
+        "liquidity_reward_config",
+        "wss_snapshot_seen",
+        "orderbook_hash",
+        "market_metadata_source_urls"
+      ],
+      "pass_criteria": [
+        "UP/DOWN token id 完整且来自同一个 condition_id。",
+        "active=true、closed=false、resolved=false、accepting_orders=true。",
+        "tick/min size、fee/rebate/reward 字段来自当前 market 快照。",
+        "server time 与本机 NTP drift 在阈值内。",
+        "WSS snapshot 已见到，orderbook hash 或等价完整性字段已记录。"
+      ],
+      "warning_conditions": [
+        "候选 slug 命中，但 active scan 尚未提供额外候选；只能记录 miss-rate，不影响非交易研究。",
+        "reward 字段缺失但当前策略不使用 reward eligibility。"
+      ],
+      "no_submit_conditions": [
+        "只有 slug 推断，没有 Gamma/CLOB 双重确认。",
+        "active、closed、resolved、accepting_orders 任一字段缺失。",
+        "WSS snapshot 未见到或 market metadata 年龄超过策略阈值。"
+      ],
+      "fail_closed_conditions": [
+        "UP/DOWN token id 缺失、跨 condition_id 混用或 market 已 closed/resolved。",
+        "NTP drift 超过 1 秒且当前为 5m 交易窗口。",
+        "fee/tick/min size 使用固定常数而非当前 market 快照。"
+      ],
+      "required_artifacts": [
+        "current_market_info_snapshot.jsonl",
+        "gamma_discovery_trace.jsonl",
+        "clob_market_info_snapshot.json",
+        "wss_market_snapshot.jsonl"
+      ]
+    },
+    {
+      "gate_name": "MarketSwitchGate",
+      "purpose": "确认旧市场订单/库存/特征/orderbook 已收敛，新市场上下文在 snapshot 和 warmup 后才进入 submit path。",
+      "checked_rules": [
+        "OF-11",
+        "OF-12",
+        "OF-19",
+        "OF-20",
+        "OF-27",
+        "OF-33"
+      ],
+      "required_inputs": [
+        "old_market_id",
+        "new_market_id",
+        "old_open_orders_audit_status",
+        "old_cancel_or_no_open_orders_status",
+        "old_inventory_snapshot",
+        "prefetched_market_context_id",
+        "active_market_context_id",
+        "per_market_feature_buffer_reset",
+        "per_market_orderbook_cache_reset",
+        "new_market_snapshot_seen",
+        "new_market_seq_warmup_count",
+        "required_seq_len",
+        "market_switch_ts",
+        "submit_path_market_id",
+        "action_age_ms",
+        "strategy_ttl_ms"
+      ],
+      "pass_criteria": [
+        "old_market_id 与 new_market_id 明确不同，且所有 per-market 状态都有 market_id。",
+        "旧市场 open orders 已 cancel/audit，或确认无开放订单。",
+        "feature buffer、orderbook cache、pending decision、unknown outcomes 未跨市场复用。",
+        "新市场 snapshot 已到达，warmup count >= required_seq_len。",
+        "submit path 使用 active_market_context，不直接使用 prefetched context。"
+      ],
+      "warning_conditions": [
+        "旧市场只有只读 audit，无 submit/cancel 权限；必须标记为不能进入 live 切换。",
+        "prefetch 命中但尚未完成新市场 warmup；只能维持 no-quote。"
+      ],
+      "no_submit_conditions": [
+        "旧市场还有 unknown submit outcome、pending cancel 或 user-channel 未对账事件。",
+        "新市场 snapshot 缺失、warmup 不足或 action age 超过策略 TTL 的 50%。"
+      ],
+      "fail_closed_conditions": [
+        "旧市场 feature/orderbook/ledger 更新写入新市场上下文。",
+        "submit path 的 market_id 与 active_market_context_id 不一致。",
+        "action age 超过策略 TTL。"
+      ],
+      "required_artifacts": [
+        "market_switch_trace.jsonl",
+        "open_order_audit.json",
+        "per_market_state_digest.json",
+        "feature_buffer_reset_report.json",
+        "orderbook_cache_reset_report.json"
+      ]
+    },
+    {
+      "gate_name": "ResourceWatermarkGate",
+      "purpose": "用 cgroup、PSI、磁盘、journal、时钟和分阶段延迟监控长时间运行风险，资源异常只允许降级或关闭交易。",
+      "checked_rules": [
+        "OF-23",
+        "OF-24",
+        "OF-31",
+        "OF-32",
+        "OF-33"
+      ],
+      "required_inputs": [
+        "systemd_unit",
+        "MemoryCurrent",
+        "MemoryMax",
+        "TasksCurrent",
+        "NRestarts",
+        "memory.current",
+        "memory.stat",
+        "memory.events",
+        "memory.pressure",
+        "cpu.pressure",
+        "io.pressure",
+        "disk_free_pct",
+        "disk_free_gib",
+        "artifact_dir_bytes",
+        "journal_disk_usage",
+        "ntp_synchronized",
+        "ntp_drift_ms",
+        "feed_age_ms",
+        "event_loop_lag_ms_p95",
+        "rest_backlog_count",
+        "inference_latency_ms_p99",
+        "submit_latency_ms_p95",
+        "strategy_ttl_ms"
+      ],
+      "pass_criteria": [
+        "memory.current、memory.events、PSI、disk、journal、NTP 和关键延迟均低于 warning 阈值。",
+        "artifact manifest 可原子写入。",
+        "action age、feed age、inference p99 均低于策略 TTL 的 50%。"
+      ],
+      "warning_conditions": [
+        "memory.events high 增加但 feed/inference 正常。",
+        "memory/cpu/io PSI avg10 > 2%。",
+        "disk free < 20% 或 < 15 GiB。",
+        "NTP 不同步一次或 drift > 250 ms。",
+        "event loop lag p95 > 100 ms。"
+      ],
+      "no_submit_conditions": [
+        "memory.events high 增加且 memory.current > 85% MemoryMax，或 anon 占比 > 70%。",
+        "PSI avg10 > 5% 且 feed age 或 event loop lag 变差。",
+        "disk free < 10% 或 < 5 GiB。",
+        "NTP 不同步连续 2 次或 drift > 500 ms。",
+        "feed age、REST backlog 或 inference p99 超过策略 TTL 的 50%。"
+      ],
+      "fail_closed_conditions": [
+        "memory.events oom 或 oom_kill 增加。",
+        "PSI avg10 > 10% 且连续 3 个采样窗口恶化。",
+        "disk free < 5% 或 < 2 GiB，或无法原子写 manifest。",
+        "日志写入失败或 rotation 失败。",
+        "drift > 1 秒，或 action age 超过策略 TTL。"
+      ],
+      "required_artifacts": [
+        "resource_watermark_report.json",
+        "cgroup_memory_snapshot.txt",
+        "cgroup_psi_snapshot.txt",
+        "disk_watermark_snapshot.txt",
+        "journal_disk_usage.txt",
+        "latency_stage_profile.jsonl"
+      ]
+    },
+    {
+      "gate_name": "HardwareTierGate",
+      "purpose": "按机器角色限制 workload，避免 live 小服务器承担训练、长 replay、build 或 GPU 任务。",
+      "checked_rules": [
+        "OF-21",
+        "OF-22",
+        "OF-23",
+        "OF-24",
+        "OF-31",
+        "OF-32",
+        "OF-34"
+      ],
+      "required_inputs": [
+        "host_class",
+        "hostname",
+        "vcpu_count",
+        "mem_total_mib",
+        "disk_total_gib",
+        "disk_free_gib",
+        "swap_total_mib",
+        "gpu_present",
+        "workload_kind",
+        "allowed_workloads",
+        "forbidden_workloads",
+        "ort_intra_op_num_threads",
+        "ort_inter_op_num_threads",
+        "active_model_count",
+        "shadow_model_count",
+        "has_real_env",
+        "has_wallet_key",
+        "has_api_key"
+      ],
+      "pass_criteria": [
+        "host_class 与 workload_kind 匹配。",
+        "live_exec 只运行轻量推理、执行和日志，不运行 build、训练、长 replay 或全量 backtest。",
+        "training_gpu 不持有真实资金密钥。",
+        "ORT intra/inter op 线程数不超过 host_class 上限。",
+        "disk_free_gib 和 mem_total_mib 满足当前角色阈值。"
+      ],
+      "warning_conditions": [
+        "paper_runtime 运行 dashboard 与 paper 同机时资源仍在 warning 内。",
+        "research_sandbox 需要安装依赖但还未被批准运行。"
+      ],
+      "no_submit_conditions": [
+        "live_exec 检测到 build/train/replay/GPU workload。",
+        "live_exec vCPU < 2、MemTotal < 1800 MiB 或 disk_free < 10 GiB。",
+        "active/shadow model 数量超过当前 host_class 预算。"
+      ],
+      "fail_closed_conditions": [
+        "真实资金密钥出现在 training_gpu 或 research_sandbox。",
+        "未登记 host_class 或 workload_kind 无法分类。",
+        "资源门禁已触发 no-submit 但 submit path 仍可用。"
+      ],
+      "required_artifacts": [
+        "hardware_tier_report.json",
+        "host_inventory_snapshot.json",
+        "workload_policy_match.json",
+        "secret_presence_check.json"
+      ]
+    },
+    {
+      "gate_name": "SupplyChainGate",
+      "purpose": "把公开 Polymarket bot、npm/pip 依赖、脚本和外部代码统一按只读研究环境处理，防止密钥和资金暴露。",
+      "checked_rules": [
+        "OF-34",
+        "OF-35"
+      ],
+      "required_inputs": [
+        "repo_url",
+        "pinned_commit",
+        "clone_path",
+        "source_id",
+        "review_only",
+        "lockfile_path",
+        "lockfile_sha256",
+        "dependency_audit_status",
+        "provenance_status",
+        "has_real_env",
+        "has_wallet_key",
+        "has_api_key",
+        "network_egress_mode",
+        "install_allowed",
+        "run_allowed"
+      ],
+      "pass_criteria": [
+        "外部仓库只读 clone，pinned_commit 已记录。",
+        "review_only=true，has_real_env=false，has_wallet_key=false，has_api_key=false。",
+        "install_allowed=false 且 run_allowed=false，除非有单独批准和隔离环境记录。",
+        "lockfile 和依赖审计状态已记录；网络出站 blocked_or_logged。"
+      ],
+      "warning_conditions": [
+        "仓库缺 lockfile，但只进行源码阅读且不安装、不运行。",
+        "provenance_status 未完全确认，但没有密钥、资金或网络出站。"
+      ],
+      "no_submit_conditions": [
+        "研究环境需要安装依赖或运行脚本，但尚未完成依赖审计和隔离记录。",
+        "外部代码请求网络出站且没有日志或阻断策略。"
+      ],
+      "fail_closed_conditions": [
+        "外部代码可读取真实 .env、钱包私钥或 API key。",
+        "未 pinned commit 即运行脚本或安装依赖。",
+        "依赖审计失败但仍计划进入 runtime。"
+      ],
+      "required_artifacts": [
+        "supply_chain_review.json",
+        "dependency_audit_report.txt",
+        "external_repo_manifest.tsv",
+        "secret_presence_check.json"
+      ]
+    },
+    {
+      "gate_name": "TrainingFeedbackGate",
+      "purpose": "确认 online feedback 进入 V2 训练前已分层、保留因果上下文，并防止回测过拟合和 paper/live 标签污染。",
+      "checked_rules": [
+        "OF-09",
+        "OF-10",
+        "OF-12",
+        "OF-15",
+        "OF-16",
+        "OF-17",
+        "OF-25",
+        "OF-26",
+        "OF-27",
+        "OF-28",
+        "OF-29",
+        "OF-35"
+      ],
+      "required_inputs": [
+        "training_report_id",
+        "online_rule_version",
+        "execution_feedback_labels_path",
+        "experiment_trial_ledger_path",
+        "strategy_family",
+        "strategy_family_registry_version",
+        "label_source_family",
+        "rule_maker_baseline_spec_version",
+        "maker_risk_controls",
+        "inventory_skew_policy",
+        "post_only_guard",
+        "merge_redeem_boundary",
+        "panic_cancel_all_policy",
+        "decision_id",
+        "paper_or_live",
+        "market_id",
+        "token_id",
+        "side",
+        "price",
+        "size",
+        "tte_ms",
+        "order_type",
+        "model_version",
+        "feature_schema_version",
+        "feature_hash",
+        "causal_cutoff_ts",
+        "book_hash_at_decision",
+        "label_maturity_ts",
+        "authority_source",
+        "settlement_source",
+        "censoring_reason",
+        "split_id",
+        "final_holdout_id",
+        "purge_embargo_config",
+        "trial_count",
+        "cost_assumption_version",
+        "fee_rebate_source"
+      ],
+      "pass_criteria": [
+        "execution feedback label 按 reject、unknown submit、partial/full fill、cancel、trading_exit、hold_to_resolution、resolved_detected、redeem_after_resolved、settled PnL、no-quote/no-submit opportunity 分层。",
+        "做市、尾盘狙击、方向下注分别登记 strategy_family，标签和 PnL 不跨策略族混用。",
+        "maker baseline 已声明 inventory skew、post-only guard、merge/redeem boundary、panic/cancel-all 风控。",
+        "每条训练样本保留因果上下文和 label_maturity_ts。",
+        "experiment_trial_ledger 登记所有成功、失败和放弃试验。",
+        "leaderboard 同时报告执行现实覆盖率、标签质量、trial_count、split_id、feature_version、online_rule_version、成本口径和冻结 final holdout。",
+        "purged/embargo split、PBO/DSR 或等价过拟合防护已记录。"
+      ],
+      "warning_conditions": [
+        "某类标签数量不足，只允许进入训练经验总结，不进入 leaderboard。",
+        "Avellaneda-Stoikov 或 queue proxy 只作为 baseline/feature，不作为收益保证。"
+      ],
+      "no_submit_conditions": [
+        "训练报告缺 online_rule_version 或 cost_assumption_version。",
+        "paper/live 反馈被用于调参但未登记 trial_count 和 final_holdout 边界。"
+      ],
+      "fail_closed_conditions": [
+        "执行失败样本、平台错误样本、负 EV 成交样本和 no-submit 机会样本混成同一 label。",
+        "maker、tail-snipe、directional 样本混入同一 leaderboard 或 reward label。",
+        "maker baseline 缺少 inventory skew、post-only guard、merge/redeem boundary 或 panic/cancel-all 风控。",
+        "fee/rebate、taker delay、settlement 或 sellable maturity 未进入 label 构造。",
+        "leaderboard 只报告 replay PnL，缺少冻结 holdout 和过拟合防护。"
+      ],
+      "required_artifacts": [
+        "execution_feedback_labels.jsonl",
+        "experiment_trial_ledger.jsonl",
+        "strategy_family_registry.json",
+        "label_source_audit.jsonl",
+        "rule_maker_baseline_spec.json",
+        "inventory_risk_cases.jsonl",
+        "training_feedback_gate_report.json",
+        "split_manifest.json",
+        "cost_assumption_manifest.json"
+      ]
+    }
+  ],
+  "hardware_tiers": {
+    "live_exec": {
+      "allowed_workloads": [
+        "lightweight_inference",
+        "execution",
+        "artifact_logging",
+        "health_monitoring"
+      ],
+      "forbidden_workloads": [
+        "build",
+        "training",
+        "long_replay",
+        "full_backtest",
+        "gpu_workload"
+      ],
+      "minimum_vcpu": 2,
+      "minimum_mem_total_mib": 1800,
+      "minimum_disk_free_gib": 10,
+      "max_ort_intra_op_threads": 1,
+      "max_ort_inter_op_threads": 1,
+      "max_active_models": 1,
+      "max_shadow_models": 1
+    },
+    "paper_runtime": {
+      "allowed_workloads": [
+        "paper_runtime",
+        "dashboard",
+        "artifact_logging",
+        "short_replay"
+      ],
+      "forbidden_workloads": [
+        "gpu_training",
+        "real_funds_key_access"
+      ],
+      "minimum_vcpu": 2,
+      "minimum_mem_total_mib": 3800,
+      "minimum_disk_free_gib": 20,
+      "max_ort_intra_op_threads": 2,
+      "max_ort_inter_op_threads": 1,
+      "max_active_models": 2,
+      "max_shadow_models": 2
+    },
+    "training_gpu": {
+      "allowed_workloads": [
+        "training",
+        "replay",
+        "feature_build",
+        "backtest"
+      ],
+      "forbidden_workloads": [
+        "real_funds_key_access",
+        "live_submit"
+      ],
+      "minimum_vcpu": 8,
+      "minimum_mem_total_mib": 32000,
+      "minimum_disk_free_gib": 100,
+      "max_ort_intra_op_threads": 8,
+      "max_ort_inter_op_threads": 2,
+      "max_active_models": 0,
+      "max_shadow_models": 0
+    },
+    "research_sandbox": {
+      "allowed_workloads": [
+        "read_only_clone",
+        "source_review",
+        "static_analysis"
+      ],
+      "forbidden_workloads": [
+        "real_env_access",
+        "wallet_key_access",
+        "unreviewed_install",
+        "unreviewed_script_run"
+      ],
+      "minimum_vcpu": 1,
+      "minimum_mem_total_mib": 1000,
+      "minimum_disk_free_gib": 5,
+      "max_ort_intra_op_threads": 1,
+      "max_ort_inter_op_threads": 1,
+      "max_active_models": 0,
+      "max_shadow_models": 0
+    }
+  },
+  "resource_thresholds": {
+    "memory": {
+      "warning": "memory.events high 增加但 feed/inference 正常。",
+      "no_submit": "memory.events high 增加且 memory.current > 85% MemoryMax，或 anon 占比 > 70%。",
+      "fail_closed": "memory.events oom 或 oom_kill 增加。"
+    },
+    "psi": {
+      "warning": "memory/cpu/io avg10 > 2%。",
+      "no_submit": "avg10 > 5% 且 feed age 或 event loop lag 变差。",
+      "fail_closed": "avg10 > 10% 且连续 3 个采样窗口恶化。"
+    },
+    "disk": {
+      "warning": "free < 20% 或 < 15 GiB。",
+      "no_submit": "free < 10% 或 < 5 GiB。",
+      "fail_closed": "free < 5% 或 < 2 GiB，或无法原子写 manifest。"
+    },
+    "clock": {
+      "warning": "NTP 不同步一次或 drift > 250 ms。",
+      "no_submit": "NTP 不同步连续 2 次或 drift > 500 ms。",
+      "fail_closed": "drift > 1 s，5m 窗口禁止交易。"
+    },
+    "latency": {
+      "warning": "event loop lag p95 > 100 ms。",
+      "no_submit": "feed age、REST backlog、inference p99 任一超过策略 TTL 的 50%。",
+      "fail_closed": "action age 超过策略 TTL。"
+    }
+  }
+}

@@ -2,13 +2,17 @@
 
 事项编号：`rebuild-core-new-data-only`
 
-状态：`基础准备修订与 D+1 归档验证；FinalDatasetBoundaryStatus=DEFERRED_TO_OBSERVED_COLLECTION；BinanceAggTradeSchemaStatus=V3_DEPLOYED_AND_VERIFIED；未开始模拟或训练`
+状态：`基础准备修订与 D+1 归档验证；StrategyActionSurface=BUY_ONLY；FinalDatasetBoundaryStatus=DEFERRED_TO_OBSERVED_COLLECTION；CollectionStartReadinessStatus=SCHEMA_V3_DEPLOYED_AND_VERIFIED；未开始模拟或训练`
 
 对应需求：`/home/chillchill/btc-updown-marketmaker/demand/rebuild-core-new-data-only-demand.md`
 
 对应执行计划：`/home/chillchill/btc-updown-marketmaker/plan/rebuild-core-new-data-only-plan.md`
 
 核心训练框架：`/home/chillchill/btc-updown-marketmaker/plan/rebuild-core-new-data-only-training-framework.md`
+
+当前策略权威：本文`2026-07-11：冻结BUY-only策略并移除自有SELL能力`一节取代此前训练框架、动作、simulator和reward中的冲突决定；旧节只保留历史审计含义，不得作为当前实现依据。
+
+当前模型容量权威：本文`2026-07-11：删除模型容量硬限制`一节取代此前把小型 GRU、固定层数/hidden 网格或同参数预算写成当前主模型约束的决定。
 
 ## 2026-07-10：创建新数据-only基础准备文档族
 
@@ -89,19 +93,19 @@
 - 该快照只说明当时运行状态，不证明未来 13/14 日数据完整，也不能补证完整区间 clock sync。
 - 7 月 9 日 aggTrade T08 事故及 4-byte partial 是旧于目标 cohort 的已知异常；目标 cohort 仍需冻结 release/schema/config，任何中途升级必须形成 cutover/regime。
 
-### 训练框架决策
+### 训练框架决策（已由2026-07-11 BUY-only与模型容量决定取代；仅作历史审计）
 
-- 主框架冻结为 `ESAR-v1 = Event-State GRU + Joint Candidate-Action Ranker + Discrete-Event Simulator`。
-- 主干初始采用标准小型 stateful GRU加delta-time/freshness/mask/multiscale inputs；hidden 从 T-30 持续到decision terminal，按 market ID 隔离；重叠 market state 并存。
+- 当时主框架冻结为 `ESAR-v1 = Event-State GRU + Joint Candidate-Action Ranker + Discrete-Event Simulator`。
+- 当时主干初始采用标准小型 stateful GRU加delta-time/freshness/mask/multiscale inputs；hidden 从 T-30 持续到decision terminal，按 market ID 隔离；重叠 market state 并存。
 - 分离 `MarketContextEpisode` 与 `AccountRunTrajectory`：market hidden按market隔离；cash/positions/open/pending/late-fill/settlement在account run中跨market持续，经济closure只以account run为权威。
 - 强制基线：常数/逻辑回归、小 MLP、XGBoost grouped ranker、no-action、naive directional 和简单规则 maker。
-- 强制同预算 challenger：causal TCN。
-- 只借鉴 DeepLOB 的小型 book spatial encoder，不照搬其固定股票 LOB 模型。
-- Transformer/TLOB、Mamba/SSM、Neural CDE 后置，除非同数据/预算下证明稳定收益和 live latency/memory可接受。
+- 当时强制同预算 challenger：causal TCN。
+- 当时只借鉴 DeepLOB 的小型 book spatial encoder，不照搬其固定股票 LOB 模型。
+- 当时将Transformer/TLOB、Mamba/SSM、Neural CDE后置，除非同数据/预算下证明稳定收益和live latency/memory可接受。
 - BC/AWBC、IQL/CQL、Decision Transformer 不作为 v1 主线，因为新数据没有真实 behavior action/reward transition。
 - PPO/SAC 后置，因为未校准 simulator 中的 RL 容易利用 simulator 漏洞，且当前 hybrid action 复杂度没有必要。
 
-### 动作合同决策
+### 动作合同决策（SUPERSEDED_BY_2026-07-11_BUY_ONLY；禁止实现）
 
 - 删除“相互独立 quote/offset/size/risk heads 再由 runtime拼接”的路径。
 - 一个 scorer candidate 表示完整 Model Intent，可包含 no-op、no-submit、submit、cancel、replace、cancel-all/cancel-only、pause，以及 token/side/offset/size/order type/TTL/target order ref。
@@ -112,7 +116,7 @@
 - 模型持久`Pause/CancelOnly`状态机与权限层`NO_SUBMIT/CANCEL_ONLY`分命名空间；allowance只在permission/preflight，不进入模型账户输入。
 - no-action 是正常经济候选，不添加 idle penalty 强迫成交。
 
-### simulator 决策
+### simulator 决策（SUPERSEDED_BY_2026-07-11_BUY_ONLY；禁止实现）
 
 - simulator 是训练的一等离散事件平台模块，不是 PnL 后处理脚本。
 - Model Intent 必须产生 raw simulation evidence，再经过共享 NOE 和 ledger；simulator private state 不得直接写 reward。
@@ -124,7 +128,7 @@
 - 增加`CounterfactualMarketImpactContract`：固定future tape只在small-agent上限内有效；维护own-order/consumption overlay，超容量动作排除或non-promotable stress。
 - 增加`SimulatorCapabilityMatrix`：v1只实现candidate实际使用能力，unsupported fail closed，避免过度建设通用交易所模拟器。
 
-### reward 决策
+### reward 决策（SUPERSEDED_BY_2026-07-11_BUY_ONLY；禁止实现）
 
 - 经济权威为 ledger conservative NAV 差和 terminal settled NAV。
 - 新增`ConservativeNavValuationContract`，覆盖reserved/pending/unknown、sellable/immature/unsettled、stale/one-sided book、可执行深度、haircut和terminal payout。
@@ -145,7 +149,7 @@
 
 ### 外部证据核验
 
-- [DeepLOB](https://arxiv.org/abs/1808.03668)：CNN处理 LOB 空间结构、LSTM处理时间依赖；作为小型 book encoder 参考。
+- [DeepLOB](https://arxiv.org/abs/1808.03668)：CNN处理 LOB 空间结构、LSTM处理时间依赖；作为 book encoder 参考。
 - [TCN 系统比较](https://arxiv.org/abs/1803.01271)：causal convolution是必要 challenger 依据。
 - [TLOB](https://arxiv.org/abs/2502.15757)：复杂模型收益需与简单 MLP 和交易成本现实对照。
 - [ONNX GRU](https://onnx.ai/onnx/operators/onnx__GRU.html)：标准 hidden-state I/O 支持 single-step runtime 合同。
@@ -267,3 +271,76 @@
 
 - 已授权：文档对齐、schema v3 最小实现与测试、D+1 昨天归档/Gamma 两字段修正、commit/push、本地 release build、数据采集服务器重新部署和重启采集。
 - 未授权：future paper/live 真实 market handoff 实现或部署、`data-pipeline` 实现、simulator/model 实现、训练、paper/live 交易和资金操作。
+
+## 2026-07-11：冻结BUY-only策略并移除自有SELL能力
+
+### 用户最终决定
+
+- 用户批准同步更新四份`rebuild-core-new-data-only` active文档。
+- 新框架及新代码的主动订单集合严格为`BUY-only`：模型只能选择BUY UP、BUY DOWN、单腿或双腿、价格、数量、TTL，以及保留或取消已有BUY订单。
+- `BUY`是系统常量，不是模型可学习或切换的side维度。不得在candidate、ONNX接口、Rust解码、simulator enabled capability、feature flag、测试占位或路线图中保留自有SELL；也不得写成deferred、research-only或未来恢复事项。
+- 仅目标新cohort的外部市场bid/ask、ask depth与trade side作为行情证据进入`book_side/market_side/trade_side`命名空间；它们不得进入自有动作schema。官方Rust SDK adapter的订单side是另一协议边界，必须固定构造`Side::Buy`。旧本账户SELL/执行artifact仍受用户单独批准门约束，只能校准simulator且不得作为模型输入。
+- split、merge、redeem均不是模型或runtime动作；平台撮合互补BUY时内部形成完整集只作为外部撮合与账本结果，不建立本方能力。
+
+### 策略身份与经济边界
+
+- 当前策略正式定义为“现金担保、双outcome、BUY-only的配对获取、库存调节与持有至结算策略”。它能在UP/DOWN两个outcome提供BUY-side流动性，但不是传统bid/ask均可主动下单的完整双向做市商。
+- 配对收益只按confirmed持仓的`paired_inventory_confirmed=min(q_up_confirmed,q_down_confirmed)`增量及其UP成本、DOWN成本、实际fee/已入账rebate核算；排除initial fixture、provisional/failed fill并相对common baseline归因。下单意图或静态盘口价格和小于1不等于已获利。两腿异步成交、单腿暴露、部分成交与batch mixed result必须进入simulator和评估。
+- 买入互补outcome可以降低净方向暴露；临近结算也允许在证据充分时买入更可能获胜的一侧。单outcome BUY保持合法，不设置按动作来源的“纯赌博”类别惩罚，只由未配平暴露、尾部损失、资金占用和最终经济结果约束。
+- 互补BUY消耗额外pUSD并增加gross inventory，不能主动减少总持仓或释放资金；持仓只能等待模型外平台结算回款使collateral重新可用。这是移除自有SELL后的明确能力代价。
+
+### 动作、状态与simulator取代决定
+
+- v1 candidate surface冻结为：`hold_existing_buys`、BUY UP、BUY DOWN、联合BUY UP+DOWN、取消指定BUY和cancel-all-buys。语义重复的`no_op/no_submit`合并为一个hold候选；模型不输出pause、cancel-only或risk-intent，持久禁单只由系统`PermissionVerdict::NO_SUBMIT/CANCEL_ONLY`负责。
+- candidate继续保持最多32个/state；submit candidate只含1..2笔BUY，每个outcome最多一个价格档，batch最多两项。v1删除replace candidate：模型先取消BUY，cancel NOE更新状态后由新的评估决定是否提交，不允许自动续提或fallback。
+- AccountExecutionState删除sellability相关状态，改为confirmed/provisional/free/reserved pUSD、UP/DOWN confirmed/provisional positions、open/pending/unknown BUY、paired/net/gross inventory、resolution/settlement与collateral重新可用状态。
+- 新增`CapitalBudgetContract`，在训练前冻结account/单market最大投入、最低free cash、第二腿资金预留和batch reservation；它是现金可执行性硬约束，不是行为类别打分。
+- simulator只启用BUY create/ack/cancel/cancel-all、cancel后新评估、单笔/双腿batch逐项结果、partial fill、pUSD reservation、cancel race、fee/rebate、resolution与模型外`platform_settlement_credit_observed`事件。移除replace、sellability maturity、SELL reservation/admission/recovery和自有split/merge/redeem命令路径。
+- 用户指定的“平台约十分钟自动兑回”被定义为模型外`platform_settlement_credit_observed`事件，不是本方redeem action。官方协议只保证resolved后可redeem，因此在取得当前账户级回款分布前只允许assumed/stress延迟且保持non-promotable；未观察到平台回款时winning token保持resolved-but-uncredited、pUSD不可复用，禁止固定十分钟伪造现金。该事件是`internal_settlement`，绝不作为external cash flow从收益中扣除。
+- 新增`SettlementLedgerTransition`：权威resolution原子将losing token归零并确认损失、将winning token转为resolved-winning-claim；平台credit使用稳定event key在同一transition中注销对应claim并增加等额pUSD，`external_cash_flow=0`。重复事件必须幂等，claim与cash不得双计；losing-only、winning-only、完整/partial pair与no-credit tail分别验证。
+- reward复审进一步发现resolution、late-fill confirmation与platform credit可能乱序。接受该异步事实，但不采用“本地claim未出现就冻结平台已确认现金或暂停模型”的过度校验：持久保存terminal outcome，resolution后的confirmed fill直接进入loss/claim；credit先到时以实际pUSD加等额`unmatched_settlement_credit_suspense`保留内部对账缺口，claim后到再原子清除且不重复加cash。partial/aggregate/duplicate credit和三种主要顺序必须最终收敛；tail未归因只censor受影响标签，不影响其他market或BUY cancel。
+- suspense进一步进入AccountExecutionState、ConservativeAccountNavValuation和terminal合同：其值非负、在NAV中只扣一次，不减少平台confirmed free cash、不属于external flow或capital-at-work，也不新增模型输入、动作或风险模式；branch-differential suspense未清零时，受影响candidate/per-market/account closure保持censored或显式residual bridge，capital release time保存bounds，但runtime与其他market继续运行。
+
+### reward与估值取代决定
+
+- `ConservativeNavValuationContract`由`ConservativeAccountNavValuationContract`取代。中间account mark只用于会计、风险和censored residual bounds，不表示策略可以主动清算，也不能变成candidate可复用现金；终局settled NAV仍是经济权威。
+- candidate label与完整账户回报分开：每个ranking group使用common-baseline与共享causal cutoff，`G_candidate`只在全部branch-differential订单、reservation、仓位、cash和下游差异闭合后计算；超限branch必须censor，禁止不同candidate按不同horizon比较。`G_account`只用于完整policy的terminal settled NAV闭合，owning-market结束本身不再等于candidate terminal。
+- 禁止pair/free-roll bonus、固定fill/reject奖惩、`lambda_flat`、按动作来源的directional类别惩罚、FIFO配对血缘和热路径pnl-floor。相同经济状态必须同分。
+- submit/cancel/reject/fill次数只作lifecycle gate与诊断；实际费用、错失成交、adverse selection、暴露时间和资金占用只通过ledger/NAV及通用风险分量体现，不建立第二套运营打分。
+- 必须报告actual paired quantity/all-in edge、unpaired exposure-time、gross inventory、capital-usage time、time-to-pair、cash exhaustion、settlement wait和settlement closure。资金占用先作为强制晋级指标；只有跨market现金约束仍不能体现机会成本时，才允许在development阶段预注册版本化`lambda_capital`。
+- inventory exposure明确为`integral(abs(q_up_confirmed-q_down_confirmed) dt)`，signed net只作方向状态；UP-heavy与DOWN-heavy镜像状态同罚。paired指标只累计confirmed、排除initial/provisional/failed并相对common baseline计算，使用order-invariant pooled-average成本，且只作审计不作bonus。
+- `order_reserved_pusd`、`provisionally_committed_pusd`和`unsettled_position_cost_basis`是互斥ledger桶；`second_leg_headroom`只作admission预算。resolution后losing部分立即转为realized loss并退出capital-at-work，winning claim等到平台回款；losing-only不等待不存在的credit。candidate capital权重只使用相对baseline的delta，capital-time不进入NAV haircut，防止双扣。
+- 全部split改为各自独立的cash-only零仓位fixture：仅固定starting pUSD，positions/open-orders/pending/reservation/resolved-claim均为零，避免初始持仓没有成本基础并阻断跨split账户状态泄漏。
+
+### mistake-log闭环与影响
+
+- 历史“本地账本持仓大于平台当时可卖量，持续提交最大SELL并反复失败”的事实保留为审计证据；新框架通过让自有SELL不可表达来闭环，不声称已经解决平台sellability语义。
+- 不保留sellability overlay、100→95→90递减重试、失败后改买互补outcome的固定fallback或其他影子策略。买哪一侧、数量和时机仍由合法BUY candidate共同评分。
+- 移除自有SELL降低动作空间、样本复杂度和链上余额成熟失败风险，但不会消除BUY fill、batch非原子、pUSD admission、cancel race、费用、adverse selection、资金锁定或结算延迟。
+
+### 本轮授权边界
+
+- 本轮授权范围仅为四份active文档一致性修改与独立审查。
+- 未实现candidate、simulator、模型、ONNX/Rust consumer或runtime代码；未启动训练、paper、live或资金操作。未开发事项是后续计划内容，不是本轮阻断项。
+
+### 独立审查结果
+
+- 派生审查前已只读确认全局Codex配置为`gpt-5.6-sol`与`model_reasoning_effort=ultra`；审查代理只读文件，不修改工作区。
+- BUY-only动作边界审查确认：CandidateIntent只含hold、submit-buy、cancel-buy和cancel-all-buys；无自有SELL deferred/placeholder、replace、模型pause/cancel-only或risk-intent第二权威；外部market side、SDK固定`Side::Buy`和旧本账户artifact已分域。最终`0 Critical / 0 High / 0 Medium — PASS`。
+- 经济/reward审查确认：`G_candidate/G_account`、confirmed pairing、互斥capital桶、cash-only split fixture、SettlementLedgerTransition、credit/claim乱序与suspense估值/终局均闭合；平台已确认cash不因本地归因延迟冻结，非零suspense只censor受影响经济标签。最终`0 Critical / 0 High / 0 Medium — PASS`。
+- mistake-log一致性审查确认：事件触发、长状态、action collapse、consumer parity、reward/ledger closure、split泄漏、simulator过度乐观、SELL余额成熟死循环和混合平台时间差均保留明确阻断或定向censor，未引入全局暂停。最终`0 Critical / 0 High / 0 Medium — PASS`。
+- 最终审查后的唯一追加内容是本节审查记录，不改变需求、动作、simulator、reward、settlement或验收语义。
+
+## 2026-07-11：删除模型容量硬限制
+
+### 用户决定
+
+- 用户明确批准删除“模型总参数量上限、GRU固定层数/hidden网格以及浅GRU为预定主模型”的硬限制。
+- `ESAR-v1`继续冻结事件状态、联合BUY-only候选评分、simulator、NOE、ledger和reward等共享合同，但不再把序列骨干或容量预定为某个冠军。
+- 标准GRU只保留为可部署基线；causal TCN继续作为序列结构challenger。候选之间必须使用相同因果数据、动作、simulator、经济评估和生产吞吐/延迟门，但不要求参数量相等。
+
+### 文档影响与当前边界
+
+- 需求、计划和核心训练框架已同步移除参数量、层数、hidden size和同参数预算的当前约束。
+- 本次只落实已批准的“删除硬限制”。同一框架下具体容量梯度、不同架构候选范围以及统一数据加载适配层仍在分析验证，尚未冻结为实现要求。
+- 未实现或启动data-pipeline、simulator、模型训练、paper、live或资金操作。

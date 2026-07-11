@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "platform_shadow_rules.schema.json",
+  "title": "PlatformShadowRule",
+  "type": "object",
+  "required": [
+    "rule_id",
+    "rule_name",
+    "source_ids",
+    "trigger_condition",
+    "confidence",
+    "default_severity",
+    "is_hard_gate",
+    "is_warning_only",
+    "action",
+    "reproduction_method",
+    "verification_artifacts",
+    "close_condition"
+  ],
+  "properties": {
+    "rule_id": {"type": "string", "pattern": "^OF-[0-9]{2}$"},
+    "rule_name": {"type": "string", "pattern": "^[a-z0-9_]+$"},
+    "source_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+    "trigger_condition": {"type": "string"},
+    "confidence": {"enum": ["low", "medium", "medium_high", "high"]},
+    "default_severity": {
+      "enum": [
+        "audit_only",
+        "warning",
+        "warning_audit_only",
+        "no-submit",
+        "cancel-only",
+        "fail-closed",
+        "fail-closed-training"
+      ]
+    },
+    "is_hard_gate": {"type": "boolean"},
+    "is_warning_only": {"type": "boolean"},
+    "action": {"type": "string"},
+    "reproduction_method": {"type": "string"},
+    "verification_artifacts": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+    "close_condition": {"type": "string"}
+  },
+  "additionalProperties": false
+}

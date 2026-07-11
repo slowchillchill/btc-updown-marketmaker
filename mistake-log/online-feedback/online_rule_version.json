@@ -1,0 +1,37 @@
+{
+  "online_rule_version": "online-feedback-2026-06-28-p0",
+  "generated_at_jst": "2026-06-28T00:00:00+09:00",
+  "rules_range": "OF-01..OF-35",
+  "source_files": [
+    "2026-06-28-online-feedback线上问题与平台潜规则汇总计划.md",
+    "外部资料交叉验证清单.tsv",
+    "相似机器人实现观察清单.tsv",
+    "online_issues.jsonl",
+    "platform_shadow_rules.jsonl",
+    "gates/p0_gate_specs.json",
+    "schemas/online_issues.schema.json",
+    "schemas/platform_shadow_rules.schema.json",
+    "schemas/execution_feedback_labels.schema.json",
+    "schemas/experiment_trial_ledger.schema.json",
+    "schemas/current_market_info_snapshot.schema.json",
+    "schemas/gate_report.schema.json"
+  ],
+  "authorization_boundary": {
+    "allows_live_trading": false,
+    "allows_paper_runtime": false,
+    "allows_training": false,
+    "allows_deploy": false,
+    "allows_fund_operations": false,
+    "scope": "仅限文档、schema、台账和门禁规格"
+  },
+  "required_p0_gates": [
+    "OnlineFeedbackGate",
+    "ModelBundlePreflight",
+    "MarketDiscoveryGate",
+    "MarketSwitchGate",
+    "ResourceWatermarkGate",
+    "HardwareTierGate",
+    "SupplyChainGate",
+    "TrainingFeedbackGate"
+  ]
+}

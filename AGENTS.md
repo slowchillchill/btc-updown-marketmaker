@@ -33,3 +33,65 @@ AWS 爱尔兰 live-trade 服务器 `108.130.74.143` 是运行目标，不是构�
 `wallets/` 只保留 gitignored 钱包 secret/env 与钱包公共地址派生配置材料。
 部署模型时必须从本地已验证 artifact 路径直接复制到
 `/home/ubuntu/live-trade` 下的独立运行产物目录，记录来源路径与 sha256 证据。
+
+## 模型框架竞赛研究来源
+
+设计、审查或更新模型框架竞赛时，优先查询下列已核验来源。清单非穷举，也不是 PyTorch 或任何生态的准入白名单。这里固化的是检索入口和证据等级，不代表已批准任何框架、模型、依赖或实现路线；每次引用仍须记录访问日期、版本/tag/commit、许可证、维护状态和与本项目的适用边界。
+
+### 证据优先级
+
+1. 本仓库真实代码、typed raw、manifest、artifact、测试、运行记录、已批准需求与 changelog。
+2. Polymarket 官方文档、官方 Rust SDK、官方合约仓库、release、issue 和 PR。
+3. 依赖或工具的官方文档、官方仓库、release、issue 和 PR。
+4. 同行评审论文、作者发布的代码与可复现实验；论文中的预测指标或模拟收益不得直接当作本项目盈利证据。
+5. 官方开发者社区、Quantitative Finance Stack Exchange、Cross Validated 等社区讨论，只用于发现问题、失败模式和待验证假设，不能覆盖前述权威来源。
+
+普通 README 盈利自述、博客、排行榜、营销材料和 Reddit/Discord/Telegram 发言只能作为低等级线索；未经本项目固定数据、固定合同、固定模拟平台和真实 artifact 复核，不得进入需求事实、框架晋级或盈利结论。
+
+### 平台规则与官方 SDK
+
+- `https://docs.polymarket.com/`：市场、CLOB、订单、WebSocket、费用、奖励、CTF、仓位与结算的第一权威入口。
+- `https://github.com/Polymarket/rs-clob-client-v2`：官方 Polymarket Rust SDK 的能力、类型、示例、release、issue 与 PR；Polymarket 开发继续遵守本文件的 SDK-first 决策门。
+- `https://github.com/Polymarket/ctf-exchange-v2` 与 `https://github.com/Polymarket/`：官方撮合/完整集语义、协议实现和仓库演进的补充证据。
+
+离线竞赛可以为公平性冻结同一规则版本、费用假设和 simulator 版本；paper/live 前仍必须重新核验当前官方规则与 SDK，不得把某轮冻结值当作永久平台常数。
+
+### 共用数据、训练、竞赛与部署工具
+
+- `https://docs.pytorch.org/`、`https://github.com/pytorch/pytorch`、`https://discuss.pytorch.org/`：模型实现、数据加载、确定性、导出和官方开发者问题。PyTorch 可作为成熟公共实现底座候选，但不是预定获胜模型框架。
+- `https://arrow.apache.org/docs/`：Arrow Dataset、PyArrow、Parquet、bounded scan、projection、filter 和 RecordBatch streaming；用于共享 canonical 数据与有界加载证据。
+- `https://xgboost.readthedocs.io/`、`https://github.com/dmlc/xgboost`：可解释树模型与 grouped learning-to-rank 基线。
+- `https://onnx.ai/`、`https://onnxruntime.ai/docs/`、`https://github.com/microsoft/onnxruntime`：模型交换、算子覆盖、推理、性能和 parity 证据；导出成功不等于运行时语义或数值 parity 通过。
+- `https://optuna.readthedocs.io/`、`https://github.com/optuna/optuna`：预注册超参搜索、持久 study、trial 状态和预算管理候选。并行/分布式搜索不天然可复现，多目标 pruning 等能力须按当前官方文档核验。
+- `https://mlflow.org/docs/`、`https://github.com/mlflow/mlflow`：run、参数、指标、dataset、artifact 和 model lineage 的竞赛台账候选。MLflow 只帮助记录，不自动保证数据公平、统计有效或可复现。
+- `https://docs.jax.dev/`、`https://flax.readthedocs.io/`、`https://www.tensorflow.org/guide`、`https://keras.io/`、`https://scikit-learn.org/stable/`、`https://lightgbm.readthedocs.io/` 与 `https://catboost.ai/en/docs/`：非 PyTorch 训练后端、树模型和统计基线的一手入口。共享竞赛合同必须保持语言和训练后端中立；能否入场取决于同一数据、动作、复现、资源、导出和 runtime parity 门，而不是库名。
+- `https://github.com/advisories` 与 `https://osv.dev/`：依赖安全公告检索入口；实际引入时还必须核对官方 release、包注册表元数据、传递依赖和锁文件。
+
+优先复用成熟工具的明确能力；只有当其不能满足已冻结合同，或引入更高的许可、部署、性能或复杂度风险时，才设计本地最小实现。
+
+### 模型、量化与模拟研究入口
+
+- `https://arxiv.org/`、`https://proceedings.mlr.press/`、`https://openreview.net/`、`https://proceedings.neurips.cc/`、`https://papers.ssrn.com/` 和论文 DOI/出版社正文：检索原始论文、方法前提、统计设计与限制。
+- `https://github.com/LeonardoBerti00/TLOB`、`https://github.com/locuslab/TCN`、`https://github.com/state-spaces/mamba`、`https://github.com/patrick-kidger/NeuralCDE`：Transformer/LOB、TCN、SSM 和不规则时间模型的一手实现与 issue。它们只能作为可注册候选或局部组件来源，不能自行替换本项目数据、动作、模拟、账本、reward 或评估合同。
+- `https://github.com/financialcomputingucl/lobframe`：LOB 模型、训练与交易评估的研究参考；当前仓库许可证为 `CC BY-NC-ND 4.0`，默认只读研究，不得未经许可复制、修改或用于商业实现。
+- `https://github.com/microsoft/qlib`：模型集成、实验记录和高频嵌套决策架构参考；不能直接替换 Polymarket 二元市场、BUY-only 动作和本项目事件驱动模拟平台。
+- `https://finrl.readthedocs.io/`、`https://github.com/AI4Finance-Foundation/FinRL`：DRL 训练环境与统一比较流程参考；其通用股票、time-driven/Gym 环境不符合本项目事件触发、订单生命周期和真实账本要求，默认不得直接采用。
+- `https://hftbacktest.readthedocs.io/`、`https://github.com/nkaz001/hftbacktest`：latency、queue 和 replay 假设参考；其 market-data replay 不改变市场且无真实 market impact，不能直接充当本项目 simulator 真相。
+- `https://github.com/abides-sim/abides`、JAX-LOB 原论文及作者仓库 `https://github.com/KangOxford/AlphaTrade`：离散事件、交互式 LOB 与 GPU 仿真的局部参考；NASDAQ/股票撮合或通用 LOB 语义不得覆盖 Polymarket 规则。`AlphaTrade` 当前未声明可识别的仓库许可证，默认只读研究，未完成许可核验前不得复制或执行。
+- `https://hummingbot.org/docs/`、`https://github.com/hummingbot/hummingbot`：connector、订单生命周期和市场做市工程参考；其固定 `on_tick`/周期刷新范式是本项目禁止退化到固定 decision tick 的反例。
+- `https://quant.stackexchange.com/` 与 `https://stats.stackexchange.com/`：queue/fill/backtest、时间序列 split、泄漏与统计检验的社区线索；关键判断必须回到论文、官方文档和本项目实证。
+
+### 外部方案进入竞赛前的最低筛选
+
+任何外部框架、模型、代码或论文在进入候选清单前，至少核验：
+
+- 是否解决本项目任务，而不是只报告分类准确率、F1、AUC 或通用股票回测；
+- 是否严格因果并支持不规则业务事件、T-30、重叠 market、持续状态和 market 隔离；
+- 是否能消费同一逻辑 `ObservationContract`，通过薄且可哈希的 adapter 接入，而不重排事件、重建另一套盘口/标签；
+- 是否能输出同一 BUY-only `Model Intent`，且每个输出有唯一 consumer；
+- 是否能在同一 simulator、NOE、ledger、reward、seed、split 和评估合同下复现；
+- 是否满足训练资源预算及 future live 的延迟、内存、导出和 Rust runtime parity 门；
+- 许可证是否允许本项目的使用方式，仓库是否仍维护，依赖是否可锁定，失败/限制是否在 issue、PR 或 release 中有证据。
+- 外部代码、权重、数据和依赖是否完整记录 provenance、许可证、传递依赖与安全告警；许可证未知或不兼容时只能作为只读研究证据，不得执行或晋级，也不得接触钱包、交易密钥或生产凭据。
+
+如果候选要求新增信息源、改变 `ObservationContract`、动作空间、市场规则、simulator、reward 或评估方法，必须创建新的竞赛轮次/实验合同，不能与原轮候选混在同一榜单。

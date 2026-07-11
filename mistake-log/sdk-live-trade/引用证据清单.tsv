@@ -1,0 +1,24 @@
+reference_id	kind	path	line_ref	sha256	required_by_mistake_ids
+REF001	official_doc	polymarket-docs/current/api-reference/clients-sdks.md	L5-L10		M0050,M0052
+REF002	official_doc	polymarket-docs/current/trading/overview.md	L31-L38		M0051
+REF003	official_doc	polymarket-docs/current/concepts/order-lifecycle.md	L54-L61		M0019,M0020,M0021,M0042
+REF004	official_doc	polymarket-docs/current/concepts/order-lifecycle.md	L120-L125		M0025,M0027
+REF005	api_spec	polymarket-docs/api-spec/clob-openapi.yaml	L346-L399		M0016,M0017
+REF006	api_spec	polymarket-docs/api-spec/clob-openapi.yaml	L5166-L5185		M0024,M0028,M0029,M0030
+REF007	asyncapi	polymarket-docs/asyncapi/asyncapi-user.json	L16-L39		M0007,M0023,M0026,M0038,M0039
+REF008	asyncapi	polymarket-docs/asyncapi/asyncapi-user.json	L437-L520		M0031,M0032,M0033
+REF009	api_spec	polymarket-docs/api-spec/data-api-openapi.yaml	L341-L363		M0010,M0022,M0034,M0035
+REF010	api_spec	polymarket-docs/api-spec/data-api-openapi.yaml	L412-L487		M0036
+REF011	official_doc	polymarket-docs/current/concepts/positions-tokens.md	L81-L87		M0037
+REF012	official_doc	polymarket-docs/current/trading/matching-engine.md	L146-L199		M0018
+REF013	artifact_report	poly-arb-ai/rust/sdk-live-trade/artifacts/live-validation/pullback/platform-sellable-maturity-live-20260626T133250Z/platform_sellable_maturity_gate_report.json		d2a9427f0cf10b9649224c172d16838ea793f6bb8bb18109402e5877daff40a9	M0003,M0008,M0009,M0014
+REF014	artifact_report	poly-arb-ai/rust/sdk-live-trade/artifacts/live-validation/pullback/platform-sellable-maturity-live-20260626T133250Z/platform_sellable_maturity_fail_closed_trace.json		e74fd13533679dd70b28b1e53df833bb8ded557ba90706ed9c6bfc0a0b0a7f55	M0008,M0009,M0014
+REF015	artifact_report	poly-arb-ai/rust/sdk-live-trade/artifacts/live-validation/pullback/platform-sellable-maturity-live-20260626T133250Z/platform_sellable_maturity_summary.json		f697182c4537b14b4de871995d86257df6ca8bdf6d1c506624939b73d44f5acf	M0008,M0009,M0014
+REF016	artifact_report	poly-arb-ai/rust/sdk-live-trade/artifacts/live-validation/pullback/platform-sellable-maturity-live-20260626T133250Z/platform_sellable_maturity_samples.jsonl		9f581d1e0a1951af413f987c3e2a9caf03cf6227f5367f08ad1868a381060375	M0008,M0009,M0014
+REF017	artifact_report	poly-arb-ai/rust/sdk-live-trade/artifacts/live-validation/pullback/platform-sellable-maturity-artifact-smoke-20260626T132728Z/platform_sellable_maturity_gate_report.json		b5902438cfeba5469c173f2ddf5cabc8d17cf249926d2e54137924ec4c1e0adf	M0005
+REF018	artifact_report	poly-arb-ai/rust/sdk-live-trade/artifacts/live-validation/pullback/post-live-account-snapshot-20260626T145200Z/reconciliation_report.json		b8427657ae369811e8575f1e6479f469dd525b7c510137b83785dd4a1702fd79	M0010,M0036
+REF019	artifact_manifest	poly-arb-ai/rust/sdk-live-trade/artifacts/live-validation/pullback/platform-sellable-maturity-live-20260626T092500Z/artifact_bundle_manifest.tsv		900515a01002eb7c2815c8ace68c98d9fb9a988f99ffbb8c223eccecd824d51c	M0006,M0011
+REF020	artifact_manifest	poly-arb-ai/rust/sdk-live-trade/artifacts/remote-r5-runs/r5-three-market-live-funds-20260619T092850Z/artifact_bundle_manifest.tsv		7041a4d0a905d543e77be82a68ae51449e8b4a505aa3a6ed6dbf8b2c6ddfa3a2	M0031,M0032
+REF021	artifact_manifest	poly-arb-ai/rust/sdk-live-trade/artifacts/remote-r5-runs/r5-three-market-live-funds-20260621T150800Z/artifact_bundle_manifest.tsv		11ae90e48a6d293419a53f021d04bec97e3da62d33db4ab51fa15ddac104fcda	M0016,M0019,M0020,M0021
+REF022	official_doc	polymarket-docs/current/trading/matching-engine.md	L31-L50		M0018
+REF023	official_doc	polymarket-docs/current/trading/orderbook.md	L91-L105		M0044

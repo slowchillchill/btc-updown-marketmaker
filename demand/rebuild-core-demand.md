@@ -19,7 +19,7 @@
     DATA["外部市场源<br>Polymarket market channel / Binance BTCUSDT depth / Binance BTCUSDT aggTrade / Polymarket RTDS Chainlink BTC/USD"] --> COLLECT["（共用）data-collect<br>外部市场源采集 / typed raw / coverage / manifest"]
     COLLECT --> CONTEXT["（共用）Market Context Builder<br>实时市场上下文 / 模型输入 / 可见信息边界"]
     CONTEXT --> TRADE["Paper / Live Trade 模块<br>市场数据 + Ledger 持续决策编排/模型输入供给"]
-    BRIDGE["（共用）Intent Bridge / Execution Adapter<br>统一意图与执行合同"] -- paper --> SIM["（共用）模拟平台模块<br>文档 / 潜规则 / issues / artifact 校准"]
+    BRIDGE["（共用）Intent Bridge / Execution Adapter<br>统一意图与执行合同"] -- paper --> SIM["（共用）sim-system模拟平台模块<br>文档 / 潜规则 / issues / artifact 校准"]
     BRIDGE -- live --> REAL["真实平台模块<br>官方 Polymarket Rust SDK"]
     SIM --> RAW["平台返回原始证据<br>成交 / 部分成交 / 不成交 / 拒单 / 撤单"]
     REAL --> RAW
@@ -38,7 +38,7 @@
   flowchart TD
     TRAIN["Train 模块<br>持续消费训练market数据+ledger数据<br>训练框架 / 奖惩办法 / 回放评估"] --> MODEL_TRAIN["模型产物 / Model Registry<br>active / shadow / candidate / retired"] & TRAIN_REPORT["训练可视化可审计报告"]
     TRAIN -- 训练回放意图 --> BRIDGE["（共用）Intent Bridge / Execution Adapter<br>统一意图与执行合同"]
-    BRIDGE --> SIM["（共用）模拟平台模块<br>文档 / 潜规则 / issues / artifact 校准"]
+    BRIDGE --> SIM["（共用）sim-system模拟平台模块<br>文档 / 潜规则 / issues / artifact 校准"]
     SIM --> RAW["模拟平台返回原始证据<br>成交 / 部分成交 / 不成交 / 拒单 / 撤单"]
     RAW --> NOE["（共用）NOE / 归一化合同<br>订单生命周期归一化"]
     NOE --> LEDGER["（共用）Ledger 合同<br>回放账户 / 持仓 / 挂单 / CASH / NAV"]
@@ -76,9 +76,10 @@
   4. 不允许出现第二套影子 feature pipeline、影子订单解释器、影子账本解释器或影子 SDK。
   5. 数据、模型、paper、live 必须共享同一套市场时间线、订单事件语义、artifact 合同和反馈标签语义。
   6. 交易决策、仓位/风控决策、暂停、不下单、撤单、减仓等策略性动作必须完全由模型输出或模型 bundle 明确声明的模型状态机输出；live-trade 不得内置第二套策略或风控来改写模型意图。
-  7. live-trade 是模型与 Polymarket/外部平台之间的桥梁，只负责数据和真实平台事件归一化、模型输入供给、模型请求校验与发送、真实平台返回/成交/拒单/撤单/ledger 派生状态记录，以及权限、协议、schema、钱包、路径等硬边界 fail closed；它可以拒绝执行不满足硬边界的请求并把原因写入 audit/operator 记录，但不得生成替代交易决策。
-  8. 本文中的“真实平台”专指 live trade 连接的 Polymarket/SDK/market channel/user channel/submit response/cancel response；“模拟平台”专指训练样本构造和 paper trade 使用的订单生命周期模拟器。模拟平台只能用真实平台 artifact 校准，不得在 live 高频热路径中作为账户、订单或风控状态源。
-  9. 所有关键结论必须有 artifact、manifest、schema、日志或测试证据支撑，不能只靠 stdout 或人工判断。
+  7. 模型决策必须由模型可见的业务事件触发，不得由固定频率、固定周期、周期性 polling 或固定 decision tick 触发。模型可见业务事件包括外部市场数据事件、NormalizedOrderEvent / ledger 状态变化，以及 market preload、market start/end、TTL due 等具有明确业务语义的 lifecycle/deadline 事件；deadline 必须先记录为可审计事件，不能退化成周期性 tick。每个有效模型可见事件都必须先更新该 market 的持续因果状态，再触发模型交易与风控 intent 评估；事件触发不等于只向模型输入当前孤立事件。
+  8. live-trade 是模型与 Polymarket/外部平台之间的桥梁，只负责数据和真实平台事件归一化、模型输入供给、模型请求校验与发送、真实平台返回/成交/拒单/撤单/ledger 派生状态记录，以及权限、协议、schema、钱包、路径等硬边界 fail closed；它可以拒绝执行不满足硬边界的请求并把原因写入 audit/operator 记录，但不得生成替代交易决策。
+  9. 本文中的“真实平台”专指 live trade 连接的 Polymarket/SDK/market channel/user channel/submit response/cancel response；“模拟平台”专指训练样本构造和 paper trade 使用的订单生命周期模拟器。模拟平台只能用真实平台 artifact 校准，不得在 live 高频热路径中作为账户、订单或风控状态源。
+  10. 所有关键结论必须有 artifact、manifest、schema、日志或测试证据支撑，不能只靠 stdout 或人工判断。
 
   ## 二、新系统流程要求
 
@@ -107,6 +108,7 @@
 
   4. Active market 持续决策阶段：
      - 当前活跃市场中，模型必须持续看到所有必要数据源。
+     - 每个有效模型可见事件到达并完成时间排序、去重、market 隔离、NOE/ledger projection 与 causal availability 判定后，必须更新该 market 的持续状态并触发一次模型交易与风控 intent 评估；没有新的模型可见事件时，不得由固定频率调度器凭空生成策略决策。
      - 模型输入必须包括 price to beat、orderbook/depth、Binance/外部价格、本地 ledger 派生的 CASH、position、sellable、open
      orders、pending cancels、active resting count、账户级 NAV 字段、订单生命周期状态、最近 submit/cancel/fill/partial-fill 反馈，以及 cancel requested、cancel ack、cancel rejected、cancel retry、cancel timeout、matched-cancel、overlapped terminal 等 cancel order 生命周期反馈。
      - 模型必须能在完整 5 分钟市场窗口内持续做交易决策，而不是只看到 250ms 的孤立片段。
@@ -123,17 +125,18 @@
   1. 模型训练、paper trade、live trade 都必须持续输入目标 market 从 `start - 30s` 到 market end 的可见上下文；这 30 秒是目标 market 的 pre-start prefetched context，不是把上一个 market 的订单/账本状态混入目标 market。
   2. 模型不得只看到 250ms 数据片段，这是之前版本的核心错误，我们当前版本重点要修复这个问题。
   3. 每个训练样本、paper 决策、live 决策都必须带有 causal cutoff，确保模型只能看到当时真实可见的信息。
-  4. 模型输入至少应包含：
+  4. 训练样本、paper 决策和 live 决策必须与真实模型可见事件触发点对齐，并至少记录 trigger_event_id、trigger_event_type、event_available_time、decision_ts 和 causal_cutoff_ts。固定间隔重采样或 `tick_stream` 可以作为派生特征、统计、兼容分析或回放索引，但不得成为模型决策触发器，也不得生成没有真实业务事件对应的策略决策样本。
+  5. 模型输入至少应包含：
      - market_id、token_id、side、time-to-expiry、active/prefetched 标记；
      - 所有数据源的时间对齐状态和 freshness；
      - orderbook、depth、spread、price to beat、tick size、min size；
      - 本地 ledger 派生的 CASH、current position、sellable balance、open orders、pending cancels、active resting count、账户级 NAV；
      - submit/cancel/fill/partial-fill；
      - 不得包含独立 account_state；如需账户状态，只能使用本地 ledger 派生字段；
-  5. 训练、paper、live 的输入 schema 必须一致。允许字段在某些环境下为空，但不能为空缺语义。
-  6. 模型输出必须包含可审计的 trading/risk intent，例如 submit、cancel、no-submit、cancel-only、pause、size、price、side 等；live-trade 只消费该 intent 并回传 execution feedback。
-  7. 每个训练样本、paper 决策、live 决策必须在 audit metadata 或 run manifest 中记录 feature_schema_version、online_rule_version、model_version、feature_hash；如记录 orderbook 摘要，只能作为审计 hash，不作为模型输入特征。
-  8. 模型不得直接以未归一化的真实平台或模拟平台订单返回作为权威订单状态、训练标签或策略输入；raw response 只能作为 raw evidence、digest/reference、审计材料或受控调试材料保留。模型可以学习由 `NormalizedOrderEvent`、ledger 和 causal projection 派生出的订单生命周期状态、submit/cancel/fill 执行反馈、cancel pending/retry/ack/terminal 状态、延迟分布、fill hazard、风险状态和策略响应。
+  6. 训练、paper、live 的输入 schema 必须一致。允许字段在某些环境下为空，但不能为空缺语义。
+  7. 模型输出必须包含可审计的 trading/risk intent，例如 submit、cancel、no-submit、cancel-only、pause、size、price、side 等；live-trade 只消费该 intent 并回传 execution feedback。
+  8. 每个训练样本、paper 决策、live 决策必须在 audit metadata 或 run manifest 中记录 feature_schema_version、online_rule_version、model_version、feature_hash；如记录 orderbook 摘要，只能作为审计 hash，不作为模型输入特征。
+  9. 模型不得直接以未归一化的真实平台或模拟平台订单返回作为权威订单状态、训练标签或策略输入；raw response 只能作为 raw evidence、digest/reference、审计材料或受控调试材料保留。模型可以学习由 `NormalizedOrderEvent`、ledger 和 causal projection 派生出的订单生命周期状态、submit/cancel/fill 执行反馈、cancel pending/retry/ack/terminal 状态、延迟分布、fill hazard、风险状态和策略响应。
 
 
   ## 四、数据采集与数据消费要求
@@ -148,7 +151,7 @@
   8. 必须先制定全盘数据处理计划，再加入旧数据处理；旧数据处理结果应作为设计新的“数据采集 -> 数据处理”工作流的基础。
   9. artifact 发布必须 atomic rename，禁止 partial artifact 被消费；discovery 必须只读取 finalized artifact，temp/running、`.rsync-partial`、外部同步未完成标记和 incomplete manifest 不得进入消费。
   10. 每次采集、训练、paper、live 都必须生成 run manifest，记录代码版本/git commit、数据范围、schema、输入源、硬件资源和验证结果；`data-collect` manifest 还必须记录 collector binary sha256、source config digest、validation verdict、required files 和 source coverage。
-  11. 数据采集与处理必须作为训练、paper trade、live trade 的共用合同：`data-collect` 提供外部市场源 typed raw / coverage / manifest；paper/live 实时消费 Market Context Builder 生成的市场上下文和模型输入；训练离线消费 `data-pipeline` 生成的训练可用数据集、校准数据池和 replay context。两者可以是不同运行实例，但必须共享 schema、manifest、时间线、causal cutoff、feature/input contract 和可回放语义。
+  11. 数据采集与处理必须作为训练、paper trade、live trade 的共用合同：`data-collect` 提供外部市场源 typed raw / coverage / manifest；paper/live 实时消费 Market Context Builder 生成的市场上下文和模型输入；训练离线消费 `data-pipeline` 生成的训练可用数据集、校准数据池和 replay context。两者可以是不同运行实例，但必须共享 schema、manifest、时间线、causal cutoff、feature/input contract、事件触发语义和可回放语义；`tick_stream` 等固定间隔派生产物不得决定模型决策频率或替代真实 trigger event。
   12. 时间戳必须命名空间隔离：`source_ts` 是外部源时间，`collector_recv_time_utc(host,region)` 是 `data-collect` 字段 `recv_time_utc` 加 collector host/region 元数据后的语义，不要求新增独立 schema 字段；`paper_live_runtime_receive_ts` 是对应 paper/live 运行主机接收时间，`decision_ts` / `causal_cutoff_ts` 是模型可见边界；live/paper 延迟标签只能来自对应运行主机 artifact，不能用非爱尔兰采集主机接收时间冒充。
 
   ## 五、订单微结构与毫秒级竞态要求
@@ -201,7 +204,7 @@
   3. PnL 不是独立账本权威状态；未带限定词时，PnL 必须指由当前 NAV、程序启动 baseline NAV 和运行期间外部资金流调整项派生的程序启动后跨市场累计 PnL。若启动 baseline 只有 CASH 且不存在历史持仓、历史挂单或外部充值/提现，则可简化为 current NAV - startup CASH。若需要单笔交易 PnL 或单个市场 PnL，必须明确写成 per-order PnL 或 per-market PnL，并只能作为审计或报表切片，不能替代程序启动后跨市场累计 PnL。
   4. NAV 是 ledger 在决策时刻计算的账户级净值字段，表示当前账户资产估值；PnL 是相对程序启动 baseline 的累计变化。NAV 不是单笔订单 NAV，也不是单个 market 的独立状态源；它可以作为模型输入和审计字段，但不得与 PnL 或 CASH 混用。
   5. 真实平台 position/sellable/open-orders/CLOB 查询或快照不得在 live 高频热路径中生成、覆盖或否定 ledger；不得作为触发交易时 fail closed的第二路径。
-  6. SELL reject 只能说明该笔 submit 失败，不能自动证明账户不可用或下一 tick 必须停止交易。
+  6. SELL reject 只能说明该笔 submit 失败，不能自动证明账户不可用或后续事件触发的下一次模型决策必须停止交易。
   7. credential、scope、schema、wallet/funder、关键 append-only audit writer、模型 bundle 合同属于真实下单硬边界；这些边界缺失、不匹配或不可验证时，live-trade 必须拒绝 submit，并记录原因。非关键审计摘要、运行外审计差异、短暂状态不一致不得触发策略性fail closed。
   8. 模糊 SELL maturity、SELL/sellable 暂态差异、late user-channel、generic not-found 应进入 warning/quarantine/audit-review，不得一律hard fail。
   9. ledger 必须可回放、可重建，并能从回放结果复算 CASH 和 NAV，再按启动 baseline 与外部资金流调整项派生程序启动后跨市场累计 PnL；run manifest 或等价 artifact 必须记录启动 baseline、计算口径版本和数据范围。
@@ -218,15 +221,16 @@
   7. venue dust close 的初始定义为 remaining_after_cumulative_fill <= 0.01 shares 时关闭剩余订单，走 TerminalDustNoMint，不再生成额外成交或现金变化。SELL clean accept latency、matched-cancel rate、partial-fill rate、user-channel fill visible latency、cancel response latency 必须从 sdk-live-trade 真实资金 artifact 统计后进入训练样本构造和 paper 模拟平台校准，不得用真实平台 snapshot 或冷路径查询替代。
   8. paper trade 的 lifecycle 与 accounting 必须分离：订单状态先归一化，账本再消费权威事件；order closure、position closure、accounting closure 和 report closure 必须分别验收，dashboard 只能展示结果，不能作为账务权威。
   9. paper simulator 必须先生成模拟平台 raw evidence，再通过与 live 一致的 NormalizedOrderEvent 合同归一化；paper 决策、训练样本和 replay 不得直接消费模拟平台私有订单状态，也不得把模拟平台内部随机结果绕过归一化后直接写成训练标签。
-  10. 训练 ingestion 必须拒绝缺少 normalized_event_id、authority_source、normalization_reason、ledger_apply_policy、causal_cutoff_ts、label_maturity_ts 或 raw evidence digest/reference 的订单反馈标签；execution feedback label 还必须对齐版本化 schema，保留 decision context、paper/live/simulation source、book hash、online_rule_version、settlement source、censoring reason 和 no-quote/no-submit opportunity 语义。缺失时必须标记为 coverage incomplete、quarantine 或 fail-closed-training。
-  11. paper trade 不得作为无约束超参搜索器；模型选择必须有 frozen holdout、purged/embargo split、PBO/DSR 或等价过拟合检查。
-  12. 每个训练批次必须生成训练批次排名表，比较同一批次内不同参数、不同随机种子或不同候选产物的训练质量、验证质量、冻结 holdout 表现、执行现实回放结果、风险指标、资源消耗、artifact sha256 和数据范围。排名表只能作为 candidate/shadow 选择和 paper/live 审查加载的证据，不能替代 ModelRegistry 状态、人工审查、paper 验证或 live 授权 gate。
-  13. live-trade 必须把真实执行反馈完整写入 training/paper 的规则、标签、反馈链路和审计 artifact；这些反馈不得未经审查直接改变线上模型行为，live-trade 也不得在内部根据反馈调整线上交易或风控决策。
+  10. 模拟平台、训练回放和 paper runtime 必须采用离散事件语义推进模型决策：平台侧延迟必须调度为未来的 accepted/rejected、fill/partial-fill、user-channel、cancel response、matched-cancel、late fill 或 settlement 事件；这些事件在对应运行环境中变为模型可见后，才能更新持续状态并触发下一次模型决策，不得用固定频率 tick 代替平台事件时间。
+  11. 训练 ingestion 必须拒绝缺少 normalized_event_id、authority_source、normalization_reason、ledger_apply_policy、causal_cutoff_ts、label_maturity_ts 或 raw evidence digest/reference 的订单反馈标签；execution feedback label 还必须对齐版本化 schema，保留 decision context、paper/live/simulation source、book hash、online_rule_version、settlement source、censoring reason 和 no-quote/no-submit opportunity 语义。缺失时必须标记为 coverage incomplete、quarantine 或 fail-closed-training。
+  12. paper trade 不得作为无约束超参搜索器；模型选择必须有 frozen holdout、purged/embargo split、PBO/DSR 或等价过拟合检查。
+  13. 每个训练批次必须生成训练批次排名表，比较同一批次内不同参数、不同随机种子或不同候选产物的训练质量、验证质量、冻结 holdout 表现、执行现实回放结果、风险指标、资源消耗、artifact sha256 和数据范围。排名表只能作为 candidate/shadow 选择和 paper/live 审查加载的证据，不能替代 ModelRegistry 状态、人工审查、paper 验证或 live 授权 gate。
+  14. live-trade 必须把真实执行反馈完整写入 training/paper 的规则、标签、反馈链路和审计 artifact；这些反馈不得未经审查直接改变线上模型行为，live-trade 也不得在内部根据反馈调整线上交易或风控决策。
 
   ## 八、模型 bundle 与策略边界
 
   1. 模型 bundle 必须有明确合同：feature_schema_version、model_version、input shape、sequence length、normalization、label contract、action
-  surface、risk limits、online_rule_version、sha256。
+  surface、risk limits、online_rule_version、decision_trigger_contract_version、模型可见 trigger event 合同、sha256；bundle 和 runtime preflight 必须拒绝固定频率 decision tick 或无法映射到权威 trigger event 的模型调用路径。
   2. ModelRegistry 必须区分 active、shadow、retired、candidate。
   3. active 模型才能真实下单；shadow 模型只能产出对照决策和评估 artifact。
   4. 训练批次排名表必须与 ModelRegistry 对齐：排名靠前的产物只能进入 candidate 或 shadow 审查，只有通过模型 bundle 合同、训练反馈 gate、paper/no-submit 验证和授权 gate 后，才允许进入 active。
@@ -252,15 +256,15 @@
   核心重构必须至少包含以下 P0 gate 或等价机制：
 
   1. OnlineFeedbackGate：online-feedback 规则版本、真实平台潜规则和 issues 是否已纳入。
-  2. ModelBundlePreflight：模型 bundle、schema、ONNX/runtime、feature contract 是否匹配。
+  2. ModelBundlePreflight：模型 bundle、schema、ONNX/runtime、feature contract、decision trigger contract 与模型可见事件合同是否匹配。
   3. MarketDiscoveryGate：active/next market、token、tick、min size、start/end、market lifecycle state 与 runtime role 是否可靠。
   4. MarketSwitchGate：active 与 prefetched context 是否隔离，切换是否可审计；旧 market 只有满足 `market_resolved` 事件路径或 fallback metadata retired predicate 后才能进入 retired，否则只能标记 stale/gap/quarantine。
   5. ResourceWatermarkGate：CPU/RAM/VRAM/IO/disk/artifact writer 是否满足阈值，并覆盖 writer queue、flush/finalize latency、backpressure 和 ResourceWatermark 阈值动作。
   6. HardwareTierGate：单卡/多卡训练配置、实际硬件、运行参数是否匹配。
   7. SupplyChainGate：SDK、依赖、模型 artifact、数据 artifact、部署产物 sha256 是否可追踪；外部 repo、脚本和依赖默认 pinned readonly，不得默认 install/run、读取 secrets 或联网出站，任何例外必须有隔离环境、审批和审计 artifact。
   8. TrainingFeedbackGate：真实交易反馈、paper 反馈、训练标签、online_rule_version、训练批次排名表是否闭环；必须覆盖 execution reality，包括 queue/fill hazard、post-only reject、tick/min size、fee/rebate、slippage/cost、no-quote/no-submit opportunity、trial ledger 和冻结 holdout/过拟合防护，不能只看 replay leaderboard。
-  9. ModelIntentBridgeGate：模型 trading/risk intent、live-trade 发送合同、平台反馈回传合同和“禁止 live-trade 改写模型交易/风控决策”的边界是否满足。
-  10. DataIngestRuntimeGate：`data-collect` 与数据消费运行时是否满足 Rust async/non-blocking、bounded queue、writer lag、backpressure、source health/gap/reconnect trace、finalized-only discovery、temp/running/rsync-partial 排除和 blocking pool 隔离。
+  9. ModelIntentBridgeGate：模型 trading/risk intent、trigger_event_id 到模型调用与 intent 的可审计映射、live-trade 发送合同、平台反馈回传合同和“禁止 live-trade 改写模型交易/风控决策”的边界是否满足。
+  10. DataIngestRuntimeGate：`data-collect` 与数据消费运行时是否满足 Rust async/non-blocking、bounded queue、writer lag、backpressure、source health/gap/reconnect trace、事件排序/去重/market 隔离、finalized-only discovery、temp/running/rsync-partial 排除和 blocking pool 隔离。
 
   每个 gate 必须有明确 verdict，例如 PASS、WARNING、NO_SUBMIT、CANCEL_ONLY、FAIL_CLOSED。coverage incomplete、quarantine 可以作为原因标签，但必须映射到
   明确执行权限动作；不得用模糊的“看起来正常”作为通过标准。gate 输出的 NO_SUBMIT、CANCEL_ONLY 只能表示权限/硬边界 verdict，不能作为 live-trade 生成的策略性 no-submit、cancel-only 或风控动作。
@@ -297,3 +301,4 @@
   11. SDK-first 边界、部署边界、模型 artifact 边界、wallet 边界、small-live/live 授权边界、`data-collect` 运行边界和 live 服务器运行边界全部明确。
   12. 任何不能验证的结论必须标记为 coverage incomplete、warning 或 quarantine，并映射到 NO_SUBMIT、CANCEL_ONLY 或 FAIL_CLOSED 等明确执行权限动作，不能冒充通过。
   13. 交易决策和风控完全由模型实现，live-trade 仅作为模型与真实平台之间的桥梁；所有模型请求、硬边界拒绝、真实平台返回和执行反馈都有可审计映射，且不存在 live-trade 改写模型交易或风控 intent 的路径。
+  14. 训练、paper 和 live 的模型决策都由真实模型可见事件触发，不存在固定频率、固定周期、周期性 polling 或固定 decision tick 的策略决策路径；每个模型调用和 intent 都能追溯到 trigger_event_id、event_available_time、decision_ts 与 causal_cutoff_ts。模拟平台延迟通过未来事件调度表达，固定间隔 `tick_stream` 只能作为派生产物，不能成为模型决策触发器。

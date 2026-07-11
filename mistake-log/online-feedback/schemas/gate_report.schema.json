@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gate_report.schema.json",
+  "title": "OnlineFeedbackGateReport",
+  "type": "object",
+  "required": [
+    "gate_name",
+    "generated_at",
+    "online_rule_version",
+    "verdict",
+    "severity",
+    "checked_rules",
+    "inputs",
+    "missing_fields",
+    "actions"
+  ],
+  "properties": {
+    "gate_name": {"type": "string"},
+    "generated_at": {"type": "string"},
+    "online_rule_version": {"type": "string"},
+    "verdict": {"enum": ["pass", "warning", "no-submit", "cancel-only", "fail-closed"]},
+    "severity": {"enum": ["audit_only", "warning", "no-submit", "cancel-only", "fail-closed"]},
+    "checked_rules": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+    "inputs": {"type": "object"},
+    "missing_fields": {"type": "array", "items": {"type": "string"}},
+    "actions": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}

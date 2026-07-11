@@ -2,7 +2,7 @@
 
 事项编号：`rebuild-core-new-data-only`
 
-状态：`基础准备修订与 D+1 归档验证；FinalDatasetBoundaryStatus=DEFERRED_TO_OBSERVED_COLLECTION；CollectionStartReadinessStatus=SCHEMA_V3_DEPLOYED_AND_VERIFIED`
+状态：`基础准备修订与 D+1 归档验证；StrategyActionSurface=BUY_ONLY；FinalDatasetBoundaryStatus=DEFERRED_TO_OBSERVED_COLLECTION；CollectionStartReadinessStatus=SCHEMA_V3_DEPLOYED_AND_VERIFIED`
 
 对应需求：`/home/chillchill/btc-updown-marketmaker/demand/rebuild-core-new-data-only-demand.md`
 
@@ -25,7 +25,7 @@
 
 当前不允许实现 simulator/model、启动训练、paper/live 或资金操作；也不允许把本轮 schema 重新部署后的任意日期自动命名为正式 cohort。完整 canonical/data-pipeline 处理脚本后续写在本仓库 `data-pipeline/` 并部署到 5090 执行，不塞入每日归档脚本。
 
-本轮成功标准：四份文档同 slug 对齐；事实、推断和建议分开；训练框架、数据额外需求、simulator、reward、split 和 `mistake-log` 闭环在训练实现前冻结；Binance aggTrade v3 本地门通过后从干净 commit 构建并重新部署，真实 finalized segment 证明 `E/T` 双列；D+1 脚本仅处理昨天并通过 Gamma/partial/云端同名包合同测试；没有把未来 cohort 写成已完成事实。
+本轮成功标准：四份文档同slug对齐；事实、推断和建议分开；自有动作严格BUY-only且没有deferred/影子SELL路径，外部bid/ask仍是完整行情；训练框架、数据额外需求、simulator、reward、split和`mistake-log`闭环在训练实现前冻结；Binance aggTrade v3本地门通过后从干净commit构建并重新部署，真实finalized segment证明`E/T`双列；D+1脚本仅处理昨天并通过Gamma/partial/云端同名包合同测试；没有把未来cohort写成已完成事实。
 
 ## 2. 为什么按这个顺序执行
 
@@ -72,7 +72,7 @@ frozen holdout
 | 4 | 端到端纵向切片 | 未开始 | 阶段 3 boundary 冻结 | canonical→simulator→NOE→ledger→reward closure |
 | 5 | bounded 全量 canonical pipeline | 未开始 | 阶段 4 PASS | 全量 features/labels/trajectories 与资源报告 |
 | 6 | simulator capability/calibration 与 rollout预算冻结 | 未开始 | 阶段 4 PASS、阶段 5必要输入可用 | capability/calibration/impact/valuation/budget manifests |
-| 7 | baselines、GRU、TCN 与 action ranker | 未开始 | 阶段 5/6 PASS | trial ledger、action-surface、模型比较 |
+| 7 | baselines、预注册序列候选与 action ranker | 未开始 | 阶段 5/6 PASS | trial ledger、action-surface、模型比较 |
 | 8 | trajectory aggregation 与 frozen holdout | 未开始 | 阶段 7 gate PASS | 一次性 holdout report、candidate bundle |
 | 9 | 后续 paper/shadow 决策 | 非本事项授权 | 用户另立需求并批准 | 独立文档和证据；不自动进入 live |
 
@@ -95,10 +95,10 @@ frozen holdout
 
 ### 任务 0.3：冻结技术方向
 
-- 步骤 0.3.1：确定 `ESAR-v1` 主模型、XGBoost/MLP 基线、TCN challenger 和后置路线。
-  验证：框架文档解释数据前提、模型/动作/损失、推理状态和 rejected alternatives。
-- 步骤 0.3.2：冻结严格事件触发、p2b、T-30/state reconstruction、MarketContextEpisode/AccountRunTrajectory、joint candidate、budgeted simulator labels、valuation/ledger reward 和 time-forward split。
-  验证：不存在固定 decision tick、全事件全后缀rollout、直接BC/IQL/DT、跨split账户状态或independent unused action heads。
+- 步骤 0.3.1：冻结 `ESAR-v1` 共享 Event-State Encoder、联合候选 scorer、XGBoost/MLP 基线和生产验收合同；不预定某个序列骨干或容量为主模型。
+  验证：框架文档解释数据前提、模型/动作/损失、推理状态和 rejected alternatives，且不存在参数量、层数或 hidden size 硬上限。
+- 步骤0.3.2：冻结严格事件触发、p2b、T-30/state reconstruction、MarketContextEpisode/AccountRunTrajectory、BUY-only joint candidate、CapitalBudget、budgeted simulator labels、valuation/ledger reward和time-forward split。
+  验证：BUY是系统常量，candidate只表达UP/DOWN单腿或双腿BUY及BUY订单管理；不存在自有SELL deferred路径、固定decision tick、全事件全后缀rollout、直接BC/IQL/DT、跨split账户状态或independent unused action heads。
 - 步骤 0.3.3：建立 `mistake-log` 逐项闭环表。
   验证：每个已知高影响失败都有阻断测试和剩余风险，不宣称架构自动解决不可观察事实。
 
@@ -261,8 +261,8 @@ frozen holdout
   验证：T-30、state reconstruction、shared global events、label horizon、TTL和reward maturity不跨 split泄漏；必要时丢弃边界market。
 - 步骤 3.4.4：冻结 final holdout access control。
   验证：日常 training account/process 无法读取 holdout labels/outcomes。
-- 步骤 3.4.5：为development、dedicated calibration和holdout分别冻结独立account fixture，split内按时间carry，split末尾延伸tail直到订单/结算闭合。
-  验证：train policy产生的cash/position/order state不进入calibration/holdout；account-run总额是经济closure权威。
+- 步骤3.4.5：为development、dedicated calibration和holdout分别冻结独立cash-only account fixture：只有固定starting pUSD，positions/open/pending/reservation/resolved-claim均为零；split内按时间carry，split末尾延伸tail直到订单/结算闭合。
+  验证：全部持仓pooled cost只来自本split confirmed fills；train policy产生的cash/position/order state不进入calibration/holdout；account-run总额是经济closure权威。
 
 ### 任务 3.5：阶段审查
 
@@ -278,19 +278,19 @@ frozen holdout
 
 ### 任务 4.2：打通 causal state
 
-- 步骤 4.2.1：从 T-30 replay 至 terminal，验证多 market overlap、transport atomicity 和 hidden reset。
+- 步骤 4.2.1：从 T-30 replay 至 terminal，验证多 market overlap、transport atomicity 和 persistent encoder state/cache reset。
   验证：p2b pending/maturity、state reconstruction、source timestamp future-shift、row reorder、child duplicate 和 reconnect 负例均被捕获。
 - 步骤 4.2.2：构造最小 ESAR single-step stub 与 candidate contract，不训练正式模型。
   验证：每个有效模型可见event触发一次，prefetched只warmup；single-writer/state-version/stale intent/overload和physical chunk语义明确。
 
 ### 任务 4.3：打通 simulator、NOE、ledger、reward
 
-- 步骤 4.3.1：实现最小平台 lifecycle，先覆盖 no-action、submit、accepted/rejected、partial/full fill、cancel、settlement。
-  验证：property tests 覆盖现金、仓位、订单 remaining、settlement守恒。
+- 步骤4.3.1：实现最小BUY-only平台lifecycle，覆盖`hold_existing_buys`、BUY UP、BUY DOWN、双腿BUY batch、accepted/rejected/unknown、partial/full fill、BUY cancel/cancel-all、resolution和模型外`platform_settlement_credit_observed`事件。
+  验证：batch逐项mixed result与异步单腿不被伪造成原子成交；cancel NOE触发新评估且不自动续提，因此没有replace candidate；本地ledger/平台回报/链上状态延迟只形成confirmed/provisional/unknown并限制相关BUY submit，不暂停整个模型或BUY cancel；property tests覆盖pUSD free/reserved、UP/DOWN仓位、订单remaining、capital usage和settlement守恒；simulator enabled capability不能表达自有SELL、replace、split、merge或redeem命令。
 - 步骤 4.3.2：simulator raw evidence 进入共享 NOE/ledger。
   验证：禁止 private-state-to-reward shortcut。
-- 步骤 4.3.3：计算 reward vector 与 ledger closure。
-  验证：ConservativeNavValuation覆盖reserved/pending/unsettled/stale/depth；AccountRunTrajectory sum event ΔNAV = terminal economic return，三类done exactly once。
+- 步骤4.3.3：计算reward vector与ledger closure。
+  验证：ConservativeAccountNavValuation覆盖free/reserved/provisional pUSD、BUY pending/unknown、UP/DOWN unsettled、stale/one-sided只读mark、resolved-but-uncredited、`platform_settlement_credit_observed`、非负`unmatched_settlement_credit_suspense`与资金重新可用；断言`NAV=ledger_pUSD_total+valued_assets-suspense-other_liabilities`，suspense只扣一次、不减少平台confirmed free cash、不进入external flow或capital-at-work。SettlementLedgerTransition持久保存terminal outcome，使loser归零、winner转claim、resolution后confirmed的fill直接进入loss/claim，平台credit以`flow_class=internal_settlement`原子消费claim并增加pUSD且`external_cash_flow=0`。credit先到时以cash加等额suspense保留平台事实和归因缺口；claim后到时清除claim/suspense且不重复加cash。confirm→resolution→credit、resolution→confirm→credit、resolution→credit→delayed-confirm、partial/aggregate/duplicate credit均幂等收敛；非零tail使受影响`G_candidate/per-market/G_account/account_run_done`保持censored或显式residual bridge、capital release time保存bounds，但不全局暂停；中间mark不冒充主动清算或可用现金；`paired_inventory_confirmed`只累计confirmed baseline-relative增量并保留结算前审计累计量；`G_candidate`与`G_account`分名且各自终点一致，成熟AccountRunTrajectory sum event ΔNAV = `G_account`，三类done exactly once。
 - 步骤 4.3.4：同 state 两个 candidate common-random-number paired rollout。
   验证：seed/version/input hash一致时轨迹逐事件相同；small-agent/own-order overlay和paired ΔJ equivalence语义通过。
 
@@ -312,8 +312,8 @@ frozen holdout
 
 ### 任务 5.2：训练序列与 single-step parity fixture
 
-- 步骤 5.2.1：按 market 构造 T-30→terminal unroll，physical chunks carry/detach hidden。
-  验证：冻结chunk/burn-in/loss window；随机chunk由前序no-grad burn-in重建；不同chunk size前向输出、full-unroll/no-detach、早期event干预和remove-hidden/multiscale ablation均报告。
+- 步骤 5.2.1：按 market 构造 T-30→terminal unroll，physical chunks carry候选所需的persistent encoder state/cache；detach只适用于recurrent candidate。
+  验证：冻结candidate-specific chunk/context、burn-in、loss window和cache重建合同；recurrent candidate的随机chunk由前序no-grad burn-in重建hidden，并报告不同chunk size前向输出、full-unroll/no-detach、早期event干预和remove-hidden/multiscale ablation；其他candidate报告等价的context/cache完整性测试。
 - 步骤 5.2.2：保存 event-state fixture 供 PyTorch/ONNX/Rust 对账。
   验证：训练与runtime不是两套 feature/normalizer。
 
@@ -326,44 +326,44 @@ frozen holdout
 
 ### 任务 6.1：冻结 SimulatorCalibrationManifest
 
-- 步骤 6.1.1：先冻结SimulatorCapabilityMatrix，只启用candidate实际需要的order/lifecycle/accounting路径；逐规则/参数记录official_rule、observed_new_data、assumed/stress provenance。
-  验证：unsupported fail closed；聚合L2 queue proxy不显示为observed FIFO；未建设第二套通用exchange/SDK/ledger。
+- 步骤6.1.1：先冻结SimulatorCapabilityMatrix，只启用candidate实际需要的BUY order/lifecycle/accounting路径；逐规则/参数记录official_rule、observed_new_data、assumed/stress provenance。
+  验证：UP/DOWN BUY、最多两项batch逐项结果、pUSD reservation、BUY cancel/cancel-all、cancel后新评估和`platform_settlement_credit_observed`完整；自有SELL、replace及split/merge/redeem命令不作为disabled/deferred capability存在；聚合L2 queue proxy不显示为observed FIFO；未建设第二套通用exchange/SDK/ledger。
 - 步骤 6.1.2：当前官方 order types、post-only、fee、rebate/reward eligibility 和 settlement 规则复核。
   验证：动态 market metadata 优先，禁止旧固定 fee/250ms/TTL/partial概率常数。
 - 步骤 6.1.3：建立 conservative/base/high-latency/tail/adverse-fill scenarios。
-  验证：单一乐观 scenario 不能标记 promotable。
-- 步骤 6.1.4：冻结CounterfactualMarketImpactContract和ConservativeNavValuationContract。
-  验证：small-agent假设、size/visible-depth/volume上限、own-order overlay、impact stress和stale/one-sided/pending估值正反例通过。
+  验证：加入resolved-but-uncredited、`platform_settlement_credit_observed` delay和tail内始终未回款场景；用户指定的约十分钟平台自动兑回在取得当前账户级分布前只能标记assumed/stress，单一乐观scenario不能标记promotable或伪造pUSD复用。
+- 步骤6.1.4：冻结CapitalBudgetContract、CounterfactualMarketImpactContract和ConservativeAccountNavValuationContract。
+  验证：account/单market最大投入、最低free-cash、第二腿headroom、batch reservation、small-agent假设、size/visible-depth/volume上限、own-order overlay、impact stress和stale/one-sided/pending估值正反例通过；order reservation、provisional commitment、unsettled cost basis互斥，second-leg headroom不进ledger/NAV，capital-time不与NAV haircut双扣。
 
 ### 任务 6.2：counterfactual pilot 与预算冻结
 
 - 步骤 6.2.1：仅在阶段4正式纵切market上做counterfactual pilot；冻结CounterfactualRolloutBudgetContract：按event type/market phase/state novelty/account-order状态抽样与收益无关的label states，记录inclusion probability/weight、每market groups、每group candidates、seeds/scenarios、总branch/wall-time/disk，以及每branch max-events/duration/market-transitions/pending-tail上限。
   验证：runtime仍逐有效事件评估；没有固定tick抽样或全事件全后缀组合爆炸。
-- 步骤 6.2.2：按candidate contract枚举完整合法Model Intents，上限32 candidates、2 logical legs、4 atomic ops。
-  验证：超限配置fail closed；enumerator只做合法性/硬风险，不按score预筛或生成策略。
-- 步骤 6.2.3：在pilot同state/path/seed paired rollout到candidate_effect_terminal，或达到branch hard limit后censor；保存continuation_policy_hash/iteration。只有完整policy evaluation运行到AccountRunTrajectory terminal。
-  验证：超限未闭合branch标censored并保存valuation residual bounds或排除ranking；pilot group、paired ΔJ、reward/ledger refs齐全；本阶段不生成全量ranker dataset。
+- 步骤6.2.2：按candidate contract枚举完整合法BUY-only Model Intents，上限32 candidates；submit candidate含1..2笔BUY、每outcome一个价格档、batch最多两项；cancel与submit不混在同一candidate。
+  验证：candidate schema无order-side、replace或risk-intent维度，BUY由SDK adapter固定为`Side::Buy`；`hold_existing_buys`唯一表达保留订单且不操作；模型不能表达pause/cancel-only，系统PermissionVerdict仍独立生效；超限配置fail closed；enumerator只做合法性/现金硬风险，不按score预筛或生成策略。
+- 步骤6.2.3：在pilot同state/path/seed运行candidate与common-baseline branch，使用group共享causal cutoff，直到全部branch-differential订单、reservation、仓位、cash和continuation下游状态闭合，或达到group hard limit后censor；保存continuation_policy_hash/iteration。只有完整policy evaluation运行到AccountRunTrajectory terminal。
+  验证：ranker label使用同cutoff的`G_candidate`；完整policy使用`G_account`。重叠market差异、branch-differential settlement suspense未闭合、所需`platform_settlement_credit_observed`未出现或其他超限状态必须censor并保存residual bounds；涉及censored branch的pairwise label排除或按预注册bounds处理，不同candidate不得使用不同horizon，也不得把owning-market结束冒充effect terminal。losing-only branch在resolution归零后无需等待credit。
 - 步骤 6.2.4：运行 simulator sensitivity、market-impact和 exploit probes。
   验证：只在一个参数点盈利、异常 churn、无风险套利或 private-state leakage 均阻断。
 
 ### 任务 6.3：阶段审查
 
-- 审查 lifecycle closure 与 economic closure 分离、unknown outcome、cancel race、late fill、fee double count、maturity。
+- 审查lifecycle closure与economic closure分离、batch逐项unknown outcome、异步单腿、cancel race、late fill、fee double count、capital lock、resolved-but-uncredited和`platform_settlement_credit_observed`；property tests覆盖`0.98→1.00→+0.02`、losing-only、winning-only、完整pair和partial pair。
 - 退出：仅 `assumed/stress` execution参数时，artifact 明确 `non-promotable`。
 
-## 阶段 7：baselines、ESAR-v1 与 action ranking
+## 阶段 7：baselines、预注册序列候选与 action ranking
 
 ### 任务 7.1：先跑最低基线
 
-- 步骤 7.1.1：常数、逻辑回归、小 MLP、naive directional 和简单规则 maker。
+- 步骤7.1.1：常数、逻辑回归、小MLP、naive directional BUY和简单paired-BUY/hold-to-settlement规则。
   验证：同 split、同 costs、同 simulator scenarios。
 
 ### 任务 7.2：监督 representation
 
-- 步骤 7.2.1：训练 ESAR GRU outcome/dynamics/calibration heads。
+- 步骤 7.2.1：训练经用户批准并预注册的 stateful encoder candidates 及其 outcome/dynamics/calibration heads。
   验证：anchored folds、Brier/ECE/quantile coverage、seed variance，AUC不单独晋级。
-- 步骤 7.2.2：同参数/延迟预算训练 TCN。
-  验证：相同输入/参数上限/live p99，另报wall-clock receptive field、streaming cache和峰值内存；不只看一个validation分数。
+- 步骤 7.2.2：训练 causal TCN challenger。
+  验证：使用相同因果输入、动作、simulator、经济评估和生产吞吐/延迟门，另报参数量、wall-clock receptive field、streaming cache和峰值内存；不以参数量相等代替公平性，也不只看一个validation分数。
 
 ### 任务 7.3：生成预算化 counterfactual groups 与 XGBoost ranker
 
@@ -377,27 +377,27 @@ frozen holdout
 - 步骤 7.4.1：训练 grouped ranking + quantile + masked execution losses。
   验证：所有loss maturity/抽样weight正确；tie基于paired ΔJ interval完全落入equivalence band，不把不确定当等价。
 - 步骤 7.4.2：action-surface audit。
-  验证：ModelOutputConsumerMatrix、raw/decoded/consumer、逐维intervention、control separation、support和entropy全部报告；training-only head不伪装runtime能力。
+  验证：ModelOutputConsumerMatrix、raw/decoded/consumer、逐维intervention、control separation、support和entropy全部报告；UP-heavy与DOWN-heavy镜像confirmed暴露的inventory penalty相同；不存在selected-risk-intent第二权威，training-only head不伪装runtime能力。
 - 步骤 7.4.3：runtime parity。
-  验证：PyTorch/ONNX/Rust hidden carry、score、selected intent对账；single-writer、global ingress ID/`relevant_pending_watermark[market_id]`与account fan-out、state-version/causal-cutoff、queued relevant-event stale拒绝与重评、unrelated prefetched event不误stale、no-submit和burst overload通过。
+  验证：PyTorch/ONNX/Rust persistent encoder state/cache carry、score、selected intent对账；single-writer、global ingress ID/`relevant_pending_watermark[market_id]`与account fan-out、state-version/causal-cutoff、queued relevant-event stale拒绝与重评、unrelated prefetched event不误stale、`hold_existing_buys`和burst overload通过。
 
 ### 任务 7.5：阶段审查
 
-- 先审 action surface，再审 PnL；全 no-action须判断是否标签支持，所有candidate相同或输出未消费则直接FAIL。
+- 先审action surface，再审PnL；全`hold_existing_buys`须判断是否标签支持，所有candidate相同或输出未消费则直接FAIL。
 - 所有 run，包括失败 seed/超参，写入 trial ledger。
 
 ## 阶段 8：trajectory aggregation 与 frozen holdout
 
 ### 任务 8.1：simulator dataset aggregation
 
-- 步骤 8.1.1：使用 no-action、规则、分层随机和当前 policy 收集状态。
+- 步骤8.1.1：使用`hold_existing_buys`、规则、分层随机和当前policy收集状态。
   验证：只在更小预注册subset内、遵守rollout budget；inventory/open-order/cancel states coverage增加，不被单一teacher垄断。
 - 步骤 8.1.2：每轮冻结 policy/dataset/simulator/continuation-policy hash。
   验证：能够回放任一ranking group；不同continuation labels分层/条件化，不能隐式在线漂移或混为同一真值。
 
 ### 任务 8.2：预注册 final evaluation
 
-- 步骤 8.2.1：冻结 primary metric、valuation、risk weights、expected-shortfall alpha、paired-equivalence band、baseline、seeds 和 scenario set。
+- 步骤8.2.1：冻结primary metric、valuation、risk weights、expected-shortfall alpha、capital-usage晋级规则、paired-equivalence band、baseline、seeds和scenario set。
   验证：holdout结果不可见时完成并签 hash。
 - 步骤 8.2.2：冻结 runtime budget 与 promotion capability状态。
   验证：只有 assumed simulator参数的候选预先标记 non-promotable。
@@ -406,7 +406,7 @@ frozen holdout
 
 - 步骤 8.3.1：在最后两个 calendar UTC 日运行。
   验证：不换日期、不删难看 market、不调 threshold。
-- 步骤 8.3.2：报告 calibration、net EV、downside/expected-shortfall、drawdown、inventory、action support、regime、scenario sensitivity、CPU/memory/event-to-intent。
+- 步骤8.3.2：报告calibration、settled net EV、downside/expected-shortfall、drawdown、actual paired all-in edge、unpaired exposure-time、gross inventory、capital-usage time、time-to-pair、cash exhaustion、settlement closure、action support、regime、scenario sensitivity、CPU/memory/event-to-intent。
   验证：逐日报告、contiguous-market block与paired-market条件性interval；明确只有两个day clusters，禁止宣称稳健day-level CI，不把event rows当IID。
 - 步骤 8.3.3：生成 bundle 与 `training/evaluation_candidate` 状态。
   验证：bundle存在、exit 0、单一AUC/PnL均不是promotion证据。
@@ -421,9 +421,9 @@ frozen holdout
 
 本阶段仅声明未来门，不属于当前计划的已授权交付：
 
-- 先决定是否需要收集真实 execution feedback 以校准 fill/cancel/sellable；
+- 先决定是否需要收集真实execution feedback以校准BUY fill/cancel、batch逐项结果、pUSD admission和`platform_settlement_credit_observed` delay；
 - simulator-only、assumed参数候选不得直接 promotion；
-- paper/no-submit shadow 必须有新的 demand/plan/changelog；
+- paper/observe-only shadow必须有新的demand/plan/changelog；
 - live 仍需单独资金、安全、SDK、部署和回滚批准；
 - live binary 在本地构建，模型从本地已验证 artifact 直接部署到 `/home/ubuntu/live-trade`，不经 GitHub，不在 live 主机编译。
 
@@ -441,9 +441,11 @@ frozen holdout
 8. fixed tick、random-row split、holdout调参、full-load或physical-row-order假设出现；
 9. simulator/NOE/AccountRunTrajectory ledger/reward/valuation不闭合；
 10. action输出无consumer或被runtime改写；
-11. counterfactual没有预算/抽样权重、continuation hash或超出small-agent impact能力；
-12. simulator只有assumed参数或SDK显式p2b确认缺口未解决却要宣称promotion/live能力；
-13. 用户当前授权只到文档准备，却要开始后续实现/训练。
+11. candidate、ONNX、Rust consumer或simulator enabled capability能够表达自有SELL，或保留自有SELL的deferred/research/feature-flag路径；外部book ask/trade side不属于本条禁止范围；
+12. 模型candidate能够表达replace、pause、cancel-only或risk-intent第二权威，或官方SDK order Side没有在adapter固定为Buy；
+13. counterfactual没有预算/抽样权重、continuation hash或超出small-agent impact能力；
+14. simulator只有assumed参数或SDK显式p2b确认缺口未解决却要宣称promotion/live能力；
+15. 用户当前授权只到文档准备，却要开始后续实现/训练。
 
 ## 文档与阶段同步规则
 

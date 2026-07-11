@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "online_issues.schema.json",
+  "title": "OnlineFeedbackIssue",
+  "type": "object",
+  "required": [
+    "issue_id",
+    "rule_id",
+    "source_ids",
+    "evidence_level",
+    "evidence_categories",
+    "evidence_detail",
+    "surface",
+    "symptom",
+    "platform_rule",
+    "hidden_rule_hypothesis",
+    "engineering_guard",
+    "verification_command_or_artifact",
+    "status"
+  ],
+  "properties": {
+    "issue_id": {"type": "string", "pattern": "^OF-[0-9]{2}$"},
+    "rule_id": {"type": "string", "pattern": "^OF-[0-9]{2}$"},
+    "source_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+    "evidence_level": {
+      "enum": [
+        "官方明规则",
+        "官方变更规则",
+        "issue/社区强信号",
+        "本地 artifact 证据",
+        "公开 bot 实现习惯",
+        "待验证推断"
+      ]
+    },
+    "evidence_categories": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "官方明规则",
+          "官方变更规则",
+          "issue/社区强信号",
+          "本地 artifact 证据",
+          "公开 bot 实现习惯",
+          "待验证推断"
+        ]
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "evidence_detail": {"type": "string"},
+    "surface": {"type": "string"},
+    "symptom": {"type": "string"},
+    "platform_rule": {"type": "string"},
+    "hidden_rule_hypothesis": {"type": "string"},
+    "engineering_guard": {"type": "string"},
+    "verification_command_or_artifact": {"type": "string"},
+    "status": {"enum": ["active", "closed", "superseded"]}
+  },
+  "additionalProperties": false
+}

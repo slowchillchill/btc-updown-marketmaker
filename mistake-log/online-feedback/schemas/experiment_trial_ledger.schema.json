@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "experiment_trial_ledger.schema.json",
+  "title": "ExperimentTrialLedgerEntry",
+  "type": "object",
+  "required": [
+    "trial_id",
+    "created_at",
+    "model_family",
+    "hyperparams_hash",
+    "feature_version",
+    "split_id",
+    "final_holdout_id",
+    "cost_assumption_version",
+    "online_rule_version",
+    "status",
+    "included_in_leaderboard",
+    "failure_or_rejection_reason"
+  ],
+  "properties": {
+    "trial_id": {"type": "string"},
+    "created_at": {"type": "string"},
+    "model_family": {"type": "string"},
+    "hyperparams_hash": {"type": "string"},
+    "feature_version": {"type": "string"},
+    "split_id": {"type": "string"},
+    "final_holdout_id": {"type": "string"},
+    "cost_assumption_version": {"type": "string"},
+    "online_rule_version": {"type": "string"},
+    "status": {"enum": ["planned", "running", "completed", "failed", "rejected", "superseded"]},
+    "trial_count_at_report": {"type": ["integer", "null"], "minimum": 1},
+    "included_in_leaderboard": {"type": "boolean"},
+    "pbo_or_dsr_report_ref": {"type": ["string", "null"]},
+    "failure_or_rejection_reason": {"type": ["string", "null"]}
+  },
+  "additionalProperties": false
+}

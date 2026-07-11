@@ -59,3 +59,14 @@
 - 根据用户继续审查，确认 `NAV` 应保留为 ledger 派生的账户级净值状态，`PnL` 不应与 `NAV` 并列为独立账本权威状态。
 - 在总需求中收紧为：未限定的 `PnL` 指由当前 `NAV`、程序启动 baseline NAV 和运行期间外部资金流调整项派生的程序启动后跨市场累计 PnL；只有启动 baseline 仅含 CASH 且无历史持仓、历史挂单、外部充值/提现时，才可简化为 `current NAV - startup CASH`。
 - 同步总计划中的账本权威分层、Phase 4 验证和训练 gate，避免把 `PnL` 写成与 `NAV` 并列的权威状态。
+
+## 2026-07-10
+
+### 模型决策改为严格事件触发
+
+- 用户明确补充：模型决策必须由事件触发，不采用固定频率、固定周期、周期性 polling 或固定 decision tick。
+- 核心需求已补充事件触发硬约束：外部市场事件、NOE/ledger 状态变化和具有业务语义的 lifecycle/deadline 事件先更新时间有序、market 隔离的持续因果状态，再触发模型交易与风控 intent 评估；事件触发不等于只输入当前孤立事件。
+- 训练样本、paper/live 决策必须与真实 trigger event 对齐并记录 trigger_event_id、trigger_event_type、event_available_time、decision_ts、causal_cutoff_ts；固定间隔 `tick_stream` 只能作为派生特征、统计、兼容分析或回放索引，不能成为决策触发器。
+- 模拟平台、训练回放和 paper runtime 采用离散事件语义：平台延迟调度为未来的平台/用户通道/结算事件，这些事件变为模型可见后才触发下一次模型决策。
+- ModelBundlePreflight、ModelIntentBridgeGate、DataIngestRuntimeGate 和最终验收已同步增加 decision trigger contract、trigger-event 映射与事件排序/去重/market 隔离检查。
+- 当前 checkout 中 `plan/rebuild-core-plan.md` 缺失，但本 changelog 仍引用该路径；因此本次按用户明确范围完成核心需求落盘并记录计划同步缺口，任何后续模块实施前必须先恢复总计划权威文件并同步事件触发约束，不能把当前文档更新解释为已完成总计划同步。
