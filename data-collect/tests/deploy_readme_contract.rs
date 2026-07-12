@@ -147,7 +147,6 @@ fn paper_live_hot_path_doc_states_non_deployment_and_runtime_boundary() {
         "NOE/ledger",
         "execution feedback",
         "当前阶段只验证 frame contract、heartbeat/status server 和 fake consumer",
-        "DATA_COLLECT_RUNTIME_MODE=live",
         "data-collect-paper-hot --dataset-root ~/btc-updown-marketmaker/datasets",
         "data-collect-live-hot --dataset-root ~/btc-updown-marketmaker/datasets",
     ] {

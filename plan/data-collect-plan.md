@@ -12,7 +12,7 @@
 
 > 对应需求文档：`/home/chillchill/btc-updown-marketmaker/demand/data-collect-demand.md`
 
-> 对应总需求文档：`/home/chillchill/btc-updown-marketmaker/demand/rebuild-core-demand.md`
+> 历史背景参考：`/home/chillchill/btc-updown-marketmaker/demand/rebuild-core-demand.md` 当前仍在用户审核中，不是已批准 `data-collect` 事项的批准依据，也不对本计划产生动态权威性。
 
 > 对应 changelog：`/home/chillchill/btc-updown-marketmaker/changelog/data-collect-changelog.md`
 
