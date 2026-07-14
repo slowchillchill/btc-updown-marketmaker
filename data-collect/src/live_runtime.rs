@@ -196,9 +196,16 @@ struct ClassifiedRtdsMessage {
 fn classify_rtds_message(
     message: &polymarket_client_sdk_v2::rtds::RtdsMessage,
     recv_time_utc_ms: i64,
-) -> Result<ClassifiedRtdsMessage> {
-    let payload = serde_json::from_value::<ChainlinkPrice>(message.payload.clone())
-        .map_err(|error| invalid_data(format!("RTDS Chainlink payload invalid: {error}")))?;
+) -> Result<Option<ClassifiedRtdsMessage>> {
+    let payload = match serde_json::from_value::<ChainlinkPrice>(message.payload.clone()) {
+        Ok(payload) => payload,
+        Err(_) if message.topic != "crypto_prices_chainlink" || message.msg_type != "update" => {
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(invalid_data(format!("RTDS Chainlink payload invalid: {error}")).into());
+        }
+    };
     let age_ms = recv_time_utc_ms.checked_sub(payload.timestamp);
     let freshness_status = if !plausible_unix_timestamp_ms(message.timestamp)
         || !plausible_unix_timestamp_ms(payload.timestamp)
@@ -218,11 +225,11 @@ fn classify_rtds_message(
     } else {
         "stale"
     };
-    Ok(ClassifiedRtdsMessage {
+    Ok(Some(ClassifiedRtdsMessage {
         payload,
         age_ms,
         freshness_status,
-    })
+    }))
 }
 
 fn rtds_freshness_actions() -> [RtdsFreshnessAction; RTDS_RESUBSCRIBE_ATTEMPTS_PER_FRESHNESS_WINDOW]
@@ -4274,7 +4281,8 @@ async fn emit_rtds_message(
 ) -> Result<bool> {
     let recv_time_utc_ms = now_ms();
     let classified = match classify_rtds_message(&message, recv_time_utc_ms) {
-        Ok(classified) => classified,
+        Ok(Some(classified)) => classified,
+        Ok(None) => return Ok(false),
         Err(error) => {
             record_gap(
                 &sink.gaps,
@@ -8648,6 +8656,7 @@ mod tests {
         let status = |message| {
             classify_rtds_message(&message, BASE_MS)
                 .unwrap()
+                .expect("price-shaped RTDS payload")
                 .freshness_status
         };
 
@@ -8838,6 +8847,65 @@ mod tests {
                 "fresh"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn rtds_initial_snapshot_shape_is_ignored_after_failed_price_decode() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let sink = SourceEventSink {
+            tx,
+            gaps: Arc::clone(&gaps),
+            source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+            inflight_budget: InflightBudget::new(),
+            enqueue_lock: Arc::new(AsyncMutex::new(())),
+        };
+        let identity = CollectorIdentity {
+            host_id: "collector-test".to_owned(),
+            region: "local-test".to_owned(),
+        };
+        let mut dedupe = TimedFingerprintWindow::with_limits(60 * 60 * 1000, 100);
+        let base = now_ms();
+        let snapshot =
+            serde_json::from_value::<polymarket_client_sdk_v2::rtds::RtdsMessage>(json!({
+                "topic": "crypto_prices",
+                "type": "subscribe",
+                "timestamp": base,
+                "payload": {
+                    "symbol": "btc/usd",
+                    "data": [
+                        {"timestamp": base - 1_000, "value": 65_000.10},
+                        {"timestamp": base, "value": 65_001.20}
+                    ]
+                }
+            }))
+            .unwrap();
+
+        assert!(
+            !emit_rtds_message(&sink, &identity, Instant::now(), &mut dedupe, snapshot,)
+                .await
+                .unwrap()
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(gaps.lock().unwrap().is_empty());
+
+        let update = serde_json::from_value::<polymarket_client_sdk_v2::rtds::RtdsMessage>(json!({
+            "topic": "crypto_prices_chainlink",
+            "type": "update",
+            "timestamp": base,
+            "payload": {
+                "symbol": "btc/usd",
+                "timestamp": base,
+                "value": "65001.20"
+            }
+        }))
+        .unwrap();
+        assert!(
+            emit_rtds_message(&sink, &identity, Instant::now(), &mut dedupe, update,)
+                .await
+                .unwrap()
+        );
+        assert!(rx.recv().await.is_some());
     }
 
     #[tokio::test]

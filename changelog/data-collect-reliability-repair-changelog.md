@@ -250,3 +250,62 @@
 - writer/schema/deployment 最终复审逐行确认 day-stable 启动恢复循环、同一稳定迭代绑定的 current manifest/aggTrade recovery/initial boundary、四 producer 首次 poll 前 barrier catch-up，以及正常运行中的 generic 锁安全等待、depth fence/flush、aggTrade 两阶段 flush/resume 均成立。
 - 审查同时确认严格 manifest schema/identity/file 对账、continuity/dedupe、writer terminal gate、批准的 `<source>_HH.parquet` / `<source>_HH-part-N.parquet` 命名、validation verdict 移除、writer drop 入账、stale temporary owner/holder gate、最小部署产物和 systemd unit 合同均未回退。
 - 阶段 2 实现与阶段 3 两路独立复审现已全部通过，状态更新为 `IMPLEMENTATION_REVIEW_PASSED_READY_FOR_TASK_3_3_1`。远端旧 collector、旧程序、旧数据与本机 archive timer 仍未改动；只有本事项 commit/push 完成并通过阶段 4 预检后，才允许执行破坏性切换。
+
+## 2026-07-14：阶段 3 提交推送与阶段 4.1 生产构建
+
+- 本事项实现精确提交为 `3538f6b5ecd64a9b1e297367a1b8f501a6f3ad27`（`fix(data-collect): rebuild reliable training collector`），并已推送到 `origin/after-data-plan`；远端 ref 与本地完整 commit 一致。用户既有 `AGENTS.md`、`demand/rebuild-core-demand.md` 和 `推荐开发顺序.md` 未进入提交。
+- 从该已推送 commit 创建 `/tmp/data-collect-build-3538f6b` detached clean worktree，设置 `DATA_COLLECT_GIT_COMMIT=3538f6b5ecd64a9b1e297367a1b8f501a6f3ad27`，使用独立 `/tmp/data-collect-target-3538f6b` 执行 locked release build。构建前后 HEAD 均精确匹配且 worktree clean，binary 中可检出完整嵌入 commit。
+- 唯一生产产物 `target/release/data-collect-training-collector` 大小为 `25,081,576` bytes，mode=`0775`，SHA-256=`69fec19ef6ba03e39e7aa67814bab944b42128379849e0f0b153732d8eb26b40`；本地 digest-named staging 复核同 SHA 后原子替换固定路径。临时 detached worktree、独立 target 与 local staging 均已删除，没有生成 release receipt 或验证报告。
+- 当前状态为 `TASK_4_1_PRODUCTION_BUILD_PASSED_PENDING_REMOTE_PREFLIGHT`。远端旧 collector、旧程序、旧数据与本机 archive timer 仍未改动。
+
+## 2026-07-14：阶段 4.2 首次切换预检与新产物预置
+
+- 首次切换入口成立：远端 final binary 与本轮两个 digest-named staging 路径原先均不存在；旧主服务仍为 enabled/active/running，MainPID=`980080`、NRestarts=`4`、ControlGroup=`/user.slice/user-1000.slice/user@1000.service/app.slice/data-collect-training-collector.service`。旧 unit SHA-256=`0440846d3feb79ea3897889ec818c42c7eca1ba1943d6601a46c90f82113c3bb`，PID executable SHA-256=`78c59f31ce8a9803d72c791c1ff066ced6660f7072137e6719b0dd9570c3058e`，`current` 仍只指向获批旧 release；argv、cgroup、owner、mode 与冻结基线一致。
+- 三个旧 release、旧 marker、旧 gate/main unit 和四个旧数据目录均为 `ubuntu` 所有的预期文件/目录，递归内容没有非 `ubuntu` owner、symlink 或异常文件类型。全机 10 个可见 mount namespace 的 mountinfo 均未发现删除目标自身或 descendant mount；全 `/proc` holder 扫描只发现冻结 PID `980080` 持有其旧 executable 与当小时 typed raw 文件。
+- 清理前只读大小：三个旧 release 分别为 `84,059,917`、`84,158,290`、`84,164,941` bytes；旧 `typed_raw` 为 `16,385,520,036` bytes，`run_manifests` 为 `2,148,080` bytes，`runtime_artifacts` 为 `6,172` bytes，retention validation 目录为 `0` bytes。未创建备份或 inventory 文件，已批准删除后不完整旧日不可恢复。
+- 在 final 路径保持不存在、旧进程继续运行的前提下，新建空 `data-collect/bin`，以 exclusive-create 语义预置 binary `data-collect-training-collector.upload-69fec19e...26b40` 与 gate unit `data-collect-training-collector.staging-69fec19e...26b40.service`。远端 binary SHA-256=`69fec19ef6ba03e39e7aa67814bab944b42128379849e0f0b153732d8eb26b40`、size=`25,081,576`、mode=`0755`；gate unit SHA-256=`76ae2883dee5bd95132e4d306eaac2507756936759082661065942a5f8c3e27c`、mode=`0644`。
+- 远端 staging binary 为 x86-64 ELF，loader=`/lib64/ld-linux-x86-64.so.2`，全部动态库可解析，主机 glibc=`2.39`；直接执行 `--version` 与 `--help` 均成功。gate unit 由 repo 权威 unit 只把 `Restart=on-failure` 机械改为 `Restart=no`，临时改指 staging binary 的 `systemd-analyze --user verify` 通过且临时文件已删除；生产 staging unit 本身未被改写。
+- 当前状态为 `TASK_4_2_STAGED_PREFLIGHT_PASSED_PENDING_FINAL_IDENTITY_RESAMPLE`。旧服务、旧程序、旧数据尚未停止或删除，本机 archive timer 尚未停用。
+
+## 2026-07-14：阶段 4.3 白名单清理、首次 gate 失败与安全收口
+
+- 最终身份、路径、owner/type、全机 10 个 mount namespace 与 holder 门分别在 `04:42:00Z` 至 `04:42:51Z` 再次通过；本机旧 archive timer 随后 disabled/inactive，失败 archive service reset 为 inactive/dead，本地 `/home/chillchill/new-datasets` 保留未删。
+- 在 `04:45:20Z` 窗口开始切换。旧主服务与旧 gate unit 均成功 disable/stop；旧主进程 Result=`success`、ExecMainStatus=`0`、MainPID=`0`。停服后 holder=0，10 个 mount namespace 与全部白名单 owner/type 再次通过；随后严格删除已批准的三个旧 release、`current`、marker、旧 gate unit、`16,385,520,036` bytes typed raw、run manifests、runtime artifacts 与空 retention-validation 目录，并重建空 `training/typed_raw`。没有删除白名单外对象，也未创建备份或 inventory 文件。
+- 预置 binary 与 gate unit 分别原子替换 final 路径并复核 SHA；gate unit SHA-256=`76ae2883dee5bd95132e4d306eaac2507756936759082661065942a5f8c3e27c`、`Restart=no`。新进程在 `04:48:23Z` 启动，但于 `04:48:24Z` 收到 RTDS 缺少 `timestamp` 的真实 payload后输出 `source_task_error:polymarket_rtds_chainlink_btc_usd:RTDS Chainlink payload invalid: missing field \`timestamp\``，以 status `1` fail closed。systemd 未重启，MainPID 回到 0。
+- 失败 gate 已成功 finalize 三个文件；manifest 与 Parquet footer 均证明 build commit=`3538f6b5ecd64a9b1e297367a1b8f501a6f3ad27`、binary SHA-256=`69fec19ef6ba03e39e7aa67814bab944b42128379849e0f0b153732d8eb26b40`、host=`ip-172-26-10-0`、region=`eu-west-1`，因此该 UTC-day 为本轮 build 独占。确认无 holder/descendant mount 后，按步骤 4.4.3 删除整个失败日并重建空 typed raw 根。
+- 当前远端是已记录 `failed_gate`：service inactive/dead、disabled、MainPID=`0`；final binary SHA-256=`69fec19ef6ba03e39e7aa67814bab944b42128379849e0f0b153732d8eb26b40`，final gate unit SHA-256=`76ae2883dee5bd95132e4d306eaac2507756936759082661065942a5f8c3e27c`，无 staging、无旧 release/current/gate unit、生产数据根为空。本机旧 archive timer 继续 disabled/inactive。
+- 当前状态为 `PRODUCTION_GATE_FAILED_RETURNED_TO_STAGE_2`。不得重启该 failed pair；先核实缺失 timestamp payload 的真实类型与官方 RTDS 合同，做最小代码修正并重新执行阶段 2/3 全量验证和独立复审。
+
+## 2026-07-14：首次 gate RTDS 根因确认与最小修正
+
+- Polymarket 官方 RTDS 页面要求价格 payload 含 `symbol/timestamp/value`，同时官方 `real-time-data-client` README 明确说明使用 filter 时 CryptoPrice 会先下发 initial data dump，形状为 `{symbol,data:[...]}`。核对的官方 TypeScript client main commit 为 `c937d9c11cdd2b771aa4818392a1b6dda65c25de`。
+- 通过仓库既有 `RtdsSdkRuntime`、即官方 Rust SDK `ConnectionManager<RtdsMessage, SimpleParser>` 与单 receiver 做一次 ignored live probe，首帧精确为 `topic=crypto_prices,type=subscribe,payload={symbol:"btc/usd",data:[...]}`，随后连续 7 帧为 `topic=crypto_prices_chainlink,type=update` 且含合法 payload timestamp/value。临时 probe 测试已删除，未使用 raw WebSocket 或第二套订阅实现。
+- 根因是 collector 在检查 envelope topic/type 之前无条件把每条 SDK 消息 decode 为 `ChainlinkPrice`；因此官方初始历史 snapshot 被错误升级为目标 update schema fatal。最小修正只在非目标 topic/type 且 payload 又不是单价形状时返回 ignored：不进入 dedupe、不写 typed 行、不记 gap、不刷新 freshness。price-shaped wrong-topic/wrong-type 仍保留原 typed invalid 状态；精确目标 `crypto_prices_chainlink/update` 缺字段仍记录 gap 并 process-fatal。
+- 新增真实 snapshot 形状回归，断言 snapshot `Ok(false)`、queue 空、gap 空，紧接正常 update `Ok(true)` 并入队；既有目标 malformed fatal 回归继续通过。随后 20 秒真实官方 SDK 端到端临时运行成功，六个 source kind 全部 finalize，其中 RTDS 写入 `15` 行；临时目录自动删除。
+- 当前状态为 `TASK_2_5_RTDS_INITIAL_SNAPSHOT_FIX_VALIDATED_PENDING_FULL_REVIEW`。远端保持已记录 inactive `failed_gate`，生产数据根为空，本机 archive timer 保持 disabled/inactive。
+
+## 2026-07-14：RTDS gate 修正完整本地门禁
+
+- data-collect 全量 lib/integration tests 通过，lib=`89/89`；all-targets clippy `-D warnings`、locked check、workspace fmt 与 `git diff --check` 全部通过。SDK patch contract=`6/6`，vendor tree 未生成 `target/`，获批三文件 patch 边界未变化。
+- 20 秒真实官方 SDK 临时运行是本轮唯一 live source 验证，已自动删除数据根；没有保留 probe 源码、报告、sidecar 或 receipt。修正 diff 只涉及 RTDS decode-error 分类、真实 snapshot 回归及对应需求/计划/changelog，不修改 typed schema、SDK vendor、writer、manifest、systemd unit 或部署路径。
+- 当前状态为 `RTDS_GATE_FIX_VALIDATED_PENDING_REVIEW`。先进行 source/SDK 独立复审，再进行 failed-gate retry/部署状态独立复审；严格串行，二者全部 PASS 前远端 failed pair 不得启动或替换。
+
+## 2026-07-14：RTDS gate 修正首轮独立审查措辞修正
+
+- source/SDK 独立审查为 FAIL，Critical=`0`、Important=`1`、Minor=`0`。唯一问题是需求、计划与测试名声称“在 Chainlink payload decode 前忽略”，而真实代码是先尝试 typed decode，再在 decode 失败升级为 fatal 前依据 envelope 归类 ignored；运行时修复本身、target update fatal、wrong-topic/type typed 行、watchdog、dedupe、single receiver 与 SDK fault/lag 边界均通过。
+- 按审查建议保留当前单一 serde decode，不新增重复 raw JSON shape parser；只把需求、计划、测试名和 changelog 改为准确的“decode 失败后、升级 fatal 前按 envelope 分类”。运行语义与 production binary 输入代码没有其他变化。
+- 当前状态为 `RTDS_GATE_FIX_WORDING_ALIGNED_PENDING_SOURCE_REREVIEW`。远端 failed pair 与空数据根未改动。
+
+## 2026-07-14：RTDS gate 修正 source/SDK 独立复审通过
+
+- 对唯一措辞问题完成修正后，原 source/SDK 审查代理复审为 PASS，Critical=`0`、Important=`0`、Minor=`0`；审查未修改文件、未访问远端。
+- 复审确认实现只使用一次 `ChainlinkPrice` decode：decode 失败且 envelope 不是精确 `crypto_prices_chainlink/update` 时返回 ignored；精确目标 envelope 的 schema 错误仍 process-fatal。需求、计划、测试名与该真实顺序一致。
+- 针对真实 snapshot ignored 与目标 malformed fatal 的两条回归分别 `1/1` 通过，workspace fmt 与 `git diff --check` 通过。当前状态为 `RTDS_GATE_FIX_SOURCE_REVIEW_PASSED_PENDING_FAILED_GATE_STATE_REVIEW`；远端 failed pair 未在本轮复审中启动或替换。
+
+## 2026-07-14：RTDS gate 修正两路独立复审全部通过
+
+- failed-gate retry/部署状态第二路独立审查为 PASS，Critical=`0`、Important=`0`、Minor=`0`；只读审查未修改本机或远端状态。
+- `2026-07-14T05:10:53Z` 远端事实为 service inactive/dead、disabled、MainPID=`0`，enable symlink 与 holder 均不存在；failed binary SHA-256=`69fec19ef6ba03e39e7aa67814bab944b42128379849e0f0b153732d8eb26b40`，failed gate unit SHA-256=`76ae2883dee5bd95132e4d306eaac2507756936759082661065942a5f8c3e27c` 且 `Restart=no`。
+- `training/typed_raw` 为空，无 upload/staging 残留；旧 releases/current/marker/gate unit 与旧 run/runtime/retention 数据目录均不存在。本机旧 archive timer disabled/inactive，`/home/chillchill/new-datasets` 保留。
+- 审查确认失败重试必须跳过已完成的旧对象删除，先提交/push、从已推送 commit 干净构建、重新预置并通过精确身份门；不得复用或直接启动当前 failed pair。当前状态为 `RTDS_GATE_FIX_IMPLEMENTATION_REVIEW_PASSED_READY_FOR_COMMIT`。
+- 提交前再次执行完整门禁：data-collect lib=`89/89` 与全部 integration contracts 通过，SDK patch=`6/6`、SDK runtime=`17/17`；all-targets locked clippy `-D warnings`、all-targets locked check、workspace fmt、`git diff --check` 均退出 0。依赖树只有仓库内 `polymarket_client_sdk_v2 0.6.0-p1`，vendor tree 未生成 `target/`。

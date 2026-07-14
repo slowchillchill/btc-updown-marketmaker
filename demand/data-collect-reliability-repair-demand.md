@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-reliability-repair-changelog.md`
 >
-> 状态：`IMPLEMENTATION_REVIEW_PASSED`。采集代码已完成自审，并通过 source/SDK 与 writer/schema/deployment 两路最终独立复审；可以提交、推送并进入本地生产构建。阶段 4 全部破坏性切换门通过前不得停止远端服务或删除、替换远端程序与数据。
+> 状态：`RTDS_GATE_FIX_IMPLEMENTATION_REVIEW_PASSED_READY_FOR_COMMIT`。首次生产 gate 的 RTDS initial snapshot 分类错误已最小修正，并通过真实 SDK 端到端运行、完整本地门禁、source/SDK 与 failed-gate retry/部署状态两路独立复审；提交并推送本轮修复、从已推送 commit 干净构建新 binary 且重新通过精确身份门后，才允许进入失败重试。
 
 ## 一、目标与权威边界
 
@@ -70,8 +70,9 @@
 
 1. 每条消息必须保存真实 `message_type`，并校验 `topic=crypto_prices_chainlink`、`message_type=update`、`symbol=btc/usd`、毫秒 payload timestamp 和 payload age；`update` 是 Polymarket 官方 RTDS 文档中 Chainlink price payload 的允许业务类型，SDK 订阅使用 `type=*` 不代表其他 type 可以恢复健康。以本机 receive time 计算 `age_ms=received-payload`；`-5_000 <= age_ms <= 30_000` 为 fresh，等于边界仍 fresh，超出范围为 stale。
 2. 陈旧、未知 type 或不匹配 topic/symbol 的消息不得刷新 freshness；持续无效消息不能饿死 watchdog。可解析原始行可以保留，但必须有 typed `freshness_status=fresh|stale|invalid_type|invalid_topic|invalid_symbol|invalid_timestamp`，data-pipeline 才能明确排除。
-3. RTDS 必须像 CLOB market channel 一样组合官方 SDK 公共的 `ConnectionManager<RtdsMessage, SimpleParser>`、RTDS `SubscriptionManager`、单一 broadcast receiver、`state_receiver()` 与 sticky `fault_receiver()`，禁止继续使用会吞掉 `Lagged(n)` 的高层 filtered stream。订阅只能由一个项目串行 actor 发送：desired subscription 使用 latest-value watch 合并，每个新的 `Connected { since }` 创建新的官方 RTDS `SubscriptionManager` 并从空 server state 重放一次最新 desired；不得启动官方 self-spawn reconnection handler，避免其首次轮询晚于首次断线时漏掉下一 epoch 重订阅。健康期间不做固定 3 秒周期重发；60 秒无 fresh matching payload 后，最多由同一 actor 重发同一官方 subscription 两次、每次应用后间隔 3 秒，第二次后再等 3 秒仍未恢复就协调退出进程，由 systemd 新进程重建 SDK client。这一合同明确取代旧需求第 226 行“每 3 秒持续重发/每 2 次在进程内重建 client”的行为。发生 lag 或 terminal disconnected 也协调退出；parser fault 必须优先分类为 schema fatal、不得当作普通 transport 重连。恢复只由新的、匹配的业务 payload 证明；若固定 patch 后公共组件仍不成立，进入 3.1 第 6 项同一 SDK 决策门。
-4. 精确 typed payload 去重使用固定滚动 60 分钟窗口。窗口基准只使用该 key 第一次被接受时的 collector `timestamp_received`，重复命中不延长；年龄 `<60:00` 保留，达到 `60:00` 即可淘汰，禁止使用可陈旧、未来偏移或无效的 payload timestamp。生产常量固定为窗口内最多 `100_000` 个 key；窗口未到期而达到上限时记录 gap、coordinated finalize 后退出 76，禁止提前淘汰并放行重复。集合跨网络 reconnect；进程重启时从最近 finalized RTDS Parquet 以相同 receive-time 口径恢复窗口，不增加 manifest key 列表或 sidecar。超过 60 分钟的业务等价或重放由 data-pipeline 的全量语义去重处理。
+3. 使用 filter 的官方 RTDS 订阅会先下发历史 snapshot；本轮真实 SDK receiver 证据为 `topic=crypto_prices,type=subscribe,payload={symbol,data:[...]}`，它不是 Chainlink 单价 typed payload。此类非目标 envelope 的 Chainlink 单价 decode 失败必须在升级为 schema fatal 前归类为 ignored，不写伪造 typed 行、不刷新 freshness、不制造 gap，也不得令进程退出；但 `topic=crypto_prices_chainlink,type=update` 的 payload 缺字段仍是 schema fatal。price-shaped 的 wrong-topic/wrong-type 行继续按上一项保留 typed 无效状态。
+4. RTDS 必须像 CLOB market channel 一样组合官方 SDK 公共的 `ConnectionManager<RtdsMessage, SimpleParser>`、RTDS `SubscriptionManager`、单一 broadcast receiver、`state_receiver()` 与 sticky `fault_receiver()`，禁止继续使用会吞掉 `Lagged(n)` 的高层 filtered stream。订阅只能由一个项目串行 actor 发送：desired subscription 使用 latest-value watch 合并，每个新的 `Connected { since }` 创建新的官方 RTDS `SubscriptionManager` 并从空 server state 重放一次最新 desired；不得启动官方 self-spawn reconnection handler，避免其首次轮询晚于首次断线时漏掉下一 epoch 重订阅。健康期间不做固定 3 秒周期重发；60 秒无 fresh matching payload 后，最多由同一 actor 重发同一官方 subscription 两次、每次应用后间隔 3 秒，第二次后再等 3 秒仍未恢复就协调退出进程，由 systemd 新进程重建 SDK client。这一合同明确取代旧需求第 226 行“每 3 秒持续重发/每 2 次在进程内重建 client”的行为。发生 lag 或 terminal disconnected 也协调退出；parser fault 必须优先分类为 schema fatal、不得当作普通 transport 重连。恢复只由新的、匹配的业务 payload 证明；若固定 patch 后公共组件仍不成立，进入 3.1 第 6 项同一 SDK 决策门。
+5. 精确 typed payload 去重使用固定滚动 60 分钟窗口。窗口基准只使用该 key 第一次被接受时的 collector `timestamp_received`，重复命中不延长；年龄 `<60:00` 保留，达到 `60:00` 即可淘汰，禁止使用可陈旧、未来偏移或无效的 payload timestamp。生产常量固定为窗口内最多 `100_000` 个 key；窗口未到期而达到上限时记录 gap、coordinated finalize 后退出 76，禁止提前淘汰并放行重复。集合跨网络 reconnect；进程重启时从最近 finalized RTDS Parquet 以相同 receive-time 口径恢复窗口，不增加 manifest key 列表或 sidecar。超过 60 分钟的业务等价或重放由 data-pipeline 的全量语义去重处理。
 
 ### 3.4 writer 与错误传播
 

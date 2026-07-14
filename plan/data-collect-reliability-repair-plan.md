@@ -6,7 +6,7 @@
 >
 > 事项编号：`DC-REPAIR-20260713-COLLECTOR-RELIABILITY`
 >
-> 状态：`IMPLEMENTATION_REVIEW_PASSED`。阶段 2 实现与阶段 3 两路最终独立复审均已通过，可以执行步骤 3.3.1 并进入阶段 4；阶段 4 全部破坏性切换门通过前禁止停止、删除或替换远端对象。
+> 状态：`RTDS_GATE_FIX_IMPLEMENTATION_REVIEW_PASSED_READY_FOR_COMMIT`。首次生产 gate 的 RTDS initial snapshot 分类修正已通过完整本地门禁与两路独立复审；远端 failed-gate binary/unit 继续保持 inactive 且数据根为空。当前先提交并推送本轮修复，再从已推送 commit 干净构建新 binary，通过失败重试的精确身份门后方可启动新 gate。
 
 ## 一、执行原则与成功定义
 
@@ -78,7 +78,7 @@ source 目录               source_kind=<source>
 
 ### 任务 2.5：修复 RTDS 与时间语义
 
-- 步骤 2.5.1：把 RTDS 从高层 filtered stream 改为阶段 2.1 已证明的官方公共单 receiver/state/fault 路线；保留真实 `message_type`，只允许 `topic=crypto_prices_chainlink,type=update,symbol=btc/usd` 恢复健康；按 `-5_000 <= age_ms <= 30_000` 判 fresh。健康期间不周期重发；60 秒无 fresh matching payload 后最多重订阅两次、间隔 3 秒，第二次后再等 3 秒仍无恢复即协调进程退出。`Lagged(n)`/terminal disconnected 同样退出，parser fault 分类为 schema fatal。 -> 验证：lag/parser 注入可见，重订阅次数/间隔/最终退出，以及 age 两个等号边界、future skew、持续 stale、fresh 但 wrong-type/topic/symbol 全部覆盖。
+- 步骤 2.5.1：把 RTDS 从高层 filtered stream 改为阶段 2.1 已证明的官方公共单 receiver/state/fault 路线；保留真实 `message_type`，只允许 `topic=crypto_prices_chainlink,type=update,symbol=btc/usd` 恢复健康；按 `-5_000 <= age_ms <= 30_000` 判 fresh。真实 SDK receiver 会在 filter 订阅后先收到 `topic=crypto_prices,type=subscribe,payload={symbol,data:[...]}` 历史 snapshot；该非目标 envelope 的 Chainlink 单价 decode 失败必须在升级为 fatal 前归类为 ignored，目标 `topic+update` 的 schema 错误仍 fatal。健康期间不周期重发；60 秒无 fresh matching payload 后最多重订阅两次、间隔 3 秒，第二次后再等 3 秒仍无恢复即协调进程退出。`Lagged(n)`/terminal disconnected 同样退出，parser fault 分类为 schema fatal。 -> 验证：真实 snapshot 回归先于正常 update 且不写行、不记 gap、不恢复健康、不退出；目标 update malformed 仍 fatal；lag/parser 注入、重订阅次数/间隔/最终退出，以及 age 两个等号边界、future skew、持续 stale、price-shaped wrong-type/topic/symbol 全部覆盖。
 - 步骤 2.5.2：typed `freshness_status` 区分 fresh/stale/invalid_type/invalid_topic/invalid_symbol/invalid_timestamp，不能伪装 current price。 -> 验证：typed readback 保留真实 message type 并能排除全部无效状态。
 - 步骤 2.5.3：在 Gamma/depth HTTP 请求前后采样真实 start/receive；WS metadata fetch-start 为空。 -> 验证：mock delay 证明 start < receive，缺值不再回填 receive time。
 - 步骤 2.5.4：删除 `metadata_recv_time_utc`、`token_ids`、`local_u_after` 等义列并更新 schema/测试。 -> 验证：保留的不同语义时间与 depth stitch 字段仍完整。
