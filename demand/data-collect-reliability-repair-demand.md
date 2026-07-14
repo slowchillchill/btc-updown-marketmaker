@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-reliability-repair-changelog.md`
 >
-> 状态：`SNAPSHOT_HOURLY_FINALIZE_IMPLEMENTATION_REVIEW_PASSED_READY_FOR_COMMIT`。RTDS initial snapshot 修复已通过生产数据验证；稀疏 `binance_depth_snapshot` 无事件小时关闭修复已通过完整本地门禁、独立源码正确性审查与 failed-gate 重试状态审查。提交并推送四个本事项文件后，必须从该已推送 commit 干净构建新 binary，禁止复用当前远端 failed pair。
+> 状态：`TASK_4_5_SNAPSHOT_HOUR_GATE_REVIEW_PASSED_READY_FOR_LONG_RUNNING_SWITCH`。稀疏 `binance_depth_snapshot` 无事件小时关闭 production gate 已通过独立审查与文档修正后的定向复审，Critical/Important/Minor 均为 0。提交并推送阶段 4 事实后，允许只把同一运行 PID 的 unit 原子切换为权威 `Restart=on-failure` 并 enable；禁止重启进程。
 
 ## 一、目标与权威边界
 

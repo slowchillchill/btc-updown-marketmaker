@@ -361,3 +361,34 @@
 - `training/typed_raw` 为空且无 mount/holder；无 upload/staging、第二数据根、validation artifact 或已删除旧对象复现。本机 archive timer disabled/inactive，archive service static/inactive，`/home/chillchill/new-datasets` 保留。
 - 审查确认 HEAD、tracking ref 与远端分支仍为 `ef34c223fc12a6b95ef5c65cc4eebc1f629dc6d1`，暂存区为空；四个本事项文件未提交，三个用户文件未混入。重试顺序继续是提交/push、从 pushed commit 干净构建、精确 restage/replace、非 23 UTC 的 45–50 分启动并跨小时至少 15 分钟；不得复用当前 failed binary。
 - 当前状态为 `SNAPSHOT_HOURLY_FINALIZE_IMPLEMENTATION_REVIEW_PASSED_READY_FOR_COMMIT`。两路独立复审已通过，允许只提交并推送四个本事项文件；新生产构建仍须严格从推送后的 commit 产生。
+
+## 2026-07-14：稀疏 snapshot 小时关闭提交推送与生产构建
+
+- 稀疏 snapshot 小时关闭修复提交为 `af57615e9694af3e930da5e648f058a1ad1cb321`（`fix(data-collect): finalize sparse snapshots hourly`），已推送到 `origin/after-data-plan`；本地 HEAD、remote-tracking ref 与 `ls-remote` 三者精确一致。提交只含 `live_runtime.rs` 和本事项 demand/plan/changelog，用户的 `AGENTS.md`、`demand/rebuild-core-demand.md`、`推荐开发顺序.md` 未进入提交。
+- 从该已推送 commit 创建 `/tmp/data-collect-build-af57615` detached clean worktree，设置 `DATA_COLLECT_GIT_COMMIT=af57615e9694af3e930da5e648f058a1ad1cb321`，以独立 `/tmp/data-collect-target-af57615` 执行 locked release build。构建后 worktree HEAD 未变化且 clean，binary 中可检出完整嵌入 commit。
+- 新 binary 大小=`25,125,208` bytes、SHA-256=`ef29d9ed09ce9f7d05a1df1a0110f9c4ac4f37ba1e6257a7dacdc07d4aadd5c4`、固定本地 mode=`0755`；经 digest-named local staging 复核后原子替换 `target/release/data-collect-training-collector`。临时 detached worktree、独立 target 与 staging 已删除，没有创建 release receipt 或验证报告。
+- 当前状态为 `TASK_4_1_SNAPSHOT_HOUR_FIX_BUILD_PASSED_PENDING_REMOTE_RESTAGE`。远端仍是第二轮审查确认的 inactive failed-gate，当前 failed binary SHA 为 `249dc5802fb0aba185adf365b0e0523f86d39e626a9440fbd05164bfd8c5d9f6`；新 binary 尚未上传、替换或启动。
+
+## 2026-07-14：稀疏 snapshot 修复的远端预置与原子替换
+
+- 重试前于 `2026-07-14T06:47:20Z` 再次核实 failed-gate：service inactive/dead、disabled、MainPID=`0`、NRestarts=`0`、`Restart=no`，数据根为空且无 executable holder；failed binary/unit SHA 分别为 `249dc5802fb0aba185adf365b0e0523f86d39e626a9440fbd05164bfd8c5d9f6` 与 `76ae2883dee5bd95132e4d306eaac2507756936759082661065942a5f8c3e27c`，新 digest staging 路径不存在。
+- 使用 shell noclobber 的独占文件描述符创建新 staging，没有先创建再覆盖。staging binary 为 `ubuntu:ubuntu`、mode `0755`、大小 `25,125,208` bytes、SHA-256=`ef29d9ed09ce9f7d05a1df1a0110f9c4ac4f37ba1e6257a7dacdc07d4aadd5c4`；ELF/loader/动态库、嵌入 commit、`--version`/`--help` 均通过。staging gate unit 为 `ubuntu:ubuntu`、mode `0644`、SHA-256=`76ae2883dee5bd95132e4d306eaac2507756936759082661065942a5f8c3e27c`、`Restart=no`，systemd verify 通过。
+- 第一次原子替换尝试在任何 `mv` 前因 disabled/inactive unit 已被 manager 卸载而由 `reset-failed` 返回 `Unit ... not loaded`，脚本安全退出。复核确认 final/staging 四个 SHA 均未变化、user manager 无 failed unit，因此记录该形式动作不适用并重新执行全部身份门，没有为此加载或启动 unit。
+- 于 `2026-07-14T06:49:50Z` 依次同目录原子替换 final binary 与 unit并 daemon-reload；final SHA 精确等于新 binary/gate unit，staging 全部消失。service 继续 inactive/dead、disabled、MainPID=`0`，数据根仍为空。
+
+## 2026-07-14：稀疏 snapshot 小时关闭 production gate
+
+- 在批准的非 23 UTC 窗口 `2026-07-14T06:50:15Z` 启动最终 `--run-forever` gate。MainPID=`1014179`，运行中 `/proc/1014179/exe` SHA 精确为 `ef29d9ed09ce9f7d05a1df1a0110f9c4ac4f37ba1e6257a7dacdc07d4aadd5c4`；service active/running、disabled、`Restart=no`、NRestarts=`0`。
+- 边界前唯一 snapshot 临时文件为 `binance_depth_snapshot_06.parquet.running`。在没有后续 snapshot 和人工触发的情况下，`2026-07-14T07:00:20Z` 采样已自然变为 `binance_depth_snapshot_06.parquet`；没有 `_06-part-N`、没有旧小时 `.running`，也没有生成空的 snapshot `_07` 文件。同一 PID 于 `07:05:21Z` 已跨边界运行超过 15 分钟，并持续稳定到至少 `07:11:39Z`。
+- 唯一 open manifest 精确记录 build `af57615e9694af3e930da5e648f058a1ad1cb321`、binary SHA、config digest、host/region 与 `gaps=[]`。六个 source 的 `_06.parquet` 全部 finalized、均为 `part=0` 与 `rollover_reason=utc_hour_boundary`；footer rows、文件 bytes、SHA-256 与 manifest 逐项一致。snapshot 为 1 行，fetch-start=`06:50:16.488Z`、receive=`06:50:16.699Z`、`last_update_id=97381662665`、bid/ask 各 `1,000` 档；depth update 的 5,833 行全部引用同一 snapshot ID且 gap reason 为空。
+- RTDS finalized 582 行全部为 `crypto_prices_chainlink/update/btc/usd/fresh`，age=`881..2442ms`，exact payload duplicate=`0`；initial subscription snapshot 未写入。aggTrade finalized 3,761 行，ID=`4013780103..4013783863` 完全连续且唯一，manifest continuity 无 unresolved range。六源 dropped/lag/reconnect 均为 0，journal 自启动后无 warning/fatal。
+- Polymarket 初次粗扫描以“同 canonical message、不同 receive millisecond”计数得到 9,917，会把首次合法多 target `PriceChange` 的不同 fan-out 行误判为重放；按需求规定的完整 typed 业务行重新比较后，609,029 行中的跨接收时间重复业务行为 `0`。这一中间误判只输出到终端，没有写入生产或仓库产物。
+- 数据根只含 hourly Parquet、唯一 manifest 与当前小时合法 `.running`；旧小时 `.running`、`part-N`、空 snapshot 小时文件、tmp、report/receipt/sidecar、第二数据根和 staging 均为 0。本机临时拉取的 finalized 文件与临时 gate unit已删除。
+- 当前状态为 `TASK_4_4_SNAPSHOT_HOUR_GATE_PASSED_PENDING_STAGE_4_5_REVIEW`。必须由独立 `gpt-5.6-sol`/`ultra` 只读复核真实 gate；审查 PASS 前 unit 继续 disabled 且 `Restart=no`，不得进入长期运行切换。
+
+## 2026-07-14：阶段 4.5 首轮审查与证据文字修正
+
+- 阶段 4.5 首轮独立 `gpt-5.6-sol`/`ultra` 只读审查暂不 PASS：Critical=`0`、Important=`0`、Minor=`1`。代码、hour-finalize 顺序、真实 snapshot、六源 Parquet/manifest、typed 重复、continuity、journal、最小产物、旧对象删除和长期切换门均通过；唯一 Minor 是上一节把 PyArrow 返回的 bids/asks JSON 字符串字符数 `32,001` 误写成盘口档数。
+- 独立审查从真实 typed JSON 与 endpoint `limit=1000` 核实 bids/asks 各恰为 `1,000` 档；已只修正该 changelog 事实，没有改代码、数据、schema、manifest、unit 或 gate 进程。当前状态为 `TASK_4_5_SNAPSHOT_HOUR_GATE_DOC_CORRECTED_PENDING_REREVIEW`，定向复审 PASS 前继续保持 PID `1014179`、disabled、`Restart=no`。
+- 定向复审结论为 PASS，Critical=`0`、Important=`0`、Minor=`0`。复审确认真实 Parquet bids/asks 各 1,000 档、两段 JSON 字符串各 32,001 字符、endpoint `limit=1000`，首轮 Minor 与修正范围记录准确，`git diff --check` 通过。
+- 截至复审采样 `2026-07-14T07:26:53Z`，远端仍为 PID `1014179`、active/running、disabled、`Restart=no`、NRestarts=`0`；binary、进程与 gate unit SHA 未变化，journal 无 warning/error。当前状态为 `TASK_4_5_SNAPSHOT_HOUR_GATE_REVIEW_PASSED_READY_FOR_LONG_RUNNING_SWITCH`；先提交/push 阶段 4 事实，再只切换长期 unit、reload/enable且不得重启 PID。

@@ -6,7 +6,7 @@
 >
 > 事项编号：`DC-REPAIR-20260713-COLLECTOR-RELIABILITY`
 >
-> 状态：`SNAPSHOT_HOURLY_FINALIZE_IMPLEMENTATION_REVIEW_PASSED_READY_FOR_COMMIT`。RTDS initial snapshot 修正已通过生产数据验证；稀疏 `binance_depth_snapshot` 无事件小时关闭修复已通过完整本地门禁、独立源码正确性审查与 failed-gate 重试状态审查。当前先提交并推送四个本事项文件，再从该已推送 commit 干净构建新 binary。
+> 状态：`TASK_4_5_SNAPSHOT_HOUR_GATE_REVIEW_PASSED_READY_FOR_LONG_RUNNING_SWITCH`。稀疏 `binance_depth_snapshot` 无事件小时关闭 production gate 已通过独立审查与文档修正后的定向复审，Critical/Important/Minor 均为 0。当前先提交并推送阶段 4 事实，再原子切换权威长期 unit、reload/enable，并验证 PID 未变化。
 
 ## 一、执行原则与成功定义
 
