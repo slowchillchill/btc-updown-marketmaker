@@ -68,7 +68,7 @@ struct DesiredRtdsSubscription {
 
 pub struct MarketSdkRuntime {
     connection: MarketConnection,
-    messages: broadcast::Receiver<WsMessage>,
+    messages: Option<MarketSdkMessageReceiver>,
     states: watch::Receiver<ConnectionState>,
     faults: watch::Receiver<Option<ConnectionFault>>,
     desired_tx: watch::Sender<DesiredMarketAssets>,
@@ -83,7 +83,6 @@ impl MarketSdkRuntime {
         let interest = Arc::new(InterestTracker::new());
         let connection = ConnectionManager::new(endpoint, config, Arc::clone(&interest))
             .map_err(|err| SdkStreamError::Connection(err.to_string()))?;
-        let messages = connection.subscribe();
         let states = connection.state_receiver();
         let faults = connection.fault_receiver();
 
@@ -91,10 +90,18 @@ impl MarketSdkRuntime {
         let (desired_tx, desired_rx) = watch::channel(initial.clone());
         let (applied_tx, applied_rx) = watch::channel(initial);
         let (actor_error_tx, actor_error_rx) = watch::channel(None::<SdkStreamError>);
+        let messages = MarketSdkMessageReceiver {
+            connection: connection.clone(),
+            messages: connection.subscribe(),
+            states: states.clone(),
+            faults: faults.clone(),
+            actor_error_rx: actor_error_rx.clone(),
+            connection_activity_seen: false,
+        };
         let actor = tokio::spawn(run_market_subscription_actor(
             connection.clone(),
             interest,
-            connection.state_receiver(),
+            states.clone(),
             desired_rx,
             applied_tx,
             actor_error_tx,
@@ -102,7 +109,7 @@ impl MarketSdkRuntime {
 
         Ok(Self {
             connection,
-            messages,
+            messages: Some(messages),
             states,
             faults,
             desired_tx,
@@ -205,50 +212,25 @@ impl MarketSdkRuntime {
         &mut self,
         timeout_duration: Duration,
     ) -> Result<Option<WsMessage>, SdkStreamError> {
-        let deadline = Instant::now() + timeout_duration;
-        loop {
-            if let Some(error) = connection_fault(&self.faults) {
-                return Err(error);
-            }
-            if let Some(error) = self.actor_error_rx.borrow().clone() {
-                return Err(error);
-            }
-            let remaining = remaining(deadline, "waiting for market message")?;
-            tokio::select! {
-                message = self.messages.recv() => {
-                    return match message {
-                        Ok(message) => Ok(Some(message)),
-                        Err(broadcast::error::RecvError::Lagged(count)) => {
-                            Err(SdkStreamError::Lagged(count))
-                        }
-                        Err(broadcast::error::RecvError::Closed) => {
-                            Err(terminal_error(&self.faults))
-                        }
-                    };
-                }
-                changed = self.faults.changed() => {
-                    if changed.is_err() && self.connection.state() == ConnectionState::Disconnected {
-                        return Err(terminal_error(&self.faults));
-                    }
-                }
-                changed = self.states.changed() => {
-                    changed.map_err(|_| terminal_error(&self.faults))?;
-                    if *self.states.borrow_and_update() == ConnectionState::Disconnected {
-                        return Err(terminal_error(&self.faults));
-                    }
-                }
-                changed = self.actor_error_rx.changed() => {
-                    if changed.is_err() {
-                        return Err(market_actor_exit_error(
-                            &self.connection,
-                            &self.faults,
-                            &self.actor_error_rx,
-                        ));
-                    }
-                }
-                () = sleep(remaining) => return Ok(None),
-            }
-        }
+        self.messages
+            .as_mut()
+            .ok_or_else(|| {
+                SdkStreamError::SubscriptionActor(
+                    "market message receiver was already taken".to_owned(),
+                )
+            })?
+            .recv(timeout_duration)
+            .await
+    }
+
+    pub(crate) fn take_message_receiver(
+        &mut self,
+    ) -> Result<MarketSdkMessageReceiver, SdkStreamError> {
+        self.messages.take().ok_or_else(|| {
+            SdkStreamError::SubscriptionActor(
+                "market message receiver was already taken".to_owned(),
+            )
+        })
     }
 
     #[must_use]
@@ -259,6 +241,154 @@ impl MarketSdkRuntime {
     #[must_use]
     pub fn subscription_count(&self) -> usize {
         usize::from(!self.applied_rx.borrow().assets.is_empty())
+    }
+}
+
+pub(crate) struct MarketSdkMessageReceiver {
+    connection: MarketConnection,
+    messages: broadcast::Receiver<WsMessage>,
+    states: watch::Receiver<ConnectionState>,
+    faults: watch::Receiver<Option<ConnectionFault>>,
+    actor_error_rx: watch::Receiver<Option<SdkStreamError>>,
+    connection_activity_seen: bool,
+}
+
+impl MarketSdkMessageReceiver {
+    pub(crate) fn pending_len(&self) -> usize {
+        self.messages.len()
+    }
+
+    pub(crate) fn terminal_snapshot(&mut self) -> Option<SdkStreamError> {
+        connection_fault(&self.faults)
+            .or_else(|| self.actor_error_rx.borrow().clone())
+            .or_else(|| {
+                (self.disconnected_after_activity() || self.messages.is_closed())
+                    .then(|| terminal_error(&self.faults))
+            })
+    }
+
+    fn disconnected_after_activity(&mut self) -> bool {
+        if self.states.has_changed().unwrap_or(true) {
+            self.connection_activity_seen = true;
+        }
+        let state = *self.states.borrow_and_update();
+        if state != ConnectionState::Disconnected {
+            self.connection_activity_seen = true;
+            return false;
+        }
+        self.connection_activity_seen
+    }
+
+    pub(crate) fn try_recv(&mut self) -> Result<Option<WsMessage>, SdkStreamError> {
+        match self.messages.try_recv() {
+            Ok(message) => Ok(Some(message)),
+            Err(broadcast::error::TryRecvError::Lagged(count)) => {
+                Err(SdkStreamError::Lagged(count))
+            }
+            Err(broadcast::error::TryRecvError::Closed) => Err(terminal_error(&self.faults)),
+            Err(broadcast::error::TryRecvError::Empty) => {
+                let terminal = connection_fault(&self.faults)
+                    .or_else(|| self.actor_error_rx.borrow().clone())
+                    .or_else(|| {
+                        self.disconnected_after_activity()
+                            .then(|| terminal_error(&self.faults))
+                    });
+                let Some(terminal) = terminal else {
+                    return Ok(None);
+                };
+                match self.messages.try_recv() {
+                    Ok(message) => Ok(Some(message)),
+                    Err(broadcast::error::TryRecvError::Lagged(count)) => {
+                        Err(SdkStreamError::Lagged(count))
+                    }
+                    Err(
+                        broadcast::error::TryRecvError::Closed
+                        | broadcast::error::TryRecvError::Empty,
+                    ) => Err(terminal),
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn recv(
+        &mut self,
+        timeout_duration: Duration,
+    ) -> Result<Option<WsMessage>, SdkStreamError> {
+        let deadline = Instant::now() + timeout_duration;
+        let mut pending_terminal = None::<SdkStreamError>;
+        loop {
+            match self.messages.try_recv() {
+                Ok(message) => return Ok(Some(message)),
+                Err(broadcast::error::TryRecvError::Lagged(count)) => {
+                    return Err(SdkStreamError::Lagged(count));
+                }
+                Err(broadcast::error::TryRecvError::Closed) => {
+                    return Err(connection_fault(&self.faults)
+                        .or_else(|| self.actor_error_rx.borrow().clone())
+                        .or_else(|| pending_terminal.take())
+                        .unwrap_or_else(|| terminal_error(&self.faults)));
+                }
+                Err(broadcast::error::TryRecvError::Empty) => {
+                    if let Some(error) = pending_terminal.take() {
+                        return Err(connection_fault(&self.faults)
+                            .or_else(|| self.actor_error_rx.borrow().clone())
+                            .unwrap_or(error));
+                    }
+                }
+            }
+            if let Some(error) = connection_fault(&self.faults) {
+                pending_terminal = Some(error);
+                continue;
+            }
+            if let Some(error) = self.actor_error_rx.borrow().clone() {
+                pending_terminal = Some(error);
+                continue;
+            }
+            if self.disconnected_after_activity() {
+                pending_terminal = Some(terminal_error(&self.faults));
+                continue;
+            }
+            let remaining = remaining(deadline, "waiting for market message")?;
+            tokio::select! {
+                message = self.messages.recv() => {
+                    match message {
+                        Ok(message) => return Ok(Some(message)),
+                        Err(broadcast::error::RecvError::Lagged(count)) => {
+                            return Err(SdkStreamError::Lagged(count));
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            pending_terminal = Some(terminal_error(&self.faults));
+                        }
+                    }
+                }
+                changed = self.faults.changed() => {
+                    if changed.is_err() && *self.states.borrow() == ConnectionState::Disconnected {
+                        pending_terminal = Some(terminal_error(&self.faults));
+                    }
+                }
+                changed = self.states.changed() => {
+                    let state = *self.states.borrow_and_update();
+                    if changed.is_ok() {
+                        self.connection_activity_seen = true;
+                    }
+                    if state == ConnectionState::Disconnected
+                        && (changed.is_err() || self.connection_activity_seen)
+                    {
+                        pending_terminal = Some(terminal_error(&self.faults));
+                    }
+                }
+                changed = self.actor_error_rx.changed() => {
+                    if changed.is_err() {
+                        pending_terminal = Some(market_actor_exit_error(
+                            &self.connection,
+                            &self.faults,
+                            &self.actor_error_rx,
+                        ));
+                    }
+                }
+                () = sleep(remaining) => return Ok(None),
+            }
+        }
     }
 }
 
@@ -789,6 +919,139 @@ mod tests {
         })
         .await
         .expect("SDK connection")
+    }
+
+    fn synthetic_disconnected_market_receiver() -> (
+        MarketSdkRuntime,
+        MarketSdkMessageReceiver,
+        watch::Sender<ConnectionState>,
+        broadcast::Sender<WsMessage>,
+    ) {
+        let mut runtime = MarketSdkRuntime::new("ws://127.0.0.1:9".to_owned(), Config::default())
+            .expect("dormant market runtime");
+        let mut receiver = runtime.take_message_receiver().unwrap();
+        let (state_tx, state_rx) = watch::channel(ConnectionState::Disconnected);
+        let (message_tx, message_rx) = broadcast::channel(1);
+        receiver.states = state_rx;
+        receiver.messages = message_rx;
+        (runtime, receiver, state_tx, message_tx)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn market_receiver_initial_disconnected_is_not_terminal() {
+        let (_runtime, mut receiver, _state_tx, _message_tx) =
+            synthetic_disconnected_market_receiver();
+
+        assert_eq!(receiver.terminal_snapshot(), None);
+        assert!(matches!(receiver.try_recv(), Ok(None)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn market_receiver_connection_activity_then_disconnected_is_terminal() {
+        let (_runtime, mut receiver, state_tx, _message_tx) =
+            synthetic_disconnected_market_receiver();
+        state_tx.send_replace(ConnectionState::Connecting);
+        state_tx.send_replace(ConnectionState::Disconnected);
+
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(SdkStreamError::TerminalDisconnected)
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn market_message_receiver_can_be_taken_only_once() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut runtime = MarketSdkRuntime::new(format!("ws://{address}"), Config::default())
+            .expect("market runtime");
+
+        let receiver = runtime
+            .take_message_receiver()
+            .expect("first receiver take");
+        assert!(matches!(
+            runtime.take_message_receiver(),
+            Err(SdkStreamError::SubscriptionActor(message))
+                if message.contains("already taken")
+        ));
+        assert!(matches!(
+            runtime.recv(Duration::from_millis(1)).await,
+            Err(SdkStreamError::SubscriptionActor(message))
+                if message.contains("already taken")
+        ));
+        drop(receiver);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn market_receiver_drains_valid_messages_before_a_later_parser_fault() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (send_frames_tx, send_frames_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            _ = next_json_request(&mut socket).await;
+            send_frames_rx.await.unwrap();
+            for timestamp in [1_i64, 2] {
+                socket
+                    .send(Message::Text(
+                        json!({
+                            "event_type": "book",
+                            "asset_id": "1",
+                            "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                            "timestamp": timestamp.to_string(),
+                            "bids": [],
+                            "asks": []
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            socket
+                .send(Message::Text(
+                    r#"{"event_type":"book","asset_id":"1""#.into(),
+                ))
+                .await
+                .unwrap();
+            sleep(Duration::from_millis(200)).await;
+        });
+
+        let mut runtime = MarketSdkRuntime::new(format!("ws://{address}"), Config::default())
+            .expect("market runtime");
+        runtime
+            .replace_and_wait(BTreeSet::from([U256::from(1)]), Duration::from_secs(2))
+            .await
+            .unwrap();
+        let mut receiver = runtime.take_message_receiver().unwrap();
+        let waiting = tokio::spawn(async move {
+            let first = receiver.recv(Duration::from_secs(1)).await;
+            (first, receiver)
+        });
+        tokio::task::yield_now().await;
+        send_frames_tx.send(()).unwrap();
+
+        let (first, mut receiver) = waiting.await.unwrap();
+        let mut messages = vec![first.unwrap().unwrap()];
+        messages.push(
+            receiver
+                .recv(Duration::from_secs(1))
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        for (message, expected_timestamp) in messages.into_iter().zip([1_i64, 2]) {
+            let WsMessage::Book(book) = message else {
+                panic!("valid book must precede parser fault");
+            };
+            assert_eq!(book.timestamp, expected_timestamp);
+        }
+        assert!(matches!(
+            receiver.recv(Duration::from_secs(1)).await,
+            Err(SdkStreamError::Parser(_))
+        ));
+        server.await.unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]

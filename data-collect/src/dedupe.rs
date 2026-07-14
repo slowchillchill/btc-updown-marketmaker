@@ -49,6 +49,28 @@ impl LifecycleFingerprintSets {
         self.observe_fingerprint(lifecycle, fingerprint)
     }
 
+    pub fn check(
+        &self,
+        lifecycle: &str,
+        source_native_payload: &[u8],
+    ) -> Result<FingerprintDecision, String> {
+        let fingerprint = sha256(source_native_payload);
+        let fingerprints = self
+            .fingerprints
+            .get(lifecycle)
+            .ok_or_else(|| format!("inactive Polymarket lifecycle: {lifecycle}"))?;
+        if fingerprints.contains(&fingerprint) {
+            return Ok(FingerprintDecision::Duplicate);
+        }
+        if fingerprints.len() >= self.per_lifecycle_limit {
+            return Err(format!(
+                "Polymarket lifecycle fingerprint limit reached: lifecycle={lifecycle} limit={}",
+                self.per_lifecycle_limit
+            ));
+        }
+        Ok(FingerprintDecision::Unique)
+    }
+
     pub fn observe_fingerprint(
         &mut self,
         lifecycle: &str,

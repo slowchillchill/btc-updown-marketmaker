@@ -6,7 +6,7 @@
 >
 > 事项编号：`DC-REPAIR-20260713-COLLECTOR-RELIABILITY`
 >
-> 状态：`TASK_4_5_SNAPSHOT_HOUR_GATE_REVIEW_PASSED_READY_FOR_LONG_RUNNING_SWITCH`。稀疏 `binance_depth_snapshot` 无事件小时关闭 production gate 已通过独立审查与文档修正后的定向复审，Critical/Important/Minor 均为 0。当前先提交并推送阶段 4 事实，再原子切换权威长期 unit、reload/enable，并验证 PID 未变化。
+> 状态：`TASK_3_FAST_DRAIN_REPAIR_REVIEW_PASSED_READY_FOR_COMMIT`。真实 `SDK receiver -> decoded queue -> canonical/dedupe/fan-out -> shared ingress/writer` 有界修复与全部本地门已通过；步骤 3.2 的 source/SDK-first 与 writer/schema/deployment 两路最终独立复审均 PASS，Critical/Important/Minor 均为 0。允许执行步骤 3.3.1；production release 仍只能从 push 后的干净 commit 构建。
 
 ## 一、执行原则与成功定义
 
@@ -59,7 +59,7 @@ source 目录               source_kind=<source>
 ### 任务 2.2：修复 Polymarket discovery、订阅和语义
 
 - 步骤 2.2.1：将 discovery contract 改为 current 必需、next optional，next 独立发现和动态订阅。 -> 验证：current-only、next 延迟出现、rollover 晋升、过期退订测试通过。
-- 步骤 2.2.2：以单 receiver 解析 `WsMessage`，再按官方高层 subscription 的 asset 语义过滤：单 asset variant 精确匹配 current/next，`PriceChange` 只输出匹配 entries，`NewMarket/MarketResolved` 至少一个 asset 匹配；其余不写入、不刷新 freshness。`Lagged(n)` 立即记录 gap、协调 drain 并非零退出，由 systemd 新进程恢复。 -> 验证：mixed-asset `PriceChange` 只写 target entries，unmatched `NewMarket/MarketResolved` 写入 0 行，lag 注入可见。
+- 步骤 2.2.2：把 `MarketSdkRuntime` 已有的唯一 SDK receiver 一次性移交给项目 fast-drain task，禁止再次 `subscribe()`；recv 后立即冻结 wall-clock/monotonic receive time、取得共享全局及 decoded 局部 permits，再按 FIFO 交给唯一串行 processor。processor 再执行 canonical、dedupe、current/next target filter 与 fan-out；订阅/Gamma/resubscribe/writer 等慢路径不得阻止 SDK receiver 排水。`Lagged(n)`、decoded queue/budget timeout 都先按顺序 drain 已接受消息，再记录 gap并非零退出。 -> 验证：第二次 take receiver 明确失败，1024 以上 burst 不触发 SDK lag，mixed-target fan-out 与 unmatched 过滤不变；排队后 row 仍使用 recv 时刻，freshness 不接受早于订阅的 queued event。
 - 步骤 2.2.3：按 market/asset 增加 30 秒 first-event 与 60 秒 freshness watchdog；Ping/Pong、global event、其他 asset 不刷新。先做有限退订/重订阅，仍失败则进程重启。 -> 验证：一个健康 asset 不能掩盖另一个，next 尚不存在不影响 current。
 - 步骤 2.2.4：删除 synthetic `market_discovery_switch -> new_market` 路径；Gamma 只写 discovery metadata。 -> 验证：synthetic 事件产生 0 个 `new_market`，原生 WS 事件仍产生 1 条。
 
@@ -86,17 +86,17 @@ source 目录               source_kind=<source>
 
 ### 任务 2.6：修复 writer 和 supervision
 
-- 步骤 2.6.1：为所有项目自有待写数据实现共享 row+byte permits：编译常量 `100_000 rows + 134_217_728 bytes`、每个 fan-out 后 row hard cap `1_048_576 bytes`、acquire timeout 2 秒；row 入队前按结构/owned capacity（含 canonical JSON）计算并拒绝超限，首次进入时申请 permits，跨 ingress/batch/writer move 时携带，复制另计，移入 Arrow builder并释放 event 后归还。Binance pending 计入同一预算；row/budget 超限、timeout、closed channel、parser/finalize/atomic rename 全链路返回 `Result` 并协调失败。 -> 验证：1MiB row、100,000/128MiB 全局边界、owned payload 复制、permits 释放、短背压和超限故障注入通过，无 drop 后继续；SDK 控制通道例外与项目数据路径隔离。
+- 步骤 2.6.1：为所有项目自有待写数据实现共享 row+byte permits：编译常量 `100_000 rows + 134_217_728 bytes`、每个 fan-out 后 row hard cap `1_048_576 bytes`、acquire timeout 2 秒；row 入队前按结构/owned capacity（含 canonical JSON）计算并拒绝超限，首次进入时申请 permits，跨 ingress/batch/writer move 时携带，复制另计，移入 Arrow builder并释放 event 后归还。Polymarket decoded message 另受 `25_000 messages/67_108_864 bytes` 附加局部 cap，但同时继续持有同一全局 permits；原 message、canonical copy 与 fan-out rows 的并存 owned memory 分别计数。Binance pending 计入同一预算；row/budget 超限、timeout、closed channel、parser/finalize/atomic rename 全链路返回 `Result` 并协调失败。 -> 验证：1MiB row、100,000/128MiB 全局边界、decoded local cap、owned payload 复制、permits 释放、短背压和超限故障注入通过，无 drop 后继续或 decoded queue 独占全局预算；SDK 控制通道例外与项目数据路径隔离。
 - 步骤 2.6.2：每个 source 的单次恢复周期有 finite attempts/max elapsed/capped backoff+jitter，外层 supervisor 可无限启动新周期；runtime writer/PM lag 失败退出进程并受 systemd StartLimit 约束，不可恢复 startup/path/manifest/dedupe 不变量转 76。 -> 验证：故障注入证明无 tight loop、网络恢复后继续，内部错误不会假装运行正常，也不会把持久不变量错误变成 restart loop。
 - 步骤 2.6.3：启动时只清理本数据根内无进程持有的 stale running/tmp，并记录 gap。 -> 验证：路径 containment 与 symlink 负例 fail closed，临时目录自动删除。
-- 步骤 2.6.4：实现 SIGTERM coordinated shutdown：停止 ingress、drain batch/writer、finalize、更新 open day manifest、journal 完成标记并在应用内部 90 秒截止前退出 0。 -> 验证：operator/systemd SIGTERM 正常停止无 running/tmp；该停服路径的 timeout/SIGKILL/非零状态不能通过，systemd 外层使用 120 秒；fault 路径完成 drain 后仍保留其非零状态。
+- 步骤 2.6.4：实现 SIGTERM coordinated shutdown：对 Polymarket 先向 fast-drain FIFO 插入 stop fence、停止 SDK intake并处理 marker 前全部 decoded message，禁止直接 abort source；随后停止其他 ingress、drain batch/writer、finalize、更新 open day manifest、journal 完成标记并在应用内部 90 秒截止前退出 0。 -> 验证：operator/systemd SIGTERM 正常停止且已接受 PM message 不丢失、无 detached receiver task或 running/tmp；超时/SIGKILL/非零状态不能通过，fault 路径完成同一 drain 后仍保留非零状态。
 - 步骤 2.6.5：50GB threshold 复用同一 drain/finalize 流程，完成后返回保留退出码 75。 -> 验证：无 running/tmp、open manifest 已更新、journal 为 `dataset_capacity_reached`、ExecMainStatus=75 且 systemd 不重启。
 - 步骤 2.6.6：把不可恢复 startup config/path/manifest reconciliation 与 active-lifecycle dedupe hard-bound 映射到 exit 76；unit 使用 `RestartPreventExitStatus=75 76`、`StartLimitIntervalSec=600`、`StartLimitBurst=5`。 -> 验证：exit 75/76 都不重启，其他连续进程失败最多 5 次/600 秒后进入 failed，不形成无限 loop。
 
 ### 任务 2.7：收敛 writer 与生产产物
 
 - 步骤 2.7.1：删除 300k rows/128MB 文件 rollover，利用已知的 per-row size 在加入前判断，用 Arrow 59 的 `50_000 rows/16_777_216 logical bytes` per-writer row-group hard limit 保持有界；恢复 projection 固定每批最多 16 行，每行继续校验 1MiB hard cap。达到 row-group 上限只结束 group，文件仍只按 UTC hour 关闭。 -> 验证：高流量 fixture 在同小时只有一个正常 Parquet、多 row groups 均不越界，恢复 batch logical payload 不超过16MiB、处理后释放且不加载完整列。
-- 步骤 2.7.2：实现同小时重启 `part-N`；四个稳定 logical producer outer supervisor 通过同一 ingress queue 发送 UTC-day watermark/barrier，独立于 inner connection/backoff，旧日事件必须位于各自 barrier 之前。depth outer supervisor 还必须在 UTC-hour 边界先 fence source，再通过同一 ingress 顺序只对 `binance_depth_snapshot` 发送小时 finalize；旧小时有 snapshot 时关闭主文件，无 snapshot 时 no-op，同一进程内不得因此生成 `part-N`。 -> 验证：故意延迟/交错旧新日事件及 source 跨午夜断线/backoff 时，barrier 仍到达、gap 保留且 closed 后不再出现旧日行；仅一条 bootstrap snapshot 且无后续事件时，跨小时后主文件已 finalized、manifest delta 为一行且 `.running` 消失；空小时无空文件，同小时 resnapshot 仍只在主文件。
+- 步骤 2.7.2：实现同小时重启 `part-N`；四个稳定 logical producer outer supervisor 通过同一 ingress queue 发送 UTC-day watermark/barrier，独立于 inner connection/backoff，旧日事件必须位于各自 barrier 之前。Polymarket outer supervisor 必须先请求 fast-drain FIFO fence，等待 processor 处理 marker 前全部 decoded message并暂停，再发送 day barrier后恢复；lifecycle/订阅集合切换使用同一 fence，marker 后消息只能由新 context 处理。depth outer supervisor 还必须在 UTC-hour 边界先 fence source，再通过同一 ingress 顺序只对 `binance_depth_snapshot` 发送小时 finalize；旧小时有 snapshot 时关闭主文件，无 snapshot 时 no-op，同一进程内不得因此生成 `part-N`。 -> 验证：PM backlog 不被 day/lifecycle barrier 超越；断线/backoff barrier 与 snapshot 小时关闭合同保持成立，closed 后不再出现旧日行。
 - 步骤 2.7.3：实现唯一 manifest owner actor；writer 只通过 bounded channel 提交 finalize delta，owner 等 queue/batch drain 与六个 writer finalize ack 后串行执行“fsync tmp -> atomic rename -> fsync parent dir”。日 manifest 的紧凑 Binance 状态保存最新 `epoch_start_id/last_observed_id/last_contiguous_id` 与 unresolved ranges，不创建游标 sidecar。 -> 验证：并发小时/日切无 last-write-wins，跨日 gap 分割，异常退出不 closed，断电恢复只见旧完整文件或新完整文件；continuity epoch 可从 manifest+Parquet 尾部重建。
 - 步骤 2.7.4：重启时必须先处理所有早于当前 UTC 日的 open manifest：确认旧进程不存在、清理 stale running、记录 crash gap、以 finalized Parquet 对账并用 `unclean_exit_recovery` 原子 closed；完成前不得选择 continuity base 或启动网络。随后 owner 才合并当前日 open manifest/磁盘 finalized 文件，或在当日无 manifest/Parquet 时使用最近前一 closed 日并让新日首次 manifest 继承状态；恢复 build/config/file/last sequence、Binance epoch 与 dedupe 窗口。日内 SIGTERM 只 finalize 并保持当日 open。 -> 验证：不覆盖/重开 closed 日，前一日 open 必先关闭；`23:59 crash -> 00:01 restart` 与三种 manifest/rename 空窗都恢复同一 epoch，只回补最新尾部，对账失败不启动 source。
 - 步骤 2.7.5：删除 segment/run manifest、runtime receipts、retention admin/policy 与重复 sidecar 生产路径；dataset 达到 50GB 只执行 coordinated finalize、journal 与 exit 75。 -> 验证：临时生产根只含 Parquet、每日一个 manifest 和瞬时文件，禁止项均不存在。
@@ -109,7 +109,7 @@ source 目录               source_kind=<source>
 
 - 任务 3.1：本地自审和验证。
   - 步骤 3.1.1：检查 diff 只覆盖本事项，删除由改动产生的孤立代码/依赖，不清理无关旧代码。 -> 验证：每个改动可追溯到需求条款。
-  - 步骤 3.1.2：运行 workspace fmt、data-collect 全量 tests/clippy；对 excluded vendored SDK 单独运行 fmt、`--locked` lib tests，以及官方 Rust 1.88 CI 的 default/all-features 两组 `--all-targets` clippy；校验原始 `.crate` SHA 后在自动删除临时目录解包并比较全树，差异路径必须恰为获批三个 SDK 文件；再运行 SDK patch contract test、四源合并既有临时 benchmark（覆盖 2k–5k events/s）、`cargo tree -p data-collect -i polymarket_client_sdk_v2` 与 `git diff --check`。 -> 验证：全部退出 0，dependency tree 只有仓库内 p1，无第四处 vendor 差异；结果只记 changelog，不生成报告。
+  - 步骤 3.1.2：运行 workspace fmt、data-collect 全量 tests/clippy；对 excluded vendored SDK 单独运行 fmt、`--locked` lib tests，以及官方 Rust 1.88 CI 的 default/all-features 两组 `--all-targets` clippy；校验原始 `.crate` SHA 后在自动删除临时目录解包并比较全树，差异路径必须恰为获批三个 SDK 文件；再运行 SDK patch contract test、既有 generic writer microbenchmark，以及复用生产 helper 的真实 `SDK receiver -> decoded queue -> canonical/dedupe/fan-out -> shared ingress/writer` 四源 `2k-5k source-native messages/s` 持续加 burst 测试、`cargo tree -p data-collect -i polymarket_client_sdk_v2` 与 `git diff --check`。 -> 验证：1024 以上 burst 无 SDK lag，message/row 数精确一致且无单调积压/drop/未完成 row；其余全部退出 0，dependency tree 只有仓库内 p1，无第四处 vendor 差异；结果只记 changelog，不生成报告。
 - 任务 3.2：独立实现审查。
   - 步骤 3.2.1：派生至少两名 `gpt-5.6-sol`/`ultra` 子代理，分别审查 source 正确性/SDK-first 与 writer/schema/部署安全。 -> 验证：两者均 PASS，Critical/Important 为 0。
   - 步骤 3.2.2：有问题则修复、重跑测试和复审。 -> 验证：最终审查通过前不构建 production release，不触碰远端。
