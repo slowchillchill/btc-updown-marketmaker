@@ -491,3 +491,32 @@
 - 修正后由同一独立 `gpt-5.6-sol`/`ultra` 审查代理复审，结论 PASS，Critical=`0`、Important=`0`、Minor=`0`。审查确认原始数组 bytes 逐项 `RtdsMessage` serde typed decode 能让重复 `topic` 正确命中 index 0，不再存在影子字段合同；8 项 diagnostic tests 完整锁定首轮缺口。
 - 审查同时确认成功解析、原错误 kind/source chain、sticky/terminal/fatal、禁止自动重连均未改变；诊断只输出获批结构、字段名与白名单标量，没有 payload、完整 frame 或 prefix 泄露。loopback contract=`6/6`、三份文档、五项 patch 边界、官方 issue #291 的有限表述、原始 crate SHA、三文件 vendor allowlist、唯一仓库 p1 依赖和无 vendor `target/` 全部通过；审查未修改文件或远端。
 - 当前状态更新为 `TASK_2_1_RTDS_BOUNDED_DIAGNOSTIC_REVIEW_PASSED_READY_FOR_COMMIT`。下一步只允许精确提交并 push 本事项 5 个文件，再从该已 push commit 的干净 detached worktree 构建 production binary；用户既有 `AGENTS.md`、`demand/rebuild-core-demand.md` 与 `推荐开发顺序.md` 必须继续排除。
+
+## 2026-07-15：RTDS 有界诊断提交、production 构建与远端预置
+
+- 有界诊断精确提交为 `ce87684e0ff4ef6787a96cabc33be12aa659bd75`（`fix(data-collect): diagnose RTDS parser failures safely`）并已 push 到 `origin/after-data-plan`；本地 HEAD、remote-tracking ref 与 `ls-remote` 三者一致。提交只含本事项 5 个文件，用户既有 `AGENTS.md`、`demand/rebuild-core-demand.md` 与 `推荐开发顺序.md` 未进入提交。
+- 从该已 push commit 创建 `/tmp/data-collect-build-ce87684e` detached clean worktree，设置完整 `DATA_COLLECT_GIT_COMMIT` 并使用独立 `/tmp/data-collect-target-ce87684e` locked release 构建。首次编译成功后，`strings | grep -q` 在 `pipefail` 下因正常 SIGPIPE 被误判为 141，脚本在本地 staging/替换前退出并自动删除临时目录；改用直接固定字节搜索后重新干净构建通过。最终 binary 大小=`25,438,728` bytes、mode=`0755`、SHA-256=`4e2bf2d8ce4c613ee3a54b8fc5aed26e674c41bfee148f3c4c7aa4b1da86adb1`，内嵌完整 commit；本地 digest staging 原子替换固定 target 后，临时 worktree/target 均已删除。
+- 远端重试入口与冻结 failed pair 精确匹配：旧 binary SHA-256=`5634ad72a5f507c590af52b62196ab310d7511e04ea7df84990ea90d5101ed91`、gate unit SHA-256=`76ae2883dee5bd95132e4d306eaac2507756936759082661065942a5f8c3e27c`，service inactive/dead、disabled、MainPID=`0`、NRestarts=`0`、`Restart=no`，生产根为空。路径逐级 owner/type 合法，binary/数据根 holder 为 0；两次全量复核分别读取 114/116 个可读 `/proc/*/mountinfo`，目标及 descendant mount 命中均为 0。本地 archive timer/service 继续 disabled/inactive。
+- 新 binary 与机械生成的 gate unit 使用不存在的 digest-named staging exclusive-create 上传。binary 的 SHA/size/mode、x86-64 ELF、loader/动态库、远端 glibc=`2.39`、内嵌 commit、无副作用 `--version`/`--help` 均通过；unit SHA 未变，ExecStart、Restart=no、RestartPreventExitStatus、SIGTERM/TimeoutStopSec 及 `systemd-analyze --user verify` 通过。第一次 unit staging 名不以 `.service` 结尾，仅使 verify 在读取内容前拒绝文件名；final 未改，核对本轮 staging SHA 后删除并以合法 digest unit 名重新 exclusive-create。inactive unit 被 systemd 垃圾回收时 `reset-failed` 返回 not loaded，但已核实 Result=success、NRestarts=0，没有失败状态需要清除。
+- `2026-07-14T22:31:44.223786800Z` 最终预检再次确认 binary/root holders=0、116 个可读 mountinfo 无命中、旧 final 与新 staging identity 精确，随后原子替换 final binary/unit并 daemon-reload。远端 final binary/unit owner 分别为 `ubuntu:ubuntu`、mode=`0755/0644`，SHA 分别为 `4e2bf2d8ce4c613ee3a54b8fc5aed26e674c41bfee148f3c4c7aa4b1da86adb1` 与 `76ae2883dee5bd95132e4d306eaac2507756936759082661065942a5f8c3e27c`；staging 全部消失，service 仍 inactive/dead、disabled、MainPID=0、NRestarts=0、Restart=no，生产根为空。
+- 当前状态为 `TASK_4_2_RTDS_DIAGNOSTIC_RESTAGE_PASSED_WAITING_GATE_WINDOW`。只允许在非 23 UTC 小时的 45–50 分之间启动最终 `--run-forever` gate，并让同一 PID 跨小时至少运行 15 分钟。
+
+## 2026-07-15：RTDS 有界诊断 production gate 启动
+
+- 在批准的非 23 UTC 窗口 `2026-07-14T22:45:44.815054547Z` 启动最终 `--run-forever` gate。MainPID=`1054097`，运行中 `/proc/1054097/exe` 与 final binary SHA-256 均为 `4e2bf2d8ce4c613ee3a54b8fc5aed26e674c41bfee148f3c4c7aa4b1da86adb1`；gate unit SHA-256=`76ae2883dee5bd95132e4d306eaac2507756936759082661065942a5f8c3e27c`，service active/running、disabled、Restart=no、NRestarts=0。
+- 启动后唯一生产根只创建 `utc_day=2026-07-14`、六个 source kind 目录和一个 `manifest.json`；journal 当前只有正常 Started 记录。当前状态为 `TASK_4_4_RTDS_DIAGNOSTIC_GATE_STARTED_20260714T224544Z`，必须保持同一 PID 跨 23:00 UTC 且连续运行至少到 `23:00:44.815054547Z` 后，再直接核验 finalized Parquet、manifest、四类外部源/六个 source kind、continuity、重复、journal 与无额外产物。
+
+## 2026-07-15：RTDS 有界诊断 production gate 通过
+
+- MainPID=`1054097` 保持不变并跨过 23:00 UTC；`2026-07-14T23:01:15.027743486Z` 已连续运行约 15分30秒，超过严格门槛。`23:05:12.872653492Z` 再采样时已运行 1,168 秒，仍 active/running、disabled、Restart=no、NRestarts=0，运行中 executable SHA、final binary SHA 和 unit SHA 与部署记录一致；journal 从启动起只有 1 条正常 Started，error/fatal/panic/lagged/drop/source_task 命中为 0。
+- 22 UTC 小时六个 source kind 均生成 finalized Parquet，manifest=`data_collect_daily_manifest_v3`、state=open、build commit/binary SHA/host/region 正确，files=6、gaps=0。逐项核验磁盘 path/type、bytes、SHA 与 manifest 全部一致，总行数=`929,409`；生产根同时只有当前小时 5 个 `.parquet.running`、1 个 manifest 和上述 6 个 Parquet，unexpected artifact=0。`binance_depth_snapshot` 是事件稀疏源，22 时已有 1 个真实 snapshot；23 时无新 snapshot 因而没有空 `.running`，不属于缺失 source。
+- 分源事实为：aggTrade=`4,469`、depth snapshot=`1`、depth update=`8,537`、Polymarket market=`915,550`、metadata=`8`、RTDS=`844`。每源 dropped_rows=0、lag_events=0、reconnect_events=0、source_gaps=[]；aggTrade finalized IDs `4014421704..4014426172` 唯一、严格连续、0 gap，manifest 当前 continuity 也为 unresolved_ranges=[]。depth 首更新桥接 snapshot，8,537 行全部 stitch、gap_rows=0、resnapshot=0。
+- RTDS 844 行全部为 `topic=crypto_prices_chainlink`、`message_type=update`、`symbol=btc/usd`、fresh，age_ms=`822..2703`；未再出现 parser fault。Polymarket market 四种业务事件均有真实行，metadata 为 complete=6/unavailable=2 并覆盖 4 个真实 5 分钟 slug。对 finalized PM/RTDS 必要列做临时、自动删除的 bounded scan：PM 475,027 个唯一 source-native payload 只出现同一接收时刻的合法 fan-out 440,523 行，跨接收时刻 exact payload 重复=0；RTDS 844 个 payload 全唯一、跨接收时刻重复=0。所有本地临时副本已删除，没有生成报告/receipt/sidecar。
+- 当前状态更新为 `TASK_4_4_RTDS_DIAGNOSTIC_GATE_PASSED_PENDING_STAGE_REVIEW`。gate 继续以同一 PID 和 Restart=no 运行；必须先由独立 `gpt-5.6-sol`/`ultra` 复核阶段 4 部署、数据、journal、文档与最小产物，PASS 后才可提交本轮 changelog并无重启切换长期 unit。
+
+## 2026-07-15：RTDS 有界诊断阶段 4 独立审查通过
+
+- 独立 `gpt-5.6-sol`/`ultra` 阶段审查结论 PASS，Critical=`0`、Important=`0`、Minor=`0`。截至 `2026-07-14T23:13:56Z`，PID `1054097` 已连续运行 1,691 秒，仍 active/running、disabled、Restart=no、NRestarts=0；commit/本地与远端 binary SHA/运行中 executable SHA/gate unit SHA 全部一致。
+- 审查独立确认唯一生产根只有 1 个 manifest、6 个 finalized Parquet、5 个当前小时 running，额外文件为 0；manifest 与磁盘 6 文件总计 `929,409` 行、`61,959,580` bytes，rows/bytes/SHA 全部一致、gaps=0。旧 release、旧 gate unit、旧 manifest/receipt 路径均不存在。
+- 审查独立复核 aggTrade ID 严格连续，depth snapshot `97416961394` 被首条 update `U=97416961395` 正确桥接且后续连续，RTDS 844 行全部 fresh/正确 topic/type/symbol且无 parser fault，PM/RTDS 跨接收时刻 exact duplicate=0；journal 仍只有 Started，lag/drop/fatal/panic/parser/reconnect 命中=0。临时 Parquet 副本均自动删除，未生成报告或 sidecar。
+- 审查确认远端 gate unit 与仓库权威长期 unit 仅 `Restart=no`/`Restart=on-failure` 一行不同；阶段 4 文档提交并 push 后，可在机械复核 PID/executable/gate unit SHA 后原子替换 unit、daemon-reload、enable，禁止 restart 当前 PID。当前状态更新为 `TASK_4_5_RTDS_DIAGNOSTIC_STAGE_REVIEW_PASSED_READY_FOR_DOC_COMMIT`。

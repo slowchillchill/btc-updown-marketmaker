@@ -6,7 +6,7 @@
 >
 > 事项编号：`DC-REPAIR-20260713-COLLECTOR-RELIABILITY`
 >
-> 状态：`TASK_2_1_RTDS_BOUNDED_DIAGNOSTIC_REVIEW_PASSED_READY_FOR_COMMIT`。步骤 4.4.2 未通过：PID=`1046442` 从 `2026-07-14T15:46:21.496539Z` 运行至 `16:01:16.948313Z`，跨过 16:00 UTC，但距连续 15 分钟验收仍差约 5 秒时因 RTDS SDK parser fault 非零退出；NRestarts=0。步骤 4.4.3 的 build-exclusive 核验、失败日删除、空根重建与 failed pair 停机保留已完成。用户 2026-07-15 批准的步骤 2.1.2 失败时有界诊断已实现；首轮独立审查发现重复必填字段的数组索引诊断不准确，现已改为直接使用 `RtdsMessage` typed decode 定位并通过全量本地门。独立复审 PASS，Critical/Important/Minor 均为 0；可以精确提交后从已 push commit 干净构建，再进入 4.2.1。
+> 状态：`TASK_4_5_RTDS_DIAGNOSTIC_STAGE_REVIEW_PASSED_READY_FOR_DOC_COMMIT`。commit `ce87684e0ff4ef6787a96cabc33be12aa659bd75` / binary SHA-256=`4e2bf2d8ce4c613ee3a54b8fc5aed26e674c41bfee148f3c4c7aa4b1da86adb1` 的 `Restart=no` gate 自 `2026-07-14T22:45:44.815054547Z` 运行；MainPID=`1054097` 保持不变，步骤 4.4.2 与步骤 4.5 独立审查均 PASS，Critical/Important/Minor 均为 0。三份文档精确提交并 push 后，才可执行步骤 5.1.1，且不得重启 PID。
 
 ## 一、执行原则与成功定义
 

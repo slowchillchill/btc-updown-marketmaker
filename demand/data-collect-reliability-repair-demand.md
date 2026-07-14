@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-reliability-repair-changelog.md`
 >
-> 状态：`TASK_2_1_RTDS_BOUNDED_DIAGNOSTIC_REVIEW_PASSED_READY_FOR_COMMIT`。`Restart=no` gate 从 `2026-07-14T15:46:21.496539Z` 运行至 `16:01:16.948313Z`，跨过 16:00 UTC，但距连续 15 分钟验收仍差约 5 秒时因 RTDS SDK parser fault 非零退出；NRestarts=0。失败 build 独占数据已按合同核对并删除，生产根为空，failed pair 保持 inactive/disabled、MainPID=0、`Restart=no`。用户 2026-07-15 批准的失败时有界结构诊断已实现；首轮独立审查发现重复必填字段的数组索引诊断不准确，现已改为直接使用 `RtdsMessage` typed decode 定位并通过全量本地门。独立复审 PASS，Critical/Important/Minor 均为 0；parser fatal、terminal disconnected 与生产数据合同不变，可以精确提交后从已 push commit 干净构建。
+> 状态：`TASK_4_5_RTDS_DIAGNOSTIC_STAGE_REVIEW_PASSED_READY_FOR_DOC_COMMIT`。commit `ce87684e0ff4ef6787a96cabc33be12aa659bd75` / binary SHA-256=`4e2bf2d8ce4c613ee3a54b8fc5aed26e674c41bfee148f3c4c7aa4b1da86adb1` 的 `Restart=no` gate 自 `2026-07-14T22:45:44.815054547Z` 运行；MainPID=`1054097` 保持不变，15 分钟门、六源数据审计与阶段 4 独立审查均 PASS，Critical/Important/Minor 均为 0。三份文档精确提交并 push 后，才可在不重启 PID 的前提下切换长期 unit。
 
 ## 一、目标与权威边界
 
