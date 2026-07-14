@@ -1,6 +1,7 @@
 use data_collect::market_discovery::{
     BtcUpdownMarketCandidate, CandidateRejectReason, DiscoverySelectionError,
-    build_market_subscription_request_json, discovery_windows, select_btc_updown_pair,
+    build_market_subscription_request_json, discovery_windows, select_btc_updown_markets,
+    select_btc_updown_pair,
 };
 
 const NOW_MS: i64 = 1_766_789_469_000;
@@ -31,6 +32,8 @@ fn rejects_generic_btc_markets_instead_of_fallback() {
         reward_eligibility_raw: Some(r#"{"rewards_min_size":"1"}"#.to_owned()),
         raw_json_sha256: Some("generic-digest".to_owned()),
         raw_json: Some(r#"{"id":"generic-btc"}"#.to_owned()),
+        metadata_fetch_start_utc_ms: None,
+        metadata_received_utc_ms: None,
     };
 
     let error = select_btc_updown_pair(NOW_MS, &[generic], &[]).expect_err("must fail closed");
@@ -78,6 +81,122 @@ fn selects_exact_current_and_next_btc_updown_5m_pair() {
     assert!(selection.relation.same_series_prefix);
     assert!(selection.relation.windows_contiguous);
     assert!(selection.relation.condition_ids_distinct);
+}
+
+#[test]
+fn current_is_required_but_next_may_arrive_later() {
+    let windows = discovery_windows(NOW_MS);
+    let current = candidate_for_window(
+        "current",
+        &windows.current.slug,
+        windows.current.target_ts_s,
+        windows.current.end_ts_s,
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "101",
+        "102",
+    );
+    let next = candidate_for_window(
+        "next",
+        &windows.next.slug,
+        windows.next.target_ts_s,
+        windows.next.end_ts_s,
+        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "201",
+        "202",
+    );
+
+    let mut current_only = select_btc_updown_markets(NOW_MS, &[current], &[])
+        .expect("missing next must not block current collection");
+    assert!(current_only.next.is_none());
+    assert_eq!(
+        current_only.asset_ids(),
+        ["101".to_owned(), "102".to_owned()].into_iter().collect()
+    );
+
+    assert!(
+        current_only
+            .attach_next(&[next])
+            .expect("a valid late next market should be attachable")
+    );
+    assert_eq!(
+        current_only
+            .next
+            .as_ref()
+            .map(|market| market.slug.as_str()),
+        Some(windows.next.slug.as_str())
+    );
+    assert_eq!(
+        current_only.asset_ids(),
+        [
+            "101".to_owned(),
+            "102".to_owned(),
+            "201".to_owned(),
+            "202".to_owned(),
+        ]
+        .into_iter()
+        .collect()
+    );
+}
+
+#[test]
+fn rollover_promotes_prefetched_next_and_removes_expired_current_assets() {
+    let windows = discovery_windows(NOW_MS);
+    let current = candidate_for_window(
+        "current",
+        &windows.current.slug,
+        windows.current.target_ts_s,
+        windows.current.end_ts_s,
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "101",
+        "102",
+    );
+    let prefetched = candidate_for_window(
+        "prefetched",
+        &windows.next.slug,
+        windows.next.target_ts_s,
+        windows.next.end_ts_s,
+        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "201",
+        "202",
+    );
+    let before = select_btc_updown_markets(NOW_MS, &[current], std::slice::from_ref(&prefetched))
+        .expect("initial discovery");
+
+    let next_now_ms = NOW_MS + 300_000;
+    let next_windows = discovery_windows(next_now_ms);
+    let future = candidate_for_window(
+        "future",
+        &next_windows.next.slug,
+        next_windows.next.target_ts_s,
+        next_windows.next.end_ts_s,
+        "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "301",
+        "302",
+    );
+    let after = select_btc_updown_markets(next_now_ms, &[prefetched], &[future])
+        .expect("rollover discovery");
+
+    assert_eq!(
+        before.next.as_ref().map(|market| market.slug.as_str()),
+        Some(after.current.slug.as_str())
+    );
+    let removed = before
+        .asset_ids()
+        .difference(&after.asset_ids())
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(removed, vec!["101".to_owned(), "102".to_owned()]);
+    assert_eq!(
+        after.asset_ids(),
+        [
+            "201".to_owned(),
+            "202".to_owned(),
+            "301".to_owned(),
+            "302".to_owned(),
+        ]
+        .into_iter()
+        .collect()
+    );
 }
 
 #[test]
@@ -164,5 +283,7 @@ fn candidate_for_window(
         reward_eligibility_raw: Some(r#"{"rewards_min_size":"1"}"#.to_owned()),
         raw_json_sha256: Some(format!("{id}-digest")),
         raw_json: Some(format!(r#"{{"id":"{id}"}}"#)),
+        metadata_fetch_start_utc_ms: None,
+        metadata_received_utc_ms: None,
     }
 }

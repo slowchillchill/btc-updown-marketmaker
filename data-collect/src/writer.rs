@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use arrow_array::{
-    ArrayRef, BooleanArray, RecordBatch, StringArray, TimestampMillisecondArray, UInt32Array,
-    UInt64Array,
+    ArrayRef, BooleanArray, Int64Array, RecordBatch, StringArray, TimestampMillisecondArray,
+    UInt32Array, UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use parquet::arrow::ArrowWriter;
@@ -27,6 +27,10 @@ use crate::source_hourly_layout::{
 };
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+pub const PARQUET_ROW_GROUP_MAX_ROWS: u64 = 50_000;
+pub const PARQUET_ROW_GROUP_MAX_BYTES: u64 = 16_777_216;
+pub const DAILY_FILE_RECOVERY_METADATA_KEY: &str = "data_collect_daily_file_fact_v1";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RawEvent {
@@ -261,12 +265,13 @@ impl ParquetSegmentWriter {
 
 pub struct TypedParquetSegmentWriter {
     running_path: PathBuf,
-    digesting_path: PathBuf,
     final_path: PathBuf,
     schema_version: String,
     schema: Arc<Schema>,
     writer: Option<ArrowWriter<File>>,
     row_count: u64,
+    row_group_rows: u64,
+    row_group_logical_bytes: u64,
 }
 
 impl TypedParquetSegmentWriter {
@@ -329,10 +334,9 @@ impl TypedParquetSegmentWriter {
         validate_segment_stem(stem)?;
         fs::create_dir_all(root)?;
 
-        let running_path = root.join(format!("{stem}-running.parquet"));
-        let digesting_path = root.join(format!("{stem}-digesting.parquet"));
+        let running_path = root.join(format!("{stem}.parquet.running"));
         let final_path = root.join(format!("{stem}.parquet"));
-        if final_path.exists() || running_path.exists() || digesting_path.exists() {
+        if final_path.exists() || running_path.exists() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 format!("typed parquet segment already exists for stem: {stem}"),
@@ -349,12 +353,13 @@ impl TypedParquetSegmentWriter {
 
         Ok(Self {
             running_path,
-            digesting_path,
             final_path,
             schema_version: schema_version.to_owned(),
             schema,
             writer: Some(writer),
             row_count: 0,
+            row_group_rows: 0,
+            row_group_logical_bytes: 0,
         })
     }
 
@@ -369,6 +374,18 @@ impl TypedParquetSegmentWriter {
         self.write_batch(&batch)
     }
 
+    pub(crate) fn write_polymarket_orderbook_rows_with_logical_bytes(
+        &mut self,
+        rows: &[PolymarketOrderbookRow],
+        logical_bytes: u64,
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let batch = polymarket_orderbook_rows_to_batch(Arc::clone(&self.schema), rows)?;
+        self.write_batch_with_logical_bytes(&batch, logical_bytes)
+    }
+
     pub fn write_polymarket_market_metadata_rows(
         &mut self,
         rows: &[PolymarketMarketMetadataRow],
@@ -378,6 +395,18 @@ impl TypedParquetSegmentWriter {
         }
         let batch = polymarket_market_metadata_rows_to_batch(Arc::clone(&self.schema), rows)?;
         self.write_batch(&batch)
+    }
+
+    pub(crate) fn write_polymarket_market_metadata_rows_with_logical_bytes(
+        &mut self,
+        rows: &[PolymarketMarketMetadataRow],
+        logical_bytes: u64,
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let batch = polymarket_market_metadata_rows_to_batch(Arc::clone(&self.schema), rows)?;
+        self.write_batch_with_logical_bytes(&batch, logical_bytes)
     }
 
     pub fn write_binance_depth_snapshot_rows(
@@ -391,6 +420,18 @@ impl TypedParquetSegmentWriter {
         self.write_batch(&batch)
     }
 
+    pub(crate) fn write_binance_depth_snapshot_rows_with_logical_bytes(
+        &mut self,
+        rows: &[BinanceDepthSnapshotHourlyRow],
+        logical_bytes: u64,
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let batch = binance_depth_snapshot_rows_to_batch(Arc::clone(&self.schema), rows)?;
+        self.write_batch_with_logical_bytes(&batch, logical_bytes)
+    }
+
     pub fn write_binance_depth_update_rows(
         &mut self,
         rows: &[BinanceDepthUpdateHourlyRow],
@@ -402,12 +443,36 @@ impl TypedParquetSegmentWriter {
         self.write_batch(&batch)
     }
 
+    pub(crate) fn write_binance_depth_update_rows_with_logical_bytes(
+        &mut self,
+        rows: &[BinanceDepthUpdateHourlyRow],
+        logical_bytes: u64,
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let batch = binance_depth_update_rows_to_batch(Arc::clone(&self.schema), rows)?;
+        self.write_batch_with_logical_bytes(&batch, logical_bytes)
+    }
+
     pub fn write_binance_aggtrade_rows(&mut self, rows: &[BinanceAggTradeHourlyRow]) -> Result<()> {
         if rows.is_empty() {
             return Ok(());
         }
         let batch = binance_aggtrade_rows_to_batch(Arc::clone(&self.schema), rows)?;
         self.write_batch(&batch)
+    }
+
+    pub(crate) fn write_binance_aggtrade_rows_with_logical_bytes(
+        &mut self,
+        rows: &[BinanceAggTradeHourlyRow],
+        logical_bytes: u64,
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let batch = binance_aggtrade_rows_to_batch(Arc::clone(&self.schema), rows)?;
+        self.write_batch_with_logical_bytes(&batch, logical_bytes)
     }
 
     pub fn write_rtds_chainlink_btc_usd_rows(
@@ -421,7 +486,59 @@ impl TypedParquetSegmentWriter {
         self.write_batch(&batch)
     }
 
+    pub(crate) fn write_rtds_chainlink_btc_usd_rows_with_logical_bytes(
+        &mut self,
+        rows: &[RtdsChainlinkBtcUsdHourlyRow],
+        logical_bytes: u64,
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let batch = rtds_chainlink_btc_usd_rows_to_batch(Arc::clone(&self.schema), rows)?;
+        self.write_batch_with_logical_bytes(&batch, logical_bytes)
+    }
+
     pub fn write_batch(&mut self, batch: &RecordBatch) -> Result<()> {
+        if batch.num_rows() == 0 {
+            return Ok(());
+        }
+        let logical_bytes = u64::try_from(batch.get_array_memory_size()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "record batch logical size does not fit in u64",
+            )
+        })?;
+        let total_rows = u64::try_from(batch.num_rows()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "record batch row count does not fit in u64",
+            )
+        })?;
+        let rows_per_chunk = if logical_bytes <= PARQUET_ROW_GROUP_MAX_BYTES {
+            total_rows.min(PARQUET_ROW_GROUP_MAX_ROWS)
+        } else {
+            ((u128::from(total_rows) * u128::from(PARQUET_ROW_GROUP_MAX_BYTES))
+                / u128::from(logical_bytes))
+            .max(1)
+            .min(u128::from(PARQUET_ROW_GROUP_MAX_ROWS)) as u64
+        };
+        let mut offset = 0_u64;
+        while offset < total_rows {
+            let rows = rows_per_chunk.min(total_rows - offset);
+            let chunk = batch.slice(offset as usize, rows as usize);
+            let chunk_logical_bytes = ((u128::from(logical_bytes) * u128::from(rows))
+                .div_ceil(u128::from(total_rows))) as u64;
+            self.write_batch_with_logical_bytes(&chunk, chunk_logical_bytes)?;
+            offset += rows;
+        }
+        Ok(())
+    }
+
+    fn write_batch_with_logical_bytes(
+        &mut self,
+        batch: &RecordBatch,
+        logical_bytes: u64,
+    ) -> Result<()> {
         if batch.schema().as_ref() != self.schema.as_ref() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -429,13 +546,66 @@ impl TypedParquetSegmentWriter {
             )
             .into());
         }
+        let rows = u64::try_from(batch.num_rows()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "record batch row count does not fit in u64",
+            )
+        })?;
+        if rows > PARQUET_ROW_GROUP_MAX_ROWS || logical_bytes > PARQUET_ROW_GROUP_MAX_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "record batch exceeds row-group hard limit: rows={rows} bytes={logical_bytes}"
+                ),
+            )
+            .into());
+        }
         let writer = self
             .writer
             .as_mut()
             .ok_or_else(|| io::Error::other("typed parquet segment already finalized"))?;
+        if self.row_group_rows > 0
+            && (self.row_group_rows.saturating_add(rows) > PARQUET_ROW_GROUP_MAX_ROWS
+                || self.row_group_logical_bytes.saturating_add(logical_bytes)
+                    > PARQUET_ROW_GROUP_MAX_BYTES)
+        {
+            writer.flush()?;
+            self.row_group_rows = 0;
+            self.row_group_logical_bytes = 0;
+        }
         writer.write(batch)?;
-        self.row_count += batch.num_rows() as u64;
+        self.row_count = self.row_count.saturating_add(rows);
+        self.row_group_rows = self.row_group_rows.saturating_add(rows);
+        self.row_group_logical_bytes = self.row_group_logical_bytes.saturating_add(logical_bytes);
+        if self.row_group_rows == PARQUET_ROW_GROUP_MAX_ROWS
+            || self.row_group_logical_bytes == PARQUET_ROW_GROUP_MAX_BYTES
+        {
+            writer.flush()?;
+            self.row_group_rows = 0;
+            self.row_group_logical_bytes = 0;
+        }
         Ok(())
+    }
+
+    pub fn append_key_value_metadata(&mut self, key: &str, value: String) -> Result<()> {
+        if key.trim().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Parquet metadata key must not be empty",
+            )
+            .into());
+        }
+        let writer = self
+            .writer
+            .as_mut()
+            .ok_or_else(|| io::Error::other("typed parquet segment already finalized"))?;
+        writer.append_key_value_metadata(KeyValue::new(key.to_owned(), value));
+        Ok(())
+    }
+
+    pub fn final_path(&self) -> &Path {
+        &self.final_path
     }
 
     pub fn finalize(mut self) -> Result<PublishedSegment> {
@@ -444,9 +614,17 @@ impl TypedParquetSegmentWriter {
             .take()
             .ok_or_else(|| io::Error::other("typed parquet segment already finalized"))?;
         writer.close()?;
-        fs::rename(&self.running_path, &self.digesting_path)?;
-        let sha256 = sha256_file(&self.digesting_path)?;
-        fs::rename(&self.digesting_path, &self.final_path)?;
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.running_path)?
+            .sync_all()?;
+        let sha256 = sha256_file(&self.running_path)?;
+        fs::rename(&self.running_path, &self.final_path)?;
+        File::open(self.final_path.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "final parquet has no parent")
+        })?)?
+        .sync_all()?;
         Ok(PublishedSegment {
             final_path: self.final_path,
             row_count: self.row_count,
@@ -462,6 +640,7 @@ fn typed_writer_properties(
     zstd_level: i32,
 ) -> Result<WriterProperties> {
     Ok(WriterProperties::builder()
+        .set_max_row_group_row_count(Some(PARQUET_ROW_GROUP_MAX_ROWS as usize))
         .set_compression(Compression::ZSTD(ZstdLevel::try_new(zstd_level)?))
         .set_dictionary_enabled(true)
         .set_key_value_metadata(Some(vec![
@@ -497,6 +676,10 @@ fn polymarket_orderbook_rows_to_batch(
         ),
         string_values(rows.iter().map(|row| row.market.as_str())),
         string_values(rows.iter().map(|row| row.event_type.as_str())),
+        string_values(
+            rows.iter()
+                .map(|row| row.source_native_payload_json.as_str()),
+        ),
         optional_strings(rows.iter().map(|row| row.asset_id.as_deref())),
         optional_strings(rows.iter().map(|row| row.bids.as_deref())),
         optional_strings(rows.iter().map(|row| row.asks.as_deref())),
@@ -540,12 +723,10 @@ fn polymarket_market_metadata_rows_to_batch(
     let columns: Vec<ArrayRef> = vec![
         timestamp_values(rows.iter().map(|row| row.timestamp_received)),
         optional_timestamp_values(rows.iter().map(|row| row.metadata_fetch_start_utc)),
-        optional_timestamp_values(rows.iter().map(|row| row.metadata_recv_time_utc)),
         string_values(rows.iter().map(|row| row.slug.as_str())),
         string_values(rows.iter().map(|row| row.condition_id.as_str())),
         optional_strings(rows.iter().map(|row| row.clob_market_id.as_deref())),
         optional_strings(rows.iter().map(|row| row.asset_ids.as_deref())),
-        optional_strings(rows.iter().map(|row| row.token_ids.as_deref())),
         optional_timestamp_values(rows.iter().map(|row| row.market_start_utc)),
         optional_timestamp_values(rows.iter().map(|row| row.market_end_utc)),
         optional_bool_values(rows.iter().map(|row| row.active)),
@@ -605,7 +786,6 @@ fn binance_depth_update_rows_to_batch(
         string_values(rows.iter().map(|row| row.stream.as_str())),
         uint64_values(rows.iter().map(|row| row.snapshot_last_update_id)),
         optional_uint64_values(rows.iter().map(|row| row.local_u_before)),
-        optional_uint64_values(rows.iter().map(|row| row.local_u_after)),
         string_values(rows.iter().map(|row| row.stitch_verdict.as_str())),
         optional_strings(rows.iter().map(|row| row.stitch_gap_reason.as_deref())),
         string_values(rows.iter().map(|row| row.collector_host_id.as_str())),
@@ -622,8 +802,11 @@ fn binance_aggtrade_rows_to_batch(
 ) -> Result<RecordBatch> {
     let columns: Vec<ArrayRef> = vec![
         timestamp_values(rows.iter().map(|row| row.timestamp_received)),
-        string_values(rows.iter().map(|row| row.event_type.as_str())),
-        timestamp_values(rows.iter().map(|row| row.event_time)),
+        optional_timestamp_values(rows.iter().map(|row| row.websocket_timestamp_received)),
+        optional_timestamp_values(rows.iter().map(|row| row.rest_backfill_timestamp_received)),
+        string_values(rows.iter().map(|row| row.ingest_source.as_str())),
+        optional_strings(rows.iter().map(|row| row.event_type.as_deref())),
+        optional_timestamp_values(rows.iter().map(|row| row.event_time)),
         timestamp_values(rows.iter().map(|row| row.trade_time)),
         string_values(rows.iter().map(|row| row.symbol.as_str())),
         uint64_values(rows.iter().map(|row| row.aggregate_trade_id)),
@@ -634,7 +817,13 @@ fn binance_aggtrade_rows_to_batch(
         Arc::new(BooleanArray::from_iter(
             rows.iter().map(|row| Some(row.buyer_is_maker)),
         )),
-        string_values(rows.iter().map(|row| row.stream.as_str())),
+        optional_strings(rows.iter().map(|row| row.stream.as_deref())),
+        optional_boolean_values(rows.iter().map(|row| row.ws_ignore)),
+        optional_boolean_values(rows.iter().map(|row| row.rest_was_best_price_match)),
+        string_values(
+            rows.iter()
+                .map(|row| row.source_native_payload_json.as_str()),
+        ),
         string_values(rows.iter().map(|row| row.collector_host_id.as_str())),
         string_values(rows.iter().map(|row| row.collector_region.as_str())),
         string_values(rows.iter().map(|row| row.source_endpoint.as_str())),
@@ -651,10 +840,17 @@ fn rtds_chainlink_btc_usd_rows_to_batch(
         timestamp_values(rows.iter().map(|row| row.timestamp_received)),
         timestamp_values(rows.iter().map(|row| row.message_timestamp)),
         timestamp_values(rows.iter().map(|row| row.payload_timestamp)),
+        optional_int64_values(rows.iter().map(|row| row.age_ms)),
         string_values(rows.iter().map(|row| row.symbol.as_str())),
         string_values(rows.iter().map(|row| row.value.as_str())),
         string_values(rows.iter().map(|row| row.topic.as_str())),
+        string_values(rows.iter().map(|row| row.message_type.as_str())),
+        string_values(rows.iter().map(|row| row.freshness_status.as_str())),
         string_values(rows.iter().map(|row| row.subscription_filter.as_str())),
+        string_values(
+            rows.iter()
+                .map(|row| row.source_native_payload_json.as_str()),
+        ),
         string_values(rows.iter().map(|row| row.collector_host_id.as_str())),
         string_values(rows.iter().map(|row| row.collector_region.as_str())),
         string_values(rows.iter().map(|row| row.source_endpoint.as_str())),
@@ -677,6 +873,14 @@ fn uint64_values(values: impl Iterator<Item = u64>) -> ArrayRef {
 
 fn optional_uint64_values(values: impl Iterator<Item = Option<u64>>) -> ArrayRef {
     Arc::new(UInt64Array::from_iter(values))
+}
+
+fn optional_int64_values(values: impl Iterator<Item = Option<i64>>) -> ArrayRef {
+    Arc::new(Int64Array::from_iter(values))
+}
+
+fn optional_boolean_values(values: impl Iterator<Item = Option<bool>>) -> ArrayRef {
+    Arc::new(BooleanArray::from_iter(values))
 }
 
 fn string_values<'a>(values: impl Iterator<Item = &'a str>) -> ArrayRef {

@@ -1,205 +1,139 @@
-# data-collect training collector deploy README
+# data-collect 训练采集器部署说明
 
-对应需求：`demand/data-collect-demand.md`
+对应需求：`demand/data-collect-reliability-repair-demand.md`
 
-本文件只描述训练数据采集服务器上的 binary-only 部署与验收。paper/live hot path 接入见 `data-collect/docs/paper-live-hot-path-integration.md`。paper/live 服务器不得运行 cargo；live 小主机不得承担训练重处理或全量 parquet 扫描。
+本文件只描述数据采集服务器上的训练 cold path。paper/live hot path 是分别部署、分别运行的独立角色，见 `data-collect/docs/paper-live-hot-path-integration.md`。远端服务器禁止编译 Rust。
 
-## 本地构建与导出
+## 权威产物与路径
 
-在本地开发机执行：
-
-```bash
-cd /home/chillchill/btc-updown-marketmaker
-DATA_COLLECT_RELEASE_ID=train-data-collect-ver1-0 \
-  CARGO_TARGET_DIR=target/data-collect-ci \
-  data-collect/scripts/export-release-artifacts.sh
-RELEASE_ID=train-data-collect-ver1-0
-```
-
-release 包必须包含正式训练采集别名、原始训练采集二进制、retention admin、paper/live hot path 二进制、部署文档、systemd 示例、`RELEASE_INFO.env` 和 `SHA256SUMS`：
+本地只构建一个训练二进制：
 
 ```text
-bin/data-collect-training-collector
-bin/train-data-collect-ver1-0
-bin/data-collect-retention-admin
-bin/data-collect-paper-hot
-bin/data-collect-live-hot
-deploy/systemd/data-collect-training-collector.service.example
-deploy/systemd/data-collect-training-collector-gate.service.example
-docs/training-collector-deploy-readme.md
-docs/paper-live-hot-path-integration.md
-RELEASE_INFO.env
-SHA256SUMS
+target/release/data-collect-training-collector
 ```
 
-`SHA256SUMS` 是 binary sha256 和文档/service 示例完整性检查的唯一入口；启动 receipt 还必须记录 git commit、config digest、dataset root canonical path、collector host、collector region 和 binary role。
-
-## 上传到数据采集服务器
-
-```bash
-ssh ubuntu@3.255.156.183 \
-  'mkdir -p ~/btc-updown-marketmaker/data-collect/releases'
-rsync -av "data-collect/releases/$RELEASE_ID/" \
-  ubuntu@3.255.156.183:~/btc-updown-marketmaker/data-collect/releases/"$RELEASE_ID"/
-ssh ubuntu@3.255.156.183 \
-  'cd ~/btc-updown-marketmaker/data-collect/releases/'"$RELEASE_ID"' && sha256sum -c SHA256SUMS'
-ssh ubuntu@3.255.156.183 \
-  'ln -sfn ~/btc-updown-marketmaker/data-collect/releases/'"$RELEASE_ID"' ~/btc-updown-marketmaker/data-collect/current'
-```
-
-切换 `current` 前必须记录原 symlink：
-
-```bash
-ssh ubuntu@3.255.156.183 \
-  'readlink -f ~/btc-updown-marketmaker/data-collect/current || true'
-```
-
-## 回滚方法
-
-只允许回滚到仍保留完整 `SHA256SUMS` 且 `sha256sum -c SHA256SUMS` 通过的历史 release。回滚时先停止 service，再把 `current` symlink 切回上一 release，校验 sha256，最后按需重启：
-
-```bash
-ssh ubuntu@3.255.156.183 '
-  set -euo pipefail
-  PREVIOUS_RELEASE="$HOME/btc-updown-marketmaker/data-collect/releases/<previous-release-id>"
-  systemctl --user stop data-collect-training-collector.service || true
-  cd "$PREVIOUS_RELEASE"
-  sha256sum -c SHA256SUMS
-  ln -sfn "$PREVIOUS_RELEASE" "$HOME/btc-updown-marketmaker/data-collect/current"
-  systemctl --user daemon-reload
-  systemctl --user start data-collect-training-collector.service
-'
-```
-
-如果回滚原因是 resource hard-threshold、retention fail-closed 或磁盘不可恢复，不得直接重启；必须先保留 failed run manifest、retention receipt、journal 和 cleanup inventory，再决定是否恢复旧 release。
-
-训练数据根为：
+数据采集服务器只保留一个正式二进制和一个 user unit：
 
 ```text
-~/btc-updown-marketmaker/datasets
+/home/ubuntu/btc-updown-marketmaker/data-collect/bin/data-collect-training-collector
+/home/ubuntu/.config/systemd/user/data-collect-training-collector.service
 ```
 
-训练 cold path 使用 day-first hourly logical partition：
+仓库内唯一 unit 权威源是：
 
 ```text
-~/btc-updown-marketmaker/datasets/training/typed_raw/utc_day=YYYY-MM-DD/source_kind=<source_kind>/<source_kind>_YYYY-MM-DDTHH.parquet
-~/btc-updown-marketmaker/datasets/training/typed_raw/utc_day=YYYY-MM-DD/source_kind=<source_kind>/<source_kind>_YYYY-MM-DDTHH--part=N.parquet
-~/btc-updown-marketmaker/datasets/training/run_manifests/<run_id>.manifest.json
-~/btc-updown-marketmaker/datasets/training/runtime_artifacts/<run_id>/retention_policy_receipt.json
+data-collect/deploy/systemd/data-collect-training-collector.service
 ```
 
-默认生产路径不再检查 source_coverage.json、不再检查 source_gaps.json、不再检查 rollover_edges.json；这些证据必须从 run manifest 内的 `source_coverage`、`source_gaps`、`rollover_edges` 读取。运行目录不得生成 write_receipts.jsonl、不得生成 queue_samples.jsonl、不得生成 retention_after_finalize_ 开头的 source-specific receipt；writer 证据看 run manifest 内的 `source_writer_stats`，queue 证据看 `queue_summary`。
+训练部署不得使用 release bundle、二进制别名、`current` symlink、独立 gate unit、retention admin 或部署 receipt。实现 commit、binary sha256 与 unit sha256 只记录到对应 changelog。
 
-`part=N` 只表示同一小时内 `max_rows` / `max_bytes` 保护性 soft rollover；不能把它解释为停机或缺数据。人工检查 Polymarket `book` 时，必须读取 manifest 中 `book_rows`、`book_rows_with_bids_asks`，并抽查 parquet/raw evidence 中 `bids` 和 `asks` 是完整 price-size 数组；只看到 `bids_len` / `asks_len` 不能通过。
+## 本地 production 构建
 
-retention 阈值是 `~/btc-updown-marketmaker/datasets/training` 的滚动容量上限，默认 `50_000_000_000` bytes。默认模式只写 dry-run/no-op policy receipt；真实删除必须显式启用 delete mode 或另获用户批准，且只允许删除 `training/typed_raw/utc_day=*` 下最老 finalized complete UTC day。current day、running/digesting/tmp/`.rsync-partial`、incomplete day、`manual-inspection`、`run_manifests`、startup receipts 不得删除。
+production binary 必须来自已经 push 的实现 commit，不使用主 worktree 的 dirty 状态或主 target cache：
 
-正式长期采集 service 必须显式传入 `--run-forever --retention-delete-mode enabled --retention-threshold-bytes 50000000000`，并在 run manifest 中看到 `runtime_mode=run_forever`、`run_started_utc_ms`、`run_forever=true`、`retention_delete_mode=enabled`、`retention_threshold_bytes=50000000000`、`code_version`、`collector_binary_sha256`、`source_config_digest`、`systemd_unit_name=data-collect-training-collector.service` 和 `systemd_restart_policy`。Resource hard-threshold fail-closed 使用退出码 `75`，service 必须配置 `RestartPreventExitStatus=75`，避免磁盘/资源不可恢复时重启循环。
-
-## 15 分钟 foreground smoke
+1. 从该完整 commit 创建临时 detached、clean worktree。
+2. 设置 `DATA_COLLECT_GIT_COMMIT=<完整 commit>`。
+3. 使用该 worktree 独立的临时 target 执行：
 
 ```bash
-ssh ubuntu@3.255.156.183 '
-  set -euo pipefail
-  BIN="$HOME/btc-updown-marketmaker/data-collect/current/bin/data-collect-training-collector"
-  DATASET_ROOT="$HOME/btc-updown-marketmaker/datasets"
-  cd "$HOME/btc-updown-marketmaker/data-collect/current"
-  sha256sum -c SHA256SUMS
-  DATA_COLLECT_RUNTIME_MODE=live "$BIN" \
-    --dataset-root "$DATASET_ROOT" \
-    --run-id "training-smoke-$(date -u +%Y%m%dT%H%M%SZ)" \
-    --collector-region eu-west-1 \
-    --max-runtime-secs 900 \
-    --retention-delete-mode dry-run
-'
+cargo build --release --locked -p data-collect --bin data-collect-training-collector
 ```
 
-smoke 后必须检查：
+4. 构建后再次确认 HEAD 未变化且 worktree clean，计算隔离 binary 的 SHA-256。
+5. 先复制到主仓库 `target/release/data-collect-training-collector.local-staging-<sha256>`，复核 SHA 后原子改名为固定产物路径。
+6. 删除临时 worktree 和临时 target。
+
+paper/live 源码 binary 仍可分别用自己的单 `--bin` 命令构建，但不进入训练部署产物。
+
+## CLI 与 systemd 合同
+
+正式 ExecStart 固定为：
 
 ```text
-binary sha256
-git commit
-config digest
-dataset root canonical path
-collector host
-collector region
-binary role
+/home/ubuntu/btc-updown-marketmaker/data-collect/bin/data-collect-training-collector \
+  --dataset-root /home/ubuntu/btc-updown-marketmaker/datasets \
+  --collector-region eu-west-1 \
+  --run-forever \
+  --max-dataset-bytes 50000000000
 ```
 
-## 完整 5 分钟 market 人工审查运行
+长期 unit 使用：
 
-该模式只用于验收 `manual_review_complete_market` artifact，不是生产 hourly cadence。运行完成后必须看到 graceful shutdown，当前 hourly part 的 manifest `rollover_reason` 为 `manual_review_complete_market_shutdown`，run manifest 记录 `manual_review_complete_market`、目标 market 数量、选择的 market 信息字段、订阅 asset ids、planned/preload window 和 stop reason。
-
-```bash
-ssh ubuntu@3.255.156.183 '
-  set -euo pipefail
-  BIN="$HOME/btc-updown-marketmaker/data-collect/current/bin/data-collect-training-collector"
-  DATASET_ROOT="$HOME/btc-updown-marketmaker/datasets"
-  cd "$HOME/btc-updown-marketmaker/data-collect/current"
-  sha256sum -c SHA256SUMS
-  DATA_COLLECT_RUNTIME_MODE=live "$BIN" \
-    --dataset-root "$DATASET_ROOT" \
-    --run-id "manual-review-$(date -u +%Y%m%dT%H%M%SZ)" \
-    --collector-region eu-west-1 \
-    --stop-after-complete-polymarket-market 1
-'
+```text
+Restart=on-failure
+RestartSec=10
+RestartPreventExitStatus=75 76
+StartLimitIntervalSec=600
+StartLimitBurst=5
+KillSignal=SIGTERM
+TimeoutStopSec=120
 ```
 
-## 2 小时 systemd user service 验收
+退出码含义：
 
-```bash
-ssh ubuntu@3.255.156.183 '
-	  set -euo pipefail
-	  mkdir -p ~/.config/systemd/user
-	  cp ~/btc-updown-marketmaker/data-collect/current/deploy/systemd/data-collect-training-collector-gate.service.example \
-	    ~/.config/systemd/user/data-collect-training-collector-gate.service
-	  systemctl --user daemon-reload
-	  systemctl --user start data-collect-training-collector-gate.service
-	  systemctl --user is-active --quiet data-collect-training-collector-gate.service
-	  sleep 7300
-	  systemctl --user show data-collect-training-collector-gate.service \
-	    --property=ActiveState,SubState,Result,ExecMainStatus --no-pager
-	  if systemctl --user is-active --quiet data-collect-training-collector-gate.service; then
-	    echo "gate service still active after bounded 2h run"
-	    exit 1
-	  fi
-	  journalctl --user -u data-collect-training-collector-gate.service \
-	    --since "-130 minutes" --no-pager | tail -n 200
-	'
+- `0`：操作员 SIGTERM 后完成协调停止。
+- `75`：`dataset_capacity_reached`；已 drain/finalize 并更新 open manifest，systemd 不重启。
+- `76`：不可恢复的配置、路径、恢复或数据合同错误，systemd 不重启。
+- 其他非零：运行故障；由 `Restart=on-failure` 处理。
+
+`--help` 和 `--version` 必须在创建 Tokio runtime、解析数据根、连接网络或写文件前退出 0。
+
+## 唯一生产数据布局
+
+```text
+/home/ubuntu/btc-updown-marketmaker/datasets/training/typed_raw/
+└── utc_day=YYYY-MM-DD/
+    ├── manifest.json
+    └── source_kind=<source_kind>/
+        ├── <source_kind>_HH.parquet
+        └── <source_kind>_HH-part-N.parquet
 ```
 
-不得 enable --now。是否执行 `loginctl enable-linger ubuntu` 或 `systemctl --user enable --now data-collect-training-collector.service` 必须单独获得用户批准。
+正常情况下每个 source/hour 只有一个 Parquet；同一小时进程重启发生文件名碰撞时才使用 `part-N`。稀疏 snapshot source 不生成空文件。写入期间只允许同目录 `*.running` 和 `manifest.json.tmp` 瞬时存在。
 
-2 小时验收必须再次检查 binary sha256、git commit、config digest、dataset root canonical path、collector host、collector region、binary role、run manifest 内的 source coverage/source gap/rollover evidence、`source_writer_stats` event/typed row 口径、`queue_summary`、`shutdown_stage_timings`、`shutdown_retention_scan_budget_ms`、`run_manifest_atomic_write`、ResourceWatermark、running/finalized artifact 边界、`run_forever=false`、`duration_secs=7200`、`retention_delete_mode=dry_run`、metadata source coverage 和 shutdown finalize 结果。shutdown stop 路径不再启动新的全盘 retention 扫描；`retention_shutdown_scan.status=skipped` 表示依赖 startup/periodic run-level `retention_policy_receipt.json`，不能判为漏验。
-示例 service 已显式传入 `--collector-region eu-west-1`；如果未来迁移出 eu-west-1，必须先更新 service、README 和验收记录，不能让生产验收依赖隐式 region。
+每个 UTC 日只能有一个 `manifest.json`。它只记录采集事实：文件路径、行数、字节数、SHA-256、逐 source 首末接收时间与写入/结构去重/backfill/lag/reconnect/drop 计数、紧凑 gap、Binance 连续性状态及 build/config/host/region identity。日内 SIGTERM 保持当前日 `open`；只有跨日 barrier、queue/batch drain 和全部 writer finalize ack 完成后才写 `closed`。data-pipeline 只消费 `closed` 日。
 
-## 清理旧测试产物
+生产目录不得生成 segment/run manifest、startup/retention/resource/backpressure receipt、coverage/gap/reconnect/rollover sidecar、逐事件日志、queue samples 或 validation report。详细运行错误只进入 journald。collector 不删除 raw；`datasets/training` 达到 50,000,000,000 bytes 时协调停止并退出 75，等待独立归档运维清理。
 
-正式长跑启动前必须生成并保存 `cleanup_allowlist.json`。只允许删除 allowlist 中逐项列出的路径，每项必须包含 path、type、bytes、digest 或目录清单 digest、reason、run_id_or_release_id、local_evidence_copy。默认保护：
+## 停旧服务前的 staging 预检
 
-- `~/btc-updown-marketmaker/data-collect/releases/train-data-collect-ver1-0`
-- `~/btc-updown-marketmaker/data-collect/current`
-- `~/btc-updown-marketmaker/datasets/training/run_manifests`
-- current UTC day 下的 `training/typed_raw/utc_day=*`
-- `manual-inspection`、phase8 evidence、历史 PASS/selected-window/retention validation evidence
+首次切换前，旧服务继续运行。新 binary 与 unit 只允许存在于带 SHA 的瞬时独占 staging 路径：
 
-允许删除的范围只限明确历史测试产物：`data-collect/phase0-runs/*`、`datasets/phase0-validation/*`、已知 validation run 的 `datasets-retention-validation/<run-id>`、未被 current 指向且非正式版本的旧 release、已有本地证据副本的旧 `training/runtime_artifacts/<test-run-id>`、满足阶段 8 计划条件的旧测试 `training/typed_raw/utc_day=<YYYY-MM-DD>`。删除前后都要记录 `du -sh`，清理证据拉回本地 `target/manual-inspection/train-data-collect-ver1-0-deploy-<ts>/cleanup/`。
-
-## 启动长期采集
-
-清理 gate 通过并获得用户批准后，安装正式 service：
-
-```bash
-ssh ubuntu@3.255.156.183 '
-  set -euo pipefail
-  mkdir -p ~/.config/systemd/user
-  cp ~/btc-updown-marketmaker/data-collect/current/deploy/systemd/data-collect-training-collector.service.example \
-    ~/.config/systemd/user/data-collect-training-collector.service
-  systemctl --user daemon-reload
-  systemctl --user enable --now data-collect-training-collector.service
-  systemctl --user show data-collect-training-collector.service \
-    --property=ActiveState,SubState,Result,ExecMainStatus,NRestarts --no-pager
-'
+```text
+/home/ubuntu/btc-updown-marketmaker/data-collect/bin/data-collect-training-collector.upload-<sha256>
+/home/ubuntu/.config/systemd/user/data-collect-training-collector.staging-<sha256>.service
 ```
 
-启动后必须观察 service 为 active，最新 run manifest 写出上述 production provenance，`source_gaps=[]`，retention receipt 为 enabled 模式，且没有 `.running` / `.digesting` 长时间残留。
+创建前必须对目标和逐级父目录做不跟随 symlink 的 owner/type/containment 检查；staging 路径必须不存在，并使用 exclusive-create 语义上传。远端必须复核 binary SHA、ELF、owner/mode、loader、`ldd`、GLIBC 兼容性以及无副作用的 `--help`/`--version`。
+
+gate unit 必须由仓库权威 unit 机械生成，只把 `Restart=on-failure` 改为 `Restart=no`；不得维护第二份 gate 源文件。`systemd-analyze --user verify` 通过前不得替换正式 binary/unit，也不得停止旧服务。
+
+## 破坏性切换与 gate
+
+只有实现独立审查、production build 和全部 staging 预检均通过后，才按批准计划执行：
+
+1. 重新核对旧 unit、ExecStart、MainPID/cgroup、`/proc/<pid>/exe`、binary SHA、目标路径 owner/type/mount/打开句柄。
+2. 协调停止旧服务；再次确认所有删除目标无 mount、无打开句柄且身份与白名单一致。
+3. 只删除批准白名单内的旧程序和旧数据。
+4. 依次把 staging binary 和 `Restart=no` unit 原子替换到固定正式路径；任一部分替换中断都保持 inactive，并把实际 old/new digest 组合记入 changelog。
+5. 在非 23 UTC 的小时边界前，以最终 ExecStart 和同一生产数据根启动 gate，跨小时运行至少 15 分钟。
+
+gate 不使用独立数据根、不生成验证 sidecar，也不 `enable`。直接检查：
+
+- service/journal 没有 panic、drop、不可解释 gap 或 restart；
+- 已 finalized Parquet 可读，行数和 manifest 文件事实一致；
+- 生产根除 Parquet、每日唯一 manifest 和允许的瞬时文件外没有其他产物；
+- `*.running` 与 `manifest.json.tmp` 在协调停止后不存在；
+- 当前日 manifest 保持 `open`，跨日只有满足完整 barrier/ack 合同才 `closed`。
+
+gate 通过并完成阶段独立审查后，只把同一正式 unit 的 `Restart=no` 原子更新为仓库权威的 `Restart=on-failure`，然后 daemon-reload 与 enable；不重启正在运行的 collector。
+
+## 长期验收
+
+长期 unit 必须连续运行至少 26 小时，并实际覆盖一个 Binance WebSocket 连接的 24 小时平台生命周期、至少一个 UTC 日切换和至少 312 个 nominal 5 分钟时槽。任何 systemd 进程退出或 MainPID 变化都重置 26 小时窗口；Binance 连接提前重连则重置其 24 小时子窗口。
+
+验收直接读取 closed manifest、Parquet 必要列/metadata 和 journald，不生成独立报告。发现 code、unit、数据正确性或产物合同问题时必须立即 `disable --now`，完成协调停止并按失败 build/day 身份清理；身份混合或无法证明时停止并请求用户决策。
+
+## 回滚边界
+
+本流程不保留服务器端旧 release bundle，因此不存在 symlink 回滚。gate 或长期版本失败时保持服务 inactive，在 changelog 记录 `failed_gate`、`failed_long_running` 或 `partial_replace` 以及 binary/unit digest 和清理结果；修复版重新完成本地验证、独立审查、已 push commit 构建和 staging 预检后再切换。不得自行恢复已批准永久删除的旧 collector 或旧数据。

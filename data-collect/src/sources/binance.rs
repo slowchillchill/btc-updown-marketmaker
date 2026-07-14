@@ -253,6 +253,10 @@ pub fn parse_aggtrade_raw(
             .get("m")
             .and_then(Value::as_bool)
             .ok_or_else(|| "missing_bool_field:m".to_owned())?,
+        ws_ignore: value
+            .get("M")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| "missing_bool_field:M".to_owned())?,
         stream_name,
     })
 }

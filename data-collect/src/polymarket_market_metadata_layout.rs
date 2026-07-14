@@ -6,7 +6,6 @@ use arrow_schema::{DataType, Field, Schema, TimeUnit};
 pub struct PolymarketMarketMetadataContext {
     pub timestamp_received_ms: i64,
     pub metadata_fetch_start_utc_ms: Option<i64>,
-    pub metadata_recv_time_utc_ms: Option<i64>,
     pub collector_host_id: String,
     pub collector_region: String,
     pub source_endpoint: String,
@@ -41,12 +40,10 @@ impl PolymarketMarketMetadataValidation {
 pub struct PolymarketMarketMetadataRow {
     pub timestamp_received: i64,
     pub metadata_fetch_start_utc: Option<i64>,
-    pub metadata_recv_time_utc: Option<i64>,
     pub slug: String,
     pub condition_id: String,
     pub clob_market_id: Option<String>,
     pub asset_ids: Option<String>,
-    pub token_ids: Option<String>,
     pub market_start_utc: Option<i64>,
     pub market_end_utc: Option<i64>,
     pub active: Option<bool>,
@@ -217,7 +214,6 @@ impl PolymarketMarketMetadataRow {
         report.require_non_empty("slug", Some(&self.slug));
         report.require_non_empty("condition_id", Some(&self.condition_id));
         report.require_non_empty("asset_ids", self.asset_ids.as_deref());
-        report.require_non_empty("token_ids", self.token_ids.as_deref());
         if !self.has_metadata_unavailable_reason() {
             report.require_some("market_start_utc", self.market_start_utc);
             report.require_some("market_end_utc", self.market_end_utc);
@@ -287,16 +283,10 @@ pub fn polymarket_market_metadata_schema() -> Arc<Schema> {
             DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
             true,
         ),
-        Field::new(
-            "metadata_recv_time_utc",
-            DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
-            true,
-        ),
         Field::new("slug", DataType::Utf8, false),
         Field::new("condition_id", DataType::Utf8, false),
         Field::new("clob_market_id", DataType::Utf8, true),
         Field::new("asset_ids", DataType::Utf8, true),
-        Field::new("token_ids", DataType::Utf8, true),
         Field::new(
             "market_start_utc",
             DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
@@ -347,12 +337,10 @@ fn metadata_row(
     PolymarketMarketMetadataRow {
         timestamp_received: context.timestamp_received_ms,
         metadata_fetch_start_utc: context.metadata_fetch_start_utc_ms,
-        metadata_recv_time_utc: context.metadata_recv_time_utc_ms,
         slug: slug.to_owned(),
         condition_id: condition_id.to_owned(),
         clob_market_id: clob_market_id.map(ToOwned::to_owned),
-        asset_ids: asset_ids_json.clone(),
-        token_ids: asset_ids_json,
+        asset_ids: asset_ids_json,
         market_start_utc,
         market_end_utc,
         active,

@@ -208,7 +208,7 @@ fn binance_depth_stitch_contract() {
 fn binance_aggtrade_raw_fields_contract() {
     let raw_trade = r#"{
         "e":"aggTrade","E":1766789469958,"s":"BTCUSDT","a":123,
-        "p":"100.50","q":"0.1","f":10,"l":12,"T":1766789469000,"m":true
+        "p":"100.50","q":"0.1","f":10,"l":12,"T":1766789469000,"m":true,"M":false
     }"#;
     let trade = parse_aggtrade_raw(
         envelope(SourceKind::BinanceAggTrade, "aggTrade", raw_trade),
@@ -230,9 +230,9 @@ fn binance_aggtrade_raw_fields_contract() {
         envelope(
             SourceKind::BinanceAggTrade,
             "aggTrade",
-            r#"{"e":"aggTrade","E":1,"s":"ETHUSDT","a":123,"p":"100","q":"0.1","f":10,"l":12,"T":1,"m":true}"#,
+            r#"{"e":"aggTrade","E":1,"s":"ETHUSDT","a":123,"p":"100","q":"0.1","f":10,"l":12,"T":1,"m":true,"M":false}"#,
         ),
-        r#"{"e":"aggTrade","E":1,"s":"ETHUSDT","a":123,"p":"100","q":"0.1","f":10,"l":12,"T":1,"m":true}"#,
+        r#"{"e":"aggTrade","E":1,"s":"ETHUSDT","a":123,"p":"100","q":"0.1","f":10,"l":12,"T":1,"m":true,"M":false}"#,
     );
     assert!(wrong_symbol.is_err());
 }

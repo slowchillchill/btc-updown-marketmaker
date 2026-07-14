@@ -74,7 +74,6 @@ fn polymarket_market_channel_contract() {
         market_id: Some("market-1".to_owned()),
         condition_id: Some("condition-1".to_owned()),
         asset_ids: vec!["1".to_owned(), "2".to_owned()],
-        token_ids: vec!["1".to_owned(), "2".to_owned()],
         subscription,
     };
     assert_eq!(
@@ -266,7 +265,6 @@ fn polymarket_discovery_requires_active_scan_or_metadata_snapshot() {
             r#"{"event_type":"new_market","condition_id":"condition-1"}"#,
         ),
         condition_id: "condition-1".to_owned(),
-        token_ids: vec!["1".to_owned(), "2".to_owned()],
         asset_ids: vec!["1".to_owned(), "2".to_owned()],
         clob_market_id: "market-1".to_owned(),
         slug: "btc-updown-5m-1766789700".to_owned(),

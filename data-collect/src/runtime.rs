@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
 use crate::collector_identity::resolve_collector_region;
@@ -13,301 +14,122 @@ use crate::deployment::{
 };
 use crate::handoff::{HandoffRuntimeConfig, run_heartbeat_handoff_server};
 use crate::live_runtime::{LiveTrainingRuntimeConfig, run_live_training_runtime};
-use crate::manifest::SourceCoverage;
 use crate::publish::PaperLiveEnvironment;
-use crate::retention::{RetentionDeleteMode, TrainingRetentionPolicy, TrainingRetentionReceipt};
-use crate::segment::SegmentNaming;
-use crate::writer::{RawEvent, sha256_file, write_segment_on_blocking_pool_for_source};
+use crate::writer::sha256_file;
 
-const SYNTHETIC_SOURCES: &[&str] = &[
-    "polymarket_market",
-    "binance_depth_update",
-    "binance_aggtrade",
-    "polymarket_rtds_chainlink_btc_usd",
-];
 pub const RESOURCE_HARD_THRESHOLD_EXIT_CODE: i32 = 75;
+pub const OPERATOR_INTERVENTION_REQUIRED_EXIT_CODE: i32 = 76;
+pub const DEFAULT_TRAINING_DATASET_MAX_BYTES: u64 = 50_000_000_000;
+pub const TRAINING_COLLECTOR_USAGE: &str = "usage: data-collect-training-collector --dataset-root <absolute-path> [--collector-region <region>] [--run-forever | --max-runtime-secs <seconds>] [--max-dataset-bytes <bytes>]";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CliArgs {
     pub dataset_root: PathBuf,
-    pub run_id: String,
     pub max_runtime_secs: Option<u64>,
     pub run_forever: bool,
     pub collector_region: Option<String>,
-    pub config_path: Option<PathBuf>,
-    pub stop_after_complete_polymarket_market: Option<u32>,
-    pub retention_delete_mode: RetentionDeleteMode,
-    pub retention_threshold_bytes: Option<u64>,
+    pub max_dataset_bytes: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TrainingRuntimeMode {
-    Synthetic,
-    Live,
+#[derive(Serialize)]
+struct TrainingConfigDigest<'a> {
+    contract_version: &'static str,
+    args: &'a CliArgs,
+    polymarket_market_endpoint: &'static str,
+    polymarket_rtds_endpoint: &'static str,
+    binance_depth_endpoint: &'static str,
+    binance_aggtrade_endpoint: &'static str,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TrainingRuntimeConfig {
-    pub dataset_root: PathBuf,
-    pub run_id: String,
-    pub mode: TrainingRuntimeMode,
-    pub max_runtime_secs: Option<u64>,
-    pub run_forever: bool,
-    pub collector_region: Option<String>,
-    pub code_version: Option<String>,
-    pub collector_binary_sha256: Option<String>,
-    pub source_config_digest: Option<String>,
-    pub stop_after_complete_polymarket_market: Option<u32>,
-    pub retention_delete_mode: RetentionDeleteMode,
-    pub retention_threshold_bytes: Option<u64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SourceTaskPlan {
-    sources: Vec<String>,
-}
-
-impl SourceTaskPlan {
-    pub fn four_sources() -> Self {
-        Self {
-            sources: SYNTHETIC_SOURCES
-                .iter()
-                .map(|source| (*source).to_owned())
-                .collect(),
-        }
-    }
-
-    pub fn startup_decisions(&self, polymarket_discovery_ready: bool) -> BTreeMap<String, String> {
-        self.sources
-            .iter()
-            .map(|source| {
-                let action = if source == "polymarket_market" && !polymarket_discovery_ready {
-                    "record_source_gap"
-                } else {
-                    "start"
-                };
-                (source.clone(), action.to_owned())
-            })
-            .collect()
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FinalizedRuntimeSegment {
-    pub source_kind: String,
-    pub parquet_path: PathBuf,
-    pub manifest_path: PathBuf,
-    pub row_count: u64,
-    pub sha256: String,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct TrainingRuntimeReceipt {
-    pub run_id: String,
-    pub run_manifest_path: PathBuf,
-    pub finalized_segments: Vec<FinalizedRuntimeSegment>,
-    pub source_coverage: Vec<SourceCoverage>,
-    pub source_gaps: Vec<String>,
-    pub resource_watermark_recorded: bool,
-    pub writer_used_blocking_pool: bool,
+#[derive(Debug)]
+struct HotCliArgs {
+    dataset_root: PathBuf,
+    run_id: String,
+    max_runtime_secs: Option<u64>,
+    collector_region: Option<String>,
+    config_path: Option<PathBuf>,
 }
 
 pub async fn run_collector_from_env(role: CollectorBinaryRole) -> Result<()> {
-    run_collector(role, env::args_os().skip(1)).await
+    let args = env::args_os().skip(1).collect::<Vec<_>>();
+    match role {
+        CollectorBinaryRole::TrainingCold => run_training_collector(args).await,
+        CollectorBinaryRole::PaperHot | CollectorBinaryRole::LiveHot => {
+            run_hot_collector(role, args).await
+        }
+    }
 }
 
-pub async fn run_collector<I, S>(role: CollectorBinaryRole, args: I) -> Result<()>
+pub async fn run_training_collector<I, S>(args: I) -> Result<()>
 where
     I: IntoIterator<Item = S>,
-    S: Into<std::ffi::OsString>,
+    S: Into<OsString>,
 {
-    let cli = parse_args(args)?;
-    fs::create_dir_all(&cli.dataset_root)?;
-    let dataset_root = cli.dataset_root.canonicalize()?;
-    let mut config = DeploymentRuntimeConfig::for_role(role, dataset_root, cli.run_id)?;
-    config.max_runtime_secs = cli.max_runtime_secs;
-    config.collector_region_override = cli.collector_region;
-    config.config_path = canonical_config_path(cli.config_path.as_deref())?;
-    validate_runtime_config(&config)?;
+    let cli = parse_args(args).map_err(operator_intervention_error)?;
+    validate_training_cli(&cli).map_err(operator_intervention_error)?;
 
-    fs::create_dir_all(&config.output_root)?;
-    let receipt = startup_receipt(&config).await?;
-    write_startup_receipt(&config.output_root, &receipt)?;
-    if role == CollectorBinaryRole::TrainingCold {
-        let training_mode = match env::var("DATA_COLLECT_RUNTIME_MODE").ok().as_deref() {
-            Some("live") => TrainingRuntimeMode::Live,
-            _ => TrainingRuntimeMode::Synthetic,
-        };
-        let training_config = TrainingRuntimeConfig {
-            dataset_root: config.dataset_root.clone(),
-            run_id: config.run_id.clone(),
-            mode: training_mode,
-            max_runtime_secs: config.max_runtime_secs,
-            run_forever: cli.run_forever,
-            collector_region: Some(receipt.collector_region),
-            code_version: Some(receipt.git_commit),
-            collector_binary_sha256: Some(receipt.binary_sha256),
-            source_config_digest: Some(receipt.config_digest),
-            stop_after_complete_polymarket_market: cli.stop_after_complete_polymarket_market,
-            retention_delete_mode: cli.retention_delete_mode,
-            retention_threshold_bytes: cli.retention_threshold_bytes,
-        };
-        let training_receipt = run_training_runtime(training_config).await?;
-        if training_receipt
-            .source_gaps
-            .iter()
-            .any(|gap| gap.starts_with("resource_hard_threshold_"))
-        {
-            return Err(io::Error::other(format!(
-                "resource_hard_threshold_shutdown:{}",
-                training_receipt.run_manifest_path.display()
-            ))
-            .into());
-        }
-    } else {
-        let environment = match role {
-            CollectorBinaryRole::PaperHot => PaperLiveEnvironment::Paper,
-            CollectorBinaryRole::LiveHot => PaperLiveEnvironment::Live,
-            CollectorBinaryRole::TrainingCold => unreachable!("handled above"),
-        };
-        let handoff_config =
-            HandoffRuntimeConfig::for_environment(&config.dataset_root, environment)?;
-        run_heartbeat_handoff_server(
-            &handoff_config,
-            &receipt.collector_host_id,
-            &receipt.collector_region,
-            config.max_runtime_secs,
-        )
-        .await?;
-    }
+    let current_exe = env::current_exe().map_err(operator_intervention_error)?;
+    let collector_binary_sha256 = sha256_file(&current_exe).map_err(operator_intervention_error)?;
+    let code_version = option_env!("DATA_COLLECT_GIT_COMMIT")
+        .or(option_env!("GIT_COMMIT"))
+        .unwrap_or("unknown-build-git-commit")
+        .to_owned();
+    let source_config_digest = training_config_digest(&cli)?;
+    let collector_region = match cli.collector_region.as_deref() {
+        Some(region) => region.trim().to_owned(),
+        None => resolve_collector_region().await,
+    };
+
+    run_live_training_runtime(LiveTrainingRuntimeConfig {
+        dataset_root: cli.dataset_root,
+        duration_secs: cli.max_runtime_secs,
+        run_forever: cli.run_forever,
+        collector_host_id: hostname(),
+        collector_region,
+        code_version,
+        collector_binary_sha256,
+        source_config_digest,
+        max_dataset_bytes: cli.max_dataset_bytes,
+    })
+    .await?;
     Ok(())
-}
-
-pub fn collector_exit_code(error: &(dyn std::error::Error + 'static)) -> i32 {
-    if error.to_string().contains("resource_hard_threshold_") {
-        RESOURCE_HARD_THRESHOLD_EXIT_CODE
-    } else {
-        1
-    }
-}
-
-pub async fn run_training_runtime(config: TrainingRuntimeConfig) -> Result<TrainingRuntimeReceipt> {
-    fs::create_dir_all(&config.dataset_root)?;
-    let dataset_root = config.dataset_root.canonicalize()?;
-    let collector_region = config
-        .collector_region
-        .clone()
-        .unwrap_or_else(|| "unknown".to_owned());
-    let (retention_policy_receipt_path, startup_retention_receipt) =
-        enforce_startup_retention_policy(
-            &dataset_root,
-            &config.run_id,
-            config.retention_delete_mode,
-            config.retention_threshold_bytes,
-        )?;
-    match config.mode {
-        TrainingRuntimeMode::Synthetic => {
-            run_synthetic_training_runtime(
-                &dataset_root,
-                &config.run_id,
-                &collector_region,
-                config.stop_after_complete_polymarket_market,
-                &retention_policy_receipt_path,
-            )
-            .await
-        }
-        TrainingRuntimeMode::Live => {
-            let receipt = run_live_training_runtime(LiveTrainingRuntimeConfig {
-                dataset_root: dataset_root.clone(),
-                run_id: config.run_id,
-                duration_secs: config.max_runtime_secs,
-                run_forever: config.run_forever,
-                collector_host_id: hostname(),
-                collector_region,
-                code_version: config
-                    .code_version
-                    .unwrap_or_else(|| "test-code-version".to_owned()),
-                collector_binary_sha256: config
-                    .collector_binary_sha256
-                    .unwrap_or_else(|| "test-binary-sha256".to_owned()),
-                source_config_digest: config
-                    .source_config_digest
-                    .unwrap_or_else(|| "test-source-config-digest".to_owned()),
-                stop_after_complete_polymarket_market: config.stop_after_complete_polymarket_market,
-                retention_policy_receipt_path: Some(retention_policy_receipt_path),
-                startup_retention_receipt: Some(startup_retention_receipt),
-                retention_delete_mode: config.retention_delete_mode,
-                retention_threshold_bytes: config.retention_threshold_bytes,
-            })
-            .await?;
-            Ok(TrainingRuntimeReceipt {
-                run_id: receipt.run_id,
-                run_manifest_path: receipt.run_manifest_path,
-                finalized_segments: receipt
-                    .finalized_segments
-                    .into_iter()
-                    .map(|segment| FinalizedRuntimeSegment {
-                        source_kind: segment.source_kind,
-                        parquet_path: segment.parquet_path,
-                        manifest_path: segment.manifest_path,
-                        row_count: segment.row_count,
-                        sha256: segment.sha256,
-                    })
-                    .collect(),
-                source_coverage: receipt.source_coverage,
-                source_gaps: receipt.source_gaps,
-                resource_watermark_recorded: receipt.resource_watermark_recorded,
-                writer_used_blocking_pool: receipt.writer_used_blocking_pool,
-            })
-        }
-    }
 }
 
 pub fn parse_args<I, S>(args: I) -> Result<CliArgs>
 where
     I: IntoIterator<Item = S>,
-    S: Into<std::ffi::OsString>,
+    S: Into<OsString>,
 {
     let mut values = BTreeMap::new();
     let mut run_forever = false;
     let mut iter = args.into_iter().map(Into::into);
     while let Some(arg) = iter.next() {
-        let arg = arg
-            .into_string()
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "argument is not utf-8"))?;
+        let arg = os_string(arg, "argument")?;
         match arg.as_str() {
-            "--run-forever" => {
-                run_forever = true;
-            }
+            "--run-forever" => run_forever = true,
             "--dataset-root"
-            | "--run-id"
             | "--max-runtime-secs"
             | "--collector-region"
-            | "--config"
-            | "--stop-after-complete-polymarket-market"
-            | "--retention-delete-mode"
-            | "--retention-threshold-bytes" => {
+            | "--max-dataset-bytes" => {
                 let value = iter.next().ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!("{arg} requires a value"),
                     )
                 })?;
-                let value = value.into_string().map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("{arg} value is not utf-8"),
-                    )
-                })?;
-                values.insert(arg, value);
+                values.insert(arg, os_string(value, "argument value")?);
             }
-            "--help" | "-h" => {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, usage()).into());
+            "--help" | "-h" | "--version" => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--help/--version must use the binary fast path",
+                )
+                .into());
             }
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("unknown argument: {arg}\n{}", usage()),
+                    format!("unknown argument: {arg}\n{TRAINING_COLLECTOR_USAGE}"),
                 )
                 .into());
             }
@@ -317,14 +139,10 @@ where
     let dataset_root = values
         .remove("--dataset-root")
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "--dataset-root is required"))?;
-    let run_id = values
-        .remove("--run-id")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "--run-id is required"))?;
     let max_runtime_secs = values
         .remove("--max-runtime-secs")
-        .map(|value| value.parse::<u64>())
-        .transpose()
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        .map(|value| parse_positive_u64("--max-runtime-secs", &value))
+        .transpose()?;
     if run_forever && max_runtime_secs.is_some() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -332,29 +150,148 @@ where
         )
         .into());
     }
-    let stop_after_complete_polymarket_market = values
-        .remove("--stop-after-complete-polymarket-market")
-        .map(|value| parse_positive_u32("--stop-after-complete-polymarket-market", &value))
-        .transpose()?;
-    let retention_delete_mode = values
-        .remove("--retention-delete-mode")
-        .map(|value| parse_retention_delete_mode(&value))
+    let max_dataset_bytes = values
+        .remove("--max-dataset-bytes")
+        .map(|value| parse_positive_u64("--max-dataset-bytes", &value))
         .transpose()?
-        .unwrap_or(RetentionDeleteMode::DryRun);
-    let retention_threshold_bytes = values
-        .remove("--retention-threshold-bytes")
-        .map(|value| parse_positive_u64("--retention-threshold-bytes", &value))
-        .transpose()?;
+        .unwrap_or(DEFAULT_TRAINING_DATASET_MAX_BYTES);
+
     Ok(CliArgs {
         dataset_root: PathBuf::from(dataset_root),
-        run_id,
         max_runtime_secs,
         run_forever,
         collector_region: values.remove("--collector-region"),
+        max_dataset_bytes,
+    })
+}
+
+pub fn collector_exit_code(error: &(dyn std::error::Error + 'static)) -> i32 {
+    let message = error.to_string();
+    if message.contains("operator_intervention_required:") {
+        OPERATOR_INTERVENTION_REQUIRED_EXIT_CODE
+    } else if message.contains("dataset_capacity_reached") {
+        RESOURCE_HARD_THRESHOLD_EXIT_CODE
+    } else {
+        1
+    }
+}
+
+pub fn training_collector_version() -> String {
+    format!(
+        "data-collect-training-collector {}",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+fn validate_training_cli(cli: &CliArgs) -> io::Result<()> {
+    if !cli.dataset_root.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--dataset-root must be absolute",
+        ));
+    }
+    if cli
+        .collector_region
+        .as_deref()
+        .is_some_and(|region| region.trim().is_empty())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--collector-region must not be empty",
+        ));
+    }
+    Ok(())
+}
+
+fn training_config_digest(cli: &CliArgs) -> Result<String> {
+    let digest_input = TrainingConfigDigest {
+        contract_version: "data_collect_training_config_v2",
+        args: cli,
+        polymarket_market_endpoint: "wss://ws-subscriptions-clob.polymarket.com/ws/market",
+        polymarket_rtds_endpoint: "wss://ws-live-data.polymarket.com",
+        binance_depth_endpoint: "wss://stream.binance.com:9443/ws/btcusdt@depth@100ms",
+        binance_aggtrade_endpoint: "wss://stream.binance.com:9443/ws/btcusdt@aggTrade",
+    };
+    sha256_serialized(&digest_input)
+}
+
+async fn run_hot_collector(
+    role: CollectorBinaryRole,
+    args: impl IntoIterator<Item = OsString>,
+) -> Result<()> {
+    let cli = parse_hot_args(args).map_err(operator_intervention_error)?;
+    fs::create_dir_all(&cli.dataset_root).map_err(operator_intervention_error)?;
+    let dataset_root = cli
+        .dataset_root
+        .canonicalize()
+        .map_err(operator_intervention_error)?;
+    let mut config = DeploymentRuntimeConfig::for_role(role, dataset_root, cli.run_id)
+        .map_err(operator_intervention_error)?;
+    config.max_runtime_secs = cli.max_runtime_secs;
+    config.collector_region_override = cli.collector_region;
+    config.config_path =
+        canonical_config_path(cli.config_path.as_deref()).map_err(operator_intervention_error)?;
+    validate_runtime_config(&config).map_err(operator_intervention_error)?;
+
+    fs::create_dir_all(&config.output_root)?;
+    let receipt = startup_receipt(&config).await?;
+    write_startup_receipt(&config.output_root, &receipt)?;
+    let environment = match role {
+        CollectorBinaryRole::PaperHot => PaperLiveEnvironment::Paper,
+        CollectorBinaryRole::LiveHot => PaperLiveEnvironment::Live,
+        CollectorBinaryRole::TrainingCold => unreachable!("training uses its own entry point"),
+    };
+    let handoff_config = HandoffRuntimeConfig::for_environment(&config.dataset_root, environment)?;
+    run_heartbeat_handoff_server(
+        &handoff_config,
+        &receipt.collector_host_id,
+        &receipt.collector_region,
+        config.max_runtime_secs,
+    )
+    .await
+}
+
+fn parse_hot_args(args: impl IntoIterator<Item = OsString>) -> Result<HotCliArgs> {
+    let mut values = BTreeMap::new();
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        let arg = os_string(arg, "argument")?;
+        match arg.as_str() {
+            "--dataset-root" | "--run-id" | "--max-runtime-secs" | "--collector-region"
+            | "--config" => {
+                let value = iter.next().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("{arg} requires a value"),
+                    )
+                })?;
+                values.insert(arg, os_string(value, "argument value")?);
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unknown hot-collector argument: {arg}"),
+                )
+                .into());
+            }
+        }
+    }
+    let dataset_root = values
+        .remove("--dataset-root")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "--dataset-root is required"))?;
+    let run_id = values
+        .remove("--run-id")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "--run-id is required"))?;
+    let max_runtime_secs = values
+        .remove("--max-runtime-secs")
+        .map(|value| parse_positive_u64("--max-runtime-secs", &value))
+        .transpose()?;
+    Ok(HotCliArgs {
+        dataset_root: PathBuf::from(dataset_root),
+        run_id,
+        max_runtime_secs,
+        collector_region: values.remove("--collector-region"),
         config_path: values.remove("--config").map(PathBuf::from),
-        stop_after_complete_polymarket_market,
-        retention_delete_mode,
-        retention_threshold_bytes,
     })
 }
 
@@ -364,7 +301,7 @@ async fn startup_receipt(config: &DeploymentRuntimeConfig) -> Result<RuntimeRece
     let git_commit = option_env!("DATA_COLLECT_GIT_COMMIT")
         .or(option_env!("GIT_COMMIT"))
         .unwrap_or("unknown-build-git-commit");
-    let config_digest = config_digest(config)?;
+    let config_digest = sha256_serialized(config)?;
     let collector_region = match config.collector_region_override.as_deref() {
         Some(region) if !region.trim().is_empty() => region.trim().to_owned(),
         _ => resolve_collector_region().await,
@@ -382,22 +319,18 @@ async fn startup_receipt(config: &DeploymentRuntimeConfig) -> Result<RuntimeRece
 
 fn write_startup_receipt(output_root: &Path, receipt: &RuntimeReceipt) -> Result<()> {
     let path = output_root.join(format!("{}.startup_receipt.json", receipt.run_id));
-    let payload = serde_json::to_vec_pretty(receipt)?;
-    fs::write(path, payload)?;
+    fs::write(path, serde_json::to_vec_pretty(receipt)?)?;
     Ok(())
 }
 
 fn canonical_config_path(path: Option<&Path>) -> Result<Option<PathBuf>> {
-    match path {
-        Some(path) => Ok(Some(path.canonicalize()?)),
-        None => Ok(None),
-    }
+    path.map(Path::canonicalize).transpose().map_err(Into::into)
 }
 
-fn config_digest(config: &DeploymentRuntimeConfig) -> Result<String> {
-    let payload = serde_json::to_vec(config)?;
+fn sha256_serialized(value: &impl Serialize) -> Result<String> {
+    let payload = serde_json::to_vec(value)?;
     let mut hasher = Sha256::new();
-    hasher.update(&payload);
+    hasher.update(payload);
     Ok(format!("{:x}", hasher.finalize()))
 }
 
@@ -419,134 +352,6 @@ fn host_clock_sync_status() -> String {
     }
 }
 
-fn usage() -> &'static str {
-    "usage: --dataset-root <absolute-path> --run-id <id> [--max-runtime-secs <seconds> | --run-forever] [--collector-region <region>] [--config <path>] [--stop-after-complete-polymarket-market <count>] [--retention-delete-mode dry-run|enabled] [--retention-threshold-bytes <bytes>]"
-}
-
-async fn run_synthetic_training_runtime(
-    dataset_root: &Path,
-    run_id: &str,
-    collector_region: &str,
-    stop_after_complete_polymarket_market: Option<u32>,
-    retention_policy_receipt_path: &Path,
-) -> Result<TrainingRuntimeReceipt> {
-    let run_started_ms = now_ms();
-    let mut finalized_segments = Vec::new();
-    let mut source_coverage = Vec::new();
-    let manual_review = stop_after_complete_polymarket_market.map(manual_review_receipt);
-    let mode = if manual_review.is_some() {
-        "manual_review_complete_market"
-    } else {
-        "synthetic"
-    };
-    let rollover_reason = if manual_review.is_some() {
-        "manual_review_complete_market_shutdown"
-    } else {
-        "shutdown_finalize"
-    };
-
-    for (index, source_kind) in SYNTHETIC_SOURCES.iter().enumerate() {
-        let recv_time_utc_ms = run_started_ms + index as i64;
-        let naming = SegmentNaming::new(dataset_root, source_kind, recv_time_utc_ms, 0, run_id)?;
-        let event = synthetic_raw_event(source_kind, recv_time_utc_ms, collector_region, index);
-        let published = write_segment_on_blocking_pool_for_source(
-            naming.partition_path.clone(),
-            naming.stem.clone(),
-            "parquet_raw_layout_v1".to_owned(),
-            (*source_kind).to_owned(),
-            vec![vec![event]],
-        )
-        .await?;
-        let manifest = serde_json::json!({
-            "run_id": run_id,
-            "source_kind": source_kind,
-            "artifact_path": published.final_path,
-            "row_count": published.row_count,
-            "sha256": published.sha256,
-            "schema_version": published.schema_version,
-            "recv_time_window_ms": {
-                "start": recv_time_utc_ms,
-                "end": recv_time_utc_ms
-            },
-            "source_timestamp_range": {
-                "start": recv_time_utc_ms.to_string(),
-                "end": recv_time_utc_ms.to_string()
-            },
-            "event_available_time_semantics": "collector_recv_time",
-            "market_slug_window": if *source_kind == "polymarket_market" {
-                Some("btc-updown-5m-synthetic")
-            } else {
-                None
-            },
-            "segment_seq": 0,
-            "rollover_reason": rollover_reason,
-            "soft_rollover_not_process_fatal": true,
-            "shutdown_finalize_result": "finalized"
-        });
-        fs::write(&naming.manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
-
-        source_coverage.push(SourceCoverage {
-            source_kind: (*source_kind).to_owned(),
-            first_recv_time_utc_ms: recv_time_utc_ms,
-            last_recv_time_utc_ms: recv_time_utc_ms,
-            rows: published.row_count,
-        });
-        finalized_segments.push(FinalizedRuntimeSegment {
-            source_kind: (*source_kind).to_owned(),
-            parquet_path: published.final_path,
-            manifest_path: naming.manifest_path,
-            row_count: published.row_count,
-            sha256: published.sha256,
-        });
-    }
-
-    let run_manifest_dir = dataset_root.join("training").join("run_manifests");
-    fs::create_dir_all(&run_manifest_dir)?;
-    let run_manifest_path = run_manifest_dir.join(format!("{run_id}.manifest.json"));
-    let run_manifest = serde_json::json!({
-        "run_id": run_id,
-        "mode": mode,
-        "manual_review_complete_market": manual_review,
-        "retention_policy_receipt_path": retention_policy_receipt_path,
-        "source_coverage": source_coverage,
-        "source_gaps": [],
-        "resource_watermark": {
-            "rss_bytes": null,
-            "unavailable": [{"metric": "rss_bytes", "reason": "synthetic runtime contract"}]
-        },
-        "writer_used_blocking_pool": true,
-        "recv_time_utc_ms": now_ms()
-    });
-    fs::write(
-        &run_manifest_path,
-        serde_json::to_vec_pretty(&run_manifest)?,
-    )?;
-
-    Ok(TrainingRuntimeReceipt {
-        run_id: run_id.to_owned(),
-        run_manifest_path,
-        finalized_segments,
-        source_coverage,
-        source_gaps: Vec::new(),
-        resource_watermark_recorded: true,
-        writer_used_blocking_pool: true,
-    })
-}
-
-fn parse_positive_u32(flag: &str, value: &str) -> Result<u32> {
-    let parsed = value
-        .parse::<u32>()
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    if parsed == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{flag} must be greater than zero"),
-        )
-        .into());
-    }
-    Ok(parsed)
-}
-
 fn parse_positive_u64(flag: &str, value: &str) -> Result<u64> {
     let parsed = value
         .parse::<u64>()
@@ -561,79 +366,12 @@ fn parse_positive_u64(flag: &str, value: &str) -> Result<u64> {
     Ok(parsed)
 }
 
-fn parse_retention_delete_mode(value: &str) -> Result<RetentionDeleteMode> {
-    match value {
-        "dry-run" | "dry_run" => Ok(RetentionDeleteMode::DryRun),
-        "enabled" => Ok(RetentionDeleteMode::Enabled),
-        other => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("unknown retention delete mode: {other}"),
-        )
-        .into()),
-    }
-}
-
-fn manual_review_receipt(target_market_count: u32) -> serde_json::Value {
-    serde_json::json!({
-        "target_market_count": target_market_count,
-        "selected_market_slug": null,
-        "selected_condition_id": null,
-        "subscribed_asset_ids_for_market": [],
-        "planned_start_utc": null,
-        "planned_end_utc": null,
-        "preload_start_utc": null,
-        "stop_reason": "manual_review_complete_market_shutdown"
+fn os_string(value: OsString, label: &str) -> Result<String> {
+    value.into_string().map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidInput, format!("{label} is not UTF-8")).into()
     })
 }
 
-fn synthetic_raw_event(
-    source_kind: &str,
-    recv_time_utc_ms: i64,
-    collector_region: &str,
-    index: usize,
-) -> RawEvent {
-    RawEvent {
-        source_kind: source_kind.to_owned(),
-        source_event_type: "synthetic".to_owned(),
-        source_identifier: format!("{source_kind}:{index}"),
-        source_ts: Some(recv_time_utc_ms.to_string()),
-        recv_time_utc_ms,
-        collector_host_id: hostname(),
-        collector_region: collector_region.to_owned(),
-        source_endpoint: format!("synthetic://{source_kind}"),
-        raw_json: serde_json::json!({
-            "event_type": "synthetic",
-            "source_kind": source_kind,
-            "seq": index
-        })
-        .to_string(),
-        parquet_raw_layout_version: 1,
-        parquet_raw_source_kind: source_kind.to_owned(),
-    }
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
-}
-
-fn enforce_startup_retention_policy(
-    dataset_root: &Path,
-    run_id: &str,
-    delete_mode: RetentionDeleteMode,
-    threshold_bytes: Option<u64>,
-) -> Result<(PathBuf, TrainingRetentionReceipt)> {
-    let relative_path = PathBuf::from("training")
-        .join("runtime_artifacts")
-        .join(run_id)
-        .join("retention_policy_receipt.json");
-    let absolute_path = dataset_root.join(&relative_path);
-    let mut policy = TrainingRetentionPolicy::new(dataset_root)?.with_delete_mode(delete_mode);
-    if let Some(threshold_bytes) = threshold_bytes {
-        policy = policy.with_threshold_bytes(threshold_bytes);
-    }
-    let receipt = policy.enforce(&absolute_path)?;
-    Ok((relative_path, receipt))
+fn operator_intervention_error(error: impl std::fmt::Display) -> io::Error {
+    io::Error::other(format!("operator_intervention_required:{error}"))
 }

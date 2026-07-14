@@ -1,4 +1,7 @@
 use arrow_schema::DataType;
+use data_collect::binance_aggtrade::{
+    BinanceAggTradeOutput, BinanceRestAggTrade, BinanceWsAggTrade,
+};
 use data_collect::event::{
     EventEnvelope, HostClockSyncStatus, RawEvidence, SourceKind, SourceTimestamp,
 };
@@ -107,7 +110,6 @@ fn binance_depth_update_hourly_row_keeps_official_fields_and_stitch_evidence() {
     assert_eq!(row.asks, r#"[["101.00","2.0"]]"#);
     assert_eq!(row.snapshot_last_update_id, 100);
     assert_eq!(row.local_u_before, None);
-    assert_eq!(row.local_u_after, Some(103));
     assert_eq!(row.stitch_verdict, "U <= lastUpdateId + 1 <= u");
     assert!(row.validate().is_complete());
 }
@@ -116,7 +118,7 @@ fn binance_depth_update_hourly_row_keeps_official_fields_and_stitch_evidence() {
 fn binance_aggtrade_hourly_row_keeps_event_and_trade_times_with_identifiers() {
     let raw_trade = r#"{
         "e":"aggTrade","E":1766789469958,"s":"BTCUSDT","a":123,
-        "p":"100.50","q":"0.1","f":10,"l":12,"T":1766789469000,"m":true
+        "p":"100.50","q":"0.1","f":10,"l":12,"T":1766789469000,"m":true,"M":false
     }"#;
     let trade = parse_aggtrade_raw(
         envelope(SourceKind::BinanceAggTrade, "aggTrade", raw_trade),
@@ -125,8 +127,8 @@ fn binance_aggtrade_hourly_row_keeps_event_and_trade_times_with_identifiers() {
     .expect("parse aggTrade");
     let row = BinanceAggTradeHourlyRow::from_raw(&trade);
 
-    assert_eq!(row.event_type, "aggTrade");
-    assert_eq!(row.event_time, 1_766_789_469_958);
+    assert_eq!(row.event_type.as_deref(), Some("aggTrade"));
+    assert_eq!(row.event_time, Some(1_766_789_469_958));
     assert_eq!(row.trade_time, 1_766_789_469_000);
     assert_eq!(row.symbol, "BTCUSDT");
     assert_eq!(row.aggregate_trade_id, 123);
@@ -135,7 +137,89 @@ fn binance_aggtrade_hourly_row_keeps_event_and_trade_times_with_identifiers() {
     assert_eq!(row.first_trade_id, 10);
     assert_eq!(row.last_trade_id, 12);
     assert!(row.buyer_is_maker);
+    assert_eq!(row.ingest_source, "websocket");
+    assert_eq!(
+        row.websocket_timestamp_received,
+        Some(row.timestamp_received)
+    );
+    assert_eq!(row.rest_backfill_timestamp_received, None);
+    assert_eq!(row.ws_ignore, Some(false));
+    assert_eq!(row.rest_was_best_price_match, None);
+    assert!(row.source_native_payload_json.contains("binance_aggtrade"));
     assert!(row.validate().is_complete());
+}
+
+#[test]
+fn binance_aggtrade_rest_and_merged_rows_keep_real_ingress_semantics() {
+    let websocket = BinanceWsAggTrade::from_wire(
+        &serde_json::json!({
+            "e":"aggTrade","E":1766789469958_i64,"s":"BTCUSDT","a":123_u64,
+            "p":"100.50","q":"0.1","f":10_u64,"l":12_u64,"T":1766789469000_i64,
+            "m":true,"M":false
+        }),
+        "btcusdt@aggTrade",
+        1_766_789_470_100,
+    )
+    .unwrap();
+    let rest = BinanceRestAggTrade::from_wire(
+        &serde_json::json!({
+            "a":123_u64,"p":"100.50","q":"0.1","f":10_u64,"l":12_u64,
+            "T":1766789469000_i64,"m":true,"M":true
+        }),
+        1_766_789_470_300,
+    )
+    .unwrap();
+    let rest_only = BinanceAggTradeHourlyRow::from_output(
+        &BinanceAggTradeOutput::RestBackfill(rest.clone()),
+        "collector-host",
+        "eu-west-1",
+        "wss://stream.binance.com:9443/ws/btcusdt@aggTrade",
+        "https://api.binance.com/api/v3/aggTrades",
+    )
+    .unwrap();
+    assert_eq!(rest_only.timestamp_received, 1_766_789_470_300);
+    assert_eq!(rest_only.websocket_timestamp_received, None);
+    assert_eq!(
+        rest_only.rest_backfill_timestamp_received,
+        Some(1_766_789_470_300)
+    );
+    assert_eq!(rest_only.event_type, None);
+    assert_eq!(rest_only.event_time, None);
+    assert_eq!(rest_only.stream, None);
+    assert_eq!(rest_only.ws_ignore, None);
+    assert_eq!(rest_only.rest_was_best_price_match, Some(true));
+    assert!(rest_only.validate().is_complete());
+
+    let merged = BinanceAggTradeHourlyRow::from_output(
+        &BinanceAggTradeOutput::WebsocketRestMerged {
+            websocket,
+            rest_backfill: rest,
+        },
+        "collector-host",
+        "eu-west-1",
+        "wss://stream.binance.com:9443/ws/btcusdt@aggTrade",
+        "https://api.binance.com/api/v3/aggTrades",
+    )
+    .unwrap();
+    assert_eq!(merged.timestamp_received, 1_766_789_470_300);
+    assert_eq!(merged.websocket_timestamp_received, Some(1_766_789_470_100));
+    assert_eq!(
+        merged.rest_backfill_timestamp_received,
+        Some(1_766_789_470_300)
+    );
+    assert_eq!(merged.event_type.as_deref(), Some("aggTrade"));
+    assert_eq!(merged.ws_ignore, Some(false));
+    assert_eq!(merged.rest_was_best_price_match, Some(true));
+    assert!(merged.validate().is_complete());
+
+    let mut invalid = merged;
+    invalid.rest_backfill_timestamp_received = Some(0);
+    assert!(
+        invalid
+            .validate()
+            .missing_fields
+            .contains(&"rest_backfill_timestamp_received".to_owned())
+    );
 }
 
 #[test]
@@ -151,6 +235,9 @@ fn rtds_chainlink_hourly_row_keeps_timestamps_topic_filter_and_value() {
         symbol: "btc/usd".to_owned(),
         value: "100000".to_owned(),
         source_topic: "crypto_prices_chainlink".to_owned(),
+        message_type: "update".to_owned(),
+        age_ms: Some(199),
+        freshness_status: "fresh".to_owned(),
         subscription_raw_json:
             r#"{"action":"subscribe","topic":"crypto_prices_chainlink","type":"*","filters":"{\"symbol\":\"btc/usd\"}"}"#
                 .to_owned(),
@@ -161,11 +248,56 @@ fn rtds_chainlink_hourly_row_keeps_timestamps_topic_filter_and_value() {
 
     assert_eq!(row.message_timestamp, 1_766_789_469_900);
     assert_eq!(row.payload_timestamp, 1_766_789_469_800);
+    assert_eq!(row.age_ms, Some(199));
     assert_eq!(row.symbol, "btc/usd");
     assert_eq!(row.value, "100000");
     assert_eq!(row.topic, "crypto_prices_chainlink");
+    assert_eq!(row.message_type, "update");
+    assert_eq!(row.freshness_status, "fresh");
     assert!(row.subscription_filter.contains("btc/usd"));
+    assert!(
+        row.source_native_payload_json
+            .contains("polymarket_rtds_chainlink_btc_usd")
+    );
     assert!(row.validate().is_complete());
+}
+
+#[test]
+fn rtds_seconds_timestamps_remain_valid_invalid_timestamp_facts() {
+    const RECEIVE_MS: i64 = 1_766_789_469_999;
+    const SECONDS: i64 = 1_766_789_469;
+    let raw = |message_timestamp_ms: i64, payload_timestamp_ms: i64| {
+        RtdsChainlinkBtcUsdRaw {
+            envelope: envelope(
+                SourceKind::PolymarketRtdsChainlinkBtcUsd,
+                "crypto_prices_chainlink",
+                r#"{"topic":"crypto_prices_chainlink","type":"update"}"#,
+            ),
+            message_timestamp_ms,
+            payload_timestamp_ms,
+            symbol: "btc/usd".to_owned(),
+            value: "100000".to_owned(),
+            source_topic: "crypto_prices_chainlink".to_owned(),
+            message_type: "update".to_owned(),
+            age_ms: RECEIVE_MS.checked_sub(payload_timestamp_ms),
+            freshness_status: "invalid_timestamp".to_owned(),
+            subscription_raw_json:
+                r#"{"action":"subscribe","topic":"crypto_prices_chainlink","type":"*","filters":"{\"symbol\":\"btc/usd\"}"}"#
+                    .to_owned(),
+            ack_or_first_message_evidence: Some(
+                "first crypto_prices_chainlink message".to_owned(),
+            ),
+            close_or_error_evidence: None,
+        }
+    };
+
+    for invalid in [raw(SECONDS, RECEIVE_MS), raw(RECEIVE_MS, SECONDS)] {
+        assert!(
+            RtdsChainlinkBtcUsdHourlyRow::from_raw(&invalid)
+                .validate()
+                .is_complete()
+        );
+    }
 }
 
 #[test]
@@ -205,7 +337,6 @@ fn schemas_contain_source_specific_typed_fields() {
                 "asks",
                 "snapshot_last_update_id",
                 "local_u_before",
-                "local_u_after",
                 "stitch_verdict",
             ],
         ),
@@ -222,6 +353,7 @@ fn schemas_contain_source_specific_typed_fields() {
                 "first_trade_id",
                 "last_trade_id",
                 "buyer_is_maker",
+                "source_native_payload_json",
             ],
         ),
         (
@@ -230,10 +362,14 @@ fn schemas_contain_source_specific_typed_fields() {
                 "timestamp_received",
                 "message_timestamp",
                 "payload_timestamp",
+                "age_ms",
                 "symbol",
                 "value",
                 "topic",
+                "message_type",
+                "freshness_status",
                 "subscription_filter",
+                "source_native_payload_json",
             ],
         ),
     ] {
@@ -248,6 +384,11 @@ fn schemas_contain_source_specific_typed_fields() {
             DataType::Timestamp(_, Some(timezone)) if timezone.as_ref() == "UTC"
         ));
     }
+    assert!(
+        binance_depth_update_schema()
+            .field_with_name("local_u_after")
+            .is_err()
+    );
 }
 
 #[test]

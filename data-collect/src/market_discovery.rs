@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::str::FromStr as _;
 
 use polymarket_client_sdk_v2::clob::ws::SubscriptionRequest;
@@ -47,6 +48,8 @@ pub struct BtcUpdownMarketCandidate {
     pub reward_eligibility_raw: Option<String>,
     pub raw_json_sha256: Option<String>,
     pub raw_json: Option<String>,
+    pub metadata_fetch_start_utc_ms: Option<i64>,
+    pub metadata_received_utc_ms: Option<i64>,
 }
 
 impl BtcUpdownMarketCandidate {
@@ -88,6 +91,8 @@ impl BtcUpdownMarketCandidate {
             reward_eligibility_raw: reward_eligibility_raw(market),
             raw_json_sha256,
             raw_json,
+            metadata_fetch_start_utc_ms: None,
+            metadata_received_utc_ms: None,
         }
     }
 }
@@ -111,6 +116,8 @@ pub struct DiscoveredBtcUpdownMarket {
     pub reward_eligibility_raw: Option<String>,
     pub raw_json_sha256: Option<String>,
     pub raw_json: Option<String>,
+    pub metadata_fetch_start_utc_ms: Option<i64>,
+    pub metadata_received_utc_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +133,43 @@ pub struct BtcUpdownDiscoveryPair {
     pub current: DiscoveredBtcUpdownMarket,
     pub next: DiscoveredBtcUpdownMarket,
     pub relation: BtcUpdownPairRelation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BtcUpdownDiscovery {
+    pub current: DiscoveredBtcUpdownMarket,
+    pub next: Option<DiscoveredBtcUpdownMarket>,
+    pub relation: Option<BtcUpdownPairRelation>,
+}
+
+impl BtcUpdownDiscovery {
+    #[must_use]
+    pub fn asset_ids(&self) -> BTreeSet<String> {
+        let mut assets = BTreeSet::from([
+            self.current.up_asset_id.clone(),
+            self.current.down_asset_id.clone(),
+        ]);
+        if let Some(next) = &self.next {
+            assets.insert(next.up_asset_id.clone());
+            assets.insert(next.down_asset_id.clone());
+        }
+        assets
+    }
+
+    pub fn attach_next(
+        &mut self,
+        candidates: &[BtcUpdownMarketCandidate],
+    ) -> Result<bool, DiscoverySelectionError> {
+        if self.next.is_some() {
+            return Ok(false);
+        }
+        let Some((next, relation)) = select_btc_updown_next(&self.current, candidates)? else {
+            return Ok(false);
+        };
+        self.next = Some(next);
+        self.relation = Some(relation);
+        Ok(true)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -200,10 +244,59 @@ pub fn select_btc_updown_pair(
     current_candidates: &[BtcUpdownMarketCandidate],
     next_candidates: &[BtcUpdownMarketCandidate],
 ) -> Result<BtcUpdownDiscoveryPair, DiscoverySelectionError> {
+    let selection = select_btc_updown_markets(now_ms, current_candidates, next_candidates)?;
+    let next = selection
+        .next
+        .ok_or_else(|| DiscoverySelectionError::MissingNextCandidate {
+            expected_slug: discovery_windows(now_ms).next.slug,
+        })?;
+    let relation = selection
+        .relation
+        .expect("a selected next market has a validated relation");
+
+    Ok(BtcUpdownDiscoveryPair {
+        current: selection.current,
+        next,
+        relation,
+    })
+}
+
+pub fn select_btc_updown_markets(
+    now_ms: i64,
+    current_candidates: &[BtcUpdownMarketCandidate],
+    next_candidates: &[BtcUpdownMarketCandidate],
+) -> Result<BtcUpdownDiscovery, DiscoverySelectionError> {
     let windows = discovery_windows(now_ms);
     let current = select_one(current_candidates, &windows.current, CandidateKind::Current)?;
-    let next = select_one(next_candidates, &windows.next, CandidateKind::Next)?;
+    let selected_next = select_btc_updown_next(&current, next_candidates)?;
+    let (next, relation) = selected_next.map_or((None, None), |(next, relation)| {
+        (Some(next), Some(relation))
+    });
 
+    Ok(BtcUpdownDiscovery {
+        current,
+        next,
+        relation,
+    })
+}
+
+pub fn select_btc_updown_next(
+    current: &DiscoveredBtcUpdownMarket,
+    next_candidates: &[BtcUpdownMarketCandidate],
+) -> Result<Option<(DiscoveredBtcUpdownMarket, BtcUpdownPairRelation)>, DiscoverySelectionError> {
+    if next_candidates.is_empty() {
+        return Ok(None);
+    }
+    let next_window = market_window(current.start_ts_s + BTC_UPDOWN_5M_STEP_SECONDS);
+    let next = select_one(next_candidates, &next_window, CandidateKind::Next)?;
+    let relation = validated_pair_relation(current, &next)?;
+    Ok(Some((next, relation)))
+}
+
+fn validated_pair_relation(
+    current: &DiscoveredBtcUpdownMarket,
+    next: &DiscoveredBtcUpdownMarket,
+) -> Result<BtcUpdownPairRelation, DiscoverySelectionError> {
     let relation = BtcUpdownPairRelation {
         same_series_prefix: current.slug.starts_with(BTC_UPDOWN_5M_SERIES_PREFIX)
             && next.slug.starts_with(BTC_UPDOWN_5M_SERIES_PREFIX),
@@ -211,20 +304,15 @@ pub fn select_btc_updown_pair(
         condition_ids_distinct: current.condition_id != next.condition_id,
         cadence_seconds: next.start_ts_s - current.start_ts_s,
     };
-
-    if !relation.same_series_prefix
-        || !relation.windows_contiguous
-        || !relation.condition_ids_distinct
-        || relation.cadence_seconds != BTC_UPDOWN_5M_STEP_SECONDS
+    if relation.same_series_prefix
+        && relation.windows_contiguous
+        && relation.condition_ids_distinct
+        && relation.cadence_seconds == BTC_UPDOWN_5M_STEP_SECONDS
     {
-        return Err(DiscoverySelectionError::PairRelationInvalid);
+        Ok(relation)
+    } else {
+        Err(DiscoverySelectionError::PairRelationInvalid)
     }
-
-    Ok(BtcUpdownDiscoveryPair {
-        current,
-        next,
-        relation,
-    })
 }
 
 pub fn build_market_subscription_request_json(asset_ids: &[String]) -> Result<String, String> {
@@ -351,6 +439,8 @@ fn validate_candidate(
         reward_eligibility_raw: candidate.reward_eligibility_raw.clone(),
         raw_json_sha256: candidate.raw_json_sha256.clone(),
         raw_json: candidate.raw_json.clone(),
+        metadata_fetch_start_utc_ms: candidate.metadata_fetch_start_utc_ms,
+        metadata_received_utc_ms: candidate.metadata_received_utc_ms,
     })
 }
 

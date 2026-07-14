@@ -7,11 +7,10 @@ fn context() -> PolymarketMarketMetadataContext {
     PolymarketMarketMetadataContext {
         timestamp_received_ms: 1_783_392_404_599,
         metadata_fetch_start_utc_ms: Some(1_783_392_404_100),
-        metadata_recv_time_utc_ms: Some(1_783_392_404_599),
         collector_host_id: "collector-host".to_owned(),
         collector_region: "eu-west-1".to_owned(),
         source_endpoint: "https://gamma-api.polymarket.com/markets".to_owned(),
-        schema_version: "polymarket_market_metadata_v1".to_owned(),
+        schema_version: "polymarket_market_metadata_v2".to_owned(),
     }
 }
 
@@ -121,12 +120,10 @@ fn schema_contains_metadata_columns() {
     for field in [
         "timestamp_received",
         "metadata_fetch_start_utc",
-        "metadata_recv_time_utc",
         "slug",
         "condition_id",
         "clob_market_id",
         "asset_ids",
-        "token_ids",
         "market_start_utc",
         "market_end_utc",
         "active",
@@ -142,6 +139,8 @@ fn schema_contains_metadata_columns() {
     ] {
         schema.field_with_name(field).expect(field);
     }
+    assert!(schema.field_with_name("metadata_recv_time_utc").is_err());
+    assert!(schema.field_with_name("token_ids").is_err());
     assert!(matches!(
         schema
             .field_with_name("timestamp_received")

@@ -1,0 +1,20 @@
+[Unit]
+Description=BTC up/down training data collector
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/home/ubuntu/btc-updown-marketmaker/data-collect/bin/data-collect-training-collector --dataset-root /home/ubuntu/btc-updown-marketmaker/datasets --collector-region eu-west-1 --run-forever --max-dataset-bytes 50000000000
+Restart=on-failure
+RestartSec=10
+RestartPreventExitStatus=75 76
+KillSignal=SIGTERM
+TimeoutStopSec=120
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

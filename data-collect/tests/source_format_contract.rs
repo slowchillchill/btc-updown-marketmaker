@@ -57,7 +57,6 @@ fn polymarket_market_schema_requires_subscription_and_platform_timestamp() {
         market_id: Some("market-1".to_owned()),
         condition_id: Some("condition-1".to_owned()),
         asset_ids: vec!["asset-1".to_owned(), "asset-2".to_owned()],
-        token_ids: vec!["asset-1".to_owned(), "asset-2".to_owned()],
         subscription: subscription(),
     };
 
@@ -145,7 +144,6 @@ fn polymarket_metadata_schema_rejects_slug_only_discovery() {
             r#"{"event_type":"new_market","condition_id":"condition-1"}"#,
         ),
         condition_id: "condition-1".to_owned(),
-        token_ids: vec!["token-1".to_owned(), "token-2".to_owned()],
         asset_ids: vec!["asset-1".to_owned(), "asset-2".to_owned()],
         clob_market_id: "clob-1".to_owned(),
         slug: "btc-updown-5m-1766789400".to_owned(),
@@ -288,7 +286,7 @@ fn binance_aggtrade_schema_keeps_full_trade_fields() {
         envelope: envelope(
             SourceKind::BinanceAggTrade,
             "aggTrade",
-            r#"{"e":"aggTrade","E":1,"s":"BTCUSDT","a":2,"p":"100","q":"0.1","f":3,"l":4,"T":5,"m":true}"#,
+            r#"{"e":"aggTrade","E":1,"s":"BTCUSDT","a":2,"p":"100","q":"0.1","f":3,"l":4,"T":5,"m":true,"M":false}"#,
         ),
         event_type: "aggTrade".to_owned(),
         event_time_ms: 1,
@@ -300,6 +298,7 @@ fn binance_aggtrade_schema_keeps_full_trade_fields() {
         last_trade_id: 4,
         trade_time_ms: 5,
         buyer_is_maker: true,
+        ws_ignore: false,
         stream_name: "btcusdt@aggTrade".to_owned(),
     };
 
@@ -322,6 +321,9 @@ fn rtds_chainlink_schema_keeps_subscription_and_timestamps() {
         symbol: "btc/usd".to_owned(),
         value: "100000".to_owned(),
         source_topic: "crypto_prices_chainlink".to_owned(),
+        message_type: "update".to_owned(),
+        age_ms: Some(199),
+        freshness_status: "fresh".to_owned(),
         subscription_raw_json:
             r#"{"action":"subscribe","topic":"crypto_prices_chainlink","type":"*","filters":"{\"symbol\":\"btc/usd\"}"}"#
                 .to_owned(),

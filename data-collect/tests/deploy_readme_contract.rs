@@ -3,135 +3,122 @@ use std::path::{Path, PathBuf};
 
 const README: &str = "data-collect/docs/training-collector-deploy-readme.md";
 const HOT_DOC: &str = "data-collect/docs/paper-live-hot-path-integration.md";
-const SYSTEMD: &str = "data-collect/deploy/systemd/data-collect-training-collector.service.example";
-const GATE_SYSTEMD: &str =
-    "data-collect/deploy/systemd/data-collect-training-collector-gate.service.example";
-const EXPORT_SCRIPT: &str = "data-collect/scripts/export-release-artifacts.sh";
+const SYSTEMD: &str = "data-collect/deploy/systemd/data-collect-training-collector.service";
 
 #[test]
-fn training_deploy_readme_contains_binary_only_remote_flow() {
+fn training_deploy_readme_describes_single_binary_single_unit_flow() {
     let readme = read(README);
 
     for expected in [
-        "cd /home/chillchill/btc-updown-marketmaker",
-        "data-collect/scripts/export-release-artifacts.sh",
-        "data-collect-training-collector",
-        "train-data-collect-ver1-0",
-        "data-collect-retention-admin",
-        "data-collect-paper-hot",
-        "data-collect-live-hot",
-        "sha256sum -c SHA256SUMS",
-        "mkdir -p ~/btc-updown-marketmaker/data-collect/releases",
-        "data-collect/releases/$RELEASE_ID",
-        "~/btc-updown-marketmaker/datasets",
-        "--max-runtime-secs 900",
+        "cargo build --release --locked -p data-collect --bin data-collect-training-collector",
+        "target/release/data-collect-training-collector",
+        "/home/ubuntu/btc-updown-marketmaker/data-collect/bin/data-collect-training-collector",
+        "/home/ubuntu/.config/systemd/user/data-collect-training-collector.service",
+        "data-collect/deploy/systemd/data-collect-training-collector.service",
+        "--dataset-root /home/ubuntu/btc-updown-marketmaker/datasets",
+        "--collector-region eu-west-1",
         "--run-forever",
-        "--retention-delete-mode enabled",
-        "--retention-threshold-bytes 50000000000",
-        "systemctl --user show",
-        "systemctl --user is-active --quiet",
-        "binary sha256",
-        "git commit",
-        "config digest",
-        "dataset root canonical path",
-        "collector host",
-        "collector region",
-        "binary role",
-        "不再检查 source_coverage.json",
-        "不再检查 source_gaps.json",
-        "不再检查 rollover_edges.json",
-        "不得生成 write_receipts.jsonl",
-        "不得生成 queue_samples.jsonl",
-        "不得生成 retention_after_finalize_",
-        "source_writer_stats",
-        "shutdown_stage_timings",
-        "shutdown_retention_scan_budget_ms",
-        "retention_shutdown_scan.status=skipped",
-        "metadata source coverage",
-        "cleanup_allowlist.json",
-        "回滚方法",
-        "PREVIOUS_RELEASE",
-        "runtime_mode=run_forever",
-        "run_started_utc_ms",
-        "systemd_unit_name=data-collect-training-collector.service",
-        "systemd_restart_policy",
-        "RestartPreventExitStatus=75",
-        "run_manifest_atomic_write",
-        "systemctl --user enable --now data-collect-training-collector.service",
-        "不得 enable --now",
-        "paper/live 服务器不得运行 cargo",
-        "live 小主机不得承担训练重处理",
+        "--max-dataset-bytes 50000000000",
+        "Restart=on-failure",
+        "RestartPreventExitStatus=75 76",
+        "StartLimitIntervalSec=600",
+        "StartLimitBurst=5",
+        "Restart=no",
+        "dataset_capacity_reached",
+        "--help",
+        "--version",
+        "每个 UTC 日只能有一个 `manifest.json`",
+        "data-pipeline 只消费 `closed` 日",
+        "*.running",
+        "manifest.json.tmp",
+        "不生成独立报告",
+        "远端服务器禁止编译 Rust",
+        "paper/live 源码 binary 仍可分别",
+        "failed_gate",
+        "failed_long_running",
+        "partial_replace",
     ] {
         assert!(readme.contains(expected), "README missing {expected}");
     }
 
-    assert!(!readme.contains("/home/ubuntu/btc-updown-marketmaker"));
-}
-
-#[test]
-fn systemd_example_uses_server_local_home_paths_and_live_mode() {
-    let systemd = read(SYSTEMD);
-
-    assert!(systemd.contains("WorkingDirectory=%h/btc-updown-marketmaker"));
-    assert!(systemd.contains("DATA_COLLECT_RUNTIME_MODE=live"));
-    assert!(systemd.contains("DATA_COLLECT_SYSTEMD_UNIT=data-collect-training-collector.service"));
-    assert!(systemd.contains(
-        "DATA_COLLECT_SYSTEMD_RESTART_POLICY=Restart=always;RestartPreventExitStatus=75"
-    ));
-    assert!(
-        systemd.contains(
-            "%h/btc-updown-marketmaker/data-collect/current/bin/train-data-collect-ver1-0"
-        )
-    );
-    assert!(systemd.contains("--dataset-root %h/btc-updown-marketmaker/datasets"));
-    assert!(systemd.contains("--collector-region eu-west-1"));
-    assert!(systemd.contains("--run-forever"));
-    assert!(systemd.contains("--retention-delete-mode enabled"));
-    assert!(systemd.contains("Restart=always"));
-    assert!(systemd.contains("RestartPreventExitStatus=75"));
-    assert!(!systemd.contains("/home/chillchill/btc-updown-marketmaker"));
-
-    let gate = read(GATE_SYSTEMD);
-    assert!(
-        gate.contains("DATA_COLLECT_SYSTEMD_UNIT=data-collect-training-collector-gate.service")
-    );
-    assert!(gate.contains("DATA_COLLECT_SYSTEMD_RESTART_POLICY=Restart=no"));
-    assert!(gate.contains("--max-runtime-secs 7200"));
-    assert!(gate.contains("--retention-delete-mode dry-run"));
-    assert!(gate.contains("Restart=no"));
-    assert!(!gate.contains("--run-forever"));
-}
-
-#[test]
-fn export_script_packages_binaries_docs_service_and_sha256s() {
-    let script = read(EXPORT_SCRIPT);
-
-    for expected in [
-        "cargo build -p data-collect --release",
-        "--bin data-collect-training-collector",
-        "--bin data-collect-retention-admin",
-        "--bin data-collect-paper-hot",
-        "--bin data-collect-live-hot",
-        "bin/data-collect-training-collector",
-        "bin/train-data-collect-ver1-0",
-        "bin/data-collect-retention-admin",
-        "bin/data-collect-paper-hot",
-        "bin/data-collect-live-hot",
-        "deploy/systemd/data-collect-training-collector.service.example",
-        "deploy/systemd/data-collect-training-collector-gate.service.example",
-        "docs/training-collector-deploy-readme.md",
-        "docs/paper-live-hot-path-integration.md",
-        "RELEASE_INFO.env",
+    for forbidden in [
+        "export-release-artifacts.sh",
+        "train-data-collect-ver1-0",
+        "data-collect-retention-admin",
         "SHA256SUMS",
-        "refusing formal train-data-collect-ver1-0 release from dirty worktree",
-        "data-collect/releases/$RELEASE_ID",
+        "RELEASE_INFO.env",
+        "service.example",
+        "retention receipt",
+        "run_manifests/<run_id>",
+        "data-collect/current",
     ] {
-        assert!(script.contains(expected), "script missing {expected}");
+        assert!(
+            !readme.contains(forbidden),
+            "README retains obsolete deployment path {forbidden}"
+        );
     }
 }
 
 #[test]
-fn paper_live_hot_path_doc_states_non_deployment_and_runtime_boundary() {
+fn repository_has_one_authoritative_training_unit() {
+    let systemd = read(SYSTEMD);
+    let expected_exec_start = "ExecStart=/home/ubuntu/btc-updown-marketmaker/data-collect/bin/data-collect-training-collector --dataset-root /home/ubuntu/btc-updown-marketmaker/datasets --collector-region eu-west-1 --run-forever --max-dataset-bytes 50000000000";
+
+    assert!(systemd.contains(expected_exec_start));
+    for expected in [
+        "Restart=on-failure",
+        "RestartSec=10",
+        "RestartPreventExitStatus=75 76",
+        "KillSignal=SIGTERM",
+        "TimeoutStopSec=120",
+        "StartLimitIntervalSec=600",
+        "StartLimitBurst=5",
+        "StandardOutput=journal",
+        "StandardError=journal",
+    ] {
+        assert!(systemd.contains(expected), "unit missing {expected}");
+    }
+    for forbidden in [
+        "Restart=always",
+        "current/",
+        "retention",
+        "run-id",
+        ".service.example",
+    ] {
+        assert!(
+            !systemd.contains(forbidden),
+            "unit retains obsolete setting {forbidden}"
+        );
+    }
+
+    let unit_dir = resolve("data-collect/deploy/systemd");
+    let mut files = fs::read_dir(unit_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    files.sort();
+    assert_eq!(files, vec!["data-collect-training-collector.service"]);
+}
+
+#[test]
+fn obsolete_release_retention_and_archive_entrypoints_are_absent() {
+    for obsolete in [
+        "data-collect/scripts/export-release-artifacts.sh",
+        "data-collect/scripts/run_daily_new_datasets_archive.sh",
+        "data-collect/tests/test_daily_new_datasets_archive.py",
+        "data-collect/src/bin/data_collect_retention_admin.rs",
+        "data-collect/src/retention.rs",
+        "data-collect/src/retention_admin.rs",
+    ] {
+        assert!(
+            !resolve(obsolete).exists(),
+            "obsolete path remains: {obsolete}"
+        );
+    }
+}
+
+#[test]
+fn paper_live_hot_path_doc_preserves_independent_runtime_boundary() {
     let doc = read(HOT_DOC);
 
     for expected in [
@@ -146,26 +133,28 @@ fn paper_live_hot_path_doc_states_non_deployment_and_runtime_boundary() {
         "不接管交易逻辑",
         "NOE/ledger",
         "execution feedback",
-        "当前阶段只验证 frame contract、heartbeat/status server 和 fake consumer",
-        "data-collect-paper-hot --dataset-root ~/btc-updown-marketmaker/datasets",
-        "data-collect-live-hot --dataset-root ~/btc-updown-marketmaker/datasets",
+        "只消费 `state=closed` 日期",
+        "不使用独立 sidecar 或 receipt",
     ] {
         assert!(doc.contains(expected), "hot path doc missing {expected}");
     }
 
     assert!(!doc.contains("当前阶段已验证真实 paper/live external_market_event"));
+    assert!(!doc.contains("retention receipt"));
+}
+
+fn resolve(path: &str) -> PathBuf {
+    let package_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let path_from_workspace = package_root.parent().unwrap().join(path);
+    if path_from_workspace.exists() {
+        path_from_workspace
+    } else {
+        package_root.join(path.strip_prefix("data-collect/").unwrap_or(path))
+    }
 }
 
 fn read(path: &str) -> String {
-    let package_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let path_from_workspace = package_root.parent().unwrap().join(path);
-    let path_from_package = package_root.join(path.strip_prefix("data-collect/").unwrap_or(path));
-    let resolved = if path_from_workspace.is_file() {
-        path_from_workspace
-    } else {
-        path_from_package
-    };
-
+    let resolved = resolve(path);
     assert!(Path::new(&resolved).is_file(), "{path} must exist");
     fs::read_to_string(resolved).unwrap()
 }

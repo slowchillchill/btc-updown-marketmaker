@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 
-use arrow_array::{StringArray, TimestampMillisecondArray};
+use arrow_array::{Array as _, StringArray, TimestampMillisecondArray};
 use data_collect::RawEvent;
 use data_collect::polymarket_market_metadata_layout::{
     PolymarketMarketMetadataContext, PolymarketMarketMetadataRow,
@@ -146,10 +146,12 @@ fn parquet_writer_writes_pmxt_like_orderbook_schema() {
         PolymarketOrderbookContext {
             timestamp_received_ms: 1_783_392_404_599,
             slug: Some("btc-updown-5m-1783392300".to_owned()),
+            source_native_payload_json:
+                r#"{"source":"polymarket_market","event_type":"book"}"#.to_owned(),
             collector_host_id: "collector-host".to_owned(),
             collector_region: "eu-west-1".to_owned(),
             source_endpoint: "wss://ws-subscriptions-clob.polymarket.com/ws/market".to_owned(),
-            schema_version: "polymarket_orderbook_v1".to_owned(),
+            schema_version: "polymarket_orderbook_v2".to_owned(),
         },
     )
     .expect("valid book row");
@@ -157,7 +159,7 @@ fn parquet_writer_writes_pmxt_like_orderbook_schema() {
     let mut writer = TypedParquetSegmentWriter::create_polymarket_orderbook(
         tmp.path(),
         "polymarket-market-typed",
-        "polymarket_orderbook_v1",
+        "polymarket_orderbook_v2",
     )
     .unwrap();
     writer.write_polymarket_orderbook_rows(&[row]).unwrap();
@@ -202,7 +204,7 @@ fn parquet_writer_writes_pmxt_like_orderbook_schema() {
         metadata
             .get("parquet_raw_layout_version")
             .and_then(|value| value.as_deref()),
-        Some("polymarket_orderbook_v1")
+        Some("polymarket_orderbook_v2")
     );
     assert_eq!(
         metadata
@@ -243,7 +245,7 @@ fn typed_writer_writes_polymarket_market_metadata_rows() {
     let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
         tmp.path(),
         "metadata",
-        "polymarket_market_metadata_v1",
+        "polymarket_market_metadata_v2",
         "polymarket_market_metadata",
     )
     .unwrap();
@@ -265,11 +267,10 @@ fn typed_writer_writes_polymarket_market_metadata_rows() {
         PolymarketMarketMetadataContext {
             timestamp_received_ms: 1_783_392_404_599,
             metadata_fetch_start_utc_ms: Some(1_783_392_404_100),
-            metadata_recv_time_utc_ms: Some(1_783_392_404_599),
             collector_host_id: "collector-host".to_owned(),
             collector_region: "eu-west-1".to_owned(),
             source_endpoint: "https://gamma-api.polymarket.com/markets".to_owned(),
-            schema_version: "polymarket_market_metadata_v1".to_owned(),
+            schema_version: "polymarket_market_metadata_v2".to_owned(),
         },
     )
     .with_metadata_unavailable_reason(Some(
@@ -308,14 +309,14 @@ fn typed_writer_constructors_publish_source_specific_schema_metadata() {
     let cases = [
         (
             "polymarket_market_metadata",
-            "polymarket_market_metadata_v1",
+            "polymarket_market_metadata_v2",
         ),
         ("binance_depth_snapshot", "binance_depth_snapshot_v2"),
-        ("binance_depth_update", "binance_depth_update_v2"),
-        ("binance_aggtrade", "binance_aggtrade_v3"),
+        ("binance_depth_update", "binance_depth_update_v3"),
+        ("binance_aggtrade", "binance_aggtrade_v5"),
         (
             "polymarket_rtds_chainlink_btc_usd",
-            "polymarket_rtds_chainlink_btc_usd_v2",
+            "polymarket_rtds_chainlink_btc_usd_v4",
         ),
     ];
 
@@ -404,29 +405,65 @@ fn typed_writer_binance_aggtrade_schema_keeps_distinct_event_and_trade_times() {
     let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
         tmp.path(),
         "binance_aggtrade",
-        "binance_aggtrade_v3",
+        "binance_aggtrade_v5",
         "binance_aggtrade",
     )
     .unwrap();
     writer
-        .write_binance_aggtrade_rows(&[BinanceAggTradeHourlyRow {
-            timestamp_received: 1_766_789_470_100,
-            event_type: "aggTrade".to_owned(),
-            event_time: 1_766_789_469_958,
-            trade_time: 1_766_789_469_000,
-            symbol: "BTCUSDT".to_owned(),
-            aggregate_trade_id: 123,
-            price: "100.50".to_owned(),
-            quantity: "0.1".to_owned(),
-            first_trade_id: 10,
-            last_trade_id: 12,
-            buyer_is_maker: true,
-            stream: "btcusdt@aggTrade".to_owned(),
-            collector_host_id: "collector-host".to_owned(),
-            collector_region: "eu-west-1".to_owned(),
-            source_endpoint: "wss://stream.binance.com:9443/ws/btcusdt@aggTrade".to_owned(),
-            schema_version: "binance_aggtrade_v3".to_owned(),
-        }])
+        .write_binance_aggtrade_rows(&[
+            BinanceAggTradeHourlyRow {
+                timestamp_received: 1_766_789_470_100,
+                websocket_timestamp_received: Some(1_766_789_470_100),
+                rest_backfill_timestamp_received: None,
+                ingest_source: "websocket".to_owned(),
+                event_type: Some("aggTrade".to_owned()),
+                event_time: Some(1_766_789_469_958),
+                trade_time: 1_766_789_469_000,
+                symbol: "BTCUSDT".to_owned(),
+                aggregate_trade_id: 123,
+                price: "100.50".to_owned(),
+                quantity: "0.1".to_owned(),
+                first_trade_id: 10,
+                last_trade_id: 12,
+                buyer_is_maker: true,
+                stream: Some("btcusdt@aggTrade".to_owned()),
+                ws_ignore: Some(false),
+                rest_was_best_price_match: None,
+                source_native_payload_json:
+                    r#"{"websocket":"{\"source\":\"binance_aggtrade_websocket\",\"payload\":{\"a\":123}}","rest_backfill":null}"#
+                        .to_owned(),
+                collector_host_id: "collector-host".to_owned(),
+                collector_region: "eu-west-1".to_owned(),
+                source_endpoint: "wss://stream.binance.com:9443/ws/btcusdt@aggTrade".to_owned(),
+                schema_version: "binance_aggtrade_v5".to_owned(),
+            },
+            BinanceAggTradeHourlyRow {
+                timestamp_received: 1_766_789_470_300,
+                websocket_timestamp_received: None,
+                rest_backfill_timestamp_received: Some(1_766_789_470_300),
+                ingest_source: "rest_backfill".to_owned(),
+                event_type: None,
+                event_time: None,
+                trade_time: 1_766_789_469_100,
+                symbol: "BTCUSDT".to_owned(),
+                aggregate_trade_id: 124,
+                price: "100.60".to_owned(),
+                quantity: "0.2".to_owned(),
+                first_trade_id: 13,
+                last_trade_id: 14,
+                buyer_is_maker: false,
+                stream: None,
+                ws_ignore: None,
+                rest_was_best_price_match: Some(true),
+                source_native_payload_json:
+                    r#"{"websocket":null,"rest_backfill":"{\"source\":\"binance_aggtrade_rest\",\"payload\":{\"a\":124}}"}"#
+                        .to_owned(),
+                collector_host_id: "collector-host".to_owned(),
+                collector_region: "eu-west-1".to_owned(),
+                source_endpoint: "https://api.binance.com/api/v3/aggTrades".to_owned(),
+                schema_version: "binance_aggtrade_v5".to_owned(),
+            },
+        ])
         .unwrap();
     let published = writer.finalize().unwrap();
     let builder =
@@ -444,7 +481,39 @@ fn typed_writer_binance_aggtrade_schema_keeps_distinct_event_and_trade_times() {
         .as_any()
         .downcast_ref::<TimestampMillisecondArray>()
         .unwrap();
+    let ingest_source = batch
+        .column(batch.schema().index_of("ingest_source").unwrap())
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    let websocket_received = batch
+        .column(
+            batch
+                .schema()
+                .index_of("websocket_timestamp_received")
+                .unwrap(),
+        )
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .unwrap();
+    let rest_received = batch
+        .column(
+            batch
+                .schema()
+                .index_of("rest_backfill_timestamp_received")
+                .unwrap(),
+        )
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .unwrap();
 
     assert_eq!(event_time.value(0), 1_766_789_469_958);
+    assert!(event_time.is_null(1));
     assert_eq!(trade_time.value(0), 1_766_789_469_000);
+    assert_eq!(ingest_source.value(0), "websocket");
+    assert_eq!(ingest_source.value(1), "rest_backfill");
+    assert_eq!(websocket_received.value(0), 1_766_789_470_100);
+    assert!(websocket_received.is_null(1));
+    assert!(rest_received.is_null(0));
+    assert_eq!(rest_received.value(1), 1_766_789_470_300);
 }

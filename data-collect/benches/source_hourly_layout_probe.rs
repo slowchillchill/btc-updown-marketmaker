@@ -34,7 +34,7 @@ fn run_case(case_name: &str, sorted: bool, zstd_level: i32) {
     let mut writer = TypedParquetSegmentWriter::create_polymarket_orderbook_with_zstd_level(
         &root,
         case_name,
-        "polymarket_orderbook_v1",
+        "polymarket_orderbook_v2",
         zstd_level,
     )
     .expect("create typed writer");
@@ -92,10 +92,13 @@ fn synthetic_book_row(seq: u64) -> PolymarketOrderbookRow {
         PolymarketOrderbookContext {
             timestamp_received_ms: 1_783_392_400_000_i64 + seq as i64,
             slug: Some(format!("btc-updown-5m-{}", 1_783_392_300 + (seq / 4) % 12)),
+            source_native_payload_json: format!(
+                r#"{{"source":"polymarket_market","event_type":"book","sequence":{seq}}}"#
+            ),
             collector_host_id: "bench-host".to_owned(),
             collector_region: "local-dev".to_owned(),
             source_endpoint: "synthetic://polymarket-market".to_owned(),
-            schema_version: "polymarket_orderbook_v1".to_owned(),
+            schema_version: "polymarket_orderbook_v2".to_owned(),
         },
     )
     .expect("synthetic book row")

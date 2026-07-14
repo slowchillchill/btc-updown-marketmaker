@@ -8,6 +8,7 @@ use serde_json::Value;
 pub struct PolymarketOrderbookContext {
     pub timestamp_received_ms: i64,
     pub slug: Option<String>,
+    pub source_native_payload_json: String,
     pub collector_host_id: String,
     pub collector_region: String,
     pub source_endpoint: String,
@@ -37,6 +38,7 @@ pub struct PolymarketOrderbookRow {
     pub timestamp: Option<i64>,
     pub market: String,
     pub event_type: String,
+    pub source_native_payload_json: String,
     pub asset_id: Option<String>,
     pub bids: Option<String>,
     pub asks: Option<String>,
@@ -243,6 +245,17 @@ impl PolymarketOrderbookRow {
         }
         report.require_non_empty("market", Some(&self.market));
         report.require_non_empty("event_type", Some(&self.event_type));
+        report.require_non_empty(
+            "source_native_payload_json",
+            Some(&self.source_native_payload_json),
+        );
+        if !self.source_native_payload_json.trim().is_empty()
+            && serde_json::from_str::<Value>(&self.source_native_payload_json).is_err()
+        {
+            report
+                .missing_fields
+                .push("source_native_payload_json_parseable".to_owned());
+        }
         report.require_non_empty("collector_host_id", Some(&self.collector_host_id));
         report.require_non_empty("collector_region", Some(&self.collector_region));
         report.require_non_empty("source_endpoint", Some(&self.source_endpoint));
@@ -314,6 +327,7 @@ pub fn polymarket_orderbook_schema() -> Arc<Schema> {
         ),
         Field::new("market", DataType::Utf8, false),
         Field::new("event_type", DataType::Utf8, false),
+        Field::new("source_native_payload_json", DataType::Utf8, false),
         Field::new("asset_id", DataType::Utf8, true),
         Field::new("bids", DataType::Utf8, true),
         Field::new("asks", DataType::Utf8, true),
@@ -352,6 +366,7 @@ fn base_row(
         timestamp,
         market,
         event_type: event_type.to_owned(),
+        source_native_payload_json: context.source_native_payload_json,
         asset_id,
         bids: None,
         asks: None,

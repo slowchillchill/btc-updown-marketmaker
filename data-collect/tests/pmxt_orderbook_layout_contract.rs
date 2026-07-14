@@ -8,10 +8,12 @@ fn context() -> PolymarketOrderbookContext {
     PolymarketOrderbookContext {
         timestamp_received_ms: 1_783_392_404_599,
         slug: Some("btc-updown-5m-1783392300".to_owned()),
+        source_native_payload_json: r#"{"source":"polymarket_market","event_type":"book"}"#
+            .to_owned(),
         collector_host_id: "collector-host".to_owned(),
         collector_region: "eu-west-1".to_owned(),
         source_endpoint: "wss://ws-subscriptions-clob.polymarket.com/ws/market".to_owned(),
-        schema_version: "polymarket_orderbook_v1".to_owned(),
+        schema_version: "polymarket_orderbook_v2".to_owned(),
     }
 }
 
@@ -162,6 +164,7 @@ fn schema_contains_pmxt_and_project_fields() {
         "timestamp",
         "market",
         "event_type",
+        "source_native_payload_json",
         "asset_id",
         "bids",
         "asks",

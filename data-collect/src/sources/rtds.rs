@@ -143,6 +143,14 @@ pub fn build_chainlink_raw_event(
         return Err("envelope_source_kind_mismatch".to_owned());
     }
     trace.validate_chainlink_btc_usd()?;
+    let age_ms = envelope
+        .recv_time_utc_ms
+        .and_then(|received| received.checked_sub(payload_timestamp_ms));
+    let freshness_status = if age_ms.is_some_and(|age| (-5_000..=30_000).contains(&age)) {
+        "fresh"
+    } else {
+        "stale"
+    };
     Ok(RtdsChainlinkBtcUsdRaw {
         envelope,
         message_timestamp_ms,
@@ -150,6 +158,9 @@ pub fn build_chainlink_raw_event(
         symbol: symbol.into(),
         value: value.into(),
         source_topic: trace.topic.clone(),
+        message_type: "update".to_owned(),
+        age_ms,
+        freshness_status: freshness_status.to_owned(),
         subscription_raw_json: trace.raw_json.clone(),
         ack_or_first_message_evidence,
         close_or_error_evidence: None,

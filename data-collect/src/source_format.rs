@@ -3,6 +3,13 @@ use serde_json::Value;
 use crate::ValidationVerdict;
 use crate::event::{EventEnvelope, SourceKind};
 
+const MIN_PLAUSIBLE_UNIX_TIMESTAMP_MS: i64 = 1_000_000_000_000;
+const MAX_PLAUSIBLE_UNIX_TIMESTAMP_MS: i64 = 9_999_999_999_999;
+
+pub(crate) fn plausible_unix_timestamp_ms(timestamp: i64) -> bool {
+    (MIN_PLAUSIBLE_UNIX_TIMESTAMP_MS..=MAX_PLAUSIBLE_UNIX_TIMESTAMP_MS).contains(&timestamp)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FormatValidationReport {
     pub verdict: ValidationVerdict,
@@ -144,7 +151,6 @@ pub struct PolymarketMarketRaw {
     pub market_id: Option<String>,
     pub condition_id: Option<String>,
     pub asset_ids: Vec<String>,
-    pub token_ids: Vec<String>,
     pub subscription: PolymarketSubscriptionEvidence,
 }
 
@@ -163,7 +169,6 @@ impl PolymarketMarketRaw {
                 .push("market_or_condition_id".to_owned());
         }
         report.require_non_empty_vec("asset_ids", &self.asset_ids);
-        report.require_non_empty_vec("token_ids", &self.token_ids);
         self.subscription.validate_into(&mut report);
         report.finish()
     }
@@ -242,7 +247,6 @@ pub enum MarketLifecycleState {
 pub struct PolymarketMarketMetadataRaw {
     pub envelope: EventEnvelope,
     pub condition_id: String,
-    pub token_ids: Vec<String>,
     pub asset_ids: Vec<String>,
     pub clob_market_id: String,
     pub slug: String,
@@ -269,7 +273,6 @@ impl PolymarketMarketMetadataRaw {
             report.missing_fields.push("source_kind".to_owned());
         }
         report.require_non_empty("condition_id", &self.condition_id);
-        report.require_non_empty_vec("token_ids", &self.token_ids);
         report.require_non_empty_vec("asset_ids", &self.asset_ids);
         report.require_non_empty("clob_market_id", &self.clob_market_id);
         report.require_non_empty("slug", &self.slug);
@@ -422,6 +425,7 @@ pub struct BinanceAggTradeRaw {
     pub last_trade_id: u64,
     pub trade_time_ms: i64,
     pub buyer_is_maker: bool,
+    pub ws_ignore: bool,
     pub stream_name: String,
 }
 
@@ -464,6 +468,9 @@ pub struct RtdsChainlinkBtcUsdRaw {
     pub symbol: String,
     pub value: String,
     pub source_topic: String,
+    pub message_type: String,
+    pub age_ms: Option<i64>,
+    pub freshness_status: String,
     pub subscription_raw_json: String,
     pub ack_or_first_message_evidence: Option<String>,
     pub close_or_error_evidence: Option<String>,
@@ -476,15 +483,30 @@ impl RtdsChainlinkBtcUsdRaw {
         if self.envelope.source_kind != SourceKind::PolymarketRtdsChainlinkBtcUsd {
             report.missing_fields.push("source_kind".to_owned());
         }
-        if self.message_timestamp_ms <= 0 {
+        if self.message_timestamp_ms <= 0 && self.freshness_status != "invalid_timestamp" {
             report.missing_fields.push("message_timestamp".to_owned());
         }
-        if self.payload_timestamp_ms <= 0 {
+        if self.payload_timestamp_ms <= 0 && self.freshness_status != "invalid_timestamp" {
             report.missing_fields.push("payload_timestamp".to_owned());
         }
         report.require_non_empty("symbol", &self.symbol);
         report.require_non_empty("value", &self.value);
         report.require_non_empty("source_topic", &self.source_topic);
+        report.require_non_empty("message_type", &self.message_type);
+        if !matches!(
+            self.freshness_status.as_str(),
+            "fresh"
+                | "stale"
+                | "invalid_type"
+                | "invalid_topic"
+                | "invalid_symbol"
+                | "invalid_timestamp"
+        ) {
+            report.missing_fields.push("freshness_status".to_owned());
+        }
+        if self.freshness_status != "invalid_timestamp" && self.age_ms.is_none() {
+            report.missing_fields.push("age_ms".to_owned());
+        }
         if !raw_json_is_parseable(&self.subscription_raw_json) {
             report
                 .missing_fields

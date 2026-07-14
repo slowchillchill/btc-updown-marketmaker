@@ -6,15 +6,15 @@
 
 当前阶段只验证 frame contract、heartbeat/status server 和 fake consumer；不宣称 paper/live 二进制已在交易服务器完成真实 Polymarket/Binance/RTDS `external_market_event` 长跑验收。真实 paper/live 外部市场源 handoff 部署前，必须另行获得用户批准，并由对应 paper/live runtime 写入本机 runtime receive timestamp 和自身 append-only event log。
 
-PMXT-like hourly parquet 只属于训练 cold path：`data-collect-training-collector` 在数据采集服务器写 finalized typed raw parquet、manifest、coverage 和 retention receipt。paper/live hot path 仍消费本机 realtime handoff frame，不能等待 finalized hourly parquet，也不能把 hourly parquet 当成实时唯一数据来源。paper/live 可以把 hourly parquet 用于审计或离线对照，但实时交易可见性必须来自本机 handoff receive time 和对应 runtime append-only log。
+PMXT-like hourly parquet 只属于训练 cold path：`data-collect-training-collector` 在数据采集服务器写 finalized typed raw parquet 和每日唯一 `manifest.json`。paper/live hot path 仍消费本机 realtime handoff frame，不能等待 finalized hourly parquet，也不能把 hourly parquet 当成实时唯一数据来源。paper/live 可以把 hourly parquet 用于审计或离线对照，但实时交易可见性必须来自本机 handoff receive time 和对应 runtime append-only log。
 
-本集成说明不生成 labels、features、tick_stream、replay context 或训练切分；这些属于 `data-pipeline` / 训练链路。`data-pipeline` 只能把 finalized typed raw parquet、manifest、coverage、health/gap/reconnect/backpressure evidence 作为输入，再生成下游训练产物。
+本集成说明不生成 labels、features、tick_stream、replay context 或训练切分；这些属于 `data-pipeline` / 训练链路。`data-pipeline` 只消费 `state=closed` 日期的 finalized typed raw parquet 和每日 manifest，再生成下游训练产物。coverage、gap、reconnect、drop 与 backfill 等采集事实收敛在该 manifest 内，不使用独立 sidecar 或 receipt。
 
 ## 三服务器拓扑
 
 | 服务器 | 二进制 | CLI dataset root | effective output root | 职责 |
 | --- | --- | --- | --- | --- |
-| 数据采集服务器 | `data-collect-training-collector` | `~/btc-updown-marketmaker/datasets` | `~/btc-updown-marketmaker/datasets/training/typed_raw` | finalized typed raw parquet、manifest、source coverage、source health/gap/reconnect、ResourceWatermark |
+| 数据采集服务器 | `data-collect-training-collector` | `~/btc-updown-marketmaker/datasets` | `~/btc-updown-marketmaker/datasets/training/typed_raw` | finalized typed raw parquet、每日唯一 manifest；达到 50GB 时协调退出 75，不删除 raw |
 | paper 服务器 | `data-collect-paper-hot` | `~/btc-updown-marketmaker/datasets` | `~/btc-updown-marketmaker/datasets/paper/data_collect_handoff` | 本机 hot path handoff frame contract、heartbeat/status、future external market frame 边界 |
 | live 服务器 | `data-collect-live-hot` | `~/btc-updown-marketmaker/datasets` | `~/btc-updown-marketmaker/datasets/live/data_collect_handoff` | 本机 hot path handoff frame contract、heartbeat/status、future external market frame 边界 |
 

@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 
 use time::OffsetDateTime;
 
-use crate::publish::{Result, manifest_path_for_parquet};
+use crate::publish::Result;
 
 const HOUR_MS: i64 = 3_600_000;
 
@@ -23,9 +23,7 @@ pub struct HourlyPartition {
     pub hour_end_utc_ms: i64,
     pub partition_path: PathBuf,
     pub running_path: PathBuf,
-    pub digesting_path: PathBuf,
     pub final_path: PathBuf,
-    pub manifest_path: PathBuf,
     pub stem: String,
 }
 
@@ -70,14 +68,13 @@ impl HourlyPartitionPolicy {
             .join(format!("source_kind={source_kind}"));
         ensure_under_root(&self.dataset_root, &partition_path)?;
 
+        let hour = format!("{:02}", hour_start.hour());
         let stem = match part {
-            Some(part) => format!("{source_kind}_{utc_hour}--part={part}"),
-            None => format!("{source_kind}_{utc_hour}"),
+            Some(part) => format!("{source_kind}_{hour}-part-{part}"),
+            None => format!("{source_kind}_{hour}"),
         };
-        let running_path = partition_path.join(format!("{stem}-running.parquet"));
-        let digesting_path = partition_path.join(format!("{stem}-digesting.parquet"));
+        let running_path = partition_path.join(format!("{stem}.parquet.running"));
         let final_path = partition_path.join(format!("{stem}.parquet"));
-        let manifest_path = manifest_path_for_parquet(&final_path);
 
         Ok(HourlyPartition {
             dataset_root: self.dataset_root.clone(),
@@ -88,9 +85,7 @@ impl HourlyPartitionPolicy {
             hour_end_utc_ms,
             partition_path,
             running_path,
-            digesting_path,
             final_path,
-            manifest_path,
             stem,
         })
     }
