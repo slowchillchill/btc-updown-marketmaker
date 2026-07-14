@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-reliability-repair-changelog.md`
 >
-> 状态：`TASK_3_FAST_DRAIN_REPAIR_REVIEW_PASSED_READY_FOR_COMMIT`。Polymarket 唯一 SDK receiver 的项目层有界 fast-drain 修复、生产 helper 四源持续加 burst 容量回归及全部本地门已通过；source/SDK-first 与 writer/schema/deployment 两路最终独立复审均 PASS，Critical/Important/Minor 均为 0。允许精确提交并推送本事项文件；production release 仍只能从 push 后的干净 commit 构建。
+> 状态：`TASK_4_4_FAST_DRAIN_GATE_FAILED_RTDS_PARSER_CLEANED_DECISION_REQUIRED`。`Restart=no` gate 从 `2026-07-14T15:46:21.496539Z` 运行至 `16:01:16.948313Z`，跨过 16:00 UTC，但距连续 15 分钟验收仍差约 5 秒时因 RTDS SDK parser fault 非零退出；NRestarts=0。失败 build 独占数据已按合同核对并删除，生产根为空，failed pair 保持 inactive/disabled、MainPID=0、`Restart=no`。现有已批准合同没有“同一 artifact 无代码变更重跑 gate”的状态转换，下一步须由用户决定，不得直接重启或放宽 parser fatal 语义。
 
 ## 一、目标与权威边界
 

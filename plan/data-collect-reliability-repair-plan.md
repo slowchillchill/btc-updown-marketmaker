@@ -6,7 +6,7 @@
 >
 > 事项编号：`DC-REPAIR-20260713-COLLECTOR-RELIABILITY`
 >
-> 状态：`TASK_3_FAST_DRAIN_REPAIR_REVIEW_PASSED_READY_FOR_COMMIT`。真实 `SDK receiver -> decoded queue -> canonical/dedupe/fan-out -> shared ingress/writer` 有界修复与全部本地门已通过；步骤 3.2 的 source/SDK-first 与 writer/schema/deployment 两路最终独立复审均 PASS，Critical/Important/Minor 均为 0。允许执行步骤 3.3.1；production release 仍只能从 push 后的干净 commit 构建。
+> 状态：`TASK_4_4_FAST_DRAIN_GATE_FAILED_RTDS_PARSER_CLEANED_DECISION_REQUIRED`。步骤 4.4.2 未通过：PID=`1046442` 从 `2026-07-14T15:46:21.496539Z` 运行至 `16:01:16.948313Z`，跨过 16:00 UTC，但距连续 15 分钟验收仍差约 5 秒时因 RTDS SDK parser fault 非零退出；NRestarts=0。步骤 4.4.3 的 build-exclusive 核验、失败日删除、空根重建与 failed pair 停机保留已完成。现有计划只允许“下一修复版”进入 4.2.1，没有定义同一 artifact 直接重跑；不得自行新增转换。
 
 ## 一、执行原则与成功定义
 

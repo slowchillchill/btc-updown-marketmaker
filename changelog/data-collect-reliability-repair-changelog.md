@@ -437,3 +437,32 @@
 - source/SDK-first 最终独立审查 PASS，Critical=`0`、Important=`0`、Minor=`0`。审查独立连续三次运行四源容量门并复跑完整 lib、SDK runtime contract、all-targets clippy、fmt 与 diff check；确认官方 SDK 唯一 receiver、单一 processor、receive time 冻结、FIFO fence、全局/局部预算、atomic fan-out、dedupe commit、跨日 drop 与 pump/task 清理均成立，没有 raw WebSocket/REST 或第二业务路径。
 - writer/schema/deployment 最终独立审查 PASS，Critical=`0`、Important=`0`、Minor=`0`。审查确认 permits 在复制和所有失败路径精确归还、writer/Parquet/operational counter 与 receive UTC 日一致、四源测试不能依靠大 buffer 延迟排空、vendor 仍只有三文件差异、依赖树只有仓库 p1、权威 unit 的退出码/StartLimit/SIGTERM 合同未回退；远端只读身份仍为已记录 failed-long-running pair且空数据根。
 - 两路审查均未修改文件或执行远端写操作。阶段 3 实现审查门现已通过，当前状态为 `TASK_3_FAST_DRAIN_REPAIR_REVIEW_PASSED_READY_FOR_COMMIT`；只允许精确提交并推送本事项文件，随后从该已 push commit 的干净 detached worktree 构建新 production binary。
+
+## 2026-07-14：fast-drain 修复提交推送与 production 构建
+
+- fast-drain 修复精确提交为 `a2d92d48f93301edfe15d1dcd9f53971ef89dae7`（`fix(data-collect): drain Polymarket receiver promptly`）并已推送到 `origin/after-data-plan`；本地 HEAD、remote-tracking ref 与 `ls-remote` 三者一致。提交只含本事项 7 个文件，用户既有 `AGENTS.md`、`demand/rebuild-core-demand.md` 与 `推荐开发顺序.md` 未进入提交。
+- 从该已 push commit 创建 `/tmp/data-collect-build-a2d92d4` detached clean worktree，设置 `DATA_COLLECT_GIT_COMMIT=a2d92d48f93301edfe15d1dcd9f53971ef89dae7`，使用独立 `/tmp/data-collect-target-a2d92d4` 执行 locked release build。构建前后 HEAD 精确匹配且 worktree clean，binary 中可检出完整嵌入 commit。
+- 新 production binary 大小=`25,434,096` bytes、mode=`0755`、SHA-256=`5634ad72a5f507c590af52b62196ab310d7511e04ea7df84990ea90d5101ed91`；经不存在的 digest-named local staging 复核后原子替换主仓库固定 target 路径。临时 detached worktree、独立 target 与 local staging 均已删除，没有生成 release receipt 或验证报告。
+- 当前状态为 `TASK_4_1_FAST_DRAIN_BUILD_PASSED_PENDING_REMOTE_RESTAGE`。远端尚未上传、替换或启动新 binary；仍须先按 failed-long-running identity、空数据根、无 holder/mount、exclusive staging 与 `Restart=no` gate unit 完成阶段 4.2 全量预检。
+
+## 2026-07-14：fast-drain 修复远端重试预检与原子替换
+
+- `2026-07-14T15:29:30Z` 起复核已记录 failed-long-running pair：service inactive/dead、disabled、MainPID=`0`、NRestarts=`0`、`Restart=on-failure`；旧 binary SHA-256=`ef29d9ed09ce9f7d05a1df1a0110f9c4ac4f37ba1e6257a7dacdc07d4aadd5c4`、旧 unit SHA-256=`7e847363f9164aa63fd4bb8c27307b24fa2e096cfc806a8e5c739d3d75f08795`，owner/mode/ExecStart 与 changelog 一致。生产 `training/typed_raw` 为空，final binary、数据根及 unit 无 executable/fd holder；114 个可读 `/proc/*/mountinfo` 均无目标自身或 descendant mount，逐级父目录均为非 symlink 预期目录。
+- 新 digest staging 路径确认不存在后使用 shell noclobber exclusive-create 上传。staging binary SHA-256=`5634ad72a5f507c590af52b62196ab310d7511e04ea7df84990ea90d5101ed91`、大小=`25,434,096`、mode=`0755`；为 x86-64 ELF，loader 与全部动态库可解析，远端 glibc=`2.39`，内嵌 commit、`--version` 与 `--help` 均通过。staging gate unit SHA-256=`76ae2883dee5bd95132e4d306eaac2507756936759082661065942a5f8c3e27c`、mode=`0644`，仅把权威 unit 的 `Restart=on-failure` 机械改为 `Restart=no`，systemd verify 通过。
+- 替换前再次核对 inactive/disabled、MainPID=0、旧 pair SHA、新 staging SHA、空数据根、无 holder/mount；随后先同目录原子替换 final binary并复核 SHA，再原子替换 final unit、daemon-reload并复核 digest。新 final binary/unit owner 均为 `ubuntu:ubuntu`，staging 全部消失；service 继续 inactive/dead、disabled、MainPID=`0`、NRestarts=`0`、`Restart=no`，数据根仍为空。
+- 当前状态为 `TASK_4_2_FAST_DRAIN_RESTAGE_PASSED_WAITING_GATE_WINDOW`。新 pair 尚未启动；只允许在非 23 UTC 小时的 45–50 分窗口启动最终 `--run-forever` gate，并在 `Restart=no` 下跨小时至少 15 分钟。
+
+## 2026-07-14：fast-drain production gate 启动
+
+- 在批准的非 23 UTC 窗口 `2026-07-14T15:46:21Z` 启动最终 `--run-forever` gate。MainPID=`1046442`，运行中 `/proc/1046442/exe` SHA-256 与 final binary 均为 `5634ad72a5f507c590af52b62196ab310d7511e04ea7df84990ea90d5101ed91`；gate unit SHA-256=`76ae2883dee5bd95132e4d306eaac2507756936759082661065942a5f8c3e27c`，service active/running、disabled、`Restart=no`、NRestarts=`0`。
+- 启动后唯一生产根创建 2026-07-14 UTC 日、六个 source 目录、六个 15 时 `.running` 与一个 `manifest.json`；journal 当前只有正常 Started 记录。当前状态为 `TASK_4_4_FAST_DRAIN_GATE_STARTED_20260714T154621Z`，必须保持同一 PID 跨 16:00 UTC 且运行至少到 `16:01:21Z` 后再判定 gate，并直接核验 finalized Parquet、manifest、continuity、重复、journal 与无额外产物。
+
+## 2026-07-14：fast-drain production gate 因 RTDS parser fault 失败并清理
+
+- systemd 精确记录 PID `1046442` 于 `2026-07-14T15:46:21.496539Z` 启动，于 `16:01:16.948313Z` 输出 `source_task_error:polymarket_rtds_chainlink_btc_usd:parser error: Internal: missing field \`topic\` at line 1 column 593` 并以 status 1 退出。该进程跨过 16:00 UTC，但只连续运行 `14分55.451774秒`，距 15 分钟验收约差 `4.548226秒`；gate 不通过。`Restart=no` 正确阻止自动重启，NRestarts=`0`。
+- 退出时唯一 manifest 为 `state=open`，顶层 build=`a2d92d48f93301edfe15d1dcd9f53971ef89dae7`、collector binary SHA-256=`5634ad72a5f507c590af52b62196ab310d7511e04ea7df84990ea90d5101ed91`、host=`ip-172-26-10-0`、region=`eu-west-1`；gaps 精确为 RTDS parser fatal、source task unexpected end 与 source task error 三项。所有活跃 writer 已按 shutdown finalize，磁盘只有 manifest 所列 `11` 个 Parquet，共 `873,107` 行、`59,561,249` bytes，没有 `.running/.tmp/.partial`、额外文件或 sidecar。
+- 删除前逐项复核 manifest 所列 11 个文件与磁盘路径、bytes、SHA-256 一一相符；每个文件 facts 的 code version/binary SHA 与顶层一致。逐级路径均为非 symlink 预期目录，数据根和 UTC 日均为 `ubuntu` 所有；没有目标内 fd/cwd/root/exe holder，遍历全部可读 `/proc/*/mountinfo` 也没有目标或 descendant mount。因此该 UTC 日只属于本轮失败 build。
+- 按步骤 4.4.3 删除整个失败 UTC 日并以 `ubuntu:ubuntu 0755` 重建空 `training/typed_raw`；没有移动、打包或生成 inventory/report/receipt/sidecar。随后仅执行 `reset-failed`，service 当前 inactive/dead、disabled、MainPID=`0`、`Restart=no`；failed binary/unit SHA-256 仍分别为 `5634ad72a5f507c590af52b62196ab310d7511e04ea7df84990ea90d5101ed91` 与 `76ae2883dee5bd95132e4d306eaac2507756936759082661065942a5f8c3e27c`，生产根为空。
+- 独立 `gpt-5.6-sol`/`ultra` 只读审查确认：parser fault 按需求被正确 fail closed，但正确退出不能替代 15 分钟 gate；计划 4.4.3 只定义 failed pair 供“下一修复版”在 4.2.1 替换，既往记录也禁止直接复用 failed binary。阶段 5 的 `Restart=on-failure` 自动恢复语义不能移植到阶段 4 的 `Restart=no` gate。现有文档不存在“无代码变化、同一 artifact 再认证”转换，直接重跑未获批准。
+- 截至 2026-07-14 查询，Polymarket 官方 RTDS 文档仍声明所有消息都有 `topic/type/timestamp/payload`；官方 Rust SDK main 与本仓库 0.6.0 一样，把 `RtdsMessage.topic` 设为必需并对单对象或整数组直接 serde decode。官方 TypeScript RTDS client 只对含 `payload` 的帧执行 `JSON.parse` 后类型断言，不做运行时字段校验。官方 Rust 仓库没有检索到对应的 RTDS missing-topic issue/PR。上述证据只能证明 Rust SDK 严格 parser 对真实帧失败，不能在没有 raw frame 时唯一判断平台坏帧、未文档化控制帧或 SDK schema 覆盖不足。
+- 相同 `missing field topic at line 1 column 593` 已在当天 `07:33:34Z` 和 `16:01:16Z` 两次出现。盲目重跑即使偶然通过 15 分钟，也没有证据支持后续同一 PID 26 小时门能够通过；但采集 raw frame、改变 `SimpleParser` 行为或新增同 artifact 重试例外都会超出现有已批准合同。当前状态为 `TASK_4_4_FAST_DRAIN_GATE_FAILED_RTDS_PARSER_CLEANED_DECISION_REQUIRED`，保持停机并请求用户决策。
