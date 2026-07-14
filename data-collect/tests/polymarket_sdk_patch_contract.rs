@@ -210,7 +210,8 @@ async fn interested_clob_array_is_all_or_error_and_terminal() {
 
 #[tokio::test]
 async fn rtds_whole_frame_parser_fault_is_sticky_and_terminal() {
-    let (endpoint, server) = one_frame_server(r#"{"topic":"crypto_prices_chainlink""#).await;
+    let frame = r#"{"message":"Invalid request body","connectionId":"connection-123","requestId":"request-456","payload":{"secret":"PAYLOAD_MUST_NOT_LEAK"}}"#;
+    let (endpoint, server) = one_frame_server(frame).await;
     let connection = ConnectionManager::<RtdsMessage, SimpleParser>::new(
         endpoint,
         parser_test_config(),
@@ -221,10 +222,17 @@ async fn rtds_whole_frame_parser_fault_is_sticky_and_terminal() {
     let mut faults = connection.fault_receiver();
     let mut states = connection.state_receiver();
 
-    assert!(matches!(
-        wait_for_fault(&mut faults).await,
-        ConnectionFault::Parser(_)
-    ));
+    let fault = wait_for_fault(&mut faults).await;
+    let ConnectionFault::Parser(message) = fault else {
+        panic!("expected parser fault");
+    };
+    assert!(message.contains("missing field `topic`"));
+    assert!(message.contains(&format!("frame_bytes={}", frame.len())));
+    assert!(message.contains("top_level=object"));
+    assert!(message.contains("message=\"Invalid request body\""));
+    assert!(message.contains("connectionId=\"connection-123\""));
+    assert!(message.contains("requestId=\"request-456\""));
+    assert!(!message.contains("PAYLOAD_MUST_NOT_LEAK"));
     wait_for_terminal_disconnected(&mut states).await;
     assert_eq!(connection.state(), ConnectionState::Disconnected);
     assert!(

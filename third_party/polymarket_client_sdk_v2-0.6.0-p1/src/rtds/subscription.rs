@@ -3,12 +3,16 @@
     reason = "Subscription types deliberately include the module name for clarity"
 )]
 
+use std::fmt;
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Instant;
 
 use async_stream::try_stream;
 use dashmap::{DashMap, Entry};
 use futures::Stream;
+use serde::de::{DeserializeSeed, SeqAccess, Visitor};
+use serde_json::{Map, Value};
+use sha2::{Digest as _, Sha256};
 use tokio::sync::broadcast::error::RecvError;
 
 use super::error::RtdsError;
@@ -23,9 +27,276 @@ use crate::ws::connection::ConnectionState;
 #[derive(Clone, Default)]
 pub struct SimpleParser;
 
+const RTDS_PARSE_DIAGNOSTIC_MAX_BYTES: usize = 2_048;
+const RTDS_PARSE_DIAGNOSTIC_TRUNCATED: &str = "...[truncated]";
+const RTDS_PARSE_DIAGNOSTIC_SCALAR_FIELDS: [&str; 8] = [
+    "message",
+    "status",
+    "code",
+    "topic",
+    "type",
+    "connectionId",
+    "requestId",
+    "error",
+];
+
+#[derive(Debug)]
+struct RtdsParseDiagnosticError {
+    source: crate::error::Error,
+    diagnostic: String,
+}
+
+impl fmt::Display for RtdsParseDiagnosticError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(source) = self.source.inner() {
+            write!(f, "{source}")?;
+        } else {
+            write!(f, "{}", self.source)?;
+        }
+        write!(f, "; rtds_parse_diagnostic={}", self.diagnostic)
+    }
+}
+
+impl std::error::Error for RtdsParseDiagnosticError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+struct BoundedDiagnostic {
+    value: String,
+    truncated: bool,
+}
+
+impl BoundedDiagnostic {
+    fn new() -> Self {
+        Self {
+            value: String::with_capacity(RTDS_PARSE_DIAGNOSTIC_MAX_BYTES),
+            truncated: false,
+        }
+    }
+
+    fn push(&mut self, value: &str) {
+        if self.truncated {
+            return;
+        }
+
+        let remaining = RTDS_PARSE_DIAGNOSTIC_MAX_BYTES - self.value.len();
+        if value.len() <= remaining {
+            self.value.push_str(value);
+            return;
+        }
+
+        if remaining < RTDS_PARSE_DIAGNOSTIC_TRUNCATED.len() {
+            let mut prefix_end =
+                RTDS_PARSE_DIAGNOSTIC_MAX_BYTES - RTDS_PARSE_DIAGNOSTIC_TRUNCATED.len();
+            while !self.value.is_char_boundary(prefix_end) {
+                prefix_end -= 1;
+            }
+            self.value.truncate(prefix_end);
+        } else {
+            let prefix_budget = remaining - RTDS_PARSE_DIAGNOSTIC_TRUNCATED.len();
+            let mut prefix_end = prefix_budget.min(value.len());
+            while !value.is_char_boundary(prefix_end) {
+                prefix_end -= 1;
+            }
+            let Some(prefix) = value.get(..prefix_end) else {
+                unreachable!("prefix_end is adjusted to a UTF-8 boundary");
+            };
+            self.value.push_str(prefix);
+        }
+        self.value.push_str(RTDS_PARSE_DIAGNOSTIC_TRUNCATED);
+        self.truncated = true;
+    }
+
+    fn push_char(&mut self, value: char) {
+        let mut bytes = [0; 4];
+        self.push(value.encode_utf8(&mut bytes));
+    }
+
+    fn is_truncated(&self) -> bool {
+        self.truncated
+    }
+
+    fn finish(self) -> String {
+        self.value
+    }
+}
+
+fn append_json_string(diagnostic: &mut BoundedDiagnostic, value: &str) {
+    diagnostic.push("\"");
+    for character in value.chars() {
+        if diagnostic.is_truncated() {
+            break;
+        }
+        match character {
+            '"' => diagnostic.push("\\\""),
+            '\\' => diagnostic.push("\\\\"),
+            '\u{08}' => diagnostic.push("\\b"),
+            '\u{0c}' => diagnostic.push("\\f"),
+            '\n' => diagnostic.push("\\n"),
+            '\r' => diagnostic.push("\\r"),
+            '\t' => diagnostic.push("\\t"),
+            character if character.is_control() => {
+                diagnostic.push(&format!("\\u{:04x}", character as u32));
+            }
+            character => diagnostic.push_char(character),
+        }
+    }
+    diagnostic.push("\"");
+}
+
+fn append_scalar(diagnostic: &mut BoundedDiagnostic, value: &Value) -> bool {
+    match value {
+        Value::Null => diagnostic.push("null"),
+        Value::Bool(value) => diagnostic.push(if *value { "true" } else { "false" }),
+        Value::Number(value) => diagnostic.push(&value.to_string()),
+        Value::String(value) => append_json_string(diagnostic, value),
+        Value::Array(_) | Value::Object(_) => return false,
+    }
+    true
+}
+
+fn append_object_diagnostic(diagnostic: &mut BoundedDiagnostic, object: &Map<String, Value>) {
+    diagnostic.push(" selected={");
+
+    let mut first = true;
+    for field in RTDS_PARSE_DIAGNOSTIC_SCALAR_FIELDS {
+        if diagnostic.is_truncated() {
+            break;
+        }
+        let Some(value) = object.get(field) else {
+            continue;
+        };
+        if matches!(value, Value::Array(_) | Value::Object(_)) {
+            continue;
+        }
+        if !first {
+            diagnostic.push(",");
+        }
+        diagnostic.push(field);
+        diagnostic.push("=");
+        let appended = append_scalar(diagnostic, value);
+        debug_assert!(appended, "non-scalar values are filtered above");
+        first = false;
+    }
+    diagnostic.push("} fields=[");
+
+    for (index, field) in object.keys().enumerate() {
+        if diagnostic.is_truncated() {
+            break;
+        }
+        if index > 0 {
+            diagnostic.push(",");
+        }
+        append_json_string(diagnostic, field);
+    }
+    diagnostic.push("]");
+}
+
+struct ArrayMismatchSeed<'diagnostic> {
+    mismatch_index: &'diagnostic mut Option<usize>,
+}
+
+impl<'de> DeserializeSeed<'de> for ArrayMismatchSeed<'_> {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(ArrayMismatchVisitor {
+            mismatch_index: self.mismatch_index,
+        })
+    }
+}
+
+struct ArrayMismatchVisitor<'diagnostic> {
+    mismatch_index: &'diagnostic mut Option<usize>,
+}
+
+impl<'de> Visitor<'de> for ArrayMismatchVisitor<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an array of RTDS messages")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut index = 0;
+        loop {
+            match seq.next_element::<RtdsMessage>() {
+                Ok(Some(_)) => index += 1,
+                Ok(None) => return Ok(()),
+                Err(error) => {
+                    *self.mismatch_index = Some(index);
+                    return Err(error);
+                }
+            }
+        }
+    }
+}
+
+fn first_array_contract_mismatch(bytes: &[u8]) -> Option<usize> {
+    let mut mismatch_index = None;
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let _: std::result::Result<(), serde_json::Error> = ArrayMismatchSeed {
+        mismatch_index: &mut mismatch_index,
+    }
+    .deserialize(&mut deserializer);
+    mismatch_index
+}
+
+fn build_rtds_parse_diagnostic(bytes: &[u8]) -> String {
+    let mut diagnostic = BoundedDiagnostic::new();
+    diagnostic.push("frame_bytes=");
+    diagnostic.push(&bytes.len().to_string());
+    diagnostic.push(" sha256=");
+    diagnostic.push(&format!("{:x}", Sha256::digest(bytes)));
+
+    match serde_json::from_slice::<Value>(bytes) {
+        Ok(Value::Object(object)) => {
+            diagnostic.push(" top_level=object");
+            append_object_diagnostic(&mut diagnostic, &object);
+        }
+        Ok(Value::Array(values)) => {
+            diagnostic.push(" top_level=array first_contract_mismatch_index=");
+            if let Some(index) = first_array_contract_mismatch(bytes) {
+                diagnostic.push(&index.to_string());
+                if let Some(Value::Object(object)) = values.get(index) {
+                    append_object_diagnostic(&mut diagnostic, object);
+                } else {
+                    diagnostic.push(" selected={} fields=[]");
+                }
+            } else {
+                diagnostic.push("none");
+            }
+        }
+        Ok(Value::String(_)) => diagnostic.push(" top_level=string"),
+        Ok(Value::Number(_)) => diagnostic.push(" top_level=number"),
+        Ok(Value::Bool(_)) => diagnostic.push(" top_level=boolean"),
+        Ok(Value::Null) => diagnostic.push(" top_level=null"),
+        Err(_) => diagnostic.push(" top_level=invalid_json"),
+    }
+
+    diagnostic.finish()
+}
+
 impl crate::ws::traits::MessageParser<RtdsMessage> for SimpleParser {
     fn parse(&self, bytes: &[u8]) -> Result<Vec<RtdsMessage>> {
-        parse_messages(bytes)
+        parse_messages(bytes).map_err(|source| {
+            let kind = source.kind();
+            crate::error::Error::with_source(
+                kind,
+                RtdsParseDiagnosticError {
+                    source,
+                    diagnostic: build_rtds_parse_diagnostic(bytes),
+                },
+            )
+        })
     }
 }
 
@@ -323,5 +594,152 @@ impl SubscriptionManager {
             .retain(|_, info| self.subscribed_topics.contains_key(&info.topic_type));
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    use crate::ws::traits::MessageParser as _;
+
+    const VALID_MESSAGE: &str = r#"{
+        "topic":"crypto_prices_chainlink",
+        "type":"update",
+        "timestamp":1753314064237,
+        "payload":{"symbol":"btc/usd","timestamp":1753314064213,"value":123.45}
+    }"#;
+
+    #[test]
+    fn successful_single_and_array_frames_are_unchanged() {
+        let single = SimpleParser.parse(VALID_MESSAGE.as_bytes()).unwrap();
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].topic, "crypto_prices_chainlink");
+        assert_eq!(single[0].msg_type, "update");
+        assert_eq!(single[0].timestamp, 1_753_314_064_237);
+
+        let array = format!("[{VALID_MESSAGE},{VALID_MESSAGE}]");
+        let messages = SimpleParser.parse(array.as_bytes()).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.topic == "crypto_prices_chainlink")
+        );
+    }
+
+    #[test]
+    fn server_error_envelope_reports_only_bounded_contract_details() {
+        let frame = br#"{
+            "message":"Invalid request body",
+            "connectionId":"connection-123",
+            "requestId":"request-456",
+            "status":400,
+            "error":"allowed error",
+            "payload":{"secret":"PAYLOAD_MUST_NOT_LEAK"},
+            "unlisted":"UNLISTED_VALUE_MUST_NOT_LEAK"
+        }"#;
+
+        let error = SimpleParser.parse(frame).unwrap_err().to_string();
+        assert!(error.contains("missing field `topic`"));
+        assert!(error.contains(&format!("frame_bytes={}", frame.len())));
+        assert!(error.contains(&format!("sha256={:x}", Sha256::digest(frame))));
+        assert!(error.contains("top_level=object"));
+        assert!(error.contains("message=\"Invalid request body\""));
+        assert!(error.contains("connectionId=\"connection-123\""));
+        assert!(error.contains("requestId=\"request-456\""));
+        assert!(error.contains("status=400"));
+        assert!(error.contains("error=\"allowed error\""));
+        assert!(error.contains("fields=["));
+        assert!(error.contains("\"unlisted\""));
+        assert!(!error.contains("PAYLOAD_MUST_NOT_LEAK"));
+        assert!(!error.contains("UNLISTED_VALUE_MUST_NOT_LEAK"));
+    }
+
+    #[test]
+    fn array_reports_the_first_contract_mismatch() {
+        let frame = format!(
+            "[{VALID_MESSAGE},{{\"message\":\"bad second item\",\"payload\":{{\"secret\":\"ARRAY_PAYLOAD_MUST_NOT_LEAK\"}}}},null]"
+        );
+
+        let error = SimpleParser
+            .parse(frame.as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("top_level=array first_contract_mismatch_index=1"));
+        assert!(error.contains("message=\"bad second item\""));
+        assert!(!error.contains("ARRAY_PAYLOAD_MUST_NOT_LEAK"));
+    }
+
+    #[test]
+    fn array_index_uses_the_real_typed_decode_for_duplicate_fields() {
+        let frame =
+            br#"[{"topic":"first","topic":"second","type":"update","timestamp":1,"payload":{}}]"#;
+
+        let error = SimpleParser.parse(frame).unwrap_err().to_string();
+        assert!(error.contains("duplicate field `topic`"));
+        assert!(error.contains("top_level=array first_contract_mismatch_index=0"));
+    }
+
+    #[test]
+    fn malformed_json_preserves_original_error_without_echoing_the_frame() {
+        let frame = br#"{"message":"MALFORMED_VALUE_MUST_NOT_LEAK""#;
+        let error = SimpleParser.parse(frame).unwrap_err().to_string();
+
+        assert!(error.contains("line 1 column"));
+        assert!(error.contains("top_level=invalid_json"));
+        assert!(!error.contains("MALFORMED_VALUE_MUST_NOT_LEAK"));
+    }
+
+    #[test]
+    fn diagnostic_preserves_error_kind_and_source_chain() {
+        let frame = br#"{"message":"Invalid request body","payload":{}}"#;
+        let original = parse_messages(frame).unwrap_err();
+        let diagnosed = SimpleParser.parse(frame).unwrap_err();
+
+        assert_eq!(diagnosed.kind(), original.kind());
+        assert!(diagnosed.to_string().starts_with(&original.to_string()));
+        let wrapper = diagnosed
+            .downcast_ref::<RtdsParseDiagnosticError>()
+            .expect("diagnostic error wrapper");
+        assert_eq!(wrapper.source.kind(), original.kind());
+        assert_eq!(wrapper.source.to_string(), original.to_string());
+        assert!(std::error::Error::source(&wrapper.source).is_some());
+    }
+
+    #[test]
+    fn selected_scalar_control_characters_are_escaped() {
+        let frame = serde_json::to_vec(&serde_json::json!({
+            "message": "line one\nline two\t\u{0001}",
+            "payload": {},
+        }))
+        .unwrap();
+
+        let diagnostic = build_rtds_parse_diagnostic(&frame);
+        assert!(diagnostic.contains("message=\"line one\\nline two\\t\\u0001\""));
+        assert!(!diagnostic.contains('\n'));
+        assert!(!diagnostic.contains('\t'));
+        assert!(!diagnostic.contains('\u{0001}'));
+    }
+
+    #[test]
+    fn diagnostic_is_utf8_safe_and_never_exceeds_2048_bytes() {
+        let ascii_frame = serde_json::to_vec(&serde_json::json!({
+            "message": "x".repeat(4_096),
+            "payload": {"secret": "PAYLOAD_MUST_NOT_LEAK"},
+        }))
+        .unwrap();
+        let ascii_diagnostic = build_rtds_parse_diagnostic(&ascii_frame);
+        assert_eq!(ascii_diagnostic.len(), RTDS_PARSE_DIAGNOSTIC_MAX_BYTES);
+        assert!(ascii_diagnostic.ends_with(RTDS_PARSE_DIAGNOSTIC_TRUNCATED));
+        assert!(!ascii_diagnostic.contains("PAYLOAD_MUST_NOT_LEAK"));
+
+        let unicode_frame = serde_json::to_vec(&serde_json::json!({
+            "message": "错误".repeat(4_096),
+            "payload": {},
+        }))
+        .unwrap();
+        let unicode_diagnostic = build_rtds_parse_diagnostic(&unicode_frame);
+        assert!(unicode_diagnostic.len() <= RTDS_PARSE_DIAGNOSTIC_MAX_BYTES);
+        assert!(unicode_diagnostic.ends_with(RTDS_PARSE_DIAGNOSTIC_TRUNCATED));
     }
 }
