@@ -309,3 +309,55 @@
 - `training/typed_raw` 为空，无 upload/staging 残留；旧 releases/current/marker/gate unit 与旧 run/runtime/retention 数据目录均不存在。本机旧 archive timer disabled/inactive，`/home/chillchill/new-datasets` 保留。
 - 审查确认失败重试必须跳过已完成的旧对象删除，先提交/push、从已推送 commit 干净构建、重新预置并通过精确身份门；不得复用或直接启动当前 failed pair。当前状态为 `RTDS_GATE_FIX_IMPLEMENTATION_REVIEW_PASSED_READY_FOR_COMMIT`。
 - 提交前再次执行完整门禁：data-collect lib=`89/89` 与全部 integration contracts 通过，SDK patch=`6/6`、SDK runtime=`17/17`；all-targets locked clippy `-D warnings`、all-targets locked check、workspace fmt、`git diff --check` 均退出 0。依赖树只有仓库内 `polymarket_client_sdk_v2 0.6.0-p1`，vendor tree 未生成 `target/`。
+
+## 2026-07-14：RTDS gate 修正提交推送与重试生产构建
+
+- RTDS gate 修正提交为 `ef34c223fc12a6b95ef5c65cc4eebc1f629dc6d1`（`fix(data-collect): ignore RTDS subscription snapshots`），已推送到 `origin/after-data-plan`；本地 HEAD、remote-tracking ref 与 `ls-remote` 三者精确一致。用户既有 `AGENTS.md`、`demand/rebuild-core-demand.md` 和 `推荐开发顺序.md` 未进入提交。
+- 从该已推送 commit 创建 `/tmp/data-collect-build-ef34c22` detached clean worktree，设置 `DATA_COLLECT_GIT_COMMIT=ef34c223fc12a6b95ef5c65cc4eebc1f629dc6d1`，以独立 `/tmp/data-collect-target-ef34c22` 执行 locked release build。构建后 HEAD 未变、worktree clean，binary 可检出完整嵌入 commit。
+- 新 binary 大小=`25,081,400` bytes、SHA-256=`249dc5802fb0aba185adf365b0e0523f86d39e626a9440fbd05164bfd8c5d9f6`、固定本地 mode=`0755`；经 digest-named local staging 复核后原子替换 `target/release/data-collect-training-collector`。临时 detached worktree、独立 target 与 staging 已删除，没有创建 release receipt 或验证报告。
+- 当前状态为 `TASK_4_1_RETRY_BUILD_PASSED_PENDING_REMOTE_RESTAGE`。远端仍是第二路审查确认的 inactive failed_gate；新 binary 尚未上传、替换或启动。
+
+## 2026-07-14：失败重试预检、预置与原子替换
+
+- 重试前再次精确核实 failed_gate：service inactive/dead、disabled、MainPID=`0`、无 holder；旧 failed binary/unit SHA 分别为 `69fec19ef6ba03e39e7aa67814bab944b42128379849e0f0b153732d8eb26b40` 与 `76ae2883dee5bd95132e4d306eaac2507756936759082661065942a5f8c3e27c`，数据根为空、无 staging，旧 release/current/gate unit 与旧 run/runtime/retention 目录仍不存在。本机 archive timer disabled/inactive，既有下载数据保留。
+- `systemctl --user reset-failed <unit>` 因 disabled/inactive unit 已被 manager 卸载而返回 `Unit ... not loaded`；现场 `Result=success` 且不存在 failed state，因此没有为形式要求加载或启动 unit。远端 `dd` 不支持 `oflag=excl`，首次 upload 在创建文件前失败；随后使用操作系统 `O_CREAT|O_EXCL` 打开语义创建精确 digest-named staging，没有改动 final pair或遗留失败文件。
+- 新 staging binary 大小=`25,081,400`、mode=`0755`、SHA-256=`249dc5802fb0aba185adf365b0e0523f86d39e626a9440fbd05164bfd8c5d9f6`；远端确认为 x86-64 ELF、loader=`/lib64/ld-linux-x86-64.so.2`、动态库无 `not found`、glibc=`2.39`，`--version`/`--help` 成功且数据根保持为空。staging gate unit mode=`0644`、SHA-256=`76ae2883dee5bd95132e4d306eaac2507756936759082661065942a5f8c3e27c`、`Restart=no`，远端 `systemd-analyze --user verify` 通过。
+- 在最终 inactive/no-holder/empty-root 与 old/new digest 门再次通过后，于 `2026-07-14T05:22:28Z` 依次同目录原子替换 final binary 与 unit并 daemon-reload。final binary/unit SHA 精确为上述新 binary 与 gate unit，staging 全部消失；service 继续 inactive/dead、disabled、MainPID=`0`，尚未启动。
+- 当前状态为 `TASK_4_4_RETRY_PAIR_INSTALLED_PENDING_START_WINDOW`。只能在非 23 UTC 的 45–50 分钟窗口启动，并以同一 `Restart=no` 进程跨下一 UTC 小时运行至少 15 分钟。
+
+## 2026-07-14：RTDS 修复生产 gate 启动
+
+- 启动前最终复采样再次确认 service inactive/dead、disabled、MainPID=`0`、无 holder、数据根为空、无 staging，final binary/unit SHA 分别为 `249dc5802fb0aba185adf365b0e0523f86d39e626a9440fbd05164bfd8c5d9f6` 与 `76ae2883dee5bd95132e4d306eaac2507756936759082661065942a5f8c3e27c`，unit 为 `Restart=no`。
+- 在非 23 UTC 的批准窗口 `2026-07-14T05:45:53Z` 启动 gate。MainPID=`1007135`，`/proc/1007135/exe` SHA 精确等于新 binary，effective argv 与冻结 ExecStart 一致；启动后三秒 service active/running、NRestarts=`0`、UnitFileState=`disabled`，journal 只有正常 systemd start 记录。
+- 当前状态为 `TASK_4_4_RETRY_GATE_RUNNING`。必须维持 PID `1007135` 跨 `06:00 UTC` 且总运行至少 15 分钟；任何退出均按 failed_gate 停服、记录并清理 build-exclusive UTC-day。
+
+## 2026-07-14：阶段 4.5 稀疏 snapshot 小时关闭审查失败与收口
+
+- gate 从 `2026-07-14T05:45:53Z` 以 MainPID=`1007135` 持续跨过 `06:00 UTC` 并运行超过 15 分钟，NRestarts=`0`。五个连续/事件 source 成功 finalize `05.parquet`；RTDS 为 `830` 条合法 fresh update、exact duplicate=`0`，initial snapshot 未误写。manifest build/binary/host/region 与文件 footer facts 一致，`gaps=[]`、全部 lag/drop/reconnect=`0`，aggTrade 无 unresolved range；journal 只有正常启动。
+- 唯一阻塞事实是 `binance_depth_snapshot_05.parquet.running` 从 `05:45:55Z` 保持 0-byte 且 manifest snapshot counters 为 files/rows=`0`，而 finalized depth update 已引用 bootstrap `snapshot_last_update_id=97380343272`。实现只在下一条跨小时 snapshot、UTC 日 barrier 或停机时 finalize；正常无 resnapshot 路径没有定时小时关闭，因此旧 running 会跨完整小时，异常退出时还可能由 stale cleanup 删除唯一 bootstrap snapshot。
+- 阶段 4.5 独立审查结论为 FAIL，Critical=`0`、Important=`1`、Minor=`0`；其余 binary/unit/SHA、RTDS、continuity、manifest、命名、journal、旧对象删除与最小产物合同均通过。最小修复边界是为 writer 增加与 ingress 顺序一致的 UTC 小时 watermark/finalize：不得制造空 snapshot、sidecar，亦不得把同进程正常小时关闭误写成 `part-N`。
+- 收到确认 FAIL 后于 `06:12:30Z` 立即 SIGTERM 停服；journal 记录 `coordinated_shutdown_complete`，Result=`success`、ExecMainStatus=`0`、MainPID=`0`、NRestarts=`0`，unit 继续 disabled 且 `Restart=no`。协调停服把已缓冲 snapshot 与当前小时 writer 正常 finalize。
+- 失败 UTC 日大小=`107,445,128` bytes、文件=`12`；manifest 与全部文件 facts 证明其只属于 commit `ef34c223fc12a6b95ef5c65cc4eebc1f629dc6d1`、binary SHA-256=`249dc5802fb0aba185adf365b0e0523f86d39e626a9440fbd05164bfd8c5d9f6`。确认 service inactive、holder=`0`、descendant mount=`0`、owner/type/symlink 门通过后，于 `06:14:47Z` 删除整个失败日并恢复空 `training/typed_raw`。
+- 当前远端为新一轮已记录 `failed_gate`：service inactive/dead、disabled、MainPID=`0`；failed binary SHA-256=`249dc5802fb0aba185adf365b0e0523f86d39e626a9440fbd05164bfd8c5d9f6`，failed gate unit SHA-256=`76ae2883dee5bd95132e4d306eaac2507756936759082661065942a5f8c3e27c`、`Restart=no`，数据根为空。状态为 `PRODUCTION_GATE_FAILED_SNAPSHOT_HOURLY_FINALIZE_RETURNED_TO_STAGE_2`。
+
+## 2026-07-14：稀疏 snapshot 小时关闭修复与本地门禁
+
+- 用户再次确认保留已批准的简洁命名：正常小时主文件继续为 `<source>_HH.parquet`，只有同一小时进程重启造成已完成文件名碰撞时才使用 `<source>_HH-part-N.parquet`；不得为修复无事件小时关闭改用第二套命名或让同一进程正常关闭生成 `part-N`。
+- 最小实现复用现有 depth source fence：depth outer supervisor 在 UTC-hour 边界先暂停 source，再把只针对 `binance_depth_snapshot` 的 finalize 控制按同一 ingress 顺序排在此前 snapshot 后，随后恢复 source。ingress 只 flush 该 source batch并把小时命令排入原 writer FIFO；旧小时有 active segment 时按 `utc_hour_boundary` finalize，没有行时 no-op。没有新增线程实例、数据根、sidecar、report、receipt 或 manifest 字段。
+- 新增回归分别证明：边界前 snapshot 先于 finalize 控制；仅一条 bootstrap snapshot 且没有后续事件时仍关闭一行主文件并发出 manifest delta；空小时不生成 Parquet；同小时 bootstrap+resnapshot 仍只写主文件、没有 `part-N`。需求第 107 行和计划步骤 2.7.2 已同步明确该合同。
+- 完整本地门禁通过：data-collect lib=`93/93` 与全部 integration contracts 通过，SDK patch=`6/6`、SDK runtime=`17/17`；all-targets locked clippy `-D warnings`、all-targets locked check、workspace fmt、`git diff --check` 均退出 0。依赖反向树只出现仓库内 `third_party/polymarket_client_sdk_v2-0.6.0-p1`，vendor tree 未生成 `target/`。
+- 当前状态为 `SNAPSHOT_HOURLY_FINALIZE_FIX_VALIDATED_PENDING_REVIEW`。必须先按顺序通过源码/顺序/writer 正确性审查，再通过远端 failed-gate 身份与重试部署状态审查；两路均 PASS 前禁止提交、替换或启动远端 pair。
+
+## 2026-07-14：稀疏 snapshot 小时关闭独立源码审查
+
+- 第一轮独立 `gpt-5.6-sol`/`ultra` 只读审查结论为 PASS，Critical=`0`、Important=`0`、Minor=`0`；审查未修改文件、未访问远端、未派生子代理。
+- 审查确认 depth source fence、共享 enqueue lock 与 ingress FIFO 保证旧小时 snapshot 先于 hour finalize；ingress 先 flush snapshot batch，再把 finalize 排入同一 writer FIFO。空小时 no-op、同一进程正常小时关闭保留主文件、`part-N` 只由既有文件碰撞触发；午夜 day/hour barrier、追赶、断线/backoff 与 writer fail-closed 未发现绕过或死锁。
+- 审查独立重跑完整 data-collect 测试、all-targets locked clippy、workspace fmt 与 `git diff --check`，全部通过。当前状态为 `SNAPSHOT_HOURLY_FINALIZE_SOURCE_REVIEW_PASSED_PENDING_RETRY_STATE_REVIEW`；第二轮远端 failed-gate 身份与重试部署状态审查 PASS 前，提交与远端替换/启动门仍关闭。
+
+## 2026-07-14：稀疏 snapshot 修复的 failed-gate 重试状态审查
+
+- 第二轮独立 `gpt-5.6-sol`/`ultra` 只读审查结论为 PASS，Critical=`0`、Important=`0`、Minor=`0`；证据采样窗口为远端 `2026-07-14T06:39:10Z–06:41:21Z`、本地 `2026-07-14T06:37:47Z–06:40:52Z`，审查未修改本地或远端状态。
+- 远端 service 精确为 inactive/dead、disabled、MainPID=`0`、NRestarts=`0`、`Restart=no`，无 enable symlink、进程、cgroup 或打开句柄。failed binary 为 `ubuntu:ubuntu`、mode `0755`、大小 `25,081,400` bytes、SHA-256=`249dc5802fb0aba185adf365b0e0523f86d39e626a9440fbd05164bfd8c5d9f6`；failed unit 为 `ubuntu:ubuntu`、mode `0644`、SHA-256=`76ae2883dee5bd95132e4d306eaac2507756936759082661065942a5f8c3e27c`，FragmentPath/ExecStart 一致。
+- `training/typed_raw` 为空且无 mount/holder；无 upload/staging、第二数据根、validation artifact 或已删除旧对象复现。本机 archive timer disabled/inactive，archive service static/inactive，`/home/chillchill/new-datasets` 保留。
+- 审查确认 HEAD、tracking ref 与远端分支仍为 `ef34c223fc12a6b95ef5c65cc4eebc1f629dc6d1`，暂存区为空；四个本事项文件未提交，三个用户文件未混入。重试顺序继续是提交/push、从 pushed commit 干净构建、精确 restage/replace、非 23 UTC 的 45–50 分启动并跨小时至少 15 分钟；不得复用当前 failed binary。
+- 当前状态为 `SNAPSHOT_HOURLY_FINALIZE_IMPLEMENTATION_REVIEW_PASSED_READY_FOR_COMMIT`。两路独立复审已通过，允许只提交并推送四个本事项文件；新生产构建仍须严格从推送后的 commit 产生。

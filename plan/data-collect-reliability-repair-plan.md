@@ -6,7 +6,7 @@
 >
 > 事项编号：`DC-REPAIR-20260713-COLLECTOR-RELIABILITY`
 >
-> 状态：`RTDS_GATE_FIX_IMPLEMENTATION_REVIEW_PASSED_READY_FOR_COMMIT`。首次生产 gate 的 RTDS initial snapshot 分类修正已通过完整本地门禁与两路独立复审；远端 failed-gate binary/unit 继续保持 inactive 且数据根为空。当前先提交并推送本轮修复，再从已推送 commit 干净构建新 binary，通过失败重试的精确身份门后方可启动新 gate。
+> 状态：`SNAPSHOT_HOURLY_FINALIZE_IMPLEMENTATION_REVIEW_PASSED_READY_FOR_COMMIT`。RTDS initial snapshot 修正已通过生产数据验证；稀疏 `binance_depth_snapshot` 无事件小时关闭修复已通过完整本地门禁、独立源码正确性审查与 failed-gate 重试状态审查。当前先提交并推送四个本事项文件，再从该已推送 commit 干净构建新 binary。
 
 ## 一、执行原则与成功定义
 
@@ -96,7 +96,7 @@ source 目录               source_kind=<source>
 ### 任务 2.7：收敛 writer 与生产产物
 
 - 步骤 2.7.1：删除 300k rows/128MB 文件 rollover，利用已知的 per-row size 在加入前判断，用 Arrow 59 的 `50_000 rows/16_777_216 logical bytes` per-writer row-group hard limit 保持有界；恢复 projection 固定每批最多 16 行，每行继续校验 1MiB hard cap。达到 row-group 上限只结束 group，文件仍只按 UTC hour 关闭。 -> 验证：高流量 fixture 在同小时只有一个正常 Parquet、多 row groups 均不越界，恢复 batch logical payload 不超过16MiB、处理后释放且不加载完整列。
-- 步骤 2.7.2：实现同小时重启 `part-N`；四个稳定 logical producer outer supervisor 通过同一 ingress queue 发送 UTC-day watermark/barrier，独立于 inner connection/backoff，旧日事件必须位于各自 barrier 之前。 -> 验证：故意延迟/交错旧新日事件及 source 跨午夜断线/backoff 时，barrier 仍到达、gap 保留且 closed 后不再出现旧日行。
+- 步骤 2.7.2：实现同小时重启 `part-N`；四个稳定 logical producer outer supervisor 通过同一 ingress queue 发送 UTC-day watermark/barrier，独立于 inner connection/backoff，旧日事件必须位于各自 barrier 之前。depth outer supervisor 还必须在 UTC-hour 边界先 fence source，再通过同一 ingress 顺序只对 `binance_depth_snapshot` 发送小时 finalize；旧小时有 snapshot 时关闭主文件，无 snapshot 时 no-op，同一进程内不得因此生成 `part-N`。 -> 验证：故意延迟/交错旧新日事件及 source 跨午夜断线/backoff 时，barrier 仍到达、gap 保留且 closed 后不再出现旧日行；仅一条 bootstrap snapshot 且无后续事件时，跨小时后主文件已 finalized、manifest delta 为一行且 `.running` 消失；空小时无空文件，同小时 resnapshot 仍只在主文件。
 - 步骤 2.7.3：实现唯一 manifest owner actor；writer 只通过 bounded channel 提交 finalize delta，owner 等 queue/batch drain 与六个 writer finalize ack 后串行执行“fsync tmp -> atomic rename -> fsync parent dir”。日 manifest 的紧凑 Binance 状态保存最新 `epoch_start_id/last_observed_id/last_contiguous_id` 与 unresolved ranges，不创建游标 sidecar。 -> 验证：并发小时/日切无 last-write-wins，跨日 gap 分割，异常退出不 closed，断电恢复只见旧完整文件或新完整文件；continuity epoch 可从 manifest+Parquet 尾部重建。
 - 步骤 2.7.4：重启时必须先处理所有早于当前 UTC 日的 open manifest：确认旧进程不存在、清理 stale running、记录 crash gap、以 finalized Parquet 对账并用 `unclean_exit_recovery` 原子 closed；完成前不得选择 continuity base 或启动网络。随后 owner 才合并当前日 open manifest/磁盘 finalized 文件，或在当日无 manifest/Parquet 时使用最近前一 closed 日并让新日首次 manifest 继承状态；恢复 build/config/file/last sequence、Binance epoch 与 dedupe 窗口。日内 SIGTERM 只 finalize 并保持当日 open。 -> 验证：不覆盖/重开 closed 日，前一日 open 必先关闭；`23:59 crash -> 00:01 restart` 与三种 manifest/rename 空窗都恢复同一 epoch，只回补最新尾部，对账失败不启动 source。
 - 步骤 2.7.5：删除 segment/run manifest、runtime receipts、retention admin/policy 与重复 sidecar 生产路径；dataset 达到 50GB 只执行 coordinated finalize、journal 与 exit 75。 -> 验证：临时生产根只含 Parquet、每日一个 manifest 和瞬时文件，禁止项均不存在。

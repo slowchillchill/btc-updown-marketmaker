@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-reliability-repair-changelog.md`
 >
-> 状态：`RTDS_GATE_FIX_IMPLEMENTATION_REVIEW_PASSED_READY_FOR_COMMIT`。首次生产 gate 的 RTDS initial snapshot 分类错误已最小修正，并通过真实 SDK 端到端运行、完整本地门禁、source/SDK 与 failed-gate retry/部署状态两路独立复审；提交并推送本轮修复、从已推送 commit 干净构建新 binary 且重新通过精确身份门后，才允许进入失败重试。
+> 状态：`SNAPSHOT_HOURLY_FINALIZE_IMPLEMENTATION_REVIEW_PASSED_READY_FOR_COMMIT`。RTDS initial snapshot 修复已通过生产数据验证；稀疏 `binance_depth_snapshot` 无事件小时关闭修复已通过完整本地门禁、独立源码正确性审查与 failed-gate 重试状态审查。提交并推送四个本事项文件后，必须从该已推送 commit 干净构建新 binary，禁止复用当前远端 failed pair。
 
 ## 一、目标与权威边界
 
@@ -104,7 +104,7 @@
         └── <source>_HH-part-N.parquet
 ```
 
-1. 正常情况每 source/hour 一个 finalized Parquet；只有同一小时进程重启导致文件名碰撞时才使用 `part-N`。稀疏 snapshot source 不生成空文件。
+1. 正常情况每 source/hour 一个 finalized Parquet；只有同一小时进程重启导致文件名碰撞时才使用 `part-N`。稀疏 snapshot source 在某小时存在行时，必须由 source-ordered UTC-hour watermark 在边界后关闭该小时主文件，即使此后没有下一条 snapshot；该小时没有行时不得生成空文件。同一进程内的正常小时关闭不得使用 `part-N`。
 2. writer 用编译常量 `PARQUET_ROW_GROUP_MAX_ROWS=50_000` 与 `PARQUET_ROW_GROUP_MAX_BYTES=16_777_216` 控制每个 writer 的逻辑 row group；利用入队前已知且不超过 1 MiB 的 row size，在加入会越界时先结束当前 row group，因此 group 逻辑 payload 不得超过 16 MiB，达到上限不创建新 part 文件。恢复扫描只投影所需列，固定 `RECOVERY_BATCH_MAX_ROWS=16`；新数据根中的每行都已受 1 MiB hard cap，故 projected logical payload 最多 16 MiB。若恢复读取发现单行超过 1 MiB，必须在网络 ingress 前 exit 76；每批处理后立即释放，不得一次载入完整列。上述边界不增加产物，仍不因 300k rows 或 128MB 产生大量小时 part 文件。
 3. 写入时只允许同目录 `*.running` 临时文件；持久化顺序固定为写完并 fsync 临时文件、atomic rename、fsync 父目录。`manifest.json.tmp` 使用相同顺序且只能瞬时存在。
 4. 每个 UTC 日只允许一个 `manifest.json`，且只有一个 manifest owner task 有写权限。各 source writer 通过 bounded channel 提交 finalized-file delta；owner 串行合并、fsync、atomic rename。它只记录采集事实：schema 版本、UTC 日、`open|closed`、build/binary/config digest/host/region、文件路径/source/hour/part/rows/bytes/sha256、逐 source 首末接收时间、写入/结构去重/backfill/lag/reconnect/drop 计数、紧凑 gap 列表，以及 Binance 最新 `epoch_start_id/last_observed_id/last_contiguous_id`。`config_digest` 只覆盖规范化的非 secret CLI/env/subscription 配置。

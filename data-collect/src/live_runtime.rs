@@ -96,6 +96,7 @@ const DEFAULT_DISCOVERY_WAIT_SECS: u64 = 90;
 const DEFAULT_QUEUE_CAPACITY: usize = 25_000;
 const DEFAULT_FLUSH_ROWS: usize = 5_000;
 const DEFAULT_MAX_FLUSH_INTERVAL_MS: u64 = 1_000;
+const UTC_HOUR_MS: i64 = 3_600_000;
 const UTC_DAY_MS: i64 = 86_400_000;
 const DEFAULT_WRITER_CHANNEL_CAPACITY: usize = 8;
 const DATASET_CAPACITY_SCAN_INTERVAL_SECS: u64 = 60;
@@ -514,6 +515,10 @@ impl SourceEventSink {
 }
 
 enum IngressControl {
+    FinalizeSourceHour {
+        source_kind: String,
+        utc_hour: String,
+    },
     DayBarrier {
         producer: String,
         utc_day: String,
@@ -722,17 +727,19 @@ where
     }
 }
 
-async fn run_depth_logical_producer_with_day_barriers<F>(
+async fn run_depth_logical_producer_with_time_barriers<F>(
     sink: SourceEventSink,
     control_tx: mpsc::Sender<DepthSourceControl>,
     run_started: Instant,
     initial_next_boundary_ms: i64,
+    initial_next_hour_boundary_ms: i64,
     source: F,
 ) -> Result<()>
 where
     F: Future<Output = Result<()>>,
 {
     let mut next_boundary_ms = initial_next_boundary_ms;
+    let mut next_hour_boundary_ms = initial_next_hour_boundary_ms;
     let mut source_started = false;
     tokio::pin!(source);
     loop {
@@ -761,11 +768,83 @@ where
             next_boundary_ms = next_boundary_ms.saturating_add(UTC_DAY_MS);
             continue;
         }
-        let wait_ms = next_boundary_ms.saturating_sub(now_ms()).max(0) as u64;
+        if now_ms() >= next_hour_boundary_ms {
+            let utc_hour = utc_hour_string_from_ms(next_hour_boundary_ms.saturating_sub(1))
+                .ok_or_else(|| invalid_data("UTC hour unavailable for depth barrier"))?;
+            if source_started {
+                if let Some(source_result) = fence_depth_and_finalize_snapshot_hour(
+                    source.as_mut(),
+                    &control_tx,
+                    &sink,
+                    run_started,
+                    &utc_hour,
+                )
+                .await?
+                {
+                    return source_result;
+                }
+            } else {
+                send_source_hour_finalize(&sink, run_started, "binance_depth_snapshot", utc_hour)
+                    .await?;
+            }
+            next_hour_boundary_ms = next_hour_boundary_ms.saturating_add(UTC_HOUR_MS);
+            continue;
+        }
+        let wait_ms = next_boundary_ms
+            .min(next_hour_boundary_ms)
+            .saturating_sub(now_ms())
+            .max(0) as u64;
         source_started = true;
         tokio::select! {
             result = &mut source => return result,
             () = sleep(Duration::from_millis(wait_ms)) => {}
+        }
+    }
+}
+
+async fn fence_depth_and_finalize_snapshot_hour<F>(
+    mut source: Pin<&mut F>,
+    control_tx: &mpsc::Sender<DepthSourceControl>,
+    sink: &SourceEventSink,
+    run_started: Instant,
+    utc_hour: &str,
+) -> Result<Option<Result<()>>>
+where
+    F: Future<Output = Result<()>>,
+{
+    let (reply_tx, mut reply_rx) = oneshot::channel();
+    let (resume_tx, resume_rx) = oneshot::channel();
+    control_tx
+        .send(DepthSourceControl::Fence {
+            stop_after_fence: false,
+            resume_after_barrier: Some(resume_rx),
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| invalid_data("depth source control channel closed before hour barrier"))?;
+    tokio::select! {
+        result = source.as_mut() => Ok(Some(result)),
+        reply = &mut reply_rx => {
+            match reply {
+                Ok(Ok(())) => {
+                    let barrier_result = send_source_hour_finalize(
+                        sink,
+                        run_started,
+                        "binance_depth_snapshot",
+                        utc_hour.to_owned(),
+                    )
+                    .await;
+                    let _ = resume_tx.send(());
+                    barrier_result?;
+                    Ok(None)
+                }
+                Ok(Err(error)) => Err(invalid_data(format!(
+                    "depth source fence failed before hour barrier:{error}"
+                )).into()),
+                Err(_) => Err(invalid_data(
+                    "depth source dropped hour-barrier fence reply",
+                ).into()),
+            }
         }
     }
 }
@@ -1504,11 +1583,12 @@ pub async fn run_live_training_runtime(
         ),
         (
             "binance_depth_update",
-            tokio::spawn(run_depth_logical_producer_with_day_barriers(
+            tokio::spawn(run_depth_logical_producer_with_time_barriers(
                 depth_sink,
                 depth_control_tx.clone(),
                 run_started,
                 initial_next_boundary_ms,
+                next_utc_hour_boundary_ms(now_ms()),
                 depth_source,
             )),
         ),
@@ -2217,6 +2297,27 @@ async fn handle_ingress_control(
     manifest_tx: &mpsc::Sender<ManifestCommand>,
 ) -> Result<()> {
     match control {
+        IngressControl::FinalizeSourceHour {
+            source_kind,
+            utc_hour,
+        } => {
+            let batch = batches.get_mut(&source_kind).ok_or_else(|| {
+                invalid_data(format!(
+                    "missing source batch for hour finalize: {source_kind}"
+                ))
+            })?;
+            flush_source_batch(
+                writers,
+                &source_kind,
+                batch,
+                gaps,
+                runtime_stats,
+                writer_queue_tracker,
+                run_started,
+            )
+            .await?;
+            send_writer_hour_finalize(writers, &source_kind, &utc_hour).await?;
+        }
         IngressControl::DayBarrier { producer, utc_day } => {
             flush_all_batches(
                 writers,
@@ -2495,6 +2596,47 @@ async fn send_writer_day_finalize(
     Ok(())
 }
 
+async fn send_writer_hour_finalize(
+    writers: &BTreeMap<String, SourceWriterHandle>,
+    source_kind: &str,
+    utc_hour: &str,
+) -> Result<()> {
+    let writer = writers.get(source_kind).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            format!("writer missing for hour finalize: {source_kind}"),
+        )
+    })?;
+    let mut command = WriterCommand::FinalizeHour {
+        utc_hour: utc_hour.to_owned(),
+    };
+    timeout(BUFFER_ACQUIRE_TIMEOUT, async {
+        loop {
+            match try_send_writer_command(writer, command) {
+                Ok(()) => return Ok(()),
+                Err(std::sync::mpsc::TrySendError::Full(returned)) => {
+                    command = returned;
+                    sleep(Duration::from_millis(50)).await;
+                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        format!("writer queue disconnected during hour finalize: {source_kind}"),
+                    ));
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("writer hour finalize timeout: {source_kind}"),
+        )
+    })??;
+    Ok(())
+}
+
 async fn stop_writer_workers_with_budget(
     writers: BTreeMap<String, SourceWriterHandle>,
     budget: Duration,
@@ -2658,6 +2800,51 @@ fn source_writer_worker(
                             &runtime_stats,
                         );
                         return Err(error);
+                    }
+                }
+            }
+            WriterCommand::FinalizeHour { utc_hour } => {
+                if active
+                    .as_ref()
+                    .is_some_and(|segment| segment.utc_hour < utc_hour)
+                {
+                    let segment = active.as_ref().expect("active segment exists");
+                    let error = invalid_data(format!(
+                        "writer hour barrier skipped UTC hour: source={source_kind} active={} barrier={utc_hour}",
+                        segment.utc_hour
+                    ));
+                    record_unfinalized_segment_drop(&runtime_stats, segment);
+                    stop_accepting_and_record_queued_drops(
+                        &accepting_commands,
+                        &rx,
+                        &queue_rows,
+                        &runtime_stats,
+                    );
+                    return Err(error.into());
+                }
+                if active
+                    .as_ref()
+                    .is_some_and(|segment| segment.utc_hour == utc_hour)
+                {
+                    let segment = active.take().expect("active segment exists");
+                    let finalized = finalize_segment_with_drop_accounting(
+                        segment,
+                        "utc_hour_boundary",
+                        &provenance,
+                        &manifest_tx,
+                        &runtime_stats,
+                    );
+                    match finalized {
+                        Ok(finalized) => finalized_segments.push(finalized),
+                        Err(error) => {
+                            stop_accepting_and_record_queued_drops(
+                                &accepting_commands,
+                                &rx,
+                                &queue_rows,
+                                &runtime_stats,
+                            );
+                            return Err(error);
+                        }
                     }
                 }
             }
@@ -4681,6 +4868,24 @@ fn utc_day_string_from_ms(utc_ms: i64) -> Option<String> {
     ))
 }
 
+fn utc_hour_string_from_ms(utc_ms: i64) -> Option<String> {
+    let dt = OffsetDateTime::from_unix_timestamp(utc_ms.div_euclid(1000)).ok()?;
+    Some(format!(
+        "{:04}-{:02}-{:02}T{:02}",
+        dt.year(),
+        u8::from(dt.month()),
+        dt.day(),
+        dt.hour()
+    ))
+}
+
+fn next_utc_hour_boundary_ms(utc_ms: i64) -> i64 {
+    utc_ms
+        .div_euclid(UTC_HOUR_MS)
+        .saturating_mul(UTC_HOUR_MS)
+        .saturating_add(UTC_HOUR_MS)
+}
+
 async fn run_binance_depth_update_ws_source_with_control(
     mut stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
     mut context: BinanceDepthUpdateContext,
@@ -4938,7 +5143,7 @@ async fn handle_depth_source_control(control: DepthSourceControl) -> Result<bool
     if let Some(resume) = resume_after_barrier {
         resume
             .await
-            .map_err(|_| invalid_data("depth day-barrier owner dropped source resume signal"))?;
+            .map_err(|_| invalid_data("depth barrier owner dropped source resume signal"))?;
     }
     Ok(stop_after_fence)
 }
@@ -6144,6 +6349,24 @@ async fn send_day_barrier(
     .await
 }
 
+async fn send_source_hour_finalize(
+    sink: &SourceEventSink,
+    run_started: Instant,
+    source_kind: &str,
+    utc_hour: String,
+) -> Result<()> {
+    send_ingress_control(
+        sink,
+        run_started,
+        IngressControl::FinalizeSourceHour {
+            source_kind: source_kind.to_owned(),
+            utc_hour,
+        },
+        "utc_hour_finalize",
+    )
+    .await
+}
+
 async fn send_binance_continuity(
     sink: &SourceEventSink,
     run_started: Instant,
@@ -6679,6 +6902,7 @@ struct SourceWriterHandle {
 
 enum WriterCommand {
     Events(Vec<InflightRawEvent>),
+    FinalizeHour { utc_hour: String },
     FinalizeDay { utc_day: String },
 }
 
@@ -7874,11 +8098,12 @@ mod tests {
                 .unwrap();
             Ok(())
         };
-        run_depth_logical_producer_with_day_barriers(
+        run_depth_logical_producer_with_time_barriers(
             sink,
             control_tx,
             Instant::now(),
             initial_boundary,
+            next_utc_hour_boundary_ms(now_ms()),
             source,
         )
         .await
@@ -7888,6 +8113,57 @@ mod tests {
             Some(IngressControl::DayBarrier { producer, .. }) if producer == "binance_depth"
         ));
         assert!(rx.recv().await.unwrap().control.is_none());
+    }
+
+    #[tokio::test]
+    async fn depth_hour_boundary_fences_snapshot_before_finalize_control() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let sink = SourceEventSink {
+            tx,
+            gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+            source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+            inflight_budget: InflightBudget::new(),
+            enqueue_lock: Arc::new(AsyncMutex::new(())),
+        };
+        let source_sink = sink.clone();
+        let (control_tx, mut control_rx) = mpsc::channel(1);
+        let run_started = Instant::now();
+        let next_hour_boundary_ms = now_ms() + 20;
+        let source = async move {
+            send_event(
+                &source_sink,
+                run_started,
+                test_binance_depth_snapshot_event(1_783_392_404_600, "bootstrap"),
+            )
+            .await?;
+            let control = control_rx.recv().await.ok_or_else(|| {
+                invalid_data("depth control channel closed before test hour barrier")
+            })?;
+            handle_depth_source_control(control).await?;
+            Ok(())
+        };
+        run_depth_logical_producer_with_time_barriers(
+            sink,
+            control_tx,
+            run_started,
+            next_hour_boundary_ms + UTC_DAY_MS,
+            next_hour_boundary_ms,
+            source,
+        )
+        .await
+        .unwrap();
+
+        let snapshot = rx.recv().await.unwrap();
+        assert!(snapshot.control.is_none());
+        assert_eq!(snapshot.event.source_event_type, "depth_snapshot");
+        let expected_hour = utc_hour_string_from_ms(next_hour_boundary_ms - 1).unwrap();
+        assert!(matches!(
+            rx.recv().await.unwrap().control,
+            Some(IngressControl::FinalizeSourceHour {
+                ref source_kind,
+                ref utc_hour,
+            }) if source_kind == "binance_depth_snapshot" && utc_hour == &expected_hour
+        ));
     }
 
     #[tokio::test]
@@ -10195,6 +10471,164 @@ mod tests {
     }
 
     #[test]
+    fn sparse_depth_snapshot_hour_finalize_closes_without_a_later_event() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let recv_time_utc_ms = 1_783_392_404_600;
+        let partition = HourlyPartitionPolicy::new(&dataset_root)
+            .unwrap()
+            .partition("binance_depth_snapshot", recv_time_utc_ms, None)
+            .unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
+        let queue_rows = Arc::new(AtomicU64::new(1));
+        let queue_rows_for_worker = Arc::clone(&queue_rows);
+        let dataset_root_for_worker = dataset_root.clone();
+        let (manifest_tx, mut manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
+        let handle = std::thread::spawn(move || {
+            source_writer_worker(
+                dataset_root_for_worker,
+                test_runtime_provenance("sparse-snapshot-hour-finalize"),
+                "binance_depth_snapshot".to_owned(),
+                rx,
+                queue_rows_for_worker,
+                Arc::new(Mutex::new(true)),
+                Arc::new(SourceQueueBackpressureStats::default()),
+                manifest_tx,
+            )
+        });
+
+        tx.send(WriterCommand::Events(vec![InflightRawEvent::for_test(
+            test_binance_depth_snapshot_event(recv_time_utc_ms, "bootstrap"),
+        )]))
+        .unwrap();
+        tx.send(WriterCommand::FinalizeHour {
+            utc_hour: partition.utc_hour.clone(),
+        })
+        .unwrap();
+        drop(tx);
+
+        let output = handle.join().unwrap().unwrap();
+        assert_eq!(output.finalized_segments.len(), 1);
+        let ManifestCommand::Finalized(delta) = manifest_rx.blocking_recv().unwrap() else {
+            panic!("expected finalized-file delta");
+        };
+        assert_eq!(delta.rows, 1);
+        assert_eq!(delta.part, 0);
+        assert_eq!(delta.facts["rollover_reason"], "utc_hour_boundary");
+        assert!(partition.final_path.is_file());
+        assert!(!partition.running_path.exists());
+        assert!(
+            !HourlyPartitionPolicy::new(&dataset_root)
+                .unwrap()
+                .partition("binance_depth_snapshot", recv_time_utc_ms, Some(1))
+                .unwrap()
+                .final_path
+                .exists()
+        );
+    }
+
+    #[test]
+    fn empty_depth_snapshot_hour_finalize_does_not_create_a_file() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let recv_time_utc_ms = 1_783_392_404_600;
+        let partition = HourlyPartitionPolicy::new(&dataset_root)
+            .unwrap()
+            .partition("binance_depth_snapshot", recv_time_utc_ms, None)
+            .unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
+        let (manifest_tx, mut manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
+        let dataset_root_for_worker = dataset_root.clone();
+        let handle = std::thread::spawn(move || {
+            source_writer_worker(
+                dataset_root_for_worker,
+                test_runtime_provenance("empty-snapshot-hour-finalize"),
+                "binance_depth_snapshot".to_owned(),
+                rx,
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(Mutex::new(true)),
+                Arc::new(SourceQueueBackpressureStats::default()),
+                manifest_tx,
+            )
+        });
+
+        tx.send(WriterCommand::FinalizeHour {
+            utc_hour: partition.utc_hour,
+        })
+        .unwrap();
+        drop(tx);
+
+        let output = handle.join().unwrap().unwrap();
+        assert!(output.finalized_segments.is_empty());
+        assert!(manifest_rx.try_recv().is_err());
+        assert!(!partition.final_path.exists());
+        assert!(!partition.running_path.exists());
+    }
+
+    #[test]
+    fn same_hour_depth_resnapshot_stays_in_the_primary_hour_file() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let recv_time_utc_ms = 1_783_392_404_600;
+        let partition = HourlyPartitionPolicy::new(&dataset_root)
+            .unwrap()
+            .partition("binance_depth_snapshot", recv_time_utc_ms, None)
+            .unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
+        let queue_rows = Arc::new(AtomicU64::new(2));
+        let queue_rows_for_worker = Arc::clone(&queue_rows);
+        let dataset_root_for_worker = dataset_root.clone();
+        let (manifest_tx, mut manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
+        let handle = std::thread::spawn(move || {
+            source_writer_worker(
+                dataset_root_for_worker,
+                test_runtime_provenance("same-hour-snapshot"),
+                "binance_depth_snapshot".to_owned(),
+                rx,
+                queue_rows_for_worker,
+                Arc::new(Mutex::new(true)),
+                Arc::new(SourceQueueBackpressureStats::default()),
+                manifest_tx,
+            )
+        });
+
+        tx.send(WriterCommand::Events(vec![
+            InflightRawEvent::for_test(test_binance_depth_snapshot_event(
+                recv_time_utc_ms,
+                "bootstrap",
+            )),
+            InflightRawEvent::for_test(test_binance_depth_snapshot_event(
+                recv_time_utc_ms + 1_000,
+                "stitch_gap:test",
+            )),
+        ]))
+        .unwrap();
+        tx.send(WriterCommand::FinalizeHour {
+            utc_hour: partition.utc_hour.clone(),
+        })
+        .unwrap();
+        drop(tx);
+
+        let output = handle.join().unwrap().unwrap();
+        assert_eq!(output.finalized_segments.len(), 1);
+        let ManifestCommand::Finalized(delta) = manifest_rx.blocking_recv().unwrap() else {
+            panic!("expected finalized-file delta");
+        };
+        assert_eq!(delta.rows, 2);
+        assert_eq!(delta.part, 0);
+        assert!(partition.final_path.is_file());
+        assert!(!partition.running_path.exists());
+        assert!(
+            !HourlyPartitionPolicy::new(&dataset_root)
+                .unwrap()
+                .partition("binance_depth_snapshot", recv_time_utc_ms, Some(1))
+                .unwrap()
+                .final_path
+                .exists()
+        );
+    }
+
+    #[test]
     fn binance_depth_manifest_counts_resnapshot_trigger_evidence() {
         let tmp = tempdir().unwrap();
         let dataset_root = tmp.path().canonicalize().unwrap();
@@ -12252,6 +12686,7 @@ mod tests {
                 Some(IngressControl::BinanceContinuity { .. }) => {
                     continuity_indexes.push(index);
                 }
+                Some(IngressControl::FinalizeSourceHour { .. }) => {}
                 Some(IngressControl::DayBarrier { .. }) => {}
                 None => {
                     data_ids.push(
@@ -12604,6 +13039,29 @@ mod tests {
 
     fn test_binance_depth_update_event(recv_time_utc_ms: i64) -> RawEvent {
         test_binance_depth_update_event_inner(recv_time_utc_ms, None)
+    }
+
+    fn test_binance_depth_snapshot_event(recv_time_utc_ms: i64, trigger_reason: &str) -> RawEvent {
+        RawEvent {
+            source_kind: "binance_depth_snapshot".to_owned(),
+            source_event_type: "depth_snapshot".to_owned(),
+            source_identifier: "BTCUSDT".to_owned(),
+            source_ts: None,
+            recv_time_utc_ms,
+            collector_host_id: "collector-test".to_owned(),
+            collector_region: "local-test".to_owned(),
+            source_endpoint: BINANCE_DEPTH_SNAPSHOT.to_owned(),
+            raw_json: json!({
+                "lastUpdateId": 100_u64,
+                "bids": [["65000.10", "0.25"]],
+                "asks": [["65000.20", "0.30"]],
+                "snapshot_trigger_reason": trigger_reason,
+                "snapshot_fetch_start_utc": recv_time_utc_ms - 10,
+            })
+            .to_string(),
+            parquet_raw_layout_version: 1,
+            parquet_raw_source_kind: "binance_depth_snapshot".to_owned(),
+        }
     }
 
     fn test_binance_depth_update_event_with_trigger(
