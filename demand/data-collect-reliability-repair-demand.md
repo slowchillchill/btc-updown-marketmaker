@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-reliability-repair-changelog.md`
 >
-> 状态：`TASK_2_D2_IMPLEMENTATION_REVIEW_PASSED_READY_FOR_COMMIT`。D2 首轮三路独立实现审查的问题已逐项修正；第二轮三路复审只剩的“两代真实 loopback 未调用生产 terminal 决策”也已用生产共用 helper 补齐 fatal、固定 gap 与无第三次 ticket/socket 断言。三路最终复审现均为 PASS，Critical/Important/Minor 全部为 0。相同 RTDS `statusCode=400` / `AddSubscriptions` / `connection_id_fk` 服务端错误已在 `2026-07-15T04:11:25.574760Z`、`11:14:54.483660Z`、`12:30:31.062283Z`与`13:40:38Z`四次返回完全相同的frame/body指纹。用户批准的 generation-aware one-shot reconnect、每代一次 latest desired replay、单 receiver freshness fence 与最多两个新 generation 已按本需求实现；所有 service envelope、parser 与目标 schema error 仍 sticky/terminal/fatal。方案2边界不变：实现提交、隔离构建和远端预检全部通过前，旧服务继续运行且不得提前删除或替换；之后才可停止旧服务并只永久删除旧 build 独占的 `utc_day=2026-07-15`，保留此前 closed 日期，再立即切换 D2。
+> 状态：`TASK_4_5_D2_STAGE_REVIEW_PASSED_READY_FOR_DOC_COMMIT`。独立`gpt-5.6-sol`/`ultra`阶段审查明确PASS，Critical=`0`、Important=`0`、Minor=`0`；`2026-07-15T18:10:07Z`复采仍为同一MainPID=`1103255`、active/running、disabled、`Restart=no`、NRestarts=`0`，六源manifest/Parquet/footer/journal与最小产物合同均通过。下一动作只提交并push本事项三份文档；远端分支确认后才能在不restart/stop当前PID的前提下切换长期`Restart=on-failure` unit并enable。
 
 ## 一、目标与权威边界
 

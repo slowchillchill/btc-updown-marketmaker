@@ -6,7 +6,7 @@
 >
 > 事项编号：`DC-REPAIR-20260713-COLLECTOR-RELIABILITY`
 >
-> 状态：`TASK_2_D2_IMPLEMENTATION_REVIEW_PASSED_READY_FOR_COMMIT`。D2 第二轮三路复审只剩的真实两代无 fresh terminal 验收缺口已修正并完成全量复验；三路最终复审均为 PASS，Critical/Important/Minor 全部为 0。下一步只允许精确提交并 push 本事项文件；提交与隔离构建、远端 staging 预检全部通过前不停止或替换旧服务，也不删除 `utc_day=2026-07-15`。方案2的 prior closed 日期保留、单日完整树门和原子 tombstone 边界不变。
+> 状态：`TASK_4_5_D2_STAGE_REVIEW_PASSED_READY_FOR_DOC_COMMIT`。独立`gpt-5.6-sol`/`ultra`阶段审查明确PASS，Critical=`0`、Important=`0`、Minor=`0`；`2026-07-15T18:10:07Z`复采仍为同一MainPID=`1103255`、active/running、disabled、`Restart=no`、NRestarts=`0`，六源manifest/Parquet/footer/journal与最小产物合同均通过。下一动作是仅提交并push本事项三份文档；远端分支确认后按5.1.1在不restart/stop当前PID的前提下原子切换长期unit并enable。
 
 ## 一、执行原则与成功定义
 
