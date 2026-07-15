@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-reliability-repair-changelog.md`
 >
-> 状态：`TASK_4_5_RTDS_RESPONSE_ENVELOPE_DIAGNOSTIC_STAGE_REVIEW_PASSED_READY_FOR_COMMIT`。commit `6e6759b8d6138e081b69ada3fd69be1ead43d133` / binary SHA-256=`078fdc32bf4992bc7393b4151c1326fc726090662a5440c8829e167196df16bc` 自 `2026-07-15T02:48:10.136517216Z` 以 `Restart=no` gate unit、MainPID=`1074411` 运行；截至独立复采 `03:37:41Z` 仍 active/running、disabled、NRestarts=0，只有正常 Started journal。跨小时六源直接内容审计与阶段 4 独立审查均 PASS，Critical/Important/Minor 均为 0。精确提交并 push 本轮三份文档后，才允许按计划无重启切换长期 unit。
+> 状态：`TASK_5_1_LONG_RUNNING_ACTIVE_PID_1074411_WINDOW_START_20260715T024810Z`。阶段 4 文档 commit `dd6775a62289fcfcc4b6e96ed9c69731651151fa` 已 push；`2026-07-15T03:41:30Z` 已把同一 MainPID=`1074411` 无重启切换到 SHA-256=`7e847363f9164aa63fd4bb8c27307b24fa2e096cfc806a8e5c739d3d75f08795` 的权威长期 unit。PID 与启动 monotonic timestamp 前后不变，binary SHA-256=`078fdc32bf4992bc7393b4151c1326fc726090662a5440c8829e167196df16bc`，当前 active/running、enabled、`Restart=on-failure`、NRestarts=0。26 小时同 PID 窗口从真实启动 `2026-07-15T02:48:10.136517216Z` 计算，不早于 `2026-07-16T04:48:10.136517216Z` 验收。
 
 ## 一、目标与权威边界
 
