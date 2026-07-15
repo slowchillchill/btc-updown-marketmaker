@@ -8,7 +8,7 @@ use polymarket_client_sdk_v2::clob::ws::interest::InterestTracker;
 use polymarket_client_sdk_v2::clob::ws::subscription::SubscriptionManager as MarketSubscriptionManager;
 use polymarket_client_sdk_v2::clob::ws::types::response::WsMessage;
 use polymarket_client_sdk_v2::rtds::subscription::{
-    SimpleParser, SubscriptionManager as RtdsSubscriptionManager, TopicType,
+    SimpleParser, SubscriptionManager as RtdsSubscriptionManager,
 };
 use polymarket_client_sdk_v2::rtds::{RtdsMessage, Subscription};
 use polymarket_client_sdk_v2::types::U256;
@@ -64,6 +64,94 @@ struct DesiredMarketAssets {
 struct DesiredRtdsSubscription {
     revision: u64,
     subscription: Option<Subscription>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RtdsAppliedSubscription {
+    pub(crate) generation: u64,
+    pub(crate) revision: u64,
+}
+
+struct RtdsFreshnessFence {
+    initial_generation: u64,
+    applied_generation: Option<u64>,
+    ineligible_remaining: usize,
+}
+
+impl RtdsFreshnessFence {
+    const fn new(initial_generation: u64) -> Self {
+        Self {
+            initial_generation,
+            applied_generation: None,
+            ineligible_remaining: 0,
+        }
+    }
+
+    fn observe_applied(
+        &mut self,
+        applied: RtdsAppliedSubscription,
+        queued_messages: usize,
+    ) -> Result<bool, SdkStreamError> {
+        match self.applied_generation {
+            None => {
+                if applied.generation < self.initial_generation {
+                    return Err(SdkStreamError::SubscriptionActor(format!(
+                        "RTDS first applied generation {} precedes initial generation {}",
+                        applied.generation, self.initial_generation
+                    )));
+                }
+                self.applied_generation = Some(applied.generation);
+                if applied.generation > self.initial_generation {
+                    self.ineligible_remaining = queued_messages;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            Some(generation) if applied.generation < generation => {
+                Err(SdkStreamError::SubscriptionActor(format!(
+                    "RTDS applied generation regressed from {generation} to {}",
+                    applied.generation
+                )))
+            }
+            Some(generation) if applied.generation == generation => Ok(false),
+            Some(_) => {
+                self.applied_generation = Some(applied.generation);
+                self.ineligible_remaining = queued_messages;
+                Ok(true)
+            }
+        }
+    }
+
+    fn classify_received(
+        &mut self,
+        generation_advanced: bool,
+        connection_generation: u64,
+        connection_is_active: bool,
+    ) -> Option<u64> {
+        if generation_advanced {
+            return None;
+        }
+        let was_fenced = self.ineligible_remaining > 0;
+        if was_fenced {
+            self.ineligible_remaining -= 1;
+        }
+        (!was_fenced
+            && connection_is_active
+            && self.applied_generation == Some(connection_generation))
+        .then_some(connection_generation)
+    }
+}
+
+pub(crate) struct RtdsRuntimeMessage {
+    pub(crate) message: RtdsMessage,
+    pub(crate) freshness_generation: Option<u64>,
+    pub(crate) newly_applied: Option<RtdsAppliedSubscription>,
+}
+
+pub(crate) enum RtdsRuntimeEvent {
+    Applied(RtdsAppliedSubscription),
+    Message(RtdsRuntimeMessage),
 }
 
 pub struct MarketSdkRuntime {
@@ -501,10 +589,11 @@ pub struct RtdsSdkRuntime {
     states: watch::Receiver<ConnectionState>,
     faults: watch::Receiver<Option<ConnectionFault>>,
     desired_tx: watch::Sender<DesiredRtdsSubscription>,
-    applied_rx: watch::Receiver<u64>,
+    applied_rx: watch::Receiver<Option<RtdsAppliedSubscription>>,
     actor_error_rx: watch::Receiver<Option<SdkStreamError>>,
     actor: JoinHandle<()>,
     next_revision: u64,
+    freshness_fence: RtdsFreshnessFence,
 }
 
 impl RtdsSdkRuntime {
@@ -515,7 +604,7 @@ impl RtdsSdkRuntime {
         let states = connection.state_receiver();
         let faults = connection.fault_receiver();
         let (desired_tx, desired_rx) = watch::channel(DesiredRtdsSubscription::default());
-        let (applied_tx, applied_rx) = watch::channel(0_u64);
+        let (applied_tx, applied_rx) = watch::channel(None);
         let (actor_error_tx, actor_error_rx) = watch::channel(None::<SdkStreamError>);
         let actor = tokio::spawn(run_rtds_subscription_actor(
             connection.clone(),
@@ -524,6 +613,7 @@ impl RtdsSdkRuntime {
             applied_tx,
             actor_error_tx,
         ));
+        let initial_generation = connection.connection_generation();
         Ok(Self {
             connection,
             messages,
@@ -534,6 +624,7 @@ impl RtdsSdkRuntime {
             actor_error_rx,
             actor,
             next_revision: 0,
+            freshness_fence: RtdsFreshnessFence::new(initial_generation),
         })
     }
 
@@ -601,7 +692,8 @@ impl RtdsSdkRuntime {
     ) -> Result<(), SdkStreamError> {
         let deadline = Instant::now() + timeout_duration;
         loop {
-            if *self.applied_rx.borrow() >= revision {
+            self.sync_applied_fence()?;
+            if self.subscription_is_applied(revision) {
                 return Ok(());
             }
             if let Some(error) = connection_fault(&self.faults) {
@@ -658,12 +750,30 @@ impl RtdsSdkRuntime {
             .await
     }
 
-    pub async fn resubscribe(
-        &mut self,
-        subscription: Subscription,
-        timeout_duration: Duration,
-    ) -> Result<(), SdkStreamError> {
-        self.subscribe(subscription, timeout_duration).await
+    #[must_use]
+    pub fn connection_generation(&self) -> u64 {
+        self.connection.connection_generation()
+    }
+
+    #[must_use]
+    pub fn subscription_revision(&self) -> u64 {
+        self.desired_tx.borrow().revision
+    }
+
+    #[must_use]
+    pub fn request_reconnect(&self, observed_generation: u64) -> bool {
+        self.connection.request_reconnect(observed_generation)
+    }
+
+    #[must_use]
+    pub(crate) fn observed_applied_generation(&self) -> Option<u64> {
+        self.freshness_fence.applied_generation
+    }
+
+    #[must_use]
+    pub(crate) fn generation_is_active(&self, generation: u64) -> bool {
+        self.connection.connection_generation() == generation
+            && self.connection.state().is_connected()
     }
 
     pub async fn recv(
@@ -672,17 +782,71 @@ impl RtdsSdkRuntime {
     ) -> Result<Option<RtdsMessage>, SdkStreamError> {
         let deadline = Instant::now() + timeout_duration;
         loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            match self.recv_event(remaining).await? {
+                Some(RtdsRuntimeEvent::Message(message)) => return Ok(Some(message.message)),
+                Some(RtdsRuntimeEvent::Applied(_)) => {}
+                None => return Ok(None),
+            }
+        }
+    }
+
+    pub(crate) async fn recv_event(
+        &mut self,
+        timeout_duration: Duration,
+    ) -> Result<Option<RtdsRuntimeEvent>, SdkStreamError> {
+        let deadline = Instant::now() + timeout_duration;
+        loop {
             if let Some(error) = connection_fault(&self.faults) {
                 return Err(error);
             }
             if let Some(error) = self.actor_error_rx.borrow().clone() {
                 return Err(error);
             }
-            let remaining = remaining(deadline, "waiting for RTDS message")?;
+            if let Some(applied) = self.sync_applied_fence()? {
+                return Ok(Some(RtdsRuntimeEvent::Applied(applied)));
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
             tokio::select! {
+                biased;
+                changed = self.applied_rx.changed() => {
+                    if changed.is_err() {
+                        return Err(rtds_actor_exit_error(
+                            &self.connection,
+                            &self.faults,
+                            &self.actor_error_rx,
+                        ));
+                    }
+                    if let Some(applied) = self.sync_applied_fence()? {
+                        return Ok(Some(RtdsRuntimeEvent::Applied(applied)));
+                    }
+                }
                 message = self.messages.recv() => {
                     return match message {
-                        Ok(message) => Ok(Some(message)),
+                        Ok(message) => {
+                            let newly_applied = self.sync_applied_fence()?;
+                            let generation_advanced = newly_applied.is_some();
+                            let connection_generation = self.connection.connection_generation();
+                            let connection_is_active = self.connection.state().is_connected();
+                            let freshness_generation = self
+                                .freshness_fence
+                                .classify_received(
+                                    generation_advanced,
+                                    connection_generation,
+                                    connection_is_active,
+                                );
+                            Ok(Some(RtdsRuntimeEvent::Message(RtdsRuntimeMessage {
+                                message,
+                                freshness_generation,
+                                newly_applied,
+                            })))
+                        }
                         Err(broadcast::error::RecvError::Lagged(count)) => {
                             Err(SdkStreamError::Lagged(count))
                         }
@@ -716,6 +880,29 @@ impl RtdsSdkRuntime {
         }
     }
 
+    fn sync_applied_fence(&mut self) -> Result<Option<RtdsAppliedSubscription>, SdkStreamError> {
+        let applied = *self.applied_rx.borrow_and_update();
+        let Some(applied) = applied else {
+            return Ok(None);
+        };
+        if self
+            .freshness_fence
+            .observe_applied(applied, self.messages.len())?
+        {
+            Ok(Some(applied))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn subscription_is_applied(&self, revision: u64) -> bool {
+        self.applied_rx.borrow().is_some_and(|applied| {
+            applied.revision >= revision
+                && applied.generation == self.connection.connection_generation()
+                && self.connection.state().is_connected()
+        })
+    }
+
     #[must_use]
     pub fn subscription_count(&self) -> usize {
         usize::from(self.desired_tx.borrow().subscription.is_some())
@@ -732,39 +919,44 @@ async fn run_rtds_subscription_actor(
     connection: RtdsConnection,
     mut states: watch::Receiver<ConnectionState>,
     mut desired_rx: watch::Receiver<DesiredRtdsSubscription>,
-    applied_tx: watch::Sender<u64>,
+    applied_tx: watch::Sender<Option<RtdsAppliedSubscription>>,
     actor_error_tx: watch::Sender<Option<SdkStreamError>>,
 ) {
     let result = async {
         let mut desired = latest_watch_value(&mut desired_rx);
-        let mut connected_since = None;
-        let mut applied_revision = 0_u64;
-        let mut connected_subscription = None::<Subscription>;
+        let mut connected_generation = None;
+        let mut generation_applied = false;
         let mut subscriptions = None::<RtdsSubscriptionManager>;
 
         loop {
-            if let ConnectionState::Connected { since } = *states.borrow() {
-                if connected_since != Some(since) {
+            if let ConnectionState::Connected { .. } = *states.borrow() {
+                let generation = connection.connection_generation();
+                if connected_generation != Some(generation) {
                     desired = latest_watch_value(&mut desired_rx);
-                    subscriptions = Some(RtdsSubscriptionManager::new(connection.clone()));
-                    connected_subscription = None;
-                    applied_revision = 0;
-                    connected_since = Some(since);
+                    subscriptions = connection
+                        .bind_generation(generation)
+                        .map(RtdsSubscriptionManager::new);
+                    generation_applied = false;
+                    connected_generation = Some(generation);
                 }
 
-                if applied_revision < desired.revision
+                if !generation_applied
                     && let Some(subscription) = desired.subscription.clone()
+                    && let Some(generation_subscriptions) = subscriptions.as_ref()
                 {
-                    apply_rtds_subscription(
-                        subscriptions
-                            .as_ref()
-                            .expect("connected state has RTDS subscription manager"),
-                        connected_subscription.as_ref(),
-                        subscription.clone(),
-                    )?;
-                    connected_subscription = Some(subscription);
-                    applied_revision = desired.revision;
-                    applied_tx.send_replace(applied_revision);
+                    apply_rtds_subscription(generation_subscriptions, subscription)?;
+                    if connection.connection_generation() != generation
+                        || !connection.state().is_connected()
+                    {
+                        subscriptions = None;
+                        connected_generation = None;
+                        continue;
+                    }
+                    generation_applied = true;
+                    applied_tx.send_replace(Some(RtdsAppliedSubscription {
+                        generation,
+                        revision: desired.revision,
+                    }));
                     continue;
                 }
             }
@@ -782,8 +974,8 @@ async fn run_rtds_subscription_actor(
                         ConnectionState::Connected { .. } => {}
                         _ => {
                             subscriptions = None;
-                            connected_subscription = None;
-                            connected_since = None;
+                            generation_applied = false;
+                            connected_generation = None;
                         }
                     }
                 }
@@ -805,15 +997,8 @@ async fn run_rtds_subscription_actor(
 
 fn apply_rtds_subscription(
     subscriptions: &RtdsSubscriptionManager,
-    applied: Option<&Subscription>,
     desired: Subscription,
 ) -> Result<(), SdkStreamError> {
-    if let Some(applied) = applied {
-        let topic_type = TopicType::new(applied.topic.clone(), applied.msg_type.clone());
-        subscriptions
-            .unsubscribe(&[topic_type])
-            .map_err(|err| SdkStreamError::Subscription(err.to_string()))?;
-    }
     drop(
         subscriptions
             .subscribe(desired)
@@ -919,6 +1104,273 @@ mod tests {
         })
         .await
         .expect("SDK connection")
+    }
+
+    #[test]
+    fn rtds_fence_keeps_the_last_queued_message_ineligible_before_decrement() {
+        let mut fence = RtdsFreshnessFence::new(0);
+        assert!(
+            !fence
+                .observe_applied(
+                    RtdsAppliedSubscription {
+                        generation: 0,
+                        revision: 1,
+                    },
+                    0,
+                )
+                .unwrap()
+        );
+        assert!(
+            fence
+                .observe_applied(
+                    RtdsAppliedSubscription {
+                        generation: 1,
+                        revision: 1,
+                    },
+                    1,
+                )
+                .unwrap()
+        );
+
+        assert_eq!(fence.classify_received(false, 1, true), None);
+        assert_eq!(fence.ineligible_remaining, 0);
+        assert_eq!(fence.classify_received(false, 1, true), Some(1));
+    }
+
+    #[test]
+    fn rtds_fence_marks_the_current_message_ineligible_when_ack_is_seen_after_recv() {
+        let mut fence = RtdsFreshnessFence::new(0);
+        fence
+            .observe_applied(
+                RtdsAppliedSubscription {
+                    generation: 0,
+                    revision: 1,
+                },
+                0,
+            )
+            .unwrap();
+
+        let generation_advanced = fence
+            .observe_applied(
+                RtdsAppliedSubscription {
+                    generation: 1,
+                    revision: 1,
+                },
+                0,
+            )
+            .unwrap();
+        assert!(generation_advanced);
+        assert_eq!(fence.ineligible_remaining, 0);
+        assert_eq!(fence.classify_received(generation_advanced, 1, true), None);
+        assert_eq!(fence.classify_received(false, 1, true), Some(1));
+    }
+
+    #[test]
+    fn rtds_unobserved_new_generation_cannot_make_a_message_eligible() {
+        let mut fence = RtdsFreshnessFence::new(0);
+        fence
+            .observe_applied(
+                RtdsAppliedSubscription {
+                    generation: 0,
+                    revision: 1,
+                },
+                0,
+            )
+            .unwrap();
+
+        assert_eq!(fence.classify_received(false, 1, true), None);
+        assert!(
+            fence
+                .observe_applied(
+                    RtdsAppliedSubscription {
+                        generation: 1,
+                        revision: 1,
+                    },
+                    0,
+                )
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn rtds_same_generation_revision_does_not_rebuild_the_fence() {
+        let mut fence = RtdsFreshnessFence::new(0);
+        fence
+            .observe_applied(
+                RtdsAppliedSubscription {
+                    generation: 3,
+                    revision: 1,
+                },
+                0,
+            )
+            .unwrap();
+        assert!(
+            !fence
+                .observe_applied(
+                    RtdsAppliedSubscription {
+                        generation: 3,
+                        revision: 2,
+                    },
+                    10,
+                )
+                .unwrap()
+        );
+        assert_eq!(fence.ineligible_remaining, 0);
+    }
+
+    #[test]
+    fn rtds_first_observed_applied_generation_builds_a_fence_when_initial_ack_was_skipped() {
+        let mut fence = RtdsFreshnessFence::new(0);
+
+        assert!(
+            fence
+                .observe_applied(
+                    RtdsAppliedSubscription {
+                        generation: 1,
+                        revision: 1,
+                    },
+                    1,
+                )
+                .unwrap()
+        );
+        assert_eq!(fence.classify_received(false, 1, true), None);
+        assert_eq!(fence.classify_received(false, 1, true), Some(1));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rtds_receive_deadline_returns_none_instead_of_a_fatal_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            _ = next_json_request(&mut socket).await;
+            finish_rx.await.unwrap();
+        });
+
+        let mut config = Config::default();
+        config.heartbeat_interval = Duration::from_secs(30);
+        config.heartbeat_timeout = Duration::from_secs(30);
+        let mut runtime = RtdsSdkRuntime::new(format!("ws://{address}"), config).unwrap();
+        runtime
+            .subscribe(
+                Subscription::chainlink_prices(Some("btc/usd".to_owned())),
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+
+        assert!(runtime.recv_event(Duration::ZERO).await.unwrap().is_none());
+        assert!(runtime.recv(Duration::ZERO).await.unwrap().is_none());
+        finish_tx.send(()).unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rtds_old_queued_message_is_preserved_but_cannot_recover_new_generation() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (old_sent_tx, old_sent_rx) = tokio::sync::oneshot::channel();
+        let (replay_seen_tx, replay_seen_rx) = tokio::sync::oneshot::channel();
+        let (send_new_tx, send_new_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            _ = next_json_request(&mut socket).await;
+            socket
+                .send(Message::Text(
+                    json!({
+                        "topic": "crypto_prices_chainlink",
+                        "type": "update",
+                        "timestamp": 1,
+                        "payload": {"symbol": "btc/usd", "timestamp": 1, "value": "1"}
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            old_sent_tx.send(()).unwrap();
+            while let Some(message) = socket.next().await {
+                if matches!(message, Ok(Message::Close(_)) | Err(_)) {
+                    break;
+                }
+            }
+            drop(socket);
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            _ = next_json_request(&mut socket).await;
+            replay_seen_tx.send(()).unwrap();
+            send_new_rx.await.unwrap();
+            socket
+                .send(Message::Text(
+                    json!({
+                        "topic": "crypto_prices_chainlink",
+                        "type": "update",
+                        "timestamp": 2,
+                        "payload": {"symbol": "btc/usd", "timestamp": 2, "value": "2"}
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            finish_rx.await.unwrap();
+        });
+
+        let mut config = Config::default();
+        config.reconnect.initial_backoff = Duration::from_millis(5);
+        config.reconnect.max_backoff = Duration::from_millis(10);
+        config.reconnect.backoff_multiplier = 1.0;
+        config.heartbeat_interval = Duration::from_secs(30);
+        config.heartbeat_timeout = Duration::from_secs(30);
+        let mut runtime = RtdsSdkRuntime::new(format!("ws://{address}"), config).unwrap();
+        runtime
+            .subscribe(
+                Subscription::chainlink_prices(Some("btc/usd".to_owned())),
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        old_sent_rx.await.unwrap();
+        timeout(Duration::from_secs(2), async {
+            while runtime.messages.len() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let old_generation = runtime.connection_generation();
+        assert!(runtime.request_reconnect(old_generation));
+        replay_seen_rx.await.unwrap();
+
+        assert!(matches!(
+            runtime.recv_event(Duration::from_secs(2)).await.unwrap(),
+            Some(RtdsRuntimeEvent::Applied(RtdsAppliedSubscription { generation, .. }))
+                if generation == old_generation + 1
+        ));
+        let Some(RtdsRuntimeEvent::Message(old_message)) =
+            runtime.recv_event(Duration::from_secs(2)).await.unwrap()
+        else {
+            panic!("old queued RTDS message");
+        };
+        assert_eq!(old_message.message.timestamp, 1);
+        assert_eq!(old_message.freshness_generation, None);
+
+        send_new_tx.send(()).unwrap();
+        let Some(RtdsRuntimeEvent::Message(new_message)) =
+            runtime.recv_event(Duration::from_secs(2)).await.unwrap()
+        else {
+            panic!("new generation RTDS message");
+        };
+        assert_eq!(new_message.message.timestamp, 2);
+        assert_eq!(new_message.freshness_generation, Some(old_generation + 1));
+        finish_tx.send(()).unwrap();
+        server.await.unwrap();
     }
 
     fn synthetic_disconnected_market_receiver() -> (
@@ -1125,11 +1577,18 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (initial_seen_tx, initial_seen_rx) = tokio::sync::oneshot::channel();
+        let (close_tx, close_rx) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut socket = accept_async(stream).await.unwrap();
             let initial = next_json_request(&mut socket).await;
             initial_seen_tx.send(()).unwrap();
+            close_rx.await.unwrap();
+            socket.send(Message::Close(None)).await.unwrap();
+            drop(socket);
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
             let reconnect = next_json_request(&mut socket).await;
             assert!(
                 timeout(Duration::from_millis(200), next_json_request(&mut socket))
@@ -1149,18 +1608,15 @@ mod tests {
         let mut actual_states = connection.state_receiver();
         wait_connected(&mut actual_states).await;
 
-        let first_since = Instant::now();
-        let (state_tx, state_rx) =
-            watch::channel(ConnectionState::Connected { since: first_since });
         let (desired_tx, desired_rx) = watch::channel(DesiredRtdsSubscription {
             revision: 1,
             subscription: Some(Subscription::chainlink_prices(Some("btc/usd-1".to_owned()))),
         });
-        let (applied_tx, _applied_rx) = watch::channel(0_u64);
+        let (applied_tx, _applied_rx) = watch::channel(None);
         let (actor_error_tx, _actor_error_rx) = watch::channel(None);
         let actor = tokio::spawn(run_rtds_subscription_actor(
-            connection,
-            state_rx,
+            connection.clone(),
+            connection.state_receiver(),
             desired_rx,
             applied_tx,
             actor_error_tx,
@@ -1171,9 +1627,7 @@ mod tests {
             revision: 2,
             subscription: Some(Subscription::chainlink_prices(Some("btc/usd-2".to_owned()))),
         });
-        state_tx.send_replace(ConnectionState::Connected {
-            since: first_since + Duration::from_secs(1),
-        });
+        close_tx.send(()).unwrap();
 
         let requests = server.await.unwrap();
         assert_eq!(requests[0]["action"], "subscribe");
@@ -1186,7 +1640,6 @@ mod tests {
             requests[1]["subscriptions"][0]["filters"],
             r#"{"symbol":"btc/usd-2"}"#
         );
-        state_tx.send_replace(ConnectionState::Disconnected);
-        actor.await.unwrap();
+        actor.abort();
     }
 }

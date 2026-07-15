@@ -8,7 +8,7 @@ use polymarket_client_sdk_v2::types::U256;
 use polymarket_client_sdk_v2::ws::config::Config;
 use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep, timeout};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{WebSocketStream, accept_async};
@@ -24,6 +24,11 @@ fn fast_config() -> Config {
     config.heartbeat_interval = Duration::from_secs(30);
     config.heartbeat_timeout = Duration::from_secs(30);
     config
+}
+
+#[cfg(target_os = "linux")]
+fn open_fd_count() -> usize {
+    std::fs::read_dir("/proc/self/fd").unwrap().count()
 }
 
 fn exhausting_config() -> Config {
@@ -372,33 +377,60 @@ async fn rtds_manager_resubscribes_in_the_new_connection_generation() {
     assert_eq!(requests[0], requests[1]);
 }
 
-#[tokio::test]
-async fn rtds_same_epoch_resubscribe_is_applied_before_returning() {
+#[tokio::test(flavor = "current_thread")]
+async fn rtds_one_shot_reconnect_replays_once_without_unsubscribe() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut socket = accept_async(stream).await.unwrap();
-        vec![
-            next_text(&mut socket).await,
-            next_text(&mut socket).await,
-            next_text(&mut socket).await,
-        ]
+        let initial = next_text(&mut socket).await;
+        while let Some(message) = socket.next().await {
+            match message {
+                Ok(Message::Close(_)) | Err(_) => break,
+                Ok(Message::Text(text)) if text == "PING" => {
+                    socket.send(Message::Text("PONG".into())).await.unwrap();
+                }
+                _ => {}
+            }
+        }
+        drop(socket);
+
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        let replay = next_text(&mut socket).await;
+        assert!(
+            timeout(Duration::from_millis(200), next_text(&mut socket))
+                .await
+                .is_err(),
+            "a generation may receive only one complete RTDS replay"
+        );
+        vec![initial, replay]
     });
 
     let subscription = Subscription::chainlink_prices(Some("btc/usd".to_owned()));
     let mut runtime = RtdsSdkRuntime::new(format!("ws://{address}"), fast_config()).unwrap();
     runtime
-        .subscribe(subscription.clone(), Duration::from_secs(2))
+        .subscribe(subscription, Duration::from_secs(2))
         .await
         .unwrap();
-    let resubscribe = runtime.resubscribe(subscription, Duration::from_secs(2));
-    tokio::pin!(resubscribe);
-    assert!(matches!(
-        futures::poll!(&mut resubscribe),
-        std::task::Poll::Pending
-    ));
-    resubscribe.await.unwrap();
+    let generation = runtime.connection_generation();
+    assert!(runtime.request_reconnect(generation));
+    for _ in 0..10_000 {
+        assert!(!runtime.request_reconnect(generation));
+    }
+    timeout(Duration::from_secs(2), async {
+        while runtime.connection_generation() == generation {
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let revision = runtime.subscription_revision();
+    runtime
+        .wait_subscription_applied(revision, Duration::from_secs(2))
+        .await
+        .unwrap();
 
     let requests = server
         .await
@@ -407,60 +439,163 @@ async fn rtds_same_epoch_resubscribe_is_applied_before_returning() {
         .map(|request| serde_json::from_str::<Value>(&request).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(requests[0]["action"], "subscribe");
-    assert_eq!(requests[1]["action"], "unsubscribe");
-    assert_eq!(requests[2]["action"], "subscribe");
-    assert_eq!(requests[0]["subscriptions"], requests[2]["subscriptions"]);
+    assert_eq!(requests[1]["action"], "subscribe");
+    assert_eq!(requests[0]["subscriptions"], requests[1]["subscriptions"]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rtds_one_hundred_one_shots_keep_one_actor_receiver_and_replay_per_generation() {
+    const RECONNECTS: u64 = 100;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (replay_tx, mut replay_rx) = mpsc::unbounded_channel();
+    let (finish_tx, finish_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        for generation in 0..=RECONNECTS {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let request: Value = serde_json::from_str(&next_text(&mut socket).await).unwrap();
+            assert_eq!(request["action"], "subscribe");
+            assert_eq!(request["subscriptions"].as_array().unwrap().len(), 1);
+            replay_tx.send(generation).unwrap();
+            if generation == RECONNECTS {
+                finish_rx.await.unwrap();
+                return;
+            }
+            while let Some(message) = socket.next().await {
+                match message {
+                    Ok(Message::Text(text)) if text == "PING" => {
+                        socket.send(Message::Text("PONG".into())).await.unwrap();
+                    }
+                    Ok(Message::Text(text)) if serde_json::from_str::<Value>(&text).is_ok() => {
+                        panic!("generation {generation} received a duplicate RTDS replay")
+                    }
+                    Ok(Message::Close(_)) | Err(_) => break,
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    let mut runtime = RtdsSdkRuntime::new(format!("ws://{address}"), fast_config()).unwrap();
+    runtime
+        .subscribe(
+            Subscription::chainlink_prices(Some("btc/usd".to_owned())),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay_rx.recv().await.unwrap(), 0);
+    let revision = runtime.subscription_revision();
+    let steady_tasks = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+    #[cfg(target_os = "linux")]
+    let steady_fds = open_fd_count();
+
+    for generation in 0..RECONNECTS {
+        assert_eq!(runtime.connection_generation(), generation);
+        assert!(runtime.request_reconnect(generation));
+        timeout(Duration::from_secs(2), async {
+            while runtime.connection_generation() == generation {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("next RTDS generation");
+        runtime
+            .wait_subscription_applied(revision, Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(runtime.connection_generation(), generation + 1);
+        assert_eq!(replay_rx.recv().await.unwrap(), generation + 1);
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if tokio::runtime::Handle::current()
+                    .metrics()
+                    .num_alive_tasks()
+                    <= steady_tasks
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("RTDS actor/heartbeat tasks must not accumulate");
+        assert_eq!(runtime.subscription_count(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    assert!(
+        open_fd_count() <= steady_fds + 4,
+        "RTDS reconnects must not retain one descriptor per generation"
+    );
+
+    finish_tx.send(()).unwrap();
+    server.await.unwrap();
 }
 
 #[tokio::test]
-async fn rtds_resubscribe_cannot_return_while_actor_is_disconnected() {
+async fn rtds_stale_ticket_does_not_close_the_new_generation() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let (first_closed_tx, first_closed_rx) = oneshot::channel();
-    let (allow_reconnect_tx, allow_reconnect_rx) = oneshot::channel();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut socket = accept_async(stream).await.unwrap();
         _ = next_text(&mut socket).await;
         socket.send(Message::Close(None)).await.unwrap();
         drop(socket);
-        first_closed_tx.send(()).unwrap();
 
-        allow_reconnect_rx.await.unwrap();
         let (stream, _) = listener.accept().await.unwrap();
         let mut socket = accept_async(stream).await.unwrap();
-        next_text(&mut socket).await
+        let replay = next_text(&mut socket).await;
+        sleep(Duration::from_millis(200)).await;
+        socket
+            .send(Message::Text(
+                json!({
+                    "topic": "crypto_prices_chainlink",
+                    "type": "update",
+                    "timestamp": 1,
+                    "payload": {
+                        "symbol": "btc/usd",
+                        "timestamp": 1,
+                        "value": "100000"
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        replay
     });
 
-    let subscription = Subscription::chainlink_prices(Some("btc/usd".to_owned()));
     let mut runtime = RtdsSdkRuntime::new(format!("ws://{address}"), fast_config()).unwrap();
+    let old_generation = runtime.connection_generation();
     runtime
-        .wait_connected(Duration::from_secs(2))
+        .subscribe(
+            Subscription::chainlink_prices(Some("btc/usd".to_owned())),
+            Duration::from_secs(2),
+        )
         .await
         .unwrap();
-    runtime
-        .subscribe(subscription.clone(), Duration::from_secs(2))
-        .await
-        .unwrap();
-    first_closed_rx.await.unwrap();
+    timeout(Duration::from_secs(2), async {
+        while runtime.connection_generation() == old_generation {
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!runtime.request_reconnect(old_generation));
     assert!(
         runtime
-            .recv(Duration::from_millis(100))
+            .recv(Duration::from_secs(2))
             .await
             .unwrap()
-            .is_none()
+            .is_some()
     );
-
-    let resubscribe = runtime.resubscribe(subscription, Duration::from_secs(2));
-    tokio::pin!(resubscribe);
-    assert!(
-        timeout(Duration::from_millis(100), &mut resubscribe)
-            .await
-            .is_err(),
-        "resubscribe must wait while the actor has no connected epoch"
-    );
-    allow_reconnect_tx.send(()).unwrap();
-    resubscribe.await.unwrap();
 
     let request: Value = serde_json::from_str(&server.await.unwrap()).unwrap();
     assert_eq!(request["action"], "subscribe");

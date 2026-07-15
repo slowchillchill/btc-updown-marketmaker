@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-reliability-repair-changelog.md`
 >
-> 状态：`TASK_2_D2_DOCUMENT_REVIEW_PASSED_READY_IMPLEMENTATION`。相同 RTDS `statusCode=400` / `AddSubscriptions` / `connection_id_fk` 服务端错误已在 `2026-07-15T04:11:25.574760Z`、`11:14:54.483660Z`、`12:30:31.062283Z`与`13:40:38Z`四次返回完全相同的frame/body指纹；四次均按当前fatal parser合同退出并由同binary/unit恢复，当前旧版本MainPID=`1084549`、active/running、enabled、`Restart=on-failure`、NRestarts=4。独立审查发现官方Rust SDK filtered unsubscribe会丢失原`btc/usd` filter，且把服务信封直接改为recoverable会绕过现有connect-attempt/backoff上限。用户于2026-07-15明确批准D2：增加第六项、generation-aware的one-shot reconnect SDK patch；RTDS 60秒无fresh时不再在同socket执行`unsubscribe -> subscribe`，而只结束请求所绑定的当前connection generation，由新`Connected` epoch的唯一actor从空server state重放一次未改变的latest desired。每个unresolved freshness episode最多跨两个新generation，仍无fresh则整进程非零退出；所有service envelope、parser与目标schema error继续sticky/terminal/fatal。用户随后在运行中升级决策门明确选择方案2：全部本地实现、独立审查、构建和远端预检通过后，停止旧服务并只永久删除旧build独占的`utc_day=2026-07-15`，保留此前closed日期，再立即切换D2。上述门通过前远端继续运行旧版本且不提前删除或替换。
+> 状态：`TASK_2_D2_IMPLEMENTATION_REVIEW_PASSED_READY_FOR_COMMIT`。D2 首轮三路独立实现审查的问题已逐项修正；第二轮三路复审只剩的“两代真实 loopback 未调用生产 terminal 决策”也已用生产共用 helper 补齐 fatal、固定 gap 与无第三次 ticket/socket 断言。三路最终复审现均为 PASS，Critical/Important/Minor 全部为 0。相同 RTDS `statusCode=400` / `AddSubscriptions` / `connection_id_fk` 服务端错误已在 `2026-07-15T04:11:25.574760Z`、`11:14:54.483660Z`、`12:30:31.062283Z`与`13:40:38Z`四次返回完全相同的frame/body指纹。用户批准的 generation-aware one-shot reconnect、每代一次 latest desired replay、单 receiver freshness fence 与最多两个新 generation 已按本需求实现；所有 service envelope、parser 与目标 schema error 仍 sticky/terminal/fatal。方案2边界不变：实现提交、隔离构建和远端预检全部通过前，旧服务继续运行且不得提前删除或替换；之后才可停止旧服务并只永久删除旧 build 独占的 `utc_day=2026-07-15`，保留此前 closed 日期，再立即切换 D2。
 
 ## 一、目标与权威边界
 

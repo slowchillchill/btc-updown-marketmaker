@@ -70,7 +70,7 @@ use crate::polymarket_market_metadata_layout::{
 };
 use crate::polymarket_orderbook_layout::{PolymarketOrderbookContext, PolymarketOrderbookRow};
 use crate::polymarket_sdk_runtime::{
-    MarketSdkMessageReceiver, MarketSdkRuntime, RtdsSdkRuntime, SdkStreamError,
+    MarketSdkMessageReceiver, MarketSdkRuntime, RtdsRuntimeEvent, RtdsSdkRuntime, SdkStreamError,
 };
 use crate::source_format::{RtdsChainlinkBtcUsdRaw, plausible_unix_timestamp_ms};
 use crate::source_hourly_layout::{
@@ -119,8 +119,9 @@ const SOURCE_RECOVERY_CYCLE_MAX_ELAPSED: Duration = Duration::from_secs(120);
 const SOURCE_SUPERVISOR_BACKOFF_BASE_MS: u64 = 1_000;
 const SOURCE_SUPERVISOR_BACKOFF_MAX_MS: u64 = 30_000;
 const SOURCE_RECOVERY_JITTER_BPS: u32 = 2_000;
-const RTDS_RESUBSCRIBE_INTERVAL_SECS: u64 = 3;
-const RTDS_RESUBSCRIBE_ATTEMPTS_PER_FRESHNESS_WINDOW: usize = 2;
+const RTDS_RECONNECT_WINDOW_SECS: u64 = 3;
+const RTDS_MAX_NEW_GENERATIONS_PER_FRESHNESS_EPISODE: u64 = 2;
+const RTDS_FRESHNESS_EPISODE_MAX_SECS: u64 = 12;
 const RTDS_FRESHNESS_TIMEOUT_SECS: u64 = 60;
 const RTDS_FRESH_MIN_AGE_MS: i64 = -5_000;
 const RTDS_FRESH_MAX_AGE_MS: i64 = 30_000;
@@ -189,10 +190,92 @@ pub fn is_live_runtime_source_gap_reason(reason: &str) -> bool {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct RtdsFreshnessAction {
-    wait: Duration,
-    resubscribe_attempt: u64,
-    exit_after_wait: bool,
+struct RtdsFreshnessEpisode {
+    base_generation: u64,
+    latest_connection_generation: u64,
+    latest_applied_generation: Option<u64>,
+}
+
+impl RtdsFreshnessEpisode {
+    fn new(
+        base_generation: u64,
+        applied_generation: Option<u64>,
+    ) -> std::result::Result<Self, &'static str> {
+        if applied_generation.is_some_and(|generation| generation > base_generation) {
+            return Err("RTDS applied generation exceeds the episode connection generation");
+        }
+        Ok(Self {
+            base_generation,
+            latest_connection_generation: base_generation,
+            latest_applied_generation: applied_generation,
+        })
+    }
+
+    fn minimum_recovery_generation(self) -> std::result::Result<u64, &'static str> {
+        self.base_generation
+            .checked_add(1)
+            .ok_or("RTDS connection generation overflow")
+    }
+
+    fn observe_connection(&mut self, generation: u64) -> std::result::Result<u64, &'static str> {
+        if generation < self.latest_connection_generation {
+            return Err("RTDS connection generation regressed");
+        }
+        let used = generation
+            .checked_sub(self.base_generation)
+            .ok_or("RTDS connection generation regressed below episode base")?;
+        if used > RTDS_MAX_NEW_GENERATIONS_PER_FRESHNESS_EPISODE {
+            return Err("RTDS freshness episode exceeded its new-generation budget");
+        }
+        let newly_observed = generation - self.latest_connection_generation;
+        self.latest_connection_generation = generation;
+        Ok(newly_observed)
+    }
+
+    fn observe_applied(&mut self, generation: u64) -> std::result::Result<bool, &'static str> {
+        if generation > self.latest_connection_generation {
+            return Err("RTDS applied generation exceeds the observed connection generation");
+        }
+        if self
+            .latest_applied_generation
+            .is_some_and(|applied| generation < applied)
+        {
+            return Err("RTDS applied generation regressed");
+        }
+        let advanced = self
+            .latest_applied_generation
+            .is_none_or(|applied| generation > applied);
+        if advanced {
+            self.latest_applied_generation = Some(generation);
+        }
+        Ok(advanced)
+    }
+
+    fn generations_used(self) -> u64 {
+        self.latest_connection_generation - self.base_generation
+    }
+
+    fn latest_connection_is_applied(self) -> bool {
+        self.latest_applied_generation == Some(self.latest_connection_generation)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RtdsFreshnessTerminal {
+    gap_reason: &'static str,
+    error_message: &'static str,
+}
+
+fn require_rtds_generation_budget_remaining(
+    episode: RtdsFreshnessEpisode,
+) -> std::result::Result<(), RtdsFreshnessTerminal> {
+    if episode.generations_used() < RTDS_MAX_NEW_GENERATIONS_PER_FRESHNESS_EPISODE {
+        return Ok(());
+    }
+    Err(RtdsFreshnessTerminal {
+        gap_reason: "rtds_business_message_timeout_after_two_new_generations",
+        error_message: "RTDS business stream did not recover",
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -239,24 +322,6 @@ fn classify_rtds_message(
         age_ms,
         freshness_status,
     }))
-}
-
-fn rtds_freshness_actions() -> [RtdsFreshnessAction; RTDS_RESUBSCRIBE_ATTEMPTS_PER_FRESHNESS_WINDOW]
-{
-    let mut actions = [RtdsFreshnessAction {
-        wait: Duration::ZERO,
-        resubscribe_attempt: 0,
-        exit_after_wait: false,
-    }; RTDS_RESUBSCRIBE_ATTEMPTS_PER_FRESHNESS_WINDOW];
-    for (index, action) in actions.iter_mut().enumerate() {
-        let attempt = u64::try_from(index + 1).expect("RTDS attempt index fits in u64");
-        *action = RtdsFreshnessAction {
-            wait: Duration::from_secs(RTDS_RESUBSCRIBE_INTERVAL_SECS),
-            resubscribe_attempt: attempt,
-            exit_after_wait: index + 1 == RTDS_RESUBSCRIBE_ATTEMPTS_PER_FRESHNESS_WINDOW,
-        };
-    }
-    actions
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6162,89 +6227,247 @@ async fn run_rtds_source(
     let mut runtime = RtdsSdkRuntime::new(RTDS_WS_ENDPOINT.to_owned(), bounded_ws_config())?;
     runtime.wait_connected(Duration::from_secs(20)).await?;
     runtime
-        .subscribe(subscription.clone(), Duration::from_secs(3))
+        .subscribe(subscription, Duration::from_secs(3))
         .await?;
+    let mut recorded_generation = runtime.connection_generation();
 
     'source: loop {
         let freshness_deadline = Instant::now() + Duration::from_secs(RTDS_FRESHNESS_TIMEOUT_SECS);
-        match wait_for_fresh_rtds_message(
-            &mut runtime,
-            &sink,
-            &collector_identity,
-            run_started,
-            &mut dedupe,
-            freshness_deadline,
-            deadline,
-        )
-        .await?
-        {
-            RtdsWaitOutcome::Fresh => continue,
-            RtdsWaitOutcome::RunDeadline => break,
-            RtdsWaitOutcome::WaitExpired => {
-                sink.source_queue_backpressure.record_lag(
-                    "polymarket_rtds_chainlink_btc_usd",
-                    now_ms(),
-                    1,
-                );
-            }
-        }
-
-        for action in rtds_freshness_actions() {
-            sink.source_queue_backpressure
-                .record_reconnect("polymarket_rtds_chainlink_btc_usd", now_ms());
-            sink.source_queue_backpressure
-                .set_recovery_active("polymarket_rtds_chainlink_btc_usd", true);
-            if let Err(err) = runtime
-                .resubscribe(subscription.clone(), Duration::from_secs(3))
-                .await
-            {
-                record_gap(
-                    &sink.gaps,
-                    format!(
-                        "rtds_resubscribe_failed:attempt={}:{}",
-                        action.resubscribe_attempt, err
-                    ),
-                );
-                return Err(err.into());
-            }
+        loop {
             match wait_for_fresh_rtds_message(
                 &mut runtime,
                 &sink,
                 &collector_identity,
                 run_started,
                 &mut dedupe,
-                Instant::now() + action.wait,
+                freshness_deadline,
                 deadline,
+                None,
             )
             .await?
             {
-                RtdsWaitOutcome::Fresh => {
-                    sink.source_queue_backpressure
-                        .set_recovery_active("polymarket_rtds_chainlink_btc_usd", false);
+                RtdsWaitOutcome::Fresh(_) => {
+                    record_rtds_generation_advance(
+                        &mut recorded_generation,
+                        runtime.connection_generation(),
+                        &sink,
+                    )?;
                     continue 'source;
                 }
-                RtdsWaitOutcome::RunDeadline => {
-                    sink.source_queue_backpressure
-                        .set_recovery_active("polymarket_rtds_chainlink_btc_usd", false);
-                    break 'source;
+                RtdsWaitOutcome::GenerationApplied(_) => {
+                    record_rtds_generation_advance(
+                        &mut recorded_generation,
+                        runtime.connection_generation(),
+                        &sink,
+                    )?;
                 }
-                RtdsWaitOutcome::WaitExpired if action.exit_after_wait => {
-                    record_gap(
-                        &sink.gaps,
-                        "rtds_business_message_timeout_after_two_resubscriptions".to_owned(),
-                    );
-                    return Err("RTDS business stream did not recover".into());
+                RtdsWaitOutcome::RunDeadline => break 'source,
+                RtdsWaitOutcome::WaitExpired => break,
+            }
+        }
+
+        sink.source_queue_backpressure
+            .record_lag("polymarket_rtds_chainlink_btc_usd", now_ms(), 1);
+        sink.source_queue_backpressure
+            .set_recovery_active("polymarket_rtds_chainlink_btc_usd", true);
+
+        // Read the independently observed acknowledgement first. Connection generations are
+        // monotonic and an applied acknowledgement can only refer to an already-established
+        // generation, so the later connection sample is guaranteed to be at least as new.
+        let applied_generation = runtime.observed_applied_generation();
+        let base_generation = runtime.connection_generation();
+        record_rtds_generation_advance(&mut recorded_generation, base_generation, &sink)?;
+        let mut episode =
+            RtdsFreshnessEpisode::new(base_generation, applied_generation).map_err(invalid_data)?;
+        let minimum_recovery_generation = episode
+            .minimum_recovery_generation()
+            .map_err(invalid_data)?;
+        let mut reconnect_generation = base_generation;
+        let episode_deadline =
+            Instant::now() + Duration::from_secs(RTDS_FRESHNESS_EPISODE_MAX_SECS);
+
+        loop {
+            let current_generation = sync_rtds_episode_connection(
+                &runtime,
+                &mut episode,
+                &mut recorded_generation,
+                &sink,
+            )?;
+            if current_generation < reconnect_generation {
+                return Err(
+                    invalid_data("RTDS reconnect target exceeded current generation").into(),
+                );
+            }
+            let ticket_attempted = current_generation == reconnect_generation;
+            let ticket_published =
+                ticket_attempted && runtime.request_reconnect(current_generation);
+            record_gap(
+                &sink.gaps,
+                format!(
+                    "rtds_generation_reconnect_requested:generation={current_generation}:attempted={ticket_attempted}:published={ticket_published}"
+                ),
+            );
+            let mut generation_deadline =
+                rtds_generation_observation_deadline(Instant::now(), episode_deadline);
+
+            loop {
+                match wait_for_fresh_rtds_message(
+                    &mut runtime,
+                    &sink,
+                    &collector_identity,
+                    run_started,
+                    &mut dedupe,
+                    generation_deadline,
+                    deadline,
+                    Some(minimum_recovery_generation),
+                )
+                .await?
+                {
+                    RtdsWaitOutcome::Fresh(generation) => {
+                        let current_generation = sync_rtds_episode_connection(
+                            &runtime,
+                            &mut episode,
+                            &mut recorded_generation,
+                            &sink,
+                        )?;
+                        if current_generation != generation {
+                            continue;
+                        }
+                        episode.observe_applied(generation).map_err(invalid_data)?;
+                        sink.source_queue_backpressure
+                            .set_recovery_active("polymarket_rtds_chainlink_btc_usd", false);
+                        continue 'source;
+                    }
+                    RtdsWaitOutcome::GenerationApplied(applied) => {
+                        sync_rtds_episode_connection(
+                            &runtime,
+                            &mut episode,
+                            &mut recorded_generation,
+                            &sink,
+                        )?;
+                        if episode
+                            .observe_applied(applied.generation)
+                            .map_err(invalid_data)?
+                            && applied.generation > episode.base_generation
+                        {
+                            generation_deadline = rtds_generation_observation_deadline(
+                                Instant::now(),
+                                episode_deadline,
+                            );
+                        }
+                    }
+                    RtdsWaitOutcome::RunDeadline => {
+                        sink.source_queue_backpressure
+                            .set_recovery_active("polymarket_rtds_chainlink_btc_usd", false);
+                        break 'source;
+                    }
+                    RtdsWaitOutcome::WaitExpired => {
+                        let current_generation = sync_rtds_episode_connection(
+                            &runtime,
+                            &mut episode,
+                            &mut recorded_generation,
+                            &sink,
+                        )?;
+                        if !episode.latest_connection_is_applied() {
+                            sink.source_queue_backpressure
+                                .set_recovery_active("polymarket_rtds_chainlink_btc_usd", false);
+                            record_gap(
+                                &sink.gaps,
+                                format!(
+                                    "rtds_generation_replay_timeout:current={current_generation}:applied={:?}",
+                                    episode.latest_applied_generation
+                                ),
+                            );
+                            return Err(invalid_data(
+                                "RTDS new connection generation did not replay the desired subscription before deadline",
+                            )
+                            .into());
+                        }
+                        if let Err(terminal) = require_rtds_generation_budget_remaining(episode) {
+                            sink.source_queue_backpressure
+                                .set_recovery_active("polymarket_rtds_chainlink_btc_usd", false);
+                            record_gap(&sink.gaps, terminal.gap_reason.to_owned());
+                            return Err(terminal.error_message.into());
+                        }
+                        if Instant::now() >= episode_deadline {
+                            sink.source_queue_backpressure
+                                .set_recovery_active("polymarket_rtds_chainlink_btc_usd", false);
+                            record_gap(
+                                &sink.gaps,
+                                "rtds_freshness_episode_total_deadline_exhausted".to_owned(),
+                            );
+                            return Err("RTDS freshness episode deadline exhausted".into());
+                        }
+                        if ticket_attempted && current_generation == reconnect_generation {
+                            sink.source_queue_backpressure
+                                .set_recovery_active("polymarket_rtds_chainlink_btc_usd", false);
+                            record_gap(
+                                &sink.gaps,
+                                format!(
+                                    "rtds_generation_reconnect_timeout:generation={reconnect_generation}"
+                                ),
+                            );
+                            return Err(invalid_data(
+                                "RTDS one-shot reconnect did not establish a new generation before deadline",
+                            )
+                            .into());
+                        }
+                        reconnect_generation = current_generation;
+                        break;
+                    }
                 }
-                RtdsWaitOutcome::WaitExpired => {}
             }
         }
     }
     Ok(())
 }
 
+fn sync_rtds_episode_connection(
+    runtime: &RtdsSdkRuntime,
+    episode: &mut RtdsFreshnessEpisode,
+    recorded_generation: &mut u64,
+    sink: &SourceEventSink,
+) -> Result<u64> {
+    let generation = runtime.connection_generation();
+    record_rtds_generation_advance(recorded_generation, generation, sink)?;
+    episode
+        .observe_connection(generation)
+        .map_err(invalid_data)?;
+    Ok(generation)
+}
+
+fn rtds_generation_observation_deadline(now: Instant, episode_deadline: Instant) -> Instant {
+    (now + Duration::from_secs(RTDS_RECONNECT_WINDOW_SECS)).min(episode_deadline)
+}
+
+fn record_rtds_generation_advance(
+    recorded_generation: &mut u64,
+    generation: u64,
+    sink: &SourceEventSink,
+) -> Result<()> {
+    let newly_observed = generation
+        .checked_sub(*recorded_generation)
+        .ok_or_else(|| invalid_data("RTDS recorded connection generation regressed"))?;
+    if newly_observed == 0 {
+        return Ok(());
+    }
+    let previous_generation = *recorded_generation;
+    for _ in 0..newly_observed {
+        sink.source_queue_backpressure
+            .record_reconnect("polymarket_rtds_chainlink_btc_usd", now_ms());
+    }
+    *recorded_generation = generation;
+    record_gap(
+        &sink.gaps,
+        format!("rtds_transport_generation_advanced:from={previous_generation}:to={generation}"),
+    );
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RtdsWaitOutcome {
-    Fresh,
+    Fresh(u64),
+    GenerationApplied(crate::polymarket_sdk_runtime::RtdsAppliedSubscription),
     WaitExpired,
     RunDeadline,
 }
@@ -6258,6 +6481,7 @@ async fn wait_for_fresh_rtds_message(
     dedupe: &mut TimedFingerprintWindow,
     wait_deadline: Instant,
     run_deadline: Option<Instant>,
+    minimum_freshness_generation: Option<u64>,
 ) -> Result<RtdsWaitOutcome> {
     loop {
         if deadline_reached(run_deadline) {
@@ -6270,11 +6494,32 @@ async fn wait_for_fresh_rtds_message(
         let wait_duration = deadline_remaining(run_deadline)
             .map(|remaining| remaining.min(wait_remaining))
             .unwrap_or(wait_remaining);
-        match runtime.recv(wait_duration).await {
-            Ok(Some(message)) => {
-                if emit_rtds_message(sink, collector_identity, run_started, dedupe, message).await?
-                {
-                    return Ok(RtdsWaitOutcome::Fresh);
+        match runtime.recv_event(wait_duration).await {
+            Ok(Some(RtdsRuntimeEvent::Applied(applied))) => {
+                return Ok(RtdsWaitOutcome::GenerationApplied(applied));
+            }
+            Ok(Some(RtdsRuntimeEvent::Message(message))) => {
+                let freshness_generation = message.freshness_generation;
+                let newly_applied = message.newly_applied;
+                let is_fresh = emit_rtds_message(
+                    sink,
+                    collector_identity,
+                    run_started,
+                    dedupe,
+                    message.message,
+                )
+                .await?;
+                if let Some(generation) = qualifying_rtds_freshness_generation(
+                    is_fresh,
+                    freshness_generation,
+                    minimum_freshness_generation,
+                    freshness_generation
+                        .is_some_and(|generation| runtime.generation_is_active(generation)),
+                ) {
+                    return Ok(RtdsWaitOutcome::Fresh(generation));
+                }
+                if let Some(applied) = newly_applied {
+                    return Ok(RtdsWaitOutcome::GenerationApplied(applied));
                 }
             }
             Ok(None) => {}
@@ -6291,6 +6536,19 @@ async fn wait_for_fresh_rtds_message(
             }
         }
     }
+}
+
+fn qualifying_rtds_freshness_generation(
+    is_fresh: bool,
+    freshness_generation: Option<u64>,
+    minimum_generation: Option<u64>,
+    generation_is_still_active: bool,
+) -> Option<u64> {
+    freshness_generation.filter(|generation| {
+        is_fresh
+            && generation_is_still_active
+            && minimum_generation.is_none_or(|minimum| *generation >= minimum)
+    })
 }
 
 async fn emit_rtds_message(
@@ -11095,26 +11353,191 @@ mod tests {
     }
 
     #[test]
-    fn rtds_freshness_waits_60s_then_uses_two_3s_resubscription_attempts() {
-        let observed = rtds_freshness_actions()
-            .iter()
-            .map(|action| {
-                (
-                    action.wait.as_secs(),
-                    action.resubscribe_attempt,
-                    action.exit_after_wait,
-                )
-            })
-            .collect::<Vec<_>>();
-
+    fn rtds_freshness_uses_two_bounded_new_generations() {
         assert_eq!(RTDS_FRESHNESS_TIMEOUT_SECS, 60);
-        assert_eq!(observed, vec![(3, 1, false), (3, 2, true)]);
+        assert_eq!(RTDS_RECONNECT_WINDOW_SECS, 3);
+        assert_eq!(RTDS_MAX_NEW_GENERATIONS_PER_FRESHNESS_EPISODE, 2);
+        assert_eq!(RTDS_FRESHNESS_EPISODE_MAX_SECS, 12);
+
+        let mut episode = RtdsFreshnessEpisode::new(7, Some(7)).unwrap();
+        assert_eq!(episode.minimum_recovery_generation(), Ok(8));
+        assert_eq!(episode.observe_connection(8), Ok(1));
+        assert!(!episode.latest_connection_is_applied());
+        assert_eq!(episode.observe_applied(8), Ok(true));
+        assert!(episode.latest_connection_is_applied());
+        assert_eq!(require_rtds_generation_budget_remaining(episode), Ok(()));
+        assert_eq!(episode.observe_connection(8), Ok(0));
+        assert_eq!(episode.observe_connection(9), Ok(1));
+        assert_eq!(episode.generations_used(), 2);
+        assert!(episode.observe_connection(10).is_err());
     }
 
     #[test]
-    fn rtds_resubscription_attempts_are_finite() {
-        assert_eq!(RTDS_RESUBSCRIBE_ATTEMPTS_PER_FRESHNESS_WINDOW, 2);
-        assert!(rtds_freshness_actions().last().unwrap().exit_after_wait);
+    fn rtds_freshness_episode_rejects_regression_and_overflow() {
+        let mut episode = RtdsFreshnessEpisode::new(7, Some(7)).unwrap();
+        assert!(episode.observe_connection(6).is_err());
+        assert!(
+            RtdsFreshnessEpisode::new(u64::MAX, Some(u64::MAX))
+                .unwrap()
+                .minimum_recovery_generation()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rtds_freshness_episode_separates_connection_and_delayed_applied_generations() {
+        let mut episode = RtdsFreshnessEpisode::new(9, Some(7)).unwrap();
+
+        assert_eq!(episode.observe_applied(8), Ok(true));
+        assert!(!episode.latest_connection_is_applied());
+        assert_eq!(episode.observe_connection(10), Ok(1));
+        assert_eq!(episode.observe_applied(10), Ok(true));
+        assert!(episode.latest_connection_is_applied());
+        assert_eq!(episode.generations_used(), 1);
+
+        let mut no_replay = RtdsFreshnessEpisode::new(20, Some(20)).unwrap();
+        assert_eq!(no_replay.observe_connection(22), Ok(2));
+        assert!(!no_replay.latest_connection_is_applied());
+        assert!(no_replay.observe_connection(23).is_err());
+    }
+
+    #[test]
+    fn rtds_recovery_uses_the_generation_bound_to_the_received_message() {
+        assert_eq!(
+            qualifying_rtds_freshness_generation(true, Some(7), Some(8), true),
+            None
+        );
+        assert_eq!(
+            qualifying_rtds_freshness_generation(true, Some(8), Some(8), false),
+            None
+        );
+        assert_eq!(
+            qualifying_rtds_freshness_generation(true, Some(8), Some(8), true),
+            Some(8)
+        );
+    }
+
+    #[test]
+    fn rtds_each_new_applied_generation_gets_a_fresh_bounded_observation_window() {
+        let start = Instant::now();
+        let episode_deadline = start + Duration::from_secs(RTDS_FRESHNESS_EPISODE_MAX_SECS);
+        let first = rtds_generation_observation_deadline(start, episode_deadline);
+        let late_applied = start + Duration::from_millis(2_990);
+        let reset = rtds_generation_observation_deadline(late_applied, episode_deadline);
+
+        assert_eq!(first.duration_since(start), Duration::from_secs(3));
+        assert_eq!(reset.duration_since(late_applied), Duration::from_secs(3));
+        assert!(reset > first);
+        assert!(reset <= episode_deadline);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rtds_two_real_one_shot_generations_replay_without_fresh_and_exhaust_budget() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (replay_tx, mut replay_rx) = mpsc::unbounded_channel();
+        let (finish_tx, finish_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            for generation in 0..=2_u64 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = accept_async(stream).await.unwrap();
+                loop {
+                    let message = socket.next().await.unwrap().unwrap();
+                    if let Message::Text(text) = message {
+                        if text == "PING" {
+                            socket.send(Message::Text("PONG".into())).await.unwrap();
+                            continue;
+                        }
+                        let request: Value = serde_json::from_str(&text).unwrap();
+                        assert_eq!(request["action"], "subscribe");
+                        replay_tx.send(generation).unwrap();
+                        break;
+                    }
+                }
+                if generation == 2 {
+                    finish_rx.await.unwrap();
+                    assert!(
+                        timeout(Duration::from_millis(200), listener.accept())
+                            .await
+                            .is_err(),
+                        "an exhausted two-generation episode must not open a third socket"
+                    );
+                    return;
+                }
+                while let Some(message) = socket.next().await {
+                    if matches!(message, Ok(Message::Close(_)) | Err(_)) {
+                        break;
+                    }
+                }
+            }
+        });
+
+        let mut config = WsConfig::default();
+        config.reconnect.initial_backoff = Duration::from_millis(5);
+        config.reconnect.max_backoff = Duration::from_millis(10);
+        config.reconnect.backoff_multiplier = 1.0;
+        config.heartbeat_interval = Duration::from_secs(30);
+        config.heartbeat_timeout = Duration::from_secs(30);
+        let mut runtime = RtdsSdkRuntime::new(format!("ws://{address}"), config).unwrap();
+        runtime
+            .subscribe(
+                Subscription::chainlink_prices(Some("btc/usd".to_owned())),
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay_rx.recv().await.unwrap(), 0);
+        let mut episode = RtdsFreshnessEpisode::new(
+            runtime.connection_generation(),
+            runtime.observed_applied_generation(),
+        )
+        .unwrap();
+
+        for expected_generation in 1..=2_u64 {
+            let generation = runtime.connection_generation();
+            assert!(runtime.request_reconnect(generation));
+            let applied = timeout(Duration::from_secs(2), async {
+                loop {
+                    match runtime
+                        .recv_event(Duration::from_millis(100))
+                        .await
+                        .unwrap()
+                    {
+                        Some(RtdsRuntimeEvent::Applied(applied)) => break applied,
+                        Some(RtdsRuntimeEvent::Message(_)) | None => {}
+                    }
+                }
+            })
+            .await
+            .expect("next generation replay");
+            assert_eq!(replay_rx.recv().await.unwrap(), expected_generation);
+            assert_eq!(runtime.connection_generation(), expected_generation);
+            episode
+                .observe_connection(runtime.connection_generation())
+                .unwrap();
+            episode.observe_applied(applied.generation).unwrap();
+            assert!(
+                runtime
+                    .recv_event(Duration::from_millis(20))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        assert_eq!(episode.generations_used(), 2);
+        assert!(episode.latest_connection_is_applied());
+        let terminal = require_rtds_generation_budget_remaining(episode)
+            .expect_err("two real generations without fresh data must be terminal");
+        assert_eq!(
+            terminal,
+            RtdsFreshnessTerminal {
+                gap_reason: "rtds_business_message_timeout_after_two_new_generations",
+                error_message: "RTDS business stream did not recover",
+            }
+        );
+        finish_tx.send(()).unwrap();
+        server.await.unwrap();
     }
 
     #[test]

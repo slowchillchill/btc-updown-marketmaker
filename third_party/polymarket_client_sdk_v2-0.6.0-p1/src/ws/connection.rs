@@ -61,6 +61,7 @@ pub enum ConnectionFault {
 
 enum ConnectionExit {
     Recoverable(Error),
+    RequestedReconnect,
     Parser,
 }
 
@@ -73,6 +74,13 @@ struct OutboundQueue {
     receiver: mpsc::UnboundedReceiver<OutboundRequest>,
     published_generation: Arc<AtomicU64>,
     active_generation: u64,
+}
+
+struct ConnectionSignals {
+    state_tx: watch::Sender<ConnectionState>,
+    fault_tx: watch::Sender<Option<ConnectionFault>>,
+    reconnect_tx: watch::Sender<Option<u64>>,
+    reconnect_rx: watch::Receiver<Option<u64>>,
 }
 
 #[derive(Debug)]
@@ -165,6 +173,10 @@ where
     sender_tx: mpsc::UnboundedSender<OutboundRequest>,
     /// Generation assigned to newly enqueued outbound requests.
     outbound_generation: Arc<AtomicU64>,
+    /// Optional generation fixed by a caller that must not send into a later socket.
+    bound_outbound_generation: Option<u64>,
+    /// Latest generation whose active socket should reconnect once.
+    reconnect_tx: watch::Sender<Option<u64>>,
     /// Broadcast sender for incoming messages
     broadcast_tx: broadcast::Sender<M>,
     /// Phantom data for unused type parameters
@@ -186,6 +198,7 @@ where
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         let (state_tx, state_rx) = watch::channel(ConnectionState::Disconnected);
         let (fault_tx, fault_rx) = watch::channel(None);
+        let (reconnect_tx, reconnect_rx) = watch::channel(None);
         let outbound_generation = Arc::new(AtomicU64::new(0));
         let outbound_queue = OutboundQueue {
             receiver: sender_rx,
@@ -197,7 +210,12 @@ where
         let connection_config = config;
         let connection_endpoint = endpoint;
         let broadcast_tx_clone = broadcast_tx.clone();
-        let state_tx_clone = state_tx.clone();
+        let signals = ConnectionSignals {
+            state_tx: state_tx.clone(),
+            fault_tx,
+            reconnect_tx: reconnect_tx.clone(),
+            reconnect_rx,
+        };
 
         tokio::spawn(async move {
             Self::connection_loop(
@@ -206,8 +224,7 @@ where
                 outbound_queue,
                 broadcast_tx_clone,
                 parser,
-                state_tx_clone,
-                fault_tx,
+                signals,
             )
             .await;
         });
@@ -218,6 +235,8 @@ where
             fault_rx,
             sender_tx,
             outbound_generation,
+            bound_outbound_generation: None,
+            reconnect_tx,
             broadcast_tx,
             _phantom: PhantomData,
         })
@@ -230,8 +249,7 @@ where
         mut outbound: OutboundQueue,
         broadcast_tx: broadcast::Sender<M>,
         parser: P,
-        state_tx: watch::Sender<ConnectionState>,
-        fault_tx: watch::Sender<Option<ConnectionFault>>,
+        mut signals: ConnectionSignals,
     ) {
         let mut attempt = 0_u32;
         let mut backoff: backoff::ExponentialBackoff = config.reconnect.clone().into();
@@ -242,13 +260,11 @@ where
             if outbound.receiver.is_closed() {
                 #[cfg(feature = "tracing")]
                 tracing::debug!("Sender channel closed, stopping connection loop");
-                _ = state_tx.send(ConnectionState::Disconnected);
+                _ = signals.state_tx.send(ConnectionState::Disconnected);
                 break;
             }
 
-            let state_rx = state_tx.subscribe();
-
-            _ = state_tx.send(ConnectionState::Connecting);
+            _ = signals.state_tx.send(ConnectionState::Connecting);
 
             // Attempt connection
             match connect_async(&endpoint).await {
@@ -257,13 +273,18 @@ where
                     backoff.reset();
                     if has_connected {
                         if outbound.advance_generation().is_err() {
-                            _ = state_tx.send(ConnectionState::Disconnected);
+                            _ = signals.state_tx.send(ConnectionState::Disconnected);
                             break;
                         }
                     } else {
                         has_connected = true;
                     }
-                    _ = state_tx.send(ConnectionState::Connected {
+                    // A ticket for an older socket must not survive into the new Connected epoch.
+                    // The state is still Connecting here, so a caller cannot submit a valid ticket
+                    // for the new generation until after this reset has been observed locally.
+                    signals.reconnect_tx.send_replace(None);
+                    drop(signals.reconnect_rx.borrow_and_update());
+                    _ = signals.state_tx.send(ConnectionState::Connected {
                         since: Instant::now(),
                     });
 
@@ -272,14 +293,13 @@ where
                         ws_stream,
                         &mut outbound,
                         &broadcast_tx,
-                        state_rx,
                         config.clone(),
                         &parser,
-                        &fault_tx,
+                        &mut signals,
                     )
                     .await
                     {
-                        Ok(()) => {}
+                        Ok(()) | Err(ConnectionExit::RequestedReconnect) => {}
                         Err(ConnectionExit::Recoverable(e)) => {
                             #[cfg(feature = "tracing")]
                             tracing::error!("Error handling connection: {e:?}");
@@ -287,7 +307,7 @@ where
                             let _: &_ = &e;
                         }
                         Err(ConnectionExit::Parser) => {
-                            _ = state_tx.send(ConnectionState::Disconnected);
+                            _ = signals.state_tx.send(ConnectionState::Disconnected);
                             break;
                         }
                     }
@@ -306,12 +326,14 @@ where
             if let Some(max) = config.reconnect.max_attempts
                 && attempt >= max
             {
-                _ = state_tx.send(ConnectionState::Disconnected);
+                _ = signals.state_tx.send(ConnectionState::Disconnected);
                 break;
             }
 
             // Update state and wait with exponential backoff
-            _ = state_tx.send(ConnectionState::Reconnecting { attempt });
+            _ = signals
+                .state_tx
+                .send(ConnectionState::Reconnecting { attempt });
 
             if let Some(duration) = backoff.next_backoff() {
                 sleep(duration).await;
@@ -324,16 +346,16 @@ where
         ws_stream: WsStream,
         outbound: &mut OutboundQueue,
         broadcast_tx: &broadcast::Sender<M>,
-        state_rx: watch::Receiver<ConnectionState>,
         config: Config,
         parser: &P,
-        fault_tx: &watch::Sender<Option<ConnectionFault>>,
+        signals: &mut ConnectionSignals,
     ) -> std::result::Result<(), ConnectionExit> {
         let (mut write, mut read) = ws_stream.split();
 
         // Channel to notify heartbeat loop when PONG is received
         let (pong_tx, pong_rx) = watch::channel(Instant::now());
         let (ping_tx, mut ping_rx) = mpsc::unbounded_channel();
+        let state_rx = signals.state_tx.subscribe();
 
         let heartbeat_handle = tokio::spawn(async move {
             Self::heartbeat_loop(ping_tx, state_rx, &config, pong_rx).await;
@@ -359,7 +381,7 @@ where
                                 }
                                 Err(e) => {
                                     let message = e.to_string();
-                                    fault_tx.send_replace(Some(ConnectionFault::Parser(message.clone())));
+                                    signals.fault_tx.send_replace(Some(ConnectionFault::Parser(message.clone())));
                                     #[cfg(feature = "tracing")]
                                     tracing::warn!(error = %message, "Failed to parse WebSocket message");
                                     #[cfg(not(feature = "tracing"))]
@@ -386,6 +408,17 @@ where
                         _ => {
                             // Ignore binary frames and unsolicited PONG replies.
                         }
+                    }
+                }
+
+                changed = signals.reconnect_rx.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    let requested_generation = *signals.reconnect_rx.borrow_and_update();
+                    if requested_generation == Some(outbound.active_generation) {
+                        heartbeat_handle.abort();
+                        return Err(ConnectionExit::RequestedReconnect);
                     }
                 }
 
@@ -486,7 +519,9 @@ where
 
     /// Send a subscription request to the WebSocket server.
     pub fn send<R: Serialize>(&self, request: &R) -> Result<()> {
-        let generation = self.outbound_generation.load(Ordering::Acquire);
+        let generation = self
+            .bound_outbound_generation
+            .unwrap_or_else(|| self.outbound_generation.load(Ordering::Acquire));
         let json = serde_json::to_string(request)?;
         self.sender_tx
             .send(OutboundRequest {
@@ -503,7 +538,9 @@ where
         request: &R,
         credentials: &Credentials,
     ) -> Result<()> {
-        let generation = self.outbound_generation.load(Ordering::Acquire);
+        let generation = self
+            .bound_outbound_generation
+            .unwrap_or_else(|| self.outbound_generation.load(Ordering::Acquire));
         let json = request.as_authenticated(credentials)?;
         self.sender_tx
             .send(OutboundRequest {
@@ -512,6 +549,55 @@ where
             })
             .map_err(|_e| WsError::ConnectionClosed)?;
         Ok(())
+    }
+
+    /// Return the generation assigned to the active connection and new outbound requests.
+    #[must_use]
+    pub fn connection_generation(&self) -> u64 {
+        self.outbound_generation.load(Ordering::Acquire)
+    }
+
+    /// Clone this manager with outbound requests fixed to the observed active generation.
+    ///
+    /// This is intended for generation-scoped subscription actors. A request serialized after a
+    /// concurrent reconnect still carries the caller's observed generation and is therefore
+    /// rejected by a later socket instead of being misattributed to it.
+    #[must_use]
+    pub fn bind_generation(&self, observed_generation: u64) -> Option<Self>
+    where
+        P: Clone,
+    {
+        if !self.state().is_connected() || self.connection_generation() != observed_generation {
+            return None;
+        }
+        let mut bound = self.clone();
+        bound.bound_outbound_generation = Some(observed_generation);
+        Some(bound)
+    }
+
+    /// Request a one-shot reconnect of the exact generation observed by the caller.
+    ///
+    /// Returns `true` only when this call publishes a new ticket. Requests made while the
+    /// connection is not active, requests for stale or future generations, and duplicates are
+    /// no-ops. The active socket validates the generation again before consuming the ticket.
+    #[must_use]
+    pub fn request_reconnect(&self, observed_generation: u64) -> bool {
+        if !self.state().is_connected() || self.connection_generation() != observed_generation {
+            return false;
+        }
+
+        self.reconnect_tx.send_if_modified(|ticket| {
+            // Recheck while holding the watch value so a delayed stale caller cannot overwrite a
+            // ticket published for a newer Connected epoch.
+            if !self.state().is_connected()
+                || self.connection_generation() != observed_generation
+                || ticket.is_some_and(|generation| generation >= observed_generation)
+            {
+                return false;
+            }
+            *ticket = Some(observed_generation);
+            true
+        })
     }
 
     /// Get the current connection state.
@@ -680,18 +766,24 @@ mod tests {
             .unwrap();
 
         let (broadcast_tx, _) = broadcast::channel(1);
-        let (_state_tx, state_rx) = watch::channel(ConnectionState::Connected {
+        let (state_tx, _state_rx) = watch::channel(ConnectionState::Connected {
             since: Instant::now(),
         });
         let (fault_tx, _fault_rx) = watch::channel(None);
+        let (reconnect_tx, reconnect_rx) = watch::channel(None);
+        let mut signals = ConnectionSignals {
+            state_tx,
+            fault_tx,
+            reconnect_tx,
+            reconnect_rx,
+        };
         let result = ConnectionManager::<TestMessage, TestParser>::handle_connection(
             socket,
             &mut outbound,
             &broadcast_tx,
-            state_rx,
             Config::default(),
             &TestParser,
-            &fault_tx,
+            &mut signals,
         )
         .await;
 

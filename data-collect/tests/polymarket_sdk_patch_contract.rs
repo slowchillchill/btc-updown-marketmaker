@@ -39,6 +39,11 @@ fn generation_test_config() -> Config {
     config
 }
 
+#[cfg(target_os = "linux")]
+fn open_fd_count() -> usize {
+    std::fs::read_dir("/proc/self/fd").unwrap().count()
+}
+
 async fn next_json_request(socket: &mut WebSocketStream<TcpStream>) -> Value {
     timeout(Duration::from_secs(2), async {
         loop {
@@ -279,9 +284,276 @@ async fn generation_zero_preserves_preconnect_requests_and_fifo() {
     assert!(requests[1]["auth"].is_object());
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn reconnect_ticket_is_current_generation_only_and_coalesced() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (second_connected_tx, second_connected_rx) = tokio::sync::oneshot::channel();
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        while socket.next().await.is_some() {}
+
+        let (stream, _) = listener.accept().await.unwrap();
+        let _socket = accept_async(stream).await.unwrap();
+        second_connected_tx.send(()).unwrap();
+        finish_rx.await.unwrap();
+    });
+
+    let connection = ConnectionManager::<RtdsMessage, SimpleParser>::new(
+        format!("ws://{address}"),
+        generation_test_config(),
+        SimpleParser::default(),
+    )
+    .unwrap();
+    let mut states = connection.state_receiver();
+    wait_for_connected(&mut states).await;
+    let generation = connection.connection_generation();
+    assert_eq!(generation, 0);
+    assert!(!connection.request_reconnect(generation + 1));
+    assert!(connection.request_reconnect(generation));
+    for _ in 0..10_000 {
+        assert!(!connection.request_reconnect(generation));
+    }
+
+    wait_for_non_connected(&mut states).await;
+    assert!(!connection.request_reconnect(generation));
+    second_connected_rx.await.unwrap();
+    wait_for_connected(&mut states).await;
+    assert_eq!(connection.connection_generation(), generation + 1);
+    assert!(!connection.request_reconnect(generation));
+    assert!(!connection.request_reconnect(generation + 2));
+    assert!(connection.state().is_connected());
+
+    finish_tx.send(()).unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn one_hundred_one_shot_reconnects_keep_one_connection_loop_and_heartbeat() {
+    const RECONNECTS: u64 = 100;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (accepted_tx, mut accepted_rx) = mpsc::unbounded_channel();
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        for generation in 0..=RECONNECTS {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            accepted_tx.send(generation).unwrap();
+            if generation == RECONNECTS {
+                finish_rx.await.unwrap();
+                return;
+            }
+            while let Some(message) = socket.next().await {
+                match message {
+                    Ok(Message::Text(text)) if text == "PING" => {
+                        socket.send(Message::Text("PONG".into())).await.unwrap();
+                    }
+                    Ok(Message::Close(_)) | Err(_) => break,
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    let connection = ConnectionManager::<RtdsMessage, SimpleParser>::new(
+        format!("ws://{address}"),
+        generation_test_config(),
+        SimpleParser::default(),
+    )
+    .unwrap();
+    let mut states = connection.state_receiver();
+    let messages = connection.subscribe();
+    assert_eq!(accepted_rx.recv().await.unwrap(), 0);
+    wait_for_connected(&mut states).await;
+    let steady_tasks = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+    #[cfg(target_os = "linux")]
+    let steady_fds = open_fd_count();
+
+    for generation in 0..RECONNECTS {
+        assert_eq!(connection.connection_generation(), generation);
+        assert!(connection.request_reconnect(generation));
+        assert_eq!(accepted_rx.recv().await.unwrap(), generation + 1);
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if connection.connection_generation() == generation + 1
+                    && connection.state().is_connected()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("next one-shot generation");
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let alive = tokio::runtime::Handle::current()
+                    .metrics()
+                    .num_alive_tasks();
+                if alive <= steady_tasks {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("old heartbeat task must not accumulate");
+    }
+
+    assert_eq!(connection.connection_generation(), RECONNECTS);
+    assert_eq!(messages.len(), 0);
+    #[cfg(target_os = "linux")]
+    assert!(
+        open_fd_count() <= steady_fds + 4,
+        "one-shot reconnects must not retain one descriptor per generation"
+    );
+    finish_tx.send(()).unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn generation_bound_sender_cannot_write_into_a_later_socket() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        while socket.next().await.is_some() {}
+
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        let request = next_json_request(&mut socket).await;
+        assert!(
+            timeout(Duration::from_millis(200), next_json_request(&mut socket))
+                .await
+                .is_err(),
+            "the bound old-generation request must be dropped"
+        );
+        request
+    });
+
+    let connection = ConnectionManager::<RtdsMessage, SimpleParser>::new(
+        format!("ws://{address}"),
+        generation_test_config(),
+        SimpleParser::default(),
+    )
+    .unwrap();
+    let mut states = connection.state_receiver();
+    wait_for_connected(&mut states).await;
+    let generation = connection.connection_generation();
+    let bound = connection.bind_generation(generation).unwrap();
+    assert!(connection.request_reconnect(generation));
+    wait_for_non_connected(&mut states).await;
+    wait_for_connected(&mut states).await;
+
+    bound.send(&json!({"old": true})).unwrap();
+    connection.send(&json!({"current": true})).unwrap();
+    assert_eq!(server.await.unwrap(), json!({"current": true}));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn continuous_inbound_frames_do_not_starve_outbound_ping_or_reconnect() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (outbound_tx, outbound_rx) = tokio::sync::oneshot::channel();
+    let (ping_tx, ping_rx) = tokio::sync::oneshot::channel();
+    let (reconnected_tx, reconnected_rx) = tokio::sync::oneshot::channel();
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        let mut outbound_tx = Some(outbound_tx);
+        let mut ping_tx = Some(ping_tx);
+        let mut sequence = 0_u64;
+        let mut ticker = tokio::time::interval(Duration::from_millis(1));
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    for _ in 0..32 {
+                        let frame = json!({
+                            "topic": "crypto_prices_chainlink",
+                            "type": "update",
+                            "timestamp": sequence,
+                            "payload": {"symbol": "btc/usd", "timestamp": sequence, "value": "1"}
+                        });
+                        if socket.send(Message::Text(frame.to_string().into())).await.is_err() {
+                            break;
+                        }
+                        sequence += 1;
+                    }
+                }
+                message = socket.next() => {
+                    match message {
+                        Some(Ok(Message::Text(text))) if text == "PING" => {
+                            if let Some(tx) = ping_tx.take() {
+                                tx.send(()).unwrap();
+                            }
+                            socket.send(Message::Text("PONG".into())).await.unwrap();
+                        }
+                        Some(Ok(Message::Text(text))) => {
+                            if serde_json::from_str::<Value>(&text).is_ok()
+                                && let Some(tx) = outbound_tx.take()
+                            {
+                                tx.send(()).unwrap();
+                            }
+                        }
+                        Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        let (stream, _) = listener.accept().await.unwrap();
+        let _socket = accept_async(stream).await.unwrap();
+        reconnected_tx.send(()).unwrap();
+        finish_rx.await.unwrap();
+    });
+
+    let mut config = generation_test_config();
+    config.heartbeat_interval = Duration::from_millis(20);
+    config.heartbeat_timeout = Duration::from_millis(500);
+    let connection = ConnectionManager::<RtdsMessage, SimpleParser>::new(
+        format!("ws://{address}"),
+        config,
+        SimpleParser::default(),
+    )
+    .unwrap();
+    let mut states = connection.state_receiver();
+    wait_for_connected(&mut states).await;
+    let mut messages = connection.subscribe();
+    let drain = tokio::spawn(async move { while messages.recv().await.is_ok() {} });
+
+    connection.send(&json!({"control": "outbound"})).unwrap();
+    timeout(Duration::from_secs(2), outbound_rx)
+        .await
+        .expect("outbound under continuous inbound")
+        .unwrap();
+    timeout(Duration::from_secs(2), ping_rx)
+        .await
+        .expect("heartbeat under continuous inbound")
+        .unwrap();
+    let generation = connection.connection_generation();
+    assert!(connection.request_reconnect(generation));
+    timeout(Duration::from_secs(2), reconnected_rx)
+        .await
+        .expect("reconnect under continuous inbound")
+        .unwrap();
+
+    finish_tx.send(()).unwrap();
+    server.await.unwrap();
+    drain.abort();
+}
+
 #[tokio::test]
 async fn old_generation_requests_are_dropped_across_repeated_reconnects() {
-    const FLAPS: usize = 8;
+    const FLAPS: usize = 100;
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
