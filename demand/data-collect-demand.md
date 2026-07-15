@@ -116,7 +116,7 @@
 2. 初始订阅必须记录 raw subscription JSON、subscribe send time、ack/first message 或 close/error 证据；Chainlink BTC/USD subscription payload 必须能追溯 `action: "subscribe"`、`topic: "crypto_prices_chainlink"`、`type: "*"` 和 `filters: "{\"symbol\":\"btc/usd\"}"`。
 3. RTDS Chainlink BTC/USD 是 Chainlink 价格证据，不是 Binance 官方 orderbook/depth 的替代源。
 4. RTDS 也必须使用业务数据 freshness 检测；ping/pong 或连接 open 不能单独证明 source coverage 完整。
-5. RTDS Chainlink BTC/USD 保持 `RTDS_FRESHNESS_TIMEOUT_SECS=60` 作为 `rtds_business_message_timeout` source gap 判定线；业务消息静默期间必须每 `3s` 主动重发同一个 Chainlink `btc/usd` subscription，在一个 `60s` source gap 窗口内最多重发 `20` 次；每累计 `2` 次重发后仍无业务消息，必须主动重建 RTDS SDK client/connection 并重新订阅；`3s` 重发和 `2` 次后的主动重连本身不记录 `rtds_business_message_timeout`，只有累计静默到 `60s` 仍无业务消息时才记录 `rtds_business_message_timeout`。
+5. 训练 cold path 的 RTDS Chainlink BTC/USD 保持`RTDS_FRESHNESS_TIMEOUT_SECS=60`；本条原有的每`3s`同socket重发、每两次重建SDK client及最多20次重发合同，已由`demand/data-collect-reliability-repair-demand.md` 3.1第5项与3.3第4项取代。现行要求是复用唯一官方SDK client/connection/receiver/actor，60秒无fresh后禁止同socket`unsubscribe -> subscribe`，只提交绑定调用者已观察generation的one-shot reconnect ticket；每个unresolved episode最多两个新generation且自然transport flap计入，仍无新的matching/fresh/nonduplicate业务payload则整进程非零退出。future paper/live独立角色须由各自需求冻结恢复预算，不得从本条恢复已被取代的训练旧策略。
 
 ## 四、存储、分区与发布
 
@@ -223,7 +223,7 @@
 13. paper/live 自身 append-only event log、rotation artifact、live artifacts、order evidence、NOE/ledger 和 execution feedback ingestion 必须由其他模块需求承接；`data-collect` 只能提供外部市场源 finalized mirror、coverage、health、gap、manifest 和 hot path handoff 边界证据，不能私自解释交易运行证据。
 14. 训练 cold path 与 paper/live hot path 的接入边界必须可验证：训练消费 finalized typed raw parquet + manifest + `data-pipeline` 输出；paper/live 消费 realtime handoff 或等价低延迟事件流，并在对应 paper/live 主机记录 runtime receive timestamp；Phase 0 或后续验收不得用 finalized parquet 可见时间替代 paper/live 实时接收延迟。
 15. 网络异常、返回空、长时间业务静默、ping/pong 正常但无数据、rate limit、server shutdown、snapshot 缺失和 source stale 都会写入 health/gap/reconnect 证据。
-16. 恢复策略使用有限重试、backoff、jitter、max attempts、max elapsed、backoff ceiling，按源独立熔断/恢复，并在重连后验证订阅、snapshot、新鲜业务消息、source coverage、RTDS topic/symbol/payload timestamp 和 Binance update/trade id 状态；RTDS Chainlink BTC/USD 必须验收每 `3s` 循环主动重发同一 subscription、每 `2` 次重发后主动重建 RTDS SDK client/connection、且 `60s` 才判 `rtds_business_message_timeout`。
+16. 恢复策略使用有限重试、backoff、jitter、max attempts、max elapsed、backoff ceiling，按源独立熔断/恢复，并在重连后验证订阅、snapshot、新鲜业务消息、source coverage、RTDS topic/symbol/payload timestamp 和 Binance update/trade id 状态；训练RTDS Chainlink BTC/USD的现行验收以`demand/data-collect-reliability-repair-demand.md`为准：60秒无fresh后由唯一SDK `ConnectionManager`执行observed-generation one-shot reconnect，新generation只重放一次完整filtered latest desired，每episode最多两个新generation，禁止恢复本条已取代的同socket循环重发或第二SDK client/connection实现。
 17. reconnect trace 必须记录每次 attempt、sleep、错误类别、最终状态，以及 open、half-open、recovered、exhausted 源级状态。
 18. Rust async/non-blocking 边界成立：主事件循环不做阻塞 I/O、重 CPU、data-collect 内部 parquet compression、local directory scan、sha256 或本地旧 segment 清理；所有队列都是 bounded queue，并具备 backpressure。archive/upload/listing/gzip 不属于当前 `data-collect` 验收项。
 19. 性能验收覆盖 Polymarket p95/max 事件量、四源合并 `2k-5k events/s` 工程吞吐、逐源吞吐/burst/drop/gap、writer queue、flush latency、RSS/CPU/disk watermark、cgroup/PSI/journal ResourceWatermark、hot path handoff latency、durable parquet write latency 和 hardware tier。
