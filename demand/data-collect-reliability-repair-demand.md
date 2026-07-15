@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-reliability-repair-changelog.md`
 >
-> 状态：`TASK_2_RTDS_RESPONSE_ENVELOPE_DIAGNOSTIC_STAGE_REVIEW_PASSED_READY_FOR_COMMIT`。第二层有界诊断已按批准边界实现并通过 vendor `164/164`、data-collect `121/121` 及全部 integration tests、Rust 1.88/workspace clippy、fmt、diff 与两路独立审查；Critical/Important/Minor 均为 0。它只读取外层 `statusCode` 与不可逆的 `body` 结构/指纹，不改变订阅、恢复或 fatal 语义。官方 RTDS 文档、固定 Rust SDK 与最新统一 TypeScript/Python beta SDK 的协议表达仍不一致，当前不能宣称已定位根因。远端 service 只读复核仍为 inactive/dead、disabled、MainPID=0，生产根为空；精确提交并 push 前禁止构建或部署。
+> 状态：`TASK_4_5_RTDS_RESPONSE_ENVELOPE_DIAGNOSTIC_STAGE_REVIEW_PASSED_READY_FOR_COMMIT`。commit `6e6759b8d6138e081b69ada3fd69be1ead43d133` / binary SHA-256=`078fdc32bf4992bc7393b4151c1326fc726090662a5440c8829e167196df16bc` 自 `2026-07-15T02:48:10.136517216Z` 以 `Restart=no` gate unit、MainPID=`1074411` 运行；截至独立复采 `03:37:41Z` 仍 active/running、disabled、NRestarts=0，只有正常 Started journal。跨小时六源直接内容审计与阶段 4 独立审查均 PASS，Critical/Important/Minor 均为 0。精确提交并 push 本轮三份文档后，才允许按计划无重启切换长期 unit。
 
 ## 一、目标与权威边界
 

@@ -6,7 +6,7 @@
 >
 > 事项编号：`DC-REPAIR-20260713-COLLECTOR-RELIABILITY`
 >
-> 状态：`TASK_2_RTDS_RESPONSE_ENVELOPE_DIAGNOSTIC_STAGE_REVIEW_PASSED_READY_FOR_COMMIT`。第二层有界诊断已按批准边界实现并通过 vendor `164/164`、data-collect `121/121` 及全部 integration tests、Rust 1.88/workspace clippy、fmt、diff 与两路独立审查；Critical/Important/Minor 均为 0。远端 service 只读复核仍为 inactive/dead、disabled、MainPID=0，生产根为空。下一步只允许精确提交/push 本事项四个文件，再按步骤 4.1.1 从已推送 commit 干净构建；提交前不得构建 production artifact。
+> 状态：`TASK_4_5_RTDS_RESPONSE_ENVELOPE_DIAGNOSTIC_STAGE_REVIEW_PASSED_READY_FOR_COMMIT`。commit `6e6759b8d6138e081b69ada3fd69be1ead43d133` / binary SHA-256=`078fdc32bf4992bc7393b4151c1326fc726090662a5440c8829e167196df16bc` 自 `2026-07-15T02:48:10.136517216Z` 按步骤 4.4.1 以 `Restart=no` gate unit、MainPID=`1074411` 运行；步骤 4.4.2 直接审计与步骤 4.5 独立审查均 PASS，Critical/Important/Minor 均为 0，截至 `03:37:41Z` PID/状态/SHA/零重启事实未变。下一步只允许精确提交/push 本轮三份文档，再按步骤 5.1.1 无重启切换长期 unit。
 
 ## 一、执行原则与成功定义
 
