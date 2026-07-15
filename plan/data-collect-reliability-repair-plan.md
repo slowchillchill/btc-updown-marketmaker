@@ -6,7 +6,7 @@
 >
 > 事项编号：`DC-REPAIR-20260713-COLLECTOR-RELIABILITY`
 >
-> 状态：`TASK_5_1_LONG_RUNNING_RESET_TO_PID_1078240_WINDOW_START_20260715T041135Z`。步骤 5.1.1 的长期 unit 保持正确；`2026-07-15T04:11:25Z` Polymarket RTDS 返回 `statusCode=400` 的 `AddSubscriptions` 后端 foreign-key constraint error，parser fault 按冻结合同 fatal，systemd 于 `04:11:35.607659Z` 以同 binary/unit 恢复为 MainPID=`1078240`。manifest gap、aggTrade backfill、depth resnapshot 与重启小时 `part-1` 均符合计划；这次 PID 变化按步骤 5.1.2 重置整个 26 小时窗口，新的最早验收时刻为 `2026-07-16T06:11:35.607659Z`。
+> 状态：`TASK_5_1_RECURRING_RTDS_SERVER_ERROR_DECISION_REQUIRED_PID_1081425`。步骤 5.1.1 的长期 unit 保持正确；同一 RTDS `statusCode=400` / `AddSubscriptions` / `connection_id_fk` 服务端错误已在 `2026-07-15T04:11:25.574760Z` 与 `11:14:54.483660Z` 两次以完全相同指纹出现。当前 fatal parser 与 systemd 恢复合同均正确执行，MainPID=`1081425`、NRestarts=2，数据恢复事实符合计划；但继续按步骤 5.1.2 机械重置同 PID 26 小时窗口已无可界定完成时间。服务保持 enabled/running 继续采集；是否扩大已批准五项 SDK patch、或修改同 PID/连接生命周期验收语义属于方案不一致决策门，未获用户决定前停止相关开发与最终验收判断。
 
 ## 一、执行原则与成功定义
 

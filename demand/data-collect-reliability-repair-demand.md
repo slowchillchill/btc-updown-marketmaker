@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-reliability-repair-changelog.md`
 >
-> 状态：`TASK_5_1_LONG_RUNNING_RESET_TO_PID_1078240_WINDOW_START_20260715T041135Z`。`2026-07-15T04:11:25Z`，Polymarket RTDS 返回外层 `statusCode=400` 的 `AddSubscriptions` 后端 foreign-key constraint error；获批有界诊断正确识别并记录，parser fault 按需求 fatal，systemd 于 `04:11:35.607659Z` 以同 binary/unit 启动 MainPID=`1078240`。当前 active/running、enabled、`Restart=on-failure`、NRestarts=1；manifest 已记录 gap，aggTrade 回补后无 unresolved range，depth 重取 snapshot，重启小时使用合法 `part-1`。按验收合同重置同 PID 26 小时窗口，最早验收时刻改为 `2026-07-16T06:11:35.607659Z`。
+> 状态：`TASK_5_1_RECURRING_RTDS_SERVER_ERROR_DECISION_REQUIRED_PID_1081425`。同一 RTDS `statusCode=400` / `AddSubscriptions` / `connection_id_fk` 服务端错误在 `2026-07-15T04:11:25.574760Z` 与 `11:14:54.483660Z` 两次返回完全相同的 frame/body 指纹；两次均按当前 fatal parser 合同退出，并由同 binary/unit 恢复。当前 MainPID=`1081425`、active/running、enabled、`Restart=on-failure`、NRestarts=2，manifest gap、RTDS lag/reconnect、aggTrade backfill、depth resnapshot 与小时 `part-1` 均如实记录且数据继续增长。重复外部响应使“任何 PID 变化都重置同 PID 26 小时窗口”成为不可预测的循环；保持 parser fatal、禁止扩大五项 SDK patch 与同 PID 26 小时验收三者已不能在当前证据下可靠同时完成。服务保持运行，但在用户决定是否批准窄化的 SDK 可恢复服务错误分类，或修改长期验收语义前，不再宣称步骤 5.1.2 正在走向可界定完成。
 
 ## 一、目标与权威边界
 
