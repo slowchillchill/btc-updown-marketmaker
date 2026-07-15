@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-reliability-repair-changelog.md`
 >
-> 状态：`TASK_5_1_LONG_RUNNING_ACTIVE_PID_1074411_WINDOW_START_20260715T024810Z`。阶段 4 文档 commit `dd6775a62289fcfcc4b6e96ed9c69731651151fa` 已 push；`2026-07-15T03:41:30Z` 已把同一 MainPID=`1074411` 无重启切换到 SHA-256=`7e847363f9164aa63fd4bb8c27307b24fa2e096cfc806a8e5c739d3d75f08795` 的权威长期 unit。PID 与启动 monotonic timestamp 前后不变，binary SHA-256=`078fdc32bf4992bc7393b4151c1326fc726090662a5440c8829e167196df16bc`，当前 active/running、enabled、`Restart=on-failure`、NRestarts=0。26 小时同 PID 窗口从真实启动 `2026-07-15T02:48:10.136517216Z` 计算，不早于 `2026-07-16T04:48:10.136517216Z` 验收。
+> 状态：`TASK_5_1_LONG_RUNNING_RESET_TO_PID_1078240_WINDOW_START_20260715T041135Z`。`2026-07-15T04:11:25Z`，Polymarket RTDS 返回外层 `statusCode=400` 的 `AddSubscriptions` 后端 foreign-key constraint error；获批有界诊断正确识别并记录，parser fault 按需求 fatal，systemd 于 `04:11:35.607659Z` 以同 binary/unit 启动 MainPID=`1078240`。当前 active/running、enabled、`Restart=on-failure`、NRestarts=1；manifest 已记录 gap，aggTrade 回补后无 unresolved range，depth 重取 snapshot，重启小时使用合法 `part-1`。按验收合同重置同 PID 26 小时窗口，最早验收时刻改为 `2026-07-16T06:11:35.607659Z`。
 
 ## 一、目标与权威边界
 

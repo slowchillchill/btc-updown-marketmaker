@@ -6,7 +6,7 @@
 >
 > 事项编号：`DC-REPAIR-20260713-COLLECTOR-RELIABILITY`
 >
-> 状态：`TASK_5_1_LONG_RUNNING_ACTIVE_PID_1074411_WINDOW_START_20260715T024810Z`。阶段 4 文档 commit `dd6775a62289fcfcc4b6e96ed9c69731651151fa` 已 push；步骤 5.1.1 已于 `2026-07-15T03:41:30Z` 完成，当前同一 MainPID=`1074411` 使用仓库权威 SHA-256=`7e847363f9164aa63fd4bb8c27307b24fa2e096cfc806a8e5c739d3d75f08795` 长期 unit，active/running、enabled、`Restart=on-failure`、NRestarts=0，PID/executable SHA 与启动 monotonic timestamp 在切换前后不变。正在执行步骤 5.1.2/5.2；26 小时门不早于 `2026-07-16T04:48:10.136517216Z`。
+> 状态：`TASK_5_1_LONG_RUNNING_RESET_TO_PID_1078240_WINDOW_START_20260715T041135Z`。步骤 5.1.1 的长期 unit 保持正确；`2026-07-15T04:11:25Z` Polymarket RTDS 返回 `statusCode=400` 的 `AddSubscriptions` 后端 foreign-key constraint error，parser fault 按冻结合同 fatal，systemd 于 `04:11:35.607659Z` 以同 binary/unit 恢复为 MainPID=`1078240`。manifest gap、aggTrade backfill、depth resnapshot 与重启小时 `part-1` 均符合计划；这次 PID 变化按步骤 5.1.2 重置整个 26 小时窗口，新的最早验收时刻为 `2026-07-16T06:11:35.607659Z`。
 
 ## 一、执行原则与成功定义
 
