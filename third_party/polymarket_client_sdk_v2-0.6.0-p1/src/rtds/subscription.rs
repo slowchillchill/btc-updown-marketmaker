@@ -39,6 +39,25 @@ const RTDS_PARSE_DIAGNOSTIC_SCALAR_FIELDS: [&str; 8] = [
     "requestId",
     "error",
 ];
+const RTDS_PARSE_DIAGNOSTIC_TOP_LEVEL_SCALAR_FIELDS: [&str; 9] = [
+    "message",
+    "status",
+    "statusCode",
+    "code",
+    "topic",
+    "type",
+    "connectionId",
+    "requestId",
+    "error",
+];
+const RTDS_PARSE_DIAGNOSTIC_BODY_SCALAR_FIELDS: [&str; 6] = [
+    "message",
+    "status",
+    "code",
+    "error",
+    "connectionId",
+    "requestId",
+];
 
 #[derive(Debug)]
 struct RtdsParseDiagnosticError {
@@ -157,15 +176,23 @@ fn append_scalar(diagnostic: &mut BoundedDiagnostic, value: &Value) -> bool {
     true
 }
 
-fn append_object_diagnostic(diagnostic: &mut BoundedDiagnostic, object: &Map<String, Value>) {
-    diagnostic.push(" selected={");
+fn append_object_diagnostic(
+    diagnostic: &mut BoundedDiagnostic,
+    object: &Map<String, Value>,
+    scalar_fields: &[&str],
+    selected_label: &str,
+    fields_label: &str,
+) {
+    diagnostic.push(" ");
+    diagnostic.push(selected_label);
+    diagnostic.push("={");
 
     let mut first = true;
-    for field in RTDS_PARSE_DIAGNOSTIC_SCALAR_FIELDS {
+    for field in scalar_fields {
         if diagnostic.is_truncated() {
             break;
         }
-        let Some(value) = object.get(field) else {
+        let Some(value) = object.get(*field) else {
             continue;
         };
         if matches!(value, Value::Array(_) | Value::Object(_)) {
@@ -180,9 +207,13 @@ fn append_object_diagnostic(diagnostic: &mut BoundedDiagnostic, object: &Map<Str
         debug_assert!(appended, "non-scalar values are filtered above");
         first = false;
     }
-    diagnostic.push("} fields=[");
+    diagnostic.push("} ");
+    diagnostic.push(fields_label);
+    diagnostic.push("=[");
 
-    for (index, field) in object.keys().enumerate() {
+    let mut fields: Vec<_> = object.keys().collect();
+    fields.sort_unstable();
+    for (index, field) in fields.into_iter().enumerate() {
         if diagnostic.is_truncated() {
             break;
         }
@@ -192,6 +223,77 @@ fn append_object_diagnostic(diagnostic: &mut BoundedDiagnostic, object: &Map<Str
         append_json_string(diagnostic, field);
     }
     diagnostic.push("]");
+}
+
+fn json_shape(value: &Value) -> &'static str {
+    match value {
+        Value::Object(_) => "object",
+        Value::Array(_) => "array",
+        Value::String(_) => "string",
+        Value::Number(_) => "number",
+        Value::Bool(_) => "boolean",
+        Value::Null => "null",
+    }
+}
+
+fn canonicalize_json(value: &Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let mut fields: Vec<_> = object.iter().collect();
+            fields.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+
+            let mut canonical = Map::new();
+            for (field, value) in fields {
+                canonical.insert(field.clone(), canonicalize_json(value));
+            }
+            Value::Object(canonical)
+        }
+        Value::Array(values) => Value::Array(values.iter().map(canonicalize_json).collect()),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => value.clone(),
+    }
+}
+
+fn append_body_json_diagnostic(diagnostic: &mut BoundedDiagnostic, value: &Value) {
+    diagnostic.push(" body_json_top_level=");
+    diagnostic.push(json_shape(value));
+    if let Value::Object(object) = value {
+        append_object_diagnostic(
+            diagnostic,
+            object,
+            &RTDS_PARSE_DIAGNOSTIC_BODY_SCALAR_FIELDS,
+            "body_selected",
+            "body_fields",
+        );
+    }
+}
+
+fn append_body_diagnostic(diagnostic: &mut BoundedDiagnostic, body: &Value) {
+    diagnostic.push(" body_type=");
+    diagnostic.push(json_shape(body));
+
+    if let Value::String(value) = body {
+        let bytes = value.as_bytes();
+        diagnostic.push(" body_decoded_bytes=");
+        diagnostic.push(&bytes.len().to_string());
+        diagnostic.push(" body_decoded_sha256=");
+        diagnostic.push(&format!("{:x}", Sha256::digest(bytes)));
+
+        match serde_json::from_str::<Value>(value) {
+            Ok(value) => append_body_json_diagnostic(diagnostic, &value),
+            Err(_) => diagnostic.push(" body_json_top_level=invalid_json"),
+        }
+        return;
+    }
+
+    let canonical = serde_json::to_vec(&canonicalize_json(body))
+        .expect("serializing a serde_json::Value cannot fail");
+    diagnostic.push(" body_canonical_json_bytes=");
+    diagnostic.push(&canonical.len().to_string());
+    diagnostic.push(" body_canonical_json_sha256=");
+    diagnostic.push(&format!("{:x}", Sha256::digest(&canonical)));
+    if matches!(body, Value::Object(_)) {
+        append_body_json_diagnostic(diagnostic, body);
+    }
 }
 
 struct ArrayMismatchSeed<'diagnostic> {
@@ -260,14 +362,29 @@ fn build_rtds_parse_diagnostic(bytes: &[u8]) -> String {
     match serde_json::from_slice::<Value>(bytes) {
         Ok(Value::Object(object)) => {
             diagnostic.push(" top_level=object");
-            append_object_diagnostic(&mut diagnostic, &object);
+            append_object_diagnostic(
+                &mut diagnostic,
+                &object,
+                &RTDS_PARSE_DIAGNOSTIC_TOP_LEVEL_SCALAR_FIELDS,
+                "selected",
+                "fields",
+            );
+            if let Some(body) = object.get("body") {
+                append_body_diagnostic(&mut diagnostic, body);
+            }
         }
         Ok(Value::Array(values)) => {
             diagnostic.push(" top_level=array first_contract_mismatch_index=");
             if let Some(index) = first_array_contract_mismatch(bytes) {
                 diagnostic.push(&index.to_string());
                 if let Some(Value::Object(object)) = values.get(index) {
-                    append_object_diagnostic(&mut diagnostic, object);
+                    append_object_diagnostic(
+                        &mut diagnostic,
+                        object,
+                        &RTDS_PARSE_DIAGNOSTIC_SCALAR_FIELDS,
+                        "selected",
+                        "fields",
+                    );
                 } else {
                     diagnostic.push(" selected={} fields=[]");
                 }
@@ -656,6 +773,87 @@ mod diagnostic_tests {
     }
 
     #[test]
+    fn string_body_reports_only_fingerprint_and_inner_allowlist() {
+        let body = r#"{"requestId":"inner-request","payload":{"secret":"INNER_PAYLOAD_MUST_NOT_LEAK"},"message":"Invalid request body","connectionId":"inner-connection","unlisted":"INNER_UNLISTED_MUST_NOT_LEAK","error":"bad request"}"#;
+        let frame = serde_json::to_vec(&serde_json::json!({
+            "statusCode": 400,
+            "body": body,
+        }))
+        .unwrap();
+
+        let error = SimpleParser.parse(&frame).unwrap_err().to_string();
+        assert!(error.contains("selected={statusCode=400}"));
+        assert!(error.contains("fields=[\"body\",\"statusCode\"]"));
+        assert!(error.contains("body_type=string"));
+        assert!(error.contains(&format!("body_decoded_bytes={}", body.len())));
+        assert!(error.contains(&format!(
+            "body_decoded_sha256={:x}",
+            Sha256::digest(body.as_bytes())
+        )));
+        assert!(error.contains("body_json_top_level=object"));
+        assert!(error.contains("message=\"Invalid request body\""));
+        assert!(error.contains("error=\"bad request\""));
+        assert!(error.contains("connectionId=\"inner-connection\""));
+        assert!(error.contains("requestId=\"inner-request\""));
+        assert!(error.contains(
+            "body_fields=[\"connectionId\",\"error\",\"message\",\"payload\",\"requestId\",\"unlisted\"]"
+        ));
+        assert!(!error.contains("INNER_PAYLOAD_MUST_NOT_LEAK"));
+        assert!(!error.contains("INNER_UNLISTED_MUST_NOT_LEAK"));
+    }
+
+    #[test]
+    fn non_json_string_body_is_fingerprinted_without_echoing_it() {
+        let body = "<html>NON_JSON_BODY_MUST_NOT_LEAK</html>";
+        let frame = serde_json::to_vec(&serde_json::json!({
+            "statusCode": 502,
+            "body": body,
+        }))
+        .unwrap();
+
+        let diagnostic = build_rtds_parse_diagnostic(&frame);
+        assert!(diagnostic.contains("selected={statusCode=502}"));
+        assert!(diagnostic.contains("body_type=string"));
+        assert!(diagnostic.contains(&format!("body_decoded_bytes={}", body.len())));
+        assert!(diagnostic.contains(&format!(
+            "body_decoded_sha256={:x}",
+            Sha256::digest(body.as_bytes())
+        )));
+        assert!(diagnostic.contains("body_json_top_level=invalid_json"));
+        assert!(!diagnostic.contains("NON_JSON_BODY_MUST_NOT_LEAK"));
+    }
+
+    #[test]
+    fn object_body_uses_a_canonical_fingerprint_without_nested_values() {
+        let frame = br#"{
+            "statusCode":500,
+            "body":{
+                "z":1,
+                "payload":{"secret":"OBJECT_BODY_MUST_NOT_LEAK"},
+                "message":"Internal error",
+                "connectionId":"inner-connection"
+            }
+        }"#;
+        let canonical = br#"{"connectionId":"inner-connection","message":"Internal error","payload":{"secret":"OBJECT_BODY_MUST_NOT_LEAK"},"z":1}"#;
+
+        let diagnostic = build_rtds_parse_diagnostic(frame);
+        assert!(diagnostic.contains("body_type=object"));
+        assert!(diagnostic.contains(&format!("body_canonical_json_bytes={}", canonical.len())));
+        assert!(diagnostic.contains(&format!(
+            "body_canonical_json_sha256={:x}",
+            Sha256::digest(canonical)
+        )));
+        assert!(diagnostic.contains("body_json_top_level=object"));
+        assert!(diagnostic.contains("message=\"Internal error\""));
+        assert!(diagnostic.contains("connectionId=\"inner-connection\""));
+        assert!(
+            diagnostic.contains("body_fields=[\"connectionId\",\"message\",\"payload\",\"z\"]")
+        );
+        assert!(!diagnostic.contains("OBJECT_BODY_MUST_NOT_LEAK"));
+        assert!(!diagnostic.contains("\"secret\""));
+    }
+
+    #[test]
     fn array_reports_the_first_contract_mismatch() {
         let frame = format!(
             "[{VALID_MESSAGE},{{\"message\":\"bad second item\",\"payload\":{{\"secret\":\"ARRAY_PAYLOAD_MUST_NOT_LEAK\"}}}},null]"
@@ -741,5 +939,20 @@ mod diagnostic_tests {
         let unicode_diagnostic = build_rtds_parse_diagnostic(&unicode_frame);
         assert!(unicode_diagnostic.len() <= RTDS_PARSE_DIAGNOSTIC_MAX_BYTES);
         assert!(unicode_diagnostic.ends_with(RTDS_PARSE_DIAGNOSTIC_TRUNCATED));
+
+        let inner_body = serde_json::to_string(&serde_json::json!({
+            "message": "错误".repeat(4_096),
+            "payload": {"secret": "INNER_PAYLOAD_MUST_NOT_LEAK"},
+        }))
+        .unwrap();
+        let inner_frame = serde_json::to_vec(&serde_json::json!({
+            "statusCode": 500,
+            "body": inner_body,
+        }))
+        .unwrap();
+        let inner_diagnostic = build_rtds_parse_diagnostic(&inner_frame);
+        assert!(inner_diagnostic.len() <= RTDS_PARSE_DIAGNOSTIC_MAX_BYTES);
+        assert!(inner_diagnostic.ends_with(RTDS_PARSE_DIAGNOSTIC_TRUNCATED));
+        assert!(!inner_diagnostic.contains("INNER_PAYLOAD_MUST_NOT_LEAK"));
     }
 }
