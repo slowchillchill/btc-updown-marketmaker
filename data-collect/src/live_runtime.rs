@@ -6224,7 +6224,7 @@ async fn run_rtds_source(
                 ))
             })?;
     let subscription = Subscription::chainlink_prices(Some("btc/usd".to_owned()));
-    let mut runtime = RtdsSdkRuntime::new(RTDS_WS_ENDPOINT.to_owned(), bounded_ws_config())?;
+    let mut runtime = RtdsSdkRuntime::new(RTDS_WS_ENDPOINT.to_owned(), bounded_rtds_ws_config())?;
     runtime.wait_connected(Duration::from_secs(20)).await?;
     runtime
         .subscribe(subscription, Duration::from_secs(3))
@@ -8289,6 +8289,15 @@ fn bounded_ws_config() -> WsConfig {
     config
 }
 
+fn bounded_rtds_ws_config() -> WsConfig {
+    let mut config = WsConfig::default();
+    config.reconnect.max_attempts = Some(3);
+    config.reconnect.max_backoff = Duration::from_secs(5);
+    config.heartbeat_interval = Duration::from_secs(5);
+    config.heartbeat_timeout = Duration::from_secs(15);
+    config
+}
+
 async fn send_event(sink: &SourceEventSink, run_started: Instant, event: RawEvent) -> Result<()> {
     let _enqueue_guard = sink.enqueue_lock.lock().await;
     let source_kind = event.source_kind.clone();
@@ -10199,6 +10208,17 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_async;
+
+    #[test]
+    fn websocket_heartbeat_configs_are_channel_specific() {
+        let clob = bounded_ws_config();
+        assert_eq!(clob.heartbeat_interval, Duration::from_secs(10));
+        assert_eq!(clob.heartbeat_timeout, Duration::from_secs(20));
+
+        let rtds = bounded_rtds_ws_config();
+        assert_eq!(rtds.heartbeat_interval, Duration::from_secs(5));
+        assert_eq!(rtds.heartbeat_timeout, Duration::from_secs(15));
+    }
 
     async fn spawn_polymarket_book_burst_server(
         count: i64,
