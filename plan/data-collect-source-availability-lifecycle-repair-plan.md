@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-source-availability-lifecycle-repair-changelog.md`
 >
-> 状态：`DRAFT_AWAITING_FINAL_USER_REVIEW`。用户已经批准把原 RTDS-only 草案改写为全数据源事项、批准离散 `next_wake` 作为核心模型调度目标候选，并于2026-07-17批准下列manifest/coverage决策。该批准冻结对应计划步骤，但不等于批准本计划其余内容、第4.7节SDK patch矩阵或开始实现。本计划当前不授权代码修改、SDK patch、模型调度实现、生产构建、部署、远端服务操作或数据清理。
+> 状态：`APPROVED_IMPLEMENTATION_PHASE_0_COMPLETE_PHASE_1_AUTHORIZED`。用户已于2026-07-17批准本计划、对应需求及当时需求第4.7节SDK-first逐项patch矩阵，并授权依次执行阶段0--8的本地文档/代码修改、测试、独立审查、commit和push；同日对阶段0新发现的官方pre-parse完整文本帧trace差异选择B，批准恢复官方0.6.0原hunk及其failure-trace边界放宽。阶段0 authority同步、SDK provenance/逐hunk基线和三路独立审查已经完成，阶段1可在本阶段commit/push后开始。本授权不包括模型调度实现、生产release构建、部署、远端服务操作或数据清理。
 
 ## 一、成功标准与实施原则
 
@@ -21,7 +21,7 @@
 - vendored SDK只保留经逐项证明仍必要的最小差异，删除旧业务静默策略专用的one-shot reconnect；
 - 没有第二套health、reconnect、socket owner、SDK session、receiver或subscription actor。
 
-实施只允许在用户最终批准需求、计划及SDK patch矩阵后开始。任何真实代码、现行已批准文档或官方协议与本计划发生新冲突时，必须停止相关阶段，在changelog登记事实、影响和选项并请求用户决定。
+用户已于2026-07-17完成需求、计划及SDK patch矩阵的最终批准。任何真实代码、现行已批准文档或官方协议与本计划发生新冲突时，必须停止相关阶段，在changelog登记事实、影响和选项并请求用户决定。
 
 每个阶段均执行：
 
@@ -78,7 +78,7 @@
 - 步骤0.3.1：记录pinned crate版本、crates.io原始SHA、官方VCS commit、当前官方release/main和相关PR状态。
   - 验证：所有上游结论附访问日期和官方链接；不能只凭旧记忆。
 - 步骤0.3.2：把官方原版与vendored树逐文件比较，将每个hunk映射到需求4.7矩阵。
-  - 验证：只有`connection.rs`、`clob/ws/types/response.rs`和`rtds/subscription.rs`三个源码路径；每个hunk有保留、删除或上游替换结论。
+  - 验证：只有`connection.rs`、`clob/ws/types/response.rs`和`rtds/subscription.rs`三个源码路径；每个hunk最终有用户批准的保留、删除或上游替换结论。官方pre-parse完整文本帧trace按用户B决定恢复原hunk并记录failure-trace边界放宽；调用链审计明确记录RTDS已使用bound manager而CLOB生产actor仍须在阶段4补齐generation绑定，不能把vendor能力误报为全部生产接入完成。
 - 步骤0.3.3：本事项保持pinned 0.6.0与现有vendor根，检查官方已合并/未合并修复能否按官方hunk/设计最小回移。
   - 验证：不升级Cargo/lock/vendor版本，不整体回退导致已证明的数据完整性能力消失，也不保留无调用依据的补丁；采用更新release必须另建SDK版本升级决策门。
 
@@ -110,8 +110,8 @@
 
 - 步骤1.3.1：把当前已经具备的真实transport恢复路径映射到各source既有唯一owner；纯业务静默不创建collector状态转换，恢复状态不持久化为manifest scope或episode。本阶段只建立分类、coverage lifecycle与测试seam，不提前宣称阶段2--6尚未修复的协议路径已满足无限恢复。
   - 验证：现有恢复路径不回退且可停止；有界operator日志不虚构消息数、silence-start或完整episode，日志失败不改变运行结果。heartbeat-dead、RTDS/CLOB/各Binance正式持续恢复断言分别留在阶段2--6转绿。
-- 步骤1.3.2：确保business/transport availability不进入`source_gaps`或业务`lag_events`，confirmed integrity仍进入原路径。
-  - 验证：正反例覆盖manifest verdict、单一`collection_day_coverage`、CLOB一asset静默而另一asset正常，以及外部静默/网络与parser/schema/sequence/local drop边界；不存在动态scope容量导致的fail-closed。
+- 步骤1.3.2：只对阶段1新增的共同classification/coverage路径和fixture冻结business/transport availability不进入`source_gaps`或业务`lag_events`、confirmed integrity仍进入原路径；不提前改写阶段3--6各协议现有生产分支。
+  - 验证：共同fixture正反例覆盖单一`collection_day_coverage`、外部availability与parser/schema/sequence/local drop边界，且不存在动态scope容量导致的fail-closed；RTDS、CLOB、aggTrade与depth生产端到端无gap/lag断言分别在阶段3--6转绿并由阶段7统一验收。
 
 阶段1完成条件：共同分类、coverage lifecycle与测试seam可执行，当前已有恢复路径不回退，中性availability不与gap混淆；不要求阶段2--6尚未实施的协议修复提前通过。阶段独立审查重点检查是否过度抽象或新增影子控制面；通过后commit/push。
 
@@ -126,7 +126,7 @@
 - 步骤2.1.3：建立互斥退出反向测试：sender closed、read EOF、Close、read/write/PING failure、heartbeat timeout/旧PONG和parser fault。
   - 验证：只有sender closed不重连；transport类全部重连；parser fault保持terminal。
 - 步骤2.1.4：保留parser sticky fault、CLOB array all-or-error、`SimpleParser::Default`、generation isolation、bounded RTDS diagnostics和`Lagged(n)`暴露测试。
-  - 验证：transport生命周期修复不回退独立合同。
+  - 验证：transport生命周期修复不回退独立合同；pre-parse raw trace按用户B决定恢复。先用非法type scalar与nested sentinel证明当前`RtdsParseDiagnosticError::Display`、sticky fault和tracing泄漏边界，再让目标外显Display/sticky fault/warn只保留2,048-byte有界allowlist摘要；原error kind与source chain仍可typed检查。测试和文档明确官方pre-parse trace会记录完整失败帧，且把它计为获批边界放宽而非脱敏通过。
 - 步骤2.1.5：盘点所有使用one-shot reconnect的测试，区分ticket coalescing/current-generation专属断言与自然generation隔离、资源、select公平性、每代replay/freshness fence回归。
   - 验证：阶段2暂时保留one-shot API，不先删除生产依赖；需要保留的自然generation测试规划改用server Close/no-PONG驱动，不能随ticket测试一并删除。
 
@@ -137,9 +137,11 @@
 - 步骤2.2.2：增加私有互斥退出结果或等价判断；只有最后一个outbound sender关闭令outer loop正常终止，其他`Ok(())`/transport退出不得被误判。
   - 验证：裸manager及两个runtime drop测试不重连，read/write/EOF/Close/PING/heartbeat反向测试仍重连，parser仍terminal。
 - 步骤2.2.3：比较原始crate、修改前vendor和修改后vendor。
-  - 验证：源码路径集合不扩大，heartbeat/teardown差异映射需求4.7；one-shot补丁在本阶段有意保持到阶段3原子删除，vendor目录无target/临时文件。
+  - 验证：源码路径集合不扩大，heartbeat/teardown及RTDS外显错误脱敏差异映射需求4.7；one-shot补丁在本阶段有意保持到阶段3原子删除，vendor目录无target/临时文件。
 - 步骤2.2.4：用CLOB parser和generic manager运行no-PONG loopback回归，保持socket开放直到heartbeat timeout，并同时覆盖parser/fault与dynamic desired保持行为。
   - 验证：旧CLOB generation因heartbeat结果传播而退出并进入现有恢复路径；既有CLOB `10s/20s` split只作为已完成配置回归基线被断言，本阶段不重复实现或改写该split。
+- 步骤2.2.5：为SDK `tracing` feature安装测试subscriber，捕获RTDS parser失败的pre-parse trace、warn与sticky fault；用非法type scalar和nested payload sentinel覆盖外显Display/log，并冻结用户B决定的官方raw trace恢复行为。
+  - 验证：Display/sticky fault/warn不含未列入allowlist的scalar或nested sentinel，摘要长度与UTF-8边界成立，kind/source chain断言保留；官方pre-parse trace明确包含完整失败sentinel，并被记为用户批准的日志边界放宽而非脱敏通过。
 
 阶段2完成条件：需求验收11--13通过，独立审查确认heartbeat/socket/task生命周期及退出分类正确；one-shot API和旧RTDS消费者仍同时存在，不形成不可运行中间commit。通过后commit/push。
 
@@ -178,7 +180,7 @@
 - 步骤4.1.1：current/prefetched assets跨越至少三个旧silence budget等价周期，期间只向其中一个asset发送合法业务事件，最后再向另一个asset发送事件。
   - 验证：修复前第三次返回错误；目标为无unsubscribe/resubscribe、无generation变化、事件正常消费，两个asset的last qualifying time按identifier独立且不会互相恢复。
 - 步骤4.1.2：执行current/prefetched/retired lifecycle切换和自然transport reconnect。
-  - 验证：只有desired set真实变化才发送精确diff，新generation只replay最新完整set。
+  - 验证：只有desired set真实变化才发送精确diff，新generation只replay最新完整set；分别在旧actor已观察connected后切代，以及发送后复核与ack发布之间切代，旧generation延迟请求不得写入新socket，generation-tagged旧ack不得满足wait。
 - 步骤4.1.3：Gamma连续网络失败、rate limit和空候选后恢复；另注入矛盾identity/schema。
   - 验证：availability不结束source；恢复时按当前时钟重算current/next window且不再请求过期slug，完整性负例仍失败。
 
@@ -186,8 +188,8 @@
 
 - 步骤4.2.1：删除`MarketAssetFreshnessWatchdog`、30/60秒业务静默阈值、resubscribe attempt、unsubscribe/subscribe和fatal budget，不在collector中保留替代silence detector。
   - 验证：全仓不存在“第三次silence必须process restart”或collector业务静默阈值的当前合同、常量或测试；last qualifying market receive time仍可追溯。
-- 步骤4.2.2：保持market lifecycle actor、desired asset diff、`10s/20s` heartbeat和自然reconnect replay。
-  - 验证：没有第二subscription actor或按静默修改desired revision。
+- 步骤4.2.2：保持market lifecycle actor、desired asset diff、`10s/20s` heartbeat和自然reconnect replay；让CLOB actor像RTDS actor一样先观察generation，以既有`bind_generation(observed_generation)`构造该代manager，发送后复核connected state/generation。把项目私有applied watch值改为generation-tagged类型，发布ack时携带observed generation，waiter要求ack generation等于当前generation、revision满足且state connected。
+  - 验证：没有第二subscription actor、公共SDK API或按静默修改desired revision；旧代manager不能借当前atomic generation把延迟请求重标为新代，post-check/ack间切代的旧ack也不能被revision-only误收，两个精确竞态与RTDS同类bound-generation回归均通过。
 - 步骤4.2.3：Gamma外部availability统一进入既有source-local持续恢复；空候选不伪造metadata或market row，也不创建manifest transport/candidate scope。
   - 验证：服务恢复后按当前时钟重算current/next discovery window、不追逐过期slug，旧失败不阻塞其他source；HTTP成功与合法candidate只更新对应运行路径和last qualifying事实。
 

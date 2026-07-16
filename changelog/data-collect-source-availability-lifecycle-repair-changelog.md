@@ -6,7 +6,13 @@
 >
 > 对应计划：`plan/data-collect-source-availability-lifecycle-repair-plan.md`
 >
-> 状态：`DRAFT_AWAITING_FINAL_USER_REVIEW`。用户已于2026-07-17批准manifest/coverage决策并授权同步需求、计划与本文；当前仍只有文档修改，没有本事项代码实现、vendor patch、生产构建、部署、远端服务写操作或数据清理。
+> 状态：`APPROVED_IMPLEMENTATION_PHASE_0_COMPLETE_PHASE_1_AUTHORIZED`。用户已于2026-07-17批准最终需求、计划及当时SDK-first逐项patch矩阵，并授权按计划执行本地文档/代码修改、测试、独立审查、commit和push；同日对新发现的官方pre-parse完整文本帧trace差异选择B。阶段0已完成并通过独立审查，阶段1可在本阶段commit/push后开始。生产构建、部署、远端服务写操作和数据清理仍未获授权。
+
+## 2026-07-17：最终批准并开始阶段0
+
+- 用户明确指令“批准按当前计划文档执行”。本次批准覆盖`demand/data-collect-source-availability-lifecycle-repair-demand.md`、`plan/data-collect-source-availability-lifecycle-repair-plan.md`及需求第4.7节逐项SDK patch矩阵，授权阶段0--8的本地实施、验证、独立审查、commit和push。
+- 批准不扩张计划范围：模型调度实现、生产release构建、部署、远端服务启停/写操作、生产数据清理与重采仍保持未授权。
+- 阶段0首先同步旧authority并重建SDK provenance/diff基线；如果官方协议、真实代码或既有批准文档出现无法同时成立的新冲突，按决策门停止，而不是自行调和。
 
 ## 2026-07-16：建立前置回滚检查点
 
@@ -133,3 +139,54 @@
 - 阶段1完成条件已收窄为classification、coverage lifecycle、测试seam与既有恢复不回退；heartbeat、RTDS/CLOB/Binance正式持续恢复分别在阶段2--6和阶段7验收，不再要求未实现能力提前通过。
 - 核心需求同步了M1--M8批准状态、source-local transport事实边界、replay eligibility、M8未来部署前置条件，以及既有daily reconnect counter不能伪造具体reconnect原因/episode的限制。
 - 最新四份文档经core、修复计划与跨文档三路最终只读复审，结果均为PASS，Critical与Important均为0；复审确认旧日final-close commit、新日activation commit、ack-only release、四态同日恢复、unclean唯一计数、PendingExit、task级abort证明、dataset独占lease与prior-state矩阵已经闭环。本次仍只有文档落盘，不构成代码实现或部署批准。
+
+## 2026-07-17：阶段0 authority同步
+
+- `demand/data-collect-demand.md`已删除或改写普通业务静默/空候选/stale/外部网络故障自动升级为gap、lag、异常告警、freshness网络动作或systemd新PID恢复的当前合同；保留confirmed ID/update hole、SDK/local lag、queue drop/timeout、parser/schema、writer/manifest和资源硬边界。
+- `demand/data-collect-reliability-repair-demand.md`已标记为只在heartbeat及其他未被取代的数据完整性合同上继续有效。固定patch数量、D2 one-shot reconnect、CLOB 30/60秒watchdog、有限总恢复、旧daily coverage和同日生产切换/清理均改由本事项取代。
+- `plan/data-collect-reliability-repair-plan.md`已停止其未执行阶段2--5，不再提供生产构建、远端预置、数据删除、同日替换或26小时长跑授权；旧changelog保持原文。文件现只保留历史基线和指向本计划的同步摘要。
+- 三份旧authority统一采用顶层`data_collect_daily_manifest_v3`直接嵌套单一`data_collect_collection_day_coverage_v1`，六个既有source counters职责不变；未新增transport scope/reason/episode、逐producer/source coverage、extensions、receipt或sidecar。legacy缺对象只读为unknown，新writer缺失/malformed fail closed。
+- 旧authority同步了dataset-root OS独占lease、十个mandatory wrapper ready gate、atomic activation commit与ack-only release、正常rollover rendezvous、PendingExit、task级abort证明、同日四态恢复、prior state-aware closure和M8 UTC边界部署前置条件。
+- `demand/rebuild-core-demand.md`在前一文档批准commit中已经与本事项一致，本阶段复核未发现需要再次编辑的漂移；用户现有`AGENTS.md`和`推荐开发顺序.md`仍不在本事项范围。
+
+## 2026-07-17：阶段0 SDK provenance与逐hunk基线
+
+- pinned crate仍为`polymarket_client_sdk_v2 0.6.0`；registry `.crate` SHA-256为`e0ed9ca91088808232ee7e6b48f8f4eaa846882f799c40f8190b0a0e3d28ed5e`，发布时间为`2026-07-02T14:29:42.824907Z`且未yank。vendor `.cargo_vcs_info.json`与官方`main`均指向`3ae1aae5e9ded38f984464c9fc0f307f8a9f41fb`。截至核验时crates.io最新稳定仍为0.6.0，官方仓库没有tag或GitHub Release对象。
+- 真实`.crate`解包树与vendor全树比较只命中三个源码路径：`src/ws/connection.rs`、`src/clob/ws/types/response.rs`、`src/rtds/subscription.rs`；没有Cargo、依赖、许可证、README或第四个源码路径漂移。Cargo解包缓存自身的`.cargo-ok`不属于原始crate或vendor差异。
+- `connection.rs`的14个diff hunk已逐项拆分：sticky parser fault、generation-tagged outbound、`connection_generation()`与`bind_generation()`保留；one-shot ticket字段/channel/reset/select branch、`RequestedReconnect`与`request_reconnect()`删除。CLOB response的2个hunk均属于interested-array all-or-error并保留；RTDS subscription的3个hunk属于`SimpleParser::Default`、2,048-byte有界脱敏诊断及其测试并保留。
+- 官方PR状态复核：[#63](https://github.com/Polymarket/rs-clob-client-v2/pull/63) heartbeat owner-propagation、[#40](https://github.com/Polymarket/rs-clob-client-v2/pull/40) high-level task drop和[#81](https://github.com/Polymarket/rs-clob-client-v2/pull/81) `SimpleParser::Default`截至2026-07-17均为open/unmerged，不得冒充已发布或已合并修复。官方release commit为[`3ae1aae`](https://github.com/Polymarket/rs-clob-client-v2/commit/3ae1aae5e9ded38f984464c9fc0f307f8a9f41fb)。
+- 阶段2可以只在既有`connection.rs`内适配PR #63的owner-propagation方向，同时保持本地parser terminal语义；原PR不能直接apply。PR #40已混入无关auth等改动，且abort-on-drop不等于last outbound sender关闭后的normal teardown，因此不整体回移。PR #81的一行源码hunk已与vendor一致，无需重复应用或新增vendor测试文件。
+- 除官方pre-parse完整文本帧trace差异外，SDK矩阵无需新决策：不升级版本、不增加第四个vendor文件；阶段2新增heartbeat-dead recoverable exit和last-sender normal teardown，阶段3再原子删除one-shot能力与生产消费者。本阶段没有修改vendor、`Cargo.toml`或`Cargo.lock`。
+- 可复现核验包括：`sha256sum ~/.cargo/registry/cache/.../polymarket_client_sdk_v2-0.6.0.crate`、`git ls-remote --symref https://github.com/Polymarket/rs-clob-client-v2.git HEAD refs/heads/main`、`git ls-remote --tags ...`、临时解包后`diff -qr`，以及GitHub API读取PR #40/#63/#81；全部为只读操作。
+
+## 2026-07-17：阶段0 SDK逐hunk复核补正
+
+- 独立调用链审查确认vendor差异仍只有三个源码文件，但发现`connection.rs`中删除的`tracing::trace!(%text, ...)`位于`parser.parse()`之前，是一个此前未被第4.7节单独命名的hunk。当前项目未启用SDK `tracing` feature，但阶段0仍必须逐hunk闭合；现列出A“保留当前移除hunk”和B“恢复官方0.6.0原hunk”两个选项。B会记录全部文本帧、包括随后解析失败的完整raw frame，因此等于显式放宽已批准的失败trace脱敏边界；另造success-only raw trace不是官方回移且无当前需求，不作为第三选项。
+- 同一审查确认vendor具备`bind_generation()`，RTDS生产actor已经按观察到的generation构造bound manager并在发送后复核，但CLOB market actor当前仍把未绑定的`connection.clone()`交给`MarketSubscriptionManager`。快速重连竞态下，旧actor迭代可能借新的atomic generation把延迟请求标记为新代；因此不能把vendor generation能力冒充CLOB生产调用已经完成。
+- 需求与计划已把CLOB补齐明确放入阶段4：按observed generation绑定manager，发送后复核connected state/generation后才发布applied ack，并增加“旧代已观察connected、随后快速切代”的竞态测试，证明旧代请求既不写入新socket也不产生applied ack。该补正使用现有公共能力、同一actor/receiver/socket owner，不新增vendor文件或API，属于已批准generation隔离语义的完整生产接入。
+- 第4.7节已经明确区分“vendor能力已存在”“RTDS生产已接入”和“CLOB阶段4待接入”；raw trace hunk尚未获最终结论，因此阶段0不得标记完成、commit/push或进入阶段1。阶段0仍未修改vendor或生产代码。
+
+- 第二路SDK复审进一步证明当前“RTDS有界脱敏诊断”只对自建摘要成立，`RtdsParseDiagnosticError::Display`仍先原样输出底层serde错误，非法type scalar可进入sticky fault和`tracing::warn!`。这与已批准脱敏目标不一致，阶段2现增加operator-visible Display/fault/log脱敏和tracing subscriber负例；error kind与source chain继续保留供typed inspection，但生产日志不得无脱敏展开。
+- 同一复审证明CLOB仅在发送后复核generation仍不足：当前applied watch值是`DesiredMarketAssets`，waiter只比较revision；如果在post-check与`send_replace`之间切代，旧ack仍可被误收。阶段4现明确使用项目私有generation-tagged applied ack，并让waiter同时校验current generation、revision和connected；新增两个独立竞态seam。两项补正均落实原获批脱敏/generation隔离语义，不增加vendor路径、公共SDK API、actor或receiver。
+
+## 2026-07-17：阶段0独立审查发现决策门与旧authority残留
+
+- 第三路独立审查认定raw trace hunk不在用户此前批准的矩阵中，不能由实现者直接冻结；需求、计划和changelog已改为明确等待用户决定，其他SDK条目和CLOB generation补齐不受影响。
+- 同一审查发现`demand/data-collect-demand.md`仍残留`required_files[]`/complete verdict、retention/threshold receipt、collector自动删除、远端删除验证和“立即部署重启”等旧活动条款，与新专项M8、无receipt及无数据清理授权冲突。现已统一为每日实际file facts、50GB协调finalize后退出75、独立运维另行批准，且历史部署事实不得重新触发当前部署。
+- authority审查还发现旧reliability demand保留“持续无效消息不能饿死watchdog”的当前措辞，已改为无效/stale只更新typed分类且不触发watchdog或网络/退出动作；阶段1原计划提前要求阶段3--6端到端无gap/lag，也已收窄为只冻结新增共同classification/coverage fixture，各协议生产断言留在对应阶段实现并于阶段7组合验收。
+- SDK复审纠正了最初把官方`%text` hunk称为“成功帧trace”的错误：它实际位于parse前，恢复后会记录成功与失败的全部文本帧。A/B决策及条件测试已按这一事实重写；B明确覆盖失败trace脱敏，不能与原脱敏合同同时宣称成立。
+- 在用户决定raw trace前，阶段0保持blocked；不会提交文档、修改vendor、开始阶段1或执行任何生产操作。
+
+## 2026-07-17：用户批准raw trace选项B
+
+- 用户明确回复“我选择B”。最终矩阵因此恢复官方0.6.0在`parser.parse()`前执行的`tracing::trace!(%text, ...)`原hunk；当前`data-collect`未启用SDK `tracing` feature，所以该决定不改变当前生产构建行为。
+- 如果未来启用该feature，完整成功帧与随后解析失败的完整文本帧都会进入pre-parse TRACE。用户本次选择明确批准这一failure-trace边界放宽；不得在验收或报告中把该TRACE称为脱敏。
+- 阶段2仍须修复`RtdsParseDiagnosticError::Display`、sticky fault和warn额外拼入原始serde scalar的问题，并保留error kind/source chain；B只恢复官方pre-parse trace，不授权另造success-only trace或扩大其他日志行为。
+- raw trace决策门已关闭。阶段0继续完成最终独立审查、精确commit/push；生产代码和vendor仍须等阶段2按测试先行实施。
+
+## 2026-07-17：阶段0最终审查通过
+
+- 三路独立只读终审分别覆盖authority/M1--M8与生产边界、SDK逐hunk/provenance与阶段2/4目标、vendor allowlist/状态门与无关dirty保护；最终结果均为PASS，Critical 0、Important 0。全局配置已核实为`gpt-5.6-sol`与Ultra reasoning。
+- 最终矩阵精确区分用户B批准的pre-parse完整文本帧TRACE例外，以及仍须在阶段2脱敏的`RtdsParseDiagnosticError::Display`、sticky fault与parser-failure warn；CLOB阶段4使用私有generation-tagged applied ack覆盖两个切代竞态。
+- `git diff --check`通过；阶段0只修改六份需求/计划/changelog文档，没有修改生产代码、vendor、`Cargo.toml`或`Cargo.lock`。用户现有`AGENTS.md`和未跟踪`推荐开发顺序.md`保持在提交范围外。
+- 阶段0完成条件已经满足；本阶段commit/push成功后进入阶段1。生产构建、部署、远端服务操作与数据清理继续未授权。

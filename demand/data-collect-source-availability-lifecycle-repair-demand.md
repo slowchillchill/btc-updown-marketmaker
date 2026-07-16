@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-source-availability-lifecycle-repair-changelog.md`
 >
-> 状态：`DRAFT_AWAITING_FINAL_USER_REVIEW`。用户已经批准把原 RTDS-only 草案改写为全数据源事项、批准离散 `next_wake` 作为核心模型调度目标候选，并于 2026-07-17 明确批准第4.2节的 `M1-A / M2-A0 / M3-A-R / M4-A-R / M5-N/A / M6-A+ / M7-A-R / M8-A` manifest/coverage合同。该批准冻结本文对应字段和生命周期语义，但不等于批准本文其余内容、第4.7节SDK-first patch矩阵、collector代码实现、模型调度实现、生产构建或部署。开始任何实现前仍须获得用户对最终需求与计划的明确批准。
+> 状态：`APPROVED_IMPLEMENTATION_PHASE_0_COMPLETE_PHASE_1_AUTHORIZED`。用户已于2026-07-17批准本文、对应计划及当时第4.7节SDK-first逐项patch矩阵，并授权按计划分阶段实施、验证、独立审查、commit和push；同日又对阶段0新发现的官方pre-parse完整文本帧trace差异选择B，批准恢复官方0.6.0原hunk并显式放宽启用SDK `tracing` feature时的失败trace脱敏边界。阶段0 authority同步、SDK provenance/逐hunk基线和三路独立审查已经完成，阶段1可在本阶段commit/push后开始。此前批准的`M1-A / M2-A0 / M3-A-R / M4-A-R / M5-N/A / M6-A+ / M7-A-R / M8-A`继续有效。本授权不包括模型调度实现、生产release构建、部署、远端服务操作或数据清理；这些仍须独立批准。
 
 ## 一、目标
 
@@ -190,8 +190,9 @@ manifest 中可以表现为六类 source artifact，但它们不是六个独立�
 | parser failure通过 typed sticky fault暴露并终止连接 | 无关 | 在pinned 0.6.0 vendor保留；可用官方等价hunk替换本地hunk |
 | CLOB interested array按 all-or-error解析 | 无关 | 保留，禁止静默跳过损坏元素 |
 | `SimpleParser: Default` | 无关 | 在pinned 0.6.0 vendor保留；可回移官方等价hunk |
-| outbound request绑定 connection generation并隔离旧 generation | 无关 | 保留；自然 reconnect 同样需要 |
-| RTDS parser failure有界、脱敏诊断 | 无关 | 保留；不改变成功解析语义 |
+| outbound request绑定 connection generation并隔离旧 generation | 无关 | 保留；自然 reconnect 同样需要。RTDS已接入，CLOB生产actor必须在阶段4补齐同等绑定与发送后复核 |
+| RTDS parser failure有界、脱敏诊断 | 无关 | 保留目标并在阶段2补齐：当前wrapper仍把原始serde Display拼入外显错误，非法scalar可泄漏；必须保留kind/source chain但让sticky fault、Display与parser-failure warn只含有界allowlist摘要，不改变成功解析语义；pre-parse TRACE仅按下一行B例外处理 |
+| 官方pre-parse `tracing::trace!(%text, ...)`是否恢复 | 无关；当前项目未启用SDK `tracing` feature，但这是现存且未被原获批矩阵命名的vendor hunk | **B已批准**：恢复官方0.6.0原hunk。启用该feature时会在parse前记录全部文本帧，包含随后解析失败的完整raw frame；用户已明确批准该failure-trace边界放宽 |
 | generation-aware one-shot `request_reconnect()` | **直接服务旧 60 秒业务静默策略** | 删除 vendor 公共能力、runtime wrapper、生产调用及专属测试 |
 | heartbeat dead向 connection owner传播并结束旧 socket | 新确认 transport 缺口 | 优先复用/审查官方修复方案；未发布时允许最小 vendor patch |
 | 最后一个 manager sender关闭后的 normal teardown | 新确认生命周期缺口 | 优先复用/审查官方修复方案；未发布时允许最小 vendor patch |
@@ -201,13 +202,15 @@ manifest 中可以表现为六类 source artifact，但它们不是六个独立�
 1. 不采用“整体恢复官方原版 SDK”。
 2. 不再写“六项扩成八项”或其他固定数量合同；以上逐项语义矩阵才是 authority。
 3. 删除 one-shot reconnect 后，connection generation 的自然重连隔离必须继续存在，二者不得混为一个补丁。
-4. heartbeat timeout或旧 PONG 必须使当前 `handle_connection` 返回既有 recoverable transport error、关闭旧 socket并进入现有 connection loop；不得新增第二个 socket owner或公共 shadow API。
-5. connection owner必须使用互斥的内部退出语义：只有最后一个manager/bound outbound sender关闭是normal shutdown并停止outer loop；read EOF、WebSocket Close、read/write/PING failure、heartbeat timeout或旧PONG继续是recoverable transport exit；parser sticky fault继续terminal。可以增加私有内部结果类型或等价判断，但不得增加公共API或把其他`Ok(())`路径误判为normal shutdown。
-6. vendor 允许修改的源码路径集合仍限于既有三个文件：
+4. 每个CLOB与RTDS subscription actor必须先观察当前connected generation，再通过既有`bind_generation(observed_generation)`构造该generation专属manager；发送后必须复核generation与connected state仍匹配，只有复核通过才可发布applied ack。CLOB applied ack必须改为项目私有的generation-tagged类型，waiter同时校验ack generation等于当前connection generation、revision满足且state仍connected；这样即使在发送后复核与ack发布之间切代，旧ack也不能满足新代wait。旧actor/旧generation延迟发送不得被重新标记为新generation、写入新socket或被误认已应用。该要求只补齐既有generation隔离能力的生产调用，不新增第二actor、第二receiver或公共SDK API。
+5. heartbeat timeout或旧 PONG 必须使当前 `handle_connection` 返回既有 recoverable transport error、关闭旧 socket并进入现有 connection loop；不得新增第二个 socket owner或公共 shadow API。
+6. connection owner必须使用互斥的内部退出语义：只有最后一个manager/bound outbound sender关闭是normal shutdown并停止outer loop；read EOF、WebSocket Close、read/write/PING failure、heartbeat timeout或旧PONG继续是recoverable transport exit；parser sticky fault继续terminal。可以增加私有内部结果类型或等价判断，但不得增加公共API或把其他`Ok(())`路径误判为normal shutdown。
+7. 按用户批准的B恢复官方0.6.0 parse前`tracing::trace!(%text, ...)`原hunk；启用SDK `tracing` feature时，完整成功/失败文本帧均可进入该TRACE记录，这是明确获批的日志边界放宽，不得把它误报为脱敏。parser错误的operator-visible `Display`、sticky fault和warn仍不得额外原样拼接serde错误中的非法scalar或nested payload/secret-like字段，只含2,048-byte上限、hash与allowlist字段摘要；底层error kind/source chain保留供typed inspection。不得另造success-only raw trace或扩大其他日志行为。
+8. vendor 允许修改的源码路径集合仍限于既有三个文件：
    - `third_party/polymarket_client_sdk_v2-0.6.0-p1/src/ws/connection.rs`
    - `third_party/polymarket_client_sdk_v2-0.6.0-p1/src/clob/ws/types/response.rs`
    - `third_party/polymarket_client_sdk_v2-0.6.0-p1/src/rtds/subscription.rs`
-7. 如果Polymarket实现需要第四个vendor文件、新公共协议API、raw WebSocket、manual signing、第二SDK session或改变parser/fatal语义，必须立即停止并向用户提交缺口、影响和选项。
+9. 如果Polymarket实现需要第四个vendor文件、新公共协议API、raw WebSocket、manual signing、第二SDK session或改变parser/fatal语义，必须立即停止并向用户提交缺口、影响和选项。
 
 ### 4.8 完整性与顶层协调边界
 
@@ -226,7 +229,7 @@ manifest 中可以表现为六类 source artifact，但它们不是六个独立�
 
 ## 五、规范衔接
 
-本文最终获批后，实施阶段必须按语义同步：
+本文已于2026-07-17最终获批；阶段0必须按语义同步：
 
 - `demand/data-collect-demand.md` 中“空结果、长时间静默、stale、断线一律写 source gap”、所有 source 必须有限 attempts/max elapsed/exhausted、non-empty external availability gap 导致 artifact 失败的旧语义，以及旧daily manifest允许字段清单；该清单必须加入第4.2节顶层、单owner、版本化`collection_day_coverage`，保持六个既有source counter职责不变，且仍只有每日唯一manifest；
 - `demand/data-collect-reliability-repair-demand.md` 中 RTDS 两层有限恢复、CLOB 静默退出、旧六项 vendor patch 白名单、断线/静默 gap、systemd 新 PID恢复语义和旧daily manifest“只记录”字段清单；
@@ -239,7 +242,7 @@ manifest 中可以表现为六类 source artifact，但它们不是六个独立�
 2. 本文只修改 training collector；paper/live共享 availability/missingness语义，但连接生命周期和权限必须由各自需求另行批准。
 3. “完整 artifact”指 schema、manifest、provenance、因果时间和缺失编码完整，不等于所有外部源全时段有行情。
 4. 当前 `demand/rebuild-core-demand.md` 仍整体处于审核中；同步这里只消除本事项已由用户决定的网络语义冲突，不借机批准其余核心重建内容。
-5. 在本文最终获批并完成上述 authority 同步前，不得开始实现。
+5. 用户已批准本文、计划与SDK矩阵；阶段0完成authority同步和SDK基线审查、commit/push前，不得进入阶段1代码实现。
 
 ## 六、验收标准
 
@@ -265,7 +268,7 @@ manifest 中可以表现为六类 source artifact，但它们不是六个独立�
 ### 6.3 CLOB 与 metadata
 
 14. **CLOB静默：** current/prefetched asset跨越至少三个旧30/60秒等价周期仍不unsubscribe/resubscribe、不退出；随后业务事件由同一generation消费。
-15. **CLOB lifecycle更新：** 只有current/prefetched/retired desired set真实变化才发送精确add/remove；自然reconnect后只replay最新完整set。
+15. **CLOB lifecycle更新与generation隔离：** 只有current/prefetched/retired desired set真实变化才发送精确add/remove；自然reconnect后只replay最新完整set。CLOB actor必须按观察到的generation绑定manager并在发送后复核state/generation；私有applied ack携带generation，waiter同时校验当前generation、revision与connected。旧generation延迟发送不得落入新socket；发送后复核与ack发布之间切代时，旧ack也不得满足wait。
 16. **Gamma不可达/空候选：** 连续网络失败或暂时无候选不结束market source/collector、不写confirmed gap；服务恢复后按当前时钟重算current/next window，且不继续请求已过期slug。
 17. **metadata完整性：** 矛盾identity/schema/asset mapping负例仍按既有合同失败，不能被空候选恢复循环吞掉。
 
@@ -284,7 +287,7 @@ manifest 中可以表现为六类 source artifact，但它们不是六个独立�
 25. **资源有界：** 每个协议至少100次恢复后task、FD、socket、receiver、actor、queue、watch、subscription refcount、snapshot/backfill任务无单调增长。
 26. **配置回归：** CLOB为 `10s/20s`，RTDS为 `5s/15s`；RTDS transport总尝试无限，各源单次backoff有界。
 27. **全量门禁：** 定向loopback/contract测试、`cargo test -p data-collect --locked`、`cargo clippy -p data-collect --locked --all-targets -- -D warnings`、`cargo fmt --all -- --check` 与 `git diff --check`全部通过。
-28. **范围门禁：** 没有新增Polymarket raw WebSocket/shadow SDK或任何source的第二socket owner；Binance只保留现有唯一direct WebSocket owner；没有CLOB user源、data-pipeline/model策略实现、部署或数据清理；vendor源码路径集合不扩大，实质差异与第4.7节逐项矩阵一致。
+28. **范围门禁：** 没有新增Polymarket raw WebSocket/shadow SDK或任何source的第二socket owner；Binance只保留现有唯一direct WebSocket owner；没有CLOB user源、data-pipeline/model策略实现、部署或数据清理；vendor源码路径集合不扩大，实质差异与第4.7节最终获批逐项矩阵一致。
 
 ## 七、完成定义
 
