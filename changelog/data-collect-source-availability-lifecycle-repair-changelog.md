@@ -6,7 +6,7 @@
 >
 > 对应计划：`plan/data-collect-source-availability-lifecycle-repair-plan.md`
 >
-> 状态：`APPROVED_IMPLEMENTATION_PHASE_1_COMPLETE_PHASE_2_AUTHORIZED`。用户已于2026-07-17批准最终需求、计划及当时SDK-first逐项patch矩阵，并授权按计划执行本地文档/代码修改、测试、独立审查、commit和push；阶段0与阶段1均已完成并通过独立审查，阶段2可在阶段1 commit/push后开始。生产构建、部署、远端服务写操作和数据清理仍未获授权。
+> 状态：`APPROVED_IMPLEMENTATION_PHASE_2_COMPLETE_PHASE_3_AUTHORIZED`。用户已于2026-07-17批准最终需求、计划及SDK-first逐项patch矩阵，并授权按计划执行本地文档/代码修改、测试、独立审查、commit和push；阶段0、阶段1与阶段2均已完成全量验证和独立终审，阶段3可在阶段2精确commit/push后开始。生产构建、部署、远端服务写操作和数据清理仍未获授权。
 
 ## 2026-07-17：最终批准并开始阶段0
 
@@ -253,3 +253,24 @@
 - manifest/R终审、runtime终审、范围/文档终审均PASS，三路分别为Critical 0、Important 0。审查确认没有fail-open、旧日重写、影子gate/receiver、越界vendor/依赖/部署修改，也没有把pre-rename测试冒充post-rename父目录`fsync`故障注入覆盖。
 - 最终验证为：`cargo check -p data-collect --tests --locked`通过；`cargo clippy -p data-collect --locked --all-targets -- -D warnings`零告警；`cargo test -p data-collect live_runtime::tests --lib -- --test-threads=1`为174/174通过；`cargo test -p data-collect --lib --locked -- --test-threads=1`为203/203通过；`cargo test -p data-collect --locked -- --test-threads=1`全部unit、integration和doc tests通过；`cargo fmt --all -- --check`与`git diff --check`通过。独立runtime终审另复跑174项`live_runtime`测试并通过，F-R Binance depth跨UTC日resnapshot/reprocess测试包含在内且单独通过。
 - 阶段1共同classification、coverage lifecycle与生产测试seam达到计划完成条件；阶段3/4才翻转的旧RTDS/CLOB有限恢复测试仍按计划保留为可复现基线，不构成本阶段缺陷。阶段1 commit/push完成后可进入已授权的阶段2；生产构建、部署、远端操作与数据清理仍未授权。
+
+## 2026-07-17：阶段2 vendored SDK transport生命周期候选实现
+
+- 阶段2先按计划建立红灯。修改vendor前，CLOB no-PONG测试在2秒内没有第二次连接；最后一个裸manager drop、`MarketSdkRuntime` drop和`RtdsSdkRuntime` drop均在2秒内未观察到旧socket关闭；非法`timestamp` scalar负例还证明`RtdsParseDiagnosticError::Display`会把非allowlist原始值传播到sticky fault。红灯证明的是heartbeat结果未传回owner、active handler未观察last-sender关闭及外显serde错误泄漏，不是loopback server主动close或测试自身超时。
+- 官方[#63](https://github.com/Polymarket/rs-clob-client-v2/pull/63)截至实施时仍未合并，只复用其heartbeat结果应回传connection owner的方向；没有原样套用其把所有ping channel关闭都视为timeout的实现，因为这会吞掉heartbeat panic/cancel。官方[#40](https://github.com/Polymarket/rs-clob-client-v2/pull/40)处理另一套high-level `Client` Arc/task生命周期，当前两个runtime wrapper没有使用该reconnection handler，故未回移或扩大阶段范围。
+- `connection.rs`现使用私有互斥退出分类：只有outbound receiver在最后一个manager/bound sender释放后返回`NormalShutdown`并停止outer loop；read EOF、WebSocket Close、read/write/PING失败、no/old-PONG返回`Recoverable`并进入原有单owner reconnect loop；one-shot仍单独返回`RequestedReconnect`；parser sticky fault保持terminal；reconnect控制channel不可能关闭、generation overflow以及heartbeat意外正常退出或`JoinError`归为内部terminal，不得冒充普通transport恢复。
+- 每个active socket仍只有一个heartbeat task和一个connection owner。owner直接select唯一heartbeat `JoinHandle`；heartbeat用私有typed结果区分owner已停止与timeout。no-PONG或早于当前PING的旧PONG返回typed timeout，owner随后退出旧socket；heartbeat panic/cancel不被改写成timeout。last-sender normal teardown直接在active handler内收敛，不依赖返回后的竞态性`is_closed()`推断。
+- `RtdsParseDiagnosticError::Display`不再展开底层serde Display，只外显稳定错误类别与既有2,048-byte allowlist/hash摘要；原`Error` kind、wrapper source字段和`Error::source()`链保留供typed inspection。按用户批准的B，官方0.6.0在parse前的`tracing::trace!(%text, "Received WebSocket text message")`原hunk已精确恢复；vendor测试subscriber逐事件证明完整非法scalar与nested secret只出现在该获批raw TRACE，parser WARN、Display与迟到订阅者看到的sticky fault均不包含这些值。
+- 反向矩阵新增并补强真实loopback证据：CLOB no-PONG先观察旧socket Close/error/EOF，再接受第二次handshake与generation增加；裸manager和两个runtime均先完成两轮PING/PONG，再drop并证明socket/task收敛且不重连；bound-generation clone在最后一个sender释放前保持socket；TCP EOF/read failure、server Close、heartbeat timeout、旧PONG、outbound write与heartbeat PING write均保持recoverable；parser fault和heartbeat task panic保持terminal。write/PING两个测试在vendor私有current-thread单测中关闭client本地write half，直接调用私有`handle_connection`并要求typed `WsError::Connection`，不使用RST竞态、公共API或生产test hook。
+- 阶段2刻意保留one-shot API、runtime wrapper、生产consumer和全部旧ticket测试，`rg request_reconnect data-collect/src data-collect/tests third_party/.../src`仍能找到定义与调用；它们只在阶段3同一未提交工作阶段原子删除。当前实现没有形成“旧生产consumer存在但SDK能力已删除”的不可运行中间状态。
+- provenance复核仍以registry crate SHA-256 `e0ed9ca91088808232ee7e6b48f8f4eaa846882f799c40f8190b0a0e3d28ed5e`为原版。registry `src`与修改后vendor `src`的逐文件比较仍只命中批准的`connection.rs`、`clob/ws/types/response.rs`和`rtds/subscription.rs`；相对阶段1 commit，本阶段只修改前者与后者。没有修改`Cargo.toml`、`Cargo.lock`、依赖、生产runtime wrapper、模型、部署或远端状态；vendor本地`target`已清除。
+- 聚焦验证当前通过：`polymarket_sdk_patch_contract` 15/15，`polymarket_sdk_runtime_contract` 20/20，RTDS diagnostic 12/12，raw TRACE、old-PONG、outbound-write与PING-write定向单测全部通过。vendored SDK `clob gamma rtds ws` lib测试168/168通过；`--all-features` lib测试184/184、全部integration与doc tests通过；vendor `--all-targets --all-features -D warnings`零告警。单独的`rtds,ws,tracing`组合会命中原版`serde_helpers.rs`既有feature-gate缺口，因此trace测试使用同时启用`clob`的适用组合及`--all-features`验证，没有为测试修改第四个vendor文件或生产feature。
+- workspace验证当前通过：`cargo check -p data-collect --tests --locked`、`cargo clippy -p data-collect --locked --all-targets -- -D warnings`及`cargo test -p data-collect --locked -- --test-threads=1`（203项lib测试、全部integration和doc tests）。最终fmt/diff、三路独立终审、顶层状态同步及commit/push仍待完成；在这些门禁通过前不把阶段2标记为complete。
+
+## 2026-07-17：阶段2最终终审通过
+
+- heartbeat/退出分类、RTDS隐私/TRACE与vendor provenance、文档/范围三路独立终审均PASS，Critical 0、Important 0。终审确认唯一owner/heartbeat task、互斥退出分类、旧socket先关闭再重连、last-sender task/state收敛、write/PING组合证据、parser与heartbeat panic terminal、迟到sticky fault及CLOB共享generic manager合同成立。
+- 三路独立复跑覆盖`polymarket_sdk_patch_contract` 15/15、`polymarket_sdk_runtime_contract` 20/20、vendor connection定向9/9、RTDS diagnostic 12/12及raw TRACE定向测试；主线程最终验证还包括vendored SDK core 168/168、all-features lib 184/184及全部integration/doc tests、workspace 203项lib及全部integration/doc tests、两套clippy `-D warnings`、root/vendor fmt和`git diff --check`。
+- 审查期间某一路未外置target的vendor测试曾重新生成ignored `third_party/.../target`；这只造成changelog磁盘事实暂时漂移，不影响源码。三路命令结束后已用vendor manifest `cargo clean`删除6421个文件/5.7GiB，并由三路复核`target`检索为零；最终提交前仍再次检查。
+- 最终vendor与registry原版比较仍只命中批准的三个源码路径，本阶段相对阶段1 commit只修改`connection.rs`与`rtds/subscription.rs`；无Cargo/lock、第四vendor文件、公共shadow API、第二socket owner、生产feature、模型、部署或远端修改。one-shot vendor API、runtime wrapper、生产consumer及旧ticket测试继续同时存在，只在阶段3原子删除。
+- 用户现有`AGENTS.md`和未跟踪`推荐开发顺序.md`继续排除。阶段2达到计划完成条件；精确commit/push成功后方可进入已授权阶段3。

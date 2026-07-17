@@ -37,6 +37,13 @@ fn exhausting_config() -> Config {
     config
 }
 
+fn drop_test_config() -> Config {
+    let mut config = fast_config();
+    config.heartbeat_interval = Duration::from_millis(20);
+    config.heartbeat_timeout = Duration::from_millis(200);
+    config
+}
+
 fn assets(values: &[u64]) -> BTreeSet<U256> {
     values.iter().copied().map(U256::from).collect()
 }
@@ -57,6 +64,82 @@ async fn next_text(socket: &mut WebSocketStream<TcpStream>) -> String {
     })
     .await
     .expect("subscription request")
+}
+
+async fn pong_until_client_closes() -> (String, oneshot::Receiver<()>, tokio::task::JoinHandle<()>)
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (healthy_heartbeat_tx, healthy_heartbeat_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        let mut ping_count = 0_u8;
+        let mut healthy_heartbeat_tx = Some(healthy_heartbeat_tx);
+        timeout(Duration::from_secs(2), async {
+            loop {
+                match socket.next().await {
+                    Some(Ok(Message::Text(text))) if text == "PING" => {
+                        socket.send(Message::Text("PONG".into())).await.unwrap();
+                        ping_count += 1;
+                        if ping_count == 2
+                            && let Some(sender) = healthy_heartbeat_tx.take()
+                        {
+                            sender.send(()).unwrap();
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("runtime drop must close the active socket");
+        assert!(
+            timeout(Duration::from_millis(200), listener.accept())
+                .await
+                .is_err(),
+            "runtime teardown must not reconnect"
+        );
+    });
+    (format!("ws://{address}"), healthy_heartbeat_rx, server)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dropping_market_runtime_closes_socket_without_reconnect() {
+    let (endpoint, healthy_heartbeat_rx, server) = pong_until_client_closes().await;
+    let runtime = MarketSdkRuntime::new(endpoint, drop_test_config()).unwrap();
+    timeout(Duration::from_secs(2), async {
+        while !runtime.connection_state().is_connected() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("market runtime connected");
+    timeout(Duration::from_secs(2), healthy_heartbeat_rx)
+        .await
+        .expect("two healthy market heartbeat PING/PONG cycles")
+        .unwrap();
+
+    drop(runtime);
+    server.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dropping_rtds_runtime_closes_socket_without_reconnect() {
+    let (endpoint, healthy_heartbeat_rx, server) = pong_until_client_closes().await;
+    let mut runtime = RtdsSdkRuntime::new(endpoint, drop_test_config()).unwrap();
+    runtime
+        .wait_connected(Duration::from_secs(2))
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(2), healthy_heartbeat_rx)
+        .await
+        .expect("two healthy RTDS heartbeat PING/PONG cycles")
+        .unwrap();
+
+    drop(runtime);
+    server.await.unwrap();
 }
 
 #[tokio::test(flavor = "current_thread")]

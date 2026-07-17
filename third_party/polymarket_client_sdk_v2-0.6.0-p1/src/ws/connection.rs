@@ -60,9 +60,16 @@ pub enum ConnectionFault {
 }
 
 enum ConnectionExit {
+    NormalShutdown,
     Recoverable(Error),
     RequestedReconnect,
     Parser,
+    Terminal(String),
+}
+
+enum HeartbeatExit {
+    OwnerStopped,
+    Recoverable(Error),
 }
 
 struct OutboundRequest {
@@ -272,9 +279,20 @@ where
                     attempt = 0;
                     backoff.reset();
                     if has_connected {
-                        if outbound.advance_generation().is_err() {
-                            _ = signals.state_tx.send(ConnectionState::Disconnected);
-                            break;
+                        match outbound.advance_generation() {
+                            Ok(()) => {}
+                            Err(GenerationAdvanceError::SenderClosed) => {
+                                _ = signals.state_tx.send(ConnectionState::Disconnected);
+                                break;
+                            }
+                            Err(GenerationAdvanceError::Overflow) => {
+                                #[cfg(feature = "tracing")]
+                                tracing::error!(
+                                    "Connection generation overflow is a terminal invariant failure"
+                                );
+                                _ = signals.state_tx.send(ConnectionState::Disconnected);
+                                break;
+                            }
                         }
                     } else {
                         has_connected = true;
@@ -299,14 +317,22 @@ where
                     )
                     .await
                     {
-                        Ok(()) | Err(ConnectionExit::RequestedReconnect) => {}
-                        Err(ConnectionExit::Recoverable(e)) => {
+                        ConnectionExit::NormalShutdown | ConnectionExit::Parser => {
+                            _ = signals.state_tx.send(ConnectionState::Disconnected);
+                            break;
+                        }
+                        ConnectionExit::RequestedReconnect => {}
+                        ConnectionExit::Recoverable(e) => {
                             #[cfg(feature = "tracing")]
                             tracing::error!("Error handling connection: {e:?}");
                             #[cfg(not(feature = "tracing"))]
                             let _: &_ = &e;
                         }
-                        Err(ConnectionExit::Parser) => {
+                        ConnectionExit::Terminal(message) => {
+                            #[cfg(feature = "tracing")]
+                            tracing::error!(%message, "Terminal WebSocket connection task failure");
+                            #[cfg(not(feature = "tracing"))]
+                            let _: &_ = &message;
                             _ = signals.state_tx.send(ConnectionState::Disconnected);
                             break;
                         }
@@ -349,7 +375,7 @@ where
         config: Config,
         parser: &P,
         signals: &mut ConnectionSignals,
-    ) -> std::result::Result<(), ConnectionExit> {
+    ) -> ConnectionExit {
         let (mut write, mut read) = ws_stream.split();
 
         // Channel to notify heartbeat loop when PONG is received
@@ -357,19 +383,27 @@ where
         let (ping_tx, mut ping_rx) = mpsc::unbounded_channel();
         let state_rx = signals.state_tx.subscribe();
 
-        let heartbeat_handle = tokio::spawn(async move {
-            Self::heartbeat_loop(ping_tx, state_rx, &config, pong_rx).await;
-        });
+        let mut heartbeat_handle =
+            tokio::spawn(
+                async move { Self::heartbeat_loop(ping_tx, state_rx, &config, pong_rx).await },
+            );
 
         loop {
             tokio::select! {
                 // Handle incoming messages
-                Some(msg) = read.next() => {
-                    match msg {
-                        Ok(Message::Text(text)) if text == "PONG" => {
-                            _ = pong_tx.send(Instant::now());
+                message = read.next() => {
+                    match message {
+                        Some(Ok(Message::Text(text))) if text == "PONG" => {
+                            if pong_tx.send(Instant::now()).is_err() {
+                                return Self::classify_heartbeat_result(
+                                    (&mut heartbeat_handle).await,
+                                );
+                            }
                         }
-                        Ok(Message::Text(text)) => {
+                        Some(Ok(Message::Text(text))) => {
+                            #[cfg(feature = "tracing")]
+                            tracing::trace!(%text, "Received WebSocket text message");
+
                             // Parse messages using the provided parser
                             match parser.parse(text.as_bytes()) {
                                 Ok(messages) => {
@@ -387,25 +421,25 @@ where
                                     #[cfg(not(feature = "tracing"))]
                                     let _: &_ = &message;
                                     heartbeat_handle.abort();
-                                    return Err(ConnectionExit::Parser);
+                                    return ConnectionExit::Parser;
                                 }
                             }
                         }
-                        Ok(Message::Close(_)) => {
+                        Some(Ok(Message::Close(_))) | None => {
                             heartbeat_handle.abort();
-                            return Err(ConnectionExit::Recoverable(Error::with_source(
+                            return ConnectionExit::Recoverable(Error::with_source(
                                 Kind::WebSocket,
                                 WsError::ConnectionClosed,
-                            )))
+                            ));
                         }
-                        Err(e) => {
+                        Some(Err(e)) => {
                             heartbeat_handle.abort();
-                            return Err(ConnectionExit::Recoverable(Error::with_source(
+                            return ConnectionExit::Recoverable(Error::with_source(
                                 Kind::WebSocket,
                                 WsError::Connection(e),
-                            )));
+                            ));
                         }
-                        _ => {
+                        Some(Ok(_)) => {
                             // Ignore binary frames and unsolicited PONG replies.
                         }
                     }
@@ -413,17 +447,25 @@ where
 
                 changed = signals.reconnect_rx.changed() => {
                     if changed.is_err() {
-                        break;
+                        heartbeat_handle.abort();
+                        return ConnectionExit::Terminal(
+                            "reconnect control channel closed while its owner sender was live"
+                                .to_owned(),
+                        );
                     }
                     let requested_generation = *signals.reconnect_rx.borrow_and_update();
                     if requested_generation == Some(outbound.active_generation) {
                         heartbeat_handle.abort();
-                        return Err(ConnectionExit::RequestedReconnect);
+                        return ConnectionExit::RequestedReconnect;
                     }
                 }
 
                 // Handle outgoing messages from subscriptions
-                Some(request) = outbound.receiver.recv() => {
+                request = outbound.receiver.recv() => {
+                    let Some(request) = request else {
+                        heartbeat_handle.abort();
+                        return ConnectionExit::NormalShutdown;
+                    };
                     if request.generation != outbound.active_generation {
                         #[cfg(feature = "tracing")]
                         tracing::debug!(
@@ -433,29 +475,52 @@ where
                         );
                         continue;
                     }
-                    if write.send(Message::Text(request.payload.into())).await.is_err() {
-                        break;
+                    if let Err(error) = write.send(Message::Text(request.payload.into())).await {
+                        heartbeat_handle.abort();
+                        return ConnectionExit::Recoverable(Error::with_source(
+                            Kind::WebSocket,
+                            WsError::Connection(error),
+                        ));
                     }
                 }
 
                 // Handle PING requests from heartbeat loop
-                Some(()) = ping_rx.recv() => {
-                    if write.send(Message::Text("PING".into())).await.is_err() {
-                        break;
+                ping = ping_rx.recv() => {
+                    match ping {
+                        Some(()) => {
+                            if let Err(error) = write.send(Message::Text("PING".into())).await {
+                                heartbeat_handle.abort();
+                                return ConnectionExit::Recoverable(Error::with_source(
+                                    Kind::WebSocket,
+                                    WsError::Connection(error),
+                                ));
+                            }
+                        }
+                        None => {
+                            return Self::classify_heartbeat_result(
+                                (&mut heartbeat_handle).await,
+                            );
+                        }
                     }
                 }
 
-                // Check if connection is still active
-                else => {
-                    break;
+                heartbeat_result = &mut heartbeat_handle => {
+                    return Self::classify_heartbeat_result(heartbeat_result);
                 }
             }
         }
+    }
 
-        // Cleanup
-        heartbeat_handle.abort();
-
-        Ok(())
+    fn classify_heartbeat_result(
+        result: std::result::Result<HeartbeatExit, tokio::task::JoinError>,
+    ) -> ConnectionExit {
+        match result {
+            Ok(HeartbeatExit::Recoverable(error)) => ConnectionExit::Recoverable(error),
+            Ok(HeartbeatExit::OwnerStopped) => ConnectionExit::Terminal(
+                "heartbeat task stopped while the connection owner was still active".to_owned(),
+            ),
+            Err(error) => ConnectionExit::Terminal(format!("heartbeat task failed: {error}")),
+        }
     }
 
     /// Heartbeat loop that sends PING messages and monitors PONG responses.
@@ -464,7 +529,7 @@ where
         state_rx: watch::Receiver<ConnectionState>,
         config: &Config,
         mut pong_rx: watch::Receiver<Instant>,
-    ) {
+    ) -> HeartbeatExit {
         let mut ping_interval = interval(config.heartbeat_interval);
 
         loop {
@@ -472,7 +537,7 @@ where
 
             // Check if still connected
             if !state_rx.borrow().is_connected() {
-                break;
+                return HeartbeatExit::OwnerStopped;
             }
 
             // Mark current PONG state as seen before sending PING
@@ -483,7 +548,7 @@ where
             let ping_sent = Instant::now();
             if ping_tx.send(()).is_err() {
                 // Message loop has terminated
-                break;
+                return HeartbeatExit::OwnerStopped;
             }
 
             // Wait for PONG within timeout
@@ -497,12 +562,15 @@ where
                         tracing::debug!(
                             "PONG received but older than last PING, connection may be stale"
                         );
-                        break;
+                        return HeartbeatExit::Recoverable(Error::with_source(
+                            Kind::WebSocket,
+                            WsError::Timeout,
+                        ));
                     }
                 }
                 Ok(Err(_)) => {
                     // Channel closed, connection is terminating
-                    break;
+                    return HeartbeatExit::OwnerStopped;
                 }
                 Err(_) => {
                     // Timeout waiting for PONG
@@ -511,7 +579,10 @@ where
                         "Heartbeat timeout: no PONG received within {:?}",
                         config.heartbeat_timeout
                     );
-                    break;
+                    return HeartbeatExit::Recoverable(Error::with_source(
+                        Kind::WebSocket,
+                        WsError::Timeout,
+                    ));
                 }
             }
         }
@@ -635,6 +706,21 @@ where
 mod tests {
     use super::*;
 
+    #[cfg(all(feature = "tracing", feature = "rtds"))]
+    struct CaptureWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    #[cfg(all(feature = "tracing", feature = "rtds"))]
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("capture lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[derive(Clone, Debug, serde::Deserialize)]
     struct TestMessage;
 
@@ -644,6 +730,262 @@ mod tests {
         fn parse(&self, _bytes: &[u8]) -> Result<Vec<TestMessage>> {
             Ok(Vec::new())
         }
+    }
+
+    async fn locally_write_shutdown_socket() -> (
+        WsStream,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::AsyncWriteExt as _;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let _socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            release_rx.await.unwrap();
+        });
+        let (mut socket, _) = connect_async(format!("ws://{address}")).await.unwrap();
+        socket.get_mut().shutdown().await.unwrap();
+        (socket, release_tx, server)
+    }
+
+    fn connection_test_context() -> (
+        mpsc::UnboundedSender<OutboundRequest>,
+        OutboundQueue,
+        broadcast::Sender<TestMessage>,
+        ConnectionSignals,
+    ) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let outbound = OutboundQueue {
+            receiver,
+            published_generation: Arc::new(AtomicU64::new(0)),
+            active_generation: 0,
+        };
+        let (broadcast_tx, _) = broadcast::channel(1);
+        let (state_tx, _) = watch::channel(ConnectionState::Connected {
+            since: Instant::now(),
+        });
+        let (fault_tx, _) = watch::channel(None);
+        let (reconnect_tx, reconnect_rx) = watch::channel(None);
+        let signals = ConnectionSignals {
+            state_tx,
+            fault_tx,
+            reconnect_tx,
+            reconnect_rx,
+        };
+        (sender, outbound, broadcast_tx, signals)
+    }
+
+    fn assert_recoverable_connection_error(exit: ConnectionExit) {
+        let ConnectionExit::Recoverable(error) = exit else {
+            panic!("WebSocket write failure must be recoverable");
+        };
+        assert!(matches!(
+            error.downcast_ref::<WsError>(),
+            Some(WsError::Connection(_))
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn outbound_write_failure_is_recoverable() {
+        let (socket, release_tx, server) = locally_write_shutdown_socket().await;
+        let (sender, mut outbound, broadcast_tx, mut signals) = connection_test_context();
+        sender
+            .send(OutboundRequest {
+                generation: 0,
+                payload: "outbound".to_owned(),
+            })
+            .unwrap();
+
+        let exit = timeout(
+            std::time::Duration::from_secs(1),
+            ConnectionManager::<TestMessage, TestParser>::handle_connection(
+                socket,
+                &mut outbound,
+                &broadcast_tx,
+                Config::default(),
+                &TestParser,
+                &mut signals,
+            ),
+        )
+        .await
+        .expect("outbound write failure");
+        assert_recoverable_connection_error(exit);
+        release_tx.send(()).unwrap();
+        timeout(std::time::Duration::from_secs(1), server)
+            .await
+            .expect("outbound write test server cleanup")
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn heartbeat_ping_write_failure_is_recoverable() {
+        let (socket, release_tx, server) = locally_write_shutdown_socket().await;
+        let (_sender, mut outbound, broadcast_tx, mut signals) = connection_test_context();
+        let config = Config {
+            heartbeat_interval: std::time::Duration::from_millis(1),
+            heartbeat_timeout: std::time::Duration::from_secs(1),
+            ..Config::default()
+        };
+
+        let exit = timeout(
+            std::time::Duration::from_secs(1),
+            ConnectionManager::<TestMessage, TestParser>::handle_connection(
+                socket,
+                &mut outbound,
+                &broadcast_tx,
+                config,
+                &TestParser,
+                &mut signals,
+            ),
+        )
+        .await
+        .expect("heartbeat PING write failure");
+        assert_recoverable_connection_error(exit);
+        release_tx.send(()).unwrap();
+        timeout(std::time::Duration::from_secs(1), server)
+            .await
+            .expect("heartbeat PING test server cleanup")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn old_pong_is_a_recoverable_heartbeat_timeout() {
+        let config = Config {
+            heartbeat_interval: std::time::Duration::from_millis(1),
+            heartbeat_timeout: std::time::Duration::from_secs(1),
+            ..Config::default()
+        };
+        let (ping_tx, mut ping_rx) = mpsc::unbounded_channel();
+        let (state_tx, state_rx) = watch::channel(ConnectionState::Connected {
+            since: Instant::now(),
+        });
+        let old_pong = Instant::now();
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let (pong_tx, pong_rx) = watch::channel(Instant::now());
+
+        let heartbeat = tokio::spawn(async move {
+            ConnectionManager::<TestMessage, TestParser>::heartbeat_loop(
+                ping_tx, state_rx, &config, pong_rx,
+            )
+            .await
+        });
+        timeout(std::time::Duration::from_secs(1), ping_rx.recv())
+            .await
+            .expect("heartbeat PING")
+            .expect("heartbeat sender");
+        pong_tx.send(old_pong).unwrap();
+
+        match heartbeat.await.unwrap() {
+            HeartbeatExit::Recoverable(error) => {
+                assert!(matches!(
+                    error.downcast_ref::<WsError>(),
+                    Some(WsError::Timeout)
+                ));
+            }
+            HeartbeatExit::OwnerStopped => panic!("old PONG must be recoverable"),
+        }
+        drop(state_tx);
+    }
+
+    #[cfg(all(feature = "tracing", feature = "rtds"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn rtds_raw_trace_is_explicit_but_warn_and_sticky_fault_are_bounded() {
+        use crate::rtds::RtdsMessage;
+        use crate::rtds::subscription::SimpleParser;
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        const INVALID_SCALAR: &str = "INVALID_TIMESTAMP_MUST_NOT_LEAK";
+        const NESTED_SECRET: &str = "NESTED_PAYLOAD_MUST_NOT_LEAK";
+        let frame = serde_json::json!({
+            "topic": "crypto_prices_chainlink",
+            "type": "update",
+            "timestamp": INVALID_SCALAR,
+            "payload": {"secret": NESTED_SECRET},
+        })
+        .to_string();
+
+        let captured = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let writer_capture = Arc::clone(&captured);
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(move || CaptureWriter(Arc::clone(&writer_capture)))
+            .with_ansi(false);
+        let subscriber = tracing_subscriber::registry().with(layer);
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_frame = frame.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            socket
+                .send(Message::Text(server_frame.into()))
+                .await
+                .unwrap();
+            assert!(
+                timeout(std::time::Duration::from_millis(300), listener.accept())
+                    .await
+                    .is_err(),
+                "parser fault must remain terminal"
+            );
+        });
+
+        let config = Config {
+            heartbeat_interval: std::time::Duration::from_secs(30),
+            heartbeat_timeout: std::time::Duration::from_secs(30),
+            ..Config::default()
+        };
+        let connection = ConnectionManager::<RtdsMessage, SimpleParser>::new(
+            format!("ws://{address}"),
+            config,
+            SimpleParser::default(),
+        )
+        .unwrap();
+        let mut faults = connection.fault_receiver();
+        let sticky = timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Some(ConnectionFault::Parser(message)) = faults.borrow().clone() {
+                    break message;
+                }
+                faults.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("sticky parser fault");
+        assert!(!sticky.contains(INVALID_SCALAR));
+        assert!(!sticky.contains(NESTED_SECRET));
+        let diagnostic = sticky
+            .split_once("rtds_parse_diagnostic=")
+            .expect("bounded diagnostic")
+            .1;
+        assert!(diagnostic.len() <= 2_048);
+        assert!(diagnostic.contains("sha256="));
+        let late_faults = connection.fault_receiver();
+        assert_eq!(
+            late_faults.borrow().as_ref(),
+            Some(&ConnectionFault::Parser(sticky.clone()))
+        );
+        server.await.unwrap();
+
+        let output = String::from_utf8(captured.lock().expect("capture lock").clone()).unwrap();
+        let trace = output
+            .lines()
+            .find(|line| line.contains("Received WebSocket text message"))
+            .expect("approved pre-parse TRACE");
+        assert!(trace.contains(INVALID_SCALAR));
+        assert!(trace.contains(NESTED_SECRET));
+        let warn = output
+            .lines()
+            .find(|line| line.contains("Failed to parse WebSocket message"))
+            .expect("parser failure WARN");
+        assert!(!warn.contains(INVALID_SCALAR));
+        assert!(!warn.contains(NESTED_SECRET));
+        assert!(warn.contains("rtds_parse_diagnostic="));
     }
 
     #[test]
@@ -787,7 +1129,7 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(result, Err(ConnectionExit::Recoverable(_))));
+        assert!(matches!(result, ConnectionExit::Recoverable(_)));
         server.await.unwrap();
     }
 

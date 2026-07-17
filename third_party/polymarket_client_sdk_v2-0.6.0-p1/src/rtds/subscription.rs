@@ -67,12 +67,11 @@ struct RtdsParseDiagnosticError {
 
 impl fmt::Display for RtdsParseDiagnosticError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(source) = self.source.inner() {
-            write!(f, "{source}")?;
-        } else {
-            write!(f, "{}", self.source)?;
-        }
-        write!(f, "; rtds_parse_diagnostic={}", self.diagnostic)
+        write!(
+            f,
+            "RTDS typed message parse failed; rtds_parse_diagnostic={}",
+            self.diagnostic
+        )
     }
 }
 
@@ -240,7 +239,7 @@ fn canonicalize_json(value: &Value) -> Value {
     match value {
         Value::Object(object) => {
             let mut fields: Vec<_> = object.iter().collect();
-            fields.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            fields.sort_unstable_by_key(|(left, _)| *left);
 
             let mut canonical = Map::new();
             for (field, value) in fields {
@@ -757,7 +756,7 @@ mod diagnostic_tests {
         }"#;
 
         let error = SimpleParser.parse(frame).unwrap_err().to_string();
-        assert!(error.contains("missing field `topic`"));
+        assert!(error.contains("RTDS typed message parse failed"));
         assert!(error.contains(&format!("frame_bytes={}", frame.len())));
         assert!(error.contains(&format!("sha256={:x}", Sha256::digest(frame))));
         assert!(error.contains("top_level=object"));
@@ -770,6 +769,34 @@ mod diagnostic_tests {
         assert!(error.contains("\"unlisted\""));
         assert!(!error.contains("PAYLOAD_MUST_NOT_LEAK"));
         assert!(!error.contains("UNLISTED_VALUE_MUST_NOT_LEAK"));
+    }
+
+    #[test]
+    fn operator_display_hides_non_allowlisted_invalid_scalar_but_keeps_typed_source() {
+        let invalid_scalar = "INVALID_TIMESTAMP_MUST_NOT_LEAK";
+        let nested_secret = "NESTED_PAYLOAD_MUST_NOT_LEAK";
+        let frame = serde_json::to_vec(&serde_json::json!({
+            "topic": "crypto_prices_chainlink",
+            "type": "update",
+            "timestamp": invalid_scalar,
+            "payload": {"secret": nested_secret},
+        }))
+        .unwrap();
+
+        let diagnosed = SimpleParser.parse(&frame).unwrap_err();
+        let display = diagnosed.to_string();
+        assert!(display.contains("rtds_parse_diagnostic="));
+        assert!(display.contains(&format!("sha256={:x}", Sha256::digest(&frame))));
+        assert!(display.contains("topic=\"crypto_prices_chainlink\""));
+        assert!(display.contains("type=\"update\""));
+        assert!(!display.contains(invalid_scalar));
+        assert!(!display.contains(nested_secret));
+
+        let wrapper = diagnosed
+            .downcast_ref::<RtdsParseDiagnosticError>()
+            .expect("diagnostic error wrapper");
+        assert!(wrapper.source.to_string().contains(invalid_scalar));
+        assert!(std::error::Error::source(wrapper).is_some());
     }
 
     #[test]
@@ -874,8 +901,17 @@ mod diagnostic_tests {
             br#"[{"topic":"first","topic":"second","type":"update","timestamp":1,"payload":{}}]"#;
 
         let error = SimpleParser.parse(frame).unwrap_err().to_string();
-        assert!(error.contains("duplicate field `topic`"));
         assert!(error.contains("top_level=array first_contract_mismatch_index=0"));
+        let diagnosed = SimpleParser.parse(frame).unwrap_err();
+        let wrapper = diagnosed
+            .downcast_ref::<RtdsParseDiagnosticError>()
+            .expect("diagnostic error wrapper");
+        assert!(
+            wrapper
+                .source
+                .to_string()
+                .contains("duplicate field `topic`")
+        );
     }
 
     #[test]
@@ -883,9 +919,13 @@ mod diagnostic_tests {
         let frame = br#"{"message":"MALFORMED_VALUE_MUST_NOT_LEAK""#;
         let error = SimpleParser.parse(frame).unwrap_err().to_string();
 
-        assert!(error.contains("line 1 column"));
         assert!(error.contains("top_level=invalid_json"));
         assert!(!error.contains("MALFORMED_VALUE_MUST_NOT_LEAK"));
+        let diagnosed = SimpleParser.parse(frame).unwrap_err();
+        let wrapper = diagnosed
+            .downcast_ref::<RtdsParseDiagnosticError>()
+            .expect("diagnostic error wrapper");
+        assert!(wrapper.source.to_string().contains("line 1 column"));
     }
 
     #[test]
@@ -895,7 +935,12 @@ mod diagnostic_tests {
         let diagnosed = SimpleParser.parse(frame).unwrap_err();
 
         assert_eq!(diagnosed.kind(), original.kind());
-        assert!(diagnosed.to_string().starts_with(&original.to_string()));
+        assert!(
+            diagnosed
+                .to_string()
+                .contains("RTDS typed message parse failed")
+        );
+        assert!(!diagnosed.to_string().contains(&original.to_string()));
         let wrapper = diagnosed
             .downcast_ref::<RtdsParseDiagnosticError>()
             .expect("diagnostic error wrapper");

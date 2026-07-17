@@ -215,7 +215,7 @@ async fn interested_clob_array_is_all_or_error_and_terminal() {
 
 #[tokio::test]
 async fn rtds_whole_frame_parser_fault_is_sticky_and_terminal() {
-    let frame = r#"{"message":"Invalid request body","connectionId":"connection-123","requestId":"request-456","payload":{"secret":"PAYLOAD_MUST_NOT_LEAK"}}"#;
+    let frame = r#"{"topic":"crypto_prices_chainlink","type":"update","timestamp":"INVALID_TIMESTAMP_MUST_NOT_LEAK","payload":{"secret":"PAYLOAD_MUST_NOT_LEAK"}}"#;
     let (endpoint, server) = one_frame_server(frame).await;
     let connection = ConnectionManager::<RtdsMessage, SimpleParser>::new(
         endpoint,
@@ -231,12 +231,11 @@ async fn rtds_whole_frame_parser_fault_is_sticky_and_terminal() {
     let ConnectionFault::Parser(message) = fault else {
         panic!("expected parser fault");
     };
-    assert!(message.contains("missing field `topic`"));
     assert!(message.contains(&format!("frame_bytes={}", frame.len())));
     assert!(message.contains("top_level=object"));
-    assert!(message.contains("message=\"Invalid request body\""));
-    assert!(message.contains("connectionId=\"connection-123\""));
-    assert!(message.contains("requestId=\"request-456\""));
+    assert!(message.contains("topic=\"crypto_prices_chainlink\""));
+    assert!(message.contains("type=\"update\""));
+    assert!(!message.contains("INVALID_TIMESTAMP_MUST_NOT_LEAK"));
     assert!(!message.contains("PAYLOAD_MUST_NOT_LEAK"));
     wait_for_terminal_disconnected(&mut states).await;
     assert_eq!(connection.state(), ConnectionState::Disconnected);
@@ -245,6 +244,362 @@ async fn rtds_whole_frame_parser_fault_is_sticky_and_terminal() {
             .await
             .is_err()
     );
+    let late_faults = connection.fault_receiver();
+    let late_message = match late_faults.borrow().as_ref() {
+        Some(ConnectionFault::Parser(message)) => message.clone(),
+        fault => panic!("expected late sticky parser fault, got {fault:?}"),
+    };
+    assert_eq!(late_message, message);
+    server.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn clob_connection_reconnects_when_heartbeat_pong_is_missing() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (reconnected_tx, reconnected_rx) = tokio::sync::oneshot::channel();
+    let (finish_tx, mut finish_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut first_socket = accept_async(stream).await.unwrap();
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if matches!(
+                    first_socket.next().await,
+                    Some(Ok(Message::Text(text))) if text == "PING"
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("first heartbeat PING");
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                match first_socket.next().await {
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("heartbeat timeout must close the old socket");
+
+        let (stream, _) = timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .expect("heartbeat timeout must reconnect")
+            .unwrap();
+        let mut second_socket = accept_async(stream).await.unwrap();
+        reconnected_tx.send(()).unwrap();
+        loop {
+            tokio::select! {
+                result = &mut finish_rx => {
+                    result.unwrap();
+                    break;
+                }
+                message = second_socket.next() => {
+                    match message {
+                        Some(Ok(Message::Text(text))) if text == "PING" => {
+                            second_socket
+                                .send(Message::Text("PONG".into()))
+                                .await
+                                .unwrap();
+                        }
+                        Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                        _ => {}
+                    }
+                }
+            }
+        }
+    });
+
+    let interest = Arc::new(InterestTracker::new());
+    interest.add(MessageInterest::BOOK);
+    let mut config = generation_test_config();
+    config.heartbeat_interval = Duration::from_millis(20);
+    config.heartbeat_timeout = Duration::from_millis(30);
+    let connection = ConnectionManager::<WsMessage, Arc<InterestTracker>>::new(
+        format!("ws://{address}"),
+        config,
+        interest,
+    )
+    .unwrap();
+    let mut states = connection.state_receiver();
+    wait_for_connected(&mut states).await;
+    let initial_generation = connection.connection_generation();
+
+    timeout(Duration::from_secs(2), reconnected_rx)
+        .await
+        .expect("second connection after missing PONG")
+        .unwrap();
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if connection.connection_generation() == initial_generation + 1
+                && connection.state().is_connected()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("new connected generation");
+
+    finish_tx.send(()).unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dropping_last_connection_manager_closes_socket_without_reconnect() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (healthy_heartbeat_tx, healthy_heartbeat_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        let mut ping_count = 0_u8;
+        let mut healthy_heartbeat_tx = Some(healthy_heartbeat_tx);
+        timeout(Duration::from_secs(2), async {
+            loop {
+                match socket.next().await {
+                    Some(Ok(Message::Text(text))) if text == "PING" => {
+                        socket.send(Message::Text("PONG".into())).await.unwrap();
+                        ping_count += 1;
+                        if ping_count == 2
+                            && let Some(sender) = healthy_heartbeat_tx.take()
+                        {
+                            sender.send(()).unwrap();
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("last manager drop must close the active socket");
+        assert!(
+            timeout(Duration::from_millis(200), listener.accept())
+                .await
+                .is_err(),
+            "normal manager teardown must not reconnect"
+        );
+    });
+
+    let mut config = generation_test_config();
+    config.heartbeat_interval = Duration::from_millis(20);
+    config.heartbeat_timeout = Duration::from_millis(200);
+    let connection = ConnectionManager::<RtdsMessage, SimpleParser>::new(
+        format!("ws://{address}"),
+        config,
+        SimpleParser::default(),
+    )
+    .unwrap();
+    let mut states = connection.state_receiver();
+    wait_for_connected(&mut states).await;
+    timeout(Duration::from_secs(2), healthy_heartbeat_rx)
+        .await
+        .expect("two healthy heartbeat PING/PONG cycles")
+        .unwrap();
+    drop(connection);
+
+    let mut saw_disconnected = false;
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if *states.borrow_and_update() == ConnectionState::Disconnected {
+                saw_disconnected = true;
+            }
+            if states.changed().await.is_err() {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("connection state task convergence");
+    assert!(saw_disconnected);
+
+    server.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn generation_bound_clone_keeps_socket_until_the_last_sender_drops() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (healthy_heartbeat_tx, healthy_heartbeat_rx) = tokio::sync::oneshot::channel();
+    let (closed_tx, mut closed_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        let mut ping_count = 0_u8;
+        let mut healthy_heartbeat_tx = Some(healthy_heartbeat_tx);
+        loop {
+            match socket.next().await {
+                Some(Ok(Message::Text(text))) if text == "PING" => {
+                    socket.send(Message::Text("PONG".into())).await.unwrap();
+                    ping_count += 1;
+                    if ping_count == 2
+                        && let Some(sender) = healthy_heartbeat_tx.take()
+                    {
+                        sender.send(()).unwrap();
+                    }
+                }
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                _ => {}
+            }
+        }
+        closed_tx.send(()).unwrap();
+        assert!(
+            timeout(Duration::from_millis(200), listener.accept())
+                .await
+                .is_err(),
+            "last bound sender teardown must not reconnect"
+        );
+    });
+
+    let mut config = generation_test_config();
+    config.heartbeat_interval = Duration::from_millis(20);
+    config.heartbeat_timeout = Duration::from_millis(200);
+    let connection = ConnectionManager::<RtdsMessage, SimpleParser>::new(
+        format!("ws://{address}"),
+        config,
+        SimpleParser::default(),
+    )
+    .unwrap();
+    let mut states = connection.state_receiver();
+    wait_for_connected(&mut states).await;
+    let bound = connection
+        .bind_generation(connection.connection_generation())
+        .unwrap();
+    timeout(Duration::from_secs(2), healthy_heartbeat_rx)
+        .await
+        .expect("two healthy heartbeat PING/PONG cycles")
+        .unwrap();
+
+    drop(connection);
+    assert!(
+        timeout(Duration::from_millis(100), &mut closed_rx)
+            .await
+            .is_err(),
+        "a live bound sender must keep the socket owned"
+    );
+    drop(bound);
+    timeout(Duration::from_secs(2), &mut closed_rx)
+        .await
+        .expect("last bound sender closes the socket")
+        .unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn heartbeat_task_panic_is_terminal_and_does_not_reconnect() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        accepted_tx.send(()).unwrap();
+        timeout(Duration::from_secs(2), async {
+            loop {
+                match socket.next().await {
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("terminal heartbeat task failure closes the socket");
+        assert!(
+            timeout(Duration::from_millis(200), listener.accept())
+                .await
+                .is_err(),
+            "terminal heartbeat task failure must not reconnect"
+        );
+    });
+
+    let mut config = generation_test_config();
+    config.heartbeat_interval = Duration::ZERO;
+    let connection = ConnectionManager::<RtdsMessage, SimpleParser>::new(
+        format!("ws://{address}"),
+        config,
+        SimpleParser::default(),
+    )
+    .unwrap();
+    let mut states = connection.state_receiver();
+    timeout(Duration::from_secs(2), accepted_rx)
+        .await
+        .expect("initial connection")
+        .unwrap();
+    wait_for_terminal_disconnected(&mut states).await;
+    assert_eq!(connection.connection_generation(), 0);
+    server.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn server_tcp_eof_is_recoverable_and_advances_generation() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (reconnected_tx, reconnected_rx) = tokio::sync::oneshot::channel();
+    let (finish_tx, mut finish_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let first_socket = accept_async(stream).await.unwrap();
+        drop(first_socket);
+
+        let (stream, _) = timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .expect("reconnect after TCP EOF")
+            .unwrap();
+        let mut second_socket = accept_async(stream).await.unwrap();
+        reconnected_tx.send(()).unwrap();
+        loop {
+            tokio::select! {
+                result = &mut finish_rx => {
+                    result.unwrap();
+                    break;
+                }
+                message = second_socket.next() => {
+                    match message {
+                        Some(Ok(Message::Text(text))) if text == "PING" => {
+                            second_socket
+                                .send(Message::Text("PONG".into()))
+                                .await
+                                .unwrap();
+                        }
+                        Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                        _ => {}
+                    }
+                }
+            }
+        }
+    });
+
+    let connection = ConnectionManager::<RtdsMessage, SimpleParser>::new(
+        format!("ws://{address}"),
+        generation_test_config(),
+        SimpleParser::default(),
+    )
+    .unwrap();
+    let initial_generation = connection.connection_generation();
+    timeout(Duration::from_secs(2), reconnected_rx)
+        .await
+        .expect("second connection after TCP EOF")
+        .unwrap();
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if connection.connection_generation() == initial_generation + 1
+                && connection.state().is_connected()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("connected generation after TCP EOF");
+
+    finish_tx.send(()).unwrap();
     server.await.unwrap();
 }
 

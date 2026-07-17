@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-source-availability-lifecycle-repair-changelog.md`
 >
-> 状态：`APPROVED_IMPLEMENTATION_PHASE_1_COMPLETE_PHASE_2_AUTHORIZED`。用户已于2026-07-17批准本文、对应计划及当时第4.7节SDK-first逐项patch矩阵，并授权按计划分阶段实施、验证、独立审查、commit和push；同日又对阶段0新发现的官方pre-parse完整文本帧trace差异选择B，批准恢复官方0.6.0原hunk并显式放宽启用SDK `tracing` feature时的失败trace脱敏边界。阶段0 authority同步与SDK provenance/逐hunk基线已经完成；阶段1共同classification、coverage lifecycle和生产测试seam已经实现、完成全量验证并通过三路独立终审，阶段2可在阶段1 commit/push后开始。此前批准的`M1-A / M2-A0 / M4-A-R / M5-N/A / M6-A+ / M7-A-R / M8-A`继续有效；`M3-A-R`的两个饱和计数字段已由用户批准的单一`reactivated_within_day`布尔语义取代，原子发布采用用户批准的R三态语义。本授权不包括模型调度实现、生产release构建、部署、远端服务操作或数据清理；这些仍须独立批准。
+> 状态：`APPROVED_IMPLEMENTATION_PHASE_2_COMPLETE_PHASE_3_AUTHORIZED`。用户已于2026-07-17批准本文、对应计划及第4.7节SDK-first逐项patch矩阵，并授权按计划分阶段实施、验证、独立审查、commit和push；同日又对官方pre-parse完整文本帧trace差异选择B，批准恢复官方0.6.0原hunk并显式放宽启用SDK `tracing` feature时的失败trace脱敏边界。阶段0 authority/provenance、阶段1共同classification/coverage lifecycle及阶段2 vendored SDK heartbeat owner、normal teardown与RTDS外显诊断边界均已实现、完成全量验证并分别通过三路独立终审；阶段3可在阶段2精确commit/push后开始。此前批准的`M1-A / M2-A0 / M4-A-R / M5-N/A / M6-A+ / M7-A-R / M8-A`继续有效；`M3-A-R`使用单一`reactivated_within_day`布尔语义，原子发布采用用户批准的R三态语义。本授权不包括模型调度实现、生产release构建、部署、远端服务操作或数据清理；这些仍须独立批准。
 
 ## 一、目标
 

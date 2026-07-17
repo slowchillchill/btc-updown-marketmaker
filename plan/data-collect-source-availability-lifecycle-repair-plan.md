@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-source-availability-lifecycle-repair-changelog.md`
 >
-> 状态：`APPROVED_IMPLEMENTATION_PHASE_1_COMPLETE_PHASE_2_AUTHORIZED`。用户已于2026-07-17批准本计划、对应需求及当时需求第4.7节SDK-first逐项patch矩阵，并授权依次执行阶段0--8的本地文档/代码修改、测试、独立审查、commit和push；同日对阶段0新发现的官方pre-parse完整文本帧trace差异选择B，批准恢复官方0.6.0原hunk及其failure-trace边界放宽。阶段0 authority同步与SDK provenance/逐hunk基线已经完成；阶段1共同classification、coverage lifecycle和生产测试seam已经实现、完成全量验证并通过三路独立终审，阶段2可在阶段1 commit/push后开始。本授权不包括模型调度实现、生产release构建、部署、远端服务操作或数据清理。
+> 状态：`APPROVED_IMPLEMENTATION_PHASE_2_COMPLETE_PHASE_3_AUTHORIZED`。用户已于2026-07-17批准本计划、对应需求及需求第4.7节SDK-first逐项patch矩阵，并授权依次执行阶段0--8的本地文档/代码修改、测试、独立审查、commit和push；同日对官方pre-parse完整文本帧trace差异选择B，批准恢复官方0.6.0原hunk及其failure-trace边界放宽。阶段0 authority/provenance、阶段1共同classification/coverage lifecycle及阶段2 vendored SDK transport生命周期均已实现、完成全量验证并分别通过三路独立终审；阶段3可在阶段2精确commit/push后开始。本授权不包括模型调度实现、生产release构建、部署、远端服务操作或数据清理。
 
 ## 一、成功标准与实施原则
 
@@ -146,6 +146,8 @@
   - 验证：Display/sticky fault/warn不含未列入allowlist的scalar或nested sentinel，摘要长度与UTF-8边界成立，kind/source chain断言保留；官方pre-parse trace明确包含完整失败sentinel，并被记为用户批准的日志边界放宽而非脱敏通过。
 
 阶段2完成条件：需求验收11--13通过，独立审查确认heartbeat/socket/task生命周期及退出分类正确；one-shot API和旧RTDS消费者仍同时存在，不形成不可运行中间commit。通过后commit/push。
+
+阶段2执行结果（2026-07-17）：`COMPLETE`。heartbeat结果由唯一connection owner直接消费，last-sender normal teardown与recoverable/terminal退出分类已经闭合；RTDS Display/sticky/WARN保持有界脱敏，用户B批准的官方pre-parse raw TRACE已恢复。no/old-PONG、sender/runtime drop、EOF/Close、outbound/PING write、parser与heartbeat panic反向矩阵通过；one-shot API、wrapper和旧RTDS消费者按计划完整保留到阶段3。workspace与vendored SDK全量测试、lint、fmt及provenance/路径检查通过，三路独立终审均为Critical 0、Important 0；阶段2精确commit/push完成后进入阶段3。
 
 ## 阶段3：原子删除RTDS主动恢复并收缩SDK
 
