@@ -1,7 +1,83 @@
 use data_collect::health::{
     ArtifactSignal, CircuitState, FreshnessStatus, NetworkFailure, ReconnectGate, RetryPolicy,
-    SourceHealthRegistry, SourceHealthTracker, plan_retry_trace,
+    SourceFactClass, SourceHealthRegistry, SourceHealthTracker, plan_retry_trace,
 };
+
+#[test]
+fn source_fact_classification_is_explicit_and_conservative() {
+    let unambiguous = [
+        (
+            NetworkFailure::PongButDataSilent,
+            SourceFactClass::BusinessAvailability,
+        ),
+        (
+            NetworkFailure::SourceStale,
+            SourceFactClass::BusinessAvailability,
+        ),
+        (
+            NetworkFailure::ConnectionFailed,
+            SourceFactClass::TransportAvailability,
+        ),
+        (
+            NetworkFailure::Disconnected,
+            SourceFactClass::TransportAvailability,
+        ),
+        (
+            NetworkFailure::ServerShutdown,
+            SourceFactClass::TransportAvailability,
+        ),
+        (
+            NetworkFailure::WsProtocolError,
+            SourceFactClass::TransportAvailability,
+        ),
+        (
+            NetworkFailure::RateLimit,
+            SourceFactClass::TransportAvailability,
+        ),
+        (
+            NetworkFailure::ConnectionLimit,
+            SourceFactClass::TransportAvailability,
+        ),
+        (
+            NetworkFailure::SubscriptionLimit,
+            SourceFactClass::TransportAvailability,
+        ),
+        (
+            NetworkFailure::UpdateIdGap,
+            SourceFactClass::ConfirmedIntegrity,
+        ),
+    ];
+    for (failure, expected) in unambiguous {
+        assert_eq!(failure.source_fact_class(), Some(expected), "{failure:?}");
+    }
+
+    let context_dependent = [
+        NetworkFailure::SubscriptionError,
+        NetworkFailure::HttpError,
+        NetworkFailure::EmptyPayload,
+        NetworkFailure::EmptyArray,
+        NetworkFailure::EmptySnapshot,
+        NetworkFailure::NoBusinessMessages,
+        NetworkFailure::SnapshotMissing,
+        NetworkFailure::SnapshotStale,
+        NetworkFailure::SourceGap,
+        NetworkFailure::CoverageDrop,
+        NetworkFailure::WriterQueueBlocked,
+        NetworkFailure::BackpressureTriggered,
+        NetworkFailure::DiskWatermarkExceeded,
+        NetworkFailure::MemoryWatermarkExceeded,
+        NetworkFailure::CpuWatermarkExceeded,
+    ];
+    for failure in context_dependent {
+        assert_eq!(failure.source_fact_class(), None, "{failure:?}");
+    }
+
+    assert_eq!(
+        unambiguous.len() + context_dependent.len(),
+        NetworkFailure::required_demand_cases().len(),
+        "the fixture must classify or explicitly defer every NetworkFailure variant"
+    );
+}
 
 #[test]
 fn network_failures_map_to_health_gap_or_reconnect_trace() {
@@ -100,10 +176,9 @@ fn source_circuit_breakers_are_independent() {
     );
 
     registry.mark_recovered("binance_depth_update");
-    registry.mark_exhausted("polymarket_market");
     assert_eq!(
         registry.state("polymarket_market"),
-        Some(CircuitState::Exhausted)
+        Some(CircuitState::HalfOpen)
     );
     assert_eq!(
         registry.state("binance_depth_update"),

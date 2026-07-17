@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::fs::{self, File};
 use std::future::Future;
@@ -7,11 +7,11 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::str::FromStr as _;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arrow_array::{Array as _, StringArray, TimestampMillisecondArray, UInt64Array};
-use futures::{SinkExt as _, StreamExt as _};
+use futures::{FutureExt as _, SinkExt as _, StreamExt as _};
 use parquet::arrow::{ProjectionMask, arrow_reader::ParquetRecordBatchReaderBuilder};
 use polymarket_client_sdk_v2::clob::ws::types::response::OrderBookLevel;
 use polymarket_client_sdk_v2::clob::ws::{
@@ -27,7 +27,9 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
+use tokio::sync::{
+    Mutex as AsyncMutex, OwnedRwLockReadGuard, RwLock as AsyncRwLock, mpsc, oneshot, watch,
+};
 use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
 use tokio_tungstenite::tungstenite::Message;
@@ -39,15 +41,19 @@ use crate::binance_aggtrade::{
     BINANCE_AGGTRADE_PENDING_MAX_ROWS, BinanceAggTradeContinuityState, BinanceAggTradeOutput,
     BinanceRestAggTrade, BinanceWsAggTrade, fetch_binance_aggtrade_range,
 };
+#[cfg(test)]
+use crate::daily_manifest::close_day_manifest;
 use crate::daily_manifest::{
-    DailyFileRecoveryMetadata, DailyFinalizedFileDelta, DailyManifestIdentity,
-    SourceOperationalCounterDelta, add_manifest_operational_counters, close_day_manifest,
-    close_reconciled_day_manifest, day_has_finalized_parquet, load_day_manifest,
-    manifest_binance_continuity, manifest_state, merge_finalized_file_delta,
-    reconcile_open_day_manifest, record_day_barrier_state, record_manifest_gaps,
-    remove_unowned_stale_temporary_files, typed_raw_root, update_manifest_continuity,
-    utc_day_directories, validate_manifest_day, validate_manifest_recovery_files,
-    validate_unmanifested_recovery_files,
+    CollectionDayCoverageState, DailyFileRecoveryMetadata, DailyFinalizedFileDelta,
+    DailyManifestIdentity, SourceOperationalCounterDelta, activate_collection_day_coverage,
+    add_manifest_operational_counters, close_day_manifest_with_collection_end,
+    close_day_manifest_with_unclean_end, close_reconciled_day_manifest, day_has_finalized_parquet,
+    load_day_manifest, manifest_binance_continuity, manifest_collection_day_coverage,
+    manifest_state, mark_collection_day_coverage_ended_known, mark_collection_day_coverage_unclean,
+    merge_finalized_file_delta, reconcile_open_day_manifest, record_day_barrier_state,
+    record_manifest_gaps, remove_unowned_stale_temporary_files, typed_raw_root,
+    update_manifest_continuity, utc_day_directories, validate_manifest_day,
+    validate_manifest_recovery_files, validate_unmanifested_recovery_files,
 };
 use crate::dedupe::{
     BinanceIdDecision, BinanceRecentIdWindow, FingerprintDecision, LifecycleFingerprintSets,
@@ -139,6 +145,9 @@ const POLYMARKET_DECODED_QUEUE_CAPACITY: usize = 25_000;
 const POLYMARKET_DECODED_MAX_BYTES: usize = 67_108_864;
 const POLYMARKET_PROCESSOR_STAGING_MAX_BYTES: usize = 8 * MAX_TYPED_ROW_BYTES;
 const POLYMARKET_CONTROL_CHANNEL_CAPACITY: usize = 4;
+const STARTUP_READY_CHANNEL_CAPACITY: usize = 10;
+const STARTUP_GATE_TIMEOUT: Duration = Duration::from_secs(30);
+const INITIAL_RAW_DAY_GENERATION: u64 = 1;
 
 const LOGICAL_PRODUCERS: &[&str] = &[
     "polymarket",
@@ -458,6 +467,1827 @@ impl MarketAssetFreshnessWatchdog {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RawDayPermit {
+    utc_day: String,
+    generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RawDayClose {
+    utc_day: String,
+    next_utc_day: String,
+    generation: u64,
+    next_generation: u64,
+    close_id: u64,
+    boundary_utc_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct RuntimeCloseIdentity {
+    utc_day: String,
+    generation: u64,
+    close_id: u64,
+}
+
+impl RuntimeCloseIdentity {
+    fn from_rollover_old_day(close: &RawDayClose) -> Self {
+        Self {
+            utc_day: close.utc_day.clone(),
+            generation: close.generation,
+            close_id: close.close_id,
+        }
+    }
+
+    fn from_rollover_next_day(close: &RawDayClose) -> Self {
+        Self {
+            utc_day: close.next_utc_day.clone(),
+            generation: close.next_generation,
+            close_id: close.close_id,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeEpoch {
+    utc_day: String,
+    generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RuntimeCloseCause {
+    OperatorStop,
+    RunDeadline,
+    CapacityLimit,
+    SourceInnerReturn { source_kind: &'static str },
+    SourceWrapperReturn { source_kind: &'static str },
+    SourceWrapperFailure { source_kind: &'static str },
+    SourcePanic { source_kind: &'static str },
+    SourceAbortWithoutPermit { source_kind: &'static str },
+    WriterReturn { source_kind: String },
+    WriterPanic { source_kind: String },
+    WriterReportDisconnected { source_kind: String },
+    CoordinatorFailure { stage: &'static str },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PreparedSameDayClose {
+    identity: RuntimeCloseIdentity,
+    ended_utc_ms: i64,
+    cause: RuntimeCloseCause,
+    unclean: bool,
+    unclean_cause: Option<RuntimeCloseCause>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingExit {
+    close: RawDayClose,
+    observed_utc_ms: i64,
+    cause: RuntimeCloseCause,
+    unclean: bool,
+    unclean_cause: Option<RuntimeCloseCause>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PreparedRuntimeExit {
+    SameDay(PreparedSameDayClose),
+    Rollover(PendingExit),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ManifestShutdownDisposition {
+    EndedKnown { ended_utc_ms: i64 },
+    UncleanEndUnknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RawDayGateState {
+    Inactive,
+    Active(RawDayPermit),
+    Closing(RawDayClose),
+    ClosingSameDay(PreparedSameDayClose),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StartupRawActivation {
+    Active(RawDayPermit),
+    Stopped(PreparedRuntimeExit),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StartupActivationOutcome {
+    Released,
+    CommittedStopped(PreparedRuntimeExit),
+}
+
+struct RawDayGate {
+    state_word: AtomicU64,
+    next_close_id: AtomicU64,
+    state: Mutex<RawDayGateState>,
+    prepared_close: Mutex<Option<RawDayClose>>,
+    prepared_same_day_close: Mutex<Option<PreparedSameDayClose>>,
+    pending_exit: Mutex<Option<PendingExit>>,
+    pre_activation_exit: Mutex<Option<RuntimeExitRequest>>,
+    startup_activation_committed: Mutex<Option<RawDayPermit>>,
+    activation_committed: Mutex<Option<RawDayClose>>,
+    runtime_deadline: Mutex<Option<RuntimeDeadlineCandidate>>,
+    rollover_transition: Mutex<()>,
+    enqueue_fence: Arc<AsyncRwLock<()>>,
+    source_fences: Mutex<BTreeMap<String, (u64, u64)>>,
+    writer_rendezvous: Mutex<Option<RawDayClose>>,
+    state_changes: watch::Sender<u64>,
+}
+
+struct RawDayEnqueuePermit {
+    permit: RawDayPermit,
+    _fence: OwnedRwLockReadGuard<()>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RawDayDeferredEpoch {
+    utc_day: String,
+    old_generation: u64,
+    expected_generation: u64,
+}
+
+enum RawDayEnqueueDecision {
+    Permit(RawDayEnqueuePermit),
+    Defer(RawDayDeferredEpoch),
+}
+
+struct DeferredRawBatch {
+    epoch: RawDayDeferredEpoch,
+    events: Vec<InflightRawEvent>,
+}
+
+impl RawDayGate {
+    fn new() -> Self {
+        let (state_changes, _) = watch::channel(0);
+        Self {
+            state_word: AtomicU64::new(0),
+            next_close_id: AtomicU64::new(1),
+            state: Mutex::new(RawDayGateState::Inactive),
+            prepared_close: Mutex::new(None),
+            prepared_same_day_close: Mutex::new(None),
+            pending_exit: Mutex::new(None),
+            pre_activation_exit: Mutex::new(None),
+            startup_activation_committed: Mutex::new(None),
+            activation_committed: Mutex::new(None),
+            runtime_deadline: Mutex::new(None),
+            rollover_transition: Mutex::new(()),
+            enqueue_fence: Arc::new(AsyncRwLock::new(())),
+            source_fences: Mutex::new(BTreeMap::new()),
+            writer_rendezvous: Mutex::new(None),
+            state_changes,
+        }
+    }
+
+    fn encoded_open_generation(generation: u64) -> Result<u64> {
+        generation
+            .checked_mul(2)
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| invalid_data("raw-day generation encoding overflow").into())
+    }
+
+    fn encoded_closed_generation(generation: u64) -> Result<u64> {
+        generation
+            .checked_mul(2)
+            .ok_or_else(|| invalid_data("raw-day generation encoding overflow").into())
+    }
+
+    fn next_close_id(&self) -> Result<u64> {
+        self.next_close_id
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| invalid_data("raw-day close-id overflow").into())
+    }
+
+    fn notify_change(&self) {
+        self.state_changes
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
+
+    fn install_runtime_deadline(&self, candidate: Option<RuntimeDeadlineCandidate>) -> Result<()> {
+        let mut installed = self
+            .runtime_deadline
+            .lock()
+            .expect("raw-day runtime-deadline mutex poisoned");
+        if installed.is_some() {
+            return Err(invalid_data("raw-day runtime deadline already installed").into());
+        }
+        *installed = candidate;
+        Ok(())
+    }
+
+    fn materialize_deadline_locked(
+        &self,
+        candidate: Option<RuntimeDeadlineCandidate>,
+    ) -> Result<bool> {
+        let installed = *self
+            .runtime_deadline
+            .lock()
+            .expect("raw-day runtime-deadline mutex poisoned");
+        let Some(candidate) = candidate
+            .or(installed)
+            .filter(|candidate| candidate.is_reached())
+        else {
+            return Ok(false);
+        };
+        match self.prepare_runtime_exit_with_cause_locked(
+            candidate.observed_utc_ms,
+            RuntimeCloseCause::RunDeadline,
+        ) {
+            Ok(_) => Ok(true),
+            Err(error)
+                if matches!(self.current_state(), RawDayGateState::Inactive)
+                    && self
+                        .pre_activation_exit
+                        .lock()
+                        .expect("pre-activation exit mutex poisoned")
+                        .is_some() =>
+            {
+                let _ = error;
+                Ok(true)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    #[cfg(test)]
+    async fn activate_startup(&self, utc_day: String, generation: u64) -> Result<RawDayPermit> {
+        self.commit_startup_manifest_activation(&utc_day, generation, None, || Ok(()))?;
+        match self
+            .activate_startup_after_manifest(utc_day, generation, None)
+            .await?
+        {
+            StartupRawActivation::Active(permit) => Ok(permit),
+            StartupRawActivation::Stopped(exit) => Err(invalid_data(format!(
+                "test startup activation was stopped after manifest commit: {exit:?}"
+            ))
+            .into()),
+        }
+    }
+
+    fn commit_startup_manifest_activation<F>(
+        &self,
+        utc_day: &str,
+        generation: u64,
+        deadline: Option<RuntimeDeadlineCandidate>,
+        commit: F,
+    ) -> Result<()>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        let _transition = self
+            .rollover_transition
+            .lock()
+            .expect("raw-day rollover-transition mutex poisoned");
+        if self.materialize_deadline_locked(deadline)? {
+            return Err(invalid_data(
+                "startup manifest activation rejected because the run deadline was reached",
+            )
+            .into());
+        }
+        if let Some(exit) = self
+            .pre_activation_exit
+            .lock()
+            .expect("pre-activation exit mutex poisoned")
+            .as_ref()
+        {
+            return Err(invalid_data(format!(
+                "startup manifest activation rejected by a pre-activation exit: {exit:?}"
+            ))
+            .into());
+        }
+        if !matches!(self.current_state(), RawDayGateState::Inactive) {
+            return Err(invalid_data(
+                "startup manifest activation requires an inactive raw-day gate",
+            )
+            .into());
+        }
+        let mut committed = self
+            .startup_activation_committed
+            .lock()
+            .expect("startup activation-commit mutex poisoned");
+        if committed.is_some() {
+            return Err(invalid_data("duplicate startup manifest activation commit").into());
+        }
+        commit()?;
+        *committed = Some(RawDayPermit {
+            utc_day: utc_day.to_owned(),
+            generation,
+        });
+        drop(committed);
+        self.notify_change();
+        Ok(())
+    }
+
+    #[cfg(test)]
+    async fn activate_startup_after_manifest(
+        &self,
+        utc_day: String,
+        generation: u64,
+        deadline: Option<RuntimeDeadlineCandidate>,
+    ) -> Result<StartupRawActivation> {
+        let _fence = Arc::clone(&self.enqueue_fence).write_owned().await;
+        let _transition = self
+            .rollover_transition
+            .lock()
+            .expect("raw-day rollover-transition mutex poisoned");
+        self.activate_startup_after_manifest_locked(&utc_day, generation, deadline)
+    }
+
+    async fn activate_or_stop_startup_after_manifest(
+        &self,
+        utc_day: String,
+        generation: u64,
+        deadline: Option<RuntimeDeadlineCandidate>,
+        releases: StartupReleaseHandles,
+    ) -> Result<StartupActivationOutcome> {
+        let _fence = Arc::clone(&self.enqueue_fence).write_owned().await;
+        let _transition = self
+            .rollover_transition
+            .lock()
+            .expect("raw-day rollover-transition mutex poisoned");
+        match self.activate_startup_after_manifest_locked(&utc_day, generation, deadline)? {
+            StartupRawActivation::Active(_) => {
+                releases.release()?;
+                Ok(StartupActivationOutcome::Released)
+            }
+            StartupRawActivation::Stopped(exit) => {
+                releases.stop_for_exit(&exit)?;
+                Ok(StartupActivationOutcome::CommittedStopped(exit))
+            }
+        }
+    }
+
+    fn activate_startup_after_manifest_locked(
+        &self,
+        utc_day: &str,
+        generation: u64,
+        deadline: Option<RuntimeDeadlineCandidate>,
+    ) -> Result<StartupRawActivation> {
+        let _ = self.materialize_deadline_locked(deadline)?;
+        let pre_activation_exit = self
+            .pre_activation_exit
+            .lock()
+            .expect("pre-activation exit mutex poisoned")
+            .take();
+        let expected = RawDayPermit {
+            utc_day: utc_day.to_owned(),
+            generation,
+        };
+        if self
+            .startup_activation_committed
+            .lock()
+            .expect("startup activation-commit mutex poisoned")
+            .as_ref()
+            != Some(&expected)
+        {
+            return Err(invalid_data(
+                "raw-day startup activation requires the matching manifest commit",
+            )
+            .into());
+        }
+        let mut state = self.state.lock().expect("raw-day gate mutex poisoned");
+        if !matches!(*state, RawDayGateState::Inactive) {
+            return Err(
+                invalid_data("raw-day startup activation requires an inactive gate").into(),
+            );
+        }
+        let encoded = Self::encoded_open_generation(generation)?;
+        self.state_word
+            .compare_exchange(0, encoded, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| invalid_data("raw-day startup activation CAS failed"))?;
+        let permit = expected;
+        *state = RawDayGateState::Active(permit.clone());
+        *self
+            .startup_activation_committed
+            .lock()
+            .expect("startup activation-commit mutex poisoned") = None;
+        drop(state);
+        self.notify_change();
+        if let Some(exit) = pre_activation_exit {
+            return self
+                .prepare_runtime_exit_with_cause_locked_inner(exit.observed_utc_ms, exit.cause)
+                .map(StartupRawActivation::Stopped);
+        }
+        Ok(StartupRawActivation::Active(permit))
+    }
+
+    fn prepare_same_day_close_with_cause(
+        &self,
+        ended_utc_ms: i64,
+        cause: RuntimeCloseCause,
+    ) -> Result<PreparedSameDayClose> {
+        let ended_day = utc_day_string_from_ms(ended_utc_ms)
+            .ok_or_else(|| invalid_data("UTC day unavailable for same-day close"))?;
+        let mut state = self.state.lock().expect("raw-day gate mutex poisoned");
+        let RawDayGateState::Active(active) = &*state else {
+            return match &*state {
+                RawDayGateState::ClosingSameDay(existing) => Ok(existing.clone()),
+                other => Err(invalid_data(format!(
+                    "same-day close requires an active epoch: state={other:?} ended_utc_ms={ended_utc_ms}"
+                ))
+                .into()),
+            };
+        };
+        if active.utc_day != ended_day {
+            return Err(invalid_data(format!(
+                "same-day close crossed UTC day: active={} ended_day={ended_day} ended_utc_ms={ended_utc_ms}",
+                active.utc_day
+            ))
+            .into());
+        }
+        if self
+            .prepared_close
+            .lock()
+            .expect("raw-day prepared-close mutex poisoned")
+            .is_some()
+        {
+            return Err(invalid_data("same-day close conflicts with prepared rollover").into());
+        }
+        let mut prepared = self
+            .prepared_same_day_close
+            .lock()
+            .expect("same-day prepared-close mutex poisoned");
+        if let Some(existing) = prepared.as_ref() {
+            return Ok(existing.clone());
+        }
+        let close = PreparedSameDayClose {
+            identity: RuntimeCloseIdentity {
+                utc_day: active.utc_day.clone(),
+                generation: active.generation,
+                close_id: self.next_close_id()?,
+            },
+            ended_utc_ms,
+            cause,
+            unclean: false,
+            unclean_cause: None,
+        };
+        let open = Self::encoded_open_generation(active.generation)?;
+        let closed = Self::encoded_closed_generation(active.generation)?;
+        self.state_word
+            .compare_exchange(open, closed, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| invalid_data("same-day close preparation CAS failed"))?;
+        *state = RawDayGateState::ClosingSameDay(close.clone());
+        *prepared = Some(close.clone());
+        drop(prepared);
+        drop(state);
+        self.notify_change();
+        Ok(close)
+    }
+
+    fn prepare_runtime_exit(&self, observed_utc_ms: i64) -> Result<PreparedRuntimeExit> {
+        self.prepare_runtime_exit_with_cause(
+            observed_utc_ms,
+            RuntimeCloseCause::CoordinatorFailure {
+                stage: "runtime_exit",
+            },
+        )
+    }
+
+    fn prepare_runtime_exit_with_cause(
+        &self,
+        observed_utc_ms: i64,
+        cause: RuntimeCloseCause,
+    ) -> Result<PreparedRuntimeExit> {
+        let _transition = self
+            .rollover_transition
+            .lock()
+            .expect("raw-day rollover-transition mutex poisoned");
+        self.prepare_runtime_exit_with_cause_locked(observed_utc_ms, cause)
+    }
+
+    fn prepare_runtime_exit_with_cause_locked(
+        &self,
+        observed_utc_ms: i64,
+        cause: RuntimeCloseCause,
+    ) -> Result<PreparedRuntimeExit> {
+        if !matches!(cause, RuntimeCloseCause::RunDeadline)
+            && let Some(deadline) = *self
+                .runtime_deadline
+                .lock()
+                .expect("raw-day runtime-deadline mutex poisoned")
+            && deadline.is_reached()
+        {
+            return self.prepare_runtime_exit_with_cause_locked_inner(
+                deadline.observed_utc_ms,
+                RuntimeCloseCause::RunDeadline,
+            );
+        }
+        self.prepare_runtime_exit_with_cause_locked_inner(observed_utc_ms, cause)
+    }
+
+    fn prepare_runtime_exit_with_cause_locked_inner(
+        &self,
+        observed_utc_ms: i64,
+        cause: RuntimeCloseCause,
+    ) -> Result<PreparedRuntimeExit> {
+        if let Some(close) = self
+            .prepared_same_day_close
+            .lock()
+            .expect("raw-day prepared-close mutex poisoned")
+            .clone()
+        {
+            return Ok(PreparedRuntimeExit::SameDay(close));
+        }
+        if let Some(exit) = self
+            .pending_exit
+            .lock()
+            .expect("raw-day pending-exit mutex poisoned")
+            .clone()
+        {
+            return Ok(PreparedRuntimeExit::Rollover(exit));
+        }
+        if let Some(close) = self
+            .activation_committed
+            .lock()
+            .expect("raw-day activation-commit mutex poisoned")
+            .clone()
+        {
+            let observed_day = utc_day_string_from_ms(observed_utc_ms)
+                .ok_or_else(|| invalid_data("UTC day unavailable for post-activation exit"))?;
+            if observed_day != close.next_utc_day || observed_utc_ms < close.boundary_utc_ms {
+                return Err(invalid_data(format!(
+                    "post-activation exit day/time mismatch: observed_day={observed_day} observed_utc_ms={observed_utc_ms} close={close:?}"
+                ))
+                .into());
+            }
+            let mut prepared = self
+                .prepared_same_day_close
+                .lock()
+                .expect("same-day prepared-close mutex poisoned");
+            if let Some(existing) = prepared.as_ref() {
+                return Ok(PreparedRuntimeExit::SameDay(existing.clone()));
+            }
+            let candidate = PreparedSameDayClose {
+                identity: RuntimeCloseIdentity {
+                    utc_day: close.next_utc_day,
+                    generation: close.next_generation,
+                    close_id: self.next_close_id()?,
+                },
+                ended_utc_ms: observed_utc_ms,
+                cause,
+                unclean: false,
+                unclean_cause: None,
+            };
+            *prepared = Some(candidate.clone());
+            drop(prepared);
+            self.notify_change();
+            return Ok(PreparedRuntimeExit::SameDay(candidate));
+        }
+
+        let observed_day = utc_day_string_from_ms(observed_utc_ms)
+            .ok_or_else(|| invalid_data("UTC day unavailable for runtime exit"))?;
+        match self.current_state() {
+            RawDayGateState::Active(active) if observed_day == active.utc_day => self
+                .prepare_same_day_close_with_cause(observed_utc_ms, cause)
+                .map(PreparedRuntimeExit::SameDay),
+            RawDayGateState::Active(active) if observed_day > active.utc_day => {
+                let boundary_utc_ms = observed_utc_ms
+                    .div_euclid(UTC_DAY_MS)
+                    .saturating_mul(UTC_DAY_MS);
+                let close = self.prepare_rollover(&active.utc_day, boundary_utc_ms)?;
+                let exit = PendingExit {
+                    close,
+                    observed_utc_ms,
+                    cause,
+                    unclean: false,
+                    unclean_cause: None,
+                };
+                let mut pending = self
+                    .pending_exit
+                    .lock()
+                    .expect("raw-day pending-exit mutex poisoned");
+                if let Some(existing) = pending.as_ref() {
+                    return Ok(PreparedRuntimeExit::Rollover(existing.clone()));
+                }
+                *pending = Some(exit.clone());
+                drop(pending);
+                self.notify_change();
+                Ok(PreparedRuntimeExit::Rollover(exit))
+            }
+            RawDayGateState::Active(active) => Err(invalid_data(format!(
+                "runtime exit time regressed before active UTC day: active={} observed_day={observed_day} observed_utc_ms={observed_utc_ms}",
+                active.utc_day
+            ))
+            .into()),
+            RawDayGateState::Closing(close) => {
+                if observed_utc_ms < close.boundary_utc_ms {
+                    return Err(invalid_data(format!(
+                        "runtime exit observed before an already completed boundary fence: observed_utc_ms={observed_utc_ms} close={close:?}"
+                    ))
+                    .into());
+                }
+                let exit = PendingExit {
+                    close,
+                    observed_utc_ms,
+                    cause,
+                    unclean: false,
+                    unclean_cause: None,
+                };
+                let mut pending = self
+                    .pending_exit
+                    .lock()
+                    .expect("raw-day pending-exit mutex poisoned");
+                if let Some(existing) = pending.as_ref() {
+                    return Ok(PreparedRuntimeExit::Rollover(existing.clone()));
+                }
+                *pending = Some(exit.clone());
+                drop(pending);
+                self.notify_change();
+                Ok(PreparedRuntimeExit::Rollover(exit))
+            }
+            RawDayGateState::ClosingSameDay(close) => {
+                Ok(PreparedRuntimeExit::SameDay(close))
+            }
+            RawDayGateState::Inactive => {
+                let mut pending = self
+                    .pre_activation_exit
+                    .lock()
+                    .expect("pre-activation exit mutex poisoned");
+                if pending.is_none() {
+                    *pending = Some(RuntimeExitRequest {
+                        observed_utc_ms,
+                        cause,
+                    });
+                    drop(pending);
+                    self.notify_change();
+                }
+                Err(invalid_data("runtime exit reached an inactive raw-day gate").into())
+            }
+        }
+    }
+
+    fn runtime_exit_identity(prepared: &PreparedRuntimeExit) -> RuntimeCloseIdentity {
+        match prepared {
+            PreparedRuntimeExit::SameDay(close) => close.identity.clone(),
+            PreparedRuntimeExit::Rollover(exit) => {
+                RuntimeCloseIdentity::from_rollover_old_day(&exit.close)
+            }
+        }
+    }
+
+    fn runtime_exit_epoch(prepared: &PreparedRuntimeExit) -> RuntimeEpoch {
+        let identity = Self::runtime_exit_identity(prepared);
+        RuntimeEpoch {
+            utc_day: identity.utc_day,
+            generation: identity.generation,
+        }
+    }
+
+    fn observe_source_terminal_now(
+        &self,
+        cause: RuntimeCloseCause,
+        unclean_cause: Option<RuntimeCloseCause>,
+        post_fence_epoch: Option<&RuntimeEpoch>,
+    ) -> SourceWrapperLifecycleObservation {
+        let _transition = self
+            .rollover_transition
+            .lock()
+            .expect("raw-day rollover-transition mutex poisoned");
+        let observed_utc_ms = now_ms();
+        let prepared = match self.prepare_runtime_exit_with_cause_locked(observed_utc_ms, cause) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return SourceWrapperLifecycleObservation {
+                    observed_utc_ms,
+                    epoch: None,
+                    lifecycle_record_error: Some(error.to_string()),
+                    replace_existing: unclean_cause.is_some(),
+                    termination_kind: SourceTaskTerminationKind::Unclean,
+                };
+            }
+        };
+        let epoch = Some(Self::runtime_exit_epoch(&prepared));
+        let Some(unclean_cause) = unclean_cause else {
+            return SourceWrapperLifecycleObservation {
+                observed_utc_ms,
+                epoch,
+                lifecycle_record_error: None,
+                replace_existing: false,
+                termination_kind: SourceTaskTerminationKind::ReliableReturn,
+            };
+        };
+        let lifecycle_record_error =
+            if self.unclean_affects_prepared_epoch(&prepared, &unclean_cause, post_fence_epoch) {
+                self.mark_runtime_exit_unclean_with_cause(
+                    &Self::runtime_exit_identity(&prepared),
+                    unclean_cause,
+                )
+                .err()
+                .map(|error| error.to_string())
+            } else {
+                None
+            };
+        SourceWrapperLifecycleObservation {
+            observed_utc_ms,
+            epoch,
+            lifecycle_record_error,
+            replace_existing: true,
+            termination_kind: SourceTaskTerminationKind::Unclean,
+        }
+    }
+
+    fn observe_source_wrapper_terminal_now<F>(
+        &self,
+        source_kind: &'static str,
+        classify: F,
+    ) -> SourceWrapperLifecycleObservation
+    where
+        F: FnOnce() -> SourceWrapperTerminalClass,
+    {
+        let _transition = self
+            .rollover_transition
+            .lock()
+            .expect("raw-day rollover-transition mutex poisoned");
+        let observed_utc_ms = now_ms();
+        let class = classify();
+        if matches!(&class, SourceWrapperTerminalClass::ExistingInnerReturn) {
+            return SourceWrapperLifecycleObservation {
+                observed_utc_ms,
+                epoch: None,
+                lifecycle_record_error: None,
+                replace_existing: false,
+                termination_kind: SourceTaskTerminationKind::ReliableReturn,
+            };
+        }
+
+        let (candidate_cause, unclean_cause, replace_existing) = match class {
+            SourceWrapperTerminalClass::ExistingInnerReturn => unreachable!(),
+            SourceWrapperTerminalClass::CleanReturn => (
+                RuntimeCloseCause::SourceWrapperReturn { source_kind },
+                None,
+                false,
+            ),
+            SourceWrapperTerminalClass::Unclean(cause) => (cause.clone(), Some(cause), true),
+            SourceWrapperTerminalClass::CoordinatedStop(expected) => {
+                if let Some(prepared) = self.prepared_runtime_exit()
+                    && Self::runtime_exit_identity(&prepared) == expected
+                {
+                    return SourceWrapperLifecycleObservation {
+                        observed_utc_ms,
+                        epoch: Some(Self::runtime_exit_epoch(&prepared)),
+                        lifecycle_record_error: None,
+                        replace_existing: false,
+                        termination_kind: SourceTaskTerminationKind::CoordinatedAbort,
+                    };
+                }
+                let cause = RuntimeCloseCause::SourceWrapperFailure { source_kind };
+                (cause.clone(), Some(cause), true)
+            }
+        };
+        let prepared =
+            match self.prepare_runtime_exit_with_cause_locked(observed_utc_ms, candidate_cause) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    return SourceWrapperLifecycleObservation {
+                        observed_utc_ms,
+                        epoch: None,
+                        lifecycle_record_error: Some(error.to_string()),
+                        replace_existing,
+                        termination_kind: SourceTaskTerminationKind::Unclean,
+                    };
+                }
+            };
+        let epoch = Some(Self::runtime_exit_epoch(&prepared));
+        let lifecycle_record_error = unclean_cause.and_then(|cause| {
+            if self.unclean_affects_prepared_epoch(&prepared, &cause, None) {
+                self.mark_runtime_exit_unclean_with_cause(
+                    &Self::runtime_exit_identity(&prepared),
+                    cause,
+                )
+                .err()
+                .map(|error| error.to_string())
+            } else {
+                None
+            }
+        });
+        SourceWrapperLifecycleObservation {
+            observed_utc_ms,
+            epoch,
+            lifecycle_record_error,
+            replace_existing,
+            termination_kind: if replace_existing {
+                SourceTaskTerminationKind::Unclean
+            } else {
+                SourceTaskTerminationKind::ReliableReturn
+            },
+        }
+    }
+
+    fn unclean_affects_prepared_epoch(
+        &self,
+        prepared: &PreparedRuntimeExit,
+        cause: &RuntimeCloseCause,
+        post_fence_epoch: Option<&RuntimeEpoch>,
+    ) -> bool {
+        let PreparedRuntimeExit::Rollover(exit) = prepared else {
+            return true;
+        };
+        if post_fence_epoch.is_some_and(|epoch| {
+            epoch.utc_day == exit.close.next_utc_day
+                && epoch.generation == exit.close.next_generation
+        }) {
+            return false;
+        }
+        let source_kind = match cause {
+            RuntimeCloseCause::SourceInnerReturn { source_kind }
+            | RuntimeCloseCause::SourceWrapperReturn { source_kind }
+            | RuntimeCloseCause::SourceWrapperFailure { source_kind }
+            | RuntimeCloseCause::SourcePanic { source_kind }
+            | RuntimeCloseCause::SourceAbortWithoutPermit { source_kind } => Some(*source_kind),
+            _ => None,
+        };
+        let Some(producer) =
+            source_kind.and_then(|source_kind| logical_producer_for_source_task(source_kind).ok())
+        else {
+            return true;
+        };
+        !self.source_fence_registered(producer, &exit.close)
+    }
+
+    fn register_source_abort_permit_now(
+        &self,
+        close: &RuntimeCloseIdentity,
+    ) -> Result<(i64, RuntimeEpoch)> {
+        let _transition = self
+            .rollover_transition
+            .lock()
+            .expect("raw-day rollover-transition mutex poisoned");
+        let observed_utc_ms = now_ms();
+        let authoritative_close = self
+            .prepared_runtime_exit()
+            .map(|prepared| Self::runtime_exit_identity(&prepared));
+        if authoritative_close.as_ref() != Some(close) {
+            return Err(invalid_data(format!(
+                "source abort permit does not match the authoritative gate close: requested={close:?} authoritative={authoritative_close:?}"
+            ))
+            .into());
+        }
+        Ok((
+            observed_utc_ms,
+            RuntimeEpoch {
+                utc_day: close.utc_day.clone(),
+                generation: close.generation,
+            },
+        ))
+    }
+
+    fn prepared_runtime_exit(&self) -> Option<PreparedRuntimeExit> {
+        self.prepared_same_day_close
+            .lock()
+            .expect("raw-day prepared-close mutex poisoned")
+            .clone()
+            .map(PreparedRuntimeExit::SameDay)
+            .or_else(|| {
+                self.pending_exit
+                    .lock()
+                    .expect("raw-day pending-exit mutex poisoned")
+                    .clone()
+                    .map(PreparedRuntimeExit::Rollover)
+            })
+    }
+
+    fn mark_runtime_exit_unclean(
+        &self,
+        identity: &RuntimeCloseIdentity,
+    ) -> Result<PreparedRuntimeExit> {
+        self.mark_runtime_exit_unclean_with_cause(
+            identity,
+            RuntimeCloseCause::CoordinatorFailure {
+                stage: "runtime_unclean",
+            },
+        )
+    }
+
+    fn mark_runtime_exit_unclean_with_cause(
+        &self,
+        identity: &RuntimeCloseIdentity,
+        cause: RuntimeCloseCause,
+    ) -> Result<PreparedRuntimeExit> {
+        if self
+            .prepared_same_day_close
+            .lock()
+            .expect("raw-day prepared-close mutex poisoned")
+            .is_some()
+            || matches!(self.current_state(), RawDayGateState::ClosingSameDay(_))
+        {
+            return self
+                .mark_same_day_close_unclean_with_cause(identity, cause)
+                .map(PreparedRuntimeExit::SameDay);
+        }
+        let mut pending = self
+            .pending_exit
+            .lock()
+            .expect("raw-day pending-exit mutex poisoned");
+        let exit = pending
+            .as_mut()
+            .ok_or_else(|| invalid_data("runtime unclean mark found no prepared exit"))?;
+        if exit.close.utc_day != identity.utc_day
+            || exit.close.generation != identity.generation
+            || exit.close.close_id != identity.close_id
+        {
+            return Err(invalid_data(format!(
+                "pending-exit unclean identity mismatch: exit={exit:?} requested={identity:?}"
+            ))
+            .into());
+        }
+        exit.unclean = true;
+        if exit.unclean_cause.is_none() {
+            exit.unclean_cause = Some(cause);
+        }
+        Ok(PreparedRuntimeExit::Rollover(exit.clone()))
+    }
+
+    fn mark_same_day_close_unclean_with_cause(
+        &self,
+        identity: &RuntimeCloseIdentity,
+        cause: RuntimeCloseCause,
+    ) -> Result<PreparedSameDayClose> {
+        let mut state = self.state.lock().expect("raw-day gate mutex poisoned");
+        let mut prepared = self
+            .prepared_same_day_close
+            .lock()
+            .expect("same-day prepared-close mutex poisoned");
+        let Some(prepared_close) = prepared.as_mut() else {
+            return Err(invalid_data(format!(
+                "same-day unclean close has no prepared identity: state={state:?} identity={identity:?}"
+            ))
+            .into());
+        };
+        if prepared_close.identity != *identity {
+            return Err(invalid_data(format!(
+                "same-day unclean identity mismatch: prepared={prepared_close:?} state={state:?} actual={identity:?}"
+            ))
+            .into());
+        }
+        prepared_close.unclean = true;
+        if prepared_close.unclean_cause.is_none() {
+            prepared_close.unclean_cause = Some(cause.clone());
+        }
+        match &mut *state {
+            RawDayGateState::ClosingSameDay(state_close) => {
+                if state_close.identity != *identity {
+                    return Err(invalid_data(format!(
+                        "same-day unclean state identity mismatch: state={state_close:?} actual={identity:?}"
+                    ))
+                    .into());
+                }
+                state_close.unclean = true;
+                if state_close.unclean_cause.is_none() {
+                    state_close.unclean_cause = Some(cause);
+                }
+            }
+            RawDayGateState::Closing(close)
+                if self
+                    .activation_committed
+                    .lock()
+                    .expect("raw-day activation-commit mutex poisoned")
+                    .as_ref()
+                    == Some(close) => {}
+            _ => {
+                return Err(invalid_data(format!(
+                    "same-day unclean close found incompatible state: state={state:?} identity={identity:?}"
+                ))
+                .into());
+            }
+        }
+        Ok(prepared_close.clone())
+    }
+
+    async fn seal_same_day_close(
+        &self,
+        identity: &RuntimeCloseIdentity,
+    ) -> Result<PreparedSameDayClose> {
+        let _fence = Arc::clone(&self.enqueue_fence).write_owned().await;
+        let state = self.state.lock().expect("raw-day gate mutex poisoned");
+        if let RawDayGateState::ClosingSameDay(existing) = &*state {
+            if existing.identity == *identity {
+                return Ok(existing.clone());
+            }
+            return Err(invalid_data(format!(
+                "conflicting same-day close: existing={existing:?} requested={identity:?}"
+            ))
+            .into());
+        }
+        if let RawDayGateState::Closing(close) = &*state
+            && self
+                .activation_committed
+                .lock()
+                .expect("raw-day activation-commit mutex poisoned")
+                .as_ref()
+                == Some(close)
+            && let Some(existing) = self
+                .prepared_same_day_close
+                .lock()
+                .expect("same-day prepared-close mutex poisoned")
+                .as_ref()
+            && existing.identity == *identity
+        {
+            return Ok(existing.clone());
+        }
+        Err(invalid_data(format!(
+            "same-day close seal requires a prepared closing gate: state={state:?}"
+        ))
+        .into())
+    }
+
+    fn prepare_rollover(&self, utc_day: &str, boundary_utc_ms: i64) -> Result<RawDayClose> {
+        if let Some(existing) = self
+            .prepared_same_day_close
+            .lock()
+            .expect("raw-day prepared-close mutex poisoned")
+            .as_ref()
+        {
+            return Err(invalid_data(format!(
+                "raw-day rollover conflicts with prepared same-day close: existing={existing:?} requested_day={utc_day}"
+            ))
+            .into());
+        }
+        let expected_old_day = utc_day_string_from_ms(boundary_utc_ms.saturating_sub(1))
+            .ok_or_else(|| invalid_data("UTC day unavailable before raw-day boundary"))?;
+        let next_utc_day = utc_day_string_from_ms(boundary_utc_ms)
+            .ok_or_else(|| invalid_data("UTC day unavailable at raw-day boundary"))?;
+        if expected_old_day != utc_day || next_utc_day == utc_day {
+            return Err(invalid_data(format!(
+                "invalid raw-day rollover boundary: old={utc_day} boundary={boundary_utc_ms} derived_old={expected_old_day} derived_new={next_utc_day}"
+            ))
+            .into());
+        }
+
+        let state = self.state.lock().expect("raw-day gate mutex poisoned");
+        let mut prepared = self
+            .prepared_close
+            .lock()
+            .expect("raw-day prepared-close mutex poisoned");
+        let close = match &*state {
+            RawDayGateState::Active(permit) => {
+                if permit.utc_day != utc_day {
+                    return Err(invalid_data(format!(
+                        "raw-day rollover active-day mismatch: active={} requested={utc_day}",
+                        permit.utc_day
+                    ))
+                    .into());
+                }
+                match prepared.as_ref() {
+                    Some(existing)
+                        if existing.utc_day == utc_day
+                            && existing.boundary_utc_ms == boundary_utc_ms =>
+                    {
+                        existing.clone()
+                    }
+                    Some(existing) => {
+                        return Err(invalid_data(format!(
+                            "conflicting prepared raw-day rollover: existing={existing:?} requested_day={utc_day} requested_boundary={boundary_utc_ms}"
+                        ))
+                        .into());
+                    }
+                    None => RawDayClose {
+                        utc_day: utc_day.to_owned(),
+                        next_utc_day,
+                        generation: permit.generation,
+                        next_generation: permit
+                            .generation
+                            .checked_add(1)
+                            .ok_or_else(|| invalid_data("raw-day generation overflow"))?,
+                        close_id: self.next_close_id()?,
+                        boundary_utc_ms,
+                    },
+                }
+            }
+            RawDayGateState::Closing(existing)
+                if existing.utc_day == utc_day && existing.boundary_utc_ms == boundary_utc_ms =>
+            {
+                return Ok(existing.clone());
+            }
+            RawDayGateState::Closing(existing) => {
+                return Err(invalid_data(format!(
+                    "conflicting raw-day rollover close: existing={existing:?} requested_day={utc_day} requested_boundary={boundary_utc_ms}"
+                ))
+                .into());
+            }
+            RawDayGateState::ClosingSameDay(existing) => {
+                return Err(invalid_data(format!(
+                    "raw-day rollover conflicts with same-day close: existing={existing:?} requested_day={utc_day}"
+                ))
+                .into());
+            }
+            RawDayGateState::Inactive => {
+                return Err(invalid_data("raw-day rollover attempted before activation").into());
+            }
+        };
+        if prepared.is_none() {
+            *prepared = Some(close.clone());
+        }
+        drop(prepared);
+        drop(state);
+        self.notify_change();
+        Ok(close)
+    }
+
+    fn register_source_fence(&self, producer: &str, close: &RawDayClose) -> Result<()> {
+        if !LOGICAL_PRODUCERS.contains(&producer) {
+            return Err(
+                invalid_data(format!("unknown logical producer source fence: {producer}")).into(),
+            );
+        }
+        let state = self.state.lock().expect("raw-day gate mutex poisoned");
+        match &*state {
+            RawDayGateState::Active(active)
+                if active.utc_day == close.utc_day && active.generation == close.generation => {}
+            RawDayGateState::Closing(existing) if existing == close => {
+                return Err(invalid_data(format!(
+                    "source fence arrived after raw-day intake closed: producer={producer} close={close:?}"
+                ))
+                .into());
+            }
+            other => {
+                return Err(invalid_data(format!(
+                    "source fence requires matching active epoch: producer={producer} state={other:?} close={close:?}"
+                ))
+                .into());
+            }
+        }
+        let prepared = self
+            .prepared_close
+            .lock()
+            .expect("raw-day prepared-close mutex poisoned");
+        if prepared.as_ref() != Some(close) {
+            return Err(invalid_data(format!(
+                "source fence prepared-close mismatch: producer={producer} prepared={prepared:?} close={close:?}"
+            ))
+            .into());
+        }
+        let mut fences = self
+            .source_fences
+            .lock()
+            .expect("raw-day source-fence mutex poisoned");
+        let identity = (close.generation, close.close_id);
+        match fences.get(producer) {
+            Some(existing) if *existing == identity => {
+                return Ok(());
+            }
+            Some(existing) => {
+                return Err(invalid_data(format!(
+                    "conflicting source fence: producer={producer} existing={existing:?} requested={identity:?}"
+                ))
+                .into());
+            }
+            None => {
+                fences.insert(producer.to_owned(), identity);
+            }
+        }
+        drop(fences);
+        drop(prepared);
+        drop(state);
+        self.notify_change();
+        Ok(())
+    }
+
+    fn all_source_fences_registered(&self, close: &RawDayClose) -> bool {
+        let identity = (close.generation, close.close_id);
+        let fences = self
+            .source_fences
+            .lock()
+            .expect("raw-day source-fence mutex poisoned");
+        fences.len() == LOGICAL_PRODUCERS.len()
+            && LOGICAL_PRODUCERS
+                .iter()
+                .all(|producer| fences.get(*producer) == Some(&identity))
+    }
+
+    fn source_fence_registered(&self, producer: &str, close: &RawDayClose) -> bool {
+        self.source_fences
+            .lock()
+            .expect("raw-day source-fence mutex poisoned")
+            .get(producer)
+            == Some(&(close.generation, close.close_id))
+    }
+
+    fn publish_writer_rendezvous(&self, close: &RawDayClose) -> Result<()> {
+        let state = self.state.lock().expect("raw-day gate mutex poisoned");
+        match &*state {
+            RawDayGateState::Active(active)
+                if active.utc_day == close.utc_day && active.generation == close.generation => {}
+            RawDayGateState::Closing(existing) if existing == close => {}
+            other => {
+                return Err(invalid_data(format!(
+                    "writer rendezvous requires the exact old-day close: state={other:?} close={close:?}"
+                ))
+                .into());
+            }
+        }
+        let mut witness = self
+            .writer_rendezvous
+            .lock()
+            .expect("raw-day writer-rendezvous mutex poisoned");
+        match witness.as_ref() {
+            Some(existing) if existing == close => return Ok(()),
+            Some(existing) => {
+                return Err(invalid_data(format!(
+                    "conflicting writer rendezvous: existing={existing:?} requested={close:?}"
+                ))
+                .into());
+            }
+            None => *witness = Some(close.clone()),
+        }
+        drop(witness);
+        drop(state);
+        self.notify_change();
+        Ok(())
+    }
+
+    fn writer_rendezvous_epoch(&self) -> Option<RuntimeEpoch> {
+        let close = self
+            .writer_rendezvous
+            .lock()
+            .expect("raw-day writer-rendezvous mutex poisoned")
+            .clone()?;
+        let matches = match &*self.state.lock().expect("raw-day gate mutex poisoned") {
+            RawDayGateState::Active(active) => {
+                active.utc_day == close.utc_day && active.generation == close.generation
+            }
+            RawDayGateState::Closing(existing) => existing == &close,
+            RawDayGateState::ClosingSameDay(_) | RawDayGateState::Inactive => false,
+        };
+        matches.then_some(RuntimeEpoch {
+            utc_day: close.next_utc_day,
+            generation: close.next_generation,
+        })
+    }
+
+    fn clear_writer_rendezvous(&self, close: &RawDayClose) -> Result<()> {
+        let mut witness = self
+            .writer_rendezvous
+            .lock()
+            .expect("raw-day writer-rendezvous mutex poisoned");
+        match witness.as_ref() {
+            Some(existing) if existing == close => *witness = None,
+            Some(existing) => {
+                return Err(invalid_data(format!(
+                    "writer rendezvous clear identity mismatch: existing={existing:?} requested={close:?}"
+                ))
+                .into());
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
+    fn all_other_source_fences_registered(
+        &self,
+        excluded_producer: &str,
+        close: &RawDayClose,
+    ) -> bool {
+        let identity = (close.generation, close.close_id);
+        let fences = self
+            .source_fences
+            .lock()
+            .expect("raw-day source-fence mutex poisoned");
+        LOGICAL_PRODUCERS
+            .iter()
+            .filter(|producer| **producer != excluded_producer)
+            .all(|producer| fences.get(*producer) == Some(&identity))
+    }
+
+    async fn wait_for_other_source_fences(
+        &self,
+        excluded_producer: &str,
+        close: &RawDayClose,
+    ) -> Result<()> {
+        if !LOGICAL_PRODUCERS.contains(&excluded_producer) {
+            return Err(invalid_data(format!(
+                "unknown logical producer excluded from source-fence wait: {excluded_producer}"
+            ))
+            .into());
+        }
+        let mut changes = self.state_changes.subscribe();
+        loop {
+            match self.current_state() {
+                RawDayGateState::Active(active)
+                    if active.utc_day == close.utc_day && active.generation == close.generation =>
+                {
+                    if self.all_other_source_fences_registered(excluded_producer, close) {
+                        return Ok(());
+                    }
+                }
+                other => {
+                    return Err(invalid_data(format!(
+                        "raw-day partial source-fence wait found conflicting state: excluded={excluded_producer} state={other:?} close={close:?}"
+                    ))
+                    .into());
+                }
+            }
+            changes.changed().await.map_err(|_| {
+                invalid_data(
+                    "raw-day gate change channel closed while partial source fences waited",
+                )
+            })?;
+        }
+    }
+
+    async fn wait_for_all_source_fences(&self, close: &RawDayClose) -> Result<()> {
+        let mut changes = self.state_changes.subscribe();
+        loop {
+            match self.current_state() {
+                RawDayGateState::Active(active)
+                    if active.utc_day == close.utc_day && active.generation == close.generation =>
+                {
+                    let prepared = self
+                        .prepared_close
+                        .lock()
+                        .expect("raw-day prepared-close mutex poisoned")
+                        .clone();
+                    if prepared.as_ref() != Some(close) {
+                        return Err(invalid_data(format!(
+                            "raw-day source-fence wait lost prepared close: prepared={prepared:?} close={close:?}"
+                        ))
+                        .into());
+                    }
+                    if self.all_source_fences_registered(close) {
+                        return Ok(());
+                    }
+                }
+                RawDayGateState::Closing(existing) if existing == *close => return Ok(()),
+                other => {
+                    return Err(invalid_data(format!(
+                        "raw-day source-fence wait found conflicting state: state={other:?} close={close:?}"
+                    ))
+                    .into());
+                }
+            }
+            changes.changed().await.map_err(|_| {
+                invalid_data("raw-day gate change channel closed while source fences waited")
+            })?;
+        }
+    }
+
+    async fn seal_prepared_rollover(&self, close: &RawDayClose) -> Result<RawDayClose> {
+        self.wait_for_all_source_fences(close).await?;
+        let _fence = Arc::clone(&self.enqueue_fence).write_owned().await;
+        let mut state = self.state.lock().expect("raw-day gate mutex poisoned");
+        if let RawDayGateState::Closing(existing) = &*state {
+            if existing == close {
+                return Ok(existing.clone());
+            }
+            return Err(invalid_data(format!(
+                "conflicting raw-day rollover close: existing={existing:?} requested={close:?}"
+            ))
+            .into());
+        }
+        let RawDayGateState::Active(active) = &*state else {
+            return Err(invalid_data("raw-day rollover seal requires an active gate").into());
+        };
+        if active.utc_day != close.utc_day || active.generation != close.generation {
+            return Err(invalid_data(format!(
+                "raw-day rollover seal active epoch mismatch: active={active:?} close={close:?}"
+            ))
+            .into());
+        }
+        let mut prepared = self
+            .prepared_close
+            .lock()
+            .expect("raw-day prepared-close mutex poisoned");
+        if prepared.as_ref() != Some(close) || !self.all_source_fences_registered(close) {
+            return Err(invalid_data(format!(
+                "raw-day rollover seal missing prepared close or source fences: prepared={prepared:?} close={close:?}"
+            ))
+            .into());
+        }
+        let open = Self::encoded_open_generation(close.generation)?;
+        let closed = Self::encoded_closed_generation(close.generation)?;
+        self.state_word
+            .compare_exchange(open, closed, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| invalid_data("raw-day rollover close CAS failed"))?;
+        *state = RawDayGateState::Closing(close.clone());
+        *prepared = None;
+        drop(prepared);
+        drop(state);
+        self.notify_change();
+        Ok(close.clone())
+    }
+
+    #[cfg(test)]
+    async fn close_for_rollover(&self, utc_day: &str, boundary_utc_ms: i64) -> Result<RawDayClose> {
+        let close = self.prepare_rollover(utc_day, boundary_utc_ms)?;
+        for producer in LOGICAL_PRODUCERS {
+            self.register_source_fence(producer, &close)?;
+        }
+        self.seal_prepared_rollover(&close).await
+    }
+
+    async fn activate_after_rollover(&self, close: &RawDayClose) -> Result<RawDayPermit> {
+        let _fence = Arc::clone(&self.enqueue_fence).write_owned().await;
+        let _transition = self
+            .rollover_transition
+            .lock()
+            .expect("raw-day rollover-transition mutex poisoned");
+        if self
+            .activation_committed
+            .lock()
+            .expect("raw-day activation-commit mutex poisoned")
+            .as_ref()
+            != Some(close)
+        {
+            return Err(invalid_data(format!(
+                "raw-day activation requires the matching committed manifest activation: close={close:?}"
+            ))
+            .into());
+        }
+        let mut state = self.state.lock().expect("raw-day gate mutex poisoned");
+        if self
+            .prepared_same_day_close
+            .lock()
+            .expect("same-day prepared-close mutex poisoned")
+            .is_some()
+        {
+            return Err(invalid_data(
+                "raw-day activation rejected because the committed new day is already closing",
+            )
+            .into());
+        }
+        match &*state {
+            RawDayGateState::Closing(existing) if existing == close => {}
+            RawDayGateState::Closing(existing) => {
+                return Err(invalid_data(format!(
+                    "raw-day rollover activation identity mismatch: expected={existing:?} actual={close:?}"
+                ))
+                .into());
+            }
+            RawDayGateState::Active(active)
+                if active.utc_day == close.next_utc_day
+                    && active.generation == close.next_generation =>
+            {
+                return Ok(active.clone());
+            }
+            RawDayGateState::Active(active) => {
+                return Err(invalid_data(format!(
+                    "raw-day rollover activation encountered unexpected active epoch: {active:?}"
+                ))
+                .into());
+            }
+            RawDayGateState::ClosingSameDay(existing) => {
+                return Err(invalid_data(format!(
+                    "raw-day rollover activation conflicts with same-day close: {existing:?}"
+                ))
+                .into());
+            }
+            RawDayGateState::Inactive => {
+                return Err(invalid_data("raw-day rollover activation found inactive gate").into());
+            }
+        }
+        let closed = Self::encoded_closed_generation(close.generation)?;
+        let open = Self::encoded_open_generation(close.next_generation)?;
+        self.state_word
+            .compare_exchange(closed, open, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| invalid_data("raw-day rollover activation CAS failed"))?;
+        let permit = RawDayPermit {
+            utc_day: close.next_utc_day.clone(),
+            generation: close.next_generation,
+        };
+        *state = RawDayGateState::Active(permit.clone());
+        self.source_fences
+            .lock()
+            .expect("raw-day source-fence mutex poisoned")
+            .clear();
+        self.clear_writer_rendezvous(close)?;
+        *self
+            .activation_committed
+            .lock()
+            .expect("raw-day activation-commit mutex poisoned") = None;
+        drop(state);
+        self.notify_change();
+        Ok(permit)
+    }
+
+    fn commit_release_if_no_exit<F>(
+        &self,
+        close: &RawDayClose,
+        deadline: Option<RuntimeDeadlineCandidate>,
+        release: F,
+    ) -> Result<()>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        let _transition = self
+            .rollover_transition
+            .lock()
+            .expect("raw-day rollover-transition mutex poisoned");
+        if self.materialize_deadline_locked(deadline)? {
+            return Err(invalid_data(format!(
+                "producer release rejected because the run deadline was reached: close={close:?}"
+            ))
+            .into());
+        }
+        if let Some(prepared) = self
+            .prepared_same_day_close
+            .lock()
+            .expect("same-day prepared-close mutex poisoned")
+            .as_ref()
+        {
+            return Err(invalid_data(format!(
+                "producer release rejected by an existing same-day close: prepared={prepared:?} rollover={close:?}"
+            ))
+            .into());
+        }
+        if let Some(exit) = self
+            .pending_exit
+            .lock()
+            .expect("raw-day pending-exit mutex poisoned")
+            .as_ref()
+        {
+            return Err(invalid_data(format!(
+                "producer release rejected by an existing pending exit: exit={exit:?} rollover={close:?}"
+            ))
+            .into());
+        }
+        match self.current_state() {
+            RawDayGateState::Active(active)
+                if active.utc_day == close.next_utc_day
+                    && active.generation == close.next_generation => {}
+            state => {
+                return Err(invalid_data(format!(
+                    "producer release requires the active next generation: state={state:?} close={close:?}"
+                ))
+                .into());
+            }
+        }
+        release()
+    }
+
+    #[cfg(test)]
+    fn commit_startup_release_if_no_exit<F>(
+        &self,
+        deadline: Option<RuntimeDeadlineCandidate>,
+        release: F,
+    ) -> Result<()>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        let _transition = self
+            .rollover_transition
+            .lock()
+            .expect("raw-day rollover-transition mutex poisoned");
+        if self.materialize_deadline_locked(deadline)? {
+            return Err(invalid_data(
+                "startup release rejected because the run deadline was reached",
+            )
+            .into());
+        }
+        if let Some(exit) = self.prepared_runtime_exit() {
+            return Err(invalid_data(format!(
+                "startup release rejected by an existing runtime exit: {exit:?}"
+            ))
+            .into());
+        }
+        if !matches!(self.current_state(), RawDayGateState::Active(_)) {
+            return Err(
+                invalid_data("startup release requires an active raw-day generation").into(),
+            );
+        }
+        release()
+    }
+
+    fn current_state(&self) -> RawDayGateState {
+        self.state
+            .lock()
+            .expect("raw-day gate mutex poisoned")
+            .clone()
+    }
+
+    #[cfg(test)]
+    fn observation_epoch(&self) -> Option<RuntimeEpoch> {
+        if let Some(close) = self
+            .activation_committed
+            .lock()
+            .expect("raw-day activation-commit mutex poisoned")
+            .as_ref()
+        {
+            return Some(RuntimeEpoch {
+                utc_day: close.next_utc_day.clone(),
+                generation: close.next_generation,
+            });
+        }
+        match self.current_state() {
+            RawDayGateState::Inactive => None,
+            RawDayGateState::Active(permit) => Some(RuntimeEpoch {
+                utc_day: permit.utc_day,
+                generation: permit.generation,
+            }),
+            RawDayGateState::Closing(close) => Some(RuntimeEpoch {
+                utc_day: close.utc_day,
+                generation: close.generation,
+            }),
+            RawDayGateState::ClosingSameDay(close) => Some(RuntimeEpoch {
+                utc_day: close.identity.utc_day,
+                generation: close.identity.generation,
+            }),
+        }
+    }
+
+    fn commit_manifest_activation<F>(
+        &self,
+        close: &RawDayClose,
+        deadline: Option<RuntimeDeadlineCandidate>,
+        commit: F,
+    ) -> Result<bool>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        let _transition = self
+            .rollover_transition
+            .lock()
+            .expect("raw-day rollover-transition mutex poisoned");
+        if self.materialize_deadline_locked(deadline)? {
+            return Ok(false);
+        }
+        if let Some(exit) = self
+            .pending_exit
+            .lock()
+            .expect("raw-day pending-exit mutex poisoned")
+            .as_ref()
+        {
+            let _ = exit;
+            return Ok(false);
+        }
+        if let Some(prepared_close) = self
+            .prepared_same_day_close
+            .lock()
+            .expect("same-day prepared-close mutex poisoned")
+            .as_ref()
+        {
+            let _ = prepared_close;
+            return Ok(false);
+        }
+        match self.current_state() {
+            RawDayGateState::Closing(actual) if actual == *close => {}
+            state => {
+                return Err(invalid_data(format!(
+                    "manifest activation commit found incompatible raw gate: state={state:?} close={close:?}"
+                ))
+                .into());
+            }
+        }
+        let mut committed = self
+            .activation_committed
+            .lock()
+            .expect("raw-day activation-commit mutex poisoned");
+        if let Some(existing) = committed.as_ref() {
+            return Err(invalid_data(format!(
+                "duplicate or conflicting manifest activation commit: existing={existing:?} actual={close:?}"
+            ))
+            .into());
+        }
+        commit()?;
+        *committed = Some(close.clone());
+        drop(committed);
+        self.notify_change();
+        Ok(true)
+    }
+
+    fn commit_old_day_if_no_exit<F>(
+        &self,
+        close: &RawDayClose,
+        deadline: Option<RuntimeDeadlineCandidate>,
+        commit: F,
+    ) -> Result<bool>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        let _transition = self
+            .rollover_transition
+            .lock()
+            .expect("raw-day rollover-transition mutex poisoned");
+        if self.materialize_deadline_locked(deadline)? {
+            return Ok(false);
+        }
+        if self
+            .prepared_same_day_close
+            .lock()
+            .expect("same-day prepared-close mutex poisoned")
+            .is_some()
+            || self
+                .pending_exit
+                .lock()
+                .expect("raw-day pending-exit mutex poisoned")
+                .is_some()
+        {
+            return Ok(false);
+        }
+        match self.current_state() {
+            RawDayGateState::Closing(actual) if actual == *close => {}
+            state => {
+                return Err(invalid_data(format!(
+                    "old-day normal commit found incompatible raw gate: state={state:?} close={close:?}"
+                ))
+                .into());
+            }
+        }
+        commit()?;
+        Ok(true)
+    }
+
+    async fn begin_close_bound_deferred_flush(
+        self: &Arc<Self>,
+        producer: &str,
+        close: &RawDayClose,
+        recv_time_utc_ms: i64,
+    ) -> Result<RawDayEnqueuePermit> {
+        let utc_day = utc_day_string_from_ms(recv_time_utc_ms)
+            .ok_or_else(|| invalid_data("UTC day unavailable for deferred raw-event permit"))?;
+        let fence = Arc::clone(&self.enqueue_fence).read_owned().await;
+        let state = self.current_state();
+        let RawDayGateState::Closing(actual) = state else {
+            return Err(invalid_data(format!(
+                "close-bound deferred flush requires a closing raw-day gate: producer={producer} state={state:?} close={close:?}"
+            ))
+            .into());
+        };
+        if actual != *close || utc_day != close.next_utc_day {
+            return Err(invalid_data(format!(
+                "close-bound deferred flush identity mismatch: producer={producer} event_day={utc_day} actual={actual:?} expected={close:?}"
+            ))
+            .into());
+        }
+        Ok(RawDayEnqueuePermit {
+            permit: RawDayPermit {
+                utc_day,
+                generation: close.next_generation,
+            },
+            _fence: fence,
+        })
+    }
+
+    async fn begin_event_enqueue(
+        self: &Arc<Self>,
+        producer: &str,
+        recv_time_utc_ms: i64,
+    ) -> Result<RawDayEnqueueDecision> {
+        let utc_day = utc_day_string_from_ms(recv_time_utc_ms)
+            .ok_or_else(|| invalid_data("UTC day unavailable for raw event permit"))?;
+        let fence = Arc::clone(&self.enqueue_fence).read_owned().await;
+        match self.current_state() {
+            RawDayGateState::Active(permit) if permit.utc_day == utc_day => {
+                Ok(RawDayEnqueueDecision::Permit(RawDayEnqueuePermit {
+                        permit,
+                        _fence: fence,
+                    }))
+            }
+            RawDayGateState::Active(permit) if utc_day > permit.utc_day => {
+                let event_day_start = recv_time_utc_ms
+                    .div_euclid(UTC_DAY_MS)
+                    .saturating_mul(UTC_DAY_MS);
+                let preceding_day = utc_day_string_from_ms(event_day_start.saturating_sub(1))
+                    .ok_or_else(|| invalid_data("UTC day unavailable before deferred raw event"))?;
+                if preceding_day != permit.utc_day {
+                    return Err(invalid_data(format!(
+                        "raw event skipped beyond the immediately following UTC day: producer={producer} event={utc_day} active={} generation={}",
+                        permit.utc_day, permit.generation
+                    ))
+                    .into());
+                }
+                let expected_generation = permit
+                    .generation
+                    .checked_add(1)
+                    .ok_or_else(|| invalid_data("raw-day generation overflow while deferring"))?;
+                drop(fence);
+                Ok(RawDayEnqueueDecision::Defer(RawDayDeferredEpoch {
+                    utc_day,
+                    old_generation: permit.generation,
+                    expected_generation,
+                }))
+            }
+            RawDayGateState::Closing(close) if utc_day == close.next_utc_day => {
+                drop(fence);
+                Ok(RawDayEnqueueDecision::Defer(RawDayDeferredEpoch {
+                    utc_day,
+                    old_generation: close.generation,
+                    expected_generation: close.next_generation,
+                }))
+            }
+            RawDayGateState::Inactive => {
+                Err(invalid_data("raw event reached inactive raw-day gate").into())
+            }
+            RawDayGateState::Active(permit) => Err(invalid_data(format!(
+                "raw event UTC day regressed: producer={producer} event={utc_day} active={} generation={}",
+                permit.utc_day, permit.generation
+            ))
+            .into()),
+            RawDayGateState::Closing(close) => Err(invalid_data(format!(
+                "raw event does not belong to next UTC day after intake close: producer={producer} event={utc_day} close={close:?}"
+            ))
+            .into()),
+            RawDayGateState::ClosingSameDay(close) => Err(invalid_data(format!(
+                "raw event arrived after same-day intake close: producer={producer} event={utc_day} close={close:?}"
+            ))
+            .into()),
+        }
+    }
+}
+
 #[derive(Default)]
 struct SourceQueueBackpressureStats {
     wait_count: AtomicU64,
@@ -465,9 +2295,53 @@ struct SourceQueueBackpressureStats {
     dropped_rows: AtomicU64,
     operational_counters: Mutex<BTreeMap<String, BTreeMap<String, SourceOperationalCounterDelta>>>,
     active_recovery_sources: Mutex<BTreeSet<String>>,
+    deferred_raw_batches: Mutex<BTreeMap<String, VecDeque<DeferredRawBatch>>>,
+    raw_day_gate: OnceLock<Arc<RawDayGate>>,
 }
 
 impl SourceQueueBackpressureStats {
+    fn install_raw_day_gate(&self, gate: Arc<RawDayGate>) -> Result<()> {
+        self.raw_day_gate
+            .set(gate)
+            .map_err(|_| invalid_data("raw-day gate already installed").into())
+    }
+
+    fn raw_day_gate(&self) -> Option<Arc<RawDayGate>> {
+        self.raw_day_gate.get().cloned()
+    }
+
+    fn defer_raw_batch(
+        &self,
+        producer: &str,
+        epoch: RawDayDeferredEpoch,
+        events: Vec<InflightRawEvent>,
+    ) -> Result<()> {
+        if events.is_empty() {
+            return Err(invalid_data("cannot defer an empty raw-event batch").into());
+        }
+        if !LOGICAL_PRODUCERS.contains(&producer) {
+            return Err(invalid_data(format!(
+                "cannot defer raw events for unknown logical producer: {producer}"
+            ))
+            .into());
+        }
+        self.deferred_raw_batches
+            .lock()
+            .expect("deferred raw-event mutex poisoned")
+            .entry(producer.to_owned())
+            .or_default()
+            .push_back(DeferredRawBatch { epoch, events });
+        Ok(())
+    }
+
+    fn take_deferred_raw_batches(&self, producer: &str) -> VecDeque<DeferredRawBatch> {
+        self.deferred_raw_batches
+            .lock()
+            .expect("deferred raw-event mutex poisoned")
+            .remove(producer)
+            .unwrap_or_default()
+    }
+
     fn record_wait(&self) {
         self.wait_count.fetch_add(1, Ordering::Relaxed);
     }
@@ -561,13 +2435,6 @@ impl SourceQueueBackpressureStats {
         }
     }
 
-    fn is_recovery_active(&self, source_kind: &str) -> bool {
-        self.active_recovery_sources
-            .lock()
-            .expect("active recovery mutex poisoned")
-            .contains(source_kind)
-    }
-
     fn apply_to_tracker(&self, tracker: &mut QueueDurationTracker) {
         let wait_count = self.wait_count.swap(0, Ordering::Relaxed);
         for _ in 0..wait_count {
@@ -612,12 +2479,51 @@ enum IngressControl {
     },
     DayBarrier {
         producer: String,
-        utc_day: String,
+        close: RawDayClose,
+        reply: oneshot::Sender<std::result::Result<DayBarrierRelease, String>>,
     },
     BinanceContinuity {
         utc_day: String,
         continuity: BinanceAggTradeContinuityState,
     },
+}
+
+#[derive(Debug)]
+enum DayBarrierRelease {
+    #[cfg(test)]
+    Resume,
+    PrepareResume(ProducerReleaseToken),
+    StopWithClose(RuntimeCloseIdentity),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ProducerReleasePhase {
+    Held,
+    FlushDeferred,
+    ResumeSources,
+    Stop(RuntimeCloseIdentity),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProducerReleaseAckKind {
+    Armed,
+    Flushed,
+}
+
+#[derive(Debug)]
+struct ProducerReleaseAck {
+    producer: String,
+    close: RuntimeCloseIdentity,
+    kind: ProducerReleaseAckKind,
+    error: Option<String>,
+}
+
+#[derive(Debug)]
+struct ProducerReleaseToken {
+    producer: String,
+    close: RawDayClose,
+    phase_rx: watch::Receiver<ProducerReleasePhase>,
+    ack_tx: mpsc::Sender<ProducerReleaseAck>,
 }
 
 enum AggTradeSourceControl {
@@ -655,6 +2561,7 @@ struct PendingAggTradeStop {
 struct InflightRawEvent {
     event: RawEvent,
     control: Option<IngressControl>,
+    raw_day_permit: Option<RawDayPermit>,
     _source_recv_monotonic_ms: u64,
     _reservation: Option<InflightReservation>,
 }
@@ -667,6 +2574,7 @@ impl InflightRawEvent {
         Self {
             event,
             control: None,
+            raw_day_permit: None,
             _source_recv_monotonic_ms: 0,
             _reservation: Some(budget.try_acquire(1, bytes)),
         }
@@ -702,12 +2610,280 @@ pub struct LiveTrainingRuntimeReceipt {
     pub source_gaps: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum StartupParticipantKind {
+    Producer,
+    Writer,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct StartupParticipant {
+    kind: StartupParticipantKind,
+    name: &'static str,
+}
+
+impl StartupParticipant {
+    fn producer(name: &'static str) -> Self {
+        Self {
+            kind: StartupParticipantKind::Producer,
+            name,
+        }
+    }
+
+    fn writer(name: &'static str) -> Self {
+        Self {
+            kind: StartupParticipantKind::Writer,
+            name,
+        }
+    }
+}
+
+struct StartupReleaseSender {
+    participant: StartupParticipant,
+    sender: oneshot::Sender<StartupReleasePhase>,
+}
+
+struct StartupReleaseHandles {
+    writers: Vec<StartupReleaseSender>,
+    producers: Vec<StartupReleaseSender>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StartupReleasePhase {
+    Run,
+    Stop(RuntimeCloseIdentity),
+}
+
+impl StartupReleaseHandles {
+    fn participants(&self) -> BTreeSet<StartupParticipant> {
+        self.writers
+            .iter()
+            .chain(&self.producers)
+            .map(|release| release.participant)
+            .collect()
+    }
+
+    fn release(self) -> Result<()> {
+        self.send_phases(|_| StartupReleasePhase::Run, |_| StartupReleasePhase::Run)
+    }
+
+    fn stop_for_exit(self, exit: &PreparedRuntimeExit) -> Result<()> {
+        let source_close = RawDayGate::runtime_exit_identity(exit);
+        self.send_phases(
+            |_| StartupReleasePhase::Run,
+            |_| StartupReleasePhase::Stop(source_close.clone()),
+        )
+    }
+
+    fn send_phases<FW, FP>(self, writer_phase: FW, producer_phase: FP) -> Result<()>
+    where
+        FW: Fn(&StartupParticipant) -> StartupReleasePhase,
+        FP: Fn(&StartupParticipant) -> StartupReleasePhase,
+    {
+        let mut failures = Vec::new();
+        for release in self.writers {
+            if release
+                .sender
+                .send(writer_phase(&release.participant))
+                .is_err()
+            {
+                failures.push(release.participant);
+            }
+        }
+        for release in self.producers {
+            if release
+                .sender
+                .send(producer_phase(&release.participant))
+                .is_err()
+            {
+                failures.push(release.participant);
+            }
+        }
+        if !failures.is_empty() {
+            return Err(invalid_data(format!(
+                "startup participants dropped before release: {failures:?}"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+}
+
+struct WriterStartupGate {
+    participant: StartupParticipant,
+    ready_tx: mpsc::Sender<StartupParticipant>,
+    release_rx: oneshot::Receiver<StartupReleasePhase>,
+}
+
+async fn run_producer_after_startup_gate<F>(
+    participant: StartupParticipant,
+    ready_tx: mpsc::Sender<StartupParticipant>,
+    release_rx: oneshot::Receiver<StartupReleasePhase>,
+    source: F,
+) -> Result<()>
+where
+    F: Future<Output = Result<()>>,
+{
+    ready_tx.send(participant).await.map_err(|_| {
+        invalid_data(format!(
+            "startup ready channel closed before producer ready: {}",
+            participant.name
+        ))
+    })?;
+    let phase = release_rx.await.map_err(|_| {
+        invalid_data(format!(
+            "startup activation gate closed before producer release: {}",
+            participant.name
+        ))
+    })?;
+    match phase {
+        StartupReleasePhase::Run => source.await,
+        StartupReleasePhase::Stop(close) => Err(CoordinatedSourceStop {
+            producer: participant.name.to_owned(),
+            close,
+        }
+        .into()),
+    }
+}
+
+fn expected_startup_participants() -> BTreeSet<StartupParticipant> {
+    LOGICAL_PRODUCERS
+        .iter()
+        .map(|producer| StartupParticipant::producer(producer))
+        .chain(
+            LIVE_SOURCES
+                .iter()
+                .map(|source_kind| StartupParticipant::writer(source_kind)),
+        )
+        .collect()
+}
+
 fn deadline_reached(deadline: Option<Instant>) -> bool {
     deadline.is_some_and(|deadline| Instant::now() >= deadline)
 }
 
 fn deadline_remaining(deadline: Option<Instant>) -> Option<Duration> {
     deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeExitRequest {
+    observed_utc_ms: i64,
+    cause: RuntimeCloseCause,
+}
+
+struct RuntimeExitWatcher {
+    join: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl RuntimeExitWatcher {
+    fn new(join: tokio::task::JoinHandle<()>) -> Self {
+        Self { join: Some(join) }
+    }
+
+    async fn abort_and_join(&mut self) {
+        let Some(join) = self.join.take() else {
+            return;
+        };
+        join.abort();
+        let _ = join.await;
+    }
+}
+
+impl Drop for RuntimeExitWatcher {
+    fn drop(&mut self) {
+        if let Some(join) = self.join.as_ref() {
+            join.abort();
+        }
+    }
+}
+
+async fn abort_manifest_owner_if_running(
+    handle: &mut tokio::task::JoinHandle<Result<()>>,
+    deadline: Instant,
+) -> bool {
+    if handle.is_finished() {
+        return false;
+    }
+    handle.abort();
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if !remaining.is_zero() {
+        let _ = timeout(remaining, handle).await;
+    }
+    true
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RuntimeDeadlineCandidate {
+    deadline: Instant,
+    observed_utc_ms: i64,
+}
+
+impl RuntimeDeadlineCandidate {
+    fn is_reached(self) -> bool {
+        Instant::now() >= self.deadline
+    }
+}
+
+fn apply_runtime_exit_request(
+    raw_day_gate: &RawDayGate,
+    request: &RuntimeExitRequest,
+) -> Result<PreparedRuntimeExit> {
+    raw_day_gate.prepare_runtime_exit_with_cause(request.observed_utc_ms, request.cause.clone())
+}
+
+enum RawDaySealOutcome {
+    Sealed(RawDayClose),
+    SourceEnded(Result<()>),
+}
+
+async fn complete_source_return_at_pending_rollover(
+    sink: &SourceEventSink,
+    run_started: Instant,
+    producer: &'static str,
+    source_result: Result<()>,
+) -> Result<()> {
+    let Some(gate) = sink.source_queue_backpressure.raw_day_gate() else {
+        return source_result;
+    };
+    let Some(PreparedRuntimeExit::Rollover(exit)) = gate.prepared_runtime_exit() else {
+        return source_result;
+    };
+    if producer == "polymarket_rtds" {
+        gate.wait_for_other_source_fences(producer, &exit.close)
+            .await?;
+    }
+    gate.register_source_fence(producer, &exit.close)?;
+    let close = gate.seal_prepared_rollover(&exit.close).await?;
+    let release = send_day_barrier(sink, run_started, producer, close.clone()).await?;
+    match apply_day_barrier_release(sink, producer, &close, release).await {
+        Ok(true) => Err(invalid_data(format!(
+            "source returned during rollover but coordinator resumed producer: {producer}"
+        ))
+        .into()),
+        Ok(false) => source_result,
+        Err(error) if is_exact_coordinated_source_stop(error.as_ref(), producer, &close) => {
+            source_result
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn seal_raw_day_while_source_runs<F>(
+    mut source: Pin<&mut F>,
+    raw_day_gate: &RawDayGate,
+    close: &RawDayClose,
+) -> Result<RawDaySealOutcome>
+where
+    F: Future<Output = Result<()>>,
+{
+    let seal = raw_day_gate.seal_prepared_rollover(close);
+    tokio::pin!(seal);
+    tokio::select! {
+        biased;
+        result = &mut seal => result.map(RawDaySealOutcome::Sealed),
+        result = source.as_mut() => Ok(RawDaySealOutcome::SourceEnded(result)),
+    }
 }
 
 async fn run_logical_producer_with_day_barriers<F>(
@@ -727,23 +2903,38 @@ where
         if now_ms() >= next_boundary_ms {
             let utc_day = utc_day_string_from_ms(next_boundary_ms.saturating_sub(1))
                 .ok_or_else(|| invalid_data("UTC day unavailable for producer barrier"))?;
-            let next_utc_day = utc_day_string_from_ms(next_boundary_ms)
-                .ok_or_else(|| invalid_data("next UTC day unavailable for producer gap"))?;
-            record_recovery_boundary_gaps(&sink, producer, &utc_day, &next_utc_day);
+            let raw_day_gate = raw_day_gate_for_rollover(&sink, &utc_day).await?;
+            let close = raw_day_gate.prepare_rollover(&utc_day, next_boundary_ms)?;
+            raw_day_gate
+                .wait_for_other_source_fences(producer, &close)
+                .await?;
+            raw_day_gate.register_source_fence(producer, &close)?;
+            let close = if source_started {
+                match seal_raw_day_while_source_runs(source.as_mut(), &raw_day_gate, &close).await?
+                {
+                    RawDaySealOutcome::Sealed(close) => close,
+                    RawDaySealOutcome::SourceEnded(result) => return result,
+                }
+            } else {
+                raw_day_gate.seal_prepared_rollover(&close).await?
+            };
             if source_started {
                 if let Some(source_result) = wait_for_day_barrier_while_source_runs(
                     source.as_mut(),
                     &sink,
                     run_started,
                     producer,
-                    utc_day,
+                    close,
                 )
                 .await?
                 {
                     return source_result;
                 }
             } else {
-                send_day_barrier(&sink, run_started, producer, utc_day).await?;
+                let release = send_day_barrier(&sink, run_started, producer, close.clone()).await?;
+                if !apply_day_barrier_release(&sink, producer, &close, release).await? {
+                    return Ok(());
+                }
             }
             next_boundary_ms = next_boundary_ms.saturating_add(UTC_DAY_MS);
             continue;
@@ -751,30 +2942,385 @@ where
         let wait_ms = next_boundary_ms.saturating_sub(now_ms()).max(0) as u64;
         source_started = true;
         tokio::select! {
-            result = &mut source => return result,
+            result = &mut source => {
+                return complete_source_return_at_pending_rollover(
+                    &sink,
+                    run_started,
+                    producer,
+                    result,
+                ).await;
+            },
             () = sleep(Duration::from_millis(wait_ms)) => {}
         }
     }
 }
 
 async fn wait_for_day_barrier_while_source_runs<F>(
-    mut source: Pin<&mut F>,
+    _source: Pin<&mut F>,
     sink: &SourceEventSink,
     run_started: Instant,
     producer: &str,
-    utc_day: String,
+    close: RawDayClose,
 ) -> Result<Option<Result<()>>>
 where
     F: Future<Output = Result<()>>,
 {
-    let barrier = send_day_barrier(sink, run_started, producer, utc_day);
-    tokio::pin!(barrier);
+    let release = send_day_barrier(sink, run_started, producer, close.clone()).await?;
+    if apply_day_barrier_release(sink, producer, &close, release).await? {
+        Ok(None)
+    } else {
+        Ok(Some(Ok(())))
+    }
+}
+
+async fn raw_day_gate_for_rollover(
+    sink: &SourceEventSink,
+    _utc_day: &str,
+) -> Result<Arc<RawDayGate>> {
+    sink.source_queue_backpressure
+        .raw_day_gate()
+        .ok_or_else(|| invalid_data("raw-day gate missing from producer rollover wrapper").into())
+}
+
+fn record_deferred_batch_drop(sink: &SourceEventSink, events: &[InflightRawEvent]) {
+    sink.source_queue_backpressure
+        .record_drop(events.len() as u64);
+    for event in events {
+        sink.source_queue_backpressure.record_operational_drop(
+            &event.event.source_kind,
+            event.event.recv_time_utc_ms,
+            1,
+        );
+    }
+}
+
+fn record_deferred_flush_drop(
+    sink: &SourceEventSink,
+    current: &[InflightRawEvent],
+    remaining: &VecDeque<DeferredRawBatch>,
+) {
+    record_deferred_batch_drop(sink, current);
+    for batch in remaining {
+        record_deferred_batch_drop(sink, &batch.events);
+    }
+}
+
+fn drop_deferred_raw_events(sink: &SourceEventSink, producer: &str) {
+    for batch in sink
+        .source_queue_backpressure
+        .take_deferred_raw_batches(producer)
+    {
+        record_deferred_batch_drop(sink, &batch.events);
+    }
+}
+
+async fn flush_deferred_raw_events(
+    sink: &SourceEventSink,
+    producer: &str,
+    close: &RawDayClose,
+) -> Result<()> {
+    let mut batches = sink
+        .source_queue_backpressure
+        .take_deferred_raw_batches(producer);
+    while let Some(batch) = batches.pop_front() {
+        let epoch = batch.epoch;
+        let mut events = batch.events;
+        if epoch.utc_day != close.next_utc_day
+            || epoch.old_generation != close.generation
+            || epoch.expected_generation != close.next_generation
+        {
+            record_deferred_flush_drop(sink, &events, &batches);
+            return Err(invalid_data(format!(
+                "deferred raw-event batch close identity mismatch: producer={producer} expected_close={close:?} actual_epoch={epoch:?}"
+            ))
+            .into());
+        }
+        let first = events
+            .first()
+            .ok_or_else(|| invalid_data("deferred raw-event batch became empty"))?;
+        if events.iter().any(|event| {
+            logical_producer_for_source_kind(&event.event.source_kind).ok() != Some(producer)
+        }) {
+            record_deferred_flush_drop(sink, &events, &batches);
+            return Err(invalid_data(format!(
+                "deferred raw-event producer mismatch while flushing: expected={producer}"
+            ))
+            .into());
+        }
+        let gate = sink
+            .source_queue_backpressure
+            .raw_day_gate()
+            .ok_or_else(|| invalid_data("raw-day gate missing while deferred events flushed"))?;
+        let enqueue = match gate.current_state() {
+            RawDayGateState::Closing(ref actual) if actual == close => {
+                gate.begin_close_bound_deferred_flush(producer, close, first.event.recv_time_utc_ms)
+                    .await?
+            }
+            _ => match gate
+                .begin_event_enqueue(producer, first.event.recv_time_utc_ms)
+                .await?
+            {
+                RawDayEnqueueDecision::Permit(enqueue) => enqueue,
+                RawDayEnqueueDecision::Defer(actual_epoch) => {
+                    record_deferred_flush_drop(sink, &events, &batches);
+                    return Err(invalid_data(format!(
+                        "deferred raw-event batch remained ahead of active day: producer={producer} expected={epoch:?} actual={actual_epoch:?} recv_time_utc_ms={}",
+                        first.event.recv_time_utc_ms,
+                    ))
+                    .into());
+                }
+            },
+        };
+        let permit = enqueue.permit.clone();
+        if permit.utc_day != epoch.utc_day
+            || permit.generation != epoch.expected_generation
+            || permit.generation != epoch.old_generation.saturating_add(1)
+            || events.iter().any(|event| {
+                utc_day_string_from_ms(event.event.recv_time_utc_ms).as_deref()
+                    != Some(permit.utc_day.as_str())
+            })
+        {
+            record_deferred_flush_drop(sink, &events, &batches);
+            return Err(invalid_data(format!(
+                "deferred raw-event batch epoch mismatch: producer={producer} expected={epoch:?} active={permit:?}"
+            ))
+            .into());
+        }
+        for event in &mut events {
+            event.raw_day_permit = Some(permit.clone());
+        }
+        let count = events.len();
+        let _enqueue_guard = sink.enqueue_lock.lock().await;
+        if count > sink.tx.max_capacity() {
+            record_deferred_flush_drop(sink, &events, &batches);
+            return Err(invalid_data(format!(
+                "deferred raw-event batch exceeds ingress capacity: producer={producer} rows={count} capacity={}",
+                sink.tx.max_capacity()
+            ))
+            .into());
+        }
+        let permits = match sink.tx.try_reserve_many(count) {
+            Ok(permits) => permits,
+            Err(mpsc::error::TrySendError::Full(())) => {
+                sink.source_queue_backpressure.record_wait();
+                match timeout(BUFFER_ACQUIRE_TIMEOUT, sink.tx.reserve_many(count)).await {
+                    Ok(Ok(permits)) => permits,
+                    Ok(Err(_)) => {
+                        record_deferred_flush_drop(sink, &events, &batches);
+                        return Err(io::Error::new(
+                            io::ErrorKind::BrokenPipe,
+                            format!(
+                                "deferred raw-event ingress channel closed: producer={producer}"
+                            ),
+                        )
+                        .into());
+                    }
+                    Err(_) => {
+                        sink.source_queue_backpressure.record_timeout();
+                        record_deferred_flush_drop(sink, &events, &batches);
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!("deferred raw-event ingress timeout: producer={producer}"),
+                        )
+                        .into());
+                    }
+                }
+            }
+            Err(mpsc::error::TrySendError::Closed(())) => {
+                record_deferred_flush_drop(sink, &events, &batches);
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    format!("deferred raw-event ingress channel closed: producer={producer}"),
+                )
+                .into());
+            }
+        };
+        for (permit, event) in permits.zip(events) {
+            permit.send(event);
+        }
+    }
+    Ok(())
+}
+
+async fn wait_for_producer_release_phase(
+    phase_rx: &mut watch::Receiver<ProducerReleasePhase>,
+) -> Result<ProducerReleasePhase> {
+    loop {
+        let phase = phase_rx.borrow_and_update().clone();
+        if phase != ProducerReleasePhase::Held {
+            return Ok(phase);
+        }
+        phase_rx.changed().await.map_err(|_| {
+            invalid_data("producer release phase owner dropped before a terminal phase")
+        })?;
+    }
+}
+
+async fn apply_day_barrier_release(
+    sink: &SourceEventSink,
+    producer: &str,
+    close: &RawDayClose,
+    release: DayBarrierRelease,
+) -> Result<bool> {
+    match release {
+        #[cfg(test)]
+        DayBarrierRelease::Resume => {
+            flush_deferred_raw_events(sink, producer, close).await?;
+            Ok(true)
+        }
+        DayBarrierRelease::StopWithClose(actual) => {
+            let expected = RuntimeCloseIdentity::from_rollover_old_day(close);
+            if actual != expected {
+                return Err(invalid_data(format!(
+                    "producer Stop close identity mismatch: producer={producer} expected={expected:?} actual={actual:?}"
+                ))
+                .into());
+            }
+            drop_deferred_raw_events(sink, producer);
+            Err(CoordinatedSourceStop {
+                producer: producer.to_owned(),
+                close: actual,
+            }
+            .into())
+        }
+        DayBarrierRelease::PrepareResume(mut token) => {
+            if token.producer != producer || token.close != *close {
+                return Err(invalid_data(format!(
+                    "producer release token identity mismatch: expected_producer={producer} expected_close={close:?} actual_producer={} actual_close={:?}",
+                    token.producer, token.close
+                ))
+                .into());
+            }
+            let close_identity = RuntimeCloseIdentity::from_rollover_old_day(close);
+            token
+                .ack_tx
+                .send(ProducerReleaseAck {
+                    producer: producer.to_owned(),
+                    close: close_identity.clone(),
+                    kind: ProducerReleaseAckKind::Armed,
+                    error: None,
+                })
+                .await
+                .map_err(|_| invalid_data("producer release armed-ack channel closed"))?;
+            match wait_for_producer_release_phase(&mut token.phase_rx).await? {
+                ProducerReleasePhase::Stop(actual) => {
+                    validate_release_stop_identity(close, &actual)?;
+                    drop_deferred_raw_events(sink, producer);
+                    return Err(CoordinatedSourceStop {
+                        producer: producer.to_owned(),
+                        close: actual,
+                    }
+                    .into());
+                }
+                ProducerReleasePhase::FlushDeferred => {}
+                ProducerReleasePhase::ResumeSources => {
+                    return Err(invalid_data(format!(
+                        "producer release skipped deferred flush: producer={producer} close={close:?}"
+                    ))
+                    .into());
+                }
+                ProducerReleasePhase::Held => unreachable!("phase waiter excludes Held"),
+            }
+
+            let flush_error = flush_deferred_raw_events(sink, producer, close)
+                .await
+                .err()
+                .map(|error| error.to_string());
+            token
+                .ack_tx
+                .send(ProducerReleaseAck {
+                    producer: producer.to_owned(),
+                    close: close_identity,
+                    kind: ProducerReleaseAckKind::Flushed,
+                    error: flush_error.clone(),
+                })
+                .await
+                .map_err(|_| invalid_data("producer deferred-flush ack channel closed"))?;
+            if let Some(error) = flush_error {
+                return Err(invalid_data(format!(
+                    "producer deferred flush failed: producer={producer} error={error}"
+                ))
+                .into());
+            }
+            loop {
+                let phase = token.phase_rx.borrow_and_update().clone();
+                match phase {
+                    ProducerReleasePhase::ResumeSources => return Ok(true),
+                    ProducerReleasePhase::Stop(actual) => {
+                        validate_release_stop_identity(close, &actual)?;
+                        drop_deferred_raw_events(sink, producer);
+                        return Err(CoordinatedSourceStop {
+                            producer: producer.to_owned(),
+                            close: actual,
+                        }
+                        .into());
+                    }
+                    ProducerReleasePhase::Held | ProducerReleasePhase::FlushDeferred => {
+                        token.phase_rx.changed().await.map_err(|_| {
+                            invalid_data(
+                                "producer release phase owner dropped before resume or stop",
+                            )
+                        })?;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn validate_release_stop_identity(
+    close: &RawDayClose,
+    actual: &RuntimeCloseIdentity,
+) -> Result<()> {
+    let old = RuntimeCloseIdentity::from_rollover_old_day(close);
+    let belongs_to_committed_next_generation = actual.utc_day == close.next_utc_day
+        && actual.generation == close.next_generation
+        && actual.close_id != 0;
+    if *actual == old || belongs_to_committed_next_generation {
+        Ok(())
+    } else {
+        Err(invalid_data(format!(
+            "producer release stop identity mismatch: rollover={close:?} actual={actual:?}"
+        ))
+        .into())
+    }
+}
+
+fn is_exact_coordinated_source_stop(
+    error: &(dyn Error + Send + Sync + 'static),
+    producer: &str,
+    close: &RawDayClose,
+) -> bool {
+    error
+        .downcast_ref::<CoordinatedSourceStop>()
+        .is_some_and(|stop| {
+            stop.producer == producer
+                && stop.close == RuntimeCloseIdentity::from_rollover_old_day(close)
+        })
+}
+
+async fn wait_for_source_fence_reply_or_source<F>(
+    mut source: Pin<&mut F>,
+    reply_rx: &mut oneshot::Receiver<std::result::Result<(), String>>,
+    failure_label: &str,
+) -> Result<Option<Result<()>>>
+where
+    F: Future<Output = Result<()>>,
+{
     tokio::select! {
-        result = source.as_mut() => Ok(Some(result)),
-        result = &mut barrier => {
-            result?;
-            Ok(None)
+        biased;
+        reply = reply_rx => {
+            match reply {
+                Ok(Ok(())) => Ok(None),
+                Ok(Err(error)) => Err(invalid_data(format!(
+                    "{failure_label} failed before day barrier:{error}"
+                )).into()),
+                Err(_) => Err(invalid_data(format!(
+                    "{failure_label} dropped day-barrier reply"
+                )).into()),
+            }
         },
+        result = source.as_mut() => Ok(Some(result)),
     }
 }
 
@@ -795,24 +3341,35 @@ where
         if now_ms() >= next_boundary_ms {
             let utc_day = utc_day_string_from_ms(next_boundary_ms.saturating_sub(1))
                 .ok_or_else(|| invalid_data("UTC day unavailable for Polymarket barrier"))?;
-            let next_utc_day = utc_day_string_from_ms(next_boundary_ms)
-                .ok_or_else(|| invalid_data("next UTC day unavailable for Polymarket gap"))?;
+            let raw_day_gate = raw_day_gate_for_rollover(&sink, &utc_day).await?;
+            let close = raw_day_gate.prepare_rollover(&utc_day, next_boundary_ms)?;
             if source_started {
                 if let Some(source_result) = fence_polymarket_and_send_day_barrier(
                     source.as_mut(),
                     &control_tx,
                     &sink,
                     run_started,
-                    &utc_day,
-                    &next_utc_day,
+                    &raw_day_gate,
+                    &close,
                 )
                 .await?
                 {
-                    return source_result;
+                    return complete_source_return_at_pending_rollover(
+                        &sink,
+                        run_started,
+                        "polymarket",
+                        source_result,
+                    )
+                    .await;
                 }
             } else {
-                record_recovery_boundary_gaps(&sink, "polymarket", &utc_day, &next_utc_day);
-                send_day_barrier(&sink, run_started, "polymarket", utc_day).await?;
+                raw_day_gate.register_source_fence("polymarket", &close)?;
+                let close = raw_day_gate.seal_prepared_rollover(&close).await?;
+                let release =
+                    send_day_barrier(&sink, run_started, "polymarket", close.clone()).await?;
+                if !apply_day_barrier_release(&sink, "polymarket", &close, release).await? {
+                    return Ok(());
+                }
             }
             next_boundary_ms = next_boundary_ms.saturating_add(UTC_DAY_MS);
             continue;
@@ -820,7 +3377,14 @@ where
         let wait_ms = next_boundary_ms.saturating_sub(now_ms()).max(0) as u64;
         source_started = true;
         tokio::select! {
-            result = &mut source => return result,
+            result = &mut source => {
+                return complete_source_return_at_pending_rollover(
+                    &sink,
+                    run_started,
+                    "polymarket",
+                    result,
+                ).await;
+            },
             () = sleep(Duration::from_millis(wait_ms)) => {}
         }
     }
@@ -831,52 +3395,47 @@ async fn fence_polymarket_and_send_day_barrier<F>(
     control_tx: &mpsc::Sender<PolymarketSourceControl>,
     sink: &SourceEventSink,
     run_started: Instant,
-    utc_day: &str,
-    next_utc_day: &str,
+    raw_day_gate: &RawDayGate,
+    close: &RawDayClose,
 ) -> Result<Option<Result<()>>>
 where
     F: Future<Output = Result<()>>,
 {
-    let (reply_tx, mut reply_rx) = oneshot::channel();
-    let (resume_tx, resume_rx) = oneshot::channel();
-    control_tx
-        .send(PolymarketSourceControl::Fence {
-            stop_after_fence: false,
-            resume_after_barrier: Some(resume_rx),
-            reply: reply_tx,
-        })
-        .await
-        .map_err(|_| invalid_data("Polymarket source control channel closed before day barrier"))?;
-    tokio::select! {
-        result = source.as_mut() => Ok(Some(result)),
-        reply = &mut reply_rx => {
-            match reply {
-                Ok(Ok(())) => {
-                    record_recovery_boundary_gaps(
-                        sink,
-                        "polymarket",
-                        utc_day,
-                        next_utc_day,
-                    );
-                    let barrier_result = send_day_barrier(
-                        sink,
-                        run_started,
-                        "polymarket",
-                        utc_day.to_owned(),
-                    )
-                    .await;
-                    let _ = resume_tx.send(());
-                    barrier_result?;
-                    Ok(None)
-                }
-                Ok(Err(error)) => Err(invalid_data(format!(
-                    "Polymarket source fence failed before day barrier:{error}"
-                )).into()),
-                Err(_) => Err(invalid_data(
-                    "Polymarket source dropped day-barrier fence reply",
-                ).into()),
-            }
+    let resume_tx = {
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        let (sender, resume_rx) = oneshot::channel();
+        control_tx
+            .send(PolymarketSourceControl::Fence {
+                stop_after_fence: false,
+                resume_after_barrier: Some(resume_rx),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| {
+                invalid_data("Polymarket source control channel closed before day barrier")
+            })?;
+        let source_result = wait_for_source_fence_reply_or_source(
+            source.as_mut(),
+            &mut reply_rx,
+            "Polymarket source fence",
+        )
+        .await?;
+        if let Some(result) = source_result {
+            return Ok(Some(result));
         }
+        sender
+    };
+    raw_day_gate.register_source_fence("polymarket", close)?;
+    let close = match seal_raw_day_while_source_runs(source.as_mut(), raw_day_gate, close).await? {
+        RawDaySealOutcome::Sealed(close) => close,
+        RawDaySealOutcome::SourceEnded(result) => return Ok(Some(result)),
+    };
+    let release = send_day_barrier(sink, run_started, "polymarket", close.clone()).await?;
+    if apply_day_barrier_release(sink, "polymarket", &close, release).await? {
+        let _ = resume_tx.send(());
+        Ok(None)
+    } else {
+        Ok(Some(Ok(())))
     }
 }
 
@@ -897,24 +3456,35 @@ where
         if now_ms() >= next_boundary_ms {
             let utc_day = utc_day_string_from_ms(next_boundary_ms.saturating_sub(1))
                 .ok_or_else(|| invalid_data("UTC day unavailable for aggTrade barrier"))?;
-            let next_utc_day = utc_day_string_from_ms(next_boundary_ms)
-                .ok_or_else(|| invalid_data("next UTC day unavailable for aggTrade gap"))?;
+            let raw_day_gate = raw_day_gate_for_rollover(&sink, &utc_day).await?;
+            let close = raw_day_gate.prepare_rollover(&utc_day, next_boundary_ms)?;
             if source_started {
                 if let Some(source_result) = flush_aggtrade_and_send_day_barrier(
                     source.as_mut(),
                     &control_tx,
                     &sink,
                     run_started,
-                    &utc_day,
-                    &next_utc_day,
+                    &raw_day_gate,
+                    &close,
                 )
                 .await?
                 {
-                    return source_result;
+                    return complete_source_return_at_pending_rollover(
+                        &sink,
+                        run_started,
+                        "binance_aggtrade",
+                        source_result,
+                    )
+                    .await;
                 }
             } else {
-                record_recovery_boundary_gaps(&sink, "binance_aggtrade", &utc_day, &next_utc_day);
-                send_day_barrier(&sink, run_started, "binance_aggtrade", utc_day).await?;
+                raw_day_gate.register_source_fence("binance_aggtrade", &close)?;
+                let close = raw_day_gate.seal_prepared_rollover(&close).await?;
+                let release =
+                    send_day_barrier(&sink, run_started, "binance_aggtrade", close.clone()).await?;
+                if !apply_day_barrier_release(&sink, "binance_aggtrade", &close, release).await? {
+                    return Ok(());
+                }
             }
             next_boundary_ms = next_boundary_ms.saturating_add(UTC_DAY_MS);
             continue;
@@ -922,7 +3492,14 @@ where
         let wait_ms = next_boundary_ms.saturating_sub(now_ms()).max(0) as u64;
         source_started = true;
         tokio::select! {
-            result = &mut source => return result,
+            result = &mut source => {
+                return complete_source_return_at_pending_rollover(
+                    &sink,
+                    run_started,
+                    "binance_aggtrade",
+                    result,
+                ).await;
+            },
             () = sleep(Duration::from_millis(wait_ms)) => {}
         }
     }
@@ -947,24 +3524,35 @@ where
         if now_ms() >= next_boundary_ms {
             let utc_day = utc_day_string_from_ms(next_boundary_ms.saturating_sub(1))
                 .ok_or_else(|| invalid_data("UTC day unavailable for depth barrier"))?;
-            let next_utc_day = utc_day_string_from_ms(next_boundary_ms)
-                .ok_or_else(|| invalid_data("next UTC day unavailable for depth gap"))?;
+            let raw_day_gate = raw_day_gate_for_rollover(&sink, &utc_day).await?;
+            let close = raw_day_gate.prepare_rollover(&utc_day, next_boundary_ms)?;
             if source_started {
                 if let Some(source_result) = fence_depth_and_send_day_barrier(
                     source.as_mut(),
                     &control_tx,
                     &sink,
                     run_started,
-                    &utc_day,
-                    &next_utc_day,
+                    &raw_day_gate,
+                    &close,
                 )
                 .await?
                 {
-                    return source_result;
+                    return complete_source_return_at_pending_rollover(
+                        &sink,
+                        run_started,
+                        "binance_depth",
+                        source_result,
+                    )
+                    .await;
                 }
             } else {
-                record_recovery_boundary_gaps(&sink, "binance_depth", &utc_day, &next_utc_day);
-                send_day_barrier(&sink, run_started, "binance_depth", utc_day).await?;
+                raw_day_gate.register_source_fence("binance_depth", &close)?;
+                let close = raw_day_gate.seal_prepared_rollover(&close).await?;
+                let release =
+                    send_day_barrier(&sink, run_started, "binance_depth", close.clone()).await?;
+                if !apply_day_barrier_release(&sink, "binance_depth", &close, release).await? {
+                    return Ok(());
+                }
             }
             next_boundary_ms = next_boundary_ms.saturating_add(UTC_DAY_MS);
             continue;
@@ -997,7 +3585,14 @@ where
             .max(0) as u64;
         source_started = true;
         tokio::select! {
-            result = &mut source => return result,
+            result = &mut source => {
+                return complete_source_return_at_pending_rollover(
+                    &sink,
+                    run_started,
+                    "binance_depth",
+                    result,
+                ).await;
+            },
             () = sleep(Duration::from_millis(wait_ms)) => {}
         }
     }
@@ -1055,52 +3650,45 @@ async fn fence_depth_and_send_day_barrier<F>(
     control_tx: &mpsc::Sender<DepthSourceControl>,
     sink: &SourceEventSink,
     run_started: Instant,
-    utc_day: &str,
-    next_utc_day: &str,
+    raw_day_gate: &RawDayGate,
+    close: &RawDayClose,
 ) -> Result<Option<Result<()>>>
 where
     F: Future<Output = Result<()>>,
 {
-    let (reply_tx, mut reply_rx) = oneshot::channel();
-    let (resume_tx, resume_rx) = oneshot::channel();
-    control_tx
-        .send(DepthSourceControl::Fence {
-            stop_after_fence: false,
-            resume_after_barrier: Some(resume_rx),
-            reply: reply_tx,
-        })
-        .await
-        .map_err(|_| invalid_data("depth source control channel closed before day barrier"))?;
-    tokio::select! {
-        result = source.as_mut() => Ok(Some(result)),
-        reply = &mut reply_rx => {
-            match reply {
-                Ok(Ok(())) => {
-                    record_recovery_boundary_gaps(
-                        sink,
-                        "binance_depth",
-                        utc_day,
-                        next_utc_day,
-                    );
-                    let barrier_result = send_day_barrier(
-                        sink,
-                        run_started,
-                        "binance_depth",
-                        utc_day.to_owned(),
-                    )
-                    .await;
-                    let _ = resume_tx.send(());
-                    barrier_result?;
-                    Ok(None)
-                }
-                Ok(Err(error)) => Err(invalid_data(format!(
-                    "depth source fence failed before day barrier:{error}"
-                )).into()),
-                Err(_) => Err(invalid_data(
-                    "depth source dropped day-barrier fence reply",
-                ).into()),
-            }
+    let resume_tx = {
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        let (sender, resume_rx) = oneshot::channel();
+        control_tx
+            .send(DepthSourceControl::Fence {
+                stop_after_fence: false,
+                resume_after_barrier: Some(resume_rx),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| invalid_data("depth source control channel closed before day barrier"))?;
+        let source_result = wait_for_source_fence_reply_or_source(
+            source.as_mut(),
+            &mut reply_rx,
+            "depth source fence",
+        )
+        .await?;
+        if let Some(result) = source_result {
+            return Ok(Some(result));
         }
+        sender
+    };
+    raw_day_gate.register_source_fence("binance_depth", close)?;
+    let close = match seal_raw_day_while_source_runs(source.as_mut(), raw_day_gate, close).await? {
+        RawDaySealOutcome::Sealed(close) => close,
+        RawDaySealOutcome::SourceEnded(result) => return Ok(Some(result)),
+    };
+    let release = send_day_barrier(sink, run_started, "binance_depth", close.clone()).await?;
+    if apply_day_barrier_release(sink, "binance_depth", &close, release).await? {
+        let _ = resume_tx.send(());
+        Ok(None)
+    } else {
+        Ok(Some(Ok(())))
     }
 }
 
@@ -1109,84 +3697,49 @@ async fn flush_aggtrade_and_send_day_barrier<F>(
     control_tx: &mpsc::Sender<AggTradeSourceControl>,
     sink: &SourceEventSink,
     run_started: Instant,
-    utc_day: &str,
-    next_utc_day: &str,
+    raw_day_gate: &RawDayGate,
+    close: &RawDayClose,
 ) -> Result<Option<Result<()>>>
 where
     F: Future<Output = Result<()>>,
 {
-    let (reply_tx, mut reply_rx) = oneshot::channel();
-    let (resume_tx, resume_rx) = oneshot::channel();
-    control_tx
-        .send(AggTradeSourceControl::Flush {
-            reason: format!("utc_day_barrier:{utc_day}"),
-            utc_day: utc_day.to_owned(),
-            stop_after_flush: false,
-            resume_after_barrier: Some(resume_rx),
-            reply: reply_tx,
-        })
-        .await
-        .map_err(|_| invalid_data("aggTrade source control channel closed before day barrier"))?;
-    tokio::select! {
-        result = source.as_mut() => Ok(Some(result)),
-        reply = &mut reply_rx => {
-            match reply {
-                Ok(Ok(())) => {
-                    record_recovery_boundary_gaps(
-                        sink,
-                        "binance_aggtrade",
-                        utc_day,
-                        next_utc_day,
-                    );
-                    let barrier_result = send_day_barrier(
-                        sink,
-                        run_started,
-                        "binance_aggtrade",
-                        utc_day.to_owned(),
-                    )
-                    .await;
-                    let _ = resume_tx.send(());
-                    barrier_result?;
-                    Ok(None)
-                }
-                Ok(Err(error)) => Err(invalid_data(format!(
-                    "aggTrade source flush failed before day barrier:{error}"
-                )).into()),
-                Err(_) => Err(invalid_data(
-                    "aggTrade source dropped day-barrier flush reply",
-                ).into()),
-            }
+    let resume_tx = {
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        let (sender, resume_rx) = oneshot::channel();
+        control_tx
+            .send(AggTradeSourceControl::Flush {
+                reason: format!("utc_day_barrier:{}", close.utc_day),
+                utc_day: close.utc_day.clone(),
+                stop_after_flush: false,
+                resume_after_barrier: Some(resume_rx),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| {
+                invalid_data("aggTrade source control channel closed before day barrier")
+            })?;
+        let source_result = wait_for_source_fence_reply_or_source(
+            source.as_mut(),
+            &mut reply_rx,
+            "aggTrade source flush",
+        )
+        .await?;
+        if let Some(result) = source_result {
+            return Ok(Some(result));
         }
-    }
-}
-
-fn record_recovery_boundary_gaps(
-    sink: &SourceEventSink,
-    producer: &str,
-    old_utc_day: &str,
-    new_utc_day: &str,
-) {
-    let Some(source_kind) = recovery_source_for_producer(producer) else {
-        return;
+        sender
     };
-    if !sink
-        .source_queue_backpressure
-        .is_recovery_active(source_kind)
-    {
-        return;
-    }
-    let reason = format!("source_recovery_overlaps_utc_day_boundary:{source_kind}");
-    record_gap_for_day(&sink.gaps, old_utc_day, reason.clone());
-    record_gap_for_day(&sink.gaps, new_utc_day, reason);
-}
-
-fn recovery_source_for_producer(producer: &str) -> Option<&'static str> {
-    match producer {
-        "polymarket" => Some("polymarket_market"),
-        "polymarket_rtds" => Some("polymarket_rtds_chainlink_btc_usd"),
-        "binance_depth" => Some("binance_depth_update"),
-        "binance_aggtrade" => Some("binance_aggtrade"),
-        _ => None,
+    raw_day_gate.register_source_fence("binance_aggtrade", close)?;
+    let close = match seal_raw_day_while_source_runs(source.as_mut(), raw_day_gate, close).await? {
+        RawDaySealOutcome::Sealed(close) => close,
+        RawDaySealOutcome::SourceEnded(result) => return Ok(Some(result)),
+    };
+    let release = send_day_barrier(sink, run_started, "binance_aggtrade", close.clone()).await?;
+    if apply_day_barrier_release(sink, "binance_aggtrade", &close, release).await? {
+        let _ = resume_tx.send(());
+        Ok(None)
+    } else {
+        Ok(Some(Ok(())))
     }
 }
 
@@ -1297,15 +3850,6 @@ async fn wait_for_source_recovery(
     deadline: Option<Instant>,
 ) -> bool {
     let wait = recovery.next_wait();
-    if wait.level == SourceRecoveryWaitLevel::OuterCycle {
-        record_gap(
-            &sink.gaps,
-            format!(
-                "source_recovery_cycle_exhausted:{}:outer_cycle={}",
-                recovery.source_kind, wait.attempt
-            ),
-        );
-    }
     let delay = deadline_remaining(deadline)
         .map(|remaining| remaining.min(wait.delay))
         .unwrap_or(wait.delay);
@@ -1329,27 +3873,121 @@ pub struct LiveFinalizedSegment {
 }
 
 enum ManifestCommand {
+    Activate {
+        utc_day: String,
+        started_utc_ms: i64,
+        generation: u64,
+        raw_day_gate: Arc<RawDayGate>,
+        deadline: Option<RuntimeDeadlineCandidate>,
+        reply: oneshot::Sender<std::result::Result<(), String>>,
+        ack_mode: ManifestActivationAckMode,
+    },
     Finalized(DailyFinalizedFileDelta),
     BinanceContinuity {
         utc_day: String,
         continuity: BinanceAggTradeContinuityState,
     },
     ProducerBarrier {
-        utc_day: String,
+        close: RawDayClose,
         producer: String,
         gaps: Vec<String>,
         operational_counters: BTreeMap<String, SourceOperationalCounterDelta>,
     },
     WriterDayFinalized {
-        utc_day: String,
+        close: RawDayClose,
         source_kind: String,
+        raw_day_gate: Arc<RawDayGate>,
+    },
+    CommitRolloverOldDay {
+        close: RawDayClose,
+        mode: ManifestRolloverCommitMode,
+        normal_gate: Option<Arc<RawDayGate>>,
+        deadline: Option<RuntimeDeadlineCandidate>,
+        reply: oneshot::Sender<std::result::Result<ManifestOldDayCommitReply, String>>,
+    },
+    ActivateRolloverNewDay {
+        close: RawDayClose,
+        raw_day_gate: Arc<RawDayGate>,
+        deadline: Option<RuntimeDeadlineCandidate>,
+        reply: oneshot::Sender<std::result::Result<ManifestActivationReply, String>>,
+        ack_mode: ManifestActivationAckMode,
+    },
+    PrepareRolloverExitDay {
+        close: RawDayClose,
+        reply: oneshot::Sender<std::result::Result<(), String>>,
+    },
+    FinishUncleanRollover {
+        close: RawDayClose,
+        reply: oneshot::Sender<std::result::Result<(), String>>,
     },
     Shutdown {
-        utc_day: String,
+        close: RuntimeCloseIdentity,
+        disposition: ManifestShutdownDisposition,
         gaps: Vec<String>,
         operational_counters: BTreeMap<String, BTreeMap<String, SourceOperationalCounterDelta>>,
         reply: oneshot::Sender<std::result::Result<(), String>>,
     },
+}
+
+async fn send_manifest_command_once(
+    manifest_tx: &mpsc::Sender<ManifestCommand>,
+    command: ManifestCommand,
+    stage: &'static str,
+) -> Result<()> {
+    match timeout(STARTUP_GATE_TIMEOUT, manifest_tx.send(command)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => {
+            Err(invalid_data(format!("manifest owner channel closed before {stage}")).into())
+        }
+        Err(_) => Err(invalid_data(format!("manifest command send timeout before {stage}")).into()),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ManifestActivationAckMode {
+    Send,
+    #[cfg(test)]
+    Drop,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ManifestActivationReply {
+    Committed,
+    PreparedExitWon,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ManifestRolloverCommitMode {
+    Normal,
+    PendingExitKnown { ended_utc_ms: i64 },
+    UncleanOldDay,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ManifestOldDayCommitReply {
+    Committed,
+    PreparedExitWon,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ManifestRolloverReady {
+    close: RawDayClose,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ManifestActiveEpoch {
+    utc_day: String,
+    generation: u64,
+}
+
+struct ManifestRolloverRendezvous {
+    close: RawDayClose,
+    producer_barriers: BTreeSet<String>,
+    writer_finalize_acks: BTreeSet<String>,
+    ready_sent: bool,
+    old_day_committed: bool,
+    old_day_mode: Option<ManifestRolloverCommitMode>,
+    raw_day_gate: Option<Arc<RawDayGate>>,
 }
 
 struct ManifestOwnerState {
@@ -1357,8 +3995,9 @@ struct ManifestOwnerState {
     identity: DailyManifestIdentity,
     continuity: BinanceAggTradeContinuityState,
     manifests: BTreeMap<String, Value>,
-    producer_barriers: BTreeMap<String, BTreeSet<String>>,
-    writer_finalize_acks: BTreeMap<String, BTreeSet<String>>,
+    activation_attempts: BTreeSet<String>,
+    active_epoch: Option<ManifestActiveEpoch>,
+    rollover: Option<ManifestRolloverRendezvous>,
 }
 
 impl ManifestOwnerState {
@@ -1372,8 +4011,9 @@ impl ManifestOwnerState {
             identity,
             continuity,
             manifests: BTreeMap::new(),
-            producer_barriers: BTreeMap::new(),
-            writer_finalize_acks: BTreeMap::new(),
+            activation_attempts: BTreeSet::new(),
+            active_epoch: None,
+            rollover: None,
         }
     }
 
@@ -1407,6 +4047,46 @@ impl ManifestOwnerState {
             &required_source_counter_defaults(),
         )?;
         self.manifests.insert(utc_day.to_owned(), manifest);
+        Ok(())
+    }
+
+    fn activate_coverage(&mut self, utc_day: &str, started_utc_ms: i64) -> Result<()> {
+        if !self.activation_attempts.insert(utc_day.to_owned()) {
+            return Err(invalid_data(format!(
+                "duplicate collection-day activation attempt: {utc_day}"
+            ))
+            .into());
+        }
+        self.ensure_open(utc_day)?;
+        let day_dir = self.day_dir(utc_day);
+        let manifest = self
+            .manifests
+            .get_mut(utc_day)
+            .expect("manifest was ensured");
+        activate_collection_day_coverage(&day_dir, manifest, started_utc_ms)?;
+        Ok(())
+    }
+
+    fn activate_initial(
+        &mut self,
+        utc_day: &str,
+        started_utc_ms: i64,
+        generation: u64,
+    ) -> Result<()> {
+        if self.active_epoch.is_some() || self.rollover.is_some() {
+            return Err(invalid_data("initial manifest activation found an active epoch").into());
+        }
+        if generation != INITIAL_RAW_DAY_GENERATION {
+            return Err(invalid_data(format!(
+                "initial manifest activation generation mismatch: expected={INITIAL_RAW_DAY_GENERATION} actual={generation}"
+            ))
+            .into());
+        }
+        self.activate_coverage(utc_day, started_utc_ms)?;
+        self.active_epoch = Some(ManifestActiveEpoch {
+            utc_day: utc_day.to_owned(),
+            generation,
+        });
         Ok(())
     }
 
@@ -1468,78 +4148,412 @@ impl ManifestOwnerState {
 
     fn record_producer_barrier(
         &mut self,
-        utc_day: String,
+        close: RawDayClose,
         producer: String,
         gaps: &[String],
         operational_counters: &BTreeMap<String, SourceOperationalCounterDelta>,
-    ) -> Result<()> {
+    ) -> Result<Option<ManifestRolloverReady>> {
         if !LOGICAL_PRODUCERS.contains(&producer.as_str()) {
             return Err(
                 invalid_data(format!("unknown logical producer barrier: {producer}")).into(),
             );
         }
-        self.record_operational_counters(&utc_day, operational_counters)?;
-        self.record_gaps(&utc_day, gaps)?;
-        self.producer_barriers
-            .entry(utc_day.clone())
-            .or_default()
+        self.ensure_rollover_identity(&close)?;
+        {
+            let rollover = self.rollover.as_ref().expect("rollover was ensured");
+            if rollover.ready_sent {
+                return Err(invalid_data("producer barrier arrived after rollover ready").into());
+            }
+            if rollover.producer_barriers.contains(&producer) {
+                return Err(invalid_data(format!(
+                    "duplicate logical producer barrier: producer={producer} generation={} close_id={}",
+                    close.generation, close.close_id
+                ))
+                .into());
+            }
+        }
+        self.record_operational_counters(&close.utc_day, operational_counters)?;
+        self.record_gaps(&close.utc_day, gaps)?;
+        self.rollover
+            .as_mut()
+            .expect("rollover was ensured")
+            .producer_barriers
             .insert(producer);
-        self.persist_barriers_and_maybe_close(&utc_day)
+        self.persist_rollover_barriers()?;
+        self.maybe_mark_rollover_ready()
     }
 
-    fn record_writer_ack(&mut self, utc_day: String, source_kind: String) -> Result<()> {
+    fn record_writer_ack(
+        &mut self,
+        close: RawDayClose,
+        source_kind: String,
+    ) -> Result<Option<ManifestRolloverReady>> {
         if !LIVE_SOURCES.contains(&source_kind.as_str()) {
             return Err(invalid_data(format!("unknown writer finalize ack: {source_kind}")).into());
         }
-        self.ensure_open(&utc_day)?;
-        self.writer_finalize_acks
-            .entry(utc_day.clone())
-            .or_default()
-            .insert(source_kind);
-        self.persist_barriers_and_maybe_close(&utc_day)
+        self.ensure_rollover_identity(&close)?;
+        let rollover = self.rollover.as_mut().expect("rollover was ensured");
+        if rollover.ready_sent {
+            return Err(invalid_data("writer finalize ack arrived after rollover ready").into());
+        }
+        if !rollover.writer_finalize_acks.insert(source_kind.clone()) {
+            return Err(invalid_data(format!(
+                "duplicate writer finalize ack: source={source_kind} generation={} close_id={}",
+                close.generation, close.close_id
+            ))
+            .into());
+        }
+        self.persist_rollover_barriers()?;
+        self.maybe_mark_rollover_ready()
     }
 
-    fn persist_barriers_and_maybe_close(&mut self, utc_day: &str) -> Result<()> {
-        let producers = self
-            .producer_barriers
-            .get(utc_day)
-            .cloned()
-            .unwrap_or_default();
-        let writers = self
-            .writer_finalize_acks
-            .get(utc_day)
-            .cloned()
-            .unwrap_or_default();
-        let day_dir = self.day_dir(utc_day);
+    fn ensure_rollover_identity(&mut self, close: &RawDayClose) -> Result<()> {
+        let active = self
+            .active_epoch
+            .as_ref()
+            .ok_or_else(|| invalid_data("rollover barrier arrived without an active epoch"))?;
+        if active.utc_day != close.utc_day || active.generation != close.generation {
+            return Err(invalid_data(format!(
+                "rollover barrier active epoch mismatch: active={active:?} close={close:?}"
+            ))
+            .into());
+        }
+        if close.close_id == 0
+            || close.next_generation
+                != close
+                    .generation
+                    .checked_add(1)
+                    .ok_or_else(|| invalid_data("rollover generation overflow"))?
+        {
+            return Err(invalid_data(format!(
+                "invalid rollover generation or close-id: {close:?}"
+            ))
+            .into());
+        }
+        let derived_old = utc_day_string_from_ms(close.boundary_utc_ms.saturating_sub(1))
+            .ok_or_else(|| invalid_data("UTC day unavailable before manifest rollover"))?;
+        let derived_new = utc_day_string_from_ms(close.boundary_utc_ms)
+            .ok_or_else(|| invalid_data("UTC day unavailable at manifest rollover"))?;
+        if derived_old != close.utc_day || derived_new != close.next_utc_day {
+            return Err(invalid_data(format!(
+                "rollover boundary/day mismatch: close={close:?} derived_old={derived_old} derived_new={derived_new}"
+            ))
+            .into());
+        }
+        match self.rollover.as_ref() {
+            Some(rollover) if rollover.close != *close => {
+                return Err(invalid_data(format!(
+                    "rollover tuple mismatch: expected={:?} actual={close:?}",
+                    rollover.close
+                ))
+                .into());
+            }
+            Some(_) => {}
+            None => {
+                self.rollover = Some(ManifestRolloverRendezvous {
+                    close: close.clone(),
+                    producer_barriers: BTreeSet::new(),
+                    writer_finalize_acks: BTreeSet::new(),
+                    ready_sent: false,
+                    old_day_committed: false,
+                    old_day_mode: None,
+                    raw_day_gate: None,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn persist_rollover_barriers(&mut self) -> Result<()> {
+        let rollover = self.rollover.as_ref().expect("rollover was ensured");
+        let utc_day = rollover.close.utc_day.clone();
+        let producers = rollover.producer_barriers.clone();
+        let writers = rollover.writer_finalize_acks.clone();
+        let day_dir = self.day_dir(&utc_day);
         let manifest = self
             .manifests
-            .get_mut(utc_day)
+            .get_mut(&utc_day)
             .expect("manifest was ensured");
         record_day_barrier_state(&day_dir, manifest, &producers, &writers)?;
-        if producers.len() == LOGICAL_PRODUCERS.len() && writers.len() == LIVE_SOURCES.len() {
-            close_day_manifest(&day_dir, manifest, "utc_day_barrier")?;
+        Ok(())
+    }
+
+    fn maybe_mark_rollover_ready(&mut self) -> Result<Option<ManifestRolloverReady>> {
+        let rollover = self.rollover.as_mut().expect("rollover was ensured");
+        if rollover.producer_barriers.len() != LOGICAL_PRODUCERS.len()
+            || rollover.writer_finalize_acks.len() != LIVE_SOURCES.len()
+        {
+            return Ok(None);
         }
+        if rollover.ready_sent {
+            return Err(invalid_data("rollover rendezvous became ready more than once").into());
+        }
+        rollover.ready_sent = true;
+        Ok(Some(ManifestRolloverReady {
+            close: rollover.close.clone(),
+        }))
+    }
+
+    fn register_rollover_gate(
+        &mut self,
+        close: &RawDayClose,
+        raw_day_gate: Arc<RawDayGate>,
+    ) -> Result<()> {
+        self.ensure_rollover_identity(close)?;
+        let rollover = self.rollover.as_mut().expect("rollover was ensured");
+        match rollover.raw_day_gate.as_ref() {
+            Some(existing) if Arc::ptr_eq(existing, &raw_day_gate) => Ok(()),
+            Some(_) => Err(invalid_data(format!(
+                "writer finalize commands disagreed on the raw-day gate: close={close:?}"
+            ))
+            .into()),
+            None => {
+                rollover.raw_day_gate = Some(raw_day_gate);
+                Ok(())
+            }
+        }
+    }
+
+    fn publish_rollover_ready(&self, ready: &ManifestRolloverReady) -> Result<()> {
+        let rollover = self
+            .rollover
+            .as_ref()
+            .ok_or_else(|| invalid_data("rollover ready has no owner rendezvous"))?;
+        if rollover.close != ready.close
+            || !rollover.ready_sent
+            || rollover.producer_barriers.len() != LOGICAL_PRODUCERS.len()
+            || rollover.writer_finalize_acks.len() != LIVE_SOURCES.len()
+        {
+            return Err(invalid_data(format!(
+                "rollover ready witness lacks the complete owner rendezvous: ready={ready:?}"
+            ))
+            .into());
+        }
+        rollover
+            .raw_day_gate
+            .as_ref()
+            .ok_or_else(|| invalid_data("complete rollover rendezvous has no raw-day gate"))?
+            .publish_writer_rendezvous(&ready.close)
+    }
+
+    fn commit_rollover_old_day(
+        &mut self,
+        close: &RawDayClose,
+        mode: ManifestRolloverCommitMode,
+    ) -> Result<()> {
+        let rollover = self
+            .rollover
+            .as_ref()
+            .ok_or_else(|| invalid_data("rollover commit arrived without rendezvous"))?;
+        if rollover.close != *close
+            || !rollover.ready_sent
+            || rollover.old_day_committed
+            || rollover.producer_barriers.len() != LOGICAL_PRODUCERS.len()
+            || rollover.writer_finalize_acks.len() != LIVE_SOURCES.len()
+        {
+            return Err(invalid_data(format!(
+                "rollover commit identity/readiness mismatch: requested={close:?}"
+            ))
+            .into());
+        }
+
+        let old_day_dir = self.day_dir(&close.utc_day);
+        let old_manifest = self
+            .manifests
+            .get_mut(&close.utc_day)
+            .expect("active rollover manifest exists");
+        match &mode {
+            ManifestRolloverCommitMode::Normal => {
+                close_day_manifest_with_collection_end(
+                    &old_day_dir,
+                    old_manifest,
+                    "utc_day_barrier",
+                    close.boundary_utc_ms,
+                )?;
+            }
+            ManifestRolloverCommitMode::PendingExitKnown { ended_utc_ms } => {
+                close_day_manifest_with_collection_end(
+                    &old_day_dir,
+                    old_manifest,
+                    "utc_day_barrier",
+                    *ended_utc_ms,
+                )?;
+            }
+            ManifestRolloverCommitMode::UncleanOldDay => {
+                close_day_manifest_with_unclean_end(
+                    &old_day_dir,
+                    old_manifest,
+                    "unclean_rollover",
+                    &["collection_day_unclean_end_unknown".to_owned()],
+                )?;
+            }
+        }
+        self.active_epoch = None;
+        let rollover = self
+            .rollover
+            .as_mut()
+            .expect("rollover exists during old-day commit");
+        rollover.old_day_committed = true;
+        rollover.old_day_mode = Some(mode);
+        Ok(())
+    }
+
+    fn activate_rollover_new_day(&mut self, close: &RawDayClose) -> Result<()> {
+        let rollover = self
+            .rollover
+            .as_ref()
+            .ok_or_else(|| invalid_data("new-day activation arrived without rollover"))?;
+        if rollover.close != *close
+            || !rollover.ready_sent
+            || !rollover.old_day_committed
+            || rollover.old_day_mode.as_ref() != Some(&ManifestRolloverCommitMode::Normal)
+        {
+            return Err(invalid_data(format!(
+                "new-day activation identity/cutpoint mismatch: requested={close:?}"
+            ))
+            .into());
+        }
+        if self.active_epoch.is_some() {
+            return Err(invalid_data("new-day activation found an active manifest epoch").into());
+        }
+        self.ensure_open(&close.next_utc_day)?;
+        self.activate_coverage(&close.next_utc_day, close.boundary_utc_ms)?;
+        self.active_epoch = Some(ManifestActiveEpoch {
+            utc_day: close.next_utc_day.clone(),
+            generation: close.next_generation,
+        });
+        self.rollover = None;
+        Ok(())
+    }
+
+    fn prepare_rollover_exit_day(&mut self, close: &RawDayClose) -> Result<()> {
+        let rollover = self
+            .rollover
+            .as_ref()
+            .ok_or_else(|| invalid_data("exit-day preparation arrived without rollover"))?;
+        if rollover.close != *close
+            || !rollover.ready_sent
+            || !rollover.old_day_committed
+            || !matches!(
+                rollover.old_day_mode.as_ref(),
+                Some(ManifestRolloverCommitMode::Normal)
+                    | Some(ManifestRolloverCommitMode::PendingExitKnown { .. })
+            )
+        {
+            return Err(invalid_data(format!(
+                "exit-day preparation identity/cutpoint mismatch: requested={close:?}"
+            ))
+            .into());
+        }
+        if self.active_epoch.is_some() {
+            return Err(invalid_data("exit-day preparation found an active manifest epoch").into());
+        }
+        self.ensure_open(&close.next_utc_day)?;
+        self.rollover = None;
+        Ok(())
+    }
+
+    fn finish_unclean_rollover(&mut self, close: &RawDayClose) -> Result<()> {
+        let rollover = self
+            .rollover
+            .as_ref()
+            .ok_or_else(|| invalid_data("unclean rollover finish arrived without rollover"))?;
+        if rollover.close != *close
+            || !rollover.ready_sent
+            || !rollover.old_day_committed
+            || rollover.old_day_mode.as_ref() != Some(&ManifestRolloverCommitMode::UncleanOldDay)
+        {
+            return Err(invalid_data(format!(
+                "unclean rollover finish identity/cutpoint mismatch: requested={close:?}"
+            ))
+            .into());
+        }
+        if self.active_epoch.is_some() {
+            return Err(
+                invalid_data("unclean rollover finish found an active manifest epoch").into(),
+            );
+        }
+        self.rollover = None;
         Ok(())
     }
 
     fn shutdown(
         &mut self,
-        utc_day: &str,
+        close: &RuntimeCloseIdentity,
+        disposition: &ManifestShutdownDisposition,
         gaps: &[String],
         operational_counters: &BTreeMap<String, BTreeMap<String, SourceOperationalCounterDelta>>,
     ) -> Result<()> {
+        let active = self
+            .active_epoch
+            .as_ref()
+            .ok_or_else(|| invalid_data("manifest shutdown arrived without an active epoch"))?;
+        if active.utc_day != close.utc_day || active.generation != close.generation {
+            return Err(invalid_data(format!(
+                "manifest shutdown active epoch mismatch: active={active:?} close={close:?}"
+            ))
+            .into());
+        }
+        if close.close_id == 0 {
+            return Err(invalid_data("manifest shutdown close-id must be nonzero").into());
+        }
+        if self.rollover.is_some() {
+            return Err(invalid_data("manifest shutdown arrived during an open rollover").into());
+        }
+        let manifest = self
+            .manifests
+            .get(&close.utc_day)
+            .ok_or_else(|| invalid_data("manifest shutdown active day is missing"))?;
+        if manifest_state(manifest)? != "open" {
+            return Err(invalid_data("manifest shutdown requires an open daily manifest").into());
+        }
+        let coverage = manifest_collection_day_coverage(manifest)?
+            .ok_or_else(|| invalid_data("manifest shutdown coverage is missing"))?;
+        if coverage.state != CollectionDayCoverageState::Active {
+            return Err(invalid_data(format!(
+                "manifest shutdown requires active collection coverage: actual={:?}",
+                coverage.state
+            ))
+            .into());
+        }
+        if let ManifestShutdownDisposition::EndedKnown { ended_utc_ms } = disposition {
+            let last_started_utc_ms = coverage
+                .last_started_utc_ms
+                .expect("validated active coverage has a last start");
+            let ended_day = utc_day_string_from_ms(*ended_utc_ms)
+                .ok_or_else(|| invalid_data("UTC day unavailable for manifest shutdown end"))?;
+            let end_belongs_to_active_day = ended_day == close.utc_day
+                || (ended_utc_ms.rem_euclid(UTC_DAY_MS) == 0
+                    && utc_day_string_from_ms(ended_utc_ms.saturating_sub(1)).as_deref()
+                        == Some(close.utc_day.as_str()));
+            if *ended_utc_ms < last_started_utc_ms || !end_belongs_to_active_day {
+                return Err(invalid_data(format!(
+                    "manifest shutdown end is outside active coverage: close={close:?} last_started_utc_ms={last_started_utc_ms} ended_utc_ms={ended_utc_ms}"
+                ))
+                .into());
+            }
+        }
         for (counter_day, counters) in operational_counters {
             self.record_operational_counters(counter_day, counters)?;
         }
-        if !self.manifests.contains_key(utc_day) {
-            return Ok(());
-        }
-        self.record_gaps(utc_day, gaps)?;
-        let day_dir = self.day_dir(utc_day);
-        let manifest = self.manifests.get_mut(utc_day).expect("manifest exists");
+        self.record_gaps(&close.utc_day, gaps)?;
+        let day_dir = self.day_dir(&close.utc_day);
+        let manifest = self
+            .manifests
+            .get_mut(&close.utc_day)
+            .ok_or_else(|| invalid_data("manifest shutdown active day is missing"))?;
         if manifest_state(manifest)? == "open" {
             update_manifest_continuity(&day_dir, manifest, &self.continuity)?;
         }
+        match disposition {
+            ManifestShutdownDisposition::EndedKnown { ended_utc_ms } => {
+                mark_collection_day_coverage_ended_known(&day_dir, manifest, *ended_utc_ms)?;
+            }
+            ManifestShutdownDisposition::UncleanEndUnknown => {
+                mark_collection_day_coverage_unclean(&day_dir, manifest)?;
+            }
+        }
+        self.active_epoch = None;
         Ok(())
     }
 }
@@ -1559,32 +4573,165 @@ fn required_source_counter_defaults() -> BTreeMap<String, SourceOperationalCount
 async fn run_manifest_owner(
     mut owner: ManifestOwnerState,
     mut commands: mpsc::Receiver<ManifestCommand>,
+    rollover_ready_tx: mpsc::Sender<ManifestRolloverReady>,
 ) -> Result<()> {
     while let Some(command) = commands.recv().await {
         match command {
+            ManifestCommand::Activate {
+                utc_day,
+                started_utc_ms,
+                generation,
+                raw_day_gate,
+                deadline,
+                reply,
+                ack_mode,
+            } => {
+                let result = raw_day_gate.commit_startup_manifest_activation(
+                    &utc_day,
+                    generation,
+                    deadline,
+                    || owner.activate_initial(&utc_day, started_utc_ms, generation),
+                );
+                let reply_result = result.as_ref().map(|_| ()).map_err(ToString::to_string);
+                match ack_mode {
+                    ManifestActivationAckMode::Send => {
+                        let _ = reply.send(reply_result);
+                    }
+                    #[cfg(test)]
+                    ManifestActivationAckMode::Drop => drop(reply),
+                }
+                result?;
+            }
             ManifestCommand::Finalized(delta) => owner.apply_finalized(delta)?,
             ManifestCommand::BinanceContinuity {
                 utc_day,
                 continuity,
             } => owner.update_continuity(utc_day, continuity)?,
             ManifestCommand::ProducerBarrier {
-                utc_day,
+                close,
                 producer,
                 gaps,
                 operational_counters,
-            } => owner.record_producer_barrier(utc_day, producer, &gaps, &operational_counters)?,
+            } => {
+                if let Some(ready) = owner.record_producer_barrier(
+                    close.clone(),
+                    producer,
+                    &gaps,
+                    &operational_counters,
+                )? {
+                    owner.publish_rollover_ready(&ready)?;
+                    rollover_ready_tx.send(ready).await.map_err(|_| {
+                        invalid_data("rollover-ready channel closed before owner rendezvous")
+                    })?;
+                }
+            }
             ManifestCommand::WriterDayFinalized {
-                utc_day,
+                close,
                 source_kind,
-            } => owner.record_writer_ack(utc_day, source_kind)?,
+                raw_day_gate,
+            } => {
+                owner.register_rollover_gate(&close, Arc::clone(&raw_day_gate))?;
+                let ready = owner.record_writer_ack(close.clone(), source_kind)?;
+                if let Some(ready) = ready {
+                    owner.publish_rollover_ready(&ready)?;
+                    rollover_ready_tx.send(ready).await.map_err(|_| {
+                        invalid_data("rollover-ready channel closed before owner rendezvous")
+                    })?;
+                }
+            }
+            ManifestCommand::CommitRolloverOldDay {
+                close,
+                mode,
+                normal_gate,
+                deadline,
+                reply,
+            } => {
+                let result = match (&mode, normal_gate) {
+                    (ManifestRolloverCommitMode::Normal, Some(gate)) => gate
+                        .commit_old_day_if_no_exit(&close, deadline, || {
+                            owner.commit_rollover_old_day(&close, mode)
+                        })
+                        .map(|committed| {
+                            if committed {
+                                ManifestOldDayCommitReply::Committed
+                            } else {
+                                ManifestOldDayCommitReply::PreparedExitWon
+                            }
+                        }),
+                    (ManifestRolloverCommitMode::Normal, None) => Err(invalid_data(
+                        "normal old-day commit requires the authoritative raw-day gate",
+                    )
+                    .into()),
+                    (_, Some(_)) => Err(invalid_data(
+                        "non-normal old-day commit must not carry a normal-commit gate",
+                    )
+                    .into()),
+                    (_, None) => owner
+                        .commit_rollover_old_day(&close, mode)
+                        .map(|_| ManifestOldDayCommitReply::Committed),
+                };
+                let reply_result = result.as_ref().copied().map_err(ToString::to_string);
+                let _ = reply.send(reply_result);
+                if result.is_err() {
+                    result?;
+                }
+            }
+            ManifestCommand::ActivateRolloverNewDay {
+                close,
+                raw_day_gate,
+                deadline,
+                reply,
+                ack_mode,
+            } => {
+                let result = raw_day_gate.commit_manifest_activation(&close, deadline, || {
+                    owner.activate_rollover_new_day(&close)
+                });
+                let prepared_exit_won = matches!(result, Ok(false));
+                let reply_result = result
+                    .as_ref()
+                    .map(|committed| {
+                        if *committed {
+                            ManifestActivationReply::Committed
+                        } else {
+                            ManifestActivationReply::PreparedExitWon
+                        }
+                    })
+                    .map_err(ToString::to_string);
+                if result.is_err()
+                    || prepared_exit_won
+                    || matches!(ack_mode, ManifestActivationAckMode::Send)
+                {
+                    let _ = reply.send(reply_result);
+                } else {
+                    drop(reply);
+                }
+                if result.is_err() {
+                    result?;
+                }
+            }
+            ManifestCommand::PrepareRolloverExitDay { close, reply } => {
+                let result = owner.prepare_rollover_exit_day(&close);
+                let reply_result = result.as_ref().map(|_| ()).map_err(ToString::to_string);
+                let _ = reply.send(reply_result);
+                result?;
+                return Ok(());
+            }
+            ManifestCommand::FinishUncleanRollover { close, reply } => {
+                let result = owner.finish_unclean_rollover(&close);
+                let reply_result = result.as_ref().map(|_| ()).map_err(ToString::to_string);
+                let _ = reply.send(reply_result);
+                result?;
+                return Ok(());
+            }
             ManifestCommand::Shutdown {
-                utc_day,
+                close,
+                disposition,
                 gaps,
                 operational_counters,
                 reply,
             } => {
                 let result = owner
-                    .shutdown(&utc_day, &gaps, &operational_counters)
+                    .shutdown(&close, &disposition, &gaps, &operational_counters)
                     .map_err(|error| error.to_string());
                 let should_stop = result.is_ok();
                 let _ = reply.send(result);
@@ -1598,12 +4745,1905 @@ async fn run_manifest_owner(
     Err(io::Error::other("daily manifest command channel closed without shutdown").into())
 }
 
+async fn collect_startup_ready(
+    ready_rx: &mut mpsc::Receiver<StartupParticipant>,
+    expected: &BTreeSet<StartupParticipant>,
+) -> Result<()> {
+    let mut pending = expected.clone();
+    while !pending.is_empty() {
+        let participant = ready_rx.recv().await.ok_or_else(|| {
+            invalid_data(format!(
+                "startup ready channel closed with {} mandatory participants pending",
+                pending.len()
+            ))
+        })?;
+        if !expected.contains(&participant) {
+            return Err(invalid_data(format!(
+                "unexpected startup participant ready: kind={:?} name={}",
+                participant.kind, participant.name
+            ))
+            .into());
+        }
+        if !pending.remove(&participant) {
+            return Err(invalid_data(format!(
+                "duplicate startup participant ready: kind={:?} name={}",
+                participant.kind, participant.name
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn activate_and_release_startup<F>(
+    manifest_tx: &mpsc::Sender<ManifestCommand>,
+    raw_day_gate: Arc<RawDayGate>,
+    mut ready_rx: mpsc::Receiver<StartupParticipant>,
+    releases: StartupReleaseHandles,
+    utc_day: String,
+    ack_mode: ManifestActivationAckMode,
+    runtime_deadline: Option<RuntimeDeadlineCandidate>,
+    activation_clock: F,
+) -> Result<StartupActivationOutcome>
+where
+    F: FnOnce() -> i64,
+{
+    let expected = expected_startup_participants();
+    if expected.len() != STARTUP_READY_CHANNEL_CAPACITY {
+        return Err(invalid_data(format!(
+            "startup topology count mismatch: expected={} channel_capacity={STARTUP_READY_CHANNEL_CAPACITY}",
+            expected.len()
+        ))
+        .into());
+    }
+    let release_participants = releases.participants();
+    let release_count = releases
+        .writers
+        .len()
+        .saturating_add(releases.producers.len());
+    if release_count != expected.len() || release_participants != expected {
+        return Err(invalid_data(format!(
+            "startup release topology mismatch: expected={expected:?} actual={release_participants:?} actual_count={release_count}"
+        ))
+        .into());
+    }
+    timeout(
+        STARTUP_GATE_TIMEOUT,
+        collect_startup_ready(&mut ready_rx, &expected),
+    )
+    .await
+    .map_err(|_| {
+        invalid_data(format!(
+            "startup ready timeout after {}ms",
+            STARTUP_GATE_TIMEOUT.as_millis()
+        ))
+    })??;
+
+    let started_utc_ms = activation_clock();
+    let activation_day = utc_day_string_from_ms(started_utc_ms)
+        .ok_or_else(|| invalid_data("UTC day unavailable for collection activation"))?;
+    if activation_day != utc_day {
+        return Err(invalid_data(format!(
+            "UTC day advanced before collection activation: recovered={utc_day} activation={activation_day}"
+        ))
+        .into());
+    }
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    timeout(
+        STARTUP_GATE_TIMEOUT,
+        manifest_tx.send(ManifestCommand::Activate {
+            utc_day,
+            started_utc_ms,
+            generation: INITIAL_RAW_DAY_GENERATION,
+            raw_day_gate: Arc::clone(&raw_day_gate),
+            deadline: runtime_deadline,
+            reply: reply_tx,
+            ack_mode,
+        }),
+    )
+    .await
+    .map_err(|_| invalid_data("daily manifest activation command timeout"))?
+    .map_err(|_| invalid_data("daily manifest owner channel closed before activation"))?;
+
+    match timeout(STARTUP_GATE_TIMEOUT, reply_rx).await {
+        Ok(Ok(Ok(()))) => {
+            raw_day_gate
+                .activate_or_stop_startup_after_manifest(
+                    activation_day,
+                    INITIAL_RAW_DAY_GENERATION,
+                    runtime_deadline,
+                    releases,
+                )
+                .await
+        }
+        Ok(Ok(Err(error))) => {
+            Err(invalid_data(format!("daily manifest activation failed: {error}")).into())
+        }
+        Ok(Err(_)) => {
+            Err(invalid_data("daily manifest activation reply dropped after command").into())
+        }
+        Err(_) => Err(invalid_data("daily manifest activation reply timeout").into()),
+    }
+}
+
+struct CoordinatorRollover {
+    close: RawDayClose,
+    cutpoint: RolloverCutpoint,
+    ready: Option<ManifestRolloverReady>,
+    pre_fence_unclean: bool,
+    producer_replies:
+        BTreeMap<String, oneshot::Sender<std::result::Result<DayBarrierRelease, String>>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RolloverCutpoint {
+    Collecting,
+    ReadyLatched,
+    StopIssued,
+    StopIssuedAfterOldCommit,
+    OldCommitCommandSent,
+    OldCommitted,
+    ResumeTokensDelivered,
+    ResumeTokensArmed,
+    ActivationCommandSent,
+    ActivationAcked,
+    DeferredFlushing,
+    RawActivated,
+    Released,
+    Terminal,
+    OutcomeUncertain,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DurableMutationAck {
+    Confirmed,
+    OutcomeUncertain(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum OldDayCommitAck {
+    Confirmed,
+    PreparedExitWon,
+    OutcomeUncertain(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ActivationMutationAck {
+    Confirmed,
+    PreparedExitWon,
+    OutcomeUncertain(String),
+}
+
+struct ProducerReleaseController {
+    close: RawDayClose,
+    phase: ProducerReleasePhase,
+    phase_tx: watch::Sender<ProducerReleasePhase>,
+    ack_rx: mpsc::Receiver<ProducerReleaseAck>,
+    armed: BTreeSet<String>,
+    flushed: BTreeSet<String>,
+}
+
+impl ProducerReleaseController {
+    fn set_phase(&mut self, phase: ProducerReleasePhase) {
+        self.phase = phase.clone();
+        self.phase_tx.send_replace(phase);
+    }
+
+    fn stop(&mut self) {
+        self.stop_with_close(RuntimeCloseIdentity::from_rollover_old_day(&self.close));
+    }
+
+    fn stop_with_close(&mut self, close: RuntimeCloseIdentity) {
+        self.set_phase(ProducerReleasePhase::Stop(close));
+    }
+
+    fn accept_ack(&mut self, ack: ProducerReleaseAck) -> Result<()> {
+        let expected_close = RuntimeCloseIdentity::from_rollover_old_day(&self.close);
+        if !LOGICAL_PRODUCERS.contains(&ack.producer.as_str()) || ack.close != expected_close {
+            return Err(invalid_data(format!(
+                "producer release ack identity mismatch: ack={ack:?} expected_close={expected_close:?}"
+            ))
+            .into());
+        }
+        if let Some(error) = ack.error {
+            return Err(invalid_data(format!(
+                "producer release ack reported failure: producer={} kind={:?} error={error}",
+                ack.producer, ack.kind
+            ))
+            .into());
+        }
+        let set = match ack.kind {
+            ProducerReleaseAckKind::Armed if self.phase == ProducerReleasePhase::Held => {
+                &mut self.armed
+            }
+            ProducerReleaseAckKind::Flushed
+                if self.phase == ProducerReleasePhase::FlushDeferred
+                    && self.armed.contains(&ack.producer) =>
+            {
+                &mut self.flushed
+            }
+            _ => {
+                return Err(invalid_data(format!(
+                    "producer release ack arrived at invalid phase: producer={} kind={:?} phase={:?}",
+                    ack.producer, ack.kind, self.phase
+                ))
+                .into());
+            }
+        };
+        if !set.insert(ack.producer.clone()) {
+            return Err(invalid_data(format!(
+                "duplicate producer release ack: producer={} kind={:?}",
+                ack.producer, ack.kind
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    fn all_armed(&self) -> bool {
+        self.armed.len() == LOGICAL_PRODUCERS.len()
+    }
+
+    fn all_flushed(&self) -> bool {
+        self.flushed.len() == LOGICAL_PRODUCERS.len()
+    }
+}
+
+impl Drop for ProducerReleaseController {
+    fn drop(&mut self) {
+        if !matches!(
+            self.phase,
+            ProducerReleasePhase::ResumeSources | ProducerReleasePhase::Stop(_)
+        ) {
+            self.phase_tx.send_replace(ProducerReleasePhase::Stop(
+                RuntimeCloseIdentity::from_rollover_old_day(&self.close),
+            ));
+        }
+    }
+}
+
+struct RolloverCoordinatorState {
+    pending: Option<CoordinatorRollover>,
+    activation_ack_mode: ManifestActivationAckMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RolloverCommitOutcome {
+    Activated,
+    PendingExit,
+    ActivatedStopped,
+}
+
+impl RolloverCoordinatorState {
+    fn new(activation_ack_mode: ManifestActivationAckMode) -> Self {
+        Self {
+            pending: None,
+            activation_ack_mode,
+        }
+    }
+
+    fn register_producer_barrier(
+        &mut self,
+        producer: String,
+        close: RawDayClose,
+        reply: oneshot::Sender<std::result::Result<DayBarrierRelease, String>>,
+    ) -> Result<()> {
+        if !LOGICAL_PRODUCERS.contains(&producer.as_str()) {
+            return Err(invalid_data(format!(
+                "coordinator received unknown producer barrier: {producer}"
+            ))
+            .into());
+        }
+        let pending = self.pending.get_or_insert_with(|| CoordinatorRollover {
+            close: close.clone(),
+            cutpoint: RolloverCutpoint::Collecting,
+            ready: None,
+            pre_fence_unclean: false,
+            producer_replies: BTreeMap::new(),
+        });
+        if pending.cutpoint != RolloverCutpoint::Collecting {
+            return Err(invalid_data(format!(
+                "producer barrier arrived after rollover collecting cutpoint: producer={producer} cutpoint={:?}",
+                pending.cutpoint
+            ))
+            .into());
+        }
+        if pending.close != close {
+            return Err(invalid_data(format!(
+                "coordinator rollover tuple mismatch: expected={:?} actual={close:?}",
+                pending.close
+            ))
+            .into());
+        }
+        if pending
+            .producer_replies
+            .insert(producer.clone(), reply)
+            .is_some()
+        {
+            return Err(invalid_data(format!(
+                "coordinator received duplicate producer barrier reply: {producer}"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    fn has_producer_barrier(&self, producer: &str, close: &RawDayClose) -> bool {
+        self.pending.as_ref().is_some_and(|pending| {
+            pending.close == *close && pending.producer_replies.contains_key(producer)
+        })
+    }
+
+    fn latch_ready(&mut self, ready: ManifestRolloverReady) -> Result<()> {
+        let pending = self.pending.as_mut().ok_or_else(|| {
+            invalid_data("manifest owner reported rollover ready without coordinator barriers")
+        })?;
+        if pending.close != ready.close || pending.producer_replies.len() != LOGICAL_PRODUCERS.len()
+        {
+            return Err(invalid_data(format!(
+                "coordinator rollover readiness mismatch: ready={:?} pending_close={:?} producer_count={}",
+                ready.close,
+                pending.close,
+                pending.producer_replies.len()
+            ))
+            .into());
+        }
+        if pending.cutpoint != RolloverCutpoint::Collecting || pending.ready.is_some() {
+            return Err(invalid_data(format!(
+                "coordinator received duplicate or late rollover ready: cutpoint={:?} ready={ready:?}",
+                pending.cutpoint
+            ))
+            .into());
+        }
+        pending.ready = Some(ready);
+        pending.cutpoint = RolloverCutpoint::ReadyLatched;
+        Ok(())
+    }
+
+    fn ready(&self) -> Result<&ManifestRolloverReady> {
+        self.pending
+            .as_ref()
+            .and_then(|pending| pending.ready.as_ref())
+            .ok_or_else(|| invalid_data("coordinator rollover ready is not latched").into())
+    }
+
+    fn cutpoint(&self) -> Option<RolloverCutpoint> {
+        self.pending.as_ref().map(|pending| pending.cutpoint)
+    }
+
+    fn mark_pre_fence_unclean(&mut self) {
+        if let Some(pending) = self.pending.as_mut()
+            && matches!(
+                pending.cutpoint,
+                RolloverCutpoint::Collecting | RolloverCutpoint::ReadyLatched
+            )
+        {
+            pending.pre_fence_unclean = true;
+        }
+    }
+
+    fn pre_fence_unclean(&self) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|pending| pending.pre_fence_unclean)
+    }
+
+    async fn commit_old_day_once(
+        &mut self,
+        mode: ManifestRolloverCommitMode,
+        manifest_tx: &mpsc::Sender<ManifestCommand>,
+        normal_gate: Option<Arc<RawDayGate>>,
+        deadline: Option<RuntimeDeadlineCandidate>,
+    ) -> Result<OldDayCommitAck> {
+        let ready = self.ready()?.clone();
+        let cutpoint = self
+            .cutpoint()
+            .ok_or_else(|| invalid_data("old-day commit found no pending rollover"))?;
+        if !matches!(
+            cutpoint,
+            RolloverCutpoint::ReadyLatched | RolloverCutpoint::StopIssued
+        ) {
+            return Err(
+                invalid_data(format!("old-day commit at invalid cutpoint: {cutpoint:?}")).into(),
+            );
+        }
+        let (old_reply_tx, old_reply_rx) = oneshot::channel();
+        if let Err(error) = send_manifest_command_once(
+            manifest_tx,
+            ManifestCommand::CommitRolloverOldDay {
+                close: ready.close.clone(),
+                mode,
+                normal_gate,
+                deadline,
+                reply: old_reply_tx,
+            },
+            "old-day rollover commit",
+        )
+        .await
+        {
+            let error = format!("old-day rollover commit was not enqueued: {error}");
+            self.mark_outcome_uncertain(error.clone());
+            return Ok(OldDayCommitAck::OutcomeUncertain(error));
+        }
+        self.pending
+            .as_mut()
+            .expect("pending rollover exists during old-day commit")
+            .cutpoint = RolloverCutpoint::OldCommitCommandSent;
+        match timeout(STARTUP_GATE_TIMEOUT, old_reply_rx).await {
+            Ok(Ok(Ok(ManifestOldDayCommitReply::Committed))) => {
+                self.pending
+                    .as_mut()
+                    .expect("pending rollover exists after old-day commit")
+                    .cutpoint = RolloverCutpoint::OldCommitted;
+                Ok(OldDayCommitAck::Confirmed)
+            }
+            Ok(Ok(Ok(ManifestOldDayCommitReply::PreparedExitWon))) => {
+                self.pending
+                    .as_mut()
+                    .expect("pending rollover exists after prepared exit won")
+                    .cutpoint = RolloverCutpoint::ReadyLatched;
+                Ok(OldDayCommitAck::PreparedExitWon)
+            }
+            Ok(Ok(Err(error))) => {
+                let error =
+                    format!("old-day rollover commit returned error after command: {error}");
+                self.mark_outcome_uncertain(error.clone());
+                Ok(OldDayCommitAck::OutcomeUncertain(error))
+            }
+            Ok(Err(_)) => {
+                let error = "old-day rollover commit reply dropped after command".to_owned();
+                self.mark_outcome_uncertain(error.clone());
+                Ok(OldDayCommitAck::OutcomeUncertain(error))
+            }
+            Err(_) => {
+                let error = "old-day rollover commit reply timeout after command".to_owned();
+                self.mark_outcome_uncertain(error.clone());
+                Ok(OldDayCommitAck::OutcomeUncertain(error))
+            }
+        }
+    }
+
+    fn mark_outcome_uncertain(&mut self, error: String) -> DurableMutationAck {
+        if let Some(pending) = self.pending.as_mut() {
+            pending.cutpoint = RolloverCutpoint::OutcomeUncertain;
+        }
+        DurableMutationAck::OutcomeUncertain(error)
+    }
+
+    async fn prepare_exit_day_once(
+        &mut self,
+        close: &RawDayClose,
+        manifest_tx: &mpsc::Sender<ManifestCommand>,
+    ) -> Result<DurableMutationAck> {
+        if !matches!(
+            self.cutpoint(),
+            Some(RolloverCutpoint::OldCommitted | RolloverCutpoint::StopIssuedAfterOldCommit)
+        ) {
+            return Err(
+                invalid_data("exit-day preparation requires a confirmed old-day commit").into(),
+            );
+        }
+        let (reply_tx, reply_rx) = oneshot::channel();
+        send_manifest_command_once(
+            manifest_tx,
+            ManifestCommand::PrepareRolloverExitDay {
+                close: close.clone(),
+                reply: reply_tx,
+            },
+            "exit-day preparation",
+        )
+        .await?;
+        match timeout(STARTUP_GATE_TIMEOUT, reply_rx).await {
+            Ok(Ok(Ok(()))) => {
+                self.pending
+                    .as_mut()
+                    .expect("pending rollover exists during exit-day preparation")
+                    .cutpoint = RolloverCutpoint::Terminal;
+                Ok(DurableMutationAck::Confirmed)
+            }
+            Ok(Ok(Err(error))) => Ok(self.mark_outcome_uncertain(format!(
+                "rollover exit-day preparation returned error after command: {error}"
+            ))),
+            Ok(Err(_)) => Ok(self.mark_outcome_uncertain(
+                "rollover exit-day preparation reply dropped after command".to_owned(),
+            )),
+            Err(_) => Ok(self.mark_outcome_uncertain(
+                "rollover exit-day preparation reply timeout after command".to_owned(),
+            )),
+        }
+    }
+
+    async fn finish_unclean_rollover_once(
+        &mut self,
+        close: &RawDayClose,
+        manifest_tx: &mpsc::Sender<ManifestCommand>,
+    ) -> Result<DurableMutationAck> {
+        if self.cutpoint() != Some(RolloverCutpoint::OldCommitted) {
+            return Err(invalid_data(
+                "unclean rollover finish requires a confirmed old-day commit",
+            )
+            .into());
+        }
+        let (reply_tx, reply_rx) = oneshot::channel();
+        send_manifest_command_once(
+            manifest_tx,
+            ManifestCommand::FinishUncleanRollover {
+                close: close.clone(),
+                reply: reply_tx,
+            },
+            "unclean rollover finish",
+        )
+        .await?;
+        match timeout(STARTUP_GATE_TIMEOUT, reply_rx).await {
+            Ok(Ok(Ok(()))) => {
+                self.pending
+                    .as_mut()
+                    .expect("pending rollover exists during unclean finish")
+                    .cutpoint = RolloverCutpoint::Terminal;
+                Ok(DurableMutationAck::Confirmed)
+            }
+            Ok(Ok(Err(error))) => Ok(self.mark_outcome_uncertain(format!(
+                "unclean rollover finish returned error after command: {error}"
+            ))),
+            Ok(Err(_)) => Ok(self.mark_outcome_uncertain(
+                "unclean rollover finish reply dropped after command".to_owned(),
+            )),
+            Err(_) => Ok(self.mark_outcome_uncertain(
+                "unclean rollover finish reply timeout after command".to_owned(),
+            )),
+        }
+    }
+
+    fn issue_stop_with_close(&mut self) -> Result<()> {
+        let pending = self
+            .pending
+            .as_mut()
+            .ok_or_else(|| invalid_data("producer stop found no pending rollover"))?;
+        if !matches!(
+            pending.cutpoint,
+            RolloverCutpoint::ReadyLatched | RolloverCutpoint::OldCommitted
+        ) {
+            return Err(invalid_data(format!(
+                "producer stop at invalid cutpoint: {:?}",
+                pending.cutpoint
+            ))
+            .into());
+        }
+        let expected = RuntimeCloseIdentity::from_rollover_old_day(&pending.close);
+        let replies = std::mem::take(&mut pending.producer_replies);
+        pending.cutpoint = if pending.cutpoint == RolloverCutpoint::OldCommitted {
+            RolloverCutpoint::StopIssuedAfterOldCommit
+        } else {
+            RolloverCutpoint::StopIssued
+        };
+        let mut failures = Vec::new();
+        for (producer, reply) in replies {
+            if reply
+                .send(Ok(DayBarrierRelease::StopWithClose(expected.clone())))
+                .is_err()
+            {
+                failures.push(producer);
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(invalid_data(format!(
+                "producer stop reply receivers closed: {failures:?}"
+            ))
+            .into())
+        }
+    }
+
+    fn stop_replies_preserving_cutpoint(&mut self) {
+        let Some(pending) = self.pending.as_mut() else {
+            return;
+        };
+        let expected = RuntimeCloseIdentity::from_rollover_old_day(&pending.close);
+        for (_, reply) in std::mem::take(&mut pending.producer_replies) {
+            let _ = reply.send(Ok(DayBarrierRelease::StopWithClose(expected.clone())));
+        }
+    }
+
+    async fn finalize_pending_exit_after_reports(
+        &mut self,
+        exit: &PendingExit,
+        manifest_tx: &mpsc::Sender<ManifestCommand>,
+    ) -> Result<DurableMutationAck> {
+        let ready = self.ready()?.clone();
+        if ready.close != exit.close {
+            return Err(invalid_data(format!(
+                "pending-exit rollover identity mismatch: ready={:?} exit={exit:?}",
+                ready.close
+            ))
+            .into());
+        }
+        if !matches!(
+            self.cutpoint(),
+            Some(
+                RolloverCutpoint::StopIssued
+                    | RolloverCutpoint::StopIssuedAfterOldCommit
+                    | RolloverCutpoint::OldCommitted
+            )
+        ) {
+            return Err(invalid_data(format!(
+                "pending-exit finalization requires stop proof cutpoint: {:?}",
+                self.cutpoint()
+            ))
+            .into());
+        }
+        let old_already_committed = matches!(
+            self.cutpoint(),
+            Some(RolloverCutpoint::OldCommitted | RolloverCutpoint::StopIssuedAfterOldCommit)
+        );
+        let unclean = exit.unclean || self.pre_fence_unclean();
+        let mode = if unclean {
+            ManifestRolloverCommitMode::UncleanOldDay
+        } else {
+            ManifestRolloverCommitMode::PendingExitKnown {
+                ended_utc_ms: exit.close.boundary_utc_ms,
+            }
+        };
+        if !old_already_committed {
+            let commit = self
+                .commit_old_day_once(mode, manifest_tx, None, None)
+                .await?;
+            match commit {
+                OldDayCommitAck::Confirmed => {}
+                OldDayCommitAck::OutcomeUncertain(error) => {
+                    return Ok(DurableMutationAck::OutcomeUncertain(error));
+                }
+                OldDayCommitAck::PreparedExitWon => {
+                    return Err(invalid_data(
+                        "pending-exit old-day commit was skipped by another prepared exit",
+                    )
+                    .into());
+                }
+            }
+        } else if self.pre_fence_unclean() {
+            return Err(invalid_data(
+                "pre-fence unclean evidence arrived after the old-day commit",
+            )
+            .into());
+        }
+        let finish = if unclean && !old_already_committed {
+            self.finish_unclean_rollover_once(&ready.close, manifest_tx)
+                .await?
+        } else {
+            self.prepare_exit_day_once(&ready.close, manifest_tx)
+                .await?
+        };
+        if matches!(finish, DurableMutationAck::Confirmed) {
+            self.pending.take();
+        }
+        Ok(finish)
+    }
+
+    fn prepare_release_controller(&mut self) -> Result<ProducerReleaseController> {
+        let pending = self
+            .pending
+            .as_mut()
+            .ok_or_else(|| invalid_data("release preparation found no pending rollover"))?;
+        if pending.cutpoint != RolloverCutpoint::OldCommitted
+            || pending.producer_replies.len() != LOGICAL_PRODUCERS.len()
+        {
+            return Err(invalid_data(format!(
+                "release preparation cutpoint/reply mismatch: cutpoint={:?} replies={}",
+                pending.cutpoint,
+                pending.producer_replies.len()
+            ))
+            .into());
+        }
+        let (phase_tx, phase_rx) = watch::channel(ProducerReleasePhase::Held);
+        let (ack_tx, ack_rx) = mpsc::channel(LOGICAL_PRODUCERS.len() * 2);
+        let replies = std::mem::take(&mut pending.producer_replies);
+        let mut controller = ProducerReleaseController {
+            close: pending.close.clone(),
+            phase: ProducerReleasePhase::Held,
+            phase_tx,
+            ack_rx,
+            armed: BTreeSet::new(),
+            flushed: BTreeSet::new(),
+        };
+        pending.cutpoint = RolloverCutpoint::ResumeTokensDelivered;
+        let mut failures = Vec::new();
+        for (producer, reply) in replies {
+            let token = ProducerReleaseToken {
+                producer: producer.clone(),
+                close: pending.close.clone(),
+                phase_rx: phase_rx.clone(),
+                ack_tx: ack_tx.clone(),
+            };
+            if reply
+                .send(Ok(DayBarrierRelease::PrepareResume(token)))
+                .is_err()
+            {
+                failures.push(producer);
+            }
+        }
+        drop(ack_tx);
+        if failures.is_empty() {
+            Ok(controller)
+        } else {
+            controller.stop();
+            pending.cutpoint = RolloverCutpoint::StopIssuedAfterOldCommit;
+            Err(invalid_data(format!(
+                "producer release token receivers closed: {failures:?}"
+            ))
+            .into())
+        }
+    }
+
+    fn mark_tokens_armed(&mut self) -> Result<()> {
+        let pending = self
+            .pending
+            .as_mut()
+            .ok_or_else(|| invalid_data("armed release found no pending rollover"))?;
+        if pending.cutpoint != RolloverCutpoint::ResumeTokensDelivered {
+            return Err(invalid_data(format!(
+                "release armed at invalid cutpoint: {:?}",
+                pending.cutpoint
+            ))
+            .into());
+        }
+        pending.cutpoint = RolloverCutpoint::ResumeTokensArmed;
+        Ok(())
+    }
+
+    fn mark_release_stopped_after_old_commit(&mut self) -> Result<()> {
+        let pending = self
+            .pending
+            .as_mut()
+            .ok_or_else(|| invalid_data("release stop found no pending rollover"))?;
+        if !matches!(
+            pending.cutpoint,
+            RolloverCutpoint::ResumeTokensDelivered | RolloverCutpoint::ResumeTokensArmed
+        ) {
+            return Err(invalid_data(format!(
+                "release stop at invalid cutpoint: {:?}",
+                pending.cutpoint
+            ))
+            .into());
+        }
+        pending.cutpoint = RolloverCutpoint::StopIssuedAfterOldCommit;
+        Ok(())
+    }
+
+    async fn activate_new_day_once(
+        &mut self,
+        manifest_tx: &mpsc::Sender<ManifestCommand>,
+        raw_day_gate: Arc<RawDayGate>,
+        deadline: Option<RuntimeDeadlineCandidate>,
+    ) -> Result<ActivationMutationAck> {
+        if self.cutpoint() != Some(RolloverCutpoint::ResumeTokensArmed) {
+            return Err(
+                invalid_data("new-day activation requires all release tokens armed").into(),
+            );
+        }
+        let close = self.ready()?.close.clone();
+        let (activation_reply_tx, activation_reply_rx) = oneshot::channel();
+        send_manifest_command_once(
+            manifest_tx,
+            ManifestCommand::ActivateRolloverNewDay {
+                close,
+                raw_day_gate,
+                deadline,
+                reply: activation_reply_tx,
+                ack_mode: self.activation_ack_mode,
+            },
+            "new-day activation",
+        )
+        .await?;
+        self.pending
+            .as_mut()
+            .expect("pending rollover exists during activation")
+            .cutpoint = RolloverCutpoint::ActivationCommandSent;
+        match timeout(STARTUP_GATE_TIMEOUT, activation_reply_rx).await {
+            Ok(Ok(Ok(ManifestActivationReply::Committed))) => {
+                self.pending
+                    .as_mut()
+                    .expect("pending rollover exists after activation")
+                    .cutpoint = RolloverCutpoint::ActivationAcked;
+                Ok(ActivationMutationAck::Confirmed)
+            }
+            Ok(Ok(Ok(ManifestActivationReply::PreparedExitWon))) => {
+                self.pending
+                    .as_mut()
+                    .expect("pending rollover exists after prepared exit won activation")
+                    .cutpoint = RolloverCutpoint::StopIssuedAfterOldCommit;
+                Ok(ActivationMutationAck::PreparedExitWon)
+            }
+            Ok(Ok(Err(error))) => {
+                let error = format!("new-day activation returned error after command: {error}");
+                self.mark_outcome_uncertain(error.clone());
+                Ok(ActivationMutationAck::OutcomeUncertain(error))
+            }
+            Ok(Err(_)) => {
+                let error = "new-day activation reply dropped after command".to_owned();
+                self.mark_outcome_uncertain(error.clone());
+                Ok(ActivationMutationAck::OutcomeUncertain(error))
+            }
+            Err(_) => {
+                let error = "new-day activation reply timeout after command".to_owned();
+                self.mark_outcome_uncertain(error.clone());
+                Ok(ActivationMutationAck::OutcomeUncertain(error))
+            }
+        }
+    }
+
+    fn mark_deferred_flushing(&mut self) -> Result<()> {
+        let pending = self
+            .pending
+            .as_mut()
+            .ok_or_else(|| invalid_data("deferred flush found no pending rollover"))?;
+        if pending.cutpoint != RolloverCutpoint::ActivationAcked {
+            return Err(invalid_data(format!(
+                "deferred flush at invalid cutpoint: {:?}",
+                pending.cutpoint
+            ))
+            .into());
+        }
+        pending.cutpoint = RolloverCutpoint::DeferredFlushing;
+        Ok(())
+    }
+
+    fn mark_raw_activated(&mut self) -> Result<()> {
+        let pending = self
+            .pending
+            .as_mut()
+            .ok_or_else(|| invalid_data("raw activation found no pending rollover"))?;
+        if pending.cutpoint != RolloverCutpoint::DeferredFlushing {
+            return Err(invalid_data(format!(
+                "raw activation at invalid cutpoint: {:?}",
+                pending.cutpoint
+            ))
+            .into());
+        }
+        pending.cutpoint = RolloverCutpoint::RawActivated;
+        Ok(())
+    }
+
+    fn finish_release(&mut self, controller: &mut ProducerReleaseController) -> Result<()> {
+        let pending = self
+            .pending
+            .as_mut()
+            .ok_or_else(|| invalid_data("release completion found no pending rollover"))?;
+        if pending.cutpoint != RolloverCutpoint::RawActivated || !controller.all_flushed() {
+            return Err(invalid_data(format!(
+                "release completion proof mismatch: cutpoint={:?} flushed={:?}",
+                pending.cutpoint, controller.flushed
+            ))
+            .into());
+        }
+        controller.set_phase(ProducerReleasePhase::ResumeSources);
+        pending.cutpoint = RolloverCutpoint::Released;
+        self.pending.take();
+        Ok(())
+    }
+
+    fn abandon_release_after_activation(&mut self) -> Result<()> {
+        let pending = self
+            .pending
+            .as_mut()
+            .ok_or_else(|| invalid_data("activation release abandonment found no rollover"))?;
+        if !matches!(
+            pending.cutpoint,
+            RolloverCutpoint::ActivationAcked
+                | RolloverCutpoint::DeferredFlushing
+                | RolloverCutpoint::RawActivated
+        ) {
+            return Err(invalid_data(format!(
+                "activation release abandonment at invalid cutpoint: {:?}",
+                pending.cutpoint
+            ))
+            .into());
+        }
+        pending.cutpoint = RolloverCutpoint::Terminal;
+        self.pending.take();
+        Ok(())
+    }
+}
+
+fn prepare_coordinator_failure_exit(
+    raw_day_gate: &RawDayGate,
+    stage: &'static str,
+) -> Result<PreparedRuntimeExit> {
+    raw_day_gate
+        .prepare_runtime_exit_with_cause(now_ms(), RuntimeCloseCause::CoordinatorFailure { stage })
+}
+
+fn freeze_coordinator_failure_message(
+    raw_day_gate: &RawDayGate,
+    stage: &'static str,
+    message: String,
+) -> String {
+    match prepare_coordinator_failure_exit(raw_day_gate, stage) {
+        Ok(_) => message,
+        Err(error) => format!("{message}; runtime_close_prepare_failed:{error}"),
+    }
+}
+
+fn prepare_post_activation_unclean_exit(
+    raw_day_gate: &RawDayGate,
+    stage: &'static str,
+) -> Result<PreparedSameDayClose> {
+    let cause = RuntimeCloseCause::CoordinatorFailure { stage };
+    let prepared = raw_day_gate.prepare_runtime_exit_with_cause(now_ms(), cause.clone())?;
+    let PreparedRuntimeExit::SameDay(close) = prepared else {
+        return Err(invalid_data(format!(
+            "post-activation failure was assigned to the old generation: stage={stage} prepared={prepared:?}"
+        ))
+        .into());
+    };
+    match raw_day_gate.mark_runtime_exit_unclean_with_cause(&close.identity, cause)? {
+        PreparedRuntimeExit::SameDay(close) => Ok(close),
+        PreparedRuntimeExit::Rollover(exit) => Err(invalid_data(format!(
+            "post-activation unclean mark changed generation ownership: stage={stage} exit={exit:?}"
+        ))
+        .into()),
+    }
+}
+
+fn stop_post_activation_release_unclean(
+    raw_day_gate: &RawDayGate,
+    rollover_coordinator: &mut RolloverCoordinatorState,
+    release: &mut ProducerReleaseController,
+    release_stop_issued: &mut bool,
+    stage: &'static str,
+) -> Result<PreparedSameDayClose> {
+    match prepare_post_activation_unclean_exit(raw_day_gate, stage) {
+        Ok(close) => {
+            *release_stop_issued = true;
+            release.stop_with_close(close.identity.clone());
+            if let Err(error) = rollover_coordinator.abandon_release_after_activation() {
+                let message = format!(
+                    "post-activation release abandonment failed after exact stop: stage={stage} error={error}"
+                );
+                rollover_coordinator.mark_outcome_uncertain(message.clone());
+                return Err(invalid_data(message).into());
+            }
+            Ok(close)
+        }
+        Err(error) => {
+            *release_stop_issued = true;
+            release.stop();
+            let message = format!(
+                "post-activation close ownership is uncertain; old-generation stop issued: stage={stage} error={error}"
+            );
+            rollover_coordinator.mark_outcome_uncertain(message.clone());
+            Err(invalid_data(message).into())
+        }
+    }
+}
+
+fn stop_post_activation_release_known(
+    rollover_coordinator: &mut RolloverCoordinatorState,
+    release: &mut ProducerReleaseController,
+    release_stop_issued: &mut bool,
+    close: &PreparedSameDayClose,
+) -> Result<()> {
+    *release_stop_issued = true;
+    release.stop_with_close(close.identity.clone());
+    if let Err(error) = rollover_coordinator.abandon_release_after_activation() {
+        let message = format!(
+            "post-activation release abandonment failed after known exact stop: error={error}"
+        );
+        rollover_coordinator.mark_outcome_uncertain(message.clone());
+        return Err(invalid_data(message).into());
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn drive_normal_rollover(
+    ready: ManifestRolloverReady,
+    manifest_tx: &mpsc::Sender<ManifestCommand>,
+    raw_day_gate: &Arc<RawDayGate>,
+    runtime_exit_rx: &mut mpsc::Receiver<RuntimeExitRequest>,
+    event_rx: &mut mpsc::Receiver<InflightRawEvent>,
+    writer_handles: &mut BTreeMap<String, SourceWriterHandle>,
+    batches: &mut BTreeMap<String, Vec<InflightRawEvent>>,
+    coverage: &mut BTreeMap<String, CoverageStats>,
+    received_rows: &mut u64,
+    average_event_bytes: &mut u64,
+    source_gaps: &SharedSourceGaps,
+    source_queue_backpressure: &SourceQueueBackpressureStats,
+    writer_queue_tracker: &mut QueueDurationTracker,
+    run_started: Instant,
+    rollover_coordinator: &mut RolloverCoordinatorState,
+    release_stop_issued: &mut bool,
+    runtime_deadline: Option<RuntimeDeadlineCandidate>,
+) -> Result<RolloverCommitOutcome> {
+    let close = ready.close.clone();
+    let post_fence_epoch = RuntimeEpoch {
+        utc_day: close.next_utc_day.clone(),
+        generation: close.next_generation,
+    };
+    rollover_coordinator.latch_ready(ready)?;
+    if let Some(completion) =
+        poll_writer_completion(writer_handles, raw_day_gate, Some(&post_fence_epoch))
+    {
+        record_gap(source_gaps, completion.message);
+        if raw_day_gate.prepared_runtime_exit().is_none() {
+            let _ = prepare_coordinator_failure_exit(
+                raw_day_gate,
+                "post_fence_writer_terminal_before_old_commit",
+            )?;
+        }
+        rollover_coordinator.issue_stop_with_close()?;
+        return Ok(RolloverCommitOutcome::PendingExit);
+    }
+    if raw_day_gate.prepared_runtime_exit().is_some() {
+        rollover_coordinator.issue_stop_with_close()?;
+        return Ok(RolloverCommitOutcome::PendingExit);
+    }
+
+    match rollover_coordinator
+        .commit_old_day_once(
+            ManifestRolloverCommitMode::Normal,
+            manifest_tx,
+            Some(Arc::clone(raw_day_gate)),
+            runtime_deadline,
+        )
+        .await?
+    {
+        OldDayCommitAck::Confirmed => {}
+        OldDayCommitAck::PreparedExitWon => {
+            rollover_coordinator.issue_stop_with_close()?;
+            return Ok(RolloverCommitOutcome::PendingExit);
+        }
+        OldDayCommitAck::OutcomeUncertain(error) => {
+            rollover_coordinator.stop_replies_preserving_cutpoint();
+            return Err(invalid_data(error).into());
+        }
+    }
+    if let Some(completion) =
+        poll_writer_completion(writer_handles, raw_day_gate, Some(&post_fence_epoch))
+    {
+        record_gap(source_gaps, completion.message);
+        if raw_day_gate.prepared_runtime_exit().is_none() {
+            let _ = prepare_coordinator_failure_exit(
+                raw_day_gate,
+                "post_fence_writer_terminal_after_old_commit",
+            )?;
+        }
+        rollover_coordinator.issue_stop_with_close()?;
+        return Ok(RolloverCommitOutcome::PendingExit);
+    }
+    if raw_day_gate.prepared_runtime_exit().is_some() {
+        rollover_coordinator.issue_stop_with_close()?;
+        return Ok(RolloverCommitOutcome::PendingExit);
+    }
+
+    let mut release = match rollover_coordinator.prepare_release_controller() {
+        Ok(release) => release,
+        Err(error) => {
+            let _ =
+                prepare_coordinator_failure_exit(raw_day_gate, "producer_release_token_delivery")?;
+            return Err(error);
+        }
+    };
+    let armed_deadline = Instant::now() + STARTUP_GATE_TIMEOUT;
+    while !release.all_armed() {
+        if let Some(completion) =
+            poll_writer_completion(writer_handles, raw_day_gate, Some(&post_fence_epoch))
+        {
+            record_gap(source_gaps, completion.message);
+            if raw_day_gate.prepared_runtime_exit().is_none() {
+                let _ = prepare_coordinator_failure_exit(
+                    raw_day_gate,
+                    "post_fence_writer_terminal_before_release_armed",
+                )?;
+            }
+            release.stop();
+            rollover_coordinator.mark_release_stopped_after_old_commit()?;
+            return Ok(RolloverCommitOutcome::PendingExit);
+        }
+        let remaining = armed_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            release.stop();
+            rollover_coordinator.mark_release_stopped_after_old_commit()?;
+            let _ =
+                prepare_coordinator_failure_exit(raw_day_gate, "producer_release_armed_timeout")?;
+            return Err(invalid_data("producer release armed-ack timeout").into());
+        }
+        tokio::select! {
+            biased;
+            request = runtime_exit_rx.recv() => {
+                let Some(request) = request else {
+                    release.stop();
+                    rollover_coordinator.mark_release_stopped_after_old_commit()?;
+                    let _ = prepare_coordinator_failure_exit(
+                        raw_day_gate,
+                        "runtime_exit_channel_closed_before_release_armed",
+                    )?;
+                    return Err(invalid_data("runtime-exit channel closed before release armed").into());
+                };
+                if let Err(error) = apply_runtime_exit_request(raw_day_gate, &request) {
+                    release.stop();
+                    if let Err(mark_error) =
+                        rollover_coordinator.mark_release_stopped_after_old_commit()
+                    {
+                        return Err(invalid_data(format!(
+                            "runtime exit preparation failed before release and stop cutpoint could not be recorded: prepare={error} cutpoint={mark_error}"
+                        ))
+                        .into());
+                    }
+                    let _ = prepare_coordinator_failure_exit(
+                        raw_day_gate,
+                        "runtime_exit_prepare_before_release_armed",
+                    );
+                    return Err(error);
+                }
+                release.stop();
+                rollover_coordinator.mark_release_stopped_after_old_commit()?;
+                return Ok(RolloverCommitOutcome::PendingExit);
+            }
+            ack = release.ack_rx.recv() => {
+                let Some(ack) = ack else {
+                    release.stop();
+                    rollover_coordinator.mark_release_stopped_after_old_commit()?;
+                    let _ = prepare_coordinator_failure_exit(
+                        raw_day_gate,
+                        "producer_release_armed_ack_channel_closed",
+                    )?;
+                    return Err(invalid_data("producer release ack channel closed before all armed").into());
+                };
+                if let Err(error) = release.accept_ack(ack) {
+                    release.stop();
+                    rollover_coordinator.mark_release_stopped_after_old_commit()?;
+                    let _ = prepare_coordinator_failure_exit(
+                        raw_day_gate,
+                        "producer_release_armed_ack_invalid",
+                    )?;
+                    return Err(error);
+                }
+            }
+            () = sleep(remaining.min(Duration::from_millis(25))) => {
+                if raw_day_gate.prepared_runtime_exit().is_some() {
+                    release.stop();
+                    rollover_coordinator.mark_release_stopped_after_old_commit()?;
+                    return Ok(RolloverCommitOutcome::PendingExit);
+                }
+            }
+        }
+    }
+    if let Some(completion) =
+        poll_writer_completion(writer_handles, raw_day_gate, Some(&post_fence_epoch))
+    {
+        record_gap(source_gaps, completion.message);
+        if raw_day_gate.prepared_runtime_exit().is_none() {
+            let _ = prepare_coordinator_failure_exit(
+                raw_day_gate,
+                "post_fence_writer_terminal_before_new_day_activation",
+            )?;
+        }
+        release.stop();
+        rollover_coordinator.mark_release_stopped_after_old_commit()?;
+        return Ok(RolloverCommitOutcome::PendingExit);
+    }
+    if let Err(error) = rollover_coordinator.mark_tokens_armed() {
+        release.stop();
+        rollover_coordinator.mark_release_stopped_after_old_commit()?;
+        let _ = prepare_coordinator_failure_exit(raw_day_gate, "producer_release_arm_commit")?;
+        return Err(error);
+    }
+
+    let activation = match rollover_coordinator
+        .activate_new_day_once(manifest_tx, Arc::clone(raw_day_gate), runtime_deadline)
+        .await
+    {
+        Ok(activation) => activation,
+        Err(error) => {
+            release.stop();
+            rollover_coordinator.mark_release_stopped_after_old_commit()?;
+            let _ = prepare_coordinator_failure_exit(raw_day_gate, "new_day_activation_send")?;
+            return Err(error);
+        }
+    };
+    match activation {
+        ActivationMutationAck::Confirmed => {}
+        ActivationMutationAck::PreparedExitWon => {
+            *release_stop_issued = true;
+            release.stop();
+            return Ok(RolloverCommitOutcome::PendingExit);
+        }
+        ActivationMutationAck::OutcomeUncertain(error) => {
+            *release_stop_issued = true;
+            release.stop();
+            return Err(invalid_data(error).into());
+        }
+    }
+    let mut post_activation_exit = if let Some(prepared) = raw_day_gate.prepared_runtime_exit() {
+        let PreparedRuntimeExit::SameDay(close) = prepared else {
+            release.stop();
+            let _ = rollover_coordinator.mark_outcome_uncertain(
+                "post-activation exit retained old-generation ownership".to_owned(),
+            );
+            return Err(
+                invalid_data("post-activation exit retained old-generation ownership").into(),
+            );
+        };
+        Some(close)
+    } else {
+        None
+    };
+
+    if let Err(error) = rollover_coordinator.mark_deferred_flushing() {
+        stop_post_activation_release_unclean(
+            raw_day_gate,
+            rollover_coordinator,
+            &mut release,
+            release_stop_issued,
+            "deferred_flush_cutpoint",
+        )?;
+        return Err(error);
+    }
+    release.set_phase(ProducerReleasePhase::FlushDeferred);
+    let flush_deadline = Instant::now() + STARTUP_GATE_TIMEOUT;
+    while !release.all_flushed() {
+        let remaining = flush_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            stop_post_activation_release_unclean(
+                raw_day_gate,
+                rollover_coordinator,
+                &mut release,
+                release_stop_issued,
+                "producer_deferred_flush_timeout",
+            )?;
+            return Err(invalid_data("producer deferred-flush ack timeout").into());
+        }
+        tokio::select! {
+            biased;
+            request = runtime_exit_rx.recv(), if post_activation_exit.is_none() => {
+                let Some(request) = request else {
+                    stop_post_activation_release_unclean(
+                        raw_day_gate,
+                        rollover_coordinator,
+                        &mut release,
+                        release_stop_issued,
+                        "runtime_exit_channel_closed_during_deferred_flush",
+                    )?;
+                    return Err(invalid_data("runtime-exit channel closed during deferred flush").into());
+                };
+                let prepared = match apply_runtime_exit_request(raw_day_gate, &request) {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        stop_post_activation_release_unclean(
+                            raw_day_gate,
+                            rollover_coordinator,
+                            &mut release,
+                            release_stop_issued,
+                            "runtime_exit_prepare_during_deferred_flush",
+                        )?;
+                        return Err(error);
+                    }
+                };
+                let PreparedRuntimeExit::SameDay(close) = prepared else {
+                    *release_stop_issued = true;
+                    release.stop();
+                    let _ = rollover_coordinator.mark_outcome_uncertain(
+                        "runtime exit during deferred flush retained old-generation ownership".to_owned(),
+                    );
+                    return Err(invalid_data(
+                        "runtime exit during deferred flush retained old-generation ownership",
+                    ).into());
+                };
+                post_activation_exit = Some(close);
+            }
+            ack = release.ack_rx.recv() => {
+                let Some(ack) = ack else {
+                    stop_post_activation_release_unclean(
+                        raw_day_gate,
+                        rollover_coordinator,
+                        &mut release,
+                        release_stop_issued,
+                        "producer_deferred_flush_ack_channel_closed",
+                    )?;
+                    return Err(invalid_data("producer release ack channel closed before all flushed").into());
+                };
+                if let Err(error) = release.accept_ack(ack) {
+                    stop_post_activation_release_unclean(
+                        raw_day_gate,
+                        rollover_coordinator,
+                        &mut release,
+                        release_stop_issued,
+                        "producer_deferred_flush_failed",
+                    )?;
+                    return Err(error);
+                }
+            }
+            received = event_rx.recv() => {
+                let Some(inflight_event) = received else {
+                    stop_post_activation_release_unclean(
+                        raw_day_gate,
+                        rollover_coordinator,
+                        &mut release,
+                        release_stop_issued,
+                        "source_event_queue_closed_during_deferred_flush",
+                    )?;
+                    return Err(invalid_data("source event queue closed during deferred flush").into());
+                };
+                if let Err(error) = process_ingress_event(
+                    inflight_event,
+                    writer_handles,
+                    batches,
+                    coverage,
+                    received_rows,
+                    average_event_bytes,
+                    source_gaps,
+                    source_queue_backpressure,
+                    writer_queue_tracker,
+                    run_started,
+                    manifest_tx,
+                    rollover_coordinator,
+                ).await {
+                    stop_post_activation_release_unclean(
+                        raw_day_gate,
+                        rollover_coordinator,
+                        &mut release,
+                        release_stop_issued,
+                        "deferred_ingress_processing",
+                    )?;
+                    return Err(error);
+                }
+            }
+            () = sleep(remaining.min(Duration::from_millis(25))) => {
+                if post_activation_exit.is_none()
+                    && let Some(prepared) = raw_day_gate.prepared_runtime_exit()
+                {
+                    let PreparedRuntimeExit::SameDay(close) = prepared else {
+                        *release_stop_issued = true;
+                        release.stop();
+                        let _ = rollover_coordinator.mark_outcome_uncertain(
+                            "prepared exit during deferred flush retained old-generation ownership".to_owned(),
+                        );
+                        return Err(invalid_data(
+                            "prepared exit during deferred flush retained old-generation ownership",
+                        ).into());
+                    };
+                    post_activation_exit = Some(close);
+                }
+            }
+        }
+    }
+
+    while let Ok(inflight_event) = event_rx.try_recv() {
+        if let Err(error) = process_ingress_event(
+            inflight_event,
+            writer_handles,
+            batches,
+            coverage,
+            received_rows,
+            average_event_bytes,
+            source_gaps,
+            source_queue_backpressure,
+            writer_queue_tracker,
+            run_started,
+            manifest_tx,
+            rollover_coordinator,
+        )
+        .await
+        {
+            stop_post_activation_release_unclean(
+                raw_day_gate,
+                rollover_coordinator,
+                &mut release,
+                release_stop_issued,
+                "post_activation_ingress_drain",
+            )?;
+            return Err(error);
+        }
+    }
+    if let Err(error) = flush_all_batches(
+        writer_handles,
+        batches,
+        source_gaps,
+        source_queue_backpressure,
+        writer_queue_tracker,
+        run_started,
+    )
+    .await
+    {
+        stop_post_activation_release_unclean(
+            raw_day_gate,
+            rollover_coordinator,
+            &mut release,
+            release_stop_issued,
+            "post_activation_writer_flush",
+        )?;
+        return Err(error);
+    }
+    let prepared_after_flush = post_activation_exit
+        .map(PreparedRuntimeExit::SameDay)
+        .or_else(|| raw_day_gate.prepared_runtime_exit());
+    if let Some(prepared) = prepared_after_flush {
+        let PreparedRuntimeExit::SameDay(close) = prepared else {
+            *release_stop_issued = true;
+            release.stop();
+            let _ = rollover_coordinator.mark_outcome_uncertain(
+                "prepared exit before raw activation retained old-generation ownership".to_owned(),
+            );
+            return Err(invalid_data(
+                "prepared exit before raw activation retained old-generation ownership",
+            )
+            .into());
+        };
+        stop_post_activation_release_known(
+            rollover_coordinator,
+            &mut release,
+            release_stop_issued,
+            &close,
+        )?;
+        return Ok(RolloverCommitOutcome::ActivatedStopped);
+    }
+    if let Err(error) = raw_day_gate.activate_after_rollover(&close).await {
+        if let Some(PreparedRuntimeExit::SameDay(close)) = raw_day_gate.prepared_runtime_exit() {
+            stop_post_activation_release_known(
+                rollover_coordinator,
+                &mut release,
+                release_stop_issued,
+                &close,
+            )?;
+            return Ok(RolloverCommitOutcome::ActivatedStopped);
+        }
+        stop_post_activation_release_unclean(
+            raw_day_gate,
+            rollover_coordinator,
+            &mut release,
+            release_stop_issued,
+            "raw_day_activation",
+        )?;
+        return Err(error);
+    }
+    if let Err(error) = rollover_coordinator.mark_raw_activated() {
+        stop_post_activation_release_unclean(
+            raw_day_gate,
+            rollover_coordinator,
+            &mut release,
+            release_stop_issued,
+            "raw_day_activation_cutpoint",
+        )?;
+        return Err(error);
+    }
+    if let Err(error) = raw_day_gate.commit_release_if_no_exit(&close, runtime_deadline, || {
+        rollover_coordinator.finish_release(&mut release)
+    }) {
+        if let Some(PreparedRuntimeExit::SameDay(close)) = raw_day_gate.prepared_runtime_exit() {
+            stop_post_activation_release_known(
+                rollover_coordinator,
+                &mut release,
+                release_stop_issued,
+                &close,
+            )?;
+            return Ok(RolloverCommitOutcome::ActivatedStopped);
+        }
+        stop_post_activation_release_unclean(
+            raw_day_gate,
+            rollover_coordinator,
+            &mut release,
+            release_stop_issued,
+            "producer_release_completion",
+        )?;
+        return Err(error);
+    }
+    Ok(RolloverCommitOutcome::Activated)
+}
+
+fn logical_producer_for_source_task(source_kind: &str) -> Result<&'static str> {
+    match source_kind {
+        "polymarket_market" => Ok("polymarket"),
+        "polymarket_rtds_chainlink_btc_usd" => Ok("polymarket_rtds"),
+        "binance_depth_update" => Ok("binance_depth"),
+        "binance_aggtrade" => Ok("binance_aggtrade"),
+        other => Err(invalid_data(format!(
+            "source task has no logical producer mapping: {other}"
+        ))
+        .into()),
+    }
+}
+
+async fn enqueue_synthetic_day_barrier(
+    sink: &SourceEventSink,
+    run_started: Instant,
+    producer: &str,
+    close: RawDayClose,
+) -> Result<oneshot::Receiver<std::result::Result<DayBarrierRelease, String>>> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    send_ingress_control(
+        sink,
+        run_started,
+        IngressControl::DayBarrier {
+            producer: producer.to_owned(),
+            close,
+            reply: reply_tx,
+        },
+        "terminated_producer_day_barrier",
+    )
+    .await?;
+    Ok(reply_rx)
+}
+
+async fn converge_spawned_runtime_resources(
+    handles: &mut Vec<SourceTaskHandle>,
+    writer_handles: &mut BTreeMap<String, SourceWriterHandle>,
+    manifest_owner_handle: &mut tokio::task::JoinHandle<Result<()>>,
+    runtime_exit_watcher: &mut RuntimeExitWatcher,
+    source_close: Option<&RuntimeCloseIdentity>,
+    writer_close: Option<RuntimeCloseIdentity>,
+    deadline: Instant,
+) {
+    runtime_exit_watcher.abort_and_join().await;
+    for handle in handles.iter_mut() {
+        if handle.is_finished() {
+            continue;
+        }
+        if source_close.is_none_or(|close| handle.abort_with_permit(close).is_err()) {
+            handle.abort_without_permit();
+        }
+    }
+    while let Some(handle) = handles.pop() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        if let Some(close) = source_close {
+            let _ = timeout(remaining, handle.await_termination(close)).await;
+        } else {
+            let _ = timeout(remaining, handle.join).await;
+        }
+    }
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if let Some(close) = writer_close {
+        let _ =
+            shutdown_writer_workers_with_budget(std::mem::take(writer_handles), close, remaining)
+                .await;
+    } else {
+        let _ = stop_writer_workers_with_budget(std::mem::take(writer_handles), remaining).await;
+    }
+    manifest_owner_handle.abort();
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if !remaining.is_zero() {
+        let _ = timeout(remaining, manifest_owner_handle).await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn complete_pending_exit_rollover(
+    mut exit: PendingExit,
+    handles: &mut Vec<SourceTaskHandle>,
+    completed_terminations: &mut Vec<SourceTaskTermination>,
+    fallback_sinks: &BTreeMap<&'static str, SourceEventSink>,
+    event_rx: &mut mpsc::Receiver<InflightRawEvent>,
+    rollover_ready_rx: &mut mpsc::Receiver<ManifestRolloverReady>,
+    writer_handles: &mut BTreeMap<String, SourceWriterHandle>,
+    completed_writer_outcome: &mut Option<WriterStopOutcome>,
+    batches: &mut BTreeMap<String, Vec<InflightRawEvent>>,
+    coverage: &mut BTreeMap<String, CoverageStats>,
+    received_rows: &mut u64,
+    average_event_bytes: &mut u64,
+    source_gaps: &SharedSourceGaps,
+    source_queue_backpressure: &SourceQueueBackpressureStats,
+    writer_queue_tracker: &mut QueueDurationTracker,
+    run_started: Instant,
+    manifest_tx: &mpsc::Sender<ManifestCommand>,
+    rollover_coordinator: &mut RolloverCoordinatorState,
+    raw_day_gate: &RawDayGate,
+    runtime_failure: &mut Option<String>,
+    deadline: Instant,
+) -> Result<PendingExit> {
+    let close_identity = RuntimeCloseIdentity::from_rollover_old_day(&exit.close);
+    let mut synthetic_producers = BTreeSet::<&'static str>::new();
+    let mut synthetic_sent = BTreeSet::<&'static str>::new();
+    let mut synthetic_release_receivers = BTreeMap::<
+        &'static str,
+        oneshot::Receiver<std::result::Result<DayBarrierRelease, String>>,
+    >::new();
+    if matches!(
+        rollover_coordinator.cutpoint(),
+        Some(RolloverCutpoint::ReadyLatched | RolloverCutpoint::OldCommitted)
+    ) && let Err(error) = rollover_coordinator.issue_stop_with_close()
+    {
+        let message = format!("pending_exit_stop_dispatch_failed:{error}");
+        record_gap(source_gaps, message.clone());
+        *runtime_failure = Some(message);
+    }
+    loop {
+        let mut completed_synthetic_releases = Vec::new();
+        for (producer, receiver) in &mut synthetic_release_receivers {
+            match receiver.try_recv() {
+                Ok(Ok(DayBarrierRelease::StopWithClose(actual))) if actual == close_identity => {
+                    completed_synthetic_releases.push(*producer);
+                }
+                Ok(Ok(DayBarrierRelease::StopWithClose(actual))) => {
+                    return Err(invalid_data(format!(
+                        "synthetic producer stop identity mismatch: producer={producer} expected={close_identity:?} actual={actual:?}"
+                    ))
+                    .into());
+                }
+                Ok(Ok(other)) => {
+                    return Err(invalid_data(format!(
+                        "synthetic producer received an invalid release: producer={producer} release={other:?}"
+                    ))
+                    .into());
+                }
+                Ok(Err(error)) => {
+                    return Err(invalid_data(format!(
+                        "synthetic producer stop failed: producer={producer} error={error}"
+                    ))
+                    .into());
+                }
+                Err(oneshot::error::TryRecvError::Empty) => {}
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    return Err(invalid_data(format!(
+                        "synthetic producer stop reply closed: producer={producer}"
+                    ))
+                    .into());
+                }
+            }
+        }
+        for producer in completed_synthetic_releases {
+            synthetic_release_receivers.remove(producer);
+        }
+        let ready_latched = rollover_coordinator.ready().is_ok();
+        let mut index = 0;
+        while index < handles.len() {
+            if !handles[index].is_finished() {
+                index += 1;
+                continue;
+            }
+            let handle = handles.swap_remove(index);
+            let termination = handle.await_termination(&close_identity).await;
+            let producer = logical_producer_for_source_task(termination.source_kind)?;
+            let producer_fenced = raw_day_gate.source_fence_registered(producer, &exit.close);
+            if !producer_fenced && termination.kind == SourceTaskTerminationKind::Unclean {
+                exit.unclean = true;
+                exit.unclean_cause
+                    .get_or_insert(RuntimeCloseCause::CoordinatorFailure {
+                        stage: "pre_fence_source_termination",
+                    });
+                rollover_coordinator.mark_pre_fence_unclean();
+                let _ = raw_day_gate.mark_runtime_exit_unclean_with_cause(
+                    &close_identity,
+                    RuntimeCloseCause::CoordinatorFailure {
+                        stage: "pre_fence_source_termination",
+                    },
+                )?;
+            }
+            if let Some(error) = termination.error.as_ref() {
+                let prefix = if termination.kind == SourceTaskTerminationKind::Unclean {
+                    "source_task_unclean"
+                } else {
+                    "source_task_error"
+                };
+                let message = format!("{prefix}:{}:{error}", termination.source_kind);
+                record_gap(source_gaps, message.clone());
+                *runtime_failure = Some(message);
+            }
+            if !ready_latched && !producer_fenced {
+                match raw_day_gate.current_state() {
+                    RawDayGateState::Active(_) => {
+                        raw_day_gate.register_source_fence(producer, &exit.close)?;
+                    }
+                    RawDayGateState::Closing(ref close) if close == &exit.close => {
+                        return Err(invalid_data(format!(
+                            "terminated producer was not fenced before raw-day close: producer={producer} close={close:?}"
+                        ))
+                        .into());
+                    }
+                    ref state => {
+                        return Err(invalid_data(format!(
+                            "terminated producer found incompatible raw-day state: producer={producer} state={state:?} close={:?}",
+                            exit.close
+                        ))
+                        .into());
+                    }
+                }
+            }
+            synthetic_producers.insert(producer);
+            completed_terminations.push(termination);
+        }
+
+        let post_fence_epoch = ready_latched.then(|| RuntimeEpoch {
+            utc_day: exit.close.next_utc_day.clone(),
+            generation: exit.close.next_generation,
+        });
+        if let Some(completion) =
+            poll_writer_completion(writer_handles, raw_day_gate, post_fence_epoch.as_ref())
+        {
+            record_gap(source_gaps, completion.message.clone());
+            *runtime_failure = Some(completion.message);
+            let worker_fenced = completion
+                .worker_epoch
+                .or(completion.rendezvous_epoch)
+                .is_some_and(|epoch| {
+                    epoch.utc_day == exit.close.next_utc_day
+                        && epoch.generation == exit.close.next_generation
+                });
+            let reliable_old_epoch = completion.termination_kind
+                == WriterTerminationKind::ReliableReturn
+                && completion.lifecycle_epoch.is_some_and(|epoch| {
+                    epoch.utc_day == exit.close.utc_day && epoch.generation == exit.close.generation
+                });
+            if !ready_latched && !reliable_old_epoch && !worker_fenced {
+                rollover_coordinator.mark_pre_fence_unclean();
+                exit.unclean = true;
+            }
+        }
+
+        if raw_day_gate.all_source_fences_registered(&exit.close)
+            && matches!(raw_day_gate.current_state(), RawDayGateState::Active(_))
+        {
+            raw_day_gate.seal_prepared_rollover(&exit.close).await?;
+        }
+        while let Ok(inflight_event) = event_rx.try_recv() {
+            process_ingress_event(
+                inflight_event,
+                writer_handles,
+                batches,
+                coverage,
+                received_rows,
+                average_event_bytes,
+                source_gaps,
+                source_queue_backpressure,
+                writer_queue_tracker,
+                run_started,
+                manifest_tx,
+                rollover_coordinator,
+            )
+            .await?;
+        }
+        if !ready_latched
+            && matches!(
+                raw_day_gate.current_state(),
+                RawDayGateState::Closing(ref close) if close == &exit.close
+            )
+        {
+            for producer in synthetic_producers.iter().copied() {
+                if synthetic_sent.contains(producer)
+                    || rollover_coordinator.has_producer_barrier(producer, &exit.close)
+                {
+                    continue;
+                }
+                let sink = fallback_sinks.get(producer).ok_or_else(|| {
+                    invalid_data(format!(
+                        "missing fallback sink for terminated producer: {producer}"
+                    ))
+                })?;
+                let reply =
+                    enqueue_synthetic_day_barrier(sink, run_started, producer, exit.close.clone())
+                        .await?;
+                synthetic_release_receivers.insert(producer, reply);
+                synthetic_sent.insert(producer);
+            }
+        }
+
+        if rollover_coordinator.ready().is_ok()
+            && handles.is_empty()
+            && synthetic_release_receivers.is_empty()
+        {
+            while let Ok(inflight_event) = event_rx.try_recv() {
+                process_ingress_event(
+                    inflight_event,
+                    writer_handles,
+                    batches,
+                    coverage,
+                    received_rows,
+                    average_event_bytes,
+                    source_gaps,
+                    source_queue_backpressure,
+                    writer_queue_tracker,
+                    run_started,
+                    manifest_tx,
+                    rollover_coordinator,
+                )
+                .await?;
+            }
+            flush_all_batches(
+                writer_handles,
+                batches,
+                source_gaps,
+                source_queue_backpressure,
+                writer_queue_tracker,
+                run_started,
+            )
+            .await?;
+            let writer_outcome = shutdown_writer_workers_with_budget(
+                std::mem::take(writer_handles),
+                RuntimeCloseIdentity::from_rollover_next_day(&exit.close),
+                deadline.saturating_duration_since(Instant::now()),
+            )
+            .await;
+            if !writer_outcome.all_terminal || !writer_outcome.all_close_proven {
+                let message = format!(
+                    "pending_exit_writer_termination_failed:{}",
+                    writer_outcome.errors.join(" | ")
+                );
+                record_gap(source_gaps, message.clone());
+                *runtime_failure = Some(message);
+            }
+            *completed_writer_outcome = Some(writer_outcome);
+            let refreshed = match raw_day_gate.prepared_runtime_exit() {
+                Some(PreparedRuntimeExit::Rollover(refreshed)) => refreshed,
+                other => {
+                    return Err(invalid_data(format!(
+                        "pending-exit rollover lost authoritative gate state before finalization: {other:?}"
+                    ))
+                    .into());
+                }
+            };
+            exit.unclean |= refreshed.unclean || rollover_coordinator.pre_fence_unclean();
+            if exit.unclean_cause.is_none() {
+                exit.unclean_cause = refreshed.unclean_cause;
+            }
+            match rollover_coordinator
+                .finalize_pending_exit_after_reports(&exit, manifest_tx)
+                .await?
+            {
+                DurableMutationAck::Confirmed => {
+                    raw_day_gate.clear_writer_rendezvous(&exit.close)?;
+                    return Ok(exit);
+                }
+                DurableMutationAck::OutcomeUncertain(error) => {
+                    return Err(invalid_data(error).into());
+                }
+            }
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "pending-exit rollover rendezvous timeout",
+            )
+            .into());
+        }
+        tokio::select! {
+            ready = rollover_ready_rx.recv(), if rollover_coordinator.ready().is_err() => {
+                let ready = ready.ok_or_else(|| {
+                    invalid_data("rollover-ready channel closed during pending exit")
+                })?;
+                rollover_coordinator.latch_ready(ready)?;
+                if let Err(error) = rollover_coordinator.issue_stop_with_close() {
+                    let message = format!("pending_exit_stop_dispatch_failed:{error}");
+                    record_gap(source_gaps, message.clone());
+                    *runtime_failure = Some(message);
+                }
+            }
+            received = event_rx.recv() => {
+                let inflight_event = received.ok_or_else(|| {
+                    invalid_data("source event queue closed during pending-exit rollover")
+                })?;
+                process_ingress_event(
+                    inflight_event,
+                    writer_handles,
+                    batches,
+                    coverage,
+                    received_rows,
+                    average_event_bytes,
+                    source_gaps,
+                    source_queue_backpressure,
+                    writer_queue_tracker,
+                    run_started,
+                    manifest_tx,
+                    rollover_coordinator,
+                )
+                .await?;
+            }
+            () = sleep(remaining.min(Duration::from_millis(100))) => {}
+        }
+    }
+}
+
 pub async fn run_live_training_runtime(
     config: LiveTrainingRuntimeConfig,
 ) -> Result<LiveTrainingRuntimeReceipt> {
+    validate_mandatory_producer_source_mapping()?;
     fs::create_dir_all(&config.dataset_root)?;
     let dataset_root = config.dataset_root.canonicalize()?;
-    let _dataset_root_lock = lock_training_dataset_root(&dataset_root)?;
+    let dataset_root_lock = Arc::new(lock_training_dataset_root(&dataset_root)?);
     if config.max_dataset_bytes == 0 {
         return Err(invalid_data(
             "operator_intervention_required:max_dataset_bytes must be greater than zero",
@@ -1630,8 +6670,17 @@ pub async fn run_live_training_runtime(
     let run_started = Instant::now();
     let deadline = bounded_run.then(|| run_started + Duration::from_secs(duration_secs));
     let deadline_ms = bounded_run.then(|| now_ms().saturating_add((duration_secs * 1000) as i64));
+    let runtime_deadline = deadline
+        .zip(deadline_ms)
+        .map(|(deadline, observed_utc_ms)| RuntimeDeadlineCandidate {
+            deadline,
+            observed_utc_ms,
+        });
     let source_gaps = Arc::new(Mutex::new(SourceGapStore::default()));
     let source_queue_backpressure = Arc::new(SourceQueueBackpressureStats::default());
+    let raw_day_gate = Arc::new(RawDayGate::new());
+    raw_day_gate.install_runtime_deadline(runtime_deadline)?;
+    source_queue_backpressure.install_raw_day_gate(Arc::clone(&raw_day_gate))?;
     let collector_identity = CollectorIdentity {
         host_id: config.collector_host_id.clone(),
         region: config.collector_region.clone(),
@@ -1665,6 +6714,57 @@ pub async fn run_live_training_runtime(
         inflight_budget,
         enqueue_lock: Arc::new(AsyncMutex::new(())),
     };
+    let mut coverage = BTreeMap::<String, CoverageStats>::new();
+    let mut batches = LIVE_SOURCES
+        .iter()
+        .map(|source| {
+            (
+                (*source).to_owned(),
+                Vec::<InflightRawEvent>::with_capacity(DEFAULT_FLUSH_ROWS),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut source_queue_tracker = QueueDurationTracker::new("source_event_queue");
+    let mut writer_queue_tracker = QueueDurationTracker::new("writer_chunk_queue");
+    let mut next_flush = run_started + Duration::from_millis(DEFAULT_MAX_FLUSH_INTERVAL_MS);
+    let mut next_queue_sample = run_started;
+    let mut next_capacity_scan =
+        run_started + Duration::from_secs(DATASET_CAPACITY_SCAN_INTERVAL_SECS);
+    let mut average_event_bytes = 512_u64;
+    let mut received_rows = 0_u64;
+    let mut operator_shutdown = false;
+    let mut capacity_shutdown = false;
+    let mut runtime_failure = None::<String>;
+    let (runtime_exit_tx, mut runtime_exit_rx) = mpsc::channel(1);
+    let runtime_exit_deadline = deadline;
+    let runtime_exit_deadline_ms = deadline_ms;
+    let runtime_exit_gate = Arc::clone(&raw_day_gate);
+    let mut runtime_exit_watcher = RuntimeExitWatcher::new(tokio::spawn(async move {
+        let request = if let (Some(deadline), Some(deadline_ms)) =
+            (runtime_exit_deadline, runtime_exit_deadline_ms)
+        {
+            tokio::select! {
+                biased;
+                () = shutdown_signal() => RuntimeExitRequest {
+                    observed_utc_ms: now_ms(),
+                    cause: RuntimeCloseCause::OperatorStop,
+                },
+                () = tokio::time::sleep_until(deadline.into()) => RuntimeExitRequest {
+                    observed_utc_ms: deadline_ms,
+                    cause: RuntimeCloseCause::RunDeadline,
+                },
+            }
+        } else {
+            shutdown_signal().await;
+            RuntimeExitRequest {
+                observed_utc_ms: now_ms(),
+                cause: RuntimeCloseCause::OperatorStop,
+            }
+        };
+        let _ = runtime_exit_gate
+            .prepare_runtime_exit_with_cause(request.observed_utc_ms, request.cause.clone());
+        let _ = runtime_exit_tx.send(request).await;
+    }));
     let provenance = RuntimeProvenance {
         code_version: config.code_version.clone(),
         collector_binary_sha256: config.collector_binary_sha256.clone(),
@@ -1702,19 +6802,36 @@ pub async fn run_live_training_runtime(
         current_manifest,
     } = startup_recovery;
     let (manifest_tx, manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
+    let (rollover_ready_tx, mut rollover_ready_rx) = mpsc::channel(1);
+    let mut rollover_coordinator = RolloverCoordinatorState::new(ManifestActivationAckMode::Send);
+    let (startup_ready_tx, startup_ready_rx) = mpsc::channel(STARTUP_READY_CHANNEL_CAPACITY);
     let mut manifest_owner = ManifestOwnerState::new(
         dataset_root.clone(),
         daily_manifest_identity,
         binance_aggtrade_recovery.continuity.clone(),
     );
     manifest_owner.insert_reconciled_manifest(recovery_day.clone(), current_manifest)?;
-    let mut manifest_owner_handle = tokio::spawn(run_manifest_owner(manifest_owner, manifest_rx));
-    let mut writer_handles = start_writer_workers(
+    let manifest_owner_dataset_lease = Arc::clone(&dataset_root_lock);
+    let mut manifest_owner_handle = tokio::spawn(async move {
+        let _dataset_lease = manifest_owner_dataset_lease;
+        run_manifest_owner(manifest_owner, manifest_rx, rollover_ready_tx).await
+    });
+    let (mut writer_handles, writer_startup_releases) = match start_writer_workers_gated(
         &dataset_root,
         &provenance,
         &manifest_tx,
         &source_queue_backpressure,
-    )?;
+        &startup_ready_tx,
+        Arc::clone(&raw_day_gate),
+        Some(Arc::clone(&dataset_root_lock)),
+    ) {
+        Ok(started) => started,
+        Err(error) => {
+            manifest_owner_handle.abort();
+            let _ = manifest_owner_handle.await;
+            return Err(error);
+        }
+    };
 
     let polymarket_sink = event_sink.fork_logical_producer();
     let polymarket_source_sink = polymarket_sink.clone();
@@ -1764,236 +6881,630 @@ pub async fn run_live_training_runtime(
         run_started,
         aggtrade_control_rx,
     );
+    let polymarket_participant = StartupParticipant::producer("polymarket");
+    let (polymarket_release_tx, polymarket_release_rx) = oneshot::channel();
+    let rtds_participant = StartupParticipant::producer("polymarket_rtds");
+    let (rtds_release_tx, rtds_release_rx) = oneshot::channel();
+    let depth_participant = StartupParticipant::producer("binance_depth");
+    let (depth_release_tx, depth_release_rx) = oneshot::channel();
+    let aggtrade_participant = StartupParticipant::producer("binance_aggtrade");
+    let (aggtrade_release_tx, aggtrade_release_rx) = oneshot::channel();
+    let polymarket_observation = SourceTaskObservationCell::default();
+    let rtds_observation = SourceTaskObservationCell::default();
+    let depth_observation = SourceTaskObservationCell::default();
+    let aggtrade_observation = SourceTaskObservationCell::default();
+    let rollover_fallback_sinks = BTreeMap::from([
+        ("polymarket", polymarket_sink.clone()),
+        ("polymarket_rtds", rtds_sink.clone()),
+        ("binance_depth", depth_sink.clone()),
+        ("binance_aggtrade", aggtrade_sink.clone()),
+    ]);
     let mut handles: Vec<SourceTaskHandle> = vec![
-        (
+        SourceTaskHandle::spawn_with_dataset_lease(
             "polymarket_market",
-            tokio::spawn(run_polymarket_logical_producer_with_day_barriers(
-                polymarket_sink,
-                polymarket_control_tx.clone(),
-                run_started,
-                initial_next_boundary_ms,
-                polymarket_source,
-            )),
+            run_producer_after_startup_gate(
+                polymarket_participant,
+                startup_ready_tx.clone(),
+                polymarket_release_rx,
+                run_polymarket_logical_producer_with_day_barriers(
+                    polymarket_sink,
+                    polymarket_control_tx.clone(),
+                    run_started,
+                    initial_next_boundary_ms,
+                    observe_inner_source_return(
+                        "polymarket_market",
+                        polymarket_source,
+                        polymarket_observation.clone(),
+                        Arc::clone(&raw_day_gate),
+                    ),
+                ),
+            ),
+            polymarket_observation,
+            Arc::clone(&raw_day_gate),
+            Arc::clone(&dataset_root_lock),
         ),
-        (
+        SourceTaskHandle::spawn_with_dataset_lease(
             "polymarket_rtds_chainlink_btc_usd",
-            tokio::spawn(run_logical_producer_with_day_barriers(
-                "polymarket_rtds",
-                rtds_sink,
-                run_started,
-                initial_next_boundary_ms,
-                rtds_source,
-            )),
+            run_producer_after_startup_gate(
+                rtds_participant,
+                startup_ready_tx.clone(),
+                rtds_release_rx,
+                run_logical_producer_with_day_barriers(
+                    "polymarket_rtds",
+                    rtds_sink,
+                    run_started,
+                    initial_next_boundary_ms,
+                    observe_inner_source_return(
+                        "polymarket_rtds_chainlink_btc_usd",
+                        rtds_source,
+                        rtds_observation.clone(),
+                        Arc::clone(&raw_day_gate),
+                    ),
+                ),
+            ),
+            rtds_observation,
+            Arc::clone(&raw_day_gate),
+            Arc::clone(&dataset_root_lock),
         ),
-        (
+        SourceTaskHandle::spawn_with_dataset_lease(
             "binance_depth_update",
-            tokio::spawn(run_depth_logical_producer_with_time_barriers(
-                depth_sink,
-                depth_control_tx.clone(),
-                run_started,
-                initial_next_boundary_ms,
-                next_utc_hour_boundary_ms(now_ms()),
-                depth_source,
-            )),
+            run_producer_after_startup_gate(
+                depth_participant,
+                startup_ready_tx.clone(),
+                depth_release_rx,
+                run_depth_logical_producer_with_time_barriers(
+                    depth_sink,
+                    depth_control_tx.clone(),
+                    run_started,
+                    initial_next_boundary_ms,
+                    next_utc_hour_boundary_ms(now_ms()),
+                    observe_inner_source_return(
+                        "binance_depth_update",
+                        depth_source,
+                        depth_observation.clone(),
+                        Arc::clone(&raw_day_gate),
+                    ),
+                ),
+            ),
+            depth_observation,
+            Arc::clone(&raw_day_gate),
+            Arc::clone(&dataset_root_lock),
         ),
-        (
+        SourceTaskHandle::spawn_with_dataset_lease(
             "binance_aggtrade",
-            tokio::spawn(run_aggtrade_logical_producer_with_day_barriers(
-                aggtrade_sink,
-                aggtrade_control_tx.clone(),
-                run_started,
-                initial_next_boundary_ms,
-                aggtrade_source,
-            )),
+            run_producer_after_startup_gate(
+                aggtrade_participant,
+                startup_ready_tx.clone(),
+                aggtrade_release_rx,
+                run_aggtrade_logical_producer_with_day_barriers(
+                    aggtrade_sink,
+                    aggtrade_control_tx.clone(),
+                    run_started,
+                    initial_next_boundary_ms,
+                    observe_inner_source_return(
+                        "binance_aggtrade",
+                        aggtrade_source,
+                        aggtrade_observation.clone(),
+                        Arc::clone(&raw_day_gate),
+                    ),
+                ),
+            ),
+            aggtrade_observation,
+            Arc::clone(&raw_day_gate),
+            Arc::clone(&dataset_root_lock),
         ),
     ];
     drop(event_sink);
-
-    let mut coverage = BTreeMap::<String, CoverageStats>::new();
-    let mut batches = LIVE_SOURCES
-        .iter()
-        .map(|source| {
-            (
-                (*source).to_owned(),
-                Vec::<InflightRawEvent>::with_capacity(DEFAULT_FLUSH_ROWS),
+    drop(startup_ready_tx);
+    let startup_releases = StartupReleaseHandles {
+        writers: writer_startup_releases,
+        producers: vec![
+            StartupReleaseSender {
+                participant: polymarket_participant,
+                sender: polymarket_release_tx,
+            },
+            StartupReleaseSender {
+                participant: rtds_participant,
+                sender: rtds_release_tx,
+            },
+            StartupReleaseSender {
+                participant: depth_participant,
+                sender: depth_release_tx,
+            },
+            StartupReleaseSender {
+                participant: aggtrade_participant,
+                sender: aggtrade_release_tx,
+            },
+        ],
+    };
+    let startup_outcome = match activate_and_release_startup(
+        &manifest_tx,
+        Arc::clone(&raw_day_gate),
+        startup_ready_rx,
+        startup_releases,
+        recovery_day,
+        ManifestActivationAckMode::Send,
+        runtime_deadline,
+        now_ms,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            converge_spawned_runtime_resources(
+                &mut handles,
+                &mut writer_handles,
+                &mut manifest_owner_handle,
+                &mut runtime_exit_watcher,
+                None,
+                None,
+                Instant::now() + STARTUP_GATE_TIMEOUT,
             )
-        })
-        .collect::<BTreeMap<_, _>>();
-    let mut source_queue_tracker = QueueDurationTracker::new("source_event_queue");
-    let mut writer_queue_tracker = QueueDurationTracker::new("writer_chunk_queue");
-    let mut next_flush = run_started + Duration::from_millis(DEFAULT_MAX_FLUSH_INTERVAL_MS);
-    let mut next_queue_sample = run_started;
-    let mut next_capacity_scan =
-        run_started + Duration::from_secs(DATASET_CAPACITY_SCAN_INTERVAL_SECS);
-    let mut average_event_bytes = 512_u64;
-    let mut received_rows = 0_u64;
-    let mut controlled_shutdown = false;
-    let mut operator_shutdown = false;
-    let mut capacity_shutdown = false;
-    let mut runtime_failure = None::<String>;
-    let shutdown = shutdown_signal();
-    tokio::pin!(shutdown);
+            .await;
+            return Err(error);
+        }
+    };
+    let startup_stopped = matches!(
+        startup_outcome,
+        StartupActivationOutcome::CommittedStopped(_)
+    );
 
-    'runtime: while !deadline_reached(deadline) {
-        tokio::select! {
-            () = &mut shutdown => {
-                controlled_shutdown = true;
-                operator_shutdown = true;
-                break;
-            }
-            received = timeout(Duration::from_millis(250), event_rx.recv()) => {
-                match received {
-                    Ok(Some(inflight_event)) => {
-                        if let Err(error) = process_ingress_event(
-                            inflight_event,
-                            &mut writer_handles,
-                            &mut batches,
-                            &mut coverage,
-                            &mut received_rows,
-                            &mut average_event_bytes,
-                            &source_gaps,
-                            &source_queue_backpressure,
-                            &mut writer_queue_tracker,
-                            run_started,
-                            &manifest_tx,
-                        )
-                        .await
-                        {
-                            let message = format!("ingress_processing_failed:{error}");
+    let mut completed_rollover_exit = None::<PendingExit>;
+    let mut completed_source_terminations = Vec::<SourceTaskTermination>::new();
+    let mut completed_rollover_writer_outcome = None::<WriterStopOutcome>;
+    let mut rollover_release_stop_issued = startup_stopped;
+
+    if !startup_stopped {
+        'runtime: loop {
+            tokio::select! {
+                biased;
+                request = runtime_exit_rx.recv() => {
+                    let Some(request) = request else {
+                        let message = freeze_coordinator_failure_message(
+                            &raw_day_gate,
+                            "runtime_exit_request_channel_closed",
+                            "runtime_exit_request_channel_closed".to_owned(),
+                        );
+                        record_gap(&source_gaps, message.clone());
+                        runtime_failure = Some(message);
+                        break 'runtime;
+                    };
+                    match request.cause {
+                        RuntimeCloseCause::OperatorStop => operator_shutdown = true,
+                        RuntimeCloseCause::RunDeadline => {}
+                        _ => {
+                            let message = format!("invalid_runtime_exit_request:{request:?}");
+                            record_gap(&source_gaps, message.clone());
+                            runtime_failure = Some(message);
+                        }
+                    }
+                    if let Err(error) = apply_runtime_exit_request(&raw_day_gate, &request) {
+                        let message = format!("runtime_exit_prepare_failed:{error}");
+                        record_gap(&source_gaps, message.clone());
+                        runtime_failure = Some(message);
+                    }
+                    break 'runtime;
+                }
+                ready = rollover_ready_rx.recv() => {
+                    match ready {
+                        Some(ready) => {
+                            match drive_normal_rollover(
+                                ready,
+                                &manifest_tx,
+                                &raw_day_gate,
+                                &mut runtime_exit_rx,
+                                &mut event_rx,
+                                &mut writer_handles,
+                                &mut batches,
+                                &mut coverage,
+                                &mut received_rows,
+                                &mut average_event_bytes,
+                                &source_gaps,
+                                &source_queue_backpressure,
+                                &mut writer_queue_tracker,
+                                run_started,
+                                &mut rollover_coordinator,
+                                &mut rollover_release_stop_issued,
+                                runtime_deadline,
+                            ).await {
+                                Ok(RolloverCommitOutcome::Activated) => {}
+                                Ok(RolloverCommitOutcome::PendingExit) => {
+                                    break 'runtime;
+                                }
+                                Ok(RolloverCommitOutcome::ActivatedStopped) => {
+                                    rollover_release_stop_issued = true;
+                                    break 'runtime;
+                                }
+                                Err(error) => {
+                                    let message = format!("normal_rollover_failed:{error}");
+                                    record_gap(&source_gaps, message.clone());
+                                    runtime_failure = Some(message);
+                                    break 'runtime;
+                                }
+                            }
+                        }
+                        None => {
+                            let message = freeze_coordinator_failure_message(
+                                &raw_day_gate,
+                                "manifest_rollover_ready_channel_closed",
+                                "manifest_rollover_ready_channel_closed".to_owned(),
+                            );
                             record_gap(&source_gaps, message.clone());
                             runtime_failure = Some(message);
                             break 'runtime;
                         }
                     }
-                    Ok(None) if deadline_reached(deadline) => break,
-                    Ok(None) => {
-                        let message = "source_event_queue_closed_unexpectedly".to_owned();
-                        record_gap(&source_gaps, message.clone());
-                        runtime_failure = Some(message);
-                        break;
+                }
+                received = timeout(Duration::from_millis(250), event_rx.recv()) => {
+                    match received {
+                        Ok(Some(inflight_event)) => {
+                            if let Err(error) = process_ingress_event(
+                                inflight_event,
+                                &mut writer_handles,
+                                &mut batches,
+                                &mut coverage,
+                                &mut received_rows,
+                                &mut average_event_bytes,
+                                &source_gaps,
+                                &source_queue_backpressure,
+                                &mut writer_queue_tracker,
+                                run_started,
+                                &manifest_tx,
+                                &mut rollover_coordinator,
+                            )
+                            .await
+                            {
+                                let message = freeze_coordinator_failure_message(
+                                    &raw_day_gate,
+                                    "ingress_processing",
+                                    format!("ingress_processing_failed:{error}"),
+                                );
+                                record_gap(&source_gaps, message.clone());
+                                runtime_failure = Some(message);
+                                break 'runtime;
+                            }
+                        }
+                        Ok(None) => {
+                            let message = freeze_coordinator_failure_message(
+                                &raw_day_gate,
+                                "source_event_queue_closed",
+                                "source_event_queue_closed_unexpectedly".to_owned(),
+                            );
+                            record_gap(&source_gaps, message.clone());
+                            runtime_failure = Some(message);
+                            break;
+                        }
+                        Err(_) => {}
                     }
-                    Err(_) => {}
                 }
             }
-        }
 
-        if let Some(source_kind) = finished_source_task(&handles)
-            && !deadline_reached(deadline)
-        {
-            let message = format!("source_task_ended_unexpectedly:{source_kind}");
-            record_gap(&source_gaps, message.clone());
-            runtime_failure = Some(message);
-            break;
-        }
-
-        if let Some(message) = poll_writer_completion(&mut writer_handles) {
-            record_gap(&source_gaps, message.clone());
-            runtime_failure = Some(message);
-            break;
-        }
-        if manifest_owner_handle.is_finished() {
-            let message = "daily_manifest_owner_ended_unexpectedly".to_owned();
-            record_gap(&source_gaps, message.clone());
-            runtime_failure = Some(message);
-            break;
-        }
-
-        if Instant::now() >= next_flush {
-            if let Err(error) = flush_all_batches(
-                &mut writer_handles,
-                &mut batches,
-                &source_gaps,
-                &source_queue_backpressure,
-                &mut writer_queue_tracker,
-                run_started,
-            )
-            .await
+            if let Some(source_kind) = finished_source_task(&handles)
+                && !deadline_reached(deadline)
             {
-                let message = format!("writer_periodic_flush_failed:{error}");
+                let message = freeze_coordinator_failure_message(
+                    &raw_day_gate,
+                    "source_task_ended_before_join",
+                    source_task_ended_unexpectedly(source_kind),
+                );
                 record_gap(&source_gaps, message.clone());
                 runtime_failure = Some(message);
                 break;
             }
-            next_flush += Duration::from_millis(DEFAULT_MAX_FLUSH_INTERVAL_MS);
-        }
-        if Instant::now() >= next_queue_sample {
-            source_queue_backpressure.apply_to_tracker(&mut source_queue_tracker);
-            let writer_queue_rows = writer_handles
-                .values()
-                .map(|handle| handle.queue_rows.load(Ordering::Relaxed))
-                .sum::<u64>();
-            let source_queue_rows = event_rx.len() as u64;
-            let source_queue_bytes = source_queue_rows.saturating_mul(average_event_bytes);
-            let writer_queue_bytes = writer_queue_rows.saturating_mul(average_event_bytes);
-            source_queue_tracker.observe(
-                monotonic_ms(run_started),
-                source_queue_rows,
-                source_queue_bytes,
-            );
-            writer_queue_tracker.observe(
-                monotonic_ms(run_started),
-                writer_queue_rows,
-                writer_queue_bytes,
-            );
-            next_queue_sample += Duration::from_secs(1);
-        }
-        if Instant::now() >= next_capacity_scan {
-            let scan_root = dataset_root.clone();
-            let capacity_scan =
-                tokio::task::spawn_blocking(move || training_dataset_size_bytes(&scan_root));
-            tokio::pin!(capacity_scan);
-            tokio::select! {
-                () = &mut shutdown => {
-                    controlled_shutdown = true;
-                    operator_shutdown = true;
+
+            if let Some(completion) =
+                poll_writer_completion(&mut writer_handles, &raw_day_gate, None)
+            {
+                record_gap(&source_gaps, completion.message.clone());
+                runtime_failure = Some(completion.message);
+                break;
+            }
+            if manifest_owner_handle.is_finished() {
+                let message = freeze_coordinator_failure_message(
+                    &raw_day_gate,
+                    "daily_manifest_owner_ended",
+                    "daily_manifest_owner_ended_unexpectedly".to_owned(),
+                );
+                record_gap(&source_gaps, message.clone());
+                runtime_failure = Some(message);
+                break;
+            }
+
+            if Instant::now() >= next_flush {
+                if let Err(error) = flush_all_batches(
+                    &mut writer_handles,
+                    &mut batches,
+                    &source_gaps,
+                    &source_queue_backpressure,
+                    &mut writer_queue_tracker,
+                    run_started,
+                )
+                .await
+                {
+                    let message = freeze_coordinator_failure_message(
+                        &raw_day_gate,
+                        "writer_periodic_flush",
+                        format!("writer_periodic_flush_failed:{error}"),
+                    );
+                    record_gap(&source_gaps, message.clone());
+                    runtime_failure = Some(message);
                     break;
                 }
-                result = &mut capacity_scan => {
-                    match result {
-                        Ok(Ok(bytes)) if bytes >= config.max_dataset_bytes => {
-                            record_gap(&source_gaps, format!(
-                                "dataset_capacity_reached:bytes={bytes}:limit={}",
-                                config.max_dataset_bytes
-                            ));
-                            controlled_shutdown = true;
-                            capacity_shutdown = true;
-                            break;
-                        }
-                        Ok(Ok(_)) => {}
-                        Ok(Err(error)) => {
-                            let message = format!(
-                                "operator_intervention_required:dataset_size_scan_failed:{error}"
+                next_flush += Duration::from_millis(DEFAULT_MAX_FLUSH_INTERVAL_MS);
+            }
+            if Instant::now() >= next_queue_sample {
+                source_queue_backpressure.apply_to_tracker(&mut source_queue_tracker);
+                let writer_queue_rows = writer_handles
+                    .values()
+                    .map(|handle| handle.queue_rows.load(Ordering::Relaxed))
+                    .sum::<u64>();
+                let source_queue_rows = event_rx.len() as u64;
+                let source_queue_bytes = source_queue_rows.saturating_mul(average_event_bytes);
+                let writer_queue_bytes = writer_queue_rows.saturating_mul(average_event_bytes);
+                source_queue_tracker.observe(
+                    monotonic_ms(run_started),
+                    source_queue_rows,
+                    source_queue_bytes,
+                );
+                writer_queue_tracker.observe(
+                    monotonic_ms(run_started),
+                    writer_queue_rows,
+                    writer_queue_bytes,
+                );
+                next_queue_sample += Duration::from_secs(1);
+            }
+            if Instant::now() >= next_capacity_scan {
+                let scan_root = dataset_root.clone();
+                let capacity_scan =
+                    tokio::task::spawn_blocking(move || training_dataset_size_bytes(&scan_root));
+                tokio::pin!(capacity_scan);
+                tokio::select! {
+                    request = runtime_exit_rx.recv() => {
+                        let Some(request) = request else {
+                            let message = freeze_coordinator_failure_message(
+                                &raw_day_gate,
+                                "runtime_exit_channel_closed_during_capacity_scan",
+                                "runtime-exit channel closed during capacity scan".to_owned(),
                             );
                             record_gap(&source_gaps, message.clone());
                             runtime_failure = Some(message);
-                            controlled_shutdown = true;
-                            break;
+                            break 'runtime;
+                        };
+                        if matches!(request.cause, RuntimeCloseCause::OperatorStop) {
+                            operator_shutdown = true;
                         }
-                        Err(error) => {
-                            let message = format!(
-                                "operator_intervention_required:dataset_size_scan_join_failed:{error}"
-                            );
+                        if let Err(error) = apply_runtime_exit_request(&raw_day_gate, &request) {
+                            let message = format!("runtime_exit_prepare_failed:{error}");
                             record_gap(&source_gaps, message.clone());
                             runtime_failure = Some(message);
-                            controlled_shutdown = true;
-                            break;
+                        }
+                        break 'runtime;
+                    }
+                    result = &mut capacity_scan => {
+                        match result {
+                            Ok(Ok(bytes)) if bytes >= config.max_dataset_bytes => {
+                                record_gap(&source_gaps, format!(
+                                    "dataset_capacity_reached:bytes={bytes}:limit={}",
+                                    config.max_dataset_bytes
+                                ));
+                                capacity_shutdown = true;
+                                let request = RuntimeExitRequest {
+                                    observed_utc_ms: now_ms(),
+                                    cause: RuntimeCloseCause::CapacityLimit,
+                                };
+                                if let Err(error) = apply_runtime_exit_request(&raw_day_gate, &request) {
+                                    let message = format!("capacity_exit_prepare_failed:{error}");
+                                    record_gap(&source_gaps, message.clone());
+                                    runtime_failure = Some(message);
+                                }
+                                break 'runtime;
+                            }
+                            Ok(Ok(_)) => {}
+                            Ok(Err(error)) => {
+                                let message = freeze_coordinator_failure_message(
+                                    &raw_day_gate,
+                                    "dataset_size_scan_failed",
+                                    format!(
+                                        "operator_intervention_required:dataset_size_scan_failed:{error}"
+                                    ),
+                                );
+                                record_gap(&source_gaps, message.clone());
+                                runtime_failure = Some(message);
+                                break 'runtime;
+                            }
+                            Err(error) => {
+                                let message = freeze_coordinator_failure_message(
+                                    &raw_day_gate,
+                                    "dataset_size_scan_join_failed",
+                                    format!(
+                                        "operator_intervention_required:dataset_size_scan_join_failed:{error}"
+                                    ),
+                                );
+                                record_gap(&source_gaps, message.clone());
+                                runtime_failure = Some(message);
+                                break 'runtime;
+                            }
                         }
                     }
                 }
+                next_capacity_scan += Duration::from_secs(DATASET_CAPACITY_SCAN_INTERVAL_SECS);
             }
-            next_capacity_scan += Duration::from_secs(DATASET_CAPACITY_SCAN_INTERVAL_SECS);
         }
     }
 
+    runtime_exit_watcher.abort_and_join().await;
     let coordinated_shutdown_deadline = Instant::now() + COORDINATED_SHUTDOWN_DEADLINE;
-    let aborting_source_tasks = controlled_shutdown || runtime_failure.is_some();
+    let rollover_outcome_uncertain =
+        rollover_coordinator.cutpoint() == Some(RolloverCutpoint::OutcomeUncertain);
+    if rollover_outcome_uncertain {
+        let close = match rollover_coordinator.ready() {
+            Ok(ready) => ready.close.clone(),
+            Err(error) => {
+                converge_spawned_runtime_resources(
+                    &mut handles,
+                    &mut writer_handles,
+                    &mut manifest_owner_handle,
+                    &mut runtime_exit_watcher,
+                    None,
+                    None,
+                    coordinated_shutdown_deadline,
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        let observed_utc_ms = now_ms().max(close.boundary_utc_ms);
+        if raw_day_gate.prepared_runtime_exit().is_none()
+            && let Err(error) = raw_day_gate.prepare_runtime_exit_with_cause(
+                observed_utc_ms,
+                RuntimeCloseCause::CoordinatorFailure {
+                    stage: "durable_rollover_outcome_uncertain",
+                },
+            )
+        {
+            converge_spawned_runtime_resources(
+                &mut handles,
+                &mut writer_handles,
+                &mut manifest_owner_handle,
+                &mut runtime_exit_watcher,
+                None,
+                None,
+                coordinated_shutdown_deadline,
+            )
+            .await;
+            return Err(error);
+        }
+        completed_rollover_exit = Some(PendingExit {
+            close,
+            observed_utc_ms,
+            cause: RuntimeCloseCause::CoordinatorFailure {
+                stage: "durable_rollover_outcome_uncertain",
+            },
+            unclean: true,
+            unclean_cause: Some(RuntimeCloseCause::CoordinatorFailure {
+                stage: "durable_rollover_outcome_uncertain",
+            }),
+        });
+    }
+    if completed_rollover_exit.is_none() {
+        let prepared_exit = match raw_day_gate.prepare_runtime_exit(now_ms()) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                converge_spawned_runtime_resources(
+                    &mut handles,
+                    &mut writer_handles,
+                    &mut manifest_owner_handle,
+                    &mut runtime_exit_watcher,
+                    None,
+                    None,
+                    coordinated_shutdown_deadline,
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        match prepared_exit {
+            PreparedRuntimeExit::SameDay(_) => {}
+            PreparedRuntimeExit::Rollover(exit) => {
+                let close = exit.close.clone();
+                let completed = match complete_pending_exit_rollover(
+                    exit,
+                    &mut handles,
+                    &mut completed_source_terminations,
+                    &rollover_fallback_sinks,
+                    &mut event_rx,
+                    &mut rollover_ready_rx,
+                    &mut writer_handles,
+                    &mut completed_rollover_writer_outcome,
+                    &mut batches,
+                    &mut coverage,
+                    &mut received_rows,
+                    &mut average_event_bytes,
+                    &source_gaps,
+                    &source_queue_backpressure,
+                    &mut writer_queue_tracker,
+                    run_started,
+                    &manifest_tx,
+                    &mut rollover_coordinator,
+                    &raw_day_gate,
+                    &mut runtime_failure,
+                    coordinated_shutdown_deadline,
+                )
+                .await
+                {
+                    Ok(completed) => completed,
+                    Err(error) => {
+                        let source_close = RuntimeCloseIdentity::from_rollover_old_day(&close);
+                        let writer_close = RuntimeCloseIdentity::from_rollover_next_day(&close);
+                        converge_spawned_runtime_resources(
+                            &mut handles,
+                            &mut writer_handles,
+                            &mut manifest_owner_handle,
+                            &mut runtime_exit_watcher,
+                            Some(&source_close),
+                            Some(writer_close),
+                            coordinated_shutdown_deadline,
+                        )
+                        .await;
+                        return Err(error);
+                    }
+                };
+                completed_rollover_exit = Some(completed);
+            }
+        }
+    }
+    let mut prepared_runtime_close = match completed_rollover_exit.as_ref() {
+        Some(_) => None,
+        None => match raw_day_gate.prepared_runtime_exit() {
+            Some(PreparedRuntimeExit::SameDay(close)) => Some(close),
+            other => {
+                converge_spawned_runtime_resources(
+                    &mut handles,
+                    &mut writer_handles,
+                    &mut manifest_owner_handle,
+                    &mut runtime_exit_watcher,
+                    None,
+                    None,
+                    coordinated_shutdown_deadline,
+                )
+                .await;
+                return Err(invalid_data(format!(
+                    "runtime shutdown lost same-day close state: {other:?}"
+                ))
+                .into());
+            }
+        },
+    };
+    let runtime_close_identity = prepared_runtime_close
+        .as_ref()
+        .map(|close| close.identity.clone())
+        .or_else(|| {
+            completed_rollover_exit
+                .as_ref()
+                .map(|exit| RuntimeCloseIdentity::from_rollover_old_day(&exit.close))
+        })
+        .expect("runtime shutdown has a close identity");
+    let writer_close_identity = prepared_runtime_close
+        .as_ref()
+        .map(|close| close.identity.clone())
+        .or_else(|| {
+            completed_rollover_exit
+                .as_ref()
+                .map(|exit| RuntimeCloseIdentity::from_rollover_next_day(&exit.close))
+        })
+        .expect("runtime shutdown has a writer close identity");
+    let same_day_shutdown = prepared_runtime_close.is_some();
+    let aborting_source_tasks = same_day_shutdown && !rollover_release_stop_issued;
+    let mut termination_unclean = false;
     let mut polymarket_stop_reply = None;
     let mut depth_stop_reply = None;
     let mut aggtrade_stop_reply = None;
+    let mut source_control_stop_facts = BTreeMap::<&'static str, SourceControlStopFact>::new();
     if aborting_source_tasks {
-        if handles.iter().any(|(source_kind, handle)| {
-            *source_kind == "polymarket_market" && !handle.is_finished()
-        }) {
+        if handles
+            .iter()
+            .any(|handle| handle.source_kind == "polymarket_market" && !handle.is_finished())
+        {
             let (reply_tx, reply_rx) = oneshot::channel();
             match timeout(
                 Duration::from_secs(5),
@@ -2007,20 +7518,27 @@ pub async fn run_live_training_runtime(
             {
                 Ok(Ok(())) => polymarket_stop_reply = Some(reply_rx),
                 Ok(Err(_)) => {
-                    let message = "polymarket_shutdown_control_channel_closed".to_owned();
-                    record_gap(&source_gaps, message.clone());
-                    runtime_failure = Some(message);
+                    source_control_stop_facts.insert(
+                        "polymarket_market",
+                        SourceControlStopFact::Failed(
+                            "polymarket_shutdown_control_channel_closed".to_owned(),
+                        ),
+                    );
                 }
                 Err(_) => {
-                    let message = "polymarket_shutdown_control_timeout".to_owned();
-                    record_gap(&source_gaps, message.clone());
-                    runtime_failure = Some(message);
+                    source_control_stop_facts.insert(
+                        "polymarket_market",
+                        SourceControlStopFact::Failed(
+                            "polymarket_shutdown_control_timeout".to_owned(),
+                        ),
+                    );
                 }
             }
         }
-        if handles.iter().any(|(source_kind, handle)| {
-            *source_kind == "binance_depth_update" && !handle.is_finished()
-        }) {
+        if handles
+            .iter()
+            .any(|handle| handle.source_kind == "binance_depth_update" && !handle.is_finished())
+        {
             let (reply_tx, reply_rx) = oneshot::channel();
             match timeout(
                 Duration::from_secs(5),
@@ -2034,20 +7552,25 @@ pub async fn run_live_training_runtime(
             {
                 Ok(Ok(())) => depth_stop_reply = Some(reply_rx),
                 Ok(Err(_)) => {
-                    let message = "depth_shutdown_control_channel_closed".to_owned();
-                    record_gap(&source_gaps, message.clone());
-                    runtime_failure = Some(message);
+                    source_control_stop_facts.insert(
+                        "binance_depth_update",
+                        SourceControlStopFact::Failed(
+                            "depth_shutdown_control_channel_closed".to_owned(),
+                        ),
+                    );
                 }
                 Err(_) => {
-                    let message = "depth_shutdown_control_timeout".to_owned();
-                    record_gap(&source_gaps, message.clone());
-                    runtime_failure = Some(message);
+                    source_control_stop_facts.insert(
+                        "binance_depth_update",
+                        SourceControlStopFact::Failed("depth_shutdown_control_timeout".to_owned()),
+                    );
                 }
             }
         }
-        if handles.iter().any(|(source_kind, handle)| {
-            *source_kind == "binance_aggtrade" && !handle.is_finished()
-        }) {
+        if handles
+            .iter()
+            .any(|handle| handle.source_kind == "binance_aggtrade" && !handle.is_finished())
+        {
             let stop_reason = if operator_shutdown {
                 "operator_shutdown"
             } else if capacity_shutdown {
@@ -2055,40 +7578,60 @@ pub async fn run_live_training_runtime(
             } else {
                 "runtime_failure"
             };
-            let stop_utc_day = utc_day_string_from_ms(now_ms())
-                .ok_or_else(|| invalid_data("UTC day unavailable for aggTrade shutdown"))?;
-            let (reply_tx, reply_rx) = oneshot::channel();
-            match timeout(
-                Duration::from_secs(5),
-                aggtrade_control_tx.send(AggTradeSourceControl::Flush {
-                    reason: stop_reason.to_owned(),
-                    utc_day: stop_utc_day,
-                    stop_after_flush: true,
-                    resume_after_barrier: None,
-                    reply: reply_tx,
-                }),
-            )
-            .await
-            {
-                Ok(Ok(())) => aggtrade_stop_reply = Some(reply_rx),
-                Ok(Err(_)) => {
-                    let message = "aggTrade_shutdown_control_channel_closed".to_owned();
-                    record_gap(&source_gaps, message.clone());
-                    runtime_failure = Some(message);
+            if let Some(stop_utc_day) = utc_day_string_from_ms(now_ms()) {
+                let (reply_tx, reply_rx) = oneshot::channel();
+                match timeout(
+                    Duration::from_secs(5),
+                    aggtrade_control_tx.send(AggTradeSourceControl::Flush {
+                        reason: stop_reason.to_owned(),
+                        utc_day: stop_utc_day,
+                        stop_after_flush: true,
+                        resume_after_barrier: None,
+                        reply: reply_tx,
+                    }),
+                )
+                .await
+                {
+                    Ok(Ok(())) => aggtrade_stop_reply = Some(reply_rx),
+                    Ok(Err(_)) => {
+                        source_control_stop_facts.insert(
+                            "binance_aggtrade",
+                            SourceControlStopFact::Failed(
+                                "aggTrade_shutdown_control_channel_closed".to_owned(),
+                            ),
+                        );
+                    }
+                    Err(_) => {
+                        source_control_stop_facts.insert(
+                            "binance_aggtrade",
+                            SourceControlStopFact::Failed(
+                                "aggTrade_shutdown_control_timeout".to_owned(),
+                            ),
+                        );
+                    }
                 }
-                Err(_) => {
-                    let message = "aggTrade_shutdown_control_timeout".to_owned();
-                    record_gap(&source_gaps, message.clone());
-                    runtime_failure = Some(message);
-                }
+            } else {
+                source_control_stop_facts.insert(
+                    "binance_aggtrade",
+                    SourceControlStopFact::Failed(
+                        "UTC day unavailable for aggTrade shutdown".to_owned(),
+                    ),
+                );
             }
         }
-        for (source_kind, handle) in &handles {
-            if *source_kind != "polymarket_market"
-                && *source_kind != "binance_depth_update"
-                && *source_kind != "binance_aggtrade"
+        for handle in &mut handles {
+            if handle.source_kind != "polymarket_market"
+                && handle.source_kind != "binance_depth_update"
+                && handle.source_kind != "binance_aggtrade"
+                && !handle.is_finished()
+                && let Err(error) = handle.abort_with_permit(&runtime_close_identity)
             {
-                handle.abort();
+                let message = format!(
+                    "source_task_abort_permit_failed:{}:{error}",
+                    handle.source_kind
+                );
+                source_control_stop_facts
+                    .insert(handle.source_kind, SourceControlStopFact::Failed(message));
             }
         }
     }
@@ -2096,37 +7639,25 @@ pub async fn run_live_training_runtime(
     while !handles.is_empty() {
         let mut index = 0;
         while index < handles.len() {
-            if !handles[index].1.is_finished() {
+            if !handles[index].is_finished() {
                 index += 1;
                 continue;
             }
-            let (source_kind, handle) = handles.swap_remove(index);
-            match handle.await {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => {
-                    let message = format!("source_task_error:{source_kind}:{err}");
-                    runtime_failure = Some(message.clone());
-                    record_gap(&source_gaps, message);
-                }
-                Err(err) if err.is_cancelled() && aborting_source_tasks => {}
-                Err(err) => {
-                    let message = format!("source_task_join_error:{source_kind}:{err}");
-                    runtime_failure = Some(message.clone());
-                    record_gap(&source_gaps, message);
-                }
-            }
+            let handle = handles.swap_remove(index);
+            let termination = handle.await_termination(&runtime_close_identity).await;
+            completed_source_terminations.push(termination);
         }
         if handles.is_empty() {
             break;
         }
         let remaining = coordinated_shutdown_deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            for (source_kind, handle) in handles.drain(..) {
-                let message = format!("source_task_join_timeout:{source_kind}");
-                runtime_failure = Some(message.clone());
-                record_gap(&source_gaps, message);
-                handle.abort();
-                let _ = handle.await;
+            for handle in handles.drain(..) {
+                let source_kind = handle.source_kind;
+                handle.abort_without_permit();
+                let mut termination = handle.await_termination(&runtime_close_identity).await;
+                termination.error = Some(format!("source_task_join_timeout:{source_kind}"));
+                completed_source_terminations.push(termination);
             }
             break;
         }
@@ -2144,12 +7675,14 @@ pub async fn run_live_training_runtime(
                 &mut writer_queue_tracker,
                 run_started,
                 &manifest_tx,
+                &mut rollover_coordinator,
             )
             .await
         {
             let message = format!("shutdown_ingress_processing_failed:{error}");
             record_gap(&source_gaps, message.clone());
             runtime_failure = Some(message);
+            termination_unclean = true;
         }
         if Instant::now() >= next_flush {
             if let Err(error) = flush_all_batches(
@@ -2165,75 +7698,141 @@ pub async fn run_live_training_runtime(
                 let message = format!("shutdown_periodic_flush_failed:{error}");
                 record_gap(&source_gaps, message.clone());
                 runtime_failure = Some(message);
+                termination_unclean = true;
             }
             next_flush = Instant::now() + Duration::from_millis(DEFAULT_MAX_FLUSH_INTERVAL_MS);
         }
     }
 
     if let Some(reply_rx) = polymarket_stop_reply {
-        let remaining = coordinated_shutdown_deadline.saturating_duration_since(Instant::now());
-        match timeout(remaining, reply_rx).await {
-            Ok(Ok(Ok(()))) => {}
-            Ok(Ok(Err(error))) => {
-                let message = format!("polymarket_shutdown_fence_failed:{error}");
-                record_gap(&source_gaps, message.clone());
-                runtime_failure = Some(message);
-            }
-            Ok(Err(_)) => {
-                let message = "polymarket_shutdown_fence_reply_dropped".to_owned();
-                record_gap(&source_gaps, message.clone());
-                runtime_failure = Some(message);
-            }
-            Err(_) => {
-                let message = "polymarket_shutdown_fence_reply_timeout".to_owned();
-                record_gap(&source_gaps, message.clone());
-                runtime_failure = Some(message);
-            }
-        }
+        source_control_stop_facts.insert(
+            "polymarket_market",
+            await_source_control_stop_fact(
+                reply_rx,
+                coordinated_shutdown_deadline,
+                "polymarket_shutdown_fence",
+            )
+            .await,
+        );
     }
 
     if let Some(reply_rx) = depth_stop_reply {
-        let remaining = coordinated_shutdown_deadline.saturating_duration_since(Instant::now());
-        match timeout(remaining, reply_rx).await {
-            Ok(Ok(Ok(()))) => {}
-            Ok(Ok(Err(error))) => {
-                let message = format!("depth_shutdown_fence_failed:{error}");
-                record_gap(&source_gaps, message.clone());
-                runtime_failure = Some(message);
-            }
-            Ok(Err(_)) => {
-                let message = "depth_shutdown_fence_reply_dropped".to_owned();
-                record_gap(&source_gaps, message.clone());
-                runtime_failure = Some(message);
-            }
-            Err(_) => {
-                let message = "depth_shutdown_fence_reply_timeout".to_owned();
-                record_gap(&source_gaps, message.clone());
-                runtime_failure = Some(message);
-            }
-        }
+        source_control_stop_facts.insert(
+            "binance_depth_update",
+            await_source_control_stop_fact(
+                reply_rx,
+                coordinated_shutdown_deadline,
+                "depth_shutdown_fence",
+            )
+            .await,
+        );
     }
 
     if let Some(reply_rx) = aggtrade_stop_reply {
-        let remaining = coordinated_shutdown_deadline.saturating_duration_since(Instant::now());
-        match timeout(remaining, reply_rx).await {
-            Ok(Ok(Ok(()))) => {}
-            Ok(Ok(Err(error))) => {
-                let message = format!("aggTrade_shutdown_flush_failed:{error}");
+        source_control_stop_facts.insert(
+            "binance_aggtrade",
+            await_source_control_stop_fact(
+                reply_rx,
+                coordinated_shutdown_deadline,
+                "aggTrade_shutdown_flush",
+            )
+            .await,
+        );
+    }
+
+    if same_day_shutdown {
+        let mut assessed_sources = BTreeSet::new();
+        for termination in &completed_source_terminations {
+            if !assessed_sources.insert(termination.source_kind) {
+                let message = format!(
+                    "duplicate_source_task_termination:{}",
+                    termination.source_kind
+                );
                 record_gap(&source_gaps, message.clone());
                 runtime_failure = Some(message);
+                termination_unclean = true;
+                continue;
             }
-            Ok(Err(_)) => {
-                let message = "aggTrade_shutdown_flush_reply_dropped".to_owned();
-                record_gap(&source_gaps, message.clone());
-                runtime_failure = Some(message);
-            }
-            Err(_) => {
-                let message = "aggTrade_shutdown_flush_reply_timeout".to_owned();
+            let assessment = assess_source_shutdown(
+                termination,
+                source_control_stop_facts.get(termination.source_kind),
+                &runtime_close_identity,
+            );
+            termination_unclean |= assessment.unclean;
+            if let Some(message) = assessment.error {
                 record_gap(&source_gaps, message.clone());
                 runtime_failure = Some(message);
             }
         }
+        if assessed_sources.len() != LOGICAL_PRODUCERS.len() {
+            let message = format!(
+                "source_task_termination_set_incomplete:expected={} actual={}",
+                LOGICAL_PRODUCERS.len(),
+                assessed_sources.len()
+            );
+            record_gap(&source_gaps, message.clone());
+            runtime_failure = Some(message);
+            termination_unclean = true;
+        }
+    }
+
+    if termination_unclean && same_day_shutdown {
+        let marked = match raw_day_gate.mark_runtime_exit_unclean(&runtime_close_identity) {
+            Ok(marked) => marked,
+            Err(error) => {
+                converge_spawned_runtime_resources(
+                    &mut handles,
+                    &mut writer_handles,
+                    &mut manifest_owner_handle,
+                    &mut runtime_exit_watcher,
+                    Some(&runtime_close_identity),
+                    Some(writer_close_identity.clone()),
+                    coordinated_shutdown_deadline,
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        let PreparedRuntimeExit::SameDay(close) = marked else {
+            converge_spawned_runtime_resources(
+                &mut handles,
+                &mut writer_handles,
+                &mut manifest_owner_handle,
+                &mut runtime_exit_watcher,
+                Some(&runtime_close_identity),
+                Some(writer_close_identity.clone()),
+                coordinated_shutdown_deadline,
+            )
+            .await;
+            return Err(invalid_data(
+                "same-day shutdown changed into rollover while marking unclean",
+            )
+            .into());
+        };
+        prepared_runtime_close = Some(close);
+    }
+    if same_day_shutdown {
+        let identity = prepared_runtime_close
+            .as_ref()
+            .expect("same-day close exists")
+            .identity
+            .clone();
+        prepared_runtime_close = Some(match raw_day_gate.seal_same_day_close(&identity).await {
+            Ok(close) => close,
+            Err(error) => {
+                converge_spawned_runtime_resources(
+                    &mut handles,
+                    &mut writer_handles,
+                    &mut manifest_owner_handle,
+                    &mut runtime_exit_watcher,
+                    Some(&runtime_close_identity),
+                    Some(writer_close_identity.clone()),
+                    coordinated_shutdown_deadline,
+                )
+                .await;
+                return Err(error);
+            }
+        });
     }
 
     while let Ok(inflight_event) = event_rx.try_recv() {
@@ -2249,6 +7848,7 @@ pub async fn run_live_training_runtime(
             &mut writer_queue_tracker,
             run_started,
             &manifest_tx,
+            &mut rollover_coordinator,
         )
         .await
         {
@@ -2290,16 +7890,95 @@ pub async fn run_live_training_runtime(
         let message = format!("flush_batches_failed:{error}");
         record_gap(&source_gaps, message.clone());
         runtime_failure = Some(message);
+        termination_unclean = true;
     }
 
     let writer_remaining = coordinated_shutdown_deadline.saturating_duration_since(Instant::now());
-    let writer_outputs_result = stop_writer_workers_with_budget(
-        writer_handles,
-        writer_remaining.min(Duration::from_millis(WRITER_FINALIZE_BUDGET_MS)),
-    )
-    .await;
-    let (writer_outputs, all_writers_terminal) =
+    let writer_outputs_result = if let Some(outcome) = completed_rollover_writer_outcome.take() {
+        debug_assert!(writer_handles.is_empty());
+        outcome
+    } else {
+        shutdown_writer_workers_with_budget(
+            std::mem::take(&mut writer_handles),
+            writer_close_identity.clone(),
+            writer_remaining.min(Duration::from_millis(WRITER_FINALIZE_BUDGET_MS)),
+        )
+        .await
+    };
+    let (writer_outputs, all_writers_terminal, all_writer_closes_proven) =
         writer_outputs_or_record_failure(writer_outputs_result, &source_gaps, &mut runtime_failure);
+    if !all_writer_closes_proven {
+        termination_unclean = true;
+        if same_day_shutdown {
+            let marked = match raw_day_gate.mark_runtime_exit_unclean(&runtime_close_identity) {
+                Ok(marked) => marked,
+                Err(error) => {
+                    converge_spawned_runtime_resources(
+                        &mut handles,
+                        &mut writer_handles,
+                        &mut manifest_owner_handle,
+                        &mut runtime_exit_watcher,
+                        Some(&runtime_close_identity),
+                        None,
+                        coordinated_shutdown_deadline,
+                    )
+                    .await;
+                    return Err(error);
+                }
+            };
+            let PreparedRuntimeExit::SameDay(close) = marked else {
+                converge_spawned_runtime_resources(
+                    &mut handles,
+                    &mut writer_handles,
+                    &mut manifest_owner_handle,
+                    &mut runtime_exit_watcher,
+                    Some(&runtime_close_identity),
+                    None,
+                    coordinated_shutdown_deadline,
+                )
+                .await;
+                return Err(
+                    invalid_data("same-day writer failure changed shutdown into rollover").into(),
+                );
+            };
+            prepared_runtime_close = Some(close);
+        }
+    }
+    if termination_unclean && same_day_shutdown {
+        let marked = match raw_day_gate.mark_runtime_exit_unclean(&runtime_close_identity) {
+            Ok(marked) => marked,
+            Err(error) => {
+                converge_spawned_runtime_resources(
+                    &mut handles,
+                    &mut writer_handles,
+                    &mut manifest_owner_handle,
+                    &mut runtime_exit_watcher,
+                    Some(&runtime_close_identity),
+                    None,
+                    coordinated_shutdown_deadline,
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        let PreparedRuntimeExit::SameDay(close) = marked else {
+            converge_spawned_runtime_resources(
+                &mut handles,
+                &mut writer_handles,
+                &mut manifest_owner_handle,
+                &mut runtime_exit_watcher,
+                Some(&runtime_close_identity),
+                None,
+                coordinated_shutdown_deadline,
+            )
+            .await;
+            return Err(invalid_data(
+                "same-day shutdown changed into rollover before manifest commit",
+            )
+            .into());
+        };
+        prepared_runtime_close = Some(close);
+    }
     if !all_writers_terminal {
         manifest_owner_handle.abort();
         let _ = manifest_owner_handle.await;
@@ -2314,32 +7993,90 @@ pub async fn run_live_training_runtime(
         .iter()
         .flat_map(|output| output.finalized_segments.clone())
         .collect::<Vec<_>>();
-    let manifest_shutdown_day = utc_day_string_from_ms(now_ms())
-        .ok_or_else(|| invalid_data("current UTC day unavailable during manifest shutdown"))?;
-    let gaps = source_gaps
-        .lock()
-        .expect("source gap mutex poisoned")
-        .reasons_for_day(&manifest_shutdown_day);
-    let (manifest_shutdown_tx, manifest_shutdown_rx) = oneshot::channel();
-    let manifest_shutdown_command = ManifestCommand::Shutdown {
-        utc_day: manifest_shutdown_day,
-        gaps: gaps.clone(),
-        operational_counters: source_queue_backpressure.drain_all_operational(),
-        reply: manifest_shutdown_tx,
-    };
-    let manifest_shutdown_result = match timeout(
-        coordinated_shutdown_deadline.saturating_duration_since(Instant::now()),
-        manifest_tx.send(manifest_shutdown_command),
-    )
-    .await
-    {
-        Ok(Ok(())) => match timeout(
-            coordinated_shutdown_deadline.saturating_duration_since(Instant::now()),
-            manifest_shutdown_rx,
-        )
-        .await
-        {
-            Ok(Ok(Ok(()))) => match timeout(
+    let manifest_shutdown_result =
+        if let Some(prepared_runtime_close) = prepared_runtime_close.as_ref() {
+            let manifest_shutdown_day = prepared_runtime_close.identity.utc_day.clone();
+            let gaps = source_gaps
+                .lock()
+                .expect("source gap mutex poisoned")
+                .reasons_for_day(&manifest_shutdown_day);
+            let (manifest_shutdown_tx, manifest_shutdown_rx) = oneshot::channel();
+            let manifest_shutdown_command = ManifestCommand::Shutdown {
+                close: prepared_runtime_close.identity.clone(),
+                disposition: if prepared_runtime_close.unclean {
+                    ManifestShutdownDisposition::UncleanEndUnknown
+                } else {
+                    ManifestShutdownDisposition::EndedKnown {
+                        ended_utc_ms: prepared_runtime_close.ended_utc_ms,
+                    }
+                },
+                gaps,
+                operational_counters: source_queue_backpressure.drain_all_operational(),
+                reply: manifest_shutdown_tx,
+            };
+            match timeout(
+                coordinated_shutdown_deadline.saturating_duration_since(Instant::now()),
+                manifest_tx.send(manifest_shutdown_command),
+            )
+            .await
+            {
+                Ok(Ok(())) => match timeout(
+                    coordinated_shutdown_deadline.saturating_duration_since(Instant::now()),
+                    manifest_shutdown_rx,
+                )
+                .await
+                {
+                    Ok(Ok(Ok(()))) => match timeout(
+                        coordinated_shutdown_deadline.saturating_duration_since(Instant::now()),
+                        &mut manifest_owner_handle,
+                    )
+                    .await
+                    {
+                        Ok(Ok(Ok(()))) => Ok(()),
+                        Ok(Ok(Err(error))) => Err(io::Error::other(format!(
+                            "daily manifest owner failed: {error}"
+                        ))),
+                        Ok(Err(error)) => Err(io::Error::other(format!(
+                            "daily manifest owner join failed: {error}"
+                        ))),
+                        Err(_) => Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "daily manifest owner join timeout",
+                        )),
+                    },
+                    Ok(Ok(Err(error))) => Err(io::Error::other(error)),
+                    Ok(Err(_)) => Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "daily manifest owner dropped shutdown reply",
+                    )),
+                    Err(_) => Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "daily manifest owner shutdown timeout",
+                    )),
+                },
+                Ok(Err(_)) => Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "daily manifest owner command channel closed",
+                )),
+                Err(_) => Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "daily manifest owner command timeout",
+                )),
+            }
+        } else if rollover_outcome_uncertain {
+            manifest_owner_handle.abort();
+            match (&mut manifest_owner_handle).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(io::Error::other(format!(
+                    "daily manifest owner failed while durable outcome was uncertain: {error}"
+                ))),
+                Err(error) if error.is_cancelled() => Ok(()),
+                Err(error) => Err(io::Error::other(format!(
+                    "daily manifest owner join failed while durable outcome was uncertain: {error}"
+                ))),
+            }
+        } else {
+            match timeout(
                 coordinated_shutdown_deadline.saturating_duration_since(Instant::now()),
                 &mut manifest_owner_handle,
             )
@@ -2347,36 +8084,20 @@ pub async fn run_live_training_runtime(
             {
                 Ok(Ok(Ok(()))) => Ok(()),
                 Ok(Ok(Err(error))) => Err(io::Error::other(format!(
-                    "daily manifest owner failed: {error}"
+                    "daily manifest owner failed after rollover exit: {error}"
                 ))),
                 Ok(Err(error)) => Err(io::Error::other(format!(
-                    "daily manifest owner join failed: {error}"
+                    "daily manifest owner join failed after rollover exit: {error}"
                 ))),
                 Err(_) => Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    "daily manifest owner join timeout",
+                    "daily manifest owner rollover-exit join timeout",
                 )),
-            },
-            Ok(Ok(Err(error))) => Err(io::Error::other(error)),
-            Ok(Err(_)) => Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "daily manifest owner dropped shutdown reply",
-            )),
-            Err(_) => Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "daily manifest owner shutdown timeout",
-            )),
-        },
-        Ok(Err(_)) => Err(io::Error::new(
-            io::ErrorKind::BrokenPipe,
-            "daily manifest owner command channel closed",
-        )),
-        Err(_) => Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "daily manifest owner command timeout",
-        )),
-    };
+            }
+        };
     if let Err(error) = manifest_shutdown_result {
+        abort_manifest_owner_if_running(&mut manifest_owner_handle, coordinated_shutdown_deadline)
+            .await;
         let message = format!("daily_manifest_shutdown_failed:{error}");
         record_gap(&source_gaps, message.clone());
         runtime_failure = Some(message);
@@ -2414,14 +8135,76 @@ pub async fn run_live_training_runtime(
     }
 }
 
+#[cfg(test)]
 fn start_writer_workers(
     dataset_root: &Path,
     provenance: &RuntimeProvenance,
     manifest_tx: &mpsc::Sender<ManifestCommand>,
     runtime_stats: &Arc<SourceQueueBackpressureStats>,
 ) -> Result<BTreeMap<String, SourceWriterHandle>> {
+    let raw_day_gate = runtime_stats.raw_day_gate();
+    let (handles, releases) = start_writer_workers_inner(
+        dataset_root,
+        provenance,
+        manifest_tx,
+        runtime_stats,
+        None,
+        raw_day_gate,
+        None,
+        |_| Ok(()),
+    )?;
+    debug_assert!(releases.is_empty());
+    Ok(handles)
+}
+
+fn start_writer_workers_gated(
+    dataset_root: &Path,
+    provenance: &RuntimeProvenance,
+    manifest_tx: &mpsc::Sender<ManifestCommand>,
+    runtime_stats: &Arc<SourceQueueBackpressureStats>,
+    ready_tx: &mpsc::Sender<StartupParticipant>,
+    raw_day_gate: Arc<RawDayGate>,
+    dataset_lease: Option<Arc<File>>,
+) -> Result<(
+    BTreeMap<String, SourceWriterHandle>,
+    Vec<StartupReleaseSender>,
+)> {
+    start_writer_workers_inner(
+        dataset_root,
+        provenance,
+        manifest_tx,
+        runtime_stats,
+        Some(ready_tx),
+        Some(raw_day_gate),
+        dataset_lease,
+        |_| Ok(()),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_writer_workers_inner<F>(
+    dataset_root: &Path,
+    provenance: &RuntimeProvenance,
+    manifest_tx: &mpsc::Sender<ManifestCommand>,
+    runtime_stats: &Arc<SourceQueueBackpressureStats>,
+    ready_tx: Option<&mpsc::Sender<StartupParticipant>>,
+    raw_day_gate: Option<Arc<RawDayGate>>,
+    dataset_lease: Option<Arc<File>>,
+    mut before_spawn: F,
+) -> Result<(
+    BTreeMap<String, SourceWriterHandle>,
+    Vec<StartupReleaseSender>,
+)>
+where
+    F: FnMut(usize) -> io::Result<()>,
+{
     let mut handles = BTreeMap::new();
-    for source_kind in LIVE_SOURCES {
+    let mut releases = Vec::new();
+    for (index, source_kind) in LIVE_SOURCES.iter().enumerate() {
+        if let Err(error) = before_spawn(index) {
+            converge_partial_writer_spawn(handles, releases, STARTUP_GATE_TIMEOUT);
+            return Err(error.into());
+        }
         let (tx, rx) = std::sync::mpsc::sync_channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
         let queue_rows = Arc::new(AtomicU64::new(0));
         let queue_rows_for_worker = Arc::clone(&queue_rows);
@@ -2432,23 +8215,134 @@ fn start_writer_workers(
         let provenance = provenance.clone();
         let manifest_tx = manifest_tx.clone();
         let source_kind_owned = (*source_kind).to_owned();
+        let report_source_kind = source_kind_owned.clone();
         let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
-        std::thread::Builder::new()
+        let writer_epoch = WriterEpochCell::default();
+        let worker_epoch = writer_epoch.clone();
+        let lifecycle_gate = raw_day_gate.clone();
+        let writer_rendezvous_gate = raw_day_gate.clone();
+        let writer_dataset_lease = dataset_lease.clone();
+        let startup_gate = ready_tx.map(|ready_tx| {
+            let participant = StartupParticipant::writer(source_kind);
+            let (release_tx, release_rx) = oneshot::channel();
+            releases.push(StartupReleaseSender {
+                participant,
+                sender: release_tx,
+            });
+            WriterStartupGate {
+                participant,
+                ready_tx: ready_tx.clone(),
+                release_rx,
+            }
+        });
+        let thread = match std::thread::Builder::new()
             .name(format!("data-collect-writer-{source_kind_owned}"))
             .spawn(move || {
-                let result = source_writer_worker(
-                    dataset_root,
-                    provenance,
-                    source_kind_owned,
-                    rx,
-                    queue_rows_for_worker,
-                    accepting_commands_for_worker,
-                    runtime_stats,
-                    manifest_tx,
+                let _dataset_lease = writer_dataset_lease;
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    source_writer_worker_with_startup(
+                        dataset_root,
+                        provenance,
+                        source_kind_owned,
+                        rx,
+                        queue_rows_for_worker,
+                        accepting_commands_for_worker,
+                        runtime_stats,
+                        manifest_tx,
+                        startup_gate,
+                        worker_epoch.clone(),
+                        writer_rendezvous_gate,
+                    )
+                }));
+                let outcome = match result {
+                    Ok(result) => WriterTaskOutcome::Returned(result),
+                    Err(payload) => WriterTaskOutcome::Panicked(
+                        payload
+                            .downcast_ref::<&str>()
+                            .map(|message| (*message).to_owned())
+                            .or_else(|| payload.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "writer thread panicked".to_owned()),
+                    ),
+                };
+                let lifecycle_close = match &outcome {
+                    WriterTaskOutcome::Returned(Ok(output)) => output.coordinated_close.clone(),
+                    WriterTaskOutcome::Returned(Err(_))
+                    | WriterTaskOutcome::Panicked(_)
+                    | WriterTaskOutcome::MissingReport(_) => None,
+                };
+                let worker_epoch_snapshot = worker_epoch.snapshot();
+                let lifecycle = if lifecycle_close.is_none() {
+                    lifecycle_gate.as_ref().map(|gate| {
+                        let cause = match &outcome {
+                            WriterTaskOutcome::Panicked(_) => RuntimeCloseCause::WriterPanic {
+                                source_kind: report_source_kind.clone(),
+                            },
+                            _ => RuntimeCloseCause::WriterReturn {
+                                source_kind: report_source_kind.clone(),
+                            },
+                        };
+                        let unclean_cause = matches!(&outcome, WriterTaskOutcome::Panicked(_))
+                            .then_some(cause.clone());
+                        gate.observe_source_terminal_now(
+                            cause,
+                            unclean_cause,
+                            worker_epoch_snapshot.as_ref(),
+                        )
+                    })
+                } else {
+                    None
+                };
+                let first_observed_utc_ms = lifecycle
+                    .as_ref()
+                    .map_or_else(now_ms, |lifecycle| lifecycle.observed_utc_ms);
+                let lifecycle_epoch = lifecycle
+                    .as_ref()
+                    .and_then(|lifecycle| lifecycle.epoch.clone())
+                    .or_else(|| {
+                        lifecycle_close.as_ref().map(|close| RuntimeEpoch {
+                            utc_day: close.utc_day.clone(),
+                            generation: close.generation,
+                        })
+                    });
+                let termination_kind = if lifecycle_close.is_some() {
+                    WriterTerminationKind::CoordinatedClose
+                } else {
+                    lifecycle.as_ref().map_or_else(
+                        || match &outcome {
+                            WriterTaskOutcome::Panicked(_)
+                            | WriterTaskOutcome::MissingReport(_) => WriterTerminationKind::Unclean,
+                            WriterTaskOutcome::Returned(_) => WriterTerminationKind::ReliableReturn,
+                        },
+                        |lifecycle| match lifecycle.termination_kind {
+                            SourceTaskTerminationKind::ReliableReturn => {
+                                WriterTerminationKind::ReliableReturn
+                            }
+                            SourceTaskTerminationKind::CoordinatedAbort
+                            | SourceTaskTerminationKind::Unclean => WriterTerminationKind::Unclean,
+                        },
+                    )
+                };
+                let lifecycle_record_error =
+                    lifecycle.and_then(|lifecycle| lifecycle.lifecycle_record_error);
+                let _ = result_tx.send(WriterTaskReport {
+                    source_kind: report_source_kind,
+                    first_observed_utc_ms,
+                    worker_epoch: worker_epoch_snapshot,
+                    lifecycle_epoch,
+                    termination_kind,
+                    lifecycle_close,
+                    lifecycle_record_error,
+                    outcome,
+                });
+            }) {
+            Ok(thread) => thread,
+            Err(error) => {
+                converge_partial_writer_spawn(handles, releases, STARTUP_GATE_TIMEOUT);
+                return Err(
+                    io::Error::other(format!("spawn writer thread failed: {error}")).into(),
                 );
-                let _ = result_tx.send(result);
-            })
-            .map_err(|err| io::Error::other(format!("spawn writer thread failed: {err}")))?;
+            }
+        };
         handles.insert(
             (*source_kind).to_owned(),
             SourceWriterHandle {
@@ -2457,13 +8351,59 @@ fn start_writer_workers(
                 accepting_commands,
                 result_rx,
                 completed_result: None,
+                thread: Some(thread),
             },
         );
     }
-    Ok(handles)
+    Ok((handles, releases))
 }
 
-fn poll_writer_completion(writers: &mut BTreeMap<String, SourceWriterHandle>) -> Option<String> {
+fn converge_partial_writer_spawn(
+    handles: BTreeMap<String, SourceWriterHandle>,
+    releases: Vec<StartupReleaseSender>,
+    budget: Duration,
+) {
+    drop(releases);
+    let deadline = Instant::now() + budget;
+    for (_, writer) in handles {
+        let SourceWriterHandle {
+            tx,
+            queue_rows: _,
+            accepting_commands: _,
+            result_rx,
+            completed_result: _,
+            thread,
+        } = writer;
+        drop(tx);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if !remaining.is_zero() {
+            let _ = result_rx.recv_timeout(remaining);
+        }
+        let Some(thread) = thread else {
+            continue;
+        };
+        while !thread.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        if thread.is_finished() {
+            let _ = thread.join();
+        }
+    }
+}
+
+struct WriterCompletionNotice {
+    message: String,
+    worker_epoch: Option<RuntimeEpoch>,
+    rendezvous_epoch: Option<RuntimeEpoch>,
+    lifecycle_epoch: Option<RuntimeEpoch>,
+    termination_kind: WriterTerminationKind,
+}
+
+fn poll_writer_completion(
+    writers: &mut BTreeMap<String, SourceWriterHandle>,
+    raw_day_gate: &RawDayGate,
+    post_fence_epoch: Option<&RuntimeEpoch>,
+) -> Option<WriterCompletionNotice> {
     for (source_kind, writer) in writers {
         if writer.completed_result.is_none() {
             match writer.result_rx.try_recv() {
@@ -2471,15 +8411,57 @@ fn poll_writer_completion(writers: &mut BTreeMap<String, SourceWriterHandle>) ->
                 Err(std::sync::mpsc::TryRecvError::Empty) => continue,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     let message = format!("writer_result_channel_disconnected:{source_kind}");
-                    writer.completed_result = Some(Err(io::Error::other(message.clone()).into()));
-                    return Some(message);
+                    let cause = RuntimeCloseCause::WriterReportDisconnected {
+                        source_kind: source_kind.clone(),
+                    };
+                    let rendezvous_epoch = post_fence_epoch
+                        .cloned()
+                        .or_else(|| raw_day_gate.writer_rendezvous_epoch());
+                    let lifecycle = raw_day_gate.observe_source_terminal_now(
+                        cause.clone(),
+                        Some(cause),
+                        rendezvous_epoch.as_ref(),
+                    );
+                    let lifecycle_epoch = lifecycle.epoch.clone();
+                    writer.completed_result = Some(WriterTaskReport {
+                        source_kind: source_kind.clone(),
+                        first_observed_utc_ms: lifecycle.observed_utc_ms,
+                        worker_epoch: None,
+                        lifecycle_epoch: lifecycle.epoch,
+                        termination_kind: WriterTerminationKind::Unclean,
+                        lifecycle_close: None,
+                        lifecycle_record_error: lifecycle.lifecycle_record_error,
+                        outcome: WriterTaskOutcome::MissingReport(message.clone()),
+                    });
+                    return Some(WriterCompletionNotice {
+                        message,
+                        worker_epoch: None,
+                        rendezvous_epoch,
+                        lifecycle_epoch,
+                        termination_kind: WriterTerminationKind::Unclean,
+                    });
                 }
             }
         }
-        if let Some(result) = writer.completed_result.as_ref() {
-            return Some(match result {
-                Ok(_) => format!("writer_ended_unexpectedly:{source_kind}"),
-                Err(error) => format!("writer_failed:{source_kind}:{error}"),
+        if let Some(report) = writer.completed_result.as_ref() {
+            let message = match &report.outcome {
+                WriterTaskOutcome::Returned(Ok(_)) => {
+                    format!("writer_ended_unexpectedly:{source_kind}")
+                }
+                WriterTaskOutcome::Returned(Err(error)) => {
+                    format!("writer_failed:{source_kind}:{error}")
+                }
+                WriterTaskOutcome::Panicked(error) => {
+                    format!("writer_panicked:{source_kind}:{error}")
+                }
+                WriterTaskOutcome::MissingReport(error) => error.clone(),
+            };
+            return Some(WriterCompletionNotice {
+                message,
+                worker_epoch: report.worker_epoch.clone(),
+                rendezvous_epoch: raw_day_gate.writer_rendezvous_epoch(),
+                lifecycle_epoch: report.lifecycle_epoch.clone(),
+                termination_kind: report.termination_kind,
             });
         }
     }
@@ -2490,14 +8472,16 @@ fn poll_writer_completion(writers: &mut BTreeMap<String, SourceWriterHandle>) ->
 fn start_writer_workers_with_hung_result(
     dataset_root: &Path,
     provenance: &RuntimeProvenance,
+    dataset_lease: Option<Arc<File>>,
 ) -> Result<BTreeMap<String, SourceWriterHandle>> {
     let _ = (dataset_root, provenance);
     let mut handles = BTreeMap::new();
     let (tx, _command_rx) = std::sync::mpsc::sync_channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
     let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
-    std::thread::Builder::new()
+    let thread = std::thread::Builder::new()
         .name("data-collect-writer-hung".to_owned())
         .spawn(move || {
+            let _dataset_lease = dataset_lease;
             let _result_tx = result_tx;
             std::thread::sleep(Duration::from_secs(60));
         })
@@ -2510,6 +8494,7 @@ fn start_writer_workers_with_hung_result(
             accepting_commands: Arc::new(Mutex::new(true)),
             result_rx,
             completed_result: None,
+            thread: Some(thread),
         },
     );
     Ok(handles)
@@ -2552,6 +8537,7 @@ async fn handle_ingress_control(
     writer_queue_tracker: &mut QueueDurationTracker,
     run_started: Instant,
     manifest_tx: &mpsc::Sender<ManifestCommand>,
+    rollover_coordinator: &mut RolloverCoordinatorState,
 ) -> Result<()> {
     match control {
         IngressControl::FinalizeSourceHour {
@@ -2575,7 +8561,16 @@ async fn handle_ingress_control(
             .await?;
             send_writer_hour_finalize(writers, &source_kind, &utc_hour).await?;
         }
-        IngressControl::DayBarrier { producer, utc_day } => {
+        IngressControl::DayBarrier {
+            producer,
+            close,
+            reply,
+        } => {
+            rollover_coordinator.register_producer_barrier(
+                producer.clone(),
+                close.clone(),
+                reply,
+            )?;
             flush_all_batches(
                 writers,
                 batches,
@@ -2585,15 +8580,15 @@ async fn handle_ingress_control(
                 run_started,
             )
             .await?;
-            send_writer_day_finalize(writers, &producer, &utc_day).await?;
+            send_writer_day_finalize(writers, &producer, &close).await?;
             let gap_snapshot = gaps
                 .lock()
                 .expect("source gap mutex poisoned")
-                .reasons_for_day(&utc_day);
-            let operational_counters = runtime_stats.drain_operational_day(&utc_day);
+                .reasons_for_day(&close.utc_day);
+            let operational_counters = runtime_stats.drain_operational_day(&close.utc_day);
             manifest_tx
                 .send(ManifestCommand::ProducerBarrier {
-                    utc_day,
+                    close,
                     producer,
                     gaps: gap_snapshot,
                     operational_counters,
@@ -2640,6 +8635,7 @@ async fn process_ingress_event(
     writer_queue_tracker: &mut QueueDurationTracker,
     run_started: Instant,
     manifest_tx: &mpsc::Sender<ManifestCommand>,
+    rollover_coordinator: &mut RolloverCoordinatorState,
 ) -> Result<()> {
     if let Some(control) = inflight_event.control.take() {
         drop(inflight_event);
@@ -2652,8 +8648,21 @@ async fn process_ingress_event(
             writer_queue_tracker,
             run_started,
             manifest_tx,
+            rollover_coordinator,
         )
         .await;
+    }
+    let permit = inflight_event
+        .raw_day_permit
+        .as_ref()
+        .ok_or_else(|| invalid_data("production raw event missing day/generation permit"))?;
+    let event_day = utc_day_string_from_ms(inflight_event.event.recv_time_utc_ms)
+        .ok_or_else(|| invalid_data("UTC day unavailable for inflight raw event"))?;
+    if event_day != permit.utc_day || permit.generation == 0 {
+        return Err(invalid_data(format!(
+            "inflight raw-day permit mismatch: event_day={event_day} permit={permit:?}"
+        ))
+        .into());
     }
     *received_rows = received_rows.saturating_add(1);
     let event = &inflight_event.event;
@@ -2810,10 +8819,83 @@ fn producer_writer_sources(producer: &str) -> Result<&'static [&'static str]> {
     }
 }
 
+fn logical_producer_for_source_kind(source_kind: &str) -> Result<&'static str> {
+    match source_kind {
+        "polymarket_market" | "polymarket_market_metadata" => Ok("polymarket"),
+        "polymarket_rtds_chainlink_btc_usd" => Ok("polymarket_rtds"),
+        "binance_depth_snapshot" | "binance_depth_update" => Ok("binance_depth"),
+        "binance_aggtrade" => Ok("binance_aggtrade"),
+        other => Err(invalid_data(format!(
+            "raw event source has no mandatory logical producer mapping: {other}"
+        ))
+        .into()),
+    }
+}
+
+fn validate_mandatory_producer_source_mapping() -> Result<()> {
+    let producers = LOGICAL_PRODUCERS.iter().copied().collect::<BTreeSet<_>>();
+    if producers.len() != LOGICAL_PRODUCERS.len() {
+        return Err(invalid_data("mandatory logical producer list contains duplicates").into());
+    }
+    let live_sources = LIVE_SOURCES.iter().copied().collect::<BTreeSet<_>>();
+    if live_sources.len() != LIVE_SOURCES.len() {
+        return Err(invalid_data("mandatory live source list contains duplicates").into());
+    }
+
+    let mut forward_sources = BTreeSet::new();
+    for producer in LOGICAL_PRODUCERS {
+        let sources = producer_writer_sources(producer)?;
+        if sources.is_empty() {
+            return Err(invalid_data(format!(
+                "mandatory logical producer has no writer source: {producer}"
+            ))
+            .into());
+        }
+        for source_kind in sources {
+            if !live_sources.contains(source_kind) {
+                return Err(invalid_data(format!(
+                    "producer mapping references non-live source: producer={producer} source={source_kind}"
+                ))
+                .into());
+            }
+            if !forward_sources.insert(*source_kind) {
+                return Err(invalid_data(format!(
+                    "live source is mapped by more than one producer: {source_kind}"
+                ))
+                .into());
+            }
+            if logical_producer_for_source_kind(source_kind)? != *producer {
+                return Err(invalid_data(format!(
+                    "producer/source mapping is not bidirectionally consistent: producer={producer} source={source_kind}"
+                ))
+                .into());
+            }
+        }
+    }
+    if forward_sources != live_sources {
+        return Err(invalid_data(format!(
+            "producer mapping does not cover the exact live source set: mapped={forward_sources:?} live={live_sources:?}"
+        ))
+        .into());
+    }
+    for source_kind in LIVE_SOURCES {
+        let producer = logical_producer_for_source_kind(source_kind)?;
+        if !producers.contains(producer)
+            || !producer_writer_sources(producer)?.contains(source_kind)
+        {
+            return Err(invalid_data(format!(
+                "live source inverse mapping is not present in the producer mapping: source={source_kind} producer={producer}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
 async fn send_writer_day_finalize(
     writers: &BTreeMap<String, SourceWriterHandle>,
     producer: &str,
-    utc_day: &str,
+    close: &RawDayClose,
 ) -> Result<()> {
     for source_kind in producer_writer_sources(producer)? {
         let writer = writers.get(*source_kind).ok_or_else(|| {
@@ -2823,7 +8905,7 @@ async fn send_writer_day_finalize(
             )
         })?;
         let mut command = WriterCommand::FinalizeDay {
-            utc_day: utc_day.to_owned(),
+            close: close.clone(),
         };
         timeout(BUFFER_ACQUIRE_TIMEOUT, async {
             loop {
@@ -2898,64 +8980,291 @@ async fn stop_writer_workers_with_budget(
     writers: BTreeMap<String, SourceWriterHandle>,
     budget: Duration,
 ) -> WriterStopOutcome {
-    let mut receivers = Vec::new();
-    let mut outputs = Vec::new();
+    stop_writer_workers_with_optional_close(writers, None, budget).await
+}
+
+async fn shutdown_writer_workers_with_budget(
+    writers: BTreeMap<String, SourceWriterHandle>,
+    close: RuntimeCloseIdentity,
+    budget: Duration,
+) -> WriterStopOutcome {
+    stop_writer_workers_with_optional_close(writers, Some(close), budget).await
+}
+
+async fn send_writer_shutdown(
+    source_kind: &str,
+    writer: &SourceWriterHandle,
+    close: &RuntimeCloseIdentity,
+    deadline: Instant,
+) -> std::result::Result<(), String> {
+    let mut command = WriterCommand::Shutdown {
+        close: close.clone(),
+    };
+    loop {
+        command = {
+            let mut accepting = writer
+                .accepting_commands
+                .lock()
+                .expect("writer accepting-command mutex poisoned");
+            if !*accepting {
+                return Err(format!(
+                    "{source_kind} writer stopped accepting before coordinated shutdown"
+                ));
+            }
+            match writer.tx.try_send(command) {
+                Ok(()) => {
+                    *accepting = false;
+                    return Ok(());
+                }
+                Err(std::sync::mpsc::TrySendError::Full(returned)) => returned,
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    return Err(format!(
+                        "{source_kind} writer queue disconnected before coordinated shutdown"
+                    ));
+                }
+            }
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!(
+                "{source_kind} writer coordinated-shutdown command timeout"
+            ));
+        }
+        sleep(remaining.min(Duration::from_millis(25))).await;
+    }
+}
+
+fn collect_writer_report(
+    source_kind: &str,
+    report: WriterTaskReport,
+    expected_close: Option<&RuntimeCloseIdentity>,
+    outputs: &mut Vec<SourceWriterOutput>,
+    errors: &mut Vec<String>,
+    proven: &mut BTreeSet<String>,
+) {
+    let report_identity_matches = report.source_kind == source_kind;
+    if !report_identity_matches {
+        errors.push(format!(
+            "writer result identity mismatch: expected={source_kind} actual={}",
+            report.source_kind
+        ));
+    }
+    if let Some(error) = report.lifecycle_record_error.as_ref() {
+        errors.push(format!(
+            "{source_kind} writer lifecycle recording failed at {}: {error}",
+            report.first_observed_utc_ms
+        ));
+    }
+    let lifecycle_epoch_matches = expected_close.is_none_or(|expected| {
+        report.lifecycle_epoch.as_ref()
+            == Some(&RuntimeEpoch {
+                utc_day: expected.utc_day.clone(),
+                generation: expected.generation,
+            })
+    });
+    let reliable_return_proves_close = report_identity_matches
+        && report.termination_kind == WriterTerminationKind::ReliableReturn
+        && lifecycle_epoch_matches
+        && report.lifecycle_record_error.is_none()
+        && matches!(&report.outcome, WriterTaskOutcome::Returned(_));
+    match report.outcome {
+        WriterTaskOutcome::Returned(Ok(output)) => {
+            let identity_matches = output.source_kind == source_kind && report_identity_matches;
+            let coordinated_close_matches = expected_close.is_none_or(|expected| {
+                output.coordinated_close.as_ref() == Some(expected)
+                    && report.lifecycle_close.as_ref() == Some(expected)
+                    && report.worker_epoch.as_ref()
+                        == Some(&RuntimeEpoch {
+                            utc_day: expected.utc_day.clone(),
+                            generation: expected.generation,
+                        })
+                    && lifecycle_epoch_matches
+                    && report.lifecycle_record_error.is_none()
+            });
+            let close_proven = match report.termination_kind {
+                WriterTerminationKind::CoordinatedClose => coordinated_close_matches,
+                WriterTerminationKind::ReliableReturn => reliable_return_proves_close,
+                WriterTerminationKind::Unclean => false,
+            };
+            if !identity_matches {
+                errors.push(format!(
+                    "writer output identity mismatch: expected={source_kind} actual={}",
+                    output.source_kind
+                ));
+            }
+            if let Some(expected) = expected_close
+                && !close_proven
+            {
+                errors.push(format!(
+                    "{source_kind} writer terminal proof mismatch: expected={expected:?} kind={:?} output={:?} report={:?} worker_epoch={:?} lifecycle_epoch={:?}",
+                    report.termination_kind,
+                    output.coordinated_close,
+                    report.lifecycle_close,
+                    report.worker_epoch,
+                    report.lifecycle_epoch,
+                ));
+            }
+            if identity_matches && close_proven && expected_close.is_some() {
+                proven.insert(source_kind.to_owned());
+            }
+            outputs.push(output);
+        }
+        WriterTaskOutcome::Returned(Err(error)) => {
+            if expected_close.is_some() && reliable_return_proves_close {
+                proven.insert(source_kind.to_owned());
+            } else if let Some(expected) = expected_close {
+                errors.push(format!(
+                    "{source_kind} writer reliable-return proof mismatch: expected={expected:?} kind={:?} lifecycle_epoch={:?}",
+                    report.termination_kind, report.lifecycle_epoch
+                ));
+            }
+            errors.push(format!(
+                "{source_kind} writer failed at {}: {error}",
+                report.first_observed_utc_ms
+            ));
+        }
+        WriterTaskOutcome::Panicked(error) => {
+            errors.push(format!(
+                "{source_kind} writer panicked at {}: {error}",
+                report.first_observed_utc_ms
+            ));
+        }
+        WriterTaskOutcome::MissingReport(error) => {
+            errors.push(format!(
+                "{source_kind} writer report missing at {}: {error}",
+                report.first_observed_utc_ms
+            ));
+        }
+    }
+}
+
+async fn stop_writer_workers_with_optional_close(
+    mut writers: BTreeMap<String, SourceWriterHandle>,
+    expected_close: Option<RuntimeCloseIdentity>,
+    budget: Duration,
+) -> WriterStopOutcome {
+    let deadline = Instant::now() + budget;
     let mut errors = Vec::new();
-    for (source_kind, writer) in writers {
+    let required = LIVE_SOURCES
+        .iter()
+        .map(|source| (*source).to_owned())
+        .collect::<BTreeSet<_>>();
+    let actual = writers.keys().cloned().collect::<BTreeSet<_>>();
+    let mandatory_keys_exact = expected_close.is_none() || actual == required;
+    if expected_close.is_some() && !mandatory_keys_exact {
+        let missing = required.difference(&actual).cloned().collect::<Vec<_>>();
+        let extra = actual.difference(&required).cloned().collect::<Vec<_>>();
+        errors.push(format!(
+            "writer mandatory key mismatch: missing={missing:?} extra={extra:?}"
+        ));
+    }
+    if let Some(close) = expected_close.as_ref() {
+        for (source_kind, writer) in &writers {
+            if writer.completed_result.is_some() {
+                continue;
+            }
+            if let Err(error) = send_writer_shutdown(source_kind, writer, close, deadline).await {
+                errors.push(error);
+            }
+        }
+    }
+
+    let mut receivers = Vec::new();
+    let mut threads = Vec::new();
+    let mut outputs = Vec::new();
+    let mut proven = BTreeSet::new();
+    for (source_kind, writer) in std::mem::take(&mut writers) {
         let SourceWriterHandle {
             tx,
             queue_rows: _,
             accepting_commands: _,
             result_rx,
             completed_result,
+            thread,
         } = writer;
         drop(tx);
+        threads.push((source_kind.clone(), thread));
         match completed_result {
-            Some(Ok(output)) => outputs.push(output),
-            Some(Err(error)) => {
-                errors.push(format!("{source_kind} writer finalize failed: {error}"))
-            }
+            Some(report) => collect_writer_report(
+                &source_kind,
+                report,
+                expected_close.as_ref(),
+                &mut outputs,
+                &mut errors,
+                &mut proven,
+            ),
             None => receivers.push((source_kind, result_rx)),
         }
     }
-    let deadline = Instant::now() + budget;
-    let mut all_terminal = true;
     for (source_kind, result_rx) in receivers {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             match result_rx.try_recv() {
-                Ok(Ok(output)) => outputs.push(output),
-                Ok(Err(error)) => {
-                    errors.push(format!("{source_kind} writer finalize failed: {error}"))
-                }
+                Ok(report) => collect_writer_report(
+                    &source_kind,
+                    report,
+                    expected_close.as_ref(),
+                    &mut outputs,
+                    &mut errors,
+                    &mut proven,
+                ),
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    all_terminal = false;
                     errors.push(format!(
                         "writer finalize timeout before {source_kind} completed"
                     ));
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    errors.push(format!("{source_kind} writer result channel disconnected"))
+                    errors.push(format!("{source_kind} writer result channel disconnected"));
                 }
             }
             continue;
         }
         match result_rx.recv_timeout(remaining) {
-            Ok(Ok(output)) => outputs.push(output),
-            Ok(Err(error)) => errors.push(format!("{source_kind} writer finalize failed: {error}")),
+            Ok(report) => collect_writer_report(
+                &source_kind,
+                report,
+                expected_close.as_ref(),
+                &mut outputs,
+                &mut errors,
+                &mut proven,
+            ),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                all_terminal = false;
                 errors.push(format!("writer finalize timeout for {source_kind}"));
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                errors.push(format!("{source_kind} writer result channel disconnected"))
+                errors.push(format!("{source_kind} writer result channel disconnected"));
             }
         }
     }
+    let mut all_terminal = true;
+    for (source_kind, thread) in threads {
+        let Some(thread) = thread else {
+            all_terminal = false;
+            proven.remove(&source_kind);
+            errors.push(format!("{source_kind} writer thread owner missing"));
+            continue;
+        };
+        while !thread.is_finished() && Instant::now() < deadline {
+            sleep(Duration::from_millis(1)).await;
+        }
+        if !thread.is_finished() {
+            all_terminal = false;
+            proven.remove(&source_kind);
+            errors.push(format!("writer thread join timeout for {source_kind}"));
+            continue;
+        }
+        if thread.join().is_err() {
+            proven.remove(&source_kind);
+            errors.push(format!("writer thread join panicked for {source_kind}"));
+        }
+    }
+    let all_close_proven = expected_close.is_none()
+        || (mandatory_keys_exact && proven == required && actual == required);
     WriterStopOutcome {
         outputs,
         errors,
         all_terminal,
+        all_close_proven,
     }
 }
 
@@ -2963,15 +9272,20 @@ fn writer_outputs_or_record_failure(
     outcome: WriterStopOutcome,
     source_gaps: &SharedSourceGaps,
     runtime_failure: &mut Option<String>,
-) -> (Vec<SourceWriterOutput>, bool) {
+) -> (Vec<SourceWriterOutput>, bool, bool) {
     if !outcome.errors.is_empty() {
         let message = format!("writer_finalize_failed:{}", outcome.errors.join(" | "));
         record_gap(source_gaps, message.clone());
         *runtime_failure = Some(message);
     }
-    (outcome.outputs, outcome.all_terminal)
+    (
+        outcome.outputs,
+        outcome.all_terminal,
+        outcome.all_close_proven,
+    )
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn source_writer_worker(
     dataset_root: PathBuf,
@@ -2983,117 +9297,156 @@ fn source_writer_worker(
     runtime_stats: Arc<SourceQueueBackpressureStats>,
     manifest_tx: mpsc::Sender<ManifestCommand>,
 ) -> Result<SourceWriterOutput> {
+    source_writer_worker_with_startup(
+        dataset_root,
+        provenance,
+        source_kind,
+        rx,
+        queue_rows,
+        accepting_commands,
+        runtime_stats,
+        manifest_tx,
+        None,
+        WriterEpochCell::default(),
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn source_writer_worker_with_startup(
+    dataset_root: PathBuf,
+    provenance: RuntimeProvenance,
+    source_kind: String,
+    rx: std::sync::mpsc::Receiver<WriterCommand>,
+    queue_rows: Arc<AtomicU64>,
+    accepting_commands: Arc<Mutex<bool>>,
+    runtime_stats: Arc<SourceQueueBackpressureStats>,
+    manifest_tx: mpsc::Sender<ManifestCommand>,
+    startup_gate: Option<WriterStartupGate>,
+    writer_epoch: WriterEpochCell,
+    raw_day_gate: Option<Arc<RawDayGate>>,
+) -> Result<SourceWriterOutput> {
     let mut active = None::<ActiveSegment>;
     let mut finalized_segments = Vec::new();
     let mut stats = SourceWriterStatsBuilder::new(source_kind.clone());
     let partition_policy = HourlyPartitionPolicy::new(&dataset_root)?;
-    while let Ok(command) = rx.recv() {
-        match command {
-            WriterCommand::Events(events) => {
-                queue_rows.fetch_sub(events.len() as u64, Ordering::Relaxed);
-                let mut events = events.into_iter();
-                while let Some(inflight_event) = events.next() {
-                    let event = &inflight_event.event;
-                    let process_result = (|| -> Result<()> {
-                        let current_partition = partition_policy.partition(
-                            &source_kind,
-                            event.recv_time_utc_ms,
-                            None,
-                        )?;
-                        if let Some(reason) = active.as_ref().and_then(|segment| {
-                            live_segment_rollover_reason(segment, &current_partition.utc_hour)
-                        }) {
-                            let segment = active.take().expect("active segment exists");
-                            finalized_segments.push(finalize_segment_with_drop_accounting(
-                                segment,
-                                reason,
-                                &provenance,
-                                &manifest_tx,
-                                &runtime_stats,
-                            )?);
-                        }
-                        if active.is_none() {
-                            let (naming, selected_hour_part) = next_available_hourly_partition(
-                                &partition_policy,
+    let mut expected_raw_epoch = None::<RawDayPermit>;
+    let mut coordinated_close = None::<RuntimeCloseIdentity>;
+    let run_after_startup = if let Some(startup_gate) = startup_gate {
+        startup_gate
+            .ready_tx
+            .blocking_send(startup_gate.participant)
+            .map_err(|_| {
+                invalid_data(format!(
+                    "startup ready channel closed before writer ready: {}",
+                    startup_gate.participant.name
+                ))
+            })?;
+        match startup_gate.release_rx.blocking_recv().map_err(|_| {
+            invalid_data(format!(
+                "startup activation gate closed before writer release: {}",
+                startup_gate.participant.name
+            ))
+        })? {
+            StartupReleasePhase::Run => true,
+            StartupReleasePhase::Stop(close) => {
+                writer_epoch.set_close(&close);
+                coordinated_close = Some(close);
+                false
+            }
+        }
+    } else {
+        true
+    };
+    if run_after_startup {
+        while let Ok(command) = rx.recv() {
+            match command {
+                WriterCommand::Events(events) => {
+                    queue_rows.fetch_sub(events.len() as u64, Ordering::Relaxed);
+                    let mut events = events.into_iter();
+                    while let Some(inflight_event) = events.next() {
+                        let event = &inflight_event.event;
+                        let process_result = (|| -> Result<()> {
+                            if let Some(permit) = inflight_event.raw_day_permit.as_ref() {
+                                let event_day = utc_day_string_from_ms(event.recv_time_utc_ms)
+                                    .ok_or_else(|| {
+                                        invalid_data("UTC day unavailable in source writer")
+                                    })?;
+                                if event_day != permit.utc_day {
+                                    return Err(invalid_data(format!(
+                                    "writer raw-day permit mismatch: source={source_kind} event_day={event_day} permit={permit:?}"
+                                ))
+                                .into());
+                                }
+                                match expected_raw_epoch.as_ref() {
+                                    Some(expected) if expected != permit => {
+                                        return Err(invalid_data(format!(
+                                        "writer raw-day generation mismatch: source={source_kind} expected={expected:?} actual={permit:?}"
+                                    ))
+                                    .into());
+                                    }
+                                    None => {
+                                        expected_raw_epoch = Some(permit.clone());
+                                        writer_epoch.set(permit);
+                                    }
+                                    Some(_) => {}
+                                }
+                            }
+                            let current_partition = partition_policy.partition(
                                 &source_kind,
                                 event.recv_time_utc_ms,
                                 None,
                             )?;
-                            active = Some(ActiveSegment::new(
-                                naming,
-                                &source_kind,
-                                selected_hour_part,
-                            )?);
-                        }
-                        let segment = active.as_mut().expect("active segment exists");
-                        let write_started = Instant::now();
-                        let written_rows = segment.writer.write_event(event)?;
-                        let write_events_us = write_started.elapsed().as_micros() as u64;
-                        segment.observe(event, written_rows);
-                        stats.record_written_event(
-                            event.recv_time_utc_ms,
-                            written_rows,
-                            write_events_us,
-                        );
-                        Ok(())
-                    })();
-                    if let Err(error) = process_result {
-                        if let Some(segment) = active.as_ref() {
-                            record_unfinalized_segment_drop(&runtime_stats, segment);
-                        }
-                        record_writer_drop_facts(
-                            &runtime_stats,
-                            &std::iter::once(inflight_event)
-                                .chain(events)
-                                .map(|event| {
-                                    (event.event.source_kind, event.event.recv_time_utc_ms)
-                                })
-                                .collect::<Vec<_>>(),
-                        );
-                        stop_accepting_and_record_queued_drops(
-                            &accepting_commands,
-                            &rx,
-                            &queue_rows,
-                            &runtime_stats,
-                        );
-                        return Err(error);
-                    }
-                }
-            }
-            WriterCommand::FinalizeHour { utc_hour } => {
-                if active
-                    .as_ref()
-                    .is_some_and(|segment| segment.utc_hour < utc_hour)
-                {
-                    let segment = active.as_ref().expect("active segment exists");
-                    let error = invalid_data(format!(
-                        "writer hour barrier skipped UTC hour: source={source_kind} active={} barrier={utc_hour}",
-                        segment.utc_hour
-                    ));
-                    record_unfinalized_segment_drop(&runtime_stats, segment);
-                    stop_accepting_and_record_queued_drops(
-                        &accepting_commands,
-                        &rx,
-                        &queue_rows,
-                        &runtime_stats,
-                    );
-                    return Err(error.into());
-                }
-                if active
-                    .as_ref()
-                    .is_some_and(|segment| segment.utc_hour == utc_hour)
-                {
-                    let segment = active.take().expect("active segment exists");
-                    let finalized = finalize_segment_with_drop_accounting(
-                        segment,
-                        "utc_hour_boundary",
-                        &provenance,
-                        &manifest_tx,
-                        &runtime_stats,
-                    );
-                    match finalized {
-                        Ok(finalized) => finalized_segments.push(finalized),
-                        Err(error) => {
+                            if let Some(reason) = active.as_ref().and_then(|segment| {
+                                live_segment_rollover_reason(segment, &current_partition.utc_hour)
+                            }) {
+                                let segment = active.take().expect("active segment exists");
+                                finalized_segments.push(finalize_segment_with_drop_accounting(
+                                    segment,
+                                    reason,
+                                    &provenance,
+                                    &manifest_tx,
+                                    &runtime_stats,
+                                )?);
+                            }
+                            if active.is_none() {
+                                let (naming, selected_hour_part) = next_available_hourly_partition(
+                                    &partition_policy,
+                                    &source_kind,
+                                    event.recv_time_utc_ms,
+                                    None,
+                                )?;
+                                active = Some(ActiveSegment::new(
+                                    naming,
+                                    &source_kind,
+                                    selected_hour_part,
+                                )?);
+                            }
+                            let segment = active.as_mut().expect("active segment exists");
+                            let write_started = Instant::now();
+                            let written_rows = segment.writer.write_event(event)?;
+                            let write_events_us = write_started.elapsed().as_micros() as u64;
+                            segment.observe(event, written_rows);
+                            stats.record_written_event(
+                                event.recv_time_utc_ms,
+                                written_rows,
+                                write_events_us,
+                            );
+                            Ok(())
+                        })();
+                        if let Err(error) = process_result {
+                            if let Some(segment) = active.as_ref() {
+                                record_unfinalized_segment_drop(&runtime_stats, segment);
+                            }
+                            record_writer_drop_facts(
+                                &runtime_stats,
+                                &std::iter::once(inflight_event)
+                                    .chain(events)
+                                    .map(|event| {
+                                        (event.event.source_kind, event.event.recv_time_utc_ms)
+                                    })
+                                    .collect::<Vec<_>>(),
+                            );
                             stop_accepting_and_record_queued_drops(
                                 &accepting_commands,
                                 &rx,
@@ -3104,19 +9457,178 @@ fn source_writer_worker(
                         }
                     }
                 }
-            }
-            WriterCommand::FinalizeDay { utc_day } => {
-                if active
-                    .as_ref()
-                    .is_some_and(|segment| segment.utc_day.as_str() <= utc_day.as_str())
-                {
+                WriterCommand::FinalizeHour { utc_hour } => {
                     if active
                         .as_ref()
-                        .is_some_and(|segment| segment.utc_day != utc_day)
+                        .is_some_and(|segment| segment.utc_hour < utc_hour)
+                    {
+                        let segment = active.as_ref().expect("active segment exists");
+                        let error = invalid_data(format!(
+                            "writer hour barrier skipped UTC hour: source={source_kind} active={} barrier={utc_hour}",
+                            segment.utc_hour
+                        ));
+                        record_unfinalized_segment_drop(&runtime_stats, segment);
+                        stop_accepting_and_record_queued_drops(
+                            &accepting_commands,
+                            &rx,
+                            &queue_rows,
+                            &runtime_stats,
+                        );
+                        return Err(error.into());
+                    }
+                    if active
+                        .as_ref()
+                        .is_some_and(|segment| segment.utc_hour == utc_hour)
+                    {
+                        let segment = active.take().expect("active segment exists");
+                        let finalized = finalize_segment_with_drop_accounting(
+                            segment,
+                            "utc_hour_boundary",
+                            &provenance,
+                            &manifest_tx,
+                            &runtime_stats,
+                        );
+                        match finalized {
+                            Ok(finalized) => finalized_segments.push(finalized),
+                            Err(error) => {
+                                stop_accepting_and_record_queued_drops(
+                                    &accepting_commands,
+                                    &rx,
+                                    &queue_rows,
+                                    &runtime_stats,
+                                );
+                                return Err(error);
+                            }
+                        }
+                    }
+                }
+                WriterCommand::FinalizeDay { close } => {
+                    let utc_day = &close.utc_day;
+                    if let Some(expected) = expected_raw_epoch.as_ref()
+                        && (expected.utc_day != close.utc_day
+                            || expected.generation != close.generation)
                     {
                         let error = invalid_data(format!(
-                            "writer day barrier skipped UTC day: source={source_kind} active={} barrier={utc_day}",
-                            active.as_ref().expect("active segment exists").utc_day
+                            "writer finalize identity mismatch: source={source_kind} expected={expected:?} close={close:?}"
+                        ));
+                        if let Some(segment) = active.as_ref() {
+                            record_unfinalized_segment_drop(&runtime_stats, segment);
+                        }
+                        stop_accepting_and_record_queued_drops(
+                            &accepting_commands,
+                            &rx,
+                            &queue_rows,
+                            &runtime_stats,
+                        );
+                        return Err(error.into());
+                    }
+                    if active
+                        .as_ref()
+                        .is_some_and(|segment| segment.utc_day.as_str() <= utc_day.as_str())
+                    {
+                        if active
+                            .as_ref()
+                            .is_some_and(|segment| segment.utc_day != *utc_day)
+                        {
+                            let error = invalid_data(format!(
+                                "writer day barrier skipped UTC day: source={source_kind} active={} barrier={utc_day}",
+                                active.as_ref().expect("active segment exists").utc_day
+                            ));
+                            record_unfinalized_segment_drop(
+                                &runtime_stats,
+                                active.as_ref().expect("active segment exists"),
+                            );
+                            stop_accepting_and_record_queued_drops(
+                                &accepting_commands,
+                                &rx,
+                                &queue_rows,
+                                &runtime_stats,
+                            );
+                            return Err(error.into());
+                        }
+                        let segment = active.take().expect("active segment exists");
+                        let finalized = finalize_segment_with_drop_accounting(
+                            segment,
+                            "utc_day_barrier",
+                            &provenance,
+                            &manifest_tx,
+                            &runtime_stats,
+                        );
+                        match finalized {
+                            Ok(finalized) => finalized_segments.push(finalized),
+                            Err(error) => {
+                                stop_accepting_and_record_queued_drops(
+                                    &accepting_commands,
+                                    &rx,
+                                    &queue_rows,
+                                    &runtime_stats,
+                                );
+                                return Err(error);
+                            }
+                        }
+                    }
+                    if let Err(error) = manifest_tx
+                        .blocking_send(ManifestCommand::WriterDayFinalized {
+                            close: close.clone(),
+                            source_kind: source_kind.clone(),
+                            raw_day_gate: raw_day_gate.clone().ok_or_else(|| {
+                                invalid_data(
+                                    "writer day finalize requires the production raw-day gate",
+                                )
+                            })?,
+                        })
+                        .map_err(|_| {
+                            io::Error::new(
+                                io::ErrorKind::BrokenPipe,
+                                "daily manifest owner channel closed during writer day finalize",
+                            )
+                        })
+                    {
+                        stop_accepting_and_record_queued_drops(
+                            &accepting_commands,
+                            &rx,
+                            &queue_rows,
+                            &runtime_stats,
+                        );
+                        return Err(error.into());
+                    }
+                    expected_raw_epoch = Some(RawDayPermit {
+                        utc_day: close.next_utc_day,
+                        generation: close.next_generation,
+                    });
+                    writer_epoch.set(
+                        expected_raw_epoch
+                            .as_ref()
+                            .expect("writer next epoch was assigned"),
+                    );
+                }
+                WriterCommand::Shutdown { close } => {
+                    if let Some(expected) = expected_raw_epoch.as_ref()
+                        && (expected.utc_day != close.utc_day
+                            || expected.generation != close.generation)
+                    {
+                        let error = invalid_data(format!(
+                            "writer shutdown identity mismatch: source={source_kind} expected={expected:?} close={close:?}"
+                        ));
+                        if let Some(segment) = active.as_ref() {
+                            record_unfinalized_segment_drop(&runtime_stats, segment);
+                        }
+                        stop_accepting_and_record_queued_drops(
+                            &accepting_commands,
+                            &rx,
+                            &queue_rows,
+                            &runtime_stats,
+                        );
+                        return Err(error.into());
+                    }
+                    if active
+                        .as_ref()
+                        .is_some_and(|segment| segment.utc_day != close.utc_day)
+                    {
+                        let error = invalid_data(format!(
+                            "writer shutdown active-day mismatch: source={source_kind} active={} close={}",
+                            active.as_ref().expect("active segment exists").utc_day,
+                            close.utc_day
                         ));
                         record_unfinalized_segment_drop(
                             &runtime_stats,
@@ -3130,46 +9642,14 @@ fn source_writer_worker(
                         );
                         return Err(error.into());
                     }
-                    let segment = active.take().expect("active segment exists");
-                    let finalized = finalize_segment_with_drop_accounting(
-                        segment,
-                        "utc_day_barrier",
-                        &provenance,
-                        &manifest_tx,
-                        &runtime_stats,
-                    );
-                    match finalized {
-                        Ok(finalized) => finalized_segments.push(finalized),
-                        Err(error) => {
-                            stop_accepting_and_record_queued_drops(
-                                &accepting_commands,
-                                &rx,
-                                &queue_rows,
-                                &runtime_stats,
-                            );
-                            return Err(error);
-                        }
+                    *accepting_commands
+                        .lock()
+                        .expect("writer accepting-command mutex poisoned") = false;
+                    if expected_raw_epoch.is_none() {
+                        writer_epoch.set_close(&close);
                     }
-                }
-                if let Err(error) = manifest_tx
-                    .blocking_send(ManifestCommand::WriterDayFinalized {
-                        utc_day,
-                        source_kind: source_kind.clone(),
-                    })
-                    .map_err(|_| {
-                        io::Error::new(
-                            io::ErrorKind::BrokenPipe,
-                            "daily manifest owner channel closed during writer day finalize",
-                        )
-                    })
-                {
-                    stop_accepting_and_record_queued_drops(
-                        &accepting_commands,
-                        &rx,
-                        &queue_rows,
-                        &runtime_stats,
-                    );
-                    return Err(error.into());
+                    coordinated_close = Some(close);
+                    break;
                 }
             }
         }
@@ -3188,6 +9668,8 @@ fn source_writer_worker(
         source_kind,
         finalized_segments,
         stats,
+        coordinated_close,
+        observed_utc_ms: now_ms(),
     })
 }
 
@@ -3910,9 +10392,33 @@ async fn run_polymarket_source(
     deadline_ms: Option<i64>,
     discovery_wait_secs: u64,
     run_started: Instant,
+    control_rx: mpsc::Receiver<PolymarketSourceControl>,
+) -> Result<()> {
+    let mut spec = PolymarketSourceSpec::production();
+    spec.discovery_wait = Duration::from_secs(discovery_wait_secs);
+    run_polymarket_source_with_spec(
+        spec,
+        dataset_root,
+        sink,
+        collector_identity,
+        deadline_ms,
+        run_started,
+        control_rx,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_polymarket_source_with_spec(
+    spec: PolymarketSourceSpec,
+    dataset_root: PathBuf,
+    sink: SourceEventSink,
+    collector_identity: CollectorIdentity,
+    deadline_ms: Option<i64>,
+    run_started: Instant,
     mut control_rx: mpsc::Receiver<PolymarketSourceControl>,
 ) -> Result<()> {
-    let gamma = GammaClient::default();
+    let gamma = GammaClient::new(&spec.gamma_endpoint)?;
     let deadline = deadline_ms.map(|deadline_ms| {
         Instant::now()
             + Duration::from_millis(
@@ -3926,20 +10432,24 @@ async fn run_polymarket_source(
     let mut dedupe = LifecycleFingerprintSets::with_limit(POLYMARKET_FINGERPRINTS_PER_LIFECYCLE);
     let mut dedupe_restored = false;
     while deadline_ms.is_none_or(|deadline_ms| now_ms() < deadline_ms) {
-        let discovery =
-            match discover_initial_polymarket_context(&gamma, discovery_wait_secs, &mut control_rx)
-                .await
-            {
-                Ok(Some(discovery)) => discovery,
-                Ok(None) => return Ok(()),
-                Err(err) => {
-                    record_gap(&sink.gaps, format!("polymarket_discovery_source_gap:{err}"));
-                    if !wait_for_source_recovery(&mut recovery, &sink, deadline).await {
-                        break;
-                    }
-                    continue;
+        let discovery = match discover_initial_polymarket_context(
+            &gamma,
+            spec.discovery_wait,
+            spec.discovery_retry_delay,
+            &mut control_rx,
+        )
+        .await
+        {
+            Ok(Some(discovery)) => discovery,
+            Ok(None) => return Ok(()),
+            Err(err) => {
+                record_gap(&sink.gaps, format!("polymarket_discovery_source_gap:{err}"));
+                if !wait_for_source_recovery(&mut recovery, &sink, deadline).await {
+                    break;
                 }
-            };
+                continue;
+            }
+        };
         if !dedupe_restored {
             let dataset_root = dataset_root.clone();
             let lifecycles = expected_lifecycle_slugs(&discovery);
@@ -3975,11 +10485,15 @@ async fn run_polymarket_source(
                 .map_err(operator_dedupe_error)?;
         }
         let mut market_runtime = PolymarketDrainRuntime::new(
-            format!("{MARKET_WS_ENDPOINT}/ws/market"),
-            bounded_ws_config(),
+            spec.market_ws_endpoint.clone(),
+            spec.ws_config.clone(),
             sink.inflight_budget.clone(),
         )?;
-        let mut context = PolymarketProcessingContext::new(discovery.clone());
+        let mut context = PolymarketProcessingContext::new_with_timeouts(
+            discovery.clone(),
+            spec.first_event_timeout,
+            spec.freshness_timeout,
+        );
         let collected = collect_polymarket_single_receiver(
             discovery,
             &mut context,
@@ -3992,7 +10506,8 @@ async fn run_polymarket_source(
             &mut dedupe,
             &mut recovery,
             &mut control_rx,
-            discovery_wait_secs,
+            spec.discovery_wait,
+            spec.discovery_retry_delay,
         )
         .await;
         let collected = match collected {
@@ -4056,10 +10571,11 @@ fn market_source_error_is_retryable(error: &(dyn Error + 'static)) -> bool {
 
 async fn discover_initial_polymarket_context(
     gamma: &GammaClient,
-    discovery_wait_secs: u64,
+    discovery_wait: Duration,
+    discovery_retry_delay: Duration,
     control_rx: &mut mpsc::Receiver<PolymarketSourceControl>,
 ) -> Result<Option<BtcUpdownDiscovery>> {
-    let discovery = discover_markets_with_wait(gamma, discovery_wait_secs);
+    let discovery = discover_markets_with_wait(gamma, discovery_wait, discovery_retry_delay);
     tokio::pin!(discovery);
     loop {
         tokio::select! {
@@ -4094,15 +10610,25 @@ struct PolymarketProcessingContext {
 }
 
 impl PolymarketProcessingContext {
+    #[cfg(test)]
     fn new(discovery: BtcUpdownDiscovery) -> Self {
+        Self::new_with_timeouts(
+            discovery,
+            Duration::from_secs(MARKET_FIRST_EVENT_TIMEOUT_SECS),
+            Duration::from_secs(MARKET_FRESHNESS_TIMEOUT_SECS),
+        )
+    }
+
+    fn new_with_timeouts(
+        discovery: BtcUpdownDiscovery,
+        first_event_timeout: Duration,
+        freshness_timeout: Duration,
+    ) -> Self {
         let asset_to_slug = discovery_asset_to_slug(&discovery);
         Self {
             discovery,
             asset_to_slug,
-            freshness: MarketAssetFreshnessWatchdog::new(
-                Duration::from_secs(MARKET_FIRST_EVENT_TIMEOUT_SECS),
-                Duration::from_secs(MARKET_FRESHNESS_TIMEOUT_SECS),
-            ),
+            freshness: MarketAssetFreshnessWatchdog::new(first_event_timeout, freshness_timeout),
             current_market_resolved: false,
         }
     }
@@ -4358,6 +10884,7 @@ async fn process_polymarket_budgeted_message(
             prepared.push(InflightRawEvent {
                 event,
                 control: None,
+                raw_day_permit: None,
                 _source_recv_monotonic_ms: monotonic_ms(run_started),
                 _reservation: Some(reservation),
             });
@@ -4935,7 +11462,8 @@ async fn collect_polymarket_single_receiver(
     dedupe: &mut LifecycleFingerprintSets,
     recovery: &mut SourceRecoverySupervisor,
     control_rx: &mut mpsc::Receiver<PolymarketSourceControl>,
-    discovery_wait_secs: u64,
+    discovery_wait: Duration,
+    discovery_retry_delay: Duration,
 ) -> Result<()> {
     install_polymarket_context(
         discovery,
@@ -5131,7 +11659,7 @@ async fn collect_polymarket_single_receiver(
             rollover_retry_at = None;
             let gamma = gamma.clone();
             rollover_discovery_tasks.spawn(async move {
-                discover_markets_with_wait(&gamma, discovery_wait_secs).await
+                discover_markets_with_wait(&gamma, discovery_wait, discovery_retry_delay).await
             });
         }
         if let Some(result) = rollover_discovery_tasks.try_join_next() {
@@ -5283,7 +11811,7 @@ fn record_polymarket_fanout_drop(
 async fn send_polymarket_events_atomically<F>(
     sink: &SourceEventSink,
     recv_time_utc_ms: i64,
-    events: Vec<InflightRawEvent>,
+    mut events: Vec<InflightRawEvent>,
     commit: F,
 ) -> Result<()>
 where
@@ -5310,8 +11838,23 @@ where
             .iter()
             .all(|event| event.event.recv_time_utc_ms == recv_time_utc_ms)
     );
+    let gate = sink
+        .source_queue_backpressure
+        .raw_day_gate()
+        .ok_or_else(|| {
+            invalid_data("raw-day gate missing from production Polymarket enqueue path")
+        })?;
+    let raw_enqueue = gate
+        .begin_event_enqueue("polymarket", recv_time_utc_ms)
+        .await?;
+    let raw_day_permit = match &raw_enqueue {
+        RawDayEnqueueDecision::Permit(enqueue) => Some(enqueue.permit.clone()),
+        RawDayEnqueueDecision::Defer(_) => None,
+    };
+    for event in &mut events {
+        event.raw_day_permit = raw_day_permit.clone();
+    }
     let count = events.len();
-    let _enqueue_guard = sink.enqueue_lock.lock().await;
     if count > sink.tx.max_capacity() {
         record_polymarket_fanout_drop(sink, recv_time_utc_ms, market_rows, metadata_rows);
         let reason = format!(
@@ -5321,6 +11864,21 @@ where
         record_gap_at(&sink.gaps, recv_time_utc_ms, reason.clone());
         return Err(invalid_data(reason).into());
     }
+    if let RawDayEnqueueDecision::Defer(epoch) = &raw_enqueue {
+        if let Err(error) = commit() {
+            record_polymarket_fanout_drop(sink, recv_time_utc_ms, market_rows, metadata_rows);
+            record_gap_at(
+                &sink.gaps,
+                recv_time_utc_ms,
+                format!("polymarket_atomic_fanout_commit_failed:{error}"),
+            );
+            return Err(error);
+        }
+        sink.source_queue_backpressure
+            .defer_raw_batch("polymarket", epoch.clone(), events)?;
+        return Ok(());
+    }
+    let _enqueue_guard = sink.enqueue_lock.lock().await;
     let permits = match sink.tx.try_reserve_many(count) {
         Ok(permits) => permits,
         Err(mpsc::error::TrySendError::Full(())) => {
@@ -6209,6 +12767,25 @@ async fn run_rtds_source(
     deadline: Option<Instant>,
     run_started: Instant,
 ) -> Result<()> {
+    run_rtds_source_with_spec(
+        RtdsSourceSpec::production(),
+        dataset_root,
+        sink,
+        collector_identity,
+        deadline,
+        run_started,
+    )
+    .await
+}
+
+async fn run_rtds_source_with_spec(
+    spec: RtdsSourceSpec,
+    dataset_root: PathBuf,
+    sink: SourceEventSink,
+    collector_identity: CollectorIdentity,
+    deadline: Option<Instant>,
+    run_started: Instant,
+) -> Result<()> {
     let restore_time_ms = now_ms();
     let mut dedupe =
         tokio::task::spawn_blocking(move || restore_rtds_dedupe(&dataset_root, restore_time_ms))
@@ -6224,15 +12801,15 @@ async fn run_rtds_source(
                 ))
             })?;
     let subscription = Subscription::chainlink_prices(Some("btc/usd".to_owned()));
-    let mut runtime = RtdsSdkRuntime::new(RTDS_WS_ENDPOINT.to_owned(), bounded_rtds_ws_config())?;
-    runtime.wait_connected(Duration::from_secs(20)).await?;
+    let mut runtime = RtdsSdkRuntime::new(spec.endpoint.clone(), spec.ws_config.clone())?;
+    runtime.wait_connected(spec.connect_timeout).await?;
     runtime
-        .subscribe(subscription, Duration::from_secs(3))
+        .subscribe(subscription, spec.subscribe_timeout)
         .await?;
     let mut recorded_generation = runtime.connection_generation();
 
     'source: loop {
-        let freshness_deadline = Instant::now() + Duration::from_secs(RTDS_FRESHNESS_TIMEOUT_SECS);
+        let freshness_deadline = Instant::now() + spec.freshness_timeout;
         loop {
             match wait_for_fresh_rtds_message(
                 &mut runtime,
@@ -6283,8 +12860,7 @@ async fn run_rtds_source(
             .minimum_recovery_generation()
             .map_err(invalid_data)?;
         let mut reconnect_generation = base_generation;
-        let episode_deadline =
-            Instant::now() + Duration::from_secs(RTDS_FRESHNESS_EPISODE_MAX_SECS);
+        let episode_deadline = Instant::now() + spec.freshness_episode_timeout;
 
         loop {
             let current_generation = sync_rtds_episode_connection(
@@ -6307,8 +12883,11 @@ async fn run_rtds_source(
                     "rtds_generation_reconnect_requested:generation={current_generation}:attempted={ticket_attempted}:published={ticket_published}"
                 ),
             );
-            let mut generation_deadline =
-                rtds_generation_observation_deadline(Instant::now(), episode_deadline);
+            let mut generation_deadline = rtds_generation_observation_deadline(
+                Instant::now(),
+                episode_deadline,
+                spec.reconnect_window,
+            );
 
             loop {
                 match wait_for_fresh_rtds_message(
@@ -6353,6 +12932,7 @@ async fn run_rtds_source(
                             generation_deadline = rtds_generation_observation_deadline(
                                 Instant::now(),
                                 episode_deadline,
+                                spec.reconnect_window,
                             );
                         }
                     }
@@ -6436,8 +13016,12 @@ fn sync_rtds_episode_connection(
     Ok(generation)
 }
 
-fn rtds_generation_observation_deadline(now: Instant, episode_deadline: Instant) -> Instant {
-    (now + Duration::from_secs(RTDS_RECONNECT_WINDOW_SECS)).min(episode_deadline)
+fn rtds_generation_observation_deadline(
+    now: Instant,
+    episode_deadline: Instant,
+    reconnect_window: Duration,
+) -> Instant {
+    (now + reconnect_window).min(episode_deadline)
 }
 
 fn record_rtds_generation_advance(
@@ -7397,11 +13981,13 @@ fn restore_binance_aggtrade_recovery(
         }
         if state == "open" {
             overlay_binance_continuity_from_day(day_dir, &mut continuity)?;
-            add_manifest_operational_counters(
-                day_dir,
-                &mut manifest,
-                &required_source_counter_defaults(),
-            )?;
+            if manifest_collection_day_coverage(&manifest)?.is_some() {
+                add_manifest_operational_counters(
+                    day_dir,
+                    &mut manifest,
+                    &required_source_counter_defaults(),
+                )?;
+            }
             close_reconciled_day_manifest(day_dir, &mut manifest, &continuity)?;
         }
     }
@@ -8234,7 +14820,8 @@ fn binance_ws_payload(value: &Value) -> &Value {
 
 async fn discover_markets_with_wait(
     gamma: &GammaClient,
-    wait_secs: u64,
+    wait: Duration,
+    retry_delay: Duration,
 ) -> Result<BtcUpdownDiscovery> {
     let started_ms = now_ms();
     let final_error = loop {
@@ -8245,15 +14832,17 @@ async fn discover_markets_with_wait(
             Ok(discovery) => return Ok(discovery),
             Err(err) => {
                 let last_error = format!("{err:?}");
-                if now_ms().saturating_sub(started_ms) >= (wait_secs * 1000) as i64 {
+                let wait_ms = i64::try_from(wait.as_millis()).unwrap_or(i64::MAX);
+                if now_ms().saturating_sub(started_ms) >= wait_ms {
                     break last_error;
                 }
-                sleep(Duration::from_secs(10)).await;
+                sleep(retry_delay).await;
             }
         }
     };
     Err(format!(
-        "btc-updown-5m current discovery failed after wait_secs={wait_secs}: {final_error}"
+        "btc-updown-5m current discovery failed after wait_secs={}: {final_error}",
+        wait.as_secs()
     )
     .into())
 }
@@ -8299,9 +14888,18 @@ fn bounded_rtds_ws_config() -> WsConfig {
 }
 
 async fn send_event(sink: &SourceEventSink, run_started: Instant, event: RawEvent) -> Result<()> {
-    let _enqueue_guard = sink.enqueue_lock.lock().await;
     let source_kind = event.source_kind.clone();
     let recv_time_utc_ms = event.recv_time_utc_ms;
+    let gate = sink
+        .source_queue_backpressure
+        .raw_day_gate()
+        .ok_or_else(|| {
+            invalid_data(format!(
+                "raw-day gate missing from production enqueue path: source={source_kind}"
+            ))
+        })?;
+    let producer = logical_producer_for_source_kind(&source_kind)?;
+    let raw_enqueue = gate.begin_event_enqueue(producer, recv_time_utc_ms).await?;
     let owned_bytes = owned_event_bytes(&event);
     if owned_bytes > MAX_TYPED_ROW_BYTES {
         let gap = format!(
@@ -8334,9 +14932,22 @@ async fn send_event(sink: &SourceEventSink, run_started: Instant, event: RawEven
     let inflight_event = InflightRawEvent {
         event,
         control: None,
+        raw_day_permit: match &raw_enqueue {
+            RawDayEnqueueDecision::Permit(enqueue) => Some(enqueue.permit.clone()),
+            RawDayEnqueueDecision::Defer(_) => None,
+        },
         _source_recv_monotonic_ms: monotonic_ms(run_started),
         _reservation: Some(reservation),
     };
+    if let RawDayEnqueueDecision::Defer(epoch) = &raw_enqueue {
+        sink.source_queue_backpressure.defer_raw_batch(
+            producer,
+            epoch.clone(),
+            vec![inflight_event],
+        )?;
+        return Ok(());
+    }
+    let _enqueue_guard = sink.enqueue_lock.lock().await;
     match sink.tx.try_send(inflight_event) {
         Ok(()) => Ok(()),
         Err(mpsc::error::TrySendError::Full(inflight_event)) => {
@@ -8404,6 +15015,7 @@ async fn send_ingress_control(
             parquet_raw_source_kind: "__ingress_control".to_owned(),
         },
         control: Some(control),
+        raw_day_permit: None,
         _source_recv_monotonic_ms: monotonic_ms(run_started),
         _reservation: None,
     };
@@ -8436,18 +15048,31 @@ async fn send_day_barrier(
     sink: &SourceEventSink,
     run_started: Instant,
     producer: &str,
-    utc_day: String,
-) -> Result<()> {
+    close: RawDayClose,
+) -> Result<DayBarrierRelease> {
+    let (reply_tx, reply_rx) = oneshot::channel();
     send_ingress_control(
         sink,
         run_started,
         IngressControl::DayBarrier {
             producer: producer.to_owned(),
-            utc_day,
+            close,
+            reply: reply_tx,
         },
         "utc_day_barrier",
     )
-    .await
+    .await?;
+    match reply_rx.await {
+        Ok(Ok(release)) => Ok(release),
+        Ok(Err(error)) => Err(invalid_data(format!(
+            "producer day barrier failed before coordinated release: producer={producer} error={error}"
+        ))
+        .into()),
+        Err(_) => Err(invalid_data(format!(
+            "producer day barrier reply dropped: producer={producer}"
+        ))
+        .into()),
+    }
 }
 
 async fn send_source_hour_finalize(
@@ -9066,6 +15691,56 @@ struct CollectorIdentity {
     region: String,
 }
 
+#[derive(Clone)]
+struct PolymarketSourceSpec {
+    gamma_endpoint: String,
+    market_ws_endpoint: String,
+    ws_config: WsConfig,
+    discovery_wait: Duration,
+    discovery_retry_delay: Duration,
+    first_event_timeout: Duration,
+    freshness_timeout: Duration,
+}
+
+impl PolymarketSourceSpec {
+    fn production() -> Self {
+        Self {
+            gamma_endpoint: "https://gamma-api.polymarket.com".to_owned(),
+            market_ws_endpoint: format!("{MARKET_WS_ENDPOINT}/ws/market"),
+            ws_config: bounded_ws_config(),
+            discovery_wait: Duration::from_secs(DEFAULT_DISCOVERY_WAIT_SECS),
+            discovery_retry_delay: Duration::from_secs(10),
+            first_event_timeout: Duration::from_secs(MARKET_FIRST_EVENT_TIMEOUT_SECS),
+            freshness_timeout: Duration::from_secs(MARKET_FRESHNESS_TIMEOUT_SECS),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct RtdsSourceSpec {
+    endpoint: String,
+    ws_config: WsConfig,
+    connect_timeout: Duration,
+    subscribe_timeout: Duration,
+    freshness_timeout: Duration,
+    reconnect_window: Duration,
+    freshness_episode_timeout: Duration,
+}
+
+impl RtdsSourceSpec {
+    fn production() -> Self {
+        Self {
+            endpoint: RTDS_WS_ENDPOINT.to_owned(),
+            ws_config: bounded_rtds_ws_config(),
+            connect_timeout: Duration::from_secs(20),
+            subscribe_timeout: Duration::from_secs(3),
+            freshness_timeout: Duration::from_secs(RTDS_FRESHNESS_TIMEOUT_SECS),
+            reconnect_window: Duration::from_secs(RTDS_RECONNECT_WINDOW_SECS),
+            freshness_episode_timeout: Duration::from_secs(RTDS_FRESHNESS_EPISODE_MAX_SECS),
+        }
+    }
+}
+
 struct BinanceWsSpec {
     source_kind: String,
     default_event_type: String,
@@ -9108,26 +15783,656 @@ struct BinanceDepthUpdateContext {
     pending_snapshot_trigger_reason: Option<String>,
 }
 
-type SourceTaskHandle = (&'static str, tokio::task::JoinHandle<Result<()>>);
+enum SourceWrapperTerminalClass {
+    ExistingInnerReturn,
+    CleanReturn,
+    CoordinatedStop(RuntimeCloseIdentity),
+    Unclean(RuntimeCloseCause),
+}
+
+struct SourceWrapperLifecycleObservation {
+    observed_utc_ms: i64,
+    epoch: Option<RuntimeEpoch>,
+    lifecycle_record_error: Option<String>,
+    replace_existing: bool,
+    termination_kind: SourceTaskTerminationKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SourceTaskObservation {
+    observed_utc_ms: i64,
+    epoch: Option<RuntimeEpoch>,
+    inner_source_returned: bool,
+    inner_result_error: Option<String>,
+    lifecycle_record_error: Option<String>,
+}
+
+#[derive(Debug)]
+struct InnerSourceReturnError {
+    source_kind: &'static str,
+    message: String,
+}
+
+impl std::fmt::Display for InnerSourceReturnError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "inner source returned error: source={} error={}",
+            self.source_kind, self.message
+        )
+    }
+}
+
+impl Error for InnerSourceReturnError {}
+
+#[derive(Debug)]
+struct CoordinatedSourceStop {
+    producer: String,
+    close: RuntimeCloseIdentity,
+}
+
+impl std::fmt::Display for CoordinatedSourceStop {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "coordinated source stop: producer={} close={:?}",
+            self.producer, self.close
+        )
+    }
+}
+
+impl Error for CoordinatedSourceStop {}
+
+#[derive(Clone, Default)]
+struct SourceTaskObservationCell {
+    observation: Arc<Mutex<Option<SourceTaskObservation>>>,
+}
+
+impl SourceTaskObservationCell {
+    fn record_inner_return(
+        &self,
+        observed_utc_ms: i64,
+        epoch: Option<RuntimeEpoch>,
+        inner_result_error: Option<String>,
+        lifecycle_record_error: Option<String>,
+    ) {
+        let mut observation = self
+            .observation
+            .lock()
+            .expect("source-task observation mutex poisoned");
+        if observation.is_none() {
+            *observation = Some(SourceTaskObservation {
+                observed_utc_ms,
+                epoch,
+                inner_source_returned: true,
+                inner_result_error,
+                lifecycle_record_error,
+            });
+        }
+    }
+
+    fn record_wrapper_return(
+        &self,
+        observed_utc_ms: i64,
+        epoch: Option<RuntimeEpoch>,
+        lifecycle_record_error: Option<String>,
+        replace_existing: bool,
+    ) -> SourceTaskObservation {
+        let mut observation = self
+            .observation
+            .lock()
+            .expect("source-task observation mutex poisoned");
+        if let Some(existing) = observation.as_mut() {
+            if replace_existing {
+                *existing = SourceTaskObservation {
+                    observed_utc_ms,
+                    epoch,
+                    inner_source_returned: false,
+                    inner_result_error: None,
+                    lifecycle_record_error,
+                };
+                return existing.clone();
+            }
+            if existing.lifecycle_record_error.is_none() {
+                existing.lifecycle_record_error = lifecycle_record_error;
+            }
+            return existing.clone();
+        }
+        observation
+            .insert(SourceTaskObservation {
+                observed_utc_ms,
+                epoch,
+                inner_source_returned: false,
+                inner_result_error: None,
+                lifecycle_record_error,
+            })
+            .clone()
+    }
+
+    fn snapshot(&self) -> Option<SourceTaskObservation> {
+        self.observation
+            .lock()
+            .expect("source-task observation mutex poisoned")
+            .clone()
+    }
+}
+
+async fn observe_inner_source_return<F>(
+    source_kind: &'static str,
+    source: F,
+    observation: SourceTaskObservationCell,
+    gate: Arc<RawDayGate>,
+) -> Result<()>
+where
+    F: Future<Output = Result<()>>,
+{
+    let result = source.await;
+    let lifecycle = gate.observe_source_terminal_now(
+        RuntimeCloseCause::SourceInnerReturn { source_kind },
+        None,
+        None,
+    );
+    let inner_result_error = result.as_ref().err().map(ToString::to_string);
+    observation.record_inner_return(
+        lifecycle.observed_utc_ms,
+        lifecycle.epoch,
+        inner_result_error.clone(),
+        lifecycle.lifecycle_record_error,
+    );
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => Err(InnerSourceReturnError {
+            source_kind,
+            message: error.to_string(),
+        }
+        .into()),
+    }
+}
+
+struct SourceTaskReport {
+    source_kind: &'static str,
+    observation: SourceTaskObservation,
+    termination_kind: SourceTaskTerminationKind,
+    result: Result<()>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SourceAbortPermit {
+    source_kind: &'static str,
+    close: RuntimeCloseIdentity,
+    observed_utc_ms: i64,
+    epoch: RuntimeEpoch,
+}
+
+struct SourceTaskHandle {
+    source_kind: &'static str,
+    join: tokio::task::JoinHandle<SourceTaskReport>,
+    observation: SourceTaskObservationCell,
+    gate: Arc<RawDayGate>,
+    abort_permit: Option<SourceAbortPermit>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceTaskTerminationKind {
+    ReliableReturn,
+    CoordinatedAbort,
+    Unclean,
+}
+
+struct SourceTaskTermination {
+    source_kind: &'static str,
+    observed_utc_ms: Option<i64>,
+    epoch: Option<RuntimeEpoch>,
+    kind: SourceTaskTerminationKind,
+    error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SourceControlStopFact {
+    Acked,
+    Failed(String),
+}
+
+struct SourceShutdownAssessment {
+    unclean: bool,
+    error: Option<String>,
+}
+
+fn assess_source_shutdown(
+    termination: &SourceTaskTermination,
+    control_stop: Option<&SourceControlStopFact>,
+    close: &RuntimeCloseIdentity,
+) -> SourceShutdownAssessment {
+    let lifecycle_proven = termination.observed_utc_ms.is_some()
+        && termination.epoch.as_ref()
+            == Some(&RuntimeEpoch {
+                utc_day: close.utc_day.clone(),
+                generation: close.generation,
+            });
+    match termination.kind {
+        SourceTaskTerminationKind::ReliableReturn if lifecycle_proven => SourceShutdownAssessment {
+            unclean: false,
+            error: termination
+                .error
+                .as_ref()
+                .map(|error| format!("source_task_error:{}:{error}", termination.source_kind)),
+        },
+        SourceTaskTerminationKind::CoordinatedAbort if lifecycle_proven => {
+            SourceShutdownAssessment {
+                unclean: false,
+                error: termination.error.as_ref().map(|error| {
+                    format!(
+                        "source_task_coordinated_stop_error:{}:{error}",
+                        termination.source_kind
+                    )
+                }),
+            }
+        }
+        SourceTaskTerminationKind::ReliableReturn
+        | SourceTaskTerminationKind::CoordinatedAbort
+        | SourceTaskTerminationKind::Unclean => {
+            let termination_detail = termination
+                .error
+                .as_deref()
+                .unwrap_or("missing reliable lifecycle proof");
+            let control_detail = match control_stop {
+                Some(SourceControlStopFact::Failed(error)) => {
+                    format!("; control_stop_failed:{error}")
+                }
+                Some(SourceControlStopFact::Acked) | None => String::new(),
+            };
+            SourceShutdownAssessment {
+                unclean: true,
+                error: Some(format!(
+                    "source_task_unclean:{}:{termination_detail}{control_detail}",
+                    termination.source_kind
+                )),
+            }
+        }
+    }
+}
+
+async fn await_source_control_stop_fact(
+    reply: oneshot::Receiver<std::result::Result<(), String>>,
+    deadline: Instant,
+    operation: &'static str,
+) -> SourceControlStopFact {
+    match timeout(deadline.saturating_duration_since(Instant::now()), reply).await {
+        Ok(Ok(Ok(()))) => SourceControlStopFact::Acked,
+        Ok(Ok(Err(error))) => SourceControlStopFact::Failed(format!("{operation}_failed:{error}")),
+        Ok(Err(_)) => SourceControlStopFact::Failed(format!("{operation}_reply_dropped")),
+        Err(_) => SourceControlStopFact::Failed(format!("{operation}_reply_timeout")),
+    }
+}
+
+impl SourceTaskHandle {
+    #[cfg(test)]
+    fn spawn<F>(
+        source_kind: &'static str,
+        wrapper: F,
+        observation: SourceTaskObservationCell,
+        gate: Arc<RawDayGate>,
+    ) -> Self
+    where
+        F: Future<Output = Result<()>> + Send + 'static,
+    {
+        Self::spawn_inner(source_kind, wrapper, observation, gate, None)
+    }
+
+    fn spawn_with_dataset_lease<F>(
+        source_kind: &'static str,
+        wrapper: F,
+        observation: SourceTaskObservationCell,
+        gate: Arc<RawDayGate>,
+        dataset_lease: Arc<File>,
+    ) -> Self
+    where
+        F: Future<Output = Result<()>> + Send + 'static,
+    {
+        Self::spawn_inner(source_kind, wrapper, observation, gate, Some(dataset_lease))
+    }
+
+    fn spawn_inner<F>(
+        source_kind: &'static str,
+        wrapper: F,
+        observation: SourceTaskObservationCell,
+        gate: Arc<RawDayGate>,
+        dataset_lease: Option<Arc<File>>,
+    ) -> Self
+    where
+        F: Future<Output = Result<()>> + Send + 'static,
+    {
+        let task_observation = observation.clone();
+        let task_gate = Arc::clone(&gate);
+        let join = tokio::spawn(async move {
+            let _dataset_lease = dataset_lease;
+            match std::panic::AssertUnwindSafe(wrapper).catch_unwind().await {
+                Ok(result) => {
+                    let existing = task_observation.snapshot();
+                    let lifecycle =
+                        task_gate.observe_source_wrapper_terminal_now(source_kind, || {
+                            let consistent_inner = existing.as_ref().is_some_and(|observed| {
+                                observed.inner_source_returned
+                                    && observed.lifecycle_record_error.is_none()
+                                    && match result.as_ref() {
+                                        Ok(()) => observed.inner_result_error.is_none(),
+                                        Err(error) => error
+                                            .downcast_ref::<InnerSourceReturnError>()
+                                            .is_some_and(|inner| {
+                                                inner.source_kind == source_kind
+                                                    && observed.inner_result_error.is_some()
+                                            }),
+                                    }
+                            });
+                            if consistent_inner {
+                                return SourceWrapperTerminalClass::ExistingInnerReturn;
+                            }
+                            match result.as_ref() {
+                                Ok(()) if existing.is_none() => {
+                                    SourceWrapperTerminalClass::CleanReturn
+                                }
+                                Err(error) if existing.is_none() => error
+                                    .downcast_ref::<CoordinatedSourceStop>()
+                                    .filter(|stop| {
+                                        logical_producer_for_source_task(source_kind).ok()
+                                            == Some(stop.producer.as_str())
+                                    })
+                                    .map_or_else(
+                                        || {
+                                            SourceWrapperTerminalClass::Unclean(
+                                                RuntimeCloseCause::SourceWrapperFailure {
+                                                    source_kind,
+                                                },
+                                            )
+                                        },
+                                        |stop| {
+                                            SourceWrapperTerminalClass::CoordinatedStop(
+                                                stop.close.clone(),
+                                            )
+                                        },
+                                    ),
+                                _ => SourceWrapperTerminalClass::Unclean(
+                                    RuntimeCloseCause::SourceWrapperFailure { source_kind },
+                                ),
+                            }
+                        });
+                    let observation = task_observation.record_wrapper_return(
+                        lifecycle.observed_utc_ms,
+                        lifecycle.epoch,
+                        lifecycle.lifecycle_record_error,
+                        lifecycle.replace_existing,
+                    );
+                    SourceTaskReport {
+                        source_kind,
+                        observation,
+                        termination_kind: lifecycle.termination_kind,
+                        result,
+                    }
+                }
+                Err(payload) => {
+                    let lifecycle =
+                        task_gate.observe_source_wrapper_terminal_now(source_kind, || {
+                            SourceWrapperTerminalClass::Unclean(RuntimeCloseCause::SourcePanic {
+                                source_kind,
+                            })
+                        });
+                    task_observation.record_wrapper_return(
+                        lifecycle.observed_utc_ms,
+                        lifecycle.epoch,
+                        lifecycle.lifecycle_record_error,
+                        lifecycle.replace_existing,
+                    );
+                    std::panic::resume_unwind(payload)
+                }
+            }
+        });
+        Self {
+            source_kind,
+            join,
+            observation,
+            gate,
+            abort_permit: None,
+        }
+    }
+
+    fn is_finished(&self) -> bool {
+        self.join.is_finished()
+    }
+
+    fn abort_without_permit(&self) {
+        let lifecycle = self.gate.observe_source_terminal_now(
+            RuntimeCloseCause::SourceAbortWithoutPermit {
+                source_kind: self.source_kind,
+            },
+            Some(RuntimeCloseCause::SourceAbortWithoutPermit {
+                source_kind: self.source_kind,
+            }),
+            None,
+        );
+        self.observation.record_wrapper_return(
+            lifecycle.observed_utc_ms,
+            lifecycle.epoch,
+            lifecycle.lifecycle_record_error,
+            true,
+        );
+        self.join.abort();
+    }
+
+    fn abort_with_permit(&mut self, close: &RuntimeCloseIdentity) -> Result<()> {
+        if self.abort_permit.is_some() {
+            return Err(invalid_data(format!(
+                "source abort permit already registered: source={} close={close:?}",
+                self.source_kind
+            ))
+            .into());
+        }
+        let (observed_utc_ms, epoch) = self.gate.register_source_abort_permit_now(close)?;
+        self.abort_permit = Some(SourceAbortPermit {
+            source_kind: self.source_kind,
+            close: close.clone(),
+            observed_utc_ms,
+            epoch,
+        });
+        self.join.abort();
+        Ok(())
+    }
+
+    async fn await_termination(self, close: &RuntimeCloseIdentity) -> SourceTaskTermination {
+        let SourceTaskHandle {
+            source_kind,
+            join,
+            observation,
+            gate: _,
+            abort_permit,
+        } = self;
+        match join.await {
+            Ok(report) => {
+                let identity_matches = report.source_kind == source_kind;
+                let coordinated_stop_matches = report.result.as_ref().err().is_some_and(|error| {
+                    error
+                        .downcast_ref::<CoordinatedSourceStop>()
+                        .is_some_and(|stop| {
+                            logical_producer_for_source_task(source_kind).ok()
+                                == Some(stop.producer.as_str())
+                                && stop.close == *close
+                        })
+                });
+                let kind = if !identity_matches
+                    || (report.termination_kind == SourceTaskTerminationKind::CoordinatedAbort
+                        && !coordinated_stop_matches)
+                {
+                    SourceTaskTerminationKind::Unclean
+                } else {
+                    report.termination_kind
+                };
+                let lifecycle_error = report.observation.lifecycle_record_error.clone();
+                SourceTaskTermination {
+                    source_kind,
+                    observed_utc_ms: Some(report.observation.observed_utc_ms),
+                    epoch: report.observation.epoch,
+                    kind,
+                    error: match (report.result, lifecycle_error, kind) {
+                        (_, Some(error), _) => Some(error),
+                        (_, None, SourceTaskTerminationKind::CoordinatedAbort) => None,
+                        (_, None, SourceTaskTerminationKind::ReliableReturn) => {
+                            report.observation.inner_result_error
+                        }
+                        (Ok(()), None, _) if !identity_matches => Some(format!(
+                            "source task report identity mismatch: expected={source_kind} actual={}",
+                            report.source_kind
+                        )),
+                        (Ok(()), None, _) => Some(format!(
+                            "source wrapper ended without a reliable terminal proof: {source_kind}"
+                        )),
+                        (Err(error), None, _) => Some(error.to_string()),
+                    },
+                }
+            }
+            Err(error) if error.is_panic() => {
+                let observed = observation.snapshot();
+                SourceTaskTermination {
+                    source_kind,
+                    observed_utc_ms: observed.as_ref().map(|observed| observed.observed_utc_ms),
+                    epoch: observed
+                        .as_ref()
+                        .and_then(|observed| observed.epoch.clone()),
+                    kind: SourceTaskTerminationKind::Unclean,
+                    error: Some(
+                        observed
+                            .and_then(|observed| observed.lifecycle_record_error)
+                            .map_or_else(
+                                || error.to_string(),
+                                |record_error| {
+                                    format!("{error}; lifecycle_record_error:{record_error}")
+                                },
+                            ),
+                    ),
+                }
+            }
+            Err(error) if error.is_cancelled() => {
+                let permit_observation = abort_permit
+                    .as_ref()
+                    .filter(|permit| permit.source_kind == source_kind && permit.close == *close);
+                let permit_matches = permit_observation.is_some();
+                let inner = observation.snapshot();
+                let reliable_inner = permit_matches
+                    && inner.as_ref().is_some_and(|inner| {
+                        inner.inner_source_returned && inner.lifecycle_record_error.is_none()
+                    });
+                SourceTaskTermination {
+                    source_kind,
+                    observed_utc_ms: inner
+                        .as_ref()
+                        .map(|inner| inner.observed_utc_ms)
+                        .or_else(|| permit_observation.map(|permit| permit.observed_utc_ms)),
+                    epoch: inner
+                        .as_ref()
+                        .and_then(|inner| inner.epoch.clone())
+                        .or_else(|| permit_observation.map(|permit| permit.epoch.clone())),
+                    kind: if reliable_inner {
+                        SourceTaskTerminationKind::ReliableReturn
+                    } else if permit_matches {
+                        SourceTaskTerminationKind::CoordinatedAbort
+                    } else {
+                        SourceTaskTerminationKind::Unclean
+                    },
+                    error: if reliable_inner {
+                        inner.and_then(|inner| {
+                            inner.lifecycle_record_error.or(inner.inner_result_error)
+                        })
+                    } else {
+                        (!permit_matches).then(|| error.to_string())
+                    },
+                }
+            }
+            Err(error) => SourceTaskTermination {
+                source_kind,
+                observed_utc_ms: None,
+                epoch: None,
+                kind: SourceTaskTerminationKind::Unclean,
+                error: Some(error.to_string()),
+            },
+        }
+    }
+}
 
 fn finished_source_task(handles: &[SourceTaskHandle]) -> Option<&'static str> {
     handles
         .iter()
-        .find_map(|(source_kind, handle)| handle.is_finished().then_some(*source_kind))
+        .find_map(|handle| handle.is_finished().then_some(handle.source_kind))
+}
+
+fn source_task_ended_unexpectedly(source_kind: &str) -> String {
+    format!("source_task_ended_unexpectedly:{source_kind}")
 }
 
 struct SourceWriterHandle {
     tx: std::sync::mpsc::SyncSender<WriterCommand>,
     queue_rows: Arc<AtomicU64>,
     accepting_commands: Arc<Mutex<bool>>,
-    result_rx: std::sync::mpsc::Receiver<Result<SourceWriterOutput>>,
-    completed_result: Option<Result<SourceWriterOutput>>,
+    result_rx: std::sync::mpsc::Receiver<WriterTaskReport>,
+    completed_result: Option<WriterTaskReport>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[derive(Clone, Default)]
+struct WriterEpochCell {
+    epoch: Arc<Mutex<Option<RuntimeEpoch>>>,
+}
+
+impl WriterEpochCell {
+    fn set(&self, permit: &RawDayPermit) {
+        *self.epoch.lock().expect("writer epoch mutex poisoned") = Some(RuntimeEpoch {
+            utc_day: permit.utc_day.clone(),
+            generation: permit.generation,
+        });
+    }
+
+    fn set_close(&self, close: &RuntimeCloseIdentity) {
+        *self.epoch.lock().expect("writer epoch mutex poisoned") = Some(RuntimeEpoch {
+            utc_day: close.utc_day.clone(),
+            generation: close.generation,
+        });
+    }
+
+    fn snapshot(&self) -> Option<RuntimeEpoch> {
+        self.epoch
+            .lock()
+            .expect("writer epoch mutex poisoned")
+            .clone()
+    }
+}
+
+#[allow(clippy::large_enum_variant)]
+enum WriterTaskOutcome {
+    Returned(Result<SourceWriterOutput>),
+    Panicked(String),
+    MissingReport(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WriterTerminationKind {
+    CoordinatedClose,
+    ReliableReturn,
+    Unclean,
+}
+
+struct WriterTaskReport {
+    source_kind: String,
+    first_observed_utc_ms: i64,
+    worker_epoch: Option<RuntimeEpoch>,
+    lifecycle_epoch: Option<RuntimeEpoch>,
+    termination_kind: WriterTerminationKind,
+    lifecycle_close: Option<RuntimeCloseIdentity>,
+    lifecycle_record_error: Option<String>,
+    outcome: WriterTaskOutcome,
 }
 
 enum WriterCommand {
     Events(Vec<InflightRawEvent>),
     FinalizeHour { utc_hour: String },
-    FinalizeDay { utc_day: String },
+    FinalizeDay { close: RawDayClose },
+    Shutdown { close: RuntimeCloseIdentity },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -9135,12 +16440,15 @@ struct SourceWriterOutput {
     source_kind: String,
     finalized_segments: Vec<LiveFinalizedSegment>,
     stats: SourceWriterStats,
+    coordinated_close: Option<RuntimeCloseIdentity>,
+    observed_utc_ms: i64,
 }
 
 struct WriterStopOutcome {
     outputs: Vec<SourceWriterOutput>,
     errors: Vec<String>,
     all_terminal: bool,
+    all_close_proven: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -10201,6 +17509,8 @@ impl CoverageStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daily_manifest::DAILY_MANIFEST_FILE_NAME;
+    use crate::writer::sha256_file;
     use parquet::file::reader::{FileReader, SerializedFileReader};
     use polymarket_client_sdk_v2::clob::ws::WsMessage;
     use std::fs::File;
@@ -10208,6 +17518,3378 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_async;
+
+    struct StartupPollProbe {
+        polls: Arc<AtomicU64>,
+    }
+
+    impl Future for StartupPollProbe {
+        type Output = Result<()>;
+
+        fn poll(
+            self: Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    type StartupProducerProbe = (Arc<AtomicU64>, tokio::task::JoinHandle<Result<()>>);
+
+    fn startup_gate_fixture() -> (
+        mpsc::Receiver<StartupParticipant>,
+        StartupReleaseHandles,
+        Vec<StartupProducerProbe>,
+        Vec<oneshot::Receiver<StartupReleasePhase>>,
+    ) {
+        let (ready_tx, ready_rx) = mpsc::channel(STARTUP_READY_CHANNEL_CAPACITY);
+        let mut producer_releases = Vec::new();
+        let mut producer_probes = Vec::new();
+        for producer in LOGICAL_PRODUCERS {
+            let participant = StartupParticipant::producer(producer);
+            let (release_tx, release_rx) = oneshot::channel();
+            let polls = Arc::new(AtomicU64::new(0));
+            let handle = tokio::spawn(run_producer_after_startup_gate(
+                participant,
+                ready_tx.clone(),
+                release_rx,
+                StartupPollProbe {
+                    polls: Arc::clone(&polls),
+                },
+            ));
+            producer_releases.push(StartupReleaseSender {
+                participant,
+                sender: release_tx,
+            });
+            producer_probes.push((polls, handle));
+        }
+
+        let mut writer_releases = Vec::new();
+        let mut writer_receivers = Vec::new();
+        for source_kind in LIVE_SOURCES {
+            let participant = StartupParticipant::writer(source_kind);
+            ready_tx
+                .try_send(participant)
+                .expect("ten-slot startup ready channel must hold all mandatory readiness");
+            let (release_tx, release_rx) = oneshot::channel();
+            writer_releases.push(StartupReleaseSender {
+                participant,
+                sender: release_tx,
+            });
+            writer_receivers.push(release_rx);
+        }
+        drop(ready_tx);
+        (
+            ready_rx,
+            StartupReleaseHandles {
+                writers: writer_releases,
+                producers: producer_releases,
+            },
+            producer_probes,
+            writer_receivers,
+        )
+    }
+
+    #[test]
+    fn mandatory_producer_source_mapping_is_exact_and_bidirectional() {
+        let approved = [
+            (
+                "polymarket",
+                &["polymarket_market", "polymarket_market_metadata"][..],
+            ),
+            (
+                "polymarket_rtds",
+                &["polymarket_rtds_chainlink_btc_usd"][..],
+            ),
+            (
+                "binance_depth",
+                &["binance_depth_snapshot", "binance_depth_update"][..],
+            ),
+            ("binance_aggtrade", &["binance_aggtrade"][..]),
+        ];
+
+        validate_mandatory_producer_source_mapping().unwrap();
+        let mut mapped_sources = BTreeSet::new();
+        for (producer, expected_sources) in approved {
+            assert_eq!(producer_writer_sources(producer).unwrap(), expected_sources);
+            for source_kind in expected_sources {
+                assert!(mapped_sources.insert(*source_kind));
+                assert_eq!(
+                    logical_producer_for_source_kind(source_kind).unwrap(),
+                    producer
+                );
+            }
+        }
+        assert_eq!(
+            mapped_sources,
+            LIVE_SOURCES.iter().copied().collect::<BTreeSet<_>>()
+        );
+        assert_eq!(
+            expected_startup_participants(),
+            LOGICAL_PRODUCERS
+                .iter()
+                .map(|producer| StartupParticipant::producer(producer))
+                .chain(
+                    LIVE_SOURCES
+                        .iter()
+                        .map(|source_kind| StartupParticipant::writer(source_kind))
+                )
+                .collect()
+        );
+    }
+
+    fn test_manifest_owner(dataset_root: &Path, utc_day: &str) -> (ManifestOwnerState, PathBuf) {
+        let identity = test_daily_manifest_identity();
+        let day_dir = typed_raw_root(dataset_root).join(format!("utc_day={utc_day}"));
+        let manifest = reconcile_open_day_manifest(
+            &day_dir,
+            utc_day,
+            &identity,
+            &BinanceAggTradeContinuityState::default(),
+        )
+        .unwrap();
+        let mut owner = ManifestOwnerState::new(
+            dataset_root.to_path_buf(),
+            identity,
+            BinanceAggTradeContinuityState::default(),
+        );
+        owner
+            .insert_reconciled_manifest(utc_day.to_owned(), manifest)
+            .unwrap();
+        (owner, day_dir)
+    }
+
+    fn reactivated_manifest_owner(
+        dataset_root: &Path,
+        utc_day: &str,
+        first_started_utc_ms: i64,
+        last_started_utc_ms: i64,
+    ) -> (ManifestOwnerState, PathBuf) {
+        let (mut first_owner, day_dir) = test_manifest_owner(dataset_root, utc_day);
+        first_owner
+            .activate_initial(utc_day, first_started_utc_ms, INITIAL_RAW_DAY_GENERATION)
+            .unwrap();
+        drop(first_owner);
+
+        let (mut recovered_owner, recovered_day_dir) = test_manifest_owner(dataset_root, utc_day);
+        assert_eq!(recovered_day_dir, day_dir);
+        recovered_owner
+            .activate_initial(utc_day, last_started_utc_ms, INITIAL_RAW_DAY_GENERATION)
+            .unwrap();
+        (recovered_owner, day_dir)
+    }
+
+    fn manifest_coverage_value(day_dir: &Path) -> Value {
+        load_day_manifest(day_dir).unwrap().unwrap()["collection_day_coverage"].clone()
+    }
+
+    fn manifest_file_digest(day_dir: &Path) -> String {
+        sha256_file(&day_dir.join(DAILY_MANIFEST_FILE_NAME)).unwrap()
+    }
+
+    fn test_rollover_close(boundary_utc_ms: i64) -> RawDayClose {
+        RawDayClose {
+            utc_day: utc_day_string_from_ms(boundary_utc_ms - 1).unwrap(),
+            next_utc_day: utc_day_string_from_ms(boundary_utc_ms).unwrap(),
+            generation: INITIAL_RAW_DAY_GENERATION,
+            next_generation: INITIAL_RAW_DAY_GENERATION + 1,
+            close_id: 1,
+            boundary_utc_ms,
+        }
+    }
+
+    fn test_release_controller(
+        close: RawDayClose,
+    ) -> (
+        ProducerReleaseController,
+        watch::Receiver<ProducerReleasePhase>,
+    ) {
+        let (phase_tx, phase_rx) = watch::channel(ProducerReleasePhase::Held);
+        let (_ack_tx, ack_rx) = mpsc::channel(LOGICAL_PRODUCERS.len() * 2);
+        (
+            ProducerReleaseController {
+                close,
+                phase: ProducerReleasePhase::Held,
+                phase_tx,
+                ack_rx,
+                armed: BTreeSet::new(),
+                flushed: BTreeSet::new(),
+            },
+            phase_rx,
+        )
+    }
+
+    fn commit_test_manifest_activation(gate: &RawDayGate, close: &RawDayClose) {
+        assert!(
+            gate.commit_manifest_activation(close, None, || Ok(()))
+                .unwrap()
+        );
+    }
+
+    fn prepare_rollover_for_producer(
+        gate: &RawDayGate,
+        producer: &str,
+        utc_day: &str,
+        boundary_utc_ms: i64,
+    ) -> RawDayClose {
+        let close = gate.prepare_rollover(utc_day, boundary_utc_ms).unwrap();
+        for other in LOGICAL_PRODUCERS {
+            if *other != producer {
+                gate.register_source_fence(other, &close).unwrap();
+            }
+        }
+        close
+    }
+
+    async fn prepared_gate_fixture(
+        producer: &str,
+        boundary_utc_ms: i64,
+    ) -> (
+        Arc<SourceQueueBackpressureStats>,
+        Arc<RawDayGate>,
+        RawDayClose,
+    ) {
+        let gate = Arc::new(RawDayGate::new());
+        let utc_day = utc_day_string_from_ms(boundary_utc_ms.saturating_sub(1)).unwrap();
+        gate.activate_startup(utc_day.clone(), INITIAL_RAW_DAY_GENERATION)
+            .await
+            .unwrap();
+        let close = prepare_rollover_for_producer(&gate, producer, &utc_day, boundary_utc_ms);
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        stats.install_raw_day_gate(Arc::clone(&gate)).unwrap();
+        (stats, gate, close)
+    }
+
+    async fn install_active_raw_day_gate(
+        stats: &Arc<SourceQueueBackpressureStats>,
+        recv_time_utc_ms: i64,
+    ) -> Arc<RawDayGate> {
+        let gate = Arc::new(RawDayGate::new());
+        gate.activate_startup(
+            utc_day_string_from_ms(recv_time_utc_ms).unwrap(),
+            INITIAL_RAW_DAY_GENERATION,
+        )
+        .await
+        .unwrap();
+        stats.install_raw_day_gate(Arc::clone(&gate)).unwrap();
+        gate
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn startup_gate_collects_ten_ready_before_activation_and_first_source_poll() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let started_utc_ms = 1_783_987_201_000;
+        let utc_day = utc_day_string_from_ms(started_utc_ms).unwrap();
+        let (owner, day_dir) = test_manifest_owner(&dataset_root, &utc_day);
+        let (manifest_tx, manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
+        let (rollover_ready_tx, _rollover_ready_rx) = mpsc::channel(1);
+        let manifest_owner_handle =
+            tokio::spawn(run_manifest_owner(owner, manifest_rx, rollover_ready_tx));
+        let raw_day_gate = Arc::new(RawDayGate::new());
+        let (ready_rx, releases, producer_probes, writer_receivers) = startup_gate_fixture();
+
+        for (polls, _) in &producer_probes {
+            assert_eq!(polls.load(Ordering::SeqCst), 0);
+        }
+        activate_and_release_startup(
+            &manifest_tx,
+            Arc::clone(&raw_day_gate),
+            ready_rx,
+            releases,
+            utc_day,
+            ManifestActivationAckMode::Send,
+            None,
+            || started_utc_ms,
+        )
+        .await
+        .unwrap();
+
+        for receiver in writer_receivers {
+            receiver.await.unwrap();
+        }
+        for (polls, handle) in producer_probes {
+            handle.await.unwrap().unwrap();
+            assert_eq!(polls.load(Ordering::SeqCst), 1);
+        }
+        let manifest = load_day_manifest(&day_dir).unwrap().unwrap();
+        assert_eq!(manifest["collection_day_coverage"]["state"], "active");
+        assert_eq!(
+            manifest["collection_day_coverage"]["reactivated_within_day"],
+            false
+        );
+
+        manifest_owner_handle.abort();
+        let _ = manifest_owner_handle.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn startup_pre_rename_manifest_failure_keeps_disk_unmodified_and_converges() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let started_utc_ms = 1_783_987_201_000;
+        let utc_day = utc_day_string_from_ms(started_utc_ms).unwrap();
+        let (owner, day_dir) = test_manifest_owner(&dataset_root, &utc_day);
+        let manifest_path = day_dir.join(DAILY_MANIFEST_FILE_NAME);
+        let manifest_before = fs::read(&manifest_path).unwrap();
+        let digest_before = manifest_file_digest(&day_dir);
+        let dataset_lease = Arc::new(lock_training_dataset_root(&dataset_root).unwrap());
+
+        let (manifest_tx, manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
+        let (rollover_ready_tx, _rollover_ready_rx) = mpsc::channel(1);
+        let owner_lease = Arc::clone(&dataset_lease);
+        let (owner_result_tx, owner_result_rx) = oneshot::channel();
+        let mut manifest_owner_handle = tokio::spawn(async move {
+            let _dataset_lease = owner_lease;
+            let result = run_manifest_owner(owner, manifest_rx, rollover_ready_tx).await;
+            let _ = owner_result_tx.send(result.as_ref().map(|_| ()).map_err(ToString::to_string));
+            result
+        });
+
+        let raw_day_gate = Arc::new(RawDayGate::new());
+        let runtime_stats = Arc::new(SourceQueueBackpressureStats::default());
+        runtime_stats
+            .install_raw_day_gate(Arc::clone(&raw_day_gate))
+            .unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel(STARTUP_READY_CHANNEL_CAPACITY);
+        let (mut writer_handles, writer_releases) = start_writer_workers_gated(
+            &dataset_root,
+            &test_runtime_provenance("startup-pre-rename-manifest-failure"),
+            &manifest_tx,
+            &runtime_stats,
+            &ready_tx,
+            Arc::clone(&raw_day_gate),
+            Some(Arc::clone(&dataset_lease)),
+        )
+        .unwrap();
+
+        let mut source_handles = Vec::new();
+        let mut producer_releases = Vec::new();
+        let mut producer_polls = Vec::new();
+        for (producer, source_kind) in [
+            ("polymarket", "polymarket_market"),
+            ("polymarket_rtds", "polymarket_rtds_chainlink_btc_usd"),
+            ("binance_depth", "binance_depth_update"),
+            ("binance_aggtrade", "binance_aggtrade"),
+        ] {
+            let participant = StartupParticipant::producer(producer);
+            let (release_tx, release_rx) = oneshot::channel();
+            let polls = Arc::new(AtomicU64::new(0));
+            source_handles.push(SourceTaskHandle::spawn_with_dataset_lease(
+                source_kind,
+                run_producer_after_startup_gate(
+                    participant,
+                    ready_tx.clone(),
+                    release_rx,
+                    StartupPollProbe {
+                        polls: Arc::clone(&polls),
+                    },
+                ),
+                SourceTaskObservationCell::default(),
+                Arc::clone(&raw_day_gate),
+                Arc::clone(&dataset_lease),
+            ));
+            producer_releases.push(StartupReleaseSender {
+                participant,
+                sender: release_tx,
+            });
+            producer_polls.push(polls);
+        }
+        drop(ready_tx);
+
+        let releases = StartupReleaseHandles {
+            writers: writer_releases,
+            producers: producer_releases,
+        };
+        let temporary_path = day_dir.join(format!("{DAILY_MANIFEST_FILE_NAME}.tmp"));
+        let error = timeout(
+            Duration::from_secs(2),
+            activate_and_release_startup(
+                &manifest_tx,
+                Arc::clone(&raw_day_gate),
+                ready_rx,
+                releases,
+                utc_day,
+                ManifestActivationAckMode::Send,
+                None,
+                || {
+                    fs::create_dir(&temporary_path).unwrap();
+                    started_utc_ms
+                },
+            ),
+        )
+        .await
+        .expect("real startup participants must reach the activation attempt")
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("daily manifest activation failed")
+        );
+        assert!(matches!(
+            raw_day_gate.current_state(),
+            RawDayGateState::Inactive
+        ));
+        assert!(
+            raw_day_gate
+                .startup_activation_committed
+                .lock()
+                .unwrap()
+                .is_none()
+        );
+        assert!(raw_day_gate.activation_committed.lock().unwrap().is_none());
+        for polls in &producer_polls {
+            assert_eq!(polls.load(Ordering::SeqCst), 0);
+        }
+        assert!(
+            timeout(Duration::from_secs(1), owner_result_rx)
+                .await
+                .expect("manifest owner must return after the failed pre-rename publish")
+                .unwrap()
+                .is_err()
+        );
+        timeout(Duration::from_secs(1), async {
+            while source_handles.iter().any(|handle| !handle.is_finished()) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all producers must stop without polling after activation failure");
+        let writer_outcome = stop_writer_workers_with_budget(
+            std::mem::take(&mut writer_handles),
+            Duration::from_secs(1),
+        )
+        .await;
+        assert!(writer_outcome.all_terminal, "{:?}", writer_outcome.errors);
+        assert!(writer_outcome.outputs.is_empty());
+        for source_kind in LIVE_SOURCES {
+            assert!(writer_outcome.errors.iter().any(|error| {
+                error.contains(source_kind)
+                    && error.contains("startup activation gate closed before writer release")
+            }));
+        }
+
+        let (watcher_dropped_tx, watcher_dropped_rx) = oneshot::channel::<()>();
+        let mut runtime_exit_watcher = RuntimeExitWatcher::new(tokio::spawn(async move {
+            let _watcher_dropped_tx = watcher_dropped_tx;
+            std::future::pending::<()>().await;
+        }));
+        converge_spawned_runtime_resources(
+            &mut source_handles,
+            &mut writer_handles,
+            &mut manifest_owner_handle,
+            &mut runtime_exit_watcher,
+            None,
+            None,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .await;
+        drop(dataset_lease);
+
+        assert!(source_handles.is_empty());
+        assert!(writer_handles.is_empty());
+        assert!(manifest_owner_handle.is_finished());
+        assert!(runtime_exit_watcher.join.is_none());
+        assert!(watcher_dropped_rx.await.is_err());
+        for polls in producer_polls {
+            assert_eq!(polls.load(Ordering::SeqCst), 0);
+        }
+        assert!(temporary_path.is_dir());
+        assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
+        assert_eq!(manifest_file_digest(&day_dir), digest_before);
+        let manifest = load_day_manifest(&day_dir).unwrap().unwrap();
+        assert_eq!(manifest["state"], "open");
+        assert_eq!(manifest["collection_day_coverage"]["state"], "not_started");
+        assert!(manifest["collection_day_coverage"]["first_started_utc_ms"].is_null());
+        assert!(manifest["collection_day_coverage"]["last_started_utc_ms"].is_null());
+        assert!(manifest["collection_day_coverage"]["ended_utc_ms"].is_null());
+        assert_eq!(
+            manifest["collection_day_coverage"]["reactivated_within_day"],
+            false
+        );
+        assert!(lock_training_dataset_root(&dataset_root).is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delayed_startup_deadline_keeps_manifest_not_started_and_sources_unpolled() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let started_utc_ms = 1_783_987_201_000;
+        let utc_day = utc_day_string_from_ms(started_utc_ms).unwrap();
+        let (owner, day_dir) = test_manifest_owner(&dataset_root, &utc_day);
+        let (manifest_tx, manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
+        let (rollover_ready_tx, _rollover_ready_rx) = mpsc::channel(1);
+        let manifest_owner_handle =
+            tokio::spawn(run_manifest_owner(owner, manifest_rx, rollover_ready_tx));
+        let raw_day_gate = Arc::new(RawDayGate::new());
+        let (ready_rx, releases, producer_probes, writer_receivers) = startup_gate_fixture();
+
+        let error = activate_and_release_startup(
+            &manifest_tx,
+            Arc::clone(&raw_day_gate),
+            ready_rx,
+            releases,
+            utc_day,
+            ManifestActivationAckMode::Send,
+            Some(RuntimeDeadlineCandidate {
+                deadline: Instant::now() - Duration::from_millis(1),
+                observed_utc_ms: started_utc_ms,
+            }),
+            || started_utc_ms,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("deadline"));
+        for receiver in writer_receivers {
+            assert!(receiver.await.is_err());
+        }
+        for (polls, handle) in producer_probes {
+            assert!(handle.await.unwrap().is_err());
+            assert_eq!(polls.load(Ordering::SeqCst), 0);
+        }
+        let manifest = load_day_manifest(&day_dir).unwrap().unwrap();
+        assert_eq!(manifest["collection_day_coverage"]["state"], "not_started");
+        assert_eq!(
+            manifest["collection_day_coverage"]["reactivated_within_day"],
+            false
+        );
+
+        manifest_owner_handle.abort();
+        let _ = manifest_owner_handle.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deadline_after_startup_commit_stops_unreleased_participants_and_closes_known() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let started_utc_ms = 1_783_987_201_000;
+        let ended_utc_ms = started_utc_ms + 1_000;
+        let utc_day = utc_day_string_from_ms(started_utc_ms).unwrap();
+        let (mut owner, day_dir) = test_manifest_owner(&dataset_root, &utc_day);
+        let raw_day_gate = Arc::new(RawDayGate::new());
+        let deadline = RuntimeDeadlineCandidate {
+            deadline: Instant::now() + Duration::from_millis(10),
+            observed_utc_ms: ended_utc_ms,
+        };
+        raw_day_gate
+            .commit_startup_manifest_activation(
+                &utc_day,
+                INITIAL_RAW_DAY_GENERATION,
+                Some(deadline),
+                || owner.activate_initial(&utc_day, started_utc_ms, INITIAL_RAW_DAY_GENERATION),
+            )
+            .unwrap();
+        sleep(Duration::from_millis(15)).await;
+
+        let (mut ready_rx, releases, producer_probes, writer_receivers) = startup_gate_fixture();
+        collect_startup_ready(&mut ready_rx, &expected_startup_participants())
+            .await
+            .unwrap();
+        let outcome = raw_day_gate
+            .activate_or_stop_startup_after_manifest(
+                utc_day.clone(),
+                INITIAL_RAW_DAY_GENERATION,
+                Some(deadline),
+                releases,
+            )
+            .await
+            .unwrap();
+        let StartupActivationOutcome::CommittedStopped(PreparedRuntimeExit::SameDay(close)) =
+            outcome
+        else {
+            panic!("a post-commit in-day deadline must stop the committed generation");
+        };
+        assert_eq!(close.ended_utc_ms, ended_utc_ms);
+        assert_eq!(close.cause, RuntimeCloseCause::RunDeadline);
+
+        for receiver in writer_receivers {
+            assert_eq!(receiver.await.unwrap(), StartupReleasePhase::Run);
+        }
+        for (polls, handle) in producer_probes {
+            let error = handle.await.unwrap().unwrap_err();
+            let stop = error
+                .downcast_ref::<CoordinatedSourceStop>()
+                .expect("startup stop must use the typed coordinated-stop proof");
+            assert_eq!(stop.close, close.identity);
+            assert_eq!(polls.load(Ordering::SeqCst), 0);
+        }
+
+        owner
+            .shutdown(
+                &close.identity,
+                &ManifestShutdownDisposition::EndedKnown { ended_utc_ms },
+                &[],
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        let manifest = load_day_manifest(&day_dir).unwrap().unwrap();
+        assert_eq!(manifest["collection_day_coverage"]["state"], "ended_known");
+        assert_eq!(
+            manifest["collection_day_coverage"]["ended_utc_ms"],
+            ended_utc_ms
+        );
+        assert_eq!(
+            manifest["collection_day_coverage"]["reactivated_within_day"],
+            false
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn boundary_deadline_after_startup_commit_runs_only_writers_for_pending_exit() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let boundary_utc_ms = 1_783_468_800_000;
+        let close = test_rollover_close(boundary_utc_ms);
+        let (mut owner, old_day_dir) = test_manifest_owner(&dataset_root, &close.utc_day);
+        let raw_day_gate = Arc::new(RawDayGate::new());
+        let deadline = RuntimeDeadlineCandidate {
+            deadline: Instant::now() + Duration::from_millis(10),
+            observed_utc_ms: boundary_utc_ms,
+        };
+        raw_day_gate
+            .commit_startup_manifest_activation(
+                &close.utc_day,
+                close.generation,
+                Some(deadline),
+                || {
+                    owner.activate_initial(
+                        &close.utc_day,
+                        boundary_utc_ms - 1_000,
+                        close.generation,
+                    )
+                },
+            )
+            .unwrap();
+        sleep(Duration::from_millis(15)).await;
+
+        let (mut ready_rx, releases, producer_probes, writer_receivers) = startup_gate_fixture();
+        collect_startup_ready(&mut ready_rx, &expected_startup_participants())
+            .await
+            .unwrap();
+        let outcome = raw_day_gate
+            .activate_or_stop_startup_after_manifest(
+                close.utc_day.clone(),
+                close.generation,
+                Some(deadline),
+                releases,
+            )
+            .await
+            .unwrap();
+        let StartupActivationOutcome::CommittedStopped(PreparedRuntimeExit::Rollover(exit)) =
+            outcome
+        else {
+            panic!("a boundary deadline must prepare a startup PendingExit");
+        };
+        assert_eq!(exit.close, close);
+
+        for receiver in writer_receivers {
+            assert_eq!(receiver.await.unwrap(), StartupReleasePhase::Run);
+        }
+        for (polls, handle) in producer_probes {
+            let error = handle.await.unwrap().unwrap_err();
+            let stop = error
+                .downcast_ref::<CoordinatedSourceStop>()
+                .expect("startup boundary stop must be typed");
+            assert_eq!(
+                stop.close,
+                RuntimeCloseIdentity::from_rollover_old_day(&close)
+            );
+            assert_eq!(polls.load(Ordering::SeqCst), 0);
+        }
+
+        for producer in LOGICAL_PRODUCERS {
+            raw_day_gate
+                .register_source_fence(producer, &close)
+                .unwrap();
+            owner
+                .record_producer_barrier(
+                    close.clone(),
+                    (*producer).to_owned(),
+                    &[],
+                    &BTreeMap::new(),
+                )
+                .unwrap();
+        }
+        raw_day_gate.seal_prepared_rollover(&close).await.unwrap();
+        for source in LIVE_SOURCES {
+            owner
+                .record_writer_ack(close.clone(), (*source).to_owned())
+                .unwrap();
+        }
+        owner
+            .commit_rollover_old_day(
+                &close,
+                ManifestRolloverCommitMode::PendingExitKnown {
+                    ended_utc_ms: boundary_utc_ms,
+                },
+            )
+            .unwrap();
+        owner.prepare_rollover_exit_day(&close).unwrap();
+
+        let old_manifest = load_day_manifest(&old_day_dir).unwrap().unwrap();
+        assert_eq!(
+            old_manifest["collection_day_coverage"]["state"],
+            "ended_known"
+        );
+        let next_day_dir =
+            typed_raw_root(&dataset_root).join(format!("utc_day={}", close.next_utc_day));
+        let next_manifest = load_day_manifest(&next_day_dir).unwrap().unwrap();
+        assert_eq!(
+            next_manifest["collection_day_coverage"]["state"],
+            "not_started"
+        );
+        assert_eq!(
+            next_manifest["collection_day_coverage"]["reactivated_within_day"],
+            false
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn committed_activation_with_dropped_reply_is_not_retried_or_released() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let started_utc_ms = 1_783_987_201_000;
+        let utc_day = utc_day_string_from_ms(started_utc_ms).unwrap();
+        let (owner, day_dir) = test_manifest_owner(&dataset_root, &utc_day);
+        let (manifest_tx, manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
+        let (rollover_ready_tx, _rollover_ready_rx) = mpsc::channel(1);
+        let manifest_owner_handle =
+            tokio::spawn(run_manifest_owner(owner, manifest_rx, rollover_ready_tx));
+        let raw_day_gate = Arc::new(RawDayGate::new());
+        let (ready_rx, releases, producer_probes, writer_receivers) = startup_gate_fixture();
+
+        let error = activate_and_release_startup(
+            &manifest_tx,
+            Arc::clone(&raw_day_gate),
+            ready_rx,
+            releases,
+            utc_day.clone(),
+            ManifestActivationAckMode::Drop,
+            None,
+            || started_utc_ms,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("activation reply dropped"));
+
+        for receiver in writer_receivers {
+            assert!(receiver.await.is_err());
+        }
+        for (polls, handle) in producer_probes {
+            assert!(handle.await.unwrap().is_err());
+            assert_eq!(polls.load(Ordering::SeqCst), 0);
+        }
+        let manifest = load_day_manifest(&day_dir).unwrap().unwrap();
+        assert_eq!(manifest["collection_day_coverage"]["state"], "active");
+        assert_eq!(
+            manifest["collection_day_coverage"]["reactivated_within_day"], false,
+            "a dropped activation reply must not cause a second mutation"
+        );
+
+        manifest_owner_handle.abort();
+        let _ = manifest_owner_handle.await;
+
+        let (mut recovered_owner, _) = test_manifest_owner(&dataset_root, &utc_day);
+        recovered_owner
+            .activate_initial(&utc_day, started_utc_ms + 1_000, INITIAL_RAW_DAY_GENERATION)
+            .unwrap();
+        let recovered_manifest = load_day_manifest(&day_dir).unwrap().unwrap();
+        assert_eq!(
+            recovered_manifest["collection_day_coverage"]["state"],
+            "active"
+        );
+        assert_eq!(
+            recovered_manifest["collection_day_coverage"]["reactivated_within_day"], true,
+            "the next same-day owner activation records reactivation without retrying the dropped reply"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ready_wait_crossing_utc_day_refuses_activation_and_release() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let recovery_started_utc_ms = 1_783_987_201_000;
+        let utc_day = utc_day_string_from_ms(recovery_started_utc_ms).unwrap();
+        let next_day_started_utc_ms = recovery_started_utc_ms.saturating_add(UTC_DAY_MS);
+        assert_ne!(
+            utc_day_string_from_ms(next_day_started_utc_ms).as_deref(),
+            Some(utc_day.as_str())
+        );
+        let (owner, day_dir) = test_manifest_owner(&dataset_root, &utc_day);
+        let (manifest_tx, manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
+        let (rollover_ready_tx, _rollover_ready_rx) = mpsc::channel(1);
+        let manifest_owner_handle =
+            tokio::spawn(run_manifest_owner(owner, manifest_rx, rollover_ready_tx));
+        let raw_day_gate = Arc::new(RawDayGate::new());
+        let (ready_rx, releases, producer_probes, writer_receivers) = startup_gate_fixture();
+
+        let error = activate_and_release_startup(
+            &manifest_tx,
+            Arc::clone(&raw_day_gate),
+            ready_rx,
+            releases,
+            utc_day,
+            ManifestActivationAckMode::Send,
+            None,
+            || next_day_started_utc_ms,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("UTC day advanced"));
+
+        for receiver in writer_receivers {
+            assert!(receiver.await.is_err());
+        }
+        for (polls, handle) in producer_probes {
+            assert!(handle.await.unwrap().is_err());
+            assert_eq!(polls.load(Ordering::SeqCst), 0);
+        }
+        let manifest = load_day_manifest(&day_dir).unwrap().unwrap();
+        assert_eq!(manifest["collection_day_coverage"]["state"], "not_started");
+        assert_eq!(
+            manifest["collection_day_coverage"]["reactivated_within_day"],
+            false
+        );
+
+        manifest_owner_handle.abort();
+        let _ = manifest_owner_handle.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn writer_workers_report_ready_only_after_local_initialization() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let provenance = test_runtime_provenance("startup-ready-writers");
+        let runtime_stats = Arc::new(SourceQueueBackpressureStats::default());
+        let (manifest_tx, _manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
+        let (ready_tx, mut ready_rx) = mpsc::channel(STARTUP_READY_CHANNEL_CAPACITY);
+        let (writers, releases) = start_writer_workers_gated(
+            &dataset_root,
+            &provenance,
+            &manifest_tx,
+            &runtime_stats,
+            &ready_tx,
+            Arc::new(RawDayGate::new()),
+            None,
+        )
+        .unwrap();
+        drop(ready_tx);
+
+        let mut ready = BTreeSet::new();
+        for _ in 0..LIVE_SOURCES.len() {
+            ready.insert(
+                timeout(Duration::from_secs(1), ready_rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        assert_eq!(
+            ready,
+            LIVE_SOURCES
+                .iter()
+                .map(|source_kind| StartupParticipant::writer(source_kind))
+                .collect()
+        );
+        for writer in writers.values() {
+            assert!(matches!(
+                writer.result_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+        }
+        StartupReleaseHandles {
+            writers: releases,
+            producers: Vec::new(),
+        }
+        .release()
+        .unwrap();
+        let outcome = stop_writer_workers_with_budget(writers, Duration::from_secs(1)).await;
+        assert!(outcome.all_terminal, "{:?}", outcome.errors);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn committed_startup_stop_runs_writers_until_centralized_exact_shutdown() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let provenance = test_runtime_provenance("startup-stop-writers");
+        let runtime_stats = Arc::new(SourceQueueBackpressureStats::default());
+        let (manifest_tx, _manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
+        let (ready_tx, mut ready_rx) = mpsc::channel(STARTUP_READY_CHANNEL_CAPACITY);
+        let (writers, releases) = start_writer_workers_gated(
+            &dataset_root,
+            &provenance,
+            &manifest_tx,
+            &runtime_stats,
+            &ready_tx,
+            Arc::new(RawDayGate::new()),
+            None,
+        )
+        .unwrap();
+        drop(ready_tx);
+        for _ in 0..LIVE_SOURCES.len() {
+            timeout(Duration::from_secs(1), ready_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+
+        let ended_utc_ms = 1_783_392_401_000;
+        let close = PreparedSameDayClose {
+            identity: RuntimeCloseIdentity {
+                utc_day: utc_day_string_from_ms(ended_utc_ms).unwrap(),
+                generation: INITIAL_RAW_DAY_GENERATION,
+                close_id: 1,
+            },
+            ended_utc_ms,
+            cause: RuntimeCloseCause::RunDeadline,
+            unclean: false,
+            unclean_cause: None,
+        };
+        StartupReleaseHandles {
+            writers: releases,
+            producers: Vec::new(),
+        }
+        .stop_for_exit(&PreparedRuntimeExit::SameDay(close.clone()))
+        .unwrap();
+
+        let outcome = shutdown_writer_workers_with_budget(
+            writers,
+            close.identity.clone(),
+            Duration::from_secs(1),
+        )
+        .await;
+        assert!(outcome.all_terminal, "{:?}", outcome.errors);
+        assert!(outcome.all_close_proven, "{:?}", outcome.errors);
+        assert!(
+            outcome
+                .outputs
+                .iter()
+                .all(|output| { output.coordinated_close.as_ref() == Some(&close.identity) })
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_day_gate_fences_boundary_events_until_normal_rollover_ack() {
+        let boundary_utc_ms = 1_783_468_800_000;
+        let gate = Arc::new(RawDayGate::new());
+        gate.activate_startup(
+            utc_day_string_from_ms(boundary_utc_ms - 1).unwrap(),
+            INITIAL_RAW_DAY_GENERATION,
+        )
+        .await
+        .unwrap();
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        stats.install_raw_day_gate(Arc::clone(&gate)).unwrap();
+        let (tx, mut rx) = mpsc::channel(8);
+        let sink = SourceEventSink {
+            tx,
+            gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+            source_queue_backpressure: stats,
+            inflight_budget: InflightBudget::new(),
+            enqueue_lock: Arc::new(AsyncMutex::new(())),
+        };
+        let run_started = Instant::now();
+
+        send_event(
+            &sink,
+            run_started,
+            test_raw_event("binance_aggtrade", boundary_utc_ms - 1),
+        )
+        .await
+        .unwrap();
+        let before = rx.recv().await.unwrap();
+        assert_eq!(
+            before.raw_day_permit,
+            Some(RawDayPermit {
+                utc_day: "2026-07-07".to_owned(),
+                generation: INITIAL_RAW_DAY_GENERATION,
+            })
+        );
+
+        let close = gate
+            .close_for_rollover("2026-07-07", boundary_utc_ms)
+            .await
+            .unwrap();
+        let at_boundary_sink = sink.clone();
+        let at_boundary = tokio::spawn(async move {
+            send_event(
+                &at_boundary_sink,
+                run_started,
+                test_raw_event("binance_aggtrade", boundary_utc_ms),
+            )
+            .await
+        });
+        let after_boundary_sink = sink.clone();
+        let after_boundary = tokio::spawn(async move {
+            send_event(
+                &after_boundary_sink,
+                run_started,
+                test_raw_event("binance_aggtrade", boundary_utc_ms + 1),
+            )
+            .await
+        });
+        at_boundary.await.unwrap().unwrap();
+        after_boundary.await.unwrap().unwrap();
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        send_ingress_control(
+            &sink,
+            run_started,
+            IngressControl::FinalizeSourceHour {
+                source_kind: "binance_depth_snapshot".to_owned(),
+                utc_hour: "2026-07-08T00".to_owned(),
+            },
+            "test_control_bypasses_raw_day_fence",
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            rx.recv().await.unwrap().control,
+            Some(IngressControl::FinalizeSourceHour { .. })
+        ));
+
+        commit_test_manifest_activation(&gate, &close);
+        gate.activate_after_rollover(&close).await.unwrap();
+        flush_deferred_raw_events(&sink, "binance_aggtrade", &close)
+            .await
+            .unwrap();
+        let mut permitted = [rx.recv().await.unwrap(), rx.recv().await.unwrap()];
+        permitted.sort_by_key(|event| event.event.recv_time_utc_ms);
+        assert_eq!(permitted[0].event.recv_time_utc_ms, boundary_utc_ms);
+        assert_eq!(permitted[1].event.recv_time_utc_ms, boundary_utc_ms + 1);
+        assert!(permitted.iter().all(|event| {
+            event.raw_day_permit.as_ref()
+                == Some(&RawDayPermit {
+                    utc_day: "2026-07-08".to_owned(),
+                    generation: INITIAL_RAW_DAY_GENERATION + 1,
+                })
+        }));
+    }
+
+    #[tokio::test]
+    async fn runtime_exit_candidate_assigns_b_minus_one_b_and_b_plus_one_causally() {
+        let boundary_utc_ms = 1_783_468_800_000;
+        let old_day = "2026-07-07";
+
+        let before_gate = RawDayGate::new();
+        before_gate
+            .activate_startup(old_day.to_owned(), INITIAL_RAW_DAY_GENERATION)
+            .await
+            .unwrap();
+        let before = before_gate
+            .prepare_runtime_exit(boundary_utc_ms - 1)
+            .unwrap();
+        let PreparedRuntimeExit::SameDay(before) = before else {
+            panic!("B-1ms must remain a same-day close");
+        };
+        assert_eq!(before.ended_utc_ms, boundary_utc_ms - 1);
+        assert!(
+            before_gate
+                .prepare_rollover(old_day, boundary_utc_ms)
+                .unwrap_err()
+                .to_string()
+                .contains("prepared same-day close")
+        );
+
+        let boundary_gate = RawDayGate::new();
+        boundary_gate
+            .activate_startup(old_day.to_owned(), INITIAL_RAW_DAY_GENERATION)
+            .await
+            .unwrap();
+        let at_boundary = boundary_gate.prepare_runtime_exit(boundary_utc_ms).unwrap();
+        let PreparedRuntimeExit::Rollover(at_boundary) = at_boundary else {
+            panic!("B must create PendingExit");
+        };
+        assert_eq!(at_boundary.observed_utc_ms, boundary_utc_ms);
+        assert_eq!(at_boundary.close.boundary_utc_ms, boundary_utc_ms);
+        let later = boundary_gate
+            .prepare_runtime_exit(boundary_utc_ms + 1)
+            .unwrap();
+        assert_eq!(later, PreparedRuntimeExit::Rollover(at_boundary.clone()));
+
+        let identity = RuntimeCloseIdentity::from_rollover_old_day(&at_boundary.close);
+        let marked = boundary_gate.mark_runtime_exit_unclean(&identity).unwrap();
+        let PreparedRuntimeExit::Rollover(marked) = marked else {
+            panic!("unclean must preserve PendingExit identity");
+        };
+        assert!(marked.unclean);
+        assert_eq!(marked.observed_utc_ms, boundary_utc_ms);
+    }
+
+    #[tokio::test]
+    async fn installed_deadline_wins_over_later_source_return_in_both_poll_orders() {
+        let boundary_utc_ms = 1_783_468_800_000;
+        let deadline_utc_ms = boundary_utc_ms - 1_000;
+        let reached = RuntimeDeadlineCandidate {
+            deadline: Instant::now() - Duration::from_millis(1),
+            observed_utc_ms: deadline_utc_ms,
+        };
+
+        let source_first = RawDayGate::new();
+        source_first
+            .activate_startup("2026-07-07".to_owned(), INITIAL_RAW_DAY_GENERATION)
+            .await
+            .unwrap();
+        source_first
+            .install_runtime_deadline(Some(reached))
+            .unwrap();
+        source_first.observe_source_terminal_now(
+            RuntimeCloseCause::SourceInnerReturn {
+                source_kind: "binance_aggtrade",
+            },
+            None,
+            None,
+        );
+
+        let notifier_first = RawDayGate::new();
+        notifier_first
+            .activate_startup("2026-07-07".to_owned(), INITIAL_RAW_DAY_GENERATION)
+            .await
+            .unwrap();
+        notifier_first
+            .install_runtime_deadline(Some(reached))
+            .unwrap();
+        notifier_first
+            .prepare_runtime_exit_with_cause(deadline_utc_ms, RuntimeCloseCause::RunDeadline)
+            .unwrap();
+        notifier_first.observe_source_terminal_now(
+            RuntimeCloseCause::SourceInnerReturn {
+                source_kind: "binance_aggtrade",
+            },
+            None,
+            None,
+        );
+
+        let source_first_close = source_first.prepared_runtime_exit().unwrap();
+        let notifier_first_close = notifier_first.prepared_runtime_exit().unwrap();
+        assert_eq!(source_first_close, notifier_first_close);
+        let PreparedRuntimeExit::SameDay(close) = source_first_close else {
+            panic!("an in-day deadline must prepare a same-day close");
+        };
+        assert_eq!(close.ended_utc_ms, deadline_utc_ms);
+        assert_eq!(close.cause, RuntimeCloseCause::RunDeadline);
+
+        let boundary_source_first = RawDayGate::new();
+        boundary_source_first
+            .activate_startup("2026-07-07".to_owned(), INITIAL_RAW_DAY_GENERATION)
+            .await
+            .unwrap();
+        boundary_source_first
+            .install_runtime_deadline(Some(RuntimeDeadlineCandidate {
+                observed_utc_ms: boundary_utc_ms,
+                ..reached
+            }))
+            .unwrap();
+        boundary_source_first.observe_source_terminal_now(
+            RuntimeCloseCause::SourceInnerReturn {
+                source_kind: "binance_aggtrade",
+            },
+            None,
+            None,
+        );
+
+        let boundary_notifier_first = RawDayGate::new();
+        boundary_notifier_first
+            .activate_startup("2026-07-07".to_owned(), INITIAL_RAW_DAY_GENERATION)
+            .await
+            .unwrap();
+        boundary_notifier_first
+            .prepare_runtime_exit_with_cause(boundary_utc_ms, RuntimeCloseCause::RunDeadline)
+            .unwrap();
+        assert_eq!(
+            boundary_source_first.prepared_runtime_exit(),
+            boundary_notifier_first.prepared_runtime_exit()
+        );
+    }
+
+    #[tokio::test]
+    async fn delayed_deadline_is_materialized_before_every_activation_or_release_cutpoint() {
+        let boundary_utc_ms = 1_783_468_800_000;
+        let reached = RuntimeDeadlineCandidate {
+            deadline: Instant::now() - Duration::from_millis(1),
+            observed_utc_ms: boundary_utc_ms,
+        };
+
+        let startup_gate = RawDayGate::new();
+        let startup_mutations = AtomicU64::new(0);
+        let startup_error = startup_gate
+            .commit_startup_manifest_activation(
+                "2026-07-08",
+                INITIAL_RAW_DAY_GENERATION,
+                Some(reached),
+                || {
+                    startup_mutations.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+        assert!(startup_error.to_string().contains("deadline"));
+        assert_eq!(startup_mutations.load(Ordering::SeqCst), 0);
+
+        let old_commit_gate = Arc::new(RawDayGate::new());
+        old_commit_gate
+            .activate_startup("2026-07-07".to_owned(), INITIAL_RAW_DAY_GENERATION)
+            .await
+            .unwrap();
+        let old_close = old_commit_gate
+            .close_for_rollover("2026-07-07", boundary_utc_ms)
+            .await
+            .unwrap();
+        let old_mutations = AtomicU64::new(0);
+        assert!(
+            !old_commit_gate
+                .commit_old_day_if_no_exit(&old_close, Some(reached), || {
+                    old_mutations.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+                .unwrap()
+        );
+        assert_eq!(old_mutations.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            old_commit_gate.prepared_runtime_exit(),
+            Some(PreparedRuntimeExit::Rollover(_))
+        ));
+
+        let activation_gate = Arc::new(RawDayGate::new());
+        activation_gate
+            .activate_startup("2026-07-07".to_owned(), INITIAL_RAW_DAY_GENERATION)
+            .await
+            .unwrap();
+        let activation_close = activation_gate
+            .close_for_rollover("2026-07-07", boundary_utc_ms)
+            .await
+            .unwrap();
+        let activation_mutations = AtomicU64::new(0);
+        assert!(
+            !activation_gate
+                .commit_manifest_activation(&activation_close, Some(reached), || {
+                    activation_mutations.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+                .unwrap()
+        );
+        assert_eq!(activation_mutations.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            activation_gate.prepared_runtime_exit(),
+            Some(PreparedRuntimeExit::Rollover(_))
+        ));
+
+        let release_gate = Arc::new(RawDayGate::new());
+        release_gate
+            .activate_startup("2026-07-07".to_owned(), INITIAL_RAW_DAY_GENERATION)
+            .await
+            .unwrap();
+        let release_close = release_gate
+            .close_for_rollover("2026-07-07", boundary_utc_ms)
+            .await
+            .unwrap();
+        assert!(
+            release_gate
+                .commit_manifest_activation(&release_close, None, || Ok(()))
+                .unwrap()
+        );
+        release_gate
+            .activate_after_rollover(&release_close)
+            .await
+            .unwrap();
+        let release_mutations = AtomicU64::new(0);
+        let release_deadline = RuntimeDeadlineCandidate {
+            observed_utc_ms: boundary_utc_ms + 1,
+            ..reached
+        };
+        assert!(
+            release_gate
+                .commit_release_if_no_exit(&release_close, Some(release_deadline), || {
+                    release_mutations.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert_eq!(release_mutations.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            release_gate.prepared_runtime_exit(),
+            Some(PreparedRuntimeExit::SameDay(_))
+        ));
+
+        let startup_release_gate = RawDayGate::new();
+        let startup_now = now_ms();
+        startup_release_gate
+            .activate_startup(
+                utc_day_string_from_ms(startup_now).unwrap(),
+                INITIAL_RAW_DAY_GENERATION,
+            )
+            .await
+            .unwrap();
+        startup_release_gate
+            .prepare_runtime_exit_with_cause(startup_now, RuntimeCloseCause::OperatorStop)
+            .unwrap();
+        let startup_releases = AtomicU64::new(0);
+        assert!(
+            startup_release_gate
+                .commit_startup_release_if_no_exit(None, || {
+                    startup_releases.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert_eq!(startup_releases.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transition_lock_linearizes_manifest_commit_against_runtime_exit() {
+        let boundary_utc_ms = 1_783_468_800_000;
+        let gate = Arc::new(RawDayGate::new());
+        gate.activate_startup("2026-07-07".to_owned(), INITIAL_RAW_DAY_GENERATION)
+            .await
+            .unwrap();
+        let close = gate
+            .close_for_rollover("2026-07-07", boundary_utc_ms)
+            .await
+            .unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let commit_gate = Arc::clone(&gate);
+        let commit_close = close.clone();
+        let commit = std::thread::spawn(move || {
+            commit_gate.commit_manifest_activation(&commit_close, None, || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+        });
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let exit_gate = Arc::clone(&gate);
+        let exit = std::thread::spawn(move || {
+            exit_gate.prepare_runtime_exit_with_cause(
+                boundary_utc_ms + 1,
+                RuntimeCloseCause::OperatorStop,
+            )
+        });
+        std::thread::sleep(Duration::from_millis(25));
+        assert!(!exit.is_finished());
+        release_tx.send(()).unwrap();
+        assert!(commit.join().unwrap().unwrap());
+        let PreparedRuntimeExit::SameDay(after_activation) = exit.join().unwrap().unwrap() else {
+            panic!("activation-first exit must belong to the next generation");
+        };
+        assert_eq!(after_activation.identity.utc_day, close.next_utc_day);
+        assert_eq!(after_activation.identity.generation, close.next_generation);
+
+        let exit_first_gate = Arc::new(RawDayGate::new());
+        exit_first_gate
+            .activate_startup("2026-07-07".to_owned(), INITIAL_RAW_DAY_GENERATION)
+            .await
+            .unwrap();
+        let exit_first_close = exit_first_gate
+            .close_for_rollover("2026-07-07", boundary_utc_ms)
+            .await
+            .unwrap();
+        exit_first_gate
+            .prepare_runtime_exit_with_cause(boundary_utc_ms, RuntimeCloseCause::OperatorStop)
+            .unwrap();
+        let mutations = AtomicU64::new(0);
+        assert!(
+            !exit_first_gate
+                .commit_manifest_activation(&exit_first_close, None, || {
+                    mutations.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+                .unwrap()
+        );
+        assert_eq!(mutations.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transition_lock_linearizes_old_day_commit_against_runtime_exit() {
+        let boundary_utc_ms = 1_783_468_800_000;
+        let gate = Arc::new(RawDayGate::new());
+        gate.activate_startup("2026-07-07".to_owned(), INITIAL_RAW_DAY_GENERATION)
+            .await
+            .unwrap();
+        let close = gate
+            .close_for_rollover("2026-07-07", boundary_utc_ms)
+            .await
+            .unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let commit_gate = Arc::clone(&gate);
+        let commit_close = close.clone();
+        let commit = std::thread::spawn(move || {
+            commit_gate.commit_old_day_if_no_exit(&commit_close, None, || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+        });
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let exit_gate = Arc::clone(&gate);
+        let exit = std::thread::spawn(move || {
+            exit_gate.prepare_runtime_exit_with_cause(
+                boundary_utc_ms + 1,
+                RuntimeCloseCause::OperatorStop,
+            )
+        });
+        std::thread::sleep(Duration::from_millis(25));
+        assert!(!exit.is_finished());
+        release_tx.send(()).unwrap();
+        assert!(commit.join().unwrap().unwrap());
+        let PreparedRuntimeExit::Rollover(exit) = exit.join().unwrap().unwrap() else {
+            panic!("a post-commit exit must remain owned by the closed old generation");
+        };
+        assert_eq!(exit.close, close);
+
+        let exit_first_gate = Arc::new(RawDayGate::new());
+        exit_first_gate
+            .activate_startup("2026-07-07".to_owned(), INITIAL_RAW_DAY_GENERATION)
+            .await
+            .unwrap();
+        let exit_first_close = exit_first_gate
+            .close_for_rollover("2026-07-07", boundary_utc_ms)
+            .await
+            .unwrap();
+        exit_first_gate
+            .prepare_runtime_exit_with_cause(boundary_utc_ms, RuntimeCloseCause::OperatorStop)
+            .unwrap();
+        let mutations = AtomicU64::new(0);
+        assert!(
+            !exit_first_gate
+                .commit_old_day_if_no_exit(&exit_first_close, None, || {
+                    mutations.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+                .unwrap()
+        );
+        assert_eq!(mutations.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn source_terminal_and_activation_have_one_generation_owner_in_both_orders() {
+        let boundary_utc_ms = now_ms().div_euclid(UTC_DAY_MS).saturating_mul(UTC_DAY_MS);
+        let old_day = utc_day_string_from_ms(boundary_utc_ms - 1).unwrap();
+
+        let terminal_first_gate = Arc::new(RawDayGate::new());
+        terminal_first_gate
+            .activate_startup(old_day.clone(), INITIAL_RAW_DAY_GENERATION)
+            .await
+            .unwrap();
+        let terminal_first_close = terminal_first_gate
+            .close_for_rollover(&old_day, boundary_utc_ms)
+            .await
+            .unwrap();
+        let terminal_first_handle = SourceTaskHandle::spawn(
+            "binance_aggtrade",
+            async { Ok(()) },
+            SourceTaskObservationCell::default(),
+            Arc::clone(&terminal_first_gate),
+        );
+        let terminal_first_report = terminal_first_handle
+            .await_termination(&RuntimeCloseIdentity::from_rollover_old_day(
+                &terminal_first_close,
+            ))
+            .await;
+        assert_eq!(
+            terminal_first_report.kind,
+            SourceTaskTerminationKind::ReliableReturn
+        );
+        assert_eq!(
+            terminal_first_report.epoch,
+            Some(RuntimeEpoch {
+                utc_day: terminal_first_close.utc_day.clone(),
+                generation: terminal_first_close.generation,
+            })
+        );
+        let terminal_first_mutations = AtomicU64::new(0);
+        assert!(
+            !terminal_first_gate
+                .commit_manifest_activation(&terminal_first_close, None, || {
+                    terminal_first_mutations.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+                .unwrap()
+        );
+        assert_eq!(terminal_first_mutations.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            terminal_first_gate.prepared_runtime_exit(),
+            Some(PreparedRuntimeExit::Rollover(_))
+        ));
+
+        let activation_first_gate = Arc::new(RawDayGate::new());
+        activation_first_gate
+            .activate_startup(old_day.clone(), INITIAL_RAW_DAY_GENERATION)
+            .await
+            .unwrap();
+        let activation_first_close = activation_first_gate
+            .close_for_rollover(&old_day, boundary_utc_ms)
+            .await
+            .unwrap();
+        let activation_first_mutations = AtomicU64::new(0);
+        assert!(
+            activation_first_gate
+                .commit_manifest_activation(&activation_first_close, None, || {
+                    activation_first_mutations.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+                .unwrap()
+        );
+        activation_first_gate
+            .activate_after_rollover(&activation_first_close)
+            .await
+            .unwrap();
+        let activation_first_handle = SourceTaskHandle::spawn(
+            "binance_aggtrade",
+            async { Ok(()) },
+            SourceTaskObservationCell::default(),
+            Arc::clone(&activation_first_gate),
+        );
+        while !activation_first_handle.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let PreparedRuntimeExit::SameDay(new_day_close) = activation_first_gate
+            .prepared_runtime_exit()
+            .expect("activation-first terminal must close the new generation")
+        else {
+            panic!("activation-first terminal must belong to the new day");
+        };
+        let activation_first_report = activation_first_handle
+            .await_termination(&new_day_close.identity)
+            .await;
+        assert_eq!(
+            activation_first_report.kind,
+            SourceTaskTerminationKind::ReliableReturn
+        );
+        assert_eq!(
+            activation_first_report.epoch,
+            Some(RuntimeEpoch {
+                utc_day: activation_first_close.next_utc_day.clone(),
+                generation: activation_first_close.next_generation,
+            })
+        );
+        assert_eq!(activation_first_mutations.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn same_day_candidate_closes_new_raw_admission_and_drains_prior_permits() {
+        let observed_utc_ms = 1_783_468_799_000;
+        let gate = Arc::new(RawDayGate::new());
+        gate.activate_startup(
+            utc_day_string_from_ms(observed_utc_ms).unwrap(),
+            INITIAL_RAW_DAY_GENERATION,
+        )
+        .await
+        .unwrap();
+
+        let admitted = match gate
+            .begin_event_enqueue("binance_aggtrade", observed_utc_ms - 1)
+            .await
+            .unwrap()
+        {
+            RawDayEnqueueDecision::Permit(permit) => permit,
+            RawDayEnqueueDecision::Defer(_) => panic!("same-day event must be admitted"),
+        };
+        let PreparedRuntimeExit::SameDay(close) =
+            gate.prepare_runtime_exit(observed_utc_ms).unwrap()
+        else {
+            panic!("same-day return must prepare a same-day close");
+        };
+        assert!(matches!(
+            gate.current_state(),
+            RawDayGateState::ClosingSameDay(ref actual) if actual == &close
+        ));
+        let rejected = gate
+            .begin_event_enqueue("binance_aggtrade", observed_utc_ms + 1)
+            .await;
+        assert!(matches!(
+            rejected,
+            Err(ref error) if error.to_string().contains("after same-day intake close")
+        ));
+
+        let sealing_gate = Arc::clone(&gate);
+        let identity = close.identity.clone();
+        let sealing =
+            tokio::spawn(async move { sealing_gate.seal_same_day_close(&identity).await.unwrap() });
+        tokio::task::yield_now().await;
+        assert!(
+            !sealing.is_finished(),
+            "seal must wait for an enqueue admitted before the close candidate"
+        );
+        drop(admitted);
+        assert_eq!(sealing.await.unwrap(), close);
+    }
+
+    #[test]
+    fn producer_release_ack_requires_exact_identity_phase_and_uniqueness() {
+        let close = test_rollover_close(1_783_468_800_000);
+        let expected = RuntimeCloseIdentity::from_rollover_old_day(&close);
+        let (mut release, _phase_rx) = test_release_controller(close.clone());
+
+        let wrong_identity = ProducerReleaseAck {
+            producer: LOGICAL_PRODUCERS[0].to_owned(),
+            close: RuntimeCloseIdentity {
+                close_id: expected.close_id.saturating_add(1),
+                ..expected.clone()
+            },
+            kind: ProducerReleaseAckKind::Armed,
+            error: None,
+        };
+        assert!(
+            release
+                .accept_ack(wrong_identity)
+                .unwrap_err()
+                .to_string()
+                .contains("identity mismatch")
+        );
+        assert!(release.armed.is_empty());
+
+        let unknown_producer = ProducerReleaseAck {
+            producer: "unknown_producer".to_owned(),
+            close: expected.clone(),
+            kind: ProducerReleaseAckKind::Armed,
+            error: None,
+        };
+        assert!(
+            release
+                .accept_ack(unknown_producer)
+                .unwrap_err()
+                .to_string()
+                .contains("identity mismatch")
+        );
+        assert!(release.armed.is_empty());
+
+        let wrong_phase = ProducerReleaseAck {
+            producer: LOGICAL_PRODUCERS[0].to_owned(),
+            close: expected.clone(),
+            kind: ProducerReleaseAckKind::Flushed,
+            error: None,
+        };
+        assert!(
+            release
+                .accept_ack(wrong_phase)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid phase")
+        );
+        assert!(release.flushed.is_empty());
+
+        let armed = || ProducerReleaseAck {
+            producer: LOGICAL_PRODUCERS[0].to_owned(),
+            close: expected.clone(),
+            kind: ProducerReleaseAckKind::Armed,
+            error: None,
+        };
+        release.accept_ack(armed()).unwrap();
+        assert!(
+            release
+                .accept_ack(armed())
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate")
+        );
+
+        release.set_phase(ProducerReleasePhase::FlushDeferred);
+        let flushed = || ProducerReleaseAck {
+            producer: LOGICAL_PRODUCERS[0].to_owned(),
+            close: expected.clone(),
+            kind: ProducerReleaseAckKind::Flushed,
+            error: None,
+        };
+        release.accept_ack(flushed()).unwrap();
+        assert!(
+            release
+                .accept_ack(flushed())
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate")
+        );
+
+        let unarmed_flush = ProducerReleaseAck {
+            producer: LOGICAL_PRODUCERS[1].to_owned(),
+            close: expected,
+            kind: ProducerReleaseAckKind::Flushed,
+            error: None,
+        };
+        assert!(
+            release
+                .accept_ack(unarmed_flush)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid phase")
+        );
+    }
+
+    #[test]
+    fn controller_drop_preserves_an_explicit_next_generation_stop_identity() {
+        let close = test_rollover_close(1_783_468_800_000);
+        let next_generation = RuntimeCloseIdentity::from_rollover_next_day(&close);
+        let (mut release, phase_rx) = test_release_controller(close);
+
+        release.stop_with_close(next_generation.clone());
+        drop(release);
+
+        assert_eq!(
+            phase_rx.borrow().clone(),
+            ProducerReleasePhase::Stop(next_generation)
+        );
+    }
+
+    #[tokio::test]
+    async fn manifest_activation_cutover_rejects_a_preexisting_pending_exit() {
+        let boundary_utc_ms = 1_783_468_800_000;
+        let gate = RawDayGate::new();
+        gate.activate_startup(
+            utc_day_string_from_ms(boundary_utc_ms - 1).unwrap(),
+            INITIAL_RAW_DAY_GENERATION,
+        )
+        .await
+        .unwrap();
+        let PreparedRuntimeExit::Rollover(exit) =
+            gate.prepare_runtime_exit(boundary_utc_ms).unwrap()
+        else {
+            panic!("boundary-time exit must prepare PendingExit");
+        };
+        for producer in LOGICAL_PRODUCERS {
+            gate.register_source_fence(producer, &exit.close).unwrap();
+        }
+        gate.seal_prepared_rollover(&exit.close).await.unwrap();
+
+        assert!(
+            !gate
+                .commit_manifest_activation(&exit.close, None, || Ok(()))
+                .unwrap()
+        );
+        let activation_error = gate.activate_after_rollover(&exit.close).await.unwrap_err();
+        assert!(
+            activation_error
+                .to_string()
+                .contains("matching committed manifest activation")
+        );
+        assert!(matches!(
+            gate.current_state(),
+            RawDayGateState::Closing(ref actual) if actual == &exit.close
+        ));
+        assert_eq!(
+            gate.observation_epoch(),
+            Some(RuntimeEpoch {
+                utc_day: exit.close.utc_day,
+                generation: exit.close.generation,
+            })
+        );
+    }
+
+    #[test]
+    fn normal_rollover_waits_for_four_producers_and_six_writers() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let boundary_utc_ms = 1_783_468_800_000;
+        let close = test_rollover_close(boundary_utc_ms);
+        let (mut owner, day_dir) = test_manifest_owner(&dataset_root, &close.utc_day);
+        owner
+            .activate_initial(
+                &close.utc_day,
+                boundary_utc_ms - 1_000,
+                INITIAL_RAW_DAY_GENERATION,
+            )
+            .unwrap();
+        for producer in LOGICAL_PRODUCERS {
+            assert!(
+                owner
+                    .record_producer_barrier(
+                        close.clone(),
+                        (*producer).to_owned(),
+                        &[],
+                        &BTreeMap::new(),
+                    )
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        for source in &LIVE_SOURCES[..LIVE_SOURCES.len() - 1] {
+            assert!(
+                owner
+                    .record_writer_ack(close.clone(), (*source).to_owned())
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert!(
+            owner
+                .commit_rollover_old_day(&close, ManifestRolloverCommitMode::Normal)
+                .is_err()
+        );
+        assert_eq!(
+            manifest_state(&load_day_manifest(&day_dir).unwrap().unwrap()).unwrap(),
+            "open"
+        );
+        assert!(
+            owner
+                .record_writer_ack(close.clone(), LIVE_SOURCES.last().unwrap().to_string(),)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            manifest_state(&load_day_manifest(&day_dir).unwrap().unwrap()).unwrap(),
+            "open",
+            "ten ready participants still require the main-owned commit decision"
+        );
+    }
+
+    #[test]
+    fn pending_exit_rollover_closes_old_day_without_activating_new_day() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let close = test_rollover_close(1_783_468_800_000);
+        let (mut owner, old_day_dir) = test_manifest_owner(&dataset_root, &close.utc_day);
+        owner
+            .activate_initial(
+                &close.utc_day,
+                close.boundary_utc_ms - 10_000,
+                close.generation,
+            )
+            .unwrap();
+        for producer in LOGICAL_PRODUCERS {
+            owner
+                .record_producer_barrier(
+                    close.clone(),
+                    (*producer).to_owned(),
+                    &[],
+                    &BTreeMap::new(),
+                )
+                .unwrap();
+        }
+        for source in LIVE_SOURCES {
+            owner
+                .record_writer_ack(close.clone(), (*source).to_owned())
+                .unwrap();
+        }
+
+        owner
+            .commit_rollover_old_day(
+                &close,
+                ManifestRolloverCommitMode::PendingExitKnown {
+                    ended_utc_ms: close.boundary_utc_ms,
+                },
+            )
+            .unwrap();
+        owner.prepare_rollover_exit_day(&close).unwrap();
+
+        let old = load_day_manifest(&old_day_dir).unwrap().unwrap();
+        assert_eq!(manifest_state(&old).unwrap(), "closed");
+        assert_eq!(old["collection_day_coverage"]["state"], "ended_known");
+        assert_eq!(
+            old["collection_day_coverage"]["ended_utc_ms"],
+            close.boundary_utc_ms
+        );
+        let new_day_dir =
+            typed_raw_root(&dataset_root).join(format!("utc_day={}", close.next_utc_day));
+        let new = load_day_manifest(&new_day_dir).unwrap().unwrap();
+        assert_eq!(manifest_state(&new).unwrap(), "open");
+        assert_eq!(new["collection_day_coverage"]["state"], "not_started");
+        assert_eq!(
+            new["collection_day_coverage"]["reactivated_within_day"],
+            false
+        );
+        assert!(owner.active_epoch.is_none());
+        assert!(owner.rollover.is_none());
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum BoundaryExitPollOrder {
+        ExitFirst,
+        CommitFirst,
+    }
+
+    struct BoundaryExitPollOrderResult {
+        exit: PendingExit,
+        old_manifest: Value,
+        old_digest: String,
+        next_manifest: Value,
+    }
+
+    async fn run_boundary_exit_poll_order(
+        dataset_root: &Path,
+        order: BoundaryExitPollOrder,
+    ) -> BoundaryExitPollOrderResult {
+        fs::create_dir_all(dataset_root).unwrap();
+        let dataset_root = dataset_root.canonicalize().unwrap();
+        let boundary_utc_ms = 1_783_468_800_000;
+        let expected_close = test_rollover_close(boundary_utc_ms);
+        let (owner, old_day_dir) = test_manifest_owner(&dataset_root, &expected_close.utc_day);
+        let (manifest_tx, manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
+        let (rollover_ready_tx, mut rollover_ready_rx) = mpsc::channel(1);
+        let owner_handle = tokio::spawn(run_manifest_owner(owner, manifest_rx, rollover_ready_tx));
+        let raw_day_gate = Arc::new(RawDayGate::new());
+        let (activation_reply_tx, activation_reply_rx) = oneshot::channel();
+        manifest_tx
+            .send(ManifestCommand::Activate {
+                utc_day: expected_close.utc_day.clone(),
+                started_utc_ms: boundary_utc_ms - 10_000,
+                generation: expected_close.generation,
+                raw_day_gate: Arc::clone(&raw_day_gate),
+                deadline: None,
+                reply: activation_reply_tx,
+                ack_mode: ManifestActivationAckMode::Send,
+            })
+            .await
+            .unwrap();
+        activation_reply_rx.await.unwrap().unwrap();
+        assert_eq!(
+            raw_day_gate
+                .activate_or_stop_startup_after_manifest(
+                    expected_close.utc_day.clone(),
+                    expected_close.generation,
+                    None,
+                    StartupReleaseHandles {
+                        writers: Vec::new(),
+                        producers: Vec::new(),
+                    },
+                )
+                .await
+                .unwrap(),
+            StartupActivationOutcome::Released
+        );
+
+        let source_gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let runtime_stats = Arc::new(SourceQueueBackpressureStats::default());
+        runtime_stats
+            .install_raw_day_gate(Arc::clone(&raw_day_gate))
+            .unwrap();
+        let provenance = test_runtime_provenance("boundary-exit-poll-order");
+        let mut writer_handles =
+            start_writer_workers(&dataset_root, &provenance, &manifest_tx, &runtime_stats).unwrap();
+        let mut batches = LIVE_SOURCES
+            .iter()
+            .map(|source| ((*source).to_owned(), Vec::new()))
+            .collect::<BTreeMap<_, _>>();
+        let mut writer_queue_tracker = QueueDurationTracker::new("writer_chunk_queue");
+        let run_started = Instant::now();
+        let mut coordinator = RolloverCoordinatorState::new(ManifestActivationAckMode::Send);
+
+        let close = raw_day_gate
+            .prepare_rollover(&expected_close.utc_day, boundary_utc_ms)
+            .unwrap();
+        assert_eq!(close, expected_close);
+        for producer in LOGICAL_PRODUCERS {
+            raw_day_gate
+                .register_source_fence(producer, &close)
+                .unwrap();
+        }
+        assert_eq!(
+            raw_day_gate.seal_prepared_rollover(&close).await.unwrap(),
+            close
+        );
+
+        let (token_seen_tx, mut token_seen_rx) = mpsc::channel(LOGICAL_PRODUCERS.len());
+        let mut handles = Vec::new();
+        for (producer, source_kind) in [
+            ("polymarket", "polymarket_market"),
+            ("polymarket_rtds", "polymarket_rtds_chainlink_btc_usd"),
+            ("binance_depth", "binance_depth_update"),
+            ("binance_aggtrade", "binance_aggtrade"),
+        ] {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            handle_ingress_control(
+                IngressControl::DayBarrier {
+                    producer: producer.to_owned(),
+                    close: close.clone(),
+                    reply: reply_tx,
+                },
+                &mut writer_handles,
+                &mut batches,
+                &source_gaps,
+                &runtime_stats,
+                &mut writer_queue_tracker,
+                run_started,
+                &manifest_tx,
+                &mut coordinator,
+            )
+            .await
+            .unwrap();
+            let task_close = close.clone();
+            let task_token_seen_tx = token_seen_tx.clone();
+            handles.push(SourceTaskHandle::spawn(
+                source_kind,
+                async move {
+                    let release = reply_rx.await.unwrap().unwrap();
+                    let stop = match release {
+                        DayBarrierRelease::StopWithClose(actual) => {
+                            assert_eq!(order, BoundaryExitPollOrder::ExitFirst);
+                            actual
+                        }
+                        DayBarrierRelease::PrepareResume(mut token) => {
+                            assert_eq!(order, BoundaryExitPollOrder::CommitFirst);
+                            assert_eq!(token.producer, producer);
+                            assert_eq!(token.close, task_close);
+                            task_token_seen_tx.send(producer.to_owned()).await.unwrap();
+                            loop {
+                                let phase = token.phase_rx.borrow().clone();
+                                match phase {
+                                    ProducerReleasePhase::Stop(actual) => break actual,
+                                    ProducerReleasePhase::Held => {
+                                        token.phase_rx.changed().await.unwrap();
+                                    }
+                                    ProducerReleasePhase::FlushDeferred
+                                    | ProducerReleasePhase::ResumeSources => {
+                                        panic!(
+                                            "boundary exit must stop before producer release: producer={producer} phase={phase:?}"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        DayBarrierRelease::Resume => {
+                            panic!("boundary exit must not resume producer={producer}");
+                        }
+                    };
+                    assert_eq!(
+                        stop,
+                        RuntimeCloseIdentity::from_rollover_old_day(&task_close)
+                    );
+                    Err(CoordinatedSourceStop {
+                        producer: producer.to_owned(),
+                        close: stop,
+                    }
+                    .into())
+                },
+                SourceTaskObservationCell::default(),
+                Arc::clone(&raw_day_gate),
+            ));
+        }
+        drop(token_seen_tx);
+
+        let ready = timeout(Duration::from_secs(5), rollover_ready_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ready.close, close);
+        if order == BoundaryExitPollOrder::ExitFirst {
+            let PreparedRuntimeExit::Rollover(exit) = raw_day_gate
+                .prepare_runtime_exit_with_cause(boundary_utc_ms, RuntimeCloseCause::RunDeadline)
+                .unwrap()
+            else {
+                panic!("boundary exit must retain rollover ownership");
+            };
+            assert_eq!(exit.close, close);
+            let manifest = load_day_manifest(&old_day_dir).unwrap().unwrap();
+            assert_eq!(manifest_state(&manifest).unwrap(), "open");
+        }
+
+        let (runtime_exit_tx, mut runtime_exit_rx) = mpsc::channel(1);
+        let commit_first_trigger = if order == BoundaryExitPollOrder::CommitFirst {
+            let trigger_day_dir = old_day_dir.clone();
+            Some(tokio::spawn(async move {
+                let mut seen = BTreeSet::new();
+                for _ in LOGICAL_PRODUCERS {
+                    seen.insert(
+                        timeout(Duration::from_secs(5), token_seen_rx.recv())
+                            .await
+                            .unwrap()
+                            .unwrap(),
+                    );
+                }
+                assert_eq!(
+                    seen,
+                    LOGICAL_PRODUCERS
+                        .iter()
+                        .map(|producer| (*producer).to_owned())
+                        .collect()
+                );
+                let committed = load_day_manifest(&trigger_day_dir).unwrap().unwrap();
+                assert_eq!(manifest_state(&committed).unwrap(), "closed");
+                runtime_exit_tx
+                    .send(RuntimeExitRequest {
+                        observed_utc_ms: boundary_utc_ms,
+                        cause: RuntimeCloseCause::RunDeadline,
+                    })
+                    .await
+                    .unwrap();
+            }))
+        } else {
+            None
+        };
+        let (_event_tx, mut event_rx) =
+            bounded_event_queue::<InflightRawEvent>(DEFAULT_QUEUE_CAPACITY).unwrap();
+        let mut coverage = BTreeMap::new();
+        let mut received_rows = 0;
+        let mut average_event_bytes = 512;
+        let mut release_stop_issued = false;
+        let drive_outcome = drive_normal_rollover(
+            ready,
+            &manifest_tx,
+            &raw_day_gate,
+            &mut runtime_exit_rx,
+            &mut event_rx,
+            &mut writer_handles,
+            &mut batches,
+            &mut coverage,
+            &mut received_rows,
+            &mut average_event_bytes,
+            &source_gaps,
+            &runtime_stats,
+            &mut writer_queue_tracker,
+            run_started,
+            &mut coordinator,
+            &mut release_stop_issued,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(drive_outcome, RolloverCommitOutcome::PendingExit);
+        if let Some(trigger) = commit_first_trigger {
+            trigger.await.unwrap();
+        }
+        let manifest_after_drive = load_day_manifest(&old_day_dir).unwrap().unwrap();
+        assert_eq!(
+            manifest_state(&manifest_after_drive).unwrap(),
+            if order == BoundaryExitPollOrder::ExitFirst {
+                "open"
+            } else {
+                "closed"
+            }
+        );
+        let PreparedRuntimeExit::Rollover(exit) = raw_day_gate.prepared_runtime_exit().unwrap()
+        else {
+            panic!("boundary exit must remain pending until reports are complete");
+        };
+
+        let mut completed_terminations = Vec::new();
+        let mut completed_writer_outcome = None;
+        let fallback_sinks = BTreeMap::new();
+        let mut runtime_failure = None;
+        let completed = complete_pending_exit_rollover(
+            exit,
+            &mut handles,
+            &mut completed_terminations,
+            &fallback_sinks,
+            &mut event_rx,
+            &mut rollover_ready_rx,
+            &mut writer_handles,
+            &mut completed_writer_outcome,
+            &mut batches,
+            &mut coverage,
+            &mut received_rows,
+            &mut average_event_bytes,
+            &source_gaps,
+            &runtime_stats,
+            &mut writer_queue_tracker,
+            run_started,
+            &manifest_tx,
+            &mut coordinator,
+            &raw_day_gate,
+            &mut runtime_failure,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert!(!completed.unclean);
+        assert!(runtime_failure.is_none(), "{runtime_failure:?}");
+        assert!(source_gaps.lock().unwrap().is_empty());
+        assert_eq!(completed_terminations.len(), LOGICAL_PRODUCERS.len());
+        assert!(completed_terminations.iter().all(|termination| {
+            termination.kind == SourceTaskTerminationKind::CoordinatedAbort
+                && termination.error.is_none()
+        }));
+        let writer_outcome = completed_writer_outcome.unwrap();
+        assert_eq!(writer_outcome.outputs.len(), LIVE_SOURCES.len());
+        assert!(
+            writer_outcome.errors.is_empty(),
+            "{:?}",
+            writer_outcome.errors
+        );
+        assert!(writer_outcome.all_terminal, "{:?}", writer_outcome.errors);
+        assert!(
+            writer_outcome.all_close_proven,
+            "{:?}",
+            writer_outcome.errors
+        );
+
+        let old_manifest = load_day_manifest(&old_day_dir).unwrap().unwrap();
+        assert_eq!(manifest_state(&old_manifest).unwrap(), "closed");
+        assert_eq!(old_manifest["closure_reason"], "utc_day_barrier");
+        assert_eq!(
+            old_manifest["collection_day_coverage"]["state"],
+            "ended_known"
+        );
+        assert_eq!(
+            old_manifest["collection_day_coverage"]["ended_utc_ms"],
+            boundary_utc_ms
+        );
+        let old_digest = manifest_file_digest(&old_day_dir);
+        let next_day_dir =
+            typed_raw_root(&dataset_root).join(format!("utc_day={}", close.next_utc_day));
+        let next_manifest = load_day_manifest(&next_day_dir).unwrap().unwrap();
+        assert_eq!(manifest_state(&next_manifest).unwrap(), "open");
+        assert_eq!(
+            next_manifest["collection_day_coverage"]["state"],
+            "not_started"
+        );
+        assert_eq!(
+            next_manifest["collection_day_coverage"]["reactivated_within_day"],
+            false
+        );
+
+        owner_handle.abort();
+        let _ = owner_handle.await;
+        BoundaryExitPollOrderResult {
+            exit: completed,
+            old_manifest,
+            old_digest,
+            next_manifest,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reliable_boundary_close_has_one_manifest_digest_for_both_poll_orders() {
+        let tmp = tempdir().unwrap();
+        let exit_first = run_boundary_exit_poll_order(
+            &tmp.path().join("exit-first"),
+            BoundaryExitPollOrder::ExitFirst,
+        )
+        .await;
+        let commit_first = run_boundary_exit_poll_order(
+            &tmp.path().join("commit-first"),
+            BoundaryExitPollOrder::CommitFirst,
+        )
+        .await;
+
+        assert_eq!(exit_first.exit, commit_first.exit);
+        assert_eq!(exit_first.old_manifest, commit_first.old_manifest);
+        assert_eq!(exit_first.old_digest, commit_first.old_digest);
+        assert_eq!(exit_first.next_manifest, commit_first.next_manifest);
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum WriterRendezvousPollOrder {
+        CommonWriterPollFirst,
+        ReadyReceiveFirst,
+    }
+
+    struct WriterRendezvousPollOrderResult {
+        old_manifest: Value,
+        old_digest: String,
+        next_manifest: Value,
+    }
+
+    async fn run_writer_rendezvous_poll_order(
+        dataset_root: &Path,
+        order: WriterRendezvousPollOrder,
+    ) -> WriterRendezvousPollOrderResult {
+        fs::create_dir_all(dataset_root).unwrap();
+        let dataset_root = dataset_root.canonicalize().unwrap();
+        let boundary_utc_ms = 1_783_468_800_000;
+        let close = test_rollover_close(boundary_utc_ms);
+        let (mut owner, old_day_dir) = test_manifest_owner(&dataset_root, &close.utc_day);
+        owner
+            .activate_initial(&close.utc_day, boundary_utc_ms - 10_000, close.generation)
+            .unwrap();
+        let (manifest_tx, manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
+        let (rollover_ready_tx, mut rollover_ready_rx) = mpsc::channel(1);
+        let owner_handle = tokio::spawn(run_manifest_owner(owner, manifest_rx, rollover_ready_tx));
+        let raw_day_gate = Arc::new(RawDayGate::new());
+        raw_day_gate
+            .activate_startup(close.utc_day.clone(), close.generation)
+            .await
+            .unwrap();
+        assert_eq!(
+            raw_day_gate
+                .close_for_rollover(&close.utc_day, close.boundary_utc_ms)
+                .await
+                .unwrap(),
+            close
+        );
+
+        let mut coordinator = RolloverCoordinatorState::new(ManifestActivationAckMode::Send);
+        let mut producer_replies = Vec::new();
+        for producer in LOGICAL_PRODUCERS {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            coordinator
+                .register_producer_barrier((*producer).to_owned(), close.clone(), reply_tx)
+                .unwrap();
+            producer_replies.push(reply_rx);
+        }
+        for producer in &LOGICAL_PRODUCERS[..LOGICAL_PRODUCERS.len() - 1] {
+            manifest_tx
+                .send(ManifestCommand::ProducerBarrier {
+                    close: close.clone(),
+                    producer: (*producer).to_owned(),
+                    gaps: Vec::new(),
+                    operational_counters: BTreeMap::new(),
+                })
+                .await
+                .unwrap();
+        }
+        for source_kind in LIVE_SOURCES {
+            manifest_tx
+                .send(ManifestCommand::WriterDayFinalized {
+                    close: close.clone(),
+                    source_kind: (*source_kind).to_owned(),
+                    raw_day_gate: Arc::clone(&raw_day_gate),
+                })
+                .await
+                .unwrap();
+        }
+        let final_producer = LOGICAL_PRODUCERS.last().unwrap();
+        manifest_tx
+            .send(ManifestCommand::ProducerBarrier {
+                close: close.clone(),
+                producer: (*final_producer).to_owned(),
+                gaps: Vec::new(),
+                operational_counters: BTreeMap::new(),
+            })
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(1), async {
+            while raw_day_gate.writer_rendezvous_epoch().is_none() || rollover_ready_rx.len() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owner must publish the complete rendezvous before ready delivery");
+        let expected_post_fence_epoch = RuntimeEpoch {
+            utc_day: close.next_utc_day.clone(),
+            generation: close.next_generation,
+        };
+        assert_eq!(
+            raw_day_gate.writer_rendezvous_epoch(),
+            Some(expected_post_fence_epoch.clone())
+        );
+
+        let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel(1);
+        drop(writer_rx);
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        drop(result_tx);
+        let mut writer_handles = BTreeMap::from([(
+            "binance_aggtrade".to_owned(),
+            SourceWriterHandle {
+                tx: writer_tx,
+                queue_rows: Arc::new(AtomicU64::new(0)),
+                accepting_commands: Arc::new(Mutex::new(true)),
+                result_rx,
+                completed_result: None,
+                thread: Some(std::thread::spawn(|| {})),
+            },
+        )]);
+        if order == WriterRendezvousPollOrder::CommonWriterPollFirst {
+            let completion = poll_writer_completion(&mut writer_handles, &raw_day_gate, None)
+                .expect("the common writer poll must observe the disconnected report channel");
+            assert!(completion.worker_epoch.is_none());
+            assert_eq!(completion.rendezvous_epoch, Some(expected_post_fence_epoch));
+            let PreparedRuntimeExit::Rollover(exit) = raw_day_gate.prepared_runtime_exit().unwrap()
+            else {
+                panic!("writer terminal at the boundary must prepare a rollover exit");
+            };
+            assert!(!exit.unclean);
+            assert_eq!(rollover_ready_rx.len(), 1);
+        }
+        let ready = rollover_ready_rx.recv().await.unwrap();
+
+        let runtime_stats = Arc::new(SourceQueueBackpressureStats::default());
+        runtime_stats
+            .install_raw_day_gate(Arc::clone(&raw_day_gate))
+            .unwrap();
+        let source_gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let mut batches = LIVE_SOURCES
+            .iter()
+            .map(|source| ((*source).to_owned(), Vec::new()))
+            .collect::<BTreeMap<_, _>>();
+        let mut coverage = BTreeMap::new();
+        let mut received_rows = 0;
+        let mut average_event_bytes = 512;
+        let mut writer_queue_tracker = QueueDurationTracker::new("writer_chunk_queue");
+        let run_started = Instant::now();
+        let (_runtime_exit_tx, mut runtime_exit_rx) = mpsc::channel(1);
+        let (_event_tx, mut event_rx) =
+            bounded_event_queue::<InflightRawEvent>(DEFAULT_QUEUE_CAPACITY).unwrap();
+        let mut release_stop_issued = false;
+        assert_eq!(
+            drive_normal_rollover(
+                ready,
+                &manifest_tx,
+                &raw_day_gate,
+                &mut runtime_exit_rx,
+                &mut event_rx,
+                &mut writer_handles,
+                &mut batches,
+                &mut coverage,
+                &mut received_rows,
+                &mut average_event_bytes,
+                &source_gaps,
+                &runtime_stats,
+                &mut writer_queue_tracker,
+                run_started,
+                &mut coordinator,
+                &mut release_stop_issued,
+                None,
+            )
+            .await
+            .unwrap(),
+            RolloverCommitOutcome::PendingExit
+        );
+        assert!(!release_stop_issued);
+        for reply in producer_replies {
+            let DayBarrierRelease::StopWithClose(actual) = reply.await.unwrap().unwrap() else {
+                panic!("post-rendezvous writer terminal must never resume a producer");
+            };
+            assert_eq!(actual, RuntimeCloseIdentity::from_rollover_old_day(&close));
+        }
+        let PreparedRuntimeExit::Rollover(exit) = raw_day_gate.prepared_runtime_exit().unwrap()
+        else {
+            panic!("writer terminal must remain a pending rollover exit");
+        };
+        assert!(!exit.unclean);
+        assert_eq!(
+            coordinator
+                .finalize_pending_exit_after_reports(&exit, &manifest_tx)
+                .await
+                .unwrap(),
+            DurableMutationAck::Confirmed
+        );
+        raw_day_gate.clear_writer_rendezvous(&close).unwrap();
+        let writer_outcome =
+            stop_writer_workers_with_budget(writer_handles, Duration::from_secs(1)).await;
+        assert!(writer_outcome.all_terminal, "{:?}", writer_outcome.errors);
+
+        let old_manifest = load_day_manifest(&old_day_dir).unwrap().unwrap();
+        assert_eq!(
+            old_manifest["collection_day_coverage"]["state"],
+            "ended_known"
+        );
+        assert_eq!(
+            old_manifest["collection_day_coverage"]["ended_utc_ms"],
+            boundary_utc_ms
+        );
+        let old_digest = manifest_file_digest(&old_day_dir);
+        let next_day_dir =
+            typed_raw_root(&dataset_root).join(format!("utc_day={}", close.next_utc_day));
+        let next_manifest = load_day_manifest(&next_day_dir).unwrap().unwrap();
+        assert_eq!(
+            next_manifest["collection_day_coverage"]["state"],
+            "not_started"
+        );
+        assert_eq!(
+            next_manifest["collection_day_coverage"]["reactivated_within_day"],
+            false
+        );
+
+        drop(manifest_tx);
+        owner_handle.await.unwrap().unwrap();
+        WriterRendezvousPollOrderResult {
+            old_manifest,
+            old_digest,
+            next_manifest,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn writer_terminal_after_owner_rendezvous_has_one_digest_for_both_poll_orders() {
+        let tmp = tempdir().unwrap();
+        let writer_first = run_writer_rendezvous_poll_order(
+            &tmp.path().join("writer-first"),
+            WriterRendezvousPollOrder::CommonWriterPollFirst,
+        )
+        .await;
+        let ready_first = run_writer_rendezvous_poll_order(
+            &tmp.path().join("ready-first"),
+            WriterRendezvousPollOrder::ReadyReceiveFirst,
+        )
+        .await;
+
+        assert_eq!(writer_first.old_manifest, ready_first.old_manifest);
+        assert_eq!(writer_first.old_digest, ready_first.old_digest);
+        assert_eq!(writer_first.next_manifest, ready_first.next_manifest);
+    }
+
+    #[test]
+    fn unclean_pending_exit_closes_old_day_without_creating_new_day() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let close = test_rollover_close(1_783_468_800_000);
+        let (mut owner, old_day_dir) = test_manifest_owner(&dataset_root, &close.utc_day);
+        owner
+            .activate_initial(
+                &close.utc_day,
+                close.boundary_utc_ms - 10_000,
+                close.generation,
+            )
+            .unwrap();
+        for producer in LOGICAL_PRODUCERS {
+            owner
+                .record_producer_barrier(
+                    close.clone(),
+                    (*producer).to_owned(),
+                    &[],
+                    &BTreeMap::new(),
+                )
+                .unwrap();
+        }
+        for source in LIVE_SOURCES {
+            owner
+                .record_writer_ack(close.clone(), (*source).to_owned())
+                .unwrap();
+        }
+
+        owner
+            .commit_rollover_old_day(&close, ManifestRolloverCommitMode::UncleanOldDay)
+            .unwrap();
+        owner.finish_unclean_rollover(&close).unwrap();
+
+        let old = load_day_manifest(&old_day_dir).unwrap().unwrap();
+        assert_eq!(manifest_state(&old).unwrap(), "closed");
+        assert_eq!(
+            old["collection_day_coverage"]["state"],
+            "unclean_end_unknown"
+        );
+        assert!(old["collection_day_coverage"]["ended_utc_ms"].is_null());
+        let new_day_dir =
+            typed_raw_root(&dataset_root).join(format!("utc_day={}", close.next_utc_day));
+        assert!(load_day_manifest(&new_day_dir).unwrap().is_none());
+        assert!(owner.active_epoch.is_none());
+        assert!(owner.rollover.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn committed_rollover_with_dropped_ack_does_not_reopen_raw_gate() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let boundary_utc_ms = 1_783_468_800_000;
+        let close = test_rollover_close(boundary_utc_ms);
+        let (mut owner, old_day_dir) = test_manifest_owner(&dataset_root, &close.utc_day);
+        owner
+            .activate_initial(
+                &close.utc_day,
+                boundary_utc_ms - 1_000,
+                INITIAL_RAW_DAY_GENERATION,
+            )
+            .unwrap();
+        let (manifest_tx, manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
+        let (ready_tx, mut ready_rx) = mpsc::channel(1);
+        let owner_handle = tokio::spawn(run_manifest_owner(owner, manifest_rx, ready_tx));
+        let gate = Arc::new(RawDayGate::new());
+        gate.activate_startup(close.utc_day.clone(), close.generation)
+            .await
+            .unwrap();
+        let gate_close = gate
+            .close_for_rollover(&close.utc_day, close.boundary_utc_ms)
+            .await
+            .unwrap();
+        assert_eq!(gate_close, close);
+
+        let mut coordinator = RolloverCoordinatorState::new(ManifestActivationAckMode::Drop);
+        let mut producer_receivers = Vec::new();
+        for producer in LOGICAL_PRODUCERS {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            coordinator
+                .register_producer_barrier((*producer).to_owned(), close.clone(), reply_tx)
+                .unwrap();
+            producer_receivers.push(reply_rx);
+            manifest_tx
+                .send(ManifestCommand::ProducerBarrier {
+                    close: close.clone(),
+                    producer: (*producer).to_owned(),
+                    gaps: Vec::new(),
+                    operational_counters: BTreeMap::new(),
+                })
+                .await
+                .unwrap();
+        }
+        for source_kind in LIVE_SOURCES {
+            manifest_tx
+                .send(ManifestCommand::WriterDayFinalized {
+                    close: close.clone(),
+                    source_kind: (*source_kind).to_owned(),
+                    raw_day_gate: Arc::clone(&gate),
+                })
+                .await
+                .unwrap();
+        }
+        let ready = timeout(Duration::from_secs(1), ready_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        coordinator.latch_ready(ready).unwrap();
+        assert_eq!(
+            coordinator
+                .commit_old_day_once(
+                    ManifestRolloverCommitMode::Normal,
+                    &manifest_tx,
+                    Some(Arc::clone(&gate)),
+                    None,
+                )
+                .await
+                .unwrap(),
+            OldDayCommitAck::Confirmed
+        );
+        let mut release = coordinator.prepare_release_controller().unwrap();
+        let mut phase_receivers = Vec::new();
+        for receiver in producer_receivers {
+            let DayBarrierRelease::PrepareResume(token) = receiver.await.unwrap().unwrap() else {
+                panic!("producer must receive a two-stage release token");
+            };
+            token
+                .ack_tx
+                .send(ProducerReleaseAck {
+                    producer: token.producer.clone(),
+                    close: RuntimeCloseIdentity::from_rollover_old_day(&token.close),
+                    kind: ProducerReleaseAckKind::Armed,
+                    error: None,
+                })
+                .await
+                .unwrap();
+            phase_receivers.push(token.phase_rx);
+        }
+        while !release.all_armed() {
+            let ack = release.ack_rx.recv().await.unwrap();
+            release.accept_ack(ack).unwrap();
+        }
+        coordinator.mark_tokens_armed().unwrap();
+        let ActivationMutationAck::OutcomeUncertain(error) = coordinator
+            .activate_new_day_once(&manifest_tx, Arc::clone(&gate), None)
+            .await
+            .unwrap()
+        else {
+            panic!("dropped activation ack must be outcome-uncertain");
+        };
+        assert!(error.contains("activation reply dropped"));
+        release.stop();
+        assert!(matches!(gate.current_state(), RawDayGateState::Closing(_)));
+        for receiver in phase_receivers {
+            assert_eq!(
+                receiver.borrow().clone(),
+                ProducerReleasePhase::Stop(RuntimeCloseIdentity::from_rollover_old_day(&close))
+            );
+        }
+
+        let old_manifest = load_day_manifest(&old_day_dir).unwrap().unwrap();
+        assert_eq!(manifest_state(&old_manifest).unwrap(), "closed");
+        assert_eq!(
+            old_manifest["collection_day_coverage"]["state"],
+            "ended_known"
+        );
+        let new_day_dir =
+            typed_raw_root(&dataset_root).join(format!("utc_day={}", close.next_utc_day));
+        let new_manifest = load_day_manifest(&new_day_dir).unwrap().unwrap();
+        assert_eq!(new_manifest["collection_day_coverage"]["state"], "active");
+        assert_eq!(
+            new_manifest["collection_day_coverage"]["reactivated_within_day"],
+            false
+        );
+
+        owner_handle.abort();
+        let _ = owner_handle.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn activation_prepared_exit_wins_without_new_day_activation_or_resume() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let boundary_utc_ms = 1_783_468_800_000;
+        let close = test_rollover_close(boundary_utc_ms);
+        let (mut owner, old_day_dir) = test_manifest_owner(&dataset_root, &close.utc_day);
+        owner
+            .activate_initial(
+                &close.utc_day,
+                boundary_utc_ms - 1_000,
+                INITIAL_RAW_DAY_GENERATION,
+            )
+            .unwrap();
+        let (manifest_tx, manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
+        let (ready_tx, mut ready_rx) = mpsc::channel(1);
+        let owner_handle = tokio::spawn(run_manifest_owner(owner, manifest_rx, ready_tx));
+        let gate = Arc::new(RawDayGate::new());
+        gate.activate_startup(close.utc_day.clone(), close.generation)
+            .await
+            .unwrap();
+        assert_eq!(
+            gate.close_for_rollover(&close.utc_day, close.boundary_utc_ms)
+                .await
+                .unwrap(),
+            close
+        );
+
+        let mut coordinator = RolloverCoordinatorState::new(ManifestActivationAckMode::Send);
+        let mut producer_receivers = Vec::new();
+        for producer in LOGICAL_PRODUCERS {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            coordinator
+                .register_producer_barrier((*producer).to_owned(), close.clone(), reply_tx)
+                .unwrap();
+            producer_receivers.push(reply_rx);
+            manifest_tx
+                .send(ManifestCommand::ProducerBarrier {
+                    close: close.clone(),
+                    producer: (*producer).to_owned(),
+                    gaps: Vec::new(),
+                    operational_counters: BTreeMap::new(),
+                })
+                .await
+                .unwrap();
+        }
+        for source_kind in LIVE_SOURCES {
+            manifest_tx
+                .send(ManifestCommand::WriterDayFinalized {
+                    close: close.clone(),
+                    source_kind: (*source_kind).to_owned(),
+                    raw_day_gate: Arc::clone(&gate),
+                })
+                .await
+                .unwrap();
+        }
+        coordinator
+            .latch_ready(
+                timeout(Duration::from_secs(1), ready_rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            coordinator
+                .commit_old_day_once(
+                    ManifestRolloverCommitMode::Normal,
+                    &manifest_tx,
+                    Some(Arc::clone(&gate)),
+                    None,
+                )
+                .await
+                .unwrap(),
+            OldDayCommitAck::Confirmed
+        );
+        let mut release = coordinator.prepare_release_controller().unwrap();
+        let mut phase_receivers = Vec::new();
+        for receiver in producer_receivers {
+            let DayBarrierRelease::PrepareResume(token) = receiver.await.unwrap().unwrap() else {
+                panic!("producer must receive a two-stage release token");
+            };
+            token
+                .ack_tx
+                .send(ProducerReleaseAck {
+                    producer: token.producer.clone(),
+                    close: RuntimeCloseIdentity::from_rollover_old_day(&token.close),
+                    kind: ProducerReleaseAckKind::Armed,
+                    error: None,
+                })
+                .await
+                .unwrap();
+            phase_receivers.push(token.phase_rx);
+        }
+        while !release.all_armed() {
+            let ack = release.ack_rx.recv().await.unwrap();
+            release.accept_ack(ack).unwrap();
+        }
+        coordinator.mark_tokens_armed().unwrap();
+
+        let PreparedRuntimeExit::Rollover(exit) = gate
+            .prepare_runtime_exit_with_cause(boundary_utc_ms + 1, RuntimeCloseCause::OperatorStop)
+            .unwrap()
+        else {
+            panic!("an exit in the closed-old/new-unactivated window must remain PendingExit");
+        };
+        assert_eq!(
+            coordinator
+                .activate_new_day_once(&manifest_tx, Arc::clone(&gate), None)
+                .await
+                .unwrap(),
+            ActivationMutationAck::PreparedExitWon
+        );
+        release.stop();
+        for receiver in phase_receivers {
+            assert_eq!(
+                receiver.borrow().clone(),
+                ProducerReleasePhase::Stop(RuntimeCloseIdentity::from_rollover_old_day(&close))
+            );
+        }
+        assert_eq!(
+            coordinator
+                .finalize_pending_exit_after_reports(&exit, &manifest_tx)
+                .await
+                .unwrap(),
+            DurableMutationAck::Confirmed
+        );
+
+        let old_manifest = load_day_manifest(&old_day_dir).unwrap().unwrap();
+        assert_eq!(
+            old_manifest["collection_day_coverage"]["state"],
+            "ended_known"
+        );
+        let new_day_dir =
+            typed_raw_root(&dataset_root).join(format!("utc_day={}", close.next_utc_day));
+        let new_manifest = load_day_manifest(&new_day_dir).unwrap().unwrap();
+        assert_eq!(
+            new_manifest["collection_day_coverage"]["state"],
+            "not_started"
+        );
+        assert_eq!(
+            new_manifest["collection_day_coverage"]["reactivated_within_day"],
+            false
+        );
+
+        owner_handle.abort();
+        let _ = owner_handle.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pending_exit_synthetic_barriers_receive_exact_stop_and_finalize_cleanly() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let boundary_utc_ms = 1_783_468_800_000;
+        let close = test_rollover_close(boundary_utc_ms);
+        let (mut owner, old_day_dir) = test_manifest_owner(&dataset_root, &close.utc_day);
+        owner
+            .activate_initial(&close.utc_day, boundary_utc_ms - 1_000, close.generation)
+            .unwrap();
+        let (manifest_tx, manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
+        let (rollover_ready_tx, mut rollover_ready_rx) = mpsc::channel(1);
+        let owner_handle = tokio::spawn(run_manifest_owner(owner, manifest_rx, rollover_ready_tx));
+
+        let raw_day_gate = Arc::new(RawDayGate::new());
+        raw_day_gate
+            .activate_startup(close.utc_day.clone(), close.generation)
+            .await
+            .unwrap();
+        let PreparedRuntimeExit::Rollover(exit) = raw_day_gate
+            .prepare_runtime_exit_with_cause(boundary_utc_ms, RuntimeCloseCause::RunDeadline)
+            .unwrap()
+        else {
+            panic!("a boundary deadline must create PendingExit");
+        };
+        assert_eq!(exit.close, close);
+
+        let source_gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let runtime_stats = Arc::new(SourceQueueBackpressureStats::default());
+        runtime_stats
+            .install_raw_day_gate(Arc::clone(&raw_day_gate))
+            .unwrap();
+        let (event_tx, mut event_rx) =
+            bounded_event_queue::<InflightRawEvent>(DEFAULT_QUEUE_CAPACITY).unwrap();
+        let event_sink = SourceEventSink {
+            tx: event_tx,
+            gaps: Arc::clone(&source_gaps),
+            source_queue_backpressure: Arc::clone(&runtime_stats),
+            inflight_budget: InflightBudget::new(),
+            enqueue_lock: Arc::new(AsyncMutex::new(())),
+        };
+        let fallback_sinks = BTreeMap::from([
+            ("polymarket", event_sink.fork_logical_producer()),
+            ("polymarket_rtds", event_sink.fork_logical_producer()),
+            ("binance_depth", event_sink.fork_logical_producer()),
+            ("binance_aggtrade", event_sink.fork_logical_producer()),
+        ]);
+        drop(event_sink);
+
+        let source_close = RuntimeCloseIdentity::from_rollover_old_day(&close);
+        let mut handles = Vec::new();
+        for source_kind in [
+            "polymarket_market",
+            "polymarket_rtds_chainlink_btc_usd",
+            "binance_depth_update",
+            "binance_aggtrade",
+        ] {
+            let producer = logical_producer_for_source_task(source_kind)
+                .unwrap()
+                .to_owned();
+            let stop_close = source_close.clone();
+            handles.push(SourceTaskHandle::spawn(
+                source_kind,
+                async move {
+                    Err(CoordinatedSourceStop {
+                        producer,
+                        close: stop_close,
+                    }
+                    .into())
+                },
+                SourceTaskObservationCell::default(),
+                Arc::clone(&raw_day_gate),
+            ));
+        }
+
+        let provenance = test_runtime_provenance("pending-exit-synthetic-barrier");
+        let mut writer_handles =
+            start_writer_workers(&dataset_root, &provenance, &manifest_tx, &runtime_stats).unwrap();
+        let mut completed_terminations = Vec::new();
+        let mut completed_writer_outcome = None;
+        let mut batches = LIVE_SOURCES
+            .iter()
+            .map(|source| ((*source).to_owned(), Vec::new()))
+            .collect::<BTreeMap<_, _>>();
+        let mut coverage = BTreeMap::new();
+        let mut received_rows = 0;
+        let mut average_event_bytes = 512;
+        let mut writer_queue_tracker = QueueDurationTracker::new("writer_chunk_queue");
+        let run_started = Instant::now();
+        let mut coordinator = RolloverCoordinatorState::new(ManifestActivationAckMode::Send);
+        let mut runtime_failure = None;
+
+        let completed = complete_pending_exit_rollover(
+            exit,
+            &mut handles,
+            &mut completed_terminations,
+            &fallback_sinks,
+            &mut event_rx,
+            &mut rollover_ready_rx,
+            &mut writer_handles,
+            &mut completed_writer_outcome,
+            &mut batches,
+            &mut coverage,
+            &mut received_rows,
+            &mut average_event_bytes,
+            &source_gaps,
+            &runtime_stats,
+            &mut writer_queue_tracker,
+            run_started,
+            &manifest_tx,
+            &mut coordinator,
+            &raw_day_gate,
+            &mut runtime_failure,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert!(!completed.unclean);
+        assert!(runtime_failure.is_none(), "{runtime_failure:?}");
+        assert!(source_gaps.lock().unwrap().is_empty());
+        assert_eq!(completed_terminations.len(), LOGICAL_PRODUCERS.len());
+        assert!(completed_terminations.iter().all(|termination| {
+            termination.kind == SourceTaskTerminationKind::CoordinatedAbort
+                && termination.error.is_none()
+        }));
+        let writer_outcome = completed_writer_outcome.unwrap();
+        assert!(writer_outcome.all_terminal, "{:?}", writer_outcome.errors);
+        assert!(
+            writer_outcome.all_close_proven,
+            "{:?}",
+            writer_outcome.errors
+        );
+
+        let old_manifest = load_day_manifest(&old_day_dir).unwrap().unwrap();
+        assert_eq!(
+            old_manifest["collection_day_coverage"]["state"],
+            "ended_known"
+        );
+        let next_day_dir =
+            typed_raw_root(&dataset_root).join(format!("utc_day={}", close.next_utc_day));
+        let next_manifest = load_day_manifest(&next_day_dir).unwrap().unwrap();
+        assert_eq!(
+            next_manifest["collection_day_coverage"]["state"],
+            "not_started"
+        );
+        assert_eq!(
+            next_manifest["collection_day_coverage"]["reactivated_within_day"],
+            false
+        );
+
+        owner_handle.abort();
+        let _ = owner_handle.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn post_activation_exit_waits_for_all_flushes_then_stops_exact_next_generation() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let boundary_utc_ms = 1_783_468_800_000;
+        let close = test_rollover_close(boundary_utc_ms);
+        let (mut owner, _) = test_manifest_owner(&dataset_root, &close.utc_day);
+        owner
+            .activate_initial(&close.utc_day, boundary_utc_ms - 1_000, close.generation)
+            .unwrap();
+        let (manifest_tx, manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
+        let (rollover_ready_tx, mut rollover_ready_rx) = mpsc::channel(1);
+        let owner_handle = tokio::spawn(run_manifest_owner(owner, manifest_rx, rollover_ready_tx));
+        let raw_day_gate = Arc::new(RawDayGate::new());
+        raw_day_gate
+            .activate_startup(close.utc_day.clone(), close.generation)
+            .await
+            .unwrap();
+        assert_eq!(
+            raw_day_gate
+                .close_for_rollover(&close.utc_day, close.boundary_utc_ms)
+                .await
+                .unwrap(),
+            close
+        );
+
+        let source_gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let runtime_stats = Arc::new(SourceQueueBackpressureStats::default());
+        runtime_stats
+            .install_raw_day_gate(Arc::clone(&raw_day_gate))
+            .unwrap();
+        let provenance = test_runtime_provenance("post-activation-exit");
+        let mut writer_handles =
+            start_writer_workers(&dataset_root, &provenance, &manifest_tx, &runtime_stats).unwrap();
+        let mut batches = LIVE_SOURCES
+            .iter()
+            .map(|source| ((*source).to_owned(), Vec::new()))
+            .collect::<BTreeMap<_, _>>();
+        let mut writer_queue_tracker = QueueDurationTracker::new("writer_chunk_queue");
+        let run_started = Instant::now();
+        let mut coordinator = RolloverCoordinatorState::new(ManifestActivationAckMode::Send);
+
+        let (flush_seen_tx, mut flush_seen_rx) = mpsc::channel(LOGICAL_PRODUCERS.len());
+        let (allow_flush_tx, allow_flush_rx) = watch::channel(false);
+        let (final_phase_tx, mut final_phase_rx) = mpsc::channel(LOGICAL_PRODUCERS.len());
+        let mut producer_tasks = Vec::new();
+        for producer in LOGICAL_PRODUCERS {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            handle_ingress_control(
+                IngressControl::DayBarrier {
+                    producer: (*producer).to_owned(),
+                    close: close.clone(),
+                    reply: reply_tx,
+                },
+                &mut writer_handles,
+                &mut batches,
+                &source_gaps,
+                &runtime_stats,
+                &mut writer_queue_tracker,
+                run_started,
+                &manifest_tx,
+                &mut coordinator,
+            )
+            .await
+            .unwrap();
+            let producer = (*producer).to_owned();
+            let flush_seen_tx = flush_seen_tx.clone();
+            let mut allow_flush_rx = allow_flush_rx.clone();
+            let final_phase_tx = final_phase_tx.clone();
+            producer_tasks.push(tokio::spawn(async move {
+                let DayBarrierRelease::PrepareResume(mut token) = reply_rx.await.unwrap().unwrap()
+                else {
+                    panic!("normal rollover must issue a staged release token");
+                };
+                token
+                    .ack_tx
+                    .send(ProducerReleaseAck {
+                        producer: token.producer.clone(),
+                        close: RuntimeCloseIdentity::from_rollover_old_day(&token.close),
+                        kind: ProducerReleaseAckKind::Armed,
+                        error: None,
+                    })
+                    .await
+                    .unwrap();
+                loop {
+                    let phase = token.phase_rx.borrow().clone();
+                    if phase == ProducerReleasePhase::FlushDeferred {
+                        break;
+                    }
+                    token.phase_rx.changed().await.unwrap();
+                }
+                flush_seen_tx.send(()).await.unwrap();
+                while !*allow_flush_rx.borrow() {
+                    allow_flush_rx.changed().await.unwrap();
+                }
+                token
+                    .ack_tx
+                    .send(ProducerReleaseAck {
+                        producer: token.producer.clone(),
+                        close: RuntimeCloseIdentity::from_rollover_old_day(&token.close),
+                        kind: ProducerReleaseAckKind::Flushed,
+                        error: None,
+                    })
+                    .await
+                    .unwrap();
+                loop {
+                    let phase = token.phase_rx.borrow().clone();
+                    if matches!(
+                        phase,
+                        ProducerReleasePhase::Stop(_) | ProducerReleasePhase::ResumeSources
+                    ) {
+                        final_phase_tx.send((producer, phase)).await.unwrap();
+                        break;
+                    }
+                    token.phase_rx.changed().await.unwrap();
+                }
+            }));
+        }
+        drop(flush_seen_tx);
+        drop(final_phase_tx);
+        let ready = timeout(Duration::from_secs(2), rollover_ready_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let (runtime_exit_tx, mut runtime_exit_rx) = mpsc::channel(1);
+        let (event_tx, mut event_rx) =
+            bounded_event_queue::<InflightRawEvent>(DEFAULT_QUEUE_CAPACITY).unwrap();
+        let drive_manifest_tx = manifest_tx.clone();
+        let drive_gate = Arc::clone(&raw_day_gate);
+        let drive_gaps = Arc::clone(&source_gaps);
+        let drive_stats = Arc::clone(&runtime_stats);
+        let (drive_done_tx, mut drive_done_rx) = oneshot::channel();
+        let drive = async move {
+            let mut coverage = BTreeMap::new();
+            let mut received_rows = 0;
+            let mut average_event_bytes = 512;
+            let mut release_stop_issued = false;
+            let outcome = drive_normal_rollover(
+                ready,
+                &drive_manifest_tx,
+                &drive_gate,
+                &mut runtime_exit_rx,
+                &mut event_rx,
+                &mut writer_handles,
+                &mut batches,
+                &mut coverage,
+                &mut received_rows,
+                &mut average_event_bytes,
+                &drive_gaps,
+                &drive_stats,
+                &mut writer_queue_tracker,
+                run_started,
+                &mut coordinator,
+                &mut release_stop_issued,
+                None,
+            )
+            .await;
+            let _ = drive_done_tx.send(());
+            (outcome, release_stop_issued, writer_handles)
+        };
+        let expected_stop_day = close.next_utc_day.clone();
+        let expected_stop_generation = close.next_generation;
+        let orchestrator = async move {
+            for _ in LOGICAL_PRODUCERS {
+                timeout(Duration::from_secs(2), flush_seen_rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            runtime_exit_tx
+                .send(RuntimeExitRequest {
+                    observed_utc_ms: boundary_utc_ms + 1,
+                    cause: RuntimeCloseCause::OperatorStop,
+                })
+                .await
+                .unwrap();
+            sleep(Duration::from_millis(25)).await;
+            assert!(matches!(
+                drive_done_rx.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            allow_flush_tx.send_replace(true);
+
+            let mut stopped = BTreeSet::new();
+            let mut observed_stop = None;
+            for _ in LOGICAL_PRODUCERS {
+                let (producer, phase) = timeout(Duration::from_secs(2), final_phase_rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let ProducerReleasePhase::Stop(actual) = phase else {
+                    panic!("post-activation exit must never resume a producer");
+                };
+                assert_eq!(actual.utc_day, expected_stop_day);
+                assert_eq!(actual.generation, expected_stop_generation);
+                if let Some(expected) = observed_stop.as_ref() {
+                    assert_eq!(&actual, expected);
+                } else {
+                    observed_stop = Some(actual);
+                }
+                stopped.insert(producer);
+            }
+            assert_eq!(
+                stopped,
+                LOGICAL_PRODUCERS
+                    .iter()
+                    .map(|producer| (*producer).to_owned())
+                    .collect()
+            );
+            for task in producer_tasks {
+                task.await.unwrap();
+            }
+            drop(event_tx);
+            observed_stop.unwrap()
+        };
+
+        let ((outcome, release_stop_issued, writer_handles), observed_stop) =
+            tokio::join!(drive, orchestrator);
+        assert_eq!(outcome.unwrap(), RolloverCommitOutcome::ActivatedStopped);
+        assert!(release_stop_issued);
+        let PreparedRuntimeExit::SameDay(prepared_close) =
+            raw_day_gate.prepared_runtime_exit().unwrap()
+        else {
+            panic!("post-activation exit must belong to the new generation");
+        };
+        assert_eq!(prepared_close.identity, observed_stop);
+        assert!(matches!(
+            raw_day_gate.current_state(),
+            RawDayGateState::Closing(ref actual) if actual == &close
+        ));
+        assert!(source_gaps.lock().unwrap().is_empty());
+        let writer_outcome = shutdown_writer_workers_with_budget(
+            writer_handles,
+            prepared_close.identity.clone(),
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(writer_outcome.all_terminal, "{:?}", writer_outcome.errors);
+        assert!(
+            writer_outcome.all_close_proven,
+            "{:?}",
+            writer_outcome.errors
+        );
+
+        let new_day_dir =
+            typed_raw_root(&dataset_root).join(format!("utc_day={}", close.next_utc_day));
+        let new_manifest = load_day_manifest(&new_day_dir).unwrap().unwrap();
+        assert_eq!(new_manifest["collection_day_coverage"]["state"], "active");
+        assert_eq!(
+            new_manifest["collection_day_coverage"]["reactivated_within_day"],
+            false
+        );
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        manifest_tx
+            .send(ManifestCommand::Shutdown {
+                close: prepared_close.identity,
+                disposition: ManifestShutdownDisposition::EndedKnown {
+                    ended_utc_ms: prepared_close.ended_utc_ms,
+                },
+                gaps: Vec::new(),
+                operational_counters: BTreeMap::new(),
+                reply: shutdown_tx,
+            })
+            .await
+            .unwrap();
+        shutdown_rx.await.unwrap().unwrap();
+        owner_handle.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn rollover_rejects_wrong_generation_or_close_id() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let close = test_rollover_close(1_783_468_800_000);
+        let (mut owner, _) = test_manifest_owner(&dataset_root, &close.utc_day);
+        owner
+            .activate_initial(
+                &close.utc_day,
+                close.boundary_utc_ms - 1_000,
+                close.generation,
+            )
+            .unwrap();
+
+        let mut wrong_generation = close.clone();
+        wrong_generation.generation += 1;
+        wrong_generation.next_generation += 1;
+        assert!(
+            owner
+                .record_producer_barrier(
+                    wrong_generation,
+                    "polymarket".to_owned(),
+                    &[],
+                    &BTreeMap::new(),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("active epoch mismatch")
+        );
+
+        owner
+            .record_producer_barrier(
+                close.clone(),
+                "polymarket".to_owned(),
+                &[],
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        let mut wrong_close_id = close.clone();
+        wrong_close_id.close_id += 1;
+        assert!(
+            owner
+                .record_writer_ack(wrong_close_id, LIVE_SOURCES[0].to_owned())
+                .unwrap_err()
+                .to_string()
+                .contains("tuple mismatch")
+        );
+    }
+
+    #[test]
+    fn rejected_duplicate_or_late_producer_barrier_preserves_manifest_digest() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let close = test_rollover_close(1_783_468_800_000);
+        let (mut owner, day_dir) = test_manifest_owner(&dataset_root, &close.utc_day);
+        owner
+            .activate_initial(
+                &close.utc_day,
+                close.boundary_utc_ms - 1_000,
+                close.generation,
+            )
+            .unwrap();
+
+        owner
+            .record_producer_barrier(
+                close.clone(),
+                LOGICAL_PRODUCERS[0].to_owned(),
+                &[],
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        let rejected_counters = BTreeMap::from([(
+            LIVE_SOURCES[0].to_owned(),
+            SourceOperationalCounterDelta {
+                dropped_rows: 1,
+                ..SourceOperationalCounterDelta::default()
+            },
+        )]);
+        let digest_before_duplicate = manifest_file_digest(&day_dir);
+        let duplicate_error = owner
+            .record_producer_barrier(
+                close.clone(),
+                LOGICAL_PRODUCERS[0].to_owned(),
+                &["rejected_duplicate_gap".to_owned()],
+                &rejected_counters,
+            )
+            .unwrap_err();
+        assert!(
+            duplicate_error
+                .to_string()
+                .contains("duplicate logical producer barrier")
+        );
+        assert_eq!(
+            manifest_file_digest(&day_dir),
+            digest_before_duplicate,
+            "a rejected duplicate producer barrier must not change the disk manifest"
+        );
+
+        for producer in &LOGICAL_PRODUCERS[1..] {
+            owner
+                .record_producer_barrier(
+                    close.clone(),
+                    (*producer).to_owned(),
+                    &[],
+                    &BTreeMap::new(),
+                )
+                .unwrap();
+        }
+        let mut ready = None;
+        for source_kind in LIVE_SOURCES {
+            ready = owner
+                .record_writer_ack(close.clone(), (*source_kind).to_owned())
+                .unwrap()
+                .or(ready);
+        }
+        assert!(ready.is_some());
+
+        let digest_before_late = manifest_file_digest(&day_dir);
+        let late_error = owner
+            .record_producer_barrier(
+                close,
+                LOGICAL_PRODUCERS[0].to_owned(),
+                &["rejected_late_gap".to_owned()],
+                &rejected_counters,
+            )
+            .unwrap_err();
+        assert!(
+            late_error
+                .to_string()
+                .contains("producer barrier arrived after rollover ready")
+        );
+        assert_eq!(
+            manifest_file_digest(&day_dir),
+            digest_before_late,
+            "a rejected late producer barrier must not change the disk manifest"
+        );
+    }
 
     #[test]
     fn websocket_heartbeat_configs_are_channel_specific() {
@@ -10218,6 +20900,152 @@ mod tests {
         let rtds = bounded_rtds_ws_config();
         assert_eq!(rtds.heartbeat_interval, Duration::from_secs(5));
         assert_eq!(rtds.heartbeat_timeout, Duration::from_secs(15));
+    }
+
+    #[test]
+    fn source_specs_keep_production_endpoints_and_timings_private() {
+        let polymarket = PolymarketSourceSpec::production();
+        assert_eq!(
+            polymarket.gamma_endpoint,
+            "https://gamma-api.polymarket.com"
+        );
+        assert_eq!(
+            polymarket.market_ws_endpoint,
+            format!("{MARKET_WS_ENDPOINT}/ws/market")
+        );
+        assert_eq!(
+            polymarket.discovery_wait,
+            Duration::from_secs(DEFAULT_DISCOVERY_WAIT_SECS)
+        );
+        assert_eq!(polymarket.discovery_retry_delay, Duration::from_secs(10));
+        assert_eq!(
+            polymarket.first_event_timeout,
+            Duration::from_secs(MARKET_FIRST_EVENT_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            polymarket.freshness_timeout,
+            Duration::from_secs(MARKET_FRESHNESS_TIMEOUT_SECS)
+        );
+
+        let rtds = RtdsSourceSpec::production();
+        assert_eq!(rtds.endpoint, RTDS_WS_ENDPOINT);
+        assert_eq!(rtds.connect_timeout, Duration::from_secs(20));
+        assert_eq!(rtds.subscribe_timeout, Duration::from_secs(3));
+        assert_eq!(
+            rtds.freshness_timeout,
+            Duration::from_secs(RTDS_FRESHNESS_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            rtds.reconnect_window,
+            Duration::from_secs(RTDS_RECONNECT_WINDOW_SECS)
+        );
+        assert_eq!(
+            rtds.freshness_episode_timeout,
+            Duration::from_secs(RTDS_FRESHNESS_EPISODE_MAX_SECS)
+        );
+    }
+
+    #[tokio::test]
+    async fn polymarket_source_spec_uses_private_gamma_endpoint_and_millisecond_deadline() {
+        let dataset_root = tempdir().unwrap();
+        let dataset_root = dataset_root.path().canonicalize().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gamma_endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 2048];
+            let read = socket.read(&mut request).await.unwrap();
+            assert!(String::from_utf8_lossy(&request[..read]).starts_with("GET /markets"));
+            let body = "[]";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let (tx, _rx) = mpsc::channel(8);
+        let (_control_tx, control_rx) = mpsc::channel(POLYMARKET_CONTROL_CHANNEL_CAPACITY);
+        let mut spec = PolymarketSourceSpec::production();
+        spec.gamma_endpoint = gamma_endpoint;
+        spec.market_ws_endpoint = "ws://127.0.0.1:9/ws/market".to_owned();
+        spec.discovery_wait = Duration::ZERO;
+        spec.discovery_retry_delay = Duration::from_millis(1);
+        let started = Instant::now();
+
+        timeout(
+            Duration::from_secs(1),
+            run_polymarket_source_with_spec(
+                spec,
+                dataset_root,
+                SourceEventSink {
+                    tx,
+                    gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+                    source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+                    inflight_budget: InflightBudget::new(),
+                    enqueue_lock: Arc::new(AsyncMutex::new(())),
+                },
+                CollectorIdentity {
+                    host_id: "collector-test".to_owned(),
+                    region: "local-test".to_owned(),
+                },
+                Some(now_ms() + 50),
+                started,
+                control_rx,
+            ),
+        )
+        .await
+        .expect("private discovery timing must bound the production source loop")
+        .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(500));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rtds_source_spec_uses_private_endpoint_and_connect_timeout() {
+        let dataset_root = tempdir().unwrap();
+        let dataset_root = dataset_root.path().canonicalize().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+        let (accepted_tx, accepted_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            accepted_tx.send(()).unwrap();
+            sleep(Duration::from_secs(1)).await;
+        });
+        let (tx, _rx) = mpsc::channel(8);
+        let mut spec = RtdsSourceSpec::production();
+        spec.endpoint = endpoint;
+        spec.connect_timeout = Duration::from_millis(25);
+        let started = Instant::now();
+        let source = tokio::spawn(run_rtds_source_with_spec(
+            spec,
+            dataset_root,
+            SourceEventSink {
+                tx,
+                gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+                source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            CollectorIdentity {
+                host_id: "collector-test".to_owned(),
+                region: "local-test".to_owned(),
+            },
+            Some(Instant::now() + Duration::from_secs(1)),
+            started,
+        ));
+
+        accepted_rx.await.unwrap();
+        let error = timeout(Duration::from_millis(500), source)
+            .await
+            .expect("private connect timeout must bound the production source loop")
+            .unwrap()
+            .expect_err("an incomplete websocket handshake must not connect RTDS");
+        assert!(error.to_string().contains("connecting RTDS"), "{error}");
+        assert!(started.elapsed() < Duration::from_millis(500));
+        server.abort();
+        let _ = server.await;
     }
 
     async fn spawn_polymarket_book_burst_server(
@@ -10486,14 +21314,15 @@ mod tests {
 
     #[tokio::test]
     async fn all_producers_enqueue_crossed_startup_barrier_before_first_source_event() {
-        let initial_boundary = now_ms().saturating_sub(1);
-        for producer in ["polymarket", "polymarket_rtds"] {
+        let initial_boundary = now_ms().div_euclid(UTC_DAY_MS).saturating_mul(UTC_DAY_MS);
+        for producer in ["polymarket_rtds"] {
             let (tx, mut rx) = mpsc::channel(4);
             let marker_tx = tx.clone();
+            let (stats, gate, close) = prepared_gate_fixture(producer, initial_boundary).await;
             let sink = SourceEventSink {
                 tx,
                 gaps: Arc::new(Mutex::new(SourceGapStore::default())),
-                source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+                source_queue_backpressure: stats,
                 inflight_budget: InflightBudget::new(),
                 enqueue_lock: Arc::new(AsyncMutex::new(())),
             };
@@ -10508,29 +21337,39 @@ mod tests {
                 Ok(())
             };
 
-            run_logical_producer_with_day_barriers(
+            let producer_name = producer;
+            let wrapper = tokio::spawn(run_logical_producer_with_day_barriers(
                 producer,
                 sink,
                 Instant::now(),
                 initial_boundary,
                 source,
-            )
-            .await
-            .unwrap();
-
-            assert!(matches!(
-                rx.recv().await.unwrap().control,
-                Some(IngressControl::DayBarrier { producer: actual, .. }) if actual == producer
             ));
+
+            let barrier = rx.recv().await.unwrap();
+            let Some(IngressControl::DayBarrier {
+                producer: actual,
+                reply,
+                ..
+            }) = barrier.control
+            else {
+                panic!("expected startup-crossing day barrier");
+            };
+            assert_eq!(actual, producer_name);
+            commit_test_manifest_activation(&gate, &close);
+            gate.activate_after_rollover(&close).await.unwrap();
+            reply.send(Ok(DayBarrierRelease::Resume)).unwrap();
             assert!(rx.recv().await.unwrap().control.is_none());
+            wrapper.await.unwrap().unwrap();
         }
 
         let (tx, mut rx) = mpsc::channel(4);
         let marker_tx = tx.clone();
+        let (stats, gate, close) = prepared_gate_fixture("polymarket", initial_boundary).await;
         let sink = SourceEventSink {
             tx,
             gaps: Arc::new(Mutex::new(SourceGapStore::default())),
-            source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+            source_queue_backpressure: stats,
             inflight_budget: InflightBudget::new(),
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         };
@@ -10545,27 +21384,35 @@ mod tests {
                 .unwrap();
             Ok(())
         };
-        run_aggtrade_logical_producer_with_day_barriers(
+        let wrapper = tokio::spawn(run_polymarket_logical_producer_with_day_barriers(
             sink,
             control_tx,
             Instant::now(),
             initial_boundary,
             source,
-        )
-        .await
-        .unwrap();
-        assert!(matches!(
-            rx.recv().await.unwrap().control,
-            Some(IngressControl::DayBarrier { producer, .. }) if producer == "binance_aggtrade"
         ));
+        let barrier = rx.recv().await.unwrap();
+        let Some(IngressControl::DayBarrier {
+            producer, reply, ..
+        }) = barrier.control
+        else {
+            panic!("expected Polymarket startup-crossing day barrier");
+        };
+        assert_eq!(producer, "polymarket");
+        commit_test_manifest_activation(&gate, &close);
+        gate.activate_after_rollover(&close).await.unwrap();
+        reply.send(Ok(DayBarrierRelease::Resume)).unwrap();
         assert!(rx.recv().await.unwrap().control.is_none());
+        wrapper.await.unwrap().unwrap();
 
         let (tx, mut rx) = mpsc::channel(4);
         let marker_tx = tx.clone();
+        let (stats, gate, close) =
+            prepared_gate_fixture("binance_aggtrade", initial_boundary).await;
         let sink = SourceEventSink {
             tx,
             gaps: Arc::new(Mutex::new(SourceGapStore::default())),
-            source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+            source_queue_backpressure: stats,
             inflight_budget: InflightBudget::new(),
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         };
@@ -10580,30 +21427,81 @@ mod tests {
                 .unwrap();
             Ok(())
         };
-        run_depth_logical_producer_with_time_barriers(
+        let wrapper = tokio::spawn(run_aggtrade_logical_producer_with_day_barriers(
+            sink,
+            control_tx,
+            Instant::now(),
+            initial_boundary,
+            source,
+        ));
+        let barrier = rx.recv().await.unwrap();
+        let Some(IngressControl::DayBarrier {
+            producer, reply, ..
+        }) = barrier.control
+        else {
+            panic!("expected aggTrade startup-crossing day barrier");
+        };
+        assert_eq!(producer, "binance_aggtrade");
+        commit_test_manifest_activation(&gate, &close);
+        gate.activate_after_rollover(&close).await.unwrap();
+        reply.send(Ok(DayBarrierRelease::Resume)).unwrap();
+        assert!(rx.recv().await.unwrap().control.is_none());
+        wrapper.await.unwrap().unwrap();
+
+        let (tx, mut rx) = mpsc::channel(4);
+        let marker_tx = tx.clone();
+        let (stats, gate, close) = prepared_gate_fixture("binance_depth", initial_boundary).await;
+        let sink = SourceEventSink {
+            tx,
+            gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+            source_queue_backpressure: stats,
+            inflight_budget: InflightBudget::new(),
+            enqueue_lock: Arc::new(AsyncMutex::new(())),
+        };
+        let (control_tx, _control_rx) = mpsc::channel(1);
+        let source = async move {
+            marker_tx
+                .send(InflightRawEvent::for_test(test_raw_event(
+                    "binance_aggtrade",
+                    now_ms(),
+                )))
+                .await
+                .unwrap();
+            Ok(())
+        };
+        let wrapper = tokio::spawn(run_depth_logical_producer_with_time_barriers(
             sink,
             control_tx,
             Instant::now(),
             initial_boundary,
             next_utc_hour_boundary_ms(now_ms()),
             source,
-        )
-        .await
-        .unwrap();
-        assert!(matches!(
-            rx.recv().await.unwrap().control,
-            Some(IngressControl::DayBarrier { producer, .. }) if producer == "binance_depth"
         ));
+        let barrier = rx.recv().await.unwrap();
+        let Some(IngressControl::DayBarrier {
+            producer, reply, ..
+        }) = barrier.control
+        else {
+            panic!("expected depth startup-crossing day barrier");
+        };
+        assert_eq!(producer, "binance_depth");
+        commit_test_manifest_activation(&gate, &close);
+        gate.activate_after_rollover(&close).await.unwrap();
+        reply.send(Ok(DayBarrierRelease::Resume)).unwrap();
         assert!(rx.recv().await.unwrap().control.is_none());
+        wrapper.await.unwrap().unwrap();
     }
 
     #[tokio::test]
     async fn depth_hour_boundary_fences_snapshot_before_finalize_control() {
         let (tx, mut rx) = mpsc::channel(4);
+        let recv_time_utc_ms = 1_783_392_404_600;
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, recv_time_utc_ms).await;
         let sink = SourceEventSink {
             tx,
             gaps: Arc::new(Mutex::new(SourceGapStore::default())),
-            source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+            source_queue_backpressure: stats,
             inflight_budget: InflightBudget::new(),
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         };
@@ -10615,7 +21513,7 @@ mod tests {
             send_event(
                 &source_sink,
                 run_started,
-                test_binance_depth_snapshot_event(1_783_392_404_600, "bootstrap"),
+                test_binance_depth_snapshot_event(recv_time_utc_ms, "bootstrap"),
             )
             .await?;
             let control = control_rx.recv().await.ok_or_else(|| {
@@ -10651,10 +21549,12 @@ mod tests {
     #[tokio::test]
     async fn producer_barrier_cannot_overtake_an_old_day_event_waiting_for_queue_space() {
         let (tx, mut rx) = mpsc::channel(1);
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, 1_783_468_799_998).await;
         let sink = SourceEventSink {
             tx,
             gaps: Arc::new(Mutex::new(SourceGapStore::default())),
-            source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+            source_queue_backpressure: stats,
             inflight_budget: InflightBudget::new(),
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         };
@@ -10680,14 +21580,10 @@ mod tests {
             tokio::task::yield_now().await;
         }
         let barrier_sink = sink.clone();
+        let close = test_rollover_close(1_783_468_800_000);
+        let expected_close = close.clone();
         let barrier = tokio::spawn(async move {
-            send_day_barrier(
-                &barrier_sink,
-                run_started,
-                "binance_aggtrade",
-                "2026-07-07".to_owned(),
-            )
-            .await
+            send_day_barrier(&barrier_sink, run_started, "binance_aggtrade", close).await
         });
 
         let first = rx.recv().await.unwrap();
@@ -10696,24 +21592,36 @@ mod tests {
         let second = rx.recv().await.unwrap();
         assert_eq!(second.event.recv_time_utc_ms, 1_783_468_799_999);
         assert!(second.control.is_none());
-        barrier.await.unwrap().unwrap();
         let third = rx.recv().await.unwrap();
-        assert!(matches!(
-            third.control,
-            Some(IngressControl::DayBarrier {
-                producer,
-                utc_day
-            }) if producer == "binance_aggtrade" && utc_day == "2026-07-07"
-        ));
+        let Some(IngressControl::DayBarrier {
+            producer,
+            close,
+            reply,
+        }) = third.control
+        else {
+            panic!("expected producer day barrier");
+        };
+        assert_eq!(producer, "binance_aggtrade");
+        assert_eq!(close, expected_close);
+        reply.send(Ok(DayBarrierRelease::Resume)).unwrap();
+        barrier.await.unwrap().unwrap();
     }
 
     #[tokio::test]
-    async fn barrier_wait_keeps_polling_a_source_that_holds_the_enqueue_lock() {
+    async fn source_fence_drains_an_accepted_enqueue_before_barrier_freezes_polling() {
         let (tx, mut rx) = mpsc::channel(1);
+        let runtime_stats = Arc::new(SourceQueueBackpressureStats::default());
+        let gate = Arc::new(RawDayGate::new());
+        gate.activate_startup("2026-07-07".to_owned(), INITIAL_RAW_DAY_GENERATION)
+            .await
+            .unwrap();
+        runtime_stats
+            .install_raw_day_gate(Arc::clone(&gate))
+            .unwrap();
         let sink = SourceEventSink {
             tx,
             gaps: Arc::new(Mutex::new(SourceGapStore::default())),
-            source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+            source_queue_backpressure: runtime_stats,
             inflight_budget: InflightBudget::new(),
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         };
@@ -10743,9 +21651,29 @@ mod tests {
         let consumer = tokio::spawn(async move {
             let first = rx.recv().await.unwrap();
             let second = rx.recv().await.unwrap();
-            let barrier = rx.recv().await.unwrap();
+            let mut barrier = rx.recv().await.unwrap();
+            let Some(IngressControl::DayBarrier { reply, .. }) = barrier.control.take() else {
+                panic!("expected producer day barrier");
+            };
+            reply.send(Ok(DayBarrierRelease::Resume)).unwrap();
             (first, second, barrier)
         });
+
+        let close = test_rollover_close(1_783_468_800_000);
+        gate.prepare_rollover(&close.utc_day, close.boundary_utc_ms)
+            .unwrap();
+        for producer in LOGICAL_PRODUCERS {
+            gate.register_source_fence(producer, &close).unwrap();
+        }
+
+        let sealed = timeout(
+            Duration::from_secs(1),
+            seal_raw_day_while_source_runs(source.as_mut(), &gate, &close),
+        )
+        .await
+        .expect("source fence must drain the already accepted enqueue")
+        .unwrap();
+        assert!(matches!(sealed, RawDaySealOutcome::Sealed(_)));
 
         assert!(
             timeout(
@@ -10755,11 +21683,11 @@ mod tests {
                     &sink,
                     run_started,
                     "polymarket_rtds",
-                    "2026-07-07".to_owned(),
+                    close.clone(),
                 ),
             )
             .await
-            .expect("barrier must not deadlock behind the source enqueue lock")
+            .expect("barrier must proceed after the source fence froze polling")
             .unwrap()
             .is_none()
         );
@@ -10769,22 +21697,26 @@ mod tests {
             .unwrap();
         assert_eq!(first.event.recv_time_utc_ms, 1_783_468_799_998);
         assert_eq!(second.event.recv_time_utc_ms, 1_783_468_799_999);
-        assert!(matches!(
-            barrier.control,
-            Some(IngressControl::DayBarrier {
-                ref producer,
-                ref utc_day,
-            }) if producer == "polymarket_rtds" && utc_day == "2026-07-07"
-        ));
+        assert!(barrier.control.is_none());
+        assert_eq!(close.utc_day, "2026-07-07");
     }
 
     #[tokio::test]
     async fn aggtrade_day_flush_fences_source_local_pending_before_barrier() {
         let (tx, mut rx) = mpsc::channel(8);
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        let raw_day_gate = Arc::new(RawDayGate::new());
+        raw_day_gate
+            .activate_startup("2026-07-07".to_owned(), INITIAL_RAW_DAY_GENERATION)
+            .await
+            .unwrap();
+        stats
+            .install_raw_day_gate(Arc::clone(&raw_day_gate))
+            .unwrap();
         let sink = SourceEventSink {
             tx,
             gaps: Arc::new(Mutex::new(SourceGapStore::default())),
-            source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+            source_queue_backpressure: stats,
             inflight_budget: InflightBudget::new(),
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         };
@@ -10854,28 +21786,77 @@ mod tests {
                 test_raw_event("binance_aggtrade", 1_783_468_800_001),
             )
             .await?;
-            std::future::pending::<Result<()>>().await
+            Ok(())
         };
         tokio::pin!(source);
+        assert!(matches!(
+            futures::poll!(source.as_mut()),
+            std::task::Poll::Pending
+        ));
+        let close = prepare_rollover_for_producer(
+            &raw_day_gate,
+            "binance_aggtrade",
+            "2026-07-07",
+            1_783_468_800_000,
+        );
+        let consumer_gate = Arc::clone(&raw_day_gate);
+        let consumer_close = close.clone();
+        let consumer_stage = Arc::new(AtomicU64::new(0));
+        let stage = Arc::clone(&consumer_stage);
+        let consumer = tokio::spawn(async move {
+            let first = rx.recv().await.unwrap();
+            stage.store(1, Ordering::SeqCst);
+            let second = rx.recv().await.unwrap();
+            stage.store(2, Ordering::SeqCst);
+            let continuity = rx.recv().await.unwrap();
+            stage.store(3, Ordering::SeqCst);
+            let mut barrier = rx.recv().await.unwrap();
+            stage.store(4, Ordering::SeqCst);
+            let Some(IngressControl::DayBarrier { reply, .. }) = barrier.control.take() else {
+                panic!("expected aggTrade day barrier");
+            };
+            commit_test_manifest_activation(&consumer_gate, &consumer_close);
+            consumer_gate
+                .activate_after_rollover(&consumer_close)
+                .await
+                .unwrap();
+            stage.store(5, Ordering::SeqCst);
+            reply.send(Ok(DayBarrierRelease::Resume)).unwrap();
+            stage.store(6, Ordering::SeqCst);
+            let after_barrier = rx.recv().await.unwrap();
+            stage.store(7, Ordering::SeqCst);
+            (first, second, continuity, barrier, after_barrier)
+        });
 
-        assert!(
+        let fence_result = timeout(
+            Duration::from_secs(2),
             flush_aggtrade_and_send_day_barrier(
                 source.as_mut(),
                 &control_tx,
                 &sink,
                 run_started,
-                "2026-07-07",
-                "2026-07-08",
+                &raw_day_gate,
+                &close,
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "aggTrade fence timed out at consumer stage {}",
+                consumer_stage.load(Ordering::SeqCst)
             )
-            .await
-            .unwrap()
-            .is_none()
+        })
+        .unwrap();
+        assert!(
+            fence_result.is_none(),
+            "source returned before aggTrade day fence: {fence_result:?}"
         );
 
-        let first = rx.recv().await.unwrap();
-        let second = rx.recv().await.unwrap();
-        let continuity = rx.recv().await.unwrap();
-        let barrier = rx.recv().await.unwrap();
+        timeout(Duration::from_secs(1), source.as_mut())
+            .await
+            .expect("aggTrade source must emit the post-barrier event")
+            .unwrap();
+        let (first, second, continuity, barrier, after_barrier) = consumer.await.unwrap();
         assert_eq!(first.event.recv_time_utc_ms, 1_783_468_799_998);
         assert_eq!(second.event.recv_time_utc_ms, 1_783_468_799_999);
         assert!(matches!(
@@ -10883,25 +21864,16 @@ mod tests {
             Some(IngressControl::BinanceContinuity { ref utc_day, .. })
                 if utc_day == "2026-07-07"
         ));
-        assert!(matches!(
-            barrier.control,
-            Some(IngressControl::DayBarrier {
-                ref producer,
-                ref utc_day,
-            }) if producer == "binance_aggtrade" && utc_day == "2026-07-07"
-        ));
-        let after_barrier = tokio::select! {
-            message = rx.recv() => message.unwrap(),
-            result = &mut source => panic!("aggTrade source ended before post-barrier event: {result:?}"),
-        };
+        assert!(barrier.control.is_none());
         assert!(after_barrier.control.is_none());
         assert_eq!(after_barrier.event.recv_time_utc_ms, 1_783_468_800_001);
     }
 
-    #[test]
-    fn recovery_crossing_midnight_is_recorded_on_both_utc_days() {
-        let (tx, _rx) = mpsc::channel(1);
-        let stats = Arc::new(SourceQueueBackpressureStats::default());
+    #[tokio::test]
+    async fn transport_recovery_crossing_utc_boundary_is_gap_neutral() {
+        let (tx, mut rx) = mpsc::channel(2);
+        let boundary_utc_ms = now_ms().div_euclid(UTC_DAY_MS).saturating_mul(UTC_DAY_MS);
+        let (stats, gate, close) = prepared_gate_fixture("polymarket_rtds", boundary_utc_ms).await;
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
         let sink = SourceEventSink {
             tx,
@@ -10910,27 +21882,61 @@ mod tests {
             inflight_budget: InflightBudget::new(),
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         };
-        stats.set_recovery_active("binance_aggtrade", true);
+        stats.set_recovery_active("polymarket_rtds_chainlink_btc_usd", true);
 
-        record_recovery_boundary_gaps(&sink, "binance_aggtrade", "2026-07-07", "2026-07-08");
+        let producer = tokio::spawn(run_logical_producer_with_day_barriers(
+            "polymarket_rtds",
+            sink,
+            Instant::now(),
+            boundary_utc_ms,
+            async { Ok(()) },
+        ));
 
-        let gaps = gaps.lock().unwrap();
-        let expected = "source_recovery_overlaps_utc_day_boundary:binance_aggtrade";
-        assert_eq!(gaps.reasons_for_day("2026-07-07"), [expected]);
-        assert_eq!(gaps.reasons_for_day("2026-07-08"), [expected]);
-        assert_eq!(gaps.all_reasons(), [expected]);
+        let message = rx.recv().await.unwrap();
+        let Some(IngressControl::DayBarrier { reply, .. }) = message.control else {
+            panic!("expected RTDS day barrier");
+        };
+        commit_test_manifest_activation(&gate, &close);
+        gate.activate_after_rollover(&close).await.unwrap();
+        reply.send(Ok(DayBarrierRelease::Resume)).unwrap();
+        producer.await.unwrap().unwrap();
+        assert!(gaps.lock().unwrap().is_empty());
     }
 
     #[test]
-    fn manifest_owner_closes_only_after_all_producer_barriers_and_writer_acks() {
+    fn manifest_owner_requires_rendezvous_then_two_normal_rollover_cutpoints() {
         let tmp = tempdir().unwrap();
         let dataset_root = tmp.path().canonicalize().unwrap();
         let day = "2026-07-07";
-        let mut owner = ManifestOwnerState::new(
-            dataset_root.clone(),
-            test_daily_manifest_identity(),
-            BinanceAggTradeContinuityState::default(),
+        let boundary_utc_ms = 1_783_468_800_000;
+        let close = test_rollover_close(boundary_utc_ms);
+        let (mut owner, day_dir) = reactivated_manifest_owner(
+            &dataset_root,
+            day,
+            boundary_utc_ms - 2_000,
+            boundary_utc_ms - 1_000,
         );
+        let active_coverage = manifest_coverage_value(&day_dir);
+        assert_eq!(active_coverage["reactivated_within_day"], true);
+        owner
+            .update_continuity(
+                day.to_owned(),
+                BinanceAggTradeContinuityState {
+                    latest_epoch: Some(crate::binance_aggtrade::BinanceAggTradeContinuityEpoch {
+                        epoch_start_id: 10,
+                        last_observed_id: 12,
+                        last_contiguous_id: 12,
+                    }),
+                    unresolved_ranges: Vec::new(),
+                    initial_coverage_boundary_id: Some(10),
+                },
+            )
+            .unwrap();
+        assert_eq!(manifest_coverage_value(&day_dir), active_coverage);
+        owner
+            .record_gaps(day, &["sticky_coverage_test_gap".to_owned()])
+            .unwrap();
+        assert_eq!(manifest_coverage_value(&day_dir), active_coverage);
 
         let operational = BTreeMap::from([(
             "binance_aggtrade".to_owned(),
@@ -10941,36 +21947,64 @@ mod tests {
                 dropped_rows: 0,
             },
         )]);
+        owner
+            .record_operational_counters(day, &operational)
+            .unwrap();
+        assert_eq!(manifest_coverage_value(&day_dir), active_coverage);
         let no_operational_counters = BTreeMap::new();
-        for (index, producer) in LOGICAL_PRODUCERS.iter().enumerate() {
-            owner
-                .record_producer_barrier(
-                    day.to_owned(),
-                    (*producer).to_owned(),
-                    &[],
-                    if index == 0 {
-                        &operational
-                    } else {
-                        &no_operational_counters
-                    },
-                )
-                .unwrap();
+        for producer in LOGICAL_PRODUCERS {
+            assert!(
+                owner
+                    .record_producer_barrier(
+                        close.clone(),
+                        (*producer).to_owned(),
+                        &[],
+                        &no_operational_counters,
+                    )
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(manifest_coverage_value(&day_dir), active_coverage);
         }
         for source in &LIVE_SOURCES[..LIVE_SOURCES.len() - 1] {
-            owner
-                .record_writer_ack(day.to_owned(), (*source).to_owned())
-                .unwrap();
+            assert!(
+                owner
+                    .record_writer_ack(close.clone(), (*source).to_owned())
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(manifest_coverage_value(&day_dir), active_coverage);
         }
-        let day_dir = typed_raw_root(&dataset_root).join(format!("utc_day={day}"));
         let open = load_day_manifest(&day_dir).unwrap().unwrap();
         assert_eq!(manifest_state(&open).unwrap(), "open");
 
+        let ready = owner
+            .record_writer_ack(close.clone(), LIVE_SOURCES.last().unwrap().to_string())
+            .unwrap()
+            .expect("ten-participant rendezvous must become ready exactly once");
+        assert_eq!(manifest_coverage_value(&day_dir), active_coverage);
+        assert_eq!(ready.close, close);
+        assert_eq!(
+            manifest_state(&load_day_manifest(&day_dir).unwrap().unwrap()).unwrap(),
+            "open",
+            "rendezvous readiness alone must not close the old day"
+        );
+
         owner
-            .record_writer_ack(day.to_owned(), LIVE_SOURCES.last().unwrap().to_string())
+            .commit_rollover_old_day(&close, ManifestRolloverCommitMode::Normal)
             .unwrap();
         let closed = load_day_manifest(&day_dir).unwrap().unwrap();
         assert_eq!(manifest_state(&closed).unwrap(), "closed");
         assert_eq!(closed["closure_reason"], "utc_day_barrier");
+        assert_eq!(closed["collection_day_coverage"]["state"], "ended_known");
+        assert_eq!(
+            closed["collection_day_coverage"]["reactivated_within_day"],
+            true
+        );
+        assert_eq!(
+            closed["collection_day_coverage"]["ended_utc_ms"],
+            boundary_utc_ms
+        );
         assert_eq!(closed["producer_barriers"].as_array().unwrap().len(), 4);
         assert_eq!(closed["writer_finalize_acks"].as_array().unwrap().len(), 6);
         assert_eq!(closed["source_counters"].as_object().unwrap().len(), 6);
@@ -10995,6 +22029,21 @@ mod tests {
             1,
             "the UTC day root may contain only its one manifest file"
         );
+        let next_day_dir =
+            typed_raw_root(&dataset_root).join(format!("utc_day={}", close.next_utc_day));
+        assert!(!next_day_dir.exists());
+        owner.activate_rollover_new_day(&close).unwrap();
+        let active = load_day_manifest(&next_day_dir).unwrap().unwrap();
+        assert_eq!(manifest_state(&active).unwrap(), "open");
+        assert_eq!(active["collection_day_coverage"]["state"], "active");
+        assert_eq!(
+            active["collection_day_coverage"]["reactivated_within_day"],
+            false
+        );
+        assert_eq!(
+            active["collection_day_coverage"]["first_started_utc_ms"],
+            boundary_utc_ms
+        );
         assert!(
             owner
                 .record_gaps(day, &["late_old_day_gap".to_owned()])
@@ -11003,41 +22052,174 @@ mod tests {
     }
 
     #[test]
-    fn manifest_owner_shutdown_keeps_current_day_open() {
+    fn manifest_owner_unclean_rollover_preserves_reactivation() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let boundary_utc_ms = 1_783_468_800_000;
+        let close = test_rollover_close(boundary_utc_ms);
+        let (mut owner, day_dir) = reactivated_manifest_owner(
+            &dataset_root,
+            &close.utc_day,
+            boundary_utc_ms - 2_000,
+            boundary_utc_ms - 1_000,
+        );
+
+        for producer in LOGICAL_PRODUCERS {
+            assert!(
+                owner
+                    .record_producer_barrier(
+                        close.clone(),
+                        (*producer).to_owned(),
+                        &[],
+                        &BTreeMap::new(),
+                    )
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        for (index, source_kind) in LIVE_SOURCES.iter().enumerate() {
+            let ready = owner
+                .record_writer_ack(close.clone(), (*source_kind).to_owned())
+                .unwrap();
+            assert_eq!(ready.is_some(), index + 1 == LIVE_SOURCES.len());
+        }
+        owner
+            .commit_rollover_old_day(&close, ManifestRolloverCommitMode::UncleanOldDay)
+            .unwrap();
+        owner.finish_unclean_rollover(&close).unwrap();
+
+        let manifest = load_day_manifest(&day_dir).unwrap().unwrap();
+        assert_eq!(manifest_state(&manifest).unwrap(), "closed");
+        assert_eq!(manifest["closure_reason"], "unclean_rollover");
+        assert_eq!(
+            manifest["collection_day_coverage"]["state"],
+            "unclean_end_unknown"
+        );
+        assert!(manifest["collection_day_coverage"]["ended_utc_ms"].is_null());
+        assert_eq!(
+            manifest["collection_day_coverage"]["reactivated_within_day"],
+            true
+        );
+        assert!(
+            !typed_raw_root(&dataset_root)
+                .join(format!("utc_day={}", close.next_utc_day))
+                .exists()
+        );
+    }
+
+    #[test]
+    fn manifest_owner_shutdown_dispositions_keep_reactivation_sticky() {
+        let day = "2026-07-07";
+        let started_utc_ms = 1_783_392_400_000;
+        let ended_utc_ms = started_utc_ms + 1_000;
+        for (disposition, expected_state, expected_end) in [
+            (
+                ManifestShutdownDisposition::EndedKnown { ended_utc_ms },
+                "ended_known",
+                Some(ended_utc_ms),
+            ),
+            (
+                ManifestShutdownDisposition::UncleanEndUnknown,
+                "unclean_end_unknown",
+                None,
+            ),
+        ] {
+            let tmp = tempdir().unwrap();
+            let dataset_root = tmp.path().canonicalize().unwrap();
+            let (mut owner, day_dir) = reactivated_manifest_owner(
+                &dataset_root,
+                day,
+                started_utc_ms,
+                started_utc_ms + 500,
+            );
+            let operational = BTreeMap::from([(
+                day.to_owned(),
+                BTreeMap::from([(
+                    "polymarket_market".to_owned(),
+                    SourceOperationalCounterDelta {
+                        dropped_rows: 1,
+                        ..SourceOperationalCounterDelta::default()
+                    },
+                )]),
+            )]);
+            owner
+                .shutdown(
+                    &RuntimeCloseIdentity {
+                        utc_day: day.to_owned(),
+                        generation: INITIAL_RAW_DAY_GENERATION,
+                        close_id: 1,
+                    },
+                    &disposition,
+                    &["operator_shutdown".to_owned()],
+                    &operational,
+                )
+                .unwrap();
+
+            let manifest = load_day_manifest(&day_dir).unwrap().unwrap();
+            assert_eq!(manifest_state(&manifest).unwrap(), "open");
+            assert_eq!(manifest["gaps"][0], "operator_shutdown");
+            assert_eq!(
+                manifest["source_counters"]["polymarket_market"]["dropped_rows"],
+                1
+            );
+            assert!(manifest.get("closure_reason").is_none());
+            assert_eq!(manifest["collection_day_coverage"]["state"], expected_state);
+            assert_eq!(
+                manifest["collection_day_coverage"]["reactivated_within_day"],
+                true
+            );
+            match expected_end {
+                Some(expected_end) => assert_eq!(
+                    manifest["collection_day_coverage"]["ended_utc_ms"],
+                    expected_end
+                ),
+                None => assert!(manifest["collection_day_coverage"]["ended_utc_ms"].is_null()),
+            }
+        }
+    }
+
+    #[test]
+    fn rejected_shutdown_identity_preserves_manifest_digest() {
         let tmp = tempdir().unwrap();
         let dataset_root = tmp.path().canonicalize().unwrap();
         let day = "2026-07-07";
-        let mut owner = ManifestOwnerState::new(
-            dataset_root.clone(),
-            test_daily_manifest_identity(),
-            BinanceAggTradeContinuityState::default(),
-        );
-        owner.ensure_open(day).unwrap();
-        let operational = BTreeMap::from([(
+        let (mut owner, day_dir) = test_manifest_owner(&dataset_root, day);
+        let started_utc_ms = 1_783_392_400_000;
+        owner
+            .activate_initial(day, started_utc_ms, INITIAL_RAW_DAY_GENERATION)
+            .unwrap();
+
+        let rejected_operational = BTreeMap::from([(
             day.to_owned(),
             BTreeMap::from([(
-                "polymarket_market".to_owned(),
+                LIVE_SOURCES[0].to_owned(),
                 SourceOperationalCounterDelta {
                     dropped_rows: 1,
                     ..SourceOperationalCounterDelta::default()
                 },
             )]),
         )]);
-        owner
-            .shutdown(day, &["operator_shutdown".to_owned()], &operational)
-            .unwrap();
-
-        let manifest =
-            load_day_manifest(&typed_raw_root(&dataset_root).join(format!("utc_day={day}")))
-                .unwrap()
-                .unwrap();
-        assert_eq!(manifest_state(&manifest).unwrap(), "open");
-        assert_eq!(manifest["gaps"][0], "operator_shutdown");
+        let digest_before = manifest_file_digest(&day_dir);
+        let error = owner
+            .shutdown(
+                &RuntimeCloseIdentity {
+                    utc_day: day.to_owned(),
+                    generation: INITIAL_RAW_DAY_GENERATION + 1,
+                    close_id: 1,
+                },
+                &ManifestShutdownDisposition::EndedKnown {
+                    ended_utc_ms: started_utc_ms + 1_000,
+                },
+                &["rejected_shutdown_gap".to_owned()],
+                &rejected_operational,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("active epoch mismatch"));
         assert_eq!(
-            manifest["source_counters"]["polymarket_market"]["dropped_rows"],
-            1
+            manifest_file_digest(&day_dir),
+            digest_before,
+            "a rejected shutdown identity must not change the disk manifest"
         );
-        assert!(manifest.get("closure_reason").is_none());
     }
 
     #[test]
@@ -11069,6 +22251,281 @@ mod tests {
         assert!(error.to_string().contains("training_dataset_root_locked"));
         drop(first);
         lock_training_dataset_root(&dataset_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn live_manifest_owner_task_retains_the_dataset_lease_until_it_returns() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let utc_day = utc_day_string_from_ms(now_ms()).unwrap();
+        let (owner, _) = test_manifest_owner(&dataset_root, &utc_day);
+        let dataset_lease = Arc::new(lock_training_dataset_root(&dataset_root).unwrap());
+        let owner_lease = Arc::clone(&dataset_lease);
+        let (manifest_tx, manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
+        let (rollover_ready_tx, _rollover_ready_rx) = mpsc::channel(1);
+        let owner_handle = tokio::spawn(async move {
+            let _dataset_lease = owner_lease;
+            run_manifest_owner(owner, manifest_rx, rollover_ready_tx).await
+        });
+        drop(dataset_lease);
+
+        let error = lock_training_dataset_root(&dataset_root).unwrap_err();
+        assert!(error.to_string().contains("training_dataset_root_locked"));
+
+        drop(manifest_tx);
+        assert!(owner_handle.await.unwrap().is_err());
+        lock_training_dataset_root(&dataset_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn live_source_task_retains_the_dataset_lease_until_it_returns() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let dataset_lease = Arc::new(lock_training_dataset_root(&dataset_root).unwrap());
+        let handle = SourceTaskHandle::spawn_with_dataset_lease(
+            "binance_aggtrade",
+            std::future::pending::<Result<()>>(),
+            SourceTaskObservationCell::default(),
+            Arc::new(RawDayGate::new()),
+            Arc::clone(&dataset_lease),
+        );
+        drop(dataset_lease);
+
+        let error = lock_training_dataset_root(&dataset_root).unwrap_err();
+        assert!(error.to_string().contains("training_dataset_root_locked"));
+
+        handle.join.abort();
+        assert!(matches!(handle.join.await, Err(error) if error.is_cancelled()));
+        lock_training_dataset_root(&dataset_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_exit_watcher_aborts_its_task_when_the_owner_is_dropped() {
+        let (task_dropped_tx, task_dropped_rx) = oneshot::channel::<()>();
+        let watcher = RuntimeExitWatcher::new(tokio::spawn(async move {
+            let _task_dropped_tx = task_dropped_tx;
+            std::future::pending::<()>().await;
+        }));
+
+        drop(watcher);
+
+        assert!(
+            timeout(Duration::from_secs(1), task_dropped_rx)
+                .await
+                .unwrap()
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_manifest_shutdown_aborts_a_blocked_owner_before_a_late_mutation() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let close = test_rollover_close(1_783_468_800_000);
+        let (mut owner, day_dir) = test_manifest_owner(&dataset_root, &close.utc_day);
+        owner
+            .activate_initial(
+                &close.utc_day,
+                close.boundary_utc_ms - 1_000,
+                close.generation,
+            )
+            .unwrap();
+        let raw_day_gate = Arc::new(RawDayGate::new());
+        raw_day_gate
+            .activate_startup(close.utc_day.clone(), close.generation)
+            .await
+            .unwrap();
+        assert_eq!(
+            raw_day_gate
+                .close_for_rollover(&close.utc_day, close.boundary_utc_ms)
+                .await
+                .unwrap(),
+            close
+        );
+        for producer in LOGICAL_PRODUCERS {
+            assert!(
+                owner
+                    .record_producer_barrier(
+                        close.clone(),
+                        (*producer).to_owned(),
+                        &[],
+                        &BTreeMap::new(),
+                    )
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        for source_kind in &LIVE_SOURCES[..LIVE_SOURCES.len() - 1] {
+            assert!(
+                owner
+                    .record_writer_ack(close.clone(), (*source_kind).to_owned())
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let digest_before_final_ack = manifest_file_digest(&day_dir);
+        let (manifest_tx, manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
+        let (rollover_ready_tx, mut rollover_ready_rx) = mpsc::channel(1);
+        rollover_ready_tx
+            .try_send(ManifestRolloverReady {
+                close: close.clone(),
+            })
+            .unwrap();
+        let mut owner_handle =
+            tokio::spawn(run_manifest_owner(owner, manifest_rx, rollover_ready_tx));
+        manifest_tx
+            .send(ManifestCommand::WriterDayFinalized {
+                close: close.clone(),
+                source_kind: LIVE_SOURCES[LIVE_SOURCES.len() - 1].to_owned(),
+                raw_day_gate,
+            })
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(1), async {
+            while manifest_file_digest(&day_dir) == digest_before_final_ack {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owner must persist the complete rendezvous before blocking on ready send");
+        let digest_before = manifest_file_digest(&day_dir);
+
+        let (late_reply_tx, late_reply_rx) = oneshot::channel();
+        manifest_tx
+            .send(ManifestCommand::Shutdown {
+                close: RuntimeCloseIdentity::from_rollover_old_day(&close),
+                disposition: ManifestShutdownDisposition::EndedKnown {
+                    ended_utc_ms: close.boundary_utc_ms,
+                },
+                gaps: vec!["late_manifest_mutation".to_owned()],
+                operational_counters: BTreeMap::new(),
+                reply: late_reply_tx,
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            abort_manifest_owner_if_running(
+                &mut owner_handle,
+                Instant::now() + Duration::from_secs(1)
+            )
+            .await
+        );
+        assert!(late_reply_rx.await.is_err());
+        assert_eq!(manifest_file_digest(&day_dir), digest_before);
+        assert_eq!(rollover_ready_rx.recv().await.unwrap().close, close);
+    }
+
+    #[tokio::test]
+    async fn normally_joined_manifest_owner_is_not_reclassified_as_aborted() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let day = "2026-07-07";
+        let (mut owner, _) = test_manifest_owner(&dataset_root, day);
+        let started_utc_ms = 1_783_392_400_000;
+        owner
+            .activate_initial(day, started_utc_ms, INITIAL_RAW_DAY_GENERATION)
+            .unwrap();
+        let (manifest_tx, manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
+        let (rollover_ready_tx, _rollover_ready_rx) = mpsc::channel(1);
+        let mut owner_handle =
+            tokio::spawn(run_manifest_owner(owner, manifest_rx, rollover_ready_tx));
+        let (reply_tx, reply_rx) = oneshot::channel();
+        manifest_tx
+            .send(ManifestCommand::Shutdown {
+                close: RuntimeCloseIdentity {
+                    utc_day: day.to_owned(),
+                    generation: INITIAL_RAW_DAY_GENERATION,
+                    close_id: 1,
+                },
+                disposition: ManifestShutdownDisposition::EndedKnown {
+                    ended_utc_ms: started_utc_ms + 1_000,
+                },
+                gaps: Vec::new(),
+                operational_counters: BTreeMap::new(),
+                reply: reply_tx,
+            })
+            .await
+            .unwrap();
+        reply_rx.await.unwrap().unwrap();
+        timeout(Duration::from_secs(1), async {
+            while !owner_handle.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            !abort_manifest_owner_if_running(
+                &mut owner_handle,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+        );
+        owner_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn post_spawn_failure_converges_all_owned_runtime_resources() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let dataset_lease = Arc::new(lock_training_dataset_root(&dataset_root).unwrap());
+        let (manifest_tx, _manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
+        let runtime_stats = Arc::new(SourceQueueBackpressureStats::default());
+        let (mut writers, releases) = start_writer_workers_inner(
+            &dataset_root,
+            &test_runtime_provenance("post-spawn-convergence"),
+            &manifest_tx,
+            &runtime_stats,
+            None,
+            None,
+            Some(Arc::clone(&dataset_lease)),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(releases.is_empty());
+
+        let gate = current_day_active_gate().await;
+        let source = SourceTaskHandle::spawn_with_dataset_lease(
+            "binance_aggtrade",
+            std::future::pending::<Result<()>>(),
+            SourceTaskObservationCell::default(),
+            gate,
+            Arc::clone(&dataset_lease),
+        );
+        let mut sources = vec![source];
+
+        let owner_lease = Arc::clone(&dataset_lease);
+        let mut manifest_owner = tokio::spawn(async move {
+            let _dataset_lease = owner_lease;
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        let (watcher_dropped_tx, watcher_dropped_rx) = oneshot::channel::<()>();
+        let mut watcher = RuntimeExitWatcher::new(tokio::spawn(async move {
+            let _watcher_dropped_tx = watcher_dropped_tx;
+            std::future::pending::<()>().await;
+        }));
+
+        converge_spawned_runtime_resources(
+            &mut sources,
+            &mut writers,
+            &mut manifest_owner,
+            &mut watcher,
+            None,
+            None,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .await;
+        drop(dataset_lease);
+
+        assert!(sources.is_empty());
+        assert!(writers.is_empty());
+        assert!(manifest_owner.is_finished());
+        assert!(watcher.join.is_none());
+        assert!(watcher_dropped_rx.await.is_err());
+        assert!(lock_training_dataset_root(&dataset_root).is_ok());
     }
 
     #[test]
@@ -11150,6 +22607,32 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn source_recovery_outer_cycle_is_nonterminal_and_gap_neutral() {
+        let (tx, _rx) = mpsc::channel(1);
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        let sink = SourceEventSink {
+            tx,
+            gaps: Arc::clone(&gaps),
+            source_queue_backpressure: stats,
+            inflight_budget: InflightBudget::new(),
+            enqueue_lock: Arc::new(AsyncMutex::new(())),
+        };
+        let mut recovery = SourceRecoverySupervisor::new("test_source", 7);
+        recovery.inner_attempts = SOURCE_RECOVERY_CYCLE_MAX_ATTEMPTS;
+
+        let _ = wait_for_source_recovery(
+            &mut recovery,
+            &sink,
+            Some(Instant::now() + Duration::from_millis(2)),
+        )
+        .await;
+
+        assert_eq!(recovery.outer_cycles, 1);
+        assert!(gaps.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn market_supervisor_retries_only_transport_exhaustion() {
         assert!(market_source_error_is_retryable(
@@ -11195,14 +22678,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn enqueue_paths_reject_a_missing_raw_day_gate_in_test_builds() {
+        let recv_time_utc_ms = 1_783_392_404_599;
+        let (tx, mut rx) = mpsc::channel(2);
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        let sink = SourceEventSink {
+            tx,
+            gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+            source_queue_backpressure: stats,
+            inflight_budget: InflightBudget::new(),
+            enqueue_lock: Arc::new(AsyncMutex::new(())),
+        };
+
+        let rollover_error =
+            raw_day_gate_for_rollover(&sink, &utc_day_string_from_ms(recv_time_utc_ms).unwrap())
+                .await
+                .err()
+                .expect("a producer wrapper must not synthesize a missing raw-day gate");
+        assert!(
+            rollover_error
+                .to_string()
+                .contains("raw-day gate missing from producer rollover wrapper")
+        );
+
+        let send_error = send_event(
+            &sink,
+            Instant::now(),
+            test_raw_event("binance_aggtrade", recv_time_utc_ms),
+        )
+        .await
+        .expect_err("generic enqueue must reject a missing raw-day gate");
+        assert!(
+            send_error
+                .to_string()
+                .contains("raw-day gate missing from production enqueue path")
+        );
+
+        let committed = Arc::new(AtomicBool::new(false));
+        let committed_for_call = Arc::clone(&committed);
+        let fanout_error = send_polymarket_events_atomically(
+            &sink,
+            recv_time_utc_ms,
+            vec![InflightRawEvent::for_test(
+                test_polymarket_price_change_event(recv_time_utc_ms),
+            )],
+            move || {
+                committed_for_call.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await
+        .expect_err("Polymarket fan-out must reject a missing raw-day gate");
+        assert!(
+            fanout_error
+                .to_string()
+                .contains("raw-day gate missing from production Polymarket enqueue path")
+        );
+        assert!(!committed.load(Ordering::SeqCst));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn ingress_rejects_an_event_whose_real_enqueue_permit_was_removed() {
+        let recv_time_utc_ms = 1_783_392_404_599;
+        let (tx, mut rx) = mpsc::channel(1);
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, recv_time_utc_ms).await;
+        let sink = SourceEventSink {
+            tx,
+            gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+            source_queue_backpressure: Arc::clone(&stats),
+            inflight_budget: InflightBudget::new(),
+            enqueue_lock: Arc::new(AsyncMutex::new(())),
+        };
+        send_event(
+            &sink,
+            Instant::now(),
+            test_raw_event("binance_aggtrade", recv_time_utc_ms),
+        )
+        .await
+        .unwrap();
+        let mut inflight_event = rx.recv().await.unwrap();
+        assert!(inflight_event.raw_day_permit.take().is_some());
+
+        let mut writers = BTreeMap::new();
+        let mut batches = BTreeMap::new();
+        let mut coverage = BTreeMap::new();
+        let mut received_rows = 0;
+        let mut average_event_bytes = 0;
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let mut writer_queue_tracker = QueueDurationTracker::new("writer_queue");
+        let (manifest_tx, _manifest_rx) = mpsc::channel(1);
+        let mut rollover_coordinator =
+            RolloverCoordinatorState::new(ManifestActivationAckMode::Send);
+
+        let error = process_ingress_event(
+            inflight_event,
+            &mut writers,
+            &mut batches,
+            &mut coverage,
+            &mut received_rows,
+            &mut average_event_bytes,
+            &gaps,
+            &stats,
+            &mut writer_queue_tracker,
+            Instant::now(),
+            &manifest_tx,
+            &mut rollover_coordinator,
+        )
+        .await
+        .expect_err("ingress must reject a missing raw-day permit");
+        assert!(
+            error
+                .to_string()
+                .contains("production raw event missing day/generation permit")
+        );
+        assert_eq!(received_rows, 0);
+        assert!(coverage.is_empty());
+        assert!(batches.is_empty());
+    }
+
+    #[tokio::test]
     async fn send_event_accepts_exact_one_mib_owned_row_and_rejects_one_byte_more() {
         let budget = InflightBudget::new();
         let (tx, mut rx) = mpsc::channel(2);
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, 1_783_392_404_599).await;
         let sink = SourceEventSink {
             tx,
             gaps: Arc::clone(&gaps),
-            source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+            source_queue_backpressure: stats,
             inflight_budget: budget.clone(),
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         };
@@ -11243,10 +22849,12 @@ mod tests {
         let original_bytes = owned_event_bytes(&event);
         let budget = InflightBudget::new();
         let (tx, mut rx) = mpsc::channel(2);
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, event.recv_time_utc_ms).await;
         let sink = SourceEventSink {
             tx,
             gaps: Arc::new(Mutex::new(SourceGapStore::default())),
-            source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+            source_queue_backpressure: stats,
             inflight_budget: budget.clone(),
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         };
@@ -11276,6 +22884,7 @@ mod tests {
     async fn short_source_queue_backpressure_waits_without_dropping() {
         let (tx, mut rx) = mpsc::channel(1);
         let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, 1_783_392_404_599).await;
         let sink = SourceEventSink {
             tx,
             gaps: Arc::new(Mutex::new(SourceGapStore::default())),
@@ -11314,10 +22923,12 @@ mod tests {
         let budget = InflightBudget::new();
         let (tx, rx) = mpsc::channel(1);
         drop(rx);
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, 1_783_392_404_599).await;
         let sink = SourceEventSink {
             tx,
             gaps: Arc::new(Mutex::new(SourceGapStore::default())),
-            source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+            source_queue_backpressure: stats,
             inflight_budget: budget.clone(),
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         };
@@ -11359,7 +22970,22 @@ mod tests {
 
     #[tokio::test]
     async fn completed_source_task_is_detected_during_runtime() {
-        let handle = tokio::spawn(async { Ok::<(), Box<dyn Error + Send + Sync>>(()) });
+        let gate = Arc::new(RawDayGate::new());
+        gate.activate_startup("2026-07-17".to_owned(), INITIAL_RAW_DAY_GENERATION)
+            .await
+            .unwrap();
+        let observation = SourceTaskObservationCell::default();
+        let handle = SourceTaskHandle::spawn(
+            "binance_aggtrade",
+            observe_inner_source_return(
+                "binance_aggtrade",
+                async { Ok::<(), Box<dyn Error + Send + Sync>>(()) },
+                observation.clone(),
+                Arc::clone(&gate),
+            ),
+            observation,
+            gate,
+        );
         timeout(Duration::from_secs(1), async {
             while !handle.is_finished() {
                 tokio::task::yield_now().await;
@@ -11367,9 +22993,414 @@ mod tests {
         })
         .await
         .unwrap();
-        let handles = vec![("binance_aggtrade", handle)];
+        let handles = vec![handle];
 
         assert_eq!(finished_source_task(&handles), Some("binance_aggtrade"));
+        assert_eq!(
+            source_task_ended_unexpectedly("binance_aggtrade"),
+            "source_task_ended_unexpectedly:binance_aggtrade"
+        );
+    }
+
+    async fn current_day_active_gate() -> Arc<RawDayGate> {
+        let gate = Arc::new(RawDayGate::new());
+        gate.activate_startup(
+            utc_day_string_from_ms(now_ms()).unwrap(),
+            INITIAL_RAW_DAY_GENERATION,
+        )
+        .await
+        .unwrap();
+        gate
+    }
+
+    fn test_runtime_close(gate: &RawDayGate) -> RuntimeCloseIdentity {
+        let PreparedRuntimeExit::SameDay(close) = gate.prepare_runtime_exit(now_ms()).unwrap()
+        else {
+            panic!("test close must remain in the current UTC day");
+        };
+        close.identity
+    }
+
+    #[tokio::test]
+    async fn source_abort_requires_one_exact_task_generation_close_permit() {
+        let gate = current_day_active_gate().await;
+        let close = test_runtime_close(&gate);
+
+        let observation = SourceTaskObservationCell::default();
+        let mut exact = SourceTaskHandle::spawn(
+            "polymarket_rtds_chainlink_btc_usd",
+            std::future::pending::<Result<()>>(),
+            observation,
+            Arc::clone(&gate),
+        );
+        exact.abort_with_permit(&close).unwrap();
+        assert!(exact.abort_with_permit(&close).is_err());
+        let exact = exact.await_termination(&close).await;
+        assert_eq!(exact.kind, SourceTaskTerminationKind::CoordinatedAbort);
+        assert!(exact.observed_utc_ms.is_some());
+        assert_eq!(
+            exact.epoch,
+            Some(RuntimeEpoch {
+                utc_day: close.utc_day.clone(),
+                generation: close.generation,
+            })
+        );
+
+        let observation = SourceTaskObservationCell::default();
+        let missing = SourceTaskHandle::spawn(
+            "polymarket_rtds_chainlink_btc_usd",
+            std::future::pending::<Result<()>>(),
+            observation,
+            Arc::clone(&gate),
+        );
+        missing.abort_without_permit();
+        let missing = missing.await_termination(&close).await;
+        assert_eq!(missing.kind, SourceTaskTerminationKind::Unclean);
+        let Some(PreparedRuntimeExit::SameDay(prepared)) = gate.prepared_runtime_exit() else {
+            panic!("missing abort permit must retain the same-day close");
+        };
+        assert!(prepared.unclean);
+
+        let observation = SourceTaskObservationCell::default();
+        let mut wrong = SourceTaskHandle::spawn(
+            "polymarket_rtds_chainlink_btc_usd",
+            std::future::pending::<Result<()>>(),
+            observation,
+            Arc::clone(&gate),
+        );
+        wrong.abort_permit = Some(SourceAbortPermit {
+            source_kind: wrong.source_kind,
+            close: RuntimeCloseIdentity {
+                close_id: close.close_id.saturating_add(1),
+                ..close.clone()
+            },
+            observed_utc_ms: now_ms(),
+            epoch: RuntimeEpoch {
+                utc_day: close.utc_day.clone(),
+                generation: close.generation,
+            },
+        });
+        wrong.join.abort();
+        let wrong = wrong.await_termination(&close).await;
+        assert_eq!(wrong.kind, SourceTaskTerminationKind::Unclean);
+    }
+
+    #[tokio::test]
+    async fn matching_abort_permit_never_masks_a_source_task_panic() {
+        let gate = current_day_active_gate().await;
+        let close = test_runtime_close(&gate);
+        let (panic_tx, panic_rx) = oneshot::channel::<()>();
+        let observation = SourceTaskObservationCell::default();
+        let observed_gate = Arc::clone(&gate);
+        let mut handle = SourceTaskHandle::spawn(
+            "polymarket_rtds_chainlink_btc_usd",
+            async move {
+                let _ = panic_rx.await;
+                panic!("source panic after close permit registration");
+            },
+            observation,
+            gate,
+        );
+        handle.abort_permit = Some(SourceAbortPermit {
+            source_kind: handle.source_kind,
+            close: close.clone(),
+            observed_utc_ms: now_ms(),
+            epoch: RuntimeEpoch {
+                utc_day: close.utc_day.clone(),
+                generation: close.generation,
+            },
+        });
+        panic_tx.send(()).unwrap();
+        let termination = handle.await_termination(&close).await;
+        assert_eq!(termination.kind, SourceTaskTerminationKind::Unclean);
+        assert!(termination.observed_utc_ms.is_some());
+        assert_eq!(
+            termination.epoch,
+            Some(RuntimeEpoch {
+                utc_day: close.utc_day.clone(),
+                generation: close.generation,
+            })
+        );
+        let Some(PreparedRuntimeExit::SameDay(prepared)) = observed_gate.prepared_runtime_exit()
+        else {
+            panic!("panic must retain the same-day close");
+        };
+        assert!(prepared.unclean);
+        assert!(
+            termination
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("task") || error.contains("panic"))
+        );
+    }
+
+    #[tokio::test]
+    async fn source_report_keeps_inner_return_time_before_late_wrapper_detection() {
+        let gate = current_day_active_gate().await;
+        let observation = SourceTaskObservationCell::default();
+        let inner = observe_inner_source_return(
+            "binance_aggtrade",
+            async { Ok(()) },
+            observation.clone(),
+            Arc::clone(&gate),
+        );
+        let handle = SourceTaskHandle::spawn(
+            "binance_aggtrade",
+            async move {
+                inner.await?;
+                sleep(Duration::from_millis(200)).await;
+                Ok(())
+            },
+            observation,
+            Arc::clone(&gate),
+        );
+        let close = test_runtime_close(&gate);
+        let detected_utc_ms = now_ms();
+        let termination = handle.await_termination(&close).await;
+        assert_eq!(termination.kind, SourceTaskTerminationKind::ReliableReturn);
+        let observed_utc_ms = termination.observed_utc_ms.unwrap();
+        assert!(detected_utc_ms <= observed_utc_ms.saturating_add(25));
+        assert!(now_ms().saturating_sub(observed_utc_ms) >= 150);
+    }
+
+    #[tokio::test]
+    async fn source_termination_distinguishes_inner_wrapper_and_exact_stop_proofs() {
+        let inner_gate = current_day_active_gate().await;
+        let inner_observation = SourceTaskObservationCell::default();
+        let inner = SourceTaskHandle::spawn(
+            "binance_aggtrade",
+            observe_inner_source_return(
+                "binance_aggtrade",
+                async {
+                    Err::<(), Box<dyn Error + Send + Sync>>(
+                        io::Error::other("inner source failed").into(),
+                    )
+                },
+                inner_observation.clone(),
+                Arc::clone(&inner_gate),
+            ),
+            inner_observation,
+            Arc::clone(&inner_gate),
+        );
+        timeout(Duration::from_secs(1), async {
+            while !inner.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let Some(PreparedRuntimeExit::SameDay(inner_close)) = inner_gate.prepared_runtime_exit()
+        else {
+            panic!("inner return must prepare a same-day close");
+        };
+        let inner = inner.await_termination(&inner_close.identity).await;
+        assert_eq!(inner.kind, SourceTaskTerminationKind::ReliableReturn);
+        assert!(
+            inner
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("inner source failed"))
+        );
+
+        let wrapper_gate = current_day_active_gate().await;
+        let wrapper_observation = SourceTaskObservationCell::default();
+        let inner_observation = wrapper_observation.clone();
+        let observed_gate = Arc::clone(&wrapper_gate);
+        let wrapper = SourceTaskHandle::spawn(
+            "binance_aggtrade",
+            async move {
+                observe_inner_source_return(
+                    "binance_aggtrade",
+                    async { Ok(()) },
+                    inner_observation,
+                    observed_gate,
+                )
+                .await?;
+                Err(io::Error::other("wrapper failed after inner return").into())
+            },
+            wrapper_observation,
+            Arc::clone(&wrapper_gate),
+        );
+        timeout(Duration::from_secs(1), async {
+            while !wrapper.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let Some(PreparedRuntimeExit::SameDay(wrapper_close)) =
+            wrapper_gate.prepared_runtime_exit()
+        else {
+            panic!("inner return before wrapper failure must prepare a same-day close");
+        };
+        let wrapper = wrapper.await_termination(&wrapper_close.identity).await;
+        assert_eq!(wrapper.kind, SourceTaskTerminationKind::Unclean);
+        let Some(PreparedRuntimeExit::SameDay(prepared)) = wrapper_gate.prepared_runtime_exit()
+        else {
+            panic!("wrapper failure must retain the same-day close");
+        };
+        assert!(prepared.unclean);
+        assert!(
+            wrapper
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("wrapper failed after inner return"))
+        );
+
+        let exact_gate = current_day_active_gate().await;
+        let exact_close = test_runtime_close(&exact_gate);
+        let exact_stop = CoordinatedSourceStop {
+            producer: "binance_aggtrade".to_owned(),
+            close: exact_close.clone(),
+        };
+        let exact = SourceTaskHandle::spawn(
+            "binance_aggtrade",
+            async move { Err(exact_stop.into()) },
+            SourceTaskObservationCell::default(),
+            exact_gate,
+        )
+        .await_termination(&exact_close)
+        .await;
+        assert_eq!(exact.kind, SourceTaskTerminationKind::CoordinatedAbort);
+        assert!(exact.error.is_none());
+
+        let wrong_gate = current_day_active_gate().await;
+        let wrong_close = test_runtime_close(&wrong_gate);
+        let wrong_stop = CoordinatedSourceStop {
+            producer: "binance_depth".to_owned(),
+            close: wrong_close.clone(),
+        };
+        let observed_wrong_gate = Arc::clone(&wrong_gate);
+        let wrong = SourceTaskHandle::spawn(
+            "binance_aggtrade",
+            async move { Err(wrong_stop.into()) },
+            SourceTaskObservationCell::default(),
+            wrong_gate,
+        )
+        .await_termination(&wrong_close)
+        .await;
+        assert_eq!(wrong.kind, SourceTaskTerminationKind::Unclean);
+        let Some(PreparedRuntimeExit::SameDay(prepared)) =
+            observed_wrong_gate.prepared_runtime_exit()
+        else {
+            panic!("wrong stop proof must retain the same-day close");
+        };
+        assert!(prepared.unclean);
+
+        let wrong_identity_gate = current_day_active_gate().await;
+        let expected_close = test_runtime_close(&wrong_identity_gate);
+        let wrong_identity_stop = CoordinatedSourceStop {
+            producer: "binance_aggtrade".to_owned(),
+            close: RuntimeCloseIdentity {
+                close_id: expected_close.close_id.saturating_add(1),
+                ..expected_close.clone()
+            },
+        };
+        let observed_wrong_identity_gate = Arc::clone(&wrong_identity_gate);
+        let wrong_identity = SourceTaskHandle::spawn(
+            "binance_aggtrade",
+            async move { Err(wrong_identity_stop.into()) },
+            SourceTaskObservationCell::default(),
+            wrong_identity_gate,
+        )
+        .await_termination(&expected_close)
+        .await;
+        assert_eq!(wrong_identity.kind, SourceTaskTerminationKind::Unclean);
+        let Some(PreparedRuntimeExit::SameDay(prepared)) =
+            observed_wrong_identity_gate.prepared_runtime_exit()
+        else {
+            panic!("wrong stop identity must retain the same-day close");
+        };
+        assert!(prepared.unclean);
+    }
+
+    #[tokio::test]
+    async fn bare_wrapper_return_is_known_but_wrapper_error_is_immediately_unclean() {
+        let clean_gate = current_day_active_gate().await;
+        let clean = SourceTaskHandle::spawn(
+            "binance_aggtrade",
+            async { Ok(()) },
+            SourceTaskObservationCell::default(),
+            Arc::clone(&clean_gate),
+        );
+        let clean_close = loop {
+            if let Some(PreparedRuntimeExit::SameDay(close)) = clean_gate.prepared_runtime_exit() {
+                break close;
+            }
+            tokio::task::yield_now().await;
+        };
+        let clean = clean.await_termination(&clean_close.identity).await;
+        assert_eq!(clean.kind, SourceTaskTerminationKind::ReliableReturn);
+        assert!(!clean_close.unclean);
+
+        let failed_gate = current_day_active_gate().await;
+        let failed = SourceTaskHandle::spawn(
+            "binance_aggtrade",
+            async { Err(io::Error::other("wrapper terminal failure").into()) },
+            SourceTaskObservationCell::default(),
+            Arc::clone(&failed_gate),
+        );
+        let failed_close = loop {
+            if let Some(PreparedRuntimeExit::SameDay(close)) = failed_gate.prepared_runtime_exit() {
+                break close;
+            }
+            tokio::task::yield_now().await;
+        };
+        let failed = failed.await_termination(&failed_close.identity).await;
+        assert_eq!(failed.kind, SourceTaskTerminationKind::Unclean);
+        let Some(PreparedRuntimeExit::SameDay(failed_close)) = failed_gate.prepared_runtime_exit()
+        else {
+            panic!("failed wrapper must retain the same-day close");
+        };
+        assert!(failed_close.unclean);
+    }
+
+    #[test]
+    fn source_stop_fact_is_assessed_only_after_the_final_task_proof() {
+        let close = RuntimeCloseIdentity {
+            utc_day: "2026-07-17".to_owned(),
+            generation: 7,
+            close_id: 19,
+        };
+        let reliable = SourceTaskTermination {
+            source_kind: "binance_aggtrade",
+            observed_utc_ms: Some(1_784_236_800_123),
+            epoch: Some(RuntimeEpoch {
+                utc_day: close.utc_day.clone(),
+                generation: close.generation,
+            }),
+            kind: SourceTaskTerminationKind::ReliableReturn,
+            error: None,
+        };
+
+        let ack_first =
+            assess_source_shutdown(&reliable, Some(&SourceControlStopFact::Acked), &close);
+        let failed_reply_first = assess_source_shutdown(
+            &reliable,
+            Some(&SourceControlStopFact::Failed(
+                "control reply raced with reliable return".to_owned(),
+            )),
+            &close,
+        );
+        assert!(!ack_first.unclean);
+        assert!(!failed_reply_first.unclean);
+        assert!(ack_first.error.is_none());
+        assert!(failed_reply_first.error.is_none());
+
+        let unclean = SourceTaskTermination {
+            kind: SourceTaskTerminationKind::Unclean,
+            error: Some("source panicked".to_owned()),
+            ..reliable
+        };
+        let assessment =
+            assess_source_shutdown(&unclean, Some(&SourceControlStopFact::Acked), &close);
+        assert!(assessment.unclean);
+        assert!(
+            assessment
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("source panicked"))
+        );
     }
 
     #[test]
@@ -11441,9 +23472,11 @@ mod tests {
     fn rtds_each_new_applied_generation_gets_a_fresh_bounded_observation_window() {
         let start = Instant::now();
         let episode_deadline = start + Duration::from_secs(RTDS_FRESHNESS_EPISODE_MAX_SECS);
-        let first = rtds_generation_observation_deadline(start, episode_deadline);
+        let reconnect_window = Duration::from_secs(RTDS_RECONNECT_WINDOW_SECS);
+        let first = rtds_generation_observation_deadline(start, episode_deadline, reconnect_window);
         let late_applied = start + Duration::from_millis(2_990);
-        let reset = rtds_generation_observation_deadline(late_applied, episode_deadline);
+        let reset =
+            rtds_generation_observation_deadline(late_applied, episode_deadline, reconnect_window);
 
         assert_eq!(first.duration_since(start), Duration::from_secs(3));
         assert_eq!(reset.duration_since(late_applied), Duration::from_secs(3));
@@ -11672,10 +23705,13 @@ mod tests {
     #[tokio::test]
     async fn rtds_only_new_fresh_matching_payload_returns_healthy() {
         let (tx, mut rx) = mpsc::channel(16);
+        let base = now_ms();
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, base).await;
         let sink = SourceEventSink {
             tx,
             gaps: Arc::new(Mutex::new(SourceGapStore::default())),
-            source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+            source_queue_backpressure: stats,
             inflight_budget: InflightBudget::new(),
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         };
@@ -11684,7 +23720,6 @@ mod tests {
             region: "local-test".to_owned(),
         };
         let mut dedupe = TimedFingerprintWindow::with_limits(60 * 60 * 1000, 100);
-        let base = now_ms();
         let message =
             |topic: &str, message_type: &str, symbol: &str, payload_timestamp: i64, value: &str| {
                 serde_json::from_value::<polymarket_client_sdk_v2::rtds::RtdsMessage>(json!({
@@ -11776,10 +23811,13 @@ mod tests {
     async fn rtds_initial_snapshot_shape_is_ignored_after_failed_price_decode() {
         let (tx, mut rx) = mpsc::channel(4);
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let base = now_ms();
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, base).await;
         let sink = SourceEventSink {
             tx,
             gaps: Arc::clone(&gaps),
-            source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+            source_queue_backpressure: stats,
             inflight_budget: InflightBudget::new(),
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         };
@@ -11788,7 +23826,6 @@ mod tests {
             region: "local-test".to_owned(),
         };
         let mut dedupe = TimedFingerprintWindow::with_limits(60 * 60 * 1000, 100);
-        let base = now_ms();
         let snapshot =
             serde_json::from_value::<polymarket_client_sdk_v2::rtds::RtdsMessage>(json!({
                 "topic": "crypto_prices",
@@ -11835,10 +23872,13 @@ mod tests {
     async fn rtds_expected_topic_payload_schema_error_is_process_fatal() {
         let (tx, mut rx) = mpsc::channel(4);
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let base = now_ms();
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, base).await;
         let sink = SourceEventSink {
             tx,
             gaps: Arc::clone(&gaps),
-            source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+            source_queue_backpressure: stats,
             inflight_budget: InflightBudget::new(),
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         };
@@ -11847,7 +23887,6 @@ mod tests {
             region: "local-test".to_owned(),
         };
         let mut dedupe = TimedFingerprintWindow::with_limits(60 * 60 * 1000, 100);
-        let base = now_ms();
         let valid = serde_json::from_value::<polymarket_client_sdk_v2::rtds::RtdsMessage>(json!({
             "topic": "crypto_prices_chainlink",
             "type": "update",
@@ -12179,6 +24218,7 @@ mod tests {
         .unwrap();
         let decoded_baseline = runtime.decoded_budget.available();
         let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
         let (tx, mut rx) = mpsc::channel(16);
         let sink = SourceEventSink {
@@ -12845,6 +24885,7 @@ mod tests {
         let dataset_root = tmp.path().canonicalize().unwrap();
         let (manifest_tx, _manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
         let runtime_stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&runtime_stats, dispatch_started_utc_ms).await;
         let mut writers = start_writer_workers(
             &dataset_root,
             &test_runtime_provenance("polymarket-composed"),
@@ -12865,6 +24906,8 @@ mod tests {
         let mut received_rows = 0_u64;
         let mut average_event_bytes = 0_u64;
         let mut writer_queue_tracker = QueueDurationTracker::new("writer_chunk_queue");
+        let mut rollover_coordinator =
+            RolloverCoordinatorState::new(ManifestActivationAckMode::Send);
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
         let (tx, mut rx) = mpsc::channel(6_000);
         let sink = SourceEventSink {
@@ -12948,6 +24991,7 @@ mod tests {
                 &mut writer_queue_tracker,
                 run_started,
                 &manifest_tx,
+                &mut rollover_coordinator,
             )
             .await
             .unwrap();
@@ -13043,6 +25087,11 @@ mod tests {
         let dataset_root = tmp.path().canonicalize().unwrap();
         let (manifest_tx, _manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
         let runtime_stats = Arc::new(SourceQueueBackpressureStats::default());
+        let load_recv_base_ms = now_ms()
+            .div_euclid(UTC_DAY_MS)
+            .saturating_mul(UTC_DAY_MS)
+            .saturating_add(UTC_DAY_MS / 2);
+        install_active_raw_day_gate(&runtime_stats, load_recv_base_ms).await;
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
         let mut writers = start_writer_workers(
             &dataset_root,
@@ -13225,7 +25274,7 @@ mod tests {
                         &depth_sink,
                         run_started,
                         test_binance_depth_update_event(
-                            1_783_392_400_000 + i64::try_from(sequence).unwrap(),
+                            load_recv_base_ms + i64::try_from(sequence).unwrap(),
                         ),
                     )
                     .await
@@ -13258,7 +25307,7 @@ mod tests {
                 sleep(deadline.saturating_duration_since(Instant::now())).await;
                 for _ in 0..AUXILIARY_MESSAGES_PER_TICK {
                     let id = u64::try_from(sequence + 1).unwrap();
-                    let timestamp = 1_783_392_400_000 + i64::try_from(sequence).unwrap();
+                    let timestamp = load_recv_base_ms + i64::try_from(sequence).unwrap();
                     let websocket = BinanceWsAggTrade::from_wire(
                         &test_ws_aggtrade_value_at(id, timestamp),
                         "btcusdt@aggTrade",
@@ -13301,6 +25350,8 @@ mod tests {
         let mut received_rows = 0_u64;
         let mut average_event_bytes = 0_u64;
         let mut writer_queue_tracker = QueueDurationTracker::new("writer_chunk_queue");
+        let mut rollover_coordinator =
+            RolloverCoordinatorState::new(ManifestActivationAckMode::Send);
         timeout(Duration::from_secs(30), async {
             while received_rows < u64::try_from(total_rows).unwrap() {
                 let inflight_event = event_rx
@@ -13319,6 +25370,7 @@ mod tests {
                     &mut writer_queue_tracker,
                     run_started,
                     &manifest_tx,
+                    &mut rollover_coordinator,
                 )
                 .await
                 .unwrap();
@@ -13551,8 +25603,10 @@ mod tests {
         else {
             panic!("expected first decoded message");
         };
+        let gate_recv_time_utc_ms = first.recv_time_utc_ms;
         drop(first);
         let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, gate_recv_time_utc_ms).await;
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
         let (tx, mut rx) = mpsc::channel(8);
         let sink = SourceEventSink {
@@ -13639,7 +25693,9 @@ mod tests {
         else {
             panic!("expected first decoded message");
         };
+        let gate_recv_time_utc_ms = first.recv_time_utc_ms;
         let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, gate_recv_time_utc_ms).await;
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
         let (tx, rx) = mpsc::channel(8);
         drop(rx);
@@ -14173,12 +26229,13 @@ mod tests {
             .unwrap()
             .partition("binance_aggtrade", 1_783_392_404_599, None)
             .unwrap();
-        let mut owner = ManifestOwnerState::new(
-            dataset_root.clone(),
-            test_daily_manifest_identity(),
-            BinanceAggTradeContinuityState::default(),
+        let (mut owner, day_dir) = reactivated_manifest_owner(
+            &dataset_root,
+            "2026-07-07",
+            1_783_392_400_000,
+            1_783_392_401_000,
         );
-        owner.ensure_open("2026-07-07").unwrap();
+        let active_coverage = manifest_coverage_value(&day_dir);
         let mut segment = ActiveSegment::new(naming.clone(), "binance_aggtrade", 0).unwrap();
         let event = test_raw_event("binance_aggtrade", 1_783_392_404_599);
 
@@ -14236,10 +26293,10 @@ mod tests {
                 )]),
             )
             .unwrap();
+        assert_eq!(manifest_coverage_value(&day_dir), active_coverage);
         owner.apply_finalized(delta).unwrap();
-        let manifest = load_day_manifest(&typed_raw_root(&dataset_root).join("utc_day=2026-07-07"))
-            .unwrap()
-            .unwrap();
+        assert_eq!(manifest_coverage_value(&day_dir), active_coverage);
+        let manifest = load_day_manifest(&day_dir).unwrap().unwrap();
         assert_eq!(
             manifest["source_counters"]["binance_aggtrade"]["written_rows"],
             1
@@ -14253,13 +26310,14 @@ mod tests {
             1
         );
         let reconciled = reconcile_open_day_manifest(
-            &typed_raw_root(&dataset_root).join("utc_day=2026-07-07"),
+            &day_dir,
             "2026-07-07",
             &test_daily_manifest_identity(),
             &BinanceAggTradeContinuityState::default(),
         )
         .unwrap();
         assert_eq!(reconciled["files"].as_array().unwrap().len(), 1);
+        assert_eq!(reconciled["collection_day_coverage"], active_coverage);
 
         let reader =
             SerializedFileReader::new(File::open(&finalized.parquet_path).unwrap()).unwrap();
@@ -14430,10 +26488,20 @@ mod tests {
     #[tokio::test]
     async fn polymarket_day_barrier_is_between_fenced_and_resumed_source_events() {
         let (tx, mut rx) = mpsc::channel(8);
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        let raw_day_gate = Arc::new(RawDayGate::new());
+        let boundary_utc_ms = 1_783_468_800_000;
+        raw_day_gate
+            .activate_startup("2026-07-07".to_owned(), INITIAL_RAW_DAY_GENERATION)
+            .await
+            .unwrap();
+        stats
+            .install_raw_day_gate(Arc::clone(&raw_day_gate))
+            .unwrap();
         let sink = SourceEventSink {
             tx,
             gaps: Arc::new(Mutex::new(SourceGapStore::default())),
-            source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+            source_queue_backpressure: stats,
             inflight_budget: InflightBudget::new(),
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         };
@@ -14441,20 +26509,15 @@ mod tests {
         let (control_tx, mut control_rx) = mpsc::channel(POLYMARKET_CONTROL_CHANNEL_CAPACITY);
         let run_started = Instant::now();
         let source = async move {
-            let PolymarketSourceControl::Fence {
-                stop_after_fence,
-                resume_after_barrier,
-                reply,
-            } = control_rx.recv().await.unwrap();
-            assert!(!stop_after_fence);
             send_event(
                 &source_sink,
                 run_started,
-                raw_event(
+                raw_event_with_recv_time(
                     "polymarket_market",
                     "book",
                     "before-fence",
                     None,
+                    boundary_utc_ms - 1,
                     MARKET_WS_ENDPOINT,
                     &CollectorIdentity {
                         host_id: "collector-test".to_owned(),
@@ -14464,16 +26527,23 @@ mod tests {
                 ),
             )
             .await?;
+            let PolymarketSourceControl::Fence {
+                stop_after_fence,
+                resume_after_barrier,
+                reply,
+            } = control_rx.recv().await.unwrap();
+            assert!(!stop_after_fence);
             reply.send(Ok(())).unwrap();
             resume_after_barrier.unwrap().await.unwrap();
             send_event(
                 &source_sink,
                 run_started,
-                raw_event(
+                raw_event_with_recv_time(
                     "polymarket_market",
                     "book",
                     "after-resume",
                     None,
+                    boundary_utc_ms,
                     MARKET_WS_ENDPOINT,
                     &CollectorIdentity {
                         host_id: "collector-test".to_owned(),
@@ -14485,29 +26555,355 @@ mod tests {
             .await?;
             Ok(())
         };
-
-        run_polymarket_logical_producer_with_day_barriers(
-            sink,
-            control_tx,
-            run_started,
-            now_ms() + 25,
-            source,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            rx.recv().await.unwrap().event.source_identifier,
-            "before-fence"
-        );
+        tokio::pin!(source);
         assert!(matches!(
-            rx.recv().await.unwrap().control,
-            Some(IngressControl::DayBarrier { producer, .. }) if producer == "polymarket"
+            futures::poll!(source.as_mut()),
+            std::task::Poll::Pending
         ));
-        assert_eq!(
-            rx.recv().await.unwrap().event.source_identifier,
-            "after-resume"
+        let close = prepare_rollover_for_producer(
+            &raw_day_gate,
+            "polymarket",
+            "2026-07-07",
+            boundary_utc_ms,
         );
+        let consumer_gate = Arc::clone(&raw_day_gate);
+        let consumer_close = close.clone();
+        let consumer = tokio::spawn(async move {
+            let before = rx.recv().await.unwrap();
+            let mut barrier = rx.recv().await.unwrap();
+            let Some(IngressControl::DayBarrier { reply, .. }) = barrier.control.take() else {
+                panic!("expected Polymarket day barrier");
+            };
+            commit_test_manifest_activation(&consumer_gate, &consumer_close);
+            consumer_gate
+                .activate_after_rollover(&consumer_close)
+                .await
+                .unwrap();
+            reply.send(Ok(DayBarrierRelease::Resume)).unwrap();
+            let after = rx.recv().await.unwrap();
+            (before, barrier, after)
+        });
+
+        assert!(
+            fence_polymarket_and_send_day_barrier(
+                source.as_mut(),
+                &control_tx,
+                &sink,
+                run_started,
+                &raw_day_gate,
+                &close,
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        source.await.unwrap();
+        let (before, barrier, after) = consumer.await.unwrap();
+        assert_eq!(before.event.source_identifier, "before-fence");
+        assert!(barrier.control.is_none());
+        assert_eq!(after.event.source_identifier, "after-resume");
+    }
+
+    fn completed_writer_with_close(
+        source_kind: &str,
+        close: &RuntimeCloseIdentity,
+    ) -> SourceWriterHandle {
+        let (tx, _rx) = std::sync::mpsc::sync_channel(1);
+        let (_result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        SourceWriterHandle {
+            tx,
+            queue_rows: Arc::new(AtomicU64::new(0)),
+            accepting_commands: Arc::new(Mutex::new(true)),
+            result_rx,
+            completed_result: Some(WriterTaskReport {
+                source_kind: source_kind.to_owned(),
+                first_observed_utc_ms: now_ms(),
+                worker_epoch: Some(RuntimeEpoch {
+                    utc_day: close.utc_day.clone(),
+                    generation: close.generation,
+                }),
+                lifecycle_epoch: Some(RuntimeEpoch {
+                    utc_day: close.utc_day.clone(),
+                    generation: close.generation,
+                }),
+                termination_kind: WriterTerminationKind::CoordinatedClose,
+                lifecycle_close: Some(close.clone()),
+                lifecycle_record_error: None,
+                outcome: WriterTaskOutcome::Returned(Ok(SourceWriterOutput {
+                    source_kind: source_kind.to_owned(),
+                    finalized_segments: Vec::new(),
+                    stats: SourceWriterStats::empty(source_kind.to_owned()),
+                    coordinated_close: Some(close.clone()),
+                    observed_utc_ms: now_ms(),
+                })),
+            }),
+            thread: Some(std::thread::spawn(|| {})),
+        }
+    }
+
+    fn completed_mandatory_writers(
+        close: &RuntimeCloseIdentity,
+    ) -> BTreeMap<String, SourceWriterHandle> {
+        LIVE_SOURCES
+            .iter()
+            .map(|source_kind| {
+                (
+                    (*source_kind).to_owned(),
+                    completed_writer_with_close(source_kind, close),
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn writer_shutdown_requires_exact_mandatory_keys_and_report_proofs() {
+        let close = RuntimeCloseIdentity {
+            utc_day: "2026-07-17".to_owned(),
+            generation: 3,
+            close_id: 42,
+        };
+
+        let empty = shutdown_writer_workers_with_budget(
+            BTreeMap::new(),
+            close.clone(),
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(empty.all_terminal);
+        assert!(!empty.all_close_proven);
+        assert!(
+            empty
+                .errors
+                .iter()
+                .any(|error| error.contains("writer mandatory key mismatch"))
+        );
+
+        let mut missing_writers = completed_mandatory_writers(&close);
+        let missing_source = LIVE_SOURCES[0];
+        missing_writers.remove(missing_source);
+        let missing = shutdown_writer_workers_with_budget(
+            missing_writers,
+            close.clone(),
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(missing.all_terminal);
+        assert!(!missing.all_close_proven);
+        assert!(
+            missing
+                .errors
+                .iter()
+                .any(|error| error.contains("writer mandatory key mismatch")
+                    && error.contains(missing_source))
+        );
+
+        let mut extra_writers = completed_mandatory_writers(&close);
+        extra_writers.insert(
+            "unexpected_writer".to_owned(),
+            completed_writer_with_close("unexpected_writer", &close),
+        );
+        let extra = shutdown_writer_workers_with_budget(
+            extra_writers,
+            close.clone(),
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(extra.all_terminal);
+        assert!(!extra.all_close_proven);
+        assert!(
+            extra
+                .errors
+                .iter()
+                .any(|error| error.contains("writer mandatory key mismatch")
+                    && error.contains("unexpected_writer"))
+        );
+
+        let exact = shutdown_writer_workers_with_budget(
+            completed_mandatory_writers(&close),
+            close.clone(),
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(exact.all_terminal, "{:?}", exact.errors);
+        assert!(exact.all_close_proven, "{:?}", exact.errors);
+        assert!(exact.errors.is_empty());
+
+        let mut missing_report_writers = completed_mandatory_writers(&close);
+        missing_report_writers
+            .get_mut(LIVE_SOURCES[0])
+            .unwrap()
+            .completed_result
+            .as_mut()
+            .unwrap()
+            .outcome = WriterTaskOutcome::MissingReport("report channel dropped".to_owned());
+        let missing_report = shutdown_writer_workers_with_budget(
+            missing_report_writers,
+            close,
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(missing_report.all_terminal);
+        assert!(!missing_report.all_close_proven);
+        assert!(
+            missing_report
+                .errors
+                .iter()
+                .any(|error| error.contains("writer report missing"))
+        );
+    }
+
+    #[tokio::test]
+    async fn matching_epoch_reliable_writer_return_is_a_known_close_proof() {
+        let close = RuntimeCloseIdentity {
+            utc_day: "2026-07-17".to_owned(),
+            generation: 3,
+            close_id: 43,
+        };
+        let mut writers = completed_mandatory_writers(&close);
+        let report = writers
+            .get_mut("binance_aggtrade")
+            .unwrap()
+            .completed_result
+            .as_mut()
+            .unwrap();
+        report.worker_epoch = None;
+        report.lifecycle_close = None;
+        report.termination_kind = WriterTerminationKind::ReliableReturn;
+        report.outcome = WriterTaskOutcome::Returned(Err(io::Error::other(
+            "writer returned a reliable terminal error",
+        )
+        .into()));
+
+        let outcome =
+            shutdown_writer_workers_with_budget(writers, close.clone(), Duration::from_millis(100))
+                .await;
+
+        assert!(outcome.all_terminal, "{:?}", outcome.errors);
+        assert!(outcome.all_close_proven, "{:?}", outcome.errors);
+        assert!(
+            outcome
+                .errors
+                .iter()
+                .any(|error| error.contains("reliable terminal error"))
+        );
+
+        let mut wrong_epoch = completed_mandatory_writers(&close);
+        let report = wrong_epoch
+            .get_mut("binance_aggtrade")
+            .unwrap()
+            .completed_result
+            .as_mut()
+            .unwrap();
+        report.worker_epoch = None;
+        report.lifecycle_close = None;
+        report.lifecycle_epoch = Some(RuntimeEpoch {
+            utc_day: close.utc_day.clone(),
+            generation: close.generation + 1,
+        });
+        report.termination_kind = WriterTerminationKind::ReliableReturn;
+        report.outcome = WriterTaskOutcome::Returned(Err(io::Error::other(
+            "writer returned in the wrong epoch",
+        )
+        .into()));
+
+        let wrong_epoch =
+            shutdown_writer_workers_with_budget(wrong_epoch, close, Duration::from_millis(100))
+                .await;
+        assert!(wrong_epoch.all_terminal);
+        assert!(!wrong_epoch.all_close_proven);
+        assert!(
+            wrong_epoch
+                .errors
+                .iter()
+                .any(|error| error.contains("reliable-return proof mismatch"))
+        );
+    }
+
+    #[tokio::test]
+    async fn writer_report_is_not_terminal_until_the_os_thread_is_joined() {
+        let (tx, _command_rx) = std::sync::mpsc::sync_channel(1);
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let thread_exited = Arc::new(AtomicBool::new(false));
+        let thread_exited_after_release = Arc::clone(&thread_exited);
+        let thread = std::thread::spawn(move || {
+            result_tx
+                .send(WriterTaskReport {
+                    source_kind: "binance_aggtrade".to_owned(),
+                    first_observed_utc_ms: now_ms(),
+                    worker_epoch: None,
+                    lifecycle_epoch: None,
+                    termination_kind: WriterTerminationKind::ReliableReturn,
+                    lifecycle_close: None,
+                    lifecycle_record_error: None,
+                    outcome: WriterTaskOutcome::Returned(Ok(SourceWriterOutput {
+                        source_kind: "binance_aggtrade".to_owned(),
+                        finalized_segments: Vec::new(),
+                        stats: SourceWriterStats::empty("binance_aggtrade".to_owned()),
+                        coordinated_close: None,
+                        observed_utc_ms: now_ms(),
+                    })),
+                })
+                .unwrap();
+            release_rx.recv().unwrap();
+            thread_exited_after_release.store(true, Ordering::SeqCst);
+        });
+        let writers = BTreeMap::from([(
+            "binance_aggtrade".to_owned(),
+            SourceWriterHandle {
+                tx,
+                queue_rows: Arc::new(AtomicU64::new(0)),
+                accepting_commands: Arc::new(Mutex::new(true)),
+                result_rx,
+                completed_result: None,
+                thread: Some(thread),
+            },
+        )]);
+        let release = tokio::spawn(async move {
+            sleep(Duration::from_millis(25)).await;
+            release_tx.send(()).unwrap();
+        });
+
+        let outcome = stop_writer_workers_with_budget(writers, Duration::from_secs(1)).await;
+
+        assert!(outcome.all_terminal, "{:?}", outcome.errors);
+        assert!(thread_exited.load(Ordering::SeqCst));
+        release.await.unwrap();
+    }
+
+    #[test]
+    fn partial_writer_spawn_failure_joins_started_workers_and_releases_the_lease() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let dataset_lease = Arc::new(lock_training_dataset_root(&dataset_root).unwrap());
+        let (manifest_tx, _manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
+        let runtime_stats = Arc::new(SourceQueueBackpressureStats::default());
+        let (ready_tx, _ready_rx) = mpsc::channel(STARTUP_READY_CHANNEL_CAPACITY);
+
+        let result = start_writer_workers_inner(
+            &dataset_root,
+            &test_runtime_provenance("partial-writer-spawn"),
+            &manifest_tx,
+            &runtime_stats,
+            Some(&ready_tx),
+            Some(Arc::new(RawDayGate::new())),
+            Some(Arc::clone(&dataset_lease)),
+            |index| {
+                if index == 2 {
+                    Err(io::Error::other("injected writer spawn failure"))
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        let error = match result {
+            Ok(_) => panic!("injected writer spawn failure unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        drop(dataset_lease);
+
+        assert!(error.to_string().contains("injected writer spawn failure"));
+        assert!(lock_training_dataset_root(&dataset_root).is_ok());
     }
 
     #[tokio::test]
@@ -14515,7 +26911,8 @@ mod tests {
         let tmp = tempdir().unwrap();
         let dataset_root = tmp.path().canonicalize().unwrap();
         let provenance = test_runtime_provenance("hung-writer-run");
-        let writers = start_writer_workers_with_hung_result(&dataset_root, &provenance).unwrap();
+        let writers =
+            start_writer_workers_with_hung_result(&dataset_root, &provenance, None).unwrap();
 
         let outcome = stop_writer_workers_with_budget(writers, Duration::from_millis(10)).await;
 
@@ -14527,6 +26924,174 @@ mod tests {
                 .any(|error| error.contains("writer finalize timeout")),
             "expected timeout error, got {:?}",
             outcome.errors
+        );
+    }
+
+    #[tokio::test]
+    async fn hung_writer_retains_dataset_lease_until_the_process_exits() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let provenance = test_runtime_provenance("hung-writer-lease");
+        let dataset_lease = Arc::new(lock_training_dataset_root(&dataset_root).unwrap());
+        let writers = start_writer_workers_with_hung_result(
+            &dataset_root,
+            &provenance,
+            Some(Arc::clone(&dataset_lease)),
+        )
+        .unwrap();
+        drop(dataset_lease);
+
+        let outcome = stop_writer_workers_with_budget(writers, Duration::from_millis(10)).await;
+
+        assert!(!outcome.all_terminal);
+        let error = lock_training_dataset_root(&dataset_root).unwrap_err();
+        assert!(error.to_string().contains("training_dataset_root_locked"));
+    }
+
+    #[tokio::test]
+    async fn six_writers_return_the_exact_coordinated_close_identity() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let provenance = test_runtime_provenance("writer-close-proof");
+        let (manifest_tx, _manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
+        let runtime_stats = Arc::new(SourceQueueBackpressureStats::default());
+        let writers =
+            start_writer_workers(&dataset_root, &provenance, &manifest_tx, &runtime_stats).unwrap();
+        let close = RuntimeCloseIdentity {
+            utc_day: utc_day_string_from_ms(now_ms()).unwrap(),
+            generation: INITIAL_RAW_DAY_GENERATION,
+            close_id: 41,
+        };
+
+        let outcome =
+            shutdown_writer_workers_with_budget(writers, close.clone(), Duration::from_secs(2))
+                .await;
+
+        assert!(outcome.all_terminal, "{:?}", outcome.errors);
+        assert!(outcome.all_close_proven, "{:?}", outcome.errors);
+        assert_eq!(outcome.outputs.len(), LIVE_SOURCES.len());
+        assert!(outcome.outputs.iter().all(|output| {
+            output.coordinated_close.as_ref() == Some(&close) && output.observed_utc_ms > 0
+        }));
+    }
+
+    #[tokio::test]
+    async fn production_writer_report_preserves_reliable_terminal_lifecycle_epoch() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let (manifest_tx, _manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
+        let runtime_stats = Arc::new(SourceQueueBackpressureStats::default());
+        let gate = Arc::new(RawDayGate::new());
+        let utc_day = utc_day_string_from_ms(now_ms()).unwrap();
+        gate.activate_startup(utc_day.clone(), INITIAL_RAW_DAY_GENERATION)
+            .await
+            .unwrap();
+        let (mut writers, releases) = start_writer_workers_inner(
+            &dataset_root,
+            &test_runtime_provenance("writer-reliable-lifecycle"),
+            &manifest_tx,
+            &runtime_stats,
+            None,
+            Some(gate),
+            None,
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(releases.is_empty());
+        let writer = writers.remove("binance_aggtrade").unwrap();
+        let SourceWriterHandle {
+            tx,
+            queue_rows: _,
+            accepting_commands: _,
+            result_rx,
+            completed_result,
+            thread,
+        } = writer;
+        assert!(completed_result.is_none());
+        drop(tx);
+        let report = result_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let thread = thread.unwrap();
+        while !thread.is_finished() {
+            std::thread::yield_now();
+        }
+        thread.join().unwrap();
+
+        assert_eq!(
+            report.termination_kind,
+            WriterTerminationKind::ReliableReturn
+        );
+        assert_eq!(
+            report.lifecycle_epoch,
+            Some(RuntimeEpoch {
+                utc_day,
+                generation: INITIAL_RAW_DAY_GENERATION,
+            })
+        );
+        assert!(report.worker_epoch.is_none());
+        assert!(report.lifecycle_close.is_none());
+        assert!(report.lifecycle_record_error.is_none());
+
+        let remaining = stop_writer_workers_with_budget(writers, Duration::from_secs(1)).await;
+        assert!(remaining.all_terminal, "{:?}", remaining.errors);
+    }
+
+    #[tokio::test]
+    async fn writer_close_proof_rejects_a_precompleted_or_wrong_identity_result() {
+        let (tx, _rx) = std::sync::mpsc::sync_channel(1);
+        let (_result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        let expected = RuntimeCloseIdentity {
+            utc_day: "2026-07-17".to_owned(),
+            generation: 3,
+            close_id: 9,
+        };
+        let wrong = RuntimeCloseIdentity {
+            close_id: 10,
+            ..expected.clone()
+        };
+        let writers = BTreeMap::from([(
+            "binance_aggtrade".to_owned(),
+            SourceWriterHandle {
+                tx,
+                queue_rows: Arc::new(AtomicU64::new(0)),
+                accepting_commands: Arc::new(Mutex::new(true)),
+                result_rx,
+                completed_result: Some(WriterTaskReport {
+                    source_kind: "binance_aggtrade".to_owned(),
+                    first_observed_utc_ms: now_ms(),
+                    worker_epoch: Some(RuntimeEpoch {
+                        utc_day: wrong.utc_day.clone(),
+                        generation: wrong.generation,
+                    }),
+                    lifecycle_epoch: Some(RuntimeEpoch {
+                        utc_day: wrong.utc_day.clone(),
+                        generation: wrong.generation,
+                    }),
+                    termination_kind: WriterTerminationKind::CoordinatedClose,
+                    lifecycle_close: Some(wrong.clone()),
+                    lifecycle_record_error: None,
+                    outcome: WriterTaskOutcome::Returned(Ok(SourceWriterOutput {
+                        source_kind: "binance_aggtrade".to_owned(),
+                        finalized_segments: Vec::new(),
+                        stats: SourceWriterStats::empty("binance_aggtrade".to_owned()),
+                        coordinated_close: Some(wrong),
+                        observed_utc_ms: now_ms(),
+                    })),
+                }),
+                thread: Some(std::thread::spawn(|| {})),
+            },
+        )]);
+
+        let outcome =
+            shutdown_writer_workers_with_budget(writers, expected, Duration::from_millis(100))
+                .await;
+
+        assert!(outcome.all_terminal);
+        assert!(!outcome.all_close_proven);
+        assert!(
+            outcome
+                .errors
+                .iter()
+                .any(|error| error.contains("terminal proof mismatch"))
         );
     }
 
@@ -14545,11 +27110,22 @@ mod tests {
             std::thread::sleep(Duration::from_millis(25));
             late_stats.record_operational_drop("binance_depth_update", 1_783_392_404_599, 2);
             late_result_tx
-                .send(Ok(SourceWriterOutput {
+                .send(WriterTaskReport {
                     source_kind: "binance_depth_update".to_owned(),
-                    finalized_segments: Vec::new(),
-                    stats: SourceWriterStats::empty("binance_depth_update".to_owned()),
-                }))
+                    first_observed_utc_ms: now_ms(),
+                    worker_epoch: None,
+                    lifecycle_epoch: None,
+                    termination_kind: WriterTerminationKind::ReliableReturn,
+                    lifecycle_close: None,
+                    lifecycle_record_error: None,
+                    outcome: WriterTaskOutcome::Returned(Ok(SourceWriterOutput {
+                        source_kind: "binance_depth_update".to_owned(),
+                        finalized_segments: Vec::new(),
+                        stats: SourceWriterStats::empty("binance_depth_update".to_owned()),
+                        coordinated_close: None,
+                        observed_utc_ms: now_ms(),
+                    })),
+                })
                 .unwrap();
         });
         let writers = BTreeMap::from([
@@ -14560,7 +27136,20 @@ mod tests {
                     queue_rows: Arc::new(AtomicU64::new(0)),
                     accepting_commands: Arc::new(Mutex::new(true)),
                     result_rx: failed_result_rx,
-                    completed_result: Some(Err(io::Error::other("first writer failed").into())),
+                    completed_result: Some(WriterTaskReport {
+                        source_kind: "binance_aggtrade".to_owned(),
+                        first_observed_utc_ms: now_ms(),
+                        worker_epoch: None,
+                        lifecycle_epoch: None,
+                        termination_kind: WriterTerminationKind::ReliableReturn,
+                        lifecycle_close: None,
+                        lifecycle_record_error: None,
+                        outcome: WriterTaskOutcome::Returned(Err(io::Error::other(
+                            "first writer failed",
+                        )
+                        .into())),
+                    }),
+                    thread: Some(std::thread::spawn(|| {})),
                 },
             ),
             (
@@ -14571,18 +27160,18 @@ mod tests {
                     accepting_commands: Arc::new(Mutex::new(true)),
                     result_rx: late_result_rx,
                     completed_result: None,
+                    thread: Some(late_worker),
                 },
             ),
         ]);
 
         let outcome = stop_writer_workers_with_budget(writers, Duration::from_secs(1)).await;
-        late_worker.join().unwrap();
 
         assert!(outcome.all_terminal);
         assert_eq!(outcome.outputs.len(), 1);
         assert_eq!(outcome.outputs[0].source_kind, "binance_depth_update");
         assert_eq!(outcome.errors.len(), 1);
-        assert!(outcome.errors[0].contains("binance_aggtrade writer finalize failed"));
+        assert!(outcome.errors[0].contains("binance_aggtrade writer failed"));
         let counters = runtime_stats.drain_all_operational();
         assert_eq!(
             counters["2026-07-07"]["binance_depth_update"].dropped_rows,
@@ -14691,10 +27280,12 @@ mod tests {
             socket.write_all(response.as_bytes()).await.unwrap();
         });
         let (tx, mut rx) = mpsc::channel(2);
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
         let sink = SourceEventSink {
             tx,
             gaps: Arc::new(Mutex::new(SourceGapStore::default())),
-            source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+            source_queue_backpressure: stats,
             inflight_budget: InflightBudget::new(),
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         };
@@ -14836,6 +27427,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(16);
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
         let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
         run_binance_depth_source_with_spec(
             BinanceDepthSpec {
                 websocket_endpoint,
@@ -14920,6 +27512,33 @@ mod tests {
 
     #[tokio::test]
     async fn binance_depth_utc_day_resnapshot_reprocesses_the_triggering_frame() {
+        const UTC_DAY_TEST_MARGIN_MS: i64 = 5_000;
+
+        let mut fixture_now_utc_ms = now_ms();
+        let mut following_boundary_utc_ms = fixture_now_utc_ms
+            .div_euclid(UTC_DAY_MS)
+            .saturating_add(1)
+            .saturating_mul(UTC_DAY_MS);
+        let remaining_utc_day_ms = following_boundary_utc_ms.saturating_sub(fixture_now_utc_ms);
+        if remaining_utc_day_ms <= UTC_DAY_TEST_MARGIN_MS {
+            sleep(Duration::from_millis(
+                u64::try_from(remaining_utc_day_ms.saturating_add(10)).unwrap(),
+            ))
+            .await;
+            fixture_now_utc_ms = now_ms();
+            following_boundary_utc_ms = fixture_now_utc_ms
+                .div_euclid(UTC_DAY_MS)
+                .saturating_add(1)
+                .saturating_mul(UTC_DAY_MS);
+        }
+        assert!(
+            following_boundary_utc_ms.saturating_sub(fixture_now_utc_ms) > UTC_DAY_TEST_MARGIN_MS
+        );
+        let boundary_utc_ms = fixture_now_utc_ms
+            .div_euclid(UTC_DAY_MS)
+            .saturating_mul(UTC_DAY_MS);
+        let old_utc_day = utc_day_string_from_ms(boundary_utc_ms.saturating_sub(1)).unwrap();
+
         let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let websocket_endpoint = format!("ws://{}", ws_listener.local_addr().unwrap());
@@ -14985,10 +27604,19 @@ mod tests {
             sleep(Duration::from_millis(200)).await;
         });
         let (tx, mut rx) = mpsc::channel(8);
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        let raw_day_gate = Arc::new(RawDayGate::new());
+        raw_day_gate
+            .activate_startup(old_utc_day.clone(), INITIAL_RAW_DAY_GENERATION)
+            .await
+            .unwrap();
+        stats
+            .install_raw_day_gate(Arc::clone(&raw_day_gate))
+            .unwrap();
         let sink = SourceEventSink {
             tx,
             gaps: Arc::new(Mutex::new(SourceGapStore::default())),
-            source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+            source_queue_backpressure: stats,
             inflight_budget: InflightBudget::new(),
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         };
@@ -15010,7 +27638,7 @@ mod tests {
                     snapshot_endpoint,
                 },
                 snapshot_last_update_id: 90,
-                snapshot_utc_day: "1970-01-01".to_owned(),
+                snapshot_utc_day: old_utc_day.clone(),
                 pending_snapshot_trigger_reason: None,
             },
             Some(&mut control_rx),
@@ -15021,23 +27649,66 @@ mod tests {
             result = &mut source => panic!("depth source ended before resnapshot started: {result:?}"),
             result = &mut request_started_rx => result.unwrap(),
         }
+        let close = prepare_rollover_for_producer(
+            &raw_day_gate,
+            "binance_depth",
+            &old_utc_day,
+            boundary_utc_ms,
+        );
+        let consumer_gate = Arc::clone(&raw_day_gate);
+        let consumer_close = close.clone();
+        let consumer = tokio::spawn(async move {
+            // This time-shifts the real frame-vs-boundary race: new-day rows are
+            // deferred until the same authoritative gate commits activation.
+            let mut barrier = rx.recv().await.unwrap();
+            let Some(IngressControl::DayBarrier { reply, .. }) = barrier.control.take() else {
+                panic!("expected depth day barrier before deferred new-day rows");
+            };
+            assert!(matches!(
+                rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            commit_test_manifest_activation(&consumer_gate, &consumer_close);
+            consumer_gate
+                .activate_after_rollover(&consumer_close)
+                .await
+                .unwrap();
+            reply.send(Ok(DayBarrierRelease::Resume)).unwrap();
+            let snapshot = rx.recv().await.unwrap();
+            let update = rx.recv().await.unwrap();
+            let after_barrier = rx.recv().await.unwrap();
+            (barrier, snapshot, update, after_barrier)
+        });
         assert!(
             fence_depth_and_send_day_barrier(
                 source.as_mut(),
                 &control_tx,
                 &sink,
                 Instant::now(),
-                "2026-07-07",
-                "2026-07-08",
+                &raw_day_gate,
+                &close,
             )
             .await
             .unwrap()
             .is_none()
         );
 
-        let snapshot = rx.recv().await.unwrap().event;
-        let update = rx.recv().await.unwrap().event;
-        let barrier = rx.recv().await.unwrap();
+        timeout(Duration::from_secs(1), source.as_mut())
+            .await
+            .expect("depth source must emit the post-barrier event")
+            .unwrap();
+        let (barrier, snapshot, update, after_barrier) = consumer.await.unwrap();
+        let expected_permit = RawDayPermit {
+            utc_day: close.next_utc_day.clone(),
+            generation: close.next_generation,
+        };
+        assert!(
+            [&snapshot, &update, &after_barrier]
+                .into_iter()
+                .all(|event| event.raw_day_permit.as_ref() == Some(&expected_permit))
+        );
+        let snapshot = snapshot.event;
+        let update = update.event;
         assert_eq!(snapshot.source_event_type, "depth_snapshot");
         assert_eq!(update.source_event_type, "depth_update");
         assert!(update.recv_time_utc_ms < snapshot.recv_time_utc_ms);
@@ -15045,17 +27716,7 @@ mod tests {
         assert_eq!(update["u"], 101);
         assert_eq!(update["snapshot_last_update_id"], 100);
         assert_eq!(update["snapshot_trigger_reason"], "utc_day_boundary");
-        assert!(matches!(
-            barrier.control,
-            Some(IngressControl::DayBarrier {
-                ref producer,
-                ref utc_day,
-            }) if producer == "binance_depth" && utc_day == "2026-07-07"
-        ));
-        let after_barrier = tokio::select! {
-            message = rx.recv() => message.unwrap(),
-            result = &mut source => panic!("depth source ended before buffered next-day frame: {result:?}"),
-        };
+        assert!(barrier.control.is_none());
         assert!(after_barrier.control.is_none());
         assert_eq!(
             serde_json::from_str::<Value>(&after_barrier.event.raw_json).unwrap()["u"],
@@ -15207,6 +27868,8 @@ mod tests {
         });
         let (tx, mut rx) = mpsc::channel(2);
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
         let result = fetch_binance_depth_snapshot(
             &reqwest::Client::builder()
                 .timeout(Duration::from_secs(1))
@@ -15215,7 +27878,7 @@ mod tests {
             &SourceEventSink {
                 tx,
                 gaps: Arc::clone(&gaps),
-                source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+                source_queue_backpressure: stats,
                 inflight_budget: InflightBudget::new(),
                 enqueue_lock: Arc::new(AsyncMutex::new(())),
             },
@@ -16072,6 +28735,7 @@ mod tests {
         let global_baseline = global_budget.available();
         let decoded_baseline = decoded_budget.available();
         let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
         let enqueue_lock = Arc::new(AsyncMutex::new(()));
         let (too_small_tx, mut too_small_rx) = mpsc::channel(1);
@@ -16190,6 +28854,7 @@ mod tests {
         let global_baseline = global_budget.available();
         let decoded_baseline = decoded_budget.available();
         let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
         let (tx, mut rx) = mpsc::channel(10);
         let sink = SourceEventSink {
@@ -16656,7 +29321,17 @@ mod tests {
         .unwrap();
         let prior_manifest = load_day_manifest(&prior_day_dir).unwrap().unwrap();
         assert_eq!(prior_manifest["state"], "closed");
-        assert_eq!(prior_manifest["closure_reason"], "unclean_exit_recovery");
+        assert_eq!(
+            prior_manifest["closure_reason"],
+            "reconciled_legacy_coverage_unknown"
+        );
+        assert!(
+            prior_manifest
+                .get("gaps")
+                .and_then(Value::as_array)
+                .is_none_or(|gaps| gaps.is_empty()),
+            "legacy unknown coverage must not be relabeled as an unclean gap"
+        );
         assert_eq!(prior_manifest["files"].as_array().unwrap().len(), 1);
         assert_eq!(
             prior_manifest["files"][0]["facts"]["collector_binary_sha256"],
@@ -16962,7 +29637,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(prior["state"], "closed");
-        assert_eq!(prior["closure_reason"], "unclean_exit_recovery");
+        assert_eq!(prior["closure_reason"], "reconciled_collection_not_started");
+        assert_eq!(prior["collection_day_coverage"]["state"], "not_started");
+        assert_eq!(
+            prior["collection_day_coverage"]["reactivated_within_day"],
+            false
+        );
+        assert!(prior["gaps"].as_array().unwrap().is_empty());
         let current = load_day_manifest(&typed_raw_root(&dataset_root).join("utc_day=2026-07-14"))
             .unwrap()
             .unwrap();
@@ -17516,6 +30197,7 @@ mod tests {
                 accepting_commands: Arc::new(Mutex::new(true)),
                 result_rx,
                 completed_result: None,
+                thread: None,
             },
         )]);
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
@@ -17572,7 +30254,7 @@ mod tests {
         .await
         .unwrap();
         let mut runtime_failure = None;
-        let (outputs, all_terminal) = writer_outputs_or_record_failure(
+        let (outputs, all_terminal, all_close_proven) = writer_outputs_or_record_failure(
             stop_writer_workers_with_budget(
                 writers,
                 Duration::from_millis(WRITER_FINALIZE_BUDGET_MS),
@@ -17583,6 +30265,7 @@ mod tests {
         );
 
         assert!(all_terminal);
+        assert!(all_close_proven);
         assert_eq!(outputs.len(), LIVE_SOURCES.len() - 1);
         assert!(
             outputs
@@ -17591,7 +30274,7 @@ mod tests {
         );
         assert!(
             runtime_failure
-                .is_some_and(|error| { error.contains("binance_aggtrade writer finalize failed") })
+                .is_some_and(|error| { error.contains("binance_aggtrade writer failed") })
         );
         assert_eq!(
             runtime_stats.drain_all_operational()["2026-07-07"]["binance_aggtrade"].dropped_rows,
@@ -17698,10 +30381,12 @@ mod tests {
         });
 
         let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(8).unwrap();
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
         let sink = SourceEventSink {
             tx,
             gaps: Arc::new(Mutex::new(SourceGapStore::default())),
-            source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+            source_queue_backpressure: stats,
             inflight_budget: InflightBudget::new(),
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         };
@@ -17776,6 +30461,8 @@ mod tests {
         });
 
         let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(8).unwrap();
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
         let (_control_tx, control_rx) = mpsc::channel(AGGTRADE_CONTROL_CHANNEL_CAPACITY);
         let source = tokio::spawn(run_binance_ws_source(
             restore_binance_aggtrade_recovery(
@@ -17794,7 +30481,7 @@ mod tests {
             SourceEventSink {
                 tx,
                 gaps: Arc::new(Mutex::new(SourceGapStore::default())),
-                source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+                source_queue_backpressure: stats,
                 inflight_budget: InflightBudget::new(),
                 enqueue_lock: Arc::new(AsyncMutex::new(())),
             },
@@ -17923,6 +30610,8 @@ mod tests {
         let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(32).unwrap();
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
         let inflight_budget = InflightBudget::new();
+        let runtime_stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&runtime_stats, now_ms()).await;
         let (control_tx, control_rx) = mpsc::channel(AGGTRADE_CONTROL_CHANNEL_CAPACITY);
         let source = tokio::spawn(run_binance_ws_source(
             restore_binance_aggtrade_recovery(
@@ -17941,7 +30630,7 @@ mod tests {
             SourceEventSink {
                 tx,
                 gaps: Arc::clone(&gaps),
-                source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+                source_queue_backpressure: runtime_stats,
                 inflight_budget: inflight_budget.clone(),
                 enqueue_lock: Arc::new(AsyncMutex::new(())),
             },
@@ -18086,6 +30775,8 @@ mod tests {
         let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(16).unwrap();
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
         let inflight_budget = InflightBudget::new();
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
         let (_control_tx, control_rx) = mpsc::channel(AGGTRADE_CONTROL_CHANNEL_CAPACITY);
         let source = tokio::spawn(run_binance_ws_source(
             restore_binance_aggtrade_recovery(
@@ -18104,7 +30795,7 @@ mod tests {
             SourceEventSink {
                 tx,
                 gaps: Arc::clone(&gaps),
-                source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+                source_queue_backpressure: stats,
                 inflight_budget: inflight_budget.clone(),
                 enqueue_lock: Arc::new(AsyncMutex::new(())),
             },

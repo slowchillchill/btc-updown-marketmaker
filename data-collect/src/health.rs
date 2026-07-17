@@ -29,7 +29,46 @@ pub enum NetworkFailure {
     CpuWatermarkExceeded,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceFactClass {
+    BusinessAvailability,
+    TransportAvailability,
+    ConfirmedIntegrity,
+}
+
 impl NetworkFailure {
+    /// Returns `None` when the variant lacks enough source-specific context for a safe class.
+    pub const fn source_fact_class(self) -> Option<SourceFactClass> {
+        match self {
+            Self::PongButDataSilent | Self::SourceStale => {
+                Some(SourceFactClass::BusinessAvailability)
+            }
+            Self::ConnectionFailed
+            | Self::Disconnected
+            | Self::ServerShutdown
+            | Self::WsProtocolError
+            | Self::RateLimit
+            | Self::ConnectionLimit
+            | Self::SubscriptionLimit => Some(SourceFactClass::TransportAvailability),
+            Self::UpdateIdGap => Some(SourceFactClass::ConfirmedIntegrity),
+            Self::SubscriptionError
+            | Self::HttpError
+            | Self::EmptyPayload
+            | Self::EmptyArray
+            | Self::EmptySnapshot
+            | Self::NoBusinessMessages
+            | Self::SnapshotMissing
+            | Self::SnapshotStale
+            | Self::SourceGap
+            | Self::CoverageDrop
+            | Self::WriterQueueBlocked
+            | Self::BackpressureTriggered
+            | Self::DiskWatermarkExceeded
+            | Self::MemoryWatermarkExceeded
+            | Self::CpuWatermarkExceeded => None,
+        }
+    }
+
     pub fn required_phase0_cases() -> Vec<Self> {
         vec![
             Self::ConnectionFailed,
@@ -217,11 +256,7 @@ pub fn plan_retry_trace(
             cumulative_elapsed_ms: elapsed_ms,
             jitter_bps: policy.jitter_bps,
             jitter_seed: policy.jitter_seed,
-            final_state: if retry_exhausted {
-                CircuitState::Exhausted
-            } else {
-                CircuitState::Open
-            },
+            final_state: CircuitState::Open,
             subscription_recheck_required: true,
             snapshot_recheck_required: true,
             business_freshness_recheck_required: true,
@@ -281,7 +316,6 @@ pub enum CircuitState {
     Open,
     HalfOpen,
     Recovered,
-    Exhausted,
 }
 
 #[derive(Default)]
@@ -309,11 +343,6 @@ impl SourceHealthRegistry {
     pub fn mark_recovered(&mut self, source_kind: impl Into<String>) {
         self.states
             .insert(source_kind.into(), CircuitState::Recovered);
-    }
-
-    pub fn mark_exhausted(&mut self, source_kind: impl Into<String>) {
-        self.states
-            .insert(source_kind.into(), CircuitState::Exhausted);
     }
 
     pub fn state(&self, source_kind: &str) -> Option<CircuitState> {

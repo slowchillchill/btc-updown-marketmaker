@@ -56,15 +56,15 @@ source 目录               source_kind=<source>
 2. 阶段2先让heartbeat timeout/旧PONG结束旧socket并进入既有recoverable loop，同时让最后一个manager/bound sender关闭成为不重连的normal teardown；不得增加第二owner或公共shadow API。
 3. 阶段3原子删除RTDS业务静默专用`request_reconnect()`的vendor能力、runtime wrapper、生产调用和ticket专属测试；每个真实transport新generation仍只replay一次latest complete filtered desired。
 4. CLOB删除30/60秒freshness watchdog、unsubscribe/resubscribe budget与第三次退出；Gamma外部失败/空候选持续恢复。Binance aggTrade/depth区分“有合法控制frame但无业务数据”和“完全无入站frame”，业务静默不控制网络；confirmed ID/update hole、parser/schema和本地book不变量继续按完整性合同处理。
-5. 各source单次connect/HTTP/read/backoff等待有界并使用capped backoff+jitter；source-local外层总attempt和总elapsed无限，普通external availability、业务静默、日志失败或计数饱和不得结束source/collector。
+5. 各source单次connect/HTTP/read/backoff等待有界并使用capped backoff+jitter；source-local外层总attempt和总elapsed无限，普通external availability、业务静默、日志失败或既有诊断计数饱和不得结束source/collector。
 
 ### 4.2 当前daily manifest与共同coverage
 
 1. 四个logical producer固定映射六个writer source：`polymarket -> polymarket_market, polymarket_market_metadata`；`polymarket_rtds -> polymarket_rtds_chainlink_btc_usd`；`binance_depth -> binance_depth_snapshot, binance_depth_update`；`binance_aggtrade -> binance_aggtrade`。全部mandatory，训练collector没有CLOB user source。
 2. 每日唯一顶层`data_collect_daily_manifest_v3`直接嵌套一个`data_collect_collection_day_coverage_v1`；六个既有source counters职责不变，不复制coverage，不新增transport scope/reason/episode、extensions、receipt或sidecar。
-3. v1只含`not_started|active|ended_known|unclean_end_unknown`、三个nullable `i64` UTC毫秒时间和两个饱和`u32`计数。legacy缺对象只读为unknown；新writer必须写，missing/malformed/unknown nested字段或版本fail closed；所有ManifestOwner mutation必须保留对象。
+3. v1只含`not_started|active|ended_known|unclean_end_unknown`、三个nullable `i64` UTC毫秒时间和一个必填`reactivated_within_day`布尔值。legacy缺对象只读为unknown；新writer必须写，missing/malformed/unknown nested字段或版本fail closed；所有ManifestOwner mutation必须保留对象。
 4. current-day读取/恢复前先持有dataset-root级OS-backed独占lease。queue/唯一receiver/ingress前置完成，六writer与四producer wrapper全部ready并阻塞共同gate后，owner只执行一次atomic activation；commit决定持久归属，ack只控制network/raw release。
-5. 正常rollover依次关闭旧raw generation、drain、收齐四producer barrier与六writer finalize ack、原子提交旧nested end和顶层closed、创建新日active commit并在ack后release。可靠known-close候选first-close-wins；共同fence前的非协调panic/abort/join failure执行unclean-dominates。PendingExit、task级ack/abort permit、同日四态恢复、prior state-aware closure和每个unclean只计一次，全部按新需求第4.2节测试。
+5. 正常rollover依次关闭旧raw generation、drain、收齐四producer barrier与六writer finalize ack、原子提交旧nested end和顶层closed、创建新日active commit并在ack后release。可靠known-close候选first-close-wins；共同fence前的非协调panic/abort/join failure执行unclean-dominates。PendingExit、task级ack/abort permit、同日四态恢复、prior state-aware closure，以及首次activation为`reactivated_within_day=false`、同日后续activation为`true`并保持sticky、新UTC日重置为`false`，全部按新需求第4.2节测试。
 
 ### 4.3 当前验证与生产边界
 

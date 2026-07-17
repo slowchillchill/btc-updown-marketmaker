@@ -6,7 +6,7 @@
 >
 > 对应计划：`plan/data-collect-source-availability-lifecycle-repair-plan.md`
 >
-> 状态：`APPROVED_IMPLEMENTATION_PHASE_0_COMPLETE_PHASE_1_AUTHORIZED`。用户已于2026-07-17批准最终需求、计划及当时SDK-first逐项patch矩阵，并授权按计划执行本地文档/代码修改、测试、独立审查、commit和push；同日对新发现的官方pre-parse完整文本帧trace差异选择B。阶段0已完成并通过独立审查，阶段1可在本阶段commit/push后开始。生产构建、部署、远端服务写操作和数据清理仍未获授权。
+> 状态：`APPROVED_IMPLEMENTATION_PHASE_1_COMPLETE_PHASE_2_AUTHORIZED`。用户已于2026-07-17批准最终需求、计划及当时SDK-first逐项patch矩阵，并授权按计划执行本地文档/代码修改、测试、独立审查、commit和push；阶段0与阶段1均已完成并通过独立审查，阶段2可在阶段1 commit/push后开始。生产构建、部署、远端服务写操作和数据清理仍未获授权。
 
 ## 2026-07-17：最终批准并开始阶段0
 
@@ -190,3 +190,66 @@
 - 最终矩阵精确区分用户B批准的pre-parse完整文本帧TRACE例外，以及仍须在阶段2脱敏的`RtdsParseDiagnosticError::Display`、sticky fault与parser-failure warn；CLOB阶段4使用私有generation-tagged applied ack覆盖两个切代竞态。
 - `git diff --check`通过；阶段0只修改六份需求/计划/changelog文档，没有修改生产代码、vendor、`Cargo.toml`或`Cargo.lock`。用户现有`AGENTS.md`和未跟踪`推荐开发顺序.md`保持在提交范围外。
 - 阶段0完成条件已经满足；本阶段commit/push成功后进入阶段1。生产构建、部署、远端服务操作与数据清理继续未授权。
+
+## 2026-07-17：阶段1共同availability合同与生产测试seam
+
+- 本阶段生产/测试代码仅修改`data-collect/src/daily_manifest.rs`、`data-collect/src/health.rs`、`data-collect/src/live_runtime.rs`、`data-collect/tests/network_recovery_contract.rs`和`data-collect/tests/reconnect_trace_contract.rs`；本changelog先记录候选实现和验证证据，需求、计划与changelog的顶层阶段状态只在终审通过后原子同步。未修改vendored SDK、`Cargo.toml`、`Cargo.lock`、模型、部署配置或远端运行态；用户现有`AGENTS.md`和未跟踪`推荐开发顺序.md`继续排除在本事项提交之外。
+- `SourceFactClass`只提供保守的共同分类fixture：只有具备足够上下文的既有variant才返回business availability、transport availability或confirmed integrity；语义含混的HTTP、subscription、empty/snapshot、queue、资源等variant返回`None`，由真实调用点上下文决定。它不是第二个health registry、transport状态机、reconnect owner或生产控制面。`CircuitState::Exhausted`已删除，重试规划不再以耗尽态表达source终止，但本阶段未提前改写阶段2--6的协议专属生产恢复分支。
+
+| 生产调用族 | 阶段1冻结的分类/行为 | 后续阶段仍须完成 |
+| --- | --- | --- |
+| manifest、writer、bounded queue/drop、parser/schema、SDK `Lagged(n)`、sequence/update-ID或payload冲突 | confirmed integrity；保留既有gap、terminal、quarantine或fail-closed边界 | 不得被协议恢复放宽 |
+| 外部connect/read/write、EOF/Close、WebSocket/HTTP/rate-limit边界 | transport availability；由既有唯一source-local owner处理，本阶段只建立共同分类与不回退证据 | 阶段2--6分别证明无总attempt/elapsed退出预算 |
+| business silence、stale、合法空candidate | business availability；共同fixture不写`source_gaps`或业务`lag_events` | 阶段3--6删除各协议旧watchdog/reconnect/退出分支 |
+| subscription或reconnect调用 | 必须按真实cause与owner上下文分类，不能只按函数名归类 | RTDS one-shot删除、CLOB generation desired-state等分别在阶段3/4完成 |
+| producer/writer/ingress返回或join结果 | 可靠返回、精确协作stop、非协调panic/abort/join failure按共同gate与task identity处理 | parser/writer/internal terminal继续属于完整性失败 |
+
+阶段1还按生产函数族审计了全部`record_gap`、`record_lag`、reconnect/subscription和return入口；下表是有界调用清单，不把`SourceFactClass`冒充自动调用点分类器：
+
+| 生产函数族 | 代表调用与当前分类边界 | 阶段门 |
+| --- | --- | --- |
+| `run_live_training_runtime`、`complete_pending_exit_rollover`、`drive_normal_rollover` | 顶层`record_gap`只覆盖lease/cleanup、runtime/rollover/control channel、ingress/唯一receiver、manifest mutation/ack、writer/source fence/join、capacity scan与其他内部不变量；operator stop、run deadline和capacity limit是显式可靠close候选，不是external availability。顶层没有subscription/reconnect owner。 | 阶段1冻结共同gate、known/unclean与收敛；任何unexpected member return继续terminal。 |
+| `run_polymarket_source_with_spec`、Gamma discovery、`collect_polymarket_single_receiver`、`schedule_polymarket_discovery_retry`、`polymarket_drain_terminal_error` | Gamma合法空candidate和asset business silence属于business availability；Gamma/SDK connect、subscription、Close/EOF等属于transport availability；SDK `Lagged(n)`、parser/schema、decoded/global capacity、queue、dedupe冲突属于confirmed integrity。当前`polymarket_discovery_source_gap`、silence `record_lag/gap`和resubscribe/reconnect调用仍是旧分支。 | 阶段4删除silence驱动网络/退出并补generation-tagged desired/applied；完整性分支不放宽。 |
+| `run_rtds_source_with_spec`、`wait_for_fresh_rtds_message`、`emit_rtds_message` | 初始`subscribe`是唯一desired-state入口；业务stale/无fresh属于business availability，SDK connection generation/Close/EOF属于transport availability；SDK `Lagged(n)`、parser/schema、dedupe冲突属于confirmed integrity。当前freshness `record_lag/gap`、`request_reconnect`、两代/总deadline退出仍明确保留。 | 阶段2先修SDK transport owner；阶段3删除one-shot与business-silence退出。 |
+| `run_binance_depth_source_with_spec_and_control`、`fetch_binance_depth_snapshot`、`run_binance_depth_update_ws_source_with_control` | WS connect/read/Close/EOF、HTTP transport/rate-limit属于transport availability；`no_business_messages`属于business availability；malformed snapshot/update schema、queue failure和confirmed update-ID hole属于confirmed integrity，ID hole继续gap+resnapshot。当前no-business与普通reconnect仍写lag/gap。 | 阶段6拆除business-silence网络动作并保留transport恢复、snapshot与ID-hole合同。 |
+| `run_binance_ws_source`、aggTrade backfill/continuity | WS connect/read/Close/EOF/server shutdown及REST transport失败属于transport availability；`business_message_timeout`属于business availability；ID/payload冲突、continuity/backfill不变量、pending/queue硬边界和schema错误属于confirmed integrity。当前business timeout仍`record_lag`并reconnect，transport reconnect仍写gap。 | 阶段5改为全frame transport inactivity和无总预算恢复；完整性与有界单range backfill边界保留。 |
+| ManifestOwner、`flush_source_batch`、writer worker、`send_event` | manifest schema/identity/mutation/atomic publish、writer parser/finalize/report、bounded queue timeout/drop、磁盘/资源hard bound全部是confirmed integrity；这些路径没有subscription或external reconnect语义。 | 阶段1已接入共同coverage lifecycle；阶段2--6不得以availability恢复吞掉这些错误。 |
+| `SourceTaskHandle`、source wrapper observation、`finished_source_task`/`source_task_ended_unexpectedly` | 可证明的inner/wrapper可靠return冻结known candidate；同一close identity的精确Stop或由同一handle消费的abort permit才是coordinated；panic、wrapper error、缺/错permit和无法证明的join结果为unclean。运行deadline前任何unexpected source完成仍由顶层发现并失败。 | 阶段1完成共同终止分类；后续各source availability loop必须持续运行而不能返回到此terminal边界。 |
+
+- daily manifest保持顶层`data_collect_daily_manifest_v3`并直接嵌套唯一`data_collect_collection_day_coverage_v1`。实现覆盖四态、三个nullable UTC毫秒、两个饱和`u32`计数、状态/时间不变量、legacy缺对象只读为unknown、新writer必写、未知nested version/field/type及非法转换fail closed；六个既有source counter没有复制coverage。ManifestOwner的全部mutation都必须保留并重新验证nested coverage，generic reconcile/load不能暗改activation或unclean计数。
+- runtime先取得并持续持有dataset-root OS独占lease，再同步建立bounded queue与唯一receiver；ManifestOwner、六writer和四mandatory producer wrapper分别ready并阻塞共同gate。owner一次性持久化active并ack后，coordinator才原子释放raw/network permit。lease被主runtime及所有生产writer、owner和source task共同持有；hung writer、live owner与live source测试证明这些任务返回前第二实例不能取得lease。
+- 正常UTC rollover使用同一个transition临界区和day/generation permit：关闭旧raw gate、drain、收齐四producer barrier及六writer finalize ack、最终提交旧日nested close与顶层close、创建并提交新日active，ack后才resume。可靠stop/deadline与rollover竞争通过一次性`PendingExit`和确定性`RunDeadline`候选收敛；旧日final-close与runtime exit在同一临界区线性化。activation已提交但ack前退出返回`PreparedExitWon`，不得把已知持久化结果误报为`OutcomeUncertain`或回滚。
+- startup在active commit前失败时不poll source；commit后deadline/stop向四producer发送同一精确`Stop(task identity, generation, close_id)`。writer只在本地命令循环接收`Run`，随后由集中shutdown各关闭一次。跨日PendingExit让source保持停止、writer继续消费synthetic barrier并完成旧日finalize；测试持有每个reply receiver并断言收到旧generation的精确`StopWithClose`，不再因receiver提前drop产生假失败。
+- source wrapper在transition锁内取得本地观察时间和generation ownership；typed inner return、wrapper panic、预登记且由同一handle消费的abort permit、错误/缺失permit都通过生产完成检测路径测试。writer lifecycle与共同gate/day epoch绑定，coordinator ingress、唯一receiver与queue不变量仍保留完整性失败边界。
+- 私有测试seam直接调用生产`drive_normal_rollover`、真实ManifestOwner、四producer token、六writer、synthetic barrier和精确stop路径。新增覆盖包括：两种poll顺序得到相同旧日manifest digest；old-day commit与runtime exit线性化；source terminal与activation只有一个generation owner；deadline先于后续source return且跨UTC日一致；activation commit后同日/跨日deadline；activation后退出等待全部flush、向四producer发送同一新generation stop且绝不resume；owner/source/writer持有lease；owner mutation拒绝coverage digest漂移。
+- 阶段1刻意保留并继续通过四个旧行为复现：RTDS两代one-shot恢复预算耗尽、CLOB两次resubscribe后退出、Binance depth reconnect仍写gap、aggTrade PING不重置旧business freshness/reconnect。它们不是正确目标合同，分别是阶段3、4、6、5的实现门；本阶段没有把未完成的协议修复冒充通过。
+- 本轮实现验证为：`cargo check -p data-collect --tests --locked`通过；`cargo clippy -p data-collect --locked --all-targets -- -D warnings`零告警；`cargo test -p data-collect live_runtime::tests --lib -- --test-threads=1`为174/174通过；`cargo test -p data-collect --lib --locked -- --test-threads=1`为203/203通过；`cargo test -p data-collect --locked -- --test-threads=1`全部unit、integration和doc tests通过；`cargo fmt --all -- --check`与`git diff --check`通过。阶段1顶层状态、最终review结论与commit/push证据须在新的独立终审通过后补记；在此之前不得进入阶段2。
+
+## 2026-07-17：阶段1独立终审阻塞与coverage计数决策门
+
+- 新的三路独立终审中，范围/文档审查在补齐七类生产调用族清单后PASS；manifest/lifecycle审查报告3项Important，runtime资源/终止审查报告5项Important，Critical均为0。因此阶段1保持`AUTHORIZED`而非`COMPLETE`，没有commit/push，也没有进入阶段2。
+- 两项manifest测试/接线缺口可直接按既有批准合同修复：启动active commit和网络release前必须验证并冻结四producer到六source的完整双向mapping；exit-first与commit-first必须分别走真实RawDayGate、ManifestOwner和rollover路径，并比较旧日字节digest、最终disposition与新日状态，不能用预选owner mode或原子计数helper冒充poll-order验收。
+- 终审发现已批准v1计数不变量与状态转换无法同时成立：需求只规定所有状态`unclean_discontinuity_count <= activation_count`，因此`active(activation=5, unclean=5)`当前是合法输入；但下一次独立unclean必须把unclean饱和加一，得到`6 > 5`并被同一validator拒绝。保持count不变会漏记尚未饱和的独立中断，增加activation又会虚构一次成功active持久化。该冲突必须由用户决定后才能修改需求、计划、schema validator和测试。
+- 推荐选项`C1-A`：对`active`和`ended_known`增加`unclean < activation`，仅当两者均已是`u32::MAX`时允许相等；`unclean_end_unknown`继续允许`unclean <= activation`，因为最后一次activation已经被计为unclean。这样保留v1字段与饱和语义，并使所有可接受状态都能执行下一次转换。备选`C1-B`是继续接受非饱和的active相等状态并在下一次unclean不增count，代价是正式放弃“每个独立中断计一次”的语义；`C1-C`是升级nested schema重新设计overflow/计数表达，范围和迁移成本显著更大。主实现不自行选择。
+- runtime终审的5项Important均已有批准合同、无需新业务决策：为runtime-exit watcher建立abort-on-drop与正常await owner；保存writer OS thread handle并在共同budget内等待report后真实join，partial spawn失败收敛已启动线程，hung writer仍fail closed并持lease；把source control ack与最终task proof联合分类以消除stop/可靠return poll-order差异；在writer report保存lifecycle epoch/terminal class，让可靠terminal作为known proof而panic/missing/wrong epoch保持unclean；把所有mandatory task spawn后的fallible cutpoint统一导向best-effort unclean convergence，禁止裸`?`/return detach后台task。
+- 为避免在决策门前留下未验证半成品，主实现已撤回刚开始的watcher/writer局部修改；随后`cargo fmt --all -- --check`、`git diff --check`和`cargo check -p data-collect --tests`重新通过。工作树仍是此前188/188及完整data-collect测试通过的阶段1候选，加上本次changelog审查记录；已知Important尚未修复，因此不得提交。
+
+## 2026-07-17：用户批准以单一同日再激活布尔值取代coverage计数
+
+- 用户批准删除`collection_day_coverage`中的`activation_count`与`unclean_discontinuity_count`，改为必填`reactivated_within_day: bool`。首次成功原子activation写`false`；任一同一UTC日后续成功原子activation写`true`且当日保持单调；新UTC日首次activation重新为`false`。unclean、known end、prior-day reconciliation和普通ManifestOwner mutation不得改变该值。
+- 本决定只修订`M3-A-R`的字段、状态转换、replay隔离条件和相应验收；`M1-A / M2-A0 / M4-A-R / M5-N/A / M6-A+ / M7-A-R / M8-A`保持不变。`reactivated_within_day=true`取代`activation_count > 1`，用于隔离最后一次start之前无法证明连续coverage的replay区间；`unclean_end_unknown`继续单独表达未知尾部，不记录或推断中断次数。
+- 先前记录的两个饱和计数字段、精确unclean计数、大小关系以及`C1-A/B/C`仅保留为决策演进历史，不再是实施authority；计数冲突决策门随本批准关闭。schema/type、四态时间nullability、UTC日范围、时间顺序、顶层/嵌套状态关系、未知字段/version fail closed等既有结构校验继续保留，不新增布尔值与时间之间的推测性关系校验。
+- 审计确认该nested v1的schema需求已在既有文档commit中存在，但生产实现仍只存在于未提交、未部署的阶段1工作树，从未进入已提交生产代码或真实manifest；因此继续使用`data_collect_collection_day_coverage_v1`，无需迁移或升级到v2。当前专项需求/计划、`data-collect`需求、reliability需求/计划及核心需求草案已同步；旧changelog保持原文。
+
+## 2026-07-17：用户批准原子发布结果语义R
+
+- 阶段1补充启动失败验收时发现真实合同冲突：专项需求第4.2.6项与计划步骤1.1.4原本要求“任何active写入失败都保持既有持久状态”，但既有`write_json_atomic`按临时文件写入/`fsync`、最终`rename`、父目录`fsync`执行；若`rename`成功后父目录`fsync`失败，函数返回错误但最终路径已经可能指向新manifest，无法安全保证旧状态不变。两路独立只读审查均确认该冲突。
+- 用户明确批准推荐R。active publish现冻结为三种结果：`NotPublished`只覆盖最终`rename`前失败并保证最终manifest原始字节与digest不变；`PublishedDurabilityUncertain`表示`rename`成功但父目录`fsync`失败，当前进程必须fail closed并禁止ack、网络/raw release、重试或rollback，下个独占lease持有者只按实际读到的`not_started|active`恢复；父目录`fsync`成功才是`DurablyCommitted`并允许activation ack。
+- R不改变`M7-A-R`的本地完整性fail-closed边界，不忽略父目录`fsync`错误，也不引入无法可靠保证的rename后rollback、双manifest、WAL、数据库或生产测试hook。生产写入顺序保持不变，仅为rename后的父目录`fsync`错误增加稳定`published_durability_uncertain_after_rename`分类；临时路径冲突测试只证明`NotPublished`，不得冒充覆盖全部I/O阶段。
+
+## 2026-07-17：阶段1最终终审通过
+
+- 阶段1先前终审发现的manifest/lifecycle与runtime Important 已全部按批准合同修复；coverage计数冲突由用户批准的单一`reactivated_within_day`消除，原子发布冲突由用户批准的R三态语义消除。本节取代此前“阶段1保持AUTHORIZED、不得提交”的临时阻塞状态。
+- manifest/R终审、runtime终审、范围/文档终审均PASS，三路分别为Critical 0、Important 0。审查确认没有fail-open、旧日重写、影子gate/receiver、越界vendor/依赖/部署修改，也没有把pre-rename测试冒充post-rename父目录`fsync`故障注入覆盖。
+- 最终验证为：`cargo check -p data-collect --tests --locked`通过；`cargo clippy -p data-collect --locked --all-targets -- -D warnings`零告警；`cargo test -p data-collect live_runtime::tests --lib -- --test-threads=1`为174/174通过；`cargo test -p data-collect --lib --locked -- --test-threads=1`为203/203通过；`cargo test -p data-collect --locked -- --test-threads=1`全部unit、integration和doc tests通过；`cargo fmt --all -- --check`与`git diff --check`通过。独立runtime终审另复跑174项`live_runtime`测试并通过，F-R Binance depth跨UTC日resnapshot/reprocess测试包含在内且单独通过。
+- 阶段1共同classification、coverage lifecycle与生产测试seam达到计划完成条件；阶段3/4才翻转的旧RTDS/CLOB有限恢复测试仍按计划保留为可复现基线，不构成本阶段缺陷。阶段1 commit/push完成后可进入已授权的阶段2；生产构建、部署、远端操作与数据清理仍未授权。

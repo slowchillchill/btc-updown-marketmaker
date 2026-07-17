@@ -48,7 +48,7 @@ fn reconnect_trace_records_bounded_backoff_jitter_and_validation_requirements() 
             .iter()
             .all(|attempt| attempt.coverage_recheck_required)
     );
-    assert_eq!(trace.last().unwrap().final_state, CircuitState::Exhausted);
+    assert_eq!(trace.last().unwrap().final_state, CircuitState::Open);
     assert!(trace.last().unwrap().retry_exhausted);
 
     let other_source = plan_retry_trace("rtds_chainlink", NetworkFailure::RateLimit, policy);
@@ -64,11 +64,10 @@ fn reconnect_state_is_independent_per_source() {
     registry.open_circuit("polymarket_market");
     registry.mark_half_open("polymarket_market");
     registry.mark_recovered("binance_depth_update");
-    registry.mark_exhausted("polymarket_market");
 
     assert_eq!(
         registry.state("polymarket_market"),
-        Some(CircuitState::Exhausted)
+        Some(CircuitState::HalfOpen)
     );
     assert_eq!(
         registry.failure("polymarket_market"),

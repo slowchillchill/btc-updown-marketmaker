@@ -11,7 +11,7 @@ use std::os::unix::fs::MetadataExt as _;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use time::OffsetDateTime;
+use time::{Date, Month, OffsetDateTime};
 
 use crate::binance_aggtrade::BinanceAggTradeContinuityState;
 use crate::writer::{DAILY_FILE_RECOVERY_METADATA_KEY, sha256_file};
@@ -19,8 +19,19 @@ use crate::writer::{DAILY_FILE_RECOVERY_METADATA_KEY, sha256_file};
 pub const DAILY_MANIFEST_FILE_NAME: &str = "manifest.json";
 pub const BINANCE_AGGTRADE_CONTINUITY_FIELD: &str = "binance_aggtrade_continuity";
 pub const DAILY_MANIFEST_SCHEMA_VERSION: &str = "data_collect_daily_manifest_v3";
+pub const COLLECTION_DAY_COVERAGE_FIELD: &str = "collection_day_coverage";
+pub const COLLECTION_DAY_COVERAGE_SCHEMA_VERSION: &str = "data_collect_collection_day_coverage_v1";
 const MAX_MANIFEST_GAPS: usize = 256;
 const HOUR_MS: i64 = 3_600_000;
+const DAY_MS: i64 = 24 * HOUR_MS;
+const COLLECTION_DAY_COVERAGE_FIELDS: &[&str] = &[
+    "schema_version",
+    "state",
+    "first_started_utc_ms",
+    "last_started_utc_ms",
+    "ended_utc_ms",
+    "reactivated_within_day",
+];
 const OPERATIONAL_COUNTER_FIELDS: &[&str] = &[
     "structural_dedupe_dropped_events",
     "lag_events",
@@ -78,6 +89,61 @@ pub struct DailyManifestIdentity {
     pub config_digest: String,
     pub collector_host_id: String,
     pub collector_region: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CollectionDayCoverageState {
+    NotStarted,
+    Active,
+    EndedKnown,
+    UncleanEndUnknown,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CollectionDayCoverage {
+    pub schema_version: String,
+    pub state: CollectionDayCoverageState,
+    pub first_started_utc_ms: Option<i64>,
+    pub last_started_utc_ms: Option<i64>,
+    pub ended_utc_ms: Option<i64>,
+    pub reactivated_within_day: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PriorDayCoverageDisposition {
+    ActiveMarkedUnclean,
+    AlreadyUnclean,
+    NotStarted,
+    EndedKnown,
+    LegacyUnknown,
+}
+
+impl PriorDayCoverageDisposition {
+    fn closure_reason(self) -> &'static str {
+        match self {
+            Self::ActiveMarkedUnclean | Self::AlreadyUnclean => "unclean_exit_recovery",
+            Self::NotStarted => "reconciled_collection_not_started",
+            Self::EndedKnown => "reconciled_collection_ended_known",
+            Self::LegacyUnknown => "reconciled_legacy_coverage_unknown",
+        }
+    }
+
+    fn requires_unclean_gap(self) -> bool {
+        matches!(self, Self::ActiveMarkedUnclean | Self::AlreadyUnclean)
+    }
+}
+
+pub fn collection_day_coverage_not_started() -> CollectionDayCoverage {
+    CollectionDayCoverage {
+        schema_version: COLLECTION_DAY_COVERAGE_SCHEMA_VERSION.to_owned(),
+        state: CollectionDayCoverageState::NotStarted,
+        first_started_utc_ms: None,
+        last_started_utc_ms: None,
+        ended_utc_ms: None,
+        reactivated_within_day: false,
+    }
 }
 
 pub fn typed_raw_root(dataset_root: &Path) -> PathBuf {
@@ -435,6 +501,192 @@ pub fn load_day_manifest(day_dir: &Path) -> io::Result<Option<Value>> {
     }
 }
 
+pub fn manifest_collection_day_coverage(
+    manifest: &Value,
+) -> io::Result<Option<CollectionDayCoverage>> {
+    let utc_day = manifest
+        .get("utc_day")
+        .and_then(Value::as_str)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "manifest utc_day missing"))?;
+    let Some(value) = manifest.get(COLLECTION_DAY_COVERAGE_FIELD) else {
+        return Ok(None);
+    };
+    let object = value.as_object().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "collection_day_coverage is not an object",
+        )
+    })?;
+    if object.len() != COLLECTION_DAY_COVERAGE_FIELDS.len()
+        || COLLECTION_DAY_COVERAGE_FIELDS
+            .iter()
+            .any(|field| !object.contains_key(*field))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "collection_day_coverage fields do not match v1 schema",
+        ));
+    }
+    let coverage: CollectionDayCoverage =
+        serde_json::from_value(value.clone()).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid collection_day_coverage: {error}"),
+            )
+        })?;
+    validate_collection_day_coverage(utc_day, &coverage)?;
+    if manifest_state(manifest)? == "closed" && coverage.state == CollectionDayCoverageState::Active
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "closed daily manifest cannot have active collection_day_coverage",
+        ));
+    }
+    Ok(Some(coverage))
+}
+
+pub fn require_manifest_collection_day_coverage(
+    manifest: &Value,
+) -> io::Result<CollectionDayCoverage> {
+    manifest_collection_day_coverage(manifest)?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "collection_day_coverage missing from writable daily manifest",
+        )
+    })
+}
+
+fn validate_collection_day_coverage(
+    utc_day: &str,
+    coverage: &CollectionDayCoverage,
+) -> io::Result<()> {
+    if coverage.schema_version != COLLECTION_DAY_COVERAGE_SCHEMA_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "collection_day_coverage schema mismatch: expected={COLLECTION_DAY_COVERAGE_SCHEMA_VERSION} actual={}",
+                coverage.schema_version
+            ),
+        ));
+    }
+    let (day_start, day_end) = utc_day_bounds_ms(utc_day)?;
+    let started_in_day = |value: i64| value >= day_start && value < day_end;
+    let ended_in_day = |value: i64| value >= day_start && value <= day_end;
+    match coverage.state {
+        CollectionDayCoverageState::NotStarted => {
+            if coverage.first_started_utc_ms.is_some()
+                || coverage.last_started_utc_ms.is_some()
+                || coverage.ended_utc_ms.is_some()
+                || coverage.reactivated_within_day
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid not_started collection_day_coverage",
+                ));
+            }
+        }
+        CollectionDayCoverageState::Active | CollectionDayCoverageState::UncleanEndUnknown => {
+            let first = coverage.first_started_utc_ms.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "started collection_day_coverage is missing first start",
+                )
+            })?;
+            let last = coverage.last_started_utc_ms.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "started collection_day_coverage is missing last start",
+                )
+            })?;
+            if coverage.ended_utc_ms.is_some()
+                || !started_in_day(first)
+                || !started_in_day(last)
+                || first > last
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "invalid {} collection_day_coverage",
+                        if coverage.state == CollectionDayCoverageState::Active {
+                            "active"
+                        } else {
+                            "unclean_end_unknown"
+                        }
+                    ),
+                ));
+            }
+        }
+        CollectionDayCoverageState::EndedKnown => {
+            let first = coverage.first_started_utc_ms.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "ended collection_day_coverage is missing first start",
+                )
+            })?;
+            let last = coverage.last_started_utc_ms.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "ended collection_day_coverage is missing last start",
+                )
+            })?;
+            let end = coverage.ended_utc_ms.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "ended collection_day_coverage is missing end",
+                )
+            })?;
+            if !started_in_day(first)
+                || !started_in_day(last)
+                || !ended_in_day(end)
+                || first > last
+                || last > end
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid ended_known collection_day_coverage",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn utc_day_bounds_ms(utc_day: &str) -> io::Result<(i64, i64)> {
+    if !valid_utc_day(utc_day) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid manifest UTC day: {utc_day}"),
+        ));
+    }
+    let year = utc_day[0..4]
+        .parse::<i32>()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid manifest UTC year"))?;
+    let month = utc_day[5..7]
+        .parse::<u8>()
+        .ok()
+        .and_then(|month| Month::try_from(month).ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid manifest UTC month"))?;
+    let day = utc_day[8..10]
+        .parse::<u8>()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid manifest UTC day"))?;
+    let date = Date::from_calendar_date(year, month, day).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid manifest UTC date: {error}"),
+        )
+    })?;
+    let day_start = date
+        .midnight()
+        .assume_utc()
+        .unix_timestamp()
+        .checked_mul(1000)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "UTC day start overflow"))?;
+    let day_end = day_start
+        .checked_add(DAY_MS)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "UTC day end overflow"))?;
+    Ok((day_start, day_end))
+}
+
 pub fn validate_manifest_day(manifest: &Value, expected_day: &str) -> io::Result<()> {
     let schema_version = manifest
         .get("schema_version")
@@ -471,6 +723,7 @@ pub fn validate_manifest_day(manifest: &Value, expected_day: &str) -> io::Result
             format!("invalid daily manifest state: {state}"),
         ));
     }
+    manifest_collection_day_coverage(manifest)?;
     Ok(())
 }
 
@@ -540,15 +793,307 @@ pub fn day_has_finalized_parquet(day_dir: &Path) -> io::Result<bool> {
     Ok(false)
 }
 
+pub fn activate_collection_day_coverage(
+    day_dir: &Path,
+    manifest: &mut Value,
+    started_utc_ms: i64,
+) -> io::Result<CollectionDayCoverage> {
+    let mut next_manifest = manifest.clone();
+    let utc_day = manifest_utc_day(&next_manifest)?.to_owned();
+    validate_manifest_day(&next_manifest, &utc_day)?;
+    require_open_manifest(&next_manifest, "activate collection-day coverage")?;
+    let current = require_manifest_collection_day_coverage(&next_manifest)?;
+    let next = match current.state {
+        CollectionDayCoverageState::NotStarted => CollectionDayCoverage {
+            schema_version: COLLECTION_DAY_COVERAGE_SCHEMA_VERSION.to_owned(),
+            state: CollectionDayCoverageState::Active,
+            first_started_utc_ms: Some(started_utc_ms),
+            last_started_utc_ms: Some(started_utc_ms),
+            ended_utc_ms: None,
+            reactivated_within_day: false,
+        },
+        CollectionDayCoverageState::Active => {
+            require_monotonic_start(&current, started_utc_ms, false)?;
+            CollectionDayCoverage {
+                state: CollectionDayCoverageState::Active,
+                last_started_utc_ms: Some(started_utc_ms),
+                ended_utc_ms: None,
+                reactivated_within_day: true,
+                ..current
+            }
+        }
+        CollectionDayCoverageState::UncleanEndUnknown => {
+            require_monotonic_start(&current, started_utc_ms, false)?;
+            CollectionDayCoverage {
+                state: CollectionDayCoverageState::Active,
+                last_started_utc_ms: Some(started_utc_ms),
+                ended_utc_ms: None,
+                reactivated_within_day: true,
+                ..current
+            }
+        }
+        CollectionDayCoverageState::EndedKnown => {
+            require_monotonic_start(&current, started_utc_ms, true)?;
+            CollectionDayCoverage {
+                state: CollectionDayCoverageState::Active,
+                last_started_utc_ms: Some(started_utc_ms),
+                ended_utc_ms: None,
+                reactivated_within_day: true,
+                ..current
+            }
+        }
+    };
+    set_manifest_collection_day_coverage(&mut next_manifest, &next)?;
+    validate_manifest_day(&next_manifest, &utc_day)?;
+    write_json_atomic(&day_dir.join(DAILY_MANIFEST_FILE_NAME), &next_manifest)?;
+    *manifest = next_manifest;
+    Ok(next)
+}
+
+pub fn mark_collection_day_coverage_unclean(
+    day_dir: &Path,
+    manifest: &mut Value,
+) -> io::Result<CollectionDayCoverage> {
+    let mut next_manifest = manifest.clone();
+    let utc_day = manifest_utc_day(&next_manifest)?.to_owned();
+    validate_manifest_day(&next_manifest, &utc_day)?;
+    require_open_manifest(&next_manifest, "mark collection-day coverage unclean")?;
+    let current = require_manifest_collection_day_coverage(&next_manifest)?;
+    let already_unclean = current.state == CollectionDayCoverageState::UncleanEndUnknown;
+    let next = collection_day_coverage_unclean(current)?;
+    if already_unclean {
+        return Ok(next);
+    }
+    set_manifest_collection_day_coverage(&mut next_manifest, &next)?;
+    validate_manifest_day(&next_manifest, &utc_day)?;
+    write_json_atomic(&day_dir.join(DAILY_MANIFEST_FILE_NAME), &next_manifest)?;
+    *manifest = next_manifest;
+    Ok(next)
+}
+
+pub fn mark_collection_day_coverage_ended_known(
+    day_dir: &Path,
+    manifest: &mut Value,
+    ended_utc_ms: i64,
+) -> io::Result<CollectionDayCoverage> {
+    let mut next_manifest = manifest.clone();
+    let utc_day = manifest_utc_day(&next_manifest)?.to_owned();
+    validate_manifest_day(&next_manifest, &utc_day)?;
+    require_open_manifest(&next_manifest, "end collection-day coverage")?;
+    let current = require_manifest_collection_day_coverage(&next_manifest)?;
+    let next = collection_day_coverage_ended_known(current, ended_utc_ms)?;
+    set_manifest_collection_day_coverage(&mut next_manifest, &next)?;
+    validate_manifest_day(&next_manifest, &utc_day)?;
+    write_json_atomic(&day_dir.join(DAILY_MANIFEST_FILE_NAME), &next_manifest)?;
+    *manifest = next_manifest;
+    Ok(next)
+}
+
+pub fn reconcile_prior_day_collection_coverage(
+    manifest: &mut Value,
+) -> io::Result<PriorDayCoverageDisposition> {
+    let utc_day = manifest_utc_day(manifest)?.to_owned();
+    validate_manifest_day(manifest, &utc_day)?;
+    require_open_manifest(manifest, "reconcile prior-day collection coverage")?;
+    let Some(current) = manifest_collection_day_coverage(manifest)? else {
+        return Ok(PriorDayCoverageDisposition::LegacyUnknown);
+    };
+    match current.state {
+        CollectionDayCoverageState::Active => {
+            let next = CollectionDayCoverage {
+                state: CollectionDayCoverageState::UncleanEndUnknown,
+                ended_utc_ms: None,
+                ..current
+            };
+            set_manifest_collection_day_coverage(manifest, &next)?;
+            validate_manifest_day(manifest, &utc_day)?;
+            Ok(PriorDayCoverageDisposition::ActiveMarkedUnclean)
+        }
+        CollectionDayCoverageState::UncleanEndUnknown => {
+            Ok(PriorDayCoverageDisposition::AlreadyUnclean)
+        }
+        CollectionDayCoverageState::NotStarted => Ok(PriorDayCoverageDisposition::NotStarted),
+        CollectionDayCoverageState::EndedKnown => Ok(PriorDayCoverageDisposition::EndedKnown),
+    }
+}
+
+pub fn close_day_manifest_with_collection_end(
+    day_dir: &Path,
+    manifest: &mut Value,
+    closure_reason: &str,
+    ended_utc_ms: i64,
+) -> io::Result<CollectionDayCoverage> {
+    ensure_no_stale_temporary_files(day_dir)?;
+    let mut next_manifest = manifest.clone();
+    let utc_day = manifest_utc_day(&next_manifest)?.to_owned();
+    validate_manifest_day(&next_manifest, &utc_day)?;
+    require_open_manifest(&next_manifest, "close daily manifest")?;
+    let current = require_manifest_collection_day_coverage(&next_manifest)?;
+    let next = collection_day_coverage_ended_known(current, ended_utc_ms)?;
+    set_manifest_collection_day_coverage(&mut next_manifest, &next)?;
+    let object = next_manifest.as_object_mut().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "daily manifest is not an object",
+        )
+    })?;
+    object.insert("state".to_owned(), Value::String("closed".to_owned()));
+    object.insert(
+        "closure_reason".to_owned(),
+        Value::String(closure_reason.to_owned()),
+    );
+    validate_manifest_day(&next_manifest, &utc_day)?;
+    write_json_atomic(&day_dir.join(DAILY_MANIFEST_FILE_NAME), &next_manifest)?;
+    *manifest = next_manifest;
+    Ok(next)
+}
+
+pub fn close_day_manifest_with_unclean_end(
+    day_dir: &Path,
+    manifest: &mut Value,
+    closure_reason: &str,
+    gaps: &[String],
+) -> io::Result<CollectionDayCoverage> {
+    ensure_no_stale_temporary_files(day_dir)?;
+    let mut next_manifest = manifest.clone();
+    let utc_day = manifest_utc_day(&next_manifest)?.to_owned();
+    validate_manifest_day(&next_manifest, &utc_day)?;
+    require_open_manifest(&next_manifest, "close daily manifest with unclean end")?;
+    let current = require_manifest_collection_day_coverage(&next_manifest)?;
+    let next = collection_day_coverage_unclean(current)?;
+    set_manifest_collection_day_coverage(&mut next_manifest, &next)?;
+    merge_manifest_gaps(&mut next_manifest, gaps)?;
+    let object = next_manifest.as_object_mut().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "daily manifest is not an object",
+        )
+    })?;
+    object.insert("state".to_owned(), Value::String("closed".to_owned()));
+    object.insert(
+        "closure_reason".to_owned(),
+        Value::String(closure_reason.to_owned()),
+    );
+    validate_manifest_day(&next_manifest, &utc_day)?;
+    write_json_atomic(&day_dir.join(DAILY_MANIFEST_FILE_NAME), &next_manifest)?;
+    *manifest = next_manifest;
+    Ok(next)
+}
+
+fn collection_day_coverage_unclean(
+    current: CollectionDayCoverage,
+) -> io::Result<CollectionDayCoverage> {
+    match current.state {
+        CollectionDayCoverageState::Active => Ok(CollectionDayCoverage {
+            state: CollectionDayCoverageState::UncleanEndUnknown,
+            ended_utc_ms: None,
+            ..current
+        }),
+        CollectionDayCoverageState::UncleanEndUnknown => Ok(current),
+        CollectionDayCoverageState::NotStarted | CollectionDayCoverageState::EndedKnown => {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "only active collection_day_coverage can become unclean",
+            ))
+        }
+    }
+}
+
+fn collection_day_coverage_ended_known(
+    current: CollectionDayCoverage,
+    ended_utc_ms: i64,
+) -> io::Result<CollectionDayCoverage> {
+    if current.state != CollectionDayCoverageState::Active {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "only active collection_day_coverage can end known",
+        ));
+    }
+    Ok(CollectionDayCoverage {
+        state: CollectionDayCoverageState::EndedKnown,
+        ended_utc_ms: Some(ended_utc_ms),
+        ..current
+    })
+}
+
+fn require_monotonic_start(
+    current: &CollectionDayCoverage,
+    started_utc_ms: i64,
+    require_after_end: bool,
+) -> io::Result<()> {
+    let last = current
+        .last_started_utc_ms
+        .expect("validated started coverage has a last start");
+    if started_utc_ms < last
+        || (require_after_end
+            && started_utc_ms
+                < current
+                    .ended_utc_ms
+                    .expect("validated ended coverage has an end"))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "collection-day activation clock moved backwards",
+        ));
+    }
+    Ok(())
+}
+
+fn set_manifest_collection_day_coverage(
+    manifest: &mut Value,
+    coverage: &CollectionDayCoverage,
+) -> io::Result<()> {
+    let object = manifest.as_object_mut().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "daily manifest is not an object",
+        )
+    })?;
+    object.insert(
+        COLLECTION_DAY_COVERAGE_FIELD.to_owned(),
+        serde_json::to_value(coverage).map_err(io::Error::other)?,
+    );
+    Ok(())
+}
+
+fn manifest_utc_day(manifest: &Value) -> io::Result<&str> {
+    manifest
+        .get("utc_day")
+        .and_then(Value::as_str)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "manifest utc_day missing"))
+}
+
+fn require_open_manifest(manifest: &Value, operation: &str) -> io::Result<()> {
+    if manifest_state(manifest)? != "open" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("cannot {operation} in closed daily manifest"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_writable_manifest_collection_coverage(manifest: &Value) -> io::Result<()> {
+    let utc_day = manifest_utc_day(manifest)?;
+    validate_manifest_day(manifest, utc_day)?;
+    require_manifest_collection_day_coverage(manifest)?;
+    Ok(())
+}
+
 pub fn close_reconciled_day_manifest(
     day_dir: &Path,
     manifest: &mut Value,
     continuity: &BinanceAggTradeContinuityState,
 ) -> io::Result<()> {
-    let existing_source_counters = manifest.get("source_counters").cloned();
-    let files = reconciled_manifest_file_facts(day_dir, manifest, true)?;
+    let mut next_manifest = manifest.clone();
+    let utc_day = manifest_utc_day(&next_manifest)?.to_owned();
+    validate_manifest_day(&next_manifest, &utc_day)?;
+    require_open_manifest(&next_manifest, "reconcile closed UTC day")?;
+    let disposition = reconcile_prior_day_collection_coverage(&mut next_manifest)?;
+    let existing_source_counters = next_manifest.get("source_counters").cloned();
+    let files = reconciled_manifest_file_facts(day_dir, &next_manifest, true)?;
     {
-        let object = manifest.as_object_mut().ok_or_else(|| {
+        let object = next_manifest.as_object_mut().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 "daily manifest is not an object",
@@ -566,21 +1111,25 @@ pub fn close_reconciled_day_manifest(
             ),
         );
     }
-    record_manifest_gaps(
-        day_dir,
-        manifest,
-        &["unclean_exit_recovery_gap:previous_process_ended_without_day_barrier".to_owned()],
-    )?;
-    let object = manifest
+    if disposition.requires_unclean_gap() {
+        merge_manifest_gaps(
+            &mut next_manifest,
+            &["unclean_exit_recovery_gap:previous_process_ended_without_day_barrier".to_owned()],
+        )?;
+    }
+    let object = next_manifest
         .as_object_mut()
         .expect("manifest object was validated");
     object.insert("state".to_owned(), Value::String("closed".to_owned()));
     object.insert(
         "closure_reason".to_owned(),
-        Value::String("unclean_exit_recovery".to_owned()),
+        Value::String(disposition.closure_reason().to_owned()),
     );
-    set_manifest_binance_continuity(manifest, continuity)?;
-    write_json_atomic(&day_dir.join(DAILY_MANIFEST_FILE_NAME), manifest)
+    set_manifest_binance_continuity(&mut next_manifest, continuity)?;
+    validate_manifest_day(&next_manifest, &utc_day)?;
+    write_json_atomic(&day_dir.join(DAILY_MANIFEST_FILE_NAME), &next_manifest)?;
+    *manifest = next_manifest;
+    Ok(())
 }
 
 pub fn reconcile_open_day_manifest(
@@ -605,6 +1154,7 @@ pub fn reconcile_open_day_manifest(
             "files": [],
             "source_counters": {},
             "gaps": [],
+            "collection_day_coverage": collection_day_coverage_not_started(),
         })
     });
     validate_manifest_day(&manifest, utc_day)?;
@@ -615,6 +1165,7 @@ pub fn reconcile_open_day_manifest(
         ));
     }
     require_identity(&manifest, identity)?;
+    require_manifest_collection_day_coverage(&manifest)?;
     let existing_source_counters = manifest.get("source_counters").cloned();
     let files = reconciled_manifest_file_facts(day_dir, &manifest, true)?;
     let object = manifest.as_object_mut().ok_or_else(|| {
@@ -645,6 +1196,7 @@ pub fn merge_finalized_file_delta(
     delta: &DailyFinalizedFileDelta,
 ) -> io::Result<()> {
     validate_manifest_day(manifest, &delta.utc_day)?;
+    require_manifest_collection_day_coverage(manifest)?;
     if manifest_state(manifest)? != "open" {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -748,6 +1300,7 @@ pub fn add_manifest_operational_counters(
     if deltas.is_empty() {
         return Ok(());
     }
+    validate_writable_manifest_collection_coverage(manifest)?;
     if manifest_state(manifest)? != "open" {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -814,6 +1367,7 @@ pub fn update_manifest_continuity(
             format!("invalid Binance continuity: {error}"),
         )
     })?;
+    validate_writable_manifest_collection_coverage(manifest)?;
     if manifest_state(manifest)? != "open" {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -829,12 +1383,21 @@ pub fn record_manifest_gaps(
     manifest: &mut Value,
     new_gaps: &[String],
 ) -> io::Result<()> {
+    validate_writable_manifest_collection_coverage(manifest)?;
     if manifest_state(manifest)? != "open" {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "cannot update gaps in closed daily manifest",
         ));
     }
+    merge_manifest_gaps(manifest, new_gaps)?;
+    if !new_gaps.is_empty() {
+        write_json_atomic(&day_dir.join(DAILY_MANIFEST_FILE_NAME), manifest)?;
+    }
+    Ok(())
+}
+
+fn merge_manifest_gaps(manifest: &mut Value, new_gaps: &[String]) -> io::Result<()> {
     let object = manifest.as_object_mut().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -870,9 +1433,6 @@ pub fn record_manifest_gaps(
         bounded.push(format!("manifest_gap_overflow_count:{overflow}"));
     }
     object.insert("gaps".to_owned(), json!(bounded));
-    if !new_gaps.is_empty() {
-        write_json_atomic(&day_dir.join(DAILY_MANIFEST_FILE_NAME), manifest)?;
-    }
     Ok(())
 }
 
@@ -882,6 +1442,8 @@ pub fn record_day_barrier_state(
     producer_barriers: &BTreeSet<String>,
     writer_finalize_acks: &BTreeSet<String>,
 ) -> io::Result<()> {
+    validate_writable_manifest_collection_coverage(manifest)?;
+    require_open_manifest(manifest, "record UTC-day barrier state")?;
     let object = manifest.as_object_mut().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -902,7 +1464,12 @@ pub fn close_day_manifest(
     closure_reason: &str,
 ) -> io::Result<()> {
     ensure_no_stale_temporary_files(day_dir)?;
-    let object = manifest.as_object_mut().ok_or_else(|| {
+    let mut next_manifest = manifest.clone();
+    let utc_day = manifest_utc_day(&next_manifest)?.to_owned();
+    validate_manifest_day(&next_manifest, &utc_day)?;
+    require_manifest_collection_day_coverage(&next_manifest)?;
+    require_open_manifest(&next_manifest, "close daily manifest")?;
+    let object = next_manifest.as_object_mut().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             "daily manifest is not an object",
@@ -913,13 +1480,17 @@ pub fn close_day_manifest(
         "closure_reason".to_owned(),
         Value::String(closure_reason.to_owned()),
     );
-    write_json_atomic(&day_dir.join(DAILY_MANIFEST_FILE_NAME), manifest)
+    validate_manifest_day(&next_manifest, &utc_day)?;
+    write_json_atomic(&day_dir.join(DAILY_MANIFEST_FILE_NAME), &next_manifest)?;
+    *manifest = next_manifest;
+    Ok(())
 }
 
 pub fn write_json_atomic(path: &Path, value: &impl Serialize) -> io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "manifest path has no parent")
     })?;
+    let parent_directory = File::open(parent)?;
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -940,12 +1511,17 @@ pub fn write_json_atomic(path: &Path, value: &impl Serialize) -> io::Result<()> 
         file.write_all(b"\n")?;
         file.sync_all()?;
         fs::rename(&temporary, path)?;
-        File::open(parent)?.sync_all()?;
         Ok(())
     })() {
         let _ = fs::remove_file(&temporary);
         return Err(error);
     }
+    parent_directory.sync_all().map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("published_durability_uncertain_after_rename: {error}"),
+        )
+    })?;
     Ok(())
 }
 
@@ -1676,6 +2252,863 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    const TEST_DAY: &str = "2026-07-17";
+    const TEST_DAY_START_MS: i64 = 1_784_246_400_000;
+    const TEST_DAY_END_MS: i64 = 1_784_332_800_000;
+
+    fn test_identity() -> DailyManifestIdentity {
+        DailyManifestIdentity {
+            build_commit: "test-build".to_owned(),
+            collector_binary_sha256: "test-binary".to_owned(),
+            config_digest: "test-config".to_owned(),
+            collector_host_id: "test-host".to_owned(),
+            collector_region: "test-region".to_owned(),
+        }
+    }
+
+    fn test_manifest(coverage: Option<CollectionDayCoverage>) -> Value {
+        let identity = test_identity();
+        let mut manifest = json!({
+            "schema_version": DAILY_MANIFEST_SCHEMA_VERSION,
+            "utc_day": TEST_DAY,
+            "state": "open",
+            "build_commit": identity.build_commit,
+            "collector_binary_sha256": identity.collector_binary_sha256,
+            "config_digest": identity.config_digest,
+            "collector_host_id": identity.collector_host_id,
+            "collector_region": identity.collector_region,
+            "files": [],
+            "source_counters": {},
+            "gaps": [],
+        });
+        if let Some(coverage) = coverage {
+            manifest[COLLECTION_DAY_COVERAGE_FIELD] = serde_json::to_value(coverage).unwrap();
+        }
+        manifest
+    }
+
+    fn active_coverage(started_utc_ms: i64) -> CollectionDayCoverage {
+        CollectionDayCoverage {
+            schema_version: COLLECTION_DAY_COVERAGE_SCHEMA_VERSION.to_owned(),
+            state: CollectionDayCoverageState::Active,
+            first_started_utc_ms: Some(started_utc_ms),
+            last_started_utc_ms: Some(started_utc_ms),
+            ended_utc_ms: None,
+            reactivated_within_day: false,
+        }
+    }
+
+    fn coverage_with_times(
+        mut coverage: CollectionDayCoverage,
+        first_started_utc_ms: Option<i64>,
+        last_started_utc_ms: Option<i64>,
+        ended_utc_ms: Option<i64>,
+    ) -> CollectionDayCoverage {
+        coverage.first_started_utc_ms = first_started_utc_ms;
+        coverage.last_started_utc_ms = last_started_utc_ms;
+        coverage.ended_utc_ms = ended_utc_ms;
+        coverage
+    }
+
+    #[test]
+    fn collection_day_coverage_strictly_validates_schema_state_and_day_bounds() {
+        let legacy = test_manifest(None);
+        assert_eq!(manifest_collection_day_coverage(&legacy).unwrap(), None);
+
+        let not_started = collection_day_coverage_not_started();
+        let manifest = test_manifest(Some(not_started.clone()));
+        assert_eq!(
+            manifest_collection_day_coverage(&manifest).unwrap(),
+            Some(not_started)
+        );
+
+        for (field, invalid) in [
+            ("unknown_field", json!(true)),
+            ("reactivated_within_day", json!(0)),
+            ("reactivated_within_day", Value::Null),
+            ("state", json!("unknown")),
+            ("state", json!(0)),
+            (
+                "schema_version",
+                json!("data_collect_collection_day_coverage_v2"),
+            ),
+            ("schema_version", json!(0)),
+        ] {
+            let mut malformed = test_manifest(Some(collection_day_coverage_not_started()));
+            malformed[COLLECTION_DAY_COVERAGE_FIELD][field] = invalid;
+            assert!(
+                manifest_collection_day_coverage(&malformed).is_err(),
+                "{field}"
+            );
+        }
+        for missing in COLLECTION_DAY_COVERAGE_FIELDS {
+            let mut missing_field = test_manifest(Some(collection_day_coverage_not_started()));
+            missing_field[COLLECTION_DAY_COVERAGE_FIELD]
+                .as_object_mut()
+                .unwrap()
+                .remove(*missing);
+            assert!(
+                manifest_collection_day_coverage(&missing_field).is_err(),
+                "{missing}"
+            );
+        }
+        for field in [
+            "first_started_utc_ms",
+            "last_started_utc_ms",
+            "ended_utc_ms",
+        ] {
+            let coverage = if field == "ended_utc_ms" {
+                CollectionDayCoverage {
+                    state: CollectionDayCoverageState::EndedKnown,
+                    ended_utc_ms: Some(TEST_DAY_START_MS),
+                    ..active_coverage(TEST_DAY_START_MS)
+                }
+            } else {
+                active_coverage(TEST_DAY_START_MS)
+            };
+            let mut malformed = test_manifest(Some(coverage));
+            malformed[COLLECTION_DAY_COVERAGE_FIELD][field] = json!("not-an-i64");
+            assert!(
+                manifest_collection_day_coverage(&malformed).is_err(),
+                "{field}"
+            );
+        }
+
+        for retired_field in ["activation_count", "unclean_discontinuity_count"] {
+            let mut malformed = test_manifest(Some(collection_day_coverage_not_started()));
+            malformed[COLLECTION_DAY_COVERAGE_FIELD][retired_field] = json!(0);
+            assert!(
+                manifest_collection_day_coverage(&malformed).is_err(),
+                "{retired_field}"
+            );
+        }
+
+        let active = active_coverage(TEST_DAY_START_MS);
+        let unclean = CollectionDayCoverage {
+            state: CollectionDayCoverageState::UncleanEndUnknown,
+            ..active.clone()
+        };
+        let ended = CollectionDayCoverage {
+            state: CollectionDayCoverageState::EndedKnown,
+            ended_utc_ms: Some(TEST_DAY_START_MS + 2),
+            ..active.clone()
+        };
+        let invalid_states = vec![
+            (
+                "not_started reactivated",
+                CollectionDayCoverage {
+                    reactivated_within_day: true,
+                    ..collection_day_coverage_not_started()
+                },
+            ),
+            (
+                "not_started first non-null",
+                coverage_with_times(
+                    collection_day_coverage_not_started(),
+                    Some(TEST_DAY_START_MS),
+                    None,
+                    None,
+                ),
+            ),
+            (
+                "not_started last non-null",
+                coverage_with_times(
+                    collection_day_coverage_not_started(),
+                    None,
+                    Some(TEST_DAY_START_MS),
+                    None,
+                ),
+            ),
+            (
+                "not_started end non-null",
+                coverage_with_times(
+                    collection_day_coverage_not_started(),
+                    None,
+                    None,
+                    Some(TEST_DAY_START_MS),
+                ),
+            ),
+            (
+                "active missing first",
+                coverage_with_times(active.clone(), None, Some(TEST_DAY_START_MS), None),
+            ),
+            (
+                "active missing last",
+                coverage_with_times(active.clone(), Some(TEST_DAY_START_MS), None, None),
+            ),
+            (
+                "active end non-null",
+                coverage_with_times(
+                    active.clone(),
+                    Some(TEST_DAY_START_MS),
+                    Some(TEST_DAY_START_MS),
+                    Some(TEST_DAY_START_MS + 1),
+                ),
+            ),
+            (
+                "active first before day",
+                coverage_with_times(
+                    active.clone(),
+                    Some(TEST_DAY_START_MS - 1),
+                    Some(TEST_DAY_START_MS),
+                    None,
+                ),
+            ),
+            (
+                "active first at day end",
+                coverage_with_times(
+                    active.clone(),
+                    Some(TEST_DAY_END_MS),
+                    Some(TEST_DAY_END_MS),
+                    None,
+                ),
+            ),
+            (
+                "active last before day",
+                coverage_with_times(
+                    active.clone(),
+                    Some(TEST_DAY_START_MS - 1),
+                    Some(TEST_DAY_START_MS - 1),
+                    None,
+                ),
+            ),
+            (
+                "active last at day end",
+                coverage_with_times(
+                    active.clone(),
+                    Some(TEST_DAY_START_MS),
+                    Some(TEST_DAY_END_MS),
+                    None,
+                ),
+            ),
+            (
+                "active first after last",
+                coverage_with_times(
+                    active.clone(),
+                    Some(TEST_DAY_START_MS + 1),
+                    Some(TEST_DAY_START_MS),
+                    None,
+                ),
+            ),
+            (
+                "unclean missing first",
+                coverage_with_times(unclean.clone(), None, Some(TEST_DAY_START_MS), None),
+            ),
+            (
+                "unclean missing last",
+                coverage_with_times(unclean.clone(), Some(TEST_DAY_START_MS), None, None),
+            ),
+            (
+                "unclean end non-null",
+                coverage_with_times(
+                    unclean.clone(),
+                    Some(TEST_DAY_START_MS),
+                    Some(TEST_DAY_START_MS),
+                    Some(TEST_DAY_START_MS + 1),
+                ),
+            ),
+            (
+                "unclean first before day",
+                coverage_with_times(
+                    unclean.clone(),
+                    Some(TEST_DAY_START_MS - 1),
+                    Some(TEST_DAY_START_MS),
+                    None,
+                ),
+            ),
+            (
+                "unclean first at day end",
+                coverage_with_times(
+                    unclean.clone(),
+                    Some(TEST_DAY_END_MS),
+                    Some(TEST_DAY_END_MS),
+                    None,
+                ),
+            ),
+            (
+                "unclean last before day",
+                coverage_with_times(
+                    unclean.clone(),
+                    Some(TEST_DAY_START_MS - 1),
+                    Some(TEST_DAY_START_MS - 1),
+                    None,
+                ),
+            ),
+            (
+                "unclean last at day end",
+                coverage_with_times(
+                    unclean.clone(),
+                    Some(TEST_DAY_START_MS),
+                    Some(TEST_DAY_END_MS),
+                    None,
+                ),
+            ),
+            (
+                "unclean first after last",
+                coverage_with_times(
+                    unclean.clone(),
+                    Some(TEST_DAY_START_MS + 1),
+                    Some(TEST_DAY_START_MS),
+                    None,
+                ),
+            ),
+            (
+                "ended missing first",
+                coverage_with_times(
+                    ended.clone(),
+                    None,
+                    Some(TEST_DAY_START_MS),
+                    Some(TEST_DAY_START_MS + 2),
+                ),
+            ),
+            (
+                "ended missing last",
+                coverage_with_times(
+                    ended.clone(),
+                    Some(TEST_DAY_START_MS),
+                    None,
+                    Some(TEST_DAY_START_MS + 2),
+                ),
+            ),
+            (
+                "ended missing end",
+                coverage_with_times(
+                    ended.clone(),
+                    Some(TEST_DAY_START_MS),
+                    Some(TEST_DAY_START_MS),
+                    None,
+                ),
+            ),
+            (
+                "ended first before day",
+                coverage_with_times(
+                    ended.clone(),
+                    Some(TEST_DAY_START_MS - 1),
+                    Some(TEST_DAY_START_MS),
+                    Some(TEST_DAY_START_MS + 2),
+                ),
+            ),
+            (
+                "ended first at day end",
+                coverage_with_times(
+                    ended.clone(),
+                    Some(TEST_DAY_END_MS),
+                    Some(TEST_DAY_END_MS),
+                    Some(TEST_DAY_END_MS),
+                ),
+            ),
+            (
+                "ended last before day",
+                coverage_with_times(
+                    ended.clone(),
+                    Some(TEST_DAY_START_MS - 1),
+                    Some(TEST_DAY_START_MS - 1),
+                    Some(TEST_DAY_START_MS + 2),
+                ),
+            ),
+            (
+                "ended last at day end",
+                coverage_with_times(
+                    ended.clone(),
+                    Some(TEST_DAY_START_MS),
+                    Some(TEST_DAY_END_MS),
+                    Some(TEST_DAY_END_MS),
+                ),
+            ),
+            (
+                "ended before day",
+                coverage_with_times(
+                    ended.clone(),
+                    Some(TEST_DAY_START_MS),
+                    Some(TEST_DAY_START_MS),
+                    Some(TEST_DAY_START_MS - 1),
+                ),
+            ),
+            (
+                "ended after day",
+                coverage_with_times(
+                    ended.clone(),
+                    Some(TEST_DAY_START_MS),
+                    Some(TEST_DAY_START_MS),
+                    Some(TEST_DAY_END_MS + 1),
+                ),
+            ),
+            (
+                "ended first after last",
+                coverage_with_times(
+                    ended.clone(),
+                    Some(TEST_DAY_START_MS + 1),
+                    Some(TEST_DAY_START_MS),
+                    Some(TEST_DAY_START_MS + 2),
+                ),
+            ),
+            (
+                "ended last after end",
+                coverage_with_times(
+                    ended,
+                    Some(TEST_DAY_START_MS),
+                    Some(TEST_DAY_START_MS + 2),
+                    Some(TEST_DAY_START_MS + 1),
+                ),
+            ),
+        ];
+        for (label, coverage) in invalid_states {
+            assert!(
+                manifest_collection_day_coverage(&test_manifest(Some(coverage))).is_err(),
+                "{label}"
+            );
+        }
+
+        let ended_at_boundary = CollectionDayCoverage {
+            state: CollectionDayCoverageState::EndedKnown,
+            ended_utc_ms: Some(TEST_DAY_END_MS),
+            ..active_coverage(TEST_DAY_START_MS)
+        };
+        assert!(manifest_collection_day_coverage(&test_manifest(Some(ended_at_boundary))).is_ok());
+
+        for coverage in [
+            CollectionDayCoverage {
+                last_started_utc_ms: Some(TEST_DAY_START_MS + 2),
+                reactivated_within_day: false,
+                ..active_coverage(TEST_DAY_START_MS)
+            },
+            CollectionDayCoverage {
+                reactivated_within_day: true,
+                ..active_coverage(TEST_DAY_START_MS)
+            },
+            CollectionDayCoverage {
+                state: CollectionDayCoverageState::UncleanEndUnknown,
+                last_started_utc_ms: Some(TEST_DAY_START_MS + 2),
+                reactivated_within_day: false,
+                ..active_coverage(TEST_DAY_START_MS)
+            },
+            CollectionDayCoverage {
+                state: CollectionDayCoverageState::UncleanEndUnknown,
+                reactivated_within_day: true,
+                ..active_coverage(TEST_DAY_START_MS)
+            },
+            CollectionDayCoverage {
+                state: CollectionDayCoverageState::EndedKnown,
+                last_started_utc_ms: Some(TEST_DAY_START_MS + 1),
+                ended_utc_ms: Some(TEST_DAY_START_MS + 2),
+                reactivated_within_day: false,
+                ..active_coverage(TEST_DAY_START_MS)
+            },
+            CollectionDayCoverage {
+                state: CollectionDayCoverageState::EndedKnown,
+                ended_utc_ms: Some(TEST_DAY_START_MS),
+                reactivated_within_day: true,
+                ..active_coverage(TEST_DAY_START_MS)
+            },
+        ] {
+            assert!(
+                manifest_collection_day_coverage(&test_manifest(Some(coverage))).is_ok(),
+                "active, unclean, and ended coverage impose no extra bool/time relationship"
+            );
+        }
+
+        let mut closed_active = test_manifest(Some(active_coverage(TEST_DAY_START_MS)));
+        closed_active["state"] = json!("closed");
+        assert!(manifest_collection_day_coverage(&closed_active).is_err());
+    }
+
+    #[test]
+    fn activation_transitions_all_four_states_and_sets_reactivation_fact() {
+        let cases = [
+            (
+                collection_day_coverage_not_started(),
+                TEST_DAY_START_MS,
+                TEST_DAY_START_MS,
+                false,
+            ),
+            (
+                active_coverage(TEST_DAY_START_MS),
+                TEST_DAY_START_MS,
+                TEST_DAY_START_MS + 1,
+                true,
+            ),
+            (
+                CollectionDayCoverage {
+                    state: CollectionDayCoverageState::UncleanEndUnknown,
+                    ..active_coverage(TEST_DAY_START_MS)
+                },
+                TEST_DAY_START_MS,
+                TEST_DAY_START_MS + 1,
+                true,
+            ),
+            (
+                CollectionDayCoverage {
+                    state: CollectionDayCoverageState::EndedKnown,
+                    ended_utc_ms: Some(TEST_DAY_START_MS + 1),
+                    ..active_coverage(TEST_DAY_START_MS)
+                },
+                TEST_DAY_START_MS,
+                TEST_DAY_START_MS + 2,
+                true,
+            ),
+        ];
+
+        for (coverage, first, started, reactivated_within_day) in cases {
+            let tmp = tempdir().unwrap();
+            let mut manifest = test_manifest(Some(coverage));
+            let activated = activate_collection_day_coverage(tmp.path(), &mut manifest, started)
+                .expect("activation must succeed");
+            assert_eq!(activated.state, CollectionDayCoverageState::Active);
+            assert_eq!(activated.first_started_utc_ms, Some(first));
+            assert_eq!(activated.last_started_utc_ms, Some(started));
+            assert_eq!(activated.ended_utc_ms, None);
+            assert_eq!(activated.reactivated_within_day, reactivated_within_day);
+            assert_eq!(
+                load_day_manifest(tmp.path()).unwrap().unwrap()[COLLECTION_DAY_COVERAGE_FIELD],
+                serde_json::to_value(activated).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn activation_rejects_clock_rollback_without_mutating_manifest() {
+        let tmp = tempdir().unwrap();
+        let coverage = CollectionDayCoverage {
+            first_started_utc_ms: Some(TEST_DAY_START_MS),
+            last_started_utc_ms: Some(TEST_DAY_START_MS + 2),
+            ..active_coverage(TEST_DAY_START_MS)
+        };
+        let mut manifest = test_manifest(Some(coverage));
+        let before = manifest.clone();
+
+        activate_collection_day_coverage(tmp.path(), &mut manifest, TEST_DAY_START_MS + 1)
+            .expect_err("clock rollback must fail closed");
+
+        assert_eq!(manifest, before);
+        assert!(!tmp.path().join(DAILY_MANIFEST_FILE_NAME).exists());
+
+        let ended_tmp = tempdir().unwrap();
+        let ended_coverage = CollectionDayCoverage {
+            state: CollectionDayCoverageState::EndedKnown,
+            first_started_utc_ms: Some(TEST_DAY_START_MS),
+            last_started_utc_ms: Some(TEST_DAY_START_MS + 1),
+            ended_utc_ms: Some(TEST_DAY_START_MS + 3),
+            ..active_coverage(TEST_DAY_START_MS)
+        };
+        let mut ended_manifest = test_manifest(Some(ended_coverage));
+        let ended_before = ended_manifest.clone();
+
+        activate_collection_day_coverage(
+            ended_tmp.path(),
+            &mut ended_manifest,
+            TEST_DAY_START_MS + 2,
+        )
+        .expect_err("ended coverage cannot reactivate before its known end");
+
+        assert_eq!(ended_manifest, ended_before);
+        assert!(!ended_tmp.path().join(DAILY_MANIFEST_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn running_unclean_transition_preserves_reactivation_fact_and_is_idempotent() {
+        let tmp = tempdir().unwrap();
+        let coverage = CollectionDayCoverage {
+            reactivated_within_day: true,
+            ..active_coverage(TEST_DAY_START_MS)
+        };
+        let mut manifest = test_manifest(Some(coverage));
+
+        let first = mark_collection_day_coverage_unclean(tmp.path(), &mut manifest).unwrap();
+        assert_eq!(first.state, CollectionDayCoverageState::UncleanEndUnknown);
+        assert!(first.reactivated_within_day);
+        let persisted_after_first = fs::read(tmp.path().join(DAILY_MANIFEST_FILE_NAME)).unwrap();
+
+        let repeated = mark_collection_day_coverage_unclean(tmp.path(), &mut manifest).unwrap();
+        assert_eq!(repeated, first);
+        assert_eq!(
+            fs::read(tmp.path().join(DAILY_MANIFEST_FILE_NAME)).unwrap(),
+            persisted_after_first
+        );
+    }
+
+    #[test]
+    fn known_end_keeps_top_level_open_and_enforces_time_bounds() {
+        let tmp = tempdir().unwrap();
+        let mut manifest = test_manifest(Some(active_coverage(TEST_DAY_START_MS)));
+        let ended =
+            mark_collection_day_coverage_ended_known(tmp.path(), &mut manifest, TEST_DAY_END_MS)
+                .unwrap();
+        assert_eq!(ended.state, CollectionDayCoverageState::EndedKnown);
+        assert_eq!(ended.ended_utc_ms, Some(TEST_DAY_END_MS));
+        assert_eq!(manifest["state"], "open");
+
+        let sticky_dir = tempdir().unwrap();
+        let mut sticky_manifest = test_manifest(Some(CollectionDayCoverage {
+            reactivated_within_day: true,
+            ..active_coverage(TEST_DAY_START_MS)
+        }));
+        let sticky_end = mark_collection_day_coverage_ended_known(
+            sticky_dir.path(),
+            &mut sticky_manifest,
+            TEST_DAY_START_MS + 1,
+        )
+        .unwrap();
+        assert!(sticky_end.reactivated_within_day);
+
+        for invalid_end in [TEST_DAY_START_MS - 1, TEST_DAY_END_MS + 1] {
+            let invalid_dir = tempdir().unwrap();
+            let mut invalid_manifest = test_manifest(Some(active_coverage(TEST_DAY_START_MS)));
+            let before = invalid_manifest.clone();
+            mark_collection_day_coverage_ended_known(
+                invalid_dir.path(),
+                &mut invalid_manifest,
+                invalid_end,
+            )
+            .expect_err("an out-of-range known end must fail closed");
+            assert_eq!(invalid_manifest, before);
+            assert!(!invalid_dir.path().join(DAILY_MANIFEST_FILE_NAME).exists());
+        }
+    }
+
+    #[test]
+    fn known_close_commits_nested_end_and_top_level_close_together() {
+        let tmp = tempdir().unwrap();
+        let mut manifest = test_manifest(Some(active_coverage(TEST_DAY_START_MS)));
+        let ended = close_day_manifest_with_collection_end(
+            tmp.path(),
+            &mut manifest,
+            "utc_day_barrier",
+            TEST_DAY_END_MS,
+        )
+        .unwrap();
+
+        assert_eq!(ended.state, CollectionDayCoverageState::EndedKnown);
+        assert_eq!(ended.ended_utc_ms, Some(TEST_DAY_END_MS));
+        assert_eq!(manifest["state"], "closed");
+        assert_eq!(manifest["closure_reason"], "utc_day_barrier");
+        assert_eq!(
+            load_day_manifest(tmp.path()).unwrap().unwrap(),
+            manifest,
+            "the only persisted image contains both nested and top-level close"
+        );
+    }
+
+    #[test]
+    fn unclean_close_commits_state_gap_and_top_level_close_together() {
+        let tmp = tempdir().unwrap();
+        let mut manifest = test_manifest(Some(active_coverage(TEST_DAY_START_MS)));
+        let gaps = vec!["source_task_join_error:test".to_owned()];
+        let ended = close_day_manifest_with_unclean_end(
+            tmp.path(),
+            &mut manifest,
+            "utc_day_barrier_unclean",
+            &gaps,
+        )
+        .unwrap();
+
+        assert_eq!(ended.state, CollectionDayCoverageState::UncleanEndUnknown);
+        assert_eq!(ended.ended_utc_ms, None);
+        assert!(!ended.reactivated_within_day);
+        assert_eq!(manifest["state"], "closed");
+        assert_eq!(manifest["closure_reason"], "utc_day_barrier_unclean");
+        assert_eq!(manifest["gaps"], json!(gaps));
+        assert_eq!(load_day_manifest(tmp.path()).unwrap().unwrap(), manifest);
+
+        let already_unclean_dir = tempdir().unwrap();
+        let mut already_unclean = test_manifest(Some(CollectionDayCoverage {
+            state: CollectionDayCoverageState::UncleanEndUnknown,
+            reactivated_within_day: true,
+            ..active_coverage(TEST_DAY_START_MS)
+        }));
+        let ended = close_day_manifest_with_unclean_end(
+            already_unclean_dir.path(),
+            &mut already_unclean,
+            "utc_day_barrier_unclean",
+            &[],
+        )
+        .unwrap();
+        assert!(ended.reactivated_within_day);
+    }
+
+    #[test]
+    fn unclean_close_rejects_nonrunning_coverage_without_mutation() {
+        for coverage in [
+            collection_day_coverage_not_started(),
+            CollectionDayCoverage {
+                state: CollectionDayCoverageState::EndedKnown,
+                ended_utc_ms: Some(TEST_DAY_START_MS + 1),
+                ..active_coverage(TEST_DAY_START_MS)
+            },
+        ] {
+            let tmp = tempdir().unwrap();
+            let mut manifest = test_manifest(Some(coverage));
+            let before = manifest.clone();
+            close_day_manifest_with_unclean_end(
+                tmp.path(),
+                &mut manifest,
+                "utc_day_barrier_unclean",
+                &[],
+            )
+            .expect_err("non-running coverage cannot be closed as unclean");
+            assert_eq!(manifest, before);
+            assert!(!tmp.path().join(DAILY_MANIFEST_FILE_NAME).exists());
+        }
+    }
+
+    #[test]
+    fn prior_day_reconciliation_is_state_aware_and_legacy_neutral() {
+        let cases = [
+            (
+                Some(CollectionDayCoverage {
+                    reactivated_within_day: true,
+                    ..active_coverage(TEST_DAY_START_MS)
+                }),
+                "unclean_exit_recovery",
+                true,
+                Some(CollectionDayCoverageState::UncleanEndUnknown),
+                Some(true),
+            ),
+            (
+                Some(CollectionDayCoverage {
+                    state: CollectionDayCoverageState::UncleanEndUnknown,
+                    reactivated_within_day: true,
+                    ..active_coverage(TEST_DAY_START_MS)
+                }),
+                "unclean_exit_recovery",
+                true,
+                Some(CollectionDayCoverageState::UncleanEndUnknown),
+                Some(true),
+            ),
+            (
+                Some(collection_day_coverage_not_started()),
+                "reconciled_collection_not_started",
+                false,
+                Some(CollectionDayCoverageState::NotStarted),
+                Some(false),
+            ),
+            (
+                Some(CollectionDayCoverage {
+                    state: CollectionDayCoverageState::EndedKnown,
+                    ended_utc_ms: Some(TEST_DAY_START_MS + 1),
+                    reactivated_within_day: true,
+                    ..active_coverage(TEST_DAY_START_MS)
+                }),
+                "reconciled_collection_ended_known",
+                false,
+                Some(CollectionDayCoverageState::EndedKnown),
+                Some(true),
+            ),
+            (
+                None,
+                "reconciled_legacy_coverage_unknown",
+                false,
+                None,
+                None,
+            ),
+        ];
+
+        for (coverage, expected_reason, expect_gap, expected_state, expected_reactivated) in cases {
+            let tmp = tempdir().unwrap();
+            let mut manifest = test_manifest(coverage);
+            close_reconciled_day_manifest(
+                tmp.path(),
+                &mut manifest,
+                &BinanceAggTradeContinuityState::default(),
+            )
+            .unwrap();
+
+            assert_eq!(manifest["state"], "closed");
+            assert_eq!(manifest["closure_reason"], expected_reason);
+            assert_eq!(
+                manifest["gaps"].as_array().unwrap().iter().any(|gap| gap
+                    .as_str()
+                    .is_some_and(|gap| gap.starts_with("unclean_exit_recovery_gap:"))),
+                expect_gap
+            );
+            let reconciled = manifest_collection_day_coverage(&manifest).unwrap();
+            assert_eq!(reconciled.as_ref().map(|value| value.state), expected_state);
+            assert_eq!(
+                reconciled
+                    .as_ref()
+                    .map(|value| value.reactivated_within_day),
+                expected_reactivated
+            );
+        }
+    }
+
+    #[test]
+    fn current_reconcile_requires_coverage_but_new_manifest_creates_not_started() {
+        let tmp = tempdir().unwrap();
+        let identity = test_identity();
+        let created = reconcile_open_day_manifest(
+            tmp.path(),
+            TEST_DAY,
+            &identity,
+            &BinanceAggTradeContinuityState::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            manifest_collection_day_coverage(&created).unwrap(),
+            Some(collection_day_coverage_not_started())
+        );
+
+        let legacy_dir = tempdir().unwrap();
+        let legacy = test_manifest(None);
+        write_json_atomic(&legacy_dir.path().join(DAILY_MANIFEST_FILE_NAME), &legacy).unwrap();
+        let error = reconcile_open_day_manifest(
+            legacy_dir.path(),
+            TEST_DAY,
+            &identity,
+            &BinanceAggTradeContinuityState::default(),
+        )
+        .expect_err("same-identity current legacy manifest must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("collection_day_coverage missing")
+        );
+
+        let mismatched_legacy_dir = tempdir().unwrap();
+        let mismatched_legacy = test_manifest(None);
+        write_json_atomic(
+            &mismatched_legacy_dir.path().join(DAILY_MANIFEST_FILE_NAME),
+            &mismatched_legacy,
+        )
+        .unwrap();
+        let mut mismatched_identity = identity.clone();
+        mismatched_identity.config_digest = "different-config".to_owned();
+        let mismatch = reconcile_open_day_manifest(
+            mismatched_legacy_dir.path(),
+            TEST_DAY,
+            &mismatched_identity,
+            &BinanceAggTradeContinuityState::default(),
+        )
+        .expect_err("identity mismatch must take precedence over current legacy compatibility");
+        assert!(
+            mismatch
+                .to_string()
+                .contains("daily manifest identity mismatch for config_digest")
+        );
+
+        let sticky_dir = tempdir().unwrap();
+        let sticky_coverage = CollectionDayCoverage {
+            reactivated_within_day: true,
+            ..active_coverage(TEST_DAY_START_MS)
+        };
+        let sticky_manifest = test_manifest(Some(sticky_coverage.clone()));
+        write_json_atomic(
+            &sticky_dir.path().join(DAILY_MANIFEST_FILE_NAME),
+            &sticky_manifest,
+        )
+        .unwrap();
+        let reconciled = reconcile_open_day_manifest(
+            sticky_dir.path(),
+            TEST_DAY,
+            &identity,
+            &BinanceAggTradeContinuityState::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            manifest_collection_day_coverage(&reconciled).unwrap(),
+            Some(sticky_coverage)
+        );
+    }
+
     #[test]
     fn file_counters_keep_exact_written_backfill_and_operational_totals() {
         let files = vec![json!({
@@ -1709,11 +3142,7 @@ mod tests {
     #[test]
     fn manifest_gap_list_stays_within_its_compact_bound() {
         let tmp = tempdir().unwrap();
-        let mut manifest = json!({
-            "utc_day": "2026-07-07",
-            "state": "open",
-            "gaps": [],
-        });
+        let mut manifest = test_manifest(Some(collection_day_coverage_not_started()));
         let gaps = (0..300)
             .map(|index| format!("gap:{index}"))
             .collect::<Vec<_>>();
