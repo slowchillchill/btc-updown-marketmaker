@@ -139,6 +139,34 @@ fn current_is_required_but_next_may_arrive_later() {
 }
 
 #[test]
+fn current_and_next_assets_must_be_disjoint() {
+    let windows = discovery_windows(NOW_MS);
+    let current = candidate_for_window(
+        "current",
+        &windows.current.slug,
+        windows.current.target_ts_s,
+        windows.current.end_ts_s,
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "101",
+        "102",
+    );
+    let next = candidate_for_window(
+        "next",
+        &windows.next.slug,
+        windows.next.target_ts_s,
+        windows.next.end_ts_s,
+        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "101",
+        "202",
+    );
+
+    assert!(matches!(
+        select_btc_updown_markets(NOW_MS, &[current], &[next]),
+        Err(DiscoverySelectionError::PairRelationInvalid)
+    ));
+}
+
+#[test]
 fn rollover_promotes_prefetched_next_and_removes_expired_current_assets() {
     let windows = discovery_windows(NOW_MS);
     let current = candidate_for_window(

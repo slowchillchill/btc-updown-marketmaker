@@ -60,6 +60,43 @@ struct DesiredMarketAssets {
     assets: BTreeSet<U256>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MarketAppliedAssets {
+    generation: u64,
+    revision: u64,
+    assets: BTreeSet<U256>,
+}
+
+#[cfg(test)]
+struct MarketActorPause {
+    generation: u64,
+    revision: u64,
+    reached: Option<tokio::sync::oneshot::Sender<()>>,
+    resume: Option<tokio::sync::oneshot::Receiver<()>>,
+}
+
+#[cfg(test)]
+impl MarketActorPause {
+    async fn pause_if_matching(&mut self, generation: u64, revision: u64) {
+        if self.generation != generation || self.revision != revision {
+            return;
+        }
+        if let Some(reached) = self.reached.take() {
+            let _ = reached.send(());
+        }
+        if let Some(resume) = self.resume.take() {
+            let _ = resume.await;
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct MarketActorTestHooks {
+    before_apply: Option<MarketActorPause>,
+    before_ack: Option<MarketActorPause>,
+}
+
 #[derive(Clone, Default)]
 struct DesiredRtdsSubscription {
     revision: u64,
@@ -159,7 +196,7 @@ pub struct MarketSdkRuntime {
     states: watch::Receiver<ConnectionState>,
     faults: watch::Receiver<Option<ConnectionFault>>,
     desired_tx: watch::Sender<DesiredMarketAssets>,
-    applied_rx: watch::Receiver<DesiredMarketAssets>,
+    applied_rx: watch::Receiver<Option<MarketAppliedAssets>>,
     actor_error_rx: watch::Receiver<Option<SdkStreamError>>,
     actor: JoinHandle<()>,
     next_revision: u64,
@@ -167,6 +204,28 @@ pub struct MarketSdkRuntime {
 
 impl MarketSdkRuntime {
     pub fn new(endpoint: String, config: Config) -> Result<Self, SdkStreamError> {
+        Self::new_inner(
+            endpoint,
+            config,
+            #[cfg(test)]
+            None,
+        )
+    }
+
+    #[cfg(test)]
+    fn new_with_test_hooks(
+        endpoint: String,
+        config: Config,
+        test_hooks: MarketActorTestHooks,
+    ) -> Result<Self, SdkStreamError> {
+        Self::new_inner(endpoint, config, Some(test_hooks))
+    }
+
+    fn new_inner(
+        endpoint: String,
+        config: Config,
+        #[cfg(test)] test_hooks: Option<MarketActorTestHooks>,
+    ) -> Result<Self, SdkStreamError> {
         let interest = Arc::new(InterestTracker::new());
         let connection = ConnectionManager::new(endpoint, config, Arc::clone(&interest))
             .map_err(|err| SdkStreamError::Connection(err.to_string()))?;
@@ -174,8 +233,8 @@ impl MarketSdkRuntime {
         let faults = connection.fault_receiver();
 
         let initial = DesiredMarketAssets::default();
-        let (desired_tx, desired_rx) = watch::channel(initial.clone());
-        let (applied_tx, applied_rx) = watch::channel(initial);
+        let (desired_tx, desired_rx) = watch::channel(initial);
+        let (applied_tx, applied_rx) = watch::channel(None);
         let (actor_error_tx, actor_error_rx) = watch::channel(None::<SdkStreamError>);
         let messages = MarketSdkMessageReceiver {
             connection: connection.clone(),
@@ -192,6 +251,8 @@ impl MarketSdkRuntime {
             desired_rx,
             applied_tx,
             actor_error_tx,
+            #[cfg(test)]
+            test_hooks,
         ));
 
         Ok(Self {
@@ -229,8 +290,16 @@ impl MarketSdkRuntime {
     ) -> Result<(), SdkStreamError> {
         let deadline = Instant::now() + timeout_duration;
         loop {
-            if self.applied_rx.borrow().revision >= revision {
-                return Ok(());
+            {
+                let applied = self.applied_rx.borrow();
+                if market_applied_matches(
+                    applied.as_ref(),
+                    self.connection.state(),
+                    self.connection.connection_generation(),
+                    revision,
+                ) {
+                    return Ok(());
+                }
             }
             if let Some(error) = connection_fault(&self.faults) {
                 return Err(error);
@@ -285,16 +354,6 @@ impl MarketSdkRuntime {
         self.wait_desired_applied(revision, timeout_duration).await
     }
 
-    pub async fn resubscribe(&mut self, timeout_duration: Duration) -> Result<(), SdkStreamError> {
-        let assets = self.desired_tx.borrow().assets.clone();
-        if assets.is_empty() {
-            return Ok(());
-        }
-        self.replace_and_wait(BTreeSet::new(), timeout_duration)
-            .await?;
-        self.replace_and_wait(assets, timeout_duration).await
-    }
-
     pub async fn recv(
         &mut self,
         timeout_duration: Duration,
@@ -327,8 +386,53 @@ impl MarketSdkRuntime {
 
     #[must_use]
     pub fn subscription_count(&self) -> usize {
-        usize::from(!self.applied_rx.borrow().assets.is_empty())
+        usize::from(
+            self.applied_rx
+                .borrow()
+                .as_ref()
+                .is_some_and(|applied| !applied.assets.is_empty()),
+        )
     }
+}
+
+fn market_applied_matches(
+    applied: Option<&MarketAppliedAssets>,
+    state: ConnectionState,
+    connection_generation: u64,
+    requested_revision: u64,
+) -> bool {
+    state.is_connected()
+        && applied.is_some_and(|applied| {
+            applied.generation == connection_generation && applied.revision >= requested_revision
+        })
+}
+
+fn market_subscription_manager_for_generation(
+    connection: &MarketConnection,
+    interest: &Arc<InterestTracker>,
+    generation: u64,
+) -> Option<MarketSubscriptionManager> {
+    connection
+        .bind_generation(generation)
+        .map(|connection| MarketSubscriptionManager::new(connection, Arc::clone(interest)))
+}
+
+fn apply_market_desired_for_generation(
+    connection: &MarketConnection,
+    subscriptions: &MarketSubscriptionManager,
+    generation: u64,
+    connected_assets: &BTreeSet<U256>,
+    desired: &DesiredMarketAssets,
+) -> Result<Option<MarketAppliedAssets>, SdkStreamError> {
+    apply_market_subscription_diff(subscriptions, connected_assets, &desired.assets)?;
+    if connection.connection_generation() != generation || !connection.state().is_connected() {
+        return Ok(None);
+    }
+    Ok(Some(MarketAppliedAssets {
+        generation,
+        revision: desired.revision,
+        assets: desired.assets.clone(),
+    }))
 }
 
 pub(crate) struct MarketSdkMessageReceiver {
@@ -490,37 +594,73 @@ async fn run_market_subscription_actor(
     interest: Arc<InterestTracker>,
     mut states: watch::Receiver<ConnectionState>,
     mut desired_rx: watch::Receiver<DesiredMarketAssets>,
-    applied_tx: watch::Sender<DesiredMarketAssets>,
+    applied_tx: watch::Sender<Option<MarketAppliedAssets>>,
     actor_error_tx: watch::Sender<Option<SdkStreamError>>,
+    #[cfg(test)] mut test_hooks: Option<MarketActorTestHooks>,
 ) {
     let result = async {
         let mut desired = latest_watch_value(&mut desired_rx);
-        let mut applied = DesiredMarketAssets::default();
-        let mut connected_since = None;
+        let mut applied_revision = 0;
+        let mut connected_generation = None;
         let mut connected_assets = BTreeSet::new();
         let mut subscriptions = None::<MarketSubscriptionManager>;
         loop {
-            if let ConnectionState::Connected { since } = *states.borrow() {
-                if connected_since != Some(since) {
+            if states.borrow().is_connected() {
+                let generation = connection.connection_generation();
+                if connected_generation != Some(generation) {
                     desired = latest_watch_value(&mut desired_rx);
-                    subscriptions = Some(MarketSubscriptionManager::new(
-                        connection.clone(),
-                        Arc::clone(&interest),
-                    ));
+                    let Some(generation_subscriptions) = market_subscription_manager_for_generation(
+                        &connection,
+                        &interest,
+                        generation,
+                    ) else {
+                        subscriptions = None;
+                        connected_generation = None;
+                        connected_assets.clear();
+                        applied_revision = 0;
+                        continue;
+                    };
+                    subscriptions = Some(generation_subscriptions);
                     connected_assets.clear();
-                    connected_since = Some(since);
+                    applied_revision = 0;
+                    connected_generation = Some(generation);
                 }
-                if connected_assets != desired.assets || applied.revision < desired.revision {
-                    apply_market_subscription_diff(
+                if connected_assets != desired.assets || applied_revision < desired.revision {
+                    #[cfg(test)]
+                    if let Some(pause) = test_hooks
+                        .as_mut()
+                        .and_then(|hooks| hooks.before_apply.as_mut())
+                    {
+                        pause.pause_if_matching(generation, desired.revision).await;
+                    }
+                    let Some(applied) = apply_market_desired_for_generation(
+                        &connection,
                         subscriptions
                             .as_ref()
                             .expect("connected state has subscription manager"),
+                        generation,
                         &connected_assets,
-                        &desired.assets,
-                    )?;
+                        &desired,
+                    )?
+                    else {
+                        subscriptions = None;
+                        connected_generation = None;
+                        connected_assets.clear();
+                        applied_revision = 0;
+                        continue;
+                    };
+                    #[cfg(test)]
+                    if let Some(pause) = test_hooks
+                        .as_mut()
+                        .and_then(|hooks| hooks.before_ack.as_mut())
+                    {
+                        pause
+                            .pause_if_matching(applied.generation, applied.revision)
+                            .await;
+                    }
                     connected_assets.clone_from(&desired.assets);
-                    applied = desired.clone();
-                    applied_tx.send_replace(applied.clone());
+                    applied_revision = desired.revision;
+                    applied_tx.send_replace(Some(applied));
                     continue;
                 }
             }
@@ -539,7 +679,8 @@ async fn run_market_subscription_actor(
                         _ => {
                             subscriptions = None;
                             connected_assets.clear();
-                            connected_since = None;
+                            applied_revision = 0;
+                            connected_generation = None;
                         }
                     }
                 }
@@ -1504,11 +1645,18 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (initial_seen_tx, initial_seen_rx) = tokio::sync::oneshot::channel();
+        let (close_tx, close_rx) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut socket = accept_async(stream).await.unwrap();
             let initial = next_json_request(&mut socket).await;
             initial_seen_tx.send(()).unwrap();
+            close_rx.await.unwrap();
+            socket.send(Message::Close(None)).await.unwrap();
+            drop(socket);
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
             let reconnect = next_json_request(&mut socket).await;
             assert!(
                 timeout(Duration::from_millis(200), next_json_request(&mut socket))
@@ -1520,12 +1668,12 @@ mod tests {
         });
 
         let interest = Arc::new(InterestTracker::new());
-        let connection = MarketConnection::new(
-            format!("ws://{address}"),
-            Config::default(),
-            Arc::clone(&interest),
-        )
-        .unwrap();
+        let mut config = Config::default();
+        config.reconnect.initial_backoff = Duration::from_millis(5);
+        config.reconnect.max_backoff = Duration::from_millis(10);
+        let connection =
+            MarketConnection::new(format!("ws://{address}"), config, Arc::clone(&interest))
+                .unwrap();
         let mut actual_states = connection.state_receiver();
         wait_connected(&mut actual_states).await;
 
@@ -1536,17 +1684,33 @@ mod tests {
             revision: 1,
             assets: BTreeSet::from([U256::from(1)]),
         });
-        let (applied_tx, _applied_rx) = watch::channel(DesiredMarketAssets::default());
+        let (applied_tx, _applied_rx) = watch::channel(None);
         let (actor_error_tx, _actor_error_rx) = watch::channel(None);
         let actor = tokio::spawn(run_market_subscription_actor(
-            connection,
+            connection.clone(),
             interest,
             state_rx,
             desired_rx,
             applied_tx,
             actor_error_tx,
+            None,
         ));
         initial_seen_rx.await.unwrap();
+
+        let first_generation = connection.connection_generation();
+        close_tx.send(()).unwrap();
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if connection.connection_generation() > first_generation
+                    && connection.state().is_connected()
+                {
+                    break;
+                }
+                actual_states.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("market reconnect");
 
         desired_tx.send_replace(DesiredMarketAssets {
             revision: 2,
@@ -1563,6 +1727,182 @@ mod tests {
         assert_eq!(requests[1]["assets_ids"], json!(["2"]));
         state_tx.send_replace(ConnectionState::Disconnected);
         actor.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn market_actor_drops_a_request_when_generation_changes_after_bind() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+        let (bound_tx, bound_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut first = accept_async(stream).await.unwrap();
+            close_rx.await.unwrap();
+            first.send(Message::Close(None)).await.unwrap();
+            drop(first);
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut second = accept_async(stream).await.unwrap();
+            let request = next_json_request(&mut second).await;
+            assert!(
+                timeout(Duration::from_millis(150), next_json_request(&mut second))
+                    .await
+                    .is_err(),
+                "the new socket may receive only the current generation request"
+            );
+            request
+        });
+
+        let mut config = Config::default();
+        config.reconnect.initial_backoff = Duration::from_millis(5);
+        config.reconnect.max_backoff = Duration::from_millis(10);
+        let mut runtime = MarketSdkRuntime::new_with_test_hooks(
+            format!("ws://{address}"),
+            config,
+            MarketActorTestHooks {
+                before_apply: Some(MarketActorPause {
+                    generation: 0,
+                    revision: 1,
+                    reached: Some(bound_tx),
+                    resume: Some(resume_rx),
+                }),
+                before_ack: None,
+            },
+        )
+        .unwrap();
+        let revision = runtime
+            .replace_desired_assets(BTreeSet::from([U256::from(1)]))
+            .unwrap();
+        bound_rx.await.unwrap();
+        let old_generation = runtime.connection.connection_generation();
+
+        close_tx.send(()).unwrap();
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if runtime.connection.connection_generation() > old_generation
+                    && runtime.connection.state().is_connected()
+                {
+                    break;
+                }
+                runtime.states.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("new market connection generation");
+        resume_tx.send(()).unwrap();
+        runtime
+            .wait_desired_applied(revision, Duration::from_secs(2))
+            .await
+            .unwrap();
+
+        let request = server.await.unwrap();
+        assert_eq!(request["operation"], "subscribe");
+        assert_eq!(request["assets_ids"], json!(["1"]));
+        assert_eq!(
+            runtime.applied_rx.borrow().as_ref().unwrap().generation,
+            runtime.connection.connection_generation()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn market_waiter_rejects_ack_published_after_generation_cutover() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (initial_seen_tx, initial_seen_rx) = tokio::sync::oneshot::channel();
+        let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+        let (old_ack_tx, old_ack_rx) = tokio::sync::oneshot::channel();
+        let (resume_old_ack_tx, resume_old_ack_rx) = tokio::sync::oneshot::channel();
+        let (new_apply_tx, new_apply_rx) = tokio::sync::oneshot::channel();
+        let (resume_new_apply_tx, resume_new_apply_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut first = accept_async(stream).await.unwrap();
+            let first_request = next_json_request(&mut first).await;
+            initial_seen_tx.send(()).unwrap();
+            close_rx.await.unwrap();
+            first.send(Message::Close(None)).await.unwrap();
+            drop(first);
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut second = accept_async(stream).await.unwrap();
+            let second_request = next_json_request(&mut second).await;
+            assert!(
+                timeout(Duration::from_millis(150), next_json_request(&mut second))
+                    .await
+                    .is_err(),
+                "the new generation may replay the latest desired set only once"
+            );
+            vec![first_request, second_request]
+        });
+
+        let mut config = Config::default();
+        config.reconnect.initial_backoff = Duration::from_millis(5);
+        config.reconnect.max_backoff = Duration::from_millis(10);
+        let mut runtime = MarketSdkRuntime::new_with_test_hooks(
+            format!("ws://{address}"),
+            config,
+            MarketActorTestHooks {
+                before_apply: Some(MarketActorPause {
+                    generation: 1,
+                    revision: 1,
+                    reached: Some(new_apply_tx),
+                    resume: Some(resume_new_apply_rx),
+                }),
+                before_ack: Some(MarketActorPause {
+                    generation: 0,
+                    revision: 1,
+                    reached: Some(old_ack_tx),
+                    resume: Some(resume_old_ack_rx),
+                }),
+            },
+        )
+        .unwrap();
+        let revision = runtime
+            .replace_desired_assets(BTreeSet::from([U256::from(1)]))
+            .unwrap();
+        old_ack_rx.await.unwrap();
+        initial_seen_rx.await.unwrap();
+        let old_generation = runtime.connection.connection_generation();
+
+        close_tx.send(()).unwrap();
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if runtime.connection.connection_generation() > old_generation
+                    && runtime.connection.state().is_connected()
+                {
+                    break;
+                }
+                runtime.states.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("new market connection generation");
+
+        let waiter = tokio::spawn(async move {
+            let result = runtime
+                .wait_desired_applied(revision, Duration::from_secs(2))
+                .await;
+            (runtime, result)
+        });
+        resume_old_ack_tx.send(()).unwrap();
+        new_apply_rx.await.unwrap();
+        assert!(
+            !waiter.is_finished(),
+            "an old-generation ack published after cutover must not satisfy the waiter"
+        );
+        resume_new_apply_tx.send(()).unwrap();
+        let (runtime, result) = waiter.await.unwrap();
+        result.unwrap();
+
+        let requests = server.await.unwrap();
+        assert_eq!(requests[0]["assets_ids"], json!(["1"]));
+        assert_eq!(requests[1]["assets_ids"], json!(["1"]));
+        assert_eq!(
+            runtime.applied_rx.borrow().as_ref().unwrap().generation,
+            runtime.connection.connection_generation()
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

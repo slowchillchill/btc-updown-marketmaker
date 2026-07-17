@@ -297,6 +297,10 @@ fn validated_pair_relation(
     current: &DiscoveredBtcUpdownMarket,
     next: &DiscoveredBtcUpdownMarket,
 ) -> Result<BtcUpdownPairRelation, DiscoverySelectionError> {
+    let assets_disjoint = current.up_asset_id != next.up_asset_id
+        && current.up_asset_id != next.down_asset_id
+        && current.down_asset_id != next.up_asset_id
+        && current.down_asset_id != next.down_asset_id;
     let relation = BtcUpdownPairRelation {
         same_series_prefix: current.slug.starts_with(BTC_UPDOWN_5M_SERIES_PREFIX)
             && next.slug.starts_with(BTC_UPDOWN_5M_SERIES_PREFIX),
@@ -307,6 +311,7 @@ fn validated_pair_relation(
     if relation.same_series_prefix
         && relation.windows_contiguous
         && relation.condition_ids_distinct
+        && assets_disjoint
         && relation.cadence_seconds == BTC_UPDOWN_5M_STEP_SECONDS
     {
         Ok(relation)

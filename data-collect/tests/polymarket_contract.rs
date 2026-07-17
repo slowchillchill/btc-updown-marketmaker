@@ -300,8 +300,4 @@ fn polymarket_discovery_miss_does_not_block_later_markets() {
     assert_eq!(decision.discovery_miss_rate, 1.0);
     assert!(decision.skip_expired_target);
     assert!(decision.recompute_target);
-    assert_eq!(
-        decision.source_gap_reason,
-        "discovery_miss_expired_target_recompute"
-    );
 }

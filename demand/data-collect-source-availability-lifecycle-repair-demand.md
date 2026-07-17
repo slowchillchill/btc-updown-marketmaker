@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-source-availability-lifecycle-repair-changelog.md`
 >
-> 状态：`APPROVED_IMPLEMENTATION_PHASE_3_COMPLETE_PHASE_4_AUTHORIZED_CT_B_APPROVED`。用户已于2026-07-17批准本文、对应计划及第4.7节SDK-first逐项patch矩阵，并授权按计划分阶段实施、验证、独立审查、commit和push；同日又对官方pre-parse完整文本帧trace差异选择B，批准恢复官方0.6.0原hunk并显式放宽启用SDK `tracing` feature时的失败trace脱敏边界。阶段3实施前发现pinned SDK的单次TCP/TLS/WebSocket建连与握手没有期限；用户随后批准`CT-B`，允许把vendor路径集合扩至四个文件、增加默认`None`的SDK `connect_timeout`配置，并由本项目为RTDS显式设为20秒。该期限只约束单次建连/握手，绝不是连接寿命、业务静默期限或周期性重连；成功连接仍在健康PING/PONG下无限等待业务数据，总重试次数仍无限。阶段0 authority/provenance、阶段1共同classification/coverage lifecycle、阶段2 vendored SDK heartbeat/teardown及阶段3 RTDS长期运行与one-shot收缩均已实现、完成全量验证并分别通过独立终审；阶段3精确commit/push后进入已授权阶段4。此前批准的`M1-A / M2-A0 / M4-A-R / M5-N/A / M6-A+ / M7-A-R / M8-A`继续有效；`M3-A-R`使用单一`reactivated_within_day`布尔语义，原子发布采用用户批准的R三态语义。本授权不包括模型调度实现、生产release构建、部署、远端服务操作或数据清理；这些仍须独立批准。
+> 状态：`APPROVED_IMPLEMENTATION_PHASE_4_COMPLETE_PHASE_5_AUTHORIZED_CT_B_APPROVED`。用户已于2026-07-17批准本文、对应计划及第4.7节SDK-first逐项patch矩阵，并授权按计划分阶段实施、验证、独立审查、commit和push；同日又对官方pre-parse完整文本帧trace差异选择B，批准恢复官方0.6.0原hunk并显式放宽启用SDK `tracing` feature时的失败trace脱敏边界。阶段3实施前发现pinned SDK的单次TCP/TLS/WebSocket建连与握手没有期限；用户随后批准`CT-B`，允许把vendor路径集合扩至四个文件、增加默认`None`的SDK `connect_timeout`配置，并由本项目为RTDS显式设为20秒。该期限只约束单次建连/握手，绝不是连接寿命、业务静默期限或周期性重连；成功连接仍在健康PING/PONG下无限等待业务数据，总重试次数仍无限。阶段0 authority/provenance、阶段1共同classification/coverage lifecycle、阶段2 vendored SDK heartbeat/teardown、阶段3 RTDS长期运行与one-shot收缩及阶段4 CLOB/Gamma长期运行与identity完整性均已实现、完成全量验证并分别通过独立终审；阶段4精确commit/push后进入已授权阶段5。此前批准的`M1-A / M2-A0 / M4-A-R / M5-N/A / M6-A+ / M7-A-R / M8-A`继续有效；`M3-A-R`使用单一`reactivated_within_day`布尔语义，原子发布采用用户批准的R三态语义。本授权不包括模型调度实现、生产release构建、部署、远端服务操作或数据清理；这些仍须独立批准。
 
 ## 一、目标
 

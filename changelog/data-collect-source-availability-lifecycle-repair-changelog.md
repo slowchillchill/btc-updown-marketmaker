@@ -6,7 +6,7 @@
 >
 > 对应计划：`plan/data-collect-source-availability-lifecycle-repair-plan.md`
 >
-> 状态：`APPROVED_IMPLEMENTATION_PHASE_3_COMPLETE_PHASE_4_AUTHORIZED_CT_B_APPROVED`。用户已于2026-07-17批准最终需求、计划及SDK-first逐项patch矩阵，并授权按计划执行本地文档/代码修改、测试、独立审查、commit和push；阶段0至阶段3均已完成全量验证和独立终审，阶段3精确commit/push后进入已授权阶段4。生产构建、部署、远端服务写操作和数据清理仍未获授权。
+> 状态：`APPROVED_IMPLEMENTATION_PHASE_4_COMPLETE_PHASE_5_AUTHORIZED_CT_B_APPROVED`。用户已于2026-07-17批准最终需求、计划及SDK-first逐项patch矩阵，并授权按计划执行本地文档/代码修改、测试、独立审查、commit和push；阶段0至阶段4均已完成全量验证和独立终审，阶段4精确commit/push后进入已授权阶段5。生产构建、部署、远端服务写操作和数据清理仍未获授权。
 
 ## 2026-07-17：最终批准并开始阶段0
 
@@ -310,3 +310,20 @@
 - 最终主线程验证为：data-collect lib 200/200及全部integration/doc tests通过；patch contract 16/16、runtime contract 19/19、RTDS production source 4/4、`rtds_contract` 1/1和scheduler 4/4；workspace check与all-targets Clippy零告警，root/vendor fmt及`git diff --check`通过。vendored SDK `clob,gamma,rtds,ws` lib 168/168，all-features lib 184/184、全部integration及49项通过/20项ignored doctest；all-features/all-targets Clippy除明确豁免两类上游既有基线告警外其余warning deny通过。
 - registry与vendor源码比较精确命中获批四路径，本阶段实际新增差异只在`ws/config.rs`和`ws/connection.rs`；旧one-shot、business-gap helper/fixture及生产freshness episode符号在training collector `src`、当前contract tests与vendor `src`中为0。无Cargo/lock、第五vendor文件、第二owner、raw Polymarket WebSocket、模型、部署或远端修改。
 - 所有审查/验证结束后已用vendor manifest执行`cargo clean`，删除23,258个ignored构建文件/32.4GiB；vendor树内`target`目录复核为0。用户现有`AGENTS.md`与未跟踪`推荐开发顺序.md`继续排除。阶段3达到完成条件，精确commit/push后进入已授权阶段4。
+
+## 2026-07-17：阶段4 CLOB/Gamma 长期运行候选实现
+
+- CLOB生产路径删除`MarketAssetFreshnessWatchdog`、30/60秒业务静默阈值、主动subscription refresh、两次恢复/第三次退出预算及对应lag/gap/fatal。current与prefetched资产跨三个旧周期等价时长仍保持同一socket、同一generation和一次完整subscribe；业务消息只作为原始市场事实，不再重置或控制Gamma/transport recovery supervisor。成功安装完整subscription context才重置恢复backoff并清除recovery-active。
+- CLOB继续使用`10s/20s` heartbeat，生产显式`connect_timeout=20s`。CT-B只包围单次TCP/TLS/WebSocket建连与握手；健康已订阅socket没有连接寿命或业务frame等待期限。SDK内部每轮有限attempt可以返回既有source-local supervisor，但外层总cycle和总elapsed无限，不构成collector存活预算。
+- market subscription actor继续是唯一owner：同desired set不发wire操作，真实set变化只发精确add/remove；每个自然新generation只replay最新完整set。actor先绑定观察到的generation再取得manager，发送后复核connected state/generation；私有applied ack携带generation，waiter要求当前connected generation与revision同时匹配。两个精确竞态回归分别覆盖manager bind后/发送前切代及发送后复核/ack发布间切代。
+- Gamma DNS/HTTP/rate-limit、合法`[]`、当前候选尚未出现及rollover暂时不可用统一为中性availability，按有界backoff持续恢复且不写confirmed gap。request使用20秒HTTP期限；每次响应完成、dedupe restore后及真正fence完成的context安装点都按处理时钟复核current/next window。initial expired返回可恢复availability；next expired重新调度；rollover expired保持既有window-end observation状态并立即重取，不安装旧context或伪造metadata。
+- 独立审查发现并修正多项完整性漏口：retryable cleanup terminal不再追加伪gap；延迟Gamma响应必须在fence后最后安装点复核；metadata unavailable reason不能豁免`same_condition_market_verified=true`；NewMarket/MarketResolved必须整体核对Gamma market id、condition、canonical slug、完整且无重复/额外的二元asset set、Up/Down位置映射、winning asset/outcome，并在resolved缺slug时写已验证canonical slug。普通Book/BestBidAsk/LastTrade/TickSize/PriceChange的目标asset也必须属于消息envelope condition，外部coentry仍可过滤忽略。
+- current/next Gamma pair现在要求四个asset跨窗口两两不重叠，防止`discovery_asset_to_slug`覆盖。inner rollover把旧prefetched提升为同slug current时，id/condition/up/down必须不变；outer CLOB transport cycle也保留有界`last_discovery`并对任意同slug current/next执行相同连续性检查。Gamma不可用跨过多个window且新旧slug不重叠时允许恢复，不把未知历史误判成identity conflict。
+- 已删除公共`DiscoveryMissStats.source_gap_reason`及其只读测试断言，因为合法Gamma miss不再拥有或制造business source gap；schema、mapping、dedupe、queue、writer、JoinError及真实SDK Lagged等既有本地/确定性完整性边界未被availability循环吞掉。没有新增公开SDK API、第二socket owner、raw WebSocket、依赖、Cargo/lock、vendor源码或模型/部署路径。
+
+## 2026-07-17：阶段4验证与最终终审
+
+- 主线程最终验证通过：`cargo check -p data-collect --tests --locked`；`cargo clippy -p data-collect --locked --all-targets -- -D warnings`零告警；`cargo test -p data-collect --locked -- --test-threads=1`为210项lib、全部integration和doc tests通过；`polymarket_sdk_patch_contract` 16/16、`polymarket_sdk_runtime_contract` 18/18、`market_discovery_probe_contract` 7/7均包含在全量结果中；`cargo fmt --all -- --check`与`git diff --check`通过。
+- 四source性能门在多个审查代理并发运行重测试期间曾单次出现一个2秒采样窗内Polymarket socket-to-processor backlog从0单调增至1,589；停止并发测试后，未修改阈值或生产代码的同一测试定向复跑为约4,684 native msg/s并通过，随后主线程独占的data-collect完整全量测试再次通过。现有证据与调度干扰一致，但不足以单凭一次失败证明因果；当前未发现可复现的生产吞吐回归，也没有为通过测试放宽门槛。
+- registry 0.6.0与vendor `src`比较仍精确只命中已批准四路径：`clob/ws/types/response.rs`、`rtds/subscription.rs`、`ws/config.rs`、`ws/connection.rs`；阶段4没有修改其中任何文件。vendor本地`target`不存在，Cargo/lock无差异；旧CLOB watchdog、resubscribe和business-recovery fatal符号在当前生产/contract源码检索为0。
+- CLOB/恢复终审、Gamma/metadata终审及SDK generation/范围终审最终均为PASS，Critical 0、Important 0。用户现有`AGENTS.md`与未跟踪`推荐开发顺序.md`继续排除；生产构建、部署、远端服务与数据清理仍未获授权。阶段4达到完成条件，精确commit/push后进入已授权阶段5。

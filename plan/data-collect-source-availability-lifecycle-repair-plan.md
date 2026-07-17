@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-source-availability-lifecycle-repair-changelog.md`
 >
-> 状态：`APPROVED_IMPLEMENTATION_PHASE_3_COMPLETE_PHASE_4_AUTHORIZED_CT_B_APPROVED`。用户已于2026-07-17批准本计划、对应需求及需求第4.7节SDK-first逐项patch矩阵，并授权依次执行阶段0--8的本地文档/代码修改、测试、独立审查、commit和push；同日对官方pre-parse完整文本帧trace差异选择B，批准恢复官方0.6.0原hunk及其failure-trace边界放宽。阶段3实施前发现pinned SDK单次建连/握手没有期限；用户批准`CT-B`，允许第4个vendor文件`src/ws/config.rs`与默认`None`的`connect_timeout`配置，RTDS生产显式20秒。该期限只包围单次TCP/TLS/WebSocket建连与握手，成功连接上的PING/PONG与业务静默仍无限运行，总重试仍无限。阶段0 authority/provenance、阶段1共同classification/coverage lifecycle、阶段2 vendored SDK transport生命周期及阶段3 RTDS长期运行与one-shot收缩均已实现、完成全量验证并通过独立终审；阶段3精确commit/push后进入已授权阶段4。本授权不包括模型调度实现、生产release构建、部署、远端服务操作或数据清理。
+> 状态：`APPROVED_IMPLEMENTATION_PHASE_4_COMPLETE_PHASE_5_AUTHORIZED_CT_B_APPROVED`。用户已于2026-07-17批准本计划、对应需求及需求第4.7节SDK-first逐项patch矩阵，并授权依次执行阶段0--8的本地文档/代码修改、测试、独立审查、commit和push；同日对官方pre-parse完整文本帧trace差异选择B，批准恢复官方0.6.0原hunk及其failure-trace边界放宽。阶段3实施前发现pinned SDK单次建连/握手没有期限；用户批准`CT-B`，允许第4个vendor文件`src/ws/config.rs`与默认`None`的`connect_timeout`配置，RTDS生产显式20秒，阶段4为CLOB显式复用同一20秒单次建连期限。该期限只包围单次TCP/TLS/WebSocket建连与握手，成功连接上的PING/PONG与业务静默仍无限运行，总重试仍无限。阶段0 authority/provenance、阶段1共同classification/coverage lifecycle、阶段2 vendored SDK transport生命周期、阶段3 RTDS长期运行与one-shot收缩及阶段4 CLOB/Gamma长期运行与identity完整性均已实现、完成全量验证并通过独立终审；阶段4精确commit/push后进入已授权阶段5。本授权不包括模型调度实现、生产release构建、部署、远端服务操作或数据清理。
 
 ## 一、成功标准与实施原则
 
@@ -202,6 +202,8 @@
   - 验证：服务恢复后按当前时钟重算current/next discovery window、不追逐过期slug，旧失败不阻塞其他source；HTTP成功与合法candidate只更新对应运行路径和last qualifying事实。
 
 阶段4完成条件：需求验收14--17通过，CLOB业务语义除silence控制与availability分类外不漂移。独立审查通过后commit/push。
+
+阶段4执行结果（2026-07-17）：`COMPLETE`。生产CLOB已删除30/60秒business-silence watchdog、主动refresh/resubscribe、generation切换与有限退出预算；健康`10s/20s` PING/PONG socket在一次desired订阅后无限等待业务数据，CT-B只限制单次建连/握手。真实current/prefetched/retired变化仍发送精确desired diff，自然reconnect只replay最新完整set；generation-bound manager、发送后generation/state复核与私有generation-tagged applied ack的两处切代竞态均已封闭。Gamma网络/HTTP/rate-limit/合法空候选按availability持续恢复，延迟响应在真正fence后安装点按处理时钟复核current window；expired initial/next/rollover不写伪gap或安装旧context。相同slug的Gamma/SDK market id、condition、Up/Down资产与outcome映射在inner rollover及outer transport恢复间保持连续，矛盾schema/identity/mapping继续fail closed；跨过多个旧slug的恢复不被误拒。需求验收14--17、data-collect全量测试、lint、fmt、diff、SDK contract与四路径provenance验证通过，三路独立终审均为Critical 0、Important 0；精确commit/push后进入阶段5。
 
 ## 阶段5：Binance aggTrade
 

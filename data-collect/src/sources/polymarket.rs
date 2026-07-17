@@ -124,7 +124,6 @@ pub struct DiscoveryMissDecision {
     pub discovery_miss_rate: f64,
     pub skip_expired_target: bool,
     pub recompute_target: bool,
-    pub source_gap_reason: String,
 }
 
 impl DiscoveryMissStats {
@@ -141,11 +140,6 @@ impl DiscoveryMissStats {
             discovery_miss_rate: self.misses as f64 / self.attempts.max(1) as f64,
             skip_expired_target: expired,
             recompute_target: expired,
-            source_gap_reason: if expired {
-                "discovery_miss_expired_target_recompute".to_owned()
-            } else {
-                "discovery_miss_retry_current_target".to_owned()
-            },
         }
     }
 }

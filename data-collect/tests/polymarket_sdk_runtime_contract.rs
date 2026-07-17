@@ -182,7 +182,7 @@ async fn disconnected_desired_updates_coalesce_to_one_final_subscription() {
 }
 
 #[tokio::test]
-async fn connected_market_actor_applies_only_the_minimal_asset_diff() {
+async fn connected_market_actor_sends_only_real_asset_set_diffs() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -192,12 +192,26 @@ async fn connected_market_actor_applies_only_the_minimal_asset_diff() {
         for _ in 0..3 {
             requests.push(next_text(&mut socket).await);
         }
+        assert!(
+            timeout(Duration::from_millis(150), next_text(&mut socket))
+                .await
+                .is_err(),
+            "same-set desired revisions must not emit another wire request"
+        );
         requests
     });
 
     let mut runtime = MarketSdkRuntime::new(format!("ws://{address}"), fast_config()).unwrap();
     runtime
         .replace_and_wait(assets(&[1, 2]), Duration::from_secs(2))
+        .await
+        .unwrap();
+    runtime
+        .replace_and_wait(assets(&[1, 2]), Duration::from_secs(2))
+        .await
+        .unwrap();
+    runtime
+        .replace_and_wait(assets(&[2, 3]), Duration::from_secs(2))
         .await
         .unwrap();
     runtime
@@ -220,42 +234,7 @@ async fn connected_market_actor_applies_only_the_minimal_asset_diff() {
 }
 
 #[tokio::test]
-async fn market_resubscribe_is_serial_and_restores_the_same_assets() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut socket = accept_async(stream).await.unwrap();
-        let mut requests = Vec::new();
-        for _ in 0..3 {
-            requests.push(next_text(&mut socket).await);
-        }
-        requests
-    });
-
-    let mut runtime = MarketSdkRuntime::new(format!("ws://{address}"), fast_config()).unwrap();
-    runtime
-        .replace_and_wait(assets(&[1, 2]), Duration::from_secs(2))
-        .await
-        .unwrap();
-    runtime.resubscribe(Duration::from_secs(2)).await.unwrap();
-
-    let requests = server
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|request| serde_json::from_str::<Value>(&request).unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(requests[0]["operation"], "subscribe");
-    assert_eq!(requests[0]["assets_ids"], json!(["1", "2"]));
-    assert_eq!(requests[1]["operation"], "unsubscribe");
-    assert_eq!(requests[1]["assets_ids"], json!(["1", "2"]));
-    assert_eq!(requests[2]["operation"], "subscribe");
-    assert_eq!(requests[2]["assets_ids"], json!(["1", "2"]));
-}
-
-#[tokio::test]
-async fn reconnect_replays_only_the_latest_offline_desired_state() {
+async fn market_natural_reconnect_replays_only_latest_complete_desired_set_once() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (first_connection_closed_tx, first_connection_closed_rx) = oneshot::channel();
@@ -296,7 +275,7 @@ async fn reconnect_replays_only_the_latest_offline_desired_state() {
     .unwrap();
 
     let mut final_revision = 0;
-    for value in 1..=10_000_u64 {
+    for value in [7_u64, 40, 99] {
         final_revision = runtime
             .replace_desired_assets(assets(&[value, value + 1]))
             .unwrap();
@@ -316,7 +295,7 @@ async fn reconnect_replays_only_the_latest_offline_desired_state() {
     assert_eq!(requests[0]["operation"], "subscribe");
     assert_eq!(requests[0]["assets_ids"], json!(["1", "2"]));
     assert_eq!(requests[1]["operation"], "subscribe");
-    assert_eq!(requests[1]["assets_ids"], json!(["10000", "10001"]));
+    assert_eq!(requests[1]["assets_ids"], json!(["99", "100"]));
 }
 
 #[tokio::test]
