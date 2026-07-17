@@ -309,6 +309,36 @@ fn depth_levels_non_empty_complete(levels: &[BinanceDepthLevel]) -> bool {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BinanceDepthOrdering {
+    pub source_sequence_epoch_id: String,
+    pub connection_generation: u64,
+    pub depth_ingress_sequence: u64,
+    pub collector_admission_sequence: u64,
+    pub collector_admission_time_utc_ms: i64,
+}
+
+impl BinanceDepthOrdering {
+    pub fn validate_contract(&self) -> Result<(), String> {
+        if self.source_sequence_epoch_id.trim().is_empty() {
+            return Err("binance_depth_source_sequence_epoch_id_empty".to_owned());
+        }
+        if self.connection_generation == 0 {
+            return Err("binance_depth_connection_generation_is_zero".to_owned());
+        }
+        if self.depth_ingress_sequence == 0 {
+            return Err("binance_depth_ingress_sequence_is_zero".to_owned());
+        }
+        if self.collector_admission_sequence == 0 {
+            return Err("binance_depth_collector_admission_sequence_is_zero".to_owned());
+        }
+        if self.collector_admission_time_utc_ms <= 0 {
+            return Err("binance_depth_collector_admission_time_not_positive".to_owned());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BinanceDepthUpdateRaw {
     pub envelope: EventEnvelope,
     pub event_type: String,
@@ -320,8 +350,6 @@ pub struct BinanceDepthUpdateRaw {
     pub bids: Vec<BinanceDepthLevel>,
     pub asks: Vec<BinanceDepthLevel>,
     pub combined_stream: Option<String>,
-    pub local_u: Option<u64>,
-    pub stitch_evidence: Option<String>,
 }
 
 impl BinanceDepthUpdateRaw {
@@ -334,6 +362,15 @@ impl BinanceDepthUpdateRaw {
         report.require_non_empty("e", &self.event_type);
         report.require_non_empty("s", &self.symbol);
         report.require_non_empty("stream_name", &self.stream_name);
+        if self.event_type != "depthUpdate" {
+            report.missing_fields.push("e_valid".to_owned());
+        }
+        if self.symbol != "BTCUSDT" {
+            report.missing_fields.push("s_valid".to_owned());
+        }
+        if self.stream_name != "btcusdt@depth" {
+            report.missing_fields.push("stream_name_valid".to_owned());
+        }
         if self.first_update_id == 0 {
             report.missing_fields.push("U".to_owned());
         }
@@ -356,8 +393,6 @@ impl BinanceDepthUpdateRaw {
         {
             report.missing_fields.push("combined_stream".to_owned());
         }
-        report.require_some("local_u", &self.local_u);
-        report.require_some("stitch_evidence", &self.stitch_evidence);
         if self.event_time_ms <= 0 {
             report.missing_fields.push("E".to_owned());
         }

@@ -67,62 +67,189 @@ impl BinanceOfficialSourceConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DepthUpdateDecision {
-    DropStaleOrDuplicate {
-        reason: String,
-    },
-    Apply {
-        local_u: u64,
-        stitch_evidence: String,
-    },
-    SourceGapResnapshot {
-        reason: String,
-    },
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DepthUpdateVerdict {
+    Applied,
+    NotAppliedStaleDuplicate,
+    NotAppliedConfirmedHole,
+    NotAppliedSnapshotUnavailable,
 }
 
-pub fn stitch_depth_update(
-    snapshot_last_update_id: u64,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DepthUpdateAssessment {
+    pub snapshot_last_update_id: Option<u64>,
+    pub local_u_before: Option<u64>,
+    pub verdict: DepthUpdateVerdict,
+    pub local_u_after: Option<u64>,
+    pub stitch_evidence: Option<String>,
+    pub gap_reason: Option<String>,
+}
+
+impl DepthUpdateAssessment {
+    pub fn validate_contract(&self) -> Result<(), String> {
+        if self
+            .snapshot_last_update_id
+            .is_some_and(|snapshot_last_update_id| snapshot_last_update_id == 0)
+        {
+            return Err("snapshot_last_update_id_is_zero".to_owned());
+        }
+        if self
+            .local_u_before
+            .zip(self.snapshot_last_update_id)
+            .is_some_and(|(local_u, snapshot_last_update_id)| local_u <= snapshot_last_update_id)
+        {
+            return Err("local_u_does_not_follow_snapshot_last_update_id".to_owned());
+        }
+        match self.verdict {
+            DepthUpdateVerdict::Applied => {
+                if self.snapshot_last_update_id.is_none() {
+                    return Err("applied_depth_update_missing_snapshot".to_owned());
+                }
+                if self.local_u_after.is_none() {
+                    return Err("applied_depth_update_missing_local_u_after".to_owned());
+                }
+                if self
+                    .stitch_evidence
+                    .as_deref()
+                    .is_none_or(|value| value.trim().is_empty())
+                {
+                    return Err("applied_depth_update_missing_stitch_evidence".to_owned());
+                }
+                if self.gap_reason.is_some() {
+                    return Err("applied_depth_update_must_not_have_gap_reason".to_owned());
+                }
+            }
+            DepthUpdateVerdict::NotAppliedConfirmedHole => {
+                if self.snapshot_last_update_id.is_none() {
+                    return Err("confirmed_hole_missing_snapshot".to_owned());
+                }
+                if self.local_u_after.is_some() {
+                    return Err("confirmed_hole_must_not_advance_local_u".to_owned());
+                }
+                if self
+                    .gap_reason
+                    .as_deref()
+                    .is_none_or(|value| value.trim().is_empty())
+                {
+                    return Err("confirmed_hole_missing_gap_reason".to_owned());
+                }
+            }
+            DepthUpdateVerdict::NotAppliedStaleDuplicate => {
+                if self.snapshot_last_update_id.is_none() {
+                    return Err("stale_depth_update_missing_snapshot".to_owned());
+                }
+                if self.local_u_after.is_some() {
+                    return Err("not_applied_depth_update_must_not_advance_local_u".to_owned());
+                }
+                if self.gap_reason.is_some() {
+                    return Err("non_gap_depth_update_must_not_have_gap_reason".to_owned());
+                }
+            }
+            DepthUpdateVerdict::NotAppliedSnapshotUnavailable => {
+                if self.snapshot_last_update_id.is_some() || self.local_u_before.is_some() {
+                    return Err("snapshot_unavailable_must_not_claim_book_state".to_owned());
+                }
+                if self.local_u_after.is_some() {
+                    return Err("not_applied_depth_update_must_not_advance_local_u".to_owned());
+                }
+                if self.gap_reason.is_some() {
+                    return Err("non_gap_depth_update_must_not_have_gap_reason".to_owned());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn assess_depth_update(
+    snapshot_last_update_id: Option<u64>,
     local_u: Option<u64>,
     update: &BinanceDepthUpdateRaw,
-) -> DepthUpdateDecision {
-    if update.final_update_id <= snapshot_last_update_id {
-        return DepthUpdateDecision::DropStaleOrDuplicate {
-            reason: "u <= lastUpdateId".to_owned(),
-        };
+) -> Result<DepthUpdateAssessment, String> {
+    if update.validate_contract().verdict != crate::ValidationVerdict::Complete {
+        return Err("invalid_depth_update_contract".to_owned());
+    }
+    if snapshot_last_update_id.is_none() {
+        if local_u.is_some() {
+            return Err("local_u_without_snapshot".to_owned());
+        }
+        return Ok(DepthUpdateAssessment {
+            snapshot_last_update_id: None,
+            local_u_before: None,
+            verdict: DepthUpdateVerdict::NotAppliedSnapshotUnavailable,
+            local_u_after: None,
+            stitch_evidence: None,
+            gap_reason: None,
+        });
     }
 
-    match local_u {
-        None => {
-            let required = snapshot_last_update_id.saturating_add(1);
-            if update.first_update_id <= required && required <= update.final_update_id {
-                DepthUpdateDecision::Apply {
-                    local_u: update.final_update_id,
-                    stitch_evidence: "U <= lastUpdateId + 1 <= u".to_owned(),
-                }
-            } else {
-                DepthUpdateDecision::SourceGapResnapshot {
-                    reason: "first_update_does_not_bridge_snapshot".to_owned(),
-                }
-            }
-        }
-        Some(previous_local_u) => {
-            if update.final_update_id <= previous_local_u {
-                return DepthUpdateDecision::DropStaleOrDuplicate {
-                    reason: "stale_or_duplicate_update".to_owned(),
-                };
-            }
-            if update.first_update_id > previous_local_u.saturating_add(1) {
-                return DepthUpdateDecision::SourceGapResnapshot {
-                    reason: "U > local_u + 1".to_owned(),
-                };
-            }
-            DepthUpdateDecision::Apply {
-                local_u: update.final_update_id,
-                stitch_evidence: "continuous_depth_update".to_owned(),
-            }
-        }
+    let snapshot_last_update_id = snapshot_last_update_id.unwrap_or_default();
+    if snapshot_last_update_id == 0 {
+        return Err("snapshot_last_update_id_is_zero".to_owned());
     }
+    if local_u.is_some_and(|value| value <= snapshot_last_update_id) {
+        return Err("local_u_does_not_follow_snapshot_last_update_id".to_owned());
+    }
+
+    let previous_u = local_u.unwrap_or(snapshot_last_update_id);
+    let required = previous_u
+        .checked_add(1)
+        .ok_or_else(|| "depth_update_sequence_overflow".to_owned())?;
+
+    if update.final_update_id <= previous_u {
+        return Ok(DepthUpdateAssessment {
+            snapshot_last_update_id: Some(snapshot_last_update_id),
+            local_u_before: local_u,
+            verdict: DepthUpdateVerdict::NotAppliedStaleDuplicate,
+            local_u_after: None,
+            stitch_evidence: Some(if local_u.is_some() {
+                "u <= local_u".to_owned()
+            } else {
+                "u <= lastUpdateId".to_owned()
+            }),
+            gap_reason: None,
+        });
+    }
+
+    if local_u.is_none() {
+        if update.first_update_id <= required && required <= update.final_update_id {
+            return Ok(DepthUpdateAssessment {
+                snapshot_last_update_id: Some(snapshot_last_update_id),
+                local_u_before: local_u,
+                verdict: DepthUpdateVerdict::Applied,
+                local_u_after: Some(update.final_update_id),
+                stitch_evidence: Some("U <= lastUpdateId + 1 <= u".to_owned()),
+                gap_reason: None,
+            });
+        }
+        return Ok(DepthUpdateAssessment {
+            snapshot_last_update_id: Some(snapshot_last_update_id),
+            local_u_before: local_u,
+            verdict: DepthUpdateVerdict::NotAppliedConfirmedHole,
+            local_u_after: None,
+            stitch_evidence: Some("first update does not bridge snapshot".to_owned()),
+            gap_reason: Some("first_update_does_not_bridge_snapshot".to_owned()),
+        });
+    }
+
+    if update.first_update_id > required {
+        return Ok(DepthUpdateAssessment {
+            snapshot_last_update_id: Some(snapshot_last_update_id),
+            local_u_before: local_u,
+            verdict: DepthUpdateVerdict::NotAppliedConfirmedHole,
+            local_u_after: None,
+            stitch_evidence: Some("U > local_u + 1".to_owned()),
+            gap_reason: Some("U > local_u + 1".to_owned()),
+        });
+    }
+    Ok(DepthUpdateAssessment {
+        snapshot_last_update_id: Some(snapshot_last_update_id),
+        local_u_before: local_u,
+        verdict: DepthUpdateVerdict::Applied,
+        local_u_after: Some(update.final_update_id),
+        stitch_evidence: Some("continuous_depth_update".to_owned()),
+        gap_reason: None,
+    })
 }
 
 pub fn parse_depth_update_raw(
@@ -176,8 +303,6 @@ pub fn parse_depth_update_raw(
         bids,
         asks,
         combined_stream,
-        local_u: None,
-        stitch_evidence: None,
     })
 }
 
@@ -259,26 +384,6 @@ pub fn parse_aggtrade_raw(
             .ok_or_else(|| "missing_bool_field:M".to_owned())?,
         stream_name,
     })
-}
-
-pub fn apply_depth_stitch_evidence(
-    mut update: BinanceDepthUpdateRaw,
-    decision: DepthUpdateDecision,
-) -> Result<BinanceDepthUpdateRaw, String> {
-    match decision {
-        DepthUpdateDecision::Apply {
-            local_u,
-            stitch_evidence,
-        } => {
-            update.local_u = Some(local_u);
-            update.stitch_evidence = Some(stitch_evidence);
-            Ok(update)
-        }
-        DepthUpdateDecision::DropStaleOrDuplicate { reason }
-        | DepthUpdateDecision::SourceGapResnapshot { reason } => {
-            Err(format!("depth_update_not_applied:{reason}"))
-        }
-    }
 }
 
 fn parse_levels(value: &Value, field: &str) -> Result<Vec<BinanceDepthLevel>, String> {

@@ -202,8 +202,6 @@ fn binance_depth_update_and_snapshot_schema_keep_official_fields() {
             quantity: "2".to_owned(),
         }],
         combined_stream: None,
-        local_u: Some(12),
-        stitch_evidence: Some("U <= lastUpdateId + 1 <= u".to_owned()),
     };
 
     assert_eq!(

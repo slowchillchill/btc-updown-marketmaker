@@ -2,7 +2,7 @@
 
 事项编号：`data-collect-demand`。
 
-> 2026-07-17 authority同步：训练collector的外部availability、业务静默、连接生命周期、daily manifest coverage与SDK patch边界，现以`demand/data-collect-source-availability-lifecycle-repair-demand.md`为准。普通业务静默、stale、空候选以及外部DNS/TCP/TLS/WS/HTTP故障不再自动构成confirmed gap、异常告警或进程退出；本文件未被该专项需求取代的source字段、typed raw、完整性、SDK-first与模块边界继续有效。专项计划不授权生产构建、部署、远端服务操作或数据清理。
+> 2026-07-18 authority同步：训练collector的外部availability、业务静默、连接生命周期、daily manifest coverage、SDK patch及Binance depth因果顺序边界，现以`demand/data-collect-source-availability-lifecycle-repair-demand.md`为准。普通业务静默、stale、空候选以及外部DNS/TCP/TLS/WS/HTTP故障不再自动构成confirmed gap、异常告警或进程退出；aggTrade ID前跳不再触发REST backfill；depth继续保留官方snapshot/update-id stitch，阶段6已把两个既有artifact升级为snapshot v3/update v4以区分raw ingress与collector admission。本文件未被该专项需求取代的source字段、typed raw、完整性、SDK-first与模块边界继续有效。专项计划不授权生产构建、部署、远端服务操作或数据清理。
 
 本文定义当前项目 `./data-collect/` 的共用数据采集模块需求。`./data-collect/` 只负责把外部市场源转化为可审计、可回放、可验证覆盖率的原始采集证据，服务训练、paper trade 和 live trade 三类消费者；本文不包含实现计划，不修改代码，也不定义 `data-pipeline` 的训练样本加工逻辑。
 
@@ -81,8 +81,8 @@
 4. 非爱尔兰采集主机的 `recv_time_utc` 只能用于该采集主机视角的接收延迟分析，不得冒充 AWS 爱尔兰 paper/live 交易服务器的真实接收延迟。
 5. 当需要评估 paper/live 交易视角延迟时，必须使用对应 paper/live 主机采集或运行 artifact 中的接收时间；跨区域数据只能作为对照证据。
 6. `data-collect` 必须保留双时间轴：`recv_time_utc` / runtime receive time 表示数据对当前进程可见的时间，source/platform timestamp 表示源平台声明的事件时间；两者都必须进入 typed raw 和 manifest 可追溯证据，不得互相替代。
-7. 训练数据服务器的存储分区和训练冷路径默认使用数据采集服务器本机 `recv_time_utc` 作为 availability time；source/platform timestamp 只能作为源事实字段、排序辅助和延迟分析输入，不能让实际晚收到的事件提前进入训练样本 causal cutoff。
-8. paper/live hot path 必须在对应 paper/live 服务器本机记录 runtime receive timestamp；paper/live 模型的因果可见性必须以本机 runtime receive timestamp / handoff receive time 为准，不能使用训练数据服务器的 `recv_time_utc` 冒充。
+7. 训练数据服务器的存储分区默认使用数据采集服务器本机`recv_time_utc`；训练冷路径对没有独立admission合同的legacy/source schema也以它作为availability time。对已批准保存collector admission的current schema，模型causal availability必须使用`collector_admission_time_utc_ms/sequence`，`recv_time_utc/timestamp_received`只保留更早raw观察事实；source/platform timestamp只能作为源事实字段、排序辅助和延迟分析输入。任何字段都不能让尚未完成准入的事件提前进入训练样本causal cutoff。
+8. paper/live hot path 必须在对应paper/live服务器本机记录runtime receive timestamp；paper/live模型的因果可见性必须以版本化handoff中的collector admission及本机handoff receive time为准，不能使用训练数据服务器的`recv_time_utc`冒充。对于D6 depth，snapshot等待期的raw ingress不在release/admission前触发模型可见事件。
 9. source-specific hourly parquet 中的 collector receive time 列统一命名为 `timestamp_received`；不得同时写入含义相同的 `recv_time_utc` 别名列。`recv_time_utc` 仍可作为 envelope、manifest、partition/coverage 和语义说明中的概念名。
 
 ## 三、数据源覆盖要求
@@ -105,12 +105,15 @@
 
 1. 必须采集 Binance 官方 `BTCUSDT` orderbook/depth 和 `BTCUSDT` aggTrade 源，并记录 WebSocket stream name、event type、source sequence / trade id、source event time 和 `recv_time_utc`。
 2. live Binance 源只能来自 Binance 官方 WebSocket stream，例如 `btcusdt@depth`、`btcusdt@aggTrade`；depth snapshot 必须来自 Binance 官方 REST `/api/v3/depth` 或当前官方等价端点。RTDS、archive、relay、proxy、cached feed 或历史 backfill 只能作为旁证或补数，不能冒充 live official source。
-3. 本地 orderbook 最小重建状态只用于 source integrity / gap detection；不得生成 labels、features、tick_stream 或模型输入。
-4. depth update 必须保留 WS raw/typed 字段 `e`、`E`、`s`、`U`、`u`、`b`、`a`；REST snapshot parquet 必须保留 `timestamp_received`、`lastUpdateId`、`bids`、`asks`、`snapshot_fetch_start_utc`，不得再写与 `timestamp_received` 等价的 `snapshot_recv_time_utc` 别名列，不得伪造 exchange timestamp；若使用 combined stream，必须保留 wrapper `stream` / `data`。
-5. 本地 orderbook source integrity 检测必须能记录 snapshot 获取、buffered updates、缺序、重建开始、重建成功和重建失败证据。
-6. depth stitch predicate 必须验证：丢弃 `u <= lastUpdateId` 的 buffered update，首个可用 update 必须满足 `U <= lastUpdateId + 1 <= u`；后续 update 必须先处理 `u <= local_u` 的 stale/duplicate update 并记录/忽略，再处理 `U > local_u + 1` 的 source gap 并重新 snapshot，其余 update 才能应用并推进 `local_u`。
-7. aggTrade raw evidence/parser 必须能校验原始字段 `e`、`E`、`s`、`a`、`p`、`q`、`f`、`l`、`T`、`m`；hourly parquet 必须输出 `timestamp_received`、`event_time`、`trade_time`、`symbol`、`aggregate_trade_id`、`price`、`quantity`、`first_trade_id`、`last_trade_id`、`buyer_is_maker`。`event_time` 映射官方 `E`，`trade_time` 映射官方 `T`，两者是不同语义并必须同时保留。
-8. 可证明的update/trade ID不连续、payload冲突、parser/schema或本地book不变量破坏继续写confirmed continuity evidence并按既有scope处理；服务器shutdown、rate limit、外部snapshot暂不可用与业务静默只形成source-local availability并持续恢复，不自动进入`source_gaps`。
+3. collector只维护snapshot anchor、`local_u`与stitch verdict组成的最小continuity state，用于source integrity/gap detection；它不维护price-level orderbook。snapshot/update中的完整`bids/asks`与`b/a`必须原样保留给后续共享处理核心按独立合同重建，不得在collector生成第二reconstructor、labels、features、tick_stream或模型输入。
+4. depth继续使用两个既有source-specific artifact：snapshot从`binance_depth_snapshot_v2`升级为v3，update从`binance_depth_update_v3`升级为v4。depth update必须保留WS raw/typed字段`e`、`E`、`s`、`U`、`u`、`b`、`a`；REST snapshot必须保留`timestamp_received`、`lastUpdateId`、`bids`、`asks`、`snapshot_fetch_start_utc`，不得再写与`timestamp_received`等价的`snapshot_recv_time_utc`别名列，不得伪造exchange timestamp；若使用combined stream，必须保留wrapper `stream`/`data`。
+5. snapshot v3与update v4必须共同保存非空`source_sequence_epoch_id`、checked非零`connection_generation`、共享域checked非零`depth_ingress_sequence`、checked非零`collector_admission_sequence`与`collector_admission_time_utc_ms`。depth ingress按collector真实完整观察snapshot响应/update frame的先后冻结；collector admission在snapshot已验证、raw fact从有界buffer按协议release并转移既有bounded queue ownership时冻结。两者不得混用，Parquet物理行序和单独`timestamp_received`都不得冒充模型causal order。
+6. 每次WebSocket成功generation必须由唯一direct owner同时运行WS reader和至多一个active REST snapshot future；snapshot pending期间已观察update进入单一row/byte有界buffer。可用snapshot先admit，随后buffered updates按depth ingress顺序admit；snapshot最终不可用、连接提前关闭或generation放弃时，结构可验证的buffered updates以中性`not_applied_snapshot_unavailable`最终verdict有界release，不得静默丢失或冒充continuity-ready/gap。
+7. depth source integrity必须能记录snapshot获取、buffered updates、缺序、continuity重建开始、成功和失败证据，但raw观察和continuity projection分层。`u <= lastUpdateId/local_u`的stale/duplicate及`U > local_u + 1`的confirmed-hole update都必须保留v4 raw row和not-applied verdict；前者不记gap，后者使旧snapshot anchor/continuity失效并重新snapshot。同一hole update不得在新snapshot后改写或应用。
+8. depth stitch predicate固定为：首个可用update满足`U <= lastUpdateId + 1 <= u`；后续先处理`u <= local_u` stale/duplicate，再以`U > local_u + 1`识别confirmed source gap，其余update才应用并推进`local_u`。raw update已保存不表示continuity-ready；只有合法snapshot与连续应用链可以推进continuity及其last-qualifying事实，其他raw row只更新真实artifact接收事实。这里的“应用”只更新continuity state，不在collector应用`b/a`形成价位簿。
+9. aggTrade raw evidence/parser 必须能校验原始字段 `e`、`E`、`s`、`a`、`p`、`q`、`f`、`l`、`T`、`m`；hourly parquet 必须输出 `timestamp_received`、`event_time`、`trade_time`、`symbol`、`aggregate_trade_id`、`price`、`quantity`、`first_trade_id`、`last_trade_id`、`buyer_is_maker`。`event_time` 映射官方 `E`，`trade_time` 映射官方 `T`，两者是不同语义并必须同时保留。
+10. Binance depth可证明的update-ID hole、payload conflict、parser/schema或本地continuity state不变量破坏继续写confirmed continuity evidence并按既有scope处理；aggTrade原始`a`数值前跳只保存观察事实，不触发REST backfill、pending、gap、重连或退出。服务器shutdown、rate limit、外部snapshot暂不可用与业务静默只形成source-local availability并持续恢复，不自动进入`source_gaps`。
+11. Binance生产实现继续复用现有`reqwest + tokio-tungstenite + Tokio + Serde`和每source唯一direct WebSocket owner，不新增Binance SDK、Barter、Nautilus或其他market-data engine、第二socket/snapshot owner、第三depth artifact或shadow protocol path。未来改变该依赖/owner、使用partial-depth stream或新增consumer schema必须另立决策门。
 
 ### 3.3 Polymarket RTDS Chainlink BTC/USD
 
@@ -139,7 +142,7 @@
 15. 训练 cold path 必须迁移为 UTC day 文件夹 + 每 source kind 每小时一个逻辑 partition：`training/typed_raw/utc_day=YYYY-MM-DD/source_kind=<source_kind>/<source_kind>_YYYY-MM-DDTHH[--part=N].parquet`。正常目标是一小时一个 finalized parquet；`max_rows` / `max_bytes` 只允许作为保护性 soft rollover 生成同一小时的 `part=N`，不得停机或丢数据。
 16. Polymarket `book` 事件必须保存完整 `bids` / `asks` price-size depth，能还原 token orderbook；不得只保存 `bids_len` / `asks_len` 却标记为 complete book。PMXT-like schema 只作为 Polymarket orderbook typed layout、hourly parquet、compression/sort 和 manifest 参考，不引入 PMXT archive source。
 17. Polymarket hourly typed layout 必须覆盖 `book`、`price_change`、`last_trade_price`、`tick_size_change`、`best_bid_ask`、`new_market`、`market_resolved` 的 typed 字段或 nullable unavailable reason，并保留 collector host/region、slug、condition id、asset id、coverage 和 source evidence。
-18. Binance depth snapshot/update、Binance aggTrade、RTDS Chainlink 必须进入 hourly typed layout 修改范围，分别使用官方字段的 source-specific schema：`binance_depth_snapshot` 保留 `timestamp_received`、`lastUpdateId` 和完整 `bids/asks`，`binance_depth_update` 保留 `timestamp_received`、`e/E/s/U/u/b/a` 与 stitch evidence，`binance_aggtrade_v3` 保留 `timestamp_received`、`event_time=E`、`trade_time=T`、`e/s/a/p/q/f/l/m` 的 typed 字段，`polymarket_rtds_chainlink_btc_usd` 保留 `timestamp_received`、message timestamp、payload timestamp、symbol、value、topic 和 subscription filter。
+18. Binance depth snapshot/update、Binance aggTrade、RTDS Chainlink 必须进入 hourly typed layout 修改范围，分别使用官方字段的 source-specific schema：`binance_depth_snapshot_v3`保留`timestamp_received`、`lastUpdateId`、完整`bids/asks`、snapshot boundary及共同depth因果坐标，`binance_depth_update_v4`保留`timestamp_received`、`e/E/s/U/u/b/a`、stitch/not-applied verdict及同一坐标域；`binance_aggtrade_v6`按独立专项合同保留trade/invalid判别、官方trade字段与WS因果坐标；`polymarket_rtds_chainlink_btc_usd`保留`timestamp_received`、message timestamp、payload timestamp、symbol、value、topic和subscription filter。旧depth snapshot v2/update v3与aggTrade v3/v5只读兼容，不得伪造新ordering字段。
 19. 训练dataset hard threshold固定为`50_000_000_000` bytes，作用域是`datasets/training`。达到阈值时collector按既有协调finalize合同保护已接收数据并以保留退出码75结束，不生成retention/threshold receipt，也不在collector内自动删除raw。
 20. 归档、retention和真实删除由独立运维事项处理；本需求与当前专项不授权删除任何UTC day、远端临时验证或生产数据清理。未来若批准删除，必须另建需求/计划/changelog和精确路径、安全门及验收，不得从50GB阈值或旧部署事实推导删除权限。
 21. 资源硬阈值的触发值、观测值、协调finalize与退出结果只进入有界operator日志、测试输出和对应changelog证据；不得为此扩张每日manifest或生成run-level policy/ResourceWatermark artifact。
@@ -153,7 +156,7 @@
 1. DNS/TCP/TLS/WebSocket/HTTP连接失败、断链、server shutdown、rate limit和合法空候选属于外部availability，由对应source-local owner持续恢复。
 2. 长时间无业务消息、持续stale、ping/pong正常但业务静默属于下游missingness的因果事实；collector保留接收时间、last-qualifying和真实空档，不由此操作subscription/socket或记录gap/lag/异常告警。
 3. 订阅/HTTP/WS直接协议错误须区分可恢复transport错误与无法验证的parser/schema错误；前者持续恢复，后者按既有受影响范围fail closed。
-4. Binance snapshot/update/trade ID中可证明的sequence hole、payload conflict、SDK `Lagged(n)`、queue drop/timeout、writer/manifest/atomic publish和内部不变量才进入confirmed integrity路径。
+4. Binance depth update-ID中可证明的sequence hole、payload conflict、SDK `Lagged(n)`、queue drop/timeout、writer/manifest/atomic publish和内部不变量才进入confirmed integrity路径；aggTrade ID数值前跳不证明hole，只保留原始观察。
 5. 资源硬边界继续按既有合同保护已接收数据；普通诊断日志失败、计数饱和或缺少专用reason不得结束source/collector。
 
 外部availability只进入source-local运行态和有界、去重operator日志；每日manifest不保存transport current/open、scope、reason或episode，也不生成compact health receipt或逐事件debug artifact。
@@ -164,7 +167,7 @@
 2. 各source只有一个source-local transport owner并独立恢复；Polymarket、Binance、RTDS任一源故障不得阻塞健康源，也不得建设第二套health/reconnect控制面。
 3. 真实新connection generation按各协议重放最新desired：Polymarket只发送真实asset diff或完整latest set，RTDS只发送一次完整filtered desired，Binance depth重新snapshot并完成官方stitch。
 4. Connection open或PONG只表示transport事实；业务消息只更新last-qualifying事实。业务静默/stale不触发refresh、reconnect、gap、lag、告警或退出。
-5. Binance stale/duplicate update安全丢弃且不记gap；可证明的update/trade ID hole保留confirmed continuity evidence。aggTrade单个REST backfill range可以有界耗尽，耗尽后记录unresolved、开启新epoch并继续未来live数据，不把该range变成source总退出预算。
+5. Binance depth stale/duplicate和confirmed-hole update都保存v4 raw row但不得错误推进continuity：前者只写not-applied且不记gap，后者保留confirmed continuity evidence、使旧snapshot anchor/`local_u`失效并重新snapshot。aggTrade ID前跳保持中性且不创建REST backfill、pending、merge、range retry或continuity epoch。
 6. RTDS重连后验证topic、symbol filter和payload typed语义；stale payload可落盘但不控制网络。SDK `Lagged(n)`、parser/schema与目标payload不变量仍按完整性边界处理。
 
 ## 六、Rust async/non-blocking 运行要求
@@ -211,7 +214,7 @@
 7. Polymarket、Binance BTCUSDT orderbook/depth、Binance BTCUSDT aggTrade、RTDS Chainlink BTC/USD四个logical producer都保留required event types、IDs/timestamps、raw_json/typed fields、last-qualifying和confirmed integrity evidence；每日manifest只保存一个共同collection coverage，不复制四份producer或六份source coverage。
 8. `market_resolved` / retired 验收必须证明事件路径或 fallback metadata 路径之一满足 retired predicate；事件路径必须记录同一 target condition/market 的 `subscribed_asset_ids_for_market`、`resolved_event_asset_ids`、`winning_asset_id`、`winning_outcome`、nullable `close_reason_if_present`，fallback metadata 路径必须记录 `market_resolved_missing_reason`、同一 target condition/market 的 `fallback_metadata_asset_ids`、freshness、same condition/market 校验和 close/resolution 证据。
 9. `best_bid_ask`、`new_market`、`market_resolved`验收必须证明`custom_feature_enabled: true`、订阅发送事实/直接错误和SDK支持状态；没有独立ack或尚无首个匹配业务事件只保留为未观测事实，不自动把manifest写成source gap/incomplete。
-10. Binance live 源必须来自 Binance 官方 WS/REST；aggTrade 必须保留原始 `e,E,s,a,p,q,f,l,T,m`，depth update 必须保留 `e,E,s,U,u,b,a`，snapshot 必须保留 `lastUpdateId,bids,asks` 且不得伪造 exchange timestamp，并且 depth stitch predicate 必须可审计。
+10. Binance live源必须来自Binance官方WS/REST并继续由现有唯一direct owner实现；Cargo/lock和生产调用图不得新增Binance SDK/market-data engine。aggTrade必须保留原始`e,E,s,a,p,q,f,l,T,m`；depth update v4必须保留`e,E,s,U,u,b,a`及共同source epoch/generation/ingress/admission坐标，snapshot v3必须保留`lastUpdateId,bids,asks`及同一坐标域且不得伪造exchange timestamp；snapshot pending/success/failure release与depth stitch predicate必须可审计。
 11. 连续 parquet 写入通过 running/temp segment 承载，close/finalize 后 atomic rename；parquet / manifest 文件发现路径只读 finalized parquet；每个 source parquet 必须带 typed raw schema version 和 source kind metadata，至少包括 `parquet_raw_layout_version` 和 `parquet_raw_source_kind`。
 12. 每日唯一顶层v3 manifest至少包含既有build/binary/config/host/region、file facts、六个source counters、continuity、confirmed gap与operational counter，并直接嵌套需求第四节冻结的单一`data_collect_collection_day_coverage_v1`；不保存validation verdict、required-files gate、ResourceWatermark大字段、transport scope/reason/episode、逐producer/source coverage复制、receipt或重复sidecar。
 13. paper/live 自身 append-only event log、rotation artifact、live artifacts、order evidence、NOE/ledger 和 execution feedback ingestion 必须由其他模块需求承接；`data-collect` 只能提供外部市场源 finalized mirror、coverage、health、gap、manifest 和 hot path handoff 边界证据，不能私自解释交易运行证据。
@@ -229,10 +232,10 @@
 25. 训练、paper、live 三类运行形态均能独立导出 release 二进制、sha256 和运行说明；训练数据采集必须有独立部署 README，paper/live hot path 必须有独立接入技术文档。
 26. 训练cold mirror按`source_kind + recv_time_utc UTC day`分区，每个source/day可包含多个finalized file；每日唯一manifest保存每个file的source/hour/part、接收事实、row count、bytes和sha256，并保存共同collection coverage，不生成segment manifest。
 27. `max_rows`、`max_bytes`、`max_segment_duration`、UTC day boundary 和 shutdown finalize 只触发 soft rollover 或保全发布；正常行情放大不得因 soft rollover 自动停机，只有不可写、无法保全、持续 hard threshold、drop/send timeout 或 partial artifact 被发布等条件才能进入 fatal 动作。
-28. 训练样本因果可见性必须以采集服务器 `recv_time_utc` / availability time 为默认主轴；paper/live 因果可见性必须以对应 paper/live 服务器本机 runtime receive timestamp 为主轴；source/platform timestamp 不能替代 receive/available time。
+28. 训练样本因果可见性对legacy/无独立admission schema以采集服务器`recv_time_utc`为默认主轴，对current aggTrade/depth等已批准schema以collector admission time/sequence为主轴并保留更早raw ingress审计；paper/live以版本化handoff admission及对应服务器本机runtime receive timestamp为主轴。source/platform timestamp和Parquet物理行序不能替代receive/admission available time。
 29. paper/live 二进制的 hot path 接入文档必须明确 IPC/local stream/bounded handoff 协议、event seq、timestamp namespace、backpressure/status 消息、runtime receive timestamp 记录点和非范围边界，且不得生成交易决策、NOE/ledger、order evidence 或 execution feedback。
 30. PMXT-inspired Polymarket orderbook hourly parquet 必须证明 `book` rows 全部保留可解析 `bids` / `asks` 数组字段；真实市场中单侧空数组可以是盘口状态，必须在人工检查报告中单独计数，不得把完整 price-size 数组缩水成 `bids_len` / `asks_len` 后伪装完整。`price_change`、`last_trade_price`、`tick_size_change`、`best_bid_ask`、`new_market`、`market_resolved` 必须有对应 typed 字段、raw-equivalent evidence 或 nullable unavailable reason。
-31. Binance depth snapshot/update、Binance aggTrade、RTDS Chainlink hourly parquet 必须分别证明 required typed fields 存在，且不能只依赖 opaque `source_kind/raw_json` 宽表；Binance aggTrade v3 必须证明 `event_time=E` 与 `trade_time=T` 都落盘且未被归档输出丢弃，Binance depth 还必须证明 snapshot/update stitch predicate、`local_u` 单调推进或 gap/resnapshot 可解释。
+31. Binance depth snapshot/update、Binance aggTrade、RTDS Chainlink hourly parquet必须分别证明required typed fields存在，且不能只依赖opaque `source_kind/raw_json`宽表；Binance aggTrade current v6及legacy v3/v5必须按各自合同证明`event_time=E`与`trade_time=T`等字段没有被归档输出丢弃。Binance depth current snapshot v3/update v4必须证明共享depth ingress与collector admission坐标、snapshot先admit/buffered updates按ingress release、stale/hole/snapshot-unavailable raw evidence不丢失且不错误应用，以及`local_u`单调推进或gap/resnapshot可解释；legacy snapshot v2/update v3只能标为ordering unknown。
 32. 训练 cold path finalized discovery 必须使用 day-first `utc_day=YYYY-MM-DD/source_kind=<source_kind>` 路径；legacy source-first 路径只能作为历史只读兼容被显式标记，不能与新产物混写。
 33. 50GB hard-threshold验收只证明触发后停止新接收、协调finalize/manifest保全并以退出码75结束；collector不生成retention/threshold receipt且不删除raw。任何归档、远端验证或真实删除都必须等待独立需求、计划和用户批准。
 

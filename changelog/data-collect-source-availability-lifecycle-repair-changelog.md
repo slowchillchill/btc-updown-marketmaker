@@ -6,7 +6,7 @@
 >
 > 对应计划：`plan/data-collect-source-availability-lifecycle-repair-plan.md`
 >
-> 状态：`APPROVED_IMPLEMENTATION_PHASE_5_COMPLETE_PHASE_6_AUTHORIZED_CT_B_APPROVED`。用户已于2026-07-17批准最终需求、计划及SDK-first逐项patch矩阵，并授权按计划执行本地文档/代码修改、测试、独立审查、commit和push；阶段0至阶段5均已完成全量验证和独立终审，阶段5精确commit/push后进入已授权阶段6。同日用户批准阶段5增加同artifact aggTrade v6 invalid-evidence、顺序与handoff evidence子边界。用户于2026-07-18进一步批准以WS因果直录取代aggTrade ID-hole/REST backfill/pending/merge/active continuity控制，先同步文档再继续实现。生产构建、部署、远端服务写操作和数据清理仍未获授权。
+> 状态：`APPROVED_IMPLEMENTATION_PHASE_6_COMPLETE_PHASE_7_AUTHORIZED_CT_B_D6_SCHEMA_R_IMPLEMENTED`。用户已于2026-07-17批准最终需求、计划及SDK-first逐项patch矩阵，并授权按计划执行本地文档/代码修改、测试、独立审查、commit和push；阶段0至阶段6均已完成全量验证和独立终审，阶段6精确commit/push后进入已授权阶段7。同日用户批准阶段5增加同artifact aggTrade v6 invalid-evidence、顺序与handoff evidence子边界。用户于2026-07-18进一步批准以WS因果直录取代aggTrade ID-hole/REST backfill/pending/merge/active continuity控制，并批准、实施`D6-SCHEMA-R`作为阶段6的depth双artifact、双坐标、raw/continuity分层方案。生产构建、部署、远端服务写操作和数据清理仍未获授权。
 
 ## 2026-07-17：最终批准并开始阶段0
 
@@ -372,3 +372,32 @@
 - `cargo test -p data-collect --locked -- --test-threads=1`通过224项lib测试及全部integration/doc tests；新增自动静态回归所在`binance_aggtrade_continuity_contract`定向复跑5/5通过。`cargo check -p data-collect --all-targets --locked`与非测试lib检查通过；`cargo clippy -p data-collect --locked --all-targets -- -D warnings`零告警；`cargo fmt --all -- --check`和`git diff --check`通过。首轮Clippy发现的`needless_return`已改为尾表达式并复验通过。
 - 阶段5单一aggTrade source的100次自然恢复与资源有界验收已经完成；计划阶段7仍负责多source组合、全部transport不可达和系统级FD/task/socket/queue压力，不重新引入aggTrade backfill或第二恢复路径。
 - 三路独立终审分别覆盖生产调用图与恢复边界、v6 writer/legacy dedupe恢复，以及schema/generation/docs/自动静态回归；handoff生产接入范围和REST trap验收措辞两项Important均已按真实实现修正并复核关闭。最终结果为Critical 0、Important 0，需求、计划与changelog顶层状态已原子同步为阶段5完成；精确commit/push后进入已授权阶段6。
+
+## 2026-07-18：用户批准D6-SCHEMA-R并同步阶段6后续计划
+
+- 阶段6实施前对真实代码和既有schema复核确认：生产depth路径在WebSocket握手后同步等待REST snapshot完成，之后才开始poll socket；snapshot为`binance_depth_snapshot_v2`，update为`binance_depth_update_v3`。当前stale/duplicate update在writer前直接continue，confirmed-hole update会先同步重新snapshot再重新判断同一update，因此现状既不能显式证明“snapshot pending时raw update先到”的观察顺序，也会丢失stale raw事实，并存在把hole update按后来的snapshot重新分类/应用的风险。这些是阶段6待修事实，不代表阶段5回退。
+- 用户批准推荐`D6-SCHEMA-R`：继续使用`binance_depth_snapshot`和`binance_depth_update`两个既有artifact、writer与manifest mapping，不增加第三artifact或sidecar；schema分别升级为snapshot v3和update v4。两个schema共同新增`source_sequence_epoch_id`、`connection_generation`、`depth_ingress_sequence`、`collector_admission_sequence`及`collector_admission_time_utc_ms`，并保留既有官方payload、receive time与stitch字段。legacy snapshot v2/update v3只读为ordering unknown，不回填伪造坐标。
+- raw observation与continuity availability明确分层。depth ingress在collector完整观察REST snapshot响应或WS application frame时按共享checked-u64域冻结；它保存真实观察顺序但不等于模型可见。snapshot已验证后先取得collector admission，snapshot pending期间buffered updates再按ingress顺序分类/release并取得admission；模型/handoff/offline replay不得把t2 snapshot才确定的stitch结果回写成t1模型可见事实，Parquet物理行序也不是authority。
+- 每个成功WebSocket generation继续只有一个direct owner；唯一WS reader与至多一个active snapshot future并行，snapshot pending update进入同时受row/byte hard bound约束的单一generation-local buffer。snapshot最终不可用、可用前Close/EOF或generation放弃时，已观察且结构可验证的buffered updates必须以中性`not_applied_snapshot_unavailable`最终verdict按ingress有界release，不得静默丢失、虚构continuity-ready或伪造confirmed gap；无法形成可信typed row的parser/schema错误仍按既有完整性scope失败，本批准不新增depth invalid union。
+- stale/duplicate与confirmed-hole update都必须保留update v4 raw row和not-applied verdict，但不得错误推进continuity或更新last-qualifying事实：前者不记gap，后者保留confirmed continuity evidence、立即失效旧snapshot anchor/`local_u`并重新snapshot；同一hole update不得在新snapshot后改写、回排或应用。首桥固定使用`U <= lastUpdateId + 1 <= u`，后续`U > local_u + 1`才是confirmed hole；公开文档叙述差异不改变本项目冻结的`+1`合同。
+- 代码审计进一步确认collector当前只维护snapshot anchor与`local_u`连续性，不维护价位簿。D6中的`book-ready/book projection`因此统一澄清为continuity-ready/continuity projection：snapshot/update继续完整保存`bids/asks`与`b/a`供后续唯一shared canonicalizer重建，但阶段6不得新增collector price-level book、第二reconstructor或模型book实现。
+- 成熟工具边界冻结为继续复用现有`reqwest + tokio-tungstenite + Tokio + Serde`及唯一Binance direct WebSocket owner。不引入官方/第三方Binance SDK、Barter、Nautilus或其他market-data engine；外部实现只作为只读研究/fixture参考。若未来改用partial-depth stream、改变首桥谓词、增加第三artifact/consumer schema、新依赖或替换owner，必须另建协议/schema/依赖决策门。
+- 阶段7资源计划改为累计证据矩阵：阶段3已有SDK/RTDS 100-cycle，阶段5已有aggTrade 100-cycle，阶段6完成depth 100-cycle后均直接复用；阶段7只补尚未覆盖的CLOB生产actor与多源系统压力，不重建aggTrade或depth第二恢复路径。阶段8增加Cargo/lock与生产调用图静态门，证明没有新增Binance SDK/engine或第二owner。
+- authority同步同时发现并修正`demand/data-collect-demand.md`残留的“aggTrade ID hole/REST backfill range”旧句；它与2026-07-18已批准并完成的阶段5 WS-only合同冲突。历史changelog中的旧backfill设计仍原样保留为决策演进，不是当前authority；superseded reliability demand/plan/changelog未修改。
+- 本次只同步`demand/data-collect-source-availability-lifecycle-repair-demand.md`、对应plan/changelog、`demand/data-collect-demand.md`及核心需求中已批准的data-collect子边界；没有修改代码、阶段0--5执行结果、next_wake/模型策略、生产构建、部署、远端服务或数据清理范围。
+
+## 2026-07-18：阶段6 D6-SCHEMA-R实施与审查修复
+
+- 生产depth继续使用`binance_depth_snapshot`与`binance_depth_update`两个既有artifact、writer和manifest source mapping，schema分别升级为v3/v4。source task epoch、成功连接generation、snapshot/update共享depth ingress及collector admission sequence/time均为checked坐标；current writer拒绝版本/schema/部分坐标不一致，真实legacy v2/v3 Parquet fixture读取为ordering unknown，不补造current坐标。
+- 每个成功generation仍只有一个direct WebSocket owner。唯一reader和至多一个active snapshot future在同一`select!`循环并行，pending buffer同时受row/byte hard bound约束；snapshot完整收到并验证后先admit，buffered updates再按ingress顺序分类/admit。snapshot不可用、Close/EOF、day/stop reset及terminal前的结构有效pending row均以中性`not_applied_snapshot_unavailable`只release一次，hour finalize只暂停而不破坏已有snapshot/continuity。
+- stitch authority收敛为单一canonical状态机和四种封闭verdict。首桥固定`U <= lastUpdateId + 1 <= u`，后续先处理`u <= local_u` stale/duplicate，再以`U > local_u + 1`确认hole；stale与hole raw row都保存一次，只有applied推进`local_u`，hole立即令旧continuity失效且不在新snapshot后重分类。snapshot/update完整保留价位数组，但collector没有新增price-level book、第二reconstructor或shared canonicalizer。
+- snapshot HTTP改为增量读取完整response body并在JSON parse前执行硬上限，坐标只在完整body观察后冻结；enriched typed row还经过真实owned-byte上限预检。408/418/429/5xx属于外部availability，其他4xx及snapshot/update schema、sequence、ownership和continuity invariant保持terminal；availability cycle使用有界内部jitter/backoff且不会耗尽source总生命。
+- 独立审查发现`Retry-After`最初只保存在generation-local future，UTC day reset、Close/EOF或inactivity取消future后可能提前请求。修复为source-task级monotonic not-before gate：每次请求前等待，合法418/429秒数以max更新，future replacement与connection generation切换不清除，且不写manifest。跨取消真实HTTP回归证明429后abort旧future，800ms内无第二请求，期限后新future恢复。该边界依据[Binance官方REST限流说明](https://developers.binance.com/en/docs/products/spot/rest-api)。
+- 其他独立审查修复包括：hour fence不得误取消Ready snapshot；terminal/owner-drop路径先中性release pending；snapshot/update必须完整validate；v4 verdict必须由raw事实重算而非信任输入；writer内部factory不能绕过schema/version；合法PING/PONG/Text按transport-positive处理且control resume后重武装persistent inactivity timer；外层control disconnect保持terminal。所有修复都位于既有owner/artifact范围内。
+
+## 2026-07-18：阶段6验证与最终终审
+
+- 真实loopback覆盖snapshot pending期间两个update先到、snapshot后到且先admit；stale、首桥、连续、confirmed hole、snapshot unavailable、buffer row/byte cap、Close/EOF、day/stop/hour fence、PING业务静默、全frame inactivity、serverShutdown、HTTP timeout/408/418/429/5xx/terminal 4xx、chunked body上限、sequence overflow及handoff parity。真实current Parquet round-trip保留全部五类坐标与官方/stitch字段，真实legacy文件不伪造ordering。
+- 100次WebSocket reconnect测试由同一source owner达到generation 101，每代结构有效update都完成中性释放，FD采样有界；100次真实HTTP resnapshot测试在单一WebSocket generation中得到101个snapshot、100个applied update、100个confirmed-hole update及301个唯一ingress/admission事件，HTTP FD/socket有界。实现没有per-cycle/per-frame spawn，snapshot future和pending buffer都是同一source task内的单一局部owner。
+- `cargo test -p data-collect --locked -- --test-threads=1`通过245项lib及全部integration/doc tests，depth定向31/31通过；`cargo check -p data-collect --all-targets --locked`、`cargo clippy -p data-collect --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check`与`git diff --check`均通过。
+- protocol/schema因果终审为Critical 0、Important 0、Minor 0；异步/资源终审为Critical 0、Important 0，并保留两个不影响任何生产读者、数据、manifest或恢复行为的非阻断机械清理候选；第三路authority/范围终审确认没有新增第三artifact、Binance SDK/engine、第二owner、price-level book、阶段7多源压力、阶段8全量交付或模型/runtime实现。阶段6因此标记完成，精确commit/push后进入已授权阶段7。

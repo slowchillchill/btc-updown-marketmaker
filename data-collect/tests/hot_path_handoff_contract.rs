@@ -1,14 +1,18 @@
 use base64::Engine as _;
 use data_collect::binance_aggtrade::BINANCE_AGGTRADE_INVALID_INPUT_MAX_BYTES;
 use data_collect::handoff::{
-    HANDOFF_SOURCE_EVIDENCE_SCHEMA_VERSION, HandoffFrame, HandoffFrameType, HandoffRecordKind,
-    HandoffRuntimeConfig, HandoffSourceEvidence, RuntimeReceivedFrame,
-    run_single_frame_unix_handoff, run_single_frame_unix_server_handoff,
+    DEPTH_HANDOFF_SOURCE_EVIDENCE_SCHEMA_VERSION, DepthHandoffRecordKind,
+    DepthHandoffSourceEvidence, HANDOFF_SOURCE_EVIDENCE_SCHEMA_VERSION, HandoffFrame,
+    HandoffFrameType, HandoffRecordKind, HandoffRuntimeConfig, HandoffSourceEvidence,
+    RuntimeReceivedFrame, run_single_frame_unix_handoff, run_single_frame_unix_server_handoff,
 };
 use data_collect::publish::PaperLiveEnvironment;
 use data_collect::source_hourly_layout::{
     BINANCE_AGGTRADE_CAPTURE_COMPLETE, BINANCE_AGGTRADE_RECORD_INVALID_INPUT,
-    BINANCE_AGGTRADE_RECORD_TRADE, BINANCE_AGGTRADE_SCHEMA_VERSION, BinanceAggTradeHourlyRow,
+    BINANCE_AGGTRADE_RECORD_TRADE, BINANCE_AGGTRADE_SCHEMA_VERSION,
+    BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION, BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
+    BINANCE_DEPTH_VERDICT_APPLIED, BinanceAggTradeHourlyRow, BinanceDepthSnapshotHourlyRow,
+    BinanceDepthUpdateHourlyRow,
 };
 use sha2::{Digest as _, Sha256};
 use tempfile::tempdir;
@@ -347,6 +351,224 @@ fn aggtrade_hourly_rows_map_to_matching_handoff_evidence() {
         assert_ne!(frame.event_seq, row.collector_admission_sequence);
         assert_ne!(frame.event_seq, row.websocket_ingress_sequence.unwrap());
     }
+}
+
+#[test]
+fn depth_snapshot_and_update_handoff_evidence_preserve_causal_coordinates() {
+    let snapshot =
+        DepthHandoffSourceEvidence::snapshot("depth-source-epoch-1", 7, 12, 20, 1_767_225_600_021)
+            .unwrap();
+    let snapshot_frame = HandoffFrame::depth_source_evidence(
+        901,
+        "binance_depth_snapshot",
+        "depth_snapshot",
+        "BTCUSDT",
+        None,
+        1_767_225_600_020,
+        1_767_225_600_022,
+        "collector-host",
+        "eu-west-1",
+        Some(r#"{"lastUpdateId":100}"#),
+        snapshot,
+    )
+    .unwrap();
+
+    let update = DepthHandoffSourceEvidence::update(
+        "depth-source-epoch-1",
+        7,
+        11,
+        21,
+        1_767_225_600_023,
+        "applied",
+    )
+    .unwrap();
+    let update_frame = HandoffFrame::depth_source_evidence(
+        902,
+        "binance_depth_update",
+        "depth_update",
+        "BTCUSDT",
+        Some("1767225600019"),
+        1_767_225_600_019,
+        1_767_225_600_024,
+        "collector-host",
+        "eu-west-1",
+        Some(r#"{"e":"depthUpdate","U":101,"u":101}"#),
+        update,
+    )
+    .unwrap();
+
+    let snapshot_evidence = snapshot_frame.depth_source_evidence.as_ref().unwrap();
+    let update_evidence = update_frame.depth_source_evidence.as_ref().unwrap();
+    assert_eq!(
+        snapshot_evidence.evidence_schema_version,
+        DEPTH_HANDOFF_SOURCE_EVIDENCE_SCHEMA_VERSION
+    );
+    assert_eq!(
+        snapshot_evidence.record_kind,
+        DepthHandoffRecordKind::Snapshot
+    );
+    assert_eq!(update_evidence.record_kind, DepthHandoffRecordKind::Update);
+    assert_eq!(snapshot_evidence.depth_ingress_sequence, 12);
+    assert_eq!(update_evidence.depth_ingress_sequence, 11);
+    assert_eq!(snapshot_evidence.collector_admission_sequence, 20);
+    assert_eq!(update_evidence.collector_admission_sequence, 21);
+    assert_eq!(update_evidence.stitch_verdict.as_deref(), Some("applied"));
+    assert!(snapshot_evidence.stitch_verdict.is_none());
+    assert_ne!(
+        snapshot_frame.event_seq,
+        snapshot_evidence.depth_ingress_sequence
+    );
+    assert_ne!(
+        update_frame.event_seq,
+        update_evidence.collector_admission_sequence
+    );
+
+    let restored: HandoffFrame =
+        serde_json::from_str(&update_frame.to_json_line().unwrap()).unwrap();
+    assert_eq!(restored, update_frame);
+}
+
+#[test]
+fn depth_handoff_evidence_rejects_wrong_source_and_invalid_variant_fields() {
+    assert!(
+        DepthHandoffSourceEvidence::update("depth-source-epoch-1", 1, 1, 1, 1_767_225_600_001, "",)
+            .is_err()
+    );
+
+    let evidence =
+        DepthHandoffSourceEvidence::snapshot("depth-source-epoch-1", 1, 1, 1, 1_767_225_600_001)
+            .unwrap();
+    assert!(
+        HandoffFrame::depth_source_evidence(
+            1,
+            "binance_depth_update",
+            "depth_update",
+            "BTCUSDT",
+            None,
+            1_767_225_600_001,
+            1_767_225_600_002,
+            "collector-host",
+            "eu-west-1",
+            Some(r#"{"e":"depthUpdate"}"#),
+            evidence,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn exact_depth_hourly_rows_map_field_for_field_to_handoff_evidence() {
+    let snapshot = BinanceDepthSnapshotHourlyRow {
+        timestamp_received: 1_767_225_600_020,
+        snapshot_fetch_start_utc: 1_767_225_600_010,
+        last_update_id: 100,
+        bids: r#"[["1","2"]]"#.to_owned(),
+        asks: r#"[["3","4"]]"#.to_owned(),
+        symbol: "BTCUSDT".to_owned(),
+        source_endpoint: "https://api.binance.com/api/v3/depth".to_owned(),
+        snapshot_status: "complete".to_owned(),
+        source_sequence_epoch_id: Some("depth-source-epoch-row".to_owned()),
+        connection_generation: Some(7),
+        depth_ingress_sequence: Some(12),
+        collector_admission_sequence: Some(20),
+        collector_admission_time_utc_ms: Some(1_767_225_600_021),
+        collector_host_id: "collector-host".to_owned(),
+        collector_region: "eu-west-1".to_owned(),
+        schema_version: BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION.to_owned(),
+    };
+    let update = BinanceDepthUpdateHourlyRow {
+        timestamp_received: 1_767_225_600_019,
+        event_type: "depthUpdate".to_owned(),
+        event_time: 1_767_225_600_018,
+        symbol: "BTCUSDT".to_owned(),
+        first_update_id: 101,
+        final_update_id: 101,
+        bids: r#"[["1","2"]]"#.to_owned(),
+        asks: r#"[["3","4"]]"#.to_owned(),
+        stream: "btcusdt@depth".to_owned(),
+        snapshot_last_update_id: Some(100),
+        local_u_before: None,
+        stitch_verdict: BINANCE_DEPTH_VERDICT_APPLIED.to_owned(),
+        stitch_evidence: Some("U <= lastUpdateId + 1 <= u".to_owned()),
+        stitch_gap_reason: None,
+        source_sequence_epoch_id: Some("depth-source-epoch-row".to_owned()),
+        connection_generation: Some(7),
+        depth_ingress_sequence: Some(11),
+        collector_admission_sequence: Some(21),
+        collector_admission_time_utc_ms: Some(1_767_225_600_023),
+        collector_host_id: "collector-host".to_owned(),
+        collector_region: "eu-west-1".to_owned(),
+        source_endpoint: "wss://stream.binance.com/ws/btcusdt@depth".to_owned(),
+        schema_version: BINANCE_DEPTH_UPDATE_SCHEMA_VERSION.to_owned(),
+    };
+
+    assert!(snapshot.validate().is_complete());
+    assert!(update.validate().is_complete());
+    let snapshot_evidence = DepthHandoffSourceEvidence::try_from(&snapshot).unwrap();
+    let update_evidence = DepthHandoffSourceEvidence::try_from(&update).unwrap();
+
+    assert_eq!(
+        snapshot_evidence.source_sequence_epoch_id,
+        snapshot.source_sequence_epoch_id.unwrap()
+    );
+    assert_eq!(
+        snapshot_evidence.connection_generation,
+        snapshot.connection_generation.unwrap()
+    );
+    assert_eq!(
+        snapshot_evidence.depth_ingress_sequence,
+        snapshot.depth_ingress_sequence.unwrap()
+    );
+    assert_eq!(
+        snapshot_evidence.collector_admission_sequence,
+        snapshot.collector_admission_sequence.unwrap()
+    );
+    assert_eq!(
+        snapshot_evidence.collector_admission_time_utc_ms,
+        snapshot.collector_admission_time_utc_ms.unwrap()
+    );
+    assert_eq!(
+        update_evidence.source_sequence_epoch_id,
+        update.source_sequence_epoch_id.unwrap()
+    );
+    assert_eq!(
+        update_evidence.connection_generation,
+        update.connection_generation.unwrap()
+    );
+    assert_eq!(
+        update_evidence.depth_ingress_sequence,
+        update.depth_ingress_sequence.unwrap()
+    );
+    assert_eq!(
+        update_evidence.collector_admission_sequence,
+        update.collector_admission_sequence.unwrap()
+    );
+    assert_eq!(
+        update_evidence.collector_admission_time_utc_ms,
+        update.collector_admission_time_utc_ms.unwrap()
+    );
+    assert_eq!(
+        update_evidence.stitch_verdict.as_deref(),
+        Some(BINANCE_DEPTH_VERDICT_APPLIED)
+    );
+}
+
+#[test]
+fn legacy_generic_depth_external_frame_remains_accepted_without_new_evidence() {
+    let frame = HandoffFrame::external_market_event(
+        44,
+        "binance_depth_update",
+        "depth_update",
+        "BTCUSDT",
+        Some("1767225600018"),
+        1_767_225_600_019,
+        1_767_225_600_020,
+        "collector-host",
+        "eu-west-1",
+        r#"{"e":"depthUpdate","U":101,"u":101}"#,
+    )
+    .unwrap();
+    assert!(frame.depth_source_evidence.is_none());
 }
 
 #[test]

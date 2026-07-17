@@ -7,9 +7,8 @@ use data_collect::health::{
     SourceHealthEvent,
 };
 use data_collect::sources::binance::{
-    BINANCE_DEPTH_SNAPSHOT_ENDPOINT, BinanceOfficialSourceConfig, DepthUpdateDecision,
-    apply_depth_stitch_evidence, parse_aggtrade_raw, parse_depth_snapshot_raw,
-    parse_depth_update_raw, stitch_depth_update,
+    BINANCE_DEPTH_SNAPSHOT_ENDPOINT, BinanceOfficialSourceConfig, DepthUpdateVerdict,
+    assess_depth_update, parse_aggtrade_raw, parse_depth_snapshot_raw, parse_depth_update_raw,
 };
 
 fn envelope(source_kind: SourceKind, event_type: &str, raw_json: &str) -> EventEnvelope {
@@ -60,7 +59,7 @@ fn binance_depth_stitch_contract() {
     .expect("parse official depth update");
     assert_eq!(
         update.validate_contract().verdict,
-        ValidationVerdict::Incomplete
+        ValidationVerdict::Complete
     );
     assert_eq!(update.combined_stream.as_deref(), Some("btcusdt@depth"));
 
@@ -86,19 +85,12 @@ fn binance_depth_stitch_contract() {
         ValidationVerdict::Complete
     );
 
-    let stitch_decision = stitch_depth_update(snapshot.last_update_id, None, &update);
+    let assessment = assess_depth_update(Some(snapshot.last_update_id), None, &update).unwrap();
+    assert_eq!(assessment.verdict, DepthUpdateVerdict::Applied);
+    assert_eq!(assessment.local_u_after, Some(103));
     assert_eq!(
-        stitch_decision,
-        DepthUpdateDecision::Apply {
-            local_u: 103,
-            stitch_evidence: "U <= lastUpdateId + 1 <= u".to_owned()
-        }
-    );
-    let stitched_update =
-        apply_depth_stitch_evidence(update.clone(), stitch_decision).expect("apply stitch");
-    assert_eq!(
-        stitched_update.validate_contract().verdict,
-        ValidationVerdict::Complete
+        assessment.stitch_evidence.as_deref(),
+        Some("U <= lastUpdateId + 1 <= u")
     );
 
     let one_sided_update = parse_depth_update_raw(
@@ -110,13 +102,11 @@ fn binance_depth_stitch_contract() {
         r#"{"e":"depthUpdate","E":1,"s":"BTCUSDT","U":104,"u":105,"b":[["100","1"]],"a":[]}"#,
     )
     .expect("parse one-sided depth update");
-    let one_sided_decision =
-        stitch_depth_update(snapshot.last_update_id, Some(103), &one_sided_update);
-    let one_sided_stitched = apply_depth_stitch_evidence(one_sided_update, one_sided_decision)
-        .expect("apply one-sided stitch");
     assert_eq!(
-        one_sided_stitched.validate_contract().verdict,
-        ValidationVerdict::Complete
+        assess_depth_update(Some(snapshot.last_update_id), Some(103), &one_sided_update)
+            .unwrap()
+            .verdict,
+        DepthUpdateVerdict::Applied
     );
 
     let stale = parse_depth_update_raw(
@@ -129,10 +119,10 @@ fn binance_depth_stitch_contract() {
     )
     .expect("parse stale");
     assert_eq!(
-        stitch_depth_update(snapshot.last_update_id, None, &stale),
-        DepthUpdateDecision::DropStaleOrDuplicate {
-            reason: "u <= lastUpdateId".to_owned()
-        }
+        assess_depth_update(Some(snapshot.last_update_id), None, &stale)
+            .unwrap()
+            .verdict,
+        DepthUpdateVerdict::NotAppliedStaleDuplicate
     );
 
     let gap = parse_depth_update_raw(
@@ -145,10 +135,10 @@ fn binance_depth_stitch_contract() {
     )
     .expect("parse gap");
     assert_eq!(
-        stitch_depth_update(snapshot.last_update_id, Some(103), &gap),
-        DepthUpdateDecision::SourceGapResnapshot {
-            reason: "U > local_u + 1".to_owned()
-        }
+        assess_depth_update(Some(snapshot.last_update_id), Some(103), &gap)
+            .unwrap()
+            .verdict,
+        DepthUpdateVerdict::NotAppliedConfirmedHole
     );
 
     let config = BinanceOfficialSourceConfig::default();

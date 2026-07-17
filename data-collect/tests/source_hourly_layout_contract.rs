@@ -7,18 +7,23 @@ use data_collect::binance_aggtrade::{
 use data_collect::event::{
     EventEnvelope, HostClockSyncStatus, RawEvidence, SourceKind, SourceTimestamp,
 };
-use data_collect::source_format::RtdsChainlinkBtcUsdRaw;
+use data_collect::source_format::{BinanceDepthOrdering, RtdsChainlinkBtcUsdRaw};
 use data_collect::source_hourly_layout::{
     BINANCE_AGGTRADE_CAPTURE_COMPLETE, BINANCE_AGGTRADE_CAPTURE_OVERSIZE_NOT_CAPTURED,
     BINANCE_AGGTRADE_RECORD_INVALID_INPUT, BINANCE_AGGTRADE_RECORD_TRADE,
-    BINANCE_AGGTRADE_SCHEMA_VERSION, BinanceAggTradeHourlyRow, BinanceAggTradeInvalidEvidence,
-    BinanceAggTradeOrdering, BinanceDepthSnapshotHourlyRow, BinanceDepthUpdateHourlyRow,
-    RtdsChainlinkBtcUsdHourlyRow, binance_aggtrade_schema, binance_depth_snapshot_schema,
-    binance_depth_update_schema, reject_opaque_raw_json_only, rtds_chainlink_btc_usd_schema,
+    BINANCE_AGGTRADE_SCHEMA_VERSION, BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
+    BINANCE_DEPTH_UPDATE_SCHEMA_VERSION, BINANCE_DEPTH_VERDICT_APPLIED,
+    BINANCE_DEPTH_VERDICT_NOT_APPLIED_CONFIRMED_HOLE,
+    BINANCE_DEPTH_VERDICT_NOT_APPLIED_SNAPSHOT_UNAVAILABLE,
+    BINANCE_DEPTH_VERDICT_NOT_APPLIED_STALE_DUPLICATE, BinanceAggTradeHourlyRow,
+    BinanceAggTradeInvalidEvidence, BinanceAggTradeOrdering, BinanceDepthOrderingClassification,
+    BinanceDepthSnapshotHourlyRow, BinanceDepthUpdateHourlyRow, RtdsChainlinkBtcUsdHourlyRow,
+    binance_aggtrade_schema, binance_depth_snapshot_schema, binance_depth_update_schema,
+    reject_opaque_raw_json_only, rtds_chainlink_btc_usd_schema,
 };
 use data_collect::sources::binance::{
-    BINANCE_DEPTH_SNAPSHOT_ENDPOINT, DepthUpdateDecision, apply_depth_stitch_evidence,
-    parse_aggtrade_raw, parse_depth_snapshot_raw, parse_depth_update_raw, stitch_depth_update,
+    BINANCE_DEPTH_SNAPSHOT_ENDPOINT, assess_depth_update, parse_aggtrade_raw,
+    parse_depth_snapshot_raw, parse_depth_update_raw,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -64,6 +69,19 @@ fn aggtrade_ordering(
         websocket_ingress_sequence,
         collector_admission_sequence,
         collector_admission_time_utc_ms,
+    }
+}
+
+fn depth_ordering(
+    depth_ingress_sequence: u64,
+    collector_admission_sequence: u64,
+) -> BinanceDepthOrdering {
+    BinanceDepthOrdering {
+        source_sequence_epoch_id: "depth-source-task-epoch-1".to_owned(),
+        connection_generation: 1,
+        depth_ingress_sequence,
+        collector_admission_sequence,
+        collector_admission_time_utc_ms: 1_766_789_470_000 + collector_admission_sequence as i64,
     }
 }
 
@@ -157,12 +175,33 @@ fn binance_depth_snapshot_hourly_row_keeps_snapshot_boundary_and_full_depth() {
     )
     .expect("parse official snapshot");
 
-    let row = BinanceDepthSnapshotHourlyRow::from_raw(&snapshot);
+    let row =
+        BinanceDepthSnapshotHourlyRow::from_raw_with_ordering(&snapshot, depth_ordering(2, 1))
+            .expect("valid snapshot ordering");
     assert_eq!(row.last_update_id, 100);
     assert_eq!(row.bids, r#"[["99.00","1.5"]]"#);
     assert_eq!(row.asks, r#"[["102.00","2.5"]]"#);
     assert_eq!(row.snapshot_fetch_start_utc, 1_766_789_469_100);
+    assert_eq!(
+        row.source_sequence_epoch_id.as_deref(),
+        Some("depth-source-task-epoch-1")
+    );
+    assert_eq!(row.connection_generation, Some(1));
+    assert_eq!(row.depth_ingress_sequence, Some(2));
+    assert_eq!(row.collector_admission_sequence, Some(1));
+    assert_eq!(row.schema_version, BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION);
+    assert_eq!(
+        row.ordering_classification().unwrap(),
+        BinanceDepthOrderingClassification::Exact
+    );
     assert!(row.validate().is_complete());
+
+    let mut wrong_symbol = row.clone();
+    wrong_symbol.symbol = "ETHUSDT".to_owned();
+    assert!(!wrong_symbol.validate().is_complete());
+    let mut wrong_status = row;
+    wrong_status.snapshot_status = "garbage".to_owned();
+    assert!(!wrong_status.validate().is_complete());
 }
 
 #[test]
@@ -181,16 +220,10 @@ fn binance_depth_update_hourly_row_keeps_official_fields_and_stitch_evidence() {
         raw_update,
     )
     .expect("parse depth update");
-    let decision = stitch_depth_update(100, None, &update);
-    assert_eq!(
-        decision,
-        DepthUpdateDecision::Apply {
-            local_u: 103,
-            stitch_evidence: "U <= lastUpdateId + 1 <= u".to_owned()
-        }
-    );
-    let stitched = apply_depth_stitch_evidence(update, decision).expect("stitch update");
-    let row = BinanceDepthUpdateHourlyRow::from_raw(&stitched, 100, None);
+    let assessment = assess_depth_update(Some(100), None, &update).expect("assess update");
+    let row =
+        BinanceDepthUpdateHourlyRow::from_assessment(&update, &assessment, depth_ordering(1, 2))
+            .expect("valid assessed row");
 
     assert_eq!(row.event_type, "depthUpdate");
     assert_eq!(row.event_time, 1_766_789_469_958);
@@ -199,10 +232,188 @@ fn binance_depth_update_hourly_row_keeps_official_fields_and_stitch_evidence() {
     assert_eq!(row.final_update_id, 103);
     assert_eq!(row.bids, r#"[["100.00","1.0"]]"#);
     assert_eq!(row.asks, r#"[["101.00","2.0"]]"#);
-    assert_eq!(row.snapshot_last_update_id, 100);
+    assert_eq!(row.snapshot_last_update_id, Some(100));
     assert_eq!(row.local_u_before, None);
-    assert_eq!(row.stitch_verdict, "U <= lastUpdateId + 1 <= u");
+    assert_eq!(row.stitch_verdict, BINANCE_DEPTH_VERDICT_APPLIED);
+    assert_eq!(
+        row.stitch_evidence.as_deref(),
+        Some("U <= lastUpdateId + 1 <= u")
+    );
+    assert_eq!(row.depth_ingress_sequence, Some(1));
+    assert_eq!(row.collector_admission_sequence, Some(2));
+    assert_eq!(row.schema_version, BINANCE_DEPTH_UPDATE_SCHEMA_VERSION);
     assert!(row.validate().is_complete());
+}
+
+#[test]
+fn binance_depth_update_v4_verdict_contract_is_closed_and_consistent() {
+    let raw_update = r#"{
+        "e":"depthUpdate","E":1766789469958,"s":"BTCUSDT",
+        "U":101,"u":103,"b":[["100.00","1.0"]],"a":[]
+    }"#;
+    let update = parse_depth_update_raw(
+        envelope(SourceKind::BinanceDepthUpdate, "depthUpdate", raw_update),
+        raw_update,
+    )
+    .unwrap();
+
+    let cases = [
+        (Some(100), None, BINANCE_DEPTH_VERDICT_APPLIED, false),
+        (
+            Some(103),
+            None,
+            BINANCE_DEPTH_VERDICT_NOT_APPLIED_STALE_DUPLICATE,
+            false,
+        ),
+        (
+            Some(98),
+            Some(99),
+            BINANCE_DEPTH_VERDICT_NOT_APPLIED_CONFIRMED_HOLE,
+            true,
+        ),
+        (
+            None,
+            None,
+            BINANCE_DEPTH_VERDICT_NOT_APPLIED_SNAPSHOT_UNAVAILABLE,
+            false,
+        ),
+    ];
+
+    for (snapshot, local_u, expected_verdict, expects_gap) in cases {
+        let assessment = assess_depth_update(snapshot, local_u, &update).unwrap();
+        let row = BinanceDepthUpdateHourlyRow::from_assessment(
+            &update,
+            &assessment,
+            depth_ordering(1, 2),
+        )
+        .unwrap();
+        assert_eq!(row.stitch_verdict, expected_verdict);
+        assert_eq!(row.stitch_gap_reason.is_some(), expects_gap);
+        assert!(row.validate().is_complete());
+    }
+
+    let assessment = assess_depth_update(Some(100), None, &update).unwrap();
+    let mut invalid =
+        BinanceDepthUpdateHourlyRow::from_assessment(&update, &assessment, depth_ordering(1, 2))
+            .unwrap();
+    invalid.stitch_verdict = "invented_verdict".to_owned();
+    assert!(!invalid.validate().is_complete());
+
+    invalid.stitch_verdict = BINANCE_DEPTH_VERDICT_NOT_APPLIED_CONFIRMED_HOLE.to_owned();
+    invalid.stitch_gap_reason = None;
+    assert!(!invalid.validate().is_complete());
+
+    invalid.stitch_verdict = BINANCE_DEPTH_VERDICT_NOT_APPLIED_STALE_DUPLICATE.to_owned();
+    invalid.stitch_gap_reason = Some("must_not_be_a_gap".to_owned());
+    assert!(!invalid.validate().is_complete());
+
+    invalid.stitch_gap_reason = None;
+    invalid.snapshot_last_update_id = None;
+    assert!(!invalid.validate().is_complete());
+
+    let canonical =
+        BinanceDepthUpdateHourlyRow::from_assessment(&update, &assessment, depth_ordering(2, 3))
+            .unwrap();
+    let mut forged_assessment = assessment.clone();
+    forged_assessment.stitch_evidence = Some("continuous_depth_update".to_owned());
+    assert!(
+        BinanceDepthUpdateHourlyRow::from_assessment(
+            &update,
+            &forged_assessment,
+            depth_ordering(2, 4),
+        )
+        .is_err()
+    );
+    let mut forged_hole = canonical.clone();
+    forged_hole.first_update_id = 105;
+    forged_hole.final_update_id = 106;
+    assert!(!forged_hole.validate().is_complete());
+
+    let unavailable = assess_depth_update(None, None, &update).unwrap();
+    let mut forged_unavailable =
+        BinanceDepthUpdateHourlyRow::from_assessment(&update, &unavailable, depth_ordering(3, 4))
+            .unwrap();
+    forged_unavailable.stitch_evidence = Some("forged_hole_evidence".to_owned());
+    assert!(!forged_unavailable.validate().is_complete());
+
+    for field in ["event_type", "symbol", "stream"] {
+        let mut wrong_constant = canonical.clone();
+        match field {
+            "event_type" => wrong_constant.event_type = "x".to_owned(),
+            "symbol" => wrong_constant.symbol = "ETHUSDT".to_owned(),
+            "stream" => wrong_constant.stream = "ethusdt@depth".to_owned(),
+            _ => unreachable!(),
+        }
+        assert!(!wrong_constant.validate().is_complete(), "{field}");
+    }
+}
+
+#[test]
+fn binance_depth_schema_compatibility_is_exact_or_legacy_unknown_and_rejects_partial() {
+    let raw_snapshot = r#"{
+        "lastUpdateId":100,"bids":[["99.00","1.5"]],"asks":[["102.00","2.5"]]
+    }"#;
+    let snapshot = parse_depth_snapshot_raw(
+        envelope(
+            SourceKind::BinanceDepthSnapshot,
+            "depth_snapshot",
+            raw_snapshot,
+        ),
+        raw_snapshot,
+        1_766_789_469_100,
+        1_766_789_469_200,
+        BINANCE_DEPTH_SNAPSHOT_ENDPOINT,
+    )
+    .unwrap();
+
+    let legacy = BinanceDepthSnapshotHourlyRow::from_raw(&snapshot);
+    assert_eq!(
+        legacy.ordering_classification().unwrap(),
+        BinanceDepthOrderingClassification::LegacyOrderingUnknown
+    );
+    assert_eq!(
+        legacy.ordering_classification().unwrap().as_str(),
+        "legacy_ordering_unknown"
+    );
+
+    let mut partial =
+        BinanceDepthSnapshotHourlyRow::from_raw_with_ordering(&snapshot, depth_ordering(1, 1))
+            .unwrap();
+    partial.connection_generation = None;
+    assert!(partial.ordering_classification().is_err());
+    assert!(!partial.validate().is_complete());
+
+    let mut unknown = legacy;
+    unknown.schema_version = "binance_depth_snapshot_v999".to_owned();
+    assert!(unknown.ordering_classification().is_err());
+    assert!(!unknown.validate().is_complete());
+
+    let mut invalid_ordering = depth_ordering(1, 1);
+    invalid_ordering.connection_generation = 0;
+    assert!(
+        BinanceDepthSnapshotHourlyRow::from_raw_with_ordering(&snapshot, invalid_ordering).is_err()
+    );
+
+    let raw_update = r#"{
+        "e":"depthUpdate","E":1766789469958,"s":"BTCUSDT",
+        "U":101,"u":103,"b":[["100.00","1.0"]],"a":[]
+    }"#;
+    let update = parse_depth_update_raw(
+        envelope(SourceKind::BinanceDepthUpdate, "depthUpdate", raw_update),
+        raw_update,
+    )
+    .unwrap();
+    let legacy_update = BinanceDepthUpdateHourlyRow::from_legacy_raw(
+        &update,
+        100,
+        None,
+        "U <= lastUpdateId + 1 <= u",
+    );
+    assert_eq!(
+        legacy_update.ordering_classification().unwrap(),
+        BinanceDepthOrderingClassification::LegacyOrderingUnknown
+    );
+    assert!(legacy_update.validate().is_complete());
 }
 
 #[test]
@@ -531,6 +742,11 @@ fn schemas_contain_source_specific_typed_fields() {
                 "asks",
                 "symbol",
                 "source_endpoint",
+                "source_sequence_epoch_id",
+                "connection_generation",
+                "depth_ingress_sequence",
+                "collector_admission_sequence",
+                "collector_admission_time_utc_ms",
             ],
         ),
         (
@@ -546,6 +762,12 @@ fn schemas_contain_source_specific_typed_fields() {
                 "snapshot_last_update_id",
                 "local_u_before",
                 "stitch_verdict",
+                "stitch_evidence",
+                "source_sequence_epoch_id",
+                "connection_generation",
+                "depth_ingress_sequence",
+                "collector_admission_sequence",
+                "collector_admission_time_utc_ms",
             ],
         ),
         (
@@ -610,6 +832,29 @@ fn schemas_contain_source_specific_typed_fields() {
         binance_depth_update_schema()
             .field_with_name("local_u_after")
             .is_err()
+    );
+    for schema in [
+        binance_depth_snapshot_schema(),
+        binance_depth_update_schema(),
+    ] {
+        for field in [
+            "source_sequence_epoch_id",
+            "connection_generation",
+            "depth_ingress_sequence",
+            "collector_admission_sequence",
+            "collector_admission_time_utc_ms",
+        ] {
+            assert!(
+                !schema.field_with_name(field).unwrap().is_nullable(),
+                "depth ordering coordinate {field} must be non-nullable"
+            );
+        }
+    }
+    assert!(
+        binance_depth_update_schema()
+            .field_with_name("snapshot_last_update_id")
+            .unwrap()
+            .is_nullable()
     );
     let aggtrade = binance_aggtrade_schema();
     assert!(

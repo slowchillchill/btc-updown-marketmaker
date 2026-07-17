@@ -8,12 +8,64 @@ use crate::binance_aggtrade::{
     AggTradeIngestSource, BINANCE_AGGTRADE_INVALID_INPUT_MAX_BYTES,
     BinanceAggTradeIngressCoordinate, BinanceAggTradeOutput,
 };
-use crate::event::EventEnvelope;
+use crate::event::{EventEnvelope, HostClockSyncStatus, RawEvidence, SourceKind, SourceTimestamp};
 use crate::source_format::{
-    BinanceAggTradeRaw, BinanceDepthLevel, BinanceDepthSnapshotRaw, BinanceDepthUpdateRaw,
-    RtdsChainlinkBtcUsdRaw, plausible_unix_timestamp_ms,
+    BinanceAggTradeRaw, BinanceDepthLevel, BinanceDepthOrdering, BinanceDepthSnapshotRaw,
+    BinanceDepthUpdateRaw, RtdsChainlinkBtcUsdRaw, plausible_unix_timestamp_ms,
 };
-use crate::sources::binance::DepthUpdateDecision;
+use crate::sources::binance::{
+    BINANCE_DEPTH_STREAM, DepthUpdateAssessment, DepthUpdateVerdict, assess_depth_update,
+};
+
+pub const BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION: &str = "binance_depth_snapshot_v3";
+pub const BINANCE_DEPTH_UPDATE_SCHEMA_VERSION: &str = "binance_depth_update_v4";
+pub const BINANCE_DEPTH_SNAPSHOT_LEGACY_SCHEMA_VERSION: &str = "binance_depth_snapshot_v2";
+pub const BINANCE_DEPTH_UPDATE_LEGACY_SCHEMA_VERSION: &str = "binance_depth_update_v3";
+pub const BINANCE_DEPTH_VERDICT_APPLIED: &str = "applied";
+pub const BINANCE_DEPTH_VERDICT_NOT_APPLIED_STALE_DUPLICATE: &str = "not_applied_stale_duplicate";
+pub const BINANCE_DEPTH_VERDICT_NOT_APPLIED_CONFIRMED_HOLE: &str = "not_applied_confirmed_hole";
+pub const BINANCE_DEPTH_VERDICT_NOT_APPLIED_SNAPSHOT_UNAVAILABLE: &str =
+    "not_applied_snapshot_unavailable";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BinanceDepthOrderingClassification {
+    Exact,
+    LegacyOrderingUnknown,
+}
+
+impl BinanceDepthOrderingClassification {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::LegacyOrderingUnknown => "legacy_ordering_unknown",
+        }
+    }
+}
+
+fn classify_depth_ordering(
+    schema_version: &str,
+    current_schema_version: &str,
+    legacy_schema_version: &str,
+    ordering_presence: [bool; 5],
+) -> Result<BinanceDepthOrderingClassification, String> {
+    let all_present = ordering_presence.iter().all(|present| *present);
+    let all_absent = ordering_presence.iter().all(|present| !*present);
+    if schema_version == current_schema_version {
+        return if all_present {
+            Ok(BinanceDepthOrderingClassification::Exact)
+        } else {
+            Err("partial_or_missing_depth_ordering_coordinates".to_owned())
+        };
+    }
+    if schema_version == legacy_schema_version {
+        return if all_absent {
+            Ok(BinanceDepthOrderingClassification::LegacyOrderingUnknown)
+        } else {
+            Err("legacy_depth_schema_must_not_claim_ordering_coordinates".to_owned())
+        };
+    }
+    Err(format!("unsupported_depth_schema_version:{schema_version}"))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceHourlyValidation {
@@ -48,6 +100,11 @@ pub struct BinanceDepthSnapshotHourlyRow {
     pub symbol: String,
     pub source_endpoint: String,
     pub snapshot_status: String,
+    pub source_sequence_epoch_id: Option<String>,
+    pub connection_generation: Option<u64>,
+    pub depth_ingress_sequence: Option<u64>,
+    pub collector_admission_sequence: Option<u64>,
+    pub collector_admission_time_utc_ms: Option<i64>,
     pub collector_host_id: String,
     pub collector_region: String,
     pub schema_version: String,
@@ -65,10 +122,78 @@ impl BinanceDepthSnapshotHourlyRow {
             symbol: raw.envelope.source_identifier.clone(),
             source_endpoint: raw.official_rest_endpoint.clone(),
             snapshot_status: "complete".to_owned(),
+            source_sequence_epoch_id: None,
+            connection_generation: None,
+            depth_ingress_sequence: None,
+            collector_admission_sequence: None,
+            collector_admission_time_utc_ms: None,
             collector_host_id: raw.envelope.collector_host_id.clone(),
             collector_region: raw.envelope.collector_region.clone(),
-            schema_version: "binance_depth_snapshot_v2".to_owned(),
+            schema_version: BINANCE_DEPTH_SNAPSHOT_LEGACY_SCHEMA_VERSION.to_owned(),
         }
+    }
+
+    pub fn from_raw_with_ordering(
+        raw: &BinanceDepthSnapshotRaw,
+        ordering: BinanceDepthOrdering,
+    ) -> Result<Self, String> {
+        if raw.validate_contract().verdict != crate::ValidationVerdict::Complete {
+            return Err("invalid_binance_depth_snapshot_contract".to_owned());
+        }
+        ordering.validate_contract()?;
+        let timestamp_received = recv_time(&raw.envelope);
+        let row = Self {
+            timestamp_received,
+            snapshot_fetch_start_utc: raw.snapshot_fetch_start_utc_ms,
+            last_update_id: raw.last_update_id,
+            bids: depth_levels_to_json(&raw.bids),
+            asks: depth_levels_to_json(&raw.asks),
+            symbol: raw.envelope.source_identifier.clone(),
+            source_endpoint: raw.official_rest_endpoint.clone(),
+            snapshot_status: "complete".to_owned(),
+            source_sequence_epoch_id: Some(ordering.source_sequence_epoch_id),
+            connection_generation: Some(ordering.connection_generation),
+            depth_ingress_sequence: Some(ordering.depth_ingress_sequence),
+            collector_admission_sequence: Some(ordering.collector_admission_sequence),
+            collector_admission_time_utc_ms: Some(ordering.collector_admission_time_utc_ms),
+            collector_host_id: raw.envelope.collector_host_id.clone(),
+            collector_region: raw.envelope.collector_region.clone(),
+            schema_version: BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION.to_owned(),
+        };
+        let validation = row.validate();
+        if validation.is_complete() {
+            Ok(row)
+        } else {
+            Err(format!(
+                "binance_depth_snapshot_v3_validation_failed:{}",
+                validation.missing_fields.join(",")
+            ))
+        }
+    }
+
+    pub fn ordering_classification(&self) -> Result<BinanceDepthOrderingClassification, String> {
+        classify_depth_ordering(
+            &self.schema_version,
+            BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
+            BINANCE_DEPTH_SNAPSHOT_LEGACY_SCHEMA_VERSION,
+            [
+                self.source_sequence_epoch_id.is_some(),
+                self.connection_generation.is_some(),
+                self.depth_ingress_sequence.is_some(),
+                self.collector_admission_sequence.is_some(),
+                self.collector_admission_time_utc_ms.is_some(),
+            ],
+        )
+    }
+
+    fn exact_ordering(&self) -> Option<BinanceDepthOrdering> {
+        Some(BinanceDepthOrdering {
+            source_sequence_epoch_id: self.source_sequence_epoch_id.clone()?,
+            connection_generation: self.connection_generation?,
+            depth_ingress_sequence: self.depth_ingress_sequence?,
+            collector_admission_sequence: self.collector_admission_sequence?,
+            collector_admission_time_utc_ms: self.collector_admission_time_utc_ms?,
+        })
     }
 
     pub fn validate(&self) -> SourceHourlyValidation {
@@ -89,6 +214,30 @@ impl BinanceDepthSnapshotHourlyRow {
         report.require_non_empty("symbol", &self.symbol);
         report.require_non_empty("source_endpoint", &self.source_endpoint);
         report.require_non_empty("snapshot_status", &self.snapshot_status);
+        if self.symbol != "BTCUSDT" {
+            report.missing_fields.push("symbol_valid".to_owned());
+        }
+        if self.snapshot_status != "complete" {
+            report
+                .missing_fields
+                .push("snapshot_status_valid".to_owned());
+        }
+        match self.ordering_classification() {
+            Ok(BinanceDepthOrderingClassification::Exact) => {
+                if self
+                    .exact_ordering()
+                    .is_none_or(|ordering| ordering.validate_contract().is_err())
+                {
+                    report
+                        .missing_fields
+                        .push("depth_ordering_coordinates_valid".to_owned());
+                }
+            }
+            Ok(BinanceDepthOrderingClassification::LegacyOrderingUnknown) => {}
+            Err(_) => report
+                .missing_fields
+                .push("depth_ordering_classification".to_owned()),
+        }
         report.require_non_empty("collector_host_id", &self.collector_host_id);
         report.require_non_empty("collector_region", &self.collector_region);
         report.require_non_empty("schema_version", &self.schema_version);
@@ -107,10 +256,16 @@ pub struct BinanceDepthUpdateHourlyRow {
     pub bids: String,
     pub asks: String,
     pub stream: String,
-    pub snapshot_last_update_id: u64,
+    pub snapshot_last_update_id: Option<u64>,
     pub local_u_before: Option<u64>,
     pub stitch_verdict: String,
+    pub stitch_evidence: Option<String>,
     pub stitch_gap_reason: Option<String>,
+    pub source_sequence_epoch_id: Option<String>,
+    pub connection_generation: Option<u64>,
+    pub depth_ingress_sequence: Option<u64>,
+    pub collector_admission_sequence: Option<u64>,
+    pub collector_admission_time_utc_ms: Option<i64>,
     pub collector_host_id: String,
     pub collector_region: String,
     pub source_endpoint: String,
@@ -118,10 +273,11 @@ pub struct BinanceDepthUpdateHourlyRow {
 }
 
 impl BinanceDepthUpdateHourlyRow {
-    pub fn from_raw(
+    pub fn from_legacy_raw(
         raw: &BinanceDepthUpdateRaw,
         snapshot_last_update_id: u64,
         local_u_before: Option<u64>,
+        stitch_verdict: impl Into<String>,
     ) -> Self {
         let timestamp_received = recv_time(&raw.envelope);
         Self {
@@ -134,15 +290,104 @@ impl BinanceDepthUpdateHourlyRow {
             bids: depth_levels_to_json(&raw.bids),
             asks: depth_levels_to_json(&raw.asks),
             stream: raw.stream_name.clone(),
-            snapshot_last_update_id,
+            snapshot_last_update_id: Some(snapshot_last_update_id),
             local_u_before,
-            stitch_verdict: raw.stitch_evidence.clone().unwrap_or_default(),
+            stitch_verdict: stitch_verdict.into(),
+            stitch_evidence: None,
             stitch_gap_reason: None,
+            source_sequence_epoch_id: None,
+            connection_generation: None,
+            depth_ingress_sequence: None,
+            collector_admission_sequence: None,
+            collector_admission_time_utc_ms: None,
             collector_host_id: raw.envelope.collector_host_id.clone(),
             collector_region: raw.envelope.collector_region.clone(),
             source_endpoint: raw.envelope.source_endpoint.clone(),
-            schema_version: "binance_depth_update_v3".to_owned(),
+            schema_version: BINANCE_DEPTH_UPDATE_LEGACY_SCHEMA_VERSION.to_owned(),
         }
+    }
+
+    pub fn from_assessment(
+        raw: &BinanceDepthUpdateRaw,
+        assessment: &DepthUpdateAssessment,
+        ordering: BinanceDepthOrdering,
+    ) -> Result<Self, String> {
+        if raw.validate_contract().verdict != crate::ValidationVerdict::Complete {
+            return Err("invalid_binance_depth_update_contract".to_owned());
+        }
+        validate_canonical_depth_assessment(raw, assessment)?;
+        ordering.validate_contract()?;
+        let stitch_verdict = match assessment.verdict {
+            DepthUpdateVerdict::Applied => BINANCE_DEPTH_VERDICT_APPLIED,
+            DepthUpdateVerdict::NotAppliedStaleDuplicate => {
+                BINANCE_DEPTH_VERDICT_NOT_APPLIED_STALE_DUPLICATE
+            }
+            DepthUpdateVerdict::NotAppliedConfirmedHole => {
+                BINANCE_DEPTH_VERDICT_NOT_APPLIED_CONFIRMED_HOLE
+            }
+            DepthUpdateVerdict::NotAppliedSnapshotUnavailable => {
+                BINANCE_DEPTH_VERDICT_NOT_APPLIED_SNAPSHOT_UNAVAILABLE
+            }
+        };
+        let row = Self {
+            timestamp_received: recv_time(&raw.envelope),
+            event_type: raw.event_type.clone(),
+            event_time: raw.event_time_ms,
+            symbol: raw.symbol.clone(),
+            first_update_id: raw.first_update_id,
+            final_update_id: raw.final_update_id,
+            bids: depth_levels_to_json(&raw.bids),
+            asks: depth_levels_to_json(&raw.asks),
+            stream: raw.stream_name.clone(),
+            snapshot_last_update_id: assessment.snapshot_last_update_id,
+            local_u_before: assessment.local_u_before,
+            stitch_verdict: stitch_verdict.to_owned(),
+            stitch_evidence: assessment.stitch_evidence.clone(),
+            stitch_gap_reason: assessment.gap_reason.clone(),
+            source_sequence_epoch_id: Some(ordering.source_sequence_epoch_id),
+            connection_generation: Some(ordering.connection_generation),
+            depth_ingress_sequence: Some(ordering.depth_ingress_sequence),
+            collector_admission_sequence: Some(ordering.collector_admission_sequence),
+            collector_admission_time_utc_ms: Some(ordering.collector_admission_time_utc_ms),
+            collector_host_id: raw.envelope.collector_host_id.clone(),
+            collector_region: raw.envelope.collector_region.clone(),
+            source_endpoint: raw.envelope.source_endpoint.clone(),
+            schema_version: BINANCE_DEPTH_UPDATE_SCHEMA_VERSION.to_owned(),
+        };
+        let validation = row.validate();
+        if validation.is_complete() {
+            Ok(row)
+        } else {
+            Err(format!(
+                "binance_depth_update_v4_validation_failed:{}",
+                validation.missing_fields.join(",")
+            ))
+        }
+    }
+
+    pub fn ordering_classification(&self) -> Result<BinanceDepthOrderingClassification, String> {
+        classify_depth_ordering(
+            &self.schema_version,
+            BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
+            BINANCE_DEPTH_UPDATE_LEGACY_SCHEMA_VERSION,
+            [
+                self.source_sequence_epoch_id.is_some(),
+                self.connection_generation.is_some(),
+                self.depth_ingress_sequence.is_some(),
+                self.collector_admission_sequence.is_some(),
+                self.collector_admission_time_utc_ms.is_some(),
+            ],
+        )
+    }
+
+    fn exact_ordering(&self) -> Option<BinanceDepthOrdering> {
+        Some(BinanceDepthOrdering {
+            source_sequence_epoch_id: self.source_sequence_epoch_id.clone()?,
+            connection_generation: self.connection_generation?,
+            depth_ingress_sequence: self.depth_ingress_sequence?,
+            collector_admission_sequence: self.collector_admission_sequence?,
+            collector_admission_time_utc_ms: self.collector_admission_time_utc_ms?,
+        })
     }
 
     pub fn validate(&self) -> SourceHourlyValidation {
@@ -165,18 +410,188 @@ impl BinanceDepthUpdateHourlyRow {
             report.missing_fields.push("bids_or_asks".to_owned());
         }
         report.require_non_empty("stream", &self.stream);
-        if self.snapshot_last_update_id == 0 {
-            report
-                .missing_fields
-                .push("snapshot_last_update_id".to_owned());
+        if self.event_type != "depthUpdate" {
+            report.missing_fields.push("event_type_valid".to_owned());
         }
-        report.require_non_empty("stitch_verdict", &self.stitch_verdict);
+        if self.symbol != "BTCUSDT" {
+            report.missing_fields.push("symbol_valid".to_owned());
+        }
+        if self.stream != BINANCE_DEPTH_STREAM {
+            report.missing_fields.push("stream_valid".to_owned());
+        }
+        match self.ordering_classification() {
+            Ok(BinanceDepthOrderingClassification::Exact) => {
+                if self
+                    .exact_ordering()
+                    .is_none_or(|ordering| ordering.validate_contract().is_err())
+                {
+                    report
+                        .missing_fields
+                        .push("depth_ordering_coordinates_valid".to_owned());
+                }
+                self.validate_current_verdict(&mut report);
+            }
+            Ok(BinanceDepthOrderingClassification::LegacyOrderingUnknown) => {
+                if self.snapshot_last_update_id.is_none_or(|value| value == 0) {
+                    report
+                        .missing_fields
+                        .push("snapshot_last_update_id".to_owned());
+                }
+                report.require_non_empty("stitch_verdict", &self.stitch_verdict);
+            }
+            Err(_) => report
+                .missing_fields
+                .push("depth_ordering_classification".to_owned()),
+        }
         report.require_non_empty("collector_host_id", &self.collector_host_id);
         report.require_non_empty("collector_region", &self.collector_region);
         report.require_non_empty("source_endpoint", &self.source_endpoint);
         report.require_non_empty("schema_version", &self.schema_version);
         report
     }
+
+    fn validate_current_verdict(&self, report: &mut SourceHourlyValidation) {
+        let verdict = match self.stitch_verdict.as_str() {
+            BINANCE_DEPTH_VERDICT_APPLIED => DepthUpdateVerdict::Applied,
+            BINANCE_DEPTH_VERDICT_NOT_APPLIED_STALE_DUPLICATE => {
+                DepthUpdateVerdict::NotAppliedStaleDuplicate
+            }
+            BINANCE_DEPTH_VERDICT_NOT_APPLIED_CONFIRMED_HOLE => {
+                DepthUpdateVerdict::NotAppliedConfirmedHole
+            }
+            BINANCE_DEPTH_VERDICT_NOT_APPLIED_SNAPSHOT_UNAVAILABLE => {
+                DepthUpdateVerdict::NotAppliedSnapshotUnavailable
+            }
+            _ => {
+                report
+                    .missing_fields
+                    .push("stitch_verdict_valid".to_owned());
+                return;
+            }
+        };
+        let snapshot_is_present = self.snapshot_last_update_id.is_some_and(|value| value > 0);
+        if self.stitch_verdict == BINANCE_DEPTH_VERDICT_NOT_APPLIED_SNAPSHOT_UNAVAILABLE {
+            if self.snapshot_last_update_id.is_some() {
+                report
+                    .missing_fields
+                    .push("snapshot_unavailable_snapshot_last_update_id_null".to_owned());
+            }
+            if self.local_u_before.is_some() {
+                report
+                    .missing_fields
+                    .push("snapshot_unavailable_local_u_before_null".to_owned());
+            }
+            if self.stitch_gap_reason.is_some() {
+                report
+                    .missing_fields
+                    .push("snapshot_unavailable_gap_absent".to_owned());
+            }
+        } else {
+            if !snapshot_is_present {
+                report
+                    .missing_fields
+                    .push("snapshot_last_update_id".to_owned());
+            }
+            if self.stitch_verdict == BINANCE_DEPTH_VERDICT_NOT_APPLIED_CONFIRMED_HOLE {
+                if self
+                    .stitch_gap_reason
+                    .as_deref()
+                    .is_none_or(|value| value.trim().is_empty())
+                {
+                    report
+                        .missing_fields
+                        .push("confirmed_hole_gap_reason".to_owned());
+                }
+            } else if self.stitch_gap_reason.is_some() {
+                report
+                    .missing_fields
+                    .push("non_gap_reason_absent".to_owned());
+            }
+            if self
+                .stitch_evidence
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                report.missing_fields.push("stitch_evidence".to_owned());
+            }
+        }
+
+        let claimed = DepthUpdateAssessment {
+            snapshot_last_update_id: self.snapshot_last_update_id,
+            local_u_before: self.local_u_before,
+            verdict,
+            local_u_after: (verdict == DepthUpdateVerdict::Applied).then_some(self.final_update_id),
+            stitch_evidence: self.stitch_evidence.clone(),
+            gap_reason: self.stitch_gap_reason.clone(),
+        };
+        if self
+            .as_depth_update_raw()
+            .and_then(|raw| validate_canonical_depth_assessment(&raw, &claimed))
+            .is_err()
+        {
+            report
+                .missing_fields
+                .push("stitch_assessment_canonical".to_owned());
+        }
+    }
+
+    fn as_depth_update_raw(&self) -> Result<BinanceDepthUpdateRaw, String> {
+        let parse_levels = |value: &str| {
+            serde_json::from_str::<Vec<[String; 2]>>(value)
+                .map(|levels| {
+                    levels
+                        .into_iter()
+                        .map(|[price, quantity]| BinanceDepthLevel { price, quantity })
+                        .collect::<Vec<_>>()
+                })
+                .map_err(|error| format!("invalid_depth_levels_json:{error}"))
+        };
+        Ok(BinanceDepthUpdateRaw {
+            envelope: EventEnvelope {
+                source_kind: SourceKind::BinanceDepthUpdate,
+                source_event_type: self.event_type.clone(),
+                source_identifier: self.symbol.clone(),
+                source_timestamp: SourceTimestamp::Timestamp {
+                    value: self.event_time.to_string(),
+                },
+                recv_time_utc_ms: Some(self.timestamp_received),
+                collector_host_id: self.collector_host_id.clone(),
+                collector_region: self.collector_region.clone(),
+                source_endpoint: self.source_endpoint.clone(),
+                host_clock_sync_status: HostClockSyncStatus::Unavailable {
+                    reason: "typed_hourly_row_validation".to_owned(),
+                },
+                raw_evidence: RawEvidence::Json("{}".to_owned()),
+                parquet_raw_layout_version: 1,
+                parquet_raw_source_kind: SourceKind::BinanceDepthUpdate,
+            },
+            event_type: self.event_type.clone(),
+            event_time_ms: self.event_time,
+            symbol: self.symbol.clone(),
+            stream_name: self.stream.clone(),
+            first_update_id: self.first_update_id,
+            final_update_id: self.final_update_id,
+            bids: parse_levels(&self.bids)?,
+            asks: parse_levels(&self.asks)?,
+            combined_stream: None,
+        })
+    }
+}
+
+fn validate_canonical_depth_assessment(
+    raw: &BinanceDepthUpdateRaw,
+    assessment: &DepthUpdateAssessment,
+) -> Result<(), String> {
+    assessment.validate_contract()?;
+    let canonical = assess_depth_update(
+        assessment.snapshot_last_update_id,
+        assessment.local_u_before,
+        raw,
+    )?;
+    if canonical != *assessment {
+        return Err("depth_update_assessment_not_canonical".to_owned());
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -812,7 +1227,10 @@ pub struct BinanceDepthStitchReceipt {
 }
 
 impl BinanceDepthStitchReceipt {
-    pub fn from_decisions(snapshot_last_update_id: u64, decisions: &[DepthUpdateDecision]) -> Self {
+    pub fn from_assessments(
+        snapshot_last_update_id: u64,
+        assessments: &[DepthUpdateAssessment],
+    ) -> Result<Self, String> {
         let mut receipt = Self {
             snapshot_last_update_id,
             stale_update_rows: 0,
@@ -825,39 +1243,58 @@ impl BinanceDepthStitchReceipt {
             gap_reasons: Vec::new(),
         };
 
-        for decision in decisions {
-            match decision {
-                DepthUpdateDecision::DropStaleOrDuplicate { .. } => {
-                    receipt.stale_update_rows = receipt.stale_update_rows.saturating_add(1);
+        for assessment in assessments {
+            assessment.validate_contract()?;
+            match assessment.verdict {
+                DepthUpdateVerdict::NotAppliedStaleDuplicate => {
+                    receipt.stale_update_rows = receipt
+                        .stale_update_rows
+                        .checked_add(1)
+                        .ok_or_else(|| "depth_stale_update_rows_overflow".to_owned())?;
                 }
-                DepthUpdateDecision::Apply {
-                    local_u,
-                    stitch_evidence,
-                } => {
-                    receipt.stitch_applied_rows = receipt.stitch_applied_rows.saturating_add(1);
+                DepthUpdateVerdict::Applied => {
+                    let local_u = assessment
+                        .local_u_after
+                        .ok_or_else(|| "applied_depth_update_missing_local_u_after".to_owned())?;
+                    receipt.stitch_applied_rows = receipt
+                        .stitch_applied_rows
+                        .checked_add(1)
+                        .ok_or_else(|| "depth_stitch_applied_rows_overflow".to_owned())?;
                     receipt.local_u_min = Some(
                         receipt
                             .local_u_min
-                            .map_or(*local_u, |current| current.min(*local_u)),
+                            .map_or(local_u, |current| current.min(local_u)),
                     );
                     receipt.local_u_max = Some(
                         receipt
                             .local_u_max
-                            .map_or(*local_u, |current| current.max(*local_u)),
+                            .map_or(local_u, |current| current.max(local_u)),
                     );
-                    if stitch_evidence == "U <= lastUpdateId + 1 <= u" {
+                    if assessment.stitch_evidence.as_deref() == Some("U <= lastUpdateId + 1 <= u") {
                         receipt.first_update_bridged_snapshot = true;
                     }
                 }
-                DepthUpdateDecision::SourceGapResnapshot { reason } => {
-                    receipt.gap_rows = receipt.gap_rows.saturating_add(1);
-                    receipt.resnapshot_count = receipt.resnapshot_count.saturating_add(1);
-                    receipt.gap_reasons.push(reason.clone());
+                DepthUpdateVerdict::NotAppliedConfirmedHole => {
+                    receipt.gap_rows = receipt
+                        .gap_rows
+                        .checked_add(1)
+                        .ok_or_else(|| "depth_gap_rows_overflow".to_owned())?;
+                    receipt.resnapshot_count = receipt
+                        .resnapshot_count
+                        .checked_add(1)
+                        .ok_or_else(|| "depth_resnapshot_count_overflow".to_owned())?;
+                    receipt.gap_reasons.push(
+                        assessment
+                            .gap_reason
+                            .clone()
+                            .ok_or_else(|| "confirmed_hole_missing_gap_reason".to_owned())?,
+                    );
                 }
+                DepthUpdateVerdict::NotAppliedSnapshotUnavailable => {}
             }
         }
 
-        receipt
+        Ok(receipt)
     }
 
     pub fn validate(&self) -> SourceHourlyValidation {
@@ -902,6 +1339,11 @@ pub fn binance_depth_snapshot_schema() -> Arc<Schema> {
         Field::new("symbol", DataType::Utf8, false),
         Field::new("source_endpoint", DataType::Utf8, false),
         Field::new("snapshot_status", DataType::Utf8, false),
+        Field::new("source_sequence_epoch_id", DataType::Utf8, false),
+        Field::new("connection_generation", DataType::UInt64, false),
+        Field::new("depth_ingress_sequence", DataType::UInt64, false),
+        Field::new("collector_admission_sequence", DataType::UInt64, false),
+        timestamp_field("collector_admission_time_utc_ms", false),
         Field::new("collector_host_id", DataType::Utf8, false),
         Field::new("collector_region", DataType::Utf8, false),
         Field::new("schema_version", DataType::Utf8, false),
@@ -919,10 +1361,16 @@ pub fn binance_depth_update_schema() -> Arc<Schema> {
         Field::new("bids", DataType::Utf8, false),
         Field::new("asks", DataType::Utf8, false),
         Field::new("stream", DataType::Utf8, false),
-        Field::new("snapshot_last_update_id", DataType::UInt64, false),
+        Field::new("snapshot_last_update_id", DataType::UInt64, true),
         Field::new("local_u_before", DataType::UInt64, true),
         Field::new("stitch_verdict", DataType::Utf8, false),
+        Field::new("stitch_evidence", DataType::Utf8, true),
         Field::new("stitch_gap_reason", DataType::Utf8, true),
+        Field::new("source_sequence_epoch_id", DataType::Utf8, false),
+        Field::new("connection_generation", DataType::UInt64, false),
+        Field::new("depth_ingress_sequence", DataType::UInt64, false),
+        Field::new("collector_admission_sequence", DataType::UInt64, false),
+        timestamp_field("collector_admission_time_utc_ms", false),
         Field::new("collector_host_id", DataType::Utf8, false),
         Field::new("collector_region", DataType::Utf8, false),
         Field::new("source_endpoint", DataType::Utf8, false),

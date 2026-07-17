@@ -21,9 +21,11 @@ use crate::polymarket_market_metadata_layout::{
 };
 use crate::polymarket_orderbook_layout::{PolymarketOrderbookRow, polymarket_orderbook_schema};
 use crate::source_hourly_layout::{
-    BinanceAggTradeHourlyRow, BinanceDepthSnapshotHourlyRow, BinanceDepthUpdateHourlyRow,
-    RtdsChainlinkBtcUsdHourlyRow, binance_aggtrade_schema, binance_depth_snapshot_schema,
-    binance_depth_update_schema, rtds_chainlink_btc_usd_schema,
+    BINANCE_DEPTH_SNAPSHOT_LEGACY_SCHEMA_VERSION, BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
+    BINANCE_DEPTH_UPDATE_LEGACY_SCHEMA_VERSION, BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
+    BinanceAggTradeHourlyRow, BinanceDepthOrderingClassification, BinanceDepthSnapshotHourlyRow,
+    BinanceDepthUpdateHourlyRow, RtdsChainlinkBtcUsdHourlyRow, binance_aggtrade_schema,
+    binance_depth_snapshot_schema, binance_depth_update_schema, rtds_chainlink_btc_usd_schema,
 };
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -280,6 +282,7 @@ pub struct TypedParquetSegmentWriter {
     row_group_rows: u64,
     row_group_logical_bytes: u64,
     last_binance_aggtrade_admission_sequence: Option<u64>,
+    last_binance_depth_admission_sequence: Option<u64>,
 }
 
 impl TypedParquetSegmentWriter {
@@ -316,8 +319,24 @@ impl TypedParquetSegmentWriter {
         let schema = match source_kind {
             "polymarket_market" => polymarket_orderbook_schema(),
             "polymarket_market_metadata" => polymarket_market_metadata_schema(),
-            "binance_depth_snapshot" => binance_depth_snapshot_schema(),
-            "binance_depth_update" => binance_depth_update_schema(),
+            "binance_depth_snapshot" => {
+                validate_current_depth_schema_version(
+                    source_kind,
+                    schema_version,
+                    BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
+                    BINANCE_DEPTH_SNAPSHOT_LEGACY_SCHEMA_VERSION,
+                )?;
+                binance_depth_snapshot_schema()
+            }
+            "binance_depth_update" => {
+                validate_current_depth_schema_version(
+                    source_kind,
+                    schema_version,
+                    BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
+                    BINANCE_DEPTH_UPDATE_LEGACY_SCHEMA_VERSION,
+                )?;
+                binance_depth_update_schema()
+            }
             "binance_aggtrade" => binance_aggtrade_schema(),
             "polymarket_rtds_chainlink_btc_usd" => rtds_chainlink_btc_usd_schema(),
             other => {
@@ -331,7 +350,7 @@ impl TypedParquetSegmentWriter {
         Self::create_with_schema(root, stem, schema_version, source_kind, schema, 3)
     }
 
-    pub fn create_with_schema(
+    fn create_with_schema(
         root: &Path,
         stem: &str,
         schema_version: &str,
@@ -339,6 +358,7 @@ impl TypedParquetSegmentWriter {
         schema: Arc<Schema>,
         zstd_level: i32,
     ) -> Result<Self> {
+        validate_typed_writer_schema(source_kind, schema_version, schema.as_ref())?;
         validate_segment_stem(stem)?;
         fs::create_dir_all(root)?;
 
@@ -369,6 +389,7 @@ impl TypedParquetSegmentWriter {
             row_group_rows: 0,
             row_group_logical_bytes: 0,
             last_binance_aggtrade_admission_sequence: None,
+            last_binance_depth_admission_sequence: None,
         })
     }
 
@@ -425,8 +446,11 @@ impl TypedParquetSegmentWriter {
         if rows.is_empty() {
             return Ok(());
         }
+        let last_sequence = self.validate_binance_depth_snapshot_admission_order(rows)?;
         let batch = binance_depth_snapshot_rows_to_batch(Arc::clone(&self.schema), rows)?;
-        self.write_batch(&batch)
+        self.write_batch(&batch)?;
+        self.last_binance_depth_admission_sequence = Some(last_sequence);
+        Ok(())
     }
 
     pub(crate) fn write_binance_depth_snapshot_rows_with_logical_bytes(
@@ -437,8 +461,11 @@ impl TypedParquetSegmentWriter {
         if rows.is_empty() {
             return Ok(());
         }
+        let last_sequence = self.validate_binance_depth_snapshot_admission_order(rows)?;
         let batch = binance_depth_snapshot_rows_to_batch(Arc::clone(&self.schema), rows)?;
-        self.write_batch_with_logical_bytes(&batch, logical_bytes)
+        self.write_batch_with_logical_bytes(&batch, logical_bytes)?;
+        self.last_binance_depth_admission_sequence = Some(last_sequence);
+        Ok(())
     }
 
     pub fn write_binance_depth_update_rows(
@@ -448,8 +475,11 @@ impl TypedParquetSegmentWriter {
         if rows.is_empty() {
             return Ok(());
         }
+        let last_sequence = self.validate_binance_depth_update_admission_order(rows)?;
         let batch = binance_depth_update_rows_to_batch(Arc::clone(&self.schema), rows)?;
-        self.write_batch(&batch)
+        self.write_batch(&batch)?;
+        self.last_binance_depth_admission_sequence = Some(last_sequence);
+        Ok(())
     }
 
     pub(crate) fn write_binance_depth_update_rows_with_logical_bytes(
@@ -460,8 +490,95 @@ impl TypedParquetSegmentWriter {
         if rows.is_empty() {
             return Ok(());
         }
+        let last_sequence = self.validate_binance_depth_update_admission_order(rows)?;
         let batch = binance_depth_update_rows_to_batch(Arc::clone(&self.schema), rows)?;
-        self.write_batch_with_logical_bytes(&batch, logical_bytes)
+        self.write_batch_with_logical_bytes(&batch, logical_bytes)?;
+        self.last_binance_depth_admission_sequence = Some(last_sequence);
+        Ok(())
+    }
+
+    fn validate_binance_depth_snapshot_admission_order(
+        &self,
+        rows: &[BinanceDepthSnapshotHourlyRow],
+    ) -> Result<u64> {
+        let mut previous = self.last_binance_depth_admission_sequence;
+        for row in rows {
+            let validation = row.validate();
+            if !validation.is_complete() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "binance depth snapshot row validation failed:{}",
+                        validation.missing_fields.join(",")
+                    ),
+                )
+                .into());
+            }
+            let classification = row.ordering_classification().map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("binance depth snapshot ordering classification failed:{error}"),
+                )
+            })?;
+            if classification != BinanceDepthOrderingClassification::Exact {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "binance depth snapshot writer requires exact ordering",
+                )
+                .into());
+            }
+            let sequence = row.collector_admission_sequence.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "binance depth snapshot collector admission sequence missing",
+                )
+            })?;
+            validate_depth_admission_sequence(previous, sequence)?;
+            previous = Some(sequence);
+        }
+        previous.ok_or_else(|| io::Error::other("missing depth snapshot admission sequence").into())
+    }
+
+    fn validate_binance_depth_update_admission_order(
+        &self,
+        rows: &[BinanceDepthUpdateHourlyRow],
+    ) -> Result<u64> {
+        let mut previous = self.last_binance_depth_admission_sequence;
+        for row in rows {
+            let validation = row.validate();
+            if !validation.is_complete() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "binance depth update row validation failed:{}",
+                        validation.missing_fields.join(",")
+                    ),
+                )
+                .into());
+            }
+            let classification = row.ordering_classification().map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("binance depth update ordering classification failed:{error}"),
+                )
+            })?;
+            if classification != BinanceDepthOrderingClassification::Exact {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "binance depth update writer requires exact ordering",
+                )
+                .into());
+            }
+            let sequence = row.collector_admission_sequence.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "binance depth update collector admission sequence missing",
+                )
+            })?;
+            validate_depth_admission_sequence(previous, sequence)?;
+            previous = Some(sequence);
+        }
+        previous.ok_or_else(|| io::Error::other("missing depth update admission sequence").into())
     }
 
     pub fn write_binance_aggtrade_rows(&mut self, rows: &[BinanceAggTradeHourlyRow]) -> Result<()> {
@@ -694,7 +811,10 @@ fn typed_writer_properties(
     source_kind: &str,
     zstd_level: i32,
 ) -> Result<WriterProperties> {
-    let sort_order = if source_kind == "binance_aggtrade" {
+    let sort_order = if matches!(
+        source_kind,
+        "binance_aggtrade" | "binance_depth_snapshot" | "binance_depth_update"
+    ) {
         "collector_admission_order"
     } else {
         "receive_order"
@@ -717,6 +837,89 @@ fn typed_writer_properties(
             KeyValue::new("sort_order".to_owned(), sort_order.to_owned()),
         ]))
         .build())
+}
+
+fn validate_current_depth_schema_version(
+    source_kind: &str,
+    schema_version: &str,
+    current_schema_version: &str,
+    legacy_schema_version: &str,
+) -> Result<()> {
+    if schema_version == current_schema_version {
+        return Ok(());
+    }
+    let reason = if schema_version == legacy_schema_version {
+        format!(
+            "read-only legacy depth schema cannot be opened for writing:source_kind={source_kind}:schema_version={schema_version}"
+        )
+    } else {
+        format!(
+            "unsupported depth schema version for writer:source_kind={source_kind}:schema_version={schema_version}:expected={current_schema_version}"
+        )
+    };
+    Err(io::Error::new(io::ErrorKind::InvalidInput, reason).into())
+}
+
+fn validate_typed_writer_schema(
+    source_kind: &str,
+    schema_version: &str,
+    schema: &Schema,
+) -> Result<()> {
+    let expected = match source_kind {
+        "binance_depth_snapshot" => {
+            validate_current_depth_schema_version(
+                source_kind,
+                schema_version,
+                BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
+                BINANCE_DEPTH_SNAPSHOT_LEGACY_SCHEMA_VERSION,
+            )?;
+            Some(binance_depth_snapshot_schema())
+        }
+        "binance_depth_update" => {
+            validate_current_depth_schema_version(
+                source_kind,
+                schema_version,
+                BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
+                BINANCE_DEPTH_UPDATE_LEGACY_SCHEMA_VERSION,
+            )?;
+            Some(binance_depth_update_schema())
+        }
+        _ => None,
+    };
+    if expected
+        .as_deref()
+        .is_some_and(|expected| expected != schema)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "typed depth writer schema mismatch:source_kind={source_kind}:schema_version={schema_version}"
+            ),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn validate_depth_admission_sequence(previous: Option<u64>, sequence: u64) -> Result<()> {
+    if sequence == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "binance depth collector admission sequence must be positive",
+        )
+        .into());
+    }
+    if previous.is_some_and(|previous| sequence <= previous) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "binance depth collector admission sequence is not strictly increasing:previous={}:actual={sequence}",
+                previous.unwrap_or_default()
+            ),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 fn polymarket_orderbook_rows_to_batch(
@@ -823,6 +1026,14 @@ fn binance_depth_snapshot_rows_to_batch(
         string_values(rows.iter().map(|row| row.symbol.as_str())),
         string_values(rows.iter().map(|row| row.source_endpoint.as_str())),
         string_values(rows.iter().map(|row| row.snapshot_status.as_str())),
+        optional_strings(
+            rows.iter()
+                .map(|row| row.source_sequence_epoch_id.as_deref()),
+        ),
+        optional_uint64_values(rows.iter().map(|row| row.connection_generation)),
+        optional_uint64_values(rows.iter().map(|row| row.depth_ingress_sequence)),
+        optional_uint64_values(rows.iter().map(|row| row.collector_admission_sequence)),
+        optional_timestamp_values(rows.iter().map(|row| row.collector_admission_time_utc_ms)),
         string_values(rows.iter().map(|row| row.collector_host_id.as_str())),
         string_values(rows.iter().map(|row| row.collector_region.as_str())),
         string_values(rows.iter().map(|row| row.schema_version.as_str())),
@@ -844,10 +1055,19 @@ fn binance_depth_update_rows_to_batch(
         string_values(rows.iter().map(|row| row.bids.as_str())),
         string_values(rows.iter().map(|row| row.asks.as_str())),
         string_values(rows.iter().map(|row| row.stream.as_str())),
-        uint64_values(rows.iter().map(|row| row.snapshot_last_update_id)),
+        optional_uint64_values(rows.iter().map(|row| row.snapshot_last_update_id)),
         optional_uint64_values(rows.iter().map(|row| row.local_u_before)),
         string_values(rows.iter().map(|row| row.stitch_verdict.as_str())),
+        optional_strings(rows.iter().map(|row| row.stitch_evidence.as_deref())),
         optional_strings(rows.iter().map(|row| row.stitch_gap_reason.as_deref())),
+        optional_strings(
+            rows.iter()
+                .map(|row| row.source_sequence_epoch_id.as_deref()),
+        ),
+        optional_uint64_values(rows.iter().map(|row| row.connection_generation)),
+        optional_uint64_values(rows.iter().map(|row| row.depth_ingress_sequence)),
+        optional_uint64_values(rows.iter().map(|row| row.collector_admission_sequence)),
+        optional_timestamp_values(rows.iter().map(|row| row.collector_admission_time_utc_ms)),
         string_values(rows.iter().map(|row| row.collector_host_id.as_str())),
         string_values(rows.iter().map(|row| row.collector_region.as_str())),
         string_values(rows.iter().map(|row| row.source_endpoint.as_str())),
@@ -1125,4 +1345,35 @@ fn estimated_event_bytes(event: &RawEvent) -> u64 {
     .sum::<u64>()
         + std::mem::size_of::<i64>() as u64
         + std::mem::size_of::<u32>() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn depth_writer_internal_factory_cannot_bypass_version_or_schema_guards() {
+        let legacy = validate_typed_writer_schema(
+            "binance_depth_update",
+            BINANCE_DEPTH_UPDATE_LEGACY_SCHEMA_VERSION,
+            binance_depth_update_schema().as_ref(),
+        )
+        .unwrap_err();
+        assert!(legacy.to_string().contains("read-only legacy depth schema"));
+
+        let mismatched = validate_typed_writer_schema(
+            "binance_depth_update",
+            BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
+            binance_depth_snapshot_schema().as_ref(),
+        )
+        .unwrap_err();
+        assert!(mismatched.to_string().contains("writer schema mismatch"));
+
+        validate_typed_writer_schema(
+            "binance_depth_update",
+            BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
+            binance_depth_update_schema().as_ref(),
+        )
+        .unwrap();
+    }
 }

@@ -1,7 +1,11 @@
 use std::collections::BTreeMap;
 use std::fs::File;
+use std::sync::Arc;
 
-use arrow_array::{Array as _, StringArray, TimestampMillisecondArray, UInt64Array};
+use arrow_array::{
+    Array as _, ArrayRef, RecordBatch, StringArray, TimestampMillisecondArray, UInt64Array,
+};
+use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use base64::Engine as _;
 use data_collect::RawEvent;
 use data_collect::binance_aggtrade::{
@@ -15,12 +19,17 @@ use data_collect::polymarket_orderbook_layout::{
     PolymarketOrderbookContext, PolymarketOrderbookRow,
 };
 use data_collect::source_hourly_layout::{
-    BINANCE_AGGTRADE_CAPTURE_COMPLETE, BINANCE_AGGTRADE_SCHEMA_VERSION, BinanceAggTradeHourlyRow,
-    BinanceAggTradeInvalidEvidence, BinanceAggTradeOrdering,
+    BINANCE_AGGTRADE_CAPTURE_COMPLETE, BINANCE_AGGTRADE_SCHEMA_VERSION,
+    BINANCE_DEPTH_SNAPSHOT_LEGACY_SCHEMA_VERSION, BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
+    BINANCE_DEPTH_UPDATE_LEGACY_SCHEMA_VERSION, BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
+    BINANCE_DEPTH_VERDICT_APPLIED, BINANCE_DEPTH_VERDICT_NOT_APPLIED_SNAPSHOT_UNAVAILABLE,
+    BinanceAggTradeHourlyRow, BinanceAggTradeInvalidEvidence, BinanceAggTradeOrdering,
+    BinanceDepthSnapshotHourlyRow, BinanceDepthUpdateHourlyRow,
 };
 use data_collect::writer::{
     ParquetSegmentWriter, TypedParquetSegmentWriter, write_segment_on_blocking_pool_for_source,
 };
+use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use sha2::{Digest as _, Sha256};
@@ -40,6 +49,62 @@ fn synthetic_event(seq: u64) -> RawEvent {
         raw_json: format!(r#"{{"event_type":"book","asset_id":"asset-{seq}"}}"#),
         parquet_raw_layout_version: 1,
         parquet_raw_source_kind: "polymarket_market".to_owned(),
+    }
+}
+
+fn depth_snapshot_row(
+    depth_ingress_sequence: u64,
+    collector_admission_sequence: u64,
+) -> BinanceDepthSnapshotHourlyRow {
+    BinanceDepthSnapshotHourlyRow {
+        timestamp_received: 1_766_789_469_999,
+        snapshot_fetch_start_utc: 1_766_789_469_900,
+        last_update_id: 100,
+        bids: r#"[["99.00","1.5"]]"#.to_owned(),
+        asks: r#"[["102.00","2.5"]]"#.to_owned(),
+        symbol: "BTCUSDT".to_owned(),
+        source_endpoint: "https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=1000"
+            .to_owned(),
+        snapshot_status: "complete".to_owned(),
+        source_sequence_epoch_id: Some("depth-epoch-1".to_owned()),
+        connection_generation: Some(1),
+        depth_ingress_sequence: Some(depth_ingress_sequence),
+        collector_admission_sequence: Some(collector_admission_sequence),
+        collector_admission_time_utc_ms: Some(1_766_789_470_000),
+        collector_host_id: "collector-host".to_owned(),
+        collector_region: "eu-west-1".to_owned(),
+        schema_version: BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION.to_owned(),
+    }
+}
+
+fn depth_update_row(
+    depth_ingress_sequence: u64,
+    collector_admission_sequence: u64,
+) -> BinanceDepthUpdateHourlyRow {
+    BinanceDepthUpdateHourlyRow {
+        timestamp_received: 1_766_789_469_998,
+        event_type: "depthUpdate".to_owned(),
+        event_time: 1_766_789_469_958,
+        symbol: "BTCUSDT".to_owned(),
+        first_update_id: 101,
+        final_update_id: 103,
+        bids: r#"[["100.00","1.0"]]"#.to_owned(),
+        asks: r#"[["101.00","2.0"]]"#.to_owned(),
+        stream: "btcusdt@depth".to_owned(),
+        snapshot_last_update_id: Some(100),
+        local_u_before: None,
+        stitch_verdict: BINANCE_DEPTH_VERDICT_APPLIED.to_owned(),
+        stitch_evidence: Some("U <= lastUpdateId + 1 <= u".to_owned()),
+        stitch_gap_reason: None,
+        source_sequence_epoch_id: Some("depth-epoch-1".to_owned()),
+        connection_generation: Some(1),
+        depth_ingress_sequence: Some(depth_ingress_sequence),
+        collector_admission_sequence: Some(collector_admission_sequence),
+        collector_admission_time_utc_ms: Some(1_766_789_470_001),
+        collector_host_id: "collector-host".to_owned(),
+        collector_region: "eu-west-1".to_owned(),
+        source_endpoint: "wss://stream.binance.com:9443/ws/btcusdt@depth".to_owned(),
+        schema_version: BINANCE_DEPTH_UPDATE_SCHEMA_VERSION.to_owned(),
     }
 }
 
@@ -321,8 +386,11 @@ fn typed_writer_constructors_publish_source_specific_schema_metadata() {
             "polymarket_market_metadata",
             "polymarket_market_metadata_v2",
         ),
-        ("binance_depth_snapshot", "binance_depth_snapshot_v2"),
-        ("binance_depth_update", "binance_depth_update_v3"),
+        (
+            "binance_depth_snapshot",
+            BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
+        ),
+        ("binance_depth_update", BINANCE_DEPTH_UPDATE_SCHEMA_VERSION),
         ("binance_aggtrade", BINANCE_AGGTRADE_SCHEMA_VERSION),
         (
             "polymarket_rtds_chainlink_btc_usd",
@@ -369,19 +437,32 @@ fn typed_writer_source_specific_schemas_omit_duplicate_time_columns() {
     let cases = [
         (
             "binance_depth_snapshot",
+            BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
             vec!["recv_time_utc", "snapshot_recv_time_utc"],
         ),
-        ("binance_depth_update", vec!["recv_time_utc"]),
-        ("binance_aggtrade", vec!["recv_time_utc"]),
-        ("polymarket_rtds_chainlink_btc_usd", vec!["recv_time_utc"]),
+        (
+            "binance_depth_update",
+            BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
+            vec!["recv_time_utc"],
+        ),
+        (
+            "binance_aggtrade",
+            BINANCE_AGGTRADE_SCHEMA_VERSION,
+            vec!["recv_time_utc"],
+        ),
+        (
+            "polymarket_rtds_chainlink_btc_usd",
+            "polymarket_rtds_chainlink_btc_usd_v4",
+            vec!["recv_time_utc"],
+        ),
     ];
 
-    for (source_kind, removed_fields) in cases {
+    for (source_kind, schema_version, removed_fields) in cases {
         let tmp = tempdir().unwrap();
         let writer = TypedParquetSegmentWriter::create_for_typed_source(
             tmp.path(),
             source_kind,
-            "schema-under-test",
+            schema_version,
             source_kind,
         )
         .unwrap();
@@ -407,6 +488,442 @@ fn typed_writer_source_specific_schemas_omit_duplicate_time_columns() {
             "{source_kind} must retain timestamp_received"
         );
     }
+}
+
+#[test]
+fn typed_writer_depth_v3_v4_round_trip_preserves_ingress_and_admission_coordinates() {
+    let snapshot_tmp = tempdir().unwrap();
+    let mut snapshot_writer = TypedParquetSegmentWriter::create_for_typed_source(
+        snapshot_tmp.path(),
+        "depth-snapshot-v3",
+        BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
+        "binance_depth_snapshot",
+    )
+    .unwrap();
+    snapshot_writer
+        .write_binance_depth_snapshot_rows(&[depth_snapshot_row(2, 1)])
+        .unwrap();
+    let snapshot = snapshot_writer.finalize().unwrap();
+
+    let mut snapshot_reader =
+        ParquetRecordBatchReaderBuilder::try_new(File::open(snapshot.final_path).unwrap())
+            .unwrap()
+            .build()
+            .unwrap();
+    let snapshot_batch = snapshot_reader.next().unwrap().unwrap();
+    let snapshot_ingress = snapshot_batch
+        .column(
+            snapshot_batch
+                .schema()
+                .index_of("depth_ingress_sequence")
+                .unwrap(),
+        )
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
+    let snapshot_admission = snapshot_batch
+        .column(
+            snapshot_batch
+                .schema()
+                .index_of("collector_admission_sequence")
+                .unwrap(),
+        )
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
+    let snapshot_epoch = snapshot_batch
+        .column(
+            snapshot_batch
+                .schema()
+                .index_of("source_sequence_epoch_id")
+                .unwrap(),
+        )
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    let snapshot_generation = snapshot_batch
+        .column(
+            snapshot_batch
+                .schema()
+                .index_of("connection_generation")
+                .unwrap(),
+        )
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
+    let snapshot_admission_time = snapshot_batch
+        .column(
+            snapshot_batch
+                .schema()
+                .index_of("collector_admission_time_utc_ms")
+                .unwrap(),
+        )
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .unwrap();
+    let snapshot_last_update_id = snapshot_batch
+        .column(snapshot_batch.schema().index_of("last_update_id").unwrap())
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
+    let snapshot_bids = snapshot_batch
+        .column(snapshot_batch.schema().index_of("bids").unwrap())
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(snapshot_ingress.value(0), 2);
+    assert_eq!(snapshot_admission.value(0), 1);
+    assert_eq!(snapshot_epoch.value(0), "depth-epoch-1");
+    assert_eq!(snapshot_generation.value(0), 1);
+    assert_eq!(snapshot_admission_time.value(0), 1_766_789_470_000);
+    assert_eq!(snapshot_last_update_id.value(0), 100);
+    assert_eq!(snapshot_bids.value(0), r#"[["99.00","1.5"]]"#);
+
+    let update_tmp = tempdir().unwrap();
+    let mut update_writer = TypedParquetSegmentWriter::create_for_typed_source(
+        update_tmp.path(),
+        "depth-update-v4",
+        BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
+        "binance_depth_update",
+    )
+    .unwrap();
+    let applied = depth_update_row(1, 2);
+    let mut unavailable = depth_update_row(2, 3);
+    unavailable.snapshot_last_update_id = None;
+    unavailable.local_u_before = None;
+    unavailable.stitch_verdict = BINANCE_DEPTH_VERDICT_NOT_APPLIED_SNAPSHOT_UNAVAILABLE.to_owned();
+    unavailable.stitch_evidence = None;
+    update_writer
+        .write_binance_depth_update_rows(&[applied, unavailable])
+        .unwrap();
+    let update = update_writer.finalize().unwrap();
+
+    let mut update_reader =
+        ParquetRecordBatchReaderBuilder::try_new(File::open(update.final_path).unwrap())
+            .unwrap()
+            .build()
+            .unwrap();
+    let update_batch = update_reader.next().unwrap().unwrap();
+    let snapshot_last_update_id = update_batch
+        .column(
+            update_batch
+                .schema()
+                .index_of("snapshot_last_update_id")
+                .unwrap(),
+        )
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
+    let verdict = update_batch
+        .column(update_batch.schema().index_of("stitch_verdict").unwrap())
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    let update_evidence = update_batch
+        .column(update_batch.schema().index_of("stitch_evidence").unwrap())
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    let update_epoch = update_batch
+        .column(
+            update_batch
+                .schema()
+                .index_of("source_sequence_epoch_id")
+                .unwrap(),
+        )
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    let update_generation = update_batch
+        .column(
+            update_batch
+                .schema()
+                .index_of("connection_generation")
+                .unwrap(),
+        )
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
+    let update_ingress = update_batch
+        .column(
+            update_batch
+                .schema()
+                .index_of("depth_ingress_sequence")
+                .unwrap(),
+        )
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
+    let update_admission = update_batch
+        .column(
+            update_batch
+                .schema()
+                .index_of("collector_admission_sequence")
+                .unwrap(),
+        )
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
+    let update_admission_time = update_batch
+        .column(
+            update_batch
+                .schema()
+                .index_of("collector_admission_time_utc_ms")
+                .unwrap(),
+        )
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .unwrap();
+    let first_update_id = update_batch
+        .column(update_batch.schema().index_of("first_update_id").unwrap())
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
+    assert_eq!(snapshot_last_update_id.value(0), 100);
+    assert!(snapshot_last_update_id.is_null(1));
+    assert_eq!(
+        verdict.value(1),
+        BINANCE_DEPTH_VERDICT_NOT_APPLIED_SNAPSHOT_UNAVAILABLE
+    );
+    assert_eq!(update_evidence.value(0), "U <= lastUpdateId + 1 <= u");
+    assert!(update_evidence.is_null(1));
+    assert_eq!(update_epoch.value(0), "depth-epoch-1");
+    assert_eq!(update_generation.value(0), 1);
+    assert_eq!(update_ingress.values(), &[1, 2]);
+    assert_eq!(update_admission.values(), &[2, 3]);
+    assert_eq!(update_admission_time.value(0), 1_766_789_470_001);
+    assert_eq!(first_update_id.value(0), 101);
+}
+
+#[test]
+fn real_legacy_depth_v2_v3_parquet_reads_without_fabricated_ordering_coordinates() {
+    let timestamp = |name: &str| {
+        Field::new(
+            name,
+            DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+            false,
+        )
+    };
+    let snapshot_schema = Arc::new(Schema::new(vec![
+        timestamp("timestamp_received"),
+        timestamp("snapshot_fetch_start_utc"),
+        Field::new("last_update_id", DataType::UInt64, false),
+        Field::new("bids", DataType::Utf8, false),
+        Field::new("asks", DataType::Utf8, false),
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("source_endpoint", DataType::Utf8, false),
+        Field::new("snapshot_status", DataType::Utf8, false),
+        Field::new("collector_host_id", DataType::Utf8, false),
+        Field::new("collector_region", DataType::Utf8, false),
+        Field::new("schema_version", DataType::Utf8, false),
+    ]));
+    let snapshot_columns: Vec<ArrayRef> = vec![
+        Arc::new(
+            TimestampMillisecondArray::from_iter_values([1_766_789_469_999]).with_timezone("UTC"),
+        ),
+        Arc::new(
+            TimestampMillisecondArray::from_iter_values([1_766_789_469_900]).with_timezone("UTC"),
+        ),
+        Arc::new(UInt64Array::from_iter_values([100])),
+        Arc::new(StringArray::from_iter_values([r#"[["99.00","1.5"]]"#])),
+        Arc::new(StringArray::from_iter_values([r#"[["102.00","2.5"]]"#])),
+        Arc::new(StringArray::from_iter_values(["BTCUSDT"])),
+        Arc::new(StringArray::from_iter_values([
+            "https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=1000",
+        ])),
+        Arc::new(StringArray::from_iter_values(["complete"])),
+        Arc::new(StringArray::from_iter_values(["collector-host"])),
+        Arc::new(StringArray::from_iter_values(["eu-west-1"])),
+        Arc::new(StringArray::from_iter_values([
+            BINANCE_DEPTH_SNAPSHOT_LEGACY_SCHEMA_VERSION,
+        ])),
+    ];
+
+    let update_schema = Arc::new(Schema::new(vec![
+        timestamp("timestamp_received"),
+        Field::new("event_type", DataType::Utf8, false),
+        timestamp("event_time"),
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("first_update_id", DataType::UInt64, false),
+        Field::new("final_update_id", DataType::UInt64, false),
+        Field::new("bids", DataType::Utf8, false),
+        Field::new("asks", DataType::Utf8, false),
+        Field::new("stream", DataType::Utf8, false),
+        Field::new("snapshot_last_update_id", DataType::UInt64, false),
+        Field::new("local_u_before", DataType::UInt64, true),
+        Field::new("stitch_verdict", DataType::Utf8, false),
+        Field::new("stitch_gap_reason", DataType::Utf8, true),
+        Field::new("collector_host_id", DataType::Utf8, false),
+        Field::new("collector_region", DataType::Utf8, false),
+        Field::new("source_endpoint", DataType::Utf8, false),
+        Field::new("schema_version", DataType::Utf8, false),
+    ]));
+    let update_columns: Vec<ArrayRef> = vec![
+        Arc::new(
+            TimestampMillisecondArray::from_iter_values([1_766_789_469_998]).with_timezone("UTC"),
+        ),
+        Arc::new(StringArray::from_iter_values(["depthUpdate"])),
+        Arc::new(
+            TimestampMillisecondArray::from_iter_values([1_766_789_469_958]).with_timezone("UTC"),
+        ),
+        Arc::new(StringArray::from_iter_values(["BTCUSDT"])),
+        Arc::new(UInt64Array::from_iter_values([101])),
+        Arc::new(UInt64Array::from_iter_values([103])),
+        Arc::new(StringArray::from_iter_values([r#"[["100.00","1.0"]]"#])),
+        Arc::new(StringArray::from_iter_values([r#"[["101.00","2.0"]]"#])),
+        Arc::new(StringArray::from_iter_values(["btcusdt@depth"])),
+        Arc::new(UInt64Array::from_iter_values([100])),
+        Arc::new(UInt64Array::from(vec![None])),
+        Arc::new(StringArray::from_iter_values([
+            "U <= lastUpdateId + 1 <= u",
+        ])),
+        Arc::new(StringArray::from(vec![None::<&str>])),
+        Arc::new(StringArray::from_iter_values(["collector-host"])),
+        Arc::new(StringArray::from_iter_values(["eu-west-1"])),
+        Arc::new(StringArray::from_iter_values([
+            "wss://stream.binance.com:9443/ws/btcusdt@depth",
+        ])),
+        Arc::new(StringArray::from_iter_values([
+            BINANCE_DEPTH_UPDATE_LEGACY_SCHEMA_VERSION,
+        ])),
+    ];
+
+    let tmp = tempdir().unwrap();
+    let snapshot_path = tmp.path().join("legacy-snapshot-v2.parquet");
+    let mut snapshot_writer = ArrowWriter::try_new(
+        File::create(&snapshot_path).unwrap(),
+        snapshot_schema.clone(),
+        None,
+    )
+    .unwrap();
+    snapshot_writer
+        .write(&RecordBatch::try_new(snapshot_schema, snapshot_columns).unwrap())
+        .unwrap();
+    snapshot_writer.close().unwrap();
+    let update_path = tmp.path().join("legacy-update-v3.parquet");
+    let mut update_writer = ArrowWriter::try_new(
+        File::create(&update_path).unwrap(),
+        update_schema.clone(),
+        None,
+    )
+    .unwrap();
+    update_writer
+        .write(&RecordBatch::try_new(update_schema, update_columns).unwrap())
+        .unwrap();
+    update_writer.close().unwrap();
+
+    let snapshot_batch =
+        ParquetRecordBatchReaderBuilder::try_new(File::open(snapshot_path).unwrap())
+            .unwrap()
+            .build()
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+    let update_batch = ParquetRecordBatchReaderBuilder::try_new(File::open(update_path).unwrap())
+        .unwrap()
+        .build()
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+    for batch in [&snapshot_batch, &update_batch] {
+        for coordinate in [
+            "source_sequence_epoch_id",
+            "connection_generation",
+            "depth_ingress_sequence",
+            "collector_admission_sequence",
+            "collector_admission_time_utc_ms",
+        ] {
+            assert!(batch.schema().index_of(coordinate).is_err(), "{coordinate}");
+        }
+    }
+
+    let snapshot_version = snapshot_batch
+        .column(snapshot_batch.schema().index_of("schema_version").unwrap())
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap()
+        .value(0);
+    let mut legacy_snapshot = depth_snapshot_row(1, 1);
+    legacy_snapshot.source_sequence_epoch_id = None;
+    legacy_snapshot.connection_generation = None;
+    legacy_snapshot.depth_ingress_sequence = None;
+    legacy_snapshot.collector_admission_sequence = None;
+    legacy_snapshot.collector_admission_time_utc_ms = None;
+    legacy_snapshot.schema_version = snapshot_version.to_owned();
+    assert_eq!(
+        legacy_snapshot.ordering_classification().unwrap().as_str(),
+        "legacy_ordering_unknown"
+    );
+
+    let update_version = update_batch
+        .column(update_batch.schema().index_of("schema_version").unwrap())
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap()
+        .value(0);
+    let mut legacy_update = depth_update_row(1, 1);
+    legacy_update.stitch_verdict = "U <= lastUpdateId + 1 <= u".to_owned();
+    legacy_update.stitch_evidence = None;
+    legacy_update.source_sequence_epoch_id = None;
+    legacy_update.connection_generation = None;
+    legacy_update.depth_ingress_sequence = None;
+    legacy_update.collector_admission_sequence = None;
+    legacy_update.collector_admission_time_utc_ms = None;
+    legacy_update.schema_version = update_version.to_owned();
+    assert_eq!(
+        legacy_update.ordering_classification().unwrap().as_str(),
+        "legacy_ordering_unknown"
+    );
+}
+
+#[test]
+fn typed_writer_depth_rejects_legacy_versions_partial_coordinates_and_non_increasing_admission() {
+    let tmp = tempdir().unwrap();
+    let error = TypedParquetSegmentWriter::create_for_typed_source(
+        tmp.path(),
+        "legacy-depth-snapshot",
+        "binance_depth_snapshot_v2",
+        "binance_depth_snapshot",
+    )
+    .err()
+    .expect("legacy depth schema is read-only");
+    assert!(error.to_string().contains("read-only legacy depth schema"));
+
+    let tmp = tempdir().unwrap();
+    let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
+        tmp.path(),
+        "depth-update-validation",
+        BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
+        "binance_depth_update",
+    )
+    .unwrap();
+    let mut partial = depth_update_row(1, 1);
+    partial.connection_generation = None;
+    let error = writer
+        .write_binance_depth_update_rows(&[partial])
+        .unwrap_err();
+    assert!(error.to_string().contains("row validation failed"));
+
+    let mut wrong_official_constant = depth_update_row(1, 1);
+    wrong_official_constant.symbol = "ETHUSDT".to_owned();
+    let error = writer
+        .write_binance_depth_update_rows(&[wrong_official_constant])
+        .unwrap_err();
+    assert!(error.to_string().contains("row validation failed"));
+
+    writer
+        .write_binance_depth_update_rows(&[depth_update_row(2, 2)])
+        .unwrap();
+    let error = writer
+        .write_binance_depth_update_rows(&[depth_update_row(3, 2)])
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("collector admission sequence is not strictly increasing")
+    );
 }
 
 #[test]

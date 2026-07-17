@@ -11,12 +11,25 @@ use tokio::time::timeout;
 use crate::publish::{PaperLiveEnvironment, Result, paper_live_handoff_boundary};
 use crate::source_hourly_layout::{
     BINANCE_AGGTRADE_INVALID_REASON_CODE_MAX_BYTES, BINANCE_AGGTRADE_RECORD_INVALID_INPUT,
-    BINANCE_AGGTRADE_RECORD_TRADE, BinanceAggTradeHourlyRow,
+    BINANCE_AGGTRADE_RECORD_TRADE, BINANCE_DEPTH_VERDICT_APPLIED,
+    BINANCE_DEPTH_VERDICT_NOT_APPLIED_CONFIRMED_HOLE,
+    BINANCE_DEPTH_VERDICT_NOT_APPLIED_SNAPSHOT_UNAVAILABLE,
+    BINANCE_DEPTH_VERDICT_NOT_APPLIED_STALE_DUPLICATE, BinanceAggTradeHourlyRow,
+    BinanceDepthOrderingClassification, BinanceDepthSnapshotHourlyRow, BinanceDepthUpdateHourlyRow,
 };
 
 pub const HANDOFF_FRAME_SCHEMA_VERSION: &str = "data_collect_handoff_v1";
 pub const HANDOFF_SOURCE_EVIDENCE_SCHEMA_VERSION: &str = "data_collect_handoff_source_evidence_v1";
+pub const DEPTH_HANDOFF_SOURCE_EVIDENCE_SCHEMA_VERSION: &str =
+    "data_collect_handoff_depth_source_evidence_v1";
 const MAX_SOURCE_SEQUENCE_EPOCH_ID_BYTES: usize = 128;
+const MAX_DEPTH_STITCH_VERDICT_BYTES: usize = 128;
+const DEPTH_STITCH_VERDICTS: &[&str] = &[
+    BINANCE_DEPTH_VERDICT_APPLIED,
+    BINANCE_DEPTH_VERDICT_NOT_APPLIED_STALE_DUPLICATE,
+    BINANCE_DEPTH_VERDICT_NOT_APPLIED_CONFIRMED_HOLE,
+    BINANCE_DEPTH_VERDICT_NOT_APPLIED_SNAPSHOT_UNAVAILABLE,
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -242,6 +255,231 @@ impl TryFrom<&BinanceAggTradeHourlyRow> for HandoffSourceEvidence {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum DepthHandoffRecordKind {
+    Snapshot,
+    Update,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DepthHandoffSourceEvidence {
+    pub evidence_schema_version: String,
+    pub record_kind: DepthHandoffRecordKind,
+    pub source_sequence_epoch_id: String,
+    pub connection_generation: u64,
+    pub depth_ingress_sequence: u64,
+    pub collector_admission_sequence: u64,
+    pub collector_admission_time_utc_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stitch_verdict: Option<String>,
+}
+
+impl DepthHandoffSourceEvidence {
+    pub fn snapshot(
+        source_sequence_epoch_id: impl Into<String>,
+        connection_generation: u64,
+        depth_ingress_sequence: u64,
+        collector_admission_sequence: u64,
+        collector_admission_time_utc_ms: i64,
+    ) -> Result<Self> {
+        Self::new(
+            DepthHandoffRecordKind::Snapshot,
+            source_sequence_epoch_id,
+            connection_generation,
+            depth_ingress_sequence,
+            collector_admission_sequence,
+            collector_admission_time_utc_ms,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update(
+        source_sequence_epoch_id: impl Into<String>,
+        connection_generation: u64,
+        depth_ingress_sequence: u64,
+        collector_admission_sequence: u64,
+        collector_admission_time_utc_ms: i64,
+        stitch_verdict: impl Into<String>,
+    ) -> Result<Self> {
+        Self::new(
+            DepthHandoffRecordKind::Update,
+            source_sequence_epoch_id,
+            connection_generation,
+            depth_ingress_sequence,
+            collector_admission_sequence,
+            collector_admission_time_utc_ms,
+            Some(stitch_verdict.into()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        record_kind: DepthHandoffRecordKind,
+        source_sequence_epoch_id: impl Into<String>,
+        connection_generation: u64,
+        depth_ingress_sequence: u64,
+        collector_admission_sequence: u64,
+        collector_admission_time_utc_ms: i64,
+        stitch_verdict: Option<String>,
+    ) -> Result<Self> {
+        let evidence = Self {
+            evidence_schema_version: DEPTH_HANDOFF_SOURCE_EVIDENCE_SCHEMA_VERSION.to_owned(),
+            record_kind,
+            source_sequence_epoch_id: source_sequence_epoch_id.into(),
+            connection_generation,
+            depth_ingress_sequence,
+            collector_admission_sequence,
+            collector_admission_time_utc_ms,
+            stitch_verdict,
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.evidence_schema_version != DEPTH_HANDOFF_SOURCE_EVIDENCE_SCHEMA_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "unsupported depth source evidence schema version: {}",
+                    self.evidence_schema_version
+                ),
+            )
+            .into());
+        }
+        validate_bounded_nonempty(
+            "source_sequence_epoch_id",
+            &self.source_sequence_epoch_id,
+            MAX_SOURCE_SEQUENCE_EPOCH_ID_BYTES,
+        )?;
+        if self.connection_generation == 0
+            || self.depth_ingress_sequence == 0
+            || self.collector_admission_sequence == 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "depth generation, ingress, and admission sequences must be positive",
+            )
+            .into());
+        }
+        if self.collector_admission_time_utc_ms <= 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "depth collector admission timestamp must be positive",
+            )
+            .into());
+        }
+        match self.record_kind {
+            DepthHandoffRecordKind::Snapshot => {
+                if self.stitch_verdict.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "depth snapshot evidence must not have stitch_verdict",
+                    )
+                    .into());
+                }
+            }
+            DepthHandoffRecordKind::Update => {
+                let verdict = self.stitch_verdict.as_deref().unwrap_or_default();
+                validate_bounded_nonempty(
+                    "stitch_verdict",
+                    verdict,
+                    MAX_DEPTH_STITCH_VERDICT_BYTES,
+                )?;
+                if !DEPTH_STITCH_VERDICTS.contains(&verdict) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("unsupported depth stitch verdict: {verdict}"),
+                    )
+                    .into());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl TryFrom<&BinanceDepthSnapshotHourlyRow> for DepthHandoffSourceEvidence {
+    type Error = Box<dyn std::error::Error + Send + Sync>;
+
+    fn try_from(row: &BinanceDepthSnapshotHourlyRow) -> Result<Self> {
+        if !row.validate().is_complete()
+            || row.ordering_classification()? != BinanceDepthOrderingClassification::Exact
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "depth snapshot handoff requires a complete exact-ordering row",
+            )
+            .into());
+        }
+        Self::snapshot(
+            row.source_sequence_epoch_id.clone().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "missing depth epoch")
+            })?,
+            row.connection_generation.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "missing depth generation")
+            })?,
+            row.depth_ingress_sequence.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "missing depth ingress sequence",
+                )
+            })?,
+            row.collector_admission_sequence.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "missing depth admission sequence",
+                )
+            })?,
+            row.collector_admission_time_utc_ms.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "missing depth admission time")
+            })?,
+        )
+    }
+}
+
+impl TryFrom<&BinanceDepthUpdateHourlyRow> for DepthHandoffSourceEvidence {
+    type Error = Box<dyn std::error::Error + Send + Sync>;
+
+    fn try_from(row: &BinanceDepthUpdateHourlyRow) -> Result<Self> {
+        if !row.validate().is_complete()
+            || row.ordering_classification()? != BinanceDepthOrderingClassification::Exact
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "depth update handoff requires a complete exact-ordering row",
+            )
+            .into());
+        }
+        Self::update(
+            row.source_sequence_epoch_id.clone().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "missing depth epoch")
+            })?,
+            row.connection_generation.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "missing depth generation")
+            })?,
+            row.depth_ingress_sequence.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "missing depth ingress sequence",
+                )
+            })?,
+            row.collector_admission_sequence.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "missing depth admission sequence",
+                )
+            })?,
+            row.collector_admission_time_utc_ms.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "missing depth admission time")
+            })?,
+            row.stitch_verdict.clone(),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum HandoffFrameType {
     ExternalMarketEvent,
     SourceStatus,
@@ -270,6 +508,8 @@ pub struct HandoffFrame {
     pub status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_evidence: Option<HandoffSourceEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth_source_evidence: Option<DepthHandoffSourceEvidence>,
 }
 
 impl HandoffFrame {
@@ -302,6 +542,7 @@ impl HandoffFrame {
             raw_json: Some(raw_json.to_owned()),
             status: None,
             source_evidence: None,
+            depth_source_evidence: None,
         };
         frame.validate()?;
         Ok(frame)
@@ -339,6 +580,45 @@ impl HandoffFrame {
             raw_json: raw_json.map(str::to_owned),
             status: None,
             source_evidence: Some(source_evidence),
+            depth_source_evidence: None,
+        };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn depth_source_evidence(
+        handoff_frame_seq: u64,
+        source_kind: impl Into<String>,
+        source_event_type: impl Into<String>,
+        source_identifier: impl Into<String>,
+        source_timestamp: Option<&str>,
+        collector_recv_time_utc_ms: i64,
+        handoff_send_time_utc_ms: i64,
+        collector_host_id: impl Into<String>,
+        collector_region: impl Into<String>,
+        raw_json: Option<&str>,
+        depth_source_evidence: DepthHandoffSourceEvidence,
+    ) -> Result<Self> {
+        if let Some(raw_json) = raw_json {
+            serde_json::from_str::<serde_json::Value>(raw_json)?;
+        }
+        let frame = Self {
+            frame_schema_version: HANDOFF_FRAME_SCHEMA_VERSION.to_owned(),
+            frame_type: HandoffFrameType::ExternalMarketEvent,
+            event_seq: handoff_frame_seq,
+            source_kind: source_kind.into(),
+            source_event_type: source_event_type.into(),
+            source_identifier: source_identifier.into(),
+            source_timestamp: source_timestamp.map(str::to_owned),
+            collector_recv_time_utc_ms,
+            handoff_send_time_utc_ms,
+            collector_host_id: collector_host_id.into(),
+            collector_region: collector_region.into(),
+            raw_json: raw_json.map(str::to_owned),
+            status: None,
+            source_evidence: None,
+            depth_source_evidence: Some(depth_source_evidence),
         };
         frame.validate()?;
         Ok(frame)
@@ -367,6 +647,7 @@ impl HandoffFrame {
             raw_json: None,
             status: Some(status.into()),
             source_evidence: None,
+            depth_source_evidence: None,
         };
         frame.validate()?;
         Ok(frame)
@@ -414,6 +695,13 @@ impl HandoffFrame {
             )
             .into());
         }
+        if self.source_evidence.is_some() && self.depth_source_evidence.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "handoff frame cannot carry aggTrade and depth evidence together",
+            )
+            .into());
+        }
         if let Some(source_evidence) = self.source_evidence.as_ref() {
             if self.frame_type != HandoffFrameType::ExternalMarketEvent {
                 return Err(io::Error::new(
@@ -445,6 +733,42 @@ impl HandoffFrame {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
                             "invalid input source evidence requires source_event_type=invalid_input",
+                        )
+                        .into());
+                    }
+                }
+            }
+        }
+        if let Some(depth_evidence) = self.depth_source_evidence.as_ref() {
+            if self.frame_type != HandoffFrameType::ExternalMarketEvent {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "depth source evidence requires an external market event frame",
+                )
+                .into());
+            }
+            depth_evidence.validate()?;
+            match depth_evidence.record_kind {
+                DepthHandoffRecordKind::Snapshot => {
+                    if self.source_kind != "binance_depth_snapshot"
+                        || self.source_event_type != "depth_snapshot"
+                        || self.raw_json.is_none()
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "depth snapshot evidence requires binance_depth_snapshot/depth_snapshot with raw_json",
+                        )
+                        .into());
+                    }
+                }
+                DepthHandoffRecordKind::Update => {
+                    if self.source_kind != "binance_depth_update"
+                        || self.source_event_type != "depth_update"
+                        || self.raw_json.is_none()
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "depth update evidence requires binance_depth_update/depth_update with raw_json",
                         )
                         .into());
                     }

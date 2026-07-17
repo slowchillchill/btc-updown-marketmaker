@@ -87,16 +87,21 @@ use crate::polymarket_orderbook_layout::{PolymarketOrderbookContext, PolymarketO
 use crate::polymarket_sdk_runtime::{
     MarketSdkMessageReceiver, MarketSdkRuntime, RtdsRuntimeEvent, RtdsSdkRuntime, SdkStreamError,
 };
-use crate::source_format::{RtdsChainlinkBtcUsdRaw, plausible_unix_timestamp_ms};
+use crate::source_format::{
+    BinanceDepthOrdering, RtdsChainlinkBtcUsdRaw, plausible_unix_timestamp_ms,
+};
 #[cfg(test)]
 use crate::source_hourly_layout::BinanceAggTradeOrdering;
 use crate::source_hourly_layout::{
-    BinanceAggTradeHourlyRow, BinanceDepthSnapshotHourlyRow, BinanceDepthUpdateHourlyRow,
-    RtdsChainlinkBtcUsdHourlyRow,
+    BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION, BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
+    BINANCE_DEPTH_VERDICT_APPLIED, BINANCE_DEPTH_VERDICT_NOT_APPLIED_CONFIRMED_HOLE,
+    BINANCE_DEPTH_VERDICT_NOT_APPLIED_SNAPSHOT_UNAVAILABLE,
+    BINANCE_DEPTH_VERDICT_NOT_APPLIED_STALE_DUPLICATE, BinanceAggTradeHourlyRow,
+    BinanceDepthSnapshotHourlyRow, BinanceDepthUpdateHourlyRow, RtdsChainlinkBtcUsdHourlyRow,
 };
 use crate::sources::binance::{
-    apply_depth_stitch_evidence, parse_depth_snapshot_raw, parse_depth_update_raw,
-    stitch_depth_update,
+    DepthUpdateAssessment, DepthUpdateVerdict, assess_depth_update, parse_depth_snapshot_raw,
+    parse_depth_update_raw,
 };
 use crate::writer::{
     DAILY_FILE_RECOVERY_METADATA_KEY, PublishedSegment, RawEvent, RawEventAdmission,
@@ -113,6 +118,7 @@ const BINANCE_DEPTH_SNAPSHOT: &str =
     "https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=1000";
 
 static AGGTRADE_SOURCE_EPOCH_COUNTER: AtomicU64 = AtomicU64::new(0);
+static DEPTH_SOURCE_EPOCH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const DEFAULT_CONTINUOUS_DURATION_SECS: u64 = 7 * 24 * 60 * 60;
 const DEFAULT_DISCOVERY_WAIT_SECS: u64 = 90;
@@ -128,12 +134,15 @@ const COORDINATED_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(90);
 const MAX_RECORDED_SOURCE_GAPS: usize = 256;
 const SOURCE_GAP_OVERFLOW_PREFIX: &str = "source_gap_overflow_count:";
 const BINANCE_DEPTH_SNAPSHOT_MAX_ATTEMPTS: u32 = 3;
+const BINANCE_DEPTH_PENDING_MAX_ROWS: usize = 25_000;
+const BINANCE_DEPTH_PENDING_MAX_BYTES: usize = 67_108_864;
 const BINANCE_HTTP_CONNECT_TIMEOUT_SECS: u64 = 5;
 const BINANCE_HTTP_TOTAL_TIMEOUT_SECS: u64 = 15;
 const WS_CONNECT_TIMEOUT_SECS: u64 = 20;
 const WS_WRITE_TIMEOUT_SECS: u64 = 5;
 const BINANCE_WS_RECONNECT_BASE_MS: u64 = 500;
 const BINANCE_WS_RECONNECT_MAX_MS: u64 = 5_000;
+const BINANCE_RETRY_AFTER_MAX_SECS: u64 = 3 * 24 * 60 * 60;
 const SOURCE_RECOVERY_CYCLE_MAX_ATTEMPTS: u32 = 12;
 const SOURCE_RECOVERY_CYCLE_MAX_ELAPSED: Duration = Duration::from_secs(120);
 const SOURCE_SUPERVISOR_BACKOFF_BASE_MS: u64 = 1_000;
@@ -2081,6 +2090,7 @@ struct SourceQueueBackpressureStats {
     timeout_count: AtomicU64,
     dropped_rows: AtomicU64,
     aggtrade_admission_sequence: AtomicU64,
+    depth_admission_sequence: AtomicU64,
     operational_counters: Mutex<BTreeMap<String, BTreeMap<String, SourceOperationalCounterDelta>>>,
     active_recovery_sources: Mutex<BTreeSet<String>>,
     deferred_raw_batches: Mutex<BTreeMap<String, VecDeque<DeferredRawBatch>>>,
@@ -2095,6 +2105,15 @@ impl SourceQueueBackpressureStats {
             })
             .map(|previous| previous + 1)
             .map_err(|_| invalid_data("binance aggTrade admission sequence overflow").into())
+    }
+
+    fn next_depth_admission_sequence(&self) -> Result<u64> {
+        self.depth_admission_sequence
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .map(|previous| previous + 1)
+            .map_err(|_| invalid_data("Binance depth admission sequence overflow").into())
     }
 
     fn install_raw_day_gate(&self, gate: Arc<RawDayGate>) -> Result<()> {
@@ -2329,10 +2348,17 @@ enum AggTradeSourceControl {
 
 enum DepthSourceControl {
     Fence {
+        kind: DepthFenceKind,
         stop_after_fence: bool,
         resume_after_barrier: Option<oneshot::Receiver<()>>,
         reply: oneshot::Sender<std::result::Result<(), String>>,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DepthFenceKind {
+    HourFinalize,
+    ResetContinuity,
 }
 
 enum PolymarketSourceControl {
@@ -2354,7 +2380,11 @@ struct InflightRawEvent {
 impl InflightRawEvent {
     #[cfg(test)]
     fn for_test(mut event: RawEvent) -> Self {
-        if event.source_kind == "binance_aggtrade" && event.collector_admission.is_none() {
+        if matches!(
+            event.source_kind.as_str(),
+            "binance_aggtrade" | "binance_depth_snapshot" | "binance_depth_update"
+        ) && event.collector_admission.is_none()
+        {
             event.collector_admission = Some(RawEventAdmission {
                 sequence: u64::try_from(event.recv_time_utc_ms).unwrap_or(1).max(1),
                 time_utc_ms: event.recv_time_utc_ms.max(1),
@@ -3403,6 +3433,7 @@ where
     let (resume_tx, resume_rx) = oneshot::channel();
     control_tx
         .send(DepthSourceControl::Fence {
+            kind: DepthFenceKind::HourFinalize,
             stop_after_fence: false,
             resume_after_barrier: Some(resume_rx),
             reply: reply_tx,
@@ -3452,6 +3483,7 @@ where
         let (sender, resume_rx) = oneshot::channel();
         control_tx
             .send(DepthSourceControl::Fence {
+                kind: DepthFenceKind::ResetContinuity,
                 stop_after_fence: false,
                 resume_after_barrier: Some(resume_rx),
                 reply: reply_tx,
@@ -7314,6 +7346,7 @@ pub async fn run_live_training_runtime(
             match timeout(
                 Duration::from_secs(5),
                 depth_control_tx.send(DepthSourceControl::Fence {
+                    kind: DepthFenceKind::ResetContinuity,
                     stop_after_fence: true,
                     resume_after_barrier: None,
                     reply: reply_tx,
@@ -9638,7 +9671,10 @@ fn segment_daily_facts(
     rollover_reason: &str,
     provenance: &RuntimeProvenance,
 ) -> Value {
-    let sort_order = if segment.source_kind == "binance_aggtrade" {
+    let sort_order = if matches!(
+        segment.source_kind.as_str(),
+        "binance_aggtrade" | "binance_depth_snapshot" | "binance_depth_update"
+    ) {
         "collector_admission_order"
     } else {
         "receive_order"
@@ -12973,16 +13009,30 @@ async fn run_binance_depth_source_with_spec_and_control(
         .connect_timeout(Duration::from_secs(BINANCE_HTTP_CONNECT_TIMEOUT_SECS))
         .timeout(Duration::from_secs(BINANCE_HTTP_TOTAL_TIMEOUT_SECS))
         .build()?;
+    let source_sequence_epoch_id = depth_source_sequence_epoch_id(&collector_identity)?;
+    let ingress_sequence = DepthIngressSequenceAllocator::default();
+    let snapshot_not_before = DepthSnapshotNotBefore::default();
+    let mut connection_generation = 0_u64;
     let mut snapshot_trigger_reason = "bootstrap".to_owned();
     let mut recovery = SourceRecoverySupervisor::new(
         "binance_depth_update",
         u64::try_from(now_ms()).unwrap_or_default(),
     );
+    #[cfg(test)]
+    recovery.set_wait_override(spec.recovery_wait_override);
     'connections: while !deadline_reached(deadline) {
         if let Some(receiver) = control_rx.as_mut() {
-            while let Ok(control) = receiver.try_recv() {
-                if handle_depth_source_control(control).await? {
-                    break 'connections;
+            loop {
+                match receiver.try_recv() {
+                    Ok(control) => {
+                        if handle_depth_source_control(control).await? {
+                            break 'connections;
+                        }
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        return Err(invalid_data("depth source control channel closed").into());
+                    }
                 }
             }
         }
@@ -12999,17 +13049,11 @@ async fn run_binance_depth_source_with_spec_and_control(
                 } else {
                     format!("reconnect_error:{err}")
                 };
-                let gap = if snapshot_trigger_reason == "bootstrap" {
-                    format!("binance_depth_update_ws_connect_error:{err}")
-                } else {
-                    format!("binance_depth_update_ws_reconnect_error:{err}")
-                };
                 if !handle_binance_depth_ws_connect_failure(
                     &sink,
                     &mut recovery,
                     &mut snapshot_trigger_reason,
                     reason,
-                    gap,
                     deadline,
                 )
                 .await
@@ -13024,17 +13068,11 @@ async fn run_binance_depth_source_with_spec_and_control(
                 } else {
                     "reconnect_timeout".to_owned()
                 };
-                let gap = if snapshot_trigger_reason == "bootstrap" {
-                    "binance_depth_update_ws_connect_timeout".to_owned()
-                } else {
-                    "binance_depth_update_ws_reconnect_timeout".to_owned()
-                };
                 if !handle_binance_depth_ws_connect_failure(
                     &sink,
                     &mut recovery,
                     &mut snapshot_trigger_reason,
                     reason,
-                    gap,
                     deadline,
                 )
                 .await
@@ -13044,32 +13082,10 @@ async fn run_binance_depth_source_with_spec_and_control(
                 continue;
             }
         };
-        let snapshot_last_update_id = match fetch_binance_depth_snapshot(
-            &http_client,
-            &sink,
-            &collector_identity,
-            run_started,
-            &spec.snapshot_endpoint,
-            &snapshot_trigger_reason,
-        )
-        .await
-        {
-            Ok(snapshot_last_update_id) => snapshot_last_update_id,
-            Err(error)
-                if error
-                    .to_string()
-                    .contains("binance_depth_snapshot_recovery_exhausted") =>
-            {
-                if !wait_for_source_recovery(&mut recovery, &sink, deadline).await {
-                    break;
-                }
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        let snapshot_utc_day =
-            utc_day_string_from_ms(now_ms()).unwrap_or_else(|| "unknown".to_owned());
-        let update_exit = match run_binance_depth_update_ws_source_with_control(
+        connection_generation = connection_generation
+            .checked_add(1)
+            .ok_or_else(|| invalid_data("Binance depth connection generation overflow"))?;
+        let update_exit = run_binance_depth_update_ws_source_with_control(
             depth_stream,
             BinanceDepthUpdateContext {
                 http_client: http_client.clone(),
@@ -13078,36 +13094,25 @@ async fn run_binance_depth_source_with_spec_and_control(
                 deadline,
                 run_started,
                 spec: spec.clone(),
-                snapshot_last_update_id,
-                snapshot_utc_day,
-                pending_snapshot_trigger_reason: (snapshot_trigger_reason != "bootstrap")
-                    .then(|| snapshot_trigger_reason.clone()),
+                source_sequence_epoch_id: source_sequence_epoch_id.clone(),
+                connection_generation,
+                ingress_sequence: ingress_sequence.clone(),
+                snapshot_not_before: snapshot_not_before.clone(),
+                initial_snapshot_trigger_reason: snapshot_trigger_reason.clone(),
+                #[cfg(test)]
+                pending_limits: None,
             },
             control_rx.as_mut(),
         )
-        .await
-        {
-            Ok(exit) => exit,
-            Err(error)
-                if error
-                    .to_string()
-                    .contains("binance_depth_snapshot_recovery_exhausted") =>
-            {
-                if !wait_for_source_recovery(&mut recovery, &sink, deadline).await {
-                    break;
-                }
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
+        .await?;
         match update_exit {
             BinanceDepthUpdateExit::DeadlineReached => break,
             BinanceDepthUpdateExit::Stopped => break,
             BinanceDepthUpdateExit::StreamEnded {
                 reason,
-                saw_business,
+                saw_transport,
             } => {
-                if saw_business {
+                if saw_transport {
                     recovery.record_business_recovery();
                     sink.source_queue_backpressure
                         .set_recovery_active("binance_depth_update", false);
@@ -13134,10 +13139,8 @@ async fn handle_binance_depth_ws_connect_failure(
     recovery: &mut SourceRecoverySupervisor,
     snapshot_trigger_reason: &mut String,
     reason: String,
-    gap: String,
     deadline: Option<Instant>,
 ) -> bool {
-    record_gap(&sink.gaps, gap);
     prepare_binance_depth_reconnect(sink, recovery, snapshot_trigger_reason, reason, deadline).await
 }
 
@@ -13148,43 +13151,83 @@ async fn prepare_binance_depth_reconnect(
     reason: String,
     deadline: Option<Instant>,
 ) -> bool {
-    if reason == "no_business_messages" {
-        sink.source_queue_backpressure
-            .record_lag("binance_depth_update", now_ms(), 1);
-    }
-    record_gap(
-        &sink.gaps,
-        format!("binance_depth_reconnect_required:{reason}"),
-    );
     *snapshot_trigger_reason = format!("reconnect:{reason}");
     wait_for_source_recovery(recovery, sink, deadline).await
 }
 
-async fn fetch_binance_depth_snapshot(
-    http_client: &reqwest::Client,
-    sink: &SourceEventSink,
-    collector_identity: &CollectorIdentity,
-    run_started: Instant,
-    snapshot_endpoint: &str,
-    trigger_reason: &str,
-) -> Result<u64> {
+#[allow(clippy::too_many_arguments)]
+async fn fetch_binance_depth_snapshot_cycle(
+    http_client: reqwest::Client,
+    collector_identity: CollectorIdentity,
+    snapshot_endpoint: String,
+    trigger_reason: String,
+    source_sequence_epoch_id: String,
+    connection_generation: u64,
+    ingress_sequence: DepthIngressSequenceAllocator,
+    snapshot_not_before: DepthSnapshotNotBefore,
+) -> Result<DepthSnapshotCycleOutcome> {
+    let mut last_unavailable_reason = "snapshot_attempts_exhausted".to_owned();
+    let snapshot_jitter_seed =
+        depth_snapshot_jitter_seed(&source_sequence_epoch_id, connection_generation);
     for attempt in 1..=BINANCE_DEPTH_SNAPSHOT_MAX_ATTEMPTS {
+        snapshot_not_before.wait().await;
         let snapshot_fetch_start_utc = now_ms();
         let fetched = async {
-            let response = http_client
-                .get(snapshot_endpoint)
+            let mut response = http_client
+                .get(&snapshot_endpoint)
                 .send()
                 .await
                 .map_err(|error| format!("request:{error}"))?;
             let status = response.status();
-            let body = response
-                .bytes()
-                .await
-                .map_err(|error| format!("body:{error}"))?;
-            let timestamp_received = now_ms();
-            if !status.is_success() {
-                return Err(format!("http_status:{status}"));
+            let retry_after = binance_snapshot_retry_after(response.headers(), status);
+            if let Some(delay) = retry_after {
+                snapshot_not_before.defer_for(delay);
             }
+            if !status.is_success() {
+                let _ = ingress_sequence.allocate()?;
+                if matches!(status.as_u16(), 408 | 418 | 429) || status.is_server_error() {
+                    return Ok::<_, String>(DepthSnapshotAttempt::Unavailable {
+                        reason: format!("http_status:{status}"),
+                        retry_after,
+                    });
+                }
+                return Err(format!("http_status_terminal:{status}"));
+            }
+            let body_limit = u64::try_from(MAX_TYPED_ROW_BYTES)
+                .map_err(|_| "snapshot_body_limit_conversion".to_owned())?;
+            if response
+                .content_length()
+                .is_some_and(|length| length > body_limit)
+            {
+                return Err(format!(
+                    "schema:response_body_too_large:limit={MAX_TYPED_ROW_BYTES}"
+                ));
+            }
+            let mut body = Vec::with_capacity(
+                response
+                    .content_length()
+                    .and_then(|length| usize::try_from(length).ok())
+                    .unwrap_or_default()
+                    .min(MAX_TYPED_ROW_BYTES),
+            );
+            while let Some(chunk) = response
+                .chunk()
+                .await
+                .map_err(|error| format!("body:{error}"))?
+            {
+                let next_length = body
+                    .len()
+                    .checked_add(chunk.len())
+                    .ok_or_else(|| "schema:response_body_length_overflow".to_owned())?;
+                if next_length > MAX_TYPED_ROW_BYTES {
+                    return Err(format!(
+                        "schema:response_body_too_large:limit={MAX_TYPED_ROW_BYTES}"
+                    ));
+                }
+                body.extend_from_slice(&chunk);
+            }
+            let timestamp_received = now_ms();
+            let depth_ingress_sequence = ingress_sequence.allocate()?;
             if body.is_empty() {
                 return Err("empty_body".to_owned());
             }
@@ -13203,47 +13246,154 @@ async fn fetch_binance_depth_snapshot(
                 "snapshot_fetch_start_utc".to_owned(),
                 json!(snapshot_fetch_start_utc),
             );
-            Ok::<_, String>((snapshot_last_update_id, snapshot_value, timestamp_received))
+            object.insert(
+                "source_sequence_epoch_id".to_owned(),
+                json!(source_sequence_epoch_id),
+            );
+            object.insert(
+                "connection_generation".to_owned(),
+                json!(connection_generation),
+            );
+            object.insert(
+                "depth_ingress_sequence".to_owned(),
+                json!(depth_ingress_sequence),
+            );
+            let mut event = raw_event(
+                "binance_depth_snapshot",
+                "depth_snapshot",
+                "BTCUSDT",
+                None,
+                &snapshot_endpoint,
+                &collector_identity,
+                snapshot_value,
+            );
+            event.recv_time_utc_ms = timestamp_received;
+            let parsed = parse_depth_snapshot_raw(
+                event_envelope(&event, SourceKind::BinanceDepthSnapshot),
+                &event.raw_json,
+                snapshot_fetch_start_utc,
+                timestamp_received,
+                snapshot_endpoint.clone(),
+            )
+            .map_err(|error| format!("schema:{error}"))?;
+            let validation = parsed.validate_contract();
+            if validation.verdict != crate::ValidationVerdict::Complete {
+                return Err(format!(
+                    "schema:invalid_snapshot_contract:{}",
+                    validation.missing_fields.join(",")
+                ));
+            }
+            let event_bytes = owned_event_bytes(&event);
+            if event_bytes > MAX_TYPED_ROW_BYTES {
+                return Err(format!(
+                    "schema:enriched_snapshot_row_too_large:bytes={event_bytes}:limit={MAX_TYPED_ROW_BYTES}"
+                ));
+            }
+            Ok(DepthSnapshotAttempt::Available(Box::new(
+                DepthSnapshotRecord {
+                    snapshot_last_update_id,
+                    snapshot_utc_day: utc_day_string_from_ms(timestamp_received)
+                        .unwrap_or_else(|| "unknown".to_owned()),
+                    event,
+                },
+            )))
         }
         .await;
+        let mut server_retry_after = None;
         match fetched {
-            Ok((snapshot_last_update_id, snapshot_value, timestamp_received)) => {
-                let mut event = raw_event(
-                    "binance_depth_snapshot",
-                    "depth_snapshot",
-                    "BTCUSDT",
-                    None,
-                    snapshot_endpoint,
-                    collector_identity,
-                    snapshot_value,
-                );
-                event.recv_time_utc_ms = timestamp_received;
-                send_event(sink, run_started, event).await?;
-                return Ok(snapshot_last_update_id);
+            Ok(DepthSnapshotAttempt::Available(record)) => {
+                return Ok(DepthSnapshotCycleOutcome::Available(record));
+            }
+            Ok(DepthSnapshotAttempt::Unavailable {
+                reason,
+                retry_after,
+            }) => {
+                last_unavailable_reason = reason;
+                server_retry_after = retry_after;
+            }
+            Err(error) if error.starts_with("request:") || error.starts_with("body:") => {
+                last_unavailable_reason = error;
+            }
+            Err(error) if depth_snapshot_schema_error(&error) => {
+                return Err(io::Error::other(format!(
+                    "binance_depth_snapshot_schema_fatal:{error}"
+                ))
+                .into());
             }
             Err(error) => {
-                record_gap(
-                    &sink.gaps,
-                    format!(
-                        "binance_depth_snapshot_attempt_failed:attempt={attempt}:{error}:{trigger_reason}"
-                    ),
-                );
-                if attempt == BINANCE_DEPTH_SNAPSHOT_MAX_ATTEMPTS {
-                    let prefix = if error.starts_with("json:")
-                        || error == "last_update_id_missing"
-                        || error == "snapshot_not_object"
-                    {
-                        "binance_depth_snapshot_schema_fatal"
-                    } else {
-                        "binance_depth_snapshot_recovery_exhausted"
-                    };
-                    return Err(io::Error::other(format!("{prefix}:{error}")).into());
-                }
-                sleep(Duration::from_millis(250 * u64::from(attempt))).await;
+                return Err(io::Error::other(format!(
+                    "binance_depth_snapshot_integrity_fatal:{error}"
+                ))
+                .into());
             }
         }
+        if attempt == BINANCE_DEPTH_SNAPSHOT_MAX_ATTEMPTS {
+            return Ok(DepthSnapshotCycleOutcome::Unavailable {
+                reason: last_unavailable_reason,
+                retry_after: server_retry_after,
+            });
+        }
+        let base_retry = Some(retry_delay(
+            "binance_depth_snapshot",
+            attempt,
+            250,
+            BINANCE_WS_RECONNECT_MAX_MS,
+            snapshot_jitter_seed,
+        ));
+        if let Some(delay) = server_retry_after.into_iter().chain(base_retry).max() {
+            sleep(delay).await;
+        }
     }
-    Err(io::Error::other("Binance depth snapshot attempt loop exhausted").into())
+    Ok(DepthSnapshotCycleOutcome::Unavailable {
+        reason: last_unavailable_reason,
+        retry_after: None,
+    })
+}
+
+fn binance_snapshot_retry_after(
+    headers: &reqwest::header::HeaderMap,
+    status: reqwest::StatusCode,
+) -> Option<Duration> {
+    if !matches!(status.as_u16(), 418 | 429) {
+        return None;
+    }
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|seconds| Duration::from_secs(seconds.min(BINANCE_RETRY_AFTER_MAX_SECS)))
+}
+
+fn start_binance_depth_snapshot_cycle(
+    context: &BinanceDepthUpdateContext,
+    trigger_reason: impl Into<String>,
+) -> DepthSnapshotFuture {
+    Box::pin(fetch_binance_depth_snapshot_cycle(
+        context.http_client.clone(),
+        context.collector_identity.clone(),
+        context.spec.snapshot_endpoint.clone(),
+        trigger_reason.into(),
+        context.source_sequence_epoch_id.clone(),
+        context.connection_generation,
+        context.ingress_sequence.clone(),
+        context.snapshot_not_before.clone(),
+    ))
+}
+
+#[cfg(test)]
+async fn fetch_binance_depth_snapshot(
+    context: &BinanceDepthUpdateContext,
+    trigger_reason: &str,
+) -> Result<DepthSnapshotCycleOutcome> {
+    start_binance_depth_snapshot_cycle(context, trigger_reason).await
+}
+
+fn depth_snapshot_schema_error(error: &str) -> bool {
+    error.starts_with("json:")
+        || error.starts_with("schema:")
+        || error == "empty_body"
+        || error == "last_update_id_missing"
+        || error == "snapshot_not_object"
 }
 
 fn utc_day_string_from_ms(utc_ms: i64) -> Option<String> {
@@ -13276,65 +13426,235 @@ fn next_utc_hour_boundary_ms(utc_ms: i64) -> i64 {
 
 async fn run_binance_depth_update_ws_source_with_control(
     mut stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
-    mut context: BinanceDepthUpdateContext,
+    context: BinanceDepthUpdateContext,
     mut control_rx: Option<&mut mpsc::Receiver<DepthSourceControl>>,
 ) -> Result<BinanceDepthUpdateExit> {
-    let mut local_u = None::<u64>;
+    let mut continuity = DepthContinuityState::AwaitingSnapshot;
+    #[cfg(test)]
+    let mut pending = context
+        .pending_limits
+        .map(|(max_rows, max_bytes)| DepthPendingBuffer::with_limits(max_rows, max_bytes))
+        .unwrap_or_default();
+    #[cfg(not(test))]
+    let mut pending = DepthPendingBuffer::default();
+    let mut snapshot_future = Some(start_binance_depth_snapshot_cycle(
+        &context,
+        context.initial_snapshot_trigger_reason.clone(),
+    ));
+    let mut snapshot_unavailable_cycles = 0_u32;
     let mut saw_business = false;
-    'messages: while !deadline_reached(context.deadline) {
-        let read_timeout = deadline_remaining(context.deadline)
-            .map(|remaining| remaining.min(Duration::from_secs(30)))
-            .unwrap_or_else(|| Duration::from_secs(30));
-        let message = match control_rx.as_deref_mut() {
-            Some(receiver) => {
-                tokio::select! {
-                    biased;
-                    control = receiver.recv() => {
-                        match control {
-                            Some(control) => {
-                                if handle_depth_source_control(control).await? {
-                                    return Ok(BinanceDepthUpdateExit::Stopped);
-                                }
-                                continue 'messages;
-                            }
-                            None => {
-                                return Err(invalid_data("depth source control channel closed").into());
-                            }
-                        }
-                    }
-                    message = timeout(read_timeout, stream.next()) => message,
+    let mut saw_transport = false;
+    let mut frame_inactivity = Box::pin(sleep(depth_frame_inactivity_wait(
+        context.deadline,
+        context.spec.frame_inactivity_timeout,
+    )));
+    while !deadline_reached(context.deadline) {
+        tokio::select! {
+            biased;
+            control = async {
+                match control_rx.as_deref_mut() {
+                    Some(receiver) => receiver.recv().await,
+                    None => std::future::pending::<Option<DepthSourceControl>>().await,
+                }
+            } => {
+                let Some(control) = control else {
+                    return fail_depth_session_after_pending_release(
+                        &context,
+                        &mut pending,
+                        &mut saw_business,
+                        invalid_data("depth source control channel closed").into(),
+                    )
+                    .await;
+                };
+                if handle_active_depth_source_control(
+                    control,
+                    &context,
+                    &mut snapshot_future,
+                    &mut pending,
+                    &mut continuity,
+                    &mut saw_business,
+                )
+                .await?
+                {
+                    return Ok(BinanceDepthUpdateExit::Stopped);
+                }
+                reset_depth_frame_inactivity(
+                    &mut frame_inactivity,
+                    context.deadline,
+                    context.spec.frame_inactivity_timeout,
+                );
+                if matches!(continuity, DepthContinuityState::AwaitingSnapshot)
+                    && snapshot_future.is_none()
+                {
+                    snapshot_future = Some(start_binance_depth_snapshot_cycle(
+                        &context,
+                        "utc_day_boundary",
+                    ));
                 }
             }
-            None => timeout(read_timeout, stream.next()).await,
-        };
-        match message {
-            Ok(Some(Ok(Message::Text(text)))) => {
+            snapshot = async {
+                match snapshot_future.as_mut() {
+                    Some(future) => future.await,
+                    None => std::future::pending::<Result<DepthSnapshotCycleOutcome>>().await,
+                }
+            } => {
+                snapshot_future = None;
+                let snapshot = match snapshot {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        return fail_depth_session_after_pending_release(
+                            &context,
+                            &mut pending,
+                            &mut saw_business,
+                            error,
+                        )
+                        .await;
+                    }
+                };
+                match snapshot {
+                    DepthSnapshotCycleOutcome::Available(record) => {
+                        snapshot_unavailable_cycles = 0;
+                        let trigger = match admit_depth_snapshot_and_drain(
+                            &context,
+                            *record,
+                            &mut pending,
+                            &mut continuity,
+                            &mut saw_business,
+                        )
+                        .await
+                        {
+                            Ok(trigger) => trigger,
+                            Err(error) => {
+                                return fail_depth_session_after_pending_release(
+                                    &context,
+                                    &mut pending,
+                                    &mut saw_business,
+                                    error,
+                                )
+                                .await;
+                            }
+                        };
+                        if let Some(trigger) = trigger {
+                            snapshot_future = Some(start_binance_depth_snapshot_cycle(
+                                &context,
+                                trigger,
+                            ));
+                        }
+                    }
+                    DepthSnapshotCycleOutcome::Unavailable {
+                        reason,
+                        retry_after,
+                    } => {
+                        neutral_release_depth_pending(
+                            &context,
+                            &mut pending,
+                            &mut saw_business,
+                        )
+                        .await?;
+                        continuity = DepthContinuityState::AwaitingSnapshot;
+                        snapshot_unavailable_cycles = snapshot_unavailable_cycles.saturating_add(1);
+                        let internal_delay = depth_snapshot_retry_delay(
+                            snapshot_unavailable_cycles,
+                            depth_snapshot_jitter_seed(
+                                &context.source_sequence_epoch_id,
+                                context.connection_generation,
+                            ),
+                        );
+                        let delay = retry_after
+                            .into_iter()
+                            .chain(Some(internal_delay))
+                            .max()
+                            .unwrap_or(internal_delay);
+                        snapshot_future = Some(start_binance_depth_snapshot_cycle_after(
+                            &context,
+                            format!("availability_retry:{reason}"),
+                            delay,
+                        ));
+                    }
+                }
+            }
+            _ = &mut frame_inactivity => {
+                neutral_release_depth_pending(&context, &mut pending, &mut saw_business).await?;
+                if deadline_reached(context.deadline) {
+                    return Ok(BinanceDepthUpdateExit::DeadlineReached);
+                }
+                return Ok(BinanceDepthUpdateExit::StreamEnded {
+                    reason: "full_frame_inactivity".to_owned(),
+                    saw_transport,
+                });
+            }
+            message = stream.next() => match message {
+            Some(Ok(Message::Text(text))) => {
+                reset_depth_frame_inactivity(
+                    &mut frame_inactivity,
+                    context.deadline,
+                    context.spec.frame_inactivity_timeout,
+                );
                 let raw_json = text.to_string();
                 let recv_time_utc_ms = now_ms();
-                let recv_utc_day = utc_day_string_from_ms(recv_time_utc_ms)
-                    .unwrap_or(context.snapshot_utc_day.clone());
-                let value = serde_json::from_str::<Value>(&raw_json).map_err(|error| {
-                    invalid_data(format!(
-                        "binance_depth_update_parse_error:parse_depth_update_json:{error}"
-                    ))
-                })?;
+                let depth_ingress_sequence = match context.ingress_sequence.allocate() {
+                    Ok(sequence) => sequence,
+                    Err(error) => {
+                        return fail_depth_session_after_pending_release(
+                            &context,
+                            &mut pending,
+                            &mut saw_business,
+                            invalid_data(format!("binance_depth_ingress_integrity:{error}")).into(),
+                        )
+                        .await;
+                    }
+                };
+                let value = match serde_json::from_str::<Value>(&raw_json) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return fail_depth_session_after_pending_release(
+                            &context,
+                            &mut pending,
+                            &mut saw_business,
+                            invalid_data(format!(
+                                "binance_depth_update_parse_error:parse_depth_update_json:{error}"
+                            ))
+                            .into(),
+                        )
+                        .await;
+                    }
+                };
                 let payload = binance_ws_payload(&value);
-                let event_type = payload.get("e").and_then(Value::as_str).ok_or_else(|| {
-                    invalid_data("binance_depth_update_parse_error:missing_string_field:e")
-                })?;
+                let Some(event_type) = payload.get("e").and_then(Value::as_str) else {
+                    return fail_depth_session_after_pending_release(
+                        &context,
+                        &mut pending,
+                        &mut saw_business,
+                        invalid_data("binance_depth_update_parse_error:missing_string_field:e")
+                            .into(),
+                    )
+                    .await;
+                };
                 if event_type == "serverShutdown" {
+                    neutral_release_depth_pending(
+                        &context,
+                        &mut pending,
+                        &mut saw_business,
+                    )
+                    .await?;
                     return Ok(BinanceDepthUpdateExit::StreamEnded {
                         reason: "server_shutdown".to_owned(),
-                        saw_business,
+                        saw_transport,
                     });
                 }
                 if event_type != "depthUpdate" {
-                    return Err(invalid_data(format!(
-                        "binance_depth_update_parse_error:unexpected_depth_event_type:{event_type}"
-                    ))
-                    .into());
+                    return fail_depth_session_after_pending_release(
+                        &context,
+                        &mut pending,
+                        &mut saw_business,
+                        invalid_data(format!(
+                            "binance_depth_update_parse_error:unexpected_depth_event_type:{event_type}"
+                        ))
+                        .into(),
+                    )
+                    .await;
                 }
-                let mut base_event = RawEvent {
+                let base_event = RawEvent {
                     source_kind: "binance_depth_update".to_owned(),
                     source_event_type: "depth_update".to_owned(),
                     source_identifier: "BTCUSDT".to_owned(),
@@ -13351,179 +13671,498 @@ async fn run_binance_depth_update_ws_source_with_control(
                     parquet_raw_layout_version: 1,
                     parquet_raw_source_kind: "binance_depth_update".to_owned(),
                 };
-                let parsed = parse_depth_update_raw(
+                let parsed = match parse_depth_update_raw(
                     event_envelope(&base_event, SourceKind::BinanceDepthUpdate),
                     &raw_json,
-                )
-                .map_err(|error| {
-                    invalid_data(format!("binance_depth_update_parse_error:{error}"))
-                })?;
-                if recv_utc_day != context.snapshot_utc_day {
-                    let next_snapshot_last_update_id = match fetch_binance_depth_snapshot(
-                        &context.http_client,
-                        &context.sink,
-                        &context.collector_identity,
-                        context.run_started,
-                        &context.spec.snapshot_endpoint,
-                        "utc_day_boundary",
-                    )
-                    .await
-                    {
-                        Ok(snapshot_last_update_id) => snapshot_last_update_id,
-                        Err(error) => {
-                            record_gap(
-                                &context.sink.gaps,
-                                "binance_depth_resync_failed:utc_day_boundary".to_owned(),
-                            );
-                            return Err(error);
-                        }
-                    };
-                    context.snapshot_last_update_id = next_snapshot_last_update_id;
-                    context.snapshot_utc_day = recv_utc_day.clone();
-                    context.pending_snapshot_trigger_reason = Some("utc_day_boundary".to_owned());
-                    local_u = None;
-                }
-                let mut local_u_before = local_u;
-                let mut resnapshot_attempted = false;
-                let stitched = loop {
-                    match stitch_depth_update(context.snapshot_last_update_id, local_u, &parsed) {
-                        crate::sources::binance::DepthUpdateDecision::Apply {
-                            local_u: next_local_u,
-                            stitch_evidence,
-                        } => {
-                            local_u = Some(next_local_u);
-                            let stitched = apply_depth_stitch_evidence(
-                                parsed,
-                                crate::sources::binance::DepthUpdateDecision::Apply {
-                                    local_u: next_local_u,
-                                    stitch_evidence,
-                                },
-                            )
-                            .map_err(invalid_data)?;
-                            break stitched;
-                        }
-                        crate::sources::binance::DepthUpdateDecision::DropStaleOrDuplicate {
-                            ..
-                        } => {
-                            context
-                                .sink
-                                .source_queue_backpressure
-                                .record_structural_dedupe(
-                                    "binance_depth_update",
-                                    base_event.recv_time_utc_ms,
-                                    1,
-                                );
-                            continue 'messages;
-                        }
-                        crate::sources::binance::DepthUpdateDecision::SourceGapResnapshot {
-                            reason,
-                        } => {
-                            if resnapshot_attempted {
-                                record_gap(
-                                    &context.sink.gaps,
-                                    format!(
-                                        "binance_depth_update_stitch_gap_after_resnapshot:{reason}"
-                                    ),
-                                );
-                                return Ok(BinanceDepthUpdateExit::StreamEnded {
-                                    reason: format!("stitch_gap_after_resnapshot:{reason}"),
-                                    saw_business,
-                                });
-                            }
-                            record_gap(
-                                &context.sink.gaps,
-                                format!("binance_depth_update_stitch_gap:{reason}"),
-                            );
-                            let trigger = format!("stitch_gap:{reason}");
-                            let next_snapshot_last_update_id = match fetch_binance_depth_snapshot(
-                                &context.http_client,
-                                &context.sink,
-                                &context.collector_identity,
-                                context.run_started,
-                                &context.spec.snapshot_endpoint,
-                                &trigger,
-                            )
-                            .await
-                            {
-                                Ok(snapshot_last_update_id) => snapshot_last_update_id,
-                                Err(error) => {
-                                    record_gap(
-                                        &context.sink.gaps,
-                                        format!("binance_depth_resync_failed:{reason}"),
-                                    );
-                                    return Err(error);
-                                }
-                            };
-                            context.snapshot_last_update_id = next_snapshot_last_update_id;
-                            context.snapshot_utc_day = recv_utc_day.clone();
-                            context.pending_snapshot_trigger_reason = Some(trigger);
-                            local_u = None;
-                            local_u_before = None;
-                            resnapshot_attempted = true;
-                        }
+                ) {
+                    Ok(parsed) => parsed,
+                    Err(error) => {
+                        return fail_depth_session_after_pending_release(
+                            &context,
+                            &mut pending,
+                            &mut saw_business,
+                            invalid_data(format!("binance_depth_update_parse_error:{error}"))
+                                .into(),
+                        )
+                        .await;
                     }
                 };
-                let mut enriched = serde_json::from_str::<Value>(&raw_json).unwrap_or(Value::Null);
-                if let Some(object) = enriched.as_object_mut() {
-                    object.insert(
-                        "snapshot_last_update_id".to_owned(),
-                        json!(context.snapshot_last_update_id),
-                    );
-                    object.insert("local_u_before".to_owned(), json!(local_u_before));
-                    object.insert(
-                        "stitch_evidence".to_owned(),
-                        json!(stitched.stitch_evidence),
-                    );
-                    if let Some(trigger_reason) = context.pending_snapshot_trigger_reason.take() {
-                        object.insert("snapshot_trigger_reason".to_owned(), json!(trigger_reason));
+                let validation = parsed.validate_contract();
+                if validation.verdict != crate::ValidationVerdict::Complete {
+                    return fail_depth_session_after_pending_release(
+                        &context,
+                        &mut pending,
+                        &mut saw_business,
+                        invalid_data(format!(
+                            "binance_depth_update_contract_error:{}",
+                            validation.missing_fields.join(",")
+                        ))
+                        .into(),
+                    )
+                    .await;
+                }
+                saw_transport = true;
+                let recv_utc_day = utc_day_string_from_ms(recv_time_utc_ms)
+                    .unwrap_or_else(|| "unknown".to_owned());
+                if matches!(
+                    &continuity,
+                    DepthContinuityState::Ready { snapshot_utc_day, .. }
+                        if snapshot_utc_day != &recv_utc_day
+                ) {
+                    continuity = DepthContinuityState::AwaitingSnapshot;
+                    if snapshot_future.is_none() {
+                        snapshot_future = Some(start_binance_depth_snapshot_cycle(
+                            &context,
+                            "utc_day_boundary",
+                        ));
                     }
                 }
-                base_event.raw_json = enriched.to_string();
-                send_event(&context.sink, context.run_started, base_event).await?;
-                context
-                    .sink
-                    .source_queue_backpressure
-                    .set_recovery_active("binance_depth_update", false);
-                saw_business = true;
+                match continuity {
+                    DepthContinuityState::AwaitingSnapshot => {
+                        let owned_bytes = owned_event_bytes(&base_event);
+                        let buffered = BufferedDepthUpdate {
+                            event: base_event,
+                            depth_ingress_sequence,
+                            owned_bytes,
+                        };
+                        if pending.would_exceed(owned_bytes) {
+                            neutral_release_depth_pending(
+                                &context,
+                                &mut pending,
+                                &mut saw_business,
+                            )
+                            .await?;
+                            neutral_release_one_depth_update(
+                                &context,
+                                buffered,
+                                &mut saw_business,
+                            )
+                            .await?;
+                            continuity = DepthContinuityState::AwaitingSnapshot;
+                            if snapshot_future.is_none() {
+                                snapshot_future = Some(start_binance_depth_snapshot_cycle_after(
+                                    &context,
+                                    "pending_buffer_capacity",
+                                    depth_snapshot_retry_delay(
+                                        1,
+                                        depth_snapshot_jitter_seed(
+                                            &context.source_sequence_epoch_id,
+                                            context.connection_generation,
+                                        ),
+                                    ),
+                                ));
+                            }
+                        } else {
+                            pending.push(buffered)?;
+                        }
+                    }
+                    DepthContinuityState::Ready { .. } => {
+                        let assessment = admit_depth_update(
+                            &context,
+                            base_event,
+                            depth_ingress_sequence,
+                            depth_continuity_coordinates(&continuity)?,
+                        )
+                        .await?;
+                        saw_business = true;
+                        if let Some(trigger) = apply_depth_assessment(
+                            &context,
+                            &mut continuity,
+                            &assessment,
+                        )? {
+                            snapshot_future = Some(start_binance_depth_snapshot_cycle(
+                                &context,
+                                trigger,
+                            ));
+                        }
+                    }
+                }
             }
-            Ok(Some(Ok(Message::Ping(payload)))) => {
-                let _ = stream.send(Message::Pong(payload)).await;
+            Some(Ok(Message::Ping(payload))) => {
+                reset_depth_frame_inactivity(
+                    &mut frame_inactivity,
+                    context.deadline,
+                    context.spec.frame_inactivity_timeout,
+                );
+                if !matches!(timeout(
+                    Duration::from_secs(WS_WRITE_TIMEOUT_SECS),
+                    stream.send(Message::Pong(payload)),
+                )
+                .await, Ok(Ok(())))
+                {
+                    neutral_release_depth_pending(
+                        &context,
+                        &mut pending,
+                        &mut saw_business,
+                    )
+                    .await?;
+                    return Ok(BinanceDepthUpdateExit::StreamEnded {
+                        reason: "pong_write_failed".to_owned(),
+                        saw_transport,
+                    });
+                }
+                saw_transport = true;
             }
-            Ok(Some(Ok(Message::Close(frame)))) => {
+            Some(Ok(Message::Close(frame))) => {
+                reset_depth_frame_inactivity(
+                    &mut frame_inactivity,
+                    context.deadline,
+                    context.spec.frame_inactivity_timeout,
+                );
+                neutral_release_depth_pending(&context, &mut pending, &mut saw_business).await?;
                 return Ok(BinanceDepthUpdateExit::StreamEnded {
                     reason: format!("ws_closed:{frame:?}"),
-                    saw_business,
+                    saw_transport,
                 });
             }
-            Ok(Some(Ok(_))) => {}
-            Ok(Some(Err(err))) => {
+            Some(Ok(Message::Pong(_))) => {
+                reset_depth_frame_inactivity(
+                    &mut frame_inactivity,
+                    context.deadline,
+                    context.spec.frame_inactivity_timeout,
+                );
+                saw_transport = true;
+            }
+            Some(Ok(Message::Binary(_))) => {
+                reset_depth_frame_inactivity(
+                    &mut frame_inactivity,
+                    context.deadline,
+                    context.spec.frame_inactivity_timeout,
+                );
+                return fail_depth_session_after_pending_release(
+                    &context,
+                    &mut pending,
+                    &mut saw_business,
+                    invalid_data("binance_depth_update_binary_payload_integrity_fatal").into(),
+                )
+                .await;
+            }
+            Some(Ok(_)) => {
+                reset_depth_frame_inactivity(
+                    &mut frame_inactivity,
+                    context.deadline,
+                    context.spec.frame_inactivity_timeout,
+                );
+            }
+            Some(Err(err)) => {
+                neutral_release_depth_pending(&context, &mut pending, &mut saw_business).await?;
                 return Ok(BinanceDepthUpdateExit::StreamEnded {
                     reason: format!("ws_error:{err}"),
-                    saw_business,
+                    saw_transport,
                 });
             }
-            Ok(None) => {
+            None => {
+                neutral_release_depth_pending(&context, &mut pending, &mut saw_business).await?;
                 return Ok(BinanceDepthUpdateExit::StreamEnded {
                     reason: "ws_ended".to_owned(),
-                    saw_business,
+                    saw_transport,
                 });
             }
-            Err(_) => {
-                if deadline_reached(context.deadline) {
-                    return Ok(BinanceDepthUpdateExit::DeadlineReached);
-                }
-                return Ok(BinanceDepthUpdateExit::StreamEnded {
-                    reason: "no_business_messages".to_owned(),
-                    saw_business,
-                });
-            }
+        },
         }
     }
+    neutral_release_depth_pending(&context, &mut pending, &mut saw_business).await?;
     Ok(BinanceDepthUpdateExit::DeadlineReached)
+}
+
+fn depth_frame_inactivity_wait(deadline: Option<Instant>, frame_window: Duration) -> Duration {
+    deadline_remaining(deadline)
+        .map(|remaining| remaining.min(frame_window))
+        .unwrap_or(frame_window)
+}
+
+fn reset_depth_frame_inactivity(
+    timer: &mut Pin<Box<tokio::time::Sleep>>,
+    deadline: Option<Instant>,
+    frame_window: Duration,
+) {
+    timer
+        .as_mut()
+        .reset(tokio::time::Instant::now() + depth_frame_inactivity_wait(deadline, frame_window));
+}
+
+fn depth_snapshot_retry_delay(cycle: u32, jitter_seed: u64) -> Duration {
+    retry_delay(
+        "binance_depth_snapshot",
+        cycle.min(32),
+        BINANCE_WS_RECONNECT_BASE_MS,
+        BINANCE_WS_RECONNECT_MAX_MS,
+        jitter_seed,
+    )
+}
+
+fn depth_snapshot_jitter_seed(source_sequence_epoch_id: &str, connection_generation: u64) -> u64 {
+    let mut hasher = Sha256::new();
+    hasher.update(b"binance_depth_snapshot_jitter_v1\0");
+    hasher.update(source_sequence_epoch_id.as_bytes());
+    hasher.update(connection_generation.to_le_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    u64::from_le_bytes(bytes)
+}
+
+fn start_binance_depth_snapshot_cycle_after(
+    context: &BinanceDepthUpdateContext,
+    trigger_reason: impl Into<String>,
+    delay: Duration,
+) -> DepthSnapshotFuture {
+    let future = start_binance_depth_snapshot_cycle(context, trigger_reason);
+    Box::pin(async move {
+        if !delay.is_zero() {
+            sleep(delay).await;
+        }
+        future.await
+    })
+}
+
+fn depth_continuity_coordinates(
+    continuity: &DepthContinuityState,
+) -> Result<(Option<u64>, Option<u64>)> {
+    match continuity {
+        DepthContinuityState::AwaitingSnapshot => Ok((None, None)),
+        DepthContinuityState::Ready {
+            snapshot_last_update_id,
+            local_u,
+            ..
+        } => Ok((Some(*snapshot_last_update_id), *local_u)),
+    }
+}
+
+fn depth_verdict_label(verdict: DepthUpdateVerdict) -> &'static str {
+    match verdict {
+        DepthUpdateVerdict::Applied => BINANCE_DEPTH_VERDICT_APPLIED,
+        DepthUpdateVerdict::NotAppliedStaleDuplicate => {
+            BINANCE_DEPTH_VERDICT_NOT_APPLIED_STALE_DUPLICATE
+        }
+        DepthUpdateVerdict::NotAppliedConfirmedHole => {
+            BINANCE_DEPTH_VERDICT_NOT_APPLIED_CONFIRMED_HOLE
+        }
+        DepthUpdateVerdict::NotAppliedSnapshotUnavailable => {
+            BINANCE_DEPTH_VERDICT_NOT_APPLIED_SNAPSHOT_UNAVAILABLE
+        }
+    }
+}
+
+async fn admit_depth_update(
+    context: &BinanceDepthUpdateContext,
+    mut event: RawEvent,
+    depth_ingress_sequence: u64,
+    (snapshot_last_update_id, local_u_before): (Option<u64>, Option<u64>),
+) -> Result<DepthUpdateAssessment> {
+    let parsed = parse_depth_update_raw(
+        event_envelope(&event, SourceKind::BinanceDepthUpdate),
+        &event.raw_json,
+    )
+    .map_err(|error| invalid_data(format!("binance_depth_update_parse_error:{error}")))?;
+    let assessment = assess_depth_update(snapshot_last_update_id, local_u_before, &parsed)
+        .map_err(invalid_data)?;
+    let mut enriched = serde_json::from_str::<Value>(&event.raw_json)?;
+    let object = enriched
+        .as_object_mut()
+        .ok_or_else(|| invalid_data("Binance depth update payload is not an object"))?;
+    object.insert(
+        "source_sequence_epoch_id".to_owned(),
+        json!(context.source_sequence_epoch_id),
+    );
+    object.insert(
+        "connection_generation".to_owned(),
+        json!(context.connection_generation),
+    );
+    object.insert(
+        "depth_ingress_sequence".to_owned(),
+        json!(depth_ingress_sequence),
+    );
+    object.insert(
+        "snapshot_last_update_id".to_owned(),
+        json!(assessment.snapshot_last_update_id),
+    );
+    object.insert(
+        "local_u_before".to_owned(),
+        json!(assessment.local_u_before),
+    );
+    object.insert(
+        "stitch_verdict".to_owned(),
+        json!(depth_verdict_label(assessment.verdict)),
+    );
+    object.insert(
+        "stitch_evidence".to_owned(),
+        json!(assessment.stitch_evidence),
+    );
+    object.insert("local_u_after".to_owned(), json!(assessment.local_u_after));
+    object.insert("stitch_gap_reason".to_owned(), json!(assessment.gap_reason));
+    event.raw_json = enriched.to_string();
+    send_event(&context.sink, context.run_started, event).await?;
+    Ok(assessment)
+}
+
+fn apply_depth_assessment(
+    context: &BinanceDepthUpdateContext,
+    continuity: &mut DepthContinuityState,
+    assessment: &DepthUpdateAssessment,
+) -> Result<Option<String>> {
+    match assessment.verdict {
+        DepthUpdateVerdict::Applied => {
+            let next_local_u = assessment
+                .local_u_after
+                .ok_or_else(|| invalid_data("applied depth update omitted local_u_after"))?;
+            let DepthContinuityState::Ready { local_u, .. } = continuity else {
+                return Err(invalid_data("applied depth update without ready snapshot").into());
+            };
+            *local_u = Some(next_local_u);
+            Ok(None)
+        }
+        DepthUpdateVerdict::NotAppliedStaleDuplicate => Ok(None),
+        DepthUpdateVerdict::NotAppliedConfirmedHole => {
+            let reason = assessment
+                .gap_reason
+                .as_deref()
+                .ok_or_else(|| invalid_data("confirmed depth hole omitted gap reason"))?;
+            record_gap(
+                &context.sink.gaps,
+                format!("binance_depth_update_stitch_gap:{reason}"),
+            );
+            *continuity = DepthContinuityState::AwaitingSnapshot;
+            Ok(Some(format!("stitch_gap:{reason}")))
+        }
+        DepthUpdateVerdict::NotAppliedSnapshotUnavailable => {
+            *continuity = DepthContinuityState::AwaitingSnapshot;
+            Ok(None)
+        }
+    }
+}
+
+async fn neutral_release_one_depth_update(
+    context: &BinanceDepthUpdateContext,
+    update: BufferedDepthUpdate,
+    saw_business: &mut bool,
+) -> Result<()> {
+    let assessment = admit_depth_update(
+        context,
+        update.event,
+        update.depth_ingress_sequence,
+        (None, None),
+    )
+    .await?;
+    if assessment.verdict != DepthUpdateVerdict::NotAppliedSnapshotUnavailable {
+        return Err(invalid_data("neutral depth release produced a non-neutral verdict").into());
+    }
+    *saw_business = true;
+    Ok(())
+}
+
+async fn neutral_release_depth_pending(
+    context: &BinanceDepthUpdateContext,
+    pending: &mut DepthPendingBuffer,
+    saw_business: &mut bool,
+) -> Result<()> {
+    while let Some(update) = pending.pop_front()? {
+        neutral_release_one_depth_update(context, update, saw_business).await?;
+    }
+    Ok(())
+}
+
+async fn fail_depth_session_after_pending_release(
+    context: &BinanceDepthUpdateContext,
+    pending: &mut DepthPendingBuffer,
+    saw_business: &mut bool,
+    terminal_error: Box<dyn Error + Send + Sync>,
+) -> Result<BinanceDepthUpdateExit> {
+    if let Err(release_error) = neutral_release_depth_pending(context, pending, saw_business).await
+    {
+        return Err(io::Error::other(format!(
+            "binance_depth_terminal_pending_release_failed:terminal={terminal_error}:release={release_error}"
+        ))
+        .into());
+    }
+    Err(terminal_error)
+}
+
+async fn drain_depth_pending(
+    context: &BinanceDepthUpdateContext,
+    pending: &mut DepthPendingBuffer,
+    continuity: &mut DepthContinuityState,
+    saw_business: &mut bool,
+) -> Result<Option<String>> {
+    while matches!(continuity, DepthContinuityState::Ready { .. }) {
+        let Some(update) = pending.pop_front()? else {
+            break;
+        };
+        let assessment = admit_depth_update(
+            context,
+            update.event,
+            update.depth_ingress_sequence,
+            depth_continuity_coordinates(continuity)?,
+        )
+        .await?;
+        *saw_business = true;
+        if let Some(trigger) = apply_depth_assessment(context, continuity, &assessment)? {
+            return Ok(Some(trigger));
+        }
+    }
+    Ok(None)
+}
+
+async fn admit_depth_snapshot_and_drain(
+    context: &BinanceDepthUpdateContext,
+    record: DepthSnapshotRecord,
+    pending: &mut DepthPendingBuffer,
+    continuity: &mut DepthContinuityState,
+    saw_business: &mut bool,
+) -> Result<Option<String>> {
+    send_event(&context.sink, context.run_started, record.event).await?;
+    *continuity = DepthContinuityState::Ready {
+        snapshot_last_update_id: record.snapshot_last_update_id,
+        local_u: None,
+        snapshot_utc_day: record.snapshot_utc_day,
+    };
+    drain_depth_pending(context, pending, continuity, saw_business).await
+}
+
+async fn handle_active_depth_source_control(
+    control: DepthSourceControl,
+    context: &BinanceDepthUpdateContext,
+    snapshot_future: &mut Option<DepthSnapshotFuture>,
+    pending: &mut DepthPendingBuffer,
+    continuity: &mut DepthContinuityState,
+    saw_business: &mut bool,
+) -> Result<bool> {
+    let DepthSourceControl::Fence {
+        kind,
+        stop_after_fence,
+        resume_after_barrier,
+        reply,
+    } = control;
+    match kind {
+        DepthFenceKind::HourFinalize => {
+            if matches!(continuity, DepthContinuityState::Ready { .. }) && !pending.is_empty() {
+                return Err(invalid_data(
+                    "ready Binance depth continuity retained a pending update at hour fence",
+                )
+                .into());
+            }
+        }
+        DepthFenceKind::ResetContinuity => {
+            drop(snapshot_future.take());
+            neutral_release_depth_pending(context, pending, saw_business).await?;
+            *continuity = DepthContinuityState::AwaitingSnapshot;
+        }
+    }
+    let _ = reply.send(Ok(()));
+    if let Some(resume) = resume_after_barrier
+        && resume.await.is_err()
+    {
+        drop(snapshot_future.take());
+        neutral_release_depth_pending(context, pending, saw_business).await?;
+        *continuity = DepthContinuityState::AwaitingSnapshot;
+        return Err(invalid_data("depth barrier owner dropped source resume signal").into());
+    }
+    Ok(stop_after_fence)
 }
 
 async fn handle_depth_source_control(control: DepthSourceControl) -> Result<bool> {
     let DepthSourceControl::Fence {
+        kind: _,
         stop_after_fence,
         resume_after_barrier,
         reply,
@@ -14758,12 +15397,14 @@ fn bounded_rtds_ws_config() -> WsConfig {
     config
 }
 
-fn stamp_aggtrade_admission(event: &mut RawEvent, sink: &SourceEventSink) -> Result<()> {
-    if event.source_kind != "binance_aggtrade" {
-        return Ok(());
-    }
+fn stamp_source_admission(event: &mut RawEvent, sink: &SourceEventSink) -> Result<()> {
+    let admission_source = match event.source_kind.as_str() {
+        "binance_aggtrade" => "binance_aggtrade",
+        "binance_depth_snapshot" | "binance_depth_update" => "binance_depth",
+        _ => return Ok(()),
+    };
     if event.collector_admission.is_some() {
-        let error = "binance aggTrade event admitted more than once";
+        let error = format!("{admission_source} event admitted more than once");
         sink.source_queue_backpressure.record_operational_drop(
             &event.source_kind,
             event.recv_time_utc_ms,
@@ -14771,18 +15412,26 @@ fn stamp_aggtrade_admission(event: &mut RawEvent, sink: &SourceEventSink) -> Res
         );
         record_gap(
             &sink.gaps,
-            format!("binance_aggtrade_admission_integrity:{error}"),
+            format!("{admission_source}_admission_integrity:{error}"),
         );
         return Err(invalid_data(error).into());
     }
     let time_utc_ms = now_ms();
     if time_utc_ms <= 0 {
-        return Err(invalid_data("binance aggTrade admission time is not positive").into());
+        return Err(
+            invalid_data(format!("{admission_source} admission time is not positive")).into(),
+        );
     }
-    let sequence = match sink
-        .source_queue_backpressure
-        .next_aggtrade_admission_sequence()
-    {
+    let sequence = match admission_source {
+        "binance_aggtrade" => sink
+            .source_queue_backpressure
+            .next_aggtrade_admission_sequence(),
+        "binance_depth" => sink
+            .source_queue_backpressure
+            .next_depth_admission_sequence(),
+        _ => unreachable!("admission source was matched above"),
+    };
+    let sequence = match sequence {
         Ok(sequence) => sequence,
         Err(error) => {
             sink.source_queue_backpressure.record_operational_drop(
@@ -14792,7 +15441,7 @@ fn stamp_aggtrade_admission(event: &mut RawEvent, sink: &SourceEventSink) -> Res
             );
             record_gap(
                 &sink.gaps,
-                format!("binance_aggtrade_admission_integrity:{error}"),
+                format!("{admission_source}_admission_integrity:{error}"),
             );
             return Err(error);
         }
@@ -14869,7 +15518,7 @@ async fn send_event_with_reservation(
         _reservation: Some(reservation),
     };
     if let RawDayEnqueueDecision::Defer(epoch) = &raw_enqueue {
-        stamp_aggtrade_admission(&mut inflight_event.event, sink)?;
+        stamp_source_admission(&mut inflight_event.event, sink)?;
         sink.source_queue_backpressure.defer_raw_batch(
             producer,
             epoch.clone(),
@@ -14921,7 +15570,7 @@ async fn send_event_with_reservation(
             return Err(io::Error::new(io::ErrorKind::BrokenPipe, gap).into());
         }
     };
-    stamp_aggtrade_admission(&mut inflight_event.event, sink)?;
+    stamp_source_admission(&mut inflight_event.event, sink)?;
     permit.send(inflight_event);
     Ok(())
 }
@@ -15595,6 +16244,29 @@ fn aggtrade_source_sequence_epoch_id(identity: &CollectorIdentity) -> Result<Str
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+fn depth_source_sequence_epoch_id(identity: &CollectorIdentity) -> Result<String> {
+    let task_sequence = DEPTH_SOURCE_EPOCH_COUNTER
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            current.checked_add(1)
+        })
+        .map(|previous| previous + 1)
+        .map_err(|_| invalid_data("Binance depth source epoch sequence overflow"))?;
+    let started_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| invalid_data(format!("system clock precedes Unix epoch: {error}")))?
+        .as_nanos();
+    let mut hasher = Sha256::new();
+    hasher.update(b"binance_depth_source_sequence_epoch_v1\0");
+    hasher.update(identity.host_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(identity.region.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(std::process::id().to_le_bytes());
+    hasher.update(started_ns.to_le_bytes());
+    hasher.update(task_sequence.to_le_bytes());
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 fn monotonic_ms(started: Instant) -> u64 {
     started.elapsed().as_millis() as u64
 }
@@ -15655,6 +16327,9 @@ struct BinanceWsSpec {
 struct BinanceDepthSpec {
     websocket_endpoint: String,
     snapshot_endpoint: String,
+    frame_inactivity_timeout: Duration,
+    #[cfg(test)]
+    recovery_wait_override: Option<Duration>,
 }
 
 impl BinanceDepthSpec {
@@ -15662,6 +16337,9 @@ impl BinanceDepthSpec {
         Self {
             websocket_endpoint: BINANCE_DEPTH_WS.to_owned(),
             snapshot_endpoint: BINANCE_DEPTH_SNAPSHOT.to_owned(),
+            frame_inactivity_timeout: Duration::from_secs(30),
+            #[cfg(test)]
+            recovery_wait_override: None,
         }
     }
 }
@@ -15670,7 +16348,7 @@ impl BinanceDepthSpec {
 enum BinanceDepthUpdateExit {
     DeadlineReached,
     Stopped,
-    StreamEnded { reason: String, saw_business: bool },
+    StreamEnded { reason: String, saw_transport: bool },
 }
 
 struct BinanceDepthUpdateContext {
@@ -15680,9 +16358,163 @@ struct BinanceDepthUpdateContext {
     deadline: Option<Instant>,
     run_started: Instant,
     spec: BinanceDepthSpec,
+    source_sequence_epoch_id: String,
+    connection_generation: u64,
+    ingress_sequence: DepthIngressSequenceAllocator,
+    snapshot_not_before: DepthSnapshotNotBefore,
+    initial_snapshot_trigger_reason: String,
+    #[cfg(test)]
+    pending_limits: Option<(usize, usize)>,
+}
+
+#[derive(Clone, Default)]
+struct DepthSnapshotNotBefore {
+    deadline: Arc<Mutex<Option<Instant>>>,
+}
+
+impl DepthSnapshotNotBefore {
+    fn defer_for(&self, delay: Duration) {
+        let candidate = Instant::now() + delay;
+        let mut deadline = self
+            .deadline
+            .lock()
+            .expect("depth snapshot not-before mutex poisoned");
+        if deadline.is_none_or(|current| candidate > current) {
+            *deadline = Some(candidate);
+        }
+    }
+
+    async fn wait(&self) {
+        loop {
+            let deadline = *self
+                .deadline
+                .lock()
+                .expect("depth snapshot not-before mutex poisoned");
+            let Some(deadline) = deadline.filter(|deadline| *deadline > Instant::now()) else {
+                return;
+            };
+            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct DepthIngressSequenceAllocator {
+    last: Arc<AtomicU64>,
+}
+
+impl DepthIngressSequenceAllocator {
+    fn allocate(&self) -> std::result::Result<u64, String> {
+        self.last
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .map(|previous| previous + 1)
+            .map_err(|_| "binance_depth_ingress_sequence_overflow".to_owned())
+    }
+}
+
+struct DepthSnapshotRecord {
     snapshot_last_update_id: u64,
     snapshot_utc_day: String,
-    pending_snapshot_trigger_reason: Option<String>,
+    event: RawEvent,
+}
+
+enum DepthSnapshotAttempt {
+    Available(Box<DepthSnapshotRecord>),
+    Unavailable {
+        reason: String,
+        retry_after: Option<Duration>,
+    },
+}
+
+enum DepthSnapshotCycleOutcome {
+    Available(Box<DepthSnapshotRecord>),
+    Unavailable {
+        reason: String,
+        retry_after: Option<Duration>,
+    },
+}
+
+type DepthSnapshotFuture = Pin<Box<dyn Future<Output = Result<DepthSnapshotCycleOutcome>> + Send>>;
+
+enum DepthContinuityState {
+    AwaitingSnapshot,
+    Ready {
+        snapshot_last_update_id: u64,
+        local_u: Option<u64>,
+        snapshot_utc_day: String,
+    },
+}
+
+struct BufferedDepthUpdate {
+    event: RawEvent,
+    depth_ingress_sequence: u64,
+    owned_bytes: usize,
+}
+
+struct DepthPendingBuffer {
+    updates: VecDeque<BufferedDepthUpdate>,
+    reserved_bytes: usize,
+    max_rows: usize,
+    max_bytes: usize,
+}
+
+impl Default for DepthPendingBuffer {
+    fn default() -> Self {
+        Self {
+            updates: VecDeque::new(),
+            reserved_bytes: 0,
+            max_rows: BINANCE_DEPTH_PENDING_MAX_ROWS,
+            max_bytes: BINANCE_DEPTH_PENDING_MAX_BYTES,
+        }
+    }
+}
+
+impl DepthPendingBuffer {
+    #[cfg(test)]
+    fn with_limits(max_rows: usize, max_bytes: usize) -> Self {
+        Self {
+            max_rows,
+            max_bytes,
+            ..Self::default()
+        }
+    }
+
+    fn would_exceed(&self, additional_bytes: usize) -> bool {
+        self.updates.len() >= self.max_rows
+            || self
+                .reserved_bytes
+                .checked_add(additional_bytes)
+                .is_none_or(|total| total > self.max_bytes)
+    }
+
+    fn push(&mut self, update: BufferedDepthUpdate) -> Result<()> {
+        if self.would_exceed(update.owned_bytes) {
+            return Err(invalid_data("Binance depth pending buffer cap exceeded").into());
+        }
+        self.reserved_bytes = self
+            .reserved_bytes
+            .checked_add(update.owned_bytes)
+            .ok_or_else(|| invalid_data("Binance depth pending byte count overflow"))?;
+        self.updates.push_back(update);
+        Ok(())
+    }
+
+    fn pop_front(&mut self) -> Result<Option<BufferedDepthUpdate>> {
+        let Some(update) = self.updates.pop_front() else {
+            return Ok(None);
+        };
+        self.reserved_bytes = self
+            .reserved_bytes
+            .checked_sub(update.owned_bytes)
+            .ok_or_else(|| invalid_data("Binance depth pending byte ownership underflow"))?;
+        Ok(Some(update))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.updates.is_empty()
+    }
 }
 
 enum SourceWrapperTerminalClass {
@@ -16617,7 +17449,10 @@ impl ActiveSegment {
                 .get("snapshot_last_update_id")
                 .and_then(Value::as_u64)
                 .or(self.depth_snapshot_last_update_id);
-            if let Some(applied_u) = value.get("u").and_then(Value::as_u64) {
+            let stitch_verdict = value.get("stitch_verdict").and_then(Value::as_str);
+            if stitch_verdict == Some(BINANCE_DEPTH_VERDICT_APPLIED)
+                && let Some(applied_u) = binance_ws_payload(&value).get("u").and_then(Value::as_u64)
+            {
                 self.depth_stitch_applied_rows =
                     self.depth_stitch_applied_rows.saturating_add(typed_rows);
                 self.depth_local_u_min = Some(
@@ -16629,26 +17464,20 @@ impl ActiveSegment {
                         .map_or(applied_u, |current| current.max(applied_u)),
                 );
             }
-            if value
-                .get("stitch_evidence")
-                .and_then(Value::as_str)
-                .is_some_and(|evidence| evidence == "U <= lastUpdateId + 1 <= u")
+            if stitch_verdict == Some(BINANCE_DEPTH_VERDICT_APPLIED)
+                && value
+                    .get("stitch_evidence")
+                    .and_then(Value::as_str)
+                    .is_some_and(|evidence| evidence == "U <= lastUpdateId + 1 <= u")
             {
                 self.depth_first_update_bridged_snapshot = true;
             }
-            if let Some(trigger_reason) =
-                value.get("snapshot_trigger_reason").and_then(Value::as_str)
-            {
+            if stitch_verdict == Some(BINANCE_DEPTH_VERDICT_NOT_APPLIED_CONFIRMED_HOLE) {
                 self.depth_resnapshot_count = self.depth_resnapshot_count.saturating_add(1);
-                if trigger_reason.starts_with("stitch_gap:") {
-                    self.depth_stitch_gap_rows = self.depth_stitch_gap_rows.saturating_add(1);
-                    self.depth_source_gaps.insert(format!(
-                        "binance_depth_update_stitch_gap:{}",
-                        trigger_reason.trim_start_matches("stitch_gap:")
-                    ));
-                } else if let Some(reason) = trigger_reason.strip_prefix("reconnect:") {
+                self.depth_stitch_gap_rows = self.depth_stitch_gap_rows.saturating_add(typed_rows);
+                if let Some(reason) = value.get("stitch_gap_reason").and_then(Value::as_str) {
                     self.depth_source_gaps
-                        .insert(format!("binance_depth_reconnect_required:{reason}"));
+                        .insert(format!("binance_depth_update_stitch_gap:{}", reason));
                 }
             }
         }
@@ -16757,8 +17586,8 @@ fn typed_schema_version(source_kind: &str) -> &'static str {
     match source_kind {
         "polymarket_market" => "polymarket_orderbook_v2",
         "polymarket_market_metadata" => "polymarket_market_metadata_v2",
-        "binance_depth_snapshot" => "binance_depth_snapshot_v2",
-        "binance_depth_update" => "binance_depth_update_v3",
+        "binance_depth_snapshot" => BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
+        "binance_depth_update" => BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
         "binance_aggtrade" => "binance_aggtrade_v6",
         "polymarket_rtds_chainlink_btc_usd" => "polymarket_rtds_chainlink_btc_usd_v4",
         _ => "unknown_typed_layout",
@@ -17160,30 +17989,79 @@ fn binance_depth_snapshot_row_from_event(
         event.source_endpoint.clone(),
     )
     .map_err(invalid_data)?;
-    Ok(BinanceDepthSnapshotHourlyRow::from_raw(&raw))
+    BinanceDepthSnapshotHourlyRow::from_raw_with_ordering(
+        &raw,
+        binance_depth_ordering_from_event(event, &value)?,
+    )
+    .map_err(|error| invalid_data(error).into())
 }
 
 fn binance_depth_update_row_from_event(event: &RawEvent) -> Result<BinanceDepthUpdateHourlyRow> {
     let value = serde_json::from_str::<Value>(&event.raw_json)?;
-    let mut raw = parse_depth_update_raw(
+    let raw = parse_depth_update_raw(
         event_envelope(event, SourceKind::BinanceDepthUpdate),
         &event.raw_json,
     )
     .map_err(invalid_data)?;
-    raw.stitch_evidence = value
-        .get("stitch_evidence")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned);
-    let snapshot_last_update_id = value
-        .get("snapshot_last_update_id")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| invalid_data("snapshot_last_update_id missing"))?;
-    let local_u_before = value.get("local_u_before").and_then(Value::as_u64);
-    Ok(BinanceDepthUpdateHourlyRow::from_raw(
+    let stitch_verdict = required_value_string(&value, "stitch_verdict")?;
+    let verdict = match stitch_verdict.as_str() {
+        BINANCE_DEPTH_VERDICT_APPLIED => DepthUpdateVerdict::Applied,
+        BINANCE_DEPTH_VERDICT_NOT_APPLIED_STALE_DUPLICATE => {
+            DepthUpdateVerdict::NotAppliedStaleDuplicate
+        }
+        BINANCE_DEPTH_VERDICT_NOT_APPLIED_CONFIRMED_HOLE => {
+            DepthUpdateVerdict::NotAppliedConfirmedHole
+        }
+        BINANCE_DEPTH_VERDICT_NOT_APPLIED_SNAPSHOT_UNAVAILABLE => {
+            DepthUpdateVerdict::NotAppliedSnapshotUnavailable
+        }
+        other => {
+            return Err(
+                invalid_data(format!("unsupported frozen Binance depth verdict: {other}")).into(),
+            );
+        }
+    };
+    let assessment = DepthUpdateAssessment {
+        snapshot_last_update_id: value.get("snapshot_last_update_id").and_then(Value::as_u64),
+        local_u_before: value.get("local_u_before").and_then(Value::as_u64),
+        verdict,
+        local_u_after: value.get("local_u_after").and_then(Value::as_u64),
+        stitch_evidence: optional_string(&value, "stitch_evidence"),
+        gap_reason: optional_string(&value, "stitch_gap_reason"),
+    };
+    assessment.validate_contract().map_err(invalid_data)?;
+    BinanceDepthUpdateHourlyRow::from_assessment(
         &raw,
-        snapshot_last_update_id,
-        local_u_before,
-    ))
+        &assessment,
+        binance_depth_ordering_from_event(event, &value)?,
+    )
+    .map_err(|error| invalid_data(error).into())
+}
+
+fn binance_depth_ordering_from_event(
+    event: &RawEvent,
+    value: &Value,
+) -> Result<BinanceDepthOrdering> {
+    let admission = event.collector_admission.as_ref().ok_or_else(|| {
+        invalid_data("Binance depth event reached writer without collector admission")
+    })?;
+    let ordering = BinanceDepthOrdering {
+        source_sequence_epoch_id: required_value_string(value, "source_sequence_epoch_id")?,
+        connection_generation: value
+            .get("connection_generation")
+            .and_then(Value::as_u64)
+            .filter(|generation| *generation > 0)
+            .ok_or_else(|| invalid_data("Binance depth connection_generation missing or zero"))?,
+        depth_ingress_sequence: value
+            .get("depth_ingress_sequence")
+            .and_then(Value::as_u64)
+            .filter(|sequence| *sequence > 0)
+            .ok_or_else(|| invalid_data("Binance depth ingress sequence missing or zero"))?,
+        collector_admission_sequence: admission.sequence,
+        collector_admission_time_utc_ms: admission.time_utc_ms,
+    };
+    ordering.validate_contract().map_err(invalid_data)?;
+    Ok(ordering)
 }
 
 fn binance_aggtrade_row_from_event(event: &RawEvent) -> Result<BinanceAggTradeHourlyRow> {
@@ -28110,7 +28988,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn binance_depth_reconnect_records_source_gap_and_snapshot_trigger() {
+    async fn binance_depth_reconnect_is_transport_only_and_preserves_snapshot_trigger() {
         let (tx, _rx) = mpsc::channel(1);
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
         let sink = SourceEventSink {
@@ -28136,21 +29014,66 @@ mod tests {
 
         assert_eq!(recovery.inner_attempts, 1);
         assert_eq!(snapshot_trigger_reason, "reconnect:stream_closed");
-        assert!(
-            gaps.lock()
-                .unwrap()
-                .contains(&"binance_depth_reconnect_required:stream_closed".to_owned())
-        );
+        assert!(gaps.lock().unwrap().is_empty());
+    }
+
+    fn test_binance_depth_context(
+        http_client: reqwest::Client,
+        sink: SourceEventSink,
+        websocket_endpoint: String,
+        snapshot_endpoint: String,
+        deadline: Option<Instant>,
+        trigger_reason: &str,
+    ) -> BinanceDepthUpdateContext {
+        BinanceDepthUpdateContext {
+            http_client,
+            sink,
+            collector_identity: CollectorIdentity {
+                host_id: "collector-test".to_owned(),
+                region: "local-test".to_owned(),
+            },
+            deadline,
+            run_started: Instant::now(),
+            spec: BinanceDepthSpec {
+                websocket_endpoint,
+                snapshot_endpoint,
+                frame_inactivity_timeout: Duration::from_secs(30),
+                recovery_wait_override: None,
+            },
+            source_sequence_epoch_id: "depth-source-epoch-test".to_owned(),
+            connection_generation: 1,
+            ingress_sequence: DepthIngressSequenceAllocator::default(),
+            snapshot_not_before: DepthSnapshotNotBefore::default(),
+            initial_snapshot_trigger_reason: trigger_reason.to_owned(),
+            pending_limits: None,
+        }
+    }
+
+    fn test_binance_depth_message(first_update_id: u64, final_update_id: u64) -> Message {
+        Message::Text(
+            json!({
+                "e": "depthUpdate",
+                "E": now_ms(),
+                "s": "BTCUSDT",
+                "U": first_update_id,
+                "u": final_update_id,
+                "b": [["1", "2"]],
+                "a": [["3", "4"]]
+            })
+            .to_string()
+            .into(),
+        )
     }
 
     #[tokio::test]
-    async fn binance_depth_bootstrap_connect_failure_uses_retry_budget() {
+    async fn binance_depth_bootstrap_connect_failure_uses_retry_without_gap_or_lag() {
         let (tx, _rx) = mpsc::channel(1);
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
         let sink = SourceEventSink {
             tx,
             gaps: Arc::clone(&gaps),
-            source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+            source_queue_backpressure: Arc::clone(&stats),
             inflight_budget: InflightBudget::new(),
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         };
@@ -28163,7 +29086,6 @@ mod tests {
                 &mut recovery,
                 &mut snapshot_trigger_reason,
                 "connect_timeout".to_owned(),
-                "binance_depth_update_ws_connect_timeout".to_owned(),
                 None,
             )
             .await
@@ -28171,9 +29093,49 @@ mod tests {
 
         assert_eq!(recovery.inner_attempts, 1);
         assert_eq!(snapshot_trigger_reason, "reconnect:connect_timeout");
-        let recorded = gaps.lock().unwrap();
-        assert!(recorded.contains(&"binance_depth_update_ws_connect_timeout".to_owned()));
-        assert!(recorded.contains(&"binance_depth_reconnect_required:connect_timeout".to_owned()));
+        assert!(gaps.lock().unwrap().is_empty());
+        assert!(stats.drain_all_operational().values().all(|sources| {
+            sources
+                .get("binance_depth_update")
+                .is_none_or(|counter| counter.lag_events == 0)
+        }));
+    }
+
+    #[tokio::test]
+    async fn binance_depth_disconnected_control_is_terminal_before_transport_retry() {
+        let (tx, _rx) = mpsc::channel(1);
+        let (control_tx, control_rx) = mpsc::channel(1);
+        drop(control_tx);
+        let error = run_binance_depth_source_with_spec_and_control(
+            BinanceDepthSpec {
+                websocket_endpoint: "ws://127.0.0.1:9".to_owned(),
+                snapshot_endpoint: "http://127.0.0.1:9/api/v3/depth".to_owned(),
+                frame_inactivity_timeout: Duration::from_secs(1),
+                recovery_wait_override: Some(Duration::from_millis(1)),
+            },
+            SourceEventSink {
+                tx,
+                gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+                source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            CollectorIdentity {
+                host_id: "collector-test".to_owned(),
+                region: "local-test".to_owned(),
+            },
+            Some(Instant::now() + Duration::from_secs(1)),
+            Instant::now(),
+            Some(control_rx),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("depth source control channel closed"),
+            "{error}"
+        );
     }
 
     #[tokio::test]
@@ -28184,14 +29146,15 @@ mod tests {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = [0_u8; 1024];
             let _ = socket.read(&mut request).await.unwrap();
-            sleep(Duration::from_millis(30)).await;
             let body = r#"{"lastUpdateId":100,"bids":[["1","2"]],"asks":[["3","4"]]}"#;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
             );
-            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            sleep(Duration::from_millis(30)).await;
+            socket.write_all(body.as_bytes()).await.unwrap();
+            now_ms()
         });
         let (tx, mut rx) = mpsc::channel(2);
         let stats = Arc::new(SourceQueueBackpressureStats::default());
@@ -28203,23 +29166,30 @@ mod tests {
             inflight_budget: InflightBudget::new(),
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         };
-        let id = fetch_binance_depth_snapshot(
-            &reqwest::Client::builder()
+        let context = test_binance_depth_context(
+            reqwest::Client::builder()
                 .timeout(Duration::from_secs(1))
                 .build()
                 .unwrap(),
-            &sink,
-            &CollectorIdentity {
-                host_id: "collector-test".to_owned(),
-                region: "local-test".to_owned(),
-            },
-            Instant::now(),
-            &endpoint,
+            sink.clone(),
+            "ws://127.0.0.1:9".to_owned(),
+            endpoint,
+            None,
             "bootstrap",
-        )
-        .await
-        .unwrap();
-        assert_eq!(id, 100);
+        );
+        let record = match fetch_binance_depth_snapshot(&context, "bootstrap")
+            .await
+            .unwrap()
+        {
+            DepthSnapshotCycleOutcome::Available(record) => record,
+            DepthSnapshotCycleOutcome::Unavailable { reason, .. } => {
+                panic!("snapshot unexpectedly unavailable: {reason}")
+            }
+        };
+        assert_eq!(record.snapshot_last_update_id, 100);
+        send_event(&sink, Instant::now(), record.event)
+            .await
+            .unwrap();
         let event = rx.recv().await.unwrap().event;
         let raw = serde_json::from_str::<Value>(&event.raw_json).unwrap();
         let fetch_start = raw["snapshot_fetch_start_utc"].as_i64().unwrap();
@@ -28227,7 +29197,8 @@ mod tests {
         let row = binance_depth_snapshot_row_from_event(&event).unwrap();
         assert_eq!(row.snapshot_fetch_start_utc, fetch_start);
         assert_eq!(row.timestamp_received, event.recv_time_utc_ms);
-        server.await.unwrap();
+        let body_completed_utc_ms = server.await.unwrap();
+        assert!(event.recv_time_utc_ms >= body_completed_utc_ms);
     }
 
     #[tokio::test]
@@ -28346,6 +29317,8 @@ mod tests {
             BinanceDepthSpec {
                 websocket_endpoint,
                 snapshot_endpoint,
+                frame_inactivity_timeout: Duration::from_secs(30),
+                recovery_wait_override: None,
             },
             SourceEventSink {
                 tx,
@@ -28377,9 +29350,10 @@ mod tests {
                 "depth_snapshot",
                 "depth_update",
                 "depth_update",
+                "depth_update",
+                "depth_update",
                 "depth_snapshot",
                 "depth_update",
-                "depth_update"
             ]
         );
         let rows = events
@@ -28389,20 +29363,26 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(rows[0]["u"], 102);
         assert_eq!(rows[1]["u"], 103);
-        assert_eq!(rows[2]["u"], 105);
-        assert_eq!(rows[2]["snapshot_last_update_id"], 104);
+        assert_eq!(rows[2]["u"], 100);
         assert_eq!(
-            rows[2]["snapshot_trigger_reason"],
-            "stitch_gap:U > local_u + 1"
+            rows[2]["stitch_verdict"],
+            BINANCE_DEPTH_VERDICT_NOT_APPLIED_STALE_DUPLICATE
         );
-        assert_eq!(rows[3]["u"], 106);
-        let resnapshot_recv_time = events[3].recv_time_utc_ms;
+        assert_eq!(rows[3]["u"], 105);
+        assert_eq!(
+            rows[3]["stitch_verdict"],
+            BINANCE_DEPTH_VERDICT_NOT_APPLIED_CONFIRMED_HOLE
+        );
+        assert_eq!(rows[3]["snapshot_last_update_id"], 100);
+        assert_eq!(rows[4]["u"], 106);
         let triggering_update_recv_time = events[4].recv_time_utc_ms;
+        let resnapshot_recv_time = events[5].recv_time_utc_ms;
         assert!(
             triggering_update_recv_time < resnapshot_recv_time,
             "the triggering frame must retain its pre-resnapshot receive time"
         );
-        assert!(rows.iter().all(|row| row.get("local_u_after").is_none()));
+        assert_eq!(rows[4]["snapshot_last_update_id"], 104);
+        assert_eq!(rows[4]["stitch_verdict"], BINANCE_DEPTH_VERDICT_APPLIED);
         assert!(
             gaps.lock()
                 .unwrap()
@@ -28410,22 +29390,17 @@ mod tests {
                 .any(|gap| gap == "binance_depth_update_stitch_gap:U > local_u + 1")
         );
         let counters = stats.drain_all_operational();
-        assert_eq!(
-            counters
-                .values()
-                .next()
-                .unwrap()
+        assert!(counters.values().all(|sources| {
+            sources
                 .get("binance_depth_update")
-                .unwrap()
-                .structural_dedupe_dropped_events,
-            1
-        );
+                .is_none_or(|counter| counter.structural_dedupe_dropped_events == 0)
+        }));
         http_server.await.unwrap();
         ws_server.await.unwrap();
     }
 
     #[tokio::test]
-    async fn binance_depth_utc_day_resnapshot_reprocesses_the_triggering_frame() {
+    async fn binance_depth_utc_day_fence_cancels_snapshot_and_neutral_releases_buffered_updates() {
         const UTC_DAY_TEST_MARGIN_MS: i64 = 5_000;
 
         let mut fixture_now_utc_ms = now_ms();
@@ -28538,23 +29513,14 @@ mod tests {
         let (control_tx, mut control_rx) = mpsc::channel(AGGTRADE_CONTROL_CHANNEL_CAPACITY);
         let depth_source = run_binance_depth_update_ws_source_with_control(
             stream,
-            BinanceDepthUpdateContext {
-                http_client: reqwest::Client::new(),
-                sink: sink.clone(),
-                collector_identity: CollectorIdentity {
-                    host_id: "collector-test".to_owned(),
-                    region: "local-test".to_owned(),
-                },
-                deadline: Some(Instant::now() + Duration::from_millis(100)),
-                run_started: Instant::now(),
-                spec: BinanceDepthSpec {
-                    websocket_endpoint,
-                    snapshot_endpoint,
-                },
-                snapshot_last_update_id: 90,
-                snapshot_utc_day: old_utc_day.clone(),
-                pending_snapshot_trigger_reason: None,
-            },
+            test_binance_depth_context(
+                reqwest::Client::new(),
+                sink.clone(),
+                websocket_endpoint,
+                snapshot_endpoint,
+                Some(Instant::now() + Duration::from_millis(100)),
+                "utc_day_boundary",
+            ),
             Some(&mut control_rx),
         );
         let source = async { depth_source.await.map(|_| ()) };
@@ -28588,10 +29554,9 @@ mod tests {
                 .await
                 .unwrap();
             reply.send(Ok(DayBarrierRelease::Resume)).unwrap();
-            let snapshot = rx.recv().await.unwrap();
-            let update = rx.recv().await.unwrap();
-            let after_barrier = rx.recv().await.unwrap();
-            (barrier, snapshot, update, after_barrier)
+            let first_update = rx.recv().await.unwrap();
+            let second_update = rx.recv().await.unwrap();
+            (barrier, first_update, second_update)
         });
         assert!(
             fence_depth_and_send_day_barrier(
@@ -28611,86 +29576,135 @@ mod tests {
             .await
             .expect("depth source must emit the post-barrier event")
             .unwrap();
-        let (barrier, snapshot, update, after_barrier) = consumer.await.unwrap();
+        let (barrier, first_update, second_update) = consumer.await.unwrap();
         let expected_permit = RawDayPermit {
             utc_day: close.next_utc_day.clone(),
             generation: close.next_generation,
         };
         assert!(
-            [&snapshot, &update, &after_barrier]
+            [&first_update, &second_update]
                 .into_iter()
                 .all(|event| event.raw_day_permit.as_ref() == Some(&expected_permit))
         );
-        let snapshot = snapshot.event;
-        let update = update.event;
-        assert_eq!(snapshot.source_event_type, "depth_snapshot");
-        assert_eq!(update.source_event_type, "depth_update");
-        assert!(update.recv_time_utc_ms < snapshot.recv_time_utc_ms);
-        let update = serde_json::from_str::<Value>(&update.raw_json).unwrap();
-        assert_eq!(update["u"], 101);
-        assert_eq!(update["snapshot_last_update_id"], 100);
-        assert_eq!(update["snapshot_trigger_reason"], "utc_day_boundary");
-        assert!(barrier.control.is_none());
-        assert!(after_barrier.control.is_none());
-        assert_eq!(
-            serde_json::from_str::<Value>(&after_barrier.event.raw_json).unwrap()["u"],
-            102
+        let first_update = first_update.event;
+        let second_update = second_update.event;
+        assert_eq!(first_update.source_event_type, "depth_update");
+        assert_eq!(second_update.source_event_type, "depth_update");
+        let first_raw = serde_json::from_str::<Value>(&first_update.raw_json).unwrap();
+        let second_raw = serde_json::from_str::<Value>(&second_update.raw_json).unwrap();
+        assert!(
+            first_raw["depth_ingress_sequence"].as_u64().unwrap()
+                < second_raw["depth_ingress_sequence"].as_u64().unwrap()
         );
+        assert_eq!(
+            first_raw["source_sequence_epoch_id"],
+            second_raw["source_sequence_epoch_id"]
+        );
+        assert_eq!(
+            first_raw["connection_generation"],
+            second_raw["connection_generation"]
+        );
+        let first_admission = first_update.collector_admission.as_ref().unwrap();
+        let second_admission = second_update.collector_admission.as_ref().unwrap();
+        assert!(first_admission.sequence < second_admission.sequence);
+        assert!(first_admission.time_utc_ms > 0);
+        assert!(second_admission.time_utc_ms > 0);
+        assert_eq!(first_raw["u"], 101);
+        assert_eq!(second_raw["u"], 102);
+        assert!(first_raw["snapshot_last_update_id"].is_null());
+        assert!(second_raw["snapshot_last_update_id"].is_null());
+        assert_eq!(
+            first_raw["stitch_verdict"],
+            BINANCE_DEPTH_VERDICT_NOT_APPLIED_SNAPSHOT_UNAVAILABLE
+        );
+        assert_eq!(
+            second_raw["stitch_verdict"],
+            BINANCE_DEPTH_VERDICT_NOT_APPLIED_SNAPSHOT_UNAVAILABLE
+        );
+        assert!(barrier.control.is_none());
         http_server.await.unwrap();
         ws_server.await.unwrap();
     }
 
     #[tokio::test]
     async fn binance_depth_schema_error_is_process_fatal() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let websocket_endpoint = format!("ws://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            let (socket, _) = listener.accept().await.unwrap();
-            let mut websocket = accept_async(socket).await.unwrap();
-            websocket
-                .send(Message::Text("{not-json".into()))
-                .await
-                .unwrap();
-            sleep(Duration::from_millis(100)).await;
-        });
-        let (tx, _rx) = mpsc::channel(8);
-        let (stream, _) = connect_async(&websocket_endpoint).await.unwrap();
-        let error = run_binance_depth_update_ws_source_with_control(
-            stream,
-            BinanceDepthUpdateContext {
-                http_client: reqwest::Client::new(),
-                sink: SourceEventSink {
-                    tx,
-                    gaps: Arc::new(Mutex::new(SourceGapStore::default())),
-                    source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
-                    inflight_budget: InflightBudget::new(),
-                    enqueue_lock: Arc::new(AsyncMutex::new(())),
-                },
-                collector_identity: CollectorIdentity {
-                    host_id: "collector-test".to_owned(),
-                    region: "local-test".to_owned(),
-                },
-                deadline: Some(Instant::now() + Duration::from_secs(1)),
-                run_started: Instant::now(),
-                spec: BinanceDepthSpec {
+        for (terminal, expected_error) in [
+            (
+                Message::Text("{not-json".into()),
+                "binance_depth_update_parse_error:parse_depth_update_json",
+            ),
+            (
+                Message::Binary(vec![0_u8, 1_u8].into()),
+                "binance_depth_update_binary_payload_integrity_fatal",
+            ),
+            (
+                test_binance_depth_message(92, 91),
+                "binance_depth_update_contract_error:u",
+            ),
+            (
+                Message::Text(
+                    json!({
+                        "e": "depthUpdate", "E": now_ms(), "s": "BTCUSDT",
+                        "U": 91, "u": 91, "b": [], "a": []
+                    })
+                    .to_string()
+                    .into(),
+                ),
+                "binance_depth_update_contract_error:b_or_a",
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let websocket_endpoint = format!("ws://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut websocket = accept_async(socket).await.unwrap();
+                websocket
+                    .send(test_binance_depth_message(90, 90))
+                    .await
+                    .unwrap();
+                websocket.send(terminal).await.unwrap();
+                sleep(Duration::from_millis(100)).await;
+            });
+            let (tx, mut rx) = mpsc::channel(8);
+            let stats = Arc::new(SourceQueueBackpressureStats::default());
+            install_active_raw_day_gate(&stats, now_ms()).await;
+            let (stream, _) = connect_async(&websocket_endpoint).await.unwrap();
+            let error = run_binance_depth_update_ws_source_with_control(
+                stream,
+                test_binance_depth_context(
+                    reqwest::Client::new(),
+                    SourceEventSink {
+                        tx,
+                        gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+                        source_queue_backpressure: stats,
+                        inflight_budget: InflightBudget::new(),
+                        enqueue_lock: Arc::new(AsyncMutex::new(())),
+                    },
                     websocket_endpoint,
-                    snapshot_endpoint: "http://127.0.0.1:9/api/v3/depth".to_owned(),
-                },
-                snapshot_last_update_id: 100,
-                snapshot_utc_day: utc_day_string_from_ms(now_ms()).unwrap(),
-                pending_snapshot_trigger_reason: None,
-            },
-            None,
-        )
-        .await
-        .expect_err("depth parser/schema errors must terminate the source");
-        assert!(
-            error
-                .to_string()
-                .contains("binance_depth_update_parse_error:parse_depth_update_json"),
-            "{error}"
-        );
-        server.await.unwrap();
+                    "http://127.0.0.1:9/api/v3/depth".to_owned(),
+                    Some(Instant::now() + Duration::from_secs(1)),
+                    "bootstrap",
+                ),
+                None,
+            )
+            .await
+            .expect_err("depth parser/schema errors must terminate the source");
+            assert!(error.to_string().contains(expected_error), "{error}");
+            let released = rx.recv().await.unwrap().event;
+            let raw = serde_json::from_str::<Value>(&released.raw_json).unwrap();
+            assert_eq!(raw["u"], 90);
+            assert_eq!(
+                raw["stitch_verdict"],
+                BINANCE_DEPTH_VERDICT_NOT_APPLIED_SNAPSHOT_UNAVAILABLE
+            );
+            assert!(raw["snapshot_last_update_id"].is_null());
+            assert!(matches!(
+                rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+                    | Err(mpsc::error::TryRecvError::Disconnected)
+            ));
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -28718,9 +29732,9 @@ mod tests {
             let outcome =
                 run_binance_depth_update_ws_source_with_control(
                     stream,
-                    BinanceDepthUpdateContext {
-                        http_client: reqwest::Client::new(),
-                        sink: SourceEventSink {
+                    test_binance_depth_context(
+                        reqwest::Client::new(),
+                        SourceEventSink {
                             tx,
                             gaps: Arc::new(Mutex::new(SourceGapStore::default())),
                             source_queue_backpressure: Arc::new(
@@ -28729,20 +29743,11 @@ mod tests {
                             inflight_budget: InflightBudget::new(),
                             enqueue_lock: Arc::new(AsyncMutex::new(())),
                         },
-                        collector_identity: CollectorIdentity {
-                            host_id: "collector-test".to_owned(),
-                            region: "local-test".to_owned(),
-                        },
-                        deadline: Some(Instant::now() + Duration::from_secs(1)),
-                        run_started: Instant::now(),
-                        spec: BinanceDepthSpec {
-                            websocket_endpoint,
-                            snapshot_endpoint: "http://127.0.0.1:9/api/v3/depth".to_owned(),
-                        },
-                        snapshot_last_update_id: 100,
-                        snapshot_utc_day: utc_day_string_from_ms(now_ms()).unwrap(),
-                        pending_snapshot_trigger_reason: None,
-                    },
+                        websocket_endpoint,
+                        "http://127.0.0.1:9/api/v3/depth".to_owned(),
+                        Some(Instant::now() + Duration::from_secs(1)),
+                        "bootstrap",
+                    ),
                     None,
                 )
                 .await
@@ -28751,7 +29756,7 @@ mod tests {
                 outcome,
                 BinanceDepthUpdateExit::StreamEnded {
                     ref reason,
-                    saw_business: false,
+                    ..
                 } if reason == "server_shutdown"
             ));
             server.await.unwrap();
@@ -28759,11 +29764,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn binance_depth_snapshot_retries_429_then_recovers() {
+    async fn binance_depth_snapshot_retries_408_then_recovers() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/api/v3/depth", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
-            for status in ["429 Too Many Requests", "200 OK"] {
+            for status in ["408 Request Timeout", "200 OK"] {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut request = [0_u8; 1024];
                 let _ = socket.read(&mut request).await.unwrap();
@@ -28780,45 +29785,227 @@ mod tests {
                 socket.write_all(response.as_bytes()).await.unwrap();
             }
         });
-        let (tx, mut rx) = mpsc::channel(2);
+        let (tx, _rx) = mpsc::channel(2);
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
         let stats = Arc::new(SourceQueueBackpressureStats::default());
         install_active_raw_day_gate(&stats, now_ms()).await;
-        let result = fetch_binance_depth_snapshot(
-            &reqwest::Client::builder()
+        let context = test_binance_depth_context(
+            reqwest::Client::builder()
                 .timeout(Duration::from_secs(1))
                 .build()
                 .unwrap(),
-            &SourceEventSink {
+            SourceEventSink {
                 tx,
                 gaps: Arc::clone(&gaps),
                 source_queue_backpressure: stats,
                 inflight_budget: InflightBudget::new(),
                 enqueue_lock: Arc::new(AsyncMutex::new(())),
             },
-            &CollectorIdentity {
-                host_id: "collector-test".to_owned(),
-                region: "local-test".to_owned(),
-            },
-            Instant::now(),
-            &endpoint,
+            "ws://127.0.0.1:9".to_owned(),
+            endpoint,
+            None,
             "stitch_gap:test",
-        )
-        .await
-        .unwrap();
-        assert_eq!(result, 100);
-        assert!(rx.recv().await.is_some());
-        assert!(
-            gaps.lock()
-                .unwrap()
-                .iter()
-                .any(|gap| gap.contains("attempt=1:http_status:429"))
         );
+        let result = fetch_binance_depth_snapshot(&context, "stitch_gap:test")
+            .await
+            .unwrap();
+        let DepthSnapshotCycleOutcome::Available(record) = result else {
+            panic!("snapshot must recover after 408")
+        };
+        assert_eq!(record.snapshot_last_update_id, 100);
+        let raw = serde_json::from_str::<Value>(&record.event.raw_json).unwrap();
+        assert_eq!(raw["depth_ingress_sequence"], 2);
+        assert!(gaps.lock().unwrap().is_empty());
         server.await.unwrap();
     }
 
     #[tokio::test]
-    async fn binance_depth_snapshot_timeout_exhaustion_is_an_error() {
+    async fn binance_depth_snapshot_honors_retry_after_before_next_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/api/v3/depth", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = first.read(&mut request).await.unwrap();
+            first
+                .write_all(
+                    b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let (early_retry, (mut second, _)) =
+                match timeout(Duration::from_millis(800), listener.accept()).await {
+                    Ok(connection) => (true, connection.unwrap()),
+                    Err(_) => (false, listener.accept().await.unwrap()),
+                };
+            let _ = second.read(&mut request).await.unwrap();
+            let body = r#"{"lastUpdateId":100,"bids":[["1","2"]],"asks":[["3","4"]]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            second.write_all(response.as_bytes()).await.unwrap();
+            early_retry
+        });
+        let (tx, _rx) = mpsc::channel(2);
+        let context = test_binance_depth_context(
+            reqwest::Client::new(),
+            SourceEventSink {
+                tx,
+                gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+                source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            "ws://127.0.0.1:9".to_owned(),
+            endpoint,
+            None,
+            "bootstrap",
+        );
+        assert!(matches!(
+            fetch_binance_depth_snapshot(&context, "bootstrap")
+                .await
+                .unwrap(),
+            DepthSnapshotCycleOutcome::Available(_)
+        ));
+        assert!(
+            !server.await.unwrap(),
+            "Retry-After must be the minimum delay before the next request"
+        );
+    }
+
+    #[tokio::test]
+    async fn binance_depth_retry_after_survives_snapshot_future_replacement() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/api/v3/depth", listener.local_addr().unwrap());
+        let (limited_tx, limited_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = first.read(&mut request).await.unwrap();
+            first
+                .write_all(
+                    b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let _ = limited_tx.send(());
+            let (early_retry, (mut second, _)) =
+                match timeout(Duration::from_millis(800), listener.accept()).await {
+                    Ok(connection) => (true, connection.unwrap()),
+                    Err(_) => (false, listener.accept().await.unwrap()),
+                };
+            let _ = second.read(&mut request).await.unwrap();
+            let body = r#"{"lastUpdateId":100,"bids":[["1","2"]],"asks":[["3","4"]]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            second.write_all(response.as_bytes()).await.unwrap();
+            early_retry
+        });
+        let (tx, _rx) = mpsc::channel(2);
+        let context = test_binance_depth_context(
+            reqwest::Client::new(),
+            SourceEventSink {
+                tx,
+                gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+                source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            "ws://127.0.0.1:9".to_owned(),
+            endpoint,
+            None,
+            "bootstrap",
+        );
+        let first_cycle = tokio::spawn(start_binance_depth_snapshot_cycle(&context, "bootstrap"));
+        limited_rx.await.unwrap();
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let gate_is_set = context
+                    .snapshot_not_before
+                    .deadline
+                    .lock()
+                    .unwrap()
+                    .is_some_and(|deadline| deadline > Instant::now());
+                if gate_is_set {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Retry-After gate must be installed after the 429 response");
+        first_cycle.abort();
+        let join_error = match first_cycle.await {
+            Err(error) => error,
+            Ok(_) => panic!("cancelled snapshot future unexpectedly completed"),
+        };
+        assert!(join_error.is_cancelled());
+
+        assert!(matches!(
+            start_binance_depth_snapshot_cycle(&context, "utc_day_boundary")
+                .await
+                .unwrap(),
+            DepthSnapshotCycleOutcome::Available(_)
+        ));
+        assert!(
+            !server.await.unwrap(),
+            "replacing a snapshot future must not clear the source-task Retry-After gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn binance_depth_snapshot_non_rate_limit_4xx_is_terminal() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/api/v3/depth", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            timeout(Duration::from_millis(400), listener.accept())
+                .await
+                .is_ok()
+        });
+        let (tx, _rx) = mpsc::channel(1);
+        let context = test_binance_depth_context(
+            reqwest::Client::new(),
+            SourceEventSink {
+                tx,
+                gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+                source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            "ws://127.0.0.1:9".to_owned(),
+            endpoint,
+            None,
+            "bootstrap",
+        );
+        let error = match fetch_binance_depth_snapshot(&context, "bootstrap").await {
+            Err(error) => error,
+            Ok(_) => panic!("a deterministic request 4xx must be terminal"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("binance_depth_snapshot_integrity_fatal:http_status_terminal:404"),
+            "{error}"
+        );
+        assert!(!server.await.unwrap(), "terminal 4xx must not be retried");
+    }
+
+    #[tokio::test]
+    async fn binance_depth_snapshot_timeout_exhaustion_is_availability() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/api/v3/depth", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
@@ -28831,42 +30018,1280 @@ mod tests {
         });
         let (tx, _rx) = mpsc::channel(1);
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
-        let error = fetch_binance_depth_snapshot(
-            &reqwest::Client::builder()
+        let context = test_binance_depth_context(
+            reqwest::Client::builder()
                 .timeout(Duration::from_millis(10))
                 .build()
                 .unwrap(),
-            &SourceEventSink {
+            SourceEventSink {
                 tx,
                 gaps: Arc::clone(&gaps),
                 source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
                 inflight_budget: InflightBudget::new(),
                 enqueue_lock: Arc::new(AsyncMutex::new(())),
             },
-            &CollectorIdentity {
-                host_id: "collector-test".to_owned(),
-                region: "local-test".to_owned(),
-            },
-            Instant::now(),
-            &endpoint,
+            "ws://127.0.0.1:9".to_owned(),
+            endpoint,
+            None,
             "bootstrap",
-        )
-        .await
-        .unwrap_err();
+        );
+        let result = fetch_binance_depth_snapshot(&context, "bootstrap")
+            .await
+            .unwrap();
+        assert!(matches!(
+            result,
+            DepthSnapshotCycleOutcome::Unavailable { .. }
+        ));
+        assert!(gaps.lock().unwrap().is_empty());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn binance_depth_snapshot_success_with_invalid_schema_is_terminal() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/api/v3/depth", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            let body = r#"{"lastUpdateId":100,"bids":"invalid","asks":[]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let (tx, _rx) = mpsc::channel(1);
+        let context = test_binance_depth_context(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(1))
+                .build()
+                .unwrap(),
+            SourceEventSink {
+                tx,
+                gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+                source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            "ws://127.0.0.1:9".to_owned(),
+            endpoint,
+            None,
+            "bootstrap",
+        );
+
+        let error = match fetch_binance_depth_snapshot(&context, "bootstrap").await {
+            Err(error) => error,
+            Ok(_) => panic!("a successful HTTP response with an invalid schema must fail closed"),
+        };
         assert!(
             error
                 .to_string()
-                .contains("binance_depth_snapshot_recovery_exhausted")
-        );
-        assert_eq!(
-            gaps.lock()
-                .unwrap()
-                .iter()
-                .filter(|gap| gap.starts_with("binance_depth_snapshot_attempt_failed:"))
-                .count(),
-            usize::try_from(BINANCE_DEPTH_SNAPSHOT_MAX_ATTEMPTS).unwrap()
+                .contains("binance_depth_snapshot_schema_fatal:schema:"),
+            "{error}"
         );
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn binance_depth_invalid_snapshot_releases_valid_pending_update_before_terminal() {
+        let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let websocket_endpoint = format!("ws://{}", ws_listener.local_addr().unwrap());
+        let snapshot_endpoint = format!(
+            "http://{}/api/v3/depth",
+            http_listener.local_addr().unwrap()
+        );
+        let ws_server = tokio::spawn(async move {
+            let (socket, _) = ws_listener.accept().await.unwrap();
+            let mut websocket = accept_async(socket).await.unwrap();
+            websocket
+                .send(test_binance_depth_message(90, 90))
+                .await
+                .unwrap();
+            sleep(Duration::from_secs(1)).await;
+        });
+        let http_server = tokio::spawn(async move {
+            let (mut socket, _) = http_listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            sleep(Duration::from_millis(100)).await;
+            let body = r#"{"lastUpdateId":100,"bids":[],"asks":[]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let (tx, mut rx) = mpsc::channel(8);
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
+        let (stream, _) = connect_async(&websocket_endpoint).await.unwrap();
+        let error = run_binance_depth_update_ws_source_with_control(
+            stream,
+            test_binance_depth_context(
+                reqwest::Client::new(),
+                SourceEventSink {
+                    tx,
+                    gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+                    source_queue_backpressure: stats,
+                    inflight_budget: InflightBudget::new(),
+                    enqueue_lock: Arc::new(AsyncMutex::new(())),
+                },
+                websocket_endpoint,
+                snapshot_endpoint,
+                Some(Instant::now() + Duration::from_secs(2)),
+                "bootstrap",
+            ),
+            None,
+        )
+        .await
+        .expect_err("an invalid successful snapshot response must remain terminal");
+        assert!(
+            error
+                .to_string()
+                .contains("binance_depth_snapshot_schema_fatal:schema:invalid_snapshot_contract"),
+            "{error}"
+        );
+        let released = rx.recv().await.unwrap().event;
+        let raw = serde_json::from_str::<Value>(&released.raw_json).unwrap();
+        assert_eq!(raw["u"], 90);
+        assert_eq!(
+            raw["stitch_verdict"],
+            BINANCE_DEPTH_VERDICT_NOT_APPLIED_SNAPSHOT_UNAVAILABLE
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty) | Err(mpsc::error::TryRecvError::Disconnected)
+        ));
+        http_server.await.unwrap();
+        ws_server.abort();
+        let _ = ws_server.await;
+    }
+
+    #[tokio::test]
+    async fn binance_depth_chunked_snapshot_body_is_bounded_before_json_parse() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/api/v3/depth", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let chunk = vec![b'x'; 64 * 1024];
+            let mut sent = 0_usize;
+            while sent <= MAX_TYPED_ROW_BYTES {
+                let remaining = MAX_TYPED_ROW_BYTES.saturating_add(1).saturating_sub(sent);
+                let length = remaining.min(chunk.len());
+                let header = format!("{length:X}\r\n");
+                if socket.write_all(header.as_bytes()).await.is_err()
+                    || socket.write_all(&chunk[..length]).await.is_err()
+                    || socket.write_all(b"\r\n").await.is_err()
+                {
+                    break;
+                }
+                sent = sent.saturating_add(length);
+            }
+            let _ = socket.write_all(b"0\r\n\r\n").await;
+        });
+        let (tx, _rx) = mpsc::channel(1);
+        let context = test_binance_depth_context(
+            reqwest::Client::new(),
+            SourceEventSink {
+                tx,
+                gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+                source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            "ws://127.0.0.1:9".to_owned(),
+            endpoint,
+            None,
+            "bootstrap",
+        );
+        let error = match fetch_binance_depth_snapshot(&context, "bootstrap").await {
+            Err(error) => error,
+            Ok(_) => panic!("a chunked snapshot body above the frozen cap must fail closed"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("response_body_too_large:limit=1048576"),
+            "{error}"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn binance_depth_snapshot_exhaustion_recovers_on_the_same_websocket_generation() {
+        let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let websocket_endpoint = format!("ws://{}", ws_listener.local_addr().unwrap());
+        let snapshot_endpoint = format!(
+            "http://{}/api/v3/depth",
+            http_listener.local_addr().unwrap()
+        );
+        let (snapshot_available_tx, snapshot_available_rx) = oneshot::channel();
+        let http_server = tokio::spawn(async move {
+            let mut snapshot_available_tx = Some(snapshot_available_tx);
+            for attempt in 0..4 {
+                let (mut socket, _) = http_listener.accept().await.unwrap();
+                let mut request = [0_u8; 1024];
+                let _ = socket.read(&mut request).await.unwrap();
+                if attempt == 0 {
+                    sleep(Duration::from_millis(50)).await;
+                }
+                let (status, body) = if attempt < 3 {
+                    ("429 Too Many Requests", "{}")
+                } else {
+                    (
+                        "200 OK",
+                        r#"{"lastUpdateId":100,"bids":[["1","2"]],"asks":[["3","4"]]}"#,
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                if attempt == 3 {
+                    let _ = snapshot_available_tx.take().unwrap().send(());
+                }
+            }
+        });
+        let ws_server = tokio::spawn(async move {
+            let (socket, _) = ws_listener.accept().await.unwrap();
+            let mut websocket = accept_async(socket).await.unwrap();
+            websocket
+                .send(test_binance_depth_message(90, 90))
+                .await
+                .unwrap();
+            snapshot_available_rx.await.unwrap();
+            websocket
+                .send(test_binance_depth_message(101, 101))
+                .await
+                .unwrap();
+            sleep(Duration::from_millis(50)).await;
+            let _ = websocket.send(Message::Close(None)).await;
+        });
+
+        let (tx, mut rx) = mpsc::channel(8);
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
+        let sink = SourceEventSink {
+            tx,
+            gaps: Arc::clone(&gaps),
+            source_queue_backpressure: stats,
+            inflight_budget: InflightBudget::new(),
+            enqueue_lock: Arc::new(AsyncMutex::new(())),
+        };
+        let (stream, _) = connect_async(&websocket_endpoint).await.unwrap();
+        let mut context = test_binance_depth_context(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(1))
+                .build()
+                .unwrap(),
+            sink,
+            websocket_endpoint,
+            snapshot_endpoint,
+            Some(Instant::now() + Duration::from_secs(4)),
+            "bootstrap",
+        );
+        context.spec.frame_inactivity_timeout = Duration::from_secs(3);
+        let outcome = run_binance_depth_update_ws_source_with_control(stream, context, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            BinanceDepthUpdateExit::StreamEnded { ref reason, .. }
+                if reason.starts_with("ws_closed:")
+        ));
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event.event);
+        }
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.source_event_type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["depth_update", "depth_snapshot", "depth_update"]
+        );
+        let first = serde_json::from_str::<Value>(&events[0].raw_json).unwrap();
+        let snapshot = serde_json::from_str::<Value>(&events[1].raw_json).unwrap();
+        let second = serde_json::from_str::<Value>(&events[2].raw_json).unwrap();
+        assert_eq!(
+            first["stitch_verdict"],
+            BINANCE_DEPTH_VERDICT_NOT_APPLIED_SNAPSHOT_UNAVAILABLE
+        );
+        assert!(first["snapshot_last_update_id"].is_null());
+        assert_eq!(second["stitch_verdict"], BINANCE_DEPTH_VERDICT_APPLIED);
+        assert_eq!(second["snapshot_last_update_id"], 100);
+        assert!(
+            first["depth_ingress_sequence"].as_u64().unwrap()
+                < snapshot["depth_ingress_sequence"].as_u64().unwrap()
+        );
+        assert!(
+            events[0].collector_admission.as_ref().unwrap().sequence
+                < events[1].collector_admission.as_ref().unwrap().sequence
+        );
+        assert!(events.iter().all(|event| {
+            serde_json::from_str::<Value>(&event.raw_json).unwrap()["connection_generation"] == 1
+        }));
+        assert!(gaps.lock().unwrap().is_empty());
+        http_server.await.unwrap();
+        ws_server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn binance_depth_snapshot_admits_before_two_earlier_ingress_updates() {
+        let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let websocket_endpoint = format!("ws://{}", ws_listener.local_addr().unwrap());
+        let snapshot_endpoint = format!(
+            "http://{}/api/v3/depth",
+            http_listener.local_addr().unwrap()
+        );
+        let (updates_sent_tx, updates_sent_rx) = oneshot::channel();
+        let (snapshot_sent_tx, snapshot_sent_rx) = oneshot::channel();
+        let http_server = tokio::spawn(async move {
+            let (mut socket, _) = http_listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            let body = r#"{"lastUpdateId":100,"bids":[["1","2"]],"asks":[["3","4"]]}"#;
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            updates_sent_rx.await.unwrap();
+            sleep(Duration::from_millis(50)).await;
+            socket.write_all(body.as_bytes()).await.unwrap();
+            let _ = snapshot_sent_tx.send(());
+        });
+        let ws_server = tokio::spawn(async move {
+            let (socket, _) = ws_listener.accept().await.unwrap();
+            let mut websocket = accept_async(socket).await.unwrap();
+            websocket
+                .send(test_binance_depth_message(101, 101))
+                .await
+                .unwrap();
+            websocket
+                .send(test_binance_depth_message(102, 102))
+                .await
+                .unwrap();
+            let _ = updates_sent_tx.send(());
+            snapshot_sent_rx.await.unwrap();
+            sleep(Duration::from_millis(50)).await;
+            let _ = websocket.send(Message::Close(None)).await;
+        });
+
+        let (tx, mut rx) = mpsc::channel(8);
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
+        let (stream, _) = connect_async(&websocket_endpoint).await.unwrap();
+        let context = test_binance_depth_context(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(1))
+                .build()
+                .unwrap(),
+            SourceEventSink {
+                tx,
+                gaps: Arc::clone(&gaps),
+                source_queue_backpressure: stats,
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            websocket_endpoint,
+            snapshot_endpoint,
+            Some(Instant::now() + Duration::from_secs(2)),
+            "bootstrap",
+        );
+        let outcome = run_binance_depth_update_ws_source_with_control(stream, context, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            BinanceDepthUpdateExit::StreamEnded { ref reason, .. }
+                if reason.starts_with("ws_closed:")
+        ));
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event.event);
+        }
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.source_event_type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["depth_snapshot", "depth_update", "depth_update"]
+        );
+        let snapshot = serde_json::from_str::<Value>(&events[0].raw_json).unwrap();
+        let first = serde_json::from_str::<Value>(&events[1].raw_json).unwrap();
+        let second = serde_json::from_str::<Value>(&events[2].raw_json).unwrap();
+        assert!(events[1].recv_time_utc_ms < events[0].recv_time_utc_ms);
+        assert!(events[2].recv_time_utc_ms < events[0].recv_time_utc_ms);
+        assert!(
+            first["depth_ingress_sequence"].as_u64().unwrap()
+                < second["depth_ingress_sequence"].as_u64().unwrap()
+        );
+        assert!(
+            second["depth_ingress_sequence"].as_u64().unwrap()
+                < snapshot["depth_ingress_sequence"].as_u64().unwrap()
+        );
+        assert!(events.windows(2).all(|pair| {
+            pair[0].collector_admission.as_ref().unwrap().sequence
+                < pair[1].collector_admission.as_ref().unwrap().sequence
+        }));
+        assert_eq!(first["stitch_verdict"], BINANCE_DEPTH_VERDICT_APPLIED);
+        assert_eq!(second["stitch_verdict"], BINANCE_DEPTH_VERDICT_APPLIED);
+        assert_eq!(
+            first["source_sequence_epoch_id"],
+            snapshot["source_sequence_epoch_id"]
+        );
+        assert_eq!(
+            second["connection_generation"],
+            snapshot["connection_generation"]
+        );
+        assert!(gaps.lock().unwrap().is_empty());
+        http_server.await.unwrap();
+        ws_server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn binance_depth_hour_fence_preserves_snapshot_and_ready_continuity() {
+        let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let websocket_endpoint = format!("ws://{}", ws_listener.local_addr().unwrap());
+        let snapshot_endpoint = format!(
+            "http://{}/api/v3/depth",
+            http_listener.local_addr().unwrap()
+        );
+        let (snapshot_release_tx, snapshot_release_rx) = oneshot::channel();
+        let http_server = tokio::spawn(async move {
+            let (mut socket, _) = http_listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            snapshot_release_rx.await.unwrap();
+            let body = r#"{"lastUpdateId":100,"bids":[["1","2"]],"asks":[["3","4"]]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            timeout(Duration::from_millis(500), http_listener.accept())
+                .await
+                .is_ok()
+        });
+        let (first_update_sent_tx, first_update_sent_rx) = oneshot::channel();
+        let (second_update_tx, second_update_rx) = oneshot::channel();
+        let ws_server = tokio::spawn(async move {
+            let (socket, _) = ws_listener.accept().await.unwrap();
+            let mut websocket = accept_async(socket).await.unwrap();
+            websocket
+                .send(test_binance_depth_message(101, 101))
+                .await
+                .unwrap();
+            let _ = first_update_sent_tx.send(());
+            second_update_rx.await.unwrap();
+            websocket
+                .send(test_binance_depth_message(102, 102))
+                .await
+                .unwrap();
+            sleep(Duration::from_millis(30)).await;
+            let _ = websocket.send(Message::Close(None)).await;
+        });
+
+        let (tx, mut rx) = mpsc::channel(8);
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
+        let (stream, _) = connect_async(&websocket_endpoint).await.unwrap();
+        let mut context = test_binance_depth_context(
+            reqwest::Client::new(),
+            SourceEventSink {
+                tx,
+                gaps: Arc::clone(&gaps),
+                source_queue_backpressure: stats,
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            websocket_endpoint,
+            snapshot_endpoint,
+            Some(Instant::now() + Duration::from_secs(2)),
+            "bootstrap",
+        );
+        context.spec.frame_inactivity_timeout = Duration::from_millis(80);
+        let observed_ingress = context.ingress_sequence.clone();
+        let (control_tx, mut control_rx) = mpsc::channel(2);
+        let source = tokio::spawn(async move {
+            run_binance_depth_update_ws_source_with_control(stream, context, Some(&mut control_rx))
+                .await
+        });
+
+        first_update_sent_rx.await.unwrap();
+        timeout(Duration::from_secs(1), async {
+            while observed_ingress.last.load(Ordering::Relaxed) < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let (resume_tx, resume_rx) = oneshot::channel();
+        control_tx
+            .send(DepthSourceControl::Fence {
+                kind: DepthFenceKind::HourFinalize,
+                stop_after_fence: false,
+                resume_after_barrier: Some(resume_rx),
+                reply: reply_tx,
+            })
+            .await
+            .unwrap();
+        reply_rx.await.unwrap().unwrap();
+        sleep(Duration::from_millis(120)).await;
+        resume_tx.send(()).unwrap();
+        snapshot_release_tx.send(()).unwrap();
+
+        let snapshot = rx.recv().await.unwrap().event;
+        let first = rx.recv().await.unwrap().event;
+        assert_eq!(snapshot.source_event_type, "depth_snapshot");
+        assert_eq!(first.source_event_type, "depth_update");
+        let first_raw = serde_json::from_str::<Value>(&first.raw_json).unwrap();
+        assert_eq!(first_raw["stitch_verdict"], BINANCE_DEPTH_VERDICT_APPLIED);
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let (resume_tx, resume_rx) = oneshot::channel();
+        control_tx
+            .send(DepthSourceControl::Fence {
+                kind: DepthFenceKind::HourFinalize,
+                stop_after_fence: false,
+                resume_after_barrier: Some(resume_rx),
+                reply: reply_tx,
+            })
+            .await
+            .unwrap();
+        reply_rx.await.unwrap().unwrap();
+        resume_tx.send(()).unwrap();
+        second_update_tx.send(()).unwrap();
+
+        let second = rx.recv().await.unwrap().event;
+        let second_raw = serde_json::from_str::<Value>(&second.raw_json).unwrap();
+        assert_eq!(second_raw["stitch_verdict"], BINANCE_DEPTH_VERDICT_APPLIED);
+        assert_eq!(second_raw["snapshot_last_update_id"], 100);
+        assert_eq!(second_raw["local_u_before"], 101);
+        let outcome = source.await.unwrap().unwrap();
+        assert!(matches!(
+            outcome,
+            BinanceDepthUpdateExit::StreamEnded { ref reason, .. }
+                if reason.starts_with("ws_closed:")
+        ));
+        assert!(
+            !http_server.await.unwrap(),
+            "hour-finalize must not create a replacement snapshot request"
+        );
+        ws_server.await.unwrap();
+        assert!(gaps.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn binance_depth_dropped_hour_resume_releases_pending_before_terminal() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let websocket_endpoint = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut websocket = accept_async(socket).await.unwrap();
+            websocket
+                .send(test_binance_depth_message(90, 90))
+                .await
+                .unwrap();
+            sleep(Duration::from_secs(1)).await;
+        });
+        let (tx, mut rx) = mpsc::channel(4);
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
+        let (stream, _) = connect_async(&websocket_endpoint).await.unwrap();
+        let context = test_binance_depth_context(
+            reqwest::Client::new(),
+            SourceEventSink {
+                tx,
+                gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+                source_queue_backpressure: stats,
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            websocket_endpoint,
+            "http://127.0.0.1:9/api/v3/depth".to_owned(),
+            Some(Instant::now() + Duration::from_secs(2)),
+            "bootstrap",
+        );
+        let observed_ingress = context.ingress_sequence.clone();
+        let (control_tx, mut control_rx) = mpsc::channel(1);
+        let source = tokio::spawn(async move {
+            run_binance_depth_update_ws_source_with_control(stream, context, Some(&mut control_rx))
+                .await
+        });
+        timeout(Duration::from_secs(1), async {
+            while observed_ingress.last.load(Ordering::Relaxed) < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let (resume_tx, resume_rx) = oneshot::channel();
+        control_tx
+            .send(DepthSourceControl::Fence {
+                kind: DepthFenceKind::HourFinalize,
+                stop_after_fence: false,
+                resume_after_barrier: Some(resume_rx),
+                reply: reply_tx,
+            })
+            .await
+            .unwrap();
+        reply_rx.await.unwrap().unwrap();
+        drop(resume_tx);
+        let error = source.await.unwrap().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("depth barrier owner dropped source resume signal"),
+            "{error}"
+        );
+        let released = rx.recv().await.unwrap().event;
+        let raw = serde_json::from_str::<Value>(&released.raw_json).unwrap();
+        assert_eq!(raw["u"], 90);
+        assert_eq!(
+            raw["stitch_verdict"],
+            BINANCE_DEPTH_VERDICT_NOT_APPLIED_SNAPSHOT_UNAVAILABLE
+        );
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn binance_depth_eof_releases_pending_update_once() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let websocket_endpoint = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut websocket = accept_async(socket).await.unwrap();
+            websocket
+                .send(test_binance_depth_message(90, 90))
+                .await
+                .unwrap();
+        });
+        let (tx, mut rx) = mpsc::channel(4);
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
+        let (stream, _) = connect_async(&websocket_endpoint).await.unwrap();
+        let outcome = run_binance_depth_update_ws_source_with_control(
+            stream,
+            test_binance_depth_context(
+                reqwest::Client::new(),
+                SourceEventSink {
+                    tx,
+                    gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+                    source_queue_backpressure: stats,
+                    inflight_budget: InflightBudget::new(),
+                    enqueue_lock: Arc::new(AsyncMutex::new(())),
+                },
+                websocket_endpoint,
+                "http://127.0.0.1:9/api/v3/depth".to_owned(),
+                Some(Instant::now() + Duration::from_secs(2)),
+                "bootstrap",
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            BinanceDepthUpdateExit::StreamEnded { .. }
+        ));
+        let released = rx.recv().await.unwrap().event;
+        let raw = serde_json::from_str::<Value>(&released.raw_json).unwrap();
+        assert_eq!(raw["u"], 90);
+        assert_eq!(
+            raw["stitch_verdict"],
+            BINANCE_DEPTH_VERDICT_NOT_APPLIED_SNAPSHOT_UNAVAILABLE
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty) | Err(mpsc::error::TryRecvError::Disconnected)
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn binance_depth_pending_cap_neutral_releases_without_reconnecting_the_socket() {
+        let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let websocket_endpoint = format!("ws://{}", ws_listener.local_addr().unwrap());
+        let snapshot_endpoint = format!(
+            "http://{}/api/v3/depth",
+            http_listener.local_addr().unwrap()
+        );
+        let (snapshot_sent_tx, snapshot_sent_rx) = oneshot::channel();
+        let http_server = tokio::spawn(async move {
+            let (mut socket, _) = http_listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            sleep(Duration::from_millis(200)).await;
+            let body = r#"{"lastUpdateId":100,"bids":[["1","2"]],"asks":[["3","4"]]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = snapshot_sent_tx.send(());
+            sleep(Duration::from_millis(30)).await;
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let ws_server = tokio::spawn(async move {
+            let (socket, _) = ws_listener.accept().await.unwrap();
+            let mut websocket = accept_async(socket).await.unwrap();
+            for update_id in [90_u64, 91, 92] {
+                websocket
+                    .send(test_binance_depth_message(update_id, update_id))
+                    .await
+                    .unwrap();
+            }
+            snapshot_sent_rx.await.unwrap();
+            websocket
+                .send(test_binance_depth_message(101, 101))
+                .await
+                .unwrap();
+            sleep(Duration::from_millis(50)).await;
+            let _ = websocket.send(Message::Close(None)).await;
+        });
+
+        let (tx, mut rx) = mpsc::channel(8);
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
+        let (stream, _) = connect_async(&websocket_endpoint).await.unwrap();
+        let mut context = test_binance_depth_context(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(1))
+                .build()
+                .unwrap(),
+            SourceEventSink {
+                tx,
+                gaps: Arc::clone(&gaps),
+                source_queue_backpressure: stats,
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            websocket_endpoint,
+            snapshot_endpoint,
+            Some(Instant::now() + Duration::from_secs(3)),
+            "bootstrap",
+        );
+        context.pending_limits = Some((2, 1024 * 1024));
+        context.spec.frame_inactivity_timeout = Duration::from_secs(2);
+        let outcome = run_binance_depth_update_ws_source_with_control(stream, context, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            BinanceDepthUpdateExit::StreamEnded { ref reason, .. }
+                if reason.starts_with("ws_closed:")
+        ));
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event.event);
+        }
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.source_event_type.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "depth_update",
+                "depth_update",
+                "depth_update",
+                "depth_snapshot",
+                "depth_update",
+            ]
+        );
+        let raw = events
+            .iter()
+            .map(|event| serde_json::from_str::<Value>(&event.raw_json).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            raw[..3]
+                .iter()
+                .map(|value| value["u"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![90, 91, 92]
+        );
+        assert!(raw[..3].iter().all(|value| {
+            value["stitch_verdict"] == BINANCE_DEPTH_VERDICT_NOT_APPLIED_SNAPSHOT_UNAVAILABLE
+                && value["snapshot_last_update_id"].is_null()
+        }));
+        assert_eq!(raw[4]["stitch_verdict"], BINANCE_DEPTH_VERDICT_APPLIED);
+        assert!(raw.iter().all(|value| value["connection_generation"] == 1));
+        assert!(raw[..3].windows(2).all(|pair| {
+            pair[0]["depth_ingress_sequence"].as_u64().unwrap()
+                < pair[1]["depth_ingress_sequence"].as_u64().unwrap()
+        }));
+        assert!(
+            raw[4]["depth_ingress_sequence"].as_u64().unwrap()
+                < raw[3]["depth_ingress_sequence"].as_u64().unwrap(),
+            "the update observed while the snapshot response is pending must retain its earlier ingress coordinate"
+        );
+        assert!(events.windows(2).all(|pair| {
+            pair[0].collector_admission.as_ref().unwrap().sequence
+                < pair[1].collector_admission.as_ref().unwrap().sequence
+        }));
+        assert!(gaps.lock().unwrap().is_empty());
+        http_server.await.unwrap();
+        ws_server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn binance_depth_ping_frames_keep_a_business_silent_socket_alive() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let websocket_endpoint = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut websocket = accept_async(socket).await.unwrap();
+            for marker in 0_u8..5 {
+                websocket
+                    .send(Message::Ping(vec![marker].into()))
+                    .await
+                    .unwrap();
+                let reply = timeout(Duration::from_millis(200), websocket.next())
+                    .await
+                    .expect("collector must answer Ping before the inactivity deadline")
+                    .expect("collector must keep the socket open")
+                    .unwrap();
+                assert!(matches!(reply, Message::Pong(payload) if payload.as_ref() == [marker]));
+                sleep(Duration::from_millis(40)).await;
+            }
+            let _ = websocket.send(Message::Close(None)).await;
+        });
+        let (tx, _rx) = mpsc::channel(1);
+        let (stream, _) = connect_async(&websocket_endpoint).await.unwrap();
+        let mut context = test_binance_depth_context(
+            reqwest::Client::new(),
+            SourceEventSink {
+                tx,
+                gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+                source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            websocket_endpoint,
+            "http://127.0.0.1:9/api/v3/depth".to_owned(),
+            Some(Instant::now() + Duration::from_secs(2)),
+            "bootstrap",
+        );
+        context.spec.frame_inactivity_timeout = Duration::from_millis(80);
+
+        let outcome = run_binance_depth_update_ws_source_with_control(stream, context, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            BinanceDepthUpdateExit::StreamEnded { ref reason, .. }
+                if reason.starts_with("ws_closed:")
+        ));
+        let BinanceDepthUpdateExit::StreamEnded { saw_transport, .. } = outcome else {
+            unreachable!()
+        };
+        assert!(saw_transport);
+        let mut recovery = SourceRecoverySupervisor::new("binance_depth_update", 7);
+        let _ = recovery.next_wait();
+        let _ = recovery.next_wait();
+        recovery.record_business_recovery();
+        assert_eq!(recovery.next_wait().attempt, 1);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn binance_depth_snapshot_retries_do_not_reset_full_frame_inactivity() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let websocket_endpoint = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let _websocket = accept_async(socket).await.unwrap();
+            sleep(Duration::from_secs(2)).await;
+        });
+        let (tx, _rx) = mpsc::channel(1);
+        let (stream, _) = connect_async(&websocket_endpoint).await.unwrap();
+        let mut context = test_binance_depth_context(
+            reqwest::Client::builder()
+                .timeout(Duration::from_millis(50))
+                .build()
+                .unwrap(),
+            SourceEventSink {
+                tx,
+                gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+                source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            websocket_endpoint,
+            "http://127.0.0.1:9/api/v3/depth".to_owned(),
+            Some(Instant::now() + Duration::from_secs(3)),
+            "bootstrap",
+        );
+        context.spec.frame_inactivity_timeout = Duration::from_millis(1_100);
+        let started = Instant::now();
+        let outcome = run_binance_depth_update_ws_source_with_control(stream, context, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            BinanceDepthUpdateExit::StreamEnded { ref reason, .. }
+                if reason == "full_frame_inactivity"
+        ));
+        assert!(
+            started.elapsed() < Duration::from_millis(1_600),
+            "snapshot retry activity must not restart the persistent frame timer"
+        );
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn binance_depth_one_hundred_reconnects_reach_generation_101_with_bounded_fds() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let websocket_endpoint = format!("ws://{}", listener.local_addr().unwrap());
+        let (final_release_tx, final_release_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut fd_counts = Vec::with_capacity(101);
+            for _ in 0..100 {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut websocket = accept_async(socket).await.unwrap();
+                fd_counts.push(fs::read_dir("/proc/self/fd").unwrap().count());
+                websocket
+                    .send(test_binance_depth_message(1, 1))
+                    .await
+                    .unwrap();
+                websocket.send(Message::Close(None)).await.unwrap();
+            }
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut websocket = accept_async(socket).await.unwrap();
+            fd_counts.push(fs::read_dir("/proc/self/fd").unwrap().count());
+            websocket
+                .send(test_binance_depth_message(1, 1))
+                .await
+                .unwrap();
+            let _ = final_release_rx.await;
+            fd_counts
+        });
+
+        let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(128).unwrap();
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let (control_tx, control_rx) = mpsc::channel(AGGTRADE_CONTROL_CHANNEL_CAPACITY);
+        let source = tokio::spawn(run_binance_depth_source_with_spec_and_control(
+            BinanceDepthSpec {
+                websocket_endpoint,
+                snapshot_endpoint: "http://127.0.0.1:9/api/v3/depth".to_owned(),
+                frame_inactivity_timeout: Duration::from_secs(30),
+                recovery_wait_override: Some(Duration::from_millis(1)),
+            },
+            SourceEventSink {
+                tx,
+                gaps: Arc::clone(&gaps),
+                source_queue_backpressure: Arc::clone(&stats),
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            CollectorIdentity {
+                host_id: "collector-test".to_owned(),
+                region: "local-test".to_owned(),
+            },
+            Some(Instant::now() + Duration::from_secs(10)),
+            Instant::now(),
+            Some(control_rx),
+        ));
+
+        let mut previous_ingress = 0_u64;
+        for expected_generation in 1_u64..=101 {
+            let event = timeout(Duration::from_secs(10), rx.recv())
+                .await
+                .expect("the depth source must survive one hundred reconnects")
+                .expect("source queue must remain open")
+                .event;
+            let raw = serde_json::from_str::<Value>(&event.raw_json).unwrap();
+            assert_eq!(raw["connection_generation"], expected_generation);
+            assert_eq!(
+                raw["stitch_verdict"],
+                BINANCE_DEPTH_VERDICT_NOT_APPLIED_SNAPSHOT_UNAVAILABLE
+            );
+            let ingress = raw["depth_ingress_sequence"].as_u64().unwrap();
+            assert!(ingress > previous_ingress);
+            previous_ingress = ingress;
+        }
+        assert_eq!(
+            stats
+                .drain_all_operational()
+                .values()
+                .find_map(|sources| sources.get("binance_depth_update"))
+                .unwrap()
+                .reconnect_events,
+            100
+        );
+        assert!(gaps.lock().unwrap().is_empty());
+        assert!(!source.is_finished());
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        control_tx
+            .send(DepthSourceControl::Fence {
+                kind: DepthFenceKind::ResetContinuity,
+                stop_after_fence: true,
+                resume_after_barrier: None,
+                reply: reply_tx,
+            })
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(2), reply_rx)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        timeout(Duration::from_secs(2), source)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let _ = final_release_tx.send(());
+        let fd_counts = server.await.unwrap();
+        assert_eq!(fd_counts.len(), 101);
+        let first = fd_counts[0];
+        let last = *fd_counts.last().unwrap();
+        let minimum = *fd_counts.iter().min().unwrap();
+        let maximum = *fd_counts.iter().max().unwrap();
+        assert!(
+            last <= first + 2 && maximum <= minimum + 4,
+            "depth connection FDs must remain bounded: first={first}, last={last}, min={minimum}, max={maximum}"
+        );
+    }
+
+    #[tokio::test]
+    async fn binance_depth_one_hundred_resnapshots_keep_one_owner_and_bounded_fds() {
+        let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let websocket_endpoint = format!("ws://{}", ws_listener.local_addr().unwrap());
+        let snapshot_endpoint = format!(
+            "http://{}/api/v3/depth",
+            http_listener.local_addr().unwrap()
+        );
+        let (first_snapshot_tx, first_snapshot_rx) = oneshot::channel();
+        let http_server = tokio::spawn(async move {
+            let mut first_snapshot_tx = Some(first_snapshot_tx);
+            let mut fd_counts = Vec::with_capacity(101);
+            for snapshot_index in 0_u64..=100 {
+                let (mut socket, _) = http_listener.accept().await.unwrap();
+                fd_counts.push(fs::read_dir("/proc/self/fd").unwrap().count());
+                let mut request = [0_u8; 1024];
+                let _ = socket.read(&mut request).await.unwrap();
+                let last_update_id = 100 + 3 * snapshot_index;
+                let body = json!({
+                    "lastUpdateId": last_update_id,
+                    "bids": [["1", "2"]],
+                    "asks": [["3", "4"]]
+                })
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                if snapshot_index == 0 {
+                    let _ = first_snapshot_tx.take().unwrap().send(());
+                }
+            }
+            fd_counts
+        });
+        let (release_ws_tx, release_ws_rx) = oneshot::channel();
+        let ws_server = tokio::spawn(async move {
+            let (socket, _) = ws_listener.accept().await.unwrap();
+            let mut websocket = accept_async(socket).await.unwrap();
+            first_snapshot_rx.await.unwrap();
+            for cycle in 0_u64..100 {
+                let anchor = 100 + 3 * cycle;
+                websocket
+                    .send(test_binance_depth_message(anchor + 1, anchor + 1))
+                    .await
+                    .unwrap();
+                websocket
+                    .send(test_binance_depth_message(anchor + 3, anchor + 3))
+                    .await
+                    .unwrap();
+            }
+            let _ = release_ws_rx.await;
+        });
+
+        let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(512).unwrap();
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let (control_tx, control_rx) = mpsc::channel(AGGTRADE_CONTROL_CHANNEL_CAPACITY);
+        let source = tokio::spawn(run_binance_depth_source_with_spec_and_control(
+            BinanceDepthSpec {
+                websocket_endpoint,
+                snapshot_endpoint,
+                frame_inactivity_timeout: Duration::from_secs(30),
+                recovery_wait_override: Some(Duration::from_millis(1)),
+            },
+            SourceEventSink {
+                tx,
+                gaps: Arc::clone(&gaps),
+                source_queue_backpressure: stats,
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            CollectorIdentity {
+                host_id: "collector-test".to_owned(),
+                region: "local-test".to_owned(),
+            },
+            Some(Instant::now() + Duration::from_secs(10)),
+            Instant::now(),
+            Some(control_rx),
+        ));
+
+        let mut snapshot_count = 0_u64;
+        let mut applied_count = 0_u64;
+        let mut hole_count = 0_u64;
+        let mut ingress = BTreeSet::new();
+        let mut previous_admission = 0_u64;
+        for _ in 0..301 {
+            let event = timeout(Duration::from_secs(10), rx.recv())
+                .await
+                .expect("one hundred resnapshot cycles must make progress")
+                .expect("source queue must remain open")
+                .event;
+            let raw = serde_json::from_str::<Value>(&event.raw_json).unwrap();
+            assert_eq!(raw["connection_generation"], 1);
+            assert!(ingress.insert(raw["depth_ingress_sequence"].as_u64().unwrap()));
+            let admission = event.collector_admission.unwrap().sequence;
+            assert!(admission > previous_admission);
+            previous_admission = admission;
+            match event.source_event_type.as_str() {
+                "depth_snapshot" => snapshot_count += 1,
+                "depth_update" if raw["stitch_verdict"] == BINANCE_DEPTH_VERDICT_APPLIED => {
+                    applied_count += 1;
+                }
+                "depth_update"
+                    if raw["stitch_verdict"]
+                        == BINANCE_DEPTH_VERDICT_NOT_APPLIED_CONFIRMED_HOLE =>
+                {
+                    hole_count += 1;
+                }
+                other => panic!("unexpected resnapshot evidence: {other} {raw}"),
+            }
+        }
+        assert_eq!(snapshot_count, 101);
+        assert_eq!(applied_count, 100);
+        assert_eq!(hole_count, 100);
+        assert_eq!(ingress.len(), 301);
+        assert!(!source.is_finished());
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        control_tx
+            .send(DepthSourceControl::Fence {
+                kind: DepthFenceKind::ResetContinuity,
+                stop_after_fence: true,
+                resume_after_barrier: None,
+                reply: reply_tx,
+            })
+            .await
+            .unwrap();
+        reply_rx.await.unwrap().unwrap();
+        timeout(Duration::from_secs(2), source)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let _ = release_ws_tx.send(());
+        ws_server.await.unwrap();
+        let fd_counts = http_server.await.unwrap();
+        assert_eq!(fd_counts.len(), 101);
+        let minimum = *fd_counts.iter().min().unwrap();
+        let maximum = *fd_counts.iter().max().unwrap();
+        assert!(
+            maximum <= minimum + 4,
+            "snapshot HTTP sockets/FDs must remain bounded: min={minimum}, max={maximum}"
+        );
+        assert!(!gaps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn binance_depth_ingress_and_admission_sequences_fail_closed_on_overflow() {
+        let ingress = DepthIngressSequenceAllocator {
+            last: Arc::new(AtomicU64::new(u64::MAX)),
+        };
+        assert_eq!(
+            ingress.allocate().unwrap_err(),
+            "binance_depth_ingress_sequence_overflow"
+        );
+
+        let stats = SourceQueueBackpressureStats::default();
+        stats
+            .depth_admission_sequence
+            .store(u64::MAX, Ordering::Relaxed);
+        assert!(
+            stats
+                .next_depth_admission_sequence()
+                .unwrap_err()
+                .to_string()
+                .contains("depth admission sequence overflow")
+        );
+    }
+
+    #[test]
+    fn binance_depth_pending_buffer_enforces_byte_cap_independently_of_row_cap() {
+        let pending = DepthPendingBuffer::with_limits(100, 10);
+        assert!(!pending.would_exceed(10));
+        assert!(pending.would_exceed(11));
+        assert_eq!(
+            depth_snapshot_retry_delay(u32::MAX, 7),
+            depth_snapshot_retry_delay(32, 7)
+        );
+    }
+
+    #[test]
+    fn binance_depth_retry_after_is_bounded_to_official_maximum_ban_window() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            reqwest::header::HeaderValue::from_static("18446744073709551615"),
+        );
+        assert_eq!(
+            binance_snapshot_retry_after(&headers, reqwest::StatusCode::TOO_MANY_REQUESTS),
+            Some(Duration::from_secs(BINANCE_RETRY_AFTER_MAX_SECS))
+        );
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            reqwest::header::HeaderValue::from_static("not-seconds"),
+        );
+        assert_eq!(
+            binance_snapshot_retry_after(&headers, reqwest::StatusCode::TOO_MANY_REQUESTS),
+            None
+        );
     }
 
     #[test]
@@ -29180,7 +31605,7 @@ mod tests {
         };
         assert_eq!(
             delta.facts["binance_depth_stitch"]["stitch_applied_rows"],
-            1
+            0
         );
         assert_eq!(delta.facts["binance_depth_stitch"]["gap_rows"], 1);
         assert_eq!(delta.facts["binance_depth_stitch"]["resnapshot_count"], 1);
@@ -33040,6 +35465,9 @@ mod tests {
                 "asks": [["65000.20", "0.30"]],
                 "snapshot_trigger_reason": trigger_reason,
                 "snapshot_fetch_start_utc": recv_time_utc_ms - 10,
+                "source_sequence_epoch_id": "depth-source-epoch-test",
+                "connection_generation": 1_u64,
+                "depth_ingress_sequence": 1_u64,
             })
             .to_string(),
             collector_admission: None,
@@ -33057,23 +35485,35 @@ mod tests {
 
     fn test_binance_depth_update_event_inner(
         recv_time_utc_ms: i64,
-        trigger_reason: Option<&str>,
+        gap_reason: Option<&str>,
     ) -> RawEvent {
-        let mut raw_json = json!({
+        let is_gap = gap_reason.is_some();
+        let raw_json = json!({
             "e": "depthUpdate",
             "E": recv_time_utc_ms,
             "s": "BTCUSDT",
-            "U": 101_u64,
-            "u": 103_u64,
+            "U": if is_gap { 105_u64 } else { 101_u64 },
+            "u": if is_gap { 105_u64 } else { 103_u64 },
             "b": [["65000.10", "0.25"]],
             "a": [["65000.20", "0.30"]],
             "snapshot_last_update_id": 100_u64,
-            "local_u_before": Value::Null,
-            "stitch_evidence": "U <= lastUpdateId + 1 <= u"
+            "local_u_before": if is_gap { json!(103_u64) } else { Value::Null },
+            "local_u_after": if is_gap { Value::Null } else { json!(103_u64) },
+            "stitch_verdict": if is_gap {
+                BINANCE_DEPTH_VERDICT_NOT_APPLIED_CONFIRMED_HOLE
+            } else {
+                BINANCE_DEPTH_VERDICT_APPLIED
+            },
+            "stitch_evidence": if is_gap {
+                "U > local_u + 1"
+            } else {
+                "U <= lastUpdateId + 1 <= u"
+            },
+            "stitch_gap_reason": gap_reason.map(|reason| reason.trim_start_matches("stitch_gap:")),
+            "source_sequence_epoch_id": "depth-source-epoch-test",
+            "connection_generation": 1_u64,
+            "depth_ingress_sequence": 1_u64,
         });
-        if let Some(trigger_reason) = trigger_reason {
-            raw_json["snapshot_trigger_reason"] = json!(trigger_reason);
-        }
         RawEvent {
             source_kind: "binance_depth_update".to_owned(),
             source_event_type: "depth_update".to_owned(),
