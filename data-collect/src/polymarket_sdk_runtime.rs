@@ -146,7 +146,6 @@ impl RtdsFreshnessFence {
 pub(crate) struct RtdsRuntimeMessage {
     pub(crate) message: RtdsMessage,
     pub(crate) freshness_generation: Option<u64>,
-    pub(crate) newly_applied: Option<RtdsAppliedSubscription>,
 }
 
 pub(crate) enum RtdsRuntimeEvent {
@@ -760,22 +759,6 @@ impl RtdsSdkRuntime {
         self.desired_tx.borrow().revision
     }
 
-    #[must_use]
-    pub fn request_reconnect(&self, observed_generation: u64) -> bool {
-        self.connection.request_reconnect(observed_generation)
-    }
-
-    #[must_use]
-    pub(crate) fn observed_applied_generation(&self) -> Option<u64> {
-        self.freshness_fence.applied_generation
-    }
-
-    #[must_use]
-    pub(crate) fn generation_is_active(&self, generation: u64) -> bool {
-        self.connection.connection_generation() == generation
-            && self.connection.state().is_connected()
-    }
-
     pub async fn recv(
         &mut self,
         timeout_duration: Duration,
@@ -798,7 +781,14 @@ impl RtdsSdkRuntime {
         &mut self,
         timeout_duration: Duration,
     ) -> Result<Option<RtdsRuntimeEvent>, SdkStreamError> {
-        let deadline = Instant::now() + timeout_duration;
+        self.recv_event_until(Some(Instant::now() + timeout_duration))
+            .await
+    }
+
+    pub(crate) async fn recv_event_until(
+        &mut self,
+        deadline: Option<Instant>,
+    ) -> Result<Option<RtdsRuntimeEvent>, SdkStreamError> {
         loop {
             if let Some(error) = connection_fault(&self.faults) {
                 return Err(error);
@@ -809,8 +799,9 @@ impl RtdsSdkRuntime {
             if let Some(applied) = self.sync_applied_fence()? {
                 return Ok(Some(RtdsRuntimeEvent::Applied(applied)));
             }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
+            let remaining =
+                deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+            if remaining.is_some_and(|remaining| remaining.is_zero()) {
                 return Ok(None);
             }
             tokio::select! {
@@ -844,7 +835,6 @@ impl RtdsSdkRuntime {
                             Ok(Some(RtdsRuntimeEvent::Message(RtdsRuntimeMessage {
                                 message,
                                 freshness_generation,
-                                newly_applied,
                             })))
                         }
                         Err(broadcast::error::RecvError::Lagged(count)) => {
@@ -875,7 +865,12 @@ impl RtdsSdkRuntime {
                         ));
                     }
                 }
-                () = sleep(remaining) => return Ok(None),
+                () = async {
+                    match remaining {
+                        Some(remaining) => sleep(remaining).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => return Ok(None),
             }
         }
     }
@@ -1272,6 +1267,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (old_sent_tx, old_sent_rx) = tokio::sync::oneshot::channel();
+        let (close_tx, close_rx) = tokio::sync::oneshot::channel();
         let (replay_seen_tx, replay_seen_rx) = tokio::sync::oneshot::channel();
         let (send_new_tx, send_new_rx) = tokio::sync::oneshot::channel();
         let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
@@ -1293,11 +1289,8 @@ mod tests {
                 .await
                 .unwrap();
             old_sent_tx.send(()).unwrap();
-            while let Some(message) = socket.next().await {
-                if matches!(message, Ok(Message::Close(_)) | Err(_)) {
-                    break;
-                }
-            }
+            close_rx.await.unwrap();
+            socket.send(Message::Close(None)).await.unwrap();
             drop(socket);
 
             let (stream, _) = listener.accept().await.unwrap();
@@ -1335,6 +1328,7 @@ mod tests {
             )
             .await
             .unwrap();
+        let revision = runtime.subscription_revision();
         old_sent_rx.await.unwrap();
         timeout(Duration::from_secs(2), async {
             while runtime.messages.len() != 1 {
@@ -1345,14 +1339,13 @@ mod tests {
         .unwrap();
 
         let old_generation = runtime.connection_generation();
-        assert!(runtime.request_reconnect(old_generation));
+        close_tx.send(()).unwrap();
         replay_seen_rx.await.unwrap();
-
-        assert!(matches!(
-            runtime.recv_event(Duration::from_secs(2)).await.unwrap(),
-            Some(RtdsRuntimeEvent::Applied(RtdsAppliedSubscription { generation, .. }))
-                if generation == old_generation + 1
-        ));
+        runtime
+            .wait_subscription_applied(revision, Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(runtime.connection_generation(), old_generation + 1);
         let Some(RtdsRuntimeEvent::Message(old_message)) =
             runtime.recv_event(Duration::from_secs(2)).await.unwrap()
         else {

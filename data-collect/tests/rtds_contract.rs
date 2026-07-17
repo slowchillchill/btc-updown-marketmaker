@@ -2,10 +2,9 @@ use data_collect::ValidationVerdict;
 use data_collect::event::{
     EventEnvelope, HostClockSyncStatus, RawEvidence, SourceKind, SourceTimestamp,
 };
-use data_collect::health::{CoverageVerdict, FreshnessStatus};
 use data_collect::sources::rtds::{
     BTC_USD_SYMBOL, RTDS_CHAINLINK_TOPIC, build_chainlink_btc_usd_subscription_trace,
-    build_chainlink_raw_event, validate_reconnect_business_freshness,
+    build_chainlink_raw_event,
 };
 
 fn envelope(raw_json: &str) -> EventEnvelope {
@@ -57,36 +56,4 @@ fn rtds_chainlink_contract() {
     );
     assert_eq!(event.source_topic, RTDS_CHAINLINK_TOPIC);
     assert_eq!(event.symbol, BTC_USD_SYMBOL);
-}
-
-#[test]
-fn rtds_reconnect_revalidates_topic_symbol_payload_timestamp() {
-    let trace = build_chainlink_btc_usd_subscription_trace().expect("sdk subscription trace");
-
-    let healthy = validate_reconnect_business_freshness(
-        &trace,
-        Some(1_766_789_469_800),
-        Some(1_766_789_469_950),
-        1_766_789_470_000,
-        1_000,
-    );
-    assert!(healthy.topic_revalidated);
-    assert!(healthy.symbol_revalidated);
-    assert!(healthy.payload_timestamp_present);
-    assert_eq!(healthy.freshness_status, FreshnessStatus::Healthy);
-    assert_eq!(healthy.coverage_verdict, CoverageVerdict::Complete);
-
-    let stale = validate_reconnect_business_freshness(
-        &trace,
-        Some(1_766_789_469_800),
-        Some(1_766_789_468_000),
-        1_766_789_470_000,
-        1_000,
-    );
-    assert_eq!(stale.freshness_status, FreshnessStatus::Stale);
-    assert_eq!(stale.coverage_verdict, CoverageVerdict::Stale);
-    assert_eq!(
-        stale.source_gap.as_deref(),
-        Some("rtds_business_freshness_not_revalidated")
-    );
 }

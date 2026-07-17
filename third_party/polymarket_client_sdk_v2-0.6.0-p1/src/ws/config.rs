@@ -17,6 +17,9 @@ const DEFAULT_BACKOFF_MULTIPLIER: f64 = 2.0;
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Maximum time to resolve DNS, establish TCP/TLS, and complete the WebSocket handshake.
+    /// `None` preserves the upstream behavior of waiting without an application deadline.
+    pub connect_timeout: Option<Duration>,
     /// Interval for sending PING messages to keep connection alive
     pub heartbeat_interval: Duration,
     /// Maximum time to wait for PONG response before considering connection dead
@@ -28,6 +31,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            connect_timeout: None,
             heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL_DURATION,
             heartbeat_timeout: DEFAULT_HEARTBEAT_TIMEOUT_DURATION,
             reconnect: ReconnectConfig::default(),
@@ -111,6 +115,7 @@ mod tests {
     #[test]
     fn default_heartbeat_is_five_seconds() {
         let config = Config::default();
+        assert_eq!(config.connect_timeout, None);
         assert_eq!(config.heartbeat_interval, Duration::from_secs(5));
     }
 }

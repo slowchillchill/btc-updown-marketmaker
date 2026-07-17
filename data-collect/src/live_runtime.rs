@@ -125,10 +125,6 @@ const SOURCE_RECOVERY_CYCLE_MAX_ELAPSED: Duration = Duration::from_secs(120);
 const SOURCE_SUPERVISOR_BACKOFF_BASE_MS: u64 = 1_000;
 const SOURCE_SUPERVISOR_BACKOFF_MAX_MS: u64 = 30_000;
 const SOURCE_RECOVERY_JITTER_BPS: u32 = 2_000;
-const RTDS_RECONNECT_WINDOW_SECS: u64 = 3;
-const RTDS_MAX_NEW_GENERATIONS_PER_FRESHNESS_EPISODE: u64 = 2;
-const RTDS_FRESHNESS_EPISODE_MAX_SECS: u64 = 12;
-const RTDS_FRESHNESS_TIMEOUT_SECS: u64 = 60;
 const RTDS_FRESH_MIN_AGE_MS: i64 = -5_000;
 const RTDS_FRESH_MAX_AGE_MS: i64 = 30_000;
 const MARKET_FIRST_EVENT_TIMEOUT_SECS: u64 = 30;
@@ -196,95 +192,6 @@ pub const LIVE_SOURCES: &[&str] = &[
 pub fn is_live_runtime_source_gap_reason(reason: &str) -> bool {
     !reason.starts_with("bounded_queue_backpressure_wait:")
         && !reason.starts_with("writer_queue_backpressure_wait:")
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct RtdsFreshnessEpisode {
-    base_generation: u64,
-    latest_connection_generation: u64,
-    latest_applied_generation: Option<u64>,
-}
-
-impl RtdsFreshnessEpisode {
-    fn new(
-        base_generation: u64,
-        applied_generation: Option<u64>,
-    ) -> std::result::Result<Self, &'static str> {
-        if applied_generation.is_some_and(|generation| generation > base_generation) {
-            return Err("RTDS applied generation exceeds the episode connection generation");
-        }
-        Ok(Self {
-            base_generation,
-            latest_connection_generation: base_generation,
-            latest_applied_generation: applied_generation,
-        })
-    }
-
-    fn minimum_recovery_generation(self) -> std::result::Result<u64, &'static str> {
-        self.base_generation
-            .checked_add(1)
-            .ok_or("RTDS connection generation overflow")
-    }
-
-    fn observe_connection(&mut self, generation: u64) -> std::result::Result<u64, &'static str> {
-        if generation < self.latest_connection_generation {
-            return Err("RTDS connection generation regressed");
-        }
-        let used = generation
-            .checked_sub(self.base_generation)
-            .ok_or("RTDS connection generation regressed below episode base")?;
-        if used > RTDS_MAX_NEW_GENERATIONS_PER_FRESHNESS_EPISODE {
-            return Err("RTDS freshness episode exceeded its new-generation budget");
-        }
-        let newly_observed = generation - self.latest_connection_generation;
-        self.latest_connection_generation = generation;
-        Ok(newly_observed)
-    }
-
-    fn observe_applied(&mut self, generation: u64) -> std::result::Result<bool, &'static str> {
-        if generation > self.latest_connection_generation {
-            return Err("RTDS applied generation exceeds the observed connection generation");
-        }
-        if self
-            .latest_applied_generation
-            .is_some_and(|applied| generation < applied)
-        {
-            return Err("RTDS applied generation regressed");
-        }
-        let advanced = self
-            .latest_applied_generation
-            .is_none_or(|applied| generation > applied);
-        if advanced {
-            self.latest_applied_generation = Some(generation);
-        }
-        Ok(advanced)
-    }
-
-    fn generations_used(self) -> u64 {
-        self.latest_connection_generation - self.base_generation
-    }
-
-    fn latest_connection_is_applied(self) -> bool {
-        self.latest_applied_generation == Some(self.latest_connection_generation)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct RtdsFreshnessTerminal {
-    gap_reason: &'static str,
-    error_message: &'static str,
-}
-
-fn require_rtds_generation_budget_remaining(
-    episode: RtdsFreshnessEpisode,
-) -> std::result::Result<(), RtdsFreshnessTerminal> {
-    if episode.generations_used() < RTDS_MAX_NEW_GENERATIONS_PER_FRESHNESS_EPISODE {
-        return Ok(());
-    }
-    Err(RtdsFreshnessTerminal {
-        gap_reason: "rtds_business_message_timeout_after_two_new_generations",
-        error_message: "RTDS business stream did not recover",
-    })
 }
 
 #[derive(Clone, Debug)]
@@ -12802,226 +12709,51 @@ async fn run_rtds_source_with_spec(
             })?;
     let subscription = Subscription::chainlink_prices(Some("btc/usd".to_owned()));
     let mut runtime = RtdsSdkRuntime::new(spec.endpoint.clone(), spec.ws_config.clone())?;
-    runtime.wait_connected(spec.connect_timeout).await?;
-    runtime
-        .subscribe(subscription, spec.subscribe_timeout)
-        .await?;
+    runtime.replace_subscription(subscription)?;
     let mut recorded_generation = runtime.connection_generation();
 
-    'source: loop {
-        let freshness_deadline = Instant::now() + spec.freshness_timeout;
-        loop {
-            match wait_for_fresh_rtds_message(
-                &mut runtime,
-                &sink,
-                &collector_identity,
-                run_started,
-                &mut dedupe,
-                freshness_deadline,
-                deadline,
-                None,
-            )
-            .await?
-            {
-                RtdsWaitOutcome::Fresh(_) => {
-                    record_rtds_generation_advance(
-                        &mut recorded_generation,
-                        runtime.connection_generation(),
-                        &sink,
-                    )?;
-                    continue 'source;
-                }
-                RtdsWaitOutcome::GenerationApplied(_) => {
-                    record_rtds_generation_advance(
-                        &mut recorded_generation,
-                        runtime.connection_generation(),
-                        &sink,
-                    )?;
-                }
-                RtdsWaitOutcome::RunDeadline => break 'source,
-                RtdsWaitOutcome::WaitExpired => break,
+    loop {
+        match runtime.recv_event_until(deadline).await {
+            Ok(Some(RtdsRuntimeEvent::Applied(applied))) => {
+                record_rtds_generation_advance(
+                    &mut recorded_generation,
+                    applied.generation,
+                    &sink,
+                )?;
             }
-        }
-
-        sink.source_queue_backpressure
-            .record_lag("polymarket_rtds_chainlink_btc_usd", now_ms(), 1);
-        sink.source_queue_backpressure
-            .set_recovery_active("polymarket_rtds_chainlink_btc_usd", true);
-
-        // Read the independently observed acknowledgement first. Connection generations are
-        // monotonic and an applied acknowledgement can only refer to an already-established
-        // generation, so the later connection sample is guaranteed to be at least as new.
-        let applied_generation = runtime.observed_applied_generation();
-        let base_generation = runtime.connection_generation();
-        record_rtds_generation_advance(&mut recorded_generation, base_generation, &sink)?;
-        let mut episode =
-            RtdsFreshnessEpisode::new(base_generation, applied_generation).map_err(invalid_data)?;
-        let minimum_recovery_generation = episode
-            .minimum_recovery_generation()
-            .map_err(invalid_data)?;
-        let mut reconnect_generation = base_generation;
-        let episode_deadline = Instant::now() + spec.freshness_episode_timeout;
-
-        loop {
-            let current_generation = sync_rtds_episode_connection(
-                &runtime,
-                &mut episode,
-                &mut recorded_generation,
-                &sink,
-            )?;
-            if current_generation < reconnect_generation {
-                return Err(
-                    invalid_data("RTDS reconnect target exceeded current generation").into(),
-                );
-            }
-            let ticket_attempted = current_generation == reconnect_generation;
-            let ticket_published =
-                ticket_attempted && runtime.request_reconnect(current_generation);
-            record_gap(
-                &sink.gaps,
-                format!(
-                    "rtds_generation_reconnect_requested:generation={current_generation}:attempted={ticket_attempted}:published={ticket_published}"
-                ),
-            );
-            let mut generation_deadline = rtds_generation_observation_deadline(
-                Instant::now(),
-                episode_deadline,
-                spec.reconnect_window,
-            );
-
-            loop {
-                match wait_for_fresh_rtds_message(
-                    &mut runtime,
+            Ok(Some(RtdsRuntimeEvent::Message(message))) => {
+                let observed_generation = message
+                    .freshness_generation
+                    .unwrap_or_else(|| runtime.connection_generation());
+                record_rtds_generation_advance(
+                    &mut recorded_generation,
+                    observed_generation,
+                    &sink,
+                )?;
+                emit_rtds_message(
                     &sink,
                     &collector_identity,
                     run_started,
                     &mut dedupe,
-                    generation_deadline,
-                    deadline,
-                    Some(minimum_recovery_generation),
+                    message.message,
                 )
-                .await?
-                {
-                    RtdsWaitOutcome::Fresh(generation) => {
-                        let current_generation = sync_rtds_episode_connection(
-                            &runtime,
-                            &mut episode,
-                            &mut recorded_generation,
-                            &sink,
-                        )?;
-                        if current_generation != generation {
-                            continue;
-                        }
-                        episode.observe_applied(generation).map_err(invalid_data)?;
-                        sink.source_queue_backpressure
-                            .set_recovery_active("polymarket_rtds_chainlink_btc_usd", false);
-                        continue 'source;
-                    }
-                    RtdsWaitOutcome::GenerationApplied(applied) => {
-                        sync_rtds_episode_connection(
-                            &runtime,
-                            &mut episode,
-                            &mut recorded_generation,
-                            &sink,
-                        )?;
-                        if episode
-                            .observe_applied(applied.generation)
-                            .map_err(invalid_data)?
-                            && applied.generation > episode.base_generation
-                        {
-                            generation_deadline = rtds_generation_observation_deadline(
-                                Instant::now(),
-                                episode_deadline,
-                                spec.reconnect_window,
-                            );
-                        }
-                    }
-                    RtdsWaitOutcome::RunDeadline => {
-                        sink.source_queue_backpressure
-                            .set_recovery_active("polymarket_rtds_chainlink_btc_usd", false);
-                        break 'source;
-                    }
-                    RtdsWaitOutcome::WaitExpired => {
-                        let current_generation = sync_rtds_episode_connection(
-                            &runtime,
-                            &mut episode,
-                            &mut recorded_generation,
-                            &sink,
-                        )?;
-                        if !episode.latest_connection_is_applied() {
-                            sink.source_queue_backpressure
-                                .set_recovery_active("polymarket_rtds_chainlink_btc_usd", false);
-                            record_gap(
-                                &sink.gaps,
-                                format!(
-                                    "rtds_generation_replay_timeout:current={current_generation}:applied={:?}",
-                                    episode.latest_applied_generation
-                                ),
-                            );
-                            return Err(invalid_data(
-                                "RTDS new connection generation did not replay the desired subscription before deadline",
-                            )
-                            .into());
-                        }
-                        if let Err(terminal) = require_rtds_generation_budget_remaining(episode) {
-                            sink.source_queue_backpressure
-                                .set_recovery_active("polymarket_rtds_chainlink_btc_usd", false);
-                            record_gap(&sink.gaps, terminal.gap_reason.to_owned());
-                            return Err(terminal.error_message.into());
-                        }
-                        if Instant::now() >= episode_deadline {
-                            sink.source_queue_backpressure
-                                .set_recovery_active("polymarket_rtds_chainlink_btc_usd", false);
-                            record_gap(
-                                &sink.gaps,
-                                "rtds_freshness_episode_total_deadline_exhausted".to_owned(),
-                            );
-                            return Err("RTDS freshness episode deadline exhausted".into());
-                        }
-                        if ticket_attempted && current_generation == reconnect_generation {
-                            sink.source_queue_backpressure
-                                .set_recovery_active("polymarket_rtds_chainlink_btc_usd", false);
-                            record_gap(
-                                &sink.gaps,
-                                format!(
-                                    "rtds_generation_reconnect_timeout:generation={reconnect_generation}"
-                                ),
-                            );
-                            return Err(invalid_data(
-                                "RTDS one-shot reconnect did not establish a new generation before deadline",
-                            )
-                            .into());
-                        }
-                        reconnect_generation = current_generation;
-                        break;
-                    }
+                .await?;
+            }
+            Ok(None) => break,
+            Err(error) => {
+                if let SdkStreamError::Lagged(count) = &error {
+                    sink.source_queue_backpressure.record_lag(
+                        "polymarket_rtds_chainlink_btc_usd",
+                        now_ms(),
+                        *count,
+                    );
                 }
+                record_gap(&sink.gaps, format!("rtds_sdk_stream_fatal:{error}"));
+                return Err(error.into());
             }
         }
     }
     Ok(())
-}
-
-fn sync_rtds_episode_connection(
-    runtime: &RtdsSdkRuntime,
-    episode: &mut RtdsFreshnessEpisode,
-    recorded_generation: &mut u64,
-    sink: &SourceEventSink,
-) -> Result<u64> {
-    let generation = runtime.connection_generation();
-    record_rtds_generation_advance(recorded_generation, generation, sink)?;
-    episode
-        .observe_connection(generation)
-        .map_err(invalid_data)?;
-    Ok(generation)
-}
-
-fn rtds_generation_observation_deadline(
-    now: Instant,
-    episode_deadline: Instant,
-    reconnect_window: Duration,
-) -> Instant {
-    (now + reconnect_window).min(episode_deadline)
 }
 
 fn record_rtds_generation_advance(
@@ -13035,104 +12767,12 @@ fn record_rtds_generation_advance(
     if newly_observed == 0 {
         return Ok(());
     }
-    let previous_generation = *recorded_generation;
     for _ in 0..newly_observed {
         sink.source_queue_backpressure
             .record_reconnect("polymarket_rtds_chainlink_btc_usd", now_ms());
     }
     *recorded_generation = generation;
-    record_gap(
-        &sink.gaps,
-        format!("rtds_transport_generation_advanced:from={previous_generation}:to={generation}"),
-    );
     Ok(())
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RtdsWaitOutcome {
-    Fresh(u64),
-    GenerationApplied(crate::polymarket_sdk_runtime::RtdsAppliedSubscription),
-    WaitExpired,
-    RunDeadline,
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn wait_for_fresh_rtds_message(
-    runtime: &mut RtdsSdkRuntime,
-    sink: &SourceEventSink,
-    collector_identity: &CollectorIdentity,
-    run_started: Instant,
-    dedupe: &mut TimedFingerprintWindow,
-    wait_deadline: Instant,
-    run_deadline: Option<Instant>,
-    minimum_freshness_generation: Option<u64>,
-) -> Result<RtdsWaitOutcome> {
-    loop {
-        if deadline_reached(run_deadline) {
-            return Ok(RtdsWaitOutcome::RunDeadline);
-        }
-        let wait_remaining = wait_deadline.saturating_duration_since(Instant::now());
-        if wait_remaining.is_zero() {
-            return Ok(RtdsWaitOutcome::WaitExpired);
-        }
-        let wait_duration = deadline_remaining(run_deadline)
-            .map(|remaining| remaining.min(wait_remaining))
-            .unwrap_or(wait_remaining);
-        match runtime.recv_event(wait_duration).await {
-            Ok(Some(RtdsRuntimeEvent::Applied(applied))) => {
-                return Ok(RtdsWaitOutcome::GenerationApplied(applied));
-            }
-            Ok(Some(RtdsRuntimeEvent::Message(message))) => {
-                let freshness_generation = message.freshness_generation;
-                let newly_applied = message.newly_applied;
-                let is_fresh = emit_rtds_message(
-                    sink,
-                    collector_identity,
-                    run_started,
-                    dedupe,
-                    message.message,
-                )
-                .await?;
-                if let Some(generation) = qualifying_rtds_freshness_generation(
-                    is_fresh,
-                    freshness_generation,
-                    minimum_freshness_generation,
-                    freshness_generation
-                        .is_some_and(|generation| runtime.generation_is_active(generation)),
-                ) {
-                    return Ok(RtdsWaitOutcome::Fresh(generation));
-                }
-                if let Some(applied) = newly_applied {
-                    return Ok(RtdsWaitOutcome::GenerationApplied(applied));
-                }
-            }
-            Ok(None) => {}
-            Err(err) => {
-                if let SdkStreamError::Lagged(count) = &err {
-                    sink.source_queue_backpressure.record_lag(
-                        "polymarket_rtds_chainlink_btc_usd",
-                        now_ms(),
-                        *count,
-                    );
-                }
-                record_gap(&sink.gaps, format!("rtds_sdk_stream_fatal:{err}"));
-                return Err(err.into());
-            }
-        }
-    }
-}
-
-fn qualifying_rtds_freshness_generation(
-    is_fresh: bool,
-    freshness_generation: Option<u64>,
-    minimum_generation: Option<u64>,
-    generation_is_still_active: bool,
-) -> Option<u64> {
-    freshness_generation.filter(|generation| {
-        is_fresh
-            && generation_is_still_active
-            && minimum_generation.is_none_or(|minimum| *generation >= minimum)
-    })
 }
 
 async fn emit_rtds_message(
@@ -13171,13 +12811,6 @@ async fn emit_rtds_message(
     let source_identifier = classified.payload.symbol.clone();
     let value = classified.payload.value.to_string();
     let is_fresh = classified.freshness_status == "fresh";
-    if classified.freshness_status == "stale" {
-        sink.source_queue_backpressure.record_lag(
-            "polymarket_rtds_chainlink_btc_usd",
-            recv_time_utc_ms,
-            1,
-        );
-    }
     send_event(
         sink,
         run_started,
@@ -14880,7 +14513,8 @@ fn bounded_ws_config() -> WsConfig {
 
 fn bounded_rtds_ws_config() -> WsConfig {
     let mut config = WsConfig::default();
-    config.reconnect.max_attempts = Some(3);
+    config.connect_timeout = Some(Duration::from_secs(WS_CONNECT_TIMEOUT_SECS));
+    config.reconnect.max_attempts = None;
     config.reconnect.max_backoff = Duration::from_secs(5);
     config.heartbeat_interval = Duration::from_secs(5);
     config.heartbeat_timeout = Duration::from_secs(15);
@@ -15720,11 +15354,6 @@ impl PolymarketSourceSpec {
 struct RtdsSourceSpec {
     endpoint: String,
     ws_config: WsConfig,
-    connect_timeout: Duration,
-    subscribe_timeout: Duration,
-    freshness_timeout: Duration,
-    reconnect_window: Duration,
-    freshness_episode_timeout: Duration,
 }
 
 impl RtdsSourceSpec {
@@ -15732,11 +15361,6 @@ impl RtdsSourceSpec {
         Self {
             endpoint: RTDS_WS_ENDPOINT.to_owned(),
             ws_config: bounded_rtds_ws_config(),
-            connect_timeout: Duration::from_secs(20),
-            subscribe_timeout: Duration::from_secs(3),
-            freshness_timeout: Duration::from_secs(RTDS_FRESHNESS_TIMEOUT_SECS),
-            reconnect_window: Duration::from_secs(RTDS_RECONNECT_WINDOW_SECS),
-            freshness_episode_timeout: Duration::from_secs(RTDS_FRESHNESS_EPISODE_MAX_SECS),
         }
     }
 }
@@ -20894,10 +20518,18 @@ mod tests {
     #[test]
     fn websocket_heartbeat_configs_are_channel_specific() {
         let clob = bounded_ws_config();
+        assert_eq!(clob.connect_timeout, None);
+        assert_eq!(clob.reconnect.max_attempts, Some(3));
         assert_eq!(clob.heartbeat_interval, Duration::from_secs(10));
         assert_eq!(clob.heartbeat_timeout, Duration::from_secs(20));
 
         let rtds = bounded_rtds_ws_config();
+        assert_eq!(
+            rtds.connect_timeout,
+            Some(Duration::from_secs(WS_CONNECT_TIMEOUT_SECS))
+        );
+        assert_eq!(rtds.reconnect.max_attempts, None);
+        assert_eq!(rtds.reconnect.max_backoff, Duration::from_secs(5));
         assert_eq!(rtds.heartbeat_interval, Duration::from_secs(5));
         assert_eq!(rtds.heartbeat_timeout, Duration::from_secs(15));
     }
@@ -20929,19 +20561,10 @@ mod tests {
 
         let rtds = RtdsSourceSpec::production();
         assert_eq!(rtds.endpoint, RTDS_WS_ENDPOINT);
-        assert_eq!(rtds.connect_timeout, Duration::from_secs(20));
-        assert_eq!(rtds.subscribe_timeout, Duration::from_secs(3));
+        assert_eq!(rtds.ws_config.reconnect.max_attempts, None);
         assert_eq!(
-            rtds.freshness_timeout,
-            Duration::from_secs(RTDS_FRESHNESS_TIMEOUT_SECS)
-        );
-        assert_eq!(
-            rtds.reconnect_window,
-            Duration::from_secs(RTDS_RECONNECT_WINDOW_SECS)
-        );
-        assert_eq!(
-            rtds.freshness_episode_timeout,
-            Duration::from_secs(RTDS_FRESHNESS_EPISODE_MAX_SECS)
+            rtds.ws_config.connect_timeout,
+            Some(Duration::from_secs(WS_CONNECT_TIMEOUT_SECS))
         );
     }
 
@@ -21002,29 +20625,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rtds_source_spec_uses_private_endpoint_and_connect_timeout() {
+    async fn rtds_source_survives_startup_unavailable_then_applies_one_complete_desired() {
         let dataset_root = tempdir().unwrap();
         let dataset_root = dataset_root.path().canonicalize().unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = format!("ws://{}", listener.local_addr().unwrap());
-        let (accepted_tx, accepted_rx) = oneshot::channel();
-        let server = tokio::spawn(async move {
-            let (_socket, _) = listener.accept().await.unwrap();
-            accepted_tx.send(()).unwrap();
-            sleep(Duration::from_secs(1)).await;
-        });
-        let (tx, _rx) = mpsc::channel(8);
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let endpoint = format!("ws://{address}");
+        let (tx, mut rx) = mpsc::channel(8);
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
         let mut spec = RtdsSourceSpec::production();
         spec.endpoint = endpoint;
-        spec.connect_timeout = Duration::from_millis(25);
+        spec.ws_config.reconnect.initial_backoff = Duration::from_millis(5);
+        spec.ws_config.reconnect.max_backoff = Duration::from_millis(10);
+        spec.ws_config.reconnect.backoff_multiplier = 1.0;
+        spec.ws_config.heartbeat_interval = Duration::from_millis(20);
+        spec.ws_config.heartbeat_timeout = Duration::from_millis(60);
         let started = Instant::now();
         let source = tokio::spawn(run_rtds_source_with_spec(
             spec,
             dataset_root,
             SourceEventSink {
                 tx,
-                gaps: Arc::new(Mutex::new(SourceGapStore::default())),
-                source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+                gaps: Arc::clone(&gaps),
+                source_queue_backpressure: Arc::clone(&stats),
                 inflight_budget: InflightBudget::new(),
                 enqueue_lock: Arc::new(AsyncMutex::new(())),
             },
@@ -21032,20 +20658,581 @@ mod tests {
                 host_id: "collector-test".to_owned(),
                 region: "local-test".to_owned(),
             },
-            Some(Instant::now() + Duration::from_secs(1)),
+            Some(Instant::now() + Duration::from_millis(500)),
             started,
         ));
 
-        accepted_rx.await.unwrap();
-        let error = timeout(Duration::from_millis(500), source)
+        sleep(Duration::from_millis(100)).await;
+        assert!(
+            !source.is_finished(),
+            "startup transport unavailability must not exhaust a retry or timeout budget"
+        );
+
+        let listener = TcpListener::bind(address).await.unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let request = loop {
+                let message = socket.next().await.unwrap().unwrap();
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                if text == "PING" {
+                    socket.send(Message::Text("PONG".into())).await.unwrap();
+                    continue;
+                }
+                break serde_json::from_str::<Value>(&text).unwrap();
+            };
+            assert_eq!(request["action"], "subscribe");
+            assert_eq!(request["subscriptions"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                request["subscriptions"][0]["topic"],
+                "crypto_prices_chainlink"
+            );
+            assert_eq!(request["subscriptions"][0]["type"], "*");
+            assert_eq!(
+                request["subscriptions"][0]["filters"],
+                r#"{"symbol":"btc/usd"}"#
+            );
+            assert!(
+                timeout(Duration::from_millis(40), async {
+                    loop {
+                        let message = socket.next().await.unwrap().unwrap();
+                        if let Message::Text(text) = message {
+                            if text == "PING" {
+                                socket.send(Message::Text("PONG".into())).await.unwrap();
+                            } else if serde_json::from_str::<Value>(&text).is_ok() {
+                                break;
+                            }
+                        }
+                    }
+                })
+                .await
+                .is_err(),
+                "the first successful generation may receive only one complete desired replay"
+            );
+            let timestamp = now_ms();
+            socket
+                .send(Message::Text(
+                    json!({
+                        "topic": "crypto_prices_chainlink",
+                        "type": "update",
+                        "timestamp": timestamp,
+                        "payload": {
+                            "symbol": "btc/usd",
+                            "timestamp": timestamp,
+                            "value": "65000.10"
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            while let Some(message) = socket.next().await {
+                match message {
+                    Ok(Message::Text(text)) if text == "PING" => {
+                        socket.send(Message::Text("PONG".into())).await.unwrap();
+                    }
+                    Ok(Message::Close(_)) | Err(_) => break,
+                    _ => {}
+                }
+            }
+        });
+
+        let event = timeout(Duration::from_millis(300), rx.recv())
             .await
-            .expect("private connect timeout must bound the production source loop")
+            .expect("RTDS must recover after startup unavailability")
+            .expect("source ingress remains open");
+        assert_eq!(
+            rtds_row_from_event(&event.event).unwrap().freshness_status,
+            "fresh"
+        );
+        timeout(Duration::from_secs(1), source)
+            .await
+            .expect("run deadline must stop the recovered source")
             .unwrap()
-            .expect_err("an incomplete websocket handshake must not connect RTDS");
-        assert!(error.to_string().contains("connecting RTDS"), "{error}");
-        assert!(started.elapsed() < Duration::from_millis(500));
-        server.abort();
-        let _ = server.await;
+            .unwrap();
+        server.await.unwrap();
+        assert!(gaps.lock().unwrap().is_empty());
+        let counters = stats.drain_all_operational();
+        assert!(counters.values().all(|by_source| {
+            by_source
+                .get("polymarket_rtds_chainlink_btc_usd")
+                .is_none_or(|counter| counter.lag_events == 0 && counter.reconnect_events == 0)
+        }));
+    }
+
+    #[tokio::test]
+    async fn rtds_source_retries_after_a_stalled_websocket_handshake() {
+        let dataset_root = tempdir().unwrap();
+        let dataset_root = dataset_root.path().canonicalize().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (tx, mut rx) = mpsc::channel(8);
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
+        let server = tokio::spawn(async move {
+            let (mut stalled_handshake, _) = listener.accept().await.unwrap();
+            let stalled_closed = tokio::spawn(async move {
+                let mut buffer = [0_u8; 1024];
+                timeout(Duration::from_millis(300), async {
+                    loop {
+                        match stalled_handshake.read(&mut buffer).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {}
+                        }
+                    }
+                })
+                .await
+                .expect("timed-out handshake socket must be released");
+            });
+
+            let (stream, _) = timeout(Duration::from_millis(300), listener.accept())
+                .await
+                .expect("stalled WebSocket handshake must be retried")
+                .unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let request = loop {
+                let message = socket.next().await.unwrap().unwrap();
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                if text == "PING" {
+                    socket.send(Message::Text("PONG".into())).await.unwrap();
+                    continue;
+                }
+                break serde_json::from_str::<Value>(&text).unwrap();
+            };
+            assert_eq!(request["action"], "subscribe");
+            assert_eq!(request["subscriptions"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                request["subscriptions"][0]["topic"],
+                "crypto_prices_chainlink"
+            );
+            assert_eq!(request["subscriptions"][0]["type"], "*");
+            assert_eq!(
+                request["subscriptions"][0]["filters"],
+                r#"{"symbol":"btc/usd"}"#
+            );
+            assert!(
+                timeout(Duration::from_millis(40), async {
+                    loop {
+                        let message = socket.next().await.unwrap().unwrap();
+                        if let Message::Text(text) = message {
+                            if text == "PING" {
+                                socket.send(Message::Text("PONG".into())).await.unwrap();
+                            } else if serde_json::from_str::<Value>(&text).is_ok() {
+                                break;
+                            }
+                        }
+                    }
+                })
+                .await
+                .is_err(),
+                "successful generation may receive only one complete desired replay"
+            );
+            let timestamp = now_ms();
+            socket
+                .send(Message::Text(
+                    json!({
+                        "topic": "crypto_prices_chainlink",
+                        "type": "update",
+                        "timestamp": timestamp,
+                        "payload": {
+                            "symbol": "btc/usd",
+                            "timestamp": timestamp,
+                            "value": "65000.10"
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            while let Some(message) = socket.next().await {
+                match message {
+                    Ok(Message::Text(text)) if text == "PING" => {
+                        socket.send(Message::Text("PONG".into())).await.unwrap();
+                    }
+                    Ok(Message::Close(_)) | Err(_) => break,
+                    _ => {}
+                }
+            }
+            stalled_closed.await.unwrap();
+            assert!(
+                timeout(Duration::from_millis(50), listener.accept())
+                    .await
+                    .is_err(),
+                "one stalled attempt must not create duplicate successful generations"
+            );
+        });
+
+        let mut spec = RtdsSourceSpec::production();
+        spec.endpoint = format!("ws://{address}");
+        spec.ws_config.connect_timeout = Some(Duration::from_millis(40));
+        spec.ws_config.reconnect.initial_backoff = Duration::from_millis(5);
+        spec.ws_config.reconnect.max_backoff = Duration::from_millis(10);
+        spec.ws_config.reconnect.backoff_multiplier = 1.0;
+        spec.ws_config.heartbeat_interval = Duration::from_millis(20);
+        spec.ws_config.heartbeat_timeout = Duration::from_millis(60);
+        let source = tokio::spawn(run_rtds_source_with_spec(
+            spec,
+            dataset_root,
+            SourceEventSink {
+                tx,
+                gaps: Arc::clone(&gaps),
+                source_queue_backpressure: Arc::clone(&stats),
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            CollectorIdentity {
+                host_id: "collector-test".to_owned(),
+                region: "local-test".to_owned(),
+            },
+            Some(Instant::now() + Duration::from_millis(350)),
+            Instant::now(),
+        ));
+
+        let event = timeout(Duration::from_millis(300), rx.recv())
+            .await
+            .expect("RTDS must recover after the stalled handshake")
+            .expect("source ingress remains open");
+        assert_eq!(
+            rtds_row_from_event(&event.event).unwrap().freshness_status,
+            "fresh"
+        );
+        timeout(Duration::from_secs(1), source)
+            .await
+            .expect("run deadline must stop the recovered source")
+            .unwrap()
+            .unwrap();
+        server.await.unwrap();
+        assert!(gaps.lock().unwrap().is_empty());
+        let counters = stats.drain_all_operational();
+        assert!(counters.values().all(|by_source| {
+            by_source
+                .get("polymarket_rtds_chainlink_btc_usd")
+                .is_none_or(|counter| counter.lag_events == 0 && counter.reconnect_events == 0)
+        }));
+    }
+
+    #[tokio::test]
+    async fn rtds_source_recovers_after_close_and_failures_without_gap_or_replay_duplication() {
+        const FAILED_ATTEMPTS: usize = 5;
+
+        let dataset_root = tempdir().unwrap();
+        let dataset_root = dataset_root.path().canonicalize().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (failed_attempts_tx, failed_attempts_rx) = oneshot::channel();
+        let (tx, mut rx) = mpsc::channel(8);
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let initial = loop {
+                let message = socket.next().await.unwrap().unwrap();
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                if text == "PING" {
+                    socket.send(Message::Text("PONG".into())).await.unwrap();
+                    continue;
+                }
+                break serde_json::from_str::<Value>(&text).unwrap();
+            };
+            socket.send(Message::Close(None)).await.unwrap();
+            drop(socket);
+
+            for _ in 0..FAILED_ATTEMPTS {
+                let (stream, _) = timeout(Duration::from_millis(300), listener.accept())
+                    .await
+                    .expect("natural reconnect attempt")
+                    .unwrap();
+                drop(stream);
+            }
+            failed_attempts_tx.send(()).unwrap();
+
+            let (stream, _) = timeout(Duration::from_millis(300), listener.accept())
+                .await
+                .expect("stable RTDS generation after failed attempts")
+                .unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let replay = loop {
+                let message = socket.next().await.unwrap().unwrap();
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                if text == "PING" {
+                    socket.send(Message::Text("PONG".into())).await.unwrap();
+                    continue;
+                }
+                break serde_json::from_str::<Value>(&text).unwrap();
+            };
+            assert_eq!(initial, replay);
+            assert_eq!(replay["action"], "subscribe");
+            assert_eq!(replay["subscriptions"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                replay["subscriptions"][0]["filters"],
+                r#"{"symbol":"btc/usd"}"#
+            );
+            assert!(
+                timeout(Duration::from_millis(40), async {
+                    loop {
+                        let message = socket.next().await.unwrap().unwrap();
+                        if let Message::Text(text) = message {
+                            if text == "PING" {
+                                socket.send(Message::Text("PONG".into())).await.unwrap();
+                            } else if serde_json::from_str::<Value>(&text).is_ok() {
+                                break;
+                            }
+                        }
+                    }
+                })
+                .await
+                .is_err(),
+                "a successful generation may receive only one latest desired replay"
+            );
+            let timestamp = now_ms();
+            socket
+                .send(Message::Text(
+                    json!({
+                        "topic": "crypto_prices_chainlink",
+                        "type": "update",
+                        "timestamp": timestamp,
+                        "payload": {
+                            "symbol": "btc/usd",
+                            "timestamp": timestamp,
+                            "value": "65000.10"
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            while let Some(message) = socket.next().await {
+                match message {
+                    Ok(Message::Text(text)) if text == "PING" => {
+                        socket.send(Message::Text("PONG".into())).await.unwrap();
+                    }
+                    Ok(Message::Close(_)) | Err(_) => break,
+                    _ => {}
+                }
+            }
+        });
+
+        let mut spec = RtdsSourceSpec::production();
+        spec.endpoint = format!("ws://{address}");
+        spec.ws_config.connect_timeout = Some(Duration::from_millis(50));
+        spec.ws_config.reconnect.initial_backoff = Duration::from_millis(5);
+        spec.ws_config.reconnect.max_backoff = Duration::from_millis(10);
+        spec.ws_config.reconnect.backoff_multiplier = 1.0;
+        spec.ws_config.heartbeat_interval = Duration::from_millis(20);
+        spec.ws_config.heartbeat_timeout = Duration::from_millis(60);
+        let source = tokio::spawn(run_rtds_source_with_spec(
+            spec,
+            dataset_root,
+            SourceEventSink {
+                tx,
+                gaps: Arc::clone(&gaps),
+                source_queue_backpressure: Arc::clone(&stats),
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            CollectorIdentity {
+                host_id: "collector-test".to_owned(),
+                region: "local-test".to_owned(),
+            },
+            Some(Instant::now() + Duration::from_millis(500)),
+            Instant::now(),
+        ));
+
+        failed_attempts_rx.await.unwrap();
+        assert!(
+            !source.is_finished(),
+            "failed reconnect attempts must not exhaust the RTDS source"
+        );
+        let event = timeout(Duration::from_millis(300), rx.recv())
+            .await
+            .expect("RTDS must recover after Close and failed attempts")
+            .expect("source ingress remains open");
+        assert_eq!(
+            rtds_row_from_event(&event.event).unwrap().freshness_status,
+            "fresh"
+        );
+        assert!(!source.is_finished());
+        timeout(Duration::from_secs(1), source)
+            .await
+            .expect("run deadline must stop the recovered source")
+            .unwrap()
+            .unwrap();
+        server.await.unwrap();
+        assert!(gaps.lock().unwrap().is_empty());
+        let counters = stats.drain_all_operational();
+        let counter = counters
+            .values()
+            .find_map(|by_source| by_source.get("polymarket_rtds_chainlink_btc_usd"))
+            .expect("natural RTDS generation advance counter");
+        assert_eq!(counter.lag_events, 0);
+        assert_eq!(counter.reconnect_events, 1);
+    }
+
+    #[tokio::test]
+    async fn rtds_source_keeps_one_socket_through_silence_and_consumes_stale_then_fresh() {
+        let dataset_root = tempdir().unwrap();
+        let dataset_root = dataset_root.path().canonicalize().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (tx, mut rx) = mpsc::channel(8);
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let request = loop {
+                let message = socket.next().await.unwrap().unwrap();
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                if text == "PING" {
+                    socket.send(Message::Text("PONG".into())).await.unwrap();
+                    continue;
+                }
+                break serde_json::from_str::<Value>(&text).unwrap();
+            };
+            assert_eq!(request["action"], "subscribe");
+            assert_eq!(request["subscriptions"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                request["subscriptions"][0]["filters"],
+                r#"{"symbol":"btc/usd"}"#
+            );
+
+            let silence = sleep(Duration::from_millis(150));
+            tokio::pin!(silence);
+            loop {
+                tokio::select! {
+                    () = &mut silence => break,
+                    message = socket.next() => {
+                        match message {
+                            Some(Ok(Message::Text(text))) if text == "PING" => {
+                                socket.send(Message::Text("PONG".into())).await.unwrap();
+                            }
+                            Some(Ok(Message::Text(text))) if serde_json::from_str::<Value>(&text).is_ok() => {
+                                panic!("business silence must not send a second RTDS subscription: {text}");
+                            }
+                            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
+                                panic!("business silence must not close the healthy transport");
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
+            let timestamp = now_ms();
+            for (payload_timestamp, value) in [
+                (timestamp.saturating_sub(31_000), "64000.00"),
+                (timestamp, "65000.00"),
+            ] {
+                socket
+                    .send(Message::Text(
+                        json!({
+                            "topic": "crypto_prices_chainlink",
+                            "type": "update",
+                            "timestamp": timestamp,
+                            "payload": {
+                                "symbol": "btc/usd",
+                                "timestamp": payload_timestamp,
+                                "value": value
+                            }
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+
+            while let Some(message) = socket.next().await {
+                match message {
+                    Ok(Message::Text(text)) if text == "PING" => {
+                        socket.send(Message::Text("PONG".into())).await.unwrap();
+                    }
+                    Ok(Message::Text(text)) if serde_json::from_str::<Value>(&text).is_ok() => {
+                        panic!("a healthy generation may receive only one complete desired replay")
+                    }
+                    Ok(Message::Close(_)) | Err(_) => break,
+                    _ => {}
+                }
+            }
+            assert!(
+                timeout(Duration::from_millis(50), listener.accept())
+                    .await
+                    .is_err(),
+                "business silence must not create a second connection generation"
+            );
+        });
+
+        let mut spec = RtdsSourceSpec::production();
+        spec.endpoint = format!("ws://{address}");
+        spec.ws_config.reconnect.initial_backoff = Duration::from_millis(5);
+        spec.ws_config.reconnect.max_backoff = Duration::from_millis(10);
+        spec.ws_config.reconnect.backoff_multiplier = 1.0;
+        spec.ws_config.heartbeat_interval = Duration::from_millis(20);
+        spec.ws_config.heartbeat_timeout = Duration::from_millis(60);
+        let source = tokio::spawn(run_rtds_source_with_spec(
+            spec,
+            dataset_root,
+            SourceEventSink {
+                tx,
+                gaps: Arc::clone(&gaps),
+                source_queue_backpressure: Arc::clone(&stats),
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            CollectorIdentity {
+                host_id: "collector-test".to_owned(),
+                region: "local-test".to_owned(),
+            },
+            None,
+            Instant::now(),
+        ));
+
+        sleep(Duration::from_millis(120)).await;
+        assert!(
+            !source.is_finished(),
+            "business silence must not finish the RTDS source"
+        );
+        let mut statuses = Vec::new();
+        while statuses.len() < 2 {
+            let event = timeout(Duration::from_millis(300), rx.recv())
+                .await
+                .expect("same socket must deliver stale and fresh rows")
+                .expect("source ingress remains open");
+            statuses.push(rtds_row_from_event(&event.event).unwrap().freshness_status);
+        }
+        assert_eq!(statuses, ["stale", "fresh"]);
+        assert!(!source.is_finished());
+        source.abort();
+        let join_error = timeout(Duration::from_secs(1), source)
+            .await
+            .expect("aborting the run-forever source must release its runtime")
+            .expect_err("the run-forever source must not return before explicit cancellation");
+        assert!(join_error.is_cancelled());
+        server.await.unwrap();
+        assert!(gaps.lock().unwrap().is_empty());
+        let counters = stats.drain_all_operational();
+        assert!(counters.values().all(|by_source| {
+            by_source
+                .get("polymarket_rtds_chainlink_btc_usd")
+                .is_none_or(|counter| counter.lag_events == 0 && counter.reconnect_events == 0)
+        }));
     }
 
     async fn spawn_polymarket_book_burst_server(
@@ -23401,196 +23588,6 @@ mod tests {
                 .as_deref()
                 .is_some_and(|error| error.contains("source panicked"))
         );
-    }
-
-    #[test]
-    fn rtds_freshness_uses_two_bounded_new_generations() {
-        assert_eq!(RTDS_FRESHNESS_TIMEOUT_SECS, 60);
-        assert_eq!(RTDS_RECONNECT_WINDOW_SECS, 3);
-        assert_eq!(RTDS_MAX_NEW_GENERATIONS_PER_FRESHNESS_EPISODE, 2);
-        assert_eq!(RTDS_FRESHNESS_EPISODE_MAX_SECS, 12);
-
-        let mut episode = RtdsFreshnessEpisode::new(7, Some(7)).unwrap();
-        assert_eq!(episode.minimum_recovery_generation(), Ok(8));
-        assert_eq!(episode.observe_connection(8), Ok(1));
-        assert!(!episode.latest_connection_is_applied());
-        assert_eq!(episode.observe_applied(8), Ok(true));
-        assert!(episode.latest_connection_is_applied());
-        assert_eq!(require_rtds_generation_budget_remaining(episode), Ok(()));
-        assert_eq!(episode.observe_connection(8), Ok(0));
-        assert_eq!(episode.observe_connection(9), Ok(1));
-        assert_eq!(episode.generations_used(), 2);
-        assert!(episode.observe_connection(10).is_err());
-    }
-
-    #[test]
-    fn rtds_freshness_episode_rejects_regression_and_overflow() {
-        let mut episode = RtdsFreshnessEpisode::new(7, Some(7)).unwrap();
-        assert!(episode.observe_connection(6).is_err());
-        assert!(
-            RtdsFreshnessEpisode::new(u64::MAX, Some(u64::MAX))
-                .unwrap()
-                .minimum_recovery_generation()
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn rtds_freshness_episode_separates_connection_and_delayed_applied_generations() {
-        let mut episode = RtdsFreshnessEpisode::new(9, Some(7)).unwrap();
-
-        assert_eq!(episode.observe_applied(8), Ok(true));
-        assert!(!episode.latest_connection_is_applied());
-        assert_eq!(episode.observe_connection(10), Ok(1));
-        assert_eq!(episode.observe_applied(10), Ok(true));
-        assert!(episode.latest_connection_is_applied());
-        assert_eq!(episode.generations_used(), 1);
-
-        let mut no_replay = RtdsFreshnessEpisode::new(20, Some(20)).unwrap();
-        assert_eq!(no_replay.observe_connection(22), Ok(2));
-        assert!(!no_replay.latest_connection_is_applied());
-        assert!(no_replay.observe_connection(23).is_err());
-    }
-
-    #[test]
-    fn rtds_recovery_uses_the_generation_bound_to_the_received_message() {
-        assert_eq!(
-            qualifying_rtds_freshness_generation(true, Some(7), Some(8), true),
-            None
-        );
-        assert_eq!(
-            qualifying_rtds_freshness_generation(true, Some(8), Some(8), false),
-            None
-        );
-        assert_eq!(
-            qualifying_rtds_freshness_generation(true, Some(8), Some(8), true),
-            Some(8)
-        );
-    }
-
-    #[test]
-    fn rtds_each_new_applied_generation_gets_a_fresh_bounded_observation_window() {
-        let start = Instant::now();
-        let episode_deadline = start + Duration::from_secs(RTDS_FRESHNESS_EPISODE_MAX_SECS);
-        let reconnect_window = Duration::from_secs(RTDS_RECONNECT_WINDOW_SECS);
-        let first = rtds_generation_observation_deadline(start, episode_deadline, reconnect_window);
-        let late_applied = start + Duration::from_millis(2_990);
-        let reset =
-            rtds_generation_observation_deadline(late_applied, episode_deadline, reconnect_window);
-
-        assert_eq!(first.duration_since(start), Duration::from_secs(3));
-        assert_eq!(reset.duration_since(late_applied), Duration::from_secs(3));
-        assert!(reset > first);
-        assert!(reset <= episode_deadline);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn rtds_two_real_one_shot_generations_replay_without_fresh_and_exhaust_budget() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let (replay_tx, mut replay_rx) = mpsc::unbounded_channel();
-        let (finish_tx, finish_rx) = oneshot::channel();
-        let server = tokio::spawn(async move {
-            for generation in 0..=2_u64 {
-                let (stream, _) = listener.accept().await.unwrap();
-                let mut socket = accept_async(stream).await.unwrap();
-                loop {
-                    let message = socket.next().await.unwrap().unwrap();
-                    if let Message::Text(text) = message {
-                        if text == "PING" {
-                            socket.send(Message::Text("PONG".into())).await.unwrap();
-                            continue;
-                        }
-                        let request: Value = serde_json::from_str(&text).unwrap();
-                        assert_eq!(request["action"], "subscribe");
-                        replay_tx.send(generation).unwrap();
-                        break;
-                    }
-                }
-                if generation == 2 {
-                    finish_rx.await.unwrap();
-                    assert!(
-                        timeout(Duration::from_millis(200), listener.accept())
-                            .await
-                            .is_err(),
-                        "an exhausted two-generation episode must not open a third socket"
-                    );
-                    return;
-                }
-                while let Some(message) = socket.next().await {
-                    if matches!(message, Ok(Message::Close(_)) | Err(_)) {
-                        break;
-                    }
-                }
-            }
-        });
-
-        let mut config = WsConfig::default();
-        config.reconnect.initial_backoff = Duration::from_millis(5);
-        config.reconnect.max_backoff = Duration::from_millis(10);
-        config.reconnect.backoff_multiplier = 1.0;
-        config.heartbeat_interval = Duration::from_secs(30);
-        config.heartbeat_timeout = Duration::from_secs(30);
-        let mut runtime = RtdsSdkRuntime::new(format!("ws://{address}"), config).unwrap();
-        runtime
-            .subscribe(
-                Subscription::chainlink_prices(Some("btc/usd".to_owned())),
-                Duration::from_secs(2),
-            )
-            .await
-            .unwrap();
-        assert_eq!(replay_rx.recv().await.unwrap(), 0);
-        let mut episode = RtdsFreshnessEpisode::new(
-            runtime.connection_generation(),
-            runtime.observed_applied_generation(),
-        )
-        .unwrap();
-
-        for expected_generation in 1..=2_u64 {
-            let generation = runtime.connection_generation();
-            assert!(runtime.request_reconnect(generation));
-            let applied = timeout(Duration::from_secs(2), async {
-                loop {
-                    match runtime
-                        .recv_event(Duration::from_millis(100))
-                        .await
-                        .unwrap()
-                    {
-                        Some(RtdsRuntimeEvent::Applied(applied)) => break applied,
-                        Some(RtdsRuntimeEvent::Message(_)) | None => {}
-                    }
-                }
-            })
-            .await
-            .expect("next generation replay");
-            assert_eq!(replay_rx.recv().await.unwrap(), expected_generation);
-            assert_eq!(runtime.connection_generation(), expected_generation);
-            episode
-                .observe_connection(runtime.connection_generation())
-                .unwrap();
-            episode.observe_applied(applied.generation).unwrap();
-            assert!(
-                runtime
-                    .recv_event(Duration::from_millis(20))
-                    .await
-                    .unwrap()
-                    .is_none()
-            );
-        }
-
-        assert_eq!(episode.generations_used(), 2);
-        assert!(episode.latest_connection_is_applied());
-        let terminal = require_rtds_generation_budget_remaining(episode)
-            .expect_err("two real generations without fresh data must be terminal");
-        assert_eq!(
-            terminal,
-            RtdsFreshnessTerminal {
-                gap_reason: "rtds_business_message_timeout_after_two_new_generations",
-                error_message: "RTDS business stream did not recover",
-            }
-        );
-        finish_tx.send(()).unwrap();
-        server.await.unwrap();
     }
 
     #[test]

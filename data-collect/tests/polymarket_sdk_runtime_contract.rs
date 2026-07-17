@@ -461,22 +461,18 @@ async fn rtds_manager_resubscribes_in_the_new_connection_generation() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn rtds_one_shot_reconnect_replays_once_without_unsubscribe() {
+async fn rtds_natural_reconnect_replays_once_without_unsubscribe() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let (initial_seen_tx, initial_seen_rx) = oneshot::channel();
+    let (close_tx, close_rx) = oneshot::channel();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut socket = accept_async(stream).await.unwrap();
         let initial = next_text(&mut socket).await;
-        while let Some(message) = socket.next().await {
-            match message {
-                Ok(Message::Close(_)) | Err(_) => break,
-                Ok(Message::Text(text)) if text == "PING" => {
-                    socket.send(Message::Text("PONG".into())).await.unwrap();
-                }
-                _ => {}
-            }
-        }
+        initial_seen_tx.send(()).unwrap();
+        close_rx.await.unwrap();
+        socket.send(Message::Close(None)).await.unwrap();
         drop(socket);
 
         let (stream, _) = listener.accept().await.unwrap();
@@ -498,10 +494,8 @@ async fn rtds_one_shot_reconnect_replays_once_without_unsubscribe() {
         .await
         .unwrap();
     let generation = runtime.connection_generation();
-    assert!(runtime.request_reconnect(generation));
-    for _ in 0..10_000 {
-        assert!(!runtime.request_reconnect(generation));
-    }
+    initial_seen_rx.await.unwrap();
+    close_tx.send(()).unwrap();
     timeout(Duration::from_secs(2), async {
         while runtime.connection_generation() == generation {
             sleep(Duration::from_millis(5)).await;
@@ -527,12 +521,13 @@ async fn rtds_one_shot_reconnect_replays_once_without_unsubscribe() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn rtds_one_hundred_one_shots_keep_one_actor_receiver_and_replay_per_generation() {
+async fn rtds_one_hundred_natural_reconnects_keep_one_actor_and_replay_per_generation() {
     const RECONNECTS: u64 = 100;
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (replay_tx, mut replay_rx) = mpsc::unbounded_channel();
+    let (close_tx, mut close_rx) = mpsc::unbounded_channel();
     let (finish_tx, finish_rx) = oneshot::channel();
     let server = tokio::spawn(async move {
         for generation in 0..=RECONNECTS {
@@ -546,16 +541,25 @@ async fn rtds_one_hundred_one_shots_keep_one_actor_receiver_and_replay_per_gener
                 finish_rx.await.unwrap();
                 return;
             }
-            while let Some(message) = socket.next().await {
-                match message {
-                    Ok(Message::Text(text)) if text == "PING" => {
-                        socket.send(Message::Text("PONG".into())).await.unwrap();
+            loop {
+                tokio::select! {
+                    command = close_rx.recv() => {
+                        assert_eq!(command.unwrap(), generation);
+                        socket.send(Message::Close(None)).await.unwrap();
+                        break;
                     }
-                    Ok(Message::Text(text)) if serde_json::from_str::<Value>(&text).is_ok() => {
-                        panic!("generation {generation} received a duplicate RTDS replay")
+                    message = socket.next() => {
+                        match message {
+                            Some(Ok(Message::Text(text))) if text == "PING" => {
+                                socket.send(Message::Text("PONG".into())).await.unwrap();
+                            }
+                            Some(Ok(Message::Text(text))) if serde_json::from_str::<Value>(&text).is_ok() => {
+                                panic!("generation {generation} received a duplicate RTDS replay")
+                            }
+                            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                            _ => {}
+                        }
                     }
-                    Ok(Message::Close(_)) | Err(_) => break,
-                    _ => {}
                 }
             }
         }
@@ -579,7 +583,7 @@ async fn rtds_one_hundred_one_shots_keep_one_actor_receiver_and_replay_per_gener
 
     for generation in 0..RECONNECTS {
         assert_eq!(runtime.connection_generation(), generation);
-        assert!(runtime.request_reconnect(generation));
+        close_tx.send(generation).unwrap();
         timeout(Duration::from_secs(2), async {
             while runtime.connection_generation() == generation {
                 tokio::task::yield_now().await;
@@ -618,70 +622,6 @@ async fn rtds_one_hundred_one_shots_keep_one_actor_receiver_and_replay_per_gener
 
     finish_tx.send(()).unwrap();
     server.await.unwrap();
-}
-
-#[tokio::test]
-async fn rtds_stale_ticket_does_not_close_the_new_generation() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut socket = accept_async(stream).await.unwrap();
-        _ = next_text(&mut socket).await;
-        socket.send(Message::Close(None)).await.unwrap();
-        drop(socket);
-
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut socket = accept_async(stream).await.unwrap();
-        let replay = next_text(&mut socket).await;
-        sleep(Duration::from_millis(200)).await;
-        socket
-            .send(Message::Text(
-                json!({
-                    "topic": "crypto_prices_chainlink",
-                    "type": "update",
-                    "timestamp": 1,
-                    "payload": {
-                        "symbol": "btc/usd",
-                        "timestamp": 1,
-                        "value": "100000"
-                    }
-                })
-                .to_string()
-                .into(),
-            ))
-            .await
-            .unwrap();
-        replay
-    });
-
-    let mut runtime = RtdsSdkRuntime::new(format!("ws://{address}"), fast_config()).unwrap();
-    let old_generation = runtime.connection_generation();
-    runtime
-        .subscribe(
-            Subscription::chainlink_prices(Some("btc/usd".to_owned())),
-            Duration::from_secs(2),
-        )
-        .await
-        .unwrap();
-    timeout(Duration::from_secs(2), async {
-        while runtime.connection_generation() == old_generation {
-            sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert!(!runtime.request_reconnect(old_generation));
-    assert!(
-        runtime
-            .recv(Duration::from_secs(2))
-            .await
-            .unwrap()
-            .is_some()
-    );
-
-    let request: Value = serde_json::from_str(&server.await.unwrap()).unwrap();
-    assert_eq!(request["action"], "subscribe");
 }
 
 #[tokio::test(flavor = "current_thread")]

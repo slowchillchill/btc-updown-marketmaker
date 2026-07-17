@@ -2,7 +2,6 @@ use polymarket_client_sdk_v2::rtds::{Subscription, SubscriptionRequest};
 use serde_json::Value;
 
 use crate::event::{EventEnvelope, SourceKind};
-use crate::health::{CoverageVerdict, FreshnessStatus};
 use crate::source_format::RtdsChainlinkBtcUsdRaw;
 
 pub const RTDS_WS_ENDPOINT: &str = "wss://ws-live-data.polymarket.com";
@@ -84,49 +83,6 @@ impl RtdsSubscriptionTrace {
             return Err("rtds_symbol_filter_mismatch".to_owned());
         }
         Ok(())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RtdsReconnectValidation {
-    pub topic_revalidated: bool,
-    pub symbol_revalidated: bool,
-    pub payload_timestamp_present: bool,
-    pub freshness_status: FreshnessStatus,
-    pub coverage_verdict: CoverageVerdict,
-    pub source_gap: Option<String>,
-}
-
-pub fn validate_reconnect_business_freshness(
-    trace: &RtdsSubscriptionTrace,
-    payload_timestamp_ms: Option<i64>,
-    last_business_recv_time_utc_ms: Option<i64>,
-    now_utc_ms: i64,
-    freshness_timeout_ms: i64,
-) -> RtdsReconnectValidation {
-    let subscription_ok = trace.validate_chainlink_btc_usd().is_ok();
-    let payload_timestamp_present = payload_timestamp_ms.is_some_and(|ts| ts > 0);
-    let business_fresh = last_business_recv_time_utc_ms
-        .is_some_and(|last| now_utc_ms.saturating_sub(last) <= freshness_timeout_ms);
-
-    if subscription_ok && payload_timestamp_present && business_fresh {
-        RtdsReconnectValidation {
-            topic_revalidated: true,
-            symbol_revalidated: true,
-            payload_timestamp_present: true,
-            freshness_status: FreshnessStatus::Healthy,
-            coverage_verdict: CoverageVerdict::Complete,
-            source_gap: None,
-        }
-    } else {
-        RtdsReconnectValidation {
-            topic_revalidated: subscription_ok,
-            symbol_revalidated: subscription_ok,
-            payload_timestamp_present,
-            freshness_status: FreshnessStatus::Stale,
-            coverage_verdict: CoverageVerdict::Stale,
-            source_gap: Some("rtds_business_freshness_not_revalidated".to_owned()),
-        }
     }
 }
 

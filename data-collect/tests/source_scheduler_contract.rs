@@ -96,8 +96,8 @@ fn four_sources_have_aligned_t30_preload_coverage_or_gap() {
         .expect("rtds next observed");
     rtds_next.coverage = None;
     rtds_next.first_business_event_utc_ms = None;
-    rtds_next.source_gap = Some("rtds_business_message_timeout".to_owned());
-    rtds_next.source_gap_evidence = Some("gap_artifact_sha256=abc123".to_owned());
+    rtds_next.source_gap = Some("rtds_sdk_stream_fatal:receiver lagged by 1 messages".to_owned());
+    rtds_next.source_gap_evidence = Some("lagged_messages=1".to_owned());
 
     let report = scheduler.evaluate_four_source_preload_coverage(&windows, &observed);
     assert!(report.is_complete_or_gap_accounted());

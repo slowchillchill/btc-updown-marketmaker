@@ -6,7 +6,7 @@
 >
 > 对应计划：`plan/data-collect-source-availability-lifecycle-repair-plan.md`
 >
-> 状态：`APPROVED_IMPLEMENTATION_PHASE_2_COMPLETE_PHASE_3_AUTHORIZED`。用户已于2026-07-17批准最终需求、计划及SDK-first逐项patch矩阵，并授权按计划执行本地文档/代码修改、测试、独立审查、commit和push；阶段0、阶段1与阶段2均已完成全量验证和独立终审，阶段3可在阶段2精确commit/push后开始。生产构建、部署、远端服务写操作和数据清理仍未获授权。
+> 状态：`APPROVED_IMPLEMENTATION_PHASE_3_COMPLETE_PHASE_4_AUTHORIZED_CT_B_APPROVED`。用户已于2026-07-17批准最终需求、计划及SDK-first逐项patch矩阵，并授权按计划执行本地文档/代码修改、测试、独立审查、commit和push；阶段0至阶段3均已完成全量验证和独立终审，阶段3精确commit/push后进入已授权阶段4。生产构建、部署、远端服务写操作和数据清理仍未获授权。
 
 ## 2026-07-17：最终批准并开始阶段0
 
@@ -274,3 +274,39 @@
 - 审查期间某一路未外置target的vendor测试曾重新生成ignored `third_party/.../target`；这只造成changelog磁盘事实暂时漂移，不影响源码。三路命令结束后已用vendor manifest `cargo clean`删除6421个文件/5.7GiB，并由三路复核`target`检索为零；最终提交前仍再次检查。
 - 最终vendor与registry原版比较仍只命中批准的三个源码路径，本阶段相对阶段1 commit只修改`connection.rs`与`rtds/subscription.rs`；无Cargo/lock、第四vendor文件、公共shadow API、第二socket owner、生产feature、模型、部署或远端修改。one-shot vendor API、runtime wrapper、生产consumer及旧ticket测试继续同时存在，只在阶段3原子删除。
 - 用户现有`AGENTS.md`和未跟踪`推荐开发顺序.md`继续排除。阶段2达到计划完成条件；精确commit/push成功后方可进入已授权阶段3。
+
+## 2026-07-17：阶段3单次建连/握手期限缺口与用户批准CT-B
+
+- 阶段3删除RTDS调用方20秒`wait_connected`存活门并把transport总attempts改为无限前，生产路径审查发现pinned SDK的唯一connection owner直接等待`connect_async(&endpoint).await`；SDK `Config`没有connect/handshake timeout。`tokio-tungstenite 0.29`的该future依次等待DNS/TCP、TLS与WebSocket HTTP upgrade，没有内建期限。现有调用方timeout只能drop wrapper，不能让仍卡在后台握手中的connection task观察last-sender关闭。
+- 这不推翻“同一健康socket只订阅一次并在PING/PONG正常时无限等待业务数据”。缺口发生在WebSocket尚未建立、subscription和heartbeat都尚未启动的阶段：如果peer接受TCP但不完成TLS/HTTP upgrade，单次attempt永久pending，既不会触发heartbeat，也不会返回现有reconnect/backoff循环。
+- 已批准需求同时要求每次connect有明确timeout、外层无限恢复、stop/deadline可收敛，并把vendor路径限制为三个文件；实现真实缺口因此触发第4.7.9项决策门。硬编码generic 20秒会隐式改变所有SDK消费者；复用heartbeat timeout或max backoff会混淆配置语义；调用方周期重建会遗留卡住的SDK task/socket，均未采用。
+- 用户明确批准推荐`CT-B`：vendor路径集合扩为`connection.rs`、`config.rs`、`clob/ws/types/response.rs`、`rtds/subscription.rs`四个文件；`Config`新增默认`None`的`connect_timeout`保持上游默认兼容，RTDS生产显式设为20秒；唯一owner用Tokio timeout包围完整`connect_async()`，超时复用recoverable WebSocket timeout分类并在有界backoff后无限重试。该20秒绝不是连接寿命、业务frame等待、subscription refresh或周期重连期限。
+- `CT-B`不新增独立cancel owner：若last sender在单次握手或既有backoff中释放，后台connection task的最坏收敛边界是剩余`connect_timeout`与有界backoff之和；连接attempt返回后、进入backoff前必须再次检查sender已关闭并直接停止，不能无条件多等一次backoff。该有界收敛取代此前可能永久卡在握手中的行为。
+- 阶段3必须补TCP已接受但不完成WebSocket握手的loopback回归，并证明超时后下一次generation只replay一次完整`btc/usd` desired；阶段4再为CLOB显式启用同一20秒期限并保留`10s/20s` heartbeat。除这一获批配置字段和第4个vendor文件外，任何第5个vendor文件、其他新公共协议API、raw WebSocket、第二SDK owner或parser/fatal语义变化仍须重新停工决策。
+- 决策前主线程只新增了两项未提交的Phase 3 production-source目标测试，没有修改生产或vendor实现、没有commit/push。用户批准后继续按测试先行实施；既有`AGENTS.md`与未跟踪`推荐开发顺序.md`仍属用户改动并排除。
+
+## 2026-07-17：阶段3 RTDS 长期运行候选实现
+
+- 阶段3先以生产source loopback建立红灯：旧实现面对启动期连续连接失败会耗尽SDK三次attempt并结束source；健康socket持续PONG但不发业务消息时会进入60秒等价freshness恢复流程，主动切换generation并最终结束source。两项失败分别证明transport总attempt预算和business-silence恢复预算仍在生产路径生效，不是测试server主动终止source。
+- RTDS生产现在只写入一次完整`crypto_prices_chainlink` / `btc/usd` desired state，然后长期消费SDK事件。健康连接由`5s/15s` PING/PONG维护；stale与业务静默不再写业务`lag_events`、`source_gaps`，不刷新订阅、不主动切generation也不结束source。只有自然Close/EOF/heartbeat等transport故障由SDK唯一owner恢复；每个成功generation由既有actor replay一次当前完整desired。
+- RTDS transport总attempt改为无限，max backoff保持5秒。用户批准的`CT-B`在SDK `Config`增加默认`None`的`connect_timeout`，RTDS生产显式设为20秒；唯一connection owner只对当次`connect_async()`施加期限，成功socket不携带该timer。超时进入既有recoverable/backoff循环，attempt返回后在backoff前再次检查last sender，从而不遗留永久卡住的握手future。
+- 旧freshness episode常量、两generation/总期限状态机、business-timeout gap/lag/fatal、生产`request_reconnect`调用、runtime wrapper、vendor ticket/channel/API和纯ticket测试已在同一未提交阶段原子删除。原先实际验证generation隔离、资源、select公平、每代replay和freshness fence的测试改用真实server Close驱动；对生产、contract和vendor源码检索旧符号为0。
+- 新生产回归覆盖四条路径：启动期失败超过旧预算后恢复并只发送一次完整desired；TCP已接受但不完成WebSocket握手时，单次期限关闭旧socket并在下一attempt成功replay；运行中Close后连续五次失败仍恢复且不写gap/lag；健康同一socket跨业务静默只收PONG，随后消费stale与fresh且generation/subscribe/reconnect计数不变。SDK contract另证明owner在半握手期间被drop后有界收敛、自然100次reconnect不增长task/FD或重复replay。
+- 当前验证通过：`polymarket_sdk_patch_contract` 16/16、`polymarket_sdk_runtime_contract` 19/19、data-collect lib 200/200及全部integration/doc tests；`cargo check -p data-collect --tests --locked`、workspace `cargo clippy -p data-collect --locked --all-targets -- -D warnings`、root/vendor fmt和`git diff --check`均通过。vendored SDK `clob,gamma,rtds,ws` lib为168/168；`--all-features`为184/184 lib、全部integration及49项通过/20项ignored doctest。vendor all-features/all-targets Clippy在显式豁免原版既有`derivable_impls`与`let_underscore_untyped`两类基线告警后以其余warning deny通过；本阶段没有为清除无关基线修改额外vendor文件。
+- 探索性运行不完整的`clob,gamma,rtds,ws --all-targets` feature组合会因上游示例直接引用未启用的`tracing`而失败；独立`rtds,ws,tracing`组合会命中原版`serde_helpers.rs`的`Value` feature-gate缺口；给Criterion bench传递libtest参数也会被bench runner拒绝。这些都不是适用的验收命令，已改用通过的`--all-features`默认test target集合及all-targets Clippy编译矩阵，没有修改`Cargo.toml`、示例、bench或第5个vendor文件。
+- registry原版与vendor `src`逐文件比较只命中获批的四个路径：`clob/ws/types/response.rs`、`rtds/subscription.rs`、`ws/config.rs`和`ws/connection.rs`。本阶段没有新增依赖、Cargo/lock变化、第二socket owner、raw WebSocket、模型、部署或远端操作；用户现有`AGENTS.md`和未跟踪`推荐开发顺序.md`继续排除。三路独立终审、最终状态同步、vendor target清理及commit/push仍待完成。
+
+## 2026-07-17：阶段3首轮范围终审修正
+
+- 首轮生产语义与SDK生命周期终审均为Critical 0、Important 0；范围/文档终审发现两项Important。第一，未接生产调用图的公共`data-collect/src/sources/rtds.rs`仍保留`RtdsReconnectValidation` / `validate_reconnect_business_freshness`，并由`rtds_contract`正向要求stale产生`rtds_business_freshness_not_revalidated` gap；`source_scheduler_contract`也仍把`rtds_business_message_timeout`作为合法gap fixture。第二，四项新生产source测试都传入有限deadline，没有执行训练生产使用的`deadline=None -> pending`长期等待分支。
+- 已手术式删除无生产caller、且只服务旧业务freshness-gap合同的公共helper与专属测试；`rtds_contract`因此从2项变为1项，保留subscription/raw typed合同。scheduler通用confirmed-gap能力不变，只把旧业务timeout fixture改为真实允许的SDK receiver `Lagged(1)` fatal gap及对应证据；当前生产`src`、contract tests和vendor `src`中的旧business-gap/helper/one-shot符号检索为0。
+- 长期静默生产source测试现显式传入`deadline=None`，在同一socket完成PONG-only静默与stale/fresh消费后确认source未自行返回，再显式abort并断言task cancelled；server继续证明旧socket收敛且没有第二connection。其他三项source测试继续保留bounded deadline，分别覆盖启动离线、半握手超时和运行中自然恢复。
+- 修正后复验通过：四项RTDS production source 4/4、`rtds_contract` 1/1、`source_scheduler_contract` 4/4、patch contract 16/16、runtime contract 19/19；workspace全量为data-collect lib 200/200及全部integration/doc tests通过，check/clippy、root/vendor fmt和`git diff --check`也均通过。范围终审二次结论在本节后续终审记录补齐。
+- 聚焦审计另确认`data-collect/benches/real_source_alignment_probe.rs`是`harness=false`的独立Phase0验证可执行target，旧authority明确称其“不是生产collector”，本专项需求也明确“只修改training collector”；它不在training collector/live runtime调用图或默认test集合中。因此该probe现存的RTDS 60秒gap、`10s/20s`、三次attempt与20秒启动wait不属于阶段3修改范围。未来若重新把该probe作为当前有效工具使用，必须整体同步其配置、恢复、deadline和verdict并另行批准，不能只删一行timeout；阶段3不得声称bench源码已经迁移。
+
+## 2026-07-17：阶段3最终终审通过
+
+- 生产RTDS语义终审与SDK生命周期/provenance终审首轮即PASS；范围/文档终审首轮两项Important按上一节修正后复审PASS。最终三路均为Critical 0、Important 0；审查确认健康socket一次desired后无限等待、自然transport无限恢复、CT-B只限制单次握手、完整性错误不被吞掉、generation/freshness fence与每代一次replay保留。
+- 最终主线程验证为：data-collect lib 200/200及全部integration/doc tests通过；patch contract 16/16、runtime contract 19/19、RTDS production source 4/4、`rtds_contract` 1/1和scheduler 4/4；workspace check与all-targets Clippy零告警，root/vendor fmt及`git diff --check`通过。vendored SDK `clob,gamma,rtds,ws` lib 168/168，all-features lib 184/184、全部integration及49项通过/20项ignored doctest；all-features/all-targets Clippy除明确豁免两类上游既有基线告警外其余warning deny通过。
+- registry与vendor源码比较精确命中获批四路径，本阶段实际新增差异只在`ws/config.rs`和`ws/connection.rs`；旧one-shot、business-gap helper/fixture及生产freshness episode符号在training collector `src`、当前contract tests与vendor `src`中为0。无Cargo/lock、第五vendor文件、第二owner、raw Polymarket WebSocket、模型、部署或远端修改。
+- 所有审查/验证结束后已用vendor manifest执行`cargo clean`，删除23,258个ignored构建文件/32.4GiB；vendor树内`target`目录复核为0。用户现有`AGENTS.md`与未跟踪`推荐开发顺序.md`继续排除。阶段3达到完成条件，精确commit/push后进入已授权阶段4。

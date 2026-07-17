@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-source-availability-lifecycle-repair-changelog.md`
 >
-> 状态：`APPROVED_IMPLEMENTATION_PHASE_2_COMPLETE_PHASE_3_AUTHORIZED`。用户已于2026-07-17批准本文、对应计划及第4.7节SDK-first逐项patch矩阵，并授权按计划分阶段实施、验证、独立审查、commit和push；同日又对官方pre-parse完整文本帧trace差异选择B，批准恢复官方0.6.0原hunk并显式放宽启用SDK `tracing` feature时的失败trace脱敏边界。阶段0 authority/provenance、阶段1共同classification/coverage lifecycle及阶段2 vendored SDK heartbeat owner、normal teardown与RTDS外显诊断边界均已实现、完成全量验证并分别通过三路独立终审；阶段3可在阶段2精确commit/push后开始。此前批准的`M1-A / M2-A0 / M4-A-R / M5-N/A / M6-A+ / M7-A-R / M8-A`继续有效；`M3-A-R`使用单一`reactivated_within_day`布尔语义，原子发布采用用户批准的R三态语义。本授权不包括模型调度实现、生产release构建、部署、远端服务操作或数据清理；这些仍须独立批准。
+> 状态：`APPROVED_IMPLEMENTATION_PHASE_3_COMPLETE_PHASE_4_AUTHORIZED_CT_B_APPROVED`。用户已于2026-07-17批准本文、对应计划及第4.7节SDK-first逐项patch矩阵，并授权按计划分阶段实施、验证、独立审查、commit和push；同日又对官方pre-parse完整文本帧trace差异选择B，批准恢复官方0.6.0原hunk并显式放宽启用SDK `tracing` feature时的失败trace脱敏边界。阶段3实施前发现pinned SDK的单次TCP/TLS/WebSocket建连与握手没有期限；用户随后批准`CT-B`，允许把vendor路径集合扩至四个文件、增加默认`None`的SDK `connect_timeout`配置，并由本项目为RTDS显式设为20秒。该期限只约束单次建连/握手，绝不是连接寿命、业务静默期限或周期性重连；成功连接仍在健康PING/PONG下无限等待业务数据，总重试次数仍无限。阶段0 authority/provenance、阶段1共同classification/coverage lifecycle、阶段2 vendored SDK heartbeat/teardown及阶段3 RTDS长期运行与one-shot收缩均已实现、完成全量验证并分别通过独立终审；阶段3精确commit/push后进入已授权阶段4。此前批准的`M1-A / M2-A0 / M4-A-R / M5-N/A / M6-A+ / M7-A-R / M8-A`继续有效；`M3-A-R`使用单一`reactivated_within_day`布尔语义，原子发布采用用户批准的R三态语义。本授权不包括模型调度实现、生产release构建、部署、远端服务操作或数据清理；这些仍须独立批准。
 
 ## 一、目标
 
@@ -196,6 +196,7 @@ manifest 中可以表现为六类 source artifact，但它们不是六个独立�
 | generation-aware one-shot `request_reconnect()` | **直接服务旧 60 秒业务静默策略** | 删除 vendor 公共能力、runtime wrapper、生产调用及专属测试 |
 | heartbeat dead向 connection owner传播并结束旧 socket | 新确认 transport 缺口 | 优先复用/审查官方修复方案；未发布时允许最小 vendor patch |
 | 最后一个 manager sender关闭后的 normal teardown | 新确认生命周期缺口 | 优先复用/审查官方修复方案；未发布时允许最小 vendor patch |
+| 单次TCP/TLS/WebSocket建连与握手有界 | **与健康连接上的业务静默无关**；pinned SDK直接等待`connect_async()`，TCP已接受但握手不完成时不会启动heartbeat或进入下一次重试 | **CT-B已批准**：SDK `ws::config::Config`增加默认`None`的`connect_timeout`；RTDS生产显式设为20秒，超时作为recoverable transport failure，之后有界backoff并无限重试。不得把该期限用于已连接socket、业务frame等待或subscription refresh |
 
 因此：
 
@@ -206,11 +207,12 @@ manifest 中可以表现为六类 source artifact，但它们不是六个独立�
 5. heartbeat timeout或旧 PONG 必须使当前 `handle_connection` 返回既有 recoverable transport error、关闭旧 socket并进入现有 connection loop；不得新增第二个 socket owner或公共 shadow API。
 6. connection owner必须使用互斥的内部退出语义：只有最后一个manager/bound outbound sender关闭是normal shutdown并停止outer loop；read EOF、WebSocket Close、read/write/PING failure、heartbeat timeout或旧PONG继续是recoverable transport exit；parser sticky fault继续terminal。可以增加私有内部结果类型或等价判断，但不得增加公共API或把其他`Ok(())`路径误判为normal shutdown。
 7. 按用户批准的B恢复官方0.6.0 parse前`tracing::trace!(%text, ...)`原hunk；启用SDK `tracing` feature时，完整成功/失败文本帧均可进入该TRACE记录，这是明确获批的日志边界放宽，不得把它误报为脱敏。parser错误的operator-visible `Display`、sticky fault和warn仍不得额外原样拼接serde错误中的非法scalar或nested payload/secret-like字段，只含2,048-byte上限、hash与allowlist字段摘要；底层error kind/source chain保留供typed inspection。不得另造success-only raw trace或扩大其他日志行为。
-8. vendor 允许修改的源码路径集合仍限于既有三个文件：
+8. vendor 允许修改的源码路径集合按用户批准的`CT-B`限于以下四个文件：
    - `third_party/polymarket_client_sdk_v2-0.6.0-p1/src/ws/connection.rs`
+   - `third_party/polymarket_client_sdk_v2-0.6.0-p1/src/ws/config.rs`
    - `third_party/polymarket_client_sdk_v2-0.6.0-p1/src/clob/ws/types/response.rs`
    - `third_party/polymarket_client_sdk_v2-0.6.0-p1/src/rtds/subscription.rs`
-9. 如果Polymarket实现需要第四个vendor文件、新公共协议API、raw WebSocket、manual signing、第二SDK session或改变parser/fatal语义，必须立即停止并向用户提交缺口、影响和选项。
+9. `CT-B`只批准新增上述`config.rs`及默认`None`的公开配置字段；如果Polymarket实现还需要第五个vendor文件、其他新公共协议API、raw WebSocket、manual signing、第二SDK session或改变parser/fatal语义，必须立即停止并向用户提交缺口、影响和选项。
 
 ### 4.8 完整性与顶层协调边界
 
@@ -260,6 +262,7 @@ manifest 中可以表现为六类 source artifact，但它们不是六个独立�
 7. **RTDS长期静默：** server持续正确PONG但不发业务frame；generation不变、wire subscribe总数为一、source不退出。随后同一 socket发送stale/fresh payload均被正确消费，stale不增加lag/gap。
 8. **RTDS启动离线：** 连续连接失败超过旧3次/20秒门后启动server；source未提前返回，首个generation只发送一次完整含 `btc/usd` filter的subscription。
 9. **RTDS运行中恢复：** 真实close/no-PONG后连续失败再恢复；每个成功generation最多一次latest desired replay，无业务静默主动ticket。
+   单次TCP/TLS/WebSocket建连与握手必须受20秒期限约束；超时只结束本次attempt并进入既有有界backoff，不能结束source或成为业务静默计时器。loopback必须覆盖TCP已接受但不完成WebSocket握手，随后下一次连接成功并只replay一次完整desired。
 10. **删除 one-shot能力：** 生产和测试代码不存在 `request_reconnect` 公共/包装/调用路径；vendor差异中不存在该专用票据状态。
 11. **heartbeat无PONG：** loopback server保持socket开放但不PONG；旧socket在timeout后关闭并进入既有reconnect loop，generation增加。
 12. **manager drop与反向transport回归：** 正常PONG时分别在裸`ConnectionManager`和`MarketSdkRuntime/RtdsSdkRuntime`集成层drop全部manager/actor持有者；server观察旧socket关闭、task收敛且不建立新连接。反向测试必须证明read EOF、Close、write/PING failure和heartbeat failure仍进入reconnect，parser fault仍terminal。
@@ -285,9 +288,9 @@ manifest 中可以表现为六类 source artifact，但它们不是六个独立�
 23. **manifest coverage与训练基础：** 每日唯一顶层v3 manifest只新增直接嵌套的`data_collect_collection_day_coverage_v1`，不新增transport scope/reason/episode、通用extensions容器或逐source coverage复制。六个既有source counter继续保存artifact首末接收事实及既有操作计数。兼容矩阵必须逐项验证：prior legacy缺对象始终可读且不插入coverage；相同新identity的current manifest缺对象按新writer损坏失败；不同identity current legacy继续被既有gate拒绝；unknown nested version/field/type/time/state失败；所有ManifestOwner mutation保留对象。dataset独占lease、四种current-day activation、顶层open/closed、写成功但ack丢失和时钟倒退必须逐项测试；首次activation为`reactivated_within_day=false`，任一同日后续activation原子提交后为`true`且不被unclean/known-end/reconcile转换清除。prior active/unclean-end-unknown/not-started/ended-known/legacy missing分别验证nested state、顶层state、closure reason与gap：active转unclean但不改变布尔值，既有unclean幂等确保unclean gap/closure，其他三类中性关闭。状态/时间不变量、ready/activation ack、可靠known-close候选first-close-wins、unclean-dominates、task级协调abort证明、PendingExit跨日归属、正常rollover rendezvous及replay eligibility均按第4.2节通过测试。typed raw、last qualifying和known coverage让后续模块因果派生missingness；不得生成额外receipt/sidecar，不进入`source_gaps`，也不因外部coverage不足自动把结构完整的训练artifact判失败。M8只作为未来部署前置合同；当前实现验收不得冒充已经具备stop-at-boundary或生产切换能力。
 24. **无collector静默timer：** 本事项不在data-collect中生成business-silence timer、离散silence-start事件、周期性合成market row、周期subscription refresh、`DecisionWakeEvent`或fixed model decision tick；模型可见age/mask计算、确定性调度基线和离散`next_wake`目标候选均不由本事项实现。
 25. **资源有界：** 每个协议至少100次恢复后task、FD、socket、receiver、actor、queue、watch、subscription refcount、snapshot/backfill任务无单调增长。
-26. **配置回归：** CLOB为 `10s/20s`，RTDS为 `5s/15s`；RTDS transport总尝试无限，各源单次backoff有界。
+26. **配置回归：** CLOB为 `10s/20s`，RTDS为 `5s/15s`；RTDS `connect_timeout=20s`、transport总尝试无限，各源单次backoff有界。SDK默认`connect_timeout=None`保持上游兼容；CLOB在阶段4显式启用同一20秒单次建连/握手期限，不得提前把它解释为heartbeat或业务静默期限。
 27. **全量门禁：** 定向loopback/contract测试、`cargo test -p data-collect --locked`、`cargo clippy -p data-collect --locked --all-targets -- -D warnings`、`cargo fmt --all -- --check` 与 `git diff --check`全部通过。
-28. **范围门禁：** 没有新增Polymarket raw WebSocket/shadow SDK或任何source的第二socket owner；Binance只保留现有唯一direct WebSocket owner；没有CLOB user源、data-pipeline/model策略实现、部署或数据清理；vendor源码路径集合不扩大，实质差异与第4.7节最终获批逐项矩阵一致。
+28. **范围门禁：** 没有新增Polymarket raw WebSocket/shadow SDK或任何source的第二socket owner；Binance只保留现有唯一direct WebSocket owner；没有CLOB user源、data-pipeline/model策略实现、部署或数据清理；vendor源码路径集合精确为第4.7节用户最终批准的四个文件，实质差异与逐项矩阵一致。
 
 ## 七、完成定义
 

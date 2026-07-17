@@ -15,6 +15,7 @@ use polymarket_client_sdk_v2::ws::connection::{
     ConnectionFault, ConnectionManager, ConnectionState,
 };
 use serde_json::{Value, json};
+use tokio::io::AsyncReadExt as _;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -603,6 +604,95 @@ async fn server_tcp_eof_is_recoverable_and_advances_generation() {
     server.await.unwrap();
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn websocket_handshake_timeout_retries_without_exhausting_the_owner() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stalled_handshake, _) = listener.accept().await.unwrap();
+        let (stream, _) = timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .expect("a stalled handshake must be cancelled and retried")
+            .unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        while let Some(message) = socket.next().await {
+            match message {
+                Ok(Message::Text(text)) if text == "PING" => {
+                    socket.send(Message::Text("PONG".into())).await.unwrap();
+                }
+                Ok(Message::Close(_)) | Err(_) => break,
+                _ => {}
+            }
+        }
+        drop(stalled_handshake);
+    });
+
+    let mut config = generation_test_config();
+    config.connect_timeout = Some(Duration::from_millis(40));
+    config.reconnect.max_attempts = None;
+    config.reconnect.initial_backoff = Duration::from_millis(5);
+    config.reconnect.max_backoff = Duration::from_millis(10);
+    let connection = ConnectionManager::<RtdsMessage, SimpleParser>::new(
+        format!("ws://{address}"),
+        config,
+        SimpleParser::default(),
+    )
+    .unwrap();
+    let mut states = connection.state_receiver();
+
+    wait_for_connected(&mut states).await;
+    assert_eq!(connection.connection_generation(), 0);
+    drop(connection);
+    timeout(Duration::from_secs(1), server)
+        .await
+        .expect("connection owner must stop after its last sender drops")
+        .unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dropping_the_last_manager_during_a_stalled_handshake_cancels_without_reconnect() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut stalled_handshake, _) = listener.accept().await.unwrap();
+        accepted_tx.send(()).unwrap();
+        let mut buffer = [0_u8; 1024];
+        timeout(Duration::from_millis(300), async {
+            loop {
+                match stalled_handshake.read(&mut buffer).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        })
+        .await
+        .expect("the configured handshake deadline must release the half-open socket");
+        assert!(
+            timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err(),
+            "dropping the last manager must not reconnect after handshake cancellation"
+        );
+    });
+
+    let mut config = generation_test_config();
+    config.connect_timeout = Some(Duration::from_millis(40));
+    config.reconnect.max_attempts = None;
+    config.reconnect.initial_backoff = Duration::from_millis(200);
+    config.reconnect.max_backoff = Duration::from_millis(200);
+    let connection = ConnectionManager::<RtdsMessage, SimpleParser>::new(
+        format!("ws://{address}"),
+        config,
+        SimpleParser::default(),
+    )
+    .unwrap();
+
+    accepted_rx.await.unwrap();
+    drop(connection);
+    server.await.unwrap();
+}
+
 #[tokio::test]
 async fn generation_zero_preserves_preconnect_requests_and_fifo() {
     let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -640,58 +730,13 @@ async fn generation_zero_preserves_preconnect_requests_and_fifo() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn reconnect_ticket_is_current_generation_only_and_coalesced() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let (second_connected_tx, second_connected_rx) = tokio::sync::oneshot::channel();
-    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
-    let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut socket = accept_async(stream).await.unwrap();
-        while socket.next().await.is_some() {}
-
-        let (stream, _) = listener.accept().await.unwrap();
-        let _socket = accept_async(stream).await.unwrap();
-        second_connected_tx.send(()).unwrap();
-        finish_rx.await.unwrap();
-    });
-
-    let connection = ConnectionManager::<RtdsMessage, SimpleParser>::new(
-        format!("ws://{address}"),
-        generation_test_config(),
-        SimpleParser::default(),
-    )
-    .unwrap();
-    let mut states = connection.state_receiver();
-    wait_for_connected(&mut states).await;
-    let generation = connection.connection_generation();
-    assert_eq!(generation, 0);
-    assert!(!connection.request_reconnect(generation + 1));
-    assert!(connection.request_reconnect(generation));
-    for _ in 0..10_000 {
-        assert!(!connection.request_reconnect(generation));
-    }
-
-    wait_for_non_connected(&mut states).await;
-    assert!(!connection.request_reconnect(generation));
-    second_connected_rx.await.unwrap();
-    wait_for_connected(&mut states).await;
-    assert_eq!(connection.connection_generation(), generation + 1);
-    assert!(!connection.request_reconnect(generation));
-    assert!(!connection.request_reconnect(generation + 2));
-    assert!(connection.state().is_connected());
-
-    finish_tx.send(()).unwrap();
-    server.await.unwrap();
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn one_hundred_one_shot_reconnects_keep_one_connection_loop_and_heartbeat() {
+async fn one_hundred_natural_reconnects_keep_one_connection_loop_and_heartbeat() {
     const RECONNECTS: u64 = 100;
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (accepted_tx, mut accepted_rx) = mpsc::unbounded_channel();
+    let (close_tx, mut close_rx) = mpsc::unbounded_channel();
     let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         for generation in 0..=RECONNECTS {
@@ -702,13 +747,22 @@ async fn one_hundred_one_shot_reconnects_keep_one_connection_loop_and_heartbeat(
                 finish_rx.await.unwrap();
                 return;
             }
-            while let Some(message) = socket.next().await {
-                match message {
-                    Ok(Message::Text(text)) if text == "PING" => {
-                        socket.send(Message::Text("PONG".into())).await.unwrap();
+            loop {
+                tokio::select! {
+                    command = close_rx.recv() => {
+                        assert_eq!(command.unwrap(), generation);
+                        socket.send(Message::Close(None)).await.unwrap();
+                        break;
                     }
-                    Ok(Message::Close(_)) | Err(_) => break,
-                    _ => {}
+                    message = socket.next() => {
+                        match message {
+                            Some(Ok(Message::Text(text))) if text == "PING" => {
+                                socket.send(Message::Text("PONG".into())).await.unwrap();
+                            }
+                            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                            _ => {}
+                        }
+                    }
                 }
             }
         }
@@ -732,7 +786,7 @@ async fn one_hundred_one_shot_reconnects_keep_one_connection_loop_and_heartbeat(
 
     for generation in 0..RECONNECTS {
         assert_eq!(connection.connection_generation(), generation);
-        assert!(connection.request_reconnect(generation));
+        close_tx.send(generation).unwrap();
         assert_eq!(accepted_rx.recv().await.unwrap(), generation + 1);
         timeout(Duration::from_secs(2), async {
             loop {
@@ -745,7 +799,7 @@ async fn one_hundred_one_shot_reconnects_keep_one_connection_loop_and_heartbeat(
             }
         })
         .await
-        .expect("next one-shot generation");
+        .expect("next natural connection generation");
         timeout(Duration::from_secs(1), async {
             loop {
                 let alive = tokio::runtime::Handle::current()
@@ -766,7 +820,7 @@ async fn one_hundred_one_shot_reconnects_keep_one_connection_loop_and_heartbeat(
     #[cfg(target_os = "linux")]
     assert!(
         open_fd_count() <= steady_fds + 4,
-        "one-shot reconnects must not retain one descriptor per generation"
+        "natural reconnects must not retain one descriptor per generation"
     );
     finish_tx.send(()).unwrap();
     server.await.unwrap();
@@ -776,10 +830,13 @@ async fn one_hundred_one_shot_reconnects_keep_one_connection_loop_and_heartbeat(
 async fn generation_bound_sender_cannot_write_into_a_later_socket() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let (close_tx, close_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut socket = accept_async(stream).await.unwrap();
-        while socket.next().await.is_some() {}
+        close_rx.await.unwrap();
+        socket.send(Message::Close(None)).await.unwrap();
+        drop(socket);
 
         let (stream, _) = listener.accept().await.unwrap();
         let mut socket = accept_async(stream).await.unwrap();
@@ -803,9 +860,19 @@ async fn generation_bound_sender_cannot_write_into_a_later_socket() {
     wait_for_connected(&mut states).await;
     let generation = connection.connection_generation();
     let bound = connection.bind_generation(generation).unwrap();
-    assert!(connection.request_reconnect(generation));
-    wait_for_non_connected(&mut states).await;
-    wait_for_connected(&mut states).await;
+    close_tx.send(()).unwrap();
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if connection.connection_generation() == generation + 1
+                && connection.state().is_connected()
+            {
+                break;
+            }
+            states.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("natural reconnect after server Close");
 
     bound.send(&json!({"old": true})).unwrap();
     connection.send(&json!({"current": true})).unwrap();
@@ -813,11 +880,12 @@ async fn generation_bound_sender_cannot_write_into_a_later_socket() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn continuous_inbound_frames_do_not_starve_outbound_ping_or_reconnect() {
+async fn continuous_inbound_frames_do_not_starve_outbound_ping_or_transport_reconnect() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (outbound_tx, outbound_rx) = tokio::sync::oneshot::channel();
     let (ping_tx, ping_rx) = tokio::sync::oneshot::channel();
+    let (close_tx, mut close_rx) = tokio::sync::oneshot::channel();
     let (reconnected_tx, reconnected_rx) = tokio::sync::oneshot::channel();
     let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
@@ -829,6 +897,11 @@ async fn continuous_inbound_frames_do_not_starve_outbound_ping_or_reconnect() {
         let mut ticker = tokio::time::interval(Duration::from_millis(1));
         loop {
             tokio::select! {
+                result = &mut close_rx => {
+                    result.unwrap();
+                    socket.send(Message::Close(None)).await.unwrap();
+                    break;
+                }
                 _ = ticker.tick() => {
                     for _ in 0..32 {
                         let frame = json!({
@@ -894,8 +967,7 @@ async fn continuous_inbound_frames_do_not_starve_outbound_ping_or_reconnect() {
         .await
         .expect("heartbeat under continuous inbound")
         .unwrap();
-    let generation = connection.connection_generation();
-    assert!(connection.request_reconnect(generation));
+    close_tx.send(()).unwrap();
     timeout(Duration::from_secs(2), reconnected_rx)
         .await
         .expect("reconnect under continuous inbound")

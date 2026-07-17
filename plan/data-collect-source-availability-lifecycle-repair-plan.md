@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-source-availability-lifecycle-repair-changelog.md`
 >
-> 状态：`APPROVED_IMPLEMENTATION_PHASE_2_COMPLETE_PHASE_3_AUTHORIZED`。用户已于2026-07-17批准本计划、对应需求及需求第4.7节SDK-first逐项patch矩阵，并授权依次执行阶段0--8的本地文档/代码修改、测试、独立审查、commit和push；同日对官方pre-parse完整文本帧trace差异选择B，批准恢复官方0.6.0原hunk及其failure-trace边界放宽。阶段0 authority/provenance、阶段1共同classification/coverage lifecycle及阶段2 vendored SDK transport生命周期均已实现、完成全量验证并分别通过三路独立终审；阶段3可在阶段2精确commit/push后开始。本授权不包括模型调度实现、生产release构建、部署、远端服务操作或数据清理。
+> 状态：`APPROVED_IMPLEMENTATION_PHASE_3_COMPLETE_PHASE_4_AUTHORIZED_CT_B_APPROVED`。用户已于2026-07-17批准本计划、对应需求及需求第4.7节SDK-first逐项patch矩阵，并授权依次执行阶段0--8的本地文档/代码修改、测试、独立审查、commit和push；同日对官方pre-parse完整文本帧trace差异选择B，批准恢复官方0.6.0原hunk及其failure-trace边界放宽。阶段3实施前发现pinned SDK单次建连/握手没有期限；用户批准`CT-B`，允许第4个vendor文件`src/ws/config.rs`与默认`None`的`connect_timeout`配置，RTDS生产显式20秒。该期限只包围单次TCP/TLS/WebSocket建连与握手，成功连接上的PING/PONG与业务静默仍无限运行，总重试仍无限。阶段0 authority/provenance、阶段1共同classification/coverage lifecycle、阶段2 vendored SDK transport生命周期及阶段3 RTDS长期运行与one-shot收缩均已实现、完成全量验证并通过独立终审；阶段3精确commit/push后进入已授权阶段4。本授权不包括模型调度实现、生产release构建、部署、远端服务操作或数据清理。
 
 ## 一、成功标准与实施原则
 
@@ -156,7 +156,7 @@
 - 步骤3.1.1：server持续PONG但长期不发业务frame，随后在同一socket发送stale和fresh payload。
   - 验证：修复前以主动generation切换/退出或lag副作用失败；目标为一次subscribe、generation不变、payload正常落盘。
 - 步骤3.1.2：初始连续连接失败超过旧3次/20秒，再启动server；另测运行中close后失败超过旧预算再恢复。
-  - 验证：source不提前返回，每个成功generation只replay一次完整`btc/usd` desired。
+  - 验证：source不提前返回，每个成功generation只replay一次完整`btc/usd` desired；另让server接受TCP但不完成WebSocket握手，单次`connect_timeout`后下一次attempt成功，证明期限取消卡住的future而不终止source。
 - 步骤3.1.3：保留SDK `Lagged(n)`、parser/schema、actor和writer terminal负例。
   - 验证：这些错误不进入无限transport重试。
 - 步骤3.1.4：先把依赖one-shot API但实际验证自然generation隔离、资源、select公平性、每代replay和freshness fence的测试改用server Close/no-PONG驱动。
@@ -164,8 +164,8 @@
 
 ### 任务3.2：同一阶段原子删除旧消费者与SDK能力
 
-- 步骤3.2.1：保留`5s/15s`和有界max backoff，把transport总attempts恢复为无限；删除20秒connected和3秒applied存活门。
-  - 验证：未连接时desired留在watch，stop/deadline仍可中断。
+- 步骤3.2.1：保留`5s/15s`和有界max backoff，把transport总attempts恢复为无限；删除调用方20秒connected和3秒applied存活门。按用户批准的`CT-B`在SDK `Config`增加默认`None`的`connect_timeout`，RTDS生产显式设为20秒，并在唯一connection owner中用它包围完整`connect_async()`。
+  - 验证：未连接时desired留在watch；单次DNS/TCP/TLS/WebSocket建连/握手超时只形成recoverable attempt并进入有界backoff，总循环继续；成功握手后不再存在该timer，健康PING/PONG下业务静默无限运行；stop/deadline在剩余单次建连期限与有界backoff之和内收敛，不遗留无限卡住的SDK task。
 - 步骤3.2.2：删除RTDS freshness episode常量、状态、`request_reconnect`生产调用、两generation预算、business-timeout gap/lag/alert/fatal分支。
   - 验证：source loop只持续receive、处理stop/deadline和真实terminal error，无等待永远不会发生的主动generation，也无tight loop。
 - 步骤3.2.3：在同一未提交工作阶段删除`RtdsSdkRuntime::request_reconnect` wrapper、vendored ticket/API与ticket专属测试。
@@ -177,7 +177,11 @@
 
 阶段3完成条件：需求验收7--10及共同availability断言通过；旧“两代无fresh必须退出”测试改为长期静默不退出，one-shot消费者与SDK能力在同一commit中消失。独立审查通过后commit/push。
 
+阶段3执行结果（2026-07-17）：`COMPLETE`。生产RTDS已改为一次desired订阅后在健康PING/PONG连接上无限等待业务数据；业务静默/stale不再触发lag、gap、subscription、generation切换或退出。自然transport恢复总attempt无限，`CT-B`只限制单次建连/握手并通过半握手loopback；one-shot生产consumer、runtime wrapper和vendor能力已原子删除。首轮范围审查发现的旧公共business-gap合同与`deadline=None`覆盖缺口均已修复，定向、workspace全量、vendored SDK、lint、fmt和四路径provenance验证通过，三路独立终审最终均为Critical 0、Important 0；精确commit/push后进入阶段4。
+
 ## 阶段4：CLOB market与Gamma metadata
+
+阶段4必须在`bounded_ws_config()`显式启用`connect_timeout=20s`，复用阶段3已批准的同一SDK配置能力；这只补齐CLOB单次建连/握手期限，不改变`10s/20s` heartbeat，也不得成为CLOB业务静默期限。
 
 ### 任务4.1：冻结CLOB/Gamma目标测试
 
