@@ -1,8 +1,13 @@
 use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
+use base64::Engine as _;
+use sha2::{Digest as _, Sha256};
 
-use crate::binance_aggtrade::{AggTradeIngestSource, BinanceAggTradeOutput};
+use crate::binance_aggtrade::{
+    AggTradeIngestSource, BINANCE_AGGTRADE_INVALID_INPUT_MAX_BYTES,
+    BinanceAggTradeIngressCoordinate, BinanceAggTradeOutput,
+};
 use crate::event::EventEnvelope;
 use crate::source_format::{
     BinanceAggTradeRaw, BinanceDepthLevel, BinanceDepthSnapshotRaw, BinanceDepthUpdateRaw,
@@ -175,25 +180,108 @@ impl BinanceDepthUpdateHourlyRow {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BinanceAggTradeOrdering {
+    pub source_sequence_epoch_id: String,
+    pub connection_generation: u64,
+    pub websocket_ingress_sequence: u64,
+    pub collector_admission_sequence: u64,
+    pub collector_admission_time_utc_ms: i64,
+}
+
+impl BinanceAggTradeOrdering {
+    fn validate(&self) -> Result<(), String> {
+        if self.source_sequence_epoch_id.trim().is_empty() {
+            return Err("binance_aggtrade_source_sequence_epoch_id_empty".to_owned());
+        }
+        if self.connection_generation == 0 {
+            return Err("binance_aggtrade_connection_generation_is_zero".to_owned());
+        }
+        if self.websocket_ingress_sequence == 0 {
+            return Err("binance_aggtrade_websocket_ingress_sequence_is_zero".to_owned());
+        }
+        if self.collector_admission_sequence == 0 {
+            return Err("binance_aggtrade_collector_admission_sequence_is_zero".to_owned());
+        }
+        if self.collector_admission_time_utc_ms <= 0 {
+            return Err("binance_aggtrade_collector_admission_time_not_positive".to_owned());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BinanceAggTradeInvalidEvidence {
+    pub timestamp_received: i64,
+    pub ingest_source: String,
+    pub source_native_payload_json: String,
+    pub source_endpoint: String,
+    pub invalid_reason_code: String,
+    pub invalid_reason_detail: Option<String>,
+    pub payload_encoding: Option<String>,
+    pub payload_length_bytes: Option<u64>,
+    pub payload_sha256: Option<String>,
+    pub payload_capture_status: String,
+}
+
+pub const BINANCE_AGGTRADE_SCHEMA_VERSION: &str = "binance_aggtrade_v6";
+pub const BINANCE_AGGTRADE_RECORD_TRADE: &str = "trade";
+pub const BINANCE_AGGTRADE_RECORD_INVALID_INPUT: &str = "invalid_input";
+pub const BINANCE_AGGTRADE_CAPTURE_COMPLETE: &str = "complete";
+pub const BINANCE_AGGTRADE_CAPTURE_OVERSIZE_NOT_CAPTURED: &str = "oversize_not_captured";
+pub const BINANCE_AGGTRADE_INVALID_REASON_CODE_MAX_BYTES: usize = 128;
+pub const BINANCE_AGGTRADE_INVALID_REASON_DETAIL_MAX_BYTES: usize = 2_048;
+
+#[derive(serde::Deserialize)]
+struct BinanceAggTradeInvalidEvidenceEnvelope {
+    evidence_schema: String,
+    transport: String,
+    endpoint: String,
+    receive_time_utc_ms: i64,
+    invalid_reason_code: String,
+    payload_encoding: Option<String>,
+    payload_length_bytes: Option<u64>,
+    payload_sha256: Option<String>,
+    payload_capture_status: String,
+    payload_base64: Option<String>,
+    observed_bytes_at_least: u64,
+    declared_content_length: Option<u64>,
+    capture_limit_bytes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BinanceAggTradeHourlyRow {
+    pub record_kind: String,
     pub timestamp_received: i64,
     pub websocket_timestamp_received: Option<i64>,
     pub rest_backfill_timestamp_received: Option<i64>,
     pub ingest_source: String,
     pub event_type: Option<String>,
     pub event_time: Option<i64>,
-    pub trade_time: i64,
-    pub symbol: String,
-    pub aggregate_trade_id: u64,
-    pub price: String,
-    pub quantity: String,
-    pub first_trade_id: u64,
-    pub last_trade_id: u64,
-    pub buyer_is_maker: bool,
+    pub trade_time: Option<i64>,
+    pub symbol: Option<String>,
+    pub aggregate_trade_id: Option<u64>,
+    pub price: Option<String>,
+    pub quantity: Option<String>,
+    pub first_trade_id: Option<u64>,
+    pub last_trade_id: Option<u64>,
+    pub buyer_is_maker: Option<bool>,
     pub stream: Option<String>,
     pub ws_ignore: Option<bool>,
     pub rest_was_best_price_match: Option<bool>,
     pub source_native_payload_json: String,
+    pub source_sequence_epoch_id: String,
+    pub connection_generation: u64,
+    pub websocket_ingress_sequence: Option<u64>,
+    pub rest_response_ingress_sequence: Option<u64>,
+    pub rest_response_item_index: Option<u64>,
+    pub collector_admission_sequence: u64,
+    pub collector_admission_time_utc_ms: i64,
+    pub invalid_reason_code: Option<String>,
+    pub invalid_reason_detail: Option<String>,
+    pub payload_encoding: Option<String>,
+    pub payload_length_bytes: Option<u64>,
+    pub payload_sha256: Option<String>,
+    pub payload_capture_status: Option<String>,
     pub collector_host_id: String,
     pub collector_region: String,
     pub source_endpoint: String,
@@ -201,23 +289,28 @@ pub struct BinanceAggTradeHourlyRow {
 }
 
 impl BinanceAggTradeHourlyRow {
-    pub fn from_raw(raw: &BinanceAggTradeRaw) -> Self {
+    pub fn from_raw(
+        raw: &BinanceAggTradeRaw,
+        ordering: BinanceAggTradeOrdering,
+    ) -> Result<Self, String> {
+        ordering.validate()?;
         let timestamp_received = recv_time(&raw.envelope);
-        Self {
+        Ok(Self {
+            record_kind: BINANCE_AGGTRADE_RECORD_TRADE.to_owned(),
             timestamp_received,
             websocket_timestamp_received: Some(timestamp_received),
             rest_backfill_timestamp_received: None,
             ingest_source: AggTradeIngestSource::Websocket.as_str().to_owned(),
             event_type: Some(raw.event_type.clone()),
             event_time: Some(raw.event_time_ms),
-            trade_time: raw.trade_time_ms,
-            symbol: raw.symbol.clone(),
-            aggregate_trade_id: raw.aggregate_trade_id,
-            price: raw.price.clone(),
-            quantity: raw.quantity.clone(),
-            first_trade_id: raw.first_trade_id,
-            last_trade_id: raw.last_trade_id,
-            buyer_is_maker: raw.buyer_is_maker,
+            trade_time: Some(raw.trade_time_ms),
+            symbol: Some(raw.symbol.clone()),
+            aggregate_trade_id: Some(raw.aggregate_trade_id),
+            price: Some(raw.price.clone()),
+            quantity: Some(raw.quantity.clone()),
+            first_trade_id: Some(raw.first_trade_id),
+            last_trade_id: Some(raw.last_trade_id),
+            buyer_is_maker: Some(raw.buyer_is_maker),
             stream: Some(raw.stream_name.clone()),
             ws_ignore: Some(raw.ws_ignore),
             rest_was_best_price_match: None,
@@ -242,11 +335,24 @@ impl BinanceAggTradeHourlyRow {
                 "rest_backfill": null,
             })
             .to_string(),
+            source_sequence_epoch_id: ordering.source_sequence_epoch_id,
+            connection_generation: ordering.connection_generation,
+            websocket_ingress_sequence: Some(ordering.websocket_ingress_sequence),
+            rest_response_ingress_sequence: None,
+            rest_response_item_index: None,
+            collector_admission_sequence: ordering.collector_admission_sequence,
+            collector_admission_time_utc_ms: ordering.collector_admission_time_utc_ms,
+            invalid_reason_code: None,
+            invalid_reason_detail: None,
+            payload_encoding: None,
+            payload_length_bytes: None,
+            payload_sha256: None,
+            payload_capture_status: None,
             collector_host_id: raw.envelope.collector_host_id.clone(),
             collector_region: raw.envelope.collector_region.clone(),
             source_endpoint: raw.envelope.source_endpoint.clone(),
-            schema_version: "binance_aggtrade_v5".to_owned(),
-        }
+            schema_version: BINANCE_AGGTRADE_SCHEMA_VERSION.to_owned(),
+        })
     }
 
     pub fn from_output(
@@ -254,72 +360,103 @@ impl BinanceAggTradeHourlyRow {
         collector_host_id: &str,
         collector_region: &str,
         websocket_endpoint: &str,
-        rest_endpoint: &str,
+        ordering: BinanceAggTradeOrdering,
     ) -> Result<Self, String> {
-        let shared = output.shared();
-        let (
-            event_type,
-            event_time,
-            symbol,
-            stream,
-            ws_ignore,
-            rest_was_best_price_match,
-            source_endpoint,
-        ) = match output {
-            BinanceAggTradeOutput::Websocket(websocket) => (
-                Some(websocket.event_type.clone()),
-                Some(websocket.event_time_ms),
-                websocket.symbol.clone(),
-                Some(websocket.stream.clone()),
-                Some(websocket.ws_ignore),
-                None,
-                websocket_endpoint.to_owned(),
-            ),
-            BinanceAggTradeOutput::RestBackfill(rest) => (
-                None,
-                None,
-                rest.symbol.clone(),
-                None,
-                None,
-                Some(rest.rest_was_best_price_match),
-                rest_endpoint.to_owned(),
-            ),
-            BinanceAggTradeOutput::WebsocketRestMerged {
-                websocket,
-                rest_backfill,
-            } => (
-                Some(websocket.event_type.clone()),
-                Some(websocket.event_time_ms),
-                websocket.symbol.clone(),
-                Some(websocket.stream.clone()),
-                Some(websocket.ws_ignore),
-                Some(rest_backfill.rest_was_best_price_match),
-                format!("{websocket_endpoint}|{rest_endpoint}"),
-            ),
-        };
+        ordering.validate()?;
+        let BinanceAggTradeOutput::Websocket(websocket) = output;
+        let BinanceAggTradeIngressCoordinate::Websocket { sequence } =
+            &websocket.ingress_coordinate;
+        if ordering.websocket_ingress_sequence != *sequence {
+            return Err("binance_aggtrade_ordering_does_not_match_source_evidence".to_owned());
+        }
+        let shared = &websocket.shared;
         Ok(Self {
-            timestamp_received: output.timestamp_received(),
-            websocket_timestamp_received: output.websocket_timestamp_received(),
-            rest_backfill_timestamp_received: output.rest_backfill_timestamp_received(),
-            ingest_source: output.ingest_source().as_str().to_owned(),
-            event_type,
-            event_time,
-            trade_time: shared.trade_time_ms,
-            symbol,
-            aggregate_trade_id: shared.aggregate_trade_id,
-            price: shared.price.clone(),
-            quantity: shared.quantity.clone(),
-            first_trade_id: shared.first_trade_id,
-            last_trade_id: shared.last_trade_id,
-            buyer_is_maker: shared.buyer_is_maker,
-            stream,
-            ws_ignore,
-            rest_was_best_price_match,
+            record_kind: BINANCE_AGGTRADE_RECORD_TRADE.to_owned(),
+            timestamp_received: websocket.timestamp_received,
+            websocket_timestamp_received: Some(websocket.timestamp_received),
+            rest_backfill_timestamp_received: None,
+            ingest_source: AggTradeIngestSource::Websocket.as_str().to_owned(),
+            event_type: Some(websocket.event_type.clone()),
+            event_time: Some(websocket.event_time_ms),
+            trade_time: Some(shared.trade_time_ms),
+            symbol: Some(websocket.symbol.clone()),
+            aggregate_trade_id: Some(shared.aggregate_trade_id),
+            price: Some(shared.price.clone()),
+            quantity: Some(shared.quantity.clone()),
+            first_trade_id: Some(shared.first_trade_id),
+            last_trade_id: Some(shared.last_trade_id),
+            buyer_is_maker: Some(shared.buyer_is_maker),
+            stream: Some(websocket.stream.clone()),
+            ws_ignore: Some(websocket.ws_ignore),
+            rest_was_best_price_match: None,
             source_native_payload_json: output.source_native_payload_json()?,
+            source_sequence_epoch_id: ordering.source_sequence_epoch_id,
+            connection_generation: ordering.connection_generation,
+            websocket_ingress_sequence: Some(ordering.websocket_ingress_sequence),
+            rest_response_ingress_sequence: None,
+            rest_response_item_index: None,
+            collector_admission_sequence: ordering.collector_admission_sequence,
+            collector_admission_time_utc_ms: ordering.collector_admission_time_utc_ms,
+            invalid_reason_code: None,
+            invalid_reason_detail: None,
+            payload_encoding: None,
+            payload_length_bytes: None,
+            payload_sha256: None,
+            payload_capture_status: None,
             collector_host_id: collector_host_id.to_owned(),
             collector_region: collector_region.to_owned(),
-            source_endpoint,
-            schema_version: "binance_aggtrade_v5".to_owned(),
+            source_endpoint: websocket_endpoint.to_owned(),
+            schema_version: BINANCE_AGGTRADE_SCHEMA_VERSION.to_owned(),
+        })
+    }
+
+    pub fn from_invalid_evidence(
+        evidence: BinanceAggTradeInvalidEvidence,
+        ordering: BinanceAggTradeOrdering,
+        collector_host_id: &str,
+        collector_region: &str,
+    ) -> Result<Self, String> {
+        ordering.validate()?;
+        if evidence.ingest_source != AggTradeIngestSource::Websocket.as_str() {
+            return Err("binance_aggtrade_invalid_evidence_must_be_websocket".to_owned());
+        }
+        Ok(Self {
+            record_kind: BINANCE_AGGTRADE_RECORD_INVALID_INPUT.to_owned(),
+            timestamp_received: evidence.timestamp_received,
+            websocket_timestamp_received: Some(evidence.timestamp_received),
+            rest_backfill_timestamp_received: None,
+            ingest_source: AggTradeIngestSource::Websocket.as_str().to_owned(),
+            event_type: None,
+            event_time: None,
+            trade_time: None,
+            symbol: None,
+            aggregate_trade_id: None,
+            price: None,
+            quantity: None,
+            first_trade_id: None,
+            last_trade_id: None,
+            buyer_is_maker: None,
+            stream: None,
+            ws_ignore: None,
+            rest_was_best_price_match: None,
+            source_native_payload_json: evidence.source_native_payload_json,
+            source_sequence_epoch_id: ordering.source_sequence_epoch_id,
+            connection_generation: ordering.connection_generation,
+            websocket_ingress_sequence: Some(ordering.websocket_ingress_sequence),
+            rest_response_ingress_sequence: None,
+            rest_response_item_index: None,
+            collector_admission_sequence: ordering.collector_admission_sequence,
+            collector_admission_time_utc_ms: ordering.collector_admission_time_utc_ms,
+            invalid_reason_code: Some(evidence.invalid_reason_code),
+            invalid_reason_detail: evidence.invalid_reason_detail,
+            payload_encoding: evidence.payload_encoding,
+            payload_length_bytes: evidence.payload_length_bytes,
+            payload_sha256: evidence.payload_sha256,
+            payload_capture_status: Some(evidence.payload_capture_status),
+            collector_host_id: collector_host_id.to_owned(),
+            collector_region: collector_region.to_owned(),
+            source_endpoint: evidence.source_endpoint,
+            schema_version: BINANCE_AGGTRADE_SCHEMA_VERSION.to_owned(),
         })
     }
 
@@ -337,67 +474,51 @@ impl BinanceAggTradeHourlyRow {
         if let Some(timestamp) = self.event_time {
             require_positive_i64("event_time", timestamp, &mut report);
         }
+        require_positive_i64(
+            "collector_admission_time_utc_ms",
+            self.collector_admission_time_utc_ms,
+            &mut report,
+        );
+        report.require_non_empty("record_kind", &self.record_kind);
         report.require_non_empty("ingest_source", &self.ingest_source);
-        require_positive_i64("trade_time", self.trade_time, &mut report);
-        report.require_non_empty("symbol", &self.symbol);
-        if self.aggregate_trade_id == 0 {
-            report.missing_fields.push("aggregate_trade_id".to_owned());
-        }
-        report.require_non_empty("price", &self.price);
-        report.require_non_empty("quantity", &self.quantity);
-        if self.first_trade_id == 0 {
-            report.missing_fields.push("first_trade_id".to_owned());
-        }
-        if self.last_trade_id < self.first_trade_id {
-            report.missing_fields.push("last_trade_id".to_owned());
-        }
-        let websocket = self.ingest_source == AggTradeIngestSource::Websocket.as_str();
-        let rest = self.ingest_source == AggTradeIngestSource::RestBackfill.as_str();
-        let merged = self.ingest_source == AggTradeIngestSource::WebsocketRestMerged.as_str();
-        if !(websocket || rest || merged) {
-            report.missing_fields.push("ingest_source_valid".to_owned());
-        }
-        if websocket || merged {
-            report.require_some(
-                "websocket_timestamp_received",
-                self.websocket_timestamp_received,
-            );
-            report.require_some("event_type", self.event_type.as_ref());
-            report.require_some("event_time", self.event_time);
-            report.require_some("stream", self.stream.as_ref());
-            report.require_some("ws_ignore", self.ws_ignore);
-        } else if self.websocket_timestamp_received.is_some()
-            || self.event_type.is_some()
-            || self.event_time.is_some()
-            || self.stream.is_some()
-            || self.ws_ignore.is_some()
-        {
+        report.require_non_empty("source_sequence_epoch_id", &self.source_sequence_epoch_id);
+        if self.connection_generation == 0 {
             report
                 .missing_fields
-                .push("rest_has_ws_only_fields".to_owned());
+                .push("connection_generation".to_owned());
         }
-        if rest || merged {
-            report.require_some(
-                "rest_backfill_timestamp_received",
-                self.rest_backfill_timestamp_received,
-            );
-            report.require_some("rest_was_best_price_match", self.rest_was_best_price_match);
-        } else if self.rest_backfill_timestamp_received.is_some()
+        if self.collector_admission_sequence == 0 {
+            report
+                .missing_fields
+                .push("collector_admission_sequence".to_owned());
+        }
+        if self.websocket_ingress_sequence == Some(0) {
+            report
+                .missing_fields
+                .push("websocket_ingress_sequence".to_owned());
+        }
+        let websocket = self.ingest_source == AggTradeIngestSource::Websocket.as_str();
+        if !websocket {
+            report.missing_fields.push("ingest_source_valid".to_owned());
+        }
+        report.require_some(
+            "websocket_timestamp_received",
+            self.websocket_timestamp_received,
+        );
+        report.require_some(
+            "websocket_ingress_sequence",
+            self.websocket_ingress_sequence,
+        );
+        if self.rest_backfill_timestamp_received.is_some()
+            || self.rest_response_ingress_sequence.is_some()
+            || self.rest_response_item_index.is_some()
             || self.rest_was_best_price_match.is_some()
         {
             report
                 .missing_fields
                 .push("websocket_has_rest_only_fields".to_owned());
         }
-        let expected_availability = match (
-            self.websocket_timestamp_received,
-            self.rest_backfill_timestamp_received,
-        ) {
-            (Some(websocket), Some(rest_backfill)) => websocket.max(rest_backfill),
-            (Some(websocket), None) => websocket,
-            (None, Some(rest_backfill)) => rest_backfill,
-            (None, None) => 0,
-        };
+        let expected_availability = self.websocket_timestamp_received.unwrap_or_default();
         if self.timestamp_received != expected_availability {
             report
                 .missing_fields
@@ -412,11 +533,130 @@ impl BinanceAggTradeHourlyRow {
                 .missing_fields
                 .push("source_native_payload_json_parseable".to_owned());
         }
+        match self.record_kind.as_str() {
+            BINANCE_AGGTRADE_RECORD_TRADE => self.validate_trade(&mut report),
+            BINANCE_AGGTRADE_RECORD_INVALID_INPUT => self.validate_invalid_input(&mut report),
+            _ => report.missing_fields.push("record_kind_valid".to_owned()),
+        }
         report.require_non_empty("collector_host_id", &self.collector_host_id);
         report.require_non_empty("collector_region", &self.collector_region);
         report.require_non_empty("source_endpoint", &self.source_endpoint);
-        report.require_non_empty("schema_version", &self.schema_version);
+        if self.schema_version != BINANCE_AGGTRADE_SCHEMA_VERSION {
+            report
+                .missing_fields
+                .push("schema_version_valid".to_owned());
+        }
         report
+    }
+
+    fn validate_trade(&self, report: &mut SourceHourlyValidation) {
+        report.require_some("trade_time", self.trade_time);
+        if let Some(trade_time) = self.trade_time {
+            require_positive_i64("trade_time", trade_time, report);
+        }
+        report.require_some("symbol", self.symbol.as_ref());
+        if let Some(symbol) = self.symbol.as_deref() {
+            report.require_non_empty("symbol", symbol);
+        }
+        report.require_some("aggregate_trade_id", self.aggregate_trade_id);
+        if self.aggregate_trade_id == Some(0) {
+            report.missing_fields.push("aggregate_trade_id".to_owned());
+        }
+        report.require_some("price", self.price.as_ref());
+        if let Some(price) = self.price.as_deref() {
+            report.require_non_empty("price", price);
+        }
+        report.require_some("quantity", self.quantity.as_ref());
+        if let Some(quantity) = self.quantity.as_deref() {
+            report.require_non_empty("quantity", quantity);
+        }
+        report.require_some("first_trade_id", self.first_trade_id);
+        if self.first_trade_id == Some(0) {
+            report.missing_fields.push("first_trade_id".to_owned());
+        }
+        report.require_some("last_trade_id", self.last_trade_id);
+        if matches!((self.first_trade_id, self.last_trade_id), (Some(first), Some(last)) if last < first)
+        {
+            report.missing_fields.push("last_trade_id".to_owned());
+        }
+        report.require_some("buyer_is_maker", self.buyer_is_maker);
+        report.require_some("event_type", self.event_type.as_ref());
+        report.require_some("event_time", self.event_time);
+        report.require_some("stream", self.stream.as_ref());
+        report.require_some("ws_ignore", self.ws_ignore);
+        if self.invalid_reason_code.is_some()
+            || self.invalid_reason_detail.is_some()
+            || self.payload_encoding.is_some()
+            || self.payload_length_bytes.is_some()
+            || self.payload_sha256.is_some()
+            || self.payload_capture_status.is_some()
+        {
+            report
+                .missing_fields
+                .push("trade_has_invalid_only_fields".to_owned());
+        }
+    }
+
+    fn validate_invalid_input(&self, report: &mut SourceHourlyValidation) {
+        if self.event_type.is_some()
+            || self.event_time.is_some()
+            || self.trade_time.is_some()
+            || self.symbol.is_some()
+            || self.aggregate_trade_id.is_some()
+            || self.price.is_some()
+            || self.quantity.is_some()
+            || self.first_trade_id.is_some()
+            || self.last_trade_id.is_some()
+            || self.buyer_is_maker.is_some()
+            || self.stream.is_some()
+            || self.ws_ignore.is_some()
+            || self.rest_was_best_price_match.is_some()
+            || self.rest_response_item_index.is_some()
+        {
+            report
+                .missing_fields
+                .push("invalid_input_has_trade_only_fields".to_owned());
+        }
+        match self.invalid_reason_code.as_deref() {
+            Some(code) if valid_invalid_reason_code(code) => {}
+            _ => report.missing_fields.push("invalid_reason_code".to_owned()),
+        }
+        if self.invalid_reason_detail.as_deref().is_some_and(|detail| {
+            detail.is_empty() || detail.len() > BINANCE_AGGTRADE_INVALID_REASON_DETAIL_MAX_BYTES
+        }) {
+            report
+                .missing_fields
+                .push("invalid_reason_detail".to_owned());
+        }
+        match self.payload_capture_status.as_deref() {
+            Some(BINANCE_AGGTRADE_CAPTURE_COMPLETE) => {
+                report.require_some("payload_encoding", self.payload_encoding.as_ref());
+                if self
+                    .payload_encoding
+                    .as_deref()
+                    .is_some_and(|encoding| encoding.trim().is_empty())
+                {
+                    report.missing_fields.push("payload_encoding".to_owned());
+                }
+                report.require_some("payload_length_bytes", self.payload_length_bytes);
+                if !self.payload_sha256.as_deref().is_some_and(valid_sha256_hex) {
+                    report.missing_fields.push("payload_sha256".to_owned());
+                }
+            }
+            Some(BINANCE_AGGTRADE_CAPTURE_OVERSIZE_NOT_CAPTURED) => {
+                if self.payload_encoding.is_some() || self.payload_sha256.is_some() {
+                    report
+                        .missing_fields
+                        .push("oversize_has_uncaptured_payload_fact".to_owned());
+                }
+            }
+            _ => report
+                .missing_fields
+                .push("payload_capture_status".to_owned()),
+        }
+        if let Err(field) = validate_invalid_evidence_envelope(self) {
+            report.missing_fields.push(field.to_owned());
+        }
     }
 }
 
@@ -692,24 +932,38 @@ pub fn binance_depth_update_schema() -> Arc<Schema> {
 
 pub fn binance_aggtrade_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
+        Field::new("record_kind", DataType::Utf8, false),
         timestamp_field("timestamp_received", false),
         timestamp_field("websocket_timestamp_received", true),
         timestamp_field("rest_backfill_timestamp_received", true),
         Field::new("ingest_source", DataType::Utf8, false),
         Field::new("event_type", DataType::Utf8, true),
         timestamp_field("event_time", true),
-        timestamp_field("trade_time", false),
-        Field::new("symbol", DataType::Utf8, false),
-        Field::new("aggregate_trade_id", DataType::UInt64, false),
-        Field::new("price", DataType::Utf8, false),
-        Field::new("quantity", DataType::Utf8, false),
-        Field::new("first_trade_id", DataType::UInt64, false),
-        Field::new("last_trade_id", DataType::UInt64, false),
-        Field::new("buyer_is_maker", DataType::Boolean, false),
+        timestamp_field("trade_time", true),
+        Field::new("symbol", DataType::Utf8, true),
+        Field::new("aggregate_trade_id", DataType::UInt64, true),
+        Field::new("price", DataType::Utf8, true),
+        Field::new("quantity", DataType::Utf8, true),
+        Field::new("first_trade_id", DataType::UInt64, true),
+        Field::new("last_trade_id", DataType::UInt64, true),
+        Field::new("buyer_is_maker", DataType::Boolean, true),
         Field::new("stream", DataType::Utf8, true),
         Field::new("ws_ignore", DataType::Boolean, true),
         Field::new("rest_was_best_price_match", DataType::Boolean, true),
         Field::new("source_native_payload_json", DataType::Utf8, false),
+        Field::new("source_sequence_epoch_id", DataType::Utf8, false),
+        Field::new("connection_generation", DataType::UInt64, false),
+        Field::new("websocket_ingress_sequence", DataType::UInt64, true),
+        Field::new("rest_response_ingress_sequence", DataType::UInt64, true),
+        Field::new("rest_response_item_index", DataType::UInt64, true),
+        Field::new("collector_admission_sequence", DataType::UInt64, false),
+        timestamp_field("collector_admission_time_utc_ms", false),
+        Field::new("invalid_reason_code", DataType::Utf8, true),
+        Field::new("invalid_reason_detail", DataType::Utf8, true),
+        Field::new("payload_encoding", DataType::Utf8, true),
+        Field::new("payload_length_bytes", DataType::UInt64, true),
+        Field::new("payload_sha256", DataType::Utf8, true),
+        Field::new("payload_capture_status", DataType::Utf8, true),
         Field::new("collector_host_id", DataType::Utf8, false),
         Field::new("collector_region", DataType::Utf8, false),
         Field::new("source_endpoint", DataType::Utf8, false),
@@ -788,4 +1042,119 @@ fn require_positive_i64(field: &str, value: i64, report: &mut SourceHourlyValida
     if value <= 0 {
         report.missing_fields.push(field.to_owned());
     }
+}
+
+fn valid_invalid_reason_code(code: &str) -> bool {
+    !code.is_empty()
+        && code.len() <= BINANCE_AGGTRADE_INVALID_REASON_CODE_MAX_BYTES
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn valid_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn validate_invalid_evidence_envelope(row: &BinanceAggTradeHourlyRow) -> Result<(), &'static str> {
+    const REQUIRED_FIELDS: [&str; 13] = [
+        "evidence_schema",
+        "transport",
+        "endpoint",
+        "receive_time_utc_ms",
+        "invalid_reason_code",
+        "payload_encoding",
+        "payload_length_bytes",
+        "payload_sha256",
+        "payload_capture_status",
+        "payload_base64",
+        "observed_bytes_at_least",
+        "declared_content_length",
+        "capture_limit_bytes",
+    ];
+
+    let value = serde_json::from_str::<serde_json::Value>(&row.source_native_payload_json)
+        .map_err(|_| "invalid_evidence_envelope_parseable")?;
+    let object = value
+        .as_object()
+        .ok_or("invalid_evidence_envelope_object")?;
+    if REQUIRED_FIELDS
+        .iter()
+        .any(|field| !object.contains_key(*field))
+    {
+        return Err("invalid_evidence_required_fields");
+    }
+    let evidence = serde_json::from_value::<BinanceAggTradeInvalidEvidenceEnvelope>(value)
+        .map_err(|_| "invalid_evidence_field_types")?;
+
+    if evidence.evidence_schema != "binance_aggtrade_invalid_evidence_v1" {
+        return Err("invalid_evidence_schema");
+    }
+    if evidence.transport != row.ingest_source
+        || evidence.endpoint != row.source_endpoint
+        || evidence.receive_time_utc_ms != row.timestamp_received
+        || Some(evidence.invalid_reason_code.as_str()) != row.invalid_reason_code.as_deref()
+        || Some(evidence.payload_capture_status.as_str()) != row.payload_capture_status.as_deref()
+        || evidence.payload_encoding.as_deref() != row.payload_encoding.as_deref()
+        || evidence.payload_length_bytes != row.payload_length_bytes
+        || evidence.payload_sha256.as_deref() != row.payload_sha256.as_deref()
+    {
+        return Err("invalid_evidence_row_consistency");
+    }
+
+    let limit = u64::try_from(BINANCE_AGGTRADE_INVALID_INPUT_MAX_BYTES)
+        .map_err(|_| "invalid_evidence_capture_limit")?;
+    if evidence.capture_limit_bytes != limit {
+        return Err("invalid_evidence_capture_limit");
+    }
+
+    match evidence.payload_capture_status.as_str() {
+        BINANCE_AGGTRADE_CAPTURE_COMPLETE => {
+            if evidence.payload_encoding.as_deref() != Some("base64") {
+                return Err("invalid_evidence_complete_payload");
+            }
+            let encoded = evidence
+                .payload_base64
+                .as_deref()
+                .ok_or("invalid_evidence_complete_payload")?;
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|_| "invalid_evidence_complete_payload")?;
+            let decoded_length =
+                u64::try_from(decoded.len()).map_err(|_| "invalid_evidence_complete_payload")?;
+            if decoded_length > limit
+                || evidence.payload_length_bytes != Some(decoded_length)
+                || evidence.observed_bytes_at_least != decoded_length
+                || evidence
+                    .declared_content_length
+                    .is_some_and(|declared| declared > limit)
+            {
+                return Err("invalid_evidence_complete_payload");
+            }
+            let expected_sha256 = format!("{:x}", Sha256::digest(&decoded));
+            if !evidence
+                .payload_sha256
+                .as_deref()
+                .is_some_and(valid_sha256_hex)
+                || evidence.payload_sha256.as_deref() != Some(expected_sha256.as_str())
+            {
+                return Err("invalid_evidence_complete_payload");
+            }
+        }
+        BINANCE_AGGTRADE_CAPTURE_OVERSIZE_NOT_CAPTURED => {
+            if evidence.payload_encoding.is_some()
+                || evidence.payload_base64.is_some()
+                || evidence.payload_sha256.is_some()
+                || evidence.payload_length_bytes != evidence.declared_content_length
+                || (evidence.observed_bytes_at_least <= limit
+                    && evidence
+                        .declared_content_length
+                        .is_none_or(|declared| declared <= limit))
+            {
+                return Err("invalid_evidence_oversize_payload");
+            }
+        }
+        _ => return Err("invalid_evidence_capture_status"),
+    }
+    Ok(())
 }

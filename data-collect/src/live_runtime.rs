@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arrow_array::{Array as _, StringArray, TimestampMillisecondArray, UInt64Array};
+use base64::Engine as _;
 use futures::{FutureExt as _, SinkExt as _, StreamExt as _};
 use parquet::arrow::{ProjectionMask, arrow_reader::ParquetRecordBatchReaderBuilder};
 use polymarket_client_sdk_v2::clob::ws::types::response::OrderBookLevel;
@@ -26,6 +27,7 @@ use polymarket_client_sdk_v2::types::U256;
 use polymarket_client_sdk_v2::ws::config::Config as WsConfig;
 use serde::Serialize;
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use time::OffsetDateTime;
 use tokio::net::TcpStream;
 use tokio::sync::{
@@ -33,14 +35,19 @@ use tokio::sync::{
 };
 use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
+use tokio_tungstenite::tungstenite::error::CapacityError;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tokio_tungstenite::tungstenite::{Error as TungsteniteError, Message};
+use tokio_tungstenite::{
+    MaybeTlsStream, WebSocketStream, connect_async, connect_async_with_config,
+};
 
 use crate::backpressure::bounded_event_queue;
 use crate::binance_aggtrade::{
-    AggTradeBackfillRange, AggTradeCoordinator, AggTradeCoordinatorResult,
-    BINANCE_AGGTRADE_PENDING_MAX_ROWS, BinanceAggTradeContinuityState, BinanceAggTradeOutput,
-    BinanceRestAggTrade, BinanceWsAggTrade, fetch_binance_aggtrade_range,
+    BINANCE_AGGTRADE_INVALID_INPUT_MAX_BYTES, BinanceAggTradeIngressCoordinate,
+    BinanceAggTradeIngressSequenceAllocator, BinanceAggTradeInvalidInput,
+    BinanceAggTradeInvalidReason, BinanceAggTradeInvalidTransport, BinanceAggTradeOutput,
+    BinanceAggTradeRawCapture, BinanceWsAggTrade,
 };
 #[cfg(test)]
 use crate::daily_manifest::close_day_manifest;
@@ -49,12 +56,12 @@ use crate::daily_manifest::{
     DailyManifestIdentity, SourceOperationalCounterDelta, activate_collection_day_coverage,
     add_manifest_operational_counters, close_day_manifest_with_collection_end,
     close_day_manifest_with_unclean_end, close_reconciled_day_manifest, day_has_finalized_parquet,
-    load_day_manifest, manifest_binance_continuity, manifest_collection_day_coverage,
-    manifest_state, mark_collection_day_coverage_ended_known, mark_collection_day_coverage_unclean,
+    load_day_manifest, manifest_collection_day_coverage, manifest_state,
+    mark_collection_day_coverage_ended_known, mark_collection_day_coverage_unclean,
     merge_finalized_file_delta, reconcile_open_day_manifest, record_day_barrier_state,
     record_manifest_gaps, remove_unowned_stale_temporary_files, typed_raw_root,
-    update_manifest_continuity, utc_day_directories, validate_manifest_day,
-    validate_manifest_recovery_files, validate_unmanifested_recovery_files,
+    utc_day_directories, validate_manifest_day, validate_manifest_recovery_files,
+    validate_unmanifested_recovery_files,
 };
 use crate::dedupe::{
     BinanceIdDecision, BinanceRecentIdWindow, FingerprintDecision, LifecycleFingerprintSets,
@@ -81,6 +88,8 @@ use crate::polymarket_sdk_runtime::{
     MarketSdkMessageReceiver, MarketSdkRuntime, RtdsRuntimeEvent, RtdsSdkRuntime, SdkStreamError,
 };
 use crate::source_format::{RtdsChainlinkBtcUsdRaw, plausible_unix_timestamp_ms};
+#[cfg(test)]
+use crate::source_hourly_layout::BinanceAggTradeOrdering;
 use crate::source_hourly_layout::{
     BinanceAggTradeHourlyRow, BinanceDepthSnapshotHourlyRow, BinanceDepthUpdateHourlyRow,
     RtdsChainlinkBtcUsdHourlyRow,
@@ -90,7 +99,8 @@ use crate::sources::binance::{
     stitch_depth_update,
 };
 use crate::writer::{
-    DAILY_FILE_RECOVERY_METADATA_KEY, PublishedSegment, RawEvent, TypedParquetSegmentWriter,
+    DAILY_FILE_RECOVERY_METADATA_KEY, PublishedSegment, RawEvent, RawEventAdmission,
+    TypedParquetSegmentWriter,
 };
 #[cfg(test)]
 use crate::writer::{PARQUET_ROW_GROUP_MAX_BYTES, PARQUET_ROW_GROUP_MAX_ROWS};
@@ -99,9 +109,10 @@ const MARKET_WS_ENDPOINT: &str = "wss://ws-subscriptions-clob.polymarket.com";
 const RTDS_WS_ENDPOINT: &str = "wss://ws-live-data.polymarket.com";
 const BINANCE_DEPTH_WS: &str = "wss://stream.binance.com:9443/ws/btcusdt@depth@100ms";
 const BINANCE_AGGTRADE_WS: &str = "wss://stream.binance.com:9443/ws/btcusdt@aggTrade";
-const BINANCE_AGGTRADE_REST: &str = "https://api.binance.com/api/v3/aggTrades";
 const BINANCE_DEPTH_SNAPSHOT: &str =
     "https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=1000";
+
+static AGGTRADE_SOURCE_EPOCH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const DEFAULT_CONTINUOUS_DURATION_SECS: u64 = 7 * 24 * 60 * 60;
 const DEFAULT_DISCOVERY_WAIT_SECS: u64 = 90;
@@ -120,6 +131,7 @@ const BINANCE_DEPTH_SNAPSHOT_MAX_ATTEMPTS: u32 = 3;
 const BINANCE_HTTP_CONNECT_TIMEOUT_SECS: u64 = 5;
 const BINANCE_HTTP_TOTAL_TIMEOUT_SECS: u64 = 15;
 const WS_CONNECT_TIMEOUT_SECS: u64 = 20;
+const WS_WRITE_TIMEOUT_SECS: u64 = 5;
 const BINANCE_WS_RECONNECT_BASE_MS: u64 = 500;
 const BINANCE_WS_RECONNECT_MAX_MS: u64 = 5_000;
 const SOURCE_RECOVERY_CYCLE_MAX_ATTEMPTS: u32 = 12;
@@ -140,6 +152,8 @@ const AGGTRADE_CONTROL_CHANNEL_CAPACITY: usize = 4;
 const POLYMARKET_DECODED_QUEUE_CAPACITY: usize = 25_000;
 const POLYMARKET_DECODED_MAX_BYTES: usize = 67_108_864;
 const POLYMARKET_PROCESSOR_STAGING_MAX_BYTES: usize = 8 * MAX_TYPED_ROW_BYTES;
+const BINANCE_AGGTRADE_JSON_VALUE_STAGING_MULTIPLIER: usize = 128;
+const BINANCE_AGGTRADE_INVALID_SERIALIZATION_STAGING_MAX_BYTES: usize = 4 * MAX_TYPED_ROW_BYTES;
 const POLYMARKET_CONTROL_CHANNEL_CAPACITY: usize = 4;
 const STARTUP_READY_CHANNEL_CAPACITY: usize = 10;
 const STARTUP_GATE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -2066,6 +2080,7 @@ struct SourceQueueBackpressureStats {
     wait_count: AtomicU64,
     timeout_count: AtomicU64,
     dropped_rows: AtomicU64,
+    aggtrade_admission_sequence: AtomicU64,
     operational_counters: Mutex<BTreeMap<String, BTreeMap<String, SourceOperationalCounterDelta>>>,
     active_recovery_sources: Mutex<BTreeSet<String>>,
     deferred_raw_batches: Mutex<BTreeMap<String, VecDeque<DeferredRawBatch>>>,
@@ -2073,6 +2088,15 @@ struct SourceQueueBackpressureStats {
 }
 
 impl SourceQueueBackpressureStats {
+    fn next_aggtrade_admission_sequence(&self) -> Result<u64> {
+        self.aggtrade_admission_sequence
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .map(|previous| previous + 1)
+            .map_err(|_| invalid_data("binance aggTrade admission sequence overflow").into())
+    }
+
     fn install_raw_day_gate(&self, gate: Arc<RawDayGate>) -> Result<()> {
         self.raw_day_gate
             .set(gate)
@@ -2255,10 +2279,6 @@ enum IngressControl {
         close: RawDayClose,
         reply: oneshot::Sender<std::result::Result<DayBarrierRelease, String>>,
     },
-    BinanceContinuity {
-        utc_day: String,
-        continuity: BinanceAggTradeContinuityState,
-    },
 }
 
 #[derive(Debug)]
@@ -2300,10 +2320,8 @@ struct ProducerReleaseToken {
 }
 
 enum AggTradeSourceControl {
-    Flush {
-        reason: String,
-        utc_day: String,
-        stop_after_flush: bool,
+    Fence {
+        stop_after_fence: bool,
         resume_after_barrier: Option<oneshot::Receiver<()>>,
         reply: oneshot::Sender<std::result::Result<(), String>>,
     },
@@ -2325,12 +2343,6 @@ enum PolymarketSourceControl {
     },
 }
 
-struct PendingAggTradeStop {
-    reason: String,
-    utc_day: String,
-    reply: oneshot::Sender<std::result::Result<(), String>>,
-}
-
 struct InflightRawEvent {
     event: RawEvent,
     control: Option<IngressControl>,
@@ -2341,7 +2353,13 @@ struct InflightRawEvent {
 
 impl InflightRawEvent {
     #[cfg(test)]
-    fn for_test(event: RawEvent) -> Self {
+    fn for_test(mut event: RawEvent) -> Self {
+        if event.source_kind == "binance_aggtrade" && event.collector_admission.is_none() {
+            event.collector_admission = Some(RawEventAdmission {
+                sequence: u64::try_from(event.recv_time_utc_ms).unwrap_or(1).max(1),
+                time_utc_ms: event.recv_time_utc_ms.max(1),
+            });
+        }
         let budget = InflightBudget::new();
         let bytes = owned_event_bytes(&event);
         Self {
@@ -3480,10 +3498,8 @@ where
         let (reply_tx, mut reply_rx) = oneshot::channel();
         let (sender, resume_rx) = oneshot::channel();
         control_tx
-            .send(AggTradeSourceControl::Flush {
-                reason: format!("utc_day_barrier:{}", close.utc_day),
-                utc_day: close.utc_day.clone(),
-                stop_after_flush: false,
+            .send(AggTradeSourceControl::Fence {
+                stop_after_fence: false,
                 resume_after_barrier: Some(resume_rx),
                 reply: reply_tx,
             })
@@ -3494,7 +3510,7 @@ where
         let source_result = wait_for_source_fence_reply_or_source(
             source.as_mut(),
             &mut reply_rx,
-            "aggTrade source flush",
+            "aggTrade source fence",
         )
         .await?;
         if let Some(result) = source_result {
@@ -3535,6 +3551,8 @@ struct SourceRecoverySupervisor {
     outer_cycles: u32,
     cycle_started: Instant,
     jitter_seed: u64,
+    #[cfg(test)]
+    wait_override: Option<Duration>,
 }
 
 impl SourceRecoverySupervisor {
@@ -3545,7 +3563,27 @@ impl SourceRecoverySupervisor {
             outer_cycles: 0,
             cycle_started: Instant::now(),
             jitter_seed,
+            #[cfg(test)]
+            wait_override: None,
         }
+    }
+
+    #[cfg(test)]
+    fn set_wait_override(&mut self, wait_override: Option<Duration>) {
+        self.wait_override = wait_override;
+    }
+
+    fn apply_wait_override(&self, wait: SourceRecoveryWait) -> SourceRecoveryWait {
+        #[cfg(test)]
+        {
+            let mut wait = wait;
+            if let Some(delay) = self.wait_override {
+                wait.delay = delay;
+            }
+            wait
+        }
+        #[cfg(not(test))]
+        wait
     }
 
     fn record_business_recovery(&mut self) {
@@ -3563,7 +3601,7 @@ impl SourceRecoverySupervisor {
             self.inner_attempts = 0;
             self.cycle_started = Instant::now();
             let attempt = self.outer_cycles.min(32);
-            return SourceRecoveryWait {
+            return self.apply_wait_override(SourceRecoveryWait {
                 level: SourceRecoveryWaitLevel::OuterCycle,
                 delay: retry_delay(
                     self.source_kind,
@@ -3573,9 +3611,9 @@ impl SourceRecoverySupervisor {
                     self.jitter_seed,
                 ),
                 attempt,
-            };
+            });
         }
-        SourceRecoveryWait {
+        self.apply_wait_override(SourceRecoveryWait {
             level: SourceRecoveryWaitLevel::InnerAttempt,
             delay: retry_delay(
                 self.source_kind,
@@ -3585,7 +3623,7 @@ impl SourceRecoverySupervisor {
                 self.jitter_seed,
             ),
             attempt: self.inner_attempts,
-        }
+        })
     }
 }
 
@@ -3656,10 +3694,6 @@ enum ManifestCommand {
         ack_mode: ManifestActivationAckMode,
     },
     Finalized(DailyFinalizedFileDelta),
-    BinanceContinuity {
-        utc_day: String,
-        continuity: BinanceAggTradeContinuityState,
-    },
     ProducerBarrier {
         close: RawDayClose,
         producer: String,
@@ -3766,7 +3800,6 @@ struct ManifestRolloverRendezvous {
 struct ManifestOwnerState {
     dataset_root: PathBuf,
     identity: DailyManifestIdentity,
-    continuity: BinanceAggTradeContinuityState,
     manifests: BTreeMap<String, Value>,
     activation_attempts: BTreeSet<String>,
     active_epoch: Option<ManifestActiveEpoch>,
@@ -3774,15 +3807,10 @@ struct ManifestOwnerState {
 }
 
 impl ManifestOwnerState {
-    fn new(
-        dataset_root: PathBuf,
-        identity: DailyManifestIdentity,
-        continuity: BinanceAggTradeContinuityState,
-    ) -> Self {
+    fn new(dataset_root: PathBuf, identity: DailyManifestIdentity) -> Self {
         Self {
             dataset_root,
             identity,
-            continuity,
             manifests: BTreeMap::new(),
             activation_attempts: BTreeSet::new(),
             active_epoch: None,
@@ -3808,12 +3836,8 @@ impl ManifestOwnerState {
         if self.manifests.contains_key(utc_day) {
             return Ok(());
         }
-        let mut manifest = reconcile_open_day_manifest(
-            &self.day_dir(utc_day),
-            utc_day,
-            &self.identity,
-            &self.continuity,
-        )?;
+        let mut manifest =
+            reconcile_open_day_manifest(&self.day_dir(utc_day), utc_day, &self.identity)?;
         add_manifest_operational_counters(
             &self.day_dir(utc_day),
             &mut manifest,
@@ -3871,22 +3895,6 @@ impl ManifestOwnerState {
             .get_mut(&delta.utc_day)
             .expect("manifest was ensured");
         merge_finalized_file_delta(&day_dir, manifest, &delta)?;
-        Ok(())
-    }
-
-    fn update_continuity(
-        &mut self,
-        utc_day: String,
-        continuity: BinanceAggTradeContinuityState,
-    ) -> Result<()> {
-        self.continuity = continuity;
-        self.ensure_open(&utc_day)?;
-        let day_dir = self.day_dir(&utc_day);
-        let manifest = self
-            .manifests
-            .get_mut(&utc_day)
-            .expect("manifest was ensured");
-        update_manifest_continuity(&day_dir, manifest, &self.continuity)?;
         Ok(())
     }
 
@@ -4315,9 +4323,6 @@ impl ManifestOwnerState {
             .manifests
             .get_mut(&close.utc_day)
             .ok_or_else(|| invalid_data("manifest shutdown active day is missing"))?;
-        if manifest_state(manifest)? == "open" {
-            update_manifest_continuity(&day_dir, manifest, &self.continuity)?;
-        }
         match disposition {
             ManifestShutdownDisposition::EndedKnown { ended_utc_ms } => {
                 mark_collection_day_coverage_ended_known(&day_dir, manifest, *ended_utc_ms)?;
@@ -4376,10 +4381,6 @@ async fn run_manifest_owner(
                 result?;
             }
             ManifestCommand::Finalized(delta) => owner.apply_finalized(delta)?,
-            ManifestCommand::BinanceContinuity {
-                utc_day,
-                continuity,
-            } => owner.update_continuity(utc_day, continuity)?,
             ManifestCommand::ProducerBarrier {
                 close,
                 producer,
@@ -6578,11 +6579,7 @@ pub async fn run_live_training_runtime(
     let (rollover_ready_tx, mut rollover_ready_rx) = mpsc::channel(1);
     let mut rollover_coordinator = RolloverCoordinatorState::new(ManifestActivationAckMode::Send);
     let (startup_ready_tx, startup_ready_rx) = mpsc::channel(STARTUP_READY_CHANNEL_CAPACITY);
-    let mut manifest_owner = ManifestOwnerState::new(
-        dataset_root.clone(),
-        daily_manifest_identity,
-        binance_aggtrade_recovery.continuity.clone(),
-    );
+    let mut manifest_owner = ManifestOwnerState::new(dataset_root.clone(), daily_manifest_identity);
     manifest_owner.insert_reconciled_manifest(recovery_day.clone(), current_manifest)?;
     let manifest_owner_dataset_lease = Arc::clone(&dataset_root_lock);
     let mut manifest_owner_handle = tokio::spawn(async move {
@@ -6645,8 +6642,9 @@ pub async fn run_live_training_runtime(
             source_kind: "binance_aggtrade".to_owned(),
             default_event_type: "aggTrade".to_owned(),
             url: BINANCE_AGGTRADE_WS.to_owned(),
-            rest_endpoint: BINANCE_AGGTRADE_REST.to_owned(),
-            freshness_timeout_secs: 60,
+            frame_inactivity_timeout_secs: 30,
+            #[cfg(test)]
+            recovery_wait_override: None,
         },
         aggtrade_sink.clone(),
         collector_identity.clone(),
@@ -7344,52 +7342,34 @@ pub async fn run_live_training_runtime(
             .iter()
             .any(|handle| handle.source_kind == "binance_aggtrade" && !handle.is_finished())
         {
-            let stop_reason = if operator_shutdown {
-                "operator_shutdown"
-            } else if capacity_shutdown {
-                "dataset_capacity_reached"
-            } else {
-                "runtime_failure"
-            };
-            if let Some(stop_utc_day) = utc_day_string_from_ms(now_ms()) {
-                let (reply_tx, reply_rx) = oneshot::channel();
-                match timeout(
-                    Duration::from_secs(5),
-                    aggtrade_control_tx.send(AggTradeSourceControl::Flush {
-                        reason: stop_reason.to_owned(),
-                        utc_day: stop_utc_day,
-                        stop_after_flush: true,
-                        resume_after_barrier: None,
-                        reply: reply_tx,
-                    }),
-                )
-                .await
-                {
-                    Ok(Ok(())) => aggtrade_stop_reply = Some(reply_rx),
-                    Ok(Err(_)) => {
-                        source_control_stop_facts.insert(
-                            "binance_aggtrade",
-                            SourceControlStopFact::Failed(
-                                "aggTrade_shutdown_control_channel_closed".to_owned(),
-                            ),
-                        );
-                    }
-                    Err(_) => {
-                        source_control_stop_facts.insert(
-                            "binance_aggtrade",
-                            SourceControlStopFact::Failed(
-                                "aggTrade_shutdown_control_timeout".to_owned(),
-                            ),
-                        );
-                    }
+            let (reply_tx, reply_rx) = oneshot::channel();
+            match timeout(
+                Duration::from_secs(5),
+                aggtrade_control_tx.send(AggTradeSourceControl::Fence {
+                    stop_after_fence: true,
+                    resume_after_barrier: None,
+                    reply: reply_tx,
+                }),
+            )
+            .await
+            {
+                Ok(Ok(())) => aggtrade_stop_reply = Some(reply_rx),
+                Ok(Err(_)) => {
+                    source_control_stop_facts.insert(
+                        "binance_aggtrade",
+                        SourceControlStopFact::Failed(
+                            "aggTrade_shutdown_control_channel_closed".to_owned(),
+                        ),
+                    );
                 }
-            } else {
-                source_control_stop_facts.insert(
-                    "binance_aggtrade",
-                    SourceControlStopFact::Failed(
-                        "UTC day unavailable for aggTrade shutdown".to_owned(),
-                    ),
-                );
+                Err(_) => {
+                    source_control_stop_facts.insert(
+                        "binance_aggtrade",
+                        SourceControlStopFact::Failed(
+                            "aggTrade_shutdown_control_timeout".to_owned(),
+                        ),
+                    );
+                }
             }
         }
         for handle in &mut handles {
@@ -8371,23 +8351,6 @@ async fn handle_ingress_control(
                     io::Error::new(
                         io::ErrorKind::BrokenPipe,
                         "daily manifest owner channel closed during producer barrier",
-                    )
-                })?;
-        }
-        IngressControl::BinanceContinuity {
-            utc_day,
-            continuity,
-        } => {
-            manifest_tx
-                .send(ManifestCommand::BinanceContinuity {
-                    utc_day,
-                    continuity,
-                })
-                .await
-                .map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::BrokenPipe,
-                        "daily manifest owner channel closed during continuity update",
                     )
                 })?;
         }
@@ -9675,6 +9638,11 @@ fn segment_daily_facts(
     rollover_reason: &str,
     provenance: &RuntimeProvenance,
 ) -> Value {
+    let sort_order = if segment.source_kind == "binance_aggtrade" {
+        "collector_admission_order"
+    } else {
+        "receive_order"
+    };
     json!({
         "rollover_reason": rollover_reason,
         "hour_window_utc_ms": {
@@ -9682,7 +9650,7 @@ fn segment_daily_facts(
             "end": segment.hour_end_utc_ms,
         },
         "layout_family": layout_family_for_source(&segment.source_kind),
-        "sort_order": "receive_order",
+        "sort_order": sort_order,
         "compression": "zstd_level_3",
         "backfill_rows": segment.backfill_rows,
         "book_rows_with_bids_asks": segment.book_rows_with_bids_asks,
@@ -12947,6 +12915,7 @@ async fn emit_rtds_message(
                 "source_native_payload_json": source_native_payload_json,
             })
             .to_string(),
+            collector_admission: None,
             parquet_raw_layout_version: 1,
             parquet_raw_source_kind: "polymarket_rtds_chainlink_btc_usd".to_owned(),
         },
@@ -13378,6 +13347,7 @@ async fn run_binance_depth_update_ws_source_with_control(
                     collector_region: context.collector_identity.region.clone(),
                     source_endpoint: context.spec.websocket_endpoint.clone(),
                     raw_json: raw_json.clone(),
+                    collector_admission: None,
                     parquet_raw_layout_version: 1,
                     parquet_raw_source_kind: "binance_depth_update".to_owned(),
                 };
@@ -13638,8 +13608,6 @@ fn all_finalized_source_parquet_paths(
 
 struct BinanceAggTradeRecovery {
     websocket_dedupe: BinanceRecentIdWindow,
-    rest_dedupe: BinanceRecentIdWindow,
-    continuity: BinanceAggTradeContinuityState,
 }
 
 struct StableStartupRecovery {
@@ -13667,7 +13635,6 @@ where
             &typed_raw_root(dataset_root).join(format!("utc_day={recovery_day}")),
             &recovery_day,
             identity,
-            &binance_aggtrade.continuity,
         )?;
         let confirmed_ms = clock_ms();
         let confirmed_day = utc_day_string_from_ms(confirmed_ms)
@@ -13704,7 +13671,6 @@ fn restore_binance_aggtrade_recovery(
         ))
         .into());
     }
-    let mut continuity = BinanceAggTradeContinuityState::default();
     for (day, day_dir) in days.iter().filter(|(day, _)| day.as_str() < current_day) {
         let Some(mut manifest) = load_day_manifest(day_dir)? else {
             if day_has_finalized_parquet(day_dir)? {
@@ -13718,12 +13684,7 @@ fn restore_binance_aggtrade_recovery(
         validate_manifest_day(&manifest, day)?;
         let state = manifest_state(&manifest)?;
         validate_manifest_recovery_files(day_dir, &manifest, state == "open")?;
-        if let Some(manifest_continuity) = manifest_binance_continuity(&manifest)? {
-            manifest_continuity.validate().map_err(invalid_data)?;
-            continuity = manifest_continuity;
-        }
         if state == "open" {
-            overlay_binance_continuity_from_day(day_dir, &mut continuity)?;
             if manifest_collection_day_coverage(&manifest)?.is_some() {
                 add_manifest_operational_counters(
                     day_dir,
@@ -13731,7 +13692,7 @@ fn restore_binance_aggtrade_recovery(
                     &required_source_counter_defaults(),
                 )?;
             }
-            close_reconciled_day_manifest(day_dir, &mut manifest, &continuity)?;
+            close_reconciled_day_manifest(day_dir, &mut manifest)?;
         }
     }
 
@@ -13745,68 +13706,80 @@ fn restore_binance_aggtrade_recovery(
                 .into());
             }
             validate_manifest_recovery_files(day_dir, &manifest, true)?;
-            if let Some(manifest_continuity) = manifest_binance_continuity(&manifest)? {
-                manifest_continuity.validate().map_err(invalid_data)?;
-                continuity = manifest_continuity;
-            }
         } else {
             validate_unmanifested_recovery_files(day_dir, current_identity)?;
         }
-        overlay_binance_continuity_from_day(day_dir, &mut continuity)?;
     }
-    continuity.validate().map_err(invalid_data)?;
 
-    let (websocket_dedupe, rest_dedupe) = restore_binance_transport_dedupe(dataset_root)?;
     Ok(BinanceAggTradeRecovery {
-        websocket_dedupe,
-        rest_dedupe,
-        continuity,
+        websocket_dedupe: restore_binance_transport_dedupe(dataset_root)?,
     })
 }
 
-fn overlay_binance_continuity_from_day(
-    day_dir: &Path,
-    continuity: &mut BinanceAggTradeContinuityState,
-) -> Result<()> {
-    for path in finalized_parquet_files(&day_dir.join("source_kind=binance_aggtrade"))? {
-        let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&path)?)?;
-        if builder.schema().index_of("aggregate_trade_id").is_err() {
-            continue;
+fn binance_aggtrade_restore_row_is_trade(
+    record_kinds: Option<&StringArray>,
+    ids: &UInt64Array,
+    row: usize,
+    path: &Path,
+) -> Result<bool> {
+    let Some(record_kinds) = record_kinds else {
+        if ids.is_null(row) {
+            return Err(io::Error::other(format!(
+                "legacy Binance aggTrade ID missing in {}",
+                path.display()
+            ))
+            .into());
         }
-        let projection = ProjectionMask::columns(builder.parquet_schema(), ["aggregate_trade_id"]);
-        let mut reader = builder
-            .with_projection(projection)
-            .with_batch_size(16)
-            .build()?;
-        for batch in &mut reader {
-            let batch = batch?;
-            let ids = batch
-                .column(batch.schema().index_of("aggregate_trade_id")?)
-                .as_any()
-                .downcast_ref::<UInt64Array>()
-                .ok_or_else(|| io::Error::other("Binance continuity ID is not UInt64"))?;
-            for row in 0..batch.num_rows() {
-                if ids.is_null(row) {
-                    return Err(io::Error::other(format!(
-                        "Binance continuity ID missing in {}",
-                        path.display()
-                    ))
-                    .into());
-                }
-                continuity
-                    .recover_persisted_id(ids.value(row))
-                    .map_err(invalid_data)?;
-            }
-        }
+        return Ok(true);
+    };
+    if record_kinds.is_null(row) {
+        return Err(io::Error::other(format!(
+            "Binance aggTrade v6 record kind missing in {}",
+            path.display()
+        ))
+        .into());
     }
-    Ok(())
+    match record_kinds.value(row) {
+        "trade" => {
+            if ids.is_null(row) {
+                return Err(io::Error::other(format!(
+                    "Binance aggTrade v6 trade ID missing in {}",
+                    path.display()
+                ))
+                .into());
+            }
+            Ok(true)
+        }
+        "invalid_input" => {
+            if !ids.is_null(row) {
+                return Err(io::Error::other(format!(
+                    "Binance aggTrade v6 invalid input has a trade ID in {}",
+                    path.display()
+                ))
+                .into());
+            }
+            Ok(false)
+        }
+        kind => Err(io::Error::other(format!(
+            "unknown Binance aggTrade v6 record kind {kind:?} in {}",
+            path.display()
+        ))
+        .into()),
+    }
 }
 
-fn restore_binance_transport_dedupe(
+fn restore_binance_transport_dedupe(dataset_root: &Path) -> Result<BinanceRecentIdWindow> {
+    restore_binance_transport_dedupe_with_limit(dataset_root, BINANCE_AGGTRADE_RECOVERY_IDS)
+}
+
+fn restore_binance_transport_dedupe_with_limit(
     dataset_root: &Path,
-) -> Result<(BinanceRecentIdWindow, BinanceRecentIdWindow)> {
-    let mut websocket = BinanceRecentIdWindow::with_limit(BINANCE_AGGTRADE_RECOVERY_IDS);
-    let mut rest = BinanceRecentIdWindow::with_limit(BINANCE_AGGTRADE_RECOVERY_IDS);
+    recovery_id_limit: usize,
+) -> Result<BinanceRecentIdWindow> {
+    if recovery_id_limit == 0 {
+        return Err(invalid_data("Binance aggTrade recovery ID limit is zero").into());
+    }
+    let mut websocket = BinanceRecentIdWindow::with_limit(recovery_id_limit);
     let mut recovery_ids = BTreeSet::new();
     let mut paths = all_finalized_source_parquet_paths(dataset_root, "binance_aggtrade")?;
     paths.reverse();
@@ -13823,10 +13796,17 @@ fn restore_binance_transport_dedupe(
         if builder.metadata().file_metadata().num_rows() == 0 {
             continue;
         }
-        let projection = ProjectionMask::columns(
-            builder.parquet_schema(),
-            ["aggregate_trade_id", "source_native_payload_json"],
-        );
+        let has_record_kind = builder.schema().index_of("record_kind").is_ok();
+        let projection_columns = if has_record_kind {
+            vec![
+                "aggregate_trade_id",
+                "source_native_payload_json",
+                "record_kind",
+            ]
+        } else {
+            vec!["aggregate_trade_id", "source_native_payload_json"]
+        };
+        let projection = ProjectionMask::columns(builder.parquet_schema(), projection_columns);
         for row_group in (0..builder.metadata().num_row_groups()).rev() {
             let row_group_builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&path)?)?;
             let mut reader = row_group_builder
@@ -13848,24 +13828,28 @@ fn restore_binance_transport_dedupe(
                     .as_any()
                     .downcast_ref::<StringArray>()
                     .ok_or_else(|| io::Error::other("Binance restore payload is not UTF8"))?;
+                let record_kinds = if has_record_kind {
+                    Some(
+                        batch
+                            .column(batch.schema().index_of("record_kind")?)
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .ok_or_else(|| {
+                                io::Error::other("Binance restore record kind is not UTF8")
+                            })?,
+                    )
+                } else {
+                    None
+                };
                 for row in 0..batch.num_rows() {
-                    if ids.is_null(row) || payloads.is_null(row) {
+                    if payloads.is_null(row) {
                         return Err(io::Error::other(format!(
-                            "Binance restore key missing in {}",
+                            "Binance restore payload missing in {}",
                             path.display()
                         ))
                         .into());
                     }
-                    let native_id = ids.value(row);
-                    recovery_ids.insert(native_id);
-                    while recovery_ids.len() > BINANCE_AGGTRADE_RECOVERY_IDS {
-                        let Some(evicted) = recovery_ids.pop_first() else {
-                            break;
-                        };
-                        websocket.remove(evicted);
-                        rest.remove(evicted);
-                    }
-                    if !recovery_ids.contains(&native_id) {
+                    if !binance_aggtrade_restore_row_is_trade(record_kinds, ids, row, &path)? {
                         continue;
                     }
                     let persisted_sources = payloads.value(row);
@@ -13877,28 +13861,38 @@ fn restore_binance_transport_dedupe(
                         .into());
                     }
                     let parsed = serde_json::from_str::<Value>(persisted_sources)?;
-                    if parsed.get("websocket").is_some() {
-                        if let Some(websocket_payload) =
-                            parsed.get("websocket").and_then(Value::as_str)
-                        {
-                            let _ = websocket.observe(native_id, websocket_payload.as_bytes());
+                    let websocket_payload = match parsed.get("websocket") {
+                        Some(Value::String(payload)) => payload.as_str(),
+                        Some(Value::Null) => continue,
+                        Some(_) => {
+                            return Err(io::Error::other(format!(
+                                "Binance restore websocket payload is not UTF8 in {}",
+                                path.display()
+                            ))
+                            .into());
                         }
-                        if let Some(rest_payload) =
-                            parsed.get("rest_backfill").and_then(Value::as_str)
-                        {
-                            let _ = rest.observe(native_id, rest_payload.as_bytes());
-                        }
-                    } else {
-                        let _ = websocket.observe(native_id, persisted_sources.as_bytes());
+                        None => persisted_sources,
+                    };
+                    let native_id = ids.value(row);
+                    recovery_ids.insert(native_id);
+                    while recovery_ids.len() > recovery_id_limit {
+                        let Some(evicted) = recovery_ids.pop_first() else {
+                            break;
+                        };
+                        websocket.remove(evicted);
                     }
+                    if !recovery_ids.contains(&native_id) {
+                        continue;
+                    }
+                    let _ = websocket.observe(native_id, websocket_payload.as_bytes());
                 }
             }
-            if recovery_ids.len() == BINANCE_AGGTRADE_RECOVERY_IDS {
+            if recovery_ids.len() == recovery_id_limit {
                 break 'files;
             }
         }
     }
-    Ok((websocket, rest))
+    Ok(websocket)
 }
 
 async fn run_binance_ws_source(
@@ -13910,651 +13904,699 @@ async fn run_binance_ws_source(
     run_started: Instant,
     mut control_rx: mpsc::Receiver<AggTradeSourceControl>,
 ) -> Result<()> {
+    let source_sequence_epoch_id = aggtrade_source_sequence_epoch_id(&collector_identity)?;
+    let ingress_sequences = BinanceAggTradeIngressSequenceAllocator::default();
     let mut websocket_dedupe = recovery.websocket_dedupe;
-    let mut rest_dedupe = recovery.rest_dedupe;
-    let mut coordinator = AggTradeCoordinator::with_pending_limit(
-        recovery.continuity,
-        BINANCE_AGGTRADE_PENDING_MAX_ROWS,
-    );
-    let http_client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(BINANCE_HTTP_CONNECT_TIMEOUT_SECS))
-        .timeout(Duration::from_secs(BINANCE_HTTP_TOTAL_TIMEOUT_SECS))
-        .build()?;
-    let mut backfill_task = None::<AggTradeBackfillTask>;
-    let mut pending_websocket_reservations = Vec::<InflightReservation>::new();
+    let mut connection_generation = 0_u64;
     let mut recovery = SourceRecoverySupervisor::new(
         "binance_aggtrade",
         u64::try_from(now_ms()).unwrap_or_default(),
     );
-    let mut pending_stop = None::<PendingAggTradeStop>;
-    let run_result: Result<()> = async {
-        'connections: while !deadline_reached(deadline) {
-            while let Ok(control) = control_rx.try_recv() {
-                if let Some(stop) = handle_aggtrade_source_control(
-                    control,
-                    &mut coordinator,
-                    &mut backfill_task,
-                    &mut pending_websocket_reservations,
-                    &sink,
-                    &collector_identity,
-                    &spec,
-                    run_started,
-                )
-                .await?
-                {
-                    pending_stop = Some(stop);
-                    break 'connections;
-                }
+    #[cfg(test)]
+    recovery.set_wait_override(spec.recovery_wait_override);
+
+    'connections: while !deadline_reached(deadline) {
+        while let Ok(control) = control_rx.try_recv() {
+            if handle_aggtrade_source_control(control).await? {
+                return Ok(());
             }
+        }
+
         let connect_timeout = deadline_remaining(deadline)
             .map(|remaining| remaining.min(Duration::from_secs(WS_CONNECT_TIMEOUT_SECS)))
             .unwrap_or_else(|| Duration::from_secs(WS_CONNECT_TIMEOUT_SECS));
         if connect_timeout.is_zero() {
             break;
         }
-        let (mut stream, _) = match timeout(connect_timeout, connect_async(&spec.url)).await {
+        let websocket_config = WebSocketConfig::default()
+            .max_message_size(Some(BINANCE_AGGTRADE_INVALID_INPUT_MAX_BYTES))
+            .max_frame_size(Some(BINANCE_AGGTRADE_INVALID_INPUT_MAX_BYTES));
+        let (mut stream, _) = match timeout(
+            connect_timeout,
+            connect_async_with_config(&spec.url, Some(websocket_config), false),
+        )
+        .await
+        {
             Ok(Ok(connected)) => connected,
-            Ok(Err(err)) => {
-                record_gap(
-                    &sink.gaps,
-                    format!("{}_ws_connect_error:{err}", spec.source_kind),
-                );
+            Ok(Err(_)) => {
                 if !wait_for_source_recovery(&mut recovery, &sink, deadline).await {
                     break;
                 }
                 continue;
             }
             Err(_) => {
-                if deadline_reached(deadline) {
-                    break;
-                }
-                record_gap(
-                    &sink.gaps,
-                    format!("{}_ws_connect_timeout", spec.source_kind),
-                );
-                if !wait_for_source_recovery(&mut recovery, &sink, deadline).await {
+                if deadline_reached(deadline)
+                    || !wait_for_source_recovery(&mut recovery, &sink, deadline).await
+                {
                     break;
                 }
                 continue;
             }
         };
+        connection_generation = connection_generation.checked_add(1).ok_or_else(|| {
+            sink.source_queue_backpressure
+                .record_operational_drop(&spec.source_kind, now_ms(), 1);
+            record_gap(
+                &sink.gaps,
+                "binance_aggtrade_connection_generation_terminal:overflow".to_owned(),
+            );
+            invalid_data("binance aggTrade connection generation overflow")
+        })?;
+        let current_connection_generation = connection_generation;
 
-        let freshness_window = Duration::from_secs(spec.freshness_timeout_secs);
-        let mut business_message_deadline = Instant::now() + freshness_window;
-        let reconnect_reason = loop {
+        let frame_inactivity_window = Duration::from_secs(spec.frame_inactivity_timeout_secs);
+        let mut frame_inactivity_deadline = Instant::now() + frame_inactivity_window;
+        let _reconnect_reason = loop {
             if deadline_reached(deadline) {
                 break 'connections;
             }
-            let freshness_remaining =
-                business_message_deadline.saturating_duration_since(Instant::now());
-            if freshness_remaining.is_zero() {
-                break "business_message_timeout".to_owned();
+            let frame_inactivity_remaining =
+                frame_inactivity_deadline.saturating_duration_since(Instant::now());
+            if frame_inactivity_remaining.is_zero() {
+                break "frame_inactivity_timeout".to_owned();
             }
             let read_timeout = deadline_remaining(deadline)
-                .map(|remaining| remaining.min(freshness_remaining))
-                .unwrap_or(freshness_remaining);
-            let input = match backfill_task.as_mut() {
-                Some(task) => tokio::select! {
-                    biased;
-                    control = control_rx.recv() => AggTradeLoopInput::Control(control),
-                    backfill = task => AggTradeLoopInput::Backfill(backfill),
-                    message = timeout(read_timeout, stream.next()) => {
-                        AggTradeLoopInput::Websocket(message)
+                .map(|remaining| remaining.min(frame_inactivity_remaining))
+                .unwrap_or(frame_inactivity_remaining);
+            let input = tokio::select! {
+                biased;
+                control = control_rx.recv() => {
+                    match control {
+                        Some(control) => {
+                            if handle_aggtrade_source_control(control).await? {
+                                return Ok(());
+                            }
+                            frame_inactivity_deadline = Instant::now() + frame_inactivity_window;
+                            continue;
+                        }
+                        None => {
+                            return Err(invalid_data(
+                                "aggTrade source control channel closed",
+                            ).into());
+                        }
                     }
-                },
-                None => tokio::select! {
-                    biased;
-                    control = control_rx.recv() => AggTradeLoopInput::Control(control),
-                    message = timeout(read_timeout, stream.next()) => {
-                        AggTradeLoopInput::Websocket(message)
-                    }
-                },
+                }
+                message = timeout(read_timeout, stream.next()) => message,
             };
+
+            if matches!(&input, Ok(Some(Ok(_)))) {
+                frame_inactivity_deadline = Instant::now() + frame_inactivity_window;
+                recovery.record_business_recovery();
+                sink.source_queue_backpressure
+                    .set_recovery_active(&spec.source_kind, false);
+            }
+
             match input {
-                AggTradeLoopInput::Control(Some(control)) => {
-                    if let Some(stop) = handle_aggtrade_source_control(
-                        control,
-                        &mut coordinator,
-                        &mut backfill_task,
-                        &mut pending_websocket_reservations,
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    let recv_time_utc_ms = now_ms();
+                    let ingress_coordinate = allocate_aggtrade_websocket_ingress(
+                        &ingress_sequences,
                         &sink,
-                        &collector_identity,
-                        &spec,
-                        run_started,
-                    )
-                    .await?
-                    {
-                        pending_stop = Some(stop);
-                        break 'connections;
-                    }
-                    continue;
-                }
-                AggTradeLoopInput::Control(None) => {
-                    return Err(invalid_data("aggTrade source control channel closed").into());
-                }
-                AggTradeLoopInput::Backfill(joined) => {
-                    let _ = backfill_task.take();
-                    let next_range = match joined {
-                        Ok(Ok(budgeted_backfill)) => {
-                            let BudgetedAggTradeBackfill {
-                                rows: rest_rows,
-                                reservations: rest_reservations,
-                            } = budgeted_backfill;
-                            for rest in &rest_rows {
-                                let id = rest.shared.aggregate_trade_id;
-                                match rest_dedupe
-                                    .observe(id, rest.source_native_payload_json.as_bytes())
-                                {
-                                    BinanceIdDecision::Conflict => record_gap(
-                                        &sink.gaps,
-                                        format!("binance_aggtrade_rest_payload_conflict:id={id}"),
-                                    ),
-                                    BinanceIdDecision::OutsideWindow => record_gap(
-                                        &sink.gaps,
-                                        format!(
-                                            "binance_aggtrade_rest_replay_outside_recovery_window:id={id}"
-                                        ),
-                                    ),
-                                    BinanceIdDecision::Unique | BinanceIdDecision::Duplicate => {}
-                                }
-                            }
-                            let page = coordinator
-                                .accept_rest_page(rest_rows)
-                                .map_err(invalid_data)?;
-                            let mut next = emit_aggtrade_result(
-                                page,
-                                &sink,
-                                &collector_identity,
-                                &spec,
-                                run_started,
-                            )
-                            .await?;
-                            let complete = coordinator.complete_backfill().map_err(invalid_data)?;
-                            let after_complete = emit_aggtrade_result(
-                                complete,
-                                &sink,
-                                &collector_identity,
-                                &spec,
-                                run_started,
-                            )
-                            .await?;
-                            if next.is_none() {
-                                next = after_complete;
-                            }
-                            if coordinator.pending_rows() == 0 {
-                                pending_websocket_reservations.clear();
-                            }
-                            drop(rest_reservations);
-                            next
-                        }
-                        Ok(Err(error)) => {
-                            let failed = coordinator
-                                .fail_backfill(&error.to_string())
-                                .map_err(invalid_data)?;
-                            emit_aggtrade_result(
-                                failed,
-                                &sink,
-                                &collector_identity,
-                                &spec,
-                                run_started,
-                            )
-                            .await?
-                        }
+                        recv_time_utc_ms,
+                    )?;
+                    let websocket_staging_reservation = sink
+                        .inflight_budget
+                        .acquire(
+                            1,
+                            aggtrade_websocket_staging_bytes(text.len(), true)?,
+                            BUFFER_ACQUIRE_TIMEOUT,
+                        )
+                        .await?;
+                    let raw_bytes = text.as_bytes().to_vec();
+                    let value = match serde_json::from_str::<Value>(text.as_str()) {
+                        Ok(value) => value,
                         Err(error) => {
-                            let failed = coordinator
-                                .fail_backfill(&format!("task_join_error:{error}"))
-                                .map_err(invalid_data)?;
-                            emit_aggtrade_result(
-                                failed,
+                            drop(text);
+                            emit_aggtrade_websocket_invalid(
+                                raw_bytes,
+                                recv_time_utc_ms,
+                                ingress_coordinate,
+                                BinanceAggTradeInvalidReason::InvalidJson,
+                                error.to_string(),
                                 &sink,
                                 &collector_identity,
                                 &spec,
+                                &source_sequence_epoch_id,
+                                current_connection_generation,
                                 run_started,
+                                websocket_staging_reservation,
                             )
-                            .await?
+                            .await?;
+                            continue;
                         }
                     };
-                    if let Some(range) = next_range {
-                        backfill_task = Some(spawn_aggtrade_backfill(
-                            http_client.clone(),
-                            spec.rest_endpoint.clone(),
-                            range,
-                            sink.inflight_budget.clone(),
-                        ));
-                    }
-                    send_binance_continuity(&sink, run_started, coordinator.state().clone())
+                    drop(text);
+                    let (payload, stream_name) = match (value.get("stream"), value.get("data")) {
+                        (None, None) => (&value, "btcusdt@aggTrade"),
+                        (Some(Value::String(stream_name)), Some(payload)) => {
+                            (payload, stream_name.as_str())
+                        }
+                        _ => {
+                            drop(value);
+                            emit_aggtrade_websocket_invalid(
+                                raw_bytes,
+                                recv_time_utc_ms,
+                                ingress_coordinate,
+                                BinanceAggTradeInvalidReason::InvalidPayload,
+                                "combined_stream_requires_string_stream_and_data",
+                                &sink,
+                                &collector_identity,
+                                &spec,
+                                &source_sequence_epoch_id,
+                                current_connection_generation,
+                                run_started,
+                                websocket_staging_reservation,
+                            )
+                            .await?;
+                            continue;
+                        }
+                    };
+                    let Some(event_type) = payload.get("e").and_then(Value::as_str) else {
+                        drop(value);
+                        emit_aggtrade_websocket_invalid(
+                            raw_bytes,
+                            recv_time_utc_ms,
+                            ingress_coordinate,
+                            BinanceAggTradeInvalidReason::InvalidPayload,
+                            "missing_event_type",
+                            &sink,
+                            &collector_identity,
+                            &spec,
+                            &source_sequence_epoch_id,
+                            current_connection_generation,
+                            run_started,
+                            websocket_staging_reservation,
+                        )
                         .await?;
-                    continue;
-                }
-                AggTradeLoopInput::Websocket(message) => match message {
-                    Ok(Some(Ok(Message::Text(text)))) => {
-                        let raw_json = text.to_string();
-                        let value = match serde_json::from_str::<Value>(&raw_json) {
-                            Ok(value) => value,
-                            Err(err) => {
-                                return Err(invalid_data(format!(
-                                    "{}_ws_invalid_json:{err}",
-                                    spec.source_kind
-                                ))
-                                .into());
-                            }
-                        };
-                        let payload = binance_ws_payload(&value);
-                        let Some(event_type) = payload.get("e").and_then(Value::as_str) else {
-                            return Err(invalid_data(format!(
-                                "{}_ws_missing_event_type",
-                                spec.source_kind
-                            ))
-                            .into());
-                        };
-                        let event_type = event_type.to_owned();
-                        if event_type == "serverShutdown" {
-                            break "server_shutdown".to_owned();
+                        continue;
+                    };
+                    let event_type = event_type.to_owned();
+                    if event_type == "serverShutdown" {
+                        break "server_shutdown".to_owned();
+                    }
+                    if event_type != spec.default_event_type {
+                        drop(value);
+                        emit_aggtrade_websocket_invalid(
+                            raw_bytes,
+                            recv_time_utc_ms,
+                            ingress_coordinate,
+                            BinanceAggTradeInvalidReason::InvalidPayload,
+                            format!("unexpected_event_type:{event_type}"),
+                            &sink,
+                            &collector_identity,
+                            &spec,
+                            &source_sequence_epoch_id,
+                            current_connection_generation,
+                            run_started,
+                            websocket_staging_reservation,
+                        )
+                        .await?;
+                        continue;
+                    }
+                    let websocket = match BinanceWsAggTrade::from_wire(
+                        payload,
+                        stream_name,
+                        recv_time_utc_ms,
+                        ingress_coordinate.clone(),
+                    ) {
+                        Ok(websocket) => websocket,
+                        Err(error) => {
+                            drop(value);
+                            emit_aggtrade_websocket_invalid(
+                                raw_bytes,
+                                recv_time_utc_ms,
+                                ingress_coordinate,
+                                BinanceAggTradeInvalidReason::InvalidPayload,
+                                error,
+                                &sink,
+                                &collector_identity,
+                                &spec,
+                                &source_sequence_epoch_id,
+                                current_connection_generation,
+                                run_started,
+                                websocket_staging_reservation,
+                            )
+                            .await?;
+                            continue;
                         }
-                        if event_type != spec.default_event_type {
-                            return Err(invalid_data(format!(
-                                "{}_ws_unexpected_event_type:{event_type}",
-                                spec.source_kind
-                            ))
-                            .into());
-                        }
-                        let stream_name = value
-                            .get("stream")
-                            .and_then(Value::as_str)
-                            .unwrap_or("btcusdt@aggTrade");
-                        let websocket =
-                            BinanceWsAggTrade::from_wire(payload, stream_name, now_ms())
-                                .map_err(invalid_data)?;
-                        let websocket_bytes = owned_binance_websocket_aggtrade_bytes(&websocket);
-                        if websocket_bytes > MAX_TYPED_ROW_BYTES {
-                            sink.source_queue_backpressure.record_operational_drop(
+                    };
+                    drop(value);
+                    drop(raw_bytes);
+                    let native_id = websocket.shared.aggregate_trade_id;
+                    match websocket_dedupe
+                        .observe(native_id, websocket.source_native_payload_json.as_bytes())
+                    {
+                        BinanceIdDecision::Duplicate => {
+                            sink.source_queue_backpressure.record_structural_dedupe(
                                 &spec.source_kind,
                                 websocket.timestamp_received,
                                 1,
                             );
-                            return Err(invalid_data(format!(
-                                "operator_intervention_required:binance_aggtrade_pending_row_too_large:bytes={websocket_bytes}:limit={MAX_TYPED_ROW_BYTES}"
-                            ))
-                            .into());
+                            continue;
                         }
-                        let websocket_reservation = sink
-                            .inflight_budget
-                            .acquire(1, websocket_bytes, BUFFER_ACQUIRE_TIMEOUT)
-                            .await?;
-                        let native_id = websocket.shared.aggregate_trade_id;
-                        match websocket_dedupe
-                            .observe(native_id, websocket.source_native_payload_json.as_bytes())
-                        {
-                            BinanceIdDecision::Duplicate => {
-                                sink.source_queue_backpressure.record_structural_dedupe(
-                                    &spec.source_kind,
-                                    websocket.timestamp_received,
-                                    1,
-                                );
-                                continue;
-                            }
-                            BinanceIdDecision::Conflict => record_gap(
-                                &sink.gaps,
-                                format!("binance_aggtrade_payload_conflict:id={native_id}"),
-                            ),
-                            BinanceIdDecision::OutsideWindow => record_gap(
-                                &sink.gaps,
-                                format!(
-                                    "binance_aggtrade_replay_outside_recovery_window:id={native_id}"
-                                ),
-                            ),
-                            BinanceIdDecision::Unique => {}
-                        }
-                        let result = coordinator
-                            .accept_websocket(websocket)
-                            .map_err(invalid_data)?;
-                        let websocket_is_pending = !result
-                            .outputs
-                            .iter()
-                            .any(|output| output.aggregate_trade_id() == native_id);
-                        let next_range = emit_aggtrade_result(
-                            result,
-                            &sink,
-                            &collector_identity,
-                            &spec,
-                            run_started,
+                        BinanceIdDecision::Conflict => record_gap(
+                            &sink.gaps,
+                            format!("binance_aggtrade_payload_conflict:id={native_id}"),
+                        ),
+                        BinanceIdDecision::OutsideWindow | BinanceIdDecision::Unique => {}
+                    }
+                    let output = BinanceAggTradeOutput::Websocket(websocket);
+                    let event = binance_aggtrade_raw_event(
+                        &output,
+                        &collector_identity,
+                        &spec,
+                        &source_sequence_epoch_id,
+                        current_connection_generation,
+                    )?;
+                    let bytes = owned_event_bytes(&event);
+                    if bytes > MAX_TYPED_ROW_BYTES {
+                        sink.source_queue_backpressure.record_operational_drop(
+                            &spec.source_kind,
+                            recv_time_utc_ms,
+                            1,
+                        );
+                        return Err(invalid_data(format!(
+                            "operator_intervention_required:binance_aggtrade_output_row_too_large:bytes={bytes}:limit={MAX_TYPED_ROW_BYTES}"
+                        ))
+                        .into());
+                    }
+                    let mut reservation = websocket_staging_reservation;
+                    reservation.shrink_to(1, bytes)?;
+                    send_event_with_reservation(&sink, run_started, event, Some(reservation))
+                        .await?;
+                }
+                Ok(Some(Ok(Message::Binary(payload)))) => {
+                    let recv_time_utc_ms = now_ms();
+                    let coordinate = allocate_aggtrade_websocket_ingress(
+                        &ingress_sequences,
+                        &sink,
+                        recv_time_utc_ms,
+                    )?;
+                    let websocket_staging_reservation = sink
+                        .inflight_budget
+                        .acquire(
+                            1,
+                            aggtrade_websocket_staging_bytes(payload.len(), false)?,
+                            BUFFER_ACQUIRE_TIMEOUT,
                         )
                         .await?;
-                        if websocket_is_pending {
-                            pending_websocket_reservations.push(websocket_reservation);
-                        }
-                        if coordinator.pending_rows() == 0 {
-                            pending_websocket_reservations.clear();
-                        }
-                        if let Some(range) = next_range {
-                            if backfill_task.is_some() {
-                                return Err(invalid_data(
-                                    "Binance aggTrade started a second concurrent backfill",
-                                )
-                                .into());
-                            }
-                            backfill_task = Some(spawn_aggtrade_backfill(
-                                http_client.clone(),
-                                spec.rest_endpoint.clone(),
-                                range,
-                                sink.inflight_budget.clone(),
-                            ));
-                        }
-                        send_binance_continuity(&sink, run_started, coordinator.state().clone())
-                            .await?;
-                        recovery.record_business_recovery();
-                        sink.source_queue_backpressure
-                            .set_recovery_active(&spec.source_kind, false);
-                        business_message_deadline = Instant::now() + freshness_window;
+                    emit_aggtrade_websocket_invalid(
+                        payload.to_vec(),
+                        recv_time_utc_ms,
+                        coordinate,
+                        BinanceAggTradeInvalidReason::InvalidPayload,
+                        "unexpected_binary_application_message",
+                        &sink,
+                        &collector_identity,
+                        &spec,
+                        &source_sequence_epoch_id,
+                        current_connection_generation,
+                        run_started,
+                        websocket_staging_reservation,
+                    )
+                    .await?;
+                }
+                Ok(Some(Ok(Message::Ping(payload)))) => {
+                    let write_timeout = deadline_remaining(deadline)
+                        .map(|remaining| remaining.min(Duration::from_secs(WS_WRITE_TIMEOUT_SECS)))
+                        .unwrap_or_else(|| Duration::from_secs(WS_WRITE_TIMEOUT_SECS));
+                    if write_timeout.is_zero() {
+                        break "source_deadline_before_pong".to_owned();
                     }
-                    Ok(Some(Ok(Message::Ping(payload)))) => {
-                        if let Err(err) = stream.send(Message::Pong(payload)).await {
-                            break format!("pong_send_error:{err}");
-                        }
+                    match timeout(write_timeout, stream.send(Message::Pong(payload))).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => break format!("pong_send_error:{error}"),
+                        Err(_) => break "pong_send_timeout".to_owned(),
                     }
-                    Ok(Some(Ok(Message::Close(frame)))) => {
-                        break format!("closed:{frame:?}");
-                    }
-                    Ok(Some(Ok(_))) => {}
-                    Ok(Some(Err(err))) => break format!("error:{err}"),
-                    Ok(None) => break "stream_ended".to_owned(),
-                    Err(_) if deadline_reached(deadline) => break 'connections,
-                    Err(_) => break "business_message_timeout".to_owned(),
-                },
+                }
+                Ok(Some(Ok(Message::Close(frame)))) => break format!("closed:{frame:?}"),
+                Ok(Some(Ok(_))) => {}
+                Ok(Some(Err(TungsteniteError::Capacity(CapacityError::MessageTooLong {
+                    size,
+                    max_size,
+                })))) => {
+                    let recv_time_utc_ms = now_ms();
+                    let coordinate = allocate_aggtrade_websocket_ingress(
+                        &ingress_sequences,
+                        &sink,
+                        recv_time_utc_ms,
+                    )?;
+                    let mut oversize_reservation = sink
+                        .inflight_budget
+                        .acquire(1, MAX_TYPED_ROW_BYTES, BUFFER_ACQUIRE_TIMEOUT)
+                        .await?;
+                    let observed_bytes_at_least = u64::try_from(size)
+                        .map_err(|_| invalid_data("aggTrade oversize size overflow"))?;
+                    let capture = BinanceAggTradeRawCapture::oversize_not_captured(
+                        observed_bytes_at_least,
+                        None,
+                    )
+                    .map_err(invalid_data)?;
+                    let invalid = BinanceAggTradeInvalidInput::new(
+                        BinanceAggTradeInvalidTransport::Websocket,
+                        coordinate,
+                        recv_time_utc_ms,
+                        spec.url.clone(),
+                        BinanceAggTradeInvalidReason::BodyTooLarge,
+                        format!("observed={size}:configured_max={max_size}"),
+                        capture,
+                    )
+                    .map_err(invalid_data)?;
+                    let event = binance_aggtrade_invalid_raw_event(
+                        &invalid,
+                        &collector_identity,
+                        &spec,
+                        &source_sequence_epoch_id,
+                        current_connection_generation,
+                    )?;
+                    drop(invalid);
+                    let bytes = owned_event_bytes(&event);
+                    oversize_reservation.shrink_to(1, bytes)?;
+                    send_event_with_reservation(
+                        &sink,
+                        run_started,
+                        event,
+                        Some(oversize_reservation),
+                    )
+                    .await?;
+                    break "oversize_application_message".to_owned();
+                }
+                Ok(Some(Err(error))) => break format!("error:{error}"),
+                Ok(None) => break "stream_ended".to_owned(),
+                Err(_) if deadline_reached(deadline) => break 'connections,
+                Err(_) => break "frame_inactivity_timeout".to_owned(),
             }
         };
 
-        if reconnect_reason == "business_message_timeout" {
-            sink.source_queue_backpressure
-                .record_lag(&spec.source_kind, now_ms(), 1);
+        if !wait_for_source_recovery(&mut recovery, &sink, deadline).await {
+            break;
         }
-        if reconnect_reason == "server_shutdown" {
-            eprintln!("{}_ws_reconnect:server_shutdown", spec.source_kind);
-            if !wait_for_source_recovery(&mut recovery, &sink, deadline).await {
-                break;
-            }
-        } else {
-            record_gap(
-                &sink.gaps,
-                format!("{}_ws_reconnect:{reconnect_reason}", spec.source_kind),
-            );
-            if !wait_for_source_recovery(&mut recovery, &sink, deadline).await {
-                break;
-            }
-        }
-        }
-        Ok(())
     }
-    .await;
-
-    let current_utc_day = utc_day_string_from_ms(now_ms()).unwrap_or_else(|| "unknown".to_owned());
-    let (flush_reason, flush_utc_day) = pending_stop.as_ref().map_or_else(
-        || {
-            (
-                run_result.as_ref().err().map_or_else(
-                    || "source_deadline".to_owned(),
-                    |error| format!("source_exit:{error}"),
-                ),
-                current_utc_day,
-            )
-        },
-        |stop| (stop.reason.clone(), stop.utc_day.clone()),
-    );
-    let flush_result = flush_aggtrade_pending_state(
-        &mut coordinator,
-        &mut backfill_task,
-        &mut pending_websocket_reservations,
-        &sink,
-        &collector_identity,
-        &spec,
-        run_started,
-        &flush_reason,
-        &flush_utc_day,
-    )
-    .await;
-    let failure = match (run_result.err(), flush_result.err()) {
-        (None, None) => None,
-        (Some(error), None) => Some(error.to_string()),
-        (None, Some(error)) => Some(error.to_string()),
-        (Some(run_error), Some(flush_error)) => Some(format!(
-            "{run_error}; aggTrade coordinated flush failed:{flush_error}"
-        )),
-    };
-    if let Some(stop) = pending_stop {
-        let reply = failure.clone().map_or(Ok(()), Err);
-        let _ = stop.reply.send(reply);
-    }
-    match failure {
-        Some(error) => Err(io::Error::other(error).into()),
-        None => Ok(()),
-    }
+    Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn handle_aggtrade_source_control(
-    control: AggTradeSourceControl,
-    coordinator: &mut AggTradeCoordinator,
-    backfill_task: &mut Option<AggTradeBackfillTask>,
-    pending_websocket_reservations: &mut Vec<InflightReservation>,
-    sink: &SourceEventSink,
-    collector_identity: &CollectorIdentity,
-    spec: &BinanceWsSpec,
-    run_started: Instant,
-) -> Result<Option<PendingAggTradeStop>> {
-    let AggTradeSourceControl::Flush {
-        reason,
-        utc_day,
-        stop_after_flush,
+async fn handle_aggtrade_source_control(control: AggTradeSourceControl) -> Result<bool> {
+    let AggTradeSourceControl::Fence {
+        stop_after_fence,
         resume_after_barrier,
         reply,
     } = control;
-    if stop_after_flush {
-        return Ok(Some(PendingAggTradeStop {
-            reason,
-            utc_day,
-            reply,
-        }));
+    let _ = reply.send(Ok(()));
+    if let Some(resume) = resume_after_barrier {
+        resume
+            .await
+            .map_err(|_| invalid_data("aggTrade barrier owner dropped source resume signal"))?;
     }
-    let flush_result = flush_aggtrade_pending_state(
-        coordinator,
-        backfill_task,
-        pending_websocket_reservations,
-        sink,
-        collector_identity,
-        spec,
-        run_started,
-        &reason,
-        &utc_day,
-    )
-    .await;
-    match flush_result {
-        Ok(()) => {
-            let _ = reply.send(Ok(()));
-            if let Some(resume) = resume_after_barrier {
-                resume.await.map_err(|_| {
-                    invalid_data("aggTrade day-barrier owner dropped source resume signal")
-                })?;
-            }
-            Ok(None)
-        }
-        Err(error) => {
-            let error = error.to_string();
-            let _ = reply.send(Err(error.clone()));
-            Err(io::Error::other(error).into())
-        }
-    }
+    Ok(stop_after_fence)
 }
-
-#[allow(clippy::too_many_arguments)]
-async fn flush_aggtrade_pending_state(
-    coordinator: &mut AggTradeCoordinator,
-    backfill_task: &mut Option<AggTradeBackfillTask>,
-    pending_websocket_reservations: &mut Vec<InflightReservation>,
-    sink: &SourceEventSink,
-    collector_identity: &CollectorIdentity,
-    spec: &BinanceWsSpec,
-    run_started: Instant,
-    reason: &str,
-    utc_day: &str,
-) -> Result<()> {
-    if let Some(task) = backfill_task.take() {
-        task.abort();
-        let _ = task.await;
-    }
-    let result = coordinator
-        .flush_pending_without_backfill(reason)
-        .map_err(invalid_data)?;
-    let next_range = emit_aggtrade_result_for_day(
-        result,
-        sink,
-        collector_identity,
-        spec,
-        run_started,
-        Some(utc_day),
-    )
-    .await?;
-    if next_range.is_some()
-        || coordinator.active_backfill().is_some()
-        || coordinator.pending_rows() != 0
-    {
-        return Err(invalid_data("aggTrade coordinated flush left pending recovery state").into());
-    }
-    pending_websocket_reservations.clear();
-    send_binance_continuity_for_day(
-        sink,
-        run_started,
-        coordinator.state().clone(),
-        utc_day.to_owned(),
-    )
-    .await
-}
-
-struct BudgetedAggTradeBackfill {
-    rows: Vec<BinanceRestAggTrade>,
-    reservations: Vec<InflightReservation>,
-}
-
-type AggTradeBackfillTask = tokio::task::JoinHandle<Result<BudgetedAggTradeBackfill>>;
-
-enum AggTradeLoopInput {
-    Control(Option<AggTradeSourceControl>),
-    Backfill(std::result::Result<Result<BudgetedAggTradeBackfill>, tokio::task::JoinError>),
-    Websocket(
-        std::result::Result<
-            Option<std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>,
-            tokio::time::error::Elapsed,
-        >,
-    ),
-}
-
-fn spawn_aggtrade_backfill(
-    client: reqwest::Client,
-    endpoint: String,
-    range: AggTradeBackfillRange,
-    inflight_budget: InflightBudget,
-) -> AggTradeBackfillTask {
-    tokio::spawn(async move {
-        let rows = fetch_binance_aggtrade_range(&client, &endpoint, range).await?;
-        let mut reservations = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let bytes = owned_binance_rest_aggtrade_bytes(row);
-            if bytes > MAX_TYPED_ROW_BYTES {
-                return Err(invalid_data(format!(
-                    "operator_intervention_required:binance_aggtrade_backfill_row_too_large:bytes={bytes}:limit={MAX_TYPED_ROW_BYTES}"
-                ))
-                .into());
-            }
-            reservations.push(
-                inflight_budget
-                    .acquire(1, bytes, BUFFER_ACQUIRE_TIMEOUT)
-                    .await?,
-            );
-        }
-        Ok(BudgetedAggTradeBackfill { rows, reservations })
-    })
-}
-
-async fn emit_aggtrade_result(
-    result: AggTradeCoordinatorResult,
-    sink: &SourceEventSink,
-    collector_identity: &CollectorIdentity,
-    spec: &BinanceWsSpec,
-    run_started: Instant,
-) -> Result<Option<AggTradeBackfillRange>> {
-    emit_aggtrade_result_for_day(result, sink, collector_identity, spec, run_started, None).await
-}
-
-async fn emit_aggtrade_result_for_day(
-    result: AggTradeCoordinatorResult,
-    sink: &SourceEventSink,
-    collector_identity: &CollectorIdentity,
-    spec: &BinanceWsSpec,
-    run_started: Instant,
-    gap_utc_day: Option<&str>,
-) -> Result<Option<AggTradeBackfillRange>> {
-    for gap in result.gaps {
-        match gap_utc_day {
-            Some(utc_day) => record_gap_for_day(&sink.gaps, utc_day, gap),
-            None => record_gap(&sink.gaps, gap),
-        }
-    }
-    for output in result.outputs {
-        send_event(
-            sink,
-            run_started,
-            binance_aggtrade_raw_event(&output, collector_identity, spec)?,
-        )
-        .await?;
-    }
-    Ok(result.start_backfill)
-}
-
 fn binance_aggtrade_raw_event(
     output: &BinanceAggTradeOutput,
     collector_identity: &CollectorIdentity,
     spec: &BinanceWsSpec,
+    source_sequence_epoch_id: &str,
+    connection_generation: u64,
 ) -> Result<RawEvent> {
-    let row = BinanceAggTradeHourlyRow::from_output(
-        output,
-        &collector_identity.host_id,
-        &collector_identity.region,
-        &spec.url,
-        &spec.rest_endpoint,
-    )
-    .map_err(invalid_data)?;
+    if connection_generation == 0 {
+        return Err(invalid_data("aggTrade connection generation is zero").into());
+    }
+    let shared = output.shared();
+    let BinanceAggTradeOutput::Websocket(websocket) = output;
+    let websocket_ingress_sequence = websocket_ingress_sequence(&websocket.ingress_coordinate)?;
+    let source_native_payload_json = output.source_native_payload_json().map_err(invalid_data)?;
     Ok(RawEvent {
         source_kind: spec.source_kind.clone(),
         source_event_type: spec.default_event_type.clone(),
-        source_identifier: row.symbol.clone(),
-        source_ts: Some(row.trade_time.to_string()),
-        recv_time_utc_ms: row.timestamp_received,
-        collector_host_id: row.collector_host_id.clone(),
-        collector_region: row.collector_region.clone(),
-        source_endpoint: row.source_endpoint.clone(),
+        source_identifier: websocket.symbol.clone(),
+        source_ts: Some(shared.trade_time_ms.to_string()),
+        recv_time_utc_ms: output.timestamp_received(),
+        collector_host_id: collector_identity.host_id.clone(),
+        collector_region: collector_identity.region.clone(),
+        source_endpoint: spec.url.clone(),
         raw_json: json!({
-            "timestamp_received": row.timestamp_received,
-            "websocket_timestamp_received": row.websocket_timestamp_received,
-            "rest_backfill_timestamp_received": row.rest_backfill_timestamp_received,
-            "ingest_source": row.ingest_source,
-            "event_type": row.event_type,
-            "event_time": row.event_time,
-            "trade_time": row.trade_time,
-            "symbol": row.symbol,
-            "aggregate_trade_id": row.aggregate_trade_id,
-            "price": row.price,
-            "quantity": row.quantity,
-            "first_trade_id": row.first_trade_id,
-            "last_trade_id": row.last_trade_id,
-            "buyer_is_maker": row.buyer_is_maker,
-            "stream": row.stream,
-            "ws_ignore": row.ws_ignore,
-            "rest_was_best_price_match": row.rest_was_best_price_match,
-            "source_native_payload_json": row.source_native_payload_json,
+            "record_kind": "trade",
+            "timestamp_received": output.timestamp_received(),
+            "websocket_timestamp_received": output.websocket_timestamp_received(),
+            "rest_backfill_timestamp_received": Value::Null,
+            "ingest_source": output.ingest_source().as_str(),
+            "event_type": websocket.event_type,
+            "event_time": websocket.event_time_ms,
+            "trade_time": shared.trade_time_ms,
+            "symbol": websocket.symbol,
+            "aggregate_trade_id": shared.aggregate_trade_id,
+            "price": shared.price,
+            "quantity": shared.quantity,
+            "first_trade_id": shared.first_trade_id,
+            "last_trade_id": shared.last_trade_id,
+            "buyer_is_maker": shared.buyer_is_maker,
+            "stream": websocket.stream,
+            "ws_ignore": websocket.ws_ignore,
+            "rest_was_best_price_match": Value::Null,
+            "source_native_payload_json": source_native_payload_json,
+            "source_sequence_epoch_id": source_sequence_epoch_id,
+            "connection_generation": connection_generation,
+            "websocket_ingress_sequence": websocket_ingress_sequence,
+            "rest_response_ingress_sequence": Value::Null,
+            "rest_response_item_index": Value::Null,
         })
         .to_string(),
+        collector_admission: None,
         parquet_raw_layout_version: 1,
         parquet_raw_source_kind: spec.source_kind.clone(),
     })
+}
+
+fn websocket_ingress_sequence(coordinate: &BinanceAggTradeIngressCoordinate) -> Result<u64> {
+    match coordinate {
+        BinanceAggTradeIngressCoordinate::Websocket { sequence } if *sequence != 0 => Ok(*sequence),
+        _ => Err(invalid_data("aggTrade websocket ingress coordinate is invalid").into()),
+    }
+}
+
+#[derive(Serialize)]
+struct BinanceAggTradeInvalidEvidenceEnvelope<'a> {
+    capture_limit_bytes: u64,
+    declared_content_length: Option<u64>,
+    endpoint: &'a str,
+    evidence_schema: &'static str,
+    invalid_reason_code: &'a str,
+    observed_bytes_at_least: u64,
+    payload_base64: Option<&'a str>,
+    payload_capture_status: &'a str,
+    payload_encoding: Option<&'a str>,
+    payload_length_bytes: Option<u64>,
+    payload_sha256: Option<&'a str>,
+    receive_time_utc_ms: i64,
+    transport: &'a str,
+}
+
+#[derive(Serialize)]
+struct BinanceAggTradeInvalidRawPayload<'a> {
+    connection_generation: u64,
+    ingest_source: &'a str,
+    invalid_reason_code: &'a str,
+    invalid_reason_detail: Option<&'a str>,
+    payload_capture_status: &'a str,
+    payload_encoding: Option<&'a str>,
+    payload_length_bytes: Option<u64>,
+    payload_sha256: Option<&'a str>,
+    record_kind: &'static str,
+    rest_response_ingress_sequence: Option<u64>,
+    rest_response_item_index: Option<u64>,
+    source_native_payload_json: &'a str,
+    source_sequence_epoch_id: &'a str,
+    timestamp_received: i64,
+    websocket_ingress_sequence: Option<u64>,
+}
+
+fn binance_aggtrade_invalid_raw_event(
+    invalid: &BinanceAggTradeInvalidInput,
+    collector_identity: &CollectorIdentity,
+    spec: &BinanceWsSpec,
+    source_sequence_epoch_id: &str,
+    connection_generation: u64,
+) -> Result<RawEvent> {
+    if connection_generation == 0 {
+        return Err(invalid_data("aggTrade invalid connection generation is zero").into());
+    }
+    let websocket_ingress_sequence = Some(websocket_ingress_sequence(&invalid.ingress_coordinate)?);
+    let (payload_encoding, payload_length_bytes, payload_sha256, payload_base64) = match invalid
+        .raw_capture
+        .status
+    {
+        crate::binance_aggtrade::BinanceAggTradeRawCaptureStatus::Complete => {
+            let length = u64::try_from(invalid.raw_capture.bytes.len())
+                .map_err(|_| invalid_data("aggTrade invalid payload length overflow"))?;
+            let digest = format!("{:x}", Sha256::digest(&invalid.raw_capture.bytes));
+            (
+                Some("base64"),
+                Some(length),
+                Some(digest),
+                Some(base64::engine::general_purpose::STANDARD.encode(&invalid.raw_capture.bytes)),
+            )
+        }
+        crate::binance_aggtrade::BinanceAggTradeRawCaptureStatus::OversizeNotCaptured => (
+            None,
+            invalid.raw_capture.declared_content_length,
+            None,
+            None,
+        ),
+    };
+    let capture_status = invalid.raw_capture.status.as_str();
+    let source_native_payload_json =
+        serde_json::to_string(&BinanceAggTradeInvalidEvidenceEnvelope {
+            capture_limit_bytes: invalid.raw_capture.limit_bytes,
+            declared_content_length: invalid.raw_capture.declared_content_length,
+            endpoint: &invalid.endpoint,
+            evidence_schema: "binance_aggtrade_invalid_evidence_v1",
+            invalid_reason_code: invalid.reason.as_str(),
+            observed_bytes_at_least: invalid.raw_capture.observed_bytes_at_least,
+            payload_base64: payload_base64.as_deref(),
+            payload_capture_status: capture_status,
+            payload_encoding,
+            payload_length_bytes,
+            payload_sha256: payload_sha256.as_deref(),
+            receive_time_utc_ms: invalid.timestamp_received,
+            transport: invalid.transport.as_str(),
+        })
+        .map_err(|error| invalid_data(format!("serialize aggTrade invalid evidence:{error}")))?;
+    drop(payload_base64);
+    let invalid_reason_detail =
+        (!invalid.reason_detail.is_empty()).then_some(invalid.reason_detail.as_str());
+    let raw_json = serde_json::to_string(&BinanceAggTradeInvalidRawPayload {
+        connection_generation,
+        ingest_source: invalid.transport.as_str(),
+        invalid_reason_code: invalid.reason.as_str(),
+        invalid_reason_detail,
+        payload_capture_status: capture_status,
+        payload_encoding,
+        payload_length_bytes,
+        payload_sha256: payload_sha256.as_deref(),
+        record_kind: "invalid_input",
+        rest_response_ingress_sequence: None,
+        rest_response_item_index: None,
+        source_native_payload_json: &source_native_payload_json,
+        source_sequence_epoch_id,
+        timestamp_received: invalid.timestamp_received,
+        websocket_ingress_sequence,
+    })
+    .map_err(|error| invalid_data(format!("serialize aggTrade invalid row:{error}")))?
+    .into_boxed_str()
+    .into_string();
+    Ok(RawEvent {
+        source_kind: spec.source_kind.clone(),
+        source_event_type: "invalid_input".to_owned(),
+        source_identifier: format!("{}:{}", invalid.transport.as_str(), invalid.reason.as_str()),
+        source_ts: None,
+        recv_time_utc_ms: invalid.timestamp_received,
+        collector_host_id: collector_identity.host_id.clone(),
+        collector_region: collector_identity.region.clone(),
+        source_endpoint: invalid.endpoint.clone(),
+        raw_json,
+        collector_admission: None,
+        parquet_raw_layout_version: 1,
+        parquet_raw_source_kind: spec.source_kind.clone(),
+    })
+}
+
+fn allocate_aggtrade_websocket_ingress(
+    allocator: &BinanceAggTradeIngressSequenceAllocator,
+    sink: &SourceEventSink,
+    recv_time_utc_ms: i64,
+) -> Result<BinanceAggTradeIngressCoordinate> {
+    allocator.allocate_websocket().map_err(|error| {
+        sink.source_queue_backpressure.record_operational_drop(
+            "binance_aggtrade",
+            recv_time_utc_ms,
+            1,
+        );
+        record_gap(
+            &sink.gaps,
+            format!("binance_aggtrade_ingress_sequence_terminal:{error}"),
+        );
+        invalid_data(error.to_string()).into()
+    })
+}
+
+fn binance_aggtrade_websocket_invalid_input(
+    raw_bytes: Vec<u8>,
+    recv_time_utc_ms: i64,
+    endpoint: &str,
+    ingress_coordinate: BinanceAggTradeIngressCoordinate,
+    reason: BinanceAggTradeInvalidReason,
+    reason_detail: impl Into<String>,
+) -> Result<BinanceAggTradeInvalidInput> {
+    let capture = BinanceAggTradeRawCapture::complete(raw_bytes, None).map_err(invalid_data)?;
+    BinanceAggTradeInvalidInput::new(
+        BinanceAggTradeInvalidTransport::Websocket,
+        ingress_coordinate,
+        recv_time_utc_ms,
+        endpoint.to_owned(),
+        reason,
+        reason_detail,
+        capture,
+    )
+    .map_err(|error| invalid_data(error).into())
+}
+
+fn aggtrade_websocket_staging_bytes(payload_bytes: usize, parse_json: bool) -> Result<usize> {
+    let input_and_capture = payload_bytes
+        .checked_mul(2)
+        .ok_or_else(|| invalid_data("aggTrade websocket input staging size overflow"))?;
+    let json_value = if parse_json {
+        payload_bytes
+            .checked_mul(BINANCE_AGGTRADE_JSON_VALUE_STAGING_MULTIPLIER)
+            .ok_or_else(|| invalid_data("aggTrade websocket JSON staging size overflow"))?
+    } else {
+        0
+    };
+    input_and_capture
+        .checked_add(json_value)
+        .and_then(|bytes| {
+            bytes.checked_add(BINANCE_AGGTRADE_INVALID_SERIALIZATION_STAGING_MAX_BYTES)
+        })
+        .ok_or_else(|| invalid_data("aggTrade websocket total staging size overflow").into())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn emit_aggtrade_websocket_invalid(
+    raw_bytes: Vec<u8>,
+    recv_time_utc_ms: i64,
+    ingress_coordinate: BinanceAggTradeIngressCoordinate,
+    reason: BinanceAggTradeInvalidReason,
+    reason_detail: impl Into<String>,
+    sink: &SourceEventSink,
+    collector_identity: &CollectorIdentity,
+    spec: &BinanceWsSpec,
+    source_sequence_epoch_id: &str,
+    connection_generation: u64,
+    run_started: Instant,
+    mut staging_reservation: InflightReservation,
+) -> Result<()> {
+    let invalid = binance_aggtrade_websocket_invalid_input(
+        raw_bytes,
+        recv_time_utc_ms,
+        &spec.url,
+        ingress_coordinate,
+        reason,
+        reason_detail,
+    )?;
+    let event = binance_aggtrade_invalid_raw_event(
+        &invalid,
+        collector_identity,
+        spec,
+        source_sequence_epoch_id,
+        connection_generation,
+    )?;
+    drop(invalid);
+    let bytes = owned_event_bytes(&event);
+    if bytes > MAX_TYPED_ROW_BYTES {
+        return Err(invalid_data(format!(
+            "operator_intervention_required:binance_aggtrade_invalid_row_too_large:bytes={bytes}:limit={MAX_TYPED_ROW_BYTES}"
+        ))
+        .into());
+    }
+    staging_reservation.shrink_to(1, bytes)?;
+    send_event_with_reservation(sink, run_started, event, Some(staging_reservation)).await
 }
 
 fn binance_ws_payload(value: &Value) -> &Value {
@@ -14716,7 +14758,62 @@ fn bounded_rtds_ws_config() -> WsConfig {
     config
 }
 
+fn stamp_aggtrade_admission(event: &mut RawEvent, sink: &SourceEventSink) -> Result<()> {
+    if event.source_kind != "binance_aggtrade" {
+        return Ok(());
+    }
+    if event.collector_admission.is_some() {
+        let error = "binance aggTrade event admitted more than once";
+        sink.source_queue_backpressure.record_operational_drop(
+            &event.source_kind,
+            event.recv_time_utc_ms,
+            1,
+        );
+        record_gap(
+            &sink.gaps,
+            format!("binance_aggtrade_admission_integrity:{error}"),
+        );
+        return Err(invalid_data(error).into());
+    }
+    let time_utc_ms = now_ms();
+    if time_utc_ms <= 0 {
+        return Err(invalid_data("binance aggTrade admission time is not positive").into());
+    }
+    let sequence = match sink
+        .source_queue_backpressure
+        .next_aggtrade_admission_sequence()
+    {
+        Ok(sequence) => sequence,
+        Err(error) => {
+            sink.source_queue_backpressure.record_operational_drop(
+                &event.source_kind,
+                event.recv_time_utc_ms,
+                1,
+            );
+            record_gap(
+                &sink.gaps,
+                format!("binance_aggtrade_admission_integrity:{error}"),
+            );
+            return Err(error);
+        }
+    };
+    event.collector_admission = Some(RawEventAdmission {
+        sequence,
+        time_utc_ms,
+    });
+    Ok(())
+}
+
 async fn send_event(sink: &SourceEventSink, run_started: Instant, event: RawEvent) -> Result<()> {
+    send_event_with_reservation(sink, run_started, event, None).await
+}
+
+async fn send_event_with_reservation(
+    sink: &SourceEventSink,
+    run_started: Instant,
+    event: RawEvent,
+    existing_reservation: Option<InflightReservation>,
+) -> Result<()> {
     let source_kind = event.source_kind.clone();
     let recv_time_utc_ms = event.recv_time_utc_ms;
     let gate = sink
@@ -14739,26 +14836,29 @@ async fn send_event(sink: &SourceEventSink, run_started: Instant, event: RawEven
         record_gap(&sink.gaps, gap.clone());
         return Err(invalid_data(gap).into());
     }
-    let reservation = match sink
-        .inflight_budget
-        .acquire(1, owned_bytes, BUFFER_ACQUIRE_TIMEOUT)
-        .await
-    {
-        Ok(reservation) => reservation,
-        Err(error) => {
-            sink.source_queue_backpressure.record_timeout();
-            sink.source_queue_backpressure.record_drop(1);
-            sink.source_queue_backpressure.record_operational_drop(
-                &source_kind,
-                recv_time_utc_ms,
-                1,
-            );
-            let gap = format!("global_inflight_budget_failed:{source_kind}:{error}");
-            record_gap(&sink.gaps, gap);
-            return Err(error.into());
-        }
+    let reservation = match existing_reservation {
+        Some(reservation) => reservation,
+        None => match sink
+            .inflight_budget
+            .acquire(1, owned_bytes, BUFFER_ACQUIRE_TIMEOUT)
+            .await
+        {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                sink.source_queue_backpressure.record_timeout();
+                sink.source_queue_backpressure.record_drop(1);
+                sink.source_queue_backpressure.record_operational_drop(
+                    &source_kind,
+                    recv_time_utc_ms,
+                    1,
+                );
+                let gap = format!("global_inflight_budget_failed:{source_kind}:{error}");
+                record_gap(&sink.gaps, gap);
+                return Err(error.into());
+            }
+        },
     };
-    let inflight_event = InflightRawEvent {
+    let mut inflight_event = InflightRawEvent {
         event,
         control: None,
         raw_day_permit: match &raw_enqueue {
@@ -14769,6 +14869,7 @@ async fn send_event(sink: &SourceEventSink, run_started: Instant, event: RawEven
         _reservation: Some(reservation),
     };
     if let RawDayEnqueueDecision::Defer(epoch) = &raw_enqueue {
+        stamp_aggtrade_admission(&mut inflight_event.event, sink)?;
         sink.source_queue_backpressure.defer_raw_batch(
             producer,
             epoch.clone(),
@@ -14777,22 +14878,22 @@ async fn send_event(sink: &SourceEventSink, run_started: Instant, event: RawEven
         return Ok(());
     }
     let _enqueue_guard = sink.enqueue_lock.lock().await;
-    match sink.tx.try_send(inflight_event) {
-        Ok(()) => Ok(()),
-        Err(mpsc::error::TrySendError::Full(inflight_event)) => {
+    let permit = match sink.tx.try_reserve() {
+        Ok(permit) => permit,
+        Err(mpsc::error::TrySendError::Full(())) => {
             sink.source_queue_backpressure.record_wait();
-            match timeout(BUFFER_ACQUIRE_TIMEOUT, sink.tx.send(inflight_event)).await {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(err)) => {
+            match timeout(BUFFER_ACQUIRE_TIMEOUT, sink.tx.reserve()).await {
+                Ok(Ok(permit)) => permit,
+                Ok(Err(_)) => {
                     sink.source_queue_backpressure.record_drop(1);
                     sink.source_queue_backpressure.record_operational_drop(
                         &source_kind,
                         recv_time_utc_ms,
                         1,
                     );
-                    let gap = format!("bounded_queue_send_failed:{source_kind}:{err}");
+                    let gap = format!("bounded_queue_send_failed:{source_kind}");
                     record_gap(&sink.gaps, gap.clone());
-                    Err(io::Error::new(io::ErrorKind::BrokenPipe, gap).into())
+                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, gap).into());
                 }
                 Err(_) => {
                     sink.source_queue_backpressure.record_timeout();
@@ -14804,11 +14905,11 @@ async fn send_event(sink: &SourceEventSink, run_started: Instant, event: RawEven
                     );
                     let gap = format!("bounded_queue_backpressure_timeout:{source_kind}");
                     record_gap(&sink.gaps, gap.clone());
-                    Err(io::Error::new(io::ErrorKind::TimedOut, gap).into())
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, gap).into());
                 }
             }
         }
-        Err(mpsc::error::TrySendError::Closed(_)) => {
+        Err(mpsc::error::TrySendError::Closed(())) => {
             sink.source_queue_backpressure.record_drop(1);
             sink.source_queue_backpressure.record_operational_drop(
                 &source_kind,
@@ -14817,9 +14918,12 @@ async fn send_event(sink: &SourceEventSink, run_started: Instant, event: RawEven
             );
             let gap = format!("bounded_queue_send_closed:{source_kind}");
             record_gap(&sink.gaps, gap.clone());
-            Err(io::Error::new(io::ErrorKind::BrokenPipe, gap).into())
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, gap).into());
         }
-    }
+    };
+    stamp_aggtrade_admission(&mut inflight_event.event, sink)?;
+    permit.send(inflight_event);
+    Ok(())
 }
 
 async fn send_ingress_control(
@@ -14840,6 +14944,7 @@ async fn send_ingress_control(
             collector_region: String::new(),
             source_endpoint: String::new(),
             raw_json: "{}".to_owned(),
+            collector_admission: None,
             parquet_raw_layout_version: 0,
             parquet_raw_source_kind: "__ingress_control".to_owned(),
         },
@@ -14922,34 +15027,6 @@ async fn send_source_hour_finalize(
     .await
 }
 
-async fn send_binance_continuity(
-    sink: &SourceEventSink,
-    run_started: Instant,
-    continuity: BinanceAggTradeContinuityState,
-) -> Result<()> {
-    let utc_day = utc_day_string_from_ms(now_ms())
-        .ok_or_else(|| invalid_data("current UTC day unavailable for Binance continuity"))?;
-    send_binance_continuity_for_day(sink, run_started, continuity, utc_day).await
-}
-
-async fn send_binance_continuity_for_day(
-    sink: &SourceEventSink,
-    run_started: Instant,
-    continuity: BinanceAggTradeContinuityState,
-    utc_day: String,
-) -> Result<()> {
-    send_ingress_control(
-        sink,
-        run_started,
-        IngressControl::BinanceContinuity {
-            utc_day,
-            continuity,
-        },
-        "binance_aggtrade_continuity",
-    )
-    .await
-}
-
 fn raw_event(
     source_kind: &str,
     source_event_type: &str,
@@ -14992,6 +15069,7 @@ fn raw_event_with_recv_time(
         collector_region: collector_identity.region.clone(),
         source_endpoint: source_endpoint.to_owned(),
         raw_json: raw.to_string(),
+        collector_admission: None,
         parquet_raw_layout_version: 1,
         parquet_raw_source_kind: source_kind.to_owned(),
     }
@@ -15426,25 +15504,6 @@ fn owned_polymarket_event_message_bytes(message: &EventMessage) -> usize {
         .saturating_add(message.description.capacity())
 }
 
-fn owned_binance_websocket_aggtrade_bytes(row: &BinanceWsAggTrade) -> usize {
-    std::mem::size_of::<BinanceWsAggTrade>()
-        .saturating_add(row.event_type.capacity())
-        .saturating_add(row.symbol.capacity())
-        .saturating_add(row.stream.capacity())
-        .saturating_add(row.shared.price.capacity())
-        .saturating_add(row.shared.quantity.capacity())
-        .saturating_add(row.source_native_payload_json.capacity())
-        .saturating_add(128)
-}
-
-fn owned_binance_rest_aggtrade_bytes(row: &BinanceRestAggTrade) -> usize {
-    std::mem::size_of::<BinanceRestAggTrade>()
-        .saturating_add(row.symbol.capacity())
-        .saturating_add(row.shared.price.capacity())
-        .saturating_add(row.shared.quantity.capacity())
-        .saturating_add(row.source_native_payload_json.capacity())
-}
-
 fn training_dataset_size_bytes(dataset_root: &Path) -> io::Result<u64> {
     let training_root = dataset_root.join("training");
     let metadata = match fs::symlink_metadata(&training_root) {
@@ -15513,6 +15572,29 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
+fn aggtrade_source_sequence_epoch_id(identity: &CollectorIdentity) -> Result<String> {
+    let task_sequence = AGGTRADE_SOURCE_EPOCH_COUNTER
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            current.checked_add(1)
+        })
+        .map(|previous| previous + 1)
+        .map_err(|_| invalid_data("binance aggTrade source epoch sequence overflow"))?;
+    let started_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| invalid_data(format!("system clock precedes Unix epoch: {error}")))?
+        .as_nanos();
+    let mut hasher = Sha256::new();
+    hasher.update(b"binance_aggtrade_source_sequence_epoch_v1\0");
+    hasher.update(identity.host_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(identity.region.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(std::process::id().to_le_bytes());
+    hasher.update(started_ns.to_le_bytes());
+    hasher.update(task_sequence.to_le_bytes());
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 fn monotonic_ms(started: Instant) -> u64 {
     started.elapsed().as_millis() as u64
 }
@@ -15559,12 +15641,14 @@ impl RtdsSourceSpec {
     }
 }
 
+#[derive(Clone)]
 struct BinanceWsSpec {
     source_kind: String,
     default_event_type: String,
     url: String,
-    rest_endpoint: String,
-    freshness_timeout_secs: u64,
+    frame_inactivity_timeout_secs: u64,
+    #[cfg(test)]
+    recovery_wait_override: Option<Duration>,
 }
 
 #[derive(Clone)]
@@ -16484,8 +16568,13 @@ impl ActiveSegment {
     fn observe(&mut self, event: &RawEvent, typed_rows: u64) {
         if self.rows == 0 {
             self.segment_start_recv_time_utc_ms = event.recv_time_utc_ms;
+            self.last_recv_time_utc_ms = event.recv_time_utc_ms;
+        } else {
+            self.segment_start_recv_time_utc_ms = self
+                .segment_start_recv_time_utc_ms
+                .min(event.recv_time_utc_ms);
+            self.last_recv_time_utc_ms = self.last_recv_time_utc_ms.max(event.recv_time_utc_ms);
         }
-        self.last_recv_time_utc_ms = event.recv_time_utc_ms;
         if let Some(source_ts) = event.source_ts.clone() {
             if self.source_ts_start.is_none() {
                 self.source_ts_start = Some(source_ts.clone());
@@ -16506,6 +16595,10 @@ impl ActiveSegment {
             return;
         };
         if event.source_kind == "binance_aggtrade"
+            && value
+                .get("record_kind")
+                .and_then(Value::as_str)
+                .is_none_or(|kind| kind == "trade")
             && value
                 .get("ingest_source")
                 .and_then(Value::as_str)
@@ -16666,7 +16759,7 @@ fn typed_schema_version(source_kind: &str) -> &'static str {
         "polymarket_market_metadata" => "polymarket_market_metadata_v2",
         "binance_depth_snapshot" => "binance_depth_snapshot_v2",
         "binance_depth_update" => "binance_depth_update_v3",
-        "binance_aggtrade" => "binance_aggtrade_v5",
+        "binance_aggtrade" => "binance_aggtrade_v6",
         "polymarket_rtds_chainlink_btc_usd" => "polymarket_rtds_chainlink_btc_usd_v4",
         _ => "unknown_typed_layout",
     }
@@ -17095,32 +17188,71 @@ fn binance_depth_update_row_from_event(event: &RawEvent) -> Result<BinanceDepthU
 
 fn binance_aggtrade_row_from_event(event: &RawEvent) -> Result<BinanceAggTradeHourlyRow> {
     let value = serde_json::from_str::<Value>(&event.raw_json)?;
+    let record_kind = required_value_string(&value, "record_kind")?;
+    let timestamp_received = required_i64(&value, "timestamp_received")?;
+    if timestamp_received != event.recv_time_utc_ms {
+        return Err(invalid_data("aggTrade raw/event receive time mismatch").into());
+    }
+    let admission = event.collector_admission.as_ref().ok_or_else(|| {
+        invalid_data("binance aggTrade event reached writer without collector admission")
+    })?;
+    let ingest_source = required_value_string(&value, "ingest_source")?;
+    let (websocket_timestamp_received, rest_backfill_timestamp_received) =
+        if record_kind == "invalid_input" {
+            (Some(timestamp_received), None)
+        } else {
+            (
+                optional_i64(&value, "websocket_timestamp_received"),
+                optional_i64(&value, "rest_backfill_timestamp_received"),
+            )
+        };
     let row = BinanceAggTradeHourlyRow {
-        timestamp_received: required_i64(&value, "timestamp_received")?,
-        websocket_timestamp_received: optional_i64(&value, "websocket_timestamp_received"),
-        rest_backfill_timestamp_received: optional_i64(&value, "rest_backfill_timestamp_received"),
-        ingest_source: required_value_string(&value, "ingest_source")?,
+        record_kind,
+        timestamp_received,
+        websocket_timestamp_received,
+        rest_backfill_timestamp_received,
+        ingest_source,
         event_type: optional_string(&value, "event_type"),
         event_time: optional_i64(&value, "event_time"),
-        trade_time: required_i64(&value, "trade_time")?,
-        symbol: required_value_string(&value, "symbol")?,
-        aggregate_trade_id: required_u64(&value, "aggregate_trade_id")?,
-        price: required_value_string(&value, "price")?,
-        quantity: required_value_string(&value, "quantity")?,
-        first_trade_id: required_u64(&value, "first_trade_id")?,
-        last_trade_id: required_u64(&value, "last_trade_id")?,
-        buyer_is_maker: value
-            .get("buyer_is_maker")
-            .and_then(Value::as_bool)
-            .ok_or_else(|| invalid_data("buyer_is_maker missing"))?,
+        trade_time: optional_i64(&value, "trade_time"),
+        symbol: optional_string(&value, "symbol"),
+        aggregate_trade_id: value.get("aggregate_trade_id").and_then(Value::as_u64),
+        price: optional_string(&value, "price"),
+        quantity: optional_string(&value, "quantity"),
+        first_trade_id: value.get("first_trade_id").and_then(Value::as_u64),
+        last_trade_id: value.get("last_trade_id").and_then(Value::as_u64),
+        buyer_is_maker: optional_bool(&value, "buyer_is_maker"),
         stream: optional_string(&value, "stream"),
         ws_ignore: optional_bool(&value, "ws_ignore"),
         rest_was_best_price_match: optional_bool(&value, "rest_was_best_price_match"),
         source_native_payload_json: required_value_string(&value, "source_native_payload_json")?,
+        source_sequence_epoch_id: required_value_string(&value, "source_sequence_epoch_id")?,
+        connection_generation: value
+            .get("connection_generation")
+            .and_then(Value::as_u64)
+            .filter(|generation| *generation != 0)
+            .ok_or_else(|| invalid_data("aggTrade connection_generation missing or zero"))?,
+        websocket_ingress_sequence: value
+            .get("websocket_ingress_sequence")
+            .and_then(Value::as_u64),
+        rest_response_ingress_sequence: value
+            .get("rest_response_ingress_sequence")
+            .and_then(Value::as_u64),
+        rest_response_item_index: value
+            .get("rest_response_item_index")
+            .and_then(Value::as_u64),
+        collector_admission_sequence: admission.sequence,
+        collector_admission_time_utc_ms: admission.time_utc_ms,
+        invalid_reason_code: optional_string(&value, "invalid_reason_code"),
+        invalid_reason_detail: optional_string(&value, "invalid_reason_detail"),
+        payload_encoding: optional_string(&value, "payload_encoding"),
+        payload_length_bytes: value.get("payload_length_bytes").and_then(Value::as_u64),
+        payload_sha256: optional_string(&value, "payload_sha256"),
+        payload_capture_status: optional_string(&value, "payload_capture_status"),
         collector_host_id: event.collector_host_id.clone(),
         collector_region: event.collector_region.clone(),
         source_endpoint: event.source_endpoint.clone(),
-        schema_version: "binance_aggtrade_v5".to_owned(),
+        schema_version: "binance_aggtrade_v6".to_owned(),
     };
     let validation = row.validate();
     if !validation.is_complete() {
@@ -17263,14 +17395,6 @@ fn metadata_unavailable_reason(value: &Value) -> Option<String> {
 
 fn required_i64(value: &Value, field: &str) -> Result<i64> {
     optional_i64(value, field).ok_or_else(|| invalid_data(format!("{field} missing")).into())
-}
-
-fn required_u64(value: &Value, field: &str) -> Result<u64> {
-    value
-        .get(field)
-        .and_then(Value::as_u64)
-        .filter(|value| *value > 0)
-        .ok_or_else(|| invalid_data(format!("{field} missing")).into())
 }
 
 fn optional_i64(value: &Value, field: &str) -> Option<i64> {
@@ -17466,18 +17590,8 @@ mod tests {
     fn test_manifest_owner(dataset_root: &Path, utc_day: &str) -> (ManifestOwnerState, PathBuf) {
         let identity = test_daily_manifest_identity();
         let day_dir = typed_raw_root(dataset_root).join(format!("utc_day={utc_day}"));
-        let manifest = reconcile_open_day_manifest(
-            &day_dir,
-            utc_day,
-            &identity,
-            &BinanceAggTradeContinuityState::default(),
-        )
-        .unwrap();
-        let mut owner = ManifestOwnerState::new(
-            dataset_root.to_path_buf(),
-            identity,
-            BinanceAggTradeContinuityState::default(),
-        );
+        let manifest = reconcile_open_day_manifest(&day_dir, utc_day, &identity).unwrap();
+        let mut owner = ManifestOwnerState::new(dataset_root.to_path_buf(), identity);
         owner
             .insert_reconciled_manifest(utc_day.to_owned(), manifest)
             .unwrap();
@@ -18309,7 +18423,7 @@ mod tests {
         let sink = SourceEventSink {
             tx,
             gaps: Arc::new(Mutex::new(SourceGapStore::default())),
-            source_queue_backpressure: stats,
+            source_queue_backpressure: Arc::clone(&stats),
             inflight_budget: InflightBudget::new(),
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         };
@@ -18359,6 +18473,28 @@ mod tests {
             rx.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
         ));
+        let deferred_admissions = {
+            let deferred = stats
+                .deferred_raw_batches
+                .lock()
+                .expect("deferred raw-event mutex poisoned");
+            deferred["binance_aggtrade"]
+                .iter()
+                .flat_map(|batch| batch.events.iter())
+                .map(|event| {
+                    (
+                        event.event.recv_time_utc_ms,
+                        event
+                            .event
+                            .collector_admission
+                            .as_ref()
+                            .expect("deferred aggTrade must already own admission")
+                            .sequence,
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        assert_eq!(deferred_admissions.len(), 2);
 
         send_ingress_control(
             &sink,
@@ -18385,6 +18521,13 @@ mod tests {
         permitted.sort_by_key(|event| event.event.recv_time_utc_ms);
         assert_eq!(permitted[0].event.recv_time_utc_ms, boundary_utc_ms);
         assert_eq!(permitted[1].event.recv_time_utc_ms, boundary_utc_ms + 1);
+        for event in &permitted {
+            assert_eq!(
+                event.event.collector_admission.as_ref().unwrap().sequence,
+                deferred_admissions[&event.event.recv_time_utc_ms],
+                "deferred flush must not renumber collector admission"
+            );
+        }
         assert!(permitted.iter().all(|event| {
             event.raw_day_permit.as_ref()
                 == Some(&RawDayPermit {
@@ -22398,174 +22541,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aggtrade_day_flush_fences_source_local_pending_before_barrier() {
-        let (tx, mut rx) = mpsc::channel(8);
-        let stats = Arc::new(SourceQueueBackpressureStats::default());
-        let raw_day_gate = Arc::new(RawDayGate::new());
-        raw_day_gate
-            .activate_startup("2026-07-07".to_owned(), INITIAL_RAW_DAY_GENERATION)
-            .await
-            .unwrap();
-        stats
-            .install_raw_day_gate(Arc::clone(&raw_day_gate))
-            .unwrap();
-        let sink = SourceEventSink {
-            tx,
-            gaps: Arc::new(Mutex::new(SourceGapStore::default())),
-            source_queue_backpressure: stats,
-            inflight_budget: InflightBudget::new(),
-            enqueue_lock: Arc::new(AsyncMutex::new(())),
-        };
-        let (control_tx, mut control_rx) = mpsc::channel(AGGTRADE_CONTROL_CHANNEL_CAPACITY);
-        let source_sink = sink.clone();
-        let run_started = Instant::now();
-        let source = async move {
-            let collector_identity = CollectorIdentity {
-                host_id: "collector-test".to_owned(),
-                region: "local-test".to_owned(),
-            };
-            let spec = BinanceWsSpec {
-                source_kind: "binance_aggtrade".to_owned(),
-                default_event_type: "aggTrade".to_owned(),
-                url: BINANCE_AGGTRADE_WS.to_owned(),
-                rest_endpoint: BINANCE_AGGTRADE_REST.to_owned(),
-                freshness_timeout_secs: 60,
-            };
-            let mut coordinator = AggTradeCoordinator::with_pending_limit(
-                BinanceAggTradeContinuityState::default(),
-                BINANCE_AGGTRADE_PENDING_MAX_ROWS,
-            );
-            let first = coordinator
-                .accept_websocket(
-                    BinanceWsAggTrade::from_wire(
-                        &test_ws_aggtrade_value(100),
-                        "btcusdt@aggTrade",
-                        1_783_468_799_998,
-                    )
-                    .unwrap(),
-                )
-                .unwrap();
-            emit_aggtrade_result(first, &source_sink, &collector_identity, &spec, run_started)
-                .await?;
-            let _ = coordinator
-                .accept_websocket(
-                    BinanceWsAggTrade::from_wire(
-                        &test_ws_aggtrade_value(103),
-                        "btcusdt@aggTrade",
-                        1_783_468_799_999,
-                    )
-                    .unwrap(),
-                )
-                .unwrap();
-            let Some(control) = control_rx.recv().await else {
-                return Err(invalid_data("missing test aggTrade flush control").into());
-            };
-            let mut backfill_task = None;
-            let mut pending_reservations = Vec::new();
-            assert!(
-                handle_aggtrade_source_control(
-                    control,
-                    &mut coordinator,
-                    &mut backfill_task,
-                    &mut pending_reservations,
-                    &source_sink,
-                    &collector_identity,
-                    &spec,
-                    run_started,
-                )
-                .await?
-                .is_none()
-            );
-            send_event(
-                &source_sink,
-                run_started,
-                test_raw_event("binance_aggtrade", 1_783_468_800_001),
-            )
-            .await?;
-            Ok(())
-        };
-        tokio::pin!(source);
-        assert!(matches!(
-            futures::poll!(source.as_mut()),
-            std::task::Poll::Pending
-        ));
-        let close = prepare_rollover_for_producer(
-            &raw_day_gate,
-            "binance_aggtrade",
-            "2026-07-07",
-            1_783_468_800_000,
-        );
-        let consumer_gate = Arc::clone(&raw_day_gate);
-        let consumer_close = close.clone();
-        let consumer_stage = Arc::new(AtomicU64::new(0));
-        let stage = Arc::clone(&consumer_stage);
-        let consumer = tokio::spawn(async move {
-            let first = rx.recv().await.unwrap();
-            stage.store(1, Ordering::SeqCst);
-            let second = rx.recv().await.unwrap();
-            stage.store(2, Ordering::SeqCst);
-            let continuity = rx.recv().await.unwrap();
-            stage.store(3, Ordering::SeqCst);
-            let mut barrier = rx.recv().await.unwrap();
-            stage.store(4, Ordering::SeqCst);
-            let Some(IngressControl::DayBarrier { reply, .. }) = barrier.control.take() else {
-                panic!("expected aggTrade day barrier");
-            };
-            commit_test_manifest_activation(&consumer_gate, &consumer_close);
-            consumer_gate
-                .activate_after_rollover(&consumer_close)
-                .await
-                .unwrap();
-            stage.store(5, Ordering::SeqCst);
-            reply.send(Ok(DayBarrierRelease::Resume)).unwrap();
-            stage.store(6, Ordering::SeqCst);
-            let after_barrier = rx.recv().await.unwrap();
-            stage.store(7, Ordering::SeqCst);
-            (first, second, continuity, barrier, after_barrier)
-        });
-
-        let fence_result = timeout(
-            Duration::from_secs(2),
-            flush_aggtrade_and_send_day_barrier(
-                source.as_mut(),
-                &control_tx,
-                &sink,
-                run_started,
-                &raw_day_gate,
-                &close,
-            ),
-        )
-        .await
-        .unwrap_or_else(|_| {
-            panic!(
-                "aggTrade fence timed out at consumer stage {}",
-                consumer_stage.load(Ordering::SeqCst)
-            )
-        })
-        .unwrap();
-        assert!(
-            fence_result.is_none(),
-            "source returned before aggTrade day fence: {fence_result:?}"
-        );
-
-        timeout(Duration::from_secs(1), source.as_mut())
-            .await
-            .expect("aggTrade source must emit the post-barrier event")
-            .unwrap();
-        let (first, second, continuity, barrier, after_barrier) = consumer.await.unwrap();
-        assert_eq!(first.event.recv_time_utc_ms, 1_783_468_799_998);
-        assert_eq!(second.event.recv_time_utc_ms, 1_783_468_799_999);
-        assert!(matches!(
-            continuity.control,
-            Some(IngressControl::BinanceContinuity { ref utc_day, .. })
-                if utc_day == "2026-07-07"
-        ));
-        assert!(barrier.control.is_none());
-        assert!(after_barrier.control.is_none());
-        assert_eq!(after_barrier.event.recv_time_utc_ms, 1_783_468_800_001);
-    }
-
-    #[tokio::test]
     async fn transport_recovery_crossing_utc_boundary_is_gap_neutral() {
         let (tx, mut rx) = mpsc::channel(2);
         let boundary_utc_ms = now_ms().div_euclid(UTC_DAY_MS).saturating_mul(UTC_DAY_MS);
@@ -22614,21 +22589,6 @@ mod tests {
         );
         let active_coverage = manifest_coverage_value(&day_dir);
         assert_eq!(active_coverage["reactivated_within_day"], true);
-        owner
-            .update_continuity(
-                day.to_owned(),
-                BinanceAggTradeContinuityState {
-                    latest_epoch: Some(crate::binance_aggtrade::BinanceAggTradeContinuityEpoch {
-                        epoch_start_id: 10,
-                        last_observed_id: 12,
-                        last_contiguous_id: 12,
-                    }),
-                    unresolved_ranges: Vec::new(),
-                    initial_coverage_boundary_id: Some(10),
-                },
-            )
-            .unwrap();
-        assert_eq!(manifest_coverage_value(&day_dir), active_coverage);
         owner
             .record_gaps(day, &["sticky_coverage_test_gap".to_owned()])
             .unwrap();
@@ -23235,16 +23195,28 @@ mod tests {
         )
         .unwrap();
         let row = test_aggtrade_hourly_row(1, 1_783_392_400_001);
+        let row_group_rows = (1..=PARQUET_ROW_GROUP_MAX_ROWS)
+            .map(|sequence| {
+                let mut row = row.clone();
+                row.websocket_ingress_sequence = Some(sequence);
+                row.collector_admission_sequence = sequence;
+                row
+            })
+            .collect::<Vec<_>>();
         writer
             .write_binance_aggtrade_rows_with_logical_bytes(
-                &vec![row.clone(); PARQUET_ROW_GROUP_MAX_ROWS as usize],
+                &row_group_rows,
                 PARQUET_ROW_GROUP_MAX_ROWS,
             )
             .unwrap();
-        for _ in 0..17 {
+        for offset in 1..=17 {
+            let mut next_row = row.clone();
+            let sequence = PARQUET_ROW_GROUP_MAX_ROWS + offset;
+            next_row.websocket_ingress_sequence = Some(sequence);
+            next_row.collector_admission_sequence = sequence;
             writer
                 .write_binance_aggtrade_rows_with_logical_bytes(
-                    std::slice::from_ref(&row),
+                    std::slice::from_ref(&next_row),
                     PARQUET_ROW_GROUP_MAX_BYTES / 16,
                 )
                 .unwrap();
@@ -23611,13 +23583,175 @@ mod tests {
             .await
         });
         sleep(Duration::from_millis(25)).await;
-        drop(rx.recv().await.unwrap());
+        assert_eq!(
+            stats.aggtrade_admission_sequence.load(Ordering::Relaxed),
+            1,
+            "a sender waiting for queue capacity must not preallocate admission"
+        );
+        let first = rx.recv().await.unwrap();
+        assert_eq!(first.event.collector_admission.unwrap().sequence, 1);
         second.await.unwrap().unwrap();
-        drop(rx.recv().await.unwrap());
+        let second = rx.recv().await.unwrap();
+        assert_eq!(second.event.collector_admission.unwrap().sequence, 2);
 
         assert_eq!(stats.wait_count.load(Ordering::Relaxed), 1);
         assert_eq!(stats.timeout_count.load(Ordering::Relaxed), 0);
         assert_eq!(stats.dropped_rows.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn aggtrade_sequence_overflow_is_terminal_and_records_bounded_evidence() {
+        let recv_time_utc_ms = 1_783_392_404_599;
+        let (tx, mut rx) = mpsc::channel(2);
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, recv_time_utc_ms).await;
+        let sink = SourceEventSink {
+            tx,
+            gaps: Arc::clone(&gaps),
+            source_queue_backpressure: Arc::clone(&stats),
+            inflight_budget: InflightBudget::new(),
+            enqueue_lock: Arc::new(AsyncMutex::new(())),
+        };
+
+        stats
+            .aggtrade_admission_sequence
+            .store(u64::MAX, Ordering::Relaxed);
+        let admission_error = send_event(
+            &sink,
+            Instant::now(),
+            test_raw_event("binance_aggtrade", recv_time_utc_ms),
+        )
+        .await
+        .expect_err("admission sequence overflow must fail closed");
+        assert!(
+            admission_error
+                .to_string()
+                .contains("admission sequence overflow")
+        );
+        assert!(rx.try_recv().is_err());
+
+        let ingress = BinanceAggTradeIngressSequenceAllocator::from_last_allocated(u64::MAX);
+        let ingress_error = allocate_aggtrade_websocket_ingress(&ingress, &sink, recv_time_utc_ms)
+            .expect_err("ingress sequence overflow must fail closed");
+        assert!(
+            ingress_error
+                .to_string()
+                .contains("binance_aggtrade_ingress_sequence_overflow")
+        );
+        assert!(
+            gaps.lock()
+                .unwrap()
+                .iter()
+                .any(|gap| { gap.starts_with("binance_aggtrade_admission_integrity:") })
+        );
+        assert!(
+            gaps.lock()
+                .unwrap()
+                .iter()
+                .any(|gap| { gap.starts_with("binance_aggtrade_ingress_sequence_terminal:") })
+        );
+        let counters = stats.drain_all_operational();
+        assert_eq!(
+            counters.values().next().unwrap()["binance_aggtrade"].dropped_rows,
+            2
+        );
+    }
+
+    #[test]
+    fn aggtrade_max_complete_invalid_capture_fits_the_typed_row_budget() {
+        let invalid = binance_aggtrade_websocket_invalid_input(
+            vec![b'x'; BINANCE_AGGTRADE_INVALID_INPUT_MAX_BYTES],
+            1_783_392_404_599,
+            BINANCE_AGGTRADE_WS,
+            BinanceAggTradeIngressCoordinate::Websocket { sequence: 1 },
+            BinanceAggTradeInvalidReason::InvalidJson,
+            "max_capture",
+        )
+        .unwrap();
+        let event = binance_aggtrade_invalid_raw_event(
+            &invalid,
+            &CollectorIdentity {
+                host_id: "collector-test".to_owned(),
+                region: "local-test".to_owned(),
+            },
+            &BinanceWsSpec {
+                source_kind: "binance_aggtrade".to_owned(),
+                default_event_type: "aggTrade".to_owned(),
+                url: BINANCE_AGGTRADE_WS.to_owned(),
+                frame_inactivity_timeout_secs: 30,
+                recovery_wait_override: None,
+            },
+            "test-source-epoch",
+            1,
+        )
+        .unwrap();
+        assert!(
+            owned_event_bytes(&event) <= MAX_TYPED_ROW_BYTES,
+            "max complete capture owns {} bytes, above the typed-row limit {}",
+            owned_event_bytes(&event),
+            MAX_TYPED_ROW_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn aggtrade_max_websocket_invalid_releases_constrained_budget_after_queue() {
+        let recv_time_utc_ms = 1_783_392_404_599;
+        let max_rows = 1;
+        let max_bytes =
+            aggtrade_websocket_staging_bytes(BINANCE_AGGTRADE_INVALID_INPUT_MAX_BYTES, true)
+                .unwrap();
+        let budget = InflightBudget::with_limits(max_rows, max_bytes);
+        let staging_reservation = budget
+            .acquire(1, max_bytes, BUFFER_ACQUIRE_TIMEOUT)
+            .await
+            .unwrap();
+        assert_eq!(budget.available(), (0, 0));
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, recv_time_utc_ms).await;
+        let sink = SourceEventSink {
+            tx,
+            gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+            source_queue_backpressure: stats,
+            inflight_budget: budget.clone(),
+            enqueue_lock: Arc::new(AsyncMutex::new(())),
+        };
+        emit_aggtrade_websocket_invalid(
+            vec![b'x'; BINANCE_AGGTRADE_INVALID_INPUT_MAX_BYTES],
+            recv_time_utc_ms,
+            BinanceAggTradeIngressCoordinate::Websocket { sequence: 1 },
+            BinanceAggTradeInvalidReason::InvalidJson,
+            "max_capture",
+            &sink,
+            &CollectorIdentity {
+                host_id: "collector-test".to_owned(),
+                region: "local-test".to_owned(),
+            },
+            &BinanceWsSpec {
+                source_kind: "binance_aggtrade".to_owned(),
+                default_event_type: "aggTrade".to_owned(),
+                url: BINANCE_AGGTRADE_WS.to_owned(),
+                frame_inactivity_timeout_secs: 30,
+                recovery_wait_override: None,
+            },
+            "test-source-epoch",
+            1,
+            Instant::now(),
+            staging_reservation,
+        )
+        .await
+        .unwrap();
+
+        let queued = rx.recv().await.unwrap();
+        assert_eq!(queued.event.source_event_type, "invalid_input");
+        let payload: Value = serde_json::from_str(&queued.event.raw_json).unwrap();
+        assert_eq!(payload["payload_length_bytes"], 524_288);
+        assert_eq!(payload["payload_capture_status"], "complete");
+        assert_ne!(budget.available(), (max_rows, max_bytes));
+        drop(queued);
+        assert_eq!(budget.available(), (max_rows, max_bytes));
     }
 
     #[tokio::test]
@@ -26053,13 +26187,9 @@ mod tests {
                 source_kind: "binance_aggtrade".to_owned(),
                 default_event_type: "aggTrade".to_owned(),
                 url: BINANCE_AGGTRADE_WS.to_owned(),
-                rest_endpoint: BINANCE_AGGTRADE_REST.to_owned(),
-                freshness_timeout_secs: 60,
+                frame_inactivity_timeout_secs: 60,
+                recovery_wait_override: None,
             };
-            let mut coordinator = AggTradeCoordinator::with_pending_limit(
-                BinanceAggTradeContinuityState::default(),
-                BINANCE_AGGTRADE_PENDING_MAX_ROWS,
-            );
             let mut tick_finished = Vec::with_capacity(SUSTAINED_TICKS);
             let mut sequence = 0_usize;
             for tick in 0..SUSTAINED_TICKS {
@@ -26073,22 +26203,20 @@ mod tests {
                         &test_ws_aggtrade_value_at(id, timestamp),
                         "btcusdt@aggTrade",
                         timestamp,
+                        BinanceAggTradeIngressCoordinate::Websocket { sequence: id },
                     )
                     .unwrap();
-                    let result = coordinator.accept_websocket(websocket).unwrap();
-                    assert_eq!(result.outputs.len(), 1);
-                    assert!(
-                        emit_aggtrade_result(
-                            result,
-                            &aggtrade_sink,
-                            &aggtrade_identity,
-                            &spec,
-                            run_started,
-                        )
+                    let event = binance_aggtrade_raw_event(
+                        &BinanceAggTradeOutput::Websocket(websocket),
+                        &aggtrade_identity,
+                        &spec,
+                        "test-source-epoch",
+                        1,
+                    )
+                    .unwrap();
+                    send_event(&aggtrade_sink, run_started, event)
                         .await
-                        .unwrap()
-                        .is_none()
-                    );
+                        .unwrap();
                     sequence += 1;
                 }
                 tick_finished.push(Instant::now());
@@ -27027,7 +27155,11 @@ mod tests {
         );
         let active_coverage = manifest_coverage_value(&day_dir);
         let mut segment = ActiveSegment::new(naming.clone(), "binance_aggtrade", 0).unwrap();
-        let event = test_raw_event("binance_aggtrade", 1_783_392_404_599);
+        let mut event = test_raw_event("binance_aggtrade", 1_783_392_404_599);
+        event.collector_admission = Some(RawEventAdmission {
+            sequence: 1,
+            time_utc_ms: event.recv_time_utc_ms,
+        });
 
         assert_eq!(segment.writer.write_event(&event).unwrap(), 1);
         segment.observe(&event, 1);
@@ -27058,7 +27190,7 @@ mod tests {
             delta.facts["layout_family"],
             "source_specific_hourly_typed_raw"
         );
-        assert_eq!(delta.facts["sort_order"], "receive_order");
+        assert_eq!(delta.facts["sort_order"], "collector_admission_order");
         assert_eq!(delta.facts["compression"], "zstd_level_3");
         assert!(delta.facts.get("required_typed_fields_present").is_none());
         assert_eq!(delta.facts["backfill_rows"], 0);
@@ -27099,18 +27231,21 @@ mod tests {
             manifest["source_counters"]["binance_aggtrade"]["structural_dedupe_dropped_events"],
             1
         );
-        let reconciled = reconcile_open_day_manifest(
-            &day_dir,
-            "2026-07-07",
-            &test_daily_manifest_identity(),
-            &BinanceAggTradeContinuityState::default(),
-        )
-        .unwrap();
+        let reconciled =
+            reconcile_open_day_manifest(&day_dir, "2026-07-07", &test_daily_manifest_identity())
+                .unwrap();
         assert_eq!(reconciled["files"].as_array().unwrap().len(), 1);
         assert_eq!(reconciled["collection_day_coverage"], active_coverage);
 
         let reader =
             SerializedFileReader::new(File::open(&finalized.parquet_path).unwrap()).unwrap();
+        let sort_order = reader
+            .metadata()
+            .file_metadata()
+            .key_value_metadata()
+            .and_then(|metadata| metadata.iter().find(|entry| entry.key == "sort_order"))
+            .and_then(|entry| entry.value.as_deref());
+        assert_eq!(sort_order, Some("collector_admission_order"));
         let fields = reader
             .metadata()
             .file_metadata()
@@ -27124,31 +27259,23 @@ mod tests {
     }
 
     #[test]
-    fn daily_file_facts_count_rest_and_merged_backfill_rows() {
+    fn aggtrade_segment_receive_bounds_allow_admission_order_time_regression() {
         let tmp = tempdir().unwrap();
         let dataset_root = tmp.path().canonicalize().unwrap();
+        let later = 1_783_392_404_600;
+        let earlier = later - 1;
         let naming = HourlyPartitionPolicy::new(&dataset_root)
             .unwrap()
-            .partition("binance_aggtrade", 1_783_392_404_599, None)
+            .partition("binance_aggtrade", later, None)
             .unwrap();
         let mut segment = ActiveSegment::new(naming, "binance_aggtrade", 0).unwrap();
-        for ingest_source in ["rest_backfill", "websocket_rest_merged", "websocket"] {
-            let mut event = test_raw_event("binance_aggtrade", 1_783_392_404_599);
-            let mut raw = serde_json::from_str::<Value>(&event.raw_json).unwrap();
-            raw.as_object_mut()
-                .unwrap()
-                .insert("ingest_source".to_owned(), json!(ingest_source));
-            event.raw_json = raw.to_string();
-            segment.observe(&event, 1);
-        }
+
+        segment.observe(&test_raw_event("binance_aggtrade", later), 1);
+        segment.observe(&test_raw_event("binance_aggtrade", earlier), 1);
 
         let context = SegmentManifestContext::from_segment(&segment);
-        let facts = segment_daily_facts(
-            &context,
-            "shutdown_finalize",
-            &test_runtime_provenance("run"),
-        );
-        assert_eq!(facts["backfill_rows"], 2);
+        assert_eq!(context.segment_start_recv_time_utc_ms, earlier);
+        assert_eq!(context.last_recv_time_utc_ms, later);
     }
 
     #[test]
@@ -27967,11 +28094,8 @@ mod tests {
             counters["2026-07-07"]["binance_depth_update"].dropped_rows,
             2
         );
-        let mut owner = ManifestOwnerState::new(
-            dataset_root.clone(),
-            test_daily_manifest_identity(),
-            BinanceAggTradeContinuityState::default(),
-        );
+        let mut owner =
+            ManifestOwnerState::new(dataset_root.clone(), test_daily_manifest_identity());
         owner.ensure_open("2026-07-07").unwrap();
         owner
             .record_operational_counters("2026-07-07", &counters["2026-07-07"])
@@ -29143,6 +29267,7 @@ mod tests {
                 "next": {"condition_id":"0x02","up_asset_id":"201","down_asset_id":"202"}
             })
             .to_string(),
+            collector_admission: None,
             parquet_raw_layout_version: 1,
             parquet_raw_source_kind: "polymarket_market".to_owned(),
         };
@@ -30176,6 +30301,7 @@ mod tests {
             collector_region: "test".to_owned(),
             source_endpoint: MARKET_WS_ENDPOINT.to_owned(),
             raw_json,
+            collector_admission: None,
             parquet_raw_layout_version: 1,
             parquet_raw_source_kind: "polymarket_market".to_owned(),
         };
@@ -30240,16 +30366,21 @@ mod tests {
             "m": true,
             "M": false
         });
-        let websocket =
-            BinanceWsAggTrade::from_wire(&payload, "btcusdt@aggTrade", recv_time_utc_ms).unwrap();
+        let websocket = BinanceWsAggTrade::from_wire(
+            &payload,
+            "btcusdt@aggTrade",
+            recv_time_utc_ms,
+            BinanceAggTradeIngressCoordinate::Websocket { sequence: 1 },
+        )
+        .unwrap();
         let native_id = websocket.shared.aggregate_trade_id;
         let canonical = websocket.source_native_payload_json.clone();
         let spec = BinanceWsSpec {
             source_kind: "binance_aggtrade".to_owned(),
             default_event_type: "aggTrade".to_owned(),
             url: BINANCE_AGGTRADE_WS.to_owned(),
-            rest_endpoint: BINANCE_AGGTRADE_REST.to_owned(),
-            freshness_timeout_secs: 60,
+            frame_inactivity_timeout_secs: 60,
+            recovery_wait_override: None,
         };
         let event = binance_aggtrade_raw_event(
             &BinanceAggTradeOutput::Websocket(websocket),
@@ -30258,8 +30389,15 @@ mod tests {
                 region: "test".to_owned(),
             },
             &spec,
+            "test-source-epoch",
+            1,
         )
         .unwrap();
+        let mut event = event;
+        event.collector_admission = Some(RawEventAdmission {
+            sequence: 1,
+            time_utc_ms: recv_time_utc_ms,
+        });
         let row = binance_aggtrade_row_from_event(&event).unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&row.source_native_payload_json).unwrap()["websocket"],
@@ -30275,7 +30413,7 @@ mod tests {
         let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
             &source_dir,
             "binance_aggtrade_02",
-            "binance_aggtrade_v5",
+            "binance_aggtrade_v6",
             "binance_aggtrade",
         )
         .unwrap();
@@ -30289,7 +30427,7 @@ mod tests {
             recv_time_utc_ms,
             recv_time_utc_ms,
             "aggTrade",
-            "binance_aggtrade_v5",
+            "binance_aggtrade_v6",
         );
         writer.finalize().unwrap();
 
@@ -30304,15 +30442,175 @@ mod tests {
         );
         let mut changed = payload;
         changed["M"] = Value::Bool(true);
-        let changed_canonical =
-            BinanceWsAggTrade::from_wire(&changed, "btcusdt@aggTrade", recv_time_utc_ms + 1)
-                .unwrap()
-                .source_native_payload_json;
+        let changed_canonical = BinanceWsAggTrade::from_wire(
+            &changed,
+            "btcusdt@aggTrade",
+            recv_time_utc_ms + 1,
+            BinanceAggTradeIngressCoordinate::Websocket { sequence: 2 },
+        )
+        .unwrap()
+        .source_native_payload_json;
         assert_eq!(
             process_b.observe(native_id, changed_canonical.as_bytes()),
             BinanceIdDecision::Conflict,
             "a field outside the WS/REST shared subset is still part of same-source payload identity"
         );
+    }
+
+    #[test]
+    fn binance_aggtrade_v5_recovery_reads_real_legacy_schema_without_synthetic_coordinates() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let day_dir = dataset_root.join("training/typed_raw/utc_day=2026-07-07");
+        let source_dir = day_dir.join("source_kind=binance_aggtrade");
+        fs::create_dir_all(&source_dir).unwrap();
+        let timestamp_received = 1_783_392_404_599;
+        let id = 123_456;
+        let websocket = BinanceWsAggTrade::from_wire(
+            &test_ws_aggtrade_value_at(id, timestamp_received),
+            "btcusdt@aggTrade",
+            timestamp_received,
+            BinanceAggTradeIngressCoordinate::Websocket { sequence: 1 },
+        )
+        .unwrap();
+        let canonical = websocket.source_native_payload_json.clone();
+        let persisted_sources = json!({
+            "websocket": canonical,
+            "rest_backfill": null,
+        })
+        .to_string();
+        let path = source_dir.join("binance_aggtrade_02.parquet");
+        write_real_legacy_v5_aggtrade_file(&path, id, timestamp_received, &persisted_sources);
+
+        let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&path).unwrap()).unwrap();
+        assert!(builder.schema().index_of("record_kind").is_err());
+        assert!(
+            builder
+                .schema()
+                .index_of("collector_admission_sequence")
+                .is_err()
+        );
+
+        let mut restored_websocket = restore_binance_transport_dedupe(&dataset_root).unwrap();
+        assert_eq!(
+            restored_websocket.observe(id, canonical.as_bytes()),
+            BinanceIdDecision::Duplicate
+        );
+    }
+
+    #[test]
+    fn binance_aggtrade_v5_rest_only_does_not_consume_websocket_recovery_window() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let source_dir = dataset_root
+            .join("training/typed_raw/utc_day=2026-07-07")
+            .join("source_kind=binance_aggtrade");
+        fs::create_dir_all(&source_dir).unwrap();
+        let timestamp_received = 1_783_392_404_599;
+        let websocket_id = 100;
+        let websocket = BinanceWsAggTrade::from_wire(
+            &test_ws_aggtrade_value_at(websocket_id, timestamp_received),
+            "btcusdt@aggTrade",
+            timestamp_received,
+            BinanceAggTradeIngressCoordinate::Websocket { sequence: 1 },
+        )
+        .unwrap();
+        let websocket_payload = websocket.source_native_payload_json;
+        let merged_sources = json!({
+            "websocket": websocket_payload,
+            "rest_backfill": json!({"a": websocket_id}).to_string(),
+        })
+        .to_string();
+        write_real_legacy_v5_aggtrade_file(
+            &source_dir.join("binance_aggtrade_01.parquet"),
+            websocket_id,
+            timestamp_received,
+            &merged_sources,
+        );
+        let rest_only_sources = json!({
+            "websocket": null,
+            "rest_backfill": json!({"a": 200}).to_string(),
+        })
+        .to_string();
+        write_real_legacy_v5_aggtrade_file(
+            &source_dir.join("binance_aggtrade_02.parquet"),
+            200,
+            timestamp_received + 1,
+            &rest_only_sources,
+        );
+
+        let mut restored = restore_binance_transport_dedupe_with_limit(&dataset_root, 1).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(
+            restored.observe(websocket_id, websocket_payload.as_bytes()),
+            BinanceIdDecision::Duplicate,
+            "a newer REST-only legacy row must not hide an older merged WS fact"
+        );
+    }
+
+    #[test]
+    fn binance_aggtrade_v6_recovery_skips_invalid_input_rows() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let day_dir = dataset_root.join("training/typed_raw/utc_day=2026-07-07");
+        let source_dir = day_dir.join("source_kind=binance_aggtrade");
+        fs::create_dir_all(&source_dir).unwrap();
+        let timestamp_received = 1_783_392_404_599;
+        let trade = test_aggtrade_hourly_row(100, timestamp_received);
+        let invalid = binance_aggtrade_websocket_invalid_input(
+            br#"{"e":"aggTrade""#.to_vec(),
+            timestamp_received + 1,
+            BINANCE_AGGTRADE_WS,
+            BinanceAggTradeIngressCoordinate::Websocket { sequence: 101 },
+            BinanceAggTradeInvalidReason::InvalidJson,
+            "expected comma",
+        )
+        .unwrap();
+        let mut invalid_event = binance_aggtrade_invalid_raw_event(
+            &invalid,
+            &CollectorIdentity {
+                host_id: "collector-test".to_owned(),
+                region: "local-test".to_owned(),
+            },
+            &BinanceWsSpec {
+                source_kind: "binance_aggtrade".to_owned(),
+                default_event_type: "aggTrade".to_owned(),
+                url: BINANCE_AGGTRADE_WS.to_owned(),
+                frame_inactivity_timeout_secs: 30,
+                recovery_wait_override: None,
+            },
+            "test-source-epoch",
+            1,
+        )
+        .unwrap();
+        invalid_event.collector_admission = Some(RawEventAdmission {
+            sequence: 101,
+            time_utc_ms: timestamp_received + 1,
+        });
+        let invalid_row = binance_aggtrade_row_from_event(&invalid_event).unwrap();
+        let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
+            &source_dir,
+            "binance_aggtrade_02",
+            "binance_aggtrade_v6",
+            "binance_aggtrade",
+        )
+        .unwrap();
+        writer
+            .write_binance_aggtrade_rows(&[trade.clone(), invalid_row])
+            .unwrap();
+        writer.finalize().unwrap();
+
+        let mut restored_websocket = restore_binance_transport_dedupe(&dataset_root).unwrap();
+        let websocket_payload = serde_json::from_str::<Value>(&trade.source_native_payload_json)
+            .unwrap()["websocket"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            restored_websocket.observe(100, websocket_payload.as_bytes()),
+            BinanceIdDecision::Duplicate
+        );
+        assert_eq!(restored_websocket.len(), 1);
     }
 
     #[test]
@@ -30325,7 +30623,7 @@ mod tests {
         let mut prior_writer = TypedParquetSegmentWriter::create_for_typed_source(
             &prior_source_dir,
             "binance_aggtrade_23",
-            "binance_aggtrade_v5",
+            "binance_aggtrade_v6",
             "binance_aggtrade",
         )
         .unwrap();
@@ -30344,9 +30642,18 @@ mod tests {
             1_783_987_100_000,
             1_783_987_100_001,
             "aggTrade",
-            "binance_aggtrade_v5",
+            "binance_aggtrade_v6",
         );
         prior_writer.finalize().unwrap();
+        let legacy_continuity = json!({
+            "latest_epoch": {
+                "epoch_start_id": 90,
+                "last_observed_id": 99,
+                "last_contiguous_id": 99
+            },
+            "unresolved_ranges": [],
+            "initial_coverage_boundary_id": 90
+        });
         crate::daily_manifest::write_json_atomic(
             &prior_day_dir.join("manifest.json"),
             &json!({
@@ -30359,7 +30666,7 @@ mod tests {
                 "collector_host_id": "collector-test",
                 "collector_region": "local-test",
                 "files": [],
-                "binance_aggtrade_continuity": BinanceAggTradeContinuityState::default(),
+                "binance_aggtrade_continuity": legacy_continuity,
             }),
         )
         .unwrap();
@@ -30393,18 +30700,10 @@ mod tests {
             2
         );
         assert_eq!(
-            prior_manifest["binance_aggtrade_continuity"]["latest_epoch"]["last_contiguous_id"],
-            101
+            prior_manifest["binance_aggtrade_continuity"]["latest_epoch"]["last_contiguous_id"], 99,
+            "legacy continuity must be preserved rather than recomputed"
         );
-        assert_eq!(
-            recovered
-                .continuity
-                .latest_epoch
-                .as_ref()
-                .unwrap()
-                .last_contiguous_id,
-            101
-        );
+        assert_eq!(recovered.websocket_dedupe.len(), 2);
 
         let current_day_dir = dataset_root.join("training/typed_raw/utc_day=2026-07-14");
         let current_source_dir = current_day_dir.join("source_kind=binance_aggtrade");
@@ -30412,7 +30711,7 @@ mod tests {
         let mut current_writer = TypedParquetSegmentWriter::create_for_typed_source(
             &current_source_dir,
             "binance_aggtrade_00",
-            "binance_aggtrade_v5",
+            "binance_aggtrade_v6",
             "binance_aggtrade",
         )
         .unwrap();
@@ -30428,7 +30727,7 @@ mod tests {
             1_783_987_200_000,
             1_783_987_200_000,
             "aggTrade",
-            "binance_aggtrade_v5",
+            "binance_aggtrade_v6",
         );
         current_writer.finalize().unwrap();
 
@@ -30438,20 +30737,12 @@ mod tests {
             &test_daily_manifest_identity(),
         )
         .unwrap();
-        assert_eq!(
-            recovered
-                .continuity
-                .latest_epoch
-                .as_ref()
-                .unwrap()
-                .last_contiguous_id,
-            102,
-            "a finalized rename not yet reflected in today's manifest must advance the tail"
-        );
+        assert_eq!(recovered.websocket_dedupe.len(), 3);
         let canonical = BinanceWsAggTrade::from_wire(
-            &test_ws_aggtrade_value(102),
+            &test_ws_aggtrade_value_at(102, 1_783_987_200_000),
             "btcusdt@aggTrade",
             1_783_987_200_000,
+            BinanceAggTradeIngressCoordinate::Websocket { sequence: 102 },
         )
         .unwrap()
         .source_native_payload_json;
@@ -30471,15 +30762,15 @@ mod tests {
         let current_day_dir = dataset_root.join("training/typed_raw/utc_day=2026-07-14");
         fs::create_dir_all(&prior_day_dir).unwrap();
         fs::create_dir_all(&current_day_dir).unwrap();
-        let continuity = BinanceAggTradeContinuityState {
-            latest_epoch: Some(crate::binance_aggtrade::BinanceAggTradeContinuityEpoch {
-                epoch_start_id: 90,
-                last_observed_id: 99,
-                last_contiguous_id: 99,
-            }),
-            unresolved_ranges: Vec::new(),
-            initial_coverage_boundary_id: Some(90),
-        };
+        let continuity = json!({
+            "latest_epoch": {
+                "epoch_start_id": 90,
+                "last_observed_id": 99,
+                "last_contiguous_id": 99
+            },
+            "unresolved_ranges": [],
+            "initial_coverage_boundary_id": 90
+        });
         crate::daily_manifest::write_json_atomic(
             &prior_day_dir.join("manifest.json"),
             &json!({
@@ -30492,7 +30783,7 @@ mod tests {
                 "collector_host_id": "collector-test",
                 "collector_region": "local-test",
                 "files": [],
-                "binance_aggtrade_continuity": continuity,
+                "binance_aggtrade_continuity": continuity.clone(),
             }),
         )
         .unwrap();
@@ -30508,7 +30799,7 @@ mod tests {
                 "collector_host_id": "collector-test",
                 "collector_region": "local-test",
                 "files": [],
-                "binance_aggtrade_continuity": continuity,
+                "binance_aggtrade_continuity": continuity.clone(),
             }),
         )
         .unwrap();
@@ -30519,9 +30810,11 @@ mod tests {
             &test_daily_manifest_identity(),
         )
         .unwrap();
-        assert_eq!(recovered.continuity, continuity);
         assert!(recovered.websocket_dedupe.is_empty());
-        assert!(recovered.rest_dedupe.is_empty());
+        assert_eq!(
+            load_day_manifest(&current_day_dir).unwrap().unwrap()["binance_aggtrade_continuity"],
+            continuity
+        );
     }
 
     #[test]
@@ -30712,7 +31005,7 @@ mod tests {
         let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
             &source_dir,
             "binance_aggtrade_00",
-            "binance_aggtrade_v5",
+            "binance_aggtrade_v6",
             "binance_aggtrade",
         )
         .unwrap();
@@ -30729,7 +31022,7 @@ mod tests {
             1_783_900_800_001,
             1_783_900_825_002,
             "aggTrade",
-            "binance_aggtrade_v5",
+            "binance_aggtrade_v6",
         );
         writer.finalize().unwrap();
 
@@ -30742,10 +31035,12 @@ mod tests {
         .websocket_dedupe;
         assert_eq!(recovered.len(), BINANCE_AGGTRADE_RECOVERY_IDS);
         let canonical = |id| {
+            let timestamp = 1_783_900_800_000 + i64::try_from(id).unwrap();
             BinanceWsAggTrade::from_wire(
-                &test_ws_aggtrade_value(id),
+                &test_ws_aggtrade_value_at(id, timestamp),
                 "btcusdt@aggTrade",
-                1_783_900_800_000,
+                timestamp,
+                BinanceAggTradeIngressCoordinate::Websocket { sequence: id },
             )
             .unwrap()
             .source_native_payload_json
@@ -30805,6 +31100,7 @@ mod tests {
                 "source_native_payload_json": canonical,
             })
             .to_string(),
+            collector_admission: None,
             parquet_raw_layout_version: 1,
             parquet_raw_source_kind: "polymarket_rtds_chainlink_btc_usd".to_owned(),
         };
@@ -31248,11 +31544,8 @@ mod tests {
                 .iter()
                 .any(|gap| gap == "writer_missing_for_source:binance_aggtrade")
         );
-        let mut owner = ManifestOwnerState::new(
-            dataset_root.clone(),
-            test_daily_manifest_identity(),
-            BinanceAggTradeContinuityState::default(),
-        );
+        let mut owner =
+            ManifestOwnerState::new(dataset_root.clone(), test_daily_manifest_identity());
         owner.ensure_open("2026-07-07").unwrap();
         let counters = runtime_stats.drain_all_operational();
         owner
@@ -31485,8 +31778,8 @@ mod tests {
                 source_kind: "binance_aggtrade".to_owned(),
                 default_event_type: "aggTrade".to_owned(),
                 url,
-                rest_endpoint: "http://127.0.0.1:9/api/v3/aggTrades".to_owned(),
-                freshness_timeout_secs: 10,
+                frame_inactivity_timeout_secs: 10,
+                recovery_wait_override: None,
             },
             sink,
             CollectorIdentity {
@@ -31510,13 +31803,84 @@ mod tests {
             serde_json::from_str::<Value>(&event.raw_json).unwrap()["event_type"],
             "aggTrade"
         );
+        assert_eq!(
+            serde_json::from_str::<Value>(&event.raw_json).unwrap()["connection_generation"],
+            2,
+            "the business row after reconnect must identify the second socket generation"
+        );
         source.abort();
         let _ = source.await;
         server.await.unwrap();
     }
 
     #[tokio::test]
-    async fn binance_ping_does_not_reset_business_message_freshness() {
+    async fn binance_handshake_failure_recovers_without_allocating_a_connection_generation() {
+        let dataset_root = tempdir().unwrap();
+        let dataset_root_path = dataset_root.path().canonicalize().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (failed_handshake, _) = listener.accept().await.unwrap();
+            drop(failed_handshake);
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut websocket = accept_async(socket).await.unwrap();
+            websocket
+                .send(test_aggtrade_message_for_id(100))
+                .await
+                .unwrap();
+        });
+
+        let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(4).unwrap();
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let (_control_tx, control_rx) = mpsc::channel(AGGTRADE_CONTROL_CHANNEL_CAPACITY);
+        let source = tokio::spawn(run_binance_ws_source(
+            restore_binance_aggtrade_recovery(
+                &dataset_root_path,
+                &utc_day_string_from_ms(now_ms()).unwrap(),
+                &test_daily_manifest_identity(),
+            )
+            .unwrap(),
+            BinanceWsSpec {
+                source_kind: "binance_aggtrade".to_owned(),
+                default_event_type: "aggTrade".to_owned(),
+                url,
+                frame_inactivity_timeout_secs: 5,
+                recovery_wait_override: None,
+            },
+            SourceEventSink {
+                tx,
+                gaps: Arc::clone(&gaps),
+                source_queue_backpressure: stats,
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            CollectorIdentity {
+                host_id: "collector-test".to_owned(),
+                region: "local-test".to_owned(),
+            },
+            Some(Instant::now() + Duration::from_secs(5)),
+            Instant::now(),
+            control_rx,
+        ));
+
+        let event = timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("the source must recover after the failed handshake")
+            .expect("source queue must remain open")
+            .event;
+        let envelope: Value = serde_json::from_str(&event.raw_json).unwrap();
+        assert_eq!(envelope["connection_generation"], 1);
+        assert!(gaps.lock().unwrap().all_reasons().is_empty());
+
+        source.abort();
+        let _ = source.await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn binance_frame_inactivity_reconnects_with_stable_epoch_and_no_gap() {
         let dataset_root = tempdir().unwrap();
         let dataset_root_path = dataset_root.path().canonicalize().unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -31524,23 +31888,264 @@ mod tests {
         let server = tokio::spawn(async move {
             let (first, _) = listener.accept().await.unwrap();
             let mut first = accept_async(first).await.unwrap();
-            let (second, _) = loop {
-                tokio::select! {
-                    accepted = listener.accept() => break accepted.unwrap(),
-                    () = sleep(Duration::from_millis(50)) => {
-                        if first
-                            .send(Message::Ping(Vec::<u8>::new().into()))
-                            .await
-                            .is_err()
-                        {
-                            break listener.accept().await.unwrap();
-                        }
-                    }
-                }
-            };
-
+            first.send(test_aggtrade_message_for_id(100)).await.unwrap();
+            let (second, _) = timeout(Duration::from_secs(4), listener.accept())
+                .await
+                .expect("full-frame inactivity must create a replacement connection")
+                .unwrap();
             let mut second = accept_async(second).await.unwrap();
-            second.send(test_aggtrade_message()).await.unwrap();
+            second
+                .send(test_aggtrade_message_for_id(101))
+                .await
+                .unwrap();
+        });
+
+        let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(4).unwrap();
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let (_control_tx, control_rx) = mpsc::channel(AGGTRADE_CONTROL_CHANNEL_CAPACITY);
+        let source = tokio::spawn(run_binance_ws_source(
+            restore_binance_aggtrade_recovery(
+                &dataset_root_path,
+                &utc_day_string_from_ms(now_ms()).unwrap(),
+                &test_daily_manifest_identity(),
+            )
+            .unwrap(),
+            BinanceWsSpec {
+                source_kind: "binance_aggtrade".to_owned(),
+                default_event_type: "aggTrade".to_owned(),
+                url,
+                frame_inactivity_timeout_secs: 1,
+                recovery_wait_override: None,
+            },
+            SourceEventSink {
+                tx,
+                gaps: Arc::clone(&gaps),
+                source_queue_backpressure: stats,
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            CollectorIdentity {
+                host_id: "collector-test".to_owned(),
+                region: "local-test".to_owned(),
+            },
+            Some(Instant::now() + Duration::from_secs(6)),
+            Instant::now(),
+            control_rx,
+        ));
+
+        let mut envelopes = Vec::new();
+        while envelopes.len() < 2 {
+            let event = timeout(Duration::from_secs(4), rx.recv())
+                .await
+                .expect("both socket generations must deliver their trade")
+                .expect("source queue must remain open")
+                .event;
+            envelopes.push(serde_json::from_str::<Value>(&event.raw_json).unwrap());
+        }
+        assert_eq!(envelopes[0]["connection_generation"], 1);
+        assert_eq!(envelopes[1]["connection_generation"], 2);
+        assert_eq!(
+            envelopes[0]["source_sequence_epoch_id"],
+            envelopes[1]["source_sequence_epoch_id"]
+        );
+        assert!(gaps.lock().unwrap().all_reasons().is_empty());
+
+        source.abort();
+        let _ = source.await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn binance_protocol_error_reconnects_in_process_without_gap() {
+        let dataset_root = tempdir().unwrap();
+        let dataset_root_path = dataset_root.path().canonicalize().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (first, _) = listener.accept().await.unwrap();
+            let mut first = accept_async(first).await.unwrap();
+            first.get_mut().write_all(&[0x83, 0x00]).await.unwrap();
+            first.get_mut().flush().await.unwrap();
+            let (second, _) = timeout(Duration::from_secs(3), listener.accept())
+                .await
+                .expect("a WebSocket protocol error must create a replacement connection")
+                .unwrap();
+            let mut second = accept_async(second).await.unwrap();
+            second
+                .send(test_aggtrade_message_for_id(100))
+                .await
+                .unwrap();
+        });
+
+        let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(4).unwrap();
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let (_control_tx, control_rx) = mpsc::channel(AGGTRADE_CONTROL_CHANNEL_CAPACITY);
+        let source = tokio::spawn(run_binance_ws_source(
+            restore_binance_aggtrade_recovery(
+                &dataset_root_path,
+                &utc_day_string_from_ms(now_ms()).unwrap(),
+                &test_daily_manifest_identity(),
+            )
+            .unwrap(),
+            BinanceWsSpec {
+                source_kind: "binance_aggtrade".to_owned(),
+                default_event_type: "aggTrade".to_owned(),
+                url,
+                frame_inactivity_timeout_secs: 5,
+                recovery_wait_override: None,
+            },
+            SourceEventSink {
+                tx,
+                gaps: Arc::clone(&gaps),
+                source_queue_backpressure: stats,
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            CollectorIdentity {
+                host_id: "collector-test".to_owned(),
+                region: "local-test".to_owned(),
+            },
+            Some(Instant::now() + Duration::from_secs(5)),
+            Instant::now(),
+            control_rx,
+        ));
+
+        let event = timeout(Duration::from_secs(4), rx.recv())
+            .await
+            .expect("the source must recover after a WebSocket protocol error")
+            .expect("source queue must remain open")
+            .event;
+        let envelope: Value = serde_json::from_str(&event.raw_json).unwrap();
+        assert_eq!(envelope["connection_generation"], 2);
+        assert!(gaps.lock().unwrap().all_reasons().is_empty());
+
+        source.abort();
+        let _ = source.await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn binance_one_hundred_reconnects_keep_one_source_loop_and_reach_generation_101() {
+        let dataset_root = tempdir().unwrap();
+        let dataset_root_path = dataset_root.path().canonicalize().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let (final_release_tx, final_release_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut fd_counts = Vec::with_capacity(101);
+            for _ in 0..100 {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut websocket = accept_async(socket).await.unwrap();
+                fd_counts.push(fs::read_dir("/proc/self/fd").unwrap().count());
+                websocket.send(Message::Close(None)).await.unwrap();
+            }
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut websocket = accept_async(socket).await.unwrap();
+            fd_counts.push(fs::read_dir("/proc/self/fd").unwrap().count());
+            websocket
+                .send(test_aggtrade_message_for_id(100))
+                .await
+                .unwrap();
+            let _ = final_release_rx.await;
+            fd_counts
+        });
+
+        let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(4).unwrap();
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let (_control_tx, control_rx) = mpsc::channel(AGGTRADE_CONTROL_CHANNEL_CAPACITY);
+        let source = tokio::spawn(run_binance_ws_source(
+            restore_binance_aggtrade_recovery(
+                &dataset_root_path,
+                &utc_day_string_from_ms(now_ms()).unwrap(),
+                &test_daily_manifest_identity(),
+            )
+            .unwrap(),
+            BinanceWsSpec {
+                source_kind: "binance_aggtrade".to_owned(),
+                default_event_type: "aggTrade".to_owned(),
+                url,
+                frame_inactivity_timeout_secs: 30,
+                recovery_wait_override: Some(Duration::from_millis(1)),
+            },
+            SourceEventSink {
+                tx,
+                gaps: Arc::clone(&gaps),
+                source_queue_backpressure: Arc::clone(&stats),
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            CollectorIdentity {
+                host_id: "collector-test".to_owned(),
+                region: "local-test".to_owned(),
+            },
+            Some(Instant::now() + Duration::from_secs(10)),
+            Instant::now(),
+            control_rx,
+        ));
+
+        let event = timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("the same source loop must survive one hundred reconnects")
+            .expect("source queue must remain open")
+            .event;
+        let envelope: Value = serde_json::from_str(&event.raw_json).unwrap();
+        assert_eq!(envelope["connection_generation"], 101);
+        assert_eq!(
+            stats
+                .drain_all_operational()
+                .values()
+                .find_map(|sources| sources.get("binance_aggtrade"))
+                .unwrap()
+                .reconnect_events,
+            100
+        );
+        assert!(gaps.lock().unwrap().all_reasons().is_empty());
+        assert!(!source.is_finished());
+
+        let _ = final_release_tx.send(());
+        source.abort();
+        let _ = source.await;
+        let fd_counts = server.await.unwrap();
+        assert_eq!(fd_counts.len(), 101);
+        let first = fd_counts[0];
+        let last = *fd_counts.last().unwrap();
+        let minimum = *fd_counts.iter().min().unwrap();
+        let maximum = *fd_counts.iter().max().unwrap();
+        assert!(
+            last <= first + 2 && maximum <= minimum + 4,
+            "connection FDs must remain bounded across reconnects: first={first}, last={last}, min={minimum}, max={maximum}"
+        );
+    }
+
+    #[tokio::test]
+    async fn binance_ping_keeps_socket_alive_during_business_silence() {
+        let dataset_root = tempdir().unwrap();
+        let dataset_root_path = dataset_root.path().canonicalize().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut websocket = accept_async(socket).await.unwrap();
+            for _ in 0..25 {
+                websocket
+                    .send(Message::Ping(Vec::<u8>::new().into()))
+                    .await
+                    .unwrap();
+                sleep(Duration::from_millis(50)).await;
+            }
+            websocket.send(test_aggtrade_message()).await.unwrap();
+            assert!(
+                timeout(Duration::from_millis(200), listener.accept())
+                    .await
+                    .is_err(),
+                "business silence with valid Ping frames must not create a second connection"
+            );
         });
 
         let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(8).unwrap();
@@ -31558,8 +32163,8 @@ mod tests {
                 source_kind: "binance_aggtrade".to_owned(),
                 default_event_type: "aggTrade".to_owned(),
                 url,
-                rest_endpoint: "http://127.0.0.1:9/api/v3/aggTrades".to_owned(),
-                freshness_timeout_secs: 1,
+                frame_inactivity_timeout_secs: 1,
+                recovery_wait_override: None,
             },
             SourceEventSink {
                 tx,
@@ -31579,10 +32184,15 @@ mod tests {
 
         let event = timeout(Duration::from_secs(3), rx.recv())
             .await
-            .expect("freshness timeout should reconnect despite Ping frames")
+            .expect("aggTrade should arrive on the original Ping-kept socket")
             .expect("source queue should stay open")
             .event;
         assert_eq!(event.source_event_type, "aggTrade");
+        assert_eq!(
+            serde_json::from_str::<Value>(&event.raw_json).unwrap()["connection_generation"],
+            1,
+            "Ping-kept business silence must stay on the original socket"
+        );
 
         source.abort();
         let _ = source.await;
@@ -31590,23 +32200,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn binance_aggtrade_schema_errors_are_process_fatal() {
-        for (frame, expected) in [
-            ("{not-json".to_owned(), "ws_invalid_json"),
-            (
-                json!({"s": "BTCUSDT", "a": 1_u64}).to_string(),
-                "ws_missing_event_type",
-            ),
-            (
-                json!({"e": "depthUpdate", "s": "BTCUSDT"}).to_string(),
-                "ws_unexpected_event_type:depthUpdate",
-            ),
-        ] {
-            assert_binance_aggtrade_schema_error_is_fatal(frame, expected).await;
-        }
-    }
-
-    async fn assert_binance_aggtrade_schema_error_is_fatal(frame: String, expected: &str) {
+    async fn binance_aggtrade_id_jump_is_forwarded_immediately_without_reconnect_or_gap() {
         let dataset_root = tempdir().unwrap();
         let dataset_root_path = dataset_root.path().canonicalize().unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -31614,10 +32208,32 @@ mod tests {
         let server = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
             let mut websocket = accept_async(socket).await.unwrap();
-            websocket.send(Message::Text(frame.into())).await.unwrap();
-            sleep(Duration::from_millis(100)).await;
+            for id in [100, 103] {
+                websocket
+                    .send(test_aggtrade_message_for_id(id))
+                    .await
+                    .unwrap();
+            }
+            websocket
+                .send(Message::Text("{not-json".into()))
+                .await
+                .unwrap();
+            websocket
+                .send(test_aggtrade_message_for_id(104))
+                .await
+                .unwrap();
+            assert!(
+                timeout(Duration::from_millis(300), listener.accept())
+                    .await
+                    .is_err(),
+                "an aggregate-trade ID jump must not create a second connection"
+            );
         });
-        let (tx, _rx) = bounded_event_queue::<InflightRawEvent>(8).unwrap();
+
+        let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(8).unwrap();
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
         let (_control_tx, control_rx) = mpsc::channel(AGGTRADE_CONTROL_CHANNEL_CAPACITY);
         let source = tokio::spawn(run_binance_ws_source(
             restore_binance_aggtrade_recovery(
@@ -31630,13 +32246,13 @@ mod tests {
                 source_kind: "binance_aggtrade".to_owned(),
                 default_event_type: "aggTrade".to_owned(),
                 url,
-                rest_endpoint: "http://127.0.0.1:9/api/v3/aggTrades".to_owned(),
-                freshness_timeout_secs: 5,
+                frame_inactivity_timeout_secs: 5,
+                recovery_wait_override: None,
             },
             SourceEventSink {
                 tx,
-                gaps: Arc::new(Mutex::new(SourceGapStore::default())),
-                source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+                gaps: Arc::clone(&gaps),
+                source_queue_backpressure: stats,
                 inflight_budget: InflightBudget::new(),
                 enqueue_lock: Arc::new(AsyncMutex::new(())),
             },
@@ -31644,58 +32260,96 @@ mod tests {
                 host_id: "collector-test".to_owned(),
                 region: "local-test".to_owned(),
             },
-            Some(Instant::now() + Duration::from_secs(2)),
+            Some(Instant::now() + Duration::from_secs(5)),
             Instant::now(),
             control_rx,
         ));
 
-        let error = timeout(Duration::from_secs(1), source)
-            .await
-            .expect("schema error must terminate the source promptly")
-            .unwrap()
-            .expect_err("schema error must propagate as a process-level source failure");
-        assert!(error.to_string().contains(expected), "{error}");
+        let mut events = Vec::new();
+        while events.len() < 4 {
+            let inflight = timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("all jumped-ID rows must be forwarded immediately")
+                .expect("source queue must remain open");
+            if inflight.control.is_none() {
+                events.push(inflight.event);
+            }
+        }
+        let envelopes = events
+            .iter()
+            .map(|event| serde_json::from_str::<Value>(&event.raw_json).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.source_event_type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["aggTrade", "aggTrade", "invalid_input", "aggTrade"]
+        );
+        assert_eq!(
+            envelopes
+                .iter()
+                .filter(|value| value["record_kind"] == "trade")
+                .map(|value| value["aggregate_trade_id"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![100, 103, 104]
+        );
+        assert_eq!(
+            envelopes
+                .iter()
+                .map(|value| value["websocket_ingress_sequence"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        assert!(
+            envelopes
+                .iter()
+                .all(|value| value["connection_generation"] == 1)
+        );
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.collector_admission.as_ref().unwrap().sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        assert!(
+            gaps.lock().unwrap().all_reasons().is_empty(),
+            "aggregate-trade ID jumps are neutral observations, not confirmed gaps"
+        );
+
+        source.abort();
+        let _ = source.await;
         server.await.unwrap();
     }
 
     #[tokio::test]
-    async fn binance_aggtrade_stop_flushes_pending_before_source_exit() {
+    async fn binance_aggtrade_payload_conflict_preserves_both_facts_and_records_conflict() {
         let dataset_root = tempdir().unwrap();
         let dataset_root_path = dataset_root.path().canonicalize().unwrap();
-        let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let ws_url = format!("ws://{}", ws_listener.local_addr().unwrap());
-        let ws_server = tokio::spawn(async move {
-            let (socket, _) = ws_listener.accept().await.unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
             let mut websocket = accept_async(socket).await.unwrap();
             websocket
                 .send(test_aggtrade_message_for_id(100))
                 .await
                 .unwrap();
+            let mut conflicting = test_ws_aggtrade_value(100);
+            conflicting["p"] = Value::String("99999.99".to_owned());
             websocket
-                .send(test_aggtrade_message_for_id(103))
+                .send(Message::Text(conflicting.to_string().into()))
                 .await
                 .unwrap();
-            sleep(Duration::from_secs(5)).await;
+            sleep(Duration::from_millis(200)).await;
         });
-        let rest_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let rest_endpoint = format!(
-            "http://{}/api/v3/aggTrades",
-            rest_listener.local_addr().unwrap()
-        );
-        let (rest_started_tx, rest_started_rx) = oneshot::channel();
-        let rest_server = tokio::spawn(async move {
-            let (mut socket, _) = rest_listener.accept().await.unwrap();
-            let mut request = [0_u8; 2048];
-            let _ = socket.read(&mut request).await.unwrap();
-            let _ = rest_started_tx.send(());
-            sleep(Duration::from_secs(5)).await;
-        });
-        let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(32).unwrap();
+
+        let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(4).unwrap();
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
-        let inflight_budget = InflightBudget::new();
-        let runtime_stats = Arc::new(SourceQueueBackpressureStats::default());
-        install_active_raw_day_gate(&runtime_stats, now_ms()).await;
-        let (control_tx, control_rx) = mpsc::channel(AGGTRADE_CONTROL_CHANNEL_CAPACITY);
+        let (_control_tx, control_rx) = mpsc::channel(AGGTRADE_CONTROL_CHANNEL_CAPACITY);
         let source = tokio::spawn(run_binance_ws_source(
             restore_binance_aggtrade_recovery(
                 &dataset_root_path,
@@ -31706,158 +32360,272 @@ mod tests {
             BinanceWsSpec {
                 source_kind: "binance_aggtrade".to_owned(),
                 default_event_type: "aggTrade".to_owned(),
-                url: ws_url,
-                rest_endpoint,
-                freshness_timeout_secs: 5,
+                url,
+                frame_inactivity_timeout_secs: 5,
+                recovery_wait_override: None,
             },
             SourceEventSink {
                 tx,
                 gaps: Arc::clone(&gaps),
-                source_queue_backpressure: runtime_stats,
-                inflight_budget: inflight_budget.clone(),
+                source_queue_backpressure: stats,
+                inflight_budget: InflightBudget::new(),
                 enqueue_lock: Arc::new(AsyncMutex::new(())),
             },
             CollectorIdentity {
                 host_id: "collector-test".to_owned(),
                 region: "local-test".to_owned(),
             },
-            Some(Instant::now() + Duration::from_secs(10)),
+            Some(Instant::now() + Duration::from_secs(4)),
             Instant::now(),
             control_rx,
         ));
 
-        rest_started_rx.await.unwrap();
-        let utc_day = utc_day_string_from_ms(now_ms()).unwrap();
-        let (reply_tx, reply_rx) = oneshot::channel();
-        control_tx
-            .send(AggTradeSourceControl::Flush {
-                reason: "operator_shutdown".to_owned(),
-                utc_day,
-                stop_after_flush: true,
-                resume_after_barrier: None,
-                reply: reply_tx,
-            })
-            .await
-            .unwrap();
-        timeout(Duration::from_secs(2), reply_rx)
-            .await
-            .expect("coordinated flush reply must be bounded")
-            .unwrap()
-            .unwrap();
-        timeout(Duration::from_secs(2), source)
-            .await
-            .expect("source must exit after stop flush")
-            .unwrap()
-            .unwrap();
-
-        let mut data_ids = Vec::new();
-        let mut last_data_index = None;
-        let mut continuity_indexes = Vec::new();
-        let mut index = 0;
-        while let Ok(message) = rx.try_recv() {
-            match message.control {
-                Some(IngressControl::BinanceContinuity { .. }) => {
-                    continuity_indexes.push(index);
-                }
-                Some(IngressControl::FinalizeSourceHour { .. }) => {}
-                Some(IngressControl::DayBarrier { .. }) => {}
-                None => {
-                    data_ids.push(
-                        serde_json::from_str::<Value>(&message.event.raw_json).unwrap()
-                            ["aggregate_trade_id"]
-                            .as_u64()
-                            .unwrap(),
-                    );
-                    last_data_index = Some(index);
-                }
-            }
-            index += 1;
+        let mut envelopes = Vec::new();
+        while envelopes.len() < 2 {
+            let event = timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("both conflicting payload facts must be forwarded")
+                .expect("source queue must remain open")
+                .event;
+            envelopes.push(serde_json::from_str::<Value>(&event.raw_json).unwrap());
         }
-        assert_eq!(data_ids, vec![100, 103]);
-        assert!(
-            continuity_indexes
-                .iter()
-                .any(|continuity| Some(*continuity) > last_data_index),
-            "final continuity must follow the flushed pending event"
-        );
-        let recorded_gaps = gaps.lock().unwrap().all_reasons();
-        assert!(
-            recorded_gaps
-                .iter()
-                .any(|gap| { gap == "binance_aggtrade_backfill_failed:operator_shutdown" })
-        );
-        assert!(
-            recorded_gaps
-                .iter()
-                .any(|gap| gap == "binance_aggtrade_unresolved_range:101-102")
-        );
+        assert!(envelopes.iter().all(|value| {
+            value["aggregate_trade_id"] == 100 && value["connection_generation"] == 1
+        }));
         assert_eq!(
-            inflight_budget.available(),
-            (GLOBAL_INFLIGHT_MAX_ROWS, GLOBAL_INFLIGHT_MAX_BYTES)
+            envelopes
+                .iter()
+                .map(|value| value["websocket_ingress_sequence"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![1, 2]
         );
-        rest_server.abort();
-        let _ = rest_server.await;
-        ws_server.abort();
-        let _ = ws_server.await;
+        assert_ne!(envelopes[0]["price"], envelopes[1]["price"]);
+        assert!(
+            gaps.lock()
+                .unwrap()
+                .all_reasons()
+                .iter()
+                .any(|reason| reason == "binance_aggtrade_payload_conflict:id=100")
+        );
+
+        source.abort();
+        let _ = source.await;
+        server.await.unwrap();
     }
 
     #[tokio::test]
-    async fn binance_gap_backfills_while_later_websocket_rows_stay_pending() {
+    async fn binance_aggtrade_invalid_text_frames_are_preserved_and_same_socket_continues() {
         let dataset_root = tempdir().unwrap();
         let dataset_root_path = dataset_root.path().canonicalize().unwrap();
-        let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let ws_url = format!("ws://{}", ws_listener.local_addr().unwrap());
-        let ws_server = tokio::spawn(async move {
-            let (socket, _) = ws_listener.accept().await.unwrap();
-            let mut socket = accept_async(socket).await.unwrap();
-            socket
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let mut wrong_symbol = test_ws_aggtrade_value(901);
+        wrong_symbol["s"] = Value::String("ETHUSDT".to_owned());
+        let wrapped_payload = test_ws_aggtrade_value(902);
+        let invalid_frames = vec![
+            "{not-json".to_owned(),
+            "{not-json".to_owned(),
+            json!({"s": "BTCUSDT", "a": 1_u64}).to_string(),
+            json!({"e": "depthUpdate", "s": "BTCUSDT"}).to_string(),
+            wrong_symbol.to_string(),
+            json!({"data": wrapped_payload}).to_string(),
+            json!({"stream": 7, "data": test_ws_aggtrade_value(903)}).to_string(),
+            json!({
+                "stream": "ethusdt@aggTrade",
+                "data": test_ws_aggtrade_value(904)
+            })
+            .to_string(),
+        ];
+        let expected_retained_rows = invalid_frames.len() + 2;
+        let server_frames = invalid_frames.clone();
+        let (frames_sent_tx, frames_sent_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut websocket = accept_async(socket).await.unwrap();
+            websocket
                 .send(test_aggtrade_message_for_id(100))
                 .await
                 .unwrap();
-            socket
-                .send(test_aggtrade_message_for_id(103))
+            for frame in server_frames {
+                websocket.send(Message::Text(frame.into())).await.unwrap();
+                sleep(Duration::from_millis(150)).await;
+            }
+            websocket
+                .send(test_aggtrade_message_for_id(100))
                 .await
                 .unwrap();
-            sleep(Duration::from_millis(25)).await;
-            socket
-                .send(test_aggtrade_message_for_id(104))
+            websocket
+                .send(test_aggtrade_message_for_id(101))
                 .await
                 .unwrap();
-            sleep(Duration::from_secs(2)).await;
-        });
-
-        let rest_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let rest_endpoint = format!(
-            "http://{}/api/v3/aggTrades",
-            rest_listener.local_addr().unwrap()
-        );
-        let rest_server = tokio::spawn(async move {
-            let (mut socket, _) = rest_listener.accept().await.unwrap();
-            let mut request = vec![0_u8; 4_096];
-            let read = socket.read(&mut request).await.unwrap();
-            let request = String::from_utf8(request[..read].to_vec()).unwrap();
-            let request_line = request.lines().next().unwrap();
-            assert!(request_line.contains("symbol=BTCUSDT"));
-            assert!(request_line.contains("fromId=101"));
-            assert!(request_line.contains("limit=3"));
-            sleep(Duration::from_millis(100)).await;
-            let body = serde_json::to_string(
-                &(101_u64..=103)
-                    .map(test_rest_aggtrade_value)
-                    .collect::<Vec<_>>(),
-            )
-            .unwrap();
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
+            frames_sent_tx.send(()).unwrap();
+            assert!(
+                timeout(Duration::from_millis(200), listener.accept())
+                    .await
+                    .is_err(),
+                "invalid application frames must rearm inactivity on the same socket"
             );
-            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(16).unwrap();
+        let (_control_tx, control_rx) = mpsc::channel(AGGTRADE_CONTROL_CHANNEL_CAPACITY);
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
+        let source = tokio::spawn(run_binance_ws_source(
+            restore_binance_aggtrade_recovery(
+                &dataset_root_path,
+                &utc_day_string_from_ms(now_ms()).unwrap(),
+                &test_daily_manifest_identity(),
+            )
+            .unwrap(),
+            BinanceWsSpec {
+                source_kind: "binance_aggtrade".to_owned(),
+                default_event_type: "aggTrade".to_owned(),
+                url,
+                frame_inactivity_timeout_secs: 1,
+                recovery_wait_override: None,
+            },
+            SourceEventSink {
+                tx,
+                gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+                source_queue_backpressure: Arc::clone(&stats),
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            CollectorIdentity {
+                host_id: "collector-test".to_owned(),
+                region: "local-test".to_owned(),
+            },
+            Some(Instant::now() + Duration::from_secs(8)),
+            Instant::now(),
+            control_rx,
+        ));
+
+        frames_sent_rx.await.unwrap();
+        timeout(Duration::from_secs(1), async {
+            while stats.aggtrade_admission_sequence.load(Ordering::Relaxed)
+                < u64::try_from(expected_retained_rows).unwrap()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("source must transfer all retained rows without a writer acknowledgement");
+
+        let mut events = Vec::new();
+        while events.len() < expected_retained_rows {
+            let inflight = timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("invalid and following valid frames must reach the source queue")
+                .expect("source queue must remain open");
+            if inflight.control.is_none() {
+                events.push(inflight.event);
+            }
+        }
+        assert_eq!(events[0].source_event_type, "aggTrade");
+        let first_trade: Value = serde_json::from_str(&events[0].raw_json).unwrap();
+        assert_eq!(first_trade["websocket_ingress_sequence"], 1);
+        assert_eq!(first_trade["connection_generation"], 1);
+        assert_eq!(events[0].collector_admission.as_ref().unwrap().sequence, 1);
+        for (index, expected_frame) in invalid_frames.iter().enumerate() {
+            let event = &events[index + 1];
+            assert_eq!(event.source_event_type, "invalid_input");
+            assert_eq!(
+                event.collector_admission.as_ref().unwrap().sequence,
+                u64::try_from(index + 2).unwrap()
+            );
+            let envelope: Value = serde_json::from_str(&event.raw_json).unwrap();
+            assert_eq!(envelope["connection_generation"], 1);
+            assert_eq!(
+                envelope["websocket_ingress_sequence"].as_u64().unwrap(),
+                u64::try_from(index + 2).unwrap()
+            );
+            let evidence: Value =
+                serde_json::from_str(envelope["source_native_payload_json"].as_str().unwrap())
+                    .unwrap();
+            assert_eq!(evidence["payload_capture_status"], "complete");
+            assert_eq!(
+                evidence["payload_base64"],
+                base64::engine::general_purpose::STANDARD.encode(expected_frame.as_bytes())
+            );
+        }
+        let final_event = events.last().unwrap();
+        assert_eq!(final_event.source_event_type, "aggTrade");
+        let second_trade: Value = serde_json::from_str(&final_event.raw_json).unwrap();
+        assert_eq!(second_trade["connection_generation"], 1);
+        assert_eq!(
+            second_trade["websocket_ingress_sequence"],
+            u64::try_from(invalid_frames.len() + 3).unwrap()
+        );
+        assert_eq!(
+            final_event.collector_admission.as_ref().unwrap().sequence,
+            u64::try_from(expected_retained_rows).unwrap()
+        );
+        let operational = stats.drain_all_operational();
+        let aggtrade = operational
+            .values()
+            .find_map(|sources| sources.get("binance_aggtrade"))
+            .unwrap();
+        assert_eq!(aggtrade.structural_dedupe_dropped_events, 1);
+        assert!(
+            !source.is_finished(),
+            "invalid frames must not terminate the source"
+        );
+        let rows = events
+            .iter()
+            .map(binance_aggtrade_row_from_event)
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        let writer_dir = dataset_root_path.join("writer-recovery");
+        fs::create_dir_all(&writer_dir).unwrap();
+        let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
+            &writer_dir,
+            "binance_aggtrade_00",
+            "binance_aggtrade_v6",
+            "binance_aggtrade",
+        )
+        .unwrap();
+        writer.write_binance_aggtrade_rows(&rows).unwrap();
+        assert_eq!(
+            writer.finalize().unwrap().row_count,
+            u64::try_from(expected_retained_rows).unwrap(),
+            "all rows accepted while the writer was paused must remain writable after recovery"
+        );
+
+        source.abort();
+        let _ = source.await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn binance_aggtrade_binary_is_exact_and_oversize_is_bounded_before_reconnect() {
+        let dataset_root = tempdir().unwrap();
+        let dataset_root_path = dataset_root.path().canonicalize().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let binary_payload = vec![0_u8, 1, 2, 255];
+        let expected_binary = binary_payload.clone();
+        let server = tokio::spawn(async move {
+            let (first, _) = listener.accept().await.unwrap();
+            let mut first = accept_async(first).await.unwrap();
+            first
+                .send(Message::Binary(binary_payload.into()))
+                .await
+                .unwrap();
+            first.send(test_aggtrade_message_for_id(100)).await.unwrap();
+            first.send(Message::Close(None)).await.unwrap();
+
+            let (second, _) = listener.accept().await.unwrap();
+            let mut second = accept_async(second).await.unwrap();
+            let oversize = vec![7_u8; BINANCE_AGGTRADE_INVALID_INPUT_MAX_BYTES + 1];
+            let _ = second.send(Message::Binary(oversize.into())).await;
+
+            let (third, _) = listener.accept().await.unwrap();
+            let mut third = accept_async(third).await.unwrap();
+            third.send(test_aggtrade_message_for_id(101)).await.unwrap();
+            sleep(Duration::from_millis(200)).await;
         });
 
         let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(16).unwrap();
-        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
-        let inflight_budget = InflightBudget::new();
         let stats = Arc::new(SourceQueueBackpressureStats::default());
         install_active_raw_day_gate(&stats, now_ms()).await;
         let (_control_tx, control_rx) = mpsc::channel(AGGTRADE_CONTROL_CHANNEL_CAPACITY);
@@ -31871,65 +32639,175 @@ mod tests {
             BinanceWsSpec {
                 source_kind: "binance_aggtrade".to_owned(),
                 default_event_type: "aggTrade".to_owned(),
-                url: ws_url,
-                rest_endpoint,
-                freshness_timeout_secs: 5,
+                url,
+                frame_inactivity_timeout_secs: 5,
+                recovery_wait_override: None,
             },
             SourceEventSink {
                 tx,
-                gaps: Arc::clone(&gaps),
+                gaps: Arc::new(Mutex::new(SourceGapStore::default())),
                 source_queue_backpressure: stats,
-                inflight_budget: inflight_budget.clone(),
+                inflight_budget: InflightBudget::new(),
                 enqueue_lock: Arc::new(AsyncMutex::new(())),
             },
             CollectorIdentity {
                 host_id: "collector-test".to_owned(),
                 region: "local-test".to_owned(),
             },
-            Some(Instant::now() + Duration::from_secs(3)),
+            Some(Instant::now() + Duration::from_secs(8)),
             Instant::now(),
             control_rx,
         ));
 
-        let mut rows = Vec::new();
-        while rows.len() < 5 {
-            let message = timeout(Duration::from_secs(2), rx.recv())
+        let mut events = Vec::new();
+        while events.len() < 4 {
+            let inflight = timeout(Duration::from_secs(6), rx.recv())
                 .await
-                .expect("expected gap/backfill output")
-                .expect("source queue remains open");
-            if message.control.is_none() {
-                rows.push(serde_json::from_str::<Value>(&message.event.raw_json).unwrap());
+                .expect("binary, oversize and following trades must reach ingress")
+                .expect("source queue must remain open");
+            if inflight.control.is_none() {
+                events.push(inflight.event);
             }
         }
         assert_eq!(
-            rows.iter()
-                .map(|row| row["aggregate_trade_id"].as_u64().unwrap())
+            events
+                .iter()
+                .map(|event| event.source_event_type.as_str())
                 .collect::<Vec<_>>(),
-            vec![100, 101, 102, 103, 104]
+            vec!["invalid_input", "aggTrade", "invalid_input", "aggTrade"]
         );
-        assert_eq!(rows[1]["ingest_source"], "rest_backfill");
-        assert_eq!(rows[2]["ingest_source"], "rest_backfill");
-        assert_eq!(rows[3]["ingest_source"], "websocket_rest_merged");
-        assert!(rows[3]["websocket_timestamp_received"].as_i64().unwrap() > 0);
-        assert!(
-            rows[3]["rest_backfill_timestamp_received"]
-                .as_i64()
-                .unwrap()
-                >= rows[3]["websocket_timestamp_received"].as_i64().unwrap()
-        );
-        assert_eq!(rows[4]["ingest_source"], "websocket");
-        assert!(gaps.lock().unwrap().is_empty());
+
+        let binary_envelope: Value = serde_json::from_str(&events[0].raw_json).unwrap();
+        let binary_evidence: Value = serde_json::from_str(
+            binary_envelope["source_native_payload_json"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(binary_evidence["payload_capture_status"], "complete");
         assert_eq!(
-            inflight_budget.available(),
-            (GLOBAL_INFLIGHT_MAX_ROWS, GLOBAL_INFLIGHT_MAX_BYTES),
-            "pending WebSocket, REST backfill, ingress and output reservations must all release"
+            binary_evidence["payload_base64"],
+            base64::engine::general_purpose::STANDARD.encode(expected_binary)
         );
+        assert_eq!(binary_envelope["websocket_ingress_sequence"], 1);
+        assert_eq!(binary_envelope["connection_generation"], 1);
+        let first_trade: Value = serde_json::from_str(&events[1].raw_json).unwrap();
+        assert_eq!(first_trade["connection_generation"], 1);
+
+        let oversize_envelope: Value = serde_json::from_str(&events[2].raw_json).unwrap();
+        let oversize_evidence: Value = serde_json::from_str(
+            oversize_envelope["source_native_payload_json"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            oversize_evidence["payload_capture_status"],
+            "oversize_not_captured"
+        );
+        assert!(oversize_evidence["payload_base64"].is_null());
+        assert!(oversize_evidence["payload_sha256"].is_null());
+        assert_eq!(
+            oversize_evidence["capture_limit_bytes"],
+            u64::try_from(BINANCE_AGGTRADE_INVALID_INPUT_MAX_BYTES).unwrap()
+        );
+        assert!(
+            oversize_evidence["observed_bytes_at_least"]
+                .as_u64()
+                .unwrap()
+                > u64::try_from(BINANCE_AGGTRADE_INVALID_INPUT_MAX_BYTES).unwrap()
+        );
+        assert_eq!(oversize_envelope["websocket_ingress_sequence"], 3);
+        assert_eq!(oversize_envelope["connection_generation"], 2);
+        let following_trade: Value = serde_json::from_str(&events[3].raw_json).unwrap();
+        assert_eq!(following_trade["websocket_ingress_sequence"], 4);
+        assert_eq!(following_trade["connection_generation"], 3);
 
         source.abort();
         let _ = source.await;
-        rest_server.await.unwrap();
-        ws_server.abort();
-        let _ = ws_server.await;
+        server.await.unwrap();
+    }
+
+    fn write_real_legacy_v5_aggtrade_file(
+        path: &Path,
+        id: u64,
+        timestamp_received: i64,
+        source_native_payload_json: &str,
+    ) {
+        use arrow_array::{BooleanArray, RecordBatch};
+        use arrow_schema::{DataType, Field, Schema, TimeUnit};
+        use parquet::arrow::ArrowWriter;
+
+        let timestamp = |name: &str, nullable| {
+            Field::new(
+                name,
+                DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+                nullable,
+            )
+        };
+        let schema = Arc::new(Schema::new(vec![
+            timestamp("timestamp_received", false),
+            timestamp("websocket_timestamp_received", true),
+            timestamp("rest_backfill_timestamp_received", true),
+            Field::new("ingest_source", DataType::Utf8, false),
+            Field::new("event_type", DataType::Utf8, true),
+            timestamp("event_time", true),
+            timestamp("trade_time", false),
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("aggregate_trade_id", DataType::UInt64, false),
+            Field::new("price", DataType::Utf8, false),
+            Field::new("quantity", DataType::Utf8, false),
+            Field::new("first_trade_id", DataType::UInt64, false),
+            Field::new("last_trade_id", DataType::UInt64, false),
+            Field::new("buyer_is_maker", DataType::Boolean, false),
+            Field::new("stream", DataType::Utf8, true),
+            Field::new("ws_ignore", DataType::Boolean, true),
+            Field::new("rest_was_best_price_match", DataType::Boolean, true),
+            Field::new("source_native_payload_json", DataType::Utf8, false),
+            Field::new("collector_host_id", DataType::Utf8, false),
+            Field::new("collector_region", DataType::Utf8, false),
+            Field::new("source_endpoint", DataType::Utf8, false),
+            Field::new("schema_version", DataType::Utf8, false),
+        ]));
+        let event_time = 1_783_392_404_599_i64;
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(
+                    TimestampMillisecondArray::from(vec![timestamp_received]).with_timezone("UTC"),
+                ),
+                Arc::new(
+                    TimestampMillisecondArray::from(vec![Some(timestamp_received)])
+                        .with_timezone("UTC"),
+                ),
+                Arc::new(TimestampMillisecondArray::from(vec![None::<i64>]).with_timezone("UTC")),
+                Arc::new(StringArray::from(vec!["websocket"])),
+                Arc::new(StringArray::from(vec![Some("aggTrade")])),
+                Arc::new(
+                    TimestampMillisecondArray::from(vec![Some(event_time)]).with_timezone("UTC"),
+                ),
+                Arc::new(TimestampMillisecondArray::from(vec![event_time]).with_timezone("UTC")),
+                Arc::new(StringArray::from(vec!["BTCUSDT"])),
+                Arc::new(UInt64Array::from(vec![id])),
+                Arc::new(StringArray::from(vec!["65000.10"])),
+                Arc::new(StringArray::from(vec!["0.001"])),
+                Arc::new(UInt64Array::from(vec![id * 10])),
+                Arc::new(UInt64Array::from(vec![id * 10])),
+                Arc::new(BooleanArray::from(vec![true])),
+                Arc::new(StringArray::from(vec![Some("btcusdt@aggTrade")])),
+                Arc::new(BooleanArray::from(vec![Some(false)])),
+                Arc::new(BooleanArray::from(vec![None])),
+                Arc::new(StringArray::from(vec![source_native_payload_json])),
+                Arc::new(StringArray::from(vec!["collector-test"])),
+                Arc::new(StringArray::from(vec!["local-test"])),
+                Arc::new(StringArray::from(vec![BINANCE_AGGTRADE_WS])),
+                Arc::new(StringArray::from(vec!["binance_aggtrade_v5"])),
+            ],
+        )
+        .unwrap();
+        let mut writer = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
     }
 
     fn test_aggtrade_message() -> Message {
@@ -31966,9 +32844,10 @@ mod tests {
 
     fn test_aggtrade_hourly_row(id: u64, timestamp_received: i64) -> BinanceAggTradeHourlyRow {
         let websocket = BinanceWsAggTrade::from_wire(
-            &test_ws_aggtrade_value(id),
+            &test_ws_aggtrade_value_at(id, timestamp_received),
             "btcusdt@aggTrade",
             timestamp_received,
+            BinanceAggTradeIngressCoordinate::Websocket { sequence: id },
         )
         .unwrap();
         BinanceAggTradeHourlyRow::from_output(
@@ -31976,22 +32855,15 @@ mod tests {
             "collector-test",
             "local-test",
             BINANCE_AGGTRADE_WS,
-            BINANCE_AGGTRADE_REST,
+            BinanceAggTradeOrdering {
+                source_sequence_epoch_id: "test-source-epoch".to_owned(),
+                connection_generation: 1,
+                websocket_ingress_sequence: id,
+                collector_admission_sequence: id,
+                collector_admission_time_utc_ms: timestamp_received,
+            },
         )
         .unwrap()
-    }
-
-    fn test_rest_aggtrade_value(id: u64) -> Value {
-        json!({
-            "a": id,
-            "p": id.to_string(),
-            "q": "0.001",
-            "f": id * 10,
-            "l": id * 10,
-            "T": 1_783_392_400_000_i64 + i64::try_from(id).unwrap(),
-            "m": true,
-            "M": true,
-        })
     }
 
     fn test_raw_event(source_kind: &str, recv_time_utc_ms: i64) -> RawEvent {
@@ -32000,6 +32872,7 @@ mod tests {
             &test_ws_aggtrade_value_at(123_456, recv_time_utc_ms),
             "btcusdt@aggTrade",
             recv_time_utc_ms,
+            BinanceAggTradeIngressCoordinate::Websocket { sequence: 1 },
         )
         .unwrap();
         binance_aggtrade_raw_event(
@@ -32012,9 +32885,11 @@ mod tests {
                 source_kind: source_kind.to_owned(),
                 default_event_type: "aggTrade".to_owned(),
                 url: BINANCE_AGGTRADE_WS.to_owned(),
-                rest_endpoint: BINANCE_AGGTRADE_REST.to_owned(),
-                freshness_timeout_secs: 60,
+                frame_inactivity_timeout_secs: 30,
+                recovery_wait_override: None,
             },
+            "test-source-epoch",
+            1,
         )
         .unwrap()
     }
@@ -32034,6 +32909,7 @@ mod tests {
             collector_region: "local-test".to_owned(),
             source_endpoint: "https://gamma-api.polymarket.com/markets".to_owned(),
             raw_json: raw_json.to_string(),
+            collector_admission: None,
             parquet_raw_layout_version: 1,
             parquet_raw_source_kind: "polymarket_market_metadata".to_owned(),
         }
@@ -32138,6 +33014,7 @@ mod tests {
                 ]
             })
             .to_string(),
+            collector_admission: None,
             parquet_raw_layout_version: 1,
             parquet_raw_source_kind: "polymarket_market".to_owned(),
         }
@@ -32165,6 +33042,7 @@ mod tests {
                 "snapshot_fetch_start_utc": recv_time_utc_ms - 10,
             })
             .to_string(),
+            collector_admission: None,
             parquet_raw_layout_version: 1,
             parquet_raw_source_kind: "binance_depth_snapshot".to_owned(),
         }
@@ -32206,6 +33084,7 @@ mod tests {
             collector_region: "local-test".to_owned(),
             source_endpoint: BINANCE_DEPTH_WS.to_owned(),
             raw_json: raw_json.to_string(),
+            collector_admission: None,
             parquet_raw_layout_version: 1,
             parquet_raw_source_kind: "binance_depth_update".to_owned(),
         }
@@ -32297,7 +33176,7 @@ mod tests {
         let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
             &source_dir,
             &stem,
-            "binance_aggtrade_v5",
+            "binance_aggtrade_v6",
             "binance_aggtrade",
         )
         .unwrap();
@@ -32319,7 +33198,7 @@ mod tests {
             first_recv_time_utc_ms,
             first_recv_time_utc_ms + i64::try_from(rows - 1).unwrap(),
             "aggTrade",
-            "binance_aggtrade_v5",
+            "binance_aggtrade_v6",
         );
         let final_path = writer.final_path().to_path_buf();
         writer.finalize().unwrap();
@@ -32336,13 +33215,9 @@ mod tests {
             1,
             1_783_987_100_000,
         );
-        let mut manifest = reconcile_open_day_manifest(
-            &day_dir,
-            "2026-07-13",
-            &test_daily_manifest_identity(),
-            &BinanceAggTradeContinuityState::default(),
-        )
-        .unwrap();
+        let mut manifest =
+            reconcile_open_day_manifest(&day_dir, "2026-07-13", &test_daily_manifest_identity())
+                .unwrap();
         close_day_manifest(&day_dir, &mut manifest, "test_closed_day").unwrap();
         (day_dir, final_path)
     }

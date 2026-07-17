@@ -16,6 +16,7 @@ fn synthetic_event(seq: u64) -> RawEvent {
         collector_region: "local-dev".to_owned(),
         source_endpoint: "synthetic://binance-depth".to_owned(),
         raw_json: format!(r#"{{"e":"depthUpdate","u":{seq}}}"#),
+        collector_admission: None,
         parquet_raw_layout_version: 1,
         parquet_raw_source_kind: "binance_depth_update".to_owned(),
     }

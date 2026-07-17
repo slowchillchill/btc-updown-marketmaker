@@ -6,7 +6,7 @@
 >
 > 对应计划：`plan/data-collect-source-availability-lifecycle-repair-plan.md`
 >
-> 状态：`APPROVED_IMPLEMENTATION_PHASE_4_COMPLETE_PHASE_5_AUTHORIZED_CT_B_APPROVED`。用户已于2026-07-17批准最终需求、计划及SDK-first逐项patch矩阵，并授权按计划执行本地文档/代码修改、测试、独立审查、commit和push；阶段0至阶段4均已完成全量验证和独立终审，阶段4精确commit/push后进入已授权阶段5。生产构建、部署、远端服务写操作和数据清理仍未获授权。
+> 状态：`APPROVED_IMPLEMENTATION_PHASE_5_COMPLETE_PHASE_6_AUTHORIZED_CT_B_APPROVED`。用户已于2026-07-17批准最终需求、计划及SDK-first逐项patch矩阵，并授权按计划执行本地文档/代码修改、测试、独立审查、commit和push；阶段0至阶段5均已完成全量验证和独立终审，阶段5精确commit/push后进入已授权阶段6。同日用户批准阶段5增加同artifact aggTrade v6 invalid-evidence、顺序与handoff evidence子边界。用户于2026-07-18进一步批准以WS因果直录取代aggTrade ID-hole/REST backfill/pending/merge/active continuity控制，先同步文档再继续实现。生产构建、部署、远端服务写操作和数据清理仍未获授权。
 
 ## 2026-07-17：最终批准并开始阶段0
 
@@ -327,3 +327,48 @@
 - 四source性能门在多个审查代理并发运行重测试期间曾单次出现一个2秒采样窗内Polymarket socket-to-processor backlog从0单调增至1,589；停止并发测试后，未修改阈值或生产代码的同一测试定向复跑为约4,684 native msg/s并通过，随后主线程独占的data-collect完整全量测试再次通过。现有证据与调度干扰一致，但不足以单凭一次失败证明因果；当前未发现可复现的生产吞吐回归，也没有为通过测试放宽门槛。
 - registry 0.6.0与vendor `src`比较仍精确只命中已批准四路径：`clob/ws/types/response.rs`、`rtds/subscription.rs`、`ws/config.rs`、`ws/connection.rs`；阶段4没有修改其中任何文件。vendor本地`target`不存在，Cargo/lock无差异；旧CLOB watchdog、resubscribe和business-recovery fatal符号在当前生产/contract源码检索为0。
 - CLOB/恢复终审、Gamma/metadata终审及SDK generation/范围终审最终均为PASS，Critical 0、Important 0。用户现有`AGENTS.md`与未跟踪`推荐开发顺序.md`继续排除；生产构建、部署、远端服务与数据清理仍未获授权。阶段4达到完成条件，精确commit/push后进入已授权阶段5。
+
+## 2026-07-17：用户批准aggTrade v6 invalid evidence与阶段5扩展
+
+- 用户复审了“外部无效输入丢弃后只记录缺失状态”的建议，明确否决静默丢弃：训练必须能够还原问题输入前后的因果队列，模型看到的是版本化invalid状态而不是伪造成交。用户随后批准先同步文档，再执行阶段5实现。
+- 当前代码事实确认旧路径在WebSocket malformed JSON、缺失/错误event type及字段schema失败时直接返回terminal error，尚未构造`RawEvent`，因此原payload没有进入Parquet；现有v5 trade字段全部non-null，无法表达invalid。该事实与新批准目标及需求3.2“不修改aggTrade布局”、验收19“payload/schema负例仍terminal”直接冲突，本节决定精确取代这些旧authority。
+- 新writer固定为既有`binance_aggtrade` artifact内部的`binance_aggtrade_v6`判别联合，`record_kind=trade|invalid_input`；invalid的trade-only字段为null，禁止0/空串/默认值伪造。连续相同坏帧逐条保存，不hash去重、不折叠计数；不新增sidecar、第七artifact、第二writer或训练进程dual-write。
+- 上限内完整invalid保存exact raw bytes、encoding、长度、SHA-256、transport/endpoint/receive time、capture status与稳定reason code。capture cap固定`524_288` bytes并继续受1MiB typed-row hard bound；超限只保存真实已知的有界metadata，未取得完整bytes时不得伪造payload或digest。
+- 三路只读审查共同指出，单一receive timestamp或单一sequence不足以重放。WS trade可先因ID hole进入pending，之后invalid先被queue接纳，旧trade在backfill失败后才释放；merged row又同时代表WS和REST两个接收事实。因此v6分别保存source sequence epoch、WS/REST response ingress coordinate、REST item index，以及queue/deferred ownership真正转移时冻结的collector admission time/sequence。前者审计原始输入，后者是offline replay与handoff的模型因果可见顺序；Parquet物理行序不得冒充任一者。
+- 异步边界固定为“只等待现有global inflight预算、raw-day permit和bounded queue容量；ownership转移后继续读取，不等待Parquet append、flush、finalize、rename或fsync”。队列饱和仍允许现有最多2秒有界背压，queue timeout/closed、writer/manifest失败、sequence overflow、evidence ownership丢失和内部不变量仍terminal。当前`send_event`满队列时持有共享enqueue lock，故本轮不虚构“坏帧洪峰下其他source永不受阻”；若未来要求满载跨源公平，另建admission设计门。
+- REST body将改为streaming hard cap。网络/HTTP/rate-limit仍走有界retry；已取得完整body但JSON/payload/数量/sequence损坏时不盲目重试同一坏响应。多页range后页损坏不能丢弃前页合法rows：先处理已取得rows，再保存当前invalid response、标记剩余range unresolved、开启新continuity epoch并继续未来live。
+- ordinary invalid application input只重置全frame transport inactivity，不更新last qualifying、dedupe、aggregate-trade-id continuity或启动backfill。已解析的同ID内容冲突继续保留双方真实trade事实并记录confirmed conflict。v5 finalized文件只读为legacy trade，不能伪造epoch/sequence；v6恢复跳过invalid的nullable ID。queue接纳后、durable publish前崩溃仍由`unclean_end_unknown`界定，不得声称已落盘。
+- typed raw中的raw bytes、hash、parser detail不直接进入模型；后续shared semantic canonicalizer只产生获准的canonical invalid marker、因果coordinate与ObservationContract字段。阶段5只实现/验证collector evidence和可关联handoff编码合同；当前paper/live hot仍只有heartbeat server，不冒充已经完成真实online source runtime或canonicalizer parity。
+- 本决定已同步当前demand/plan及仍处审核状态的`demand/rebuild-core-demand.md`对应子边界；核心草案整体仍未批准，不创建其plan/changelog，也不借本轮批准其余重构内容。用户现有`AGENTS.md`与未跟踪`推荐开发顺序.md`继续排除；生产构建、部署、远端服务操作和数据清理仍未获授权。
+
+## 2026-07-17：阶段5实现发现WS ingress sequence时点冲突并完成决策
+
+- 实现接线与独立只读审查确认，已批准需求第4.5.9项要求合法WebSocket消息沿用既有结构去重后才进入ingress sequence域；已批准计划步骤5.3.2却要求WebSocket ingress coordinate在parse前冻结。对合法duplicate而言，两者不能同时满足：前者不应分配，后者会消耗一个不落盘的sequence并形成由本地去重制造的编号空洞。
+- 与该冲突相关的Text生产分支已按方案不一致决策门暂停，没有擅自选边。进一步按双transport并发顺序复核后，推荐保留计划的parse前语义并修订需求：完整Text frame一经collector观察就立即取得真实ingress coordinate；invalid逐条留证，Unique/Conflict/OutsideWindow合法trade携带该coordinate，合法Duplicate仍按既有结构去重不产生typed/model evidence，但会留下由真实到达消息占用的编号空洞及既有有界dedupe计数。若改为dedupe后分配，WS parse期间并发完成的REST response可能先取得编号，使所谓ingress sequence实际退化为parse/dedupe完成顺序；要无空洞又保留跨transport真实顺序则需新增reservation/commit arbiter，属于不必要复杂化。
+- 不受冲突影响的文档、v6 layout/writer、REST bounded evidence、handoff schema、collector admission ownership、oversize/Binary evidence及v5/v6恢复兼容候选实现已经继续推进；但阶段5尚未完成或获准commit/push。当前`cargo check -p data-collect --lib`唯一错误正是Text分支尚未传入待决的ingress coordinate；旧Text terminal测试和阶段5集成验收也必须在决策后改写并完整复验。
+- 用户批准保留计划的parse前语义并修订需求第4.5.9项。最终合同明确：完整Text frame在任何parse前冻结coordinate；REST在有界body outcome形成后、application parse前冻结coordinate；合法Duplicate不产生typed/model evidence但不回收已消费编号，编号空洞由既有有界结构去重计数解释且不代表source缺失。该批准解除Text生产接线决策门，阶段5继续实施、测试和终审。
+
+## 2026-07-18：用户批准aggTrade WS因果直录并删除实时ID-hole恢复
+
+- 用户基于TCP/WebSocket同连接有序交付与Binance公开aggTrade字段合同，复审并否决了把`aggregate_trade_id`数值前跳自动解释为可恢复confirmed gap的旧设计。协议有序交付不证明服务端ID对单个订阅连接连续，官方也没有提供以`a+1`作为REST回填触发器的公开合同；因此保留旧backfill并不是必要可靠性措施，反而会把collector推断的完整性回插到真实可用观察流。
+- 新批准合同是WS因果直录：每条合法WS aggTrade按真实到达顺序立即保存并handoff，`100 -> 103`不得等待、pending、重排或回插。原始`a`继续完整保存，供下游在另有ObservationContract批准时派生中性`observed_id_delta`；ID前跳本身不命名为gap，不告警、不主动重连、不结束source或collector。
+- 生产路径删除`GET /api/v3/aggTrades`实时请求、REST backfill task、range retry、pending/merge/unresolved range和active aggTrade continuity coordinator。Close、EOF、read/write/protocol error、serverShutdown、24小时连接生命周期和全frame inactivity仍由同一source task持续重连；连接窗口中未实际收到的数据保持真实缺失。
+- v6新生产只写WS `trade|invalid_input`。为避免无必要schema迁移，既有REST nullable列保留为读取兼容列，但新行必须全部为null；历史v5 REST-only/merged行继续只读。旧manifest已存在的`binance_aggtrade_continuity`字段原样保留并接受既有合法性校验，新binary不得创建、更新、从Parquet推导或用于控制运行。历史`backfill_rows`计数保留兼容但新运行始终为零。
+- 三路代码/文档映射复核指出，既有`source_sequence_epoch_id`跨socket reconnect稳定，不能冒充连接代次；因此v6新增checked非零`connection_generation`。它只在成功WebSocket握手后递增，同一socket全部trade/invalid共享该值，失败attempt不分配，重连后严格增加；source epoch继续跨同一task的reconnect和UTC rollover稳定。
+- invalid evidence、parse前WS ingress sequence、collector admission sequence、bounded queue/byte ownership、writer/manifest完整性与legacy读取保护不因删除backfill而放宽。新的因果示例固定为`trade 100 -> trade 103 -> invalid -> trade 104`原序接纳；合法duplicate仍消耗已冻结WS ingress sequence但不产生typed row，payload conflict仍保留双方真实事实。
+- 本决定精确取代2026-07-17阶段5扩展中关于REST response ingress、pending trade后释放、unresolved range、new continuity epoch和REST body bounded retry的设计；历史条目作为决策过程保留，不再是当前实施authority。需求、计划和核心需求的aggTrade子边界已经同步；阶段5继续实现、测试、独立审查、commit和push。
+
+## 2026-07-18：阶段5 WS-only实现与首轮审查修复
+
+- 生产aggTrade已经改为单一WebSocket因果直录：合法trade及能够形成有界evidence的invalid frame立即进入既有bounded admission，并由contract test证明可编码为等价handoff frame，不因原始`a`前跳等待、回排、写gap、告警或切换连接。`GET /api/v3/aggTrades`、REST client/backfill task、pending/merge/range retry、unresolved range和active continuity coordinator已经从生产调用图删除；新运行的`backfill_rows`恒为零。
+- `binance_aggtrade_v6`在同一artifact中封闭表达`trade|invalid_input`，保存source task epoch、成功握手后才分配的非零`connection_generation`、parse前WebSocket ingress coordinate及queue ownership转移时的collector admission coordinate。新writer只接受WebSocket evidence；历史v5 REST-only/merged row、v6 nullable REST列与旧manifest continuity只读兼容，不伪造legacy sequence/generation，也不参与当前运行控制。
+- 接纳与写盘保持异步边界：source只等待既有global inflight预算、raw-day permit和bounded queue容量，不等待Parquet append、flush、finalize、rename或fsync。测试先暂停writer确认producer可把queue容量内的`trade/invalid/invalid/trade`全部转移ownership，再恢复writer并验证全部v6 rows落盘；queue timeout/closed、writer/manifest/schema/ownership等本地完整性失败仍按原scope terminal。
+- 首轮独立审查发现两个真实缺陷并完成修复。其一，legacy恢复曾在识别`websocket:null`以前让REST-only row占用有界dedupe窗口，可能令较旧WS事实被limit截断；恢复现在先提取真实WebSocket payload再进入窗口，并增加limit=1回归。其二，writer只校验generation/admission而没有执行完整`row.validate()`，可能写出非法REST兼容列；共享writer校验现在调用完整validator，并增加拒绝REST compatibility值的负例。修复后的对应独立复审为Critical 0、Important 0。
+- 新增真实loopback合同覆盖：失败WebSocket握手不消耗generation、全frame inactivity重连、reserved-opcode protocol error重连、同ID不同payload conflict双方留存、`100 -> 103 -> invalid -> 104`原序接纳无gap，以及连续100次TCP/WebSocket Close后仍由同一source owner恢复到generation 101且FD采样有界。100次恢复测试使用真实时间和仅在`cfg(test)`存在的1ms退避覆盖；最初把Tokio虚拟时间与真实TCP混用会令虚拟inactivity deadline抢先触发，该测试方案已撤销，生产退避与期限未改变。
+- 自动静态回归扫描`data-collect/src`及crate依赖配置，确认生产路径没有aggTrade REST endpoint/client/task、backfill coordinator、pending或active continuity控制符号；legacy manifest字段及测试fixture中的兼容符号不属于生产控制路径。阶段5未增加第二socket owner、sidecar、第七artifact或shared canonicalizer，也未执行release构建、部署、远端服务操作或数据清理；用户现有`AGENTS.md`和未跟踪`推荐开发顺序.md`继续排除。
+
+## 2026-07-18：阶段5验证与最终终审
+
+- `cargo test -p data-collect --locked -- --test-threads=1`通过224项lib测试及全部integration/doc tests；新增自动静态回归所在`binance_aggtrade_continuity_contract`定向复跑5/5通过。`cargo check -p data-collect --all-targets --locked`与非测试lib检查通过；`cargo clippy -p data-collect --locked --all-targets -- -D warnings`零告警；`cargo fmt --all -- --check`和`git diff --check`通过。首轮Clippy发现的`needless_return`已改为尾表达式并复验通过。
+- 阶段5单一aggTrade source的100次自然恢复与资源有界验收已经完成；计划阶段7仍负责多source组合、全部transport不可达和系统级FD/task/socket/queue压力，不重新引入aggTrade backfill或第二恢复路径。
+- 三路独立终审分别覆盖生产调用图与恢复边界、v6 writer/legacy dedupe恢复，以及schema/generation/docs/自动静态回归；handoff生产接入范围和REST trap验收措辞两项Important均已按真实实现修正并复核关闭。最终结果为Critical 0、Important 0，需求、计划与changelog顶层状态已原子同步为阶段5完成；精确commit/push后进入已授权阶段6。

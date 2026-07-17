@@ -170,6 +170,7 @@ fn synthetic_event(role: SourceRole, seq: u64, recv_time_utc_ms: i64) -> RawEven
             role.as_str(),
             event_type(role)
         ),
+        collector_admission: None,
         parquet_raw_layout_version: 1,
         parquet_raw_source_kind: role.as_str().to_owned(),
     }

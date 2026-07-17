@@ -112,6 +112,8 @@ pub enum BinanceIdDecision {
     OutsideWindow,
 }
 
+const BINANCE_MAX_FINGERPRINTS_PER_ID: usize = 8;
+
 pub struct BinanceRecentIdWindow {
     limit: usize,
     fingerprints: BTreeMap<u64, HashSet<[u8; 32]>>,
@@ -132,7 +134,9 @@ impl BinanceRecentIdWindow {
             if existing.contains(&fingerprint) {
                 return BinanceIdDecision::Duplicate;
             }
-            existing.insert(fingerprint);
+            if existing.len() < BINANCE_MAX_FINGERPRINTS_PER_ID {
+                existing.insert(fingerprint);
+            }
             return BinanceIdDecision::Conflict;
         }
         if self.fingerprints.len() >= self.limit
@@ -154,6 +158,11 @@ impl BinanceRecentIdWindow {
     #[must_use]
     pub fn len(&self) -> usize {
         self.fingerprints.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fingerprint_count(&self, native_id: u64) -> usize {
+        self.fingerprints.get(&native_id).map_or(0, HashSet::len)
     }
 
     pub fn remove(&mut self, native_id: u64) {
@@ -228,4 +237,32 @@ impl TimedFingerprintWindow {
 #[must_use]
 pub fn sha256(payload: &[u8]) -> [u8; 32] {
     Sha256::digest(payload).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binance_conflict_fingerprints_are_bounded_without_dropping_conflicts() {
+        let mut window = BinanceRecentIdWindow::with_limit(1);
+        assert_eq!(window.observe(7, b"variant-0"), BinanceIdDecision::Unique);
+        for variant in 1..64 {
+            assert_eq!(
+                window.observe(7, format!("variant-{variant}").as_bytes()),
+                BinanceIdDecision::Conflict
+            );
+        }
+        assert_eq!(window.fingerprint_count(7), BINANCE_MAX_FINGERPRINTS_PER_ID);
+        assert_eq!(
+            window.observe(7, b"variant-63"),
+            BinanceIdDecision::Conflict,
+            "an uncached overflow variant remains preserved as a conflict"
+        );
+        assert_eq!(
+            window.observe(7, b"variant-1"),
+            BinanceIdDecision::Duplicate,
+            "cached variants remain structural duplicates"
+        );
+    }
 }

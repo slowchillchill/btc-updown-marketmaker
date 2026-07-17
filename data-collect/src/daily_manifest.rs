@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use time::{Date, Month, OffsetDateTime};
 
-use crate::binance_aggtrade::BinanceAggTradeContinuityState;
 use crate::writer::{DAILY_FILE_RECOVERY_METADATA_KEY, sha256_file};
 
 pub const DAILY_MANIFEST_FILE_NAME: &str = "manifest.json";
@@ -38,6 +37,29 @@ const OPERATIONAL_COUNTER_FIELDS: &[&str] = &[
     "reconnect_events",
     "dropped_rows",
 ];
+
+#[derive(Deserialize)]
+struct LegacyBinanceAggTradeContinuityEpoch {
+    epoch_start_id: u64,
+    last_observed_id: u64,
+    last_contiguous_id: u64,
+}
+
+#[derive(Deserialize)]
+struct LegacyBinanceAggTradeUnresolvedRange {
+    start_id: u64,
+    end_id: u64,
+    #[allow(dead_code)]
+    reason: String,
+}
+
+#[derive(Deserialize)]
+struct LegacyBinanceAggTradeContinuityState {
+    latest_epoch: Option<LegacyBinanceAggTradeContinuityEpoch>,
+    unresolved_ranges: Vec<LegacyBinanceAggTradeUnresolvedRange>,
+    #[allow(dead_code)]
+    initial_coverage_boundary_id: Option<u64>,
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct SourceOperationalCounterDelta {
@@ -723,6 +745,7 @@ pub fn validate_manifest_day(manifest: &Value, expected_day: &str) -> io::Result
             format!("invalid daily manifest state: {state}"),
         ));
     }
+    validate_legacy_binance_continuity_field(manifest)?;
     manifest_collection_day_coverage(manifest)?;
     Ok(())
 }
@@ -734,37 +757,40 @@ pub fn manifest_state(manifest: &Value) -> io::Result<&str> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "manifest state missing"))
 }
 
-pub fn manifest_binance_continuity(
-    manifest: &Value,
-) -> io::Result<Option<BinanceAggTradeContinuityState>> {
-    manifest
+fn validate_legacy_binance_continuity_field(manifest: &Value) -> io::Result<()> {
+    let Some(value) = manifest
         .get(BINANCE_AGGTRADE_CONTINUITY_FIELD)
         .filter(|value| !value.is_null())
-        .map(|value| {
-            serde_json::from_value(value.clone()).map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("invalid Binance continuity in daily manifest: {error}"),
-                )
-            })
-        })
-        .transpose()
-}
-
-pub fn set_manifest_binance_continuity(
-    manifest: &mut Value,
-    continuity: &BinanceAggTradeContinuityState,
-) -> io::Result<()> {
-    let object = manifest.as_object_mut().ok_or_else(|| {
-        io::Error::new(
+    else {
+        return Ok(());
+    };
+    let continuity: LegacyBinanceAggTradeContinuityState = serde_json::from_value(value.clone())
+        .map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid legacy Binance continuity in daily manifest: {error}"),
+            )
+        })?;
+    if let Some(epoch) = continuity.latest_epoch
+        && (epoch.epoch_start_id == 0
+            || epoch.epoch_start_id > epoch.last_contiguous_id
+            || epoch.last_contiguous_id > epoch.last_observed_id)
+    {
+        return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "daily manifest is not an object",
-        )
-    })?;
-    object.insert(
-        BINANCE_AGGTRADE_CONTINUITY_FIELD.to_owned(),
-        serde_json::to_value(continuity).map_err(io::Error::other)?,
-    );
+            "invalid legacy Binance continuity epoch",
+        ));
+    }
+    if continuity
+        .unresolved_ranges
+        .iter()
+        .any(|range| range.start_id == 0 || range.end_id < range.start_id)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid legacy Binance unresolved range",
+        ));
+    }
     Ok(())
 }
 
@@ -1080,11 +1106,7 @@ fn validate_writable_manifest_collection_coverage(manifest: &Value) -> io::Resul
     Ok(())
 }
 
-pub fn close_reconciled_day_manifest(
-    day_dir: &Path,
-    manifest: &mut Value,
-    continuity: &BinanceAggTradeContinuityState,
-) -> io::Result<()> {
+pub fn close_reconciled_day_manifest(day_dir: &Path, manifest: &mut Value) -> io::Result<()> {
     let mut next_manifest = manifest.clone();
     let utc_day = manifest_utc_day(&next_manifest)?.to_owned();
     validate_manifest_day(&next_manifest, &utc_day)?;
@@ -1125,7 +1147,6 @@ pub fn close_reconciled_day_manifest(
         "closure_reason".to_owned(),
         Value::String(disposition.closure_reason().to_owned()),
     );
-    set_manifest_binance_continuity(&mut next_manifest, continuity)?;
     validate_manifest_day(&next_manifest, &utc_day)?;
     write_json_atomic(&day_dir.join(DAILY_MANIFEST_FILE_NAME), &next_manifest)?;
     *manifest = next_manifest;
@@ -1136,7 +1157,6 @@ pub fn reconcile_open_day_manifest(
     day_dir: &Path,
     utc_day: &str,
     identity: &DailyManifestIdentity,
-    continuity: &BinanceAggTradeContinuityState,
 ) -> io::Result<Value> {
     fs::create_dir_all(day_dir)?;
     ensure_no_stale_temporary_files(day_dir)?;
@@ -1185,7 +1205,6 @@ pub fn reconcile_open_day_manifest(
             existing_source_counters.as_ref(),
         ),
     );
-    set_manifest_binance_continuity(&mut manifest, continuity)?;
     write_json_atomic(&path, &manifest)?;
     Ok(manifest)
 }
@@ -1353,28 +1372,6 @@ pub fn add_manifest_operational_counters(
             counter.insert(field.to_owned(), json!(current.saturating_add(increment)));
         }
     }
-    write_json_atomic(&day_dir.join(DAILY_MANIFEST_FILE_NAME), manifest)
-}
-
-pub fn update_manifest_continuity(
-    day_dir: &Path,
-    manifest: &mut Value,
-    continuity: &BinanceAggTradeContinuityState,
-) -> io::Result<()> {
-    continuity.validate().map_err(|error| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("invalid Binance continuity: {error}"),
-        )
-    })?;
-    validate_writable_manifest_collection_coverage(manifest)?;
-    if manifest_state(manifest)? != "open" {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "cannot update continuity in closed daily manifest",
-        ));
-    }
-    set_manifest_binance_continuity(manifest, continuity)?;
     write_json_atomic(&day_dir.join(DAILY_MANIFEST_FILE_NAME), manifest)
 }
 
@@ -3005,12 +3002,7 @@ mod tests {
         for (coverage, expected_reason, expect_gap, expected_state, expected_reactivated) in cases {
             let tmp = tempdir().unwrap();
             let mut manifest = test_manifest(coverage);
-            close_reconciled_day_manifest(
-                tmp.path(),
-                &mut manifest,
-                &BinanceAggTradeContinuityState::default(),
-            )
-            .unwrap();
+            close_reconciled_day_manifest(tmp.path(), &mut manifest).unwrap();
 
             assert_eq!(manifest["state"], "closed");
             assert_eq!(manifest["closure_reason"], expected_reason);
@@ -3035,13 +3027,7 @@ mod tests {
     fn current_reconcile_requires_coverage_but_new_manifest_creates_not_started() {
         let tmp = tempdir().unwrap();
         let identity = test_identity();
-        let created = reconcile_open_day_manifest(
-            tmp.path(),
-            TEST_DAY,
-            &identity,
-            &BinanceAggTradeContinuityState::default(),
-        )
-        .unwrap();
+        let created = reconcile_open_day_manifest(tmp.path(), TEST_DAY, &identity).unwrap();
         assert_eq!(
             manifest_collection_day_coverage(&created).unwrap(),
             Some(collection_day_coverage_not_started())
@@ -3050,13 +3036,8 @@ mod tests {
         let legacy_dir = tempdir().unwrap();
         let legacy = test_manifest(None);
         write_json_atomic(&legacy_dir.path().join(DAILY_MANIFEST_FILE_NAME), &legacy).unwrap();
-        let error = reconcile_open_day_manifest(
-            legacy_dir.path(),
-            TEST_DAY,
-            &identity,
-            &BinanceAggTradeContinuityState::default(),
-        )
-        .expect_err("same-identity current legacy manifest must fail closed");
+        let error = reconcile_open_day_manifest(legacy_dir.path(), TEST_DAY, &identity)
+            .expect_err("same-identity current legacy manifest must fail closed");
         assert!(
             error
                 .to_string()
@@ -3076,7 +3057,6 @@ mod tests {
             mismatched_legacy_dir.path(),
             TEST_DAY,
             &mismatched_identity,
-            &BinanceAggTradeContinuityState::default(),
         )
         .expect_err("identity mismatch must take precedence over current legacy compatibility");
         assert!(
@@ -3096,13 +3076,8 @@ mod tests {
             &sticky_manifest,
         )
         .unwrap();
-        let reconciled = reconcile_open_day_manifest(
-            sticky_dir.path(),
-            TEST_DAY,
-            &identity,
-            &BinanceAggTradeContinuityState::default(),
-        )
-        .unwrap();
+        let reconciled =
+            reconcile_open_day_manifest(sticky_dir.path(), TEST_DAY, &identity).unwrap();
         assert_eq!(
             manifest_collection_day_coverage(&reconciled).unwrap(),
             Some(sticky_coverage)

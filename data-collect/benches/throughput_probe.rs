@@ -297,6 +297,7 @@ fn synthetic_event(seq: u64) -> RawEvent {
         source_identifier: format!("{source_kind}:{seq}"),
         source_ts: Some((1_766_789_400_000 + seq as i64).to_string()),
         recv_time_utc_ms: 1_766_789_469_999 + seq as i64,
+        collector_admission: None,
         collector_host_id: "collector-local".to_owned(),
         collector_region: "local-dev".to_owned(),
         source_endpoint: format!("synthetic://{source_kind}"),

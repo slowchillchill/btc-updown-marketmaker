@@ -33,12 +33,19 @@ pub const PARQUET_ROW_GROUP_MAX_BYTES: u64 = 16_777_216;
 pub const DAILY_FILE_RECOVERY_METADATA_KEY: &str = "data_collect_daily_file_fact_v1";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RawEventAdmission {
+    pub sequence: u64,
+    pub time_utc_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RawEvent {
     pub source_kind: String,
     pub source_event_type: String,
     pub source_identifier: String,
     pub source_ts: Option<String>,
     pub recv_time_utc_ms: i64,
+    pub collector_admission: Option<RawEventAdmission>,
     pub collector_host_id: String,
     pub collector_region: String,
     pub source_endpoint: String,
@@ -272,6 +279,7 @@ pub struct TypedParquetSegmentWriter {
     row_count: u64,
     row_group_rows: u64,
     row_group_logical_bytes: u64,
+    last_binance_aggtrade_admission_sequence: Option<u64>,
 }
 
 impl TypedParquetSegmentWriter {
@@ -360,6 +368,7 @@ impl TypedParquetSegmentWriter {
             row_count: 0,
             row_group_rows: 0,
             row_group_logical_bytes: 0,
+            last_binance_aggtrade_admission_sequence: None,
         })
     }
 
@@ -459,8 +468,11 @@ impl TypedParquetSegmentWriter {
         if rows.is_empty() {
             return Ok(());
         }
+        let last_sequence = self.validate_binance_aggtrade_admission_order(rows)?;
         let batch = binance_aggtrade_rows_to_batch(Arc::clone(&self.schema), rows)?;
-        self.write_batch(&batch)
+        self.write_batch(&batch)?;
+        self.last_binance_aggtrade_admission_sequence = Some(last_sequence);
+        Ok(())
     }
 
     pub(crate) fn write_binance_aggtrade_rows_with_logical_bytes(
@@ -471,8 +483,51 @@ impl TypedParquetSegmentWriter {
         if rows.is_empty() {
             return Ok(());
         }
+        let last_sequence = self.validate_binance_aggtrade_admission_order(rows)?;
         let batch = binance_aggtrade_rows_to_batch(Arc::clone(&self.schema), rows)?;
-        self.write_batch_with_logical_bytes(&batch, logical_bytes)
+        self.write_batch_with_logical_bytes(&batch, logical_bytes)?;
+        self.last_binance_aggtrade_admission_sequence = Some(last_sequence);
+        Ok(())
+    }
+
+    fn validate_binance_aggtrade_admission_order(
+        &self,
+        rows: &[BinanceAggTradeHourlyRow],
+    ) -> Result<u64> {
+        let mut previous = self.last_binance_aggtrade_admission_sequence;
+        for row in rows {
+            if row.connection_generation == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "binance aggTrade connection generation must be positive",
+                )
+                .into());
+            }
+            let validation = row.validate();
+            if !validation.is_complete() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "binance aggTrade row validation failed:{}",
+                        validation.missing_fields.join(",")
+                    ),
+                )
+                .into());
+            }
+            if previous.is_some_and(|previous| row.collector_admission_sequence <= previous) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "binance aggTrade collector admission sequence is not strictly increasing:previous={}:actual={}",
+                        previous.unwrap_or_default(),
+                        row.collector_admission_sequence
+                    ),
+                )
+                .into());
+            }
+            previous = Some(row.collector_admission_sequence);
+        }
+        previous.ok_or_else(|| io::Error::other("missing aggTrade admission sequence").into())
     }
 
     pub fn write_rtds_chainlink_btc_usd_rows(
@@ -639,6 +694,11 @@ fn typed_writer_properties(
     source_kind: &str,
     zstd_level: i32,
 ) -> Result<WriterProperties> {
+    let sort_order = if source_kind == "binance_aggtrade" {
+        "collector_admission_order"
+    } else {
+        "receive_order"
+    };
     Ok(WriterProperties::builder()
         .set_max_row_group_row_count(Some(PARQUET_ROW_GROUP_MAX_ROWS as usize))
         .set_compression(Compression::ZSTD(ZstdLevel::try_new(zstd_level)?))
@@ -654,7 +714,7 @@ fn typed_writer_properties(
                 "typed_raw_parquet".to_owned(),
             ),
             KeyValue::new("compression".to_owned(), format!("zstd_level_{zstd_level}")),
-            KeyValue::new("sort_order".to_owned(), "receive_order".to_owned()),
+            KeyValue::new("sort_order".to_owned(), sort_order.to_owned()),
         ]))
         .build())
 }
@@ -801,22 +861,21 @@ fn binance_aggtrade_rows_to_batch(
     rows: &[BinanceAggTradeHourlyRow],
 ) -> Result<RecordBatch> {
     let columns: Vec<ArrayRef> = vec![
+        string_values(rows.iter().map(|row| row.record_kind.as_str())),
         timestamp_values(rows.iter().map(|row| row.timestamp_received)),
         optional_timestamp_values(rows.iter().map(|row| row.websocket_timestamp_received)),
         optional_timestamp_values(rows.iter().map(|row| row.rest_backfill_timestamp_received)),
         string_values(rows.iter().map(|row| row.ingest_source.as_str())),
         optional_strings(rows.iter().map(|row| row.event_type.as_deref())),
         optional_timestamp_values(rows.iter().map(|row| row.event_time)),
-        timestamp_values(rows.iter().map(|row| row.trade_time)),
-        string_values(rows.iter().map(|row| row.symbol.as_str())),
-        uint64_values(rows.iter().map(|row| row.aggregate_trade_id)),
-        string_values(rows.iter().map(|row| row.price.as_str())),
-        string_values(rows.iter().map(|row| row.quantity.as_str())),
-        uint64_values(rows.iter().map(|row| row.first_trade_id)),
-        uint64_values(rows.iter().map(|row| row.last_trade_id)),
-        Arc::new(BooleanArray::from_iter(
-            rows.iter().map(|row| Some(row.buyer_is_maker)),
-        )),
+        optional_timestamp_values(rows.iter().map(|row| row.trade_time)),
+        optional_strings(rows.iter().map(|row| row.symbol.as_deref())),
+        optional_uint64_values(rows.iter().map(|row| row.aggregate_trade_id)),
+        optional_strings(rows.iter().map(|row| row.price.as_deref())),
+        optional_strings(rows.iter().map(|row| row.quantity.as_deref())),
+        optional_uint64_values(rows.iter().map(|row| row.first_trade_id)),
+        optional_uint64_values(rows.iter().map(|row| row.last_trade_id)),
+        optional_boolean_values(rows.iter().map(|row| row.buyer_is_maker)),
         optional_strings(rows.iter().map(|row| row.stream.as_deref())),
         optional_boolean_values(rows.iter().map(|row| row.ws_ignore)),
         optional_boolean_values(rows.iter().map(|row| row.rest_was_best_price_match)),
@@ -824,6 +883,19 @@ fn binance_aggtrade_rows_to_batch(
             rows.iter()
                 .map(|row| row.source_native_payload_json.as_str()),
         ),
+        string_values(rows.iter().map(|row| row.source_sequence_epoch_id.as_str())),
+        uint64_values(rows.iter().map(|row| row.connection_generation)),
+        optional_uint64_values(rows.iter().map(|row| row.websocket_ingress_sequence)),
+        optional_uint64_values(rows.iter().map(|row| row.rest_response_ingress_sequence)),
+        optional_uint64_values(rows.iter().map(|row| row.rest_response_item_index)),
+        uint64_values(rows.iter().map(|row| row.collector_admission_sequence)),
+        timestamp_values(rows.iter().map(|row| row.collector_admission_time_utc_ms)),
+        optional_strings(rows.iter().map(|row| row.invalid_reason_code.as_deref())),
+        optional_strings(rows.iter().map(|row| row.invalid_reason_detail.as_deref())),
+        optional_strings(rows.iter().map(|row| row.payload_encoding.as_deref())),
+        optional_uint64_values(rows.iter().map(|row| row.payload_length_bytes)),
+        optional_strings(rows.iter().map(|row| row.payload_sha256.as_deref())),
+        optional_strings(rows.iter().map(|row| row.payload_capture_status.as_deref())),
         string_values(rows.iter().map(|row| row.collector_host_id.as_str())),
         string_values(rows.iter().map(|row| row.collector_region.as_str())),
         string_values(rows.iter().map(|row| row.source_endpoint.as_str())),
