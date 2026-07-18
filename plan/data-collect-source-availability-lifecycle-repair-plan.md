@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-source-availability-lifecycle-repair-changelog.md`
 >
-> 状态：`APPROVED_IMPLEMENTATION_PHASE_6_COMPLETE_PHASE_7_AUTHORIZED_D7_8_R`。用户已于2026-07-17批准本计划、对应需求及需求第4.7节SDK-first逐项patch矩阵，并授权依次执行阶段0--8的本地文档/代码修改、测试、独立审查、commit和push；阶段0至阶段6已经实现、完成全量验证并通过独立终审。2026-07-18用户进一步批准`D7/8-R`：阶段7采用累计证据矩阵，只新增完整collector组合缺口、CLOB production actor与Gamma discovery/outer-supervisor各100-cycle及多源资源/terminal交互；阶段8采用最终树门禁、需求1--28追溯、条件式vendor复验和同批evidence交叉验收。四个逻辑producer owner、六条外部I/O路径和六个artifact/source counter必须始终区分；不得重建阶段1--6已经完成的manifest、配置或单source恢复路径。此前批准的`CT-B`与`D6-SCHEMA-R`继续有效。本授权不包括shared canonicalizer/模型调度实现、生产release构建、部署、远端服务操作或数据清理。
+> 状态：`APPROVED_IMPLEMENTATION_PHASE_7_COMPLETE_PHASE_8_AUTHORIZED_D7_8_R_D7_TIME_R_D7_MIN_R_D7_DEFER_B_R`。用户已于2026-07-17批准本计划、对应需求及需求第4.7节SDK-first逐项patch矩阵，并授权依次执行阶段0--8的本地文档/代码修改、测试、独立审查、commit和push；阶段0至阶段7已经实现、完成全量验证并通过独立终审。2026-07-18用户进一步批准`D7/8-R`：阶段7采用累计证据矩阵，只新增完整collector组合缺口、CLOB production actor与Gamma discovery/outer-supervisor各100-cycle及多源资源/terminal交互；阶段8采用最终树门禁、需求1--28追溯、条件式vendor复验和同批evidence交叉验收。四个逻辑producer owner、六条外部I/O路径和六个artifact/source counter必须始终区分；不得重建阶段1--6已经完成的manifest、配置或单source恢复路径。用户随后批准`D7-TIME-R`：完整collector组合覆盖operator stop、run deadline和shutdown segment finalize；UTC day rollover/hour finalize复用阶段1/6组件证据，不新增clock seam。用户随后批准`D7-MIN-R`：阶段7完整collector固定为三个指定场景，取消组合笛卡尔积与`D7-PENDING-A`，仅增加共同gate和depth pre-admission pending的受控stop/deadline聚焦回归；随后批准`D7-DEFER-B-R`，把取得新日permit前的跨日deferred冻结为有界pre-admission staging，正常flush才分配admission，受控截止清空时不得留下drop/gap证据。此前批准的`CT-B`与`D6-SCHEMA-R`继续有效。阶段7已完成全量验证与三路独立终审；阶段8尚未执行。本授权不包括shared canonicalizer/模型调度实现、生产release构建、部署、远端服务操作或数据清理。
 
 ## 一、成功标准与实施原则
 
@@ -214,7 +214,7 @@
 - 步骤5.1.2：对照完全无任何frame超过加速后的30秒边界，并分别注入connect error、close、EOF、server shutdown和长期恢复。
   - 验证：只有全frame inactivity/真实transport故障触发中性reconnect，同PID持续恢复且total cycles不结束source；每次成功连接的`connection_generation`严格增加，source epoch保持不变。
 - 步骤5.1.3：注入`100 -> 103 -> 104`、更大ID前跳、相同/下降ID、payload conflict、完整application payload无效及parser/typed-schema内部失败。
-  - 验证：每条合法WS trade立即按接收顺序保存/handoff，不调用REST、不进入pending、不记gap、不主动重连且generation不变；payload conflict保留双方事实，普通外部invalid保存v6 evidence并继续，parser实现、证据编码、typed-schema及本地queue/writer不变量仍按冻结scope失败。
+  - 验证：每条合法WS trade不得因ID关系等待；当前日event按接收顺序进入bounded queue并保存/handoff，跨日activation未完成时进入pre-admission staging并只在正常flush后取得admission。不得调用REST、不进入ID-hole pending、不记gap、不主动重连且generation不变；payload conflict保留双方事实，普通外部invalid保存v6 evidence并继续，parser实现、证据编码、typed-schema及本地queue/writer不变量仍按冻结scope失败。
 - 步骤5.1.4：先建立同毫秒`trade A -> invalid B -> invalid C -> trade D`与`trade 100 -> trade 103 -> invalid -> trade 104`红灯测试。
   - 验证：B/C不去重、不合并且raw bytes可逆；两组消息的WS ingress与collector admission均保持真实因果顺序，不能由receive timestamp或Parquet物理行序回排；自动静态回归证明生产代码、依赖与配置不存在aggTrade REST endpoint/client/task。
 
@@ -222,7 +222,7 @@
 
 - 步骤5.2.1：删除`business_message_deadline`对socket生命周期的控制，以及`business_message_timeout`对应lag/gap/reconnect。
   - 验证：复用depth同一30秒全frame inactivity transport边界；任意完整application frame或合法PING重新武装，不从无成交推断连接坏。
-- 步骤5.2.2：删除aggTrade实时REST client/backfill task、pending/merge/range retry、unresolved range和active continuity coordinator；合法WS trade直接走现有有界enqueue/handoff。
+- 步骤5.2.2：删除aggTrade实时REST client/backfill task、pending/merge/range retry、unresolved range和active continuity coordinator；合法WS trade不因ID关系等待，当前日直接走现有有界enqueue/handoff，跨日activation未完成时遵循pre-admission staging例外。
   - 验证：自动静态回归证明生产调用图、依赖与配置不存在`GET /api/v3/aggTrades`、aggTrade REST client及第二task，ID数值关系不影响接纳；历史`backfill_rows`只作兼容计数且新运行始终为零。
 - 步骤5.2.3：保留真实close/error/server shutdown恢复、PING/PONG、source-local transport事实、last qualifying receive time与checked连接代次。
   - 验证：网络恢复使用既有唯一source-local loop；成功握手后generation递增，同连接全部trade/invalid共享非零值，失败attempt不虚构generation；无成交和ID跳变均不进入`source_gaps`。
@@ -233,7 +233,7 @@
   - 验证：`record_kind=trade|invalid_input`封闭；新trade只来自WS，invalid的trade-only字段为null且exact evidence完整；既有REST nullable列只作兼容且新行全部为null。v5历史WS/REST/merged行只读为legacy trade，不伪造sequence/generation；仍只有既有artifact、writer和manifest mapping，无sidecar/第七artifact。
 - 步骤5.3.2：为aggTrade source task创建稳定跨reconnect/UTC rollover、重启即更换的`source_sequence_epoch_id`；每次成功WebSocket连接分配checked非零`connection_generation`，并在每个完整Text frame parse前冻结checked `websocket_ingress_sequence`。
   - 验证：同socket的trade/invalid共享generation，重连后严格增加；invalid逐条编号，sequence/generation overflow fail closed；合法duplicate消耗真实到达时已经冻结的ingress sequence但不产生typed/model evidence，既有有界`structural_dedupe_dropped_events`解释该编号空洞，空洞不得冒充source缺失或模型事件。
-- 步骤5.3.3：在现有global row/byte预算、raw-day permit及bounded queue/deferred path真正取得容量并转移ownership时冻结`collector_admission_sequence`与`collector_admission_time_utc_ms`。
+- 步骤5.3.3：在现有global row/byte预算下，event取得对应raw-day permit并把ownership转移到bounded queue时冻结`collector_admission_sequence`与`collector_admission_time_utc_ms`。尚无新日permit的跨日deferred只是有界pre-admission staging，正常rollover flush取得permit与queue ownership后才按staging顺序冻结坐标。
   - 验证：writer/flush暂停但queue有容量时source可接纳完整`trade/invalid/invalid/trade`且不等待Parquet append/finalize/fsync；writer恢复后全部落盘。短时queue满仅有界背压且不丢，timeout/closed仍terminal；不声称满载global enqueue对其他source完全隔离。
 - 步骤5.3.4：WebSocket Text/Binary application input在`524_288` bytes内按原bytes可逆编码；连接配置在cap处拒绝更大message并保存真实oversize metadata。invalid只重置全frame inactivity，不更新last qualifying或dedupe。
   - 验证：malformed JSON、缺字段、错误event/symbol/stream、binary与连续相同invalid均逐条保存并继续同socket；oversize不无界分配、不伪造payload/digest，可重连但不结束collector。
@@ -244,7 +244,7 @@
 
 阶段5完成条件：需求验收18--19、23、25及28中aggTrade适用断言全部通过；独立审查确认生产调用图没有aggTrade REST/backfill/pending/merge/active continuity控制，ID前跳保持中性，WS因果顺序与legacy读取兼容成立，没有伪造durability、busy loop/无界分配或把raw坏payload直接暴露给模型。通过后commit/push。
 
-阶段5执行结果（2026-07-18）：`COMPLETE`。生产aggTrade路径已经收敛为单一WebSocket owner。合法trade与上限内invalid frame均按真实接收顺序取得ingress coordinate，在既有有界queue取得ownership时取得admission coordinate，并异步写入同一`binance_aggtrade_v6` artifact；contract test证明相同source evidence可编码为等价handoff frame。ID前跳不等待、不回填、不写gap且不控制socket。实时REST backfill、pending、merge、range retry、unresolved range和active continuity控制已经删除；成功握手才递增非零`connection_generation`，source epoch跨同一task重连稳定，Close/EOF/protocol error/server shutdown及全frame inactivity继续在同一PID内无限恢复。历史v5 REST/merged row、v6 nullable REST列与旧manifest continuity只读兼容，历史`backfill_rows`兼容计数保留且新运行恒为零，当前writer拒绝生成REST evidence。首轮独立审查发现并修复“legacy REST-only row先占用dedupe恢复窗口”和“writer未调用完整row validator”两项缺陷；相应负例与limit=1恢复回归均已加入。真实loopback覆盖握手失败不消耗generation、全frame inactivity、reserved-opcode protocol error、payload conflict、`100 -> 103 -> invalid -> 104`原序接纳及100次Close恢复/资源有界；writer暂停测试证明producer在queue容量内不等待Parquet确认，恢复后全部v6 row落盘。`cargo test -p data-collect --locked -- --test-threads=1`通过224项lib及全部integration/doc tests，新增自动静态回归证明生产代码、依赖与配置不存在aggTrade REST endpoint/client/task；`cargo check -p data-collect --all-targets --locked`、严格Clippy、fmt与diff check均通过。阶段5单source的100次恢复验收已经完成；阶段7仍保留多source组合恢复、全部外部I/O路径不可达和系统级FD/task/queue压力验收，不重复实现aggTrade恢复路径。三路独立终审最终均为Critical 0、Important 0；精确commit/push后进入已授权阶段6。
+阶段5执行结果（2026-07-18）：`COMPLETE`。生产aggTrade路径已经收敛为单一WebSocket owner。合法trade与上限内invalid frame均按真实接收顺序取得ingress coordinate，在既有有界queue取得ownership时取得admission coordinate，并异步写入同一`binance_aggtrade_v6` artifact；contract test证明相同source evidence可编码为等价handoff frame。ID前跳不等待、不回填、不写gap且不控制socket。实时REST backfill、pending、merge、range retry、unresolved range和active continuity控制已经删除；成功握手才递增非零`connection_generation`，source epoch跨同一task重连稳定，Close/EOF/protocol error/server shutdown及全frame inactivity继续在同一PID内无限恢复。历史v5 REST/merged row、v6 nullable REST列与旧manifest continuity只读兼容，历史`backfill_rows`兼容计数保留且新运行恒为零，当前writer拒绝生成REST evidence。首轮独立审查发现并修复“legacy REST-only row先占用dedupe恢复窗口”和“writer未调用完整row validator”两项缺陷；相应负例与limit=1恢复回归均已加入。真实loopback覆盖握手失败不消耗generation、全frame inactivity、reserved-opcode protocol error、payload conflict、`100 -> 103 -> invalid -> 104`原序接纳及100次Close恢复/资源有界；writer暂停测试证明producer在queue容量内不等待Parquet确认，恢复后全部v6 row落盘。`cargo test -p data-collect --locked -- --test-threads=1`通过224项lib及全部integration/doc tests，新增自动静态回归证明生产代码、依赖与配置不存在aggTrade REST endpoint/client/task；`cargo check -p data-collect --all-targets --locked`、严格Clippy、fmt与diff check均通过。阶段5单source的100次恢复验收已经完成；其后批准的`D7-MIN-R`已把阶段7新增范围精确收敛为三个完整collector场景、CLOB/Gamma各100-cycle及受控cutoff的depth pending/跨日staging聚焦回归，不再保留额外多source组合或系统级FD/task/queue压力场景。三路独立终审最终均为Critical 0、Important 0；精确commit/push后进入已授权阶段6。
 
 ## 阶段6：Binance depth与snapshot
 
@@ -257,7 +257,7 @@
 - 步骤6.1.3：分别注入`u <= snapshot lastUpdateId`、`u <= local_u`、首桥`U <= lastUpdateId + 1 <= u`、后续连续update及`U > local_u + 1`。
   - 验证：每条结构合法raw update都只保存一次；stale/duplicate和confirmed hole写v4 not-applied verdict、只更新artifact接收事实，只有首桥/连续update推进snapshot anchor/`local_u` continuity及last-qualifying事实。hole使旧continuity state失效并触发新snapshot，但同一hole update不得在新snapshot后被改写、回排或应用。
 - 步骤6.1.4：覆盖snapshot HTTP timeout/rate limit持续超过旧单cycle预算、`418/429 Retry-After`期间future replacement/day reset/reconnect、可用snapshot前Close/EOF、generation放弃，以及无法解析`U/u`、`U > u`、非法snapshot/schema、sequence overflow和本地continuity state不变量。
-  - 验证：外部snapshot不可用不耗尽source存活预算；source-task级monotonic not-before gate不得被snapshot future取消或连接切代清除。已观察且结构可验证的buffered update按ingress顺序以`not_applied_snapshot_unavailable`中性verdict有界release，不冒充continuity-ready/gap。无法形成可信typed row及本地完整性负例仍按冻结scope失败。
+  - 验证：外部snapshot不可用不耗尽source存活预算；source-task级monotonic not-before gate不得被snapshot future取消或连接切代清除。正常运行中的snapshot unavailable、Close/EOF、普通reconnect/generation放弃和UTC day reset都把结构可验证的buffered update按ingress以`not_applied_snapshot_unavailable`中性verdict有界release；只有可靠operator stop/run deadline已关闭共同intake时，未取得共同bounded admission ownership的pending可以清空且不生成row/gap/告警/terminal。无法形成可信typed row及本地完整性负例仍按冻结scope失败。
 - 步骤6.1.5：持续发送PING但不发depth update；另一个场景完全不发送任何frame。
   - 验证：前者不重连，后者按transport inactivity重连并为真实新generation重新snapshot。
 
@@ -266,7 +266,7 @@
 - 步骤6.2.1：保留现有唯一`tokio-tungstenite` direct WebSocket owner和`reqwest + Tokio + Serde`，在每次成功握手后分配connection generation，启动唯一WS reader与至多一个active snapshot future；增加单一generation-local有界buffer和共享depth ingress allocator。
   - 验证：Cargo/lock不新增Binance SDK、Barter、Nautilus或其他market-data engine；生产调用图没有第二socket/snapshot owner、第三artifact、per-frame task或无界容器。buffer同时受row/byte硬上限约束，stop/deadline/day fence能取消/收敛当前generation且不丢弃已admit evidence。
 - 步骤6.2.2：在snapshot/update两个既有writer路径接入v3/v4字段；raw观察时冻结depth ingress，snapshot已验证并从buffer release时才在既有bounded admission取得collector admission。
-  - 验证：snapshot先admit、buffered updates按ingress release；writer/flush暂停但容量存在时不要求Parquet ACK。snapshot最终不可用或generation放弃时执行中性最终release，queue接纳后durable publish前崩溃继续落入unknown tail，不宣称已发布。
+  - 验证：snapshot先admit、buffered updates按ingress release；writer/flush暂停但容量存在时不要求Parquet ACK。正常运行中的snapshot最终不可用或generation放弃执行中性最终release；可靠operator stop/run deadline只截断未取得对应raw-day permit与queue ownership的generation-local pending或跨日deferred staging，已经取得permit并进入queue admission的evidence仍drain。queue接纳后durable publish前崩溃继续落入unknown tail，不宣称已发布。
 - 步骤6.2.3：把raw保存与continuity projection分开，更新stitch状态机并保留confirmed hole resnapshot。
   - 验证：stale/hole raw row不会因continuity不应用而消失；raw row已保存也不自动表示continuity-ready。首桥固定`U <= lastUpdateId + 1 <= u`，后续仅`U > local_u + 1`为confirmed hole；collector只推进snapshot anchor/`local_u`与verdict，原样保留`bids/asks`和`b/a`，没有新增或发布price-level book。
 - 步骤6.2.4：把完全无入站frame与有控制frame但无业务update分开，并统一snapshot外部availability与schema/invariant terminal边界。
@@ -277,7 +277,7 @@
 - 步骤6.3.1：复跑既有archive/source-hourly/writer/manifest/handoff contract，并增加v2/v3 legacy与v3/v4 current矩阵。
   - 验证：旧日级归档仍只读真实legacy字段；新消费者不把legacy `timestamp_received`或文件顺序冒充精确ingress/admission。snapshot/update仍是两个既有source目录与manifest source counter，不新增artifact或coverage复制。
 - 步骤6.3.2：执行depth snapshot pending/success/failure、100-cycle snapshot/reconnect与FD/task/socket/buffer采样。
-  - 验证：reader、snapshot future、buffer、FD、socket、queue与writer ownership不单调增长；没有tight loop、busy wait、raw静默丢失或因snapshot慢阻塞全部健康source。
+  - 验证：reader、snapshot future、buffer、FD、socket、queue与writer ownership不单调增长；没有tight loop、busy wait、正常运行恢复路径中的raw静默丢失或因snapshot慢阻塞全部健康source。受控operator stop/run deadline未接纳pending按第4.6节例外验收，不冒充raw row。
 - 步骤6.3.3：自审后派生protocol/schema因果审查与范围/资源审查。
   - 验证：两路审查均确认官方snapshot/update-id continuity算法没有被“允许缺失”弱化，`+1`首桥、raw/continuity分层、legacy unknown、无collector price-level book、依赖/owner边界及全部需求20--22逐项闭环；Critical/Important为0。
 
@@ -293,8 +293,8 @@ HTTP snapshot路径使用有界全body读取和完整typed-row预检；408/418/4
 
 ### 任务7.0：冻结累计证据与实现边界
 
-- 步骤7.0.1：建立需求1--6、23--26的累计证据矩阵，逐项引用阶段1--6已经通过的测试、命令、changelog与commit。
-  - 验证：阶段7新增工作只包含完整collector组合运行、CLOB production actor与Gamma discovery/outer-supervisor各100-cycle、多源资源/terminal交互；不得重建manifest状态机、source recovery、artifact schema、公开测试endpoint或第二coordinator。
+- 步骤7.0.1：建立需求1--6、23--26的累计证据矩阵，逐项引用阶段1--6已经通过的测试、命令、changelog与commit；阶段7完整collector新增证据固定为三个场景。
+  - 验证：阶段7新增工作只包含三个完整collector场景、CLOB production actor与Gamma discovery/outer-supervisor各100-cycle，以及受控stop/deadline未接纳depth pending和跨日pre-admission staging的聚焦回归；不得重建manifest状态机、source recovery、artifact schema、公开测试endpoint、第二coordinator或组合笛卡尔积。
 - 步骤7.0.2：冻结真实拓扑：四个producer owner为`polymarket`、`polymarket_rtds`、`binance_depth`、`binance_aggtrade`；六条外部I/O路径为Gamma HTTP、CLOB WebSocket、RTDS WebSocket、depth snapshot HTTP、depth WebSocket、aggTrade WebSocket；六个manifest counter仍对应既有六个artifact/source事实。
   - 验证：测试与诊断不把四个owner误称为四条transport，不新增第五owner、第七counter或transport episode字段。
 - 步骤7.0.3：为完整collector loopback只允许增加最小私有、必要时仅`cfg(test)`存在的runtime source-spec/factory与operator-stop注入seam，把四个现有production source future接入同一个真实coordinator；生产入口继续只构造production specs。
@@ -302,19 +302,19 @@ HTTP snapshot路径使用有界全body读取和完整typed-row预检；408/418/4
 
 ### 任务7.1：组合退化场景
 
-- 步骤7.1.1：复用阶段3--6单路径长期静默/不可达证据；在完整四owner coordinator中依次只退化Gamma HTTP、CLOB WebSocket、RTDS WebSocket、depth snapshot HTTP、depth WebSocket或aggTrade WebSocket中的一条I/O路径，并让至少一个健康producer持续产生可识别typed row。
-  - 验证：退化路径的DNS/connect/read/HTTP/backoff不持有shared queue、enqueue lock或writer资源；在queue仍有既有容量时，健康row、对应counter与最终Parquet持续推进，PID和四个producer wrapper均未替换，对应owner不因单路径availability返回。
-- 步骤7.1.2：同时退化RTDS+CLOB、aggTrade+depth以及至少一个Polymarket+一个Binance组合。
-  - 验证：availability等待不占有共享资源，未退化producer在容量范围内继续推进；共享queue真正饱和时仍适用既有有界背压与terminal timeout，本阶段不新增跨source公平调度合同。
-- 步骤7.1.3：分别运行六条外部I/O路径全部不可达，以及流式业务全静默两种场景。全静默必须先由Gamma返回有效稳定市场、depth取得合法初始snapshot并完成CLOB subscription，再让CLOB、RTDS、depth和aggTrade四条WebSocket只维持协议存活而无合格业务事件。
-  - 验证：全不可达时同PID持续source-local恢复并保留去重operator证据；全静默场景允许初始metadata/snapshot已经产生typed row，只要求进入静默后counter不再伪增长。两者都不出现systemd restart假恢复，不在manifest生成transport scope/episode、`active|idle|degraded`新状态或通用last-qualifying字段。
-- 步骤7.1.4：执行有界控制矩阵，而不是把每个source组合与每种控制事件做笛卡尔积：全I/O不可达和全流式静默分别覆盖operator stop、run deadline与UTC day rollover；至少一个代表性永久退化场景覆盖hour/segment finalize。
-  - 验证：复用阶段1 PendingExit、activation ack、rollover rendezvous、unclean-dominates与四态转换证据；新增场景在既有期限内drain/finalize，不永久等待、不丢弃已接受事件。
+- 步骤7.1.1：复用阶段3--6分别覆盖Gamma HTTP、CLOB WebSocket、RTDS WebSocket、depth snapshot HTTP、depth WebSocket和aggTrade WebSocket的单路径长期静默/不可达、恢复与资源证据，不在完整collector中逐路重复六次。
+  - 验证：累计证据证明退化路径的DNS/connect/read/HTTP/backoff不持有shared queue、enqueue lock或writer资源；阶段7只通过步骤7.1.2的代表性跨平台场景复核健康typed row、counter和最终Parquet在同一真实coordinator中推进。
+- 步骤7.1.2：只运行一个代表性Polymarket＋Binance跨平台多源退化场景；固定退化CLOB WebSocket与depth snapshot HTTP，RTDS、Gamma/depth WebSocket及aggTrade保留真实健康或可观察路径。
+  - 验证：availability等待不占有共享资源，健康producer在容量范围内产生typed row；共享queue真正饱和仍复用既有有界背压与terminal timeout组件证据，本阶段不新增跨source公平调度合同或第二多源组合。
+- 步骤7.1.3：运行六条外部I/O全部配置不可达与流式业务全静默两个operator-stop场景。全不可达例只证明四个owner在全部外部能力不可用时仍受同一collector监督；Gamma或depth前置失败阻断的CLOB/snapshot请求不得冒充实际连接失败，逐路证据引用步骤7.1.1。全静默必须先由Gamma返回有效稳定市场、depth取得合法初始snapshot并完成CLOB subscription，再让四条WebSocket只维持协议存活而无合格业务事件。
+  - 验证：全不可达时同PID持续source-local恢复并可由operator stop收敛；全静默允许初始metadata/snapshot已经产生typed row，只要求进入静默后counter不再伪增长并可由operator stop收敛。两者都不出现systemd restart假恢复，不在manifest生成transport scope/episode、`active|idle|degraded`新状态或通用last-qualifying字段。
+- 步骤7.1.4：第三个且最后一个完整collector场景使用步骤7.1.2的跨平台多源退化，同时保留健康typed row，由run deadline触发shutdown segment finalize。三个完整collector场景合计覆盖两次operator stop、一次run deadline和真实segment finalize；UTC day rollover与hour finalize复用阶段1/6真实owner/component证据，不新增clock seam。
+  - 验证：共同gate把operator stop/run deadline作为新admission截止；已取得对应raw-day permit并进入queue ownership的event在既有期限内drain/finalize，depth generation-local pending及未取得新日permit的跨日deferred staging可以清空且不生成row/gap/告警/`dropped_rows`/terminal。正常rollover只在新日activation后flush staging、分配admission并发布关联confirmed-gap副作用。累计复跑PendingExit/activation ack/rendezvous/unclean-dominates、depth hour fence及运行中snapshot unavailable/EOF中性release，证明受控截止没有扩大到普通运行边界。
 
 ### 任务7.2：中性产物与模型边界
 
-- 步骤7.2.1：只检查阶段7组合场景产生的真实产物，不重新实施阶段1 manifest矩阵。
-  - 验证：启动即全不可达时共同coverage仍为active且六counter保持真实零/null；部分健康时只有真实artifact counter推进；全静默在初始metadata/snapshot后不再伪造行；stop/rollover得到与阶段1合同一致的known/unknown closure。nullable last-qualifying从typed raw或source-local运行事实因果取得，不新增manifest字段；无额外receipt/sidecar、transport episode、collector silence timer、缺失条数或行情回填。
+- 步骤7.2.1：只检查步骤7.1指定的三个完整collector场景产生的真实产物，不重新实施阶段1 manifest矩阵。
+  - 验证：全不可达时共同coverage仍为active且六counter保持真实零/null；跨平台退化时只有真实artifact counter推进并有健康row；全静默在初始metadata/snapshot后不再伪造行；两次operator stop和一次run deadline得到与阶段1合同一致的known/unknown closure与finalized segment。无额外receipt/sidecar、transport episode、collector silence timer、缺失条数或行情回填。
 - 步骤7.2.2：复跑并引用阶段1、5、6既有manifest、state-aware recovery、legacy compatibility及artifact合同测试，确认阶段7diff没有改变schema或恢复语义。
   - 验证：每日仍只有顶层v3直接嵌套coverage v1及六个既有counter；`active|idle|degraded`不成为manifest状态；legacy aggTrade continuity只读、depth legacy/current矩阵和sticky bool语义不变，availability不进入`source_gaps`。
 - 步骤7.2.3：检查范围。
@@ -324,12 +324,16 @@ HTTP snapshot路径使用有界全body读取和完整typed-row预检；408/418/4
 
 - 步骤7.3.1：完成累计100-cycle证据矩阵：复用阶段3 SDK/RTDS、阶段5 aggTrade、阶段6 depth WebSocket reconnect与HTTP resnapshot证据；新增CLOB production market actor和Gamma discovery/outer-supervisor各100-cycle。不得另建任何第二恢复循环。
   - 验证：每条独立恢复路径累计至少100次后task、FD、socket、receiver、actor、queue、watch、refcount、depth buffer/snapshot future无单调增长；CLOB每代只replay latest desired且旧generation ack不能满足新代，Gamma按当前时钟重新发现而不保留过期slug；阶段5静态门继续证明aggTrade没有REST/backfill/pending/range-retry任务。
-- 步骤7.3.2：拆分非terminal与terminal组合。非terminal场景同时包含一个availability退化source、连续普通aggTrade invalid和至少一个持续写入的健康source；terminal场景每次只注入一个代表性fault family，并让另一个source保持availability recovery。
-  - 验证：普通aggTrade invalid逐条进入v6且collector不退出；代表性的source-local parser/sequence terminal与shared writer/manifest terminal不会被availability循环吞掉。复用阶段1及各source既有完整fault矩阵，不在同一已fail-closed运行中继续注入不可观测的后续fault。
-- 步骤7.3.3：复用阶段5 invalid burst、writer暂停、oversize和阶段6 depth buffer证据，只新增cross-source shared queue短时饱和、单writer暂停时其他writer在容量内推进，以及admitted-but-not-durable后的共同coverage unknown-tail组合证据。
-  - 验证：容量内异步接纳不等待磁盘ACK，没有per-frame task或无界内存；queue真正饱和时沿用既有2秒有界背压与terminal timeout，不承诺跨source公平性；资源采样记录基线、峰值与最终回落或稳定平台，而不是仅凭一次FD数值判断。
+- 步骤7.3.2：复用阶段1、5、6已经冻结的aggTrade invalid、source-local parser/sequence terminal、shared writer/manifest terminal与共同gate证据，不再把availability退化、invalid burst、健康source和terminal拼成第四个完整collector场景。
+  - 验证：普通aggTrade invalid逐条进入v6且collector不退出，真实terminal不会被availability循环吞掉；这些结论由既有component/owner fault矩阵提供，不在同一已fail-closed运行中继续注入不可观测fault。
+- 步骤7.3.3：复用阶段5 invalid burst、writer暂停、oversize与阶段6 depth buffer、queue/writer ownership证据；只新增共同gate受控截止和真实depth pending的聚焦component回归，不新增cross-source shared-queue完整collector组合。
+  - 验证：operator stop与已到点run deadline都拒绝新的unadmitted enqueue；CapacityLimit/terminal仍保持错误，截止前已取得对应raw-day permit并转移queue ownership的event继续drain。聚焦回归同时证明跨日deferred在新日permit前没有collector admission，正常rollover按staging顺序flush后才分配，受控PendingExit清空后queue无新row且admission sequence、gap、`dropped_rows`、terminal均不伪增长；snapshot pending update适用相同截止，普通snapshot unavailable、Close/EOF、reconnect、UTC rollover仍中性release。
 
-阶段7完成条件：需求1--6、23--26由“前序阶段冻结证据＋阶段7新增差异证据”共同闭环。阶段7新增范围限定为完整collector下的单I/O路径、多源与全源组合、代表性控制收敛、CLOB/Gamma 100-cycle及多源资源/terminal交互；不得新增public test endpoint、shadow coordinator、第二owner、manifest字段或artifact。自审和独立审查通过后精确commit/push。
+阶段7完成条件：需求1--6、23--26由“前序阶段冻结证据＋阶段7新增差异证据”共同闭环。阶段7新增范围严格限定为三个指定完整collector场景、CLOB/Gamma各100-cycle及受控stop/deadline depth pending与跨日pre-admission staging聚焦回归；single-source、invalid、terminal、queue/writer、UTC rollover与hour finalize均复用累计组件/owner证据。不得新增第四个完整collector场景、public test endpoint、shadow coordinator、第二owner、manifest字段或artifact。自审和独立审查通过后精确commit/push。
+
+阶段7执行结果（2026-07-18）：`COMPLETE`。默认集合中的完整collector严格只有三例：全部外部I/O不可达由operator stop收敛、protocol存活但业务静默由operator stop收敛、跨平台退化保留健康typed row并由run deadline触发segment finalize。CLOB production market actor与Gamma discovery/outer-supervisor各完成100-cycle；阶段3 RTDS、阶段5 aggTrade及阶段6 depth累计恢复证据继续复用，没有新增第二恢复循环或组合矩阵。受控cutoff聚焦回归同时覆盖depth generation-local pending、activation前PendingExit及activation commit后deferred flush期间的SameDay stop；跨日staging只有在取得新日permit与queue ownership后才分配admission，受控清空不生成row、gap、告警、`dropped_rows`、operational counter或terminal。admission关联gap按各event真实接收UTC日归档。
+
+最终门禁通过：`cargo check -p data-collect --all-targets --locked`、`cargo clippy -p data-collect --locked --all-targets -- -D warnings`、`cargo test -p data-collect --locked -- --test-threads=1`、`cargo fmt --all -- --check`及`git diff --check`均退出0；全量测试为254项lib及全部integration/doc tests。三路`gpt-5.6-sol/ultra`终审分别覆盖生产并发/所有权、测试最小性及文档authority；发现的post-activation cutoff、gap UTC日归属与旧绝对措辞均已修复并由原审查者复核，最终Critical 0、Important 0、Minor 0。阶段8已获授权但尚未执行。
 
 ## 阶段8：全量验证、追溯与本地交付
 

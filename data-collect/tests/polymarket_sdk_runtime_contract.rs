@@ -31,6 +31,23 @@ fn open_fd_count() -> usize {
     std::fs::read_dir("/proc/self/fd").unwrap().count()
 }
 
+fn delegate_resource_test_to_isolated_process(test_name: &str) -> bool {
+    const ISOLATED_TEST_ENV: &str = "DATA_COLLECT_ISOLATED_SDK_RESOURCE_TEST";
+    if std::env::var(ISOLATED_TEST_ENV).as_deref() == Ok(test_name) {
+        return false;
+    }
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([test_name, "--exact", "--test-threads=1"])
+        .env(ISOLATED_TEST_ENV, test_name)
+        .status()
+        .expect("isolated SDK resource test process must start");
+    assert!(
+        status.success(),
+        "isolated SDK resource test failed: {test_name}"
+    );
+    true
+}
+
 fn exhausting_config() -> Config {
     let mut config = fast_config();
     config.reconnect.max_attempts = Some(2);
@@ -298,6 +315,148 @@ async fn market_natural_reconnect_replays_only_latest_complete_desired_set_once(
     assert_eq!(requests[1]["assets_ids"], json!(["99", "100"]));
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn market_one_hundred_natural_reconnects_keep_one_actor_and_replay_per_generation() {
+    if delegate_resource_test_to_isolated_process(
+        "market_one_hundred_natural_reconnects_keep_one_actor_and_replay_per_generation",
+    ) {
+        return;
+    }
+    const RECONNECTS: u64 = 100;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (replay_tx, mut replay_rx) = mpsc::unbounded_channel();
+    let (close_tx, mut close_rx) = mpsc::unbounded_channel();
+    let (finish_tx, mut finish_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        for generation in 0..=RECONNECTS {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let request: Value = serde_json::from_str(&next_text(&mut socket).await).unwrap();
+            assert_eq!(request["operation"], "subscribe");
+            assert_eq!(request["assets_ids"], json!(["1", "2"]));
+            replay_tx.send(generation).unwrap();
+
+            if generation == RECONNECTS {
+                loop {
+                    tokio::select! {
+                        biased;
+                        message = socket.next() => {
+                            match message {
+                                Some(Ok(Message::Text(text))) if text == "PING" => {
+                                    socket.send(Message::Text("PONG".into())).await.unwrap();
+                                }
+                                Some(Ok(Message::Text(text))) if serde_json::from_str::<Value>(&text).is_ok() => {
+                                    panic!("generation {generation} received a duplicate market replay")
+                                }
+                                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
+                                    panic!("final market generation closed before test release")
+                                }
+                                _ => {}
+                            }
+                        }
+                        result = &mut finish_rx => {
+                            result.unwrap();
+                            return;
+                        }
+                    }
+                }
+            }
+
+            loop {
+                tokio::select! {
+                    biased;
+                    message = socket.next() => {
+                        match message {
+                            Some(Ok(Message::Text(text))) if text == "PING" => {
+                                socket.send(Message::Text("PONG".into())).await.unwrap();
+                            }
+                            Some(Ok(Message::Text(text))) if serde_json::from_str::<Value>(&text).is_ok() => {
+                                panic!("generation {generation} received a duplicate market replay")
+                            }
+                            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
+                                panic!("market generation {generation} closed before command")
+                            }
+                            _ => {}
+                        }
+                    }
+                    command = close_rx.recv() => {
+                        assert_eq!(command.unwrap(), generation);
+                        socket.send(Message::Close(None)).await.unwrap();
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    let mut config = fast_config();
+    config.reconnect.max_attempts = Some(3);
+    let mut runtime = MarketSdkRuntime::new(format!("ws://{address}"), config).unwrap();
+    let revision = runtime.replace_desired_assets(assets(&[1, 2])).unwrap();
+    runtime
+        .wait_desired_applied(revision, Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(replay_rx.recv().await.unwrap(), 0);
+    assert_eq!(runtime.subscription_count(), 1);
+
+    let steady_tasks = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+    #[cfg(target_os = "linux")]
+    let mut fd_samples = vec![open_fd_count()];
+
+    for generation in 0..RECONNECTS {
+        close_tx.send(generation).unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(2), replay_rx.recv())
+                .await
+                .expect("next market generation")
+                .unwrap(),
+            generation + 1
+        );
+        runtime
+            .wait_desired_applied(revision, Duration::from_secs(2))
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if tokio::runtime::Handle::current()
+                    .metrics()
+                    .num_alive_tasks()
+                    <= steady_tasks
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("market actor/heartbeat tasks must not accumulate");
+        assert_eq!(runtime.subscription_count(), 1);
+        #[cfg(target_os = "linux")]
+        fd_samples.push(open_fd_count());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        assert_eq!(fd_samples.len(), RECONNECTS as usize + 1);
+        let first = fd_samples[0];
+        let last = *fd_samples.last().unwrap();
+        let minimum = *fd_samples.iter().min().unwrap();
+        let maximum = *fd_samples.iter().max().unwrap();
+        assert!(
+            last <= first + 2 && maximum <= minimum + 4,
+            "market reconnect FDs must remain bounded: first={first}, last={last}, min={minimum}, max={maximum}"
+        );
+    }
+
+    finish_tx.send(()).unwrap();
+    server.await.unwrap();
+}
+
 #[tokio::test]
 async fn market_single_receiver_exposes_broadcast_lag() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -501,6 +660,11 @@ async fn rtds_natural_reconnect_replays_once_without_unsubscribe() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn rtds_one_hundred_natural_reconnects_keep_one_actor_and_replay_per_generation() {
+    if delegate_resource_test_to_isolated_process(
+        "rtds_one_hundred_natural_reconnects_keep_one_actor_and_replay_per_generation",
+    ) {
+        return;
+    }
     const RECONNECTS: u64 = 100;
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -6,7 +6,7 @@
 >
 > 对应计划：`plan/data-collect-source-availability-lifecycle-repair-plan.md`
 >
-> 状态：`APPROVED_IMPLEMENTATION_PHASE_6_COMPLETE_PHASE_7_AUTHORIZED_D7_8_R`。用户已于2026-07-17批准最终需求、计划及SDK-first逐项patch矩阵，并授权按计划执行本地文档/代码修改、测试、独立审查、commit和push；阶段0至阶段6均已完成全量验证和独立终审。2026-07-18用户进一步批准`D7/8-R`，要求阶段7复用前序证据并只补组合运行、CLOB/Gamma 100-cycle与多源压力缺口，阶段8收敛为最终树门禁、需求1--28追溯、条件式vendor复验和同批evidence交叉验收。生产构建、部署、远端服务写操作和数据清理仍未获授权。
+> 状态：`APPROVED_IMPLEMENTATION_PHASE_7_COMPLETE_PHASE_8_AUTHORIZED_D7_8_R_D7_TIME_R_D7_MIN_R_D7_DEFER_B_R`。用户已于2026-07-17批准最终需求、计划及SDK-first逐项patch矩阵，并授权按计划执行本地文档/代码修改、测试、独立审查、commit和push；阶段0至阶段7均已完成全量验证和独立终审。2026-07-18用户进一步批准`D7/8-R`，要求阶段7复用前序证据并只补组合运行、CLOB/Gamma 100-cycle与多源压力缺口，阶段8收敛为最终树门禁、需求1--28追溯、条件式vendor复验和同批evidence交叉验收；随后批准`D7-TIME-R`，禁止为组合时间测试新增clock seam。用户随后批准`D7-MIN-R`：完整collector只保留三个指定场景，取消组合笛卡尔积与`D7-PENDING-A`，只对未取得共同admission ownership的depth pending采用受控stop/deadline清空边界；随后批准`D7-DEFER-B-R`，把未取得新日permit的跨日deferred定义为有界pre-admission staging，正常flush后才分配admission，受控清空不生成drop/gap证据。阶段7已完成全量验证与三路独立终审；阶段8尚未执行。生产构建、部署、远端服务写操作和数据清理仍未获授权。
 
 ## 2026-07-17：最终批准并开始阶段0
 
@@ -415,3 +415,32 @@
 - 完整collector组合loopback只允许增加最小私有、必要时仅`cfg(test)`存在的runtime source-spec/factory与operator-stop注入seam；四个既有source future必须继续进入同一个真实production coordinator，公开runtime config、CLI、endpoint环境变量和生产source构造不变，禁止shadow coordinator、test API或绕过owner的合成事件注入。
 - 旧计划要求“changelog记录阶段8自身commit SHA”存在Git自引用矛盾，现改为changelog记录阶段0--7 commit映射、最终测试/审查/scope与阶段8 commit subject；阶段8 push后由交付报告记录并验证`HEAD == upstream == remote`。审查修复只重跑受影响的阶段7场景和全部阶段8最终门禁，不因纯文档修改重复全部100-cycle。
 - 需求第2.3节已改名为“修复前历史缺陷基线（截至2026-07-16）”，避免把阶段0--6已经修复的行为继续描述成当前事实。历史changelog中的旧方案与当时证据继续原样保留，用于记录决策演进，不作为当前authority。
+
+## 2026-07-18：用户批准D7-TIME-R并关闭组合时钟冲突
+
+- 阶段7实施审查发现，原步骤7.1.4要求全不可达和全流式静默的完整collector fixture都确定性跨越UTC day rollover，但同一已批准步骤7.0.3只允许私有source-spec/factory与operator-stop seam。真实runtime、四个producer wrapper及depth hour调度直接读取`SystemTime`；Tokio虚拟时间不推进该时钟，等待真实午夜/整点也不能形成确定性门禁。两项要求无法在不扩张范围时同时成立，因此按方案不一致决策门暂停。
+- 用户批准`D7-TIME-R`：完整collector组合新增operator stop、run deadline与shutdown segment finalize证据；UTC day rollover和hour finalize分别复用阶段1/6已经冻结的真实owner/component测试及其PendingExit、activation ack、rollover rendezvous和unclean-dominates证据。不得新增全局或per-runtime clock seam，不得把组件累计证据冒充为组合fixture真实跨界。
+- 该选择不降低需求第六节业务验收：两种全源场景仍必须完成operator stop，至少一个永久退化完整collector场景还要完成run deadline，至少一个存在健康typed row的退化场景必须在shutdown时真实finalize segment。它只删除计划中超出核心需求且与最小seam冲突的重复时间组合。
+
+## 2026-07-18：用户批准D7-MIN-R并收缩阶段7组合测试
+
+- 用户质疑阶段7完整collector组合测试及depth snapshot pending关闭校验是否过度设计，并要求先核对`/home/chillchill/poly-tx`与成熟实践。真实代码审计确认`poly-tx`在停止时直接结束收集循环并丢弃尚在内存中的snapshot pending，不存在避免该问题的隐藏机制；Binance官方只规定运行中snapshot/update-id同步流程，没有规定operator stop时必须保存应用内pending。Tokio同时支持“停止入口后drain已经接纳ownership”与应用明确允许的受控取消；这些证据支持缩小测试，而不支持删除全部关闭边界。
+- 用户批准`D7-MIN-R`：阶段7完整collector新增证据从十三个case收敛为且只能为三个case：①全部外部I/O配置不可达＋operator stop；②protocol存活但业务全静默＋operator stop；③代表性Polymarket＋Binance跨平台多源退化＋健康typed row＋run deadline及shutdown segment finalize。全不可达case只证明四个owner在全部外部能力不可用时仍受共同collector监督；被Gamma/depth前置失败阻断的CLOB/snapshot I/O不得冒充实际连接失败，逐路恢复引用阶段3--6累计证据。
+- 同时撤销未获批准的`D7-PENDING-A`全量pending持久化方案。新的最小边界以共同admission ownership为切点：已经取得raw-day permit并把ownership转移到既有bounded inflight/queue/deferred admission的event必须drain/finalize；仅位于Binance depth generation-local pending buffer、尚未取得共同admission ownership的update，在可靠collector-wide operator stop或run deadline关闭intake后可以清空，不生成row、gap、告警或terminal。training、paper、live因而都只看到真实已接纳事实，不补造unknown row。
+- 该例外不得扩张到正常运行。snapshot unavailable、Close/EOF、普通reconnect/generation abandon、UTC day rollover与terminal前的结构有效pending仍按阶段6合同中性release；CapacityLimit、queue/writer/manifest、parser/schema内部不变量与ownership失败继续terminal。run deadline在watcher尚未调度但已到点的窗口也必须拒绝新unadmitted enqueue；若已有terminal close，后到的deadline不得把它静默改写为受控丢弃。
+- 计划第7.3.2/7.3.3已同步改为复用阶段1/5/6的invalid、terminal、queue/writer与depth运行中恢复证据，不再拼接第四个完整collector场景；只新增共同gate截止和真实depth pending的聚焦stop/deadline回归。`demand/data-collect-demand.md`与`demand/rebuild-core-demand.md`同步采用相同admitted/pre-admission边界，避免专项需求与核心authority冲突；阶段6历史条目保留原样，本节只明确取代其中`stop reset`无条件中性release的旧范围。
+
+## 2026-07-18：用户批准D7-DEFER-B-R并修正跨日staging边界
+
+- 阶段7终审发现，跨日event在旧实现中会于新日activation前进入`DeferredRawBatch`并提前取得`collector_admission`，但该event尚无新日raw-day permit；若此时operator stop/run deadline形成PendingExit，producer stop路径又会删除该batch并增加`dropped_rows`。这同时违反“已接纳evidence必须drain”和“新日activation未提交时不得发布新日event”，不能靠简单增加组合测试调和。
+- 用户批准`D7-DEFER-B-R`：共同inflight reservation与`DeferredRawBatch`只构成有界pre-admission staging；event必须同时取得对应raw-day permit与bounded queue ownership才成为已接纳事实并冻结collector admission坐标。正常rollover在新日activation后按staging顺序flush；PendingExit先获胜时不激活新日，可以清空staging且不生成row、gap、告警、`dropped_rows`或terminal。此前阶段5/6把deferred ownership本身称为admission的现行计划措辞由本节精确取代，历史记录保留不改写。
+- 生产实现删除deferred入口的提前admission分配，把分配移动到flush取得新日permit和queue permits之后。aggTrade payload conflict与depth confirmed-hole gap改为随event携带的pre-admission副作用：当前日queue admission立即发布，跨日staging只在正常flush成功后发布，受控清空不会留下“没有raw row却存在gap”的伪证据。terminal flush/drop仍保留既有完整性计数。
+- 聚焦回归覆盖两条边界：正常rollover证明staging内无permit/admission、flush保持顺序并在新日分配坐标；operator-stop PendingExit证明staging清空后inflight预算全部释放，queue、admission sequence、gap、`dropped_rows`及operational counters均不增长。阶段7旧“多源系统压力”残留措辞同步删除，完整collector仍严格只有三个批准场景。
+
+## 2026-07-18：阶段7实现、终审修复与完成
+
+- 完整collector默认测试严格保持三例：全部外部I/O不可达＋operator stop、protocol存活但业务全静默＋operator stop、跨平台多源退化＋健康typed row＋run deadline及shutdown segment finalize。四个production source future继续进入同一个真实coordinator；没有新增public endpoint、shadow coordinator、第四个组合场景、manifest字段或artifact。CLOB production market actor与Gamma discovery/outer-supervisor分别完成100-cycle，阶段3 RTDS、阶段5 aggTrade和阶段6 depth证据按批准累计复用。
+- `D7-DEFER-B-R`生产边界已经落地：共同inflight reservation及尚无新日permit的`DeferredRawBatch`只提供有界pre-admission staging；正常rollover在新日activation commit后按staging顺序取得permit与queue ownership，再冻结collector admission并发布随event携带的aggTrade conflict/depth confirmed-hole gap。operator stop/run deadline在activation前或activation commit后的deferred flush期间先关闭unadmitted intake时，尚未取得最终permit的当前及剩余staging均中性释放；已经admit的event继续drain/finalize，terminal/CapacityLimit不使用该豁免。
+- 首轮终审发现并关闭两个代码Important。其一，activation commit后、deferred flush尚未完成时到达受控截止，旧严格enqueue会把未接纳staging误报为terminal；close-bound与active-day admission现在都在持有enqueue fence后识别authoritative cutoff并返回中性结果，原聚焦测试增加真实SameDay operator-stop flush分支。其二，admission gap原来使用发布时`now_ms()`归档，队列/rollover延迟可能令row与gap跨UTC日；immediate与deferred路径现在都使用各event的`recv_time_utc_ms`调用`record_gap_at()`，同一rollover测试分别断言旧日immediate gap与新日deferred gap归属。
+- 文档终审发现并修正核心需求与阶段5计划中“立即admission”的绝对措辞、旧系统级多source压力范围以及阶段7完成条件漏列跨日staging回归；当前authority统一为“当前日queue admission／跨日pre-admission staging／正常flush后admission／受控清空保持缺失”，历史changelog仍按日期保留并由后续批准明确取代。
+- 最终验证：`cargo check -p data-collect --all-targets --locked`、`cargo clippy -p data-collect --locked --all-targets -- -D warnings`、`cargo test -p data-collect --locked -- --test-threads=1`、`cargo fmt --all -- --check`及`git diff --check`均退出0；全量为254项lib及全部integration/doc tests。三路`gpt-5.6-sol/ultra`原审查者复核后均为Critical 0、Important 0、Minor 0。阶段7标记完成；阶段8已授权但尚未执行，生产构建、部署、远端服务和数据清理仍未获授权。

@@ -1147,6 +1147,25 @@ impl RawDayGate {
             })
     }
 
+    fn unadmitted_runtime_cutoff_is_active(&self) -> bool {
+        if let Some(exit) = self.prepared_runtime_exit() {
+            return match exit {
+                PreparedRuntimeExit::SameDay(close) => matches!(
+                    close.cause,
+                    RuntimeCloseCause::OperatorStop | RuntimeCloseCause::RunDeadline
+                ),
+                PreparedRuntimeExit::Rollover(exit) => matches!(
+                    exit.cause,
+                    RuntimeCloseCause::OperatorStop | RuntimeCloseCause::RunDeadline
+                ),
+            };
+        }
+        self.runtime_deadline
+            .lock()
+            .expect("raw-day runtime-deadline mutex poisoned")
+            .is_some_and(RuntimeDeadlineCandidate::is_reached)
+    }
+
     fn mark_runtime_exit_unclean(
         &self,
         identity: &RuntimeCloseIdentity,
@@ -1991,10 +2010,14 @@ impl RawDayGate {
         producer: &str,
         close: &RawDayClose,
         recv_time_utc_ms: i64,
-    ) -> Result<RawDayEnqueuePermit> {
+    ) -> Result<Option<RawDayEnqueuePermit>> {
         let utc_day = utc_day_string_from_ms(recv_time_utc_ms)
             .ok_or_else(|| invalid_data("UTC day unavailable for deferred raw-event permit"))?;
         let fence = Arc::clone(&self.enqueue_fence).read_owned().await;
+        if self.unadmitted_runtime_cutoff_is_active() {
+            drop(fence);
+            return Ok(None);
+        }
         let state = self.current_state();
         let RawDayGateState::Closing(actual) = state else {
             return Err(invalid_data(format!(
@@ -2008,29 +2031,56 @@ impl RawDayGate {
             ))
             .into());
         }
-        Ok(RawDayEnqueuePermit {
+        Ok(Some(RawDayEnqueuePermit {
             permit: RawDayPermit {
                 utc_day,
                 generation: close.next_generation,
             },
             _fence: fence,
-        })
+        }))
     }
 
+    #[cfg(test)]
     async fn begin_event_enqueue(
         self: &Arc<Self>,
         producer: &str,
         recv_time_utc_ms: i64,
     ) -> Result<RawDayEnqueueDecision> {
+        self.begin_event_enqueue_with_cutoff(producer, recv_time_utc_ms, false)
+            .await?
+            .ok_or_else(|| {
+                invalid_data("strict raw enqueue unexpectedly accepted a runtime cutoff").into()
+            })
+    }
+
+    async fn begin_unadmitted_event_enqueue(
+        self: &Arc<Self>,
+        producer: &str,
+        recv_time_utc_ms: i64,
+    ) -> Result<Option<RawDayEnqueueDecision>> {
+        self.begin_event_enqueue_with_cutoff(producer, recv_time_utc_ms, true)
+            .await
+    }
+
+    async fn begin_event_enqueue_with_cutoff(
+        self: &Arc<Self>,
+        producer: &str,
+        recv_time_utc_ms: i64,
+        allow_controlled_cutoff: bool,
+    ) -> Result<Option<RawDayEnqueueDecision>> {
         let utc_day = utc_day_string_from_ms(recv_time_utc_ms)
             .ok_or_else(|| invalid_data("UTC day unavailable for raw event permit"))?;
         let fence = Arc::clone(&self.enqueue_fence).read_owned().await;
+        if allow_controlled_cutoff && self.unadmitted_runtime_cutoff_is_active() {
+            drop(fence);
+            return Ok(None);
+        }
         match self.current_state() {
             RawDayGateState::Active(permit) if permit.utc_day == utc_day => {
-                Ok(RawDayEnqueueDecision::Permit(RawDayEnqueuePermit {
+                Ok(Some(RawDayEnqueueDecision::Permit(RawDayEnqueuePermit {
                         permit,
                         _fence: fence,
-                    }))
+                    })))
             }
             RawDayGateState::Active(permit) if utc_day > permit.utc_day => {
                 let event_day_start = recv_time_utc_ms
@@ -2050,19 +2100,19 @@ impl RawDayGate {
                     .checked_add(1)
                     .ok_or_else(|| invalid_data("raw-day generation overflow while deferring"))?;
                 drop(fence);
-                Ok(RawDayEnqueueDecision::Defer(RawDayDeferredEpoch {
+                Ok(Some(RawDayEnqueueDecision::Defer(RawDayDeferredEpoch {
                     utc_day,
                     old_generation: permit.generation,
                     expected_generation,
-                }))
+                })))
             }
             RawDayGateState::Closing(close) if utc_day == close.next_utc_day => {
                 drop(fence);
-                Ok(RawDayEnqueueDecision::Defer(RawDayDeferredEpoch {
+                Ok(Some(RawDayEnqueueDecision::Defer(RawDayDeferredEpoch {
                     utc_day,
                     old_generation: close.generation,
                     expected_generation: close.next_generation,
-                }))
+                })))
             }
             RawDayGateState::Inactive => {
                 Err(invalid_data("raw event reached inactive raw-day gate").into())
@@ -2076,10 +2126,22 @@ impl RawDayGate {
                 "raw event does not belong to next UTC day after intake close: producer={producer} event={utc_day} close={close:?}"
             ))
             .into()),
-            RawDayGateState::ClosingSameDay(close) => Err(invalid_data(format!(
-                "raw event arrived after same-day intake close: producer={producer} event={utc_day} close={close:?}"
-            ))
-            .into()),
+            RawDayGateState::ClosingSameDay(close)
+                if allow_controlled_cutoff
+                    && matches!(
+                        close.cause,
+                        RuntimeCloseCause::OperatorStop | RuntimeCloseCause::RunDeadline
+                    ) =>
+            {
+                drop(fence);
+                Ok(None)
+            }
+            RawDayGateState::ClosingSameDay(close) => {
+                Err(invalid_data(format!(
+                    "raw event arrived after same-day intake close: producer={producer} event={utc_day} close={close:?}"
+                ))
+                .into())
+            }
         }
     }
 }
@@ -2372,6 +2434,7 @@ enum PolymarketSourceControl {
 struct InflightRawEvent {
     event: RawEvent,
     control: Option<IngressControl>,
+    admission_gaps: Vec<String>,
     raw_day_permit: Option<RawDayPermit>,
     _source_recv_monotonic_ms: u64,
     _reservation: Option<InflightReservation>,
@@ -2395,6 +2458,7 @@ impl InflightRawEvent {
         Self {
             event,
             control: None,
+            admission_gaps: Vec::new(),
             raw_day_permit: None,
             _source_recv_monotonic_ms: 0,
             _reservation: Some(budget.try_acquire(1, bytes)),
@@ -2827,11 +2891,17 @@ fn record_deferred_flush_drop(
 }
 
 fn drop_deferred_raw_events(sink: &SourceEventSink, producer: &str) {
-    for batch in sink
+    let batches = sink
         .source_queue_backpressure
-        .take_deferred_raw_batches(producer)
-    {
-        record_deferred_batch_drop(sink, &batch.events);
+        .take_deferred_raw_batches(producer);
+    let controlled_cutoff = sink
+        .source_queue_backpressure
+        .raw_day_gate()
+        .is_some_and(|gate| gate.unadmitted_runtime_cutoff_is_active());
+    if !controlled_cutoff {
+        for batch in &batches {
+            record_deferred_batch_drop(sink, &batch.events);
+        }
     }
 }
 
@@ -2868,29 +2938,48 @@ async fn flush_deferred_raw_events(
             ))
             .into());
         }
+        if events.iter().any(|event| {
+            event.raw_day_permit.is_some() || event.event.collector_admission.is_some()
+        }) {
+            record_deferred_flush_drop(sink, &events, &batches);
+            return Err(invalid_data(format!(
+                "deferred raw-event staging already owned final admission: producer={producer}"
+            ))
+            .into());
+        }
         let gate = sink
             .source_queue_backpressure
             .raw_day_gate()
             .ok_or_else(|| invalid_data("raw-day gate missing while deferred events flushed"))?;
         let enqueue = match gate.current_state() {
             RawDayGateState::Closing(ref actual) if actual == close => {
-                gate.begin_close_bound_deferred_flush(producer, close, first.event.recv_time_utc_ms)
+                let Some(enqueue) = gate
+                    .begin_close_bound_deferred_flush(producer, close, first.event.recv_time_utc_ms)
                     .await?
+                else {
+                    return Ok(());
+                };
+                enqueue
             }
-            _ => match gate
-                .begin_event_enqueue(producer, first.event.recv_time_utc_ms)
-                .await?
-            {
-                RawDayEnqueueDecision::Permit(enqueue) => enqueue,
-                RawDayEnqueueDecision::Defer(actual_epoch) => {
-                    record_deferred_flush_drop(sink, &events, &batches);
-                    return Err(invalid_data(format!(
+            _ => {
+                let Some(decision) = gate
+                    .begin_unadmitted_event_enqueue(producer, first.event.recv_time_utc_ms)
+                    .await?
+                else {
+                    return Ok(());
+                };
+                match decision {
+                    RawDayEnqueueDecision::Permit(enqueue) => enqueue,
+                    RawDayEnqueueDecision::Defer(actual_epoch) => {
+                        record_deferred_flush_drop(sink, &events, &batches);
+                        return Err(invalid_data(format!(
                         "deferred raw-event batch remained ahead of active day: producer={producer} expected={epoch:?} actual={actual_epoch:?} recv_time_utc_ms={}",
                         first.event.recv_time_utc_ms,
                     ))
                     .into());
+                    }
                 }
-            },
+            }
         };
         let permit = enqueue.permit.clone();
         if permit.utc_day != epoch.utc_day
@@ -2956,8 +3045,20 @@ async fn flush_deferred_raw_events(
                 .into());
             }
         };
-        for (permit, event) in permits.zip(events) {
+        let admission_result = events
+            .iter_mut()
+            .try_for_each(|event| stamp_source_admission(&mut event.event, sink));
+        if let Err(error) = admission_result {
+            record_deferred_flush_drop(sink, &events, &batches);
+            return Err(error);
+        }
+        for (permit, mut event) in permits.zip(events) {
+            let gap_time_utc_ms = event.event.recv_time_utc_ms;
+            let admission_gaps = std::mem::take(&mut event.admission_gaps);
             permit.send(event);
+            for gap in admission_gaps {
+                record_gap_at(&sink.gaps, gap_time_utc_ms, gap);
+            }
         }
     }
     Ok(())
@@ -6446,6 +6547,22 @@ async fn complete_pending_exit_rollover(
 pub async fn run_live_training_runtime(
     config: LiveTrainingRuntimeConfig,
 ) -> Result<LiveTrainingRuntimeReceipt> {
+    run_live_training_runtime_with_sources_and_stop(
+        config,
+        LiveRuntimeSourceSpecs::production(),
+        shutdown_signal(),
+    )
+    .await
+}
+
+async fn run_live_training_runtime_with_sources_and_stop<S>(
+    config: LiveTrainingRuntimeConfig,
+    source_specs: LiveRuntimeSourceSpecs,
+    operator_stop: S,
+) -> Result<LiveTrainingRuntimeReceipt>
+where
+    S: Future<Output = ()> + Send + 'static,
+{
     validate_mandatory_producer_source_mapping()?;
     fs::create_dir_all(&config.dataset_root)?;
     let dataset_root = config.dataset_root.canonicalize()?;
@@ -6551,7 +6668,7 @@ pub async fn run_live_training_runtime(
         {
             tokio::select! {
                 biased;
-                () = shutdown_signal() => RuntimeExitRequest {
+                () = operator_stop => RuntimeExitRequest {
                     observed_utc_ms: now_ms(),
                     cause: RuntimeCloseCause::OperatorStop,
                 },
@@ -6561,7 +6678,7 @@ pub async fn run_live_training_runtime(
                 },
             }
         } else {
-            shutdown_signal().await;
+            operator_stop.await;
             RuntimeExitRequest {
                 observed_utc_ms: now_ms(),
                 cause: RuntimeCloseCause::OperatorStop,
@@ -6639,17 +6756,18 @@ pub async fn run_live_training_runtime(
     let polymarket_source_sink = polymarket_sink.clone();
     let (polymarket_control_tx, polymarket_control_rx) =
         mpsc::channel(POLYMARKET_CONTROL_CHANNEL_CAPACITY);
-    let polymarket_source = run_polymarket_source(
+    let polymarket_source = run_polymarket_source_with_spec(
+        source_specs.polymarket,
         dataset_root.clone(),
         polymarket_source_sink,
         collector_identity.clone(),
         deadline_ms,
-        DEFAULT_DISCOVERY_WAIT_SECS,
         run_started,
         polymarket_control_rx,
     );
     let rtds_sink = event_sink.fork_logical_producer();
-    let rtds_source = run_rtds_source(
+    let rtds_source = run_rtds_source_with_spec(
+        source_specs.rtds,
         dataset_root.clone(),
         rtds_sink.clone(),
         collector_identity.clone(),
@@ -6658,26 +6776,20 @@ pub async fn run_live_training_runtime(
     );
     let depth_sink = event_sink.fork_logical_producer();
     let (depth_control_tx, depth_control_rx) = mpsc::channel(AGGTRADE_CONTROL_CHANNEL_CAPACITY);
-    let depth_source = run_binance_depth_source(
+    let depth_source = run_binance_depth_source_with_spec_and_control(
+        source_specs.depth,
         depth_sink.clone(),
         collector_identity.clone(),
         deadline,
         run_started,
-        depth_control_rx,
+        Some(depth_control_rx),
     );
     let aggtrade_sink = event_sink.fork_logical_producer();
     let (aggtrade_control_tx, aggtrade_control_rx) =
         mpsc::channel(AGGTRADE_CONTROL_CHANNEL_CAPACITY);
     let aggtrade_source = run_binance_ws_source(
         binance_aggtrade_recovery,
-        BinanceWsSpec {
-            source_kind: "binance_aggtrade".to_owned(),
-            default_event_type: "aggTrade".to_owned(),
-            url: BINANCE_AGGTRADE_WS.to_owned(),
-            frame_inactivity_timeout_secs: 30,
-            #[cfg(test)]
-            recovery_wait_override: None,
-        },
+        source_specs.aggtrade,
         aggtrade_sink.clone(),
         collector_identity.clone(),
         deadline,
@@ -8421,6 +8533,9 @@ async fn process_ingress_event(
         )
         .await;
     }
+    if !inflight_event.admission_gaps.is_empty() {
+        return Err(invalid_data("production raw event retained pre-admission gap effects").into());
+    }
     let permit = inflight_event
         .raw_day_permit
         .as_ref()
@@ -10159,29 +10274,6 @@ async fn wait_for_polymarket_dedupe_restore(
     }
 }
 
-async fn run_polymarket_source(
-    dataset_root: PathBuf,
-    sink: SourceEventSink,
-    collector_identity: CollectorIdentity,
-    deadline_ms: Option<i64>,
-    discovery_wait_secs: u64,
-    run_started: Instant,
-    control_rx: mpsc::Receiver<PolymarketSourceControl>,
-) -> Result<()> {
-    let mut spec = PolymarketSourceSpec::production();
-    spec.discovery_wait = Duration::from_secs(discovery_wait_secs);
-    run_polymarket_source_with_spec(
-        spec,
-        dataset_root,
-        sink,
-        collector_identity,
-        deadline_ms,
-        run_started,
-        control_rx,
-    )
-    .await
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn run_polymarket_source_with_spec(
     spec: PolymarketSourceSpec,
@@ -10203,6 +10295,8 @@ async fn run_polymarket_source_with_spec(
         "polymarket_market",
         u64::try_from(now_ms()).unwrap_or_default(),
     );
+    #[cfg(test)]
+    recovery.set_wait_override(spec.recovery_wait_override);
     let mut dedupe = LifecycleFingerprintSets::with_limit(POLYMARKET_FINGERPRINTS_PER_LIFECYCLE);
     let mut dedupe_restored = false;
     let mut last_discovery = None::<BtcUpdownDiscovery>;
@@ -10685,6 +10779,7 @@ async fn process_polymarket_budgeted_message(
             prepared.push(InflightRawEvent {
                 event,
                 control: None,
+                admission_gaps: Vec::new(),
                 raw_day_permit: None,
                 _source_recv_monotonic_ms: monotonic_ms(run_started),
                 _reservation: Some(reservation),
@@ -11702,9 +11797,12 @@ where
         .ok_or_else(|| {
             invalid_data("raw-day gate missing from production Polymarket enqueue path")
         })?;
-    let raw_enqueue = gate
-        .begin_event_enqueue("polymarket", recv_time_utc_ms)
-        .await?;
+    let Some(raw_enqueue) = gate
+        .begin_unadmitted_event_enqueue("polymarket", recv_time_utc_ms)
+        .await?
+    else {
+        return Ok(());
+    };
     let raw_day_permit = match &raw_enqueue {
         RawDayEnqueueDecision::Permit(enqueue) => Some(enqueue.permit.clone()),
         RawDayEnqueueDecision::Defer(_) => None,
@@ -12781,24 +12879,6 @@ fn restore_rtds_dedupe(
     Ok(window)
 }
 
-async fn run_rtds_source(
-    dataset_root: PathBuf,
-    sink: SourceEventSink,
-    collector_identity: CollectorIdentity,
-    deadline: Option<Instant>,
-    run_started: Instant,
-) -> Result<()> {
-    run_rtds_source_with_spec(
-        RtdsSourceSpec::production(),
-        dataset_root,
-        sink,
-        collector_identity,
-        deadline,
-        run_started,
-    )
-    .await
-}
-
 async fn run_rtds_source_with_spec(
     spec: RtdsSourceSpec,
     dataset_root: PathBuf,
@@ -12958,24 +13038,6 @@ async fn emit_rtds_message(
     )
     .await?;
     Ok(is_fresh)
-}
-
-async fn run_binance_depth_source(
-    sink: SourceEventSink,
-    collector_identity: CollectorIdentity,
-    deadline: Option<Instant>,
-    run_started: Instant,
-    control_rx: mpsc::Receiver<DepthSourceControl>,
-) -> Result<()> {
-    run_binance_depth_source_with_spec_and_control(
-        BinanceDepthSpec::production(),
-        sink,
-        collector_identity,
-        deadline,
-        run_started,
-        Some(control_rx),
-    )
-    .await
 }
 
 #[cfg(test)]
@@ -13574,10 +13636,20 @@ async fn run_binance_depth_update_ws_source_with_control(
                 }
             }
             _ = &mut frame_inactivity => {
-                neutral_release_depth_pending(&context, &mut pending, &mut saw_business).await?;
                 if deadline_reached(context.deadline) {
+                    if depth_controlled_cutoff_is_active(&context) {
+                        pending.discard_all();
+                    } else {
+                        neutral_release_depth_pending(
+                            &context,
+                            &mut pending,
+                            &mut saw_business,
+                        )
+                        .await?;
+                    }
                     return Ok(BinanceDepthUpdateExit::DeadlineReached);
                 }
+                neutral_release_depth_pending(&context, &mut pending, &mut saw_business).await?;
                 return Ok(BinanceDepthUpdateExit::StreamEnded {
                     reason: "full_frame_inactivity".to_owned(),
                     saw_transport,
@@ -13764,16 +13836,16 @@ async fn run_binance_depth_update_ws_source_with_control(
                             depth_continuity_coordinates(&continuity)?,
                         )
                         .await?;
-                        saw_business = true;
-                        if let Some(trigger) = apply_depth_assessment(
-                            &context,
-                            &mut continuity,
-                            &assessment,
-                        )? {
-                            snapshot_future = Some(start_binance_depth_snapshot_cycle(
-                                &context,
-                                trigger,
-                            ));
+                        if let Some(assessment) = assessment {
+                            saw_business = true;
+                            if let Some(trigger) =
+                                apply_depth_assessment(&mut continuity, &assessment)?
+                            {
+                                snapshot_future = Some(start_binance_depth_snapshot_cycle(
+                                    &context,
+                                    trigger,
+                                ));
+                            }
                         }
                     }
                 }
@@ -13861,7 +13933,11 @@ async fn run_binance_depth_update_ws_source_with_control(
         },
         }
     }
-    neutral_release_depth_pending(&context, &mut pending, &mut saw_business).await?;
+    if depth_controlled_cutoff_is_active(&context) {
+        pending.discard_all();
+    } else {
+        neutral_release_depth_pending(&context, &mut pending, &mut saw_business).await?;
+    }
     Ok(BinanceDepthUpdateExit::DeadlineReached)
 }
 
@@ -13949,7 +14025,7 @@ async fn admit_depth_update(
     mut event: RawEvent,
     depth_ingress_sequence: u64,
     (snapshot_last_update_id, local_u_before): (Option<u64>, Option<u64>),
-) -> Result<DepthUpdateAssessment> {
+) -> Result<Option<DepthUpdateAssessment>> {
     let parsed = parse_depth_update_raw(
         event_envelope(&event, SourceKind::BinanceDepthUpdate),
         &event.raw_json,
@@ -13992,12 +14068,31 @@ async fn admit_depth_update(
     object.insert("local_u_after".to_owned(), json!(assessment.local_u_after));
     object.insert("stitch_gap_reason".to_owned(), json!(assessment.gap_reason));
     event.raw_json = enriched.to_string();
-    send_event(&context.sink, context.run_started, event).await?;
-    Ok(assessment)
+    let admission_gaps = match assessment.verdict {
+        DepthUpdateVerdict::NotAppliedConfirmedHole => vec![format!(
+            "binance_depth_update_stitch_gap:{}",
+            assessment
+                .gap_reason
+                .as_deref()
+                .ok_or_else(|| invalid_data("confirmed depth hole omitted gap reason"))?
+        )],
+        _ => Vec::new(),
+    };
+    if !send_event_with_reservation_outcome(
+        &context.sink,
+        context.run_started,
+        event,
+        None,
+        admission_gaps,
+    )
+    .await?
+    {
+        return Ok(None);
+    }
+    Ok(Some(assessment))
 }
 
 fn apply_depth_assessment(
-    context: &BinanceDepthUpdateContext,
     continuity: &mut DepthContinuityState,
     assessment: &DepthUpdateAssessment,
 ) -> Result<Option<String>> {
@@ -14018,10 +14113,6 @@ fn apply_depth_assessment(
                 .gap_reason
                 .as_deref()
                 .ok_or_else(|| invalid_data("confirmed depth hole omitted gap reason"))?;
-            record_gap(
-                &context.sink.gaps,
-                format!("binance_depth_update_stitch_gap:{reason}"),
-            );
             *continuity = DepthContinuityState::AwaitingSnapshot;
             Ok(Some(format!("stitch_gap:{reason}")))
         }
@@ -14037,13 +14128,16 @@ async fn neutral_release_one_depth_update(
     update: BufferedDepthUpdate,
     saw_business: &mut bool,
 ) -> Result<()> {
-    let assessment = admit_depth_update(
+    let Some(assessment) = admit_depth_update(
         context,
         update.event,
         update.depth_ingress_sequence,
         (None, None),
     )
-    .await?;
+    .await?
+    else {
+        return Ok(());
+    };
     if assessment.verdict != DepthUpdateVerdict::NotAppliedSnapshotUnavailable {
         return Err(invalid_data("neutral depth release produced a non-neutral verdict").into());
     }
@@ -14088,15 +14182,19 @@ async fn drain_depth_pending(
         let Some(update) = pending.pop_front()? else {
             break;
         };
-        let assessment = admit_depth_update(
+        let Some(assessment) = admit_depth_update(
             context,
             update.event,
             update.depth_ingress_sequence,
             depth_continuity_coordinates(continuity)?,
         )
-        .await?;
+        .await?
+        else {
+            pending.discard_all();
+            break;
+        };
         *saw_business = true;
-        if let Some(trigger) = apply_depth_assessment(context, continuity, &assessment)? {
+        if let Some(trigger) = apply_depth_assessment(continuity, &assessment)? {
             return Ok(Some(trigger));
         }
     }
@@ -14110,7 +14208,11 @@ async fn admit_depth_snapshot_and_drain(
     continuity: &mut DepthContinuityState,
     saw_business: &mut bool,
 ) -> Result<Option<String>> {
-    send_event(&context.sink, context.run_started, record.event).await?;
+    if !send_event_with_outcome(&context.sink, context.run_started, record.event).await? {
+        pending.discard_all();
+        *continuity = DepthContinuityState::AwaitingSnapshot;
+        return Ok(None);
+    }
     *continuity = DepthContinuityState::Ready {
         snapshot_last_update_id: record.snapshot_last_update_id,
         local_u: None,
@@ -14144,7 +14246,11 @@ async fn handle_active_depth_source_control(
         }
         DepthFenceKind::ResetContinuity => {
             drop(snapshot_future.take());
-            neutral_release_depth_pending(context, pending, saw_business).await?;
+            if depth_controlled_cutoff_is_active(context) {
+                pending.discard_all();
+            } else {
+                neutral_release_depth_pending(context, pending, saw_business).await?;
+            }
             *continuity = DepthContinuityState::AwaitingSnapshot;
         }
     }
@@ -14158,6 +14264,14 @@ async fn handle_active_depth_source_control(
         return Err(invalid_data("depth barrier owner dropped source resume signal").into());
     }
     Ok(stop_after_fence)
+}
+
+fn depth_controlled_cutoff_is_active(context: &BinanceDepthUpdateContext) -> bool {
+    context
+        .sink
+        .source_queue_backpressure
+        .raw_day_gate()
+        .is_some_and(|gate| gate.unadmitted_runtime_cutoff_is_active())
 }
 
 async fn handle_depth_source_control(control: DepthSourceControl) -> Result<bool> {
@@ -14782,7 +14896,7 @@ async fn run_binance_ws_source(
                     drop(value);
                     drop(raw_bytes);
                     let native_id = websocket.shared.aggregate_trade_id;
-                    match websocket_dedupe
+                    let payload_conflict = match websocket_dedupe
                         .observe(native_id, websocket.source_native_payload_json.as_bytes())
                     {
                         BinanceIdDecision::Duplicate => {
@@ -14793,12 +14907,9 @@ async fn run_binance_ws_source(
                             );
                             continue;
                         }
-                        BinanceIdDecision::Conflict => record_gap(
-                            &sink.gaps,
-                            format!("binance_aggtrade_payload_conflict:id={native_id}"),
-                        ),
-                        BinanceIdDecision::OutsideWindow | BinanceIdDecision::Unique => {}
-                    }
+                        BinanceIdDecision::Conflict => true,
+                        BinanceIdDecision::OutsideWindow | BinanceIdDecision::Unique => false,
+                    };
                     let output = BinanceAggTradeOutput::Websocket(websocket);
                     let event = binance_aggtrade_raw_event(
                         &output,
@@ -14821,8 +14932,18 @@ async fn run_binance_ws_source(
                     }
                     let mut reservation = websocket_staging_reservation;
                     reservation.shrink_to(1, bytes)?;
-                    send_event_with_reservation(&sink, run_started, event, Some(reservation))
-                        .await?;
+                    let admission_gaps = payload_conflict
+                        .then(|| format!("binance_aggtrade_payload_conflict:id={native_id}"))
+                        .into_iter()
+                        .collect();
+                    send_event_with_reservation_outcome(
+                        &sink,
+                        run_started,
+                        event,
+                        Some(reservation),
+                        admission_gaps,
+                    )
+                    .await?;
                 }
                 Ok(Some(Ok(Message::Binary(payload)))) => {
                     let recv_time_utc_ms = now_ms();
@@ -15454,7 +15575,17 @@ fn stamp_source_admission(event: &mut RawEvent, sink: &SourceEventSink) -> Resul
 }
 
 async fn send_event(sink: &SourceEventSink, run_started: Instant, event: RawEvent) -> Result<()> {
-    send_event_with_reservation(sink, run_started, event, None).await
+    send_event_with_outcome(sink, run_started, event)
+        .await
+        .map(|_| ())
+}
+
+async fn send_event_with_outcome(
+    sink: &SourceEventSink,
+    run_started: Instant,
+    event: RawEvent,
+) -> Result<bool> {
+    send_event_with_reservation_outcome(sink, run_started, event, None, Vec::new()).await
 }
 
 async fn send_event_with_reservation(
@@ -15463,6 +15594,18 @@ async fn send_event_with_reservation(
     event: RawEvent,
     existing_reservation: Option<InflightReservation>,
 ) -> Result<()> {
+    send_event_with_reservation_outcome(sink, run_started, event, existing_reservation, Vec::new())
+        .await
+        .map(|_| ())
+}
+
+async fn send_event_with_reservation_outcome(
+    sink: &SourceEventSink,
+    run_started: Instant,
+    event: RawEvent,
+    existing_reservation: Option<InflightReservation>,
+    admission_gaps: Vec<String>,
+) -> Result<bool> {
     let source_kind = event.source_kind.clone();
     let recv_time_utc_ms = event.recv_time_utc_ms;
     let gate = sink
@@ -15474,7 +15617,12 @@ async fn send_event_with_reservation(
             ))
         })?;
     let producer = logical_producer_for_source_kind(&source_kind)?;
-    let raw_enqueue = gate.begin_event_enqueue(producer, recv_time_utc_ms).await?;
+    let Some(raw_enqueue) = gate
+        .begin_unadmitted_event_enqueue(producer, recv_time_utc_ms)
+        .await?
+    else {
+        return Ok(false);
+    };
     let owned_bytes = owned_event_bytes(&event);
     if owned_bytes > MAX_TYPED_ROW_BYTES {
         let gap = format!(
@@ -15510,6 +15658,7 @@ async fn send_event_with_reservation(
     let mut inflight_event = InflightRawEvent {
         event,
         control: None,
+        admission_gaps,
         raw_day_permit: match &raw_enqueue {
             RawDayEnqueueDecision::Permit(enqueue) => Some(enqueue.permit.clone()),
             RawDayEnqueueDecision::Defer(_) => None,
@@ -15518,13 +15667,12 @@ async fn send_event_with_reservation(
         _reservation: Some(reservation),
     };
     if let RawDayEnqueueDecision::Defer(epoch) = &raw_enqueue {
-        stamp_source_admission(&mut inflight_event.event, sink)?;
         sink.source_queue_backpressure.defer_raw_batch(
             producer,
             epoch.clone(),
             vec![inflight_event],
         )?;
-        return Ok(());
+        return Ok(true);
     }
     let _enqueue_guard = sink.enqueue_lock.lock().await;
     let permit = match sink.tx.try_reserve() {
@@ -15571,8 +15719,12 @@ async fn send_event_with_reservation(
         }
     };
     stamp_source_admission(&mut inflight_event.event, sink)?;
+    let admission_gaps = std::mem::take(&mut inflight_event.admission_gaps);
     permit.send(inflight_event);
-    Ok(())
+    for gap in admission_gaps {
+        record_gap_at(&sink.gaps, recv_time_utc_ms, gap);
+    }
+    Ok(true)
 }
 
 async fn send_ingress_control(
@@ -15598,6 +15750,7 @@ async fn send_ingress_control(
             parquet_raw_source_kind: "__ingress_control".to_owned(),
         },
         control: Some(control),
+        admission_gaps: Vec::new(),
         raw_day_permit: None,
         _source_recv_monotonic_ms: monotonic_ms(run_started),
         _reservation: None,
@@ -16284,6 +16437,8 @@ struct PolymarketSourceSpec {
     ws_config: WsConfig,
     discovery_wait: Duration,
     discovery_retry_delay: Duration,
+    #[cfg(test)]
+    recovery_wait_override: Option<Duration>,
 }
 
 impl PolymarketSourceSpec {
@@ -16294,6 +16449,8 @@ impl PolymarketSourceSpec {
             ws_config: bounded_ws_config(),
             discovery_wait: Duration::from_secs(DEFAULT_DISCOVERY_WAIT_SECS),
             discovery_retry_delay: Duration::from_secs(10),
+            #[cfg(test)]
+            recovery_wait_override: None,
         }
     }
 }
@@ -16340,6 +16497,32 @@ impl BinanceDepthSpec {
             frame_inactivity_timeout: Duration::from_secs(30),
             #[cfg(test)]
             recovery_wait_override: None,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct LiveRuntimeSourceSpecs {
+    polymarket: PolymarketSourceSpec,
+    rtds: RtdsSourceSpec,
+    depth: BinanceDepthSpec,
+    aggtrade: BinanceWsSpec,
+}
+
+impl LiveRuntimeSourceSpecs {
+    fn production() -> Self {
+        Self {
+            polymarket: PolymarketSourceSpec::production(),
+            rtds: RtdsSourceSpec::production(),
+            depth: BinanceDepthSpec::production(),
+            aggtrade: BinanceWsSpec {
+                source_kind: "binance_aggtrade".to_owned(),
+                default_event_type: "aggTrade".to_owned(),
+                url: BINANCE_AGGTRADE_WS.to_owned(),
+                frame_inactivity_timeout_secs: 30,
+                #[cfg(test)]
+                recovery_wait_override: None,
+            },
         }
     }
 }
@@ -16514,6 +16697,11 @@ impl DepthPendingBuffer {
 
     fn is_empty(&self) -> bool {
         self.updates.is_empty()
+    }
+
+    fn discard_all(&mut self) {
+        self.updates.clear();
+        self.reserved_bytes = 0;
     }
 }
 
@@ -18345,6 +18533,23 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_async;
 
+    fn delegate_resource_test_to_isolated_process(test_name: &str) -> bool {
+        const ISOLATED_TEST_ENV: &str = "DATA_COLLECT_ISOLATED_RESOURCE_TEST";
+        if std::env::var(ISOLATED_TEST_ENV).as_deref() == Ok(test_name) {
+            return false;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([test_name, "--exact", "--test-threads=1"])
+            .env(ISOLATED_TEST_ENV, test_name)
+            .status()
+            .expect("isolated resource test process must start");
+        assert!(
+            status.success(),
+            "isolated resource test failed: {test_name}"
+        );
+        true
+    }
+
     struct StartupPollProbe {
         polls: Arc<AtomicU64>,
     }
@@ -19298,22 +19503,27 @@ mod tests {
         let stats = Arc::new(SourceQueueBackpressureStats::default());
         stats.install_raw_day_gate(Arc::clone(&gate)).unwrap();
         let (tx, mut rx) = mpsc::channel(8);
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
         let sink = SourceEventSink {
             tx,
-            gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+            gaps: Arc::clone(&gaps),
             source_queue_backpressure: Arc::clone(&stats),
             inflight_budget: InflightBudget::new(),
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         };
         let run_started = Instant::now();
 
-        send_event(
-            &sink,
-            run_started,
-            test_raw_event("binance_aggtrade", boundary_utc_ms - 1),
-        )
-        .await
-        .unwrap();
+        assert!(
+            send_event_with_reservation_outcome(
+                &sink,
+                run_started,
+                test_raw_event("binance_aggtrade", boundary_utc_ms - 1),
+                None,
+                vec!["old_day_gap_follows_event_admission_day".to_owned()],
+            )
+            .await
+            .unwrap()
+        );
         let before = rx.recv().await.unwrap();
         assert_eq!(
             before.raw_day_permit,
@@ -19322,6 +19532,19 @@ mod tests {
                 generation: INITIAL_RAW_DAY_GENERATION,
             })
         );
+        assert!(
+            gaps.lock()
+                .unwrap()
+                .reasons_for_day("2026-07-07")
+                .iter()
+                .any(|gap| gap == "old_day_gap_follows_event_admission_day")
+        );
+        assert!(
+            gaps.lock()
+                .unwrap()
+                .reasons_for_day("2026-07-08")
+                .is_empty()
+        );
 
         let close = gate
             .close_for_rollover("2026-07-07", boundary_utc_ms)
@@ -19329,12 +19552,15 @@ mod tests {
             .unwrap();
         let at_boundary_sink = sink.clone();
         let at_boundary = tokio::spawn(async move {
-            send_event(
+            send_event_with_reservation_outcome(
                 &at_boundary_sink,
                 run_started,
                 test_raw_event("binance_aggtrade", boundary_utc_ms),
+                None,
+                vec!["deferred_gap_published_only_after_admission".to_owned()],
             )
             .await
+            .map(|_| ())
         });
         let after_boundary_sink = sink.clone();
         let after_boundary = tokio::spawn(async move {
@@ -19351,7 +19577,7 @@ mod tests {
             rx.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
         ));
-        let deferred_admissions = {
+        let deferred_order = {
             let deferred = stats
                 .deferred_raw_batches
                 .lock()
@@ -19360,19 +19586,20 @@ mod tests {
                 .iter()
                 .flat_map(|batch| batch.events.iter())
                 .map(|event| {
-                    (
-                        event.event.recv_time_utc_ms,
-                        event
-                            .event
-                            .collector_admission
-                            .as_ref()
-                            .expect("deferred aggTrade must already own admission")
-                            .sequence,
-                    )
+                    assert!(event.raw_day_permit.is_none());
+                    assert!(event.event.collector_admission.is_none());
+                    event.event.recv_time_utc_ms
                 })
-                .collect::<BTreeMap<_, _>>()
+                .collect::<Vec<_>>()
         };
-        assert_eq!(deferred_admissions.len(), 2);
+        assert_eq!(deferred_order.len(), 2);
+        assert_eq!(stats.aggtrade_admission_sequence.load(Ordering::Relaxed), 1);
+        assert!(
+            gaps.lock()
+                .unwrap()
+                .reasons_for_day("2026-07-08")
+                .is_empty()
+        );
 
         send_ingress_control(
             &sink,
@@ -19395,17 +19622,23 @@ mod tests {
         flush_deferred_raw_events(&sink, "binance_aggtrade", &close)
             .await
             .unwrap();
-        let mut permitted = [rx.recv().await.unwrap(), rx.recv().await.unwrap()];
-        permitted.sort_by_key(|event| event.event.recv_time_utc_ms);
-        assert_eq!(permitted[0].event.recv_time_utc_ms, boundary_utc_ms);
-        assert_eq!(permitted[1].event.recv_time_utc_ms, boundary_utc_ms + 1);
-        for event in &permitted {
-            assert_eq!(
-                event.event.collector_admission.as_ref().unwrap().sequence,
-                deferred_admissions[&event.event.recv_time_utc_ms],
-                "deferred flush must not renumber collector admission"
-            );
-        }
+        let permitted = [rx.recv().await.unwrap(), rx.recv().await.unwrap()];
+        assert_eq!(
+            permitted
+                .iter()
+                .map(|event| event.event.recv_time_utc_ms)
+                .collect::<Vec<_>>(),
+            deferred_order,
+            "normal rollover must preserve deferred staging order"
+        );
+        assert_eq!(
+            permitted
+                .iter()
+                .map(|event| event.event.collector_admission.as_ref().unwrap().sequence)
+                .collect::<Vec<_>>(),
+            vec![2, 3],
+            "normal rollover must allocate admission only after the new-day permit"
+        );
         assert!(permitted.iter().all(|event| {
             event.raw_day_permit.as_ref()
                 == Some(&RawDayPermit {
@@ -19413,6 +19646,169 @@ mod tests {
                     generation: INITIAL_RAW_DAY_GENERATION + 1,
                 })
         }));
+        let gaps = gaps.lock().unwrap();
+        assert!(
+            gaps.reasons_for_day("2026-07-08")
+                .iter()
+                .any(|gap| gap == "deferred_gap_published_only_after_admission")
+        );
+        assert!(
+            !gaps
+                .reasons_for_day("2026-07-07")
+                .iter()
+                .any(|gap| gap == "deferred_gap_published_only_after_admission")
+        );
+    }
+
+    #[tokio::test]
+    async fn controlled_rollover_cutoff_discards_pre_admission_staging_without_drop_evidence() {
+        let boundary_utc_ms = 1_783_468_800_000;
+        let gate = Arc::new(RawDayGate::new());
+        gate.activate_startup(
+            utc_day_string_from_ms(boundary_utc_ms - 1).unwrap(),
+            INITIAL_RAW_DAY_GENERATION,
+        )
+        .await
+        .unwrap();
+        let close = gate
+            .close_for_rollover("2026-07-07", boundary_utc_ms)
+            .await
+            .unwrap();
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        stats.install_raw_day_gate(Arc::clone(&gate)).unwrap();
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let budget = InflightBudget::new();
+        let available_before = budget.available();
+        let (tx, mut rx) = mpsc::channel(4);
+        let sink = SourceEventSink {
+            tx,
+            gaps: Arc::clone(&gaps),
+            source_queue_backpressure: Arc::clone(&stats),
+            inflight_budget: budget.clone(),
+            enqueue_lock: Arc::new(AsyncMutex::new(())),
+        };
+
+        assert!(
+            send_event_with_reservation_outcome(
+                &sink,
+                Instant::now(),
+                test_raw_event("binance_aggtrade", boundary_utc_ms),
+                None,
+                vec!["staged_gap_must_not_publish".to_owned()],
+            )
+            .await
+            .unwrap()
+        );
+        {
+            let deferred = stats
+                .deferred_raw_batches
+                .lock()
+                .expect("deferred raw-event mutex poisoned");
+            let staged = &deferred["binance_aggtrade"][0].events[0];
+            assert!(staged.raw_day_permit.is_none());
+            assert!(staged.event.collector_admission.is_none());
+        }
+        assert_eq!(stats.aggtrade_admission_sequence.load(Ordering::Relaxed), 0);
+        assert_eq!(budget.available().0 + 1, available_before.0);
+
+        let PreparedRuntimeExit::Rollover(exit) = gate
+            .prepare_runtime_exit_with_cause(boundary_utc_ms + 1, RuntimeCloseCause::OperatorStop)
+            .unwrap()
+        else {
+            panic!("post-boundary operator stop must remain a PendingExit");
+        };
+        let error = apply_day_barrier_release(
+            &sink,
+            "binance_aggtrade",
+            &close,
+            DayBarrierRelease::StopWithClose(RuntimeCloseIdentity::from_rollover_old_day(
+                &exit.close,
+            )),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("coordinated source stop"));
+        assert!(
+            stats
+                .deferred_raw_batches
+                .lock()
+                .expect("deferred raw-event mutex poisoned")
+                .is_empty()
+        );
+        assert_eq!(budget.available(), available_before);
+        assert_eq!(stats.dropped_rows.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.aggtrade_admission_sequence.load(Ordering::Relaxed), 0);
+        assert!(stats.drain_all_operational().is_empty());
+        assert!(gaps.lock().unwrap().is_empty());
+        assert!(rx.try_recv().is_err());
+
+        let post_gate = Arc::new(RawDayGate::new());
+        post_gate
+            .activate_startup(
+                utc_day_string_from_ms(boundary_utc_ms - 1).unwrap(),
+                INITIAL_RAW_DAY_GENERATION,
+            )
+            .await
+            .unwrap();
+        let post_close = post_gate
+            .close_for_rollover("2026-07-07", boundary_utc_ms)
+            .await
+            .unwrap();
+        let post_stats = Arc::new(SourceQueueBackpressureStats::default());
+        post_stats
+            .install_raw_day_gate(Arc::clone(&post_gate))
+            .unwrap();
+        let post_gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let post_budget = InflightBudget::new();
+        let post_available_before = post_budget.available();
+        let (post_tx, mut post_rx) = mpsc::channel(4);
+        let post_sink = SourceEventSink {
+            tx: post_tx,
+            gaps: Arc::clone(&post_gaps),
+            source_queue_backpressure: Arc::clone(&post_stats),
+            inflight_budget: post_budget.clone(),
+            enqueue_lock: Arc::new(AsyncMutex::new(())),
+        };
+        assert!(
+            send_event_with_reservation_outcome(
+                &post_sink,
+                Instant::now(),
+                test_raw_event("binance_aggtrade", boundary_utc_ms),
+                None,
+                vec!["post_activation_staged_gap_must_not_publish".to_owned()],
+            )
+            .await
+            .unwrap()
+        );
+        commit_test_manifest_activation(&post_gate, &post_close);
+        let PreparedRuntimeExit::SameDay(post_exit) = post_gate
+            .prepare_runtime_exit_with_cause(boundary_utc_ms + 1, RuntimeCloseCause::OperatorStop)
+            .unwrap()
+        else {
+            panic!("post-activation operator stop must belong to the new day");
+        };
+        assert_eq!(post_exit.identity.utc_day, "2026-07-08");
+        flush_deferred_raw_events(&post_sink, "binance_aggtrade", &post_close)
+            .await
+            .unwrap();
+        assert!(
+            post_stats
+                .deferred_raw_batches
+                .lock()
+                .expect("deferred raw-event mutex poisoned")
+                .is_empty()
+        );
+        assert_eq!(post_budget.available(), post_available_before);
+        assert_eq!(post_stats.dropped_rows.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            post_stats
+                .aggtrade_admission_sequence
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert!(post_stats.drain_all_operational().is_empty());
+        assert!(post_gaps.lock().unwrap().is_empty());
+        assert!(post_rx.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -19963,6 +20359,136 @@ mod tests {
         );
         drop(admitted);
         assert_eq!(sealing.await.unwrap(), close);
+    }
+
+    #[tokio::test]
+    async fn controlled_runtime_cutoff_discards_only_unadmitted_events() {
+        let observed_utc_ms = 1_783_468_799_000;
+        for cause in [
+            RuntimeCloseCause::OperatorStop,
+            RuntimeCloseCause::RunDeadline,
+        ] {
+            let gate = Arc::new(RawDayGate::new());
+            gate.activate_startup(
+                utc_day_string_from_ms(observed_utc_ms).unwrap(),
+                INITIAL_RAW_DAY_GENERATION,
+            )
+            .await
+            .unwrap();
+            let admitted = gate
+                .begin_event_enqueue("binance_depth", observed_utc_ms - 1)
+                .await
+                .unwrap();
+            let PreparedRuntimeExit::SameDay(_) = gate
+                .prepare_runtime_exit_with_cause(observed_utc_ms, cause)
+                .unwrap()
+            else {
+                panic!("controlled cutoff must remain in the active UTC day");
+            };
+
+            assert!(
+                gate.begin_unadmitted_event_enqueue("binance_depth", observed_utc_ms + 1)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "a new event after the controlled cutoff must not become admitted"
+            );
+            assert!(matches!(admitted, RawDayEnqueueDecision::Permit(_)));
+        }
+
+        let boundary_utc_ms = 1_783_468_800_000;
+        for cause in [
+            RuntimeCloseCause::OperatorStop,
+            RuntimeCloseCause::RunDeadline,
+        ] {
+            let gate = Arc::new(RawDayGate::new());
+            let old_utc_day = utc_day_string_from_ms(boundary_utc_ms - 1).unwrap();
+            gate.activate_startup(old_utc_day, INITIAL_RAW_DAY_GENERATION)
+                .await
+                .unwrap();
+            let admitted = gate
+                .begin_event_enqueue("binance_depth", boundary_utc_ms - 1)
+                .await
+                .unwrap();
+            assert!(matches!(
+                gate.prepare_runtime_exit_with_cause(boundary_utc_ms + 1, cause)
+                    .unwrap(),
+                PreparedRuntimeExit::Rollover(_)
+            ));
+
+            for recv_time_utc_ms in [boundary_utc_ms - 1, boundary_utc_ms] {
+                assert!(
+                    gate.begin_unadmitted_event_enqueue("binance_depth", recv_time_utc_ms)
+                        .await
+                        .unwrap()
+                        .is_none(),
+                    "a new old-day or next-day event after a rollover cutoff must not become admitted"
+                );
+            }
+            assert!(matches!(admitted, RawDayEnqueueDecision::Permit(_)));
+        }
+
+        let gate = Arc::new(RawDayGate::new());
+        let old_utc_day = utc_day_string_from_ms(boundary_utc_ms - 1).unwrap();
+        gate.activate_startup(old_utc_day.clone(), INITIAL_RAW_DAY_GENERATION)
+            .await
+            .unwrap();
+        gate.prepare_rollover(&old_utc_day, boundary_utc_ms)
+            .unwrap();
+        assert!(matches!(
+            gate.begin_unadmitted_event_enqueue("binance_depth", boundary_utc_ms)
+                .await
+                .unwrap(),
+            Some(RawDayEnqueueDecision::Defer(_))
+        ));
+
+        let gate = Arc::new(RawDayGate::new());
+        gate.activate_startup(
+            utc_day_string_from_ms(observed_utc_ms).unwrap(),
+            INITIAL_RAW_DAY_GENERATION,
+        )
+        .await
+        .unwrap();
+        gate.install_runtime_deadline(Some(RuntimeDeadlineCandidate {
+            deadline: Instant::now(),
+            observed_utc_ms,
+        }))
+        .unwrap();
+        assert!(
+            gate.begin_unadmitted_event_enqueue("binance_depth", observed_utc_ms)
+                .await
+                .unwrap()
+                .is_none(),
+            "an elapsed installed deadline must close optional admission before the watcher runs"
+        );
+
+        for cause in [
+            RuntimeCloseCause::CapacityLimit,
+            RuntimeCloseCause::CoordinatorFailure {
+                stage: "controlled_cutoff_negative_control",
+            },
+        ] {
+            let gate = Arc::new(RawDayGate::new());
+            gate.activate_startup(
+                utc_day_string_from_ms(observed_utc_ms).unwrap(),
+                INITIAL_RAW_DAY_GENERATION,
+            )
+            .await
+            .unwrap();
+            gate.prepare_runtime_exit_with_cause(observed_utc_ms, cause)
+                .unwrap();
+            gate.install_runtime_deadline(Some(RuntimeDeadlineCandidate {
+                deadline: Instant::now(),
+                observed_utc_ms,
+            }))
+            .unwrap();
+            assert!(
+                gate.begin_unadmitted_event_enqueue("binance_depth", observed_utc_ms + 1)
+                    .await
+                    .is_err(),
+                "capacity and integrity exits must remain terminal"
+            );
+        }
     }
 
     #[test]
@@ -21774,6 +22300,7 @@ mod tests {
             Duration::from_secs(DEFAULT_DISCOVERY_WAIT_SECS)
         );
         assert_eq!(polymarket.discovery_retry_delay, Duration::from_secs(10));
+        assert_eq!(polymarket.recovery_wait_override, None);
 
         let rtds = RtdsSourceSpec::production();
         assert_eq!(rtds.endpoint, RTDS_WS_ENDPOINT);
@@ -21782,6 +22309,1128 @@ mod tests {
             rtds.ws_config.connect_timeout,
             Some(Duration::from_secs(WS_CONNECT_TIMEOUT_SECS))
         );
+
+        let runtime = LiveRuntimeSourceSpecs::production();
+        assert_eq!(runtime.polymarket.gamma_endpoint, polymarket.gamma_endpoint);
+        assert_eq!(runtime.rtds.endpoint, rtds.endpoint);
+        assert_eq!(runtime.depth.websocket_endpoint, BINANCE_DEPTH_WS);
+        assert_eq!(runtime.depth.snapshot_endpoint, BINANCE_DEPTH_SNAPSHOT);
+        assert_eq!(runtime.aggtrade.url, BINANCE_AGGTRADE_WS);
+    }
+
+    #[derive(Default)]
+    struct GammaRecoveryLoopbackCounters {
+        gamma_attempts: AtomicU64,
+        gamma_successes: AtomicU64,
+        clob_subscriptions: AtomicU64,
+        gamma_fd_samples: Mutex<Vec<usize>>,
+    }
+
+    async fn gamma_recovery_loopback(
+        failures: u64,
+        counters: Arc<GammaRecoveryLoopbackCounters>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut request = [0_u8; 4_096];
+                let Ok(read) = socket.read(&mut request).await else {
+                    continue;
+                };
+                if read == 0 {
+                    continue;
+                }
+                let attempt = counters.gamma_attempts.fetch_add(1, Ordering::Relaxed) + 1;
+                counters
+                    .gamma_fd_samples
+                    .lock()
+                    .unwrap()
+                    .push(fs::read_dir("/proc/self/fd").unwrap().count());
+                let (status, body) = if attempt <= failures {
+                    ("503 Service Unavailable", "[]".to_owned())
+                } else {
+                    counters.gamma_successes.fetch_add(1, Ordering::Relaxed);
+                    let windows = discovery_windows(now_ms());
+                    ("200 OK", gamma_market_response_for_window(&windows.current))
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        (endpoint, server)
+    }
+
+    async fn silent_clob_loopback(
+        counters: Arc<GammaRecoveryLoopbackCounters>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let Ok(mut socket) = accept_async(stream).await else {
+                    continue;
+                };
+                while let Some(frame) = socket.next().await {
+                    match frame {
+                        Ok(Message::Text(text)) if text == "PING" => {
+                            match socket.send(Message::Text("PONG".into())).await {
+                                Ok(()) => {}
+                                Err(_) => break,
+                            }
+                        }
+                        Ok(Message::Text(text)) => {
+                            match serde_json::from_str::<Value>(&text).ok() {
+                                Some(request) if request["operation"] == "subscribe" => {
+                                    counters.clob_subscriptions.fetch_add(1, Ordering::Relaxed);
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                        Ok(Message::Close(_)) | Err(_) => break,
+                        _ => {}
+                    }
+                }
+                while let Some(frame) = socket.next().await {
+                    match frame {
+                        Ok(Message::Text(text)) if text == "PING" => {
+                            match socket.send(Message::Text("PONG".into())).await {
+                                Ok(()) => {}
+                                Err(_) => break,
+                            }
+                        }
+                        Ok(Message::Close(_)) | Err(_) => break,
+                        _ => {}
+                    }
+                }
+            }
+        });
+        (endpoint, server)
+    }
+
+    fn tune_composed_specs(specs: &mut LiveRuntimeSourceSpecs) {
+        specs.polymarket.discovery_wait = Duration::ZERO;
+        specs.polymarket.discovery_retry_delay = Duration::from_millis(1);
+        specs.polymarket.recovery_wait_override = Some(Duration::from_millis(1));
+        specs.polymarket.ws_config.connect_timeout = Some(Duration::from_millis(500));
+        specs.polymarket.ws_config.reconnect.initial_backoff = Duration::from_millis(1);
+        specs.polymarket.ws_config.reconnect.max_backoff = Duration::from_millis(1);
+        specs.polymarket.ws_config.heartbeat_interval = Duration::from_millis(20);
+        specs.polymarket.ws_config.heartbeat_timeout = Duration::from_millis(100);
+        specs.rtds.ws_config.connect_timeout = Some(Duration::from_millis(500));
+        specs.rtds.ws_config.reconnect.initial_backoff = Duration::from_millis(1);
+        specs.rtds.ws_config.reconnect.max_backoff = Duration::from_millis(1);
+        specs.rtds.ws_config.reconnect.backoff_multiplier = 1.0;
+        specs.rtds.ws_config.heartbeat_interval = Duration::from_millis(20);
+        specs.rtds.ws_config.heartbeat_timeout = Duration::from_millis(100);
+        specs.depth.frame_inactivity_timeout = Duration::from_millis(100);
+        specs.depth.recovery_wait_override = Some(Duration::from_millis(1));
+        specs.aggtrade.frame_inactivity_timeout_secs = 1;
+        specs.aggtrade.recovery_wait_override = Some(Duration::from_millis(1));
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum ComposedIoBehavior {
+        Healthy,
+        Unavailable,
+        Silent,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum ComposedIoPath {
+        Gamma,
+        Clob,
+        Rtds,
+        DepthSnapshot,
+        DepthWebsocket,
+        AggTrade,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct ComposedLoopbackMode {
+        gamma: ComposedIoBehavior,
+        clob: ComposedIoBehavior,
+        rtds: ComposedIoBehavior,
+        depth_snapshot: ComposedIoBehavior,
+        depth_websocket: ComposedIoBehavior,
+        aggtrade: ComposedIoBehavior,
+    }
+
+    impl ComposedLoopbackMode {
+        fn healthy() -> Self {
+            Self {
+                gamma: ComposedIoBehavior::Healthy,
+                clob: ComposedIoBehavior::Healthy,
+                rtds: ComposedIoBehavior::Healthy,
+                depth_snapshot: ComposedIoBehavior::Healthy,
+                depth_websocket: ComposedIoBehavior::Healthy,
+                aggtrade: ComposedIoBehavior::Healthy,
+            }
+        }
+
+        fn with_unavailable(paths: &[ComposedIoPath]) -> Self {
+            let mut mode = Self::healthy();
+            for path in paths {
+                match path {
+                    ComposedIoPath::Gamma => mode.gamma = ComposedIoBehavior::Unavailable,
+                    ComposedIoPath::Clob => mode.clob = ComposedIoBehavior::Unavailable,
+                    ComposedIoPath::Rtds => mode.rtds = ComposedIoBehavior::Unavailable,
+                    ComposedIoPath::DepthSnapshot => {
+                        mode.depth_snapshot = ComposedIoBehavior::Unavailable;
+                    }
+                    ComposedIoPath::DepthWebsocket => {
+                        mode.depth_websocket = ComposedIoBehavior::Unavailable;
+                    }
+                    ComposedIoPath::AggTrade => {
+                        mode.aggtrade = ComposedIoBehavior::Unavailable;
+                    }
+                }
+            }
+            mode
+        }
+
+        fn all_unavailable() -> Self {
+            Self::with_unavailable(&[
+                ComposedIoPath::Gamma,
+                ComposedIoPath::Clob,
+                ComposedIoPath::Rtds,
+                ComposedIoPath::DepthSnapshot,
+                ComposedIoPath::DepthWebsocket,
+                ComposedIoPath::AggTrade,
+            ])
+        }
+
+        fn stream_silent() -> Self {
+            Self {
+                gamma: ComposedIoBehavior::Healthy,
+                clob: ComposedIoBehavior::Silent,
+                rtds: ComposedIoBehavior::Silent,
+                depth_snapshot: ComposedIoBehavior::Healthy,
+                depth_websocket: ComposedIoBehavior::Silent,
+                aggtrade: ComposedIoBehavior::Silent,
+            }
+        }
+
+        fn behavior(self, path: ComposedIoPath) -> ComposedIoBehavior {
+            match path {
+                ComposedIoPath::Gamma => self.gamma,
+                ComposedIoPath::Clob => self.clob,
+                ComposedIoPath::Rtds => self.rtds,
+                ComposedIoPath::DepthSnapshot => self.depth_snapshot,
+                ComposedIoPath::DepthWebsocket => self.depth_websocket,
+                ComposedIoPath::AggTrade => self.aggtrade,
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct ComposedLoopbackCounters {
+        gamma_requests: AtomicU64,
+        clob_connections: AtomicU64,
+        clob_subscriptions: AtomicU64,
+        clob_business_sent: AtomicU64,
+        rtds_connections: AtomicU64,
+        rtds_subscriptions: AtomicU64,
+        rtds_business_sent: AtomicU64,
+        depth_snapshot_requests: AtomicU64,
+        depth_snapshot_sent: AtomicU64,
+        depth_connections: AtomicU64,
+        depth_business_sent: AtomicU64,
+        aggtrade_connections: AtomicU64,
+        aggtrade_business_sent: AtomicU64,
+    }
+
+    struct ComposedLoopbackFixture {
+        specs: LiveRuntimeSourceSpecs,
+        mode: ComposedLoopbackMode,
+        counters: Arc<ComposedLoopbackCounters>,
+        servers: Vec<tokio::task::JoinHandle<()>>,
+    }
+
+    async fn read_loopback_http_request(socket: &mut tokio::net::TcpStream) -> Option<String> {
+        let mut request = [0_u8; 4_096];
+        let read = socket.read(&mut request).await.ok()?;
+        (read > 0).then(|| String::from_utf8_lossy(&request[..read]).into_owned())
+    }
+
+    async fn write_loopback_http_response(
+        socket: &mut tokio::net::TcpStream,
+        status: &str,
+        body: &str,
+    ) {
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = socket.write_all(response.as_bytes()).await;
+    }
+
+    async fn keep_binance_loopback_alive(
+        socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    ) {
+        loop {
+            sleep(Duration::from_millis(20)).await;
+            if socket
+                .send(Message::Ping(Vec::<u8>::new().into()))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
+
+    async fn keep_text_heartbeat_loopback_alive(
+        socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    ) {
+        while let Some(frame) = socket.next().await {
+            match frame {
+                Ok(Message::Text(text)) if text == "PING" => {
+                    match socket.send(Message::Text("PONG".into())).await {
+                        Ok(()) => {}
+                        Err(_) => return,
+                    }
+                }
+                Ok(Message::Close(_)) | Err(_) => return,
+                _ => {}
+            }
+        }
+    }
+
+    impl ComposedLoopbackFixture {
+        async fn spawn(mode: ComposedLoopbackMode) -> Self {
+            let counters = Arc::new(ComposedLoopbackCounters::default());
+            let mut servers = Vec::new();
+
+            let gamma_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let gamma_endpoint = format!("http://{}", gamma_listener.local_addr().unwrap());
+            let gamma_counters = Arc::clone(&counters);
+            servers.push(tokio::spawn(async move {
+                loop {
+                    let Ok((mut socket, _)) = gamma_listener.accept().await else {
+                        return;
+                    };
+                    let Some(request) = read_loopback_http_request(&mut socket).await else {
+                        continue;
+                    };
+                    gamma_counters
+                        .gamma_requests
+                        .fetch_add(1, Ordering::Relaxed);
+                    if mode.gamma == ComposedIoBehavior::Unavailable {
+                        write_loopback_http_response(&mut socket, "503 Service Unavailable", "[]")
+                            .await;
+                    } else {
+                        let windows = discovery_windows(now_ms());
+                        let is_next = request.contains(&windows.next.slug);
+                        let body = if is_next {
+                            "[]".to_owned()
+                        } else {
+                            gamma_market_response_for_window(&windows.current)
+                        };
+                        write_loopback_http_response(&mut socket, "200 OK", &body).await;
+                    }
+                }
+            }));
+
+            let clob_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let clob_endpoint = format!("ws://{}", clob_listener.local_addr().unwrap());
+            let clob_counters = Arc::clone(&counters);
+            servers.push(tokio::spawn(async move {
+                loop {
+                    let Ok((stream, _)) = clob_listener.accept().await else {
+                        return;
+                    };
+                    clob_counters
+                        .clob_connections
+                        .fetch_add(1, Ordering::Relaxed);
+                    if mode.clob == ComposedIoBehavior::Unavailable {
+                        drop(stream);
+                        continue;
+                    }
+                    let Ok(mut socket) = accept_async(stream).await else {
+                        continue;
+                    };
+                    let mut subscribed = false;
+                    while let Some(frame) = socket.next().await {
+                        match frame {
+                            Ok(Message::Text(text)) if text == "PING" => {
+                                match socket.send(Message::Text("PONG".into())).await {
+                                    Ok(()) => {}
+                                    Err(_) => break,
+                                }
+                            }
+                            Ok(Message::Text(text)) => {
+                                match serde_json::from_str::<Value>(&text).ok() {
+                                    Some(request) if request["operation"] == "subscribe" => {
+                                        clob_counters
+                                            .clob_subscriptions
+                                            .fetch_add(1, Ordering::Relaxed);
+                                        subscribed = true;
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            Ok(Message::Close(_)) | Err(_) => break,
+                            _ => {}
+                        }
+                    }
+                    if !subscribed {
+                        continue;
+                    }
+                    if mode.clob == ComposedIoBehavior::Healthy
+                        && socket
+                            .send(Message::Text(
+                                json!({
+                                    "event_type": "book",
+                                    "asset_id": "101",
+                                    "market": "0x0000000000000000000000000000000000000000000000000000000000000002",
+                                    "timestamp": now_ms().to_string(),
+                                    "bids": [],
+                                    "asks": []
+                                })
+                                .to_string()
+                                .into(),
+                            ))
+                            .await
+                            .is_ok()
+                    {
+                        clob_counters
+                            .clob_business_sent
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    keep_text_heartbeat_loopback_alive(&mut socket).await;
+                }
+            }));
+
+            let rtds_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let rtds_endpoint = format!("ws://{}", rtds_listener.local_addr().unwrap());
+            let rtds_counters = Arc::clone(&counters);
+            servers.push(tokio::spawn(async move {
+                loop {
+                    let Ok((stream, _)) = rtds_listener.accept().await else {
+                        return;
+                    };
+                    rtds_counters
+                        .rtds_connections
+                        .fetch_add(1, Ordering::Relaxed);
+                    if mode.rtds == ComposedIoBehavior::Unavailable {
+                        drop(stream);
+                        continue;
+                    }
+                    let Ok(mut socket) = accept_async(stream).await else {
+                        continue;
+                    };
+                    let mut subscribed = false;
+                    while let Some(frame) = socket.next().await {
+                        match frame {
+                            Ok(Message::Text(text)) if text == "PING" => {
+                                match socket.send(Message::Text("PONG".into())).await {
+                                    Ok(()) => {}
+                                    Err(_) => break,
+                                }
+                            }
+                            Ok(Message::Text(text))
+                                if serde_json::from_str::<Value>(&text).is_ok() =>
+                            {
+                                rtds_counters
+                                    .rtds_subscriptions
+                                    .fetch_add(1, Ordering::Relaxed);
+                                subscribed = true;
+                                break;
+                            }
+                            Ok(Message::Close(_)) | Err(_) => break,
+                            _ => {}
+                        }
+                    }
+                    if !subscribed {
+                        continue;
+                    }
+                    if mode.rtds == ComposedIoBehavior::Healthy {
+                        let timestamp = now_ms();
+                        if socket
+                            .send(Message::Text(
+                                json!({
+                                    "topic": "crypto_prices_chainlink",
+                                    "type": "update",
+                                    "timestamp": timestamp,
+                                    "payload": {
+                                        "symbol": "btc/usd",
+                                        "timestamp": timestamp,
+                                        "value": "65000.10"
+                                    }
+                                })
+                                .to_string()
+                                .into(),
+                            ))
+                            .await
+                            .is_ok()
+                        {
+                            rtds_counters
+                                .rtds_business_sent
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    keep_text_heartbeat_loopback_alive(&mut socket).await;
+                }
+            }));
+
+            let snapshot_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let snapshot_endpoint = format!(
+                "http://{}/api/v3/depth",
+                snapshot_listener.local_addr().unwrap()
+            );
+            let snapshot_counters = Arc::clone(&counters);
+            servers.push(tokio::spawn(async move {
+                loop {
+                    let Ok((mut socket, _)) = snapshot_listener.accept().await else {
+                        return;
+                    };
+                    if read_loopback_http_request(&mut socket).await.is_none() {
+                        continue;
+                    }
+                    snapshot_counters
+                        .depth_snapshot_requests
+                        .fetch_add(1, Ordering::Relaxed);
+                    if mode.depth_snapshot == ComposedIoBehavior::Unavailable {
+                        write_loopback_http_response(&mut socket, "503 Service Unavailable", "[]")
+                            .await;
+                    } else {
+                        let body = json!({
+                            "lastUpdateId": 100_u64,
+                            "bids": [["1", "2"]],
+                            "asks": [["3", "4"]]
+                        })
+                        .to_string();
+                        write_loopback_http_response(&mut socket, "200 OK", &body).await;
+                        snapshot_counters
+                            .depth_snapshot_sent
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }));
+
+            let depth_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let depth_endpoint = format!("ws://{}", depth_listener.local_addr().unwrap());
+            let depth_counters = Arc::clone(&counters);
+            servers.push(tokio::spawn(async move {
+                loop {
+                    let Ok((stream, _)) = depth_listener.accept().await else {
+                        return;
+                    };
+                    depth_counters
+                        .depth_connections
+                        .fetch_add(1, Ordering::Relaxed);
+                    if mode.depth_websocket == ComposedIoBehavior::Unavailable {
+                        drop(stream);
+                        continue;
+                    }
+                    let Ok(mut socket) = accept_async(stream).await else {
+                        continue;
+                    };
+                    if mode.depth_websocket == ComposedIoBehavior::Healthy
+                        && mode.depth_snapshot != ComposedIoBehavior::Unavailable
+                        && socket
+                            .send(Message::Text(
+                                json!({
+                                    "e": "depthUpdate",
+                                    "E": now_ms(),
+                                    "s": "BTCUSDT",
+                                    "U": 101_u64,
+                                    "u": 101_u64,
+                                    "b": [["1", "2"]],
+                                    "a": [["3", "4"]]
+                                })
+                                .to_string()
+                                .into(),
+                            ))
+                            .await
+                            .is_ok()
+                    {
+                        depth_counters
+                            .depth_business_sent
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    keep_binance_loopback_alive(&mut socket).await;
+                }
+            }));
+
+            let aggtrade_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let aggtrade_endpoint = format!("ws://{}", aggtrade_listener.local_addr().unwrap());
+            let aggtrade_counters = Arc::clone(&counters);
+            servers.push(tokio::spawn(async move {
+                loop {
+                    let Ok((stream, _)) = aggtrade_listener.accept().await else {
+                        return;
+                    };
+                    let connection = aggtrade_counters
+                        .aggtrade_connections
+                        .fetch_add(1, Ordering::Relaxed)
+                        + 1;
+                    if mode.aggtrade == ComposedIoBehavior::Unavailable {
+                        drop(stream);
+                        continue;
+                    }
+                    let Ok(mut socket) = accept_async(stream).await else {
+                        continue;
+                    };
+                    if mode.aggtrade == ComposedIoBehavior::Healthy
+                        && socket
+                            .send(test_aggtrade_message_for_id(100 + connection))
+                            .await
+                            .is_ok()
+                    {
+                        aggtrade_counters
+                            .aggtrade_business_sent
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    keep_binance_loopback_alive(&mut socket).await;
+                }
+            }));
+
+            let mut specs = LiveRuntimeSourceSpecs::production();
+            specs.polymarket.gamma_endpoint = gamma_endpoint;
+            specs.polymarket.market_ws_endpoint = clob_endpoint;
+            specs.rtds.endpoint = rtds_endpoint;
+            specs.depth.snapshot_endpoint = snapshot_endpoint;
+            specs.depth.websocket_endpoint = depth_endpoint;
+            specs.aggtrade.url = aggtrade_endpoint;
+            tune_composed_specs(&mut specs);
+            Self {
+                specs,
+                mode,
+                counters,
+                servers,
+            }
+        }
+
+        fn path_ready(&self, path: ComposedIoPath) -> bool {
+            let unavailable_attempts = 2;
+            match (path, self.mode.behavior(path)) {
+                (ComposedIoPath::Gamma, ComposedIoBehavior::Unavailable) => {
+                    self.counters.gamma_requests.load(Ordering::Relaxed) >= unavailable_attempts
+                }
+                (ComposedIoPath::Gamma, _) => {
+                    self.counters.gamma_requests.load(Ordering::Relaxed) >= 1
+                }
+                (ComposedIoPath::Clob, ComposedIoBehavior::Unavailable) => {
+                    self.mode.gamma == ComposedIoBehavior::Unavailable
+                        || self.counters.clob_connections.load(Ordering::Relaxed)
+                            >= unavailable_attempts
+                }
+                (ComposedIoPath::Clob, _) => {
+                    self.mode.gamma == ComposedIoBehavior::Unavailable
+                        || (self.counters.clob_subscriptions.load(Ordering::Relaxed) >= 1
+                            && (self.mode.clob == ComposedIoBehavior::Silent
+                                || self.counters.clob_business_sent.load(Ordering::Relaxed) >= 1))
+                }
+                (ComposedIoPath::Rtds, ComposedIoBehavior::Unavailable) => {
+                    self.counters.rtds_connections.load(Ordering::Relaxed) >= unavailable_attempts
+                }
+                (ComposedIoPath::Rtds, _) => {
+                    self.counters.rtds_subscriptions.load(Ordering::Relaxed) >= 1
+                        && (self.mode.rtds == ComposedIoBehavior::Silent
+                            || self.counters.rtds_business_sent.load(Ordering::Relaxed) >= 1)
+                }
+                (ComposedIoPath::DepthSnapshot, ComposedIoBehavior::Unavailable) => {
+                    self.mode.depth_websocket == ComposedIoBehavior::Unavailable
+                        || self
+                            .counters
+                            .depth_snapshot_requests
+                            .load(Ordering::Relaxed)
+                            >= 1
+                }
+                (ComposedIoPath::DepthSnapshot, _) => {
+                    self.mode.depth_websocket == ComposedIoBehavior::Unavailable
+                        || self.counters.depth_snapshot_sent.load(Ordering::Relaxed) >= 1
+                }
+                (ComposedIoPath::DepthWebsocket, ComposedIoBehavior::Unavailable) => {
+                    self.counters.depth_connections.load(Ordering::Relaxed) >= unavailable_attempts
+                }
+                (ComposedIoPath::DepthWebsocket, _) => {
+                    self.counters.depth_connections.load(Ordering::Relaxed) >= 1
+                        && (self.mode.depth_websocket == ComposedIoBehavior::Silent
+                            || self.mode.depth_snapshot == ComposedIoBehavior::Unavailable
+                            || self.counters.depth_business_sent.load(Ordering::Relaxed) >= 1)
+                }
+                (ComposedIoPath::AggTrade, ComposedIoBehavior::Unavailable) => {
+                    self.counters.aggtrade_connections.load(Ordering::Relaxed)
+                        >= unavailable_attempts
+                }
+                (ComposedIoPath::AggTrade, _) => {
+                    self.counters.aggtrade_connections.load(Ordering::Relaxed) >= 1
+                        && (self.mode.aggtrade == ComposedIoBehavior::Silent
+                            || self.counters.aggtrade_business_sent.load(Ordering::Relaxed) >= 1)
+                }
+            }
+        }
+
+        async fn wait_ready(
+            &self,
+            runtime: &std::thread::JoinHandle<Result<LiveTrainingRuntimeReceipt>>,
+        ) {
+            timeout(Duration::from_secs(5), async {
+                loop {
+                    assert!(
+                        !runtime.is_finished(),
+                        "composed runtime exited before loopback fixture became ready: {:?}",
+                        self.mode
+                    );
+                    if [
+                        ComposedIoPath::Gamma,
+                        ComposedIoPath::Clob,
+                        ComposedIoPath::Rtds,
+                        ComposedIoPath::DepthSnapshot,
+                        ComposedIoPath::DepthWebsocket,
+                        ComposedIoPath::AggTrade,
+                    ]
+                    .into_iter()
+                    .all(|path| self.path_ready(path))
+                    {
+                        break;
+                    }
+                    sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("all required composed loopback paths must become observable");
+        }
+
+        async fn shutdown(self) {
+            for server in self.servers {
+                server.abort();
+                let _ = server.await;
+            }
+        }
+    }
+
+    fn composed_runtime_config(dataset_root: PathBuf, label: &str) -> LiveTrainingRuntimeConfig {
+        LiveTrainingRuntimeConfig {
+            dataset_root,
+            duration_secs: None,
+            run_forever: true,
+            collector_host_id: format!("collector-{label}"),
+            collector_region: "local-test".to_owned(),
+            code_version: format!("stage7-{label}"),
+            collector_binary_sha256: "test-binary-sha256".to_owned(),
+            source_config_digest: format!("stage7-source-{label}"),
+            max_dataset_bytes: u64::MAX,
+        }
+    }
+
+    fn spawn_composed_runtime_thread(
+        config: LiveTrainingRuntimeConfig,
+        specs: LiveRuntimeSourceSpecs,
+        stop_rx: oneshot::Receiver<()>,
+    ) -> std::thread::JoinHandle<Result<LiveTrainingRuntimeReceipt>> {
+        // Polling the complete coordinator overflows the test harness's 2 MiB stack;
+        // the smallest verified bounded test thread is 4 MiB.
+        std::thread::Builder::new()
+            .name("stage7-composed-runtime".to_owned())
+            .stack_size(4 * 1024 * 1024)
+            .spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(run_live_training_runtime_with_sources_and_stop(
+                        config,
+                        specs,
+                        async move {
+                            let _ = stop_rx.await;
+                        },
+                    ))
+            })
+            .unwrap()
+    }
+
+    async fn join_composed_runtime(
+        runtime: std::thread::JoinHandle<Result<LiveTrainingRuntimeReceipt>>,
+    ) -> Result<LiveTrainingRuntimeReceipt> {
+        timeout(Duration::from_secs(5), async {
+            while !runtime.is_finished() {
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("composed runtime thread must converge");
+        runtime.join().expect("composed runtime thread panicked")
+    }
+
+    fn composed_expected_minimum_rows(mode: ComposedLoopbackMode) -> BTreeMap<&'static str, u64> {
+        let polymarket_connected = mode.gamma != ComposedIoBehavior::Unavailable
+            && mode.clob != ComposedIoBehavior::Unavailable;
+        BTreeMap::from([
+            (
+                "polymarket_market",
+                u64::from(polymarket_connected && mode.clob == ComposedIoBehavior::Healthy),
+            ),
+            (
+                "polymarket_market_metadata",
+                u64::from(polymarket_connected),
+            ),
+            (
+                "polymarket_rtds_chainlink_btc_usd",
+                u64::from(mode.rtds == ComposedIoBehavior::Healthy),
+            ),
+            (
+                "binance_depth_snapshot",
+                u64::from(
+                    mode.depth_websocket != ComposedIoBehavior::Unavailable
+                        && mode.depth_snapshot == ComposedIoBehavior::Healthy,
+                ),
+            ),
+            (
+                "binance_depth_update",
+                u64::from(
+                    mode.depth_websocket == ComposedIoBehavior::Healthy
+                        && mode.depth_snapshot != ComposedIoBehavior::Unavailable,
+                ),
+            ),
+            (
+                "binance_aggtrade",
+                if mode.aggtrade == ComposedIoBehavior::Healthy {
+                    1
+                } else {
+                    0
+                },
+            ),
+        ])
+    }
+
+    fn assert_composed_artifacts(
+        label: &str,
+        mode: ComposedLoopbackMode,
+        receipt: &LiveTrainingRuntimeReceipt,
+        manifest: &Value,
+    ) {
+        assert!(
+            receipt.source_gaps.is_empty(),
+            "{label} availability created confirmed gaps: {:?}",
+            receipt.source_gaps
+        );
+        assert_eq!(manifest["collection_day_coverage"]["state"], "ended_known");
+        let expected = composed_expected_minimum_rows(mode);
+        let counters = manifest["source_counters"].as_object().unwrap();
+        assert_eq!(counters.len(), LIVE_SOURCES.len());
+        for (source, minimum_rows) in expected {
+            let counter = &counters[source];
+            let rows = counter["rows"].as_u64().unwrap();
+            let written_rows = counter["written_rows"].as_u64().unwrap();
+            if minimum_rows == 0 {
+                assert_eq!(rows, 0, "{label}:{source} fabricated rows");
+                assert_eq!(written_rows, 0, "{label}:{source} fabricated writes");
+                assert_eq!(counter["files"], 0, "{label}:{source} fabricated a file");
+                continue;
+            }
+            assert!(
+                rows >= minimum_rows,
+                "{label}:{source} rows={rows} expected_at_least={minimum_rows}"
+            );
+            assert_eq!(written_rows, rows, "{label}:{source} write accounting");
+            assert!(counter["files"].as_u64().is_some_and(|files| files > 0));
+            let segments = receipt
+                .finalized_segments
+                .iter()
+                .filter(|segment| segment.source_kind == source)
+                .collect::<Vec<_>>();
+            assert!(!segments.is_empty(), "{label}:{source} missing Parquet");
+            let segment_rows = segments
+                .iter()
+                .map(|segment| segment.row_count)
+                .sum::<u64>();
+            assert_eq!(segment_rows, rows, "{label}:{source} receipt rows");
+            for segment in segments {
+                assert!(segment.parquet_path.is_file());
+                let reader =
+                    SerializedFileReader::new(File::open(&segment.parquet_path).unwrap()).unwrap();
+                assert_eq!(
+                    u64::try_from(reader.metadata().file_metadata().num_rows()).unwrap(),
+                    segment.row_count,
+                    "{label}:{source} physical Parquet rows"
+                );
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn gamma_outer_supervisor_survives_one_hundred_outer_cycles_with_bounded_fds() {
+        if delegate_resource_test_to_isolated_process(
+            "live_runtime::tests::gamma_outer_supervisor_survives_one_hundred_outer_cycles_with_bounded_fds",
+        ) {
+            return;
+        }
+
+        let counters = Arc::new(GammaRecoveryLoopbackCounters::default());
+        let failed_attempts = u64::from(SOURCE_RECOVERY_CYCLE_MAX_ATTEMPTS.saturating_add(1)) * 100;
+        let (gamma_endpoint, gamma_server) =
+            gamma_recovery_loopback(failed_attempts, Arc::clone(&counters)).await;
+        let (clob_endpoint, clob_server) = silent_clob_loopback(Arc::clone(&counters)).await;
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let (control_tx, control_rx) = mpsc::channel(POLYMARKET_CONTROL_CHANNEL_CAPACITY);
+        let mut spec = PolymarketSourceSpec::production();
+        spec.gamma_endpoint = gamma_endpoint;
+        spec.market_ws_endpoint = clob_endpoint;
+        spec.discovery_wait = Duration::ZERO;
+        spec.discovery_retry_delay = Duration::from_millis(1);
+        spec.recovery_wait_override = Some(Duration::from_millis(1));
+        spec.ws_config.connect_timeout = Some(Duration::from_millis(500));
+        spec.ws_config.heartbeat_interval = Duration::from_millis(20);
+        spec.ws_config.heartbeat_timeout = Duration::from_millis(100);
+        let source = tokio::spawn(run_polymarket_source_with_spec(
+            spec,
+            dataset_root,
+            SourceEventSink {
+                tx: event_tx,
+                gaps: Arc::clone(&gaps),
+                source_queue_backpressure: Arc::clone(&stats),
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            CollectorIdentity {
+                host_id: "collector-gamma-100".to_owned(),
+                region: "local-test".to_owned(),
+            },
+            None,
+            Instant::now(),
+            control_rx,
+        ));
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if counters.gamma_successes.load(Ordering::Relaxed) >= 1
+                    && counters.clob_subscriptions.load(Ordering::Relaxed) >= 1
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("Gamma must recover after one hundred outer supervisor cycles");
+        let (reply_tx, reply_rx) = oneshot::channel();
+        control_tx
+            .send(PolymarketSourceControl::Fence {
+                stop_after_fence: true,
+                resume_after_barrier: None,
+                reply: reply_tx,
+            })
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(2), reply_rx)
+            .await
+            .expect("Gamma source stop acknowledgement must be bounded")
+            .unwrap()
+            .unwrap();
+        timeout(Duration::from_secs(2), source)
+            .await
+            .expect("Gamma source must converge after its coordinated stop")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            counters.gamma_attempts.load(Ordering::Relaxed),
+            failed_attempts + 1
+        );
+        assert_eq!(counters.gamma_successes.load(Ordering::Relaxed), 1);
+        let metadata = event_rx.recv().await.unwrap();
+        assert_eq!(metadata.event.source_kind, "polymarket_market_metadata");
+        assert!(event_rx.try_recv().is_err());
+        assert!(
+            gaps.lock().unwrap().is_empty(),
+            "Gamma availability recovery must not create confirmed gaps"
+        );
+        let operational = stats.drain_all_operational();
+        let reconnects = operational
+            .values()
+            .filter_map(|by_source| by_source.get("polymarket_market"))
+            .map(|counter| counter.reconnect_events)
+            .sum::<u64>();
+        assert_eq!(reconnects, failed_attempts);
+        let fd_samples = counters.gamma_fd_samples.lock().unwrap().clone();
+        assert_eq!(
+            fd_samples.len(),
+            usize::try_from(failed_attempts + 1).unwrap()
+        );
+        let minimum = *fd_samples.iter().min().unwrap();
+        let maximum = *fd_samples.iter().max().unwrap();
+        assert!(
+            fd_samples.last().unwrap() <= &(fd_samples[0] + 2),
+            "Gamma recovery descriptors did not return to their initial plateau: {fd_samples:?}"
+        );
+        assert!(
+            maximum.saturating_sub(minimum) <= 8,
+            "Gamma recovery leaked file descriptors: {fd_samples:?}"
+        );
+        gamma_server.abort();
+        clob_server.abort();
+        let _ = gamma_server.await;
+        let _ = clob_server.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn full_runtime_all_io_unavailable_stays_live_until_injected_operator_stop() {
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let mode = ComposedLoopbackMode::all_unavailable();
+        let fixture = ComposedLoopbackFixture::spawn(mode).await;
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let runtime_root = dataset_root.clone();
+        let runtime = spawn_composed_runtime_thread(
+            composed_runtime_config(runtime_root, "all-unavailable"),
+            fixture.specs.clone(),
+            stop_rx,
+        );
+        fixture.wait_ready(&runtime).await;
+        assert_eq!(fixture.counters.clob_connections.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            fixture
+                .counters
+                .depth_snapshot_requests
+                .load(Ordering::Relaxed),
+            0
+        );
+        sleep(Duration::from_millis(50)).await;
+        assert!(!runtime.is_finished());
+        stop_tx.send(()).unwrap();
+        let receipt = join_composed_runtime(runtime).await.unwrap();
+        let utc_day = utc_day_string_from_ms(now_ms()).unwrap();
+        let day_dir = typed_raw_root(&dataset_root).join(format!("utc_day={utc_day}"));
+        let manifest = load_day_manifest(&day_dir).unwrap().unwrap();
+        assert_composed_artifacts("all-unavailable", mode, &receipt, &manifest);
+        fixture.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn full_runtime_cross_platform_degradation_converges_at_run_deadline_and_finalizes_rows()
+    {
+        let mode = ComposedLoopbackMode::with_unavailable(&[
+            ComposedIoPath::Clob,
+            ComposedIoPath::DepthSnapshot,
+        ]);
+        let fixture = ComposedLoopbackFixture::spawn(mode).await;
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let mut config =
+            composed_runtime_config(dataset_root.clone(), "deadline-cross-platform-degraded");
+        config.duration_secs = Some(1);
+        config.run_forever = false;
+        let runtime = spawn_composed_runtime_thread(config, fixture.specs.clone(), stop_rx);
+        fixture.wait_ready(&runtime).await;
+        let receipt = join_composed_runtime(runtime).await.unwrap();
+        drop(stop_tx);
+        let utc_day = utc_day_string_from_ms(now_ms()).unwrap();
+        let day_dir = typed_raw_root(&dataset_root).join(format!("utc_day={utc_day}"));
+        let manifest = load_day_manifest(&day_dir).unwrap().unwrap();
+        assert_composed_artifacts(
+            "deadline-cross-platform-degraded",
+            mode,
+            &receipt,
+            &manifest,
+        );
+        fixture.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn full_runtime_protocol_alive_business_silence_does_not_fabricate_rows_or_reconnect() {
+        let mode = ComposedLoopbackMode::stream_silent();
+        let fixture = ComposedLoopbackFixture::spawn(mode).await;
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let runtime = spawn_composed_runtime_thread(
+            composed_runtime_config(dataset_root.clone(), "all-streams-silent"),
+            fixture.specs.clone(),
+            stop_rx,
+        );
+        fixture.wait_ready(&runtime).await;
+        sleep(Duration::from_millis(100)).await;
+        let stable_transport = (
+            fixture.counters.clob_connections.load(Ordering::Relaxed),
+            fixture.counters.clob_subscriptions.load(Ordering::Relaxed),
+            fixture.counters.rtds_connections.load(Ordering::Relaxed),
+            fixture.counters.rtds_subscriptions.load(Ordering::Relaxed),
+            fixture.counters.depth_connections.load(Ordering::Relaxed),
+            fixture
+                .counters
+                .depth_snapshot_requests
+                .load(Ordering::Relaxed),
+            fixture
+                .counters
+                .aggtrade_connections
+                .load(Ordering::Relaxed),
+        );
+        sleep(Duration::from_millis(250)).await;
+        assert_eq!(
+            stable_transport,
+            (
+                fixture.counters.clob_connections.load(Ordering::Relaxed),
+                fixture.counters.clob_subscriptions.load(Ordering::Relaxed),
+                fixture.counters.rtds_connections.load(Ordering::Relaxed),
+                fixture.counters.rtds_subscriptions.load(Ordering::Relaxed),
+                fixture.counters.depth_connections.load(Ordering::Relaxed),
+                fixture
+                    .counters
+                    .depth_snapshot_requests
+                    .load(Ordering::Relaxed),
+                fixture
+                    .counters
+                    .aggtrade_connections
+                    .load(Ordering::Relaxed),
+            ),
+            "protocol-alive silence must stay on the original sessions"
+        );
+        assert_eq!(
+            fixture.counters.clob_business_sent.load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            fixture.counters.rtds_business_sent.load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            fixture.counters.depth_business_sent.load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            fixture
+                .counters
+                .aggtrade_business_sent
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert!(!runtime.is_finished());
+        stop_tx.send(()).unwrap();
+        let receipt = join_composed_runtime(runtime).await.unwrap();
+        let utc_day = utc_day_string_from_ms(now_ms()).unwrap();
+        let day_dir = typed_raw_root(&dataset_root).join(format!("utc_day={utc_day}"));
+        let manifest = load_day_manifest(&day_dir).unwrap().unwrap();
+        assert_composed_artifacts("all-streams-silent", mode, &receipt, &manifest);
+        assert_eq!(
+            manifest["source_counters"]["polymarket_market_metadata"]["rows"],
+            1
+        );
+        assert_eq!(
+            manifest["source_counters"]["binance_depth_snapshot"]["rows"],
+            1
+        );
+        fixture.shutdown().await;
     }
 
     #[tokio::test]
@@ -30684,6 +32333,239 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn binance_depth_operator_cutoff_discards_unadmitted_pending_and_stops_cleanly() {
+        let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let websocket_endpoint = format!("ws://{}", ws_listener.local_addr().unwrap());
+        let snapshot_endpoint = format!(
+            "http://{}/api/v3/depth",
+            http_listener.local_addr().unwrap()
+        );
+        let (server_release_tx, server_release_rx) = oneshot::channel();
+        let http_server = tokio::spawn(async move {
+            let (mut socket, _) = http_listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            let _ = server_release_rx.await;
+        });
+        let ws_server = tokio::spawn(async move {
+            let (socket, _) = ws_listener.accept().await.unwrap();
+            let mut websocket = accept_async(socket).await.unwrap();
+            websocket
+                .send(test_binance_depth_message(101, 101))
+                .await
+                .unwrap();
+            sleep(Duration::from_secs(1)).await;
+        });
+
+        let (tx, mut rx) = mpsc::channel(4);
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        let gate = install_active_raw_day_gate(&stats, now_ms()).await;
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let (stream, _) = connect_async(&websocket_endpoint).await.unwrap();
+        let context = test_binance_depth_context(
+            reqwest::Client::new(),
+            SourceEventSink {
+                tx,
+                gaps: Arc::clone(&gaps),
+                source_queue_backpressure: Arc::clone(&stats),
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            websocket_endpoint,
+            snapshot_endpoint,
+            Some(Instant::now() + Duration::from_secs(2)),
+            "bootstrap",
+        );
+        let observed_ingress = context.ingress_sequence.clone();
+        let (control_tx, mut control_rx) = mpsc::channel(1);
+        let source = tokio::spawn(async move {
+            run_binance_depth_update_ws_source_with_control(stream, context, Some(&mut control_rx))
+                .await
+        });
+
+        timeout(Duration::from_secs(1), async {
+            while observed_ingress.last.load(Ordering::Relaxed) < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::task::yield_now().await;
+        gate.prepare_runtime_exit_with_cause(now_ms(), RuntimeCloseCause::OperatorStop)
+            .unwrap();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        control_tx
+            .send(DepthSourceControl::Fence {
+                kind: DepthFenceKind::ResetContinuity,
+                stop_after_fence: true,
+                resume_after_barrier: None,
+                reply: reply_tx,
+            })
+            .await
+            .unwrap();
+        reply_rx.await.unwrap().unwrap();
+        assert!(matches!(
+            source.await.unwrap().unwrap(),
+            BinanceDepthUpdateExit::Stopped
+        ));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(stats.depth_admission_sequence.load(Ordering::Relaxed), 0);
+        assert!(gaps.lock().unwrap().is_empty());
+
+        let _ = server_release_tx.send(());
+        http_server.await.unwrap();
+        ws_server.abort();
+        let _ = ws_server.await;
+    }
+
+    #[tokio::test]
+    async fn binance_depth_cutoff_does_not_apply_unadmitted_ready_update() {
+        let observed_utc_ms = now_ms();
+        let (tx, mut rx) = mpsc::channel(4);
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        let gate = install_active_raw_day_gate(&stats, observed_utc_ms).await;
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let context = test_binance_depth_context(
+            reqwest::Client::new(),
+            SourceEventSink {
+                tx,
+                gaps: Arc::clone(&gaps),
+                source_queue_backpressure: Arc::clone(&stats),
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            "ws://127.0.0.1:9".to_owned(),
+            "http://127.0.0.1:9/api/v3/depth".to_owned(),
+            None,
+            "bootstrap",
+        );
+        let mut continuity = DepthContinuityState::Ready {
+            snapshot_last_update_id: 100,
+            local_u: Some(101),
+            snapshot_utc_day: utc_day_string_from_ms(observed_utc_ms).unwrap(),
+        };
+        let event = RawEvent {
+            source_kind: "binance_depth_update".to_owned(),
+            source_event_type: "depth_update".to_owned(),
+            source_identifier: "BTCUSDT".to_owned(),
+            source_ts: Some(observed_utc_ms.to_string()),
+            recv_time_utc_ms: observed_utc_ms,
+            collector_host_id: "collector-test".to_owned(),
+            collector_region: "local-test".to_owned(),
+            source_endpoint: "ws://127.0.0.1:9".to_owned(),
+            raw_json: json!({
+                "e": "depthUpdate",
+                "E": observed_utc_ms,
+                "s": "BTCUSDT",
+                "U": 103,
+                "u": 103,
+                "b": [["1", "2"]],
+                "a": [["3", "4"]]
+            })
+            .to_string(),
+            collector_admission: None,
+            parquet_raw_layout_version: 1,
+            parquet_raw_source_kind: "binance_depth_update".to_owned(),
+        };
+        gate.prepare_runtime_exit_with_cause(observed_utc_ms, RuntimeCloseCause::OperatorStop)
+            .unwrap();
+
+        let assessment = admit_depth_update(&context, event, 1, (Some(100), Some(101)))
+            .await
+            .unwrap();
+        if let Some(assessment) = assessment {
+            let _ = apply_depth_assessment(&mut continuity, &assessment).unwrap();
+            panic!("an update after the controlled cutoff must not be applied");
+        }
+        let DepthContinuityState::Ready { local_u, .. } = continuity else {
+            panic!("the unadmitted update must not invalidate ready continuity");
+        };
+        assert_eq!(local_u, Some(101));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(stats.depth_admission_sequence.load(Ordering::Relaxed), 0);
+        assert!(gaps.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn binance_depth_run_deadline_discards_unadmitted_pending_without_gap() {
+        let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let websocket_endpoint = format!("ws://{}", ws_listener.local_addr().unwrap());
+        let snapshot_endpoint = format!(
+            "http://{}/api/v3/depth",
+            http_listener.local_addr().unwrap()
+        );
+        let (server_release_tx, server_release_rx) = oneshot::channel();
+        let http_server = tokio::spawn(async move {
+            let (mut socket, _) = http_listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            let _ = server_release_rx.await;
+        });
+        let ws_server = tokio::spawn(async move {
+            let (socket, _) = ws_listener.accept().await.unwrap();
+            let mut websocket = accept_async(socket).await.unwrap();
+            websocket
+                .send(test_binance_depth_message(101, 101))
+                .await
+                .unwrap();
+            sleep(Duration::from_secs(1)).await;
+        });
+
+        let (tx, mut rx) = mpsc::channel(4);
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        let observed_utc_ms = now_ms();
+        let gate = install_active_raw_day_gate(&stats, observed_utc_ms).await;
+        let deadline = Instant::now() + Duration::from_millis(100);
+        gate.install_runtime_deadline(Some(RuntimeDeadlineCandidate {
+            deadline,
+            observed_utc_ms: observed_utc_ms + 100,
+        }))
+        .unwrap();
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let (stream, _) = connect_async(&websocket_endpoint).await.unwrap();
+        let context = test_binance_depth_context(
+            reqwest::Client::new(),
+            SourceEventSink {
+                tx,
+                gaps: Arc::clone(&gaps),
+                source_queue_backpressure: Arc::clone(&stats),
+                inflight_budget: InflightBudget::new(),
+                enqueue_lock: Arc::new(AsyncMutex::new(())),
+            },
+            websocket_endpoint,
+            snapshot_endpoint,
+            Some(deadline),
+            "bootstrap",
+        );
+        let observed_ingress = context.ingress_sequence.clone();
+        let outcome = tokio::spawn(async move {
+            run_binance_depth_update_ws_source_with_control(stream, context, None).await
+        });
+
+        timeout(Duration::from_secs(1), async {
+            while observed_ingress.last.load(Ordering::Relaxed) < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            outcome.await.unwrap().unwrap(),
+            BinanceDepthUpdateExit::DeadlineReached
+        ));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(stats.depth_admission_sequence.load(Ordering::Relaxed), 0);
+        assert!(gaps.lock().unwrap().is_empty());
+
+        let _ = server_release_tx.send(());
+        http_server.await.unwrap();
+        ws_server.abort();
+        let _ = ws_server.await;
+    }
+
+    #[tokio::test]
     async fn binance_depth_eof_releases_pending_update_once() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let websocket_endpoint = format!("ws://{}", listener.local_addr().unwrap());
@@ -30973,6 +32855,11 @@ mod tests {
 
     #[tokio::test]
     async fn binance_depth_one_hundred_reconnects_reach_generation_101_with_bounded_fds() {
+        if delegate_resource_test_to_isolated_process(
+            "live_runtime::tests::binance_depth_one_hundred_reconnects_reach_generation_101_with_bounded_fds",
+        ) {
+            return;
+        }
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let websocket_endpoint = format!("ws://{}", listener.local_addr().unwrap());
         let (final_release_tx, final_release_rx) = oneshot::channel();
@@ -31091,6 +32978,11 @@ mod tests {
 
     #[tokio::test]
     async fn binance_depth_one_hundred_resnapshots_keep_one_owner_and_bounded_fds() {
+        if delegate_resource_test_to_isolated_process(
+            "live_runtime::tests::binance_depth_one_hundred_resnapshots_keep_one_owner_and_bounded_fds",
+        ) {
+            return;
+        }
         let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let websocket_endpoint = format!("ws://{}", ws_listener.local_addr().unwrap());
@@ -34455,6 +36347,11 @@ mod tests {
 
     #[tokio::test]
     async fn binance_one_hundred_reconnects_keep_one_source_loop_and_reach_generation_101() {
+        if delegate_resource_test_to_isolated_process(
+            "live_runtime::tests::binance_one_hundred_reconnects_keep_one_source_loop_and_reach_generation_101",
+        ) {
+            return;
+        }
         let dataset_root = tempdir().unwrap();
         let dataset_root_path = dataset_root.path().canonicalize().unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
