@@ -515,3 +515,9 @@
 - 最终门禁前的生产/范围、测试/证据、文档/authority三路`gpt-5.6-sol`/`ultra`独立终审均为Critical 0、Important 0、Minor 0。反馈修正仅收紧文档证据的真实退出码、路径、测试名与组合证明边界；没有因审查新增生产实现或重复扩张完整collector/100-cycle矩阵。
 - 阶段0--7 commit映射为：阶段0 `ab43d05054705e21973c491fb0e9b966c046543f`，阶段1 `b1172fe52261b412dfd26471b080f7ccbaafbd0e`，阶段2 `75aeb543aaecbd3cd135f754d8c09135c54d2441`，阶段3 `e7d766dd7d7b3642b619746c8fb2a54857527e4a`，阶段4 `387ba0394d94b37fcfe0a2c8d09078e5b03a532d`，阶段5 `f40177d103e9529a586c798624c2e2958e039dba`，阶段6 `982e92f457300fb63914ef499491c78b8a683f88`，阶段7/8门禁细化文档 `689273f9f02539bcc1d07ecb4eadaef742807340`，阶段7 `f53946537b7c3089971cbb667556704fbe75d6b0`。本阶段提交subject冻结为`test(data-collect): complete source lifecycle phase 8`；commit SHA与push后本地/upstream/remote ref一致性由交付报告记录，不在commit自身伪写尚未存在的SHA。
 - 阶段8完成只表示本地需求、计划、实现差异测试、证据追溯与门禁闭环。本次没有执行release构建、生产部署、远程服务/数据写操作或数据清理，也不授权这些后续操作。
+
+## 2026-07-18：独立直接部署事项取代M8-A首次启用编排
+
+- 用户在阶段8完成后独立批准`DC-DEPLOY-20260718-DIRECT-LONG-RUN`。已确认数据采集服务器多日停服、旧PID/lease退出且当前UTC日没有manifest，因此首次正式冷启动可在任意时刻直接启用唯一`Restart=on-failure` unit，不等待UTC边界，不使用`Restart=no`或独立gate，也不删除历史数据。
+- 该后续批准只取代M8-A的首次启用编排；本专项阶段0--8实现、测试与历史批准记录不变。same-day不同identity takeover、回滚或identity migration仍不是已实现能力。
+- 当前执行authority为`demand/data-collect-training-collector-direct-deployment-demand.md`、`plan/data-collect-training-collector-direct-deployment-plan.md`及其changelog。

@@ -19,6 +19,8 @@
 > 事项编号：`data-collect-demand`
 
 > 状态：用户已在 2026-07-06 批准执行本文档；2026-07-10 又批准 Binance aggTrade schema v3、D+1 昨天归档修正、立即重新部署与重启采集；2026-07-11 批准只修复归档 depth checkpoint 并本地重跑，明确禁止审核前上传。本次执行仍不授权 paper/live 真实市场接入、真实下单、撤单或资金操作。
+>
+> 2026-07-18训练collector首次正式冷启动与长期运行的当前执行authority为`plan/data-collect-training-collector-direct-deployment-plan.md`；本计划中更早的gate、删除、重启或部署记录只保留为历史，不得重新执行。
 
 ## 2026-07-10 已批准增量执行
 

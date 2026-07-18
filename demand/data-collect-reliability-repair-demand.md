@@ -7,6 +7,8 @@
 > 对应 changelog：`changelog/data-collect-reliability-repair-changelog.md`
 >
 > 状态：`SUPERSEDED_IN_PART_BY_SOURCE_AVAILABILITY_LIFECYCLE`。已完成并通过审查的CLOB `10s/20s`、RTDS `5s/15s`分源heartbeat修复继续作为基线；用户于2026-07-17批准`demand/data-collect-source-availability-lifecycle-repair-demand.md`及其计划后，本文件的业务静默恢复预算、D2 one-shot reconnect、CLOB freshness退出、普通网络/空结果gap、有限总恢复、旧SDK patch白名单、daily coverage和同日生产切换/清理语义均被取代。本文其余已实现数据完整性合同继续有效；旧执行事实只由原changelog保留。新专项不授权生产构建、部署、远端服务操作或数据清理。
+>
+> 当前训练collector首次正式冷启动的独立部署authority为`demand/data-collect-training-collector-direct-deployment-demand.md`；本文件及旧生产阶段不得用于执行`Restart=no`、gate、UTC边界等待或数据清理。
 
 ## 一、目标与权威边界
 
@@ -119,15 +121,15 @@
 8. data-pipeline 只消费 `state=closed` 日期；它自行做内容校验、语义去重、排序、market acceptance/rejection 与训练准入。
 9. collector 不再自动删除 raw，也不生成 retention receipt。数据根达到 50GB 时按 3.4 的 coordinated shutdown 合同以保留退出码 75 fail closed，等待独立归档运维清理，禁止静默填满磁盘。
 
-## 六、生产边界（被新专项M8-A取代）
+## 六、生产边界（历史条款已被直接部署事项取代）
 
 1. 本文件原同日D2 running-upgrade、当日删除、立即启动、gate与26小时长跑步骤不再是可执行authority；历史批准、未执行状态和远端只读事实保留在原changelog。
-2. 首次启用coverage-aware binary只能由未来独立部署计划在UTC边界前停止legacy进程、确认旧PID退出且未创建新日manifest，并于下一UTC日启动。
-3. coverage-aware升级/回滚需要另行批准并实现的v1-aware `stop-at-boundary/no-new-day-activation`或等价编排，先state-aware关闭open日，再于下一UTC日启动入站binary。
-4. same-day binary/version/identity takeover、identity migration、旧binary接管open v1日、生产构建、部署、远端服务操作与数据清理均不在当前专项授权内。相同identity持有dataset独占lease的同日进程恢复属于collector状态机，不是部署takeover。
+2. 2026-07-18首次正式冷启动已经由`demand/data-collect-training-collector-direct-deployment-demand.md`独立批准：多日停服、旧PID/lease退出且当前UTC日无任何collector产物时，任意时刻直接启用唯一`Restart=on-failure` unit。
+3. 旧UTC边界首次启用编排不再可执行；future coverage-aware升级/回滚、same-day binary/version/identity takeover、identity migration或旧binary接管open v1日仍须基于当时事实另行批准。
+4. 本旧专项自身不授权生产构建、部署、远端服务操作或数据清理。相同identity持有dataset独占lease的同日进程恢复属于collector状态机，不是部署takeover。
 ## 七、当前验收authority
 
 1. 本文件已完成的分源heartbeat配置与既有parser、dedupe、continuity、writer、schema和资源完整性测试继续作为保持回归。
 2. 业务静默、transport持续恢复、SDK heartbeat/teardown、one-shot删除、CLOB/Gamma、Binance、daily coverage、资源100-cycle与全量门禁，以`demand/data-collect-source-availability-lifecycle-repair-demand.md`第六节28项验收为唯一当前authority。
-3. 每个新writer必须写顶层v3直接嵌套v1 coverage；legacy missing=unknown，新writer missing/malformed fail closed，所有ManifestOwner mutation、同日四态恢复、prior state-aware closure、rollover/PendingExit/abort因果证明和M8边界均须按新专项测试。
-4. 生产构建、远端预置、数据删除、服务启停和长期生产运行不属于当前验收；若未来获批，必须另建与M8-A一致的部署需求、计划与changelog。
+3. 每个新writer必须写顶层v3直接嵌套v1 coverage；legacy missing=unknown，新writer missing/malformed fail closed，所有ManifestOwner mutation、同日四态恢复、prior state-aware closure、rollover/PendingExit/abort因果证明均须按新专项测试。
+4. 本文件不授权生产操作；当前首次正式冷启动只由独立直接部署三件套授权。

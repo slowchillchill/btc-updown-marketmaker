@@ -4,6 +4,10 @@ use std::path::{Path, PathBuf};
 const README: &str = "data-collect/docs/training-collector-deploy-readme.md";
 const HOT_DOC: &str = "data-collect/docs/paper-live-hot-path-integration.md";
 const SYSTEMD: &str = "data-collect/deploy/systemd/data-collect-training-collector.service";
+const RELIABILITY_DEMAND: &str = "demand/data-collect-reliability-repair-demand.md";
+const RELIABILITY_PLAN: &str = "plan/data-collect-reliability-repair-plan.md";
+const LIFECYCLE_DEMAND: &str = "demand/data-collect-source-availability-lifecycle-repair-demand.md";
+const LIFECYCLE_PLAN: &str = "plan/data-collect-source-availability-lifecycle-repair-plan.md";
 
 #[test]
 fn training_deploy_readme_describes_single_binary_single_unit_flow() {
@@ -23,7 +27,6 @@ fn training_deploy_readme_describes_single_binary_single_unit_flow() {
         "RestartPreventExitStatus=75 76",
         "StartLimitIntervalSec=600",
         "StartLimitBurst=5",
-        "Restart=no",
         "dataset_capacity_reached",
         "--help",
         "--version",
@@ -31,12 +34,27 @@ fn training_deploy_readme_describes_single_binary_single_unit_flow() {
         "data-pipeline 只消费 `closed` 日",
         "*.running",
         "manifest.json.tmp",
-        "不生成独立报告",
         "远端服务器禁止编译 Rust",
         "paper/live 源码 binary 仍可分别",
-        "failed_gate",
-        "failed_long_running",
-        "partial_replace",
+        "demand/data-collect-training-collector-direct-deployment-demand.md",
+        "无需等待 UTC 00:00",
+        "不运行 `Restart=no`",
+        "systemctl --user enable --now data-collect-training-collector.service",
+        "当前 UTC 日目录及manifest、finalized Parquet",
+        "发现任何当前日产物都原样保留并停止",
+        "最高 GLIBC requirement 不高于远端 2.39",
+        "同步 destination 所在目录",
+        "不删除、移动、隔离或改写历史 raw、Parquet 或 manifest",
+        "普通 source 静默、stale、网络恢复或暂时无数据不是整体启动失败",
+        "从日内开始得到的首日是部分 UTC 日",
+        "这些是运行证据，不是启动前 gate",
+        "无进程级故障时 PID 应保持不变",
+        "约24小时soak只能证明观察期间通过，不能冒充每种reconnect分支都被真实触发",
+        "collection-day coverage v1 为 `active`",
+        "启动时零行和稀疏 source 暂无文件均合法",
+        "`.parquet.running` 不是 finalized Parquet",
+        "若已经发生同identity restart",
+        "reconciled_legacy_coverage_unknown",
     ] {
         assert!(readme.contains(expected), "README missing {expected}");
     }
@@ -51,11 +69,39 @@ fn training_deploy_readme_describes_single_binary_single_unit_flow() {
         "retention receipt",
         "run_manifests/<run_id>",
         "data-collect/current",
+        "failed_gate",
+        "failed_long_running",
+        "按失败 build/day 身份清理",
+        "连续运行至少 26 小时",
     ] {
         assert!(
             !readme.contains(forbidden),
             "README retains obsolete deployment path {forbidden}"
         );
+    }
+}
+
+#[test]
+fn current_authority_supersedes_the_old_utc_boundary_first_start() {
+    for path in [
+        RELIABILITY_DEMAND,
+        RELIABILITY_PLAN,
+        LIFECYCLE_DEMAND,
+        LIFECYCLE_PLAN,
+    ] {
+        let doc = read(path);
+        assert!(doc.contains("data-collect-training-collector-direct-deployment"));
+        assert!(doc.contains("当前UTC日无任何collector产物"));
+        for obsolete in [
+            "首次启用coverage-aware binary只能由未来独立部署计划在UTC边界前",
+            "M8-A只冻结未来UTC边界部署策略：首次启用在边界前",
+            "M8-A`继续有效",
+        ] {
+            assert!(
+                !doc.contains(obsolete),
+                "{path} retains obsolete deployment authority: {obsolete}"
+            );
+        }
     }
 }
 
@@ -95,6 +141,9 @@ fn repository_has_one_authoritative_training_unit() {
     let mut files = fs::read_dir(unit_dir)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| {
+            name.starts_with("data-collect-training-collector") && name.ends_with(".service")
+        })
         .collect::<Vec<_>>();
     files.sort();
     assert_eq!(files, vec!["data-collect-training-collector.service"]);

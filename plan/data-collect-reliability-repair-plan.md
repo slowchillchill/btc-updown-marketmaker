@@ -7,6 +7,8 @@
 > 事项编号：`DC-REPAIR-20260713-COLLECTOR-RELIABILITY`
 >
 > 状态：`SUPERSEDED_AFTER_HEARTBEAT_BASELINE`。本计划已完成并通过审查的CLOB `10s/20s`、RTDS `5s/15s`分源heartbeat修复继续作为保持基线；用户于2026-07-17批准`plan/data-collect-source-availability-lifecycle-repair-plan.md`后，本计划未执行的业务静默恢复预算、D2 one-shot reconnect、CLOB freshness退出、有限总恢复、旧SDK patch白名单、daily coverage及生产阶段全部被取代，不再提供实施、构建、部署、远端操作或数据清理授权。历史执行记录仍以原changelog为准。
+>
+> 当前训练collector首次正式冷启动的独立执行authority为`plan/data-collect-training-collector-direct-deployment-plan.md`；本旧计划中的`Restart=no`、gate、UTC边界等待与数据清理步骤均不可执行。
 
 ## 一、执行原则与成功定义
 
@@ -31,7 +33,7 @@ source 目录               source_kind=<source>
 日清单                    utc_day=YYYY-MM-DD/manifest.json
 ```
 
-上述路径只保留为旧计划的历史命名记录，不构成当前build/deploy authority。未来生产流程必须另建符合M8-A的需求、计划与changelog；本专项不得使用旧同日staging/replace步骤临场部署。
+上述路径只保留为旧计划的历史命名记录，不构成当前build/deploy authority。2026-07-18首次正式冷启动已另建并批准直接长期部署三件套；本专项不得恢复旧同日staging/gate/清理步骤。
 
 ## 三、阶段 1：冻结合同并通过计划审查
 
@@ -69,5 +71,5 @@ source 目录               source_kind=<source>
 ### 4.3 当前验证与生产边界
 
 1. 阶段1--7的定向loopback、组合退化和至少100-cycle资源测试，以及阶段8的`cargo fmt --all -- --check`、`cargo clippy -p data-collect --locked --all-targets -- -D warnings`、`cargo test -p data-collect --locked`、vendored SDK测试/lint、vendor diff与`git diff --check`，均由新计划执行并逐项映射28项验收。
-2. 旧D2同日running-upgrade、当日删除、立即启动、gate和26小时长跑步骤全部撤销。M8-A只冻结未来UTC边界部署策略：首次启用在边界前停止legacy且确认未创建新日manifest，下一UTC日启动；coverage-aware升级/回滚须另行批准并实现v1-aware `stop-at-boundary/no-new-day-activation`或等价编排。
+2. 旧D2同日running-upgrade、当日删除、gate和26小时放行步骤全部撤销；M8-A的UTC边界首次启用候选也已被2026-07-18独立直接部署事项取代。多日停服、旧PID/lease退出且当前UTC日无任何collector产物的首次正式冷启动可任意时刻直接启用唯一`Restart=on-failure` unit；future coverage-aware升级/回滚仍须另行批准。
 3. same-day binary/version/identity takeover、identity migration、旧binary接管open v1日、生产构建、部署、远端服务操作、数据清理和重采均不在当前计划内。相同identity持有独占lease的同日进程恢复属于collector状态机，不是部署takeover。

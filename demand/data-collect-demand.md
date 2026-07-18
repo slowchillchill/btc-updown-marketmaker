@@ -19,7 +19,7 @@
 ## DC-INCREMENT-20260710-P2B-T-V3-ARCHIVE 增量需求
 
 1. Binance aggTrade hourly typed parquet 必须同时保存官方 `E` 为 `event_time` 和官方 `T` 为 `trade_time`；两列不得合并或相互代替，schema version 升为 `binance_aggtrade_v3`。
-2. `binance_aggtrade_v3`继续以新finalized segment中`event_time`和`trade_time`的真实可读值验收，不得修改或伪装旧v2产物；本增量当时的部署/重启事实只由对应旧changelog记录，不构成当前再次部署授权。未来任何部署必须另行批准并遵守当前M8 UTC边界合同。
+2. `binance_aggtrade_v3`继续以新finalized segment中`event_time`和`trade_time`的真实可读值验收，不得修改或伪装旧v2产物；本增量当时的部署/重启事实只由对应旧changelog记录。2026-07-18首次正式冷启动已由`demand/data-collect-training-collector-direct-deployment-demand.md`独立批准并取代旧M8 UTC边界编排；未来same-day不同identity升级/回滚仍须另行批准。
 3. future paper/live hot path 的真实 external market event handoff 必须显式传输同一 slug 下可空 decimal-string `price_to_beat` 和 `final_price`。缺少任一字段不得阻断 handoff，也不得增加 closed/resolved/winner 门；当前 paper/live 二进制仅实现 heartbeat/status，该字段合同本轮只写入需求与计划，不冒充已实现。
 4. 经用户批准的日级运维辅助脚本只在 D+1 UTC 02:00 处理昨天 D：每个目标 slug 发起一个逻辑 Gamma 读取，仅以 `eventMetadata.priceToBeat` 和 `eventMetadata.finalPrice` 同时存在作为该 market 的回填成功条件。TLS/timeout/connection reset/`URLError` 只在本次任务内有界重试，最多 3 attempts 且单次等待不超过 5 秒；HTTP 已到达但字段缺失不做语义重试。P2B artifact 使用 `price-to-beat-gamma-v2`，每 row 写入 `gamma_http_attempt_count`。已有完整 D 文件时只重请其中的瞬时传输失败 rows；不设 D+2，closed/resolved/winner 及结果一致性不得成为阻断门。
 5. 日级辅助脚本发现历史 running/digesting/partial 文件时只写入诊断报告并且绝不读取；不得因一个孤立历史 partial 使昨天整日归档提前终止。上传同名昨天包时必须核对当前本地与云端内容 digest，不得仅因云端已有同名文件就报告成功。

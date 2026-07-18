@@ -58,7 +58,7 @@
 | `M5-N/A` | 不建设transport summary | 若未来需要持久运维取证，另建需求与schema决策门 |
 | `M6-A+` | 顶层v3加直接嵌套v1 | legacy缺对象为unknown；新writer必有；malformed fail closed；merge/recovery保留；不新增通用extensions容器 |
 | `M7-A-R` | 修订后的失败边界 | 外部静默/网络、诊断日志失败和既有诊断计数饱和不终止；mapping/schema/state/atomic write完整性故障fail closed；coverage不创建trigger/wake/row |
-| `M8-A` | UTC日边界部署 | 只冻结未来部署策略；首次启用与回滚使用不同边界流程，same-day binary/version/identity takeover不在本事项内；相同identity加独占lease的同日恢复属于M4状态机，当前代码不得冒充已具备无竞态切换能力 |
+| `M8-A` | 历史UTC日边界候选 | 已由`DC-DEPLOY-20260718-DIRECT-LONG-RUN`在首次正式冷启动范围内取代；多日停服、旧PID/lease退出且当前UTC日无任何collector产物时任意时刻直接启用唯一`Restart=on-failure` unit，same-day不同identity takeover仍不在本事项内 |
 
 固定生命周期合同：当前四个logical producer、六个writer及coordinator-owned bounded event queue/唯一receiver/ingress路径全部mandatory；任一producer/writer terminal，或queue/receiver/ingress路径失效，都会使共同collector coverage失效并结束collector。任何current-day读取/恢复前先取得并持续持有dataset-root级OS-backed独占实例lease；相同identity不能替代旧进程退出证明。coordinator再完成queue/receiver/ingress前置条件，全部writer/producer wrapper spawn、ready并阻塞共同gate，随后才可发送一次不重试的activation mutation；owner原子写`active`并ack后释放网络poll。未来出现optional producer、独立暂停/重启或任一mandatory terminal后collector继续运行时，必须升级嵌套schema并重新批准。
 
@@ -67,7 +67,7 @@
 - 步骤0.2.1：按语义更新`demand/data-collect-demand.md`，删除或改写“空结果/业务静默/stale/断线一律source gap”“每个source总attempt/max elapsed必须耗尽”和“非空外部availability必然令结构完整artifact失败”的旧合同；同步daily manifest允许字段清单，只新增顶层直接嵌套、版本化`collection_day_coverage`。
   - 验证：保留confirmed sequence/local drop/parser/writer等真实gap；明确complete artifact不等于外部coverage 100%；旧manifest“只记录”字段清单包含需求4.2的全部字段，六个既有source counter不承载coverage，且仍只有每日唯一manifest、无receipt/sidecar/transport episode。
 - 步骤0.2.2：同步`demand/data-collect-reliability-repair-demand.md`与`plan/data-collect-reliability-repair-plan.md`中的RTDS D2、CLOB silence budget、Binance silence分类、有限总恢复、旧vendor patch白名单，以及“daily manifest只记录”的字段清单与coverage验证步骤。
-  - 验证：语义检索`60秒无fresh|两次无fresh|第三次.*重启|business_message_timeout|有限attempt|max_elapsed|六项|request_reconnect`不再存在互斥当前合同；reliability demand/plan都显式采用需求4.2同一顶层v3/嵌套v1、restart/cross-day和UTC边界部署语义，并仍禁止receipt/sidecar/逐事件transport artifact；旧changelog保持原文。
+  - 验证：语义检索`60秒无fresh|两次无fresh|第三次.*重启|business_message_timeout|有限attempt|max_elapsed|六项|request_reconnect`不再存在互斥当前合同；reliability demand/plan都显式采用需求4.2同一顶层v3/嵌套v1和restart/cross-day语义，并明确旧UTC边界首次启用候选由独立直接部署事项取代；仍禁止receipt/sidecar/逐事件transport artifact，旧changelog保持原文。
 - 步骤0.2.3：复核并保持本轮已完成的`demand/rebuild-core-demand.md`语义同步：训练采集退化按全部训练外部源的source-local协议恢复，daily manifest只新增单一collector observation-eligibility coverage且保持既有source counters，typed raw空档支持missingness派生；后续批准的aggTrade v6保存逐条invalid及原始/因果接纳coordinate，shared canonicalizer只向模型暴露版本化invalid marker而不暴露raw bytes/parser detail；当前业务不需要精确transport episode artifact且没有默认建设计划。保留BUY-only对侧风险中和语义，并只把用户已批准的离散`next_wake`写成核心目标候选及独立`DecisionScheduleContract`，不得把调度实现扩入collector计划；若实施前core发生漂移，只修复与本事项直接冲突的条款。
   - 验证：core不再把当前manifest摘要或day coverage envelope误称为完整episode历史，也不降低模型学习真实/模拟missingness的目标；明确区分collector availability事实、Observation age/mask和decision scheduler；离散`next_wake`未被冒充champion、active模型或实现授权。若现有dirty diff与本事项重叠且无法手术式合并，立即停止请用户决定。
 - 步骤0.2.4：在新changelog记录每份旧文档的被取代内容锚点，不修改旧历史changelog。
@@ -381,10 +381,6 @@ HTTP snapshot路径使用有界全body读取和完整typed-row预检；408/418/4
 
 ## 本计划之外的生产边界
 
-生产release构建、产物复制、远端部署、服务启停、生产验收、回滚、数据清理和失败日期重采均不属于本需求或本计划。阶段8完成后，如用户希望进入生产，必须另行明确批准对应需求/计划及精确操作范围；不得把本计划的本地完成或push解释为生产授权。
+本计划本身仍不授权生产release构建、产物复制、远端部署、服务启停、生产验收、回滚、数据清理或失败日期重采。用户已另行批准`demand/data-collect-training-collector-direct-deployment-demand.md`及对应计划，专门授权2026-07-18多日停服、旧PID/lease已退出、当前UTC日无任何collector产物这一首次正式冷启动：任意时刻原子安装并直接启用唯一`Restart=on-failure` unit，不使用`Restart=no`、独立gate或历史数据删除。
 
-用户已经通过`M8-A`冻结未来部署兼容策略，但当前代码和本地实施计划不得声称已经具备无竞态生产切换能力：
-
-- 首次启用：未来部署编排必须在UTC边界前停止legacy service，确认旧PID退出且未创建新日manifest；下一UTC日才启动v1 binary，旧日coverage保持legacy unknown。
-- coverage-aware升级或回滚：v1-aware出站路径必须先保存`ended_known`，并通过另行批准、实现和验证的`stop-at-boundary/no-new-day-activation`或等价编排按state-aware规则关闭coverage-bearing顶层manifest，确认未创建新日manifest后，下一UTC日才可启动入站binary。
-- same-day binary/version/identity takeover、identity migration和旧binary接管仍open的v1日均不在本事项内；相同identity、持有dataset独占lease的systemd同日恢复属于需求4.2状态机，不得与部署takeover混淆。“compatible”至少表示能读取并保留closed manifest中的嵌套v1。未来生产计划不得临场绕过这些边界。
+发现任何当前日产物必须原样保留并停止。该独立批准不表示当前代码具备无竞态same-day不同identity切换能力；future coverage-aware升级、回滚、identity migration或旧binary接管open v1日仍需基于当时状态另行批准。相同identity、持有dataset独占lease的systemd同日恢复属于需求4.2状态机，不得与部署takeover混淆。
