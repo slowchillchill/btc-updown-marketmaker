@@ -19,7 +19,7 @@
 - 云 3090GPU 训练服务器：`ssh -p 37267 root@connect.nmb2.seetacloud.com`
 - AWS 爱尔兰 paper-trade 服务器：`ssh ubuntu@54.155.172.85`
 - AWS 爱尔兰 live-trade 服务器：`ssh ubuntu@108.130.74.143`
-- 数据采集服务器：`ssh ubuntu@3.255.156.183`
+- AWS 爱尔兰 数据采集服务器：`ssh ubuntu@3.255.156.183`
 
 AWS 爱尔兰 live-trade 服务器 `108.130.74.143` 是运行目标，不是构建机。
 它只有约 `2 vCPU`、`1.9 GiB RAM`、无 swap，不具备 Rust 编译硬件条件。
@@ -31,7 +31,7 @@ AWS 爱尔兰 live-trade 服务器 `108.130.74.143` 是运行目标，不是构�
 
 模型文件不得通过GitHub、`git push`、`git pull` 或服务器 `git pull` 同步；不得放入 `wallets/`。
 `wallets/` 只保留 gitignored 钱包 secret/env 与钱包公共地址派生配置材料。
-部署模型时必须从本地已验证 artifact 路径直接复制到
+部署模型时必须从本地已验证 artifact 路径直接复制到服务器
 `/home/ubuntu/live-trade` 下的独立运行产物目录，记录来源路径与 sha256 证据。
 
 ## 模型框架竞赛研究来源
@@ -47,14 +47,6 @@ AWS 爱尔兰 live-trade 服务器 `108.130.74.143` 是运行目标，不是构�
 5. 官方开发者社区、Quantitative Finance Stack Exchange、Cross Validated 等社区讨论，只用于发现问题、失败模式和待验证假设，不能覆盖前述权威来源。
 
 普通 README 盈利自述、博客、排行榜、营销材料和 Reddit/Discord/Telegram 发言只能作为低等级线索；未经本项目固定数据、固定合同、固定模拟平台和真实 artifact 复核，不得进入需求事实、框架晋级或盈利结论。
-
-### 平台规则与官方 SDK
-
-- `https://docs.polymarket.com/`：市场、CLOB、订单、WebSocket、费用、奖励、CTF、仓位与结算的第一权威入口。
-- `https://github.com/Polymarket/rs-clob-client-v2`：官方 Polymarket Rust SDK 的能力、类型、示例、release、issue 与 PR；Polymarket 开发继续遵守本文件的 SDK-first 决策门。
-- `https://github.com/Polymarket/ctf-exchange-v2` 与 `https://github.com/Polymarket/`：官方撮合/完整集语义、协议实现和仓库演进的补充证据。
-
-离线竞赛可以为公平性冻结同一规则版本、费用假设和 simulator 版本；paper/live 前仍必须重新核验当前官方规则与 SDK，不得把某轮冻结值当作永久平台常数。
 
 ### 共用数据、训练、竞赛与部署工具
 
@@ -72,14 +64,8 @@ AWS 爱尔兰 live-trade 服务器 `108.130.74.143` 是运行目标，不是构�
 ### 模型、量化与模拟研究入口
 
 - `https://arxiv.org/`、`https://proceedings.mlr.press/`、`https://openreview.net/`、`https://proceedings.neurips.cc/`、`https://papers.ssrn.com/` 和论文 DOI/出版社正文：检索原始论文、方法前提、统计设计与限制。
-- `https://github.com/LeonardoBerti00/TLOB`、`https://github.com/locuslab/TCN`、`https://github.com/state-spaces/mamba`、`https://github.com/patrick-kidger/NeuralCDE`：Transformer/LOB、TCN、SSM 和不规则时间模型的一手实现与 issue。它们只能作为可注册候选或局部组件来源，不能自行替换本项目数据、动作、模拟、账本、reward 或评估合同。
-- `https://github.com/financialcomputingucl/lobframe`：LOB 模型、训练与交易评估的研究参考；当前仓库许可证为 `CC BY-NC-ND 4.0`，默认只读研究，不得未经许可复制、修改或用于商业实现。
-- `https://github.com/microsoft/qlib`：模型集成、实验记录和高频嵌套决策架构参考；不能直接替换 Polymarket 二元市场、BUY-only 动作和本项目事件驱动模拟平台。
-- `https://finrl.readthedocs.io/`、`https://github.com/AI4Finance-Foundation/FinRL`：DRL 训练环境与统一比较流程参考；其通用股票、time-driven/Gym 环境不符合本项目事件触发、订单生命周期和真实账本要求，默认不得直接采用。
 - `https://hftbacktest.readthedocs.io/`、`https://github.com/nkaz001/hftbacktest`：latency、queue 和 replay 假设参考；其 market-data replay 不改变市场且无真实 market impact，不能直接充当本项目 simulator 真相。
-- `https://github.com/abides-sim/abides`、JAX-LOB 原论文及作者仓库 `https://github.com/KangOxford/AlphaTrade`：离散事件、交互式 LOB 与 GPU 仿真的局部参考；NASDAQ/股票撮合或通用 LOB 语义不得覆盖 Polymarket 规则。`AlphaTrade` 当前未声明可识别的仓库许可证，默认只读研究，未完成许可核验前不得复制或执行。
-- `https://hummingbot.org/docs/`、`https://github.com/hummingbot/hummingbot`：connector、订单生命周期和市场做市工程参考；其固定 `on_tick`/周期刷新范式是本项目禁止退化到固定 decision tick 的反例。
-- `https://quant.stackexchange.com/` 与 `https://stats.stackexchange.com/`：queue/fill/backtest、时间序列 split、泄漏与统计检验的社区线索；关键判断必须回到论文、官方文档和本项目实证。
+
 
 ### 外部方案进入竞赛前的最低筛选
 
