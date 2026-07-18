@@ -6,7 +6,7 @@
 >
 > 对应计划：`plan/data-collect-source-availability-lifecycle-repair-plan.md`
 >
-> 状态：`APPROVED_IMPLEMENTATION_PHASE_6_COMPLETE_PHASE_7_AUTHORIZED_CT_B_D6_SCHEMA_R_IMPLEMENTED`。用户已于2026-07-17批准最终需求、计划及SDK-first逐项patch矩阵，并授权按计划执行本地文档/代码修改、测试、独立审查、commit和push；阶段0至阶段6均已完成全量验证和独立终审，阶段6精确commit/push后进入已授权阶段7。同日用户批准阶段5增加同artifact aggTrade v6 invalid-evidence、顺序与handoff evidence子边界。用户于2026-07-18进一步批准以WS因果直录取代aggTrade ID-hole/REST backfill/pending/merge/active continuity控制，并批准、实施`D6-SCHEMA-R`作为阶段6的depth双artifact、双坐标、raw/continuity分层方案。生产构建、部署、远端服务写操作和数据清理仍未获授权。
+> 状态：`APPROVED_IMPLEMENTATION_PHASE_6_COMPLETE_PHASE_7_AUTHORIZED_D7_8_R`。用户已于2026-07-17批准最终需求、计划及SDK-first逐项patch矩阵，并授权按计划执行本地文档/代码修改、测试、独立审查、commit和push；阶段0至阶段6均已完成全量验证和独立终审。2026-07-18用户进一步批准`D7/8-R`，要求阶段7复用前序证据并只补组合运行、CLOB/Gamma 100-cycle与多源压力缺口，阶段8收敛为最终树门禁、需求1--28追溯、条件式vendor复验和同批evidence交叉验收。生产构建、部署、远端服务写操作和数据清理仍未获授权。
 
 ## 2026-07-17：最终批准并开始阶段0
 
@@ -401,3 +401,17 @@
 - 100次WebSocket reconnect测试由同一source owner达到generation 101，每代结构有效update都完成中性释放，FD采样有界；100次真实HTTP resnapshot测试在单一WebSocket generation中得到101个snapshot、100个applied update、100个confirmed-hole update及301个唯一ingress/admission事件，HTTP FD/socket有界。实现没有per-cycle/per-frame spawn，snapshot future和pending buffer都是同一source task内的单一局部owner。
 - `cargo test -p data-collect --locked -- --test-threads=1`通过245项lib及全部integration/doc tests，depth定向31/31通过；`cargo check -p data-collect --all-targets --locked`、`cargo clippy -p data-collect --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check`与`git diff --check`均通过。
 - protocol/schema因果终审为Critical 0、Important 0、Minor 0；异步/资源终审为Critical 0、Important 0，并保留两个不影响任何生产读者、数据、manifest或恢复行为的非阻断机械清理候选；第三路authority/范围终审确认没有新增第三artifact、Binance SDK/engine、第二owner、price-level book、阶段7多源压力、阶段8全量交付或模型/runtime实现。阶段6因此标记完成，精确commit/push后进入已授权阶段7。
+
+## 2026-07-18：用户批准D7/8-R并修订阶段7--8执行边界
+
+- 阶段6完成后，用户要求重新核对较早编写的阶段7和阶段8是否仍符合当前实现。三路`gpt-5.6-sol/ultra`只读审查分别覆盖阶段7累计证据、阶段8最终门禁以及需求/计划/changelog跨文档一致性，结果均为Critical 0；用户随后明确批准推荐`D7/8-R`并同意继续执行。
+- 审查确认当前拓扑必须分成三个不同计数域：四个producer owner为`polymarket`、`polymarket_rtds`、`binance_depth`、`binance_aggtrade`；六条外部I/O路径为Gamma HTTP、CLOB WebSocket、RTDS WebSocket、depth snapshot HTTP、depth WebSocket、aggTrade WebSocket；六个manifest counter继续对应既有artifact/source事实。需求与计划中把四个owner写成“四个transport”的旧表述已经修正。
+- 阶段7改用“前序冻结证据＋新增差异证据”累计口径。阶段1--6已经完成的manifest lifecycle/compatibility、heartbeat与SDK配置、单source恢复及其fault/资源证据不重新实现；阶段7只新增完整collector下健康producer持续推进、代表性多源/全I/O退化、流式业务全静默、有界stop/deadline/day/hour控制矩阵、CLOB production actor与Gamma discovery/outer-supervisor各100-cycle，以及多源资源/terminal交互。测试不得增加public endpoint、shadow coordinator、第二owner、manifest字段或artifact。
+- “业务全静默”不再被错误描述为四个transport简单不发数据：Gamma必须先返回有效稳定市场，depth必须先取得合法初始snapshot并完成CLOB subscription，随后CLOB/RTDS/depth/aggTrade四条WebSocket只维持协议存活而不产生合格业务事件。初始metadata/snapshot可以已经产生typed row，静默后counter停止增长即可。`active|idle|degraded`仍只是运行行为/诊断；nullable last-qualifying从typed raw或source-local事实因果取得，不是manifest字段。本事项的availability摘要只使用单一coverage并复用六个既有counter，其他既有manifest字段及职责保持不变。
+- 阶段7不再把每个退化组合与每种停止方式做笛卡尔积，也不承诺共享queue已满时的跨source公平性。网络等待不得持有shared queue/enqueue lock/writer资源；queue真正饱和时继续采用既有有界背压与terminal timeout。terminal组合每次只注入一个可观测fault family，其他单source完整矩阵直接复用前序阶段证据。
+- 需求原有“每条独立恢复协议至少100-cycle”与旧计划“只缺CLOB”发生不一致。用户批准保留较强需求：阶段7除CLOB production market actor外，还必须补Gamma discovery/outer-supervisor 100-cycle；阶段3 SDK/RTDS、阶段5 aggTrade和阶段6 depth WebSocket/HTTP证据继续复用，不另建第二恢复循环。
+- 阶段8保留最终fmt、Clippy、串行全量`cargo test -p data-collect --locked -- --test-threads=1`、Cargo/lock与生产调用图检查、需求1--28追溯、累计独立终审及精确commit/push。vendor SDK改为条件门：始终核对官方crate hash、四路径diff、根patch映射、SDK版本/features、vendor Cargo/lock及dependency/feature图；全部身份未变才复用阶段3的批准生产feature集合`clob,gamma,rtds,ws`与`--all-features`矩阵，任一变化都重跑受影响矩阵，非批准变化先触发决策门。
+- 阶段8新增最小的需求28交叉验收：同一批aggTrade `trade + invalid_input`及depth `snapshot + update` evidence必须同时进入finalized Parquet与对应handoff frame；handoff经过`to_json_line()`及反序列化后，与Parquet读取结果的全部共同语义字段一致。Parquet专属审计列无需复制，handoff `event_seq`不得冒充collector admission sequence。本验收只补测试，不批准新生产写入路径。
+- 完整collector组合loopback只允许增加最小私有、必要时仅`cfg(test)`存在的runtime source-spec/factory与operator-stop注入seam；四个既有source future必须继续进入同一个真实production coordinator，公开runtime config、CLI、endpoint环境变量和生产source构造不变，禁止shadow coordinator、test API或绕过owner的合成事件注入。
+- 旧计划要求“changelog记录阶段8自身commit SHA”存在Git自引用矛盾，现改为changelog记录阶段0--7 commit映射、最终测试/审查/scope与阶段8 commit subject；阶段8 push后由交付报告记录并验证`HEAD == upstream == remote`。审查修复只重跑受影响的阶段7场景和全部阶段8最终门禁，不因纯文档修改重复全部100-cycle。
+- 需求第2.3节已改名为“修复前历史缺陷基线（截至2026-07-16）”，避免把阶段0--6已经修复的行为继续描述成当前事实。历史changelog中的旧方案与当时证据继续原样保留，用于记录决策演进，不作为当前authority。

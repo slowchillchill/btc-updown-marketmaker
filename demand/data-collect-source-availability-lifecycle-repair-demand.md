@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-source-availability-lifecycle-repair-changelog.md`
 >
-> 状态：`APPROVED_IMPLEMENTATION_PHASE_6_COMPLETE_PHASE_7_AUTHORIZED_CT_B_D6_SCHEMA_R_IMPLEMENTED`。用户已于2026-07-17批准本文、对应计划及第4.7节SDK-first逐项patch矩阵，并授权按计划分阶段实施、验证、独立审查、commit和push；同日又批准阶段5增加第4.5节同artifact `binance_aggtrade_v6` invalid-evidence、原始接收顺序与collector接纳顺序合同，取代“普通外部aggTrade payload/schema负例一律terminal”及“不修改aggTrade Parquet布局”的旧条款。用户于2026-07-18进一步批准以真实WebSocket因果观测取代aggTrade ID-hole恢复：合法WS trade立即保存/handoff，删除实时REST backfill、pending、merge、range retry和active continuity epoch，ID数值前跳保持中性且不得控制网络、告警或进程；历史v5 REST/merged与旧manifest continuity只读兼容。同日用户批准并已实施`D6-SCHEMA-R`：继续使用两个既有Binance depth artifact，把snapshot v2升级为v3、update v3升级为v4，以共同source epoch、connection generation、depth ingress与collector admission坐标区分原始观察顺序和continuity可用顺序；WS reader与每代唯一snapshot future并行，snapshot等待期间只使用有界buffer，raw事实不得因stale、confirmed hole或snapshot不可用而静默丢失。官方pre-parse完整文本帧trace差异仍采用用户选择的B，恢复官方0.6.0原hunk并显式放宽启用SDK `tracing` feature时的失败trace脱敏边界。阶段3实施前发现pinned SDK的单次TCP/TLS/WebSocket建连与握手没有期限；用户随后批准`CT-B`，允许把vendor路径集合扩至四个文件、增加默认`None`的SDK `connect_timeout`配置，并由本项目为RTDS显式设为20秒。该期限只约束单次建连/握手，绝不是连接寿命、业务静默期限或周期性重连；成功连接仍在健康PING/PONG下无限等待业务数据，总重试次数仍无限。阶段0至阶段6均已实现、完成全量验证并分别通过独立终审；阶段6精确commit/push后进入已授权阶段7。此前批准的`M1-A / M2-A0 / M4-A-R / M5-N/A / M6-A+ / M7-A-R / M8-A`继续有效；`M3-A-R`使用单一`reactivated_within_day`布尔语义，原子发布采用用户批准的R三态语义。本授权不包括模型调度或shared canonicalizer实现、生产release构建、部署、远端服务操作或数据清理；这些仍须独立批准。
+> 状态：`APPROVED_IMPLEMENTATION_PHASE_6_COMPLETE_PHASE_7_AUTHORIZED_D7_8_R`。用户已于2026-07-17批准本文、对应计划及第4.7节SDK-first逐项patch矩阵，并授权按计划分阶段实施、验证、独立审查、commit和push；阶段0至阶段6已经实现、完成全量验证并分别通过独立终审。2026-07-18用户进一步批准`D7/8-R`：阶段7必须按“前序冻结证据＋组合运行差异证据”收缩，不重建阶段1--6已经完成的manifest、配置或单source恢复路径；四个逻辑producer owner、六条外部I/O路径与六个artifact/source counter必须明确区分；阶段7补CLOB production actor与Gamma discovery/outer-supervisor各100-cycle以及多源/全源组合缺口。阶段8改为最终树门禁、需求1--28追溯和条件式vendor复验，并补同批aggTrade/depth evidence的Parquet与handoff交叉验收。此前批准的`CT-B`、`D6-SCHEMA-R`、`M1-A / M2-A0 / M4-A-R / M5-N/A / M6-A+ / M7-A-R / M8-A`继续有效；`M3-A-R`使用单一`reactivated_within_day`布尔语义，原子发布采用用户批准的R三态语义。本授权不包括模型调度或shared canonicalizer实现、生产release构建、部署、远端服务操作或数据清理；这些仍须独立批准。
 
 ## 一、目标
 
@@ -14,13 +14,13 @@
 
 修复后的 `data-collect-training-collector` 必须满足：
 
-1. Polymarket market/metadata、RTDS、Binance depth/snapshot与Binance aggTrade中任意一个、多个或全部外部源transport不可达或业务流静默时，collector都在同一PID内持续运行，健康源继续采集和写盘。全部transport不可达时进程保持有直接证据的degraded并逐源恢复；transport按协议存活但全部业务流静默时进程保持active/idle，保存active coverage与nullable last-qualifying；当前transport事实只存在于source-local运行态及有界operator日志，不进入daily manifest，也不得虚构degraded或silence状态转换。
+1. Polymarket market/metadata、RTDS、Binance depth/snapshot与Binance aggTrade中任意一个、多个或全部外部I/O路径不可达或业务流静默时，collector都在同一PID内持续运行，健康producer继续采集和写盘。六条外部I/O路径全部不可达时进程保持有直接证据的degraded并逐路恢复；Gamma已返回有效稳定市场、depth已取得合法初始snapshot且四条WebSocket按协议存活但均无合格业务事件时，进程保持active/idle。本事项的availability摘要只使用单一collection coverage并复用六个既有artifact/source counter，其他既有manifest字段及职责保持不变；nullable last-qualifying只能从typed raw或source-local运行事实因果取得，不是新增manifest字段。当前transport事实只存在于source-local运行态及有界operator日志，不进入daily manifest，也不得虚构degraded或silence状态转换。
 2. 业务消息静默、持续 stale、暂时无候选市场、DNS/TCP/TLS/WebSocket/HTTP 不可达、heartbeat timeout、rate limit 和服务端关闭是外部availability与下游missingness因果基础，不得仅因持续时间或恢复次数升级为confirmed gap、异常告警、run failure、source退出、collector退出或systemd新PID；missingness mask只由后续`ObservationContract`在求值时派生。
 3. 业务静默不控制网络：不得仅因没有业务消息而重复 subscribe/unsubscribe、主动切换 connection generation 或主动断开仍然存活的 socket。
 4. 真实 transport 故障在同一进程的 source-local transport owner 内持续恢复；单次等待、退避、并发和资源必须有界，但 availability episode 的总时长与总尝试次数不得成为进程存活预算。
 5. 各源共享同一结果合同和错误分类，但保留各自协议要求；不得把 RTDS 的 subscription/reconnect 实现机械复制到 CLOB 或 Binance。
 6. SDK 或本地 queue 的确定性丢失、具有官方连续性合同的confirmed sequence hole（例如Binance depth）、writer/manifest/atomic publish、路径、磁盘、资源硬边界、parser实现故障和内部不变量故障不属于 availability 豁免，继续按既有受影响范围 quarantine 或 fail closed。aggTrade ID数值前跳不属于confirmed hole；第4.5节已批准且能够完整形成并接纳v6 evidence的普通外部aggTrade应用层无效输入是模型必须能够重放的source evidence，不再单凭payload/schema无效令source或collector退出。
-7. collector必须保留typed raw接收时间、真实数据空档、last qualifying time与中性有界运行诊断，使后续训练能够从真实/模拟missingness学习暂停新增交易、取消未成交BUY订单，以及通过BUY对侧outcome中和已有方向风险；daily manifest只包含既有source counters与第4.2节单一coverage，不得被伪称为transport episode event tape，collector和data-pipeline也不得替模型生成这些策略动作。
+7. collector必须保留typed raw接收时间、真实数据空档、last qualifying time与中性有界运行诊断，使后续训练能够从真实/模拟missingness学习暂停新增交易、取消未成交BUY订单，以及通过BUY对侧outcome中和已有方向风险；本事项的availability持久化只新增第4.2节单一coverage并复用既有source counters，其他manifest字段保持既有职责，manifest整体不得被伪称为transport episode event tape，collector和data-pipeline也不得替模型生成这些策略动作。
 
 “同一进程内持续恢复”不等于关闭旧进程再由 systemd 启动新进程。进程重启只允许来自真实进程级完整性故障、operator 明确操作或后续单独批准的部署流程，不能作为单个外部源的正常恢复机制。
 
@@ -32,12 +32,12 @@
 
 | 逻辑 source task | 产生的事实/产物 | 本事项边界 |
 |---|---|---|
-| Polymarket market source | CLOB market 事件与 Gamma market metadata | 包含 CLOB 动态 asset subscription、业务静默 watchdog、Gamma discovery |
+| Polymarket market source | CLOB market 事件与 Gamma market metadata | 包含CLOB动态desired-state actor与Gamma discovery；业务静默不控制subscription或连接 |
 | RTDS source | `crypto_prices_chainlink` / `btc/usd` | 包含 desired subscription、SDK transport 与 fresh/stale 消费 |
 | Binance depth source | depth WebSocket 与 REST snapshot | 包含 transport liveness、snapshot stitch 与 update-id continuity |
 | Binance aggTrade source | aggTrade WebSocket | 包含业务静默、transport recovery、原始ID观测与invalid evidence；不做REST补齐或aggregate-trade-id continuity控制 |
 
-manifest 中可以表现为六类 source artifact，但它们不是六个独立生命周期 owner。训练 collector 当前没有 Polymarket CLOB user-channel source；本文不得虚构或实现该数据源。
+manifest 中可以表现为六类 source artifact，但它们不是六个独立生命周期 owner。四个owner实际包含六条外部I/O路径：Polymarket owner包含Gamma HTTP与CLOB WebSocket，RTDS owner包含RTDS WebSocket，Binance depth owner包含snapshot HTTP与depth WebSocket，Binance aggTrade owner包含aggTrade WebSocket。训练 collector 当前没有 Polymarket CLOB user-channel source；本文不得虚构或实现该数据源。
 
 ### 2.2 官方合同边界
 
@@ -49,12 +49,14 @@ manifest 中可以表现为六类 source artifact，但它们不是六个独立�
 
 因此，业务 freshness、subscription state 与 transport liveness 是三种不同状态，不能用一个业务消息 deadline 同时控制。
 
-### 2.3 当前代码中的已确认缺陷
+### 2.3 修复前历史缺陷基线（截至2026-07-16）
 
-| 数据源 | 当前行为 | 已确认问题 |
+下表记录本事项开始前的已核实行为，用于解释修复来源；阶段0--6完成后的当前实现状态以本事项changelog及对应阶段commit为准。
+
+| 数据源 | 修复前行为 | 已确认问题 |
 |---|---|---|
 | RTDS | 60 秒无 fresh 后调用 generation-aware `request_reconnect()`；观察两个新 generation、3 秒窗口/12 秒总期限后退出 | 业务静默错误控制 transport，并最终结束 RTDS source 与 collector |
-| CLOB market | 单 asset 首条 30 秒、后续 60 秒静默后 unsubscribe/subscribe；只允许两次，第三次返回错误 | 与 RTDS 同类的有限业务静默预算；现有测试还明确要求第三次强制进程重启 |
+| CLOB market | 单 asset 首条 30 秒、后续 60 秒静默后 unsubscribe/subscribe；只允许两次，第三次返回错误 | 与 RTDS 同类的有限业务静默预算；修复前测试还明确要求第三次强制进程重启 |
 | Binance aggTrade | 60 秒无 aggTrade 即断线重连、增加 lag 并写 gap；收到 PING 不重置业务 deadline | 通常不会最终停机，但把正常无成交误判为 lag/gap 并制造无必要连接 churn |
 | Binance depth | 约 30 秒完全无入站 frame 后重连并重新 snapshot；update-id hole 后重建订单簿 | 恢复机制基本正确，但 transport availability 被写成 gap；必须与“有 PING、无业务更新”区分 |
 | Gamma metadata | 网络/发现失败通常经外层 supervisor 继续恢复；暂时无候选可能形成错误 gap 语义 | 持续运行基本具备，但 availability/coverage 分类需要统一 |
@@ -241,7 +243,7 @@ manifest 中可以表现为六类 source artifact，但它们不是六个独立�
 1. 已提交的分源heartbeat修复作为本事项实现基线和回归合同保留：CLOB按官方client PING cadence使用`10s` interval并保持项目`20s` timeout，RTDS按官方client PING cadence使用`5s` interval并保持pinned SDK默认`15s` timeout；`20s/15s`不得冒充官方共同保证，两者也不得再共用错误数值或在本计划中重复实现同一split。
 2. 各 source 的单次 connect/HTTP/read/backoff timeout保持有界，最大 backoff有上限并加入既有 jitter；外层恢复无总次数/总 elapsed退出预算且禁止 tight loop。
 3. 每个 Polymarket source最多一个 active connection generation、一个 actor、一个 receiver和一个 desired-state owner；每个 Binance source最多一个 active WebSocket，只有depth可以持有官方stitch所需的单一active snapshot future及单一有界generation-local buffer，aggTrade不得创建backfill任务。
-4. 至少100个恢复周期后task、FD、socket、queue、watch、actor、receiver、subscription refcount、depth buffer和pending snapshot不得单调增长；允许复用身份与实现未变化的前序阶段已完成证据，阶段5已完成的aggTrade单source 100-cycle不得在阶段7另建第二套恢复路径。aggTrade路径还必须证明不存在REST/backfill/pending任务。
+4. 每条具有独立恢复循环的协议路径累计至少100个恢复周期后，task、FD、socket、queue、watch、actor、receiver、subscription refcount、depth buffer和pending snapshot不得单调增长。允许复用身份与实现未变化的阶段3 SDK/RTDS、阶段5 aggTrade及阶段6 depth证据；阶段7只补尚未覆盖的CLOB production market actor与Gamma discovery/outer-supervisor各100-cycle，并且不得为任何路径另建第二恢复循环。aggTrade路径还必须证明不存在REST/backfill/pending任务。
 5. deadline、SIGTERM/operator stop和既有 day/segment finalize必须在永久离线/静默时按既有期限完成 drain/finalize。
 
 ## 五、规范衔接
@@ -266,10 +268,10 @@ manifest 中可以表现为六类 source artifact，但它们不是六个独立�
 
 ### 6.1 共同生命周期
 
-1. **单源静默：** 分别让 RTDS、CLOB、aggTrade 和 depth业务流长期无事件但 transport按协议存活；跨越多个旧 freshness/budget周期后，source与collector仍运行，不产生静默驱动 subscription/reconnect、gap、lag或告警。
-2. **单源不可达：** 分别让每个外部 source连续 connect/HTTP失败超过旧 attempts/max elapsed预算；同一 PID保持运行，其他健康源继续写盘；恢复后该 source自行恢复。
+1. **单源静默：** 分别让RTDS、CLOB、aggTrade和depth业务流长期无事件但WebSocket按协议存活，并让Gamma持续返回合法空候选；跨越多个旧freshness/budget周期后，source与collector仍运行，不产生静默驱动subscription/reconnect、gap、lag或告警。
+2. **单路不可达：** 分别让Gamma HTTP、CLOB WebSocket、RTDS WebSocket、depth snapshot HTTP、depth WebSocket和aggTrade WebSocket连续失败超过旧attempts/max elapsed预算；同一PID保持运行，其他健康producer继续写盘；恢复后对应source-local owner自行恢复。
 3. **多源退化：** 同时断开至少两个不同协议源，未断开的 source继续采集和 finalize；collector不出现 `source_task_ended_unexpectedly`。
-4. **全部源不可达或业务静默：** 四个逻辑source task全部transport不可达时，collector保持同一PID和有直接证据的degraded、逐源恢复；四个transport按协议存活但全部业务流无数据时，collector保持同一PID active/idle，只保存active coverage与nullable last-qualifying，transport事实仅在source-local运行态/有界operator日志中可见且不写daily manifest，也不创建虚假degraded/silence事件。两种场景下operator stop都可完成。
+4. **全部外部I/O不可达或流式业务静默：** 六条外部I/O路径全部不可达时，collector保持同一PID和有直接证据的degraded，并由四个owner逐路恢复；业务静默场景必须先让Gamma返回有效稳定市场、depth取得合法初始snapshot并完成CLOB subscription，再让CLOB、RTDS、depth和aggTrade四条WebSocket保持协议存活但不产生合格业务事件。后一场景允许初始metadata/snapshot已经产生typed row，只要求进入静默后对应counter不再伪增长；collector保持同一PID active/idle，本事项的availability摘要只使用active coverage与真实六counter，其他既有manifest字段及职责保持不变，nullable last-qualifying从typed raw或source-local事实取得而不新增manifest字段。transport事实仅在source-local运行态/有界operator日志中可见，不创建虚假degraded/silence事件。两种场景下operator stop都可完成。
 5. **coverage与缺失保留：** current-day恢复前取得并持续持有dataset独占实例lease；coordinator再同步建立bounded event queue、唯一receiver并确认ingress循环可进入，六writer与四producer wrapper全部spawn、初始化ready并阻塞在共同gate；ManifestOwner只执行一次不重试的atomic activation，ack后才释放网络poll。零行业务源仍有共同`active` coverage，未达到共同起点保持`not_started`。无PendingExit的正常rollover必须覆盖新日frame与boundary timer竞态、逐event day/generation permit、旧日drain、barrier/finalize ack、旧日顶层关闭、新日active commit和owner ack；跨界PendingExit按两个持久化切点与一个release切点验收：旧日final-close前无法由fence排除的unclean令旧日unknown；旧日已经closed而新日activation commit未成立时不重写旧日，新日只能missing/not-started且布尔值不变；activation commit后状态与`reactivated_within_day`已经归属新日，即使ack丢失也不得回滚，ack只控制是否release。任何pending exit都不得伪造新日active或提前resume。可靠close候选之间first-close-wins，但最终fence前发现的非协调unclean必须覆盖known candidate；协调退出必须有精确task级ack/permit证据。四种current-day nested状态到active的转换必须证明首次activation为`false`、任一同日后续activation为`true`且保持单调。`reactivated_within_day=true`只隔离最后start前不能证明连续coverage的replay区间，不得回写历史Observation；unclean共同尾界只能是last start，另一健康源的更晚行不得延长。typed raw接收事实不得被抹除，也不得生成collector silence-start timer或伪行情。
 6. **availability与真实terminal：** 已确认发生在外部connect/read/write/HTTP/WebSocket边界的故障必须在对应source-local owner内持续恢复，不能仅因缺少专门诊断reason、持续时间、尝试次数、既有诊断计数饱和或日志失败结束source/collector；parser/schema、SDK lag、queue drop、writer/manifest和内部不变量故障注入不得被恢复循环吞掉。producer/writer task的可靠normal/terminal return必须按共同gate合同冻结known candidate；coordinator ingress路径提前退出、唯一receiver ownership丢失或queue不变量失败也必须结束coverage，并按能否可靠完成共同fence决定known end或unknown tail。非协调panic/abort/join failure为unknown tail，顶层仍发现terminal task；stop已发但cancel生效前panic、无/错abort permit、ack丢失与具体handle `is_cancelled()`必须证明只有可因果归属本次close的协调退出获得豁免。不得把同步构造的queue或ingress路径冒充独立spawn task。
 
@@ -303,9 +305,9 @@ manifest 中可以表现为六类 source artifact，但它们不是六个独立�
 
 23. **manifest coverage、同artifact v6与训练基础：** 每日唯一顶层v3 manifest只新增直接嵌套的`data_collect_collection_day_coverage_v1`，不新增transport scope/reason/episode、通用extensions容器或逐source coverage复制。六个既有source counter继续保存artifact首末接收事实及既有操作计数；历史`backfill_rows`兼容计数保留，但新WS-only生产必须始终为零。`binance_aggtrade_v6`必须仍位于既有source目录和同一小时artifact/writer中；实际Parquet round-trip证明`trade|invalid_input`判别、nullable互斥、exact payload evidence、source epoch、connection generation、WS ingress/admission coordinate及同毫秒排序，目录中不存在invalid sidecar或第七artifact。兼容矩阵必须逐项验证：真实v5文件仍按legacy trade读取，包括历史REST-only/merged行；v6 invalid恢复时不被当作null ID损坏且不参与WebSocket结构去重，v5不伪造sequence或generation；既有REST nullable列只作读取兼容，新生产行全部为null；旧manifest已有aggTrade continuity字段时原样保留，新binary不创建、更新、推导或用其控制运行；prior legacy manifest缺对象始终可读且不插入coverage；相同新identity的current manifest缺对象按新writer损坏失败；不同identity current legacy继续被既有gate拒绝；unknown nested version/field/type/time/state失败；所有ManifestOwner mutation保留对象。dataset独占lease、四种current-day activation、顶层open/closed、写成功但ack丢失和时钟倒退必须逐项测试；首次activation为`reactivated_within_day=false`，任一同日后续activation原子提交后为`true`且不被unclean/known-end/reconcile转换清除。prior active/unclean-end-unknown/not-started/ended-known/legacy missing分别验证nested state、顶层state、closure reason与gap：active转unclean但不改变布尔值，既有unclean幂等确保unclean gap/closure，其他三类中性关闭。状态/时间不变量、ready/activation ack、可靠known-close候选first-close-wins、unclean-dominates、task级协调abort证明、PendingExit跨日归属、正常rollover rendezvous及replay eligibility均按第4.2节通过测试。typed raw、last qualifying和known coverage让后续模块因果派生missingness；不得生成额外receipt/sidecar，不进入`source_gaps`，也不因外部coverage不足自动把结构完整的训练artifact判失败。M8只作为未来部署前置合同；当前实现验收不得冒充已经具备stop-at-boundary或生产切换能力。
 24. **无collector静默timer：** 本事项不在data-collect中生成business-silence timer、离散silence-start事件、周期性合成market row、周期subscription refresh、`DecisionWakeEvent`或fixed model decision tick；模型可见age/mask计算、确定性调度基线和离散`next_wake`目标候选均不由本事项实现。
-25. **资源与异步接纳有界：** 每个协议累计至少100次恢复后task、FD、socket、receiver、actor、queue、watch、subscription refcount、depth buffer和snapshot future无单调增长；身份与实现未变化的阶段3 SDK/RTDS、阶段5 aggTrade及阶段6 depth证据可以复用，阶段7只补尚未覆盖的CLOB生产actor和多源系统压力，不重建aggTrade/depth恢复路径。aggTrade不得存在REST、backfill、pending或range-retry任务。aggTrade writer/flush被测试阻塞但现有queue仍有容量时，连续`trade/invalid/invalid/trade`必须全部转移ownership且source不等待磁盘ACK；writer恢复后全部落盘。depth snapshot等待、成功释放和失败中性释放均不得使用无界buffer或per-frame task。短时queue满允许有界背压且不丢行，queue timeout/closed及writer failure仍terminal；invalid burst不逐条spawn、不越过global row/byte或512KiB capture cap。oversize只写真实有界证据；queue接纳后durable publish前模拟崩溃必须落入unknown tail，不能宣称缺失row已落盘。
+25. **资源与异步接纳有界：** 每条具有独立恢复循环的协议路径累计至少100次恢复后task、FD、socket、receiver、actor、queue、watch、subscription refcount、depth buffer和snapshot future无单调增长；身份与实现未变化的阶段3 SDK/RTDS、阶段5 aggTrade及阶段6 depth证据可以复用，阶段7只补尚未覆盖的CLOB production market actor、Gamma discovery/outer-supervisor各100-cycle及多源系统压力，不重建任何第二恢复路径。aggTrade不得存在REST、backfill、pending或range-retry任务。aggTrade writer/flush被测试阻塞但现有queue仍有容量时，连续`trade/invalid/invalid/trade`必须全部转移ownership且source不等待磁盘ACK；writer恢复后全部落盘。depth snapshot等待、成功释放和失败中性释放均不得使用无界buffer或per-frame task。短时queue满允许有界背压且不丢行，queue timeout/closed及writer failure仍terminal；invalid burst不逐条spawn、不越过global row/byte或512KiB capture cap。oversize只写真实有界证据；queue接纳后durable publish前模拟崩溃必须落入unknown tail，不能宣称缺失row已落盘。
 26. **配置回归：** CLOB为 `10s/20s`，RTDS为 `5s/15s`；RTDS `connect_timeout=20s`、transport总尝试无限，各源单次backoff有界。SDK默认`connect_timeout=None`保持上游兼容；CLOB在阶段4显式启用同一20秒单次建连/握手期限，不得提前把它解释为heartbeat或业务静默期限。
-27. **全量门禁：** 定向loopback/contract测试、`cargo test -p data-collect --locked`、`cargo clippy -p data-collect --locked --all-targets -- -D warnings`、`cargo fmt --all -- --check` 与 `git diff --check`全部通过。
+27. **全量门禁：** 定向loopback/contract测试、`cargo test -p data-collect --locked -- --test-threads=1`、`cargo clippy -p data-collect --locked --all-targets -- -D warnings`、`cargo fmt --all -- --check`与`git diff --check`全部通过。默认全量集合中的同一loopback不得先逐项重复执行；只有非默认关键验收、最终修复直接影响的测试或需要单独保存资源采样的场景才额外定向运行。
 28. **范围、依赖与handoff parity门禁：** 没有新增Polymarket raw WebSocket/shadow SDK或任何source的第二socket owner；Binance只保留现有唯一direct WebSocket owner与`reqwest + tokio-tungstenite + Tokio + Serde`依赖底座，Cargo/lock和生产调用图没有新增Binance SDK、Barter、Nautilus或其他market-data engine。使用同一批可关联aggTrade evidence验证finalized typed raw与版本化handoff编码能承载相同record kind、source evidence identity、causal admission与total-order输入；depth snapshot v3/update v4同样能承载一致的source identity、raw ingress、collector admission及continuity-ready分层语义，但现有heartbeat-only handoff `event_seq`不得被冒充为已完成online source parity。没有CLOB user源、第三depth artifact、collector price-level book、shared canonicalizer/data-pipeline/model策略或真实paper/live source runtime实现、部署或数据清理；vendor源码路径集合精确为第4.7节用户最终批准的四个文件，实质差异与逐项矩阵一致。
 
 ## 七、完成定义
