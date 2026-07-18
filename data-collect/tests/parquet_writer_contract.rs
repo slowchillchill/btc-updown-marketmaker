@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs::File;
+use std::path::Path;
 use std::sync::Arc;
 
 use arrow_array::{
@@ -11,6 +12,9 @@ use data_collect::RawEvent;
 use data_collect::binance_aggtrade::{
     BINANCE_AGGTRADE_INVALID_INPUT_MAX_BYTES, BinanceAggTradeIngressCoordinate,
     BinanceAggTradeOutput, BinanceWsAggTrade,
+};
+use data_collect::handoff::{
+    DepthHandoffRecordKind, DepthHandoffSourceEvidence, HandoffFrame, HandoffSourceEvidence,
 };
 use data_collect::polymarket_market_metadata_layout::{
     PolymarketMarketMetadataContext, PolymarketMarketMetadataRow,
@@ -106,6 +110,72 @@ fn depth_update_row(
         source_endpoint: "wss://stream.binance.com:9443/ws/btcusdt@depth".to_owned(),
         schema_version: BINANCE_DEPTH_UPDATE_SCHEMA_VERSION.to_owned(),
     }
+}
+
+fn read_single_finalized_batch(path: &Path) -> RecordBatch {
+    let mut reader = ParquetRecordBatchReaderBuilder::try_new(File::open(path).unwrap())
+        .unwrap()
+        .build()
+        .unwrap();
+    let batch = reader.next().unwrap().unwrap();
+    assert!(
+        reader.next().is_none(),
+        "expected exactly one finalized batch"
+    );
+    batch
+}
+
+fn handoff_json_round_trip(frame: &HandoffFrame) -> HandoffFrame {
+    serde_json::from_str(&frame.to_json_line().unwrap()).unwrap()
+}
+
+fn parquet_value(batch: &RecordBatch, row_index: usize, column_name: &str) -> serde_json::Value {
+    let column = batch.column(batch.schema().index_of(column_name).unwrap());
+    if column.is_null(row_index) {
+        return serde_json::Value::Null;
+    }
+    match column.data_type() {
+        DataType::Utf8 => serde_json::json!(
+            column
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(row_index)
+        ),
+        DataType::UInt64 => serde_json::json!(
+            column
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .value(row_index)
+        ),
+        DataType::Timestamp(TimeUnit::Millisecond, _) => serde_json::json!(
+            column
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap()
+                .value(row_index)
+        ),
+        data_type => panic!("unsupported projection type for {column_name}: {data_type:?}"),
+    }
+}
+
+fn parquet_projection(
+    batch: &RecordBatch,
+    row_index: usize,
+    column_names: &[&str],
+) -> serde_json::Value {
+    serde_json::Value::Object(
+        column_names
+            .iter()
+            .map(|column_name| {
+                (
+                    (*column_name).to_owned(),
+                    parquet_value(batch, row_index, column_name),
+                )
+            })
+            .collect(),
+    )
 }
 
 #[test]
@@ -1410,5 +1480,254 @@ fn typed_writer_binance_aggtrade_rejects_legacy_rest_compatibility_values() {
     assert!(
         error.to_string().contains("websocket_has_rest_only_fields"),
         "{error}"
+    );
+}
+
+#[test]
+fn parquet_handoff_aggtrade_same_evidence_round_trips() {
+    let tmp = tempdir().unwrap();
+    let rows = [
+        websocket_aggtrade_row(123, 1_766_789_470_100, 10, 1),
+        invalid_websocket_aggtrade_row(b"{broken", "invalid_json", 1_766_789_470_101, 11, 2),
+    ];
+    let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
+        tmp.path(),
+        "binance_aggtrade-parquet-handoff",
+        BINANCE_AGGTRADE_SCHEMA_VERSION,
+        "binance_aggtrade",
+    )
+    .unwrap();
+    writer.write_binance_aggtrade_rows(&rows).unwrap();
+    let published = writer.finalize().unwrap();
+    let batch = read_single_finalized_batch(&published.final_path);
+    assert_eq!(batch.num_rows(), rows.len());
+
+    let shared_columns = [
+        "record_kind",
+        "source_sequence_epoch_id",
+        "connection_generation",
+        "websocket_ingress_sequence",
+        "collector_admission_sequence",
+        "collector_admission_time_utc_ms",
+        "timestamp_received",
+        "collector_host_id",
+        "collector_region",
+        "source_native_payload_json",
+        "invalid_reason_code",
+    ];
+    for (row_index, row) in rows.iter().enumerate() {
+        let source_timestamp = row.trade_time.map(|timestamp| timestamp.to_string());
+        let frame = HandoffFrame::source_evidence(
+            10_000 + u64::try_from(row_index).unwrap(),
+            "binance_aggtrade",
+            if row.record_kind == "trade" {
+                "aggTrade"
+            } else {
+                "invalid_input"
+            },
+            "BTCUSDT",
+            source_timestamp.as_deref(),
+            row.timestamp_received,
+            row.collector_admission_time_utc_ms + 1,
+            &row.collector_host_id,
+            &row.collector_region,
+            Some(&row.source_native_payload_json),
+            HandoffSourceEvidence::try_from(row).unwrap(),
+        )
+        .unwrap();
+        let frame = handoff_json_round_trip(&frame);
+        let evidence = frame.source_evidence.as_ref().unwrap();
+
+        assert_eq!(
+            parquet_projection(&batch, row_index, &shared_columns),
+            serde_json::json!({
+                "record_kind": evidence.record_kind.as_str(),
+                "source_sequence_epoch_id": evidence.source_sequence_epoch_id.as_str(),
+                "connection_generation": evidence.connection_generation,
+                "websocket_ingress_sequence": evidence.websocket_ingress_sequence,
+                "collector_admission_sequence": evidence.collector_admission_sequence,
+                "collector_admission_time_utc_ms": evidence.collector_admission_time_utc_ms,
+                "timestamp_received": frame.collector_recv_time_utc_ms,
+                "collector_host_id": frame.collector_host_id.as_str(),
+                "collector_region": frame.collector_region.as_str(),
+                "source_native_payload_json": frame.raw_json.as_deref(),
+                "invalid_reason_code": evidence.invalid_reason_code.as_deref(),
+            })
+        );
+        assert_ne!(frame.event_seq, evidence.collector_admission_sequence);
+    }
+}
+
+#[test]
+fn parquet_handoff_depth_same_evidence_round_trips() {
+    let snapshot_tmp = tempdir().unwrap();
+    let snapshot_row = depth_snapshot_row(2, 1);
+    let mut snapshot_writer = TypedParquetSegmentWriter::create_for_typed_source(
+        snapshot_tmp.path(),
+        "binance_depth_snapshot-parquet-handoff",
+        BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
+        "binance_depth_snapshot",
+    )
+    .unwrap();
+    snapshot_writer
+        .write_binance_depth_snapshot_rows(std::slice::from_ref(&snapshot_row))
+        .unwrap();
+    let snapshot_published = snapshot_writer.finalize().unwrap();
+
+    let update_tmp = tempdir().unwrap();
+    let update_row = depth_update_row(1, 2);
+    let mut update_writer = TypedParquetSegmentWriter::create_for_typed_source(
+        update_tmp.path(),
+        "binance_depth_update-parquet-handoff",
+        BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
+        "binance_depth_update",
+    )
+    .unwrap();
+    update_writer
+        .write_binance_depth_update_rows(std::slice::from_ref(&update_row))
+        .unwrap();
+    let update_published = update_writer.finalize().unwrap();
+
+    let finalized_source_kind = |path: &Path| {
+        let reader = SerializedFileReader::new(File::open(path).unwrap()).unwrap();
+        reader
+            .metadata()
+            .file_metadata()
+            .key_value_metadata()
+            .unwrap()
+            .iter()
+            .find(|item| item.key == "parquet_raw_source_kind")
+            .and_then(|item| item.value.clone())
+            .unwrap()
+    };
+
+    let snapshot_batch = read_single_finalized_batch(&snapshot_published.final_path);
+    let snapshot_raw_json = serde_json::json!({
+        "lastUpdateId": snapshot_row.last_update_id,
+        "bids": serde_json::from_str::<serde_json::Value>(&snapshot_row.bids).unwrap(),
+        "asks": serde_json::from_str::<serde_json::Value>(&snapshot_row.asks).unwrap(),
+    })
+    .to_string();
+    let snapshot_frame = handoff_json_round_trip(
+        &HandoffFrame::depth_source_evidence(
+            20_000,
+            "binance_depth_snapshot",
+            "depth_snapshot",
+            &snapshot_row.symbol,
+            None,
+            snapshot_row.timestamp_received,
+            snapshot_row.collector_admission_time_utc_ms.unwrap() + 1,
+            &snapshot_row.collector_host_id,
+            &snapshot_row.collector_region,
+            Some(&snapshot_raw_json),
+            DepthHandoffSourceEvidence::try_from(&snapshot_row).unwrap(),
+        )
+        .unwrap(),
+    );
+    let snapshot_evidence = snapshot_frame.depth_source_evidence.as_ref().unwrap();
+    assert_eq!(
+        finalized_source_kind(&snapshot_published.final_path),
+        snapshot_frame.source_kind
+    );
+    assert_eq!(
+        snapshot_evidence.record_kind,
+        DepthHandoffRecordKind::Snapshot
+    );
+    assert_eq!(
+        parquet_projection(
+            &snapshot_batch,
+            0,
+            &[
+                "source_sequence_epoch_id",
+                "connection_generation",
+                "depth_ingress_sequence",
+                "collector_admission_sequence",
+                "collector_admission_time_utc_ms",
+                "timestamp_received",
+            ],
+        ),
+        serde_json::json!({
+            "source_sequence_epoch_id": snapshot_evidence.source_sequence_epoch_id.as_str(),
+            "connection_generation": snapshot_evidence.connection_generation,
+            "depth_ingress_sequence": snapshot_evidence.depth_ingress_sequence,
+            "collector_admission_sequence": snapshot_evidence.collector_admission_sequence,
+            "collector_admission_time_utc_ms":
+                snapshot_evidence.collector_admission_time_utc_ms,
+            "timestamp_received": snapshot_frame.collector_recv_time_utc_ms,
+        })
+    );
+    assert!(snapshot_evidence.stitch_verdict.is_none());
+    assert_ne!(
+        snapshot_frame.event_seq,
+        snapshot_evidence.collector_admission_sequence
+    );
+
+    let update_batch = read_single_finalized_batch(&update_published.final_path);
+    let update_source_timestamp = update_row.event_time.to_string();
+    let update_raw_json = serde_json::json!({
+        "e": update_row.event_type.as_str(),
+        "E": update_row.event_time,
+        "s": update_row.symbol.as_str(),
+        "U": update_row.first_update_id,
+        "u": update_row.final_update_id,
+        "b": serde_json::from_str::<serde_json::Value>(&update_row.bids).unwrap(),
+        "a": serde_json::from_str::<serde_json::Value>(&update_row.asks).unwrap(),
+    })
+    .to_string();
+    let update_frame = handoff_json_round_trip(
+        &HandoffFrame::depth_source_evidence(
+            20_001,
+            "binance_depth_update",
+            "depth_update",
+            &update_row.symbol,
+            Some(&update_source_timestamp),
+            update_row.timestamp_received,
+            update_row.collector_admission_time_utc_ms.unwrap() + 1,
+            &update_row.collector_host_id,
+            &update_row.collector_region,
+            Some(&update_raw_json),
+            DepthHandoffSourceEvidence::try_from(&update_row).unwrap(),
+        )
+        .unwrap(),
+    );
+    let update_evidence = update_frame.depth_source_evidence.as_ref().unwrap();
+    assert_eq!(
+        finalized_source_kind(&update_published.final_path),
+        update_frame.source_kind
+    );
+    assert_eq!(update_evidence.record_kind, DepthHandoffRecordKind::Update);
+    assert_eq!(
+        parquet_projection(
+            &update_batch,
+            0,
+            &[
+                "source_sequence_epoch_id",
+                "connection_generation",
+                "depth_ingress_sequence",
+                "collector_admission_sequence",
+                "collector_admission_time_utc_ms",
+                "timestamp_received",
+                "stitch_verdict",
+            ],
+        ),
+        serde_json::json!({
+            "source_sequence_epoch_id": update_evidence.source_sequence_epoch_id.as_str(),
+            "connection_generation": update_evidence.connection_generation,
+            "depth_ingress_sequence": update_evidence.depth_ingress_sequence,
+            "collector_admission_sequence": update_evidence.collector_admission_sequence,
+            "collector_admission_time_utc_ms":
+                update_evidence.collector_admission_time_utc_ms,
+            "timestamp_received": update_frame.collector_recv_time_utc_ms,
+            "stitch_verdict": update_evidence.stitch_verdict.as_deref(),
+        })
+    );
+    assert_ne!(
+        update_frame.event_seq,
+        update_evidence.collector_admission_sequence
+    );
+    assert!(update_evidence.depth_ingress_sequence < snapshot_evidence.depth_ingress_sequence);
+    assert!(
+        snapshot_evidence.collector_admission_sequence
+            < update_evidence.collector_admission_sequence
     );
 }

@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-source-availability-lifecycle-repair-changelog.md`
 >
-> 状态：`APPROVED_IMPLEMENTATION_PHASE_7_COMPLETE_PHASE_8_AUTHORIZED_D7_8_R_D7_TIME_R_D7_MIN_R_D7_DEFER_B_R`。用户已于2026-07-17批准本计划、对应需求及需求第4.7节SDK-first逐项patch矩阵，并授权依次执行阶段0--8的本地文档/代码修改、测试、独立审查、commit和push；阶段0至阶段7已经实现、完成全量验证并通过独立终审。2026-07-18用户进一步批准`D7/8-R`：阶段7采用累计证据矩阵，只新增完整collector组合缺口、CLOB production actor与Gamma discovery/outer-supervisor各100-cycle及多源资源/terminal交互；阶段8采用最终树门禁、需求1--28追溯、条件式vendor复验和同批evidence交叉验收。四个逻辑producer owner、六条外部I/O路径和六个artifact/source counter必须始终区分；不得重建阶段1--6已经完成的manifest、配置或单source恢复路径。用户随后批准`D7-TIME-R`：完整collector组合覆盖operator stop、run deadline和shutdown segment finalize；UTC day rollover/hour finalize复用阶段1/6组件证据，不新增clock seam。用户随后批准`D7-MIN-R`：阶段7完整collector固定为三个指定场景，取消组合笛卡尔积与`D7-PENDING-A`，仅增加共同gate和depth pre-admission pending的受控stop/deadline聚焦回归；随后批准`D7-DEFER-B-R`，把取得新日permit前的跨日deferred冻结为有界pre-admission staging，正常flush才分配admission，受控截止清空时不得留下drop/gap证据。此前批准的`CT-B`与`D6-SCHEMA-R`继续有效。阶段7已完成全量验证与三路独立终审；阶段8尚未执行。本授权不包括shared canonicalizer/模型调度实现、生产release构建、部署、远端服务操作或数据清理。
+> 状态：`APPROVED_IMPLEMENTATION_PHASE_8_COMPLETE_D7_8_R_D7_TIME_R_D7_MIN_R_D7_DEFER_B_R_D8_R_D8_STATUS_A`。用户已于2026-07-17批准本计划、对应需求及需求第4.7节SDK-first逐项patch矩阵，并授权依次执行阶段0--8的本地文档/代码修改、测试、独立审查、commit和push；阶段0至阶段7已经实现、完成全量验证并通过独立终审。2026-07-18用户进一步批准`D7/8-R`：阶段7采用累计证据矩阵，只新增完整collector组合缺口、CLOB production actor与Gamma discovery/outer-supervisor各100-cycle及多源资源/terminal交互；阶段8采用最终树门禁、需求1--28追溯、条件式vendor复验和同批evidence交叉验收。四个逻辑producer owner、六条外部I/O路径和六个artifact/source counter必须始终区分；不得重建阶段1--6已经完成的manifest、配置或单source恢复路径。用户随后批准`D7-TIME-R`：完整collector组合覆盖operator stop、run deadline和shutdown segment finalize；UTC day rollover/hour finalize复用阶段1/6组件证据，不新增clock seam。用户随后批准`D7-MIN-R`：阶段7完整collector固定为三个指定场景，取消组合笛卡尔积与`D7-PENDING-A`，仅增加共同gate和depth pre-admission pending的受控stop/deadline聚焦回归；随后批准`D7-DEFER-B-R`，把取得新日permit前的跨日deferred冻结为有界pre-admission staging，正常flush才分配admission，受控截止清空时不得留下drop/gap证据。用户随后批准`D8-R`：修正验收19与depth current schema的残留歧义，冻结累计基线和阶段7HEAD，阶段8先补两个聚焦编码交叉测试、静态审计、28项追溯和终审，再在最终Rust树只运行一次全量门禁。此前批准的`CT-B`与`D6-SCHEMA-R`继续有效。阶段0至阶段8均已完成实现、最终门禁与三路独立终审；阶段8同时落实用户批准的`D8-STATUS-A` authority边界。本授权不包括shared canonicalizer/模型调度实现、生产release构建、部署、远端服务操作或数据清理。
 
 ## 一、成功标准与实施原则
 
@@ -337,36 +337,45 @@ HTTP snapshot路径使用有界全body读取和完整typed-row预检；408/418/4
 
 ## 阶段8：全量验证、追溯与本地交付
 
-### 任务8.1：静态和全量门禁
+### 任务8.0：冻结authority与审查边界
 
-- 步骤8.1.1：运行`cargo fmt --all -- --check`，并分别对批准基线`e1b3685`至阶段7最终HEAD的累计diff和阶段8 working-tree diff执行whitespace检查。
-  - 验证：均退出0；用户现有`AGENTS.md`与`推荐开发顺序.md`排除在本事项范围外。
-- 步骤8.1.2：运行`cargo clippy -p data-collect --locked --all-targets -- -D warnings`。
-  - 验证：退出0且无warning。
-- 步骤8.1.3：在阶段7及其审查修复完成后运行一次`cargo test -p data-collect --locked -- --test-threads=1`；定向测试只用于非默认关键验收、最终修复直接影响的场景或单独保存资源采样。
-  - 验证：最终树全量通过，无ignored关键验收；默认集合中的同一loopback不先逐项重复运行。
-- 步骤8.1.4：重新计算官方crate hash、四个批准vendor源码路径diff，并核对根`[patch.crates-io]`映射、SDK版本、批准features、vendor Cargo/lock及SDK dependency/feature图。只有这些身份与图自阶段3后均未变化时，才复用阶段3已记录的批准生产feature集合`clob,gamma,rtds,ws`、`--all-features`、integration/doc与Clippy证据；任一变化都必须重跑受影响vendor矩阵，非批准变化先触发决策门。
-  - 验证：需求4.7矩阵、源码路径allowlist和provenance一致，并在changelog明确记录复用或重跑依据；如重跑，包含vendor fmt并使用仓库外临时target或在完成后确认vendor树不存在`target/`残留。
-- 步骤8.1.5：比较根/data-collect Cargo manifests、lockfile及Binance生产调用图。
-  - 验证：逐项解释Cargo/lock变化；没有新增Binance SDK、Barter、Nautilus或其他market-data engine。aggTrade REST/backfill/pending/merge/range-retry不得复活；legacy aggTrade continuity只能存在于读取兼容路径；current depth不得写v2/v3，且不得出现第二WebSocket/snapshot owner、第三artifact或price-level book；`request_reconnect`及旧business-silence预算生产调用为零。
-- 步骤8.1.6：使用同一批可关联source evidence执行finalized typed raw与handoff交叉验收：aggTrade覆盖`trade + invalid_input`，depth覆盖`snapshot + update`。handoff必须经过`HandoffFrame::to_json_line()`及反序列化，再与finalized Parquet读取结果比较。
-  - 验证：双方全部共同语义字段一致。aggTrade至少覆盖record kind、source epoch、connection generation、WS ingress、collector admission sequence/time、receive time、host/region、source-native payload与invalid reason；depth至少覆盖source epoch、connection generation、depth ingress、collector admission sequence/time、receive time及update stitch verdict。Parquet专属审计列无需复制到handoff；handoff `event_seq`不得冒充collector admission sequence。本步骤只补测试，不新增生产写入路径。
+- 步骤8.0.1：以`e1b368561779b7f67d006b0dabc8a40632267d44`为批准累计基线，以`f53946537b7c3089971cbb667556704fbe75d6b0`为阶段7最终HEAD；阶段8开发期间审查`f539465..working tree/index`，提交后审查`f539465..HEAD`。
+  - 验证：累计实现范围固定为`e1b3685..f539465`；用户现有`AGENTS.md`与`推荐开发顺序.md`始终排除在本事项pathspec、stage和commit之外。
+- 步骤8.0.2：按用户批准的`D8-R`同步需求验收19、depth current schema、阶段8测试顺序和D7-DEFER追溯边界。
+  - 验证：当前日立即admission与跨日pre-admission staging不再冲突；current depth唯一写入schema明确为snapshot v3/update v4，snapshot v2/update v3只读兼容。
+
+### 任务8.1：聚焦交叉验收与静态审计
+
+- 步骤8.1.1：重新计算官方crate hash、四个批准vendor源码路径diff，并核对根`[patch.crates-io]`映射、SDK版本、批准features、vendor Cargo/lock及SDK dependency/feature图。冻结阶段3 vendor基线`e7d766dd7d7b3642b619746c8fb2a54857527e4a`、阶段3/current vendor tree`676ea8a0669166dafeee88c368bb20f42fc44c7d`与官方crate SHA-256 `e0ed9ca91088808232ee7e6b48f8f4eaa846882f799c40f8190b0a0e3d28ed5e`。只有这些身份与图自阶段3后均未变化时，才复用阶段3已记录的批准生产feature集合`clob,gamma,rtds,ws`、`--all-features`、integration/doc、Clippy与vendor fmt证据；任一变化都必须重跑受影响vendor矩阵，非批准变化先触发决策门。
+  - 验证：需求4.7矩阵、源码路径allowlist和provenance一致，并在changelog明确记录复用或重跑依据；不冻结受Cargo展示版本影响的`cargo tree`文本hash。如需重跑，使用仓库外临时target或确认vendor树不存在`target/`残留。
+- 步骤8.1.2：比较根/data-collect Cargo manifests、lockfile、Polymarket/Binance生产调用图及共同admission/deferred路径。
+  - 验证：逐项解释Cargo/lock变化；没有新增Binance SDK、Barter、Nautilus或其他market-data engine。aggTrade REST/backfill/pending/merge/range-retry不得复活；legacy aggTrade continuity只能存在于读取兼容路径；current depth不得写snapshot v2/update v3，snapshot v3/update v4是唯一current写入schema，且不得出现第二WebSocket/snapshot owner、第三artifact或price-level book；`request_reconnect`及旧business-silence预算生产调用为零。Polymarket fanout与通用Binance发送路径只能经过共同unadmitted enqueue；`DeferredRawBatch`在最终flush前不得拥有raw-day permit或collector admission，只有取得对应permit与bounded queue ownership后才能冻结source admission；admission gap只随最终admission发布并按event `recv_time_utc_ms`归日。受控截止可中性清空pre-admission staging，已经admit的event必须drain/finalize；不得出现第二deferred owner、旁路admission stamp或绕过queue的发布路径。
+- 步骤8.1.3：使用同一批可关联、已经接纳的source rows执行finalized typed raw与handoff编码交叉验收：aggTrade覆盖`trade + invalid_input`，depth覆盖`snapshot + update`。handoff必须经过`HandoffFrame::to_json_line()`及反序列化，再与finalized Parquet读取结果比较。
+  - 验证：只比较双方共享字段。aggTrade覆盖record kind、source epoch、connection generation、WS ingress、collector admission sequence/time、receive time、host/region、source-native payload与invalid reason；depth覆盖record kind、source epoch、connection generation、depth ingress、collector admission sequence/time、receive time及update stitch verdict。Parquet专属审计列、depth book payload和其他非共享字段不进入比较；handoff `event_seq`不得冒充collector admission sequence。该步骤只证明同一已接纳source row的两种编码一致，不宣称存在或已经验证真实paper/live online source fanout、shared canonicalizer或完整runtime parity，不新增生产写入路径、完整collector、network loopback、absence frame或100-cycle。
 
 ### 任务8.2：需求追溯与独立终审
 
 - 步骤8.2.1：逐条把需求第六节28项验收映射到测试名、命令、结果和必要artifact，写入changelog。
-  - 验证：没有用“全量测试通过”代替逐项证据。
-- 步骤8.2.2：分别自审`e1b3685..阶段7最终HEAD`累计实现和阶段8 staged diff，检查跨阶段组合、范围、孤立代码、旧测试/常量、authority和changelog；不重复逐行复审已经关闭的单阶段问题。
-  - 验证：每一行改动可追溯本需求，没有遗留或复活旧silence budget、`request_reconnect`、aggTrade backfill、旧depth current writer或shadow owner。
-- 步骤8.2.3：派生正确性终审和范围/资源终审。
-  - 验证：Critical/Important均为0；可执行反馈修复后只重复受影响的阶段7场景、对应定向测试及全部阶段8最终门禁。纯文档修复不得强制重跑全部100-cycle或全部阶段7场景。
+  - 验证：没有用“全量测试通过”代替逐项证据；D7-DEFER显式复用阶段7聚焦回归，证明depth generation-local pending及尚无新日permit的跨日staging在受控截止后没有admission、queue row、Parquet row、gap、告警、`dropped_rows`、operational counter或terminal，截止前已经admit的event继续drain。该absence边界不得通过伪造handoff frame或新增生产path验收。
+- 步骤8.2.2：分别自审`e1b3685..f539465`累计实现和阶段8 working-tree diff，检查跨阶段组合、范围、孤立代码、旧测试/常量、authority、Cargo/vendor身份、D7-DEFER唯一owner路径和changelog；不重复逐行复审已经关闭的单阶段问题。
+  - 验证：每一行改动可追溯本需求，没有遗留或复活旧silence budget、`request_reconnect`、aggTrade backfill、旧depth current writer、shadow owner、旁路admission或第二deferred owner。
+- 步骤8.2.3：派生正确性终审和范围/资源/authority终审。
+  - 验证：Critical/Important均为0；可执行反馈修复后只重复直接受影响的组件或合同测试。只有完整runtime fixture/path发生变化才重复对应完整collector；纯文档修复不强制重复100-cycle、完整collector或阶段7场景。所有代码/测试反馈修复结束后才进入任务8.3最终门禁。
 
-### 任务8.3：本地开发交付
+### 任务8.3：最终门禁与本地开发交付
 
-- 步骤8.3.1：精确stage本事项文件并复核cached diff。
+- 步骤8.3.1：在最终Rust树运行`cargo fmt --all -- --check`，并对`e1b3685..f539465`累计diff及使用本事项pathspec的阶段8 working-tree diff执行whitespace检查。
+  - 验证：均退出0；用户无关dirty文件不影响本事项working-tree检查。
+- 步骤8.3.2：运行`cargo clippy -p data-collect --locked --all-targets -- -D warnings`。
+  - 验证：退出0且无warning。
+- 步骤8.3.3：由于步骤8.1.3新增Rust合同测试，在全部代码/测试反馈修复完成后只运行一次`cargo test -p data-collect --locked -- --test-threads=1`；开发期间只运行新增或受影响的定向测试。
+  - 验证：最终树全量通过，无ignored关键验收；不在补交叉测试前预跑全量，也不逐项重复默认集合中的完整collector或100-cycle。最终门禁后的纯文档结果记录不使该次最终Rust树证据失效。
+- 步骤8.3.4：精确stage本事项文件并复核cached diff。
   - 验证：运行`git diff --cached --check`并复核cached文件清单；用户现有无关dirty文件不进入commit。
-- 步骤8.3.2：创建commit并push当前批准分支。
+- 步骤8.3.5：创建commit并push当前批准分支。
   - 验证：changelog记录阶段0--7 commit映射、最终测试、审查、scope与阶段8 commit subject；push后在交付报告验证并记录本地HEAD、upstream、`origin/after-data-plan`及远端ref SHA一致，不要求commit在自身内容中记录自身SHA。
+
+阶段8执行结果（2026-07-18）：`COMPLETE`。实施严格限于两项test-only finalized Parquet/handoff交叉合同、`D8-R`/`D8-STATUS-A`文档同步、SDK/Cargo/生产调用图静态身份审计及需求1--28证据追溯；没有生产Rust、Cargo、vendor或schema变更。三路独立终审均为Critical 0、Important 0、Minor 0。最终`cargo fmt --all -- --check`、累计/本事项`git diff --check`、data-collect all-targets Clippy `-D warnings`及串行全量测试均退出0；全量测试为254项lib与40个integration test binary共231项通过，无失败或ignored。阶段8 commit subject为`test(data-collect): complete source lifecycle phase 8`，push后SHA一致性在交付报告中记录。
 
 阶段8完成只表示本地代码与文档闭环，不授权生产操作。
 
