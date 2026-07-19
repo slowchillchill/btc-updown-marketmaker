@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-source-availability-lifecycle-repair-changelog.md`
 >
-> 状态：`PHASE_9_COMPLETE_RTDS_PONG_A`。用户已于2026-07-17批准本计划、对应需求及需求第4.7节SDK-first逐项patch矩阵，并授权依次执行阶段0--8的本地文档/代码修改、测试、独立审查、commit和push；阶段0至阶段8已经实现、完成最终门禁并通过独立终审。2026-07-18批准的`D7/8-R`、`D7-TIME-R`、`D7-MIN-R`、`D7-DEFER-B-R`、`D8-R`与`D8-STATUS-A`继续作为历史实现authority。2026-07-19香港线路wire验证证明RTDS持续响应业务数据但不返回文本/控制PONG，用户明确回复“批准 RTDS-PONG-A”；阶段9现已按本计划完成RTDS固定PING/no-PONG实现、全量门禁、香港线路SDK复测及独立终审。此前批准的`CT-B`与`D6-SCHEMA-R`继续有效。本授权不包括shared canonicalizer/模型调度实现、生产release构建、部署、远端服务操作或数据清理。
+> 状态：`PHASE_9_COMPLETE_RTDS_PONG_A`。用户已于2026-07-17批准本计划、对应需求及需求第4.7节SDK-first逐项patch矩阵，并授权依次执行阶段0--8的本地文档/代码修改、测试、独立审查、commit和push；阶段0至阶段8已经实现、完成最终门禁并通过独立终审。2026-07-18批准的`D7/8-R`、`D7-TIME-R`、`D7-MIN-R`、`D7-DEFER-B-R`、`D8-R`与`D8-STATUS-A`继续作为历史实现authority。2026-07-19香港线路wire验证证明RTDS持续响应业务数据但不返回文本/控制PONG，用户明确回复“批准 RTDS-PONG-A”；阶段9现已按本计划完成RTDS固定PING/no-PONG实现、全量门禁、香港线路SDK复测及独立终审。此前批准的`CT-B`与`D6-SCHEMA-R`继续有效。本计划只提供实现步骤；用户后续批准的生产重置部署以`plan/data-collect-rtds-pong-a-reset-deployment-plan.md`为唯一执行authority。
 
 ## 一、成功标准与实施原则
 

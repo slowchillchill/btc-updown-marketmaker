@@ -6,6 +6,8 @@
 >
 > 对应计划：`plan/data-collect-training-collector-direct-deployment-plan.md`
 
+> 2026-07-19 RTDS-PONG-A 的当前生产重置部署改由 `changelog/data-collect-rtds-pong-a-reset-deployment-changelog.md` 记录；本文件以下内容保持 2026-07-18 首次冷启动历史事实。
+
 ## 2026-07-18：用户取代旧 M8-A 部署编排
 
 - 用户明确批准在数据采集服务器空闲、多日没有 current-day manifest 的冷启动事实下，从任意时间直接部署并长期运行。

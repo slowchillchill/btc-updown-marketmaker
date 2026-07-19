@@ -6,7 +6,9 @@
 >
 > 对应 changelog：`changelog/data-collect-training-collector-direct-deployment-changelog.md`
 >
-> 状态：`APPROVED_EXECUTION_IN_PROGRESS`
+> 状态：`COMPLETE_SUPERSEDED_FOR_CURRENT_DEPLOYMENT_BY_RTDS_PONG_A_RESET`
+>
+> 2026-07-19 当前生产替换与精确 current-day 删除由 `demand/data-collect-rtds-pong-a-reset-deployment-demand.md` 单独授权；本文件的首次冷启动合同继续作为历史事实，不授权扩张到其他 future same-day takeover。
 
 ## 一、用户批准与目标
 

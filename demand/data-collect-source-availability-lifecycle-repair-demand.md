@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-source-availability-lifecycle-repair-changelog.md`
 >
-> 状态：`PHASE_9_COMPLETE_RTDS_PONG_A`。用户已于2026-07-17批准本文、对应计划及第4.7节SDK-first逐项patch矩阵，并授权按计划分阶段实施、验证、独立审查、commit和push；阶段0至阶段8均已完成实现、最终门禁与三路独立终审。用户于2026-07-19在香港线路15分钟wire验证后明确回复“批准 RTDS-PONG-A”；阶段9现已完成RTDS固定PING/no-PONG实现、定向与全量门禁、香港线路修复后15分钟SDK复测、官方crate provenance核验及两路独立终审，Critical/Important/Minor均为0。此前批准的`CT-B`、`D6-SCHEMA-R`、`M1-A / M2-A0 / M4-A-R / M5-N/A / M6-A+ / M7-A-R`及修订后的`M3-A-R`实现语义继续有效；M8-A旧UTC边界首次启用候选已由用户2026-07-18批准的独立直接长期部署事项取代。本文本身仍不授权模型调度、shared canonicalizer、生产release构建、部署、远端服务操作或数据清理；本次训练collector部署只以独立部署三件套为authority。
+> 状态：`PHASE_9_COMPLETE_RTDS_PONG_A`。用户已于2026-07-17批准本文、对应计划及第4.7节SDK-first逐项patch矩阵，并授权按计划分阶段实施、验证、独立审查、commit和push；阶段0至阶段8均已完成实现、最终门禁与三路独立终审。用户于2026-07-19在香港线路15分钟wire验证后明确回复“批准 RTDS-PONG-A”；阶段9现已完成RTDS固定PING/no-PONG实现、定向与全量门禁、香港线路修复后15分钟SDK复测、官方crate provenance核验及两路独立终审，Critical/Important/Minor均为0。此前批准的`CT-B`、`D6-SCHEMA-R`、`M1-A / M2-A0 / M4-A-R / M5-N/A / M6-A+ / M7-A-R`及修订后的`M3-A-R`实现语义继续有效；M8-A旧UTC边界首次启用候选已由用户2026-07-18批准的独立直接长期部署事项取代。本文只提供实现 authority；用户2026-07-19后续批准的production release构建、精确current-day删除、部署与远端服务操作只以`demand/data-collect-rtds-pong-a-reset-deployment-demand.md`及对应计划/changelog为authority。
 
 ## 一、目标
 

@@ -6,7 +6,9 @@
 >
 > 对应 changelog：`changelog/data-collect-training-collector-direct-deployment-changelog.md`
 >
-> 状态：`APPROVED_IN_PROGRESS`
+> 状态：`COMPLETE_SUPERSEDED_FOR_CURRENT_DEPLOYMENT_BY_RTDS_PONG_A_RESET`
+>
+> 2026-07-19 当前生产替换执行以 `plan/data-collect-rtds-pong-a-reset-deployment-plan.md` 为唯一计划 authority。
 
 ## 阶段 1：冻结部署合同
 

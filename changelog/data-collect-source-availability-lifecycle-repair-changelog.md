@@ -6,7 +6,7 @@
 >
 > 对应计划：`plan/data-collect-source-availability-lifecycle-repair-plan.md`
 >
-> 状态：`PHASE_9_COMPLETE_RTDS_PONG_A`。阶段0至阶段8的实现、最终门禁、独立终审与历史批准均保持完成事实。2026-07-19香港线路wire验证发现真实RTDS不返回PONG，旧当前合同与运行事实冲突；用户明确回复“批准 RTDS-PONG-A”。阶段9现已完成本地文档、代码、测试、香港线路SDK复测、provenance核验及两路独立终审；生产release构建、部署、远端服务操作、数据清理和重采仍未获授权。
+> 状态：`PHASE_9_COMPLETE_RTDS_PONG_A`。阶段0至阶段8的实现、最终门禁、独立终审与历史批准均保持完成事实。2026-07-19香港线路wire验证发现真实RTDS不返回PONG，旧当前合同与运行事实冲突；用户明确回复“批准 RTDS-PONG-A”。阶段9现已完成本地文档、代码、测试、香港线路SDK复测、provenance核验及两路独立终审；用户后续批准的生产release构建、精确current-day删除、部署与远端服务操作改由`changelog/data-collect-rtds-pong-a-reset-deployment-changelog.md`记录。
 
 ## 2026-07-17：最终批准并开始阶段0
 

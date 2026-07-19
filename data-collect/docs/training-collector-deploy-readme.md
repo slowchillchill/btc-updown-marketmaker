@@ -155,3 +155,5 @@ unit 内容已与仓库权威源一致时不重复替换。部署命令和operat
 发现本地完整性错误、启动失败或 restart storm 时，停止服务并保留全部真实数据、journal、manifest 与 digest 证据，不执行失败日期清理。退出 75/76 继续由 `RestartPreventExitStatus=75 76` 阻止自动重启。
 
 本次冷启动不授权 future same-day 不同 identity 升级、回滚或删除历史数据。需要这些操作时，必须基于当时 manifest/coverage/service 事实另行批准；不得把当前直接冷启动合同扩展成通用 takeover。
+
+2026-07-19 的 `RTDS-PONG-A` 同日替换是单独批准的精确 current-day 删除后冷启动，不是 identity takeover；其删除范围、构建、停服、原子替换和验收只以 `demand/data-collect-rtds-pong-a-reset-deployment-demand.md`、对应计划及 changelog 为 authority，不得据此扩大为通用同日升级或删除流程。
