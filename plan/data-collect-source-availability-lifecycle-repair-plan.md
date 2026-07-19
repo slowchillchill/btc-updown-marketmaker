@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-source-availability-lifecycle-repair-changelog.md`
 >
-> 状态：`APPROVED_IMPLEMENTATION_PHASE_8_COMPLETE_D7_8_R_D7_TIME_R_D7_MIN_R_D7_DEFER_B_R_D8_R_D8_STATUS_A`。用户已于2026-07-17批准本计划、对应需求及需求第4.7节SDK-first逐项patch矩阵，并授权依次执行阶段0--8的本地文档/代码修改、测试、独立审查、commit和push；阶段0至阶段7已经实现、完成全量验证并通过独立终审。2026-07-18用户进一步批准`D7/8-R`：阶段7采用累计证据矩阵，只新增完整collector组合缺口、CLOB production actor与Gamma discovery/outer-supervisor各100-cycle及多源资源/terminal交互；阶段8采用最终树门禁、需求1--28追溯、条件式vendor复验和同批evidence交叉验收。四个逻辑producer owner、六条外部I/O路径和六个artifact/source counter必须始终区分；不得重建阶段1--6已经完成的manifest、配置或单source恢复路径。用户随后批准`D7-TIME-R`：完整collector组合覆盖operator stop、run deadline和shutdown segment finalize；UTC day rollover/hour finalize复用阶段1/6组件证据，不新增clock seam。用户随后批准`D7-MIN-R`：阶段7完整collector固定为三个指定场景，取消组合笛卡尔积与`D7-PENDING-A`，仅增加共同gate和depth pre-admission pending的受控stop/deadline聚焦回归；随后批准`D7-DEFER-B-R`，把取得新日permit前的跨日deferred冻结为有界pre-admission staging，正常flush才分配admission，受控截止清空时不得留下drop/gap证据。用户随后批准`D8-R`：修正验收19与depth current schema的残留歧义，冻结累计基线和阶段7HEAD，阶段8先补两个聚焦编码交叉测试、静态审计、28项追溯和终审，再在最终Rust树只运行一次全量门禁。此前批准的`CT-B`与`D6-SCHEMA-R`继续有效。阶段0至阶段8均已完成实现、最终门禁与三路独立终审；阶段8同时落实用户批准的`D8-STATUS-A` authority边界。本授权不包括shared canonicalizer/模型调度实现、生产release构建、部署、远端服务操作或数据清理。
+> 状态：`PHASE_9_COMPLETE_RTDS_PONG_A`。用户已于2026-07-17批准本计划、对应需求及需求第4.7节SDK-first逐项patch矩阵，并授权依次执行阶段0--8的本地文档/代码修改、测试、独立审查、commit和push；阶段0至阶段8已经实现、完成最终门禁并通过独立终审。2026-07-18批准的`D7/8-R`、`D7-TIME-R`、`D7-MIN-R`、`D7-DEFER-B-R`、`D8-R`与`D8-STATUS-A`继续作为历史实现authority。2026-07-19香港线路wire验证证明RTDS持续响应业务数据但不返回文本/控制PONG，用户明确回复“批准 RTDS-PONG-A”；阶段9现已按本计划完成RTDS固定PING/no-PONG实现、全量门禁、香港线路SDK复测及独立终审。此前批准的`CT-B`与`D6-SCHEMA-R`继续有效。本授权不包括shared canonicalizer/模型调度实现、生产release构建、部署、远端服务操作或数据清理。
 
 ## 一、成功标准与实施原则
 
@@ -15,13 +15,14 @@
 - 任意一条、多条或全部六条外部I/O路径不可达，或者四条WebSocket业务流静默时，collector保持同一PID运行；全部I/O不可达才记录有证据的degraded，Gamma已返回有效市场、depth已取得初始snapshot且四条WebSocket协议存活但业务静默时保持active/idle，不虚构状态转换；
 - 业务静默不再控制subscription或transport，不制造gap、lag、异常告警或退出；
 - transport故障在各自source-local owner内持续恢复，总attempt和总elapsed不构成存活预算；
+- heartbeat配置身份明确分离：CLOB生产为`10s/20s/require_text_pong=true`，RTDS生产为固定`5s/require_text_pong=false`，SDK默认保持`5s/15s/true`；RTDS no-PONG不重连，PING实际write确认前最多一个pending且确认后无burst补发；
 - RTDS、CLOB、Binance aggTrade、Binance depth/snapshot和Gamma保留各自协议语义；depth另外以snapshot v3/update v4的双坐标明确区分raw观察与continuity可用，不以stitch处理顺序改写原始观察顺序；
 - typed raw接收时间、真实空档和last qualifying time可供后续因果派生missingness；aggTrade v6另外保存普通外部invalid、source epoch、connection generation、WS ingress与collector admission coordinate，使训练能按模型实际可见顺序重放；合法WS trade不因原始`a`跳变等待或回填；daily manifest只新增单一collector observation-eligibility coverage并保持既有source counters，不保存transport scope/reason/episode；data-collect不决定模型age/mask、确定性调度基线、离散`next_wake`目标候选或任何decision tick；
 - 上限内完整的普通外部aggTrade invalid逐条进入同artifact v6并继续；parser实现/typed-schema内部失败、本地lag/drop、queue接纳失败、sequence hole/overflow、writer/manifest、evidence ownership和内部不变量仍按既有scope quarantine或fail closed；
 - vendored SDK只保留经逐项证明仍必要的最小差异，删除旧业务静默策略专用的one-shot reconnect；
 - 没有第二套health、reconnect、socket owner、SDK session、receiver或subscription actor；Binance继续复用现有`reqwest + tokio-tungstenite + Tokio + Serde`，不引入新SDK或market-data engine。
 
-用户已于2026-07-17完成需求、计划及SDK patch矩阵的最终批准。任何真实代码、现行已批准文档或官方协议与本计划发生新冲突时，必须停止相关阶段，在changelog登记事实、影响和选项并请求用户决定。
+用户已于2026-07-17完成需求、计划及原SDK patch矩阵的批准，并于2026-07-19批准`RTDS-PONG-A`修订。任何真实代码、现行已批准文档或官方协议与本计划发生新冲突时，必须停止相关阶段，在changelog登记事实、影响和选项并请求用户决定。
 
 每个阶段均执行：
 
@@ -149,6 +150,8 @@
 
 阶段2执行结果（2026-07-17）：`COMPLETE`。heartbeat结果由唯一connection owner直接消费，last-sender normal teardown与recoverable/terminal退出分类已经闭合；RTDS Display/sticky/WARN保持有界脱敏，用户B批准的官方pre-parse raw TRACE已恢复。no/old-PONG、sender/runtime drop、EOF/Close、outbound/PING write、parser与heartbeat panic反向矩阵通过；one-shot API、wrapper和旧RTDS消费者按计划完整保留到阶段3。workspace与vendored SDK全量测试、lint、fmt及provenance/路径检查通过，三路独立终审均为Critical 0、Important 0；阶段2精确commit/push完成后进入阶段3。
 
+阶段2历史说明（2026-07-19修订）：上述no/old-PONG recoverable结论继续适用于`require_text_pong=true`的CLOB；其被机械应用到RTDS的部分已由阶段9 `RTDS-PONG-A`取代。阶段2当时的实现、测试和审查事实不回写删除。
+
 ## 阶段3：原子删除RTDS主动恢复并收缩SDK
 
 ### 任务3.1：冻结RTDS目标测试
@@ -178,6 +181,8 @@
 阶段3完成条件：需求验收7--10及共同availability断言通过；旧“两代无fresh必须退出”测试改为长期静默不退出，one-shot消费者与SDK能力在同一commit中消失。独立审查通过后commit/push。
 
 阶段3执行结果（2026-07-17）：`COMPLETE`。生产RTDS已改为一次desired订阅后在健康PING/PONG连接上无限等待业务数据；业务静默/stale不再触发lag、gap、subscription、generation切换或退出。自然transport恢复总attempt无限，`CT-B`只限制单次建连/握手并通过半握手loopback；one-shot生产consumer、runtime wrapper和vendor能力已原子删除。首轮范围审查发现的旧公共business-gap合同与`deadline=None`覆盖缺口均已修复，定向、workspace全量、vendored SDK、lint、fmt和四路径provenance验证通过，三路独立终审最终均为Critical 0、Important 0；精确commit/push后进入阶段4。
+
+阶段3历史说明（2026-07-19修订）：其中“RTDS健康连接必须PING/PONG”及`5s/15s`会等待PONG的部分已由阶段9取代；一次desired、业务静默不控制网络、真实Close/EOF/读写失败自然恢复、无限总attempt与`CT-B`单次握手期限继续有效。阶段3使用PONG维持loopback和以no-PONG驱动重连的RTDS测试不得作为阶段9当前证据复用。
 
 ## 阶段4：CLOB market与Gamma metadata
 
@@ -378,6 +383,44 @@ HTTP snapshot路径使用有界全body读取和完整typed-row预检；408/418/4
 阶段8执行结果（2026-07-18）：`COMPLETE`。实施严格限于两项test-only finalized Parquet/handoff交叉合同、`D8-R`/`D8-STATUS-A`文档同步、SDK/Cargo/生产调用图静态身份审计及需求1--28证据追溯；没有生产Rust、Cargo、vendor或schema变更。三路独立终审均为Critical 0、Important 0、Minor 0。最终`cargo fmt --all -- --check`、累计/本事项`git diff --check`、data-collect all-targets Clippy `-D warnings`及串行全量测试均退出0；全量测试为254项lib与40个integration test binary共231项通过，无失败或ignored。阶段8 commit subject为`test(data-collect): complete source lifecycle phase 8`，push后SHA一致性在交付报告中记录。
 
 阶段8完成只表示本地代码与文档闭环，不授权生产操作。
+
+## 阶段9：RTDS固定PING与no-PONG合同修复
+
+### 任务9.1：冻结真实wire事实、冲突与红灯
+
+- 步骤9.1.1：保存香港SOCKS5h路线前后回执、15分钟RTDS wire统计、两次无PING空帧对照及四个SHA-256；明确官方文档只要求每5秒PING，没有PONG要求。
+  - 验证：同一socket持续约900秒，181次PING的180个间隔为4999--5001ms，业务更新持续且文本/控制PONG与服务端Close均为0；空文本在无PING对照中同样出现，不能冒充PONG。
+- 步骤9.1.2：同步主demand/plan/changelog及旧reliability demand/plan的当前authority指针，并先写RTDS no-PONG loopback红灯。
+  - 验证：旧“RTDS no-PONG必须重连”和“5s/15s PING/PONG”只保留为历史事实；红灯因缺少`Config::require_text_pong`或旧socket被PONG timeout关闭而失败，不由测试server主动Close。
+
+### 任务9.2：实施最小SDK配置与单pending状态机
+
+- 步骤9.2.1：在既有`ws::config::Config`新增`require_text_pong: bool`且默认`true`；CLOB生产显式`true`并保持`10s/20s`，RTDS生产显式`false`并保持`5s` cadence，`15s`字段在false模式下不生效。
+  - 验证：三种配置身份均有精确断言；不改Cargo/lock、SDK版本、parser/fatal语义或第五个vendor文件。
+- 步骤9.2.2：在现有唯一connection owner与heartbeat task之间使用私有PING write ack；false模式每次只在实际`write.send(Text("PING"))`成功后确认，确认前不创建第二个请求，确认后`Interval::reset()`并等待完整周期。
+  - 验证：阻塞write跨多个interval时channel不积压；解除后不会catch-up burst。true模式继续精确文本PONG、old/no-PONG timeout与recoverable重连，WebSocket控制Pong不冒充文本PONG。
+- 步骤9.2.3：保持真实Close、EOF、read/write/PING-send failure recoverable，parser sticky fault terminal，last-manager drop normal且不重连。
+  - 验证：现有反向分类矩阵与false模式PING write failure定向测试全部通过；没有第二owner、raw WebSocket或shadow SDK。
+
+### 任务9.3：回归、资源与香港线路复测
+
+- 步骤9.3.1：运行配置、vendor heartbeat、生产RTDS长期no-PONG、CLOB strict-PONG、自然Close/replay及RTDS 100-cycle定向测试。
+  - 验证：RTDS跨至少三个旧timeout仍同socket/generation、一次subscribe并消费后续stale/fresh；100次真实Close后task/FD/actor/subscription不单调增长；CLOB no/old-PONG合同不变。
+- 步骤9.3.2：完成workspace与vendored SDK适用全量测试、check/Clippy、root/vendor fmt、diff、四路径allowlist、Cargo/lock与官方crate provenance核验。
+  - 验证：所有命令退出0；阶段8因vendor身份未变化而复用旧矩阵的条件已失效，本阶段必须重跑受影响vendor矩阵。
+- 步骤9.3.3：通过香港VPN/SOCKS5h路线，以使用本次vendored SDK的本地测试程序运行15分钟，不新增生产代理路径。
+  - 验证：真实WSS层证明零no-PONG重连、同一connection generation/revision且业务数据持续；由于SDK应用帧在外部SOCKS隧道处为TLS密文且公共runtime不暴露出站帧，修复后的精确PING计数/cadence由同一实现的loopback直接计数，服务端no-PONG合同由修复前香港raw-wire的181次PING/零PONG证据冻结，不把推算值冒充修复后wire观测。记录前后HK/HKG出口、服务状态、分层统计和SHA-256。
+
+### 任务9.4：阶段审查与交付
+
+- 步骤9.4.1：自审全部diff及需求验收7、9、11--13、25--28，再由`gpt-5.6-sol`/`ultra`独立审查生产状态机、测试/资源及文档authority。
+  - 验证：Critical/Important均为0；可执行反馈修复后重复直接受影响验证和审查。
+- 步骤9.4.2：同步最终命令/结果与范围，精确stage阶段9文件，创建commit并push当前分支。
+  - 验证：cached diff/check与文件清单正确，本地HEAD、upstream和remote ref一致；不包含生产部署、远端服务或数据写操作。
+
+阶段9完成条件：需求的RTDS固定PING/no-PONG、CLOB保持、真实transport分类、单pending资源与SDK-first范围全部有测试和香港线路证据，独立审查Critical/Important为0，commit/push完成。阶段9完成前不得把当前修订标记为complete。
+
+阶段9执行结果（2026-07-19）：`COMPLETE`。SDK `Config`新增默认`true`的`require_text_pong`；CLOB生产显式`10s/20s/true`，RTDS生产显式`5s/15s/false`，其中RTDS `15s`仅为false模式不读取的兼容字段。false模式由唯一connection owner实际写入大写文本`PING`后通过私有oneshot确认，确认前最多一个pending，确认后重置完整interval；no-PONG不再触发RTDS重连，Close、EOF、read/write/PING-send failure仍recoverable，parser sticky fault与last-manager normal teardown保持不变。测试先行红灯退出101；候选实现后的生产no-PONG、固定cadence、CLOB strict-PONG、write failure、自然Close与100-cycle资源矩阵均通过。最终workspace locked全量、check、Clippy、root/vendor fmt与diff均退出0；vendor在Rust `+1.88`下core 170/170、all-features 624通过/20个doc示例ignored，default/all-features Clippy均退出0。香港线路修复后SDK复测持续`900001ms`、收到897条消息/896条Chainlink update，generation始终0、revision始终1且SOCKS隧道只有1个TCP连接；TLS证据边界没有把不可见的修复后PING数量冒充wire观测。官方crate SHA-256、四路径allowlist、Cargo/lock与无vendor target均复核通过；两路`gpt-5.6-sol`/`ultra`独立终审均为Critical 0、Important 0、Minor 0。阶段9精确commit/push完成后由交付报告记录SHA；本阶段没有执行release构建、部署、远端服务/数据写操作、数据清理或重采。
 
 ## 本计划之外的生产边界
 

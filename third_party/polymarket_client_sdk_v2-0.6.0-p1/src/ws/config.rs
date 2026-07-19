@@ -22,7 +22,9 @@ pub struct Config {
     pub connect_timeout: Option<Duration>,
     /// Interval for sending PING messages to keep connection alive
     pub heartbeat_interval: Duration,
-    /// Maximum time to wait for PONG response before considering connection dead
+    /// Whether each PING requires an exact application-level text `PONG` response.
+    pub require_text_pong: bool,
+    /// Maximum time to wait for PONG response when `require_text_pong` is enabled
     pub heartbeat_timeout: Duration,
     /// Reconnection strategy configuration
     pub reconnect: ReconnectConfig,
@@ -33,6 +35,7 @@ impl Default for Config {
         Self {
             connect_timeout: None,
             heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL_DURATION,
+            require_text_pong: true,
             heartbeat_timeout: DEFAULT_HEARTBEAT_TIMEOUT_DURATION,
             reconnect: ReconnectConfig::default(),
         }
@@ -117,5 +120,7 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.connect_timeout, None);
         assert_eq!(config.heartbeat_interval, Duration::from_secs(5));
+        assert!(config.require_text_pong);
+        assert_eq!(config.heartbeat_timeout, Duration::from_secs(15));
     }
 }

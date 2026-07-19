@@ -15504,6 +15504,7 @@ fn bounded_ws_config() -> WsConfig {
     config.reconnect.max_attempts = Some(3);
     config.reconnect.max_backoff = Duration::from_secs(5);
     config.heartbeat_interval = Duration::from_secs(10);
+    config.require_text_pong = true;
     config.heartbeat_timeout = Duration::from_secs(20);
     config
 }
@@ -15514,6 +15515,7 @@ fn bounded_rtds_ws_config() -> WsConfig {
     config.reconnect.max_attempts = None;
     config.reconnect.max_backoff = Duration::from_secs(5);
     config.heartbeat_interval = Duration::from_secs(5);
+    config.require_text_pong = false;
     config.heartbeat_timeout = Duration::from_secs(15);
     config
 }
@@ -22271,6 +22273,7 @@ mod tests {
         );
         assert_eq!(clob.reconnect.max_attempts, Some(3));
         assert_eq!(clob.heartbeat_interval, Duration::from_secs(10));
+        assert!(clob.require_text_pong);
         assert_eq!(clob.heartbeat_timeout, Duration::from_secs(20));
 
         let rtds = bounded_rtds_ws_config();
@@ -22281,6 +22284,7 @@ mod tests {
         assert_eq!(rtds.reconnect.max_attempts, None);
         assert_eq!(rtds.reconnect.max_backoff, Duration::from_secs(5));
         assert_eq!(rtds.heartbeat_interval, Duration::from_secs(5));
+        assert!(!rtds.require_text_pong);
         assert_eq!(rtds.heartbeat_timeout, Duration::from_secs(15));
     }
 
@@ -23858,7 +23862,6 @@ mod tests {
                     continue;
                 };
                 if text == "PING" {
-                    socket.send(Message::Text("PONG".into())).await.unwrap();
                     continue;
                 }
                 break serde_json::from_str::<Value>(&text).unwrap();
@@ -23878,12 +23881,11 @@ mod tests {
                 timeout(Duration::from_millis(40), async {
                     loop {
                         let message = socket.next().await.unwrap().unwrap();
-                        if let Message::Text(text) = message {
-                            if text == "PING" {
-                                socket.send(Message::Text("PONG".into())).await.unwrap();
-                            } else if serde_json::from_str::<Value>(&text).is_ok() {
-                                break;
-                            }
+                        if let Message::Text(text) = message
+                            && text != "PING"
+                            && serde_json::from_str::<Value>(&text).is_ok()
+                        {
+                            break;
                         }
                     }
                 })
@@ -23911,9 +23913,6 @@ mod tests {
                 .unwrap();
             while let Some(message) = socket.next().await {
                 match message {
-                    Ok(Message::Text(text)) if text == "PING" => {
-                        socket.send(Message::Text("PONG".into())).await.unwrap();
-                    }
                     Ok(Message::Close(_)) | Err(_) => break,
                     _ => {}
                 }
@@ -23980,7 +23979,6 @@ mod tests {
                     continue;
                 };
                 if text == "PING" {
-                    socket.send(Message::Text("PONG".into())).await.unwrap();
                     continue;
                 }
                 break serde_json::from_str::<Value>(&text).unwrap();
@@ -24000,12 +23998,11 @@ mod tests {
                 timeout(Duration::from_millis(40), async {
                     loop {
                         let message = socket.next().await.unwrap().unwrap();
-                        if let Message::Text(text) = message {
-                            if text == "PING" {
-                                socket.send(Message::Text("PONG".into())).await.unwrap();
-                            } else if serde_json::from_str::<Value>(&text).is_ok() {
-                                break;
-                            }
+                        if let Message::Text(text) = message
+                            && text != "PING"
+                            && serde_json::from_str::<Value>(&text).is_ok()
+                        {
+                            break;
                         }
                     }
                 })
@@ -24033,9 +24030,6 @@ mod tests {
                 .unwrap();
             while let Some(message) = socket.next().await {
                 match message {
-                    Ok(Message::Text(text)) if text == "PING" => {
-                        socket.send(Message::Text("PONG".into())).await.unwrap();
-                    }
                     Ok(Message::Close(_)) | Err(_) => break,
                     _ => {}
                 }
@@ -24120,7 +24114,6 @@ mod tests {
                     continue;
                 };
                 if text == "PING" {
-                    socket.send(Message::Text("PONG".into())).await.unwrap();
                     continue;
                 }
                 break serde_json::from_str::<Value>(&text).unwrap();
@@ -24148,7 +24141,6 @@ mod tests {
                     continue;
                 };
                 if text == "PING" {
-                    socket.send(Message::Text("PONG".into())).await.unwrap();
                     continue;
                 }
                 break serde_json::from_str::<Value>(&text).unwrap();
@@ -24164,12 +24156,11 @@ mod tests {
                 timeout(Duration::from_millis(40), async {
                     loop {
                         let message = socket.next().await.unwrap().unwrap();
-                        if let Message::Text(text) = message {
-                            if text == "PING" {
-                                socket.send(Message::Text("PONG".into())).await.unwrap();
-                            } else if serde_json::from_str::<Value>(&text).is_ok() {
-                                break;
-                            }
+                        if let Message::Text(text) = message
+                            && text != "PING"
+                            && serde_json::from_str::<Value>(&text).is_ok()
+                        {
+                            break;
                         }
                     }
                 })
@@ -24197,9 +24188,6 @@ mod tests {
                 .unwrap();
             while let Some(message) = socket.next().await {
                 match message {
-                    Ok(Message::Text(text)) if text == "PING" => {
-                        socket.send(Message::Text("PONG".into())).await.unwrap();
-                    }
                     Ok(Message::Close(_)) | Err(_) => break,
                     _ => {}
                 }
@@ -24263,7 +24251,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rtds_source_keeps_one_socket_through_silence_and_consumes_stale_then_fresh() {
+    async fn rtds_source_keeps_one_socket_without_required_text_pong_and_consumes_stale_then_fresh()
+    {
         let dataset_root = tempdir().unwrap();
         let dataset_root = dataset_root.path().canonicalize().unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -24275,13 +24264,14 @@ mod tests {
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut socket = accept_async(stream).await.unwrap();
+            let mut ping_count = 0_u64;
             let request = loop {
                 let message = socket.next().await.unwrap().unwrap();
                 let Message::Text(text) = message else {
                     continue;
                 };
                 if text == "PING" {
-                    socket.send(Message::Text("PONG".into())).await.unwrap();
+                    ping_count += 1;
                     continue;
                 }
                 break serde_json::from_str::<Value>(&text).unwrap();
@@ -24293,7 +24283,7 @@ mod tests {
                 r#"{"symbol":"btc/usd"}"#
             );
 
-            let silence = sleep(Duration::from_millis(150));
+            let silence = sleep(Duration::from_millis(200));
             tokio::pin!(silence);
             loop {
                 tokio::select! {
@@ -24301,7 +24291,7 @@ mod tests {
                     message = socket.next() => {
                         match message {
                             Some(Ok(Message::Text(text))) if text == "PING" => {
-                                socket.send(Message::Text("PONG".into())).await.unwrap();
+                                ping_count += 1;
                             }
                             Some(Ok(Message::Text(text))) if serde_json::from_str::<Value>(&text).is_ok() => {
                                 panic!("business silence must not send a second RTDS subscription: {text}");
@@ -24342,7 +24332,7 @@ mod tests {
             while let Some(message) = socket.next().await {
                 match message {
                     Ok(Message::Text(text)) if text == "PING" => {
-                        socket.send(Message::Text("PONG".into())).await.unwrap();
+                        ping_count += 1;
                     }
                     Ok(Message::Text(text)) if serde_json::from_str::<Value>(&text).is_ok() => {
                         panic!("a healthy generation may receive only one complete desired replay")
@@ -24351,6 +24341,10 @@ mod tests {
                     _ => {}
                 }
             }
+            assert!(
+                ping_count >= 7,
+                "RTDS must keep sending PING while text PONG is absent"
+            );
             assert!(
                 timeout(Duration::from_millis(50), listener.accept())
                     .await
@@ -24384,7 +24378,7 @@ mod tests {
             Instant::now(),
         ));
 
-        sleep(Duration::from_millis(120)).await;
+        sleep(Duration::from_millis(170)).await;
         assert!(
             !source.is_finished(),
             "business silence must not finish the RTDS source"

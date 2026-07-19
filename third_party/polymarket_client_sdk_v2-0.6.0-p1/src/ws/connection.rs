@@ -14,7 +14,7 @@ use futures::{SinkExt as _, StreamExt as _};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::net::TcpStream;
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::time::{interval, sleep, timeout};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
@@ -74,6 +74,10 @@ enum HeartbeatExit {
 struct OutboundRequest {
     generation: u64,
     payload: String,
+}
+
+struct PingRequest {
+    write_ack_tx: Option<oneshot::Sender<()>>,
 }
 
 struct OutboundQueue {
@@ -137,7 +141,7 @@ impl ConnectionState {
 /// This generic connection manager handles all WebSocket connection concerns:
 /// - Establishing and maintaining connections
 /// - Automatic reconnection with exponential backoff
-/// - Heartbeat monitoring via PING/PONG
+/// - Heartbeat PING delivery with optional application-level text PONG monitoring
 /// - Broadcasting messages to multiple subscribers
 ///
 /// # Type Parameters
@@ -476,13 +480,20 @@ where
                 // Handle PING requests from heartbeat loop
                 ping = ping_rx.recv() => {
                     match ping {
-                        Some(()) => {
+                        Some(PingRequest { write_ack_tx }) => {
                             if let Err(error) = write.send(Message::Text("PING".into())).await {
                                 heartbeat_handle.abort();
                                 return ConnectionExit::Recoverable(Error::with_source(
                                     Kind::WebSocket,
                                     WsError::Connection(error),
                                 ));
+                            }
+                            if let Some(write_ack_tx) = write_ack_tx
+                                && write_ack_tx.send(()).is_err()
+                            {
+                                return Self::classify_heartbeat_result(
+                                    (&mut heartbeat_handle).await,
+                                );
                             }
                         }
                         None => {
@@ -512,9 +523,9 @@ where
         }
     }
 
-    /// Heartbeat loop that sends PING messages and monitors PONG responses.
+    /// Heartbeat loop that sends PING messages and optionally monitors text PONG responses.
     async fn heartbeat_loop(
-        ping_tx: mpsc::UnboundedSender<()>,
+        ping_tx: mpsc::UnboundedSender<PingRequest>,
         state_rx: watch::Receiver<ConnectionState>,
         config: &Config,
         mut pong_rx: watch::Receiver<Instant>,
@@ -529,13 +540,30 @@ where
                 return HeartbeatExit::OwnerStopped;
             }
 
+            if !config.require_text_pong {
+                let (write_ack_tx, write_ack_rx) = oneshot::channel();
+                if ping_tx
+                    .send(PingRequest {
+                        write_ack_tx: Some(write_ack_tx),
+                    })
+                    .is_err()
+                {
+                    return HeartbeatExit::OwnerStopped;
+                }
+                if write_ack_rx.await.is_err() {
+                    return HeartbeatExit::OwnerStopped;
+                }
+                ping_interval.reset();
+                continue;
+            }
+
             // Mark current PONG state as seen before sending PING
             // This prevents changed() from returning immediately due to a stale PONG
             drop(pong_rx.borrow_and_update());
 
             // Send PING request to message loop
             let ping_sent = Instant::now();
-            if ping_tx.send(()).is_err() {
+            if ping_tx.send(PingRequest { write_ack_tx: None }).is_err() {
                 // Message loop has terminated
                 return HeartbeatExit::OwnerStopped;
             }
@@ -831,10 +859,11 @@ mod tests {
             )
             .await
         });
-        timeout(std::time::Duration::from_secs(1), ping_rx.recv())
+        let ping = timeout(std::time::Duration::from_secs(1), ping_rx.recv())
             .await
             .expect("heartbeat PING")
             .expect("heartbeat sender");
+        assert!(ping.write_ack_tx.is_none());
         pong_tx.send(old_pong).unwrap();
 
         match heartbeat.await.unwrap() {
@@ -849,12 +878,103 @@ mod tests {
         drop(state_tx);
     }
 
+    #[tokio::test]
+    async fn send_only_heartbeat_waits_for_write_ack_before_scheduling_next_ping() {
+        let config = Config {
+            heartbeat_interval: std::time::Duration::from_millis(20),
+            heartbeat_timeout: std::time::Duration::from_millis(1),
+            require_text_pong: false,
+            ..Config::default()
+        };
+        let (ping_tx, mut ping_rx) = mpsc::unbounded_channel();
+        let (_state_tx, state_rx) = watch::channel(ConnectionState::Connected {
+            since: Instant::now(),
+        });
+        let (pong_tx, pong_rx) = watch::channel(Instant::now());
+
+        let heartbeat = tokio::spawn(async move {
+            ConnectionManager::<TestMessage, TestParser>::heartbeat_loop(
+                ping_tx, state_rx, &config, pong_rx,
+            )
+            .await
+        });
+        let first = timeout(std::time::Duration::from_secs(1), ping_rx.recv())
+            .await
+            .expect("first send-only PING")
+            .expect("heartbeat sender");
+        let first_ack = first.write_ack_tx.expect("send-only PING write ack");
+        tokio::time::sleep(std::time::Duration::from_millis(70)).await;
+        assert!(
+            matches!(ping_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "a blocked write must not accumulate PING requests"
+        );
+        first_ack.send(()).unwrap();
+        pong_tx.send(Instant::now()).unwrap();
+        assert!(
+            timeout(std::time::Duration::from_millis(10), ping_rx.recv())
+                .await
+                .is_err(),
+            "write completion or a late PONG must not trigger a catch-up PING burst"
+        );
+        let second = timeout(std::time::Duration::from_millis(50), ping_rx.recv())
+            .await
+            .expect("next PING after one full reset interval")
+            .expect("heartbeat sender");
+        assert!(second.write_ack_tx.is_some());
+        drop(second);
+        drop(ping_rx);
+
+        match timeout(std::time::Duration::from_secs(1), heartbeat)
+            .await
+            .expect("heartbeat stops when its write ack closes")
+            .unwrap()
+        {
+            HeartbeatExit::OwnerStopped => {}
+            HeartbeatExit::Recoverable(_) => {
+                panic!("send-only write-ack closure is an owner stop")
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn send_only_heartbeat_ping_write_failure_is_recoverable() {
+        let (socket, release_tx, server) = locally_write_shutdown_socket().await;
+        let (_sender, mut outbound, broadcast_tx, mut signals) = connection_test_context();
+        let config = Config {
+            heartbeat_interval: std::time::Duration::from_millis(1),
+            heartbeat_timeout: std::time::Duration::from_secs(1),
+            require_text_pong: false,
+            ..Config::default()
+        };
+
+        let exit = timeout(
+            std::time::Duration::from_secs(1),
+            ConnectionManager::<TestMessage, TestParser>::handle_connection(
+                socket,
+                &mut outbound,
+                &broadcast_tx,
+                config,
+                &TestParser,
+                &mut signals,
+            ),
+        )
+        .await
+        .expect("send-only heartbeat PING write failure");
+        assert_recoverable_connection_error(exit);
+        release_tx.send(()).unwrap();
+        timeout(std::time::Duration::from_secs(1), server)
+            .await
+            .expect("send-only heartbeat PING test server cleanup")
+            .unwrap();
+    }
+
     #[cfg(all(feature = "tracing", feature = "rtds"))]
     #[tokio::test(flavor = "current_thread")]
     async fn rtds_raw_trace_is_explicit_but_warn_and_sticky_fault_are_bounded() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
         use crate::rtds::RtdsMessage;
         use crate::rtds::subscription::SimpleParser;
-        use tracing_subscriber::layer::SubscriberExt as _;
 
         const INVALID_SCALAR: &str = "INVALID_TIMESTAMP_MUST_NOT_LEAK";
         const NESTED_SECRET: &str = "NESTED_PAYLOAD_MUST_NOT_LEAK";

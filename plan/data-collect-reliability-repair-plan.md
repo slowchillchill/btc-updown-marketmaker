@@ -6,7 +6,7 @@
 >
 > 事项编号：`DC-REPAIR-20260713-COLLECTOR-RELIABILITY`
 >
-> 状态：`SUPERSEDED_AFTER_HEARTBEAT_BASELINE`。本计划已完成并通过审查的CLOB `10s/20s`、RTDS `5s/15s`分源heartbeat修复继续作为保持基线；用户于2026-07-17批准`plan/data-collect-source-availability-lifecycle-repair-plan.md`后，本计划未执行的业务静默恢复预算、D2 one-shot reconnect、CLOB freshness退出、有限总恢复、旧SDK patch白名单、daily coverage及生产阶段全部被取代，不再提供实施、构建、部署、远端操作或数据清理授权。历史执行记录仍以原changelog为准。
+> 状态：`SUPERSEDED_AFTER_HEARTBEAT_BASELINE`。本计划已完成并通过审查的CLOB `10s/20s/require_text_pong=true`继续作为保持基线；旧RTDS `5s/15s PING/PONG`已由`plan/data-collect-source-availability-lifecycle-repair-plan.md`阶段9 `RTDS-PONG-A`取代，该阶段已于2026-07-19完成本地实现、全量门禁、香港线路复测及独立终审，当前RTDS为固定`5s/require_text_pong=false`。本计划未执行的业务静默恢复预算、D2 one-shot reconnect、CLOB freshness退出、有限总恢复、旧SDK patch白名单、daily coverage及生产阶段全部被新计划取代，不再提供实施、构建、部署、远端操作或数据清理授权。历史执行记录仍以原changelog为准。
 >
 > 当前训练collector首次正式冷启动的独立执行authority为`plan/data-collect-training-collector-direct-deployment-plan.md`；本旧计划中的`Restart=no`、gate、UTC边界等待与数据清理步骤均不可执行。
 
@@ -55,7 +55,7 @@ source 目录               source_kind=<source>
 ### 4.1 当前SDK与source生命周期
 
 1. SDK以新需求第4.7节最终获批逐项语义矩阵为authority，不再使用固定“六项/八项patch”合同。保持pinned 0.6.0、唯一vendor根和三个源码差异路径；保留sticky parser fault、CLOB all-or-error、`SimpleParser::Default`、generation隔离能力和RTDS有界脱敏诊断目标。阶段2补齐当前外显serde scalar泄漏；RTDS已接入bound-generation manager，CLOB生产actor在阶段4补齐同等绑定、generation-tagged私有ack及waiter复核。用户已选择B恢复官方pre-parse完整文本帧trace，并显式批准失败trace脱敏边界放宽。
-2. 阶段2先让heartbeat timeout/旧PONG结束旧socket并进入既有recoverable loop，同时让最后一个manager/bound sender关闭成为不重连的normal teardown；不得增加第二owner或公共shadow API。
+2. 阶段2让strict heartbeat timeout/旧PONG结束旧socket并进入既有recoverable loop，同时让最后一个manager/bound sender关闭成为不重连的normal teardown；该strict语义当前只适用于`require_text_pong=true`的CLOB。阶段9 RTDS `require_text_pong=false`固定发送PING且no-PONG不重连；不得增加第二owner或公共shadow API。
 3. 阶段3原子删除RTDS业务静默专用`request_reconnect()`的vendor能力、runtime wrapper、生产调用和ticket专属测试；每个真实transport新generation仍只replay一次latest complete filtered desired。
 4. CLOB删除30/60秒freshness watchdog、unsubscribe/resubscribe budget与第三次退出；Gamma外部失败/空候选持续恢复。Binance aggTrade/depth区分“有合法控制frame但无业务数据”和“完全无入站frame”，业务静默不控制网络；confirmed ID/update hole、parser/schema和本地book不变量继续按完整性合同处理。
 5. 各source单次connect/HTTP/read/backoff等待有界并使用capped backoff+jitter；source-local外层总attempt和总elapsed无限，普通external availability、业务静默、日志失败或既有诊断计数饱和不得结束source/collector。

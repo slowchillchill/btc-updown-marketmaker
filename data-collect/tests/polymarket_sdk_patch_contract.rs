@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::{SinkExt as _, StreamExt as _};
 use polymarket_client_sdk_v2::auth::Credentials;
@@ -275,6 +275,10 @@ async fn clob_connection_reconnects_when_heartbeat_pong_is_missing() {
         })
         .await
         .expect("first heartbeat PING");
+        first_socket
+            .send(Message::Pong(Vec::new().into()))
+            .await
+            .unwrap();
 
         timeout(Duration::from_secs(2), async {
             loop {
@@ -320,6 +324,7 @@ async fn clob_connection_reconnects_when_heartbeat_pong_is_missing() {
     let mut config = generation_test_config();
     config.heartbeat_interval = Duration::from_millis(20);
     config.heartbeat_timeout = Duration::from_millis(30);
+    config.require_text_pong = true;
     let connection = ConnectionManager::<WsMessage, Arc<InterestTracker>>::new(
         format!("ws://{address}"),
         config,
@@ -349,6 +354,91 @@ async fn clob_connection_reconnects_when_heartbeat_pong_is_missing() {
 
     finish_tx.send(()).unwrap();
     server.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rtds_connection_sends_fixed_cadence_ping_without_requiring_text_pong() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        let mut ping_times = Vec::new();
+        while ping_times.len() < 7 {
+            match timeout(Duration::from_secs(2), socket.next())
+                .await
+                .expect("fixed-cadence RTDS heartbeat frame")
+            {
+                Some(Ok(Message::Text(text))) if text == "PING" => {
+                    ping_times.push(Instant::now());
+                }
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
+                    panic!("RTDS socket closed while PONG was intentionally absent")
+                }
+                _ => {}
+            }
+        }
+
+        socket
+            .send(Message::Text(
+                json!({
+                    "topic": "crypto_prices_chainlink",
+                    "type": "update",
+                    "timestamp": 1,
+                    "payload": {"symbol": "btc/usd", "timestamp": 1, "value": "1"}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            timeout(Duration::from_millis(150), listener.accept())
+                .await
+                .is_err(),
+            "missing RTDS PONG must not create another connection"
+        );
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                match socket.next().await {
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("dropping the RTDS manager must close its socket");
+        ping_times
+    });
+
+    let mut config = generation_test_config();
+    config.heartbeat_interval = Duration::from_millis(20);
+    config.heartbeat_timeout = Duration::from_millis(30);
+    config.require_text_pong = false;
+    let connection = ConnectionManager::<RtdsMessage, SimpleParser>::new(
+        format!("ws://{address}"),
+        config,
+        SimpleParser::default(),
+    )
+    .unwrap();
+    let mut states = connection.state_receiver();
+    let mut messages = connection.subscribe();
+    wait_for_connected(&mut states).await;
+    let initial_generation = connection.connection_generation();
+
+    timeout(Duration::from_secs(2), messages.recv())
+        .await
+        .expect("business frame after more than three old heartbeat timeouts")
+        .unwrap();
+    assert_eq!(connection.connection_generation(), initial_generation);
+    assert!(connection.state().is_connected());
+    drop(connection);
+
+    let ping_times = server.await.unwrap();
+    let elapsed = ping_times.last().unwrap().duration_since(ping_times[0]);
+    assert!(elapsed >= Duration::from_millis(100));
+    assert!(elapsed < Duration::from_millis(500));
 }
 
 #[tokio::test(flavor = "current_thread")]

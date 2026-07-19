@@ -626,7 +626,9 @@ async fn rtds_natural_reconnect_replays_once_without_unsubscribe() {
     });
 
     let subscription = Subscription::chainlink_prices(Some("btc/usd".to_owned()));
-    let mut runtime = RtdsSdkRuntime::new(format!("ws://{address}"), fast_config()).unwrap();
+    let mut config = fast_config();
+    config.require_text_pong = false;
+    let mut runtime = RtdsSdkRuntime::new(format!("ws://{address}"), config).unwrap();
     runtime
         .subscribe(subscription, Duration::from_secs(2))
         .await
@@ -708,7 +710,9 @@ async fn rtds_one_hundred_natural_reconnects_keep_one_actor_and_replay_per_gener
         }
     });
 
-    let mut runtime = RtdsSdkRuntime::new(format!("ws://{address}"), fast_config()).unwrap();
+    let mut config = fast_config();
+    config.require_text_pong = false;
+    let mut runtime = RtdsSdkRuntime::new(format!("ws://{address}"), config).unwrap();
     runtime
         .subscribe(
             Subscription::chainlink_prices(Some("btc/usd".to_owned())),
