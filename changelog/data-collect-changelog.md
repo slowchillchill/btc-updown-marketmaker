@@ -595,3 +595,16 @@
 - 第二轮修复后全量验证通过：`cargo fmt --all -- --check`、`git diff --check`、`CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo clippy -p data-collect --all-targets -- -D warnings`、`CARGO_TARGET_DIR=/tmp/btc-updown-marketmaker-target cargo test -p data-collect --lib --tests --quiet`（98 条测试）。
 - 第二轮修复后 `throughput_probe` bench 通过：`polymarket_p95_window` 302000 rows，`events_per_sec_total=1703182.50`，`flush_latency_ms_p95=1`，`finalize_failures=0`；`polymarket_max_window` 433000 rows，`events_per_sec_total=1771398.44`，`flush_latency_ms_p95=1`，`finalize_failures=0`。
 - 最终 Phase 6 复审结果为 `PASS`、`PASS`、`PASS_WITH_NOTES`，无 Critical/Important blocker；复审确认 e2e coverage 绑定、manifest time window 一致性、partial discovery 负例、acceptance matrix 证据口径和非范围扫描均已关闭或可接受。允许进入 commit/push gate。
+
+## 2026-07-22：Polymarket resolution-followup窄authority同步
+
+- 用户逐项批准`demand/data-collect-polymarket-resolution-followup-demand.md`第1至8项，拒绝并要求删除固定5秒`closedTime` future-skew allowance，并批准同步主authority。批准范围只覆盖需求定稿与阶段0文档同步，不授权Rust/schema/test实现、构建/测试执行、commit、push、release、远端probe、部署、服务操作或数据清理。
+- 本demand当前语义已同步：market lifecycle仍为candidate/prefetched/active/retired四态，runtime role独立增加resolution_pending；T时prefetched/next转active/current，E时只把current转resolution_pending，取得合格terminal证据后才把active转retired，budget exhausted只退出role。
+- Gamma fallback当前authority冻结为固定identity的E+3 initial与E+4..E+8五次retry。`active`只记录、不参与terminal truth-value判定；closedTime只要求存在、可解析且不早于E，并与receive分别原样保存，不设置future-skew上界。主plan阶段2任务2.1步骤2.1.3的旧执行结果及旧代码事实中的`active=false`保留为历史，主计划任务8.5当前规范已明确supersede，不能冒充新合同已经实现。
+- 固定resolution业务slot每slot最多一条metadata v3 attempt row，作为“普通transport只进source-local/operator日志”的窄例外；row进入既有Parquet与manifest file facts，但daily manifest schema/artifact、sidecar和通用transport episode仍不扩张。
+- 主plan任务8.5已补齐resolution_pending、六个slot、19项source failure枚举、五种v3 row kind、terminal-once/drain、prefix durability、restart fail-closed及后续专项验收引用。既有2小时live run只证明旧metadata source存在，不作为新合同实现证据。
+- `demand/rebuild-core-demand.md`只同步data-collect runtime role与证据驱动retired窄边界；该文档整体仍在用户审核中，本次没有批准其余rebuild-core内容。
+- 阶段0文档同步完成自审与两路`gpt-5.6-sol`/Ultra独立终审；source-availability顶部指针/changelog漏记desired asset union的唯一Minor已修复并复审通过，最终两路均为PASS且Critical/Important/Minor为0。当前停在review-ready，未执行Rust/schema/test实现、Cargo/live验证、commit、push或远端操作。
+- 用户随后指定本事项AC-12真实数据采集测试验收改在本地原生Ubuntu环境使用已配置香港VPN线路执行，不再上传到AWS爱尔兰数据采集服务器。专项demand/plan/changelog及主authority已同步；测试前、运行期间每个完整五分钟market window至少一次、测试结束后须保留不含凭据的香港VPN/出口线路证据，线路不可确认、失效或静默直连回退均不得通过。本地receive/latency不得冒充AWS爱尔兰paper/live主机延迟，production部署拓扑不变。本次未实际运行测试、VPN或任何远端操作。
+- AC-12本地香港VPN拓扑修订经两路`gpt-5.6-sol`/Ultra独立审查并最终PASS，Critical/Important/Minor均为0；线路连续性证据与本地validation路径审批歧义已修复，未发现其他当前AWS执行要求或production拓扑漂移。
+- 用户随后明确授权完整执行resolution-followup阶段1至阶段4，包括Rust/schema/test实现、本地构建与全量测试、每阶段独立审查后的commit/push及最终本地香港VPN AC-12；production部署、服务操作和数据删除继续禁止。阶段0文档将先精确commit/push，随后严格按专项计划逐阶段推进。

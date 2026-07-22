@@ -21,6 +21,8 @@
 > 状态：用户已在 2026-07-06 批准执行本文档；2026-07-10 又批准 Binance aggTrade schema v3、D+1 昨天归档修正、立即重新部署与重启采集；2026-07-11 批准只修复归档 depth checkpoint 并本地重跑，明确禁止审核前上传。本次执行仍不授权 paper/live 真实市场接入、真实下单、撤单或资金操作。
 >
 > 2026-07-18训练collector首次正式冷启动以`plan/data-collect-training-collector-direct-deployment-plan.md`为历史authority；2026-07-19用户批准的RTDS-PONG-A原路径重置部署以`plan/data-collect-rtds-pong-a-reset-deployment-plan.md`为当前执行authority。本计划中更早的gate、删除、重启或部署记录只保留为历史，不得重新执行。
+>
+> 2026-07-22 Polymarket resolution-followup窄authority已按用户批准同步到任务8.5附近；详细后续实现与验收只以`plan/data-collect-polymarket-resolution-followup-plan.md`为准。本事项AC-12真实source验收固定在本地原生Ubuntu环境使用已配置香港VPN线路，不再上传到AWS爱尔兰数据采集服务器执行。阶段0文档同步已完成；用户已后续授权完整执行阶段1至阶段4、本地构建/测试、每阶段独立审查后的commit/push与本地AC-12，但未授权production部署、服务操作或数据删除。
 
 ## 2026-07-10 已批准增量执行
 
@@ -106,7 +108,7 @@
 阶段 0 通过标准：
 
 1. 官方 Polymarket Rust SDK 能力核对完成，明确 market channel、RTDS、market discovery、metadata 是否覆盖需求；缺口已经形成报告并获得用户批准，或不存在阻塞缺口。
-2. 技术测试必须真实发现当前 `btc-updown-5m` active market 和 prefetched next market，跨至少一个 market rollover 验证 current -> retired、prefetched -> active 的切换边界；不得用 generic BTC/Bitcoin open market 或任意 CLOB market 代替。
+2. 技术测试必须真实发现当前`btc-updown-5m` active market和prefetched next market，跨至少一个market rollover验证`prefetched -> active`、`next -> current`与`current -> resolution_pending`；retired只能由后续合格WS/Gamma terminal证据触发，budget exhausted只退出pending role。不得用generic BTC/Bitcoin open market或任意CLOB market代替。
 3. 技术测试必须用真实 Polymarket market channel、Binance `BTCUSDT` depth WS + REST snapshot、Binance `BTCUSDT` aggTrade WS、RTDS Chainlink `btc/usd` 四源同时运行，并按同一 UTC window 记录 coverage、first business event、source timestamp、`recv_time_utc`、source gap/stale 和逐源吞吐。
 4. 技术测试证明四源合并 `2k-5k events/s` 的解析、排队、写入、health/gap 统计路径在目标 hardware tier 上可达到需求基线，或明确给出达不到时的真实瓶颈和备选方案；synthetic throughput 只能作为容量预检，不再单独构成阶段 0 通过证据。
 5. 技术测试证明 parquet running/temp segment、close/finalize、sha256、manifest、required_files[] 和 atomic rename 发布路径可恢复、可校验、不会被消费者读取 partial artifact。
@@ -2589,7 +2591,10 @@ CARGO_TARGET_DIR=target/data-collect-ci \
 - `LIVE_SOURCES` 增加 `polymarket_market_metadata`，writer 创建独立 parquet 和 manifest。
 - 将 discovery pair 的 current/next Gamma metadata snapshot 写成 `metadata_source=metadata_snapshot` 或 `active_scan` rows，包含 slug、condition id、asset ids、start/end、active、acceptingOrders、lifecycle。
 - `new_market` 事件同时继续保留在 `polymarket_market` 事件流，并生成对应 `polymarket_market_metadata` row；不得只在 orderbook schema 里用 `new_market` 代替 metadata source。
-- 当 `market_resolved` 缺失、stale 或 source gap 时，只有在 SDK/Gamma fallback close snapshot 同时满足 same-condition、asset set、freshness、`closed=true`、`active=false`、`acceptingOrders=false`、closed time 和 resolution evidence 时，才能生成 `fallback_close` / `retired` row；不满足 retired predicate 时只能记录 `metadata_unavailable_reason` / unavailable observation，不得以 window end 或 stale discovery 伪造 retired。
+- 2026-07-22批准的当前authority取代旧`active=false` fallback门：E时旧market lifecycle保持active、runtime role从current切到resolution_pending并保留terminal观察assets；只有合格`market_resolved`或fresh exact-slug Gamma证据才能写retired，预算耗尽只写`resolution_followup_exhausted`并退出role，不再新写`unresolved_window_end_observation`。
+- Gamma fallback固定为E+3 initial与E+4..E+8五次retry，总计最多6个绝对slot。terminal predicate要求固定same identity、exact二元asset/outcome映射、`closed=true`、`acceptingOrders=false`、存在且可解析并不早于E的closedTime、精确resolved状态与one-hot winner；`active`只原样记录为nullable字段，不参与truth-value判定，closedTime与receive之间没有future-skew上界门。
+- metadata升级为v3并采用批准需求RF-09的五种row kind、required/null matrix、19项稳定source failure枚举、可还原payload与digest/reference合同；每slot最多一条attempt row。该row进入既有Parquet与manifest file facts，但不扩张manifest schema/artifact/sidecar；terminal-once、WS/Gamma drain、prefix durability与restart fail-closed矩阵均以批准专项需求/计划为准。
+- 上述三条当前只完成authority同步，不能冒充Rust/schema/test已实现；阶段2任务2.1步骤2.1.3的历史执行结果保留当时`active=false`事实，并由本节与新changelog追加记录supersede。
 - 对 SDK 暴露不到的 tick size、min size、fee/reward 字段，优先通过 SDK/Gamma 类型补齐；无法补齐时必须在 typed schema、raw evidence 或 segment/run manifest 中写 `metadata_unavailable_reason` / `field_unavailable_reasons` / limitation 等等价证据，不能只写 null 后仍把 metadata 判为 complete。
 
 **测试：**
@@ -2603,7 +2608,7 @@ CARGO_TARGET_DIR=target/data-collect-ci \
   cargo test -p data-collect live_runtime --lib -- --nocapture
 ```
 
-**验收：** 2 小时 live run 的 `source_coverage` 包含 `polymarket_market_metadata`；metadata parquet 存在 finalized 文件和 manifest；至少 current/next market metadata 可读，缺失字段有明确 unavailable/gap reason。
+**验收：** 既有2小时live run仍只证明当时`source_coverage`包含`polymarket_market_metadata`、metadata parquet/finalized manifest及current/next可读；它不证明2026-07-22批准的resolution-followup合同已实现。后续必须按专项需求AC-01至AC-13及专项计划阶段1至阶段4取得新的schema、竞态、restart、资源、全量回归和本轮已授权的本地live-validation证据后，才能宣称新合同完成；其中AC-12固定在本地原生Ubuntu环境使用已配置香港VPN线路执行，不使用AWS爱尔兰数据采集服务器，且本地receive/latency不得冒充AWS爱尔兰paper/live主机延迟。
 
 ### 任务 8.6：同步 release/README/systemd/contract
 

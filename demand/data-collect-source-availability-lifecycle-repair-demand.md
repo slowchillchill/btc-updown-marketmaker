@@ -8,13 +8,15 @@
 >
 > 状态：`PHASE_9_COMPLETE_RTDS_PONG_A`。用户已于2026-07-17批准本文、对应计划及第4.7节SDK-first逐项patch矩阵，并授权按计划分阶段实施、验证、独立审查、commit和push；阶段0至阶段8均已完成实现、最终门禁与三路独立终审。用户于2026-07-19在香港线路15分钟wire验证后明确回复“批准 RTDS-PONG-A”；阶段9现已完成RTDS固定PING/no-PONG实现、定向与全量门禁、香港线路修复后15分钟SDK复测、官方crate provenance核验及两路独立终审，Critical/Important/Minor均为0。此前批准的`CT-B`、`D6-SCHEMA-R`、`M1-A / M2-A0 / M4-A-R / M5-N/A / M6-A+ / M7-A-R`及修订后的`M3-A-R`实现语义继续有效；M8-A旧UTC边界首次启用候选已由用户2026-07-18批准的独立直接长期部署事项取代。本文只提供实现 authority；用户2026-07-19后续批准的production release构建、精确current-day删除、部署与远端服务操作只以`demand/data-collect-rtds-pong-a-reset-deployment-demand.md`及对应计划/changelog为authority。
 
+> 2026-07-22窄authority同步：已批准的`demand/data-collect-polymarket-resolution-followup-demand.md`只对固定pending-resolution identity的E+3..E+8 exact-slug查询、每个业务slot最多一条metadata v3 attempt row，以及旧market assets保留到terminal claim后的bounded drain或budget完成，建立本文的有界例外。desired asset set因此扩展为current + prefetched next + resolution_pending旧market assets；current/next discovery、普通availability、manifest schema/artifact及本文其他生命周期合同不变。用户已后续授权按专项计划执行阶段1至阶段4及每阶段commit/push；该授权不重开本文其他已完成阶段，也不授权production部署、服务操作或数据删除。
+
 ## 一、目标
 
 修复训练数据采集器把外部业务消息静默、stale、暂时不可达或服务端暂时没有数据错误升级为订阅操作、连接操作、`source_gaps`、告警、source 退出或整个 collector 退出的行为。
 
 修复后的 `data-collect-training-collector` 必须满足：
 
-1. Polymarket market/metadata、RTDS、Binance depth/snapshot与Binance aggTrade中任意一个、多个或全部外部I/O路径不可达或业务流静默时，collector都在同一PID内持续运行，健康producer继续采集和写盘。六条外部I/O路径全部不可达时进程保持有直接证据的degraded并逐路恢复；Gamma已返回有效稳定市场、depth已取得合法初始snapshot且四条WebSocket按协议存活但均无合格业务事件时，进程保持active/idle。本事项的availability摘要只使用单一collection coverage并复用六个既有artifact/source counter，其他既有manifest字段及职责保持不变；nullable last-qualifying只能从typed raw或source-local运行事实因果取得，不是新增manifest字段。当前transport事实只存在于source-local运行态及有界operator日志，不进入daily manifest，也不得虚构degraded或silence状态转换。
+1. Polymarket market/metadata、RTDS、Binance depth/snapshot与Binance aggTrade中任意一个、多个或全部外部I/O路径不可达或业务流静默时，collector都在同一PID内持续运行，健康producer继续采集和写盘。六条外部I/O路径全部不可达时进程保持有直接证据的degraded并逐路恢复；Gamma已返回有效稳定市场、depth已取得合法初始snapshot且四条WebSocket按协议存活但均无合格业务事件时，进程保持active/idle。本事项的availability摘要只使用单一collection coverage并复用六个既有artifact/source counter，其他既有manifest字段及职责保持不变；nullable last-qualifying只能从typed raw或source-local运行事实因果取得，不是新增manifest字段。除2026-07-22批准的固定resolution-followup业务slot typed attempt窄例外外，当前transport事实只存在于source-local运行态及有界operator日志，不进入daily manifest，也不得虚构degraded或silence状态转换。
 2. 业务消息静默、持续 stale、暂时无候选市场、DNS/TCP/TLS/WebSocket/HTTP 不可达、协议明确要求PONG时的heartbeat timeout、rate limit 和服务端关闭是外部availability与下游missingness因果基础，不得仅因持续时间或恢复次数升级为confirmed gap、异常告警、run failure、source退出、collector退出或systemd新PID；RTDS没有文本PONG不得被归入heartbeat timeout，missingness mask只由后续`ObservationContract`在求值时派生。
 3. 业务静默不控制网络：不得仅因没有业务消息而重复 subscribe/unsubscribe、主动切换 connection generation 或主动断开仍然存活的 socket。
 4. 真实 transport 故障在同一进程的 source-local transport owner 内持续恢复；单次等待、退避、并发和资源必须有界，但 availability episode 的总时长与总尝试次数不得成为进程存活预算。
@@ -94,7 +96,7 @@ manifest 中可以表现为六类 source artifact，但它们不是六个独立�
 ### 3.2 本事项不包含
 
 - 新增 CLOB user channel 或其他新外部数据源；
-- 除第4.5节已批准的`binance_aggtrade_v6`判别联合及其handoff evidence schema，以及第4.6节已批准的`binance_depth_snapshot_v3`/`binance_depth_update_v4`因果坐标扩展外，修改RTDS/CLOB/Binance业务payload schema、价格含义、dedupe identity或Parquet行布局；三者都复用各自既有artifact、writer和manifest mapping，不新增artifact、quarantine sidecar或第二写入路径；第4.2节对每日manifest schema的有界扩展仍属于本事项，其他新artifact/typed raw/consumer schema必须停在新决策门；
+- 除第4.5节已批准的`binance_aggtrade_v6`判别联合及其handoff evidence schema、第4.6节已批准的`binance_depth_snapshot_v3`/`binance_depth_update_v4`因果坐标扩展，以及2026-07-22独立批准的`polymarket_market_metadata_v3` resolution-followup五类row与每slot唯一attempt合同外，修改RTDS/CLOB/Binance/Polymarket业务payload schema、价格含义、dedupe identity或Parquet行布局；这些例外都复用各自既有artifact、writer和manifest mapping，不新增artifact、quarantine sidecar或第二写入路径；第4.2节对每日manifest schema的有界扩展仍属于本事项，其他新artifact/typed raw/consumer schema必须停在新决策门；
 - 在 `data-pipeline`、model-train、offline-evaluation、paper、live 或 execution 中实现模型策略；
 - 决定或实现`data-pipeline`/Model Runtime的`DecisionWakeEvent`、deadline数量/阈值、离散`next_wake_bucket`、timer排序/抢占、最小/最大间隔、变量持续时间Reward/SMDP归因或模型调度策略；这些属于整体审核中的`demand/rebuild-core-demand.md`，不属于collector修复；
 - fixed/periodic decision tick、周期性合成 market row、用 PING/PONG 填充业务 coverage，或用 stale 值冒充 current；
@@ -117,7 +119,7 @@ manifest 中可以表现为六类 source artifact，但它们不是六个独立�
 
 ### 4.2 中性 availability/missingness 证据与 manifest coverage
 
-1. source-local transport owner仍必须根据真实connect/read/write/HTTP/WebSocket/heartbeat结果区分连接中、重试、恢复与terminal完整性错误；这些状态只控制对应协议恢复并可形成有界、去重的operator日志，不得因持续时间、累计尝试、日志失败或既有诊断计数饱和结束source/collector。本事项不在daily manifest新增transport scope、reason矩阵、current/open摘要或episode；现有reconnect/lag/drop等source counter保持既有字段和职责。
+1. source-local transport owner仍必须根据真实connect/read/write/HTTP/WebSocket/heartbeat结果区分连接中、重试、恢复与terminal完整性错误；这些状态只控制对应协议恢复并可形成有界、去重的operator日志，不得因持续时间、累计尝试、日志失败或既有诊断计数饱和结束source/collector。固定resolution-followup业务slot可按独立已批准需求每slot写至多一条metadata v3 attempt row，仍不得在daily manifest新增transport scope、reason矩阵、current/open摘要或episode；除此之外现有reconnect/lag/drop等source counter保持既有字段和职责。
 2. 纯业务静默本身没有新的协议事件，也没有官方cadence可定义开始点。本事项不得为RTDS、CLOB、aggTrade或depth新增或保留business-silence timer、离散silence-start事件或阈值；collector只保留typed raw接收时间、既有source counter中的首末接收事实、可因果取得的last qualifying business/fresh receive time和本节冻结的collection-day coverage。
 3. 每个UTC日仍只有一个由唯一ManifestOwner原子维护的`manifest.json`。顶层schema继续是`data_collect_daily_manifest_v3`，只新增一个直接嵌套、独立版本化的`collection_day_coverage`对象；不得新增通用`extensions`容器、health/gap/reconnect receipt、sidecar、逐事件availability日志或把coverage复制进六个`source_counters`。
 4. `collection_day_coverage.schema_version`固定为`data_collect_collection_day_coverage_v1`。该对象只表达四个mandatory logical producer supervisor、六个writer及coordinator-owned bounded event queue/唯一receiver/ingress处理路径已经全部接纳且仍共同受collector监督的观察资格交集，不表达transport、subscription或业务健康，也不承诺任一artifact应按某cadence产生行。实现前必须在任何网络动作前验证且测试冻结以下映射，但不在每个manifest重复保存：`polymarket -> polymarket_market, polymarket_market_metadata`；`polymarket_rtds -> polymarket_rtds_chainlink_btc_usd`；`binance_depth -> binance_depth_snapshot, binance_depth_update`；`binance_aggtrade -> binance_aggtrade`。未来若出现optional producer、producer独立暂停/重启或任一mandatory成员terminal后collector继续运行，必须升级嵌套schema并重新取得用户批准。
@@ -160,10 +162,10 @@ manifest 中可以表现为六类 source artifact，但它们不是六个独立�
 ### 4.4 Polymarket CLOB market 与 Gamma metadata
 
 1. 删除 `MarketAssetFreshnessWatchdog`、首条30秒/后续60秒业务静默阈值、unsubscribe/subscribe恢复、两次resubscribe budget和第三次错误退出；不得把旧阈值保留为collector内的中性silence detector。后续`source_information_age`和availability mask由版本化`ObservationContract`计算，模型稀疏唤醒由独立`DecisionScheduleContract`处理；两者都不由collector选择阈值或生成timer。
-2. CLOB desired asset set 仍由 current/prefetched/retired market lifecycle 驱动；只有 desired assets 实际变化时，现有唯一 actor 才执行 dynamic additions/removals。
+2. CLOB desired asset set由current market、prefetched next market与全部resolution_pending旧market的assets并集驱动；terminal claim后仍保留对应pending/assets直到accepted-event bounded drain完成，只有drain后的terminal或budget完成才精确移除。只有desired assets实际变化时，现有唯一actor才执行dynamic additions/removals。
 3. 自然 transport reconnect 后，每个新 generation replay 当前最新完整 desired asset set；业务静默不得制造 desired revision 或 generation churn。
 4. CLOB 继续使用 `10s/20s` heartbeat。SDK 单次 connection loop 可以有限尝试后返回现有外层 source-local supervisor重建 runtime，但该外层总 cycle 和总 elapsed 不得耗尽 collector 存活预算。
-5. Gamma DNS/HTTP/rate limit、暂时无候选、当前市场尚未出现或rollover discovery暂时失败只形成metadata availability；当前可用market数据与其他source继续运行。服务恢复后按恢复时当前时钟重新计算current/next discovery window，禁止继续追逐已过期slug，也不回放伪造metadata。
+5. Gamma DNS/HTTP/rate limit、暂时无候选、当前市场尚未出现或rollover discovery暂时失败只形成metadata availability；当前可用market数据与其他source继续运行。服务恢复后按恢复时当前时钟重新计算current/next discovery window，禁止继续追逐已过期slug，也不回放伪造metadata。唯一例外是目标market已在自身活跃窗内固定并验证identity且仍处于`market_runtime_role=resolution_pending`时，可按已批准需求对该exact slug执行E+3..E+8有界resolution follow-up；process restart还必须具有finalized durable v3 identity，且不得补做错过slot、历史backfill或第7次probe。
 6. Gamma/SDK 返回无法验证的 schema、矛盾 market identity、asset mapping 或 lifecycle 不变量错误仍按既有受影响范围 fail closed，不得作为普通空结果吞掉。
 
 ### 4.5 Binance aggTrade
@@ -291,8 +293,8 @@ manifest 中可以表现为六类 source artifact，但它们不是六个独立�
 ### 6.3 CLOB 与 metadata
 
 14. **CLOB静默：** current/prefetched asset跨越至少三个旧30/60秒等价周期仍不unsubscribe/resubscribe、不退出；随后业务事件由同一generation消费。
-15. **CLOB lifecycle更新与generation隔离：** 只有current/prefetched/retired desired set真实变化才发送精确add/remove；自然reconnect后只replay最新完整set。CLOB actor必须按观察到的generation绑定manager并在发送后复核state/generation；私有applied ack携带generation，waiter同时校验当前generation、revision与connected。旧generation延迟发送不得落入新socket；发送后复核与ack发布之间切代时，旧ack也不得满足wait。
-16. **Gamma不可达/空候选：** 连续网络失败或暂时无候选不结束market source/collector、不写confirmed gap；服务恢复后按当前时钟重算current/next window，且不继续请求已过期slug。
+15. **CLOB lifecycle更新与generation隔离：** desired set为current + prefetched next + resolution_pending旧market assets并集；terminal claim后到accepted-event drain完成前不得移除pending assets，drain后的terminal或budget完成才发送精确remove。自然reconnect只replay最新完整set。CLOB actor必须按观察到的generation绑定manager并在发送后复核state/generation；私有applied ack携带generation，waiter同时校验当前generation、revision与connected。旧generation延迟发送不得落入新socket；发送后复核与ack发布之间切代时，旧ack也不得满足wait。
+16. **Gamma不可达/空候选：** 连续网络失败或暂时无候选不结束market source/collector、不写confirmed gap；服务恢复后按当前时钟重算current/next window，且current/next discovery不继续请求已过期slug。测试另证明只有活跃窗内已固定并验证identity的resolution-pending market可执行E+3..E+8 exact-slug例外；restart无finalized durable v3 identity、错过slot、budget结束或第7次probe均被拒绝。
 17. **metadata完整性：** 矛盾identity/schema/asset mapping负例仍按既有合同失败，不能被空候选恢复循环吞掉。
 
 ### 6.4 Binance

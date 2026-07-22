@@ -550,3 +550,12 @@
 - 修复后香港线路SDK复测运行`900001ms`并退出0：共897条消息、896条Chainlink update，`initial_generation=final_generation=0`、`subscription_revision=1`，本地SOCKS隧道仅1个TCP连接；前后出口均为`8.210.176.1 / HK / HKG`，代理服务均为PID `7729`、`NRestarts=0`。回执`target/rtds-sdk-hk-probe/postfix_receipt.json` SHA-256为`424321c0658c348a7cfc954cfd7eb19e859948f35cf35861263ed4946add1c37`。修复后WSS层只证明业务连续、单generation/revision与零no-PONG重连；精确PING cadence继续由同实现loopback计数，服务端no-PONG由修复前香港raw-wire 181次PING、零PONG/Close证据证明，不把TLS隧道不可见的修复后出站帧冒充wire观测。
 - 官方crate缓存SHA-256 `e0ed9ca91088808232ee7e6b48f8f4eaa846882f799c40f8190b0a0e3d28ed5e`与crates.io sparse index一致；registry与vendor源码差异仍精确为批准的四个文件，本阶段仅涉及其中两个；root/vendor Cargo与lock均未变化，vendor目录无`target/`。代码/状态机与测试/资源两路`gpt-5.6-sol`/`ultra`独立终审均为PASS，Critical 0、Important 0、Minor 0。
 - 阶段9提交subject冻结为`fix(data-collect): keep RTDS heartbeat on fixed cadence`；commit SHA与push后本地/upstream/remote ref一致性由交付报告记录，不在commit自身伪写尚未存在的SHA。阶段9完成只表示本地文档、代码、测试、香港线路诊断复测、provenance与审查闭环；没有执行生产release构建、部署、远端服务/数据写操作、数据清理或重采，也不授权这些操作。
+
+## 2026-07-22：Polymarket resolution-followup有界例外同步
+
+- 用户独立批准`DC-REPAIR-20260721-POLYMARKET-RESOLUTION-FOLLOWUP`需求语义与阶段0主authority文档同步。本专项关于source-local持续恢复、current/next按当前时钟重算、普通transport不进入daily manifest或typed episode的既有合同继续有效。
+- expired-slug规则只增加一个有界例外：目标market必须已在自身活跃窗内固定并验证identity且仍为`market_runtime_role=resolution_pending`，才可对该exact slug执行E+3..E+8 resolution follow-up。process restart还要求finalized durable v3 identity；错过slot不补做，budget结束不追逐，不允许历史backfill或第7次probe。
+- desired asset set同步扩展为current + prefetched next + resolution_pending旧market assets；terminal claim后继续保留对应pending/assets，直到accepted-event bounded drain完成，随后才按terminal或budget完成精确移除。该变化只服务已批准的旧market terminal观察，不改变current/next discovery。
+- transport持久化规则只增加固定业务slot例外：每slot最多一条`polymarket_market_metadata_v3` attempt row，仍写入既有metadata Parquet并由manifest既有file facts覆盖；不新增manifest transport scope/reason/current/open/episode、artifact、sidecar或第二writer。普通connect/read/backoff availability仍只进入source-local运行态与有界operator日志。
+- 本次只同步demand与历史changelog的supersede关系，没有修改本专项已完成的Rust、测试、SDK、schema产物或运行证据，也没有执行构建/测试、commit、push、release、远端或服务操作。
+- 用户随后明确授权独立resolution-followup专项完整执行阶段1至阶段4、每阶段独立审查后的commit/push及本地香港VPN AC-12；该后续授权supersede上一条“本次只同步”的执行边界，但不重开source-availability其他已完成阶段，也不授权production部署、服务操作或数据删除。
