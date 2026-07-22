@@ -83,6 +83,13 @@
 
 ## 阶段 1：先冻结失败测试与 metadata v3
 
+执行解释：任务1.1在本阶段冻结并实际观察目标行为的预期RED，不把尚未实现的
+pending/scheduler行为误报为GREEN；阶段1审查门仍只要求该RED可编译、可复现且失败在
+目标行为差异，并要求schema/predicate及既有默认测试保持通过。metadata v3在本阶段只建立
+同一layout/writer中的合同能力，production `typed_schema_version`与live emission继续唯一写v2；
+不新增第二writer、第二source kind、产品feature或dual-write。阶段2完成pending、terminal actor、
+admission与scheduler后再删除旧metadata fanout，并一次性切换production到v3。
+
 ### 任务 1.1：建立 fake-clock 时间线测试
 
 - 步骤 1.1.1：新增 paused-time fixture，复现当前 T+5 promotion、E+5 缓存 sentinel 和旧 assets 过早移除。
@@ -92,11 +99,11 @@
 
 ### 任务 1.2：升级 metadata schema
 
-- 步骤 1.2.1：将 `polymarket_market_metadata_v2` 升级为 v3，精确实现 RF-09 的五种 row kind、字段名、完整枚举和 required/null matrix。
-  - 验证：schema field names、row-kind validator、UTC timestamp unit、source metadata 与需求完全一致；所有v3 row identity非空，旧v2 slug-only candidate只读兼容且不再新写。
-- 步骤 1.2.2：扩展 row constructor、raw-to-typed conversion 和 writer batch，分离 `timestamp_received`、source-evidence receive 与 collector admission，冻结 attempt ordinal 1..6、poll result、transport class/status、closedTime raw/check、active unavailable reason、followup summary、counters、nullable predicate/evidence、event type/channel、可还原payload与digest fields。
+- 步骤 1.2.1：在保留现有v2 production路径的同时新增 `polymarket_market_metadata_v3` 合同能力，精确实现 RF-09 的五种 row kind、字段名、完整枚举和 required/null matrix。
+  - 验证：schema field names、row-kind validator、UTC timestamp unit、source metadata 与需求完全一致；所有v3 row identity非空，旧v2 slug-only candidate只读兼容且不再新写；阶段1没有production v3 emission或dual-write。
+- 步骤 1.2.2：在同一layout与既有writer版本分派中扩展v3 row、测试用 raw-to-typed conversion 和 writer batch，分离 `timestamp_received`、source-evidence receive 与 collector admission，冻结 attempt ordinal 1..6、poll result、transport class/status、closedTime raw/check、active unavailable reason、followup summary、counters、nullable predicate/evidence、event type/channel、可还原payload与digest fields；不新增独立v3 writer factory或提前冻结依赖阶段2 actor时序的production constructor。
   - 验证：T/E local rows不复制旧平台状态；真实 response-derived fields只来自对应 response/frame；transport/missed/summary row不含伪造 closed/winner/receive。
-- 步骤 1.2.3：增加五类 row 的 table-driven validator、failure-reason precedence、Arrow/Parquet roundtrip、v2/v3 non-mixing、manifest file-facts coverage、recovery 与 consumer compatibility tests。
+- 步骤 1.2.3：增加五类 row 的 table-driven validator、failure-reason precedence、Arrow/Parquet roundtrip、v2/v3 non-mixing、manifest file-facts coverage、schema-level recovery eligibility 与 consumer compatibility tests；startup recovery与crash matrix仍留在阶段3。
   - 验证：AC-02、AC-06、AC-09通过；fixed identity时间跨row不变，row-evidence validation completed只在适用row非空并满足source receive <= validation completed <= admission/applied；source-bearing row payload无损重建全部source-native response inputs，payload + row timing/attempt + fixed identity可重建完整predicate，digest重算一致，local reference精确解析到唯一source row；decoded stale/cache binding error也保留payload/receive/digest且predicate为null；WS event type/channel闭合；五类row的horizon/status逐项required/null；post row四个ownership-bearing winner/evidence字段为null；v2只读兼容且不能合成v3/recover pending；attempt rows增加既有file row count/hash但不改变每日manifest schema/artifact集合。
 
 ### 任务 1.3：结构化 terminal predicate 测试
@@ -110,7 +117,7 @@
 
 ### 任务 1.4：阶段审查门
 
-- 步骤 1.4.1：运行 targeted schema/predicate tests、fmt 和 diff check并自审。
+- 步骤 1.4.1：运行并记录named timeline RED，确认其失败在目标行为差异；随后运行targeted schema/predicate tests、默认测试、fmt和diff check并自审，默认验证不得因RED fixture而失败。
 - 步骤 1.4.2：按阶段 0 相同模型与 reasoning 要求执行独立阶段审查，修复后复审。
 - 步骤 1.4.3：只有已授权时 commit/push；否则停在 review-ready 且不进入下一阶段。
 
@@ -155,10 +162,12 @@
   - 验证：AC-05 至 AC-08；failure reason/result class唯一，WS-owned terminal/nonterminal Gamma response均成为post-terminal observation，而WS-owned integrity/transport结果保留原类且不被吞掉；任一 terminal 后取消剩余 slots。
 - 步骤 2.4.4：预算耗尽按“至少一次 valid response”与“零 valid response”互斥聚合，只发布一次 `resolution_followup_exhausted` 和 summary counters。
   - 验证：只有accepted-WS fence/drain无terminal后才发布summary；valid+transport混合序列归类唯一，四counter和last-valid条件不变量成立；budget horizon=E+8而role-exit scheduled=null/applied为drain后的实际完成；不写retired、不复制旧snapshot、不产生新`unresolved_window_end_observation`或第7次probe。
+- 步骤 2.4.5：在pending、terminal-once、bounded drain、metadata admission与scheduler全部接通后，删除WS `new_market` metadata fanout、E+5 sentinel及旧`fallback_close` metadata conversion，并将现有production writer/converter一次性切换到v3。
+  - 验证：production只有一个metadata emission/conversion/writer路径；不dual-write、不把旧事件硬映射为新row kind，切换后的新segment只含v3且历史v2只读。
 
 ### 任务 2.5：阶段审查门
 
-- 步骤 2.5.1：运行 fake-clock、subscription loopback、WS/Gamma race、retry/exhausted tests和自审。
+- 步骤 2.5.1：将阶段1的同一named timeline RED转为GREEN，并运行fake-clock、subscription loopback、WS/Gamma race、retry/exhausted、production v3 activation/non-mixing tests和自审。
 - 步骤 2.5.2：独立阶段审查覆盖 correctness、唯一 owner、资源、过度设计、文档一致性；修复后复审。
 - 步骤 2.5.3：只有已授权时 commit/push；否则停在 review-ready 且不进入下一阶段。
 

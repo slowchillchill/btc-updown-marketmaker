@@ -232,6 +232,136 @@ T-30继续作为健康情况下 next metadata/subscription的最迟覆盖边界�
 - 执行必须严格按阶段顺序推进；阶段0文档先精确commit/push，随后每个阶段只有在自审、规定的`gpt-5.6-sol`/Ultra独立审查和验证通过并完成commit/push后才能进入下一阶段。
 - production部署、服务操作和数据删除未获授权。阶段4只允许本地香港VPN真实source验证与本地隔离artifact，不上传或部署到AWS数据采集、paper或live服务器。
 
+## 2026-07-22：阶段 1 预检、反审查纠正与用户批准继续
+
+阶段 0 已按授权完成精确提交与推送：commit
+`948941ea552a43eb6b2754188f35864c07e0b52b`，本地 HEAD、upstream 与远端
+`origin/fix-rtds-silents` 已核对一致。进入阶段 1 预检时尚未修改任何 Rust、schema 或测试文件。
+
+首轮两路只读预检正确确认以下代码事实：当前runtime使用`std::time::Instant/SystemTime`且
+Tokio未启用`test-util`；production metadata仍固定v2并生成WS `new_market`、E+5 sentinel与
+`fallback_close`；这些旧事件不能在缺少pending、terminal-once、bounded drain和admission时
+直接改名映射为RF-09的五种v3 row。官方Polymarket Rust SDK能力充足，不存在SDK缺口。
+
+随后按用户要求对预检结论本身进行三路独立反审查。反审查纠正了首轮把实现难点升级为
+阶段硬冲突的过度判断：plan任务1.1明确要求修复前精确观察RED，阶段1审查门只要求
+schema/predicate与默认验证通过；同一fake-clock目标在阶段2审查门才转为GREEN。因此阶段1
+不要求pending/scheduler目标行为提前通过，也无需移动或合并阶段。
+
+用户同意并批准按以下最小执行解释继续：
+
+1. 阶段1保留compile-valid、可单独运行的named timeline RED及最小测试seam；默认构建与既有测试不得被破坏。阶段2使用同一测试转GREEN，不建立全仓通用clock框架。
+2. 阶段1只在同一layout与现有writer中建立v3 row/schema/enums/validator、测试转换/roundtrip/version guard及19项纯predicate能力；production继续唯一写v2。`parallel v3`只表示类型/schema短期共存，不是双写或第二production path。
+3. 不新增独立v3 writer factory、第二source kind、Cargo产品feature、production constructor空壳或提前的startup recovery。现有writer按schema version严格分派；完整recovery/crash matrix留在阶段3。
+4. 阶段2接通pending、subscription union、terminal actor/drain、admission与scheduler后，删除旧metadata fanout和E+5 sentinel，再一次性切换production到v3；不得把旧事件硬塞进新row kind。
+5. RF-09 required/null matrix、19项failure fixture、payload/digest/reference及v2/v3 non-mixing属于用户已批准的持久化合同，不是可删除的过度校验；实现使用基准fixture与table-driven mutation，不做字段组合的笛卡尔积或重复判定框架。
+
+本节supersede进入反审查前尚未提交的“阶段1必须fake-clock GREEN、必须移动任务1.1及新增显式v3 writer factory”的临时判断。demand的RF/AC、阶段1至4授权及production/服务/删除禁止边界均未改变。
+
+## 2026-07-22：阶段 1 实现、自审与验证
+
+阶段1按上述最小解释完成待独立审查的实现：
+
+- `live_runtime.rs`只增加Polymarket market-local双时钟采样与paused-time loopback fixture，未建立全仓clock abstraction。named测试`polymarket_resolution_timeline_is_absolute_red`默认忽略，显式运行会完整启动真实Gamma HTTP与官方SDK CLOB loopback collector，再只在最终时间线目标断言处RED；既有边界测试补齐E-1/E/E+1。
+- `polymarket_market_metadata_layout.rs`在保留v2的同时定义68字段v3 row、五种row kind、稳定枚举和单row required/null/因果时序validator；跨row唯一reference、首次identity snapshot一致性及terminal/summary互斥没有伪装成单row校验，留给阶段2 actor/writer admission与阶段3 recovery。
+- `sources/polymarket.rs`基于已固定官方Rust SDK `Market`类型增加纯Gamma terminal evaluator和19项稳定source failure precedence；`active`只记录，UMA status执行trim后ASCII大小写不敏感比较，不存在closedTime future-skew上界或raw REST/manual decode旁路。
+- 既有`create_for_typed_source`按metadata schema version选择v2/v3，同一writer增加v3 batch转换与严格递增admission检查；没有第二factory、第二source kind、dual-write、manifest扩张或production v3 emission。现有production runtime继续构造并写v2。
+- 合同测试覆盖五种row、68字段Arrow类型、required/null及因果时序拒绝、稳定枚举、真实payload可解析与digest重算、五row Parquet roundtrip、v2/v3 non-mixing、19项predicate与组合precedence、active true/false/null、无future-skew gate、SDK序列化重建及binding/decode失败。
+
+主线程自审纠正了实现过程中的范围或语义偏差：恢复被误删的历史v2 fallback；取消把所有snapshot都强制等同首次identity validation的过度校验；阻止integrity failure被错误归入post-terminal；恢复RF-07要求的trim + ASCII大小写不敏感UMA判断；删除阶段1尚无production调用方的v3 logical-bytes辅助方法；补齐v2 row标签/version guard、`active=false`正例、source payload与typed fixture一致性，并避免测试中同一identity同时出现terminal和summary。Clippy随后只指出新loopback测试中的一个可折叠match分支，已做等价局部改写。
+
+已执行验证：
+
+1. `cargo test -p data-collect --test polymarket_metadata_layout_contract --test polymarket_contract --test parquet_writer_contract --locked`：18 + 7 + 11项全部通过。
+2. `cargo test -p data-collect --lib live_runtime::tests::gamma_late_current_or_next_response_cannot_be_installed_after_window_advance --locked -- --exact`：1项通过。
+3. `cargo test -p data-collect --lib live_runtime::tests::polymarket_resolution_timeline_is_absolute_red --locked -- --exact`：退出0，指定RED为1项ignored。
+4. 同一named测试增加`--ignored --nocapture`显式运行：按计划退出101，collector与prefetch准备成功、无gap；实际仍只有旧E+5 sentinel，而目标要求T边界promotion/pending、E+3至E+8六个Gamma slot且无sentinel，失败点仅为最终目标时间线差异。
+5. `cargo clippy -p data-collect --all-targets --locked -- -D warnings`：修正上述测试分支后退出0。
+6. `cargo test -p data-collect --locked`：完整package默认测试退出0；named阶段1 RED保持默认ignored，所有既有及新增非RED测试通过。
+7. `cargo fmt --all -- --check`与`git diff --check`：退出0；`Cargo.lock`未变化。
+
+固定官方SDK类型和当前writer能力足以表达本阶段合同，未发现RF-11 SDK能力缺口。此时尚未创建阶段1 commit/push，也未进入阶段2；必须先完成规定的独立`gpt-5.6-sol`/Ultra审查及问题闭环。
+
+## 2026-07-22：阶段 1 首轮独立审查 FAIL 与问题闭环
+
+规定的`gpt-5.6-sol`、Ultra独立审查首轮结论为FAIL：Critical 0、Important 8、Minor 0。审查同时明确判断阶段1整体没有过度设计：大部分增量来自已批准的68字段显式合同、稳定枚举和测试矩阵，未出现第二writer/source或shadow SDK；反而若在writer validator内复制完整terminal predicate，才会形成第二authority和过度校验，因此没有采用该方案。
+
+八项Important均已按最小边界修复：
+
+1. context switch不再复用fence前采样的UTC；switch在processor fence/drain完成后通过market-local timeline provider重新采样applied time。首次install完成后才锚定next-discovery monotonic deadline，并恢复原production各判断点独立采样语义。新增delayed-fence跨E测试，证明fence前不读取applied time且跨E后返回expired、不安装旧discovery。
+2. `polymarket_market_metadata_v3` Parquet file metadata改为`sort_order=collector_admission_order`；v2继续为`receive_order`。Binance既有admission声明和其他source既有receive声明不变，versioned constructor测试逐项核对。
+3. `resolution_terminal_ws`现在要求pinned SDK必填的platform timestamp raw与UTC均存在、为正且数值一致；receive time仍独立保存，未增加future-skew gate。
+4. exhausted summary新增`runtime_role_applied_at_utc >= E+8 horizon`、`last_valid <= applied <= timestamp_received <= admission`单row因果门；六个slot的最大valid receive仍留给阶段2 actor和阶段3跨row recovery，不在writer重复实现。
+5. Gamma fixture改为先由官方SDK `Market`解码、再确定性完整序列化的有效payload，使用合法B256与RFC3339 closedTime；WS fixture补齐SDK必填`id/market/timestamp`并真实解码为`WsMessage::MarketResolved`。测试由唯一Gamma evaluator从保存payload、attempt timing和fixed identity重建typed predicate/winner，并覆盖binding/decode subtype；未在layout validator复制19项predicate。
+6. closedTime layout与唯一Gamma evaluator共用trimmed RFC3339解析helper；pass、parse-error、before-E及raw/UTC一致性均由真实解析结果约束，仍不与receive比较future skew。
+7. named paused-time RED新增旧asset unsubscribe trace，冻结“terminal或budget完成前不得退订、完成后最终退订”的合同；没有把无合同依据的精确teardown毫秒设为门。另增late identity table，覆盖receive在T前而verify在T后、applied=E-1、applied=E及E后，因果顺序成立时只有真实applied落在`[T,E)`才可active。
+8. 五row fixture统一market A的首次snapshot evidence、fixed verification和local transition reference；reference按identity、source receive和digest唯一解析到一个source-bearing row。summary使用独立market B的完整T2/E2/horizon/role-exit时间线，不再只替换slug/ID。
+
+修复后重新执行：
+
+1. `cargo test -p data-collect --test polymarket_metadata_layout_contract --test polymarket_contract --test parquet_writer_contract --locked`：18 + 7 + 12项全部通过。
+2. delayed-fence applied-time、late-identity table与E-1/E/E+1 Gamma installation三个指定lib测试分别通过。
+3. `cargo test -p data-collect --lib --locked`：257项通过、0失败、named阶段1 RED 1项ignored。
+4. `cargo clippy -p data-collect --all-targets --locked -- -D warnings`：退出0。
+5. `cargo test -p data-collect --locked`：完整package与doc-tests退出0。
+6. named RED默认仍ignored；显式`--ignored --nocapture`按计划退出101。真实Gamma HTTP和官方SDK CLOB loopback均启动成功，collector无gap、early prefetch与旧assets保留/最终退订合同已经满足；剩余差异仍是阶段2尚未实现的T promotion/E pending、E+3至E+8六个absolute Gamma slots及删除旧sentinel。
+7. `cargo fmt --all -- --check`与`git diff --check`退出0，`Cargo.lock`未变化。
+
+当前仍未创建阶段1 commit/push，也未进入阶段2；以上修复必须由同一独立审查代理复审至Critical/Important均为0后才能提交。
+
+同一复审继续按当前磁盘检查时又发现两项Important证据缺口，均已局部闭合：
+
+- Parquet writer虽然已按schema version声明v2 `receive_order`/v3 `collector_admission_order`，但daily manifest与embedded recovery facts原先仍只按source kind固定为`receive_order`。现抽取同一`typed_sort_order(schema_version, source_kind)`纯判定供WriterProperties和segment facts共用，finalize只解析一次schema version；新增测试分别创建v2/v3文件并核对Parquet property、embedded `DailyFileRecoveryMetadata.schema_version`和`facts.sort_order`三者一致。
+- 纯evaluator已有attempt binding与SDK decode返回值测试，但v3正向subtype表缺少这两类合法持久化`integrity_error` row。现新增binding row，保留decoded endpoint/fetch/receive/validation/payload/digest/response fields且predicate/reason为null；新增decode row，只保留endpoint/fetch，source response与平台字段为null并使用对应unavailable reason。没有在writer或layout复制19项predicate。
+
+两项新增定向测试均已通过；完整package、Clippy和格式检查将在最终复审前基于最新工作区再次运行。
+
+## 2026-07-22：阶段 1 第二轮独立审查、RED 证据纠正与最终验证
+
+第二轮独立审查没有接受“命令退出101”本身作为RED证据，而是继续检查panic位置、wire trace、
+取样时刻和断言是否可能false-green。审查正确推翻了上一节“旧assets保留/最终退订合同已经满足”
+这一过早结论：旧fixture最初只在stop之后读取累计unsubscribe，随后又只在E+5取一次快照，既会把
+stop cleanup误当正常teardown，也会漏掉E+3至E+7之间的错误退订；一版修复还把E+8后最多
+`80 * 250ms`虚拟等待变成了没有需求依据的teardown上界，属于过度校验。
+
+按最小合同完成以下纠正：
+
+1. paused-time collector仍使用现有官方SDK actor；只有测试CLOB loopback移到独立墙钟runtime线程，
+   避免paused current-thread runtime令SDK wire flush与测试取样互相饥饿。零时长Tokio timer只用于
+   让I/O driver获得轮询机会，没有引入production clock framework或第二transport实现。
+2. CLOB phase clock在每次虚拟advance前写入目标时刻，避免advance内发生的E+8合法teardown被
+   错标为上一slot。E+8后先完成non-stop processor fence，再等待server已观察到101与102；等待只用
+   5秒墙钟harness防止测试挂死，不推进fake UTC，也不形成业务deadline。
+3. teardown readiness不再作为setup独立assert，而是进入最终observed/expected；缺少正常teardown的
+   实现也会到达最终RED断言。pre-stop完整wire trace同时断言101/102都已移除，并断言任何旧asset
+   unsubscribe不得早于E+8；允许E+8之后任意由最后attempt完成和accepted-event drain决定的时刻，
+   不要求`== E+8`、`<= E+8+20s`或其他固定上界。
+4. trace settle改为async零时长timer轮询，不再用`std::thread::sleep`阻塞collector所在current-thread
+   runtime。E+5快照只用于明确复现当前legacy early teardown，全量`< E+8`判定负责覆盖整个保留窗。
+
+显式运行named RED现在稳定只在最终`observed == expected`断言失败：legacy observed为
+`collector_ok=true`、`gaps=0`、early prefetch存在、101/102在E+8前已退订且stop前均已正常观察、
+没有promotion/pending/attempt rows或Gamma follow-up请求，并仍有E+5及后续legacy sentinel；目标则为
+T promotion、E pending、E+3至E+8六个absolute attempts、E+8前无退订、stop前最终退订且无sentinel。
+因此该RED同时暴露阶段2尚缺的生命周期、scheduler和asset-retention行为，而不再依赖setup早退。
+
+最终工作区验证：
+
+1. `cargo test -p data-collect --test polymarket_metadata_layout_contract --test polymarket_contract --test parquet_writer_contract --locked`：18 + 7 + 12项通过。
+2. `cargo test -p data-collect --lib live_runtime::tests::polymarket_resolution_timeline_is_absolute_red --locked -- --exact`：退出0，named RED为1项ignored。
+3. 同一测试增加`--ignored --nocapture`：退出101且panic仅在最终目标断言；主线程与独立审查代理分别实跑得到相同分类。
+4. `cargo test -p data-collect --lib --locked`：258项通过、0失败、1项ignored。
+5. `cargo test -p data-collect --locked`：完整package、integration与doc-tests退出0。
+6. `cargo clippy -p data-collect --all-targets --locked -- -D warnings`：退出0。
+7. `cargo fmt --all -- --check`与`git diff --check`：退出0；`Cargo.lock`未变化。
+
+本轮审查对“过度设计/过度校验”的结论是：68字段v3、五类row、19项failure与payload/digest/reference
+来自已批准RF-09/AC，不是推测性扩张；production仍唯一写v2，未新增writer/source/shadow SDK。
+审查实际删除了无依据的固定teardown上界和可能重复predicate authority，并保留单一shared sort-order
+判定与唯一Gamma evaluator。最终独立复审正式PASS：Critical 0、Important 0、Minor 0；审查代理
+连续3次显式运行named RED均只在最终目标断言退出101，并独立复核完整package、Clippy、fmt与
+diff check通过、`Cargo.lock`未变化。阶段1已满足授权的commit/push门。
+
 ## 后续 changelog 规则
 
 阶段1至阶段4现已获授权；后续每个阶段必须追加记录：

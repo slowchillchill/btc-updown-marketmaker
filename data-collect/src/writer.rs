@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use arrow_array::{
     ArrayRef, BooleanArray, Int64Array, RecordBatch, StringArray, TimestampMillisecondArray,
-    UInt32Array, UInt64Array,
+    UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use parquet::arrow::ArrowWriter;
@@ -17,7 +17,9 @@ use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
 use crate::polymarket_market_metadata_layout::{
-    PolymarketMarketMetadataRow, polymarket_market_metadata_schema,
+    POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
+    PolymarketMarketMetadataRow, PolymarketMarketMetadataV3Row, polymarket_market_metadata_schema,
+    polymarket_market_metadata_v3_schema,
 };
 use crate::polymarket_orderbook_layout::{PolymarketOrderbookRow, polymarket_orderbook_schema};
 use crate::source_hourly_layout::{
@@ -283,6 +285,7 @@ pub struct TypedParquetSegmentWriter {
     row_group_logical_bytes: u64,
     last_binance_aggtrade_admission_sequence: Option<u64>,
     last_binance_depth_admission_sequence: Option<u64>,
+    last_polymarket_metadata_admission_sequence: Option<u64>,
 }
 
 impl TypedParquetSegmentWriter {
@@ -318,7 +321,21 @@ impl TypedParquetSegmentWriter {
     ) -> Result<Self> {
         let schema = match source_kind {
             "polymarket_market" => polymarket_orderbook_schema(),
-            "polymarket_market_metadata" => polymarket_market_metadata_schema(),
+            "polymarket_market_metadata" => match schema_version {
+                POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION => polymarket_market_metadata_schema(),
+                POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION => {
+                    polymarket_market_metadata_v3_schema()
+                }
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "unsupported Polymarket metadata schema version for writer:schema_version={schema_version}"
+                        ),
+                    )
+                    .into());
+                }
+            },
             "binance_depth_snapshot" => {
                 validate_current_depth_schema_version(
                     source_kind,
@@ -390,6 +407,7 @@ impl TypedParquetSegmentWriter {
             row_group_logical_bytes: 0,
             last_binance_aggtrade_admission_sequence: None,
             last_binance_depth_admission_sequence: None,
+            last_polymarket_metadata_admission_sequence: None,
         })
     }
 
@@ -423,6 +441,23 @@ impl TypedParquetSegmentWriter {
         if rows.is_empty() {
             return Ok(());
         }
+        if self.schema_version != POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "v2 Polymarket metadata rows require a v2 writer",
+            )
+            .into());
+        }
+        if rows
+            .iter()
+            .any(|row| row.schema_version != POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "v2 Polymarket metadata row carried a non-v2 schema version",
+            )
+            .into());
+        }
         let batch = polymarket_market_metadata_rows_to_batch(Arc::clone(&self.schema), rows)?;
         self.write_batch(&batch)
     }
@@ -435,8 +470,75 @@ impl TypedParquetSegmentWriter {
         if rows.is_empty() {
             return Ok(());
         }
+        if self.schema_version != POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "v2 Polymarket metadata rows require a v2 writer",
+            )
+            .into());
+        }
+        if rows
+            .iter()
+            .any(|row| row.schema_version != POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "v2 Polymarket metadata row carried a non-v2 schema version",
+            )
+            .into());
+        }
         let batch = polymarket_market_metadata_rows_to_batch(Arc::clone(&self.schema), rows)?;
         self.write_batch_with_logical_bytes(&batch, logical_bytes)
+    }
+
+    pub fn write_polymarket_market_metadata_v3_rows(
+        &mut self,
+        rows: &[PolymarketMarketMetadataV3Row],
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let last_sequence = self.validate_polymarket_metadata_v3_rows(rows)?;
+        let batch = polymarket_market_metadata_v3_rows_to_batch(Arc::clone(&self.schema), rows)?;
+        self.write_batch(&batch)?;
+        self.last_polymarket_metadata_admission_sequence = Some(last_sequence);
+        Ok(())
+    }
+
+    fn validate_polymarket_metadata_v3_rows(
+        &self,
+        rows: &[PolymarketMarketMetadataV3Row],
+    ) -> Result<u64> {
+        if self.schema_version != POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "v3 Polymarket metadata rows require a v3 writer",
+            )
+            .into());
+        }
+        let mut previous = self.last_polymarket_metadata_admission_sequence;
+        for row in rows {
+            let validation = row.validate();
+            if !validation.is_complete() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "invalid Polymarket metadata v3 row:{}",
+                        validation.violations.join(",")
+                    ),
+                )
+                .into());
+            }
+            if previous.is_some_and(|previous| row.collector_admission_sequence <= previous) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Polymarket metadata v3 admission sequence must be strictly increasing",
+                )
+                .into());
+            }
+            previous = Some(row.collector_admission_sequence);
+        }
+        Ok(previous.expect("non-empty rows have a last admission sequence"))
     }
 
     pub fn write_binance_depth_snapshot_rows(
@@ -811,14 +913,7 @@ fn typed_writer_properties(
     source_kind: &str,
     zstd_level: i32,
 ) -> Result<WriterProperties> {
-    let sort_order = if matches!(
-        source_kind,
-        "binance_aggtrade" | "binance_depth_snapshot" | "binance_depth_update"
-    ) {
-        "collector_admission_order"
-    } else {
-        "receive_order"
-    };
+    let sort_order = typed_sort_order(schema_version, source_kind);
     Ok(WriterProperties::builder()
         .set_max_row_group_row_count(Some(PARQUET_ROW_GROUP_MAX_ROWS as usize))
         .set_compression(Compression::ZSTD(ZstdLevel::try_new(zstd_level)?))
@@ -837,6 +932,19 @@ fn typed_writer_properties(
             KeyValue::new("sort_order".to_owned(), sort_order.to_owned()),
         ]))
         .build())
+}
+
+pub(crate) fn typed_sort_order(schema_version: &str, source_kind: &str) -> &'static str {
+    if matches!(
+        source_kind,
+        "binance_aggtrade" | "binance_depth_snapshot" | "binance_depth_update"
+    ) || (source_kind == "polymarket_market_metadata"
+        && schema_version == POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION)
+    {
+        "collector_admission_order"
+    } else {
+        "receive_order"
+    }
 }
 
 fn validate_current_depth_schema_version(
@@ -1013,6 +1121,149 @@ fn polymarket_market_metadata_rows_to_batch(
     Ok(RecordBatch::try_new(schema, columns)?)
 }
 
+fn polymarket_market_metadata_v3_rows_to_batch(
+    schema: Arc<Schema>,
+    rows: &[PolymarketMarketMetadataV3Row],
+) -> Result<RecordBatch> {
+    let columns: Vec<ArrayRef> = vec![
+        string_values(rows.iter().map(|row| row.metadata_row_kind.as_str())),
+        timestamp_values(rows.iter().map(|row| row.timestamp_received)),
+        uint64_values(rows.iter().map(|row| row.collector_admission_sequence)),
+        timestamp_values(rows.iter().map(|row| row.collector_admission_time_utc_ms)),
+        string_values(rows.iter().map(|row| row.metadata_origin.as_str())),
+        string_values(rows.iter().map(|row| row.collector_host_id.as_str())),
+        string_values(rows.iter().map(|row| row.collector_region.as_str())),
+        string_values(rows.iter().map(|row| row.schema_version.as_str())),
+        string_values(rows.iter().map(|row| row.slug.as_str())),
+        string_values(rows.iter().map(|row| row.condition_id.as_str())),
+        string_values(rows.iter().map(|row| row.clob_market_id.as_str())),
+        string_values(rows.iter().map(|row| row.asset_ids.as_str())),
+        timestamp_values(rows.iter().map(|row| row.market_start_utc)),
+        timestamp_values(rows.iter().map(|row| row.market_end_utc)),
+        timestamp_values(rows.iter().map(|row| row.fixed_identity_verified_at_utc)),
+        string_values(rows.iter().map(|row| row.market_lifecycle_state.as_str())),
+        string_values(rows.iter().map(|row| row.market_runtime_role.as_str())),
+        optional_strings(rows.iter().map(|row| row.source_endpoint.as_deref())),
+        optional_strings(rows.iter().map(|row| {
+            row.source_endpoint_unavailable_reason
+                .map(|value| value.as_str())
+        })),
+        optional_strings(
+            rows.iter()
+                .map(|row| row.source_evidence_origin.map(|value| value.as_str())),
+        ),
+        optional_strings(
+            rows.iter()
+                .map(|row| row.source_evidence_event_type.map(|value| value.as_str())),
+        ),
+        optional_strings(
+            rows.iter()
+                .map(|row| row.source_evidence_channel.map(|value| value.as_str())),
+        ),
+        optional_timestamp_values(rows.iter().map(|row| row.source_evidence_received_at_utc)),
+        optional_timestamp_values(
+            rows.iter()
+                .map(|row| row.row_evidence_validation_completed_at_utc),
+        ),
+        optional_strings(
+            rows.iter()
+                .map(|row| row.source_evidence_payload_json.as_deref()),
+        ),
+        optional_strings(
+            rows.iter()
+                .map(|row| row.source_evidence_raw_sha256.as_deref()),
+        ),
+        optional_strings(
+            rows.iter()
+                .map(|row| row.market_lifecycle_transition.map(|value| value.as_str())),
+        ),
+        optional_timestamp_values(rows.iter().map(|row| row.lifecycle_scheduled_at_utc)),
+        optional_timestamp_values(rows.iter().map(|row| row.lifecycle_applied_at_utc)),
+        optional_strings(rows.iter().map(|row| {
+            row.market_runtime_role_transition
+                .map(|value| value.as_str())
+        })),
+        optional_timestamp_values(rows.iter().map(|row| row.runtime_role_scheduled_at_utc)),
+        optional_timestamp_values(rows.iter().map(|row| row.runtime_role_applied_at_utc)),
+        optional_timestamp_values(rows.iter().map(|row| row.metadata_fetch_start_utc)),
+        optional_bool_values(rows.iter().map(|row| row.closed)),
+        optional_strings(rows.iter().map(|row| row.closed_time_raw.as_deref())),
+        optional_timestamp_values(rows.iter().map(|row| row.closed_time_utc)),
+        optional_bool_values(rows.iter().map(|row| row.closed_time_check_passed)),
+        optional_strings(rows.iter().map(|row| {
+            row.closed_time_check_failure_reason
+                .map(|value| value.as_str())
+        })),
+        optional_bool_values(rows.iter().map(|row| row.automatically_resolved)),
+        optional_strings(rows.iter().map(|row| row.uma_resolution_status.as_deref())),
+        optional_strings(rows.iter().map(|row| row.outcomes_raw.as_deref())),
+        optional_strings(rows.iter().map(|row| row.outcome_prices_raw.as_deref())),
+        optional_bool_values(rows.iter().map(|row| row.active)),
+        optional_strings(
+            rows.iter()
+                .map(|row| row.active_unavailable_reason.map(|value| value.as_str())),
+        ),
+        optional_bool_values(rows.iter().map(|row| row.accepting_orders)),
+        optional_strings(
+            rows.iter()
+                .map(|row| row.ws_platform_timestamp_raw.as_deref()),
+        ),
+        optional_timestamp_values(rows.iter().map(|row| row.ws_platform_timestamp_utc)),
+        optional_strings(rows.iter().map(|row| row.winning_asset_id.as_deref())),
+        optional_strings(rows.iter().map(|row| row.winning_outcome.as_deref())),
+        optional_strings(
+            rows.iter()
+                .map(|row| row.resolution_evidence_source.map(|value| value.as_str())),
+        ),
+        optional_strings(
+            rows.iter()
+                .map(|row| row.resolution_evidence_raw_sha256.as_deref()),
+        ),
+        optional_strings(
+            rows.iter()
+                .map(|row| row.terminal_claim_owner.map(|value| value.as_str())),
+        ),
+        optional_uint8_values(rows.iter().map(|row| row.resolution_poll_attempt_ordinal)),
+        optional_timestamp_values(rows.iter().map(|row| row.resolution_poll_scheduled_utc)),
+        optional_strings(
+            rows.iter()
+                .map(|row| row.resolution_poll_result.map(|value| value.as_str())),
+        ),
+        optional_strings(rows.iter().map(|row| {
+            row.resolution_transport_error_class
+                .map(|value| value.as_str())
+        })),
+        optional_uint16_values(rows.iter().map(|row| row.resolution_transport_http_status)),
+        optional_strings(rows.iter().map(|row| {
+            row.resolution_integrity_error_class
+                .map(|value| value.as_str())
+        })),
+        optional_timestamp_values(rows.iter().map(|row| row.resolution_budget_horizon_utc)),
+        optional_strings(
+            rows.iter()
+                .map(|row| row.resolution_followup_status.map(|value| value.as_str())),
+        ),
+        optional_uint32_values(rows.iter().map(|row| row.resolution_poll_attempts_recorded)),
+        optional_uint32_values(rows.iter().map(|row| row.resolution_valid_response_count)),
+        optional_uint32_values(
+            rows.iter()
+                .map(|row| row.resolution_transport_unavailable_count),
+        ),
+        optional_uint32_values(rows.iter().map(|row| row.resolution_missed_slot_count)),
+        optional_timestamp_values(rows.iter().map(|row| row.last_valid_metadata_received_utc)),
+        optional_bool_values(rows.iter().map(|row| row.terminal_predicate_passed)),
+        optional_strings(rows.iter().map(|row| {
+            row.terminal_predicate_failure_reason
+                .map(|value| value.as_str())
+        })),
+        optional_strings(rows.iter().map(|row| {
+            row.response_fields_unavailable_reason
+                .map(|value| value.as_str())
+        })),
+    ];
+    Ok(RecordBatch::try_new(schema, columns)?)
+}
+
 fn binance_depth_snapshot_rows_to_batch(
     schema: Arc<Schema>,
     rows: &[BinanceDepthSnapshotHourlyRow],
@@ -1165,6 +1416,18 @@ fn uint64_values(values: impl Iterator<Item = u64>) -> ArrayRef {
 
 fn optional_uint64_values(values: impl Iterator<Item = Option<u64>>) -> ArrayRef {
     Arc::new(UInt64Array::from_iter(values))
+}
+
+fn optional_uint8_values(values: impl Iterator<Item = Option<u8>>) -> ArrayRef {
+    Arc::new(UInt8Array::from_iter(values))
+}
+
+fn optional_uint16_values(values: impl Iterator<Item = Option<u16>>) -> ArrayRef {
+    Arc::new(UInt16Array::from_iter(values))
+}
+
+fn optional_uint32_values(values: impl Iterator<Item = Option<u32>>) -> ArrayRef {
+    Arc::new(UInt32Array::from_iter(values))
 }
 
 fn optional_int64_values(values: impl Iterator<Item = Option<i64>>) -> ArrayRef {

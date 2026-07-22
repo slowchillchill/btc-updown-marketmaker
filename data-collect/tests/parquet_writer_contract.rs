@@ -17,6 +17,7 @@ use data_collect::handoff::{
     DepthHandoffRecordKind, DepthHandoffSourceEvidence, HandoffFrame, HandoffSourceEvidence,
 };
 use data_collect::polymarket_market_metadata_layout::{
+    POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
     PolymarketMarketMetadataContext, PolymarketMarketMetadataRow,
 };
 use data_collect::polymarket_orderbook_layout::{
@@ -110,6 +111,37 @@ fn depth_update_row(
         source_endpoint: "wss://stream.binance.com:9443/ws/btcusdt@depth".to_owned(),
         schema_version: BINANCE_DEPTH_UPDATE_SCHEMA_VERSION.to_owned(),
     }
+}
+
+fn polymarket_metadata_v2_row() -> PolymarketMarketMetadataRow {
+    PolymarketMarketMetadataRow::active_scan(
+        "btc-updown-5m-1783392300",
+        "condition-1",
+        Some("clob-market-1"),
+        &["asset-1".to_owned(), "asset-2".to_owned()],
+        Some(1_783_392_300_000),
+        Some(1_783_392_600_000),
+        Some(true),
+        Some(true),
+        "active",
+        None,
+        None,
+        None,
+        None,
+        Some(true),
+        PolymarketMarketMetadataContext {
+            timestamp_received_ms: 1_783_392_404_599,
+            metadata_fetch_start_utc_ms: Some(1_783_392_404_100),
+            collector_host_id: "collector-host".to_owned(),
+            collector_region: "eu-west-1".to_owned(),
+            source_endpoint: "https://gamma-api.polymarket.com/markets".to_owned(),
+            schema_version: POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION.to_owned(),
+        },
+    )
+    .with_metadata_unavailable_reason(Some(
+        "gamma_discovery_snapshot_lacks_tick_size_min_size_fee_schedule_reward_eligibility"
+            .to_owned(),
+    ))
 }
 
 fn read_single_finalized_batch(path: &Path) -> RecordBatch {
@@ -394,34 +426,7 @@ fn typed_writer_writes_polymarket_market_metadata_rows() {
         "polymarket_market_metadata",
     )
     .unwrap();
-    let row = PolymarketMarketMetadataRow::active_scan(
-        "btc-updown-5m-1783392300",
-        "condition-1",
-        Some("clob-market-1"),
-        &["asset-1".to_owned(), "asset-2".to_owned()],
-        Some(1_783_392_300_000),
-        Some(1_783_392_600_000),
-        Some(true),
-        Some(true),
-        "active",
-        None,
-        None,
-        None,
-        None,
-        Some(true),
-        PolymarketMarketMetadataContext {
-            timestamp_received_ms: 1_783_392_404_599,
-            metadata_fetch_start_utc_ms: Some(1_783_392_404_100),
-            collector_host_id: "collector-host".to_owned(),
-            collector_region: "eu-west-1".to_owned(),
-            source_endpoint: "https://gamma-api.polymarket.com/markets".to_owned(),
-            schema_version: "polymarket_market_metadata_v2".to_owned(),
-        },
-    )
-    .with_metadata_unavailable_reason(Some(
-        "gamma_discovery_snapshot_lacks_tick_size_min_size_fee_schedule_reward_eligibility"
-            .to_owned(),
-    ));
+    let row = polymarket_metadata_v2_row();
 
     writer
         .write_polymarket_market_metadata_rows(&[row])
@@ -450,25 +455,88 @@ fn typed_writer_writes_polymarket_market_metadata_rows() {
 }
 
 #[test]
+fn polymarket_metadata_writer_does_not_mix_v2_and_v3() {
+    let tmp = tempdir().unwrap();
+    let mut v3_writer = TypedParquetSegmentWriter::create_for_typed_source(
+        tmp.path(),
+        "metadata-v3",
+        POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
+        "polymarket_market_metadata",
+    )
+    .unwrap();
+    let error = v3_writer
+        .write_polymarket_market_metadata_rows(&[polymarket_metadata_v2_row()])
+        .unwrap_err();
+    assert!(error.to_string().contains("require a v2 writer"));
+
+    let tmp = tempdir().unwrap();
+    let mut v2_writer = TypedParquetSegmentWriter::create_for_typed_source(
+        tmp.path(),
+        "metadata-v2",
+        POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION,
+        "polymarket_market_metadata",
+    )
+    .unwrap();
+    let mut mislabeled_v2_row = polymarket_metadata_v2_row();
+    mislabeled_v2_row.schema_version = POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION.to_owned();
+    let error = v2_writer
+        .write_polymarket_market_metadata_rows(&[mislabeled_v2_row])
+        .unwrap_err();
+    assert!(error.to_string().contains("carried a non-v2 schema"));
+
+    let tmp = tempdir().unwrap();
+    let error = match TypedParquetSegmentWriter::create_for_typed_source(
+        tmp.path(),
+        "metadata-unknown",
+        "polymarket_market_metadata_v4",
+        "polymarket_market_metadata",
+    ) {
+        Ok(_) => panic!("unknown Polymarket metadata schema must be rejected"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported Polymarket metadata schema")
+    );
+}
+
+#[test]
 fn typed_writer_constructors_publish_source_specific_schema_metadata() {
     let cases = [
         (
             "polymarket_market_metadata",
-            "polymarket_market_metadata_v2",
+            POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION,
+            "receive_order",
+        ),
+        (
+            "polymarket_market_metadata",
+            POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
+            "collector_admission_order",
         ),
         (
             "binance_depth_snapshot",
             BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
+            "collector_admission_order",
         ),
-        ("binance_depth_update", BINANCE_DEPTH_UPDATE_SCHEMA_VERSION),
-        ("binance_aggtrade", BINANCE_AGGTRADE_SCHEMA_VERSION),
+        (
+            "binance_depth_update",
+            BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
+            "collector_admission_order",
+        ),
+        (
+            "binance_aggtrade",
+            BINANCE_AGGTRADE_SCHEMA_VERSION,
+            "collector_admission_order",
+        ),
         (
             "polymarket_rtds_chainlink_btc_usd",
             "polymarket_rtds_chainlink_btc_usd_v4",
+            "receive_order",
         ),
     ];
 
-    for (source_kind, schema_version) in cases {
+    for (source_kind, schema_version, expected_sort_order) in cases {
         let tmp = tempdir().unwrap();
         let writer = TypedParquetSegmentWriter::create_for_typed_source(
             tmp.path(),
@@ -498,6 +566,12 @@ fn typed_writer_constructors_publish_source_specific_schema_metadata() {
                 .get("parquet_raw_source_kind")
                 .and_then(|value| value.as_deref()),
             Some(source_kind)
+        );
+        assert_eq!(
+            metadata
+                .get("sort_order")
+                .and_then(|value| value.as_deref()),
+            Some(expected_sort_order)
         );
     }
 }
