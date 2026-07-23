@@ -7,13 +7,12 @@ use data_collect::polymarket_market_metadata_layout::{
 };
 use data_collect::source_format::{
     MarketLifecycleState, PolymarketMarketMetadataRaw, PolymarketMarketRaw,
-    PolymarketMarketResolutionRaw, SubscriptionConfirmation,
+    SubscriptionConfirmation,
 };
 use data_collect::sources::polymarket::{
     DiscoveryMissStats, GammaTerminalAttemptContext, GammaTerminalFixedIdentity,
     GammaTerminalResponse, GammaTerminalWinner, LifecycleInput, PolymarketDiscoveryEvidence,
-    PolymarketMarketAdapter, PolymarketRetiredFallbackMetadata, PolymarketRetirementEvidence,
-    classify_lifecycle, evaluate_gamma_terminal_response, evaluate_retired_predicate,
+    PolymarketMarketAdapter, classify_lifecycle, evaluate_gamma_terminal_response,
     t30_prefetch_window,
 };
 use polymarket_client_sdk_v2::gamma::types::response::Market as SdkGammaMarket;
@@ -86,116 +85,6 @@ fn polymarket_market_channel_contract() {
     assert_eq!(
         market.validate_contract().verdict,
         ValidationVerdict::Complete
-    );
-}
-
-#[test]
-fn polymarket_retired_predicate_contract() {
-    let resolved = PolymarketMarketResolutionRaw {
-        envelope: envelope(
-            SourceKind::PolymarketMarket,
-            "market_resolved",
-            r#"{"event_type":"market_resolved","market":"condition-1","asset_id":"1"}"#,
-        ),
-        condition_id: "condition-1".to_owned(),
-        market_id: Some("market-1".to_owned()),
-        subscribed_asset_ids_for_market: vec!["1".to_owned(), "2".to_owned()],
-        resolved_event_asset_ids: vec!["1".to_owned(), "2".to_owned()],
-        winning_asset_id: "1".to_owned(),
-        winning_outcome: "Up".to_owned(),
-        close_reason_if_present: Some("resolved".to_owned()),
-    };
-
-    let decision = evaluate_retired_predicate(
-        "condition-1",
-        &["1".to_owned(), "2".to_owned()],
-        &PolymarketRetirementEvidence::ResolvedEvent(Box::new(resolved.clone())),
-    );
-    assert!(decision.retired);
-    assert!(decision.source_gap.is_none());
-
-    let mut single_leg = resolved;
-    single_leg.resolved_event_asset_ids = vec!["1".to_owned()];
-    let decision = evaluate_retired_predicate(
-        "condition-1",
-        &["1".to_owned(), "2".to_owned()],
-        &PolymarketRetirementEvidence::ResolvedEvent(Box::new(single_leg)),
-    );
-    assert!(!decision.retired);
-    assert_eq!(
-        decision.source_gap.as_deref(),
-        Some("market_resolved_event_incomplete")
-    );
-
-    let extra_winner = PolymarketMarketResolutionRaw {
-        envelope: envelope(
-            SourceKind::PolymarketMarket,
-            "market_resolved",
-            r#"{"event_type":"market_resolved","market":"condition-1","asset_id":"3"}"#,
-        ),
-        condition_id: "condition-1".to_owned(),
-        market_id: Some("market-1".to_owned()),
-        subscribed_asset_ids_for_market: vec!["1".to_owned(), "2".to_owned(), "3".to_owned()],
-        resolved_event_asset_ids: vec!["1".to_owned(), "2".to_owned(), "3".to_owned()],
-        winning_asset_id: "3".to_owned(),
-        winning_outcome: "Other".to_owned(),
-        close_reason_if_present: Some("resolved".to_owned()),
-    };
-    let decision = evaluate_retired_predicate(
-        "condition-1",
-        &["1".to_owned(), "2".to_owned()],
-        &PolymarketRetirementEvidence::ResolvedEvent(Box::new(extra_winner)),
-    );
-    assert!(!decision.retired);
-    assert_eq!(
-        decision.source_gap.as_deref(),
-        Some("market_resolved_winning_asset_not_in_target_market")
-    );
-
-    let fallback = PolymarketRetiredFallbackMetadata {
-        market_resolved_missing_reason: "no market_resolved event before close".to_owned(),
-        fallback_metadata_asset_ids: vec!["1".to_owned(), "2".to_owned()],
-        fallback_freshness_ms: 2_000,
-        same_condition_confirmed: true,
-        condition_id: "condition-1".to_owned(),
-        closed: true,
-        active: false,
-        accepting_orders: false,
-        closed_time_utc_ms: Some(1_766_790_000_000),
-        resolution_evidence: Some(
-            "metadata closed true, active false, acceptingOrders false, winning outcome".to_owned(),
-        ),
-        max_freshness_ms: 5_000,
-    };
-    let decision = evaluate_retired_predicate(
-        "condition-1",
-        &["1".to_owned(), "2".to_owned()],
-        &PolymarketRetirementEvidence::FallbackMetadata(fallback.clone()),
-    );
-    assert!(decision.retired);
-
-    let decision = evaluate_retired_predicate(
-        "condition-1",
-        &[],
-        &PolymarketRetirementEvidence::FallbackMetadata(fallback.clone()),
-    );
-    assert!(!decision.retired);
-    assert_eq!(
-        decision.source_gap.as_deref(),
-        Some("subscribed_asset_ids_missing")
-    );
-
-    let mut incomplete_fallback = fallback;
-    incomplete_fallback.active = true;
-    let decision = evaluate_retired_predicate(
-        "condition-1",
-        &["1".to_owned(), "2".to_owned()],
-        &PolymarketRetirementEvidence::FallbackMetadata(incomplete_fallback),
-    );
-    assert!(!decision.retired);
-    assert_eq!(
-        decision.source_gap.as_deref(),
-        Some("fallback_resolution_evidence_missing")
     );
 }
 

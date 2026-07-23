@@ -1,26 +1,31 @@
 use std::collections::BTreeMap;
 use std::fs::File;
+use std::sync::Arc;
 
-use arrow_array::{Array as _, StringArray};
+use arrow_array::{
+    Array as _, ArrayRef, BooleanArray, RecordBatch, StringArray, TimestampMillisecondArray,
+};
 use arrow_schema::DataType;
 use data_collect::polymarket_market_metadata_layout::{
     ActiveUnavailableReason, ClosedTimeCheckFailureReason, MarketLifecycleState,
     MarketLifecycleTransition, MarketRuntimeRole, MarketRuntimeRoleTransition,
     POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
     PolymarketMarketMetadataContext, PolymarketMarketMetadataRow, PolymarketMarketMetadataV3Row,
-    PolymarketMetadataOrigin, PolymarketMetadataRowKind, ResolutionEvidenceSource,
-    ResolutionFollowupStatus, ResolutionIntegrityErrorClass, ResolutionPollResult,
-    ResolutionTransportErrorClass, ResponseFieldsUnavailableReason,
+    PolymarketMetadataOrigin, PolymarketMetadataRowKind,
+    PolymarketMetadataV3ReferenceIntegrityError, PolymarketMetadataV3ReferenceRecord,
+    ResolutionEvidenceSource, ResolutionFollowupStatus, ResolutionIntegrityErrorClass,
+    ResolutionPollResult, ResolutionTransportErrorClass, ResponseFieldsUnavailableReason,
     SourceEndpointUnavailableReason, SourceEvidenceChannel, SourceEvidenceEventType,
     SourceEvidenceOrigin, TerminalClaimOwner, TerminalPredicateFailureReason,
     polymarket_market_metadata_schema, polymarket_market_metadata_v3_schema,
+    validate_polymarket_metadata_v3_local_references,
 };
 use data_collect::sources::polymarket::{
     GammaTerminalAttemptContext, GammaTerminalFixedIdentity, GammaTerminalResponse,
     evaluate_gamma_terminal_response,
 };
 use data_collect::writer::TypedParquetSegmentWriter;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
 use polymarket_client_sdk_v2::clob::ws::WsMessage;
 use polymarket_client_sdk_v2::gamma::types::response::Market as SdkGammaMarket;
 use serde_json::json;
@@ -36,6 +41,62 @@ fn context() -> PolymarketMarketMetadataContext {
         source_endpoint: "https://gamma-api.polymarket.com/markets".to_owned(),
         schema_version: POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION.to_owned(),
     }
+}
+
+fn string_column<'a>(batch: &'a RecordBatch, name: &str) -> &'a StringArray {
+    batch
+        .column(batch.schema().index_of(name).unwrap())
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap()
+}
+
+fn timestamp_column<'a>(batch: &'a RecordBatch, name: &str) -> &'a TimestampMillisecondArray {
+    batch
+        .column(batch.schema().index_of(name).unwrap())
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .unwrap()
+}
+
+fn v3_reference_records_from_batch(
+    batch: &RecordBatch,
+) -> Vec<PolymarketMetadataV3ReferenceRecord> {
+    let row_kind = string_column(batch, "metadata_row_kind");
+    let slug = string_column(batch, "slug");
+    let condition_id = string_column(batch, "condition_id");
+    let clob_market_id = string_column(batch, "clob_market_id");
+    let asset_ids = string_column(batch, "asset_ids");
+    let market_start = timestamp_column(batch, "market_start_utc");
+    let market_end = timestamp_column(batch, "market_end_utc");
+    let fixed_verified = timestamp_column(batch, "fixed_identity_verified_at_utc");
+    let source_origin = string_column(batch, "source_evidence_origin");
+    let source_received = timestamp_column(batch, "source_evidence_received_at_utc");
+    let source_digest = string_column(batch, "source_evidence_raw_sha256");
+    let source_payload = string_column(batch, "source_evidence_payload_json");
+
+    (0..batch.num_rows())
+        .map(|index| PolymarketMetadataV3ReferenceRecord {
+            metadata_row_kind: row_kind.value(index).to_owned(),
+            slug: slug.value(index).to_owned(),
+            condition_id: condition_id.value(index).to_owned(),
+            clob_market_id: clob_market_id.value(index).to_owned(),
+            asset_ids: asset_ids.value(index).to_owned(),
+            market_start_utc: market_start.value(index),
+            market_end_utc: market_end.value(index),
+            fixed_identity_verified_at_utc: fixed_verified.value(index),
+            source_evidence_origin: source_origin
+                .is_valid(index)
+                .then(|| source_origin.value(index).to_owned()),
+            source_evidence_received_at_utc: source_received
+                .is_valid(index)
+                .then(|| source_received.value(index)),
+            source_evidence_raw_sha256: source_digest
+                .is_valid(index)
+                .then(|| source_digest.value(index).to_owned()),
+            source_evidence_payload_present: source_payload.is_valid(index),
+        })
+        .collect()
 }
 
 #[test]
@@ -172,6 +233,91 @@ fn schema_contains_metadata_columns() {
             .data_type(),
         DataType::Timestamp(_, Some(timezone)) if timezone.as_ref() == "UTC"
     ));
+}
+
+#[test]
+fn historical_v2_parquet_remains_readable_without_reopening_the_production_writer() {
+    let schema = polymarket_market_metadata_schema();
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(
+            TimestampMillisecondArray::from_iter_values([1_783_392_404_599]).with_timezone("UTC"),
+        ),
+        Arc::new(
+            TimestampMillisecondArray::from(vec![Some(1_783_392_404_100)]).with_timezone("UTC"),
+        ),
+        Arc::new(StringArray::from_iter_values(["btc-updown-5m-1783392300"])),
+        Arc::new(StringArray::from_iter_values(["condition-1"])),
+        Arc::new(StringArray::from(vec![Some("clob-market-1")])),
+        Arc::new(StringArray::from(vec![Some(r#"["asset-1","asset-2"]"#)])),
+        Arc::new(
+            TimestampMillisecondArray::from(vec![Some(1_783_392_300_000)]).with_timezone("UTC"),
+        ),
+        Arc::new(
+            TimestampMillisecondArray::from(vec![Some(1_783_392_600_000)]).with_timezone("UTC"),
+        ),
+        Arc::new(BooleanArray::from(vec![Some(true)])),
+        Arc::new(BooleanArray::from(vec![Some(true)])),
+        Arc::new(StringArray::from_iter_values(["active"])),
+        Arc::new(StringArray::from(vec![Some("0.01")])),
+        Arc::new(StringArray::from(vec![Some("1")])),
+        Arc::new(StringArray::from(vec![Some(r#"{"maker":0}"#)])),
+        Arc::new(StringArray::from(vec![Some(r#"{"eligible":true}"#)])),
+        Arc::new(StringArray::from(vec![None::<&str>])),
+        Arc::new(StringArray::from_iter_values(["active_scan"])),
+        Arc::new(BooleanArray::from(vec![Some(true)])),
+        Arc::new(StringArray::from_iter_values(["collector-host"])),
+        Arc::new(StringArray::from_iter_values(["eu-west-1"])),
+        Arc::new(StringArray::from_iter_values([
+            "https://gamma-api.polymarket.com/markets",
+        ])),
+        Arc::new(StringArray::from_iter_values([
+            POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION,
+        ])),
+    ];
+    let batch = RecordBatch::try_new(Arc::clone(&schema), columns).unwrap();
+    let tmp = tempdir().unwrap();
+    let path = tmp.path().join("historical-metadata-v2.parquet");
+    let mut historical_writer =
+        ArrowWriter::try_new(File::create(&path).unwrap(), schema, None).unwrap();
+    historical_writer.write(&batch).unwrap();
+    historical_writer.close().unwrap();
+
+    let mut reader = ParquetRecordBatchReaderBuilder::try_new(File::open(path).unwrap())
+        .unwrap()
+        .build()
+        .unwrap();
+    let historical = reader.next().unwrap().unwrap();
+    assert_eq!(historical.num_rows(), 1);
+    assert_eq!(
+        string_column(&historical, "schema_version").value(0),
+        POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION
+    );
+    assert_eq!(
+        string_column(&historical, "slug").value(0),
+        "btc-updown-5m-1783392300"
+    );
+    assert!(historical.schema().index_of("metadata_row_kind").is_err());
+    assert!(
+        historical
+            .schema()
+            .index_of("collector_admission_sequence")
+            .is_err()
+    );
+
+    let error = match TypedParquetSegmentWriter::create_for_typed_source(
+        tmp.path(),
+        "new-metadata-v2",
+        POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION,
+        "polymarket_market_metadata",
+    ) {
+        Ok(_) => panic!("historical metadata v2 must remain read-only"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported Polymarket metadata schema")
+    );
 }
 
 const T: i64 = 1_783_392_300_000;
@@ -495,6 +641,129 @@ fn resolution_followup_summary_v3() -> PolymarketMarketMetadataV3Row {
     row.resolution_missed_slot_count = Some(1);
     row.last_valid_metadata_received_utc = Some(SUMMARY_E + 420_010);
     row
+}
+
+fn assert_snake_case_codec<T>(value: T, expected: &str)
+where
+    T: serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug + PartialEq,
+{
+    let encoded = serde_json::to_string(&value).unwrap();
+    assert_eq!(encoded, serde_json::to_string(expected).unwrap());
+    assert_eq!(serde_json::from_str::<T>(&encoded).unwrap(), value);
+}
+
+#[test]
+fn v3_internal_json_enums_keep_the_frozen_snake_case_values() {
+    macro_rules! assert_values {
+        ($($value:expr),+ $(,)?) => {
+            $(
+                let value = $value;
+                assert_snake_case_codec(value, value.as_str());
+            )+
+        };
+    }
+
+    assert_values!(
+        PolymarketMetadataRowKind::MetadataSnapshot,
+        PolymarketMetadataRowKind::MarketStateTransition,
+        PolymarketMetadataRowKind::ResolutionPollAttempt,
+        PolymarketMetadataRowKind::ResolutionTerminalWs,
+        PolymarketMetadataRowKind::ResolutionFollowupSummary,
+        PolymarketMetadataOrigin::GammaMarketsDiscovery,
+        PolymarketMetadataOrigin::GammaBySlug,
+        PolymarketMetadataOrigin::MarketResolvedWs,
+        PolymarketMetadataOrigin::LocalMarketStateTimer,
+        PolymarketMetadataOrigin::LocalFollowupScheduler,
+        MarketLifecycleState::Candidate,
+        MarketLifecycleState::Prefetched,
+        MarketLifecycleState::Active,
+        MarketLifecycleState::Retired,
+        MarketRuntimeRole::Current,
+        MarketRuntimeRole::Next,
+        MarketRuntimeRole::ResolutionPending,
+        MarketRuntimeRole::None,
+        SourceEndpointUnavailableReason::NotApplicableNoSourceEvidence,
+        SourceEvidenceOrigin::GammaMarketsDiscovery,
+        SourceEvidenceOrigin::GammaBySlug,
+        SourceEvidenceOrigin::MarketResolvedWs,
+        SourceEvidenceEventType::GammaMarketsDiscoveryResponse,
+        SourceEvidenceEventType::GammaMarketBySlugResponse,
+        SourceEvidenceEventType::MarketResolved,
+        SourceEvidenceChannel::Market,
+        MarketLifecycleTransition::PrefetchedToActive,
+        MarketLifecycleTransition::CandidateToActive,
+        MarketLifecycleTransition::ActiveToRetired,
+        MarketRuntimeRoleTransition::NoneToCurrent,
+        MarketRuntimeRoleTransition::NextToCurrent,
+        MarketRuntimeRoleTransition::CurrentToResolutionPending,
+        MarketRuntimeRoleTransition::ResolutionPendingToNone,
+        ClosedTimeCheckFailureReason::Missing,
+        ClosedTimeCheckFailureReason::ParseError,
+        ClosedTimeCheckFailureReason::BeforeMarketEnd,
+        ActiveUnavailableReason::SourceFieldAbsent,
+        ActiveUnavailableReason::NotApplicableForRowKind,
+        ResolutionEvidenceSource::MarketResolvedWs,
+        ResolutionEvidenceSource::GammaBySlug,
+        TerminalClaimOwner::MarketResolvedWs,
+        TerminalClaimOwner::GammaBySlug,
+        ResolutionPollResult::Terminal,
+        ResolutionPollResult::ValidNonterminal,
+        ResolutionPollResult::TransportUnavailable,
+        ResolutionPollResult::IntegrityError,
+        ResolutionPollResult::MissedDueToDowntime,
+        ResolutionPollResult::PostTerminalClaimObservation,
+        ResolutionTransportErrorClass::Connect,
+        ResolutionTransportErrorClass::Timeout,
+        ResolutionTransportErrorClass::HttpStatus,
+        ResolutionTransportErrorClass::RateLimited,
+        ResolutionTransportErrorClass::SdkTransport,
+        ResolutionIntegrityErrorClass::AttemptBindingInvariant,
+        ResolutionIntegrityErrorClass::SdkDecodeOrSchema,
+        ResolutionIntegrityErrorClass::SourceIdentityOrShapeContradiction,
+        ResolutionIntegrityErrorClass::ClosedTimeInvalid,
+        ResolutionIntegrityErrorClass::DerivedWinnerInvariant,
+        ResolutionFollowupStatus::Pending,
+        ResolutionFollowupStatus::TerminalWs,
+        ResolutionFollowupStatus::TerminalGammaFallback,
+        ResolutionFollowupStatus::BudgetExhaustedAfterValidNonterminal,
+        ResolutionFollowupStatus::BudgetExhaustedWithoutValidResponse,
+        ResponseFieldsUnavailableReason::NotApplicableForRowKind,
+        ResponseFieldsUnavailableReason::TransportUnavailable,
+        ResponseFieldsUnavailableReason::MissedDueToDowntime,
+        ResponseFieldsUnavailableReason::SdkDecodeOrSchemaError,
+    );
+    for value in TerminalPredicateFailureReason::ALL {
+        assert_snake_case_codec(value, value.as_str());
+    }
+}
+
+#[test]
+fn v3_internal_json_draft_excludes_and_cannot_override_collector_admission() {
+    let row = metadata_snapshot_v3();
+    let draft_json = row.to_draft_json().unwrap();
+    let mut draft_value = serde_json::from_str::<serde_json::Value>(&draft_json).unwrap();
+    assert!(draft_value.get("collector_admission_sequence").is_none());
+    assert!(draft_value.get("collector_admission_time_utc_ms").is_none());
+
+    let draft_object = draft_value.as_object_mut().unwrap();
+    draft_object.insert("collector_admission_sequence".to_owned(), json!(999_999));
+    draft_object.insert(
+        "collector_admission_time_utc_ms".to_owned(),
+        json!(9_999_999_999_999_i64),
+    );
+
+    let external_sequence = 41;
+    let external_time = row.collector_admission_time_utc_ms;
+    let restored = PolymarketMarketMetadataV3Row::from_draft_json_with_admission(
+        &serde_json::to_string(&draft_value).unwrap(),
+        external_sequence,
+        external_time,
+    )
+    .unwrap();
+    let mut expected = row;
+    expected.collector_admission_sequence = external_sequence;
+    assert_eq!(restored, expected);
+    assert!(restored.validate().is_complete());
 }
 
 #[test]
@@ -848,7 +1117,6 @@ fn v3_stable_row_kinds_and_failure_precedence_are_frozen() {
     );
     assert_eq!(
         [
-            ResolutionTransportErrorClass::Dns,
             ResolutionTransportErrorClass::Connect,
             ResolutionTransportErrorClass::Timeout,
             ResolutionTransportErrorClass::HttpStatus,
@@ -857,13 +1125,28 @@ fn v3_stable_row_kinds_and_failure_precedence_are_frozen() {
         ]
         .map(ResolutionTransportErrorClass::as_str),
         [
-            "dns",
             "connect",
             "timeout",
             "http_status",
             "rate_limited",
             "sdk_transport",
         ]
+    );
+    assert_eq!(
+        ResolutionTransportErrorClass::TYPED_CLASSIFICATION_PRECEDENCE
+            .map(ResolutionTransportErrorClass::as_str),
+        [
+            "rate_limited",
+            "http_status",
+            "timeout",
+            "connect",
+            "sdk_transport",
+        ],
+        "transport classification must use public typed first-match precedence"
+    );
+    assert!(
+        serde_json::from_str::<ResolutionTransportErrorClass>(r#""dns""#).is_err(),
+        "v3 must not retain an unprovable dns subtype"
     );
     assert_eq!(
         [
@@ -1161,6 +1444,37 @@ fn five_v3_row_kinds_round_trip_through_the_versioned_writer_in_admission_order(
     let terminal_owner = batch.column(batch.schema().index_of("terminal_claim_owner").unwrap());
     assert!(terminal_owner.is_null(2));
     assert!(terminal_owner.is_valid(3));
+
+    let references = v3_reference_records_from_batch(&batch);
+    validate_polymarket_metadata_v3_local_references(&references).unwrap();
+
+    let mut unique_digest_collision = references.clone();
+    let mut different_payload = references[0].clone();
+    different_payload.source_evidence_raw_sha256 = Some("f".repeat(64));
+    unique_digest_collision.push(different_payload);
+    validate_polymarket_metadata_v3_local_references(&unique_digest_collision)
+        .expect("the full reference tuple must select the unique matching digest");
+
+    let mut missing = references.clone();
+    missing.remove(0);
+    assert!(matches!(
+        validate_polymarket_metadata_v3_local_references(&missing),
+        Err(PolymarketMetadataV3ReferenceIntegrityError::Missing { .. })
+    ));
+
+    let mut duplicate = references.clone();
+    duplicate.push(references[0].clone());
+    assert!(matches!(
+        validate_polymarket_metadata_v3_local_references(&duplicate),
+        Err(PolymarketMetadataV3ReferenceIntegrityError::Multiple { matches: 2, .. })
+    ));
+
+    let mut digest_mismatch = references;
+    digest_mismatch[0].source_evidence_raw_sha256 = Some("0".repeat(64));
+    assert!(matches!(
+        validate_polymarket_metadata_v3_local_references(&digest_mismatch),
+        Err(PolymarketMetadataV3ReferenceIntegrityError::DigestMismatch { .. })
+    ));
 }
 
 #[test]
@@ -1264,6 +1578,19 @@ fn v3_subtype_contracts_cover_transition_attempt_and_summary_variants() {
     no_valid_summary.resolution_transport_unavailable_count = Some(4);
     no_valid_summary.resolution_missed_slot_count = Some(2);
     no_valid_summary.last_valid_metadata_received_utc = None;
+
+    let mut late_end_transition = end_transition.clone();
+    late_end_transition.fixed_identity_verified_at_utc =
+        late_transition.fixed_identity_verified_at_utc;
+    late_end_transition.source_evidence_received_at_utc =
+        late_transition.source_evidence_received_at_utc;
+    late_end_transition.source_evidence_raw_sha256 =
+        late_transition.source_evidence_raw_sha256.clone();
+    validate_polymarket_metadata_v3_local_references(&[
+        PolymarketMetadataV3ReferenceRecord::from(&late_transition),
+        PolymarketMetadataV3ReferenceRecord::from(&late_end_transition),
+    ])
+    .expect("late candidate-to-active evidence must be the unique authority for its E transition");
 
     for (name, row) in [
         ("late_transition", late_transition),

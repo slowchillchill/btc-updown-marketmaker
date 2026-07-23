@@ -78,6 +78,8 @@ fn selects_exact_current_and_next_btc_updown_5m_pair() {
     assert_eq!(selection.current.down_asset_id, "102");
     assert_eq!(selection.next.up_asset_id, "201");
     assert_eq!(selection.next.down_asset_id, "202");
+    assert_eq!(selection.current.fixed_identity_verified_at_utc_ms, NOW_MS);
+    assert_eq!(selection.next.fixed_identity_verified_at_utc_ms, NOW_MS);
     assert!(selection.relation.same_series_prefix);
     assert!(selection.relation.windows_contiguous);
     assert!(selection.relation.condition_ids_distinct);
@@ -115,7 +117,7 @@ fn current_is_required_but_next_may_arrive_later() {
 
     assert!(
         current_only
-            .attach_next(&[next])
+            .attach_next(&[next], NOW_MS + 1)
             .expect("a valid late next market should be attachable")
     );
     assert_eq!(
@@ -124,6 +126,13 @@ fn current_is_required_but_next_may_arrive_later() {
             .as_ref()
             .map(|market| market.slug.as_str()),
         Some(windows.next.slug.as_str())
+    );
+    assert_eq!(
+        current_only
+            .next
+            .as_ref()
+            .map(|market| market.fixed_identity_verified_at_utc_ms),
+        Some(NOW_MS + 1)
     );
     assert_eq!(
         current_only.asset_ids(),

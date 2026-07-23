@@ -118,6 +118,8 @@ pub struct DiscoveredBtcUpdownMarket {
     pub raw_json: Option<String>,
     pub metadata_fetch_start_utc_ms: Option<i64>,
     pub metadata_received_utc_ms: Option<i64>,
+    pub fixed_identity_verified_at_utc_ms: i64,
+    pub metadata_validation_completed_at_utc_ms: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,11 +161,14 @@ impl BtcUpdownDiscovery {
     pub fn attach_next(
         &mut self,
         candidates: &[BtcUpdownMarketCandidate],
+        fixed_identity_verified_at_utc_ms: i64,
     ) -> Result<bool, DiscoverySelectionError> {
         if self.next.is_some() {
             return Ok(false);
         }
-        let Some((next, relation)) = select_btc_updown_next(&self.current, candidates)? else {
+        let Some((next, relation)) =
+            select_btc_updown_next(&self.current, candidates, fixed_identity_verified_at_utc_ms)?
+        else {
             return Ok(false);
         };
         self.next = Some(next);
@@ -267,8 +272,13 @@ pub fn select_btc_updown_markets(
     next_candidates: &[BtcUpdownMarketCandidate],
 ) -> Result<BtcUpdownDiscovery, DiscoverySelectionError> {
     let windows = discovery_windows(now_ms);
-    let current = select_one(current_candidates, &windows.current, CandidateKind::Current)?;
-    let selected_next = select_btc_updown_next(&current, next_candidates)?;
+    let current = select_one(
+        current_candidates,
+        &windows.current,
+        CandidateKind::Current,
+        now_ms,
+    )?;
+    let selected_next = select_btc_updown_next(&current, next_candidates, now_ms)?;
     let (next, relation) = selected_next.map_or((None, None), |(next, relation)| {
         (Some(next), Some(relation))
     });
@@ -283,12 +293,18 @@ pub fn select_btc_updown_markets(
 pub fn select_btc_updown_next(
     current: &DiscoveredBtcUpdownMarket,
     next_candidates: &[BtcUpdownMarketCandidate],
+    fixed_identity_verified_at_utc_ms: i64,
 ) -> Result<Option<(DiscoveredBtcUpdownMarket, BtcUpdownPairRelation)>, DiscoverySelectionError> {
     if next_candidates.is_empty() {
         return Ok(None);
     }
     let next_window = market_window(current.start_ts_s + BTC_UPDOWN_5M_STEP_SECONDS);
-    let next = select_one(next_candidates, &next_window, CandidateKind::Next)?;
+    let next = select_one(
+        next_candidates,
+        &next_window,
+        CandidateKind::Next,
+        fixed_identity_verified_at_utc_ms,
+    )?;
     let relation = validated_pair_relation(current, &next)?;
     Ok(Some((next, relation)))
 }
@@ -349,6 +365,7 @@ fn select_one(
     candidates: &[BtcUpdownMarketCandidate],
     window: &MarketWindow,
     kind: CandidateKind,
+    fixed_identity_verified_at_utc_ms: i64,
 ) -> Result<DiscoveredBtcUpdownMarket, DiscoverySelectionError> {
     let [candidate] = candidates else {
         return Err(match (kind, candidates.is_empty()) {
@@ -369,23 +386,26 @@ fn select_one(
         });
     };
 
-    validate_candidate(candidate, window).map_err(|reason| match kind {
-        CandidateKind::Current => DiscoverySelectionError::InvalidCurrent {
-            expected_slug: window.slug.clone(),
-            candidate_slug: candidate.slug.clone(),
-            reason,
-        },
-        CandidateKind::Next => DiscoverySelectionError::InvalidNext {
-            expected_slug: window.slug.clone(),
-            candidate_slug: candidate.slug.clone(),
-            reason,
-        },
+    validate_candidate(candidate, window, fixed_identity_verified_at_utc_ms).map_err(|reason| {
+        match kind {
+            CandidateKind::Current => DiscoverySelectionError::InvalidCurrent {
+                expected_slug: window.slug.clone(),
+                candidate_slug: candidate.slug.clone(),
+                reason,
+            },
+            CandidateKind::Next => DiscoverySelectionError::InvalidNext {
+                expected_slug: window.slug.clone(),
+                candidate_slug: candidate.slug.clone(),
+                reason,
+            },
+        }
     })
 }
 
 fn validate_candidate(
     candidate: &BtcUpdownMarketCandidate,
     window: &MarketWindow,
+    fixed_identity_verified_at_utc_ms: i64,
 ) -> Result<DiscoveredBtcUpdownMarket, CandidateRejectReason> {
     let slug = candidate
         .slug
@@ -446,6 +466,8 @@ fn validate_candidate(
         raw_json: candidate.raw_json.clone(),
         metadata_fetch_start_utc_ms: candidate.metadata_fetch_start_utc_ms,
         metadata_received_utc_ms: candidate.metadata_received_utc_ms,
+        fixed_identity_verified_at_utc_ms,
+        metadata_validation_completed_at_utc_ms: fixed_identity_verified_at_utc_ms,
     })
 }
 

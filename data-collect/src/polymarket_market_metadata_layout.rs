@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use polymarket_client_sdk_v2::types::DateTime;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 pub use crate::source_format::MarketLifecycleState;
@@ -9,7 +10,8 @@ pub use crate::source_format::MarketLifecycleState;
 pub const POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION: &str = "polymarket_market_metadata_v2";
 pub const POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION: &str = "polymarket_market_metadata_v3";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PolymarketMetadataRowKind {
     MetadataSnapshot,
     MarketStateTransition,
@@ -30,7 +32,8 @@ impl PolymarketMetadataRowKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PolymarketMetadataOrigin {
     GammaMarketsDiscovery,
     GammaBySlug,
@@ -62,7 +65,8 @@ impl MarketLifecycleState {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MarketRuntimeRole {
     Current,
     Next,
@@ -81,7 +85,8 @@ impl MarketRuntimeRole {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SourceEndpointUnavailableReason {
     NotApplicableNoSourceEvidence,
 }
@@ -94,7 +99,8 @@ impl SourceEndpointUnavailableReason {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SourceEvidenceOrigin {
     GammaMarketsDiscovery,
     GammaBySlug,
@@ -111,7 +117,8 @@ impl SourceEvidenceOrigin {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SourceEvidenceEventType {
     GammaMarketsDiscoveryResponse,
     GammaMarketBySlugResponse,
@@ -128,7 +135,8 @@ impl SourceEvidenceEventType {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SourceEvidenceChannel {
     Market,
 }
@@ -141,7 +149,8 @@ impl SourceEvidenceChannel {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MarketLifecycleTransition {
     PrefetchedToActive,
     CandidateToActive,
@@ -158,7 +167,8 @@ impl MarketLifecycleTransition {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MarketRuntimeRoleTransition {
     NoneToCurrent,
     NextToCurrent,
@@ -177,7 +187,8 @@ impl MarketRuntimeRoleTransition {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ClosedTimeCheckFailureReason {
     Missing,
     ParseError,
@@ -194,7 +205,8 @@ impl ClosedTimeCheckFailureReason {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ActiveUnavailableReason {
     SourceFieldAbsent,
     NotApplicableForRowKind,
@@ -209,7 +221,8 @@ impl ActiveUnavailableReason {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ResolutionEvidenceSource {
     MarketResolvedWs,
     GammaBySlug,
@@ -224,7 +237,8 @@ impl ResolutionEvidenceSource {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TerminalClaimOwner {
     MarketResolvedWs,
     GammaBySlug,
@@ -239,7 +253,8 @@ impl TerminalClaimOwner {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ResolutionPollResult {
     Terminal,
     ValidNonterminal,
@@ -262,9 +277,9 @@ impl ResolutionPollResult {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ResolutionTransportErrorClass {
-    Dns,
     Connect,
     Timeout,
     HttpStatus,
@@ -273,9 +288,18 @@ pub enum ResolutionTransportErrorClass {
 }
 
 impl ResolutionTransportErrorClass {
+    /// First-match order for the public typed transport classification contract:
+    /// HTTP 429, other HTTP status, timeout, connect, then SDK transport fallback.
+    pub const TYPED_CLASSIFICATION_PRECEDENCE: [Self; 5] = [
+        Self::RateLimited,
+        Self::HttpStatus,
+        Self::Timeout,
+        Self::Connect,
+        Self::SdkTransport,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Dns => "dns",
             Self::Connect => "connect",
             Self::Timeout => "timeout",
             Self::HttpStatus => "http_status",
@@ -285,7 +309,8 @@ impl ResolutionTransportErrorClass {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ResolutionIntegrityErrorClass {
     AttemptBindingInvariant,
     SdkDecodeOrSchema,
@@ -306,7 +331,8 @@ impl ResolutionIntegrityErrorClass {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ResolutionFollowupStatus {
     Pending,
     TerminalWs,
@@ -329,7 +355,8 @@ impl ResolutionFollowupStatus {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TerminalPredicateFailureReason {
     SlugMismatch,
     MarketIdMismatch,
@@ -435,7 +462,8 @@ impl TerminalPredicateFailureReason {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ResponseFieldsUnavailableReason {
     NotApplicableForRowKind,
     TransportUnavailable,
@@ -846,11 +874,14 @@ impl PolymarketMarketMetadataV3Validation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct PolymarketMarketMetadataV3Row {
     pub metadata_row_kind: PolymarketMetadataRowKind,
     pub timestamp_received: i64,
+    #[serde(skip)]
     pub collector_admission_sequence: u64,
+    #[serde(skip)]
     pub collector_admission_time_utc_ms: i64,
     pub metadata_origin: PolymarketMetadataOrigin,
     pub collector_host_id: String,
@@ -918,7 +949,165 @@ pub struct PolymarketMarketMetadataV3Row {
     pub response_fields_unavailable_reason: Option<ResponseFieldsUnavailableReason>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PolymarketMetadataV3ReferenceRecord {
+    pub metadata_row_kind: String,
+    pub slug: String,
+    pub condition_id: String,
+    pub clob_market_id: String,
+    pub asset_ids: String,
+    pub market_start_utc: i64,
+    pub market_end_utc: i64,
+    pub fixed_identity_verified_at_utc: i64,
+    pub source_evidence_origin: Option<String>,
+    pub source_evidence_received_at_utc: Option<i64>,
+    pub source_evidence_raw_sha256: Option<String>,
+    pub source_evidence_payload_present: bool,
+}
+
+impl From<&PolymarketMarketMetadataV3Row> for PolymarketMetadataV3ReferenceRecord {
+    fn from(row: &PolymarketMarketMetadataV3Row) -> Self {
+        Self {
+            metadata_row_kind: row.metadata_row_kind.as_str().to_owned(),
+            slug: row.slug.clone(),
+            condition_id: row.condition_id.clone(),
+            clob_market_id: row.clob_market_id.clone(),
+            asset_ids: row.asset_ids.clone(),
+            market_start_utc: row.market_start_utc,
+            market_end_utc: row.market_end_utc,
+            fixed_identity_verified_at_utc: row.fixed_identity_verified_at_utc,
+            source_evidence_origin: row
+                .source_evidence_origin
+                .map(|origin| origin.as_str().to_owned()),
+            source_evidence_received_at_utc: row.source_evidence_received_at_utc,
+            source_evidence_raw_sha256: row.source_evidence_raw_sha256.clone(),
+            source_evidence_payload_present: row.source_evidence_payload_json.is_some(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PolymarketMetadataV3ReferenceIntegrityError {
+    Missing { slug: String },
+    Multiple { slug: String, matches: usize },
+    DigestMismatch { slug: String },
+}
+
+impl std::fmt::Display for PolymarketMetadataV3ReferenceIntegrityError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing { slug } => {
+                write!(formatter, "missing metadata source authority for {slug}")
+            }
+            Self::Multiple { slug, matches } => {
+                write!(
+                    formatter,
+                    "multiple metadata source authorities for {slug}:matches={matches}"
+                )
+            }
+            Self::DigestMismatch { slug } => {
+                write!(
+                    formatter,
+                    "metadata source authority digest mismatch for {slug}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for PolymarketMetadataV3ReferenceIntegrityError {}
+
+pub fn validate_polymarket_metadata_v3_local_references(
+    records: &[PolymarketMetadataV3ReferenceRecord],
+) -> Result<(), PolymarketMetadataV3ReferenceIntegrityError> {
+    for reference in records.iter().filter(|record| {
+        record.metadata_row_kind == PolymarketMetadataRowKind::MarketStateTransition.as_str()
+            && !record.source_evidence_payload_present
+    }) {
+        let Some(source_received_at_utc) = reference.source_evidence_received_at_utc else {
+            return Err(PolymarketMetadataV3ReferenceIntegrityError::Missing {
+                slug: reference.slug.clone(),
+            });
+        };
+        let Some(reference_digest) = reference.source_evidence_raw_sha256.as_deref() else {
+            return Err(PolymarketMetadataV3ReferenceIntegrityError::Missing {
+                slug: reference.slug.clone(),
+            });
+        };
+        let candidates = records
+            .iter()
+            .filter(|candidate| {
+                candidate.source_evidence_payload_present
+                    && same_polymarket_metadata_v3_fixed_identity(reference, candidate)
+                    && candidate.source_evidence_origin == reference.source_evidence_origin
+                    && candidate.source_evidence_received_at_utc == Some(source_received_at_utc)
+            })
+            .collect::<Vec<_>>();
+        let authorities = candidates
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                candidate.source_evidence_raw_sha256.as_deref() == Some(reference_digest)
+            })
+            .collect::<Vec<_>>();
+        match authorities.as_slice() {
+            [] => {
+                if candidates.is_empty() {
+                    return Err(PolymarketMetadataV3ReferenceIntegrityError::Missing {
+                        slug: reference.slug.clone(),
+                    });
+                }
+                return Err(
+                    PolymarketMetadataV3ReferenceIntegrityError::DigestMismatch {
+                        slug: reference.slug.clone(),
+                    },
+                );
+            }
+            [_authority] => {}
+            _ => {
+                return Err(PolymarketMetadataV3ReferenceIntegrityError::Multiple {
+                    slug: reference.slug.clone(),
+                    matches: authorities.len(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn same_polymarket_metadata_v3_fixed_identity(
+    left: &PolymarketMetadataV3ReferenceRecord,
+    right: &PolymarketMetadataV3ReferenceRecord,
+) -> bool {
+    left.slug == right.slug
+        && left.condition_id == right.condition_id
+        && left.clob_market_id == right.clob_market_id
+        && left.asset_ids == right.asset_ids
+        && left.market_start_utc == right.market_start_utc
+        && left.market_end_utc == right.market_end_utc
+        && left.fixed_identity_verified_at_utc == right.fixed_identity_verified_at_utc
+}
+
 impl PolymarketMarketMetadataV3Row {
+    /// Serializes the producer-side metadata draft. Collector admission is
+    /// deliberately omitted because it is assigned by the ingress authority.
+    pub fn to_draft_json(&self) -> serde_json::Result<String> {
+        serde_json::to_string(self)
+    }
+
+    /// Restores a producer-side draft and injects the collector-owned admission
+    /// evidence. Any admission-looking fields in `raw_json` are ignored by serde.
+    pub fn from_draft_json_with_admission(
+        raw_json: &str,
+        collector_admission_sequence: u64,
+        collector_admission_time_utc_ms: i64,
+    ) -> serde_json::Result<Self> {
+        let mut row = serde_json::from_str::<Self>(raw_json)?;
+        row.collector_admission_sequence = collector_admission_sequence;
+        row.collector_admission_time_utc_ms = collector_admission_time_utc_ms;
+        Ok(row)
+    }
+
     pub fn validate(&self) -> PolymarketMarketMetadataV3Validation {
         let mut report = PolymarketMarketMetadataV3Validation {
             violations: Vec::new(),

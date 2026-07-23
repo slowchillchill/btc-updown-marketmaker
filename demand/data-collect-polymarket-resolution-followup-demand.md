@@ -92,7 +92,7 @@
 10. **`market_runtime_role=resolution_pending`**：market 已越过 `E`、不再是 current，但 collector 仍在执行有界 terminal follow-up。它不是第五种 `market_lifecycle_state`。
 11. **terminal-once**：同一 slug/condition 只允许一个经过校验的终态结果完成 lifecycle；WS 与 Gamma 竞态时不得重复写终态。
 12. **有效非终态响应**：请求成功，固定 identity 与二元结构可验证；平台 terminal fields 可以尚未出现、尚未进入终态或不满足 terminal predicate，但不存在 identity/shape contradiction。
-13. **transport unavailable**：DNS、连接、timeout、HTTP status/rate limit 等没有产生可验证 market response 的可用性事实；不得解释为 market 未 resolved。
+13. **transport unavailable**：连接建立（包括官方公开 typed API 只能归入 `connect` 的 DNS 解析失败）、timeout、HTTP status/rate limit 等没有产生可验证 market response 的可用性事实；不得解释为 market 未 resolved。
 14. **integrity error**：slug/condition/market/assets/outcome/schema 矛盾；继续按既有范围 fail closed，不作为普通 retryable nonterminal 吞掉。
 
 ### 3.1 单个 market 的规范时间线
@@ -110,7 +110,9 @@
 
 ## 四、与现有 authority 的关系
 
-本需求已于2026-07-22获批，但只授权阶段0文档authority同步。以下记录批准前的精确冲突及当前处理状态；不得把已完成的文档同步冒充代码已经实现：
+本需求于2026-07-22首次获批时只授权阶段0文档authority同步；同日后续已明确授权阶段1至阶段4，
+当前授权状态以页首及对应changelog为准。以下记录批准前的精确冲突及当前处理状态；不得把已完成的
+文档同步冒充代码已经实现：
 
 1. `plan/data-collect-plan.md`此前要求fallback同时满足`active=false`；全天真实证据证明该门会拒绝288/288个已结算目标market。主plan任务8.5的当前规范已删除该truth-value gate，旧阶段2执行结果继续作为历史事实保留。
 2. `data-collect/src/sources/polymarket.rs` 与对应测试把 `active=true` 当作 fallback 失败条件。必须改为“字段原样记录，但不参与 terminal 判定”。
@@ -245,7 +247,7 @@ v3 必须新增或显式保留下列 typed fields：
 - state transition：nullable `market_lifecycle_transition=prefetched_to_active|candidate_to_active|active_to_retired`、`lifecycle_scheduled_at_utc`、`lifecycle_applied_at_utc`、`market_runtime_role_transition=none_to_current|next_to_current|current_to_resolution_pending|resolution_pending_to_none`、`runtime_role_scheduled_at_utc`、`runtime_role_applied_at_utc`；lifecycle 与 runtime-role 字段不得跨命名空间写值；
 - Gamma/WS source fields：nullable `metadata_fetch_start_utc`、`closed`、`closed_time_raw`、`closed_time_utc`、`closed_time_check_passed`、`closed_time_check_failure_reason=missing|parse_error|before_market_end`、`automatically_resolved`、`uma_resolution_status`、`outcomes_raw`、`outcome_prices_raw`、`active`、`active_unavailable_reason=source_field_absent|not_applicable_for_row_kind`、`accepting_orders`、`ws_platform_timestamp_raw`、`ws_platform_timestamp_utc`；
 - winner/terminal：nullable `winning_asset_id`、`winning_outcome`、`resolution_evidence_source=market_resolved_ws|gamma_by_slug`、`resolution_evidence_raw_sha256`、`terminal_claim_owner=market_resolved_ws|gamma_by_slug`；
-- attempt：nullable `resolution_poll_attempt_ordinal`（1..6）、`resolution_poll_scheduled_utc`、`resolution_poll_result=terminal|valid_nonterminal|transport_unavailable|integrity_error|missed_due_to_downtime|post_terminal_claim_observation`、`resolution_transport_error_class=dns|connect|timeout|http_status|rate_limited|sdk_transport`、`resolution_transport_http_status`、`resolution_integrity_error_class=attempt_binding_invariant|sdk_decode_or_schema|source_identity_or_shape_contradiction|closed_time_invalid|derived_winner_invariant`；
+- attempt：nullable `resolution_poll_attempt_ordinal`（1..6）、`resolution_poll_scheduled_utc`、`resolution_poll_result=terminal|valid_nonterminal|transport_unavailable|integrity_error|missed_due_to_downtime|post_terminal_claim_observation`、`resolution_transport_error_class=connect|timeout|http_status|rate_limited|sdk_transport`、`resolution_transport_http_status`、`resolution_integrity_error_class=attempt_binding_invariant|sdk_decode_or_schema|source_identity_or_shape_contradiction|closed_time_invalid|derived_winner_invariant`；
 - follow-up：nullable `resolution_budget_horizon_utc`、`resolution_followup_status=pending|terminal_ws|terminal_gamma_fallback|budget_exhausted_after_valid_nonterminal|budget_exhausted_without_valid_response`、`resolution_poll_attempts_recorded`、`resolution_valid_response_count`、`resolution_transport_unavailable_count`、`resolution_missed_slot_count` 与 `last_valid_metadata_received_utc`；
 - predicate：nullable `terminal_predicate_passed` 与 `terminal_predicate_failure_reason`；not-evaluated 必须使用 null，不能冒充 false；
 - nullable `response_fields_unavailable_reason=not_applicable_for_row_kind|transport_unavailable|missed_due_to_downtime|sdk_decode_or_schema_error`，用于解释整组 response-derived fields 为 null 的原因。`attempt_binding_invariant`在本需求专指已经decoded但与本slot/fetch context矛盾的stale/cache response，因此不得用该reason清空真实response fields。
@@ -324,6 +326,7 @@ transport、missed、20秒timeout、SDK decode/schema error和attempt-binding in
 ### RF-11：SDK-first 与失败边界
 - production 只能使用 pinned 官方 Polymarket Rust SDK 已有 market channel、dynamic subscription 和 Gamma 方法；本事项不增加 production CLOB follow-up。
 - 若实际实现发现 SDK 类型、请求或响应无法满足 RF-05、RF-07 或 RF-09，必须列出具体缺口、影响和最小可选方案并等待用户决定；不得自行改用 raw REST、manual WebSocket 或 shadow client。
+- `resolution_transport_error_class`只按 pinned SDK 和其公开 typed error surface 做 first-match 分类，固定优先级为：typed HTTP status 429 -> `rate_limited`；其他 typed HTTP status -> `http_status`；`reqwest::Error::is_timeout()` -> `timeout`；`reqwest::Error::is_connect()` -> `connect`；其余 SDK transport error -> `sdk_transport`。`connect`覆盖`is_connect()`所报告的DNS/TCP/TLS/proxy连接建立失败；v3不保留独立`dns` subtype，不得读取错误显示文本、private error type/source chain或自建resolver来重新细分。HTTP成功后的SDK decode/schema错误仍按RF-07写`integrity_error + sdk_decode_or_schema`，不进入上述transport分类。
 - Gamma network/HTTP/rate-limit 与有效非终态均不得结束整个 collector，也不得阻塞其他 source；identity/schema contradiction 继续按既有完整性范围 fail closed。
 
 ## 七、验收标准
@@ -358,7 +361,7 @@ table-driven测试必须对RF-09冻结的19个source failure枚举逐项各有�
 
 ### AC-08：availability 与 integrity 分流
 
-DNS/timeout/rate-limit、valid nonterminal 与 identity/schema contradiction 进入三个不同结果类；前两者不结束 collector，第三者保持既有 fail-closed 边界。
+connect/timeout/rate-limit availability统一进入`transport_unavailable`，valid nonterminal 与 identity/schema contradiction 分别进入另外两个结果类；availability和valid nonterminal不结束 collector，identity/schema contradiction 保持既有 fail-closed 边界。测试必须证明RF-11固定的typed分类优先级；DNS失败只在公开`is_connect()`成立时归`connect`，不得恢复独立`dns`标签。
 
 ### AC-09：schema 与 writer
 

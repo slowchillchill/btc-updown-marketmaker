@@ -362,6 +362,190 @@ T promotion、E pending、E+3至E+8六个absolute attempts、E+8前无退订、s
 连续3次显式运行named RED均只在最终目标断言退出101，并独立复核完整package、Clippy、fmt与
 diff check通过、`Cargo.lock`未变化。阶段1已满足授权的commit/push门。
 
+## 2026-07-22：阶段 2 RF-11 transport subtype 能力缺口与暂停
+
+进入阶段2后，在实现`resolution_transport_error_class`的production分类前重新核验固定依赖的公开
+typed error surface，确认已批准RF-09与pinned官方SDK当前能力不能原样同时成立：
+
+1. RF-09冻结`resolution_transport_error_class=dns|connect|timeout|http_status|rate_limited|sdk_transport`，
+   AC-08明确要求DNS availability负例；因此真实DNS错误不能无证据地伪装为另一稳定subtype。
+2. 本仓库pinned `polymarket_client_sdk_v2 0.6.0` Gamma `Client`只公开`new(host)`，内部自行构造
+   `reqwest::Client`；SDK error可typed downcast到`reqwest::Error`，也可取得typed HTTP status。
+3. pinned `reqwest 0.13.4`公开提供`is_timeout()`、`is_connect()`、`is_decode()`与`status()`，但没有
+   DNS-specific判定。其底层`hyper-util 0.1.20`内部确实用不同路径创建`"dns error"`和
+   `"tcp connect error"`，但`ConnectError`位于private `connect::http` module、未公开重导出，且没有
+   public kind/accessor；依赖错误显示文本或private实现细节分类不构成稳定typed合同。
+4. 因此当前production可以稳定区分timeout、HTTP/rate-limit、decode/schema和总的connect类，却不能在
+   不修改合同或SDK注入面的前提下稳定区分DNS与其他connect。使用错误字符串、raw REST、自建Gamma
+   client或其他shadow transport均违反RF-11与项目SDK-first边界，未采用。
+
+影响：阶段2的lifecycle/pending/scheduler主实现、production v3切换以及阶段2commit/push暂停；已完成的
+fixed identity验证时刻传递、旧fallback shadow predicate清理和v3 codec准备改动保持未提交、未推送。
+现实最小选项为：A）修改合同，将官方公开`reqwest::Error::is_connect()`覆盖的连接建立失败统一记为
+`connect`，保留或删除永不由production发出的`dns`枚举另行决定；B）经用户批准，为本仓库pinned官方
+SDK补充最小reqwest client/DNS resolver注入面，并用项目自有typed DNS marker分类，承担vendored SDK
+API和测试维护范围；C）等待上游SDK/reqwest公开稳定DNS subtype。等待用户决定前不继续冲突相关实现。
+
+## 2026-07-22T15:33:01+09:00：用户批准 RF-11 方案 A
+
+用户在确认该能力缺口不是为香港VPN测试而新增后，批准采用推荐的最小方案A并恢复执行阶段2至阶段4。
+随同批准接受的取舍是：以pinned SDK公开typed surface可稳定验证的粒度为准，避免只为遥测细分类修改
+vendored SDK、注入resolver或新增shadow transport；香港VPN仍只用于最终AC-12真实采集验收，不改变schema。
+
+权威合同同步调整为：
+
+1. 从RF-09 v3稳定枚举、layout与测试删除`dns`；不产生永远无法由production可靠证明的标签。
+2. `connect`精确对齐`reqwest::Error::is_connect()`，覆盖该公开判据报告的DNS/TCP/TLS/proxy连接建立失败。
+3. transport first-match优先级冻结为typed HTTP 429 -> `rate_limited`、其他typed HTTP status ->
+   `http_status`、`is_timeout()` -> `timeout`、`is_connect()` -> `connect`、其余SDK transport ->
+   `sdk_transport`；SDK decode/schema仍走既有integrity路径。
+4. AC-08改为覆盖connect/timeout/rate-limit availability、valid nonterminal与identity/schema contradiction三类
+   结果边界。禁止错误字符串、private error source chain、raw REST或自建Gamma client分类DNS。
+
+该决定缩小schema和实现范围，不要求修改pinned SDK，也不改变本地香港VPN AC-12、production部署禁令、
+服务操作禁令或数据删除禁令。
+
+## 2026-07-22 至 2026-07-23：阶段 2 production actor、scheduler 与 v3 切换
+
+阶段2主体实现与自审正在现有单一Polymarket actor和现有typed writer内推进；阶段审查门尚未通过。
+当前实现没有新增source kind、checkpoint、raw REST、manual WebSocket、manual signing或shadow SDK路径：
+
+1. current在真实`E`进入独立`resolution_pending` role，lifecycle继续保持active；next按真实`T`
+   promotion，缺失next时由同一actor异步执行exact-slug discovery。只有活跃窗内已经固定并验证的
+   identity可进入pending；late install以fence后实际applied时刻判窗，`applied >= E`直接expired。
+2. desired subscription变为current + next +最多2个pending的有界union，仍由既有官方SDK dynamic
+   subscription actor执行additions-before-removals。pending旧market只路由`market_resolved`，每slug
+   terminal-only fingerprint最多16条；terminal或exhausted drain完成后才精确移除旧assets。
+3. follow-up scheduler只调用pinned官方SDK `market_by_slug`，按绝对`E+3m` initial和`E+4m..E+8m`
+   五次retry执行，每slug最多一个in-flight，20秒timeout不累计漂移且没有第7次probe。attempt binding、
+   source identity/shape、closedTime和唯一terminal predicate均由单一actor按RF-07/RF-11顺序判定。
+4. production transport分类只使用公开typed surface：HTTP 429、其他HTTP status、timeout、connect、
+   其余SDK transport；decode/schema保持integrity。v3枚举与测试同步删除无法可靠证明的`dns` subtype。
+5. 所有SDK-decoded `market_resolved`先保存既有`polymarket_market` raw。WS/Gamma terminal由actor
+   terminal-once仲裁；WS先claim时abort handle只发取消请求，pending仍等待JoinSet completion或明确的
+   cancelled task回收，已完成Gamma response继续完成integrity/predicate并buffer该slot唯一attempt。
+   Gamma先claim时queued WS只保留raw corroboration，不产生第二owner、evidence source或transition。
+6. terminal/exhausted使用paused accepted-event fence：actor先drain并应用唯一role/lifecycle退出，再释放
+   processor和执行unsubscribe。WS terminal与同UTC hour的buffered post-attempt先整体取得global budget和
+   ingress capacity，再按terminal-first连续admission；容量失败为零条admit，避免terminal成功而post丢失。
+   阶段2以内存中有界source-reference authority和整批原子admission阻止孤立transition/post进入queue；
+   跨UTC partition的terminal bundle继续fail closed，finalized prefix durability、crash cuts与restart
+   恢复属于已批准阶段3，不在阶段2提前另造writer/rollover框架。
+7. production metadata source一次性切换为v3；历史v2仍只读。删除新产生的WS `new_market` metadata、
+   E+5 sentinel和旧`fallback_close` conversion，保留同一Parquet writer、每日manifest file facts与
+   artifact集合，不dual-write、不扩张manifest schema。
+
+自审和前置独立审查实际发现并修正：
+
+- WS claim后过早清除abort state会让已完成Gamma completion越过teardown；现在按task id明确回收，
+  completion-wins与cancel-wins都有定向测试。
+- terminal和buffered post原先逐条enqueue，第二条容量失败可能形成孤儿post evidence；现在同分区使用
+  原子reserve-many admission，并测试容量不足时零条进入队列、正常时admission sequence严格相邻。
+- `terminal_finalized`字段从不写true且pending完成后直接remove，不提供幂等或恢复authority，已删除，
+  保留RF-04明确要求的16-entry compact terminal fingerprint。
+- reverse-race fixture曾把old identity的fixed verification放在`E`之后，已改为活跃窗内真实时刻；
+  AC-07另补initial、retry1、中间retry、retry5 terminal-stop，valid+transport与zero-valid exhausted。
+- 全量测试首次暴露两个旧fixture假设：静默CLOB测试更新了window却没有同步source payload/digest时间，
+  production v3正确拒绝为raw-day regression；已在同一测试运行日重建evidence。Gamma 100-cycle资源测试
+  仍只预期一次成功请求，但阶段2会在current恢复后立即异步发起一次bounded next discovery；fixture改为
+  明确等待并断言恰好两次成功请求，而不是放宽FD或attempt上限。
+
+此前阶段2自验证快照：
+
+1. `cargo test -p data-collect --lib live_runtime::tests::polymarket_ --locked -- --nocapture`：
+   当时51项通过、0失败；后续新增用例已使该计数失效，最终结果须在阶段审查前重跑并更新。
+2. terminal bundle、Gamma completion/cancel、initial/retry stop、mixed/zero-valid exhausted及三类
+   reverse-race定向测试全部通过；真实SDK loopback同时覆盖exact unsubscribe和queued WS。
+3. `cargo test -p data-collect --locked`：当时275项unit、全部integration与doc-tests退出0；后续新增
+   用例已使该计数失效，最终结果须在阶段审查前重跑并更新。
+4. `cargo clippy -p data-collect --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check`
+   与`git diff --check`退出0；`Cargo.lock`和vendored SDK均未修改。
+
+本节只记录阶段2实现与自审证据；阶段2在规定的独立Ultra复审通过、commit并push前仍不标记完成。
+
+## 2026-07-23：用户批准阶段 2 / 阶段 3 最小职责分界
+
+阶段2前置独立审查发现：原计划任务2.3.3把actor buffer、writer admission、flush/finalize crash cuts
+同时放进阶段2，而当前changelog与阶段3又把finalized prefix durability和restart归入阶段3；两者不能
+同时作为当前authority。按方案不一致决策门暂停后，用户批准推荐的最小分界：
+
+1. 阶段2闭合单一actor内的terminal-once、accepted-event drain、WS/Gamma竞态矩阵、terminal-first
+   原子batch admission，以及最多current/next/pending所需的有界内存source-reference authority。
+2. 阶段3统一闭合finalized prefix durability、raw/actor/writer/flush/finalize/UTC seal crash cuts、
+   跨分区producer fence、finalized artifact integrity和process restart恢复。
+3. demand第四节“只授权阶段0”改为历史首次授权表述；当前阶段1至阶段4授权仍以页首和本changelog为准。
+4. 该分界不删除、不放宽RF-10、AC-09、AC-10或最终本地香港VPN AC-12；只避免阶段2提前复制阶段3
+   writer durability/recovery框架。production部署、服务操作和数据删除仍未获授权。
+
+阶段2继续执行前已核实的修复证据包括：真实post-E routing不再把旧current非terminal事件fan-out为
+metadata；metadata admission拒绝未来causal fields但不恢复已删除的固定closedTime skew；local
+source-reference validator按identity、origin、receive与digest完整tuple判唯一，允许同receive不同digest
+的唯一命中；late `candidate_to_active` source-bearing row可成为后续E transition authority；GREEN时间线
+测试已改为中性名称。过滤套件、full lib和metadata layout在该快照分别为54/54、278/278与14/14通过；
+这些只是继续开发前快照，阶段2最终数量和完整验证仍须在后续改动完成后重跑。
+
+继续开发后的阶段2终审前自验证：
+
+1. discovery首次identity验证与本次payload validation已分开采样；同actor内相同canonical identity
+   的fresh rediscovery保留首次fixed时刻，fresh row仍保存本次validation。真实clock fixture证明
+   fetch start、source receive、candidate evaluation与validation completion按因果顺序取样。
+2. actor只保留current + next +最多2个pending所需的4条discovery source-reference authority；
+   source-bearing snapshot或late `candidate_to_active`必须先成功进入既有有序queue才登记。正常T/E
+   transition在任何state mutation或admission sequence前按完整identity、origin、receive和digest
+   唯一preflight；missing、digest mismatch或duplicate authority均fail closed。不扫描Parquet，
+   finalized durability仍留在阶段3。
+3. WS-first late Gamma由真实completion路径覆盖terminal、valid nonterminal、SDK decode、attempt
+   binding、identity/shape、closedTime及transport七类；只有integrity-clean terminal/nonterminal
+   改写为post observation，其余保留原分类。`recv=E`的`market_resolved`证明raw-first、early claim
+   唯一转交pending、旧assets保留到drain；reverse-race fixture不再手工塞post row。
+4. 历史v2使用手工ArrowWriter真实写读fixture证明仍可只读；production typed writer继续拒绝新建v2
+   segment，v3-only字段没有被伪造进历史文件。
+5. `cargo test -p data-collect --lib live_runtime::tests::polymarket_ --locked -- --nocapture`：
+   62项通过、0失败。
+6. `cargo test -p data-collect --locked`：286项unit、全部integration与doc-tests退出0；其中metadata
+   layout 15项、Parquet writer 18项、Polymarket contract 6项均通过。
+7. 四source production load精确复跑为28,745 native messages、42,370 rows、sustained
+   4,682.7 msg/s、actual 4,477.8 msg/s，位于既有2,000至5,000 native msg/s验收带内。
+8. `cargo clippy -p data-collect --all-targets --locked -- -D warnings`、
+   `cargo fmt --all -- --check`与`git diff --check`退出0；`Cargo.lock`和vendored SDK均未修改。
+
+以上仍是独立Ultra阶段终审前证据；只有审查问题闭环、复审通过并完成获授权的commit/push后，阶段2
+才可标记完成。
+
+阶段2独立Ultra终审发现并闭环以下问题：
+
+1. schema reviewer发现metadata source-bearing row在UTC rollover gate返回`Defer`时，旧boolean helper
+   会把“已暂存但尚未admit”误当成authority。实现改为内部
+   `EventAdmissionOutcome::{Admitted, Deferred, Cutoff}`；只有`Admitted`返回并登记authority，
+   `Deferred/Cutoff`均fail closed。定向回归证明deferred row没有collector admission、metadata
+   sequence仍为0且actor authority仍为空；schema复审最终PASS，Critical/Important/Minor均为0。
+2. runtime reviewer发现合格`market_resolved`若在`E-1ms`到达，原guard会在raw-first后丢弃terminal
+   claim，违反RF-05且需求没有WS temporal predicate。删除该guard后，current/next的已完整校验事件
+   一律进入既有最多2条`early_ws_claims`有界状态，仍只在E进入pending后完成transition；新增
+   pre-E与既有recv=E回归，未增加skew allowance或新actor。
+3. runtime reviewer发现同一fence最多两个ready pending顺序完成时，第二个transition会复用第一次
+   fence后的单次clock sample；若第一条metadata admission遇到backpressure，其applied不再真实。
+   改为每个slug紧邻`pending.remove`线性化点单独采样并更新actor clock。确定性channel-capacity-1
+   测试用prefill阻塞第一条，推进fake clock后证明两条summary分别记录`t1/t2`，并只unsubscribe
+   四个旧assets一次。
+4. runtime reviewer继续发现exhausted summary applied与fence释放后第一条post-marker WS可能落在同一
+   UTC毫秒，形成`raw.recv == summary.applied`，不满足RF-05/RF-10要求的严格post-horizon关系。
+   最小修复只对实际exhausted role-exit在释放paused fence前复用既有
+   `BUFFER_ACQUIRE_TIMEOUT`等待真实`timeline_now().utc_ms`严格大于最大exhausted applied；不伪造
+   `+1`、不恢复固定closedTime skew，clock不前进则fail closed。测试证明clock冻结时post-marker
+   WS不产生raw，真实推进到`t2+1`后才生成严格更晚的raw-only evidence，且没有第二terminal metadata。
+5. 新clock barrier使两个冻结时间fixture正确暴露旧假设：reverse-race的constant clock及
+   start-paused GREEN在actor采样后不再推进。fixture分别改为第二次真实采样前进1ms，以及在budget
+   fence等待期间同步推进paused UTC/clob trace；两项exact回归与完整62项Polymarket过滤套件均通过。
+
+最终阶段2验证为：Polymarket过滤62/62、完整lib 286/286、全部integration与doc-tests、
+metadata layout 15/15、Parquet writer 18/18、Polymarket contract 6/6、
+`cargo clippy -p data-collect --all-targets --locked -- -D warnings`、`cargo fmt --all -- --check`
+及`git diff --check`全部通过。四source production load结果仍为28,745 native messages、
+42,370 rows、sustained 4,682.7 msg/s、actual 4,477.8 msg/s。docs、schema与runtime终审在上述
+修复后均为PASS，Critical/Important/Minor均为0；未改动`Cargo.lock`、vendored SDK或三个未跟踪
+RTDS文档，也未执行production部署、服务操作、数据删除或提前执行香港VPN AC-12。
+
 ## 后续 changelog 规则
 
 阶段1至阶段4现已获授权；后续每个阶段必须追加记录：

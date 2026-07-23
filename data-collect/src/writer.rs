@@ -17,8 +17,7 @@ use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
 use crate::polymarket_market_metadata_layout::{
-    POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
-    PolymarketMarketMetadataRow, PolymarketMarketMetadataV3Row, polymarket_market_metadata_schema,
+    POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION, PolymarketMarketMetadataV3Row,
     polymarket_market_metadata_v3_schema,
 };
 use crate::polymarket_orderbook_layout::{PolymarketOrderbookRow, polymarket_orderbook_schema};
@@ -322,7 +321,6 @@ impl TypedParquetSegmentWriter {
         let schema = match source_kind {
             "polymarket_market" => polymarket_orderbook_schema(),
             "polymarket_market_metadata" => match schema_version {
-                POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION => polymarket_market_metadata_schema(),
                 POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION => {
                     polymarket_market_metadata_v3_schema()
                 }
@@ -434,63 +432,6 @@ impl TypedParquetSegmentWriter {
         self.write_batch_with_logical_bytes(&batch, logical_bytes)
     }
 
-    pub fn write_polymarket_market_metadata_rows(
-        &mut self,
-        rows: &[PolymarketMarketMetadataRow],
-    ) -> Result<()> {
-        if rows.is_empty() {
-            return Ok(());
-        }
-        if self.schema_version != POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "v2 Polymarket metadata rows require a v2 writer",
-            )
-            .into());
-        }
-        if rows
-            .iter()
-            .any(|row| row.schema_version != POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "v2 Polymarket metadata row carried a non-v2 schema version",
-            )
-            .into());
-        }
-        let batch = polymarket_market_metadata_rows_to_batch(Arc::clone(&self.schema), rows)?;
-        self.write_batch(&batch)
-    }
-
-    pub(crate) fn write_polymarket_market_metadata_rows_with_logical_bytes(
-        &mut self,
-        rows: &[PolymarketMarketMetadataRow],
-        logical_bytes: u64,
-    ) -> Result<()> {
-        if rows.is_empty() {
-            return Ok(());
-        }
-        if self.schema_version != POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "v2 Polymarket metadata rows require a v2 writer",
-            )
-            .into());
-        }
-        if rows
-            .iter()
-            .any(|row| row.schema_version != POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "v2 Polymarket metadata row carried a non-v2 schema version",
-            )
-            .into());
-        }
-        let batch = polymarket_market_metadata_rows_to_batch(Arc::clone(&self.schema), rows)?;
-        self.write_batch_with_logical_bytes(&batch, logical_bytes)
-    }
-
     pub fn write_polymarket_market_metadata_v3_rows(
         &mut self,
         rows: &[PolymarketMarketMetadataV3Row],
@@ -501,6 +442,21 @@ impl TypedParquetSegmentWriter {
         let last_sequence = self.validate_polymarket_metadata_v3_rows(rows)?;
         let batch = polymarket_market_metadata_v3_rows_to_batch(Arc::clone(&self.schema), rows)?;
         self.write_batch(&batch)?;
+        self.last_polymarket_metadata_admission_sequence = Some(last_sequence);
+        Ok(())
+    }
+
+    pub(crate) fn write_polymarket_market_metadata_v3_rows_with_logical_bytes(
+        &mut self,
+        rows: &[PolymarketMarketMetadataV3Row],
+        logical_bytes: u64,
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let last_sequence = self.validate_polymarket_metadata_v3_rows(rows)?;
+        let batch = polymarket_market_metadata_v3_rows_to_batch(Arc::clone(&self.schema), rows)?;
+        self.write_batch_with_logical_bytes(&batch, logical_bytes)?;
         self.last_polymarket_metadata_admission_sequence = Some(last_sequence);
         Ok(())
     }
@@ -1087,40 +1043,6 @@ fn polymarket_orderbook_rows_to_batch(
     Ok(RecordBatch::try_new(schema, columns)?)
 }
 
-fn polymarket_market_metadata_rows_to_batch(
-    schema: Arc<Schema>,
-    rows: &[PolymarketMarketMetadataRow],
-) -> Result<RecordBatch> {
-    let columns: Vec<ArrayRef> = vec![
-        timestamp_values(rows.iter().map(|row| row.timestamp_received)),
-        optional_timestamp_values(rows.iter().map(|row| row.metadata_fetch_start_utc)),
-        string_values(rows.iter().map(|row| row.slug.as_str())),
-        string_values(rows.iter().map(|row| row.condition_id.as_str())),
-        optional_strings(rows.iter().map(|row| row.clob_market_id.as_deref())),
-        optional_strings(rows.iter().map(|row| row.asset_ids.as_deref())),
-        optional_timestamp_values(rows.iter().map(|row| row.market_start_utc)),
-        optional_timestamp_values(rows.iter().map(|row| row.market_end_utc)),
-        optional_bool_values(rows.iter().map(|row| row.active)),
-        optional_bool_values(rows.iter().map(|row| row.accepting_orders)),
-        string_values(rows.iter().map(|row| row.market_lifecycle_state.as_str())),
-        optional_strings(rows.iter().map(|row| row.tick_size.as_deref())),
-        optional_strings(rows.iter().map(|row| row.min_size.as_deref())),
-        optional_strings(rows.iter().map(|row| row.fee_schedule_raw.as_deref())),
-        optional_strings(rows.iter().map(|row| row.reward_eligibility_raw.as_deref())),
-        optional_strings(
-            rows.iter()
-                .map(|row| row.metadata_unavailable_reason.as_deref()),
-        ),
-        string_values(rows.iter().map(|row| row.metadata_source.as_str())),
-        optional_bool_values(rows.iter().map(|row| row.same_condition_market_verified)),
-        string_values(rows.iter().map(|row| row.collector_host_id.as_str())),
-        string_values(rows.iter().map(|row| row.collector_region.as_str())),
-        string_values(rows.iter().map(|row| row.source_endpoint.as_str())),
-        string_values(rows.iter().map(|row| row.schema_version.as_str())),
-    ];
-    Ok(RecordBatch::try_new(schema, columns)?)
-}
-
 fn polymarket_market_metadata_v3_rows_to_batch(
     schema: Arc<Schema>,
     rows: &[PolymarketMarketMetadataV3Row],
@@ -1614,6 +1536,47 @@ fn estimated_event_bytes(event: &RawEvent) -> u64 {
 mod tests {
     use super::*;
 
+    fn valid_v3_followup_summary(admission_sequence: u64) -> PolymarketMarketMetadataV3Row {
+        const MARKET_START: i64 = 1_783_392_300_000;
+        const MARKET_END: i64 = MARKET_START + 300_000;
+        const HORIZON: i64 = MARKET_END + 480_000;
+        let draft = serde_json::json!({
+            "metadata_row_kind": "resolution_followup_summary",
+            "timestamp_received": HORIZON + 30,
+            "metadata_origin": "local_followup_scheduler",
+            "collector_host_id": "collector-host",
+            "collector_region": "eu-west-1",
+            "schema_version": POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
+            "slug": "btc-updown-5m-1783392300",
+            "condition_id": "0x01",
+            "clob_market_id": "clob-market-1",
+            "asset_ids": "[\"101\",\"102\"]",
+            "market_start_utc": MARKET_START,
+            "market_end_utc": MARKET_END,
+            "fixed_identity_verified_at_utc": MARKET_START - 120_000,
+            "market_lifecycle_state": "active",
+            "market_runtime_role": "none",
+            "source_endpoint_unavailable_reason": "not_applicable_no_source_evidence",
+            "market_runtime_role_transition": "resolution_pending_to_none",
+            "runtime_role_applied_at_utc": HORIZON + 20,
+            "active_unavailable_reason": "not_applicable_for_row_kind",
+            "resolution_budget_horizon_utc": HORIZON,
+            "resolution_followup_status": "budget_exhausted_after_valid_nonterminal",
+            "resolution_poll_attempts_recorded": 6,
+            "resolution_valid_response_count": 4,
+            "resolution_transport_unavailable_count": 1,
+            "resolution_missed_slot_count": 1,
+            "last_valid_metadata_received_utc": HORIZON - 60_000,
+            "response_fields_unavailable_reason": "not_applicable_for_row_kind"
+        });
+        PolymarketMarketMetadataV3Row::from_draft_json_with_admission(
+            &serde_json::to_string(&draft).unwrap(),
+            admission_sequence,
+            HORIZON + 40,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn depth_writer_internal_factory_cannot_bypass_version_or_schema_guards() {
         let legacy = validate_typed_writer_schema(
@@ -1638,5 +1601,30 @@ mod tests {
             binance_depth_update_schema().as_ref(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn v3_logical_bytes_writer_keeps_strict_admission_sequence_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
+            root.path(),
+            "metadata-v3-logical-bytes",
+            POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
+            "polymarket_market_metadata",
+        )
+        .unwrap();
+        let row = valid_v3_followup_summary(2);
+        assert!(row.validate().is_complete());
+        writer
+            .write_polymarket_market_metadata_v3_rows_with_logical_bytes(
+                std::slice::from_ref(&row),
+                512,
+            )
+            .unwrap();
+
+        let error = writer
+            .write_polymarket_market_metadata_v3_rows_with_logical_bytes(&[row], 512)
+            .unwrap_err();
+        assert!(error.to_string().contains("strictly increasing"));
     }
 }

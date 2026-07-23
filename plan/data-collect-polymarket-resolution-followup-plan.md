@@ -10,6 +10,11 @@
 
 > 2026-07-22 AC-12执行拓扑修订：真实source validation固定在本地原生Ubuntu环境通过用户已配置的香港VPN线路执行，不再上传到AWS爱尔兰数据采集服务器。用户已授权阶段4在阶段1至阶段3全部通过后执行；不得改变production service或执行数据删除。
 
+> 2026-07-23阶段职责分界：用户批准阶段2只闭合actor语义、竞态矩阵、原子writer admission与有界
+> 内存source-reference authority；finalized prefix durability、actor/writer/flush/finalize/UTC seal
+> crash cuts及process restart恢复统一归阶段3。该分界不削弱RF-10、AC-09或AC-10，只避免阶段2另造
+> 与阶段3重复的durability/recovery框架。
+
 ## 一、执行原则与成功标准
 
 本计划阶段0文档authority同步已经完成；现按用户明确授权顺序执行阶段1至阶段4。每个阶段必须先完成自审与独立审查、commit/push后才能进入下一阶段，并保持官方Polymarket Rust SDK-first、唯一market-channel subscription owner、真实时间戳、identity fail-closed和其他source独立运行。
@@ -103,8 +108,8 @@ admission与scheduler后再删除旧metadata fanout，并一次性切换producti
   - 验证：schema field names、row-kind validator、UTC timestamp unit、source metadata 与需求完全一致；所有v3 row identity非空，旧v2 slug-only candidate只读兼容且不再新写；阶段1没有production v3 emission或dual-write。
 - 步骤 1.2.2：在同一layout与既有writer版本分派中扩展v3 row、测试用 raw-to-typed conversion 和 writer batch，分离 `timestamp_received`、source-evidence receive 与 collector admission，冻结 attempt ordinal 1..6、poll result、transport class/status、closedTime raw/check、active unavailable reason、followup summary、counters、nullable predicate/evidence、event type/channel、可还原payload与digest fields；不新增独立v3 writer factory或提前冻结依赖阶段2 actor时序的production constructor。
   - 验证：T/E local rows不复制旧平台状态；真实 response-derived fields只来自对应 response/frame；transport/missed/summary row不含伪造 closed/winner/receive。
-- 步骤 1.2.3：增加五类 row 的 table-driven validator、failure-reason precedence、Arrow/Parquet roundtrip、v2/v3 non-mixing、manifest file-facts coverage、schema-level recovery eligibility 与 consumer compatibility tests；startup recovery与crash matrix仍留在阶段3。
-  - 验证：AC-02、AC-06、AC-09通过；fixed identity时间跨row不变，row-evidence validation completed只在适用row非空并满足source receive <= validation completed <= admission/applied；source-bearing row payload无损重建全部source-native response inputs，payload + row timing/attempt + fixed identity可重建完整predicate，digest重算一致，local reference精确解析到唯一source row；decoded stale/cache binding error也保留payload/receive/digest且predicate为null；WS event type/channel闭合；五类row的horizon/status逐项required/null；post row四个ownership-bearing winner/evidence字段为null；v2只读兼容且不能合成v3/recover pending；attempt rows增加既有file row count/hash但不改变每日manifest schema/artifact集合。
+- 步骤 1.2.3：增加五类 row 的 table-driven validator、failure-reason precedence、transport subtype稳定枚举与公开typed分类优先级合同、Arrow/Parquet roundtrip、v2/v3 non-mixing、manifest file-facts coverage、schema-level recovery eligibility 与 consumer compatibility tests；startup recovery与crash matrix仍留在阶段3。
+  - 验证：AC-02、AC-06、AC-09通过；transport枚举仅保留RF-09五种稳定值并冻结RF-11公开typed优先级；fixed identity时间跨row不变，row-evidence validation completed只在适用row非空并满足source receive <= validation completed <= admission/applied；source-bearing row payload无损重建全部source-native response inputs，payload + row timing/attempt + fixed identity可重建完整predicate，digest重算一致，local reference精确解析到唯一source row；decoded stale/cache binding error也保留payload/receive/digest且predicate为null；WS event type/channel闭合；五类row的horizon/status逐项required/null；post row四个ownership-bearing winner/evidence字段为null；v2只读兼容且不能合成v3/recover pending；attempt rows增加既有file row count/hash但不改变每日manifest schema/artifact集合。
 
 ### 任务 1.3：结构化 terminal predicate 测试
 
@@ -150,7 +155,7 @@ admission与scheduler后再删除旧metadata fanout，并一次性切换producti
 - 步骤 2.3.2：用 per-slug terminal-once 仲裁 WS/Gamma 竞态。
   - 验证：AC-04；现有唯一Polymarket processing actor串行执行validation、typed conversion与claim，fetch/WS producer不在actor外写terminal；terminal metadata/lifecycle只转换一次。
 - 步骤 2.3.3：任何terminal claim后保持pending/assets直到accepted-event drain结束。Gamma-first随后写唯一Gamma terminal row，queued WS仅在既有`polymarket_market`保存raw corroboration；WS-first时，queued/in-flight Gamma completion仍完成integrity检查与predicate计算并在actor内buffer该slot唯一attempt evidence，但不取得terminal ownership、不产生第二transition。drain后先应用唯一transition并把WS terminal作为terminal bundle第一条writer admission，再按completion顺序admit buffered attempts；exhausted fence在释放barrier前由同一actor原子terminal或关闭pending+enqueue summary。
-  - 验证：Gamma-first的transition applied在drain后且Gamma attempt独占status；WS-first分别覆盖late terminal/nonterminal Gamma response及SDK decode、binding、identity/shape、closedTime integrity error，断言WS terminal与post attempt同批或更早持久化、保留该slot唯一attempt evidence且WS独占terminal transition；在actor buffer、writer admission、flush/finalize各切点注入crash，任何finalized post都已有唯一finalized terminal。E+8 nonterminal/timeout断言barrier释放前已线性化terminal或summary。三者都无过早unsubscribe，不新增candidate/superseded状态。
+  - 验证：Gamma-first的transition applied在drain后且Gamma attempt独占status；WS-first分别覆盖late terminal/nonterminal Gamma response及SDK decode、binding、identity/shape、closedTime integrity error，断言同一actor先原子应用唯一transition，再以terminal-first有序batch admission保留该slot唯一attempt evidence且WS独占terminal transition；容量或reference authority失败时整批零admit，内存中不存在可单独admit的孤儿post。E+8 nonterminal/timeout断言barrier释放前已线性化terminal或summary。三者都无过早unsubscribe，不新增candidate/superseded状态。finalized prefix与crash-cut验证按2026-07-23批准分界归任务3.1。
 
 ### 任务 2.4：实现 Gamma exact-slug poll scheduler
 
@@ -158,8 +163,8 @@ admission与scheduler后再删除旧metadata fanout，并一次性切换producti
   - 验证：SDK provenance/static contract证明无 raw REST/manual path。
 - 步骤 2.4.2：用最小单一有界 scheduler 驱动绝对 E+3..E+8 slots，每 slug 最多一个 in-flight。
   - 验证：AC-01、AC-07；20 秒 timeout 不产生重叠或 60 秒累计漂移。
-- 步骤 2.4.3：按 RF-09 的稳定 precedence 将每个 slot 分类为 terminal、valid_nonterminal、transport_unavailable、integrity_error、missed_due_to_downtime 或 post_terminal_claim_observation；先固定transport/missed/decode/binding/source-integrity/derived-integrity，只有integrity-clean decoded response才由既有WS claim把terminal或valid-nonterminal覆盖为post-terminal observation。
-  - 验证：AC-05 至 AC-08；failure reason/result class唯一，WS-owned terminal/nonterminal Gamma response均成为post-terminal observation，而WS-owned integrity/transport结果保留原类且不被吞掉；任一 terminal 后取消剩余 slots。
+- 步骤 2.4.3：按 RF-09 的稳定 precedence 将每个 slot 分类为 terminal、valid_nonterminal、transport_unavailable、integrity_error、missed_due_to_downtime 或 post_terminal_claim_observation；先固定transport/missed/decode/binding/source-integrity/derived-integrity，只有integrity-clean decoded response才由既有WS claim把terminal或valid-nonterminal覆盖为post-terminal observation。transport subtype严格使用RF-11公开typed优先级：429、其他HTTP status、timeout、connect、其余SDK transport；DNS只在`reqwest::Error::is_connect()`成立时归`connect`，不解析错误字符串。
+  - 验证：AC-05 至 AC-08；failure reason/result class唯一，typed transport分类逐级命中且v3拒绝`dns`枚举，WS-owned terminal/nonterminal Gamma response均成为post-terminal observation，而WS-owned integrity/transport结果保留原类且不被吞掉；任一 terminal 后取消剩余 slots。
 - 步骤 2.4.4：预算耗尽按“至少一次 valid response”与“零 valid response”互斥聚合，只发布一次 `resolution_followup_exhausted` 和 summary counters。
   - 验证：只有accepted-WS fence/drain无terminal后才发布summary；valid+transport混合序列归类唯一，四counter和last-valid条件不变量成立；budget horizon=E+8而role-exit scheduled=null/applied为drain后的实际完成；不写retired、不复制旧snapshot、不产生新`unresolved_window_end_observation`或第7次probe。
 - 步骤 2.4.5：在pending、terminal-once、bounded drain、metadata admission与scheduler全部接通后，删除WS `new_market` metadata fanout、E+5 sentinel及旧`fallback_close` metadata conversion，并将现有production writer/converter一次性切换到v3。
@@ -176,7 +181,7 @@ admission与scheduler后再删除旧metadata fanout，并一次性切换producti
 ### 任务 3.1：UTC day/hour rollover
 
 - 步骤 3.1.1：让 pending state、poll scheduler、completed-result queue、in-flight result routing与terminal bundle参加同一 Polymarket producer fence；按真实 receive time drain 旧日或defer新日row admission，并保持WS terminal先于其post attempts的跨分区prefix durability。WS-old/Gamma-new时允许completion作为bounded drain消息进入actor并buffer new-day row，旧日terminal finalize后才放行新日admission。
-  - 验证：23:55 market fixture 的 E+3..E+8 进入次日且 identity 可关联；D-1ms/D/D+1ms、in-flight timeout、WS-old/Gamma-new、Gamma-old/WS-new与fence race均不产生UTC regression、deadlock或orphan post。
+  - 验证：23:55 market fixture 的 E+3..E+8 进入次日且 identity 可关联；D-1ms/D/D+1ms、in-flight timeout、WS-old/Gamma-new、Gamma-old/WS-new与fence race均不产生UTC regression、deadlock或orphan post。在raw admission/finalize、actor buffer、metadata writer admission、batch flush、segment finalize与UTC seal各切点注入crash，任何finalized post都已有同一fixed identity且更早finalized的唯一WS terminal。
 - 步骤 3.1.2：确保 schema 切换不会把 v2/v3 混进同一 segment。
   - 验证：hour/day boundary writer recovery tests通过。
 

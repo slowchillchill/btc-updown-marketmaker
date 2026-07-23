@@ -1,21 +1,73 @@
 use std::collections::BTreeSet;
 
+use polymarket_client_sdk_v2::error::{Error as PolymarketSdkError, Status as PolymarketSdkStatus};
 use polymarket_client_sdk_v2::gamma::types::response::Market as SdkGammaMarket;
 use polymarket_client_sdk_v2::types::Decimal;
 
-use crate::ValidationVerdict;
 use crate::market_discovery::build_market_subscription_request_json;
 use crate::polymarket_market_metadata_layout::{
-    ResolutionIntegrityErrorClass, ResolutionPollResult, TerminalPredicateFailureReason,
-    parse_polymarket_gamma_closed_time_utc_ms,
+    ResolutionIntegrityErrorClass, ResolutionPollResult, ResolutionTransportErrorClass,
+    TerminalPredicateFailureReason, parse_polymarket_gamma_closed_time_utc_ms,
 };
 use crate::source_format::{
-    MarketLifecycleState, PolymarketMarketResolutionRaw, PolymarketSubscriptionEvidence,
-    SubscriptionConfirmation,
+    MarketLifecycleState, PolymarketSubscriptionEvidence, SubscriptionConfirmation,
 };
 
 pub const MARKET_WS_ENDPOINT: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 pub const T30_PREFETCH_MS: i64 = 30_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GammaMarketBySlugTransportError {
+    pub class: ResolutionTransportErrorClass,
+    pub http_status: Option<u16>,
+}
+
+/// Classifies an SDK `market_by_slug` failure using only public typed error APIs.
+///
+/// `None` means the SDK failed while decoding a successful response and the caller
+/// must route the attempt through the `sdk_decode_or_schema` integrity path.
+pub fn classify_gamma_market_by_slug_transport_error(
+    error: &PolymarketSdkError,
+) -> Option<GammaMarketBySlugTransportError> {
+    let reqwest_error = error.downcast_ref::<reqwest::Error>();
+    let status = error
+        .downcast_ref::<PolymarketSdkStatus>()
+        .map(|status| status.status_code)
+        .or_else(|| reqwest_error.and_then(reqwest::Error::status));
+
+    if let Some(status) = status {
+        return Some(GammaMarketBySlugTransportError {
+            class: if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                ResolutionTransportErrorClass::RateLimited
+            } else {
+                ResolutionTransportErrorClass::HttpStatus
+            },
+            http_status: Some(status.as_u16()),
+        });
+    }
+
+    if error.downcast_ref::<serde_json::Error>().is_some()
+        || reqwest_error.is_some_and(reqwest::Error::is_decode)
+    {
+        return None;
+    }
+    if reqwest_error.is_some_and(reqwest::Error::is_timeout) {
+        return Some(GammaMarketBySlugTransportError {
+            class: ResolutionTransportErrorClass::Timeout,
+            http_status: None,
+        });
+    }
+    if reqwest_error.is_some_and(reqwest::Error::is_connect) {
+        return Some(GammaMarketBySlugTransportError {
+            class: ResolutionTransportErrorClass::Connect,
+            http_status: None,
+        });
+    }
+    Some(GammaMarketBySlugTransportError {
+        class: ResolutionTransportErrorClass::SdkTransport,
+        http_status: None,
+    })
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PolymarketMarketAdapter {
@@ -180,108 +232,6 @@ pub fn t30_prefetch_window(market_start_utc_ms: i64) -> (i64, i64) {
         market_start_utc_ms.saturating_sub(T30_PREFETCH_MS),
         market_start_utc_ms,
     )
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PolymarketRetiredFallbackMetadata {
-    pub market_resolved_missing_reason: String,
-    pub fallback_metadata_asset_ids: Vec<String>,
-    pub fallback_freshness_ms: i64,
-    pub same_condition_confirmed: bool,
-    pub condition_id: String,
-    pub closed: bool,
-    pub active: bool,
-    pub accepting_orders: bool,
-    pub closed_time_utc_ms: Option<i64>,
-    pub resolution_evidence: Option<String>,
-    pub max_freshness_ms: i64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PolymarketRetirementEvidence {
-    ResolvedEvent(Box<PolymarketMarketResolutionRaw>),
-    FallbackMetadata(PolymarketRetiredFallbackMetadata),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RetiredPredicateDecision {
-    pub retired: bool,
-    pub source_gap: Option<String>,
-}
-
-pub fn evaluate_retired_predicate(
-    condition_id: &str,
-    subscribed_asset_ids_for_market: &[String],
-    evidence: &PolymarketRetirementEvidence,
-) -> RetiredPredicateDecision {
-    if subscribed_asset_ids_for_market.is_empty() {
-        return not_retired("subscribed_asset_ids_missing");
-    }
-
-    match evidence {
-        PolymarketRetirementEvidence::ResolvedEvent(resolved) => {
-            if resolved.validate_contract().verdict != ValidationVerdict::Complete {
-                return not_retired("market_resolved_event_incomplete");
-            }
-            if resolved.condition_id != condition_id {
-                return not_retired("market_resolved_condition_mismatch");
-            }
-            let subscribed_match = subscribed_asset_ids_for_market
-                .iter()
-                .all(|asset_id| resolved.subscribed_asset_ids_for_market.contains(asset_id));
-            if !subscribed_match {
-                return not_retired("market_resolved_subscription_mismatch");
-            }
-            if !subscribed_asset_ids_for_market.contains(&resolved.winning_asset_id) {
-                return not_retired("market_resolved_winning_asset_not_in_target_market");
-            }
-            RetiredPredicateDecision {
-                retired: true,
-                source_gap: None,
-            }
-        }
-        PolymarketRetirementEvidence::FallbackMetadata(fallback) => {
-            if fallback.market_resolved_missing_reason.trim().is_empty() {
-                return not_retired("market_resolved_missing_reason_absent");
-            }
-            if fallback.condition_id != condition_id || !fallback.same_condition_confirmed {
-                return not_retired("fallback_condition_mismatch");
-            }
-            if fallback.fallback_freshness_ms > fallback.max_freshness_ms {
-                return not_retired("fallback_metadata_stale");
-            }
-            if !fallback.closed
-                || fallback.active
-                || fallback.accepting_orders
-                || fallback
-                    .closed_time_utc_ms
-                    .is_none_or(|closed_time| closed_time <= 0)
-                || fallback
-                    .resolution_evidence
-                    .as_deref()
-                    .is_none_or(|evidence| evidence.trim().is_empty())
-            {
-                return not_retired("fallback_resolution_evidence_missing");
-            }
-            let fallback_covers_subscription = subscribed_asset_ids_for_market
-                .iter()
-                .all(|asset_id| fallback.fallback_metadata_asset_ids.contains(asset_id));
-            if !fallback_covers_subscription {
-                return not_retired("fallback_asset_set_mismatch");
-            }
-            RetiredPredicateDecision {
-                retired: true,
-                source_gap: None,
-            }
-        }
-    }
-}
-
-fn not_retired(reason: &str) -> RetiredPredicateDecision {
-    RetiredPredicateDecision {
-        retired: false,
-        source_gap: Some(reason.to_owned()),
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -669,7 +619,159 @@ fn not_evaluated(
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+    use std::time::Duration;
+
+    use polymarket_client_sdk_v2::error::Kind as PolymarketSdkErrorKind;
+    use reqwest::{Method, StatusCode};
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
     use super::*;
+
+    #[test]
+    fn market_by_slug_transport_classifier_uses_typed_status_and_fallback() {
+        assert_eq!(
+            ResolutionTransportErrorClass::TYPED_CLASSIFICATION_PRECEDENCE,
+            [
+                ResolutionTransportErrorClass::RateLimited,
+                ResolutionTransportErrorClass::HttpStatus,
+                ResolutionTransportErrorClass::Timeout,
+                ResolutionTransportErrorClass::Connect,
+                ResolutionTransportErrorClass::SdkTransport,
+            ]
+        );
+        for (status, expected_class) in [
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                ResolutionTransportErrorClass::RateLimited,
+            ),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                ResolutionTransportErrorClass::HttpStatus,
+            ),
+        ] {
+            let error = PolymarketSdkError::status(
+                status,
+                Method::GET,
+                "markets/slug/test".to_owned(),
+                "test",
+            );
+
+            assert_eq!(
+                classify_gamma_market_by_slug_transport_error(&error),
+                Some(GammaMarketBySlugTransportError {
+                    class: expected_class,
+                    http_status: Some(status.as_u16()),
+                })
+            );
+        }
+
+        let error = PolymarketSdkError::with_source(
+            PolymarketSdkErrorKind::Internal,
+            io::Error::other("dns timeout connect 429"),
+        );
+        assert_eq!(
+            classify_gamma_market_by_slug_transport_error(&error),
+            Some(GammaMarketBySlugTransportError {
+                class: ResolutionTransportErrorClass::SdkTransport,
+                http_status: None,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn market_by_slug_transport_classifier_uses_reqwest_timeout_before_connect() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind timeout test listener");
+        let address = listener.local_addr().expect("timeout listener address");
+        let server = tokio::spawn(async move {
+            let _accepted = listener
+                .accept()
+                .await
+                .expect("accept timeout test request");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+        let reqwest_error = reqwest::Client::builder()
+            .timeout(Duration::from_millis(25))
+            .build()
+            .expect("build timeout test client")
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .expect_err("request must time out");
+        assert!(reqwest_error.is_timeout());
+        let error: PolymarketSdkError = reqwest_error.into();
+
+        assert_eq!(
+            classify_gamma_market_by_slug_transport_error(&error),
+            Some(GammaMarketBySlugTransportError {
+                class: ResolutionTransportErrorClass::Timeout,
+                http_status: None,
+            })
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn market_by_slug_transport_classifier_uses_reqwest_connect() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind connect test listener");
+        let address = listener.local_addr().expect("connect listener address");
+        drop(listener);
+        let reqwest_error = reqwest::Client::new()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .expect_err("request must fail to connect");
+        assert!(reqwest_error.is_connect());
+        let error: PolymarketSdkError = reqwest_error.into();
+
+        assert_eq!(
+            classify_gamma_market_by_slug_transport_error(&error),
+            Some(GammaMarketBySlugTransportError {
+                class: ResolutionTransportErrorClass::Connect,
+                http_status: None,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn market_by_slug_transport_classifier_excludes_decode_and_schema_errors() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind decode test listener");
+        let address = listener.local_addr().expect("decode listener address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept decode test request");
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1\r\nConnection: close\r\n\r\n{",
+                )
+                .await
+                .expect("write invalid JSON response");
+        });
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .expect("receive decode test response");
+        let reqwest_error = response
+            .json::<serde_json::Value>()
+            .await
+            .expect_err("invalid JSON must fail decoding");
+        assert!(reqwest_error.is_decode());
+        let error: PolymarketSdkError = reqwest_error.into();
+        assert_eq!(classify_gamma_market_by_slug_transport_error(&error), None);
+        server.await.expect("decode test server");
+
+        let schema_error = serde_json::from_str::<u64>(r#""not-a-number""#)
+            .expect_err("schema mismatch must fail");
+        let error: PolymarketSdkError = schema_error.into();
+        assert_eq!(classify_gamma_market_by_slug_transport_error(&error), None);
+    }
 
     #[test]
     fn derived_winner_invariant_is_not_a_source_predicate_failure() {

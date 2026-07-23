@@ -18,7 +18,6 @@ use data_collect::handoff::{
 };
 use data_collect::polymarket_market_metadata_layout::{
     POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
-    PolymarketMarketMetadataContext, PolymarketMarketMetadataRow,
 };
 use data_collect::polymarket_orderbook_layout::{
     PolymarketOrderbookContext, PolymarketOrderbookRow,
@@ -111,37 +110,6 @@ fn depth_update_row(
         source_endpoint: "wss://stream.binance.com:9443/ws/btcusdt@depth".to_owned(),
         schema_version: BINANCE_DEPTH_UPDATE_SCHEMA_VERSION.to_owned(),
     }
-}
-
-fn polymarket_metadata_v2_row() -> PolymarketMarketMetadataRow {
-    PolymarketMarketMetadataRow::active_scan(
-        "btc-updown-5m-1783392300",
-        "condition-1",
-        Some("clob-market-1"),
-        &["asset-1".to_owned(), "asset-2".to_owned()],
-        Some(1_783_392_300_000),
-        Some(1_783_392_600_000),
-        Some(true),
-        Some(true),
-        "active",
-        None,
-        None,
-        None,
-        None,
-        Some(true),
-        PolymarketMarketMetadataContext {
-            timestamp_received_ms: 1_783_392_404_599,
-            metadata_fetch_start_utc_ms: Some(1_783_392_404_100),
-            collector_host_id: "collector-host".to_owned(),
-            collector_region: "eu-west-1".to_owned(),
-            source_endpoint: "https://gamma-api.polymarket.com/markets".to_owned(),
-            schema_version: POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION.to_owned(),
-        },
-    )
-    .with_metadata_unavailable_reason(Some(
-        "gamma_discovery_snapshot_lacks_tick_size_min_size_fee_schedule_reward_eligibility"
-            .to_owned(),
-    ))
 }
 
 fn read_single_finalized_batch(path: &Path) -> RecordBatch {
@@ -417,72 +385,50 @@ fn parquet_writer_writes_pmxt_like_orderbook_schema() {
 }
 
 #[test]
-fn typed_writer_writes_polymarket_market_metadata_rows() {
+fn typed_writer_rejects_new_polymarket_market_metadata_v2_segments() {
     let tmp = tempdir().unwrap();
-    let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
+    let error = match TypedParquetSegmentWriter::create_for_typed_source(
         tmp.path(),
         "metadata",
-        "polymarket_market_metadata_v2",
+        POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION,
         "polymarket_market_metadata",
-    )
-    .unwrap();
-    let row = polymarket_metadata_v2_row();
-
-    writer
-        .write_polymarket_market_metadata_rows(&[row])
-        .unwrap();
-    let published = writer.finalize().unwrap();
-
-    let builder =
-        ParquetRecordBatchReaderBuilder::try_new(File::open(&published.final_path).unwrap())
-            .unwrap();
-    let mut batch_reader = builder.build().unwrap();
-    let batch = batch_reader.next().unwrap().unwrap();
-    let reasons = batch
-        .column(
-            batch
-                .schema()
-                .index_of("metadata_unavailable_reason")
-                .unwrap(),
-        )
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap();
-    assert_eq!(
-        reasons.value(0),
-        "gamma_discovery_snapshot_lacks_tick_size_min_size_fee_schedule_reward_eligibility"
+    ) {
+        Ok(_) => panic!("historical metadata v2 must remain read-only"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported Polymarket metadata schema")
     );
 }
 
 #[test]
 fn polymarket_metadata_writer_does_not_mix_v2_and_v3() {
     let tmp = tempdir().unwrap();
-    let mut v3_writer = TypedParquetSegmentWriter::create_for_typed_source(
+    let _v3_writer = TypedParquetSegmentWriter::create_for_typed_source(
         tmp.path(),
         "metadata-v3",
         POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
         "polymarket_market_metadata",
     )
     .unwrap();
-    let error = v3_writer
-        .write_polymarket_market_metadata_rows(&[polymarket_metadata_v2_row()])
-        .unwrap_err();
-    assert!(error.to_string().contains("require a v2 writer"));
 
     let tmp = tempdir().unwrap();
-    let mut v2_writer = TypedParquetSegmentWriter::create_for_typed_source(
+    let error = match TypedParquetSegmentWriter::create_for_typed_source(
         tmp.path(),
         "metadata-v2",
         POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION,
         "polymarket_market_metadata",
-    )
-    .unwrap();
-    let mut mislabeled_v2_row = polymarket_metadata_v2_row();
-    mislabeled_v2_row.schema_version = POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION.to_owned();
-    let error = v2_writer
-        .write_polymarket_market_metadata_rows(&[mislabeled_v2_row])
-        .unwrap_err();
-    assert!(error.to_string().contains("carried a non-v2 schema"));
+    ) {
+        Ok(_) => panic!("historical metadata v2 must remain read-only"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported Polymarket metadata schema")
+    );
 
     let tmp = tempdir().unwrap();
     let error = match TypedParquetSegmentWriter::create_for_typed_source(
@@ -504,11 +450,6 @@ fn polymarket_metadata_writer_does_not_mix_v2_and_v3() {
 #[test]
 fn typed_writer_constructors_publish_source_specific_schema_metadata() {
     let cases = [
-        (
-            "polymarket_market_metadata",
-            POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION,
-            "receive_order",
-        ),
         (
             "polymarket_market_metadata",
             POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
