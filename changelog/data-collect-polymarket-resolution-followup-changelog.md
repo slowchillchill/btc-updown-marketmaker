@@ -474,7 +474,7 @@ vendored SDK、注入resolver或新增shadow transport；香港VPN仍只用于�
 2. 阶段3统一闭合finalized prefix durability、raw/actor/writer/flush/finalize/UTC seal crash cuts、
    跨分区producer fence、finalized artifact integrity和process restart恢复。
 3. demand第四节“只授权阶段0”改为历史首次授权表述；当前阶段1至阶段4授权仍以页首和本changelog为准。
-4. 该分界不删除、不放宽RF-10、AC-09、AC-10或最终本地香港VPN AC-12；只避免阶段2提前复制阶段3
+4. 该分界不删除、不放宽RF-10、AC-09、AC-10、AC-11或最终本地香港VPN AC-12；只避免阶段2提前复制阶段3
    writer durability/recovery框架。production部署、服务操作和数据删除仍未获授权。
 
 阶段2继续执行前已核实的修复证据包括：真实post-E routing不再把旧current非terminal事件fan-out为
@@ -545,6 +545,141 @@ metadata layout 15/15、Parquet writer 18/18、Polymarket contract 6/6、
 42,370 rows、sustained 4,682.7 msg/s、actual 4,477.8 msg/s。docs、schema与runtime终审在上述
 修复后均为PASS，Critical/Important/Minor均为0；未改动`Cargo.lock`、vendored SDK或三个未跟踪
 RTDS文档，也未执行production部署、服务操作、数据删除或提前执行香港VPN AC-12。
+
+## 2026-07-23：阶段 3 UTC、restart/recovery 与资源收敛
+
+阶段3按已批准的阶段2/3职责分界实现，未新增checkpoint、journal、sidecar、manifest字段、第二
+Polymarket actor或shadow transport：
+
+1. Polymarket day control携带精确UTC boundary。day fence先暂停唯一market pump，再把已接受WS消息
+   和至多两个Gamma completion按真实receive time与稳定同刻顺序合并交给同一actor；旧日事实在旧日
+   finalize前完成，新日事实只在barrier后admit。WS-owned terminal bundle继续使用terminal-first原子
+   admission，restart scanner同时验证真实finalized artifact位置，禁止finalized post早于其唯一WS
+   terminal。
+2. next与rollover discovery task在day/stop fence前统一abort并join，barrier后只按现有立即重试路径
+   fresh fetch，旧日异步结果不能跨日安装。
+3. CLOB pump不可用的outer recovery仍按绝对E边界把current转入pending，并继续驱动E+3至E+8
+   Gamma slots；Gamma terminal或第6次nonterminal/transport完成后无需等待CLOB重连即可由同一
+   pending state完成terminal/exhausted落盘。无第7次probe，旧assets只在terminal或budget完成后
+   从下一次desired subscription移除。
+4. process startup新增只读finalized-artifact scanner。它只接受manifest file facts覆盖且hash、
+   row count、schema version匹配的finalized metadata v3与`polymarket_market` raw；running文件和
+   历史v2不作authority。scanner保存day/hour/part/row位置并fail closed验证fixed identity、
+   source payload/digest/reference、attempt ordinal prefix、terminal/summary互斥及WS/Gamma/
+   exhausted/raw完整matrix；只恢复仍有未来slot且总数不超过2的pending，已经越过而无durable
+   attempt evidence的slot只生成missed语义。
+5. recovered startup先恢复当前与下一五分钟window的既有raw lifecycle dedupe，再按scanner耗时后的
+   真实clock重新归类elapsed slot；scanner期间跨UTC日则丢弃旧日只读结果并重新走startup loop，
+   clock回退则fail closed。
+6. 资源合同继续复用既有两个Gamma task上限、每pending 16-entry compact terminal dedupe与
+   current/next/pending desired union；批量recovery fixture证明actor-owned pending、task和dedupe
+   在terminal/exhausted后释放，没有引入全历史状态或新后台scheduler。
+
+开发与自审中发现并修正：
+
+- 初版recovered启动绕过既有raw dedupe restore，可能让重启后的current/next WS replay重复写入；
+  现只对启动时真实current+next windows执行control-aware restore，pending仍使用自身compact terminal
+  dedupe，避免扩大2M-entry lifecycle集合。
+- 初版outer loop只有已有pending才发poll，CLOB在E前断线会丢失E transition；同时Gamma completion
+  需等CLOB恢复才finalize。现outer loop复用既有boundary advancement与paused finalizer，并增加
+  CLOB持续不可用的transition、terminal和exhausted回归。
+- 初版day fence先处理全部queued WS再处理Gamma，不能表达`Gamma receive=D-1 / WS receive=D+1`
+  的反向竞态。现以control携带的exact boundary合并排序，覆盖D-1/D/D+1及WS-old/Gamma-new、
+  Gamma-old/WS-new。
+- 初版scanner把“不相关raw”和“相关但identity/payload矛盾raw”都表示为`None`，存在错误恢复pending
+  的fail-open；现使用三态分类，只有真实其他market或窗外raw被忽略，相关解码、schema、identity、
+  payload或digest矛盾均终止恢复。
+- 初版restart只用进程内admission sequence验证terminal/post prefix，无法证明跨文件durable顺序；
+  现附加finalized artifact position，并补齐会改变恢复判断的terminal、summary、post及transition
+  row语义。
+- 完整测试首次发现阶段3把所有source control提前为最高优先级，导致普通测试fence抢在已ready的
+  第6次Gamma completion与退订收敛之前。对比阶段2提交证明SDK退订能力无缺口；最终只延后
+  `stop=false + no day boundary + no resume`的普通fence，让ready Gamma/finalization先收敛，
+  day、stop及所有malformed control仍立即优先。定向时间线恢复通过，所有临时SDK/loopback诊断代码
+  均已移除，vendored SDK最终无diff。
+- 初版raw-day admission在WS/Gamma actor处理期间持有`Arc` read guard，day seal需等待该guard释放，
+  而accepted terminal bundle又可能等待seal，形成闭环。最终只保留source-scoped detached
+  `Permit/Defer` ticket；真正enqueue时重新取得短生命周期guard并核对day/generation。没有新增gate、
+  checkpoint或第二writer。
+- scanner初版先按`[E,E+8)`筛掉identity，因而无法检查horizon外仍属于同一identity的finalized
+  terminal/post/raw矛盾；metadata reader又把缺少row-kind projection一律当作v2。最终先验证D/D-1
+  全部finalized v3 identity及raw matrix，再只从仍有未来slot的子集恢复；Parquet footer显式v2才跳过，
+  v3缺projection、footer缺失/重复/未知均fail closed。未增加`raw > Gamma completion`这类需求外时间门。
+- quiesce初版只物化已到E的current early WS claim；current-pre-E会被clean stop误报成功，current
+  物化时的`next.take()/rebuild`还会静默剪掉next-pre-E claim。day fence也可能在ordinary E
+  advancement前先回复并seal旧日raw，outer recovery的biased control分支存在同一竞态。最终增加一个
+  只读preflight：claim非空时只允许唯一current且真实时间已到E；connected与outer day fence均在
+  drain/join后重新采样真实clock、确认`now >= boundary`、复用既有boundary advancement后再finalize。
+  正常运行仍允许early claim等待E，检查只作用于clean exit/day seal，独立Ultra复审确认不是过度校验。
+- AC-10 crash fixture初版虽为GREEN，但actor、metadata admission、WriterCommand与ActiveSegment切点
+  只携带terminal单行，未形成真实WS-first terminal+buffered-post bundle；UTC正例还新建generation=1
+  gate并剥离Inflight permit直接写Parquet，绕过真实writer rollover generation检查。独立Ultra复审
+  判为2项Important；修复固定为调用真实Gamma completion与actor finalizer，并复用同一gate/close、
+  deferred flush和writer permit检查，不增加production seam。orphan-post与reverse-prefix负例经复审
+  继续有效。
+- 补充并发运行`polymarket_`过滤集时，既有
+  `polymarket_source_spec_uses_private_gamma_endpoint_and_millisecond_deadline`在高并发调度下先越过
+  50ms source deadline，随后测试代码无界等待尚未被连接的本地mock server；主代理终止该重复run，
+  确认无残留进程。该test exact为1/1；`cargo test -p data-collect --lib polymarket_ --locked --
+  --test-threads=1`这一lib名称过滤在新增scanner回归前为130/130（其中也包含模块名带
+  `polymarket_sdk_runtime`的既有RTDS测试），且权威全量套件已通过；
+  因而没有把test harness调度抖动误报为collector或SDK缺陷，也没有为此扩大production改动。
+- 阶段3全面代码终审发现restart scanner只投影canonical v3的40/68列，并让compact
+  `MetadataRecord::validate()`承担不完整的第二套row校验；此前未投影的source event/channel、
+  fetch/validation时间、Gamma response、transport与predicate字段若损坏，可能被错误用于恢复或
+  terminal/exhausted判定。按用户批准的推荐方案，scanner现精确核对完整Arrow schema的字段名、
+  顺序、类型与nullability，读取完整row，通过canonical
+  `PolymarketMarketMetadataV3Row::from_draft_json_with_admission()`与`validate()`后才构造compact
+  recovery view；discovery payload复用production candidate validator，Gamma payload复用官方SDK
+  decode与唯一`evaluate_gamma_terminal_response()`。原有跨row/raw/prefix规则继续保留，未增加依赖、
+  transport、checkpoint或第二套predicate。新增完整schema缺列、未投影required/null matrix、缺失
+  budget horizon、discovery payload/identity矛盾及Gamma terminal predicate矛盾五项corruption
+  fixture，均证明恢复fail closed。
+- 后续代码与范围终审继续发现两项raw/WS完整性缺口和一项局部重复校验：raw scanner原先只用
+  Parquet typed routing列筛选candidate，目标source payload可能被同时损坏的typed
+  `event_type/market/slug`隐藏；WS row只校验两个typed platform timestamp字段互相一致，未核对
+  persisted source payload中的真实`timestamp`；compact recovery view仍重复部分canonical
+  row/schema判定。修复保持最小：scanner对每条raw同时解析payload中的
+  `event_type/id/market/slug`并与typed routing取并集，再对相关row的typed/payload矛盾fail
+  closed；WS source payload的`event_type`与`timestamp`必须精确支持typed字段；compact层只保留
+  fixed-identity、finalized integrity、跨row attempt/reference、terminal-prefix和strict
+  post-horizon规则，单row/schema/predicate继续唯一委托canonical validator与官方SDK/evaluator。
+  新增两项corruption fixture分别证明typed routing不能隐藏目标payload、WS typed timestamp不能
+  脱离source payload。没有新增网络parser、transport、状态机、checkpoint、依赖或第二套predicate。
+- 文档终审同时发现AC-11证据未具名闭合，且旧“130/130”可能被误读为纯Polymarket套件；本节现已
+  具名记录四项AC-11资源回归，并把该数字明确限定为lib名称过滤。该修订不改变需求、计划、实现范围
+  或验收标准。
+
+阶段3独立终审前自验证：
+
+1. restart scanner为32/32；`live_runtime::tests::polymarket_`为88/88；单线程
+   `cargo test -p data-collect --lib polymarket_ --locked -- --test-threads=1`这一lib名称过滤为
+   137/137；AC-10 crash-cut exact为1/1。`polymarket_resolution_timeline_is_absolute_green`
+   继续为1/1，并重新证明旧assets在budget完成后、stop前退订。
+2. `cargo test -p data-collect --lib --tests --locked`及
+   `cargo test -p data-collect --locked`均退出0；完整lib为347/347，全部integration test targets
+   与doc-tests通过。
+3. `cargo check -p data-collect --locked`与
+   `cargo clippy -p data-collect --all-targets --locked -- -D warnings`退出0；
+   `cargo fmt --all -- --check`及`git diff --check`退出0。
+4. official-SDK/static scope scan只发现pinned `polymarket_client_sdk_v2::gamma::Client`与
+   `MarketBySlugRequest`进入新增production路径；没有raw REST、manual WS/signing、第二actor、
+   checkpoint或新增依赖。`Cargo.lock`、Cargo manifests、vendored SDK和三个未跟踪RTDS文档均未修改。
+5. clean-stop/day-fence边界复审与最终AC-10 crash fixture复审均为PASS，Critical/Important/Minor
+   均为0；两项复审都明确确认修复没有过度设计或过度校验。
+6. AC-11具名资源回归全部通过：`polymarket_pending_union_and_terminal_dedupe_stay_within_frozen_bounds`
+   证明最多2个pending、8个assets、每pending 16个fingerprints且额外状态小于1 MiB；
+   `polymarket_hour_budget_and_two_task_ownership_are_hard_bounded`证明每小时最多72次请求且最多2个
+   Gamma task；`polymarket_many_recovered_lifecycles_release_actor_owned_state`证明100个lifecycle后
+   pending/assets/bytes归零；`gamma_outer_supervisor_survives_one_hundred_outer_cycles_with_bounded_fds`
+   证明100次outer recovery后FD回归平台且波动有界。
+7. 未执行production部署、服务操作、数据删除或提前执行香港VPN AC-12。
+
+阶段3最终代码、范围/简洁性与文档/验收三路独立Ultra复审均为PASS，Critical 0、Important 0、
+Minor 0。三项首轮问题已真实闭环：typed raw routing不能隐藏目标payload，WS platform timestamp
+精确绑定保存payload，compact recovery层不再重复canonical单row/schema/predicate校验。复审明确
+确认没有整体或局部过度设计/过度校验，没有shadow parser/authority、第二actor、checkpoint或范围
+扩张。阶段3现已满足获授权的commit/push门；完成精确提交与远端分支一致性核对后才进入阶段4。
 
 ## 后续 changelog 规则
 

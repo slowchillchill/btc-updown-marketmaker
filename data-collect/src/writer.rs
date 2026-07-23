@@ -1043,7 +1043,7 @@ fn polymarket_orderbook_rows_to_batch(
     Ok(RecordBatch::try_new(schema, columns)?)
 }
 
-fn polymarket_market_metadata_v3_rows_to_batch(
+pub(crate) fn polymarket_market_metadata_v3_rows_to_batch(
     schema: Arc<Schema>,
     rows: &[PolymarketMarketMetadataV3Row],
 ) -> Result<RecordBatch> {

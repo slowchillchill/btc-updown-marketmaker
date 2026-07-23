@@ -16,6 +16,7 @@ pub mod manifest;
 pub mod market_discovery;
 pub mod polymarket_market_metadata_layout;
 pub mod polymarket_orderbook_layout;
+pub mod polymarket_resolution_recovery;
 pub mod polymarket_sdk_runtime;
 pub mod publish;
 pub mod resource;

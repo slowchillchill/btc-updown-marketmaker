@@ -471,6 +471,18 @@ fn validate_candidate(
     })
 }
 
+pub(crate) fn validate_recovered_btc_updown_market_from_sdk_payload(
+    market: &SdkGammaMarket,
+    window: &MarketWindow,
+    fixed_identity_verified_at_utc_ms: i64,
+) -> Result<DiscoveredBtcUpdownMarket, CandidateRejectReason> {
+    validate_candidate(
+        &BtcUpdownMarketCandidate::from_sdk_market(market),
+        window,
+        fixed_identity_verified_at_utc_ms,
+    )
+}
+
 fn fee_schedule_raw(market: &SdkGammaMarket) -> Option<String> {
     let value = serde_json::json!({
         "fee": market.fee.as_ref().map(ToString::to_string),
