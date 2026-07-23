@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-polymarket-resolution-followup-changelog.md`
 >
-> 状态：`APPROVED_FOR_PHASE_1_TO_4_EXECUTION_2026-07-22`。用户已逐项批准第八节第1至8项需求语义，拒绝并要求删除第9项固定5秒`closedTime` future-skew allowance，并批准同步第10项主authority；随后明确授权完整执行阶段1至阶段4，包括Rust/schema/test实现、本地构建与全量测试、每阶段独立审查后的commit/push，以及最终本地香港VPN AC-12。production部署、服务操作和数据删除未获授权。
+> 状态：`PHASE_4_COMPLETE_LOCAL_HK_VPN_AC12_AC13_PASS_2026-07-23`。用户已逐项批准第八节第1至8项需求语义，拒绝并要求删除第9项固定5秒`closedTime` future-skew allowance，并批准同步第10项主authority；随后明确授权完整执行阶段1至阶段4。阶段1至阶段4已完成实现、验证和规定的独立审查；阶段4本地香港线路AC-12与全量AC-13通过，最终三路全面终审均为Critical 0、Important 0、Minor 0。production部署、服务操作和数据删除未获授权，也未执行。
 
 > 2026-07-22真实数据采集验收拓扑修订：用户指定本事项AC-12必须在本地原生Ubuntu环境使用已配置的香港VPN线路执行，不再使用AWS爱尔兰数据采集服务器。用户现已授权在阶段1至阶段3完成并通过各阶段门后执行阶段4及AC-12；该决定不改变production部署拓扑，也不授权production部署、服务操作或数据删除。
 
@@ -382,6 +382,30 @@ connect/timeout/rate-limit availability统一进入`transport_unavailable`，val
 ### AC-13：全量回归与范围
 
 data-collect targeted tests、全量 tests、check、Clippy、fmt、diff check 均通过；静态检查证明没有 raw REST/manual WS/shadow client、第二 subscription owner，也没有修改 Binance、RTDS、paper/live、模型或交易路径。
+
+### AC-12/AC-13 执行结果（2026-07-23）
+
+阶段4在本地隔离artifact中完成真实source执行并通过主代理自审：
+
+- 精确commit `a32226863428dcbd82b016538f36855240a41892` 的release binary连续运行
+  `1802` 秒，collector与线路监控退出码均为 `0`，无临时文件；
+- `31/31` 份before/running/after线路样本均为
+  `8.210.176.1 / HK / HKG`，覆盖 `5` 个完整五分钟market的每个活跃窗；
+- collector进程树 `22/22` 次IPv4/IPv6 connect均只到本地香港线路
+  `127.0.0.1:20810`，非loopback connect为 `0`；
+- 5个完整market中4个在E+3前取得真实WS terminal；5条metadata terminal与
+  5条raw `market_resolved`逐条唯一对应；
+- v3 metadata为精确68字段、25行，row-kind计数为snapshot 8、transition 12、
+  WS terminal 5、attempt 0、summary 0；WS先于E+3完成使attempt/summary为0符合
+  terminal-once合同，不要求真实运行人为制造五种row kind；
+- manifest 11/11 file facts、Parquet bytes/hash/rows/footer/embedded facts一致，
+  full tests、check、Clippy、fmt与diff check全部通过。
+
+真实source报告：
+`data-collect/docs/polymarket-resolution-followup-ac12-validation.md`。
+该结果仅代表本机进程被强制经既有香港线路的validation，不代表系统默认路由或AWS爱尔兰
+paper/live延迟。阶段4需求映射、文档/验收与范围/简洁性三路独立Ultra终审均为PASS，
+Critical 0、Important 0、Minor 0；已满足计划4.3最终commit/push门。
 
 ## 八、用户审查决定
 

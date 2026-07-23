@@ -6,7 +6,7 @@
 >
 > 对应计划：`plan/data-collect-polymarket-resolution-followup-plan.md`
 >
-> 状态：`AUTHORIZED_PHASE_1_TO_4_EXECUTION_2026-07-22`。阶段0已完成自审和独立终审；用户已明确授权完整执行阶段1至阶段4、每阶段独立审查后的commit/push及最终本地香港VPN AC-12。production部署、服务操作和数据删除未获授权。
+> 状态：`PHASE_4_COMPLETE_LOCAL_HK_VPN_AC12_AC13_PASS_2026-07-23`。阶段0至阶段3已分别完成自审、独立终审与commit/push；阶段4本地香港线路AC-12、全量AC-13与三路独立全面终审均已通过。production部署、服务操作和数据删除未获授权，也未执行。
 
 ## 2026-07-21：数据检查与问题确认
 
@@ -680,6 +680,140 @@ Minor 0。三项首轮问题已真实闭环：typed raw routing不能隐藏目�
 精确绑定保存payload，compact recovery层不再重复canonical单row/schema/predicate校验。复审明确
 确认没有整体或局部过度设计/过度校验，没有shadow parser/authority、第二actor、checkpoint或范围
 扩张。阶段3现已满足获授权的commit/push门；完成精确提交与远端分支一致性核对后才进入阶段4。
+
+## 2026-07-23：阶段4本地全量验证与香港线路AC-12
+
+阶段4在已推送的Phase3 commit
+`a32226863428dcbd82b016538f36855240a41892` 上执行，没有修改Rust、schema、Cargo
+manifest/lock、vendor或production网络路径。
+
+### 本地全量验证
+
+在独立 `target/data-collect-resolution-followup` 中执行并保存日志：
+
+- `cargo test -p data-collect --locked -- --test-threads=1`：完整lib 347/347，
+  全部integration targets与doc-tests通过；
+- `cargo check -p data-collect --tests --locked`：退出0；
+- `cargo clippy -p data-collect --locked --all-targets -- -D warnings`：退出0；
+- `cargo fmt --all -- --check` 与 `git diff --check`：退出0。
+
+精确release binary：
+
+- SHA-256：
+  `82aa27fb3f1dfdb425b9e9aeae97e4666ac9bfd352908afe95a2eee3ffdad0ca`；
+- size：`29,430,920` bytes；
+- Build ID：`d0f9ed9fa35564844051948ae8a904f9d9e0500d`；
+- build receipt SHA-256：
+  `1e9b7725f1ba64fbd4a4443a06aef64ad0d75d47f5332cbea8b79fbb92dfecfa`。
+
+### 香港线路最小适配与预检
+
+核实当前继承代理出口为日本、清空代理后的默认路由也不是香港；同时官方SDK WebSocket
+路径不会可靠继承HTTP代理变量。因此直接运行会产生混合线路，不满足AC-12。
+
+用户同意推荐方案后，只在隔离validation artifact内解压Ubuntu官方
+`proxychains-ng 4.17-3build1`，通过绝对 `LD_PRELOAD`、
+`strict_chain + proxy_dns + socks5 127.0.0.1:20810` 包装精确collector。
+没有系统安装、route/firewall/TUN/service mutation，也没有改SDK或新增shadow client。
+
+执行前正负控制：
+
+- IPInfo、Cloudflare、IPify、IPWho一致为
+  `8.210.176.1 / HK / HKG`；
+- 无监听端口 `20812` 的strict negative请求退出7，syscall只到该本地端口；
+- 官方SDK Gamma、market WS和RTDS smoke均取得真实业务消息，connect只到20810；
+- 精确collector 45秒smoke退出0，strace记录的6/6次connect都只到20810，6类Parquet与
+  manifest正常finalized；正式1800秒run的`/proc/maps`另行证明加载隔离library。
+
+### 正式AC-12
+
+validation root：
+`/home/chillchill/validation-artifacts/data-collect-resolution-followup-ac12-20260723T121902Z`。
+
+正式collector从 `2026-07-23T12:30:31.728772491Z` 至
+`2026-07-23T13:00:33.702730918Z` 运行1802秒；collector和线路monitor退出码均为0。
+
+线路与连接证据：
+
+- before/running/after共31份route samples，失败0；
+- 7次IPWho第三源交叉均与IPInfo/Cloudflare一致；
+- 全程出口集合 `{8.210.176.1 / HK / HKG}`；
+- proxy PID集合 `{3706}`，restart集合 `{0}`；
+- collector进程树22次IPv4/IPv6 connect全部到 `127.0.0.1:20810`，
+  非loopback为0；22条proxychains chain均成功。
+
+数据证据：
+
+- manifest含11个finalized Parquet，无running/tmp/partial/digesting文件、gap为0；
+- 5个完整五分钟market的每个 `[T,E)` 都有5份香港线路样本；
+- 其中4个完整market在E+3前取得WS terminal；启动半窗另有1个WS terminal；
+- metadata共25行：snapshot 8、transition 12、WS terminal 5、attempt 0、summary 0；
+- 5条metadata terminal与5条raw `market_resolved`按receive、payload digest、winner和
+  fixed identity逐条唯一对应；
+- 11/11 manifest file facts与磁盘bytes/hash/rows/footer/embedded fact一致；
+- v3为精确68字段，v2文件为0，独立复算结果 `PASS`、`violations=[]`。
+
+WS在各自E+3前完成，所以未发Gamma attempt是terminal-once合同的正确分支，不是漏测；
+没有人为延迟terminal或制造retry/exhausted。报告分别保留WS platform timestamp、
+Gamma discovery fetch/receive、本地collector receive、validation、lifecycle/runtime-role
+applied与admission时间；WS terminal的Gamma fetch/closedTime为null。没有用closedTime推断
+历史可见时间，也没有恢复被用户拒绝的5秒future-skew门。
+
+真实source报告：
+`data-collect/docs/polymarket-resolution-followup-ac12-validation.md`。
+
+### 验收工具审查与收敛
+
+首版离线检查器达到2587行，接近复制Rust validator；自审后删除并改为只验证本次artifact
+必需事实的精简检查器。首轮精简版虽对本数据得到PASS，独立审查仍发现5个Important：
+
+1. 合法transport/missed attempt payload分流与exhausted path识别不完整；
+2. v2存在时可能不影响global verdict；
+3. raw linkage缺少typed payload与反向唯一证明；
+4. complete market缺少关键state-role/admission因果关系；
+5. manifest缺少磁盘闭包、duplicate、strict relative/symlink与固定sort/compression合同。
+
+以上问题只影响验收工具证明面，不影响真实artifact或Rust实现。后续三轮独立复审继续发现并
+闭环了manifest路径/embedded fact、transition reference、raw terminal反向唯一、winner与固定
+asset顺序、WS evidence和terminal/attempt/summary admission ordering等证明缺口；每次都只扩展
+本次artifact必需的独立复算，不复制完整Rust required/null matrix、19项失败precedence、
+restart crash或VPN authority。
+
+最终稳定检查器SHA-256为
+`f254dea3db0f6049018d5b22a2595e85ddbdb67e821503ecf7fbe395df2042b8`，
+结果SHA-256为
+`920f472b22d4adc9356ed22f47a68f991d18edad1370a2f665511a5fb519fc59`，
+结果为PASS且`violations=[]`。第四轮复审为PASS，Critical 0、Important 0、Minor 2：
+大小写精确的`Up/Down`对未来合法小写输入偏严，以及manifest未额外重复核对source/utc_day目录
+语义；当前真实payload、路径和embedded facts全部一致，两项均不影响本次artifact。审查明确建议
+在1542行处收敛，避免把验收器扩张为production Rust validator的shadow authority，主代理接受。
+
+文档与范围终审发现首版artifact inventory只扫描五个主目录，虽216条均通过hash校验，却漏掉
+报告引用的throwaway smoke dataset manifest和6个Parquet。该问题不影响正式AC-12数据，但
+“固定artifact”表述不成立。最终清单改为扫描artifact根下除清单自身外的全部普通文件，
+223/223条通过校验，SHA-256为
+`d11219fe4e6e4cc14e7bec80a027e349a0daaf0934890d2c27f3a776338d94c6`。
+
+文档终审还发现原报告把正式run的`/proc/maps`证据归到45秒smoke，并把smoke的6次connect
+写成6个活动socket。现已准确拆分为：smoke strace的6/6次connect只到20810且6类Parquet
+finalized；正式1800秒run的`/proc/maps`证明隔离library实际加载。
+
+上述修复后，需求映射、文档/验收、范围/简洁性三路
+`gpt-5.6-sol`、Ultra独立全面终审最终均为PASS，Critical 0、Important 0、Minor 0。
+三路均确认：process-local `proxychains-ng`包装和每分钟线路/syscall证据直接服务于禁止静默
+直连；1542行检查器只复算本次artifact并明确不复制完整Rust required/null matrix、19项失败
+precedence、restart/crash或VPN authority，因此没有过度设计、过度校验或第二production
+authority。阶段4已满足获授权的最终commit/push门；production部署、服务操作和数据删除仍未
+获授权，也未执行。
+
+### 范围边界
+
+- 本地香港线路receive timing不代表AWS爱尔兰paper/live延迟；
+- 进程级包装与全程syscall审计证明本次精确binary已知TCP路径没有静默直连，不扩大为
+  任意未知binary的内核级隔离保证；
+- 未访问或改变AWS主机，未执行production部署、production service操作、系统网络变更、
+  系统包安装或数据删除；
+- 三个无关untracked RTDS文档继续排除。
 
 ## 后续 changelog 规则
 

@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-polymarket-resolution-followup-changelog.md`
 >
-> 状态：`AUTHORIZED_PHASE_1_TO_4_EXECUTION_2026-07-22`。阶段0已完成自审和独立终审；用户已明确授权完整执行阶段1至阶段4，包括Rust/schema/test实现、本地构建与全量测试、每阶段独立审查后的commit/push，以及最终本地香港VPN AC-12。production部署、服务操作和数据删除未获授权。
+> 状态：`PHASE_4_COMPLETE_LOCAL_HK_VPN_AC12_AC13_PASS_2026-07-23`。阶段0至阶段3已分别完成自审、独立终审与commit/push；阶段4本地香港线路AC-12、本地全量AC-13与任务4.3三路独立全面终审均已通过。production部署、服务操作和数据删除未获授权，也未执行。
 
 > 2026-07-22 AC-12执行拓扑修订：真实source validation固定在本地原生Ubuntu环境通过用户已配置的香港VPN线路执行，不再上传到AWS爱尔兰数据采集服务器。用户已授权阶段4在阶段1至阶段3全部通过后执行；不得改变production service或执行数据删除。
 
@@ -239,6 +239,27 @@ git diff --check
 - 步骤 4.3.1：对照 demand RF/AC逐项生成证据索引，主代理自审。
 - 步骤 4.3.2：使用规定模型/推理级别执行独立全面终审；任何可执行问题修复后重新运行受影响验证并复审。
 - 步骤 4.3.3：只有用户已授权发布时创建最终 commit并 push；部署 production仍是独立授权门。
+
+### 阶段4执行结果（2026-07-23）
+
+1. 任务4.1全部通过：独立target中的完整lib为347/347，全部integration targets与
+   doc-tests通过；`cargo check --tests`、Clippy `-D warnings`、fmt与diff check均退出0。
+2. 任务4.2使用commit `a32226863428dcbd82b016538f36855240a41892` 的精确release
+   binary在本地隔离artifact运行1802秒并正常finalize。31份线路样本全为
+   `8.210.176.1 / HK / HKG`；22次collector connect全部只到
+   `127.0.0.1:20810`，非loopback为0。
+3. 只读复算识别5个完整五分钟market，其中4个在E+3前取得WS terminal；5条metadata
+   terminal与5条raw `market_resolved`逐条唯一对应。manifest file facts、68字段v3
+   schema、identity、transition/reference、digest与实际时间线均通过。
+4. 真实source validation report已落盘：
+   `data-collect/docs/polymarket-resolution-followup-ac12-validation.md`。
+5. 审查中修正了smoke与正式run的`/proc/maps`证据归属，并把首版漏掉7个smoke dataset
+   文件的inventory扩为artifact根下除自身外全部223个普通文件；223/223 hash通过。
+6. 任务4.3的需求映射、文档/验收、范围/简洁性三路独立Ultra终审最终均为PASS，
+   Critical 0、Important 0、Minor 0，且明确确认当前方案没有过度设计或过度校验。
+7. 本轮没有production部署、AWS操作、system VPN/route/service mutation、系统包安装、
+   数据删除或shadow Polymarket网络实现。阶段4已满足获授权的最终commit/push门；
+   production部署仍保持独立授权门。
 
 ## 三、需求—计划—验证映射
 
