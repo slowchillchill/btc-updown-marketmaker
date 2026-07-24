@@ -6,7 +6,7 @@
 >
 > 对应计划：`plan/data-collect-polymarket-resolution-followup-plan.md`
 >
-> 状态：`PHASE_4_COMPLETE_LOCAL_HK_VPN_AC12_AC13_PASS_2026-07-23`。阶段0至阶段3已分别完成自审、独立终审与commit/push；阶段4本地香港线路AC-12、全量AC-13与三路独立全面终审均已通过。production部署、服务操作和数据删除未获授权，也未执行。
+> 状态：`PHASE_4_COMPLETE_LOCAL_HK_VPN_AC12_AC13_PASS_2026-07-23__V3_VALIDATE_FIRST_DOC_APPROVED_IMPLEMENTATION_NOT_AUTHORIZED_2026-07-24__METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`。阶段0至阶段3已分别完成自审、独立终审与commit/push；阶段4本地香港线路AC-12、全量AC-13与三路独立全面终审均已通过。用户于2026-07-24批准未来source schema v3的validate-first文档修订，并于2026-07-25批准未来metadata v4 claimant schema；两次批准均未授权Rust/schema/test实施。production部署、服务操作和数据删除也未获授权、未执行。
 
 ## 2026-07-21：数据检查与问题确认
 
@@ -814,6 +814,47 @@ authority。阶段4已满足获授权的最终commit/push门；production部署�
 - 未访问或改变AWS主机，未执行production部署、production service操作、系统网络变更、
   系统包安装或数据删除；
 - 三个无关untracked RTDS文档继续排除。
+
+## 2026-07-24：future source schema v3取消raw-first
+
+用户重新审查采集目标后，质疑“每个SDK-decoded `market_resolved`在terminal校验前先持久化”是否属于过度设计，并明确同意、批准修改文档。只读核实确认：
+
+- 2026-07-21至2026-07-23的RF-05、raw late corroboration、post-horizon raw-only和raw-to-metadata restart矩阵均是当时真实批准、实现和验证的v2行为；
+- 当前handler确实先写raw，再做target identity/winner校验；invalid raw-first只有synthetic test，真实AC-12为5条有效raw与5条terminal逐条匹配；
+- raw-first提供的是无效/losing/late frame取证和跨artifact半完成状态的fail-closed标记，不提高typed业务值正确性，也不能恢复terminal；当前raw还是SDK解码后的项目重序列化而非wire bytes；
+- 新总需求的canonical artifact只保存target-admitted typed projection，因此invalid/unmatched/post-horizon raw与该边界冲突。
+
+用户决定只对未来`polymarket_orderbook_v3` new-write取代以下旧语义：
+
+1. candidate routing不等于admission；必须先完成target lifecycle relevance和market/condition/nullable slug/exact assets/outcomes/winner完整校验。
+2. qualified消息才写一条typed source row，并从同一个validated object派生terminal-once和WS terminal metadata source fields。
+3. 完全unmatched写0条且不改变状态；target-associated contradiction在row admission、claim和transition前fail closed并写0条。既有有界gap/error/coverage只能保留稳定reason code、已定义的最小身份坐标、计数和时间，不得携带完整/截断frame、重序列化JSON、payload digest或等价可恢复字段集合。
+4. Gamma-first accepted drain中的agreeing WS只写validated typed non-owning observation；矛盾WS仍fail closed；role-exit后写0条，不再保留post-horizon raw-only corroboration。
+5. v3 restart的合法完成态包括claimant typed row + 唯一WS terminal、无WS row或仅有role-exit前validated non-owning observations + 唯一Gamma terminal，以及0条`market_resolved` source row + 唯一合法exhausted summary及其一致的finalized attempts；terminal/exhausted均不恢复pending或未来slot。
+6. v3 restart以validated typed fields、唯一claimant admission/source reference、metadata authority和finalized manifest facts为准；typed source-only、typed+exhausted、late-after-role-exit、terminal+summary、重复终态或typed contradiction均fail closed，不补metadata。
+7. 不新增rejected-row、quarantine、sidecar、第二artifact或generic evidence blob。若未来要求完整拒绝帧取证，必须另立需求并由用户决定。
+
+历史边界不回写：
+
+- 本changelog此前记录的raw-first设计、代码、crash tests、5 raw/5 terminal AC-12和当时审查结论继续作为2026-07-23真实历史；
+- 当前v2 Rust/schema/tests在另获总计划阶段3实施授权并完成切换前保持不变；切换后v2只读兼容，不能授权v3 recovery；
+- metadata v3自身的WS/Gamma source payload/digest traceability继续保留，但不等于orderbook source raw-first，也不再作为orderbook payload/digest recovery依赖；
+- 本次只修改demand/plan/changelog，没有修改Rust、Cargo/vendor、schema、tests、数据或服务，也没有构建、网络probe、commit、push、release、部署、远端操作、migration或删除。
+
+两路独立只读文档复审代理进一步发现：旧resolution计划存在重复v3执行游标；六份文档遗漏合法的exhausted-summary-only完成态；gap/error/coverage可能成为frame/JSON/digest/recovery旁路；历史第6、8项的日期及AC-12范围表述过宽。主代理据此完成修正，明确AC-12只证明5条有效raw与5条terminal逐条匹配。修正后两路最终复审均为`Critical 0 / Important 0 / Minor 0 / PASS`；复审代理未直接修改文件或运行构建/测试，修正未扩大授权。
+
+## 2026-07-25：用户批准 metadata v4 claimant schema
+
+用户回复“同意你的推荐”，批准`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`。本次决定解决未来source v3 claimant recovery不能修改既有metadata v3、也不能用digest/时间/物理行位置模糊关联的版本冲突：
+
+1. 新增`polymarket_market_metadata_v4`，继续使用`source_kind=polymarket_market_metadata`及同一artifact、writer owner、partition和manifest mapping，不新增artifact、sidecar、digest、第二writer或dual-write。
+2. metadata v4以metadata v3全部字段、顺序、类型、nullability和语义为不可变前缀，只在末尾追加nullable `ws_claimant_source_sequence_epoch_id: Utf8`与`ws_claimant_collector_admission_sequence: UInt64`。
+3. 仅WS-owned `resolution_terminal_ws`两列同时必填，epoch非空且sequence>0；Gamma-owned terminal、`post_terminal_claim_observation`、snapshot、transition、summary和non-owning late WS均同时为null。
+4. claimant pair必须精确指向一条finalized、manifest-verified source v3 `market_resolved` row，并核对event/market/slug/assets/outcomes/winner与receive/admission因果事实；0条、多条、partial pair、identity/winner矛盾、running/unknown/corrupt artifact均fail closed。
+5. metadata v3 schema/version立即冻结，activation前仍是current metadata writer，activation后只读；它不能作为source v3 claimant authority。
+6. current new-write只能在同一activation diff中由source v2 + metadata v3原子切换为source v3 + metadata v4。source v3 + metadata v3、source v2 + metadata v4、dual-write和半切换均禁止。
+
+resolution demand与本计划只增加到SDK070总计划阶段3的映射，不复制第二套实现或审查游标。该批准只授权文档同步；未修改Rust、Cargo/vendor、schema、tests或数据，未执行构建、网络probe、commit、push、release、部署、migration、服务操作或删除。
 
 ## 后续 changelog 规则
 

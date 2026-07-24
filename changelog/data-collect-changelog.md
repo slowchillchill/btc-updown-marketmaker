@@ -608,3 +608,11 @@
 - 用户随后指定本事项AC-12真实数据采集测试验收改在本地原生Ubuntu环境使用已配置香港VPN线路执行，不再上传到AWS爱尔兰数据采集服务器。专项demand/plan/changelog及主authority已同步；测试前、运行期间每个完整五分钟market window至少一次、测试结束后须保留不含凭据的香港VPN/出口线路证据，线路不可确认、失效或静默直连回退均不得通过。本地receive/latency不得冒充AWS爱尔兰paper/live主机延迟，production部署拓扑不变。本次未实际运行测试、VPN或任何远端操作。
 - AC-12本地香港VPN拓扑修订经两路`gpt-5.6-sol`/Ultra独立审查并最终PASS，Critical/Important/Minor均为0；线路连续性证据与本地validation路径审批歧义已修复，未发现其他当前AWS执行要求或production拓扑漂移。
 - 用户随后明确授权完整执行resolution-followup阶段1至阶段4，包括Rust/schema/test实现、本地构建与全量测试、每阶段独立审查后的commit/push及最终本地香港VPN AC-12；production部署、服务操作和数据删除继续禁止。阶段0文档将先精确commit/push，随后严格按专项计划逐阶段推进。
+
+## 2026-07-25：Polymarket metadata v4 claimant窄authority同步
+
+- 用户批准`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`。2026-07-22记录的metadata v3五row-kind、每slot唯一attempt和source-v2运行/验证事实保持历史有效，不回写为v4。
+- current source v2 + metadata v3在另获Rust/schema/test实施授权并通过SDK070总计划阶段3原子activation门前保持不变；metadata v3 schema/version立即冻结。activation后同一五row-kind/attempt窄例外由metadata v4继承，metadata v3与source v2只读。
+- metadata v4继续使用同一`polymarket_market_metadata` artifact、writer owner、partition和manifest mapping，以v3完整schema为不可变前缀，只追加两个nullable WS claimant字段；不新增artifact、sidecar、digest、第二writer或dual-write。
+- future source-v3 claimant recovery只接受metadata v4精确外键。source v3 + metadata v3、source v2 + metadata v4、dual-write及半切换均fail closed；唯一执行游标是`plan/data-collect-sdk070-typed-schema-live-runtime-refactor-plan.md`阶段3。
+- 本次只同步demand、plan与changelog authority；没有修改Rust、Cargo/vendor、schema、tests或数据，没有构建、网络probe、commit、push、release、部署、migration、服务操作或删除。

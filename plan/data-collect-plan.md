@@ -2593,8 +2593,8 @@ CARGO_TARGET_DIR=target/data-collect-ci \
 - `new_market` 事件同时继续保留在 `polymarket_market` 事件流，并生成对应 `polymarket_market_metadata` row；不得只在 orderbook schema 里用 `new_market` 代替 metadata source。
 - 2026-07-22批准的当前authority取代旧`active=false` fallback门：E时旧market lifecycle保持active、runtime role从current切到resolution_pending并保留terminal观察assets；只有合格`market_resolved`或fresh exact-slug Gamma证据才能写retired，预算耗尽只写`resolution_followup_exhausted`并退出role，不再新写`unresolved_window_end_observation`。
 - Gamma fallback固定为E+3 initial与E+4..E+8五次retry，总计最多6个绝对slot。terminal predicate要求固定same identity、exact二元asset/outcome映射、`closed=true`、`acceptingOrders=false`、存在且可解析并不早于E的closedTime、精确resolved状态与one-hot winner；`active`只原样记录为nullable字段，不参与truth-value判定，closedTime与receive之间没有future-skew上界门。
-- metadata升级为v3并采用批准需求RF-09的五种row kind、required/null matrix、19项稳定source failure枚举、可还原payload与digest/reference合同；每slot最多一条attempt row。该row进入既有Parquet与manifest file facts，但不扩张manifest schema/artifact/sidecar；terminal-once、WS/Gamma drain、prefix durability与restart fail-closed矩阵均以批准专项需求/计划为准。
-- 上述三条当前只完成authority同步，不能冒充Rust/schema/test已实现；阶段2任务2.1步骤2.1.3的历史执行结果保留当时`active=false`事实，并由本节与新changelog追加记录supersede。
+- current source-v2路径的metadata升级为v3并采用批准需求RF-09的五种row kind、required/null matrix、19项稳定source failure枚举、可还原payload与digest/reference合同；每slot最多一条attempt row。2026-07-25批准的future metadata v4以v3完整schema为不可变前缀，只追加两个nullable WS claimant字段；source-v3 recovery与source v2 + metadata v3到source v3 + metadata v4的原子activation只由`plan/data-collect-sdk070-typed-schema-live-runtime-refactor-plan.md`阶段3执行，本计划不复制第二执行游标。attempt row进入同一既有Parquet与manifest file facts，但不扩张manifest schema/artifact/sidecar、不双写；terminal-once、WS/Gamma drain、prefix durability与restart fail-closed矩阵均以批准专项需求及SDK070总计划为准。
+- 2026-07-22上述source-v2/metadata-v3三条后来已由resolution-followup专项阶段1至阶段4完成实现和验证；阶段2任务2.1步骤2.1.3的更早历史执行结果仍保留当时`active=false`事实，并由本节与对应changelog记录supersede。2026-07-24 future source-v3 validate-first与2026-07-25 metadata-v4 claimant/原子activation则仍只完成文档批准和authority同步，未获Rust/schema/test实施授权，不能冒充已实现。
 - 对 SDK 暴露不到的 tick size、min size、fee/reward 字段，优先通过 SDK/Gamma 类型补齐；无法补齐时必须在 typed schema、raw evidence 或 segment/run manifest 中写 `metadata_unavailable_reason` / `field_unavailable_reasons` / limitation 等等价证据，不能只写 null 后仍把 metadata 判为 complete。
 
 **测试：**
@@ -2608,7 +2608,7 @@ CARGO_TARGET_DIR=target/data-collect-ci \
   cargo test -p data-collect live_runtime --lib -- --nocapture
 ```
 
-**验收：** 既有2小时live run仍只证明当时`source_coverage`包含`polymarket_market_metadata`、metadata parquet/finalized manifest及current/next可读；它不证明2026-07-22批准的resolution-followup合同已实现。后续必须按专项需求AC-01至AC-13及专项计划阶段1至阶段4取得新的schema、竞态、restart、资源、全量回归和本轮已授权的本地live-validation证据后，才能宣称新合同完成；其中AC-12固定在本地原生Ubuntu环境使用已配置香港VPN线路执行，不使用AWS爱尔兰数据采集服务器，且本地receive/latency不得冒充AWS爱尔兰paper/live主机延迟。
+**验收：** 既有2小时live run仍只证明当时`source_coverage`包含`polymarket_market_metadata`、metadata parquet/finalized manifest及current/next可读；它不证明2026-07-22批准的resolution-followup合同已实现，也不证明2026-07-25批准的metadata v4 schema、claimant recovery或原子activation已经实施。既有resolution-followup阶段1至阶段4证据只覆盖当时source v2 + metadata v3实现；future source v3 + metadata v4必须另按SDK070总计划阶段3在获得实施授权后完成schema/null matrix、claimant/restart、cross-pair和原子activation验收，才能宣称该未来合同完成。AC-12的既有执行固定在本地原生Ubuntu环境使用已配置香港VPN线路，不使用AWS爱尔兰数据采集服务器，且本地receive/latency不得冒充AWS爱尔兰paper/live主机延迟。
 
 ### 任务 8.6：同步 release/README/systemd/contract
 

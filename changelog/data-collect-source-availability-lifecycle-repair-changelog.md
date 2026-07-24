@@ -559,3 +559,11 @@
 - transport持久化规则只增加固定业务slot例外：每slot最多一条`polymarket_market_metadata_v3` attempt row，仍写入既有metadata Parquet并由manifest既有file facts覆盖；不新增manifest transport scope/reason/current/open/episode、artifact、sidecar或第二writer。普通connect/read/backoff availability仍只进入source-local运行态与有界operator日志。
 - 本次只同步demand与历史changelog的supersede关系，没有修改本专项已完成的Rust、测试、SDK、schema产物或运行证据，也没有执行构建/测试、commit、push、release、远端或服务操作。
 - 用户随后明确授权独立resolution-followup专项完整执行阶段1至阶段4、每阶段独立审查后的commit/push及本地香港VPN AC-12；该后续授权supersede上一条“本次只同步”的执行边界，但不重开source-availability其他已完成阶段，也不授权production部署、服务操作或数据删除。
+
+## 2026-07-25：metadata v4继承resolution-followup窄例外
+
+- 用户批准`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`。本文件2026-07-22记录的metadata v3 attempt例外及阶段事实保持历史有效，不回写。
+- activation前，固定E+3..E+8业务slot的每slot最多一条attempt row仍由current source v2 + metadata v3路径承载；metadata v3 schema/version立即冻结。
+- future source v3 + metadata v4只可按SDK070总计划阶段3原子activation。activation后同一五row-kind/attempt例外由metadata v4继承，source v2与metadata v3只读；不得cross-pair、dual-write或半切换。
+- v4只在v3不可变前缀末尾追加两个nullable WS claimant字段，复用同一artifact、writer owner、partition与manifest mapping，不扩大普通availability持久化，也不新增artifact、sidecar或第二writer。
+- 本次只同步demand/changelog authority；source-availability计划没有metadata版本或attempt exception执行条款，因此不新增重复步骤。没有修改Rust/schema/tests、构建、网络、commit、push、部署、服务或数据。

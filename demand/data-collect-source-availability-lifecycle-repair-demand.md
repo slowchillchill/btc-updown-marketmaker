@@ -9,6 +9,8 @@
 > 状态：`PHASE_9_COMPLETE_RTDS_PONG_A`。用户已于2026-07-17批准本文、对应计划及第4.7节SDK-first逐项patch矩阵，并授权按计划分阶段实施、验证、独立审查、commit和push；阶段0至阶段8均已完成实现、最终门禁与三路独立终审。用户于2026-07-19在香港线路15分钟wire验证后明确回复“批准 RTDS-PONG-A”；阶段9现已完成RTDS固定PING/no-PONG实现、定向与全量门禁、香港线路修复后15分钟SDK复测、官方crate provenance核验及两路独立终审，Critical/Important/Minor均为0。此前批准的`CT-B`、`D6-SCHEMA-R`、`M1-A / M2-A0 / M4-A-R / M5-N/A / M6-A+ / M7-A-R`及修订后的`M3-A-R`实现语义继续有效；M8-A旧UTC边界首次启用候选已由用户2026-07-18批准的独立直接长期部署事项取代。本文只提供实现 authority；用户2026-07-19后续批准的production release构建、精确current-day删除、部署与远端服务操作只以`demand/data-collect-rtds-pong-a-reset-deployment-demand.md`及对应计划/changelog为authority。
 
 > 2026-07-22窄authority同步：已批准的`demand/data-collect-polymarket-resolution-followup-demand.md`只对固定pending-resolution identity的E+3..E+8 exact-slug查询、每个业务slot最多一条metadata v3 attempt row，以及旧market assets保留到terminal claim后的bounded drain或budget完成，建立本文的有界例外。desired asset set因此扩展为current + prefetched next + resolution_pending旧market assets；current/next discovery、普通availability、manifest schema/artifact及本文其他生命周期合同不变。用户已后续授权按专项计划执行阶段1至阶段4及每阶段commit/push；该授权不重开本文其他已完成阶段，也不授权production部署、服务操作或数据删除。
+>
+> 2026-07-25窄authority supersede：用户批准`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`。上述唯一业务slot例外在activation前仍由current source v2 + metadata v3承载；未来source v3 + metadata v4通过SDK070总计划阶段3原子activation后，同一五row-kind/attempt例外由metadata v4继承，并只追加精确nullable WS claimant pair。metadata v3 schema/version立即冻结且activation后只读；不新增artifact、sidecar、第二writer、dual-write或普通transport持久化。本次只同步文档，不授权Rust/schema/test实施或activation。
 
 ## 一、目标
 
@@ -96,7 +98,7 @@ manifest 中可以表现为六类 source artifact，但它们不是六个独立�
 ### 3.2 本事项不包含
 
 - 新增 CLOB user channel 或其他新外部数据源；
-- 除第4.5节已批准的`binance_aggtrade_v6`判别联合及其handoff evidence schema、第4.6节已批准的`binance_depth_snapshot_v3`/`binance_depth_update_v4`因果坐标扩展，以及2026-07-22独立批准的`polymarket_market_metadata_v3` resolution-followup五类row与每slot唯一attempt合同外，修改RTDS/CLOB/Binance/Polymarket业务payload schema、价格含义、dedupe identity或Parquet行布局；这些例外都复用各自既有artifact、writer和manifest mapping，不新增artifact、quarantine sidecar或第二写入路径；第4.2节对每日manifest schema的有界扩展仍属于本事项，其他新artifact/typed raw/consumer schema必须停在新决策门；
+- 除第4.5节已批准的`binance_aggtrade_v6`判别联合及其handoff evidence schema、第4.6节已批准的`binance_depth_snapshot_v3`/`binance_depth_update_v4`因果坐标扩展、2026-07-22独立批准的`polymarket_market_metadata_v3` resolution-followup五类row与每slot唯一attempt合同，以及2026-07-25批准的future `polymarket_market_metadata_v4`不可变前缀与两个nullable WS claimant字段外，修改RTDS/CLOB/Binance/Polymarket业务payload schema、价格含义、dedupe identity或Parquet行布局；这些例外都复用各自既有artifact、writer和manifest mapping，不新增artifact、quarantine sidecar、第二写入路径或dual-write；第4.2节对每日manifest schema的有界扩展仍属于本事项，其他新artifact/typed raw/consumer schema必须停在新决策门；
 - 在 `data-pipeline`、model-train、offline-evaluation、paper、live 或 execution 中实现模型策略；
 - 决定或实现`data-pipeline`/Model Runtime的`DecisionWakeEvent`、deadline数量/阈值、离散`next_wake_bucket`、timer排序/抢占、最小/最大间隔、变量持续时间Reward/SMDP归因或模型调度策略；这些属于整体审核中的`demand/rebuild-core-demand.md`，不属于collector修复；
 - fixed/periodic decision tick、周期性合成 market row、用 PING/PONG 填充业务 coverage，或用 stale 值冒充 current；
@@ -119,7 +121,7 @@ manifest 中可以表现为六类 source artifact，但它们不是六个独立�
 
 ### 4.2 中性 availability/missingness 证据与 manifest coverage
 
-1. source-local transport owner仍必须根据真实connect/read/write/HTTP/WebSocket/heartbeat结果区分连接中、重试、恢复与terminal完整性错误；这些状态只控制对应协议恢复并可形成有界、去重的operator日志，不得因持续时间、累计尝试、日志失败或既有诊断计数饱和结束source/collector。固定resolution-followup业务slot可按独立已批准需求每slot写至多一条metadata v3 attempt row，仍不得在daily manifest新增transport scope、reason矩阵、current/open摘要或episode；除此之外现有reconnect/lag/drop等source counter保持既有字段和职责。
+1. source-local transport owner仍必须根据真实connect/read/write/HTTP/WebSocket/heartbeat结果区分连接中、重试、恢复与terminal完整性错误；这些状态只控制对应协议恢复并可形成有界、去重的operator日志，不得因持续时间、累计尝试、日志失败或既有诊断计数饱和结束source/collector。固定resolution-followup业务slot可按独立已批准需求每slot写至多一条metadata attempt row：activation前写current metadata v3，source v3 + metadata v4原子activation后写v4，不得双写；仍不得在daily manifest新增transport scope、reason矩阵、current/open摘要或episode。除此之外现有reconnect/lag/drop等source counter保持既有字段和职责。
 2. 纯业务静默本身没有新的协议事件，也没有官方cadence可定义开始点。本事项不得为RTDS、CLOB、aggTrade或depth新增或保留business-silence timer、离散silence-start事件或阈值；collector只保留typed raw接收时间、既有source counter中的首末接收事实、可因果取得的last qualifying business/fresh receive time和本节冻结的collection-day coverage。
 3. 每个UTC日仍只有一个由唯一ManifestOwner原子维护的`manifest.json`。顶层schema继续是`data_collect_daily_manifest_v3`，只新增一个直接嵌套、独立版本化的`collection_day_coverage`对象；不得新增通用`extensions`容器、health/gap/reconnect receipt、sidecar、逐事件availability日志或把coverage复制进六个`source_counters`。
 4. `collection_day_coverage.schema_version`固定为`data_collect_collection_day_coverage_v1`。该对象只表达四个mandatory logical producer supervisor、六个writer及coordinator-owned bounded event queue/唯一receiver/ingress处理路径已经全部接纳且仍共同受collector监督的观察资格交集，不表达transport、subscription或业务健康，也不承诺任一artifact应按某cadence产生行。实现前必须在任何网络动作前验证且测试冻结以下映射，但不在每个manifest重复保存：`polymarket -> polymarket_market, polymarket_market_metadata`；`polymarket_rtds -> polymarket_rtds_chainlink_btc_usd`；`binance_depth -> binance_depth_snapshot, binance_depth_update`；`binance_aggtrade -> binance_aggtrade`。未来若出现optional producer、producer独立暂停/重启或任一mandatory成员terminal后collector继续运行，必须升级嵌套schema并重新取得用户批准。

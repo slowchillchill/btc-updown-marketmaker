@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-polymarket-resolution-followup-changelog.md`
 >
-> 状态：`PHASE_4_COMPLETE_LOCAL_HK_VPN_AC12_AC13_PASS_2026-07-23`。阶段0至阶段3已分别完成自审、独立终审与commit/push；阶段4本地香港线路AC-12、本地全量AC-13与任务4.3三路独立全面终审均已通过。production部署、服务操作和数据删除未获授权，也未执行。
+> 状态：`PHASE_4_COMPLETE_LOCAL_HK_VPN_AC12_AC13_PASS_2026-07-23__V3_VALIDATE_FIRST_DOC_APPROVED_IMPLEMENTATION_NOT_AUTHORIZED_2026-07-24__METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`。阶段0至阶段3已分别完成自审、独立终审与commit/push；阶段4本地香港线路AC-12、本地全量AC-13与任务4.3三路独立全面终审均已通过。用户于2026-07-24批准未来source schema v3的validate-first文档修订，并于2026-07-25批准未来metadata v4 claimant schema；两次批准均未授权Rust/schema/test实施。production部署、服务操作和数据删除也未获授权、未执行。
 
 > 2026-07-22 AC-12执行拓扑修订：真实source validation固定在本地原生Ubuntu环境通过用户已配置的香港VPN线路执行，不再上传到AWS爱尔兰数据采集服务器。用户已授权阶段4在阶段1至阶段3全部通过后执行；不得改变production service或执行数据删除。
 
@@ -26,7 +26,7 @@
 3. 旧 market 在 E 后继续接收 WS resolution，并按 E+3 initial + E+4..E+8 retry 做 Gamma fallback；
 4. `active=true` 的真实 resolved market 可以通过结构化 terminal predicate；
 5. budget exhausted、transport unavailable 与 integrity error 不混淆；
-6. metadata v3 足以重建完整因果时间线；
+6. metadata v3足以重建既有/current source-v2因果时间线；未来source-v3 claimant recovery只使用已批准metadata v4精确外键，metadata v3不能充当该authority；
 7. UTC rollover 与同进程 source recovery 不丢失 pending evidence；process restart 只按已冻结的 finalized-artifact best-effort 边界执行且不伪造证据；
 8. targeted/full tests、静态检查和后续经授权的真实 live validation 全部满足需求 AC-01 至 AC-13。
 
@@ -109,7 +109,7 @@ admission与scheduler后再删除旧metadata fanout，并一次性切换producti
 - 步骤 1.2.2：在同一layout与既有writer版本分派中扩展v3 row、测试用 raw-to-typed conversion 和 writer batch，分离 `timestamp_received`、source-evidence receive 与 collector admission，冻结 attempt ordinal 1..6、poll result、transport class/status、closedTime raw/check、active unavailable reason、followup summary、counters、nullable predicate/evidence、event type/channel、可还原payload与digest fields；不新增独立v3 writer factory或提前冻结依赖阶段2 actor时序的production constructor。
   - 验证：T/E local rows不复制旧平台状态；真实 response-derived fields只来自对应 response/frame；transport/missed/summary row不含伪造 closed/winner/receive。
 - 步骤 1.2.3：增加五类 row 的 table-driven validator、failure-reason precedence、transport subtype稳定枚举与公开typed分类优先级合同、Arrow/Parquet roundtrip、v2/v3 non-mixing、manifest file-facts coverage、schema-level recovery eligibility 与 consumer compatibility tests；startup recovery与crash matrix仍留在阶段3。
-  - 验证：AC-02、AC-06、AC-09通过；transport枚举仅保留RF-09五种稳定值并冻结RF-11公开typed优先级；fixed identity时间跨row不变，row-evidence validation completed只在适用row非空并满足source receive <= validation completed <= admission/applied；source-bearing row payload无损重建全部source-native response inputs，payload + row timing/attempt + fixed identity可重建完整predicate，digest重算一致，local reference精确解析到唯一source row；decoded stale/cache binding error也保留payload/receive/digest且predicate为null；WS event type/channel闭合；五类row的horizon/status逐项required/null；post row四个ownership-bearing winner/evidence字段为null；v2只读兼容且不能合成v3/recover pending；attempt rows增加既有file row count/hash但不改变每日manifest schema/artifact集合。
+  - 验证：AC-02、AC-06、AC-09通过；transport枚举仅保留RF-09五种稳定值并冻结RF-11公开typed优先级；fixed identity时间跨row不变，row-evidence validation completed只在适用row非空并满足source receive <= validation completed <= admission/applied；`polymarket_market_metadata_v3`内部的source-bearing metadata row payload无损重建全部source-native response inputs，payload + row timing/attempt + fixed identity可重建完整predicate，digest重算一致，local reference精确解析到唯一metadata source row；decoded stale/cache binding error也保留payload/receive/digest且predicate为null；WS event type/channel闭合；五类row的horizon/status逐项required/null；post row四个ownership-bearing winner/evidence字段为null；v2只读兼容且不能合成v3/recover pending；attempt rows增加既有file row count/hash但不改变每日manifest schema/artifact集合。该验证不要求未来`polymarket_orderbook_v3` raw-first，也不把metadata digest作为orderbook source recovery authority。
 
 ### 任务 1.3：结构化 terminal predicate 测试
 
@@ -151,10 +151,10 @@ admission与scheduler后再删除旧metadata fanout，并一次性切换producti
 ### 任务 2.3：实现 WebSocket terminal-once
 
 - 步骤 2.3.1：让 identity verifier 可查 current、next 与 pending 固定身份。
-  - 验证：WS exact identity正例与逐项矛盾负例通过；每个SDK-decoded `market_resolved`先进入既有`polymarket_market` raw artifact，无效事件fail closed且不生成任何v3 terminal/poll metadata row。
+  - 历史执行验证（当前v2，2026-07-23已完成）：WS exact identity正例与逐项矛盾负例通过；每个SDK-decoded `market_resolved`先进入既有`polymarket_market` raw artifact，无效事件fail closed且不生成任何v3 terminal/poll metadata row。该raw-first仅保留为已完成v2事实；未来source schema v3由本计划“2026-07-24 v3 new-write修订”取代。
 - 步骤 2.3.2：用 per-slug terminal-once 仲裁 WS/Gamma 竞态。
   - 验证：AC-04；现有唯一Polymarket processing actor串行执行validation、typed conversion与claim，fetch/WS producer不在actor外写terminal；terminal metadata/lifecycle只转换一次。
-- 步骤 2.3.3：任何terminal claim后保持pending/assets直到accepted-event drain结束。Gamma-first随后写唯一Gamma terminal row，queued WS仅在既有`polymarket_market`保存raw corroboration；WS-first时，queued/in-flight Gamma completion仍完成integrity检查与predicate计算并在actor内buffer该slot唯一attempt evidence，但不取得terminal ownership、不产生第二transition。drain后先应用唯一transition并把WS terminal作为terminal bundle第一条writer admission，再按completion顺序admit buffered attempts；exhausted fence在释放barrier前由同一actor原子terminal或关闭pending+enqueue summary。
+- 步骤 2.3.3（当前v2历史执行）：任何terminal claim后保持pending/assets直到accepted-event drain结束。Gamma-first随后写唯一Gamma terminal row，queued WS仅在既有`polymarket_market`保存raw corroboration；WS-first时，queued/in-flight Gamma completion仍完成integrity检查与predicate计算并在actor内buffer该slot唯一attempt evidence，但不取得terminal ownership、不产生第二transition。drain后先应用唯一transition并把WS terminal作为terminal bundle第一条writer admission，再按completion顺序admit buffered attempts；exhausted fence在释放barrier前由同一actor原子terminal或关闭pending+enqueue summary。未来source schema v3不再保存invalid/unmatched/post-horizon raw，按本计划v3修订任务执行。
   - 验证：Gamma-first的transition applied在drain后且Gamma attempt独占status；WS-first分别覆盖late terminal/nonterminal Gamma response及SDK decode、binding、identity/shape、closedTime integrity error，断言同一actor先原子应用唯一transition，再以terminal-first有序batch admission保留该slot唯一attempt evidence且WS独占terminal transition；容量或reference authority失败时整批零admit，内存中不存在可单独admit的孤儿post。E+8 nonterminal/timeout断言barrier释放前已线性化terminal或summary。三者都无过早unsubscribe，不新增candidate/superseded状态。finalized prefix与crash-cut验证按2026-07-23批准分界归任务3.1。
 
 ### 任务 2.4：实现 Gamma exact-slug poll scheduler
@@ -181,7 +181,7 @@ admission与scheduler后再删除旧metadata fanout，并一次性切换producti
 ### 任务 3.1：UTC day/hour rollover
 
 - 步骤 3.1.1：让 pending state、poll scheduler、completed-result queue、in-flight result routing与terminal bundle参加同一 Polymarket producer fence；按真实 receive time drain 旧日或defer新日row admission，并保持WS terminal先于其post attempts的跨分区prefix durability。WS-old/Gamma-new时允许completion作为bounded drain消息进入actor并buffer new-day row，旧日terminal finalize后才放行新日admission。
-  - 验证：23:55 market fixture 的 E+3..E+8 进入次日且 identity 可关联；D-1ms/D/D+1ms、in-flight timeout、WS-old/Gamma-new、Gamma-old/WS-new与fence race均不产生UTC regression、deadlock或orphan post。在raw admission/finalize、actor buffer、metadata writer admission、batch flush、segment finalize与UTC seal各切点注入crash，任何finalized post都已有同一fixed identity且更早finalized的唯一WS terminal。
+  - 历史执行验证（当前v2，2026-07-23已完成）：23:55 market fixture 的 E+3..E+8 进入次日且 identity 可关联；D-1ms/D/D+1ms、in-flight timeout、WS-old/Gamma-new、Gamma-old/WS-new与fence race均不产生UTC regression、deadlock或orphan post。在raw admission/finalize、actor buffer、metadata writer admission、batch flush、segment finalize与UTC seal各切点注入crash，任何finalized post都已有同一fixed identity且更早finalized的唯一WS terminal。未来source schema v3的validation/typed-row crash cuts由本计划v3修订任务替代。
 - 步骤 3.1.2：确保 schema 切换不会把 v2/v3 混进同一 segment。
   - 验证：hour/day boundary writer recovery tests通过。
 
@@ -189,8 +189,8 @@ admission与scheduler后再删除旧metadata fanout，并一次性切换producti
 
 - 步骤 3.2.1：source outer runtime重建时保留或恢复 pending fixed identity与剩余 slots。
   - 验证：WS reconnect、Gamma availability cycle 不丢 pending，不回放已完成 terminal。
-- 步骤 3.2.2：不新增 checkpoint/journal；进程启动先验证finalized v3 terminal bundle/source references及既有`polymarket_market` raw-to-metadata完整性，再只从无terminal冲突的finalized v3 verified identity best-effort恢复仍有未来slot的pending；v2不得作为恢复authority。
-  - 验证：running parquet不被当作durable；finalized post必须解析到唯一已finalized WS terminal，孤儿post fail closed。`[T,recovery_time]`内matching finalized `market_resolved` raw与metadata覆盖完整matrix：unique WS/Gamma terminal合法；无terminal/summary失败；unique exhausted下raw receive严格晚于role-exit才是合法post-horizon corroboration，相等/更早失败；terminal+summary、重复terminal或重复summary失败。失败路径不恢复pending、不发Gamma、不写exhausted且不伪造transition补写；无finalized v3 identity不猜测；past slot只记录“无durable attempt evidence”的missed语义，不断言旧进程未发请求；E+8最后slot后不发起final probe；不承诺unclean crash exactly-once。
+- 步骤 3.2.2（当前v2历史执行）：不新增 checkpoint/journal；进程启动先验证finalized v3 terminal bundle/source references及既有`polymarket_market` raw-to-metadata完整性，再只从无terminal冲突的finalized v3 verified identity best-effort恢复仍有未来slot的pending；v2不得作为恢复authority。
+  - 历史执行验证：running parquet不被当作durable；finalized post必须解析到唯一已finalized WS terminal，孤儿post fail closed。`[T,recovery_time]`内matching finalized `market_resolved` raw与metadata覆盖完整matrix：unique WS/Gamma terminal合法；无terminal/summary失败；unique exhausted下raw receive严格晚于role-exit才是合法post-horizon corroboration，相等/更早失败；terminal+summary、重复terminal或重复summary失败。失败路径不恢复pending、不发Gamma、不写exhausted且不伪造transition补写；无finalized v3 identity不猜测；past slot只记录“无durable attempt evidence”的missed语义，不断言旧进程未发请求；E+8最后slot后不发起final probe；不承诺unclean crash exactly-once。该raw/post-horizon矩阵不进入未来source schema v3 authority。
 
 ### 任务 3.3：资源与持续性
 
@@ -261,6 +261,31 @@ git diff --check
    数据删除或shadow Polymarket网络实现。阶段4已满足获授权的最终commit/push门；
    production部署仍保持独立授权门。
 
+## 2026-07-24 v3 new-write修订映射（文档已批准，实施未授权）
+
+前述阶段2/3的raw-first和raw-only recovery文本只记录2026-07-23已经完成的`polymarket_orderbook_v2` source行为与验证，不得用于实现v3。未来`polymarket_orderbook_v3` validate-first的唯一执行游标是`plan/data-collect-sdk070-typed-schema-live-runtime-refactor-plan.md`阶段3；本计划不复制第二套步骤或审查门。
+
+| 本需求增量 | 唯一执行计划位置 | 验证 |
+|---|---|---|
+| qualified / unmatched / target-associated contradiction / Gamma-first / role-exit / platform duplicate | 总计划步骤3.1.6至3.1.7 | source writer admission/sequence、terminal metadata、claim、transition和pending边界；gap/error/coverage不得成为payload/digest旁路 |
+| 单一validated canonical object与写入顺序 | 总计划步骤3.2.2至3.2.3 | 一次validator、source admission失败时0 claim/0 transition、无rejected/quarantine/sidecar |
+| 删除raw-first/raw-only production分支 | 总计划步骤3.4.7 | v3调用图与历史source v2/metadata v3保留边界 |
+| typed-only合法/失败/restart/crash/mixed矩阵 | 总计划步骤3.5.1至3.5.5 | 包含0 source row + 唯一合法exhausted summary及一致attempts |
+
+上述总计划步骤只有在其SDK字段门、`2-PM_CLOSED`、最终字段矩阵和Rust/schema/test授权全部满足后实施；本次文档批准不授权实施、构建、测试、commit或push。
+
+### 2026-07-25 metadata v4 claimant修订映射（文档已批准，实施未授权）
+
+未来`polymarket_market_metadata_v4`与source v3 recovery的唯一执行游标仍是SDK070总计划阶段3。本计划保留2026-07-23已完成的metadata v3/source v2步骤与证据，不复制第二套schema、recovery、activation或审查步骤。
+
+| 本需求增量 | 唯一执行计划位置 | 验证 |
+|---|---|---|
+| metadata v3不可变前缀、两个nullable claimant字段及逐row null matrix | 总计划步骤3.1.8、3.5.1 | Arrow/Parquet round-trip、WS-owned terminal pair必填、其他row同时为null、partial/空epoch/zero sequence失败 |
+| source v3 claimant外键、restart与cross-pair fail-closed矩阵 | 总计划步骤3.5.2至3.5.5 | 唯一finalized source row匹配、identity/winner核对、platform duplicate唯一claimant、source v3 + metadata v3及source v2 + metadata v4失败 |
+| current new-write原子activation | 总计划步骤3.5.6 | activation前仅source v2 + metadata v3，activation后仅source v3 + metadata v4；无dual-write、半切换或第二writer |
+
+该映射只消费总计划的单一执行游标。用户批准的是metadata版本与字段合同，不是Rust/schema/test实施、构建、测试、commit、push或production cutover授权。
+
 ## 三、需求—计划—验证映射
 
 | 需求 | 计划任务 | 主要验证 |
@@ -269,12 +294,12 @@ git diff --check
 | RF-02 | 1.1、2.1 | AC-01、AC-02 |
 | RF-03 | 2.1 | AC-01、AC-03 |
 | RF-04 | 2.2 | AC-03、AC-11 |
-| RF-05 | 2.3 | AC-04 |
+| RF-05 | 2.3（source v2历史）；总计划3.1.6至3.2.3、3.4.7 | AC-04、AC-09、AC-10 |
 | RF-06 | 2.4 | AC-01、AC-07 |
 | RF-07 | 1.3、2.4 | AC-05、AC-06、AC-08 |
 | RF-08 | 1.2、2.4 | AC-07、AC-09 |
-| RF-09 | 1.2、3.1 | AC-02、AC-09、AC-10 |
-| RF-10 | 2.3、3.1、3.2、3.3 | AC-04、AC-10、AC-11 |
+| RF-09 | 1.2、3.1（metadata v3/source v2历史）；总计划3.1.8、3.5.1、3.5.5至3.5.6 | AC-02、AC-09、AC-10 |
+| RF-10 | 2.3、3.1、3.2、3.3（source v2历史）；总计划3.1.6至3.1.8、3.5.1至3.5.6 | AC-04、AC-10、AC-11 |
 | RF-11 | 全阶段 | AC-08、AC-13 |
 | AC-12 | 4.2 | 真实 source validation report |
 | AC-13 | 4.1、4.3 | 全量命令、scope/provenance终审 |
