@@ -109,7 +109,7 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
             "polymarket_subscription_json_sha256": market_subscription_json_sha256,
             "polymarket_subscription_evidence_scope": {
                 "sdk_api_used_for_custom_feature_business_messages": "Client::subscribe_best_bid_ask",
-                "sdk_source_fact": "polymarket_client_sdk_v2 0.6.0 Client::subscribe_best_bid_ask calls subscribe_market_with_options(asset_ids, true)",
+                "sdk_source_fact": "polymarket_client_sdk_v2 0.7.0 Client::subscribe_best_bid_ask calls subscribe_market_with_options(asset_ids, true)",
                 "orderbook_api_used": "Client::subscribe_orderbook",
                 "actual_outbound_frame_captured_by_probe": false,
                 "actual_outbound_frame_unavailable_reason": "official SDK does not expose sent-frame receipt in this probe; Phase 1 adapter must capture request evidence or record unavailable reason"

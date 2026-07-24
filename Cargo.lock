@@ -3082,7 +3082,7 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
 name = "polymarket_client_sdk_v2"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "alloy",
  "async-stream",

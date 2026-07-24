@@ -8,13 +8,13 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_EXECUTION_STAGE_0_CLOSED`。用户于2026-07-25明确批准按本需求与对应计划开始执行；pre-execution checkpoint为`b65a2add5749d0931e91ef36d3bbadcb15a53014`。同日用户批准阶段0发现的四项推荐修复：旧authority统一为四个vendor patch路径、阶段1/6各只运行一次串行完整package测试、直接耦合Polymarket生命周期的Gamma归入`2-PM`、vendor身份变化后只在阶段1收口运行一次适用vendor矩阵。文档对齐及审查修复已完成，独立阶段0复核为`Critical 0 / Important 0 / Minor 0 / PASS`；用户已另行批准把精确阶段0文档集commit并push到`origin/fix-rtds-silents`，本闭合状态以承载本记录的commit成功推送且远端分支SHA与本地一致为生效条件。Stage1/Stage2尚未修改。该批准不消解仍待用户决定的SDK typed字段gap、RTDS三项参数及4A/4B独立授权、公开网络smoke、后继各阶段commit/push、production activation/cutover、release、部署、远端服务操作、历史数据迁移或删除等明确独立门。既有`market_resolved` validate-first与`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`决定继续有效，source v3 + metadata v4仍只能在其实现和验收门通过后原子激活。
+> 状态：`APPROVED_EXECUTION_STAGE_1_CLOSED`。用户于2026-07-25明确批准按本需求与对应计划开始执行；pre-execution checkpoint为`b65a2add5749d0931e91ef36d3bbadcb15a53014`，阶段0文档closure已以commit `86d14a9f4225f9b941206b9d47bcfe5a736c7789`推送到`origin/fix-rtds-silents`并核对本地HEAD、upstream与远端ref一致。Stage1已在本地从官方crate全新建立`0.7.0-p1`、重放恰好四路径patch、切换唯一workspace依赖并删除旧tracked vendor；规定的离线vendor/workspace矩阵全部通过，runtime终态为`SDK_070_RUNTIME_USABLE`。2026-07-25官方文档missing/null fixture与当前consumer审计确认七类target variant均存在admission前整帧parser gap，typed终态为`SDK_070_TYPED_CONTRACT_BLOCKED`，只停止v3 schema、reader/writer与local new-write。独立`gpt-5.6-sol`/`ultra`阶段审查为`Critical 0 / Important 0 / Minor 0 / PASS`；用户已另行批准Stage1 commit/push，本闭合状态以承载本记录的commit成功推送且远端分支SHA与本地HEAD/upstream一致为生效条件。Stage2未开始，公开网络smoke为`NOT_AUTHORIZED / NOT_RUN`。该批准不消解仍待用户决定的非parser typed字段gap、RTDS三项参数及4A/4B独立授权、公开网络smoke、后继各阶段commit/push、production activation/cutover、release、部署、远端服务操作、历史数据迁移或删除等明确独立门。既有`market_resolved` validate-first与`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`决定继续有效，source v3 + metadata v4仍只能在其实现和验收门通过后原子激活。
 
 ## 一、决策结论与目标
 
 本事项冻结以下总方向：
 
-1. 执行顺序上先把官方 Polymarket Rust SDK 从当前“以官方 0.6.0 为底座的本地 `0.6.0-p1` vendor”升级到“以官方 0.7.0 为底座、Cargo package version 仍为 `0.7.0` 的本地 `0.7.0-p1` vendor”，独立验证 provenance、现有四文件 patch、依赖树、编译、确定性回归和公开只读能力；升级本身不得与 schema、RTDS 行为或模块拆分混合。“先升级”是 v3 和依赖该 runtime 的 RTDS 实现前置，不是文档、静态证据审计或 SDK 无关机械拆分的全局硬阻塞。
+1. 执行顺序上先以阶段0“官方0.6.0底座的本地`0.6.0-p1` vendor”为历史基线，升级到“官方0.7.0底座、Cargo package version仍为`0.7.0`的本地`0.7.0-p1` vendor”；Stage1当前worktree已完成该切换，并独立验证provenance、现有四文件patch、依赖树、编译和确定性回归。公开只读能力只在任务1.5另行获批后验证，当前为`NOT_AUTHORIZED / NOT_RUN`。升级本身不得与schema、RTDS行为或模块拆分混合。“先升级”是v3和依赖该runtime的RTDS实现前置，不是文档、静态证据审计或SDK无关机械拆分的全局硬阻塞。
 2. 对 `source_kind=polymarket_market` 建立下一版完整 typed message schema，删除持久化列 `source_native_payload_json` 和 Polymarket venue validation `hash`，并停止 `PriceChange` 的逐 change 行 fan-out；一条通过现行 target-market admission 的 SDK message projection 对应一条 typed row。
 3. “无损”精确定义为：在官方 SDK 成功解码并执行现行 target-market admission 后，对本事项当前可执行消费者和既有已批准合同所需的 retained业务字段、数组顺序、decimal文本精度、source/receive time、market/asset identity和collector provenance无损。当前硬门覆盖 collector canonical domain、v3 writer/reader、resolution recovery、manifest和training cold-consumer contract；future paper/live映射只是非阻断静态兼容附件，不能自行创造必需字段或冒充真实消费者。无损不包含被现行 admission排除的非目标entry、外部metadata join字段、原始WebSocket bytes或用户明确排除的venue `hash`。若要求逐字段重建过滤前SDK message，则不能同时维持当前范围并删除这些字段；本事项选择目标消费语义无损，而不是source-native全量归档。
 4. manifest/finalized-file SHA-256、artifact row/byte facts和原子发布校验继续保留。平台 `hash`、当前内存 SHA-256 dedupe fingerprint、manifest file SHA-256 是三种不同对象，不得因名称相似一起删除。
@@ -88,14 +88,15 @@
 
 future mapping只做独立非阻断静态审查，不进入full-day运行。不得恢复持久化 JSON/digest、重建 collector semantic key或重新请求该已决定事项。
 
-### 2.3 SDK 0.7.0 的初步结论
+### 2.3 SDK 0.7.0 的阶段0基线与阶段1核验结论
 
-- 当前 workspace 精确依赖 `polymarket_client_sdk_v2 = 0.6.0`，vendor 路径是 `third_party/polymarket_client_sdk_v2-0.6.0-p1`。
+- 阶段0发布checkpoint时，workspace精确依赖`polymarket_client_sdk_v2 = 0.6.0`，vendor路径为`third_party/polymarket_client_sdk_v2-0.6.0-p1`；这是历史基线，不再是当前依赖身份。
+- Stage1当前worktree精确依赖`polymarket_client_sdk_v2 = 0.7.0`，唯一vendor路径为`third_party/polymarket_client_sdk_v2-0.7.0-p1`。旧tracked vendor已在同一Stage1 diff删除，active Cargo/code/bench中不存在Polymarket SDK旧路径或0.6精确版本引用。
 - 官方 `0.7.0` 于 2026-07-17 发布；crate SHA-256 为 `ba212e0641f178c274af266772de15962ac7e76da550a0f79f47b49349b1138a`，VCS commit 为 `222143d321eba97d5711a848265eb9aab3bc7ff4`，MSRV 为 Rust `1.88.0`。
 - 官方 0.7.0 主要增加 CLOB async execution 下 `post_order` / `post_orders` 对 transaction hashes 的 best-effort 回填，修复 `tradeIDs` 和 pending transaction hash 反序列化，并调整 Tokio feature。当前 collector 不调用下单路径，但仍需保留上游相关 mock tests。
 - 官方 0.6.0 到 0.7.0 之间，当前项目 patch 的四个 SDK 源文件没有上游文本变化，因此可以无冲突重放；这不等于可以删除 patch。当前连接 generation、sticky parser fault、handshake timeout、RTDS PONG 策略、CLOB interested-array all-or-error 与 RTDS parser 诊断仍依赖项目 patch。
-- 本轮一个独立审计子代理在未修改 worktree 的 `/tmp` 候选上实际执行了 compile 和 selected-feature SDK lib tests，结果为 `170/170`。这超出了本轮 docs-only 授权，不能称为只读检查，也不计入阶段 1 验收；当前 branch 尚未真正切换根依赖、lock 和 data-collect，获批实施时必须重新执行完整门禁。
-- 官方 0.7.0 的 CLOB market WS/RTDS 相关 typed message 并未因本次 release 自动补齐当前官方实时数据文档中的全部字段。升级和 typed-schema 能力是两个独立门；当前只能标记为 `SDK_070_RUNTIME_SWITCH_UNVERIFIED` 与 `SDK_070_TYPED_CONTRACT_BLOCKED_PENDING_FIELD_DECISION`。
+- 阶段0 docs-only审计中越权运行的`/tmp`候选`170/170`继续只作为历史事件，不计入验收。Stage1已在真实切换后的vendor/workspace重新运行计划规定的完整离线矩阵：vendor core `170/170`、all-features全部harness、两组Clippy、固定nightly fmt及data-collect完整串行suite、check/Clippy/fmt均通过；runtime终态为`SDK_070_RUNTIME_USABLE`。精确命令与结果见`data-collect/docs/sdk070-stage1-sdk-runtime-and-typed-contract.md`。
+- 官方 0.7.0 的 CLOB market WS/RTDS typed message并未因本次release自动补齐当前官方实时数据文档中的全部字段。升级和typed-schema能力是两个独立门；Stage1 fixture和consumer矩阵已把typed终态确定为`SDK_070_TYPED_CONTRACT_BLOCKED`。
 
 已知能力差距不是未来才检查的假设。除“SDK struct没有某字段”外，官方文档允许missing/null而SDK 0.7 struct要求非空时，官方合法帧可能在target admission之前反序列化失败，这同样是parser-level SDK gap：
 
@@ -106,20 +107,20 @@ future mapping只做独立非阻断静态审查，不进入full-day运行。不�
 | `last_trade_price` | `timestamp`与`transactionHash`可missing/null | `LastTradePrice.timestamp: i64`必填且无`transactionHash`；只有排除在本artifact外的authenticated `TradeMessage`有transaction hash | `SDK_NULLABILITY_PARSE_GAP + SDK_FIELD_GAP`，不得错接user-channel字段 |
 | `tick_size_change` | `oldTickSize`、`timestamp`可missing/null | `TickSizeChange.old_tick_size: Decimal`和`timestamp: i64`必填 | `SDK_NULLABILITY_PARSE_GAP` |
 | `best_bid_ask` | `bestBid`、`bestAsk`、`spread`、`timestamp`均可missing/null | `BestBidAsk`四项均为必填`Decimal/i64` | `SDK_NULLABILITY_PARSE_GAP` |
-| `new_market` | question/slug/description/tokenIds/outcomes/eventMessage及其内部文本/timestamp均可missing/null；另有tags/condition/active/token/sports/line/game/tick/fee扩展字段 | `NewMarket`把多项基础字段、数组、timestamp及`EventMessage`内部文本设为必填，并缺少所列扩展字段 | `SDK_NULLABILITY_PARSE_GAP + SDK_FIELD_GAP` |
-| `market_resolved` | tokenIds/winningTokenId/winningOutcome/eventMessage及其内部文本/timestamp/tags可missing/null | `MarketResolved`把asset IDs、winner和timestamp设为必填，`EventMessage`内部文本必填，且无tags | `SDK_NULLABILITY_PARSE_GAP + SDK_FIELD_GAP` |
+| `new_market` | question/slug/description/tokenIds/outcomes/timestamp可missing/null；`eventMessage`整体missing/null可用，但对象存在时其optional ticker/slug/title/description可missing/null；另有tags/condition/active/token/sports/line/game/tick/fee扩展字段 | `NewMarket`把多项基础字段、数组、timestamp及`EventMessage`对象内文本设为必填，并缺少所列扩展字段；`EventMessage.id`在文档与SDK均为required，不是gap | `SDK_NULLABILITY_PARSE_GAP + SDK_FIELD_GAP` |
+| `market_resolved` | tokenIds/winningTokenId/winningOutcome/timestamp可missing/null；`eventMessage`整体missing/null可用，但对象存在时其optional ticker/slug/title/description可missing/null；tags可missing/null | `MarketResolved`把asset IDs、winner和timestamp设为必填，`EventMessage`对象内文本必填，且无tags；question/slug/description已为`Option`，outcomes接受missing/null | `SDK_NULLABILITY_PARSE_GAP + SDK_FIELD_GAP` |
 | book/price change venue `hash` | 文档与 SDK均存在 | SDK可解码 | `USER_DECIDED_EXCLUDE`，不属于待补 gap且不得再次请求确认 |
 
-上述parser-level gap必须先用完全按官方文档构造的missing/null fixture直接验证官方upstream 0.7与当前四文件patch结果；不得只用字段齐全的示例帧。任何官方合法帧无法由SDK typed API解析时，必须标记该variant与影响范围，不能把parser失败降级成普通nullable Parquet值。上述尚未裁决的 gap 中，任一字段只要被本事项当前可执行消费者或既有已批准合同冻结为必需字段，0.7.0 就必须标记 `SDK_070_TYPED_CONTRACT_BLOCKED`。该终态只阻断 v3 schema及其 reader/writer/local new-write替换；SDK runtime验证、与该字段无关的机械拆分、死代码证据审计和已独立获批的 RTDS 工作仍可按各自依赖继续。future paper/live静态附件本身不创造必需字段或阻断门。只有用户基于当前真实消费者/已批准合同审计明确批准每个非阻断gap为排除或 `nullable_unavailable`，v3才可继续；不得由 agent自行降级。
+2026-07-25已用完全按官方文档构造的missing/null fixture直接验证官方upstream 0.7与当前四文件patch parser。七类variant的单object在上述合法missing/null输入上均被两者拒绝；同一element放入array时，官方0.7静默返回`OK messages=0`，当前patch传播同一parse error。四路径patch因此只消除了数组静默跳过，没有补字段或放宽nullability。整帧拒绝发生在target admission之前，不能降级成普通nullable Parquet值，也不能由`EXCLUDED`或`nullable_unavailable`恢复，故typed终态为`SDK_070_TYPED_CONTRACT_BLOCKED`。该终态只阻断v3 schema及其reader/writer/local new-write替换；SDK runtime验证、与该字段无关的机械拆分、死代码证据审计和已独立获批的RTDS工作仍可按各自依赖继续。future paper/live静态附件本身不创造必需字段或阻断门。book四个扩展字段、`LastTradePrice.transactionHash`、new-market扩展字段与resolved tags仍须用户基于当前真实消费者逐项决定为“要求官方typed支持、`EXCLUDED`或`nullable_unavailable`”；即使全部获批降级，也不能绕过整帧parser blocker。
 
 官方证据：
 
 - `https://github.com/Polymarket/rs-clob-client-v2/pull/84`
 - `https://github.com/Polymarket/rs-clob-client-v2/pull/83`
 - `https://github.com/Polymarket/rs-clob-client-v2/blob/222143d321eba97d5711a848265eb9aab3bc7ff4/CHANGELOG.md`（固定commit `222143d321eba97d5711a848265eb9aab3bc7ff4`）
-- `https://docs.polymarket.com/market-data/realtime-data`（未版本化current page，访问日期：2026-07-24；阶段1必须保存实际核对字段和访问日期，不能把未来页面漂移冒充本次证据）
+- `https://docs.polymarket.com/market-data/realtime-data`（未版本化current page，Stage1实际访问日期：2026-07-25；字段/nullability fixture结果冻结在阶段1artifact，不能把未来页面漂移冒充本次证据）
 
-未经用户对上述已知 gap逐项决定，v3字段集合没有冻结。不得改用 raw WebSocket、raw REST、手写协议、第二解析器或 shadow canonicalizer补洞。
+当前整帧parser blocker未获得官方SDK-first修复路线，v3字段集合和实现入口保持阻断；上述single-field gap也未经用户逐项决定。不得改用 raw WebSocket、raw REST、手写协议、第二解析器或 shadow canonicalizer补洞。
 
 ### 2.4 `live_runtime.rs` 是生产核心，不是整文件死代码
 

@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_EXECUTION_STAGE_0_CLOSED`。用户于2026-07-25明确批准按本需求与计划开始执行；pre-execution checkpoint为`b65a2add5749d0931e91ef36d3bbadcb15a53014`。阶段0只读盘点、安全的current-v2本地writer probe、四项获批文档对齐及其审查修复均已完成，证据记录在`data-collect/docs/sdk070-stage0-baseline.md`；独立复核为`Critical 0 / Important 0 / Minor 0 / PASS`。用户已另行批准把精确阶段0文档集commit并push到`origin/fix-rtds-silents`，本闭合状态以承载本记录的commit成功推送且远端分支SHA与本地一致为生效条件。Stage1/Stage2没有Rust、Cargo、vendor或schema修改。该总批准不覆盖文内仍明确要求独立决定或授权的SDK typed字段gap、RTDS参数与4A/4B、公开网络smoke、后继各阶段commit/push、production activation/cutover、release、部署、远端操作、migration或删除。
+> 状态：`APPROVED_EXECUTION_STAGE_1_CLOSED`。用户于2026-07-25明确批准按本需求与计划开始执行；pre-execution checkpoint为`b65a2add5749d0931e91ef36d3bbadcb15a53014`，阶段0文档closure已以commit `86d14a9f4225f9b941206b9d47bcfe5a736c7789`推送到`origin/fix-rtds-silents`并核对本地HEAD、upstream与远端ref一致。Stage1已在本地完成官方0.7.0 vendor重建、恰好四路径patch重放、唯一workspace依赖切换、旧tracked vendor删除、规定的离线vendor/workspace矩阵与typed fixture/consumer审计；runtime为`SDK_070_RUNTIME_USABLE`，typed contract为`SDK_070_TYPED_CONTRACT_BLOCKED`。独立`gpt-5.6-sol`/`ultra`阶段审查为`Critical 0 / Important 0 / Minor 0 / PASS`；用户已另行批准Stage1 commit/push，本闭合状态以承载本记录的commit成功推送且远端分支SHA与本地HEAD/upstream一致为生效条件。Stage2未开始，`data-collect/src`、schema和RTDS业务逻辑未修改，公开网络smoke为`NOT_AUTHORIZED / NOT_RUN`。该总批准不覆盖文内仍明确要求独立决定或授权的非parser typed字段gap、RTDS参数与4A/4B、公开网络smoke、后继各阶段commit/push、production activation/cutover、release、部署、远端操作、migration或删除。
 
 ## 一、执行原则与成功标准
 
@@ -193,6 +193,27 @@ bench；bench只做compile check，真实smoke另受任务1.5约束。
 - 通过后更新三件套；
 - 只有用户授权才 commit/push；
 - schema/refactor/RTDS diff必须为零。
+
+### 阶段 1 当前执行记录（2026-07-25）
+
+- 任务1.1--1.4已在真实Stage1 worktree完成；官方crate provenance、132文件清单、
+  MIT、MSRV、VCS、唯一vendor、四路径相对官方diff、精确0.7.0依赖与feature tree
+  均已核验。
+- 阶段1规定的vendor core/all-features tests、两组all-targets Clippy、固定nightly
+  fmt及data-collect单次串行完整suite、check/Clippy/fmt/diff均离线通过；
+  `SDK_070_RUNTIME_USABLE`。
+- 任务1.5是单独授权的公开只读smoke；当前为`NOT_AUTHORIZED / NOT_RUN`，不把它
+  伪写成runtime离线门的失败或完成。
+- 任务1.6已用官方文档missing/null object/array fixture分别核对官方0.7与当前patch，
+  并完成当前consumer/既有批准合同矩阵。七类variant均存在admission前整帧parser
+  gap，typed终态为`SDK_070_TYPED_CONTRACT_BLOCKED`；只停止v3，不用raw/shadow
+  路线补洞。
+- `data-collect/src`、schema、RTDS业务逻辑和Stage2改动为零。完整证据见
+  `data-collect/docs/sdk070-stage1-sdk-runtime-and-typed-contract.md`。
+- 独立`gpt-5.6-sol`/`ultra`阶段审查已以
+  `Critical 0 / Important 0 / Minor 0 / PASS`通过；当前游标为
+  `STAGE_1_CLOSED`，以承载闭合记录的commit成功推送且远端分支SHA与本地
+  HEAD/upstream一致为生效条件；完成该验证后进入下一阶段。
 
 ## 四、阶段 2：共同合同基线与三个独立拆分分支
 

@@ -1,7 +1,7 @@
 [workspace]
 members = ["data-collect"]
-exclude = ["third_party/polymarket_client_sdk_v2-0.6.0-p1"]
+exclude = ["third_party/polymarket_client_sdk_v2-0.7.0-p1"]
 resolver = "3"
 
 [patch.crates-io]
-polymarket_client_sdk_v2 = { path = "third_party/polymarket_client_sdk_v2-0.6.0-p1" }
+polymarket_client_sdk_v2 = { path = "third_party/polymarket_client_sdk_v2-0.7.0-p1" }

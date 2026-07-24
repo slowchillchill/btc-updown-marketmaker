@@ -33,7 +33,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     println!("probe=websocket_smoke_probe");
     println!("sdk_crate=polymarket_client_sdk_v2");
-    println!("sdk_version=0.6.0");
+    println!("sdk_version=0.7.0");
     println!("recv_time_utc_ms={}", now_ms());
 
     let asset = discover_market_asset().await?;

@@ -759,3 +759,30 @@ SDK070阶段0盘点发现，本事项demand第3.1节和plan的current说明虽�
 
 该修正只消除current authority自相矛盾，不回写本changelog中各历史时点真实的
 两路径/三路径执行记录，不修改vendor源码、Cargo/lock、测试或运行行为。
+
+## 2026-07-25：current SDK身份迁移到独立SDK070事项
+
+- `DC-REPAIR-20260724-SDK070-TYPED-LIVE-RUNTIME` Stage1已在当前worktree从官方
+  0.7.0 crate全新建立唯一
+  `third_party/polymarket_client_sdk_v2-0.7.0-p1`，把根patch、data-collect精确
+  依赖和lock切换为0.7.0，并删除旧tracked `0.6.0-p1` vendor。相对官方0.7.0的
+  源码差异仍恰好为本事项current demand/plan列出的四个路径。
+- 本次只同步本事项仍使用现在时表达的SDK identity、path与provenance指针；四路径
+  patch语义、SDK-first、唯一owner、CLOB strict heartbeat、RTDS no-PONG、bounded
+  outgoing/ping例外及全部历史阶段事实不变。旧changelog中的0.6.0 hash、命令与
+  运行证据继续描述其当时时点，不回写。
+- SDK070 Stage1离线runtime矩阵已通过并标记
+  `SDK_070_RUNTIME_USABLE`；typed fixture因官方合法missing/null帧在admission前
+  被SDK整帧拒绝而标记`SDK_070_TYPED_CONTRACT_BLOCKED`。该typed阻断只属于SDK070
+  v3入口，不改变本事项已完成source lifecycle行为。
+- SDK070 Stage1独立审查已为`Critical 0 / Important 0 / Minor 0 / PASS`，当前仍待
+  另行commit/push授权；本同步没有修改本事项生产Rust/schema/RTDS行为，没有运行
+  公开网络smoke、release、部署、远端服务/数据操作或清理。
+
+### SDK070 Stage1发布授权同步
+
+- 用户已另行批准SDK070 Stage1 commit/push；其闭合以承载SDK070闭合记录的commit
+  成功推送且远端SHA与本地HEAD/upstream一致为生效条件。
+- 本记录精确取代同日此前等待发布授权状态；旧段仅保留为历史事实。
+- 本同步不修改本事项既有生产行为，也不授权公开网络smoke、release、部署、远端
+  服务/数据操作或清理。

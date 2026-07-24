@@ -427,3 +427,20 @@ HTTP snapshot路径使用有界全body读取和完整typed-row预检；408/418/4
 本计划本身仍不授权生产release构建、产物复制、远端部署、服务启停、生产验收、回滚、数据清理或失败日期重采。用户已另行批准`demand/data-collect-training-collector-direct-deployment-demand.md`及对应计划，专门授权2026-07-18多日停服、旧PID/lease已退出、当前UTC日无任何collector产物这一首次正式冷启动：任意时刻原子安装并直接启用唯一`Restart=on-failure` unit，不使用`Restart=no`、独立gate或历史数据删除。
 
 发现任何当前日产物必须原样保留并停止。该独立批准不表示当前代码具备无竞态same-day不同identity切换能力；future coverage-aware升级、回滚、identity migration或旧binary接管open v1日仍需基于当时状态另行批准。相同identity、持有dataset独占lease的systemd同日恢复属于需求4.2状态机，不得与部署takeover混淆。
+
+## 2026-07-25：current SDK依赖身份说明
+
+本计划阶段0--9中的0.6.0路径、provenance、命令和执行结果均是已完成阶段的历史事实，
+不回写。其要求“采用更新release必须另建SDK版本升级决策门”已由独立
+`plan/data-collect-sdk070-typed-schema-live-runtime-refactor-plan.md`满足；当前
+Stage1 worktree使用官方0.7.0底座的唯一
+`third_party/polymarket_client_sdk_v2-0.7.0-p1`，版本、Cargo/lock、路径与provenance
+由SDK070三件套管理。需求第4.7节四路径patch语义、SDK-first、唯一owner/no-shadow
+与heartbeat/teardown合同继续有效，不因身份迁移重新执行本计划阶段0--9。
+
+SDK070 Stage1当前为`SDK_070_RUNTIME_USABLE`与
+`SDK_070_TYPED_CONTRACT_BLOCKED`，独立审查已为
+`Critical 0 / Important 0 / Minor 0 / PASS`且用户已另行批准发布；其闭合以承载
+记录的commit成功推送且远端SHA与本地HEAD/upstream一致为生效条件。本说明不修改
+本事项生产Rust/schema/RTDS行为，也不授权公开网络smoke、release、部署、远端操作
+或数据清理。

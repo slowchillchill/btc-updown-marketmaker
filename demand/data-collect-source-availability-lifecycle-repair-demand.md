@@ -11,6 +11,8 @@
 > 2026-07-22窄authority同步：已批准的`demand/data-collect-polymarket-resolution-followup-demand.md`只对固定pending-resolution identity的E+3..E+8 exact-slug查询、每个业务slot最多一条metadata v3 attempt row，以及旧market assets保留到terminal claim后的bounded drain或budget完成，建立本文的有界例外。desired asset set因此扩展为current + prefetched next + resolution_pending旧market assets；current/next discovery、普通availability、manifest schema/artifact及本文其他生命周期合同不变。用户已后续授权按专项计划执行阶段1至阶段4及每阶段commit/push；该授权不重开本文其他已完成阶段，也不授权production部署、服务操作或数据删除。
 >
 > 2026-07-25窄authority supersede：用户批准`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`。上述唯一业务slot例外在activation前仍由current source v2 + metadata v3承载；未来source v3 + metadata v4通过SDK070总计划阶段3原子activation后，同一五row-kind/attempt例外由metadata v4继承，并只追加精确nullable WS claimant pair。metadata v3 schema/version立即冻结且activation后只读；不新增artifact、sidecar、第二writer、dual-write或普通transport持久化。本次只同步文档，不授权Rust/schema/test实施或activation。
+>
+> 2026-07-25 SDK身份supersede：本事项以官方0.6.0和`0.6.0-p1`实施的阶段事实保持历史；其“采用更新release必须另建SDK版本升级决策门”已由独立`DC-REPAIR-20260724-SDK070-TYPED-LIVE-RUNTIME`满足。当前Stage1 worktree使用官方0.7.0底座的唯一`third_party/polymarket_client_sdk_v2-0.7.0-p1`，版本、Cargo/lock、路径与provenance以SDK070三件套为authority；本事项第4.7节的四路径patch语义、SDK-first、唯一owner/no-shadow及heartbeat/teardown合同继续有效。SDK070 Stage1独立审查已为`Critical 0 / Important 0 / Minor 0 / PASS`且用户已另行批准发布，其闭合以承载记录的commit成功推送且远端SHA与本地HEAD/upstream一致为生效条件；本同步不修改本事项已完成生产行为。
 
 ## 一、目标
 
@@ -73,13 +75,25 @@ manifest 中可以表现为六类 source artifact，但它们不是六个独立�
 
 本事项必须优先复用并最小修正已有 health 类型，不能另建第二套 health/reconnect 控制面；但也不能因为抽象测试通过就宣称生产 source 生命周期已经满足本需求。
 
-### 2.5 pinned SDK 现状
+### 2.5 原事项pinned基线与当前SDK身份
 
-当前项目通过 `[patch.crates-io]` 使用 `third_party/polymarket_client_sdk_v2-0.6.0-p1`。现有 vendor 差异同时包含数据完整性修复、API 可构造性修复、自然重连隔离、诊断增强和旧业务策略专用能力，不能整体归因于错误的 RTDS 业务逻辑。
+本事项开始和阶段0--9实施时通过`[patch.crates-io]`使用官方0.6.0底座的
+`third_party/polymarket_client_sdk_v2-0.6.0-p1`。这是本事项历史scope与验证身份，
+不能回写成当时已经使用0.7.0。
 
-直接恢复官方原版会令当前 runtime 缺失 `ConnectionFault`、`fault_receiver()`、`SimpleParser::default()`、connection-generation 隔离接口等能力，并恢复官方当前仍存在的 parser 错误静默继续、CLOB 数组损坏元素被跳过以及高层 subscription stream 吞掉 `Lagged(n)` 等行为。因此，本事项采用逐项 patch 审计，不采用整体恢复官方原版。
+独立SDK070升级门现已在当前Stage1 worktree从官方0.7.0 crate全新建立唯一
+`third_party/polymarket_client_sdk_v2-0.7.0-p1`，并完成Cargo/lock切换、旧tracked
+vendor删除与离线runtime矩阵。相对官方0.7.0的源码差异仍恰好是第4.7节四个批准
+路径；因此当前版本/path/provenance由SDK070管理，本事项继续管理这些patch的业务
+语义，不能整体恢复官方原版或建立shadow fallback。
 
-实施前必须重新核对的官方上游证据至少包括：`SimpleParser::Default` [PR #81](https://github.com/Polymarket/rs-clob-client-v2/pull/81)、heartbeat 传播 [Issue #60](https://github.com/Polymarket/rs-clob-client-v2/issues/60) / [PR #63](https://github.com/Polymarket/rs-clob-client-v2/pull/63)，以及连接任务回收 [Issue #39](https://github.com/Polymarket/rs-clob-client-v2/issues/39) / [PR #40](https://github.com/Polymarket/rs-clob-client-v2/pull/40)。这些链接是当前审查入口，不冻结其未来 merge 状态；阶段0必须按当时官方状态复核。
+本事项实施前核对的上游入口包括：`SimpleParser::Default`
+[PR #81](https://github.com/Polymarket/rs-clob-client-v2/pull/81)、heartbeat传播
+[Issue #60](https://github.com/Polymarket/rs-clob-client-v2/issues/60) /
+[PR #63](https://github.com/Polymarket/rs-clob-client-v2/pull/63)，以及连接任务回收
+[Issue #39](https://github.com/Polymarket/rs-clob-client-v2/issues/39) /
+[PR #40](https://github.com/Polymarket/rs-clob-client-v2/pull/40)。这些链接继续只是
+历史审查入口，不冻结未来merge状态，也不取代SDK070的0.7.0固定provenance。
 
 ## 三、范围
 
@@ -203,15 +217,22 @@ manifest 中可以表现为六类 source artifact，但它们不是六个独立�
 
 ### 4.7 SDK-first 最小 patch 决策门
 
-本事项保持pinned官方`0.6.0`与现有`third_party/polymarket_client_sdk_v2-0.6.0-p1`根，不在同一事项升级SDK版本。实现前必须把vendored SDK与官方`0.6.0`原版、当前官方release/main及相关已合并/未合并PR再比较一次；上游已有且满足本地合同的修复优先按官方hunk/设计最小回移到pinned vendor，未吸收的真实缺口才保留本地最小实现。若希望采用更新官方release，必须停止并建立独立SDK版本升级决策门，重新冻结Cargo/lock/vendor路径、API兼容和全量回归范围。不得仅因为“官方原版”就放弃已证明的数据完整性边界，也不得仅因为“当前已有补丁”就永久保留。
+本事项实施时保持pinned官方`0.6.0`与
+`third_party/polymarket_client_sdk_v2-0.6.0-p1`根，并要求采用更新release时建立
+独立SDK版本升级决策门。该独立门现已由SDK070事项建立并在当前Stage1 worktree完成
+0.7.0身份、Cargo/lock/vendor路径、API兼容和全量离线回归核验；因此当前身份为官方
+0.7.0底座的唯一`third_party/polymarket_client_sdk_v2-0.7.0-p1`，精确provenance
+和runtime/typed终态由SDK070三件套及Stage1 artifact管理。以下逐项patch语义矩阵
+继续是本事项authority，不因版本迁移被重开，也不得仅因为“官方原版”就放弃已证明
+的数据完整性边界。
 
 当前拟议 patch 语义矩阵如下：
 
 | patch 语义 | 与错误业务静默策略的关系 | 本需求决定 |
 |---|---|---|
-| parser failure通过 typed sticky fault暴露并终止连接 | 无关 | 在pinned 0.6.0 vendor保留；可用官方等价hunk替换本地hunk |
+| parser failure通过 typed sticky fault暴露并终止连接 | 无关 | 保留；原0.6.0实施为历史，当前由0.7.0-p1同一批准路径承载 |
 | CLOB interested array按 all-or-error解析 | 无关 | 保留，禁止静默跳过损坏元素 |
-| `SimpleParser: Default` | 无关 | 在pinned 0.6.0 vendor保留；可回移官方等价hunk |
+| `SimpleParser: Default` | 无关 | 保留；原0.6.0实施为历史，当前由0.7.0-p1同一批准路径承载 |
 | outbound request绑定 connection generation并隔离旧 generation | 无关 | 保留；自然 reconnect 同样需要。RTDS已接入，CLOB生产actor必须在阶段4补齐同等绑定与发送后复核 |
 | RTDS parser failure有界、脱敏诊断 | 无关 | 保留目标并在阶段2补齐：当前wrapper仍把原始serde Display拼入外显错误，非法scalar可泄漏；必须保留kind/source chain但让sticky fault、Display与parser-failure warn只含有界allowlist摘要，不改变成功解析语义；pre-parse TRACE仅按下一行B例外处理 |
 | 官方pre-parse `tracing::trace!(%text, ...)`是否恢复 | 无关；当前项目未启用SDK `tracing` feature，但这是现存且未被原获批矩阵命名的vendor hunk | **B已批准**：恢复官方0.6.0原hunk。启用该feature时会在parse前记录全部文本帧，包含随后解析失败的完整raw frame；用户已明确批准该failure-trace边界放宽 |
@@ -219,7 +240,7 @@ manifest 中可以表现为六类 source artifact，但它们不是六个独立�
 | heartbeat dead向 connection owner传播并结束旧 socket | 新确认 transport 缺口 | 仅对`require_text_pong=true`的连接保留；CLOB no/old-PONG继续结束旧socket并recoverable重连，RTDS no-PONG不进入该路径 |
 | application-level文本PONG是否必需 | 旧generic SDK把不同频道合同压平；真实RTDS不返回PONG | **RTDS-PONG-A已批准**：`Config::require_text_pong`默认`true`，CLOB显式`true`，RTDS显式`false`；false模式以实际PING write ack串行调度且最多一个未完成PING |
 | 最后一个 manager sender关闭后的 normal teardown | 新确认生命周期缺口 | 优先复用/审查官方修复方案；未发布时允许最小 vendor patch |
-| 单次TCP/TLS/WebSocket建连与握手有界 | **与健康连接上的业务静默无关**；pinned SDK直接等待`connect_async()`，TCP已接受但握手不完成时不会启动heartbeat或进入下一次重试 | **CT-B已批准**：SDK `ws::config::Config`增加默认`None`的`connect_timeout`；RTDS生产显式设为20秒，超时作为recoverable transport failure，之后有界backoff并无限重试。不得把该期限用于已连接socket、业务frame等待或subscription refresh |
+| 单次TCP/TLS/WebSocket建连与握手有界 | **与健康连接上的业务静默无关**；原0.6.0官方基线直接等待`connect_async()`，当前0.7.0-p1继续由批准patch提供该能力 | **CT-B已批准**：SDK `ws::config::Config`增加默认`None`的`connect_timeout`；RTDS生产显式设为20秒，超时作为recoverable transport failure，之后有界backoff并无限重试。不得把该期限用于已连接socket、业务frame等待或subscription refresh |
 
 因此：
 
@@ -231,10 +252,10 @@ manifest 中可以表现为六类 source artifact，但它们不是六个独立�
 6. connection owner必须使用互斥的内部退出语义：只有最后一个manager/bound outbound sender关闭是normal shutdown并停止outer loop；read EOF、WebSocket Close、read/write/PING failure及strict模式heartbeat timeout/旧PONG继续是recoverable transport exit；parser sticky fault继续terminal。可以增加私有内部结果类型或等价判断，但不得增加公共API或把其他`Ok(())`路径误判为normal shutdown。
 7. 按用户批准的B恢复官方0.6.0 parse前`tracing::trace!(%text, ...)`原hunk；启用SDK `tracing` feature时，完整成功/失败文本帧均可进入该TRACE记录，这是明确获批的日志边界放宽，不得把它误报为脱敏。parser错误的operator-visible `Display`、sticky fault和warn仍不得额外原样拼接serde错误中的非法scalar或nested payload/secret-like字段，只含2,048-byte上限、hash与allowlist字段摘要；底层error kind/source chain保留供typed inspection。不得另造success-only raw trace或扩大其他日志行为。
 8. vendor 允许修改的源码路径集合按用户批准的`CT-B`限于以下四个文件：
-   - `third_party/polymarket_client_sdk_v2-0.6.0-p1/src/ws/connection.rs`
-   - `third_party/polymarket_client_sdk_v2-0.6.0-p1/src/ws/config.rs`
-   - `third_party/polymarket_client_sdk_v2-0.6.0-p1/src/clob/ws/types/response.rs`
-   - `third_party/polymarket_client_sdk_v2-0.6.0-p1/src/rtds/subscription.rs`
+   - `third_party/polymarket_client_sdk_v2-0.7.0-p1/src/ws/connection.rs`
+   - `third_party/polymarket_client_sdk_v2-0.7.0-p1/src/ws/config.rs`
+   - `third_party/polymarket_client_sdk_v2-0.7.0-p1/src/clob/ws/types/response.rs`
+   - `third_party/polymarket_client_sdk_v2-0.7.0-p1/src/rtds/subscription.rs`
 9. `CT-B`批准`Config::connect_timeout: Option<Duration>`且默认`None`；用户2026-07-19批准的`RTDS-PONG-A`另授权同一`config.rs`新增`Config::require_text_pong: bool`且默认`true`。除此之外，如果Polymarket实现还需要第五个vendor文件、其他新公共协议API、raw WebSocket、manual signing、第二SDK session或改变parser/fatal语义，必须立即停止并向用户提交缺口、影响和选项。
 
 ### 4.8 完整性与顶层协调边界

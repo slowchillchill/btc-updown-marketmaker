@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.88.0"
 name = "polymarket_client_sdk_v2"
-version = "0.6.0"
+version = "0.7.0"
 authors = [
     "Polymarket Engineering <engineering@polymarket.com>",
     "Chaz Byrnes <chaz@polymarket.com>",
@@ -56,14 +56,16 @@ data = []
 default = []
 gamma = []
 heartbeats = [
-    "dep:tokio",
     "dep:tokio-util",
+    "tokio/macros",
+    "tokio/rt-multi-thread",
 ]
 rfq = []
 rtds = [
     "dep:backoff",
-    "dep:tokio",
     "dep:tokio-tungstenite",
+    "tokio/macros",
+    "tokio/rt-multi-thread",
 ]
 tracing = [
     "dep:tracing",
@@ -73,8 +75,9 @@ tracing = [
 ws = [
     "dep:backoff",
     "dep:bitflags",
-    "dep:tokio",
     "dep:tokio-tungstenite",
+    "tokio/macros",
+    "tokio/rt-multi-thread",
 ]
 
 [lib]
@@ -501,11 +504,7 @@ version = "0.28.0"
 
 [dependencies.tokio]
 version = "1.50.0"
-features = [
-    "rt-multi-thread",
-    "macros",
-]
-optional = true
+features = ["time"]
 
 [dependencies.tokio-tungstenite]
 version = "0.29.0"

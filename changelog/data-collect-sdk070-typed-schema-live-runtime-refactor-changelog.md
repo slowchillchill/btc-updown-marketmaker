@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_EXECUTION_STAGE_0_CLOSED`。用户于2026-07-25明确批准按本需求与计划开始执行；pre-execution checkpoint为`b65a2add5749d0931e91ef36d3bbadcb15a53014`。阶段0只读基线、四项获批文档对齐及审查修复均已完成，独立复核为`Critical 0 / Important 0 / Minor 0 / PASS`；尚未修改Rust、Cargo、vendor或schema。用户已另行批准把精确阶段0文档集commit并push到`origin/fix-rtds-silents`，本闭合状态以承载本记录的commit成功推送且远端分支SHA与本地一致为生效条件。文内单独决策/授权门继续有效；本文件只记录本组三件套的形成、事实、冲突、决定与实际执行，不回写旧changelog。
+> 状态：`APPROVED_EXECUTION_STAGE_1_CLOSED`。用户于2026-07-25明确批准按本需求与计划开始执行；pre-execution checkpoint为`b65a2add5749d0931e91ef36d3bbadcb15a53014`。阶段0只读基线、四项获批文档对齐及审查修复已完成并以commit `86d14a9f4225f9b941206b9d47bcfe5a736c7789`推送到`origin/fix-rtds-silents`，本地HEAD、upstream与远端ref一致。Stage1已在本地完成官方0.7.0 vendor重建、四路径patch重放、唯一依赖切换、旧vendor删除、离线门禁与typed fixture/consumer审计；runtime为`SDK_070_RUNTIME_USABLE`，typed contract为`SDK_070_TYPED_CONTRACT_BLOCKED`。独立`gpt-5.6-sol`/`ultra`阶段审查为`Critical 0 / Important 0 / Minor 0 / PASS`；用户已另行批准Stage1 commit/push，本闭合状态以承载本记录的commit成功推送且远端分支SHA与本地HEAD/upstream一致为生效条件。Stage2未开始；公开网络smoke为`NOT_AUTHORIZED / NOT_RUN`。文内单独决策/授权门继续有效；本文件只记录本组三件套的形成、事实、冲突、决定与实际执行，不回写旧changelog。
 
 ## 2026-07-24：用户要求建立一个新的总事项
 
@@ -586,3 +586,136 @@ schema或数据。
 本地一致为生效条件。该授权允许发布阶段0并在验证后进入Stage1，不继承为后继
 阶段的commit/push授权，也不扩大公开网络smoke、RTDS 4A/4B、production
 activation/cutover、release、部署、远端服务操作、migration或删除授权。
+
+## 2026-07-25：阶段0文档closure已发布
+
+- 精确七份阶段0文档以commit
+  `86d14a9f4225f9b941206b9d47bcfe5a736c7789`
+  （`docs(data-collect): close SDK070 stage 0`）提交并push到
+  `origin/fix-rtds-silents`。
+- push后本地HEAD、`@{upstream}`与`git ls-remote --heads origin
+  fix-rtds-silents`均为同一完整SHA。三份既存未跟踪RTDS草案未被stage、commit或
+  push。
+- 该commit是Stage1前可回滚checkpoint；它没有预授权Stage1 commit/push、公开网络
+  smoke、RTDS 4A/4B、production activation/cutover、release、部署、远端操作、
+  migration或删除。
+
+## 2026-07-25：阶段1重建官方0.7.0 vendor并切换唯一依赖
+
+- Stage1从本机Cargo registry缓存的官方
+  `polymarket_client_sdk_v2-0.7.0.crate`全新解包建立
+  `third_party/polymarket_client_sdk_v2-0.7.0-p1`，不是旧目录改名，也没有为取得
+  源码访问公共网络。archive SHA-256为
+  `ba212e0641f178c274af266772de15962ac7e76da550a0f79f47b49349b1138a`，
+  package为0.7.0，发布时间为`2026-07-17T14:56:51Z`，MIT license，MSRV
+  `1.88.0`，VCS为`222143d321eba97d5711a848265eb9aab3bc7ff4`；archive含132个
+  文件，排序文件清单SHA-256为
+  `55c093724c71c384cb485cc44bef1cb75d21123035cb8f253308b3d518e0dc74`。
+- 官方0.6.0与0.7.0的四个patch底文件逐字节相同。Stage1从当前0.6 patch逐hunk
+  重放到官方0.7；相对官方0.7.0的源码差异恰好是
+  `src/ws/connection.rs`、`src/ws/config.rs`、
+  `src/clob/ws/types/response.rs`、`src/rtds/subscription.rs`，没有第五个路径。
+  connection/config/CLOB response/RTDS subscription patched文件SHA-256分别为
+  `90070b2bd438909a44a82209963881b4c70f755bc671ea19b13c7ee2e2d6a223`、
+  `dc68886999cfd3509c0668f403c6f8953f283f03847b5dbd6ebe6c5b72d20e2d`、
+  `55163a02b9f4c58c0e861043e5b6a109164d6e661aceeb46b24d2dd460ac0073`、
+  `4e2174a4dcb0e18ad5baf2914ec3270cbff5923915e6dc39ed7f04174fa10e7b`。
+- 根`[patch.crates-io]`、workspace exclude、`data-collect`精确依赖、lock及两个bench
+  provenance已切换到0.7.0/`0.7.0-p1`。offline `cargo tree`只解析一个本地
+  `polymarket_client_sdk_v2 0.7.0`，生产features仍为
+  `clob,gamma,rtds,ws`。
+- 新vendor provenance、四路径patch和workspace切换建立后，旧tracked
+  `third_party/polymarket_client_sdk_v2-0.6.0-p1`在同一Stage1 diff删除。
+  `third_party`只保留一个tracked SDK vendor；active Cargo/code/bench中的旧路径及
+  Polymarket SDK 0.6精确版本引用为0。阶段0artifact与旧changelog的历史引用有意
+  保留，Git checkpoint提供回滚，不建立备份目录或shadow fallback。
+- 本阶段没有修改`data-collect/src`、schema或RTDS业务逻辑。
+
+## 2026-07-25：阶段1离线runtime验证完成
+
+- 使用`+1.88`在offline模式运行vendor core approved-feature lib suite，
+  `170/170`通过；all-features的unit/integration/doc harness全部通过，其中library
+  `186/186`、doctest `49 passed / 20 ignored`。官方0.7 async execution
+  `post_order`/`post_orders` mock覆盖通过，没有真实订单、钱包或认证调用。
+- vendor default及all-features两组all-targets Clippy `-D warnings`均退出0；固定
+  `nightly-2025-11-24` vendor fmt check退出0。
+- 单次`cargo test -p data-collect --locked -- --test-threads=1`的lib
+  `347/347`且全部integration/doc harness通过；其中现有patch/runtime contract为
+  `17/17`与`19/19`。随后locked all-targets check、Clippy `-D warnings`、workspace
+  fmt及staged/unstaged diff check均退出0。
+- 全部构建/测试均为offline；任务1.5公开只读CLOB/RTDS/Gamma smoke未获授权且未
+  运行，记录为`NOT_AUTHORIZED / NOT_RUN`，没有用synthetic结果冒充public smoke。
+- vendor-local构建缓存完成后以精确manifest path执行`cargo clean`；Cargo报告清理
+  18,463个可再生成文件、约26.1 GiB，随后确认vendor目录无`target/`。这不是源码、
+  证据或用户数据删除。
+- runtime终态确定为`SDK_070_RUNTIME_USABLE`。精确命令、toolchain、hash与结果写入
+  `data-collect/docs/sdk070-stage1-sdk-runtime-and-typed-contract.md`。
+
+## 2026-07-25：typed field/nullability fixture与consumer矩阵完成
+
+- 2026-07-25访问官方current realtime data文档，并以固定SDK commit
+  `222143d321eba97d5711a848265eb9aab3bc7ff4`核对typed struct/serde。临时offline
+  harness对官方registry 0.7与当前patch分别调用
+  `parse_if_interested(bytes, &MessageInterest::ALL)`，覆盖单object和array envelope；
+  完成后已清理临时harness，worktree未留下第二parser。
+- `book`、`price_change`、`last_trade_price`、`tick_size_change`、
+  `best_bid_ask`、`new_market`、`market_resolved`七类variant都存在官方允许
+  missing/null但SDK拒绝单object整帧的路径。相同element放入array时，官方0.7静默
+  返回`OK messages=0`，当前patch传播同一parse error；因此patch只消除数组静默
+  跳过，没有补typed字段或放宽nullability。
+- `event_message`整体missing/null可解析；对象存在时的官方optional内部文本会失败。
+  `EventMessage.id`在官方文档和SDK中均required，不是gap。
+  `MarketResolved.question/slug/description`已为`Option`且outcomes接受
+  missing/null，也不是gap。
+- 当前consumer/批准合同审计确认，整帧parser gap在target admission之前丢失消息，
+  不能通过Parquet nullable、`EXCLUDED`或`nullable_unavailable`降级。因此typed
+  终态为`SDK_070_TYPED_CONTRACT_BLOCKED`，只停止v3
+  schema/reader/writer/local new-write，不阻断runtime可用性或与这些字段无关的
+  机械工作；禁止以raw REST/WS、manual signing、第二parser或shadow canonicalizer
+  补洞。
+- 仍须用户逐字段裁决的single-field gap为：book的
+  `minOrderSize/tickSize/negRisk/lastTradePrice`、
+  `LastTradePrice.transactionHash`、new-market扩展字段及resolved `tags`。
+  当前未识别这些字段的WS-v3 executable consumer；但agent没有替用户选择要求官方
+  typed支持、`EXCLUDED`或`nullable_unavailable`。即使全部批准降级，整帧parser
+  blocker仍必须先由官方SDK-first路线修复才能解除v3阻断。
+- future paper/live保持`NONBLOCKING_FUTURE_SPEC`，不能创造当前必需字段或阻断项。
+
+## 2026-07-25：阶段1独立审查通过，等待发布授权
+
+- 独立`gpt-5.6-sol`/`ultra`审查者只读复核完整cached diff、官方crate与vendor
+  路径/内容、Cargo/lock/feature tree、测试证据、typed fixture/consumer矩阵及三组
+  authority同步；没有编辑、构建、联网、commit、push或远端操作。
+- 审查确认官方crate SHA/VCS/MSRV/license/132文件及文件清单hash一致；vendor与官方
+  0.7.0路径集相同且只有四个批准源码路径内容不同；四个patched文件与Stage0版本
+  逐字节一致，无第五路径、第二vendor或active 0.6引用。
+- 审查确认`data-collect/src`、schema、RTDS业务逻辑及三份未跟踪RTDS草案均未进入
+  diff；runtime证据足以支持`SDK_070_RUNTIME_USABLE`，无需重复测试；typed矩阵和
+  `SDK_070_TYPED_CONTRACT_BLOCKED`结论准确且没有替用户裁决single-field gaps。
+- 终审结果为：
+
+```text
+Critical: 0
+Important: 0
+Minor: 0
+Verdict: PASS
+```
+
+当前游标为`STAGE_1_REVIEW_PASSED_AWAITING_PUBLISH`。Stage1未commit/push，
+Stage2未开始；必须取得用户另行发布授权后才可创建Stage1 closure commit并push。
+
+## 2026-07-25：阶段1发布授权与闭合
+
+用户另行明确批准创建Stage1 commit并push到
+`origin/fix-rtds-silents`。发布范围保持为已通过两轮状态复核的Stage1暂存集：
+官方0.7.0 vendor重建、四路径patch重放、唯一workspace依赖切换、旧tracked
+vendor删除、probe身份同步、Stage1证据及三组authority文档同步；三份既存未跟踪
+RTDS草案继续排除。
+
+本记录精确取代同日此前等待发布授权状态；旧段仅保留为历史事实。
+
+Stage1记录为`STAGE_1_CLOSED`，以承载本记录的commit成功推送且远端分支SHA与
+本地HEAD/upstream一致为生效条件。完成该验证后可按既有持续推进授权进入Stage2；
+本次授权不继承为Stage2各分支或后继阶段的commit/push授权，也不扩大非parser
+typed字段决定、RTDS参数与4A/4B、公开网络smoke、production activation/cutover、
+release、部署、远端服务/数据操作、migration或删除授权。

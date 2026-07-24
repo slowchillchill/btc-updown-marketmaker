@@ -567,3 +567,30 @@
 - future source v3 + metadata v4只可按SDK070总计划阶段3原子activation。activation后同一五row-kind/attempt例外由metadata v4继承，source v2与metadata v3只读；不得cross-pair、dual-write或半切换。
 - v4只在v3不可变前缀末尾追加两个nullable WS claimant字段，复用同一artifact、writer owner、partition与manifest mapping，不扩大普通availability持久化，也不新增artifact、sidecar或第二writer。
 - 本次只同步demand/changelog authority；source-availability计划没有metadata版本或attempt exception执行条款，因此不新增重复步骤。没有修改Rust/schema/tests、构建、网络、commit、push、部署、服务或数据。
+
+## 2026-07-25：current SDK身份由独立SDK070升级门接管
+
+- 本事项阶段0--9以官方0.6.0与`0.6.0-p1`完成的实施、测试、香港线路证据和
+  commit/push均保持历史事实，不回写。本事项原先要求采用更新release必须建立独立
+  SDK升级门；该门已由
+  `DC-REPAIR-20260724-SDK070-TYPED-LIVE-RUNTIME`建立。
+- SDK070 Stage1当前worktree已从官方0.7.0 crate全新建立唯一
+  `third_party/polymarket_client_sdk_v2-0.7.0-p1`，切换Cargo/lock并删除旧tracked
+  vendor。相对官方0.7.0的源码差异仍恰好为本事项第4.7节批准的四路径；SDK070管理
+  当前版本/path/provenance，本事项继续管理patch业务语义、SDK-first、唯一owner、
+  no-shadow及heartbeat/teardown合同。
+- SDK070离线runtime矩阵已通过并标记`SDK_070_RUNTIME_USABLE`；其typed
+  missing/null fixture确认七类public market variant存在admission前整帧parser gap，
+  因而标记`SDK_070_TYPED_CONTRACT_BLOCKED`。该typed阻断只停止SDK070 v3入口，不
+  重开或改变本事项已完成source lifecycle行为。
+- SDK070 Stage1独立审查已为`Critical 0 / Important 0 / Minor 0 / PASS`，当前仍待
+  另行commit/push授权。本同步没有修改本事项生产Rust/schema/RTDS行为，没有运行
+  公开网络smoke、release、部署、远端服务/数据操作或清理。
+
+### SDK070 Stage1发布授权同步
+
+- 用户已另行批准SDK070 Stage1 commit/push；其闭合以承载SDK070闭合记录的commit
+  成功推送且远端SHA与本地HEAD/upstream一致为生效条件。
+- 本记录精确取代同日此前等待发布授权状态；旧段仅保留为历史事实。
+- 本同步不修改本事项既有生产行为，也不授权公开网络smoke、release、部署、远端
+  服务/数据操作或清理。
