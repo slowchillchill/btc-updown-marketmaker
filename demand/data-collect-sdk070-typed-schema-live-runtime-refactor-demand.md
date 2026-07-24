@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`DRAFT_AWAITING_REMAINING_USER_REVIEW_AND_AUTHORITY_DECISIONS`。用户已授权创建和审查本组三件套，并于2026-07-24明确批准 `market_resolved` 的 v3 new-write 采用 validate-first、取消 raw-first；同日用户批准按后续上下文/追踪/过度设计审查结论修复本组三件套。用户又于2026-07-25明确批准`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`：沿用同一metadata artifact/writer/manifest mapping，仅追加两个nullable WS claimant外键字段；metadata v3 schema/version立即冻结，activation前仍是current metadata writer，activation后转为read-only。`BLOCKED_PENDING_METADATA_CLAIMANT_SCHEMA_DECISION`因此解除，但source v3 + metadata v4的current new-write仍须等metadata v4实现及WS claimant/recovery验收通过后才能原子激活。上述授权只允许文档决策同步，不等于批准整份总需求或任何实施。用户现已单独授权把本轮审查后的文档同步集创建并push为pre-execution checkpoint；该checkpoint授权不等于Rust、Cargo/vendor、schema、测试或数据实施授权，也不授权构建、真实网络probe、release、部署、远端服务器/服务操作、历史数据迁移或删除。既往授权越界事实只在 changelog 保留，不计入任何实施验收。
+> 状态：`APPROVED_EXECUTION_STAGE_0_CLOSED`。用户于2026-07-25明确批准按本需求与对应计划开始执行；pre-execution checkpoint为`b65a2add5749d0931e91ef36d3bbadcb15a53014`。同日用户批准阶段0发现的四项推荐修复：旧authority统一为四个vendor patch路径、阶段1/6各只运行一次串行完整package测试、直接耦合Polymarket生命周期的Gamma归入`2-PM`、vendor身份变化后只在阶段1收口运行一次适用vendor矩阵。文档对齐及审查修复已完成，独立阶段0复核为`Critical 0 / Important 0 / Minor 0 / PASS`；用户已另行批准把精确阶段0文档集commit并push到`origin/fix-rtds-silents`，本闭合状态以承载本记录的commit成功推送且远端分支SHA与本地一致为生效条件。Stage1/Stage2尚未修改。该批准不消解仍待用户决定的SDK typed字段gap、RTDS三项参数及4A/4B独立授权、公开网络smoke、后继各阶段commit/push、production activation/cutover、release、部署、远端服务操作、历史数据迁移或删除等明确独立门。既有`market_resolved` validate-first与`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`决定继续有效，source v3 + metadata v4仍只能在其实现和验收门通过后原子激活。
 
 ## 一、决策结论与目标
 
@@ -160,13 +160,13 @@ data_collect_training_collector
 
 ## 三、authority 与文档关系
 
-### 3.1 总体草案获批前
+### 3.1 当前总需求批准状态与独立门
 
-除下述已由用户单独批准并同步的`market_resolved` v3 validate-first决定，以及`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`的metadata v4最小schema/claimant/原子activation合同外，本草案其余内容只记录拟议的新方向。当前已批准authority和当前代码继续有效；不得据此删除任何字段、测试或行为。前一决定只约束未来`polymarket_orderbook_v3` new-write；后一决定只冻结metadata v4文档合同及metadata v3 schema/version，不授权Rust/schema/test实施或activation。current source v2 + metadata v3代码在另获实施授权并完成原子切换前保持不变。
+用户已于2026-07-25明确批准按本需求与对应计划开始执行；本需求不再是“总体未获批草案”。该总批准允许按DAG推进本地工作，但不使当前代码或旧authority立即失效，也不自动通过SDK typed字段gap、最终v3字段集合、阶段3、RTDS参数/4A/4B、公开网络smoke、阶段commit/push或production相关独立门。`market_resolved` v3 validate-first和`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`继续是已经单独冻结、不得重新置为待决的合同；它们仍不等于Rust/schema/test实现或activation已经完成。current source v2 + metadata v3代码保持有效，只有对应入口门和验收通过后，才能在已冻结的原子activation diff中切换。
 
-### 3.2 typed schema 获批时需要精确取代的旧合同
+### 3.2 本需求批准后需要精确取代的旧合同
 
-`market_resolved` v3 validate-first与metadata v4 claimant两个窄决定已经按用户单独批准完成文档authority同步，不得在阶段3重新置为待决，也不得据此声称实现完成。除这两个carve-out外，未来最终批准本需求后，阶段0只建立以下conflict/delta matrix；其余typed schema旧authority只能在SDK字段门通过、用户批准v3字段集合并单独授权阶段3后，于阶段3代码修改前同步：
+`market_resolved` v3 validate-first与metadata v4 claimant两个窄决定已经完成文档authority同步，不得在阶段3重新置为待决，也不得据此声称实现完成。总需求虽已获执行批准，阶段0仍只建立以下conflict/delta matrix；除用户本轮另行批准的四路径current authority修正外，其余typed schema旧authority只能在SDK字段门通过、用户批准v3字段集合并单独授权阶段3后，于阶段3代码修改前同步：
 
 - `demand/data-collect-reliability-repair-demand.md` 中以 `source_native_payload_json` 做持久化 evidence、跨进程 fingerprint recovery 和 fan-out 前丢弃的合同；
 - `demand/data-collect-demand.md` 中只适用于`source_kind=polymarket_market` persisted artifact/data-pipeline的parseable `raw_json`或等价原始证据条款，收敛为“官方SDK解码后的完整消费typed evidence”；其他source及paper/live Handoff v1/Task 7.4条款均为`KEEP_OUT_OF_SCOPE`；
@@ -219,7 +219,7 @@ RTDS typed row/schema 不属于这次 `polymarket_orderbook_v3` 列删除。不�
 
 - raw Polymarket REST/WebSocket、manual signing、自建 SDK、第二解析器或 shadow feed；
 - 钱包、认证 user channel、真实下单、资金测试或任何交易；
-- 本轮直接实施或把草案标为已批准；
+- 越过SDK typed字段、阶段3、RTDS参数/4A/4B、公开网络smoke、阶段commit/push或production相关独立门；
 - 修改其他 source 的 persisted payload/hash schema；
 - 新建通用 actor/source/plugin framework；
 - 把代码简单搬进新的巨型模块，或仅以测试数量/总 LOC 下降证明正确；
@@ -230,7 +230,7 @@ RTDS typed row/schema 不属于这次 `polymarket_orderbook_v3` 列删除。不�
 
 ## 五、SDK 0.7.0 需求
 
-1. 新 vendor 必须从已核验的官方 0.7.0 crate 重建为 `third_party/polymarket_client_sdk_v2-0.7.0-p1`，不得给旧 0.6 目录改名冒充升级。
+1. 新 vendor 必须从已核验的官方 0.7.0 crate 重建为 `third_party/polymarket_client_sdk_v2-0.7.0-p1`，不得给旧 0.6 目录改名冒充升级。新vendor完成provenance、四路径patch和workspace依赖切换后，必须在同一阶段1 diff删除tracked旧`0.6.0-p1`源码树；Git checkpoint保留回滚能力，不得把旧树作为无消费者副本或shadow路径留在`third_party`。
 2. provenance 至少冻结 crate SHA-256、VCS commit、发布时间、license、MSRV、文件清单和 Cargo metadata。官方没有对应可验证 tag/release object时不得虚构。
 3. 相对官方 0.7.0 的项目源码差异必须恰好是当前批准的四个路径；每个 hunk 必须映射到仍有效的需求和确定性测试。出现第五个路径必须停止并由用户决定。
 4. workspace 只能解析一个 `polymarket_client_sdk_v2`，精确版本为 `0.7.0`，features 保持 `clob,gamma,rtds,ws` 的当前生产需要；依赖树不得同时保留 0.6。
@@ -332,9 +332,9 @@ v3 writer 不得包含：
 
 机械拆分必须形成三个可独立收口的分支：
 
-- `2-PM`：逐owner提取v3直接需要的最小Polymarket source、adapter/row conversion、Polymarket-specific writer seam和resolution recovery；每一步仍只移动一个owner；
+- `2-PM`：逐owner提取v3直接需要的最小Polymarket source、该source直接持有的Gamma discovery/identity/resolution transport与helpers、adapter/row conversion、Polymarket-specific writer seam和resolution recovery；每一步仍只移动一个owner；
 - `2-RTDS`：只提取RTDS source owner及其测试；
-- `2-REST`：其余Binance/Gamma、shared writer/manifest/day/coordinator/source supervision/root等owner按收益和风险独立迁移。
+- `2-REST`：其余Binance、shared writer/manifest/day/coordinator/source supervision/root等owner按收益和风险独立迁移。
 
 `2-PM`完成即可进入v3，`2-RTDS`完成即可在其他RTDS入口条件满足后进入专项；`2-REST`不阻断前两者。每个分支内部小步只做定向/受影响测试、compile/check和自审，分支收口才运行一次完整回归和独立审查。审查通过先记为`*_REVIEW_PASSED_AWAITING_PUBLISH`；只有取得授权并完成对应commit/push后才记为`*_CLOSED`并允许后继阶段消费。
 
@@ -389,7 +389,7 @@ v3 writer 不得包含：
 
 ### AC-01 SDK provenance 与单版本
 
-workspace只解析“以官方 0.7.0 crate为底座的本地 `0.7.0-p1` vendor”，其 Cargo package version仍为 `0.7.0`；crate checksum、VCS、MSRV、license、feature tree和四个允许差异路径 `src/ws/connection.rs`、`src/ws/config.rs`、`src/clob/ws/types/response.rs`、`src/rtds/subscription.rs` 全部可复核，无第五个 vendor源码差异。
+workspace只解析“以官方 0.7.0 crate为底座的本地 `0.7.0-p1` vendor”，其 Cargo package version仍为 `0.7.0`；`third_party`中tracked Polymarket SDK vendor目录也只有该一个，旧`0.6.0-p1`目录不存在，active Cargo/code/probe对Polymarket SDK旧路径或其0.6精确版本的引用为0，历史文档记录不回写。crate checksum、VCS、MSRV、license、feature tree和四个允许差异路径 `src/ws/connection.rs`、`src/ws/config.rs`、`src/clob/ws/types/response.rs`、`src/rtds/subscription.rs` 全部可复核，无第五个 vendor源码差异。
 
 ### AC-02 SDK 可用性
 
@@ -445,7 +445,7 @@ v3按 `size_of::<DomainMessage>() + Σ String::capacity() + Σ (Vec<T>::capacity
 
 ### AC-15 授权边界
 
-本组三件套完成不等于实施授权。获批阶段3可以先实现未激活的v3 domain/schema/writer/reader、不依赖claimant pair的typed recovery及其测试；只有metadata v4实现且WS claimant/recovery验收通过后，才可在本地代码/test的同一activation diff中把source v2 + metadata v3原子替换为唯一current new-write pair source v3 + metadata v4，并让source v2与metadata v3只读。这仍不等于production binary激活、服务器dataset root/canonical new-data cutover、历史migration、旧数据删除、release或部署，后者分别需要新的明确授权。
+本组三件套已获总执行批准，但不等于各独立决策/授权门自动通过。阶段3获单独授权且满足入口条件后，可以先实现未激活的v3 domain/schema/writer/reader、不依赖claimant pair的typed recovery及其测试；只有metadata v4实现且WS claimant/recovery验收通过后，才可在本地代码/test的同一activation diff中把source v2 + metadata v3原子替换为唯一current new-write pair source v3 + metadata v4，并让source v2与metadata v3只读。这仍不等于production binary激活、服务器dataset root/canonical new-data cutover、历史migration、旧数据删除、release或部署，后者分别需要新的明确授权。
 
 ## 十、停止条件
 

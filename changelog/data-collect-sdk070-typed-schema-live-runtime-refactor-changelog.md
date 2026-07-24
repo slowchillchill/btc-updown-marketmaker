@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`DRAFT_AWAITING_REMAINING_USER_REVIEW_AND_AUTHORITY_DECISIONS`。用户已于2026-07-24批准`market_resolved` v3 validate-first，并批准按最新上下文/追踪/过度设计审查结论修复本组三件套；又于2026-07-25批准`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`。版本决策blocker已解除，但这些授权只覆盖文档，不授权Rust/schema/test、构建、网络、提交或部署；metadata v4实现及WS claimant/recovery验收完成前不得原子激活source v3 + metadata v4 current new-write。本文件只记录本组三件套的形成、事实、冲突、决定与未来实际执行；不得回写旧 changelog。
+> 状态：`APPROVED_EXECUTION_STAGE_0_CLOSED`。用户于2026-07-25明确批准按本需求与计划开始执行；pre-execution checkpoint为`b65a2add5749d0931e91ef36d3bbadcb15a53014`。阶段0只读基线、四项获批文档对齐及审查修复均已完成，独立复核为`Critical 0 / Important 0 / Minor 0 / PASS`；尚未修改Rust、Cargo、vendor或schema。用户已另行批准把精确阶段0文档集commit并push到`origin/fix-rtds-silents`，本闭合状态以承载本记录的commit成功推送且远端分支SHA与本地一致为生效条件。文内单独决策/授权门继续有效；本文件只记录本组三件套的形成、事实、冲突、决定与实际执行，不回写旧changelog。
 
 ## 2026-07-24：用户要求建立一个新的总事项
 
@@ -449,3 +449,140 @@ activation前只有source v2 + metadata v3是current new-write；activation后�
 ## 2026-07-25：pre-execution 文档 checkpoint 授权
 
 用户明确授权把本轮审查后的SDK070三件套及其resolution/main/source-availability authority同步文件创建commit并push，作为后续实施前的可回滚checkpoint。该授权只覆盖本次文档同步集的commit/push，不表示Rust、Cargo/vendor、schema、测试或数据实施已经开始，也不授权构建、真实网络probe、release、部署、远端服务器/服务操作、历史数据迁移或删除。三个既存、未纳入本轮修订的RTDS草案继续排除在本checkpoint之外。
+
+## 2026-07-25：用户批准开始执行，阶段0触发不一致停止门
+
+用户明确批准按本需求与计划开始执行。执行从已推送checkpoint
+`b65a2add5749d0931e91ef36d3bbadcb15a53014`开始；该批准允许阶段0以及在
+依赖和现有决策门满足后的本地实施，但不覆盖公开网络smoke、RTDS待定参数与
+4A/4B、各阶段commit/push、production activation/cutover、release、部署、
+远端服务操作、历史数据迁移或删除等文内独立门。
+
+主代理完成两路`gpt-5.6-sol` / `ultra`只读盘点和安全的current-v2本地writer
+probe。阶段证据写入
+`data-collect/docs/sdk070-stage0-baseline.md`。已核实：
+
+- HEAD、upstream与远端均为`b65a2add5749d0931e91ef36d3bbadcb15a53014`；
+  worktree只有三份既存未跟踪RTDS草案，继续排除在本事项改动之外。
+- 当前workspace仍精确使用官方0.6.0底座的本地`0.6.0-p1`vendor；官方0.7.0
+  crate SHA-256、VCS、MSRV与文件清单可复核，当前四个patch底文件在官方0.6.0
+  与0.7.0之间逐字节相同。
+- `live_runtime.rs`当前为50,382行，主测试模块26,985行；83个同步测试、190个
+  Tokio测试，共273个名称唯一的当前快照。生产training入口、四个logical
+  producer、六个artifact及paper/live heartbeat边界与需求描述一致。
+- 用户指定Parquet文件为4,047,003行、269,203,640 bytes；被拟删除的payload与
+  venue hash两列压缩chunk合计233,426,625 bytes，占86.7101%。同UTC日24文件
+  合计93,481,048行、6,265,404,486 bytes，两列合计占86.6232%。
+- 当前缓存状态下的有界全列streaming scan和现有v2 writer microbench已记录为
+  报告基线，不作为v3性能硬门；benchmark只写并清理本地临时路径，未改变tracked
+  文件。
+- RTDS三项参数仍全部待冻结，umbrella结果保持`RTDS_PARAMETERS_DEFERRED`；
+  wrapper路线保持
+  `WRAPPER_FIRST_PROVISIONAL_REQUIRES_STAGE_1_CAPABILITY_GATE`，4A/4B未启动。
+
+authority delta和真实owner盘点发现以下四项不能同时成立：
+
+1. `demand/data-collect-reliability-repair-demand.md`第3.1节第3项先声明以
+   source-availability需求第4.7节四路径矩阵为最终authority、且不再以固定数量
+   为合同，却在同一句末尾仍只枚举三个路径并漏掉`src/ws/config.rs`；最终authority、
+   当前vendor事实与本需求AC-01均为四路径。
+2. source-availability需求AC-27要求单次串行完整
+   `cargo test -p data-collect --locked -- --test-threads=1`，本计划阶段1和阶段6
+   却使用默认并行且不含doctest的`--tests`；两者不是同一验收。
+3. demand/plan要求`2-PM`完整且独立收口Polymarket source、discovery与resolution，
+   同时把Gamma放入`2-REST`。真实代码由同一个Polymarket source owner创建和持有
+   `GammaClient`，并直接用于initial/current/next discovery与resolution polling；
+   当前两个分支归属无法同时满足。
+4. 既有source-availability计划规定vendor SDK身份任一变化必须重跑受影响的
+   tests、default/all-features all-targets Clippy和vendor fmt矩阵；0.7.0升级必然
+   改变身份，而本计划阶段1只列出两组vendor tests及workspace Clippy/fmt，无法确定
+   是有意缩减还是遗漏。
+
+按方案不一致决策门，Stage1和Stage2相关修改立即停止。当前没有建立0.7.0 vendor
+目录，没有修改Cargo/lock、Rust、schema、测试或数据，没有运行真实网络probe。
+阶段0不能在用户裁决并完成文档对齐前通过独立阶段审查。
+
+## 2026-07-25：用户批准四项推荐并完成最小文档对齐
+
+用户回复“同意四项推荐”，批准阶段0停止门中的全部四项最小修复。实际同步如下：
+
+1. reliability demand/plan的current说明统一为source-availability第4.7节已经批准的
+   四路径allowlist，补入`src/ws/config.rs`；不改变任何vendor代码或patch语义。
+2. SDK070阶段1和阶段6各自收口时只运行一次
+   `cargo test -p data-collect --locked -- --test-threads=1`，删除`--tests`
+   替代命令；现有完整suite同时覆盖unit、integration与doctest，不再额外重复同一
+   target。
+3. 当前由Polymarket source直接持有并用于discovery、identity和resolution polling的
+   Gamma transport/helpers归入`2-PM`；`2-REST`不再笼统包含Gamma，且`2-PM`
+   继续不依赖`2-REST`。
+4. 0.7.0 vendor身份变化后，阶段1收口只运行一次已有`+1.88`
+   core/all-features tests、default/all-features all-targets Clippy和固定nightly
+   vendor fmt矩阵。workspace排除vendor，因此workspace Clippy/fmt不是该矩阵的
+   替代；小步骤不重复矩阵，也不增加网络、bench或无关feature组合。
+
+本轮修复只涉及demand、plan、changelog和阶段0证据文档；没有建立0.7.0 vendor，
+没有修改Rust、Cargo/lock、schema、tests或数据，也没有运行网络probe。下一步是
+独立阶段0审查；审查通过后仍须另获commit/push授权，才可把阶段0记为published
+closure并进入后继阶段。
+
+### 独立阶段0审查首轮修正
+
+`gpt-5.6-sol` / `ultra`独立审查首轮发现三项Important：
+
+1. demand顶部已经记录总需求获批，但第3.1/3.2节和范围排除项仍使用“总体草案尚未
+   获批”的current时态。
+2. plan阶段0审查门仍绝对禁止任何authority diff，与用户本轮批准的reliability
+   current四路径清单修正不能同时成立。
+3. 阶段0artifact记录了Parquet聚合和streaming scan结果，但缺少计划要求的可执行
+   只读复现命令；另保留了没有说明拼接算法、也不是验收必需的patch摘要。
+
+主代理已做最小修正：总需求明确为已批准执行，同时继续保留SDK typed字段、阶段3、
+RTDS、网络、发布和production独立门；阶段0门只豁免本轮获批的四项文档对齐，继续
+禁止未授权authority及任何Rust/Cargo/vendor/schema/data diff；artifact直接记录
+PyArrow/jq/`time`只读复现命令和精确glob/column-chunk算法，不新增脚本或工具文件，
+并删除不透明且非必要的patch concatenation摘要。历史授权状态和旧changelog均未
+回写。当前等待同一审查者复核。
+
+### 独立阶段0审查复核修正
+
+同一审查者确认前三项Important均已正确修复，随后发现一项新的Important：计划只
+规定新建`0.7.0-p1`和切换workspace，未规定tracked旧`0.6.0-p1`源码树终态，按
+字面执行会留下两个完整SDK目录和潜在shadow fallback。
+
+主代理核对总需求“从0.6升级到0.7”、单版本和无shadow path合同后补齐唯一终态：
+新vendor provenance、四路径patch和workspace切换建立后，在同一阶段1 diff删除旧
+vendor；`third_party`只保留一个tracked SDK vendor，active Cargo/code/probe旧路径
+与Polymarket SDK 0.6精确版本引用为0，历史文档引用保留。pre-execution
+checkpoint提供完整Git回滚，不新增备份目录或第二fallback。当前等待同一审查者
+再次复核。
+
+### 独立阶段0最终复审结果
+
+同一`gpt-5.6-sol` / `ultra`审查者对全部修复复核后给出：
+
+```text
+Critical: 0
+Important: 0
+Minor: 0
+Verdict: PASS
+```
+
+复核确认四项用户决定、三项首轮修正和旧vendor唯一终态准确落地；demand、plan、
+changelog及阶段0artifact一致，验证命令可复现且没有多余门。当前diff精确为七份
+本事项文档，三份既存RTDS草案保持排除；`git diff --check`通过，没有
+Rust/Cargo/vendor/schema/data、网络或提交操作越界。
+
+阶段0审查通过后曾更新为`STAGE_0_REVIEW_PASSED_AWAITING_PUBLISH`。
+先前pre-execution checkpoint的单次commit/push授权已经完成并消耗。
+
+## 2026-07-25：阶段0发布授权与闭合
+
+用户另行明确批准把当前阶段0文档commit并push到
+`origin/fix-rtds-silents`，并批准持续推进需求与计划。本次发布范围精确为阶段0
+审查确认的七份文档；三份既存RTDS草案继续排除，不修改Rust、Cargo、vendor、
+schema或数据。
+
+阶段0记录为`STAGE_0_CLOSED`，以承载本记录的commit成功推送且远端分支SHA与
+本地一致为生效条件。该授权允许发布阶段0并在验证后进入Stage1，不继承为后继
+阶段的commit/push授权，也不扩大公开网络smoke、RTDS 4A/4B、production
+activation/cutover、release、部署、远端服务操作、migration或删除授权。

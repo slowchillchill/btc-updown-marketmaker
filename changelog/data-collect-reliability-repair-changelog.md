@@ -747,3 +747,15 @@
 - 2026-07-16 用户明确只批准先最小修复分源 heartbeat，未批准把恢复预算或数据清理并入本轮。主流程重新核对生产调用、pinned SDK 与当前官方文档：CLOB market生产路径和RTDS生产路径确实共同调用覆盖为`10s/20s`的`bounded_ws_config()`；[CLOB WebSocket总览](https://docs.polymarket.com/market-data/websocket/overview)明确market/user每`10s`发送PING，[RTDS文档](https://docs.polymarket.com/market-data/websocket/rtds)两处明确每`5s`发送PING；pinned SDK `WsConfig::default()`为`5s/15s`。因此“CLOB的10秒interval被错误复用给RTDS”结论再次确认；同时收窄措辞，官方页面没有直接规定CLOB `20s`或RTDS `15s` PONG timeout，RTDS `15s`只采用pinned官方SDK默认。
 - 按测试先行增加`websocket_heartbeat_configs_are_channel_specific`：首次定向运行因尚无`bounded_rtds_ws_config()`以`E0425`失败。随后只在`data-collect/src/live_runtime.rs`新增独立RTDS配置并把唯一生产RTDS构造切到该配置；CLOB原helper及所有CLOB调用保持`10s/20s`，RTDS为`5s/15s`，reconnect `max_attempts=3`与`max_backoff=5s`不变。历史bench/smoke probe不是本次生产构造路径，保持原样且不纳入本轮最小修复验收。相同locked定向测试复跑为`1 passed, 0 failed, 132 filtered out`。当前状态更新为`TASK_2_HEARTBEAT_MINIMAL_FIX_IMPLEMENTED_REVIEW_PENDING_RECOVERY_BUDGET_DECISION_REQUIRED`；service继续inactive/dead、disabled，本轮没有清理、生产release构建、部署或改动`3s/12s`恢复预算。
 - 完整验证通过：`cargo test -p data-collect --locked`的lib为`133 passed, 0 failed`，所有bin、integration与doc tests同时退出0；`cargo clippy -p data-collect --locked --all-targets -- -D warnings`、`cargo fmt --all -- --check`和`git diff --check`均退出0。两路独立`gpt-5.6-sol`/`ultra`实现复审最终均为PASS，Critical=`0`、Important=`0`、Minor=`0`；确认唯一RTDS生产构造使用独立`5s/15s`、CLOB及reconnect/subscribe/freshness/SDK路径不变，需求/计划/changelog对齐且没有越权纳入恢复预算或清理。远端只读复核为ActiveState=`inactive`、SubState=`dead`、UnitFileState=`disabled`、MainPID=`0`，没有collector进程；未执行任何远端状态变更。当前状态更新为`TASK_2_HEARTBEAT_MINIMAL_FIX_REVIEW_PASSED_RECOVERY_BUDGET_DECISION_REQUIRED`。
+
+## 2026-07-25：同步最终四路径vendor authority
+
+SDK070阶段0盘点发现，本事项demand第3.1节和plan的current说明虽然都明确把
+`demand/data-collect-source-availability-lifecycle-repair-demand.md`第4.7节作为
+最终authority，却仍残留“三个源码差异路径”的旧枚举，漏掉后来已经批准并实际存在
+的`src/ws/config.rs`。用户批准按推荐修正后，current demand/plan现统一列出
+`src/ws/connection.rs`、`src/ws/config.rs`、
+`src/clob/ws/types/response.rs`、`src/rtds/subscription.rs`四路径。
+
+该修正只消除current authority自相矛盾，不回写本changelog中各历史时点真实的
+两路径/三路径执行记录，不修改vendor源码、Cargo/lock、测试或运行行为。

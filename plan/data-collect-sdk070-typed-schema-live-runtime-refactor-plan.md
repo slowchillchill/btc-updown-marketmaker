@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`DRAFT_AWAITING_REMAINING_USER_REVIEW_AND_AUTHORITY_DECISIONS`。用户已于2026-07-24批准 `market_resolved` 的v3 new-write采用validate-first，并批准按后续审查结论修复本组三件套；又于2026-07-25批准`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`：新增`polymarket_market_metadata_v4`，复用同一artifact/writer/manifest mapping并只追加两个nullable WS claimant字段；metadata v3 schema/version立即冻结，activation前仍是current metadata writer，activation后转为read-only。版本决策blocker已解除，但这些授权只覆盖文档同步，未授权任何Rust/schema/test实施；metadata v4实现及WS claimant/recovery验收完成前不得原子激活source v3 + metadata v4 current new-write。用户现已单独授权把本轮审查后的文档同步集创建并push为pre-execution checkpoint；该授权不启动任何实施阶段。其余总计划决定及所有实施阶段仍等待用户逐项或逐阶段授权；既往授权越界事实只在对应changelog保留且不计入实施验收。
+> 状态：`APPROVED_EXECUTION_STAGE_0_CLOSED`。用户于2026-07-25明确批准按本需求与计划开始执行；pre-execution checkpoint为`b65a2add5749d0931e91ef36d3bbadcb15a53014`。阶段0只读盘点、安全的current-v2本地writer probe、四项获批文档对齐及其审查修复均已完成，证据记录在`data-collect/docs/sdk070-stage0-baseline.md`；独立复核为`Critical 0 / Important 0 / Minor 0 / PASS`。用户已另行批准把精确阶段0文档集commit并push到`origin/fix-rtds-silents`，本闭合状态以承载本记录的commit成功推送且远端分支SHA与本地一致为生效条件。Stage1/Stage2没有Rust、Cargo、vendor或schema修改。该总批准不覆盖文内仍明确要求独立决定或授权的SDK typed字段gap、RTDS参数与4A/4B、公开网络smoke、后继各阶段commit/push、production activation/cutover、release、部署、远端操作、migration或删除。
 
 ## 一、执行原则与成功标准
 
@@ -52,9 +52,9 @@ typed字段缺口只阻断 v3；`RTDS_PARAMETERS_DEFERRED` 只阻断 RTDS。SDK 
 - 步骤 0.1.3：冻结每阶段授权边界。
   -> 验证：文档批准、Rust 修改、构建/测试、commit/push、网络 probe、cutover、部署和删除分别列出。
 - 步骤 0.1.4：登记用户已批准的 `market_resolved` v3 validate-first决定，不再次请求同一语义。
-  -> 验证：决定只约束未来v3 new-write；当前`polymarket_orderbook_v2` source代码、Rust/schema/tests和整个总需求均未因此自动获批。
+  -> 验证：该窄决定在2026-07-24只约束未来v3 new-write，当时没有自动批准当前`polymarket_orderbook_v2` source代码、Rust/schema/tests或整个总需求；总需求已由用户于2026-07-25另行批准开始执行，但实现和activation仍走各自入口门。
 - 步骤 0.1.5：登记`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`，不再次请求metadata版本选择。
-  -> 验证：只冻结metadata v4 schema合同与未来activation pairing；不把文档批准写成Rust/schema/test实施、current调用图切换或production cutover授权。
+  -> 验证：该窄决定本身只冻结metadata v4 schema合同与未来activation pairing；总需求的后续执行批准也不把尚未发生的Rust/schema/test实施、current调用图切换或production cutover写成已完成/已授权。
 
 ### 任务 0.2：建立精确 authority delta matrix
 
@@ -62,8 +62,8 @@ typed字段缺口只阻断 v3；`RTDS_PARAMETERS_DEFERRED` 只阻断 RTDS。SDK 
   -> 验证：每项包含旧路径/锚点、新语义、保留合同、被取代范围和测试；至少覆盖reliability/data-collect demand、`plan/data-collect-plan.md`、retention plan及resolution follow-up三件套，并把当前`HandoffFrame v1.raw_json`明确标为`KEEP_OUT_OF_SCOPE`。`market_resolved` raw-first、Gamma-first raw-only corroboration和post-horizon raw-only restart矩阵已由用户批准改为v3 validate-first，矩阵必须标记`USER_DECIDED_V3_VALIDATE_FIRST`而不是待决。
 - 步骤 0.2.2：只引用并消费RTDS专项三件套已经记录的business-silence authority delta、参数状态和测试入口/出口。
   -> 验证：umbrella不重扫数据、不重算参数候选、不重建delta/test矩阵，也不维护第二执行游标；专项路径、状态和阻断原因可精确解析。
-- 步骤 0.2.3：除已经单独批准并完成文档同步的`market_resolved` v3 validate-first与metadata v4 claimant两个窄决定外，阶段0只建立并评审矩阵，不同步其他相反authority；旧changelog不回写。
-  -> 验证：上述两个carve-out不得重新置为待决，也不得冒充Rust/schema/test实施；其余typed authority只允许在SDK字段门通过、用户批准v3字段集合并单独授权阶段3后同步。RTDS authority只在参数/需求/delta获批并单独授权4A后同步，随即停止，4B Rust/构建/测试必须另获授权。
+- 步骤 0.2.3：除已经单独批准并完成文档同步的`market_resolved` v3 validate-first与metadata v4 claimant两个窄决定，以及本轮用户批准的reliability current四路径清单修正外，阶段0只建立并评审矩阵，不同步其他相反authority；旧changelog不回写。
+  -> 验证：四路径修正只恢复source-availability第4.7节已经批准且当前代码实际使用的allowlist，不改变typed或RTDS行为authority。上述两个carve-out不得重新置为待决，也不得冒充Rust/schema/test实施；其余typed authority只允许在SDK字段门通过、用户批准v3字段集合并单独授权阶段3后同步。RTDS authority只在参数/需求/delta获批并单独授权4A后同步，随即停止，4B Rust/构建/测试必须另获授权。
 
 ### 任务 0.3：消费 RTDS 专项状态，但不重复执行
 
@@ -86,8 +86,8 @@ typed字段缺口只阻断 v3；`RTDS_PARAMETERS_DEFERRED` 只阻断 RTDS。SDK 
 ### 阶段 0 审查门
 
 - demand、plan、changelog 事项编号与引用一致；
-- authority冲突没有被草案状态掩盖；
-- 没有 authority、Rust/Cargo/vendor/schema/data diff；
+- authority冲突没有被顶部状态掩盖；
+- 除用户批准的四项文档对齐外，没有未授权authority diff，且没有Rust/Cargo/vendor/schema/data diff；
 - `git diff --check` 通过；
 - 独立审查通过后，只在用户授权时 commit/push。
 
@@ -117,7 +117,9 @@ typed字段缺口只阻断 v3；`RTDS_PARAMETERS_DEFERRED` 只阻断 RTDS。SDK 
   -> 验证：本地路径为 `0.7.0-p1` vendor，Cargo package/version requirement为精确 `0.7.0`。
 - 步骤 1.3.2：更新 `Cargo.lock`，检查 feature和 transitive dependency变化。
   -> 验证：`cargo tree -p data-collect --locked -e features -i polymarket_client_sdk_v2` 只有 0.7.0。
-- 步骤 1.3.3：确认本阶段不修改 `data-collect/src`、schema或 RTDS业务逻辑。
+- 步骤 1.3.3：只有新vendor provenance、四路径patch和workspace依赖切换均已建立后，删除tracked旧`third_party/polymarket_client_sdk_v2-0.6.0-p1`源码树。
+  -> 验证：`third_party`中tracked Polymarket SDK vendor目录恰好只有`0.7.0-p1`；旧目录不存在，active Cargo/code/probe中的Polymarket SDK旧路径和其0.6精确版本引用为0，历史文档记录保留。删除与新增属于同一阶段1 diff，可由pre-execution checkpoint回滚，不保留第二vendor或shadow fallback。
+- 步骤 1.3.4：确认本阶段不修改 `data-collect/src`、schema或 RTDS业务逻辑。
   -> 验证：diff path gate。
 
 ### 任务 1.4：SDK 与项目可用性测试
@@ -125,26 +127,42 @@ typed字段缺口只阻断 v3；`RTDS_PARAMETERS_DEFERRED` 只阻断 RTDS。SDK 
 按从窄到宽顺序运行：
 
 ```bash
-cargo test --manifest-path \
+cargo +1.88 test --manifest-path \
   third_party/polymarket_client_sdk_v2-0.7.0-p1/Cargo.toml \
   --locked --lib --features clob,gamma,rtds,ws
 
-cargo test --manifest-path \
+cargo +1.88 test --manifest-path \
   third_party/polymarket_client_sdk_v2-0.7.0-p1/Cargo.toml \
   --locked --all-features
 
-cargo test -p data-collect --locked --tests
+cargo +1.88 clippy --manifest-path \
+  third_party/polymarket_client_sdk_v2-0.7.0-p1/Cargo.toml \
+  --locked --all-targets -- -D warnings
+
+cargo +1.88 clippy --manifest-path \
+  third_party/polymarket_client_sdk_v2-0.7.0-p1/Cargo.toml \
+  --locked --all-features --all-targets -- -D warnings
+
+cargo +nightly-2025-11-24 fmt --manifest-path \
+  third_party/polymarket_client_sdk_v2-0.7.0-p1/Cargo.toml \
+  --all -- --check
+
+cargo test -p data-collect --locked -- --test-threads=1
 cargo check -p data-collect --locked --all-targets
 cargo clippy -p data-collect --locked --all-targets -- -D warnings
 cargo fmt --all -- --check
 git diff --check
 ```
 
-不使用 `cargo test --all-targets` 运行可能访问真实网络、写 artifact或 `harness=false` 的 bench。bench只做 compile check；真实 smoke另受任务 1.5约束。
+vendor身份由0.6.0变为0.7.0，因此上述vendor tests、default/all-features
+all-targets Clippy和固定nightly fmt各只在阶段1收口运行一次；root workspace排除
+vendor，workspace Clippy/fmt不能替代该矩阵。不得在每个小步骤重复该矩阵。不使用
+`cargo test --all-targets`运行可能访问真实网络、写artifact或`harness=false`的
+bench；bench只做compile check，真实smoke另受任务1.5约束。
 
 - 步骤 1.4.1：证明 upstream async execution相关 mock tests未被 vendor破坏。
   -> 验证：不调用真实订单或钱包。
-- 步骤 1.4.2：从单次`cargo test -p data-collect --locked --tests`结果映射阶段开始时实际发现的named patch/runtime contract tests；`17/19`只作为2026-07-24快照。只有该suite未覆盖明确target，或失败诊断需要时，才补跑对应定向命令。
+- 步骤 1.4.2：从单次`cargo test -p data-collect --locked -- --test-threads=1`结果映射阶段开始时实际发现的named patch/runtime contract tests；`17/19`只作为2026-07-24快照。只有该suite未覆盖明确target，或失败诊断需要时，才补跑对应定向命令。
   -> 验证：sticky terminal、all-or-error、generation-bound send、heartbeat、EOF、timeout、manager drop和100-cycle等冻结行为均有结果，不以固定测试数量或重复运行同一target过门。
 - 步骤 1.4.3：完整 deterministic suite通过。
   -> 验证：记录实际测试名称集合、命令、状态、时长和失败摘要；只有长期保留的独立 artifact才需要 SHA-256。
@@ -202,7 +220,7 @@ git diff --check
 
 按依赖逐个移动且每步只移动一个owner：
 
-1. Polymarket source owner及其直接测试；
+1. Polymarket source owner、该source直接持有的Gamma discovery/identity/resolution transport与helpers及其直接测试；
 2. Polymarket adapter/row conversion owner及其直接测试；
 3. Polymarket-specific writer integration seam及其直接测试；
 4. Polymarket resolution recovery owner及其直接测试。
@@ -215,7 +233,7 @@ git diff --check
 
 ### 分支 2-REST：其余行为保持模块化
 
-其余Binance aggTrade/depth、Gamma、shared writer supervisor、manifest、raw day/epoch/rollover、source supervision、runtime coordinator和root composition按收益/风险逐owner迁移。每个小步只移动一个owner及其直接测试，运行定向/受影响测试、compile/check和自审；coordinator/day/manifest/shutdown可额外运行一次完整门。
+其余Binance aggTrade/depth、shared writer supervisor、manifest、raw day/epoch/rollover、source supervision、runtime coordinator和root composition按收益/风险逐owner迁移。每个小步只移动一个owner及其直接测试，运行定向/受影响测试、compile/check和自审；coordinator/day/manifest/shutdown可额外运行一次完整门。
 
 分支最终验收：
 
@@ -374,7 +392,7 @@ git diff --check
 ### 任务 6.1：完整本地确定性门
 
 ```bash
-cargo test -p data-collect --locked --tests
+cargo test -p data-collect --locked -- --test-threads=1
 cargo check -p data-collect --locked --all-targets
 cargo clippy -p data-collect --locked --all-targets -- -D warnings
 cargo fmt --all -- --check
