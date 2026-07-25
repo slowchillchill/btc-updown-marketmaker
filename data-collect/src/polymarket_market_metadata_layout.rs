@@ -9,6 +9,7 @@ pub use crate::source_format::MarketLifecycleState;
 
 pub const POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION: &str = "polymarket_market_metadata_v2";
 pub const POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION: &str = "polymarket_market_metadata_v3";
+pub const POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION: &str = "polymarket_market_metadata_v4";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -949,6 +950,14 @@ pub struct PolymarketMarketMetadataV3Row {
     pub response_fields_unavailable_reason: Option<ResponseFieldsUnavailableReason>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolymarketMarketMetadataV4Row {
+    #[serde(flatten)]
+    pub v3_prefix: PolymarketMarketMetadataV3Row,
+    pub ws_claimant_source_sequence_epoch_id: Option<String>,
+    pub ws_claimant_collector_admission_sequence: Option<u64>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PolymarketMetadataV3ReferenceRecord {
     pub metadata_row_kind: String,
@@ -1109,10 +1118,17 @@ impl PolymarketMarketMetadataV3Row {
     }
 
     pub fn validate(&self) -> PolymarketMarketMetadataV3Validation {
+        self.validate_for_schema(POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION)
+    }
+
+    fn validate_for_schema(
+        &self,
+        expected_schema_version: &str,
+    ) -> PolymarketMarketMetadataV3Validation {
         let mut report = PolymarketMarketMetadataV3Validation {
             violations: Vec::new(),
         };
-        self.validate_common(&mut report);
+        self.validate_common(&mut report, expected_schema_version);
         match self.metadata_row_kind {
             PolymarketMetadataRowKind::MetadataSnapshot => {
                 self.validate_metadata_snapshot(&mut report)
@@ -1133,7 +1149,11 @@ impl PolymarketMarketMetadataV3Row {
         report
     }
 
-    fn validate_common(&self, report: &mut PolymarketMarketMetadataV3Validation) {
+    fn validate_common(
+        &self,
+        report: &mut PolymarketMarketMetadataV3Validation,
+        expected_schema_version: &str,
+    ) {
         report.require("timestamp_received", self.timestamp_received > 0);
         report.require(
             "collector_admission_sequence",
@@ -1156,8 +1176,14 @@ impl PolymarketMarketMetadataV3Row {
         ] {
             report.require(field, !value.trim().is_empty());
         }
-        if self.schema_version != POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION {
-            report.reject("schema_version:expected_v3");
+        if self.schema_version != expected_schema_version {
+            report.reject(
+                if expected_schema_version == POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION {
+                    "schema_version:expected_v3"
+                } else {
+                    "schema_version:expected_v4"
+                },
+            );
         }
         self.validate_fixed_identity(report);
         self.validate_source_times_and_digests(report);
@@ -2639,6 +2665,52 @@ impl PolymarketMarketMetadataV3Row {
     }
 }
 
+impl PolymarketMarketMetadataV4Row {
+    pub fn from_v3_prefix(
+        mut v3_prefix: PolymarketMarketMetadataV3Row,
+        ws_claimant_source_sequence_epoch_id: Option<String>,
+        ws_claimant_collector_admission_sequence: Option<u64>,
+    ) -> Self {
+        v3_prefix.schema_version = POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION.to_owned();
+        Self {
+            v3_prefix,
+            ws_claimant_source_sequence_epoch_id,
+            ws_claimant_collector_admission_sequence,
+        }
+    }
+
+    pub fn validate(&self) -> PolymarketMarketMetadataV3Validation {
+        let mut report = self
+            .v3_prefix
+            .validate_for_schema(POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION);
+        let claimant_required = self.v3_prefix.metadata_row_kind
+            == PolymarketMetadataRowKind::ResolutionTerminalWs
+            && self.v3_prefix.terminal_claim_owner == Some(TerminalClaimOwner::MarketResolvedWs);
+
+        if claimant_required {
+            report.require(
+                "ws_claimant_source_sequence_epoch_id",
+                non_empty(self.ws_claimant_source_sequence_epoch_id.as_deref()),
+            );
+            report.require(
+                "ws_claimant_collector_admission_sequence",
+                self.ws_claimant_collector_admission_sequence
+                    .is_some_and(|sequence| sequence > 0),
+            );
+        } else {
+            report.require_null(
+                "ws_claimant_source_sequence_epoch_id",
+                self.ws_claimant_source_sequence_epoch_id.is_none(),
+            );
+            report.require_null(
+                "ws_claimant_collector_admission_sequence",
+                self.ws_claimant_collector_admission_sequence.is_none(),
+            );
+        }
+        report
+    }
+}
+
 fn non_empty(value: Option<&str>) -> bool {
     value.is_some_and(|value| !value.trim().is_empty())
 }
@@ -2735,6 +2807,23 @@ pub fn polymarket_market_metadata_v3_schema() -> Arc<Schema> {
         Field::new("terminal_predicate_failure_reason", DataType::Utf8, true),
         Field::new("response_fields_unavailable_reason", DataType::Utf8, true),
     ]))
+}
+
+pub fn polymarket_market_metadata_v4_schema() -> Arc<Schema> {
+    let mut fields = polymarket_market_metadata_v3_schema()
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
+    fields.extend([
+        Field::new("ws_claimant_source_sequence_epoch_id", DataType::Utf8, true),
+        Field::new(
+            "ws_claimant_collector_admission_sequence",
+            DataType::UInt64,
+            true,
+        ),
+    ]);
+    Arc::new(Schema::new(fields))
 }
 
 fn v3_timestamp_field(name: &str, nullable: bool) -> Field {

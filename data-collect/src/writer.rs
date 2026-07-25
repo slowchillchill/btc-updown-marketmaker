@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -17,10 +18,15 @@ use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
 use crate::polymarket_market_metadata_layout::{
-    POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION, PolymarketMarketMetadataV3Row,
-    polymarket_market_metadata_v3_schema,
+    POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION,
+    PolymarketMarketMetadataV3Row, PolymarketMarketMetadataV4Row,
+    polymarket_market_metadata_v3_schema, polymarket_market_metadata_v4_schema,
 };
 use crate::polymarket_orderbook_layout::{PolymarketOrderbookRow, polymarket_orderbook_schema};
+use crate::polymarket_orderbook_v3::{
+    POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION, PolymarketOrderbookV3Message,
+    polymarket_orderbook_v3_messages_to_batch, polymarket_orderbook_v3_schema,
+};
 use crate::source_hourly_layout::{
     BINANCE_DEPTH_SNAPSHOT_LEGACY_SCHEMA_VERSION, BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
     BINANCE_DEPTH_UPDATE_LEGACY_SCHEMA_VERSION, BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
@@ -87,6 +93,39 @@ pub struct WriterWriteStats {
 pub struct InstrumentedPublishedSegment {
     pub segment: PublishedSegment,
     pub timing: FinalizeTiming,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PolymarketOrderbookV3WriteSequenceState {
+    last_by_epoch: HashMap<String, u64>,
+}
+
+impl PolymarketOrderbookV3WriteSequenceState {
+    fn preview(&self, messages: &[PolymarketOrderbookV3Message]) -> Result<HashMap<String, u64>> {
+        let mut next = self.last_by_epoch.clone();
+        for message in messages {
+            let epoch = &message.envelope.source_sequence_epoch_id;
+            let sequence = message.envelope.collector_admission_sequence;
+            if next
+                .get(epoch)
+                .is_some_and(|previous| sequence <= *previous)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "Polymarket orderbook v3 admission sequence is not strictly increasing within epoch:epoch={epoch}:sequence={sequence}"
+                    ),
+                )
+                .into());
+            }
+            next.insert(epoch.clone(), sequence);
+        }
+        Ok(next)
+    }
+
+    fn commit(&mut self, next: HashMap<String, u64>) {
+        self.last_by_epoch = next;
+    }
 }
 
 pub struct ParquetSegmentWriter {
@@ -302,12 +341,13 @@ impl TypedParquetSegmentWriter {
         schema_version: &str,
         zstd_level: i32,
     ) -> Result<Self> {
+        let schema = polymarket_orderbook_schema_for_version(schema_version)?;
         Self::create_with_schema(
             root,
             stem,
             schema_version,
             "polymarket_market",
-            polymarket_orderbook_schema(),
+            schema,
             zstd_level,
         )
     }
@@ -319,10 +359,13 @@ impl TypedParquetSegmentWriter {
         source_kind: &str,
     ) -> Result<Self> {
         let schema = match source_kind {
-            "polymarket_market" => polymarket_orderbook_schema(),
+            "polymarket_market" => polymarket_orderbook_schema_for_version(schema_version)?,
             "polymarket_market_metadata" => match schema_version {
                 POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION => {
                     polymarket_market_metadata_v3_schema()
+                }
+                POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION => {
+                    polymarket_market_metadata_v4_schema()
                 }
                 _ => {
                     return Err(io::Error::new(
@@ -432,6 +475,32 @@ impl TypedParquetSegmentWriter {
         self.write_batch_with_logical_bytes(&batch, logical_bytes)
     }
 
+    pub(crate) fn schema_version(&self) -> &str {
+        &self.schema_version
+    }
+
+    pub fn write_polymarket_orderbook_v3_messages(
+        &mut self,
+        messages: &[PolymarketOrderbookV3Message],
+        sequence_state: &mut PolymarketOrderbookV3WriteSequenceState,
+    ) -> Result<()> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+        if self.schema_version != POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Polymarket orderbook v3 messages require a v3 writer",
+            )
+            .into());
+        }
+        let batch = polymarket_orderbook_v3_messages_to_batch(messages)?;
+        let next = sequence_state.preview(messages)?;
+        self.write_batch_chunks(&batch)?;
+        sequence_state.commit(next);
+        Ok(())
+    }
+
     pub fn write_polymarket_market_metadata_v3_rows(
         &mut self,
         rows: &[PolymarketMarketMetadataV3Row],
@@ -456,6 +525,35 @@ impl TypedParquetSegmentWriter {
         }
         let last_sequence = self.validate_polymarket_metadata_v3_rows(rows)?;
         let batch = polymarket_market_metadata_v3_rows_to_batch(Arc::clone(&self.schema), rows)?;
+        self.write_batch_with_logical_bytes(&batch, logical_bytes)?;
+        self.last_polymarket_metadata_admission_sequence = Some(last_sequence);
+        Ok(())
+    }
+
+    pub fn write_polymarket_market_metadata_v4_rows(
+        &mut self,
+        rows: &[PolymarketMarketMetadataV4Row],
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let last_sequence = self.validate_polymarket_metadata_v4_rows(rows)?;
+        let batch = polymarket_market_metadata_v4_rows_to_batch(Arc::clone(&self.schema), rows)?;
+        self.write_batch(&batch)?;
+        self.last_polymarket_metadata_admission_sequence = Some(last_sequence);
+        Ok(())
+    }
+
+    pub(crate) fn write_polymarket_market_metadata_v4_rows_with_logical_bytes(
+        &mut self,
+        rows: &[PolymarketMarketMetadataV4Row],
+        logical_bytes: u64,
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let last_sequence = self.validate_polymarket_metadata_v4_rows(rows)?;
+        let batch = polymarket_market_metadata_v4_rows_to_batch(Arc::clone(&self.schema), rows)?;
         self.write_batch_with_logical_bytes(&batch, logical_bytes)?;
         self.last_polymarket_metadata_admission_sequence = Some(last_sequence);
         Ok(())
@@ -493,6 +591,44 @@ impl TypedParquetSegmentWriter {
                 .into());
             }
             previous = Some(row.collector_admission_sequence);
+        }
+        Ok(previous.expect("non-empty rows have a last admission sequence"))
+    }
+
+    fn validate_polymarket_metadata_v4_rows(
+        &self,
+        rows: &[PolymarketMarketMetadataV4Row],
+    ) -> Result<u64> {
+        if self.schema_version != POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "v4 Polymarket metadata rows require a v4 writer",
+            )
+            .into());
+        }
+        let mut previous = self.last_polymarket_metadata_admission_sequence;
+        for row in rows {
+            let validation = row.validate();
+            if !validation.is_complete() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "invalid Polymarket metadata v4 row:{}",
+                        validation.violations.join(",")
+                    ),
+                )
+                .into());
+            }
+            if previous
+                .is_some_and(|previous| row.v3_prefix.collector_admission_sequence <= previous)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Polymarket metadata v4 admission sequence must be strictly increasing",
+                )
+                .into());
+            }
+            previous = Some(row.v3_prefix.collector_admission_sequence);
         }
         Ok(previous.expect("non-empty rows have a last admission sequence"))
     }
@@ -729,6 +865,17 @@ impl TypedParquetSegmentWriter {
     }
 
     pub fn write_batch(&mut self, batch: &RecordBatch) -> Result<()> {
+        if self.schema_version == POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Polymarket orderbook v3 batches must use the canonical typed message writer",
+            )
+            .into());
+        }
+        self.write_batch_chunks(batch)
+    }
+
+    fn write_batch_chunks(&mut self, batch: &RecordBatch) -> Result<()> {
         if batch.num_rows() == 0 {
             return Ok(());
         }
@@ -895,7 +1042,13 @@ pub(crate) fn typed_sort_order(schema_version: &str, source_kind: &str) -> &'sta
         source_kind,
         "binance_aggtrade" | "binance_depth_snapshot" | "binance_depth_update"
     ) || (source_kind == "polymarket_market_metadata"
-        && schema_version == POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION)
+        && matches!(
+            schema_version,
+            POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION
+                | POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION
+        ))
+        || (source_kind == "polymarket_market"
+            && schema_version == POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION)
     {
         "collector_admission_order"
     } else {
@@ -924,12 +1077,44 @@ fn validate_current_depth_schema_version(
     Err(io::Error::new(io::ErrorKind::InvalidInput, reason).into())
 }
 
+fn polymarket_orderbook_schema_for_version(schema_version: &str) -> Result<Arc<Schema>> {
+    match schema_version {
+        "polymarket_orderbook_v2" => Ok(polymarket_orderbook_schema()),
+        POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION => Ok(polymarket_orderbook_v3_schema()),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "unsupported Polymarket orderbook schema version for writer:schema_version={schema_version}"
+            ),
+        )
+        .into()),
+    }
+}
+
 fn validate_typed_writer_schema(
     source_kind: &str,
     schema_version: &str,
     schema: &Schema,
 ) -> Result<()> {
     let expected = match source_kind {
+        "polymarket_market" => Some(polymarket_orderbook_schema_for_version(schema_version)?),
+        "polymarket_market_metadata" => match schema_version {
+            POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION => {
+                Some(polymarket_market_metadata_v3_schema())
+            }
+            POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION => {
+                Some(polymarket_market_metadata_v4_schema())
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "unsupported Polymarket metadata schema version for writer:schema_version={schema_version}"
+                    ),
+                )
+                .into());
+            }
+        },
         "binance_depth_snapshot" => {
             validate_current_depth_schema_version(
                 source_kind,
@@ -957,7 +1142,7 @@ fn validate_typed_writer_schema(
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "typed depth writer schema mismatch:source_kind={source_kind}:schema_version={schema_version}"
+                "typed writer schema mismatch:source_kind={source_kind}:schema_version={schema_version}"
             ),
         )
         .into());
@@ -1043,11 +1228,10 @@ fn polymarket_orderbook_rows_to_batch(
     Ok(RecordBatch::try_new(schema, columns)?)
 }
 
-pub(crate) fn polymarket_market_metadata_v3_rows_to_batch(
-    schema: Arc<Schema>,
-    rows: &[PolymarketMarketMetadataV3Row],
-) -> Result<RecordBatch> {
-    let columns: Vec<ArrayRef> = vec![
+fn polymarket_market_metadata_v3_prefix_columns(
+    rows: &[&PolymarketMarketMetadataV3Row],
+) -> Vec<ArrayRef> {
+    vec![
         string_values(rows.iter().map(|row| row.metadata_row_kind.as_str())),
         timestamp_values(rows.iter().map(|row| row.timestamp_received)),
         uint64_values(rows.iter().map(|row| row.collector_admission_sequence)),
@@ -1182,7 +1366,32 @@ pub(crate) fn polymarket_market_metadata_v3_rows_to_batch(
             row.response_fields_unavailable_reason
                 .map(|value| value.as_str())
         })),
-    ];
+    ]
+}
+
+pub(crate) fn polymarket_market_metadata_v3_rows_to_batch(
+    schema: Arc<Schema>,
+    rows: &[PolymarketMarketMetadataV3Row],
+) -> Result<RecordBatch> {
+    let prefix_rows = rows.iter().collect::<Vec<_>>();
+    let columns = polymarket_market_metadata_v3_prefix_columns(&prefix_rows);
+    Ok(RecordBatch::try_new(schema, columns)?)
+}
+
+pub(crate) fn polymarket_market_metadata_v4_rows_to_batch(
+    schema: Arc<Schema>,
+    rows: &[PolymarketMarketMetadataV4Row],
+) -> Result<RecordBatch> {
+    let prefix_rows = rows.iter().map(|row| &row.v3_prefix).collect::<Vec<_>>();
+    let mut columns = polymarket_market_metadata_v3_prefix_columns(&prefix_rows);
+    columns
+        .push(optional_strings(rows.iter().map(|row| {
+            row.ws_claimant_source_sequence_epoch_id.as_deref()
+        })));
+    columns.push(optional_uint64_values(
+        rows.iter()
+            .map(|row| row.ws_claimant_collector_admission_sequence),
+    ));
     Ok(RecordBatch::try_new(schema, columns)?)
 }
 

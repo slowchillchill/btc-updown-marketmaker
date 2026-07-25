@@ -22,9 +22,15 @@ use crate::market_discovery::{
 };
 use crate::polymarket_market_metadata_layout::{
     POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
-    PolymarketMarketMetadataV3Row, PolymarketMetadataV3ReferenceRecord, ResolutionPollResult,
+    POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION, PolymarketMarketMetadataV3Row,
+    PolymarketMarketMetadataV4Row, PolymarketMetadataV3ReferenceRecord, ResolutionPollResult,
     SourceEvidenceOrigin, polymarket_market_metadata_v3_schema,
-    validate_polymarket_metadata_v3_local_references,
+    polymarket_market_metadata_v4_schema, validate_polymarket_metadata_v3_local_references,
+};
+use crate::polymarket_orderbook_v3::{
+    POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION, PolymarketOrderbookV3Event,
+    PolymarketOrderbookV3Message, polymarket_orderbook_v3_messages_from_batch,
+    polymarket_orderbook_v3_schema, same_outcome_label,
 };
 use crate::sources::polymarket::{
     GammaTerminalAttemptContext, GammaTerminalFixedIdentity, GammaTerminalResponse,
@@ -53,6 +59,45 @@ const RAW_PROJECTION: [&str; 9] = [
     "slug",
     "schema_version",
 ];
+
+const LEGACY_V2_ROUTING_PROJECTION: [&str; 5] = [
+    "timestamp_received",
+    "market",
+    "event_type",
+    "slug",
+    "schema_version",
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecoveryPair {
+    LegacyV2MetadataV3,
+    CurrentV3MetadataV4,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MetadataLayout {
+    V2,
+    V3,
+    V4,
+}
+
+impl MetadataLayout {
+    fn schema(self) -> Option<std::sync::Arc<Schema>> {
+        match self {
+            Self::V2 => None,
+            Self::V3 => Some(polymarket_market_metadata_v3_schema()),
+            Self::V4 => Some(polymarket_market_metadata_v4_schema()),
+        }
+    }
+
+    const fn version(self) -> &'static str {
+        match self {
+            Self::V2 => POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION,
+            Self::V3 => POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
+            Self::V4 => POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION,
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PolymarketRestartRecovery {
@@ -155,10 +200,8 @@ struct MetadataRecord {
     kind: String,
     timestamp_received: i64,
     admission_sequence: u64,
-    #[cfg(test)]
     admission_time_utc_ms: i64,
     metadata_origin: String,
-    #[cfg(test)]
     schema_version: String,
     slug: String,
     condition_id: String,
@@ -203,6 +246,8 @@ struct MetadataRecord {
     last_valid_metadata_received_at_utc_ms: Option<i64>,
     #[cfg(test)]
     terminal_predicate_passed: Option<bool>,
+    ws_claimant_source_sequence_epoch_id: Option<String>,
+    ws_claimant_collector_admission_sequence: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -291,15 +336,22 @@ fn record_raw_scan_test_row(materialized: bool) {
     });
 }
 
-fn require_canonical_metadata_v3_schema(schema: &Schema, path: &Path) -> Result<()> {
-    let expected = polymarket_market_metadata_v3_schema();
+fn require_canonical_metadata_schema(
+    schema: &Schema,
+    path: &Path,
+    layout: MetadataLayout,
+) -> Result<()> {
+    let expected = layout
+        .schema()
+        .ok_or_else(|| invalid_data("metadata v2 has no current canonical recovery schema"))?;
     if let Some(missing) = expected
         .fields()
         .iter()
         .find(|field| schema.index_of(field.name()).is_err())
     {
         return Err(invalid_data(format!(
-            "Polymarket restart v3 projection column missing:file={}:column={}",
+            "Polymarket restart {} projection column missing:file={}:column={}",
+            layout.version(),
             path.display(),
             missing.name()
         ))
@@ -307,7 +359,8 @@ fn require_canonical_metadata_v3_schema(schema: &Schema, path: &Path) -> Result<
     }
     if schema.fields().len() != expected.fields().len() {
         return Err(invalid_data(format!(
-            "Polymarket restart finalized v3 schema field count mismatch:file={}:expected={}:actual={}",
+            "Polymarket restart finalized {} schema field count mismatch:file={}:expected={}:actual={}",
+            layout.version(),
             path.display(),
             expected.fields().len(),
             schema.fields().len()
@@ -320,13 +373,19 @@ fn require_canonical_metadata_v3_schema(schema: &Schema, path: &Path) -> Result<
             || actual.is_nullable() != expected.is_nullable()
         {
             return Err(invalid_data(format!(
-                "Polymarket restart finalized v3 schema mismatch:file={}:index={index}:expected={expected:?}:actual={actual:?}",
+                "Polymarket restart finalized {} schema mismatch:file={}:index={index}:expected={expected:?}:actual={actual:?}",
+                layout.version(),
                 path.display()
             ))
             .into());
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+fn require_canonical_metadata_v3_schema(schema: &Schema, path: &Path) -> Result<()> {
+    require_canonical_metadata_schema(schema, path, MetadataLayout::V3)
 }
 
 fn finalized_metadata_v3_row_from_batch(
@@ -558,7 +617,7 @@ fn validate_finalized_gamma_attempt_payload(
     let evaluation = evaluate_gamma_terminal_response(
         &GammaTerminalFixedIdentity {
             slug: row.slug.clone(),
-            market_id: row.clob_market_id.clone(),
+            clob_market_id: row.clob_market_id.clone(),
             condition_id: row.condition_id.clone(),
             up_asset_id: up_asset_id.clone(),
             down_asset_id: down_asset_id.clone(),
@@ -657,12 +716,43 @@ impl MetadataRecord {
         batch: &RecordBatch,
         row: usize,
         artifact_position: FinalizedArtifactPosition,
+        layout: MetadataLayout,
     ) -> Result<Self> {
         let full_row = finalized_metadata_v3_row_from_batch(batch, row)?;
-        let validation = full_row.validate();
+        let (
+            validation,
+            ws_claimant_source_sequence_epoch_id,
+            ws_claimant_collector_admission_sequence,
+        ) = match layout {
+            MetadataLayout::V3 => (full_row.validate(), None, None),
+            MetadataLayout::V4 => {
+                let v4 = PolymarketMarketMetadataV4Row {
+                    v3_prefix: full_row.clone(),
+                    ws_claimant_source_sequence_epoch_id: optional_string(
+                        batch,
+                        row,
+                        "ws_claimant_source_sequence_epoch_id",
+                    )?,
+                    ws_claimant_collector_admission_sequence: optional_u64(
+                        batch,
+                        row,
+                        "ws_claimant_collector_admission_sequence",
+                    )?,
+                };
+                (
+                    v4.validate(),
+                    v4.ws_claimant_source_sequence_epoch_id,
+                    v4.ws_claimant_collector_admission_sequence,
+                )
+            }
+            MetadataLayout::V2 => {
+                return Err(invalid_data("metadata v2 cannot produce a recovery record").into());
+            }
+        };
         if !validation.is_complete() {
             return Err(invalid_data(format!(
-                "Polymarket restart finalized v3 row violates canonical schema:file={}:row={row}:violations={:?}",
+                "Polymarket restart finalized {} row violates canonical schema:file={}:row={row}:violations={:?}",
+                layout.version(),
                 artifact_position.path.display(),
                 validation.violations
             ))
@@ -679,14 +769,12 @@ impl MetadataRecord {
             kind: required_string(batch, row, "metadata_row_kind")?,
             timestamp_received: required_timestamp(batch, row, "timestamp_received")?,
             admission_sequence: required_u64(batch, row, "collector_admission_sequence")?,
-            #[cfg(test)]
             admission_time_utc_ms: required_timestamp(
                 batch,
                 row,
                 "collector_admission_time_utc_ms",
             )?,
             metadata_origin: required_string(batch, row, "metadata_origin")?,
-            #[cfg(test)]
             schema_version: required_string(batch, row, "schema_version")?,
             slug: required_string(batch, row, "slug")?,
             condition_id: required_string(batch, row, "condition_id")?,
@@ -763,6 +851,8 @@ impl MetadataRecord {
             )?,
             #[cfg(test)]
             terminal_predicate_passed: optional_bool(batch, row, "terminal_predicate_passed")?,
+            ws_claimant_source_sequence_epoch_id,
+            ws_claimant_collector_admission_sequence,
         })
     }
 
@@ -867,6 +957,16 @@ struct QualifiedRaw {
     winning_outcome: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct QualifiedTypedSource {
+    timestamp_received: i64,
+    collector_admission_time_utc_ms: i64,
+    source_sequence_epoch_id: String,
+    collector_admission_sequence: u64,
+    winning_asset_id: String,
+    winning_outcome: String,
+}
+
 #[derive(Default)]
 struct AttemptCounters {
     ordinals: BTreeSet<u8>,
@@ -881,12 +981,44 @@ pub fn restore_polymarket_resolution_recovery(
     dataset_root: &Path,
     recovery_time_ms: i64,
 ) -> Result<PolymarketRestartRecovery> {
+    restore_polymarket_resolution_recovery_for_pair(
+        dataset_root,
+        recovery_time_ms,
+        RecoveryPair::CurrentV3MetadataV4,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn restore_legacy_polymarket_resolution_recovery(
+    dataset_root: &Path,
+    recovery_time_ms: i64,
+) -> Result<PolymarketRestartRecovery> {
+    restore_polymarket_resolution_recovery_for_pair(
+        dataset_root,
+        recovery_time_ms,
+        RecoveryPair::LegacyV2MetadataV3,
+    )
+}
+
+fn restore_polymarket_resolution_recovery_for_pair(
+    dataset_root: &Path,
+    recovery_time_ms: i64,
+    pair: RecoveryPair,
+) -> Result<PolymarketRestartRecovery> {
     if recovery_time_ms <= 0 {
         return Err(invalid_data("Polymarket restart recovery time must be positive").into());
     }
     let days = recovery_days(recovery_time_ms)?;
-    let metadata = read_finalized_metadata_for_validation(dataset_root, &days)?;
+    let metadata = read_finalized_metadata_for_validation(dataset_root, &days, pair)?;
     if metadata.is_empty() {
+        if pair == RecoveryPair::CurrentV3MetadataV4 {
+            read_qualified_typed_market_sources(
+                dataset_root,
+                &days,
+                &BTreeMap::new(),
+                recovery_time_ms,
+            )?;
+        }
         return Ok(PolymarketRestartRecovery {
             pending: Vec::new(),
         });
@@ -920,9 +1052,15 @@ pub fn restore_polymarket_resolution_recovery(
         }
         identities.insert(slug.clone(), identity);
     }
+    reject_dual_metadata_layout_for_current_lifecycles(
+        dataset_root,
+        &days,
+        grouped.keys().map(String::as_str).collect(),
+        pair,
+    )?;
 
     let reference_authorities =
-        read_precise_metadata_reference_authorities(dataset_root, &days, &grouped)?;
+        read_precise_metadata_reference_authorities(dataset_root, &days, &grouped, pair)?;
     for authority in &reference_authorities {
         authority.validate_recovery_eligibility()?;
     }
@@ -940,8 +1078,18 @@ pub fn restore_polymarket_resolution_recovery(
         ))
     })?;
 
-    let qualified_raw =
-        read_qualified_market_raw(dataset_root, &days, &identities, recovery_time_ms)?;
+    let qualified_raw = match pair {
+        RecoveryPair::LegacyV2MetadataV3 => {
+            read_qualified_market_raw(dataset_root, &days, &identities, recovery_time_ms)?
+        }
+        RecoveryPair::CurrentV3MetadataV4 => BTreeMap::new(),
+    };
+    let qualified_typed = match pair {
+        RecoveryPair::LegacyV2MetadataV3 => BTreeMap::new(),
+        RecoveryPair::CurrentV3MetadataV4 => {
+            read_qualified_typed_market_sources(dataset_root, &days, &identities, recovery_time_ms)?
+        }
+    };
 
     let mut pending_counters = BTreeMap::new();
     for (slug, records) in &grouped {
@@ -949,6 +1097,10 @@ pub fn restore_polymarket_resolution_recovery(
             .get(slug)
             .expect("grouped validation identity has fixed identity");
         let matching_raw = qualified_raw
+            .get(slug)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let matching_typed = qualified_typed
             .get(slug)
             .map(Vec::as_slice)
             .unwrap_or_default();
@@ -982,16 +1134,30 @@ pub fn restore_polymarket_resolution_recovery(
 
         let counters = attempt_counters(records)?;
         if let Some(terminal) = terminals.first().copied() {
-            validate_terminal_raw(terminal, matching_raw, identity)?;
+            match pair {
+                RecoveryPair::LegacyV2MetadataV3 => {
+                    validate_terminal_raw(terminal, matching_raw, identity)?;
+                }
+                RecoveryPair::CurrentV3MetadataV4 => {
+                    validate_terminal_typed_sources(terminal, matching_typed, identity)?;
+                }
+            }
             continue;
         }
         if let Some(summary) = summaries.first().copied() {
-            validate_summary(summary, &counters, matching_raw)?;
+            match pair {
+                RecoveryPair::LegacyV2MetadataV3 => {
+                    validate_summary(summary, &counters, matching_raw)?;
+                }
+                RecoveryPair::CurrentV3MetadataV4 => {
+                    validate_typed_summary(summary, &counters, matching_typed)?;
+                }
+            }
             continue;
         }
-        if !matching_raw.is_empty() {
+        if !matching_raw.is_empty() || !matching_typed.is_empty() {
             return Err(invalid_data(format!(
-                "Polymarket restart matching raw has no terminal or summary:slug={slug}"
+                "Polymarket restart matching source has no terminal or summary:slug={slug}"
             ))
             .into());
         }
@@ -1224,17 +1390,121 @@ fn validate_terminal_raw(
     Ok(())
 }
 
+fn validate_terminal_typed_sources(
+    terminal: &MetadataRecord,
+    sources: &[QualifiedTypedSource],
+    identity: &FixedIdentity,
+) -> Result<()> {
+    let winning_asset = terminal
+        .winning_asset_id
+        .as_deref()
+        .expect("validated terminal has winner");
+    let winning_outcome = terminal
+        .winning_outcome
+        .as_deref()
+        .expect("validated terminal has outcome");
+    if !winner_matches(identity, winning_asset, winning_outcome)
+        || sources.iter().any(|source| {
+            source.winning_asset_id != winning_asset
+                || !same_outcome_label(&source.winning_outcome, winning_outcome)
+        })
+    {
+        return Err(invalid_data(format!(
+            "Polymarket restart typed terminal/source winner mismatch:slug={}",
+            identity.slug
+        ))
+        .into());
+    }
+    let role_exit = terminal.runtime_role_applied_at_utc_ms.ok_or_else(|| {
+        invalid_data(format!(
+            "Polymarket restart typed terminal has no role-exit time:slug={}",
+            identity.slug
+        ))
+    })?;
+    if sources.iter().any(|source| {
+        source.timestamp_received > role_exit
+            || source.collector_admission_time_utc_ms > terminal.admission_time_utc_ms
+    }) {
+        return Err(invalid_data(format!(
+            "Polymarket restart typed source is later than terminal role exit/admission:slug={}",
+            identity.slug
+        ))
+        .into());
+    }
+
+    if terminal.kind == "resolution_terminal_ws" {
+        let claimant_epoch = terminal
+            .ws_claimant_source_sequence_epoch_id
+            .as_deref()
+            .expect("validated metadata v4 WS terminal has claimant epoch");
+        let claimant_sequence = terminal
+            .ws_claimant_collector_admission_sequence
+            .expect("validated metadata v4 WS terminal has claimant sequence");
+        let matches = sources
+            .iter()
+            .filter(|source| {
+                source.source_sequence_epoch_id == claimant_epoch
+                    && source.collector_admission_sequence == claimant_sequence
+            })
+            .collect::<Vec<_>>();
+        let [claimant] = matches.as_slice() else {
+            return Err(invalid_data(format!(
+                "Polymarket restart WS claimant does not resolve exactly once:slug={}:matches={}",
+                identity.slug,
+                matches.len()
+            ))
+            .into());
+        };
+        if terminal.source_received_at_utc_ms != Some(claimant.timestamp_received) {
+            return Err(invalid_data(format!(
+                "Polymarket restart WS claimant receive time mismatch:slug={}",
+                identity.slug
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
 fn validate_summary(
     summary: &MetadataRecord,
     counters: &AttemptCounters,
     raw: &[QualifiedRaw],
 ) -> Result<()> {
+    validate_summary_counters(summary, counters)?;
     let role_exit = summary.runtime_role_applied_at_utc_ms.ok_or_else(|| {
         invalid_data(format!(
             "Polymarket restart summary has no role-exit time:slug={}",
             summary.slug
         ))
     })?;
+    if raw.iter().any(|raw| raw.timestamp_received <= role_exit) {
+        return Err(invalid_data(format!(
+            "Polymarket restart exhausted raw is not strictly post-horizon:slug={}",
+            summary.slug
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+fn validate_typed_summary(
+    summary: &MetadataRecord,
+    counters: &AttemptCounters,
+    sources: &[QualifiedTypedSource],
+) -> Result<()> {
+    validate_summary_counters(summary, counters)?;
+    if !sources.is_empty() {
+        return Err(invalid_data(format!(
+            "Polymarket restart exhausted summary coexists with typed market_resolved source:slug={}",
+            summary.slug
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+fn validate_summary_counters(summary: &MetadataRecord, counters: &AttemptCounters) -> Result<()> {
     if counters.ordinals != BTreeSet::from([1, 2, 3, 4, 5, 6])
         || counters.attempts != u32::from(RESOLUTION_ATTEMPT_COUNT)
         || summary.attempts_recorded != Some(counters.attempts)
@@ -1250,13 +1520,6 @@ fn validate_summary(
     {
         return Err(invalid_data(format!(
             "Polymarket restart summary counters do not reconstruct six slots:slug={}",
-            summary.slug
-        ))
-        .into());
-    }
-    if raw.iter().any(|raw| raw.timestamp_received <= role_exit) {
-        return Err(invalid_data(format!(
-            "Polymarket restart exhausted raw is not strictly post-horizon:slug={}",
             summary.slug
         ))
         .into());
@@ -1468,6 +1731,7 @@ fn winner_matches(identity: &FixedIdentity, asset_id: &str, outcome: &str) -> bo
 fn read_finalized_metadata_for_validation(
     dataset_root: &Path,
     days: &BTreeSet<String>,
+    pair: RecoveryPair,
 ) -> Result<Vec<MetadataRecord>> {
     let mut records = Vec::new();
     for (file_order, path) in
@@ -1476,13 +1740,18 @@ fn read_finalized_metadata_for_validation(
             .enumerate()
     {
         let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&path)?)?;
-        if !metadata_layout_is_v3(
+        let layout = metadata_layout(
             builder.metadata().file_metadata().key_value_metadata(),
             &path,
-        )? {
+        )?;
+        let expected_layout = match pair {
+            RecoveryPair::LegacyV2MetadataV3 => MetadataLayout::V3,
+            RecoveryPair::CurrentV3MetadataV4 => MetadataLayout::V4,
+        };
+        if layout == MetadataLayout::V2 || layout != expected_layout {
             continue;
         }
-        require_canonical_metadata_v3_schema(builder.schema().as_ref(), &path)?;
+        require_canonical_metadata_schema(builder.schema().as_ref(), &path, layout)?;
         let mut reader = builder.with_batch_size(64).build()?;
         let mut file_row = 0_u64;
         for batch in &mut reader {
@@ -1496,6 +1765,7 @@ fn read_finalized_metadata_for_validation(
                         file_order,
                         file_row,
                     },
+                    layout,
                 )?;
                 records.push(record);
                 file_row = file_row.saturating_add(1);
@@ -1505,10 +1775,52 @@ fn read_finalized_metadata_for_validation(
     Ok(records)
 }
 
+fn reject_dual_metadata_layout_for_current_lifecycles(
+    dataset_root: &Path,
+    days: &BTreeSet<String>,
+    current_slugs: BTreeSet<&str>,
+    pair: RecoveryPair,
+) -> Result<()> {
+    if current_slugs.is_empty() {
+        return Ok(());
+    }
+    let forbidden_layout = match pair {
+        RecoveryPair::LegacyV2MetadataV3 => MetadataLayout::V4,
+        RecoveryPair::CurrentV3MetadataV4 => MetadataLayout::V3,
+    };
+    for path in finalized_source_paths(dataset_root, days, "polymarket_market_metadata")? {
+        let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&path)?)?;
+        let layout = metadata_layout(
+            builder.metadata().file_metadata().key_value_metadata(),
+            &path,
+        )?;
+        if layout != forbidden_layout {
+            continue;
+        }
+        require_canonical_metadata_schema(builder.schema().as_ref(), &path, layout)?;
+        let mut reader = builder.with_batch_size(64).build()?;
+        for batch in &mut reader {
+            let batch = batch?;
+            for row in 0..batch.num_rows() {
+                let slug = required_string(&batch, row, "slug")?;
+                if current_slugs.contains(slug.as_str()) {
+                    return Err(invalid_data(format!(
+                        "Polymarket restart detected dual metadata layouts for slug={slug}:forbidden_layout={}",
+                        layout.version()
+                    ))
+                    .into());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn read_precise_metadata_reference_authorities(
     dataset_root: &Path,
     default_days: &BTreeSet<String>,
     grouped: &BTreeMap<String, Vec<MetadataRecord>>,
+    pair: RecoveryPair,
 ) -> Result<Vec<MetadataRecord>> {
     let mut lookups_by_day = BTreeMap::<String, BTreeSet<MetadataReferenceLookup>>::new();
     for lookup in grouped
@@ -1531,13 +1843,18 @@ fn read_precise_metadata_reference_authorities(
                 .enumerate()
         {
             let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&path)?)?;
-            if !metadata_layout_is_v3(
+            let layout = metadata_layout(
                 builder.metadata().file_metadata().key_value_metadata(),
                 &path,
-            )? {
+            )?;
+            let expected_layout = match pair {
+                RecoveryPair::LegacyV2MetadataV3 => MetadataLayout::V3,
+                RecoveryPair::CurrentV3MetadataV4 => MetadataLayout::V4,
+            };
+            if layout == MetadataLayout::V2 || layout != expected_layout {
                 continue;
             }
-            require_canonical_metadata_v3_schema(builder.schema().as_ref(), &path)?;
+            require_canonical_metadata_schema(builder.schema().as_ref(), &path, layout)?;
             let mut reader = builder.with_batch_size(64).build()?;
             let mut file_row = 0_u64;
             for batch in &mut reader {
@@ -1561,6 +1878,7 @@ fn read_precise_metadata_reference_authorities(
                             file_order,
                             file_row,
                         },
+                        layout,
                     )?;
                     if lookups
                         .iter()
@@ -1576,39 +1894,264 @@ fn read_precise_metadata_reference_authorities(
     Ok(records)
 }
 
-fn metadata_layout_is_v3(metadata: Option<&Vec<KeyValue>>, path: &Path) -> Result<bool> {
+fn parquet_layout_version<'a>(
+    metadata: Option<&'a Vec<KeyValue>>,
+    path: &Path,
+) -> Result<Option<&'a str>> {
     let mut values = metadata
         .into_iter()
         .flatten()
         .filter(|entry| entry.key == "parquet_raw_layout_version");
-    let entry = values.next().ok_or_else(|| {
-        invalid_data(format!(
-            "Polymarket restart metadata layout footer is missing:file={}",
-            path.display()
-        ))
-    })?;
+    let Some(entry) = values.next() else {
+        return Ok(None);
+    };
     if values.next().is_some() {
         return Err(invalid_data(format!(
-            "Polymarket restart metadata layout footer is duplicated:file={}",
+            "Polymarket restart layout footer is duplicated:file={}",
             path.display()
         ))
         .into());
     }
     let version = entry.value.as_deref().ok_or_else(|| {
         invalid_data(format!(
-            "Polymarket restart metadata layout footer has no value:file={}",
+            "Polymarket restart layout footer has no value:file={}",
+            path.display()
+        ))
+    })?;
+    Ok(Some(version))
+}
+
+fn metadata_layout(metadata: Option<&Vec<KeyValue>>, path: &Path) -> Result<MetadataLayout> {
+    let version = parquet_layout_version(metadata, path)?.ok_or_else(|| {
+        invalid_data(format!(
+            "Polymarket restart metadata layout footer is missing:file={}",
             path.display()
         ))
     })?;
     match version {
-        POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION => Ok(false),
-        POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION => Ok(true),
+        POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION => Ok(MetadataLayout::V2),
+        POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION => Ok(MetadataLayout::V3),
+        POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION => Ok(MetadataLayout::V4),
         _ => Err(invalid_data(format!(
             "Polymarket restart metadata layout footer is unsupported:file={}:version={version}",
             path.display()
         ))
         .into()),
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceLayout {
+    V2,
+    V3,
+}
+
+fn source_layout(
+    metadata: Option<&Vec<KeyValue>>,
+    schema: &Schema,
+    path: &Path,
+) -> Result<SourceLayout> {
+    match parquet_layout_version(metadata, path)? {
+        Some(POLYMARKET_ORDERBOOK_V2_SCHEMA_VERSION) => Ok(SourceLayout::V2),
+        Some(POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION) => Ok(SourceLayout::V3),
+        Some(version) => Err(invalid_data(format!(
+            "Polymarket restart source layout footer is unsupported:file={}:version={version}",
+            path.display()
+        ))
+        .into()),
+        None if schema.index_of("source_native_payload_json").is_ok() => Ok(SourceLayout::V2),
+        None => Err(invalid_data(format!(
+            "Polymarket restart source layout footer is missing:file={}",
+            path.display()
+        ))
+        .into()),
+    }
+}
+
+fn read_qualified_typed_market_sources(
+    dataset_root: &Path,
+    days: &BTreeSet<String>,
+    identities: &BTreeMap<String, FixedIdentity>,
+    recovery_time_ms: i64,
+) -> Result<BTreeMap<String, Vec<QualifiedTypedSource>>> {
+    let mut qualified = BTreeMap::<String, Vec<QualifiedTypedSource>>::new();
+    let mut source_keys = BTreeSet::<(String, u64)>::new();
+    let mut last_sequence_by_epoch = BTreeMap::<String, u64>::new();
+    for path in finalized_source_paths(dataset_root, days, "polymarket_market")? {
+        let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&path)?)?;
+        match source_layout(
+            builder.metadata().file_metadata().key_value_metadata(),
+            builder.schema().as_ref(),
+            &path,
+        )? {
+            SourceLayout::V2 => {
+                reject_relevant_legacy_v2_source(builder, &path, identities, recovery_time_ms)?;
+            }
+            SourceLayout::V3 => {
+                let expected = polymarket_orderbook_v3_schema();
+                if builder.schema().fields() != expected.fields() {
+                    return Err(invalid_data(format!(
+                        "Polymarket restart finalized v3 source schema mismatch:file={}",
+                        path.display()
+                    ))
+                    .into());
+                }
+                let mut reader = builder.with_batch_size(64).build()?;
+                for batch in &mut reader {
+                    let batch = batch?;
+                    for message in polymarket_orderbook_v3_messages_from_batch(&batch)? {
+                        let key = (
+                            message.envelope.source_sequence_epoch_id.clone(),
+                            message.envelope.collector_admission_sequence,
+                        );
+                        if !source_keys.insert(key.clone()) {
+                            return Err(invalid_data(format!(
+                                "Polymarket restart duplicate v3 source key:epoch={}:sequence={}",
+                                key.0, key.1
+                            ))
+                            .into());
+                        }
+                        let previous = last_sequence_by_epoch.entry(key.0.clone()).or_insert(0);
+                        if key.1 <= *previous {
+                            return Err(invalid_data(format!(
+                                "Polymarket restart v3 source sequence regressed:epoch={}:previous={}:current={}",
+                                key.0, *previous, key.1
+                            ))
+                            .into());
+                        }
+                        *previous = key.1;
+                        let PolymarketOrderbookV3Event::MarketResolved(resolved) = &message.event
+                        else {
+                            continue;
+                        };
+                        if message.envelope.timestamp_received > recovery_time_ms {
+                            return Err(invalid_data(format!(
+                                "Polymarket restart v3 source receive exceeds recovery time:file={}:received={}:recovery={recovery_time_ms}",
+                                path.display(),
+                                message.envelope.timestamp_received
+                            ))
+                            .into());
+                        }
+                        let candidates = identities
+                            .values()
+                            .filter(|identity| {
+                                message.envelope.timestamp_received >= identity.market_start_utc_ms
+                                    && (message.envelope.market == identity.condition_id
+                                        || message.envelope.slug.as_deref()
+                                            == Some(identity.slug.as_str())
+                                        || resolved.clob_market_id == identity.clob_market_id)
+                            })
+                            .collect::<Vec<_>>();
+                        let [identity] = candidates.as_slice() else {
+                            let detail = if candidates.is_empty() {
+                                "no metadata v4 identity"
+                            } else {
+                                "multiple metadata v4 identities"
+                            };
+                            return Err(invalid_data(format!(
+                                "Polymarket restart v3 market_resolved has {detail}:market={}:slug={:?}:clob_market_id={}",
+                                message.envelope.market,
+                                message.envelope.slug,
+                                resolved.clob_market_id
+                            ))
+                            .into());
+                        };
+                        let source = validate_typed_market_source(&message, resolved, identity)?;
+                        qualified
+                            .entry(identity.slug.clone())
+                            .or_default()
+                            .push(source);
+                    }
+                }
+            }
+        }
+    }
+    Ok(qualified)
+}
+
+fn reject_relevant_legacy_v2_source(
+    builder: ParquetRecordBatchReaderBuilder<File>,
+    path: &Path,
+    identities: &BTreeMap<String, FixedIdentity>,
+    recovery_time_ms: i64,
+) -> Result<()> {
+    if identities.is_empty() {
+        return Ok(());
+    }
+    require_columns(
+        builder.schema().as_ref(),
+        &LEGACY_V2_ROUTING_PROJECTION,
+        path,
+    )?;
+    let projection =
+        ProjectionMask::columns(builder.parquet_schema(), LEGACY_V2_ROUTING_PROJECTION);
+    let mut reader = builder
+        .with_projection(projection)
+        .with_batch_size(64)
+        .build()?;
+    for batch in &mut reader {
+        let batch = batch?;
+        for row in 0..batch.num_rows() {
+            let timestamp_received = required_timestamp(&batch, row, "timestamp_received")?;
+            if timestamp_received > recovery_time_ms
+                || required_string(&batch, row, "event_type")? != "market_resolved"
+            {
+                continue;
+            }
+            let market = required_string(&batch, row, "market")?;
+            let slug = optional_string(&batch, row, "slug")?;
+            if identities.values().any(|identity| {
+                timestamp_received >= identity.market_start_utc_ms
+                    && (market == identity.condition_id
+                        || slug.as_deref() == Some(identity.slug.as_str()))
+            }) {
+                return Err(invalid_data(format!(
+                    "Polymarket restart source v2 cannot pair with metadata v4:file={}:market={market}:slug={slug:?}",
+                    path.display()
+                ))
+                .into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_typed_market_source(
+    message: &PolymarketOrderbookV3Message,
+    resolved: &crate::polymarket_orderbook_v3::PolymarketMarketResolvedV3,
+    identity: &FixedIdentity,
+) -> Result<QualifiedTypedSource> {
+    if message.envelope.market != identity.condition_id
+        || message.envelope.slug.as_deref() != Some(identity.slug.as_str())
+        || resolved.clob_market_id != identity.clob_market_id
+        || !asset_set_matches(&resolved.asset_ids, identity)
+        || !winner_matches(
+            identity,
+            &resolved.winning_asset_id,
+            &resolved.winning_outcome,
+        )
+        || (!resolved.outcomes.is_empty()
+            && (resolved.outcomes.len() != resolved.asset_ids.len()
+                || resolved
+                    .asset_ids
+                    .iter()
+                    .zip(&resolved.outcomes)
+                    .any(|(asset, outcome)| {
+                        (asset == &identity.up_asset_id && !same_outcome_label(outcome, "up"))
+                            || (asset == &identity.down_asset_id
+                                && !same_outcome_label(outcome, "down"))
+                    })))
+    {
+        return Err(relevant_raw_error(identity, "typed v3 identity/winner contradiction").into());
+    }
+    Ok(QualifiedTypedSource {
+        timestamp_received: message.envelope.timestamp_received,
+        collector_admission_time_utc_ms: message.envelope.collector_admission_time_utc_ms,
+        source_sequence_epoch_id: message.envelope.source_sequence_epoch_id.clone(),
+        collector_admission_sequence: message.envelope.collector_admission_sequence,
+        winning_asset_id: resolved.winning_asset_id.clone(),
+        winning_outcome: resolved.winning_outcome.clone(),
+    })
 }
 
 fn read_qualified_market_raw(
@@ -1832,6 +2375,11 @@ fn required_u64(batch: &RecordBatch, row: usize, name: &str) -> Result<u64> {
     Ok(values.value(row))
 }
 
+fn optional_u64(batch: &RecordBatch, row: usize, name: &str) -> Result<Option<u64>> {
+    let values = typed_column::<UInt64Array>(batch, name)?;
+    Ok(values.is_valid(row).then(|| values.value(row)))
+}
+
 fn optional_u8(batch: &RecordBatch, row: usize, name: &str) -> Result<Option<u8>> {
     let values = typed_column::<UInt8Array>(batch, name)?;
     Ok(values.is_valid(row).then(|| values.value(row)))
@@ -1896,9 +2444,16 @@ mod tests {
         ResolutionTransportErrorClass, ResponseFieldsUnavailableReason,
         SourceEndpointUnavailableReason, SourceEvidenceChannel, SourceEvidenceEventType,
         TerminalPredicateFailureReason, polymarket_market_metadata_v3_schema,
+        polymarket_market_metadata_v4_schema,
     };
     use crate::polymarket_orderbook_layout::polymarket_orderbook_schema;
-    use crate::writer::polymarket_market_metadata_v3_rows_to_batch;
+    use crate::polymarket_orderbook_v3::{
+        PolymarketMarketResolvedV3, PolymarketOrderbookV3Envelope,
+    };
+    use crate::writer::{
+        PolymarketOrderbookV3WriteSequenceState, TypedParquetSegmentWriter,
+        polymarket_market_metadata_v3_rows_to_batch, polymarket_market_metadata_v4_rows_to_batch,
+    };
 
     const T: i64 = 1_783_392_300_000;
     const E: i64 = T + 300_000;
@@ -1910,6 +2465,13 @@ mod tests {
     const CONDITION_6: &str = "0x0000000000000000000000000000000000000000000000000000000000000006";
     const SLUG: &str = "btc-updown-5m-1783392300";
     const MARKET_ID: &str = "clob-market-1";
+
+    fn restore_polymarket_resolution_recovery(
+        dataset_root: &Path,
+        recovery_time_ms: i64,
+    ) -> Result<PolymarketRestartRecovery> {
+        restore_legacy_polymarket_resolution_recovery(dataset_root, recovery_time_ms)
+    }
 
     fn gamma_market_payload(
         slug: &str,
@@ -2024,6 +2586,8 @@ mod tests {
             missed_slot_count: None,
             last_valid_metadata_received_at_utc_ms: None,
             terminal_predicate_passed: None,
+            ws_claimant_source_sequence_epoch_id: None,
+            ws_claimant_collector_admission_sequence: None,
         }
     }
 
@@ -2480,7 +3044,7 @@ mod tests {
                 let evaluation = evaluate_gamma_terminal_response(
                     &GammaTerminalFixedIdentity {
                         slug: row.slug.clone(),
-                        market_id: row.clob_market_id.clone(),
+                        clob_market_id: row.clob_market_id.clone(),
                         condition_id: row.condition_id.clone(),
                         up_asset_id: assets[0].clone(),
                         down_asset_id: assets[1].clone(),
@@ -2573,6 +3137,111 @@ mod tests {
         .unwrap();
         writer.write(&batch).unwrap();
         writer.close().unwrap();
+    }
+
+    fn metadata_v4_fixture_row(
+        record: &MetadataRecord,
+        claimant: Option<(&str, u64)>,
+    ) -> PolymarketMarketMetadataV4Row {
+        let (claimant_epoch, claimant_sequence) = claimant
+            .map(|(epoch, sequence)| (Some(epoch.to_owned()), Some(sequence)))
+            .unwrap_or((None, None));
+        PolymarketMarketMetadataV4Row::from_v3_prefix(
+            metadata_fixture_row(record),
+            claimant_epoch,
+            claimant_sequence,
+        )
+    }
+
+    fn write_metadata_v4_rows(path: &Path, rows: &[PolymarketMarketMetadataV4Row]) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let schema = polymarket_market_metadata_v4_schema();
+        let batch = polymarket_market_metadata_v4_rows_to_batch(Arc::clone(&schema), rows).unwrap();
+        let mut writer = ArrowWriter::try_new(
+            File::create(path).unwrap(),
+            schema,
+            Some(metadata_writer_properties(
+                POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION,
+            )),
+        )
+        .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    fn typed_market_resolved_source(
+        source_sequence_epoch_id: &str,
+        collector_admission_sequence: u64,
+        timestamp_received: i64,
+        collector_admission_time_utc_ms: i64,
+        winning_asset_id: &str,
+        winning_outcome: &str,
+    ) -> PolymarketOrderbookV3Message {
+        PolymarketOrderbookV3Message {
+            envelope: PolymarketOrderbookV3Envelope {
+                timestamp_received,
+                timestamp: Some(timestamp_received),
+                market: CONDITION.to_owned(),
+                slug: Some(SLUG.to_owned()),
+                collector_host_id: "recovery-fixture-host".to_owned(),
+                collector_region: "recovery-fixture-region".to_owned(),
+                source_endpoint: "wss://ws-subscriptions-clob.polymarket.com/ws/market".to_owned(),
+                schema_version: POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION.to_owned(),
+                source_sequence_epoch_id: source_sequence_epoch_id.to_owned(),
+                collector_admission_sequence,
+                collector_admission_time_utc_ms,
+            },
+            event: PolymarketOrderbookV3Event::MarketResolved(PolymarketMarketResolvedV3 {
+                clob_market_id: MARKET_ID.to_owned(),
+                question: None,
+                description: None,
+                asset_ids: vec!["101".to_owned(), "102".to_owned()],
+                outcomes: vec!["Up".to_owned(), "Down".to_owned()],
+                event_message: None,
+                winning_asset_id: winning_asset_id.to_owned(),
+                winning_outcome: winning_outcome.to_owned(),
+            }),
+        }
+    }
+
+    fn write_typed_v3_sources(path: &Path, sources: &[PolymarketOrderbookV3Message]) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let stem = path.file_stem().unwrap().to_str().unwrap();
+        let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
+            path.parent().unwrap(),
+            stem,
+            POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,
+            "polymarket_market",
+        )
+        .unwrap();
+        let mut sequence_state = PolymarketOrderbookV3WriteSequenceState::default();
+        writer
+            .write_polymarket_orderbook_v3_messages(sources, &mut sequence_state)
+            .unwrap();
+        let published = writer.finalize().unwrap();
+        assert_eq!(published.final_path, path);
+    }
+
+    fn write_current_fixture(
+        root: &Path,
+        recovery_time: i64,
+        metadata: &[PolymarketMarketMetadataV4Row],
+        sources: &[PolymarketOrderbookV3Message],
+    ) {
+        if !metadata.is_empty() {
+            write_metadata_v4_rows(
+                &day_dir(root, recovery_time, "polymarket_market_metadata")
+                    .join("polymarket_market_metadata_02.parquet"),
+                metadata,
+            );
+        }
+        if !sources.is_empty() {
+            write_typed_v3_sources(
+                &day_dir(root, recovery_time, "polymarket_market")
+                    .join("polymarket_market_02.parquet"),
+                sources,
+            );
+        }
     }
 
     fn write_metadata_v3_rows_without_field(
@@ -2779,6 +3448,292 @@ mod tests {
                 raw,
             );
         }
+    }
+
+    #[test]
+    fn current_v3_v4_ws_claimant_and_agreeing_duplicate_are_terminal_complete() {
+        let tmp = tempdir().unwrap();
+        let epoch = "source-epoch-current";
+        let receive = E + 240_000;
+        let recovery_time = receive + 30;
+        let terminal = ws_terminal(2, receive);
+        let metadata = vec![
+            metadata_v4_fixture_row(&base_record(1), None),
+            metadata_v4_fixture_row(&terminal, Some((epoch, 1))),
+        ];
+        let sources = vec![
+            typed_market_resolved_source(epoch, 1, receive, receive + 1, "101", "Up"),
+            typed_market_resolved_source(epoch, 2, receive, receive + 2, "101", "up"),
+        ];
+        write_current_fixture(tmp.path(), recovery_time, &metadata, &sources);
+
+        let recovery =
+            super::restore_polymarket_resolution_recovery(tmp.path(), recovery_time).unwrap();
+        assert!(recovery.pending.is_empty());
+    }
+
+    #[test]
+    fn current_v3_v4_ws_missing_or_wrong_claimant_fails_closed() {
+        let epoch = "source-epoch-current";
+        let receive = E + 240_000;
+        let recovery_time = receive + 30;
+        for (claimant, expected) in [
+            (None, "ws_claimant_source_sequence_epoch_id"),
+            (
+                Some(("wrong-source-epoch", 99)),
+                "WS claimant does not resolve exactly once",
+            ),
+        ] {
+            let tmp = tempdir().unwrap();
+            let terminal = ws_terminal(2, receive);
+            let metadata = vec![
+                metadata_v4_fixture_row(&base_record(1), None),
+                metadata_v4_fixture_row(&terminal, claimant),
+            ];
+            let sources = vec![typed_market_resolved_source(
+                epoch,
+                1,
+                receive,
+                receive + 1,
+                "101",
+                "Up",
+            )];
+            write_current_fixture(tmp.path(), recovery_time, &metadata, &sources);
+
+            let error = super::restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn current_v3_v4_gamma_accepts_zero_or_pre_exit_agreeing_source() {
+        let epoch = "source-epoch-current";
+        let terminal = gamma_terminal(2, 1);
+        let role_exit = terminal.runtime_role_applied_at_utc_ms.unwrap();
+        let recovery_time = role_exit + 30;
+        let metadata = vec![
+            metadata_v4_fixture_row(&base_record(1), None),
+            metadata_v4_fixture_row(&terminal, None),
+        ];
+
+        let zero_source = tempdir().unwrap();
+        write_current_fixture(zero_source.path(), recovery_time, &metadata, &[]);
+        assert!(
+            super::restore_polymarket_resolution_recovery(zero_source.path(), recovery_time)
+                .unwrap()
+                .pending
+                .is_empty()
+        );
+
+        let agreeing_source = tempdir().unwrap();
+        let sources = vec![typed_market_resolved_source(
+            epoch,
+            1,
+            terminal.timestamp_received,
+            role_exit,
+            "101",
+            "Up",
+        )];
+        write_current_fixture(agreeing_source.path(), recovery_time, &metadata, &sources);
+        assert!(
+            super::restore_polymarket_resolution_recovery(agreeing_source.path(), recovery_time)
+                .unwrap()
+                .pending
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn current_v3_v4_gamma_rejects_late_or_contradictory_source() {
+        let epoch = "source-epoch-current";
+        let terminal = gamma_terminal(2, 1);
+        let role_exit = terminal.runtime_role_applied_at_utc_ms.unwrap();
+        let recovery_time = role_exit + 30;
+        let metadata = vec![
+            metadata_v4_fixture_row(&base_record(1), None),
+            metadata_v4_fixture_row(&terminal, None),
+        ];
+        let cases = [
+            (
+                typed_market_resolved_source(epoch, 1, role_exit + 1, role_exit + 2, "101", "Up"),
+                "later than terminal role exit/admission",
+            ),
+            (
+                typed_market_resolved_source(
+                    epoch,
+                    1,
+                    terminal.timestamp_received,
+                    role_exit,
+                    "102",
+                    "Down",
+                ),
+                "terminal/source winner mismatch",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let tmp = tempdir().unwrap();
+            write_current_fixture(tmp.path(), recovery_time, &metadata, &[source]);
+            let error = super::restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn current_v3_v4_exhausted_summary_requires_zero_source() {
+        let epoch = "source-epoch-current";
+        let attempts = (1..=RESOLUTION_ATTEMPT_COUNT)
+            .map(|ordinal| attempt(u64::from(ordinal) + 1, ordinal, "transport_unavailable"))
+            .collect::<Vec<_>>();
+        let summary = summary(8, &attempts);
+        let recovery_time = summary.admission_time_utc_ms + 30;
+        let mut records = vec![base_record(1)];
+        records.extend(attempts);
+        records.push(summary);
+        let metadata = records
+            .iter()
+            .map(|record| metadata_v4_fixture_row(record, None))
+            .collect::<Vec<_>>();
+
+        let zero_source = tempdir().unwrap();
+        write_current_fixture(zero_source.path(), recovery_time, &metadata, &[]);
+        assert!(
+            super::restore_polymarket_resolution_recovery(zero_source.path(), recovery_time)
+                .unwrap()
+                .pending
+                .is_empty()
+        );
+
+        let with_source = tempdir().unwrap();
+        let source_receive = E + 240_000;
+        let sources = vec![typed_market_resolved_source(
+            epoch,
+            1,
+            source_receive,
+            source_receive + 1,
+            "101",
+            "Up",
+        )];
+        write_current_fixture(with_source.path(), recovery_time, &metadata, &sources);
+        let error =
+            super::restore_polymarket_resolution_recovery(with_source.path(), recovery_time)
+                .unwrap_err()
+                .to_string();
+        assert!(
+            error.contains("exhausted summary coexists with typed market_resolved source"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn current_v3_v4_source_only_and_cross_pair_sources_fail_closed() {
+        let epoch = "source-epoch-current";
+        let receive = E + 240_000;
+        let recovery_time = receive + 30;
+        let sources = vec![typed_market_resolved_source(
+            epoch,
+            1,
+            receive,
+            receive + 1,
+            "101",
+            "Up",
+        )];
+
+        let source_only = tempdir().unwrap();
+        write_current_fixture(source_only.path(), recovery_time, &[], &sources);
+        let error =
+            super::restore_polymarket_resolution_recovery(source_only.path(), recovery_time)
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("no metadata v4 identity"), "{error}");
+
+        let v4_with_v2_source = tempdir().unwrap();
+        write_current_fixture(
+            v4_with_v2_source.path(),
+            recovery_time,
+            &[metadata_v4_fixture_row(&base_record(1), None)],
+            &[],
+        );
+        write_raw(
+            &day_dir(v4_with_v2_source.path(), recovery_time, "polymarket_market")
+                .join("polymarket_market_02.parquet"),
+            &[valid_raw(receive)],
+        );
+        let error =
+            super::restore_polymarket_resolution_recovery(v4_with_v2_source.path(), recovery_time)
+                .unwrap_err()
+                .to_string();
+        assert!(
+            error.contains("source v2 cannot pair with metadata v4"),
+            "{error}"
+        );
+
+        let v3_metadata_with_v3_source = tempdir().unwrap();
+        write_metadata(
+            &day_dir(
+                v3_metadata_with_v3_source.path(),
+                recovery_time,
+                "polymarket_market_metadata",
+            )
+            .join("polymarket_market_metadata_02.parquet"),
+            &[base_record(1)],
+        );
+        write_typed_v3_sources(
+            &day_dir(
+                v3_metadata_with_v3_source.path(),
+                recovery_time,
+                "polymarket_market",
+            )
+            .join("polymarket_market_02.parquet"),
+            &sources,
+        );
+        let error = super::restore_polymarket_resolution_recovery(
+            v3_metadata_with_v3_source.path(),
+            recovery_time,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("no metadata v4 identity"), "{error}");
+    }
+
+    #[test]
+    fn current_v3_v4_same_slug_dual_metadata_layouts_fail_closed() {
+        let tmp = tempdir().unwrap();
+        let epoch = "source-epoch-current";
+        let receive = E + 240_000;
+        let recovery_time = receive + 30;
+        let terminal = ws_terminal(2, receive);
+        let metadata_v4 = vec![
+            metadata_v4_fixture_row(&base_record(1), None),
+            metadata_v4_fixture_row(&terminal, Some((epoch, 1))),
+        ];
+        let sources = vec![typed_market_resolved_source(
+            epoch,
+            1,
+            receive,
+            receive + 1,
+            "101",
+            "Up",
+        )];
+        write_current_fixture(tmp.path(), recovery_time, &metadata_v4, &sources);
+        write_metadata(
+            &day_dir(tmp.path(), recovery_time, "polymarket_market_metadata")
+                .join("polymarket_market_metadata_03.parquet"),
+            &[base_record(1)],
+        );
+
+        let error = super::restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("detected dual metadata layouts")
+                && error.contains("forbidden_layout=polymarket_market_metadata_v3"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -3886,7 +4841,7 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             assert!(
-                error.contains("matching raw has no terminal or summary"),
+                error.contains("matching source has no terminal or summary"),
                 "time={recovery_time}:{error}"
             );
         }

@@ -18,9 +18,14 @@ use data_collect::handoff::{
 };
 use data_collect::polymarket_market_metadata_layout::{
     POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
+    POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION,
 };
 use data_collect::polymarket_orderbook_layout::{
     PolymarketOrderbookContext, PolymarketOrderbookRow,
+};
+use data_collect::polymarket_orderbook_v3::{
+    PolymarketOrderbookV3Admission, PolymarketOrderbookV3Message, PolymarketOrderbookV3Projection,
+    polymarket_orderbook_v3_messages_from_batch, polymarket_orderbook_v3_messages_to_batch,
 };
 use data_collect::source_hourly_layout::{
     BINANCE_AGGTRADE_CAPTURE_COMPLETE, BINANCE_AGGTRADE_SCHEMA_VERSION,
@@ -31,11 +36,13 @@ use data_collect::source_hourly_layout::{
     BinanceDepthSnapshotHourlyRow, BinanceDepthUpdateHourlyRow,
 };
 use data_collect::writer::{
-    ParquetSegmentWriter, TypedParquetSegmentWriter, write_segment_on_blocking_pool_for_source,
+    ParquetSegmentWriter, PolymarketOrderbookV3WriteSequenceState, TypedParquetSegmentWriter,
+    write_segment_on_blocking_pool_for_source,
 };
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::reader::{FileReader, SerializedFileReader};
+use polymarket_client_sdk_v2::clob::ws::WsMessage;
 use sha2::{Digest as _, Sha256};
 use tempfile::tempdir;
 
@@ -385,6 +392,331 @@ fn parquet_writer_writes_pmxt_like_orderbook_schema() {
 }
 
 #[test]
+fn polymarket_v3_writer_never_reuses_the_v2_row_schema() {
+    let tmp = tempdir().unwrap();
+    let writer = TypedParquetSegmentWriter::create_for_typed_source(
+        tmp.path(),
+        "polymarket-market-v3",
+        "polymarket_orderbook_v3",
+        "polymarket_market",
+    )
+    .unwrap();
+    let published = writer.finalize().unwrap();
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(File::open(published.final_path).unwrap())
+            .unwrap();
+    let schema = builder.schema();
+
+    for deleted in ["source_native_payload_json", "hash", "transaction_hash"] {
+        assert!(
+            schema.field_with_name(deleted).is_err(),
+            "v3 must not persist deleted v2 field {deleted}"
+        );
+    }
+    for required in [
+        "source_sequence_epoch_id",
+        "collector_admission_sequence",
+        "collector_admission_time_utc_ms",
+        "price_changes",
+    ] {
+        schema
+            .field_with_name(required)
+            .unwrap_or_else(|_| panic!("v3 schema missing {required}"));
+    }
+    for nested in ["bids", "asks", "price_changes"] {
+        assert!(
+            matches!(
+                schema.field_with_name(nested).unwrap().data_type(),
+                DataType::List(_)
+            ),
+            "v3 {nested} must use an Arrow List"
+        );
+    }
+}
+
+#[test]
+fn polymarket_writer_rejects_unknown_orderbook_schema_versions() {
+    let tmp = tempdir().unwrap();
+    let error = match TypedParquetSegmentWriter::create_for_typed_source(
+        tmp.path(),
+        "polymarket-market-unknown",
+        "polymarket_orderbook_v999",
+        "polymarket_market",
+    ) {
+        Ok(_) => panic!("unknown Polymarket source schema must not open for writing"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported Polymarket orderbook schema version"),
+        "{error}"
+    );
+}
+
+#[test]
+fn polymarket_v3_writer_round_trips_platform_duplicates_and_allows_sequence_gaps() {
+    let tmp = tempdir().unwrap();
+    let messages = vec![
+        polymarket_v3_book_message("source-epoch-a", 1),
+        polymarket_v3_book_message("source-epoch-a", 3),
+    ];
+    let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
+        tmp.path(),
+        "polymarket-market-v3-rows",
+        "polymarket_orderbook_v3",
+        "polymarket_market",
+    )
+    .unwrap();
+    let mut sequence_state = PolymarketOrderbookV3WriteSequenceState::default();
+    writer
+        .write_polymarket_orderbook_v3_messages(&messages, &mut sequence_state)
+        .unwrap();
+    let published = writer.finalize().unwrap();
+
+    assert_eq!(published.row_count, 2);
+    let batch = read_single_finalized_batch(&published.final_path);
+    assert_eq!(
+        polymarket_orderbook_v3_messages_from_batch(&batch).unwrap(),
+        messages
+    );
+    let reader = SerializedFileReader::new(File::open(published.final_path).unwrap()).unwrap();
+    let metadata = reader
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .unwrap()
+        .iter()
+        .map(|item| (item.key.as_str(), item.value.as_deref()))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        metadata.get("sort_order").copied().flatten(),
+        Some("collector_admission_order")
+    );
+}
+
+#[test]
+fn polymarket_v3_writer_rejects_duplicate_or_backward_sequence_within_each_epoch() {
+    let tmp = tempdir().unwrap();
+    let mut same_batch_writer = TypedParquetSegmentWriter::create_for_typed_source(
+        tmp.path(),
+        "polymarket-market-v3-same-batch-duplicate",
+        "polymarket_orderbook_v3",
+        "polymarket_market",
+    )
+    .unwrap();
+    let mut same_batch_sequence_state = PolymarketOrderbookV3WriteSequenceState::default();
+    assert!(
+        same_batch_writer
+            .write_polymarket_orderbook_v3_messages(
+                &[
+                    polymarket_v3_book_message("source-epoch-a", 1),
+                    polymarket_v3_book_message("source-epoch-a", 1),
+                ],
+                &mut same_batch_sequence_state,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("not strictly increasing within epoch")
+    );
+    same_batch_writer
+        .write_polymarket_orderbook_v3_messages(
+            &[
+                polymarket_v3_book_message("source-epoch-a", 1),
+                polymarket_v3_book_message("source-epoch-a", 2),
+            ],
+            &mut same_batch_sequence_state,
+        )
+        .unwrap();
+    assert_eq!(same_batch_writer.finalize().unwrap().row_count, 2);
+
+    let mut duplicate_writer = TypedParquetSegmentWriter::create_for_typed_source(
+        tmp.path(),
+        "polymarket-market-v3-duplicate",
+        "polymarket_orderbook_v3",
+        "polymarket_market",
+    )
+    .unwrap();
+    let mut duplicate_sequence_state = PolymarketOrderbookV3WriteSequenceState::default();
+    duplicate_writer
+        .write_polymarket_orderbook_v3_messages(
+            &[polymarket_v3_book_message("source-epoch-a", 1)],
+            &mut duplicate_sequence_state,
+        )
+        .unwrap();
+    assert!(
+        duplicate_writer
+            .write_polymarket_orderbook_v3_messages(
+                &[polymarket_v3_book_message("source-epoch-a", 1)],
+                &mut duplicate_sequence_state,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("not strictly increasing within epoch")
+    );
+
+    let mut backward_writer = TypedParquetSegmentWriter::create_for_typed_source(
+        tmp.path(),
+        "polymarket-market-v3-backward",
+        "polymarket_orderbook_v3",
+        "polymarket_market",
+    )
+    .unwrap();
+    let mut backward_sequence_state = PolymarketOrderbookV3WriteSequenceState::default();
+    backward_writer
+        .write_polymarket_orderbook_v3_messages(
+            &[
+                polymarket_v3_book_message("source-epoch-a", 2),
+                polymarket_v3_book_message("source-epoch-b", 1),
+            ],
+            &mut backward_sequence_state,
+        )
+        .unwrap();
+    assert!(
+        backward_writer
+            .write_polymarket_orderbook_v3_messages(
+                &[polymarket_v3_book_message("source-epoch-a", 1)],
+                &mut backward_sequence_state,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("not strictly increasing within epoch")
+    );
+}
+
+#[test]
+fn polymarket_v3_writer_state_rejects_retry_and_backward_sequence_across_segments() {
+    let tmp = tempdir().unwrap();
+    let mut sequence_state = PolymarketOrderbookV3WriteSequenceState::default();
+    let first_two = vec![
+        polymarket_v3_book_message("source-epoch-a", 1),
+        polymarket_v3_book_message("source-epoch-a", 2),
+    ];
+    let mut first = TypedParquetSegmentWriter::create_for_typed_source(
+        tmp.path(),
+        "polymarket-market-v3-segment-a",
+        "polymarket_orderbook_v3",
+        "polymarket_market",
+    )
+    .unwrap();
+    first
+        .write_polymarket_orderbook_v3_messages(&first_two, &mut sequence_state)
+        .unwrap();
+    assert!(
+        first
+            .write_polymarket_orderbook_v3_messages(&[first_two[0].clone()], &mut sequence_state,)
+            .unwrap_err()
+            .to_string()
+            .contains("not strictly increasing within epoch")
+    );
+    assert_eq!(first.finalize().unwrap().row_count, 2);
+
+    let mut second = TypedParquetSegmentWriter::create_for_typed_source(
+        tmp.path(),
+        "polymarket-market-v3-segment-b",
+        "polymarket_orderbook_v3",
+        "polymarket_market",
+    )
+    .unwrap();
+    assert!(
+        second
+            .write_polymarket_orderbook_v3_messages(
+                &[polymarket_v3_book_message("source-epoch-a", 1)],
+                &mut sequence_state,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("not strictly increasing within epoch")
+    );
+    second
+        .write_polymarket_orderbook_v3_messages(
+            &[polymarket_v3_book_message("source-epoch-a", 3)],
+            &mut sequence_state,
+        )
+        .unwrap();
+    assert_eq!(second.finalize().unwrap().row_count, 1);
+}
+
+#[test]
+fn polymarket_v3_writer_rejects_invalid_envelopes_and_generic_batch_bypass() {
+    let tmp = tempdir().unwrap();
+    let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
+        tmp.path(),
+        "polymarket-market-v3-invalid-envelopes",
+        "polymarket_orderbook_v3",
+        "polymarket_market",
+    )
+    .unwrap();
+    let mut sequence_state = PolymarketOrderbookV3WriteSequenceState::default();
+
+    let mut zero_sequence = polymarket_v3_book_message("source-epoch-a", 1);
+    zero_sequence.envelope.collector_admission_sequence = 0;
+    let mut empty_epoch = polymarket_v3_book_message("source-epoch-a", 1);
+    empty_epoch.envelope.source_sequence_epoch_id.clear();
+    let mut zero_admission_time = polymarket_v3_book_message("source-epoch-a", 1);
+    zero_admission_time.envelope.collector_admission_time_utc_ms = 0;
+    let mut receive_after_admission = polymarket_v3_book_message("source-epoch-a", 1);
+    receive_after_admission.envelope.timestamp_received = receive_after_admission
+        .envelope
+        .collector_admission_time_utc_ms
+        + 1;
+
+    for (invalid, expected) in [
+        (zero_sequence, "sequence must be positive"),
+        (empty_epoch, "source_sequence_epoch_id must be non-empty"),
+        (zero_admission_time, "admission time must be positive"),
+        (receive_after_admission, "receive time exceeds"),
+    ] {
+        let error = writer
+            .write_polymarket_orderbook_v3_messages(&[invalid], &mut sequence_state)
+            .unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+
+    let valid = polymarket_v3_book_message("source-epoch-a", 1);
+    let batch = polymarket_orderbook_v3_messages_to_batch(std::slice::from_ref(&valid)).unwrap();
+    assert!(
+        writer
+            .write_batch(&batch)
+            .unwrap_err()
+            .to_string()
+            .contains("canonical typed message writer")
+    );
+    writer
+        .write_polymarket_orderbook_v3_messages(&[valid], &mut sequence_state)
+        .unwrap();
+    assert_eq!(writer.finalize().unwrap().row_count, 1);
+}
+
+fn polymarket_v3_book_message(epoch: &str, sequence: u64) -> PolymarketOrderbookV3Message {
+    let sdk_message = serde_json::from_str::<WsMessage>(
+        r#"{
+            "event_type":"book",
+            "market":"0x0000000000000000000000000000000000000000000000000000000000000002",
+            "asset_id":"101",
+            "timestamp":"1783392404600",
+            "bids":[{"price":"0.49","size":"10"}],
+            "asks":[],
+            "last_trade_price":"0.50"
+        }"#,
+    )
+    .unwrap();
+    PolymarketOrderbookV3Projection::from_target_admitted_sdk_message(&sdk_message)
+        .unwrap()
+        .unwrap()
+        .admit(PolymarketOrderbookV3Admission {
+            timestamp_received: 1_783_392_404_599,
+            collector_host_id: "collector-host".to_owned(),
+            collector_region: "eu-west-1".to_owned(),
+            source_endpoint: "wss://ws-subscriptions-clob.polymarket.com/ws/market".to_owned(),
+            source_sequence_epoch_id: epoch.to_owned(),
+            collector_admission_sequence: sequence,
+            collector_admission_time_utc_ms: 1_783_392_404_600,
+        })
+        .unwrap()
+}
+
+#[test]
 fn typed_writer_rejects_new_polymarket_market_metadata_v2_segments() {
     let tmp = tempdir().unwrap();
     let error = match TypedParquetSegmentWriter::create_for_typed_source(
@@ -434,7 +766,7 @@ fn polymarket_metadata_writer_does_not_mix_v2_and_v3() {
     let error = match TypedParquetSegmentWriter::create_for_typed_source(
         tmp.path(),
         "metadata-unknown",
-        "polymarket_market_metadata_v4",
+        "polymarket_market_metadata_v5",
         "polymarket_market_metadata",
     ) {
         Ok(_) => panic!("unknown Polymarket metadata schema must be rejected"),
@@ -573,6 +905,52 @@ fn typed_writer_source_specific_schemas_omit_duplicate_time_columns() {
             "{source_kind} must retain timestamp_received"
         );
     }
+}
+
+#[test]
+fn polymarket_metadata_v4_writer_appends_only_the_claimant_pair() {
+    let tmp = tempdir().unwrap();
+    let writer = TypedParquetSegmentWriter::create_for_typed_source(
+        tmp.path(),
+        "metadata-v4",
+        POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION,
+        "polymarket_market_metadata",
+    )
+    .unwrap();
+    let published = writer.finalize().unwrap();
+    let schema =
+        ParquetRecordBatchReaderBuilder::try_new(File::open(published.final_path).unwrap())
+            .unwrap()
+            .schema()
+            .clone();
+    let tail = schema
+        .fields()
+        .iter()
+        .rev()
+        .take(2)
+        .map(|field| {
+            (
+                field.name().as_str(),
+                field.data_type(),
+                field.is_nullable(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tail,
+        [
+            (
+                "ws_claimant_collector_admission_sequence",
+                &DataType::UInt64,
+                true,
+            ),
+            (
+                "ws_claimant_source_sequence_epoch_id",
+                &DataType::Utf8,
+                true,
+            ),
+        ]
+    );
 }
 
 #[test]

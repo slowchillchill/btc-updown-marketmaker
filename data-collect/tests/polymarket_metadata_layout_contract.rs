@@ -4,13 +4,15 @@ use std::sync::Arc;
 
 use arrow_array::{
     Array as _, ArrayRef, BooleanArray, RecordBatch, StringArray, TimestampMillisecondArray,
+    UInt64Array,
 };
 use arrow_schema::DataType;
 use data_collect::polymarket_market_metadata_layout::{
     ActiveUnavailableReason, ClosedTimeCheckFailureReason, MarketLifecycleState,
     MarketLifecycleTransition, MarketRuntimeRole, MarketRuntimeRoleTransition,
     POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
-    PolymarketMarketMetadataContext, PolymarketMarketMetadataRow, PolymarketMarketMetadataV3Row,
+    POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION, PolymarketMarketMetadataContext,
+    PolymarketMarketMetadataRow, PolymarketMarketMetadataV3Row, PolymarketMarketMetadataV4Row,
     PolymarketMetadataOrigin, PolymarketMetadataRowKind,
     PolymarketMetadataV3ReferenceIntegrityError, PolymarketMetadataV3ReferenceRecord,
     ResolutionEvidenceSource, ResolutionFollowupStatus, ResolutionIntegrityErrorClass,
@@ -18,7 +20,7 @@ use data_collect::polymarket_market_metadata_layout::{
     SourceEndpointUnavailableReason, SourceEvidenceChannel, SourceEvidenceEventType,
     SourceEvidenceOrigin, TerminalClaimOwner, TerminalPredicateFailureReason,
     polymarket_market_metadata_schema, polymarket_market_metadata_v3_schema,
-    validate_polymarket_metadata_v3_local_references,
+    polymarket_market_metadata_v4_schema, validate_polymarket_metadata_v3_local_references,
 };
 use data_collect::sources::polymarket::{
     GammaTerminalAttemptContext, GammaTerminalFixedIdentity, GammaTerminalResponse,
@@ -908,6 +910,105 @@ fn v3_schema_has_the_frozen_fields_types_and_utc_units() {
 }
 
 #[test]
+fn v4_schema_is_the_exact_v3_prefix_plus_the_nullable_claimant_pair() {
+    let v3 = polymarket_market_metadata_v3_schema();
+    let v4 = polymarket_market_metadata_v4_schema();
+
+    assert_eq!(v4.fields().len(), v3.fields().len() + 2);
+    assert_eq!(&v4.fields()[..v3.fields().len()], v3.fields().as_ref());
+    assert_eq!(
+        v4.fields()[v3.fields().len()..]
+            .iter()
+            .map(|field| (
+                field.name().as_str(),
+                field.data_type(),
+                field.is_nullable()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (
+                "ws_claimant_source_sequence_epoch_id",
+                &DataType::Utf8,
+                true,
+            ),
+            (
+                "ws_claimant_collector_admission_sequence",
+                &DataType::UInt64,
+                true,
+            ),
+        ]
+    );
+}
+
+#[test]
+fn v4_claimant_pair_is_required_only_for_the_ws_terminal_owner() {
+    let qualified = PolymarketMarketMetadataV4Row::from_v3_prefix(
+        resolution_terminal_ws_v3(),
+        Some("source-epoch-1".to_owned()),
+        Some(7),
+    );
+    assert!(qualified.validate().is_complete());
+    assert_eq!(
+        qualified.v3_prefix.schema_version,
+        POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION
+    );
+
+    let invalid_ws_claimants = [
+        PolymarketMarketMetadataV4Row::from_v3_prefix(resolution_terminal_ws_v3(), None, None),
+        PolymarketMarketMetadataV4Row::from_v3_prefix(
+            resolution_terminal_ws_v3(),
+            Some(" ".to_owned()),
+            Some(7),
+        ),
+        PolymarketMarketMetadataV4Row::from_v3_prefix(
+            resolution_terminal_ws_v3(),
+            Some("source-epoch-1".to_owned()),
+            Some(0),
+        ),
+        PolymarketMarketMetadataV4Row::from_v3_prefix(resolution_terminal_ws_v3(), None, Some(7)),
+        PolymarketMarketMetadataV4Row::from_v3_prefix(
+            resolution_terminal_ws_v3(),
+            Some("source-epoch-1".to_owned()),
+            None,
+        ),
+    ];
+    for row in invalid_ws_claimants {
+        assert!(!row.validate().is_complete());
+    }
+
+    let mut post_terminal = decoded_gamma_attempt_v3();
+    post_terminal.resolution_poll_result = Some(ResolutionPollResult::PostTerminalClaimObservation);
+    post_terminal.terminal_claim_owner = Some(TerminalClaimOwner::MarketResolvedWs);
+    let non_ws_owner_rows = [
+        metadata_snapshot_v3(),
+        market_state_transition_v3(),
+        terminal_gamma_attempt_v3(),
+        post_terminal,
+        resolution_followup_summary_v3(),
+    ];
+    for row in non_ws_owner_rows {
+        let accepted = PolymarketMarketMetadataV4Row::from_v3_prefix(row.clone(), None, None);
+        assert!(
+            accepted.validate().is_complete(),
+            "{:?}",
+            accepted.validate().violations
+        );
+        let rejected = PolymarketMarketMetadataV4Row::from_v3_prefix(
+            row,
+            Some("source-epoch-1".to_owned()),
+            Some(7),
+        );
+        assert_eq!(
+            rejected.validate().violations,
+            [
+                "ws_claimant_source_sequence_epoch_id:must_be_null",
+                "ws_claimant_collector_admission_sequence:must_be_null",
+            ]
+        );
+    }
+}
+
+#[test]
 fn v3_stable_row_kinds_and_failure_precedence_are_frozen() {
     assert_eq!(
         [
@@ -1228,7 +1329,7 @@ fn source_payloads_reconstruct_through_the_pinned_sdk_and_unique_terminal_evalua
     let decoded_gamma: SdkGammaMarket = serde_json::from_str(gamma_payload).unwrap();
     let fixed_identity = GammaTerminalFixedIdentity {
         slug: gamma_row.slug.clone(),
-        market_id: gamma_row.clob_market_id.clone(),
+        clob_market_id: gamma_row.clob_market_id.clone(),
         condition_id: gamma_row.condition_id.clone(),
         up_asset_id: "101".to_owned(),
         down_asset_id: "102".to_owned(),
@@ -1479,6 +1580,95 @@ fn five_v3_row_kinds_round_trip_through_the_versioned_writer_in_admission_order(
         validate_polymarket_metadata_v3_local_references(&digest_mismatch),
         Err(PolymarketMetadataV3ReferenceIntegrityError::DigestMismatch { .. })
     ));
+}
+
+#[test]
+fn five_v4_row_kinds_round_trip_with_only_the_ws_terminal_claimant_populated() {
+    let v3_rows = [
+        metadata_snapshot_v3(),
+        market_state_transition_v3(),
+        decoded_gamma_attempt_v3(),
+        resolution_terminal_ws_v3(),
+        resolution_followup_summary_v3(),
+    ];
+    let rows = v3_rows
+        .into_iter()
+        .enumerate()
+        .map(|(index, mut row)| {
+            row.collector_admission_sequence = index as u64 + 1;
+            if row.metadata_row_kind == PolymarketMetadataRowKind::ResolutionTerminalWs {
+                PolymarketMarketMetadataV4Row::from_v3_prefix(
+                    row,
+                    Some("source-epoch-1".to_owned()),
+                    Some(41),
+                )
+            } else {
+                PolymarketMarketMetadataV4Row::from_v3_prefix(row, None, None)
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let tmp = tempdir().unwrap();
+    let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
+        tmp.path(),
+        "metadata-v4-layout-contract",
+        POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION,
+        "polymarket_market_metadata",
+    )
+    .unwrap();
+    writer
+        .write_polymarket_market_metadata_v4_rows(&rows)
+        .unwrap();
+
+    let error = writer
+        .write_polymarket_market_metadata_v3_rows(&[metadata_snapshot_v3()])
+        .unwrap_err();
+    assert!(error.to_string().contains("require a v3 writer"));
+
+    let published = writer.finalize().unwrap();
+    assert_eq!(published.row_count, 5);
+    assert_eq!(
+        published.schema_version,
+        POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION
+    );
+
+    let mut reader =
+        ParquetRecordBatchReaderBuilder::try_new(File::open(&published.final_path).unwrap())
+            .unwrap()
+            .build()
+            .unwrap();
+    let batch = reader.next().unwrap().unwrap();
+    assert_eq!(
+        batch.schema().as_ref(),
+        polymarket_market_metadata_v4_schema().as_ref()
+    );
+
+    let epoch = batch
+        .column(
+            batch
+                .schema()
+                .index_of("ws_claimant_source_sequence_epoch_id")
+                .unwrap(),
+        )
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    let sequence = batch
+        .column(
+            batch
+                .schema()
+                .index_of("ws_claimant_collector_admission_sequence")
+                .unwrap(),
+        )
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
+    for index in [0, 1, 2, 4] {
+        assert!(epoch.is_null(index));
+        assert!(sequence.is_null(index));
+    }
+    assert_eq!(epoch.value(3), "source-epoch-1");
+    assert_eq!(sequence.value(3), 41);
 }
 
 #[test]

@@ -112,7 +112,7 @@ fn decode_gamma_market(value: Value) -> SdkGammaMarket {
 fn gamma_terminal_identity() -> GammaTerminalFixedIdentity {
     GammaTerminalFixedIdentity {
         slug: "btc-updown-5m-1767225600".to_owned(),
-        market_id: "market-1".to_owned(),
+        clob_market_id: "market-1".to_owned(),
         condition_id: "0x0000000000000000000000000000000000000000000000000000000000000001"
             .to_owned(),
         up_asset_id: "101".to_owned(),

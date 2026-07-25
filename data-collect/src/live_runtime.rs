@@ -92,7 +92,8 @@ use crate::market_discovery::{
 use crate::polymarket_market_metadata_layout::{
     ActiveUnavailableReason, ClosedTimeCheckFailureReason, MarketLifecycleTransition,
     MarketRuntimeRole, MarketRuntimeRoleTransition, POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
-    PolymarketMarketMetadataV3Row, PolymarketMetadataOrigin, PolymarketMetadataRowKind,
+    POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION, PolymarketMarketMetadataV3Row,
+    PolymarketMarketMetadataV4Row, PolymarketMetadataOrigin, PolymarketMetadataRowKind,
     PolymarketMetadataV3ReferenceRecord, ResolutionEvidenceSource, ResolutionFollowupStatus,
     ResolutionIntegrityErrorClass, ResolutionPollResult, ResolutionTransportErrorClass,
     ResponseFieldsUnavailableReason, SourceEndpointUnavailableReason, SourceEvidenceChannel,
@@ -104,6 +105,13 @@ use crate::polymarket_market_metadata_layout::{
     PolymarketMarketMetadataContext, PolymarketMarketMetadataRow,
 };
 use crate::polymarket_orderbook_layout::{PolymarketOrderbookContext, PolymarketOrderbookRow};
+#[cfg(test)]
+use crate::polymarket_orderbook_v3::PolymarketOrderbookV3Admission;
+use crate::polymarket_orderbook_v3::{
+    POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION, PendingPolymarketOrderbookV3Admission,
+    PolymarketOrderbookV3Event, PolymarketOrderbookV3Message, PolymarketOrderbookV3Projection,
+    same_outcome_label,
+};
 use crate::polymarket_resolution_recovery::{
     PolymarketRestartRecovery, RecoveredPolymarketPending, restore_polymarket_resolution_recovery,
 };
@@ -131,8 +139,8 @@ use crate::sources::polymarket::{
     classify_gamma_market_by_slug_transport_error, evaluate_gamma_terminal_response,
 };
 use crate::writer::{
-    DAILY_FILE_RECOVERY_METADATA_KEY, PublishedSegment, RawEvent, RawEventAdmission,
-    TypedParquetSegmentWriter, typed_sort_order,
+    DAILY_FILE_RECOVERY_METADATA_KEY, PolymarketOrderbookV3WriteSequenceState, PublishedSegment,
+    RawEvent, RawEventAdmission, TypedParquetSegmentWriter, typed_sort_order,
 };
 #[cfg(test)]
 use crate::writer::{PARQUET_ROW_GROUP_MAX_BYTES, PARQUET_ROW_GROUP_MAX_ROWS};
@@ -146,6 +154,7 @@ const BINANCE_DEPTH_SNAPSHOT: &str =
 
 static AGGTRADE_SOURCE_EPOCH_COUNTER: AtomicU64 = AtomicU64::new(0);
 static DEPTH_SOURCE_EPOCH_COUNTER: AtomicU64 = AtomicU64::new(0);
+static POLYMARKET_SOURCE_EPOCH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const DEFAULT_CONTINUOUS_DURATION_SECS: u64 = 7 * 24 * 60 * 60;
 const DEFAULT_QUEUE_CAPACITY: usize = 25_000;
@@ -413,6 +422,11 @@ struct DeferredRawBatch {
     epoch: RawDayDeferredEpoch,
     events: Vec<InflightRawEvent>,
     accepted_ticket: Option<RawDayAcceptedTicket>,
+}
+
+enum DeferredIngressBatch {
+    LegacyRaw(DeferredRawBatch),
+    PolymarketOrderbookV3(DeferredPolymarketOrderbookV3),
 }
 
 impl RawDayGate {
@@ -2414,10 +2428,11 @@ struct SourceQueueBackpressureStats {
     dropped_rows: AtomicU64,
     aggtrade_admission_sequence: AtomicU64,
     depth_admission_sequence: AtomicU64,
+    polymarket_market_admission_sequence: AtomicU64,
     polymarket_metadata_admission_sequence: AtomicU64,
     operational_counters: Mutex<BTreeMap<String, BTreeMap<String, SourceOperationalCounterDelta>>>,
     active_recovery_sources: Mutex<BTreeSet<String>>,
-    deferred_raw_batches: Mutex<BTreeMap<String, VecDeque<DeferredRawBatch>>>,
+    deferred_ingress_batches: Mutex<BTreeMap<String, VecDeque<DeferredIngressBatch>>>,
     raw_day_gate: OnceLock<Arc<RawDayGate>>,
 }
 
@@ -2436,6 +2451,10 @@ impl SourceQueueBackpressureStats {
             "binance_depth" => (
                 &self.depth_admission_sequence,
                 "Binance depth admission sequence",
+            ),
+            "polymarket_market" => (
+                &self.polymarket_market_admission_sequence,
+                "Polymarket market admission sequence",
             ),
             "polymarket_market_metadata" => (
                 &self.polymarket_metadata_admission_sequence,
@@ -2501,23 +2520,23 @@ impl SourceQueueBackpressureStats {
             ))
             .into());
         }
-        self.deferred_raw_batches
+        self.deferred_ingress_batches
             .lock()
             .expect("deferred raw-event mutex poisoned")
             .entry(producer.to_owned())
             .or_default()
-            .push_back(DeferredRawBatch {
+            .push_back(DeferredIngressBatch::LegacyRaw(DeferredRawBatch {
                 epoch,
                 events,
                 accepted_ticket,
-            });
+            }));
         Ok(())
     }
 
-    fn take_deferred_raw_batches(&self, producer: &str) -> VecDeque<DeferredRawBatch> {
-        self.deferred_raw_batches
+    fn take_deferred_ingress_batches(&self, producer: &str) -> VecDeque<DeferredIngressBatch> {
+        self.deferred_ingress_batches
             .lock()
-            .expect("deferred raw-event mutex poisoned")
+            .expect("deferred ingress mutex poisoned")
             .remove(producer)
             .unwrap_or_default()
     }
@@ -2633,7 +2652,7 @@ impl SourceQueueBackpressureStats {
 
 #[derive(Clone)]
 struct SourceEventSink {
-    tx: mpsc::Sender<InflightRawEvent>,
+    tx: mpsc::Sender<SourceIngressPayload>,
     gaps: SharedSourceGaps,
     source_queue_backpressure: Arc<SourceQueueBackpressureStats>,
     inflight_budget: InflightBudget,
@@ -2732,6 +2751,159 @@ struct InflightRawEvent {
     raw_day_permit: Option<RawDayPermit>,
     _source_recv_monotonic_ms: u64,
     _reservation: Option<InflightReservation>,
+}
+
+struct InflightPolymarketOrderbookV3 {
+    message: PolymarketOrderbookV3Message,
+    raw_day_permit: RawDayPermit,
+    _source_recv_monotonic_ms: u64,
+    _row_reservation: InflightReservation,
+    _byte_reservation: InflightReservation,
+}
+
+struct DeferredPolymarketOrderbookV3 {
+    epoch: RawDayDeferredEpoch,
+    accepted_ticket: RawDayAcceptedTicket,
+    message: PolymarketOrderbookV3Message,
+    _source_recv_monotonic_ms: u64,
+    _row_reservation: InflightReservation,
+    _byte_reservation: InflightReservation,
+}
+
+#[derive(Default)]
+struct PendingIngressBatches {
+    legacy: BTreeMap<String, Vec<InflightRawEvent>>,
+    polymarket_orderbook_v3: Vec<InflightPolymarketOrderbookV3>,
+}
+
+impl PendingIngressBatches {
+    fn for_live_sources() -> Self {
+        Self {
+            legacy: LIVE_SOURCES
+                .iter()
+                .map(|source| {
+                    (
+                        (*source).to_owned(),
+                        Vec::<InflightRawEvent>::with_capacity(DEFAULT_FLUSH_ROWS),
+                    )
+                })
+                .collect(),
+            polymarket_orderbook_v3: Vec::with_capacity(DEFAULT_FLUSH_ROWS),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PolymarketOrderbookV3AdmissionReceipt {
+    source_sequence_epoch_id: String,
+    collector_admission_sequence: u64,
+    collector_admission_time_utc_ms: i64,
+    market_resolved: Option<PolymarketMarketResolvedAdmissionEvidence>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PolymarketMarketResolvedAdmissionEvidence {
+    source_evidence_payload_json: String,
+    source_evidence_raw_sha256: String,
+    platform_timestamp_utc_ms: i64,
+    winning_asset_id: String,
+    winning_outcome: String,
+}
+
+fn polymarket_market_resolved_admission_evidence(
+    message: &PolymarketOrderbookV3Message,
+) -> Result<Option<PolymarketMarketResolvedAdmissionEvidence>> {
+    let PolymarketOrderbookV3Event::MarketResolved(resolved) = &message.event else {
+        return Ok(None);
+    };
+    let platform_timestamp_utc_ms = message.envelope.timestamp.ok_or_else(|| {
+        invalid_data("admitted Polymarket market_resolved is missing its platform timestamp")
+    })?;
+    let event_message = resolved.event_message.as_ref().map(|event_message| {
+        json!({
+            "id": event_message.id,
+            "ticker": event_message.ticker,
+            "slug": event_message.slug,
+            "title": event_message.title,
+            "description": event_message.description,
+        })
+    });
+    let source_evidence_payload_json = serde_json::to_string(&json!({
+        "event_type": "market_resolved",
+        "market": message.envelope.market,
+        "slug": message.envelope.slug,
+        "clob_market_id": resolved.clob_market_id,
+        "question": resolved.question,
+        "description": resolved.description,
+        "asset_ids": resolved.asset_ids,
+        "outcomes": resolved.outcomes,
+        "event_message": event_message,
+        "winning_asset_id": resolved.winning_asset_id,
+        "winning_outcome": resolved.winning_outcome,
+        "timestamp": platform_timestamp_utc_ms,
+    }))?;
+    let source_evidence_raw_sha256 = Sha256::digest(source_evidence_payload_json.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Ok(Some(PolymarketMarketResolvedAdmissionEvidence {
+        source_evidence_payload_json,
+        source_evidence_raw_sha256,
+        platform_timestamp_utc_ms,
+        winning_asset_id: resolved.winning_asset_id.clone(),
+        winning_outcome: resolved.winning_outcome.clone(),
+    }))
+}
+
+#[allow(clippy::large_enum_variant)]
+enum SourceIngressPayload {
+    LegacyRaw(InflightRawEvent),
+    PolymarketOrderbookV3(InflightPolymarketOrderbookV3),
+}
+
+impl SourceIngressPayload {
+    #[cfg(test)]
+    fn into_legacy_raw(self) -> InflightRawEvent {
+        match self {
+            Self::LegacyRaw(event) => event,
+            Self::PolymarketOrderbookV3(_) => panic!("expected a legacy raw ingress payload"),
+        }
+    }
+
+    #[cfg(test)]
+    fn into_legacy_event(self) -> RawEvent {
+        self.into_legacy_raw().event
+    }
+
+    #[cfg(test)]
+    fn into_polymarket_orderbook_v3(self) -> InflightPolymarketOrderbookV3 {
+        match self {
+            Self::PolymarketOrderbookV3(event) => event,
+            Self::LegacyRaw(_) => panic!("expected a Polymarket v3 ingress payload"),
+        }
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Deref for SourceIngressPayload {
+    type Target = InflightRawEvent;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::LegacyRaw(event) => event,
+            Self::PolymarketOrderbookV3(_) => panic!("expected a legacy raw ingress payload"),
+        }
+    }
+}
+
+#[cfg(test)]
+impl std::ops::DerefMut for SourceIngressPayload {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::LegacyRaw(event) => event,
+            Self::PolymarketOrderbookV3(_) => panic!("expected a legacy raw ingress payload"),
+        }
+    }
 }
 
 impl InflightRawEvent {
@@ -3161,7 +3333,7 @@ async fn raw_day_gate_for_rollover(
         .ok_or_else(|| invalid_data("raw-day gate missing from producer rollover wrapper").into())
 }
 
-fn record_deferred_batch_drop(sink: &SourceEventSink, events: &[InflightRawEvent]) {
+fn record_deferred_raw_batch_drop(sink: &SourceEventSink, events: &[InflightRawEvent]) {
     sink.source_queue_backpressure
         .record_drop(events.len() as u64);
     for event in events {
@@ -3173,14 +3345,42 @@ fn record_deferred_batch_drop(sink: &SourceEventSink, events: &[InflightRawEvent
     }
 }
 
-fn record_deferred_flush_drop(
+fn record_deferred_ingress_batch_drop(sink: &SourceEventSink, batch: &DeferredIngressBatch) {
+    match batch {
+        DeferredIngressBatch::LegacyRaw(batch) => {
+            record_deferred_raw_batch_drop(sink, &batch.events);
+        }
+        DeferredIngressBatch::PolymarketOrderbookV3(event) => {
+            sink.source_queue_backpressure.record_drop(1);
+            sink.source_queue_backpressure.record_operational_drop(
+                "polymarket_market",
+                event.message.envelope.timestamp_received,
+                1,
+            );
+        }
+    }
+}
+
+fn record_deferred_polymarket_v3_drop(
     sink: &SourceEventSink,
-    current: &[InflightRawEvent],
-    remaining: &VecDeque<DeferredRawBatch>,
+    event: &DeferredPolymarketOrderbookV3,
 ) {
-    record_deferred_batch_drop(sink, current);
+    sink.source_queue_backpressure.record_drop(1);
+    sink.source_queue_backpressure.record_operational_drop(
+        "polymarket_market",
+        event.message.envelope.timestamp_received,
+        1,
+    );
+}
+
+fn record_deferred_polymarket_v3_flush_drop(
+    sink: &SourceEventSink,
+    current: &DeferredPolymarketOrderbookV3,
+    remaining: &VecDeque<DeferredIngressBatch>,
+) {
+    record_deferred_polymarket_v3_drop(sink, current);
     for batch in remaining {
-        record_deferred_batch_drop(sink, &batch.events);
+        record_deferred_ingress_batch_drop(sink, batch);
     }
 }
 
@@ -3191,20 +3391,24 @@ async fn flush_accepted_deferred_raw_events_for_stop(
 ) -> Result<()> {
     let batches = sink
         .source_queue_backpressure
-        .take_deferred_raw_batches(producer);
+        .take_deferred_ingress_batches(producer);
     let controlled_cutoff = sink
         .source_queue_backpressure
         .raw_day_gate()
         .is_some_and(|gate| gate.unadmitted_runtime_cutoff_is_active());
     let mut accepted = VecDeque::new();
     for batch in batches {
-        if batch.accepted_ticket.is_some() {
+        let is_accepted = match &batch {
+            DeferredIngressBatch::LegacyRaw(batch) => batch.accepted_ticket.is_some(),
+            DeferredIngressBatch::PolymarketOrderbookV3(_) => true,
+        };
+        if is_accepted {
             accepted.push_back(batch);
         } else if !controlled_cutoff {
-            record_deferred_batch_drop(sink, &batch.events);
+            record_deferred_ingress_batch_drop(sink, &batch);
         }
     }
-    flush_deferred_raw_batches(sink, producer, close, accepted).await
+    flush_deferred_ingress_batches(sink, producer, close, accepted).await
 }
 
 async fn flush_deferred_raw_events(
@@ -3214,193 +3418,355 @@ async fn flush_deferred_raw_events(
 ) -> Result<()> {
     let batches = sink
         .source_queue_backpressure
-        .take_deferred_raw_batches(producer);
-    flush_deferred_raw_batches(sink, producer, close, batches).await
+        .take_deferred_ingress_batches(producer);
+    flush_deferred_ingress_batches(sink, producer, close, batches).await
 }
 
-async fn flush_deferred_raw_batches(
+async fn flush_deferred_ingress_batches(
     sink: &SourceEventSink,
     producer: &str,
     close: &RawDayClose,
-    mut batches: VecDeque<DeferredRawBatch>,
+    mut batches: VecDeque<DeferredIngressBatch>,
 ) -> Result<()> {
     while let Some(batch) = batches.pop_front() {
-        let epoch = batch.epoch;
-        let mut events = batch.events;
-        let accepted_ticket = batch.accepted_ticket;
-        if epoch.utc_day != close.next_utc_day
-            || epoch.old_generation != close.generation
-            || epoch.expected_generation != close.next_generation
-        {
-            record_deferred_flush_drop(sink, &events, &batches);
-            return Err(invalid_data(format!(
+        match batch {
+            DeferredIngressBatch::LegacyRaw(batch) => {
+                flush_deferred_raw_batch(sink, producer, close, batch, &batches).await?;
+            }
+            DeferredIngressBatch::PolymarketOrderbookV3(event) => {
+                flush_deferred_polymarket_orderbook_v3(sink, producer, close, event, &batches)
+                    .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn flush_deferred_raw_batch(
+    sink: &SourceEventSink,
+    producer: &str,
+    close: &RawDayClose,
+    batch: DeferredRawBatch,
+    remaining: &VecDeque<DeferredIngressBatch>,
+) -> Result<()> {
+    let epoch = batch.epoch;
+    let mut events = batch.events;
+    let accepted_ticket = batch.accepted_ticket;
+    if epoch.utc_day != close.next_utc_day
+        || epoch.old_generation != close.generation
+        || epoch.expected_generation != close.next_generation
+    {
+        record_deferred_raw_batch_drop(sink, &events);
+        for batch in remaining {
+            record_deferred_ingress_batch_drop(sink, batch);
+        }
+        return Err(invalid_data(format!(
                 "deferred raw-event batch close identity mismatch: producer={producer} expected_close={close:?} actual_epoch={epoch:?}"
             ))
             .into());
+    }
+    let first = events
+        .first()
+        .ok_or_else(|| invalid_data("deferred raw-event batch became empty"))?;
+    if events.iter().any(|event| {
+        logical_producer_for_source_kind(&event.event.source_kind).ok() != Some(producer)
+    }) {
+        record_deferred_raw_batch_drop(sink, &events);
+        for batch in remaining {
+            record_deferred_ingress_batch_drop(sink, batch);
         }
-        let first = events
-            .first()
-            .ok_or_else(|| invalid_data("deferred raw-event batch became empty"))?;
-        if events.iter().any(|event| {
-            logical_producer_for_source_kind(&event.event.source_kind).ok() != Some(producer)
-        }) {
-            record_deferred_flush_drop(sink, &events, &batches);
-            return Err(invalid_data(format!(
-                "deferred raw-event producer mismatch while flushing: expected={producer}"
-            ))
-            .into());
+        return Err(invalid_data(format!(
+            "deferred raw-event producer mismatch while flushing: expected={producer}"
+        ))
+        .into());
+    }
+    if events
+        .iter()
+        .any(|event| event.raw_day_permit.is_some() || event.event.collector_admission.is_some())
+    {
+        record_deferred_raw_batch_drop(sink, &events);
+        for batch in remaining {
+            record_deferred_ingress_batch_drop(sink, batch);
         }
-        if events.iter().any(|event| {
-            event.raw_day_permit.is_some() || event.event.collector_admission.is_some()
-        }) {
-            record_deferred_flush_drop(sink, &events, &batches);
-            return Err(invalid_data(format!(
-                "deferred raw-event staging already owned final admission: producer={producer}"
-            ))
-            .into());
-        }
-        let gate = sink
-            .source_queue_backpressure
-            .raw_day_gate()
-            .ok_or_else(|| invalid_data("raw-day gate missing while deferred events flushed"))?;
-        let enqueue = match accepted_ticket.as_ref() {
-            Some(ticket) => match gate.current_state() {
-                RawDayGateState::Closing(ref actual) if actual == close => {
-                    gate.begin_accepted_close_bound_deferred_flush(
-                        producer,
-                        close,
-                        first.event.recv_time_utc_ms,
-                        ticket,
-                    )
-                    .await?
-                }
-                _ => match gate
-                    .begin_accepted_ticket_enqueue(producer, first.event.recv_time_utc_ms, ticket)
-                    .await?
-                {
-                    RawDayEnqueueDecision::Permit(enqueue) => enqueue,
-                    RawDayEnqueueDecision::Defer(actual_epoch) => {
-                        record_deferred_flush_drop(sink, &events, &batches);
-                        return Err(invalid_data(format!(
+        return Err(invalid_data(format!(
+            "deferred raw-event staging already owned final admission: producer={producer}"
+        ))
+        .into());
+    }
+    let gate = sink
+        .source_queue_backpressure
+        .raw_day_gate()
+        .ok_or_else(|| invalid_data("raw-day gate missing while deferred events flushed"))?;
+    let enqueue = match accepted_ticket.as_ref() {
+        Some(ticket) => match gate.current_state() {
+            RawDayGateState::Closing(ref actual) if actual == close => {
+                gate.begin_accepted_close_bound_deferred_flush(
+                    producer,
+                    close,
+                    first.event.recv_time_utc_ms,
+                    ticket,
+                )
+                .await?
+            }
+            _ => match gate
+                .begin_accepted_ticket_enqueue(producer, first.event.recv_time_utc_ms, ticket)
+                .await?
+            {
+                RawDayEnqueueDecision::Permit(enqueue) => enqueue,
+                RawDayEnqueueDecision::Defer(actual_epoch) => {
+                    record_deferred_raw_batch_drop(sink, &events);
+                    for batch in remaining {
+                        record_deferred_ingress_batch_drop(sink, batch);
+                    }
+                    return Err(invalid_data(format!(
                             "accepted deferred raw-event batch remained ahead of active day: producer={producer} expected={epoch:?} actual={actual_epoch:?} recv_time_utc_ms={}",
                             first.event.recv_time_utc_ms,
                         ))
                         .into());
-                    }
-                },
-            },
-            None => match gate.current_state() {
-                RawDayGateState::Closing(ref actual) if actual == close => {
-                    let Some(enqueue) = gate
-                        .begin_close_bound_deferred_flush(
-                            producer,
-                            close,
-                            first.event.recv_time_utc_ms,
-                        )
-                        .await?
-                    else {
-                        return Ok(());
-                    };
-                    enqueue
                 }
-                _ => {
-                    let Some(decision) = gate
-                        .begin_unadmitted_event_enqueue(producer, first.event.recv_time_utc_ms)
-                        .await?
-                    else {
-                        return Ok(());
-                    };
-                    match decision {
-                        RawDayEnqueueDecision::Permit(enqueue) => enqueue,
-                        RawDayEnqueueDecision::Defer(actual_epoch) => {
-                            record_deferred_flush_drop(sink, &events, &batches);
-                            return Err(invalid_data(format!(
+            },
+        },
+        None => match gate.current_state() {
+            RawDayGateState::Closing(ref actual) if actual == close => {
+                let Some(enqueue) = gate
+                    .begin_close_bound_deferred_flush(producer, close, first.event.recv_time_utc_ms)
+                    .await?
+                else {
+                    return Ok(());
+                };
+                enqueue
+            }
+            _ => {
+                let Some(decision) = gate
+                    .begin_unadmitted_event_enqueue(producer, first.event.recv_time_utc_ms)
+                    .await?
+                else {
+                    return Ok(());
+                };
+                match decision {
+                    RawDayEnqueueDecision::Permit(enqueue) => enqueue,
+                    RawDayEnqueueDecision::Defer(actual_epoch) => {
+                        record_deferred_raw_batch_drop(sink, &events);
+                        for batch in remaining {
+                            record_deferred_ingress_batch_drop(sink, batch);
+                        }
+                        return Err(invalid_data(format!(
                                 "deferred raw-event batch remained ahead of active day: producer={producer} expected={epoch:?} actual={actual_epoch:?} recv_time_utc_ms={}",
                                 first.event.recv_time_utc_ms,
                             ))
                             .into());
-                        }
                     }
                 }
-            },
-        };
-        let permit = enqueue.permit.clone();
-        if permit.utc_day != epoch.utc_day
-            || permit.generation != epoch.expected_generation
-            || permit.generation != epoch.old_generation.saturating_add(1)
-            || events.iter().any(|event| {
-                utc_day_string_from_ms(event.event.recv_time_utc_ms).as_deref()
-                    != Some(permit.utc_day.as_str())
-            })
-        {
-            record_deferred_flush_drop(sink, &events, &batches);
-            return Err(invalid_data(format!(
+            }
+        },
+    };
+    let permit = enqueue.permit.clone();
+    if permit.utc_day != epoch.utc_day
+        || permit.generation != epoch.expected_generation
+        || permit.generation != epoch.old_generation.saturating_add(1)
+        || events.iter().any(|event| {
+            utc_day_string_from_ms(event.event.recv_time_utc_ms).as_deref()
+                != Some(permit.utc_day.as_str())
+        })
+    {
+        record_deferred_raw_batch_drop(sink, &events);
+        for batch in remaining {
+            record_deferred_ingress_batch_drop(sink, batch);
+        }
+        return Err(invalid_data(format!(
                 "deferred raw-event batch epoch mismatch: producer={producer} expected={epoch:?} active={permit:?}"
             ))
             .into());
+    }
+    for event in &mut events {
+        event.raw_day_permit = Some(permit.clone());
+    }
+    let count = events.len();
+    let _enqueue_guard = sink.enqueue_lock.lock().await;
+    if count > sink.tx.max_capacity() {
+        record_deferred_raw_batch_drop(sink, &events);
+        for batch in remaining {
+            record_deferred_ingress_batch_drop(sink, batch);
         }
-        for event in &mut events {
-            event.raw_day_permit = Some(permit.clone());
-        }
-        let count = events.len();
-        let _enqueue_guard = sink.enqueue_lock.lock().await;
-        if count > sink.tx.max_capacity() {
-            record_deferred_flush_drop(sink, &events, &batches);
-            return Err(invalid_data(format!(
+        return Err(invalid_data(format!(
                 "deferred raw-event batch exceeds ingress capacity: producer={producer} rows={count} capacity={}",
                 sink.tx.max_capacity()
             ))
             .into());
-        }
-        let permits = match sink.tx.try_reserve_many(count) {
-            Ok(permits) => permits,
-            Err(mpsc::error::TrySendError::Full(())) => {
-                sink.source_queue_backpressure.record_wait();
-                match timeout(BUFFER_ACQUIRE_TIMEOUT, sink.tx.reserve_many(count)).await {
-                    Ok(Ok(permits)) => permits,
-                    Ok(Err(_)) => {
-                        record_deferred_flush_drop(sink, &events, &batches);
-                        return Err(io::Error::new(
-                            io::ErrorKind::BrokenPipe,
-                            format!(
-                                "deferred raw-event ingress channel closed: producer={producer}"
-                            ),
-                        )
-                        .into());
+    }
+    let permits = match sink.tx.try_reserve_many(count) {
+        Ok(permits) => permits,
+        Err(mpsc::error::TrySendError::Full(())) => {
+            sink.source_queue_backpressure.record_wait();
+            match timeout(BUFFER_ACQUIRE_TIMEOUT, sink.tx.reserve_many(count)).await {
+                Ok(Ok(permits)) => permits,
+                Ok(Err(_)) => {
+                    record_deferred_raw_batch_drop(sink, &events);
+                    for batch in remaining {
+                        record_deferred_ingress_batch_drop(sink, batch);
                     }
-                    Err(_) => {
-                        sink.source_queue_backpressure.record_timeout();
-                        record_deferred_flush_drop(sink, &events, &batches);
-                        return Err(io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            format!("deferred raw-event ingress timeout: producer={producer}"),
-                        )
-                        .into());
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        format!("deferred raw-event ingress channel closed: producer={producer}"),
+                    )
+                    .into());
+                }
+                Err(_) => {
+                    sink.source_queue_backpressure.record_timeout();
+                    record_deferred_raw_batch_drop(sink, &events);
+                    for batch in remaining {
+                        record_deferred_ingress_batch_drop(sink, batch);
                     }
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("deferred raw-event ingress timeout: producer={producer}"),
+                    )
+                    .into());
                 }
             }
-            Err(mpsc::error::TrySendError::Closed(())) => {
-                record_deferred_flush_drop(sink, &events, &batches);
-                return Err(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    format!("deferred raw-event ingress channel closed: producer={producer}"),
-                )
-                .into());
-            }
-        };
-        if let Err(error) = stamp_source_admissions_atomically(&mut events, sink) {
-            record_deferred_flush_drop(sink, &events, &batches);
-            return Err(error);
         }
-        for (permit, mut event) in permits.zip(events) {
-            let gap_time_utc_ms = event.event.recv_time_utc_ms;
-            let admission_gaps = std::mem::take(&mut event.admission_gaps);
-            permit.send(event);
-            for gap in admission_gaps {
-                record_gap_at(&sink.gaps, gap_time_utc_ms, gap);
+        Err(mpsc::error::TrySendError::Closed(())) => {
+            record_deferred_raw_batch_drop(sink, &events);
+            for batch in remaining {
+                record_deferred_ingress_batch_drop(sink, batch);
             }
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                format!("deferred raw-event ingress channel closed: producer={producer}"),
+            )
+            .into());
+        }
+    };
+    if let Err(error) = stamp_source_admissions_atomically(&mut events, sink) {
+        record_deferred_raw_batch_drop(sink, &events);
+        for batch in remaining {
+            record_deferred_ingress_batch_drop(sink, batch);
+        }
+        return Err(error);
+    }
+    for (permit, mut event) in permits.zip(events) {
+        let gap_time_utc_ms = event.event.recv_time_utc_ms;
+        let admission_gaps = std::mem::take(&mut event.admission_gaps);
+        permit.send(SourceIngressPayload::LegacyRaw(event));
+        for gap in admission_gaps {
+            record_gap_at(&sink.gaps, gap_time_utc_ms, gap);
         }
     }
+    Ok(())
+}
+
+async fn flush_deferred_polymarket_orderbook_v3(
+    sink: &SourceEventSink,
+    producer: &str,
+    close: &RawDayClose,
+    event: DeferredPolymarketOrderbookV3,
+    remaining: &VecDeque<DeferredIngressBatch>,
+) -> Result<()> {
+    let recv_time_utc_ms = event.message.envelope.timestamp_received;
+    if producer != "polymarket"
+        || event.epoch.utc_day != close.next_utc_day
+        || event.epoch.old_generation != close.generation
+        || event.epoch.expected_generation != close.next_generation
+        || event.accepted_ticket != RawDayAcceptedTicket::Defer(event.epoch.clone())
+    {
+        record_deferred_polymarket_v3_flush_drop(sink, &event, remaining);
+        return Err(invalid_data(format!(
+            "deferred Polymarket v3 close identity mismatch:producer={producer}:close={close:?}:epoch={:?}:ticket={:?}",
+            event.epoch, event.accepted_ticket
+        ))
+        .into());
+    }
+    event
+        .message
+        .validate()
+        .inspect_err(|_| record_deferred_polymarket_v3_flush_drop(sink, &event, remaining))?;
+    let gate = sink
+        .source_queue_backpressure
+        .raw_day_gate()
+        .ok_or_else(|| invalid_data("raw-day gate missing while deferred v3 event flushed"))?;
+    let enqueue = match gate.current_state() {
+        RawDayGateState::Closing(ref actual) if actual == close => {
+            gate.begin_accepted_close_bound_deferred_flush(
+                producer,
+                close,
+                recv_time_utc_ms,
+                &event.accepted_ticket,
+            )
+            .await?
+        }
+        _ => match gate
+            .begin_accepted_ticket_enqueue(producer, recv_time_utc_ms, &event.accepted_ticket)
+            .await?
+        {
+            RawDayEnqueueDecision::Permit(enqueue) => enqueue,
+            RawDayEnqueueDecision::Defer(actual_epoch) => {
+                record_deferred_polymarket_v3_flush_drop(sink, &event, remaining);
+                return Err(invalid_data(format!(
+                    "accepted deferred Polymarket v3 event remained ahead of active day:expected={:?}:actual={actual_epoch:?}:recv_time_utc_ms={recv_time_utc_ms}",
+                    event.epoch
+                ))
+                .into());
+            }
+        },
+    };
+    let raw_day_permit = enqueue.permit.clone();
+    if raw_day_permit.utc_day != event.epoch.utc_day
+        || raw_day_permit.generation != event.epoch.expected_generation
+        || raw_day_permit.generation != event.epoch.old_generation.saturating_add(1)
+        || utc_day_string_from_ms(recv_time_utc_ms).as_deref()
+            != Some(raw_day_permit.utc_day.as_str())
+    {
+        record_deferred_polymarket_v3_flush_drop(sink, &event, remaining);
+        return Err(invalid_data(format!(
+            "deferred Polymarket v3 epoch mismatch:expected={:?}:active={raw_day_permit:?}",
+            event.epoch
+        ))
+        .into());
+    }
+    let _enqueue_guard = sink.enqueue_lock.lock().await;
+    let permit = match sink.tx.try_reserve() {
+        Ok(permit) => permit,
+        Err(mpsc::error::TrySendError::Full(())) => {
+            sink.source_queue_backpressure.record_wait();
+            match timeout(BUFFER_ACQUIRE_TIMEOUT, sink.tx.reserve()).await {
+                Ok(Ok(permit)) => permit,
+                Ok(Err(_)) => {
+                    record_deferred_polymarket_v3_flush_drop(sink, &event, remaining);
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "deferred Polymarket v3 ingress channel closed",
+                    )
+                    .into());
+                }
+                Err(_) => {
+                    sink.source_queue_backpressure.record_timeout();
+                    record_deferred_polymarket_v3_flush_drop(sink, &event, remaining);
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "deferred Polymarket v3 ingress timeout",
+                    )
+                    .into());
+                }
+            }
+        }
+        Err(mpsc::error::TrySendError::Closed(())) => {
+            record_deferred_polymarket_v3_flush_drop(sink, &event, remaining);
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "deferred Polymarket v3 ingress channel closed",
+            )
+            .into());
+        }
+    };
+    permit.send(SourceIngressPayload::PolymarketOrderbookV3(
+        InflightPolymarketOrderbookV3 {
+            message: event.message,
+            raw_day_permit,
+            _source_recv_monotonic_ms: event._source_recv_monotonic_ms,
+            _row_reservation: event._row_reservation,
+            _byte_reservation: event._byte_reservation,
+        },
+    ));
     Ok(())
 }
 
@@ -5990,9 +6356,9 @@ async fn drive_normal_rollover(
     manifest_tx: &mpsc::Sender<ManifestCommand>,
     raw_day_gate: &Arc<RawDayGate>,
     runtime_exit_rx: &mut mpsc::Receiver<RuntimeExitRequest>,
-    event_rx: &mut mpsc::Receiver<InflightRawEvent>,
+    event_rx: &mut mpsc::Receiver<SourceIngressPayload>,
     writer_handles: &mut BTreeMap<String, SourceWriterHandle>,
-    batches: &mut BTreeMap<String, Vec<InflightRawEvent>>,
+    batches: &mut PendingIngressBatches,
     coverage: &mut BTreeMap<String, CoverageStats>,
     received_rows: &mut u64,
     average_event_bytes: &mut u64,
@@ -6564,11 +6930,11 @@ async fn complete_pending_exit_rollover(
     handles: &mut Vec<SourceTaskHandle>,
     completed_terminations: &mut Vec<SourceTaskTermination>,
     fallback_sinks: &BTreeMap<&'static str, SourceEventSink>,
-    event_rx: &mut mpsc::Receiver<InflightRawEvent>,
+    event_rx: &mut mpsc::Receiver<SourceIngressPayload>,
     rollover_ready_rx: &mut mpsc::Receiver<ManifestRolloverReady>,
     writer_handles: &mut BTreeMap<String, SourceWriterHandle>,
     completed_writer_outcome: &mut Option<WriterStopOutcome>,
-    batches: &mut BTreeMap<String, Vec<InflightRawEvent>>,
+    batches: &mut PendingIngressBatches,
     coverage: &mut BTreeMap<String, CoverageStats>,
     received_rows: &mut u64,
     average_event_bytes: &mut u64,
@@ -6970,7 +7336,8 @@ where
         );
     }
     let inflight_budget = InflightBudget::new();
-    let (event_tx, mut event_rx) = bounded_event_queue::<InflightRawEvent>(DEFAULT_QUEUE_CAPACITY)?;
+    let (event_tx, mut event_rx) =
+        bounded_event_queue::<SourceIngressPayload>(DEFAULT_QUEUE_CAPACITY)?;
     let event_sink = SourceEventSink {
         tx: event_tx,
         gaps: Arc::clone(&source_gaps),
@@ -6979,15 +7346,7 @@ where
         enqueue_lock: Arc::new(AsyncMutex::new(())),
     };
     let mut coverage = BTreeMap::<String, CoverageStats>::new();
-    let mut batches = LIVE_SOURCES
-        .iter()
-        .map(|source| {
-            (
-                (*source).to_owned(),
-                Vec::<InflightRawEvent>::with_capacity(DEFAULT_FLUSH_ROWS),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
+    let mut batches = PendingIngressBatches::for_live_sources();
     let mut source_queue_tracker = QueueDurationTracker::new("source_event_queue");
     let mut writer_queue_tracker = QueueDurationTracker::new("writer_chunk_queue");
     let mut next_flush = run_started + Duration::from_millis(DEFAULT_MAX_FLUSH_INTERVAL_MS);
@@ -8458,6 +8817,8 @@ where
         let manifest_tx = manifest_tx.clone();
         let source_kind_owned = (*source_kind).to_owned();
         let report_source_kind = source_kind_owned.clone();
+        let writer_schema_version = typed_schema_version(source_kind).to_owned();
+        let worker_schema_version = writer_schema_version.clone();
         let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
         let writer_epoch = WriterEpochCell::default();
         let worker_epoch = writer_epoch.clone();
@@ -8486,6 +8847,7 @@ where
                         dataset_root,
                         provenance,
                         source_kind_owned,
+                        worker_schema_version,
                         rx,
                         queue_rows_for_worker,
                         accepting_commands_for_worker,
@@ -8588,6 +8950,7 @@ where
         handles.insert(
             (*source_kind).to_owned(),
             SourceWriterHandle {
+                schema_version: writer_schema_version,
                 tx,
                 queue_rows,
                 accepting_commands,
@@ -8609,6 +8972,7 @@ fn converge_partial_writer_spawn(
     let deadline = Instant::now() + budget;
     for (_, writer) in handles {
         let SourceWriterHandle {
+            schema_version: _,
             tx,
             queue_rows: _,
             accepting_commands: _,
@@ -8731,6 +9095,7 @@ fn start_writer_workers_with_hung_result(
     handles.insert(
         "hung_writer".to_owned(),
         SourceWriterHandle {
+            schema_version: "unknown_typed_layout".to_owned(),
             tx,
             queue_rows: Arc::new(AtomicU64::new(0)),
             accepting_commands: Arc::new(Mutex::new(true)),
@@ -8744,15 +9109,15 @@ fn start_writer_workers_with_hung_result(
 
 async fn flush_all_batches(
     writers: &mut BTreeMap<String, SourceWriterHandle>,
-    batches: &mut BTreeMap<String, Vec<InflightRawEvent>>,
+    batches: &mut PendingIngressBatches,
     gaps: &SharedSourceGaps,
     runtime_stats: &SourceQueueBackpressureStats,
     writer_queue_tracker: &mut QueueDurationTracker,
     run_started: Instant,
 ) -> Result<()> {
-    let sources = batches.keys().cloned().collect::<Vec<_>>();
+    let sources = batches.legacy.keys().cloned().collect::<Vec<_>>();
     for source_kind in sources {
-        let Some(batch) = batches.get_mut(&source_kind) else {
+        let Some(batch) = batches.legacy.get_mut(&source_kind) else {
             continue;
         };
         flush_source_batch(
@@ -8766,6 +9131,15 @@ async fn flush_all_batches(
         )
         .await?;
     }
+    flush_polymarket_orderbook_v3_batch(
+        writers,
+        &mut batches.polymarket_orderbook_v3,
+        gaps,
+        runtime_stats,
+        writer_queue_tracker,
+        run_started,
+    )
+    .await?;
     Ok(())
 }
 
@@ -8773,7 +9147,7 @@ async fn flush_all_batches(
 async fn handle_ingress_control(
     control: IngressControl,
     writers: &mut BTreeMap<String, SourceWriterHandle>,
-    batches: &mut BTreeMap<String, Vec<InflightRawEvent>>,
+    batches: &mut PendingIngressBatches,
     gaps: &SharedSourceGaps,
     runtime_stats: &SourceQueueBackpressureStats,
     writer_queue_tracker: &mut QueueDurationTracker,
@@ -8786,7 +9160,7 @@ async fn handle_ingress_control(
             source_kind,
             utc_hour,
         } => {
-            let batch = batches.get_mut(&source_kind).ok_or_else(|| {
+            let batch = batches.legacy.get_mut(&source_kind).ok_or_else(|| {
                 invalid_data(format!(
                     "missing source batch for hour finalize: {source_kind}"
                 ))
@@ -8801,6 +9175,17 @@ async fn handle_ingress_control(
                 run_started,
             )
             .await?;
+            if source_kind == "polymarket_market" {
+                flush_polymarket_orderbook_v3_batch(
+                    writers,
+                    &mut batches.polymarket_orderbook_v3,
+                    gaps,
+                    runtime_stats,
+                    writer_queue_tracker,
+                    run_started,
+                )
+                .await?;
+            }
             send_writer_hour_finalize(writers, &source_kind, &utc_hour).await?;
         }
         IngressControl::DayBarrier {
@@ -8849,9 +9234,9 @@ async fn handle_ingress_control(
 
 #[allow(clippy::too_many_arguments)]
 async fn process_ingress_event(
-    mut inflight_event: InflightRawEvent,
+    inflight: SourceIngressPayload,
     writers: &mut BTreeMap<String, SourceWriterHandle>,
-    batches: &mut BTreeMap<String, Vec<InflightRawEvent>>,
+    batches: &mut PendingIngressBatches,
     coverage: &mut BTreeMap<String, CoverageStats>,
     received_rows: &mut u64,
     average_event_bytes: &mut u64,
@@ -8862,6 +9247,70 @@ async fn process_ingress_event(
     manifest_tx: &mpsc::Sender<ManifestCommand>,
     rollover_coordinator: &mut RolloverCoordinatorState,
 ) -> Result<()> {
+    let mut inflight_event = match inflight {
+        SourceIngressPayload::LegacyRaw(event) => {
+            if event.event.source_kind == "polymarket_market"
+                && typed_schema_version("polymarket_market")
+                    == POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION
+            {
+                return Err(invalid_data(format!(
+                    "legacy raw Polymarket ingress is forbidden after v3 activation:event_type={}",
+                    event.event.source_event_type
+                ))
+                .into());
+            }
+            event
+        }
+        SourceIngressPayload::PolymarketOrderbookV3(event) => {
+            let Some(writer) = writers.get("polymarket_market") else {
+                return Err(invalid_data(
+                    "Polymarket orderbook v3 ingress is missing the polymarket_market writer",
+                )
+                .into());
+            };
+            if writer.schema_version != POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION {
+                return Err(invalid_data(format!(
+                    "Polymarket orderbook v3 ingress reached a non-v3 writer:event_type={}:utc_day={}:generation={}",
+                    event.message.event_type(),
+                    event.raw_day_permit.utc_day,
+                    event.raw_day_permit.generation,
+                ))
+                .into());
+            }
+            let recv_time_utc_ms = event.message.envelope.timestamp_received;
+            let event_day = utc_day_string_from_ms(recv_time_utc_ms).ok_or_else(|| {
+                invalid_data("UTC day unavailable for inflight Polymarket v3 message")
+            })?;
+            if event_day != event.raw_day_permit.utc_day || event.raw_day_permit.generation == 0 {
+                return Err(invalid_data(format!(
+                    "inflight Polymarket v3 raw-day permit mismatch: event_day={event_day} permit={:?}",
+                    event.raw_day_permit
+                ))
+                .into());
+            }
+            *received_rows = received_rows.saturating_add(1);
+            update_polymarket_v3_coverage(coverage, &event.message);
+            *average_event_bytes = rolling_average_bytes(
+                *average_event_bytes,
+                u64::try_from(event.message.owned_bytes())
+                    .map_err(|_| invalid_data("Polymarket v3 owned bytes do not fit in u64"))?,
+                *received_rows,
+            );
+            batches.polymarket_orderbook_v3.push(event);
+            if batches.polymarket_orderbook_v3.len() >= DEFAULT_FLUSH_ROWS {
+                flush_polymarket_orderbook_v3_batch(
+                    writers,
+                    &mut batches.polymarket_orderbook_v3,
+                    gaps,
+                    runtime_stats,
+                    writer_queue_tracker,
+                    run_started,
+                )
+                .await?;
+            }
+            return Ok(());
+        }
+    };
     if let Some(control) = inflight_event.control.take() {
         drop(inflight_event);
         return handle_ingress_control(
@@ -8901,7 +9350,7 @@ async fn process_ingress_event(
         *received_rows,
     );
     let source_kind = event.source_kind.clone();
-    let batch = batches.entry(source_kind.clone()).or_default();
+    let batch = batches.legacy.entry(source_kind.clone()).or_default();
     batch.push(inflight_event);
     if batch.len() >= DEFAULT_FLUSH_ROWS {
         flush_source_batch(
@@ -8941,6 +9390,68 @@ async fn flush_source_batch(
             )
         })
         .collect::<Vec<_>>();
+    send_writer_batch(
+        writers,
+        source_kind,
+        WriterCommand::Events(events),
+        rows,
+        &drop_facts,
+        gaps,
+        runtime_stats,
+        writer_queue_tracker,
+        run_started,
+    )
+    .await
+}
+
+async fn flush_polymarket_orderbook_v3_batch(
+    writers: &mut BTreeMap<String, SourceWriterHandle>,
+    batch: &mut Vec<InflightPolymarketOrderbookV3>,
+    gaps: &SharedSourceGaps,
+    runtime_stats: &SourceQueueBackpressureStats,
+    writer_queue_tracker: &mut QueueDurationTracker,
+    run_started: Instant,
+) -> Result<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let rows = batch.len() as u64;
+    let events = std::mem::take(batch);
+    let drop_facts = events
+        .iter()
+        .map(|event| {
+            (
+                "polymarket_market".to_owned(),
+                event.message.envelope.timestamp_received,
+            )
+        })
+        .collect::<Vec<_>>();
+    send_writer_batch(
+        writers,
+        "polymarket_market",
+        WriterCommand::PolymarketOrderbookV3(events),
+        rows,
+        &drop_facts,
+        gaps,
+        runtime_stats,
+        writer_queue_tracker,
+        run_started,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_writer_batch(
+    writers: &BTreeMap<String, SourceWriterHandle>,
+    source_kind: &str,
+    mut command: WriterCommand,
+    rows: u64,
+    drop_facts: &[(String, i64)],
+    gaps: &SharedSourceGaps,
+    runtime_stats: &SourceQueueBackpressureStats,
+    writer_queue_tracker: &mut QueueDurationTracker,
+    run_started: Instant,
+) -> Result<()> {
     let Some(writer) = writers.get(source_kind) else {
         writer_queue_tracker.record_drop(rows);
         record_writer_drop_facts(runtime_stats, &drop_facts);
@@ -8948,7 +9459,6 @@ async fn flush_source_batch(
         record_gap(gaps, gap.clone());
         return Err(io::Error::new(io::ErrorKind::BrokenPipe, gap).into());
     };
-    let mut command = WriterCommand::Events(events);
     writer.queue_rows.fetch_add(rows, Ordering::Relaxed);
     match try_send_writer_command(writer, command) {
         Ok(()) => {
@@ -9403,6 +9913,7 @@ async fn stop_writer_workers_with_optional_close(
     let mut proven = BTreeSet::new();
     for (source_kind, writer) in std::mem::take(&mut writers) {
         let SourceWriterHandle {
+            schema_version: _,
             tx,
             queue_rows: _,
             accepting_commands: _,
@@ -9525,10 +10036,12 @@ fn source_writer_worker(
     runtime_stats: Arc<SourceQueueBackpressureStats>,
     manifest_tx: mpsc::Sender<ManifestCommand>,
 ) -> Result<SourceWriterOutput> {
+    let writer_schema_version = typed_schema_version(&source_kind).to_owned();
     source_writer_worker_with_startup(
         dataset_root,
         provenance,
         source_kind,
+        writer_schema_version,
         rx,
         queue_rows,
         accepting_commands,
@@ -9545,6 +10058,7 @@ fn source_writer_worker_with_startup(
     dataset_root: PathBuf,
     provenance: RuntimeProvenance,
     source_kind: String,
+    writer_schema_version: String,
     rx: std::sync::mpsc::Receiver<WriterCommand>,
     queue_rows: Arc<AtomicU64>,
     accepting_commands: Arc<Mutex<bool>>,
@@ -9555,6 +10069,9 @@ fn source_writer_worker_with_startup(
     raw_day_gate: Option<Arc<RawDayGate>>,
 ) -> Result<SourceWriterOutput> {
     let mut active = None::<ActiveSegment>;
+    let mut polymarket_v3_sequence_state = (source_kind == "polymarket_market"
+        && writer_schema_version == POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION)
+        .then(PolymarketOrderbookV3WriteSequenceState::default);
     let mut finalized_segments = Vec::new();
     let mut stats = SourceWriterStatsBuilder::new(source_kind.clone());
     let partition_policy = HourlyPartitionPolicy::new(&dataset_root)?;
@@ -9591,6 +10108,28 @@ fn source_writer_worker_with_startup(
             match command {
                 WriterCommand::Events(events) => {
                     queue_rows.fetch_sub(events.len() as u64, Ordering::Relaxed);
+                    if writer_schema_version != typed_schema_version(&source_kind) {
+                        let drop_facts = events
+                            .iter()
+                            .map(|event| {
+                                (
+                                    event.event.source_kind.clone(),
+                                    event.event.recv_time_utc_ms,
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        record_writer_drop_facts(&runtime_stats, &drop_facts);
+                        stop_accepting_and_record_queued_drops(
+                            &accepting_commands,
+                            &rx,
+                            &queue_rows,
+                            &runtime_stats,
+                        );
+                        return Err(invalid_data(format!(
+                            "legacy raw writer command does not match frozen writer schema:source={source_kind}:schema={writer_schema_version}"
+                        ))
+                        .into());
+                    }
                     let mut events = events.into_iter();
                     while let Some(inflight_event) = events.next() {
                         let event = &inflight_event.event;
@@ -9672,6 +10211,143 @@ fn source_writer_worker_with_startup(
                                     .chain(events)
                                     .map(|event| {
                                         (event.event.source_kind, event.event.recv_time_utc_ms)
+                                    })
+                                    .collect::<Vec<_>>(),
+                            );
+                            stop_accepting_and_record_queued_drops(
+                                &accepting_commands,
+                                &rx,
+                                &queue_rows,
+                                &runtime_stats,
+                            );
+                            return Err(error);
+                        }
+                    }
+                }
+                WriterCommand::PolymarketOrderbookV3(events) => {
+                    queue_rows.fetch_sub(events.len() as u64, Ordering::Relaxed);
+                    if source_kind != "polymarket_market"
+                        || writer_schema_version != POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION
+                    {
+                        let drop_facts = events
+                            .iter()
+                            .map(|event| {
+                                (
+                                    "polymarket_market".to_owned(),
+                                    event.message.envelope.timestamp_received,
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        record_writer_drop_facts(&runtime_stats, &drop_facts);
+                        stop_accepting_and_record_queued_drops(
+                            &accepting_commands,
+                            &rx,
+                            &queue_rows,
+                            &runtime_stats,
+                        );
+                        return Err(invalid_data(format!(
+                            "Polymarket v3 writer command does not match frozen writer identity:source={source_kind}:schema={writer_schema_version}"
+                        ))
+                        .into());
+                    }
+                    let sequence_state = polymarket_v3_sequence_state
+                        .as_mut()
+                        .expect("validated Polymarket v3 writer owns sequence state");
+                    let mut events = events.into_iter();
+                    while let Some(inflight_event) = events.next() {
+                        let message = &inflight_event.message;
+                        let recv_time_utc_ms = message.envelope.timestamp_received;
+                        let process_result = (|| -> Result<()> {
+                            let event_day =
+                                utc_day_string_from_ms(recv_time_utc_ms).ok_or_else(|| {
+                                    invalid_data(
+                                        "UTC day unavailable in Polymarket v3 source writer",
+                                    )
+                                })?;
+                            if event_day != inflight_event.raw_day_permit.utc_day {
+                                return Err(invalid_data(format!(
+                                    "writer Polymarket v3 raw-day permit mismatch:source={source_kind}:event_day={event_day}:permit={:?}",
+                                    inflight_event.raw_day_permit
+                                ))
+                                .into());
+                            }
+                            match expected_raw_epoch.as_ref() {
+                                Some(expected) if expected != &inflight_event.raw_day_permit => {
+                                    return Err(invalid_data(format!(
+                                        "writer Polymarket v3 raw-day generation mismatch:source={source_kind}:expected={expected:?}:actual={:?}",
+                                        inflight_event.raw_day_permit
+                                    ))
+                                    .into());
+                                }
+                                None => {
+                                    expected_raw_epoch =
+                                        Some(inflight_event.raw_day_permit.clone());
+                                    writer_epoch.set(&inflight_event.raw_day_permit);
+                                }
+                                Some(_) => {}
+                            }
+                            let current_partition =
+                                partition_policy.partition(&source_kind, recv_time_utc_ms, None)?;
+                            if let Some(reason) = active.as_ref().and_then(|segment| {
+                                live_segment_rollover_reason(segment, &current_partition.utc_hour)
+                            }) {
+                                let segment = active.take().expect("active segment exists");
+                                finalized_segments.push(finalize_segment_with_drop_accounting(
+                                    segment,
+                                    reason,
+                                    &provenance,
+                                    &manifest_tx,
+                                    &runtime_stats,
+                                )?);
+                            }
+                            if active.is_none() {
+                                let (naming, selected_hour_part) = next_available_hourly_partition(
+                                    &partition_policy,
+                                    &source_kind,
+                                    recv_time_utc_ms,
+                                    None,
+                                )?;
+                                active = Some(ActiveSegment::new_with_schema_version(
+                                    naming,
+                                    &source_kind,
+                                    &writer_schema_version,
+                                    selected_hour_part,
+                                )?);
+                            }
+                            let segment = active.as_mut().expect("active segment exists");
+                            if segment.writer.schema_version() != writer_schema_version {
+                                return Err(invalid_data(format!(
+                                    "active segment schema drift:source={source_kind}:expected={writer_schema_version}:actual={}",
+                                    segment.writer.schema_version()
+                                ))
+                                .into());
+                            }
+                            let write_started = Instant::now();
+                            let written_rows = segment
+                                .writer
+                                .write_polymarket_orderbook_v3(message, sequence_state)?;
+                            let write_events_us = write_started.elapsed().as_micros() as u64;
+                            segment.observe_polymarket_orderbook_v3(message, written_rows);
+                            stats.record_written_event(
+                                recv_time_utc_ms,
+                                written_rows,
+                                write_events_us,
+                            );
+                            Ok(())
+                        })();
+                        if let Err(error) = process_result {
+                            if let Some(segment) = active.as_ref() {
+                                record_unfinalized_segment_drop(&runtime_stats, segment);
+                            }
+                            record_writer_drop_facts(
+                                &runtime_stats,
+                                &std::iter::once(inflight_event)
+                                    .chain(events)
+                                    .map(|event| {
+                                        (
+                                            "polymarket_market".to_owned(),
+                                            event.message.envelope.timestamp_received,
+                                        )
                                     })
                                     .collect::<Vec<_>>(),
                             );
@@ -9951,13 +10627,27 @@ fn stop_accepting_and_record_queued_drops(
     *accepting = false;
     let mut drop_facts = Vec::new();
     while let Ok(command) = rx.try_recv() {
-        if let WriterCommand::Events(events) = command {
-            queue_rows.fetch_sub(events.len() as u64, Ordering::Relaxed);
-            drop_facts.extend(
-                events
-                    .into_iter()
-                    .map(|event| (event.event.source_kind, event.event.recv_time_utc_ms)),
-            );
+        match command {
+            WriterCommand::Events(events) => {
+                queue_rows.fetch_sub(events.len() as u64, Ordering::Relaxed);
+                drop_facts.extend(
+                    events
+                        .into_iter()
+                        .map(|event| (event.event.source_kind, event.event.recv_time_utc_ms)),
+                );
+            }
+            WriterCommand::PolymarketOrderbookV3(events) => {
+                queue_rows.fetch_sub(events.len() as u64, Ordering::Relaxed);
+                drop_facts.extend(events.into_iter().map(|event| {
+                    (
+                        "polymarket_market".to_owned(),
+                        event.message.envelope.timestamp_received,
+                    )
+                }));
+            }
+            WriterCommand::FinalizeHour { .. }
+            | WriterCommand::FinalizeDay { .. }
+            | WriterCommand::Shutdown { .. } => {}
         }
     }
     drop(accepting);
@@ -9971,11 +10661,11 @@ fn finalize_segment(
     manifest_tx: &mpsc::Sender<ManifestCommand>,
 ) -> Result<LiveFinalizedSegment> {
     let source_kind = segment.source_kind.clone();
-    let schema_version = typed_schema_version(&source_kind);
+    let schema_version = segment.writer.schema_version().to_owned();
     let manifest_context = SegmentManifestContext::from_segment(&segment);
     let facts = segment_daily_facts(
         &manifest_context,
-        schema_version,
+        &schema_version,
         rollover_reason,
         provenance,
     );
@@ -9984,7 +10674,7 @@ fn finalize_segment(
         utc_hour: manifest_context.utc_hour.clone(),
         part: manifest_context.hour_part,
         rows: manifest_context.rows,
-        schema_version: schema_version.to_owned(),
+        schema_version,
         first_recv_time_utc_ms: manifest_context.segment_start_recv_time_utc_ms,
         last_recv_time_utc_ms: manifest_context.last_recv_time_utc_ms,
         source_timestamp_start: manifest_context.source_ts_start.clone(),
@@ -10401,7 +11091,7 @@ where
         return Err(error);
     }
     for (permit, event) in permits.zip(events) {
-        permit.send(event);
+        permit.send(SourceIngressPayload::LegacyRaw(event));
     }
     Ok(EventAdmissionOutcome::Admitted)
 }
@@ -10672,8 +11362,36 @@ async fn send_polymarket_metadata_v3_row(
     run_started: Instant,
     row: PolymarketMarketMetadataV3Row,
 ) -> Result<()> {
-    let event = polymarket_metadata_v3_raw_event(row)?;
+    let event = polymarket_metadata_v4_event(row, None, None)?;
     send_event(sink, run_started, event).await
+}
+
+fn polymarket_metadata_v4_event(
+    row: PolymarketMarketMetadataV3Row,
+    ws_claimant_source_sequence_epoch_id: Option<String>,
+    ws_claimant_collector_admission_sequence: Option<u64>,
+) -> Result<RawEvent> {
+    let mut row = PolymarketMarketMetadataV4Row::from_v3_prefix(
+        row,
+        ws_claimant_source_sequence_epoch_id,
+        ws_claimant_collector_admission_sequence,
+    );
+    validate_polymarket_metadata_v4_draft(&mut row)?;
+    polymarket_metadata_v4_raw_event(row)
+}
+
+fn validate_polymarket_metadata_v4_draft(row: &mut PolymarketMarketMetadataV4Row) -> Result<()> {
+    row.v3_prefix.collector_admission_sequence = 1;
+    row.v3_prefix.collector_admission_time_utc_ms = now_ms();
+    let validation = row.validate();
+    if !validation.is_complete() {
+        return Err(invalid_data(format!(
+            "Polymarket metadata v4 validation failed before admission:{}",
+            validation.violations.join(",")
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 async fn send_polymarket_metadata_v3_row_with_ticket(
@@ -10681,7 +11399,11 @@ async fn send_polymarket_metadata_v3_row_with_ticket(
     run_started: Instant,
     accepted: AcceptedPolymarketMetadataRow,
 ) -> Result<()> {
-    let event = polymarket_metadata_v3_raw_event(accepted.row)?;
+    let event = polymarket_metadata_v4_event(
+        accepted.row,
+        accepted.ws_claimant_source_sequence_epoch_id,
+        accepted.ws_claimant_collector_admission_sequence,
+    )?;
     send_event_with_ticket(sink, run_started, event, &accepted.raw_day_ticket).await
 }
 
@@ -10691,7 +11413,7 @@ async fn send_polymarket_metadata_v3_source_authority_row(
     row: PolymarketMarketMetadataV3Row,
 ) -> Result<PolymarketMetadataV3ReferenceRecord> {
     let authority = PolymarketMetadataV3ReferenceRecord::from(&row);
-    let event = polymarket_metadata_v3_raw_event(row)?;
+    let event = polymarket_metadata_v4_event(row, None, None)?;
     match send_event_with_admission_outcome(sink, run_started, event).await? {
         EventAdmissionOutcome::Admitted => Ok(authority),
         EventAdmissionOutcome::Deferred => Err(invalid_data(
@@ -10710,7 +11432,11 @@ async fn send_polymarket_metadata_v3_rows_atomically(
     run_started: Instant,
     rows: Vec<PolymarketMarketMetadataV3Row>,
 ) -> Result<EventAdmissionOutcome> {
-    send_polymarket_metadata_v3_rows_atomically_with_authority(sink, run_started, rows, None).await
+    let rows = rows
+        .into_iter()
+        .map(|row| PolymarketMarketMetadataV4Row::from_v3_prefix(row, None, None))
+        .collect();
+    send_polymarket_metadata_v4_rows_atomically_with_authority(sink, run_started, rows, None).await
 }
 
 async fn send_polymarket_metadata_v3_rows_atomically_with_tickets(
@@ -10735,9 +11461,15 @@ async fn send_polymarket_metadata_v3_rows_atomically_with_tickets(
     }
     let rows = accepted_rows
         .into_iter()
-        .map(|accepted| accepted.row)
+        .map(|accepted| {
+            PolymarketMarketMetadataV4Row::from_v3_prefix(
+                accepted.row,
+                accepted.ws_claimant_source_sequence_epoch_id,
+                accepted.ws_claimant_collector_admission_sequence,
+            )
+        })
         .collect();
-    send_polymarket_metadata_v3_rows_atomically_with_authority(
+    send_polymarket_metadata_v4_rows_atomically_with_authority(
         sink,
         run_started,
         rows,
@@ -10746,15 +11478,18 @@ async fn send_polymarket_metadata_v3_rows_atomically_with_tickets(
     .await
 }
 
-async fn send_polymarket_metadata_v3_rows_atomically_with_authority(
+async fn send_polymarket_metadata_v4_rows_atomically_with_authority(
     sink: &SourceEventSink,
     run_started: Instant,
-    rows: Vec<PolymarketMarketMetadataV3Row>,
+    mut rows: Vec<PolymarketMarketMetadataV4Row>,
     raw_day_ticket: Option<&RawDayAcceptedTicket>,
 ) -> Result<EventAdmissionOutcome> {
+    for row in &mut rows {
+        validate_polymarket_metadata_v4_draft(row)?;
+    }
     if rows.len() <= 1 {
         if let Some(row) = rows.into_iter().next() {
-            let event = polymarket_metadata_v3_raw_event(row)?;
+            let event = polymarket_metadata_v4_raw_event(row)?;
             return match raw_day_ticket {
                 Some(ticket) => {
                     send_event_with_ticket_outcome(sink, run_started, event, ticket).await
@@ -10767,7 +11502,7 @@ async fn send_polymarket_metadata_v3_rows_atomically_with_authority(
 
     let events = rows
         .into_iter()
-        .map(polymarket_metadata_v3_raw_event)
+        .map(polymarket_metadata_v4_raw_event)
         .collect::<Result<Vec<_>>>()?;
     let recv_time_utc_ms = events[0].recv_time_utc_ms;
     let partition = utc_hour_string_from_ms(recv_time_utc_ms)
@@ -13266,6 +14001,250 @@ fn binance_ws_payload(value: &Value) -> &Value {
     value.get("data").unwrap_or(value)
 }
 
+fn record_polymarket_v3_admission_failure(
+    sink: &SourceEventSink,
+    recv_time_utc_ms: i64,
+    reason: &str,
+) {
+    sink.source_queue_backpressure.record_drop(1);
+    sink.source_queue_backpressure.record_operational_drop(
+        "polymarket_market",
+        recv_time_utc_ms,
+        1,
+    );
+    record_gap_at(
+        &sink.gaps,
+        recv_time_utc_ms,
+        format!("polymarket_orderbook_v3_admission_failed:{reason}"),
+    );
+}
+
+async fn enqueue_polymarket_orderbook_v3_with_ticket<F>(
+    sink: &SourceEventSink,
+    run_started: Instant,
+    recv_time_utc_ms: i64,
+    ticket: &RawDayAcceptedTicket,
+    collector_identity: &CollectorIdentity,
+    source_endpoint: &str,
+    source_sequence_epoch_id: &str,
+    build_projection: F,
+) -> Result<PolymarketOrderbookV3AdmissionReceipt>
+where
+    F: FnOnce() -> Result<PolymarketOrderbookV3Projection>,
+{
+    let gate = sink
+        .source_queue_backpressure
+        .raw_day_gate()
+        .ok_or_else(|| invalid_data("raw-day gate missing from Polymarket v3 admission path"))?;
+    let raw_enqueue = gate
+        .begin_accepted_ticket_enqueue("polymarket", recv_time_utc_ms, ticket)
+        .await?;
+
+    let budget_deadline = TokioInstant::now() + BUFFER_ACQUIRE_TIMEOUT;
+    let mut byte_reservation = match sink
+        .inflight_budget
+        .acquire(0, MAX_TYPED_ROW_BYTES, BUFFER_ACQUIRE_TIMEOUT)
+        .await
+    {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            sink.source_queue_backpressure.record_timeout();
+            record_polymarket_v3_admission_failure(
+                sink,
+                recv_time_utc_ms,
+                &format!("global_inflight_budget_failed:{error}"),
+            );
+            return Err(error.into());
+        }
+    };
+    let projection = build_projection().inspect_err(|error| {
+        record_polymarket_v3_admission_failure(
+            sink,
+            recv_time_utc_ms,
+            &format!("canonical_projection_failed:{error}"),
+        );
+    })?;
+    let pending = projection
+        .prepare_admission(
+            recv_time_utc_ms,
+            collector_identity.host_id.clone(),
+            collector_identity.region.clone(),
+            source_endpoint.to_owned(),
+            source_sequence_epoch_id.to_owned(),
+        )
+        .inspect_err(|error| {
+            record_polymarket_v3_admission_failure(
+                sink,
+                recv_time_utc_ms,
+                &format!("canonical_projection_failed:{error}"),
+            );
+        })?;
+    let owned_bytes = pending.owned_bytes();
+    if owned_bytes > MAX_TYPED_ROW_BYTES {
+        let reason = format!(
+            "operator_intervention_required:max_typed_row_bytes_exceeded:bytes={owned_bytes}:limit={MAX_TYPED_ROW_BYTES}"
+        );
+        record_polymarket_v3_admission_failure(sink, recv_time_utc_ms, &reason);
+        return Err(invalid_data(reason).into());
+    }
+    byte_reservation
+        .shrink_to(0, owned_bytes)
+        .inspect_err(|error| {
+            record_polymarket_v3_admission_failure(
+                sink,
+                recv_time_utc_ms,
+                &format!("inflight_byte_reservation_shrink_failed:{error}"),
+            );
+        })?;
+    let row_reservation = match sink
+        .inflight_budget
+        .acquire(
+            1,
+            0,
+            budget_deadline.saturating_duration_since(TokioInstant::now()),
+        )
+        .await
+    {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            sink.source_queue_backpressure.record_timeout();
+            record_polymarket_v3_admission_failure(
+                sink,
+                recv_time_utc_ms,
+                &format!("global_inflight_row_budget_failed:{error}"),
+            );
+            return Err(error.into());
+        }
+    };
+
+    match raw_enqueue {
+        RawDayEnqueueDecision::Permit(raw_enqueue) => {
+            let _enqueue_guard = sink.enqueue_lock.lock().await;
+            let queue_permit = match sink.tx.try_reserve() {
+                Ok(permit) => permit,
+                Err(mpsc::error::TrySendError::Full(())) => {
+                    sink.source_queue_backpressure.record_wait();
+                    match timeout(BUFFER_ACQUIRE_TIMEOUT, sink.tx.reserve()).await {
+                        Ok(Ok(permit)) => permit,
+                        Ok(Err(_)) => {
+                            let reason = "bounded_queue_send_closed";
+                            record_polymarket_v3_admission_failure(sink, recv_time_utc_ms, reason);
+                            return Err(io::Error::new(io::ErrorKind::BrokenPipe, reason).into());
+                        }
+                        Err(_) => {
+                            sink.source_queue_backpressure.record_timeout();
+                            let reason = "bounded_queue_backpressure_timeout";
+                            record_polymarket_v3_admission_failure(sink, recv_time_utc_ms, reason);
+                            return Err(io::Error::new(io::ErrorKind::TimedOut, reason).into());
+                        }
+                    }
+                }
+                Err(mpsc::error::TrySendError::Closed(())) => {
+                    let reason = "bounded_queue_send_closed";
+                    record_polymarket_v3_admission_failure(sink, recv_time_utc_ms, reason);
+                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, reason).into());
+                }
+            };
+            let (message, receipt) = admit_polymarket_orderbook_v3_pending(
+                sink,
+                recv_time_utc_ms,
+                source_sequence_epoch_id,
+                pending,
+                owned_bytes,
+            )?;
+            queue_permit.send(SourceIngressPayload::PolymarketOrderbookV3(
+                InflightPolymarketOrderbookV3 {
+                    message,
+                    raw_day_permit: raw_enqueue.permit,
+                    _source_recv_monotonic_ms: monotonic_ms(run_started),
+                    _row_reservation: row_reservation,
+                    _byte_reservation: byte_reservation,
+                },
+            ));
+            Ok(receipt)
+        }
+        RawDayEnqueueDecision::Defer(epoch) => {
+            let mut deferred = sink
+                .source_queue_backpressure
+                .deferred_ingress_batches
+                .lock()
+                .expect("deferred ingress mutex poisoned");
+            let (message, receipt) = admit_polymarket_orderbook_v3_pending(
+                sink,
+                recv_time_utc_ms,
+                source_sequence_epoch_id,
+                pending,
+                owned_bytes,
+            )?;
+            deferred
+                .entry("polymarket".to_owned())
+                .or_default()
+                .push_back(DeferredIngressBatch::PolymarketOrderbookV3(
+                    DeferredPolymarketOrderbookV3 {
+                        epoch,
+                        accepted_ticket: ticket.clone(),
+                        message,
+                        _source_recv_monotonic_ms: monotonic_ms(run_started),
+                        _row_reservation: row_reservation,
+                        _byte_reservation: byte_reservation,
+                    },
+                ));
+            Ok(receipt)
+        }
+    }
+}
+
+fn admit_polymarket_orderbook_v3_pending(
+    sink: &SourceEventSink,
+    recv_time_utc_ms: i64,
+    source_sequence_epoch_id: &str,
+    pending: PendingPolymarketOrderbookV3Admission,
+    owned_bytes: usize,
+) -> Result<(
+    PolymarketOrderbookV3Message,
+    PolymarketOrderbookV3AdmissionReceipt,
+)> {
+    let collector_admission_time_utc_ms = now_ms();
+    if collector_admission_time_utc_ms <= 0 || recv_time_utc_ms > collector_admission_time_utc_ms {
+        let reason = format!(
+            "invalid_real_admission_clock:received={recv_time_utc_ms}:admission={collector_admission_time_utc_ms}"
+        );
+        record_polymarket_v3_admission_failure(sink, recv_time_utc_ms, &reason);
+        return Err(invalid_data(reason).into());
+    }
+    let collector_admission_sequence = sink
+        .source_queue_backpressure
+        .reserve_admission_sequences("polymarket_market", 1)
+        .inspect_err(|error| {
+            record_polymarket_v3_admission_failure(
+                sink,
+                recv_time_utc_ms,
+                &format!("sequence_allocation_failed:{error}"),
+            );
+        })?;
+    let message = pending
+        .admit(
+            collector_admission_sequence,
+            collector_admission_time_utc_ms,
+        )
+        .inspect_err(|error| {
+            record_polymarket_v3_admission_failure(
+                sink,
+                recv_time_utc_ms,
+                &format!("canonical_admission_failed:{error}"),
+            );
+        })?;
+    debug_assert_eq!(message.owned_bytes(), owned_bytes);
+    let market_resolved = polymarket_market_resolved_admission_evidence(&message)?;
+    let receipt = PolymarketOrderbookV3AdmissionReceipt {
+        source_sequence_epoch_id: source_sequence_epoch_id.to_owned(),
+        collector_admission_sequence,
+        collector_admission_time_utc_ms,
+        market_resolved,
+    };
+    Ok((message, receipt))
+}
+
 fn source_admission_authority(event: &RawEvent) -> Option<&'static str> {
     match event.source_kind.as_str() {
         "binance_aggtrade" => "binance_aggtrade",
@@ -13707,7 +14686,7 @@ async fn enqueue_event_with_reservation_outcome(
     };
     stamp_source_admission(&mut inflight_event.event, sink)?;
     let admission_gaps = std::mem::take(&mut inflight_event.admission_gaps);
-    permit.send(inflight_event);
+    permit.send(SourceIngressPayload::LegacyRaw(inflight_event));
     for gap in admission_gaps {
         record_gap_at(&sink.gaps, recv_time_utc_ms, gap);
     }
@@ -13742,6 +14721,7 @@ async fn send_ingress_control(
         _source_recv_monotonic_ms: monotonic_ms(run_started),
         _reservation: None,
     };
+    let message = SourceIngressPayload::LegacyRaw(message);
     match sink.tx.try_send(message) {
         Ok(()) => Ok(()),
         Err(mpsc::error::TrySendError::Full(message)) => {
@@ -13891,6 +14871,42 @@ fn update_coverage(coverage: &mut BTreeMap<String, CoverageStats>, event: &RawEv
             .entry(slug.to_owned())
             .and_modify(|value| *value = (*value).min(event.recv_time_utc_ms))
             .or_insert(event.recv_time_utc_ms);
+    }
+}
+
+fn update_polymarket_v3_coverage(
+    coverage: &mut BTreeMap<String, CoverageStats>,
+    message: &PolymarketOrderbookV3Message,
+) {
+    let recv_time_utc_ms = message.envelope.timestamp_received;
+    let stats = coverage.entry("polymarket_market".to_owned()).or_default();
+    stats.rows = stats.rows.saturating_add(1);
+    *stats
+        .event_type_counts
+        .entry(message.event_type().to_owned())
+        .or_default() += 1;
+    stats.first_recv_time_utc_ms = stats
+        .first_recv_time_utc_ms
+        .map_or(Some(recv_time_utc_ms), |value| {
+            Some(value.min(recv_time_utc_ms))
+        });
+    stats.last_recv_time_utc_ms = stats
+        .last_recv_time_utc_ms
+        .map_or(Some(recv_time_utc_ms), |value| {
+            Some(value.max(recv_time_utc_ms))
+        });
+    if let Some(slug) = message
+        .envelope
+        .slug
+        .as_deref()
+        .filter(|slug| slug.starts_with("btc-updown-5m-"))
+    {
+        stats.market_windows.insert(slug.to_owned());
+        stats
+            .market_window_first_recv_time_utc_ms
+            .entry(slug.to_owned())
+            .and_modify(|value| *value = (*value).min(recv_time_utc_ms))
+            .or_insert(recv_time_utc_ms);
     }
 }
 
@@ -14206,6 +15222,29 @@ fn depth_source_sequence_epoch_id(identity: &CollectorIdentity) -> Result<String
         .as_nanos();
     let mut hasher = Sha256::new();
     hasher.update(b"binance_depth_source_sequence_epoch_v1\0");
+    hasher.update(identity.host_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(identity.region.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(std::process::id().to_le_bytes());
+    hasher.update(started_ns.to_le_bytes());
+    hasher.update(task_sequence.to_le_bytes());
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn polymarket_source_sequence_epoch_id(identity: &CollectorIdentity) -> Result<String> {
+    let task_sequence = POLYMARKET_SOURCE_EPOCH_COUNTER
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            current.checked_add(1)
+        })
+        .map(|previous| previous + 1)
+        .map_err(|_| invalid_data("Polymarket market source epoch sequence overflow"))?;
+    let started_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| invalid_data(format!("system clock precedes Unix epoch: {error}")))?
+        .as_nanos();
+    let mut hasher = Sha256::new();
+    hasher.update(b"polymarket_market_source_sequence_epoch_v1\0");
     hasher.update(identity.host_id.as_bytes());
     hasher.update(b"\0");
     hasher.update(identity.region.as_bytes());
@@ -15045,6 +16084,7 @@ fn source_task_ended_unexpectedly(source_kind: &str) -> String {
 }
 
 struct SourceWriterHandle {
+    schema_version: String,
     tx: std::sync::mpsc::SyncSender<WriterCommand>,
     queue_rows: Arc<AtomicU64>,
     accepting_commands: Arc<Mutex<bool>>,
@@ -15108,6 +16148,7 @@ struct WriterTaskReport {
 
 enum WriterCommand {
     Events(Vec<InflightRawEvent>),
+    PolymarketOrderbookV3(Vec<InflightPolymarketOrderbookV3>),
     FinalizeHour { utc_hour: String },
     FinalizeDay { close: RawDayClose },
     Shutdown { close: RuntimeCloseIdentity },
@@ -15307,7 +16348,22 @@ struct ActiveSegment {
 
 impl ActiveSegment {
     fn new(naming: HourlyPartition, source_kind: &str, hour_part: u32) -> Result<Self> {
-        let writer = LiveSegmentWriter::create(&naming, source_kind)?;
+        Self::new_with_schema_version(
+            naming,
+            source_kind,
+            typed_schema_version(source_kind),
+            hour_part,
+        )
+    }
+
+    fn new_with_schema_version(
+        naming: HourlyPartition,
+        source_kind: &str,
+        schema_version: &str,
+        hour_part: u32,
+    ) -> Result<Self> {
+        let writer =
+            LiveSegmentWriter::create_with_schema_version(&naming, source_kind, schema_version)?;
         Ok(Self {
             source_kind: source_kind.to_owned(),
             utc_day: naming.utc_day.clone(),
@@ -15483,6 +16539,78 @@ impl ActiveSegment {
             }
         }
     }
+
+    fn observe_polymarket_orderbook_v3(
+        &mut self,
+        message: &PolymarketOrderbookV3Message,
+        typed_rows: u64,
+    ) {
+        let recv_time_utc_ms = message.envelope.timestamp_received;
+        if self.rows == 0 {
+            self.segment_start_recv_time_utc_ms = recv_time_utc_ms;
+            self.last_recv_time_utc_ms = recv_time_utc_ms;
+        } else {
+            self.segment_start_recv_time_utc_ms =
+                self.segment_start_recv_time_utc_ms.min(recv_time_utc_ms);
+            self.last_recv_time_utc_ms = self.last_recv_time_utc_ms.max(recv_time_utc_ms);
+        }
+        if let Some(source_ts) = message.envelope.timestamp.map(|value| value.to_string()) {
+            if self.source_ts_start.is_none() {
+                self.source_ts_start = Some(source_ts.clone());
+            }
+            self.source_ts_end = Some(source_ts);
+        }
+        self.rows = self.rows.saturating_add(typed_rows);
+        self.bytes = self
+            .bytes
+            .saturating_add(u64::try_from(message.owned_bytes()).unwrap_or(u64::MAX));
+        *self
+            .event_type_counts
+            .entry(message.event_type().to_owned())
+            .or_default() += typed_rows;
+        if let Some(slug) = message
+            .envelope
+            .slug
+            .as_deref()
+            .filter(|slug| !slug.trim().is_empty())
+        {
+            self.covered_market_slugs.insert(slug.to_owned());
+        }
+        self.covered_condition_ids
+            .insert(message.envelope.market.clone());
+        match &message.event {
+            PolymarketOrderbookV3Event::Book(book) => {
+                self.book_rows_with_bids_asks =
+                    self.book_rows_with_bids_asks.saturating_add(typed_rows);
+                self.covered_asset_ids.insert(book.asset_id.clone());
+            }
+            PolymarketOrderbookV3Event::PriceChange(price_change) => {
+                self.covered_asset_ids.extend(
+                    price_change
+                        .price_changes
+                        .iter()
+                        .map(|change| change.asset_id.clone()),
+                );
+            }
+            PolymarketOrderbookV3Event::TickSizeChange(tick) => {
+                self.covered_asset_ids.insert(tick.asset_id.clone());
+            }
+            PolymarketOrderbookV3Event::LastTradePrice(trade) => {
+                self.covered_asset_ids.insert(trade.asset_id.clone());
+            }
+            PolymarketOrderbookV3Event::BestBidAsk(best) => {
+                self.covered_asset_ids.insert(best.asset_id.clone());
+            }
+            PolymarketOrderbookV3Event::NewMarket(market) => {
+                self.covered_asset_ids
+                    .extend(market.asset_ids.iter().cloned());
+            }
+            PolymarketOrderbookV3Event::MarketResolved(market) => {
+                self.covered_asset_ids
+                    .extend(market.asset_ids.iter().cloned());
+            }
+        }
+    }
 }
 
 enum LiveSegmentWriter {
@@ -15490,12 +16618,16 @@ enum LiveSegmentWriter {
 }
 
 impl LiveSegmentWriter {
-    fn create(naming: &HourlyPartition, source_kind: &str) -> Result<Self> {
+    fn create_with_schema_version(
+        naming: &HourlyPartition,
+        source_kind: &str,
+        schema_version: &str,
+    ) -> Result<Self> {
         Ok(Self::Typed(
             TypedParquetSegmentWriter::create_for_typed_source(
                 &naming.partition_path,
                 &naming.stem,
-                typed_schema_version(source_kind),
+                schema_version,
                 source_kind,
             )?,
         ))
@@ -15504,6 +16636,28 @@ impl LiveSegmentWriter {
     fn write_event(&mut self, event: &RawEvent) -> Result<u64> {
         match self {
             Self::Typed(writer) => write_typed_live_event(writer, event),
+        }
+    }
+
+    fn write_polymarket_orderbook_v3(
+        &mut self,
+        message: &PolymarketOrderbookV3Message,
+        sequence_state: &mut PolymarketOrderbookV3WriteSequenceState,
+    ) -> Result<u64> {
+        match self {
+            Self::Typed(writer) => {
+                writer.write_polymarket_orderbook_v3_messages(
+                    std::slice::from_ref(message),
+                    sequence_state,
+                )?;
+                Ok(1)
+            }
+        }
+    }
+
+    fn schema_version(&self) -> &str {
+        match self {
+            Self::Typed(writer) => writer.schema_version(),
         }
     }
 
@@ -15528,8 +16682,8 @@ impl LiveSegmentWriter {
 
 fn typed_schema_version(source_kind: &str) -> &'static str {
     match source_kind {
-        "polymarket_market" => POLYMARKET_ORDERBOOK_SCHEMA_VERSION,
-        "polymarket_market_metadata" => POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
+        "polymarket_market" => POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,
+        "polymarket_market_metadata" => POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION,
         "binance_depth_snapshot" => BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
         "binance_depth_update" => BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
         "binance_aggtrade" => "binance_aggtrade_v6",
@@ -15542,9 +16696,11 @@ fn write_typed_live_event(writer: &mut TypedParquetSegmentWriter, event: &RawEve
     let logical_bytes = u64::try_from(owned_event_bytes(event))
         .map_err(|_| invalid_data("typed event logical size does not fit in u64"))?;
     match event.source_kind.as_str() {
-        "polymarket_market" => write_polymarket_orderbook_live_event(writer, event, logical_bytes),
+        "polymarket_market" => {
+            Err(invalid_data("legacy raw Polymarket event reached the activated v3 writer").into())
+        }
         "polymarket_market_metadata" => {
-            write_polymarket_metadata_v3_live_event(writer, event, logical_bytes)
+            write_polymarket_metadata_v4_live_event(writer, event, logical_bytes)
         }
         "binance_depth_snapshot" => {
             let row = binance_depth_snapshot_row_from_event(event)?;
@@ -17011,12 +18167,17 @@ mod tests {
         ));
         let deferred_order = {
             let deferred = stats
-                .deferred_raw_batches
+                .deferred_ingress_batches
                 .lock()
                 .expect("deferred raw-event mutex poisoned");
             deferred["binance_aggtrade"]
                 .iter()
-                .flat_map(|batch| batch.events.iter())
+                .flat_map(|batch| match batch {
+                    DeferredIngressBatch::LegacyRaw(batch) => batch.events.iter(),
+                    DeferredIngressBatch::PolymarketOrderbookV3(_) => {
+                        panic!("Binance producer cannot own a deferred Polymarket v3 event")
+                    }
+                })
                 .map(|event| {
                     assert!(event.raw_day_permit.is_none());
                     assert!(event.event.collector_admission.is_none());
@@ -17133,10 +18294,13 @@ mod tests {
         );
         {
             let deferred = stats
-                .deferred_raw_batches
+                .deferred_ingress_batches
                 .lock()
                 .expect("deferred raw-event mutex poisoned");
-            let staged = &deferred["binance_aggtrade"][0].events[0];
+            let DeferredIngressBatch::LegacyRaw(staged) = &deferred["binance_aggtrade"][0] else {
+                panic!("Binance producer cannot own a deferred Polymarket v3 event");
+            };
+            let staged = &staged.events[0];
             assert!(staged.raw_day_permit.is_none());
             assert!(staged.event.collector_admission.is_none());
         }
@@ -17162,7 +18326,7 @@ mod tests {
         assert!(error.to_string().contains("coordinated source stop"));
         assert!(
             stats
-                .deferred_raw_batches
+                .deferred_ingress_batches
                 .lock()
                 .expect("deferred raw-event mutex poisoned")
                 .is_empty()
@@ -17225,7 +18389,7 @@ mod tests {
             .unwrap();
         assert!(
             post_stats
-                .deferred_raw_batches
+                .deferred_ingress_batches
                 .lock()
                 .expect("deferred raw-event mutex poisoned")
                 .is_empty()
@@ -18416,10 +19580,7 @@ mod tests {
         let provenance = test_runtime_provenance("boundary-exit-poll-order");
         let mut writer_handles =
             start_writer_workers(&dataset_root, &provenance, &manifest_tx, &runtime_stats).unwrap();
-        let mut batches = LIVE_SOURCES
-            .iter()
-            .map(|source| ((*source).to_owned(), Vec::new()))
-            .collect::<BTreeMap<_, _>>();
+        let mut batches = PendingIngressBatches::for_live_sources();
         let mut writer_queue_tracker = QueueDurationTracker::new("writer_chunk_queue");
         let run_started = Instant::now();
         let mut coordinator = RolloverCoordinatorState::new(ManifestActivationAckMode::Send);
@@ -18567,7 +19728,7 @@ mod tests {
             None
         };
         let (_event_tx, mut event_rx) =
-            bounded_event_queue::<InflightRawEvent>(DEFAULT_QUEUE_CAPACITY).unwrap();
+            bounded_event_queue::<SourceIngressPayload>(DEFAULT_QUEUE_CAPACITY).unwrap();
         let mut coverage = BTreeMap::new();
         let mut received_rows = 0;
         let mut average_event_bytes = 512;
@@ -18820,6 +19981,7 @@ mod tests {
         let mut writer_handles = BTreeMap::from([(
             "binance_aggtrade".to_owned(),
             SourceWriterHandle {
+                schema_version: typed_schema_version("binance_aggtrade").to_owned(),
                 tx: writer_tx,
                 queue_rows: Arc::new(AtomicU64::new(0)),
                 accepting_commands: Arc::new(Mutex::new(true)),
@@ -18847,10 +20009,7 @@ mod tests {
             .install_raw_day_gate(Arc::clone(&raw_day_gate))
             .unwrap();
         let source_gaps = Arc::new(Mutex::new(SourceGapStore::default()));
-        let mut batches = LIVE_SOURCES
-            .iter()
-            .map(|source| ((*source).to_owned(), Vec::new()))
-            .collect::<BTreeMap<_, _>>();
+        let mut batches = PendingIngressBatches::for_live_sources();
         let mut coverage = BTreeMap::new();
         let mut received_rows = 0;
         let mut average_event_bytes = 512;
@@ -18858,7 +20017,7 @@ mod tests {
         let run_started = Instant::now();
         let (_runtime_exit_tx, mut runtime_exit_rx) = mpsc::channel(1);
         let (_event_tx, mut event_rx) =
-            bounded_event_queue::<InflightRawEvent>(DEFAULT_QUEUE_CAPACITY).unwrap();
+            bounded_event_queue::<SourceIngressPayload>(DEFAULT_QUEUE_CAPACITY).unwrap();
         let mut release_stop_issued = false;
         assert_eq!(
             drive_normal_rollover(
@@ -19319,7 +20478,7 @@ mod tests {
             .install_raw_day_gate(Arc::clone(&raw_day_gate))
             .unwrap();
         let (event_tx, mut event_rx) =
-            bounded_event_queue::<InflightRawEvent>(DEFAULT_QUEUE_CAPACITY).unwrap();
+            bounded_event_queue::<SourceIngressPayload>(DEFAULT_QUEUE_CAPACITY).unwrap();
         let event_sink = SourceEventSink {
             tx: event_tx,
             gaps: Arc::clone(&source_gaps),
@@ -19366,10 +20525,7 @@ mod tests {
             start_writer_workers(&dataset_root, &provenance, &manifest_tx, &runtime_stats).unwrap();
         let mut completed_terminations = Vec::new();
         let mut completed_writer_outcome = None;
-        let mut batches = LIVE_SOURCES
-            .iter()
-            .map(|source| ((*source).to_owned(), Vec::new()))
-            .collect::<BTreeMap<_, _>>();
+        let mut batches = PendingIngressBatches::for_live_sources();
         let mut coverage = BTreeMap::new();
         let mut received_rows = 0;
         let mut average_event_bytes = 512;
@@ -19474,10 +20630,7 @@ mod tests {
         let provenance = test_runtime_provenance("post-activation-exit");
         let mut writer_handles =
             start_writer_workers(&dataset_root, &provenance, &manifest_tx, &runtime_stats).unwrap();
-        let mut batches = LIVE_SOURCES
-            .iter()
-            .map(|source| ((*source).to_owned(), Vec::new()))
-            .collect::<BTreeMap<_, _>>();
+        let mut batches = PendingIngressBatches::for_live_sources();
         let mut writer_queue_tracker = QueueDurationTracker::new("writer_chunk_queue");
         let run_started = Instant::now();
         let mut coordinator = RolloverCoordinatorState::new(ManifestActivationAckMode::Send);
@@ -19566,7 +20719,7 @@ mod tests {
             .unwrap();
         let (runtime_exit_tx, mut runtime_exit_rx) = mpsc::channel(1);
         let (event_tx, mut event_rx) =
-            bounded_event_queue::<InflightRawEvent>(DEFAULT_QUEUE_CAPACITY).unwrap();
+            bounded_event_queue::<SourceIngressPayload>(DEFAULT_QUEUE_CAPACITY).unwrap();
         let drive_manifest_tx = manifest_tx.clone();
         let drive_gate = Arc::clone(&raw_day_gate);
         let drive_gaps = Arc::clone(&source_gaps);
@@ -21234,9 +22387,8 @@ mod tests {
             };
             let source = async move {
                 marker_tx
-                    .send(InflightRawEvent::for_test(test_raw_event(
-                        "binance_aggtrade",
-                        now_ms(),
+                    .send(SourceIngressPayload::LegacyRaw(InflightRawEvent::for_test(
+                        test_raw_event("binance_aggtrade", now_ms()),
                     )))
                     .await
                     .unwrap();
@@ -21252,7 +22404,7 @@ mod tests {
                 source,
             ));
 
-            let barrier = rx.recv().await.unwrap();
+            let barrier = rx.recv().await.unwrap().into_legacy_raw();
             let Some(IngressControl::DayBarrier {
                 producer: actual,
                 reply,
@@ -21282,9 +22434,8 @@ mod tests {
         let (control_tx, _control_rx) = mpsc::channel(1);
         let source = async move {
             marker_tx
-                .send(InflightRawEvent::for_test(test_raw_event(
-                    "binance_aggtrade",
-                    now_ms(),
+                .send(SourceIngressPayload::LegacyRaw(InflightRawEvent::for_test(
+                    test_raw_event("binance_aggtrade", now_ms()),
                 )))
                 .await
                 .unwrap();
@@ -21297,7 +22448,7 @@ mod tests {
             initial_boundary,
             source,
         ));
-        let barrier = rx.recv().await.unwrap();
+        let barrier = rx.recv().await.unwrap().into_legacy_raw();
         let Some(IngressControl::DayBarrier {
             producer, reply, ..
         }) = barrier.control
@@ -21325,9 +22476,8 @@ mod tests {
         let (control_tx, _control_rx) = mpsc::channel(1);
         let source = async move {
             marker_tx
-                .send(InflightRawEvent::for_test(test_raw_event(
-                    "binance_aggtrade",
-                    now_ms(),
+                .send(SourceIngressPayload::LegacyRaw(InflightRawEvent::for_test(
+                    test_raw_event("binance_aggtrade", now_ms()),
                 )))
                 .await
                 .unwrap();
@@ -21340,7 +22490,7 @@ mod tests {
             initial_boundary,
             source,
         ));
-        let barrier = rx.recv().await.unwrap();
+        let barrier = rx.recv().await.unwrap().into_legacy_raw();
         let Some(IngressControl::DayBarrier {
             producer, reply, ..
         }) = barrier.control
@@ -21367,9 +22517,8 @@ mod tests {
         let (control_tx, _control_rx) = mpsc::channel(1);
         let source = async move {
             marker_tx
-                .send(InflightRawEvent::for_test(test_raw_event(
-                    "binance_aggtrade",
-                    now_ms(),
+                .send(SourceIngressPayload::LegacyRaw(InflightRawEvent::for_test(
+                    test_raw_event("binance_aggtrade", now_ms()),
                 )))
                 .await
                 .unwrap();
@@ -21383,7 +22532,7 @@ mod tests {
             next_utc_hour_boundary_ms(now_ms()),
             source,
         ));
-        let barrier = rx.recv().await.unwrap();
+        let barrier = rx.recv().await.unwrap().into_legacy_raw();
         let Some(IngressControl::DayBarrier {
             producer, reply, ..
         }) = barrier.control
@@ -21498,7 +22647,7 @@ mod tests {
         let second = rx.recv().await.unwrap();
         assert_eq!(second.event.recv_time_utc_ms, 1_783_468_799_999);
         assert!(second.control.is_none());
-        let third = rx.recv().await.unwrap();
+        let third = rx.recv().await.unwrap().into_legacy_raw();
         let Some(IngressControl::DayBarrier {
             producer,
             close,
@@ -21630,7 +22779,7 @@ mod tests {
             async { Ok(()) },
         ));
 
-        let message = rx.recv().await.unwrap();
+        let message = rx.recv().await.unwrap().into_legacy_raw();
         let Some(IngressControl::DayBarrier { reply, .. }) = message.control else {
             panic!("expected RTDS day barrier");
         };
@@ -22478,7 +23627,7 @@ mod tests {
         assert!(inflight_event.raw_day_permit.take().is_some());
 
         let mut writers = BTreeMap::new();
-        let mut batches = BTreeMap::new();
+        let mut batches = PendingIngressBatches::default();
         let mut coverage = BTreeMap::new();
         let mut received_rows = 0;
         let mut average_event_bytes = 0;
@@ -22511,7 +23660,8 @@ mod tests {
         );
         assert_eq!(received_rows, 0);
         assert!(coverage.is_empty());
-        assert!(batches.is_empty());
+        assert!(batches.legacy.is_empty());
+        assert!(batches.polymarket_orderbook_v3.is_empty());
     }
 
     #[tokio::test]
@@ -22631,10 +23781,16 @@ mod tests {
             "a sender waiting for queue capacity must not preallocate admission"
         );
         let first = rx.recv().await.unwrap();
-        assert_eq!(first.event.collector_admission.unwrap().sequence, 1);
+        assert_eq!(
+            first.event.collector_admission.as_ref().unwrap().sequence,
+            1
+        );
         second.await.unwrap().unwrap();
         let second = rx.recv().await.unwrap();
-        assert_eq!(second.event.collector_admission.unwrap().sequence, 2);
+        assert_eq!(
+            second.event.collector_admission.as_ref().unwrap().sequence,
+            2
+        );
 
         assert_eq!(stats.wait_count.load(Ordering::Relaxed), 1);
         assert_eq!(stats.timeout_count.load(Ordering::Relaxed), 0);
@@ -23385,7 +24541,10 @@ mod tests {
                 inflight_budget: InflightBudget::new(),
                 enqueue_lock: Arc::new(AsyncMutex::new(())),
             };
-            let mut event = polymarket_metadata_v3_raw_event(base_row.clone()).unwrap();
+            let mut event = polymarket_metadata_v4_raw_event(
+                PolymarketMarketMetadataV4Row::from_v3_prefix(base_row.clone(), None, None),
+            )
+            .unwrap();
             let future = now_ms() + 60_000;
             if field == "recv_time_utc_ms" {
                 event.recv_time_utc_ms = future;
@@ -23415,7 +24574,10 @@ mod tests {
             inflight_budget: InflightBudget::new(),
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         };
-        let mut event = polymarket_metadata_v3_raw_event(base_row).unwrap();
+        let mut event = polymarket_metadata_v4_raw_event(
+            PolymarketMarketMetadataV4Row::from_v3_prefix(base_row, None, None),
+        )
+        .unwrap();
         let mut raw = serde_json::from_str::<Value>(&event.raw_json).unwrap();
         raw["closed_time_utc"] = json!(now_ms() + 60_000);
         event.raw_json = raw.to_string();
@@ -23445,6 +24607,8 @@ mod tests {
         .unwrap();
         let source_payload_json = r#"{"event_type":"market_resolved"}"#.to_owned();
         let evidence = PolymarketWsTerminalEvidence {
+            source_sequence_epoch_id: "test-polymarket-source-epoch".to_owned(),
+            collector_admission_sequence: 1,
             source_received_at_utc_ms: scheduled_at_utc_ms,
             validation_completed_at_utc_ms: completed_at_utc_ms,
             source_payload_sha256: Sha256::digest(source_payload_json.as_bytes())
@@ -23493,10 +24657,20 @@ mod tests {
         )
         .unwrap();
 
-        let terminal_event =
-            InflightRawEvent::for_test(polymarket_metadata_v3_raw_event(terminal).unwrap());
-        let mut post_event =
-            InflightRawEvent::for_test(polymarket_metadata_v3_raw_event(post).unwrap());
+        let terminal_event = InflightRawEvent::for_test(
+            polymarket_metadata_v4_raw_event(PolymarketMarketMetadataV4Row::from_v3_prefix(
+                terminal,
+                Some(evidence.source_sequence_epoch_id.clone()),
+                Some(evidence.collector_admission_sequence),
+            ))
+            .unwrap(),
+        );
+        let mut post_event = InflightRawEvent::for_test(
+            polymarket_metadata_v4_raw_event(PolymarketMarketMetadataV4Row::from_v3_prefix(
+                post, None, None,
+            ))
+            .unwrap(),
+        );
         let future = now_ms() + 60_000;
         let mut post_raw = serde_json::from_str::<Value>(&post_event.event.raw_json).unwrap();
         post_raw["timestamp_received"] = json!(future);
@@ -23527,1059 +24701,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn polymarket_restart_crash_cut_matrix_preserves_finalized_ws_terminal_prefix() {
-        #[derive(Clone, Copy)]
-        enum CrashCut {
-            RawAdmissionFinalize,
-            ActorBuffer,
-            MetadataWriterAdmission,
-            WriterBatchQueued,
-            ActiveSegmentBeforeFinalize,
-            UtcSeal,
-            OrphanPost,
-            ReversePrefix,
-        }
-
-        struct CrashCutCase {
-            name: &'static str,
-            cut: CrashCut,
-        }
-
-        fn finalize_active_segment(
-            manifest_owner: &mut ManifestOwnerState,
-            segment: ActiveSegment,
-        ) {
-            let (manifest_tx, mut manifest_rx) = mpsc::channel(1);
-            finalize_segment(
-                segment,
-                "polymarket_restart_crash_fixture",
-                &test_runtime_provenance("polymarket-restart-crash-fixture"),
-                &manifest_tx,
-            )
-            .unwrap();
-            let ManifestCommand::Finalized(delta) = manifest_rx.blocking_recv().unwrap() else {
-                panic!("crash fixture finalize must emit a finalized-file delta");
-            };
-            manifest_owner.apply_finalized(delta).unwrap();
-        }
-
-        fn finalize_events(
-            dataset_root: &Path,
-            manifest_owner: &mut ManifestOwnerState,
-            source_kind: &str,
-            preferred_part: u32,
-            events: &[RawEvent],
-        ) {
-            let first = events.first().expect("crash fixture segment is non-empty");
-            assert!(
-                events.iter().all(|event| event.source_kind == source_kind),
-                "crash fixture source kinds must not mix"
-            );
-            let partition_policy = HourlyPartitionPolicy::new(dataset_root).unwrap();
-            let expected_hour = utc_hour_string_from_ms(first.recv_time_utc_ms).unwrap();
-            assert!(
-                events.iter().all(|event| {
-                    utc_hour_string_from_ms(event.recv_time_utc_ms).as_deref()
-                        == Some(expected_hour.as_str())
-                }),
-                "crash fixture segment must stay within one UTC hour"
-            );
-            let (naming, selected_part) = next_available_hourly_partition(
-                &partition_policy,
-                source_kind,
-                first.recv_time_utc_ms,
-                Some(preferred_part),
-            )
-            .unwrap();
-            assert_eq!(selected_part, preferred_part);
-            let mut segment = ActiveSegment::new(naming, source_kind, selected_part).unwrap();
-            for event in events {
-                let written = segment.writer.write_event(event).unwrap();
-                assert_eq!(written, 1);
-                segment.observe(event, written);
-            }
-            finalize_active_segment(manifest_owner, segment);
-        }
-
-        fn finalize_inflight_events_via_writer(
-            dataset_root: &Path,
-            manifest_owner: &mut ManifestOwnerState,
-            source_kind: &str,
-            events: Vec<InflightRawEvent>,
-            expected_permit: &RawDayPermit,
-        ) {
-            assert!(!events.is_empty());
-            assert!(events.iter().all(|event| {
-                event.event.source_kind == source_kind
-                    && event.raw_day_permit.as_ref() == Some(expected_permit)
-            }));
-            let event_count = events.len();
-            let (writer_tx, writer_rx) =
-                std::sync::mpsc::sync_channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
-            let queue_rows = Arc::new(AtomicU64::new(event_count as u64));
-            let worker_queue_rows = Arc::clone(&queue_rows);
-            let writer_epoch = WriterEpochCell::default();
-            let worker_epoch = writer_epoch.clone();
-            let worker_root = dataset_root.to_path_buf();
-            let worker_source = source_kind.to_owned();
-            let (manifest_tx, mut manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
-            let worker = std::thread::spawn(move || {
-                source_writer_worker_with_startup(
-                    worker_root,
-                    test_runtime_provenance("polymarket-restart-crash-fixture-writer"),
-                    worker_source,
-                    writer_rx,
-                    worker_queue_rows,
-                    Arc::new(Mutex::new(true)),
-                    Arc::new(SourceQueueBackpressureStats::default()),
-                    manifest_tx,
-                    None,
-                    worker_epoch,
-                    None,
-                )
-            });
-            writer_tx.send(WriterCommand::Events(events)).unwrap();
-            drop(writer_tx);
-            let output = worker.join().unwrap().unwrap();
-            assert_eq!(output.stats.events_received, event_count as u64);
-            assert_eq!(output.stats.finalized_segments, 1);
-            assert_eq!(
-                writer_epoch.snapshot(),
-                Some(RuntimeEpoch {
-                    utc_day: expected_permit.utc_day.clone(),
-                    generation: expected_permit.generation,
-                })
-            );
-            let mut finalized = 0_usize;
-            while let Ok(command) = manifest_rx.try_recv() {
-                let ManifestCommand::Finalized(delta) = command else {
-                    panic!("crash fixture writer emitted an unexpected manifest command");
-                };
-                manifest_owner.apply_finalized(delta).unwrap();
-                finalized += 1;
-            }
-            assert_eq!(finalized, output.finalized_segments.len());
-            assert_eq!(queue_rows.load(Ordering::Relaxed), 0);
-        }
-
-        fn validate_finalized_manifests(dataset_root: &Path, days: &[String]) {
-            for day in days {
-                let day_dir = typed_raw_root(dataset_root).join(format!("utc_day={day}"));
-                let Some(manifest) = load_day_manifest(&day_dir).unwrap() else {
-                    continue;
-                };
-                validate_manifest_recovery_files(&day_dir, &manifest, true).unwrap();
-            }
-        }
-
-        fn assert_raw_only_fails_closed(
-            dataset_root: &Path,
-            recovery_time_utc_ms: i64,
-            name: &str,
-        ) {
-            let error = restore_polymarket_resolution_recovery(dataset_root, recovery_time_utc_ms)
-                .expect_err(
-                    "a finalized matching WS raw without terminal metadata must fail closed",
-                );
-            assert!(
-                error
-                    .to_string()
-                    .contains("matching raw has no terminal or summary"),
-                "{name}: {error}"
-            );
-        }
-
-        let cases = [
-            CrashCutCase {
-                name: "raw admission/finalize",
-                cut: CrashCut::RawAdmissionFinalize,
-            },
-            CrashCutCase {
-                name: "actor buffer",
-                cut: CrashCut::ActorBuffer,
-            },
-            CrashCutCase {
-                name: "metadata writer admission",
-                cut: CrashCut::MetadataWriterAdmission,
-            },
-            CrashCutCase {
-                name: "batch flush into writer command queue",
-                cut: CrashCut::WriterBatchQueued,
-            },
-            CrashCutCase {
-                name: "active segment before finalize",
-                cut: CrashCut::ActiveSegmentBeforeFinalize,
-            },
-            CrashCutCase {
-                name: "UTC seal",
-                cut: CrashCut::UtcSeal,
-            },
-            CrashCutCase {
-                name: "orphan post finalized corruption",
-                cut: CrashCut::OrphanPost,
-            },
-            CrashCutCase {
-                name: "reverse-prefix corruption",
-                cut: CrashCut::ReversePrefix,
-            },
-        ];
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
-        for case in cases {
-            let tmp = tempdir().unwrap();
-            let dataset_root = tmp.path().canonicalize().unwrap();
-            let boundary_utc_ms = 1_783_468_800_000;
-            let utc_seal = matches!(case.cut, CrashCut::UtcSeal);
-            let market_end_utc_ms = if utc_seal {
-                boundary_utc_ms - 5 * 60_000
-            } else {
-                boundary_utc_ms
-            };
-            let market_start_utc_ms = market_end_utc_ms - 5 * 60_000;
-            let mut market = test_btc_discovery().current;
-            market.slug = format!("btc-updown-5m-{}", market_start_utc_ms / 1_000);
-            market.start_ts_s = market_start_utc_ms / 1_000;
-            market.end_ts_s = market_end_utc_ms / 1_000;
-            market.candidate_start_ts_s = market.start_ts_s;
-            market.candidate_end_ts_s = market.end_ts_s;
-            refresh_test_discovery_evidence(&mut market, market_start_utc_ms - 2 * 60_000);
-
-            let collector_identity = CollectorIdentity {
-                host_id: "collector-test".to_owned(),
-                region: "local-test".to_owned(),
-            };
-            let identity = PendingPolymarketIdentity::from_discovered(&market).unwrap();
-            let terminal_received_at_utc_ms = if utc_seal {
-                boundary_utc_ms - 1
-            } else {
-                market_end_utc_ms.saturating_add(POLYMARKET_RESOLUTION_FIRST_SLOT_DELAY_MS)
-            };
-            let post_received_at_utc_ms = if utc_seal {
-                boundary_utc_ms + 1
-            } else {
-                terminal_received_at_utc_ms.saturating_add(60_000)
-            };
-            let recovery_time_utc_ms = if utc_seal {
-                market_end_utc_ms.saturating_add(7 * 60_000)
-            } else {
-                post_received_at_utc_ms.saturating_add(60_000)
-            };
-            let resolved =
-                match market_resolved_message_for_test(&market, terminal_received_at_utc_ms) {
-                    WsMessage::MarketResolved(resolved) => resolved,
-                    _ => panic!("crash fixture requires market_resolved"),
-                };
-
-            let mut context = PolymarketProcessingContext::new(BtcUpdownDiscovery {
-                current: market.clone(),
-                next: None,
-                relation: None,
-            });
-            context.current = None;
-            context.next = None;
-            let mut pending = PendingPolymarketResolution::new(identity.clone(), None);
-            pending.in_flight_ordinal = Some(1);
-            context.pending.insert(identity.slug.clone(), pending);
-            context.actor_now_utc_ms = terminal_received_at_utc_ms;
-            context.rebuild_asset_to_slug();
-
-            let stats = Arc::new(SourceQueueBackpressureStats::default());
-            stats
-                .polymarket_metadata_admission_sequence
-                .store(1, Ordering::Relaxed);
-            let gate = runtime.block_on(install_active_raw_day_gate(
-                &stats,
-                terminal_received_at_utc_ms,
-            ));
-            let raw_day_ticket = runtime.block_on(accepted_raw_day_ticket_from_gate_for_test(
-                &gate,
-                terminal_received_at_utc_ms,
-            ));
-            let (source_tx, mut source_rx) = mpsc::channel(2);
-            let sink = SourceEventSink {
-                tx: source_tx,
-                gaps: Arc::new(Mutex::new(SourceGapStore::default())),
-                source_queue_backpressure: stats,
-                inflight_budget: InflightBudget::new(),
-                enqueue_lock: Arc::new(AsyncMutex::new(())),
-            };
-            let run_started = Instant::now();
-            runtime
-                .block_on(process_polymarket_market_resolved(
-                    &resolved,
-                    terminal_received_at_utc_ms,
-                    &mut context,
-                    &sink,
-                    &collector_identity,
-                    run_started,
-                    raw_day_ticket,
-                ))
-                .unwrap();
-            assert_eq!(
-                source_rx.len(),
-                1,
-                "{} must stop with the admitted WS raw in the source queue",
-                case.name
-            );
-            let evidence = match &context.pending[&identity.slug].claim {
-                Some(PolymarketTerminalClaim::MarketResolvedWs(evidence)) => evidence.clone(),
-                _ => panic!("validated WS claim must be retained by the pending actor"),
-            };
-            let terminal_row = polymarket_resolution_terminal_ws_v3_row(
-                &context.pending[&identity.slug],
-                &evidence,
-                terminal_received_at_utc_ms,
-                &collector_identity,
-            )
-            .unwrap();
-            let post_row = polymarket_resolution_attempt_v3_row(
-                &context.pending[&identity.slug],
-                &GammaResolutionPollCompletion {
-                    slug: identity.slug.clone(),
-                    ordinal: 1,
-                    scheduled_at_utc_ms: identity
-                        .market_end_utc_ms
-                        .saturating_add(POLYMARKET_RESOLUTION_FIRST_SLOT_DELAY_MS),
-                    fetch_start_utc_ms: identity
-                        .market_end_utc_ms
-                        .saturating_add(POLYMARKET_RESOLUTION_FIRST_SLOT_DELAY_MS),
-                    completed_at_utc_ms: post_received_at_utc_ms,
-                    result: Ok(serde_json::from_value::<SdkGammaMarket>(
-                        gamma_market_value_for_discovered(&market),
-                    )
-                    .unwrap()),
-                    raw_day_ticket: RawDayTicketAcceptance::Failed(
-                        "unused by pure row fixture".to_owned(),
-                    ),
-                },
-                &|| post_received_at_utc_ms + 1,
-                true,
-                &collector_identity,
-            )
-            .unwrap();
-            assert_eq!(
-                post_row.resolution_poll_result,
-                Some(ResolutionPollResult::PostTerminalClaimObservation)
-            );
-
-            let admitted_metadata_event =
-                |row: PolymarketMarketMetadataV3Row, sequence: u64, time_utc_ms: i64| {
-                    let mut event = polymarket_metadata_v3_raw_event(row).unwrap();
-                    event.collector_admission = Some(RawEventAdmission {
-                        sequence,
-                        time_utc_ms,
-                    });
-                    event
-                };
-            let base_event = admitted_metadata_event(
-                polymarket_metadata_snapshot_v3_row(
-                    &market,
-                    MarketRuntimeRole::Current,
-                    &collector_identity,
-                )
-                .unwrap(),
-                1,
-                market_start_utc_ms - 2 * 60_000 + 10,
-            );
-            let post_event = admitted_metadata_event(post_row.clone(), 3, now_ms());
-            let base_day = utc_day_string_from_ms(base_event.recv_time_utc_ms).unwrap();
-            let raw_day = utc_day_string_from_ms(terminal_received_at_utc_ms).unwrap();
-            let terminal_day = utc_day_string_from_ms(terminal_row.timestamp_received).unwrap();
-            let post_day = utc_day_string_from_ms(post_event.recv_time_utc_ms).unwrap();
-            let recovery_day = utc_day_string_from_ms(recovery_time_utc_ms).unwrap();
-            if utc_seal {
-                assert_eq!(terminal_received_at_utc_ms, boundary_utc_ms - 1);
-                assert_eq!(terminal_row.timestamp_received, boundary_utc_ms - 1);
-                assert_eq!(post_event.recv_time_utc_ms, boundary_utc_ms + 1);
-                assert_eq!(base_day, raw_day);
-                assert_eq!(raw_day, terminal_day);
-                assert_ne!(terminal_day, post_day);
-                assert_eq!(post_day, recovery_day);
-            }
-
-            let mut manifest_owner =
-                ManifestOwnerState::new(dataset_root.clone(), test_daily_manifest_identity());
-            if utc_seal {
-                manifest_owner
-                    .activate_initial(
-                        &base_day,
-                        market_start_utc_ms - 2 * 60_000,
-                        INITIAL_RAW_DAY_GENERATION,
-                    )
-                    .unwrap();
-            }
-            finalize_events(
-                &dataset_root,
-                &mut manifest_owner,
-                "polymarket_market_metadata",
-                0,
-                &[base_event],
-            );
-
-            if matches!(case.cut, CrashCut::RawAdmissionFinalize) {
-                assert_eq!(
-                    source_rx.len(),
-                    1,
-                    "{}: admitted raw must remain queued before writer consumption",
-                    case.name
-                );
-                validate_finalized_manifests(
-                    &dataset_root,
-                    &[base_day.clone(), recovery_day.clone()],
-                );
-                let before_raw_finalize =
-                    restore_polymarket_resolution_recovery(&dataset_root, recovery_time_utc_ms)
-                        .unwrap();
-                assert_eq!(
-                    before_raw_finalize.pending.len(),
-                    1,
-                    "{}: raw admission without finalize must expose no raw artifact",
-                    case.name
-                );
-            }
-
-            let raw_inflight = source_rx.blocking_recv().unwrap();
-            assert_eq!(raw_inflight.event.source_kind, "polymarket_market");
-            assert_eq!(raw_inflight.event.source_event_type, "market_resolved");
-            let old_day_permit = RawDayPermit {
-                utc_day: raw_day.clone(),
-                generation: INITIAL_RAW_DAY_GENERATION,
-            };
-            assert_eq!(raw_inflight.raw_day_permit.as_ref(), Some(&old_day_permit));
-            if utc_seal {
-                finalize_inflight_events_via_writer(
-                    &dataset_root,
-                    &mut manifest_owner,
-                    "polymarket_market",
-                    vec![raw_inflight],
-                    &old_day_permit,
-                );
-            } else {
-                finalize_events(
-                    &dataset_root,
-                    &mut manifest_owner,
-                    "polymarket_market",
-                    0,
-                    &[raw_inflight.event],
-                );
-            }
-            let uses_real_terminal_bundle = matches!(
-                case.cut,
-                CrashCut::ActorBuffer
-                    | CrashCut::MetadataWriterAdmission
-                    | CrashCut::WriterBatchQueued
-                    | CrashCut::ActiveSegmentBeforeFinalize
-                    | CrashCut::UtcSeal
-            );
-            if uses_real_terminal_bundle {
-                let completion_ticket = runtime.block_on(
-                    accepted_raw_day_ticket_from_gate_for_test(&gate, post_received_at_utc_ms),
-                );
-                runtime
-                    .block_on(record_gamma_resolution_completion(
-                        GammaResolutionPollCompletion {
-                            slug: identity.slug.clone(),
-                            ordinal: 1,
-                            scheduled_at_utc_ms: identity
-                                .market_end_utc_ms
-                                .saturating_add(POLYMARKET_RESOLUTION_FIRST_SLOT_DELAY_MS),
-                            fetch_start_utc_ms: identity
-                                .market_end_utc_ms
-                                .saturating_add(POLYMARKET_RESOLUTION_FIRST_SLOT_DELAY_MS),
-                            completed_at_utc_ms: post_received_at_utc_ms,
-                            result: Ok(serde_json::from_value::<SdkGammaMarket>(
-                                gamma_market_value_for_discovered(&market),
-                            )
-                            .unwrap()),
-                            raw_day_ticket: RawDayTicketAcceptance::Accepted(completion_ticket),
-                        },
-                        &|| post_received_at_utc_ms + 1,
-                        &mut context,
-                        &sink,
-                        &collector_identity,
-                        run_started,
-                    ))
-                    .unwrap();
-                let pending = &context.pending[&identity.slug];
-                assert!(matches!(
-                    pending.claim,
-                    Some(PolymarketTerminalClaim::MarketResolvedWs(_))
-                ));
-                assert_eq!(pending.buffered_attempt_rows.len(), 1);
-                assert_eq!(
-                    pending.buffered_attempt_rows[0].row.resolution_poll_result,
-                    Some(ResolutionPollResult::PostTerminalClaimObservation)
-                );
-                assert!(pending.requires_fence());
-                assert!(source_rx.is_empty());
-            }
-            match case.cut {
-                CrashCut::RawAdmissionFinalize => {
-                    assert_raw_only_fails_closed(&dataset_root, recovery_time_utc_ms, case.name);
-                }
-                CrashCut::ActorBuffer => {
-                    let pending = &context.pending[&identity.slug];
-                    assert!(matches!(
-                        pending.claim,
-                        Some(PolymarketTerminalClaim::MarketResolvedWs(_))
-                    ));
-                    assert_eq!(pending.buffered_attempt_rows.len(), 1);
-                    assert!(
-                        source_rx.is_empty(),
-                        "actor-buffer cut must retain terminal and post before metadata admission"
-                    );
-                    assert_raw_only_fails_closed(&dataset_root, recovery_time_utc_ms, case.name);
-                }
-                CrashCut::MetadataWriterAdmission
-                | CrashCut::WriterBatchQueued
-                | CrashCut::ActiveSegmentBeforeFinalize
-                | CrashCut::UtcSeal => {
-                    let finalization_now_utc_ms = post_received_at_utc_ms + 2;
-                    let timeline_now = || PolymarketTimelineNow {
-                        utc_ms: finalization_now_utc_ms,
-                        monotonic: TokioInstant::now(),
-                    };
-                    let mut dedupe = LifecycleFingerprintSets::with_limit(8);
-                    runtime
-                        .block_on(finalize_polymarket_outer_ready_pending(
-                            &timeline_now,
-                            &mut context,
-                            &sink,
-                            &collector_identity,
-                            run_started,
-                            &mut dedupe,
-                        ))
-                        .unwrap();
-                    assert!(!context.pending.contains_key(&identity.slug));
-
-                    let admitted_count = if utc_seal { 1 } else { 2 };
-                    assert_eq!(source_rx.len(), admitted_count, "{}", case.name);
-                    if matches!(case.cut, CrashCut::MetadataWriterAdmission) {
-                        assert_raw_only_fails_closed(
-                            &dataset_root,
-                            recovery_time_utc_ms,
-                            case.name,
-                        );
-                    }
-
-                    let mut admitted = (0..admitted_count)
-                        .map(|_| source_rx.blocking_recv().unwrap())
-                        .collect::<Vec<_>>();
-                    let terminal_inflight = &admitted[0];
-                    assert_eq!(
-                        terminal_inflight.event.source_event_type,
-                        PolymarketMetadataRowKind::ResolutionTerminalWs.as_str()
-                    );
-                    assert_eq!(
-                        terminal_inflight
-                            .event
-                            .collector_admission
-                            .as_ref()
-                            .unwrap()
-                            .sequence,
-                        2
-                    );
-                    assert_eq!(
-                        terminal_inflight.raw_day_permit.as_ref(),
-                        Some(&old_day_permit)
-                    );
-                    let terminal = polymarket_metadata_v3_rows_from_event(&terminal_inflight.event)
-                        .unwrap()
-                        .remove(0);
-                    assert_eq!(
-                        terminal.metadata_row_kind,
-                        PolymarketMetadataRowKind::ResolutionTerminalWs
-                    );
-
-                    if !utc_seal {
-                        let post_inflight = &admitted[1];
-                        assert_eq!(
-                            post_inflight.event.source_event_type,
-                            PolymarketMetadataRowKind::ResolutionPollAttempt.as_str()
-                        );
-                        assert_eq!(
-                            post_inflight
-                                .event
-                                .collector_admission
-                                .as_ref()
-                                .unwrap()
-                                .sequence,
-                            3
-                        );
-                        assert_eq!(post_inflight.raw_day_permit.as_ref(), Some(&old_day_permit));
-                        let post = polymarket_metadata_v3_rows_from_event(&post_inflight.event)
-                            .unwrap()
-                            .remove(0);
-                        assert_eq!(
-                            post.resolution_poll_result,
-                            Some(ResolutionPollResult::PostTerminalClaimObservation)
-                        );
-                    }
-
-                    if matches!(case.cut, CrashCut::MetadataWriterAdmission) {
-                        continue;
-                    }
-
-                    if matches!(case.cut, CrashCut::WriterBatchQueued) {
-                        let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel(1);
-                        let queue_rows = Arc::new(AtomicU64::new(0));
-                        let accepting_commands = Arc::new(Mutex::new(true));
-                        let (_result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
-                        let mut writers = BTreeMap::from([(
-                            "polymarket_market_metadata".to_owned(),
-                            SourceWriterHandle {
-                                tx: writer_tx,
-                                queue_rows: Arc::clone(&queue_rows),
-                                accepting_commands,
-                                result_rx,
-                                completed_result: None,
-                                thread: None,
-                            },
-                        )]);
-                        let mut writer_queue_tracker =
-                            QueueDurationTracker::new("writer_chunk_queue");
-                        runtime
-                            .block_on(flush_source_batch(
-                                &mut writers,
-                                "polymarket_market_metadata",
-                                &mut admitted,
-                                &sink.gaps,
-                                &sink.source_queue_backpressure,
-                                &mut writer_queue_tracker,
-                                run_started,
-                            ))
-                            .unwrap();
-                        assert!(admitted.is_empty());
-                        assert_eq!(queue_rows.load(Ordering::Relaxed), 2);
-                        let writer = writers
-                            .get("polymarket_market_metadata")
-                            .expect("metadata writer handle must exist");
-                        assert!(matches!(
-                            try_send_writer_command(writer, WriterCommand::Events(Vec::new())),
-                            Err(std::sync::mpsc::TrySendError::Full(_))
-                        ));
-                        assert_raw_only_fails_closed(
-                            &dataset_root,
-                            recovery_time_utc_ms,
-                            case.name,
-                        );
-                        let WriterCommand::Events(queued_batch) = writer_rx.try_recv().unwrap()
-                        else {
-                            panic!("batch-flush cut must retain an events writer command");
-                        };
-                        assert_eq!(queued_batch.len(), 2);
-                        assert_eq!(
-                            queued_batch[0].event.source_event_type,
-                            PolymarketMetadataRowKind::ResolutionTerminalWs.as_str()
-                        );
-                        assert_eq!(
-                            queued_batch[1].event.source_event_type,
-                            PolymarketMetadataRowKind::ResolutionPollAttempt.as_str()
-                        );
-                        continue;
-                    }
-
-                    if matches!(case.cut, CrashCut::ActiveSegmentBeforeFinalize) {
-                        let (naming, selected_part) = next_available_hourly_partition(
-                            &HourlyPartitionPolicy::new(&dataset_root).unwrap(),
-                            "polymarket_market_metadata",
-                            admitted[0].event.recv_time_utc_ms,
-                            Some(0),
-                        )
-                        .unwrap();
-                        assert_eq!(selected_part, 0);
-                        let running_path = naming.running_path.clone();
-                        let final_path = naming.final_path.clone();
-                        let mut segment =
-                            ActiveSegment::new(naming, "polymarket_market_metadata", selected_part)
-                                .unwrap();
-                        for inflight in &admitted {
-                            assert_eq!(inflight.raw_day_permit.as_ref(), Some(&old_day_permit));
-                            let written = segment.writer.write_event(&inflight.event).unwrap();
-                            assert_eq!(written, 1);
-                            segment.observe(&inflight.event, written);
-                        }
-                        assert_eq!(segment.rows, 2);
-                        assert!(running_path.is_file());
-                        assert!(!final_path.exists());
-                        assert_raw_only_fails_closed(
-                            &dataset_root,
-                            recovery_time_utc_ms,
-                            case.name,
-                        );
-                        finalize_active_segment(&mut manifest_owner, segment);
-                        assert!(!running_path.exists());
-                        assert!(final_path.is_file());
-                        assert!(
-                            restore_polymarket_resolution_recovery(
-                                &dataset_root,
-                                recovery_time_utc_ms,
-                            )
-                            .unwrap()
-                            .pending
-                            .is_empty(),
-                            "{}: publishing the same active segment must make terminal durable",
-                            case.name
-                        );
-                        continue;
-                    }
-
-                    if matches!(case.cut, CrashCut::UtcSeal) {
-                        assert_eq!(admitted.len(), 1);
-                        {
-                            let deferred = sink
-                                .source_queue_backpressure
-                                .deferred_raw_batches
-                                .lock()
-                                .expect("deferred raw-event mutex poisoned");
-                            let batches = deferred
-                                .get("polymarket")
-                                .expect("new-day post must be deferred behind the old-day gate");
-                            assert_eq!(batches.len(), 1);
-                            assert_eq!(batches[0].events.len(), 1);
-                            assert_eq!(
-                                batches[0].events[0].event.source_event_type,
-                                PolymarketMetadataRowKind::ResolutionPollAttempt.as_str()
-                            );
-                            assert!(batches[0].events[0].raw_day_permit.is_none());
-                            assert!(batches[0].events[0].event.collector_admission.is_none());
-                        }
-                        let close = gate
-                            .prepare_rollover(&terminal_day, boundary_utc_ms)
-                            .unwrap();
-                        assert_eq!(close.utc_day, terminal_day);
-                        assert_eq!(close.next_utc_day, post_day);
-                        for producer in LOGICAL_PRODUCERS {
-                            gate.register_source_fence(producer, &close).unwrap();
-                            assert!(
-                                manifest_owner
-                                    .record_producer_barrier(
-                                        close.clone(),
-                                        (*producer).to_owned(),
-                                        &[],
-                                        &BTreeMap::new(),
-                                    )
-                                    .unwrap()
-                                    .is_none()
-                            );
-                        }
-                        runtime
-                            .block_on(gate.seal_prepared_rollover(&close))
-                            .unwrap();
-
-                        let (writer_tx, writer_rx) =
-                            std::sync::mpsc::sync_channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
-                        let queue_rows = Arc::new(AtomicU64::new(0));
-                        let worker_queue_rows = Arc::clone(&queue_rows);
-                        let accepting_commands = Arc::new(Mutex::new(true));
-                        let worker_accepting_commands = Arc::clone(&accepting_commands);
-                        let writer_epoch = WriterEpochCell::default();
-                        let worker_epoch = writer_epoch.clone();
-                        let worker_root = dataset_root.clone();
-                        let worker_gate = Arc::clone(&gate);
-                        let writer_runtime_stats =
-                            Arc::new(SourceQueueBackpressureStats::default());
-                        let worker_runtime_stats = Arc::clone(&writer_runtime_stats);
-                        let (manifest_tx, mut manifest_rx) =
-                            mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
-                        let worker = std::thread::spawn(move || {
-                            source_writer_worker_with_startup(
-                                worker_root,
-                                test_runtime_provenance(
-                                    "polymarket-restart-crash-fixture-rollover-writer",
-                                ),
-                                "polymarket_market_metadata".to_owned(),
-                                writer_rx,
-                                worker_queue_rows,
-                                worker_accepting_commands,
-                                worker_runtime_stats,
-                                manifest_tx,
-                                None,
-                                worker_epoch,
-                                Some(worker_gate),
-                            )
-                        });
-                        let (_result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
-                        let mut writers = BTreeMap::from([(
-                            "polymarket_market_metadata".to_owned(),
-                            SourceWriterHandle {
-                                tx: writer_tx,
-                                queue_rows: Arc::clone(&queue_rows),
-                                accepting_commands,
-                                result_rx,
-                                completed_result: None,
-                                thread: None,
-                            },
-                        )]);
-                        let mut writer_queue_tracker =
-                            QueueDurationTracker::new("writer_chunk_queue");
-                        runtime
-                            .block_on(flush_source_batch(
-                                &mut writers,
-                                "polymarket_market_metadata",
-                                &mut admitted,
-                                &sink.gaps,
-                                &writer_runtime_stats,
-                                &mut writer_queue_tracker,
-                                run_started,
-                            ))
-                            .unwrap();
-                        assert!(admitted.is_empty());
-                        writers["polymarket_market_metadata"]
-                            .tx
-                            .send(WriterCommand::FinalizeDay {
-                                close: close.clone(),
-                            })
-                            .unwrap();
-
-                        let ManifestCommand::Finalized(terminal_delta) =
-                            manifest_rx.blocking_recv().unwrap()
-                        else {
-                            panic!("UTC terminal writer must finalize its old-day segment first");
-                        };
-                        manifest_owner.apply_finalized(terminal_delta).unwrap();
-                        let ManifestCommand::WriterDayFinalized {
-                            close: writer_close,
-                            source_kind,
-                            raw_day_gate,
-                        } = manifest_rx.blocking_recv().unwrap()
-                        else {
-                            panic!("UTC terminal writer must emit its old-day writer ack");
-                        };
-                        assert_eq!(writer_close, close);
-                        assert_eq!(source_kind, "polymarket_market_metadata");
-                        assert!(Arc::ptr_eq(&raw_day_gate, &gate));
-                        manifest_owner
-                            .register_rollover_gate(&writer_close, raw_day_gate)
-                            .unwrap();
-                        assert!(
-                            manifest_owner
-                                .record_writer_ack(writer_close.clone(), source_kind)
-                                .unwrap()
-                                .is_none()
-                        );
-                        assert_eq!(
-                            writer_epoch.snapshot(),
-                            Some(RuntimeEpoch {
-                                utc_day: post_day.clone(),
-                                generation: INITIAL_RAW_DAY_GENERATION + 1,
-                            })
-                        );
-                        assert!(
-                            restore_polymarket_resolution_recovery(
-                                &dataset_root,
-                                recovery_time_utc_ms,
-                            )
-                            .unwrap()
-                            .pending
-                            .is_empty(),
-                            "{}: old-day terminal must be restart-authoritative before new-day post release",
-                            case.name
-                        );
-                        let mut ready = None;
-                        for source in LIVE_SOURCES
-                            .iter()
-                            .filter(|source| **source != "polymarket_market_metadata")
-                        {
-                            ready = manifest_owner
-                                .record_writer_ack(close.clone(), (*source).to_owned())
-                                .unwrap()
-                                .or(ready);
-                        }
-                        manifest_owner
-                            .publish_rollover_ready(
-                                ready.as_ref().expect("writer rendezvous must become ready"),
-                            )
-                            .unwrap();
-                        assert!(
-                            gate.commit_old_day_if_no_exit(&close, None, || {
-                                manifest_owner.commit_rollover_old_day(
-                                    &close,
-                                    ManifestRolloverCommitMode::Normal,
-                                )
-                            })
-                            .unwrap()
-                        );
-                        let old_day_dir = typed_raw_root(&dataset_root)
-                            .join(format!("utc_day={}", close.utc_day));
-                        assert_eq!(
-                            manifest_state(&load_day_manifest(&old_day_dir).unwrap().unwrap())
-                                .unwrap(),
-                            "closed"
-                        );
-                        assert!(
-                            gate.commit_manifest_activation(&close, None, || {
-                                manifest_owner.activate_rollover_new_day(&close)
-                            })
-                            .unwrap()
-                        );
-                        let new_day_permit = runtime
-                            .block_on(gate.activate_after_rollover(&close))
-                            .unwrap();
-                        assert_eq!(
-                            new_day_permit,
-                            RawDayPermit {
-                                utc_day: post_day.clone(),
-                                generation: INITIAL_RAW_DAY_GENERATION + 1,
-                            }
-                        );
-                        runtime
-                            .block_on(flush_deferred_raw_events(&sink, "polymarket", &close))
-                            .unwrap();
-                        let admitted_post = source_rx.blocking_recv().unwrap();
-                        assert_eq!(admitted_post.event.recv_time_utc_ms, boundary_utc_ms + 1);
-                        assert_eq!(
-                            admitted_post
-                                .event
-                                .collector_admission
-                                .as_ref()
-                                .unwrap()
-                                .sequence,
-                            3
-                        );
-                        assert_eq!(admitted_post.raw_day_permit.as_ref(), Some(&new_day_permit));
-                        let post = polymarket_metadata_v3_rows_from_event(&admitted_post.event)
-                            .unwrap()
-                            .remove(0);
-                        assert_eq!(
-                            post.resolution_poll_result,
-                            Some(ResolutionPollResult::PostTerminalClaimObservation)
-                        );
-                        let mut post_batch = vec![admitted_post];
-                        runtime
-                            .block_on(flush_source_batch(
-                                &mut writers,
-                                "polymarket_market_metadata",
-                                &mut post_batch,
-                                &sink.gaps,
-                                &writer_runtime_stats,
-                                &mut writer_queue_tracker,
-                                run_started,
-                            ))
-                            .unwrap();
-                        assert!(post_batch.is_empty());
-                        drop(writers);
-                        let output = worker.join().unwrap().unwrap();
-                        assert_eq!(output.stats.events_received, 2);
-                        assert_eq!(output.stats.finalized_segments, 2);
-                        assert_eq!(output.finalized_segments.len(), 2);
-                        assert_eq!(queue_rows.load(Ordering::Relaxed), 0);
-                        assert_eq!(
-                            writer_epoch.snapshot(),
-                            Some(RuntimeEpoch {
-                                utc_day: new_day_permit.utc_day.clone(),
-                                generation: new_day_permit.generation,
-                            })
-                        );
-                        let ManifestCommand::Finalized(post_delta) =
-                            manifest_rx.blocking_recv().unwrap()
-                        else {
-                            panic!("UTC metadata writer must finalize the new-day post segment");
-                        };
-                        manifest_owner.apply_finalized(post_delta).unwrap();
-                        assert!(
-                            manifest_rx.try_recv().is_err(),
-                            "UTC metadata writer emitted an unexpected manifest command"
-                        );
-                        assert_eq!(
-                            output
-                                .finalized_segments
-                                .iter()
-                                .map(|segment| segment.row_count)
-                                .sum::<u64>(),
-                            2
-                        );
-                        assert_eq!(
-                            output
-                                .finalized_segments
-                                .iter()
-                                .map(|segment| segment.source_kind.as_str())
-                                .collect::<BTreeSet<_>>(),
-                            BTreeSet::from(["polymarket_market_metadata"])
-                        );
-                        validate_finalized_manifests(
-                            &dataset_root,
-                            &[terminal_day.clone(), post_day.clone()],
-                        );
-                        assert!(
-                            restore_polymarket_resolution_recovery(
-                                &dataset_root,
-                                recovery_time_utc_ms,
-                            )
-                            .unwrap()
-                            .pending
-                            .is_empty(),
-                            "{}: finalized new-day post must retain the closed old-day terminal prefix",
-                            case.name
-                        );
-                        continue;
-                    }
-                }
-                CrashCut::OrphanPost => {
-                    finalize_events(
-                        &dataset_root,
-                        &mut manifest_owner,
-                        "polymarket_market_metadata",
-                        0,
-                        &[post_event],
-                    );
-                    let error =
-                        restore_polymarket_resolution_recovery(&dataset_root, recovery_time_utc_ms)
-                            .expect_err("orphan post-terminal observation must fail closed");
-                    assert!(
-                        error
-                            .to_string()
-                            .contains("orphan post-terminal observation"),
-                        "{}: {error}",
-                        case.name
-                    );
-                }
-                CrashCut::ReversePrefix => {
-                    runtime
-                        .block_on(send_polymarket_metadata_v3_row_with_ticket(
-                            &sink,
-                            run_started,
-                            AcceptedPolymarketMetadataRow {
-                                row: terminal_row,
-                                raw_day_ticket: evidence.raw_day_ticket,
-                            },
-                        ))
-                        .unwrap();
-                    let terminal_inflight = source_rx.blocking_recv().unwrap();
-                    finalize_events(
-                        &dataset_root,
-                        &mut manifest_owner,
-                        "polymarket_market_metadata",
-                        0,
-                        &[post_event],
-                    );
-                    finalize_events(
-                        &dataset_root,
-                        &mut manifest_owner,
-                        "polymarket_market_metadata",
-                        1,
-                        &[terminal_inflight.event],
-                    );
-                    let error =
-                        restore_polymarket_resolution_recovery(&dataset_root, recovery_time_utc_ms)
-                            .expect_err("reverse terminal prefix must fail closed");
-                    assert!(
-                        error
-                            .to_string()
-                            .contains("post-terminal prefix is invalid"),
-                        "{}: {error}",
-                        case.name
-                    );
-                }
-            }
-            validate_finalized_manifests(&dataset_root, &[base_day, recovery_day]);
-        }
-    }
-
     #[tokio::test]
     async fn four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second()
     {
@@ -24594,12 +24715,12 @@ mod tests {
         let sustained_native_messages =
             SUSTAINED_TICKS * (POLYMARKET_MESSAGES_PER_TICK + 3 * AUXILIARY_MESSAGES_PER_TICK);
         let total_native_messages = polymarket_native_messages + 3 * auxiliary_native_messages;
-        let polymarket_rows = polymarket_native_messages * 2;
+        let polymarket_rows = polymarket_native_messages;
         let total_rows = polymarket_rows + 3 * auxiliary_native_messages;
-        let one_tick_rows = 2 * POLYMARKET_MESSAGES_PER_TICK + 3 * AUXILIARY_MESSAGES_PER_TICK;
+        let one_tick_rows = POLYMARKET_MESSAGES_PER_TICK + 3 * AUXILIARY_MESSAGES_PER_TICK;
         assert_eq!(sustained_native_messages, 27_720);
         assert_eq!(total_native_messages, 28_745);
-        assert_eq!(total_rows, 42_370);
+        assert_eq!(total_rows, 28_745);
 
         let (address, polymarket_start_tx, polymarket_complete_rx, polymarket_offered, server) =
             spawn_polymarket_price_change_load_server(
@@ -24646,7 +24767,7 @@ mod tests {
         )
         .unwrap();
         let (event_tx, mut event_rx) =
-            bounded_event_queue::<InflightRawEvent>(DEFAULT_QUEUE_CAPACITY).unwrap();
+            bounded_event_queue::<SourceIngressPayload>(DEFAULT_QUEUE_CAPACITY).unwrap();
         let root_sink = SourceEventSink {
             tx: event_tx,
             gaps: Arc::clone(&gaps),
@@ -24885,15 +25006,7 @@ mod tests {
 
         polymarket_start_tx.send(sustained_start).unwrap();
 
-        let mut batches = LIVE_SOURCES
-            .iter()
-            .map(|source| {
-                (
-                    (*source).to_owned(),
-                    Vec::<InflightRawEvent>::with_capacity(DEFAULT_FLUSH_ROWS),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
+        let mut batches = PendingIngressBatches::for_live_sources();
         let mut coverage = BTreeMap::<String, CoverageStats>::new();
         let mut received_rows = 0_u64;
         let mut average_event_bytes = 0_u64;
@@ -25046,7 +25159,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(batches.values().all(Vec::is_empty));
+        assert!(batches.legacy.values().all(Vec::is_empty));
+        assert!(batches.polymarket_orderbook_v3.is_empty());
         let writer_outcome =
             stop_writer_workers_with_budget(writers, Duration::from_secs(30)).await;
         assert!(writer_outcome.all_terminal);
@@ -25238,6 +25352,7 @@ mod tests {
         use crate::polymarket_market_metadata_layout::{
             POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION,
             POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
+            POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION,
         };
 
         let tmp = tempdir().unwrap();
@@ -25257,6 +25372,10 @@ mod tests {
             ),
             (
                 POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
+                "collector_admission_order",
+            ),
+            (
+                POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION,
                 "collector_admission_order",
             ),
         ]
@@ -25591,6 +25710,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::sync_channel(1);
         let (_result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
         SourceWriterHandle {
+            schema_version: typed_schema_version(source_kind).to_owned(),
             tx,
             queue_rows: Arc::new(AtomicU64::new(0)),
             accepting_commands: Arc::new(Mutex::new(true)),
@@ -25831,6 +25951,7 @@ mod tests {
         let writers = BTreeMap::from([(
             "binance_aggtrade".to_owned(),
             SourceWriterHandle {
+                schema_version: typed_schema_version("binance_aggtrade").to_owned(),
                 tx,
                 queue_rows: Arc::new(AtomicU64::new(0)),
                 accepting_commands: Arc::new(Mutex::new(true)),
@@ -25980,6 +26101,7 @@ mod tests {
         assert!(releases.is_empty());
         let writer = writers.remove("binance_aggtrade").unwrap();
         let SourceWriterHandle {
+            schema_version: _,
             tx,
             queue_rows: _,
             accepting_commands: _,
@@ -26031,6 +26153,7 @@ mod tests {
         let writers = BTreeMap::from([(
             "binance_aggtrade".to_owned(),
             SourceWriterHandle {
+                schema_version: typed_schema_version("binance_aggtrade").to_owned(),
                 tx,
                 queue_rows: Arc::new(AtomicU64::new(0)),
                 accepting_commands: Arc::new(Mutex::new(true)),
@@ -26112,6 +26235,7 @@ mod tests {
             (
                 "binance_aggtrade".to_owned(),
                 SourceWriterHandle {
+                    schema_version: typed_schema_version("binance_aggtrade").to_owned(),
                     tx: failed_tx,
                     queue_rows: Arc::new(AtomicU64::new(0)),
                     accepting_commands: Arc::new(Mutex::new(true)),
@@ -26135,6 +26259,7 @@ mod tests {
             (
                 "binance_depth_update".to_owned(),
                 SourceWriterHandle {
+                    schema_version: typed_schema_version("binance_depth_update").to_owned(),
                     tx: late_tx,
                     queue_rows: Arc::new(AtomicU64::new(0)),
                     accepting_commands: Arc::new(Mutex::new(true)),
@@ -26375,7 +26500,7 @@ mod tests {
         send_event(&sink, Instant::now(), record.event)
             .await
             .unwrap();
-        let event = rx.recv().await.unwrap().event;
+        let event = rx.recv().await.unwrap().into_legacy_event();
         let raw = serde_json::from_str::<Value>(&event.raw_json).unwrap();
         let fetch_start = raw["snapshot_fetch_start_utc"].as_i64().unwrap();
         assert!(fetch_start < event.recv_time_utc_ms);
@@ -26494,7 +26619,7 @@ mod tests {
 
         let mut events = Vec::new();
         while let Ok(timed) = rx.try_recv() {
-            events.push(timed.event);
+            events.push(timed.into_legacy_event());
         }
         assert_eq!(
             events
@@ -26741,8 +26866,8 @@ mod tests {
                 .into_iter()
                 .all(|event| event.raw_day_permit.as_ref() == Some(&expected_permit))
         );
-        let first_update = first_update.event;
-        let second_update = second_update.event;
+        let first_update = first_update.into_legacy_event();
+        let second_update = second_update.into_legacy_event();
         assert_eq!(first_update.source_event_type, "depth_update");
         assert_eq!(second_update.source_event_type, "depth_update");
         let first_raw = serde_json::from_str::<Value>(&first_update.raw_json).unwrap();
@@ -26845,7 +26970,7 @@ mod tests {
             .await
             .expect_err("depth parser/schema errors must terminate the source");
             assert!(error.to_string().contains(expected_error), "{error}");
-            let released = rx.recv().await.unwrap().event;
+            let released = rx.recv().await.unwrap().into_legacy_event();
             let raw = serde_json::from_str::<Value>(&released.raw_json).unwrap();
             assert_eq!(raw["u"], 90);
             assert_eq!(
@@ -27311,7 +27436,7 @@ mod tests {
                 .contains("binance_depth_snapshot_schema_fatal:schema:invalid_snapshot_contract"),
             "{error}"
         );
-        let released = rx.recv().await.unwrap().event;
+        let released = rx.recv().await.unwrap().into_legacy_event();
         let raw = serde_json::from_str::<Value>(&released.raw_json).unwrap();
         assert_eq!(raw["u"], 90);
         assert_eq!(
@@ -27474,7 +27599,7 @@ mod tests {
 
         let mut events = Vec::new();
         while let Ok(event) = rx.try_recv() {
-            events.push(event.event);
+            events.push(event.into_legacy_event());
         }
         assert_eq!(
             events
@@ -27585,7 +27710,7 @@ mod tests {
 
         let mut events = Vec::new();
         while let Ok(event) = rx.try_recv() {
-            events.push(event.event);
+            events.push(event.into_legacy_event());
         }
         assert_eq!(
             events
@@ -27722,8 +27847,8 @@ mod tests {
         resume_tx.send(()).unwrap();
         snapshot_release_tx.send(()).unwrap();
 
-        let snapshot = rx.recv().await.unwrap().event;
-        let first = rx.recv().await.unwrap().event;
+        let snapshot = rx.recv().await.unwrap().into_legacy_event();
+        let first = rx.recv().await.unwrap().into_legacy_event();
         assert_eq!(snapshot.source_event_type, "depth_snapshot");
         assert_eq!(first.source_event_type, "depth_update");
         let first_raw = serde_json::from_str::<Value>(&first.raw_json).unwrap();
@@ -27744,7 +27869,7 @@ mod tests {
         resume_tx.send(()).unwrap();
         second_update_tx.send(()).unwrap();
 
-        let second = rx.recv().await.unwrap().event;
+        let second = rx.recv().await.unwrap().into_legacy_event();
         let second_raw = serde_json::from_str::<Value>(&second.raw_json).unwrap();
         assert_eq!(second_raw["stitch_verdict"], BINANCE_DEPTH_VERDICT_APPLIED);
         assert_eq!(second_raw["snapshot_last_update_id"], 100);
@@ -27827,7 +27952,7 @@ mod tests {
                 .contains("depth barrier owner dropped source resume signal"),
             "{error}"
         );
-        let released = rx.recv().await.unwrap().event;
+        let released = rx.recv().await.unwrap().into_legacy_event();
         let raw = serde_json::from_str::<Value>(&released.raw_json).unwrap();
         assert_eq!(raw["u"], 90);
         assert_eq!(
@@ -28111,7 +28236,7 @@ mod tests {
             outcome,
             BinanceDepthUpdateExit::StreamEnded { .. }
         ));
-        let released = rx.recv().await.unwrap().event;
+        let released = rx.recv().await.unwrap().into_legacy_event();
         let raw = serde_json::from_str::<Value>(&released.raw_json).unwrap();
         assert_eq!(raw["u"], 90);
         assert_eq!(
@@ -28203,7 +28328,7 @@ mod tests {
 
         let mut events = Vec::new();
         while let Ok(event) = rx.try_recv() {
-            events.push(event.event);
+            events.push(event.into_legacy_event());
         }
         assert_eq!(
             events
@@ -28392,7 +28517,7 @@ mod tests {
             fd_counts
         });
 
-        let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(128).unwrap();
+        let (tx, mut rx) = bounded_event_queue::<SourceIngressPayload>(128).unwrap();
         let stats = Arc::new(SourceQueueBackpressureStats::default());
         install_active_raw_day_gate(&stats, now_ms()).await;
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
@@ -28426,7 +28551,7 @@ mod tests {
                 .await
                 .expect("the depth source must survive one hundred reconnects")
                 .expect("source queue must remain open")
-                .event;
+                .into_legacy_event();
             let raw = serde_json::from_str::<Value>(&event.raw_json).unwrap();
             assert_eq!(raw["connection_generation"], expected_generation);
             assert_eq!(
@@ -28543,7 +28668,7 @@ mod tests {
             let _ = release_ws_rx.await;
         });
 
-        let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(512).unwrap();
+        let (tx, mut rx) = bounded_event_queue::<SourceIngressPayload>(512).unwrap();
         let stats = Arc::new(SourceQueueBackpressureStats::default());
         install_active_raw_day_gate(&stats, now_ms()).await;
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
@@ -28581,7 +28706,7 @@ mod tests {
                 .await
                 .expect("one hundred resnapshot cycles must make progress")
                 .expect("source queue must remain open")
-                .event;
+                .into_legacy_event();
             let raw = serde_json::from_str::<Value>(&event.raw_json).unwrap();
             assert_eq!(raw["connection_generation"], 1);
             assert!(ingress.insert(raw["depth_ingress_sequence"].as_u64().unwrap()));
@@ -28692,8 +28817,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn polymarket_price_change_stats_count_typed_rows_not_raw_events() {
+    #[tokio::test]
+    async fn polymarket_price_change_stats_count_one_canonical_v3_message_row() {
         let tmp = tempdir().unwrap();
         let dataset_root = tmp.path().canonicalize().unwrap();
         let provenance = test_runtime_provenance("polymarket-stats-run");
@@ -28715,35 +28840,57 @@ mod tests {
             )
         });
 
-        let event = test_polymarket_price_change_event(1_783_392_404_600);
-        let value = serde_json::from_str::<Value>(&event.raw_json).unwrap();
-        let events = value["price_changes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|change| {
-                let mut row_event = event.clone();
-                let mut row_value = value.clone();
-                row_value["price_changes"] = Value::Array(vec![change.clone()]);
-                row_event.raw_json = row_value.to_string();
-                InflightRawEvent::for_test(row_event)
-            })
-            .collect::<Vec<_>>();
-        queue_rows.store(events.len() as u64, Ordering::Relaxed);
-        tx.send(WriterCommand::Events(events)).unwrap();
+        let recv_time_utc_ms = 1_783_392_404_600;
+        let event = test_polymarket_price_change_event(recv_time_utc_ms);
+        let sdk_message = serde_json::from_str::<WsMessage>(&event.raw_json).unwrap();
+        let message =
+            PolymarketOrderbookV3Projection::from_target_admitted_sdk_message(&sdk_message)
+                .unwrap()
+                .unwrap()
+                .with_slug(Some(event.source_identifier.clone()))
+                .admit(PolymarketOrderbookV3Admission {
+                    timestamp_received: recv_time_utc_ms,
+                    collector_host_id: event.collector_host_id,
+                    collector_region: event.collector_region,
+                    source_endpoint: event.source_endpoint,
+                    source_sequence_epoch_id: "polymarket-stats-source-epoch".to_owned(),
+                    collector_admission_sequence: 1,
+                    collector_admission_time_utc_ms: recv_time_utc_ms + 1,
+                })
+                .unwrap();
+        let budget = InflightBudget::new();
+        let row_reservation = budget.acquire(1, 0, BUFFER_ACQUIRE_TIMEOUT).await.unwrap();
+        let byte_reservation = budget
+            .acquire(0, message.owned_bytes(), BUFFER_ACQUIRE_TIMEOUT)
+            .await
+            .unwrap();
+        queue_rows.store(1, Ordering::Relaxed);
+        tx.send(WriterCommand::PolymarketOrderbookV3(vec![
+            InflightPolymarketOrderbookV3 {
+                message,
+                raw_day_permit: RawDayPermit {
+                    utc_day: utc_day_string_from_ms(recv_time_utc_ms).unwrap(),
+                    generation: INITIAL_RAW_DAY_GENERATION,
+                },
+                _source_recv_monotonic_ms: 0,
+                _row_reservation: row_reservation,
+                _byte_reservation: byte_reservation,
+            },
+        ]))
+        .unwrap();
         drop(tx);
 
         let output = handle.join().unwrap().unwrap();
-        assert_eq!(output.stats.events_received, 2);
-        assert_eq!(output.stats.events_written, 2);
-        assert_eq!(output.stats.typed_rows_written, 2);
-        assert_eq!(output.stats.finalized_segment_rows, 2);
+        assert_eq!(output.stats.events_received, 1);
+        assert_eq!(output.stats.events_written, 1);
+        assert_eq!(output.stats.typed_rows_written, 1);
+        assert_eq!(output.stats.finalized_segment_rows, 1);
 
-        let ManifestCommand::Finalized(delta) = manifest_rx.blocking_recv().unwrap() else {
+        let ManifestCommand::Finalized(delta) = manifest_rx.recv().await.unwrap() else {
             panic!("expected finalized-file delta");
         };
-        assert_eq!(delta.rows, 2);
-        assert_eq!(delta.event_type_counts["price_change"], 2);
+        assert_eq!(delta.rows, 1);
+        assert_eq!(delta.event_type_counts["price_change"], 1);
     }
 
     #[test]
@@ -29040,7 +29187,7 @@ mod tests {
             }))
             .unwrap()
         };
-        let resolved = |market_id: &str,
+        let resolved = |clob_market_id: &str,
                         condition: &str,
                         slug: Option<&str>,
                         assets: Vec<&str>,
@@ -29048,7 +29195,7 @@ mod tests {
                         winning_asset: &str,
                         winning_outcome: &str| {
             let WsMessage::MarketResolved(event) = serde_json::from_value::<WsMessage>(json!({
-                "id": market_id,
+                "id": clob_market_id,
                 "market": condition,
                 "slug": slug,
                 "assets_ids": assets,
@@ -29258,7 +29405,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn polymarket_invalid_market_resolved_is_raw_first_then_fail_closed() {
+    async fn polymarket_invalid_market_resolved_fails_before_v3_admission() {
         let discovery = test_btc_discovery();
         let current = discovery.current.clone();
         let received_at_utc_ms = now_ms();
@@ -29305,286 +29452,10 @@ mod tests {
         .await
         .unwrap_err();
         assert!(error.to_string().contains("market id mismatch"));
-
-        let raw = rx.recv().await.unwrap().event;
-        assert_eq!(raw.source_kind, "polymarket_market");
-        assert_eq!(raw.source_event_type, "market_resolved");
-        assert_eq!(raw.source_identifier, current.slug);
-        let payload = serde_json::from_str::<Value>(&raw.raw_json).unwrap();
-        assert_eq!(payload["id"], "market-wrong");
-        assert_eq!(payload["event_type"], "market_resolved");
         assert!(matches!(
             rx.try_recv(),
             Err(mpsc::error::TryRecvError::Empty) | Err(mpsc::error::TryRecvError::Disconnected)
         ));
-    }
-
-    #[test]
-    fn polymarket_message_dedupe_happens_once_before_price_change_fanout() {
-        let discovery = test_btc_discovery();
-        let asset_to_slug = discovery_asset_to_slug(&discovery);
-        let mut dedupe = LifecycleFingerprintSets::with_limit(8);
-        dedupe
-            .replace_lifecycles(expected_lifecycle_slugs(&discovery))
-            .unwrap();
-        let message = serde_json::from_str::<WsMessage>(
-            r#"{
-                "event_type":"price_change",
-                "market":"0x0000000000000000000000000000000000000000000000000000000000000002",
-                "timestamp":"1783392404600",
-                "price_changes":[
-                    {"asset_id":"101","price":"0.52","size":"10","side":"BUY"},
-                    {"asset_id":"102","price":"0.48","size":"8","side":"SELL"}
-                ]
-            }"#,
-        )
-        .unwrap();
-        let stats = SourceQueueBackpressureStats::default();
-
-        let canonical = prepare_polymarket_message(&message).unwrap().unwrap();
-        assert!(
-            polymarket_message_passes_dedupe(
-                &mut dedupe,
-                &discovery,
-                &asset_to_slug,
-                &message,
-                &canonical,
-                1_783_392_404_599,
-                Some(&stats),
-            )
-            .unwrap()
-        );
-        let lifecycle = polymarket_message_lifecycle_slug(&message, &discovery, &asset_to_slug);
-        commit_polymarket_message_dedupe(&mut dedupe, lifecycle.as_deref(), &canonical).unwrap();
-        assert!(
-            !polymarket_message_passes_dedupe(
-                &mut dedupe,
-                &discovery,
-                &asset_to_slug,
-                &message,
-                &canonical,
-                1_783_392_404_599,
-                Some(&stats),
-            )
-            .unwrap(),
-            "the replay is dropped once at message level, not independently per output row"
-        );
-        let counters = stats.drain_all_operational();
-        let counter = counters
-            .values()
-            .next()
-            .unwrap()
-            .get("polymarket_market")
-            .unwrap();
-        assert_eq!(counter.structural_dedupe_dropped_events, 1);
-    }
-
-    #[tokio::test]
-    async fn polymarket_atomic_fanout_failure_does_not_commit_dedupe() {
-        let message = || {
-            serde_json::from_str::<WsMessage>(
-                r#"{
-                    "event_type":"price_change",
-                    "market":"0x0000000000000000000000000000000000000000000000000000000000000002",
-                    "timestamp":"1783392404600",
-                    "price_changes":[
-                        {"asset_id":"101","price":"0.52","size":"10","side":"BUY"},
-                        {"asset_id":"102","price":"0.48","size":"8","side":"SELL"}
-                    ]
-                }"#,
-            )
-            .unwrap()
-        };
-        let global_budget = InflightBudget::new();
-        let decoded_budget = InflightBudget::new();
-        let global_baseline = global_budget.available();
-        let decoded_baseline = decoded_budget.available();
-        let stats = Arc::new(SourceQueueBackpressureStats::default());
-        install_active_raw_day_gate(&stats, 1_783_392_404_600).await;
-        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
-        let enqueue_lock = Arc::new(AsyncMutex::new(()));
-        let (too_small_tx, mut too_small_rx) = mpsc::channel(1);
-        let too_small_sink = SourceEventSink {
-            tx: too_small_tx,
-            gaps: Arc::clone(&gaps),
-            source_queue_backpressure: Arc::clone(&stats),
-            inflight_budget: global_budget.clone(),
-            enqueue_lock: Arc::clone(&enqueue_lock),
-        };
-        let discovery = test_btc_discovery();
-        let mut context = PolymarketProcessingContext::new(discovery.clone());
-        let mut dedupe = LifecycleFingerprintSets::with_limit(8);
-        dedupe
-            .replace_lifecycles(expected_lifecycle_slugs(&discovery))
-            .unwrap();
-        let identity = CollectorIdentity {
-            host_id: "collector-test".to_owned(),
-            region: "local-test".to_owned(),
-        };
-        let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
-        let run_started = Instant::now();
-
-        let error = process_polymarket_budgeted_message(
-            budgeted_polymarket_message_at_for_test(
-                message(),
-                1_783_392_404_600,
-                &global_budget,
-                &decoded_budget,
-            )
-            .await,
-            &mut context,
-            &too_small_sink,
-            &identity,
-            run_started,
-            &mut dedupe,
-            &mut recovery,
-        )
-        .await
-        .expect_err("two-row fan-out must not partially enter a one-row ingress");
-        assert!(
-            error
-                .to_string()
-                .contains("fan-out exceeds ingress capacity"),
-            "unexpected fan-out error: {error}"
-        );
-        assert!(too_small_rx.try_recv().is_err());
-
-        let (retry_tx, mut retry_rx) = mpsc::channel(2);
-        let retry_sink = SourceEventSink {
-            tx: retry_tx,
-            gaps,
-            source_queue_backpressure: Arc::clone(&stats),
-            inflight_budget: global_budget.clone(),
-            enqueue_lock,
-        };
-        process_polymarket_budgeted_message(
-            budgeted_polymarket_message_at_for_test(
-                message(),
-                1_783_392_404_600,
-                &global_budget,
-                &decoded_budget,
-            )
-            .await,
-            &mut context,
-            &retry_sink,
-            &identity,
-            run_started,
-            &mut dedupe,
-            &mut recovery,
-        )
-        .await
-        .expect("the identical retry must succeed because the failed fan-out was not committed");
-        process_polymarket_budgeted_message(
-            budgeted_polymarket_message_at_for_test(
-                message(),
-                1_783_392_404_600,
-                &global_budget,
-                &decoded_budget,
-            )
-            .await,
-            &mut context,
-            &retry_sink,
-            &identity,
-            run_started,
-            &mut dedupe,
-            &mut recovery,
-        )
-        .await
-        .expect("the committed replay must be handled as a duplicate");
-
-        let mut identifiers = Vec::new();
-        for _ in 0..2 {
-            let event = retry_rx
-                .recv()
-                .await
-                .expect("complete two-row retry fan-out");
-            identifiers.push(event.event.source_identifier.clone());
-            drop(event);
-        }
-        assert!(retry_rx.try_recv().is_err());
-        assert_eq!(
-            identifiers,
-            vec![
-                format!("{}:101", discovery.current.slug),
-                format!("{}:102", discovery.current.slug),
-            ]
-        );
-        assert_eq!(stats.dropped_rows.load(Ordering::Relaxed), 2);
-        assert_eq!(global_budget.available(), global_baseline);
-        assert_eq!(decoded_budget.available(), decoded_baseline);
-    }
-
-    #[tokio::test]
-    async fn polymarket_fanout_budget_uses_measured_bytes_not_rows_times_maximum() {
-        let price_changes = (0..10)
-            .map(|index| {
-                json!({
-                    "asset_id": if index % 2 == 0 { "101" } else { "102" },
-                    "price": "0.50",
-                    "size": (index + 1).to_string(),
-                    "side": if index % 2 == 0 { "BUY" } else { "SELL" }
-                })
-            })
-            .collect::<Vec<_>>();
-        let message = serde_json::from_value::<WsMessage>(json!({
-            "event_type": "price_change",
-            "market": "0x0000000000000000000000000000000000000000000000000000000000000002",
-            "timestamp": "1783392404600",
-            "price_changes": price_changes
-        }))
-        .unwrap();
-        let global_budget = InflightBudget::with_limits(64, 9 * MAX_TYPED_ROW_BYTES);
-        let decoded_budget = InflightBudget::new();
-        let global_baseline = global_budget.available();
-        let decoded_baseline = decoded_budget.available();
-        let stats = Arc::new(SourceQueueBackpressureStats::default());
-        install_active_raw_day_gate(&stats, 1_783_392_404_600).await;
-        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
-        let (tx, mut rx) = mpsc::channel(10);
-        let sink = SourceEventSink {
-            tx,
-            gaps: Arc::clone(&gaps),
-            source_queue_backpressure: stats,
-            inflight_budget: global_budget.clone(),
-            enqueue_lock: Arc::new(AsyncMutex::new(())),
-        };
-        let discovery = test_btc_discovery();
-        let mut context = PolymarketProcessingContext::new(discovery.clone());
-        let mut dedupe = LifecycleFingerprintSets::with_limit(8);
-        dedupe
-            .replace_lifecycles(expected_lifecycle_slugs(&discovery))
-            .unwrap();
-        let identity = CollectorIdentity {
-            host_id: "collector-test".to_owned(),
-            region: "local-test".to_owned(),
-        };
-        let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
-
-        process_polymarket_budgeted_message(
-            budgeted_polymarket_message_at_for_test(
-                message,
-                1_783_392_404_600,
-                &global_budget,
-                &decoded_budget,
-            )
-            .await,
-            &mut context,
-            &sink,
-            &identity,
-            Instant::now(),
-            &mut dedupe,
-            &mut recovery,
-        )
-        .await
-        .expect("ten small rows fit below nine MiB when actual bytes are reserved");
-
-        for _ in 0..10 {
-            drop(rx.recv().await.expect("all measured fan-out rows"));
-        }
-        assert!(rx.try_recv().is_err());
-        assert!(gaps.lock().unwrap().is_empty());
-        assert_eq!(global_budget.available(), global_baseline);
-        assert_eq!(decoded_budget.available(), decoded_baseline);
     }
 
     #[tokio::test]
@@ -30773,6 +30644,7 @@ mod tests {
         let mut writers = BTreeMap::from([(
             "binance_aggtrade".to_owned(),
             SourceWriterHandle {
+                schema_version: typed_schema_version("binance_aggtrade").to_owned(),
                 tx,
                 queue_rows: Arc::new(AtomicU64::new(0)),
                 accepting_commands: Arc::new(Mutex::new(true)),
@@ -30961,7 +30833,7 @@ mod tests {
             second.send(test_aggtrade_message()).await.unwrap();
         });
 
-        let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(8).unwrap();
+        let (tx, mut rx) = bounded_event_queue::<SourceIngressPayload>(8).unwrap();
         let stats = Arc::new(SourceQueueBackpressureStats::default());
         install_active_raw_day_gate(&stats, now_ms()).await;
         let sink = SourceEventSink {
@@ -31000,7 +30872,7 @@ mod tests {
             .await
             .expect("aggTrade should arrive after reconnect")
             .expect("source queue should stay open")
-            .event;
+            .into_legacy_event();
 
         assert_eq!(event.source_event_type, "aggTrade");
         assert_eq!(event.source_ts.as_deref(), Some("1783392404599"));
@@ -31035,7 +30907,7 @@ mod tests {
                 .unwrap();
         });
 
-        let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(4).unwrap();
+        let (tx, mut rx) = bounded_event_queue::<SourceIngressPayload>(4).unwrap();
         let stats = Arc::new(SourceQueueBackpressureStats::default());
         install_active_raw_day_gate(&stats, now_ms()).await;
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
@@ -31074,7 +30946,7 @@ mod tests {
             .await
             .expect("the source must recover after the failed handshake")
             .expect("source queue must remain open")
-            .event;
+            .into_legacy_event();
         let envelope: Value = serde_json::from_str(&event.raw_json).unwrap();
         assert_eq!(envelope["connection_generation"], 1);
         assert!(gaps.lock().unwrap().all_reasons().is_empty());
@@ -31105,7 +30977,7 @@ mod tests {
                 .unwrap();
         });
 
-        let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(4).unwrap();
+        let (tx, mut rx) = bounded_event_queue::<SourceIngressPayload>(4).unwrap();
         let stats = Arc::new(SourceQueueBackpressureStats::default());
         install_active_raw_day_gate(&stats, now_ms()).await;
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
@@ -31146,7 +31018,7 @@ mod tests {
                 .await
                 .expect("both socket generations must deliver their trade")
                 .expect("source queue must remain open")
-                .event;
+                .into_legacy_event();
             envelopes.push(serde_json::from_str::<Value>(&event.raw_json).unwrap());
         }
         assert_eq!(envelopes[0]["connection_generation"], 1);
@@ -31184,7 +31056,7 @@ mod tests {
                 .unwrap();
         });
 
-        let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(4).unwrap();
+        let (tx, mut rx) = bounded_event_queue::<SourceIngressPayload>(4).unwrap();
         let stats = Arc::new(SourceQueueBackpressureStats::default());
         install_active_raw_day_gate(&stats, now_ms()).await;
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
@@ -31223,7 +31095,7 @@ mod tests {
             .await
             .expect("the source must recover after a WebSocket protocol error")
             .expect("source queue must remain open")
-            .event;
+            .into_legacy_event();
         let envelope: Value = serde_json::from_str(&event.raw_json).unwrap();
         assert_eq!(envelope["connection_generation"], 2);
         assert!(gaps.lock().unwrap().all_reasons().is_empty());
@@ -31264,7 +31136,7 @@ mod tests {
             fd_counts
         });
 
-        let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(4).unwrap();
+        let (tx, mut rx) = bounded_event_queue::<SourceIngressPayload>(4).unwrap();
         let stats = Arc::new(SourceQueueBackpressureStats::default());
         install_active_raw_day_gate(&stats, now_ms()).await;
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
@@ -31303,7 +31175,7 @@ mod tests {
             .await
             .expect("the same source loop must survive one hundred reconnects")
             .expect("source queue must remain open")
-            .event;
+            .into_legacy_event();
         let envelope: Value = serde_json::from_str(&event.raw_json).unwrap();
         assert_eq!(envelope["connection_generation"], 101);
         assert_eq!(
@@ -31358,7 +31230,7 @@ mod tests {
             );
         });
 
-        let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(8).unwrap();
+        let (tx, mut rx) = bounded_event_queue::<SourceIngressPayload>(8).unwrap();
         let stats = Arc::new(SourceQueueBackpressureStats::default());
         install_active_raw_day_gate(&stats, now_ms()).await;
         let (_control_tx, control_rx) = mpsc::channel(AGGTRADE_CONTROL_CHANNEL_CAPACITY);
@@ -31396,7 +31268,7 @@ mod tests {
             .await
             .expect("aggTrade should arrive on the original Ping-kept socket")
             .expect("source queue should stay open")
-            .event;
+            .into_legacy_event();
         assert_eq!(event.source_event_type, "aggTrade");
         assert_eq!(
             serde_json::from_str::<Value>(&event.raw_json).unwrap()["connection_generation"],
@@ -31440,7 +31312,7 @@ mod tests {
             );
         });
 
-        let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(8).unwrap();
+        let (tx, mut rx) = bounded_event_queue::<SourceIngressPayload>(8).unwrap();
         let stats = Arc::new(SourceQueueBackpressureStats::default());
         install_active_raw_day_gate(&stats, now_ms()).await;
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
@@ -31482,7 +31354,7 @@ mod tests {
                 .expect("all jumped-ID rows must be forwarded immediately")
                 .expect("source queue must remain open");
             if inflight.control.is_none() {
-                events.push(inflight.event);
+                events.push(inflight.into_legacy_event());
             }
         }
         let envelopes = events
@@ -31555,7 +31427,7 @@ mod tests {
             sleep(Duration::from_millis(200)).await;
         });
 
-        let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(4).unwrap();
+        let (tx, mut rx) = bounded_event_queue::<SourceIngressPayload>(4).unwrap();
         let stats = Arc::new(SourceQueueBackpressureStats::default());
         install_active_raw_day_gate(&stats, now_ms()).await;
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
@@ -31596,7 +31468,7 @@ mod tests {
                 .await
                 .expect("both conflicting payload facts must be forwarded")
                 .expect("source queue must remain open")
-                .event;
+                .into_legacy_event();
             envelopes.push(serde_json::from_str::<Value>(&event.raw_json).unwrap());
         }
         assert!(envelopes.iter().all(|value| {
@@ -31676,7 +31548,7 @@ mod tests {
                 "invalid application frames must rearm inactivity on the same socket"
             );
         });
-        let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(16).unwrap();
+        let (tx, mut rx) = bounded_event_queue::<SourceIngressPayload>(16).unwrap();
         let (_control_tx, control_rx) = mpsc::channel(AGGTRADE_CONTROL_CHANNEL_CAPACITY);
         let stats = Arc::new(SourceQueueBackpressureStats::default());
         install_active_raw_day_gate(&stats, now_ms()).await;
@@ -31728,7 +31600,7 @@ mod tests {
                 .expect("invalid and following valid frames must reach the source queue")
                 .expect("source queue must remain open");
             if inflight.control.is_none() {
-                events.push(inflight.event);
+                events.push(inflight.into_legacy_event());
             }
         }
         assert_eq!(events[0].source_event_type, "aggTrade");
@@ -31835,7 +31707,7 @@ mod tests {
             sleep(Duration::from_millis(200)).await;
         });
 
-        let (tx, mut rx) = bounded_event_queue::<InflightRawEvent>(16).unwrap();
+        let (tx, mut rx) = bounded_event_queue::<SourceIngressPayload>(16).unwrap();
         let stats = Arc::new(SourceQueueBackpressureStats::default());
         install_active_raw_day_gate(&stats, now_ms()).await;
         let (_control_tx, control_rx) = mpsc::channel(AGGTRADE_CONTROL_CHANNEL_CAPACITY);
@@ -31876,7 +31748,7 @@ mod tests {
                 .expect("binary, oversize and following trades must reach ingress")
                 .expect("source queue must remain open");
             if inflight.control.is_none() {
-                events.push(inflight.event);
+                events.push(inflight.into_legacy_event());
             }
         }
         assert_eq!(

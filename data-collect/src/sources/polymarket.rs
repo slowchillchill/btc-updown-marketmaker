@@ -237,7 +237,7 @@ pub fn t30_prefetch_window(market_start_utc_ms: i64) -> (i64, i64) {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GammaTerminalFixedIdentity {
     pub slug: String,
-    pub market_id: String,
+    pub clob_market_id: String,
     pub condition_id: String,
     pub up_asset_id: String,
     pub down_asset_id: String,
@@ -309,7 +309,7 @@ pub fn evaluate_gamma_terminal_response(
             None,
         );
     }
-    if market.id != fixed_identity.market_id {
+    if market.id != fixed_identity.clob_market_id {
         return source_failure(
             TerminalPredicateFailureReason::MarketIdMismatch,
             observed_active,
@@ -778,7 +778,7 @@ mod tests {
         let evaluation = finalize_gamma_terminal(
             &GammaTerminalFixedIdentity {
                 slug: "btc-updown-5m-1".to_owned(),
-                market_id: "market-1".to_owned(),
+                clob_market_id: "market-1".to_owned(),
                 condition_id: "0x0000000000000000000000000000000000000000000000000000000000000001"
                     .to_owned(),
                 up_asset_id: "101".to_owned(),

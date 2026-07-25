@@ -890,7 +890,7 @@ where
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_polymarket_source_with_spec(
     spec: PolymarketSourceSpec,
-    dataset_root: PathBuf,
+    _dataset_root: PathBuf,
     sink: SourceEventSink,
     collector_identity: CollectorIdentity,
     deadline_ms: Option<i64>,
@@ -899,6 +899,7 @@ pub(super) async fn run_polymarket_source_with_spec(
     startup_recovery: PolymarketRestartRecovery,
 ) -> Result<()> {
     let gamma = GammaClient::new(&spec.gamma_endpoint)?;
+    let source_sequence_epoch_id = polymarket_source_sequence_epoch_id(&collector_identity)?;
     let deadline = deadline_ms.map(|deadline_ms| {
         Instant::now()
             + Duration::from_millis(
@@ -912,33 +913,17 @@ pub(super) async fn run_polymarket_source_with_spec(
     #[cfg(test)]
     recovery.set_wait_override(spec.recovery_wait_override);
     let mut dedupe = LifecycleFingerprintSets::with_limit(POLYMARKET_FINGERPRINTS_PER_LIFECYCLE);
-    let mut dedupe_restored = false;
-    let mut context = PolymarketProcessingContext::from_recovery(startup_recovery)?;
+    let mut context = PolymarketProcessingContext::from_recovery_with_source_epoch(
+        startup_recovery,
+        source_sequence_epoch_id.clone(),
+    )?;
+    if let Some(recovered) = &context {
+        dedupe
+            .replace_lifecycles(recovered.pending.keys().cloned().collect())
+            .map_err(operator_dedupe_error)?;
+    }
     let mut resolution_poll_tasks = JoinSet::<GammaResolutionPollCompletion>::new();
     while deadline_ms.is_none_or(|deadline_ms| now_ms() < deadline_ms) {
-        if context.is_some() && !dedupe_restored {
-            let restore_started_at_utc_ms = now_ms();
-            let lifecycles = expected_polymarket_recovery_lifecycles(restore_started_at_utc_ms);
-            let Some(restored) = restore_polymarket_lifecycle_dedupe(
-                dataset_root.clone(),
-                lifecycles.clone(),
-                &mut control_rx,
-            )
-            .await?
-            else {
-                return Ok(());
-            };
-            dedupe = restored;
-            dedupe_restored = true;
-            let recovered = context
-                .as_mut()
-                .ok_or_else(|| invalid_data("Polymarket recovered context disappeared"))?;
-            recovered.retain_startup_restored_dedupe_lifecycles(lifecycles);
-            recovered.reclassify_recovered_pending(now_ms())?;
-            if recovered.current.is_none() && recovered.pending.is_empty() {
-                context = None;
-            }
-        }
         let discovery = if context.is_none() {
             let discovery = match discover_initial_polymarket_context(
                 &gamma,
@@ -967,28 +952,13 @@ pub(super) async fn run_polymarket_source_with_spec(
                     return Err(invalid_data(error).into());
                 }
             };
-            if !dedupe_restored {
-                let lifecycles = expected_lifecycle_slugs(&discovery);
-                let Some(restored) = restore_polymarket_lifecycle_dedupe(
-                    dataset_root.clone(),
-                    lifecycles,
-                    &mut control_rx,
-                )
-                .await?
-                else {
-                    return Ok(());
-                };
-                if !gamma_discovery_is_current(&discovery, now_ms()) {
-                    continue;
-                }
-                dedupe = restored;
-                dedupe_restored = true;
-            } else {
-                dedupe
-                    .replace_lifecycles(expected_lifecycle_slugs(&discovery))
-                    .map_err(operator_dedupe_error)?;
-            }
-            context = Some(PolymarketProcessingContext::new(discovery.clone()));
+            dedupe
+                .replace_lifecycles(expected_lifecycle_slugs(&discovery))
+                .map_err(operator_dedupe_error)?;
+            context = Some(PolymarketProcessingContext::new_with_source_epoch(
+                discovery.clone(),
+                source_sequence_epoch_id.clone(),
+            ));
             Some(discovery)
         } else {
             None
@@ -1156,6 +1126,8 @@ async fn discover_initial_polymarket_context(
 
 #[derive(Clone, Debug)]
 pub(super) struct PolymarketWsTerminalEvidence {
+    pub(super) source_sequence_epoch_id: String,
+    pub(super) collector_admission_sequence: u64,
     pub(super) source_received_at_utc_ms: i64,
     pub(super) validation_completed_at_utc_ms: i64,
     pub(super) source_payload_json: String,
@@ -1169,8 +1141,9 @@ pub(super) struct PolymarketWsTerminalEvidence {
 
 impl PolymarketWsTerminalEvidence {
     fn dynamic_owned_bytes(&self) -> usize {
-        self.source_payload_json
+        self.source_sequence_epoch_id
             .capacity()
+            .saturating_add(self.source_payload_json.capacity())
             .saturating_add(self.source_payload_sha256.capacity())
             .saturating_add(self.platform_timestamp_raw.capacity())
             .saturating_add(self.winning_asset_id.capacity())
@@ -1183,6 +1156,8 @@ impl PolymarketWsTerminalEvidence {
 pub(super) struct AcceptedPolymarketMetadataRow {
     pub(super) row: PolymarketMarketMetadataV3Row,
     pub(super) raw_day_ticket: RawDayAcceptedTicket,
+    pub(super) ws_claimant_source_sequence_epoch_id: Option<String>,
+    pub(super) ws_claimant_collector_admission_sequence: Option<u64>,
 }
 
 #[cfg(test)]
@@ -1203,7 +1178,7 @@ pub(super) enum PolymarketTerminalClaim {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct PendingPolymarketIdentity {
     pub(super) slug: String,
-    pub(super) market_id: String,
+    pub(super) clob_market_id: String,
     pub(super) condition_id: String,
     pub(super) up_asset_id: String,
     pub(super) down_asset_id: String,
@@ -1218,7 +1193,7 @@ impl PendingPolymarketIdentity {
     pub(super) fn from_discovered(market: &DiscoveredBtcUpdownMarket) -> Result<Self> {
         Ok(Self {
             slug: market.slug.clone(),
-            market_id: market.id.clone(),
+            clob_market_id: market.id.clone(),
             condition_id: market.condition_id.clone(),
             up_asset_id: market.up_asset_id.clone(),
             down_asset_id: market.down_asset_id.clone(),
@@ -1241,7 +1216,7 @@ impl PendingPolymarketIdentity {
     fn from_recovered(recovered: &RecoveredPolymarketPending) -> Self {
         Self {
             slug: recovered.slug.clone(),
-            market_id: recovered.clob_market_id.clone(),
+            clob_market_id: recovered.clob_market_id.clone(),
             condition_id: recovered.condition_id.clone(),
             up_asset_id: recovered.up_asset_id.clone(),
             down_asset_id: recovered.down_asset_id.clone(),
@@ -1256,7 +1231,7 @@ impl PendingPolymarketIdentity {
     fn owned_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             .saturating_add(self.slug.capacity())
-            .saturating_add(self.market_id.capacity())
+            .saturating_add(self.clob_market_id.capacity())
             .saturating_add(self.condition_id.capacity())
             .saturating_add(self.up_asset_id.capacity())
             .saturating_add(self.down_asset_id.capacity())
@@ -1266,7 +1241,7 @@ impl PendingPolymarketIdentity {
     pub(super) fn gamma_terminal_identity(&self) -> GammaTerminalFixedIdentity {
         GammaTerminalFixedIdentity {
             slug: self.slug.clone(),
-            market_id: self.market_id.clone(),
+            clob_market_id: self.clob_market_id.clone(),
             condition_id: self.condition_id.clone(),
             up_asset_id: self.up_asset_id.clone(),
             down_asset_id: self.down_asset_id.clone(),
@@ -1442,6 +1417,7 @@ pub(super) struct GammaResolutionPollCompletion {
 }
 
 pub(super) struct PolymarketProcessingContext {
+    pub(super) source_sequence_epoch_id: String,
     pub(super) current: Option<DiscoveredBtcUpdownMarket>,
     pub(super) next: Option<DiscoveredBtcUpdownMarket>,
     pub(super) pending: BTreeMap<String, PendingPolymarketResolution>,
@@ -1469,7 +1445,15 @@ pub(super) fn production_polymarket_timeline_now() -> PolymarketTimelineNow {
 
 impl PolymarketProcessingContext {
     pub(super) fn new(discovery: BtcUpdownDiscovery) -> Self {
+        Self::new_with_source_epoch(discovery, "test-polymarket-source-epoch".to_owned())
+    }
+
+    pub(super) fn new_with_source_epoch(
+        discovery: BtcUpdownDiscovery,
+        source_sequence_epoch_id: String,
+    ) -> Self {
         let mut context = Self {
+            source_sequence_epoch_id,
             current: Some(discovery.current),
             next: discovery.next,
             pending: BTreeMap::new(),
@@ -1486,10 +1470,18 @@ impl PolymarketProcessingContext {
     }
 
     pub(super) fn from_recovery(recovery: PolymarketRestartRecovery) -> Result<Option<Self>> {
+        Self::from_recovery_with_source_epoch(recovery, "test-polymarket-source-epoch".to_owned())
+    }
+
+    pub(super) fn from_recovery_with_source_epoch(
+        recovery: PolymarketRestartRecovery,
+        source_sequence_epoch_id: String,
+    ) -> Result<Option<Self>> {
         if recovery.pending.is_empty() {
             return Ok(None);
         }
         let mut context = Self {
+            source_sequence_epoch_id,
             current: None,
             next: None,
             pending: recovery
@@ -1637,7 +1629,7 @@ impl PolymarketProcessingContext {
         }
         self.pending.values().find_map(|pending| {
             let identity = &pending.identity;
-            (identity.market_id == event.id
+            (identity.clob_market_id == event.id
                 || identity.condition_id == condition_id
                 || event.slug.as_deref() == Some(identity.slug.as_str())
                 || event_assets.contains(&identity.up_asset_id)
@@ -1807,7 +1799,7 @@ fn polymarket_authority_matches_identity(
 ) -> bool {
     authority.slug == identity.slug
         && authority.condition_id == identity.condition_id
-        && authority.clob_market_id == identity.market_id
+        && authority.clob_market_id == identity.clob_market_id
         && authority.asset_ids
             == serde_json::to_string(&[
                 identity.up_asset_id.as_str(),
@@ -1897,7 +1889,7 @@ pub(super) async fn process_polymarket_budgeted_message(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    dedupe: &mut LifecycleFingerprintSets,
+    _dedupe: &mut LifecycleFingerprintSets,
     _recovery: &mut SourceRecoverySupervisor,
 ) -> Result<()> {
     let BudgetedPolymarketMessage {
@@ -1937,229 +1929,21 @@ pub(super) async fn process_polymarket_budgeted_message(
     let Some(discovery) = context.discovery_snapshot() else {
         return Ok(());
     };
-    let (market_rows, metadata_rows) =
-        polymarket_target_fanout_counts(&message, routed_asset_to_slug);
-    let mut canonical_reservation = match sink
-        .inflight_budget
-        .acquire(
-            0,
-            POLYMARKET_PROCESSOR_STAGING_MAX_BYTES,
-            BUFFER_ACQUIRE_TIMEOUT,
-        )
-        .await
-    {
-        Ok(reservation) => reservation,
-        Err(error) => {
-            sink.source_queue_backpressure.record_timeout();
-            record_polymarket_fanout_drop(sink, recv_time_utc_ms, market_rows, metadata_rows);
-            let reason = format!("polymarket_canonical_budget_failed:{error}");
-            record_gap_at(&sink.gaps, recv_time_utc_ms, reason);
-            return Err(error.into());
-        }
-    };
-    let source_native_payload_json = match prepare_polymarket_message(&message) {
-        Ok(payload) => payload,
-        Err(error) => {
-            record_polymarket_fanout_drop(sink, recv_time_utc_ms, market_rows, metadata_rows);
-            record_gap_at(
-                &sink.gaps,
-                recv_time_utc_ms,
-                format!("polymarket_message_prepare_failed:{error}"),
-            );
-            return Err(error);
-        }
-    };
-    let Some(source_native_payload_json) = source_native_payload_json else {
+    let Some(admitted) =
+        target_admitted_polymarket_message(&message, &discovery, routed_asset_to_slug)?
+    else {
         return Ok(());
     };
-    let canonical_owned_bytes =
-        std::mem::size_of::<String>().saturating_add(source_native_payload_json.capacity());
-    if canonical_owned_bytes > MAX_TYPED_ROW_BYTES {
-        let reason = format!(
-            "operator_intervention_required:Polymarket canonical payload exceeds {MAX_TYPED_ROW_BYTES} owned bytes:bytes={canonical_owned_bytes}"
-        );
-        record_polymarket_fanout_drop(sink, recv_time_utc_ms, market_rows, metadata_rows);
-        record_gap_at(&sink.gaps, recv_time_utc_ms, reason.clone());
-        return Err(invalid_data(reason).into());
-    }
-    if let Err(error) = canonical_reservation.shrink_to(0, canonical_owned_bytes) {
-        record_polymarket_fanout_drop(sink, recv_time_utc_ms, market_rows, metadata_rows);
-        let reason = format!("polymarket_canonical_reservation_shrink_failed:{error}");
-        record_gap_at(&sink.gaps, recv_time_utc_ms, reason);
-        return Err(error.into());
-    }
-    let _canonical_reservation = canonical_reservation;
-    let accepted = match polymarket_message_passes_dedupe(
-        dedupe,
-        &discovery,
-        routed_asset_to_slug,
-        &message,
-        &source_native_payload_json,
-        recv_time_utc_ms,
-        Some(&sink.source_queue_backpressure),
-    ) {
-        Ok(accepted) => accepted,
-        Err(error) => {
-            record_polymarket_fanout_drop(sink, recv_time_utc_ms, market_rows, metadata_rows);
-            record_gap_at(
-                &sink.gaps,
-                recv_time_utc_ms,
-                format!("polymarket_message_dedupe_failed:{error}"),
-            );
-            return Err(error);
-        }
-    };
-    if !accepted {
-        return Ok(());
-    }
-    let dedupe_lifecycle =
-        polymarket_message_lifecycle_slug(&message, &discovery, routed_asset_to_slug);
-    let fanout_rows = market_rows.saturating_add(metadata_rows);
-    let fanout_staging = if fanout_rows > 0 {
-        match sink
-            .inflight_budget
-            .acquire(
-                0,
-                POLYMARKET_PROCESSOR_STAGING_MAX_BYTES,
-                BUFFER_ACQUIRE_TIMEOUT,
-            )
-            .await
-        {
-            Ok(reservation) => Some(reservation),
-            Err(error) => {
-                sink.source_queue_backpressure.record_timeout();
-                record_polymarket_fanout_drop(sink, recv_time_utc_ms, market_rows, metadata_rows);
-                let reason = format!("polymarket_fanout_staging_budget_failed:{error}");
-                record_gap_at(&sink.gaps, recv_time_utc_ms, reason);
-                return Err(error.into());
-            }
-        }
-    } else {
-        None
-    };
-    let mut measured_bytes = Vec::with_capacity(fanout_rows);
-    let measured_outcome = match visit_polymarket_events(
-        &message,
-        &discovery,
-        routed_asset_to_slug,
-        collector_identity,
-        recv_time_utc_ms,
-        &source_native_payload_json,
-        |event| {
-            let owned_bytes = owned_event_bytes(&event);
-            if owned_bytes > MAX_TYPED_ROW_BYTES {
-                return Err(invalid_data(format!(
-                    "operator_intervention_required:max_typed_row_bytes_exceeded:{}:bytes={owned_bytes}:limit={MAX_TYPED_ROW_BYTES}",
-                    event.source_kind
-                ))
-                .into());
-            }
-            measured_bytes.push(owned_bytes);
-            Ok(())
-        },
-    ) {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            record_polymarket_fanout_drop(sink, recv_time_utc_ms, market_rows, metadata_rows);
-            record_gap_at(&sink.gaps, recv_time_utc_ms, error.to_string());
-            return Err(error);
-        }
-    };
-    if measured_bytes.len() != fanout_rows {
-        let reason = format!(
-            "Polymarket fan-out count changed while measuring:expected={fanout_rows}:actual={}",
-            measured_bytes.len()
-        );
-        record_polymarket_fanout_drop(sink, recv_time_utc_ms, market_rows, metadata_rows);
-        record_gap_at(&sink.gaps, recv_time_utc_ms, reason.clone());
-        return Err(invalid_data(reason).into());
-    }
-    let fanout_bytes = match measured_bytes.iter().try_fold(0_usize, |total, bytes| {
-        total
-            .checked_add(*bytes)
-            .ok_or_else(|| invalid_data("Polymarket fan-out byte total overflow"))
-    }) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            record_polymarket_fanout_drop(sink, recv_time_utc_ms, market_rows, metadata_rows);
-            record_gap_at(&sink.gaps, recv_time_utc_ms, error.to_string());
-            return Err(error.into());
-        }
-    };
-    let mut fanout_reservation = match sink
-        .inflight_budget
-        .acquire(fanout_rows, fanout_bytes, BUFFER_ACQUIRE_TIMEOUT)
-        .await
-    {
-        Ok(reservation) => reservation,
-        Err(error) => {
-            sink.source_queue_backpressure.record_timeout();
-            record_polymarket_fanout_drop(sink, recv_time_utc_ms, market_rows, metadata_rows);
-            let reason = format!("polymarket_fanout_budget_failed:{error}");
-            record_gap_at(&sink.gaps, recv_time_utc_ms, reason);
-            return Err(error.into());
-        }
-    };
-    let mut prepared = Vec::with_capacity(fanout_rows);
-    let mut measured_bytes = measured_bytes.into_iter();
-    let outcome = match visit_polymarket_events(
-        &message,
-        &discovery,
-        routed_asset_to_slug,
-        collector_identity,
-        recv_time_utc_ms,
-        &source_native_payload_json,
-        |event| {
-            let owned_bytes = owned_event_bytes(&event);
-            let expected_bytes = measured_bytes.next().ok_or_else(|| {
-                invalid_data("Polymarket fan-out second pass produced an extra row")
-            })?;
-            if owned_bytes != expected_bytes {
-                return Err(invalid_data(format!(
-                    "Polymarket fan-out owned size changed between passes:first={expected_bytes}:second={owned_bytes}"
-                ))
-                .into());
-            }
-            let reservation = fanout_reservation.split(1, owned_bytes)?;
-            prepared.push(InflightRawEvent {
-                event,
-                control: None,
-                admission_gaps: Vec::new(),
-                raw_day_permit: None,
-                _source_recv_monotonic_ms: monotonic_ms(run_started),
-                _reservation: Some(reservation),
-            });
-            Ok(())
-        },
-    ) {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            record_polymarket_fanout_drop(sink, recv_time_utc_ms, market_rows, metadata_rows);
-            record_gap_at(&sink.gaps, recv_time_utc_ms, error.to_string());
-            return Err(error);
-        }
-    };
-    if measured_bytes.next().is_some() || outcome.matched_assets != measured_outcome.matched_assets
-    {
-        let reason = "Polymarket fan-out changed between measurement and build".to_owned();
-        record_polymarket_fanout_drop(sink, recv_time_utc_ms, market_rows, metadata_rows);
-        record_gap_at(&sink.gaps, recv_time_utc_ms, reason.clone());
-        return Err(invalid_data(reason).into());
-    }
-    drop(fanout_reservation);
-    drop(fanout_staging);
-    send_polymarket_events_atomically_with_ticket(
+    let source_sequence_epoch_id = context.source_sequence_epoch_id.clone();
+    let _ = enqueue_polymarket_orderbook_v3_with_ticket(
         sink,
+        run_started,
         recv_time_utc_ms,
-        prepared,
         &raw_day_ticket,
-        || {
-            commit_polymarket_message_dedupe(
-                dedupe,
-                dedupe_lifecycle.as_deref(),
-                &source_native_payload_json,
-            )
-        },
+        collector_identity,
+        MARKET_WS_ENDPOINT,
+        &source_sequence_epoch_id,
+        || admitted.polymarket_v3_projection(),
     )
     .await?;
     Ok(())
@@ -2169,7 +1953,7 @@ pub(super) fn validate_polymarket_market_resolved_identity(
     identity: &PendingPolymarketIdentity,
     event: &MarketResolved,
 ) -> Result<()> {
-    if event.id != identity.market_id {
+    if event.id != identity.clob_market_id {
         return Err(invalid_data(format!(
             "Polymarket market_resolved market id mismatch:slug={}",
             identity.slug
@@ -2258,10 +2042,7 @@ pub(super) fn validate_polymarket_market_resolved_identity(
             identity.slug
         ))
     })?;
-    if !winning_outcome
-        .trim()
-        .eq_ignore_ascii_case(expected_winning_outcome)
-    {
+    if !same_outcome_label(winning_outcome, expected_winning_outcome) {
         return Err(invalid_data(format!(
             "Polymarket market_resolved winning outcome mismatch:slug={}",
             identity.slug
@@ -2269,6 +2050,36 @@ pub(super) fn validate_polymarket_market_resolved_identity(
         .into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn target_admitted_market_resolved_v3_projection(
+    event: &MarketResolved,
+    context: &PolymarketProcessingContext,
+) -> Result<Option<PolymarketOrderbookV3Projection>> {
+    let Some(slug) = context.matched_resolved_slug(event) else {
+        return Ok(None);
+    };
+    let identity = if let Some(pending) = context.pending.get(&slug) {
+        pending.identity.clone()
+    } else {
+        let market = context
+            .current
+            .iter()
+            .chain(context.next.iter())
+            .find(|market| market.slug == slug)
+            .ok_or_else(|| invalid_data("matched market_resolved identity disappeared"))?;
+        PendingPolymarketIdentity::from_discovered(market)?
+    };
+    validate_polymarket_market_resolved_identity(&identity, event)?;
+    let projection = PolymarketOrderbookV3Projection::from_target_admitted_sdk_message(
+        &WsMessage::MarketResolved(event.clone()),
+    )?
+    .map(|projection| projection.with_slug(Some(identity.slug)))
+    .ok_or_else(|| {
+        invalid_data("target-admitted market_resolved did not produce a v3 projection")
+    })?;
+    Ok(Some(projection))
 }
 
 pub(super) async fn process_polymarket_market_resolved(
@@ -2280,52 +2091,7 @@ pub(super) async fn process_polymarket_market_resolved(
     run_started: Instant,
     raw_day_ticket: RawDayAcceptedTicket,
 ) -> Result<()> {
-    let source_payload_json =
-        prepare_polymarket_message(&WsMessage::MarketResolved(event.clone()))?
-            .ok_or_else(|| invalid_data("decoded market_resolved is missing source payload"))?;
-    let platform_timestamp = event.timestamp.ok_or_else(|| {
-        invalid_data(
-            "polymarket_current_v2_typed_shape_missing_required_fields:event_type=market_resolved:fields=timestamp",
-        )
-    })?;
-    let winning_asset_id = event.winning_asset_id.as_ref().ok_or_else(|| {
-        invalid_data(
-            "polymarket_current_v2_typed_shape_missing_required_fields:event_type=market_resolved:fields=winning_asset_id",
-        )
-    })?;
-    let winning_outcome = event.winning_outcome.as_deref().ok_or_else(|| {
-        invalid_data(
-            "polymarket_current_v2_typed_shape_missing_required_fields:event_type=market_resolved:fields=winning_outcome",
-        )
-    })?;
-    let matched_slug = context.matched_resolved_slug(event);
-    let source_identifier = matched_slug
-        .as_deref()
-        .or(event.slug.as_deref())
-        .unwrap_or(event.id.as_str());
-    let raw = with_polymarket_row_context(
-        polymarket_market_resolved_raw_json(event),
-        matched_slug.as_deref(),
-        &source_payload_json,
-    );
-    send_event_with_ticket(
-        sink,
-        run_started,
-        raw_event_with_recv_time(
-            "polymarket_market",
-            "market_resolved",
-            source_identifier,
-            Some(platform_timestamp.to_string()),
-            recv_time_utc_ms,
-            MARKET_WS_ENDPOINT,
-            collector_identity,
-            raw,
-        ),
-        &raw_day_ticket,
-    )
-    .await?;
-
-    let Some(slug) = matched_slug else {
+    let Some(slug) = context.matched_resolved_slug(event) else {
         return Ok(());
     };
     let identity = if let Some(pending) = context.pending.get(&slug) {
@@ -2340,7 +2106,6 @@ pub(super) async fn process_polymarket_market_resolved(
         PendingPolymarketIdentity::from_discovered(market)?
     };
     validate_polymarket_market_resolved_identity(&identity, event)?;
-
     let validation_completed_at_utc_ms = context.validation_now_utc_ms();
     if validation_completed_at_utc_ms < recv_time_utc_ms {
         return Err(invalid_data(format!(
@@ -2348,24 +2113,89 @@ pub(super) async fn process_polymarket_market_resolved(
         ))
         .into());
     }
+    let winning_asset_id = event
+        .winning_asset_id
+        .as_ref()
+        .expect("validated market_resolved has a winner")
+        .to_string();
+    let winning_outcome = event
+        .winning_outcome
+        .as_deref()
+        .expect("validated market_resolved has an outcome")
+        .to_owned();
+    let claim_agrees = |claim: &PolymarketTerminalClaim| -> bool {
+        let (claimed_asset, claimed_outcome) = match claim {
+            PolymarketTerminalClaim::MarketResolvedWs(evidence) => (
+                evidence.winning_asset_id.as_str(),
+                evidence.winning_outcome.as_str(),
+            ),
+            PolymarketTerminalClaim::GammaBySlug(accepted) => (
+                accepted.row.winning_asset_id.as_deref().unwrap_or_default(),
+                accepted.row.winning_outcome.as_deref().unwrap_or_default(),
+            ),
+        };
+        claimed_asset == winning_asset_id && same_outcome_label(claimed_outcome, &winning_outcome)
+    };
+    if let Some(pending) = context.pending.get(&slug) {
+        if recv_time_utc_ms > pending.budget_horizon_utc_ms() {
+            return Ok(());
+        }
+        if let Some(claim) = &pending.claim
+            && !claim_agrees(claim)
+        {
+            return Err(invalid_data(format!(
+                "Polymarket market_resolved contradicts the existing terminal claim:slug={slug}"
+            ))
+            .into());
+        }
+    } else if let Some(claim) = context.early_ws_claims.get(&slug)
+        && (claim.winning_asset_id != winning_asset_id
+            || !same_outcome_label(&claim.winning_outcome, &winning_outcome))
+    {
+        return Err(invalid_data(format!(
+            "Polymarket market_resolved contradicts the existing early terminal claim:slug={slug}"
+        ))
+        .into());
+    }
+    let projection_event = event.clone();
+    let projection_slug = slug.clone();
+    let source_sequence_epoch_id = context.source_sequence_epoch_id.clone();
+    let receipt = enqueue_polymarket_orderbook_v3_with_ticket(
+        sink,
+        run_started,
+        recv_time_utc_ms,
+        &raw_day_ticket,
+        collector_identity,
+        MARKET_WS_ENDPOINT,
+        &source_sequence_epoch_id,
+        move || {
+            PolymarketOrderbookV3Projection::from_target_admitted_sdk_message(
+                &WsMessage::MarketResolved(projection_event),
+            )?
+            .map(|projection| projection.with_slug(Some(projection_slug)))
+            .ok_or_else(|| {
+                invalid_data("validated market_resolved did not produce a v3 projection").into()
+            })
+        },
+    )
+    .await?;
+    let resolved = receipt.market_resolved.ok_or_else(|| {
+        invalid_data("admitted market_resolved is missing typed terminal evidence")
+    })?;
     let evidence = PolymarketWsTerminalEvidence {
+        source_sequence_epoch_id: receipt.source_sequence_epoch_id,
+        collector_admission_sequence: receipt.collector_admission_sequence,
         source_received_at_utc_ms: recv_time_utc_ms,
         validation_completed_at_utc_ms,
-        source_payload_sha256: Sha256::digest(source_payload_json.as_bytes())
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect(),
-        source_payload_json,
-        platform_timestamp_raw: platform_timestamp.to_string(),
-        platform_timestamp_utc_ms: platform_timestamp,
-        winning_asset_id: winning_asset_id.to_string(),
-        winning_outcome: winning_outcome.to_owned(),
+        source_payload_json: resolved.source_evidence_payload_json,
+        source_payload_sha256: resolved.source_evidence_raw_sha256,
+        platform_timestamp_raw: resolved.platform_timestamp_utc_ms.to_string(),
+        platform_timestamp_utc_ms: resolved.platform_timestamp_utc_ms,
+        winning_asset_id: resolved.winning_asset_id,
+        winning_outcome: resolved.winning_outcome,
         raw_day_ticket,
     };
     if let Some(pending) = context.pending.get_mut(&slug) {
-        if !pending.observe_ws_payload(&evidence.source_payload_json) {
-            return Ok(());
-        }
         if pending.claim.is_none() {
             pending.claim = Some(PolymarketTerminalClaim::MarketResolvedWs(evidence));
         }
@@ -2397,17 +2227,6 @@ fn polymarket_processing_sink_unusable(
     })
 }
 
-fn record_abandoned_polymarket_message(
-    message: &BudgetedPolymarketMessage,
-    context: &PolymarketProcessingContext,
-    sink: &SourceEventSink,
-) -> usize {
-    let (market_rows, metadata_rows) =
-        polymarket_target_fanout_counts(&message.message, &context.asset_to_slug);
-    record_polymarket_fanout_drop(sink, message.recv_time_utc_ms, market_rows, metadata_rows);
-    market_rows.saturating_add(metadata_rows)
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn stop_polymarket_after_processing_error(
     first_error: Box<dyn Error + Send + Sync>,
@@ -2437,7 +2256,7 @@ pub(super) async fn stop_polymarket_after_processing_error(
         Some(PolymarketFenceRequest::Paused { id, .. }) => Some(id),
         Some(PolymarketFenceRequest::PumpClosed) | None => None,
     };
-    let mut abandoned_by_day = BTreeMap::<String, (usize, usize, i64, i64)>::new();
+    let mut abandoned_by_day = BTreeMap::<String, (usize, i64, i64)>::new();
     loop {
         match market_runtime.recv(Duration::from_secs(1)).await {
             Ok(Some(PolymarketDrainEvent::Message(message))) => {
@@ -2472,19 +2291,16 @@ pub(super) async fn stop_polymarket_after_processing_error(
                     }
                 } else {
                     let recv_time_utc_ms = message.recv_time_utc_ms;
-                    let rows = record_abandoned_polymarket_message(&message, context, sink);
                     let utc_day = utc_day_string_from_ms(recv_time_utc_ms)
                         .unwrap_or_else(|| "unknown".to_owned());
                     let entry = abandoned_by_day.entry(utc_day).or_insert((
-                        0,
                         0,
                         recv_time_utc_ms,
                         recv_time_utc_ms,
                     ));
                     entry.0 = entry.0.saturating_add(1);
-                    entry.1 = entry.1.saturating_add(rows);
-                    entry.2 = entry.2.min(recv_time_utc_ms);
-                    entry.3 = entry.3.max(recv_time_utc_ms);
+                    entry.1 = entry.1.min(recv_time_utc_ms);
+                    entry.2 = entry.2.max(recv_time_utc_ms);
                 }
             }
             Ok(Some(PolymarketDrainEvent::Fence {
@@ -2531,12 +2347,12 @@ pub(super) async fn stop_polymarket_after_processing_error(
             primary_error = error;
         }
     }
-    for (utc_day, (messages, rows, first_recv, last_recv)) in abandoned_by_day {
+    for (utc_day, (messages, first_recv, last_recv)) in abandoned_by_day {
         record_gap_for_day(
             &sink.gaps,
             &utc_day,
             format!(
-                "polymarket_accepted_decoded_messages_discarded:messages={messages}:rows={rows}:first_recv_time_utc_ms={first_recv}:last_recv_time_utc_ms={last_recv}",
+                "polymarket_accepted_decoded_messages_discarded:messages={messages}:first_recv_time_utc_ms={first_recv}:last_recv_time_utc_ms={last_recv}",
             ),
         );
     }
@@ -2851,6 +2667,8 @@ async fn materialize_polymarket_accepted_early_ws_at_quiesce(
         AcceptedPolymarketMetadataRow {
             row: pending_row,
             raw_day_ticket: pending_row_ticket,
+            ws_claimant_source_sequence_epoch_id: None,
+            ws_claimant_collector_admission_sequence: None,
         },
     )
     .await?;
@@ -3927,6 +3745,8 @@ where
     let accepted_row = AcceptedPolymarketMetadataRow {
         row,
         raw_day_ticket: raw_day_ticket.clone(),
+        ws_claimant_source_sequence_epoch_id: None,
+        ws_claimant_collector_admission_sequence: None,
     };
 
     let mut emit_now = None;
@@ -4516,6 +4336,12 @@ where
                             collector_identity,
                         )?,
                         raw_day_ticket: evidence.raw_day_ticket.clone(),
+                        ws_claimant_source_sequence_epoch_id: Some(
+                            evidence.source_sequence_epoch_id.clone(),
+                        ),
+                        ws_claimant_collector_admission_sequence: Some(
+                            evidence.collector_admission_sequence,
+                        ),
                     }
                 }
                 PolymarketTerminalClaim::GammaBySlug(row) => {
@@ -4575,6 +4401,8 @@ where
                 row: Box::new(AcceptedPolymarketMetadataRow {
                     row,
                     raw_day_ticket,
+                    ws_claimant_source_sequence_epoch_id: None,
+                    ws_claimant_collector_admission_sequence: None,
                 }),
             }
         } else {

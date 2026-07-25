@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED_STAGE3_AUTHORITY_SYNC_CLOSED`。阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED`。阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
 > `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
@@ -32,6 +32,10 @@
 > 冲突或实际情况与需求/计划不一致时才停止。未冻结的RTDS参数仍是实质决策门；
 > production activation/cutover、release、部署、远端操作、migration和删除仍为
 > 第九节范围外事项。
+> Stage3任务3.1至3.7、S-B/M-B/W-B修复、本地门与重复独立审查均已通过；
+> `STAGE3_CLOSED`以承载本记录的commit成功push到`origin/fix-rtds-silents`且本地
+> HEAD、upstream与远端ref一致为生效条件。下一执行游标为独立cleanup阶段5；
+> 阶段4仍遵守RTDS专项自身尚未满足的参数与授权门。
 
 ## 一、执行原则与成功标准
 
@@ -449,7 +453,7 @@ non-production conformance路径。
 ### 任务 3.1：测试先行冻结 v3 schema
 
 - 步骤 3.1.1：复用P-B1长期保留的missing/null parser fixtures，并为七类可被SDK typed API接纳的public market variant建立target-admitted golden fixtures。
-  -> 验证：parser gap不会被v3测试伪装成nullable row；可接纳fixture覆盖空/多元素数组、decimal文本、F04 nullable book快照状态、event message、terminal fields，以及含目标/非目标entries的mixed `PriceChange`。
+  -> 验证：parser gap不会被v3测试伪装成nullable row；可接纳fixture覆盖空/多元素数组、decimal文本、F04 nullable book快照状态、event message、terminal fields，以及含目标/非目标entries的mixed `PriceChange`。schema golden只包含项目canonical `clob_market_id`，不含同值顶层`id`；fixture证明SDK `NewMarket.id`/`MarketResolved.id`只在唯一入口映射一次，`market`仍为condition ID，nested `event_message.id`保持不变。
 - 步骤 3.1.2：写失败测试，要求 v3 schema没有 `source_native_payload_json` / venue `hash`，并使用 nested Arrow types。
   -> 验证：旧 writer应失败或只写 v2，测试不先改实现。
 - 步骤 3.1.3：写 `PriceChange` 一条 target-admitted projection一行、list顺序和 round-trip测试。
@@ -463,12 +467,12 @@ non-production conformance路径。
 - 步骤 3.1.7：写Gamma-first与platform duplicate矩阵。
   -> 验证：accepted drain中的一条或多条合格late WS各写一条validated typed observation但不产生WS terminal、第二owner或第二transition；target-associated contradiction仍在row admission前fail closed；role-exit后的late WS写0条。两条相同qualified platform delivery产生两条不同source key的row，内部retry不产生第三条；metadata v4 terminal row通过claimant pair唯一指向实际claimant。
 - 步骤 3.1.8：冻结source admission coordinate与已批准metadata v4 schema/null matrix。
-  -> 验证：v3 source schema包含非空epoch、正数sequence和正数UTC毫秒admission time，唯一source key只由epoch+sequence组成；metadata v4以metadata v3全部字段、顺序、类型、nullability和语义为不可变前缀，只在末尾追加nullable `ws_claimant_source_sequence_epoch_id: Utf8`与`ws_claimant_collector_admission_sequence: UInt64`。metadata v3 schema/version立即冻结，activation前仍是current metadata writer，activation后只读；不得复用digest、时间或物理行位置。
+  -> 验证：v3 source schema包含非空epoch、正数sequence和正数UTC毫秒admission time，唯一source key只由epoch+sequence组成；metadata v4以metadata v3全部字段、顺序、类型、nullability和语义为不可变前缀，只在末尾追加nullable `ws_claimant_source_sequence_epoch_id: Utf8`与`ws_claimant_collector_admission_sequence: UInt64`。metadata v3 schema/version立即冻结，activation前仍是current metadata writer，activation后退出current runtime new-write；公开offline legacy writer只允许历史fixture、兼容测试和任务3.7 bounded A/B，不得复用digest、时间或物理行位置建立current authority。
 
 ### 任务 3.2：建立单一 domain typed message
 
 - 步骤 3.2.1：用最小 enum + variant structs表达七类消息和共同envelope；envelope增加`source_sequence_epoch_id`、`collector_admission_sequence`和`collector_admission_time_utc_ms`。
-  -> 验证：epoch在同一producer ownership内跨reconnect/UTC rollover稳定、restart更换；sequence在epoch内严格递增但允许空洞且不得回绕；admission time为正数UTC毫秒并验证`timestamp_received <= collector_admission_time_utc_ms`，不属于唯一key。不新增connection-generation、generic validation framework或JSON blob。
+  -> 验证：epoch在同一producer ownership内跨reconnect/UTC rollover稳定、restart更换；sequence在epoch内严格递增但允许空洞且不得回绕；admission time为正数UTC毫秒并验证`timestamp_received <= collector_admission_time_utc_ms`，不属于唯一key。不新增connection-generation、generic validation framework或JSON blob。按用户批准的方案B，第三方SDK/wire `id`只在typed入口映射为项目canonical `clob_market_id`；v3 domain、Parquet、metadata、recovery和项目consumer不再建立同值`id` alias或双路径，active-v2外部/legacy JSON保持不变。
 - 步骤 3.2.2：source owner先执行现行 target-market/asset admission；对 `market_resolved`，先把宽松candidate routing收敛到完整fixed identity/assets/outcomes/winner validation，再从通过准入的SDK message构造一次target-admitted domain projection。
   -> 验证：unmatched不写row且不改变状态；target-associated contradiction在row/claim/transition前fail closed；只有qualified消息产生domain。删除 typed -> canonical JSON -> normalized JSON -> typed往返的生产依赖，不建立第二validator。
 - 步骤 3.2.3：完整target validation、对应row/byte permit和bounded source-writer queue ownership全部成立后，为每个domain message恰好分配一次Polymarket source coordinate，再从同一个validated object派生source row、terminal-once输入与metadata v4 WS claimant pair。
@@ -483,7 +487,7 @@ non-production conformance路径。
 - 步骤 3.3.1：在 schema owner中实现 event discriminator和 nested list/struct builders。
   -> 验证：实际 Parquet footer字段顺序、类型、nullability和 metadata匹配 golden。
 - 步骤 3.3.2：新增的v3 writer只写v3，但在任务3.5.6前不替换current v2 writer；v2 reader始终保持legacy read-only。
-  -> 验证：v3 writer拒绝unknown/legacy写入，reader兼容真实v2 fixture；未过activation barrier时生产调用图仍只激活v2 writer。
+  -> 验证：v3 writer拒绝unknown/legacy写入，reader兼容真实v2 fixture；未过activation barrier时生产调用图仍只激活v2 writer。W-B保留production-compiled public offline v2/metadata-v3 writer API，不要求硬拒绝legacy schema；它不能接入current runtime。
 - 步骤 3.3.3：保持 ZSTD、hour/day partition、sort order、atomic rename和 manifest file facts。
   -> 验证：finalized row/bytes/SHA/schema逐项一致。
 - 步骤 3.3.4：实现但暂不激活v3 writer；按collector admission order写入并验证同epoch内sequence严格递增，active v2 writer继续current new-write，v2 reader保持legacy read-only/receive-order。
@@ -492,7 +496,7 @@ non-production conformance路径。
 ### 任务 3.4：准备替代 payload fingerprint 和 fan-out
 
 - 步骤 3.4.1：让未激活v3路径不构造或持久化Polymarket canonical payload，并按 `size_of::<DomainMessage>() + Σ String::capacity() + Σ (Vec<T>::capacity() * size_of::<T>())`计算permit合同值，递归计入Vec已初始化元素拥有的动态缓冲区且每个allocation只计一次；active v2路径在任务3.5.6前保持不变。
-  -> 验证：不得把Vec元素数当字节；未激活v3路径无`source_native_payload_json`，不把合同值声称为allocator实际bytes或覆盖共享buffer/Arrow内部开销，不创建通用追踪框架，v2 current writer与legacy reader均未被误删。
+  -> 验证：不得把Vec元素数当字节；未激活v3路径无`source_native_payload_json`，不把合同值声称为allocator实际bytes或覆盖共享buffer/Arrow内部开销，不创建通用追踪框架，v2 current writer与legacy reader均未被误删。active/legacy v2的wire-compatible canonical/raw-equivalent JSON继续使用顶层`id`；本命名决定不修改v2 bytes、fingerprint、reader或历史文件，也不授权migration/backfill。
 - 步骤 3.4.2：在未激活v3路径实现无跨进程fingerprint recovery、无fan-out前payload-equality drop的语义，并把旧active v2依赖登记为任务3.5.6同一activation diff中的待断开路径。
   -> 验证：v3 restart不投影payload，不创建sidecar/digest列；activation前v2生产行为不漂移。`14,664`只记录为现行full-day manifest中不可恢复的aggregate，不声称重放被丢消息或精确恢复row/event差异。
 - 步骤 3.4.3：在未激活v3路径把一条domain message作为一个admission unit进入queue/writer。
@@ -503,23 +507,35 @@ non-production conformance路径。
   -> 验证：一条target-admitted projection取得一行和按冻结公式计算的contract-owned-byte permits；decoded queue附加上限不替代全局预算。
 - 步骤 3.4.6：建立预算表，逐 owner记录对象、上限、reservation起点、跨queue/await存活期和释放点；move/borrow不重复计费，只有与原对象并存且跨await/queue的owned copy另取permit。
   -> 验证：复用现有Arrow batch/writer bound；若无可证明边界则停止报告，不创建通用instrumentation。exact-limit、oversize、nested book/price-change burst、channel closed、queue/writer阻塞、permit acquisition failure、admission gap、coordinated finalize和shutdown测试证明失败路径fail closed且permits最终回到基线，RSS只报告。
+
+  当前逐owner预算事实：
+
+  | owner / 对象 | 上限 | reservation起点 | 跨queue/await存活期 | 释放点 |
+  |---|---|---|---|---|
+  | fast-drain SDK `WsMessage` / `BudgetedPolymarketMessage` | global `100,000 rows / 134,217,728 bytes`；decoded `25,000 messages / 67,108,864 bytes`；单对象`1,048,576 bytes`；共同`2s` deadline | SDK decode、market variant和owned-bytes检查后，raw-day ticket与decoded queue admission前 | 同时持有global+decoded reservation，跨decoded mpsc、fence/drain、target validation及v3 enqueue await | processor return、ignore/drop、queue closed/timeout或abort；decoded acquire失败先释放global |
+  | v3 canonical source message | global `1 row + exact contract-owned bytes`；单行`1 MiB`；共同`2s` deadline | accepted ticket gate后先预留`1 MiB` byte，projection完成后shrink到exact，再用剩余deadline取得`1 row`；queue ownership成立后分配source key | 与SDK message并存时独立计费；跨Defer FIFO/source queue、`5,000` row pending batch、`8` command writer queue和writer write | writer消费完成，或任一defer/queue/writer/error/drop/shutdown析构 |
+  | metadata v4 `RawEvent` bundle | 每行global `1 row + exact bytes`；bundle按总rows/bytes取得后split；单行`1 MiB`、`2s` | metadata row验证并构造`RawEvent`后、source queue前 | 可与SDK/v3 source/pending evidence并存，故独立计费；跨Defer FIFO/source queue/pending batch/writer queue/write | writer完成或失败/drop/shutdown析构 |
+  | resolution pending state | pending markets `2`；source authorities `4`；总owned bytes严格小于`1,048,576` | early claim、promotion、recovery或authority mutation后由`ensure_pending_bounds`检查；不是semaphore permit | 跨actor与Gamma await | terminal/exhausted成功入队后remove、无future slot恢复删除、promotion消费early claim，或actor退出drop |
+  | queue/batch/writer/Arrow结构边界 | source queue `25,000`；flush batch `5,000`；writer channel `8 commands`；row group `50,000 rows / 16,777,216 logical bytes` | 上述对象move进入各owner，不取得第二份permit | 原reservation跨各层；构造Arrow batch时输入reservation仍存活 | writer处理或command drop后释放 |
+
+  SDK message与v3 projection在canonical构造期真实并存，因此两份global reservation不是重复计费。`16 MiB`只是row-group logical limit，不是Arrow allocator精确内存上限；RSS只报告。无active consumer的`POLYMARKET_PROCESSOR_STAGING_MAX_BYTES`不列为预算owner，留待阶段5按不可达证明处理。
 - 步骤 3.4.7：证明未激活v3路径不依赖专用raw-first handler、invalid/unmatched raw retention、Gamma-first raw-only或post-horizon raw-only，并把对应active v2生产边登记到任务3.5.6的待断开清单；不删除历史`polymarket_orderbook_v2` source reader或`polymarket_market_metadata_v3`自身的source traceability。
   -> 验证：v3调用图只存在candidate routing ->完整validation -> canonical domain -> typed row/terminal输入这一条路径；没有rejected-row schema、quarantine/sidecar、第二artifact或payload-digest recovery。静态schema/调用图和负例证明gap/error/coverage不能携带完整/截断frame、重序列化JSON、digest或等价可恢复字段集合。activation前active v2行为不变；历史v2 fixture仍可读，metadata WS/Gamma payload/digest仍只按其自身合同验证。
 
 ### 任务 3.5：未激活 typed-only resolution recovery、metadata v4 与 activation
 
-- 步骤 3.5.1：在未激活v3 recovery路径中以typed event/market/slug/winner/outcome/assets/admission/schema取代raw projection，并实现已批准的metadata v4 overlay；active v2 raw recovery与metadata v3 current writer在任务3.5.6前保持不变。
-  -> 验证：v3 recovery源码和测试不解析payload JSON。metadata v4复用同一artifact/writer/manifest mapping和五种row kind，以metadata v3完整schema为不可变前缀，只追加nullable claimant pair。仅WS-owned `resolution_terminal_ws`两列同时必填且epoch非空、sequence>0；Gamma-owned terminal、post-terminal observation、snapshot、transition、summary及non-owning late WS均同时为null。metadata v3保持不可变；不能以payload digest或模糊匹配替代，也不得提前断开active v2 recovery。
-- 步骤 3.5.2：让未激活v3 recovery用validated typed contradiction、manifest finalization和metadata authority恢复。
-  -> 验证：以下合法：claimant typed row + 唯一matching WS terminal；多条agreeing platform duplicates + 唯一claimant coordinate；无WS row + 唯一Gamma terminal；role-exit前accepted的agreeing typed corroboration + 唯一Gamma terminal；0条`market_resolved` source row + 唯一合法exhausted summary及与counters/status一致的finalized attempts。terminal态不重放或产生第二owner；exhausted态不恢复pending或未来slot。
+- 步骤 3.5.1：在未激活v3 recovery路径中以typed event/market/slug/winner/outcome/`asset_ids`/admission/schema取代raw projection，并实现已批准的metadata v4 overlay；active v2 raw recovery与metadata v3 current writer在任务3.5.6前保持不变。
+  -> 验证：v3 recovery源码和测试不解析payload JSON；`market_resolved`与`new_market`统一使用v3 canonical `asset_ids`，不增加`resolved_event_asset_ids` alias或双列，历史v2字段只读。metadata v4复用同一artifact/writer/manifest mapping和五种row kind，以metadata v3完整schema为不可变前缀，只追加nullable claimant pair。仅WS-owned `resolution_terminal_ws`两列同时必填且epoch非空、sequence>0；Gamma-owned terminal、post-terminal observation、snapshot、transition、summary及non-owning late WS均同时为null。metadata v3保持不可变；不能以payload digest或模糊匹配替代，也不得提前断开active v2 recovery。
+- 步骤 3.5.2：让未激活v3 recovery用validated typed contradiction、metadata authority，以及production startup在dataset-root lease内完成的manifest preflight/reconcile所建立的finalized facts恢复。
+  -> 验证：startup/manifest owner是唯一manifest trust boundary；公开recovery API继续接收`dataset_root + time`并扫描同一锁定root的final-named Parquet，不接收snapshot、不重复manifest校验。直接模块调用只证明恢复算法，不证明production manifest authority。以下合法：claimant typed row + 唯一matching WS terminal；多条agreeing platform duplicates + 唯一claimant coordinate；无WS row + 唯一Gamma terminal；role-exit前accepted的agreeing typed corroboration + 唯一Gamma terminal；0条`market_resolved` source row + 唯一合法exhausted summary及与counters/status一致的finalized attempts。terminal态不重放或产生第二owner；exhausted态不恢复pending或未来slot。
 - 步骤 3.5.3：写source-only、exhausted、role-exit和损坏artifact负例。
   -> 验证：validated `market_resolved` row但无terminal/summary、WS terminal无唯一claimant row、typed row + exhausted、row receive晚于role-exit、terminal+summary、重复terminal/summary、typed identity/winner/admission contradiction、running Parquet、unknown schema、缺列或损坏文件均fail closed；不恢复pending、不发Gamma、不写exhausted、不伪造transition或补metadata。
 - 步骤 3.5.4：在validation前、validation后但queue admission前、typed row running、typed row finalized但terminal未finalized、terminal running/finalized、manifest finalize和UTC seal切点执行crash fixture。
-  -> 验证：running artifact不作为durable fact；source-only finalized prefix按上一步fail closed；不存在post-horizon raw-only合法例外；只有finalized verified pending identity且仍有未来slot时best-effort恢复未来slot，过去slot只记missed且E+8后无第7次probe。
+  -> 验证：startup preflight/reconcile拒绝不一致manifest/file facts；running artifact不作为durable fact；source-only finalized prefix按上一步fail closed；recovery不另建snapshot validator。不存在post-horizon raw-only合法例外；只有finalized verified pending identity且仍有未来slot时best-effort恢复未来slot，过去slot只记missed且E+8后无第7次probe。
 - 步骤 3.5.5：真实 v2/v3 mixed dataset compatibility test。
-  -> 验证：activation前合法current pair只有source v2 + metadata v3，activation后合法current pair只有source v3 + metadata v4；source v3 + metadata v3、source v2 + metadata v4、dual-write、running/unknown/corrupt组合均fail closed。`polymarket_orderbook_v2`按独立legacy row view读取且raw-first只作历史audit兼容；metadata v2保持只读，metadata v3保持既有schema且只在activation后转为只读，它们都不能成为source v3 claimant authority或重建v3 canonical domain。
+  -> 验证：activation前合法current runtime pair只有source v2 + metadata v3，activation后合法current runtime pair只有source v3 + metadata v4；source v3 + metadata v3、source v2 + metadata v4、dual-write、running/unknown/corrupt组合均fail closed。`polymarket_orderbook_v2`按独立legacy row view读取且raw-first只作历史audit兼容；metadata v2 reader保持只读，metadata v3保持既有schema且activation后退出current runtime new-write，它们都不能成为source v3 claimant authority或重建v3 canonical domain。offline legacy writer产物不得放入current canonical root冒充合法pair。
 - 步骤 3.5.6：执行唯一current new-write activation barrier。
-  -> 验证：只有metadata v4实现、WS claimant/recovery矩阵及任务3.1至3.5其余硬门通过后，同一个本地activation diff才同时把`polymarket_orderbook_v2 -> v3`与`polymarket_market_metadata_v3 -> v4`两条current new-write路径切换，并断开任务3.4登记的active v2 payload/fingerprint/fan-out/raw-recovery生产边；切换后source v2与metadata v3均只读。任一条件未满足时只保留未激活v3/v4实现和原source v2 + metadata v3路径，不关闭v3分支、不双写、不宣称cutover，也不改变production binary/dataset root。
+  -> 验证：只有metadata v4实现、WS claimant/recovery矩阵及任务3.1至3.5其余硬门通过后，同一个本地activation diff才同时把`polymarket_orderbook_v2 -> v3`与`polymarket_market_metadata_v3 -> v4`两条current runtime new-write路径切换，并断开任务3.4登记的active v2 payload/fingerprint/fan-out/raw-recovery生产边；切换后source v2与metadata v3退出current runtime new-write。公开offline legacy writer继续只服务历史fixture、兼容测试和任务3.7，不得接入`LiveSegmentWriter`、current dispatch、recovery authority或dual-write。任一条件未满足时只保留未激活v3/v4实现和原source v2 + metadata v3路径，不关闭v3分支、不双写、不宣称cutover，也不改变production binary/dataset root。
 
 ### 任务 3.6：canonical round-trip 与 future handoff mapping
 
@@ -528,9 +544,53 @@ non-production conformance路径。
 - 步骤 3.6.2：登记任务3.2.5产生的`NONBLOCKING_FUTURE_SPEC`附件路径、内容hash和状态，不重复评审字段映射。
   -> 验证：附件已记录当前可知retained字段及后继metadata join的`price_to_beat/final_price`责任；不构造`HandoffFrame v1`、不宣称hot runtime parity。未知future字段不阻断v3，真实adapter、frame升级/legacy、模型接线、长跑和部署另立三件套。
 
+### 任务 3.7：唯一 bounded storage A/B measurement
+
+- 步骤 3.7.1：新增唯一`harness=false` repo-local probe
+  `data-collect/benches/polymarket_storage_ab_probe.rs`，复用公开v2/v3
+  `TypedParquetSegmentWriter`和官方SDK typed parser；不得修改production writer、
+  新增Criterion、第二encoder、manifest simulator或通用benchmark框架。
+  -> 验证：同一固定fixture/digest覆盖七类variant、mixed `PriceChange`目标过滤、
+  两条相同platform delivery及一次不新增admission的internal retry；两侧均为Zstd 3、
+  相同row-group常量。
+- 步骤 3.7.2：用隔离case进程写入v2 baseline和v3 candidate，并用独立scan进程请求
+  `POSIX_FADV_DONTNEED`后执行全列扫描。
+  -> 验证：报告finalized bytes/SHA、column chunks、logical messages/physical rows、
+  event rows、write/finalize wall、process CPU、peak RSS、messages/s、scan throughput、
+  toolchain与host硬件；缓存回收只写`advisory requested`，不得宣称物理cold-cache已证明。
+- 步骤 3.7.3：执行硬门并把完整命令、fixture边界、结果和正式语义证据索引写入
+  `data-collect/docs/sdk070-stage3-storage-ab-measurement.md`。
+  -> 验证：v2 payload/hash列及fan-out存在，v3三项排除列和fan-out消失，
+  `v3 finalized bytes < v2`，writer/footer/scan row facts一致。canonical round-trip、
+  duplicate/retry、resolution和manifest authority由Stage3正式contract/startup tests
+  证明，probe不复制这些owner。完整UTC日只消费Stage0已冻结v2事实，不重扫、不生成
+  full-day v3。
+
 ### 阶段 3 审查与提交门
 
-独立审查 source v3/metadata v4 schema、consumer、resolution、legacy compatibility和 storage measurement脚本。SDK字段能力矩阵存在blocking gap时不允许用JSON补洞；metadata v4 implementation/null matrix/claimant recovery未通过时，不得把current new-write activation标为通过。未激活小绿点可按DAG独立评审，通过后按持续发布授权commit/push。
+独立审查 source v3/metadata v4 schema、consumer、resolution、legacy compatibility，以及任务3.7 probe源码、运行命令和结果报告。SDK字段能力矩阵存在blocking gap时不允许用JSON补洞；metadata v4 implementation/null matrix/claimant recovery未通过时，不得把current new-write activation标为通过。未激活小绿点可按DAG独立评审，通过后按持续发布授权commit/push。
+
+当前执行事实：
+
+- 任务3.1至3.6的本地实现、current new-write单一activation diff和自审已经完成；
+  本地current runtime source/metadata pair固定为v3/v4，不存在双写；W-B保留的
+  production-compiled public offline source-v2/metadata-v3 writer只用于历史fixture、
+  兼容测试和任务3.7，不得进入current runtime或recovery authority；
+- `data-collect/docs/sdk070-stage3-future-typed-handoff-mapping.md`登记为
+  `NONBLOCKING_FUTURE_SPEC`，SHA-256为
+  `9b8207c3a01b5356a1a365913d1e8368c69d686bbac36a3f39cbbb1629a31464`；
+- locked全包串行测试、374项lib测试、current v3/v4 recovery、schema/writer
+  contract、fmt与diff门均通过；activation后暴露的不可达v2 helper和空
+  fingerprint plumbing已登记为阶段5清理候选，不通过`allow`掩盖；
+- 用户已裁决S-B/M-B/W-B：storage probe移入任务3.7；production startup
+  lease + manifest preflight/reconcile满足manifest authority且recovery不新增snapshot；
+  “只读”只约束current runtime new-write，offline legacy writer保留。对应文档、
+  probe/report和预算表修复已经完成；本地门及三名独立
+  `gpt-5.6-sol`/`ultra`重复审查均通过，期间发现的storage报告正式语义证据索引
+  Important已修复并复审关闭。当前游标为`STAGE3_CLOSED`，以承载本记录的commit
+  成功push及三方ref一致为生效条件。
+  这里的current new-write activation只指本仓库本地代码调用图，不授权production
+  binary activation/cutover、release、部署、远端操作、dataset migration或删除。
 
 ## 六、阶段 4：RTDS business-silence 完整换 runtime
 
@@ -559,7 +619,9 @@ non-production conformance路径。
 - 步骤 5.1.1：从 symbol矩阵筛出只计算后丢弃、重复 owner、test-only public path、legacy adapter和旧 JSON/fingerprint路径。
   -> 验证：每项记录当前消费者和预计终态。
 - 步骤 5.1.2：检查 binaries/public API/features/benches/scripts/docs/history。
-  -> 验证：只有测试引用不能直接判删。
+  -> 验证：只有测试引用不能直接判删；W-B已把public offline v2/metadata-v3 writer、
+  legacy schema/reader和任务3.7 probe定为`KEEP`，不得与已不可达的current-runtime
+  private v2 branches混为一项删除。
 - 步骤 5.1.3：用户决定 `USER_DECISION` 项。
   -> 验证：不擅自删除 public module或 legacy兼容。
 
@@ -578,7 +640,7 @@ non-production conformance路径。
 
 独立审查每项 consumer proof和删除范围；不得借 cleanup删除 paper/live、历史 reader或未获批产品功能。
 
-## 八、阶段 6：v3集成、storage 与范围内 parity
+## 八、阶段 6：v3集成与范围内 parity
 
 ### 任务 6.1：完整本地确定性门
 
@@ -595,14 +657,20 @@ git diff --check
 - 步骤 6.1.2：只有某个v3 AC对应target未被上述命令覆盖时，才补跑一次该定向target并记录原因。
   -> 验证：不运行有真实网络副作用的bench，不为同一测试重复建门。
 
-### 任务 6.2：bounded fixture A/B 与完整 UTC 日事实基线
+### 任务 6.2：消费 Stage3 storage 与完整 UTC 日既有证据
 
-- 步骤 6.2.1：用确定性bounded fixture从同一target-admitted logical message projection序列分别生成v2 baseline和v3 candidate；fixture另行覆盖两个相同platform deliveries与一次内部retry。
-  -> 验证：输入顺序、compression、row-group和硬件环境记录；duplicate fixture证明两条平台delivery保留两行且内部retry不产生第三行。
-- 步骤 6.2.2：比较 finalized bytes、column chunks、rows/messages、CPU、peak RSS、finalize latency、scan throughput。
-  -> 验证：硬门为被删列/fan-out消失、v3 finalized bytes小于v2、资源/语义通过；实际减少比例、CPU、RSS、finalize和scan为报告项。
-- 步骤 6.2.3：保存现有完整UTC日post-dedupe v2 artifact的schema/storage/resource/manifest事实基线。
-  -> 验证：不生成v3 full-day candidate，不做canonical-domain/resolution语义对照；manifest中的`14,664`仅作为不可恢复aggregate披露，不声称pre-dedupe replay、精确row/event差异或首次真实v3前向长跑。不得为补齐输入新增录制器、sidecar、双写或shadow replay。
+- 步骤 6.2.1：只登记Stage3已经独立审查并发布的
+  `data-collect/benches/polymarket_storage_ab_probe.rs`、
+  `data-collect/docs/sdk070-stage3-storage-ab-measurement.md`路径、内容hash和
+  closure状态。
+  -> 验证：`NO_RERUN / NO_REIMPLEMENTATION / NO_SECOND_REVIEW`；Stage5不得删除或
+  改写该证据owner。若文件hash漂移，按新diff处理而不是沿用旧结果。
+- 步骤 6.2.2：消费`data-collect/docs/sdk070-stage0-baseline.md`已经冻结的完整UTC日
+  post-dedupe v2 schema/storage/resource/manifest事实。
+  -> 验证：不重扫完整日、不生成v3 full-day candidate、不做full-day canonical-domain/
+  resolution语义对照；manifest中的`14,664`仅作不可恢复aggregate披露，不声称
+  pre-dedupe replay、精确row/event差异或首次真实v3前向长跑。不得为补齐输入新增
+  录制器、sidecar、双写或shadow replay。
 
 ### 任务 6.3：canonical domain / future mapping 与产品边界
 
@@ -618,13 +686,13 @@ git diff --check
 - 步骤 6.4.1：报告v3 schema/domain/writer/reader/recovery相关moved/deleted/rewritten/added/net LOC和artifact差异。
   -> 验证：只统计v3范围，不重复验收2-REST root结构。
 - 步骤 6.4.2：报告payload/fingerprint/fan-out旧路径的替代与删除证据。
-  -> 验证：同时逐项报告raw-first handler、invalid/unmatched persistence、Gamma-first raw-only、post-horizon raw-only和raw-to-metadata recovery矩阵的替代/删除证据；明确metadata v3 schema不可变且在activation后与历史orderbook v2一起只读保留，metadata v4继承v3 traceability并只追加claimant pair。只覆盖v3/v4必需删除，不重复汇总阶段5的全局cleanup台账。
+  -> 验证：同时逐项报告raw-first handler、invalid/unmatched persistence、Gamma-first raw-only、post-horizon raw-only和raw-to-metadata recovery矩阵的替代/删除证据；明确metadata v3 schema不可变且在activation后与source v2一起退出current runtime new-write，legacy schema/reader和W-B offline writer保留，metadata v4继承v3 traceability并只追加claimant pair。只覆盖v3/v4必需删除，不重复汇总阶段5的全局cleanup台账。
 - 步骤 6.4.3：报告v3与原计划偏差。
   -> 验证：事实、影响、选项和用户决定写入 changelog。
 
 ### 阶段 6 审查与提交门
 
-独立终审需求AC-01至AC-09、AC-13至AC-15中与v3相关的diff、测试和artifact；AC-10/11由2-REST/cleanup分支收口，AC-12由RTDS子计划收口，本阶段不重复其专项验收门。通过后按持续发布授权创建v3 closure commit/push；deployment、旧数据删除或历史rewrite仍不在本计划范围内。
+独立终审需求AC-01至AC-08、AC-13至AC-15中与v3相关的diff、测试和artifact；AC-09已由Stage3 task 3.7 closure，本阶段只核对证据路径/hash/status，不重跑或重复评审。AC-10/11由2-REST/cleanup分支收口，AC-12由RTDS子计划收口。通过后按持续发布授权创建v3 closure commit/push；deployment、旧数据删除或历史rewrite仍不在本计划范围内。
 
 ## 九、范围外后继事项
 

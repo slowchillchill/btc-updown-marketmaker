@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED_STAGE3_AUTHORITY_SYNC_CLOSED`。阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED`。阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
 > `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
@@ -30,6 +30,10 @@
 > commit和push不再逐次申请；只在上下文冲突或实际情况与需求/计划不一致时停止。
 > 未冻结RTDS参数仍为实质决策门；production activation/cutover、release、部署、
 > 远端操作、migration和删除仍为范围外事项。
+> Stage3任务3.1至3.7、S-B/M-B/W-B修复、本地门与重复独立审查均已通过；
+> `STAGE3_CLOSED`以承载本记录的commit成功push到`origin/fix-rtds-silents`且本地
+> HEAD、upstream与远端ref一致为生效条件。下一执行游标为独立cleanup阶段5；
+> 阶段4仍遵守RTDS专项自身尚未满足的参数与授权门。
 > 本文件只记录本组三件套的事实、冲突、决定与执行，不回写旧changelog。
 
 ## 2026-07-24：用户要求建立一个新的总事项
@@ -1273,3 +1277,299 @@ schema/tests及production activation/cutover、release、部署、远端操作�
 
 `STAGE3_AUTHORITY_SYNC_CLOSED`以承载本记录的closure commit成功push到
 `origin/fix-rtds-silents`且本地HEAD、upstream与远端ref一致为生效条件。
+
+## 2026-07-25：用户批准方案B统一market ID canonical命名
+
+阶段3未提交实现最初把SDK `NewMarket.id`与`MarketResolved.id`映射为
+`clob_market_id`，而需求6.1仍写作`new_market.id`。两者保存同一个CLOB market
+ID，但计划与changelog没有记录该rename；current-v2 canonical/raw JSON使用外部
+wire名`id`，独立metadata domain使用`clob_market_id`，两种先例并存。主代理据此
+触发不一致决策门并暂停schema冻结。
+
+用户明确选择方案B并要求同值统一命名。当前决定冻结为：
+
+- 第三方SDK struct和平台wire继续使用其不可修改的顶层`id`；
+- 唯一typed入口执行一次显式`SDK id -> clob_market_id`映射；
+- 项目自有v3 domain、Parquet、metadata、recovery和consumer统一使用
+  `clob_market_id`，共同envelope的`market`继续表示condition ID；
+- 不在v3 canonical合同中增加同值顶层`id`列、alias、双写或第二转换路径；
+- nested `event_message.id`属于不同层级的event identity并保持原名；
+- activation前current-v2 canonical/raw JSON继续遵循legacy外部字段名，不因本次
+  命名决定提前改变生产行为，也不重写、回填或迁移历史artifact。
+
+这项决定只消除项目canonical命名歧义，不改变字段值、target admission、metadata
+authority、schema activation边界或production授权范围。需求、计划和本changelog
+已同步；阶段3可继续修复独立审查发现的实现问题。
+
+## 2026-07-25：用户裁决 recovery 数组字段统一为 `asset_ids`
+
+阶段3 typed recovery入口审查发现一项文档/实现冲突：需求6.3第5项仍要求投影
+`resolved_event_asset_ids`，但已冻结的v3 domain、Parquet schema、reader和contract
+test统一使用`asset_ids`；需求6.1同时规定`market_resolved`继承`new_market`的
+identity/text/arrays。主代理按不一致决策门暂停阶段3.5，撤回尚未完成的recovery
+草稿并报告真实位置、语义和选项。
+
+用户明确回复“同意”，批准推荐修正：
+
+- `market_resolved`与`new_market`在项目v3 canonical domain、Parquet、recovery和
+  consumer中统一使用`asset_ids`；
+- 不新增同值的`resolved_event_asset_ids` alias、双列、第二映射或兼容写路径；
+- 历史`polymarket_orderbook_v2.resolved_event_asset_ids`保持独立read-only
+  consumer/audit兼容，不得合成v3 canonical row或claimant authority。
+
+需求与计划已同步这一裁决。该修正只消除遗留v2字段名，不改变数组值、顺序、
+target admission、metadata v4 claimant合同或production范围；阶段3.5恢复执行。
+
+## 2026-07-25：Stage3任务3.1至3.6与单一activation diff完成
+
+阶段3按已批准typed合同完成本地实现和current调用图切换：
+
+- 新增唯一`polymarket_orderbook_v3` canonical domain、七类variant、nested Arrow
+  schema、writer/reader和严格round-trip；一条target-admitted SDK message只产生
+  一行，mixed `PriceChange`只保留目标entries并保持SDK原始相对顺序；
+- F04仅作为nullable `book.last_trade_price`快照状态保留，不合成成交事件；
+  F01–F03与F05–F18没有进入v3 schema；
+- 第三方SDK/wire顶层`id`只在typed入口映射一次，项目domain、Parquet、metadata、
+  recovery和consumer统一使用`clob_market_id`；`market_resolved`与`new_market`
+  统一使用`asset_ids`。未增加同值alias、双列或第二转换路径；
+- source owner先做target admission和`market_resolved`完整identity/assets/outcomes/
+  winner校验，再取得既有row/byte预算与bounded queue ownership，并分配唯一
+  epoch+sequence source key。平台重复delivery取得不同key，内部retry不取得第二key；
+  epoch跨reconnect、hour和UTC day rollover稳定；
+- v3 current ingress不构造或持久化canonical payload JSON、venue hash、payload
+  fingerprint、fan-out row reference或raw recovery sidecar。旧source v2与metadata
+  v3 writer在同一个本地activation diff中断开current new-write，保留legacy
+  read-only或`cfg(test)`兼容验证；
+- metadata v4严格以v3完整schema为前缀，只追加nullable WS claimant pair；只有
+  WS-owned terminal同时填写两列。current restart recovery只接受source v3 +
+  metadata v4，按exact epoch+sequence、identity、assets、winner和receive ordering
+  校验；cross-pair、source-only、错误claimant、late/contradictory row和损坏artifact
+  均fail closed；
+- `data-collect/docs/sdk070-stage3-future-typed-handoff-mapping.md`登记为
+  `NONBLOCKING_FUTURE_SPEC`，SHA-256为
+  `9b8207c3a01b5356a1a365913d1e8368c69d686bbac36a3f39cbbb1629a31464`。
+  本阶段没有实现future frame、external adapter、metadata join或paper/live接线。
+
+这里的activation只表示本地源码的current new-write调用图已从source v2/metadata v3
+原子切到source v3/metadata v4；没有构建或部署production binary，没有对运行服务器、
+现有dataset、历史artifact或远端服务执行activation/cutover、migration、backfill、
+release、部署或删除。
+
+## 2026-07-25：独立语义审查发现跨日Defer会丢typed row，已修复
+
+Stage3 activation语义审查发现：既有RawDay gate在UTC rollover返回`Defer`时，最初
+v3 enqueue分支直接返回deferred结果，没有把已经通过validation的typed message交给
+任何持久化owner。该路径会静默丢失下一日source row，并使`MarketResolved`无法建立
+合法claimant。此事实与“已接纳message恰好一行”和“claim前必须已有source ownership”
+合同冲突，因此在阶段收口前修复。
+
+修复没有新增第二queue、JSON sidecar或通用框架，而是把既有单一deferred FIFO扩展为
+mixed `DeferredIngressBatch`：
+
+- typed Defer先取得同一全局row/byte预算，在同一FIFO内分配一次source key并保存原
+  validated domain、deferred ticket/epoch和reservation，随后才返回admission receipt；
+- rollover/stop flush只注入下一日permit并发送同一个owned message，不重新validation、
+  重建JSON或分配第二key；source row与随后插入的metadata继续由单producer FIFO保证顺序；
+- closed channel、budget timeout和queue admission失败仍不分配可用于claim的source key，
+  所有error/drop路径释放reservation；
+- 覆盖23:55窗口、boundary前后、stop、closed/timeout、source先于metadata以及epoch/
+  sequence跨日稳定的测试均通过。
+
+同一审查还发现sink-unusable drain仍用旧v2 fan-out估算虚构`rows`，会让一条
+`PriceChange`或`MarketResolved`消息产生错误drop row计数。active drain已改为只记录
+真实abandoned decoded message和receive-day事实，不再重新projection或伪造row/drop；
+旧fan-out函数已无生产caller，留待阶段5物理删除。
+
+## 2026-07-25：Stage3本地验证门通过，等待最终独立阶段审查
+
+最终行为代码的本地验证证据：
+
+- `cargo check -p data-collect --tests`通过；
+- `cargo test -p data-collect --test polymarket_orderbook_v3_contract -- --nocapture`：
+  `7/7`通过；
+- current v3/v4 recovery定向测试：`7/7`通过；
+- `parquet_writer_contract`、`polymarket_contract`与
+  `polymarket_metadata_layout_contract`：`25/25`、`6/6`、`18/18`通过；
+- Polymarket source完整串行模块：`89/89`通过；
+- `cargo test -p data-collect --lib -- --test-threads=1`：`374/374`通过；
+- `cargo test -p data-collect --locked -- --test-threads=1`：完整unit、
+  integration与doc-test suite全部通过；
+- `cargo fmt --all -- --check`与`git diff --check`通过。
+
+编译warning只对应activation后已不可达的旧v2 raw/fan-out/fingerprint helper、空
+fingerprint plumbing、legacy recovery pair和旧writer入口；语义审查确认它们没有
+生产caller、不会drop或restore消息。它们按DAG登记为阶段5删除候选，本阶段不通过
+`allow`或额外抽象掩盖，也不把清理扩大到仍需legacy read-only的schema/reader。
+
+三份未跟踪RTDS草案未修改、未暂存，哈希仍为
+`d8caddb53c9fbe259ce2f844845426580f614de47ea8bd79c5f110576dc84148`、
+`911aa69bd6d086887f88c185f1b7dc20f6223e7d8637fc1848752966886fc1a7`、
+`50d4a405a664baec39844ac1952af7be10de6b2f75ad792f8abb57f62d36d4c1`。
+当前游标为`STAGE3_LOCAL_GATES_PASSED_REVIEW_PENDING`；下一步只进行最终独立
+`gpt-5.6-sol`/`ultra`阶段审查，审查通过后按持续发布授权commit/push。
+
+## 2026-07-25：Stage3最终独立审查未通过，等待三项一致性裁决
+
+三名独立`gpt-5.6-sol`/`ultra`审查者分别检查合同、运行时和范围。运行时审查为
+`PASS`并确认active v3/v4调用图、Defer FIFO、claim ordering、预算和source
+sequence没有新blocker；合同审查为`NOT PASS`（Important 2），范围审查为
+`NOT PASS`（Important 1）。已核实的不一致如下。
+
+1. Stage3审查门要求独立审查`storage measurement脚本`，但同一计划把v2/v3
+   bounded storage A/B脚本、指标和硬门放在Stage6任务6.2；当前仓库只有历史v2
+   `source_hourly_layout_probe`，没有v3 A/B measurement脚本。不能把不存在的脚本
+   记录为Stage3已审查，也不能静默提前或推迟计划任务。
+2. production startup确实先持有dataset-root lock，验证prior-day manifest并
+   reconcile current manifest的rows/bytes/SHA/file facts，再调用Polymarket
+   recovery；但公开recovery API只接收`dataset_root + time`，随后重新扫描所有
+   final-named Parquet，不消费刚验证的manifest path/facts snapshot。因而公开caller
+   可绕过preflight，且preflight后新出现的final-named文件没有绑定到同一快照。
+   一名运行时审查者认为production调用顺序已满足门，合同审查者认为这仍未满足
+   demand 6.3.6与plan 3.5.2/3.5.4的manifest-finalized authority；不得由主代理
+   擅自选择较弱或较强解释。
+3. active runtime与writer worker只使用source v3 + metadata v4，没有dual-write；
+   但production-compiled public `TypedParquetSegmentWriter`仍允许创建并写入source v2
+   和metadata v3，集成测试和旧bench也证明该入口可用。文档写作activation后source
+   v2与metadata v3“只读”，但没有明确该词只约束current runtime调用图，还是要求
+   production public writer API硬拒绝。硬拒绝会改变public API运行语义；弱解释则
+   需要修正文档，不能由主代理自行决定。
+
+另有一项非阻断但必须补齐的验收记录：计划3.4.6要求逐owner预算表列出对象、上限、
+reservation起点、跨await/queue存活期和释放点；当前只有公式和概括说明。此项不需
+新增抽象或通用instrumentation，可在上述裁决后按代码事实补入文档。
+
+当前游标回退为`STAGE3_REVIEW_BLOCKED_PENDING_CONSISTENCY_DECISIONS`。在用户裁决前
+不修改上述合同语义、不创建Stage3 commit、不push；三份RTDS草案继续排除。
+
+## 2026-07-25：用户裁决S-B、M-B、W-B，Stage3恢复执行
+
+用户对上一节三项不一致分别选择：
+
+1. **S-B**：把唯一bounded v2/v3 storage measurement probe、首次本地运行、结果报告
+   和独立审查移入Stage3；Stage6只消费已发布证据的路径/hash/status，明确
+   `NO_RERUN / NO_REIMPLEMENTATION / NO_SECOND_REVIEW`。
+2. **M-B**：接受production dataset-root lease + startup prior-day manifest preflight
+   + current manifest reconcile作为唯一manifest trust boundary。保留公开
+   `restore_polymarket_resolution_recovery(dataset_root, time)`语义，不增加manifest
+   snapshot参数或第二校验路径。直接模块调用不构成production manifest-authority
+   证明；绕过startup或不遵守lease的外部文件突变是用户接受的剩余风险。
+3. **W-B**：“activation后只读”只表示source v2/metadata v3退出current runtime
+   new-write。production-compiled public offline legacy writer继续用于历史fixture、
+   compatibility tests和S-B probe；它不得接回`LiveSegmentWriter`、current schema
+   dispatch、recovery authority、dual-write或production canonical root。
+
+demand/plan已同步三项裁决。Stage5台账相应区分：
+
+- 旧current-runtime private payload/fingerprint/fan-out/raw-recovery branches继续是
+  `REPLACED_BEHAVIOR`或`UNREACHABLE_PRIVATE`候选；
+- public offline v2/metadata-v3 writer、legacy schema/reader和storage probe为`KEEP`。
+
+计划3.4.6已补逐owner预算表，记录fast-drain SDK message、v3 canonical source、
+metadata v4 bundle、resolution pending state以及queue/batch/writer/Arrow边界的上限、
+reservation起点、跨queue/await存活期和释放点。SDK message与v3 projection短暂并存
+所以分别占global reservation；`16 MiB`只作为row-group logical limit，不宣称精确计量
+Arrow allocator。无active consumer的`POLYMARKET_PROCESSOR_STAGING_MAX_BYTES`未被
+冒充现行预算owner。
+
+### S-B probe与结果
+
+新增：
+
+- `data-collect/benches/polymarket_storage_ab_probe.rs`；
+- `data-collect/Cargo.toml`中的`harness=false` bench target；
+- `data-collect/docs/sdk070-stage3-storage-ab-measurement.md`。
+
+probe只复用官方SDK typed parser、现有v2/v3 domain/writer和Parquet reader。它没有修改
+production writer/schema/runtime，没有新增Criterion、第二encoder、manifest simulator、
+recorder、sidecar、dual-write、shadow replay或通用benchmark framework。
+
+固定fixture：
+
+- 8,192 logical deliveries，七类variant均覆盖；
+- mixed `PriceChange`使用同一原始SDK message和matched-assets集合，v2写13,000条
+  price-change rows，v3写7,800条nested rows；
+- 两条完全相同的book platform deliveries取得两个实际logical id/source sequence；
+- internal retry显式引用`logical_delivery_id=1`并纳入fixture digest，writer sequence
+  guard拒绝第二次写入。
+
+简洁性专项审查最初发现duplicate/retry计数只是固定报告数字，会让没有retry输入时仍可
+显示PASS。修复后duplicate key数量从实际logical-id集合计算，retry成为fixture引用并
+纳入digest，v3 case实际执行同key retry且要求writer拒绝；同时删除重复的静态assertion、
+scan schema、case label和throughput字段。审查者判断单文件长度本身不阻断：七类typed
+fixture、v2 exhaustive offline projection、四个隔离case/scan进程、逐column统计与
+CPU/RSS证据构成真实必要复杂度，不应拆成第二框架。
+
+最终本地命令：
+
+```bash
+cargo check -p data-collect --locked --bench polymarket_storage_ab_probe
+cargo bench -p data-collect --locked --bench polymarket_storage_ab_probe
+```
+
+均通过。最终fixture digest为
+`25964d5b874cb202519596b0fb20e4ed7af2b6a74fc36ad21d3590a7ffe6331f`；
+v2/v3 finalized bytes分别为`229,762 / 119,696`，v3减少`110,066 bytes`
+（该fixture为`47.904353%`）。v2 `source_native_payload_json`/`hash` compressed
+column chunks分别为`113,116 / 36,178 bytes`；v3不存在
+`source_native_payload_json`、venue `hash`或`transaction_hash`。v2/v3 physical
+rows为`13,392 / 8,192`，writer/footer/独立全列scan逐项一致。
+
+scan子进程先请求`POSIX_FADV_DONTNEED`且两侧返回成功；文档只称
+`cache-drop requested`，不冒充已证明物理cold-cache。CPU、RSS、吞吐、finalize和
+scan均为本机报告项，不新增阈值。完整UTC日只消费Stage0既有v2事实，不重扫、不生成
+full-day v3或声称pre-dedupe replay。
+
+当前三项用户决策阻断已经解除，S-B probe本地硬门通过；下一步仍需完成三件套一致性
+复核、受影响本地门和重复`gpt-5.6-sol`/`ultra`独立阶段审查。审查通过前不记录
+`STAGE3_CLOSED`，不创建closure commit/push。
+
+## 2026-07-25：Stage3重复独立审查通过，进入closure commit/push
+
+S-B/M-B/W-B修复后的三名独立`gpt-5.6-sol`/`ultra`审查者分别覆盖typed contract、
+current runtime/recovery以及scope/overdesign：
+
+- contract审查：`PASS`，Critical/Important/Minor均为0；
+- runtime审查：`PASS`，Critical/Important/Minor均为0；
+- scope审查首次发现1项Important：storage报告只笼统引用正式测试，缺少计划3.7.3
+  要求的精确语义证据索引。报告已补canonical `7/7`、writer `5/5`、current v3/v4
+  recovery `7/7`、startup reconcile `2/2`、prior-day manifest preflight `2/2`
+  及dataset-root lease `1/1`的路径、测试名、`--locked`命令与PASS结果；重复审查后
+  为`PASS`，Blocker/Important/Minor均为0。
+
+最终复核确认：
+
+- current runtime只有source v3 + metadata v4 new-write，不存在dual-write；
+- W-B public offline source-v2/metadata-v3 writer只服务历史fixture、兼容测试与
+  S-B probe，没有接回current dispatch、recovery authority或production root；
+- M-B调用链在dataset-root lease内先完成prior-day manifest preflight/current
+  reconcile，再调用公开`(dataset_root, time)` recovery；没有新增snapshot或第二校验；
+- S-B probe没有新增production encoder、shadow canonicalizer、manifest simulator或
+  通用benchmark framework；
+- 37项dead-code warning只对应已登记给Stage5的旧current-runtime私有路径；未用
+  `allow`掩盖，也没有误删W-B legacy KEEP范围。
+
+最终证据hash：
+
+- storage probe：
+  `369ee423a0f1409a7ab2766e35dafded139b482276ba44248466b934b775c261`；
+- storage报告：
+  `92a9df249dd0e4287d7538a6f9081f164b954e84e832288849d5ff9d83141fcb`；
+- future typed handoff mapping：
+  `9b8207c3a01b5356a1a365913d1e8368c69d686bbac36a3f39cbbb1629a31464`。
+
+最终本地门为绿色：完整locked package suite已在行为实现冻结后通过；S-B只新增
+bench/docs，随后`cargo check -p data-collect --locked --all-targets`、上述六组
+正式语义定向测试、`cargo fmt --all -- --check`与`git diff --check`均通过。没有
+重复运行Stage6才要求的clippy门；37项warning按DAG由Stage5删除后再执行
+`-D warnings`。
+
+三份未跟踪RTDS草案继续排除，哈希仍为
+`d8caddb53c9fbe259ce2f844845426580f614de47ea8bd79c5f110576dc84148`、
+`911aa69bd6d086887f88c185f1b7dc20f6223e7d8637fc1848752966886fc1a7`、
+`50d4a405a664baec39844ac1952af7be10de6b2f75ad792f8abb57f62d36d4c1`。
+
+`STAGE3_CLOSED`以承载本记录的commit成功push到
+`origin/fix-rtds-silents`且本地HEAD、upstream与远端ref一致为生效条件。该closure
+不授权production binary activation/cutover、release、部署、远端操作、dataset
+migration或删除；下一执行游标为独立Stage5 cleanup，Stage4仍受RTDS专项自身参数和
+授权门约束。

@@ -1,9 +1,17 @@
 use super::*;
+use crate::polymarket_market_metadata_layout::PolymarketMarketMetadataV4Row;
 
 pub(super) const POLYMARKET_ORDERBOOK_SCHEMA_VERSION: &str = "polymarket_orderbook_v2";
 
 #[derive(Default)]
 pub(super) struct PolymarketDispatchOutcome {
+    pub(super) matched_assets: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct TargetAdmittedPolymarketMessage<'a> {
+    pub(super) message: &'a WsMessage,
+    pub(super) slug: String,
     pub(super) matched_assets: BTreeSet<String>,
 }
 
@@ -34,6 +42,156 @@ pub(super) fn polymarket_target_fanout_counts(
             (usize::from(matches), usize::from(matches))
         }
         _ => (0, 0),
+    }
+}
+
+pub(super) fn target_admitted_polymarket_message<'a>(
+    message: &'a WsMessage,
+    discovery: &BtcUpdownDiscovery,
+    asset_to_slug: &BTreeMap<String, String>,
+) -> Result<Option<TargetAdmittedPolymarketMessage<'a>>> {
+    let mut matched_assets = BTreeSet::new();
+    let (message, slug) = match message {
+        WsMessage::Book(event) => {
+            let asset_id = event.asset_id.to_string();
+            let Some(slug) = verify_polymarket_business_asset(
+                discovery,
+                asset_to_slug,
+                &event.market.to_string(),
+                &asset_id,
+            )?
+            else {
+                return Ok(None);
+            };
+            matched_assets.insert(asset_id);
+            (message, slug.to_owned())
+        }
+        WsMessage::PriceChange(event) => {
+            let condition_id = event.market.to_string();
+            let mut matched_slug = None::<String>;
+            for change in &event.price_changes {
+                let asset_id = change.asset_id.to_string();
+                let Some(slug) = verify_polymarket_business_asset(
+                    discovery,
+                    asset_to_slug,
+                    &condition_id,
+                    &asset_id,
+                )?
+                else {
+                    continue;
+                };
+                if matched_slug
+                    .as_deref()
+                    .is_some_and(|matched| matched != slug)
+                {
+                    return Err(invalid_data(
+                        "Polymarket price_change matched multiple lifecycle slugs",
+                    )
+                    .into());
+                }
+                matched_slug = Some(slug.to_owned());
+                matched_assets.insert(asset_id);
+            }
+            let Some(slug) = matched_slug else {
+                return Ok(None);
+            };
+            (message, slug)
+        }
+        WsMessage::TickSizeChange(event) => {
+            let asset_id = event.asset_id.to_string();
+            let Some(slug) = verify_polymarket_business_asset(
+                discovery,
+                asset_to_slug,
+                &event.market.to_string(),
+                &asset_id,
+            )?
+            else {
+                return Ok(None);
+            };
+            matched_assets.insert(asset_id);
+            (message, slug.to_owned())
+        }
+        WsMessage::LastTradePrice(event) => {
+            let asset_id = event.asset_id.to_string();
+            let Some(slug) = verify_polymarket_business_asset(
+                discovery,
+                asset_to_slug,
+                &event.market.to_string(),
+                &asset_id,
+            )?
+            else {
+                return Ok(None);
+            };
+            matched_assets.insert(asset_id);
+            (message, slug.to_owned())
+        }
+        WsMessage::BestBidAsk(event) => {
+            let asset_id = event.asset_id.to_string();
+            let Some(slug) = verify_polymarket_business_asset(
+                discovery,
+                asset_to_slug,
+                &event.market.to_string(),
+                &asset_id,
+            )?
+            else {
+                return Ok(None);
+            };
+            matched_assets.insert(asset_id);
+            (message, slug.to_owned())
+        }
+        WsMessage::NewMarket(event) => {
+            let Some((market, assets)) = verify_target_market_identity(
+                discovery,
+                &event.id,
+                &event.market.to_string(),
+                event.slug.as_deref(),
+                &event.asset_ids,
+                Some(&event.outcomes),
+                None,
+                None,
+            )?
+            else {
+                return Ok(None);
+            };
+            matched_assets = assets;
+            (message, market.slug.clone())
+        }
+        WsMessage::MarketResolved(_) => {
+            return Err(invalid_data(
+                "market_resolved must use the validate-first typed terminal handler",
+            )
+            .into());
+        }
+        WsMessage::Trade(_) | WsMessage::Order(_) => return Ok(None),
+        _ => {
+            return Err(
+                invalid_data("unsupported target Polymarket SDK market-data variant").into(),
+            );
+        }
+    };
+    Ok(Some(TargetAdmittedPolymarketMessage {
+        message,
+        slug,
+        matched_assets,
+    }))
+}
+
+impl TargetAdmittedPolymarketMessage<'_> {
+    pub(super) fn polymarket_v3_projection(&self) -> Result<PolymarketOrderbookV3Projection> {
+        let mut projection =
+            PolymarketOrderbookV3Projection::from_target_admitted_sdk_message(self.message)?
+                .ok_or_else(|| {
+                    invalid_data("target-admitted Polymarket v3 message was not projectable")
+                })?;
+        if let crate::polymarket_orderbook_v3::PolymarketOrderbookV3Event::PriceChange(
+            price_change,
+        ) = &mut projection.event
+        {
+            price_change
+                .price_changes
+                .retain(|change| self.matched_assets.contains(&change.asset_id));
+        }
+        Ok(projection.with_slug(Some(self.slug.clone())))
     }
 }
 
@@ -278,8 +436,7 @@ pub(super) fn prepare_polymarket_message(message: &WsMessage) -> Result<Option<S
 }
 
 pub(super) fn visit_polymarket_events<F>(
-    message: &WsMessage,
-    discovery: &BtcUpdownDiscovery,
+    admitted: &TargetAdmittedPolymarketMessage<'_>,
     asset_to_slug: &BTreeMap<String, String>,
     collector_identity: &CollectorIdentity,
     recv_time_utc_ms: i64,
@@ -289,20 +446,14 @@ pub(super) fn visit_polymarket_events<F>(
 where
     F: FnMut(RawEvent) -> Result<()>,
 {
-    let mut outcome = PolymarketDispatchOutcome::default();
+    let message = admitted.message;
+    let slug = admitted.slug.as_str();
+    let outcome = PolymarketDispatchOutcome {
+        matched_assets: admitted.matched_assets.clone(),
+    };
     match message {
         WsMessage::BestBidAsk(event) => {
             let asset_id = event.asset_id.to_string();
-            let Some(slug) = verify_polymarket_business_asset(
-                discovery,
-                asset_to_slug,
-                &event.market.to_string(),
-                &asset_id,
-            )?
-            else {
-                return Ok(outcome);
-            };
-            outcome.matched_assets.insert(asset_id.clone());
             emit(raw_event_with_recv_time(
                 "polymarket_market",
                 "best_bid_ask",
@@ -327,17 +478,6 @@ where
             ))?;
         }
         WsMessage::Book(event) => {
-            let asset_id = event.asset_id.to_string();
-            let Some(slug) = verify_polymarket_business_asset(
-                discovery,
-                asset_to_slug,
-                &event.market.to_string(),
-                &asset_id,
-            )?
-            else {
-                return Ok(outcome);
-            };
-            outcome.matched_assets.insert(asset_id.clone());
             emit(raw_event_with_recv_time(
                 "polymarket_market",
                 "book",
@@ -353,19 +493,11 @@ where
             ))?;
         }
         WsMessage::PriceChange(event) => {
-            let condition_id = event.market.to_string();
             for change in &event.price_changes {
                 let asset_id = change.asset_id.to_string();
-                let Some(slug) = verify_polymarket_business_asset(
-                    discovery,
-                    asset_to_slug,
-                    &condition_id,
-                    &asset_id,
-                )?
-                else {
+                if !admitted.matched_assets.contains(&asset_id) {
                     continue;
-                };
-                outcome.matched_assets.insert(asset_id.clone());
+                }
                 let mut row_event = event.clone();
                 row_event.price_changes = vec![change.clone()];
                 emit(raw_event_with_recv_time(
@@ -385,16 +517,6 @@ where
         }
         WsMessage::LastTradePrice(event) => {
             let asset_id = event.asset_id.to_string();
-            let Some(slug) = verify_polymarket_business_asset(
-                discovery,
-                asset_to_slug,
-                &event.market.to_string(),
-                &asset_id,
-            )?
-            else {
-                return Ok(outcome);
-            };
-            outcome.matched_assets.insert(asset_id.clone());
             emit(raw_event_with_recv_time(
                 "polymarket_market",
                 "last_trade_price",
@@ -411,16 +533,6 @@ where
         }
         WsMessage::TickSizeChange(event) => {
             let asset_id = event.asset_id.to_string();
-            let Some(slug) = verify_polymarket_business_asset(
-                discovery,
-                asset_to_slug,
-                &event.market.to_string(),
-                &asset_id,
-            )?
-            else {
-                return Ok(outcome);
-            };
-            outcome.matched_assets.insert(asset_id.clone());
             emit(raw_event_with_recv_time(
                 "polymarket_market",
                 "tick_size_change",
@@ -436,25 +548,6 @@ where
             ))?;
         }
         WsMessage::NewMarket(event) => {
-            let slug = event.slug.as_deref().ok_or_else(|| {
-                invalid_data(
-                    "polymarket_current_v2_typed_shape_missing_required_fields:event_type=new_market:fields=slug",
-                )
-            })?;
-            let Some((_verified_market, matched_assets)) = verify_target_market_identity(
-                discovery,
-                &event.id,
-                &event.market.to_string(),
-                Some(slug),
-                &event.asset_ids,
-                Some(&event.outcomes),
-                None,
-                None,
-            )?
-            else {
-                return Ok(outcome);
-            };
-            outcome.matched_assets = matched_assets;
             let market_raw_json = with_source_native_payload_json(
                 polymarket_new_market_raw_json(event),
                 source_native_payload_json,
@@ -514,9 +607,12 @@ pub(super) fn build_polymarket_events(
     source_native_payload_json: &str,
 ) -> Result<(PolymarketDispatchOutcome, Vec<RawEvent>)> {
     let mut events = Vec::new();
+    let Some(admitted) = target_admitted_polymarket_message(&message, discovery, asset_to_slug)?
+    else {
+        return Ok((PolymarketDispatchOutcome::default(), events));
+    };
     let outcome = visit_polymarket_events(
-        &message,
-        discovery,
+        &admitted,
         asset_to_slug,
         collector_identity,
         recv_time_utc_ms,
@@ -547,7 +643,7 @@ pub(super) fn retain_target_price_changes(
 #[allow(clippy::too_many_arguments)]
 fn verify_target_market_identity<'a>(
     discovery: &'a BtcUpdownDiscovery,
-    market_id: &str,
+    clob_market_id: &str,
     condition_id: &str,
     slug: Option<&str>,
     asset_ids: &[U256],
@@ -574,7 +670,7 @@ fn verify_target_market_identity<'a>(
         .as_ref()
         .filter(|asset| target_assets.contains(*asset));
     let markets = std::iter::once(&discovery.current).chain(discovery.next.as_ref());
-    let id_match = markets.clone().find(|market| market.id == market_id);
+    let id_match = markets.clone().find(|market| market.id == clob_market_id);
     let condition_match = markets
         .clone()
         .find(|market| market.condition_id == condition_id);
@@ -603,9 +699,9 @@ fn verify_target_market_identity<'a>(
                 "Polymarket target identity could not be mapped to condition_id {condition_id}"
             ))
         })?;
-    if market_id != expected.id {
+    if clob_market_id != expected.id {
         return Err(invalid_data(format!(
-            "Polymarket target identity carried unexpected market id {market_id}"
+            "Polymarket target identity carried unexpected market id {clob_market_id}"
         ))
         .into());
     }
@@ -667,10 +763,7 @@ fn verify_target_market_identity<'a>(
         } else {
             "down"
         };
-        if !winning_outcome
-            .trim()
-            .eq_ignore_ascii_case(expected_winning_outcome)
-        {
+        if !same_outcome_label(winning_outcome, expected_winning_outcome) {
             return Err(invalid_data(format!(
                 "Polymarket condition {} carried contradictory winning outcome",
                 expected.condition_id
@@ -701,7 +794,7 @@ fn polymarket_v3_base_row(
         schema_version: POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION.to_owned(),
         slug: identity.slug.clone(),
         condition_id: identity.condition_id.clone(),
-        clob_market_id: identity.market_id.clone(),
+        clob_market_id: identity.clob_market_id.clone(),
         asset_ids: serde_json::to_string(&[
             identity.up_asset_id.as_str(),
             identity.down_asset_id.as_str(),
@@ -1236,6 +1329,26 @@ pub(super) fn polymarket_metadata_v3_raw_event(
     ))
 }
 
+pub(super) fn polymarket_metadata_v4_raw_event(
+    row: PolymarketMarketMetadataV4Row,
+) -> Result<RawEvent> {
+    let event_type = row.v3_prefix.metadata_row_kind.as_str();
+    let endpoint = row.v3_prefix.source_endpoint.as_deref().unwrap_or_default();
+    Ok(raw_event_with_recv_time(
+        "polymarket_market_metadata",
+        event_type,
+        &row.v3_prefix.slug,
+        None,
+        row.v3_prefix.timestamp_received,
+        endpoint,
+        &CollectorIdentity {
+            host_id: row.v3_prefix.collector_host_id.clone(),
+            region: row.v3_prefix.collector_region.clone(),
+        },
+        serde_json::to_value(&row)?,
+    ))
+}
+
 #[cfg(test)]
 pub(super) fn polymarket_metadata_snapshot_raw_json(
     market: &crate::market_discovery::DiscoveredBtcUpdownMarket,
@@ -1489,6 +1602,18 @@ pub(super) fn polymarket_metadata_v3_rows_from_event(
         admission.sequence,
         admission.time_utc_ms,
     )?;
+    Ok(vec![row])
+}
+
+pub(super) fn polymarket_metadata_v4_rows_from_event(
+    event: &RawEvent,
+) -> Result<Vec<PolymarketMarketMetadataV4Row>> {
+    let admission = event.collector_admission.as_ref().ok_or_else(|| {
+        invalid_data("Polymarket metadata v4 event is missing collector admission")
+    })?;
+    let mut row = serde_json::from_str::<PolymarketMarketMetadataV4Row>(&event.raw_json)?;
+    row.v3_prefix.collector_admission_sequence = admission.sequence;
+    row.v3_prefix.collector_admission_time_utc_ms = admission.time_utc_ms;
     Ok(vec![row])
 }
 
@@ -1781,6 +1906,18 @@ pub(super) fn write_polymarket_metadata_v3_live_event(
     let written = rows.len() as u64;
     require_at_most_one_typed_row(event, written)?;
     writer.write_polymarket_market_metadata_v3_rows_with_logical_bytes(&rows, logical_bytes)?;
+    Ok(written)
+}
+
+pub(super) fn write_polymarket_metadata_v4_live_event(
+    writer: &mut TypedParquetSegmentWriter,
+    event: &RawEvent,
+    logical_bytes: u64,
+) -> Result<u64> {
+    let rows = polymarket_metadata_v4_rows_from_event(event)?;
+    let written = rows.len() as u64;
+    require_at_most_one_typed_row(event, written)?;
+    writer.write_polymarket_market_metadata_v4_rows_with_logical_bytes(&rows, logical_bytes)?;
     Ok(written)
 }
 
