@@ -13,6 +13,15 @@
 > 2026-07-25窄authority supersede：用户批准`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`。上述唯一业务slot例外在activation前仍由current source v2 + metadata v3承载；未来source v3 + metadata v4通过SDK070总计划阶段3原子activation后，同一五row-kind/attempt例外由metadata v4继承，并只追加精确nullable WS claimant pair。metadata v3 schema/version立即冻结且activation后只读；不新增artifact、sidecar、第二writer、dual-write或普通transport持久化。本次只同步文档，不授权Rust/schema/test实施或activation。
 >
 > 2026-07-25 SDK身份supersede：本事项以官方0.6.0和`0.6.0-p1`实施的阶段事实保持历史；其“采用更新release必须另建SDK版本升级决策门”已由独立`DC-REPAIR-20260724-SDK070-TYPED-LIVE-RUNTIME`满足。当前Stage1 worktree使用官方0.7.0底座的唯一`third_party/polymarket_client_sdk_v2-0.7.0-p1`，版本、Cargo/lock、路径与provenance以SDK070三件套为authority；本事项第4.7节的四路径patch语义、SDK-first、唯一owner/no-shadow及heartbeat/teardown合同继续有效。SDK070 Stage1独立审查已为`Critical 0 / Important 0 / Minor 0 / PASS`且用户已另行批准发布，其闭合以承载记录的commit成功推送且远端SHA与本地HEAD/upstream一致为生效条件；本同步不修改本事项已完成生产行为。
+>
+> 2026-07-26 SDK070 Stage5窄authority supersede：本文第2.4节与第3.1节对
+> `health.rs`及其最小衔接的描述只保留为当时实施基线。后续真实consumer审计证明
+> `RetryPolicy/plan_retry_trace`、circuit registry、`ReconnectGate`及三个专属合同
+> 没有接入production；用户批准`U06-A`后已删除该shadow model。current transport
+> 恢复authority是各source-local supervisor的有界单次等待、capped+jitter backoff
+> 与无限外层总attempt，business freshness不成为transport门；该删除不改变本文已
+> 验收的source availability、heartbeat、SDK-first、manifest或完整性边界，也不授权
+> production、远端、部署或数据操作。
 
 ## 一、目标
 
@@ -69,11 +78,17 @@ manifest 中可以表现为六类 source artifact，但它们不是六个独立�
 
 顶层 coordinator 当前把任一 source task 在运行 deadline 前结束视为 `source_task_ended_unexpectedly` 并终止 collector。这个保护本身不是缺陷：recoverable availability 必须在 source 内部持续等待/恢复，真正的本地完整性错误仍应返回顶层；不得通过让顶层吞掉所有 source 错误来实现“持续运行”。
 
-### 2.4 当前 health 抽象不能直接视为生产修复
+### 2.4 本事项实施时的 health 抽象（历史基线，已由Stage5 supersede）
 
-`data-collect/src/health.rs` 已有 `SourceHealthEvent`、`SourceHealthRegistry`、`ReconnectGate` 和有限 retry trace，但它没有完整接入生产 `live_runtime`，而且 `CircuitState::Exhausted`、固定 `max_attempts/max_elapsed` 及部分 `CoverageVerdict` 仍表达旧有限恢复合同。
+本事项实施时，`data-collect/src/health.rs`已有`SourceHealthEvent`、
+`SourceHealthRegistry`、`ReconnectGate`和有限retry trace，但它没有完整接入
+production `live_runtime`，而且`CircuitState::Exhausted`、固定
+`max_attempts/max_elapsed`及部分`CoverageVerdict`仍表达旧有限恢复合同。
 
-本事项必须优先复用并最小修正已有 health 类型，不能另建第二套 health/reconnect 控制面；但也不能因为抽象测试通过就宣称生产 source 生命周期已经满足本需求。
+本事项当时必须优先复用并最小修正已有health类型，不能另建第二套
+health/reconnect控制面；但也不能因为抽象测试通过就宣称production source
+lifecycle满足本需求。current终态由文首2026-07-26 overlay接管：该未接production
+的shadow model已删除，真实source-local owner保持。
 
 ### 2.5 原事项pinned基线与当前SDK身份
 
@@ -101,7 +116,8 @@ vendor删除与离线runtime矩阵。相对官方0.7.0的源码差异仍恰好�
 
 - 四个训练 source task 的 availability、业务静默、transport recovery 和 terminal error 边界；
 - 顶层 source-task 生命周期分类，不改变真正 terminal task 结束必须被发现的原则；
-- 生产 `live_runtime` 与已有 `health.rs` 的最小衔接；
+- 本事项实施阶段对production `live_runtime`与当时`health.rs`的最小衔接
+  （current终态已由文首2026-07-26 Stage5 overlay supersede）；
 - RTDS desired subscription、CLOB market-lifecycle desired assets、Binance depth双artifact原始观察/可用book分层与snapshot stitch、Binance aggTrade WebSocket因果接纳及Gamma discovery的源特定恢复；
 - pinned 官方 Rust SDK 的逐项 patch 审计、删除失去依据的 one-shot reconnect 能力，以及 heartbeat/teardown 的最小修复；
 - 每日唯一manifest中的顶层、单owner、版本化`collection_day_coverage`，并保持六个既有source counter只记录artifact事实与既有操作计数；

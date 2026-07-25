@@ -2,10 +2,6 @@ use data_collect::ValidationVerdict;
 use data_collect::event::{
     EventEnvelope, HostClockSyncStatus, RawEvidence, SourceKind, SourceTimestamp,
 };
-use data_collect::health::{
-    ArtifactSignal, CircuitState, CoverageVerdict, FreshnessStatus, NetworkFailure,
-    SourceHealthEvent,
-};
 use data_collect::sources::binance::{
     BINANCE_DEPTH_SNAPSHOT_ENDPOINT, BinanceOfficialSourceConfig, DepthUpdateVerdict,
     assess_depth_update, parse_aggtrade_raw, parse_depth_snapshot_raw, parse_depth_update_raw,
@@ -225,44 +221,4 @@ fn binance_aggtrade_raw_fields_contract() {
         r#"{"e":"aggTrade","E":1,"s":"ETHUSDT","a":123,"p":"100","q":"0.1","f":10,"l":12,"T":1,"m":true,"M":false}"#,
     );
     assert!(wrong_symbol.is_err());
-}
-
-#[test]
-fn binance_source_gap_and_reconnect_failures_are_classified() {
-    for (failure, signal, coverage) in [
-        (
-            NetworkFailure::SnapshotMissing,
-            ArtifactSignal::SourceGap,
-            CoverageVerdict::Gap,
-        ),
-        (
-            NetworkFailure::RateLimit,
-            ArtifactSignal::ReconnectTrace,
-            CoverageVerdict::Incomplete,
-        ),
-        (
-            NetworkFailure::ServerShutdown,
-            ArtifactSignal::ReconnectTrace,
-            CoverageVerdict::Incomplete,
-        ),
-        (
-            NetworkFailure::NoBusinessMessages,
-            ArtifactSignal::SourceHealth,
-            CoverageVerdict::Stale,
-        ),
-    ] {
-        let event = SourceHealthEvent::from_failure(
-            "binance_depth_update",
-            failure,
-            Some(1),
-            Some(250),
-            CircuitState::Degraded,
-        );
-        assert_eq!(event.signal, signal);
-        assert_eq!(event.coverage_verdict, coverage);
-        if failure == NetworkFailure::NoBusinessMessages {
-            assert_eq!(event.freshness_verdict, FreshnessStatus::Stale);
-        }
-        assert!(!event.process_fatal);
-    }
 }

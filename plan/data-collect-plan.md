@@ -32,6 +32,28 @@
 > `source_native_payload_json`或venue `hash`，不做payload fingerprint恢复。实施
 > 是否完成仍只由SDK070总计划Stage3真实代码、测试及activation门证明；production
 > cutover、release、部署、远端操作、migration和删除仍未授权。
+>
+> 2026-07-26 Stage5 authority修正：用户批准删除从未接入production的
+> `sources/rtds.rs`、`config.rs`、`scheduler.rs`和`segment.rs`旧public/test-only
+> 模型。current owner分别为`live_runtime/rtds_source.rs`、bounded
+> channel + global inflight row/owned-byte budget、四logical-producer/六source
+> runtime composition、`HourlyPartitionPolicy`/writer row-group/handoff admission。
+> Polymarket current/next/T-30不再错误扩展到连续Binance/RTDS source；运行中只因
+> UTC hour rollover，协调shutdown可提前finalize，同小时启动/重启路径碰撞只选择
+> 初始`part=N`，50,000 rows/16MiB只切row group；legacy/无独立admission schema
+> 使用recv time，已批准保存独立collector admission字段的current schema使用
+> admission，paper/live使用handoff admission与本机runtime receive。旧阶段2/4/6/7
+> 执行结果只作
+> 历史，不再作为current实现或验收命令；具体删除、验证与游标以SDK070总计划Stage5
+> 及`data-collect/docs/acceptance-matrix.md`为准。
+> Stage5首次终审后，用户又批准`U05-A + U06-A`：删除从未接入production的逐queue
+> hard-threshold `BackpressureConfig/Monitor`与有限health/reconnect circuit
+> shadow model，只保留真实bounded/inflight/backpressure-wait owner、纯观测/兼容
+> DTO，以及现有source-local supervisor中的确定性capped+jitter delay。本文旧
+> Phase0/Phase4、文件清单、任务步骤、执行结果和验收映射中对`health.rs`、
+> `ReconnectGate`、有限retry exhausted、逐queue pause/resume及其旧测试的引用均只
+> 保留为历史；current验收只使用上述真实owner和acceptance matrix，不恢复第二套
+> control model。
 
 ## 2026-07-10 已批准增量执行
 

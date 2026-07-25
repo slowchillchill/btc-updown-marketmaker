@@ -28,6 +28,14 @@
 > `hash`与F05 `transaction_hash`，一条target-admitted SDK message写一条nested
 > row，`PriceChange` entries保持SDK顺序而不逐change展开；source v2文件、行数及
 > replay报告只读保留，不回写。
+>
+> 2026-07-26 Stage5 overlay：本文旧步骤中对`data-collect/src/config.rs`、
+> `segment.rs`与`causal_time_contract.rs`的修改指令只保留为历史，不得继续执行。
+> current queue owner是bounded channel、global inflight row/owned-byte budget与
+> bounded wait；current文件owner是`HourlyPartitionPolicy`、hourly writer、
+> row-group和协调shutdown；current因果时间owner是各schema collector admission、
+> source-format与handoff/runtime-receive合同。正常运行只按UTC hour rollover，
+> 50,000 rows/16MiB只切row group，同小时启动/重启路径碰撞才选择`part=N`。
 
 ## 一、背景与问题
 

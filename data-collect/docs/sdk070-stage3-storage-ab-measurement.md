@@ -14,7 +14,7 @@
 > `data-collect/benches/polymarket_storage_ab_probe.rs`
 >
 > probe SHA-256：
-> `369ee423a0f1409a7ab2766e35dafded139b482276ba44248466b934b775c261`
+> `70c5f2dae2085d5c3584a49eb1311b2e54b81bcec08e52372dad019bd4e51dd4`
 
 ## 1. 边界
 
@@ -86,6 +86,12 @@ fixture digest；它不是伪造的第三条platform delivery。
 
 ## 4. 2026-07-25本地结果
 
+Stage5 all-target clippy只把probe中的四处`index % 2 == 0`机械改为
+`index.is_multiple_of(2)`，没有改变fixture分支或输入。该修改触发计划6.2.1的
+hash-drift规则，因此本节对当前probe唯一重跑一次bounded measurement。fixture
+digest、两侧physical rows/finalized bytes/finalized SHA、全部column chunks和硬门
+结果与Stage3首次运行逐项相同；下列非门槛性能报告项更新为本次重跑实测。
+
 运行环境：
 
 - Linux `7.0.0-28-generic`，`x86_64`；
@@ -102,16 +108,16 @@ fixture digest；它不是伪造的第三条platform delivery。
 | finalized SHA-256 | `71783ce3e3fd9e3e942bc4f8f3e533093b1cd41a358e6df6a4dd027b3ba3415b` | `964b9c022cb3c88a140742cc7274392c9f980ef7c34fefd05735de8b0522c223` |
 | row groups | 1 | 1 |
 | leaf columns | 28 | 45 |
-| write + finalize wall | 75.709 ms | 43.113 ms |
-| finalize wall | 11.187 ms | 7.013 ms |
-| process user CPU | 51.863 ms | 32.354 ms |
-| process system CPU | 14.039 ms | 5.043 ms |
-| logical messages/s | 108,203.78 | 190,012.29 |
-| case peak RSS | 54,832 KiB | 35,740 KiB |
+| write + finalize wall | 72.809 ms | 40.071 ms |
+| finalize wall | 11.278 ms | 6.484 ms |
+| process user CPU | 50.060 ms | 31.972 ms |
+| process system CPU | 12.942 ms | 2.994 ms |
+| logical messages/s | 112,513.56 | 204,437.12 |
+| case peak RSS | 56,312 KiB | 36,632 KiB |
 | all-column scan rows | 13,392 | 8,192 |
-| all-column scan wall | 6.998 ms | 2.998 ms |
-| scan rows/s | 1,913,689.63 | 2,732,488.33 |
-| scan-process peak RSS | 20,704 KiB | 14,652 KiB |
+| all-column scan wall | 6.692 ms | 3.358 ms |
+| scan rows/s | 2,001,195.46 | 2,439,547.35 |
+| scan-process peak RSS | 20,940 KiB | 14,784 KiB |
 
 v3减少`110,066 bytes`，即该fixture的`47.904353%`。只有`v3 bytes < v2`是硬门；
 实际比例、CPU、吞吐、RSS、finalize和scan均只是本机报告项。

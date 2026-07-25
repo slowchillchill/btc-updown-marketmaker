@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED`。阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_REVIEW_PASSED_AWAITING_PUBLISH`。阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
 > `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
@@ -1573,3 +1573,99 @@ bench/docs，随后`cargo check -p data-collect --locked --all-targets`、上述
 不授权production binary activation/cutover、release、部署、远端操作、dataset
 migration或删除；下一执行游标为独立Stage5 cleanup，Stage4仍受RTDS专项自身参数和
 授权门约束。
+
+## 2026-07-26：Stage5 U01–U04对抗复审、用户裁决与实施
+
+Stage5 C01–C08清理和本地门完成后，初次用户建议把U01/U02/U03/U04b保持
+`DEFER`、U04a保持`KEEP`。用户质疑其中存在明显错误并要求派生subagents重新审查。
+三路`gpt-5.6-sol`/Ultra审查与主代理production调用图复核确认：
+
+- `pub`只为仓内integration tests提供可见性；crate无已证明外部consumer、tag、
+  release或semver承诺，不能单独构成KEEP理由；
+- U01旧RTDS adapter只由自身测试消费，current唯一owner已是
+  `live_runtime/rtds_source.rs`、SDK runtime与source/hourly contracts；
+- U03旧四role scheduler遗漏production六source中的metadata与depth snapshot，
+  synthetic e2e还使用旧RTDS endpoint、per-segment manifest并把连续Binance/RTDS
+  错误绑定到market slug；
+- U04a把所有训练availability简化为recv time，不能表达current collector
+  admission；U04b的旧命名和rows/bytes/duration文件rollover与current hourly
+  writer/row-group语义冲突；
+- U02静态`CrossTaskQueueConfig`从未接入production。一名审查者据此指出当前批准
+  demand的逐队列五维硬约束并未由真实runtime完整实现，不能在未裁决需求前冒充
+  “已替代”；其余审查者同意旧config本身不应保留。
+
+用户随后批准四项推荐，最终authority为：
+
+1. queue使用bounded channel、global inflight row/owned-byte硬预算、单行上限与
+   bounded acquire/send wait，并沿用writer batch/periodic flush；queue duration、
+   writer lag、flush latency和RSS只作真实观测，不建立第二逐队列五维配置owner；
+2. 运行中只因UTC hour rollover；协调shutdown可提前finalize，同小时启动/重启
+   路径碰撞只选择初始`part=N`而不是运行中切换；50,000 rows/16MiB只切Parquet
+   row group；
+3. legacy/无独立admission schema使用collector recv time，已批准保存独立collector
+   admission字段的current schema使用collector admission time/sequence，
+   paper/live使用handoff admission与本机runtime receive；
+4. current/next/T-30只属于Polymarket market lifecycle，连续Binance/RTDS source
+   独立运行；合法空响应、业务静默和stale不驱动gap/reconnect，真实transport failure
+   由source-local owner以有界单次等待和无限外层总尝试恢复。
+
+据此U01、U02、U03、U04a、U04b全部进入
+`DELETE_PROVEN_REPLACED_BEHAVIOR`：删除四个旧源码模块、四个专属自引用integration
+tests、一个旧synthetic e2e（共五个）、module exports，以及
+`bounded_queue_contract`中的静态config自测；
+真实bounded/backpressure测试、current RTDS owner、四producer/六source topology、
+hourly writer、handoff及W-B legacy reader/writer均保留。代码删除精确为
+`+0/-1,585`；残留symbol扫描为0。替代owner的7个integration targets共67项及6个
+关键unit合同通过；最终locked package suite退出0（lib 351项及全部现存
+integration/doc targets通过），all-target check、`clippy -D warnings`、fmt与
+diff gate均通过。当前整个Stage5 tracked Rust diff为`+541/-5,381`，净删除
+`4,840`行；该总值同时包含精确owned-byte正确性修复、必要current测试迁移与机械
+clippy修正，不冒充纯删除量。Stage5仍须完成独立阶段审查和commit/push后才能闭合。
+
+## 2026-07-26：Stage5首次终审FAIL、U05-A/U06-A裁决与修复
+
+首次独立`gpt-5.6-sol`/Ultra阶段终审为`FAIL / CLOSURE_BLOCKED`，Blocker 0、
+Important 4、Minor 1：
+
+- C02/C03只删了production plumbing，遗漏仅由两个旧测试消费的public
+  `LifecycleFingerprintSets`；该模型不被W-B legacy writer/reader或bounded A/B消费；
+- C01遗漏cfg(test) metadata-v2 RawEvent adapter，以及正向要求`fallback_close`和
+  `unresolved_window_end_observation`的旧测试；current source测试只允许sentinel为0；
+- U02删掉静态config后，`BackpressureConfig/Monitor`仍在test/bench中用逐queue
+  age/lag hard阈值产生`PauseIntake/ResumeIntake`；
+- `health.rs`仍公开有限attempt/elapsed、`retry_exhausted`、circuit registry与
+  fresh-business reconnect gate，而production只从整条trace取最后一次sleep；
+- 新增overlay把启动/重启`part=N`碰撞写成运行中file switch，并把current admission
+  schema写得过宽。
+
+前两项属于既有C01/C02/C03批准范围，直接补删。用户随后批准：
+
+1. `U05-A`：删除逐queue hard-threshold pause/resume控制子树及其test/bench依赖；
+   保留真实bounded channel、global inflight row/owned-byte、单行上限、有界
+   acquire/send wait、`QueueSample`纯观测DTO和`BackpressureReceipt`兼容字段；
+2. `U06-A`：删除有限health/reconnect circuit shadow模型及三个专属旧合同，把
+   production需要的确定性capped+jitter delay收窄到现有私有
+   `live_runtime::retry_delay`；真实`SourceRecoverySupervisor`的有界单次等待、
+   无限外层总attempt与business-silence非transport门保持不变。
+
+当前代码已完成上述删除。首次终审修复后的定向回归为bounded queue 2项、
+manifest 5项、Binance/RTDS dedupe 2项、Binance 2项、current v3 adapter 7项、
+真实outer recovery 1项全部通过，throughput bench编译通过。首次终审修复后的完整
+package suite退出0（lib 348项及全部现存integration/doc targets通过），all-target
+check、`clippy -D warnings`、fmt与diff gate全部通过；lib比首次终审前少3项，正是
+批准删除的旧adapter正向测试。整个Stage5 tracked Rust diff为
+`+584/-7,499`，净删除`6,915`行。已向source-availability需求/计划/changelog
+追加U06-A窄supersede，保留历史阶段事实但不再把已删除的`health.rs`写成current
+owner。
+
+重复独立代码/consumer终审随后发现1个Important：pending-state严格1MiB
+owned-byte计算遗漏`BTreeMap`独立key allocation与`source_authorities`的`Vec`
+spare capacity，新增的“each allocation once”测试也复现了相同漏算。修复后map
+entry计key fixed size/capacity，authority vector计完整backing capacity并仅另加
+已初始化元素动态String capacity；focused两个budget合同各1项通过。完整package
+suite再次退出0（lib 348及全部integration/doc targets通过），all-target check、
+`clippy -D warnings`、fmt和diff gate再次通过。最终tracked Rust diff为
+`+641/-7,509`，净删除`6,868`行。修复后代码/consumer终审与独立
+文档/authority终审均为`PASS / CLOSURE_UNBLOCKED`，Blocker 0 / Important 0 /
+Minor 0；当前只待精确staging、commit/push与三方ref一致性。未授权production、
+远端、部署、migration或数据删除。

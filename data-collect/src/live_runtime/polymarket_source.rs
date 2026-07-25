@@ -8,12 +8,9 @@ pub(super) const POLYMARKET_RESOLUTION_FIRST_SLOT_DELAY_MS: i64 = 3 * 60_000;
 pub(super) const POLYMARKET_RESOLUTION_SLOT_INTERVAL_MS: i64 = 60_000;
 pub(super) const POLYMARKET_RESOLUTION_ATTEMPT_COUNT: u8 = 6;
 pub(super) const POLYMARKET_PENDING_MAX_MARKETS: usize = 2;
-pub(super) const POLYMARKET_PENDING_WS_FINGERPRINT_LIMIT: usize = 16;
 pub(super) const POLYMARKET_PENDING_STATE_MAX_BYTES: usize = 1024 * 1024;
-pub(super) const POLYMARKET_FINGERPRINTS_PER_LIFECYCLE: usize = 2_000_000;
 pub(super) const POLYMARKET_DECODED_QUEUE_CAPACITY: usize = 25_000;
 pub(super) const POLYMARKET_DECODED_MAX_BYTES: usize = 67_108_864;
-pub(super) const POLYMARKET_PROCESSOR_STAGING_MAX_BYTES: usize = 8 * MAX_TYPED_ROW_BYTES;
 pub(super) const POLYMARKET_CONTROL_CHANNEL_CAPACITY: usize = 4;
 
 pub(super) enum PolymarketSourceControl {
@@ -498,114 +495,12 @@ async fn acquire_polymarket_fast_path(
     }
 }
 
-pub(super) async fn wait_for_polymarket_dedupe_restore(
-    mut restore: tokio::task::JoinHandle<Result<Option<LifecycleFingerprintSets>>>,
-    cancel: Arc<AtomicBool>,
-    control_rx: &mut mpsc::Receiver<PolymarketSourceControl>,
-) -> Result<Option<LifecycleFingerprintSets>> {
-    loop {
-        tokio::select! {
-            biased;
-            control = control_rx.recv() => {
-                let Some(PolymarketSourceControl::Fence {
-                    stop_after_fence,
-                    day_boundary_utc_ms: _,
-                    resume_after_barrier,
-                    reply,
-                }) = control else {
-                    cancel.store(true, Ordering::Relaxed);
-                    restore.await.map_err(|error| {
-                        invalid_data(format!(
-                            "operator_intervention_required:Polymarket restore join failed:{error}"
-                        ))
-                    })??;
-                    return Ok(None);
-                };
-                if stop_after_fence {
-                    cancel.store(true, Ordering::Relaxed);
-                    let joined = restore.await.map_err(|error| {
-                        invalid_data(format!(
-                            "operator_intervention_required:Polymarket restore join failed:{error}"
-                        ))
-                    })?;
-                    if let Err(error) = joined {
-                        let message = format!(
-                            "operator_intervention_required:Polymarket restore failed:{error}"
-                        );
-                        let _ = reply.send(Err(message.clone()));
-                        return Err(invalid_data(message).into());
-                    }
-                    let _ = reply.send(Ok(()));
-                    return Ok(None);
-                }
-                let _ = reply.send(Ok(()));
-                if let Some(resume) = resume_after_barrier
-                    && resume.await.is_err()
-                {
-                    cancel.store(true, Ordering::Relaxed);
-                    restore.await.map_err(|error| {
-                        invalid_data(format!(
-                            "operator_intervention_required:Polymarket restore join failed:{error}"
-                        ))
-                    })??;
-                    return Err(
-                        invalid_data("Polymarket restore day-barrier resume dropped").into(),
-                    );
-                }
-            }
-            joined = &mut restore => {
-                let restored = joined
-                    .map_err(|error| {
-                        invalid_data(format!(
-                            "operator_intervention_required:Polymarket restore join failed:{error}"
-                        ))
-                    })?
-                    .map_err(|error| {
-                        invalid_data(format!(
-                            "operator_intervention_required:Polymarket restore failed:{error}"
-                        ))
-                    })?;
-                return restored.ok_or_else(|| {
-                    invalid_data("operator_intervention_required:Polymarket restore cancelled without stop").into()
-                }).map(Some);
-            }
-        }
-    }
-}
-
-async fn restore_polymarket_lifecycle_dedupe(
-    dataset_root: PathBuf,
-    lifecycles: BTreeSet<String>,
-    control_rx: &mut mpsc::Receiver<PolymarketSourceControl>,
-) -> Result<Option<LifecycleFingerprintSets>> {
-    let restore_cancel = Arc::new(AtomicBool::new(false));
-    let worker_cancel = Arc::clone(&restore_cancel);
-    let restore =
-        tokio::task::spawn_blocking(move || -> Result<Option<LifecycleFingerprintSets>> {
-            let mut dedupe =
-                LifecycleFingerprintSets::with_limit(POLYMARKET_FINGERPRINTS_PER_LIFECYCLE);
-            dedupe
-                .replace_lifecycles(lifecycles)
-                .map_err(operator_dedupe_error)?;
-            if !restore_polymarket_dedupe_until_cancelled(
-                &dataset_root,
-                &mut dedupe,
-                &worker_cancel,
-            )? {
-                return Ok(None);
-            }
-            Ok(Some(dedupe))
-        });
-    wait_for_polymarket_dedupe_restore(restore, restore_cancel, control_rx).await
-}
-
 pub(super) async fn finalize_polymarket_outer_ready_pending<N>(
     timeline_now: &N,
     context: &mut PolymarketProcessingContext,
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    dedupe: &mut LifecycleFingerprintSets,
 ) -> Result<()>
 where
     N: Fn() -> PolymarketTimelineNow + Send + Sync,
@@ -620,7 +515,6 @@ where
             sink,
             collector_identity,
             run_started,
-            dedupe,
         )
         .await?;
     wait_for_polymarket_exhausted_clock_barrier(
@@ -646,7 +540,6 @@ pub(super) async fn wait_for_polymarket_outer_recovery<N>(
     context: &mut PolymarketProcessingContext,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    dedupe: &mut LifecycleFingerprintSets,
     timeline_now: Arc<N>,
 ) -> Result<bool>
 where
@@ -665,7 +558,6 @@ where
             sink,
             collector_identity,
             run_started,
-            dedupe,
             recovery,
         )
         .await?;
@@ -679,22 +571,14 @@ where
     loop {
         let now = timeline_now();
         context.actor_now_utc_ms = now.utc_ms;
-        advance_polymarket_boundaries(
-            now.utc_ms,
-            context,
-            sink,
-            collector_identity,
-            run_started,
-            dedupe,
-        )
-        .await?;
+        advance_polymarket_boundaries(now.utc_ms, context, sink, collector_identity, run_started)
+            .await?;
         finalize_polymarket_outer_ready_pending(
             &*timeline_now,
             context,
             sink,
             collector_identity,
             run_started,
-            dedupe,
         )
         .await?;
         spawn_due_gamma_resolution_polls(
@@ -725,7 +609,6 @@ where
                         sink,
                         collector_identity,
                         run_started,
-                        dedupe,
                         recovery,
                     )
                     .await?;
@@ -746,7 +629,6 @@ where
                         sink,
                         collector_identity,
                         run_started,
-                        dedupe,
                         recovery,
                     )
                     .await;
@@ -799,7 +681,6 @@ where
                             sink,
                             collector_identity,
                             run_started,
-                            dedupe,
                         )
                         .await?;
                     }
@@ -810,7 +691,6 @@ where
                             sink,
                             collector_identity,
                             run_started,
-                            dedupe,
                         )
                         .await?;
                     wait_for_polymarket_exhausted_clock_barrier(
@@ -860,7 +740,6 @@ where
                     sink,
                     collector_identity,
                     run_started,
-                    dedupe,
                 )
                 .await?;
             }
@@ -875,7 +754,6 @@ where
                         sink,
                         collector_identity,
                         run_started,
-                        dedupe,
                         recovery,
                     )
                     .await?;
@@ -912,16 +790,10 @@ pub(super) async fn run_polymarket_source_with_spec(
     );
     #[cfg(test)]
     recovery.set_wait_override(spec.recovery_wait_override);
-    let mut dedupe = LifecycleFingerprintSets::with_limit(POLYMARKET_FINGERPRINTS_PER_LIFECYCLE);
     let mut context = PolymarketProcessingContext::from_recovery_with_source_epoch(
         startup_recovery,
         source_sequence_epoch_id.clone(),
     )?;
-    if let Some(recovered) = &context {
-        dedupe
-            .replace_lifecycles(recovered.pending.keys().cloned().collect())
-            .map_err(operator_dedupe_error)?;
-    }
     let mut resolution_poll_tasks = JoinSet::<GammaResolutionPollCompletion>::new();
     while deadline_ms.is_none_or(|deadline_ms| now_ms() < deadline_ms) {
         let discovery = if context.is_none() {
@@ -952,9 +824,6 @@ pub(super) async fn run_polymarket_source_with_spec(
                     return Err(invalid_data(error).into());
                 }
             };
-            dedupe
-                .replace_lifecycles(expected_lifecycle_slugs(&discovery))
-                .map_err(operator_dedupe_error)?;
             context = Some(PolymarketProcessingContext::new_with_source_epoch(
                 discovery.clone(),
                 source_sequence_epoch_id.clone(),
@@ -993,7 +862,6 @@ pub(super) async fn run_polymarket_source_with_spec(
             run_started,
             &mut market_runtime,
             &gamma,
-            &mut dedupe,
             &mut recovery,
             &mut control_rx,
             spec.discovery_wait,
@@ -1010,7 +878,6 @@ pub(super) async fn run_polymarket_source_with_spec(
                     &sink,
                     &collector_identity,
                     run_started,
-                    &mut dedupe,
                     &mut recovery,
                 )
                 .await
@@ -1023,7 +890,6 @@ pub(super) async fn run_polymarket_source_with_spec(
                     &sink,
                     &collector_identity,
                     run_started,
-                    &mut dedupe,
                     &mut recovery,
                 )
                 .await
@@ -1044,7 +910,6 @@ pub(super) async fn run_polymarket_source_with_spec(
                     context,
                     &collector_identity,
                     run_started,
-                    &mut dedupe,
                     Arc::new(production_polymarket_timeline_now),
                 )
                 .await?
@@ -1160,6 +1025,87 @@ pub(super) struct AcceptedPolymarketMetadataRow {
     pub(super) ws_claimant_collector_admission_sequence: Option<u64>,
 }
 
+impl AcceptedPolymarketMetadataRow {
+    fn dynamic_owned_bytes(&self) -> usize {
+        self.row
+            .collector_host_id
+            .capacity()
+            .saturating_add(self.row.collector_region.capacity())
+            .saturating_add(self.row.schema_version.capacity())
+            .saturating_add(self.row.slug.capacity())
+            .saturating_add(self.row.condition_id.capacity())
+            .saturating_add(self.row.clob_market_id.capacity())
+            .saturating_add(self.row.asset_ids.capacity())
+            .saturating_add(
+                self.row
+                    .source_endpoint
+                    .as_ref()
+                    .map_or(0, String::capacity),
+            )
+            .saturating_add(
+                self.row
+                    .source_evidence_payload_json
+                    .as_ref()
+                    .map_or(0, String::capacity),
+            )
+            .saturating_add(
+                self.row
+                    .source_evidence_raw_sha256
+                    .as_ref()
+                    .map_or(0, String::capacity),
+            )
+            .saturating_add(
+                self.row
+                    .closed_time_raw
+                    .as_ref()
+                    .map_or(0, String::capacity),
+            )
+            .saturating_add(
+                self.row
+                    .uma_resolution_status
+                    .as_ref()
+                    .map_or(0, String::capacity),
+            )
+            .saturating_add(self.row.outcomes_raw.as_ref().map_or(0, String::capacity))
+            .saturating_add(
+                self.row
+                    .outcome_prices_raw
+                    .as_ref()
+                    .map_or(0, String::capacity),
+            )
+            .saturating_add(
+                self.row
+                    .ws_platform_timestamp_raw
+                    .as_ref()
+                    .map_or(0, String::capacity),
+            )
+            .saturating_add(
+                self.row
+                    .winning_asset_id
+                    .as_ref()
+                    .map_or(0, String::capacity),
+            )
+            .saturating_add(
+                self.row
+                    .winning_outcome
+                    .as_ref()
+                    .map_or(0, String::capacity),
+            )
+            .saturating_add(
+                self.row
+                    .resolution_evidence_raw_sha256
+                    .as_ref()
+                    .map_or(0, String::capacity),
+            )
+            .saturating_add(self.raw_day_ticket.dynamic_owned_bytes())
+            .saturating_add(
+                self.ws_claimant_source_sequence_epoch_id
+                    .as_ref()
+                    .map_or(0, String::capacity),
+            )
+    }
+}
+
 #[cfg(test)]
 impl std::ops::Deref for AcceptedPolymarketMetadataRow {
     type Target = PolymarketMarketMetadataV3Row;
@@ -1171,7 +1117,7 @@ impl std::ops::Deref for AcceptedPolymarketMetadataRow {
 
 #[derive(Clone, Debug)]
 pub(super) enum PolymarketTerminalClaim {
-    MarketResolvedWs(PolymarketWsTerminalEvidence),
+    MarketResolvedWs(Box<PolymarketWsTerminalEvidence>),
     GammaBySlug(Box<AcceptedPolymarketMetadataRow>),
 }
 
@@ -1228,9 +1174,9 @@ impl PendingPolymarketIdentity {
         }
     }
 
-    fn owned_bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
-            .saturating_add(self.slug.capacity())
+    fn dynamic_owned_bytes(&self) -> usize {
+        self.slug
+            .capacity()
             .saturating_add(self.clob_market_id.capacity())
             .saturating_add(self.condition_id.capacity())
             .saturating_add(self.up_asset_id.capacity())
@@ -1268,7 +1214,6 @@ pub(super) struct PendingPolymarketResolution {
     pub(super) buffered_attempt_rows: Vec<AcceptedPolymarketMetadataRow>,
     pub(super) recovery_missed_ordinals: VecDeque<u8>,
     pub(super) recovery_reclassification_pending: bool,
-    pub(super) ws_fingerprints: VecDeque<[u8; 32]>,
 }
 
 impl PendingPolymarketResolution {
@@ -1286,14 +1231,14 @@ impl PendingPolymarketResolution {
             transport_unavailable_count: 0,
             missed_slot_count: 0,
             last_valid_metadata_received_at_utc_ms: None,
-            claim: early_claim.map(PolymarketTerminalClaim::MarketResolvedWs),
+            claim: early_claim
+                .map(|claim| PolymarketTerminalClaim::MarketResolvedWs(Box::new(claim))),
             exhaustion_requested: false,
             exhaustion_ticket: None,
             fatal_integrity_error: false,
             buffered_attempt_rows: Vec::new(),
             recovery_missed_ordinals: VecDeque::new(),
             recovery_reclassification_pending: false,
-            ws_fingerprints: VecDeque::new(),
         }
     }
 
@@ -1316,7 +1261,6 @@ impl PendingPolymarketResolution {
             buffered_attempt_rows: Vec::new(),
             recovery_missed_ordinals: recovered.missed_attempt_ordinals.into(),
             recovery_reclassification_pending: true,
-            ws_fingerprints: VecDeque::new(),
         }
     }
 
@@ -1340,43 +1284,26 @@ impl PendingPolymarketResolution {
             && self.poll_abort_handle.is_none()
     }
 
-    pub(super) fn observe_ws_payload(&mut self, payload: &str) -> bool {
-        let digest: [u8; 32] = Sha256::digest(payload.as_bytes()).into();
-        if self.ws_fingerprints.contains(&digest) {
-            return false;
-        }
-        if self.ws_fingerprints.len() == POLYMARKET_PENDING_WS_FINGERPRINT_LIMIT {
-            self.ws_fingerprints.pop_front();
-        }
-        self.ws_fingerprints.push_back(digest);
-        true
-    }
-
     fn owned_bytes(&self) -> usize {
         let claim_bytes = match &self.claim {
-            Some(PolymarketTerminalClaim::MarketResolvedWs(claim)) => claim.dynamic_owned_bytes(),
-            Some(PolymarketTerminalClaim::GammaBySlug(row)) => row
-                .row
-                .to_draft_json()
-                .map_or(MAX_TYPED_ROW_BYTES.saturating_add(1), |json| json.len())
-                .saturating_add(row.raw_day_ticket.dynamic_owned_bytes()),
+            Some(PolymarketTerminalClaim::MarketResolvedWs(claim)) => {
+                std::mem::size_of::<PolymarketWsTerminalEvidence>()
+                    .saturating_add(claim.dynamic_owned_bytes())
+            }
+            Some(PolymarketTerminalClaim::GammaBySlug(row)) => {
+                std::mem::size_of::<AcceptedPolymarketMetadataRow>()
+                    .saturating_add(row.dynamic_owned_bytes())
+            }
             None => 0,
         };
-        let buffered_bytes = self
-            .buffered_attempt_rows
-            .iter()
-            .fold(0_usize, |total, accepted| {
-                total
-                    .saturating_add(
-                        accepted
-                            .row
-                            .to_draft_json()
-                            .map_or(MAX_TYPED_ROW_BYTES.saturating_add(1), |json| json.len()),
-                    )
-                    .saturating_add(accepted.raw_day_ticket.dynamic_owned_bytes())
-            });
+        let buffered_bytes = self.buffered_attempt_rows.iter().fold(
+            self.buffered_attempt_rows
+                .capacity()
+                .saturating_mul(std::mem::size_of::<AcceptedPolymarketMetadataRow>()),
+            |total, accepted| total.saturating_add(accepted.dynamic_owned_bytes()),
+        );
         std::mem::size_of::<Self>()
-            .saturating_add(self.identity.owned_bytes())
+            .saturating_add(self.identity.dynamic_owned_bytes())
             .saturating_add(claim_bytes)
             .saturating_add(buffered_bytes)
             .saturating_add(
@@ -1384,8 +1311,11 @@ impl PendingPolymarketResolution {
                     .as_ref()
                     .map_or(0, RawDayAcceptedTicket::dynamic_owned_bytes),
             )
-            .saturating_add(self.recovery_missed_ordinals.capacity())
-            .saturating_add(self.ws_fingerprints.capacity().saturating_mul(32))
+            .saturating_add(
+                self.recovery_missed_ordinals
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<u8>()),
+            )
     }
 }
 
@@ -1421,7 +1351,6 @@ pub(super) struct PolymarketProcessingContext {
     pub(super) current: Option<DiscoveredBtcUpdownMarket>,
     pub(super) next: Option<DiscoveredBtcUpdownMarket>,
     pub(super) pending: BTreeMap<String, PendingPolymarketResolution>,
-    pub(super) startup_restored_dedupe_lifecycles: BTreeSet<String>,
     pub(super) early_ws_claims: BTreeMap<String, PolymarketWsTerminalEvidence>,
     pub(super) source_authorities: Vec<PolymarketMetadataV3ReferenceRecord>,
     pub(super) active_asset_to_slug: BTreeMap<String, String>,
@@ -1444,6 +1373,7 @@ pub(super) fn production_polymarket_timeline_now() -> PolymarketTimelineNow {
 }
 
 impl PolymarketProcessingContext {
+    #[cfg(test)]
     pub(super) fn new(discovery: BtcUpdownDiscovery) -> Self {
         Self::new_with_source_epoch(discovery, "test-polymarket-source-epoch".to_owned())
     }
@@ -1457,7 +1387,6 @@ impl PolymarketProcessingContext {
             current: Some(discovery.current),
             next: discovery.next,
             pending: BTreeMap::new(),
-            startup_restored_dedupe_lifecycles: BTreeSet::new(),
             early_ws_claims: BTreeMap::new(),
             source_authorities: Vec::new(),
             active_asset_to_slug: BTreeMap::new(),
@@ -1469,6 +1398,7 @@ impl PolymarketProcessingContext {
         context
     }
 
+    #[cfg(test)]
     pub(super) fn from_recovery(recovery: PolymarketRestartRecovery) -> Result<Option<Self>> {
         Self::from_recovery_with_source_epoch(recovery, "test-polymarket-source-epoch".to_owned())
     }
@@ -1494,7 +1424,6 @@ impl PolymarketProcessingContext {
                     )
                 })
                 .collect(),
-            startup_restored_dedupe_lifecycles: BTreeSet::new(),
             early_ws_claims: BTreeMap::new(),
             source_authorities: Vec::new(),
             active_asset_to_slug: BTreeMap::new(),
@@ -1537,17 +1466,6 @@ impl PolymarketProcessingContext {
         self.current = Some(discovery.current);
         self.next = discovery.next;
         self.rebuild_asset_to_slug();
-    }
-
-    pub(super) fn retain_startup_restored_dedupe_lifecycles(
-        &mut self,
-        lifecycles: BTreeSet<String>,
-    ) {
-        self.startup_restored_dedupe_lifecycles = lifecycles;
-    }
-
-    fn release_startup_restored_dedupe_lifecycles(&mut self) {
-        self.startup_restored_dedupe_lifecycles.clear();
     }
 
     pub(super) fn discovery_snapshot(&self) -> Option<BtcUpdownDiscovery> {
@@ -1647,8 +1565,11 @@ impl PolymarketProcessingContext {
     }
 
     pub(super) fn pending_owned_bytes(&self) -> usize {
-        let pending = self.pending.values().fold(0_usize, |total, pending| {
-            total.saturating_add(pending.owned_bytes())
+        let pending = self.pending.iter().fold(0_usize, |total, (slug, pending)| {
+            total
+                .saturating_add(std::mem::size_of::<String>())
+                .saturating_add(slug.capacity())
+                .saturating_add(pending.owned_bytes())
         });
         let early_claims = self
             .early_ws_claims
@@ -1660,11 +1581,16 @@ impl PolymarketProcessingContext {
                     .saturating_add(std::mem::size_of::<PolymarketWsTerminalEvidence>())
                     .saturating_add(evidence.dynamic_owned_bytes())
             });
-        self.source_authorities
-            .iter()
-            .fold(early_claims, |total, authority| {
-                total.saturating_add(polymarket_authority_owned_bytes(authority))
-            })
+        self.source_authorities.iter().fold(
+            early_claims.saturating_add(
+                self.source_authorities
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<PolymarketMetadataV3ReferenceRecord>()),
+            ),
+            |total, authority| {
+                total.saturating_add(polymarket_authority_dynamic_owned_bytes(authority))
+            },
+        )
     }
 
     pub(super) fn ensure_pending_bounds(&self) -> Result<()> {
@@ -1811,9 +1737,12 @@ fn polymarket_authority_matches_identity(
         && authority.fixed_identity_verified_at_utc == identity.fixed_identity_verified_at_utc_ms
 }
 
-fn polymarket_authority_owned_bytes(authority: &PolymarketMetadataV3ReferenceRecord) -> usize {
-    std::mem::size_of::<PolymarketMetadataV3ReferenceRecord>()
-        .saturating_add(authority.metadata_row_kind.capacity())
+fn polymarket_authority_dynamic_owned_bytes(
+    authority: &PolymarketMetadataV3ReferenceRecord,
+) -> usize {
+    authority
+        .metadata_row_kind
+        .capacity()
         .saturating_add(authority.slug.capacity())
         .saturating_add(authority.condition_id.capacity())
         .saturating_add(authority.clob_market_id.capacity())
@@ -1889,7 +1818,6 @@ pub(super) async fn process_polymarket_budgeted_message(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    _dedupe: &mut LifecycleFingerprintSets,
     _recovery: &mut SourceRecoverySupervisor,
 ) -> Result<()> {
     let BudgetedPolymarketMessage {
@@ -1941,7 +1869,6 @@ pub(super) async fn process_polymarket_budgeted_message(
         recv_time_utc_ms,
         &raw_day_ticket,
         collector_identity,
-        MARKET_WS_ENDPOINT,
         &source_sequence_epoch_id,
         || admitted.polymarket_v3_projection(),
     )
@@ -2166,7 +2093,6 @@ pub(super) async fn process_polymarket_market_resolved(
         recv_time_utc_ms,
         &raw_day_ticket,
         collector_identity,
-        MARKET_WS_ENDPOINT,
         &source_sequence_epoch_id,
         move || {
             PolymarketOrderbookV3Projection::from_target_admitted_sdk_message(
@@ -2197,7 +2123,9 @@ pub(super) async fn process_polymarket_market_resolved(
     };
     if let Some(pending) = context.pending.get_mut(&slug) {
         if pending.claim.is_none() {
-            pending.claim = Some(PolymarketTerminalClaim::MarketResolvedWs(evidence));
+            pending.claim = Some(PolymarketTerminalClaim::MarketResolvedWs(Box::new(
+                evidence,
+            )));
         }
         context.ensure_pending_bounds()?;
         return Ok(());
@@ -2235,7 +2163,6 @@ pub(super) async fn stop_polymarket_after_processing_error(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    dedupe: &mut LifecycleFingerprintSets,
     recovery: &mut SourceRecoverySupervisor,
 ) -> Result<()> {
     let mut primary_error = first_error;
@@ -2268,7 +2195,6 @@ pub(super) async fn stop_polymarket_after_processing_error(
                         sink,
                         collector_identity,
                         run_started,
-                        dedupe,
                         recovery,
                     )
                     .await
@@ -2368,7 +2294,6 @@ async fn drain_polymarket_fence(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    dedupe: &mut LifecycleFingerprintSets,
     recovery: &mut SourceRecoverySupervisor,
 ) -> Result<Option<oneshot::Sender<()>>> {
     let (expected_id, resume) = match request {
@@ -2385,7 +2310,6 @@ async fn drain_polymarket_fence(
                     sink,
                     collector_identity,
                     run_started,
-                    dedupe,
                     recovery,
                 )
                 .await
@@ -2398,7 +2322,6 @@ async fn drain_polymarket_fence(
                         sink,
                         collector_identity,
                         run_started,
-                        dedupe,
                         recovery,
                     )
                     .await
@@ -2464,7 +2387,6 @@ pub(super) async fn fence_polymarket_processor(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    dedupe: &mut LifecycleFingerprintSets,
     recovery: &mut SourceRecoverySupervisor,
 ) -> Result<()> {
     let request = market_runtime.request_fence(stop_after_fence).await?;
@@ -2476,7 +2398,6 @@ pub(super) async fn fence_polymarket_processor(
         sink,
         collector_identity,
         run_started,
-        dedupe,
         recovery,
     )
     .await?;
@@ -2519,7 +2440,6 @@ pub(super) async fn process_polymarket_boundary_drain_items<N>(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    dedupe: &mut LifecycleFingerprintSets,
     recovery: &mut SourceRecoverySupervisor,
 ) -> Result<()>
 where
@@ -2543,7 +2463,6 @@ where
                     sink,
                     collector_identity,
                     run_started,
-                    dedupe,
                     recovery,
                 )
                 .await?;
@@ -2601,7 +2520,6 @@ async fn materialize_polymarket_accepted_early_ws_at_quiesce(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    dedupe: &mut LifecycleFingerprintSets,
 ) -> Result<bool> {
     preflight_polymarket_early_ws_claims_for_current_boundary(now_utc_ms, context)?;
     let Some(current) = context.current.as_ref() else {
@@ -2658,9 +2576,6 @@ async fn materialize_polymarket_accepted_early_ws_at_quiesce(
     context.next.take();
     context.rebuild_asset_to_slug();
     context.ensure_pending_bounds()?;
-    dedupe
-        .replace_lifecycles(expected_active_polymarket_lifecycles(context))
-        .map_err(operator_dedupe_error)?;
     send_polymarket_metadata_v3_row_with_ticket(
         sink,
         run_started,
@@ -2736,7 +2651,6 @@ async fn arbitrate_polymarket_ready_items<N>(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    dedupe: &mut LifecycleFingerprintSets,
     recovery: &mut SourceRecoverySupervisor,
 ) -> Result<()>
 where
@@ -2755,7 +2669,6 @@ where
         sink,
         collector_identity,
         run_started,
-        dedupe,
         recovery,
     )
     .await?;
@@ -2771,7 +2684,6 @@ pub(super) async fn arbitrate_polymarket_fence_with_ready_gamma<N>(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    dedupe: &mut LifecycleFingerprintSets,
     recovery: &mut SourceRecoverySupervisor,
 ) -> Result<()>
 where
@@ -2792,7 +2704,6 @@ where
         sink,
         collector_identity,
         run_started,
-        dedupe,
         recovery,
     )
     .await
@@ -2807,7 +2718,6 @@ async fn quiesce_polymarket_resolution_actor<N>(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    dedupe: &mut LifecycleFingerprintSets,
     recovery: &mut SourceRecoverySupervisor,
 ) -> Result<()>
 where
@@ -2827,7 +2737,6 @@ where
         sink,
         collector_identity,
         run_started,
-        dedupe,
         recovery,
     )
     .await?;
@@ -2839,7 +2748,6 @@ where
         sink,
         collector_identity,
         run_started,
-        dedupe,
     )
     .await?;
     ensure_polymarket_resolution_task_bound(resolution_poll_tasks, context)?;
@@ -2849,7 +2757,6 @@ where
         sink,
         collector_identity,
         run_started,
-        dedupe,
     )
     .await
 }
@@ -2863,7 +2770,6 @@ pub(super) async fn quiesce_connected_polymarket_source<N>(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    dedupe: &mut LifecycleFingerprintSets,
     recovery: &mut SourceRecoverySupervisor,
 ) -> Result<()>
 where
@@ -2884,7 +2790,6 @@ where
         sink,
         collector_identity,
         run_started,
-        dedupe,
         recovery,
     )
     .await
@@ -2941,7 +2846,6 @@ pub(super) async fn handle_polymarket_source_control<N>(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    dedupe: &mut LifecycleFingerprintSets,
     recovery: &mut SourceRecoverySupervisor,
 ) -> Result<bool>
 where
@@ -2967,7 +2871,6 @@ where
             sink,
             collector_identity,
             run_started,
-            dedupe,
             recovery,
         )
         .await;
@@ -3027,7 +2930,6 @@ where
                 sink,
                 collector_identity,
                 run_started,
-                dedupe,
                 recovery,
             )
             .await?;
@@ -3050,7 +2952,6 @@ where
                 sink,
                 collector_identity,
                 run_started,
-                dedupe,
             )
             .await?;
             ensure_polymarket_resolution_task_bound(resolution_poll_tasks, context)?;
@@ -3061,7 +2962,6 @@ where
                     sink,
                     collector_identity,
                     run_started,
-                    dedupe,
                 )
                 .await?;
             wait_for_polymarket_exhausted_clock_barrier(
@@ -3095,7 +2995,6 @@ where
             sink,
             collector_identity,
             run_started,
-            dedupe,
             recovery,
         )
         .await?;
@@ -3115,7 +3014,6 @@ where
         sink,
         collector_identity,
         run_started,
-        dedupe,
         recovery,
     )
     .await;
@@ -3146,7 +3044,6 @@ async fn apply_polymarket_subscription_while_draining(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    dedupe: &mut LifecycleFingerprintSets,
     recovery: &mut SourceRecoverySupervisor,
 ) -> Result<()> {
     let progress = {
@@ -3257,7 +3154,6 @@ async fn apply_polymarket_subscription_while_draining(
                     sink,
                     collector_identity,
                     run_started,
-                    dedupe,
                     recovery,
                 )
                 .await
@@ -3287,7 +3183,6 @@ async fn apply_polymarket_subscription_while_draining(
                 sink,
                 collector_identity,
                 run_started,
-                dedupe,
                 recovery,
             )
             .await
@@ -3300,7 +3195,6 @@ async fn apply_polymarket_subscription_while_draining(
                 sink,
                 collector_identity,
                 run_started,
-                dedupe,
                 recovery,
             )
             .await
@@ -3318,12 +3212,8 @@ pub(super) async fn install_polymarket_context(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    dedupe: &mut LifecycleFingerprintSets,
     recovery: &mut SourceRecoverySupervisor,
 ) -> Result<()> {
-    dedupe
-        .replace_lifecycles(expected_lifecycle_slugs(&discovery))
-        .map_err(operator_dedupe_error)?;
     context.replace_discovery(discovery);
     let target_assets = context.desired_assets()?;
     apply_polymarket_subscription_while_draining(
@@ -3334,7 +3224,6 @@ pub(super) async fn install_polymarket_context(
         sink,
         collector_identity,
         run_started,
-        dedupe,
         recovery,
     )
     .await?;
@@ -3362,7 +3251,6 @@ pub(super) async fn install_polymarket_context(
     recovery.record_business_recovery();
     sink.source_queue_backpressure
         .set_recovery_active("polymarket_market", false);
-    context.release_startup_restored_dedupe_lifecycles();
     Ok(())
 }
 
@@ -3383,7 +3271,6 @@ pub(super) async fn install_polymarket_context_if_current(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    dedupe: &mut LifecycleFingerprintSets,
     recovery: &mut SourceRecoverySupervisor,
 ) -> Result<PolymarketContextInstallOutcome> {
     if !gamma_discovery_is_current(&discovery, evaluation_ms) {
@@ -3398,7 +3285,6 @@ pub(super) async fn install_polymarket_context_if_current(
         sink,
         collector_identity,
         run_started,
-        dedupe,
         recovery,
     )
     .await?;
@@ -3512,7 +3398,6 @@ pub(super) async fn switch_polymarket_context<N>(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    dedupe: &mut LifecycleFingerprintSets,
     recovery: &mut SourceRecoverySupervisor,
 ) -> Result<PolymarketContextInstallOutcome>
 where
@@ -3536,7 +3421,6 @@ where
         sink,
         collector_identity,
         run_started,
-        dedupe,
         recovery,
     )
     .await?;
@@ -3550,7 +3434,6 @@ where
         sink,
         collector_identity,
         run_started,
-        dedupe,
         recovery,
     )
     .await
@@ -3572,31 +3455,12 @@ where
     timeline_now().monotonic + wait.delay
 }
 
-fn expected_active_polymarket_lifecycles(
-    context: &PolymarketProcessingContext,
-) -> BTreeSet<String> {
-    let Some(current) = &context.current else {
-        return context.startup_restored_dedupe_lifecycles.clone();
-    };
-    let next_slug = context.next.as_ref().map_or_else(
-        || discovery_windows(current.start_ts_s * 1000).next.slug,
-        |next| next.slug.clone(),
-    );
-    BTreeSet::from([current.slug.clone(), next_slug])
-}
-
-pub(super) fn expected_polymarket_recovery_lifecycles(now_utc_ms: i64) -> BTreeSet<String> {
-    let windows = discovery_windows(now_utc_ms);
-    BTreeSet::from([windows.current.slug, windows.next.slug])
-}
-
 pub(super) async fn advance_polymarket_boundaries(
     now_utc_ms: i64,
     context: &mut PolymarketProcessingContext,
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    dedupe: &mut LifecycleFingerprintSets,
 ) -> Result<bool> {
     let Some(current) = context.current.as_ref() else {
         return Ok(false);
@@ -3659,9 +3523,6 @@ pub(super) async fn advance_polymarket_boundaries(
     context.current = promoted;
     context.rebuild_asset_to_slug();
     context.ensure_pending_bounds()?;
-    dedupe
-        .replace_lifecycles(expected_active_polymarket_lifecycles(context))
-        .map_err(operator_dedupe_error)?;
 
     send_polymarket_metadata_v3_row(sink, run_started, pending_row).await?;
     if let Some(row) = promotion_row {
@@ -4209,7 +4070,6 @@ pub(super) async fn finalize_polymarket_pending_after_fence<N>(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    dedupe: &mut LifecycleFingerprintSets,
     recovery: &mut SourceRecoverySupervisor,
 ) -> Result<()>
 where
@@ -4239,7 +4099,6 @@ where
         sink,
         collector_identity,
         run_started,
-        dedupe,
         recovery,
     )
     .await?;
@@ -4252,7 +4111,6 @@ where
             sink,
             collector_identity,
             run_started,
-            dedupe,
         )
         .await?;
     wait_for_polymarket_exhausted_clock_barrier(
@@ -4272,7 +4130,6 @@ where
         sink,
         collector_identity,
         run_started,
-        dedupe,
         recovery,
     )
     .await?;
@@ -4288,7 +4145,6 @@ pub(super) async fn finalize_polymarket_ready_pending_while_paused<N>(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    dedupe: &mut LifecycleFingerprintSets,
 ) -> Result<(Option<i64>, Option<String>)>
 where
     N: Fn() -> PolymarketTimelineNow + Send + Sync,
@@ -4445,9 +4301,6 @@ where
     }
     context.rebuild_asset_to_slug();
     context.ensure_pending_bounds()?;
-    dedupe
-        .replace_lifecycles(expected_active_polymarket_lifecycles(context))
-        .map_err(operator_dedupe_error)?;
     Ok((latest_exhausted_applied_at_utc_ms, fatal_integrity))
 }
 
@@ -4504,7 +4357,6 @@ pub(super) async fn collect_polymarket_single_receiver<N>(
     run_started: Instant,
     market_runtime: &mut PolymarketDrainRuntime,
     gamma: &GammaClient,
-    dedupe: &mut LifecycleFingerprintSets,
     recovery: &mut SourceRecoverySupervisor,
     control_rx: &mut mpsc::Receiver<PolymarketSourceControl>,
     discovery_wait: Duration,
@@ -4538,7 +4390,6 @@ where
             sink,
             collector_identity,
             run_started,
-            dedupe,
             recovery,
         )
         .await?;
@@ -4563,7 +4414,6 @@ where
             sink,
             collector_identity,
             run_started,
-            dedupe,
             recovery,
         )
         .await?;
@@ -4602,7 +4452,6 @@ where
                         sink,
                         collector_identity,
                         run_started,
-                        dedupe,
                         recovery,
                     )
                     .await?
@@ -4633,7 +4482,6 @@ where
                         sink,
                         collector_identity,
                         run_started,
-                        dedupe,
                         recovery,
                     )
                     .await?;
@@ -4657,7 +4505,6 @@ where
                 sink,
                 collector_identity,
                 run_started,
-                dedupe,
                 recovery,
             )
             .await?;
@@ -4673,7 +4520,6 @@ where
             sink,
             collector_identity,
             run_started,
-            dedupe,
         )
         .await?;
         if boundary_advanced {
@@ -4703,7 +4549,6 @@ where
                 sink,
                 collector_identity,
                 run_started,
-                dedupe,
                 recovery,
             )
             .await?;
@@ -4724,7 +4569,6 @@ where
                 sink,
                 collector_identity,
                 run_started,
-                dedupe,
                 recovery,
             )
             .await?;
@@ -4746,7 +4590,6 @@ where
                 sink,
                 collector_identity,
                 run_started,
-                dedupe,
                 recovery,
             )
             .await?
@@ -4829,7 +4672,6 @@ where
                                 sink,
                                 collector_identity,
                                 run_started,
-                                dedupe,
                                 recovery,
                             )
                             .await?;
@@ -4900,7 +4742,6 @@ where
                         sink,
                         collector_identity,
                         run_started,
-                        dedupe,
                         recovery,
                     )
                     .await?;
@@ -4976,7 +4817,6 @@ where
                         sink,
                         collector_identity,
                         run_started,
-                        dedupe,
                         recovery,
                     )
                     .await?;
@@ -5000,7 +4840,6 @@ where
                     sink,
                     collector_identity,
                     run_started,
-                    dedupe,
                     recovery,
                 )
                 .await?
@@ -5024,7 +4863,6 @@ where
                         sink,
                         collector_identity,
                         run_started,
-                        dedupe,
                         recovery,
                     )
                     .await
@@ -5036,7 +4874,6 @@ where
                             sink,
                             collector_identity,
                             run_started,
-                            dedupe,
                             recovery,
                         )
                         .await;

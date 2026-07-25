@@ -754,3 +754,22 @@ Phase 6 新增本地交付核对，不改变 Phase 0 远端技术 verdict：
 - `data-collect/tests/e2e_collect_contract.rs` 用本地 synthetic 四源写入验证 typed raw parquet、manifest sidecar、health/gap/reconnect evidence、finalized-only discovery、consumer boundary declarations，以及 current active / planned next preload coverage 对齐。
 - `data-collect/docs/acceptance-matrix.md` 将 `demand/data-collect-demand.md` 第九节 24 个验收标准逐条映射到合同测试、Phase 0 远端 artifact 或 Phase 6 扫描。
 - Phase 6 本地 e2e contract 不替代 0.6.10 / 0.6.11 的真实四源远端长跑；它用于防止交付阶段遗漏 manifest、finalized-only、消费者边界或验收矩阵。
+
+2026-07-26 authority说明：上述内容只保留为当时Phase 6执行事实。
+`e2e_collect_contract.rs`随后被证明只是在同一个test-only
+`SourceScheduler`模型内构造并验证旧四源/per-segment-manifest语义，且未调用current
+production runtime；它已由真实四logical-producer/六source启动映射、Polymarket
+current+prefetched lifecycle、hourly writer/finalized discovery和daily manifest合同
+替代并在SDK070 Stage5删除。当前验收证据以
+`data-collect/docs/acceptance-matrix.md`为准，不再把该synthetic测试作为现行合同。
+
+2026-07-26 Stage5进一步supersession：本文第8节中
+`BackpressureMonitor` hard watermark后`PauseIntake/ResumeIntake`、第9节有限
+`plan_retry_trace/ReconnectGate`及fresh-business恢复门的`PASS_FOR_PHASE0_CONTRACT`
+均只保留为当时synthetic contract执行事实，不再是current production authority。
+用户批准`U05-A + U06-A`后，这两套从未接入production的public/test-only控制模型及
+专属测试已删除。current queue由有限channel、global inflight row/owned-byte、
+单行上限与有界acquire/send wait限制，age/lag/flush/RSS只作观测；current transport
+恢复由各source-local supervisor以有界单次等待和无限外层总attempt执行，business
+silence/stale不作为reconnect/gap门。现行验收证据只以
+`data-collect/docs/acceptance-matrix.md`列出的真实runtime/source测试为准。

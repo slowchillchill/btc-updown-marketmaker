@@ -353,7 +353,7 @@ fn polymarket_v3_price_change_keeps_one_message_and_sdk_entry_order() {
     assert_eq!(batch.num_rows(), 1);
     assert_eq!(
         polymarket_orderbook_v3_messages_from_batch(&batch).unwrap(),
-        [message.clone()]
+        std::slice::from_ref(&message)
     );
     let PolymarketOrderbookV3Event::PriceChange(price_change) = &message.event else {
         panic!("expected price_change domain");
@@ -531,7 +531,7 @@ fn polymarket_v3_codec_rejects_non_sdk_lexical_values_and_preserves_decimal_text
     let batch = polymarket_orderbook_v3_messages_to_batch(std::slice::from_ref(&message)).unwrap();
     assert_eq!(
         polymarket_orderbook_v3_messages_from_batch(&batch).unwrap(),
-        [message.clone()]
+        std::slice::from_ref(&message)
     );
 
     let mut invalid_market = message.clone();

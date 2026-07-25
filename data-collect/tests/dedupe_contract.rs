@@ -1,58 +1,6 @@
-use std::collections::BTreeSet;
-
 use data_collect::dedupe::{
-    BinanceIdDecision, BinanceRecentIdWindow, FingerprintDecision, LifecycleFingerprintSets,
-    TimedFingerprintWindow,
+    BinanceIdDecision, BinanceRecentIdWindow, FingerprintDecision, TimedFingerprintWindow,
 };
-
-#[test]
-fn polymarket_dedupes_only_exact_payloads_within_the_same_lifecycle() {
-    let mut sets = LifecycleFingerprintSets::with_limit(2);
-    sets.replace_lifecycles(BTreeSet::from(["current".to_owned(), "next".to_owned()]))
-        .unwrap();
-
-    assert_eq!(
-        sets.observe("current", br#"{"price":"0.1","size":"1"}"#),
-        Ok(FingerprintDecision::Unique)
-    );
-    assert_eq!(
-        sets.observe("current", br#"{"price":"0.1","size":"1"}"#),
-        Ok(FingerprintDecision::Duplicate)
-    );
-    assert_eq!(
-        sets.observe("next", br#"{"price":"0.1","size":"1"}"#),
-        Ok(FingerprintDecision::Unique),
-        "the same payload in another lifecycle is not a transport replay"
-    );
-    assert_eq!(
-        sets.observe("current", br#"{"price":"0.10","size":"1"}"#),
-        Ok(FingerprintDecision::Unique),
-        "numeric text that is only business-equivalent must remain distinct"
-    );
-    assert!(sets.observe("current", br#"{"price":"0.2"}"#).is_err());
-}
-
-#[test]
-fn polymarket_rollover_preserves_promoted_next_without_copying_retired_state() {
-    let mut sets = LifecycleFingerprintSets::with_limit(4);
-    sets.replace_lifecycles(BTreeSet::from(["a".to_owned(), "b".to_owned()]))
-        .unwrap();
-    assert_eq!(
-        sets.observe("b", b"prefetched"),
-        Ok(FingerprintDecision::Unique)
-    );
-
-    sets.replace_lifecycles(BTreeSet::from(["b".to_owned(), "c".to_owned()]))
-        .unwrap();
-
-    assert_eq!(
-        sets.observe("b", b"prefetched"),
-        Ok(FingerprintDecision::Duplicate),
-        "the promoted lifecycle keeps its original set"
-    );
-    assert!(sets.observe("a", b"retired").is_err());
-    assert_eq!(sets.lifecycle_count(), 2);
-}
 
 #[test]
 fn binance_recent_id_window_distinguishes_duplicate_conflict_and_old_replay() {

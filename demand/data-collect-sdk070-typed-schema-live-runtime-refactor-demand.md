@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED`。阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_REVIEW_PASSED_AWAITING_PUBLISH`。阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime终态为
 > `SDK_070_RUNTIME_USABLE`。阶段1闭合时的typed终态为
@@ -41,6 +41,23 @@
 > `STAGE3_CLOSED`以承载本记录的commit成功push到`origin/fix-rtds-silents`且本地
 > HEAD、upstream与远端ref一致为生效条件。该闭合只表示本地current new-write
 > 调用图已原子切换为source v3 + metadata v4，不授权production activation/cutover。
+> 2026-07-26用户批准Stage5四项authority修正：queue收敛为真实bounded
+> channel + global row/owned-byte budget + bounded wait/观测；训练文件采用
+> hourly-only rollover；训练/paper/live采用精确admission时间语义；Polymarket
+> current/next/T-30不扩张到连续Binance/RTDS source。U01–U04b的程序决策门已经
+> 解除，均进入`DELETE_PROVEN_REPLACED_BEHAVIOR`实施与验证；该删除不改变RTDS
+> 专项参数/行为，也不授权production、远端或数据删除。
+> Stage5首次独立终审随后发现两个既有C簇遗漏，以及两套新的public/test-only
+> shadow authority。用户批准`U05-A + U06-A`：删除逐queue hard-threshold
+> pause/resume控制面，只保留真实bounded/inflight owner与纯观测/兼容DTO；删除
+> 未接production的有限health/reconnect circuit模型，把唯一生产所需的确定性
+> capped+jitter delay收窄到现有source-local runtime helper。该批准不改变真实
+> source恢复、manifest兼容字段或全局hard-resource threshold。
+> Stage5实现、最终package/check/clippy/fmt/diff门及两路独立
+> `gpt-5.6-sol`/Ultra终审均已通过，最终终审为Blocker 0 / Important 0 /
+> Minor 0；终审发现的pending map key与source-authority `Vec` backing
+> owned-byte漏算已修复并复审通过。`STAGE5_CLOSED`仍以承载本记录的commit成功
+> push且本地HEAD、upstream与远端ref一致为生效条件。
 
 ## 一、决策结论与目标
 
@@ -545,12 +562,44 @@ v3 writer 不得包含：
 
 审计根集合必须覆盖 binaries、lib public API、features/targets、tests、benches、serde/macro/trait 间接入口、deployment scripts、历史 readers和 demand/plan/changelog。只有测试消费者也不能直接推出可删除；必须先判断测试是在保护公共合同、legacy compatibility还是孤立旧实现。
 
-当前初步结论：
+当前结论（2026-07-26用户裁决后）：
 
 - `live_runtime.rs`：`KEEP + MOVE`；
 - 26,985 行内嵌测试：按 owner `MOVE`，不能当作净删除；
 - 当前“RTDS 静默不重连”测试：在旧 authority 生效期间 `KEEP`；
-- `sources/rtds.rs`、`config.rs`、`scheduler.rs`、`segment.rs` 等只有测试或 public API消费者的路径：候选 `MERGE/USER_DECISION`，尚未证明可删；
+- `sources/rtds.rs`及其旧合同测试：
+  `DELETE_PROVEN_REPLACED_BEHAVIOR`；current唯一owner为
+  `live_runtime/rtds_source.rs`、SDK runtime及source/hourly contracts，Stage4如获
+  批准也只修改该current owner；
+- `config.rs::CrossTaskQueueConfig`及其静态自测：
+  `DELETE_PROVEN_REPLACED_BEHAVIOR`；真实owner为bounded channel、global inflight
+  row/owned-byte预算、单行上限和bounded acquire/send wait，并沿用writer
+  batch/periodic flush；queue duration、writer lag与RSS只作观测，不建立第二逐队列
+  五维配置authority；
+- `scheduler.rs`、`source_scheduler_contract`与旧synthetic e2e：
+  `DELETE_PROVEN_REPLACED_BEHAVIOR`；真实owner为四logical-producer/六source
+  startup映射及Polymarket current+prefetched lifecycle，连续Binance/RTDS不绑定
+  market slug；
+- `segment.rs` availability与naming/rollover两半及其旧测试：
+  `DELETE_PROVEN_REPLACED_BEHAVIOR`；legacy/无独立admission schema使用recv time，
+  已批准保存独立collector admission字段的current schema使用collector admission，
+  paper/live使用handoff admission + runtime receive；运行中只按UTC hour
+  rollover，协调shutdown可提前finalize，同小时启动/重启路径碰撞只选择初始
+  `part=N`，50,000 rows/16MiB只切row group；
+- `backpressure.rs`中的`BackpressureConfig/Monitor`、soft/hard age/lag阈值、
+  `PauseIntake/ResumeIntake`及其test/bench控制路径：
+  `DELETE_PROVEN_REPLACED_BEHAVIOR`；保留真实`bounded_event_queue`、global
+  inflight owner、`QueueSample`纯观测DTO和`BackpressureReceipt`兼容字段，不以这些
+  DTO重建控制决策；
+- `health.rs`有限`RetryPolicy/plan_retry_trace`、circuit registry、
+  `ReconnectGate`及其旧合同：
+  `DELETE_PROVEN_REPLACED_BEHAVIOR`；生产只保留现有`live_runtime::retry_delay`
+  内部的确定性capped+jitter数学，真实`SourceRecoverySupervisor`继续使用有界单次
+  等待与无限外层总attempt，business freshness不成为transport恢复门；
+- `dedupe.rs::LifecycleFingerprintSets`及两个Polymarket自引用测试、旧
+  metadata-v2 runtime adapter与`fallback_close/unresolved_window_end_observation`
+  正向测试：分别作为C02/C03与C01遗漏补删；它们不属于W-B公开legacy
+  schema/reader/writer或Stage3 bounded A/B；
 - v2 legacy schema/reader，以及
   `TypedParquetSegmentWriter::create_polymarket_orderbook*`、
   `write_polymarket_orderbook_rows`、metadata v3 offline writer等公开兼容入口：

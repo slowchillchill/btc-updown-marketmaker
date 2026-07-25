@@ -1,107 +1,12 @@
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet};
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 
 use sha2::{Digest as _, Sha256};
-
-pub const POLYMARKET_MAX_ACTIVE_LIFECYCLES: usize = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FingerprintDecision {
     Unique,
     Duplicate,
-}
-
-pub struct LifecycleFingerprintSets {
-    per_lifecycle_limit: usize,
-    fingerprints: BTreeMap<String, HashSet<[u8; 32]>>,
-}
-
-impl LifecycleFingerprintSets {
-    #[must_use]
-    pub fn with_limit(per_lifecycle_limit: usize) -> Self {
-        Self {
-            per_lifecycle_limit,
-            fingerprints: BTreeMap::new(),
-        }
-    }
-
-    pub fn replace_lifecycles(&mut self, lifecycles: BTreeSet<String>) -> Result<(), String> {
-        if lifecycles.len() > POLYMARKET_MAX_ACTIVE_LIFECYCLES {
-            return Err(format!(
-                "too many active Polymarket lifecycles: {}",
-                lifecycles.len()
-            ));
-        }
-        self.fingerprints
-            .retain(|lifecycle, _| lifecycles.contains(lifecycle));
-        for lifecycle in lifecycles {
-            self.fingerprints.entry(lifecycle).or_default();
-        }
-        Ok(())
-    }
-
-    pub fn observe(
-        &mut self,
-        lifecycle: &str,
-        source_native_payload: &[u8],
-    ) -> Result<FingerprintDecision, String> {
-        let fingerprint = sha256(source_native_payload);
-        self.observe_fingerprint(lifecycle, fingerprint)
-    }
-
-    pub fn check(
-        &self,
-        lifecycle: &str,
-        source_native_payload: &[u8],
-    ) -> Result<FingerprintDecision, String> {
-        let fingerprint = sha256(source_native_payload);
-        let fingerprints = self
-            .fingerprints
-            .get(lifecycle)
-            .ok_or_else(|| format!("inactive Polymarket lifecycle: {lifecycle}"))?;
-        if fingerprints.contains(&fingerprint) {
-            return Ok(FingerprintDecision::Duplicate);
-        }
-        if fingerprints.len() >= self.per_lifecycle_limit {
-            return Err(format!(
-                "Polymarket lifecycle fingerprint limit reached: lifecycle={lifecycle} limit={}",
-                self.per_lifecycle_limit
-            ));
-        }
-        Ok(FingerprintDecision::Unique)
-    }
-
-    pub fn observe_fingerprint(
-        &mut self,
-        lifecycle: &str,
-        fingerprint: [u8; 32],
-    ) -> Result<FingerprintDecision, String> {
-        let fingerprints = self
-            .fingerprints
-            .get_mut(lifecycle)
-            .ok_or_else(|| format!("inactive Polymarket lifecycle: {lifecycle}"))?;
-        if fingerprints.contains(&fingerprint) {
-            return Ok(FingerprintDecision::Duplicate);
-        }
-        if fingerprints.len() >= self.per_lifecycle_limit {
-            return Err(format!(
-                "Polymarket lifecycle fingerprint limit reached: lifecycle={lifecycle} limit={}",
-                self.per_lifecycle_limit
-            ));
-        }
-        fingerprints.insert(fingerprint);
-        Ok(FingerprintDecision::Unique)
-    }
-
-    #[must_use]
-    pub fn lifecycle_count(&self) -> usize {
-        self.fingerprints.len()
-    }
-
-    #[must_use]
-    pub fn contains_lifecycle(&self, lifecycle: &str) -> bool {
-        self.fingerprints.contains_key(lifecycle)
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

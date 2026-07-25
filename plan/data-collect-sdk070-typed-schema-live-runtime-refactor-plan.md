@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED`。阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_REVIEW_PASSED_AWAITING_PUBLISH`。阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
 > `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
@@ -36,6 +36,19 @@
 > `STAGE3_CLOSED`以承载本记录的commit成功push到`origin/fix-rtds-silents`且本地
 > HEAD、upstream与远端ref一致为生效条件。下一执行游标为独立cleanup阶段5；
 > 阶段4仍遵守RTDS专项自身尚未满足的参数与授权门。
+> 2026-07-26用户已批准Stage5四项authority修正并解除U01–U04b决策门：
+> queue使用真实bounded channel/global row+owned-byte/bounded-wait owner，
+> 文件采用hourly-only rollover，因果时间区分legacy recv/current admission与
+> paper/live handoff admission + runtime receive，T-30只属于Polymarket lifecycle。
+> 五项旧public/test-only模型统一按`DELETE_PROVEN_REPLACED_BEHAVIOR`原子处理；
+> Stage5仍须完成文档同步、完整门、独立阶段审查、commit/push后才能闭合。
+> 首次独立终审发现C01/C02/C03两项实施遗漏，并发现逐queue hard pause/resume与
+> 有限health/reconnect circuit两套新shadow authority。用户随后批准
+> `U05-A + U06-A`，允许按现有真实owner删除这两套public/test-only模型；修复后必须
+> 重算LOC/测试证据、重跑完整门并重复独立审查，不能沿用首次FAIL前的closure结论。
+> 当前修复后完整门与两路独立`gpt-5.6-sol`/Ultra终审均已通过，最终为
+> Blocker 0 / Important 0 / Minor 0；`STAGE5_CLOSED`仍以closure commit成功push
+> 且本地HEAD、upstream与远端ref一致为生效条件。
 
 ## 一、执行原则与成功标准
 
@@ -624,6 +637,11 @@ non-production conformance路径。
   private v2 branches混为一项删除。
 - 步骤 5.1.3：用户决定 `USER_DECISION` 项。
   -> 验证：不擅自删除 public module或 legacy兼容。
+  -> 执行结果：2026-07-26用户批准四项推荐。`sources/rtds.rs`、
+  `config.rs`、`scheduler.rs`及`segment.rs`两半均不再因`pub`或自引用测试而保留；
+  它们统一进入`DELETE_PROVEN_REPLACED_BEHAVIOR`。W-B public offline
+  source-v2/metadata-v3 writer、legacy schema/reader和Stage3 probe继续`KEEP`，
+  不属于本次裁决。
 
 ### 任务 5.2：逐候选或同构小簇处理
 
@@ -631,14 +649,52 @@ non-production conformance路径。
   -> 验证：前者需要唯一替代合同和定向回归；后者只需跨features/targets/public API/scripts/legacy reader的无消费者证明，不为删除它新增test seam、抽象或虚构替代合同。
 - 步骤 5.2.2：隔离删除或合并一个候选/小簇。
   -> 验证：diff每行可追溯到已批准候选。
+  -> U簇执行边界：删除旧RTDS shadow adapter/测试；删除静态queue config并只移除
+  `bounded_queue_contract`中的自引用测试；删除旧scheduler、scheduler测试和
+  synthetic e2e；删除整个旧segment及causal/rollover测试。对应module export一并
+  删除，不修改current RTDS owner、真实bounded/inflight/backpressure-wait测试、hourly writer、
+  handoff或legacy reader。
+  -> 首次终审修复边界：补删C01旧metadata-v2 test-only adapter/sentinel正向测试及
+  C02/C03 `LifecycleFingerprintSets`自引用模型；按用户批准`U05-A`删除逐queue
+  hard-threshold pause/resume control，只保留bounded queue、真实inflight与纯观测/
+  兼容DTO；按`U06-A`删除有限health/reconnect circuit旧模型，把确定性
+  capped+jitter delay收窄到现有runtime helper，不修改真实source supervisor。
 - 步骤 5.2.3：运行受影响 targeted（仅替代行为）、package compile/check/clippy和diff gate；阶段收口运行一次deterministic suite。
   -> 验证：schema/manifest/row/gap/counter/shutdown无意外变化。
+  -> 首次终审前执行结果：替代owner的7个integration targets共67项、6个关键unit合同全部
+  通过；最终`cargo test -p data-collect --locked -- --test-threads=1`退出0（lib
+  351项及全部现存integration/doc targets通过）。随后all-target check、
+  `clippy -D warnings`、fmt和diff gate均通过；删除符号在active
+  source/tests/benches/Cargo targets中的残留为0。
+  -> 首次终审修复后执行结果：bounded queue、manifest、Binance/RTDS dedupe、
+  Binance source、current v3 adapter、真实outer recovery定向回归共
+  `2+5+2+2+7+1`项全部通过，throughput bench编译通过。首次终审修复后的完整
+  `cargo test -p data-collect --locked -- --test-threads=1`退出0（lib 348项及全部
+  现存integration/doc targets通过）；all-target check、`clippy -D warnings`、fmt
+  和diff gate全部通过。lib减少3项正是已批准删除的旧adapter正向测试。
+  -> 重复终审修复后执行结果：pending map key与source-authority `Vec` backing
+  capacity的两个focused合同各1项通过；完整package suite再次退出0（lib 348项及
+  全部现存integration/doc targets通过），all-target check、`clippy -D warnings`、
+  fmt和diff gate再次全部通过。
 - 步骤 5.2.4：更新终态和 LOC。
   -> 验证：只有两类 `DELETE_PROVEN_*` 计入净删除。
+  -> 首次终审前执行结果：U簇本身为`+0/-1,585`；整个Stage5 tracked Rust diff为
+  `+541/-5,381`，净删除`4,840`行。总值包含精确owned-byte正确性修复、必要current
+  测试迁移和机械clippy修正，不冒充纯删除量。
+  -> 首次终审修复后执行结果：整个Stage5 tracked Rust diff为
+  `+584/-7,499`，净删除`6,915`行；新增差额来自I1/I2遗漏补删及U05-A/U06-A，
+  同样不把含正确性修复和测试迁移的总净值冒充纯删除量。
+  -> 重复终审发现并修复pending `BTreeMap` key与source-authority `Vec` backing
+  capacity漏算后，最终tracked Rust diff为`+641/-7,509`，净删除`6,868`行。
 
 ### 阶段 5 审查与提交门
 
 独立审查每项 consumer proof和删除范围；不得借 cleanup删除 paper/live、历史 reader或未获批产品功能。
+
+执行结果：文档/authority与代码/consumer两路`gpt-5.6-sol`/Ultra终审均为
+`PASS / CLOSURE_UNBLOCKED`，Blocker 0 / Important 0 / Minor 0。代码终审首次快照
+发现的pending map key与source-authority `Vec` backing owned-byte漏算已修复，
+focused与完整门重跑通过，并由同一审查者复审清零。
 
 ## 八、阶段 6：v3集成与范围内 parity
 

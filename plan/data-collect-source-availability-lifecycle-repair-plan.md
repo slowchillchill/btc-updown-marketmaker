@@ -7,6 +7,13 @@
 > 对应 changelog：`changelog/data-collect-source-availability-lifecycle-repair-changelog.md`
 >
 > 状态：`PHASE_9_COMPLETE_RTDS_PONG_A`。用户已于2026-07-17批准本计划、对应需求及需求第4.7节SDK-first逐项patch矩阵，并授权依次执行阶段0--8的本地文档/代码修改、测试、独立审查、commit和push；阶段0至阶段8已经实现、完成最终门禁并通过独立终审。2026-07-18批准的`D7/8-R`、`D7-TIME-R`、`D7-MIN-R`、`D7-DEFER-B-R`、`D8-R`与`D8-STATUS-A`继续作为历史实现authority。2026-07-19香港线路wire验证证明RTDS持续响应业务数据但不返回文本/控制PONG，用户明确回复“批准 RTDS-PONG-A”；阶段9现已按本计划完成RTDS固定PING/no-PONG实现、全量门禁、香港线路SDK复测及独立终审。此前批准的`CT-B`与`D6-SCHEMA-R`继续有效。本计划只提供实现步骤；用户后续批准的生产重置部署以`plan/data-collect-rtds-pong-a-reset-deployment-plan.md`为唯一执行authority。
+>
+> 2026-07-26 SDK070 Stage5窄authority supersede：步骤1.1.2对`health.rs`最小复用的
+> 指令只保留为历史执行事实。真实consumer审计证明其有限retry/circuit/
+> `ReconnectGate`模型没有接入production；用户批准`U06-A`后已删除该shadow
+> model，并把production唯一需要的确定性capped+jitter delay收窄到现有私有
+> `live_runtime::retry_delay`。真实source-local supervisor与本文长期恢复合同保持
+> 不变；不重开已闭合阶段，也不授权production、远端、部署或数据操作。
 
 ## 一、成功标准与实施原则
 
@@ -91,7 +98,12 @@
 
 - 步骤1.1.1：逐项列出`live_runtime`中所有`record_gap`、`record_lag`、source return、reconnect和subscription调用，映射到business availability、transport availability或confirmed integrity failure。
   - 验证：RTDS、CLOB/Gamma、aggTrade、depth/snapshot和顶层coordinator全部有归类；未知项不得自行归类。
-- 步骤1.1.2：审计`health.rs`与实际四个source-local owner，只复用仍符合长期恢复合同的最小类型；删除`CircuitState::Exhausted`作为source终止依据，不把旧registry接成第二套生产控制面，也不为manifest建设通用transport状态机。外部I/O错误使用现有错误链和有界、去重operator日志诊断，不在manifest新增scope、reason、current/open或episode。
+- 步骤1.1.2（历史执行步骤，current终态由文首2026-07-26 overlay接管）：审计
+  `health.rs`与实际四个source-local owner，只复用当时仍符合长期恢复合同的最小
+  类型；删除`CircuitState::Exhausted`作为source终止依据，不把旧registry接成
+  第二套生产控制面，也不为manifest建设通用transport状态机。外部I/O错误使用现有
+  错误链和有界、去重operator日志诊断，不在manifest新增scope、reason、current/open
+  或episode。
   - 验证：新的外部I/O错误不因缺少专用reason、持续时间、尝试次数、既有诊断计数饱和或日志失败而结束source/collector；parser/schema/本地完整性错误不被恢复循环吞掉；没有第二health registry/writer/artifact。
 - 步骤1.1.3：严格按已批准的M2-A0/M3-A-R/M6-A+实现顶层单一`collection_day_coverage`：四态、三个nullable `i64` UTC毫秒、单一`reactivated_within_day`布尔值、全部状态/时间不变量、legacy missing=unknown、新writer required、malformed fail-closed与字段保留。首次activation写`false`，任一同日后续activation原子提交时写`true`且当日保持单调；unclean、known end、prior-day reconcile和generic load不得改变。
   - 验证：六个source counter无coverage复制；全部mandatory成员ready但零行时为active，未达到共同起点为not-started；current-day `not_started|active|unclean_end_unknown|ended_known -> active`逐项断言first/last/end与布尔值，证明首次为`false`、三种同日后续activation均为`true`，unclean/known-end/reconcile不清除该值，时钟倒退失败。current top-level closed、identity mismatch、同identity缺对象与非法nested均拒绝；prior-day四态/legacy按state-aware规则关闭。`reactivated_within_day=true`只隔离last start前无法证明连续coverage的历史replay区间，不生成要求parity的Observation且不倒灌unknown mask；unclean共同尾界仅为last start。兼容矩阵另覆盖unknown nested version/field、错误布尔类型、越界时间及每种非法状态。阶段5的`binance_aggtrade_v6` typed raw变化已由用户后续明确批准，视为该决策门已经满足；除此之外若需要producer独立生命周期、run segments、新artifact、typed raw变化或额外consumer职责，仍须停止阶段并提交新schema决策。

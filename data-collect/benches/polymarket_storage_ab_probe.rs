@@ -539,7 +539,7 @@ fn last_trade_price_delivery(index: usize) -> Result<LogicalDelivery> {
             "market": MARKET,
             "asset_id": "101",
             "price": format!("0.{:04}", 4_900 + index % 100),
-            "side": if index % 2 == 0 { "BUY" } else { "SELL" },
+            "side": if index.is_multiple_of(2) { "BUY" } else { "SELL" },
             "size": format!("{}", 5 + index % 30),
             "fee_rate_bps": "0",
             "timestamp": (BASE_TIME_MS + 40_000 + i64::try_from(index)?).to_string()
@@ -557,7 +557,7 @@ fn tick_size_change_delivery(index: usize) -> Result<LogicalDelivery> {
             "market": MARKET,
             "asset_id": "101",
             "old_tick_size": "0.01",
-            "new_tick_size": if index % 2 == 0 { "0.001" } else { "0.0001" },
+            "new_tick_size": if index.is_multiple_of(2) { "0.001" } else { "0.0001" },
             "timestamp": (BASE_TIME_MS + 50_000 + i64::try_from(index)?).to_string()
         }),
         ["101"],
@@ -603,8 +603,8 @@ fn market_resolved_delivery(index: usize) -> Result<LogicalDelivery> {
             "description": "deterministic storage fixture",
             "assets_ids": ["101", "102"],
             "outcomes": ["Up", "Down"],
-            "winning_asset_id": if index % 2 == 0 { "101" } else { "102" },
-            "winning_outcome": if index % 2 == 0 { "Up" } else { "Down" },
+            "winning_asset_id": if index.is_multiple_of(2) { "101" } else { "102" },
+            "winning_outcome": if index.is_multiple_of(2) { "Up" } else { "Down" },
             "event_message": {
                 "id": format!("event-{index}"),
                 "ticker": "BTC",

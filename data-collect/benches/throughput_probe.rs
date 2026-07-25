@@ -1,9 +1,7 @@
 use std::fs;
 use std::time::Instant;
 
-use data_collect::backpressure::{
-    BackpressureConfig, BackpressureMonitor, QueueSample, bounded_event_queue,
-};
+use data_collect::backpressure::{QueueSample, bounded_event_queue};
 use data_collect::resource::{MetricUnavailable, ResourceSample, ResourceWatermark};
 use data_collect::{ParquetSegmentWriter, RawEvent};
 use tokio::sync::mpsc::error::TryRecvError;
@@ -22,24 +20,7 @@ fn run_case(case_name: &str, total_rows: u64) {
     ));
     fs::create_dir_all(&root).expect("create throughput probe root");
 
-    let mut monitor = BackpressureMonitor::new(
-        "four_source_synthetic",
-        BackpressureConfig::new(
-            QueueSample {
-                rows: 2_000,
-                bytes: 1_000_000,
-                oldest_event_age_ms: 250,
-                writer_lag_ms: 50,
-            },
-            QueueSample {
-                rows: 25_000,
-                bytes: 25_000_000,
-                oldest_event_age_ms: 2_000,
-                writer_lag_ms: 500,
-            },
-            3,
-        ),
-    );
+    let mut high = QueueSample::default();
 
     let started = Instant::now();
     let mut writer = ParquetSegmentWriter::create(
@@ -75,12 +56,10 @@ fn run_case(case_name: &str, total_rows: u64) {
         chunk_events_per_sec.push(take as f64 / write_elapsed_secs);
         flush_latency_ms.push(writer_lag_ms);
 
-        monitor.observe(QueueSample {
-            rows: take,
-            bytes,
-            oldest_event_age_ms: writer_lag_ms,
-            writer_lag_ms,
-        });
+        high.rows = high.rows.max(take);
+        high.bytes = high.bytes.max(bytes);
+        high.oldest_event_age_ms = high.oldest_event_age_ms.max(writer_lag_ms);
+        high.writer_lag_ms = high.writer_lag_ms.max(writer_lag_ms);
 
         written += take;
     }
@@ -93,7 +72,6 @@ fn run_case(case_name: &str, total_rows: u64) {
     let elapsed = started.elapsed();
     let elapsed_secs = elapsed.as_secs_f64().max(0.001);
     let events_per_sec = total_rows as f64 / elapsed_secs;
-    let high = monitor.high_watermark();
     let event_rate_stats = F64Stats::from_values(&chunk_events_per_sec);
     let flush_stats = U64Stats::from_values(&flush_latency_ms);
     let resource_watermark = synthetic_resource_watermark(high, flush_stats.max);

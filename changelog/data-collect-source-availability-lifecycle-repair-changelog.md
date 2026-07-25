@@ -594,3 +594,18 @@
 - 本记录精确取代同日此前等待发布授权状态；旧段仅保留为历史事实。
 - 本同步不修改本事项既有生产行为，也不授权公开网络smoke、release、部署、远端
   服务/数据操作或清理。
+
+## 2026-07-26：SDK070 Stage5删除未接production的health shadow model
+
+- SDK070 Stage5首次独立终审确认：本事项阶段1保留的`health.rs`
+  `RetryPolicy/plan_retry_trace`、circuit registry、`ReconnectGate`与三个专属
+  integration contracts仍只被自身test和production `retry_delay`间接取最后一次
+  sleep使用，没有成为真实source lifecycle owner。
+- 用户批准`U06-A`：删除该有限attempt/elapsed与fresh-business reconnect shadow
+  model，把确定性capped exponential + stable jitter数学收窄到现有私有
+  `live_runtime::retry_delay`；真实`SourceRecoverySupervisor`继续使用有界单次
+  等待、无限外层总attempt，business silence/stale不驱动transport恢复。
+- U06本轮增量为`+24/-1,108`；source recovery、business-silence、hourly rollover、
+  backoff、Binance定向合同及最终package/check/clippy/fmt/diff门均通过。该变更只
+  删除失去consumer的旧控制模型，不回写本事项历史阶段证据，不改变SDK-first、
+  heartbeat、manifest或完整性边界，也未执行production、远端、部署或数据操作。

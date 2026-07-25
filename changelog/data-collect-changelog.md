@@ -631,3 +631,55 @@
 - 用户持续执行授权已覆盖SDK070 Stage3本地Rust/schema/test、审查、commit和push；
   本次authority同步不等于实现完成，也不授权production cutover、release、部署、
   远端操作、migration或删除。
+
+## 2026-07-26：SDK070 Stage5旧public/test-only模型authority修正
+
+- 三路`gpt-5.6-sol`/Ultra对抗性复审与production调用图复核推翻了此前因`pub`或
+  integration-test引用而建议保留/DEFER的判断。用户批准四项推荐：收敛queue约束、
+  采用hourly-only file rollover、采用精确admission因果时间，并把current/next/T-30
+  限定在Polymarket market lifecycle。
+- queue current合同为bounded channel、全局inflight row/owned-byte硬预算、单行上限
+  和有界acquire/send wait，并沿用writer batch/periodic flush；queue duration、
+  writer lag和RSS保留真实观测，不再维护从未接入production的逐队列五维静态配置
+  对象。
+- 训练文件运行中只因UTC hour rollover；协调shutdown可提前finalize，同小时
+  启动/重启路径碰撞只选择初始`part=N`而不是运行中切换；50,000 rows/16MiB
+  logical bytes只切Parquet row group。legacy/无独立admission schema使用collector
+  recv time，已批准保存独立collector admission字段的current schema使用collector
+  admission time/sequence，paper/live使用handoff admission与本机runtime receive。
+- 删除`data-collect/src/sources/rtds.rs`、`config.rs`、`scheduler.rs`、`segment.rs`
+  及其四个专属自引用integration tests和一个旧synthetic e2e（共五个）；从
+  `bounded_queue_contract.rs`只删除静态config自测，保留真实bounded
+  mpsc/backpressure测试。真实RTDS、startup topology、Polymarket lifecycle、
+  hourly writer、consumer handoff与daily manifest owner均保持。
+- 本节只追加current supersession事实；2026-07-06/07当时创建这些模块及测试的历史
+  记录不回写。current验收引用迁移到真实runtime/source/hourly/handoff合同。
+
+## 2026-07-26：SDK070 Stage5首次终审发现项与U05-A/U06-A
+
+- 首次独立`gpt-5.6-sol`/Ultra阶段终审为`FAIL / CLOSURE_BLOCKED`：发现C01旧
+  metadata-v2 test-only adapter与sentinel正向测试、C02/C03
+  `LifecycleFingerprintSets`本体未删；这两项属于既有批准范围，直接补删。
+- 同一终审发现两套新public/test-only shadow authority。用户批准`U05-A`：删除
+  `BackpressureConfig/Monitor`、soft/hard age/lag阈值、`PauseIntake/ResumeIntake`
+  与对应test/bench控制路径；保留`bounded_event_queue`、真实global inflight
+  owner、`QueueSample`纯观测DTO及`BackpressureReceipt`兼容字段。
+- 用户批准`U06-A`：删除未接production的有限health/reconnect
+  `RetryPolicy/plan_retry_trace`、circuit registry、`ReconnectGate`及三个专属旧合同；
+  唯一production消费者需要的确定性capped+jitter delay收窄到现有
+  `live_runtime::retry_delay`，不创建第二恢复框架，不改变真实source-local无限外层
+  恢复。
+- Phase0中旧hard pause/resume与fresh-business reconnect gate的PASS只保留为当时
+  synthetic contract事实，current authority改由真实bounded/inflight、source-local
+  supervisor、daily counter/紧凑gap及production source tests证明。Stage5必须重跑
+  完整门与独立审查后才能闭合。
+- 首次终审修复后的定向回归共`2+5+2+2+7+1`项全部通过，throughput bench编译
+  通过；首次终审修复后的完整package suite退出0（lib 348项及全部现存
+  integration/doc targets通过），all-target check、`clippy -D warnings`、fmt与
+  diff gate全部通过。
+- 重复独立代码终审发现pending-state 1MiB计数遗漏`BTreeMap`独立key与
+  source-authority `Vec` backing capacity；修复及两个focused合同通过后，完整
+  package/check/clippy/fmt/diff门再次全部通过。当前Stage5 tracked Rust diff为
+  `+641/-7,509`，净删除`6,868`行。修复后代码/consumer与文档/authority两路
+  `gpt-5.6-sol`/Ultra终审均为`PASS / CLOSURE_UNBLOCKED`，Blocker/Important/Minor
+  均为0；只待commit/push与三方ref一致后闭合。

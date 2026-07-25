@@ -14,7 +14,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::str::FromStr as _;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -24,8 +26,7 @@ use futures::{FutureExt as _, SinkExt as _, StreamExt as _};
 use parquet::arrow::{ProjectionMask, arrow_reader::ParquetRecordBatchReaderBuilder};
 use polymarket_client_sdk_v2::clob::ws::types::response::OrderBookLevel;
 use polymarket_client_sdk_v2::clob::ws::{
-    BookUpdate, EventMessage, LastTradePrice, MarketResolved, NewMarket, PriceChange,
-    PriceChangeBatchEntry, TickSizeChange, WsMessage,
+    EventMessage, MarketResolved, PriceChangeBatchEntry, WsMessage,
 };
 use polymarket_client_sdk_v2::error::Kind as PolymarketSdkErrorKind;
 use polymarket_client_sdk_v2::gamma::Client as GammaClient;
@@ -73,11 +74,9 @@ use crate::daily_manifest::{
     validate_unmanifested_recovery_files,
 };
 use crate::dedupe::{
-    BinanceIdDecision, BinanceRecentIdWindow, FingerprintDecision, LifecycleFingerprintSets,
-    TimedFingerprintWindow,
+    BinanceIdDecision, BinanceRecentIdWindow, FingerprintDecision, TimedFingerprintWindow,
 };
 use crate::event::{EventEnvelope, HostClockSyncStatus, RawEvidence, SourceKind, SourceTimestamp};
-use crate::health::{NetworkFailure, RetryPolicy, plan_retry_trace};
 use crate::hourly_partition::{HourlyPartition, HourlyPartitionPolicy};
 use crate::inflight::{BUFFER_ACQUIRE_TIMEOUT, InflightBudget, InflightReservation};
 pub use crate::inflight::{
@@ -100,11 +99,6 @@ use crate::polymarket_market_metadata_layout::{
     SourceEvidenceEventType, SourceEvidenceOrigin, TerminalClaimOwner,
     TerminalPredicateFailureReason, validate_polymarket_metadata_v3_local_references,
 };
-#[cfg(test)]
-use crate::polymarket_market_metadata_layout::{
-    PolymarketMarketMetadataContext, PolymarketMarketMetadataRow,
-};
-use crate::polymarket_orderbook_layout::{PolymarketOrderbookContext, PolymarketOrderbookRow};
 #[cfg(test)]
 use crate::polymarket_orderbook_v3::PolymarketOrderbookV3Admission;
 use crate::polymarket_orderbook_v3::{
@@ -426,7 +420,7 @@ struct DeferredRawBatch {
 
 enum DeferredIngressBatch {
     LegacyRaw(DeferredRawBatch),
-    PolymarketOrderbookV3(DeferredPolymarketOrderbookV3),
+    PolymarketOrderbookV3(Box<DeferredPolymarketOrderbookV3>),
 }
 
 impl RawDayGate {
@@ -3434,7 +3428,7 @@ async fn flush_deferred_ingress_batches(
                 flush_deferred_raw_batch(sink, producer, close, batch, &batches).await?;
             }
             DeferredIngressBatch::PolymarketOrderbookV3(event) => {
-                flush_deferred_polymarket_orderbook_v3(sink, producer, close, event, &batches)
+                flush_deferred_polymarket_orderbook_v3(sink, producer, close, *event, &batches)
                     .await?;
             }
         }
@@ -4474,25 +4468,30 @@ fn retry_delay(
     max_backoff_ms: u64,
     jitter_seed: u64,
 ) -> Duration {
-    let trace = plan_retry_trace(
-        source_kind,
-        NetworkFailure::Disconnected,
-        RetryPolicy {
-            max_attempts: attempt.max(1),
-            initial_backoff_ms,
-            max_backoff_ms,
-            max_elapsed_ms: u64::MAX / 4,
-            multiplier: 2,
-            jitter_bps: SOURCE_RECOVERY_JITTER_BPS,
-            jitter_seed,
-        },
-    );
-    Duration::from_millis(
-        trace
-            .last()
-            .map(|entry| entry.sleep_ms)
-            .unwrap_or(initial_backoff_ms),
-    )
+    let attempt = attempt.max(1);
+    let base_sleep_ms = initial_backoff_ms
+        .max(1)
+        .saturating_mul(2_u64.saturating_pow(attempt.saturating_sub(1)));
+    let spread = base_sleep_ms.saturating_mul(SOURCE_RECOVERY_JITTER_BPS as u64) / 10_000;
+    let jittered_sleep_ms = if spread == 0 {
+        base_sleep_ms
+    } else {
+        let bucket_count = spread.saturating_mul(2).saturating_add(1);
+        let mut hash = 14_695_981_039_346_656_037_u64 ^ jitter_seed;
+        for byte in source_kind
+            .bytes()
+            .chain(attempt.to_le_bytes())
+            .chain(jitter_seed.to_le_bytes())
+        {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(1_099_511_628_211);
+        }
+        base_sleep_ms
+            .saturating_sub(spread)
+            .saturating_add(hash % bucket_count)
+            .max(1)
+    };
+    Duration::from_millis(jittered_sleep_ms.min(max_backoff_ms.max(1)))
 }
 
 async fn wait_for_source_recovery(
@@ -9454,7 +9453,7 @@ async fn send_writer_batch(
 ) -> Result<()> {
     let Some(writer) = writers.get(source_kind) else {
         writer_queue_tracker.record_drop(rows);
-        record_writer_drop_facts(runtime_stats, &drop_facts);
+        record_writer_drop_facts(runtime_stats, drop_facts);
         let gap = format!("writer_missing_for_source:{source_kind}");
         record_gap(gaps, gap.clone());
         return Err(io::Error::new(io::ErrorKind::BrokenPipe, gap).into());
@@ -9480,7 +9479,7 @@ async fn send_writer_batch(
         Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
             writer.queue_rows.fetch_sub(rows, Ordering::Relaxed);
             writer_queue_tracker.record_drop(rows);
-            record_writer_drop_facts(runtime_stats, &drop_facts);
+            record_writer_drop_facts(runtime_stats, drop_facts);
             let gap = format!("writer_queue_disconnected:{source_kind}");
             record_gap(gaps, gap.clone());
             return Err(io::Error::new(io::ErrorKind::BrokenPipe, gap).into());
@@ -9507,7 +9506,7 @@ async fn send_writer_batch(
     {
         Ok(Some(gap)) => {
             writer_queue_tracker.record_drop(rows);
-            record_writer_drop_facts(runtime_stats, &drop_facts);
+            record_writer_drop_facts(runtime_stats, drop_facts);
             record_gap(gaps, gap.clone());
             Err(io::Error::new(io::ErrorKind::BrokenPipe, gap).into())
         }
@@ -9515,7 +9514,7 @@ async fn send_writer_batch(
         Err(_) => {
             writer_queue_tracker.record_backpressure_timeout();
             writer_queue_tracker.record_drop(rows);
-            record_writer_drop_facts(runtime_stats, &drop_facts);
+            record_writer_drop_facts(runtime_stats, drop_facts);
             let gap = format!("writer_queue_backpressure_timeout:{source_kind}");
             record_gap(gaps, gap.clone());
             Err(io::Error::new(io::ErrorKind::TimedOut, gap).into())
@@ -11094,247 +11093,6 @@ where
         permit.send(SourceIngressPayload::LegacyRaw(event));
     }
     Ok(EventAdmissionOutcome::Admitted)
-}
-
-fn expected_lifecycle_slugs(discovery: &BtcUpdownDiscovery) -> BTreeSet<String> {
-    let next_slug = discovery.next.as_ref().map_or_else(
-        || {
-            discovery_windows(discovery.current.start_ts_s * 1000)
-                .next
-                .slug
-        },
-        |next| next.slug.clone(),
-    );
-    BTreeSet::from([discovery.current.slug.clone(), next_slug])
-}
-
-fn polymarket_message_lifecycle_slug(
-    message: &WsMessage,
-    discovery: &BtcUpdownDiscovery,
-    asset_to_slug: &BTreeMap<String, String>,
-) -> Option<String> {
-    let (market, asset_ids) = match message {
-        WsMessage::Book(event) => (event.market.to_string(), vec![event.asset_id.to_string()]),
-        WsMessage::PriceChange(event) => (
-            event.market.to_string(),
-            event
-                .price_changes
-                .iter()
-                .map(|change| change.asset_id.to_string())
-                .collect(),
-        ),
-        WsMessage::TickSizeChange(event) => {
-            (event.market.to_string(), vec![event.asset_id.to_string()])
-        }
-        WsMessage::LastTradePrice(event) => {
-            (event.market.to_string(), vec![event.asset_id.to_string()])
-        }
-        WsMessage::BestBidAsk(event) => {
-            (event.market.to_string(), vec![event.asset_id.to_string()])
-        }
-        WsMessage::NewMarket(event) => (
-            event.market.to_string(),
-            event.asset_ids.iter().map(ToString::to_string).collect(),
-        ),
-        WsMessage::MarketResolved(event) => (
-            event.market.to_string(),
-            event.asset_ids.iter().map(ToString::to_string).collect(),
-        ),
-        _ => return None,
-    };
-    if market == discovery.current.condition_id {
-        return Some(discovery.current.slug.clone());
-    }
-    if let Some(next) = &discovery.next
-        && market == next.condition_id
-    {
-        return Some(next.slug.clone());
-    }
-    asset_ids
-        .iter()
-        .find_map(|asset_id| asset_to_slug.get(asset_id).cloned())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn polymarket_message_passes_dedupe(
-    dedupe: &mut LifecycleFingerprintSets,
-    discovery: &BtcUpdownDiscovery,
-    asset_to_slug: &BTreeMap<String, String>,
-    message: &WsMessage,
-    source_native_payload_json: &str,
-    recv_time_utc_ms: i64,
-    operational_stats: Option<&SourceQueueBackpressureStats>,
-) -> Result<bool> {
-    let Some(lifecycle) = polymarket_message_lifecycle_slug(message, discovery, asset_to_slug)
-    else {
-        return Ok(true);
-    };
-    match dedupe
-        .check(&lifecycle, source_native_payload_json.as_bytes())
-        .map_err(operator_dedupe_error)?
-    {
-        FingerprintDecision::Unique => Ok(true),
-        FingerprintDecision::Duplicate => {
-            if let Some(stats) = operational_stats {
-                stats.record_structural_dedupe("polymarket_market", recv_time_utc_ms, 1);
-            }
-            Ok(false)
-        }
-    }
-}
-
-fn commit_polymarket_message_dedupe(
-    dedupe: &mut LifecycleFingerprintSets,
-    lifecycle: Option<&str>,
-    source_native_payload_json: &str,
-) -> Result<()> {
-    let Some(lifecycle) = lifecycle else {
-        return Ok(());
-    };
-    match dedupe
-        .observe(lifecycle, source_native_payload_json.as_bytes())
-        .map_err(operator_dedupe_error)?
-    {
-        FingerprintDecision::Unique => Ok(()),
-        FingerprintDecision::Duplicate => Err(invalid_data(
-            "Polymarket fingerprint changed from unique to duplicate before commit",
-        )
-        .into()),
-    }
-}
-
-#[cfg(test)]
-fn restore_polymarket_dedupe(
-    dataset_root: &Path,
-    dedupe: &mut LifecycleFingerprintSets,
-) -> Result<()> {
-    let cancel = AtomicBool::new(false);
-    if !restore_polymarket_dedupe_until_cancelled(dataset_root, dedupe, &cancel)? {
-        return Err(invalid_data("Polymarket restore cancelled without a stop request").into());
-    }
-    Ok(())
-}
-
-fn restore_polymarket_dedupe_until_cancelled(
-    dataset_root: &Path,
-    dedupe: &mut LifecycleFingerprintSets,
-    cancel: &AtomicBool,
-) -> Result<bool> {
-    let mut parquet_paths = Vec::new();
-    let now = now_ms();
-    let days = BTreeSet::from([
-        utc_day_string_from_ms(now.saturating_sub(86_400_000))
-            .ok_or_else(|| io::Error::other("previous UTC day is out of range"))?,
-        utc_day_string_from_ms(now)
-            .ok_or_else(|| io::Error::other("current UTC day is out of range"))?,
-    ]);
-    for day in days {
-        if cancel.load(Ordering::Relaxed) {
-            return Ok(false);
-        }
-        let source_dir = dataset_root
-            .join("training")
-            .join("typed_raw")
-            .join(format!("utc_day={day}"))
-            .join("source_kind=polymarket_market");
-        let entries = match fs::read_dir(&source_dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
-        };
-        for entry in entries {
-            if cancel.load(Ordering::Relaxed) {
-                return Ok(false);
-            }
-            let entry = entry?;
-            if !entry.file_type()?.is_file() {
-                continue;
-            }
-            let file_name = entry.file_name();
-            let file_name = file_name.to_string_lossy();
-            if file_name.ends_with(".parquet")
-                && !file_name.ends_with("-running.parquet")
-                && !file_name.ends_with("-digesting.parquet")
-            {
-                parquet_paths.push(entry.path());
-            }
-        }
-    }
-    parquet_paths.sort_by_key(|path| finalized_parquet_order_key(path));
-
-    for path in parquet_paths {
-        if cancel.load(Ordering::Relaxed) {
-            return Ok(false);
-        }
-        let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&path)?)?;
-        if builder.schema().index_of("slug").is_err()
-            || builder
-                .schema()
-                .index_of("source_native_payload_json")
-                .is_err()
-        {
-            continue;
-        }
-        if builder.metadata().file_metadata().num_rows() == 0 {
-            continue;
-        }
-        let projection = ProjectionMask::columns(
-            builder.parquet_schema(),
-            ["slug", "source_native_payload_json"],
-        );
-        let mut reader = builder
-            .with_projection(projection)
-            .with_batch_size(16)
-            .build()?;
-        for batch in &mut reader {
-            if cancel.load(Ordering::Relaxed) {
-                return Ok(false);
-            }
-            let batch = batch?;
-            let slug_index = batch.schema().index_of("slug")?;
-            let payload_index = batch.schema().index_of("source_native_payload_json")?;
-            let slugs = batch
-                .column(slug_index)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| io::Error::other("Polymarket restore slug is not UTF8"))?;
-            let payloads = batch
-                .column(payload_index)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| {
-                    io::Error::other("Polymarket restore source-native payload is not UTF8")
-                })?;
-            for row in 0..batch.num_rows() {
-                if slugs.is_null(row) {
-                    continue;
-                }
-                let slug = slugs.value(row);
-                if !dedupe.contains_lifecycle(slug) {
-                    continue;
-                }
-                if payloads.is_null(row) {
-                    return Err(io::Error::other(format!(
-                        "Polymarket restore payload missing in {}",
-                        path.display()
-                    ))
-                    .into());
-                }
-                let payload = payloads.value(row);
-                if payload.len() > MAX_TYPED_ROW_BYTES {
-                    return Err(io::Error::other(format!(
-                        "operator_intervention_required:Polymarket restore payload exceeds {MAX_TYPED_ROW_BYTES} bytes in {}",
-                        path.display()
-                    ))
-                    .into());
-                }
-                let _ = dedupe
-                    .observe(slug, payload.as_bytes())
-                    .map_err(operator_dedupe_error)?;
-            }
-        }
-    }
-    Ok(true)
 }
 
 async fn send_polymarket_metadata_event(
@@ -14025,7 +13783,6 @@ async fn enqueue_polymarket_orderbook_v3_with_ticket<F>(
     recv_time_utc_ms: i64,
     ticket: &RawDayAcceptedTicket,
     collector_identity: &CollectorIdentity,
-    source_endpoint: &str,
     source_sequence_epoch_id: &str,
     build_projection: F,
 ) -> Result<PolymarketOrderbookV3AdmissionReceipt>
@@ -14069,7 +13826,7 @@ where
             recv_time_utc_ms,
             collector_identity.host_id.clone(),
             collector_identity.region.clone(),
-            source_endpoint.to_owned(),
+            MARKET_WS_ENDPOINT.to_owned(),
             source_sequence_epoch_id.to_owned(),
         )
         .inspect_err(|error| {
@@ -14179,7 +13936,7 @@ where
             deferred
                 .entry("polymarket".to_owned())
                 .or_default()
-                .push_back(DeferredIngressBatch::PolymarketOrderbookV3(
+                .push_back(DeferredIngressBatch::PolymarketOrderbookV3(Box::new(
                     DeferredPolymarketOrderbookV3 {
                         epoch,
                         accepted_ticket: ticket.clone(),
@@ -14188,7 +13945,7 @@ where
                         _row_reservation: row_reservation,
                         _byte_reservation: byte_reservation,
                     },
-                ));
+                )));
             Ok(receipt)
         }
     }
@@ -16974,29 +16731,8 @@ fn optional_string(value: &Value, field: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-#[cfg(test)]
-fn optional_json_string(value: &Value, field: &str) -> Option<String> {
-    value.get(field).and_then(|value| {
-        if value.is_null() {
-            None
-        } else if let Some(value) = value.as_str() {
-            (!value.trim().is_empty()).then(|| value.to_owned())
-        } else {
-            Some(value.to_string())
-        }
-    })
-}
-
 fn optional_bool(value: &Value, field: &str) -> Option<bool> {
     value.get(field).and_then(Value::as_bool)
-}
-
-#[cfg(test)]
-fn json_string_vec(value: &Value, field: &str) -> Result<Vec<String>> {
-    let Some(values) = value.get(field).and_then(Value::as_array) else {
-        return Ok(Vec::new());
-    };
-    values.iter().map(json_scalar_to_string).collect()
 }
 
 fn metadata_unavailable_reason(value: &Value) -> Option<String> {
@@ -24849,11 +24585,7 @@ mod tests {
                 next: None,
                 relation: None,
             };
-            let mut context = PolymarketProcessingContext::new(discovery.clone());
-            let mut dedupe = LifecycleFingerprintSets::with_limit(polymarket_native_messages + 1);
-            dedupe
-                .replace_lifecycles(expected_lifecycle_slugs(&discovery))
-                .unwrap();
+            let mut context = PolymarketProcessingContext::new(discovery);
             let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
             for _ in 0..polymarket_native_messages {
                 let message = match polymarket_runtime.recv(Duration::from_secs(5)).await {
@@ -24870,7 +24602,6 @@ mod tests {
                     &polymarket_sink,
                     &polymarket_identity,
                     run_started,
-                    &mut dedupe,
                     &mut recovery,
                 )
                 .await
@@ -24884,7 +24615,6 @@ mod tests {
                 &polymarket_sink,
                 &polymarket_identity,
                 run_started,
-                &mut dedupe,
                 &mut recovery,
             )
             .await
@@ -29163,10 +28893,6 @@ mod tests {
 
     #[test]
     fn polymarket_lifecycle_identity_contradictions_are_terminal() {
-        let identity = CollectorIdentity {
-            host_id: "collector-test".to_owned(),
-            region: "local-test".to_owned(),
-        };
         let discovery = test_btc_discovery();
         let asset_to_slug = discovery_asset_to_slug(&discovery);
         let current_condition = discovery.current.condition_id.as_str();
@@ -29211,17 +28937,11 @@ mod tests {
             event
         };
         let assert_error = |message: WsMessage, expected: &str| {
-            let error = match build_polymarket_events(
-                message,
-                &discovery,
-                &asset_to_slug,
-                &identity,
-                1_783_392_404_599,
-                r#"{"source":"test"}"#,
-            ) {
-                Err(error) => error,
-                Ok(_) => panic!("a target identity contradiction must be terminal"),
-            };
+            let error =
+                match target_admitted_polymarket_message(&message, &discovery, &asset_to_slug) {
+                    Err(error) => error,
+                    Ok(_) => panic!("a target identity contradiction must be terminal"),
+                };
             assert!(
                 error.to_string().contains(expected),
                 "unexpected identity error: {error}"
@@ -29456,283 +29176,6 @@ mod tests {
             rx.try_recv(),
             Err(mpsc::error::TryRecvError::Empty) | Err(mpsc::error::TryRecvError::Disconnected)
         ));
-    }
-
-    #[tokio::test]
-    async fn polymarket_restore_stop_reply_waits_for_blocking_worker_exit() {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let worker_cancel = Arc::clone(&cancel);
-        let worker_started = Arc::new(AtomicBool::new(false));
-        let started = Arc::clone(&worker_started);
-        let cancel_observed = Arc::new(AtomicBool::new(false));
-        let observed = Arc::clone(&cancel_observed);
-        let worker_exited = Arc::new(AtomicBool::new(false));
-        let exited = Arc::clone(&worker_exited);
-        let (allow_exit_tx, allow_exit_rx) = std::sync::mpsc::sync_channel(0);
-        let restore =
-            tokio::task::spawn_blocking(move || -> Result<Option<LifecycleFingerprintSets>> {
-                started.store(true, Ordering::Relaxed);
-                while !worker_cancel.load(Ordering::Relaxed) {
-                    std::thread::yield_now();
-                }
-                observed.store(true, Ordering::Relaxed);
-                allow_exit_rx.recv().unwrap();
-                exited.store(true, Ordering::Relaxed);
-                Ok(None)
-            });
-        let (control_tx, mut control_rx) = mpsc::channel(1);
-        let waiter = tokio::spawn(async move {
-            wait_for_polymarket_dedupe_restore(restore, cancel, &mut control_rx).await
-        });
-
-        timeout(Duration::from_secs(1), async {
-            while !worker_started.load(Ordering::Relaxed) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("restore worker must start");
-        let (reply_tx, mut reply_rx) = oneshot::channel();
-        control_tx
-            .send(PolymarketSourceControl::Fence {
-                stop_after_fence: true,
-                day_boundary_utc_ms: None,
-                resume_after_barrier: None,
-                reply: reply_tx,
-            })
-            .await
-            .unwrap();
-        timeout(Duration::from_secs(1), async {
-            while !cancel_observed.load(Ordering::Relaxed) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("restore worker must observe cancellation");
-        assert!(matches!(
-            reply_rx.try_recv(),
-            Err(oneshot::error::TryRecvError::Empty)
-        ));
-        assert!(!waiter.is_finished());
-
-        allow_exit_tx.send(()).unwrap();
-        timeout(Duration::from_secs(1), &mut reply_rx)
-            .await
-            .expect("stop reply must follow worker exit")
-            .unwrap()
-            .unwrap();
-        assert!(worker_exited.load(Ordering::Relaxed));
-        assert!(
-            timeout(Duration::from_secs(1), waiter)
-                .await
-                .expect("restore waiter must finish")
-                .unwrap()
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn polymarket_restore_control_close_cancels_and_joins_blocking_worker() {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let worker_cancel = Arc::clone(&cancel);
-        let worker_started = Arc::new(AtomicBool::new(false));
-        let started = Arc::clone(&worker_started);
-        let worker_exited = Arc::new(AtomicBool::new(false));
-        let exited = Arc::clone(&worker_exited);
-        let restore =
-            tokio::task::spawn_blocking(move || -> Result<Option<LifecycleFingerprintSets>> {
-                started.store(true, Ordering::Relaxed);
-                while !worker_cancel.load(Ordering::Relaxed) {
-                    std::thread::yield_now();
-                }
-                exited.store(true, Ordering::Relaxed);
-                Ok(None)
-            });
-        let (control_tx, mut control_rx) = mpsc::channel(1);
-        let waiter = tokio::spawn(async move {
-            wait_for_polymarket_dedupe_restore(restore, cancel, &mut control_rx).await
-        });
-
-        timeout(Duration::from_secs(1), async {
-            while !worker_started.load(Ordering::Relaxed) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("restore worker must start");
-        drop(control_tx);
-        let restored = timeout(Duration::from_secs(1), waiter)
-            .await
-            .expect("closed control channel must stop restore")
-            .unwrap()
-            .unwrap();
-        assert!(restored.is_none());
-        assert!(worker_exited.load(Ordering::Relaxed));
-    }
-
-    #[tokio::test]
-    async fn polymarket_restore_dropped_day_resume_cancels_and_joins_worker() {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let worker_cancel = Arc::clone(&cancel);
-        let worker_started = Arc::new(AtomicBool::new(false));
-        let started = Arc::clone(&worker_started);
-        let cancel_observed = Arc::new(AtomicBool::new(false));
-        let observed = Arc::clone(&cancel_observed);
-        let worker_exited = Arc::new(AtomicBool::new(false));
-        let exited = Arc::clone(&worker_exited);
-        let (allow_exit_tx, allow_exit_rx) = std::sync::mpsc::sync_channel(0);
-        let restore =
-            tokio::task::spawn_blocking(move || -> Result<Option<LifecycleFingerprintSets>> {
-                started.store(true, Ordering::Relaxed);
-                while !worker_cancel.load(Ordering::Relaxed) {
-                    std::thread::yield_now();
-                }
-                observed.store(true, Ordering::Relaxed);
-                allow_exit_rx.recv().unwrap();
-                exited.store(true, Ordering::Relaxed);
-                Ok(None)
-            });
-        let (control_tx, mut control_rx) = mpsc::channel(1);
-        let waiter = tokio::spawn(async move {
-            wait_for_polymarket_dedupe_restore(restore, cancel, &mut control_rx).await
-        });
-
-        timeout(Duration::from_secs(1), async {
-            while !worker_started.load(Ordering::Relaxed) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("restore worker must start");
-        let (resume_tx, resume_rx) = oneshot::channel();
-        let (reply_tx, reply_rx) = oneshot::channel();
-        control_tx
-            .send(PolymarketSourceControl::Fence {
-                stop_after_fence: false,
-                day_boundary_utc_ms: Some(1_783_987_200_000),
-                resume_after_barrier: Some(resume_rx),
-                reply: reply_tx,
-            })
-            .await
-            .unwrap();
-        timeout(Duration::from_secs(1), reply_rx)
-            .await
-            .expect("day fence reply must be bounded")
-            .unwrap()
-            .unwrap();
-        drop(resume_tx);
-        timeout(Duration::from_secs(1), async {
-            while !cancel_observed.load(Ordering::Relaxed) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("dropped resume must cancel restore worker");
-        assert!(!waiter.is_finished());
-
-        allow_exit_tx.send(()).unwrap();
-        let result = timeout(Duration::from_secs(1), waiter)
-            .await
-            .expect("restore waiter must finish after worker exit")
-            .unwrap();
-        let error = match result {
-            Err(error) => error,
-            Ok(_) => panic!("dropped day resume must fail closed"),
-        };
-        assert!(worker_exited.load(Ordering::Relaxed));
-        assert!(
-            error
-                .to_string()
-                .contains("Polymarket restore day-barrier resume dropped"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn polymarket_dedupe_restores_from_finalized_parquet_before_process_b_replay() {
-        let tmp = tempdir().unwrap();
-        let dataset_root = tmp.path().canonicalize().unwrap();
-        let discovery = test_btc_discovery();
-        let asset_to_slug = discovery_asset_to_slug(&discovery);
-        let message = serde_json::from_str::<WsMessage>(
-            r#"{
-                "event_type":"price_change",
-                "market":"0x0000000000000000000000000000000000000000000000000000000000000002",
-                "timestamp":"1783392404600",
-                "price_changes":[
-                    {"asset_id":"101","price":"0.52","size":"10","side":"BUY"},
-                    {"asset_id":"102","price":"0.48","size":"8","side":"SELL"}
-                ]
-            }"#,
-        )
-        .unwrap();
-        let canonical = polymarket_source_native_payload_json(&message)
-            .unwrap()
-            .unwrap();
-        let WsMessage::PriceChange(event) = &message else {
-            panic!("expected price_change message");
-        };
-        let raw_json = with_source_native_payload_json(
-            polymarket_price_change_raw_json(event, &asset_to_slug),
-            &canonical,
-        )
-        .to_string();
-        let raw_event = RawEvent {
-            source_kind: "polymarket_market".to_owned(),
-            source_event_type: "price_change".to_owned(),
-            source_identifier: format!("{}:101", discovery.current.slug),
-            source_ts: event.timestamp.map(|timestamp| timestamp.to_string()),
-            recv_time_utc_ms: now_ms(),
-            collector_host_id: "collector-a".to_owned(),
-            collector_region: "test".to_owned(),
-            source_endpoint: MARKET_WS_ENDPOINT.to_owned(),
-            raw_json,
-            collector_admission: None,
-            parquet_raw_layout_version: 1,
-            parquet_raw_source_kind: "polymarket_market".to_owned(),
-        };
-        let rows = polymarket_orderbook_rows_from_event(&raw_event).unwrap();
-        assert_eq!(rows.len(), 2);
-        assert!(
-            rows.iter()
-                .all(|row| row.source_native_payload_json == canonical)
-        );
-
-        let day = utc_day_string_from_ms(raw_event.recv_time_utc_ms).unwrap();
-        let source_dir = dataset_root
-            .join("training")
-            .join("typed_raw")
-            .join(format!("utc_day={day}"))
-            .join("source_kind=polymarket_market");
-        let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
-            &source_dir,
-            "process-a",
-            "polymarket_orderbook_v2",
-            "polymarket_market",
-        )
-        .unwrap();
-        writer.write_polymarket_orderbook_rows(&rows).unwrap();
-        writer.finalize().unwrap();
-
-        let mut process_b = LifecycleFingerprintSets::with_limit(8);
-        process_b
-            .replace_lifecycles(expected_lifecycle_slugs(&discovery))
-            .unwrap();
-        restore_polymarket_dedupe(&dataset_root, &mut process_b).unwrap();
-        assert!(
-            !polymarket_message_passes_dedupe(
-                &mut process_b,
-                &discovery,
-                &asset_to_slug,
-                &message,
-                &canonical,
-                1_783_392_404_599,
-                None,
-            )
-            .unwrap(),
-            "process B must drop a message already finalized by process A"
-        );
     }
 
     #[test]

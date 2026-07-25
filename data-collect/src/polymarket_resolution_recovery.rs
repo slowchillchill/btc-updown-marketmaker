@@ -12,8 +12,8 @@ use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use parquet::arrow::{ProjectionMask, arrow_reader::ParquetRecordBatchReaderBuilder};
 use parquet::file::metadata::KeyValue;
 use polymarket_client_sdk_v2::gamma::types::response::Market as SdkGammaMarket;
-use serde::Deserialize;
 use serde_json::Value;
+#[cfg(test)]
 use sha2::{Digest as _, Sha256};
 use time::OffsetDateTime;
 
@@ -48,18 +48,6 @@ const POLYMARKET_ORDERBOOK_V2_SCHEMA_VERSION: &str = "polymarket_orderbook_v2";
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
-const RAW_PROJECTION: [&str; 9] = [
-    "timestamp_received",
-    "market",
-    "event_type",
-    "source_native_payload_json",
-    "winning_asset_id",
-    "winning_outcome",
-    "resolved_event_asset_ids",
-    "slug",
-    "schema_version",
-];
-
 const LEGACY_V2_ROUTING_PROJECTION: [&str; 5] = [
     "timestamp_received",
     "market",
@@ -67,12 +55,6 @@ const LEGACY_V2_ROUTING_PROJECTION: [&str; 5] = [
     "slug",
     "schema_version",
 ];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RecoveryPair {
-    LegacyV2MetadataV3,
-    CurrentV3MetadataV4,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MetadataLayout {
@@ -202,7 +184,6 @@ struct MetadataRecord {
     admission_sequence: u64,
     admission_time_utc_ms: i64,
     metadata_origin: String,
-    schema_version: String,
     slug: String,
     condition_id: String,
     clob_market_id: String,
@@ -309,33 +290,6 @@ impl MetadataReferenceLookup {
     }
 }
 
-#[cfg(test)]
-std::thread_local! {
-    static RAW_SCAN_TEST_STATS: std::cell::Cell<(usize, usize)> =
-        const { std::cell::Cell::new((0, 0)) };
-}
-
-#[cfg(test)]
-fn reset_raw_scan_test_stats() {
-    RAW_SCAN_TEST_STATS.set((0, 0));
-}
-
-#[cfg(test)]
-fn raw_scan_test_stats() -> (usize, usize) {
-    RAW_SCAN_TEST_STATS.get()
-}
-
-#[cfg(test)]
-fn record_raw_scan_test_row(materialized: bool) {
-    RAW_SCAN_TEST_STATS.with(|stats| {
-        let (scanned, retained) = stats.get();
-        stats.set((
-            scanned.saturating_add(1),
-            retained.saturating_add(usize::from(materialized)),
-        ));
-    });
-}
-
 fn require_canonical_metadata_schema(
     schema: &Schema,
     path: &Path,
@@ -381,11 +335,6 @@ fn require_canonical_metadata_schema(
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-fn require_canonical_metadata_v3_schema(schema: &Schema, path: &Path) -> Result<()> {
-    require_canonical_metadata_schema(schema, path, MetadataLayout::V3)
 }
 
 fn finalized_metadata_v3_row_from_batch(
@@ -775,7 +724,6 @@ impl MetadataRecord {
                 "collector_admission_time_utc_ms",
             )?,
             metadata_origin: required_string(batch, row, "metadata_origin")?,
-            schema_version: required_string(batch, row, "schema_version")?,
             slug: required_string(batch, row, "slug")?,
             condition_id: required_string(batch, row, "condition_id")?,
             clob_market_id: required_string(batch, row, "clob_market_id")?,
@@ -912,51 +860,6 @@ impl MetadataRecord {
     }
 }
 
-#[derive(Clone, Debug)]
-struct RawRecord {
-    timestamp_received: i64,
-    market: String,
-    event_type: String,
-    source_payload_json: String,
-    winning_asset_id: Option<String>,
-    winning_outcome: Option<String>,
-    resolved_event_asset_ids: Option<String>,
-    slug: Option<String>,
-    schema_version: String,
-}
-
-impl RawRecord {
-    fn from_batch(batch: &RecordBatch, row: usize) -> Result<Self> {
-        Ok(Self {
-            timestamp_received: required_timestamp(batch, row, "timestamp_received")?,
-            market: required_string(batch, row, "market")?,
-            event_type: required_string(batch, row, "event_type")?,
-            source_payload_json: required_string(batch, row, "source_native_payload_json")?,
-            winning_asset_id: optional_string(batch, row, "winning_asset_id")?,
-            winning_outcome: optional_string(batch, row, "winning_outcome")?,
-            resolved_event_asset_ids: optional_string(batch, row, "resolved_event_asset_ids")?,
-            slug: optional_string(batch, row, "slug")?,
-            schema_version: required_string(batch, row, "schema_version")?,
-        })
-    }
-}
-
-#[derive(Deserialize)]
-struct RawPayloadRouting {
-    event_type: Option<Value>,
-    id: Option<Value>,
-    market: Option<Value>,
-    slug: Option<Value>,
-}
-
-#[derive(Clone, Debug)]
-struct QualifiedRaw {
-    timestamp_received: i64,
-    source_raw_sha256: String,
-    winning_asset_id: String,
-    winning_outcome: String,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct QualifiedTypedSource {
     timestamp_received: i64,
@@ -981,44 +884,18 @@ pub fn restore_polymarket_resolution_recovery(
     dataset_root: &Path,
     recovery_time_ms: i64,
 ) -> Result<PolymarketRestartRecovery> {
-    restore_polymarket_resolution_recovery_for_pair(
-        dataset_root,
-        recovery_time_ms,
-        RecoveryPair::CurrentV3MetadataV4,
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn restore_legacy_polymarket_resolution_recovery(
-    dataset_root: &Path,
-    recovery_time_ms: i64,
-) -> Result<PolymarketRestartRecovery> {
-    restore_polymarket_resolution_recovery_for_pair(
-        dataset_root,
-        recovery_time_ms,
-        RecoveryPair::LegacyV2MetadataV3,
-    )
-}
-
-fn restore_polymarket_resolution_recovery_for_pair(
-    dataset_root: &Path,
-    recovery_time_ms: i64,
-    pair: RecoveryPair,
-) -> Result<PolymarketRestartRecovery> {
     if recovery_time_ms <= 0 {
         return Err(invalid_data("Polymarket restart recovery time must be positive").into());
     }
     let days = recovery_days(recovery_time_ms)?;
-    let metadata = read_finalized_metadata_for_validation(dataset_root, &days, pair)?;
+    let metadata = read_finalized_metadata_for_validation(dataset_root, &days)?;
     if metadata.is_empty() {
-        if pair == RecoveryPair::CurrentV3MetadataV4 {
-            read_qualified_typed_market_sources(
-                dataset_root,
-                &days,
-                &BTreeMap::new(),
-                recovery_time_ms,
-            )?;
-        }
+        read_qualified_typed_market_sources(
+            dataset_root,
+            &days,
+            &BTreeMap::new(),
+            recovery_time_ms,
+        )?;
         return Ok(PolymarketRestartRecovery {
             pending: Vec::new(),
         });
@@ -1056,11 +933,10 @@ fn restore_polymarket_resolution_recovery_for_pair(
         dataset_root,
         &days,
         grouped.keys().map(String::as_str).collect(),
-        pair,
     )?;
 
     let reference_authorities =
-        read_precise_metadata_reference_authorities(dataset_root, &days, &grouped, pair)?;
+        read_precise_metadata_reference_authorities(dataset_root, &days, &grouped)?;
     for authority in &reference_authorities {
         authority.validate_recovery_eligibility()?;
     }
@@ -1078,28 +954,14 @@ fn restore_polymarket_resolution_recovery_for_pair(
         ))
     })?;
 
-    let qualified_raw = match pair {
-        RecoveryPair::LegacyV2MetadataV3 => {
-            read_qualified_market_raw(dataset_root, &days, &identities, recovery_time_ms)?
-        }
-        RecoveryPair::CurrentV3MetadataV4 => BTreeMap::new(),
-    };
-    let qualified_typed = match pair {
-        RecoveryPair::LegacyV2MetadataV3 => BTreeMap::new(),
-        RecoveryPair::CurrentV3MetadataV4 => {
-            read_qualified_typed_market_sources(dataset_root, &days, &identities, recovery_time_ms)?
-        }
-    };
+    let qualified_typed =
+        read_qualified_typed_market_sources(dataset_root, &days, &identities, recovery_time_ms)?;
 
     let mut pending_counters = BTreeMap::new();
     for (slug, records) in &grouped {
         let identity = identities
             .get(slug)
             .expect("grouped validation identity has fixed identity");
-        let matching_raw = qualified_raw
-            .get(slug)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
         let matching_typed = qualified_typed
             .get(slug)
             .map(Vec::as_slice)
@@ -1134,28 +996,14 @@ fn restore_polymarket_resolution_recovery_for_pair(
 
         let counters = attempt_counters(records)?;
         if let Some(terminal) = terminals.first().copied() {
-            match pair {
-                RecoveryPair::LegacyV2MetadataV3 => {
-                    validate_terminal_raw(terminal, matching_raw, identity)?;
-                }
-                RecoveryPair::CurrentV3MetadataV4 => {
-                    validate_terminal_typed_sources(terminal, matching_typed, identity)?;
-                }
-            }
+            validate_terminal_typed_sources(terminal, matching_typed, identity)?;
             continue;
         }
         if let Some(summary) = summaries.first().copied() {
-            match pair {
-                RecoveryPair::LegacyV2MetadataV3 => {
-                    validate_summary(summary, &counters, matching_raw)?;
-                }
-                RecoveryPair::CurrentV3MetadataV4 => {
-                    validate_typed_summary(summary, &counters, matching_typed)?;
-                }
-            }
+            validate_typed_summary(summary, &counters, matching_typed)?;
             continue;
         }
-        if !matching_raw.is_empty() || !matching_typed.is_empty() {
+        if !matching_typed.is_empty() {
             return Err(invalid_data(format!(
                 "Polymarket restart matching source has no terminal or summary:slug={slug}"
             ))
@@ -1336,60 +1184,6 @@ fn attempt_counters(records: &[MetadataRecord]) -> Result<AttemptCounters> {
     Ok(counters)
 }
 
-fn validate_terminal_raw(
-    terminal: &MetadataRecord,
-    raw: &[QualifiedRaw],
-    identity: &FixedIdentity,
-) -> Result<()> {
-    let winning_asset = terminal
-        .winning_asset_id
-        .as_deref()
-        .expect("validated terminal has winner");
-    let winning_outcome = terminal
-        .winning_outcome
-        .as_deref()
-        .expect("validated terminal has outcome");
-    if !winner_matches(identity, winning_asset, winning_outcome) {
-        return Err(invalid_data(format!(
-            "Polymarket restart terminal winner is invalid:slug={}",
-            identity.slug
-        ))
-        .into());
-    }
-    if raw.iter().any(|raw| {
-        raw.winning_asset_id != winning_asset
-            || !raw.winning_outcome.eq_ignore_ascii_case(winning_outcome)
-    }) {
-        return Err(invalid_data(format!(
-            "Polymarket restart terminal/raw winner mismatch:slug={}",
-            identity.slug
-        ))
-        .into());
-    }
-    if terminal.kind == "resolution_terminal_ws" {
-        let source_received = terminal
-            .source_received_at_utc_ms
-            .expect("validated WS terminal has source receive");
-        let source_digest = terminal
-            .source_raw_sha256
-            .as_deref()
-            .expect("validated WS terminal has source digest");
-        if !raw.iter().any(|raw| {
-            raw.timestamp_received == source_received
-                && raw.source_raw_sha256 == source_digest
-                && raw.winning_asset_id == winning_asset
-                && raw.winning_outcome.eq_ignore_ascii_case(winning_outcome)
-        }) {
-            return Err(invalid_data(format!(
-                "Polymarket restart WS terminal has no exact finalized raw:slug={}",
-                identity.slug
-            ))
-            .into());
-        }
-    }
-    Ok(())
-}
-
 fn validate_terminal_typed_sources(
     terminal: &MetadataRecord,
     sources: &[QualifiedTypedSource],
@@ -1466,28 +1260,6 @@ fn validate_terminal_typed_sources(
     Ok(())
 }
 
-fn validate_summary(
-    summary: &MetadataRecord,
-    counters: &AttemptCounters,
-    raw: &[QualifiedRaw],
-) -> Result<()> {
-    validate_summary_counters(summary, counters)?;
-    let role_exit = summary.runtime_role_applied_at_utc_ms.ok_or_else(|| {
-        invalid_data(format!(
-            "Polymarket restart summary has no role-exit time:slug={}",
-            summary.slug
-        ))
-    })?;
-    if raw.iter().any(|raw| raw.timestamp_received <= role_exit) {
-        return Err(invalid_data(format!(
-            "Polymarket restart exhausted raw is not strictly post-horizon:slug={}",
-            summary.slug
-        ))
-        .into());
-    }
-    Ok(())
-}
-
 fn validate_typed_summary(
     summary: &MetadataRecord,
     counters: &AttemptCounters,
@@ -1540,171 +1312,6 @@ fn durable_current_authority(records: &[MetadataRecord]) -> Option<&MetadataReco
     Some(basis)
 }
 
-fn validate_relevant_raw(
-    raw: &RawRecord,
-    identity: &FixedIdentity,
-    recovery_time_ms: i64,
-) -> Result<QualifiedRaw> {
-    if raw.event_type != "market_resolved" {
-        return Err(relevant_raw_error(identity, "typed event_type is contradictory").into());
-    }
-    if raw.timestamp_received < identity.market_start_utc_ms
-        || raw.timestamp_received > recovery_time_ms
-    {
-        return Err(
-            relevant_raw_error(identity, "typed receive time is outside recovery scan").into(),
-        );
-    }
-    let typed_market_matches = raw.market == identity.condition_id;
-    let typed_slug_matches = raw.slug.as_deref() == Some(identity.slug.as_str());
-    if !typed_market_matches || !typed_slug_matches {
-        return Err(
-            relevant_raw_error(identity, "typed slug/market identity contradiction").into(),
-        );
-    }
-    if raw.schema_version != POLYMARKET_ORDERBOOK_V2_SCHEMA_VERSION {
-        return Err(relevant_raw_error(
-            identity,
-            format!("schema version mismatch:{}", raw.schema_version),
-        )
-        .into());
-    }
-    let typed_assets_json = raw
-        .resolved_event_asset_ids
-        .as_deref()
-        .ok_or_else(|| relevant_raw_error(identity, "typed resolved_event_asset_ids is missing"))?;
-    let typed_assets = serde_json::from_str::<Vec<String>>(typed_assets_json).map_err(|error| {
-        relevant_raw_error(
-            identity,
-            format!("typed resolved_event_asset_ids JSON is invalid:{error}"),
-        )
-    })?;
-    if serde_json::to_string(&typed_assets)? != typed_assets_json
-        || !asset_set_matches(&typed_assets, identity)
-    {
-        return Err(relevant_raw_error(
-            identity,
-            "typed resolved_event_asset_ids is noncanonical or contradictory",
-        )
-        .into());
-    }
-    let typed_winner = raw
-        .winning_asset_id
-        .as_deref()
-        .ok_or_else(|| relevant_raw_error(identity, "typed winning_asset_id is missing"))?;
-    let typed_outcome = raw
-        .winning_outcome
-        .as_deref()
-        .ok_or_else(|| relevant_raw_error(identity, "typed winning_outcome is missing"))?;
-    if !winner_matches(identity, typed_winner, typed_outcome) {
-        return Err(relevant_raw_error(identity, "typed winner is contradictory").into());
-    }
-
-    let payload = serde_json::from_str::<Value>(&raw.source_payload_json).map_err(|error| {
-        relevant_raw_error(identity, format!("source payload JSON is invalid:{error}"))
-    })?;
-    let payload = payload
-        .as_object()
-        .ok_or_else(|| relevant_raw_error(identity, "source payload is not an object"))?;
-    if payload.get("event_type").and_then(Value::as_str) != Some("market_resolved")
-        || payload.get("id").and_then(Value::as_str) != Some(identity.clob_market_id.as_str())
-        || payload.get("market").and_then(Value::as_str) != Some(identity.condition_id.as_str())
-    {
-        return Err(
-            relevant_raw_error(identity, "source payload identity is contradictory").into(),
-        );
-    }
-    match payload.get("slug") {
-        None | Some(Value::Null) => {}
-        Some(Value::String(slug)) if slug == &identity.slug => {}
-        _ => {
-            return Err(
-                relevant_raw_error(identity, "source payload slug is contradictory").into(),
-            );
-        }
-    }
-
-    let mut payload_asset_variants = Vec::new();
-    for field in ["asset_ids", "assets_ids"] {
-        let Some(value) = payload.get(field) else {
-            continue;
-        };
-        let array = value.as_array().ok_or_else(|| {
-            relevant_raw_error(identity, format!("source payload {field} is not an array"))
-        })?;
-        let assets = array
-            .iter()
-            .map(json_scalar_string)
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| {
-                relevant_raw_error(
-                    identity,
-                    format!("source payload {field} contains a nonscalar asset"),
-                )
-            })?;
-        if !asset_set_matches(&assets, identity) {
-            return Err(relevant_raw_error(
-                identity,
-                format!("source payload {field} is contradictory"),
-            )
-            .into());
-        }
-        payload_asset_variants.push(assets);
-    }
-    let payload_assets = payload_asset_variants
-        .first()
-        .ok_or_else(|| relevant_raw_error(identity, "source payload asset_ids is missing"))?;
-    if payload_asset_variants
-        .iter()
-        .skip(1)
-        .any(|assets| assets != payload_assets)
-    {
-        return Err(relevant_raw_error(identity, "source payload asset aliases contradict").into());
-    }
-
-    let outcomes = payload
-        .get("outcomes")
-        .and_then(Value::as_array)
-        .ok_or_else(|| relevant_raw_error(identity, "source payload outcomes is missing"))?;
-    if !outcomes.is_empty()
-        && (outcomes.len() != 2
-            || payload_assets.iter().zip(outcomes).any(|(asset, outcome)| {
-                let Some(outcome) = outcome.as_str() else {
-                    return true;
-                };
-                match outcome.trim().to_ascii_lowercase().as_str() {
-                    "up" => asset != &identity.up_asset_id,
-                    "down" => asset != &identity.down_asset_id,
-                    _ => true,
-                }
-            }))
-    {
-        return Err(relevant_raw_error(identity, "source payload outcomes contradict").into());
-    }
-    let payload_winner = payload
-        .get("winning_asset_id")
-        .and_then(json_scalar_string)
-        .ok_or_else(|| relevant_raw_error(identity, "source payload winner is missing"))?;
-    let payload_outcome = payload
-        .get("winning_outcome")
-        .and_then(Value::as_str)
-        .ok_or_else(|| relevant_raw_error(identity, "source payload outcome is missing"))?;
-    if payload_winner != typed_winner
-        || !payload_outcome.eq_ignore_ascii_case(typed_outcome)
-        || !winner_matches(identity, &payload_winner, payload_outcome)
-    {
-        return Err(
-            relevant_raw_error(identity, "source payload winner contradicts typed row").into(),
-        );
-    }
-    Ok(QualifiedRaw {
-        timestamp_received: raw.timestamp_received,
-        source_raw_sha256: sha256_hex(raw.source_payload_json.as_bytes()),
-        winning_asset_id: typed_winner.to_owned(),
-        winning_outcome: typed_outcome.to_owned(),
-    })
-}
-
 fn relevant_raw_error(identity: &FixedIdentity, detail: impl std::fmt::Display) -> io::Error {
     invalid_data(format!(
         "Polymarket restart relevant raw is invalid:slug={}:detail={detail}",
@@ -1731,7 +1338,6 @@ fn winner_matches(identity: &FixedIdentity, asset_id: &str, outcome: &str) -> bo
 fn read_finalized_metadata_for_validation(
     dataset_root: &Path,
     days: &BTreeSet<String>,
-    pair: RecoveryPair,
 ) -> Result<Vec<MetadataRecord>> {
     let mut records = Vec::new();
     for (file_order, path) in
@@ -1744,11 +1350,7 @@ fn read_finalized_metadata_for_validation(
             builder.metadata().file_metadata().key_value_metadata(),
             &path,
         )?;
-        let expected_layout = match pair {
-            RecoveryPair::LegacyV2MetadataV3 => MetadataLayout::V3,
-            RecoveryPair::CurrentV3MetadataV4 => MetadataLayout::V4,
-        };
-        if layout == MetadataLayout::V2 || layout != expected_layout {
+        if layout != MetadataLayout::V4 {
             continue;
         }
         require_canonical_metadata_schema(builder.schema().as_ref(), &path, layout)?;
@@ -1779,15 +1381,11 @@ fn reject_dual_metadata_layout_for_current_lifecycles(
     dataset_root: &Path,
     days: &BTreeSet<String>,
     current_slugs: BTreeSet<&str>,
-    pair: RecoveryPair,
 ) -> Result<()> {
     if current_slugs.is_empty() {
         return Ok(());
     }
-    let forbidden_layout = match pair {
-        RecoveryPair::LegacyV2MetadataV3 => MetadataLayout::V4,
-        RecoveryPair::CurrentV3MetadataV4 => MetadataLayout::V3,
-    };
+    let forbidden_layout = MetadataLayout::V3;
     for path in finalized_source_paths(dataset_root, days, "polymarket_market_metadata")? {
         let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&path)?)?;
         let layout = metadata_layout(
@@ -1820,7 +1418,6 @@ fn read_precise_metadata_reference_authorities(
     dataset_root: &Path,
     default_days: &BTreeSet<String>,
     grouped: &BTreeMap<String, Vec<MetadataRecord>>,
-    pair: RecoveryPair,
 ) -> Result<Vec<MetadataRecord>> {
     let mut lookups_by_day = BTreeMap::<String, BTreeSet<MetadataReferenceLookup>>::new();
     for lookup in grouped
@@ -1847,11 +1444,7 @@ fn read_precise_metadata_reference_authorities(
                 builder.metadata().file_metadata().key_value_metadata(),
                 &path,
             )?;
-            let expected_layout = match pair {
-                RecoveryPair::LegacyV2MetadataV3 => MetadataLayout::V3,
-                RecoveryPair::CurrentV3MetadataV4 => MetadataLayout::V4,
-            };
-            if layout == MetadataLayout::V2 || layout != expected_layout {
+            if layout != MetadataLayout::V4 {
                 continue;
             }
             require_canonical_metadata_schema(builder.schema().as_ref(), &path, layout)?;
@@ -2154,93 +1747,6 @@ fn validate_typed_market_source(
     })
 }
 
-fn read_qualified_market_raw(
-    dataset_root: &Path,
-    days: &BTreeSet<String>,
-    identities: &BTreeMap<String, FixedIdentity>,
-    recovery_time_ms: i64,
-) -> Result<BTreeMap<String, Vec<QualifiedRaw>>> {
-    let mut qualified = BTreeMap::<String, Vec<QualifiedRaw>>::new();
-    for path in finalized_source_paths(dataset_root, days, "polymarket_market")? {
-        let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&path)?)?;
-        require_columns(builder.schema().as_ref(), &RAW_PROJECTION, &path)?;
-        let projection = ProjectionMask::columns(builder.parquet_schema(), RAW_PROJECTION);
-        let mut reader = builder
-            .with_projection(projection)
-            .with_batch_size(64)
-            .build()?;
-        for batch in &mut reader {
-            let batch = batch?;
-            let timestamps =
-                typed_column::<TimestampMillisecondArray>(&batch, "timestamp_received")?;
-            let markets = typed_column::<StringArray>(&batch, "market")?;
-            let event_types = typed_column::<StringArray>(&batch, "event_type")?;
-            let payloads = typed_column::<StringArray>(&batch, "source_native_payload_json")?;
-            let slugs = typed_column::<StringArray>(&batch, "slug")?;
-            for row in 0..batch.num_rows() {
-                if timestamps.is_null(row) || markets.is_null(row) || event_types.is_null(row) {
-                    return Err(invalid_data(format!(
-                        "Polymarket restart required raw routing field is null:file={}:row={row}",
-                        path.display()
-                    ))
-                    .into());
-                }
-                let timestamp_received = timestamps.value(row);
-                let market = markets.value(row);
-                let event_type = event_types.value(row);
-                let slug = slugs.is_valid(row).then(|| slugs.value(row));
-                let payload_routing = payloads
-                    .is_valid(row)
-                    .then(|| serde_json::from_str::<RawPayloadRouting>(payloads.value(row)).ok());
-                let payload_routing = payload_routing.flatten();
-                let typed_may_match = event_type == "market_resolved";
-                let payload_may_match = payload_routing
-                    .as_ref()
-                    .and_then(|routing| routing.event_type.as_ref())
-                    .and_then(Value::as_str)
-                    == Some("market_resolved");
-                let matching_identities = if typed_may_match || payload_may_match {
-                    identities
-                        .values()
-                        .filter(|identity| {
-                            timestamp_received >= identity.market_start_utc_ms
-                                && timestamp_received <= recovery_time_ms
-                                && ((typed_may_match
-                                    && (market == identity.condition_id
-                                        || slug == Some(identity.slug.as_str())))
-                                    || (payload_may_match
-                                        && payload_routing.as_ref().is_some_and(|routing| {
-                                            routing.id.as_ref().and_then(Value::as_str)
-                                                == Some(identity.clob_market_id.as_str())
-                                                || routing.market.as_ref().and_then(Value::as_str)
-                                                    == Some(identity.condition_id.as_str())
-                                                || routing.slug.as_ref().and_then(Value::as_str)
-                                                    == Some(identity.slug.as_str())
-                                        })))
-                        })
-                        .collect::<Vec<_>>()
-                } else {
-                    Vec::new()
-                };
-                #[cfg(test)]
-                record_raw_scan_test_row(!matching_identities.is_empty());
-                if matching_identities.is_empty() {
-                    continue;
-                }
-                let raw = RawRecord::from_batch(&batch, row)?;
-                for identity in matching_identities {
-                    let record = validate_relevant_raw(&raw, identity, recovery_time_ms)?;
-                    qualified
-                        .entry(identity.slug.clone())
-                        .or_default()
-                        .push(record);
-                }
-            }
-        }
-    }
-    Ok(qualified)
-}
-
 fn finalized_source_paths(
     dataset_root: &Path,
     days: &BTreeSet<String>,
@@ -2415,6 +1921,7 @@ fn json_scalar_string(value: &Value) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -2430,7 +1937,7 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 mod tests {
     use std::sync::Arc;
 
-    use arrow_schema::{DataType, Field, Schema, TimeUnit};
+    use arrow_schema::{DataType, Field, Schema};
     use parquet::arrow::ArrowWriter;
     use parquet::file::properties::WriterProperties;
     use serde::de::DeserializeOwned;
@@ -2446,7 +1953,7 @@ mod tests {
         TerminalPredicateFailureReason, polymarket_market_metadata_v3_schema,
         polymarket_market_metadata_v4_schema,
     };
-    use crate::polymarket_orderbook_layout::polymarket_orderbook_schema;
+    use crate::polymarket_orderbook_layout::{PolymarketOrderbookContext, PolymarketOrderbookRow};
     use crate::polymarket_orderbook_v3::{
         PolymarketMarketResolvedV3, PolymarketOrderbookV3Envelope,
     };
@@ -2465,13 +1972,6 @@ mod tests {
     const CONDITION_6: &str = "0x0000000000000000000000000000000000000000000000000000000000000006";
     const SLUG: &str = "btc-updown-5m-1783392300";
     const MARKET_ID: &str = "clob-market-1";
-
-    fn restore_polymarket_resolution_recovery(
-        dataset_root: &Path,
-        recovery_time_ms: i64,
-    ) -> Result<PolymarketRestartRecovery> {
-        restore_legacy_polymarket_resolution_recovery(dataset_root, recovery_time_ms)
-    }
 
     fn gamma_market_payload(
         slug: &str,
@@ -2551,7 +2051,6 @@ mod tests {
             admission_sequence: sequence,
             admission_time_utc_ms: T - 119_990,
             metadata_origin: "gamma_markets_discovery".to_owned(),
-            schema_version: POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION.to_owned(),
             slug: SLUG.to_owned(),
             condition_id: CONDITION.to_owned(),
             clob_market_id: MARKET_ID.to_owned(),
@@ -2781,40 +2280,6 @@ mod tests {
         record
     }
 
-    fn valid_raw(receive: i64) -> RawRecord {
-        RawRecord {
-            timestamp_received: receive,
-            market: CONDITION.to_owned(),
-            event_type: "market_resolved".to_owned(),
-            source_payload_json: ws_payload(),
-            winning_asset_id: Some("101".to_owned()),
-            winning_outcome: Some("Up".to_owned()),
-            resolved_event_asset_ids: Some(r#"["101","102"]"#.to_owned()),
-            slug: Some(SLUG.to_owned()),
-            schema_version: POLYMARKET_ORDERBOOK_V2_SCHEMA_VERSION.to_owned(),
-        }
-    }
-
-    fn valid_down_raw(receive: i64) -> RawRecord {
-        let mut raw = valid_raw(receive);
-        raw.source_payload_json = json!({
-            "source": "polymarket_market",
-            "event_type": "market_resolved",
-            "id": MARKET_ID,
-            "market": CONDITION,
-            "slug": SLUG,
-            "asset_ids": ["101", "102"],
-            "outcomes": ["Up", "Down"],
-            "winning_asset_id": "102",
-            "winning_outcome": "Down",
-            "timestamp": receive
-        })
-        .to_string();
-        raw.winning_asset_id = Some("102".to_owned());
-        raw.winning_outcome = Some("Down".to_owned());
-        raw
-    }
-
     fn day_dir(root: &Path, recovery_time: i64, source: &str) -> PathBuf {
         root.join("training")
             .join("typed_raw")
@@ -2927,7 +2392,7 @@ mod tests {
             metadata_origin,
             collector_host_id: "recovery-fixture-host".to_owned(),
             collector_region: "recovery-fixture-region".to_owned(),
-            schema_version: record.schema_version.clone(),
+            schema_version: POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION.to_owned(),
             slug: record.slug.clone(),
             condition_id: record.condition_id.clone(),
             clob_market_id: record.clob_market_id.clone(),
@@ -3143,14 +2608,17 @@ mod tests {
         record: &MetadataRecord,
         claimant: Option<(&str, u64)>,
     ) -> PolymarketMarketMetadataV4Row {
+        metadata_v4_from_v3_fixture(metadata_fixture_row(record), claimant)
+    }
+
+    fn metadata_v4_from_v3_fixture(
+        row: PolymarketMarketMetadataV3Row,
+        claimant: Option<(&str, u64)>,
+    ) -> PolymarketMarketMetadataV4Row {
         let (claimant_epoch, claimant_sequence) = claimant
             .map(|(epoch, sequence)| (Some(epoch.to_owned()), Some(sequence)))
             .unwrap_or((None, None));
-        PolymarketMarketMetadataV4Row::from_v3_prefix(
-            metadata_fixture_row(record),
-            claimant_epoch,
-            claimant_sequence,
-        )
+        PolymarketMarketMetadataV4Row::from_v3_prefix(row, claimant_epoch, claimant_sequence)
     }
 
     fn write_metadata_v4_rows(path: &Path, rows: &[PolymarketMarketMetadataV4Row]) {
@@ -3244,15 +2712,15 @@ mod tests {
         }
     }
 
-    fn write_metadata_v3_rows_without_field(
+    fn write_metadata_v4_rows_without_field(
         path: &Path,
-        rows: &[PolymarketMarketMetadataV3Row],
+        rows: &[PolymarketMarketMetadataV4Row],
         omitted_field: &str,
     ) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let canonical_schema = polymarket_market_metadata_v3_schema();
+        let canonical_schema = polymarket_market_metadata_v4_schema();
         let canonical_batch =
-            polymarket_market_metadata_v3_rows_to_batch(Arc::clone(&canonical_schema), rows)
+            polymarket_market_metadata_v4_rows_to_batch(Arc::clone(&canonical_schema), rows)
                 .unwrap();
         let omitted_index = canonical_schema.index_of(omitted_field).unwrap();
         let fields = canonical_schema
@@ -3278,7 +2746,7 @@ mod tests {
             File::create(path).unwrap(),
             schema,
             Some(metadata_writer_properties(
-                POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
+                POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION,
             )),
         )
         .unwrap();
@@ -3291,115 +2759,45 @@ mod tests {
         write_metadata_v3_rows(path, &rows);
     }
 
-    fn write_raw(path: &Path, records: &[RawRecord]) {
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let schema = Arc::new(Schema::new(vec![
-            Field::new(
-                "timestamp_received",
-                DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
-                false,
-            ),
-            Field::new("market", DataType::Utf8, false),
-            Field::new("event_type", DataType::Utf8, false),
-            Field::new("source_native_payload_json", DataType::Utf8, false),
-            Field::new("winning_asset_id", DataType::Utf8, true),
-            Field::new("winning_outcome", DataType::Utf8, true),
-            Field::new("resolved_event_asset_ids", DataType::Utf8, true),
-            Field::new("slug", DataType::Utf8, true),
-            Field::new("collector_host_id", DataType::Utf8, false),
-            Field::new("schema_version", DataType::Utf8, false),
-        ]));
-        let required_strings = |values: Vec<String>| {
-            Arc::new(StringArray::from_iter_values(values)) as Arc<dyn arrow_array::Array>
-        };
-        let optional_strings = |values: Vec<Option<String>>| {
-            Arc::new(StringArray::from(values)) as Arc<dyn arrow_array::Array>
-        };
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![
-                Arc::new(
-                    TimestampMillisecondArray::from(
-                        records
-                            .iter()
-                            .map(|record| record.timestamp_received)
-                            .collect::<Vec<_>>(),
-                    )
-                    .with_timezone("UTC"),
-                ),
-                required_strings(records.iter().map(|record| record.market.clone()).collect()),
-                required_strings(
-                    records
-                        .iter()
-                        .map(|record| record.event_type.clone())
-                        .collect(),
-                ),
-                required_strings(
-                    records
-                        .iter()
-                        .map(|record| record.source_payload_json.clone())
-                        .collect(),
-                ),
-                optional_strings(
-                    records
-                        .iter()
-                        .map(|record| record.winning_asset_id.clone())
-                        .collect(),
-                ),
-                optional_strings(
-                    records
-                        .iter()
-                        .map(|record| record.winning_outcome.clone())
-                        .collect(),
-                ),
-                optional_strings(
-                    records
-                        .iter()
-                        .map(|record| record.resolved_event_asset_ids.clone())
-                        .collect(),
-                ),
-                optional_strings(records.iter().map(|record| record.slug.clone()).collect()),
-                required_strings(vec!["collector-host".to_owned(); records.len()]),
-                required_strings(
-                    records
-                        .iter()
-                        .map(|record| record.schema_version.clone())
-                        .collect(),
-                ),
-            ],
-        )
-        .unwrap();
-        let mut writer = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
-        writer.write(&batch).unwrap();
-        writer.close().unwrap();
+    fn write_metadata_v4_records(path: &Path, records: &[MetadataRecord]) {
+        let rows = records
+            .iter()
+            .map(|record| {
+                let claimant = (record.kind == "resolution_terminal_ws")
+                    .then_some(("fixture-source-epoch", 1));
+                metadata_v4_fixture_row(record, claimant)
+            })
+            .collect::<Vec<_>>();
+        write_metadata_v4_rows(path, &rows);
     }
 
-    fn write_raw_missing_projection_column(path: &Path) {
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let schema = Arc::new(Schema::new(vec![
-            Field::new(
-                "timestamp_received",
-                DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
-                false,
-            ),
-            Field::new("schema_version", DataType::Utf8, false),
-        ]));
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![
-                Arc::new(
-                    TimestampMillisecondArray::from(vec![E + FIRST_SLOT_DELAY_MS])
-                        .with_timezone("UTC"),
-                ),
-                Arc::new(StringArray::from(vec![
-                    POLYMARKET_ORDERBOOK_V2_SCHEMA_VERSION,
-                ])),
-            ],
+    fn write_relevant_legacy_v2_source(path: &Path, receive: i64) {
+        let row = PolymarketOrderbookRow::market_resolved(
+            CONDITION,
+            receive,
+            "101",
+            "Up",
+            None,
+            &["101".to_owned(), "102".to_owned()],
+            PolymarketOrderbookContext {
+                timestamp_received_ms: receive,
+                slug: Some(SLUG.to_owned()),
+                source_native_payload_json: ws_payload(),
+                collector_host_id: "recovery-fixture-host".to_owned(),
+                collector_region: "recovery-fixture-region".to_owned(),
+                source_endpoint: "wss://ws-subscriptions-clob.polymarket.com/ws/market".to_owned(),
+                schema_version: POLYMARKET_ORDERBOOK_V2_SCHEMA_VERSION.to_owned(),
+            },
+        );
+        let stem = path.file_stem().unwrap().to_str().unwrap();
+        let mut writer = TypedParquetSegmentWriter::create_polymarket_orderbook(
+            path.parent().unwrap(),
+            stem,
+            POLYMARKET_ORDERBOOK_V2_SCHEMA_VERSION,
         )
         .unwrap();
-        let mut writer = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
-        writer.write(&batch).unwrap();
-        writer.close().unwrap();
+        writer.write_polymarket_orderbook_rows(&[row]).unwrap();
+        assert_eq!(writer.finalize().unwrap().final_path, path);
     }
 
     fn write_metadata_without_row_kind(path: &Path, layout_version: &str) {
@@ -3430,24 +2828,20 @@ mod tests {
         write_metadata_without_row_kind(path, POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION);
     }
 
-    fn write_finalized_fixture(
-        root: &Path,
-        recovery_time: i64,
-        metadata: &[MetadataRecord],
-        raw: &[RawRecord],
-    ) {
-        write_metadata(
+    fn write_finalized_fixture(root: &Path, recovery_time: i64, metadata: &[MetadataRecord]) {
+        let rows = metadata
+            .iter()
+            .map(|record| {
+                let claimant = (record.kind == "resolution_terminal_ws")
+                    .then_some(("fixture-source-epoch", 1));
+                metadata_v4_fixture_row(record, claimant)
+            })
+            .collect::<Vec<_>>();
+        write_metadata_v4_rows(
             &day_dir(root, recovery_time, "polymarket_market_metadata")
                 .join("polymarket_market_metadata_02.parquet"),
-            metadata,
+            &rows,
         );
-        if !raw.is_empty() {
-            write_raw(
-                &day_dir(root, recovery_time, "polymarket_market")
-                    .join("polymarket_market_02.parquet"),
-                raw,
-            );
-        }
     }
 
     #[test]
@@ -3658,10 +3052,10 @@ mod tests {
             &[metadata_v4_fixture_row(&base_record(1), None)],
             &[],
         );
-        write_raw(
+        write_relevant_legacy_v2_source(
             &day_dir(v4_with_v2_source.path(), recovery_time, "polymarket_market")
                 .join("polymarket_market_02.parquet"),
-            &[valid_raw(receive)],
+            receive,
         );
         let error =
             super::restore_polymarket_resolution_recovery(v4_with_v2_source.path(), recovery_time)
@@ -3741,7 +3135,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let recovery_time = E + 4 * 60_000;
         let metadata = vec![base_record(1), attempt(2, 1, "valid_nonterminal")];
-        write_finalized_fixture(tmp.path(), recovery_time, &metadata, &[]);
+        write_finalized_fixture(tmp.path(), recovery_time, &metadata);
 
         let recovery = restore_polymarket_resolution_recovery(tmp.path(), recovery_time).unwrap();
         assert_eq!(recovery.pending.len(), 1);
@@ -3776,7 +3170,7 @@ mod tests {
             (E + BUDGET_HORIZON_MS + 1, None, Vec::new()),
         ] {
             let tmp = tempdir().unwrap();
-            write_finalized_fixture(tmp.path(), recovery_time, &[base_record(1)], &[]);
+            write_finalized_fixture(tmp.path(), recovery_time, &[base_record(1)]);
             let recovery =
                 restore_polymarket_resolution_recovery(tmp.path(), recovery_time).unwrap();
             match expected_next {
@@ -3824,13 +3218,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_v3_missing_row_kind_in_default_and_precise_reference_days() {
+    fn rejects_v4_missing_row_kind_in_default_and_precise_reference_days() {
         let recovery_time = E + 4 * 60_000;
         let tmp = tempdir().unwrap();
         write_metadata_without_row_kind(
             &day_dir(tmp.path(), recovery_time, "polymarket_market_metadata")
                 .join("polymarket_market_metadata_02.parquet"),
-            POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
+            POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION,
         );
         let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
             .unwrap_err()
@@ -3855,7 +3249,7 @@ mod tests {
         );
         let transition = next_to_current_transition(&authority, 2, day_start);
         let tmp = tempdir().unwrap();
-        write_metadata(
+        write_metadata_v4_records(
             &day_dir(tmp.path(), recovery_time, "polymarket_market_metadata")
                 .join("polymarket_market_metadata_02.parquet"),
             &[transition],
@@ -3863,7 +3257,7 @@ mod tests {
         write_metadata_without_row_kind(
             &day_dir(tmp.path(), source_receive, "polymarket_market_metadata")
                 .join("polymarket_market_metadata_02.parquet"),
-            POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
+            POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION,
         );
         let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
             .unwrap_err()
@@ -3906,12 +3300,12 @@ mod tests {
             next_to_current_transition(&candidate_authority, 4, day_start + 4 * 60_000);
 
         let tmp = tempdir().unwrap();
-        write_metadata(
+        write_metadata_v4_records(
             &day_dir(tmp.path(), source_day_receive, "polymarket_market_metadata")
                 .join("polymarket_market_metadata_02.parquet"),
             &[old_authority, candidate_authority.clone()],
         );
-        write_metadata(
+        write_metadata_v4_records(
             &day_dir(
                 tmp.path(),
                 day_start - UTC_DAY_MS,
@@ -3920,7 +3314,7 @@ mod tests {
             .join("polymarket_market_metadata_02.parquet"),
             &[old_transition],
         );
-        write_metadata(
+        write_metadata_v4_records(
             &day_dir(tmp.path(), day_start, "polymarket_market_metadata")
                 .join("polymarket_market_metadata_02.parquet"),
             &[candidate_transition],
@@ -3973,7 +3367,6 @@ mod tests {
                 third_authority,
                 third_transition,
             ],
-            &[],
         );
 
         let recovery = restore_polymarket_resolution_recovery(tmp.path(), recovery_time).unwrap();
@@ -3988,11 +3381,14 @@ mod tests {
     }
 
     #[test]
-    fn authoritative_schemas_cover_full_v3_metadata_and_bounded_raw_projection() {
-        let metadata = polymarket_market_metadata_v3_schema();
-        require_canonical_metadata_v3_schema(metadata.as_ref(), Path::new("metadata")).unwrap();
-        let market = polymarket_orderbook_schema();
-        require_columns(market.as_ref(), &RAW_PROJECTION, Path::new("market")).unwrap();
+    fn authoritative_schema_covers_full_v4_metadata() {
+        let metadata = polymarket_market_metadata_v4_schema();
+        require_canonical_metadata_schema(
+            metadata.as_ref(),
+            Path::new("metadata"),
+            MetadataLayout::V4,
+        )
+        .unwrap();
 
         assert_eq!(
             metadata
@@ -4008,23 +3404,16 @@ mod tests {
                 .data_type(),
             &DataType::UInt8
         );
-        assert_eq!(
-            market
-                .field_with_name("source_native_payload_json")
-                .unwrap()
-                .data_type(),
-            &DataType::Utf8
-        );
     }
 
     #[test]
-    fn rejects_full_v3_schema_missing_previously_unprojected_column() {
+    fn rejects_full_v4_schema_missing_required_column() {
         let recovery_time = E + 4 * 60_000;
         let tmp = tempdir().unwrap();
-        write_metadata_v3_rows_without_field(
+        write_metadata_v4_rows_without_field(
             &day_dir(tmp.path(), recovery_time, "polymarket_market_metadata")
                 .join("polymarket_market_metadata_02.parquet"),
-            &[metadata_fixture_row(&base_record(1))],
+            &[metadata_v4_fixture_row(&base_record(1), None)],
             "resolution_transport_http_status",
         );
 
@@ -4039,15 +3428,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_previously_unprojected_v3_required_null_matrix_contradiction() {
+    fn rejects_v4_required_null_matrix_contradiction() {
         let recovery_time = E + 4 * 60_000;
         let tmp = tempdir().unwrap();
         let mut row = metadata_fixture_row(&base_record(1));
         row.source_evidence_event_type = Some(SourceEvidenceEventType::MarketResolved);
-        write_metadata_v3_rows(
+        write_metadata_v4_rows(
             &day_dir(tmp.path(), recovery_time, "polymarket_market_metadata")
                 .join("polymarket_market_metadata_02.parquet"),
-            &[row],
+            &[metadata_v4_from_v3_fixture(row, None)],
         );
 
         let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
@@ -4065,10 +3454,13 @@ mod tests {
         let tmp = tempdir().unwrap();
         let mut attempt_row = metadata_fixture_row(&attempt(2, 1, "valid_nonterminal"));
         attempt_row.resolution_budget_horizon_utc = None;
-        write_metadata_v3_rows(
+        write_metadata_v4_rows(
             &day_dir(tmp.path(), recovery_time, "polymarket_market_metadata")
                 .join("polymarket_market_metadata_02.parquet"),
-            &[metadata_fixture_row(&base_record(1)), attempt_row],
+            &[
+                metadata_v4_fixture_row(&base_record(1), None),
+                metadata_v4_from_v3_fixture(attempt_row, None),
+            ],
         );
 
         let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
@@ -4093,10 +3485,10 @@ mod tests {
         row.source_evidence_payload_json = Some(payload.clone());
         row.source_evidence_raw_sha256 = Some(sha256_hex(payload.as_bytes()));
         assert!(row.validate().is_complete());
-        write_metadata_v3_rows(
+        write_metadata_v4_rows(
             &day_dir(tmp.path(), recovery_time, "polymarket_market_metadata")
                 .join("polymarket_market_metadata_02.parquet"),
-            &[row],
+            &[metadata_v4_from_v3_fixture(row, None)],
         );
 
         let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
@@ -4127,10 +3519,13 @@ mod tests {
         terminal_row.source_evidence_raw_sha256 = Some(digest.clone());
         terminal_row.resolution_evidence_raw_sha256 = Some(digest);
         assert!(terminal_row.validate().is_complete());
-        write_metadata_v3_rows(
+        write_metadata_v4_rows(
             &day_dir(tmp.path(), recovery_time, "polymarket_market_metadata")
                 .join("polymarket_market_metadata_02.parquet"),
-            &[metadata_fixture_row(&base_record(1)), terminal_row],
+            &[
+                metadata_v4_fixture_row(&base_record(1), None),
+                metadata_v4_from_v3_fixture(terminal_row, None),
+            ],
         );
 
         let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
@@ -4151,15 +3546,13 @@ mod tests {
         terminal_row.ws_platform_timestamp_raw = Some((receive + 1).to_string());
         terminal_row.ws_platform_timestamp_utc = Some(receive + 1);
         assert!(terminal_row.validate().is_complete());
-        write_metadata_v3_rows(
+        write_metadata_v4_rows(
             &day_dir(tmp.path(), recovery_time, "polymarket_market_metadata")
                 .join("polymarket_market_metadata_02.parquet"),
-            &[metadata_fixture_row(&base_record(1)), terminal_row],
-        );
-        write_raw(
-            &day_dir(tmp.path(), recovery_time, "polymarket_market")
-                .join("polymarket_market_02.parquet"),
-            &[valid_raw(receive)],
+            &[
+                metadata_v4_fixture_row(&base_record(1), None),
+                metadata_v4_from_v3_fixture(terminal_row, Some(("fixture-source-epoch", 1))),
+            ],
         );
 
         let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
@@ -4180,7 +3573,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let mut conflict = base_record(2);
         conflict.condition_id = format!("{CONDITION}ff");
-        write_finalized_fixture(tmp.path(), recovery_time, &[base_record(1), conflict], &[]);
+        write_finalized_fixture(tmp.path(), recovery_time, &[base_record(1), conflict]);
         let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
             .unwrap_err()
             .to_string();
@@ -4192,7 +3585,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let mut digest = base_record(1);
         digest.source_raw_sha256 = Some("0".repeat(64));
-        write_finalized_fixture(tmp.path(), recovery_time, &[digest], &[]);
+        write_finalized_fixture(tmp.path(), recovery_time, &[digest]);
         let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
             .unwrap_err()
             .to_string();
@@ -4218,7 +3611,6 @@ mod tests {
             tmp.path(),
             recovery_time,
             &[base_record(1), transition, duplicate],
-            &[],
         );
         assert!(
             restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
@@ -4241,7 +3633,6 @@ mod tests {
                 attempt(2, 1, "valid_nonterminal"),
                 attempt(3, 1, "transport_unavailable"),
             ],
-            &[],
         );
         assert!(
             restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
@@ -4255,7 +3646,6 @@ mod tests {
             tmp.path(),
             recovery_time,
             &[base_record(1), attempt(2, 5, "transport_unavailable")],
-            &[],
         );
         assert!(
             restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
@@ -4267,7 +3657,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let mut misbound = attempt(2, 1, "valid_nonterminal");
         misbound.attempt_scheduled_utc_ms = Some(E + 180_001);
-        write_finalized_fixture(tmp.path(), recovery_time, &[base_record(1), misbound], &[]);
+        write_finalized_fixture(tmp.path(), recovery_time, &[base_record(1), misbound]);
         let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
             .unwrap_err()
             .to_string();
@@ -4279,7 +3669,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let mut integrity = attempt(2, 1, "integrity_error");
         integrity.integrity_error_class = Some("sdk_decode_or_schema".to_owned());
-        write_finalized_fixture(tmp.path(), recovery_time, &[base_record(1), integrity], &[]);
+        write_finalized_fixture(tmp.path(), recovery_time, &[base_record(1), integrity]);
         assert!(
             restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
                 .unwrap_err()
@@ -4340,7 +3730,6 @@ mod tests {
                 tmp.path(),
                 recovery_time,
                 &[base_record(1), invalid_attempt],
-                &[],
             );
             let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
                 .unwrap_err()
@@ -4350,7 +3739,7 @@ mod tests {
     }
 
     #[test]
-    fn ws_terminal_requires_exact_raw_and_prefixes_post_observations() {
+    fn ws_terminal_uses_current_typed_claimant_and_prefixes_post_observations() {
         let recovery_time = E + 5 * 60_000;
         let receive = E + 240_000;
 
@@ -4363,7 +3752,18 @@ mod tests {
                 ws_terminal(2, receive),
                 post_observation(3, 1),
             ],
-            &[valid_raw(receive)],
+        );
+        write_typed_v3_sources(
+            &day_dir(tmp.path(), recovery_time, "polymarket_market")
+                .join("polymarket_market_02.parquet"),
+            &[typed_market_resolved_source(
+                "fixture-source-epoch",
+                1,
+                receive,
+                receive + 1,
+                "101",
+                "Up",
+            )],
         );
         assert!(
             restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
@@ -4376,40 +3776,11 @@ mod tests {
         write_finalized_fixture(
             tmp.path(),
             recovery_time,
-            &[base_record(1), gamma_terminal(2, 1)],
-            &[valid_down_raw(receive)],
-        );
-        assert!(
-            restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
-                .unwrap_err()
-                .to_string()
-                .contains("terminal/raw winner mismatch")
-        );
-
-        let tmp = tempdir().unwrap();
-        write_finalized_fixture(
-            tmp.path(),
-            recovery_time,
-            &[base_record(1), ws_terminal(2, receive)],
-            &[],
-        );
-        assert!(
-            restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
-                .unwrap_err()
-                .to_string()
-                .contains("no exact finalized raw")
-        );
-
-        let tmp = tempdir().unwrap();
-        write_finalized_fixture(
-            tmp.path(),
-            recovery_time,
             &[
                 base_record(1),
                 ws_terminal(3, receive),
                 post_observation(2, 1),
             ],
-            &[valid_raw(receive)],
         );
         assert!(
             restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
@@ -4423,7 +3794,6 @@ mod tests {
             tmp.path(),
             recovery_time,
             &[base_record(1), post_observation(2, 1)],
-            &[],
         );
         assert!(
             restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
@@ -4440,18 +3810,25 @@ mod tests {
 
         let tmp = tempdir().unwrap();
         let metadata_dir = day_dir(tmp.path(), recovery_time, "polymarket_market_metadata");
-        write_metadata(
+        write_metadata_v4_records(
             &metadata_dir.join("polymarket_market_metadata_02.parquet"),
             &[base_record(1), ws_terminal(2, receive)],
         );
-        write_metadata(
+        write_metadata_v4_records(
             &metadata_dir.join("polymarket_market_metadata_03.parquet"),
             &[post_observation(3, 1)],
         );
-        write_raw(
+        write_typed_v3_sources(
             &day_dir(tmp.path(), recovery_time, "polymarket_market")
                 .join("polymarket_market_02.parquet"),
-            &[valid_raw(receive)],
+            &[typed_market_resolved_source(
+                "fixture-source-epoch",
+                1,
+                receive,
+                receive + 1,
+                "101",
+                "Up",
+            )],
         );
         assert!(
             restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
@@ -4462,57 +3839,18 @@ mod tests {
 
         let tmp = tempdir().unwrap();
         let metadata_dir = day_dir(tmp.path(), recovery_time, "polymarket_market_metadata");
-        write_metadata(
+        write_metadata_v4_records(
             &metadata_dir.join("polymarket_market_metadata_02.parquet"),
             &[base_record(1), post_observation(3, 1)],
         );
-        write_metadata(
+        write_metadata_v4_records(
             &metadata_dir.join("polymarket_market_metadata_03.parquet"),
             &[ws_terminal(2, receive)],
-        );
-        write_raw(
-            &day_dir(tmp.path(), recovery_time, "polymarket_market")
-                .join("polymarket_market_02.parquet"),
-            &[valid_raw(receive)],
         );
         let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
             .unwrap_err()
             .to_string();
         assert!(error.contains("post-terminal prefix"), "{error}");
-    }
-
-    #[test]
-    fn gamma_terminal_accepts_qualified_losing_raw_but_not_ws_owned_post() {
-        let recovery_time = E + 5 * 60_000;
-        let receive = E + 240_000;
-
-        let tmp = tempdir().unwrap();
-        write_finalized_fixture(
-            tmp.path(),
-            recovery_time,
-            &[base_record(1), gamma_terminal(2, 1)],
-            &[valid_raw(receive)],
-        );
-        assert!(
-            restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
-                .unwrap()
-                .pending
-                .is_empty()
-        );
-
-        let tmp = tempdir().unwrap();
-        write_finalized_fixture(
-            tmp.path(),
-            recovery_time,
-            &[base_record(1), gamma_terminal(2, 1), post_observation(3, 2)],
-            &[valid_raw(receive)],
-        );
-        assert!(
-            restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
-                .unwrap_err()
-                .to_string()
-                .contains("post-terminal prefix")
-        );
     }
 
     #[test]
@@ -4559,7 +3897,6 @@ mod tests {
                     tmp.path(),
                     recovery_time,
                     &[base_record(1), invalid_terminal],
-                    &[],
                 );
                 let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
                     .unwrap_err()
@@ -4573,291 +3910,14 @@ mod tests {
     }
 
     #[test]
-    fn relevant_invalid_raw_fails_closed_while_out_of_window_and_unrelated_raw_are_ignored() {
-        let recovery_time = E + 4 * 60_000;
-        let mut invalid = valid_raw(E + 180_000);
-        invalid.winning_asset_id = Some("999".to_owned());
-
-        let tmp = tempdir().unwrap();
-        write_finalized_fixture(tmp.path(), recovery_time, &[base_record(1)], &[invalid]);
-        assert!(
-            restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
-                .unwrap_err()
-                .to_string()
-                .contains("relevant raw is invalid")
-        );
-
-        let mut before_window = valid_raw(T - 1);
-        before_window.winning_asset_id = Some("999".to_owned());
-        let mut after_recovery = valid_raw(recovery_time + 1);
-        after_recovery.source_payload_json = "{".to_owned();
-        let mut unrelated = valid_raw(E + 180_000);
-        unrelated.market = "unrelated-condition".to_owned();
-        unrelated.slug = Some("unrelated-slug".to_owned());
-        unrelated.source_payload_json = "{".to_owned();
-        let tmp = tempdir().unwrap();
-        write_finalized_fixture(
-            tmp.path(),
-            recovery_time,
-            &[base_record(1)],
-            &[before_window, after_recovery, unrelated],
-        );
-        assert_eq!(
-            restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
-                .unwrap()
-                .pending
-                .len(),
-            1
-        );
-
-        let tmp = tempdir().unwrap();
-        write_finalized_fixture(
-            tmp.path(),
-            recovery_time,
-            &[base_record(1)],
-            &[valid_raw(E + 180_000)],
-        );
-        assert!(
-            restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
-                .unwrap_err()
-                .to_string()
-                .contains("no terminal or summary")
-        );
-    }
-
-    #[test]
-    fn relevant_raw_contradictions_and_missing_v2_columns_fail_closed() {
-        let recovery_time = E + 4 * 60_000;
-        let receive = E + FIRST_SLOT_DELAY_MS;
-
-        let mut schema_mismatch = valid_raw(receive);
-        schema_mismatch.schema_version = "polymarket_orderbook_v1".to_owned();
-
-        let mut typed_identity_mismatch = valid_raw(receive);
-        typed_identity_mismatch.market = "contradictory-condition".to_owned();
-
-        let mut missing_typed_assets = valid_raw(receive);
-        missing_typed_assets.resolved_event_asset_ids = None;
-
-        let mut noncanonical_typed_assets = valid_raw(receive);
-        noncanonical_typed_assets.resolved_event_asset_ids = Some(r#"[ "101", "102" ]"#.to_owned());
-
-        let mut malformed_payload = valid_raw(receive);
-        malformed_payload.source_payload_json = "{".to_owned();
-
-        let mut payload_identity_mismatch = valid_raw(receive);
-        let mut payload =
-            serde_json::from_str::<Value>(&payload_identity_mismatch.source_payload_json).unwrap();
-        payload["id"] = Value::String("contradictory-market-id".to_owned());
-        payload_identity_mismatch.source_payload_json = payload.to_string();
-
-        let mut payload_slug_mismatch = valid_raw(receive);
-        let mut payload =
-            serde_json::from_str::<Value>(&payload_slug_mismatch.source_payload_json).unwrap();
-        payload["slug"] = Value::String("contradictory-slug".to_owned());
-        payload_slug_mismatch.source_payload_json = payload.to_string();
-
-        let mut payload_assets_mismatch = valid_raw(receive);
-        let mut payload =
-            serde_json::from_str::<Value>(&payload_assets_mismatch.source_payload_json).unwrap();
-        payload["asset_ids"] = json!(["101", "999"]);
-        payload_assets_mismatch.source_payload_json = payload.to_string();
-
-        let mut payload_winner_mismatch = valid_raw(receive);
-        let mut payload =
-            serde_json::from_str::<Value>(&payload_winner_mismatch.source_payload_json).unwrap();
-        payload["winning_asset_id"] = Value::String("102".to_owned());
-        payload["winning_outcome"] = Value::String("Down".to_owned());
-        payload_winner_mismatch.source_payload_json = payload.to_string();
-
-        for (case, raw) in [
-            ("schema", schema_mismatch),
-            ("typed_identity", typed_identity_mismatch),
-            ("missing_typed_assets", missing_typed_assets),
-            ("noncanonical_typed_assets", noncanonical_typed_assets),
-            ("malformed_payload", malformed_payload),
-            ("payload_identity", payload_identity_mismatch),
-            ("payload_slug", payload_slug_mismatch),
-            ("payload_assets", payload_assets_mismatch),
-            ("payload_winner", payload_winner_mismatch),
-        ] {
-            let tmp = tempdir().unwrap();
-            write_finalized_fixture(tmp.path(), recovery_time, &[base_record(1)], &[raw]);
-            let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
-                .unwrap_err()
-                .to_string();
-            assert!(
-                error.contains("relevant raw is invalid"),
-                "case={case}:{error}"
-            );
-        }
-
-        let tmp = tempdir().unwrap();
-        let raw_dir = day_dir(tmp.path(), recovery_time, "polymarket_market");
-        write_metadata(
-            &day_dir(tmp.path(), recovery_time, "polymarket_market_metadata")
-                .join("polymarket_market_metadata_02.parquet"),
-            &[base_record(1)],
-        );
-        write_raw_missing_projection_column(&raw_dir.join("polymarket_market_02.parquet"));
-        let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("projection column missing"), "{error}");
-    }
-
-    #[test]
-    fn relevant_raw_payload_slug_null_is_legal() {
-        let recovery_time = E + 5 * 60_000;
-        let receive = E + 4 * 60_000;
-        let mut raw = valid_raw(receive);
-        let mut payload = serde_json::from_str::<Value>(&raw.source_payload_json).unwrap();
-        payload["slug"] = Value::Null;
-        raw.source_payload_json = payload.to_string();
-
-        let mut terminal = ws_terminal(2, receive);
-        terminal.source_payload_json = Some(raw.source_payload_json.clone());
-        terminal.source_raw_sha256 = Some(sha256_hex(raw.source_payload_json.as_bytes()));
-        terminal.resolution_evidence_raw_sha256 = terminal.source_raw_sha256.clone();
-
-        let tmp = tempdir().unwrap();
-        write_finalized_fixture(
-            tmp.path(),
-            recovery_time,
-            &[base_record(1), terminal],
-            &[raw],
-        );
-        assert!(
-            restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
-                .unwrap()
-                .pending
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn payload_routing_prevents_corrupt_typed_columns_from_hiding_relevant_raw() {
-        let recovery_time = E + 5 * 60_000;
-        let receive = E + 4 * 60_000;
-        let mut raw = valid_raw(receive);
-        raw.event_type = "book".to_owned();
-        raw.market = CONDITION_6.to_owned();
-        raw.slug = Some(fixture_slug(E));
-
-        let tmp = tempdir().unwrap();
-        write_finalized_fixture(tmp.path(), recovery_time, &[base_record(1)], &[raw]);
-        let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("relevant raw is invalid")
-                && error.contains("typed event_type is contradictory"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn raw_scan_is_single_pass_and_materializes_only_coarse_candidate_matches() {
-        let recovery_time = E + 5 * 60_000;
-        let receive = E + 4 * 60_000;
-        let mut second = base_record(3);
-        second.slug = fixture_slug(E);
-        second.condition_id = CONDITION_6.to_owned();
-        second.clob_market_id = format!("{MARKET_ID}-second");
-        second.market_start_utc_ms = E;
-        second.market_end_utc_ms = E + 5 * 60_000;
-        let payload = gamma_market_payload(
-            &second.slug,
-            &second.condition_id,
-            &second.clob_market_id,
-            second.market_start_utc_ms,
-            second.market_end_utc_ms,
-            false,
-        );
-        second.source_payload_json = Some(payload.clone());
-        second.source_raw_sha256 = Some(sha256_hex(payload.as_bytes()));
-        let second_slug = second.slug.clone();
-
-        let mut raw = (0..4_096)
-            .map(|_| {
-                let mut row = valid_raw(receive);
-                row.event_type = "book".to_owned();
-                row.source_payload_json = "{".to_owned();
-                row.winning_asset_id = None;
-                row.winning_outcome = None;
-                row.resolved_event_asset_ids = None;
-                row.schema_version = "irrelevant-book-schema".to_owned();
-                row
-            })
-            .collect::<Vec<_>>();
-        raw.push(valid_raw(receive));
-
-        let tmp = tempdir().unwrap();
-        write_finalized_fixture(
-            tmp.path(),
-            recovery_time,
-            &[base_record(1), ws_terminal(2, receive), second],
-            &raw,
-        );
-        reset_raw_scan_test_stats();
-        let recovery = restore_polymarket_resolution_recovery(tmp.path(), recovery_time).unwrap();
-        assert_eq!(recovery.pending.len(), 1);
-        assert_eq!(recovery.pending[0].slug, second_slug);
-        assert_eq!(raw_scan_test_stats(), (raw.len(), 1));
-    }
-
-    #[test]
-    fn expired_validation_identity_still_opens_raw() {
-        let recovery_time = E + 30 * 60_000;
-        let tmp = tempdir().unwrap();
-        write_metadata(
-            &day_dir(tmp.path(), recovery_time, "polymarket_market_metadata")
-                .join("polymarket_market_metadata_02.parquet"),
-            &[base_record(1)],
-        );
-        write_raw_missing_projection_column(
-            &day_dir(tmp.path(), recovery_time, "polymarket_market")
-                .join("polymarket_market_02.parquet"),
-        );
-
-        let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("projection column missing"), "{error}");
-    }
-
-    #[test]
-    fn raw_only_at_or_after_last_slot_fails_closed() {
-        let receive = E + 4 * 60_000;
-        for recovery_time in [E + BUDGET_HORIZON_MS, E + BUDGET_HORIZON_MS + 1] {
-            let tmp = tempdir().unwrap();
-            write_finalized_fixture(
-                tmp.path(),
-                recovery_time,
-                &[base_record(1)],
-                &[valid_raw(receive)],
-            );
-            let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
-                .unwrap_err()
-                .to_string();
-            assert!(
-                error.contains("matching source has no terminal or summary"),
-                "time={recovery_time}:{error}"
-            );
-        }
-    }
-
-    #[test]
     fn legal_terminal_and_summary_after_horizon_validate_without_recovery() {
         let recovery_time = E + 30 * 60_000;
-        let receive = E + 4 * 60_000;
 
         let tmp = tempdir().unwrap();
         write_finalized_fixture(
             tmp.path(),
             recovery_time,
-            &[base_record(1), ws_terminal(2, receive)],
-            &[valid_raw(receive)],
+            &[base_record(1), gamma_terminal(2, 1)],
         );
         assert!(
             restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
@@ -4873,7 +3933,7 @@ mod tests {
         metadata.extend(attempts.clone());
         metadata.push(summary(8, &attempts));
         let tmp = tempdir().unwrap();
-        write_finalized_fixture(tmp.path(), recovery_time, &metadata, &[]);
+        write_finalized_fixture(tmp.path(), recovery_time, &metadata);
         assert!(
             restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
                 .unwrap()
@@ -4883,7 +3943,7 @@ mod tests {
     }
 
     #[test]
-    fn summary_reconstructs_six_ordinals_and_allows_only_strictly_late_raw() {
+    fn summary_reconstructs_six_ordinals_and_requires_zero_typed_source() {
         let attempts = (1..=6)
             .map(|ordinal| {
                 let result = match ordinal {
@@ -4897,25 +3957,12 @@ mod tests {
         let summary = summary(8, &attempts);
         summary.validate_recovery_eligibility().unwrap();
         let counters = attempt_counters(&attempts).unwrap();
-        let identity = base_record(1).fixed_identity().unwrap();
-        let role_exit = summary.runtime_role_applied_at_utc_ms.unwrap();
-        let late_raw =
-            validate_relevant_raw(&valid_raw(role_exit + 1), &identity, role_exit + 1).unwrap();
-        validate_summary(&summary, &counters, &[late_raw]).unwrap();
-
-        let on_exit_raw =
-            validate_relevant_raw(&valid_raw(role_exit), &identity, role_exit).unwrap();
-        assert!(
-            validate_summary(&summary, &counters, &[on_exit_raw])
-                .unwrap_err()
-                .to_string()
-                .contains("not strictly post-horizon")
-        );
+        validate_typed_summary(&summary, &counters, &[]).unwrap();
 
         let mut bad_summary = summary;
         bad_summary.valid_response_count = Some(3);
         assert!(
-            validate_summary(&bad_summary, &counters, &[])
+            validate_typed_summary(&bad_summary, &counters, &[])
                 .unwrap_err()
                 .to_string()
                 .contains("do not reconstruct six slots")
@@ -4930,12 +3977,7 @@ mod tests {
         let mut bad_terminal = ws_terminal(2, receive);
         bad_terminal.lifecycle_state = "active".to_owned();
         let tmp = tempdir().unwrap();
-        write_finalized_fixture(
-            tmp.path(),
-            recovery_time,
-            &[base_record(1), bad_terminal],
-            &[valid_raw(receive)],
-        );
+        write_finalized_fixture(tmp.path(), recovery_time, &[base_record(1), bad_terminal]);
         let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
             .unwrap_err()
             .to_string();
@@ -4954,7 +3996,6 @@ mod tests {
             tmp.path(),
             recovery_time,
             &[base_record(1), late_applied_terminal],
-            &[valid_raw(receive)],
         );
         let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
             .unwrap_err()
@@ -4973,7 +4014,7 @@ mod tests {
         metadata.extend(attempts);
         metadata.push(bad_summary);
         let tmp = tempdir().unwrap();
-        write_finalized_fixture(tmp.path(), recovery_time, &metadata, &[]);
+        write_finalized_fixture(tmp.path(), recovery_time, &metadata);
         let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
             .unwrap_err()
             .to_string();
@@ -5004,7 +4045,6 @@ mod tests {
                 tmp.path(),
                 recovery_time,
                 &[base_record(1), ws_terminal(2, receive), post.clone()],
-                &[valid_raw(receive)],
             );
             let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
                 .unwrap_err()
@@ -5016,7 +4056,7 @@ mod tests {
         bad_snapshot.metadata_origin = "local_market_state_timer".to_owned();
         let authority_recovery_time = E + 4 * 60_000;
         let tmp = tempdir().unwrap();
-        write_finalized_fixture(tmp.path(), authority_recovery_time, &[bad_snapshot], &[]);
+        write_finalized_fixture(tmp.path(), authority_recovery_time, &[bad_snapshot]);
         let error = restore_polymarket_resolution_recovery(tmp.path(), authority_recovery_time)
             .unwrap_err()
             .to_string();
@@ -5062,7 +4102,6 @@ mod tests {
                 tmp.path(),
                 authority_recovery_time,
                 &[base_record(1), transition],
-                &[],
             );
             let error = restore_polymarket_resolution_recovery(tmp.path(), authority_recovery_time)
                 .unwrap_err()
@@ -5080,7 +4119,6 @@ mod tests {
             tmp.path(),
             recovery_time,
             &[base_record(1), gamma_terminal(2, 1), gamma_terminal(3, 2)],
-            &[],
         );
         assert!(
             restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
@@ -5095,7 +4133,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let mut metadata = vec![base_record(1), gamma_terminal(2, 1)];
         metadata.push(summary(30, &attempts));
-        write_finalized_fixture(tmp.path(), recovery_time, &metadata, &[]);
+        write_finalized_fixture(tmp.path(), recovery_time, &metadata);
         assert!(
             restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
                 .unwrap_err()
@@ -5111,7 +4149,7 @@ mod tests {
         let mut metadata = vec![base_record(1)];
         metadata.extend(attempts);
         metadata.extend([first, second]);
-        write_finalized_fixture(tmp.path(), recovery_time, &metadata, &[]);
+        write_finalized_fixture(tmp.path(), recovery_time, &metadata);
         assert!(
             restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
                 .unwrap_err()
@@ -5124,7 +4162,7 @@ mod tests {
     fn never_recovers_at_or_after_last_slot_and_enforces_two_pending_bound() {
         let tmp = tempdir().unwrap();
         let recovery_time = E + BUDGET_HORIZON_MS;
-        write_finalized_fixture(tmp.path(), recovery_time, &[base_record(1)], &[]);
+        write_finalized_fixture(tmp.path(), recovery_time, &[base_record(1)]);
         assert!(
             restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
                 .unwrap()
@@ -5156,7 +4194,7 @@ mod tests {
                 record
             })
             .collect::<Vec<_>>();
-        write_finalized_fixture(tmp.path(), recovery_time, &records, &[]);
+        write_finalized_fixture(tmp.path(), recovery_time, &records);
         assert!(
             restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
                 .unwrap_err()
