@@ -8,7 +8,21 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_EXECUTION_STAGE_1_CLOSED`。用户于2026-07-25明确批准按本需求与计划开始执行；pre-execution checkpoint为`b65a2add5749d0931e91ef36d3bbadcb15a53014`。阶段0只读基线、四项获批文档对齐及审查修复已完成并以commit `86d14a9f4225f9b941206b9d47bcfe5a736c7789`推送到`origin/fix-rtds-silents`，本地HEAD、upstream与远端ref一致。Stage1已在本地完成官方0.7.0 vendor重建、四路径patch重放、唯一依赖切换、旧vendor删除、离线门禁与typed fixture/consumer审计；runtime为`SDK_070_RUNTIME_USABLE`，typed contract为`SDK_070_TYPED_CONTRACT_BLOCKED`。独立`gpt-5.6-sol`/`ultra`阶段审查为`Critical 0 / Important 0 / Minor 0 / PASS`；用户已另行批准Stage1 commit/push，本闭合状态以承载本记录的commit成功推送且远端分支SHA与本地HEAD/upstream一致为生效条件。Stage2未开始；公开网络smoke为`NOT_AUTHORIZED / NOT_RUN`。文内单独决策/授权门继续有效；本文件只记录本组三件套的形成、事实、冲突、决定与实际执行，不回写旧changelog。
+> 状态：`APPROVED_EXECUTION_STAGE_2_IN_PROGRESS`。阶段0已以commit
+> `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
+> `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
+> `SDK_070_RUNTIME_USABLE`，typed contract为
+> `SDK_070_TYPED_CONTRACT_BLOCKED`。用户于2026-07-25批准继续推进，阶段2任务
+> 2.1/2.2共同基线已落盘到
+> `data-collect/docs/sdk070-stage2-observable-and-owner-baseline.md`并完成自审；
+> `2-PM`四个小步均已完成：step 1/2/3通过实现与自审，step 4确认既有resolution
+> recovery已是唯一owner且无需再重构。`2-PM`分支收口完整门与独立审查均已通过，
+> 用户已另行批准`2-PM` closure commit/push；`2-PM_CLOSED`以承载本记录的commit
+> 成功推送且本地HEAD、upstream与远端ref一致为生效条件。共享dispatcher继续留在
+> root。公开网络smoke、非parser
+> typed字段决定、RTDS参数与4A/4B、后继commit/push、production
+> activation/cutover、release、部署、远端操作、migration和删除仍保留独立门。
+> 本文件只记录本组三件套的事实、冲突、决定与执行，不回写旧changelog。
 
 ## 2026-07-24：用户要求建立一个新的总事项
 
@@ -719,3 +733,264 @@ Stage1记录为`STAGE_1_CLOSED`，以承载本记录的commit成功推送且远�
 本次授权不继承为Stage2各分支或后继阶段的commit/push授权，也不扩大非parser
 typed字段决定、RTDS参数与4A/4B、公开网络smoke、production activation/cutover、
 release、部署、远端服务/数据操作、migration或删除授权。
+
+## 2026-07-25：阶段2共同基线落盘并完成自审
+
+- 用户批准继续推进后，以Stage1 closure commit
+  `b818e436a115eb61859fa281773342ee58f54f6a`为事实锚，完成任务2.1/2.2的
+  current observable与owner只读盘点，落盘
+  `data-collect/docs/sdk070-stage2-observable-and-owner-baseline.md`。
+- 基线冻结training唯一调用链、4个logical producer、6个artifact、current
+  schema、identity/timestamp/admission、RawDayGate/rollover/writer/manifest/
+  shutdown、resolution current/next/pending/terminal/restart及paper/live
+  heartbeat-only边界；两个历史artifact根分别记录其真实build commit，不冒充
+  SDK070 current public smoke。
+- 当前自动测试集合为`593`，无重复leaf name、无`#[ignore]`；排序
+  `path:name`与name-only SHA-256分别为
+  `f038056715f0a130dcba90ee5168300ed5b57f962303376725ede7341dbfc221`
+  和
+  `1b25ed8f6e51e6a6696338e890c6e3a5ca84129abd6f140ca1ce9a03b2eea812`。
+  lexical symbol集合为`2808`，`path:kind:name`与`kind:name` SHA-256分别为
+  `d4a2ff3cc10c480e2278ec670f4153c7ff3583e7f7c7575ee515b16b4b853706`
+  和
+  `e2c6ad75c153040241bd3897338a37bb7b6c18efcded4b6d73fe3ebd86632e17`。
+- 只登记8类真实跨owner边界；SDK actor、Polymarket pump和Gamma `JoinSet`
+  仍归source内部，不重复建立第二message-flow台账。当前105个
+  `#[cfg(test)]`中9个为test-module gate、96个为implementation hook，按真实
+  文件owner记录production影响。
+- 对照需求、计划、当前代码与历史artifact后未发现阻断阶段2的语义冲突。
+  `SDK_070_TYPED_CONTRACT_BLOCKED`仍只阻断阶段3 v3；公开网络smoke仍是
+  `NOT_AUTHORIZED / NOT_RUN`。
+- 文档路径、artifact事实、测试/symbol数量与hash均已复算一致；
+  `cargo test -p data-collect --locked --lib --tests -- --list`成功列出593个test，
+  `git diff --check`退出0。当前游标为`STAGE_2_COMMON_BASELINE_COMPLETE`。
+  共同基线没有修改
+  Rust、schema、payload、fingerprint、admission、RTDS、paper/live、部署路径或
+  `run_id`校验；三份既存未跟踪RTDS草案保持未修改、未暂存、未删除。
+- 自审通过后只进入`2-PM` step 1：提取Polymarket runtime source owner及其直接
+  Gamma discovery/identity/resolution transport、helpers和直接测试。adapter、
+  writer seam、restart recovery与RTDS保持原位。
+
+## 2026-07-25：`2-PM` step 1 Polymarket source owner完成自审
+
+- 新增私有`data-collect/src/live_runtime/polymarket_source.rs`，机械迁入
+  Polymarket source spec/control、SDK fast-drain pump、discovery/context、
+  single processing actor、Gamma resolution transport及其直接helpers；root仅
+  增加私有`mod polymarket_source; use polymarket_source::*;`。
+- 新增私有
+  `data-collect/src/live_runtime/tests/polymarket_source.rs`，从root机械迁入
+  73个直接测试；root保留200个adapter/writer/recovery/coordinator/cross-owner
+  测试。唯一文本适配是隔离资源测试的完整模块名；所有test属性和函数体与Stage1
+  HEAD对账一致。
+- `live_runtime.rs`由50,382行降至36,428行；新production/test模块分别为
+  5,432/8,484行，三个文件合计50,344行，净减38行。行数变化只来自机械迁移、
+  私有module scaffolding、最窄`pub(super)`及rustfmt布局，不是runtime语义门。
+- Step2实施前复核发现，前一版未提交记录误用了最终`cargo fmt`前的root统计
+  36,501行，因而把合计/净变化误记为50,417/+35。最终格式化后的root少73行，
+  恰与迁移测试数相同；归一化production、73个测试函数与root remainder的hash、
+  测试名称集合及验证结果均未变化。用户批准方案A后，本条把活动事实修正为
+  36,428/50,344/-38；错误数字不再具有current authority。
+- 主代理把Stage1 HEAD原owner片段与新production模块归一化后得到同一SHA-256
+  `2c78da1d4a2c1bce1de218ed35680af0a1237692dcba3186f93dab992b07ff34`；
+  73个测试函数归一化后同为
+  `0b5f550295731a59896698280913346569296fe2fbe7f18994dadc3b5cd292db`；
+  删除计划内owner/test并排除三个私有module声明后，root remainder归一化后同为
+  `2ee0aa51666072cc0b3ca4c1b8785f86bcc366d761ebea8a00367318ddda24e7`。
+  归一化只忽略空白、rustfmt可选尾逗号、`pub(super)`及唯一隔离测试路径变化。
+- 全局测试仍为593，src/integration仍为347/246、无重复leaf name，name-only
+  SHA-256仍为
+  `1b25ed8f6e51e6a6696338e890c6e3a5ca84129abd6f140ca1ce9a03b2eea812`。
+  lexical symbol只有两个计划内`mod polymarket_source`新增；剔除它们后的
+  `kind:name` SHA-256仍为Stage2基线
+  `e2c6ad75c153040241bd3897338a37bb7b6c18efcded4b6d73fe3ebd86632e17`。
+- 主代理复跑owner测试73/73、跨owner测试8/8、五组Polymarket integration
+  52/52；`cargo fmt --all -- --check`、
+  `cargo check -p data-collect --locked --all-targets`与`git diff --check`
+  全部退出0。
+- `lib.rs`未修改，新模块不存在plain `pub`或`pub(crate)`；仅使用parent
+  adapter和移动测试所需的最窄`pub(super)`。schema、payload、hash、fingerprint、
+  admission、RTDS、paper/live、`run_id`与部署路径均未修改，三份既存未跟踪RTDS
+  草案保持未修改、未暂存、未删除。
+- 当前`2-PM`游标为`STEP_1_SELF_REVIEW_PASSED`。下一小步只允许step 2
+  adapter/row conversion owner；writer seam、restart recovery与RTDS保持原位。
+
+## 2026-07-25：`2-PM` step 2 event adapter/row conversion完成自审
+
+- 新增私有`data-collect/src/live_runtime/polymarket_event_adapter.rs`，机械迁入
+  38个纯adapter/row conversion items：canonical payload、target fan-out与identity
+  校验、event-specific raw JSON、metadata v3构造、RawEvent到metadata/orderbook
+  row转换及其直接test helpers。
+- 新增私有
+  `data-collect/src/live_runtime/tests/polymarket_event_adapter.rs`，机械迁入12个
+  直接测试。root保留188个测试，source子模块保留73个，adapter子模块为12个；
+  `polymarket_lifecycle_identity_contradictions_are_terminal`与
+  `polymarket_invalid_market_resolved_is_raw_first_then_fail_closed`因跨
+  adapter/source/admission边界继续留root。
+- Step1后三文件合计50,344行；Step2后root/source/adapter/source-tests/
+  adapter-tests分别为33,988/5,432/1,692/8,484/756行，合计50,352行。净增8行只
+  来自私有module scaffolding、最窄`pub(super)`及rustfmt布局。
+- 主代理逐item归一化对账38个production items，Stage1 HEAD与新模块SHA-256同为
+  `0e75f87c0802b05f9cb0621fae16d1dddf9af33917697885539930169b12f393`；
+  12个测试函数归一化后同为
+  `ff8b15361618359a8c557a42dca48c5f55972e3821a43b090315efe61139037e`。
+  归一化只忽略空白、rustfmt可选尾逗号和编译所需`pub(super)`；相关
+  `#[cfg(test)]`/`#[allow]`属性另行逐项保留。
+- 全局测试仍为593，src/integration仍为347/246，无重复leaf name，name-only
+  SHA-256仍为
+  `1b25ed8f6e51e6a6696338e890c6e3a5ca84129abd6f140ca1ce9a03b2eea812`。
+  lexical symbol为2812；剔除source/adapter两组各两个私有module声明后仍为2808，
+  `kind:name` SHA-256仍为
+  `e2c6ad75c153040241bd3897338a37bb7b6c18efcded4b6d73fe3ebd86632e17`。
+- 主代理复跑adapter 12/12、`polymarket_`受影响unit 100/100、六组
+  adapter/schema/dedupe/writer integration 50/50；实现代理另复核source 73/73、
+  root跨owner 13/13及Step1五组PM/SDK integration 52/52。fmt、locked
+  all-targets check与diff check全部退出0。
+- RawDay/admission、source lifecycle dedupe与Parquet restore、metadata
+  enqueue/atomic ordering、`LiveSegmentWriter`/schema dispatch、restart
+  recovery、manifest、coordinator及RTDS保持原位。`lib.rs`未修改，新模块没有
+  plain`pub`或`pub(crate)`；schema、payload、hash、fingerprint、admission、
+  paper/live、`run_id`和部署路径均未改变。
+- 当前`2-PM`游标为`STEP_2_SELF_REVIEW_PASSED`。下一小步只允许step 3 writer
+  integration seam及直接测试；restart recovery与RTDS保持原位。
+
+## 2026-07-25：Step 3 writer owner冲突与`Writer-A`裁决
+
+- 两路只读审计确认，当前`LiveSegmentWriter`生命周期、`typed_schema_version`
+  schema mapping及`write_typed_live_event`均同时服务六类source；PM只占两个
+  match arm。Rust中不存在可仅移动现有symbol、只做path/visibility适配便形成
+  完整PM dispatcher owner的实现。
+- 整体移动共享函数会把Binance/RTDS错误归入`2-PM`；新增
+  `Option/handled`协议或在root/module重复source-kind match又会形成多余控制
+  抽象。原需求中的“PM-specific writer dispatch”与计划的纯机械约束因此不能
+  同时成立，主代理按方案不一致门停止实现并请求用户裁决；停止期间未编辑Rust、
+  未构建、未测试、未提交或push。
+- 用户批准`Writer-A`：root继续唯一持有六源source-kind dispatch与
+  `logical_bytes`计算；既有私有`polymarket_event_adapter`只取得PM current
+  schema version value、两个rows-to-writer leaf函数及PM独占one-row guard。
+  两个root PM match arm分别直接委派对应leaf，不新增Option/handled协议、重复
+  source-kind match、第三模块或第二writer abstraction。
+- 测试只补one-row guard当前缺失的一个fail-closed直接回归，并继续运行既有
+  adapter、shared writer、schema/Parquet及跨owner验证；不为已经覆盖的0/1-row
+  正常路径重复增加测试。`Writer-A`不授权修改schema值、payload/hash、
+  fingerprint、admission、RTDS、paper/live、部署、远端、commit或push。
+
+## 2026-07-25：`2-PM` step 3 `Writer-A`完成自审
+
+- `polymarket_event_adapter.rs`新增私有
+  `POLYMARKET_ORDERBOOK_SCHEMA_VERSION`，把root schema mapping与adapter row
+  context原有的两个`polymarket_orderbook_v2`同值literal归并为单一current
+  value；没有改变schema字符串。metadata v3常量继续由
+  `polymarket_market_metadata_layout`持有，没有复制或迁移。
+- adapter新增两个最窄`pub(super)` leaf：
+  `write_polymarket_orderbook_live_event`与
+  `write_polymarket_metadata_v3_live_event`；原私有
+  `require_at_most_one_typed_row`随leaf完整移动。root
+  `write_typed_live_event`仍只计算一次`logical_bytes`并持有唯一六源match，两个
+  PM arm分别直接调用对应leaf，其余四个source arm与error路径未改。
+- 没有新增`Option/handled`协议、adapter内source-kind match、第三模块、第二
+  writer abstraction、plain`pub`、`pub(crate)`或`lib.rs`改动。schema、payload、
+  hash、fingerprint、admission、recovery、RTDS、paper/live、`run_id`与部署路径
+  均未改变。
+- 新增一个直接测试
+  `polymarket_writer_rejects_unsplit_fanout_before_writing`：真实typed writer接收
+  既有两row price-change fixture，断言原guard错误，并在finalize后确认row count
+  为0；没有重复增加已有0/1-row正常路径测试。
+- Step2后五文件合计50,352行；分支收口Clippy修正后root/source/adapter/
+  source-tests/adapter-tests分别为33,965/5,432/1,727/8,484/782行，合计50,390
+  行，净增38行，来自批准的两个leaf、一个version constant及一个直接测试。
+- 自动测试集合为src 348、integration 246、合计594，无重复leaf name、无
+  `#[ignore]`；source-order、排序`path:name`与name-only SHA-256分别为
+  `c6067bb80a9717e7f6392a798070f27b6728d10be4b4e076a48dcdd263153766`、
+  `23e3805c21c385831f905799e3de3c74a2417d6c7f8cccf94bd725a55f31faaa`与
+  `a67ca19fb9c84e7b5b9a70bfef6cc8d869d53ea5277b4a0e146a96ee05161470`。
+  lexical symbol为2,816：相对Step2只增加批准的两个production leaf、一个
+  direct test及一个constant，原guard只是移动；`path:kind:name`与`kind:name`
+  SHA-256分别为
+  `dbd8cad3f5b2d02ac610becb7750d3d0afc324f343f014af79f5b186c87346d9`与
+  `311b52bfd2da4c02616c62040354a2646316d01164362bb943a439cb5e77b1bb`。
+- 验证通过：新guard测试1/1、adapter 13/13、`live_runtime::tests::polymarket_`
+  101/101、共享writer统计测试1/1、六组相关integration 53/53、
+  `cargo fmt --all -- --check`、`cargo check -p data-collect --locked
+  --all-targets`、594-test harness list与`git diff --check`。
+- `gpt-5.6-sol`/`ultra`独立只读审查结论为`PASS_WITH_MINOR`，Critical 0、
+  Important 0；唯一Minor是文档把单个orderbook version value误写为复数，已在
+  demand/plan/changelog同步修正。当前游标为
+  `2-PM_STEP_3_SELF_REVIEW_PASSED`；下一小步只审计既有resolution recovery
+  owner，不提前改RTDS或shared writer。
+
+## 2026-07-25：`2-PM` step 4 recovery owner审计通过且无需移动
+
+- 独立只读审计确认
+  `data-collect/src/polymarket_resolution_recovery.rs`已经是唯一完整的resolution
+  restart事实恢复owner：唯一production入口
+  `restore_polymarket_resolution_recovery`、metadata/raw读取、canonical schema/
+  payload/reference validation、finalized路径/排序及恢复结果类型均在同文件。
+- 同文件`mod tests`持有32个直接测试。root
+  `reconcile_stable_startup_recovery`只在UTC/manifest稳定门内调用恢复入口，PM
+  source只把`PolymarketRestartRecovery`转换成pending运行态，不再次扫描或验证
+  durable事实；adapter没有restore/recovery路径。
+- root `restore_polymarket_dedupe_until_cancelled`只投影slug与
+  `source_native_payload_json`并恢复`LifecycleFingerprintSets`，其输出、消费者和
+  取消语义均不同，不是resolution-state shadow实现，也不应误搬入recovery owner。
+- `lib.rs`中的public module与三个public item均为既存边界。checkout内没有额外
+  外部消费者，但行为保持阶段不得借此收窄API。审查另观察到
+  `finalized_attempt_ordinals`未被production source读取；删除它会改变public恢复
+  结果合同且不属于Step 4，因此保持不动。
+- 本步终态为`ALREADY_OWNED_NO_MOVE`：recovery、`lib.rs`、Rust、测试与schema均
+  没有修改，Step3的594测试/2,816 lexical symbol事实不变。直接recovery测试
+  32/32、startup crossing-midnight/clock-regression 2/2通过；此前PM unit
+  101/101已经覆盖restart crash-cut与recovered-pending source消费者。
+- 当前四个`2-PM`小步均完成，游标进入`2-PM_BRANCH_CLOSE_GATE`。下一步只运行
+  一次分支完整确定性门与`gpt-5.6-sol`/`ultra`独立全面审查；通过后先记
+  `2-PM_REVIEW_PASSED_AWAITING_PUBLISH`，仍不得自行commit/push。
+
+## 2026-07-25：`2-PM`分支收口确定性门通过，等待独立审查
+
+- 按计划只运行一次完整
+  `cargo test -p data-collect --locked -- --test-threads=1`：348个unit、246个
+  integration及0个doctest全部通过。
+- `cargo check -p data-collect --locked --all-targets`已在最终行为代码上通过；
+  `cargo clippy -p data-collect --locked --all-targets -- -D warnings`首轮发现
+  机械迁移使Stage1 HEAD既有的`#[allow(clippy::too_many_arguments)]`与
+  `polymarket_message_passes_dedupe`之间出现空行。最终只删除该空行，既有
+  attribute与其函数保持和Stage1 HEAD一致。
+- 修正后all-targets Clippy通过；`cargo fmt --all -- --check`与
+  `git diff --check`也通过。该单行空白修正不生成runtime代码；
+  完整suite已在同一函数体与调用图上通过，因此没有违反“完整suite只跑一次”的
+  防重复门。
+- 最终五文件合计50,390行；测试集合594与lexical symbol 2,816及其hash均不受
+  lint-only空白修正影响。三份RTDS草案继续未修改、未暂存、未删除。
+- 当前游标为`2-PM_BRANCH_CLOSE_GATES_PASSED_REVIEW_PENDING`；下一动作仅为
+  `gpt-5.6-sol`/`ultra`独立全面审查，不创建commit或push。
+
+## 2026-07-25：`2-PM`独立审查通过，等待发布授权
+
+- `gpt-5.6-sol` / `ultra`独立全面审查首轮结论为
+  `FAIL_PENDING_MINOR_FIX`：Critical 0、Important 0、Minor 1。唯一Minor是
+  Stage1 HEAD既有的`#[allow(clippy::too_many_arguments)]`被误删，且plan、
+  changelog与阶段2基线把它错误记录为迁移新增。
+- 对照Stage1 HEAD核实后，在`polymarket_message_passes_dedupe`前恢复既有
+  attribute，不恢复触发Clippy的空行；同步修正三份记录。最终五文件LOC为
+  33,965/5,432/1,727/8,484/782，合计50,390。
+- 最终工作树重新通过locked all-targets Clippy `-D warnings`、locked
+  all-targets check、fmt check与`git diff --check`。该修复只恢复既有lint
+  attribute并修正文档，不改变函数体、调用图或runtime语义，因此没有重复已经
+  通过的完整suite。
+- 同一独立审查完成最小复审，最终结论为`PASS`：Critical 0、Important 0、
+  Minor 0；确认没有新增行为、owner、visibility、schema或授权边界问题。
+- 当前游标为`2-PM_REVIEW_PASSED_AWAITING_PUBLISH`。尚未创建commit或push，
+  不得写成`2-PM_CLOSED`；下一动作只能是取得单独发布授权后创建本分支closure
+  commit并push到`origin/fix-rtds-silents`。
+
+## 2026-07-25：`2-PM`发布授权与闭合
+
+用户在独立审查与最小复审通过后，明确同意创建`2-PM` closure commit并push到
+`origin/fix-rtds-silents`。发布范围严格限定为本事项三件套、阶段2共同基线、
+root facade及两个PM owner模块和各自测试；三份既存未跟踪RTDS草案继续排除。
+
+本记录精确取代同日此前等待发布授权状态；旧段仅保留为历史事实。
+
+`2-PM`记录为`2-PM_CLOSED`，以承载本记录的commit成功推送且本地HEAD、upstream
+与远端ref一致为生效条件。本次授权不继承为`2-RTDS`、`2-REST`、阶段3或后继
+分支的commit/push授权，也不扩大typed字段决定、RTDS参数与4A/4B、公开网络smoke、
+production activation/cutover、release、部署、远端操作、migration或删除授权。
