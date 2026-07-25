@@ -6,6 +6,12 @@ const RTDS_FRESH_MAX_AGE_MS: i64 = 30_000;
 pub(super) const RTDS_DEDUPE_WINDOW_MS: i64 = 60 * 60 * 1000;
 const RTDS_DEDUPE_MAX_KEYS: usize = 100_000;
 
+fn operator_dedupe_error(message: String) -> io::Error {
+    invalid_data(format!(
+        "operator_intervention_required:dedupe_invariant:{message}"
+    ))
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct ClassifiedRtdsMessage {
     payload: ChainlinkPrice,

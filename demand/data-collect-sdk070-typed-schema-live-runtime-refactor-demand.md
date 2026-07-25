@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_REVIEW_PASSED_AWAITING_PUBLISH`。阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_PARAMETERS_DEFERRED`。阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime终态为
 > `SDK_070_RUNTIME_USABLE`。阶段1闭合时的typed终态为
@@ -22,15 +22,16 @@
 > 2.1/2.2共同基线已落盘到
 > `data-collect/docs/sdk070-stage2-observable-and-owner-baseline.md`并完成自审；
 > `2-PM`四个小步均已完成：step 1/2/3通过实现与自审，step 4确认既有resolution
-> recovery已是唯一owner且无需再重构。`2-PM`分支收口完整门与独立审查均已通过，
-> 用户已另行批准`2-PM` closure commit/push；`2-PM_CLOSED`以承载本记录的commit
-> 成功推送且本地HEAD、upstream与远端ref一致为生效条件。六源共享dispatcher继续
+> recovery已是唯一owner且无需再重构。`2-PM`分支收口完整门与独立审查均已通过；
+> closure commit `582eb154687c4c0522615753b3fc1903f2e833f3`已推送且三方ref
+> 一致，故`2-PM_CLOSED`成立。六源共享dispatcher继续
 > 留在root。`2-RTDS`唯一owner机械移动、完整/静态门及独立审查已通过；closure
 > commit `b7f83704cf2176de61573c6b11d792df73d68b53`已推送，且本地HEAD、
 > upstream与远端ref一致，故`2-RTDS_CLOSED`成立。Stage3入口独立只读审计为
 > `PASS`；任务3.0已只同步future Polymarket source-v3 payload/fingerprint/v2 raw
-> projection现行authority。`STAGE3_AUTHORITY_SYNC_CLOSED`以承载本记录的commit
-> 成功push且三方ref一致为生效条件。用户明确批准本事项持续推进直至
+> projection现行authority。authority-sync commit
+> `b569546ae1c9cfc24bcdfe4ba12ee4ce60ccc278`已push且三方ref一致，故
+> `STAGE3_AUTHORITY_SYNC_CLOSED`成立。用户明确批准本事项持续推进直至
 > 完成，不再逐阶段申请本地
 > 实现、测试、审查、commit或push授权；只有发生上下文冲突或实际情况与需求/计划
 > 不一致时才停止请求决策。该持续授权满足阶段3等后继本地执行门，但不替代尚未
@@ -38,8 +39,8 @@
 > migration和删除纳入本计划。既有`market_resolved` validate-first与
 > `METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`决定继续有效。
 > Stage3任务3.1至3.7、S-B/M-B/W-B修复、本地门与重复独立审查均已通过；
-> `STAGE3_CLOSED`以承载本记录的commit成功push到`origin/fix-rtds-silents`且本地
-> HEAD、upstream与远端ref一致为生效条件。该闭合只表示本地current new-write
+> closure commit `7c6927f663d9c3b387874f688b10346956b9302d`已push且三方ref
+> 一致，故`STAGE3_CLOSED`成立。该闭合只表示本地current new-write
 > 调用图已原子切换为source v3 + metadata v4，不授权production activation/cutover。
 > 2026-07-26用户批准Stage5四项authority修正：queue收敛为真实bounded
 > channel + global row/owned-byte budget + bounded wait/观测；训练文件采用
@@ -59,13 +60,22 @@
 > owned-byte漏算已修复并复审通过。Stage5 closure commit
 > `9e0d264058ed64cd63fbd05280f0826afaba0509`已push，且本地HEAD、upstream与远端
 > ref一致，故`STAGE5_CLOSED`成立。Stage6已完成v3 AC映射、Stage3/Stage0证据消费、
-> canonical/finalized artifact parity与最终报告，当前等待独立阶段终审。用户于
+> canonical/finalized artifact parity与最终报告。用户于
 > 2026-07-26批准方案A：Stage6 6.3.1要求七类target-admitted fixture的canonical
 > round-trip，以及Stage3另一个固定deterministic fixture经正式writer产生的
 > finalized v3 Parquet artifact；两套fixture不得混同，后者也不得冒充production
 > real artifact。首次真实v3 forward run继续属于范围外后继三件套。两路独立
 > `gpt-5.6-sol`/Ultra终审均为`PASS / CLOSURE_UNBLOCKED`，Blocker 0 /
-> Important 0 / Minor 0。
+> Important 0 / Minor 0。Stage6 closure commit
+> `c0aff3a3e61583138b33eec44d847acaa8ebd682`已push且三方ref一致，故
+> `STAGE6_CLOSED`成立。2-REST的owner迁移、测试归属、root残留审计与唯一完整
+> 确定性门均已通过，报告为
+> `data-collect/docs/sdk070-stage2-rest-modularization.md`；代码、证据与文档三路
+> `gpt-5.6-sol`/Ultra独立终审均为`PASS / CLOSURE_UNBLOCKED`，Critical 0 /
+> Important 0 / Minor 0。按用户批准的方案A，本文条件式记录`2-REST_CLOSED`与
+> 核心总事项`CORE_COMPLETE`：只有承载本记录的closure commit成功push且本地HEAD、
+> upstream与远端ref一致后才生效。RTDS行为专项仍为
+> `RTDS_PARAMETERS_DEFERRED`且未完成，不由核心事项闭合自动升级。
 
 ## 一、决策结论与目标
 
@@ -329,8 +339,8 @@ Step 4审计确认`polymarket_resolution_recovery.rs`已完整持有唯一produc
 resolution-state shadow path。该步终态为`ALREADY_OWNED_NO_MOVE`，没有修改
 recovery、`lib.rs`或public API。32个直接测试、两个startup边界测试及既有PM
 cross-owner测试均通过。`2-PM`分支收口完整确定性门与独立审查随后均已通过；
-用户已单独批准closure commit/push；`2-PM_CLOSED`以承载本记录的commit成功推送
-且本地HEAD、upstream与远端ref一致为生效条件。
+closure commit `582eb154687c4c0522615753b3fc1903f2e833f3`已推送且三方ref
+一致，故`2-PM_CLOSED`成立。
 
 ## 三、authority 与文档关系
 

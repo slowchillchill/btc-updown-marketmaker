@@ -217,4 +217,29 @@ mod tests {
         drop(held_byte);
         assert_eq!(budget.available(), (1, 1));
     }
+
+    #[tokio::test]
+    async fn global_inflight_budget_enforces_exact_production_boundaries_and_releases() {
+        let budget = InflightBudget::new();
+        let reservation = budget
+            .acquire(
+                GLOBAL_INFLIGHT_MAX_ROWS,
+                GLOBAL_INFLIGHT_MAX_BYTES,
+                Duration::from_millis(10),
+            )
+            .await
+            .unwrap();
+        assert_eq!(budget.available(), (0, 0));
+        let error = budget
+            .acquire(1, 1, Duration::from_millis(10))
+            .await
+            .expect_err("the 100,001st row must not pass the global budget");
+        assert!(error.to_string().contains("row_acquire_timeout"));
+
+        drop(reservation);
+        assert_eq!(
+            budget.available(),
+            (GLOBAL_INFLIGHT_MAX_ROWS, GLOBAL_INFLIGHT_MAX_BYTES)
+        );
+    }
 }

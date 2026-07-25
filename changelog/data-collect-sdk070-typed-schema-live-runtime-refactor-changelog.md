@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_REVIEW_PASSED_AWAITING_PUBLISH`。阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_PARAMETERS_DEFERRED`。阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
 > `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
@@ -20,20 +20,25 @@
 > 2.1/2.2共同基线已落盘到
 > `data-collect/docs/sdk070-stage2-observable-and-owner-baseline.md`并完成自审；
 > `2-PM`四个小步均已完成：step 1/2/3通过实现与自审，step 4确认既有resolution
-> recovery已是唯一owner且无需再重构。`2-PM`分支收口完整门与独立审查均已通过，
-> 用户已另行批准`2-PM` closure commit/push；`2-PM_CLOSED`以承载本记录的commit
-> 成功推送且本地HEAD、upstream与远端ref一致为生效条件。共享dispatcher继续留在
+> recovery已是唯一owner且无需再重构。`2-PM`分支收口完整门与独立审查均已通过；
+> closure commit `582eb154687c4c0522615753b3fc1903f2e833f3`已推送且三方ref
+> 一致，故`2-PM_CLOSED`成立。共享dispatcher继续留在
 > root。`2-RTDS`唯一owner小步、自审、分支收口完整/静态门及独立审查均已通过；
 > closure commit `b7f83704cf2176de61573c6b11d792df73d68b53`已推送且三方ref
-> 一致。Stage3入口独立审计为`PASS`，任务3.0 authority同步已完成并进入closure
-> commit/push。后继本地实现、测试、审查、
+> 一致。Stage3入口独立审计为`PASS`；authority-sync commit
+> `b569546ae1c9cfc24bcdfe4ba12ee4ce60ccc278`已push且三方ref一致，故
+> `STAGE3_AUTHORITY_SYNC_CLOSED`成立。后继本地实现、测试、审查、
 > commit和push不再逐次申请；只在上下文冲突或实际情况与需求/计划不一致时停止。
 > 未冻结RTDS参数仍为实质决策门；production activation/cutover、release、部署、
 > 远端操作、migration和删除仍为范围外事项。
 > Stage3任务3.1至3.7、S-B/M-B/W-B修复、本地门与重复独立审查均已通过；
-> `STAGE3_CLOSED`以承载本记录的commit成功push到`origin/fix-rtds-silents`且本地
-> HEAD、upstream与远端ref一致为生效条件。下一执行游标为独立cleanup阶段5；
+> closure commit `7c6927f663d9c3b387874f688b10346956b9302d`已push且三方ref
+> 一致，故`STAGE3_CLOSED`成立。随后执行游标进入独立cleanup阶段5；
 > 阶段4仍遵守RTDS专项自身尚未满足的参数与授权门。
+> Stage5、Stage6与2-REST均已完成各自实现、完整门和独立终审。按用户批准的
+> 方案A，本文条件式记录`2-REST_CLOSED`与核心总事项`CORE_COMPLETE`：只有承载
+> 本记录的closure commit成功push且本地HEAD、upstream与远端ref一致后才生效。
+> RTDS行为专项仍为`RTDS_PARAMETERS_DEFERRED`且未完成。
 > 本文件只记录本组三件套的事实、冲突、决定与执行，不回写旧changelog。
 
 ## 2026-07-24：用户要求建立一个新的总事项
@@ -1736,3 +1741,116 @@ fixture身份混同、binary/handoff比较起点、LOC分类与writer归属措�
 当前游标为`STAGE6_REVIEW_PASSED_AWAITING_PUBLISH`。下一步按持续发布授权创建Stage6
 closure commit/push。2-REST仍是之后必须单独执行的开放分支；RTDS保持真实deferred
 状态。
+
+## 2026-07-26：Stage6发布闭合并进入2-REST
+
+Stage6 closure commit
+`c0aff3a3e61583138b33eec44d847acaa8ebd682`已push到
+`origin/fix-rtds-silents`；本地HEAD、upstream与远端ref三方一致，故
+`STAGE6_CLOSED`成立。三份受保护RTDS草案未暂存、未修改。
+
+2-REST入口冻结的自动测试名称集合为574项、37个test targets，排序后名称清单
+SHA-256为
+`135168b32b594884fed2bd1ad437b44f5d77c5eaf26b06beb63f6e4df444f78d`。
+入口`live_runtime.rs`为31,904行，其中内嵌tests module从第16,816行开始；当前只有
+Polymarket与RTDS production/test owner已经分离，AC-10仍为开放事实。当前游标为
+`2-REST_IN_PROGRESS`。
+
+## 2026-07-26：2-REST owner迁移、root收口与本地门通过
+
+2-REST按“每个绿点一个真实owner”完成其余行为保持拆分。新私有production owner为：
+
+- `binance_aggtrade_source`、`binance_depth_source`；
+- `dataset_capacity`、`dataset_root_lock`；
+- `ingress_control_sender`、`ingress_deferred`、`ingress_owned_bytes`、
+  `raw_ingress_admission`、`source_ingress_state`、`runtime_ingress`；
+- `manifest_owner`、`raw_day`、`rollover_coordinator`、
+  `runtime_rollover_driver`、`producer_day_barrier`；
+- `runtime_coverage`、`runtime_gaps`、`runtime_shutdown`、`runtime_time`；
+- `source_recovery`、`source_task_supervision`、`source_topology`；
+- `startup_coordinator`、`startup_recovery`、`writer_supervisor`。
+
+既有Polymarket owner吸收其自己持有的v3 admission receipt/evidence与PM-only
+ticket/epoch leaf；既有RTDS owner吸收唯一dedupe error wrapper。21个新测试文件
+随对应owner迁移；global inflight exact-boundary测试迁入`inflight.rs::tests`。
+missing raw-day gate、完整runtime、跨四源静默/load、dataset-lease及startup
+组合测试继续留root，因为它们横跨多个真实owner。
+
+最后一轮root残留审计纠正了一项初始建议：`IngressControl`若迁入
+`source_ingress_state`，会形成
+`source_ingress_state -> producer_day_barrier::DayBarrierRelease`与
+`producer_day_barrier -> SourceEventSink`的语义依赖环。Rust虽可编译，但为消除
+该环再抽protocol模块属于过度设计；因此它作为composition中立控制合同保留root。
+`RuntimeProvenance`、`CollectorIdentity`与`LiveRuntimeSourceSpecs`同样作为纯
+derived/injected config保留root。该结论与需求7.1/AC-10及计划一致，不是新的
+用户决策门。
+
+机械迁移`runtime_time`时曾在未通过编译的中间worktree把
+`RuntimeExitRequest`与`CollectorIdentity`的derive属性留在错误边界；主代理检查
+新文件时立即发现并恢复属性，同时把`UTC_HOUR_MS/UTC_DAY_MS`归入time owner。
+随后all-target check及跨ingress/day/raw/PM定向测试通过；该临时状态未提交、
+未push，也未成为验收快照。
+
+测试库存早期还误用了包含harness-free benchmark的
+`cargo test ... --all-targets ... -- --list`。Cargo实际执行
+`market_discovery_probe`，尝试公开Gamma只读请求并生成未跟踪
+`data-collect/market-discovery-artifacts/market_discovery_receipt.json`。receipt
+检查后已删除，目录为空；没有tracked diff或远端写入，该请求不计入验收证据。
+此后只用`--lib --bins --tests -- --list`做安全库存。
+
+终态证据：
+
+- root为4,966行，其中`mod tests`前root为1,815行，只含
+  facade/config/composition及最小test-only glue；
+- 28个owner文件逐项LOC、KEEP/MOVE与line classification已写入
+  `data-collect/docs/sdk070-stage2-rest-modularization.md`；
+- 新增25个production owner文件、21个测试文件，共25,555行；整个Rust
+  file-level churn为`+30,966/-30,895`，净`+71`行。semantic delete、
+  semantic rewrite与behavioral add均为0；
+- named tests仍为574项、37个package test/doc targets
+  （36个可执行targets + 1个doctest target）；终态完整限定名排序SHA-256为
+  `5ac43b7efc6f9840fb2ca723f87685b1dd95b16d123b78c5f842c765b17fc71d`；
+  basename排序SHA-256与入口一致，均为
+  `76c2711cb908bde6cbfa2a5b9b9cb54b3416f1135f29cec5e7143fdef2d9184a`；
+- root残留只读审计为`PASS / CLOSURE_UNBLOCKED`，剩余必做迁移0；
+- 代码冻结后主执行方唯一完整分支suite退出0：lib 348项、integration 226项、bin/doctest
+  0项；locked all-target check、Clippy `-D warnings`、fmt及diff gate全部通过。
+
+独立证据终审者随后在只读审查中独立复跑同一完整suite及
+check/Clippy/fmt/diff，结果同样全部退出0；该复跑只作为独立审查证据，不计作
+第二次主执行方分支验收门。
+
+三份未跟踪RTDS草案继续未修改、未暂存、未删除，hash保持
+`d8caddb53c9fbe259ce2f844845426580f614de47ea8bd79c5f110576dc84148`、
+`911aa69bd6d086887f88c185f1b7dc20f6223e7d8637fc1848752966886fc1a7`、
+`50d4a405a664baec39844ac1952af7be10de6b2f75d792f8abb57f62d36d4c1`。
+没有production activation、AWS远端、release、deployment、migration、数据删除
+或public smoke。
+
+当前游标为`2_REST_BRANCH_CLOSE_GATES_PASSED_REVIEW_PENDING`。下一动作只派出
+`gpt-5.6-sol`/Ultra独立阶段审查；审查通过前不记录`2-REST_CLOSED`，不创建
+closure commit/push。
+
+## 2026-07-26：2-REST三路终审通过并按方案A条件式闭合
+
+代码、证据与文档三路独立`gpt-5.6-sol`/Ultra终审均完成：
+
+- 代码终审：`PASS / CLOSURE_UNBLOCKED`，Critical 0 / Important 0 / Minor 0；
+  316个production函数、213个类型/常量与入口逐项等价，无缺失、新增或重复；
+- 证据终审：`PASS / CLOSURE_UNBLOCKED`，Critical 0 / Important 0 / Minor 0；
+  LOC/churn、574项测试、37个targets、测试hash、完整门与受保护草案hash均一致；
+- 文档终审：`PASS / CLOSURE_UNBLOCKED`，Critical 0 / Important 0 / Minor 0；
+  demand/plan/changelog、AC映射、阶段事实与范围边界一致。
+
+三路终审剩余必做事项均为0，没有发现shadow path、重复owner、重复校验框架、
+generic framework、public API扩张或语义漂移。按用户批准的方案A，本次在同一个
+closure commit中条件式记录：
+
+- `2-REST_CLOSED`；
+- SDK070核心总事项`CORE_COMPLETE`；
+- RTDS行为专项仍为`RTDS_PARAMETERS_DEFERRED / 未完成`。
+
+前两项只有在承载本记录的closure commit成功push到
+`origin/fix-rtds-silents`，且本地HEAD、upstream与远端ref一致后才生效。该闭合
+不授权production activation/cutover、AWS远端操作、release、deployment、
+migration、数据删除、public-network smoke或RTDS参数/行为实施。

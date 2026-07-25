@@ -10568,3 +10568,476 @@ async fn polymarket_discovery_samples_validation_after_candidate_selection() {
         query_utc_ms + 4
     );
 }
+
+#[test]
+fn polymarket_metadata_admission_uses_real_time_and_rejects_future_causal_fields() {
+    let discovery = test_btc_discovery();
+    let collector_identity = CollectorIdentity {
+        host_id: "collector-test".to_owned(),
+        region: "local-test".to_owned(),
+    };
+    let base_row = polymarket_metadata_snapshot_v3_row(
+        &discovery.current,
+        MarketRuntimeRole::Current,
+        &collector_identity,
+    )
+    .unwrap();
+
+    for field in [
+        "recv_time_utc_ms",
+        "timestamp_received",
+        "fixed_identity_verified_at_utc",
+        "source_evidence_received_at_utc",
+        "row_evidence_validation_completed_at_utc",
+        "metadata_fetch_start_utc",
+        "lifecycle_applied_at_utc",
+        "runtime_role_applied_at_utc",
+    ] {
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        let (tx, _rx) = mpsc::channel(1);
+        let sink = SourceEventSink {
+            tx,
+            gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+            source_queue_backpressure: Arc::clone(&stats),
+            inflight_budget: InflightBudget::new(),
+            enqueue_lock: Arc::new(AsyncMutex::new(())),
+        };
+        let mut event = polymarket_metadata_v4_raw_event(
+            PolymarketMarketMetadataV4Row::from_v3_prefix(base_row.clone(), None, None),
+        )
+        .unwrap();
+        let future = now_ms() + 60_000;
+        if field == "recv_time_utc_ms" {
+            event.recv_time_utc_ms = future;
+        } else {
+            let mut raw = serde_json::from_str::<Value>(&event.raw_json).unwrap();
+            raw[field] = json!(future);
+            event.raw_json = raw.to_string();
+        }
+
+        let error = stamp_source_admission(&mut event, &sink).unwrap_err();
+        assert!(error.to_string().contains(field), "{field}: {error}");
+        assert!(event.collector_admission.is_none());
+        assert_eq!(
+            stats
+                .polymarket_metadata_admission_sequence
+                .load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    let stats = Arc::new(SourceQueueBackpressureStats::default());
+    let (tx, _rx) = mpsc::channel(1);
+    let sink = SourceEventSink {
+        tx,
+        gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+        source_queue_backpressure: Arc::clone(&stats),
+        inflight_budget: InflightBudget::new(),
+        enqueue_lock: Arc::new(AsyncMutex::new(())),
+    };
+    let mut event = polymarket_metadata_v4_raw_event(
+        PolymarketMarketMetadataV4Row::from_v3_prefix(base_row, None, None),
+    )
+    .unwrap();
+    let mut raw = serde_json::from_str::<Value>(&event.raw_json).unwrap();
+    raw["closed_time_utc"] = json!(now_ms() + 60_000);
+    event.raw_json = raw.to_string();
+    let before = now_ms();
+    stamp_source_admission(&mut event, &sink).unwrap();
+    let after = now_ms();
+    let admission = event.collector_admission.unwrap();
+    assert!((before..=after).contains(&admission.time_utc_ms));
+    assert_eq!(admission.sequence, 1);
+    assert_eq!(
+        stats
+            .polymarket_metadata_admission_sequence
+            .load(Ordering::Relaxed),
+        1
+    );
+}
+
+#[test]
+fn polymarket_terminal_post_batch_rejects_future_post_without_consuming_sequence() {
+    let discovery = test_btc_discovery();
+    let identity = PendingPolymarketIdentity::from_discovered(&discovery.current).unwrap();
+    let scheduled_at_utc_ms = identity.market_end_utc_ms + 3 * 60_000;
+    let completed_at_utc_ms = scheduled_at_utc_ms + 1;
+    let sdk_market = serde_json::from_value::<SdkGammaMarket>(gamma_market_value_for_discovered(
+        &discovery.current,
+    ))
+    .unwrap();
+    let source_payload_json = r#"{"event_type":"market_resolved"}"#.to_owned();
+    let evidence = PolymarketWsTerminalEvidence {
+        source_sequence_epoch_id: "test-polymarket-source-epoch".to_owned(),
+        collector_admission_sequence: 1,
+        source_received_at_utc_ms: scheduled_at_utc_ms,
+        validation_completed_at_utc_ms: completed_at_utc_ms,
+        source_payload_sha256: Sha256::digest(source_payload_json.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+        source_payload_json,
+        platform_timestamp_raw: scheduled_at_utc_ms.to_string(),
+        platform_timestamp_utc_ms: scheduled_at_utc_ms,
+        winning_asset_id: identity.up_asset_id.clone(),
+        winning_outcome: "Up".to_owned(),
+        raw_day_ticket: accepted_raw_day_ticket_for_sync_test(scheduled_at_utc_ms),
+    };
+    let mut pending = PendingPolymarketResolution::new(identity.clone(), Some(evidence.clone()));
+    pending.in_flight_ordinal = Some(1);
+    let post = polymarket_resolution_attempt_v3_row(
+        &pending,
+        &GammaResolutionPollCompletion {
+            slug: identity.slug.clone(),
+            ordinal: 1,
+            scheduled_at_utc_ms,
+            fetch_start_utc_ms: scheduled_at_utc_ms,
+            completed_at_utc_ms,
+            result: Ok(sdk_market),
+            raw_day_ticket: RawDayTicketAcceptance::Failed("unused by pure row fixture".to_owned()),
+        },
+        &|| completed_at_utc_ms + 1,
+        true,
+        &CollectorIdentity {
+            host_id: "collector-test".to_owned(),
+            region: "local-test".to_owned(),
+        },
+    )
+    .unwrap();
+    let terminal = polymarket_resolution_terminal_ws_v3_row(
+        &pending,
+        &evidence,
+        completed_at_utc_ms + 2,
+        &CollectorIdentity {
+            host_id: "collector-test".to_owned(),
+            region: "local-test".to_owned(),
+        },
+    )
+    .unwrap();
+
+    let terminal_event = InflightRawEvent::for_test(
+        polymarket_metadata_v4_raw_event(PolymarketMarketMetadataV4Row::from_v3_prefix(
+            terminal,
+            Some(evidence.source_sequence_epoch_id.clone()),
+            Some(evidence.collector_admission_sequence),
+        ))
+        .unwrap(),
+    );
+    let mut post_event = InflightRawEvent::for_test(
+        polymarket_metadata_v4_raw_event(PolymarketMarketMetadataV4Row::from_v3_prefix(
+            post, None, None,
+        ))
+        .unwrap(),
+    );
+    let future = now_ms() + 60_000;
+    let mut post_raw = serde_json::from_str::<Value>(&post_event.event.raw_json).unwrap();
+    post_raw["timestamp_received"] = json!(future);
+    post_event.event.raw_json = post_raw.to_string();
+    let stats = Arc::new(SourceQueueBackpressureStats::default());
+    let (tx, _rx) = mpsc::channel(2);
+    let sink = SourceEventSink {
+        tx,
+        gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+        source_queue_backpressure: Arc::clone(&stats),
+        inflight_budget: InflightBudget::new(),
+        enqueue_lock: Arc::new(AsyncMutex::new(())),
+    };
+
+    let mut batch = [terminal_event, post_event];
+    let error = stamp_source_admissions_atomically(&mut batch, &sink).unwrap_err();
+    assert!(error.to_string().contains("timestamp_received"));
+    assert!(
+        batch
+            .iter()
+            .all(|event| event.event.collector_admission.is_none())
+    );
+    assert_eq!(
+        stats
+            .polymarket_metadata_admission_sequence
+            .load(Ordering::Relaxed),
+        0
+    );
+}
+
+#[test]
+fn polymarket_lifecycle_identity_contradictions_are_terminal() {
+    let discovery = test_btc_discovery();
+    let asset_to_slug = discovery_asset_to_slug(&discovery);
+    let current_condition = discovery.current.condition_id.as_str();
+    let current_slug = discovery.current.slug.as_str();
+    let unrelated_condition = "0x0000000000000000000000000000000000000000000000000000000000000009";
+    let new_market = |condition: &str, slug: &str, assets: Vec<&str>, outcomes: Vec<&str>| {
+        serde_json::from_value::<WsMessage>(json!({
+            "id": "market-current",
+            "question": "Bitcoin Up or Down",
+            "market": condition,
+            "slug": slug,
+            "description": "Description",
+            "assets_ids": assets,
+            "outcomes": outcomes,
+            "timestamp": "1783392404603",
+            "event_type": "new_market"
+        }))
+        .unwrap()
+    };
+    let resolved = |clob_market_id: &str,
+                    condition: &str,
+                    slug: Option<&str>,
+                    assets: Vec<&str>,
+                    outcomes: Vec<&str>,
+                    winning_asset: &str,
+                    winning_outcome: &str| {
+        let WsMessage::MarketResolved(event) = serde_json::from_value::<WsMessage>(json!({
+            "id": clob_market_id,
+            "market": condition,
+            "slug": slug,
+            "assets_ids": assets,
+            "outcomes": outcomes,
+            "winning_asset_id": winning_asset,
+            "winning_outcome": winning_outcome,
+            "timestamp": "1783392404604",
+            "event_type": "market_resolved"
+        }))
+        .unwrap() else {
+            panic!("expected market_resolved message")
+        };
+        event
+    };
+    let assert_error = |message: WsMessage, expected: &str| {
+        let error = match target_admitted_polymarket_message(&message, &discovery, &asset_to_slug) {
+            Err(error) => error,
+            Ok(_) => panic!("a target identity contradiction must be terminal"),
+        };
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected identity error: {error}"
+        );
+    };
+    let pending_identity = PendingPolymarketIdentity::from_discovered(&discovery.current).unwrap();
+    let assert_resolved_error = |event: MarketResolved, expected: &str| {
+        let error = match validate_polymarket_market_resolved_identity(&pending_identity, &event) {
+            Err(error) => error,
+            Ok(()) => panic!("a market_resolved identity contradiction must be terminal"),
+        };
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected market_resolved identity error: {error}"
+        );
+    };
+
+    for message in [
+        new_market(
+            current_condition,
+            current_slug,
+            vec!["999", "1000"],
+            vec!["Up", "Down"],
+        ),
+        new_market(
+            current_condition,
+            current_slug,
+            vec!["101", "102", "999"],
+            vec!["Up", "Down", "Other"],
+        ),
+        new_market(
+            current_condition,
+            current_slug,
+            vec!["101", "102", "102"],
+            vec!["Up", "Down", "Down"],
+        ),
+    ] {
+        assert_error(message, "contradictory asset mapping");
+    }
+    assert_error(
+        new_market(
+            unrelated_condition,
+            current_slug,
+            vec!["101", "102"],
+            vec!["Up", "Down"],
+        ),
+        "unexpected condition_id",
+    );
+    assert_error(
+        new_market(
+            current_condition,
+            "btc-updown-5m-wrong",
+            vec!["101", "102"],
+            vec!["Up", "Down"],
+        ),
+        "unexpected slug",
+    );
+    assert_error(
+        new_market(
+            current_condition,
+            current_slug,
+            vec!["101", "102"],
+            vec!["Down", "Up"],
+        ),
+        "contradictory outcome mapping",
+    );
+    assert_error(
+        serde_json::from_value::<WsMessage>(json!({
+            "id": "market-wrong",
+            "question": "Bitcoin Up or Down",
+            "market": current_condition,
+            "slug": current_slug,
+            "description": "Description",
+            "assets_ids": ["101", "102"],
+            "outcomes": ["Up", "Down"],
+            "timestamp": "1783392404603",
+            "event_type": "new_market"
+        }))
+        .unwrap(),
+        "unexpected market id",
+    );
+    assert_resolved_error(
+        resolved(
+            "market-current",
+            current_condition,
+            None,
+            vec!["101", "102", "999"],
+            vec!["Up", "Down", "Other"],
+            "101",
+            "Up",
+        ),
+        "asset mapping mismatch",
+    );
+    assert_resolved_error(
+        resolved(
+            "market-current",
+            current_condition,
+            None,
+            vec!["101", "102"],
+            vec!["Up", "Down"],
+            "999",
+            "Up",
+        ),
+        "winner outside fixed assets",
+    );
+    assert_resolved_error(
+        resolved(
+            "market-current",
+            current_condition,
+            None,
+            vec!["101", "102"],
+            vec!["Up", "Down"],
+            "101",
+            "Down",
+        ),
+        "winning outcome mismatch",
+    );
+    assert_resolved_error(
+        resolved(
+            "market-current",
+            unrelated_condition,
+            None,
+            vec!["101", "102"],
+            Vec::new(),
+            "101",
+            "Up",
+        ),
+        "condition id mismatch",
+    );
+    assert_resolved_error(
+        resolved(
+            "market-wrong",
+            current_condition,
+            None,
+            vec!["101", "102"],
+            Vec::new(),
+            "101",
+            "Up",
+        ),
+        "market id mismatch",
+    );
+    assert_resolved_error(
+        resolved(
+            "market-current",
+            current_condition,
+            Some("btc-updown-5m-wrong"),
+            vec!["101", "102"],
+            Vec::new(),
+            "101",
+            "Up",
+        ),
+        "slug mismatch",
+    );
+    assert_resolved_error(
+        resolved(
+            "market-current",
+            current_condition,
+            None,
+            vec!["101", "102"],
+            vec!["Down", "Up"],
+            "101",
+            "Up",
+        ),
+        "outcome mapping mismatch",
+    );
+    validate_polymarket_market_resolved_identity(
+        &pending_identity,
+        &resolved(
+            "market-current",
+            current_condition,
+            None,
+            vec!["101", "102"],
+            Vec::new(),
+            "101",
+            "Up",
+        ),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn polymarket_invalid_market_resolved_fails_before_v3_admission() {
+    let discovery = test_btc_discovery();
+    let current = discovery.current.clone();
+    let received_at_utc_ms = now_ms();
+    let event = match serde_json::from_value::<WsMessage>(json!({
+        "id": "market-wrong",
+        "market": current.condition_id,
+        "slug": current.slug,
+        "assets_ids": [current.up_asset_id, current.down_asset_id],
+        "outcomes": ["Up", "Down"],
+        "winning_asset_id": "101",
+        "winning_outcome": "Up",
+        "timestamp": received_at_utc_ms.to_string(),
+        "event_type": "market_resolved"
+    }))
+    .unwrap()
+    {
+        WsMessage::MarketResolved(event) => event,
+        _ => panic!("expected market_resolved message"),
+    };
+    let stats = Arc::new(SourceQueueBackpressureStats::default());
+    install_active_raw_day_gate(&stats, received_at_utc_ms).await;
+    let (tx, mut rx) = mpsc::channel(2);
+    let sink = SourceEventSink {
+        tx,
+        gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+        source_queue_backpressure: stats,
+        inflight_budget: InflightBudget::new(),
+        enqueue_lock: Arc::new(AsyncMutex::new(())),
+    };
+    let mut context = PolymarketProcessingContext::new(discovery);
+    context.actor_now_utc_ms = received_at_utc_ms;
+    let error = process_polymarket_market_resolved(
+        &event,
+        received_at_utc_ms,
+        &mut context,
+        &sink,
+        &CollectorIdentity {
+            host_id: "collector-test".to_owned(),
+            region: "local-test".to_owned(),
+        },
+        Instant::now(),
+        accepted_raw_day_ticket_for_test(received_at_utc_ms).await,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("market id mismatch"));
+    assert!(matches!(
+        rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty) | Err(mpsc::error::TryRecvError::Disconnected)
+    ));
+}

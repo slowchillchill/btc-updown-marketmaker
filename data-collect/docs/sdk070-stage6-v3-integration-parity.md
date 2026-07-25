@@ -11,10 +11,13 @@
 > 对应 changelog：
 > `changelog/data-collect-sdk070-typed-schema-live-runtime-refactor-changelog.md`
 >
-> 状态：`STAGE6_REVIEW_PASSED_AWAITING_PUBLISH`
+> 状态：`STAGE6_CLOSED`
 >
 > 稳定代码快照：
 > `9e0d264058ed64cd63fbd05280f0826afaba0509`
+>
+> closure commit：
+> `c0aff3a3e61583138b33eec44d847acaa8ebd682`
 
 ## 1. 结论与边界
 
@@ -91,7 +94,7 @@ focused_gap_targets=0
 | AC-07 | source key、sequence/retry、source v3 + metadata v4 claimant/restart、Gamma/exhausted、source-only/cross-pair/corrupt矩阵 | `PASS` |
 | AC-08 | 七类fixture，以及Stage3另一固定fixture的确定性finalized v3 artifact；独立legacy v2 row-grain兼容；future mapping附件和binary边界核对 | `PASS_WITH_NONBLOCKING_FUTURE_SPEC` |
 | AC-09 | Stage3唯一bounded measurement及当前路径/hash/status | `PASS_CONSUMED_NO_RERUN` |
-| AC-10 | 由独立2-REST分支收口，不属于Stage6 v3重复验收范围 | `OPEN_IN_2_REST` |
+| AC-10 | 由独立2-REST分支收口，不属于Stage6 v3重复验收范围；其完整门、root残留审计与三路独立终审已通过，见`data-collect/docs/sdk070-stage2-rest-modularization.md` | `PASS_CONSUMED_2_REST_CLOSED` |
 | AC-11 | v3专属C01–C08由Stage5闭合；其余全局cleanup不在本报告重复汇总 | `PASS_FOR_V3_SCOPE` |
 | AC-12 | RTDS专项仍按其独立参数/授权门处理 | `RTDS_PARAMETERS_DEFERRED` |
 | AC-13 | cold v3 writer、manifest schema/facts、source sequence跨segment/day、startup prior-day preflight/current reconcile、lease与atomic publish合同 | `PASS` |
@@ -243,7 +246,8 @@ canonical production root或dual-write。
 
 剩余事项：
 
-- 2-REST仍须按独立分支完成root及其余owner的行为保持模块化和AC-10；
+- 2-REST root及其余owner模块化、AC-10完整门与三路独立终审已完成；其闭合随
+  承载2-REST记录的closure commit成功push且三方ref一致生效；
 - RTDS专项继续保持真实`RTDS_PARAMETERS_DEFERRED`状态；
 - first real-v3 forward run、production cutover、external adapter、paper/live接线、
   migration、deployment和删除均须另建三件套。

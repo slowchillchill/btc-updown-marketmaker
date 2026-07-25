@@ -5124,3 +5124,953 @@ impl PolymarketSourceSpec {
         }
     }
 }
+
+static POLYMARKET_SOURCE_EPOCH_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PolymarketOrderbookV3AdmissionReceipt {
+    pub(super) source_sequence_epoch_id: String,
+    pub(super) collector_admission_sequence: u64,
+    pub(super) collector_admission_time_utc_ms: i64,
+    pub(super) market_resolved: Option<PolymarketMarketResolvedAdmissionEvidence>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PolymarketMarketResolvedAdmissionEvidence {
+    pub(super) source_evidence_payload_json: String,
+    pub(super) source_evidence_raw_sha256: String,
+    pub(super) platform_timestamp_utc_ms: i64,
+    pub(super) winning_asset_id: String,
+    pub(super) winning_outcome: String,
+}
+
+fn polymarket_market_resolved_admission_evidence(
+    message: &PolymarketOrderbookV3Message,
+) -> Result<Option<PolymarketMarketResolvedAdmissionEvidence>> {
+    let PolymarketOrderbookV3Event::MarketResolved(resolved) = &message.event else {
+        return Ok(None);
+    };
+    let platform_timestamp_utc_ms = message.envelope.timestamp.ok_or_else(|| {
+        invalid_data("admitted Polymarket market_resolved is missing its platform timestamp")
+    })?;
+    let event_message = resolved.event_message.as_ref().map(|event_message| {
+        json!({
+            "id": event_message.id,
+            "ticker": event_message.ticker,
+            "slug": event_message.slug,
+            "title": event_message.title,
+            "description": event_message.description,
+        })
+    });
+    let source_evidence_payload_json = serde_json::to_string(&json!({
+        "event_type": "market_resolved",
+        "market": message.envelope.market,
+        "slug": message.envelope.slug,
+        "clob_market_id": resolved.clob_market_id,
+        "question": resolved.question,
+        "description": resolved.description,
+        "asset_ids": resolved.asset_ids,
+        "outcomes": resolved.outcomes,
+        "event_message": event_message,
+        "winning_asset_id": resolved.winning_asset_id,
+        "winning_outcome": resolved.winning_outcome,
+        "timestamp": platform_timestamp_utc_ms,
+    }))?;
+    let source_evidence_raw_sha256 = Sha256::digest(source_evidence_payload_json.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Ok(Some(PolymarketMarketResolvedAdmissionEvidence {
+        source_evidence_payload_json,
+        source_evidence_raw_sha256,
+        platform_timestamp_utc_ms,
+        winning_asset_id: resolved.winning_asset_id.clone(),
+        winning_outcome: resolved.winning_outcome.clone(),
+    }))
+}
+
+fn record_polymarket_fanout_drop(
+    sink: &SourceEventSink,
+    recv_time_utc_ms: i64,
+    market_rows: usize,
+    metadata_rows: usize,
+) {
+    let total = market_rows.saturating_add(metadata_rows) as u64;
+    sink.source_queue_backpressure.record_drop(total);
+    if market_rows > 0 {
+        sink.source_queue_backpressure.record_operational_drop(
+            "polymarket_market",
+            recv_time_utc_ms,
+            market_rows as u64,
+        );
+    }
+    if metadata_rows > 0 {
+        sink.source_queue_backpressure.record_operational_drop(
+            "polymarket_market_metadata",
+            recv_time_utc_ms,
+            metadata_rows as u64,
+        );
+    }
+}
+
+enum PolymarketRawDayAuthority<'a> {
+    Unadmitted,
+    Accepted(&'a RawDayAcceptedTicket),
+}
+
+pub(super) async fn send_polymarket_events_atomically<F>(
+    sink: &SourceEventSink,
+    recv_time_utc_ms: i64,
+    events: Vec<InflightRawEvent>,
+    commit: F,
+) -> Result<EventAdmissionOutcome>
+where
+    F: FnOnce() -> Result<()>,
+{
+    send_polymarket_events_atomically_inner(
+        sink,
+        recv_time_utc_ms,
+        events,
+        PolymarketRawDayAuthority::Unadmitted,
+        commit,
+    )
+    .await
+}
+
+async fn send_polymarket_events_atomically_with_ticket<F>(
+    sink: &SourceEventSink,
+    recv_time_utc_ms: i64,
+    events: Vec<InflightRawEvent>,
+    ticket: &RawDayAcceptedTicket,
+    commit: F,
+) -> Result<EventAdmissionOutcome>
+where
+    F: FnOnce() -> Result<()>,
+{
+    send_polymarket_events_atomically_inner(
+        sink,
+        recv_time_utc_ms,
+        events,
+        PolymarketRawDayAuthority::Accepted(ticket),
+        commit,
+    )
+    .await
+}
+
+async fn send_polymarket_events_atomically_inner<F>(
+    sink: &SourceEventSink,
+    recv_time_utc_ms: i64,
+    mut events: Vec<InflightRawEvent>,
+    authority: PolymarketRawDayAuthority<'_>,
+    commit: F,
+) -> Result<EventAdmissionOutcome>
+where
+    F: FnOnce() -> Result<()>,
+{
+    if events.is_empty() {
+        if let Err(error) = commit() {
+            record_gap_at(
+                &sink.gaps,
+                recv_time_utc_ms,
+                format!("polymarket_atomic_fanout_commit_failed:{error}"),
+            );
+            return Err(error);
+        }
+        return Ok(EventAdmissionOutcome::Admitted);
+    }
+    let market_rows = events
+        .iter()
+        .filter(|event| event.event.source_kind == "polymarket_market")
+        .count();
+    let metadata_rows = events.len().saturating_sub(market_rows);
+    let batch_utc_day = utc_day_string_from_ms(recv_time_utc_ms)
+        .ok_or_else(|| invalid_data("Polymarket atomic batch UTC day is unavailable"))?;
+    if events.iter().any(|event| {
+        utc_day_string_from_ms(event.event.recv_time_utc_ms).as_deref()
+            != Some(batch_utc_day.as_str())
+    }) {
+        let reason = "Polymarket atomic batch spans UTC days".to_owned();
+        record_polymarket_fanout_drop(sink, recv_time_utc_ms, market_rows, metadata_rows);
+        record_gap_at(&sink.gaps, recv_time_utc_ms, reason.clone());
+        return Err(invalid_data(reason).into());
+    }
+    let gate = sink
+        .source_queue_backpressure
+        .raw_day_gate()
+        .ok_or_else(|| {
+            invalid_data("raw-day gate missing from production Polymarket enqueue path")
+        })?;
+    let (raw_enqueue, accepted_ticket) = match authority {
+        PolymarketRawDayAuthority::Unadmitted => {
+            let Some(raw_enqueue) = gate
+                .begin_unadmitted_event_enqueue("polymarket", recv_time_utc_ms)
+                .await?
+            else {
+                return Ok(EventAdmissionOutcome::Cutoff);
+            };
+            (raw_enqueue, None)
+        }
+        PolymarketRawDayAuthority::Accepted(ticket) => (
+            gate.begin_accepted_ticket_enqueue("polymarket", recv_time_utc_ms, ticket)
+                .await?,
+            Some(ticket.clone()),
+        ),
+    };
+    let raw_day_permit = match &raw_enqueue {
+        RawDayEnqueueDecision::Permit(enqueue) => Some(enqueue.permit.clone()),
+        RawDayEnqueueDecision::Defer(_) => None,
+    };
+    for event in &mut events {
+        event.raw_day_permit = raw_day_permit.clone();
+    }
+    let count = events.len();
+    if count > sink.tx.max_capacity() {
+        record_polymarket_fanout_drop(sink, recv_time_utc_ms, market_rows, metadata_rows);
+        let reason = format!(
+            "operator_intervention_required:Polymarket fan-out exceeds ingress capacity:rows={count}:capacity={}",
+            sink.tx.max_capacity()
+        );
+        record_gap_at(&sink.gaps, recv_time_utc_ms, reason.clone());
+        return Err(invalid_data(reason).into());
+    }
+    if let RawDayEnqueueDecision::Defer(epoch) = &raw_enqueue {
+        if let Err(error) = commit() {
+            record_polymarket_fanout_drop(sink, recv_time_utc_ms, market_rows, metadata_rows);
+            record_gap_at(
+                &sink.gaps,
+                recv_time_utc_ms,
+                format!("polymarket_atomic_fanout_commit_failed:{error}"),
+            );
+            return Err(error);
+        }
+        if let Some(ticket) = accepted_ticket {
+            sink.source_queue_backpressure.defer_accepted_raw_batch(
+                "polymarket",
+                epoch.clone(),
+                events,
+                ticket,
+            )?;
+        } else {
+            sink.source_queue_backpressure
+                .defer_raw_batch("polymarket", epoch.clone(), events)?;
+        }
+        return Ok(EventAdmissionOutcome::Deferred);
+    }
+    let _enqueue_guard = sink.enqueue_lock.lock().await;
+    let permits = match sink.tx.try_reserve_many(count) {
+        Ok(permits) => permits,
+        Err(mpsc::error::TrySendError::Full(())) => {
+            sink.source_queue_backpressure.record_wait();
+            match timeout(BUFFER_ACQUIRE_TIMEOUT, sink.tx.reserve_many(count)).await {
+                Ok(Ok(permits)) => permits,
+                Ok(Err(_)) => {
+                    record_polymarket_fanout_drop(
+                        sink,
+                        recv_time_utc_ms,
+                        market_rows,
+                        metadata_rows,
+                    );
+                    let reason = "bounded_queue_send_closed:polymarket_atomic_fanout".to_owned();
+                    record_gap_at(&sink.gaps, recv_time_utc_ms, reason.clone());
+                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, reason).into());
+                }
+                Err(_) => {
+                    sink.source_queue_backpressure.record_timeout();
+                    record_polymarket_fanout_drop(
+                        sink,
+                        recv_time_utc_ms,
+                        market_rows,
+                        metadata_rows,
+                    );
+                    let reason =
+                        "bounded_queue_backpressure_timeout:polymarket_atomic_fanout".to_owned();
+                    record_gap_at(&sink.gaps, recv_time_utc_ms, reason.clone());
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, reason).into());
+                }
+            }
+        }
+        Err(mpsc::error::TrySendError::Closed(())) => {
+            record_polymarket_fanout_drop(sink, recv_time_utc_ms, market_rows, metadata_rows);
+            let reason = "bounded_queue_send_closed:polymarket_atomic_fanout".to_owned();
+            record_gap_at(&sink.gaps, recv_time_utc_ms, reason.clone());
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, reason).into());
+        }
+    };
+    if let Err(error) = stamp_source_admissions_atomically(&mut events, sink) {
+        record_polymarket_fanout_drop(sink, recv_time_utc_ms, market_rows, metadata_rows);
+        return Err(error);
+    }
+    if let Err(error) = commit() {
+        record_polymarket_fanout_drop(sink, recv_time_utc_ms, market_rows, metadata_rows);
+        record_gap_at(
+            &sink.gaps,
+            recv_time_utc_ms,
+            format!("polymarket_atomic_fanout_commit_failed:{error}"),
+        );
+        return Err(error);
+    }
+    for (permit, event) in permits.zip(events) {
+        permit.send(SourceIngressPayload::LegacyRaw(event));
+    }
+    Ok(EventAdmissionOutcome::Admitted)
+}
+
+pub(super) async fn send_polymarket_metadata_event(
+    sink: &SourceEventSink,
+    run_started: Instant,
+    market: &crate::market_discovery::DiscoveredBtcUpdownMarket,
+    discovery_slot: &str,
+    collector_identity: &CollectorIdentity,
+) -> Result<PolymarketMetadataV3ReferenceRecord> {
+    let role = match discovery_slot {
+        "current" => MarketRuntimeRole::Current,
+        "next" => MarketRuntimeRole::Next,
+        other => {
+            return Err(
+                invalid_data(format!("unsupported Polymarket v3 discovery slot:{other}")).into(),
+            );
+        }
+    };
+    let row = polymarket_metadata_snapshot_v3_row(market, role, collector_identity)?;
+    send_polymarket_metadata_v3_source_authority_row(sink, run_started, row).await
+}
+
+async fn send_polymarket_metadata_v3_row(
+    sink: &SourceEventSink,
+    run_started: Instant,
+    row: PolymarketMarketMetadataV3Row,
+) -> Result<()> {
+    let event = polymarket_metadata_v4_event(row, None, None)?;
+    send_event(sink, run_started, event).await
+}
+
+fn polymarket_metadata_v4_event(
+    row: PolymarketMarketMetadataV3Row,
+    ws_claimant_source_sequence_epoch_id: Option<String>,
+    ws_claimant_collector_admission_sequence: Option<u64>,
+) -> Result<RawEvent> {
+    let mut row = PolymarketMarketMetadataV4Row::from_v3_prefix(
+        row,
+        ws_claimant_source_sequence_epoch_id,
+        ws_claimant_collector_admission_sequence,
+    );
+    validate_polymarket_metadata_v4_draft(&mut row)?;
+    polymarket_metadata_v4_raw_event(row)
+}
+
+fn validate_polymarket_metadata_v4_draft(row: &mut PolymarketMarketMetadataV4Row) -> Result<()> {
+    row.v3_prefix.collector_admission_sequence = 1;
+    row.v3_prefix.collector_admission_time_utc_ms = now_ms();
+    let validation = row.validate();
+    if !validation.is_complete() {
+        return Err(invalid_data(format!(
+            "Polymarket metadata v4 validation failed before admission:{}",
+            validation.violations.join(",")
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+async fn send_polymarket_metadata_v3_row_with_ticket(
+    sink: &SourceEventSink,
+    run_started: Instant,
+    accepted: AcceptedPolymarketMetadataRow,
+) -> Result<()> {
+    let event = polymarket_metadata_v4_event(
+        accepted.row,
+        accepted.ws_claimant_source_sequence_epoch_id,
+        accepted.ws_claimant_collector_admission_sequence,
+    )?;
+    send_event_with_ticket(sink, run_started, event, &accepted.raw_day_ticket).await
+}
+
+pub(super) async fn send_polymarket_metadata_v3_source_authority_row(
+    sink: &SourceEventSink,
+    run_started: Instant,
+    row: PolymarketMarketMetadataV3Row,
+) -> Result<PolymarketMetadataV3ReferenceRecord> {
+    let authority = PolymarketMetadataV3ReferenceRecord::from(&row);
+    let event = polymarket_metadata_v4_event(row, None, None)?;
+    match send_event_with_admission_outcome(sink, run_started, event).await? {
+        EventAdmissionOutcome::Admitted => Ok(authority),
+        EventAdmissionOutcome::Deferred => Err(invalid_data(
+            "polymarket_metadata_source_authority_not_admitted:utc_deferred",
+        )
+        .into()),
+        EventAdmissionOutcome::Cutoff => Err(invalid_data(
+            "polymarket_metadata_source_authority_not_admitted:controlled_runtime_cutoff",
+        )
+        .into()),
+    }
+}
+
+async fn send_polymarket_metadata_v3_rows_atomically(
+    sink: &SourceEventSink,
+    run_started: Instant,
+    rows: Vec<PolymarketMarketMetadataV3Row>,
+) -> Result<EventAdmissionOutcome> {
+    let rows = rows
+        .into_iter()
+        .map(|row| PolymarketMarketMetadataV4Row::from_v3_prefix(row, None, None))
+        .collect();
+    send_polymarket_metadata_v4_rows_atomically_with_authority(sink, run_started, rows, None).await
+}
+
+pub(super) async fn send_polymarket_metadata_v3_rows_atomically_with_tickets(
+    sink: &SourceEventSink,
+    run_started: Instant,
+    accepted_rows: Vec<AcceptedPolymarketMetadataRow>,
+) -> Result<EventAdmissionOutcome> {
+    let Some(first) = accepted_rows.first() else {
+        return Ok(EventAdmissionOutcome::Admitted);
+    };
+    let raw_day_ticket = first.raw_day_ticket.clone();
+    if accepted_rows
+        .iter()
+        .any(|accepted| accepted.raw_day_ticket != raw_day_ticket)
+    {
+        let recv_time_utc_ms = first.row.timestamp_received;
+        let reason =
+            "Polymarket terminal atomic group contains inconsistent raw-day tickets".to_owned();
+        record_polymarket_fanout_drop(sink, recv_time_utc_ms, 0, accepted_rows.len());
+        record_gap_at(&sink.gaps, recv_time_utc_ms, reason.clone());
+        return Err(invalid_data(reason).into());
+    }
+    let rows = accepted_rows
+        .into_iter()
+        .map(|accepted| {
+            PolymarketMarketMetadataV4Row::from_v3_prefix(
+                accepted.row,
+                accepted.ws_claimant_source_sequence_epoch_id,
+                accepted.ws_claimant_collector_admission_sequence,
+            )
+        })
+        .collect();
+    send_polymarket_metadata_v4_rows_atomically_with_authority(
+        sink,
+        run_started,
+        rows,
+        Some(&raw_day_ticket),
+    )
+    .await
+}
+
+async fn send_polymarket_metadata_v4_rows_atomically_with_authority(
+    sink: &SourceEventSink,
+    run_started: Instant,
+    mut rows: Vec<PolymarketMarketMetadataV4Row>,
+    raw_day_ticket: Option<&RawDayAcceptedTicket>,
+) -> Result<EventAdmissionOutcome> {
+    for row in &mut rows {
+        validate_polymarket_metadata_v4_draft(row)?;
+    }
+    if rows.len() <= 1 {
+        if let Some(row) = rows.into_iter().next() {
+            let event = polymarket_metadata_v4_raw_event(row)?;
+            return match raw_day_ticket {
+                Some(ticket) => {
+                    send_event_with_ticket_outcome(sink, run_started, event, ticket).await
+                }
+                None => send_event_with_admission_outcome(sink, run_started, event).await,
+            };
+        }
+        return Ok(EventAdmissionOutcome::Admitted);
+    }
+
+    let events = rows
+        .into_iter()
+        .map(polymarket_metadata_v4_raw_event)
+        .collect::<Result<Vec<_>>>()?;
+    let recv_time_utc_ms = events[0].recv_time_utc_ms;
+    let partition = utc_hour_string_from_ms(recv_time_utc_ms)
+        .ok_or_else(|| invalid_data("Polymarket terminal bundle UTC partition is unavailable"))?;
+    if events.iter().any(|event| {
+        utc_hour_string_from_ms(event.recv_time_utc_ms).as_deref() != Some(partition.as_str())
+    }) {
+        let reason = "Polymarket terminal bundle spans UTC partitions".to_owned();
+        record_polymarket_fanout_drop(sink, recv_time_utc_ms, 0, events.len());
+        record_gap_at(&sink.gaps, recv_time_utc_ms, reason.clone());
+        return Err(invalid_data(reason).into());
+    }
+
+    let mut total_bytes = 0_usize;
+    let mut measured_bytes = Vec::with_capacity(events.len());
+    for event in &events {
+        let bytes = owned_event_bytes(event);
+        if bytes > MAX_TYPED_ROW_BYTES {
+            let reason = format!(
+                "operator_intervention_required:max_typed_row_bytes_exceeded:polymarket_market_metadata:bytes={bytes}:limit={MAX_TYPED_ROW_BYTES}"
+            );
+            record_polymarket_fanout_drop(sink, recv_time_utc_ms, 0, events.len());
+            record_gap_at(&sink.gaps, recv_time_utc_ms, reason.clone());
+            return Err(invalid_data(reason).into());
+        }
+        total_bytes = total_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| invalid_data("Polymarket terminal bundle byte count overflow"))?;
+        measured_bytes.push(bytes);
+    }
+    let mut reservation = match sink
+        .inflight_budget
+        .acquire(events.len(), total_bytes, BUFFER_ACQUIRE_TIMEOUT)
+        .await
+    {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            sink.source_queue_backpressure.record_timeout();
+            record_polymarket_fanout_drop(sink, recv_time_utc_ms, 0, events.len());
+            record_gap_at(
+                &sink.gaps,
+                recv_time_utc_ms,
+                format!("polymarket_terminal_bundle_budget_failed:{error}"),
+            );
+            return Err(error.into());
+        }
+    };
+    let mut prepared = Vec::with_capacity(events.len());
+    for (event, bytes) in events.into_iter().zip(measured_bytes) {
+        let row_reservation = reservation.split(1, bytes)?;
+        prepared.push(InflightRawEvent {
+            event,
+            control: None,
+            admission_gaps: Vec::new(),
+            raw_day_permit: None,
+            _source_recv_monotonic_ms: monotonic_ms(run_started),
+            _reservation: Some(row_reservation),
+        });
+    }
+    drop(reservation);
+    match raw_day_ticket {
+        Some(ticket) => {
+            send_polymarket_events_atomically_with_ticket(
+                sink,
+                recv_time_utc_ms,
+                prepared,
+                ticket,
+                || Ok(()),
+            )
+            .await
+        }
+        None => {
+            send_polymarket_events_atomically(sink, recv_time_utc_ms, prepared, || Ok(())).await
+        }
+    }
+}
+
+pub(super) async fn send_polymarket_terminal_prefix_ordered(
+    sink: &SourceEventSink,
+    run_started: Instant,
+    rows: Vec<AcceptedPolymarketMetadataRow>,
+) -> Result<()> {
+    if rows.len() <= 1 {
+        send_polymarket_metadata_v3_rows_atomically_with_tickets(sink, run_started, rows).await?;
+        return Ok(());
+    }
+    let first = rows
+        .first()
+        .ok_or_else(|| invalid_data("Polymarket terminal prefix is empty"))?;
+    if first.row.metadata_row_kind != PolymarketMetadataRowKind::ResolutionTerminalWs {
+        return Err(invalid_data(
+            "cross-partition Polymarket terminal prefix requires a WS terminal first",
+        )
+        .into());
+    }
+    if rows.iter().skip(1).any(|accepted| {
+        let row = &accepted.row;
+        row.metadata_row_kind != PolymarketMetadataRowKind::ResolutionPollAttempt
+            || !matches!(
+                row.resolution_poll_result,
+                Some(
+                    ResolutionPollResult::PostTerminalClaimObservation
+                        | ResolutionPollResult::TransportUnavailable
+                        | ResolutionPollResult::IntegrityError
+                )
+            )
+            || (row.resolution_poll_result
+                == Some(ResolutionPollResult::PostTerminalClaimObservation)
+                && row.terminal_claim_owner != Some(TerminalClaimOwner::MarketResolvedWs))
+    }) {
+        return Err(invalid_data(
+            "cross-partition Polymarket terminal prefix contains an invalid buffered attempt",
+        )
+        .into());
+    }
+
+    let mut groups = Vec::<Vec<AcceptedPolymarketMetadataRow>>::new();
+    let mut previous_partition = None::<String>;
+    for accepted in rows {
+        let partition =
+            utc_hour_string_from_ms(accepted.row.timestamp_received).ok_or_else(|| {
+                invalid_data("Polymarket terminal prefix UTC partition is unavailable")
+            })?;
+        if previous_partition
+            .as_ref()
+            .is_some_and(|previous| partition < *previous)
+        {
+            return Err(invalid_data("Polymarket terminal prefix UTC partition regressed").into());
+        }
+        if previous_partition.as_deref() != Some(partition.as_str()) {
+            groups.push(Vec::new());
+            previous_partition = Some(partition);
+        }
+        groups
+            .last_mut()
+            .expect("terminal prefix has a current partition")
+            .push(accepted);
+    }
+
+    for group in groups {
+        let _ = send_polymarket_metadata_v3_rows_atomically_with_tickets(sink, run_started, group)
+            .await?;
+    }
+    Ok(())
+}
+
+fn record_polymarket_v3_admission_failure(
+    sink: &SourceEventSink,
+    recv_time_utc_ms: i64,
+    reason: &str,
+) {
+    sink.source_queue_backpressure.record_drop(1);
+    sink.source_queue_backpressure.record_operational_drop(
+        "polymarket_market",
+        recv_time_utc_ms,
+        1,
+    );
+    record_gap_at(
+        &sink.gaps,
+        recv_time_utc_ms,
+        format!("polymarket_orderbook_v3_admission_failed:{reason}"),
+    );
+}
+
+pub(super) async fn enqueue_polymarket_orderbook_v3_with_ticket<F>(
+    sink: &SourceEventSink,
+    run_started: Instant,
+    recv_time_utc_ms: i64,
+    ticket: &RawDayAcceptedTicket,
+    collector_identity: &CollectorIdentity,
+    source_sequence_epoch_id: &str,
+    build_projection: F,
+) -> Result<PolymarketOrderbookV3AdmissionReceipt>
+where
+    F: FnOnce() -> Result<PolymarketOrderbookV3Projection>,
+{
+    let gate = sink
+        .source_queue_backpressure
+        .raw_day_gate()
+        .ok_or_else(|| invalid_data("raw-day gate missing from Polymarket v3 admission path"))?;
+    let raw_enqueue = gate
+        .begin_accepted_ticket_enqueue("polymarket", recv_time_utc_ms, ticket)
+        .await?;
+
+    let budget_deadline = TokioInstant::now() + BUFFER_ACQUIRE_TIMEOUT;
+    let mut byte_reservation = match sink
+        .inflight_budget
+        .acquire(0, MAX_TYPED_ROW_BYTES, BUFFER_ACQUIRE_TIMEOUT)
+        .await
+    {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            sink.source_queue_backpressure.record_timeout();
+            record_polymarket_v3_admission_failure(
+                sink,
+                recv_time_utc_ms,
+                &format!("global_inflight_budget_failed:{error}"),
+            );
+            return Err(error.into());
+        }
+    };
+    let projection = build_projection().inspect_err(|error| {
+        record_polymarket_v3_admission_failure(
+            sink,
+            recv_time_utc_ms,
+            &format!("canonical_projection_failed:{error}"),
+        );
+    })?;
+    let pending = projection
+        .prepare_admission(
+            recv_time_utc_ms,
+            collector_identity.host_id.clone(),
+            collector_identity.region.clone(),
+            MARKET_WS_ENDPOINT.to_owned(),
+            source_sequence_epoch_id.to_owned(),
+        )
+        .inspect_err(|error| {
+            record_polymarket_v3_admission_failure(
+                sink,
+                recv_time_utc_ms,
+                &format!("canonical_projection_failed:{error}"),
+            );
+        })?;
+    let owned_bytes = pending.owned_bytes();
+    if owned_bytes > MAX_TYPED_ROW_BYTES {
+        let reason = format!(
+            "operator_intervention_required:max_typed_row_bytes_exceeded:bytes={owned_bytes}:limit={MAX_TYPED_ROW_BYTES}"
+        );
+        record_polymarket_v3_admission_failure(sink, recv_time_utc_ms, &reason);
+        return Err(invalid_data(reason).into());
+    }
+    byte_reservation
+        .shrink_to(0, owned_bytes)
+        .inspect_err(|error| {
+            record_polymarket_v3_admission_failure(
+                sink,
+                recv_time_utc_ms,
+                &format!("inflight_byte_reservation_shrink_failed:{error}"),
+            );
+        })?;
+    let row_reservation = match sink
+        .inflight_budget
+        .acquire(
+            1,
+            0,
+            budget_deadline.saturating_duration_since(TokioInstant::now()),
+        )
+        .await
+    {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            sink.source_queue_backpressure.record_timeout();
+            record_polymarket_v3_admission_failure(
+                sink,
+                recv_time_utc_ms,
+                &format!("global_inflight_row_budget_failed:{error}"),
+            );
+            return Err(error.into());
+        }
+    };
+
+    match raw_enqueue {
+        RawDayEnqueueDecision::Permit(raw_enqueue) => {
+            let _enqueue_guard = sink.enqueue_lock.lock().await;
+            let queue_permit = match sink.tx.try_reserve() {
+                Ok(permit) => permit,
+                Err(mpsc::error::TrySendError::Full(())) => {
+                    sink.source_queue_backpressure.record_wait();
+                    match timeout(BUFFER_ACQUIRE_TIMEOUT, sink.tx.reserve()).await {
+                        Ok(Ok(permit)) => permit,
+                        Ok(Err(_)) => {
+                            let reason = "bounded_queue_send_closed";
+                            record_polymarket_v3_admission_failure(sink, recv_time_utc_ms, reason);
+                            return Err(io::Error::new(io::ErrorKind::BrokenPipe, reason).into());
+                        }
+                        Err(_) => {
+                            sink.source_queue_backpressure.record_timeout();
+                            let reason = "bounded_queue_backpressure_timeout";
+                            record_polymarket_v3_admission_failure(sink, recv_time_utc_ms, reason);
+                            return Err(io::Error::new(io::ErrorKind::TimedOut, reason).into());
+                        }
+                    }
+                }
+                Err(mpsc::error::TrySendError::Closed(())) => {
+                    let reason = "bounded_queue_send_closed";
+                    record_polymarket_v3_admission_failure(sink, recv_time_utc_ms, reason);
+                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, reason).into());
+                }
+            };
+            let (message, receipt) = admit_polymarket_orderbook_v3_pending(
+                sink,
+                recv_time_utc_ms,
+                source_sequence_epoch_id,
+                pending,
+                owned_bytes,
+            )?;
+            queue_permit.send(SourceIngressPayload::PolymarketOrderbookV3(
+                InflightPolymarketOrderbookV3 {
+                    message,
+                    raw_day_permit: raw_enqueue.permit,
+                    _source_recv_monotonic_ms: monotonic_ms(run_started),
+                    _row_reservation: row_reservation,
+                    _byte_reservation: byte_reservation,
+                },
+            ));
+            Ok(receipt)
+        }
+        RawDayEnqueueDecision::Defer(epoch) => {
+            let mut deferred = sink
+                .source_queue_backpressure
+                .deferred_ingress_batches
+                .lock()
+                .expect("deferred ingress mutex poisoned");
+            let (message, receipt) = admit_polymarket_orderbook_v3_pending(
+                sink,
+                recv_time_utc_ms,
+                source_sequence_epoch_id,
+                pending,
+                owned_bytes,
+            )?;
+            deferred
+                .entry("polymarket".to_owned())
+                .or_default()
+                .push_back(DeferredIngressBatch::PolymarketOrderbookV3(Box::new(
+                    DeferredPolymarketOrderbookV3 {
+                        epoch,
+                        accepted_ticket: ticket.clone(),
+                        message,
+                        _source_recv_monotonic_ms: monotonic_ms(run_started),
+                        _row_reservation: row_reservation,
+                        _byte_reservation: byte_reservation,
+                    },
+                )));
+            Ok(receipt)
+        }
+    }
+}
+
+fn admit_polymarket_orderbook_v3_pending(
+    sink: &SourceEventSink,
+    recv_time_utc_ms: i64,
+    source_sequence_epoch_id: &str,
+    pending: PendingPolymarketOrderbookV3Admission,
+    owned_bytes: usize,
+) -> Result<(
+    PolymarketOrderbookV3Message,
+    PolymarketOrderbookV3AdmissionReceipt,
+)> {
+    let collector_admission_time_utc_ms = now_ms();
+    if collector_admission_time_utc_ms <= 0 || recv_time_utc_ms > collector_admission_time_utc_ms {
+        let reason = format!(
+            "invalid_real_admission_clock:received={recv_time_utc_ms}:admission={collector_admission_time_utc_ms}"
+        );
+        record_polymarket_v3_admission_failure(sink, recv_time_utc_ms, &reason);
+        return Err(invalid_data(reason).into());
+    }
+    let collector_admission_sequence = sink
+        .source_queue_backpressure
+        .reserve_admission_sequences("polymarket_market", 1)
+        .inspect_err(|error| {
+            record_polymarket_v3_admission_failure(
+                sink,
+                recv_time_utc_ms,
+                &format!("sequence_allocation_failed:{error}"),
+            );
+        })?;
+    let message = pending
+        .admit(
+            collector_admission_sequence,
+            collector_admission_time_utc_ms,
+        )
+        .inspect_err(|error| {
+            record_polymarket_v3_admission_failure(
+                sink,
+                recv_time_utc_ms,
+                &format!("canonical_admission_failed:{error}"),
+            );
+        })?;
+    debug_assert_eq!(message.owned_bytes(), owned_bytes);
+    let market_resolved = polymarket_market_resolved_admission_evidence(&message)?;
+    let receipt = PolymarketOrderbookV3AdmissionReceipt {
+        source_sequence_epoch_id: source_sequence_epoch_id.to_owned(),
+        collector_admission_sequence,
+        collector_admission_time_utc_ms,
+        market_resolved,
+    };
+    Ok((message, receipt))
+}
+
+async fn send_event_with_ticket(
+    sink: &SourceEventSink,
+    run_started: Instant,
+    event: RawEvent,
+    ticket: &RawDayAcceptedTicket,
+) -> Result<()> {
+    match send_event_with_ticket_outcome(sink, run_started, event, ticket).await? {
+        EventAdmissionOutcome::Admitted | EventAdmissionOutcome::Deferred => Ok(()),
+        EventAdmissionOutcome::Cutoff => Err(invalid_data(
+            "accepted Polymarket ticket unexpectedly reached a controlled runtime cutoff",
+        )
+        .into()),
+    }
+}
+
+async fn send_event_with_ticket_outcome(
+    sink: &SourceEventSink,
+    run_started: Instant,
+    event: RawEvent,
+    ticket: &RawDayAcceptedTicket,
+) -> Result<EventAdmissionOutcome> {
+    let producer = logical_producer_for_source_kind(&event.source_kind)?;
+    if producer != "polymarket" {
+        return Err(invalid_data(format!(
+            "accepted Polymarket ticket cannot authorize producer {producer}"
+        ))
+        .into());
+    }
+    let recv_time_utc_ms = event.recv_time_utc_ms;
+    let owned_bytes = owned_event_bytes(&event);
+    if owned_bytes > MAX_TYPED_ROW_BYTES {
+        let reason = format!(
+            "operator_intervention_required:max_typed_row_bytes_exceeded:{}:bytes={owned_bytes}:limit={MAX_TYPED_ROW_BYTES}",
+            event.source_kind
+        );
+        sink.source_queue_backpressure.record_operational_drop(
+            &event.source_kind,
+            recv_time_utc_ms,
+            1,
+        );
+        record_gap_at(&sink.gaps, recv_time_utc_ms, reason.clone());
+        return Err(invalid_data(reason).into());
+    }
+    let reservation = match sink
+        .inflight_budget
+        .acquire(1, owned_bytes, BUFFER_ACQUIRE_TIMEOUT)
+        .await
+    {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            sink.source_queue_backpressure.record_timeout();
+            sink.source_queue_backpressure.record_drop(1);
+            sink.source_queue_backpressure.record_operational_drop(
+                &event.source_kind,
+                recv_time_utc_ms,
+                1,
+            );
+            record_gap_at(
+                &sink.gaps,
+                recv_time_utc_ms,
+                format!(
+                    "global_inflight_budget_failed:{}:{error}",
+                    event.source_kind
+                ),
+            );
+            return Err(error.into());
+        }
+    };
+    let prepared = vec![InflightRawEvent {
+        event,
+        control: None,
+        admission_gaps: Vec::new(),
+        raw_day_permit: None,
+        _source_recv_monotonic_ms: monotonic_ms(run_started),
+        _reservation: Some(reservation),
+    }];
+    send_polymarket_events_atomically_with_ticket(sink, recv_time_utc_ms, prepared, ticket, || {
+        Ok(())
+    })
+    .await
+}
+
+pub(super) fn polymarket_source_sequence_epoch_id(identity: &CollectorIdentity) -> Result<String> {
+    let task_sequence = POLYMARKET_SOURCE_EPOCH_COUNTER
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            current.checked_add(1)
+        })
+        .map(|previous| previous + 1)
+        .map_err(|_| invalid_data("Polymarket market source epoch sequence overflow"))?;
+    let started_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| invalid_data(format!("system clock precedes Unix epoch: {error}")))?
+        .as_nanos();
+    let mut hasher = Sha256::new();
+    hasher.update(b"polymarket_market_source_sequence_epoch_v1\0");
+    hasher.update(identity.host_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(identity.region.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(std::process::id().to_le_bytes());
+    hasher.update(started_ns.to_le_bytes());
+    hasher.update(task_sequence.to_le_bytes());
+    Ok(format!("{:x}", hasher.finalize()))
+}

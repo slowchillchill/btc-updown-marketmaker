@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_REVIEW_PASSED_AWAITING_PUBLISH`。阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_PARAMETERS_DEFERRED`。阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
 > `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
@@ -20,21 +20,21 @@
 > 2.1/2.2共同基线已落盘到
 > `data-collect/docs/sdk070-stage2-observable-and-owner-baseline.md`并完成自审；
 > `2-PM`四个小步均已完成：step 1/2/3通过实现与自审，step 4确认既有resolution
-> recovery已是唯一owner且无需再重构。`2-PM`分支收口完整门与独立审查均已通过，
-> 用户已另行批准`2-PM` closure commit/push；`2-PM_CLOSED`以承载本记录的commit
-> 成功推送且本地HEAD、upstream与远端ref一致为生效条件。共享dispatcher继续留在
+> recovery已是唯一owner且无需再重构。`2-PM`分支收口完整门与独立审查均已通过；
+> closure commit `582eb154687c4c0522615753b3fc1903f2e833f3`已推送且三方ref
+> 一致，故`2-PM_CLOSED`成立。共享dispatcher继续留在
 > root。`2-RTDS`唯一owner小步、自审、分支收口完整/静态门及独立审查均已通过；
 > closure commit `b7f83704cf2176de61573c6b11d792df73d68b53`已推送且三方ref
 > 一致，故`2-RTDS_CLOSED`成立。Stage3入口独立审计为`PASS`；任务3.0 authority
-> 同步已完成，`STAGE3_AUTHORITY_SYNC_CLOSED`以承载本记录的commit成功push且三方
-> ref一致为生效条件。用户明确批准持续推进本
+> sync commit `b569546ae1c9cfc24bcdfe4ba12ee4ce60ccc278`已push且三方ref
+> 一致，故`STAGE3_AUTHORITY_SYNC_CLOSED`成立。用户明确批准持续推进本
 > 事项直至完成；后继本地实现、测试、审查、commit和push不再逐次申请。只有上下文
 > 冲突或实际情况与需求/计划不一致时才停止。未冻结的RTDS参数仍是实质决策门；
 > production activation/cutover、release、部署、远端操作、migration和删除仍为
 > 第九节范围外事项。
 > Stage3任务3.1至3.7、S-B/M-B/W-B修复、本地门与重复独立审查均已通过；
-> `STAGE3_CLOSED`以承载本记录的commit成功push到`origin/fix-rtds-silents`且本地
-> HEAD、upstream与远端ref一致为生效条件。下一执行游标为独立cleanup阶段5；
+> closure commit `7c6927f663d9c3b387874f688b10346956b9302d`已push且三方ref
+> 一致，故`STAGE3_CLOSED`成立。随后执行游标进入独立cleanup阶段5；
 > 阶段4仍遵守RTDS专项自身尚未满足的参数与授权门。
 > 2026-07-26用户已批准Stage5四项authority修正并解除U01–U04b决策门：
 > queue使用真实bounded channel/global row+owned-byte/bounded-wait owner，
@@ -52,7 +52,15 @@
 > 一致，故`STAGE5_CLOSED`成立。Stage6本地证据、最终报告及两路独立
 > `gpt-5.6-sol`/Ultra终审已经完成；终审均为
 > `PASS / CLOSURE_UNBLOCKED`，Blocker 0 / Important 0 / Minor 0。2-REST仍是
-> Stage6后必须单独执行的开放分支。
+> Stage6后必须单独执行的开放分支。Stage6 closure commit
+> `c0aff3a3e61583138b33eec44d847acaa8ebd682`已push且三方ref一致，故
+> `STAGE6_CLOSED`成立。2-REST owner迁移、root残留审计、测试库存对账与唯一完整
+> 确定性门已经通过；代码、证据与文档三路`gpt-5.6-sol`/Ultra独立终审均为
+> `PASS / CLOSURE_UNBLOCKED`，Critical 0 / Important 0 / Minor 0。按用户批准的
+> 方案A，本文条件式记录`2-REST_CLOSED`与核心总事项`CORE_COMPLETE`：只有承载
+> 本记录的closure commit成功push且本地HEAD、upstream与远端ref一致后才生效。
+> RTDS行为专项继续保持`RTDS_PARAMETERS_DEFERRED`且未完成；按第十节不另设
+> umbrella独立审查或总回归门。
 
 ## 一、执行原则与成功标准
 
@@ -331,9 +339,9 @@ bench；bench只做compile check，真实smoke另受任务1.5约束。
   Stage1 HEAD既有lint attribute与其函数之间因迁移产生的空行；attribute保持不变，
   函数体与调用图未变，不重复suite。独立全面审查首轮只发现attribute被误删及
   文档叙述错误这一项Minor；恢复既有attribute、修正文档并复跑最终静态门后，最小
-  复审以Critical/Important/Minor均为0通过。当前游标为
-  `2-PM_CLOSED`，以承载本状态的closure commit成功推送且本地HEAD、upstream与
-  远端ref一致为生效条件。
+  复审以Critical/Important/Minor均为0通过。closure commit
+  `582eb154687c4c0522615753b3fc1903f2e833f3`已推送且三方ref一致，故
+  `2-PM_CLOSED`成立。
 - Stage1 typed blocker继续只阻断阶段3 v3；不把它扩大为阶段2机械拆分 blocker。
 
 ### 分支 2-PM：v3所需最小 Polymarket owner
@@ -385,6 +393,24 @@ bench；bench只做compile check，真实smoke另受任务1.5约束。
 - tests随owner分布，不形成横跨多个无关owner的单体测试模块；
 - 报告各模块及root的moved/deleted/rewritten/added/net LOC，但不设固定LOC门；
 - 分支收口运行一次完整确定性门和独立审查。
+
+当前执行事实（2026-07-26）：
+
+- 入口 commit为`c0aff3a3e61583138b33eec44d847acaa8ebd682`；入口
+  `live_runtime.rs`为31,904行，574个named tests、37个package test/doc
+  targets（36个可执行targets + 1个doctest target）；
+- 其余有效行为已迁入28个私有owner；最终root为4,966行，其中测试前root
+  为1,815行，只含facade/config/composition及最小test-only glue。独立残留审计为
+  `PASS / CLOSURE_UNBLOCKED`，剩余必做迁移0；
+- 终态仍为574个named tests、37个package test/doc targets；basename排序清单SHA-256与入口
+  同为`76c2711cb908bde6cbfa2a5b9b9cb54b3416f1135f29cec5e7143fdef2d9184a`；
+- Rust file-level churn为`+30,966/-30,895`，净`+71`行；semantic delete、
+  rewrite和behavioral add均为0，精确owner/LOC/KEEP/MOVE及偏差记录见
+  `data-collect/docs/sdk070-stage2-rest-modularization.md`；
+- 主执行方唯一完整分支门已通过：lib 348项、integration 226项、0 bin/doctest，以及
+  locked all-target check、Clippy `-D warnings`、fmt和diff gate；
+- 当前只待`gpt-5.6-sol`/Ultra独立阶段审查；审查通过前不创建closure
+  commit/push，也不记录`2-REST_CLOSED`。
 
 审查通过后使用持续发布授权完成commit/push与ref核对并记`2-REST_CLOSED`。`2-REST`不阻断阶段3或阶段4。三个分支均禁止test consolidation、死代码清理、generic source/actor/plugin framework和直接套用历史remote branch patch；发现语义漂移时回退对应小步，不用新测试接受漂移。
 
