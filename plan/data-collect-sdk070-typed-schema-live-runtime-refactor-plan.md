@@ -8,23 +8,27 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_EXECUTION_P_B1_REVIEW_PASSED_AWAITING_PUBLISH`。阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED`。阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
 > `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
-> `SDK_070_TYPED_CONTRACT_BLOCKED`。用户随后批准独立前置`P-B1`，最终字段裁决为
+> `SDK_070_TYPED_CONTRACT_BLOCKED`。用户随后批准并发布独立前置`P-B1`，最终字段裁决为
 > F04 `INCLUDED_OPTIONAL`、F01–F03与F05–F18 `EXCLUDED`；本地实现、最终门及
-> 独立审查已通过，尚未commit或push。用户于2026-07-25批准继续推进，阶段2任务
+> 独立审查已通过，closure commit
+> `d6a87fdaf0a751d6b7c4196aeb936b4c5de4c094`已推送且三方ref一致，typed终态为
+> `SDK_070_TYPED_CONTRACT_NONBLOCKING_GAPS_APPROVED`。用户于2026-07-25批准继续推进，阶段2任务
 > 2.1/2.2共同基线已落盘到
 > `data-collect/docs/sdk070-stage2-observable-and-owner-baseline.md`并完成自审；
 > `2-PM`四个小步均已完成：step 1/2/3通过实现与自审，step 4确认既有resolution
 > recovery已是唯一owner且无需再重构。`2-PM`分支收口完整门与独立审查均已通过，
 > 用户已另行批准`2-PM` closure commit/push；`2-PM_CLOSED`以承载本记录的commit
 > 成功推送且本地HEAD、upstream与远端ref一致为生效条件。共享dispatcher继续留在
-> root。typed blocker不阻断阶段2；
-> 公开网络smoke、非parser typed字段决定、RTDS参数与4A/4B、后继
-> commit/push、production activation/cutover、release、部署、远端操作、migration
-> 和删除仍保留各自独立门。
+> root。`2-RTDS`唯一owner小步、自审、分支收口完整/静态门及独立审查均已通过，
+> 并在用户持续执行/发布授权下进入closure commit/push。用户明确批准持续推进本
+> 事项直至完成；后继本地实现、测试、审查、commit和push不再逐次申请。只有上下文
+> 冲突或实际情况与需求/计划不一致时才停止。未冻结的RTDS参数仍是实质决策门；
+> production activation/cutover、release、部署、远端操作、migration和删除仍为
+> 第九节范围外事项。
 
 ## 一、执行原则与成功标准
 
@@ -53,7 +57,7 @@ typed字段缺口只阻断 v3；`RTDS_PARAMETERS_DEFERRED` 只阻断 RTDS。SDK 
 3. 主代理检查 diff、测试证据、authority和范围；
 4. 同步 plan/changelog的真实 cursor与偏差。
 
-完整确定性回归和 `gpt-5.6-sol`、`ultra` 独立审查只在阶段收口执行；coordinator/day/manifest/shutdown等高风险迁移可额外执行一次完整门。修复 Critical/Important 后复审；只有阶段另行获得 commit/push授权时才提交。
+完整确定性回归和 `gpt-5.6-sol`、`ultra` 独立审查只在阶段收口执行；coordinator/day/manifest/shutdown等高风险迁移可额外执行一次完整门。修复 Critical/Important 后复审；审查通过后使用用户2026-07-25持续执行/发布授权直接commit/push并核对ref，不再重复询问。只有上下文冲突或实际情况与需求/计划不一致时停止请求决策。
 
 若发现文档、代码、数据或 SDK 事实冲突，执行需求第十节停止条件，不自行调和。
 
@@ -70,7 +74,7 @@ typed字段缺口只阻断 v3；`RTDS_PARAMETERS_DEFERRED` 只阻断 RTDS。SDK 
 - 步骤 0.1.4：登记用户已批准的 `market_resolved` v3 validate-first决定，不再次请求同一语义。
   -> 验证：该窄决定在2026-07-24只约束未来v3 new-write，当时没有自动批准当前`polymarket_orderbook_v2` source代码、Rust/schema/tests或整个总需求；总需求已由用户于2026-07-25另行批准开始执行，但实现和activation仍走各自入口门。
 - 步骤 0.1.5：登记`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`，不再次请求metadata版本选择。
-  -> 验证：该窄决定本身只冻结metadata v4 schema合同与未来activation pairing；总需求的后续执行批准也不把尚未发生的Rust/schema/test实施、current调用图切换或production cutover写成已完成/已授权。
+  -> 验证：该窄决定本身只冻结metadata v4 schema合同与未来activation pairing；尚未发生的Rust/schema/test实施与current调用图切换不得写成已完成，production cutover仍未获授权；阶段3本地Rust/schema/test实施已由2026-07-25持续执行授权覆盖。
 
 ### 任务 0.2：建立精确 authority delta matrix
 
@@ -79,7 +83,7 @@ typed字段缺口只阻断 v3；`RTDS_PARAMETERS_DEFERRED` 只阻断 RTDS。SDK 
 - 步骤 0.2.2：只引用并消费RTDS专项三件套已经记录的business-silence authority delta、参数状态和测试入口/出口。
   -> 验证：umbrella不重扫数据、不重算参数候选、不重建delta/test矩阵，也不维护第二执行游标；专项路径、状态和阻断原因可精确解析。
 - 步骤 0.2.3：除已经单独批准并完成文档同步的`market_resolved` v3 validate-first与metadata v4 claimant两个窄决定，以及本轮用户批准的reliability current四路径清单修正外，阶段0只建立并评审矩阵，不同步其他相反authority；旧changelog不回写。
-  -> 验证：四路径修正只恢复source-availability第4.7节已经批准且当前代码实际使用的allowlist，不改变typed或RTDS行为authority。上述两个carve-out不得重新置为待决，也不得冒充Rust/schema/test实施；其余typed authority只允许在SDK字段门通过、用户批准v3字段集合并单独授权阶段3后同步。RTDS authority只在参数/需求/delta获批并单独授权4A后同步，随即停止，4B Rust/构建/测试必须另获授权。
+  -> 验证：四路径修正只恢复source-availability第4.7节已经批准且当前代码实际使用的allowlist，不改变typed或RTDS行为authority。上述两个carve-out不得重新置为待决，也不得冒充Rust/schema/test实施；其余typed authority只允许在SDK字段门通过、用户批准v3字段集合且2026-07-25持续执行授权有效后同步。RTDS authority只在参数/需求/delta获批并单独授权4A后同步，随即停止，4B Rust/构建/测试必须另获授权。
 
 ### 任务 0.3：消费 RTDS 专项状态，但不重复执行
 
@@ -323,7 +327,29 @@ bench；bench只做compile check，真实smoke另受任务1.5约束。
 
 ### 分支 2-RTDS：专项所需最小 RTDS owner
 
-只移动RTDS source owner及其直接测试，保持当前“业务静默不重连”authority和行为；内部按小步门验证，分支收口运行一次完整回归和独立审查后先记`2-RTDS_REVIEW_PASSED_AWAITING_PUBLISH`，只有获授权并完成commit/push后才记`2-RTDS_CLOSED`。它是阶段4机械前置，不依赖2-PM或2-REST。
+只移动RTDS source owner及其直接测试，保持当前“业务静默不重连”authority和行为；内部按小步门验证，分支收口运行一次完整回归和独立审查后，使用持续发布授权创建closure commit/push并核对ref，随后记`2-RTDS_CLOSED`。它是阶段4机械前置，不依赖2-PM或2-REST。
+
+当前执行事实：
+
+- production owner已机械迁入私有`live_runtime/rtds_source.rs`：RTDS endpoint与
+  bounded config、source spec、classify、subscription evidence、source-native
+  canonical、dedupe restore、SDK runtime loop、generation accounting与emit；
+- 九个直接测试已机械迁入`live_runtime/tests/rtds_source.rs`；root继续保留
+  composition、共享sink/day/coordinator、writer/schema/row conversion、跨channel
+  config、跨四源静默和四源load测试；
+- 迁移前root为33,965行；最终root 32,589行、source 359行、直接测试1,019行，
+  合计33,967行，净增2行module wiring，不作为固定LOC门；
+- production代码块规范化后与`d6a87fd`基线逐项hash一致；九个测试在移动时函数体
+  逐字一致，最终文本差异仅为标准rustfmt布局。owner定向`9/9`、三个root affected
+  test `3/3`与locked all-targets check通过；
+- 分支收口完整suite为`351 unit / 246 integration / 0 doctest`通过；all-targets
+  Clippy `-D warnings`通过。首次fmt check只发现移动后缩进变化与三处孤立空行，
+  运行标准formatter后fmt与diff门通过；不因纯格式修正重复完整suite；
+- `gpt-5.6-sol`/`ultra`独立审查以
+  `PASS (Critical 0 / Important 0 / Minor 0)`通过；用户随后授予持续执行/发布
+  授权。当前游标记录为`2-RTDS_CLOSED`，以承载本记录的closure commit成功push且
+  本地HEAD、upstream与远端ref一致为生效条件；不运行vendor suite、public smoke
+  或未批准RTDS草案的专项验证。
 
 ### 分支 2-REST：其余行为保持模块化
 
@@ -336,7 +362,7 @@ bench；bench只做compile check，真实smoke另受任务1.5约束。
 - 报告各模块及root的moved/deleted/rewritten/added/net LOC，但不设固定LOC门；
 - 分支收口运行一次完整确定性门和独立审查。
 
-审查通过先记`2-REST_REVIEW_PASSED_AWAITING_PUBLISH`，获授权并完成commit/push后才记`2-REST_CLOSED`。`2-REST`不阻断阶段3或阶段4。三个分支均禁止test consolidation、死代码清理、generic source/actor/plugin framework和直接套用历史remote branch patch；发现语义漂移时回退对应小步，不用新测试接受漂移。
+审查通过后使用持续发布授权完成commit/push与ref核对并记`2-REST_CLOSED`。`2-REST`不阻断阶段3或阶段4。三个分支均禁止test consolidation、死代码清理、generic source/actor/plugin framework和直接套用历史remote branch patch；发现语义漂移时回退对应小步，不用新测试接受漂移。
 
 ## 四-A、独立前置 P-B1：SDK typed/nullability compatibility
 
@@ -384,21 +410,22 @@ non-production conformance路径。
   demand/plan/changelog/阶段证据一致性。
   -> 验证：Critical/Important必须修复并复审；无待处理问题后只记
   `P_B1_REVIEW_PASSED_AWAITING_PUBLISH`。
-- 步骤 PB.3.3：只有用户另行批准才创建P-B1 closure commit并push。
-  -> 验证：本地HEAD、upstream与`origin/fix-rtds-silents`一致后才记
-  `P_B1_CLOSED`并把typed终态切换为
-  `SDK_070_TYPED_CONTRACT_NONBLOCKING_GAPS_APPROVED`；该状态只解除Stage3 typed
-  前置，不等于Stage3已授权。
+- 步骤 PB.3.3：本步已按当时取得的单独授权创建P-B1 closure commit并push。
+  -> 验证：commit
+  `d6a87fdaf0a751d6b7c4196aeb936b4c5de4c094`推送后本地HEAD、upstream与
+  `origin/fix-rtds-silents`一致，故`P_B1_CLOSED`及
+  `SDK_070_TYPED_CONTRACT_NONBLOCKING_GAPS_APPROVED`成立；它解除Stage3 typed
+  前置，Stage3本地执行/发布现由2026-07-25持续执行授权覆盖。
 
 ## 五、阶段 3：`polymarket_orderbook_v3` typed message
 
 ### 任务 3.0：同步 typed authority
 
-- 步骤 3.0.1：确认阶段 1 runtime门通过、`2-PM_CLOSED`、`P_B1_CLOSED`、typed-contract终态允许继续、用户已批准最终 v3字段矩阵并单独授权阶段 3。
-  -> 验证：任何已知gap未获逐项决定或任一必需字段缺失时停止，不修改authority或代码；metadata v4版本合同已经批准，不再作为待决项，但其Rust/schema/test实施仍须包含在阶段3单独授权内。
+- 步骤 3.0.1：确认阶段 1 runtime门通过、`2-PM_CLOSED`、`P_B1_CLOSED`、typed-contract终态允许继续、用户已批准最终 v3字段矩阵，且2026-07-25持续执行授权有效。
+  -> 验证：任何已知gap未获逐项决定或任一必需字段缺失时停止，不修改authority或代码；metadata v4版本合同已经批准，不再作为待决项，其Rust/schema/test实施由持续执行授权覆盖。
 - 步骤 3.0.2：复核已经单独同步的`market_resolved` v3 validate-first与metadata v4 claimant/原子activation文档条款，再只同步需求3.2所列其余payload/fingerprint/v2 raw projection现行authority，保留旧changelog。
   -> 验证：不得把已批准的validate-first或metadata v4版本合同重新置为待决，也不得把其文档同步冒充Rust/schema/test实施；其余authority diff逐条对应届时已批准delta matrix，不修改RTDS相反authority或`HandoffFrame v1.raw_json`合同，不混入Rust/Cargo/schema。
-- 步骤 3.0.3：主代理审查 authority diff并按单独授权提交；阶段收口再做独立审查。
+- 步骤 3.0.3：主代理审查 authority diff后按持续发布授权提交；阶段收口再做独立审查。
   -> 验证：代码修改开始前，当前 authority、最终字段矩阵和本阶段 AC一致。
 
 ### 任务 3.1：测试先行冻结 v3 schema
@@ -485,7 +512,7 @@ non-production conformance路径。
 
 ### 阶段 3 审查与提交门
 
-独立审查 source v3/metadata v4 schema、consumer、resolution、legacy compatibility和 storage measurement脚本。SDK字段能力矩阵存在blocking gap时不允许用JSON补洞；metadata v4 implementation/null matrix/claimant recovery未通过时，不得把current new-write activation标为通过。未激活小绿点可按DAG独立评审，但只有通过且另获授权后才可commit/push。
+独立审查 source v3/metadata v4 schema、consumer、resolution、legacy compatibility和 storage measurement脚本。SDK字段能力矩阵存在blocking gap时不允许用JSON补洞；metadata v4 implementation/null matrix/claimant recovery未通过时，不得把current new-write activation标为通过。未激活小绿点可按DAG独立评审，通过后按持续发布授权commit/push。
 
 ## 六、阶段 4：RTDS business-silence 完整换 runtime
 
@@ -579,7 +606,7 @@ git diff --check
 
 ### 阶段 6 审查与提交门
 
-独立终审需求AC-01至AC-09、AC-13至AC-15中与v3相关的diff、测试和artifact；AC-10/11由2-REST/cleanup分支收口，AC-12由RTDS子计划收口，本阶段不重复其专项验收门。通过且获授权后创建v3 closure commit/push；仍不授权deployment、旧数据删除或历史rewrite。
+独立终审需求AC-01至AC-09、AC-13至AC-15中与v3相关的diff、测试和artifact；AC-10/11由2-REST/cleanup分支收口，AC-12由RTDS子计划收口，本阶段不重复其专项验收门。通过后按持续发布授权创建v3 closure commit/push；deployment、旧数据删除或历史rewrite仍不在本计划范围内。
 
 ## 九、范围外后继事项
 

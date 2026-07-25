@@ -600,6 +600,35 @@ P-B1是Stage1闭合后的SDK typed/nullability前置，不属于Stage2 owner迁�
 - `2-PM_CLOSED`继续成立；共享dispatcher、writer、resolution recovery owner和
   current source v2 + metadata v3组合保持不变；
 - P-B1最终本地门及独立审查已通过
-  （`PASS, Critical 0 / Important 0 / Minor 0`），尚未commit/push，故
-  `P_B1_CLOSED`尚未成立；
-- `2-RTDS`未因P-B1启动，Stage3也仍未获单独授权。
+  （`PASS, Critical 0 / Important 0 / Minor 0`），closure commit
+  `d6a87fdaf0a751d6b7c4196aeb936b4c5de4c094`已推送且三方ref一致，故
+  `P_B1_CLOSED`与`SDK_070_TYPED_CONTRACT_NONBLOCKING_GAPS_APPROVED`成立；
+- P-B1发布后已按总计划启动独立`2-RTDS`机械分支；用户随后授予本事项持续执行/
+  发布授权，阶段3等后继本地门不再逐次申请授权。
+
+## 18. `2-RTDS`唯一owner小步与分支收口handoff
+
+`2-RTDS`只移动当前RTDS source owner及其直接测试，不实施未批准专项草案：
+
+- `live_runtime/rtds_source.rs`唯一持有RTDS endpoint/config/spec、classify、
+  subscription evidence、source-native canonical、dedupe restore、SDK runtime
+  loop、generation accounting和emit；
+- `live_runtime/tests/rtds_source.rs`持有九个直接测试；
+- root保留composition、共享sink/day/coordinator、writer/schema/
+  `rtds_row_from_event`、跨channel config、跨四源业务静默和四源load测试；
+- 生产代码与`d6a87fd`基线规范化后逐项hash一致；九个测试在移动时函数体逐字
+  一致，最终文本差异仅为标准rustfmt布局。没有新增timer、watchdog、refresh、
+  连接owner、行为或public API。
+
+迁移前root为33,965行；最终root 32,589行、source 359行、tests 1,019行，
+合计33,967行，净增2行module wiring。owner定向`9/9`、三个root affected test
+`3/3`、locked all-targets check、完整suite
+`351 unit / 246 integration / 0 doctest`、Clippy、fmt与diff门通过。首次fmt
+check只发现移动后的标准布局与三处孤立空行，formatter修正后未重复完整suite。
+
+`gpt-5.6-sol`/`ultra`独立审查以
+`PASS (Critical 0 / Important 0 / Minor 0)`通过，并独立确认production/root
+remainder/九个测试的规范化迁移哈希一致。用户随后授予持续执行/发布授权；当前
+游标记录为`2-RTDS_CLOSED`，以承载本状态的closure commit成功push且本地HEAD、
+upstream与远端ref一致为生效条件。public smoke、vendor suite、未批准RTDS草案的
+100-cycle/8小时门及4A/4B不在本分支。

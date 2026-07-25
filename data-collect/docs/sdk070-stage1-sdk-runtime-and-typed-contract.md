@@ -289,6 +289,10 @@ src/rtds/subscription.rs
 （`1df005dfbd0d1735ee102323283cf5c9fd644b6a97fda94a57a79f073d60c55c`）。
 
 当前P-B1代码、最终本地门及独立审查已经完成，审查结果为
-`PASS (Critical 0 / Important 0 / Minor 0)`，但发布仍未闭合。typed终态继续保持
-Stage1历史`SDK_070_TYPED_CONTRACT_BLOCKED`；只有另行commit/push并核对ref后，才切换为
-`SDK_070_TYPED_CONTRACT_NONBLOCKING_GAPS_APPROVED`。
+`PASS (Critical 0 / Important 0 / Minor 0)`。用户随后批准发布；closure commit
+`d6a87fdaf0a751d6b7c4196aeb936b4c5de4c094`已推送到
+`origin/fix-rtds-silents`，且本地HEAD、upstream与远端ref一致。因此
+`P_B1_CLOSED`与`SDK_070_TYPED_CONTRACT_NONBLOCKING_GAPS_APPROVED`已经成立。
+该闭合本身不等于public smoke、RTDS参数或4A/4B获得授权；用户随后于
+2026-07-25授予本事项持续执行/发布授权，Stage3本地实现、测试、审查、commit和
+push不再逐次申请授权。

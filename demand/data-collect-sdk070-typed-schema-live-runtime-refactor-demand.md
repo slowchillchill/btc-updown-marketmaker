@@ -8,14 +8,16 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_EXECUTION_P_B1_REVIEW_PASSED_AWAITING_PUBLISH`。阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED`。阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime终态为
 > `SDK_070_RUNTIME_USABLE`。阶段1闭合时的typed终态为
-> `SDK_070_TYPED_CONTRACT_BLOCKED`；用户随后批准`P-B1`修复路线，最终字段裁决为
+> `SDK_070_TYPED_CONTRACT_BLOCKED`；用户随后批准并发布`P-B1`修复路线，最终字段裁决为
 > F04 `INCLUDED_OPTIONAL`、F01–F03与F05–F18 `EXCLUDED`。本地实现、最终门及
-> 独立审查已通过，尚未发布，故
-> `SDK_070_TYPED_CONTRACT_NONBLOCKING_GAPS_APPROVED`仍是候选终态而非已发布终态。
+> 独立审查已通过，closure commit
+> `d6a87fdaf0a751d6b7c4196aeb936b4c5de4c094`已推送且本地HEAD、upstream与远端
+> ref一致，故`P_B1_CLOSED`与
+> `SDK_070_TYPED_CONTRACT_NONBLOCKING_GAPS_APPROVED`已经成立。
 > 用户于2026-07-25批准继续推进，阶段2任务
 > 2.1/2.2共同基线已落盘到
 > `data-collect/docs/sdk070-stage2-observable-and-owner-baseline.md`并完成自审；
@@ -23,10 +25,15 @@
 > recovery已是唯一owner且无需再重构。`2-PM`分支收口完整门与独立审查均已通过，
 > 用户已另行批准`2-PM` closure commit/push；`2-PM_CLOSED`以承载本记录的commit
 > 成功推送且本地HEAD、upstream与远端ref一致为生效条件。六源共享dispatcher继续
-> 留在root。typed blocker仍只停止阶段3
-> v3；公开网络smoke、非parser typed字段决定、RTDS参数与4A/4B、后继
-> commit/push、production activation/cutover、release、部署、远端操作、migration
-> 和删除仍保留各自独立门。既有`market_resolved` validate-first与
+> 留在root。`2-RTDS`现已完成唯一source owner与九个直接测试的机械移动、自审、
+> 小步门、分支收口完整/静态门及独立审查，并在用户持续执行/发布授权下进入
+> closure commit/push；`2-RTDS_CLOSED`以承载本记录的closure commit成功push且
+> 本地HEAD、upstream与远端ref一致为生效条件。用户明确批准本事项持续推进直至
+> 完成，不再逐阶段申请本地
+> 实现、测试、审查、commit或push授权；只有发生上下文冲突或实际情况与需求/计划
+> 不一致时才停止请求决策。该持续授权满足阶段3等后继本地执行门，但不替代尚未
+> 冻结的RTDS参数，也不把production activation/cutover、release、部署、远端操作、
+> migration和删除纳入本计划。既有`market_resolved` validate-first与
 > `METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`决定继续有效。
 
 ## 一、决策结论与目标
@@ -194,7 +201,8 @@ optional typed支持写成非空可用性承诺。
 独立审查和单独发布均闭合后，typed终态才从历史
 `SDK_070_TYPED_CONTRACT_BLOCKED`切换为
 `SDK_070_TYPED_CONTRACT_NONBLOCKING_GAPS_APPROVED`；这只解除阶段3的typed前置，
-不等于用户已授权阶段3 Rust/schema/test实施。
+其闭合本身当时不等于阶段3 Rust/schema/test实施授权；用户随后于2026-07-25授予
+持续执行/发布授权，现已覆盖阶段3本地实施及其常规发布门。
 
 ### 2.4 `live_runtime.rs` 是生产核心，不是整文件死代码
 
@@ -297,11 +305,11 @@ cross-owner测试均通过。`2-PM`分支收口完整确定性门与独立审查
 
 ### 3.1 当前总需求批准状态与独立门
 
-用户已于2026-07-25明确批准按本需求与对应计划开始执行；本需求不再是“总体未获批草案”。该总批准允许按DAG推进本地工作，但不使当前代码或旧authority立即失效，也不自动通过SDK typed字段gap、最终v3字段集合、阶段3、RTDS参数/4A/4B、公开网络smoke、阶段commit/push或production相关独立门。`market_resolved` v3 validate-first和`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`继续是已经单独冻结、不得重新置为待决的合同；它们仍不等于Rust/schema/test实现或activation已经完成。current source v2 + metadata v3代码保持有效，只有对应入口门和验收通过后，才能在已冻结的原子activation diff中切换。
+用户已于2026-07-25明确批准按本需求与对应计划开始执行；本需求不再是“总体未获批草案”。同日用户进一步批准持续推进直至本事项完成：本事项范围内的本地实现、测试、阶段审查、commit和push不再逐次申请授权；只有开发文档、代码语义、运行事实或用户明确描述不能同时成立时才停止请求决策。该持续授权满足阶段3等后继本地执行/发布门，但不使当前代码或旧authority立即失效，不自动通过SDK typed字段gap或未冻结的RTDS参数，也不扩大第九节范围外事项。`market_resolved` v3 validate-first和`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`继续是已经单独冻结、不得重新置为待决的合同；它们仍不等于Rust/schema/test实现或activation已经完成。current source v2 + metadata v3代码保持有效，只有对应实质入口门和验收通过后，才能在已冻结的原子activation diff中切换。
 
 ### 3.2 本需求批准后需要精确取代的旧合同
 
-`market_resolved` v3 validate-first与metadata v4 claimant两个窄决定已经完成文档authority同步，不得在阶段3重新置为待决，也不得据此声称实现完成。总需求虽已获执行批准，阶段0仍只建立以下conflict/delta matrix；除用户本轮另行批准的四路径current authority修正外，其余typed schema旧authority只能在SDK字段门通过、用户批准v3字段集合并单独授权阶段3后，于阶段3代码修改前同步：
+`market_resolved` v3 validate-first与metadata v4 claimant两个窄决定已经完成文档authority同步，不得在阶段3重新置为待决，也不得据此声称实现完成。总需求虽已获执行批准，阶段0仍只建立以下conflict/delta matrix；除用户本轮另行批准的四路径current authority修正外，其余typed schema旧authority只能在SDK字段门通过、用户批准v3字段集合且2026-07-25持续执行授权有效后，于阶段3代码修改前同步：
 
 - `demand/data-collect-reliability-repair-demand.md` 中以 `source_native_payload_json` 做持久化 evidence、跨进程 fingerprint recovery 和 fan-out 前丢弃的合同；
 - `demand/data-collect-demand.md` 中只适用于`source_kind=polymarket_market` persisted artifact/data-pipeline的parseable `raw_json`或等价原始证据条款，收敛为“官方SDK解码后的完整消费typed evidence”；其他source及paper/live Handoff v1/Task 7.4条款均为`KEEP_OUT_OF_SCOPE`；
@@ -314,7 +322,7 @@ cross-owner测试均通过。`2-PM`分支收口完整确定性门与独立审查
 
 ### 3.2.1 `market_resolved` v3 validate-first 已批准决定
 
-用户于2026-07-24明确批准以下窄化 authority；该决定无需在阶段3再次请求，但实施仍受阶段3其余入口门和独立 Rust/schema/test 授权约束：
+用户于2026-07-24明确批准以下窄化 authority；该决定无需在阶段3再次请求，实施仍受阶段3其余实质入口门、验收标准和2026-07-25持续执行授权范围约束：
 
 - `matched_resolved_slug` 或等价逻辑只进行 candidate routing，不等于 target admission；
 - SDK decode 后，唯一 source owner 必须先完成目标 lifecycle relevance，以及 market id、condition id、nullable slug、exact asset set、outcomes mapping、winning asset 和 winning outcome 的现有完整校验；
@@ -354,7 +362,7 @@ RTDS typed row/schema 不属于这次 `polymarket_orderbook_v3` 列删除。不�
 
 - raw Polymarket REST/WebSocket、manual signing、自建 SDK、第二解析器或 shadow feed；
 - 钱包、认证 user channel、真实下单、资金测试或任何交易；
-- 越过SDK typed字段、阶段3、RTDS参数/4A/4B、公开网络smoke、阶段commit/push或production相关独立门；
+- 越过SDK typed字段终态、RTDS参数/4A/4B、公开网络smoke或production相关独立门；阶段3本地实现及常规阶段commit/push已由2026-07-25持续执行授权覆盖；
 - 修改其他 source 的 persisted payload/hash schema；
 - 新建通用 actor/source/plugin framework；
 - 把代码简单搬进新的巨型模块，或仅以测试数量/总 LOC 下降证明正确；
@@ -487,7 +495,7 @@ v3 writer 不得包含：
 - `2-RTDS`：只提取RTDS source owner及其测试；
 - `2-REST`：其余Binance、shared writer/manifest/day/coordinator/source supervision/root等owner按收益和风险独立迁移。
 
-`2-PM`完成即可进入v3，`2-RTDS`完成即可在其他RTDS入口条件满足后进入专项；`2-REST`不阻断前两者。每个分支内部小步只做定向/受影响测试、compile/check和自审，分支收口才运行一次完整回归和独立审查。审查通过先记为`*_REVIEW_PASSED_AWAITING_PUBLISH`；只有取得授权并完成对应commit/push后才记为`*_CLOSED`并允许后继阶段消费。
+`2-PM`完成即可进入v3，`2-RTDS`完成即可在其他RTDS入口条件满足后进入专项；`2-REST`不阻断前两者。每个分支内部小步只做定向/受影响测试、compile/check和自审，分支收口才运行一次完整回归和独立审查。审查通过后在用户持续发布授权下直接创建对应closure commit/push并核对ref，随后记为`*_CLOSED`并允许后继阶段消费；无需重复询问，除非触发上下文/方案不一致决策门。
 
 目标模块边界以真实 owner 为准，初始候选为：
 
@@ -596,7 +604,7 @@ v3按 `size_of::<DomainMessage>() + Σ String::capacity() + Σ (Vec<T>::capacity
 
 ### AC-15 授权边界
 
-本组三件套已获总执行批准；用户也已单独批准P-B1 Rust/consumer/test/docs实施及最终字段矩阵（F04 `INCLUDED_OPTIONAL`，F01–F03与F05–F18 `EXCLUDED`），但这些批准不等于阶段3已获授权。只有P-B1独立审查、单独commit/push和ref核对闭合，且阶段3另获明确授权并满足其余入口条件后，才可先实现未激活的v3 domain/schema/writer/reader、不依赖claimant pair的typed recovery及其测试；只有metadata v4实现且WS claimant/recovery验收通过后，才可在本地代码/test的同一activation diff中把source v2 + metadata v3原子替换为唯一current new-write pair source v3 + metadata v4，并让source v2与metadata v3只读。这仍不等于production binary激活、服务器dataset root/canonical new-data cutover、历史migration、旧数据删除、release或部署，后者分别需要新的明确授权。
+本组三件套已获总执行批准；用户也已批准P-B1 Rust/consumer/test/docs实施及最终字段矩阵（F04 `INCLUDED_OPTIONAL`，F01–F03与F05–F18 `EXCLUDED`）。2026-07-25用户进一步授予持续执行/发布授权，因此P-B1闭合且阶段3其余实质入口条件满足后，可直接实现未激活的v3 domain/schema/writer/reader、不依赖claimant pair的typed recovery及其测试，不再重复申请阶段3或commit/push授权；只有出现上下文/方案不一致才停止。只有metadata v4实现且WS claimant/recovery验收通过后，才可在本地代码/test的同一activation diff中把source v2 + metadata v3原子替换为唯一current new-write pair source v3 + metadata v4，并让source v2与metadata v3只读。这仍不等于production binary激活、服务器dataset root/canonical new-data cutover、历史migration、旧数据删除、release或部署；这些第九节范围外事项不因持续授权自动纳入本计划。
 
 ## 十、停止条件
 

@@ -8,22 +8,26 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_EXECUTION_P_B1_REVIEW_PASSED_AWAITING_PUBLISH`。阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED`。阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
 > `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
-> `SDK_070_TYPED_CONTRACT_BLOCKED`。用户随后批准独立前置`P-B1`，最终字段裁决为
+> `SDK_070_TYPED_CONTRACT_BLOCKED`。用户随后批准并发布独立前置`P-B1`，最终字段裁决为
 > F04 `INCLUDED_OPTIONAL`、F01–F03与F05–F18 `EXCLUDED`；本地实现、最终门及
-> 独立审查已通过，尚未commit或push。用户于2026-07-25批准继续推进，阶段2任务
+> 独立审查已通过，closure commit
+> `d6a87fdaf0a751d6b7c4196aeb936b4c5de4c094`已推送且三方ref一致，typed终态为
+> `SDK_070_TYPED_CONTRACT_NONBLOCKING_GAPS_APPROVED`。用户于2026-07-25批准继续推进，阶段2任务
 > 2.1/2.2共同基线已落盘到
 > `data-collect/docs/sdk070-stage2-observable-and-owner-baseline.md`并完成自审；
 > `2-PM`四个小步均已完成：step 1/2/3通过实现与自审，step 4确认既有resolution
 > recovery已是唯一owner且无需再重构。`2-PM`分支收口完整门与独立审查均已通过，
 > 用户已另行批准`2-PM` closure commit/push；`2-PM_CLOSED`以承载本记录的commit
 > 成功推送且本地HEAD、upstream与远端ref一致为生效条件。共享dispatcher继续留在
-> root。公开网络smoke、非parser
-> typed字段决定、RTDS参数与4A/4B、后继commit/push、production
-> activation/cutover、release、部署、远端操作、migration和删除仍保留独立门。
+> root。`2-RTDS`唯一owner小步、自审、分支收口完整/静态门及独立审查均已通过，
+> 并在用户持续执行/发布授权下进入closure commit/push。后继本地实现、测试、审查、
+> commit和push不再逐次申请；只在上下文冲突或实际情况与需求/计划不一致时停止。
+> 未冻结RTDS参数仍为实质决策门；production activation/cutover、release、部署、
+> 远端操作、migration和删除仍为范围外事项。
 > 本文件只记录本组三件套的事实、冲突、决定与执行，不回写旧changelog。
 
 ## 2026-07-24：用户要求建立一个新的总事项
@@ -1110,3 +1114,113 @@ non-production conformance路径；三份未跟踪RTDS草案仍未修改或暂�
 首次订阅和重连book中的填充率未知。当前游标更新为
 `P_B1_REVIEW_PASSED_AWAITING_PUBLISH`。尚未创建commit或push；
 `P_B1_CLOSED`须在用户另行授权并完成commit、push与ref核对后才能成立。
+
+## 2026-07-25：P-B1发布闭合
+
+用户明确批准创建并发布P-B1 closure checkpoint。发布范围只包含已审查通过的
+18个tracked P-B1代码、测试和文档文件；三份既存未跟踪RTDS草案未暂存。
+
+- commit：`d6a87fdaf0a751d6b7c4196aeb936b4c5de4c094`
+  （`fix(data-collect): close sdk070 typed compatibility gate`）；
+- push：`582eb154687c4c0522615753b3fc1903f2e833f3..d6a87fdaf0a751d6b7c4196aeb936b4c5de4c094`
+  到`origin/fix-rtds-silents`；
+- 发布后本地HEAD、upstream与远端ref均为
+  `d6a87fdaf0a751d6b7c4196aeb936b4c5de4c094`；
+- `P_B1_CLOSED`与`SDK_070_TYPED_CONTRACT_NONBLOCKING_GAPS_APPROVED`成立。
+
+本次发布不授权Stage3、public smoke、RTDS参数或4A/4B，也不继承为`2-RTDS`
+commit/push授权。
+
+## 2026-07-25：`2-RTDS`唯一owner小步完成并通过自审
+
+按已批准机械边界，只移动现有RTDS source owner及其九个直接测试：
+
+- 新私有模块`data-collect/src/live_runtime/rtds_source.rs`唯一持有RTDS endpoint、
+  bounded config、source spec、classify、subscription evidence、source-native
+  canonical、dedupe restore、SDK runtime loop、generation accounting和emit；
+- 新测试模块`data-collect/src/live_runtime/tests/rtds_source.rs`持有九个直接测试；
+- root继续持有composition、shared sink/day/coordinator、writer/schema/
+  `rtds_row_from_event`、跨channel config、跨四源业务静默及四源load测试；
+- 没有新增business-silence timer、watchdog、refresh、第二连接owner或RTDS重连
+  authority；生产source loop仍忽略freshness返回值，业务静默不会驱动网络变化。
+
+机械一致性与小步门：
+
+- production常量与九个代码块去除空白和必要`pub(super)`后，与
+  `d6a87fd`逐项SHA-256一致；九个测试在移动时函数体逐字一致；
+- 迁移前root 33,965行；最终root 32,589行、source 359行、tests 1,019行，
+  合计33,967行，净增2行module wiring；
+- RTDS owner定向测试`9/9`通过；
+- root heartbeat config、source specs和跨四源业务静默三个affected tests
+  `3/3`通过；
+- locked all-targets check与`git diff --check`通过；
+- 三份未跟踪RTDS草案哈希保持
+  `d8caddb53c9fbe259ce2f844845426580f614de47ea8bd79c5f110576dc84148`、
+  `911aa69bd6d086887f88c185f1b7dc20f6223e7d8637fc1848752966886fc1a7`、
+  `50d4a405a664baec39844ac1952af7be10de6b2f75ad792f8abb57f62d36d4c1`。
+
+主代理与production/test映射子代理自审均为`PASS`，没有遗漏、越界、语义变化或
+新增public API。当前游标为`2-RTDS_BRANCH_CLOSE_GATE`；下一动作只运行一次完整
+data-collect suite、Clippy、fmt、diff门与`gpt-5.6-sol`/`ultra`独立审查。
+
+## 2026-07-25：`2-RTDS`分支收口本地门通过，等待独立审查
+
+- 按计划只运行一次完整
+  `cargo test -p data-collect --locked -- --test-threads=1`：
+  `351 unit / 246 integration / 0 doctest`全部通过；
+- 最终行为代码的locked all-targets check已在小步门通过；分支收口all-targets
+  Clippy `-D warnings`通过；
+- 首次fmt check只发现测试移出root后缩进减少引发的标准布局变化，以及原测试块
+  移走后留下的三处孤立空行。运行`cargo fmt --all`后，最终fmt check与
+  `git diff --check`通过；
+- formatter只改变空白/换行，未改变token语义、函数调用图或测试集合，因此没有
+  重复已经通过的完整suite。最终LOC为root 32,589、source 359、tests 1,019，
+  合计33,967；
+- 三份未跟踪RTDS草案继续保持原哈希，未修改、未暂存、未删除；没有public smoke、
+  vendor suite、RTDS专项100-cycle/8小时门、4A/4B、commit、push或远端操作。
+
+当前游标更新为`2-RTDS_BRANCH_CLOSE_GATES_PASSED_REVIEW_PENDING`；下一动作仅为
+`gpt-5.6-sol`/`ultra`独立全面审查。
+
+## 2026-07-25：`2-RTDS`独立审查通过，等待发布授权
+
+`gpt-5.6-sol`/`ultra`只读独立全面审查结论为`PASS`：
+
+- Critical：0；
+- Important：0；
+- Minor：0；
+- 无可执行问题。
+
+审查独立确认：
+
+- 四组production owner代码规范化SHA-256在迁移前后全部一致，移除计划内移动块后
+  的root remainder哈希也一致；
+- 新测试模块恰好包含九个直接测试，逐测试规范化哈希与`d6a87fd`基线一致；
+- production仍为单一`RtdsSdkRuntime`、初始化时一次`replace_subscription`和原
+  receive loop；freshness返回值仍被生产loop忽略，没有timer、watchdog、refresh、
+  第二连接owner或业务静默重连；
+- root保留composition、shared owner、writer/schema/row conversion及跨源测试，
+  没有重复、shadow path、过度抽象、多余校验或public API扩大；
+- 需求、计划、changelog、Stage1/Stage2状态和P-B1 closure事实一致；未误写
+  `2-RTDS_CLOSED`、Stage3、4A/4B、public smoke、production或远端授权；
+- 三份受保护RTDS草案仍未跟踪、未暂存且哈希不变。
+
+当前游标更新为`2-RTDS_REVIEW_PASSED_AWAITING_PUBLISH`。尚未创建commit或push；
+只有取得用户单独授权并完成commit、push与本地HEAD/upstream/远端ref核对后，
+`2-RTDS_CLOSED`才能成立。
+
+## 2026-07-25：用户授予持续执行/发布授权并闭合`2-RTDS`
+
+用户明确决定：本事项不再逐阶段申请本地实现、测试、审查、commit或push授权；
+主代理持续推进直至任务完成，只有开发文档、代码语义、运行事实或用户明确描述
+不能同时成立时，才停止并请求决策/额外授权。
+
+该决定精确取代此前“每个阶段审查通过后再次申请commit/push授权”及“阶段3再次
+申请本地Rust/schema/test授权”的当前门；旧段落只保留为历史事实。持续授权不替
+未冻结RTDS参数作决定，也不扩大总计划第九节明确排除的production activation/
+cutover、release、部署、远端操作、migration或删除范围。
+
+`2-RTDS`记录为`2-RTDS_CLOSED`，以承载本记录的closure commit成功推送到
+`origin/fix-rtds-silents`，且本地HEAD、upstream与远端ref一致为生效条件。发布
+范围严格限定为本事项需求/计划/changelog、Stage1/Stage2状态同步、root私有module
+接线及两个RTDS source/test新模块；三份既存未跟踪RTDS草案继续排除。
