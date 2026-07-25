@@ -21,6 +21,13 @@
 > Polymarket market channel 参考文档：`https://docs.polymarket.com/market-data/websocket/market-channel`
 
 > 状态：`APPROVED_EXECUTING`。用户已批准执行；实现、验证和远端采集必须继续遵守本文的 SDK-first、hot/cold path、retention dry-run/default 和删除决策门。
+>
+> 2026-07-25 source-v3 overlay：本文既有字段表、Step 6.4和真实run记录继续描述
+> `polymarket_orderbook_v1/v2`历史/current行为；future
+> `polymarket_orderbook_v3`以SDK070总计划Stage3为唯一游标。v3删除venue
+> `hash`与F05 `transaction_hash`，一条target-admitted SDK message写一条nested
+> row，`PriceChange` entries保持SDK顺序而不逐change展开；source v2文件、行数及
+> replay报告只读保留，不回写。
 
 ## 一、背景与问题
 
@@ -61,7 +68,7 @@
 | `timestamp_received` + source `timestamp` 双时间轴 | 采纳 | source-specific parquet 的 collector receive time 统一为 `timestamp_received`；`recv_time_utc` 只保留为 envelope/manifest/partition 语义名，不在同一 parquet 中重复写别名列。Polymarket 是平台 `timestamp`，Binance typed 输出使用 `E` / snapshot boundary，RTDS 是 message/payload timestamp。 |
 | `market` 为 condition id，`asset_id` 为 outcome token id | 采纳 | 这是重建每个 Up/Down token orderbook 的关键主键。manifest 继续记录 slug、market window、current/prefetched lifecycle。 |
 | `book` 行保存完整 `bids` / `asks` depth | 必须采纳 | 当前缺口的直接修复点；禁止只保存 `bids_len` / `asks_len`。 |
-| `price_change` 行保存 `price`、`size`、`side`、`best_bid`、`best_ask` | 采纳 | 用于在 `book` 快照之间推进本地 orderbook 状态。 |
+| `price_change` 行保存 `price`、`size`、`side`、`best_bid`、`best_ask` | 采纳 | source v1/v2按change行用于推进本地orderbook；future v3在单条message row的nested entries中保留相同字段与相对顺序。 |
 | event-specific nullable columns | 采纳 | Polymarket、Binance、RTDS 都按事件类型填充对应列；不相关字段保持 null，不写错误默认值。 |
 | UTC hourly parquet | 采纳 | 用户新要求为 UTC day 文件夹、每小时落盘；本计划解释为每个 source kind 每小时一个逻辑 partition，正常一个 finalized parquet，保护性 soft rollover 可产生 `part=N`。 |
 | parquet finalized 后供消费者读取 | 采纳 | 继续保留 running/digesting/final atomic rename 和 manifest 完整性。 |
@@ -226,9 +233,9 @@
   | `side` | BUY/SELL nullable | price_change / last_trade_price |
   | `best_bid` | decimal-compatible nullable | price_change / best_bid_ask |
   | `best_ask` | decimal-compatible nullable | price_change / best_bid_ask |
-  | `hash` | string nullable | book / price_change |
+  | `hash` | string nullable | book / price_change；仅source v1/v2，v3删除 |
   | `fee_rate_bps` | decimal-compatible nullable | price_change / last_trade_price / new_market 如源提供 |
-  | `transaction_hash` | string nullable | last_trade_price / trade-related event 如源提供 |
+  | `transaction_hash` | string nullable | last_trade_price / trade-related event 如源提供；仅source v1/v2历史候选，F05在v3排除 |
   | `old_tick_size` | decimal-compatible nullable | tick_size_change |
   | `new_tick_size` | decimal-compatible nullable | tick_size_change |
   | `winning_asset_id` | string nullable | market_resolved |
@@ -528,8 +535,8 @@
 
   在 SDK-first 前提下接入 market channel 可用事件：`price_change`、`last_trade_price`、`tick_size_change`、`best_bid_ask`、`new_market`、`market_resolved`。实现要求：
 
-  - `price_change` 写入 price/size/side/best_bid/best_ask/hash 等 typed fields。
-  - `last_trade_price` 写入 price/size/side/transaction hash 或等价 raw evidence。
+  - source v1/v2 `price_change`写入price/size/side/best_bid/best_ask/hash等typed fields；future v3删除hash并把匹配changes保留在单条message row的nested list中。
+  - source v1/v2 `last_trade_price`写入price/size/side/transaction hash或等价raw evidence；F05 `transaction_hash`在future v3排除。
   - `tick_size_change` 写入 old/new tick size 或等价 raw evidence。
   - `new_market` 写入 `polymarket_market_metadata` row，不被过滤。
   - `market_resolved` 写入同一 condition/market 的 resolved/subscribed asset ids、winning asset/outcome、nullable close reason；缺失时只允许 fallback metadata close evidence，不伪造事件字段。

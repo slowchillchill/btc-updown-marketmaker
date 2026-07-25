@@ -628,7 +628,8 @@ check只发现移动后的标准布局与三处孤立空行，formatter修正后
 
 `gpt-5.6-sol`/`ultra`独立审查以
 `PASS (Critical 0 / Important 0 / Minor 0)`通过，并独立确认production/root
-remainder/九个测试的规范化迁移哈希一致。用户随后授予持续执行/发布授权；当前
-游标记录为`2-RTDS_CLOSED`，以承载本状态的closure commit成功push且本地HEAD、
-upstream与远端ref一致为生效条件。public smoke、vendor suite、未批准RTDS草案的
+remainder/九个测试的规范化迁移哈希一致。用户随后授予持续执行/发布授权；closure
+commit `b7f83704cf2176de61573c6b11d792df73d68b53`已推送到
+`origin/fix-rtds-silents`，且本地HEAD、upstream与远端ref一致，故
+`2-RTDS_CLOSED`正式成立。public smoke、vendor suite、未批准RTDS草案的
 100-cycle/8小时门及4A/4B不在本分支。

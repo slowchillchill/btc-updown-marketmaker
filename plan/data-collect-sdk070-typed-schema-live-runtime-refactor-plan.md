@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED`。阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED_STAGE3_AUTHORITY_SYNC_CLOSED`。阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
 > `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
@@ -23,8 +23,11 @@
 > recovery已是唯一owner且无需再重构。`2-PM`分支收口完整门与独立审查均已通过，
 > 用户已另行批准`2-PM` closure commit/push；`2-PM_CLOSED`以承载本记录的commit
 > 成功推送且本地HEAD、upstream与远端ref一致为生效条件。共享dispatcher继续留在
-> root。`2-RTDS`唯一owner小步、自审、分支收口完整/静态门及独立审查均已通过，
-> 并在用户持续执行/发布授权下进入closure commit/push。用户明确批准持续推进本
+> root。`2-RTDS`唯一owner小步、自审、分支收口完整/静态门及独立审查均已通过；
+> closure commit `b7f83704cf2176de61573c6b11d792df73d68b53`已推送且三方ref
+> 一致，故`2-RTDS_CLOSED`成立。Stage3入口独立审计为`PASS`；任务3.0 authority
+> 同步已完成，`STAGE3_AUTHORITY_SYNC_CLOSED`以承载本记录的commit成功push且三方
+> ref一致为生效条件。用户明确批准持续推进本
 > 事项直至完成；后继本地实现、测试、审查、commit和push不再逐次申请。只有上下文
 > 冲突或实际情况与需求/计划不一致时才停止。未冻结的RTDS参数仍是实质决策门；
 > production activation/cutover、release、部署、远端操作、migration和删除仍为
@@ -427,6 +430,21 @@ non-production conformance路径。
   -> 验证：不得把已批准的validate-first或metadata v4版本合同重新置为待决，也不得把其文档同步冒充Rust/schema/test实施；其余authority diff逐条对应届时已批准delta matrix，不修改RTDS相反authority或`HandoffFrame v1.raw_json`合同，不混入Rust/Cargo/schema。
 - 步骤 3.0.3：主代理审查 authority diff后按持续发布授权提交；阶段收口再做独立审查。
   -> 验证：代码修改开始前，当前 authority、最终字段矩阵和本阶段 AC一致。
+
+当前执行事实：
+
+- 步骤3.0.1独立只读入口审计为`PASS`：`SDK_070_RUNTIME_USABLE`、
+  `2-PM_CLOSED`、`P_B1_CLOSED`、
+  `SDK_070_TYPED_CONTRACT_NONBLOCKING_GAPS_APPROVED`、最终F矩阵、
+  validate-first、metadata v4/原子activation及持续执行授权全部满足；
+- 步骤3.0.2只同步reliability/data-collect demand、data-collect/retention plan及
+  resolution-followup三件套中的future source-v3 payload/fingerprint/v2 raw
+  projection现行条款，并在对应历史changelog追加supersede记录；rebuild-core草案
+  保持`KEEP_OUT_OF_SCOPE`；
+- 其他source raw JSON、metadata payload/digest、`HandoffFrame v1.raw_json`、
+  source v2历史、RTDS草案及production边界均未改变；
+- 步骤3.0.3按持续发布授权闭合；`STAGE3_AUTHORITY_SYNC_CLOSED`以承载本记录的
+  commit成功push且本地HEAD、upstream、远端ref一致为生效条件。
 
 ### 任务 3.1：测试先行冻结 v3 schema
 

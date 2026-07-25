@@ -6,13 +6,13 @@
 >
 > 对应 changelog：`changelog/data-collect-polymarket-resolution-followup-changelog.md`
 >
-> 状态：`PHASE_4_COMPLETE_LOCAL_HK_VPN_AC12_AC13_PASS_2026-07-23__V3_VALIDATE_FIRST_DOC_APPROVED_IMPLEMENTATION_NOT_AUTHORIZED_2026-07-24__METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`。用户已逐项批准第八节第1至8项需求语义，拒绝并要求删除第9项固定5秒`closedTime` future-skew allowance，并批准同步第10项主authority；随后明确授权完整执行阶段1至阶段4。阶段1至阶段4已完成实现、验证和规定的独立审查；阶段4本地香港线路AC-12与全量AC-13通过，最终三路全面终审均为Critical 0、Important 0、Minor 0。用户于2026-07-24另批准未来source schema v3的validate-first文档修订，并于2026-07-25批准未来`polymarket_market_metadata_v4` claimant schema；两次批准均只授权文档同步，未授权Rust/schema/test实施。production部署、服务操作和数据删除也未获授权、未执行。
+> 状态：`PHASE_4_COMPLETE_LOCAL_HK_VPN_AC12_AC13_PASS_2026-07-23__V3_VALIDATE_FIRST_AND_METADATA_V4_STANDING_LOCAL_EXECUTION_AUTHORIZED_NOT_YET_IMPLEMENTED_2026-07-25`。用户已逐项批准第八节第1至8项需求语义，拒绝并要求删除第9项固定5秒`closedTime` future-skew allowance，并批准同步第10项主authority；随后明确授权完整执行阶段1至阶段4。阶段1至阶段4已完成实现、验证和规定的独立审查；阶段4本地香港线路AC-12与全量AC-13通过，最终三路全面终审均为Critical 0、Important 0、Minor 0。用户于2026-07-24另批准未来source schema v3的validate-first文档修订，并于2026-07-25批准未来`polymarket_market_metadata_v4` claimant schema；后续持续执行授权现已覆盖SDK070 Stage3本地Rust/schema/test、审查、commit和push，但实现尚未完成。production部署、服务操作和数据删除仍未授权、未执行。
 
 > 2026-07-22真实数据采集验收拓扑修订：用户指定本事项AC-12必须在本地原生Ubuntu环境使用已配置的香港VPN线路执行，不再使用AWS爱尔兰数据采集服务器。用户现已授权在阶段1至阶段3完成并通过各阶段门后执行阶段4及AC-12；该决定不改变production部署拓扑，也不授权production部署、服务操作或数据删除。
 
-> 2026-07-24 v3 new-write authority修订：用户明确批准未来`polymarket_orderbook_v3`的`market_resolved`取消raw-first，改为完整target admission/identity/winner validation通过后才写一条typed source row。该决定只同步文档；当前`polymarket_orderbook_v2` source代码、schema和测试在另获实施授权前保持不变，2026-07-23 AC-12的source v2 raw执行事实不回写。
+> 2026-07-24 v3 new-write authority修订：用户明确批准未来`polymarket_orderbook_v3`的`market_resolved`取消raw-first，改为完整target admission/identity/winner validation通过后才写一条typed source row。该决定当时只同步文档；当前`polymarket_orderbook_v2` source代码、schema和测试在SDK070 Stage3原子activation门通过前保持不变，2026-07-23 AC-12的source v2 raw执行事实不回写。
 >
-> 2026-07-25 metadata claimant authority修订：用户批准`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`。未来source v3 recovery只使用同一metadata artifact/writer/manifest mapping内的`polymarket_market_metadata_v4`精确claimant pair；metadata v3 schema/version立即冻结，activation前仍是current metadata writer，activation后转为read-only，且不能作为source v3 claimant authority。该决定只同步文档，current source v2 + metadata v3实现及既有阶段事实在另获实施授权并通过原子activation门前保持不变。
+> 2026-07-25 metadata claimant authority修订：用户批准`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`。未来source v3 recovery只使用同一metadata artifact/writer/manifest mapping内的`polymarket_market_metadata_v4`精确claimant pair；metadata v3 schema/version立即冻结，activation前仍是current metadata writer，activation后转为read-only，且不能作为source v3 claimant authority。该决定当时只同步文档；后续持续执行授权覆盖本地实施，current source v2 + metadata v3实现及既有阶段事实仍保持到原子activation门通过。
 
 ## 一、目标
 
@@ -124,7 +124,7 @@
 4. 既有 `T-30s` 是最迟覆盖边界，不是禁止更早 metadata discovery 的门，也不得被实测 `T-294.93s` 替代。
 5. 主demand此前要求rollover`current -> retired`；rebuild-core草案已经把lifecycle与runtime role分离，但runtime role只列current/next。两份文档现已保持candidate/prefetched/active/retired四态并补齐独立runtime role`resolution_pending`；E只切换role，取得terminal后才切换lifecycle`active -> retired`。rebuild-core只做该data-collect窄边界补齐，整体仍未获批准。
 6. source-availability authority此前只允许transport状态进入source-local runtime/operator log。现已同步严格有界例外：在current source v2 + metadata v3路径中，每个resolution slot最多一条`polymarket_market_metadata_v3` attempt row，总计每market最多6条；未来source v3 + metadata v4原子activation后，同一既有例外由metadata v4继承，不新增row kind或transport语义。这些row与其他metadata row一样进入既有Parquet artifact，并由每日manifest的既有file row count、bytes、sha256与schema facts覆盖，但不向manifest增加per-attempt transport字段、artifact mapping、sidecar、receipt或通用transport episode tape。
-7. 历史changelog继续保留当时事实、不删除、不重写；本事项与受影响旧authority的changelog已追加supersede决定。未来实现证据仍只能在另获授权并真实执行后追加。
+7. 历史changelog继续保留当时事实、不删除、不重写；本事项与受影响旧authority的changelog已追加supersede决定。未来实现证据只能在持续执行授权下真实执行并验证后追加，不能把授权冒充完成。
 
 ## 五、范围
 
@@ -136,7 +136,7 @@
 - 官方 Rust SDK subscription actor 的 desired asset union；
 - current/historical metadata typed schema v3合同，以及未来source v3所需的已批准metadata v4 claimant overlay、writer、恢复和相关合同测试；
 - 必要的主 demand/plan/source-availability authority 同步；
-- 获得后续明确授权后的本地构建、测试，以及在本地原生Ubuntu环境通过已配置香港VPN线路执行、对外部平台只读且仅写本地隔离artifact的live validation。
+- 持续执行授权覆盖的本地构建、测试；公开网络live validation仍须遵守其独立范围门，并只允许在本地原生Ubuntu环境通过已配置香港VPN线路执行、对外部平台只读且仅写本地隔离artifact。
 
 ### 5.2 不包含
 

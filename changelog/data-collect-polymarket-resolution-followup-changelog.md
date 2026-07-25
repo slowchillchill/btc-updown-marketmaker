@@ -6,7 +6,7 @@
 >
 > 对应计划：`plan/data-collect-polymarket-resolution-followup-plan.md`
 >
-> 状态：`PHASE_4_COMPLETE_LOCAL_HK_VPN_AC12_AC13_PASS_2026-07-23__V3_VALIDATE_FIRST_DOC_APPROVED_IMPLEMENTATION_NOT_AUTHORIZED_2026-07-24__METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`。阶段0至阶段3已分别完成自审、独立终审与commit/push；阶段4本地香港线路AC-12、全量AC-13与三路独立全面终审均已通过。用户于2026-07-24批准未来source schema v3的validate-first文档修订，并于2026-07-25批准未来metadata v4 claimant schema；两次批准均未授权Rust/schema/test实施。production部署、服务操作和数据删除也未获授权、未执行。
+> 状态：`PHASE_4_COMPLETE_LOCAL_HK_VPN_AC12_AC13_PASS_2026-07-23__V3_VALIDATE_FIRST_AND_METADATA_V4_STANDING_LOCAL_EXECUTION_AUTHORIZED_NOT_YET_IMPLEMENTED_2026-07-25`。阶段0至阶段3已分别完成自审、独立终审与commit/push；阶段4本地香港线路AC-12、全量AC-13与三路独立全面终审均已通过。用户于2026-07-24批准未来source schema v3的validate-first文档修订，并于2026-07-25批准未来metadata v4 claimant schema；后续持续执行授权现已覆盖SDK070 Stage3本地Rust/schema/test、审查、commit和push，但实现尚未完成。production部署、服务操作和数据删除仍未获授权、未执行。
 
 ## 2026-07-21：数据检查与问题确认
 
@@ -855,6 +855,17 @@ authority。阶段4已满足获授权的最终commit/push门；production部署�
 6. current new-write只能在同一activation diff中由source v2 + metadata v3原子切换为source v3 + metadata v4。source v3 + metadata v3、source v2 + metadata v4、dual-write和半切换均禁止。
 
 resolution demand与本计划只增加到SDK070总计划阶段3的映射，不复制第二套实现或审查游标。该批准只授权文档同步；未修改Rust、Cargo/vendor、schema、tests或数据，未执行构建、网络probe、commit、push、release、部署、migration、服务操作或删除。
+
+## 2026-07-25：持续本地执行授权取代后续重复授权门
+
+用户明确批准SDK070总事项持续推进直至完成，本事项future source v3 validate-first
+与metadata v4 claimant映射所需的本地Rust/schema/test、构建、审查、commit和push
+不再逐次申请。该决定只取代前两节在各自时点记录的“实施未授权”当前门，不回写
+它们当时只批准文档的历史事实，也不把尚未执行的Stage3写成完成。
+
+current source v2 + metadata v3继续有效到SDK070 Stage3原子activation门通过；
+production activation/cutover、release、部署、远端操作、migration和删除仍不在
+持续授权范围。
 
 ## 后续 changelog 规则
 

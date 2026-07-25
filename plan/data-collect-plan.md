@@ -23,6 +23,15 @@
 > 2026-07-18训练collector首次正式冷启动以`plan/data-collect-training-collector-direct-deployment-plan.md`为历史authority；2026-07-19用户批准的RTDS-PONG-A原路径重置部署以`plan/data-collect-rtds-pong-a-reset-deployment-plan.md`为当前执行authority。本计划中更早的gate、删除、重启或部署记录只保留为历史，不得重新执行。
 >
 > 2026-07-22 Polymarket resolution-followup窄authority已按用户批准同步到任务8.5附近；详细后续实现与验收只以`plan/data-collect-polymarket-resolution-followup-plan.md`为准。本事项AC-12真实source验收固定在本地原生Ubuntu环境使用已配置香港VPN线路，不再上传到AWS爱尔兰数据采集服务器执行。阶段0文档同步已完成；用户已后续授权完整执行阶段1至阶段4、本地构建/测试、每阶段独立审查后的commit/push与本地AC-12，但未授权production部署、服务操作或数据删除。
+>
+> 2026-07-25 future Polymarket source-v3 current authority：SDK070总计划Stage3
+> 已满足入口并获持续本地执行/发布授权。本文common envelope、source format、
+> data-pipeline表及历史步骤中的`raw_json`/逐change row只对其他source、
+> `HandoffFrame v1`和source v2历史继续有效；future `polymarket_orderbook_v3`
+> 改为一条target-admitted SDK message对应一条nested typed row，不保存
+> `source_native_payload_json`或venue `hash`，不做payload fingerprint恢复。实施
+> 是否完成仍只由SDK070总计划Stage3真实代码、测试及activation门证明；production
+> cutover、release、部署、远端操作、migration和删除仍未授权。
 
 ## 2026-07-10 已批准增量执行
 
@@ -2594,7 +2603,7 @@ CARGO_TARGET_DIR=target/data-collect-ci \
 - 2026-07-22批准的当前authority取代旧`active=false` fallback门：E时旧market lifecycle保持active、runtime role从current切到resolution_pending并保留terminal观察assets；只有合格`market_resolved`或fresh exact-slug Gamma证据才能写retired，预算耗尽只写`resolution_followup_exhausted`并退出role，不再新写`unresolved_window_end_observation`。
 - Gamma fallback固定为E+3 initial与E+4..E+8五次retry，总计最多6个绝对slot。terminal predicate要求固定same identity、exact二元asset/outcome映射、`closed=true`、`acceptingOrders=false`、存在且可解析并不早于E的closedTime、精确resolved状态与one-hot winner；`active`只原样记录为nullable字段，不参与truth-value判定，closedTime与receive之间没有future-skew上界门。
 - current source-v2路径的metadata升级为v3并采用批准需求RF-09的五种row kind、required/null matrix、19项稳定source failure枚举、可还原payload与digest/reference合同；每slot最多一条attempt row。2026-07-25批准的future metadata v4以v3完整schema为不可变前缀，只追加两个nullable WS claimant字段；source-v3 recovery与source v2 + metadata v3到source v3 + metadata v4的原子activation只由`plan/data-collect-sdk070-typed-schema-live-runtime-refactor-plan.md`阶段3执行，本计划不复制第二执行游标。attempt row进入同一既有Parquet与manifest file facts，但不扩张manifest schema/artifact/sidecar、不双写；terminal-once、WS/Gamma drain、prefix durability与restart fail-closed矩阵均以批准专项需求及SDK070总计划为准。
-- 2026-07-22上述source-v2/metadata-v3三条后来已由resolution-followup专项阶段1至阶段4完成实现和验证；阶段2任务2.1步骤2.1.3的更早历史执行结果仍保留当时`active=false`事实，并由本节与对应changelog记录supersede。2026-07-24 future source-v3 validate-first与2026-07-25 metadata-v4 claimant/原子activation则仍只完成文档批准和authority同步，未获Rust/schema/test实施授权，不能冒充已实现。
+- 2026-07-22上述source-v2/metadata-v3三条后来已由resolution-followup专项阶段1至阶段4完成实现和验证；阶段2任务2.1步骤2.1.3的更早历史执行结果仍保留当时`active=false`事实，并由本节与对应changelog记录supersede。2026-07-24 future source-v3 validate-first与2026-07-25 metadata-v4 claimant/原子activation已完成文档批准和authority同步；2026-07-25持续执行授权覆盖其Stage3本地Rust/schema/test实施与常规发布，但未真实完成前不得冒充已实现。
 - 对 SDK 暴露不到的 tick size、min size、fee/reward 字段，优先通过 SDK/Gamma 类型补齐；无法补齐时必须在 typed schema、raw evidence 或 segment/run manifest 中写 `metadata_unavailable_reason` / `field_unavailable_reasons` / limitation 等等价证据，不能只写 null 后仍把 metadata 判为 complete。
 
 **测试：**
@@ -2608,7 +2617,7 @@ CARGO_TARGET_DIR=target/data-collect-ci \
   cargo test -p data-collect live_runtime --lib -- --nocapture
 ```
 
-**验收：** 既有2小时live run仍只证明当时`source_coverage`包含`polymarket_market_metadata`、metadata parquet/finalized manifest及current/next可读；它不证明2026-07-22批准的resolution-followup合同已实现，也不证明2026-07-25批准的metadata v4 schema、claimant recovery或原子activation已经实施。既有resolution-followup阶段1至阶段4证据只覆盖当时source v2 + metadata v3实现；future source v3 + metadata v4必须另按SDK070总计划阶段3在获得实施授权后完成schema/null matrix、claimant/restart、cross-pair和原子activation验收，才能宣称该未来合同完成。AC-12的既有执行固定在本地原生Ubuntu环境使用已配置香港VPN线路，不使用AWS爱尔兰数据采集服务器，且本地receive/latency不得冒充AWS爱尔兰paper/live主机延迟。
+**验收：** 既有2小时live run仍只证明当时`source_coverage`包含`polymarket_market_metadata`、metadata parquet/finalized manifest及current/next可读；它不证明2026-07-22批准的resolution-followup合同已实现，也不证明2026-07-25批准的metadata v4 schema、claimant recovery或原子activation已经实施。既有resolution-followup阶段1至阶段4证据只覆盖当时source v2 + metadata v3实现；future source v3 + metadata v4必须按SDK070总计划阶段3在持续执行授权下完成schema/null matrix、claimant/restart、cross-pair和原子activation验收，才能宣称该未来合同完成。AC-12的既有执行固定在本地原生Ubuntu环境使用已配置香港VPN线路，不使用AWS爱尔兰数据采集服务器，且本地receive/latency不得冒充AWS爱尔兰paper/live主机延迟。
 
 ### 任务 8.6：同步 release/README/systemd/contract
 
@@ -2794,7 +2803,7 @@ cargo bench -p data-collect --bench throughput_probe -- --sample-size 20
 
 | 消费方 | 是否直接消费 `data-collect` typed raw parquet | 必须满足的数据格式 | 不允许的误用 |
 | --- | --- | --- | --- |
-| `data-pipeline` | 是，作为外部市场源 typed raw mirror 输入 | 逐源 parquet source kind、parseable `raw_json`、schema version、source timestamp、`recv_time_utc`、source coverage、manifest、UTC day 分区 | 把 `data-collect` 当成 labels/features/tick_stream/训练切分生成器 |
+| `data-pipeline` | 是，作为外部市场源 typed raw mirror 输入 | 逐源 parquet source kind、schema version、source timestamp、`recv_time_utc`、source coverage、manifest、UTC day 分区；其他JSON-like source继续要求parseable `raw_json`，future Polymarket source v3改用完整canonical typed evidence且不含被删列 | 把 `data-collect` 当成 labels/features/tick_stream/训练切分生成器 |
 | 训练 | 不直接把 raw parquet 当训练样本；通过 `data-pipeline` 后消费 | 训练 raw mirror 由 `data-collect-training-collector` 写入；按 `source_kind + recv_time_utc UTC day` 多 segment 分区；`event_available_time` 默认等于采集服务器 `recv_time_utc`；`data-pipeline` 生成 labels/features/tick_stream/split 后，训练再消费 | parquet 完整即训练批准、source coverage 完整即 label 完整，或用 source/platform timestamp 让晚收到事件提前进入 causal cutoff |
 | paper | hot path 消费 `data-collect-paper-hot` 的 realtime handoff 或等价低延迟事件流；cold mirror 只能作外部市场源证据、coverage、manifest | 与训练/live 共用 source kind、schema version、timestamp namespace；paper runtime receive timestamp 由 paper 主机 runtime/consumer 在收到 handoff frame 时记录 | 用训练服务器 `recv_time_utc` 冒充 paper runtime receive timestamp，用 finalized parquet 作为 paper 热路径唯一事实来源，或用 parquet 替代 append-only log |
 | live | hot path 消费 `data-collect-live-hot` 的 realtime handoff 或等价低延迟事件流；cold mirror 只能作外部市场源证据、coverage、manifest | 与训练/paper 共用 source kind、schema version、timestamp namespace；live runtime receive timestamp 由 live 主机 runtime/consumer 在收到 handoff frame 时记录 | 在 live 小主机编译/重处理，用 finalized parquet 作为 live 热路径唯一事实来源，或用 `data-collect` 生成交易决策、NOE/ledger、execution feedback label |

@@ -6,7 +6,7 @@
 
 > 2026-07-22 Polymarket resolution-followup authority同步：`demand/data-collect-polymarket-resolution-followup-demand.md`已获用户批准为本事项的窄语义authority。它只取代本文中纯时间`current -> retired`、Gamma fallback要求`active=false`、expired-slug无例外以及普通transport证据绝不进入metadata typed row的冲突边界；冻结`resolution_pending`、E+3..E+8六个slot、metadata v3、terminal-once、restart/fail-closed与无future-skew上界合同。本事项AC-12真实source验收固定在本地原生Ubuntu环境通过已配置香港VPN线路执行，不使用AWS爱尔兰数据采集服务器；该测试拓扑不改变production部署拓扑。用户已后续授权完整执行专项阶段1至阶段4、每阶段独立审查后的commit/push与本地AC-12；production部署、服务操作和数据删除仍未授权。
 >
-> 2026-07-25 Polymarket source-v3/metadata-v4 authority同步：用户批准`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`。metadata v3 schema/version立即冻结；在另获Rust/schema/test实施授权并通过SDK070总计划阶段3原子activation门前，current source v2 + metadata v3行为保持不变。activation后，同一五row-kind/attempt窄例外由metadata v4继承，source-v3 WS claimant recovery只使用v4末尾追加的精确nullable claimant pair，source v2与metadata v3转为只读。禁止source v3 + metadata v3、source v2 + metadata v4、dual-write或半切换；本次批准只同步文档，不授权实施、构建、测试、commit、push或production cutover。
+> 2026-07-25 Polymarket source-v3/metadata-v4 authority同步：用户批准`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`。metadata v3 schema/version立即冻结；current source v2 + metadata v3在SDK070总计划阶段3原子activation门通过前保持不变。activation后，同一五row-kind/attempt窄例外由metadata v4继承，source-v3 WS claimant recovery只使用v4末尾追加的精确nullable claimant pair，source v2与metadata v3转为只读。禁止source v3 + metadata v3、source v2 + metadata v4、dual-write或半切换。用户随后授予本事项持续执行/发布授权，已覆盖Stage3本地Rust/schema/test、审查、commit和push，但不把尚未完成的实现写成已完成，也不授权production cutover、release、部署、远端操作、migration或删除。
 
 本文定义当前项目 `./data-collect/` 的共用数据采集模块需求。`./data-collect/` 只负责把外部市场源转化为可审计、可回放、可验证覆盖率的原始采集证据，服务训练、paper trade 和 live trade 三类消费者；本文不包含实现计划，不修改代码，也不定义 `data-pipeline` 的训练样本加工逻辑。
 
@@ -58,6 +58,15 @@
 8. 覆盖当前 active market，并从目标 market start 前 `T-30s` 开始采集 prefetched next market；`T-30s` 采集覆盖必须与 `T-30` 样本加工非范围明确区分。
 9. 技术验证必须覆盖真实 `btc-updown-5m` 冷启动 market discovery、current active market、prefetched next market、market rollover、以及 Polymarket / Binance depth / Binance aggTrade / RTDS Chainlink 四源在同一时间线上的长时间采集；generic BTC/Bitcoin open market smoke、HTTP reachability、单条业务消息或 synthetic throughput 不能替代该验收。
 10. 按训练、paper trade、live trade 三种独立运行拓扑导出独立二进制和部署/接入文档；训练二进制用于数据采集服务器持续写训练 raw mirror，paper/live 二进制用于各自交易服务器本机 hot path handoff 和外部市场源证据，不得混入交易决策、下单、撤单、NOE/ledger 或模型输入组装。
+
+本文所有“每条JSON-like源保存parseable `raw_json`/raw evidence”及Polymarket
+`new_market` raw evidence条款，对future `source_kind=polymarket_market` v3
+persisted artifact/data-pipeline合同收敛为官方SDK解码并通过target admission后的
+完整消费typed evidence：唯一canonical domain、每条SDK message一条nested row，
+`PriceChange`不逐change fan-out；不持久化`source_native_payload_json`或venue
+`hash`，不恢复payload fingerprint。该窄化不改变其他source的raw JSON/evidence、
+metadata v3/v4自身payload/digest traceability、历史source v2只读事实或
+`HandoffFrame v1.raw_json`。
 
 ### 1.2 data-collect 非范围
 

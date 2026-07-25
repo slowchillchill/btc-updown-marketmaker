@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED`。阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED_STAGE3_AUTHORITY_SYNC_CLOSED`。阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
 > `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
@@ -23,8 +23,10 @@
 > recovery已是唯一owner且无需再重构。`2-PM`分支收口完整门与独立审查均已通过，
 > 用户已另行批准`2-PM` closure commit/push；`2-PM_CLOSED`以承载本记录的commit
 > 成功推送且本地HEAD、upstream与远端ref一致为生效条件。共享dispatcher继续留在
-> root。`2-RTDS`唯一owner小步、自审、分支收口完整/静态门及独立审查均已通过，
-> 并在用户持续执行/发布授权下进入closure commit/push。后继本地实现、测试、审查、
+> root。`2-RTDS`唯一owner小步、自审、分支收口完整/静态门及独立审查均已通过；
+> closure commit `b7f83704cf2176de61573c6b11d792df73d68b53`已推送且三方ref
+> 一致。Stage3入口独立审计为`PASS`，任务3.0 authority同步已完成并进入closure
+> commit/push。后继本地实现、测试、审查、
 > commit和push不再逐次申请；只在上下文冲突或实际情况与需求/计划不一致时停止。
 > 未冻结RTDS参数仍为实质决策门；production activation/cutover、release、部署、
 > 远端操作、migration和删除仍为范围外事项。
@@ -1224,3 +1226,50 @@ cutover、release、部署、远端操作、migration或删除范围。
 `origin/fix-rtds-silents`，且本地HEAD、upstream与远端ref一致为生效条件。发布
 范围严格限定为本事项需求/计划/changelog、Stage1/Stage2状态同步、root私有module
 接线及两个RTDS source/test新模块；三份既存未跟踪RTDS草案继续排除。
+
+## 2026-07-25：`2-RTDS`发布闭合
+
+- closure commit：
+  `b7f83704cf2176de61573c6b11d792df73d68b53`
+  （`refactor(data-collect): close 2-RTDS source owner`）；
+- push：`d6a87fdaf0a751d6b7c4196aeb936b4c5de4c094..b7f83704cf2176de61573c6b11d792df73d68b53`
+  到`origin/fix-rtds-silents`；
+- 发布后本地HEAD、upstream与远端ref均为
+  `b7f83704cf2176de61573c6b11d792df73d68b53`；
+- 工作区只剩三份受保护RTDS草案，仍未跟踪、未暂存且哈希不变。
+
+因此`2-RTDS_CLOSED`正式成立。
+
+## 2026-07-25：Stage3入口审计与任务3.0 authority同步
+
+独立只读入口审计结论为`PASS`。已核实：
+
+- runtime终态为`SDK_070_RUNTIME_USABLE`；
+- `2-PM_CLOSED`、`P_B1_CLOSED`与
+  `SDK_070_TYPED_CONTRACT_NONBLOCKING_GAPS_APPROVED`均成立；
+- 最终字段矩阵仍为F04 `INCLUDED_OPTIONAL`，F01–F03与F05–F18 `EXCLUDED`；
+- `market_resolved` validate-first、metadata v4 claimant/原子activation及用户
+  持续执行/发布授权均有效；
+- Stage1 typed-blocked、旧等待授权文本及current source v2 + metadata v3是历史
+  状态或Stage3工作基线，不构成入口阻断。
+
+任务3.0 authority diff严格限定为：
+
+- reliability demand中的canonical JSON、payload fingerprint、逐change fan-out及
+  restart projection只继续约束source v2；future v3改用唯一canonical typed domain、
+  一条SDK message一条nested row、无payload-equality drop或跨进程fingerprint；
+- data-collect demand/plan中的通用raw evidence合同只对future
+  `source_kind=polymarket_market` v3收敛为完整typed evidence；
+- retention plan的venue `hash`、F05 `transaction_hash`及逐change行明确为v1/v2
+  历史/current条款，v3按最终F矩阵与nested row执行；
+- resolution-followup三件套只把“实施未授权”当前门同步为持续本地执行已授权，
+  validate-first、metadata v4和历史v2语义不重写；
+- 对应旧changelog只追加新supersede记录，不回写历史。
+
+明确未改：其他source raw JSON、metadata v3/v4自身payload/digest、
+`HandoffFrame v1.raw_json`、rebuild-core审核中草案、RTDS三份草案、Rust/Cargo/
+schema/tests及production activation/cutover、release、部署、远端操作、migration
+和删除。
+
+`STAGE3_AUTHORITY_SYNC_CLOSED`以承载本记录的closure commit成功push到
+`origin/fix-rtds-silents`且本地HEAD、upstream与远端ref一致为生效条件。

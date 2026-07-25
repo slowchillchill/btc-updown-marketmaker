@@ -9,6 +9,15 @@
 > 状态：`SUPERSEDED_IN_PART_BY_SOURCE_AVAILABILITY_LIFECYCLE`。已完成并通过审查的CLOB `10s/20s/require_text_pong=true`继续作为基线；旧RTDS `5s/15s PING/PONG`基线已由`demand/data-collect-source-availability-lifecycle-repair-demand.md`阶段9 `RTDS-PONG-A`取代，该阶段已于2026-07-19完成本地实现、全量门禁、香港线路复测及独立终审，当前RTDS为固定`5s/require_text_pong=false`。用户于2026-07-17批准新专项后，本文件的业务静默恢复预算、D2 one-shot reconnect、CLOB freshness退出、普通网络/空结果gap、有限总恢复、旧SDK patch白名单、daily coverage和同日生产切换/清理语义均被取代。2026-07-25独立SDK070事项已在当前Stage1 worktree把SDK身份迁移为官方0.7.0底座的唯一`0.7.0-p1`vendor；本文件只继承仍有效的SDK-first、唯一owner、四路径patch与heartbeat/teardown语义，不再拥有版本/path/provenance authority。本文其余已实现数据完整性合同继续有效；旧执行事实只由原changelog保留。SDK070 Stage1独立审查已为`Critical 0 / Important 0 / Minor 0 / PASS`，用户已另行批准发布；其闭合以承载记录的commit成功推送且远端SHA与本地HEAD/upstream一致为生效条件。本同步不授权生产构建、部署、远端服务操作或数据清理。
 >
 > 当前训练collector首次正式冷启动的独立部署authority为`demand/data-collect-training-collector-direct-deployment-demand.md`；本文件及旧生产阶段不得用于执行`Restart=no`、gate、UTC边界等待或数据清理。
+>
+> 2026-07-25 Polymarket source-v3窄化：本文件中canonical JSON、
+> `source_native_payload_json`、payload fingerprint、逐change fan-out及其restart
+> recovery只继续描述current/historical `polymarket_orderbook_v2`。future
+> `polymarket_orderbook_v3`的唯一authority为
+> `demand/data-collect-sdk070-typed-schema-live-runtime-refactor-demand.md`及对应
+> plan/changelog；其本地实施、测试、审查、commit和push已由用户持续执行授权覆盖，
+> production activation/cutover、release、部署、远端操作、migration和删除不在该
+> 授权范围。
 
 ## 一、目标与权威边界
 
@@ -59,6 +68,16 @@
 6. 若第4.7节批准矩阵仍不能满足单receiver、动态增删asset、transport自然重连、lag/parser fault/terminal state可见或manager drop后的socket/task收敛，必须停止并报告具体SDK缺口、影响和选项；不得扩大vendor路径、改用raw WS/REST或手写订阅。
 7. Transport connected、Ping/Pong、unmatched/global event和其他asset的消息都不能替目标asset产生业务事实。collector按asset保留nullable first/last-qualifying receive time，但不设置30/60秒业务静默watchdog，不因静默unsubscribe/resubscribe、切generation、记录gap/lag/异常告警或退出。
 8. 采集层只对“同 source、同 market lifecycle、SDK 解码后所有 source-native 字段完全一致”的 payload 做结构去重。每个 SDK 消息先生成稳定 canonical JSON：覆盖 variant、market/asset、平台时间及该 variant 的全部 SDK typed 字段，不含本地接收时间和派生 slug；该 JSON 作为 `source_native_payload_json` 落入 Parquet，并以其 SHA-256 作为内存去重 fingerprint。fingerprint 的 check/insert 必须在 target row fan-out 前按消息执行：首次出现的多 target `PriceChange` 必须保留全部匹配 rows，整条消息重放时才全部丢弃。这样 `spread`、`NewMarket`/`MarketResolved` 的文本、outcomes 与 event message 等当前被 typed layout 丢失的字段也能参与比较并由进程重启恢复；仅这些字段不同的两条消息必须保留。缓存跨网络 reconnect 保留，并完整覆盖最多 current+next 两个活跃 lifecycle，lifecycle 退役前禁止 TTL/capacity 淘汰。生产常量固定为每 lifecycle 最多 `2_000_000` 个 SHA-256 fingerprint、同时最多两个 lifecycle；达到上限必须记录 gap、coordinated finalize 后退出 76，禁止淘汰后静默放行重复。进程重启时必须用 Arrow bounded RecordBatch projection 流式读取最近 finalized Parquet 的 `slug/source_native_payload_json`，重算 fingerprint 并恢复 current/next 集合，不增加 sidecar，也不得把完整列一次性载入内存。`0.1/0.10` 只有在 SDK 无损解码后生成相同 canonical JSON 且其他字段完全一致时才可去重；更广泛的精度/业务等价由 data-pipeline 处理。
+
+以上第3项项目层canonical/fan-out文字、第4项row grain、第8项去重/restart文字及
+第3.4、第四节中的相关JSON/fingerprint预算，只约束source v2直至Stage3原子
+activation，并在此后作为legacy只读事实保留。source v3先完成target admission，
+再构造一次唯一canonical typed domain；每条通过准入的SDK message写一条nested
+typed row，`PriceChange`只保留匹配entries且保持SDK相对顺序。v3不构造或持久化
+`source_native_payload_json`和venue `hash`，不按payload equality丢弃platform
+delivery，也不恢复跨进程fingerprint；相同platform delivery各自保留，内部retry
+不得额外制造记录。既有全局row/byte、单行和decoded queue上限继续有效，但按domain
+及其nested owned buffers计费，不再为canonical JSON或fan-out副本重复计费。
 
 ### 3.2 Binance
 

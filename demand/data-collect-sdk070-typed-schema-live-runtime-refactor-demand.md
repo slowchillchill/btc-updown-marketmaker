@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED`。阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED_STAGE3_AUTHORITY_SYNC_CLOSED`。阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime终态为
 > `SDK_070_RUNTIME_USABLE`。阶段1闭合时的typed终态为
@@ -25,10 +25,12 @@
 > recovery已是唯一owner且无需再重构。`2-PM`分支收口完整门与独立审查均已通过，
 > 用户已另行批准`2-PM` closure commit/push；`2-PM_CLOSED`以承载本记录的commit
 > 成功推送且本地HEAD、upstream与远端ref一致为生效条件。六源共享dispatcher继续
-> 留在root。`2-RTDS`现已完成唯一source owner与九个直接测试的机械移动、自审、
-> 小步门、分支收口完整/静态门及独立审查，并在用户持续执行/发布授权下进入
-> closure commit/push；`2-RTDS_CLOSED`以承载本记录的closure commit成功push且
-> 本地HEAD、upstream与远端ref一致为生效条件。用户明确批准本事项持续推进直至
+> 留在root。`2-RTDS`唯一owner机械移动、完整/静态门及独立审查已通过；closure
+> commit `b7f83704cf2176de61573c6b11d792df73d68b53`已推送，且本地HEAD、
+> upstream与远端ref一致，故`2-RTDS_CLOSED`成立。Stage3入口独立只读审计为
+> `PASS`；任务3.0已只同步future Polymarket source-v3 payload/fingerprint/v2 raw
+> projection现行authority。`STAGE3_AUTHORITY_SYNC_CLOSED`以承载本记录的commit
+> 成功push且三方ref一致为生效条件。用户明确批准本事项持续推进直至
 > 完成，不再逐阶段申请本地
 > 实现、测试、审查、commit或push授权；只有发生上下文冲突或实际情况与需求/计划
 > 不一致时才停止请求决策。该持续授权满足阶段3等后继本地执行门，但不替代尚未

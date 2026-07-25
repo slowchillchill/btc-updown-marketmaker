@@ -786,3 +786,16 @@ SDK070阶段0盘点发现，本事项demand第3.1节和plan的current说明虽�
 - 本记录精确取代同日此前等待发布授权状态；旧段仅保留为历史事实。
 - 本同步不修改本事项既有生产行为，也不授权公开网络smoke、release、部署、远端
   服务/数据操作或清理。
+
+## 2026-07-25：future Polymarket source-v3窄authority同步
+
+- 本事项demand中canonical JSON、`source_native_payload_json`、payload
+  fingerprint、逐change fan-out及restart projection只继续约束current/historical
+  source v2；旧实现和验证事实不回写。
+- future source v3由SDK070总事项Stage3唯一执行：target admission后构造一次
+  canonical typed domain，一条SDK message写一条nested row；不保存payload JSON或
+  venue hash，不按payload equality丢弃platform delivery，也不恢复跨进程
+  fingerprint。
+- 其他source、metadata payload/digest、HandoffFrame v1和production边界未改变。
+  本次只同步文档authority，没有修改Rust/schema/test或执行网络、部署、migration
+  和删除。

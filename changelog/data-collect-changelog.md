@@ -616,3 +616,18 @@
 - metadata v4继续使用同一`polymarket_market_metadata` artifact、writer owner、partition和manifest mapping，以v3完整schema为不可变前缀，只追加两个nullable WS claimant字段；不新增artifact、sidecar、digest、第二writer或dual-write。
 - future source-v3 claimant recovery只接受metadata v4精确外键。source v3 + metadata v3、source v2 + metadata v4、dual-write及半切换均fail closed；唯一执行游标是`plan/data-collect-sdk070-typed-schema-live-runtime-refactor-plan.md`阶段3。
 - 本次只同步demand、plan与changelog authority；没有修改Rust、Cargo/vendor、schema、tests或数据，没有构建、网络probe、commit、push、release、部署、migration、服务操作或删除。
+
+## 2026-07-25：Polymarket source-v3 payload/fingerprint现行authority同步
+
+- `data-collect-demand`与主plan中通用`raw_json`/raw evidence合同已增加窄版本
+  carve-out：只对future `source_kind=polymarket_market` v3 persisted artifact和
+  data-pipeline合同改用完整canonical typed evidence；其他source与
+  `HandoffFrame v1.raw_json`不变。
+- v3一条target-admitted SDK message对应一条nested typed row，`PriceChange`
+  entries保持SDK相对顺序；不持久化`source_native_payload_json`或venue `hash`，
+  不做payload fingerprint recovery。source v2历史文件与执行证据保持只读。
+- metadata v3/v4自身payload/digest traceability、manifest file SHA-256及原子发布
+  校验均不受影响；F04保持optional，F01–F03及F05–F18保持excluded。
+- 用户持续执行授权已覆盖SDK070 Stage3本地Rust/schema/test、审查、commit和push；
+  本次authority同步不等于实现完成，也不授权production cutover、release、部署、
+  远端操作、migration或删除。

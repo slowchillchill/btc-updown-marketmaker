@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-polymarket-resolution-followup-changelog.md`
 >
-> 状态：`PHASE_4_COMPLETE_LOCAL_HK_VPN_AC12_AC13_PASS_2026-07-23__V3_VALIDATE_FIRST_DOC_APPROVED_IMPLEMENTATION_NOT_AUTHORIZED_2026-07-24__METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`。阶段0至阶段3已分别完成自审、独立终审与commit/push；阶段4本地香港线路AC-12、本地全量AC-13与任务4.3三路独立全面终审均已通过。用户于2026-07-24批准未来source schema v3的validate-first文档修订，并于2026-07-25批准未来metadata v4 claimant schema；两次批准均未授权Rust/schema/test实施。production部署、服务操作和数据删除也未获授权、未执行。
+> 状态：`PHASE_4_COMPLETE_LOCAL_HK_VPN_AC12_AC13_PASS_2026-07-23__V3_VALIDATE_FIRST_AND_METADATA_V4_STANDING_LOCAL_EXECUTION_AUTHORIZED_NOT_YET_IMPLEMENTED_2026-07-25`。阶段0至阶段3已分别完成自审、独立终审与commit/push；阶段4本地香港线路AC-12、本地全量AC-13与任务4.3三路独立全面终审均已通过。用户于2026-07-24批准未来source schema v3的validate-first文档修订，并于2026-07-25批准未来metadata v4 claimant schema；后续持续执行授权现已覆盖SDK070 Stage3本地Rust/schema/test、审查、commit和push，但实现尚未完成。production部署、服务操作和数据删除仍未获授权、未执行。
 
 > 2026-07-22 AC-12执行拓扑修订：真实source validation固定在本地原生Ubuntu环境通过用户已配置的香港VPN线路执行，不再上传到AWS爱尔兰数据采集服务器。用户已授权阶段4在阶段1至阶段3全部通过后执行；不得改变production service或执行数据删除。
 
@@ -261,7 +261,7 @@ git diff --check
    数据删除或shadow Polymarket网络实现。阶段4已满足获授权的最终commit/push门；
    production部署仍保持独立授权门。
 
-## 2026-07-24 v3 new-write修订映射（文档已批准，实施未授权）
+## 2026-07-24 v3 new-write修订映射（文档已批准，持续本地执行已授权）
 
 前述阶段2/3的raw-first和raw-only recovery文本只记录2026-07-23已经完成的`polymarket_orderbook_v2` source行为与验证，不得用于实现v3。未来`polymarket_orderbook_v3` validate-first的唯一执行游标是`plan/data-collect-sdk070-typed-schema-live-runtime-refactor-plan.md`阶段3；本计划不复制第二套步骤或审查门。
 
@@ -272,9 +272,9 @@ git diff --check
 | 删除raw-first/raw-only production分支 | 总计划步骤3.4.7 | v3调用图与历史source v2/metadata v3保留边界 |
 | typed-only合法/失败/restart/crash/mixed矩阵 | 总计划步骤3.5.1至3.5.5 | 包含0 source row + 唯一合法exhausted summary及一致attempts |
 
-上述总计划步骤只有在其SDK字段门、`2-PM_CLOSED`、最终字段矩阵和Rust/schema/test授权全部满足后实施；本次文档批准不授权实施、构建、测试、commit或push。
+上述总计划步骤只有在其SDK字段门、`2-PM_CLOSED`、最终字段矩阵和持续执行授权全部满足后实施；这些入口现已满足，但只有真实代码、测试和验收完成后才能标记为已实现。
 
-### 2026-07-25 metadata v4 claimant修订映射（文档已批准，实施未授权）
+### 2026-07-25 metadata v4 claimant修订映射（文档已批准，持续本地执行已授权）
 
 未来`polymarket_market_metadata_v4`与source v3 recovery的唯一执行游标仍是SDK070总计划阶段3。本计划保留2026-07-23已完成的metadata v3/source v2步骤与证据，不复制第二套schema、recovery、activation或审查步骤。
 
@@ -284,7 +284,7 @@ git diff --check
 | source v3 claimant外键、restart与cross-pair fail-closed矩阵 | 总计划步骤3.5.2至3.5.5 | 唯一finalized source row匹配、identity/winner核对、platform duplicate唯一claimant、source v3 + metadata v3及source v2 + metadata v4失败 |
 | current new-write原子activation | 总计划步骤3.5.6 | activation前仅source v2 + metadata v3，activation后仅source v3 + metadata v4；无dual-write、半切换或第二writer |
 
-该映射只消费总计划的单一执行游标。用户批准的是metadata版本与字段合同，不是Rust/schema/test实施、构建、测试、commit、push或production cutover授权。
+该映射只消费总计划的单一执行游标。后续持续授权已覆盖Stage3本地Rust/schema/test、构建、测试、审查、commit和push；它不等于实现已经完成，也不授权production cutover。
 
 ## 三、需求—计划—验证映射
 
