@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_REVIEW_PASSED_AWAITING_PUBLISH`。阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_REVIEW_PASSED_AWAITING_PUBLISH`。阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime终态为
 > `SDK_070_RUNTIME_USABLE`。阶段1闭合时的typed终态为
@@ -56,8 +56,16 @@
 > Stage5实现、最终package/check/clippy/fmt/diff门及两路独立
 > `gpt-5.6-sol`/Ultra终审均已通过，最终终审为Blocker 0 / Important 0 /
 > Minor 0；终审发现的pending map key与source-authority `Vec` backing
-> owned-byte漏算已修复并复审通过。`STAGE5_CLOSED`仍以承载本记录的commit成功
-> push且本地HEAD、upstream与远端ref一致为生效条件。
+> owned-byte漏算已修复并复审通过。Stage5 closure commit
+> `9e0d264058ed64cd63fbd05280f0826afaba0509`已push，且本地HEAD、upstream与远端
+> ref一致，故`STAGE5_CLOSED`成立。Stage6已完成v3 AC映射、Stage3/Stage0证据消费、
+> canonical/finalized artifact parity与最终报告，当前等待独立阶段终审。用户于
+> 2026-07-26批准方案A：Stage6 6.3.1要求七类target-admitted fixture的canonical
+> round-trip，以及Stage3另一个固定deterministic fixture经正式writer产生的
+> finalized v3 Parquet artifact；两套fixture不得混同，后者也不得冒充production
+> real artifact。首次真实v3 forward run继续属于范围外后继三件套。两路独立
+> `gpt-5.6-sol`/Ultra终审均为`PASS / CLOSURE_UNBLOCKED`，Blocker 0 /
+> Important 0 / Minor 0。
 
 ## 一、决策结论与目标
 

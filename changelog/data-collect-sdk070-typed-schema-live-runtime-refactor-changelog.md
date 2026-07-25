@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_REVIEW_PASSED_AWAITING_PUBLISH`。阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_REVIEW_PASSED_AWAITING_PUBLISH`。阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
 > `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
@@ -1669,3 +1669,70 @@ suite再次退出0（lib 348及全部integration/doc targets通过），all-targ
 文档/authority终审均为`PASS / CLOSURE_UNBLOCKED`，Blocker 0 / Important 0 /
 Minor 0；当前只待精确staging、commit/push与三方ref一致性。未授权production、
 远端、部署、migration或数据删除。
+
+## 2026-07-26：Stage5发布闭合并进入Stage6
+
+Stage5 closure commit
+`9e0d264058ed64cd63fbd05280f0826afaba0509`已push到
+`origin/fix-rtds-silents`；本地HEAD、upstream与远端ref逐项一致，故
+`STAGE5_CLOSED`成立。提交只包含已批准C/U清理、必要正确性修复、测试迁移与文档，
+三份未跟踪RTDS草案未暂存、未修改。
+
+Stage6随后只消费同一稳定代码快照的最终五道门、Stage3 storage/future附件和Stage0
+完整日v2物理事实。完整package suite、all-target check、Clippy `-D warnings`、fmt与
+diff均已在该稳定源码树通过，没有v3 AC需要补充focused target。
+
+## 2026-07-26：Stage6 6.3.1冲突、方案A裁决与本地证据完成
+
+Stage6只读AC/证据审计发现局部需求/计划冲突：
+
+- 需求AC-06/AC-08只要求target-admitted SDK fixture、producer golden fixture和
+  canonical/v3 round-trip，并明确真实adapter、长跑和首次real-v3 forward run另立
+  三件套；
+- 计划6.3.1却额外写了“代表性real artifact”；
+- Stage3 v3 artifact是固定synthetic fixture经正式writer生成的确定性Parquet，
+  不能冒充production real artifact；
+- Stage0真实artifact是legacy v2且没有原message boundary，需求又禁止v2 reader重组
+  v3 canonical domain，因此不能用它补写real-v3 parity。
+
+现实选项为：A，以七类fixture验证canonical round-trip，并以Stage3另一个固定
+deterministic fixture经正式writer产生的finalized v3 artifact验证物理落盘，两套
+fixture不得混同；B，另建三件套执行首次真实v3 forward run。用户批准方案A。需求
+语义不变，计划6.3.1已作最小修正，没有新增reader、adapter、录制器、sidecar、双写、
+shadow replay或网络测试。
+
+Stage6最终报告写入
+`data-collect/docs/sdk070-stage6-v3-integration-parity.md`，并登记：
+
+- 稳定代码快照
+  `9e0d264058ed64cd63fbd05280f0826afaba0509`；
+- probe/report/future mapping/Stage0 hash分别为
+  `70c5f2dae2085d5c3584a49eb1311b2e54b81bcec08e52372dad019bd4e51dd4`、
+  `527c10d79d95803640980d94aacccaf79605dd565a3ce32526820b3c08380ed3`、
+  `9b8207c3a01b5356a1a365913d1e8368c69d686bbac36a3f39cbbb1629a31464`、
+  `5a3705ed5c360ec6983fdffc7947c54a716182738e55ac75b3aaca410e844a53`；
+- Stage3 v3 production Rust owner文件`+5,155/-2,388`、test Rust
+  `+3,838/-313`；Git file-level moved/deleted-file均为0；
+- v3专属Stage5 C01–C08另按自身阶段边界保持`+183/-3,732`，不与Stage3净值相加；
+- payload/hash/fingerprint/fan-out/raw-first/raw-recovery替代与删除矩阵，以及
+  metadata v3 immutable、metadata v4 current、W-B offline legacy writer保留边界。
+
+在方案A冲突审计结论返回前，主代理为绑定当前commit额外执行了一次
+`cargo test -p data-collect --locked -- --test-threads=1`；lib 348及全部
+integration/doc targets通过。这是无必要的重复执行，不构成第二验收门，也没有修改
+artifact或外部状态；Stage6没有继续重复其余四道门。
+
+合同终审者在只读Git游标核验时执行了
+`git ls-remote origin refs/heads/fix-rtds-silents`，违反该审查子任务的
+“不得网络操作”约束；命令只返回
+`9e0d264058ed64cd63fbd05280f0826afaba0509`，未写文件、未push、未改变本地或
+远端状态，也不作为产品验收证据。
+
+两路独立`gpt-5.6-sol`/Ultra阶段终审最终均为
+`PASS / CLOSURE_UNBLOCKED`，Blocker 0 / Important 0 / Minor 0。终审发现的方案A
+fixture身份混同、binary/handoff比较起点、LOC分类与writer归属措辞均已修正并复审
+清零；没有Rust、Cargo、vendor或test tracked diff。
+
+当前游标为`STAGE6_REVIEW_PASSED_AWAITING_PUBLISH`。下一步按持续发布授权创建Stage6
+closure commit/push。2-REST仍是之后必须单独执行的开放分支；RTDS保持真实deferred
+状态。

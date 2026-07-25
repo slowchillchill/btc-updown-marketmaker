@@ -11,7 +11,10 @@
 > 对应 changelog：
 > `changelog/data-collect-sdk070-typed-schema-live-runtime-refactor-changelog.md`
 >
-> 状态：`STAGE5_REVIEW_PASSED_AWAITING_PUBLISH`
+> 状态：`STAGE5_CLOSED`
+>
+> closure commit：
+> `9e0d264058ed64cd63fbd05280f0826afaba0509`
 
 ## 1. 审计边界
 

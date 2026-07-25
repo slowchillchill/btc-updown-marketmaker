@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_REVIEW_PASSED_AWAITING_PUBLISH`。阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_REVIEW_PASSED_AWAITING_PUBLISH`。阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
 > `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
@@ -47,8 +47,12 @@
 > `U05-A + U06-A`，允许按现有真实owner删除这两套public/test-only模型；修复后必须
 > 重算LOC/测试证据、重跑完整门并重复独立审查，不能沿用首次FAIL前的closure结论。
 > 当前修复后完整门与两路独立`gpt-5.6-sol`/Ultra终审均已通过，最终为
-> Blocker 0 / Important 0 / Minor 0；`STAGE5_CLOSED`仍以closure commit成功push
-> 且本地HEAD、upstream与远端ref一致为生效条件。
+> Blocker 0 / Important 0 / Minor 0；closure commit
+> `9e0d264058ed64cd63fbd05280f0826afaba0509`已push且本地HEAD、upstream与远端ref
+> 一致，故`STAGE5_CLOSED`成立。Stage6本地证据、最终报告及两路独立
+> `gpt-5.6-sol`/Ultra终审已经完成；终审均为
+> `PASS / CLOSURE_UNBLOCKED`，Blocker 0 / Important 0 / Minor 0。2-REST仍是
+> Stage6后必须单独执行的开放分支。
 
 ## 一、执行原则与成功标准
 
@@ -696,6 +700,10 @@ non-production conformance路径。
 发现的pending map key与source-authority `Vec` backing owned-byte漏算已修复，
 focused与完整门重跑通过，并由同一审查者复审清零。
 
+closure commit `9e0d264058ed64cd63fbd05280f0826afaba0509`已push到
+`origin/fix-rtds-silents`，本地HEAD、upstream与远端ref一致，故`STAGE5_CLOSED`
+成立。
+
 ## 八、阶段 6：v3集成与范围内 parity
 
 ### 任务 6.1：完整本地确定性门
@@ -712,6 +720,11 @@ git diff --check
   -> 验证：完整suite可执行其他模块的现有测试，但只作为一次v3跨模块回归；不重复其专项AC/artifact/长跑/独立审查门，也不重复已被suite覆盖的定向测试。失败须相对pre-v3基线归因：v3 diff引入的失败阻断v3，既存或并发冲突则停止并报告。
 - 步骤 6.1.2：只有某个v3 AC对应target未被上述命令覆盖时，才补跑一次该定向target并记录原因。
   -> 验证：不运行有真实网络副作用的bench，不为同一测试重复建门。
+  -> 执行结果：Stage6消费Stage5最终修复后、随后发布为
+  `9e0d264058ed64cd63fbd05280f0826afaba0509`的同一稳定源码快照；完整package
+  suite、all-target check、Clippy `-D warnings`、fmt与diff门均已通过，没有AC
+  target缺口。Stage6入口在反重复审计结论返回前额外执行了一次package suite并通过，
+  但不作为第二验收门；其余四道门没有重复执行。
 
 ### 任务 6.2：消费 Stage3 storage 与完整 UTC 日既有证据
 
@@ -730,8 +743,18 @@ git diff --check
 
 ### 任务 6.3：canonical domain / future mapping 与产品边界
 
-- 步骤 6.3.1：七类target-admitted fixture和代表性real artifact做canonical domain/v3 round-trip parity。
-  -> 验证：当前消费字段field-for-field报告；mixed `PriceChange`只比较retained entries且保持SDK原始相对顺序；data-collect侧training/data-pipeline producer golden fixture通过，但不宣称真实data-pipeline adapter端到端通过。
+- 步骤 6.3.1：七类target-admitted fixture做canonical domain/v3 round-trip；
+  Stage3另一个固定deterministic fixture经正式writer生成finalized v3 Parquet
+  artifact。两套fixture不得混同。
+  -> 验证：当前消费字段field-for-field报告；mixed `PriceChange`只比较retained
+  entries且保持SDK原始相对顺序；data-collect侧training/data-pipeline producer
+  golden fixture通过，但不宣称真实data-pipeline adapter端到端或production real
+  artifact通过。Stage0真实v2 artifact只消费物理事实，不得重组为v3 canonical
+  domain。首次真实v3 forward run另建三件套。
+  -> 执行结果：用户于2026-07-26批准方案A，解除原“代表性real artifact”与需求
+  fixture/scope边界的冲突；七类fixture及真实target admission owner的canonical
+  round-trip通过，Stage3另一固定fixture的v3 writer/reader与确定性finalized
+  artifact通过。
 - 步骤 6.3.2：消费阶段3登记的`NONBLOCKING_FUTURE_SPEC`附件路径/hash/status，并只检查现有binary边界没有变化。
   -> 验证：不重新评审同一字段映射；未知future字段记为后继附件缺口而不阻断v3。`HandoffFrame v1`和hot heartbeat行为无diff，不宣称runtime parity。
 - 步骤 6.3.3：官方missing/null parser fixture、parser error传播、损坏Parquet、独立legacy v2 row view、v3及restart负例。
@@ -745,10 +768,18 @@ git diff --check
   -> 验证：同时逐项报告raw-first handler、invalid/unmatched persistence、Gamma-first raw-only、post-horizon raw-only和raw-to-metadata recovery矩阵的替代/删除证据；明确metadata v3 schema不可变且在activation后与source v2一起退出current runtime new-write，legacy schema/reader和W-B offline writer保留，metadata v4继承v3 traceability并只追加claimant pair。只覆盖v3/v4必需删除，不重复汇总阶段5的全局cleanup台账。
 - 步骤 6.4.3：报告v3与原计划偏差。
   -> 验证：事实、影响、选项和用户决定写入 changelog。
+  -> 执行结果：最终报告已写入
+  `data-collect/docs/sdk070-stage6-v3-integration-parity.md`；包含AC映射、证据hash、
+  artifact差异、v3 LOC、旧路径替代/删除矩阵、方案A及重复package suite过程偏差。
 
 ### 阶段 6 审查与提交门
 
 独立终审需求AC-01至AC-08、AC-13至AC-15中与v3相关的diff、测试和artifact；AC-09已由Stage3 task 3.7 closure，本阶段只核对证据路径/hash/status，不重跑或重复评审。AC-10/11由2-REST/cleanup分支收口，AC-12由RTDS子计划收口。通过后按持续发布授权创建v3 closure commit/push；deployment、旧数据删除或历史rewrite仍不在本计划范围内。
+
+执行结果：两路独立`gpt-5.6-sol`/Ultra终审均为
+`PASS / CLOSURE_UNBLOCKED`，Blocker 0 / Important 0 / Minor 0；终审发现的
+fixture身份混同、binary边界比较起点和writer归属措辞已修正并复审清零。当前游标为
+`STAGE6_REVIEW_PASSED_AWAITING_PUBLISH`。
 
 ## 九、范围外后继事项
 
