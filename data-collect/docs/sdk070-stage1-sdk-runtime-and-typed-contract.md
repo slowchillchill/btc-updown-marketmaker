@@ -249,3 +249,46 @@ public SDK smoke: NOT_AUTHORIZED / NOT_RUN
 Stage 2: NOT_STARTED
 v3 schema/writer/reader/local new-write: BLOCKED
 ```
+
+## 9. 2026-07-25 post-closure P-B1 addendum
+
+本节是Stage1闭合后的独立前置记录，不回写第1至8节的历史fixture、hash、审查或
+`SDK_070_TYPED_CONTRACT_BLOCKED`结论。
+
+用户随后批准`P-B1`以官方SDK-first方式修复七类missing/null整帧decode，并冻结：
+
+- nullable标量/文本使用`Option`；三个nullable数组使用
+  `DefaultOnNull -> empty Vec`；
+- current-v2在canonical/persist/claim/state之前对旧必填shape fail closed；
+- F04 `book.lastTradePrice`最终为`INCLUDED_OPTIONAL`，映射为
+  `BookUpdate.last_trade_price: Option<Decimal>`；F01–F03与F05–F18保持
+  `EXCLUDED`；
+- F04只表示book快照时已知的最近成交价，不替代或合成独立
+  `last_trade_price`成交事件。present值进入book canonical/raw-equivalent JSON，
+  missing/null省略新key并保持旧current-v2 canonical/fingerprint/row语义；
+- 公开network smoke仍为`NOT_AUTHORIZED / NOT_RUN`，所以实际目标市场首次订阅与
+  重连book的F04填充率未知。
+
+P-B1没有新增第五个vendor生产源码路径。当前四个生产差异路径及SHA-256为：
+
+```text
+src/ws/connection.rs
+  90070b2bd438909a44a82209963881b4c70f755bc671ea19b13c7ee2e2d6a223
+src/ws/config.rs
+  dc68886999cfd3509c0668f403c6f8953f283f03847b5dbd6ebe6c5b72d20e2d
+src/clob/ws/types/response.rs
+  9bd05887b9190449f75f5cda623a5f2e465c07033900fb1dabf89b72ab2b6aba
+src/rtds/subscription.rs
+  4e2174a4dcb0e18ad5baf2914ec3270cbff5923915e6dc39ed7f04174fa10e7b
+```
+
+公开type直接适配的两个non-production conformance文件为
+`tests/websocket.rs`
+（`0cadd63b07c2d5a6033f83dbca0c127dc90d71a0c88e38babdeea56e98e182eb`）
+和`examples/clob/ws/orderbook.rs`
+（`1df005dfbd0d1735ee102323283cf5c9fd644b6a97fda94a57a79f073d60c55c`）。
+
+当前P-B1代码、最终本地门及独立审查已经完成，审查结果为
+`PASS (Critical 0 / Important 0 / Minor 0)`，但发布仍未闭合。typed终态继续保持
+Stage1历史`SDK_070_TYPED_CONTRACT_BLOCKED`；只有另行commit/push并核对ref后，才切换为
+`SDK_070_TYPED_CONTRACT_NONBLOCKING_GAPS_APPROVED`。

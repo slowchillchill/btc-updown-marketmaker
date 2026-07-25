@@ -158,7 +158,8 @@ pub mod payloads {
                 { "price": ".54", "size": "10" }
             ],
             "timestamp": "123456789000",
-            "hash": "0x1234567890abcdef"
+            "hash": "0x1234567890abcdef",
+            "last_trade_price": "0.51"
         })
     }
 
@@ -361,9 +362,9 @@ mod market_channel {
 
         assert_eq!(tsc.asset_id, payloads::asset_id());
         assert_eq!(tsc.market, payloads::MARKET);
-        assert_eq!(tsc.old_tick_size, dec!(0.01));
+        assert_eq!(tsc.old_tick_size, Some(dec!(0.01)));
         assert_eq!(tsc.new_tick_size, dec!(0.001));
-        assert_eq!(tsc.timestamp, 100_000_000);
+        assert_eq!(tsc.timestamp, Some(100_000_000));
     }
 
     #[tokio::test]
@@ -1492,9 +1493,9 @@ mod custom_features {
 
         assert_eq!(bba.asset_id, payloads::asset_id());
         assert_eq!(bba.market, payloads::MARKET);
-        assert_eq!(bba.best_bid, dec!(0.48));
-        assert_eq!(bba.best_ask, dec!(0.52));
-        assert_eq!(bba.spread, dec!(0.04));
+        assert_eq!(bba.best_bid, Some(dec!(0.48)));
+        assert_eq!(bba.best_ask, Some(dec!(0.52)));
+        assert_eq!(bba.spread, Some(dec!(0.04)));
     }
 
     #[tokio::test]
@@ -1520,9 +1521,9 @@ mod custom_features {
         let nm = result.unwrap().unwrap().unwrap();
 
         assert_eq!(nm.id, "12345");
-        assert_eq!(nm.question, "Will it rain tomorrow?");
+        assert_eq!(nm.question.as_deref(), Some("Will it rain tomorrow?"));
         assert_eq!(nm.market, payloads::MARKET);
-        assert_eq!(nm.slug, "will-it-rain-tomorrow");
+        assert_eq!(nm.slug.as_deref(), Some("will-it-rain-tomorrow"));
         assert_eq!(nm.asset_ids, vec![payloads::asset_id()]);
         assert_eq!(nm.outcomes, vec!["Yes", "No"]);
     }
@@ -1579,7 +1580,7 @@ mod custom_features {
         // Should only receive best_bid_ask
         let result = timeout(Duration::from_secs(2), stream.next()).await;
         let bba = result.unwrap().unwrap().unwrap();
-        assert_eq!(bba.best_bid, dec!(0.48));
+        assert_eq!(bba.best_bid, Some(dec!(0.48)));
     }
 
     #[tokio::test]
@@ -1671,8 +1672,9 @@ mod message_parsing {
         let book = result.unwrap().unwrap().unwrap();
 
         // Verify all fields from docs example
-        assert_eq!(book.timestamp, 123_456_789_000);
+        assert_eq!(book.timestamp, Some(123_456_789_000));
         assert_eq!(book.hash, Some("0x1234567890abcdef".to_owned()));
+        assert_eq!(book.last_trade_price, Some(dec!(0.51)));
         assert_eq!(book.bids[1].price, dec!(0.49));
         assert_eq!(book.bids[1].size, dec!(20));
         assert_eq!(book.asks[2].price, dec!(0.54));
@@ -1746,9 +1748,9 @@ mod message_parsing {
 
         assert_eq!(tsc.asset_id, payloads::asset_id());
         assert_eq!(tsc.market, payloads::MARKET);
-        assert_eq!(tsc.old_tick_size, dec!(0.01));
+        assert_eq!(tsc.old_tick_size, Some(dec!(0.01)));
         assert_eq!(tsc.new_tick_size, dec!(0.001));
-        assert_eq!(tsc.timestamp, 100_000_000);
+        assert_eq!(tsc.timestamp, Some(100_000_000));
     }
 
     #[test]
@@ -1766,6 +1768,6 @@ mod message_parsing {
         );
         assert_eq!(ltp.price, dec!(0.456));
         assert_eq!(ltp.side, Some(Side::Buy));
-        assert_eq!(ltp.timestamp, 1_750_428_146_322);
+        assert_eq!(ltp.timestamp, Some(1_750_428_146_322));
     }
 }

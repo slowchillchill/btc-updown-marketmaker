@@ -73,7 +73,7 @@ impl PolymarketOrderbookRow {
             "book",
             event.market.to_string(),
             Some(event.asset_id.to_string()),
-            Some(event.timestamp),
+            event.timestamp,
             context,
         );
         row.bids =
@@ -148,7 +148,7 @@ impl PolymarketOrderbookRow {
                     "price_change",
                     event.market.to_string(),
                     Some(change.asset_id.to_string()),
-                    Some(event.timestamp),
+                    event.timestamp,
                     context.clone(),
                 );
                 row.price = Some(change.price.to_string());

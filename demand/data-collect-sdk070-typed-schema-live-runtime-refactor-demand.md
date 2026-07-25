@@ -8,11 +8,15 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_EXECUTION_STAGE_2_IN_PROGRESS`。阶段0已以commit
+> 状态：`APPROVED_EXECUTION_P_B1_REVIEW_PASSED_AWAITING_PUBLISH`。阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime终态为
-> `SDK_070_RUNTIME_USABLE`，typed终态为
-> `SDK_070_TYPED_CONTRACT_BLOCKED`。用户于2026-07-25批准继续推进，阶段2任务
+> `SDK_070_RUNTIME_USABLE`。阶段1闭合时的typed终态为
+> `SDK_070_TYPED_CONTRACT_BLOCKED`；用户随后批准`P-B1`修复路线，最终字段裁决为
+> F04 `INCLUDED_OPTIONAL`、F01–F03与F05–F18 `EXCLUDED`。本地实现、最终门及
+> 独立审查已通过，尚未发布，故
+> `SDK_070_TYPED_CONTRACT_NONBLOCKING_GAPS_APPROVED`仍是候选终态而非已发布终态。
+> 用户于2026-07-25批准继续推进，阶段2任务
 > 2.1/2.2共同基线已落盘到
 > `data-collect/docs/sdk070-stage2-observable-and-owner-baseline.md`并完成自审；
 > `2-PM`四个小步均已完成：step 1/2/3通过实现与自审，step 4确认既有resolution
@@ -135,7 +139,62 @@ future mapping只做独立非阻断静态审查，不进入full-day运行。不�
 - `https://github.com/Polymarket/rs-clob-client-v2/blob/222143d321eba97d5711a848265eb9aab3bc7ff4/CHANGELOG.md`（固定commit `222143d321eba97d5711a848265eb9aab3bc7ff4`）
 - `https://docs.polymarket.com/market-data/realtime-data`（未版本化current page，Stage1实际访问日期：2026-07-25；字段/nullability fixture结果冻结在阶段1artifact，不能把未来页面漂移冒充本次证据）
 
-当前整帧parser blocker未获得官方SDK-first修复路线，v3字段集合和实现入口保持阻断；上述single-field gap也未经用户逐项决定。不得改用 raw WebSocket、raw REST、手写协议、第二解析器或 shadow canonicalizer补洞。
+上述结论是Stage1闭合时的历史事实。2026-07-25用户随后批准`P-B1`：
+
+- vendor生产源码继续只允许既有四个差异路径；typed/nullability补丁只落在既有
+  `src/clob/ws/types/response.rs`；
+- nullable标量与文本使用`Option`，不得用`0`、空串、零decimal或receive time伪造；
+- `NewMarket.asset_ids/outcomes`与`MarketResolved.asset_ids`沿用SDK既有
+  `DefaultOnNull -> empty Vec`合同；missing、null与显式空数组对target identity均
+  作为不完整集合处理；
+- `MidpointUpdate.timestamp`只因其直接复制`BookUpdate.timestamp`而在同一
+  `response.rs`内保持同型`Option<i64>`，不新增第五个vendor生产源码路径；
+- current source v2在生成canonical payload、fingerprint、row、terminal claim或
+  改变业务状态前，对过去由SDK parser强制必填、现改为nullable的字段fail closed；
+  完整旧fixture的v2 schema、payload、fingerprint、admission和持久化语义保持；
+- 不增加raw WebSocket/REST、手写协议、第二parser、shadow canonicalizer或
+  `subscription.rs`补丁。当前data-collect直接消费`ConnectionManager` broadcast；
+  `subscribe_market_with_options`返回的filtered stream会立即drop，因此其空数组过滤
+  不在当前collector接收链路上。
+
+用户最初把全部single-field gap冻结为`EXCLUDED`；随后核实
+`book.lastTradePrice`与独立`last_trade_price`分别是快照状态和成交事件，并非
+可互相替代的重复数据。用户据此把F04单独修正为`INCLUDED_OPTIONAL`。最终矩阵为：
+
+| ID | variant.field | 决定 |
+|---|---|---|
+| F01 | `book.minOrderSize` | `EXCLUDED` |
+| F02 | `book.tickSize` | `EXCLUDED` |
+| F03 | `book.negRisk` | `EXCLUDED` |
+| F04 | `book.lastTradePrice` | `INCLUDED_OPTIONAL` |
+| F05 | `last_trade_price.transactionHash` | `EXCLUDED` |
+| F06 | `new_market.tags` | `EXCLUDED` |
+| F07 | `new_market.conditionId` | `EXCLUDED` |
+| F08 | `new_market.active` | `EXCLUDED` |
+| F09 | `new_market.clobTokenIds` | `EXCLUDED` |
+| F10 | `new_market.sportsMarketType` | `EXCLUDED` |
+| F11 | `new_market.line` | `EXCLUDED` |
+| F12 | `new_market.gameStartTime` | `EXCLUDED` |
+| F13 | `new_market.orderPriceMinTickSize` | `EXCLUDED` |
+| F14 | `new_market.groupItemTitle` | `EXCLUDED` |
+| F15 | `new_market.takerBaseFee` | `EXCLUDED` |
+| F16 | `new_market.feesEnabled` | `EXCLUDED` |
+| F17 | `new_market.feeSchedule` | `EXCLUDED` |
+| F18 | `market_resolved.tags` | `EXCLUDED` |
+
+F04只能以`BookUpdate.last_trade_price: Option<Decimal>`表示快照时已知的最近成交价。
+missing/null保持`None`；实际有值时只作为book快照字段保留，不得伪造，也不得转换成
+独立`last_trade_price`成交行。current v2只在该字段实际存在时把它加入canonical与
+raw-equivalent JSON；字段缺失时旧canonical字节、fingerprint、row及持久化语义保持
+不变。实际目标市场首次订阅/重连book中的填充率尚未经过公开网络smoke验证，不能把
+optional typed支持写成非空可用性承诺。
+
+该决定不删除current v2现有列，也不把authenticated
+`TradeMessage.transaction_hash`错接到public `LastTradePrice`。只有P-B1完整验证、
+独立审查和单独发布均闭合后，typed终态才从历史
+`SDK_070_TYPED_CONTRACT_BLOCKED`切换为
+`SDK_070_TYPED_CONTRACT_NONBLOCKING_GAPS_APPROVED`；这只解除阶段3的typed前置，
+不等于用户已授权阶段3 Rust/schema/test实施。
 
 ### 2.4 `live_runtime.rs` 是生产核心，不是整文件死代码
 
@@ -317,6 +376,22 @@ RTDS typed row/schema 不属于这次 `polymarket_orderbook_v3` 列删除。不�
    - `SDK_070_TYPED_CONTRACT_NONBLOCKING_GAPS_APPROVED`：用户逐项批准已知 gap为排除或 `nullable_unavailable`；
    - `SDK_070_TYPED_CONTRACT_BLOCKED`：任一当前消费必需字段缺失，或SDK拒绝官方允许的target相关missing/null消息且尚无用户批准的官方SDK修复路线；阶段 1报告后只阻断 v3 schema及其 reader/writer/local new-write替换。
 8. 阶段 1 必须更新本节已有字段/nullability/parser矩阵，而不是把字段检查写成首次发现。runtime升级可用不等于 typed schema能力足够；不得用`nullable_unavailable`掩盖整帧在SDK parser处已丢失。
+9. 已批准`P-B1`只能在既有`src/clob/ws/types/response.rs`生产patch内修复七类
+   missing/null typed decode；因`BookUpdate.timestamp`直接传播到`MidpointUpdate`，
+   后者必须在同一文件保持同型。vendor tests/example可作必要编译与合同适配，但不得
+   冒充第五个生产源码patch。
+10. P-B1必须用永久fixture分别覆盖七类variant的missing object、null object、
+    `[missing object]`和`[null object]`，全部走真实
+    `parse_if_interested(..., MessageInterest::ALL)`并返回恰好一条正确variant。
+11. current source v2必须在canonical payload、fingerprint、row、terminal claim和
+    业务状态变化前拒绝新nullable但旧v2要求完整的shape；完整旧fixture保持原行为。
+    不得把`MarketResolved.question/slug/description/outcomes`误设为新v2必填，因为
+    它们在P-B1前已经接受missing/null。
+12. F04为`INCLUDED_OPTIONAL`，使用
+    `BookUpdate.last_trade_price: Option<Decimal>`并进入未来v3 book字段；F01–F03
+    与F05–F18全部`EXCLUDED`，不得加入SDK struct或未来v3 schema。不得用
+    authenticated channel字段或Gamma metadata值伪装public WS观察值，也不得把F04
+    合成独立成交事件。
 
 ## 六、`polymarket_orderbook_v3` typed message 合同
 
@@ -325,10 +400,10 @@ RTDS typed row/schema 不属于这次 `polymarket_orderbook_v3` 列删除。不�
 下一版 schema version预定为 `polymarket_orderbook_v3`；具体字段集合只有在已知 SDK gap逐项裁决后才能冻结。每条已接纳、属于目标 market lifecycle 的 target-admitted SDK message projection只写一行：
 
 - 共同 envelope：`timestamp_received`、平台 `timestamp`、`event_type`、`market`、可用时的 `slug`、collector identity、region、endpoint、schema version，以及本事项新增并按下述合同冻结的`source_sequence_epoch_id`、`collector_admission_sequence`和`collector_admission_time_utc_ms`；
-- `book`：`asset_id`，`bids` / `asks` 使用 Arrow `List<Struct<price: Utf8, size: Utf8>>`，保留顺序和 decimal 文本；
+- `book`：`asset_id`，`bids` / `asks` 使用 Arrow `List<Struct<price: Utf8, size: Utf8>>`，保留顺序和 decimal 文本；另保留nullable decimal-string `last_trade_price`作为快照状态，不合成成交行；
 - `price_change`：`price_changes` 使用 Arrow `List<Struct<asset_id, price, size, side, best_bid, best_ask>>`；只保留通过现行 target asset/condition admission的全部 entries及其 SDK原始相对顺序，不再复制共同 payload；mixed message中的非目标 entry继续被过滤；
 - `tick_size_change`：asset、old/new tick size；
-- `last_trade_price`：asset、price、size、side、fee rate；官方文档的 `transactionHash` 是当前已知 SDK gap，只有用户裁决并由官方 SDK typed API提供后才可进入可用字段集合；
+- `last_trade_price`：asset、price、size、side、fee rate；F05 `transactionHash`保持`EXCLUDED`；
 - `best_bid_ask`：asset、best bid、best ask、spread；
 - `new_market`：id、question、slug、description、asset IDs、outcomes、event message typed struct；
 - `market_resolved`：new-market identity/text/arrays，加 winning asset/outcome 和 terminal 所需 typed 字段。
@@ -465,7 +540,7 @@ v3 writer 不得包含：
 
 ### AC-01 SDK provenance 与单版本
 
-workspace只解析“以官方 0.7.0 crate为底座的本地 `0.7.0-p1` vendor”，其 Cargo package version仍为 `0.7.0`；`third_party`中tracked Polymarket SDK vendor目录也只有该一个，旧`0.6.0-p1`目录不存在，active Cargo/code/probe对Polymarket SDK旧路径或其0.6精确版本的引用为0，历史文档记录不回写。crate checksum、VCS、MSRV、license、feature tree和四个允许差异路径 `src/ws/connection.rs`、`src/ws/config.rs`、`src/clob/ws/types/response.rs`、`src/rtds/subscription.rs` 全部可复核，无第五个 vendor源码差异。
+workspace只解析“以官方 0.7.0 crate为底座的本地 `0.7.0-p1` vendor”，其 Cargo package version仍为 `0.7.0`；`third_party`中tracked Polymarket SDK vendor目录也只有该一个，旧`0.6.0-p1`目录不存在，active Cargo/code/probe对Polymarket SDK旧路径或其0.6精确版本的引用为0，历史文档记录不回写。crate checksum、VCS、MSRV、license、feature tree和四个允许生产源码差异路径 `src/ws/connection.rs`、`src/ws/config.rs`、`src/clob/ws/types/response.rs`、`src/rtds/subscription.rs` 全部可复核，无第五个vendor生产源码差异。P-B1为公开类型变化直接适配的vendor `tests/websocket.rs`和`examples/clob/ws/orderbook.rs`属于非生产conformance路径，必须单列，不能被错误计算为第五个生产patch，也不能扩张到其他vendor路径。
 
 ### AC-02 SDK 可用性
 
@@ -473,7 +548,7 @@ SDK upstream tests、patch contract、runtime contract、data-collect determinis
 
 ### AC-03 SDK 字段能力
 
-七类 public market variant具有“官方实时文档字段/nullability -> SDK 0.7 typed field/parser结果 -> target admission -> v3 field -> 当前consumer/已批准合同”的矩阵。`book`、`price_change`、`last_trade_price`、`tick_size_change`、`best_bid_ask`、`new_market`和`market_resolved`均用官方允许的missing/null fixture直接验证upstream 0.7与当前patch parser；本需求2.3列出的field/nullability gap逐项获得用户决定。任何官方合法target相关帧不能被typed parser解码，或任一当前消费必需字段缺失时，终态为`SDK_070_TYPED_CONTRACT_BLOCKED`并只阻断v3及其reader/writer/local new-write替换，不能用JSON旁路或`nullable_unavailable`掩盖整帧丢失。
+七类 public market variant具有“官方实时文档字段/nullability -> SDK 0.7 typed field/parser结果 -> target admission -> v3 field -> 当前consumer/已批准合同”的矩阵。`book`、`price_change`、`last_trade_price`、`tick_size_change`、`best_bid_ask`、`new_market`和`market_resolved`均用官方允许的missing/null fixture直接验证upstream 0.7与当前patch parser；P-B1后的永久fixture必须证明single object与array element都返回恰好一条typed message。nullable标量/文本保留`Option`，三个批准的nullable数组使用`DefaultOnNull -> empty Vec`，current v2兼容门在任何持久化或业务状态变化前fail closed。F04以nullable typed book快照字段保留；其present值进入canonical/raw-equivalent JSON，missing/null不改变旧current-v2 canonical/fingerprint，也不得产生独立成交行。F01–F03与F05–F18全部`EXCLUDED`且不进入未来v3字段集合。任一fixture、完整旧shape兼容门、consumer编译或current-v2零写入/零状态门失败时仍为`SDK_070_TYPED_CONTRACT_BLOCKED`；全部通过并完成独立审查、发布后，终态为`SDK_070_TYPED_CONTRACT_NONBLOCKING_GAPS_APPROVED`。不得用JSON旁路或`nullable_unavailable`掩盖整帧丢失。
 
 ### AC-04 v3 schema
 
@@ -521,7 +596,7 @@ v3按 `size_of::<DomainMessage>() + Σ String::capacity() + Σ (Vec<T>::capacity
 
 ### AC-15 授权边界
 
-本组三件套已获总执行批准，但不等于各独立决策/授权门自动通过。阶段3获单独授权且满足入口条件后，可以先实现未激活的v3 domain/schema/writer/reader、不依赖claimant pair的typed recovery及其测试；只有metadata v4实现且WS claimant/recovery验收通过后，才可在本地代码/test的同一activation diff中把source v2 + metadata v3原子替换为唯一current new-write pair source v3 + metadata v4，并让source v2与metadata v3只读。这仍不等于production binary激活、服务器dataset root/canonical new-data cutover、历史migration、旧数据删除、release或部署，后者分别需要新的明确授权。
+本组三件套已获总执行批准；用户也已单独批准P-B1 Rust/consumer/test/docs实施及最终字段矩阵（F04 `INCLUDED_OPTIONAL`，F01–F03与F05–F18 `EXCLUDED`），但这些批准不等于阶段3已获授权。只有P-B1独立审查、单独commit/push和ref核对闭合，且阶段3另获明确授权并满足其余入口条件后，才可先实现未激活的v3 domain/schema/writer/reader、不依赖claimant pair的typed recovery及其测试；只有metadata v4实现且WS claimant/recovery验收通过后，才可在本地代码/test的同一activation diff中把source v2 + metadata v3原子替换为唯一current new-write pair source v3 + metadata v4，并让source v2与metadata v3只读。这仍不等于production binary激活、服务器dataset root/canonical new-data cutover、历史migration、旧数据删除、release或部署，后者分别需要新的明确授权。
 
 ## 十、停止条件
 

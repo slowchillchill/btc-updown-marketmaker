@@ -1309,15 +1309,19 @@ fn source_payloads_reconstruct_through_the_pinned_sdk_and_unique_terminal_evalua
             .collect::<Vec<_>>(),
         serde_json::from_str::<Vec<String>>(&ws_row.asset_ids).unwrap()
     );
-    assert_eq!(resolved.winning_asset_id.to_string(), "101");
-    assert_eq!(resolved.winning_outcome, ws_row.winning_outcome.unwrap());
     assert_eq!(
-        resolved.timestamp,
-        ws_row.ws_platform_timestamp_utc.unwrap()
+        resolved
+            .winning_asset_id
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("101")
     );
+    assert_eq!(resolved.winning_outcome, ws_row.winning_outcome);
+    assert_eq!(resolved.timestamp, ws_row.ws_platform_timestamp_utc);
     assert_eq!(
-        resolved.timestamp.to_string(),
-        ws_row.ws_platform_timestamp_raw.unwrap()
+        resolved.timestamp.map(|timestamp| timestamp.to_string()),
+        ws_row.ws_platform_timestamp_raw
     );
 }
 

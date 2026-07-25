@@ -8,11 +8,13 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_EXECUTION_STAGE_2_IN_PROGRESS`。阶段0已以commit
+> 状态：`APPROVED_EXECUTION_P_B1_REVIEW_PASSED_AWAITING_PUBLISH`。阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
-> `SDK_070_RUNTIME_USABLE`，typed contract为
-> `SDK_070_TYPED_CONTRACT_BLOCKED`。用户于2026-07-25批准继续推进，阶段2任务
+> `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
+> `SDK_070_TYPED_CONTRACT_BLOCKED`。用户随后批准独立前置`P-B1`，最终字段裁决为
+> F04 `INCLUDED_OPTIONAL`、F01–F03与F05–F18 `EXCLUDED`；本地实现、最终门及
+> 独立审查已通过，尚未commit或push。用户于2026-07-25批准继续推进，阶段2任务
 > 2.1/2.2共同基线已落盘到
 > `data-collect/docs/sdk070-stage2-observable-and-owner-baseline.md`并完成自审；
 > `2-PM`四个小步均已完成：step 1/2/3通过实现与自审，step 4确认既有resolution
@@ -994,3 +996,117 @@ root facade及两个PM owner模块和各自测试；三份既存未跟踪RTDS草
 与远端ref一致为生效条件。本次授权不继承为`2-RTDS`、`2-REST`、阶段3或后继
 分支的commit/push授权，也不扩大typed字段决定、RTDS参数与4A/4B、公开网络smoke、
 production activation/cutover、release、部署、远端操作、migration或删除授权。
+
+## 2026-07-25：P-B/P-B1路线与single-field初始裁决
+
+Stage1闭合后，用户先批准`P-B`的SDK-first修复方向及F01–F18全部
+`EXCLUDED`，随后在实现前冲突审计中进一步冻结为`P-B1`：
+
+- vendor生产源码差异继续只有既有四个路径；nullable补丁只进入既有
+  `src/clob/ws/types/response.rs`；
+- nullable标量/文本使用`Option`，三个nullable数组使用
+  `DefaultOnNull -> empty Vec`，不得用伪默认值；
+- data-collect在current-v2 canonical/persist/claim/state之前fail closed；
+- 必要consumer、测试和三组authority文档可同步修改；
+- raw WebSocket/REST、第二parser、shadow canonicalizer、Stage3及RTDS实现均不
+  进入本分支。
+
+实现审计确认data-collect直接消费`ConnectionManager` broadcast；
+`subscribe_market_with_options`返回的filtered stream在当前collector路径会立即
+drop，所以没有新增`subscription.rs`生产patch。因
+`BookUpdate.timestamp`直接复制到`MidpointUpdate.timestamp`，两者在同一
+`response.rs`保持`Option<i64>`，没有形成第五个vendor生产源码路径。
+
+## 2026-07-25：F04从批量排除修正为nullable book快照字段
+
+用户追问`book.lastTradePrice`是否因与独立`last_trade_price`重复而被排除。重新
+核对官方类型、当前SDK和consumer后确认：
+
+- 两者指向同一“最近成交价”概念，但语义不同；F04是book快照时已知状态，独立
+  variant是订阅期间发生的成交事件并携带自己的size/side/fee/timestamp等属性；
+- F04可能在首次订阅或重连后、尚无新成交事件时提供bootstrap值，不能据此认定为
+  完全重复；但实际目标市场填充率仍未通过公开wire smoke验证；
+- 先前`EXCLUDED`只由“当时未识别executable consumer + 整批范围裁决”支持，不是
+  无价值或等价重复证明。
+
+用户据此明确把F04改为`INCLUDED_OPTIONAL`并批准继续；F01–F03与F05–F18继续
+`EXCLUDED`。实现只新增
+`BookUpdate.last_trade_price: Option<Decimal>`：missing/null保持`None`，
+present值保留到book canonical与raw-equivalent JSON，不伪造、不要求非空，也不
+合成独立成交行。为保持current-v2兼容，新key只在present时插入；missing/null旧帧
+的canonical字节、fingerprint、row及持久化语义不变。未来v3 book合同增加同名
+nullable decimal-string字段，Stage3 Rust/schema/writer仍未获授权、未实施。
+
+## 2026-07-25：P-B1实现完成，最终验证进行中
+
+当前实现已经完成：
+
+- 七类missing/null typed decode及single-object/array永久fixture；
+- current-v2完整shape前置门和target-associated resolved零写入/零claim/零状态门；
+- F04 SDK present/missing/null解码、vendor websocket stream适配，以及
+  data-collect present无损保留和missing时不改变canonical shape的直接测试；
+- F01–F03与F05–F18未加入SDK struct或consumer；没有Stage3、RTDS、公开网络或
+  production操作。
+
+F04定向结果为：vendor response fixture `1/1`、vendor websocket book
+`1/1`、data-collect book canonical/raw `2/2`通过。一次data-collect定向命令误用
+vendor的`+1.88` toolchain，依赖MSRV检查在编译前退出；改回workspace默认toolchain
+后通过，这不是代码失败。
+
+此前P-B1全门中还发生一次验证命令范围错误：
+`cargo test --all-features --all-targets`在全部测试通过后进入官方
+`clob_order_operations` criterion benchmark；benchmark使用vendor内硬编码dummy
+private key并尝试连接CLOB，连接在`127.0.0.1:443`被拒绝，没有真实credential、
+订单或成功public调用。该命令不再使用；正确替代为lib/tests/examples测试加
+all-targets check。当前游标为`P_B1_VALIDATION_IN_PROGRESS`，须完成最终静态门、
+文档同步和独立审查后才能申请发布。
+
+## 2026-07-25：P-B1最终本地门通过，等待独立审查
+
+- vendor `--all-features --lib --tests --examples`全部通过：library `193/193`，
+  websocket integration `41/41`，其余integration harness与全部example test
+  harness均为0失败；没有执行criterion benchmark；
+- vendor `--all-features --doc`为`49 passed / 20 ignored`，locked all-targets
+  check与Clippy `-D warnings`、固定nightly fmt均通过；
+- data-collect完整串行suite为`351 unit / 246 integration / 0 doctest`，全部通过；
+  locked all-targets check、Clippy `-D warnings`、workspace fmt与
+  `git diff --check`均通过；
+- P-B1后vendor相对官方registry 0.7.0仍只有四个production源码差异：
+  `src/ws/connection.rs`、`src/ws/config.rs`、
+  `src/clob/ws/types/response.rs`、`src/rtds/subscription.rs`；另有明确列出的
+  `tests/websocket.rs`和`examples/clob/ws/orderbook.rs`两个non-production
+  conformance差异，无第五个production路径；
+- 四个production文件当前SHA-256依次为
+  `90070b2bd438909a44a82209963881b4c70f755bc671ea19b13c7ee2e2d6a223`、
+  `dc68886999cfd3509c0668f403c6f8953f283f03847b5dbd6ebe6c5b72d20e2d`、
+  `9bd05887b9190449f75f5cda623a5f2e465c07033900fb1dabf89b72ab2b6aba`、
+  `4e2174a4dcb0e18ad5baf2914ec3270cbff5923915e6dc39ed7f04174fa10e7b`；
+- 三份既存未跟踪RTDS草案继续未修改、未暂存、未删除；没有Stage3、2-RTDS、
+  public smoke、commit、push或远端操作。
+
+主代理自审确认F04 missing/null不改变旧canonical shape，present值只保留为book
+快照字段；current-v2 gate仍在canonical/persist/claim/state之前，F01–F03与
+F05–F18仍无新增typed field。当前游标更新为
+`P_B1_BRANCH_CLOSE_GATES_PASSED_REVIEW_PENDING`；下一动作仅为
+`gpt-5.6-sol` / `ultra`独立全面审查。
+
+## 2026-07-25：P-B1独立审查通过，等待发布授权
+
+按阶段门派出的`gpt-5.6-sol` / `ultra`只读独立审查结论为`PASS`：
+
+- Critical：0；
+- Important：0；
+- Minor：0；
+- 无可执行问题。
+
+审查确认：七类nullable typed修复与三个`DefaultOnNull`数组符合批准矩阵；
+current-v2 gate位于canonical、持久化、claim和业务状态变化之前，且没有把
+`MarketResolved`原本nullable的question/slug/description/outcomes新增为必填；
+F04只作为optional book快照字段条件保留，没有合成独立成交事件；F01–F03与
+F05–F18仍为`EXCLUDED`；vendor差异仍为四个production路径和两个明确的
+non-production conformance路径；三份未跟踪RTDS草案仍未修改或暂存。
+
+剩余非阻断风险为public smoke仍是`NOT_AUTHORIZED / NOT_RUN`，因此F04在真实
+首次订阅和重连book中的填充率未知。当前游标更新为
+`P_B1_REVIEW_PASSED_AWAITING_PUBLISH`。尚未创建commit或push；
+`P_B1_CLOSED`须在用户另行授权并完成commit、push与ref核对后才能成立。

@@ -134,10 +134,13 @@ async fn smoke_market_ws(
 
     match timeout(event_timeout, stream.next()).await {
         Ok(Some(Ok(book))) => {
+            let source_ts = book
+                .timestamp
+                .map_or_else(|| "null".to_owned(), |timestamp| timestamp.to_string());
             println!(
                 "market_ws_business_message=PASS event_type=book asset_id={} source_ts={} bids={} asks={} recv_time_utc_ms={}",
                 book.asset_id,
-                book.timestamp,
+                source_ts,
                 book.bids.len(),
                 book.asks.len(),
                 now_ms()

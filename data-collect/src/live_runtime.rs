@@ -14368,9 +14368,9 @@ fn owned_polymarket_message_bytes(message: &WsMessage) -> usize {
             ),
         WsMessage::NewMarket(event) => base
             .saturating_add(event.id.capacity())
-            .saturating_add(event.question.capacity())
-            .saturating_add(event.slug.capacity())
-            .saturating_add(event.description.capacity())
+            .saturating_add(event.question.as_ref().map_or(0, String::capacity))
+            .saturating_add(event.slug.as_ref().map_or(0, String::capacity))
+            .saturating_add(event.description.as_ref().map_or(0, String::capacity))
             .saturating_add(
                 event
                     .asset_ids
@@ -14396,7 +14396,7 @@ fn owned_polymarket_message_bytes(message: &WsMessage) -> usize {
                     .saturating_mul(std::mem::size_of::<U256>()),
             )
             .saturating_add(owned_string_vec_bytes(&event.outcomes))
-            .saturating_add(event.winning_outcome.capacity())
+            .saturating_add(event.winning_outcome.as_ref().map_or(0, String::capacity))
             .saturating_add(
                 event
                     .event_message
@@ -14424,10 +14424,10 @@ fn owned_polymarket_event_message_bytes(message: &EventMessage) -> usize {
     message
         .id
         .capacity()
-        .saturating_add(message.ticker.capacity())
-        .saturating_add(message.slug.capacity())
-        .saturating_add(message.title.capacity())
-        .saturating_add(message.description.capacity())
+        .saturating_add(message.ticker.as_ref().map_or(0, String::capacity))
+        .saturating_add(message.slug.as_ref().map_or(0, String::capacity))
+        .saturating_add(message.title.as_ref().map_or(0, String::capacity))
+        .saturating_add(message.description.as_ref().map_or(0, String::capacity))
 }
 
 fn training_dataset_size_bytes(dataset_root: &Path) -> io::Result<u64> {
@@ -31101,7 +31101,7 @@ mod tests {
             source_kind: "polymarket_market".to_owned(),
             source_event_type: "price_change".to_owned(),
             source_identifier: format!("{}:101", discovery.current.slug),
-            source_ts: Some(event.timestamp.to_string()),
+            source_ts: event.timestamp.map(|timestamp| timestamp.to_string()),
             recv_time_utc_ms: now_ms(),
             collector_host_id: "collector-a".to_owned(),
             collector_region: "test".to_owned(),

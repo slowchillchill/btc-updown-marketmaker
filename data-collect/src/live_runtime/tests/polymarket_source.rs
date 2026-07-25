@@ -1462,6 +1462,71 @@ async fn polymarket_qualified_market_resolved_before_e_is_not_lost() {
 }
 
 #[tokio::test]
+async fn polymarket_current_v2_missing_resolved_winner_fails_before_row_claim_or_state() {
+    let discovery = test_btc_discovery();
+    let current = discovery.current.clone();
+    let received_at_utc_ms = current.end_ts_s * 1_000 - 1;
+    let collector_identity = CollectorIdentity {
+        host_id: "collector-test".to_owned(),
+        region: "local-test".to_owned(),
+    };
+    let mut context = PolymarketProcessingContext::new(discovery);
+    context.actor_now_utc_ms = received_at_utc_ms;
+    let stats = Arc::new(SourceQueueBackpressureStats::default());
+    install_active_raw_day_gate(&stats, received_at_utc_ms).await;
+    let (tx, mut rx) = mpsc::channel(2);
+    let sink = SourceEventSink {
+        tx,
+        gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+        source_queue_backpressure: stats,
+        inflight_budget: InflightBudget::new(),
+        enqueue_lock: Arc::new(AsyncMutex::new(())),
+    };
+    let event = match serde_json::from_value::<WsMessage>(json!({
+        "id": current.id,
+        "market": current.condition_id,
+        "slug": current.slug,
+        "assets_ids": [current.up_asset_id, current.down_asset_id],
+        "outcomes": ["Up", "Down"],
+        "winning_asset_id": null,
+        "winning_outcome": "Up",
+        "timestamp": received_at_utc_ms.to_string(),
+        "event_type": "market_resolved"
+    }))
+    .unwrap()
+    {
+        WsMessage::MarketResolved(event) => event,
+        _ => panic!("expected market_resolved message"),
+    };
+
+    let error = process_polymarket_market_resolved(
+        &event,
+        received_at_utc_ms,
+        &mut context,
+        &sink,
+        &collector_identity,
+        Instant::now(),
+        accepted_raw_day_ticket_for_test(received_at_utc_ms).await,
+    )
+    .await
+    .expect_err("missing target winner must fail before current-v2 persistence");
+
+    assert!(
+        error
+            .to_string()
+            .contains("polymarket_current_v2_typed_shape_missing_required_fields:event_type=market_resolved:fields=winning_asset_id"),
+        "{error}"
+    );
+    assert!(rx.try_recv().is_err());
+    assert!(context.early_ws_claims.is_empty());
+    assert!(context.pending.is_empty());
+    assert_eq!(
+        context.current.as_ref().map(|market| market.slug.as_str()),
+        Some(current.slug.as_str())
+    );
+}
+
+#[tokio::test]
 async fn polymarket_ws_claim_waits_for_completed_gamma_before_fence() {
     let discovery = test_btc_discovery();
     let identity = PendingPolymarketIdentity::from_discovered(&discovery.current).unwrap();
@@ -6919,7 +6984,7 @@ async fn polymarket_fast_drain_absorbs_five_thousand_message_burst_in_fifo_order
         let WsMessage::Book(book) = message.message else {
             panic!("expected book event");
         };
-        assert_eq!(book.timestamp, expected_timestamp);
+        assert_eq!(book.timestamp, Some(expected_timestamp));
     }
 
     let request = runtime.request_fence(true).await.unwrap();
@@ -7054,7 +7119,7 @@ async fn polymarket_fast_drain_fence_separates_before_and_after_messages() {
             None => {}
         }
     }
-    assert_eq!(before, vec![1, 2]);
+    assert_eq!(before, vec![Some(1), Some(2)]);
 
     send_after_tx.send(()).unwrap();
     let after = timeout(Duration::from_secs(2), async {
@@ -7071,7 +7136,7 @@ async fn polymarket_fast_drain_fence_separates_before_and_after_messages() {
     let WsMessage::Book(book) = &after.message else {
         panic!("expected book event");
     };
-    assert_eq!(book.timestamp, 3);
+    assert_eq!(book.timestamp, Some(3));
     drop(after);
     let request = runtime.request_fence(true).await.unwrap();
     let PolymarketFenceRequest::Queued(stop_id) = request else {
@@ -7198,7 +7263,7 @@ async fn polymarket_paused_fence_holds_post_marker_messages_until_role_exit_rele
             None => {}
         }
     }
-    assert_eq!(before, vec![1]);
+    assert_eq!(before, vec![Some(1)]);
 
     send_after_tx.send(()).unwrap();
     assert!(
@@ -7224,7 +7289,7 @@ async fn polymarket_paused_fence_holds_post_marker_messages_until_role_exit_rele
     let WsMessage::Book(book) = after.message else {
         panic!("expected book event")
     };
-    assert_eq!(book.timestamp, 2);
+    assert_eq!(book.timestamp, Some(2));
     runtime.abort_pump_and_wait().await;
     server.abort();
 }
@@ -7336,7 +7401,7 @@ async fn polymarket_fast_drain_fence_is_bounded_during_a_continuous_stream() {
     assert!(!after.is_empty());
     assert_eq!(
         before.iter().chain(&after).copied().collect::<Vec<_>>(),
-        (0..2_000_i64).collect::<Vec<_>>()
+        (0..2_000_i64).map(Some).collect::<Vec<_>>()
     );
 
     let PolymarketFenceRequest::Queued(stop_id) = runtime.request_fence(true).await.unwrap() else {
@@ -7459,7 +7524,7 @@ async fn polymarket_fence_cannot_hide_a_terminal_already_present_at_its_snapshot
         let WsMessage::Book(book) = message.message else {
             panic!("expected book event");
         };
-        assert_eq!(book.timestamp, expected_timestamp);
+        assert_eq!(book.timestamp, Some(expected_timestamp));
     }
     assert!(matches!(
         event_rx.recv().await,

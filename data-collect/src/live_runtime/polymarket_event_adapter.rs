@@ -51,20 +51,26 @@ fn polymarket_event_message_json(
 
 pub(super) fn polymarket_source_native_payload_json(message: &WsMessage) -> Result<Option<String>> {
     let value = match message {
-        WsMessage::Book(event) => json!({
-            "source": "polymarket_market",
-            "event_type": "book",
-            "market": event.market.to_string(),
-            "asset_id": event.asset_id.to_string(),
-            "timestamp": event.timestamp,
-            "bids": event.bids.iter().map(|level| {
-                json!([level.price.to_string(), level.size.to_string()])
-            }).collect::<Vec<_>>(),
-            "asks": event.asks.iter().map(|level| {
-                json!([level.price.to_string(), level.size.to_string()])
-            }).collect::<Vec<_>>(),
-            "hash": event.hash,
-        }),
+        WsMessage::Book(event) => {
+            let mut value = json!({
+                "source": "polymarket_market",
+                "event_type": "book",
+                "market": event.market.to_string(),
+                "asset_id": event.asset_id.to_string(),
+                "timestamp": event.timestamp,
+                "bids": event.bids.iter().map(|level| {
+                    json!([level.price.to_string(), level.size.to_string()])
+                }).collect::<Vec<_>>(),
+                "asks": event.asks.iter().map(|level| {
+                    json!([level.price.to_string(), level.size.to_string()])
+                }).collect::<Vec<_>>(),
+                "hash": event.hash,
+            });
+            if let Some(last_trade_price) = event.last_trade_price {
+                value["last_trade_price"] = Value::String(last_trade_price.to_string());
+            }
+            value
+        }
         WsMessage::PriceChange(event) => json!({
             "source": "polymarket_market",
             "event_type": "price_change",
@@ -85,7 +91,7 @@ pub(super) fn polymarket_source_native_payload_json(message: &WsMessage) -> Resu
             "event_type": "tick_size_change",
             "market": event.market.to_string(),
             "asset_id": event.asset_id.to_string(),
-            "old_tick_size": event.old_tick_size.to_string(),
+            "old_tick_size": event.old_tick_size.as_ref().map(ToString::to_string),
             "new_tick_size": event.new_tick_size.to_string(),
             "timestamp": event.timestamp,
         }),
@@ -105,9 +111,9 @@ pub(super) fn polymarket_source_native_payload_json(message: &WsMessage) -> Resu
             "event_type": "best_bid_ask",
             "market": event.market.to_string(),
             "asset_id": event.asset_id.to_string(),
-            "best_bid": event.best_bid.to_string(),
-            "best_ask": event.best_ask.to_string(),
-            "spread": event.spread.to_string(),
+            "best_bid": event.best_bid.as_ref().map(ToString::to_string),
+            "best_ask": event.best_ask.as_ref().map(ToString::to_string),
+            "spread": event.spread.as_ref().map(ToString::to_string),
             "timestamp": event.timestamp,
         }),
         WsMessage::NewMarket(event) => json!({
@@ -133,7 +139,7 @@ pub(super) fn polymarket_source_native_payload_json(message: &WsMessage) -> Resu
             "description": event.description,
             "asset_ids": event.asset_ids.iter().map(ToString::to_string).collect::<Vec<_>>(),
             "outcomes": event.outcomes,
-            "winning_asset_id": event.winning_asset_id.to_string(),
+            "winning_asset_id": event.winning_asset_id.as_ref().map(ToString::to_string),
             "winning_outcome": event.winning_outcome,
             "event_message": event.event_message.as_ref().map(polymarket_event_message_json),
             "timestamp": event.timestamp,
@@ -144,7 +150,121 @@ pub(super) fn polymarket_source_native_payload_json(message: &WsMessage) -> Resu
     Ok(Some(serde_json::to_string(&value)?))
 }
 
+fn require_current_v2_polymarket_shape(message: &WsMessage) -> Result<()> {
+    let (event_type, missing_fields) = match message {
+        WsMessage::Book(event) => (
+            "book",
+            [("timestamp", event.timestamp.is_none())]
+                .into_iter()
+                .filter_map(|(field, missing)| missing.then_some(field))
+                .collect::<Vec<_>>(),
+        ),
+        WsMessage::PriceChange(event) => (
+            "price_change",
+            [("timestamp", event.timestamp.is_none())]
+                .into_iter()
+                .filter_map(|(field, missing)| missing.then_some(field))
+                .collect::<Vec<_>>(),
+        ),
+        WsMessage::LastTradePrice(event) => (
+            "last_trade_price",
+            [("timestamp", event.timestamp.is_none())]
+                .into_iter()
+                .filter_map(|(field, missing)| missing.then_some(field))
+                .collect::<Vec<_>>(),
+        ),
+        WsMessage::TickSizeChange(event) => (
+            "tick_size_change",
+            [
+                ("old_tick_size", event.old_tick_size.is_none()),
+                ("timestamp", event.timestamp.is_none()),
+            ]
+            .into_iter()
+            .filter_map(|(field, missing)| missing.then_some(field))
+            .collect::<Vec<_>>(),
+        ),
+        WsMessage::BestBidAsk(event) => (
+            "best_bid_ask",
+            [
+                ("best_bid", event.best_bid.is_none()),
+                ("best_ask", event.best_ask.is_none()),
+                ("spread", event.spread.is_none()),
+                ("timestamp", event.timestamp.is_none()),
+            ]
+            .into_iter()
+            .filter_map(|(field, missing)| missing.then_some(field))
+            .collect::<Vec<_>>(),
+        ),
+        WsMessage::NewMarket(event) => {
+            let mut missing_fields = [
+                ("question", event.question.is_none()),
+                ("slug", event.slug.is_none()),
+                ("description", event.description.is_none()),
+                ("asset_ids", event.asset_ids.is_empty()),
+                ("outcomes", event.outcomes.is_empty()),
+                ("timestamp", event.timestamp.is_none()),
+            ]
+            .into_iter()
+            .filter_map(|(field, missing)| missing.then_some(field))
+            .collect::<Vec<_>>();
+            if let Some(event_message) = &event.event_message {
+                missing_fields.extend(
+                    [
+                        ("event_message.ticker", event_message.ticker.is_none()),
+                        ("event_message.slug", event_message.slug.is_none()),
+                        ("event_message.title", event_message.title.is_none()),
+                        (
+                            "event_message.description",
+                            event_message.description.is_none(),
+                        ),
+                    ]
+                    .into_iter()
+                    .filter_map(|(field, missing)| missing.then_some(field)),
+                );
+            }
+            ("new_market", missing_fields)
+        }
+        WsMessage::MarketResolved(event) => {
+            let mut missing_fields = [
+                ("asset_ids", event.asset_ids.is_empty()),
+                ("winning_asset_id", event.winning_asset_id.is_none()),
+                ("winning_outcome", event.winning_outcome.is_none()),
+                ("timestamp", event.timestamp.is_none()),
+            ]
+            .into_iter()
+            .filter_map(|(field, missing)| missing.then_some(field))
+            .collect::<Vec<_>>();
+            if let Some(event_message) = &event.event_message {
+                missing_fields.extend(
+                    [
+                        ("event_message.ticker", event_message.ticker.is_none()),
+                        ("event_message.slug", event_message.slug.is_none()),
+                        ("event_message.title", event_message.title.is_none()),
+                        (
+                            "event_message.description",
+                            event_message.description.is_none(),
+                        ),
+                    ]
+                    .into_iter()
+                    .filter_map(|(field, missing)| missing.then_some(field)),
+                );
+            }
+            ("market_resolved", missing_fields)
+        }
+        _ => return Ok(()),
+    };
+    if missing_fields.is_empty() {
+        return Ok(());
+    }
+    Err(invalid_data(format!(
+        "polymarket_current_v2_typed_shape_missing_required_fields:event_type={event_type}:fields={}",
+        missing_fields.join(",")
+    ))
+    .into())
+}
+
 pub(super) fn prepare_polymarket_message(message: &WsMessage) -> Result<Option<String>> {
+    require_current_v2_polymarket_shape(message)?;
     let Some(source_native_payload_json) = polymarket_source_native_payload_json(message)? else {
         return Ok(None);
     };
@@ -187,7 +307,7 @@ where
                 "polymarket_market",
                 "best_bid_ask",
                 &format!("{slug}:{}", event.asset_id),
-                Some(event.timestamp.to_string()),
+                event.timestamp.map(|timestamp| timestamp.to_string()),
                 recv_time_utc_ms,
                 MARKET_WS_ENDPOINT,
                 collector_identity,
@@ -197,9 +317,9 @@ where
                         "market": event.market.to_string(),
                         "asset_id": asset_id,
                         "slug": slug,
-                        "best_bid": event.best_bid.to_string(),
-                        "best_ask": event.best_ask.to_string(),
-                        "spread": event.spread.to_string(),
+                        "best_bid": event.best_bid.as_ref().map(ToString::to_string),
+                        "best_ask": event.best_ask.as_ref().map(ToString::to_string),
+                        "spread": event.spread.as_ref().map(ToString::to_string),
                         "timestamp": event.timestamp
                     }),
                     source_native_payload_json,
@@ -222,7 +342,7 @@ where
                 "polymarket_market",
                 "book",
                 &format!("{slug}:{}", event.asset_id),
-                Some(event.timestamp.to_string()),
+                event.timestamp.map(|timestamp| timestamp.to_string()),
                 recv_time_utc_ms,
                 MARKET_WS_ENDPOINT,
                 collector_identity,
@@ -252,7 +372,7 @@ where
                     "polymarket_market",
                     "price_change",
                     &format!("{slug}:{asset_id}"),
-                    Some(row_event.timestamp.to_string()),
+                    row_event.timestamp.map(|timestamp| timestamp.to_string()),
                     recv_time_utc_ms,
                     MARKET_WS_ENDPOINT,
                     collector_identity,
@@ -279,7 +399,7 @@ where
                 "polymarket_market",
                 "last_trade_price",
                 &format!("{slug}:{asset_id}"),
-                Some(event.timestamp.to_string()),
+                event.timestamp.map(|timestamp| timestamp.to_string()),
                 recv_time_utc_ms,
                 MARKET_WS_ENDPOINT,
                 collector_identity,
@@ -305,7 +425,7 @@ where
                 "polymarket_market",
                 "tick_size_change",
                 &format!("{slug}:{asset_id}"),
-                Some(event.timestamp.to_string()),
+                event.timestamp.map(|timestamp| timestamp.to_string()),
                 recv_time_utc_ms,
                 MARKET_WS_ENDPOINT,
                 collector_identity,
@@ -316,11 +436,16 @@ where
             ))?;
         }
         WsMessage::NewMarket(event) => {
+            let slug = event.slug.as_deref().ok_or_else(|| {
+                invalid_data(
+                    "polymarket_current_v2_typed_shape_missing_required_fields:event_type=new_market:fields=slug",
+                )
+            })?;
             let Some((_verified_market, matched_assets)) = verify_target_market_identity(
                 discovery,
                 &event.id,
                 &event.market.to_string(),
-                Some(event.slug.as_str()),
+                Some(slug),
                 &event.asset_ids,
                 Some(&event.outcomes),
                 None,
@@ -337,8 +462,8 @@ where
             emit(raw_event_with_recv_time(
                 "polymarket_market",
                 "new_market",
-                &event.slug,
-                Some(event.timestamp.to_string()),
+                slug,
+                event.timestamp.map(|timestamp| timestamp.to_string()),
                 recv_time_utc_ms,
                 MARKET_WS_ENDPOINT,
                 collector_identity,
@@ -1214,7 +1339,7 @@ pub(super) fn with_polymarket_row_context(
 }
 
 pub(super) fn polymarket_book_raw_json(event: &BookUpdate, slug: &str) -> Value {
-    json!({
+    let mut value = json!({
         "event_type": "book",
         "market": event.market.to_string(),
         "asset_id": event.asset_id.to_string(),
@@ -1231,7 +1356,11 @@ pub(super) fn polymarket_book_raw_json(event: &BookUpdate, slug: &str) -> Value 
             .map(|level| json!([level.price.to_string(), level.size.to_string()]))
             .collect::<Vec<_>>(),
         "hash": event.hash,
-    })
+    });
+    if let Some(last_trade_price) = event.last_trade_price {
+        value["last_trade_price"] = Value::String(last_trade_price.to_string());
+    }
+    value
 }
 
 pub(super) fn polymarket_price_change_raw_json(
@@ -1282,7 +1411,7 @@ pub(super) fn polymarket_tick_size_change_raw_json(event: &TickSizeChange, slug:
         "market": event.market.to_string(),
         "asset_id": event.asset_id.to_string(),
         "slug": slug,
-        "old_tick_size": event.old_tick_size.to_string(),
+        "old_tick_size": event.old_tick_size.as_ref().map(ToString::to_string),
         "new_tick_size": event.new_tick_size.to_string(),
         "timestamp": event.timestamp,
     })
@@ -1333,7 +1462,7 @@ pub(super) fn polymarket_market_resolved_raw_json(event: &MarketResolved) -> Val
         "asset_ids": asset_ids,
         "resolved_event_asset_ids": asset_ids,
         "outcomes": event.outcomes,
-        "winning_asset_id": event.winning_asset_id.to_string(),
+        "winning_asset_id": event.winning_asset_id.as_ref().map(ToString::to_string),
         "winning_outcome": event.winning_outcome,
         "close_reason_if_present": Value::Null,
         "event_message": event.event_message.as_ref().map(|message| {

@@ -69,9 +69,10 @@ async fn main() -> anyhow::Result<()> {
                     endpoint = "orderbook",
                     asset_id = %book.asset_id,
                     market = %book.market,
-                    timestamp = %book.timestamp,
+                    timestamp = ?book.timestamp,
                     bids = book.bids.len(),
-                    asks = book.asks.len()
+                    asks = book.asks.len(),
+                    last_trade_price = ?book.last_trade_price
                 );
 
                 for (i, bid) in book.bids.iter().take(5).enumerate() {

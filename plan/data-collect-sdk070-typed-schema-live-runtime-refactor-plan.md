@@ -8,11 +8,13 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_EXECUTION_STAGE_2_IN_PROGRESS`。阶段0已以commit
+> 状态：`APPROVED_EXECUTION_P_B1_REVIEW_PASSED_AWAITING_PUBLISH`。阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
-> `SDK_070_RUNTIME_USABLE`，typed contract为
-> `SDK_070_TYPED_CONTRACT_BLOCKED`。用户于2026-07-25批准继续推进，阶段2任务
+> `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
+> `SDK_070_TYPED_CONTRACT_BLOCKED`。用户随后批准独立前置`P-B1`，最终字段裁决为
+> F04 `INCLUDED_OPTIONAL`、F01–F03与F05–F18 `EXCLUDED`；本地实现、最终门及
+> 独立审查已通过，尚未commit或push。用户于2026-07-25批准继续推进，阶段2任务
 > 2.1/2.2共同基线已落盘到
 > `data-collect/docs/sdk070-stage2-observable-and-owner-baseline.md`并完成自审；
 > `2-PM`四个小步均已完成：step 1/2/3通过实现与自审，step 4确认既有resolution
@@ -31,7 +33,7 @@
 ```text
 共同基线 / authority delta matrix
   ├─ SDK 0.7 runtime验证
-  │    ├─ 2-PM分支收口 + typed字段决定 -> v3 -> v3集成验证
+  │    ├─ 2-PM分支收口 + P-B1闭合 -> v3 -> v3集成验证
   │    └─ 2-RTDS分支收口 + RTDS参数/authority批准 -> RTDS专项
   └─ 2-REST其余行为保持模块拆分与删除证据审计
 ```
@@ -336,11 +338,63 @@ bench；bench只做compile check，真实smoke另受任务1.5约束。
 
 审查通过先记`2-REST_REVIEW_PASSED_AWAITING_PUBLISH`，获授权并完成commit/push后才记`2-REST_CLOSED`。`2-REST`不阻断阶段3或阶段4。三个分支均禁止test consolidation、死代码清理、generic source/actor/plugin framework和直接套用历史remote branch patch；发现语义漂移时回退对应小步，不用新测试接受漂移。
 
+## 四-A、独立前置 P-B1：SDK typed/nullability compatibility
+
+本前置在Stage1闭合后独立执行，不回写Stage1历史结论，不属于Stage2 owner迁移，也
+不等于Stage3授权。生产vendor差异路径仍只能是既有四个，其中本前置的typed修改只
+落在既有`src/clob/ws/types/response.rs`；必要的vendor tests/example适配单列为
+non-production conformance路径。
+
+### 任务 PB.1：修复typed decode并冻结字段裁决
+
+- 步骤 PB.1.1：把七类官方允许missing/null但SDK 0.7要求非空的标量/文本改为
+  `Option`；三个批准数组保持`DefaultOnNull -> empty Vec`，并让直接复制
+  `BookUpdate.timestamp`的`MidpointUpdate.timestamp`保持同型。
+  -> 验证：missing object、null object、`[missing object]`和`[null object]`
+  全部通过真实`parse_if_interested(..., MessageInterest::ALL)`返回恰好一条正确
+  variant；不得增加第五个vendor生产源码路径、第二parser或伪默认值。
+- 步骤 PB.1.2：按最终字段矩阵实现F04
+  `BookUpdate.last_trade_price: Option<Decimal>`；F01–F03与F05–F18保持
+  `EXCLUDED`。
+  -> 验证：F04 missing/null为`None`，present decimal文本无损解码；它只表示book
+  快照状态，不转换为独立`last_trade_price`成交事件。其余排除字段在SDK struct和
+  未来v3字段矩阵中均不存在。
+
+### 任务 PB.2：保持current-v2行为边界
+
+- 步骤 PB.2.1：在canonical payload、fingerprint、row、terminal claim及业务状态
+  变化前，对P-B1前由SDK parser强制完整、current-v2仍要求完整的shape fail closed。
+  -> 验证：七类nullable负例在任何写入/claim/state变化前失败；不得把P-B1前已经
+  nullable的`MarketResolved.question/slug/description/outcomes`误加为必填。
+- 步骤 PB.2.2：F04有值时只把其decimal文本加入book canonical与raw-equivalent
+  JSON；missing/null时省略该新key。
+  -> 验证：F04 present可从持久化evidence恢复；missing/null的旧完整fixture保持
+  原canonical字节、fingerprint、target admission、row与持久化语义，不合成成交行。
+
+### 任务 PB.3：验证、独立审查与发布门
+
+- 步骤 PB.3.1：运行vendor lib/tests/examples与doc测试、all-targets check、
+  all-targets Clippy `-D warnings`、固定nightly fmt；运行data-collect完整串行suite、
+  all-targets check/Clippy、workspace fmt和diff check。
+  -> 验证：只记录真实命令和结果；不得用会执行联网criterion benchmark的
+  `cargo test --all-targets`替代tests/examples与all-targets check。公开wire smoke
+  未授权则保持`NOT_AUTHORIZED / NOT_RUN`，不得把optional typed支持写成实际填充率。
+- 步骤 PB.3.2：主代理自审完整diff后，派生独立
+  `gpt-5.6-sol` / `ultra`审查代码、测试、四路径边界、F矩阵、current-v2 gate及
+  demand/plan/changelog/阶段证据一致性。
+  -> 验证：Critical/Important必须修复并复审；无待处理问题后只记
+  `P_B1_REVIEW_PASSED_AWAITING_PUBLISH`。
+- 步骤 PB.3.3：只有用户另行批准才创建P-B1 closure commit并push。
+  -> 验证：本地HEAD、upstream与`origin/fix-rtds-silents`一致后才记
+  `P_B1_CLOSED`并把typed终态切换为
+  `SDK_070_TYPED_CONTRACT_NONBLOCKING_GAPS_APPROVED`；该状态只解除Stage3 typed
+  前置，不等于Stage3已授权。
+
 ## 五、阶段 3：`polymarket_orderbook_v3` typed message
 
 ### 任务 3.0：同步 typed authority
 
-- 步骤 3.0.1：确认阶段 1 runtime门通过、`2-PM_CLOSED`、typed-contract终态允许继续、用户已批准最终 v3字段矩阵并单独授权阶段 3。
+- 步骤 3.0.1：确认阶段 1 runtime门通过、`2-PM_CLOSED`、`P_B1_CLOSED`、typed-contract终态允许继续、用户已批准最终 v3字段矩阵并单独授权阶段 3。
   -> 验证：任何已知gap未获逐项决定或任一必需字段缺失时停止，不修改authority或代码；metadata v4版本合同已经批准，不再作为待决项，但其Rust/schema/test实施仍须包含在阶段3单独授权内。
 - 步骤 3.0.2：复核已经单独同步的`market_resolved` v3 validate-first与metadata v4 claimant/原子activation文档条款，再只同步需求3.2所列其余payload/fingerprint/v2 raw projection现行authority，保留旧changelog。
   -> 验证：不得把已批准的validate-first或metadata v4版本合同重新置为待决，也不得把其文档同步冒充Rust/schema/test实施；其余authority diff逐条对应届时已批准delta matrix，不修改RTDS相反authority或`HandoffFrame v1.raw_json`合同，不混入Rust/Cargo/schema。
@@ -349,8 +403,8 @@ bench；bench只做compile check，真实smoke另受任务1.5约束。
 
 ### 任务 3.1：测试先行冻结 v3 schema
 
-- 步骤 3.1.1：复用阶段1已经由官方文档约束的missing/null parser fixtures，并为七类可被SDK typed API接纳的public market variant建立target-admitted golden fixtures。
-  -> 验证：parser gap不会被v3测试伪装成nullable row；可接纳fixture覆盖空/多元素数组、decimal文本、event message、terminal fields，以及含目标/非目标entries的mixed `PriceChange`。
+- 步骤 3.1.1：复用P-B1长期保留的missing/null parser fixtures，并为七类可被SDK typed API接纳的public market variant建立target-admitted golden fixtures。
+  -> 验证：parser gap不会被v3测试伪装成nullable row；可接纳fixture覆盖空/多元素数组、decimal文本、F04 nullable book快照状态、event message、terminal fields，以及含目标/非目标entries的mixed `PriceChange`。
 - 步骤 3.1.2：写失败测试，要求 v3 schema没有 `source_native_payload_json` / venue `hash`，并使用 nested Arrow types。
   -> 验证：旧 writer应失败或只写 v2，测试不先改实现。
 - 步骤 3.1.3：写 `PriceChange` 一条 target-admitted projection一行、list顺序和 round-trip测试。
@@ -535,7 +589,10 @@ git diff --check
 
 本总计划采用分支终态汇总，不设一个会让独立分支互相重跑或阻断的总回归门：
 
-- SDK分支记录`RUNTIME_USABLE/NOT_USABLE`和独立typed-contract终态；
+- SDK分支记录`RUNTIME_USABLE/NOT_USABLE`；P-B1通过独立审查、另行发布并核对ref后
+  才记录独立typed-contract终态
+  `SDK_070_TYPED_CONTRACT_NONBLOCKING_GAPS_APPROVED`，否则保持真实pending/blocked
+  状态；
 - 2-PM/v3分支只有在两列/fan-out删除、metadata v4、当前消费语义、resolution、canonical round-trip、storage和资源门通过并发布后才记完成；`NONBLOCKING_FUTURE_SPEC`只作为附件状态汇报，不成为完成硬门。typed-contract或metadata v4 implementation/validation阻断时，只记对应v3/v4子路径阻断；
 - 2-RTDS与2-REST分别按自身review/publish状态结项；root模块化只在2-REST验收；
 - cleanup分支独立维护两类删除台账和证据；

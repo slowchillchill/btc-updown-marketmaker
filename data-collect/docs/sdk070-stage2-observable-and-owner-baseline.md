@@ -587,3 +587,19 @@ hash保持不变。
 diff门后，同一独立审查最小复审以Critical/Important/Minor均为0通过。当前游标为
 `2-PM_CLOSED`，以承载本状态的closure commit成功推送且本地HEAD、upstream与
 远端ref一致为生效条件。
+
+## 17. P-B1独立前置handoff
+
+P-B1是Stage1闭合后的SDK typed/nullability前置，不属于Stage2 owner迁移。本节
+不改变第1至16节的`2-PM`实现、测试、LOC、symbol、审查或closure事实。
+
+- 最终字段裁决为F04 `book.lastTradePrice = INCLUDED_OPTIONAL`，F01–F03与
+  F05–F18 `EXCLUDED`；
+- P-B1只扩展既有vendor `response.rs`生产patch及必要conformance/consumer测试，
+  没有把typed修复混入PM owner边界；
+- `2-PM_CLOSED`继续成立；共享dispatcher、writer、resolution recovery owner和
+  current source v2 + metadata v3组合保持不变；
+- P-B1最终本地门及独立审查已通过
+  （`PASS, Critical 0 / Important 0 / Minor 0`），尚未commit/push，故
+  `P_B1_CLOSED`尚未成立；
+- `2-RTDS`未因P-B1启动，Stage3也仍未获单独授权。

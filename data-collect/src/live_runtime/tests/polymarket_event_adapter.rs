@@ -31,6 +31,7 @@ fn polymarket_book_raw_event_keeps_full_depth_not_lengths() {
             "timestamp": "1783392404599",
             "bids": [{"price": "0.49", "size": "120.5"}],
             "asks": [{"price": "0.51", "size": "88"}],
+            "last_trade_price": "0.50",
             "hash": "book-hash"
         }"#,
     )
@@ -39,6 +40,14 @@ fn polymarket_book_raw_event_keeps_full_depth_not_lengths() {
         panic!("expected book message");
     };
 
+    let canonical = polymarket_source_native_payload_json(&WsMessage::Book(book.clone()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&canonical).unwrap()["last_trade_price"],
+        "0.50"
+    );
+
     let raw = polymarket_book_raw_json(&book, "btc-updown-5m-1783392300");
 
     assert_eq!(raw["event_type"], "book");
@@ -46,8 +55,29 @@ fn polymarket_book_raw_event_keeps_full_depth_not_lengths() {
     assert_eq!(raw["bids"][0][1], "120.5");
     assert_eq!(raw["asks"][0][0], "0.51");
     assert_eq!(raw["asks"][0][1], "88");
+    assert_eq!(raw["last_trade_price"], "0.50");
     assert!(raw.get("bids_len").is_none());
     assert!(raw.get("asks_len").is_none());
+}
+
+#[test]
+fn polymarket_book_canonical_omits_missing_optional_last_trade_price() {
+    let message = serde_json::from_str::<WsMessage>(
+        r#"{
+            "event_type": "book",
+            "asset_id": "106585164761922456203746651621390029417453862034640469075081961934906147433548",
+            "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "timestamp": "1783392404599",
+            "bids": [],
+            "asks": []
+        }"#,
+    )
+    .unwrap();
+
+    let canonical = polymarket_source_native_payload_json(&message)
+        .unwrap()
+        .unwrap();
+    assert!(!canonical.contains("last_trade_price"));
 }
 
 #[test]
@@ -480,12 +510,97 @@ fn polymarket_source_native_canonical_covers_every_market_variant() {
 
     for (event_type, raw) in cases {
         let message = serde_json::from_str::<WsMessage>(raw).unwrap();
-        let canonical = polymarket_source_native_payload_json(&message)
-            .unwrap()
-            .unwrap();
+        let canonical = prepare_polymarket_message(&message).unwrap().unwrap();
         let value = serde_json::from_str::<Value>(&canonical).unwrap();
         assert_eq!(value["source"], "polymarket_market");
         assert_eq!(value["event_type"], event_type);
+    }
+}
+
+#[test]
+fn polymarket_current_v2_rejects_sdk_nullable_shapes_before_canonicalization() {
+    let cases: [(&str, &[&str], &str); 7] = [
+        (
+            "book",
+            &["timestamp"],
+            r#"{"event_type":"book","market":"0x0000000000000000000000000000000000000000000000000000000000000002","asset_id":"101","timestamp":null,"bids":[],"asks":[]}"#,
+        ),
+        (
+            "price_change",
+            &["timestamp"],
+            r#"{"event_type":"price_change","market":"0x0000000000000000000000000000000000000000000000000000000000000002","price_changes":[{"asset_id":"101","price":"0.50","size":"10","side":"BUY"}]}"#,
+        ),
+        (
+            "last_trade_price",
+            &["timestamp"],
+            r#"{"event_type":"last_trade_price","market":"0x0000000000000000000000000000000000000000000000000000000000000002","asset_id":"101","price":"0.50","timestamp":null}"#,
+        ),
+        (
+            "tick_size_change",
+            &["old_tick_size", "timestamp"],
+            r#"{"event_type":"tick_size_change","market":"0x0000000000000000000000000000000000000000000000000000000000000002","asset_id":"101","old_tick_size":null,"new_tick_size":"0.001","timestamp":null}"#,
+        ),
+        (
+            "best_bid_ask",
+            &["best_bid", "best_ask", "spread", "timestamp"],
+            r#"{"event_type":"best_bid_ask","market":"0x0000000000000000000000000000000000000000000000000000000000000002","asset_id":"101","best_bid":null,"best_ask":null,"spread":null,"timestamp":null}"#,
+        ),
+        (
+            "new_market",
+            &[
+                "question",
+                "slug",
+                "description",
+                "asset_ids",
+                "outcomes",
+                "timestamp",
+                "event_message.ticker",
+                "event_message.slug",
+                "event_message.title",
+                "event_message.description",
+            ],
+            r#"{"event_type":"new_market","id":"m","question":null,"market":"0x0000000000000000000000000000000000000000000000000000000000000002","slug":null,"description":null,"assets_ids":null,"outcomes":null,"event_message":{"id":"1"},"timestamp":null}"#,
+        ),
+        (
+            "market_resolved",
+            &[
+                "asset_ids",
+                "winning_asset_id",
+                "winning_outcome",
+                "timestamp",
+                "event_message.ticker",
+                "event_message.slug",
+                "event_message.title",
+                "event_message.description",
+            ],
+            r#"{"event_type":"market_resolved","id":"m","question":null,"market":"0x0000000000000000000000000000000000000000000000000000000000000002","slug":null,"description":null,"assets_ids":null,"outcomes":null,"winning_asset_id":null,"winning_outcome":null,"event_message":{"id":"1"},"timestamp":null}"#,
+        ),
+    ];
+
+    for (event_type, missing_fields, raw) in cases {
+        let message = serde_json::from_str::<WsMessage>(raw)
+            .unwrap_or_else(|error| panic!("{event_type} must decode through the SDK: {error}"));
+        let error = prepare_polymarket_message(&message)
+            .expect_err("current v2 must reject the newly nullable SDK shape");
+        let error = error.to_string();
+        let expected_prefix =
+            "polymarket_current_v2_typed_shape_missing_required_fields:event_type=";
+        assert!(
+            error.starts_with(&format!("{expected_prefix}{event_type}:fields=")),
+            "{error}"
+        );
+        for missing_field in missing_fields {
+            assert!(
+                error.split_once(":fields=").is_some_and(|(_, fields)| {
+                    fields.split(',').any(|field| field == *missing_field)
+                }),
+                "{event_type} must reject missing {missing_field}: {error}"
+            );
+        }
+        assert!(
+            error.ends_with(&format!("fields={}", missing_fields.join(","))),
+            "{event_type} must reject exactly the current-v2-required fields: {error}"
+        );
     }
 }
 

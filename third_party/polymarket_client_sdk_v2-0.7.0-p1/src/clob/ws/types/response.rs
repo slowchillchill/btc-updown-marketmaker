@@ -74,14 +74,18 @@ pub struct BookUpdate {
     /// Market condition ID
     pub market: B256,
     /// Unix timestamp in milliseconds
-    #[serde_as(as = "DisplayFromStr")]
-    pub timestamp: i64,
+    #[serde(default)]
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub timestamp: Option<i64>,
     /// Current bid levels (price descending)
     #[serde(default)]
     pub bids: Vec<OrderBookLevel>,
     /// Current ask levels (price ascending)
     #[serde(default)]
     pub asks: Vec<OrderBookLevel>,
+    /// Last traded price known at snapshot time
+    #[serde(default)]
+    pub last_trade_price: Option<Decimal>,
     /// Hash for orderbook validation
     pub hash: Option<String>,
 }
@@ -105,8 +109,9 @@ pub struct OrderBookLevel {
 pub struct PriceChange {
     /// Market condition ID
     pub market: B256,
-    #[serde_as(as = "DisplayFromStr")]
-    pub timestamp: i64,
+    #[serde(default)]
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub timestamp: Option<i64>,
     #[serde(default)]
     pub price_changes: Vec<PriceChangeBatchEntry>,
 }
@@ -144,12 +149,14 @@ pub struct TickSizeChange {
     /// Market condition ID
     pub market: B256,
     /// Previous tick size
-    pub old_tick_size: Decimal,
+    #[serde(default)]
+    pub old_tick_size: Option<Decimal>,
     /// New tick size
     pub new_tick_size: Decimal,
     /// Unix timestamp in milliseconds
-    #[serde_as(as = "DisplayFromStr")]
-    pub timestamp: i64,
+    #[serde(default)]
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub timestamp: Option<i64>,
 }
 
 /// Last trade price update.
@@ -170,8 +177,9 @@ pub struct LastTradePrice {
     /// Fee rate in basis points
     pub fee_rate_bps: Option<Decimal>,
     /// Unix timestamp in milliseconds
-    #[serde_as(as = "DisplayFromStr")]
-    pub timestamp: i64,
+    #[serde(default)]
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub timestamp: Option<i64>,
 }
 
 /// Best bid/ask update (requires `custom_feature_enabled` flag).
@@ -186,14 +194,18 @@ pub struct BestBidAsk {
     /// Asset/token identifier
     pub asset_id: U256,
     /// Current best bid price
-    pub best_bid: Decimal,
+    #[serde(default)]
+    pub best_bid: Option<Decimal>,
     /// Current best ask price
-    pub best_ask: Decimal,
+    #[serde(default)]
+    pub best_ask: Option<Decimal>,
     /// Spread between best bid and ask
-    pub spread: Decimal,
+    #[serde(default)]
+    pub spread: Option<Decimal>,
     /// Unix timestamp in milliseconds
-    #[serde_as(as = "DisplayFromStr")]
-    pub timestamp: i64,
+    #[serde(default)]
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub timestamp: Option<i64>,
 }
 
 /// New market created event (requires `custom_feature_enabled` flag).
@@ -206,24 +218,31 @@ pub struct NewMarket {
     /// Market ID
     pub id: String,
     /// Market question
-    pub question: String,
+    #[serde(default)]
+    pub question: Option<String>,
     /// Market condition ID
     pub market: B256,
     /// Market slug
-    pub slug: String,
+    #[serde(default)]
+    pub slug: Option<String>,
     /// Market description
-    pub description: String,
+    #[serde(default)]
+    pub description: Option<String>,
     /// List of asset IDs
-    #[serde(rename = "assets_ids", alias = "asset_ids")]
+    #[serde(default, rename = "assets_ids", alias = "asset_ids")]
+    #[serde_as(deserialize_as = "DefaultOnNull")]
     pub asset_ids: Vec<U256>,
     /// List of outcomes (e.g., `["Yes", "No"]`)
+    #[serde(default)]
+    #[serde_as(deserialize_as = "DefaultOnNull")]
     pub outcomes: Vec<String>,
     /// Event message object
     #[serde(default)]
     pub event_message: Option<EventMessage>,
     /// Unix timestamp in milliseconds
-    #[serde_as(as = "DisplayFromStr")]
-    pub timestamp: i64,
+    #[serde(default)]
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub timestamp: Option<i64>,
 }
 
 /// Market resolved event (requires `custom_feature_enabled` flag).
@@ -247,22 +266,26 @@ pub struct MarketResolved {
     #[serde(default)]
     pub description: Option<String>,
     /// List of asset IDs
-    #[serde(rename = "assets_ids", alias = "asset_ids")]
+    #[serde(default, rename = "assets_ids", alias = "asset_ids")]
+    #[serde_as(deserialize_as = "DefaultOnNull")]
     pub asset_ids: Vec<U256>,
     /// List of outcomes (e.g., `["Yes", "No"]`)
     #[serde(default)]
     #[serde_as(deserialize_as = "DefaultOnNull")]
     pub outcomes: Vec<String>,
     /// Winning asset ID
-    pub winning_asset_id: U256,
+    #[serde(default)]
+    pub winning_asset_id: Option<U256>,
     /// Winning outcome (e.g., "Yes" or "No")
-    pub winning_outcome: String,
+    #[serde(default)]
+    pub winning_outcome: Option<String>,
     /// Event message object
     #[serde(default)]
     pub event_message: Option<EventMessage>,
     /// Unix timestamp in milliseconds
-    #[serde_as(as = "DisplayFromStr")]
-    pub timestamp: i64,
+    #[serde(default)]
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub timestamp: Option<i64>,
 }
 
 /// Event message object for market events.
@@ -272,13 +295,17 @@ pub struct EventMessage {
     /// Event message ID
     pub id: String,
     /// Event message ticker
-    pub ticker: String,
+    #[serde(default)]
+    pub ticker: Option<String>,
     /// Event message slug
-    pub slug: String,
+    #[serde(default)]
+    pub slug: Option<String>,
     /// Event message title
-    pub title: String,
+    #[serde(default)]
+    pub title: Option<String>,
     /// Event message description
-    pub description: String,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// Maker order details within a trade message.
@@ -480,8 +507,9 @@ pub struct MidpointUpdate {
     /// Calculated midpoint price
     pub midpoint: Decimal,
     /// Unix timestamp in milliseconds
-    #[serde_as(as = "DisplayFromStr")]
-    pub timestamp: i64,
+    #[serde(default)]
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub timestamp: Option<i64>,
 }
 
 /// Deserialize messages from the byte slice, filtering by interest.
@@ -571,6 +599,262 @@ mod tests {
             WsMessage::Trade(_) => interest.contains(MessageInterest::TRADE),
             WsMessage::Order(_) => interest.contains(MessageInterest::ORDER),
         }
+    }
+
+    fn assert_missing_and_null_object_and_array(
+        missing_json: &str,
+        null_json: &str,
+        assert_message: impl Fn(&WsMessage),
+    ) {
+        for json in [missing_json, null_json] {
+            let messages = parse_if_interested(json.as_bytes(), &MessageInterest::ALL).unwrap();
+            assert_eq!(messages.len(), 1);
+            assert_message(&messages[0]);
+
+            let array_json = format!("[{json}]");
+            let messages =
+                parse_if_interested(array_json.as_bytes(), &MessageInterest::ALL).unwrap();
+            assert_eq!(messages.len(), 1);
+            assert_message(&messages[0]);
+        }
+    }
+
+    #[test]
+    fn parse_book_with_missing_or_null_nullable_fields_in_object_and_array() {
+        let missing_json = r#"{
+            "event_type": "book",
+            "asset_id": "1",
+            "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "bids": [{"price": "0.5", "size": "10"}],
+            "asks": []
+        }"#;
+        let null_json = r#"{
+            "event_type": "book",
+            "asset_id": "1",
+            "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "timestamp": null,
+            "bids": [{"price": "0.5", "size": "10"}],
+            "asks": [],
+            "last_trade_price": null
+        }"#;
+
+        assert_missing_and_null_object_and_array(missing_json, null_json, |message| {
+            let WsMessage::Book(event) = message else {
+                panic!("expected book message");
+            };
+            assert_eq!(event.timestamp, None);
+            assert_eq!(event.last_trade_price, None);
+            assert_eq!(event.bids.len(), 1);
+        });
+    }
+
+    #[test]
+    fn parse_price_change_with_missing_or_null_nullable_fields_in_object_and_array() {
+        let missing_json = r#"{
+            "event_type": "price_change",
+            "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "price_changes": [{
+                "asset_id": "1",
+                "price": "0.5",
+                "size": "10",
+                "side": "BUY"
+            }]
+        }"#;
+        let null_json = r#"{
+            "event_type": "price_change",
+            "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "timestamp": null,
+            "price_changes": [{
+                "asset_id": "1",
+                "price": "0.5",
+                "size": "10",
+                "side": "BUY"
+            }]
+        }"#;
+
+        assert_missing_and_null_object_and_array(missing_json, null_json, |message| {
+            let WsMessage::PriceChange(event) = message else {
+                panic!("expected price_change message");
+            };
+            assert_eq!(event.timestamp, None);
+            assert_eq!(event.price_changes.len(), 1);
+        });
+    }
+
+    #[test]
+    fn parse_last_trade_price_with_missing_or_null_nullable_fields_in_object_and_array() {
+        let missing_json = r#"{
+            "event_type": "last_trade_price",
+            "asset_id": "1",
+            "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "price": "0.5"
+        }"#;
+        let null_json = r#"{
+            "event_type": "last_trade_price",
+            "asset_id": "1",
+            "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "price": "0.5",
+            "timestamp": null
+        }"#;
+
+        assert_missing_and_null_object_and_array(missing_json, null_json, |message| {
+            let WsMessage::LastTradePrice(event) = message else {
+                panic!("expected last_trade_price message");
+            };
+            assert_eq!(event.timestamp, None);
+            assert_eq!(event.price, dec!(0.5));
+        });
+    }
+
+    #[test]
+    fn parse_tick_size_change_with_missing_or_null_nullable_fields_in_object_and_array() {
+        let missing_json = r#"{
+            "event_type": "tick_size_change",
+            "asset_id": "1",
+            "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "new_tick_size": "0.001"
+        }"#;
+        let null_json = r#"{
+            "event_type": "tick_size_change",
+            "asset_id": "1",
+            "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "old_tick_size": null,
+            "new_tick_size": "0.001",
+            "timestamp": null
+        }"#;
+
+        assert_missing_and_null_object_and_array(missing_json, null_json, |message| {
+            let WsMessage::TickSizeChange(event) = message else {
+                panic!("expected tick_size_change message");
+            };
+            assert_eq!(event.old_tick_size, None);
+            assert_eq!(event.timestamp, None);
+            assert_eq!(event.new_tick_size, dec!(0.001));
+        });
+    }
+
+    #[test]
+    fn parse_best_bid_ask_with_missing_or_null_nullable_fields_in_object_and_array() {
+        let missing_json = r#"{
+            "event_type": "best_bid_ask",
+            "asset_id": "1",
+            "market": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        }"#;
+        let null_json = r#"{
+            "event_type": "best_bid_ask",
+            "asset_id": "1",
+            "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "best_bid": null,
+            "best_ask": null,
+            "spread": null,
+            "timestamp": null
+        }"#;
+
+        assert_missing_and_null_object_and_array(missing_json, null_json, |message| {
+            let WsMessage::BestBidAsk(event) = message else {
+                panic!("expected best_bid_ask message");
+            };
+            assert_eq!(event.best_bid, None);
+            assert_eq!(event.best_ask, None);
+            assert_eq!(event.spread, None);
+            assert_eq!(event.timestamp, None);
+        });
+    }
+
+    #[test]
+    fn parse_new_market_with_missing_or_null_nullable_fields_in_object_and_array() {
+        let missing_json = r#"{
+            "event_type": "new_market",
+            "id": "market-1",
+            "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "event_message": {"id": "event-1"}
+        }"#;
+        let null_json = r#"{
+            "event_type": "new_market",
+            "id": "market-1",
+            "question": null,
+            "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "slug": null,
+            "description": null,
+            "assets_ids": null,
+            "outcomes": null,
+            "event_message": {
+                "id": "event-1",
+                "ticker": null,
+                "slug": null,
+                "title": null,
+                "description": null
+            },
+            "timestamp": null
+        }"#;
+
+        assert_missing_and_null_object_and_array(missing_json, null_json, |message| {
+            let WsMessage::NewMarket(event) = message else {
+                panic!("expected new_market message");
+            };
+            assert_eq!(event.question, None);
+            assert_eq!(event.slug, None);
+            assert_eq!(event.description, None);
+            assert!(event.asset_ids.is_empty());
+            assert!(event.outcomes.is_empty());
+            assert_eq!(event.timestamp, None);
+            let event_message = event.event_message.as_ref().unwrap();
+            assert_eq!(event_message.id, "event-1");
+            assert_eq!(event_message.ticker, None);
+            assert_eq!(event_message.slug, None);
+            assert_eq!(event_message.title, None);
+            assert_eq!(event_message.description, None);
+        });
+    }
+
+    #[test]
+    fn parse_market_resolved_with_missing_or_null_nullable_fields_in_object_and_array() {
+        let missing_json = r#"{
+            "event_type": "market_resolved",
+            "id": "market-1",
+            "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "event_message": {"id": "event-1"}
+        }"#;
+        let null_json = r#"{
+            "event_type": "market_resolved",
+            "id": "market-1",
+            "question": null,
+            "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "slug": null,
+            "description": null,
+            "assets_ids": null,
+            "outcomes": null,
+            "winning_asset_id": null,
+            "winning_outcome": null,
+            "event_message": {
+                "id": "event-1",
+                "ticker": null,
+                "slug": null,
+                "title": null,
+                "description": null
+            },
+            "timestamp": null
+        }"#;
+
+        assert_missing_and_null_object_and_array(missing_json, null_json, |message| {
+            let WsMessage::MarketResolved(event) = message else {
+                panic!("expected market_resolved message");
+            };
+            assert_eq!(event.question, None);
+            assert_eq!(event.slug, None);
+            assert_eq!(event.description, None);
+            assert!(event.asset_ids.is_empty());
+            assert!(event.outcomes.is_empty());
+            assert_eq!(event.winning_asset_id, None);
+            assert_eq!(event.winning_outcome, None);
+            assert_eq!(event.timestamp, None);
+            let event_message = event.event_message.as_ref().unwrap();
+            assert_eq!(event_message.id, "event-1");
+            assert_eq!(event_message.ticker, None);
+            assert_eq!(event_message.slug, None);
+            assert_eq!(event_message.title, None);
+            assert_eq!(event_message.description, None);
+        });
     }
 
     #[test]
@@ -682,7 +966,8 @@ mod tests {
                 "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
                 "timestamp": "1234567890",
                 "bids": [{"price": "0.5", "size": "100"}],
-                "asks": []
+                "asks": [],
+                "last_trade_price": "0.49"
             },
             {
                 "event_type": "price_change",
@@ -706,9 +991,12 @@ mod tests {
         let msgs = parse_if_interested(json.as_bytes(), &MessageInterest::ALL).unwrap();
         assert_eq!(msgs.len(), 3);
 
-        assert!(
-            matches!(&msgs[0], WsMessage::Book(b) if b.asset_id == U256::from_str("106585164761922456203746651621390029417453862034640469075081961934906147433548").unwrap())
-        );
+        assert!(matches!(
+            &msgs[0],
+            WsMessage::Book(b)
+                if b.asset_id == U256::from_str("106585164761922456203746651621390029417453862034640469075081961934906147433548").unwrap()
+                    && b.last_trade_price == Some(dec!(0.49))
+        ));
         assert!(matches!(&msgs[1], WsMessage::PriceChange(p) if p.market == TEST_MARKET));
         assert!(
             matches!(&msgs[2], WsMessage::LastTradePrice(l) if l.asset_id == U256::from_str("106585164761922456203746651621390029417453862034640469075081961934906147433548").unwrap())
@@ -768,9 +1056,9 @@ mod tests {
         let msg: WsMessage = serde_json::from_str(json).unwrap();
         match msg {
             WsMessage::BestBidAsk(bba) => {
-                assert_eq!(bba.best_bid, dec!(0.73));
-                assert_eq!(bba.best_ask, dec!(0.77));
-                assert_eq!(bba.spread, dec!(0.04));
+                assert_eq!(bba.best_bid, Some(dec!(0.73)));
+                assert_eq!(bba.best_ask, Some(dec!(0.77)));
+                assert_eq!(bba.spread, Some(dec!(0.04)));
             }
             _ => panic!("Expected BestBidAsk message"),
         }
@@ -805,15 +1093,15 @@ mod tests {
             WsMessage::NewMarket(nm) => {
                 assert_eq!(nm.id, "1031769");
                 assert_eq!(
-                    nm.question,
-                    "Will NVIDIA (NVDA) close above $240 end of January?"
+                    nm.question.as_deref(),
+                    Some("Will NVIDIA (NVDA) close above $240 end of January?")
                 );
                 assert_eq!(nm.asset_ids.len(), 2);
                 assert_eq!(nm.outcomes, vec!["Yes", "No"]);
                 assert!(nm.event_message.is_some());
                 let event = nm.event_message.unwrap();
                 assert_eq!(event.id, "125819");
-                assert_eq!(event.ticker, "nvda-above-in-january-2026");
+                assert_eq!(event.ticker.as_deref(), Some("nvda-above-in-january-2026"));
             }
             _ => panic!("Expected NewMarket message"),
         }
@@ -849,10 +1137,12 @@ mod tests {
         match msg {
             WsMessage::MarketResolved(mr) => {
                 assert_eq!(mr.id, "1031769");
-                assert_eq!(mr.winning_outcome, "Yes");
+                assert_eq!(mr.winning_outcome.as_deref(), Some("Yes"));
                 assert_eq!(
                     mr.winning_asset_id,
-                    U256::from_str("76043073756653678226373981964075571318267289248134717369284518995922789326425").unwrap()
+                    Some(
+                        U256::from_str("76043073756653678226373981964075571318267289248134717369284518995922789326425").unwrap()
+                    )
                 );
                 assert_eq!(mr.asset_ids.len(), 2);
             }
@@ -967,7 +1257,7 @@ mod tests {
             WsMessage::MarketResolved(mr) => {
                 assert_eq!(mr.id, "1031769");
                 assert!(mr.event_message.is_none());
-                assert_eq!(mr.winning_outcome, "Yes");
+                assert_eq!(mr.winning_outcome.as_deref(), Some("Yes"));
             }
             _ => panic!("Expected MarketResolved message"),
         }
@@ -1003,10 +1293,10 @@ mod tests {
                 "106585164761922456203746651621390029417453862034640469075081961934906147433548",
             )
             .unwrap(),
-            best_bid: dec!(0.5),
-            best_ask: dec!(0.6),
-            spread: dec!(0.1),
-            timestamp: 0,
+            best_bid: Some(dec!(0.5)),
+            best_ask: Some(dec!(0.6)),
+            spread: Some(dec!(0.1)),
+            timestamp: Some(0),
         });
         assert!(matches_interest(&bba, MessageInterest::BEST_BID_ASK));
         assert!(!matches_interest(&bba, MessageInterest::BOOK));
@@ -1014,14 +1304,14 @@ mod tests {
 
         let nm = WsMessage::NewMarket(NewMarket {
             id: "1".to_owned(),
-            question: "q".to_owned(),
+            question: Some("q".to_owned()),
             market: TEST_MARKET,
-            slug: "s".to_owned(),
-            description: "d".to_owned(),
+            slug: Some("s".to_owned()),
+            description: Some("d".to_owned()),
             asset_ids: vec![],
             outcomes: vec![],
             event_message: None,
-            timestamp: 0,
+            timestamp: Some(0),
         });
         assert!(matches_interest(&nm, MessageInterest::NEW_MARKET));
         assert!(matches_interest(&nm, MessageInterest::MARKET));
@@ -1034,13 +1324,15 @@ mod tests {
             description: Some("d".to_owned()),
             asset_ids: vec![],
             outcomes: vec![],
-            winning_asset_id: U256::from_str(
-                "106585164761922456203746651621390029417453862034640469075081961934906147433548",
-            )
-            .unwrap(),
-            winning_outcome: "Yes".to_owned(),
+            winning_asset_id: Some(
+                U256::from_str(
+                    "106585164761922456203746651621390029417453862034640469075081961934906147433548",
+                )
+                .unwrap(),
+            ),
+            winning_outcome: Some("Yes".to_owned()),
             event_message: None,
-            timestamp: 0,
+            timestamp: Some(0),
         });
         assert!(matches_interest(&mr, MessageInterest::MARKET_RESOLVED));
         assert!(matches_interest(&mr, MessageInterest::MARKET));

@@ -1623,15 +1623,15 @@ impl PolymarketProcessingContext {
             .iter()
             .map(ToString::to_string)
             .collect::<BTreeSet<_>>();
-        let winner = event.winning_asset_id.to_string();
+        let winner = event.winning_asset_id.as_ref().map(ToString::to_string);
         if let Some(market) = self.current.iter().chain(self.next.iter()).find(|market| {
             market.id == event.id
                 || market.condition_id == condition_id
                 || event.slug.as_deref() == Some(market.slug.as_str())
                 || event_assets.contains(&market.up_asset_id)
                 || event_assets.contains(&market.down_asset_id)
-                || winner == market.up_asset_id
-                || winner == market.down_asset_id
+                || winner.as_deref() == Some(market.up_asset_id.as_str())
+                || winner.as_deref() == Some(market.down_asset_id.as_str())
         }) {
             return Some(market.slug.clone());
         }
@@ -1642,9 +1642,9 @@ impl PolymarketProcessingContext {
                 || event.slug.as_deref() == Some(identity.slug.as_str())
                 || event_assets.contains(&identity.up_asset_id)
                 || event_assets.contains(&identity.down_asset_id)
-                || winner == identity.up_asset_id
-                || winner == identity.down_asset_id)
-                .then(|| identity.slug.clone())
+                || winner.as_deref() == Some(identity.up_asset_id.as_str())
+                || winner.as_deref() == Some(identity.down_asset_id.as_str()))
+            .then(|| identity.slug.clone())
         })
     }
 
@@ -2231,7 +2231,16 @@ pub(super) fn validate_polymarket_market_resolved_identity(
         ))
         .into());
     }
-    let winning_asset_id = event.winning_asset_id.to_string();
+    let winning_asset_id = event
+        .winning_asset_id
+        .as_ref()
+        .ok_or_else(|| {
+            invalid_data(format!(
+                "Polymarket market_resolved winning asset missing:slug={}",
+                identity.slug
+            ))
+        })?
+        .to_string();
     let expected_winning_outcome = if winning_asset_id == identity.up_asset_id {
         "up"
     } else if winning_asset_id == identity.down_asset_id {
@@ -2243,8 +2252,13 @@ pub(super) fn validate_polymarket_market_resolved_identity(
         ))
         .into());
     };
-    if !event
-        .winning_outcome
+    let winning_outcome = event.winning_outcome.as_deref().ok_or_else(|| {
+        invalid_data(format!(
+            "Polymarket market_resolved winning outcome missing:slug={}",
+            identity.slug
+        ))
+    })?;
+    if !winning_outcome
         .trim()
         .eq_ignore_ascii_case(expected_winning_outcome)
     {
@@ -2269,6 +2283,21 @@ pub(super) async fn process_polymarket_market_resolved(
     let source_payload_json =
         prepare_polymarket_message(&WsMessage::MarketResolved(event.clone()))?
             .ok_or_else(|| invalid_data("decoded market_resolved is missing source payload"))?;
+    let platform_timestamp = event.timestamp.ok_or_else(|| {
+        invalid_data(
+            "polymarket_current_v2_typed_shape_missing_required_fields:event_type=market_resolved:fields=timestamp",
+        )
+    })?;
+    let winning_asset_id = event.winning_asset_id.as_ref().ok_or_else(|| {
+        invalid_data(
+            "polymarket_current_v2_typed_shape_missing_required_fields:event_type=market_resolved:fields=winning_asset_id",
+        )
+    })?;
+    let winning_outcome = event.winning_outcome.as_deref().ok_or_else(|| {
+        invalid_data(
+            "polymarket_current_v2_typed_shape_missing_required_fields:event_type=market_resolved:fields=winning_outcome",
+        )
+    })?;
     let matched_slug = context.matched_resolved_slug(event);
     let source_identifier = matched_slug
         .as_deref()
@@ -2286,7 +2315,7 @@ pub(super) async fn process_polymarket_market_resolved(
             "polymarket_market",
             "market_resolved",
             source_identifier,
-            Some(event.timestamp.to_string()),
+            Some(platform_timestamp.to_string()),
             recv_time_utc_ms,
             MARKET_WS_ENDPOINT,
             collector_identity,
@@ -2327,10 +2356,10 @@ pub(super) async fn process_polymarket_market_resolved(
             .map(|byte| format!("{byte:02x}"))
             .collect(),
         source_payload_json,
-        platform_timestamp_raw: event.timestamp.to_string(),
-        platform_timestamp_utc_ms: event.timestamp,
-        winning_asset_id: event.winning_asset_id.to_string(),
-        winning_outcome: event.winning_outcome.clone(),
+        platform_timestamp_raw: platform_timestamp.to_string(),
+        platform_timestamp_utc_ms: platform_timestamp,
+        winning_asset_id: winning_asset_id.to_string(),
+        winning_outcome: winning_outcome.to_owned(),
         raw_day_ticket,
     };
     if let Some(pending) = context.pending.get_mut(&slug) {

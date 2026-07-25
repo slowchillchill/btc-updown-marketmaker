@@ -1631,7 +1631,7 @@ mod tests {
             let WsMessage::Book(book) = message else {
                 panic!("valid book must precede parser fault");
             };
-            assert_eq!(book.timestamp, expected_timestamp);
+            assert_eq!(book.timestamp, Some(expected_timestamp));
         }
         assert!(matches!(
             receiver.recv(Duration::from_secs(1)).await,
