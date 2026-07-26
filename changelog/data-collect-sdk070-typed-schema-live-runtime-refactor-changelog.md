@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CAPABILITY_PENDING`。RTDS阶段0闭合状态只在承载本记录的文档commit成功push且三方ref一致后生效。总事项阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_IMPLEMENTED_VALIDATION_PASSED_REVIEW_PENDING`。RTDS阶段0已以commit `0a2153e76dd9824b675a54cd93cc7f92a08e300f`闭合并push，且三方ref一致；阶段1候选实现与收窄验证门已通过，正在闭合独立终审。总事项阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
 > `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
@@ -38,7 +38,7 @@
 > Stage5、Stage6与2-REST均已完成各自实现、完整门和独立终审。按用户批准的
 > 方案A，本文条件式记录`2-REST_CLOSED`与核心总事项`CORE_COMPLETE`：只有承载
 > 本记录的closure commit成功push且本地HEAD、upstream与远端ref一致后才生效。
-> RTDS行为专项当前为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CAPABILITY_PENDING`且行为实现未完成。
+> RTDS行为专项当前为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_IMPLEMENTED_VALIDATION_PASSED_REVIEW_PENDING`。
 > 本文件只记录本组三件套的事实、冲突、决定与执行，不回写旧changelog。
 
 ## 2026-07-24：用户要求建立一个新的总事项
@@ -1880,3 +1880,15 @@ migration、数据删除、public-network smoke或RTDS参数/行为实施。
 - 专项三件套、两份current authority、umbrella指针、paper/live future合同说明、参数报告及三份changelog已同步；阶段0工作树没有Rust、Cargo、vendor或测试代码改动。
 - 主代理自审及三路`gpt-5.6-sol`/`ultra`独立终审最终均通过，Critical/Important/Minor为0。唯一成立的跨端关闭事件排序过严问题已按本地shutdown completion顺序修正并复核通过。
 - 承载本记录的文档commit成功push且本地HEAD、upstream与远端ref一致后，umbrella状态升级为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CAPABILITY_PENDING`并沿专项唯一游标进入4B/专项阶段1；若push或ref核对失败，该条件式闭合不生效。
+
+## 2026-07-26：RTDS阶段1验证门再次收窄
+
+- 用户确认历史100-cycle也属于本后继事项的过度校验。既有测试文件与旧阶段结果保留，但4B/专项阶段1不重跑、不以其验收；最终只执行受影响RTDS lib测试、workspace测试target编译、Clippy、fmt和diff check。
+- 专项同时删除四段专用恢复耗时、owner-local epoch/fresh重复核对及test-only lifecycle completion记录。4B仍保留SDK-first、唯一owner/socket、freshness fence、消费式shutdown、`300s/60s/cold-start disabled/outer cap 300s`及最小三个runtime行为链，不扩大umbrella核心或production边界。
+
+## 2026-07-26：RTDS阶段1候选实现与终审修正
+
+- 4B已在training唯一RTDS adapter实现同一owner消费的message/state/local-applied事件流、消费式shutdown、冻结的business recovery合同及三个runtime/两次replacement最小行为链；没有vendor patch、第二owner/socket、typed stop、资源矩阵或新100-cycle。
+- 终审发现并完成三项手术式修正：后续generation补充State/Applied断言；fresh reset测试先实际升级outer level再证明重置；timer使用同一次state/generation/applied快照，删除重复SDK事实核对。operator日志键同步为冻结的四个术语。
+- 修正后RTDS lib精确测试20项全部通过、331项被filter。历史100-cycle在本阶段早期、最终简化裁决前曾误跑一次；裁决后的收窄验证门没有再次执行，也未把该结果作为4B验收依据。
+- 当前状态为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_IMPLEMENTED_VALIDATION_PASSED_REVIEW_PENDING`；独立终审与分离的Rust/闭合文档commit/push完成后才可升级为Stage1 closed。

@@ -691,3 +691,15 @@
 - 当前paper/live binary仍是heartbeat/status-only。本次只冻结future真实RTDS adapter必须继承的共同网络生命周期合同，不新增paper/live adapter、handoff producer、共享framework、模型接线或部署；这些实施仍须独立三件套。
 - 现行`data-collect-demand`与source-availability demand/plan已按最小差异同步；旧changelog与既有阶段结果继续保留为当时事实，不回写成从未存在。
 - 用户随后否决typed stop/completion、CAS/mutex、100-cycle完整runtime replacement、完整资源矩阵和probe socket high-water等过严要求。当前最小合同只新增业务replacement专用`shutdown_and_wait(self)`及连续两次replacement、共三个runtime epoch的精确顺序测试；operator stop复用既有abort permit + task join，8小时probe只记录实际运行与恢复行为。
+
+## 2026-07-26：RTDS阶段1不再重跑历史100-cycle
+
+- 用户进一步确认既有100-cycle也属于当前后继事项的过度校验。历史测试文件与旧阶段结果保持原样，不删除、不改写；RTDS阶段1不重新执行，也不把它们作为business replacement验收依据。
+- 当前验证门只执行受影响RTDS lib测试、编译全部workspace测试target，并运行workspace Clippy、fmt和diff check。四段专用恢复耗时、owner-local epoch/fresh重复核对及test-only lifecycle completion记录均已取消；共同参数、freshness fence、消费式shutdown和三个runtime最小行为链保持不变。
+
+## 2026-07-26：RTDS阶段1候选实现与收窄验证通过
+
+- training唯一RTDS adapter已完成同一owner、单socket、break-before-make的候选实现；wrapper同一事件流交付message/state/local-applied，消费式shutdown返回后才构造后继runtime。paper/live仍只有heartbeat/status，CLOB、Gamma、Binance及其他source没有变化。
+- 冻结的`300s steady + 60s后到monotonic first-fresh + cold-start disabled + 1s × 2 ±20%/300s cap/unlimited`合同由最小状态与三个runtime/两次replacement测试覆盖；终审成立项只在既有测试中补充后续generation观测、实际level增长后fresh reset，并删除timer的重复SDK事实读取。
+- 修正后RTDS lib精确测试20项全部通过、331项被filter。历史100-cycle在本阶段早期、最终简化裁决前曾误跑一次；裁决后的收窄验证门没有再次执行，也未把该结果作为新路径验收依据。
+- 当前为`STAGE1_IMPLEMENTED_VALIDATION_PASSED_REVIEW_PENDING`；独立终审和分离的Rust/闭合文档commit/push完成前不记Stage1闭合。

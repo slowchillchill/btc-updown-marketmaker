@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CAPABILITY_PENDING`。该状态只在承载本记录的阶段0文档commit成功push且本地HEAD、upstream与远端ref一致后生效。用户已于 2026-07-26 冻结第六节完整行为参数，并批准本需求、wrapper-first SDK 路线、精确 authority 修改矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe：`steady=300s`、`first-fresh=60s/后到 monotonic anchor`、首次 fresh 前禁用 cold-start watchdog，后续完整换连接前使用 `1s × 2 ±20%`、单次最长 `300s`、fresh 后重置且总尝试次数不限的 outer backoff。当前代码只有 training 拥有真实 RTDS adapter；新恢复行为尚未实现，阶段1只在 training 实现与验证。future paper/live 真实 RTDS adapter 一旦另项接入，必须继承同一恢复合同，不得重新冻结另一套语义。production release、部署、远端操作和数据清理仍不在本需求范围。
+> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_IMPLEMENTED_VALIDATION_PASSED_REVIEW_PENDING`。用户已于 2026-07-26 冻结第六节完整行为参数，并批准本需求、wrapper-first SDK 路线、精确 authority 修改矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe：`steady=300s`、`first-fresh=60s/后到 monotonic anchor`、首次 fresh 前禁用 cold-start watchdog，后续完整换连接前使用 `1s × 2 ±20%`、单次最长 `300s`、fresh 后重置且总尝试次数不限的 outer backoff。阶段0文档commit已push并核对本地HEAD、upstream与远端ref一致；当前代码只有 training 拥有真实 RTDS adapter，阶段1实现与收窄后的验证门已经通过，正在等待独立阶段终审。future paper/live 真实 RTDS adapter 一旦另项接入，必须继承同一恢复合同，不得重新冻结另一套语义。production release、部署、远端操作和数据清理仍不在本需求范围。
 
 ## 一、目标与已决定方向
 
@@ -34,26 +34,26 @@
 - Polymarket [real-time-data-client Issue #26](https://github.com/Polymarket/real-time-data-client/issues/26) 是未关闭的 `activity` feed 用户报告，只支持“socket 保持开放但业务数据停止、用户以重连作为 workaround”这一相似症状；它不是 Chainlink 专项证据，也没有维护者根因或自然恢复证明。
 - 不同端点的 [py-clob-client Issue #292](https://github.com/Polymarket/py-clob-client/issues/292) 只能作为“反复新连接仍可能无数据”的跨端点反例，不能证明本次 RTDS 故障根因。
 
-### 2.2 当前代码事实
+### 2.2 阶段0代码快照与阶段1结果
 
 - `RtdsSdkRuntime::replace_subscription()` 更新 latest desired；同一真实连接已应用相同订阅时，不会用 revision 变化冒充网络重订阅。
 - pinned 官方 Rust SDK 对同 topic/type 再次 `subscribe()` 只增加本地引用计数；`unsubscribe()` 请求不保留原 `btc/usd` filter，因此二者均不适合作为恢复路径。
-- 当前 `RtdsSdkRuntime::Drop`、最后一个 `ConnectionManager` owner 释放及已有 `dropping_rtds_runtime_closes_socket_without_reconnect` loopback 测试提供了收敛基础，但 SDK 没有公开的异步 `shutdown_and_wait()`。实现前仍必须证明 wrapper 可以等待 actor 和 connection loop 真正结束；不能证明时触发 SDK 能力决策门。
+- 阶段0快照中，`RtdsSdkRuntime::Drop`、最后一个 `ConnectionManager` owner 释放及已有 `dropping_rtds_runtime_closes_socket_without_reconnect` loopback 测试只提供收敛基础，vendor SDK没有公开异步shutdown。阶段1已在项目wrapper实现消费式`shutdown_and_wait(self)`，并以state-channel closure loopback证明返回时actor和connection loop已经结束；没有修改vendor SDK。
 - 当前 `applied` 事件发生在项目 actor 调用 SDK `subscribe()` 并完成本地发送入队之后；SDK `send()` 本身是向内部 mpsc 入队，不是 wire write completion 或服务端 ACK。因此生产指标不得把 `applied` 命名为 wire send、握手完成或 ACK。
-- 当前 `RtdsSdkRuntime` 的 state/applied receiver 是 wrapper 私有字段；`recv_event_until()` 会消费 transport state 变化但不向 source owner 返回 `Connecting/Reconnecting`，初始 generation 的 local-applied 也会被 freshness fence 吸收而不形成 `RtdsRuntimeEvent::Applied`。当前 source loop 因此尚不具备本需求所需的完整仲裁观测面，未来实现必须增加最小 wrapper-only observation surface，但不得改变既有 freshness fence 或 patch vendor SDK 来绕过项目 wrapper。
+- 阶段0快照中，`RtdsSdkRuntime`的state/applied receiver仍是wrapper私有字段，source owner尚未收到完整观测。阶段1已把initial及后续generation的state/local-applied纳入唯一owner消费的同一`RtdsRuntimeEvent`流，并保留queued-message freshness fence；没有第二receiver、actor、socket或vendor patch。
 - 当前 coordinator 对 RTDS source task 使用现有 abort permit，并在随后等待 source task 结束。pinned Tokio 的取消语义保证 task 结束被观察到前会销毁 task-local 变量；这足以保持现有 collector stop 合同。本事项只为业务 replacement 增加可等待的 wrapper shutdown，不把 operator stop 扩张成新的 typed control channel、completion reply或 stop/create 线性化事务。
 - 当前 `require_text_pong=false`；`PING` 写成功既不是业务健康证据，也不是必须具备 PONG 的完整往返证据。本事项不改变该合同。
 
-### 2.3 当前 authority 冲突及同步范围
+### 2.3 阶段0识别的 authority 冲突及已完成同步
 
-当前执行 authority 中存在必须在实现前同步的旧语义：
+阶段0在当时执行authority中识别出以下必须先同步的旧语义：
 
-1. `demand/data-collect-demand.md` 的 RTDS 观测说明仍把 subscribe send、ACK/首条消息混在同一证据链，且第 3.3 节第 4--5 项仍要求业务静默不切换连接；
-2. `demand/data-collect-source-availability-lifecycle-repair-demand.md` 的第一节第3项、第4.2/4.3节及验收AC1/AC24/AC25与新路线直接冲突；AC4没有说明RTDS此前是否收到过fresh而存在分支歧义。AC7的cold-start同socket、AC9的真实transport恢复且无one-shot ticket、AC10删除`request_reconnect`均与新路线相容，必须保留；
+1. `demand/data-collect-demand.md` 的 RTDS 观测说明当时把 subscribe send、ACK/首条消息混在同一证据链，且第 3.3 节第 4--5 项要求业务静默不切换连接；
+2. `demand/data-collect-source-availability-lifecycle-repair-demand.md` 的第一节第3项、第4.2/4.3节及验收AC1/AC24/AC25当时与新路线直接冲突；AC4没有说明RTDS此前是否收到过fresh而存在分支歧义。AC7的cold-start同socket、AC9的真实transport恢复且无one-shot ticket、AC10删除`request_reconnect`均与新路线相容，必须保留；
 3. `demand/data-collect-reliability-repair-demand.md` 已被部分取代，但其 SDK-first、唯一 owner、数据完整性等仍有效合同必须保留；
 4. `demand/rebuild-core-demand.md` 尚未整体批准，只作为未来一致性上下文；既有 plan、test 和 changelog 中“长期静默保持同一连接”是历史事实，不得删除或改写成从未存在。
 
-本需求对当前 training collector 的 `polymarket_rtds_chainlink_btc_usd` 形成精确实现例外，并为 future paper/live 真实 RTDS adapter 冻结同一网络生命周期合同。实现前必须同步前两份当前 authority 中相反的行为和证据语义；不得批量扩张到 CLOB、Gamma、Binance，也不得把共同合同误写成当前 paper/live adapter 已实现或已验证。
+阶段0已按精确矩阵同步前两份current authority中相反的行为和证据语义。本需求对training collector的`polymarket_rtds_chainlink_btc_usd`形成精确实现例外，并为future paper/live真实RTDS adapter冻结同一网络生命周期合同；没有批量扩张到CLOB、Gamma、Binance，也没有把共同合同误写成当前paper/live adapter已实现或已验证。
 
 ## 三、术语与可观测时间
 
@@ -64,7 +64,7 @@
 5. **本地订阅 applied 观测**：复用并最小扩展既有 applied 事实，使 owner 能观察当前 `rtds_runtime_epoch` / `sdk_connection_generation` 的 latest desired 已由 actor 交给 SDK 本地发送队列及其 monotonic 时刻；这不要求另建一套 `LocalApplied` domain type。它不是 wire write completion 或服务端 ACK。
 6. **彻底关闭**：项目订阅 actor 的 `JoinHandle` 已完成，旧 receiver 和全部 manager owner 已释放，保留用于等待的 SDK state receiver 已观察到 state channel 关闭，因而 connection loop 已完成且不再重连，底层 WebSocket 已关闭。`Disconnected` 只可作为中间状态，不能单独证明 task 完成；实现不要求服务端 Close ACK。
 7. **恢复成功**：目标 runtime/generation 在本地 applied 后收到第一条新的合格实时更新。Connected、`PING` 写成功、本地 applied、snapshot 或历史/重复消息都不能单独证明恢复。
-8. **时间分段**：每个 episode 记录 `episode_trigger_kind=steady_silence_threshold|first_fresh_window_timeout`，并只报告真实可观测的 monotonic 时长：带 `attempt_index` 的 `episode-trigger-to-teardown-complete`、`runtime-create-to-local-applied`、`local-applied-to-first-fresh` 和 `episode-trigger-to-first-fresh`。除非未来增加并验证 SDK write-completion 能力，否则不得把这些分段命名为 handshake、wire subscribe 或 ACK 时长。
+8. **最小恢复日志**：每次实际 business replacement 只记录 `trigger_kind=steady_silence|first_fresh_window_timeout`、`rtds_runtime_epoch`、当时可见的 `sdk_connection_generation`、`attempt_index`，以及 replacement start/runtime created 两个顺序事件。不为诊断增加四段专用计时状态、counter、schema或test seam；没有真实 replacement 时不推导恢复耗时，也不得把 local-applied 命名为 handshake、wire subscribe 或 ACK。
 9. **recovery episode**：当前没有 episode 时，由 steady threshold 命中，或一个已启用的 `first_fresh_observation_window` 首次到期且仍无 fresh，二者之一启动；到下一条合格实时更新到达结束。一个 episode 可以按观察窗口和 outer backoff 顺序执行多轮 runtime replacement，但任意时刻最多一个在途恢复动作；后续窗口到期或仅创建新 runtime 都不重启或结束 episode。
 
 ## 四、范围
@@ -96,7 +96,7 @@
 ### 5.1 单 owner 与 transport 优先仲裁
 
 1. 使用一个结构化 async ownership loop 管理唯一 `RtdsSdkRuntime`、source-task 级 `ever_received_fresh`、最后一条 fresh 的 monotonic 时刻、首条 fresh 窗口和外层 business backoff；除非测试证明必要，不新增大型形式化状态机或恢复框架。
-2. 项目 wrapper 必须以最小 observation surface 向 owner 提供 current state + generation transition，以及 initial 和后续 generation 的 local-applied 事实；该观测与现有消息 freshness fence 分离，不改变 queued-message fencing，不修改 vendor SDK，不增加第二 receiver/actor。
+2. 项目 wrapper 必须通过唯一 source owner 消费的同一 `recv_event` 流提供 current state + generation transition，以及 initial 和后续 generation 的 local-applied 事实；该观测不改变 queued-message freshness fence，不修改 vendor SDK，也不增加第二 RTDS message receiver、subscription actor或网络 owner。
 3. business deadline 只在当前 runtime 的 SDK 状态为 `Connected`、latest desired 对当前 `sdk_connection_generation` 已本地 applied，且没有 transport fault 时消耗时间。
 4. 在 owner 开始消费式 `shutdown_and_wait(self)` 之前，进入 `Connecting`、`Reconnecting` 或 `Disconnected` 时立即撤销旧 business deadline 和正在等待的 outer backoff，transport 恢复交给 SDK 现有 inner reconnect/backoff；不得因业务计时器销毁一个正在自然恢复的 runtime，也不得重置 SDK inner backoff。shutdown 调用开始后按普通顺序控制流等待完成，不再恢复旧 runtime。
 5. `ever_received_fresh` 在 source task 启动时为 `false`，收到第一条合格实时更新后置为 `true`，跨同一 source task 内的 runtime/generation replacement 保持为 `true`，不写 schema 或持久化 sidecar。
@@ -107,7 +107,7 @@
 ### 5.2 静默触发、teardown 与新 runtime
 
 1. steady threshold 命中时，同一 recovery episode 任意时刻最多一个在途恢复动作；fresh 到达前允许按首条 fresh 窗口和 outer backoff 顺序重试。第一次静默触发的完整替换可以立即开始，runtime replacement 本身不结束 episode；已启用的首条 fresh 窗口首次到期时则按 5.3 启动 episode 和 outer backoff。
-2. business action 执行前必须重新读取 current `rtds_runtime_epoch`、SDK generation、state、local-applied 和 fresh 状态；任一条件已变化则取消候选并回到对应 transport/fresh 路径。条件仍成立时，唯一 owner 直接消费 current runtime 并调用 `shutdown_and_wait(self)`；不增加 active-slot 状态机、CAS、mutex 或第二控制 owner。
+2. business deadline/backoff只负责唤醒唯一owner。已 ready 的message/state/applied分支优先；timer分支只读取一次可能异步变化的current SDK generation、state和local-applied并更新恢复状态。仍满足`Connected + local-applied`且恢复状态已到期时，owner直接消费current runtime并调用`shutdown_and_wait(self)`；不另建candidate对象、commit标记、active-slot状态机、CAS、mutex或第二控制owner，也不重复核对只由该owner修改/消费的`rtds_runtime_epoch`和fresh状态。
 3. `shutdown_and_wait(self)` 停止并 await 项目 actor、释放旧 receiver和全部 manager owner，最后等待保留的 state receiver 观察到 channel closure。旧 receiver 队列不会转移到新 runtime，不另建跨 runtime 数据路径 fence。
 4. 只有 teardown 完成后才可创建新的 `RtdsSdkRuntime` 并递增 `rtds_runtime_epoch`。任何时刻最多一个活动 RTDS socket，旧 connection loop 不得与新 runtime 并存或继续自然重连。
 5. coordinator stop 继续复用现有 `abort_with_permit()` 与 source task join，不新增 RTDS typed stop/control channel或 completion reply，也不要求 stop 请求的墙钟时刻与 runtime constructor 形成事务级线性化。business replacement 的 break-before-make 只约束同一 source task 创建后继 production runtime 的顺序。
@@ -120,7 +120,7 @@
 2. 新 runtime/generation 在首条 fresh 窗口内收到合格实时更新时，立即取消外层 business backoff、重置其尝试级别并进入 steady-state。
 3. 任一已启用的窗口到期仍无 fresh 时：若尚无 episode，先以 `first_fresh_window_timeout` 启动；无论 episode 是刚创建还是已经存在，都进入当前 episode 的 outer capped exponential backoff + jitter。等待期间当前静默但仍 `Connected + local applied` 的连接保持活动，fresh 到达即结束 episode并重置 backoff，不人为制造“先断线再等待”的无连接窗口。
 4. 在消费式 shutdown 调用开始前出现 transport 转换时取消当前 backoff wait，但不把同一 episode 的尝试级别重置为初始值。被取消的 wait 不算一次 replacement、不升级 outer level；自然新 generation 在下一次窗口超时后复用该 level，只有实际开始业务 replacement 才递增 replacement `attempt_index`。自然新 generation 只有在 `ever_received_fresh=true` 时才重新进入首条 fresh 窗口，否则保持 transport-only 等待。
-5. backoff 到期时按 5.2.2 重新核对；仅当目标仍相同、仍 `Connected + local applied` 且仍无 fresh 时，才开始下一轮 break-before-make。
+5. backoff 到期时按 5.2.2 处理；只有timer分支读取到current SDK仍为`Connected + local applied`且恢复状态仍到期，才开始下一轮 break-before-make。
 6. 永久共享上游静默时允许外层退避达到上限后继续等待和尝试，但不得 tight loop、不得结束 source/collector、不得虚报恢复。operator stop 继续服从现有 coordinator 合同。
 
 ### 5.4 订阅、数据、日志与 counter
@@ -134,16 +134,16 @@
 ### 5.5 必要而有界的测试
 
 1. 复用现有 fresh/snapshot/stale/wrong/invalid/duplicate 分类测试；只新增暂停时间的聚焦状态测试，覆盖首次 fresh 前无 business watchdog、后到 monotonic anchor、transport 转换取消候选、outer backoff 上限和 fresh reset。
-2. 一个 wrapper shutdown loopback：`shutdown_and_wait(self)` 返回前旧 connection loop 已结束且不再自然重连；不统计进程级 FD、RSS、task、watch、receiver或refcount。
-3. 一个连续两次 replacement、共三个 runtime epoch 的确定性 loopback：runtime 0 曾收到 fresh 后 stuck并完成第一次替换；runtime 1 在60秒窗口和当前outer delay后仍无fresh并完成第二次替换；runtime 2 收到 fresh并重置episode/backoff。逐次断言本地`shutdown_and_wait(self)`完成记录早于`runtime_created(n+1)`、每连接只有一次完整filtered subscription且没有`unsubscribe`；服务端只需最终观察到旧连接关闭且没有自然重连，不要求该观察事件早于新runtime创建，也不等待Close ACK。
-4. 不新增100-cycle完整runtime replacement、不新增完整multi-source fixture或资源计数框架。既有自然transport、完整runtime/source隔离、parser、UTC rollover和coordinated shutdown由现有测试及最终workspace suite回归。
-5. 开发中运行与改动对应的定向测试；最终只运行一次 `cargo test --workspace --locked`、一次 workspace 全量 clippy、fmt check 和 diff check。代码变化发生在最终全量验证之后才重跑受影响检查，不重复执行等价的 package/workspace 全量测试。
+2. 一个 wrapper shutdown loopback证明`shutdown_and_wait(self)`返回时旧connection-loop state channel已关闭；生产源码由同一owner直接表达“await该调用返回后才构造新runtime”。不为重复证明相邻源码顺序新增test-only lifecycle event、channel、counter或hook，也不统计进程级FD、RSS、task、watch、receiver或refcount。
+3. 一个连续两次 replacement、共三个 runtime epoch 的确定性 loopback：runtime 0 曾收到 fresh 后 stuck并完成第一次替换；runtime 1 在60秒窗口和当前outer delay后仍无fresh并完成第二次替换；runtime 2 收到 fresh并重置episode/backoff。该loopback证明生产分支实际完成两次顺序替换、每连接只有一次完整filtered subscription且没有`unsubscribe`；服务端只需最终观察到旧连接关闭且没有自然重连，不要求该观察事件早于新runtime创建，也不等待Close ACK。
+4. 历史自然transport 100-cycle测试和既有结果保留原样，不删除、不改写，但本事项不重新执行，也不把它们作为新business replacement的验收依据。本事项不新增100-cycle完整runtime replacement、完整multi-source fixture或资源计数框架。
+5. 开发和最终闭合只运行受影响的RTDS lib测试；另用`cargo test --workspace --locked --no-run`编译全部测试target，再运行workspace全target Clippy、fmt check和diff check。不得用默认workspace test重新执行历史100-cycle；若后续代码修复，只重跑直接受影响的测试或静态检查。
 
 ### 5.6 本地香港 VPN 8 小时只读 probe
 
 1. 只在需求参数、实现和前置测试获批并通过后执行。使用与 `run_rtds_source_with_spec()` 同模块的 `#[cfg(test)]`、`#[ignore]` 长运行 harness，直接调用该私有 runner，传入隔离临时 dataset root、持续 drain 的 in-memory `SourceEventSink`，并安装纯内存 active `RawDayGate`；不为 probe 公开 production API、重构 `emit_rtds_message()` 或新增 production seam。
 2. probe 不启动 `ManifestOwner`、Parquet/canonical writer，不传入或打开 canonical dataset root，不接触钱包、paper/live、远端服务或第二 RTDS owner。隔离由实际传参和进程启动路径保证，不要求 canonical root mtime/FD attestation。
-3. 记录 clean `HEAD`、执行命令、冻结参数、开始/结束UTC、进程内monotonic elapsed、退出状态、合格fresh数量、最大相邻fresh间隔、runtime错误数、自然重连数和business replacement数。只有真实发生replacement时才追加trigger、旧runtime关闭完成、新订阅和first fresh耗时。
+3. 记录 clean `HEAD`、执行命令、冻结参数、开始/结束UTC、进程内monotonic elapsed、退出状态、合格fresh数量、最大相邻fresh间隔、runtime错误数、自然重连数和business replacement数。只有真实发生replacement时，才根据已有replacement start/runtime created日志和fresh row如实报告可直接证明的事件顺序；不为probe补建四段专用计时状态或推导不存在的恢复分布。
 4. 开始和结束各记录一次不含凭据的公网出口与香港区域事实。该边界样本只支持“从香港线路开始/结束”的表述，不冒充8小时逐秒路由证明。
 5. 进程提前退出、crash或monotonic elapsed不足8小时表示probe未完成；开始或结束确认不在香港时不得标记为香港线路。观察到协议、顺序或恢复错误时直接记FAIL，不把已有证据作废后以重跑掩盖。
 6. 报告可将最长静默与历史 `6075.343s` 作跨环境数量级参考，但不得冒充香港本地与 AWS 爱尔兰的同环境因果对照。若没有可比真实事件，只能结论为“8 小时窗口稳定，真实事件效果未验证”。
@@ -161,7 +161,7 @@
 
 外层 backoff 复用现有私有 `retry_delay()` 的初始 `1s`、倍率 `2`、稳定 jitter `±20%`，hard cap 固定为 `300s`，总 attempts 和总 episode 时长不设上限；收到合格 fresh 后重置。不复用完整通用 supervisor，也不新增依赖。jitter seed 在 source task 启动时按现有 source-local supervisor 做法从一次 `now_ms()` 取得，并在该 task 的全部 outer attempts 中保持不变；这只决定同一 attempt 的确定性抖动，不改变上限或触发语义。`300s` 是控制永久停流时 socket/subscription churn 的工程政策取舍，不是三日 typed raw 推导出的外部 RTDS SLA。
 
-上述值适用于共同 RTDS 行为合同。当前代码只有 training 拥有真实 RTDS adapter；新恢复行为尚未实现，阶段1只在 training 实现与验证。future paper/live adapter 接入时必须使用同一值和语义，但须在各自独立事项中补充进程重启后的 `ever_received_fresh=false`、本机 handoff 时序/背压及资源验收，且不得复用 training 的 Parquet/manifest writer。
+上述值适用于共同 RTDS 行为合同。当前代码只有 training 拥有真实 RTDS adapter；阶段1已在该路径完成候选实现和本地验证，独立阶段终审及commit/push尚未闭合。future paper/live adapter 接入时必须使用同一值和语义，但须在各自独立事项中补充进程重启后的 `ever_received_fresh=false`、本机 handoff 时序/背压及资源验收，且不得复用 training 的 Parquet/manifest writer。
 
 ## 七、验收标准
 
@@ -173,12 +173,12 @@
 6. `rtds_runtime_epoch` 与 `sdk_connection_generation` 含义分离；现有 `reconnect_events` 语义不变，未新增 schema/counter/fence 框架。
 7. typed rows、分类、去重、timestamp/freshness、单 writer 和真实 gap 语义不回退；没有补写、伪造或第二路径。
 8. cold start首次fresh前无business watchdog、首次fresh后跨runtime/generation保持`ever_received_fresh=true`、两种recovery-episode入口、transport取消候选、wrapper shutdown和现有transport/parser/shutdown回归通过。
-9. 一个连续两次replacement、共三个runtime epoch的确定性loopback逐次证明本地`shutdown_and_wait(self)`完成记录早于`runtime_created(n+1)`、每连接一次filtered subscription、无`unsubscribe`，并在第三个runtime收到fresh后重置episode/backoff；服务端最终观察旧连接关闭且没有自然重连，但不承担跨端事件先后断言；本事项不新增100-cycle或进程资源矩阵。
-10. 每个 episode 记录 trigger kind，只报告带 attempt index 的 `episode-trigger-to-teardown-complete`、`runtime-create-to-local-applied`、`local-applied-to-first-fresh` 和 `episode-trigger-to-first-fresh`，不虚构 handshake/wire/ACK 指标。
+9. wrapper loopback证明`shutdown_and_wait(self)`返回时旧connection-loop state channel已关闭；生产源码明确await该调用后才创建新runtime；连续两次replacement、共三个runtime epoch的loopback证明该分支实际顺序执行两次、每连接一次filtered subscription、无`unsubscribe`，并在第三个runtime收到fresh后重置episode/backoff。不得为重复证明源码顺序新增test-only lifecycle hook；本事项不新增或重跑100-cycle，也不新增进程资源矩阵。
+10. 每次实际replacement只记录trigger kind、runtime epoch、SDK generation、attempt index及replacement start/runtime created事件；不增加四段专用计时状态、counter、schema或test seam，不虚构handshake/wire/ACK指标。
 11. 香港 VPN probe 使用同模块 ignored test harness、临时 root、纯内存 active `RawDayGate` 和持续 drain 的内存 sink；以退出状态和进程内monotonic elapsed证明连续运行8小时，起止各记录一次香港出口边界。没有可比真实故障时不声称效果已验证。
 12. 共同合同明确区分“适用角色”和“当前实现”：training 在本事项实现并完成全部聚焦测试与既有回归；paper/live 当前仍为 heartbeat-only，future 真实 RTDS adapter 由独立三件套实施、测试、验收和部署，但其恢复语义不得重新冻结。CLOB、Gamma、Binance 保持不变。
 13. 用户的持续执行授权覆盖本地authority同步、Rust/build/test/review/commit/push及阶段2本地香港VPN连续8小时只读公开网络probe，并按阶段顺序继续；capability失败、SDK缺口或新上下文/事实冲突必须停止。production release、部署、远端操作和数据清理保持独立边界。
 
 ## 八、当前授权边界
 
-完整参数、本需求、wrapper-first SDK路线、authority精确修改矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe均已获用户批准。两份当前authority同步、阶段0自审和独立复核已经通过；完成独立文档commit/push并核对三方ref一致后，继续阶段1 capability gate，无需重复申请普通实现授权。capability失败、官方SDK缺口或新的文档/代码/事实冲突仍必须停止；production release、部署、远端服务操作和数据清理不在当前授权边界。
+完整参数、本需求、wrapper-first SDK路线、authority精确修改矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe均已获用户批准。两份当前authority同步与阶段0发布已经闭合；阶段1候选实现及收窄后的本地验证门已通过，正在等待独立阶段终审，终审、commit/push及三方ref一致后继续阶段2，无需重复申请普通实现授权。capability失败、官方SDK缺口或新的文档/代码/事实冲突仍必须停止；production release、部署、远端服务操作和数据清理不在当前授权边界。

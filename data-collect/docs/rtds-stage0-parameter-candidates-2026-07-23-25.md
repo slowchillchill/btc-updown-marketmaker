@@ -29,7 +29,7 @@
 2. `first_fresh_observation_window = 60s`，anchor 采用当前 runtime/generation 首次同时满足 `Connected + latest desired local applied` 时的 monotonic 时刻，即取两个观测事件中较晚者；
 3. cold start 从未收到过合格 fresh 时，首条 fresh watchdog 保持禁用；同一 source task 一旦收到首条合格 fresh，后续 generation 才启用该窗口。
 
-这些值及第11节 outer backoff 现在组成完整冻结参数合同。用户已另行批准authority同步、本地实现及阶段2本地香港VPN连续8小时只读probe持续执行；当前代码只有training拥有真实RTDS adapter，新恢复行为尚未实现并将在阶段1仅对training实现与验证。future paper/live真实RTDS adapter接入时必须继承同一合同。production release和部署仍是独立边界。
+这些值及第11节 outer backoff 现在组成完整冻结参数合同。用户已另行批准authority同步、本地实现及阶段2本地香港VPN连续8小时只读probe持续执行；当前代码只有training拥有真实RTDS adapter，阶段1已完成training候选实现与收窄验证门，正在闭合独立终审。future paper/live真实RTDS adapter接入时必须继承同一合同。production release和部署仍是独立边界。
 
 ## 2. 输入完整性与 provenance
 
@@ -226,11 +226,7 @@ raw inter-arrival=272.179s
 
 ### 7.1 数据能证明什么
 
-typed raw 只保存收到的业务消息，没有保存 runtime 创建、SDK `Connected` 或 latest desired `local applied` 时刻。因此三日数据不能直接计算：
-
-```text
-local-applied-to-first-fresh
-```
+typed raw 只保存收到的业务消息，没有保存 runtime 创建、SDK `Connected` 或 latest desired `local applied` 时刻。因此三日数据不能直接计算每个 generation 从本地 applied 到首条 fresh 的真实间隔。
 
 唯一可近似观察的已知重启样本是 2026-07-24 collector 日内 reactivation：
 
@@ -251,7 +247,7 @@ difference=1.537s
 | `120s` | 样本内不减少候选上界，timeout/下一主动动作时点比 60 秒晚 60 秒 |
 | `300s` | 保守；比 60 秒少 1 个 generic 候选，timeout/下一主动动作时点晚 240 秒 |
 
-冻结前暂推荐并已由用户采纳 `60s`：它是三日 generic inter-arrival 敏感性分析中，不增加 60/90/120 秒共同候选集合的最短候选。该比较仍不是 generation 首条 fresh 的直接估计，因而不是外部 SLA。未来 probe 必须单独报告实际 `local-applied-to-first-fresh` 分布；若尾部接近该窗口，必须重新提交参数决策。
+冻结前暂推荐并已由用户采纳 `60s`：它是三日 generic inter-arrival 敏感性分析中，不增加 60/90/120 秒共同候选集合的最短候选。该比较仍不是 generation 首条 fresh 的直接估计，因而不是外部 SLA。未来 probe 只如实报告现有日志与fresh row能直接证明的样本；没有真实replacement或样本过少时不构造专用恢复耗时分布，也不自动重开参数决策。
 
 冻结前建议并已由用户采纳需求 5.3.1 的 anchor：
 
@@ -269,7 +265,7 @@ anchor = max(
 - 后到事件能唯一表达二者首次同时成立；
 - `local applied` 只表示 wrapper/actor 本地完成，不得命名为 wire send、server ACK 或业务订阅确认。
 
-当前 wrapper 内部已持有 SDK state receiver、connection generation 和 applied observation，所以不需要 vendor patch 或第二连接 owner就能设计出该 anchor；但当前 source-facing surface 还不充分：`recv_event_until()` 消费 transport state 变化而不返回 `Connecting/Reconnecting`，initial generation 的 local-applied 也可能被 freshness fence 吸收。故这里只证明 anchor 语义唯一且最小 wrapper-only 扩展有现成输入，不声称当前生产 surface 已经交付。阶段 0/1 仍须按计划验证 initial/后续 generation 与竞态。
+阶段0快照中，wrapper内部已有SDK state receiver、connection generation和applied observation，所以无需vendor patch或第二连接owner即可设计该anchor；当时source-facing surface尚未交付。阶段1候选实现现已通过同一`RtdsRuntimeEvent`流交付initial及后续generation的state/local-applied，并保留queued-message freshness fence；聚焦测试已覆盖initial/后续generation与排队旧消息边界，独立终审仍待闭合。
 
 ## 8. Cold-start 候选
 
@@ -444,4 +440,4 @@ total_elapsed_budget = None
 
 用户已选择`300s` hard cap：新runtime以后到monotonic anchor等待60秒仍无fresh，先等待当前outer delay，再完整换runtime；后续delay逐次增长且单次不超过300秒。总attempts和总episode时长均不设上限，fresh才结束episode并把outer level重置为初始值。`300s`用于限制永久停流时的socket/subscription churn，是工程政策取舍，不是三日数据推导出的RTDS业务SLA。
 
-不再为本事项增加teardown诊断周期或probe周期环境采样常量。业务replacement只记录实际shutdown开始/完成事件；8小时probe以进程内monotonic elapsed和退出状态证明持续运行，公网出口/香港区域只在开始与结束记录。这个精简不改变上方四项业务参数和outer backoff。
+不再为本事项增加teardown诊断周期或probe周期环境采样常量。业务replacement只记录有界的replacement start/runtime created事件及其trigger、runtime epoch、SDK generation和attempt index；8小时probe以进程内monotonic elapsed和退出状态证明持续运行，公网出口/香港区域只在开始与结束记录。这个精简不改变上方四项业务参数和outer backoff。

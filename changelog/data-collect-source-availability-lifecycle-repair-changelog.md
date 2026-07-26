@@ -616,3 +616,15 @@
 - 例外只允许同一RTDS owner在source task此前收到fresh后，按`300s steady + 60s后到monotonic first-fresh + cold-start disabled + 1s × 2 ±20%/300s cap/unlimited`串行break-before-make替换整个runtime。它不恢复同socketrefresh、one-shot `request_reconnect`、generation预算、第二owner/socket、gap/lag/告警或进程退出。
 - AC4明确拆成从未fresh与此前有fresh两个fixture；AC7保留cold-start同socket，AC9保留真实transport恢复且无one-shot ticket，AC10继续要求删除该能力。用户随后明确否决新增100-cycle与完整资源矩阵；AC25改为保留既有自然Close历史/现存证据，新business replacement只以连续两次replacement、共三个runtime epoch的精确顺序测试验收。
 - 当前代码只有training拥有真实RTDS adapter；新恢复行为尚未实现，专项阶段1只在training实现与验证。future paper/live真实RTDS adapter的实现、handoff、测试和部署仍须独立三件套，但连接生命周期必须继承相同共同合同，不再独立冻结；当前paper/live仍heartbeat-only。CLOB、Gamma、Binance不变。
+
+## 2026-07-26：后继RTDS专项移除历史100-cycle执行门
+
+- 用户进一步确认既有100-cycle本身也是过度校验。本文已完成阶段3/9的自然Close 100-cycle测试与结果继续作为当时历史事实保留，不删除、不改写；后继RTDS business replacement专项不重新执行，也不把它作为新路径的验收依据。
+- 后继专项的最小证据改为wrapper state-channel closure测试、production同一owner中`shutdown_and_wait(self).await`后创建新runtime的直接源码顺序，以及连续两次replacement/三个runtime epoch聚焦测试。不得增加test-only lifecycle hook、四段专用恢复耗时或进程资源矩阵；该收窄不改变本文其他source已完成的历史验收。
+
+## 2026-07-26：后继RTDS专项阶段1候选实现通过收窄验证
+
+- training唯一RTDS adapter已实现冻结的business replacement窄例外；同一owner消费单一事件流，旧runtime完成消费式shutdown后才创建新runtime。该实现不恢复同socket refresh或one-shot `request_reconnect`，不增加第二owner/socket、gap/lag/告警或进程退出。
+- 既有聚焦测试覆盖wrapper state-channel closure、initial/后续generation观测、queued-message freshness fence、backoff增长/reset/cap及三个runtime两次replacement。终审成立项以现有测试内的最小断言和删除timer重复事实读取闭环，没有新增100-cycle、资源矩阵或test-only hook。
+- 修正后RTDS lib精确测试20项全部通过。历史100-cycle在后继专项早期、最终简化裁决前曾误跑一次；裁决后的收窄门没有再次执行，也未把它作为新business replacement验收依据。
+- 当前专项为`STAGE1_IMPLEMENTED_VALIDATION_PASSED_REVIEW_PENDING`；future paper/live共同合同与其他source保持不变。

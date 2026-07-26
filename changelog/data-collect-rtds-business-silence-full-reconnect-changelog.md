@@ -6,7 +6,7 @@
 >
 > 对应计划：`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`
 >
-> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CAPABILITY_PENDING`。该状态只在承载本记录的阶段0文档commit成功push且本地HEAD、upstream与远端ref一致后生效。
+> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_IMPLEMENTED_VALIDATION_PASSED_REVIEW_PENDING`。阶段0文档commit已push并核对本地HEAD、upstream与远端ref一致；阶段1候选实现与收窄验证门已通过，正在闭合独立终审。
 
 ## 2026-07-21：用户选择彻底换连接方向
 
@@ -170,3 +170,27 @@
 - 三名`gpt-5.6-sol`/`ultra`独立subagent分别审查stop/ownership、测试范围和8小时probe。最终Critical/Important/Minor均为0。
 - 终审唯一成立问题是把服务端观察旧socket关闭的时刻错误地设为新runtime创建前置条件。现行合同已改为只断言本地`shutdown_and_wait(self)`完成记录早于`runtime_created(n+1)`；服务端只需最终观察旧连接关闭且没有自然重连，不承担跨端事件先后断言，也不等待Close ACK。
 - 承载本记录的阶段0文档commit成功push且本地HEAD、upstream与远端ref一致后，状态升级为`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CAPABILITY_PENDING`，并按既有持续授权直接进入阶段1任务1.0。若push或ref核对失败，该条件式闭合不生效。
+
+## 2026-07-26：阶段1再次删除过度校验
+
+- 阶段1初版实现曾引入重复candidate核对、test-only lifecycle记录、短时间负断言及额外观测receiver；主代理已在用户本次裁决前把这些实现删除，当前wrapper只通过唯一source owner消费的同一`RtdsRuntimeEvent`流交付message/state/local-applied，production没有第二RTDS message receiver、subscription actor或网络owner。
+- 用户确认“简单、准确、可靠”优先，并明确把既有100-cycle也判定为本事项的过度校验。最终裁决是保留历史100-cycle测试文件与既有结果，不删除、不改写，但本事项不重新执行，也不把它们作为新business replacement的验收依据。
+- 四段专用恢复耗时、owner-local `rtds_runtime_epoch`/fresh重复核对和test-only lifecycle completion record均从当前需求与计划删除。timer分支只读取一次可能异步变化的SDK generation/state/local-applied；replacement日志只保留trigger、runtime epoch、SDK generation、attempt index及replacement start/runtime created事件。
+- break-before-make采用最小组合证据：wrapper loopback证明`shutdown_and_wait(self)`返回时state channel已关闭；生产源码直接await该调用后才构造新runtime；三个runtime聚焦loopback实际执行两次replacement并在第三个runtime收到fresh后重置episode/backoff。不得为复述相邻源码顺序增加人为延迟或test-only hook。
+- 阶段1最终门收窄为RTDS lib受影响测试、`cargo test --workspace --locked --no-run`、workspace全target Clippy、fmt和diff check。默认workspace test不执行，避免重跑历史100-cycle；阶段2只报告已有日志和fresh row能够直接证明的事实，不强制构造四段耗时分布。
+
+## 2026-07-26：阶段1候选实现与收窄验证门通过
+
+- wrapper新增单一`RtdsRuntimeEvent`流中的state/local-applied观测，保留既有message freshness fence；source没有克隆第二message/state/applied receiver，也没有新增actor、socket、vendor patch或test-only lifecycle channel。
+- `RtdsBusinessRecovery`只保存冻结行为直接需要的timing、稳定jitter seed、generation、Connected/applied后到观测、一个带kind的deadline、`ever_received_fresh`、episode trigger、replacement attempt和下一outer level。启动、普通message和新runtime创建后的重复SDK核对已删除，只在deadline到期时读取一次current SDK generation/state/local-applied。
+- 自审发现原biased事件优先可能被连续非fresh消息饿死timer；实现改为每次事件处理后检查到期状态。三-runtime测试在runtime 0持续发送ignored消息，证明fresh仍优先且非fresh流量不能阻止300秒等价deadline。
+- fresh的monotonic观测时刻在owner取得消息时冻结，不被下游queue等待向后推迟。实际replacement只输出两条有界日志，并包含trigger、runtime epoch、SDK generation和attempt index。
+- `cargo test -p data-collect --locked --lib rtds_ -- --test-threads=1`通过20项、331项被精确filter；`cargo test --workspace --locked --no-run`完成全部测试target编译；workspace全target Clippy `-D warnings`、fmt check和diff check均退出0。历史100-cycle在本阶段早期、最终简化裁决前曾误跑一次；裁决后的收窄验证门没有再次执行，也未把该结果作为新路径验收依据。独立阶段终审仍待闭合。
+
+## 2026-07-26：阶段1终审成立项完成最小修正
+
+- wrapper后续generation测试在既有queued-message场景内补充`State + Applied`断言；paused-time恢复测试先实际提交一次outer backoff replacement使级别增长，再证明fresh把新episode恢复到初始级别，并由既有`retry_delay()`单点边界断言证明`300s`单次上限。没有新增测试文件、循环、资源矩阵或框架。
+- timer分支改为各读取一次current state、generation、desired revision和applied observation，再用同一快照判断local-applied；删除会二次读取state/generation的source-facing predicate，避免重复校验及跨generation瞬时组合。
+- 两条有界operator日志键精确统一为`trigger_kind`、`rtds_runtime_epoch`、`sdk_connection_generation`和`attempt_index`，与冻结术语及阶段2解析入口一致。
+- 修正后RTDS lib精确测试仍为20项全部通过、331项被filter；最终workspace target编译、Clippy、fmt和diff gate也均退出0。
+- 聚焦测试与需求AC的最小映射如下：`rtds_receive_deadline_returns_none_instead_of_a_fatal_timeout`及`rtds_old_queued_message_is_preserved_but_cannot_recover_new_generation`以initial/后续观测和排队旧消息覆盖AC2/AC7；`rtds_shutdown_waits_for_connection_loop_completion`以state-channel closure覆盖AC3/AC9；`rtds_business_timer_uses_late_anchor_and_preserves_cancelled_backoff_level`以cold start、后到anchor、transport取消、实际level增长、fresh reset和单点cap覆盖AC2/AC5/AC8；`rtds_business_silence_replaces_two_runtimes_then_fresh_resets_the_episode`以连续非fresh流量、三个runtime、两次replacement、每连接一次filtered subscription和第三runtime fresh覆盖AC3--AC7及AC9。上述输入、预期与实际均通过，未新增重复分类矩阵。
