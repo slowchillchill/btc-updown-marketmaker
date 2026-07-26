@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_IMPLEMENTED_VALIDATION_PASSED_REVIEW_PENDING`。用户已于 2026-07-26 冻结第六节完整行为参数，并批准本需求、wrapper-first SDK 路线、精确 authority 修改矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe：`steady=300s`、`first-fresh=60s/后到 monotonic anchor`、首次 fresh 前禁用 cold-start watchdog，后续完整换连接前使用 `1s × 2 ±20%`、单次最长 `300s`、fresh 后重置且总尝试次数不限的 outer backoff。阶段0文档commit已push并核对本地HEAD、upstream与远端ref一致；当前代码只有 training 拥有真实 RTDS adapter，阶段1实现与收窄后的验证门已经通过，正在等待独立阶段终审。future paper/live 真实 RTDS adapter 一旦另项接入，必须继承同一恢复合同，不得重新冻结另一套语义。production release、部署、远端操作和数据清理仍不在本需求范围。
+> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_PROBE_PENDING`。该阶段1闭合状态仅在承载本记录的文档commit成功push且三方ref一致后生效。用户已于 2026-07-26 冻结第六节完整行为参数，并批准本需求、wrapper-first SDK 路线、精确 authority 修改矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe：`steady=300s`、`first-fresh=60s/后到 monotonic anchor`、首次 fresh 前禁用 cold-start watchdog，后续完整换连接前使用 `1s × 2 ±20%`、单次最长 `300s`、fresh 后重置且总尝试次数不限的 outer backoff。阶段0已完成参数/authority同步、独立审查及commit `0a2153e76dd9824b675a54cd93cc7f92a08e300f`发布；阶段1已完成实现、收窄验证、三路独立终审及`ef200a6e89eaaee9f19ff49a00232b5004825ce7`/`a29486babe2682481549cfc0b95b010784d653f0`分离发布。当前代码只有 training 拥有真实 RTDS adapter。future paper/live 真实 RTDS adapter 一旦另项接入，必须继承同一恢复合同，不得重新冻结另一套语义。production release、部署、远端操作和数据清理仍不在本需求范围。
 
 ## 一、目标与已决定方向
 
@@ -161,7 +161,7 @@
 
 外层 backoff 复用现有私有 `retry_delay()` 的初始 `1s`、倍率 `2`、稳定 jitter `±20%`，hard cap 固定为 `300s`，总 attempts 和总 episode 时长不设上限；收到合格 fresh 后重置。不复用完整通用 supervisor，也不新增依赖。jitter seed 在 source task 启动时按现有 source-local supervisor 做法从一次 `now_ms()` 取得，并在该 task 的全部 outer attempts 中保持不变；这只决定同一 attempt 的确定性抖动，不改变上限或触发语义。`300s` 是控制永久停流时 socket/subscription churn 的工程政策取舍，不是三日 typed raw 推导出的外部 RTDS SLA。
 
-上述值适用于共同 RTDS 行为合同。当前代码只有 training 拥有真实 RTDS adapter；阶段1已在该路径完成候选实现和本地验证，独立阶段终审及commit/push尚未闭合。future paper/live adapter 接入时必须使用同一值和语义，但须在各自独立事项中补充进程重启后的 `ever_received_fresh=false`、本机 handoff 时序/背压及资源验收，且不得复用 training 的 Parquet/manifest writer。
+上述值适用于共同 RTDS 行为合同。当前代码只有 training 拥有真实 RTDS adapter；阶段1已在该路径完成实现、本地验证、三路独立终审及分离commit/push。future paper/live adapter 接入时必须使用同一值和语义，但须在各自独立事项中补充进程重启后的 `ever_received_fresh=false`、本机 handoff 时序/背压及资源验收，且不得复用 training 的 Parquet/manifest writer。
 
 ## 七、验收标准
 
@@ -181,4 +181,4 @@
 
 ## 八、当前授权边界
 
-完整参数、本需求、wrapper-first SDK路线、authority精确修改矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe均已获用户批准。两份当前authority同步与阶段0发布已经闭合；阶段1候选实现及收窄后的本地验证门已通过，正在等待独立阶段终审，终审、commit/push及三方ref一致后继续阶段2，无需重复申请普通实现授权。capability失败、官方SDK缺口或新的文档/代码/事实冲突仍必须停止；production release、部署、远端服务操作和数据清理不在当前授权边界。
+完整参数、本需求、wrapper-first SDK路线、authority精确修改矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe均已获用户批准。两份当前authority同步、阶段0发布及阶段1实现/验证/终审/发布已经闭合；本闭合文档生效后的下一游标为阶段2，无需重复申请普通实现授权。新的文档/代码/事实冲突仍必须停止；production release、部署、远端服务操作和数据清理不在当前授权边界。

@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_IMPLEMENTED_VALIDATION_PASSED_REVIEW_PENDING`。阶段0文档commit已push并核对本地HEAD、upstream与远端ref一致。用户已于 2026-07-26 冻结完整行为参数并批准本需求、wrapper-first SDK路线、authority精确修改矩阵和本地持续执行；阶段1已在当前唯一training RTDS adapter中完成候选实现及收窄后的本地验证，正在等待独立阶段终审。future paper/live 真实 RTDS adapter 一旦由独立事项接入，必须继承同一行为合同，不得重新冻结另一套恢复政策。
+> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_PROBE_PENDING`。该阶段1闭合状态仅在承载本记录的文档commit成功push且三方ref一致后生效。阶段0已完成参数/authority同步、独立审查及commit `0a2153e76dd9824b675a54cd93cc7f92a08e300f`发布；阶段1已完成实现、收窄验证、三路独立终审及`ef200a6e89eaaee9f19ff49a00232b5004825ce7`/`a29486babe2682481549cfc0b95b010784d653f0`分离发布。用户已于 2026-07-26 冻结完整行为参数并批准本需求、wrapper-first SDK路线、authority精确修改矩阵和本地持续执行；future paper/live 真实 RTDS adapter 一旦由独立事项接入，必须继承同一行为合同，不得重新冻结另一套恢复政策。
 
 本计划以最小source-local ownership loop为边界，不预设大型状态机、通用配置框架、新production probe seam、额外schema/counter或第二数据路径。每个阶段完成后先自审，再由继承`gpt-5.6-sol`/`ultra`的独立subagent审查，成立问题闭环后才发布。本地authority同步、Rust/build/test/review/commit/push及阶段2本地香港VPN连续8小时只读probe按既定阶段顺序持续执行，不重复申请普通实现授权，也不合并阶段、diff或commit；capability失败、SDK缺口或新冲突仍必须停止。production release/部署保持独立边界。
 
@@ -131,15 +131,16 @@
 - 步骤 1.6.2：把future adapter的强制验收入口保留在paper/live集成说明。
   - 验证：未来独立事项必须继承相同fresh classifier、参数/backoff、唯一owner/socket、break-before-make与cold-start重启语义，并另测本机handoff时序/背压；不得复用training Parquet/manifest/dedupe-restore。
 
-### 阶段1候选执行结果
+### 阶段1执行结果
 
-> 状态：`IMPLEMENTED_VALIDATION_PASSED_REVIEW_PENDING`。
+> 状态：`COMPLETE`。
 
 - wrapper使用唯一source owner消费的同一`RtdsRuntimeEvent`流交付message/state/local-applied；既有queued-message freshness fence保留，vendor SDK未修改。
 - `shutdown_and_wait(self)`消费旧runtime、结束并await subscription actor、释放wrapper owner并等待state channel关闭；production同一owner随后才创建新runtime。
 - source-local最小恢复状态实现冻结的`300s steady + 60s后到monotonic anchor + cold-start disabled + 1s × 2 ±20%/300s cap/unlimited`合同。已ready事件先处理；每次事件处理后若deadline到期，timer只读取一次current SDK generation/state/local-applied，因此fresh优先且连续非fresh消息不会饿死watchdog。
 - 三-runtime loopback完成两次replacement、每连接一次完整filtered subscription、无`unsubscribe`，第三runtime fresh重置episode/backoff。历史100-cycle在本阶段早期、最终简化裁决前曾误跑一次；裁决后的收窄验证门没有再次执行，也未把该结果作为新路径验收依据。
-- `cargo test -p data-collect --locked --lib rtds_ -- --test-threads=1`通过20项；`cargo test --workspace --locked --no-run`完成全部测试target编译；workspace全target Clippy `-D warnings`、fmt check和diff check均通过。独立阶段终审闭合后才把阶段1标记完成。
+- `cargo test -p data-collect --locked --lib rtds_ -- --test-threads=1`通过20项；`cargo test --workspace --locked --no-run`完成全部测试target编译；workspace全target Clippy `-D warnings`、fmt check和diff check均通过。runtime、测试和authority三路独立终审均为Critical/Important/Minor 0并PASS。
+- 阶段1文档验收commit为`ef200a6e89eaaee9f19ff49a00232b5004825ce7`，Rust实现commit为`a29486babe2682481549cfc0b95b010784d653f0`；二者均已push且本地HEAD、upstream与远端ref核对一致。闭合文档生效后的下一游标为阶段2。
 
 ## 阶段 2：本地香港 VPN 连续 8 小时只读 probe
 
@@ -171,4 +172,4 @@
 
 ## 本轮文档执行结果
 
-三日真实RTDS typed raw参数分析、任务0.1--0.4及全部用户裁决已完成；阶段0文档commit已push并核对本地HEAD、upstream与远端ref一致。冻结合同为`steady=300s`、`first-fresh=60s/后到 monotonic anchor`、cold-start首次fresh前禁用，以及outer `1s × 2 ±20%`、hard cap=`300s`、fresh重置、总尝试不限；整个runtime替换代次统一命名为`rtds_runtime_epoch`。共同合同适用于training及future paper/live真实RTDS adapter；当前只有training拥有真实RTDS adapter，阶段1候选实现和本地验证已通过，独立终审尚未闭合。历史100-cycle只保留为旧阶段事实，不在本事项重跑；香港VPN probe、production release和部署尚未执行。
+三日真实RTDS typed raw参数分析、任务0.1--0.4及全部用户裁决已完成。阶段0已完成参数/authority同步、独立审查及commit `0a2153e76dd9824b675a54cd93cc7f92a08e300f`发布；阶段1已完成实现、收窄验证、三路独立终审及文档/Rust分离发布。冻结合同为`steady=300s`、`first-fresh=60s/后到 monotonic anchor`、cold-start首次fresh前禁用，以及outer `1s × 2 ±20%`、hard cap=`300s`、fresh重置、总尝试不限；整个runtime替换代次统一命名为`rtds_runtime_epoch`。共同合同适用于training及future paper/live真实RTDS adapter；当前只有training拥有真实RTDS adapter。历史100-cycle只保留为旧阶段事实，最终简化裁决后没有再次执行；香港VPN probe、production release和部署尚未执行。

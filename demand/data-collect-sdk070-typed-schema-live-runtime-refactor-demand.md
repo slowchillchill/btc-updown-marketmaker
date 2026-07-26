@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_IMPLEMENTED_VALIDATION_PASSED_REVIEW_PENDING`。RTDS阶段0已以commit `0a2153e76dd9824b675a54cd93cc7f92a08e300f`闭合并push，且三方ref一致；阶段1候选实现与收窄验证门已通过，正在闭合独立终审。总事项阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_PROBE_PENDING`。RTDS阶段1闭合状态仅在承载本记录的文档commit成功push且三方ref一致后生效。RTDS阶段0已以commit `0a2153e76dd9824b675a54cd93cc7f92a08e300f`闭合并push；阶段1文档验收commit `ef200a6e89eaaee9f19ff49a00232b5004825ce7`与Rust实现commit `a29486babe2682481549cfc0b95b010784d653f0`均已push且三方ref一致，三路独立终审均为PASS。总事项阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime终态为
 > `SDK_070_RUNTIME_USABLE`。阶段1闭合时的typed终态为
@@ -75,7 +75,7 @@
 > Important 0 / Minor 0。按用户批准的方案A，本文条件式记录`2-REST_CLOSED`与
 > 核心总事项`CORE_COMPLETE`：只有承载本记录的closure commit成功push且本地HEAD、
 > upstream与远端ref一致后才生效。RTDS行为专项当前为
-> `RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_IMPLEMENTED_VALIDATION_PASSED_REVIEW_PENDING`；该状态来自RTDS专项阶段1实际实现与验证，不由核心事项闭合自动升级。
+> `RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_PROBE_PENDING`；该状态来自RTDS专项阶段1实际实现、验证、终审与发布，不由核心事项闭合自动升级。
 
 ## 一、决策结论与目标
 
@@ -86,7 +86,7 @@
 3. “无损”精确定义为：在官方 SDK 成功解码并执行现行 target-market admission 后，对本事项当前可执行消费者和既有已批准合同所需的 retained业务字段、数组顺序、decimal文本精度、source/receive time、market/asset identity和collector provenance无损。当前硬门覆盖 collector canonical domain、v3 writer/reader、resolution recovery、manifest和training cold-consumer contract；future paper/live映射只是非阻断静态兼容附件，不能自行创造必需字段或冒充真实消费者。无损不包含被现行 admission排除的非目标entry、外部metadata join字段、原始WebSocket bytes或用户明确排除的venue `hash`。若要求逐字段重建过滤前SDK message，则不能同时维持当前范围并删除这些字段；本事项选择目标消费语义无损，而不是source-native全量归档。
 4. manifest/finalized-file SHA-256、artifact row/byte facts和原子发布校验继续保留。平台 `hash`、当前内存 SHA-256 dedupe fingerprint、manifest file SHA-256 是三种不同对象，不得因名称相似一起删除。
 5. `data-collect/src/live_runtime.rs` 按真实 owner 与职责机械拆分；先冻结共同可观察合同，再把最小 Polymarket owner、最小 RTDS owner和其余重构作为三个独立分支。v3只依赖 Polymarket分支收口，RTDS只依赖RTDS分支收口，其余重构不得阻塞二者；死代码仅在对应替代owner完成或不可达证明成立后删除。
-6. 将 `demand/data-collect-rtds-business-silence-full-reconnect-demand.md` 作为本总事项的 RTDS 专项合同纳入执行顺序；完整参数、需求、wrapper-first SDK路线、精确authority矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe均已获批，阶段0 authority同步、自审、独立终审及文档commit/push已经闭合。当前状态为`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_IMPLEMENTED_VALIDATION_PASSED_REVIEW_PENDING`。当前代码只有training拥有真实RTDS adapter；阶段1已在training完成候选实现与收窄验证门，正在闭合独立终审。future paper/live真实RTDS adapter由独立事项实施、测试和部署，但必须继承同一恢复合同。
+6. 将 `demand/data-collect-rtds-business-silence-full-reconnect-demand.md` 作为本总事项的 RTDS 专项合同纳入执行顺序；完整参数、需求、wrapper-first SDK路线、精确authority矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe均已获批。阶段0已完成参数/authority同步、审查与`0a2153e76dd9824b675a54cd93cc7f92a08e300f`发布；阶段1已完成实现、验证、三路独立终审及`ef200a6e89eaaee9f19ff49a00232b5004825ce7`/`a29486babe2682481549cfc0b95b010784d653f0`分离发布，当前状态为`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_PROBE_PENDING`。当前代码只有training拥有真实RTDS adapter；future paper/live真实RTDS adapter由独立事项实施、测试和部署，但必须继承同一恢复合同。
 7. `METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`：用户已批准新增`polymarket_market_metadata_v4`作为未来current metadata schema；它复用既有`polymarket_market_metadata` artifact、writer和manifest mapping，保留metadata v3的五种row kind与既有字段语义，只追加两个nullable WS claimant外键字段。metadata v3 schema/version立即冻结且不再追加字段，activation前仍承载current metadata new-write，activation后不再由current runtime new-write；不新增artifact、sidecar、digest或第二writer。公开offline legacy writer仍可用于历史fixture、兼容测试和本事项bounded A/B，但不得接入current runtime或canonical production root。
 
 最终目标不是单纯减少文件行数，而是同时做到：
@@ -381,7 +381,7 @@ closure commit `582eb154687c4c0522615753b3fc1903f2e833f3`已推送且三方ref
 - `demand/data-collect-source-availability-lifecycle-repair-demand.md` 中 RTDS 长静默 generation 不变、无 collector silence timer 的条款；
 - 尚未在阶段1替换的“静默不重连”回归测试。
 
-用户已裁决该冲突并批准完整参数、RTDS新需求、wrapper-first SDK路线、精确authority修改矩阵和持续执行范围。4A相反authority同步、自审、独立复核及文档commit/push已经闭合；4B teardown capability已通过，training候选实现与收窄验证门已完成，正在闭合独立终审。future paper/live真实RTDS adapter必须继承共同恢复合同，但本事项不新增其adapter、handoff或部署。
+用户已裁决该冲突并批准完整参数、RTDS新需求、wrapper-first SDK路线、精确authority修改矩阵和持续执行范围。4A相反authority同步及4B teardown capability/training实现均已完成验证、独立终审、分离commit/push和三方ref核对。future paper/live真实RTDS adapter必须继承共同恢复合同，但本事项不新增其adapter、handoff或部署。
 
 RTDS typed row/schema 不属于这次 `polymarket_orderbook_v3` 列删除。不得借 RTDS 子事项删除 RTDS、Binance 或其他 source 的 `source_native_payload_json`。
 
@@ -628,7 +628,7 @@ v3 writer 不得包含：
 
 1. 详细行为、术语、参数候选、测试、长跑、授权和性能门只以纳入的 RTDS demand/plan为准，本总需求不复制第二套合同；typed-contract字段裁决不是其依赖。umbrella只消费专项已记录的状态与入口/出口，不重扫数据、不重算参数候选、不重建delta/test矩阵，也不维护第二执行游标。
 2. `4A_AUTHORITY`的完整参数、最终需求、精确authority delta、wrapper-first路线与持续执行入口均已满足；专项矩阵同步、自审、独立审查、文档commit/push及三方ref核对已经闭合。
-3. `4B_IMPLEMENTATION`已证明官方SDK + 当前最小wrapper能够完成真实teardown，并在training完成候选实现及收窄验证门；当前只待独立阶段终审和分离的Rust/闭合文档commit/push。
+3. `4B_IMPLEMENTATION`已证明官方SDK + 当前最小wrapper能够完成真实teardown，并在training完成实现、收窄验证、三路独立终审、分离commit/push和三方ref核对；本闭合文档生效后的下一游标为专项阶段2。
 4. teardown能力门已通过且未修改vendor SDK、未创建raw WebSocket旁路；若终审发现新冲突才暂停RTDS，不反向阻断SDK、v3或其他已闭合分支。
 5. RTDS authority、Rust实现和`polymarket_orderbook_v3` schema不得混在同一个diff/commit。
 
@@ -685,7 +685,7 @@ root只保留 facade/config/composition；职责、测试和 visibility按唯一
 
 ### AC-12 RTDS
 
-专项完整参数、最终需求、SDK路线、精确authority修改矩阵和持续执行范围已经获批；4A同步、审查、文档commit/push及三方ref核对已经闭合。4B teardown capability、training候选实现和收窄验证门均已通过，正在闭合独立终审。future paper/live真实RTDS adapter必须继承共同合同，但实际adapter、handoff、长跑和部署继续另立三件套。终审发现新冲突只记录对应真实阻断，不阻塞SDK、v3或其他已闭合分支。
+专项完整参数、最终需求、SDK路线、精确authority修改矩阵和持续执行范围已经获批；4A authority同步、审查与文档发布已闭合，4B实现、验证、三路终审及分离发布已闭合。本闭合文档生效后的下一游标为阶段2本地香港VPN连续8小时只读probe。future paper/live真实RTDS adapter必须继承共同合同，但实际adapter、handoff、长跑和部署继续另立三件套。新冲突只记录对应真实阻断，不阻塞SDK、v3或其他已闭合分支。
 
 ### AC-13 artifact 与 manifest
 

@@ -703,3 +703,9 @@
 - 冻结的`300s steady + 60s后到monotonic first-fresh + cold-start disabled + 1s × 2 ±20%/300s cap/unlimited`合同由最小状态与三个runtime/两次replacement测试覆盖；终审成立项只在既有测试中补充后续generation观测、实际level增长后fresh reset，并删除timer的重复SDK事实读取。
 - 修正后RTDS lib精确测试20项全部通过、331项被filter。历史100-cycle在本阶段早期、最终简化裁决前曾误跑一次；裁决后的收窄验证门没有再次执行，也未把该结果作为新路径验收依据。
 - 当前为`STAGE1_IMPLEMENTED_VALIDATION_PASSED_REVIEW_PENDING`；独立终审和分离的Rust/闭合文档commit/push完成前不记Stage1闭合。
+
+## 2026-07-26：RTDS阶段1终审与发布闭合
+
+- runtime、测试和authority三路独立终审最终均为PASS，Critical/Important/Minor均为0；RTDS精确测试、workspace测试target编译、Clippy、fmt和diff check全部通过。
+- 文档验收commit `ef200a6e89eaaee9f19ff49a00232b5004825ce7`与Rust实现commit `a29486babe2682481549cfc0b95b010784d653f0`已分离push，且本地HEAD、upstream与远端ref一致。
+- 承载本记录的闭合文档commit成功push且三方ref一致后，阶段1状态更新为`STAGE1_CLOSED_STAGE2_PROBE_PENDING`。下一游标仅为本地香港VPN连续8小时只读RTDS probe；paper/live、其他source、production、部署和远端边界不变。

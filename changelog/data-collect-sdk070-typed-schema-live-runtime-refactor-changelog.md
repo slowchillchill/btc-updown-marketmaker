@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_IMPLEMENTED_VALIDATION_PASSED_REVIEW_PENDING`。RTDS阶段0已以commit `0a2153e76dd9824b675a54cd93cc7f92a08e300f`闭合并push，且三方ref一致；阶段1候选实现与收窄验证门已通过，正在闭合独立终审。总事项阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_PROBE_PENDING`。RTDS阶段1闭合状态仅在承载本记录的文档commit成功push且三方ref一致后生效。RTDS阶段0已以commit `0a2153e76dd9824b675a54cd93cc7f92a08e300f`闭合并push；阶段1文档验收commit `ef200a6e89eaaee9f19ff49a00232b5004825ce7`与Rust实现commit `a29486babe2682481549cfc0b95b010784d653f0`均已push且三方ref一致，三路独立终审均为PASS。总事项阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
 > `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
@@ -38,7 +38,7 @@
 > Stage5、Stage6与2-REST均已完成各自实现、完整门和独立终审。按用户批准的
 > 方案A，本文条件式记录`2-REST_CLOSED`与核心总事项`CORE_COMPLETE`：只有承载
 > 本记录的closure commit成功push且本地HEAD、upstream与远端ref一致后才生效。
-> RTDS行为专项当前为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_IMPLEMENTED_VALIDATION_PASSED_REVIEW_PENDING`。
+> RTDS行为专项当前为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_PROBE_PENDING`。
 > 本文件只记录本组三件套的事实、冲突、决定与执行，不回写旧changelog。
 
 ## 2026-07-24：用户要求建立一个新的总事项
@@ -1892,3 +1892,10 @@ migration、数据删除、public-network smoke或RTDS参数/行为实施。
 - 终审发现并完成三项手术式修正：后续generation补充State/Applied断言；fresh reset测试先实际升级outer level再证明重置；timer使用同一次state/generation/applied快照，删除重复SDK事实核对。operator日志键同步为冻结的四个术语。
 - 修正后RTDS lib精确测试20项全部通过、331项被filter。历史100-cycle在本阶段早期、最终简化裁决前曾误跑一次；裁决后的收窄验证门没有再次执行，也未把该结果作为4B验收依据。
 - 当前状态为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_IMPLEMENTED_VALIDATION_PASSED_REVIEW_PENDING`；独立终审与分离的Rust/闭合文档commit/push完成后才可升级为Stage1 closed。
+
+## 2026-07-26：RTDS阶段1三路终审与分离发布闭合
+
+- runtime、测试和authority三路`gpt-5.6-sol`/Ultra独立终审最终均为`PASS`，Critical/Important/Minor均为0；成立问题已全部以现有测试和最小accessor/log修正闭环。
+- RTDS lib精确测试20项、workspace全部测试target编译、workspace全target Clippy `-D warnings`、fmt和diff check全部通过；最终裁决后未再执行历史100-cycle。
+- 文档验收commit `ef200a6e89eaaee9f19ff49a00232b5004825ce7`与Rust实现commit `a29486babe2682481549cfc0b95b010784d653f0`已按边界分离push，本地HEAD、upstream与远端ref一致。
+- umbrella消费专项结果并更新为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_PROBE_PENDING`；不增加umbrella第二执行游标或重复验收门。

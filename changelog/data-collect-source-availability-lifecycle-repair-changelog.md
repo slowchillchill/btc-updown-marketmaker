@@ -628,3 +628,9 @@
 - 既有聚焦测试覆盖wrapper state-channel closure、initial/后续generation观测、queued-message freshness fence、backoff增长/reset/cap及三个runtime两次replacement。终审成立项以现有测试内的最小断言和删除timer重复事实读取闭环，没有新增100-cycle、资源矩阵或test-only hook。
 - 修正后RTDS lib精确测试20项全部通过。历史100-cycle在后继专项早期、最终简化裁决前曾误跑一次；裁决后的收窄门没有再次执行，也未把它作为新business replacement验收依据。
 - 当前专项为`STAGE1_IMPLEMENTED_VALIDATION_PASSED_REVIEW_PENDING`；future paper/live共同合同与其他source保持不变。
+
+## 2026-07-26：后继RTDS专项阶段1闭合
+
+- 后继专项runtime、测试和authority三路独立终审均为PASS，Critical/Important/Minor均为0；收窄最终门全部通过，裁决后未再执行历史100-cycle。
+- 文档验收commit `ef200a6e89eaaee9f19ff49a00232b5004825ce7`与Rust实现commit `a29486babe2682481549cfc0b95b010784d653f0`已分离push并核对三方ref一致。
+- 承载本记录的闭合文档commit成功push且三方ref一致后，后继专项状态为`STAGE1_CLOSED_STAGE2_PROBE_PENDING`。本文既有阶段事实、future paper/live共同合同、CLOB/Gamma/Binance及其他source均不变。

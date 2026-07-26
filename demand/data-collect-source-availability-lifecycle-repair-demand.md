@@ -23,7 +23,7 @@
 > 验收的source availability、heartbeat、SDK-first、manifest或完整性边界，也不授权
 > production、远端、部署或数据操作。
 >
-> 2026-07-26 RTDS业务静默窄authority supersede：用户批准`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`。本文“业务静默不控制网络”继续适用于CLOB、Gamma、Binance及RTDS首次fresh之前；唯一例外是RTDS source task曾收到合格fresh后，按`300s steady + 60s后到monotonic first-fresh + cold-start disabled + 1s × 2 ±20%/300s cap/unlimited`共同合同，由同一owner串行break-before-make替换整个runtime。它不恢复同socketrefresh、one-shot `request_reconnect`、generation预算、第二owner/socket、gap/lag/告警或进程退出。当前代码只有training拥有真实RTDS adapter；阶段1已在training完成候选实现与收窄验证门，正在闭合独立终审。future paper/live真实RTDS adapter由独立事项实施，但必须继承同一恢复合同。其他source不变。
+> 2026-07-26 RTDS业务静默窄authority supersede：用户批准`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`。本文“业务静默不控制网络”继续适用于CLOB、Gamma、Binance及RTDS首次fresh之前；唯一例外是RTDS source task曾收到合格fresh后，按`300s steady + 60s后到monotonic first-fresh + cold-start disabled + 1s × 2 ±20%/300s cap/unlimited`共同合同，由同一owner串行break-before-make替换整个runtime。它不恢复同socketrefresh、one-shot `request_reconnect`、generation预算、第二owner/socket、gap/lag/告警或进程退出。当前代码只有training拥有真实RTDS adapter；阶段1已在training完成实现、收窄验证、三路独立终审及分离commit/push。future paper/live真实RTDS adapter由独立事项实施，但必须继承同一恢复合同。其他source不变。
 
 ## 一、目标
 

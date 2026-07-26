@@ -6,7 +6,7 @@
 >
 > 对应计划：`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`
 >
-> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_IMPLEMENTED_VALIDATION_PASSED_REVIEW_PENDING`。阶段0文档commit已push并核对本地HEAD、upstream与远端ref一致；阶段1候选实现与收窄验证门已通过，正在闭合独立终审。
+> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_PROBE_PENDING`。该阶段1闭合状态仅在承载本记录的文档commit成功push且三方ref一致后生效。阶段0已完成参数/authority同步、独立审查及commit `0a2153e76dd9824b675a54cd93cc7f92a08e300f`发布；阶段1已完成实现、收窄验证、三路独立终审及`ef200a6e89eaaee9f19ff49a00232b5004825ce7`/`a29486babe2682481549cfc0b95b010784d653f0`分离发布。闭合文档生效后的下一游标为阶段2。
 
 ## 2026-07-21：用户选择彻底换连接方向
 
@@ -194,3 +194,10 @@
 - 两条有界operator日志键精确统一为`trigger_kind`、`rtds_runtime_epoch`、`sdk_connection_generation`和`attempt_index`，与冻结术语及阶段2解析入口一致。
 - 修正后RTDS lib精确测试仍为20项全部通过、331项被filter；最终workspace target编译、Clippy、fmt和diff gate也均退出0。
 - 聚焦测试与需求AC的最小映射如下：`rtds_receive_deadline_returns_none_instead_of_a_fatal_timeout`及`rtds_old_queued_message_is_preserved_but_cannot_recover_new_generation`以initial/后续观测和排队旧消息覆盖AC2/AC7；`rtds_shutdown_waits_for_connection_loop_completion`以state-channel closure覆盖AC3/AC9；`rtds_business_timer_uses_late_anchor_and_preserves_cancelled_backoff_level`以cold start、后到anchor、transport取消、实际level增长、fresh reset和单点cap覆盖AC2/AC5/AC8；`rtds_business_silence_replaces_two_runtimes_then_fresh_resets_the_episode`以连续非fresh流量、三个runtime、两次replacement、每连接一次filtered subscription和第三runtime fresh覆盖AC3--AC7及AC9。上述输入、预期与实际均通过，未新增重复分类矩阵。
+
+## 2026-07-26：阶段1三路终审通过并发布闭合
+
+- runtime、测试和authority三路`gpt-5.6-sol`/Ultra独立终审在全部成立项修正后均为`PASS`，Critical/Important/Minor均为0；没有剩余SDK gap、上下文冲突或过度校验阻断。
+- 最终门通过：RTDS lib精确测试20项通过、331项被filter；全部workspace测试target编译完成；workspace全target Clippy `-D warnings`、fmt check和diff check均退出0。最终简化裁决后没有再次运行历史100-cycle。
+- 为遵守authority与Rust不得混入同一commit，阶段1文档验收先以commit `ef200a6e89eaaee9f19ff49a00232b5004825ce7`发布，Rust实现再以commit `a29486babe2682481549cfc0b95b010784d653f0`发布；两次push后本地HEAD、upstream与远端ref均一致。
+- 承载本记录的闭合文档commit成功push且三方ref一致后，阶段1状态升级为`STAGE1_CLOSED_STAGE2_PROBE_PENDING`。阶段2只执行已批准的本地香港VPN连续8小时只读probe；production release、部署、远端操作和数据清理仍不在范围内。

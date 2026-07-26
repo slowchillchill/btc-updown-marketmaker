@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_IMPLEMENTED_VALIDATION_PASSED_REVIEW_PENDING`。RTDS阶段0已以commit `0a2153e76dd9824b675a54cd93cc7f92a08e300f`闭合并push，且三方ref一致；阶段1候选实现与收窄验证门已通过，正在闭合独立终审。总事项阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_PROBE_PENDING`。RTDS阶段1闭合状态仅在承载本记录的文档commit成功push且三方ref一致后生效。RTDS阶段0已以commit `0a2153e76dd9824b675a54cd93cc7f92a08e300f`闭合并push；阶段1文档验收commit `ef200a6e89eaaee9f19ff49a00232b5004825ce7`与Rust实现commit `a29486babe2682481549cfc0b95b010784d653f0`均已push且三方ref一致，三路独立终审均为PASS。总事项阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
 > `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
@@ -60,7 +60,7 @@
 > `PASS / CLOSURE_UNBLOCKED`，Critical 0 / Important 0 / Minor 0。按用户批准的
 > 方案A，本文条件式记录`2-REST_CLOSED`与核心总事项`CORE_COMPLETE`：只有承载
 > 本记录的closure commit成功push且本地HEAD、upstream与远端ref一致后才生效。
-> RTDS行为专项当前为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_IMPLEMENTED_VALIDATION_PASSED_REVIEW_PENDING`；该状态来自专项阶段1实际实现与验证，按第十节不另设
+> RTDS行为专项当前为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_PROBE_PENDING`；该状态来自专项阶段1实际实现、验证、终审与发布，按第十节不另设
 > umbrella独立审查或总回归门。
 
 ## 一、执行原则与成功标准
@@ -650,7 +650,7 @@ non-production conformance路径。
 
 ### 4B：适用授权范围内的capability与实现
 
-`SDK_070_RUNTIME_USABLE`、`2-RTDS_CLOSED`、4A闭合及阶段1本地授权均已满足。官方SDK + 当前最小wrapper的真实teardown capability、training候选实现与收窄验证门已经通过；当前只待独立阶段终审和分离的Rust/闭合文档commit/push。阶段1闭合后按已批准边界进入阶段2本地香港VPN连续8小时只读probe。
+`SDK_070_RUNTIME_USABLE`、`2-RTDS_CLOSED`、4A闭合及阶段1本地授权均已满足。官方SDK + 当前最小wrapper的真实teardown capability及training实现已经完成收窄验证、三路独立终审、分离commit/push与三方ref核对；本闭合文档生效后的下一游标为阶段2本地香港VPN连续8小时只读probe。
 
 ### 阶段 4 审查与提交门
 

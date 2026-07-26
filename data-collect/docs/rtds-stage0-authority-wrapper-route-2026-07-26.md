@@ -17,7 +17,7 @@
 ## 1. 结论
 
 1. 完整参数门已经完成：`300s + 60s/后到 monotonic anchor + cold-start disabled + outer 1s × 2 ±20% / hard cap 300s / fresh reset / unlimited attempts`。
-2. 用户已批准本报告的精确修改矩阵、wrapper-first路线与本地持续执行；两份当前执行authority已按矩阵同步，阶段0自审、独立终审、commit/push及三方ref核对已以闭合commit完成。阶段1候选实现与收窄验证门现已通过，正在闭合独立终审。
+2. 用户已批准本报告的精确修改矩阵、wrapper-first路线与本地持续执行；两份当前执行authority已按矩阵同步，阶段0自审、独立终审、commit/push及三方ref核对已以闭合commit完成。阶段1实现、收窄验证、三路独立终审及分离commit/push也已闭合。
 3. 在上述阶段0代码快照中，官方 SDK 与项目 wrapper 的 ownership primitive 没有静态证明该路线不可能，但当时wrapper没有awaitable shutdown，也不能向source owner完整交付state/local-applied观测。因此阶段0路线状态只能是：
 
 ```text
@@ -35,10 +35,10 @@ WRAPPER_FIRST_PROVISIONAL_REQUIRES_STAGE_1_CAPABILITY_GATE
 | 当前 authority | 当前语义与冲突 | 允许加入的唯一窄例外 | 必须保留 |
 |---|---|---|---|
 | `demand/data-collect-demand.md` 3.3 第2项 | 把 subscribe send、ACK 和 first message 混成一条证据链；当前代码只能证明 SDK 本地发送队列入队/local applied，不能证明 wire completion或服务端 ACK | 分开记录 raw subscription JSON、复用并扩展既有 applied 观测得到的 generation/revision/monotonic time、首条匹配消息和直接 SDK/close/error；没有独立 ACK 时禁止命名为 ACK/wire send | subscription payload 的 action/topic/type/filter精确字段；typed row字段；Chainlink不是Binance depth替代源 |
-| 同文件 3.3 第4--5项 | 明确要求 freshness 不控制 subscription/generation，并删除全部 business-silence reconnect | 只有training的`polymarket_rtds_chainlink_btc_usd`拥有真实adapter；阶段1已完成该路径候选实现与收窄验证门。future paper/live真实RTDS adapter必须继承：source task 曾收到合格 fresh 后，steady silence 达300秒，或后续 runtime/generation 的60秒 first-fresh窗口到期；timer分支只读取一次current SDK generation/state/local-applied，恢复状态仍到期时按冻结outer backoff break-before-make替换整个 runtime | 不做同socket subscribe/unsubscribe；不恢复 one-shot ticket、generation budget或进程退出；不写gap/lag/告警；真实transport无限恢复；当前paper/live仍heartbeat-only，其他source不变 |
+| 同文件 3.3 第4--5项 | 明确要求 freshness 不控制 subscription/generation，并删除全部 business-silence reconnect | 只有training的`polymarket_rtds_chainlink_btc_usd`拥有真实adapter；阶段1已完成该路径实现、收窄验证与三路终审。future paper/live真实RTDS adapter必须继承：source task 曾收到合格 fresh 后，steady silence 达300秒，或后续 runtime/generation 的60秒 first-fresh窗口到期；timer分支只读取一次current SDK generation/state/local-applied，恢复状态仍到期时按冻结outer backoff break-before-make替换整个 runtime | 不做同socket subscribe/unsubscribe；不恢复 one-shot ticket、generation budget或进程退出；不写gap/lag/告警；真实transport无限恢复；当前paper/live仍heartbeat-only，其他source不变 |
 | 同文件 5.1 第2项、5.2 第2--4项 | 长静默/stale不得操作socket；RTDS只在自然generation重放desired | 在第5.1第2项和5.2第4项引用同一training RTDS窄例外；第5.2第3项补充每个新runtime的初始connection也只应用一次完整desired；stale本身不直接触发，但不重置fresh watchdog | 唯一source owner、无第二socket/actor/receiver/shadow client；所有其他source行为不变；有界单次等待与无限总attempt保持 |
 | 同文件验收第15--17项 | 验收仍要求静默完全不影响网络，且只描述真实transport generation replay | 第15--16项引用同一完整runtime replacement例外和每新runtime一次完整desired；第17项继续使用有界、去重operator日志 | one-shot `request_reconnect`仍删除；平台无数据不算实现失败；SDK-first缺口门和所有完整性边界保持 |
-| `demand/data-collect-source-availability-lifecycle-repair-demand.md` 第一节第3项 | 全局禁止业务静默主动断开仍活socket | 增加共同RTDS专项交叉引用；authority同步后允许阶段1在training由同一PID、同一owner串行完整换runtime，future paper/live真实RTDS adapter必须使用同一合同；阶段1候选实现与收窄验证门已通过 | 不gap/告警/退出/systemd；健康source继续；真实transport无限恢复；其他source不变 |
+| `demand/data-collect-source-availability-lifecycle-repair-demand.md` 第一节第3项 | 全局禁止业务静默主动断开仍活socket | 增加共同RTDS专项交叉引用；authority同步后允许阶段1在training由同一PID、同一owner串行完整换runtime，future paper/live真实RTDS adapter必须使用同一合同；阶段1实现、收窄验证与三路终审已通过 | 不gap/告警/退出/systemd；健康source继续；真实transport无限恢复；其他source不变 |
 | 同文件4.2第2项 | 禁止RTDS/CLOB/aggTrade/depth的business-silence timer和阈值 | 只允许RTDS唯一source owner中的monotonic 300秒/60秒watchdog；不持久化silence-start事件 | CLOB/Binance/Gamma继续无business timer；manifest、coverage、schema和模型调度不扩张 |
 | 同文件4.3第1、3、5--6项 | 一个长生命周期runtime；静默/stale/no fresh不得切generation；只有自然generation重放desired | 改成“任一时刻一个active RTDS runtime，但批准条件下可完整替换”；仍禁止修改desired revision和同socket重订阅；每个新runtime初始connection只应用一次完整desired；stale不重置watchdog但不直接成为trigger | 第2项旧60秒one-shot/预算/fatal删除；第4项5秒/no-PONG/无限transport；第7项真实transport与normal teardown |
 | 同文件4.9第3--4项 | 唯一owner成立，但“不得为任何路径另建第二恢复循环”会排除business replacement层 | 只允许同一个RTDS owner内串行的business runtime-replacement/backoff层；它不是第二transport owner、并行恢复循环或shadow control plane | 单active runtime/socket/generation/actor/receiver/desired owner；operator stop、drain/finalize保持 |
@@ -129,4 +129,4 @@ initial和后续generation都必须交付，且与现有message freshness fence�
 
 1. 用户已批准 outer hard cap=`300s`、`rtds_runtime_epoch`内部命名、精确authority矩阵及`WRAPPER_FIRST_PROVISIONAL_REQUIRES_STAGE_1_CAPABILITY_GATE`路线。applied只表示SDK本地发送队列接纳，不得称为wire completion或ACK；AC4按是否曾有fresh拆分，AC7/AC9/AC10完整保留，AC25只加入同一owner串行业务replacement层。新路径使用wrapper channel-closure测试、生产源码顺序和连续两次replacement的三个runtime聚焦测试组成最小证据，不增加test-only lifecycle hook、100-cycle或资源矩阵。历史100-cycle在阶段1早期、最终简化裁决前曾误跑一次；裁决后的收窄门没有再次执行，也未把它作为新路径验收。
 2. 用户已明确持续推进至阶段2本地香港VPN连续8小时只读probe，只在capability失败、SDK缺口或新上下文/事实冲突时停止。阶段0同步、自审和独立审查已通过；文档commit/push及三方ref一致后按顺序进入阶段1。不合并authority与Rust diff/commit。production release/deployment、远端操作、migration和删除保持独立边界。
-3. 用户进一步澄清共同合同边界：当前只有training拥有真实RTDS adapter；阶段1已在training完成候选实现与收窄验证门，正在闭合独立终审。future paper/live真实RTDS adapter由各自独立三件套实施、测试、验收和部署，但恢复语义必须继承本专项，不得再次冻结。当前paper/live Rust调用图不在阶段0/1修改范围。
+3. 用户进一步澄清共同合同边界：当前只有training拥有真实RTDS adapter；阶段1已在training完成实现、收窄验证、三路独立终审及分离commit/push。future paper/live真实RTDS adapter由各自独立三件套实施、测试、验收和部署，但恢复语义必须继承本专项，不得再次冻结。当前paper/live Rust调用图不在阶段0/1修改范围。
