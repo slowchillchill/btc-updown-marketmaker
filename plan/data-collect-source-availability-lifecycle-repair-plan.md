@@ -14,13 +14,15 @@
 > model，并把production唯一需要的确定性capped+jitter delay收窄到现有私有
 > `live_runtime::retry_delay`。真实source-local supervisor与本文长期恢复合同保持
 > 不变；不重开已闭合阶段，也不授权production、远端、部署或数据操作。
+>
+> 2026-07-26 RTDS业务静默窄authority supersede：本计划阶段0--9及其当时“RTDS业务静默不控制网络”结果保持历史事实；当前后继实现只以`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`为执行游标。当前代码只有training拥有真实RTDS adapter；新恢复行为尚未实现，专项阶段1只在training实现同一owner内的break-before-make完整runtime replacement。future paper/live真实RTDS adapter由独立事项实现但必须继承同一合同。不得修改CLOB、Gamma、Binance，不得恢复one-shot `request_reconnect`、第二owner/socket或并行恢复loop。既有自然Close 100-cycle只保留为本计划历史/现存回归；新路径改用连续两次replacement的精确顺序测试，不新增100-cycle或资源矩阵。
 
 ## 一、成功标准与实施原则
 
 实现完成必须直接满足需求第六节全部28项验收，并同时证明：
 
 - 任意一条、多条或全部六条外部I/O路径不可达，或者四条WebSocket业务流静默时，collector保持同一PID运行；全部I/O不可达才记录有证据的degraded，Gamma已返回有效市场、depth已取得初始snapshot且四条WebSocket协议存活但业务静默时保持active/idle，不虚构状态转换；
-- 业务静默不再控制subscription或transport，不制造gap、lag、异常告警或退出；
+- CLOB、Gamma、Binance及RTDS首次fresh前的业务静默不控制subscription或transport，不制造gap、lag、异常告警或退出；曾有fresh后的RTDS完整runtime replacement按后继专项窄合同执行；
 - transport故障在各自source-local owner内持续恢复，总attempt和总elapsed不构成存活预算；
 - heartbeat配置身份明确分离：CLOB生产为`10s/20s/require_text_pong=true`，RTDS生产为固定`5s/require_text_pong=false`，SDK默认保持`5s/15s/true`；RTDS no-PONG不重连，PING实际write确认前最多一个pending且确认后无burst补发；
 - RTDS、CLOB、Binance aggTrade、Binance depth/snapshot和Gamma保留各自协议语义；depth另外以snapshot v3/update v4的双坐标明确区分raw观察与continuity可用，不以stitch处理顺序改写原始观察顺序；

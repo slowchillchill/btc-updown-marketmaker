@@ -609,3 +609,10 @@
   backoff、Binance定向合同及最终package/check/clippy/fmt/diff门均通过。该变更只
   删除失去consumer的旧控制模型，不回写本事项历史阶段证据，不改变SDK-first、
   heartbeat、manifest或完整性边界，也未执行production、远端、部署或数据操作。
+
+## 2026-07-26：RTDS业务静默共同合同形成窄例外
+
+- 用户批准独立`DC-REPAIR-20260721-RTDS-BUSINESS-SILENCE-FULL-RECONNECT`专项，精确取代本文对RTDS的全局“业务静默永不控制网络”当前语义；本文阶段0--9当时的实现、测试、commit/push及自然Close/PING/no-PONG证据保持历史事实。
+- 例外只允许同一RTDS owner在source task此前收到fresh后，按`300s steady + 60s后到monotonic first-fresh + cold-start disabled + 1s × 2 ±20%/300s cap/unlimited`串行break-before-make替换整个runtime。它不恢复同socketrefresh、one-shot `request_reconnect`、generation预算、第二owner/socket、gap/lag/告警或进程退出。
+- AC4明确拆成从未fresh与此前有fresh两个fixture；AC7保留cold-start同socket，AC9保留真实transport恢复且无one-shot ticket，AC10继续要求删除该能力。用户随后明确否决新增100-cycle与完整资源矩阵；AC25改为保留既有自然Close历史/现存证据，新business replacement只以连续两次replacement、共三个runtime epoch的精确顺序测试验收。
+- 当前代码只有training拥有真实RTDS adapter；新恢复行为尚未实现，专项阶段1只在training实现与验证。future paper/live真实RTDS adapter的实现、handoff、测试和部署仍须独立三件套，但连接生命周期必须继承相同共同合同，不再独立冻结；当前paper/live仍heartbeat-only。CLOB、Gamma、Binance不变。

@@ -54,6 +54,8 @@
 > `ReconnectGate`、有限retry exhausted、逐queue pause/resume及其旧测试的引用均只
 > 保留为历史；current验收只使用上述真实owner和acceptance matrix，不恢复第二套
 > control model。
+>
+> 2026-07-26 RTDS业务静默current authority：详细执行只以`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`为单一游标。阶段0同步当前authority后，阶段1只在training实现并测试同一owner内的break-before-make完整runtime replacement；不得修改CLOB、Gamma、Binance，也不得新增paper/live RTDS adapter或提前抽象共享framework。future paper/live真实RTDS adapter仍须另立三件套实施、测试和部署，但必须继承相同fresh classifier、`300s/60s/cold-start disabled`、outer`1s × 2 ±20%/300s cap/unlimited`、唯一owner/socket与break-before-make合同。用户已批准本专项持续推进至阶段2本地香港VPN连续8小时只读probe；capability失败、SDK缺口或新冲突时停止，production release/部署/远端操作仍不在该授权内。
 
 ## 2026-07-10 已批准增量执行
 
@@ -208,7 +210,7 @@
 | Binance BTCUSDT depth update | `binance_depth_update` | `e`、`E`、`s`、`U`、`u`、`b`、`a`、`recv_time_utc`、本地 `local_u` / stitch evidence 引用 | official WS stream name、combined stream wrapper `stream/data`、raw_json、stale/duplicate/gap evidence | data-pipeline 可重建 source integrity；不得直接生成 labels/features/tick_stream |
 | Binance BTCUSDT depth snapshot | `binance_depth_snapshot` | `lastUpdateId`、`bids`、`asks`、`snapshot_fetch_start_utc`、`snapshot_recv_time_utc` | official REST endpoint、raw_json、no exchange timestamp evidence | 只用于 depth stitch 和 source gap 恢复；不得伪造 exchange timestamp |
 | Binance BTCUSDT aggTrade | `binance_aggtrade` | `e`、`E`、`s`、`a`、`p`、`q`、`f`、`l`、`T`、`m`、`buyer_is_maker`、`recv_time_utc` | official WS stream name、raw_json、trade id 连续性可解释性 | 满足 data-pipeline 对 aggTrade typed raw 的字段完整性，避免缩水 schema；训练可见性由 data-pipeline 后续处理决定 |
-| Polymarket RTDS Chainlink BTC/USD | `polymarket_rtds_chainlink_btc_usd` | RTDS message timestamp、payload timestamp、symbol、value、source topic、`recv_time_utc` | subscription raw JSON、`action: "subscribe"`、`topic: "crypto_prices_chainlink"`、`type: "*"`、symbol filter、ack/first message 或 close/error evidence | Chainlink 价格证据，不替代 Binance 官方 orderbook/depth 或 aggTrade |
+| Polymarket RTDS Chainlink BTC/USD | `polymarket_rtds_chainlink_btc_usd` | RTDS message timestamp、payload timestamp、symbol、value、source topic、`recv_time_utc` | subscription raw JSON、`action: "subscribe"`、`topic: "crypto_prices_chainlink"`、`type: "*"`、symbol filter、latest desired本地applied观测、首个匹配业务事件或直接SDK/close/error evidence；本地applied不得称为wire completion或服务端ACK | Chainlink 价格证据，不替代 Binance 官方 orderbook/depth 或 aggTrade |
 
 ### 格式对消费者的兼容性要求
 

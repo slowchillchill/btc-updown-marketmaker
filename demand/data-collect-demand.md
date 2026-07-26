@@ -7,6 +7,8 @@
 > 2026-07-22 Polymarket resolution-followup authority同步：`demand/data-collect-polymarket-resolution-followup-demand.md`已获用户批准为本事项的窄语义authority。它只取代本文中纯时间`current -> retired`、Gamma fallback要求`active=false`、expired-slug无例外以及普通transport证据绝不进入metadata typed row的冲突边界；冻结`resolution_pending`、E+3..E+8六个slot、metadata v3、terminal-once、restart/fail-closed与无future-skew上界合同。本事项AC-12真实source验收固定在本地原生Ubuntu环境通过已配置香港VPN线路执行，不使用AWS爱尔兰数据采集服务器；该测试拓扑不改变production部署拓扑。用户已后续授权完整执行专项阶段1至阶段4、每阶段独立审查后的commit/push与本地AC-12；production部署、服务操作和数据删除仍未授权。
 >
 > 2026-07-25 Polymarket source-v3/metadata-v4 authority同步：用户批准`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`。metadata v3 schema/version立即冻结；current source v2 + metadata v3在SDK070总计划阶段3原子activation门通过前保持不变。activation后，同一五row-kind/attempt窄例外由metadata v4继承，source-v3 WS claimant recovery只使用v4末尾追加的精确nullable claimant pair，source v2与metadata v3转为只读。禁止source v3 + metadata v3、source v2 + metadata v4、dual-write或半切换。用户随后授予本事项持续执行/发布授权，已覆盖Stage3本地Rust/schema/test、审查、commit和push，但不把尚未完成的实现写成已完成，也不授权production cutover、release、部署、远端操作、migration或删除。
+>
+> 2026-07-26 RTDS业务静默窄authority supersede：用户批准`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`的共同RTDS恢复合同。当前代码只有training的`polymarket_rtds_chainlink_btc_usd`拥有真实adapter；新恢复行为尚未实现，阶段1只在该training adapter实现与验证：source task曾收到合格fresh后，steady静默`300s`可完整替换runtime；后续runtime/generation以`Connected`与latest desired本地applied的后到monotonic观测为anchor等待`60s`，仍无fresh则在下一次完整替换前使用`1s × 2 ±20%`、单次最长`300s`、fresh重置且总尝试不限的outer backoff。首次fresh前禁用该business watchdog；严格唯一owner/socket、break-before-make，真实transport仍由SDK原机制恢复。future paper/live真实RTDS adapter由独立事项实施、测试和部署，但必须继承同一合同，不再独立冻结另一套语义；当前paper/live仍只有heartbeat/status。CLOB、Gamma、Binance及其他source不变。
 
 本文定义当前项目 `./data-collect/` 的共用数据采集模块需求。`./data-collect/` 只负责把外部市场源转化为可审计、可回放、可验证覆盖率的原始采集证据，服务训练、paper trade 和 live trade 三类消费者；本文不包含实现计划，不修改代码，也不定义 `data-pipeline` 的训练样本加工逻辑。
 
@@ -131,10 +133,10 @@ metadata v3/v4自身payload/digest traceability、历史source v2只读事实或
 ### 3.3 Polymarket RTDS Chainlink BTC/USD
 
 1. 必须采集 Polymarket RTDS Chainlink `btc/usd` 更新，hourly parquet 保留 `timestamp_received`、RTDS message timestamp、payload timestamp、symbol、value、source topic 和 subscription filter，不再额外写 `recv_time_utc` 别名列。
-2. 初始订阅必须记录 raw subscription JSON、subscribe send time、ack/first message 或 close/error 证据；Chainlink BTC/USD subscription payload 必须能追溯 `action: "subscribe"`、`topic: "crypto_prices_chainlink"`、`type: "*"` 和 `filters: "{\"symbol\":\"btc/usd\"}"`。
+2. 初始订阅必须分别记录 raw subscription JSON、本地applied观测时间、首条匹配消息或直接SDK/close/error证据；当前本地applied只证明actor把latest desired交给SDK本地发送队列，不得命名为wire write completion、handshake或服务端ACK。Chainlink BTC/USD subscription payload 必须能追溯 `action: "subscribe"`、`topic: "crypto_prices_chainlink"`、`type: "*"` 和 `filters: "{\"symbol\":\"btc/usd\"}"`。
 3. RTDS Chainlink BTC/USD 是 Chainlink 价格证据，不是 Binance 官方 orderbook/depth 的替代源。
-4. RTDS ping/pong或connection open不能证明业务数据持续产生；collector只保存真实payload、fresh/stale typed分类、接收时间与last-qualifying事实，不用业务freshness控制subscription、generation、gap、lag、告警或source存活。
-5. 训练cold path复用唯一官方SDK connection/receiver/actor与latest complete filtered desired；每个真实transport新generation只replay一次完整`crypto_prices_chainlink`/`btc/usd`订阅。删除业务静默驱动的同socket refresh、one-shot reconnect、generation预算和进程退出；真实transport故障在同一source-local owner持续恢复，总attempt与总elapsed不构成存活预算。future paper/live连接生命周期仍由各自需求独立冻结。
+4. RTDS ping/pong或connection open不能证明业务数据持续产生；collector只保存真实payload、fresh/stale typed分类、接收时间与last-qualifying事实，不因业务freshness写gap、lag、异常告警或结束source。唯一窄例外是第5项共同RTDS合同允许业务静默在同一owner内串行替换整个runtime；stale不直接触发也不重置fresh watchdog。
+5. 训练cold path复用唯一官方SDK connection/receiver/actor与latest complete filtered desired；每个真实transport新generation以及每个新runtime的初始connection都只应用一次完整`crypto_prices_chainlink`/`btc/usd`订阅。删除业务静默驱动的同socket refresh、one-shot reconnect、generation预算和进程退出；真实transport故障在同一source-local owner持续恢复，总attempt与总elapsed不构成存活预算。source task曾收到合格fresh后，按RTDS专项冻结的`300s steady + 60s后到monotonic first-fresh + cold-start disabled + 1s × 2 ±20%/300s cap/unlimited`合同执行break-before-make完整runtime replacement。future paper/live真实RTDS adapter仍由各自独立事项实施、测试、验收和部署，但必须继承相同行为合同，不得重新冻结另一套连接生命周期。
 
 ## 四、存储、分区与发布
 
@@ -167,7 +169,7 @@ metadata v3/v4自身payload/digest traceability、历史source v2只读事实或
 以下情况必须先按证据分为外部availability、业务missingness基础或confirmed integrity failure；不得把尚未观测到业务数据写成“完整外部覆盖”，也不得把普通availability伪造成confirmed gap：
 
 1. DNS/TCP/TLS/WebSocket/HTTP连接失败、断链、server shutdown、rate limit和合法空候选属于外部availability，由对应source-local owner持续恢复。
-2. 长时间无业务消息、持续stale、ping/pong正常但业务静默属于下游missingness的因果事实；collector保留接收时间、last-qualifying和真实空档，不由此操作subscription/socket或记录gap/lag/异常告警。
+2. 长时间无业务消息、持续stale、ping/pong正常但业务静默属于下游missingness的因果事实；collector保留接收时间、last-qualifying和真实空档，不由此记录gap/lag/异常告警。唯一网络动作例外是第3.3节已冻结的RTDS完整runtime replacement；它不适用于CLOB、Gamma或Binance。
 3. 订阅/HTTP/WS直接协议错误须区分可恢复transport错误与无法验证的parser/schema错误；前者持续恢复，后者按既有受影响范围fail closed。
 4. Binance depth update-ID中可证明的sequence hole、payload conflict、SDK `Lagged(n)`、queue drop/timeout、writer/manifest/atomic publish和内部不变量才进入confirmed integrity路径；aggTrade ID数值前跳不证明hole，只保留原始观察。
 5. 资源硬边界继续按既有合同保护已接收数据；普通诊断日志失败、计数饱和或缺少专用reason不得结束source/collector。
@@ -178,10 +180,10 @@ metadata v3/v4自身payload/digest traceability、历史source v2只读事实或
 
 1. 各source的单次connect/HTTP/read/backoff等待必须有界，使用capped exponential backoff与既有jitter，禁止tight loop；source外层总attempt和总elapsed无限，不存在availability耗尽即退出的存活预算。
 2. 各source只有一个source-local transport owner并独立恢复；Polymarket、Binance、RTDS任一源故障不得阻塞健康源，也不得建设第二套health/reconnect控制面。
-3. 真实新connection generation按各协议重放最新desired：Polymarket只发送真实asset diff或完整latest set，RTDS只发送一次完整filtered desired，Binance depth重新snapshot并完成官方stitch。
-4. Connection open或PONG只表示transport事实；业务消息只更新last-qualifying事实。业务静默/stale不触发refresh、reconnect、gap、lag、告警或退出。
+3. 真实新connection generation按各协议重放最新desired：Polymarket只发送真实asset diff或完整latest set，RTDS每个transport generation及每个新runtime的初始connection只应用一次完整filtered desired，Binance depth重新snapshot并完成官方stitch。
+4. Connection open或PONG只表示transport事实；业务消息只更新last-qualifying事实。业务静默/stale不触发同socket refresh、gap、lag、告警或退出；仅RTDS在满足第3.3节冻结条件后可由同一owner串行完整替换runtime，其他source不变。
 5. Binance depth stale/duplicate和confirmed-hole update都保存v4 raw row但不得错误推进continuity：前者只写not-applied且不记gap，后者保留confirmed continuity evidence、使旧snapshot anchor/`local_u`失效并重新snapshot。aggTrade ID前跳保持中性且不创建REST backfill、pending、merge、range retry或continuity epoch。
-6. RTDS重连后验证topic、symbol filter和payload typed语义；stale payload可落盘但不控制网络。SDK `Lagged(n)`、parser/schema与目标payload不变量仍按完整性边界处理。
+6. RTDS自然重连或完整runtime replacement后都验证topic、symbol filter和payload typed语义；stale payload可落盘但不直接触发或重置business watchdog。SDK `Lagged(n)`、parser/schema与目标payload不变量仍按完整性边界处理。
 
 ## 六、Rust async/non-blocking 运行要求
 
@@ -213,6 +215,7 @@ metadata v3/v4自身payload/digest traceability、历史source v2只读事实或
 5. data-pipeline 可以消费 `data-collect` 的 typed raw parquet 和 manifest，但必须自行生成 labels、validation、tick_stream、features 和训练切分证据。
 6. 采集artifact结构完整不等于外部业务coverage 100%，也不等于训练批准、labels/features已完成或paper/live交易逻辑健康；共同collection coverage只表达collector observation eligibility，不表达具体transport原因或模型动作。
 7. 训练、paper、live 三类运行形态必须导出独立二进制：训练二进制只服务数据采集服务器训练 raw mirror；paper 二进制只服务 paper 服务器热路径外部市场源 handoff；live 二进制只服务 live 服务器热路径外部市场源 handoff。三者共享 schema/manifest/source adapter 合同，但不得共享运行根、钱包、交易状态或消费者 artifact 语义。
+8. 当前paper/live binary仍只有heartbeat/status server，不宣称已接入真实RTDS。future真实RTDS adapter接入时，网络生命周期必须继承第3.3节共同RTDS合同；其handoff sink、runtime receive、背压、append-only log、长跑和部署由各自独立三件套验收，且不得启动training的Parquet/manifest/dedupe-restore路径。
 
 ## 九、验收标准
 
@@ -232,8 +235,8 @@ metadata v3/v4自身payload/digest traceability、历史source v2只读事实或
 12. 每日唯一顶层v3 manifest至少包含既有build/binary/config/host/region、file facts、六个source counters、continuity、confirmed gap与operational counter，并直接嵌套需求第四节冻结的单一`data_collect_collection_day_coverage_v1`；不保存validation verdict、required-files gate、ResourceWatermark大字段、transport scope/reason/episode、逐producer/source coverage复制、receipt或重复sidecar。
 13. paper/live 自身 append-only event log、rotation artifact、live artifacts、order evidence、NOE/ledger 和 execution feedback ingestion 必须由其他模块需求承接；`data-collect` 只能提供外部市场源 finalized mirror、coverage、health、gap、manifest 和 hot path handoff 边界证据，不能私自解释交易运行证据。
 14. 训练 cold path 与 paper/live hot path 的接入边界必须可验证：训练消费 finalized typed raw parquet + manifest + `data-pipeline` 输出；paper/live 消费 realtime handoff 或等价低延迟事件流，并在对应 paper/live 主机记录 runtime receive timestamp；Phase 0 或后续验收不得用 finalized parquet 可见时间替代 paper/live 实时接收延迟。
-15. 网络异常、rate limit、server shutdown和外部snapshot暂不可用由source-local owner持续恢复；返回空、长时间业务静默、ping/pong正常但无业务数据与source stale只保留真实空档/last-qualifying，不进入`source_gaps`、业务lag、异常告警或退出。confirmed sequence/local drop/parser/writer等完整性事实继续保留。
-16. 恢复策略对单次等待与backoff有界并使用jitter，但按源外层总attempt/elapsed无限；真实重连后按协议恢复subscription/snapshot，业务新鲜度不作为transport恢复门。RTDS只在真实generation重连后replay一次完整filtered desired，生产/测试/vendor均删除business-silence one-shot `request_reconnect`能力。
+15. 网络异常、rate limit、server shutdown和外部snapshot暂不可用由source-local owner持续恢复；返回空、长时间业务静默、ping/pong正常但无业务数据与source stale只保留真实空档/last-qualifying，不进入`source_gaps`、业务lag、异常告警或退出。仅RTDS按第3.3节共同合同在曾有fresh后可完整替换runtime；confirmed sequence/local drop/parser/writer等完整性事实继续保留。
+16. 恢复策略对单次等待与backoff有界并使用jitter，但按源外层总attempt/elapsed无限；真实重连后按协议恢复subscription/snapshot，业务新鲜度不作为transport恢复门。RTDS每个真实generation和每个新runtime初始connection只应用一次完整filtered desired，生产/测试/vendor均删除business-silence one-shot `request_reconnect`能力；完整runtime replacement必须证明单owner/socket、break-before-make和`300s/60s/cold-start disabled/outer cap 300s`，并以连续两次replacement的精确顺序测试覆盖重复路径，不新增100-cycle或进程资源矩阵。
 17. Transport诊断使用有界、去重operator日志或现有counter；日志失败、专用reason缺失、计数饱和或episode持续时间不改变运行结果，daily manifest不充当完整reconnect trace。
 18. Rust async/non-blocking 边界成立：主事件循环不做阻塞 I/O、重 CPU、data-collect 内部 parquet compression、local directory scan、sha256 或本地旧 segment 清理；所有队列都是 bounded queue，并具备 backpressure。archive/upload/listing/gzip 不属于当前 `data-collect` 验收项。
 19. 性能验收覆盖Polymarket p95/max事件量、四源合并`2k-5k events/s`工程吞吐、writer queue、flush latency、RSS/CPU/disk、hot path handoff latency、durable parquet write latency和hardware tier；测试/运维证据进入changelog或有界日志，不扩张daily manifest schema。

@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_PARAMETERS_DEFERRED`。阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CAPABILITY_PENDING`。RTDS阶段0闭合状态只在承载本记录的文档commit成功push且三方ref一致后生效。总事项阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
 > `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
@@ -29,16 +29,16 @@
 > `b569546ae1c9cfc24bcdfe4ba12ee4ce60ccc278`已push且三方ref一致，故
 > `STAGE3_AUTHORITY_SYNC_CLOSED`成立。后继本地实现、测试、审查、
 > commit和push不再逐次申请；只在上下文冲突或实际情况与需求/计划不一致时停止。
-> 未冻结RTDS参数仍为实质决策门；production activation/cutover、release、部署、
+> RTDS完整参数、最终需求、wrapper-first SDK路线、authority矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe已于2026-07-26获批；production activation/cutover、release、部署、
 > 远端操作、migration和删除仍为范围外事项。
 > Stage3任务3.1至3.7、S-B/M-B/W-B修复、本地门与重复独立审查均已通过；
 > closure commit `7c6927f663d9c3b387874f688b10346956b9302d`已push且三方ref
 > 一致，故`STAGE3_CLOSED`成立。随后执行游标进入独立cleanup阶段5；
-> 阶段4仍遵守RTDS专项自身尚未满足的参数与授权门。
+> 阶段4的4A authority同步、自审和独立终审已通过；承载本记录的文档commit成功push且三方ref一致后进入4B capability gate。
 > Stage5、Stage6与2-REST均已完成各自实现、完整门和独立终审。按用户批准的
 > 方案A，本文条件式记录`2-REST_CLOSED`与核心总事项`CORE_COMPLETE`：只有承载
 > 本记录的closure commit成功push且本地HEAD、upstream与远端ref一致后才生效。
-> RTDS行为专项仍为`RTDS_PARAMETERS_DEFERRED`且未完成。
+> RTDS行为专项当前为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CAPABILITY_PENDING`且行为实现未完成。
 > 本文件只记录本组三件套的事实、冲突、决定与执行，不回写旧changelog。
 
 ## 2026-07-24：用户要求建立一个新的总事项
@@ -1854,3 +1854,29 @@ closure commit中条件式记录：
 `origin/fix-rtds-silents`，且本地HEAD、upstream与远端ref一致后才生效。该闭合
 不授权production activation/cutover、AWS远端操作、release、deployment、
 migration、数据删除、public-network smoke或RTDS参数/行为实施。
+
+## 2026-07-26：umbrella 消费 RTDS 四项主要参数冻结结果
+
+- 用户已在 RTDS 专项中冻结 `300s + 60s/后到 monotonic anchor + cold-start disabled`；umbrella 不重扫三日数据、不重算候选，也不维护第二执行游标。
+- 当前汇总状态由 `RTDS_PARAMETERS_DEFERRED` 更新为 `RTDS_PRIMARY_PARAMETERS_FROZEN_OUTER_CAP_AND_FINAL_APPROVAL_PENDING`。这只表示四项主要参数门已满足；outer hard cap、专项最终需求、SDK 路线和 authority 精确修改矩阵仍待批准，RTDS 行为仍未完成。
+- 上方历史条目中的 `RTDS_PARAMETERS_DEFERRED` 保留为各记录发生时的真实状态，不回写为当前结果。
+- 四项主要参数冻结不改变 SDK070 核心总事项已闭合的事实，也不授权 4A authority 同步、4B Rust 实现、香港 VPN probe 或 production 操作。
+
+## 2026-07-26：RTDS完整合同与持续执行入口获批
+
+- 用户在上条四项参数冻结后继续批准outer backoff：`1s × 2 ±20%`、hard cap=`300s`、fresh重置、总尝试和总episode时长不限；并批准专项最终需求、wrapper-first SDK路线、精确authority修改矩阵。
+- 用户明确把持续执行扩展到本专项阶段0文档同步、阶段1本地实现/构建/测试/审查/commit/push，以及阶段2本地香港VPN连续8小时只读probe；只在capability失败、SDK缺口或文档/代码/数据/运行事实冲突时停止。production release、部署、远端操作、migration和删除仍排除。
+- 用户澄清“paper/live与training一致”只冻结future共同RTDS恢复合同。当前paper/live仍heartbeat/status-only，本专项不新增adapter、handoff、共享framework或部署；future真实RTDS adapter由独立三件套实施，但不得重新选择不同恢复语义。CLOB、Gamma、Binance不变。
+- umbrella当前状态升级为`RTDS_SHARED_CONTRACT_APPROVED_STAGE0_AUTHORITY_SYNC_IN_PROGRESS`；4A闭合后按专项唯一游标进入4B capability gate。上条`RTDS_PRIMARY_PARAMETERS_FROZEN_OUTER_CAP_AND_FINAL_APPROVAL_PENDING`保留为裁决前历史状态，不再是当前阻断。
+
+## 2026-07-26：RTDS实现与验证边界按简单性重新收敛
+
+- 用户明确否决上一轮过严审查，并指出新增100-cycle属于过度校验。三路`gpt-5.6-sol`/`ultra`复审一致确认：本事项不需要RTDS typed stop/completion、CAS/mutex、stop/create线性化事务、100-cycle完整runtime replacement、完整资源矩阵或probe连续socket证明。
+- 4B capability gate只证明业务replacement专用的消费式`shutdown_and_wait(self)`；operator stop继续复用现有abort permit与source task join。新路径以连续两次replacement、共三个runtime epoch的精确顺序loopback验收，既有自然transport 100-cycle只保留为历史/现存回归。
+- 阶段2的8小时香港VPN probe只报告真实运行与恢复行为，不再承担进程资源或逐时路由审计。该精简不改变冻结参数、future共同合同、SDK-first、break-before-make或production排除边界。
+
+## 2026-07-26：RTDS阶段0 authority同步终审通过
+
+- 专项三件套、两份current authority、umbrella指针、paper/live future合同说明、参数报告及三份changelog已同步；阶段0工作树没有Rust、Cargo、vendor或测试代码改动。
+- 主代理自审及三路`gpt-5.6-sol`/`ultra`独立终审最终均通过，Critical/Important/Minor为0。唯一成立的跨端关闭事件排序过严问题已按本地shutdown completion顺序修正并复核通过。
+- 承载本记录的文档commit成功push且本地HEAD、upstream与远端ref一致后，umbrella状态升级为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CAPABILITY_PENDING`并沿专项唯一游标进入4B/专项阶段1；若push或ref核对失败，该条件式闭合不生效。

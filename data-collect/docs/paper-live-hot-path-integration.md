@@ -6,6 +6,10 @@
 
 当前阶段只验证 frame contract、heartbeat/status server 和 fake consumer；不宣称 paper/live 二进制已在交易服务器完成真实 Polymarket/Binance/RTDS `external_market_event` 长跑验收。真实 paper/live 外部市场源 handoff 部署前，必须另行获得用户批准，并由对应 paper/live runtime 写入本机 runtime receive timestamp 和自身 append-only event log。
 
+2026-07-26 已冻结future RTDS共同恢复合同：以后paper/live任一真实RTDS adapter接入时，必须与training使用相同合格fresh分类、`steady_silence_threshold=300s`、`first_fresh_observation_window=60s`、`Connected`与latest desired本地applied的后到monotonic anchor、首次fresh前禁用cold-start watchdog，以及`1s × 2 ±20%`、单次最长`300s`、fresh重置、总尝试不限的outer backoff。必须由唯一owner严格break-before-make，旧runtime真实完成后才能创建新runtime，任意时刻最多一个RTDS socket，每条connection只应用一次完整`btc/usd` filtered desired。
+
+该共同合同不表示当前paper/live已经实现或验证RTDS。future adapter仍须另立demand/plan/changelog，补齐本机handoff sink、runtime receive、背压、append-only log、进程重启后`ever_received_fresh=false`、长跑、资源与部署验收；不得启动或复用training专属Parquet、manifest、dedupe-restore和`SourceEventSink`路径，也不得另选不同RTDS恢复语义。
+
 PMXT-like hourly parquet 只属于训练 cold path：`data-collect-training-collector` 在数据采集服务器写 finalized typed raw parquet 和每日唯一 `manifest.json`。paper/live hot path 仍消费本机 realtime handoff frame，不能等待 finalized hourly parquet，也不能把 hourly parquet 当成实时唯一数据来源。paper/live 可以把 hourly parquet 用于审计或离线对照，但实时交易可见性必须来自本机 handoff receive time 和对应 runtime append-only log。
 
 本集成说明不生成 labels、features、tick_stream、replay context 或训练切分；这些属于 `data-pipeline` / 训练链路。`data-pipeline` 只消费 `state=closed` 日期的 finalized typed raw parquet 和每日 manifest，再生成下游训练产物。coverage、gap、reconnect、drop 与 backfill 等采集事实收敛在该 manifest 内，不使用独立 sidecar 或 receipt。
@@ -32,7 +36,7 @@ live 服务器模板：
 /home/ubuntu/live-trade/data-collect/current/bin/data-collect-live-hot --dataset-root ~/btc-updown-marketmaker/datasets --run-id live-hot-$(date -u +%Y%m%dT%H%M%SZ)
 ```
 
-上述命令是未来部署前的调用模板，不是本阶段已授权在 paper/live 服务器执行的命令。当前实现会启动本机 socket heartbeat/status handoff server；真实 `external_market_event` source adapter 接入必须在 paper/live 部署阶段另行验收。
+上述命令是未来部署前的调用模板，不是本阶段已授权在 paper/live 服务器执行的命令。当前实现会启动本机 socket heartbeat/status handoff server；真实 `external_market_event` source adapter 接入必须在 paper/live 独立实施/部署事项中验收，其中RTDS adapter必须满足上方已冻结的共同恢复合同。
 
 ## local stream
 

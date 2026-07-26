@@ -683,3 +683,11 @@
   `+641/-7,509`，净删除`6,868`行。修复后代码/consumer与文档/authority两路
   `gpt-5.6-sol`/Ultra终审均为`PASS / CLOSURE_UNBLOCKED`，Blocker/Important/Minor
   均为0；只待commit/push与三方ref一致后闭合。
+
+## 2026-07-26：RTDS业务静默共同合同同步
+
+- 用户批准`DC-REPAIR-20260721-RTDS-BUSINESS-SILENCE-FULL-RECONNECT`完整参数、wrapper-first路线与authority矩阵，并将持续执行授权扩展到阶段0文档同步、阶段1本地实现/构建/测试/审查/commit/push及阶段2本地香港VPN连续8小时只读probe；只在文档、代码、数据或运行事实冲突及SDK能力缺口时停止。
+- 当前代码只有training拥有真实RTDS adapter；新恢复行为尚未实现，阶段1只在该training adapter实现与验证：source task曾收到fresh后使用`300s steady + 60s后到monotonic first-fresh + cold-start disabled + outer 1s × 2 ±20%/300s cap/unlimited`，严格同一owner/socket且break-before-make。CLOB、Gamma、Binance不变，不恢复同socketrefresh或one-shot `request_reconnect`。
+- 当前paper/live binary仍是heartbeat/status-only。本次只冻结future真实RTDS adapter必须继承的共同网络生命周期合同，不新增paper/live adapter、handoff producer、共享framework、模型接线或部署；这些实施仍须独立三件套。
+- 现行`data-collect-demand`与source-availability demand/plan已按最小差异同步；旧changelog与既有阶段结果继续保留为当时事实，不回写成从未存在。
+- 用户随后否决typed stop/completion、CAS/mutex、100-cycle完整runtime replacement、完整资源矩阵和probe socket high-water等过严要求。当前最小合同只新增业务replacement专用`shutdown_and_wait(self)`及连续两次replacement、共三个runtime epoch的精确顺序测试；operator stop复用既有abort permit + task join，8小时probe只记录实际运行与恢复行为。

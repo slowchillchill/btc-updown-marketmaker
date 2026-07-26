@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_PARAMETERS_DEFERRED`。阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CAPABILITY_PENDING`。RTDS阶段0闭合状态只在承载本记录的文档commit成功push且三方ref一致后生效。总事项阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
 > `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
@@ -29,13 +29,14 @@
 > sync commit `b569546ae1c9cfc24bcdfe4ba12ee4ce60ccc278`已push且三方ref
 > 一致，故`STAGE3_AUTHORITY_SYNC_CLOSED`成立。用户明确批准持续推进本
 > 事项直至完成；后继本地实现、测试、审查、commit和push不再逐次申请。只有上下文
-> 冲突或实际情况与需求/计划不一致时才停止。未冻结的RTDS参数仍是实质决策门；
+> 冲突或实际情况与需求/计划不一致时才停止。RTDS完整参数、最终需求、wrapper-first
+> SDK路线、authority矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe均已获批；
 > production activation/cutover、release、部署、远端操作、migration和删除仍为
 > 第九节范围外事项。
 > Stage3任务3.1至3.7、S-B/M-B/W-B修复、本地门与重复独立审查均已通过；
 > closure commit `7c6927f663d9c3b387874f688b10346956b9302d`已push且三方ref
 > 一致，故`STAGE3_CLOSED`成立。随后执行游标进入独立cleanup阶段5；
-> 阶段4仍遵守RTDS专项自身尚未满足的参数与授权门。
+> RTDS阶段4的4A authority同步、自审和独立终审已通过；承载本记录的文档commit成功push且三方ref一致后按顺序进入4B capability gate。
 > 2026-07-26用户已批准Stage5四项authority修正并解除U01–U04b决策门：
 > queue使用真实bounded channel/global row+owned-byte/bounded-wait owner，
 > 文件采用hourly-only rollover，因果时间区分legacy recv/current admission与
@@ -59,7 +60,7 @@
 > `PASS / CLOSURE_UNBLOCKED`，Critical 0 / Important 0 / Minor 0。按用户批准的
 > 方案A，本文条件式记录`2-REST_CLOSED`与核心总事项`CORE_COMPLETE`：只有承载
 > 本记录的closure commit成功push且本地HEAD、upstream与远端ref一致后才生效。
-> RTDS行为专项继续保持`RTDS_PARAMETERS_DEFERRED`且未完成；按第十节不另设
+> RTDS行为专项当前为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CAPABILITY_PENDING`且行为实现未完成；按第十节不另设
 > umbrella独立审查或总回归门。
 
 ## 一、执行原则与成功标准
@@ -74,7 +75,7 @@
   └─ 2-REST其余行为保持模块拆分与删除证据审计
 ```
 
-typed字段缺口只阻断 v3；`RTDS_PARAMETERS_DEFERRED` 只阻断 RTDS。SDK runtime不可用才阻断依赖该 runtime的 v3/RTDS，但不阻断文档、静态证据审计或不依赖 SDK变更的机械拆分。
+typed字段缺口只阻断 v3；RTDS 4A已完成authority同步和终审，文档commit成功push且三方ref一致后进入4B，只有真实capability失败或新冲突才阻断后续实现。SDK runtime不可用才阻断依赖该 runtime的 v3/RTDS，但不阻断文档、静态证据审计或不依赖 SDK变更的机械拆分。
 
 执行必须同时满足：
 
@@ -115,14 +116,14 @@ typed字段缺口只阻断 v3；`RTDS_PARAMETERS_DEFERRED` 只阻断 RTDS。SDK 
 - 步骤 0.2.2：只引用并消费RTDS专项三件套已经记录的business-silence authority delta、参数状态和测试入口/出口。
   -> 验证：umbrella不重扫数据、不重算参数候选、不重建delta/test矩阵，也不维护第二执行游标；专项路径、状态和阻断原因可精确解析。
 - 步骤 0.2.3：除已经单独批准并完成文档同步的`market_resolved` v3 validate-first与metadata v4 claimant两个窄决定，以及本轮用户批准的reliability current四路径清单修正外，阶段0只建立并评审矩阵，不同步其他相反authority；旧changelog不回写。
-  -> 验证：四路径修正只恢复source-availability第4.7节已经批准且当前代码实际使用的allowlist，不改变typed或RTDS行为authority。上述两个carve-out不得重新置为待决，也不得冒充Rust/schema/test实施；其余typed authority只允许在SDK字段门通过、用户批准v3字段集合且2026-07-25持续执行授权有效后同步。RTDS authority只在参数/需求/delta获批并单独授权4A后同步，随即停止，4B Rust/构建/测试必须另获授权。
+  -> 验证：四路径修正只恢复source-availability第4.7节已经批准且当前代码实际使用的allowlist，不改变typed或RTDS行为authority。上述两个carve-out不得重新置为待决，也不得冒充Rust/schema/test实施；其余typed authority只允许在SDK字段门通过、用户批准v3字段集合且2026-07-25持续执行授权有效后同步。RTDS完整入口已获裁决，按专项单一游标同步；4A闭合后进入4B，capability失败或新冲突始终停止。
 
 ### 任务 0.3：消费 RTDS 专项状态，但不重复执行
 
-- 步骤 0.3.1：读取RTDS专项计划/变更记录中的`steady_silence_threshold`、`first_fresh_observation_window`及anchor、cold-start watchdog三项状态。
-  -> 验证：只记录`APPROVED`、`PENDING`或专项已经给出的真实阻断，不在umbrella计算或提出第二组参数。
+- 步骤 0.3.1：读取RTDS专项计划/变更记录中的`steady_silence_threshold`、`first_fresh_observation_window`及anchor、cold-start watchdog、outer backoff状态。
+  -> 验证：只消费专项已冻结的`300s/60s/后到monotonic/cold-start disabled/outer 300s cap`，不在umbrella计算或提出第二组参数。
 - 步骤 0.3.2：把专项状态映射为本计划的单一入口结果。
-  -> 验证：三项未全部冻结时只记录`RTDS_PARAMETERS_DEFERRED`并停止4A/4B；专项获批后沿用其唯一执行游标，不复制任务、测试或长跑。
+  -> 验证：全部入口已满足；承载阶段0记录的文档commit成功push且三方ref一致后，记录`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CAPABILITY_PENDING`并沿用专项唯一执行游标；不复制任务、测试或长跑。
 
 ### 任务 0.4：记录当前代码与数据基线
 
@@ -359,7 +360,7 @@ bench；bench只做compile check，真实smoke另受任务1.5约束。
 
 ### 分支 2-RTDS：专项所需最小 RTDS owner
 
-只移动RTDS source owner及其直接测试，保持当前“业务静默不重连”authority和行为；内部按小步门验证，分支收口运行一次完整回归和独立审查后，使用持续发布授权创建closure commit/push并核对ref，随后记`2-RTDS_CLOSED`。它是阶段4机械前置，不依赖2-PM或2-REST。
+该已闭合分支只移动RTDS source owner及其直接测试，并在当时保持“业务静默不重连”authority和行为；内部按小步门验证，分支收口运行一次完整回归和独立审查后，使用持续发布授权创建closure commit/push并核对ref，随后记`2-RTDS_CLOSED`。它是阶段4机械前置，不依赖2-PM或2-REST；后续行为变更只以阶段4纳入的RTDS专项为准。
 
 当前执行事实：
 
@@ -641,19 +642,19 @@ non-production conformance路径。
 
 `plan/data-collect-rtds-business-silence-full-reconnect-plan.md`
 
-参数未冻结时记录`RTDS_PARAMETERS_DEFERRED`，不阻断v3或其他拆分。阶段4必须保持子计划的两次独立授权和强制停止点：
+完整参数、专项最终需求、wrapper-first SDK路线、精确authority修改矩阵和持续执行范围均已获批。阶段4继续遵守子计划的入口门和阶段边界：
 
-### 4A：authority同步并停止
+### 4A：authority同步与阶段边界
 
-进入条件为三个参数、专项最终需求及精确authority delta已批准，专项阶段0.3 wrapper-first路线未被只读证据否定且用户已批准该SDK路线，并明确授权RTDS阶段0 authority同步。只同步相反authority，完成自审和独立审查后强制停止；一次4A授权不得覆盖Rust修改、构建或测试。
+进入条件已经满足；相反authority同步、自审和独立审查已通过，并已冻结“当前只有training拥有真实RTDS adapter、新恢复行为尚未实现且4B只在training实现、future paper/live真实RTDS adapter必须继承共同合同”的边界。独立文档commit/push及三方ref一致后条件式闭合4A。
 
-### 4B：另获授权后的capability与实现
+### 4B：适用授权范围内的capability与实现
 
-进入条件为`SDK_070_RUNTIME_USABLE`、`2-RTDS_CLOSED`、4A已完成，以及用户另行明确授权RTDS阶段1 Rust修改和本地构建/测试。第一项工作才是按子计划动态证明官方SDK + 当前最小wrapper能完成真实teardown；该证明不是4A或4B入口的先验条件。证明失败则停止4B，不创建新runtime、不旁路raw WebSocket；证明通过后其余工作完全沿用子计划。
+`SDK_070_RUNTIME_USABLE`、`2-RTDS_CLOSED`及阶段1本地授权均已满足；只等待4A文档commit/push及三方ref一致。第一项工作按子计划动态证明官方SDK + 当前最小wrapper能完成真实teardown；该证明不是4A入口的先验条件。证明失败则停止4B，不创建新runtime、不旁路raw WebSocket；证明通过后其余工作完全沿用子计划，并在阶段1闭合后按已批准边界进入阶段2本地香港VPN连续8小时只读probe。
 
 ### 阶段 4 审查与提交门
 
-严格按RTDS专项各阶段review/stop/commit/push门；4A与4B授权不得继承或合并。本总计划只核对依赖状态，且authority、Rust和`polymarket_orderbook_v3`/其他source schema不得混入同一diff或commit。
+严格按RTDS专项各阶段review/stop/commit/push顺序与本轮裁决后的适用授权范围执行。standing execution可以合并重复申请，但不得合并4A/4B的执行顺序、diff或commit；capability失败、SDK缺口或新冲突仍停止。本总计划只核对依赖状态，且authority、Rust和`polymarket_orderbook_v3`/其他source schema不得混入同一diff或commit。
 
 ## 七、阶段 5：stale/redundant 代码与过度校验删除
 
@@ -822,6 +823,6 @@ fixture身份混同、binary边界比较起点和writer归属措辞已修正并�
 - 2-PM/v3分支只有在两列/fan-out删除、metadata v4、当前消费语义、resolution、canonical round-trip、storage和资源门通过并发布后才记完成；`NONBLOCKING_FUTURE_SPEC`只作为附件状态汇报，不成为完成硬门。typed-contract或metadata v4 implementation/validation阻断时，只记对应v3/v4子路径阻断；
 - 2-RTDS与2-REST分别按自身review/publish状态结项；root模块化只在2-REST验收；
 - cleanup分支独立维护两类删除台账和证据；
-- RTDS行为按子计划记`COMPLETE`或`RTDS_PARAMETERS_DEFERRED/其他真实阻断`，deferred不反向阻断v3；
-- umbrella只汇总各分支状态、authority和changelog一致性，不重复各分支专项验收/长跑/审查门。SDK/v3/三个机械分支及cleanup均完成时可记核心总事项完成；RTDS若deferred必须单独标明未完成；
+- RTDS行为按子计划记`COMPLETE`、当前阶段状态或真实capability/冲突阻断，未完成状态不反向阻断v3；
+- umbrella只汇总各分支状态、authority和changelog一致性，不重复各分支专项验收/长跑/审查门。SDK/v3/三个机械分支及cleanup均完成时可记核心总事项完成；RTDS处于任一未完成状态时必须单独标明；
 - metadata v4实现与WS claimant/recovery验收完成后，本地代码/test中的source v3 + metadata v4原子current new-write替换才属于阶段3完成项；未满足时只可保留未激活实现。scope外production binary/dataset-root cutover、paper/live接线、deployment、migration、首次真实v3完整日前向长跑和历史删除不得冒充任何分支完成项。
