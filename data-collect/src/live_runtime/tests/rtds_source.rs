@@ -1315,3 +1315,152 @@ fn rtds_dedupe_restores_first_receive_anchored_payload() {
         "the restored first receive time, not payload time, controls expiry"
     );
 }
+
+#[tokio::test]
+#[ignore = "requires an eight-hour public RTDS run through the local Hong Kong route"]
+async fn rtds_hong_kong_vpn_eight_hour_probe() {
+    const PROBE_DURATION: Duration = Duration::from_secs(8 * 60 * 60);
+    const PROBE_DURATION_MS: i64 = 8 * 60 * 60 * 1_000;
+
+    let started_utc_ms = now_ms();
+    let ending_utc_ms = started_utc_ms + PROBE_DURATION_MS;
+    assert_eq!(
+        utc_day_string_from_ms(started_utc_ms),
+        utc_day_string_from_ms(ending_utc_ms),
+        "the in-memory RawDayGate probe must start early enough to finish within one UTC day"
+    );
+
+    let dataset_root_guard = tempdir().unwrap();
+    let dataset_root = dataset_root_guard.path().canonicalize().unwrap();
+    let (tx, mut rx) = mpsc::channel::<SourceIngressPayload>(DEFAULT_QUEUE_CAPACITY);
+    let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+    let stats = Arc::new(SourceQueueBackpressureStats::default());
+    install_active_raw_day_gate(&stats, started_utc_ms).await;
+    let spec = RtdsSourceSpec::production();
+    let timing = spec.business_timing;
+    let run_started = Instant::now();
+
+    eprintln!(
+        "rtds_probe_start={}",
+        json!({
+            "started_utc_ms": started_utc_ms,
+            "duration_ms": PROBE_DURATION_MS,
+            "steady_silence_threshold_ms": timing.steady_silence_threshold.as_millis(),
+            "first_fresh_observation_window_ms": timing.first_fresh_observation_window.as_millis(),
+            "outer_backoff_initial_ms": timing.outer_backoff_initial_ms,
+            "outer_backoff_max_ms": timing.outer_backoff_max_ms,
+            "cold_start_watchdog": "disabled_until_ever_received_fresh",
+            "first_fresh_anchor": "later_of_connected_and_latest_desired_local_applied_monotonic",
+        })
+    );
+
+    let drain = tokio::spawn(async move {
+        let mut fresh_count = 0_u64;
+        let mut previous_fresh_monotonic_ms = None;
+        let mut max_adjacent_fresh_gap_ms: Option<u64> = None;
+        let mut first_row_error = None;
+
+        while let Some(event) = rx.recv().await {
+            let row = match rtds_row_from_event(&event.event) {
+                Ok(row) => row,
+                Err(error) => {
+                    if first_row_error.is_none() {
+                        first_row_error = Some(error.to_string());
+                    }
+                    continue;
+                }
+            };
+            if row.freshness_status != "fresh" {
+                continue;
+            }
+
+            fresh_count += 1;
+            let current = event._source_recv_monotonic_ms;
+            let mut emit_fresh_evidence = previous_fresh_monotonic_ms.is_none();
+            if let Some(previous) = previous_fresh_monotonic_ms {
+                match current.checked_sub(previous) {
+                    Some(gap) => {
+                        max_adjacent_fresh_gap_ms =
+                            Some(max_adjacent_fresh_gap_ms.map_or(gap, |maximum| maximum.max(gap)));
+                        emit_fresh_evidence |= gap
+                            >= u64::try_from(timing.first_fresh_observation_window.as_millis())
+                                .expect("first-fresh window fits in u64 milliseconds");
+                    }
+                    None => {
+                        if first_row_error.is_none() {
+                            first_row_error = Some(format!(
+                                "fresh receive monotonic time regressed from {previous} to {current}"
+                            ));
+                        }
+                    }
+                }
+            }
+            previous_fresh_monotonic_ms = Some(current);
+
+            if emit_fresh_evidence {
+                eprintln!(
+                    "rtds_probe_qualified_fresh recv_monotonic_ms={current} recv_utc_ms={}",
+                    event.event.recv_time_utc_ms
+                );
+            }
+        }
+
+        (fresh_count, max_adjacent_fresh_gap_ms, first_row_error)
+    });
+
+    let source_result = run_rtds_source_with_spec(
+        spec,
+        dataset_root,
+        SourceEventSink {
+            tx,
+            gaps: Arc::clone(&gaps),
+            source_queue_backpressure: Arc::clone(&stats),
+            inflight_budget: InflightBudget::new(),
+            enqueue_lock: Arc::new(AsyncMutex::new(())),
+        },
+        CollectorIdentity {
+            host_id: "collector-rtds-stage2-probe".to_owned(),
+            region: "local-hong-kong-route".to_owned(),
+        },
+        Some(run_started + PROBE_DURATION),
+        run_started,
+    )
+    .await;
+    let (fresh_count, max_adjacent_fresh_gap_ms, first_row_error) =
+        drain.await.expect("RTDS probe drain task");
+    let ended_utc_ms = now_ms();
+    let elapsed_ms =
+        u64::try_from(run_started.elapsed().as_millis()).expect("probe elapsed time fits in u64");
+    let natural_reconnect_count = stats
+        .drain_all_operational()
+        .values()
+        .filter_map(|by_source| by_source.get("polymarket_rtds_chainlink_btc_usd"))
+        .map(|counter| counter.reconnect_events)
+        .sum::<u64>();
+    let runtime_error = source_result.as_ref().err().map(ToString::to_string);
+
+    println!(
+        "rtds_probe_summary={}",
+        json!({
+            "started_utc_ms": started_utc_ms,
+            "ended_utc_ms": ended_utc_ms,
+            "elapsed_ms": elapsed_ms,
+            "fresh_count": fresh_count,
+            "max_adjacent_fresh_gap_ms": max_adjacent_fresh_gap_ms,
+            "runtime_error_count": u64::from(runtime_error.is_some()),
+            "runtime_error": runtime_error,
+            "natural_reconnect_count": natural_reconnect_count,
+            "row_error": first_row_error.as_deref(),
+        })
+    );
+
+    assert!(
+        elapsed_ms >= u64::try_from(PROBE_DURATION_MS).unwrap(),
+        "RTDS probe ended before eight monotonic hours elapsed"
+    );
+    source_result.expect("RTDS probe runtime error");
+    assert!(
+        first_row_error.is_none(),
+        "RTDS probe row/order error: {first_row_error:?}"
+    );
+}
