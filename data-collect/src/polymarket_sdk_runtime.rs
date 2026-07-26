@@ -187,6 +187,10 @@ pub(crate) struct RtdsRuntimeMessage {
 
 pub(crate) enum RtdsRuntimeEvent {
     Applied(RtdsAppliedSubscription),
+    State {
+        state: ConnectionState,
+        generation: u64,
+    },
     Message(RtdsRuntimeMessage),
 }
 
@@ -734,6 +738,8 @@ pub struct RtdsSdkRuntime {
     actor: JoinHandle<()>,
     next_revision: u64,
     freshness_fence: RtdsFreshnessFence,
+    reported_applied: Option<RtdsAppliedSubscription>,
+    reported_state: Option<(ConnectionState, u64)>,
 }
 
 impl RtdsSdkRuntime {
@@ -765,6 +771,8 @@ impl RtdsSdkRuntime {
             actor,
             next_revision: 0,
             freshness_fence: RtdsFreshnessFence::new(initial_generation),
+            reported_applied: None,
+            reported_state: None,
         })
     }
 
@@ -912,7 +920,7 @@ impl RtdsSdkRuntime {
             }
             match self.recv_event(remaining).await? {
                 Some(RtdsRuntimeEvent::Message(message)) => return Ok(Some(message.message)),
-                Some(RtdsRuntimeEvent::Applied(_)) => {}
+                Some(RtdsRuntimeEvent::Applied(_) | RtdsRuntimeEvent::State { .. }) => {}
                 None => return Ok(None),
             }
         }
@@ -937,8 +945,12 @@ impl RtdsSdkRuntime {
             if let Some(error) = self.actor_error_rx.borrow().clone() {
                 return Err(error);
             }
-            if let Some(applied) = self.sync_applied_fence()? {
+            _ = self.sync_applied_fence()?;
+            if let Some(applied) = self.take_applied_observation() {
                 return Ok(Some(RtdsRuntimeEvent::Applied(applied)));
+            }
+            if let Some((state, generation)) = self.take_state_observation()? {
+                return Ok(Some(RtdsRuntimeEvent::State { state, generation }));
             }
             let remaining =
                 deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
@@ -955,7 +967,8 @@ impl RtdsSdkRuntime {
                             &self.actor_error_rx,
                         ));
                     }
-                    if let Some(applied) = self.sync_applied_fence()? {
+                    _ = self.sync_applied_fence()?;
+                    if let Some(applied) = self.take_applied_observation() {
                         return Ok(Some(RtdsRuntimeEvent::Applied(applied)));
                     }
                 }
@@ -993,8 +1006,8 @@ impl RtdsSdkRuntime {
                 }
                 changed = self.states.changed() => {
                     changed.map_err(|_| terminal_error(&self.faults))?;
-                    if *self.states.borrow_and_update() == ConnectionState::Disconnected {
-                        return Err(terminal_error(&self.faults));
+                    if let Some((state, generation)) = self.take_state_observation()? {
+                        return Ok(Some(RtdsRuntimeEvent::State { state, generation }));
                     }
                 }
                 changed = self.actor_error_rx.changed() => {
@@ -1014,6 +1027,34 @@ impl RtdsSdkRuntime {
                 } => return Ok(None),
             }
         }
+    }
+
+    fn take_applied_observation(&mut self) -> Option<RtdsAppliedSubscription> {
+        let applied = *self.applied_rx.borrow();
+        if applied.is_some() && applied != self.reported_applied {
+            self.reported_applied = applied;
+            applied
+        } else {
+            None
+        }
+    }
+
+    fn take_state_observation(&mut self) -> Result<Option<(ConnectionState, u64)>, SdkStreamError> {
+        let state = *self.states.borrow_and_update();
+        let generation = self.connection.connection_generation();
+        let observation = (state, generation);
+        if self.reported_state == Some(observation) {
+            return Ok(None);
+        }
+        let initial = self.reported_state.is_none();
+        self.reported_state = Some(observation);
+        if state == ConnectionState::Disconnected {
+            if initial {
+                return Ok(None);
+            }
+            return Err(terminal_error(&self.faults));
+        }
+        Ok(Some(observation))
     }
 
     fn sync_applied_fence(&mut self) -> Result<Option<RtdsAppliedSubscription>, SdkStreamError> {
@@ -1037,6 +1078,23 @@ impl RtdsSdkRuntime {
                 && applied.generation == self.connection.connection_generation()
                 && self.connection.state().is_connected()
         })
+    }
+
+    #[must_use]
+    pub(crate) fn connection_state(&self) -> ConnectionState {
+        self.connection.state()
+    }
+
+    pub(crate) fn applied_subscription(&self) -> Option<RtdsAppliedSubscription> {
+        *self.applied_rx.borrow()
+    }
+
+    pub(crate) async fn shutdown_and_wait(mut self) {
+        let mut states = self.connection.state_receiver();
+        self.actor.abort();
+        _ = (&mut self.actor).await;
+        drop(self);
+        while states.changed().await.is_ok() {}
     }
 
     #[must_use]
@@ -1397,9 +1455,61 @@ mod tests {
             .await
             .unwrap();
 
+        let Some(RtdsRuntimeEvent::Applied(applied)) =
+            runtime.recv_event(Duration::ZERO).await.unwrap()
+        else {
+            panic!("initial RTDS local-applied observation");
+        };
+        assert_eq!(applied.generation, runtime.connection_generation());
+        assert_eq!(applied.revision, runtime.subscription_revision());
+        let Some(RtdsRuntimeEvent::State { state, generation }) =
+            runtime.recv_event(Duration::ZERO).await.unwrap()
+        else {
+            panic!("initial RTDS connected observation");
+        };
+        assert!(state.is_connected());
+        assert_eq!(generation, runtime.connection_generation());
         assert!(runtime.recv_event(Duration::ZERO).await.unwrap().is_none());
         assert!(runtime.recv(Duration::ZERO).await.unwrap().is_none());
         finish_tx.send(()).unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rtds_shutdown_waits_for_connection_loop_completion() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            loop {
+                match socket.next().await {
+                    Some(Ok(Message::Text(text))) if text == "PING" => {
+                        socket.send(Message::Text("PONG".into())).await.unwrap();
+                    }
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    _ => {}
+                }
+            }
+        });
+
+        let mut config = Config::default();
+        config.heartbeat_interval = Duration::from_secs(30);
+        config.heartbeat_timeout = Duration::from_secs(30);
+        let mut runtime = RtdsSdkRuntime::new(format!("ws://{address}"), config).unwrap();
+        runtime
+            .wait_connected(Duration::from_secs(2))
+            .await
+            .unwrap();
+        let states = runtime.states.clone();
+
+        timeout(Duration::from_secs(2), runtime.shutdown_and_wait())
+            .await
+            .expect("RTDS shutdown completion");
+        assert!(
+            states.has_changed().is_err(),
+            "shutdown must wait until the SDK state channel closes"
+        );
         server.await.unwrap();
     }
 
@@ -1487,20 +1597,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(runtime.connection_generation(), old_generation + 1);
-        let Some(RtdsRuntimeEvent::Message(old_message)) =
-            runtime.recv_event(Duration::from_secs(2)).await.unwrap()
-        else {
-            panic!("old queued RTDS message");
-        };
+        let mut observed_reconnected = false;
+        let mut observed_reapplied = false;
+        let old_message = timeout(Duration::from_secs(2), async {
+            loop {
+                match runtime.recv_event_until(None).await.unwrap() {
+                    Some(RtdsRuntimeEvent::State { state, generation })
+                        if state.is_connected() && generation == old_generation + 1 =>
+                    {
+                        observed_reconnected = true;
+                    }
+                    Some(RtdsRuntimeEvent::Applied(applied))
+                        if applied.generation == old_generation + 1
+                            && applied.revision == revision =>
+                    {
+                        observed_reapplied = true;
+                    }
+                    Some(RtdsRuntimeEvent::Message(message)) => break message,
+                    Some(RtdsRuntimeEvent::State { .. } | RtdsRuntimeEvent::Applied(_)) | None => {}
+                }
+            }
+        })
+        .await
+        .expect("old queued RTDS message");
+        assert!(observed_reconnected);
+        assert!(observed_reapplied);
         assert_eq!(old_message.message.timestamp, 1);
         assert_eq!(old_message.freshness_generation, None);
 
         send_new_tx.send(()).unwrap();
-        let Some(RtdsRuntimeEvent::Message(new_message)) =
-            runtime.recv_event(Duration::from_secs(2)).await.unwrap()
-        else {
-            panic!("new generation RTDS message");
-        };
+        let new_message = timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(RtdsRuntimeEvent::Message(message)) =
+                    runtime.recv_event_until(None).await.unwrap()
+                {
+                    break message;
+                }
+            }
+        })
+        .await
+        .expect("new generation RTDS message");
         assert_eq!(new_message.message.timestamp, 2);
         assert_eq!(new_message.freshness_generation, Some(old_generation + 1));
         finish_tx.send(()).unwrap();

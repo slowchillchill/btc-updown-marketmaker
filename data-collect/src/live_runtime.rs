@@ -90,6 +90,7 @@ use polymarket_client_sdk_v2::gamma::types::response::Market as SdkGammaMarket;
 use polymarket_client_sdk_v2::rtds::{ChainlinkPrice, Subscription};
 use polymarket_client_sdk_v2::types::U256;
 use polymarket_client_sdk_v2::ws::config::Config as WsConfig;
+use polymarket_client_sdk_v2::ws::connection::ConnectionState;
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};

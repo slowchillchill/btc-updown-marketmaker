@@ -600,6 +600,304 @@ async fn rtds_source_keeps_one_socket_without_required_text_pong_and_consumes_st
     }));
 }
 
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn rtds_business_timer_uses_late_anchor_and_preserves_cancelled_backoff_level() {
+    let timing = RtdsBusinessTiming {
+        steady_silence_threshold: Duration::from_secs(300),
+        first_fresh_observation_window: Duration::from_secs(60),
+        outer_backoff_initial_ms: 1_000,
+        outer_backoff_max_ms: 300_000,
+    };
+    let mut recovery = RtdsBusinessRecovery::new(timing, 7, 0);
+
+    recovery.observe_state(
+        ConnectionState::Connected {
+            since: Instant::now(),
+        },
+        0,
+        tokio::time::Instant::now(),
+    );
+    tokio::time::advance(Duration::from_secs(10)).await;
+    recovery.observe_applied(0, tokio::time::Instant::now());
+    assert_eq!(
+        recovery.next_deadline(),
+        None,
+        "cold start has no business watchdog"
+    );
+
+    recovery.observe_fresh(0, tokio::time::Instant::now());
+    tokio::time::advance(Duration::from_secs(300)).await;
+    assert!(recovery.replacement_due(tokio::time::Instant::now()));
+    assert_eq!(recovery.commit_replacement(), ("steady_silence", 1));
+
+    recovery.start_runtime(0);
+    recovery.observe_applied(0, tokio::time::Instant::now());
+    tokio::time::advance(Duration::from_secs(10)).await;
+    recovery.observe_state(
+        ConnectionState::Connected {
+            since: Instant::now(),
+        },
+        0,
+        tokio::time::Instant::now(),
+    );
+    let first_fresh_deadline = recovery.next_deadline().unwrap();
+    assert_eq!(
+        first_fresh_deadline.saturating_duration_since(tokio::time::Instant::now()),
+        Duration::from_secs(60),
+        "first-fresh window starts at the later Connected/applied observation"
+    );
+
+    tokio::time::advance(Duration::from_secs(60)).await;
+    assert!(!recovery.replacement_due(tokio::time::Instant::now()));
+    let first_backoff = recovery
+        .next_deadline()
+        .unwrap()
+        .saturating_duration_since(tokio::time::Instant::now());
+    recovery.observe_state(
+        ConnectionState::Reconnecting { attempt: 1 },
+        0,
+        tokio::time::Instant::now(),
+    );
+    assert_eq!(
+        recovery.next_deadline(),
+        None,
+        "transport recovery cancels the current outer wait"
+    );
+
+    recovery.observe_state(
+        ConnectionState::Connected {
+            since: Instant::now(),
+        },
+        1,
+        tokio::time::Instant::now(),
+    );
+    recovery.observe_applied(1, tokio::time::Instant::now());
+    tokio::time::advance(Duration::from_secs(60)).await;
+    assert!(!recovery.replacement_due(tokio::time::Instant::now()));
+    assert_eq!(
+        recovery
+            .next_deadline()
+            .unwrap()
+            .saturating_duration_since(tokio::time::Instant::now()),
+        first_backoff,
+        "a cancelled wait does not consume the backoff level"
+    );
+
+    tokio::time::advance(first_backoff).await;
+    assert!(recovery.replacement_due(tokio::time::Instant::now()));
+    assert_eq!(
+        recovery.commit_replacement(),
+        ("steady_silence", 2),
+        "an actual backoff replacement advances the episode attempt"
+    );
+    recovery.start_runtime(2);
+    recovery.observe_state(
+        ConnectionState::Connected {
+            since: Instant::now(),
+        },
+        2,
+        tokio::time::Instant::now(),
+    );
+    recovery.observe_applied(2, tokio::time::Instant::now());
+    tokio::time::advance(Duration::from_secs(60)).await;
+    assert!(!recovery.replacement_due(tokio::time::Instant::now()));
+    let second_backoff = recovery
+        .next_deadline()
+        .unwrap()
+        .saturating_duration_since(tokio::time::Instant::now());
+    assert!(second_backoff > first_backoff);
+
+    recovery.observe_fresh(2, tokio::time::Instant::now());
+    assert_eq!(
+        recovery.next_deadline().unwrap(),
+        tokio::time::Instant::now() + Duration::from_secs(300),
+        "fresh ends the episode and restores the steady deadline"
+    );
+
+    recovery.observe_state(
+        ConnectionState::Reconnecting { attempt: 1 },
+        2,
+        tokio::time::Instant::now(),
+    );
+    recovery.observe_state(
+        ConnectionState::Connected {
+            since: Instant::now(),
+        },
+        3,
+        tokio::time::Instant::now(),
+    );
+    recovery.observe_applied(3, tokio::time::Instant::now());
+    tokio::time::advance(Duration::from_secs(60)).await;
+    assert!(!recovery.replacement_due(tokio::time::Instant::now()));
+    let backoff = recovery
+        .next_deadline()
+        .unwrap()
+        .saturating_duration_since(tokio::time::Instant::now());
+    assert_eq!(backoff, first_backoff, "fresh resets the outer level");
+    tokio::time::advance(backoff).await;
+    assert!(recovery.replacement_due(tokio::time::Instant::now()));
+    assert_eq!(
+        recovery.commit_replacement(),
+        ("first_fresh_window_timeout", 1)
+    );
+    assert_eq!(
+        retry_delay(
+            "polymarket_rtds_chainlink_btc_usd",
+            u32::MAX,
+            timing.outer_backoff_initial_ms,
+            timing.outer_backoff_max_ms,
+            7,
+        ),
+        Duration::from_secs(300),
+        "the shared retry helper enforces the frozen per-wait cap"
+    );
+}
+
+#[tokio::test]
+async fn rtds_business_silence_replaces_two_runtimes_then_fresh_resets_the_episode() {
+    let dataset_root = tempdir().unwrap();
+    let dataset_root = dataset_root.path().canonicalize().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        for runtime_epoch in 0..3_u64 {
+            let (stream, _) = timeout(Duration::from_secs(2), listener.accept())
+                .await
+                .expect("next RTDS runtime connection")
+                .unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let request = loop {
+                let message = socket.next().await.unwrap().unwrap();
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                if text == "PING" {
+                    continue;
+                }
+                break serde_json::from_str::<Value>(&text).unwrap();
+            };
+            assert_eq!(request["action"], "subscribe");
+            assert_eq!(request["subscriptions"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                request["subscriptions"][0]["filters"],
+                r#"{"symbol":"btc/usd"}"#
+            );
+
+            if runtime_epoch != 1 {
+                let timestamp = now_ms();
+                socket
+                    .send(Message::Text(
+                        json!({
+                            "topic": "crypto_prices_chainlink",
+                            "type": "update",
+                            "timestamp": timestamp,
+                            "payload": {
+                                "symbol": "btc/usd",
+                                "timestamp": timestamp,
+                                "value": format!("65000.{runtime_epoch}")
+                            }
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+
+            let mut ignored_messages = tokio::time::interval(Duration::from_millis(5));
+            loop {
+                tokio::select! {
+                    message = socket.next() => match message {
+                        Some(Ok(Message::Text(text))) if text != "PING" => {
+                            panic!("unexpected second RTDS control message: {text}")
+                        }
+                        Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                        _ => {}
+                    },
+                    _ = ignored_messages.tick(), if runtime_epoch == 0 => {
+                        if socket
+                            .send(Message::Text(
+                                json!({
+                                    "topic": "ignored",
+                                    "type": "ignored",
+                                    "timestamp": now_ms(),
+                                    "payload": {}
+                                })
+                                .to_string()
+                                .into(),
+                            ))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    let (tx, mut rx) = mpsc::channel(8);
+    let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+    let stats = Arc::new(SourceQueueBackpressureStats::default());
+    install_active_raw_day_gate(&stats, now_ms()).await;
+    let mut spec = RtdsSourceSpec::production();
+    spec.endpoint = format!("ws://{address}");
+    spec.ws_config.reconnect.initial_backoff = Duration::from_millis(5);
+    spec.ws_config.reconnect.max_backoff = Duration::from_millis(10);
+    spec.ws_config.reconnect.backoff_multiplier = 1.0;
+    spec.ws_config.heartbeat_interval = Duration::from_millis(20);
+    spec.ws_config.heartbeat_timeout = Duration::from_millis(60);
+    spec.business_timing = RtdsBusinessTiming {
+        steady_silence_threshold: Duration::from_millis(80),
+        first_fresh_observation_window: Duration::from_millis(30),
+        outer_backoff_initial_ms: 2,
+        outer_backoff_max_ms: 4,
+    };
+    let source = tokio::spawn(run_rtds_source_with_spec(
+        spec,
+        dataset_root,
+        SourceEventSink {
+            tx,
+            gaps: Arc::clone(&gaps),
+            source_queue_backpressure: Arc::clone(&stats),
+            inflight_budget: InflightBudget::new(),
+            enqueue_lock: Arc::new(AsyncMutex::new(())),
+        },
+        CollectorIdentity {
+            host_id: "collector-test".to_owned(),
+            region: "local-test".to_owned(),
+        },
+        None,
+        Instant::now(),
+    ));
+
+    timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("runtime 0 fresh row")
+        .expect("source ingress remains open");
+    timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("runtime 2 fresh row")
+        .expect("source ingress remains open");
+    source.abort();
+    assert!(
+        timeout(Duration::from_secs(1), source)
+            .await
+            .expect("source cancellation")
+            .expect_err("run-forever source requires cancellation")
+            .is_cancelled()
+    );
+    server.await.unwrap();
+    assert!(gaps.lock().unwrap().is_empty());
+    let counters = stats.drain_all_operational();
+    assert!(counters.values().all(|by_source| {
+        by_source
+            .get("polymarket_rtds_chainlink_btc_usd")
+            .is_none_or(|counter| counter.lag_events == 0 && counter.reconnect_events == 0)
+    }));
+}
+
 #[test]
 fn rtds_freshness_classification_keeps_exact_boundaries_and_invalid_reasons() {
     const BASE_MS: i64 = 1_783_392_400_000;
