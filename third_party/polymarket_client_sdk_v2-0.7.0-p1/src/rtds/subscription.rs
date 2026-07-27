@@ -21,7 +21,7 @@ use super::types::response::{RtdsMessage, parse_messages};
 use crate::Result;
 use crate::auth::Credentials;
 use crate::ws::ConnectionManager;
-use crate::ws::connection::ConnectionState;
+use crate::ws::connection::{ConnectionState, recoverable_rtds_network_envelope};
 
 #[non_exhaustive]
 #[derive(Clone, Default)]
@@ -58,6 +58,8 @@ const RTDS_PARSE_DIAGNOSTIC_BODY_SCALAR_FIELDS: [&str; 6] = [
     "connectionId",
     "requestId",
 ];
+const RTDS_RECOVERABLE_NETWORK_ERROR: &str = "Network error communicating with endpoint";
+const RTDS_MESSAGE_FIELDS: [&str; 4] = ["topic", "type", "timestamp", "payload"];
 
 #[derive(Debug)]
 struct RtdsParseDiagnosticError {
@@ -401,17 +403,26 @@ fn build_rtds_parse_diagnostic(bytes: &[u8]) -> String {
     diagnostic.finish()
 }
 
+fn is_recoverable_network_error_envelope(bytes: &[u8]) -> bool {
+    let Ok(Value::Object(object)) = serde_json::from_slice(bytes) else {
+        return false;
+    };
+
+    object.get("message").and_then(Value::as_str) == Some(RTDS_RECOVERABLE_NETWORK_ERROR)
+        && RTDS_MESSAGE_FIELDS
+            .iter()
+            .all(|field| !object.contains_key(*field))
+}
+
 impl crate::ws::traits::MessageParser<RtdsMessage> for SimpleParser {
     fn parse(&self, bytes: &[u8]) -> Result<Vec<RtdsMessage>> {
         parse_messages(bytes).map_err(|source| {
+            let diagnostic = build_rtds_parse_diagnostic(bytes);
+            if is_recoverable_network_error_envelope(bytes) {
+                return recoverable_rtds_network_envelope(source, diagnostic);
+            }
             let kind = source.kind();
-            crate::error::Error::with_source(
-                kind,
-                RtdsParseDiagnosticError {
-                    source,
-                    diagnostic: build_rtds_parse_diagnostic(bytes),
-                },
-            )
+            crate::error::Error::with_source(kind, RtdsParseDiagnosticError { source, diagnostic })
         })
     }
 }

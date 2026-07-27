@@ -59,6 +59,39 @@ pub enum ConnectionFault {
     Parser(String),
 }
 
+#[cfg(feature = "rtds")]
+#[derive(Debug)]
+struct RecoverableRtdsNetworkEnvelope {
+    source: Error,
+    diagnostic: String,
+}
+
+#[cfg(feature = "rtds")]
+impl std::fmt::Display for RecoverableRtdsNetworkEnvelope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "RTDS remote endpoint network error; rtds_parse_diagnostic={}",
+            self.diagnostic
+        )
+    }
+}
+
+#[cfg(feature = "rtds")]
+impl std::error::Error for RecoverableRtdsNetworkEnvelope {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+#[cfg(feature = "rtds")]
+pub(crate) fn recoverable_rtds_network_envelope(source: Error, diagnostic: String) -> Error {
+    Error::with_source(
+        Kind::WebSocket,
+        RecoverableRtdsNetworkEnvelope { source, diagnostic },
+    )
+}
+
 enum ConnectionExit {
     NormalShutdown,
     Recoverable(Error),
@@ -421,8 +454,17 @@ where
                                         _ = broadcast_tx.send(message);
                                     }
                                 }
-                                Err(e) => {
-                                    let message = e.to_string();
+                                Err(error) => {
+                                    #[cfg(feature = "rtds")]
+                                    if error
+                                        .downcast_ref::<RecoverableRtdsNetworkEnvelope>()
+                                        .is_some()
+                                    {
+                                        heartbeat_handle.abort();
+                                        return ConnectionExit::Recoverable(error);
+                                    }
+
+                                    let message = error.to_string();
                                     signals.fault_tx.send_replace(Some(ConnectionFault::Parser(message.clone())));
                                     #[cfg(feature = "tracing")]
                                     tracing::warn!(error = %message, "Failed to parse WebSocket message");

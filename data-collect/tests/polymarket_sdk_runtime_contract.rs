@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::{SinkExt as _, StreamExt as _};
 use polymarket_client_sdk_v2::clob::ws::types::response::WsMessage;
@@ -596,6 +596,103 @@ async fn rtds_manager_resubscribes_in_the_new_connection_generation() {
         .map(|request| serde_json::from_str::<Value>(&request).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(requests[0], requests[1]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rtds_network_error_reconnects_once_but_target_like_frame_remains_terminal() {
+    const NETWORK_ERROR: &str = r#"{"message":"Network error communicating with endpoint","connectionId":"connection-123","requestId":"request-456"}"#;
+    const TARGET_LIKE_NETWORK_ERROR: &str = r#"{"message":"Network error communicating with endpoint","topic":"crypto_prices_chainlink","connectionId":"connection-789","requestId":"request-012"}"#;
+    let fresh_timestamp = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let fresh = json!({
+        "topic": "crypto_prices_chainlink",
+        "type": "update",
+        "timestamp": fresh_timestamp,
+        "payload": {
+            "symbol": "btc/usd",
+            "timestamp": fresh_timestamp,
+            "value": "100000"
+        }
+    })
+    .to_string();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (send_error_tx, send_error_rx) = oneshot::channel();
+    let (send_target_like_tx, send_target_like_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut first_socket = accept_async(stream).await.unwrap();
+        let initial = next_text(&mut first_socket).await;
+        send_error_rx.await.unwrap();
+        first_socket
+            .send(Message::Text(NETWORK_ERROR.into()))
+            .await
+            .unwrap();
+
+        let (stream, _) = timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .expect("network error envelope must reconnect")
+            .unwrap();
+        let mut second_socket = accept_async(stream).await.unwrap();
+        let replay = next_text(&mut second_socket).await;
+        second_socket
+            .send(Message::Text(fresh.into()))
+            .await
+            .unwrap();
+        send_target_like_rx.await.unwrap();
+        second_socket
+            .send(Message::Text(TARGET_LIKE_NETWORK_ERROR.into()))
+            .await
+            .unwrap();
+        vec![initial, replay]
+    });
+
+    let mut config = fast_config();
+    config.require_text_pong = false;
+    let mut runtime = RtdsSdkRuntime::new(format!("ws://{address}"), config).unwrap();
+    runtime
+        .subscribe(
+            Subscription::chainlink_prices(Some("btc/usd".to_owned())),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    let initial_generation = runtime.connection_generation();
+    send_error_tx.send(()).unwrap();
+
+    let message = runtime
+        .recv(Duration::from_secs(2))
+        .await
+        .unwrap()
+        .expect("fresh RTDS message after recoverable network error");
+    assert_eq!(message.topic, "crypto_prices_chainlink");
+    assert_eq!(message.msg_type, "update");
+    assert_eq!(message.timestamp, fresh_timestamp);
+    assert_eq!(message.payload["symbol"], "btc/usd");
+    assert_eq!(message.payload["timestamp"], fresh_timestamp);
+    assert_eq!(message.payload["value"], "100000");
+    assert_eq!(runtime.connection_generation(), initial_generation + 1);
+    send_target_like_tx.send(()).unwrap();
+    assert!(matches!(
+        runtime.recv(Duration::from_secs(2)).await,
+        Err(SdkStreamError::Parser(_))
+    ));
+
+    let requests = server
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|request| serde_json::from_str::<Value>(&request).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(requests[0]["action"], "subscribe");
+    assert_eq!(requests[1]["action"], "subscribe");
+    assert_eq!(requests[0]["subscriptions"], requests[1]["subscriptions"]);
 }
 
 #[tokio::test(flavor = "current_thread")]
