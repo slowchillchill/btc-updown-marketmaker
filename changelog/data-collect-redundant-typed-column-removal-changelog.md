@@ -6,7 +6,89 @@
 >
 > 对应计划：`plan/data-collect-redundant-typed-column-removal-plan.md`
 >
-> 状态：`APPROVED_STAGE0_CLOSED_ON_PUBLISH_STAGE1_NEXT_ATTEMPT5_USER_TERMINATED_INCOMPLETE_8H`
+> 状态：`APPROVED_STAGE0_CLOSED_STAGE1_CLOSED_ON_PUBLISH_STAGE2_NEXT_ATTEMPT5_USER_TERMINATED_INCOMPLETE_8H`
+
+## 2026-07-28：阶段 1 aggTrade v7 最小实现与本地验证
+
+先写并确认旧代码下失败的 schema/writer 合同后，完成以下生产修改：
+
+- current schema version 从 `binance_aggtrade_v6` 升为
+  `binance_aggtrade_v7`；
+- 从 current row、三个构造器、validator、Arrow schema、raw event、writer
+  parser 和 Parquet batch 删除 `websocket_timestamp_received`；
+- 保留 `timestamp_received` 作为唯一 WebSocket transport receive time，并保持
+  event/trade time、ingress/admission 坐标及四个 REST nullable 兼容列不变；
+- current writer factory 精确只接受 v7，统一将同一版本常量传播到 row、footer、
+  published result、embedded recovery metadata、finalized delta 与 manifest
+  per-file fact；
+- recovery 算法仍只投影 ID、source-native payload 和可选 `record_kind`，没有
+  新增 schema adapter、迁移器、旧 writer 或额外运行时 forbidden-key 校验。
+
+兼容与回归测试同时确认：
+
+- v7 trade/invalid raw event、Arrow 与 Parquet 均不存在被删字段，两个 row 的
+  `timestamp_received` 值保持；
+- v5 手写旧物理 schema 与 v6 冻结旧物理 schema 可恢复且恢复前后文件 SHA-256
+  不变；v6 invalid row 不进入成交 ID 恢复窗口；
+- v5、v6、未知版本标签在创建 current writer 时立即失败且不产生文件；v7 writer
+  也拒绝携带 v6 row version 的写入；
+- published result、footer、embedded recovery metadata、finalized delta 与
+  manifest file fact 均记录 v7。
+
+验证结果：
+
+- aggTrade layout、writer、handoff 三组集成测试：`56/56` 通过；
+- aggTrade runtime/source/recovery 定向库测试与 writer-supervisor 版本传播测试
+  通过；
+- `cargo test -p data-collect --locked` 全部通过，lib 为 `351 passed / 1
+  ignored`，所有 integration 与 doc tests 通过；
+- `cargo check -p data-collect --tests --locked`、严格 Clippy、fmt check 与
+  `git diff --check` 通过。
+
+没有新增或恢复独立 100-cycle 验收；完整 package test 自然执行仓库已有测试，不把
+历史循环测试重新定义为本阶段 gate。当前等待独立 `gpt-5.6-sol`/Ultra 阶段审查，
+尚未创建阶段 1 commit。
+
+## 2026-07-28：阶段 1 首轮独立审查问题与修复
+
+三路独立审查均确认生产改动范围、版本传播、v5 只读恢复和无独立 100-cycle gate
+正确。代码与简单性两路各报告同一个 `Important 1`：v6 fixture 最初仍从 current
+v7 writer 的 schema/columns 反向构造，不能独立冻结旧 `DataType`、nullability
+和值语义。文档/验收一路报告 `Important 3`：同一个 v6 fixture 问题、本 changelog
+仍停留在“阶段 0 待发布”的旧游标，以及 SDK070/RTDS 六份顶部仍保留阶段 0
+`STAGE1_NEXT` 状态。三路首轮均为 `CHANGES_REQUESTED`，不存在 Critical 或
+Minor。
+
+已执行最小修复：
+
+- v6 fixture 改为测试内独立的显式 Arrow schema 和两行字面量
+  `trade|invalid_input`，不再调用 current writer、current schema 或 current row
+  constructor；
+- 继续验证 footer 为 v6、invalid row 不进入恢复窗口、恢复前后 SHA-256 不变；
+- 新增完整 Arrow `Field` 比较，证明 v7 精确等于冻结 v6 schema 删除目标列；
+- 修正本 changelog 的旧阶段 0 游标，并把 SDK070/RTDS 六份现行状态同步为
+  `STAGE1_IMPLEMENTED_REVIEW_PENDING`。
+
+修复后的 v6 定向恢复测试已通过。阶段 1 仍等待复审，不把首轮问题闭环冒充阶段
+完成。
+
+## 2026-07-28：阶段 1 三路最终复审通过
+
+修复后由原三路 `gpt-5.6-sol`/Ultra 审查者重新检查完整当前 diff：
+
+- 代码正确性、legacy recovery 与版本传播审查：
+  `PASS / Critical 0 / Important 0 / Minor 0`；
+- 简单性、过度校验与测试独立性审查：
+  `PASS / Critical 0 / Important 0 / Minor 0`；
+- demand/plan/changelog、umbrella 游标与验收覆盖审查：
+  `PASS / Critical 0 / Important 0 / Minor 0`。
+
+复审确认生产路径没有新增 schema adapter、迁移器、第二 writer、shadow path 或
+独立 100-cycle gate；v6 fixture 与 current v7 实现已相互独立；验收 1、3、4、6
+的 aggTrade 部分已通过，验收 8 的文档同步与独立审查已通过，commit/push 和三方
+ref 核对仍待发布完成。阶段 1 只在承载本记录的代码+文档 commit 成功 push 且本地
+HEAD、upstream 与远端 ref 一致后闭合；在此之前状态为
+`STAGE1_CLOSED_ON_PUBLISH`。
 
 ## 2026-07-28：两个候选重复字段完成消费者审计
 
@@ -103,11 +185,11 @@ v6/v4 部分日前向与本次重复字段审计证据，不计为 v7/v5 或 RTD
 
 ## 当前执行游标
 
-阶段 0 将随本次文档 commit 成功发布而闭合；随后依次进入：
-
-1. `binance_aggtrade_v7`；
-2. `polymarket_market_metadata_v5`；
-3. 完整六源 8 小时 Attempt6 与最终收口。
+阶段 0 已由 commit `3d5f37e3f95f82adf2d01f3cd6190944867bff38` 发布并完成
+本地 HEAD、upstream 与远端 ref 核对。阶段 1 的 v7 实现、本地门禁、首轮问题修复
+和三路最终复审均已完成，当前只等待阶段 1 commit/push 与三方 ref 核对；发布成功
+后进入 `polymarket_market_metadata_v5`，其后执行完整六源 8 小时 Attempt6 与最终
+收口。
 
 本事项没有执行 production activation、canonical cutover、远端部署、历史迁移或数据
 清理。

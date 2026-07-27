@@ -1476,11 +1476,34 @@ fn typed_writer_binance_aggtrade_schema_keeps_distinct_event_and_trade_times() {
         .write_binance_aggtrade_rows(&[websocket_row, invalid_row])
         .unwrap();
     let published = writer.finalize().unwrap();
+    assert_eq!(published.schema_version, BINANCE_AGGTRADE_SCHEMA_VERSION);
     let builder =
         ParquetRecordBatchReaderBuilder::try_new(File::open(&published.final_path).unwrap())
             .unwrap();
+    let footer_schema_version = builder
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .and_then(|metadata| {
+            metadata
+                .iter()
+                .find(|entry| entry.key == "parquet_raw_layout_version")
+        })
+        .and_then(|entry| entry.value.as_deref());
+    assert_eq!(footer_schema_version, Some(BINANCE_AGGTRADE_SCHEMA_VERSION));
     let mut batch_reader = builder.build().unwrap();
     let batch = batch_reader.next().unwrap().unwrap();
+    assert!(
+        batch
+            .schema()
+            .index_of("websocket_timestamp_received")
+            .is_err()
+    );
+    let timestamp_received = batch
+        .column(batch.schema().index_of("timestamp_received").unwrap())
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .unwrap();
     let event_time = batch
         .column(batch.schema().index_of("event_time").unwrap())
         .as_any()
@@ -1526,16 +1549,6 @@ fn typed_writer_binance_aggtrade_schema_keeps_distinct_event_and_trade_times() {
         .as_any()
         .downcast_ref::<UInt64Array>()
         .unwrap();
-    let websocket_received = batch
-        .column(
-            batch
-                .schema()
-                .index_of("websocket_timestamp_received")
-                .unwrap(),
-        )
-        .as_any()
-        .downcast_ref::<TimestampMillisecondArray>()
-        .unwrap();
     let rest_received = batch
         .column(
             batch
@@ -1547,6 +1560,8 @@ fn typed_writer_binance_aggtrade_schema_keeps_distinct_event_and_trade_times() {
         .downcast_ref::<TimestampMillisecondArray>()
         .unwrap();
 
+    assert_eq!(timestamp_received.value(0), 1_766_789_470_100);
+    assert_eq!(timestamp_received.value(1), 1_766_789_470_400);
     assert_eq!(event_time.value(0), 1_766_789_469_958);
     assert!(event_time.is_null(1));
     assert_eq!(trade_time.value(0), 1_766_789_469_000);
@@ -1561,10 +1576,51 @@ fn typed_writer_binance_aggtrade_schema_keeps_distinct_event_and_trade_times() {
     assert_eq!(invalid_reason_code.value(1), "invalid_json");
     assert_eq!(admission_sequence.values(), &[1, 2]);
     assert_eq!(connection_generation.values(), &[4, 4]);
-    assert_eq!(websocket_received.value(0), 1_766_789_470_100);
-    assert_eq!(websocket_received.value(1), invalid_timestamp);
     assert!(rest_received.is_null(0));
     assert!(rest_received.is_null(1));
+}
+
+#[test]
+fn typed_writer_binance_aggtrade_rejects_legacy_or_unknown_new_write_labels() {
+    for schema_version in [
+        "binance_aggtrade_v5",
+        "binance_aggtrade_v6",
+        "binance_aggtrade_v999",
+    ] {
+        let tmp = tempdir().unwrap();
+        let error = match TypedParquetSegmentWriter::create_for_typed_source(
+            tmp.path(),
+            "binance_aggtrade-version-reject",
+            schema_version,
+            "binance_aggtrade",
+        ) {
+            Ok(_) => panic!("v7 physical layout must not be written under {schema_version}"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains(schema_version),
+            "version rejection must identify {schema_version}: {error}"
+        );
+        assert!(
+            tmp.path().read_dir().unwrap().next().is_none(),
+            "rejected version {schema_version} must not create a writer artifact"
+        );
+    }
+
+    let tmp = tempdir().unwrap();
+    let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
+        tmp.path(),
+        "binance_aggtrade-row-version-reject",
+        BINANCE_AGGTRADE_SCHEMA_VERSION,
+        "binance_aggtrade",
+    )
+    .unwrap();
+    let mut row = websocket_aggtrade_row(123, 1_766_789_470_100, 1, 1);
+    row.schema_version = "binance_aggtrade_v6".to_owned();
+    let error = writer
+        .write_binance_aggtrade_rows(&[row])
+        .expect_err("a current writer must reject a row carrying a legacy schema label");
+    assert!(error.to_string().contains("schema_version_valid"));
 }
 
 fn websocket_aggtrade_row(

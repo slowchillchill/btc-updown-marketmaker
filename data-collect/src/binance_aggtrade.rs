@@ -387,13 +387,6 @@ impl BinanceAggTradeOutput {
     }
 
     #[must_use]
-    pub fn websocket_timestamp_received(&self) -> Option<i64> {
-        match self {
-            Self::Websocket(websocket) => Some(websocket.timestamp_received),
-        }
-    }
-
-    #[must_use]
     pub fn websocket_ingress_sequence(&self) -> Option<u64> {
         match self {
             Self::Websocket(BinanceWsAggTrade {

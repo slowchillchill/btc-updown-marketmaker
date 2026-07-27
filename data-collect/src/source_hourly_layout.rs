@@ -638,7 +638,7 @@ pub struct BinanceAggTradeInvalidEvidence {
     pub payload_capture_status: String,
 }
 
-pub const BINANCE_AGGTRADE_SCHEMA_VERSION: &str = "binance_aggtrade_v6";
+pub const BINANCE_AGGTRADE_SCHEMA_VERSION: &str = "binance_aggtrade_v7";
 pub const BINANCE_AGGTRADE_RECORD_TRADE: &str = "trade";
 pub const BINANCE_AGGTRADE_RECORD_INVALID_INPUT: &str = "invalid_input";
 pub const BINANCE_AGGTRADE_CAPTURE_COMPLETE: &str = "complete";
@@ -667,7 +667,6 @@ struct BinanceAggTradeInvalidEvidenceEnvelope {
 pub struct BinanceAggTradeHourlyRow {
     pub record_kind: String,
     pub timestamp_received: i64,
-    pub websocket_timestamp_received: Option<i64>,
     pub rest_backfill_timestamp_received: Option<i64>,
     pub ingest_source: String,
     pub event_type: Option<String>,
@@ -713,7 +712,6 @@ impl BinanceAggTradeHourlyRow {
         Ok(Self {
             record_kind: BINANCE_AGGTRADE_RECORD_TRADE.to_owned(),
             timestamp_received,
-            websocket_timestamp_received: Some(timestamp_received),
             rest_backfill_timestamp_received: None,
             ingest_source: AggTradeIngestSource::Websocket.as_str().to_owned(),
             event_type: Some(raw.event_type.clone()),
@@ -788,7 +786,6 @@ impl BinanceAggTradeHourlyRow {
         Ok(Self {
             record_kind: BINANCE_AGGTRADE_RECORD_TRADE.to_owned(),
             timestamp_received: websocket.timestamp_received,
-            websocket_timestamp_received: Some(websocket.timestamp_received),
             rest_backfill_timestamp_received: None,
             ingest_source: AggTradeIngestSource::Websocket.as_str().to_owned(),
             event_type: Some(websocket.event_type.clone()),
@@ -838,7 +835,6 @@ impl BinanceAggTradeHourlyRow {
         Ok(Self {
             record_kind: BINANCE_AGGTRADE_RECORD_INVALID_INPUT.to_owned(),
             timestamp_received: evidence.timestamp_received,
-            websocket_timestamp_received: Some(evidence.timestamp_received),
             rest_backfill_timestamp_received: None,
             ingest_source: AggTradeIngestSource::Websocket.as_str().to_owned(),
             event_type: None,
@@ -880,9 +876,6 @@ impl BinanceAggTradeHourlyRow {
             missing_fields: Vec::new(),
         };
         require_positive_i64("timestamp_received", self.timestamp_received, &mut report);
-        if let Some(timestamp) = self.websocket_timestamp_received {
-            require_positive_i64("websocket_timestamp_received", timestamp, &mut report);
-        }
         if let Some(timestamp) = self.rest_backfill_timestamp_received {
             require_positive_i64("rest_backfill_timestamp_received", timestamp, &mut report);
         }
@@ -917,10 +910,6 @@ impl BinanceAggTradeHourlyRow {
             report.missing_fields.push("ingest_source_valid".to_owned());
         }
         report.require_some(
-            "websocket_timestamp_received",
-            self.websocket_timestamp_received,
-        );
-        report.require_some(
             "websocket_ingress_sequence",
             self.websocket_ingress_sequence,
         );
@@ -932,12 +921,6 @@ impl BinanceAggTradeHourlyRow {
             report
                 .missing_fields
                 .push("websocket_has_rest_only_fields".to_owned());
-        }
-        let expected_availability = self.websocket_timestamp_received.unwrap_or_default();
-        if self.timestamp_received != expected_availability {
-            report
-                .missing_fields
-                .push("timestamp_received_is_full_row_availability".to_owned());
         }
         report.require_non_empty(
             "source_native_payload_json",
@@ -1382,7 +1365,6 @@ pub fn binance_aggtrade_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("record_kind", DataType::Utf8, false),
         timestamp_field("timestamp_received", false),
-        timestamp_field("websocket_timestamp_received", true),
         timestamp_field("rest_backfill_timestamp_received", true),
         Field::new("ingest_source", DataType::Utf8, false),
         Field::new("event_type", DataType::Utf8, true),

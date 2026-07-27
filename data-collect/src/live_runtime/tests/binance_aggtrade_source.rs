@@ -88,6 +88,13 @@ fn aggtrade_max_complete_invalid_capture_fits_the_typed_row_budget() {
     )
     .unwrap();
     assert!(
+        serde_json::from_str::<Value>(&event.raw_json)
+            .unwrap()
+            .get("websocket_timestamp_received")
+            .is_none(),
+        "v7 invalid raw event must not carry the removed receive-time alias"
+    );
+    assert!(
         owned_event_bytes(&event) <= MAX_TYPED_ROW_BYTES,
         "max complete capture owns {} bytes, above the typed-row limit {}",
         owned_event_bytes(&event),
@@ -248,13 +255,14 @@ async fn assert_binance_reconnects_after(first_message: Option<Message>) {
 
     assert_eq!(event.source_event_type, "aggTrade");
     assert_eq!(event.source_ts.as_deref(), Some("1783392404599"));
-    assert_eq!(
-        serde_json::from_str::<Value>(&event.raw_json).unwrap()["event_type"],
-        "aggTrade"
+    let raw_event = serde_json::from_str::<Value>(&event.raw_json).unwrap();
+    assert_eq!(raw_event["event_type"], "aggTrade");
+    assert!(
+        raw_event.get("websocket_timestamp_received").is_none(),
+        "v7 trade raw event must not carry the removed receive-time alias"
     );
     assert_eq!(
-        serde_json::from_str::<Value>(&event.raw_json).unwrap()["connection_generation"],
-        2,
+        raw_event["connection_generation"], 2,
         "the business row after reconnect must identify the second socket generation"
     );
     source.abort();
@@ -1033,7 +1041,7 @@ async fn binance_aggtrade_invalid_text_frames_are_preserved_and_same_socket_cont
     let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
         &writer_dir,
         "binance_aggtrade_00",
-        "binance_aggtrade_v6",
+        BINANCE_AGGTRADE_SCHEMA_VERSION,
         "binance_aggtrade",
     )
     .unwrap();

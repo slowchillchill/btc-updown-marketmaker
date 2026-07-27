@@ -224,7 +224,7 @@ fn binance_aggtrade_restore_row_is_trade(
     };
     if record_kinds.is_null(row) {
         return Err(io::Error::other(format!(
-            "Binance aggTrade v6 record kind missing in {}",
+            "Binance aggTrade record kind missing in {}",
             path.display()
         ))
         .into());
@@ -233,7 +233,7 @@ fn binance_aggtrade_restore_row_is_trade(
         "trade" => {
             if ids.is_null(row) {
                 return Err(io::Error::other(format!(
-                    "Binance aggTrade v6 trade ID missing in {}",
+                    "Binance aggTrade trade ID missing in {}",
                     path.display()
                 ))
                 .into());
@@ -243,7 +243,7 @@ fn binance_aggtrade_restore_row_is_trade(
         "invalid_input" => {
             if !ids.is_null(row) {
                 return Err(io::Error::other(format!(
-                    "Binance aggTrade v6 invalid input has a trade ID in {}",
+                    "Binance aggTrade invalid input has a trade ID in {}",
                     path.display()
                 ))
                 .into());
@@ -251,7 +251,7 @@ fn binance_aggtrade_restore_row_is_trade(
             Ok(false)
         }
         kind => Err(io::Error::other(format!(
-            "unknown Binance aggTrade v6 record kind {kind:?} in {}",
+            "unknown Binance aggTrade record kind {kind:?} in {}",
             path.display()
         ))
         .into()),

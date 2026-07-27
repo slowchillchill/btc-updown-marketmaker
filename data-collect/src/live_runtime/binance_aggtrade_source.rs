@@ -464,7 +464,6 @@ pub(super) fn binance_aggtrade_raw_event(
         raw_json: json!({
             "record_kind": "trade",
             "timestamp_received": output.timestamp_received(),
-            "websocket_timestamp_received": output.websocket_timestamp_received(),
             "rest_backfill_timestamp_received": Value::Null,
             "ingest_source": output.ingest_source().as_str(),
             "event_type": websocket.event_type,

@@ -2402,7 +2402,7 @@ pub(super) fn typed_schema_version(source_kind: &str) -> &'static str {
         "polymarket_market_metadata" => POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION,
         "binance_depth_snapshot" => BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
         "binance_depth_update" => BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
-        "binance_aggtrade" => "binance_aggtrade_v6",
+        "binance_aggtrade" => BINANCE_AGGTRADE_SCHEMA_VERSION,
         "polymarket_rtds_chainlink_btc_usd" => "polymarket_rtds_chainlink_btc_usd_v4",
         _ => "unknown_typed_layout",
     }
@@ -2547,19 +2547,10 @@ pub(super) fn binance_aggtrade_row_from_event(
         invalid_data("binance aggTrade event reached writer without collector admission")
     })?;
     let ingest_source = required_value_string(&value, "ingest_source")?;
-    let (websocket_timestamp_received, rest_backfill_timestamp_received) =
-        if record_kind == "invalid_input" {
-            (Some(timestamp_received), None)
-        } else {
-            (
-                optional_i64(&value, "websocket_timestamp_received"),
-                optional_i64(&value, "rest_backfill_timestamp_received"),
-            )
-        };
+    let rest_backfill_timestamp_received = optional_i64(&value, "rest_backfill_timestamp_received");
     let row = BinanceAggTradeHourlyRow {
         record_kind,
         timestamp_received,
-        websocket_timestamp_received,
         rest_backfill_timestamp_received,
         ingest_source,
         event_type: optional_string(&value, "event_type"),
@@ -2602,7 +2593,7 @@ pub(super) fn binance_aggtrade_row_from_event(
         collector_host_id: event.collector_host_id.clone(),
         collector_region: event.collector_region.clone(),
         source_endpoint: event.source_endpoint.clone(),
-        schema_version: "binance_aggtrade_v6".to_owned(),
+        schema_version: BINANCE_AGGTRADE_SCHEMA_VERSION.to_owned(),
     };
     let validation = row.validate();
     if !validation.is_complete() {

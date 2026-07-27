@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-redundant-typed-column-removal-changelog.md`
 >
-> 状态：`APPROVED_STAGE0_CLOSED_ON_PUBLISH_STAGE1_NEXT_ATTEMPT5_USER_TERMINATED_INCOMPLETE_8H`
+> 状态：`APPROVED_STAGE0_CLOSED_STAGE1_CLOSED_ON_PUBLISH_STAGE2_NEXT_ATTEMPT5_USER_TERMINATED_INCOMPLETE_8H`
 
 ## 阶段 0：停止旧测试并同步 authority
 
@@ -70,6 +70,18 @@ push 到 `origin/fix-rtds-silents`。
 
 阶段 1 完成条件：需求验收 1、3、4、6、8 中 aggTrade 部分通过，阶段 1 commit
 已 push。
+
+### 阶段 1 当前执行记录（2026-07-28）
+
+- 任务 1.1、1.2 与步骤 1.3.1--1.3.2 已完成；旧代码下的 schema contract
+  先失败，随后以最小生产改动升级到 v7。
+- v5 手写物理 fixture 与 v6 冻结物理 fixture 均保持只读恢复；current writer
+  拒绝 v5、v6 和未知 new-write 标签，且拒绝携带旧 row version 的写入。
+- 定向测试、完整 `data-collect` package tests、tests check、严格 Clippy、fmt
+  与 diff check 已通过。未新增或恢复独立 100-cycle 验收门。
+- 步骤 1.3.3 的三路独立审查、首轮问题闭环和最终复审已完成，最终均为
+  `PASS / Critical 0 / Important 0 / Minor 0`。阶段 1 随承载本记录的
+  代码+文档 commit 成功 push 且三方 ref 一致而闭合。
 
 ## 阶段 2：实现 `polymarket_market_metadata_v5`
 

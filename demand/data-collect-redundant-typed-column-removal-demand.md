@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-redundant-typed-column-removal-changelog.md`
 >
-> 状态：`APPROVED_STAGE0_CLOSED_ON_PUBLISH_STAGE1_NEXT_ATTEMPT5_USER_TERMINATED_INCOMPLETE_8H`
+> 状态：`APPROVED_STAGE0_CLOSED_STAGE1_CLOSED_ON_PUBLISH_STAGE2_NEXT_ATTEMPT5_USER_TERMINATED_INCOMPLETE_8H`
 
 ## 一、目标与用户裁决
 

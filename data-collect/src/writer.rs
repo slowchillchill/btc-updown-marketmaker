@@ -28,11 +28,12 @@ use crate::polymarket_orderbook_v3::{
     polymarket_orderbook_v3_messages_to_batch, polymarket_orderbook_v3_schema,
 };
 use crate::source_hourly_layout::{
-    BINANCE_DEPTH_SNAPSHOT_LEGACY_SCHEMA_VERSION, BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
-    BINANCE_DEPTH_UPDATE_LEGACY_SCHEMA_VERSION, BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
-    BinanceAggTradeHourlyRow, BinanceDepthOrderingClassification, BinanceDepthSnapshotHourlyRow,
-    BinanceDepthUpdateHourlyRow, RtdsChainlinkBtcUsdHourlyRow, binance_aggtrade_schema,
-    binance_depth_snapshot_schema, binance_depth_update_schema, rtds_chainlink_btc_usd_schema,
+    BINANCE_AGGTRADE_SCHEMA_VERSION, BINANCE_DEPTH_SNAPSHOT_LEGACY_SCHEMA_VERSION,
+    BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION, BINANCE_DEPTH_UPDATE_LEGACY_SCHEMA_VERSION,
+    BINANCE_DEPTH_UPDATE_SCHEMA_VERSION, BinanceAggTradeHourlyRow,
+    BinanceDepthOrderingClassification, BinanceDepthSnapshotHourlyRow, BinanceDepthUpdateHourlyRow,
+    RtdsChainlinkBtcUsdHourlyRow, binance_aggtrade_schema, binance_depth_snapshot_schema,
+    binance_depth_update_schema, rtds_chainlink_btc_usd_schema,
 };
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -395,7 +396,18 @@ impl TypedParquetSegmentWriter {
                 )?;
                 binance_depth_update_schema()
             }
-            "binance_aggtrade" => binance_aggtrade_schema(),
+            "binance_aggtrade" => {
+                if schema_version != BINANCE_AGGTRADE_SCHEMA_VERSION {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "unsupported Binance aggTrade schema version for writer:schema_version={schema_version}:expected={BINANCE_AGGTRADE_SCHEMA_VERSION}"
+                        ),
+                    )
+                    .into());
+                }
+                binance_aggtrade_schema()
+            }
             "polymarket_rtds_chainlink_btc_usd" => rtds_chainlink_btc_usd_schema(),
             other => {
                 return Err(io::Error::new(
@@ -1438,7 +1450,6 @@ fn binance_aggtrade_rows_to_batch(
     let columns: Vec<ArrayRef> = vec![
         string_values(rows.iter().map(|row| row.record_kind.as_str())),
         timestamp_values(rows.iter().map(|row| row.timestamp_received)),
-        optional_timestamp_values(rows.iter().map(|row| row.websocket_timestamp_received)),
         optional_timestamp_values(rows.iter().map(|row| row.rest_backfill_timestamp_received)),
         string_values(rows.iter().map(|row| row.ingest_source.as_str())),
         optional_strings(rows.iter().map(|row| row.event_type.as_deref())),

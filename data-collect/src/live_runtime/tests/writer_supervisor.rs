@@ -209,6 +209,7 @@ fn live_segment_finalize_emits_daily_delta_without_segment_manifest() {
         1_783_393_200_000i64
     );
     assert_eq!(delta.part, 0);
+    assert_eq!(delta.schema_version, BINANCE_AGGTRADE_SCHEMA_VERSION);
     assert_eq!(
         delta.facts["layout_family"],
         "source_specific_hourly_typed_raw"
@@ -254,6 +255,10 @@ fn live_segment_finalize_emits_daily_delta_without_segment_manifest() {
         manifest["source_counters"]["binance_aggtrade"]["structural_dedupe_dropped_events"],
         1
     );
+    assert_eq!(
+        manifest["files"][0]["schema_version"],
+        BINANCE_AGGTRADE_SCHEMA_VERSION
+    );
     let reconciled =
         reconcile_open_day_manifest(&day_dir, "2026-07-07", &test_daily_manifest_identity())
             .unwrap();
@@ -261,13 +266,28 @@ fn live_segment_finalize_emits_daily_delta_without_segment_manifest() {
     assert_eq!(reconciled["collection_day_coverage"], active_coverage);
 
     let reader = SerializedFileReader::new(File::open(&finalized.parquet_path).unwrap()).unwrap();
-    let sort_order = reader
+    let key_value_metadata = reader
         .metadata()
         .file_metadata()
         .key_value_metadata()
-        .and_then(|metadata| metadata.iter().find(|entry| entry.key == "sort_order"))
+        .expect("typed Parquet must carry footer metadata");
+    let sort_order = key_value_metadata
+        .iter()
+        .find(|entry| entry.key == "sort_order")
         .and_then(|entry| entry.value.as_deref());
     assert_eq!(sort_order, Some("collector_admission_order"));
+    let footer_schema_version = key_value_metadata
+        .iter()
+        .find(|entry| entry.key == "parquet_raw_layout_version")
+        .and_then(|entry| entry.value.as_deref());
+    assert_eq!(footer_schema_version, Some(BINANCE_AGGTRADE_SCHEMA_VERSION));
+    let embedded = key_value_metadata
+        .iter()
+        .find(|entry| entry.key == DAILY_FILE_RECOVERY_METADATA_KEY)
+        .and_then(|entry| entry.value.as_deref())
+        .map(|payload| serde_json::from_str::<DailyFileRecoveryMetadata>(payload).unwrap())
+        .expect("typed Parquet must carry embedded recovery metadata");
+    assert_eq!(embedded.schema_version, BINANCE_AGGTRADE_SCHEMA_VERSION);
     let fields = reader
         .metadata()
         .file_metadata()
@@ -277,6 +297,7 @@ fn live_segment_finalize_emits_daily_delta_without_segment_manifest() {
         .map(|column| column.name().to_owned())
         .collect::<Vec<_>>();
     assert!(fields.contains(&"aggregate_trade_id".to_owned()));
+    assert!(!fields.contains(&"websocket_timestamp_received".to_owned()));
     assert!(!fields.contains(&"raw_json".to_owned()));
 }
 

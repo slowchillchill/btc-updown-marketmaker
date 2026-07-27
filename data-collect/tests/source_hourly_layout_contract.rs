@@ -443,10 +443,6 @@ fn binance_aggtrade_hourly_row_keeps_event_and_trade_times_with_identifiers() {
     assert_eq!(row.last_trade_id, Some(12));
     assert_eq!(row.buyer_is_maker, Some(true));
     assert_eq!(row.ingest_source, "websocket");
-    assert_eq!(
-        row.websocket_timestamp_received,
-        Some(row.timestamp_received)
-    );
     assert_eq!(row.rest_backfill_timestamp_received, None);
     assert_eq!(row.ws_ignore, Some(false));
     assert_eq!(row.rest_was_best_price_match, None);
@@ -857,6 +853,57 @@ fn schemas_contain_source_specific_typed_fields() {
             .is_nullable()
     );
     let aggtrade = binance_aggtrade_schema();
+    assert_eq!(BINANCE_AGGTRADE_SCHEMA_VERSION, "binance_aggtrade_v7");
+    assert_eq!(
+        aggtrade
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "record_kind",
+            "timestamp_received",
+            "rest_backfill_timestamp_received",
+            "ingest_source",
+            "event_type",
+            "event_time",
+            "trade_time",
+            "symbol",
+            "aggregate_trade_id",
+            "price",
+            "quantity",
+            "first_trade_id",
+            "last_trade_id",
+            "buyer_is_maker",
+            "stream",
+            "ws_ignore",
+            "rest_was_best_price_match",
+            "source_native_payload_json",
+            "source_sequence_epoch_id",
+            "connection_generation",
+            "websocket_ingress_sequence",
+            "rest_response_ingress_sequence",
+            "rest_response_item_index",
+            "collector_admission_sequence",
+            "collector_admission_time_utc_ms",
+            "invalid_reason_code",
+            "invalid_reason_detail",
+            "payload_encoding",
+            "payload_length_bytes",
+            "payload_sha256",
+            "payload_capture_status",
+            "collector_host_id",
+            "collector_region",
+            "source_endpoint",
+            "schema_version",
+        ]
+    );
+    assert!(
+        aggtrade
+            .field_with_name("websocket_timestamp_received")
+            .is_err(),
+        "v7 must use timestamp_received as the only WebSocket receive timestamp"
+    );
     assert!(
         !aggtrade
             .field_with_name("connection_generation")
@@ -927,7 +974,7 @@ fn source_hourly_schemas_do_not_duplicate_receive_time_aliases() {
                 .field_with_name(trade_only)
                 .expect(trade_only)
                 .is_nullable(),
-            "v6 trade-only field {trade_only} must be nullable for invalid_input rows"
+            "v7 trade-only field {trade_only} must be nullable for invalid_input rows"
         );
     }
 }

@@ -21,7 +21,6 @@ fn websocket_trade_row() -> BinanceAggTradeHourlyRow {
     BinanceAggTradeHourlyRow {
         record_kind: BINANCE_AGGTRADE_RECORD_TRADE.to_owned(),
         timestamp_received: 1_767_225_600_010,
-        websocket_timestamp_received: Some(1_767_225_600_010),
         rest_backfill_timestamp_received: None,
         ingest_source: "websocket".to_owned(),
         event_type: Some("aggTrade".to_owned()),
@@ -104,7 +103,6 @@ fn websocket_invalid_row() -> BinanceAggTradeHourlyRow {
     BinanceAggTradeHourlyRow {
         record_kind: BINANCE_AGGTRADE_RECORD_INVALID_INPUT.to_owned(),
         timestamp_received,
-        websocket_timestamp_received: Some(timestamp_received),
         rest_backfill_timestamp_received: None,
         ingest_source: "websocket".to_owned(),
         event_type: None,

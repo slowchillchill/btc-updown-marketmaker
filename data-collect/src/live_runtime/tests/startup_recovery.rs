@@ -1,5 +1,6 @@
 use super::*;
 use crate::daily_manifest::close_day_manifest;
+use crate::source_hourly_layout::binance_aggtrade_schema;
 
 fn write_real_legacy_v5_aggtrade_file(
     path: &Path,
@@ -81,6 +82,197 @@ fn write_real_legacy_v5_aggtrade_file(
     writer.close().unwrap();
 }
 
+const LEGACY_V6_TRADE_ID: u64 = 100;
+const LEGACY_V6_TRADE_TIMESTAMP_RECEIVED: i64 = 1_783_392_404_599;
+const LEGACY_V6_WEBSOCKET_PAYLOAD: &str = r#"{"payload":{"E":1783392404599,"M":false,"T":1783392404599,"a":100,"e":"aggTrade","f":1000,"l":1000,"m":true,"p":"100","q":"0.001","s":"BTCUSDT"},"source":"binance_aggtrade_websocket","stream":"btcusdt@aggTrade"}"#;
+
+fn write_real_legacy_v6_aggtrade_file(path: &Path) {
+    use arrow_array::{BooleanArray, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema, TimeUnit};
+    use parquet::arrow::ArrowWriter;
+    use parquet::file::metadata::KeyValue;
+    use parquet::file::properties::WriterProperties;
+
+    let timestamp = |name: &str, nullable| {
+        Field::new(
+            name,
+            DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+            nullable,
+        )
+    };
+    let legacy_schema = Arc::new(Schema::new(vec![
+        Field::new("record_kind", DataType::Utf8, false),
+        timestamp("timestamp_received", false),
+        timestamp("websocket_timestamp_received", true),
+        timestamp("rest_backfill_timestamp_received", true),
+        Field::new("ingest_source", DataType::Utf8, false),
+        Field::new("event_type", DataType::Utf8, true),
+        timestamp("event_time", true),
+        timestamp("trade_time", true),
+        Field::new("symbol", DataType::Utf8, true),
+        Field::new("aggregate_trade_id", DataType::UInt64, true),
+        Field::new("price", DataType::Utf8, true),
+        Field::new("quantity", DataType::Utf8, true),
+        Field::new("first_trade_id", DataType::UInt64, true),
+        Field::new("last_trade_id", DataType::UInt64, true),
+        Field::new("buyer_is_maker", DataType::Boolean, true),
+        Field::new("stream", DataType::Utf8, true),
+        Field::new("ws_ignore", DataType::Boolean, true),
+        Field::new("rest_was_best_price_match", DataType::Boolean, true),
+        Field::new("source_native_payload_json", DataType::Utf8, false),
+        Field::new("source_sequence_epoch_id", DataType::Utf8, false),
+        Field::new("connection_generation", DataType::UInt64, false),
+        Field::new("websocket_ingress_sequence", DataType::UInt64, true),
+        Field::new("rest_response_ingress_sequence", DataType::UInt64, true),
+        Field::new("rest_response_item_index", DataType::UInt64, true),
+        Field::new("collector_admission_sequence", DataType::UInt64, false),
+        timestamp("collector_admission_time_utc_ms", false),
+        Field::new("invalid_reason_code", DataType::Utf8, true),
+        Field::new("invalid_reason_detail", DataType::Utf8, true),
+        Field::new("payload_encoding", DataType::Utf8, true),
+        Field::new("payload_length_bytes", DataType::UInt64, true),
+        Field::new("payload_sha256", DataType::Utf8, true),
+        Field::new("payload_capture_status", DataType::Utf8, true),
+        Field::new("collector_host_id", DataType::Utf8, false),
+        Field::new("collector_region", DataType::Utf8, false),
+        Field::new("source_endpoint", DataType::Utf8, false),
+        Field::new("schema_version", DataType::Utf8, false),
+    ]));
+    let invalid_payload = br#"{"e":"aggTrade""#;
+    let invalid_payload_length = u64::try_from(invalid_payload.len()).unwrap();
+    let invalid_payload_sha256 = format!("{:x}", Sha256::digest(invalid_payload));
+    let trade_sources = json!({
+        "websocket": LEGACY_V6_WEBSOCKET_PAYLOAD,
+        "rest_backfill": null,
+    })
+    .to_string();
+    let invalid_evidence = json!({
+        "capture_limit_bytes": 524_288,
+        "declared_content_length": null,
+        "endpoint": BINANCE_AGGTRADE_WS,
+        "evidence_schema": "binance_aggtrade_invalid_evidence_v1",
+        "invalid_reason_code": "invalid_json",
+        "observed_bytes_at_least": invalid_payload_length,
+        "payload_base64": base64::engine::general_purpose::STANDARD.encode(invalid_payload),
+        "payload_capture_status": "complete",
+        "payload_encoding": "base64",
+        "payload_length_bytes": invalid_payload_length,
+        "payload_sha256": invalid_payload_sha256,
+        "receive_time_utc_ms": LEGACY_V6_TRADE_TIMESTAMP_RECEIVED + 1,
+        "transport": "websocket",
+    })
+    .to_string();
+    let legacy_batch = RecordBatch::try_new(
+        Arc::clone(&legacy_schema),
+        vec![
+            Arc::new(StringArray::from(vec!["trade", "invalid_input"])),
+            Arc::new(
+                TimestampMillisecondArray::from(vec![
+                    LEGACY_V6_TRADE_TIMESTAMP_RECEIVED,
+                    LEGACY_V6_TRADE_TIMESTAMP_RECEIVED + 1,
+                ])
+                .with_timezone("UTC"),
+            ),
+            Arc::new(
+                TimestampMillisecondArray::from(vec![
+                    Some(LEGACY_V6_TRADE_TIMESTAMP_RECEIVED),
+                    Some(LEGACY_V6_TRADE_TIMESTAMP_RECEIVED + 1),
+                ])
+                .with_timezone("UTC"),
+            ),
+            Arc::new(TimestampMillisecondArray::from(vec![None::<i64>, None]).with_timezone("UTC")),
+            Arc::new(StringArray::from(vec!["websocket", "websocket"])),
+            Arc::new(StringArray::from(vec![Some("aggTrade"), None])),
+            Arc::new(
+                TimestampMillisecondArray::from(vec![
+                    Some(LEGACY_V6_TRADE_TIMESTAMP_RECEIVED),
+                    None,
+                ])
+                .with_timezone("UTC"),
+            ),
+            Arc::new(
+                TimestampMillisecondArray::from(vec![
+                    Some(LEGACY_V6_TRADE_TIMESTAMP_RECEIVED),
+                    None,
+                ])
+                .with_timezone("UTC"),
+            ),
+            Arc::new(StringArray::from(vec![Some("BTCUSDT"), None])),
+            Arc::new(UInt64Array::from(vec![Some(LEGACY_V6_TRADE_ID), None])),
+            Arc::new(StringArray::from(vec![Some("100"), None])),
+            Arc::new(StringArray::from(vec![Some("0.001"), None])),
+            Arc::new(UInt64Array::from(vec![Some(1_000), None])),
+            Arc::new(UInt64Array::from(vec![Some(1_000), None])),
+            Arc::new(BooleanArray::from(vec![Some(true), None])),
+            Arc::new(StringArray::from(vec![Some("btcusdt@aggTrade"), None])),
+            Arc::new(BooleanArray::from(vec![Some(false), None])),
+            Arc::new(BooleanArray::from(vec![None, None])),
+            Arc::new(StringArray::from(vec![
+                trade_sources.as_str(),
+                invalid_evidence.as_str(),
+            ])),
+            Arc::new(StringArray::from(vec![
+                "legacy-v6-fixture",
+                "legacy-v6-fixture",
+            ])),
+            Arc::new(UInt64Array::from(vec![1, 1])),
+            Arc::new(UInt64Array::from(vec![
+                Some(LEGACY_V6_TRADE_ID),
+                Some(LEGACY_V6_TRADE_ID + 1),
+            ])),
+            Arc::new(UInt64Array::from(vec![None, None])),
+            Arc::new(UInt64Array::from(vec![None, None])),
+            Arc::new(UInt64Array::from(vec![
+                LEGACY_V6_TRADE_ID,
+                LEGACY_V6_TRADE_ID + 1,
+            ])),
+            Arc::new(
+                TimestampMillisecondArray::from(vec![
+                    LEGACY_V6_TRADE_TIMESTAMP_RECEIVED,
+                    LEGACY_V6_TRADE_TIMESTAMP_RECEIVED + 1,
+                ])
+                .with_timezone("UTC"),
+            ),
+            Arc::new(StringArray::from(vec![None, Some("invalid_json")])),
+            Arc::new(StringArray::from(vec![None, Some("expected comma")])),
+            Arc::new(StringArray::from(vec![None, Some("base64")])),
+            Arc::new(UInt64Array::from(vec![None, Some(invalid_payload_length)])),
+            Arc::new(StringArray::from(vec![
+                None,
+                Some(invalid_payload_sha256.as_str()),
+            ])),
+            Arc::new(StringArray::from(vec![None, Some("complete")])),
+            Arc::new(StringArray::from(vec!["collector-test", "collector-test"])),
+            Arc::new(StringArray::from(vec!["local-test", "local-test"])),
+            Arc::new(StringArray::from(vec![
+                BINANCE_AGGTRADE_WS,
+                BINANCE_AGGTRADE_WS,
+            ])),
+            Arc::new(StringArray::from(vec![
+                "binance_aggtrade_v6",
+                "binance_aggtrade_v6",
+            ])),
+        ],
+    )
+    .unwrap();
+    let properties = WriterProperties::builder()
+        .set_key_value_metadata(Some(vec![
+            KeyValue::new(
+                "parquet_raw_layout_version".to_owned(),
+                "binance_aggtrade_v6".to_owned(),
+            ),
+            KeyValue::new(
+                "parquet_raw_source_kind".to_owned(),
+                "binance_aggtrade".to_owned(),
+            ),
+        ]))
+        .build();
+    let mut writer =
+        ArrowWriter::try_new(File::create(path).unwrap(), legacy_schema, Some(properties)).unwrap();
+    writer.write(&legacy_batch).unwrap();
+    writer.close().unwrap();
+}
+
 #[allow(clippy::too_many_arguments)]
 fn append_test_recovery_metadata(
     writer: &mut TypedParquetSegmentWriter,
@@ -157,7 +349,7 @@ fn write_test_aggtrade_recovery_file(
     let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
         &source_dir,
         &stem,
-        "binance_aggtrade_v6",
+        BINANCE_AGGTRADE_SCHEMA_VERSION,
         "binance_aggtrade",
     )
     .unwrap();
@@ -179,7 +371,7 @@ fn write_test_aggtrade_recovery_file(
         first_recv_time_utc_ms,
         first_recv_time_utc_ms + i64::try_from(rows - 1).unwrap(),
         "aggTrade",
-        "binance_aggtrade_v6",
+        BINANCE_AGGTRADE_SCHEMA_VERSION,
     );
     let final_path = writer.final_path().to_path_buf();
     writer.finalize().unwrap();
@@ -243,6 +435,12 @@ fn binance_aggtrade_dedupe_restores_id_and_complete_payload() {
     )
     .unwrap();
     let mut event = event;
+    let raw_event = serde_json::from_str::<Value>(&event.raw_json).unwrap();
+    assert_eq!(raw_event["timestamp_received"], recv_time_utc_ms);
+    assert!(
+        raw_event.get("websocket_timestamp_received").is_none(),
+        "current trade raw event must not carry the removed receive-time alias"
+    );
     event.collector_admission = Some(RawEventAdmission {
         sequence: 1,
         time_utc_ms: recv_time_utc_ms,
@@ -262,7 +460,7 @@ fn binance_aggtrade_dedupe_restores_id_and_complete_payload() {
     let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
         &source_dir,
         "binance_aggtrade_02",
-        "binance_aggtrade_v6",
+        BINANCE_AGGTRADE_SCHEMA_VERSION,
         "binance_aggtrade",
     )
     .unwrap();
@@ -276,7 +474,7 @@ fn binance_aggtrade_dedupe_restores_id_and_complete_payload() {
         recv_time_utc_ms,
         recv_time_utc_ms,
         "aggTrade",
-        "binance_aggtrade_v6",
+        BINANCE_AGGTRADE_SCHEMA_VERSION,
     );
     writer.finalize().unwrap();
 
@@ -333,14 +531,27 @@ fn binance_aggtrade_v5_recovery_reads_real_legacy_schema_without_synthetic_coord
 
     let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&path).unwrap()).unwrap();
     assert!(builder.schema().index_of("record_kind").is_err());
+    assert_eq!(
+        builder
+            .schema()
+            .index_of("websocket_timestamp_received")
+            .unwrap(),
+        1
+    );
     assert!(
         builder
             .schema()
             .index_of("collector_admission_sequence")
             .is_err()
     );
+    let digest_before = format!("{:x}", Sha256::digest(fs::read(&path).unwrap()));
 
     let mut restored_websocket = restore_binance_transport_dedupe(&dataset_root).unwrap();
+    let digest_after = format!("{:x}", Sha256::digest(fs::read(&path).unwrap()));
+    assert_eq!(
+        digest_after, digest_before,
+        "legacy v5 recovery must not rewrite the Parquet fixture"
+    );
     assert_eq!(
         restored_websocket.observe(id, canonical.as_bytes()),
         BinanceIdDecision::Duplicate
@@ -404,59 +615,52 @@ fn binance_aggtrade_v6_recovery_skips_invalid_input_rows() {
     let day_dir = dataset_root.join("training/typed_raw/utc_day=2026-07-07");
     let source_dir = day_dir.join("source_kind=binance_aggtrade");
     fs::create_dir_all(&source_dir).unwrap();
-    let timestamp_received = 1_783_392_404_599;
-    let trade = test_aggtrade_hourly_row(100, timestamp_received);
-    let invalid = binance_aggtrade_websocket_invalid_input(
-        br#"{"e":"aggTrade""#.to_vec(),
-        timestamp_received + 1,
-        BINANCE_AGGTRADE_WS,
-        BinanceAggTradeIngressCoordinate::Websocket { sequence: 101 },
-        BinanceAggTradeInvalidReason::InvalidJson,
-        "expected comma",
-    )
-    .unwrap();
-    let mut invalid_event = binance_aggtrade_invalid_raw_event(
-        &invalid,
-        &CollectorIdentity {
-            host_id: "collector-test".to_owned(),
-            region: "local-test".to_owned(),
-        },
-        &BinanceWsSpec {
-            source_kind: "binance_aggtrade".to_owned(),
-            default_event_type: "aggTrade".to_owned(),
-            url: BINANCE_AGGTRADE_WS.to_owned(),
-            frame_inactivity_timeout_secs: 30,
-            recovery_wait_override: None,
-        },
-        "test-source-epoch",
-        1,
-    )
-    .unwrap();
-    invalid_event.collector_admission = Some(RawEventAdmission {
-        sequence: 101,
-        time_utc_ms: timestamp_received + 1,
-    });
-    let invalid_row = binance_aggtrade_row_from_event(&invalid_event).unwrap();
-    let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
-        &source_dir,
-        "binance_aggtrade_02",
-        "binance_aggtrade_v6",
-        "binance_aggtrade",
-    )
-    .unwrap();
-    writer
-        .write_binance_aggtrade_rows(&[trade.clone(), invalid_row])
-        .unwrap();
-    writer.finalize().unwrap();
+    let path = source_dir.join("binance_aggtrade_02.parquet");
+    write_real_legacy_v6_aggtrade_file(&path);
+    let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&path).unwrap()).unwrap();
+    assert!(
+        builder
+            .schema()
+            .index_of("websocket_timestamp_received")
+            .is_ok()
+    );
+    let v6_without_removed_field = builder
+        .schema()
+        .fields()
+        .iter()
+        .filter(|field| field.name() != "websocket_timestamp_received")
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        binance_aggtrade_schema()
+            .fields()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        v6_without_removed_field,
+        "v7 must equal the independently frozen v6 physical schema minus the removed field"
+    );
+    let footer_schema_version = builder
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .and_then(|metadata| {
+            metadata
+                .iter()
+                .find(|entry| entry.key == "parquet_raw_layout_version")
+        })
+        .and_then(|entry| entry.value.as_deref());
+    assert_eq!(footer_schema_version, Some("binance_aggtrade_v6"));
+    let digest_before = format!("{:x}", Sha256::digest(fs::read(&path).unwrap()));
 
     let mut restored_websocket = restore_binance_transport_dedupe(&dataset_root).unwrap();
-    let websocket_payload = serde_json::from_str::<Value>(&trade.source_native_payload_json)
-        .unwrap()["websocket"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let digest_after = format!("{:x}", Sha256::digest(fs::read(&path).unwrap()));
     assert_eq!(
-        restored_websocket.observe(100, websocket_payload.as_bytes()),
+        digest_after, digest_before,
+        "legacy v6 recovery must not rewrite the Parquet fixture"
+    );
+    assert_eq!(
+        restored_websocket.observe(LEGACY_V6_TRADE_ID, LEGACY_V6_WEBSOCKET_PAYLOAD.as_bytes()),
         BinanceIdDecision::Duplicate
     );
     assert_eq!(restored_websocket.len(), 1);
@@ -472,7 +676,7 @@ fn binance_recovery_closes_prior_open_day_and_overlays_current_finalized_tail() 
     let mut prior_writer = TypedParquetSegmentWriter::create_for_typed_source(
         &prior_source_dir,
         "binance_aggtrade_23",
-        "binance_aggtrade_v6",
+        BINANCE_AGGTRADE_SCHEMA_VERSION,
         "binance_aggtrade",
     )
     .unwrap();
@@ -491,7 +695,7 @@ fn binance_recovery_closes_prior_open_day_and_overlays_current_finalized_tail() 
         1_783_987_100_000,
         1_783_987_100_001,
         "aggTrade",
-        "binance_aggtrade_v6",
+        BINANCE_AGGTRADE_SCHEMA_VERSION,
     );
     prior_writer.finalize().unwrap();
     let legacy_continuity = json!({
@@ -560,7 +764,7 @@ fn binance_recovery_closes_prior_open_day_and_overlays_current_finalized_tail() 
     let mut current_writer = TypedParquetSegmentWriter::create_for_typed_source(
         &current_source_dir,
         "binance_aggtrade_00",
-        "binance_aggtrade_v6",
+        BINANCE_AGGTRADE_SCHEMA_VERSION,
         "binance_aggtrade",
     )
     .unwrap();
@@ -576,7 +780,7 @@ fn binance_recovery_closes_prior_open_day_and_overlays_current_finalized_tail() 
         1_783_987_200_000,
         1_783_987_200_000,
         "aggTrade",
-        "binance_aggtrade_v6",
+        BINANCE_AGGTRADE_SCHEMA_VERSION,
     );
     current_writer.finalize().unwrap();
 
@@ -896,7 +1100,7 @@ fn binance_recovery_keeps_only_the_latest_fixed_id_window() {
     let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
         &source_dir,
         "binance_aggtrade_00",
-        "binance_aggtrade_v6",
+        BINANCE_AGGTRADE_SCHEMA_VERSION,
         "binance_aggtrade",
     )
     .unwrap();
@@ -913,7 +1117,7 @@ fn binance_recovery_keeps_only_the_latest_fixed_id_window() {
         1_783_900_800_001,
         1_783_900_825_002,
         "aggTrade",
-        "binance_aggtrade_v6",
+        BINANCE_AGGTRADE_SCHEMA_VERSION,
     );
     writer.finalize().unwrap();
 
