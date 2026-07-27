@@ -8,6 +8,25 @@
 >
 > 状态：`PHASE_9_COMPLETE_RTDS_PONG_A`。阶段0至阶段8的实现、最终门禁、独立终审与历史批准均保持完成事实。2026-07-19香港线路wire验证发现真实RTDS不返回PONG，旧当前合同与运行事实冲突；用户明确回复“批准 RTDS-PONG-A”。阶段9现已完成本地文档、代码、测试、香港线路SDK复测、provenance核验及两路独立终审；用户后续批准的生产release构建、精确current-day删除、部署与远端服务操作改由`changelog/data-collect-rtds-pong-a-reset-deployment-changelog.md`记录。
 
+## 2026-07-28：aggTrade v6 current new-write 由独立 v7 事项窄范围取代
+
+- 用户批准 future `binance_aggtrade_v7` 只删除与 `timestamp_received` 恒等的
+  `websocket_timestamp_received`。
+- 本事项的 v6 WebSocket-only、trade/invalid、因果坐标和历史 v5/v6 兼容事实保持
+  不变；不回写阶段5历史。
+- 新实现、测试和发布仅由
+  `DC-REPAIR-20260728-REDUNDANT-TYPED-COLUMN-REMOVAL` 执行；本事项不新增
+  production cutover、迁移或历史删除授权。
+
+## 2026-07-28：Attempt5 停止，后继长跑改为 Attempt6
+
+- Attempt5 在 clean/pushed `92fb71883cad19285ae0a291e2a8ee94698133dd`
+  上运行 `16233.700s` 后按用户指令停止，固定为
+  `USER_TERMINATED_FOR_APPROVED_SCHEMA_CHANGE + INCOMPLETE_8H`。
+- 当前先由独立重复 typed 列删除事项闭合 aggTrade v7 与 metadata v5，再从新
+  clean/pushed HEAD 和空 root 执行完整六源 8 小时 Attempt6；本文旧 Attempt5
+  游标只保留为当时历史事实。
+
 ## 2026-07-17：最终批准并开始阶段0
 
 - 用户明确指令“批准按当前计划文档执行”。本次批准覆盖`demand/data-collect-source-availability-lifecycle-repair-demand.md`、`plan/data-collect-source-availability-lifecycle-repair-plan.md`及需求第4.7节逐项SDK patch矩阵，授权阶段0--8的本地实施、验证、独立审查、commit和push。

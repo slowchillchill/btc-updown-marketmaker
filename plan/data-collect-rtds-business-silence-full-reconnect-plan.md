@@ -6,7 +6,12 @@
 >
 > 对应 changelog：`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FAIL_INCOMPLETE_8H_P_B1E_IMPLEMENTATION_CLOSED_ATTEMPT5_FULL_COLLECTOR_PENDING`。其中`P-B1E`是本次获批的“nullable Decimal精确空串兼容”唯一标识，用于避免与Attempt1辅助文件污染处置的历史`E-A`重名；该状态仅在承载本记录的纯文档closure commit成功push且本地HEAD、upstream与远端ref一致后生效。RTDS network-error方案A的`366fed7d`/`415470e`、Gamma `closedTime`方案A的`3a367386`/`e086017f`及P-B1E的`15feb12`/`9d8e59b`均已按authority/Rust分离发布并完成三方ref核对。阶段0与阶段1均已完成；Attempt1、Attempt3、Attempt4永久为`FAIL + INCOMPLETE_8H`，Attempt2永久为`USER_TERMINATED + INCOMPLETE_8H`。P-B1E定向验证与三路独立终审均已通过；当前唯一下一步是从新clean/pushed HEAD、新artifact和空dataset root执行完整六源8小时Attempt5。该本地部分日前向验证不等于production binary激活、完整UTC日前向长跑或canonical cutover。future paper/live真实RTDS adapter一旦由独立事项接入，必须继承同一行为合同。
+> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FAIL_INCOMPLETE_8H_P_B1E_IMPLEMENTATION_CLOSED_ATTEMPT5_USER_TERMINATED_SCHEMA_CHANGE_INCOMPLETE_8H_REDUNDANT_TYPED_COLUMNS_STAGE0_CLOSED_ON_PUBLISH_STAGE1_NEXT_ATTEMPT6_PENDING_AFTER_V7_V5`。其中`P-B1E`是本次获批的“nullable Decimal精确空串兼容”唯一标识，用于避免与Attempt1辅助文件污染处置的历史`E-A`重名；该状态仅在承载本记录的纯文档closure commit成功push且本地HEAD、upstream与远端ref一致后生效。RTDS network-error方案A的`366fed7d`/`415470e`、Gamma `closedTime`方案A的`3a367386`/`e086017f`及P-B1E的`15feb12`/`9d8e59b`均已按authority/Rust分离发布并完成三方ref核对。阶段0与阶段1均已完成；Attempt1、Attempt3、Attempt4永久为`FAIL + INCOMPLETE_8H`，Attempt2永久为`USER_TERMINATED + INCOMPLETE_8H`。P-B1E定向验证与三路独立终审均已通过；Attempt5已按用户指令停止；当前先闭合v7/v5，再从新clean/pushed HEAD、新artifact和空dataset root执行完整六源8小时Attempt6。该本地部分日前向验证不等于production binary激活、完整UTC日前向长跑或canonical cutover。future paper/live真实RTDS adapter一旦由独立事项接入，必须继承同一行为合同。
+
+> 2026-07-28 当前游标更新：Attempt5 已按用户指令停止并固定为
+> `USER_TERMINATED_FOR_APPROVED_SCHEMA_CHANGE + INCOMPLETE_8H`。先按
+> `plan/data-collect-redundant-typed-column-removal-plan.md` 分别闭合 aggTrade v7
+> 与 metadata v5；之后由本计划阶段2使用全新 root 执行完整六源 8 小时 Attempt6。
 
 本计划以最小source-local ownership loop为边界，不预设大型状态机、通用配置框架、新production probe seam、额外schema/counter或第二数据路径。每个阶段完成后先自审，再由继承`gpt-5.6-sol`/`ultra`的独立subagent审查，成立问题闭环后才发布。本地authority同步、review/commit/push、从clean HEAD重建release-profile binary及阶段2本地香港VPN连续8小时完整training collector落盘验证按既定阶段顺序持续执行，不重复申请普通实现授权。当前完整collector能力已经存在；本轮Rust只允许按SDK070三件套在既有vendor `response.rs`实施P-B1E及其紧凑定向测试，不改变RTDS实现或建立第二解析路径。capability失败、SDK缺口或新冲突仍必须停止。production release、systemd、部署、远端、上传、migration和数据清理保持独立边界。
 
@@ -207,20 +212,22 @@
   `-D warnings`、fmt和diff-check通过。三路独立终审均为Critical 0 /
   Important 0 / Minor 0。用户批准将陈旧`current-v2`验证措辞最小纠正为现行v3
   直接消费者与vendor F04合法值测试；没有恢复v2或新增测试矩阵。
-- 步骤 2.2.13：从P-B1E实现闭合后的新clean/pushed HEAD设置新
-  `DATA_COLLECT_GIT_COMMIT`重建release binary，按任务2.1与步骤2.2.1--2.2.2运行
-  Attempt5。
-  - 验证：使用新artifact和空dataset root，不续写Attempt4、不拼接剩余时间、不以
-    短smoke替代8小时；同一正式四logical-producer/六source/ManifestOwner/Parquet
-    路径连续运行至少28800秒并满足退出0及全部文件门。若同一Decimal空串错误复发，
-    停止报告新证据，不自动扩大nullable范围。
+- 步骤 2.2.13：Attempt5已从P-B1E闭合后的clean/pushed `92fb718`启动，并在
+  `16233.700s`后按用户新schema指令停止，固定为
+  `USER_TERMINATED_FOR_APPROVED_SCHEMA_CHANGE + INCOMPLETE_8H`。先按独立计划
+  闭合v7/v5，再设置新的`DATA_COLLECT_GIT_COMMIT`重建release binary，按任务2.1与
+  步骤2.2.1--2.2.2运行Attempt6。
+  - 验证：Attempt6使用新artifact和空dataset root，不续写Attempt5、不拼接剩余
+    时间、不以短smoke替代8小时；同一正式四logical-producer/六source/
+    ManifestOwner/Parquet路径连续运行至少28800秒并满足退出0及全部文件门。若同一
+    Decimal空串错误复发，停止报告新证据，不自动扩大nullable范围。
 
 ### 任务 2.3：报告与阶段审查
 
-- 步骤 2.3.1：报告Attempt5完整collector六源文件/行数、manifest/file一致性、RTDS最长相邻接收间隔、replacement/自然重连/error计数，以及真实发生replacement时已有日志和Parquet能直接证明的事件顺序，并与历史`6075.343s`作跨环境数量级比较；不强制形成四段耗时或分布。
+- 步骤 2.3.1：先报告Attempt5用户终止、部分六源文件与manifest收尾事实；Attempt6完成后报告其完整collector六源文件/行数、manifest/file一致性、RTDS最长相邻接收间隔、replacement/自然重连/error计数，以及真实发生replacement时已有日志和Parquet能直接证明的事件顺序，并与历史`6075.343s`作跨环境数量级比较；不强制形成四段耗时或分布。
   - 验证：香港本地不冒充AWS爱尔兰同环境对照；没有真实replacement或样本过少时不推导恢复耗时分布，只写证据实际支持的结论。
 - 步骤 2.3.2：同步三件套实际collector证据与剩余风险，自审后派生独立subagent终审。
-  - 验证：完整collector机械正确性与真实RTDS replacement效果分别标记；最终报告并列保留Attempt1失败、Attempt2用户终止、Attempt3失败、Attempt4失败和Attempt5实际结果，并明确五次测试拓扑与终态；成立问题闭环后发布commit/push。
+  - 验证：完整collector机械正确性与真实RTDS replacement效果分别标记；最终报告并列保留Attempt1失败、Attempt2用户终止、Attempt3失败、Attempt4失败、Attempt5因schema变更用户终止和Attempt6实际结果，并明确六次测试拓扑与终态；成立问题闭环后发布commit/push。
 
 ## 阶段 3：production release 与部署保持独立授权
 
@@ -229,4 +236,4 @@
 
 ## 本轮文档执行结果
 
-三日真实RTDS typed raw参数分析、任务0.1--0.4及全部参数裁决已完成。阶段0与阶段1均已完成并分离发布；冻结合同仍为`steady=300s`、`first-fresh=60s/后到 monotonic anchor`、cold-start首次fresh前禁用，以及outer `1s × 2 ±20%`、hard cap=`300s`、fresh重置、总尝试不限。历史100-cycle只保留为旧阶段事实。香港线路Attempt1固定为`FAIL + INCOMPLETE_8H`，历史E-A污染已披露；RTDS network-error方案A已由`366fed7d`/`415470e`分离闭合；Attempt2固定为`USER_TERMINATED + INCOMPLETE_8H`；Attempt3因Gamma `closedTime`格式误判在`3863.950s`退出1，Attempt4因Polymarket market Decimal空串parser fatal在`8192.100s`退出1，均固定为`FAIL + INCOMPLETE_8H`并保留六源部分Parquet/manifest。P-B1E已由`15feb12`/`9d8e59b`分离闭合，定向验证与三路终审均通过；当前游标为步骤2.2.13，从承载本closure的新clean/pushed HEAD、新artifact和空dataset root执行完整六源8小时Attempt5。production release、systemd、部署、远端、上传、migration和数据清理仍未执行。
+三日真实RTDS typed raw参数分析、任务0.1--0.4及全部参数裁决已完成。阶段0与阶段1均已完成并分离发布；冻结合同仍为`steady=300s`、`first-fresh=60s/后到 monotonic anchor`、cold-start首次fresh前禁用，以及outer `1s × 2 ±20%`、hard cap=`300s`、fresh重置、总尝试不限。历史100-cycle只保留为旧阶段事实。香港线路Attempt1固定为`FAIL + INCOMPLETE_8H`，历史E-A污染已披露；RTDS network-error方案A已由`366fed7d`/`415470e`分离闭合；Attempt2固定为`USER_TERMINATED + INCOMPLETE_8H`；Attempt3因Gamma `closedTime`格式误判在`3863.950s`退出1，Attempt4因Polymarket market Decimal空串parser fatal在`8192.100s`退出1，均固定为`FAIL + INCOMPLETE_8H`并保留六源部分Parquet/manifest。P-B1E已由`15feb12`/`9d8e59b`分离闭合，定向验证与三路终审均通过；Attempt5已按用户指令固定为`USER_TERMINATED_FOR_APPROVED_SCHEMA_CHANGE + INCOMPLETE_8H`。当前游标转入重复typed列删除计划，v7/v5闭合后从新clean/pushed HEAD、新artifact和空dataset root执行完整六源8小时Attempt6。production release、systemd、部署、远端、上传、migration和数据清理仍未执行。

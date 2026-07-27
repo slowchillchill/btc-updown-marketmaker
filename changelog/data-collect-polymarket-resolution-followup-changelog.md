@@ -8,6 +8,17 @@
 >
 > 状态：`PHASE_4_COMPLETE_LOCAL_HK_VPN_AC12_AC13_PASS_2026-07-23__V3_VALIDATE_FIRST_METADATA_V4_IMPLEMENTED_CURRENT__GAMMA_CLOSED_TIME_FORMAT_A_IMPLEMENTATION_CLOSED_2026-07-27`。阶段0至阶段3已分别完成自审、独立终审与commit/push；阶段4本地香港线路AC-12、全量AC-13与三路独立全面终审均已通过。用户于2026-07-24批准source schema v3的validate-first文档修订，并于2026-07-25批准metadata v4 claimant schema；二者已由SDK070 Stage3实施并成为当前new-write组合。2026-07-27 Attempt3暴露的Gamma顶层`closedTime`精确格式缺口已按方案A由独立Rust commit `e086017fc6d376b739e7a5146dacc18f674f1407`完成最小实现、定向验证、三路终审、push和三方ref核对。production部署、服务操作和数据删除仍未获授权、未执行。
 
+## 2026-07-28：metadata v4 current new-write 由独立 v5 事项窄范围取代
+
+- 用户批准 future `polymarket_market_metadata_v5` 删除
+  `resolution_evidence_raw_sha256`，以 `source_evidence_raw_sha256` 作为唯一
+  source payload digest。
+- 本事项 v3/v4 exact schema、claimant pair、terminal ownership、恢复与历史阶段
+  事实保持不变；v3/v4 只读，不回写。
+- 新实现、测试和发布仅由
+  `DC-REPAIR-20260728-REDUNDANT-TYPED-COLUMN-REMOVAL` 执行；不新增 migration、
+  dual-write、production cutover 或数据删除授权。
+
 ## 2026-07-21：数据检查与问题确认
 
 用户要求检查 2026-07-20 的 `polymarket_market_metadata` 数据，重点判断 collector 是否没有等待足够时间采集 market resolved，并理清以市场活跃期为基准的采集时间线。

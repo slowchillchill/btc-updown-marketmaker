@@ -6,7 +6,24 @@
 >
 > 对应计划：`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`
 >
-> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FAIL_INCOMPLETE_8H_P_B1E_IMPLEMENTATION_CLOSED_ATTEMPT5_FULL_COLLECTOR_PENDING`。其中`P-B1E`是本次获批的“nullable Decimal精确空串兼容”唯一标识，用于避免与Attempt1辅助文件污染处置的历史`E-A`重名；该状态仅在承载本记录的纯文档closure commit成功push且本地HEAD、upstream与远端ref一致后生效。RTDS network-error方案A的`366fed7d`/`415470e`、Gamma `closedTime`方案A的`3a367386`/`e086017f`及P-B1E的`15feb12`/`9d8e59b`均已按authority/Rust分离发布并完成三方ref核对；Attempt1、Attempt3、Attempt4永久保持`FAIL + INCOMPLETE_8H`，Attempt2永久记录为`USER_TERMINATED + INCOMPLETE_8H`。唯一下一游标是完整六源8小时Attempt5。
+> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FAIL_INCOMPLETE_8H_P_B1E_IMPLEMENTATION_CLOSED_ATTEMPT5_USER_TERMINATED_SCHEMA_CHANGE_INCOMPLETE_8H_REDUNDANT_TYPED_COLUMNS_STAGE0_CLOSED_ON_PUBLISH_STAGE1_NEXT_ATTEMPT6_PENDING_AFTER_V7_V5`。其中`P-B1E`是本次获批的“nullable Decimal精确空串兼容”唯一标识，用于避免与Attempt1辅助文件污染处置的历史`E-A`重名；该状态仅在承载本记录的纯文档closure commit成功push且本地HEAD、upstream与远端ref一致后生效。RTDS network-error方案A的`366fed7d`/`415470e`、Gamma `closedTime`方案A的`3a367386`/`e086017f`及P-B1E的`15feb12`/`9d8e59b`均已按authority/Rust分离发布并完成三方ref核对；Attempt1、Attempt3、Attempt4永久保持`FAIL + INCOMPLETE_8H`，Attempt2永久记录为`USER_TERMINATED + INCOMPLETE_8H`。Attempt5已按用户指令停止；下一游标是v7/v5闭合后的完整六源8小时Attempt6。
+
+## 2026-07-28：Attempt5 用户终止，游标移至 v7/v5 后的 Attempt6
+
+- 用户批准删除两个重复 typed 字段，并明确批准先停止当前测试再执行新 schema。
+- Attempt5 在 clean/pushed `92fb71883cad19285ae0a291e2a8ee94698133dd`
+  上运行 `16233.700s` 后收到精确进程组 `SIGINT`；wrapper 记录
+  `collector_exit=101`、`tee_exit=130`、`end_route_exit=0`；前两者为非零，
+  不记作正常完成。
+- 每日顶层 manifest 保持 `state=open`，仅
+  `collection_day_coverage.state=ended_known`；保留 `27` 个 finalized Parquet、
+  `297,802,741` bytes，`.running=0`。旧 root 不删除、不改写。
+- Attempt5 固定为
+  `USER_TERMINATED_FOR_APPROVED_SCHEMA_CHANGE + INCOMPLETE_8H`。下一游标不是
+  续跑 Attempt5，而是在
+  `DC-REPAIR-20260728-REDUNDANT-TYPED-COLUMN-REMOVAL` 的 v7/v5 阶段分别闭合后，
+  从新 clean/pushed HEAD 和空 root 执行完整六源 8 小时 Attempt6。
+- 顶部状态段中“Attempt5 为下一游标”的旧句是停止前历史描述，由本条精确取代。
 
 ## 2026-07-21：用户选择彻底换连接方向
 

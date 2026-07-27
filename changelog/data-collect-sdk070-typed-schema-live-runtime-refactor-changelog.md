@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FAIL_INCOMPLETE_8H_P_B1E_IMPLEMENTATION_CLOSED_ATTEMPT5_FULL_COLLECTOR_PENDING`。其中`P-B1E`是本次获批的“nullable Decimal精确空串兼容”唯一标识，用于避免与Attempt1辅助文件污染处置的历史`E-A`重名；该状态仅在承载本记录的纯文档closure commit成功push且三方ref一致后生效。RTDS network-error方案A的`366fed7d`/`415470e`、Gamma `closedTime`方案A的`3a367386`/`e086017f`及P-B1E的`15feb12`/`9d8e59b`均已按authority/Rust分离发布并完成三方ref核对。RTDS阶段0和阶段1已闭合；Attempt1、Attempt3、Attempt4永久为`FAIL + INCOMPLETE_8H`，Attempt2永久为`USER_TERMINATED + INCOMPLETE_8H`。P-B1E定向验证与三路独立终审均已通过；当前唯一下一步是从新clean/pushed HEAD执行完整六源8小时Attempt5。总事项阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FAIL_INCOMPLETE_8H_P_B1E_IMPLEMENTATION_CLOSED_ATTEMPT5_USER_TERMINATED_SCHEMA_CHANGE_INCOMPLETE_8H_REDUNDANT_TYPED_COLUMNS_STAGE0_CLOSED_ON_PUBLISH_STAGE1_NEXT_ATTEMPT6_PENDING_AFTER_V7_V5`。其中`P-B1E`是本次获批的“nullable Decimal精确空串兼容”唯一标识，用于避免与Attempt1辅助文件污染处置的历史`E-A`重名；该状态仅在承载本记录的纯文档closure commit成功push且三方ref一致后生效。RTDS network-error方案A的`366fed7d`/`415470e`、Gamma `closedTime`方案A的`3a367386`/`e086017f`及P-B1E的`15feb12`/`9d8e59b`均已按authority/Rust分离发布并完成三方ref核对。RTDS阶段0和阶段1已闭合；Attempt1、Attempt3、Attempt4永久为`FAIL + INCOMPLETE_8H`，Attempt2永久为`USER_TERMINATED + INCOMPLETE_8H`。P-B1E定向验证与三路独立终审均已通过；Attempt5已按用户指令停止；当前先闭合v7/v5，再从新clean/pushed HEAD执行完整六源8小时Attempt6。总事项阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
 > `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
@@ -38,8 +38,25 @@
 > Stage5、Stage6与2-REST均已完成各自实现、完整门和独立终审。按用户批准的
 > 方案A，本文条件式记录`2-REST_CLOSED`与核心总事项`CORE_COMPLETE`：只有承载
 > 本记录的closure commit成功push且本地HEAD、upstream与远端ref一致后才生效。
-> RTDS行为专项当前为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FAIL_INCOMPLETE_8H_P_B1E_IMPLEMENTATION_CLOSED_ATTEMPT5_FULL_COLLECTOR_PENDING`。
+> RTDS行为专项当前为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FAIL_INCOMPLETE_8H_P_B1E_IMPLEMENTATION_CLOSED_ATTEMPT5_USER_TERMINATED_SCHEMA_CHANGE_INCOMPLETE_8H_ATTEMPT6_PENDING_AFTER_V7_V5`。
 > 本文件只记录本组三件套的事实、冲突、决定与执行，不回写旧changelog。
+
+## 2026-07-28：两个重复字段新事项接管 current new-write，Attempt5 用户终止
+
+- 用户批准
+  `DC-REPAIR-20260728-REDUNDANT-TYPED-COLUMN-REMOVAL`，分别以 aggTrade v7 和
+  metadata v5 删除两个可无损派生的重复字段；历史 v5/v6、metadata v3/v4 不迁移、
+  不重写。
+- 本 umbrella 已完成的 source v3 + metadata v4 Stage3 事实保持不变；新事项只取代
+  future current new-write 和后继本地验证。
+- Attempt5 在 commit `92fb71883cad19285ae0a291e2a8ee94698133dd` 上运行
+  `16233.700s` 后按用户指令停止，固定为
+  `USER_TERMINATED_FOR_APPROVED_SCHEMA_CHANGE + INCOMPLETE_8H`；manifest
+  顶层仍为`state=open`，仅`collection_day_coverage.state=ended_known`；
+  finalized Parquet `27` 个 / `297,802,741` bytes、`.running=0`。
+- 唯一下一长跑游标是在新事项 v7/v5 分阶段审查、commit、push 后，从新
+  clean/pushed HEAD 与空 root 启动 Attempt6。顶部状态段中“Attempt5 为下一步”的
+  旧句只保留停止前历史游标。
 
 ## 2026-07-24：用户要求建立一个新的总事项
 

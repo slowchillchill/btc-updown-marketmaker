@@ -56,6 +56,13 @@
 > control model。
 >
 > 2026-07-27 RTDS current authority：详细执行只以`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`为单一游标。阶段1已在training实现并验证同一owner内的break-before-make完整runtime replacement；阶段2 Attempt1因精确network-error服务对象固定为`FAIL + INCOMPLETE_8H`，对应方案A已由`366fed7d`/`415470e`分离闭合；Attempt2固定为`USER_TERMINATED + INCOMPLETE_8H`。Attempt3从clean/pushed `c05db6ba58676bec3e20878375608e395ad0971a`运行完整六源collector并在`3863.950s`后因Gamma顶层`closedTime`格式误判退出1，Gamma方案A已由`3a367386`/`e086017f`分离闭合。Attempt4从clean/pushed `a37cf1181597296b9b2d87f8bc2c93700bda8f48`运行同一完整collector，在`8192.100s`后因Polymarket market某个Decimal收到精确空串而退出1；失败raw frame/variant/path未知。Attempt3和Attempt4均永久为`FAIL + INCOMPLETE_8H`。SDK070三件套定义的`P-B1E`已由authority/Rust commits `15feb12`/`9d8e59b`分离闭合：只对九个官方nullable Decimal精确`"" -> None`，required与非空malformed仍fatal；只修改既有vendor `response.rs`，定向验证与三路独立终审均通过，未新增parser/诊断/schema/100-cycle。承载本closure的纯文档commit成功push并完成三方ref核对后，当前单一游标是从该新clean/pushed HEAD重建release-profile `data-collect-training-collector`，经香港线路用新隔离dataset root和`--max-runtime-secs 28800`运行完整四个logical producer、六个`LIVE_SOURCES`并正式落盘的Attempt5。该运行是本地部分日前向验证；除P-B1E typed decode规范化外，不修改CLOB、RTDS、Binance业务或恢复行为，也不新增paper/live RTDS adapter或提前抽象共享framework。future paper/live真实RTDS adapter仍须另立三件套实施、测试和部署，但必须继承相同fresh classifier、`300s/60s/cold-start disabled`、outer`1s × 2 ±20%/300s cap/unlimited`、唯一owner/socket与break-before-make合同。production binary激活、完整UTC日前向长跑、部署和远端操作仍不在该授权内。
+>
+> 2026-07-28 current cursor supersede：Attempt5 已按用户指令停止并永久记为
+> `USER_TERMINATED_FOR_APPROVED_SCHEMA_CHANGE + INCOMPLETE_8H`。当前实现步骤只以
+> `plan/data-collect-redundant-typed-column-removal-plan.md`为 authority：先分别
+> 完成 aggTrade v7 与 metadata v5 的实现、验证、独立审查、commit 和 push，再从
+> 新 clean/pushed HEAD、新 binary、新 artifact root 与空 dataset root 执行完整六源
+> 8 小时 Attempt6。上述 2026-07-27 段落中的 Attempt5 游标仅保留为启动前历史事实。
 
 ## 2026-07-10 已批准增量执行
 
@@ -2621,6 +2628,12 @@ CARGO_TARGET_DIR=target/data-collect-ci \
 
 **执行步骤：**
 
+- 2026-07-28 current-schema 窄 supersede：SDK070 Stage3 的 source v3 + metadata v4
+  实施事实保持历史完成；future current pair 升为 source v3 + metadata v5，唯一物理列
+  变化是删除 `resolution_evidence_raw_sha256`。实现、legacy exact reader、验证和
+  Attempt6 只按
+  `plan/data-collect-redundant-typed-column-removal-plan.md` 执行；本任务不建立
+  第二游标，也不授权迁移、dual-write 或 production cutover。
 - `LIVE_SOURCES` 增加 `polymarket_market_metadata`，writer 创建独立 parquet 和 manifest。
 - 将 discovery pair 的 current/next Gamma metadata snapshot 写成 `metadata_source=metadata_snapshot` 或 `active_scan` rows，包含 slug、condition id、asset ids、start/end、active、acceptingOrders、lifecycle。
 - `new_market` 事件同时继续保留在 `polymarket_market` 事件流，并生成对应 `polymarket_market_metadata` row；不得只在 orderbook schema 里用 `new_market` 代替 metadata source。

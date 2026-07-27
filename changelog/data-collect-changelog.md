@@ -6,6 +6,21 @@
 
 > 对应计划文档：`/home/chillchill/btc-updown-marketmaker/plan/data-collect-plan.md`
 
+## 2026-07-28
+
+### DC-REPAIR-20260728-REDUNDANT-TYPED-COLUMN-REMOVAL
+
+- 用户批准 future current aggTrade v7 删除
+  `websocket_timestamp_received`，metadata v5 删除
+  `resolution_evidence_raw_sha256`；历史 aggTrade v5/v6、metadata v3/v4 只读，
+  不迁移、不重写。
+- current aggTrade receive time 统一为 `timestamp_received`；metadata source
+  payload integrity 统一由 `source_evidence_raw_sha256` 承担。其他字段、writer
+  owner、artifact 和 manifest schema 不变。
+- Attempt5 按用户指令停止并固定为
+  `USER_TERMINATED_FOR_APPROVED_SCHEMA_CHANGE + INCOMPLETE_8H`。v7/v5 分阶段
+  闭合后，从新 clean/pushed HEAD 和空 root 执行完整六源 8 小时 Attempt6。
+
 ## 2026-07-11
 
 ### DC-INCREMENT-20260711-ARCHIVE-DEPTH-CHECKPOINT

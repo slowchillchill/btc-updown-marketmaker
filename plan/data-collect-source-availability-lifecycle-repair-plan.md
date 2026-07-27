@@ -17,6 +17,17 @@
 >
 > 2026-07-27 RTDS与P-B1E窄authority supersede：本计划阶段0--9及其当时“RTDS业务静默不控制网络”与parser验收结果保持历史事实；当前后继实现只以`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`为执行游标。专项阶段1已在training完成同一owner内break-before-make完整runtime replacement的实现、收窄验证、三路独立终审及分离commit/push；阶段2 Attempt1固定为`FAIL + INCOMPLETE_8H`，Attempt2固定为`USER_TERMINATED + INCOMPLETE_8H`，RTDS network-error方案A已由`366fed7d`/`415470e`分离闭合。Attempt3从clean/pushed `c05db6ba58676bec3e20878375608e395ad0971a`运行完整六源collector，在`3863.950s`后因Gamma `closedTime`格式误判退出1；独立resolution方案A已由`3a367386`/`e086017f`分离闭合。Attempt4从clean/pushed `a37cf1181597296b9b2d87f8bc2c93700bda8f48`运行同一完整collector，在`8192.100s`后因Polymarket market某个Decimal收到精确空串触发parser fatal而退出1；失败raw frame/variant/path未知。Attempt3和Attempt4均永久为`FAIL + INCOMPLETE_8H`。SDK070三件套定义的P-B1E已由authority/Rust commits `15feb12`/`9d8e59b`分离闭合：只在既有vendor `response.rs`把九个官方nullable Decimal的精确`""`解码为`None`，required、非空malformed和其余parser/typed/schema错误继续terminal；定向验证与三路独立终审均通过，未增加parser、诊断、schema、100-cycle或改变恢复行为。承载本closure的纯文档commit成功push并完成三方ref核对后，从该新clean/pushed HEAD、新artifact和空dataset root运行完整六源8小时Attempt5。该运行不是production/canonical cutover；future paper/live真实RTDS adapter由独立事项实现但必须继承同一合同。不得恢复one-shot `request_reconnect`、第二owner/socket或并行恢复loop。既有自然Close 100-cycle只保留为本计划历史证据，不删除、不重跑，也不作为后继验收。
 
+> 2026-07-28 aggTrade current-schema 窄 supersede：阶段5的 v6 实施与验证保持
+> 历史完成事实；future v7 的字段删除、版本分派、legacy recovery 和验证只按
+> `plan/data-collect-redundant-typed-column-removal-plan.md` 执行。本计划不重开
+> 阶段5，也不授权历史重写或 production cutover。
+
+> 2026-07-28 后继验证游标 supersede：Attempt5 已按用户指令固定为
+> `USER_TERMINATED_FOR_APPROVED_SCHEMA_CHANGE + INCOMPLETE_8H`。先按重复 typed
+> 列删除计划闭合 v7/v5，再从新 clean/pushed HEAD、新 binary、新 artifact root
+> 与空 dataset root 执行完整六源 8 小时 Attempt6；上述 2026-07-27 Attempt5
+> 游标仅保留为停止前历史事实。
+
 ## 一、成功标准与实施原则
 
 实现完成必须直接满足需求第六节全部28项验收，并同时证明：

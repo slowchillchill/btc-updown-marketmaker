@@ -8,7 +8,25 @@
 >
 > 2026-07-25 Polymarket source-v3/metadata-v4 authority同步：用户批准`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`。metadata v3 schema/version立即冻结；current source v2 + metadata v3在SDK070总计划阶段3原子activation门通过前保持不变。activation后，同一五row-kind/attempt窄例外由metadata v4继承，source-v3 WS claimant recovery只使用v4末尾追加的精确nullable claimant pair，source v2与metadata v3转为只读。禁止source v3 + metadata v3、source v2 + metadata v4、dual-write或半切换。用户随后授予本事项持续执行/发布授权，已覆盖Stage3本地Rust/schema/test、审查、commit和push，但不把尚未完成的实现写成已完成，也不授权production cutover、release、部署、远端操作、migration或删除。
 >
+> 2026-07-28 Polymarket metadata-v5 current-schema 窄 supersede：用户批准
+> `demand/data-collect-redundant-typed-column-removal-demand.md`。source v3
+> 不变，future current metadata new-write 升为
+> `polymarket_market_metadata_v5`，唯一变化是删除与
+> `source_evidence_raw_sha256` 在共同非空行恒等的
+> `resolution_evidence_raw_sha256`；本文后续把 metadata v4 写作 current/future
+> current 的段落仅保留为当时合同与实施事实。metadata v3/v4 文件保持原 schema
+> 只读，不迁移、不重写；claimant pair、五种 resolution attempt row、source
+> payload/hash 校验及其他字段语义不变。
+>
 > 2026-07-27 RTDS窄authority supersede：用户批准`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`的共同RTDS恢复合同及阶段2方案A。当前代码只有training的`polymarket_rtds_chainlink_btc_usd`拥有真实adapter；阶段1已在该training adapter完成实现、收窄验证、三路独立终审及分离commit/push：source task曾收到合格fresh后，steady静默`300s`可完整替换runtime；后续runtime/generation以`Connected`与latest desired本地applied的后到monotonic观测为anchor等待`60s`，仍无fresh则在下一次完整替换前使用`1s × 2 ±20%`、单次最长`300s`、fresh重置且总尝试不限的outer backoff。首次fresh前禁用该business watchdog；严格唯一owner/socket、break-before-make。Attempt1因精确network-error服务对象被归为terminal parser error而固定为`FAIL + INCOMPLETE_8H`；方案A只把该数据外对象映射到SDK既有自然重连。Attempt2由用户终止；Attempt3因Gamma格式误判、Attempt4因Polymarket market Decimal空串parser fatal分别固定为`FAIL + INCOMPLETE_8H`。Attempt4没有保存失败raw frame/variant/path，不能归因具体字段。SDK070三件套单点定义的`P-B1E`已由authority/Rust commits `15feb12`/`9d8e59b`分离闭合：仅九个官方nullable Decimal把精确`""`解码为`None`，required、非空malformed和其他parser/typed/schema错误继续terminal；定向验证与三路独立终审均通过，它不是transport重连或availability例外。承载本closure的纯文档commit成功push并完成三方ref核对后，专项从该新clean/pushed HEAD执行完整六源8小时Attempt5。future paper/live真实RTDS adapter由独立事项实施、测试和部署，但必须继承同一合同，不再独立冻结另一套语义；当前paper/live仍只有heartbeat/status。除P-B1E这个typed decode规范化外，CLOB、Gamma、Binance及其他source行为不变。
+>
+> 2026-07-28 Attempt5 与当前游标 supersede：Attempt5 已按用户指令向精确
+> 进程组发送 SIGINT 后停止，固定为
+> `USER_TERMINATED_FOR_APPROVED_SCHEMA_CHANGE + INCOMPLETE_8H`，不是正常完成或
+> 新 schema 验收。当前实现 authority 为
+> `demand/data-collect-redundant-typed-column-removal-demand.md`；依次闭合
+> aggTrade v7 与 metadata v5 后，唯一长跑游标是从新 clean/pushed HEAD 和空
+> dataset root 执行完整六源 8 小时 Attempt6。
 
 本文定义当前项目 `./data-collect/` 的共用数据采集模块需求。`./data-collect/` 只负责把外部市场源转化为可审计、可回放、可验证覆盖率的原始采集证据，服务训练、paper trade 和 live trade 三类消费者；本文不包含实现计划，不修改代码，也不定义 `data-pipeline` 的训练样本加工逻辑。
 
@@ -158,7 +176,7 @@ metadata v3/v4自身payload/digest traceability、历史source v2只读事实或
 15. 训练 cold path 必须迁移为 UTC day 文件夹 + 每 source kind 每小时一个逻辑 partition：`training/typed_raw/utc_day=YYYY-MM-DD/source_kind=<source_kind>/<source_kind>_YYYY-MM-DDTHH[--part=N].parquet`。正常目标是一小时一个 finalized parquet；`part=N`只用于同一小时已存在 finalized/running 路径时的启动或重启碰撞，不由 row count、logical bytes或segment duration触发。
 16. Polymarket `book` 事件必须保存完整 `bids` / `asks` price-size depth，能还原 token orderbook；不得只保存 `bids_len` / `asks_len` 却标记为 complete book。PMXT-like schema 只作为 Polymarket orderbook typed layout、hourly parquet、compression/sort 和 manifest 参考，不引入 PMXT archive source。
 17. Polymarket hourly typed layout 必须覆盖 `book`、`price_change`、`last_trade_price`、`tick_size_change`、`best_bid_ask`、`new_market`、`market_resolved` 的 typed 字段或 nullable unavailable reason，并保留 collector host/region、slug、condition id、asset id、coverage 和 source evidence。
-18. Binance depth snapshot/update、Binance aggTrade、RTDS Chainlink 必须进入 hourly typed layout 修改范围，分别使用官方字段的 source-specific schema：`binance_depth_snapshot_v3`保留`timestamp_received`、`lastUpdateId`、完整`bids/asks`、snapshot boundary及共同depth因果坐标，`binance_depth_update_v4`保留`timestamp_received`、`e/E/s/U/u/b/a`、stitch/not-applied verdict及同一坐标域；`binance_aggtrade_v6`按独立专项合同保留trade/invalid判别、官方trade字段与WS因果坐标；`polymarket_rtds_chainlink_btc_usd`保留`timestamp_received`、message timestamp、payload timestamp、symbol、value、topic和subscription filter。旧depth snapshot v2/update v3与aggTrade v3/v5只读兼容，不得伪造新ordering字段。
+18. Binance depth snapshot/update、Binance aggTrade、RTDS Chainlink 必须进入 hourly typed layout 修改范围，分别使用官方字段的 source-specific schema：`binance_depth_snapshot_v3`保留`timestamp_received`、`lastUpdateId`、完整`bids/asks`、snapshot boundary及共同depth因果坐标，`binance_depth_update_v4`保留`timestamp_received`、`e/E/s/U/u/b/a`、stitch/not-applied verdict及同一坐标域；future current `binance_aggtrade_v7`按独立专项合同保留trade/invalid判别、官方trade字段与WS因果坐标，并只删除与`timestamp_received`恒等的`websocket_timestamp_received`；`polymarket_rtds_chainlink_btc_usd`保留`timestamp_received`、message timestamp、payload timestamp、symbol、value、topic和subscription filter。旧depth snapshot v2/update v3与aggTrade v3/v5/v6只读兼容，不得伪造新ordering字段。
 19. 训练dataset hard threshold固定为`50_000_000_000` bytes，作用域是`datasets/training`。达到阈值时collector按既有协调finalize合同保护已接收数据并以保留退出码75结束，不生成retention/threshold receipt，也不在collector内自动删除raw。
 20. 归档、retention和真实删除由独立运维事项处理；本需求与当前专项不授权删除任何UTC day、远端临时验证或生产数据清理。未来若批准删除，必须另建需求/计划/changelog和精确路径、安全门及验收，不得从50GB阈值或旧部署事实推导删除权限。
 21. 资源硬阈值的触发值、观测值、协调finalize与退出结果只进入有界operator日志、测试输出和对应changelog证据；不得为此扩张每日manifest或生成run-level policy/ResourceWatermark artifact。
@@ -252,7 +270,7 @@ metadata v3/v4自身payload/digest traceability、历史source v2只读事实或
 28. 训练样本因果可见性对legacy/无独立admission schema以采集服务器`recv_time_utc`为默认主轴，对current aggTrade/depth等已批准schema以collector admission time/sequence为主轴并保留更早raw ingress审计；paper/live以版本化handoff admission及对应服务器本机runtime receive timestamp为主轴。source/platform timestamp和Parquet物理行序不能替代receive/admission available time。
 29. paper/live 二进制的 hot path 接入文档必须明确 IPC/local stream/bounded handoff 协议、event seq、timestamp namespace、backpressure/status 消息、runtime receive timestamp 记录点和非范围边界，且不得生成交易决策、NOE/ledger、order evidence 或 execution feedback。
 30. PMXT-inspired Polymarket orderbook hourly parquet 必须证明 `book` rows 全部保留可解析 `bids` / `asks` 数组字段；真实市场中单侧空数组可以是盘口状态，必须在人工检查报告中单独计数，不得把完整 price-size 数组缩水成 `bids_len` / `asks_len` 后伪装完整。`price_change`、`last_trade_price`、`tick_size_change`、`best_bid_ask`、`new_market`、`market_resolved` 必须有对应 typed 字段、raw-equivalent evidence 或 nullable unavailable reason。
-31. Binance depth snapshot/update、Binance aggTrade、RTDS Chainlink hourly parquet必须分别证明required typed fields存在，且不能只依赖opaque `source_kind/raw_json`宽表；Binance aggTrade current v6及legacy v3/v5必须按各自合同证明`event_time=E`与`trade_time=T`等字段没有被归档输出丢弃。Binance depth current snapshot v3/update v4必须证明共享depth ingress与collector admission坐标、snapshot先admit/buffered updates按ingress release、stale/hole与正常运行中snapshot-unavailable的已接纳raw evidence不丢失且不错误应用；跨日deferred在新日permit前不得提前分配admission，正常rollover按staging顺序flush；可靠operator stop/run deadline截止后的未接纳depth pending或跨日staging不生成raw row、gap、告警、`dropped_rows`或terminal，以及`local_u`单调推进或gap/resnapshot可解释；legacy snapshot v2/update v3只能标为ordering unknown。
+31. Binance depth snapshot/update、Binance aggTrade、RTDS Chainlink hourly parquet必须分别证明required typed fields存在，且不能只依赖opaque `source_kind/raw_json`宽表；Binance aggTrade current v7及legacy v3/v5/v6必须按各自合同证明`event_time=E`与`trade_time=T`等字段没有被归档输出丢弃。Binance depth current snapshot v3/update v4必须证明共享depth ingress与collector admission坐标、snapshot先admit/buffered updates按ingress release、stale/hole与正常运行中snapshot-unavailable的已接纳raw evidence不丢失且不错误应用；跨日deferred在新日permit前不得提前分配admission，正常rollover按staging顺序flush；可靠operator stop/run deadline截止后的未接纳depth pending或跨日staging不生成raw row、gap、告警、`dropped_rows`或terminal，以及`local_u`单调推进或gap/resnapshot可解释；legacy snapshot v2/update v3只能标为ordering unknown。
 32. 训练 cold path finalized discovery 必须使用 day-first `utc_day=YYYY-MM-DD/source_kind=<source_kind>` 路径；legacy source-first 路径只能作为历史只读兼容被显式标记，不能与新产物混写。
 33. 50GB hard-threshold验收只证明触发后停止新接收、协调finalize/manifest保全并以退出码75结束；collector不生成retention/threshold receipt且不删除raw。任何归档、远端验证或真实删除都必须等待独立需求、计划和用户批准。
 

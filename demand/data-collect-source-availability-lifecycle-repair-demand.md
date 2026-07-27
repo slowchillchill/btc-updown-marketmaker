@@ -8,6 +8,19 @@
 >
 > 状态：`PHASE_9_COMPLETE_RTDS_PONG_A`。用户已于2026-07-17批准本文、对应计划及第4.7节SDK-first逐项patch矩阵，并授权按计划分阶段实施、验证、独立审查、commit和push；阶段0至阶段8均已完成实现、最终门禁与三路独立终审。用户于2026-07-19在香港线路15分钟wire验证后明确回复“批准 RTDS-PONG-A”；阶段9现已完成RTDS固定PING/no-PONG实现、定向与全量门禁、香港线路修复后15分钟SDK复测、官方crate provenance核验及两路独立终审，Critical/Important/Minor均为0。此前批准的`CT-B`、`D6-SCHEMA-R`、`M1-A / M2-A0 / M4-A-R / M5-N/A / M6-A+ / M7-A-R`及修订后的`M3-A-R`实现语义继续有效；M8-A旧UTC边界首次启用候选已由用户2026-07-18批准的独立直接长期部署事项取代。本文只提供实现 authority；用户2026-07-19后续批准的production release构建、精确current-day删除、部署与远端服务操作只以`demand/data-collect-rtds-pong-a-reset-deployment-demand.md`及对应计划/changelog为authority。
 
+> 2026-07-28 aggTrade current-schema 窄 supersede：本文第4.5节完成的
+> `binance_aggtrade_v6` 继续作为冻结历史合同。用户已批准
+> `demand/data-collect-redundant-typed-column-removal-demand.md`，future
+> current new-write 升为 v7，唯一变化是删除与 `timestamp_received` 恒等的
+> `websocket_timestamp_received`。v5/v6 文件保持原 schema 只读，其他 REST
+> nullable 兼容列与本文 WebSocket-only 行为不变；不重开本文已闭合阶段。
+
+> 2026-07-28 后继验证游标 supersede：Attempt5 已按用户指令停止并固定为
+> `USER_TERMINATED_FOR_APPROVED_SCHEMA_CHANGE + INCOMPLETE_8H`。当前先按
+> `DC-REPAIR-20260728-REDUNDANT-TYPED-COLUMN-REMOVAL` 分阶段闭合 aggTrade v7
+> 与 metadata v5，再从新 clean/pushed HEAD 和空 root 执行完整六源 8 小时
+> Attempt6；本文 2026-07-27 段落中的 Attempt5 游标只保留为当时历史事实。
+
 > 2026-07-22窄authority同步：已批准的`demand/data-collect-polymarket-resolution-followup-demand.md`只对固定pending-resolution identity的E+3..E+8 exact-slug查询、每个业务slot最多一条metadata v3 attempt row，以及旧market assets保留到terminal claim后的bounded drain或budget完成，建立本文的有界例外。desired asset set因此扩展为current + prefetched next + resolution_pending旧market assets；current/next discovery、普通availability、manifest schema/artifact及本文其他生命周期合同不变。用户已后续授权按专项计划执行阶段1至阶段4及每阶段commit/push；该授权不重开本文其他已完成阶段，也不授权production部署、服务操作或数据删除。
 >
 > 2026-07-25窄authority supersede：用户批准`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`。上述唯一业务slot例外在activation前仍由current source v2 + metadata v3承载；未来source v3 + metadata v4通过SDK070总计划阶段3原子activation后，同一五row-kind/attempt例外由metadata v4继承，并只追加精确nullable WS claimant pair。metadata v3 schema/version立即冻结且activation后只读；不新增artifact、sidecar、第二writer、dual-write或普通transport持久化。本次只同步文档，不授权Rust/schema/test实施或activation。

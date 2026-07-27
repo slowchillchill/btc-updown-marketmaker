@@ -16,6 +16,14 @@
 >
 > 2026-07-27 Gamma `closedTime`真实格式修订：用户批准方案A。现有Chrono RFC3339第一路径失败且原始值精确以`+00`结尾时，只把该后缀规范化为`+00:00`并再次交给同一parser；真实触发值为`2026-07-27 05:25:52+00`，持久化仍保留未经改写的raw字符串。不得读取nested event时间作备用authority，不得使用`%#z`或第二套格式grammar；无时区、其他offset缩写、规范化后仍无法解析或解析结果早于E时，既有`closed_time_invalid + integrity_error + fail closed`不变。
 
+> 2026-07-28 metadata current-schema 窄 supersede：本文实现的 metadata v3/v4
+> exact schema、旧 digest required/equality 规则和既有阶段事实保持冻结。用户批准
+> `demand/data-collect-redundant-typed-column-removal-demand.md`，future current
+> new-write 升为 metadata v5，唯一物理列变化是删除
+> `resolution_evidence_raw_sha256`；source payload/source digest、terminal
+> ownership、winner/outcome、claimant pair 与恢复完整性继续有效。v3/v4 只读，不
+> 迁移、不重写。
+
 ## 一、目标
 
 修复 `btc-updown-5m` market metadata 与 market channel 在市场切换和结束后的生命周期采集，使 collector：

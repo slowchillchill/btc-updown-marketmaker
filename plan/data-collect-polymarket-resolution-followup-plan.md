@@ -15,6 +15,12 @@
 > crash cuts及process restart恢复统一归阶段3。该分界不削弱RF-10、AC-09或AC-10，只避免阶段2另造
 > 与阶段3重复的durability/recovery框架。
 
+> 2026-07-28 metadata current-schema 窄 supersede：本文 metadata v4 实施与
+> 验证保持历史完成事实；future v5 删除重复 digest 的实现、legacy exact reader、
+> recovery 和验证只按
+> `plan/data-collect-redundant-typed-column-removal-plan.md` 执行。本计划不重开
+> 已完成阶段，不授权历史迁移或 production cutover。
+
 ## 一、执行原则与成功标准
 
 本计划阶段0文档authority同步已经完成；现按用户明确授权顺序执行阶段1至阶段4。每个阶段必须先完成自审与独立审查、commit/push后才能进入下一阶段，并保持官方Polymarket Rust SDK-first、唯一market-channel subscription owner、真实时间戳、identity fail-closed和其他source独立运行。
