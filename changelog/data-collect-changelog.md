@@ -755,3 +755,16 @@
   P-B1E最小实现、定向验证、三路终审与独立Rust发布，再从新clean/pushed HEAD、
   新artifact和空dataset root运行完整六源8小时Attempt5。不得续写Attempt4、运行
   RTDS-only probe/100-cycle/资源矩阵或增加raw诊断旁路。
+
+## 2026-07-27：P-B1E实现闭合，Attempt5待运行
+
+- P-B1E authority/Rust commits `15feb12`/`9d8e59b`已分离发布并完成三方ref
+  核对；实现只修改既有vendor `response.rs`的九个官方nullable Decimal，
+  required、非空malformed及其他parser/typed/schema错误继续fatal。
+- response聚焦测试`32/32`、现行v3直接消费者`1/1`、vendor合法非空WebSocket
+  `4/4`及编译/check/Clippy基线外`-D warnings`/fmt/diff-check通过；三路独立终审
+  均为Critical 0 / Important 0 / Minor 0。用户批准把计划中的陈旧current-v2
+  验证措辞最小纠正为现行v3消费者与vendor F04合法值测试，不恢复v2或新增测试矩阵。
+- 承载本closure的纯文档commit成功push且三方ref一致后，唯一游标为从该新
+  clean/pushed HEAD、新artifact和空dataset root运行完整六源8小时Attempt5。
+  P-B1E不冒充已定位Attempt4未知字段；同类错误复发时停止并报告新证据。

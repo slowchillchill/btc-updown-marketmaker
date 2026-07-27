@@ -6,7 +6,7 @@
 >
 > 对应计划：`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`
 >
-> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FAIL_INCOMPLETE_8H_P_B1E_AUTHORITY_SYNC_CLOSED_IMPLEMENTATION_PENDING`。其中`P-B1E`是本次获批的“nullable Decimal精确空串兼容”唯一标识，用于避免与Attempt1辅助文件污染处置的历史`E-A`重名；该状态仅在承载本记录的纯文档authority commit成功push且本地HEAD、upstream与远端ref一致后生效。RTDS network-error方案A的`366fed7d`/`415470e`与Gamma `closedTime`方案A的`3a367386`/`e086017f`均已分离发布并完成三方ref核对；Attempt1、Attempt3、Attempt4永久保持`FAIL + INCOMPLETE_8H`，Attempt2永久记录为`USER_TERMINATED + INCOMPLETE_8H`。唯一下一游标是先闭合P-B1E最小实现，再执行完整六源8小时Attempt5。
+> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FAIL_INCOMPLETE_8H_P_B1E_IMPLEMENTATION_CLOSED_ATTEMPT5_FULL_COLLECTOR_PENDING`。其中`P-B1E`是本次获批的“nullable Decimal精确空串兼容”唯一标识，用于避免与Attempt1辅助文件污染处置的历史`E-A`重名；该状态仅在承载本记录的纯文档closure commit成功push且本地HEAD、upstream与远端ref一致后生效。RTDS network-error方案A的`366fed7d`/`415470e`、Gamma `closedTime`方案A的`3a367386`/`e086017f`及P-B1E的`15feb12`/`9d8e59b`均已按authority/Rust分离发布并完成三方ref核对；Attempt1、Attempt3、Attempt4永久保持`FAIL + INCOMPLETE_8H`，Attempt2永久记录为`USER_TERMINATED + INCOMPLETE_8H`。唯一下一游标是完整六源8小时Attempt5。
 
 ## 2026-07-21：用户选择彻底换连接方向
 
@@ -303,3 +303,28 @@
   clean/pushed HEAD设置新`DATA_COLLECT_GIT_COMMIT`，使用新release binary、
   新artifact和空dataset root执行完整六源8小时Attempt5。不得续写Attempt4、拼接
   剩余时间或自动扩大空串容忍范围。
+
+## 2026-07-27：P-B1E实现闭合，Attempt5待运行
+
+- authority commit
+  `15feb1217d182eea3ef909f51f3ee0a700b918db`与独立Rust commit
+  `9d8e59b1fbeb9db04b20c2a00402b36b45f228f7`已按边界分离发布；Rust发布后
+  本地HEAD、upstream和`origin/fix-rtds-silents`均指向`9d8e59b1`。
+- 实现只修改既有vendor生产差异路径`src/clob/ws/types/response.rs`：九个获批
+  `Option<Decimal>`字段复用`NoneAsEmptyString`，missing/null/合法非空值保持；
+  nullable非空malformed及required `price_change.size=""`继续fatal。没有新增依赖、
+  parser、生产路径、schema/counter、诊断、raw recorder、100-cycle或资源矩阵。
+- TDD RED精确复现Decimal空串错误类；response聚焦测试`32/32`、现行v3直接消费者
+  `1/1`及vendor合法非空WebSocket测试`4/4`通过。vendor全feature
+  lib/tests/examples编译、data-collect `--lib` check、fmt与diff-check通过。
+  Clippy首次只命中两类已记录且未修改的vendor基线；精确豁免这两类后，其余warning
+  继续以`-D warnings`通过。
+- 三路`gpt-5.6-sol`/`ultra`独立终审均为
+  `PASS / CLOSURE_UNBLOCKED`，Critical 0 / Important 0 / Minor 0。Stage3已删除
+  current-v2 current consumer，用户批准把P-B1E计划中的陈旧验证措辞最小纠正为
+  现行v3直接消费者与vendor F04合法值测试；没有恢复v2或增加测试矩阵。
+- P-B1E只证明九个官方nullable字段的精确空串边界，仍不证明已定位Attempt4的未知
+  字段，也不保证Attempt5不会出现新的parser证据。承载本closure的纯文档commit
+  成功push且三方ref一致后，当前唯一游标为从该新clean/pushed HEAD、新artifact和
+  空dataset root运行完整六源8小时Attempt5；若同类Decimal空串错误复发，立即停止并
+  报告新证据，不自动扩张nullable范围。

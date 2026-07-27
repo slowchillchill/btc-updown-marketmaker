@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FAIL_INCOMPLETE_8H_P_B1E_AUTHORITY_SYNC_CLOSED_IMPLEMENTATION_PENDING`。其中`P-B1E`是本次获批的“nullable Decimal精确空串兼容”唯一标识，用于避免与Attempt1辅助文件污染处置的历史`E-A`重名；该状态仅在承载本记录的纯文档authority commit成功push且三方ref一致后生效。RTDS network-error方案A的`366fed7d`/`415470e`与Gamma `closedTime`方案A的`3a367386`/`e086017f`均已按authority/Rust分离发布并完成三方ref核对。RTDS阶段0和阶段1已闭合；Attempt1、Attempt3、Attempt4永久为`FAIL + INCOMPLETE_8H`，Attempt2永久为`USER_TERMINATED + INCOMPLETE_8H`。Attempt4在`8192.100s`因`polymarket_market`某个Decimal字段收到精确空串而失败；当前唯一下一步是先完成P-B1E最小实现、定向验证、三路独立审查及独立Rust commit/push，再从新clean/pushed HEAD执行完整六源8小时Attempt5。总事项阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FAIL_INCOMPLETE_8H_P_B1E_IMPLEMENTATION_CLOSED_ATTEMPT5_FULL_COLLECTOR_PENDING`。其中`P-B1E`是本次获批的“nullable Decimal精确空串兼容”唯一标识，用于避免与Attempt1辅助文件污染处置的历史`E-A`重名；该状态仅在承载本记录的纯文档closure commit成功push且三方ref一致后生效。RTDS network-error方案A的`366fed7d`/`415470e`、Gamma `closedTime`方案A的`3a367386`/`e086017f`及P-B1E的`15feb12`/`9d8e59b`均已按authority/Rust分离发布并完成三方ref核对。RTDS阶段0和阶段1已闭合；Attempt1、Attempt3、Attempt4永久为`FAIL + INCOMPLETE_8H`，Attempt2永久为`USER_TERMINATED + INCOMPLETE_8H`。P-B1E定向验证与三路独立终审均已通过；当前唯一下一步是从新clean/pushed HEAD执行完整六源8小时Attempt5。总事项阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
 > `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
@@ -38,7 +38,7 @@
 > Stage5、Stage6与2-REST均已完成各自实现、完整门和独立终审。按用户批准的
 > 方案A，本文条件式记录`2-REST_CLOSED`与核心总事项`CORE_COMPLETE`：只有承载
 > 本记录的closure commit成功push且本地HEAD、upstream与远端ref一致后才生效。
-> RTDS行为专项当前为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FAIL_INCOMPLETE_8H_P_B1E_AUTHORITY_SYNC_CLOSED_IMPLEMENTATION_PENDING`。
+> RTDS行为专项当前为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FAIL_INCOMPLETE_8H_P_B1E_IMPLEMENTATION_CLOSED_ATTEMPT5_FULL_COLLECTOR_PENDING`。
 > 本文件只记录本组三件套的事实、冲突、决定与执行，不回写旧changelog。
 
 ## 2026-07-24：用户要求建立一个新的总事项
@@ -1961,3 +1961,33 @@ migration、数据删除、public-network smoke或RTDS参数/行为实施。
   push且三方ref一致后，状态为`P_B1E_AUTHORITY_SYNC_CLOSED_IMPLEMENTATION_PENDING`；
   最小实现、定向验证、三路终审与独立Rust发布闭合后，才从新clean/pushed HEAD、
   新artifact和空dataset root运行完整六源8小时Attempt5。
+
+## 2026-07-27：P-B1E最小实现闭合
+
+- authority commit
+  `15feb1217d182eea3ef909f51f3ee0a700b918db`先行发布；独立Rust commit
+  `9d8e59b1fbeb9db04b20c2a00402b36b45f228f7`随后只修改既有vendor
+  `src/clob/ws/types/response.rs`。Rust发布后本地HEAD、upstream与远端ref一致。
+- 九个获批`Option<Decimal>`字段只在反序列化时复用`NoneAsEmptyString`；
+  missing/null/官方合法非空DecimalString保持，nullable非空malformed及required
+  `PriceChangeBatchEntry.size=""`继续fatal。F04仍为nullable book快照状态；
+  F01--F03与F05--F18保持排除。没有新增依赖、第二parser、第五个vendor生产路径、
+  raw recorder、schema/counter、诊断框架、100-cycle或资源矩阵。
+- TDD RED精确复现旧Decimal空串失败；GREEN response聚焦测试`32/32`。现行v3
+  直接消费者测试`1/1`验证F04合法值、七类target-admitted projection与Arrow往返；
+  vendor合法非空WebSocket测试`4/4`覆盖book、price_change、tick_size_change和
+  last_trade_price。全feature lib/tests/examples编译、data-collect `--lib` check、
+  fmt和diff-check通过。Clippy首次只命中已记录且未修改的`derivable_impls`与
+  `let_underscore_untyped`两类vendor基线；精确豁免后二者以外仍以
+  `-D warnings`通过。
+- 三路`gpt-5.6-sol`/`ultra`独立终审均为
+  `PASS / CLOSURE_UNBLOCKED`，Critical 0 / Important 0 / Minor 0。独立验证审查
+  首轮指出现行消费者测试尚未运行，补跑后闭合；Stage3已删除current-v2 current
+  consumer。用户批准把P-B1E计划中的陈旧`current-v2`措辞最小纠正为现行v3直接
+  消费者与vendor F04合法值测试，不恢复v2、不增加测试矩阵。
+- umbrella不重复实现或运行长测，只消费专项证据。承载本closure的纯文档commit
+  成功push且三方ref一致后，消费状态升级为
+  `RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FAIL_INCOMPLETE_8H_P_B1E_IMPLEMENTATION_CLOSED_ATTEMPT5_FULL_COLLECTOR_PENDING`；
+  唯一下一步由专项从该新clean/pushed HEAD、新artifact和空dataset root运行完整
+  六源8小时Attempt5。P-B1E仍不证明已唯一定位Attempt4；同类错误复发时停止并报告
+  新证据，不自动扩张nullable范围。
