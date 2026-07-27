@@ -731,3 +731,8 @@
 - Attempt3从clean/pushed `c05db6ba58676bec3e20878375608e395ad0971a`运行完整release-profile training collector；六个`LIVE_SOURCES`均已在新隔离dataset root形成正式Parquet/manifest。wrapper运行`3863.950s`后collector退出1，原因是Gamma market `btc-updown-5m-1785129600`顶层`closedTime="2026-07-27 05:25:52+00"`被RFC3339-only helper归为`closed_time_invalid`，不是RTDS错误。该attempt永久为`FAIL + INCOMPLETE_8H`，部分artifact只作失败证据。
 - 用户批准Gamma方案A：保留现有RFC3339优先路径，只在失败后把精确尾部`+00`规范化为`+00:00`并交给同一Chrono parser；原raw、nested event禁用、其他格式拒绝、E边界及fail-closed不变。不新增格式矩阵、100-cycle、资源矩阵、SDK/schema/evaluator/adapter或第二解析authority。
 - 最小修复、定向验证、三路独立审查和分离发布闭合后，当前单一游标为从新clean/pushed HEAD、新artifact和空dataset root，经香港线路运行完整六源8小时Attempt4。其他source行为、paper/live当前实现、production、部署、远端、既有数据和100-cycle边界不变。
+
+## 2026-07-27：Gamma方案A实现闭合，Attempt4成为单一游标
+
+- Gamma authority commit `3a367386cb1768867e20a8190d2f13617b65fe67`与Rust commit `e086017fc6d376b739e7a5146dacc18f674f1407`已分离发布；精确回归`1/1`、完整`polymarket_contract` `7/7`、package tests check、目标Clippy、fmt、diff-check和三路独立终审均通过，Rust发布后三方ref一致。
+- 该修复只修改共享Gamma `closedTime` helper和一个精确回归，不改变RTDS、其他source、SDK/schema/evaluator/adapter/fatal/raw路径，也未运行100-cycle或资源矩阵。承载本closure的纯文档commit成功push且三方ref一致后，当前单一游标为从该新clean/pushed HEAD、新artifact和空dataset root，经香港线路运行完整六源8小时Attempt4。

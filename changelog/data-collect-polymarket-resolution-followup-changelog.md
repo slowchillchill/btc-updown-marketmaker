@@ -6,7 +6,7 @@
 >
 > 对应计划：`plan/data-collect-polymarket-resolution-followup-plan.md`
 >
-> 状态：`PHASE_4_COMPLETE_LOCAL_HK_VPN_AC12_AC13_PASS_2026-07-23__V3_VALIDATE_FIRST_METADATA_V4_IMPLEMENTED_CURRENT__GAMMA_CLOSED_TIME_FORMAT_A_APPROVED_FIX_PENDING_2026-07-27`。阶段0至阶段3已分别完成自审、独立终审与commit/push；阶段4本地香港线路AC-12、全量AC-13与三路独立全面终审均已通过。用户于2026-07-24批准source schema v3的validate-first文档修订，并于2026-07-25批准metadata v4 claimant schema；二者已由SDK070 Stage3实施并成为当前new-write组合。2026-07-27 Attempt3暴露的Gamma顶层`closedTime`精确格式缺口已由用户批准方案A，本地最小修复、测试和发布待执行。production部署、服务操作和数据删除仍未获授权、未执行。
+> 状态：`PHASE_4_COMPLETE_LOCAL_HK_VPN_AC12_AC13_PASS_2026-07-23__V3_VALIDATE_FIRST_METADATA_V4_IMPLEMENTED_CURRENT__GAMMA_CLOSED_TIME_FORMAT_A_IMPLEMENTATION_CLOSED_2026-07-27`。阶段0至阶段3已分别完成自审、独立终审与commit/push；阶段4本地香港线路AC-12、全量AC-13与三路独立全面终审均已通过。用户于2026-07-24批准source schema v3的validate-first文档修订，并于2026-07-25批准metadata v4 claimant schema；二者已由SDK070 Stage3实施并成为当前new-write组合。2026-07-27 Attempt3暴露的Gamma顶层`closedTime`精确格式缺口已按方案A由独立Rust commit `e086017fc6d376b739e7a5146dacc18f674f1407`完成最小实现、定向验证、三路终审、push和三方ref核对。production部署、服务操作和数据删除仍未获授权、未执行。
 
 ## 2026-07-21：数据检查与问题确认
 
@@ -887,6 +887,12 @@ production activation/cutover、release、部署、远端操作、migration和�
   evaluator、adapter、fatal路径或旧Attempt3 artifact，不新增格式矩阵、100-cycle或资源
   验证。authority与Rust分离发布，修复后由RTDS专项从新clean/pushed HEAD执行完整六源
   8小时Attempt4。
+
+## 2026-07-27：Gamma方案A实现与分离发布闭合
+
+- authority commit `3a367386cb1768867e20a8190d2f13617b65fe67`先行发布；独立Rust commit `e086017fc6d376b739e7a5146dacc18f674f1407`随后只修改共享`parse_polymarket_gamma_closed_time_utc_ms` helper和一个Attempt3精确回归，共`15 insertions / 1 deletion`。既有RFC3339仍是第一路径；失败后仅把精确尾部`+00`规范化为`+00:00`并交回同一Chrono parser。
+- 精确回归`1/1`、完整`polymarket_contract` `7/7`、`cargo check -p data-collect --tests --locked`、目标Clippy `-D warnings`、fmt与diff-check全部通过。现有非法时间、早于E与terminal evaluator合同由完整`polymarket_contract`继续覆盖；fatal路径未修改，并经静态审查确认保持既有fail-closed语义。没有运行RTDS-only probe、100-cycle、资源矩阵或默认workspace完整测试。
+- runtime、验证和authority三路独立终审均为Critical 0 / Important 0 / Minor 0。Rust发布后本地HEAD、upstream和远端ref均为`e086017fc6d376b739e7a5146dacc18f674f1407`；未修改SDK、Cargo、schema、writer、evaluator、adapter、fatal路径、raw持久化或Attempt3 artifact。resolution事项的实现游标闭合，完整六源8小时复验继续只由RTDS专项Attempt4执行。
 
 ## 后续 changelog 规则
 

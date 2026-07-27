@@ -6,7 +6,7 @@
 >
 > 对应计划：`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`
 >
-> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_APPROVED_FIX_PENDING_ATTEMPT4_FULL_COLLECTOR_PENDING`。该状态仅在承载本记录的纯文档authority commit成功push且本地HEAD、upstream与远端ref一致后生效。方案A authority commit `366fed7d19ff9ce2f855f362c81de5641b63f9c4`与Rust commit `415470eda0b2d629c19c2609e6610a253703d684`已分离发布并分别完成三方ref核对；Attempt1永久保持`FAIL + INCOMPLETE_8H`，Attempt2永久记录为`USER_TERMINATED + INCOMPLETE_8H`，Attempt3永久记录为`FAIL + INCOMPLETE_8H`。用户已批准Gamma `closedTime`方案A；修复闭合后执行完整六源8小时Attempt4。
+> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FULL_COLLECTOR_PENDING`。该状态仅在承载本记录的纯文档closure commit成功push且本地HEAD、upstream与远端ref一致后生效。RTDS network-error方案A的`366fed7d`/`415470e`与Gamma `closedTime`方案A的`3a367386`/`e086017f`均已分离发布并完成三方ref核对；Attempt1永久保持`FAIL + INCOMPLETE_8H`，Attempt2永久记录为`USER_TERMINATED + INCOMPLETE_8H`，Attempt3永久记录为`FAIL + INCOMPLETE_8H`。唯一下一游标为完整六源8小时Attempt4。
 
 ## 2026-07-21：用户选择彻底换连接方向
 
@@ -247,3 +247,9 @@
 - offending metadata v4 row保留顶层`closed_time_raw="2026-07-27 05:25:52+00"`，其余terminal字段为`closed=true`、`acceptingOrders=false`、`umaResolutionStatus=resolved`及`outcome_prices_raw=["1","0"]`；因closedTime gate先失败，`winning_asset_id/winning_outcome`仍为null。市场结束为`05:25:00Z`。当前RFC3339-only helper将这个`E+52s`值误判为`closed_time_parse_error`，随后既有fail-closed路径正确终止collector。
 - 用户批准Gamma `closedTime`方案A：只把真实顶层格式的精确`+00`后缀规范化为`+00:00`并交给同一Chrono parser，raw原样保存；非法、无时区、其他未批准格式及早于E继续fatal。不得使用nested event兜底或把integrity error降级。
 - authority与最小Rust修复必须分离完成测试、三路审查、commit/push和三方ref核对。闭合后从新clean/pushed HEAD设置新`DATA_COLLECT_GIT_COMMIT`，用新release binary、新artifact和空dataset root执行完整六源8小时Attempt4；不得续写Attempt3、拼接剩余时间或恢复RTDS-only/100-cycle/资源矩阵。
+
+## 2026-07-27：Gamma方案A实现闭合，Attempt4待启动
+
+- Gamma authority commit `3a367386cb1768867e20a8190d2f13617b65fe67`先行发布；独立Rust commit `e086017fc6d376b739e7a5146dacc18f674f1407`随后只修改共享helper和一个Attempt3精确回归。精确测试`1/1`、完整`polymarket_contract` `7/7`、package tests check、目标Clippy `-D warnings`、fmt和diff-check全部通过。
+- 三路独立代码终审均为Critical 0 / Important 0 / Minor 0；曾有一处审查报告把slug/start `05:20Z`误称为市场E，已复核更正为E=`05:25Z`、closedTime=`05:25:52Z`即E+52秒，不影响代码或验收。Rust发布后本地HEAD、upstream和远端ref均为`e086017fc6d376b739e7a5146dacc18f674f1407`。
+- 本轮没有修改RTDS、SDK、Cargo、schema、writer、evaluator、adapter、fatal路径、raw持久化或Attempt3 artifact，也没有运行RTDS-only probe、100-cycle或资源矩阵。承载本closure的纯文档commit成功push并完成三方ref核对后，唯一下一游标为步骤2.2.10：从该新clean/pushed HEAD设置精确`DATA_COLLECT_GIT_COMMIT`，用新release binary、新artifact和空dataset root运行完整六源8小时Attempt4。

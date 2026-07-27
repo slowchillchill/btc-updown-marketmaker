@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-polymarket-resolution-followup-changelog.md`
 >
-> 状态：`PHASE_4_COMPLETE_LOCAL_HK_VPN_AC12_AC13_PASS_2026-07-23__V3_VALIDATE_FIRST_METADATA_V4_IMPLEMENTED_CURRENT__GAMMA_CLOSED_TIME_FORMAT_A_APPROVED_FIX_PENDING_2026-07-27`。阶段0至阶段3已分别完成自审、独立终审与commit/push；阶段4本地香港线路AC-12、本地全量AC-13与任务4.3三路独立全面终审均已通过。用户于2026-07-24批准source schema v3的validate-first文档修订，并于2026-07-25批准metadata v4 claimant schema；二者已由SDK070 Stage3实施并成为当前new-write组合。2026-07-27 Attempt3暴露的Gamma顶层`closedTime`精确格式缺口已由用户批准方案A，本地最小修复、测试和发布待执行。production部署、服务操作和数据删除仍未获授权、未执行。
+> 状态：`PHASE_4_COMPLETE_LOCAL_HK_VPN_AC12_AC13_PASS_2026-07-23__V3_VALIDATE_FIRST_METADATA_V4_IMPLEMENTED_CURRENT__GAMMA_CLOSED_TIME_FORMAT_A_IMPLEMENTATION_CLOSED_2026-07-27`。阶段0至阶段3已分别完成自审、独立终审与commit/push；阶段4本地香港线路AC-12、本地全量AC-13与任务4.3三路独立全面终审均已通过。用户于2026-07-24批准source schema v3的validate-first文档修订，并于2026-07-25批准metadata v4 claimant schema；二者已由SDK070 Stage3实施并成为当前new-write组合。2026-07-27 Attempt3暴露的Gamma顶层`closedTime`精确格式缺口已按方案A由独立Rust commit `e086017fc6d376b739e7a5146dacc18f674f1407`完成最小实现、定向验证、三路终审、push和三方ref核对。production部署、服务操作和数据删除仍未获授权、未执行。
 
 > 2026-07-22 AC-12执行拓扑修订：真实source validation固定在本地原生Ubuntu环境通过用户已配置的香港VPN线路执行，不再上传到AWS爱尔兰数据采集服务器。用户已授权阶段4在阶段1至阶段3全部通过后执行；不得改变production service或执行数据删除。
 
@@ -301,6 +301,7 @@ git diff --check
   - 验证：不运行RTDS-only probe、100-cycle、资源矩阵、格式笛卡尔积或默认workspace完整测试；没有SDK、Cargo、schema、writer、evaluator或第二parser authority改动。
 - 步骤 5.2.3：自审后执行三路独立审查，成立问题闭环后以独立Rust commit发布。
   - 验证：authority与Rust不混入同一commit；push后本地HEAD、upstream和远端ref一致。
+  - 执行结果：`COMPLETE`。Rust commit `e086017fc6d376b739e7a5146dacc18f674f1407`只修改共享helper和一个精确回归；精确测试`1/1`、完整`polymarket_contract` `7/7`、`cargo check -p data-collect --tests --locked`、目标Clippy `-D warnings`、fmt和diff-check全部通过。三路独立终审均为Critical 0 / Important 0 / Minor 0，push后三方ref一致。
 
 ### 任务 5.3：由RTDS专项执行完整collector复验
 

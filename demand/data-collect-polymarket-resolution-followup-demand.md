@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-polymarket-resolution-followup-changelog.md`
 >
-> 状态：`PHASE_4_COMPLETE_LOCAL_HK_VPN_AC12_AC13_PASS_2026-07-23__V3_VALIDATE_FIRST_METADATA_V4_IMPLEMENTED_CURRENT__GAMMA_CLOSED_TIME_FORMAT_A_APPROVED_FIX_PENDING_2026-07-27`。用户已逐项批准第八节第1至8项需求语义，拒绝并要求删除第9项固定5秒`closedTime` future-skew allowance，并批准同步第10项主authority；随后明确授权完整执行阶段1至阶段4。阶段1至阶段4已完成实现、验证和规定的独立审查；阶段4本地香港线路AC-12与全量AC-13通过，最终三路全面终审均为Critical 0、Important 0、Minor 0。用户于2026-07-24另批准source schema v3的validate-first文档修订，并于2026-07-25批准`polymarket_market_metadata_v4` claimant schema；二者已由SDK070 Stage3实施并成为当前new-write组合。2026-07-27完整training collector的Attempt3真实观察到Gamma顶层`closedTime="2026-07-27 05:25:52+00"`，当前RFC3339-only helper将其误判为parse error；用户已批准下述精确格式方案A，本地最小修复、测试和发布待执行。production部署、服务操作和数据删除仍未授权、未执行。
+> 状态：`PHASE_4_COMPLETE_LOCAL_HK_VPN_AC12_AC13_PASS_2026-07-23__V3_VALIDATE_FIRST_METADATA_V4_IMPLEMENTED_CURRENT__GAMMA_CLOSED_TIME_FORMAT_A_IMPLEMENTATION_CLOSED_2026-07-27`。用户已逐项批准第八节第1至8项需求语义，拒绝并要求删除第9项固定5秒`closedTime` future-skew allowance，并批准同步第10项主authority；随后明确授权完整执行阶段1至阶段4。阶段1至阶段4已完成实现、验证和规定的独立审查；阶段4本地香港线路AC-12与全量AC-13通过，最终三路全面终审均为Critical 0、Important 0、Minor 0。用户于2026-07-24另批准source schema v3的validate-first文档修订，并于2026-07-25批准`polymarket_market_metadata_v4` claimant schema；二者已由SDK070 Stage3实施并成为当前new-write组合。2026-07-27完整training collector的Attempt3真实观察到Gamma顶层`closedTime="2026-07-27 05:25:52+00"`，RFC3339-only helper将其误判为parse error；用户批准的方案A已由独立Rust commit `e086017fc6d376b739e7a5146dacc18f674f1407`完成最小实现、定向验证、三路终审、push和三方ref核对。production部署、服务操作和数据删除仍未授权、未执行。
 
 > 2026-07-22真实数据采集验收拓扑修订：用户指定本事项AC-12必须在本地原生Ubuntu环境使用已配置的香港VPN线路执行，不再使用AWS爱尔兰数据采集服务器。用户现已授权在阶段1至阶段3完成并通过各阶段门后执行阶段4及AC-12；该决定不改变production部署拓扑，也不授权production部署、服务操作或数据删除。
 
