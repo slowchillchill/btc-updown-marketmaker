@@ -634,3 +634,9 @@
 - 后继专项runtime、测试和authority三路独立终审均为PASS，Critical/Important/Minor均为0；收窄最终门全部通过，裁决后未再执行历史100-cycle。
 - 文档验收commit `ef200a6e89eaaee9f19ff49a00232b5004825ce7`与Rust实现commit `a29486babe2682481549cfc0b95b010784d653f0`已分离push并核对三方ref一致。
 - 承载本记录的闭合文档commit成功push且三方ref一致后，后继专项状态为`STAGE1_CLOSED_STAGE2_PROBE_PENDING`。本文既有阶段事实、future paper/live共同合同、CLOB/Gamma/Binance及其他source均不变。
+
+## 2026-07-27：后继RTDS专项Attempt1与方案A窄supersede
+
+- 后继专项阶段2 Attempt1从clean HEAD运行`16851391ms`后，因顶层`Network error communicating with endpoint`数据外对象被现行typed parser归为terminal而提前结束；固定结论为`FAIL + INCOMPLETE_8H`。辅助`probe-tee-exit.txt`的已披露事后污染按E-A原样保留，未受污染的核心日志、frame/script哈希和运行计数继续由专项changelog记录；Attempt2使用新目录。
+- 用户批准方案A：正常typed parse失败后，只把顶层object、精确network-error message且无`topic/type/timestamp/payload`的对象以crate-private typed marker映射到既有recoverable connection exit。它不写row、不计fresh、不直接改变业务freshness/recovery episode或持久化；transport state/generation按既有自然重连变化，其他未匹配service message及typed/parser/schema错误仍sticky terminal。
+- 方案A只使用既有vendor allowlist中的`rtds/subscription.rs`和`ws/connection.rs`，配一个正负合并runtime loopback；不修改本文阶段0--9历史结果，不新增collector parser、公共API、第五个vendor路径、第二owner/socket、service-message矩阵、资源计数或100-cycle。authority与Rust分离发布后才从新clean HEAD执行Attempt2。

@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_PROBE_PENDING`。该阶段1闭合状态仅在承载本记录的文档commit成功push且三方ref一致后生效。用户已于 2026-07-26 冻结第六节完整行为参数，并批准本需求、wrapper-first SDK 路线、精确 authority 修改矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe：`steady=300s`、`first-fresh=60s/后到 monotonic anchor`、首次 fresh 前禁用 cold-start watchdog，后续完整换连接前使用 `1s × 2 ±20%`、单次最长 `300s`、fresh 后重置且总尝试次数不限的 outer backoff。阶段0已完成参数/authority同步、独立审查及commit `0a2153e76dd9824b675a54cd93cc7f92a08e300f`发布；阶段1已完成实现、收窄验证、三路独立终审及`ef200a6e89eaaee9f19ff49a00232b5004825ce7`/`a29486babe2682481549cfc0b95b010784d653f0`分离发布。当前代码只有 training 拥有真实 RTDS adapter。future paper/live 真实 RTDS adapter 一旦另项接入，必须继承同一恢复合同，不得重新冻结另一套语义。production release、部署、远端操作和数据清理仍不在本需求范围。
+> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_AUTHORITY_SYNC_CLOSED_IMPLEMENTATION_PENDING`。其中`SOLUTION_A_AUTHORITY_SYNC_CLOSED`仅在承载本记录的纯文档commit成功push且本地HEAD、upstream与远端ref一致后生效。用户已于 2026-07-26 冻结第六节完整行为参数，并批准本需求、wrapper-first SDK 路线、精确 authority 修改矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe：`steady=300s`、`first-fresh=60s/后到 monotonic anchor`、首次 fresh 前禁用 cold-start watchdog，后续完整换连接前使用 `1s × 2 ±20%`、单次最长 `300s`、fresh 后重置且总尝试次数不限的 outer backoff。阶段0已完成参数/authority同步、独立审查及commit `0a2153e76dd9824b675a54cd93cc7f92a08e300f`发布；阶段1已完成实现、收窄验证、三路独立终审及`ef200a6e89eaaee9f19ff49a00232b5004825ce7`/`a29486babe2682481549cfc0b95b010784d653f0`分离发布。阶段2 Attempt1在clean HEAD `8db5b9bad683586c55fa49be80fa2aab73444646`上提前结束，永久结论为`FAIL + INCOMPLETE_8H`；用户随后批准第五节的方案A窄修复。当前代码只有 training 拥有真实 RTDS adapter。future paper/live 真实 RTDS adapter 一旦另项接入，必须继承同一恢复合同，不得重新冻结另一套语义。production release、部署、远端操作和数据清理仍不在本需求范围。
 
 ## 一、目标与已决定方向
 
@@ -43,6 +43,7 @@
 - 阶段0快照中，`RtdsSdkRuntime`的state/applied receiver仍是wrapper私有字段，source owner尚未收到完整观测。阶段1已把initial及后续generation的state/local-applied纳入唯一owner消费的同一`RtdsRuntimeEvent`流，并保留queued-message freshness fence；没有第二receiver、actor、socket或vendor patch。
 - 当前 coordinator 对 RTDS source task 使用现有 abort permit，并在随后等待 source task 结束。pinned Tokio 的取消语义保证 task 结束被观察到前会销毁 task-local 变量；这足以保持现有 collector stop 合同。本事项只为业务 replacement 增加可等待的 wrapper shutdown，不把 operator stop 扩张成新的 typed control channel、completion reply或 stop/create 线性化事务。
 - 当前 `require_text_pong=false`；`PING` 写成功既不是业务健康证据，也不是必须具备 PONG 的完整往返证据。本事项不改变该合同。
+- 阶段2 Attempt1运行`16851391ms`后收到127-byte顶层服务错误对象`message="Network error communicating with endpoint"`。正常RTDS typed parse将其作为parser error结束source，故probe在8小时之前失败。该对象没有`topic`、`type`、`timestamp`或`payload`，不能形成RTDS业务消息；它证明当前SDK缺少一个已获用户批准的服务端网络错误窄分类，不证明应放宽其他typed/parser/schema错误。
 
 ### 2.3 阶段0识别的 authority 冲突及已完成同步
 
@@ -103,6 +104,8 @@
 6. SDK 自然进入新的 `sdk_connection_generation` 后，不得恢复上一 generation 的 steady deadline。若 `ever_received_fresh=true`，待 `Connected + local applied` 后无条件进入首条 fresh 窗口；若仍为 `false`，保持 transport-only 等待直到首条合格 fresh 到达，不运行任何 business watchdog。
 7. 当前 generation 收到第一条合格实时更新后才进入 steady-state；之后只有新的合格实时更新重置 steady deadline。
 8. `require_text_pong=false` 保持不变；不得增加 PONG 依赖来证明业务健康。
+9. 方案A只在vendor SDK正常`RtdsMessage`解析失败后检查原始帧：只有顶层JSON object、`message`精确等于`Network error communicating with endpoint`，且不存在RTDS数据身份字段`topic`、`type`、`timestamp`、`payload`时，才生成crate-private可恢复远端网络marker。不得要求对象字段集合完全相等，也不得要求`connectionId`或`requestId`存在；marker只保留原parser source与既有bounded diagnostic，不携带raw frame或未获既有allowlist允许的额外字段值；不得向collector公开raw JSON parser、第二parser或新公共API。
+10. `ConnectionManager`只以typed downcast识别该marker，停止本连接heartbeat并返回既有`ConnectionExit::Recoverable`；旧socket关闭后沿用SDK现有自然重连/backoff并重放latest desired。该对象不得形成`ConnectionFault::Parser`、typed row、fresh、业务freshness/recovery episode变化或持久化；transport state/generation按既有自然重连变化。`Invalid request body`、其他未匹配service message、数组及形似目标但字段/typed内容错误的frame继续走既有sticky terminal parser路径。只有未typed的`message="Too Many Requests"`字符串不构成已确认rate-limit；真实HTTP/protocol/typed rate-limit继续按既有availability合同恢复。
 
 ### 5.2 静默触发、teardown 与新 runtime
 
@@ -138,6 +141,7 @@
 3. 一个连续两次 replacement、共三个 runtime epoch 的确定性 loopback：runtime 0 曾收到 fresh 后 stuck并完成第一次替换；runtime 1 在60秒窗口和当前outer delay后仍无fresh并完成第二次替换；runtime 2 收到 fresh并重置episode/backoff。该loopback证明生产分支实际完成两次顺序替换、每连接只有一次完整filtered subscription且没有`unsubscribe`；服务端只需最终观察到旧连接关闭且没有自然重连，不要求该观察事件早于新runtime创建，也不等待Close ACK。
 4. 历史自然transport 100-cycle测试和既有结果保留原样，不删除、不改写，但本事项不重新执行，也不把它们作为新business replacement的验收依据。本事项不新增100-cycle完整runtime replacement、完整multi-source fixture或资源计数框架。
 5. 开发和最终闭合只运行受影响的RTDS lib测试；另用`cargo test --workspace --locked --no-run`编译全部测试target，再运行workspace全target Clippy、fmt check和diff check。不得用默认workspace test重新执行历史100-cycle；若后续代码修复，只重跑直接受影响的测试或静态检查。
+6. 方案A只新增一个聚焦runtime loopback：第一条连接收到精确网络错误对象后进入既有自然重连，第二条连接收到一次完整filtered subscription并能消费fresh；同一测试随后发送“相同精确message但带一个RTDS数据身份字段”的对象并证明它不进入recoverable marker。该测试负责正负分类；既有自然重连once-replay、malformed typed-frame sticky/no-reconnect和两项bounded parser诊断测试继续复用，共同证明完整行为。`Invalid request body`沿用既有诊断测试，不新增service-message表格矩阵、重复等待、资源计数或100-cycle。
 
 ### 5.6 本地香港 VPN 8 小时只读 probe
 
@@ -145,8 +149,10 @@
 2. probe 不启动 `ManifestOwner`、Parquet/canonical writer，不传入或打开 canonical dataset root，不接触钱包、paper/live、远端服务或第二 RTDS owner。隔离由实际传参和进程启动路径保证，不要求 canonical root mtime/FD attestation。
 3. 记录 clean `HEAD`、执行命令、冻结参数、开始/结束UTC、进程内monotonic elapsed、退出状态、合格fresh数量、最大相邻fresh间隔、runtime错误数、自然重连数和business replacement数。只有真实发生replacement时，才根据已有replacement start/runtime created日志和fresh row如实报告可直接证明的事件顺序；不为probe补建四段专用计时状态或推导不存在的恢复分布。
 4. 开始和结束各记录一次不含凭据的公网出口与香港区域事实。该边界样本只支持“从香港线路开始/结束”的表述，不冒充8小时逐秒路由证明。
-5. 进程提前退出、crash或monotonic elapsed不足8小时表示probe未完成；开始或结束确认不在香港时不得标记为香港线路。观察到协议、顺序或恢复错误时直接记FAIL，不把已有证据作废后以重跑掩盖。
+5. 进程提前退出、crash或monotonic elapsed不足8小时表示probe未完成；开始或结束确认不在香港时不得标记为香港线路。方案A精确对象被成功分类并完成既有自然重连属于预期transport恢复，不单独记FAIL；marker分类失败、旧连接未收敛、未自然重连、desired replay错误或其他协议/parser/顺序/恢复错误直接记FAIL。不把已有证据作废后以重跑掩盖。
 6. 报告可将最长静默与历史 `6075.343s` 作跨环境数量级参考，但不得冒充香港本地与 AWS 爱尔兰的同环境因果对照。若没有可比真实事件，只能结论为“8 小时窗口稳定，真实事件效果未验证”。
+7. Attempt1证据目录为`target/rtds-stage2-hk-probe-20260726T113120Z`：起止香港边界均成立，进程内运行`16851391ms`，fresh `16127`、最大相邻fresh间隔`8521ms`、自然重连`2`、business replacement `0`、runtime error `1`，test exit `101`。2026-07-27一次已披露的本地`xxd`误操作事后覆盖了辅助文件`probe-tee-exit.txt`；按用户批准的E-A保持污染文件原样且不再写入，以未变的`wrapper-result.json`及覆盖前独立读取证明tee exit为`0`。该单文件污染不改变`STAGE2_ATTEMPT1_FAIL_INCOMPLETE_8H`，但不得再声称整个目录逐文件保持运行结束时原样。
+8. Attempt2只能在方案A完成authority同步、实现、聚焦验证、独立审查、独立Rust commit/push及三方ref核对后，从新的clean HEAD和新的artifact目录启动。最终报告必须并列保留Attempt1失败和Attempt2实际结果；Attempt2通过也不把Attempt1改写为成功。
 
 ## 六、用户已冻结的高影响参数
 
@@ -178,7 +184,9 @@
 11. 香港 VPN probe 使用同模块 ignored test harness、临时 root、纯内存 active `RawDayGate` 和持续 drain 的内存 sink；以退出状态和进程内monotonic elapsed证明连续运行8小时，起止各记录一次香港出口边界。没有可比真实故障时不声称效果已验证。
 12. 共同合同明确区分“适用角色”和“当前实现”：training 在本事项实现并完成全部聚焦测试与既有回归；paper/live 当前仍为 heartbeat-only，future 真实 RTDS adapter 由独立三件套实施、测试、验收和部署，但其恢复语义不得重新冻结。CLOB、Gamma、Binance 保持不变。
 13. 用户的持续执行授权覆盖本地authority同步、Rust/build/test/review/commit/push及阶段2本地香港VPN连续8小时只读公开网络probe，并按阶段顺序继续；capability失败、SDK缺口或新上下文/事实冲突必须停止。production release、部署、远端操作和数据清理保持独立边界。
+14. 方案A的精确网络错误对象只触发SDK既有recoverable connection exit；它不进入collector数据、fresh、业务freshness/recovery episode或持久化路径，transport state/generation按既有自然重连变化。其余未匹配service message和目标typed/parser/schema错误继续sticky terminal；新增loopback与既有once/sticky/diagnostic测试共同证明正负边界。
+15. Attempt1以未受污染的核心日志、wrapper结果、已记录哈希、test exit和不足8小时事实永久记为失败；`probe-tee-exit.txt`的事后污染按E-A原样保留并披露。Attempt2使用新clean HEAD和新artifact目录，不再写入Attempt1目录，最终阶段报告明确区分两次运行。
 
 ## 八、当前授权边界
 
-完整参数、本需求、wrapper-first SDK路线、authority精确修改矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe均已获用户批准。两份当前authority同步、阶段0发布及阶段1实现/验证/终审/发布已经闭合；本闭合文档生效后的下一游标为阶段2，无需重复申请普通实现授权。新的文档/代码/事实冲突仍必须停止；production release、部署、远端服务操作和数据清理不在当前授权边界。
+完整参数、本需求、wrapper-first SDK路线、authority精确修改矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe均已获用户批准。两份当前authority同步、阶段0发布及阶段1实现/验证/终审/发布已经闭合；Attempt1核心证据及辅助exit文件污染事实已按E-A永久记录，结论为`FAIL + INCOMPLETE_8H`。用户已批准方案A及修复后一次新的Attempt2；本纯文档commit成功push且三方ref一致后的下一游标为方案A最小Rust实现、聚焦验证、独立审查和独立commit/push，完成后才启动Attempt2。无需重复申请普通实现授权。新的文档/代码/事实冲突仍必须停止；production release、部署、远端服务操作和数据清理不在当前授权边界。

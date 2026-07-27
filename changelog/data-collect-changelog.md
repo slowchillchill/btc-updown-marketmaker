@@ -709,3 +709,9 @@
 - runtime、测试和authority三路独立终审最终均为PASS，Critical/Important/Minor均为0；RTDS精确测试、workspace测试target编译、Clippy、fmt和diff check全部通过。
 - 文档验收commit `ef200a6e89eaaee9f19ff49a00232b5004825ce7`与Rust实现commit `a29486babe2682481549cfc0b95b010784d653f0`已分离push，且本地HEAD、upstream与远端ref一致。
 - 承载本记录的闭合文档commit成功push且三方ref一致后，阶段1状态更新为`STAGE1_CLOSED_STAGE2_PROBE_PENDING`。下一游标仅为本地香港VPN连续8小时只读RTDS probe；paper/live、其他source、production、部署和远端边界不变。
+
+## 2026-07-27：RTDS阶段2 Attempt1失败与方案A
+
+- 香港Attempt1从clean HEAD `8db5b9bad683586c55fa49be80fa2aab73444646`运行`16851391ms`，fresh `16127`、最大相邻间隔`8521ms`、自然重连`2`、business replacement `0`、runtime error `1`，test exit `101`。精确network-error服务对象触发terminal parser错误，故结论永久为`FAIL + INCOMPLETE_8H`。辅助`probe-tee-exit.txt`的已披露事后污染按E-A原样保留；未受污染核心证据仍有效，Attempt2使用新目录。
+- 用户批准方案A：只在正常typed parse失败后，将顶层object、精确`Network error communicating with endpoint`且无`topic/type/timestamp/payload`的数据外对象通过crate-private typed marker交给既有自然重连；其他service message及typed/parser/schema错误保持terminal。
+- 当前单一游标仍是RTDS专项：先分离发布authority，再完成两条既有vendor路径的最小修复、一个正负合并runtime测试、独立审查和分离发布，最后从新clean HEAD、新artifact目录执行Attempt2。CLOB/Gamma/Binance、paper/live当前实现、production、部署、远端和数据边界均不变；不新增100-cycle或资源矩阵。

@@ -15,7 +15,7 @@
 > `live_runtime::retry_delay`。真实source-local supervisor与本文长期恢复合同保持
 > 不变；不重开已闭合阶段，也不授权production、远端、部署或数据操作。
 >
-> 2026-07-26 RTDS业务静默窄authority supersede：本计划阶段0--9及其当时“RTDS业务静默不控制网络”结果保持历史事实；当前后继实现只以`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`为执行游标。当前代码只有training拥有真实RTDS adapter；专项阶段1已在training完成同一owner内break-before-make完整runtime replacement的实现、收窄验证、三路独立终审及分离commit/push。future paper/live真实RTDS adapter由独立事项实现但必须继承同一合同。不得修改CLOB、Gamma、Binance，不得恢复one-shot `request_reconnect`、第二owner/socket或并行恢复loop。既有自然Close 100-cycle只保留为本计划历史证据，不删除；后继专项在最终简化裁决后的收窄门不再执行，也不以它验收。新路径改用wrapper closure、生产源码顺序和连续两次replacement的三个runtime聚焦测试，不新增100-cycle、test-only lifecycle hook或资源矩阵。
+> 2026-07-27 RTDS窄authority supersede：本计划阶段0--9及其当时“RTDS业务静默不控制网络”与parser验收结果保持历史事实；当前后继实现只以`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`为执行游标。专项阶段1已在training完成同一owner内break-before-make完整runtime replacement的实现、收窄验证、三路独立终审及分离commit/push；阶段2 Attempt1固定为`FAIL + INCOMPLETE_8H`，当前依次执行方案A authority、最小vendor修复与新clean HEAD Attempt2。future paper/live真实RTDS adapter由独立事项实现但必须继承同一合同。不得修改CLOB、Gamma、Binance，不得恢复one-shot `request_reconnect`、第二owner/socket或并行恢复loop。既有自然Close 100-cycle只保留为本计划历史证据，不删除；后继专项不再执行，也不以它验收。方案A只以一个正负合并runtime loopback复用现有parser回归，不新增service-message矩阵、100-cycle、test-only lifecycle hook或资源矩阵。
 
 ## 一、成功标准与实施原则
 

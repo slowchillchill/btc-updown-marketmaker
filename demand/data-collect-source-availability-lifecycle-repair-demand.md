@@ -23,7 +23,7 @@
 > 验收的source availability、heartbeat、SDK-first、manifest或完整性边界，也不授权
 > production、远端、部署或数据操作。
 >
-> 2026-07-26 RTDS业务静默窄authority supersede：用户批准`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`。本文“业务静默不控制网络”继续适用于CLOB、Gamma、Binance及RTDS首次fresh之前；唯一例外是RTDS source task曾收到合格fresh后，按`300s steady + 60s后到monotonic first-fresh + cold-start disabled + 1s × 2 ±20%/300s cap/unlimited`共同合同，由同一owner串行break-before-make替换整个runtime。它不恢复同socketrefresh、one-shot `request_reconnect`、generation预算、第二owner/socket、gap/lag/告警或进程退出。当前代码只有training拥有真实RTDS adapter；阶段1已在training完成实现、收窄验证、三路独立终审及分离commit/push。future paper/live真实RTDS adapter由独立事项实施，但必须继承同一恢复合同。其他source不变。
+> 2026-07-27 RTDS窄authority supersede：用户批准`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`及阶段2方案A。本文“业务静默不控制网络”继续适用于CLOB、Gamma、Binance及RTDS首次fresh之前；唯一业务静默例外是RTDS source task曾收到合格fresh后，按`300s steady + 60s后到monotonic first-fresh + cold-start disabled + 1s × 2 ±20%/300s cap/unlimited`共同合同，由同一owner串行break-before-make替换整个runtime。它不恢复同socket refresh、one-shot `request_reconnect`、generation预算、第二owner/socket、gap/lag/告警或进程退出。Attempt1因精确network-error服务对象被归为terminal parser error而固定为`FAIL + INCOMPLETE_8H`；方案A只把该数据外对象映射到SDK既有自然重连，其他parser/typed/schema错误继续terminal。当前代码只有training拥有真实RTDS adapter；future paper/live真实RTDS adapter由独立事项实施，但必须继承同一恢复合同。其他source不变。
 
 ## 一、目标
 
@@ -191,7 +191,7 @@ vendor删除与离线runtime矩阵。相对官方0.7.0的源码差异仍恰好�
 4. 生产RTDS配置固定为`heartbeat_interval=5s`、`require_text_pong=false`和有界max backoff；共享配置结构中的`heartbeat_timeout=15s`只保留SDK默认兼容值，在该模式下不得启动PONG等待或参与连接判死。首条大写文本`PING`沿用Tokio interval首tick在连接建立后立即发送；每次必须由唯一connection owner完成WebSocket write后确认，确认前不得创建第二个PING，确认后重置完整5秒周期，写延迟不得触发catch-up burst。SDK transport owner 的总 reconnect attempts 必须为无限。启动不得以旧 20 秒 connected wait 或 3 秒 subscription-applied wait 作为 source 存活门。
 5. 每个真实新generation及每个新runtime的初始connection都由唯一actor创建空subscription manager，并只应用一次最新完整filtered desired；不发送丢失`btc/usd` filter的unsubscribe，不复用旧generation applied acknowledgement。
 6. stale payload继续按typed freshness事实落盘；stale本身不增加lag/gap、不直接触发或重置business watchdog。只有SDK `Lagged(n)`等确定性本地丢失进入完整性处理。
-7. RTDS没有PONG、迟到PONG或主动收到PONG均不得改变PING cadence、关闭socket、切换generation或触发replay；真实WebSocket Close/EOF/read failure、subscription/outbound write failure或PING write failure继续作为recoverable transport exit，parser sticky fault继续terminal，最后一个manager sender关闭继续normal teardown且不重连。
+7. RTDS没有PONG、迟到PONG或主动收到PONG均不得改变PING cadence、关闭socket、切换generation或触发replay；真实WebSocket Close/EOF/read failure、subscription/outbound write failure或PING write failure继续作为recoverable transport exit。正常typed parse失败后，只有顶层object、精确`message="Network error communicating with endpoint"`且无`topic/type/timestamp/payload`的数据外对象可由crate-private typed marker进入同一recoverable exit；它不写row、不计fresh、不直接改变业务freshness/recovery episode或持久化，transport state/generation按既有自然重连变化。`Invalid request body`、其他未匹配service message、array及目标typed/parser/schema错误继续sticky terminal；仅有未typed的`Too Many Requests`字符串不构成已确认rate-limit，真实HTTP/protocol/typed rate-limit继续按availability恢复。最后一个manager sender关闭继续normal teardown且不重连。
 
 ### 4.4 Polymarket CLOB market 与 Gamma metadata
 
@@ -274,11 +274,11 @@ vendor删除与离线runtime矩阵。相对官方0.7.0的源码差异仍恰好�
    - `third_party/polymarket_client_sdk_v2-0.7.0-p1/src/ws/config.rs`
    - `third_party/polymarket_client_sdk_v2-0.7.0-p1/src/clob/ws/types/response.rs`
    - `third_party/polymarket_client_sdk_v2-0.7.0-p1/src/rtds/subscription.rs`
-9. `CT-B`批准`Config::connect_timeout: Option<Duration>`且默认`None`；用户2026-07-19批准的`RTDS-PONG-A`另授权同一`config.rs`新增`Config::require_text_pong: bool`且默认`true`。除此之外，如果Polymarket实现还需要第五个vendor文件、其他新公共协议API、raw WebSocket、manual signing、第二SDK session或改变parser/fatal语义，必须立即停止并向用户提交缺口、影响和选项。
+9. `CT-B`批准`Config::connect_timeout: Option<Duration>`且默认`None`；用户2026-07-19批准的`RTDS-PONG-A`另授权同一`config.rs`新增`Config::require_text_pong: bool`且默认`true`。用户2026-07-27批准的方案A只允许在既有allowlist的`src/rtds/subscription.rs`和`src/ws/connection.rs`内实现第4.3.7项精确network-error分类，不增加公共API或第五个路径。除此之外，如果Polymarket实现还需要第五个vendor文件、其他新公共协议API、raw WebSocket、manual signing、第二SDK session或改变parser/fatal语义，必须立即停止并向用户提交缺口、影响和选项。
 
 ### 4.8 完整性与顶层协调边界
 
-1. 下列事实继续保留为 confirmed gap、quarantine 或 fail-closed 信号：SDK `Lagged(n)`、bounded queue timeout/drop、Binance depth confirmed update-id hole、payload conflict、parser实现或本地typed-schema失败、dedupe conflict、writer/manifest/atomic publish、磁盘/资源硬边界、sequence/generation溢出、evidence编码/ownership失败和内部不变量。depth confirmed-hole update必须先按第4.6节保存raw not-applied evidence，再使旧continuity state失效并resnapshot；保存raw不把hole降级为普通availability。aggTrade ID数值前跳以及第4.5节已完整形成并接纳的普通外部aggTrade `invalid_input`不在该terminal集合中；前者只保留原始`a`观测，后者作为invalid source evidence继续运行，两者都不得被误记为有效缺失条数。
+1. 下列事实继续保留为 confirmed gap、quarantine 或 fail-closed 信号：SDK `Lagged(n)`、bounded queue timeout/drop、Binance depth confirmed update-id hole、payload conflict、parser实现或本地typed-schema失败、dedupe conflict、writer/manifest/atomic publish、磁盘/资源硬边界、sequence/generation溢出、evidence编码/ownership失败和内部不变量。第4.3.7项精确数据外RTDS network-error对象是已批准的transport分类，不属于parser实现或typed-schema失败，也不得泛化。depth confirmed-hole update必须先按第4.6节保存raw not-applied evidence，再使旧continuity state失效并resnapshot；保存raw不把hole降级为普通availability。aggTrade ID数值前跳以及第4.5节已完整形成并接纳的普通外部aggTrade `invalid_input`不在该terminal集合中；前者只保留原始`a`观测，后者作为invalid source evidence继续运行，两者都不得被误记为有效缺失条数。
 2. 顶层“任一mandatory producer/writer/ingress在运行deadline前意外结束即失败”保护继续存在；测试必须证明availability及已保存的普通aggTrade invalid路径不会返回，而本地完整性注入仍会关闭共同gate并返回正确terminal error。
 3. 不得把source/writer/ingress panic、join error、control channel意外关闭或writer失败重新分类为普通external availability；能由wrapper在退出前可靠观察并持久化的terminal按第4.2节写known end，其他异常只保留unknown tail。
 4. confirmed gap 可以保留模型可见 missingness，但不得伪造行情、自动backfill无官方依据的数据或用后续恢复抹除缺失区间；aggTrade实时路径明确不做REST backfill。

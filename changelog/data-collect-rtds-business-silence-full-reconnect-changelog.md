@@ -6,7 +6,7 @@
 >
 > 对应计划：`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`
 >
-> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_PROBE_PENDING`。该阶段1闭合状态仅在承载本记录的文档commit成功push且三方ref一致后生效。阶段0已完成参数/authority同步、独立审查及commit `0a2153e76dd9824b675a54cd93cc7f92a08e300f`发布；阶段1已完成实现、收窄验证、三路独立终审及`ef200a6e89eaaee9f19ff49a00232b5004825ce7`/`a29486babe2682481549cfc0b95b010784d653f0`分离发布。闭合文档生效后的下一游标为阶段2。
+> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_AUTHORITY_SYNC_CLOSED_IMPLEMENTATION_PENDING`。其中`SOLUTION_A_AUTHORITY_SYNC_CLOSED`仅在承载本记录的纯文档commit成功push且本地HEAD、upstream与远端ref一致后生效。阶段0已完成参数/authority同步、独立审查及commit `0a2153e76dd9824b675a54cd93cc7f92a08e300f`发布；阶段1已完成实现、收窄验证、三路独立终审及`ef200a6e89eaaee9f19ff49a00232b5004825ce7`/`a29486babe2682481549cfc0b95b010784d653f0`分离发布。阶段2 Attempt1已永久记录为`FAIL + INCOMPLETE_8H`，用户已批准方案A及修复后新Attempt2。
 
 ## 2026-07-21：用户选择彻底换连接方向
 
@@ -201,3 +201,23 @@
 - 最终门通过：RTDS lib精确测试20项通过、331项被filter；全部workspace测试target编译完成；workspace全target Clippy `-D warnings`、fmt check和diff check均退出0。最终简化裁决后没有再次运行历史100-cycle。
 - 为遵守authority与Rust不得混入同一commit，阶段1文档验收先以commit `ef200a6e89eaaee9f19ff49a00232b5004825ce7`发布，Rust实现再以commit `a29486babe2682481549cfc0b95b010784d653f0`发布；两次push后本地HEAD、upstream与远端ref均一致。
 - 承载本记录的闭合文档commit成功push且三方ref一致后，阶段1状态升级为`STAGE1_CLOSED_STAGE2_PROBE_PENDING`。阶段2只执行已批准的本地香港VPN连续8小时只读probe；production release、部署、远端操作和数据清理仍不在范围内。
+
+## 2026-07-26：阶段2 Attempt1提前失败并永久保留
+
+- Attempt1 artifact固定为`target/rtds-stage2-hk-probe-20260726T113120Z`；启动时clean HEAD与upstream均为`8db5b9bad683586c55fa49be80fa2aab73444646`，命令由该目录的`run-probe.sh`以`cargo test -p data-collect --locked --lib live_runtime::tests::rtds_source::rtds_hong_kong_vpn_eight_hour_probe -- --exact --ignored --nocapture --test-threads=1`执行。冻结参数仍为`300s + 60s/后到monotonic anchor + cold-start disabled + outer 1s × 2 ±20%/300s cap/unlimited`。
+- probe自身开始UTC为`2026-07-26T11:36:01.101Z`，结束UTC为`2026-07-26T16:16:52.493Z`；香港route边界样本分别为`2026-07-26T11:36:00.300483874Z`与`2026-07-26T16:16:52.508616757Z`，两次均为Hong Kong/HK，二者不是同一字段。probe进程内运行`16851391ms`（`4h40m51.391s`），fresh `16127`、最大相邻fresh间隔`8521ms`、自然重连`2`、business replacement `0`、runtime error `1`、row error为null；test exit `101`、tee exit `0`、结束route采样exit `0`。
+- terminal输入为127-byte顶层object，`message="Network error communicating with endpoint"`且不含`topic/type/timestamp/payload`；frame SHA-256为`5761fe3e33411429da70476c354075a9fff6816157636d173138eb0e362f6b69`。`probe.log` SHA-256为`409c82c936aab3ea0b489f67aed1ffa56b5f3da443371ae9a5d8d9550227fc6d`，`run-probe.sh` SHA-256为`5dc3f428e513414c62bc2ba704524e021d95e2bcd7fec31cfc0f3ea2577a90cb`。
+- 因elapsed不足8小时且出现协议分类错误，Attempt1终态永久固定为`STAGE2_ATTEMPT1_FAIL_INCOMPLETE_8H`。未发生business replacement，因此它没有验证真实业务静默replacement效果；后续运行不得改写该结论。
+
+## 2026-07-27：Attempt1辅助exit文件事后污染按E-A保留
+
+- 主代理误执行`xxd -g 1 probe-test-exit.txt probe-tee-exit.txt`；`xxd`把第二个路径解释为输出文件，将运行结束时2-byte的`0\n`覆盖为64-byte十六进制文本。覆盖发生于`2026-07-27T11:13:54.650992513+09:00`，污染后SHA-256为`0e8b1f557d3d10e28d15f8626e890ea4c9015a048cc4e75099da78fa0b52a8cb`。
+- 覆盖前本轮目录清单已确认该文件为2 bytes，独立审查曾读取原值`0`；未变的`wrapper-result.json`仍记录`probe_tee_exit=0`，其SHA-256为`b03aa139a791446bc66e9c90872d1bd36116bd09ad87d567b08138005836d87d`。`probe.log`、`run-probe.sh`及frame既有哈希继续匹配，因此Attempt1的`FAIL + INCOMPLETE_8H`核心结论不变。
+- 用户批准E-A：保持污染文件现状，不静默恢复或重建，不再写入Attempt1目录；专项三件套及引用该证据的current changelog明确披露该单文件污染，不再声称整个目录逐文件保持运行结束时原样。
+
+## 2026-07-27：用户批准方案A及修复后Attempt2
+
+- 方案A只修改既有vendor allowlist内的`src/rtds/subscription.rs`与`src/ws/connection.rs`：正常typed parse失败后，仅将顶层object、精确`Network error communicating with endpoint`且无`topic/type/timestamp/payload`的数据外对象标为crate-private recoverable remote-network marker；不要求精确字段集合，也不要求`connectionId/requestId`存在。
+- connection owner以typed downcast把该marker映射到既有`ConnectionExit::Recoverable`，关闭旧socket后沿用自然reconnect/backoff与latest desired replay。该对象不写row、不计fresh、不改变业务freshness/recovery episode或持久化；transport state/generation按既有自然重连变化。其他未匹配service message、array及目标typed/parser/schema错误继续terminal；仅有未typed的`Too Many Requests`字符串不等于已确认rate-limit，真实HTTP/protocol/typed rate-limit继续按availability恢复。
+- 最小验证只增加一个正负合并runtime loopback：正例为精确对象，负例为相同message附带一个RTDS数据身份字段；既有once-replay、malformed sticky/no-reconnect、`Invalid request body`与bounded diagnostic测试继续复用。不增加collector raw parser、公共API、第五个vendor生产路径、第二owner/socket、新状态机/counter/schema、service-message表格矩阵、重复等待、资源计数或100-cycle。
+- 当前状态为`STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_AUTHORITY_SYNC_PENDING`。纯文档authority完成独立审查、commit/push及三方ref核对后，才进入独立Rust实现/验证/审查/commit/push；全部闭合后从新clean HEAD、新artifact目录运行Attempt2。最终报告必须并列保留两次attempt。
