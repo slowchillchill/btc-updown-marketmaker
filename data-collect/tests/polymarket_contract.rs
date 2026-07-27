@@ -4,6 +4,7 @@ use data_collect::event::{
 };
 use data_collect::polymarket_market_metadata_layout::{
     ResolutionIntegrityErrorClass, ResolutionPollResult, TerminalPredicateFailureReason,
+    parse_polymarket_gamma_closed_time_utc_ms,
 };
 use data_collect::source_format::{
     MarketLifecycleState, PolymarketMarketMetadataRaw, PolymarketMarketRaw,
@@ -131,6 +132,14 @@ fn gamma_terminal_attempt() -> GammaTerminalAttemptContext {
 }
 
 type GammaFailureMutation = fn(&mut Value, &mut GammaTerminalFixedIdentity);
+
+#[test]
+fn gamma_closed_time_accepts_utc_hour_offset_without_minutes() {
+    assert_eq!(
+        parse_polymarket_gamma_closed_time_utc_ms("2026-07-27 05:25:52+00"),
+        Some(1_785_129_952_000)
+    );
+}
 
 #[test]
 fn gamma_terminal_predicate_contract() {

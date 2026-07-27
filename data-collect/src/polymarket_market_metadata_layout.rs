@@ -2716,8 +2716,13 @@ fn non_empty(value: Option<&str>) -> bool {
 }
 
 pub fn parse_polymarket_gamma_closed_time_utc_ms(raw: &str) -> Option<i64> {
-    DateTime::parse_from_rfc3339(raw.trim())
+    let raw = raw.trim();
+    DateTime::parse_from_rfc3339(raw)
         .ok()
+        .or_else(|| {
+            let prefix = raw.strip_suffix("+00")?;
+            DateTime::parse_from_rfc3339(&format!("{prefix}+00:00")).ok()
+        })
         .map(|closed_time| closed_time.timestamp_millis())
 }
 
