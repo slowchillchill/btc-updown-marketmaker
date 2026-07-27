@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FULL_COLLECTOR_PENDING`。该状态仅在承载本记录的纯文档closure commit成功push且本地HEAD、upstream与远端ref一致后生效。RTDS network-error方案A的authority commit `366fed7d19ff9ce2f855f362c81de5641b63f9c4`与Rust commit `415470eda0b2d629c19c2609e6610a253703d684`已分离发布；Gamma `closedTime`方案A的authority commit `3a367386cb1768867e20a8190d2f13617b65fe67`与Rust commit `e086017fc6d376b739e7a5146dacc18f674f1407`也已分离发布，均完成三方ref核对。阶段0和阶段1均已完成；Attempt1永久为`FAIL + INCOMPLETE_8H`，Attempt2永久为`USER_TERMINATED + INCOMPLETE_8H`，Attempt3因Gamma误判永久为`FAIL + INCOMPLETE_8H`。Gamma修复的精确/完整合同测试、check、Clippy、fmt、diff-check及三路终审均已通过；唯一下一游标为从本closure后的新clean/pushed HEAD、新artifact和空dataset root执行完整六源8小时Attempt4。该本地部分日前向验证不等于production binary激活、完整UTC日前向长跑或canonical cutover。当前代码只有training拥有真实RTDS adapter；future paper/live真实RTDS adapter须由独立事项接入并继承同一恢复合同。production release、部署、远端操作和数据清理仍不在本需求范围。
+> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FAIL_INCOMPLETE_8H_P_B1E_AUTHORITY_SYNC_CLOSED_IMPLEMENTATION_PENDING`。其中`P-B1E`是本次获批的“nullable Decimal精确空串兼容”唯一标识，用于避免与Attempt1辅助文件污染处置的历史`E-A`重名；该状态仅在承载本记录的纯文档authority commit成功push且本地HEAD、upstream与远端ref一致后生效。RTDS network-error方案A的authority commit `366fed7d19ff9ce2f855f362c81de5641b63f9c4`与Rust commit `415470eda0b2d629c19c2609e6610a253703d684`已分离发布；Gamma `closedTime`方案A的authority commit `3a367386cb1768867e20a8190d2f13617b65fe67`与Rust commit `e086017fc6d376b739e7a5146dacc18f674f1407`也已分离发布，均完成三方ref核对。阶段0和阶段1均已完成；Attempt1、Attempt3、Attempt4永久为`FAIL + INCOMPLETE_8H`，Attempt2永久为`USER_TERMINATED + INCOMPLETE_8H`。Attempt4在`8192.100s`因`polymarket_market`某个Decimal字段收到精确空串而失败；当前唯一下一步是先完成P-B1E最小实现、定向验证、三路独立审查及独立Rust commit/push，再从新clean/pushed HEAD、新artifact和空dataset root执行完整六源8小时Attempt5。该本地部分日前向验证不等于production binary激活、完整UTC日前向长跑或canonical cutover。当前代码只有training拥有真实RTDS adapter；future paper/live真实RTDS adapter须由独立事项接入并继承同一恢复合同。production release、部署、远端操作和数据清理仍不在本需求范围。
 
 ## 一、目标与已决定方向
 
@@ -88,7 +88,9 @@
 - raw WebSocket、manual protocol、manual signing 或绕过官方 Polymarket Rust SDK；
 - 新的统计故障检测框架、通用状态机框架、配置系统、数据路径 epoch validator/fence 或 test-only 资源计数基础设施；
 - 回补、伪造、删除静默区间数据，或修改 typed row、manifest、ObservationContract、模型与交易语义；
-- CLOB、Gamma、Binance 的行为修改；
+- 本RTDS事项内的CLOB、Gamma、Binance行为修改；Attempt4暴露的P-B1E由
+  `DC-REPAIR-20260724-SDK070-TYPED-LIVE-RUNTIME`三件套单点定义和实现，本事项只把
+  其闭合作为Attempt5前置，不建立第二份parser authority；
 - 当前 paper/live RTDS adapter、external-event handoff producer、模型接线、长跑与部署实现；
 - production release 构建、上传、部署、systemd、远端服务操作或生产数据清理。
 
@@ -159,6 +161,32 @@
 12. Attempt3错误退出仍协调finalize了11个manifest登记Parquet，六源文件数/行数分别为`binance_aggtrade 2/20259`、`binance_depth_snapshot 1/1`、`binance_depth_update 2/38521`、`polymarket_market 2/1311849`、`polymarket_market_metadata 2/58`、`polymarket_rtds_chainlink_btc_usd 2/3365`。逐文件bytes、SHA-256、PyArrow schema/metadata/rows与manifest一致，无额外或临时文件；同日manifest正确为`open + ended_known`。这些只证明约64分钟内六源正式落盘和错误退出后的finalize，不满足8小时验收。
 13. Attempt3 RTDS在部分窗口内记录一次`steady_silence` business replacement及对应一次runtime-created，runtime epoch从0到1；自然reconnect为0，3365行均为fresh，最大相邻接收间隔`304.875s`。replacement日志没有时间戳，故不能计算teardown、runtime创建或恢复耗时，也不能把部分证据写成完整8小时replacement效果验收。
 14. Gamma `closedTime`方案A的唯一语义authority为`demand/data-collect-polymarket-resolution-followup-demand.md`：现有RFC3339第一路径失败且raw精确以`+00`结尾时，只把该后缀规范化为`+00:00`并再次交给同一parser；真实触发值为`2026-07-27 05:25:52+00`，其他完整性错误继续fail closed。修复完成目标测试、三路审查、独立Rust commit/push及三方ref核对后，Attempt4必须从新clean/pushed HEAD设置新`DATA_COLLECT_GIT_COMMIT`重建release binary，使用新artifact和空dataset root完整重跑同一六源28800秒；不得续写Attempt3或拼接剩余时间。
+15. Attempt4 artifact固定为
+`target/rtds-stage2-attempt4-full-training-20260727T071429Z`。它从clean/pushed
+`a37cf1181597296b9b2d87f8bc2c93700bda8f48`构建正式release binary，SHA-256为
+`b451b2b53aace314e28503ff4f983c20a7468d8175abfd5c7450d8fa7942cc0a`；起止
+route均为`8.210.176.1 / HK / HKG`。wrapper从
+`2026-07-27T07:20:35.073560320Z`运行至
+`2026-07-27T09:37:07.171376781Z`，monotonic elapsed为`8192.100s`，collector
+exit为1，故固定为`FAIL + INCOMPLETE_8H`。
+16. Attempt4首因是`polymarket_market`某个Decimal字段收到精确字符串`""`后触发
+SDK parser fatal；manifest明确记录market source inner return。随后Binance depth和
+RTDS碰到已关闭的同日gate只是连锁后果。失败raw frame、event variant和字段path均未
+保存，所以不得把失败归因给F04、`price_change`或任一具体字段。
+17. Attempt4错误退出仍协调finalize了16个manifest登记Parquet，共`1,884,425`行、
+`115,390,221` bytes。六源文件数/行数为aggTrade `3/74380`、depth snapshot
+`1/1`、depth update `3/81751`、Polymarket market `3/1720377`、metadata `3/141`、
+RTDS `3/7775`；逐文件path/bytes/SHA/PyArrow rows与manifest一致，无额外或临时
+文件，manifest SHA-256为
+`ee43925d1ebe3f9b8d83555cd08a40e287832c049cda89f348ead95d7d2acab5`。这些只
+证明约2小时16分钟内六源正式落盘和错误退出后的finalize，不满足8小时验收。
+18. P-B1E的唯一语义authority为SDK070三件套：只对九个官方nullable Decimal把精确
+`""`解码为`None`；missing/null/官方合法非空DecimalString保持，nullable非空malformed及required
+`price_change.size=""`继续fatal。不增加raw recorder、第二parser、诊断框架、
+schema/counter、100-cycle或第五个vendor生产路径。P-B1E最小实现、定向验证、三路
+审查、独立Rust commit/push和三方ref核对闭合后，Attempt5必须从新clean/pushed HEAD
+设置新`DATA_COLLECT_GIT_COMMIT`，用新artifact和空dataset root完整重跑同一六源
+28800秒；不得续写Attempt4或自动扩大空串容忍范围。
 
 ## 六、用户已冻结的高影响参数
 
@@ -183,16 +211,17 @@
 4. 每条 wire connection 恰有一次 `btc/usd` filtered subscription、无 `unsubscribe`；local applied 不被称作 wire completion 或 ACK。
 5. recovery episode 可由 steady threshold 或已启用的首条 fresh 窗口首次到期启动；任一后续合格窗口到期都进入同一 episode 的下一轮 outer backoff而不重启 episode。同一 episode 任意时刻最多一个在途动作，fresh 结束 episode 并取消/重置退避。
 6. `rtds_runtime_epoch` 与 `sdk_connection_generation` 含义分离；现有 `reconnect_events` 语义不变，未新增 schema/counter/fence 框架。
-7. typed rows、分类、去重、timestamp/freshness、正式单writer与真实gap语义不回退；Attempt3及修复后的Attempt4均直接使用完整正式训练采集代码路径和各自隔离dataset root，没有补写、伪造、JSONL sidecar或第二数据路径。
+7. typed rows、分类、去重、timestamp/freshness、正式单writer与真实gap语义不回退；Attempt3、Attempt4及P-B1E后的Attempt5均直接使用完整正式训练采集代码路径和各自隔离dataset root，没有补写、伪造、JSONL sidecar或第二数据路径。
 8. cold start首次fresh前无business watchdog、首次fresh后跨runtime/generation保持`ever_received_fresh=true`、两种recovery-episode入口、transport取消候选、wrapper shutdown和现有transport/parser/shutdown回归通过。
 9. wrapper loopback证明`shutdown_and_wait(self)`返回时旧connection-loop state channel已关闭；生产源码明确await该调用后才创建新runtime；连续两次replacement、共三个runtime epoch的loopback证明该分支实际顺序执行两次、每连接一次filtered subscription、无`unsubscribe`，并在第三个runtime收到fresh后重置episode/backoff。不得为重复证明源码顺序新增test-only lifecycle hook；本事项不新增或重跑100-cycle，也不新增进程资源矩阵。
 10. 每次实际replacement只记录trigger kind、runtime epoch、SDK generation、attempt index及replacement start/runtime created事件；不增加四段专用计时状态、counter、schema或test seam，不虚构handshake/wire/ACK指标。
-11. Attempt3已按正确完整collector拓扑运行，但因非RTDS的Gamma格式误判在`3863.950s`退出1，固定为`FAIL + INCOMPLETE_8H`。修复后的香港线路Attempt4必须使用新clean/pushed HEAD重建的正式training binary、全部六个`LIVE_SOURCES`、正式Parquet writer与每日manifest，在全新隔离本地dataset root运行`28800`秒；退出0、六源非空finalized Parquet、manifest/file/PyArrow一致和无临时残留共同证明完整采集。起止各记录一次香港出口边界；没有可比真实故障时不声称replacement效果已验证。
-12. 共同合同明确区分“适用角色”和“当前实现”：training在本事项实现并完成全部聚焦测试与既有回归；paper/live当前仍为heartbeat-only，future真实RTDS adapter由独立三件套实施、测试、验收和部署，但其恢复语义不得重新冻结。CLOB与Binance行为不变；Gamma只允许resolution专项批准的精确`closedTime`序列化兼容，不改变identity、terminal predicate或fatal边界。
-13. 用户的持续执行授权覆盖本地authority同步、文档审查/commit/push、Gamma共享helper的最小Rust修复和定向验证，以及从新clean HEAD重建release binary后执行阶段2本地香港线路连续8小时Attempt4。不得新增格式矩阵、RTDS-only probe、100-cycle或资源矩阵。capability失败、SDK缺口或新上下文/事实冲突必须停止。production release、systemd、部署、远端操作、上传、migration和数据清理保持独立边界。
+11. Attempt3因非RTDS的Gamma格式误判在`3863.950s`退出1；修复后的Attempt4因Polymarket market Decimal空串parser fatal在`8192.100s`退出1，二者均固定为`FAIL + INCOMPLETE_8H`。P-B1E闭合后的香港线路Attempt5必须使用新clean/pushed HEAD重建的正式training binary、全部六个`LIVE_SOURCES`、正式Parquet writer与每日manifest，在全新隔离本地dataset root运行`28800`秒；退出0、六源非空finalized Parquet、manifest/file/PyArrow一致和无临时残留共同证明完整采集。起止各记录一次香港出口边界；没有可比真实故障时不声称replacement效果已验证。
+12. 共同合同明确区分“适用角色”和“当前实现”：training在本事项实现并完成全部聚焦测试与既有回归；paper/live当前仍为heartbeat-only，future真实RTDS adapter由独立三件套实施、测试、验收和部署，但其恢复语义不得重新冻结。除SDK070三件套单点实施的P-B1E typed decode规范化外，CLOB与Binance业务及恢复行为不变；Gamma只允许resolution专项批准的精确`closedTime`序列化兼容，不改变identity、terminal predicate或fatal边界。
+13. 用户的持续执行授权覆盖本地authority同步、文档审查/commit/push、P-B1E的最小vendor修复和定向验证，以及从新clean HEAD重建release binary后执行阶段2本地香港线路连续8小时Attempt5。不得新增格式矩阵、RTDS-only probe、100-cycle、资源矩阵或Decimal诊断框架。capability失败、SDK缺口或新上下文/事实冲突必须停止。production release、systemd、部署、远端操作、上传、migration和数据清理保持独立边界。
 14. 方案A的精确网络错误对象只触发SDK既有recoverable connection exit；它不进入collector数据、fresh、业务freshness/recovery episode或持久化路径，transport state/generation按既有自然重连变化。其余未匹配service message和目标typed/parser/schema错误继续sticky terminal；新增loopback与既有once/sticky/diagnostic测试共同证明正负边界。
-15. Attempt1以未受污染的核心日志、wrapper结果、已记录哈希、test exit和不足8小时事实永久记为失败；`probe-tee-exit.txt`的事后污染按E-A原样保留并披露。Attempt2以用户终止且无最终summary的事实永久记为`USER_TERMINATED + INCOMPLETE_8H`。Attempt3以完整collector的部分六源数据、Gamma错误和不足8小时事实永久记为`FAIL + INCOMPLETE_8H`。Attempt4使用修复后的新clean HEAD、新artifact和空dataset root；最终阶段报告明确区分四次运行及不同测试拓扑，不覆盖或续写前三次。
+15. Attempt1以未受污染的核心日志、wrapper结果、已记录哈希、test exit和不足8小时事实永久记为失败；`probe-tee-exit.txt`的事后污染按历史E-A原样保留并披露。Attempt2以用户终止且无最终summary的事实永久记为`USER_TERMINATED + INCOMPLETE_8H`。Attempt3以完整collector的部分六源数据、Gamma错误和不足8小时事实永久记为`FAIL + INCOMPLETE_8H`。Attempt4以完整collector的部分六源数据、Decimal空串parser fatal和不足8小时事实永久记为`FAIL + INCOMPLETE_8H`。Attempt5使用P-B1E闭合后的新clean HEAD、新artifact和空dataset root；最终阶段报告明确区分五次运行及不同测试拓扑，不覆盖或续写前四次。
+16. P-B1E只证明九个官方nullable字段的精确空串兼容边界，不得写成已经唯一定位或保证消除Attempt4首因。若Attempt5同一错误复发，按新证据停止；required Decimal、非空malformed及其他parser/typed/schema错误继续fail closed。
 
 ## 八、当前授权边界
 
-完整参数、本需求、wrapper-first SDK路线、authority精确修改矩阵及持续执行至阶段2本地香港线路连续8小时验证均已获用户批准。两份当前authority同步、阶段0发布及阶段1实现/验证/终审/发布已经闭合；Attempt1按E-A永久记录为`FAIL + INCOMPLETE_8H`，Attempt2按用户终止和缺失最终summary永久记录为`USER_TERMINATED + INCOMPLETE_8H`，Attempt3按完整collector提前遇到Gamma `closedTime`格式误判永久记录为`FAIL + INCOMPLETE_8H`。Gamma方案A已由`3a367386`/`e086017f`完成authority/Rust分离发布、定向验证、三路终审和三方ref核对；当前唯一游标为从承载本closure且新clean/pushed HEAD、新artifact和空dataset root执行完整六源8小时Attempt4。无需重复申请普通实现授权。新的文档/代码/事实冲突仍必须停止；production release、systemd、部署、远端服务操作、上传、migration和数据清理不在当前授权边界。
+完整参数、本需求、wrapper-first SDK路线、authority精确修改矩阵及持续执行至阶段2本地香港线路连续8小时验证均已获用户批准。两份当前authority同步、阶段0发布及阶段1实现/验证/终审/发布已经闭合；Attempt1按历史E-A永久记录为`FAIL + INCOMPLETE_8H`，Attempt2按用户终止和缺失最终summary永久记录为`USER_TERMINATED + INCOMPLETE_8H`，Attempt3按Gamma格式误判、Attempt4按Decimal空串parser fatal分别永久记录为`FAIL + INCOMPLETE_8H`。P-B1E authority由本次纯文档commit条件式闭合；当前唯一游标为完成其最小实现、定向验证、三路终审与独立Rust发布，随后从新clean/pushed HEAD、新artifact和空dataset root执行完整六源8小时Attempt5。无需重复申请普通实现授权。新的文档/代码/事实冲突仍必须停止；production release、systemd、部署、远端服务操作、上传、migration和数据清理不在当前授权边界。

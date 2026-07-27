@@ -6,7 +6,7 @@
 >
 > 对应计划：`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`
 >
-> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FULL_COLLECTOR_PENDING`。该状态仅在承载本记录的纯文档closure commit成功push且本地HEAD、upstream与远端ref一致后生效。RTDS network-error方案A的`366fed7d`/`415470e`与Gamma `closedTime`方案A的`3a367386`/`e086017f`均已分离发布并完成三方ref核对；Attempt1永久保持`FAIL + INCOMPLETE_8H`，Attempt2永久记录为`USER_TERMINATED + INCOMPLETE_8H`，Attempt3永久记录为`FAIL + INCOMPLETE_8H`。唯一下一游标为完整六源8小时Attempt4。
+> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FAIL_INCOMPLETE_8H_P_B1E_AUTHORITY_SYNC_CLOSED_IMPLEMENTATION_PENDING`。其中`P-B1E`是本次获批的“nullable Decimal精确空串兼容”唯一标识，用于避免与Attempt1辅助文件污染处置的历史`E-A`重名；该状态仅在承载本记录的纯文档authority commit成功push且本地HEAD、upstream与远端ref一致后生效。RTDS network-error方案A的`366fed7d`/`415470e`与Gamma `closedTime`方案A的`3a367386`/`e086017f`均已分离发布并完成三方ref核对；Attempt1、Attempt3、Attempt4永久保持`FAIL + INCOMPLETE_8H`，Attempt2永久记录为`USER_TERMINATED + INCOMPLETE_8H`。唯一下一游标是先闭合P-B1E最小实现，再执行完整六源8小时Attempt5。
 
 ## 2026-07-21：用户选择彻底换连接方向
 
@@ -253,3 +253,53 @@
 - Gamma authority commit `3a367386cb1768867e20a8190d2f13617b65fe67`先行发布；独立Rust commit `e086017fc6d376b739e7a5146dacc18f674f1407`随后只修改共享helper和一个Attempt3精确回归。精确测试`1/1`、完整`polymarket_contract` `7/7`、package tests check、目标Clippy `-D warnings`、fmt和diff-check全部通过。
 - 三路独立代码终审均为Critical 0 / Important 0 / Minor 0；曾有一处审查报告把slug/start `05:20Z`误称为市场E，已复核更正为E=`05:25Z`、closedTime=`05:25:52Z`即E+52秒，不影响代码或验收。Rust发布后本地HEAD、upstream和远端ref均为`e086017fc6d376b739e7a5146dacc18f674f1407`。
 - 本轮没有修改RTDS、SDK、Cargo、schema、writer、evaluator、adapter、fatal路径、raw持久化或Attempt3 artifact，也没有运行RTDS-only probe、100-cycle或资源矩阵。承载本closure的纯文档commit成功push并完成三方ref核对后，唯一下一游标为步骤2.2.10：从该新clean/pushed HEAD设置精确`DATA_COLLECT_GIT_COMMIT`，用新release binary、新artifact和空dataset root运行完整六源8小时Attempt4。
+
+## 2026-07-27：Attempt4完整collector提前失败
+
+- Attempt4 artifact为`target/rtds-stage2-attempt4-full-training-20260727T071429Z`。
+  构建和运行均来自clean/pushed
+  `a37cf1181597296b9b2d87f8bc2c93700bda8f48`；正式release binary SHA-256为
+  `b451b2b53aace314e28503ff4f983c20a7468d8175abfd5c7450d8fa7942cc0a`，命令
+  包含新绝对dataset root、`local-hong-kong-route`、`--max-runtime-secs 28800`
+  和`--max-dataset-bytes 50000000000`。
+- wrapper从`2026-07-27T07:20:35.073560320Z`运行至
+  `2026-07-27T09:37:07.171376781Z`，monotonic elapsed为`8192.100s`；起止route
+  均为`8.210.176.1 / HK / HKG`。collector exit 1、tee exit与结束route exit均为0，
+  因此Attempt4固定为`FAIL + INCOMPLETE_8H`。
+- manifest首因是
+  `polymarket_sdk_stream_fatal:parser error: Internal: invalid value: string "", expected a Decimal type representing a fixed-point number`，
+  并记录`SourceInnerReturn { source_kind: "polymarket_market" }`。collector最终打印
+  的Binance depth after-close和manifest中的RTDS after-close发生在同日gate关闭之后，
+  都是连锁后果，不是首因；当前RTDS恢复合同没有因此失败或改变。
+- 错误退出仍协调finalize了16个manifest登记Parquet，共`1,884,425`行、
+  `115,390,221` bytes。六源文件数/行数为：aggTrade `3/74380`、depth snapshot
+  `1/1`、depth update `3/81751`、Polymarket market `3/1720377`、metadata
+  `3/141`、RTDS `3/7775`。逐文件path/bytes/SHA-256/PyArrow rows与manifest一致，
+  无额外、`.running`、`.tmp`或`.partial`文件；manifest SHA-256为
+  `ee43925d1ebe3f9b8d83555cd08a40e287832c049cda89f348ead95d7d2acab5`。
+  同日`open + ended_known`符合当前错误退出合同。这些只证明约2小时16分钟内六源
+  正式落盘，不满足8小时门。
+- RTDS的`7775/7775`行均为`fresh`，按`timestamp_received`计算的最大相邻接收间隔为
+  `9382ms`；manifest记录`reconnect_events=1`，wrapper记录business replacement
+  start/runtime-created为`0/0`。这些是本次部分窗口的实际计数，不冒充完整8小时
+  稳定性或真实business replacement效果验收。
+- 失败raw frame、event variant和字段path没有保存；最后成功typed row也不能唯一证明
+  下一raw frame。因此不能把首因归给F04、`price_change`或任一具体Decimal字段，
+  也不能声称已经唯一修复Attempt4。
+
+## 2026-07-27：用户批准P-B1E并冻结Attempt5游标
+
+- 用户批准本次E-A语义；为避免与Attempt1辅助文件污染处置的历史`E-A`重名，当前
+  唯一代号为`P-B1E`。其唯一技术authority是SDK070三件套：仅九个官方nullable
+  Decimal把精确`""`解码为`None`；missing/null/official legal DecimalString保持，
+  nullable非空malformed及required `price_change.size=""`继续parser fatal。
+- P-B1E只修改既有vendor生产差异路径`src/clob/ws/types/response.rs`并复用现有
+  `serde_with::NoneAsEmptyString`。不使用`DefaultOnError`，不把空串改成零，不新增
+  raw recorder、第二parser、第五个vendor生产路径、依赖、schema/counter、诊断框架、
+  RTDS-only probe、100-cycle或资源矩阵。
+- authority与最小Rust实现继续分离完成三路审查、commit/push和三方ref核对。承载
+  本记录的纯文档authority commit成功push且三方ref一致后，条件式状态为
+  `P_B1E_AUTHORITY_SYNC_CLOSED_IMPLEMENTATION_PENDING`；实现闭合后从新
+  clean/pushed HEAD设置新`DATA_COLLECT_GIT_COMMIT`，使用新release binary、
+  新artifact和空dataset root执行完整六源8小时Attempt5。不得续写Attempt4、拼接
+  剩余时间或自动扩大空串容忍范围。

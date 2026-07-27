@@ -736,3 +736,22 @@
 
 - Gamma authority commit `3a367386cb1768867e20a8190d2f13617b65fe67`与Rust commit `e086017fc6d376b739e7a5146dacc18f674f1407`已分离发布；精确回归`1/1`、完整`polymarket_contract` `7/7`、package tests check、目标Clippy、fmt、diff-check和三路独立终审均通过，Rust发布后三方ref一致。
 - 该修复只修改共享Gamma `closedTime` helper和一个精确回归，不改变RTDS、其他source、SDK/schema/evaluator/adapter/fatal/raw路径，也未运行100-cycle或资源矩阵。承载本closure的纯文档commit成功push且三方ref一致后，当前单一游标为从该新clean/pushed HEAD、新artifact和空dataset root，经香港线路运行完整六源8小时Attempt4。
+
+## 2026-07-27：Attempt4失败、P-B1E获批与Attempt5游标
+
+- Attempt4从clean/pushed `a37cf1181597296b9b2d87f8bc2c93700bda8f48`运行完整
+  release-profile training collector，起止香港route均成立；在`8192.100s`后因
+  `polymarket_market`某个Decimal字段收到精确`""`触发parser fatal而退出1，永久为
+  `FAIL + INCOMPLETE_8H`。失败raw frame、event variant和字段path未知，不能归因
+  F04或任一具体字段；Binance/RTDS after-close是market source return后的连锁后果。
+- 错误退出仍协调finalize了16个Parquet、六源合计`1,884,425`行；path、bytes、
+  SHA-256、PyArrow rows和manifest一致且无临时文件。这些只作部分运行与协调finalize
+  证据，不满足8小时门。
+- 用户批准E-A并统一记为`P-B1E`，避免与Attempt1辅助文件污染处置的历史`E-A`
+  重名：仅九个官方nullable Decimal精确`"" -> None`；required、非空malformed及
+  其他parser/typed/schema错误继续fatal。唯一技术authority为SDK070三件套；本总
+  changelog不复制实现矩阵。
+- 承载本记录的纯文档authority commit成功push且三方ref一致后，当前游标为先完成
+  P-B1E最小实现、定向验证、三路终审与独立Rust发布，再从新clean/pushed HEAD、
+  新artifact和空dataset root运行完整六源8小时Attempt5。不得续写Attempt4、运行
+  RTDS-only probe/100-cycle/资源矩阵或增加raw诊断旁路。

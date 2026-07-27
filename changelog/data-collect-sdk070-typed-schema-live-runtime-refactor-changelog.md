@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FULL_COLLECTOR_PENDING`。RTDS的该状态仅在承载本记录的纯文档closure commit成功push且三方ref一致后生效；RTDS network-error方案A的`366fed7d`/`415470e`与Gamma `closedTime`方案A的`3a367386`/`e086017f`均已按authority/Rust分离发布并完成三方ref核对。RTDS阶段0和阶段1已闭合；Attempt1永久为`FAIL + INCOMPLETE_8H`，Attempt2永久为`USER_TERMINATED + INCOMPLETE_8H`，Attempt3永久为`FAIL + INCOMPLETE_8H`。Gamma方案A的目标测试、check、Clippy、fmt、diff-check与三路终审均已通过；唯一下一步为完整六源8小时Attempt4。总事项阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FAIL_INCOMPLETE_8H_P_B1E_AUTHORITY_SYNC_CLOSED_IMPLEMENTATION_PENDING`。其中`P-B1E`是本次获批的“nullable Decimal精确空串兼容”唯一标识，用于避免与Attempt1辅助文件污染处置的历史`E-A`重名；该状态仅在承载本记录的纯文档authority commit成功push且三方ref一致后生效。RTDS network-error方案A的`366fed7d`/`415470e`与Gamma `closedTime`方案A的`3a367386`/`e086017f`均已按authority/Rust分离发布并完成三方ref核对。RTDS阶段0和阶段1已闭合；Attempt1、Attempt3、Attempt4永久为`FAIL + INCOMPLETE_8H`，Attempt2永久为`USER_TERMINATED + INCOMPLETE_8H`。Attempt4在`8192.100s`因`polymarket_market`某个Decimal字段收到精确空串而失败；当前唯一下一步是先完成P-B1E最小实现、定向验证、三路独立审查及独立Rust commit/push，再从新clean/pushed HEAD执行完整六源8小时Attempt5。总事项阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
 > `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
@@ -29,7 +29,7 @@
 > `b569546ae1c9cfc24bcdfe4ba12ee4ce60ccc278`已push且三方ref一致，故
 > `STAGE3_AUTHORITY_SYNC_CLOSED`成立。后继本地实现、测试、审查、
 > commit和push不再逐次申请；只在上下文冲突或实际情况与需求/计划不一致时停止。
-> RTDS完整参数、最终需求、wrapper-first SDK路线、authority矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe已于2026-07-26获批；用户随后终止旧probe并将验证对象纠正为本地完整training collector全源正式落盘。Attempt3已经失败并固定，Gamma方案A及修复后Attempt4已获批准。production activation/cutover、release、部署、
+> RTDS完整参数、最终需求、wrapper-first SDK路线、authority矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe已于2026-07-26获批；用户随后终止旧probe并将验证对象纠正为本地完整training collector全源正式落盘。Attempt3和Attempt4已经失败并固定；Gamma方案A已闭合，Attempt4暴露的nullable Decimal精确空串P-B1E已获批准。production activation/cutover、release、部署、
 > 远端操作、migration和删除仍为范围外事项。
 > Stage3任务3.1至3.7、S-B/M-B/W-B修复、本地门与重复独立审查均已通过；
 > closure commit `7c6927f663d9c3b387874f688b10346956b9302d`已push且三方ref
@@ -38,7 +38,7 @@
 > Stage5、Stage6与2-REST均已完成各自实现、完整门和独立终审。按用户批准的
 > 方案A，本文条件式记录`2-REST_CLOSED`与核心总事项`CORE_COMPLETE`：只有承载
 > 本记录的closure commit成功push且本地HEAD、upstream与远端ref一致后才生效。
-> RTDS行为专项当前为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FULL_COLLECTOR_PENDING`。
+> RTDS行为专项当前为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FAIL_INCOMPLETE_8H_P_B1E_AUTHORITY_SYNC_CLOSED_IMPLEMENTATION_PENDING`。
 > 本文件只记录本组三件套的事实、冲突、决定与执行，不回写旧changelog。
 
 ## 2026-07-24：用户要求建立一个新的总事项
@@ -1927,3 +1927,37 @@ migration、数据删除、public-network smoke或RTDS参数/行为实施。
 
 - Gamma authority commit `3a367386cb1768867e20a8190d2f13617b65fe67`与独立Rust commit `e086017fc6d376b739e7a5146dacc18f674f1407`已按边界分离发布。精确回归`1/1`、完整`polymarket_contract` `7/7`、package tests check、目标Clippy `-D warnings`、fmt和diff-check全部通过；三路独立终审均为Critical 0 / Important 0 / Minor 0。
 - umbrella不重复实现、测试或审查，只消费专项证据。承载本记录的纯文档closure commit成功push且三方ref一致后，消费状态升级为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FULL_COLLECTOR_PENDING`；唯一下一步由专项从该新clean/pushed HEAD、新artifact和空dataset root运行完整六源8小时Attempt4。
+
+## 2026-07-27：Attempt4失败与P-B1E批准
+
+- Attempt4 artifact为`target/rtds-stage2-attempt4-full-training-20260727T071429Z`，从
+  clean/pushed `a37cf1181597296b9b2d87f8bc2c93700bda8f48`构建并运行正式
+  release-profile training collector；binary SHA-256为
+  `b451b2b53aace314e28503ff4f983c20a7468d8175abfd5c7450d8fa7942cc0a`。
+  起止route均为`8.210.176.1 / HK / HKG`。wrapper从
+  `2026-07-27T07:20:35.073560320Z`运行至
+  `2026-07-27T09:37:07.171376781Z`，monotonic elapsed为`8192.100s`；
+  collector exit 1，故固定为`FAIL + INCOMPLETE_8H`。
+- manifest首因是
+  `polymarket_sdk_stream_fatal:parser error: Internal: invalid value: string "", expected a Decimal type representing a fixed-point number`，
+  并明确记录`SourceInnerReturn { source_kind: "polymarket_market" }`。随后出现的
+  Binance depth与RTDS after-close是同日gate关闭后的连锁后果，不是首因。
+- 错误退出仍协调finalize了16个manifest登记Parquet，共`1,884,425`行、
+  `115,390,221` bytes，六源文件数/行数为：aggTrade `3/74380`、depth snapshot
+  `1/1`、depth update `3/81751`、Polymarket market `3/1720377`、metadata
+  `3/141`、RTDS `3/7775`。路径、bytes、SHA-256、PyArrow rows与manifest一致，
+  无额外或临时文件；manifest SHA-256为
+  `ee43925d1ebe3f9b8d83555cd08a40e287832c049cda89f348ead95d7d2acab5`。
+  这些只证明约2小时16分钟的六源正式落盘与协调finalize，不满足8小时门。
+- 失败raw frame、event variant和字段path没有保存，所以不能把具体字段写成F04、
+  `price_change`或其他候选；最后成功row也不能唯一归因下一frame。用户批准最小方案
+  E-A，并在authority中统一编号为`P-B1E`，避免与Attempt1污染处置的历史`E-A`
+  重名：仅九个官方nullable Decimal精确`"" -> None`；missing/null/官方合法非空
+  DecimalString保持，
+  nullable非空malformed及required `price_change.size=""`继续fatal。
+- P-B1E只修改既有vendor `response.rs`并复用`NoneAsEmptyString`；不使用
+  `DefaultOnError`，不增加raw recorder、第二parser、第五个vendor生产路径、依赖、
+  schema/counter、诊断框架或100-cycle。承载本记录的纯文档authority commit成功
+  push且三方ref一致后，状态为`P_B1E_AUTHORITY_SYNC_CLOSED_IMPLEMENTATION_PENDING`；
+  最小实现、定向验证、三路终审与独立Rust发布闭合后，才从新clean/pushed HEAD、
+  新artifact和空dataset root运行完整六源8小时Attempt5。
