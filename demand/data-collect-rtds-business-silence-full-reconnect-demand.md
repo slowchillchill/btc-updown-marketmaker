@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_AUTHORITY_SYNC_CLOSED_IMPLEMENTATION_PENDING`。其中`SOLUTION_A_AUTHORITY_SYNC_CLOSED`仅在承载本记录的纯文档commit成功push且本地HEAD、upstream与远端ref一致后生效。用户已于 2026-07-26 冻结第六节完整行为参数，并批准本需求、wrapper-first SDK 路线、精确 authority 修改矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe：`steady=300s`、`first-fresh=60s/后到 monotonic anchor`、首次 fresh 前禁用 cold-start watchdog，后续完整换连接前使用 `1s × 2 ±20%`、单次最长 `300s`、fresh 后重置且总尝试次数不限的 outer backoff。阶段0已完成参数/authority同步、独立审查及commit `0a2153e76dd9824b675a54cd93cc7f92a08e300f`发布；阶段1已完成实现、收窄验证、三路独立终审及`ef200a6e89eaaee9f19ff49a00232b5004825ce7`/`a29486babe2682481549cfc0b95b010784d653f0`分离发布。阶段2 Attempt1在clean HEAD `8db5b9bad683586c55fa49be80fa2aab73444646`上提前结束，永久结论为`FAIL + INCOMPLETE_8H`；用户随后批准第五节的方案A窄修复。当前代码只有 training 拥有真实 RTDS adapter。future paper/live 真实 RTDS adapter 一旦另项接入，必须继承同一恢复合同，不得重新冻结另一套语义。production release、部署、远端操作和数据清理仍不在本需求范围。
+> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_PENDING`。该状态仅在承载本记录的纯文档closure commit成功push且本地HEAD、upstream与远端ref一致后生效。方案A authority commit `366fed7d19ff9ce2f855f362c81de5641b63f9c4`与Rust commit `415470eda0b2d629c19c2609e6610a253703d684`已分离发布并分别完成三方ref核对。用户已于 2026-07-26 冻结第六节完整行为参数，并批准本需求、wrapper-first SDK 路线、精确 authority 修改矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe：`steady=300s`、`first-fresh=60s/后到 monotonic anchor`、首次 fresh 前禁用 cold-start watchdog，后续完整换连接前使用 `1s × 2 ±20%`、单次最长 `300s`、fresh 后重置且总尝试次数不限的 outer backoff。阶段0已完成参数/authority同步、独立审查及commit `0a2153e76dd9824b675a54cd93cc7f92a08e300f`发布；阶段1已完成实现、收窄验证、三路独立终审及`ef200a6e89eaaee9f19ff49a00232b5004825ce7`/`a29486babe2682481549cfc0b95b010784d653f0`分离发布。阶段2 Attempt1在clean HEAD `8db5b9bad683586c55fa49be80fa2aab73444646`上提前结束，永久结论为`FAIL + INCOMPLETE_8H`；Attempt2尚未启动。当前代码只有 training 拥有真实 RTDS adapter。future paper/live 真实 RTDS adapter 一旦另项接入，必须继承同一恢复合同，不得重新冻结另一套语义。production release、部署、远端操作和数据清理仍不在本需求范围。
 
 ## 一、目标与已决定方向
 
@@ -189,4 +189,4 @@
 
 ## 八、当前授权边界
 
-完整参数、本需求、wrapper-first SDK路线、authority精确修改矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe均已获用户批准。两份当前authority同步、阶段0发布及阶段1实现/验证/终审/发布已经闭合；Attempt1核心证据及辅助exit文件污染事实已按E-A永久记录，结论为`FAIL + INCOMPLETE_8H`。用户已批准方案A及修复后一次新的Attempt2；本纯文档commit成功push且三方ref一致后的下一游标为方案A最小Rust实现、聚焦验证、独立审查和独立commit/push，完成后才启动Attempt2。无需重复申请普通实现授权。新的文档/代码/事实冲突仍必须停止；production release、部署、远端服务操作和数据清理不在当前授权边界。
+完整参数、本需求、wrapper-first SDK路线、authority精确修改矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe均已获用户批准。两份当前authority同步、阶段0发布及阶段1实现/验证/终审/发布已经闭合；Attempt1核心证据及辅助exit文件污染事实已按E-A永久记录，结论为`FAIL + INCOMPLETE_8H`。方案A的authority、最小Rust实现、聚焦验证、三路独立终审、分离commit/push及三方ref核对均已闭合；承载本记录的纯文档closure commit成功push且三方ref一致后，唯一下一游标为从包含`415470e`修复的新clean HEAD和新artifact目录启动Attempt2。无需重复申请普通实现授权。新的文档/代码/事实冲突仍必须停止；production release、部署、远端服务操作和数据清理不在当前授权边界。

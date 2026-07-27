@@ -55,7 +55,7 @@
 > 保留为历史；current验收只使用上述真实owner和acceptance matrix，不恢复第二套
 > control model。
 >
-> 2026-07-27 RTDS current authority：详细执行只以`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`为单一游标。阶段1已在training实现并验证同一owner内的break-before-make完整runtime replacement；阶段2 Attempt1因精确network-error服务对象被归为terminal parser error而固定为`FAIL + INCOMPLETE_8H`。用户已批准方案A：先独立同步authority，再在既有两条vendor路径内做最小typed marker修复和正负合并runtime测试，完成独立审查/commit/push/ref核对后从新clean HEAD、新artifact目录执行Attempt2。不得修改CLOB、Gamma、Binance，也不得新增paper/live RTDS adapter或提前抽象共享framework；future paper/live真实RTDS adapter仍须另立三件套实施、测试和部署，但必须继承相同fresh classifier、`300s/60s/cold-start disabled`、outer`1s × 2 ±20%/300s cap/unlimited`、唯一owner/socket与break-before-make合同。production release/部署/远端操作仍不在该授权内。
+> 2026-07-27 RTDS current authority：详细执行只以`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`为单一游标。阶段1已在training实现并验证同一owner内的break-before-make完整runtime replacement；阶段2 Attempt1因精确network-error服务对象被归为terminal parser error而固定为`FAIL + INCOMPLETE_8H`。方案A authority commit `366fed7d`与Rust commit `415470e`已分离发布，聚焦验证、独立审查和三方ref核对均已闭合；当前单一游标为从新的clean HEAD和新artifact目录执行Attempt2。不得修改CLOB、Gamma、Binance，也不得新增paper/live RTDS adapter或提前抽象共享framework；future paper/live真实RTDS adapter仍须另立三件套实施、测试和部署，但必须继承相同fresh classifier、`300s/60s/cold-start disabled`、outer`1s × 2 ±20%/300s cap/unlimited`、唯一owner/socket与break-before-make合同。production release/部署/远端操作仍不在该授权内。
 
 ## 2026-07-10 已批准增量执行
 

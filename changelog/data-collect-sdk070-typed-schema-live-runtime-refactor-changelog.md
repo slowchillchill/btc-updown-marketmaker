@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_AUTHORITY_SYNC_CLOSED_IMPLEMENTATION_PENDING`。其中RTDS的`SOLUTION_A_AUTHORITY_SYNC_CLOSED`仅在承载本记录的纯文档commit成功push且三方ref一致后生效。RTDS阶段0已以commit `0a2153e76dd9824b675a54cd93cc7f92a08e300f`闭合并push；阶段1文档验收commit `ef200a6e89eaaee9f19ff49a00232b5004825ce7`与Rust实现commit `a29486babe2682481549cfc0b95b010784d653f0`均已push且三方ref一致，三路独立终审均为PASS。阶段2 Attempt1已永久记录为`FAIL + INCOMPLETE_8H`，用户随后批准方案A最小vendor修复及修复后新Attempt2。总事项阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_PENDING`。RTDS的该状态仅在承载本记录的纯文档closure commit成功push且三方ref一致后生效；专项authority commit `366fed7d19ff9ce2f855f362c81de5641b63f9c4`与Rust commit `415470eda0b2d629c19c2609e6610a253703d684`已分离发布并分别完成三方ref核对。RTDS阶段0已以commit `0a2153e76dd9824b675a54cd93cc7f92a08e300f`闭合并push；阶段1文档验收commit `ef200a6e89eaaee9f19ff49a00232b5004825ce7`与Rust实现commit `a29486babe2682481549cfc0b95b010784d653f0`均已push且三方ref一致，三路独立终审均为PASS。阶段2 Attempt1已永久记录为`FAIL + INCOMPLETE_8H`，Attempt2尚未启动。总事项阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
 > `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
@@ -38,7 +38,7 @@
 > Stage5、Stage6与2-REST均已完成各自实现、完整门和独立终审。按用户批准的
 > 方案A，本文条件式记录`2-REST_CLOSED`与核心总事项`CORE_COMPLETE`：只有承载
 > 本记录的closure commit成功push且本地HEAD、upstream与远端ref一致后才生效。
-> RTDS行为专项当前为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_AUTHORITY_SYNC_CLOSED_IMPLEMENTATION_PENDING`。
+> RTDS行为专项当前为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_PENDING`。
 > 本文件只记录本组三件套的事实、冲突、决定与执行，不回写旧changelog。
 
 ## 2026-07-24：用户要求建立一个新的总事项
@@ -1905,3 +1905,8 @@ migration、数据删除、public-network smoke或RTDS参数/行为实施。
 - 专项Attempt1从clean HEAD/upstream `8db5b9bad683586c55fa49be80fa2aab73444646`经香港边界运行`16851391ms`，fresh `16127`、最大相邻fresh间隔`8521ms`、自然重连`2`、business replacement `0`、runtime error `1`，test exit `101`。127-byte network-error对象触发terminal parser错误，故永久结论为`FAIL + INCOMPLETE_8H`；辅助`probe-tee-exit.txt`的已披露事后污染、替代证据及污染后哈希由专项changelog记录，未受污染的核心日志/frame/script哈希继续匹配。
 - 用户批准方案A：仅在正常typed parse失败后，把顶层object、精确`Network error communicating with endpoint`且无`topic/type/timestamp/payload`的数据外对象标为crate-private recoverable marker，由connection owner typed downcast进入既有自然重连。其余service message及typed/parser/schema错误保持sticky terminal；不增加collector parser、公共API、第五个vendor路径、第二owner/socket、状态机/counter/schema或100-cycle。
 - umbrella不建立第二执行游标。专项先独立发布authority，再完成最小Rust修复、聚焦验证、独立审查及分离发布，最后从新clean HEAD、新artifact目录执行Attempt2；最终报告并列保留两次attempt。承载本记录的纯文档commit成功push且三方ref一致后，umbrella消费状态为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_AUTHORITY_SYNC_CLOSED_IMPLEMENTATION_PENDING`。
+
+## 2026-07-27：RTDS方案A实现闭合消费
+
+- 专项authority commit `366fed7d19ff9ce2f855f362c81de5641b63f9c4`与Rust commit `415470eda0b2d629c19c2609e6610a253703d684`已分离发布；Rust发布后本地HEAD、upstream与远端ref一致，专项三路独立终审均为PASS且没有运行100-cycle。
+- umbrella不建立第二审查、测试或执行游标，详细实现与验证证据只引用专项changelog。承载本记录的纯文档closure commit成功push且三方ref一致后，umbrella消费状态为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_PENDING`，下一步仅为专项Attempt2。

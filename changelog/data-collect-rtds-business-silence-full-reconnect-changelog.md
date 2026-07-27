@@ -6,7 +6,7 @@
 >
 > 对应计划：`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`
 >
-> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_AUTHORITY_SYNC_CLOSED_IMPLEMENTATION_PENDING`。其中`SOLUTION_A_AUTHORITY_SYNC_CLOSED`仅在承载本记录的纯文档commit成功push且本地HEAD、upstream与远端ref一致后生效。阶段0已完成参数/authority同步、独立审查及commit `0a2153e76dd9824b675a54cd93cc7f92a08e300f`发布；阶段1已完成实现、收窄验证、三路独立终审及`ef200a6e89eaaee9f19ff49a00232b5004825ce7`/`a29486babe2682481549cfc0b95b010784d653f0`分离发布。阶段2 Attempt1已永久记录为`FAIL + INCOMPLETE_8H`，用户已批准方案A及修复后新Attempt2。
+> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_PENDING`。该状态仅在承载本记录的纯文档closure commit成功push且本地HEAD、upstream与远端ref一致后生效。方案A authority commit `366fed7d19ff9ce2f855f362c81de5641b63f9c4`与Rust commit `415470eda0b2d629c19c2609e6610a253703d684`已分离发布并分别完成三方ref核对；Attempt1永久保持`FAIL + INCOMPLETE_8H`，Attempt2尚未启动。
 
 ## 2026-07-21：用户选择彻底换连接方向
 
@@ -221,3 +221,12 @@
 - connection owner以typed downcast把该marker映射到既有`ConnectionExit::Recoverable`，关闭旧socket后沿用自然reconnect/backoff与latest desired replay。该对象不写row、不计fresh、不改变业务freshness/recovery episode或持久化；transport state/generation按既有自然重连变化。其他未匹配service message、array及目标typed/parser/schema错误继续terminal；仅有未typed的`Too Many Requests`字符串不等于已确认rate-limit，真实HTTP/protocol/typed rate-limit继续按availability恢复。
 - 最小验证只增加一个正负合并runtime loopback：正例为精确对象，负例为相同message附带一个RTDS数据身份字段；既有once-replay、malformed sticky/no-reconnect、`Invalid request body`与bounded diagnostic测试继续复用。不增加collector raw parser、公共API、第五个vendor生产路径、第二owner/socket、新状态机/counter/schema、service-message表格矩阵、重复等待、资源计数或100-cycle。
 - 当前状态为`STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_AUTHORITY_SYNC_PENDING`。纯文档authority完成独立审查、commit/push及三方ref核对后，才进入独立Rust实现/验证/审查/commit/push；全部闭合后从新clean HEAD、新artifact目录运行Attempt2。最终报告必须并列保留两次attempt。
+
+## 2026-07-27：方案A实现、验证与分离发布闭合
+
+- 纯文档authority commit `366fed7d19ff9ce2f855f362c81de5641b63f9c4`先行发布；其直接子提交、独立Rust commit `415470eda0b2d629c19c2609e6610a253703d684`随后发布。Rust commit只修改`rtds/subscription.rs`、`ws/connection.rs`和`polymarket_sdk_runtime_contract.rs`，共`161 insertions / 11 deletions`，没有混入文档、collector生产parser、公共API、第五个vendor路径或新状态机。
+- 正常typed parse失败后，只有顶层object、精确network-error message且不存在`topic/type/timestamp/payload`时才生成crate-private marker；允许其他元数据字段且不要求`connectionId/requestId`。marker只保留原parser source与既有bounded diagnostic。connection owner以typed downcast进入既有`ConnectionExit::Recoverable`，旧socket收敛后沿用既有backoff、generation前进和latest desired replay；其他service message、array及typed/parser/schema错误继续sticky terminal。
+- 新增正负合并runtime loopback使用当前毫秒的typed fresh frame，证明精确对象触发一次自然重连、第二连接收到同一完整filtered subscription、generation前进且可消费fresh；随后相同message加`topic`仍返回parser terminal。生产fresh classifier、既有once replay、whole-frame sticky terminal、vendor bounded-contract diagnostic及source-chain diagnostic精确测试均各`1/1`通过。
+- `cargo test --workspace --locked --no-run`、workspace全target Clippy `-D warnings`、workspace与vendor fmt check及`git diff --check`均退出0。额外vendor direct Clippy先发现并修正本次`renamed_function_params`；最终只对未修改的`subscription.rs:650`既有`clippy::let_underscore_untyped`使用窄allow后退出0，没有豁免方案A新增代码问题。历史100-cycle、资源矩阵和默认workspace完整测试均未运行。
+- runtime、测试和authority三路独立终审最终均为`Critical 0 / Important 0 / Minor 0 / PASS`。本地HEAD、upstream和远端`origin/fix-rtds-silents`在Rust发布后均精确为`415470eda0b2d629c19c2609e6610a253703d684`；Attempt1按E-A保留的污染文件仍为64 bytes、mtime `2026-07-27 11:13:54.650992513 +0900`、SHA-256 `0e8b1f557d3d10e28d15f8626e890ea4c9015a048cc4e75099da78fa0b52a8cb`，未被改写。
+- 承载本记录的纯文档closure commit成功push且三方ref一致后，条件式状态升级为`STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_PENDING`；唯一下一游标为从该新clean HEAD和新artifact目录执行Attempt2，最终报告继续并列保留两次attempt。
