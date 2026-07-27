@@ -6,7 +6,7 @@
 >
 > 对应计划：`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`
 >
-> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_PENDING`。该状态仅在承载本记录的纯文档closure commit成功push且本地HEAD、upstream与远端ref一致后生效。方案A authority commit `366fed7d19ff9ce2f855f362c81de5641b63f9c4`与Rust commit `415470eda0b2d629c19c2609e6610a253703d684`已分离发布并分别完成三方ref核对；Attempt1永久保持`FAIL + INCOMPLETE_8H`，Attempt2尚未启动。
+> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FULL_COLLECTOR_PENDING`。该状态仅在承载本记录的纯文档authority commit成功push且本地HEAD、upstream与远端ref一致后生效。方案A authority commit `366fed7d19ff9ce2f855f362c81de5641b63f9c4`与Rust commit `415470eda0b2d629c19c2609e6610a253703d684`已分离发布并分别完成三方ref核对；Attempt1永久保持`FAIL + INCOMPLETE_8H`，Attempt2永久记录为`USER_TERMINATED + INCOMPLETE_8H`，Attempt3尚未启动。
 
 ## 2026-07-21：用户选择彻底换连接方向
 
@@ -230,3 +230,10 @@
 - `cargo test --workspace --locked --no-run`、workspace全target Clippy `-D warnings`、workspace与vendor fmt check及`git diff --check`均退出0。额外vendor direct Clippy先发现并修正本次`renamed_function_params`；最终只对未修改的`subscription.rs:650`既有`clippy::let_underscore_untyped`使用窄allow后退出0，没有豁免方案A新增代码问题。历史100-cycle、资源矩阵和默认workspace完整测试均未运行。
 - runtime、测试和authority三路独立终审最终均为`Critical 0 / Important 0 / Minor 0 / PASS`。本地HEAD、upstream和远端`origin/fix-rtds-silents`在Rust发布后均精确为`415470eda0b2d629c19c2609e6610a253703d684`；Attempt1按E-A保留的污染文件仍为64 bytes、mtime `2026-07-27 11:13:54.650992513 +0900`、SHA-256 `0e8b1f557d3d10e28d15f8626e890ea4c9015a048cc4e75099da78fa0b52a8cb`，未被改写。
 - 承载本记录的纯文档closure commit成功push且三方ref一致后，条件式状态升级为`STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_PENDING`；唯一下一游标为从该新clean HEAD和新artifact目录执行Attempt2，最终报告继续并列保留两次attempt。
+
+## 2026-07-27：Attempt2用户终止，Attempt3改为完整训练采集程序
+
+- Attempt2从clean HEAD/upstream `0685fcab51a2b7c644ba7c5aca9c873134f88fd4`及香港`8.210.176.1 / HK / HKG`启动旧RTDS-only内存probe，约2.347秒观察到首条合格fresh。用户随后主动终止，并明确纠正测试对象应为完整`data-collect-training-collector`，对全部正式数据源采集并通过正式Parquet/manifest路径在本地落盘。旧进程已不存在；该attempt没有结束route、程序退出码、wrapper result或最终summary，因此永久记为`USER_TERMINATED + INCOMPLETE_8H`，不补造精确elapsed、最终计数或数据文件，也不记为代码FAIL。
+- 曾考虑的RTDS-only JSONL方向与用户真实要求不符，已在形成Rust或已提交文档改动前停止。当前正式training binary已经原生组合四个logical producer、六个`LIVE_SOURCES`、`ManifestOwner`及typed Parquet writer，并支持`--max-runtime-secs 28800`；Attempt3无需新增Rust代码、JSONL、第二writer、第二RTDS owner/socket或probe专用production seam。
+- 用户本次明确要求构成本专项三件套的窄范围扩展：Attempt3从承载本authority且已push的clean HEAD设置精确`DATA_COLLECT_GIT_COMMIT`重建本地release-profile binary，经既有香港proxychains路径及显式`--dataset-root <新绝对隔离路径>`连续运行完整训练采集代码路径8小时。它会真实写出当前source v3 + metadata v4及其他四类current schema，因此属于首次真实本地部分日v3/v4前向验证；不得把它误称为完整UTC日前向长跑、production binary激活、服务器/canonical dataset-root cutover、部署、migration或历史数据操作。
+- Attempt3的本次全源验收只检查程序正常完成bounded runtime并协调finalize、六类source均产生非空finalized Parquet、manifest file facts与文件一致、每个manifest登记文件可由PyArrow打开且实际行数匹配，并且没有临时文件残留。若某source为零，必须如实报告该source未完成用户要求，但不能仅据此把collector进程或其他source误判为代码失败；不新增周期路由、资源矩阵或100-cycle。

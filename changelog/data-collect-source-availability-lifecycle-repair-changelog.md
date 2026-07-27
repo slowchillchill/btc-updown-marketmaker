@@ -645,3 +645,8 @@
 
 - 后继专项authority commit `366fed7d19ff9ce2f855f362c81de5641b63f9c4`与Rust commit `415470eda0b2d629c19c2609e6610a253703d684`已分离发布，聚焦验证、三路独立终审和三方ref核对均已闭合；详细证据由专项changelog记录。
 - 本事项阶段0--9历史结果及CLOB/Gamma/Binance边界均未修改。承载本记录的纯文档closure commit成功push且三方ref一致后，后继专项下一游标仅为从新clean HEAD和新artifact目录执行Attempt2；历史100-cycle没有重跑。
+
+## 2026-07-27：后继RTDS专项Attempt2终止与Attempt3完整collector
+
+- Attempt2由用户主动终止并固定为`USER_TERMINATED + INCOMPLETE_8H`，不是代码FAIL；Attempt1继续永久保持`FAIL + INCOMPLETE_8H`，详细证据只由后继专项changelog记录。
+- 承载本记录的纯文档commit成功push且三方ref一致后，下一游标仅为从新clean/pushed HEAD运行完整release-profile training collector的Attempt3；它是RTDS专项三件套批准的本地部分日前向验证，不是production/canonical cutover。本事项阶段0--9、其他source行为及既有100-cycle边界均不变。

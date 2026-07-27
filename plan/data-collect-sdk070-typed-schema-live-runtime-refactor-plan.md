@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_PENDING`。RTDS的该状态仅在承载本记录的纯文档closure commit成功push且三方ref一致后生效；专项authority commit `366fed7d19ff9ce2f855f362c81de5641b63f9c4`与Rust commit `415470eda0b2d629c19c2609e6610a253703d684`已分离发布并分别完成三方ref核对。RTDS阶段0已以commit `0a2153e76dd9824b675a54cd93cc7f92a08e300f`闭合并push；阶段1文档验收commit `ef200a6e89eaaee9f19ff49a00232b5004825ce7`与Rust实现commit `a29486babe2682481549cfc0b95b010784d653f0`均已push且三方ref一致，三路独立终审均为PASS。阶段2 Attempt1已永久记录为`FAIL + INCOMPLETE_8H`，Attempt2尚未启动。总事项阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FULL_COLLECTOR_PENDING`。RTDS的该状态仅在承载本记录的纯文档closure commit成功push且三方ref一致后生效；专项authority commit `366fed7d19ff9ce2f855f362c81de5641b63f9c4`与Rust commit `415470eda0b2d629c19c2609e6610a253703d684`已分离发布并分别完成三方ref核对。RTDS阶段0已以commit `0a2153e76dd9824b675a54cd93cc7f92a08e300f`闭合并push；阶段1文档验收commit `ef200a6e89eaaee9f19ff49a00232b5004825ce7`与Rust实现commit `a29486babe2682481549cfc0b95b010784d653f0`均已push且三方ref一致，三路独立终审均为PASS。阶段2 Attempt1已永久记录为`FAIL + INCOMPLETE_8H`；Attempt2由用户主动终止并固定为`USER_TERMINATED + INCOMPLETE_8H`；Attempt3尚未启动。总事项阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
 > `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
@@ -30,7 +30,7 @@
 > 一致，故`STAGE3_AUTHORITY_SYNC_CLOSED`成立。用户明确批准持续推进本
 > 事项直至完成；后继本地实现、测试、审查、commit和push不再逐次申请。只有上下文
 > 冲突或实际情况与需求/计划不一致时才停止。RTDS完整参数、最终需求、wrapper-first
-> SDK路线、authority矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe均已获批；
+> SDK路线、authority矩阵及持续执行至阶段2本地香港VPN连续8小时验证均已获批；旧RTDS-only只读probe拓扑已由用户纠正为Attempt3完整training collector全源正式落盘；
 > production activation/cutover、release、部署、远端操作、migration和删除仍为
 > 第九节范围外事项。
 > Stage3任务3.1至3.7、S-B/M-B/W-B修复、本地门与重复独立审查均已通过；
@@ -60,8 +60,8 @@
 > `PASS / CLOSURE_UNBLOCKED`，Critical 0 / Important 0 / Minor 0。按用户批准的
 > 方案A，本文条件式记录`2-REST_CLOSED`与核心总事项`CORE_COMPLETE`：只有承载
 > 本记录的closure commit成功push且本地HEAD、upstream与远端ref一致后才生效。
-> RTDS行为专项当前为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_PENDING`；该状态来自专项的分离authority/Rust发布及Attempt1证据，按第十节不另设
-> umbrella独立执行游标或总回归门；专项下一步仅为Attempt2。
+> RTDS行为专项当前为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FULL_COLLECTOR_PENDING`；该状态来自专项的分离authority/Rust发布及两次既有attempt证据，按第十节不另设
+> umbrella独立执行游标或总回归门；专项下一步仅为从新clean/pushed HEAD重建release-profile training collector，并以香港线路和新隔离dataset root执行完整正式训练采集代码路径的Attempt3。
 
 ## 一、执行原则与成功标准
 
@@ -650,7 +650,7 @@ non-production conformance路径。
 
 ### 4B：适用授权范围内的capability与实现
 
-`SDK_070_RUNTIME_USABLE`、`2-RTDS_CLOSED`、4A闭合及阶段1本地授权均已满足。官方SDK + 当前最小wrapper的真实teardown capability及training实现已经完成收窄验证、三路独立终审、分离commit/push与三方ref核对。阶段2 Attempt1在`16851391ms`后因精确network-error服务对象被归为terminal parser error而固定为`FAIL + INCOMPLETE_8H`；本总计划只消费专项状态。方案A authority与最小vendor修复已由`366fed7d`/`415470e`分离闭合，当前专项唯一游标是从新clean HEAD和新artifact目录执行Attempt2。
+`SDK_070_RUNTIME_USABLE`、`2-RTDS_CLOSED`、4A闭合及阶段1本地授权均已满足。官方SDK + 当前最小wrapper的真实teardown capability及training实现已经完成收窄验证、三路独立终审、分离commit/push与三方ref核对。阶段2 Attempt1在`16851391ms`后因精确network-error服务对象被归为terminal parser error而固定为`FAIL + INCOMPLETE_8H`；Attempt2由用户主动终止并固定为`USER_TERMINATED + INCOMPLETE_8H`；本总计划只消费专项状态。方案A authority与最小vendor修复已由`366fed7d`/`415470e`分离闭合，当前专项唯一游标是从新clean/pushed HEAD重建release-profile `data-collect-training-collector`，经香港线路用新隔离dataset root和`--max-runtime-secs 28800`运行完整四个logical producer、六个`LIVE_SOURCES`并通过既有Parquet与daily manifest正式落盘的Attempt3。
 
 ### 阶段 4 审查与提交门
 
@@ -810,7 +810,7 @@ fixture身份混同、binary边界比较起点和writer归属措辞已修正并�
 
 ## 九、范围外后继事项
 
-新数据cutover、历史迁移/删除、production release/deployment，以及真实paper/live外部adapter、模型接线和长跑，均须另建对应 demand/plan/changelog并获得授权；本计划不包含其实现任务。
+新数据cutover、历史迁移/删除、production release/deployment，以及真实paper/live外部adapter、模型接线和除RTDS专项Attempt3外的长跑，均须另建对应 demand/plan/changelog并获得授权。用户本次明确批准的Attempt3只以RTDS专项三件套运行当前正式training collector，在本地香港线路和新隔离dataset root做8小时部分日前向验证；它会真实写source v3 + metadata v4，但不构成完整UTC日前向长跑、production binary激活、服务器/canonical dataset-root cutover或部署。
 
 ## 十、计划完成定义
 
@@ -825,4 +825,4 @@ fixture身份混同、binary边界比较起点和writer归属措辞已修正并�
 - cleanup分支独立维护两类删除台账和证据；
 - RTDS行为按子计划记`COMPLETE`、当前阶段状态或真实capability/冲突阻断，未完成状态不反向阻断v3；
 - umbrella只汇总各分支状态、authority和changelog一致性，不重复各分支专项验收/长跑/审查门。SDK/v3/三个机械分支及cleanup均完成时可记核心总事项完成；RTDS处于任一未完成状态时必须单独标明；
-- metadata v4实现与WS claimant/recovery验收完成后，本地代码/test中的source v3 + metadata v4原子current new-write替换才属于阶段3完成项；未满足时只可保留未激活实现。scope外production binary/dataset-root cutover、paper/live接线、deployment、migration、首次真实v3完整日前向长跑和历史删除不得冒充任何分支完成项。
+- metadata v4实现与WS claimant/recovery验收完成后，本地代码/test中的source v3 + metadata v4原子current new-write替换才属于阶段3完成项；未满足时只可保留未激活实现。RTDS专项Attempt3只新增首次真实本地部分日v3/v4前向验证证据，不重开或冒充v3分支完成项；scope外production binary/dataset-root cutover、paper/live接线、deployment、migration、首次真实v3完整UTC日前向长跑和历史删除不得冒充任何分支完成项。

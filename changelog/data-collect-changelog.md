@@ -720,3 +720,8 @@
 
 - 专项authority commit `366fed7d19ff9ce2f855f362c81de5641b63f9c4`与Rust commit `415470eda0b2d629c19c2609e6610a253703d684`已分离发布，聚焦验证和三路独立终审均为PASS，本地HEAD、upstream与远端ref一致；详细实现、测试和E-A证据只以专项changelog为准。
 - 承载本记录的纯文档closure commit成功push且三方ref一致后，当前单一游标升级为从新clean HEAD和新artifact目录执行Attempt2。Attempt1继续永久保留`FAIL + INCOMPLETE_8H`；其他source、paper/live当前实现、production、部署、远端和数据边界不变，未运行或恢复100-cycle。
+
+## 2026-07-27：RTDS Attempt2用户终止与Attempt3完整collector
+
+- Attempt2由用户主动终止并永久记录为`USER_TERMINATED + INCOMPLETE_8H`，不是代码FAIL；Attempt1继续永久保持`FAIL + INCOMPLETE_8H`，两次历史结果均不覆盖。
+- 承载本记录的纯文档commit成功push且三方ref一致后，当前单一游标为从新clean/pushed HEAD重建release-profile training collector，经香港线路使用新隔离dataset root运行完整正式训练采集代码路径的Attempt3；无需Rust改动。它是用户通过RTDS专项三件套批准的本地部分日前向验证，不是production/canonical cutover；其他source行为、paper/live当前实现、部署、远端、既有数据和100-cycle边界不变。

@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_PENDING`。RTDS的该状态仅在承载本记录的纯文档closure commit成功push且三方ref一致后生效；专项authority commit `366fed7d19ff9ce2f855f362c81de5641b63f9c4`与Rust commit `415470eda0b2d629c19c2609e6610a253703d684`已分离发布并分别完成三方ref核对。RTDS阶段0已以commit `0a2153e76dd9824b675a54cd93cc7f92a08e300f`闭合并push；阶段1文档验收commit `ef200a6e89eaaee9f19ff49a00232b5004825ce7`与Rust实现commit `a29486babe2682481549cfc0b95b010784d653f0`均已push且三方ref一致，三路独立终审均为PASS。阶段2 Attempt1已永久记录为`FAIL + INCOMPLETE_8H`，Attempt2尚未启动。总事项阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FULL_COLLECTOR_PENDING`。RTDS的该状态仅在承载本记录的纯文档closure commit成功push且三方ref一致后生效；专项authority commit `366fed7d19ff9ce2f855f362c81de5641b63f9c4`与Rust commit `415470eda0b2d629c19c2609e6610a253703d684`已分离发布并分别完成三方ref核对。RTDS阶段0已以commit `0a2153e76dd9824b675a54cd93cc7f92a08e300f`闭合并push；阶段1文档验收commit `ef200a6e89eaaee9f19ff49a00232b5004825ce7`与Rust实现commit `a29486babe2682481549cfc0b95b010784d653f0`均已push且三方ref一致，三路独立终审均为PASS。阶段2 Attempt1已永久记录为`FAIL + INCOMPLETE_8H`；Attempt2由用户主动终止并固定为`USER_TERMINATED + INCOMPLETE_8H`，不是代码FAIL；Attempt3尚未启动。总事项阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime终态为
 > `SDK_070_RUNTIME_USABLE`。阶段1闭合时的typed终态为
@@ -35,7 +35,7 @@
 > 完成，不再逐阶段申请本地
 > 实现、测试、审查、commit或push授权；只有发生上下文冲突或实际情况与需求/计划
 > 不一致时才停止请求决策。该持续授权满足阶段3等后继本地执行门；RTDS完整参数、
-> 共同合同、SDK路线、authority矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe均已获批，也不把production activation/cutover、release、部署、远端操作、
+> 共同合同、SDK路线、authority矩阵及持续执行至阶段2本地香港VPN连续8小时验证均已获批；旧RTDS-only只读probe拓扑已由用户纠正为Attempt3完整training collector全源正式落盘，也不把production activation/cutover、release、部署、远端操作、
 > migration和删除纳入本计划。既有`market_resolved` validate-first与
 > `METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`决定继续有效。
 > Stage3任务3.1至3.7、S-B/M-B/W-B修复、本地门与重复独立审查均已通过；
@@ -64,7 +64,9 @@
 > 2026-07-26批准方案A：Stage6 6.3.1要求七类target-admitted fixture的canonical
 > round-trip，以及Stage3另一个固定deterministic fixture经正式writer产生的
 > finalized v3 Parquet artifact；两套fixture不得混同，后者也不得冒充production
-> real artifact。首次真实v3 forward run继续属于范围外后继三件套。两路独立
+> real artifact。该裁决当时排除首次真实v3 forward run；用户现已通过RTDS专项
+> 三件套窄授权Attempt3执行首次真实本地部分日v3/v4前向验证，但完整UTC日前向长跑、
+> production binary激活和canonical dataset-root cutover仍属于范围外后继事项。两路独立
 > `gpt-5.6-sol`/Ultra终审均为`PASS / CLOSURE_UNBLOCKED`，Blocker 0 /
 > Important 0 / Minor 0。Stage6 closure commit
 > `c0aff3a3e61583138b33eec44d847acaa8ebd682`已push且三方ref一致，故
@@ -75,7 +77,7 @@
 > Important 0 / Minor 0。按用户批准的方案A，本文条件式记录`2-REST_CLOSED`与
 > 核心总事项`CORE_COMPLETE`：只有承载本记录的closure commit成功push且本地HEAD、
 > upstream与远端ref一致后才生效。RTDS行为专项当前为
-> `RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_PENDING`；该状态来自RTDS专项的分离authority/Rust发布及Attempt1证据，不由核心事项闭合自动升级；本umbrella不建立第二游标，专项下一步仅为Attempt2。
+> `RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FULL_COLLECTOR_PENDING`；该状态来自RTDS专项的分离authority/Rust发布及两次既有attempt证据，不由核心事项闭合自动升级；本umbrella不建立第二游标，专项下一步仅为从新clean/pushed HEAD执行完整training collector的Attempt3。
 
 ## 一、决策结论与目标
 
@@ -86,7 +88,7 @@
 3. “无损”精确定义为：在官方 SDK 成功解码并执行现行 target-market admission 后，对本事项当前可执行消费者和既有已批准合同所需的 retained业务字段、数组顺序、decimal文本精度、source/receive time、market/asset identity和collector provenance无损。当前硬门覆盖 collector canonical domain、v3 writer/reader、resolution recovery、manifest和training cold-consumer contract；future paper/live映射只是非阻断静态兼容附件，不能自行创造必需字段或冒充真实消费者。无损不包含被现行 admission排除的非目标entry、外部metadata join字段、原始WebSocket bytes或用户明确排除的venue `hash`。若要求逐字段重建过滤前SDK message，则不能同时维持当前范围并删除这些字段；本事项选择目标消费语义无损，而不是source-native全量归档。
 4. manifest/finalized-file SHA-256、artifact row/byte facts和原子发布校验继续保留。平台 `hash`、当前内存 SHA-256 dedupe fingerprint、manifest file SHA-256 是三种不同对象，不得因名称相似一起删除。
 5. `data-collect/src/live_runtime.rs` 按真实 owner 与职责机械拆分；先冻结共同可观察合同，再把最小 Polymarket owner、最小 RTDS owner和其余重构作为三个独立分支。v3只依赖 Polymarket分支收口，RTDS只依赖RTDS分支收口，其余重构不得阻塞二者；死代码仅在对应替代owner完成或不可达证明成立后删除。
-6. 将 `demand/data-collect-rtds-business-silence-full-reconnect-demand.md` 作为本总事项的 RTDS 专项合同纳入执行顺序；完整参数、需求、wrapper-first SDK路线、精确authority矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe均已获批。阶段0已完成参数/authority同步、审查与`0a2153e76dd9824b675a54cd93cc7f92a08e300f`发布；阶段1已完成实现、验证、三路独立终审及`ef200a6e89eaaee9f19ff49a00232b5004825ce7`/`a29486babe2682481549cfc0b95b010784d653f0`分离发布。阶段2 Attempt1在`16851391ms`后因服务端network-error对象被归为terminal parser error而固定为`FAIL + INCOMPLETE_8H`；专项方案A已由`366fed7d`/`415470e`分离闭合，当前状态为`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_PENDING`。当前代码只有training拥有真实RTDS adapter；future paper/live真实RTDS adapter由独立事项实施、测试和部署，但必须继承同一恢复合同。
+6. 将 `demand/data-collect-rtds-business-silence-full-reconnect-demand.md` 作为本总事项的 RTDS 专项合同纳入执行顺序；完整参数、需求、wrapper-first SDK路线、精确authority矩阵及持续执行至阶段2本地香港VPN连续8小时验证均已获批。阶段0已完成参数/authority同步、审查与`0a2153e76dd9824b675a54cd93cc7f92a08e300f`发布；阶段1已完成实现、验证、三路独立终审及`ef200a6e89eaaee9f19ff49a00232b5004825ce7`/`a29486babe2682481549cfc0b95b010784d653f0`分离发布。阶段2 Attempt1在`16851391ms`后因服务端network-error对象被归为terminal parser error而固定为`FAIL + INCOMPLETE_8H`；专项方案A已由`366fed7d`/`415470e`分离闭合；Attempt2由用户主动终止并固定为`USER_TERMINATED + INCOMPLETE_8H`，当前状态为`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FULL_COLLECTOR_PENDING`。Attempt3按专项三件套从新clean/pushed HEAD重建release-profile training collector，以香港线路和新隔离dataset root运行完整正式训练采集代码路径。当前代码只有training拥有真实RTDS adapter；future paper/live真实RTDS adapter由独立事项实施、测试和部署，但必须继承同一恢复合同。
 7. `METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`：用户已批准新增`polymarket_market_metadata_v4`作为未来current metadata schema；它复用既有`polymarket_market_metadata` artifact、writer和manifest mapping，保留metadata v3的五种row kind与既有字段语义，只追加两个nullable WS claimant外键字段。metadata v3 schema/version立即冻结且不再追加字段，activation前仍承载current metadata new-write，activation后不再由current runtime new-write；不新增artifact、sidecar、digest或第二writer。公开offline legacy writer仍可用于历史fixture、兼容测试和本事项bounded A/B，但不得接入current runtime或canonical production root。
 
 最终目标不是单纯减少文件行数，而是同时做到：
@@ -346,7 +348,7 @@ closure commit `582eb154687c4c0522615753b3fc1903f2e833f3`已推送且三方ref
 
 ### 3.1 当前总需求批准状态与独立门
 
-用户已于2026-07-25明确批准按本需求与对应计划开始执行；本需求不再是“总体未获批草案”。同日用户进一步批准持续推进直至本事项完成：本事项范围内的本地实现、测试、阶段审查、commit和push不再逐次申请授权；只有开发文档、代码语义、运行事实或用户明确描述不能同时成立时才停止请求决策。该持续授权满足阶段3等后继本地执行/发布门，但不使当前代码或旧authority立即失效，不自动通过SDK typed字段gap。2026-07-26用户又明确批准RTDS完整参数、最终需求、wrapper-first SDK路线、精确authority矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe；该裁决不扩大第九节production/部署/远端等范围外事项。`market_resolved` v3 validate-first和`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`继续是已经单独冻结、不得重新置为待决的合同；它们仍不等于Rust/schema/test实现或activation已经完成。current source v2 + metadata v3代码保持有效，只有对应实质入口门和验收通过后，才能在已冻结的原子activation diff中切换。
+用户已于2026-07-25明确批准按本需求与对应计划开始执行；本需求不再是“总体未获批草案”。同日用户进一步批准持续推进直至本事项完成：本事项范围内的本地实现、测试、阶段审查、commit和push不再逐次申请授权；只有开发文档、代码语义、运行事实或用户明确描述不能同时成立时才停止请求决策。该持续授权满足阶段3等后继本地执行/发布门，但不使当时代码或旧authority立即失效，不自动通过SDK typed字段gap。2026-07-26用户又明确批准RTDS完整参数、最终需求、wrapper-first SDK路线、精确authority矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe；2026-07-27用户终止该旧拓扑并将当前游标纠正为Attempt3完整training collector全源正式落盘。两次裁决均不扩大第九节production/部署/远端等范围外事项。`market_resolved` v3 validate-first和`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`继续是已经单独冻结、不得重新置为待决的合同；它们在当时仍不等于Rust/schema/test实现或activation已经完成。当时source v2 + metadata v3代码保持有效，直到后续Stage3入口与验收通过后才由已冻结的原子activation diff切换为当前source v3 + metadata v4；Attempt3运行该当前调用图。
 
 ### 3.2 本需求批准后需要精确取代的旧合同
 
@@ -397,19 +399,19 @@ RTDS typed row/schema 不属于这次 `polymarket_orderbook_v3` 列删除。不�
 - RTDS 业务静默完整换 runtime 子事项在上述升级和拆分后的有序接入；
 - Stage3内实现、运行并独立审查唯一的代表性同输入bounded fixture v2/v3 storage probe，比较storage、CPU、RSS、finalize和读取性能；完整UTC日只消费Stage0已经冻结的post-dedupe v2事实基线，不重扫、不生成full-day v3；
 - 只有metadata v4实现及对应WS claimant/recovery验收通过后，本地代码/test中的current new-write生产调用图才可在同一activation diff中从source v2 + metadata v3原子替换为source v3 + metadata v4；此前只允许未激活的domain/schema/writer/reader、不依赖claimant pair的typed recovery及其测试。不得出现source v3 + metadata v3、source v2 + metadata v4、dual-write或半切换；该代码路径切换不等于production部署或dataset root激活；
-- 本地确定性测试、静态检查，以及已获明确授权的一次RTDS本地香港VPN连续8小时只读probe。
+- 本地确定性测试、静态检查，以及已获明确授权的阶段2 Attempt3：从新clean/pushed HEAD重建release-profile `data-collect-training-collector`，经本地香港线路使用新隔离dataset root和`--max-runtime-secs 28800`运行完整四个logical producer、六个`LIVE_SOURCES`并通过既有Parquet与daily manifest正式落盘。Attempt3会写当前source v3 + metadata v4，属于RTDS专项三件套批准的首次真实本地部分日v3/v4前向验证，不等于完整UTC日前向长跑、production binary激活或canonical dataset-root cutover。
 
 ### 4.2 不包含
 
 - raw Polymarket REST/WebSocket、manual signing、自建 SDK、第二解析器或 shadow feed；
 - 钱包、认证 user channel、真实下单、资金测试或任何交易；
-- 越过SDK typed字段终态、RTDS capability gate或production相关独立门；阶段3本地实现及RTDS阶段0/1和一次阶段2香港VPN只读probe已由持续执行授权覆盖；
+- 越过SDK typed字段终态、RTDS capability gate或production相关独立门；阶段3本地实现及RTDS阶段0/1和阶段2 Attempt3本地完整training collector验证已由持续执行授权覆盖；
 - 修改其他 source 的 persisted payload/hash schema；
 - 新建通用 actor/source/plugin framework；
 - 把代码简单搬进新的巨型模块，或仅以测试数量/总 LOC 下降证明正确；
 - production release、部署、systemd、远端服务器操作；
 - 历史 Parquet 批量重写、删除、production binary激活或服务器 dataset root/canonical new-data cutover；
-- 真实data-pipeline adapter/consumer代码改造，以及尚不存在的真实 paper/live 外部事件 adapter、模型 observation 接线、长时间运行验收和部署；这些必须在正确仓库另建并批准对应三件套；
+- 真实data-pipeline adapter/consumer代码改造，以及尚不存在的真实 paper/live 外部事件 adapter、模型 observation 接线、除本地Attempt3外的长时间运行验收和部署；这些必须在正确仓库另建并批准对应三件套；
 - 为了减行删除 paper/live binary、role、handoff、startup receipt、deployment boundary 或 consumer contract。
 
 ## 五、SDK 0.7.0 需求
@@ -628,7 +630,7 @@ v3 writer 不得包含：
 
 1. 详细行为、术语、参数候选、测试、长跑、授权和性能门只以纳入的 RTDS demand/plan为准，本总需求不复制第二套合同；typed-contract字段裁决不是其依赖。umbrella只消费专项已记录的状态与入口/出口，不重扫数据、不重算参数候选、不重建delta/test矩阵，也不维护第二执行游标。
 2. `4A_AUTHORITY`的完整参数、最终需求、精确authority delta、wrapper-first路线与持续执行入口均已满足；专项矩阵同步、自审、独立审查、文档commit/push及三方ref核对已经闭合。
-3. `4B_IMPLEMENTATION`已证明官方SDK + 当前最小wrapper能够完成真实teardown，并在training完成实现、收窄验证、三路独立终审、分离commit/push和三方ref核对。专项阶段2 Attempt1已固定为`FAIL + INCOMPLETE_8H`；方案A authority与最小vendor修复已由`366fed7d`/`415470e`分离闭合，当前唯一游标是从新clean HEAD和新artifact目录执行Attempt2。
+3. `4B_IMPLEMENTATION`已证明官方SDK + 当前最小wrapper能够完成真实teardown，并在training完成实现、收窄验证、三路独立终审、分离commit/push和三方ref核对。专项阶段2 Attempt1已固定为`FAIL + INCOMPLETE_8H`；方案A authority与最小vendor修复已由`366fed7d`/`415470e`分离闭合；Attempt2由用户主动终止并固定为`USER_TERMINATED + INCOMPLETE_8H`。当前唯一游标是从新clean/pushed HEAD重建release-profile training collector，并以香港线路和新隔离dataset root执行完整正式训练采集代码路径的Attempt3。
 4. teardown能力门已通过且未修改vendor SDK、未创建raw WebSocket旁路；若终审发现新冲突才暂停RTDS，不反向阻断SDK、v3或其他已闭合分支。
 5. RTDS authority、Rust实现和`polymarket_orderbook_v3` schema不得混在同一个diff/commit。
 
@@ -685,7 +687,7 @@ root只保留 facade/config/composition；职责、测试和 visibility按唯一
 
 ### AC-12 RTDS
 
-专项完整参数、最终需求、SDK路线、精确authority修改矩阵和持续执行范围已经获批；4A authority同步、审查与文档发布已闭合，4B实现、验证、三路终审及分离发布已闭合。阶段2 Attempt1因精确network-error服务对象被归为terminal parser error，在`16851391ms`提前结束并永久记为`FAIL + INCOMPLETE_8H`；方案A只为该数据外对象增加crate-private recoverable marker，其余parser/typed/schema错误继续terminal。方案A authority、Rust和Attempt2按专项计划顺序闭合，Attempt2不得覆盖Attempt1。future paper/live真实RTDS adapter必须继承共同合同，但实际adapter、handoff、长跑和部署继续另立三件套。新冲突只记录对应真实阻断，不阻塞SDK、v3或其他已闭合分支。
+专项完整参数、最终需求、SDK路线、精确authority修改矩阵和持续执行范围已经获批；4A authority同步、审查与文档发布已闭合，4B实现、验证、三路终审及分离发布已闭合。阶段2 Attempt1因精确network-error服务对象被归为terminal parser error，在`16851391ms`提前结束并永久记为`FAIL + INCOMPLETE_8H`；方案A只为该数据外对象增加crate-private recoverable marker，其余parser/typed/schema错误继续terminal。Attempt2由用户主动终止并固定为`USER_TERMINATED + INCOMPLETE_8H`；Attempt3从新clean/pushed HEAD运行完整release-profile training collector并正式落盘，且必须并列保留两次既有attempt。future paper/live真实RTDS adapter必须继承共同合同，但实际adapter、handoff、长跑和部署继续另立三件套。新冲突只记录对应真实阻断，不阻塞SDK、v3或其他已闭合分支。
 
 ### AC-13 artifact 与 manifest
 
