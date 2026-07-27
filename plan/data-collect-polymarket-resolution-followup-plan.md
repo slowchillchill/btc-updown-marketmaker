@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-polymarket-resolution-followup-changelog.md`
 >
-> 状态：`PHASE_4_COMPLETE_LOCAL_HK_VPN_AC12_AC13_PASS_2026-07-23__V3_VALIDATE_FIRST_AND_METADATA_V4_STANDING_LOCAL_EXECUTION_AUTHORIZED_NOT_YET_IMPLEMENTED_2026-07-25`。阶段0至阶段3已分别完成自审、独立终审与commit/push；阶段4本地香港线路AC-12、本地全量AC-13与任务4.3三路独立全面终审均已通过。用户于2026-07-24批准未来source schema v3的validate-first文档修订，并于2026-07-25批准未来metadata v4 claimant schema；后续持续执行授权现已覆盖SDK070 Stage3本地Rust/schema/test、审查、commit和push，但实现尚未完成。production部署、服务操作和数据删除仍未获授权、未执行。
+> 状态：`PHASE_4_COMPLETE_LOCAL_HK_VPN_AC12_AC13_PASS_2026-07-23__V3_VALIDATE_FIRST_METADATA_V4_IMPLEMENTED_CURRENT__GAMMA_CLOSED_TIME_FORMAT_A_APPROVED_FIX_PENDING_2026-07-27`。阶段0至阶段3已分别完成自审、独立终审与commit/push；阶段4本地香港线路AC-12、本地全量AC-13与任务4.3三路独立全面终审均已通过。用户于2026-07-24批准source schema v3的validate-first文档修订，并于2026-07-25批准metadata v4 claimant schema；二者已由SDK070 Stage3实施并成为当前new-write组合。2026-07-27 Attempt3暴露的Gamma顶层`closedTime`精确格式缺口已由用户批准方案A，本地最小修复、测试和发布待执行。production部署、服务操作和数据删除仍未获授权、未执行。
 
 > 2026-07-22 AC-12执行拓扑修订：真实source validation固定在本地原生Ubuntu环境通过用户已配置的香港VPN线路执行，不再上传到AWS爱尔兰数据采集服务器。用户已授权阶段4在阶段1至阶段3全部通过后执行；不得改变production service或执行数据删除。
 
@@ -286,6 +286,27 @@ git diff --check
 
 该映射只消费总计划的单一执行游标。后续持续授权已覆盖Stage3本地Rust/schema/test、构建、测试、审查、commit和push；它不等于实现已经完成，也不授权production cutover。
 
+## 2026-07-27 Gamma `closedTime`真实格式后继修复
+
+### 任务 5.1：同步精确格式authority
+
+- 步骤 5.1.1：记录Attempt3顶层Gamma `closedTime="2026-07-27 05:25:52+00"`、当前RFC3339-only helper误判、`E+52s`事实与用户批准的方案A。
+  - 验证：只允许精确`+00`后缀规范化为`+00:00`后交给同一Chrono RFC3339 parser；raw原样保存；不使用nested event兜底，不降级任何integrity error，不增加任意格式框架。
+
+### 任务 5.2：最小实现与验证
+
+- 步骤 5.2.1：只修改共享`parse_polymarket_gamma_closed_time_utc_ms` helper，在既有RFC3339失败后执行上述窄规范化；evaluator、adapter、fatal路径、SDK和schema保持不变。
+  - 验证：精确Attempt3值解析为`1785129952000ms`；既有RFC3339继续通过，非法时间及`closedTime < E`继续按`closed_time_invalid` fail closed，raw仍保存原值。
+- 步骤 5.2.2：只运行直接受影响的`polymarket_contract`精确回归、完整integration target、fmt与diff check；按实际编译影响补充必要check/Clippy。
+  - 验证：不运行RTDS-only probe、100-cycle、资源矩阵、格式笛卡尔积或默认workspace完整测试；没有SDK、Cargo、schema、writer、evaluator或第二parser authority改动。
+- 步骤 5.2.3：自审后执行三路独立审查，成立问题闭环后以独立Rust commit发布。
+  - 验证：authority与Rust不混入同一commit；push后本地HEAD、upstream和远端ref一致。
+
+### 任务 5.3：由RTDS专项执行完整collector复验
+
+- 步骤 5.3.1：修复闭合后只以`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`的新Attempt4作为8小时全量运行游标。
+  - 验证：新clean/pushed HEAD、新release binary、新artifact和空dataset root；不续写Attempt3，不用短smoke替代8小时，不增加本计划第二套长跑验收。
+
 ## 三、需求—计划—验证映射
 
 | 需求 | 计划任务 | 主要验证 |
@@ -296,7 +317,7 @@ git diff --check
 | RF-04 | 2.2 | AC-03、AC-11 |
 | RF-05 | 2.3（source v2历史）；总计划3.1.6至3.2.3、3.4.7 | AC-04、AC-09、AC-10 |
 | RF-06 | 2.4 | AC-01、AC-07 |
-| RF-07 | 1.3、2.4 | AC-05、AC-06、AC-08 |
+| RF-07 | 1.3、2.4、5.1--5.2 | AC-05、AC-06、AC-08 |
 | RF-08 | 1.2、2.4 | AC-07、AC-09 |
 | RF-09 | 1.2、3.1（metadata v3/source v2历史）；总计划3.1.8、3.5.1、3.5.5至3.5.6 | AC-02、AC-09、AC-10 |
 | RF-10 | 2.3、3.1、3.2、3.3（source v2历史）；总计划3.1.6至3.1.8、3.5.1至3.5.6 | AC-04、AC-10、AC-11 |

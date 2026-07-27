@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FULL_COLLECTOR_PENDING`。RTDS的该状态仅在承载本记录的纯文档closure commit成功push且三方ref一致后生效；专项authority commit `366fed7d19ff9ce2f855f362c81de5641b63f9c4`与Rust commit `415470eda0b2d629c19c2609e6610a253703d684`已分离发布并分别完成三方ref核对。RTDS阶段0已以commit `0a2153e76dd9824b675a54cd93cc7f92a08e300f`闭合并push；阶段1文档验收commit `ef200a6e89eaaee9f19ff49a00232b5004825ce7`与Rust实现commit `a29486babe2682481549cfc0b95b010784d653f0`均已push且三方ref一致，三路独立终审均为PASS。阶段2 Attempt1已永久记录为`FAIL + INCOMPLETE_8H`；Attempt2由用户主动终止并固定为`USER_TERMINATED + INCOMPLETE_8H`；Attempt3尚未启动。总事项阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_APPROVED_FIX_PENDING_ATTEMPT4_FULL_COLLECTOR_PENDING`。RTDS的该状态仅在承载本记录的纯文档closure commit成功push且三方ref一致后生效；专项authority commit `366fed7d19ff9ce2f855f362c81de5641b63f9c4`与Rust commit `415470eda0b2d629c19c2609e6610a253703d684`已分离发布并分别完成三方ref核对。RTDS阶段0已以commit `0a2153e76dd9824b675a54cd93cc7f92a08e300f`闭合并push；阶段1文档验收commit `ef200a6e89eaaee9f19ff49a00232b5004825ce7`与Rust实现commit `a29486babe2682481549cfc0b95b010784d653f0`均已push且三方ref一致，三路独立终审均为PASS。阶段2 Attempt1已永久记录为`FAIL + INCOMPLETE_8H`；Attempt2由用户主动终止并固定为`USER_TERMINATED + INCOMPLETE_8H`；Attempt3运行完整六源collector并正式落盘，在`3863.950s`后因Gamma顶层`closedTime="2026-07-27 05:25:52+00"`被RFC3339-only helper误判而退出1，永久记录为`FAIL + INCOMPLETE_8H`。用户已批准Gamma方案A；最小修复分离发布后，唯一下一步为完整六源8小时Attempt4。总事项阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
 > `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
@@ -29,7 +29,7 @@
 > `b569546ae1c9cfc24bcdfe4ba12ee4ce60ccc278`已push且三方ref一致，故
 > `STAGE3_AUTHORITY_SYNC_CLOSED`成立。后继本地实现、测试、审查、
 > commit和push不再逐次申请；只在上下文冲突或实际情况与需求/计划不一致时停止。
-> RTDS完整参数、最终需求、wrapper-first SDK路线、authority矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe已于2026-07-26获批；用户随后终止旧probe并将当前验证对象纠正为本地完整training collector全源正式落盘的Attempt3。production activation/cutover、release、部署、
+> RTDS完整参数、最终需求、wrapper-first SDK路线、authority矩阵及持续执行至阶段2本地香港VPN连续8小时只读probe已于2026-07-26获批；用户随后终止旧probe并将验证对象纠正为本地完整training collector全源正式落盘。Attempt3已经失败并固定，Gamma方案A及修复后Attempt4已获批准。production activation/cutover、release、部署、
 > 远端操作、migration和删除仍为范围外事项。
 > Stage3任务3.1至3.7、S-B/M-B/W-B修复、本地门与重复独立审查均已通过；
 > closure commit `7c6927f663d9c3b387874f688b10346956b9302d`已push且三方ref
@@ -38,7 +38,7 @@
 > Stage5、Stage6与2-REST均已完成各自实现、完整门和独立终审。按用户批准的
 > 方案A，本文条件式记录`2-REST_CLOSED`与核心总事项`CORE_COMPLETE`：只有承载
 > 本记录的closure commit成功push且本地HEAD、upstream与远端ref一致后才生效。
-> RTDS行为专项当前为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FULL_COLLECTOR_PENDING`。
+> RTDS行为专项当前为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_APPROVED_FIX_PENDING_ATTEMPT4_FULL_COLLECTOR_PENDING`。
 > 本文件只记录本组三件套的事实、冲突、决定与执行，不回写旧changelog。
 
 ## 2026-07-24：用户要求建立一个新的总事项
@@ -1916,3 +1916,9 @@ migration、数据删除、public-network smoke或RTDS参数/行为实施。
 - Attempt2由用户主动终止并永久记录为`USER_TERMINATED + INCOMPLETE_8H`，不是代码FAIL；Attempt1继续永久保持`FAIL + INCOMPLETE_8H`，两次历史均不回写。
 - umbrella不建立第二执行或验收游标。承载本记录的纯文档commit成功push且三方ref一致后，消费状态为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FULL_COLLECTOR_PENDING`；唯一下一步由专项从新clean/pushed HEAD运行完整release-profile training collector的Attempt3。
 - 当前正式collector调用图写source v3 + metadata v4，因此Attempt3是用户通过RTDS专项三件套窄批准的首次真实本地部分日v3/v4前向验证。该决定只supersede此前对任何首次真实v3 forward run的一般排除，不授权完整UTC日前向长跑、production binary激活、服务器/canonical dataset-root cutover、deployment、migration或历史数据操作。
+
+## 2026-07-27：RTDS Attempt3失败、Gamma方案A与Attempt4游标
+
+- Attempt3从clean/pushed `c05db6ba58676bec3e20878375608e395ad0971a`运行完整release-profile `data-collect-training-collector`，六个`LIVE_SOURCES`均已写入新隔离dataset root；wrapper运行`3863.950s`后collector退出1。终止原因是Gamma market `btc-updown-5m-1785129600`顶层`closedTime="2026-07-27 05:25:52+00"`被RFC3339-only helper归为`closed_time_invalid`，不是RTDS错误。Attempt3永久记录为`FAIL + INCOMPLETE_8H`，其11个finalized Parquet及manifest作为部分运行证据保留，不冒充8小时通过。
+- 用户批准Gamma方案A：保留既有RFC3339优先路径；仅当其失败时，精确把尾部`+00`规范化为`+00:00`并交给同一Chrono RFC3339 parser。持久化保留原raw；不得读取nested event时间，不接受无时区、其他offset缩写或其他新格式；规范化后仍失败或早于E时继续fail closed。该修复独立属于resolution专项，不改变RTDS合同、SDK、schema、evaluator、adapter或fatal完整性边界。
+- umbrella继续只消费专项状态，不建立第二执行或验收游标。当前消费状态为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_APPROVED_FIX_PENDING_ATTEMPT4_FULL_COLLECTOR_PENDING`；最小修复、定向验证、三路独立审查和分离发布闭合后，唯一下一步由专项从新clean/pushed HEAD、新artifact和空dataset root运行完整六源8小时Attempt4。

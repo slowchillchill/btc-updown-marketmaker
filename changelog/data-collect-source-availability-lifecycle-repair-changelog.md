@@ -650,3 +650,9 @@
 
 - Attempt2由用户主动终止并固定为`USER_TERMINATED + INCOMPLETE_8H`，不是代码FAIL；Attempt1继续永久保持`FAIL + INCOMPLETE_8H`，详细证据只由后继专项changelog记录。
 - 承载本记录的纯文档commit成功push且三方ref一致后，下一游标仅为从新clean/pushed HEAD运行完整release-profile training collector的Attempt3；它是RTDS专项三件套批准的本地部分日前向验证，不是production/canonical cutover。本事项阶段0--9、其他source行为及既有100-cycle边界均不变。
+
+## 2026-07-27：后继RTDS专项Attempt3失败、Gamma方案A与Attempt4
+
+- Attempt3从clean/pushed `c05db6ba58676bec3e20878375608e395ad0971a`运行完整六源collector并正式落盘，在`3863.950s`后因Gamma顶层`closedTime="2026-07-27 05:25:52+00"`被RFC3339-only helper归为`closed_time_invalid`而退出1。它不是RTDS错误，永久记录为`FAIL + INCOMPLETE_8H`；部分Parquet/manifest只保留为失败证据。
+- 用户批准独立resolution方案A：现有RFC3339 parse失败后，只把精确尾部`+00`规范化为`+00:00`并交给同一Chrono parser；原raw、其他格式拒绝、E边界与fail-closed不变。该窄修复不改变本事项阶段0--9的availability分类、RTDS合同或其他source行为。
+- 最小修复、定向验证、三路独立审查和分离发布闭合后，下一游标仅为从新clean/pushed HEAD、新artifact和空dataset root运行完整六源8小时Attempt4。本事项既有100-cycle只保留为历史证据，不重跑。

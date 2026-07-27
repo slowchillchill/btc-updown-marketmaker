@@ -6,13 +6,15 @@
 >
 > 对应 changelog：`changelog/data-collect-polymarket-resolution-followup-changelog.md`
 >
-> 状态：`PHASE_4_COMPLETE_LOCAL_HK_VPN_AC12_AC13_PASS_2026-07-23__V3_VALIDATE_FIRST_AND_METADATA_V4_STANDING_LOCAL_EXECUTION_AUTHORIZED_NOT_YET_IMPLEMENTED_2026-07-25`。用户已逐项批准第八节第1至8项需求语义，拒绝并要求删除第9项固定5秒`closedTime` future-skew allowance，并批准同步第10项主authority；随后明确授权完整执行阶段1至阶段4。阶段1至阶段4已完成实现、验证和规定的独立审查；阶段4本地香港线路AC-12与全量AC-13通过，最终三路全面终审均为Critical 0、Important 0、Minor 0。用户于2026-07-24另批准未来source schema v3的validate-first文档修订，并于2026-07-25批准未来`polymarket_market_metadata_v4` claimant schema；后续持续执行授权现已覆盖SDK070 Stage3本地Rust/schema/test、审查、commit和push，但实现尚未完成。production部署、服务操作和数据删除仍未授权、未执行。
+> 状态：`PHASE_4_COMPLETE_LOCAL_HK_VPN_AC12_AC13_PASS_2026-07-23__V3_VALIDATE_FIRST_METADATA_V4_IMPLEMENTED_CURRENT__GAMMA_CLOSED_TIME_FORMAT_A_APPROVED_FIX_PENDING_2026-07-27`。用户已逐项批准第八节第1至8项需求语义，拒绝并要求删除第9项固定5秒`closedTime` future-skew allowance，并批准同步第10项主authority；随后明确授权完整执行阶段1至阶段4。阶段1至阶段4已完成实现、验证和规定的独立审查；阶段4本地香港线路AC-12与全量AC-13通过，最终三路全面终审均为Critical 0、Important 0、Minor 0。用户于2026-07-24另批准source schema v3的validate-first文档修订，并于2026-07-25批准`polymarket_market_metadata_v4` claimant schema；二者已由SDK070 Stage3实施并成为当前new-write组合。2026-07-27完整training collector的Attempt3真实观察到Gamma顶层`closedTime="2026-07-27 05:25:52+00"`，当前RFC3339-only helper将其误判为parse error；用户已批准下述精确格式方案A，本地最小修复、测试和发布待执行。production部署、服务操作和数据删除仍未授权、未执行。
 
 > 2026-07-22真实数据采集验收拓扑修订：用户指定本事项AC-12必须在本地原生Ubuntu环境使用已配置的香港VPN线路执行，不再使用AWS爱尔兰数据采集服务器。用户现已授权在阶段1至阶段3完成并通过各阶段门后执行阶段4及AC-12；该决定不改变production部署拓扑，也不授权production部署、服务操作或数据删除。
 
 > 2026-07-24 v3 new-write authority修订：用户明确批准未来`polymarket_orderbook_v3`的`market_resolved`取消raw-first，改为完整target admission/identity/winner validation通过后才写一条typed source row。该决定当时只同步文档；当前`polymarket_orderbook_v2` source代码、schema和测试在SDK070 Stage3原子activation门通过前保持不变，2026-07-23 AC-12的source v2 raw执行事实不回写。
 >
 > 2026-07-25 metadata claimant authority修订：用户批准`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`。未来source v3 recovery只使用同一metadata artifact/writer/manifest mapping内的`polymarket_market_metadata_v4`精确claimant pair；metadata v3 schema/version立即冻结，activation前仍是current metadata writer，activation后转为read-only，且不能作为source v3 claimant authority。该决定当时只同步文档；后续持续执行授权覆盖本地实施，current source v2 + metadata v3实现及既有阶段事实仍保持到原子activation门通过。
+>
+> 2026-07-27 Gamma `closedTime`真实格式修订：用户批准方案A。现有Chrono RFC3339第一路径失败且原始值精确以`+00`结尾时，只把该后缀规范化为`+00:00`并再次交给同一parser；真实触发值为`2026-07-27 05:25:52+00`，持久化仍保留未经改写的raw字符串。不得读取nested event时间作备用authority，不得使用`%#z`或第二套格式grammar；无时区、其他offset缩写、规范化后仍无法解析或解析结果早于E时，既有`closed_time_invalid + integrity_error + fail closed`不变。
 
 ## 一、目标
 
@@ -212,7 +214,7 @@ WS event 路径维持 RF-05。Gamma fallback 只有同时满足下列条件才�
 3. response 绑定本次唯一 attempt，由新的 SDK `market_by_slug` 调用取得而非复用 discovery cache；`fetch_start >= scheduled_at`、`receive >= fetch_start`。单次请求在20秒边界终止并写 `transport_unavailable + timeout`，该slot后到response丢弃且不得参与predicate；attempt无法绑定属于内部integrity error，也不得伪装成source predicate失败；
 4. `closed=true`；
 5. `acceptingOrders=false`；
-6. `closedTime` 存在、可解析，且不早于 E；raw closedTime、解析/下界校验结果和本次 receive time 必须分别保存，但不得增加 `closedTime` 相对 receive time 的 future-skew allowance 或上界门；
+6. `closedTime` 存在、可解析，且不早于 E；raw closedTime、解析/下界校验结果和本次 receive time 必须分别保存，但不得增加 `closedTime` 相对 receive time 的 future-skew allowance 或上界门。既有Chrono RFC3339第一路径失败且原始值精确以`+00`结尾时，只允许把该后缀规范化为`+00:00`后再次交给同一parser；raw必须原样保存。不得读取nested event时间兜底，不得引入`%#z`或第二套格式grammar；无时区、其他offset缩写及规范化后仍不可解析的值继续失败；
 7. 本轮只接受去除首尾空白并 ASCII 小写后精确等于 `resolved` 的 `umaResolutionStatus`；不保留未枚举的等价状态口子；
 8. outcomes 与 outcome prices 完整，价格恰好一胜一负；`winning_asset_id` 与 `winning_outcome` 只能按同一 exact asset/outcome 数组索引派生，不能读取或注入 Gamma 不存在的独立 winner 字段；
 9. `active` 字段原样保存为 nullable；缺失写 null 和 field-unavailable reason，但不影响 terminal 判定，无论 true/false/None 都不能恢复成 truth-value gate。
@@ -357,11 +359,11 @@ loopback/SDK contract 测试证明旧 assets 在 pending 期间保留、terminal
 
 ### AC-05：Gamma 正例
 
-至少覆盖一个真实形态的 `active=true, closed=true, acceptingOrders=false, umaResolutionStatus=resolved` fixture，并证明它可通过 terminal predicate；`active=true` 不再被拒绝。
+至少覆盖一个真实形态的 `active=true, closed=true, acceptingOrders=false, umaResolutionStatus=resolved` fixture，并证明它可通过 terminal predicate；`active=true` 不再被拒绝。另以Attempt3精确值`2026-07-27 05:25:52+00`回归共享helper返回`1785129952000ms`；既有terminal predicate测试继续证明该值不早于`E=1785129900000ms`，代码diff必须保持raw持久化路径不变。
 
 ### AC-06：Gamma 负例
 
-table-driven测试必须对RF-09冻结的19个source failure枚举逐项各有至少一个fixture，明确覆盖slug、market id、condition id、asset count/duplicate/set、outcome count/mapping、outcome-price count、closed missing/false、accepting-orders missing/true、closedTime missing/parse/before-E、resolution missing/non-resolved与non-one-hot；另覆盖active null和不绑定当前attempt的stale/cache response。组合失败fixture必须证明只保存precedence最前的唯一reason。除active null外均不得retired，active null仍按其他证据判定；每个可达source负例必须得到唯一result class、predicate三态与稳定failure reason。另以不注入Gamma winner字段的纯派生后置不变量单元测试覆盖`derived_winner_invariant`，断言integrity fail closed且predicate/reason均为null。
+table-driven测试必须对RF-09冻结的19个source failure枚举逐项各有至少一个fixture，明确覆盖slug、market id、condition id、asset count/duplicate/set、outcome count/mapping、outcome-price count、closed missing/false、accepting-orders missing/true、closedTime missing/parse/before-E、resolution missing/non-resolved与non-one-hot；另覆盖active null和不绑定当前attempt的stale/cache response。组合失败fixture必须证明只保存precedence最前的唯一reason。除active null外均不得retired，active null仍按其他证据判定；每个可达source负例必须得到唯一result class、predicate三态与稳定failure reason。既有非法时间与早于E的fixture继续证明`closed_time_invalid` fail closed；方案A不得把无时区、其他offset缩写或规范化后仍不可解析的值变成正例。另以不注入Gamma winner字段的纯派生后置不变量单元测试覆盖`derived_winner_invariant`，断言integrity fail closed且predicate/reason均为null。
 
 ### AC-07：重试与 exhausted
 
@@ -431,3 +433,4 @@ Critical 0、Important 0、Minor 0；已满足计划4.3最终commit/push门。
 10. 批准同步主 authority；本次批准不授权 Rust/schema/test 实现、commit、push、release、远端 probe、部署、服务操作或数据清理。
 11. 用户于2026-07-24批准未来`polymarket_orderbook_v3` new-write取消raw-first：先完成target relevance与完整identity/assets/outcomes/winner校验，qualified才写一条typed source row；unmatched写0条，target-associated contradiction在row admission前fail closed且写0条，Gamma-first只保留accepted drain内的validated non-owning observation，role-exit后写0条。v3 recovery取消post-horizon raw-only例外并按RF-10 typed矩阵执行；历史`polymarket_orderbook_v2` source文件只读、不重写。本次只批准文档修改，不授权Rust/schema/test、构建、commit/push、部署或数据操作。
 12. 用户于2026-07-25批准`METADATA_V4_CLAIMANT_SCHEMA_APPROVED_2026-07-25`：未来`polymarket_market_metadata_v4`复用同一artifact/writer/partition/manifest mapping，以metadata v3完整schema为不可变前缀，仅追加两个nullable WS claimant字段；只有WS-owned terminal同时必填，其他row同时为null。source v3 claimant recovery只接受该pair精确指向唯一finalized typed row，metadata v3不可作为source v3 claimant authority。current new-write只能在同一activation diff中由source v2 + metadata v3原子切换为source v3 + metadata v4；本次仍只批准文档修改，不授权Rust/schema/test、构建、commit/push、部署、migration或数据操作。
+13. 用户于2026-07-27批准Gamma `closedTime`方案A：保留既有RFC3339第一路径；其失败且raw精确以`+00`结尾时，只把该后缀规范化为`+00:00`后再次交给同一parser。raw保持原样，真正不可解析、无时区、其他offset缩写及`closedTime < E`继续按既有完整性边界fail closed。该裁决不允许nested event兜底、`%#z`、transport降级、第二parser authority、额外格式矩阵或修改旧Attempt3 artifact。

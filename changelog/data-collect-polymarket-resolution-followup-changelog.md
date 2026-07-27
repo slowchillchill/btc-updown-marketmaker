@@ -6,7 +6,7 @@
 >
 > 对应计划：`plan/data-collect-polymarket-resolution-followup-plan.md`
 >
-> 状态：`PHASE_4_COMPLETE_LOCAL_HK_VPN_AC12_AC13_PASS_2026-07-23__V3_VALIDATE_FIRST_AND_METADATA_V4_STANDING_LOCAL_EXECUTION_AUTHORIZED_NOT_YET_IMPLEMENTED_2026-07-25`。阶段0至阶段3已分别完成自审、独立终审与commit/push；阶段4本地香港线路AC-12、全量AC-13与三路独立全面终审均已通过。用户于2026-07-24批准未来source schema v3的validate-first文档修订，并于2026-07-25批准未来metadata v4 claimant schema；后续持续执行授权现已覆盖SDK070 Stage3本地Rust/schema/test、审查、commit和push，但实现尚未完成。production部署、服务操作和数据删除仍未获授权、未执行。
+> 状态：`PHASE_4_COMPLETE_LOCAL_HK_VPN_AC12_AC13_PASS_2026-07-23__V3_VALIDATE_FIRST_METADATA_V4_IMPLEMENTED_CURRENT__GAMMA_CLOSED_TIME_FORMAT_A_APPROVED_FIX_PENDING_2026-07-27`。阶段0至阶段3已分别完成自审、独立终审与commit/push；阶段4本地香港线路AC-12、全量AC-13与三路独立全面终审均已通过。用户于2026-07-24批准source schema v3的validate-first文档修订，并于2026-07-25批准metadata v4 claimant schema；二者已由SDK070 Stage3实施并成为当前new-write组合。2026-07-27 Attempt3暴露的Gamma顶层`closedTime`精确格式缺口已由用户批准方案A，本地最小修复、测试和发布待执行。production部署、服务操作和数据删除仍未获授权、未执行。
 
 ## 2026-07-21：数据检查与问题确认
 
@@ -866,6 +866,27 @@ resolution demand与本计划只增加到SDK070总计划阶段3的映射，不�
 current source v2 + metadata v3继续有效到SDK070 Stage3原子activation门通过；
 production activation/cutover、release、部署、远端操作、migration和删除仍不在
 持续授权范围。
+
+## 2026-07-27：Attempt3暴露Gamma `closedTime`真实格式缺口，用户批准方案A
+
+- 完整training collector Attempt3在Gamma attempt ordinal 5收到顶层
+  `closedTime="2026-07-27 05:25:52+00"`；同一response的`closed=true`、
+  `acceptingOrders=false`、`umaResolutionStatus=resolved`和one-hot outcome均成立。
+  市场结束为`2026-07-27T05:25:00Z`，该值表示`E+52s`。
+- pinned SDK已把response成功解码为`Market`并将顶层`closed_time`暴露为
+  `Option<String>`。项目共享helper只调用`DateTime::parse_from_rfc3339`，因此把这一
+  无歧义UTC序列化误判为`closed_time_parse_error + closed_time_invalid`；既有actor按
+  已批准合同先持久化attempt row再fail closed，导致Attempt3提前结束。
+- 权威需求只冻结“存在、可解析且不早于E”，没有冻结RFC3339-only。一旦真实parse error
+  成立，现有fatal行为正确；本次错误在于输入格式覆盖不足，不是应把integrity error降级。
+- 用户批准方案A：保留RFC3339第一路径，只在其失败后把精确`+00`后缀规范化为
+  `+00:00`并再次交给同一Chrono parser；持久化raw保持原样。无时区、其他未批准格式、
+  非法日期及`closedTime < E`继续fail closed。不得使用nested event时间兜底、raw REST、
+  第二parser authority或availability降级。
+- 修复只允许修改共享helper和一个精确`polymarket_contract`回归；不修改SDK、schema、
+  evaluator、adapter、fatal路径或旧Attempt3 artifact，不新增格式矩阵、100-cycle或资源
+  验证。authority与Rust分离发布，修复后由RTDS专项从新clean/pushed HEAD执行完整六源
+  8小时Attempt4。
 
 ## 后续 changelog 规则
 

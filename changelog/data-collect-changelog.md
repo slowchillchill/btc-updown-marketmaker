@@ -725,3 +725,9 @@
 
 - Attempt2由用户主动终止并永久记录为`USER_TERMINATED + INCOMPLETE_8H`，不是代码FAIL；Attempt1继续永久保持`FAIL + INCOMPLETE_8H`，两次历史结果均不覆盖。
 - 承载本记录的纯文档commit成功push且三方ref一致后，当前单一游标为从新clean/pushed HEAD重建release-profile training collector，经香港线路使用新隔离dataset root运行完整正式训练采集代码路径的Attempt3；无需Rust改动。它是用户通过RTDS专项三件套批准的本地部分日前向验证，不是production/canonical cutover；其他source行为、paper/live当前实现、部署、远端、既有数据和100-cycle边界不变。
+
+## 2026-07-27：RTDS Attempt3失败、Gamma方案A与Attempt4
+
+- Attempt3从clean/pushed `c05db6ba58676bec3e20878375608e395ad0971a`运行完整release-profile training collector；六个`LIVE_SOURCES`均已在新隔离dataset root形成正式Parquet/manifest。wrapper运行`3863.950s`后collector退出1，原因是Gamma market `btc-updown-5m-1785129600`顶层`closedTime="2026-07-27 05:25:52+00"`被RFC3339-only helper归为`closed_time_invalid`，不是RTDS错误。该attempt永久为`FAIL + INCOMPLETE_8H`，部分artifact只作失败证据。
+- 用户批准Gamma方案A：保留现有RFC3339优先路径，只在失败后把精确尾部`+00`规范化为`+00:00`并交给同一Chrono parser；原raw、nested event禁用、其他格式拒绝、E边界及fail-closed不变。不新增格式矩阵、100-cycle、资源矩阵、SDK/schema/evaluator/adapter或第二解析authority。
+- 最小修复、定向验证、三路独立审查和分离发布闭合后，当前单一游标为从新clean/pushed HEAD、新artifact和空dataset root，经香港线路运行完整六源8小时Attempt4。其他source行为、paper/live当前实现、production、部署、远端、既有数据和100-cycle边界不变。

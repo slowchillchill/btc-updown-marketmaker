@@ -6,7 +6,7 @@
 >
 > 对应计划：`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`
 >
-> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FULL_COLLECTOR_PENDING`。该状态仅在承载本记录的纯文档authority commit成功push且本地HEAD、upstream与远端ref一致后生效。方案A authority commit `366fed7d19ff9ce2f855f362c81de5641b63f9c4`与Rust commit `415470eda0b2d629c19c2609e6610a253703d684`已分离发布并分别完成三方ref核对；Attempt1永久保持`FAIL + INCOMPLETE_8H`，Attempt2永久记录为`USER_TERMINATED + INCOMPLETE_8H`，Attempt3尚未启动。
+> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_APPROVED_FIX_PENDING_ATTEMPT4_FULL_COLLECTOR_PENDING`。该状态仅在承载本记录的纯文档authority commit成功push且本地HEAD、upstream与远端ref一致后生效。方案A authority commit `366fed7d19ff9ce2f855f362c81de5641b63f9c4`与Rust commit `415470eda0b2d629c19c2609e6610a253703d684`已分离发布并分别完成三方ref核对；Attempt1永久保持`FAIL + INCOMPLETE_8H`，Attempt2永久记录为`USER_TERMINATED + INCOMPLETE_8H`，Attempt3永久记录为`FAIL + INCOMPLETE_8H`。用户已批准Gamma `closedTime`方案A；修复闭合后执行完整六源8小时Attempt4。
 
 ## 2026-07-21：用户选择彻底换连接方向
 
@@ -237,3 +237,13 @@
 - 曾考虑的RTDS-only JSONL方向与用户真实要求不符，已在形成Rust或已提交文档改动前停止。当前正式training binary已经原生组合四个logical producer、六个`LIVE_SOURCES`、`ManifestOwner`及typed Parquet writer，并支持`--max-runtime-secs 28800`；Attempt3无需新增Rust代码、JSONL、第二writer、第二RTDS owner/socket或probe专用production seam。
 - 用户本次明确要求构成本专项三件套的窄范围扩展：Attempt3从承载本authority且已push的clean HEAD设置精确`DATA_COLLECT_GIT_COMMIT`重建本地release-profile binary，经既有香港proxychains路径及显式`--dataset-root <新绝对隔离路径>`连续运行完整训练采集代码路径8小时。它会真实写出当前source v3 + metadata v4及其他四类current schema，因此属于首次真实本地部分日v3/v4前向验证；不得把它误称为完整UTC日前向长跑、production binary激活、服务器/canonical dataset-root cutover、部署、migration或历史数据操作。
 - Attempt3的本次全源验收只检查程序正常完成bounded runtime并协调finalize、六类source均产生非空finalized Parquet、manifest file facts与文件一致、每个manifest登记文件可由PyArrow打开且实际行数匹配，并且没有临时文件残留。若某source为零，必须如实报告该source未完成用户要求，但不能仅据此把collector进程或其他source误判为代码失败；不新增周期路由、资源矩阵或100-cycle。
+
+## 2026-07-27：Attempt3完整collector提前失败，Gamma方案A获批
+
+- Attempt3 artifact为`target/rtds-stage2-attempt3-full-training-20260727T042402Z`。构建和运行均来自clean/pushed `c05db6ba58676bec3e20878375608e395ad0971a`；正式release binary SHA-256为`b73f224b1217cef00592422d5dceedea786e5a5eaf70b154c5f2c0340b4b3337`，命令包含新绝对dataset root、`local-hong-kong-route`、`--max-runtime-secs 28800`和`--max-dataset-bytes 50000000000`。
+- wrapper从`2026-07-27T04:27:37.565691017Z`运行至`2026-07-27T05:32:01.509592989Z`，monotonic elapsed为`3863.950s`；起止route样本均为`8.210.176.1 / HK / HKG`。collector exit为1、tee exit和结束route exit均为0。直接错误为`source_task_error:polymarket_market:Gamma resolution integrity failure:slug=btc-updown-5m-1785129600:ordinal=5`，不是RTDS failure；Attempt3固定为`FAIL + INCOMPLETE_8H`。
+- 错误退出仍协调finalize了11个manifest登记Parquet。六源文件数/行数为：aggTrade `2/20259`、depth snapshot `1/1`、depth update `2/38521`、Polymarket market `2/1311849`、metadata `2/58`、RTDS `2/3365`。逐文件bytes、SHA-256、PyArrow schema/metadata/rows与manifest一致，无额外、`.running`或`.tmp`文件；同日manifest为正确的`open + ended_known`，并精确记录Polymarket source unexpected end和Gamma integrity error。六源非空只证明约64分钟内正式落盘，不满足8小时门。
+- RTDS部分记录一次`steady_silence` replacement start及对应runtime-created，epoch从0到1；自然reconnect为0，3365行均为fresh，最大相邻接收间隔`304.875s`。日志没有可计算四段耗时的时间戳，不能宣称已完整验证replacement恢复耗时或八小时稳定性。
+- offending metadata v4 row保留顶层`closed_time_raw="2026-07-27 05:25:52+00"`，其余terminal字段为`closed=true`、`acceptingOrders=false`、`umaResolutionStatus=resolved`及`outcome_prices_raw=["1","0"]`；因closedTime gate先失败，`winning_asset_id/winning_outcome`仍为null。市场结束为`05:25:00Z`。当前RFC3339-only helper将这个`E+52s`值误判为`closed_time_parse_error`，随后既有fail-closed路径正确终止collector。
+- 用户批准Gamma `closedTime`方案A：只把真实顶层格式的精确`+00`后缀规范化为`+00:00`并交给同一Chrono parser，raw原样保存；非法、无时区、其他未批准格式及早于E继续fatal。不得使用nested event兜底或把integrity error降级。
+- authority与最小Rust修复必须分离完成测试、三路审查、commit/push和三方ref核对。闭合后从新clean/pushed HEAD设置新`DATA_COLLECT_GIT_COMMIT`，用新release binary、新artifact和空dataset root执行完整六源8小时Attempt4；不得续写Attempt3、拼接剩余时间或恢复RTDS-only/100-cycle/资源矩阵。

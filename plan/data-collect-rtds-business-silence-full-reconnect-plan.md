@@ -6,9 +6,9 @@
 >
 > 对应 changelog：`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FULL_COLLECTOR_PENDING`。该状态仅在承载本记录的纯文档authority commit成功push且本地HEAD、upstream与远端ref一致后生效。方案A authority commit `366fed7d19ff9ce2f855f362c81de5641b63f9c4`与Rust commit `415470eda0b2d629c19c2609e6610a253703d684`已分离发布并分别完成三方ref核对。阶段0与阶段1均已完成并发布。阶段2 Attempt1永久为`FAIL + INCOMPLETE_8H`；Attempt2从clean `0685fcab51a2b7c644ba7c5aca9c873134f88fd4`启动旧RTDS-only内存probe，随后由用户明确终止并纠正测试拓扑，永久为`USER_TERMINATED + INCOMPLETE_8H`。Attempt3改为运行从新clean、已push HEAD重建的完整`data-collect-training-collector`，让全部正式数据源通过现有Parquet writer和每日manifest写入新的本地隔离dataset root；无需Rust修改。该本地部分日前向验证不等于production binary激活、完整UTC日前向长跑或canonical cutover。future paper/live 真实 RTDS adapter 一旦由独立事项接入，必须继承同一行为合同，不得重新冻结另一套恢复政策。
+> 状态：`APPROVED_SHARED_RTDS_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_APPROVED_FIX_PENDING_ATTEMPT4_FULL_COLLECTOR_PENDING`。该状态仅在承载本记录的纯文档authority commit成功push且本地HEAD、upstream与远端ref一致后生效。方案A authority commit `366fed7d19ff9ce2f855f362c81de5641b63f9c4`与Rust commit `415470eda0b2d629c19c2609e6610a253703d684`已分离发布并分别完成三方ref核对。阶段0与阶段1均已完成并发布；Attempt1永久为`FAIL + INCOMPLETE_8H`，Attempt2永久为`USER_TERMINATED + INCOMPLETE_8H`。Attempt3已运行完整`data-collect-training-collector`并形成六源正式Parquet/manifest，但因Gamma顶层`closedTime`格式误判在`3863.950s`退出1，永久为`FAIL + INCOMPLETE_8H`。用户已批准Gamma方案A；resolution最小修复、定向验证、三路审查和分离发布闭合后，唯一下一游标为从新clean/pushed HEAD、新artifact和空dataset root执行完整六源8小时Attempt4。该本地部分日前向验证不等于production binary激活、完整UTC日前向长跑或canonical cutover。future paper/live真实RTDS adapter一旦由独立事项接入，必须继承同一行为合同。
 
-本计划以最小source-local ownership loop为边界，不预设大型状态机、通用配置框架、新production probe seam、额外schema/counter或第二数据路径。每个阶段完成后先自审，再由继承`gpt-5.6-sol`/`ultra`的独立subagent审查，成立问题闭环后才发布。本地authority同步、review/commit/push、从clean HEAD重建release-profile binary及阶段2本地香港VPN连续8小时完整training collector落盘验证按既定阶段顺序持续执行，不重复申请普通实现授权；当前完整collector能力已经存在，本轮不创建Rust diff。capability失败、SDK缺口或新冲突仍必须停止。production release、systemd、部署、远端、上传、migration和数据清理保持独立边界。
+本计划以最小source-local ownership loop为边界，不预设大型状态机、通用配置框架、新production probe seam、额外schema/counter或第二数据路径。每个阶段完成后先自审，再由继承`gpt-5.6-sol`/`ultra`的独立subagent审查，成立问题闭环后才发布。本地authority同步、review/commit/push、从clean HEAD重建release-profile binary及阶段2本地香港VPN连续8小时完整training collector落盘验证按既定阶段顺序持续执行，不重复申请普通实现授权。当前完整collector能力已经存在；本轮Rust只允许resolution专项批准的共享Gamma `closedTime` helper及一个精确回归，不改变RTDS实现或建立第二解析路径。capability失败、SDK缺口或新冲突仍必须停止。production release、systemd、部署、远端、上传、migration和数据清理保持独立边界。
 
 ## 阶段 0：冻结参数、authority 修改矩阵与 wrapper 路线
 
@@ -171,13 +171,20 @@
   - 验证：三件套与七份current pointer一致；明确当前collector会写source v3 + metadata v4，本专项三件套是用户本次批准的首次真实本地部分日v3/v4前向验证authority，但不授权完整UTC日前向长跑、production binary激活或canonical dataset-root cutover。独立审查、纯文档commit/push及三方ref核对完成前不得启动Attempt3；无需Rust代码commit。
 - 步骤 2.2.7：从步骤2.2.6发布后的新clean HEAD重建release binary，并按任务2.1与步骤2.2.1--2.2.2运行Attempt3。
   - 验证：Attempt3使用新artifact目录和新隔离dataset root；不得写Attempt1/Attempt2目录，不得运行RTDS-only harness，不得新增JSONL sidecar、100-cycle、资源矩阵或默认workspace完整测试。
+- Attempt3执行结果：从clean/pushed `c05db6ba58676bec3e20878375608e395ad0971a`构建SHA-256为`b73f224b1217cef00592422d5dceedea786e5a5eaf70b154c5f2c0340b4b3337`的正式release binary；artifact为`target/rtds-stage2-attempt3-full-training-20260727T042402Z`，起止香港route样本均为`8.210.176.1 / HK / HKG`。wrapper运行`3863.950s`后collector exit 1，直接错误为`Gamma resolution integrity failure:slug=btc-updown-5m-1785129600:ordinal=5`，固定为`FAIL + INCOMPLETE_8H`。11个finalized Parquet覆盖六源且逐文件bytes/SHA/PyArrow rows与manifest一致，无临时文件；这些部分证据不能替代8小时验收。
+- 步骤 2.2.8：以独立纯文档diff同步Gamma `closedTime`方案A及Attempt3失败事实。
+  - 验证：格式语义只由resolution三件套单点定义；RTDS三件套和七份current pointer只消费该裁决。authority完成独立审查、commit/push和三方ref一致后才进入Rust；不改写Attempt3 artifact或历史Attempt1/2。
+- 步骤 2.2.9：只修改共享Gamma `closedTime` parser helper并增加一个Attempt3精确值回归。
+  - 验证：既有RFC3339第一路径不变；只把精确`+00`后缀规范化为`+00:00`后再次交给同一Chrono parser；raw原样保存，非法、无时区、其他未批准格式及早于E继续fail closed。只运行直接受影响的Polymarket合同测试和必要静态门，不修改SDK/schema/evaluator/adapter/fatal路径，不新增格式矩阵、RTDS-only probe、100-cycle或资源矩阵。三路审查通过后以独立Rust commit/push并核对三方ref。
+- 步骤 2.2.10：从步骤2.2.9及其闭合文档发布后的新clean/pushed HEAD设置新`DATA_COLLECT_GIT_COMMIT`重建release binary，按任务2.1与步骤2.2.1--2.2.2运行Attempt4。
+  - 验证：使用新artifact和空dataset root，不续写Attempt3、不拼接剩余时间、不以短smoke替代8小时；同一正式四logical-producer/六source/ManifestOwner/Parquet路径连续运行至少28800秒并满足退出0及全部文件门。
 
 ### 任务 2.3：报告与阶段审查
 
-- 步骤 2.3.1：报告完整collector六源文件/行数、manifest/file一致性、RTDS最长相邻接收间隔、replacement/自然重连/error计数，以及真实发生replacement时已有日志和Parquet能直接证明的事件顺序，并与历史`6075.343s`作跨环境数量级比较；不强制形成四段耗时或分布。
+- 步骤 2.3.1：报告Attempt4完整collector六源文件/行数、manifest/file一致性、RTDS最长相邻接收间隔、replacement/自然重连/error计数，以及真实发生replacement时已有日志和Parquet能直接证明的事件顺序，并与历史`6075.343s`作跨环境数量级比较；不强制形成四段耗时或分布。
   - 验证：香港本地不冒充AWS爱尔兰同环境对照；没有真实replacement或样本过少时不推导恢复耗时分布，只写证据实际支持的结论。
 - 步骤 2.3.2：同步三件套实际collector证据与剩余风险，自审后派生独立subagent终审。
-  - 验证：完整collector机械正确性与真实RTDS replacement效果分别标记；最终报告并列保留Attempt1失败、Attempt2用户终止和Attempt3实际结果，并明确前两次与Attempt3测试拓扑不同；成立问题闭环后发布commit/push。
+  - 验证：完整collector机械正确性与真实RTDS replacement效果分别标记；最终报告并列保留Attempt1失败、Attempt2用户终止、Attempt3失败和Attempt4实际结果，并明确四次测试拓扑与终态；成立问题闭环后发布commit/push。
 
 ## 阶段 3：production release 与部署保持独立授权
 
@@ -186,4 +193,4 @@
 
 ## 本轮文档执行结果
 
-三日真实RTDS typed raw参数分析、任务0.1--0.4及全部参数裁决已完成。阶段0与阶段1均已完成并分离发布；冻结合同仍为`steady=300s`、`first-fresh=60s/后到 monotonic anchor`、cold-start首次fresh前禁用，以及outer `1s × 2 ±20%`、hard cap=`300s`、fresh重置、总尝试不限。历史100-cycle只保留为旧阶段事实。香港VPN Attempt1固定为`FAIL + INCOMPLETE_8H`；E-A污染已披露。方案A已由authority commit `366fed7d`与Rust commit `415470e`分离闭合。Attempt2从`0685fca`启动旧RTDS-only内存probe后由用户终止，固定为`USER_TERMINATED + INCOMPLETE_8H`；用户随后明确纠正Stage2应启动完整training collector并保存全部正式数据源的Parquet/manifest。本轮无需Rust修改；承载本记录的纯文档authority commit发布并完成三方ref核对后，当前游标进入步骤2.2.7，从新clean HEAD重建本地release-profile binary并在新artifact/隔离dataset root执行Attempt3。production release、systemd、部署、远端、上传、migration和数据清理仍未执行。
+三日真实RTDS typed raw参数分析、任务0.1--0.4及全部参数裁决已完成。阶段0与阶段1均已完成并分离发布；冻结合同仍为`steady=300s`、`first-fresh=60s/后到 monotonic anchor`、cold-start首次fresh前禁用，以及outer `1s × 2 ±20%`、hard cap=`300s`、fresh重置、总尝试不限。历史100-cycle只保留为旧阶段事实。香港线路Attempt1固定为`FAIL + INCOMPLETE_8H`，E-A污染已披露；方案A已由authority commit `366fed7d`与Rust commit `415470e`分离闭合；Attempt2固定为`USER_TERMINATED + INCOMPLETE_8H`。Attempt3已按用户纠正运行完整training collector并保存六源Parquet/manifest，但因Gamma `closedTime`格式误判在`3863.950s`退出1，固定为`FAIL + INCOMPLETE_8H`。用户已批准Gamma方案A；当前游标为步骤2.2.8--2.2.9的authority/Rust分离修复，闭合后进入步骤2.2.10，从新clean/pushed HEAD和新artifact/空dataset root执行完整六源8小时Attempt4。production release、systemd、部署、远端、上传、migration和数据清理仍未执行。
