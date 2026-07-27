@@ -85,6 +85,7 @@ pub struct BookUpdate {
     pub asks: Vec<OrderBookLevel>,
     /// Last traded price known at snapshot time
     #[serde(default)]
+    #[serde_as(deserialize_as = "NoneAsEmptyString")]
     pub last_trade_price: Option<Decimal>,
     /// Hash for orderbook validation
     pub hash: Option<String>,
@@ -117,6 +118,7 @@ pub struct PriceChange {
 }
 
 #[non_exhaustive]
+#[serde_as]
 #[derive(Debug, Clone, Deserialize, Builder)]
 pub struct PriceChangeBatchEntry {
     /// Asset/token identifier
@@ -133,9 +135,11 @@ pub struct PriceChangeBatchEntry {
     pub hash: Option<String>,
     /// Best bid price after this change
     #[serde(default)]
+    #[serde_as(deserialize_as = "NoneAsEmptyString")]
     pub best_bid: Option<Decimal>,
     /// Best ask price after this change
     #[serde(default)]
+    #[serde_as(deserialize_as = "NoneAsEmptyString")]
     pub best_ask: Option<Decimal>,
 }
 
@@ -150,6 +154,7 @@ pub struct TickSizeChange {
     pub market: B256,
     /// Previous tick size
     #[serde(default)]
+    #[serde_as(deserialize_as = "NoneAsEmptyString")]
     pub old_tick_size: Option<Decimal>,
     /// New tick size
     pub new_tick_size: Decimal,
@@ -173,8 +178,12 @@ pub struct LastTradePrice {
     /// Side of the last trade
     pub side: Option<Side>,
     /// Size of the last trade
+    #[serde(default)]
+    #[serde_as(deserialize_as = "NoneAsEmptyString")]
     pub size: Option<Decimal>,
     /// Fee rate in basis points
+    #[serde(default)]
+    #[serde_as(deserialize_as = "NoneAsEmptyString")]
     pub fee_rate_bps: Option<Decimal>,
     /// Unix timestamp in milliseconds
     #[serde(default)]
@@ -195,12 +204,15 @@ pub struct BestBidAsk {
     pub asset_id: U256,
     /// Current best bid price
     #[serde(default)]
+    #[serde_as(deserialize_as = "NoneAsEmptyString")]
     pub best_bid: Option<Decimal>,
     /// Current best ask price
     #[serde(default)]
+    #[serde_as(deserialize_as = "NoneAsEmptyString")]
     pub best_ask: Option<Decimal>,
     /// Spread between best bid and ask
     #[serde(default)]
+    #[serde_as(deserialize_as = "NoneAsEmptyString")]
     pub spread: Option<Decimal>,
     /// Unix timestamp in milliseconds
     #[serde(default)]
@@ -668,7 +680,9 @@ mod tests {
                 "asset_id": "1",
                 "price": "0.5",
                 "size": "10",
-                "side": "BUY"
+                "side": "BUY",
+                "best_bid": null,
+                "best_ask": null
             }]
         }"#;
 
@@ -678,6 +692,8 @@ mod tests {
             };
             assert_eq!(event.timestamp, None);
             assert_eq!(event.price_changes.len(), 1);
+            assert_eq!(event.price_changes[0].best_bid, None);
+            assert_eq!(event.price_changes[0].best_ask, None);
         });
     }
 
@@ -694,6 +710,8 @@ mod tests {
             "asset_id": "1",
             "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
             "price": "0.5",
+            "size": null,
+            "fee_rate_bps": null,
             "timestamp": null
         }"#;
 
@@ -703,6 +721,8 @@ mod tests {
             };
             assert_eq!(event.timestamp, None);
             assert_eq!(event.price, dec!(0.5));
+            assert_eq!(event.size, None);
+            assert_eq!(event.fee_rate_bps, None);
         });
     }
 
@@ -759,6 +779,114 @@ mod tests {
             assert_eq!(event.spread, None);
             assert_eq!(event.timestamp, None);
         });
+    }
+
+    #[test]
+    fn parse_nullable_decimal_empty_strings_as_none() {
+        let json = r#"[
+            {
+                "event_type": "book",
+                "asset_id": "1",
+                "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                "bids": [],
+                "asks": [],
+                "last_trade_price": ""
+            },
+            {
+                "event_type": "price_change",
+                "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                "price_changes": [{
+                    "asset_id": "1",
+                    "price": "0.5",
+                    "size": "1",
+                    "side": "BUY",
+                    "best_bid": "",
+                    "best_ask": ""
+                }]
+            },
+            {
+                "event_type": "tick_size_change",
+                "asset_id": "1",
+                "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                "old_tick_size": "",
+                "new_tick_size": "0.01"
+            },
+            {
+                "event_type": "last_trade_price",
+                "asset_id": "1",
+                "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                "price": "0.5",
+                "size": "",
+                "fee_rate_bps": ""
+            },
+            {
+                "event_type": "best_bid_ask",
+                "asset_id": "1",
+                "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                "best_bid": "",
+                "best_ask": "",
+                "spread": ""
+            }
+        ]"#;
+
+        let messages = parse_if_interested(json.as_bytes(), &MessageInterest::ALL).unwrap();
+        assert_eq!(messages.len(), 5);
+        assert!(matches!(
+            &messages[0],
+            WsMessage::Book(event) if event.last_trade_price.is_none()
+        ));
+        assert!(matches!(
+            &messages[1],
+            WsMessage::PriceChange(event)
+                if event.price_changes[0].best_bid.is_none()
+                    && event.price_changes[0].best_ask.is_none()
+        ));
+        assert!(matches!(
+            &messages[2],
+            WsMessage::TickSizeChange(event) if event.old_tick_size.is_none()
+        ));
+        assert!(matches!(
+            &messages[3],
+            WsMessage::LastTradePrice(event)
+                if event.size.is_none() && event.fee_rate_bps.is_none()
+        ));
+        assert!(matches!(
+            &messages[4],
+            WsMessage::BestBidAsk(event)
+                if event.best_bid.is_none()
+                    && event.best_ask.is_none()
+                    && event.spread.is_none()
+        ));
+    }
+
+    #[test]
+    fn reject_nonempty_malformed_nullable_decimal() {
+        let json = r#"{
+            "event_type": "book",
+            "asset_id": "1",
+            "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "bids": [],
+            "asks": [],
+            "last_trade_price": " "
+        }"#;
+
+        assert!(parse_if_interested(json.as_bytes(), &MessageInterest::ALL).is_err());
+    }
+
+    #[test]
+    fn reject_empty_required_price_change_size() {
+        let json = r#"[{
+            "event_type": "price_change",
+            "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "price_changes": [{
+                "asset_id": "1",
+                "price": "0.5",
+                "size": "",
+                "side": "BUY"
+            }]
+        }]"#;
+
+        assert!(parse_if_interested(json.as_bytes(), &MessageInterest::ALL).is_err());
     }
 
     #[test]
