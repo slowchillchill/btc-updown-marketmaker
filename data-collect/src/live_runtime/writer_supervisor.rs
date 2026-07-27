@@ -2399,7 +2399,7 @@ impl LiveSegmentWriter {
 pub(super) fn typed_schema_version(source_kind: &str) -> &'static str {
     match source_kind {
         "polymarket_market" => POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,
-        "polymarket_market_metadata" => POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION,
+        "polymarket_market_metadata" => POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION,
         "binance_depth_snapshot" => BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
         "binance_depth_update" => BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
         "binance_aggtrade" => BINANCE_AGGTRADE_SCHEMA_VERSION,
@@ -2416,7 +2416,7 @@ fn write_typed_live_event(writer: &mut TypedParquetSegmentWriter, event: &RawEve
             Err(invalid_data("legacy raw Polymarket event reached the activated v3 writer").into())
         }
         "polymarket_market_metadata" => {
-            write_polymarket_metadata_v4_live_event(writer, event, logical_bytes)
+            write_polymarket_metadata_v5_live_event(writer, event, logical_bytes)
         }
         "binance_depth_snapshot" => {
             let row = binance_depth_snapshot_row_from_event(event)?;

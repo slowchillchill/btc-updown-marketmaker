@@ -302,10 +302,106 @@ fn live_segment_finalize_emits_daily_delta_without_segment_manifest() {
 }
 
 #[test]
+fn polymarket_metadata_v5_version_propagates_through_finalize_and_manifest() {
+    let tmp = tempdir().unwrap();
+    let dataset_root = tmp.path().canonicalize().unwrap();
+    let discovery = test_btc_discovery();
+    let prefix = polymarket_metadata_snapshot_v3_row(
+        &discovery.current,
+        MarketRuntimeRole::Current,
+        &CollectorIdentity {
+            host_id: "collector-test".to_owned(),
+            region: "local-test".to_owned(),
+        },
+    )
+    .unwrap();
+    let admission_time_utc_ms = prefix.fixed_identity_verified_at_utc + 1;
+    let mut event = polymarket_metadata_v5_raw_event(
+        PolymarketMarketMetadataV5Row::from_v3_prefix(prefix, None, None),
+    )
+    .unwrap();
+    event.collector_admission = Some(RawEventAdmission {
+        sequence: 1,
+        time_utc_ms: admission_time_utc_ms,
+    });
+    let utc_day = utc_day_string_from_ms(event.recv_time_utc_ms).unwrap();
+    let naming = HourlyPartitionPolicy::new(&dataset_root)
+        .unwrap()
+        .partition("polymarket_market_metadata", event.recv_time_utc_ms, None)
+        .unwrap();
+    let (mut owner, day_dir) = reactivated_manifest_owner(
+        &dataset_root,
+        &utc_day,
+        event.recv_time_utc_ms - 1_000,
+        event.recv_time_utc_ms - 500,
+    );
+    let mut segment = ActiveSegment::new(naming, "polymarket_market_metadata", 0).unwrap();
+    assert_eq!(segment.writer.write_event(&event).unwrap(), 1);
+    segment.observe(&event, 1);
+
+    let (manifest_tx, mut manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
+    let finalized = finalize_segment(
+        segment,
+        "shutdown_finalize",
+        &test_runtime_provenance("metadata-v5"),
+        &manifest_tx,
+    )
+    .unwrap();
+    let ManifestCommand::Finalized(delta) = manifest_rx.blocking_recv().unwrap() else {
+        panic!("expected finalized-file delta");
+    };
+    assert_eq!(
+        delta.schema_version,
+        POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION
+    );
+    owner.apply_finalized(delta).unwrap();
+    let manifest = load_day_manifest(&day_dir).unwrap().unwrap();
+    assert_eq!(
+        manifest["files"][0]["schema_version"],
+        POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION
+    );
+
+    let reader = SerializedFileReader::new(File::open(finalized.parquet_path).unwrap()).unwrap();
+    let metadata = reader
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .expect("typed Parquet must carry footer metadata");
+    let footer_schema_version = metadata
+        .iter()
+        .find(|entry| entry.key == "parquet_raw_layout_version")
+        .and_then(|entry| entry.value.as_deref());
+    assert_eq!(
+        footer_schema_version,
+        Some(POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION)
+    );
+    let embedded = metadata
+        .iter()
+        .find(|entry| entry.key == DAILY_FILE_RECOVERY_METADATA_KEY)
+        .and_then(|entry| entry.value.as_deref())
+        .map(|payload| serde_json::from_str::<DailyFileRecoveryMetadata>(payload).unwrap())
+        .expect("typed Parquet must carry embedded recovery metadata");
+    assert_eq!(
+        embedded.schema_version,
+        POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION
+    );
+    let fields = reader
+        .metadata()
+        .file_metadata()
+        .schema_descr()
+        .columns()
+        .iter()
+        .map(|column| column.name().to_owned())
+        .collect::<Vec<_>>();
+    assert!(fields.contains(&"source_evidence_raw_sha256".to_owned()));
+    assert!(!fields.contains(&"resolution_evidence_raw_sha256".to_owned()));
+}
+
+#[test]
 fn polymarket_metadata_sort_order_matches_parquet_and_embedded_recovery_facts_by_version() {
     use crate::polymarket_market_metadata_layout::{
         POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
-        POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION,
+        POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION,
     };
 
     let tmp = tempdir().unwrap();
@@ -331,6 +427,10 @@ fn polymarket_metadata_sort_order_matches_parquet_and_embedded_recovery_facts_by
             POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION,
             "collector_admission_order",
         ),
+        (
+            POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION,
+            "collector_admission_order",
+        ),
     ]
     .into_iter()
     .enumerate()
@@ -350,7 +450,7 @@ fn polymarket_metadata_sort_order_matches_parquet_and_embedded_recovery_facts_by
             event_type_counts: BTreeMap::new(),
             facts,
         };
-        if schema_version == POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION {
+        if schema_version != POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION {
             continue;
         }
         let writer_root = dataset_root.join(format!("version-{index}"));

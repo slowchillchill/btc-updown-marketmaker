@@ -10,6 +10,7 @@ pub use crate::source_format::MarketLifecycleState;
 pub const POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION: &str = "polymarket_market_metadata_v2";
 pub const POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION: &str = "polymarket_market_metadata_v3";
 pub const POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION: &str = "polymarket_market_metadata_v4";
+pub const POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION: &str = "polymarket_market_metadata_v5";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -851,6 +852,7 @@ fn non_empty_json_list(values: &[String]) -> Option<String> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PolymarketMarketMetadataV3Validation {
     pub violations: Vec<String>,
+    validate_legacy_resolution_digest: bool,
 }
 
 impl PolymarketMarketMetadataV3Validation {
@@ -872,6 +874,10 @@ impl PolymarketMarketMetadataV3Validation {
 
     fn reject(&mut self, violation: &str) {
         self.violations.push(violation.to_owned());
+    }
+
+    fn validates_legacy_resolution_digest(&self) -> bool {
+        self.validate_legacy_resolution_digest
     }
 }
 
@@ -954,6 +960,13 @@ pub struct PolymarketMarketMetadataV3Row {
 pub struct PolymarketMarketMetadataV4Row {
     #[serde(flatten)]
     pub v3_prefix: PolymarketMarketMetadataV3Row,
+    pub ws_claimant_source_sequence_epoch_id: Option<String>,
+    pub ws_claimant_collector_admission_sequence: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PolymarketMarketMetadataV5Row {
+    v3_prefix: PolymarketMarketMetadataV3Row,
     pub ws_claimant_source_sequence_epoch_id: Option<String>,
     pub ws_claimant_collector_admission_sequence: Option<u64>,
 }
@@ -1118,15 +1131,17 @@ impl PolymarketMarketMetadataV3Row {
     }
 
     pub fn validate(&self) -> PolymarketMarketMetadataV3Validation {
-        self.validate_for_schema(POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION)
+        self.validate_for_schema(POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION, true)
     }
 
     fn validate_for_schema(
         &self,
         expected_schema_version: &str,
+        validate_legacy_resolution_digest: bool,
     ) -> PolymarketMarketMetadataV3Validation {
         let mut report = PolymarketMarketMetadataV3Validation {
             violations: Vec::new(),
+            validate_legacy_resolution_digest,
         };
         self.validate_common(&mut report, expected_schema_version);
         match self.metadata_row_kind {
@@ -1177,13 +1192,12 @@ impl PolymarketMarketMetadataV3Row {
             report.require(field, !value.trim().is_empty());
         }
         if self.schema_version != expected_schema_version {
-            report.reject(
-                if expected_schema_version == POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION {
-                    "schema_version:expected_v3"
-                } else {
-                    "schema_version:expected_v4"
-                },
-            );
+            report.reject(match expected_schema_version {
+                POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION => "schema_version:expected_v3",
+                POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION => "schema_version:expected_v4",
+                POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION => "schema_version:expected_v5",
+                _ => "schema_version:unexpected",
+            });
         }
         self.validate_fixed_identity(report);
         self.validate_source_times_and_digests(report);
@@ -1285,7 +1299,9 @@ impl PolymarketMarketMetadataV3Row {
             report.reject("source_evidence_payload_json:invalid_json");
         }
 
-        if let Some(digest) = self.resolution_evidence_raw_sha256.as_deref() {
+        if report.validates_legacy_resolution_digest()
+            && let Some(digest) = self.resolution_evidence_raw_sha256.as_deref()
+        {
             if !is_sha256_hex(digest) {
                 report.reject("resolution_evidence_raw_sha256:invalid");
             }
@@ -1925,12 +1941,14 @@ impl PolymarketMarketMetadataV3Row {
                 "resolution_evidence_source",
                 self.resolution_evidence_source.is_none(),
             ),
-            (
-                "resolution_evidence_raw_sha256",
-                self.resolution_evidence_raw_sha256.is_none(),
-            ),
         ] {
             report.require_null(field, is_null);
+        }
+        if report.validates_legacy_resolution_digest() {
+            report.require_null(
+                "resolution_evidence_raw_sha256",
+                self.resolution_evidence_raw_sha256.is_none(),
+            );
         }
         report.require_null(
             "resolution_transport_error_class",
@@ -2470,13 +2488,15 @@ impl PolymarketMarketMetadataV3Row {
                 "resolution_evidence_source",
                 self.resolution_evidence_source.is_none(),
             ),
-            (
-                "resolution_evidence_raw_sha256",
-                self.resolution_evidence_raw_sha256.is_none(),
-            ),
             ("terminal_claim_owner", self.terminal_claim_owner.is_none()),
         ] {
             report.require_null(field, is_null);
+        }
+        if report.validates_legacy_resolution_digest() {
+            report.require_null(
+                "resolution_evidence_raw_sha256",
+                self.resolution_evidence_raw_sha256.is_none(),
+            );
         }
     }
 
@@ -2651,10 +2671,12 @@ impl PolymarketMarketMetadataV3Row {
             "winning_outcome",
             non_empty(self.winning_outcome.as_deref()),
         );
-        report.require(
-            "resolution_evidence_raw_sha256",
-            non_empty(self.resolution_evidence_raw_sha256.as_deref()),
-        );
+        if report.validates_legacy_resolution_digest() {
+            report.require(
+                "resolution_evidence_raw_sha256",
+                non_empty(self.resolution_evidence_raw_sha256.as_deref()),
+            );
+        }
         if let (Some(winner), Ok(asset_ids)) = (
             self.winning_asset_id.as_deref(),
             serde_json::from_str::<Vec<String>>(&self.asset_ids),
@@ -2682,32 +2704,90 @@ impl PolymarketMarketMetadataV4Row {
     pub fn validate(&self) -> PolymarketMarketMetadataV3Validation {
         let mut report = self
             .v3_prefix
-            .validate_for_schema(POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION);
-        let claimant_required = self.v3_prefix.metadata_row_kind
-            == PolymarketMetadataRowKind::ResolutionTerminalWs
-            && self.v3_prefix.terminal_claim_owner == Some(TerminalClaimOwner::MarketResolvedWs);
-
-        if claimant_required {
-            report.require(
-                "ws_claimant_source_sequence_epoch_id",
-                non_empty(self.ws_claimant_source_sequence_epoch_id.as_deref()),
-            );
-            report.require(
-                "ws_claimant_collector_admission_sequence",
-                self.ws_claimant_collector_admission_sequence
-                    .is_some_and(|sequence| sequence > 0),
-            );
-        } else {
-            report.require_null(
-                "ws_claimant_source_sequence_epoch_id",
-                self.ws_claimant_source_sequence_epoch_id.is_none(),
-            );
-            report.require_null(
-                "ws_claimant_collector_admission_sequence",
-                self.ws_claimant_collector_admission_sequence.is_none(),
-            );
-        }
+            .validate_for_schema(POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION, true);
+        validate_ws_claimant_pair(
+            &self.v3_prefix,
+            self.ws_claimant_source_sequence_epoch_id.as_deref(),
+            self.ws_claimant_collector_admission_sequence,
+            &mut report,
+        );
         report
+    }
+}
+
+impl PolymarketMarketMetadataV5Row {
+    pub fn from_v3_prefix(
+        mut v3_prefix: PolymarketMarketMetadataV3Row,
+        ws_claimant_source_sequence_epoch_id: Option<String>,
+        ws_claimant_collector_admission_sequence: Option<u64>,
+    ) -> Self {
+        v3_prefix.schema_version = POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION.to_owned();
+        v3_prefix.resolution_evidence_raw_sha256 = None;
+        Self {
+            v3_prefix,
+            ws_claimant_source_sequence_epoch_id,
+            ws_claimant_collector_admission_sequence,
+        }
+    }
+
+    pub fn validate(&self) -> PolymarketMarketMetadataV3Validation {
+        let mut report = self
+            .v3_prefix
+            .validate_for_schema(POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION, false);
+        validate_ws_claimant_pair(
+            &self.v3_prefix,
+            self.ws_claimant_source_sequence_epoch_id.as_deref(),
+            self.ws_claimant_collector_admission_sequence,
+            &mut report,
+        );
+        report
+    }
+
+    pub fn schema_version(&self) -> &str {
+        &self.v3_prefix.schema_version
+    }
+
+    pub(crate) fn compatibility_prefix(&self) -> &PolymarketMarketMetadataV3Row {
+        &self.v3_prefix
+    }
+
+    pub(crate) fn compatibility_prefix_mut(&mut self) -> &mut PolymarketMarketMetadataV3Row {
+        &mut self.v3_prefix
+    }
+
+    #[cfg(test)]
+    pub(crate) fn into_compatibility_prefix(self) -> PolymarketMarketMetadataV3Row {
+        self.v3_prefix
+    }
+}
+
+fn validate_ws_claimant_pair(
+    prefix: &PolymarketMarketMetadataV3Row,
+    claimant_epoch: Option<&str>,
+    claimant_sequence: Option<u64>,
+    report: &mut PolymarketMarketMetadataV3Validation,
+) {
+    let claimant_required = prefix.metadata_row_kind
+        == PolymarketMetadataRowKind::ResolutionTerminalWs
+        && prefix.terminal_claim_owner == Some(TerminalClaimOwner::MarketResolvedWs);
+    if claimant_required {
+        report.require(
+            "ws_claimant_source_sequence_epoch_id",
+            non_empty(claimant_epoch),
+        );
+        report.require(
+            "ws_claimant_collector_admission_sequence",
+            claimant_sequence.is_some_and(|sequence| sequence > 0),
+        );
+    } else {
+        report.require_null(
+            "ws_claimant_source_sequence_epoch_id",
+            claimant_epoch.is_none(),
+        );
+        report.require_null(
+            "ws_claimant_collector_admission_sequence",
+            claimant_sequence.is_none(),
+        );
     }
 }
 
@@ -2829,6 +2909,17 @@ pub fn polymarket_market_metadata_v4_schema() -> Arc<Schema> {
         ),
     ]);
     Arc::new(Schema::new(fields))
+}
+
+pub fn polymarket_market_metadata_v5_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(
+        polymarket_market_metadata_v4_schema()
+            .fields()
+            .iter()
+            .filter(|field| field.name() != "resolution_evidence_raw_sha256")
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>(),
+    ))
 }
 
 fn v3_timestamp_field(name: &str, nullable: bool) -> Field {

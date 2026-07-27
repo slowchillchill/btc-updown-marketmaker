@@ -1,6 +1,6 @@
 use super::*;
 use crate::polymarket_market_metadata_layout::{
-    POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION, PolymarketMarketMetadataV4Row,
+    POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION, PolymarketMarketMetadataV5Row,
 };
 use crate::polymarket_orderbook_v3::{
     PolymarketOrderbookV3Admission, polymarket_orderbook_v3_messages_from_batch,
@@ -31,7 +31,7 @@ fn polymarket_late_activation_builder_rejects_applied_at_e() {
 }
 
 #[test]
-fn polymarket_metadata_v4_nonclaimant_raw_event_round_trips_and_writes() {
+fn polymarket_metadata_v5_nonclaimant_raw_event_round_trips_and_writes() {
     let discovery = test_btc_discovery();
     let collector_identity = CollectorIdentity {
         host_id: "collector-test".to_owned(),
@@ -44,15 +44,16 @@ fn polymarket_metadata_v4_nonclaimant_raw_event_round_trips_and_writes() {
     )
     .unwrap();
     let admission_time_utc_ms = prefix.fixed_identity_verified_at_utc + 1;
-    let expected = PolymarketMarketMetadataV4Row::from_v3_prefix(prefix, None, None);
-    let mut event = polymarket_metadata_v4_raw_event(expected.clone()).unwrap();
+    let expected = PolymarketMarketMetadataV5Row::from_v3_prefix(prefix, None, None);
+    let mut event = polymarket_metadata_v5_raw_event(expected.clone()).unwrap();
     let draft = serde_json::from_str::<Value>(&event.raw_json).unwrap();
     assert_eq!(
         draft["schema_version"],
-        POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION
+        POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION
     );
     assert!(draft["ws_claimant_source_sequence_epoch_id"].is_null());
     assert!(draft["ws_claimant_collector_admission_sequence"].is_null());
+    assert!(draft.get("resolution_evidence_raw_sha256").is_none());
     assert!(draft.get("collector_admission_sequence").is_none());
     assert!(draft.get("collector_admission_time_utc_ms").is_none());
 
@@ -60,11 +61,28 @@ fn polymarket_metadata_v4_nonclaimant_raw_event_round_trips_and_writes() {
         sequence: 1,
         time_utc_ms: admission_time_utc_ms,
     });
-    let rows = polymarket_metadata_v4_rows_from_event(&event).unwrap();
+    let mut forbidden_event = event.clone();
+    let mut forbidden_draft = draft.clone();
+    forbidden_draft
+        .as_object_mut()
+        .unwrap()
+        .insert("resolution_evidence_raw_sha256".to_owned(), Value::Null);
+    forbidden_event.raw_json = serde_json::to_string(&forbidden_draft).unwrap();
+    let error = polymarket_metadata_v5_rows_from_event(&forbidden_event)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("contains removed field"), "{error}");
+
+    let rows = polymarket_metadata_v5_rows_from_event(&event).unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].v3_prefix.collector_admission_sequence, 1);
     assert_eq!(
-        rows[0].v3_prefix.collector_admission_time_utc_ms,
+        rows[0].compatibility_prefix().collector_admission_sequence,
+        1
+    );
+    assert_eq!(
+        rows[0]
+            .compatibility_prefix()
+            .collector_admission_time_utc_ms,
         admission_time_utc_ms
     );
     assert!(rows[0].validate().is_complete());
@@ -72,21 +90,21 @@ fn polymarket_metadata_v4_nonclaimant_raw_event_round_trips_and_writes() {
     let tmp = tempdir().unwrap();
     let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
         tmp.path(),
-        "metadata-v4-nonclaimant",
-        POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION,
+        "metadata-v5-nonclaimant",
+        POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION,
         "polymarket_market_metadata",
     )
     .unwrap();
     let logical_bytes = u64::try_from(owned_event_bytes(&event)).unwrap();
     assert_eq!(
-        write_polymarket_metadata_v4_live_event(&mut writer, &event, logical_bytes).unwrap(),
+        write_polymarket_metadata_v5_live_event(&mut writer, &event, logical_bytes).unwrap(),
         1
     );
     assert_eq!(writer.finalize().unwrap().row_count, 1);
 }
 
 #[test]
-fn polymarket_metadata_v4_ws_claimant_raw_event_round_trips_and_writes() {
+fn polymarket_metadata_v5_ws_claimant_raw_event_round_trips_and_writes() {
     let discovery = test_btc_discovery();
     let identity = PendingPolymarketIdentity::from_discovered(&discovery.current).unwrap();
     let source_received_at_utc_ms = identity.market_end_utc_ms + 3 * 60_000;
@@ -120,24 +138,25 @@ fn polymarket_metadata_v4_ws_claimant_raw_event_round_trips_and_writes() {
         &collector_identity,
     )
     .unwrap();
-    let expected = PolymarketMarketMetadataV4Row::from_v3_prefix(
+    let expected = PolymarketMarketMetadataV5Row::from_v3_prefix(
         prefix,
         Some("source-epoch-1".to_owned()),
         Some(41),
     );
-    let mut event = polymarket_metadata_v4_raw_event(expected).unwrap();
+    let mut event = polymarket_metadata_v5_raw_event(expected).unwrap();
     let draft = serde_json::from_str::<Value>(&event.raw_json).unwrap();
     assert_eq!(
         draft["ws_claimant_source_sequence_epoch_id"],
         "source-epoch-1"
     );
     assert_eq!(draft["ws_claimant_collector_admission_sequence"], 41);
+    assert!(draft.get("resolution_evidence_raw_sha256").is_none());
 
     event.collector_admission = Some(RawEventAdmission {
         sequence: 2,
         time_utc_ms: applied_at_utc_ms + 1,
     });
-    let rows = polymarket_metadata_v4_rows_from_event(&event).unwrap();
+    let rows = polymarket_metadata_v5_rows_from_event(&event).unwrap();
     assert_eq!(
         rows[0].ws_claimant_source_sequence_epoch_id.as_deref(),
         Some("source-epoch-1")
@@ -148,14 +167,14 @@ fn polymarket_metadata_v4_ws_claimant_raw_event_round_trips_and_writes() {
     let tmp = tempdir().unwrap();
     let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
         tmp.path(),
-        "metadata-v4-claimant",
-        POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION,
+        "metadata-v5-claimant",
+        POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION,
         "polymarket_market_metadata",
     )
     .unwrap();
     let logical_bytes = u64::try_from(owned_event_bytes(&event)).unwrap();
     assert_eq!(
-        write_polymarket_metadata_v4_live_event(&mut writer, &event, logical_bytes).unwrap(),
+        write_polymarket_metadata_v5_live_event(&mut writer, &event, logical_bytes).unwrap(),
         1
     );
     assert_eq!(writer.finalize().unwrap().row_count, 1);

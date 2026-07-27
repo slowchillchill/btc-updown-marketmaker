@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FAIL_INCOMPLETE_8H_P_B1E_IMPLEMENTATION_CLOSED_ATTEMPT5_USER_TERMINATED_SCHEMA_CHANGE_INCOMPLETE_8H_REDUNDANT_TYPED_COLUMNS_STAGE0_CLOSED_STAGE1_CLOSED_ON_PUBLISH_STAGE2_NEXT_ATTEMPT6_PENDING_AFTER_V7_V5`。其中`P-B1E`是本次获批的“nullable Decimal精确空串兼容”唯一标识，用于避免与Attempt1辅助文件污染处置的历史`E-A`重名；重复typed列阶段0已由commit `3d5f37e3f95f82adf2d01f3cd6190944867bff38`完成发布与三方ref核对；阶段1只有在独立复审通过、承载本记录的阶段1代码+文档commit成功push且三方ref一致后闭合。RTDS network-error方案A的`366fed7d`/`415470e`、Gamma `closedTime`方案A的`3a367386`/`e086017f`及P-B1E的`15feb12`/`9d8e59b`均已按authority/Rust分离发布并完成三方ref核对。RTDS阶段0和阶段1已闭合；Attempt1、Attempt3、Attempt4永久为`FAIL + INCOMPLETE_8H`，Attempt2永久为`USER_TERMINATED + INCOMPLETE_8H`。P-B1E定向验证与三路独立终审均已通过；Attempt5已按用户指令停止；当前先闭合v7/v5，再从新clean/pushed HEAD执行完整六源8小时Attempt6。总事项阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FAIL_INCOMPLETE_8H_P_B1E_IMPLEMENTATION_CLOSED_ATTEMPT5_USER_TERMINATED_SCHEMA_CHANGE_INCOMPLETE_8H_REDUNDANT_TYPED_COLUMNS_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_CLOSED_ON_PUBLISH_ATTEMPT6_PENDING_AFTER_V7_V5`。其中`P-B1E`是本次获批的“nullable Decimal精确空串兼容”唯一标识，用于避免与Attempt1辅助文件污染处置的历史`E-A`重名；重复typed列阶段0已由commit `3d5f37e3f95f82adf2d01f3cd6190944867bff38`完成发布与三方ref核对，阶段1已由commit `470b7cd82d6242cdf9040918ad46993e291b828c`完成发布与三方ref核对，阶段2实现、本地门与三路独立终审均已通过，随承载本记录的commit成功push后闭合。RTDS network-error方案A的`366fed7d`/`415470e`、Gamma `closedTime`方案A的`3a367386`/`e086017f`及P-B1E的`15feb12`/`9d8e59b`均已按authority/Rust分离发布并完成三方ref核对。RTDS阶段0和阶段1已闭合；Attempt1、Attempt3、Attempt4永久为`FAIL + INCOMPLETE_8H`，Attempt2永久为`USER_TERMINATED + INCOMPLETE_8H`。P-B1E定向验证与三路独立终审均已通过；Attempt5已按用户指令停止；当前先闭合v5，再从新clean/pushed HEAD执行完整六源8小时Attempt6。总事项阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
 > `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
@@ -69,6 +69,15 @@
 > Attempt5 已固定为
 > `USER_TERMINATED_FOR_APPROVED_SCHEMA_CHANGE + INCOMPLETE_8H`；本文既有
 > Stage3 source v3 + metadata v4 和 Attempt1--4 事实均不回写。
+
+> 2026-07-28 W-B 窄覆盖：重复 typed 列删除阶段 2 的独立审查发现，旧计划要求
+> production-compiled public offline source-v2/metadata-v3 writer 一并保留，而
+> current metadata-v5 实现已经删除 metadata-v3 writer。用户选择方案 B：撤销且仅
+> 撤销 metadata-v3 writer 的 W-B `KEEP`；V3 exact schema/reader/legacy
+> validator 与精确 fixture 保留，fixture 使用测试内冻结 Arrow schema/batch。
+> public offline source-v2 writer、schema 与 legacy row-grain reader继续
+> `KEEP`。下文旧 Stage3/Stage5 执行记录中的 metadata-v3 writer 保留文字只描述
+> 当时合同，不再是当前执行要求。
 
 ## 一、执行原则与成功标准
 
@@ -577,7 +586,7 @@ Decimal。
 - 步骤 3.1.7：写Gamma-first与platform duplicate矩阵。
   -> 验证：accepted drain中的一条或多条合格late WS各写一条validated typed observation但不产生WS terminal、第二owner或第二transition；target-associated contradiction仍在row admission前fail closed；role-exit后的late WS写0条。两条相同qualified platform delivery产生两条不同source key的row，内部retry不产生第三条；metadata v4 terminal row通过claimant pair唯一指向实际claimant。
 - 步骤 3.1.8：冻结source admission coordinate与已批准metadata v4 schema/null matrix。
-  -> 验证：v3 source schema包含非空epoch、正数sequence和正数UTC毫秒admission time，唯一source key只由epoch+sequence组成；metadata v4以metadata v3全部字段、顺序、类型、nullability和语义为不可变前缀，只在末尾追加nullable `ws_claimant_source_sequence_epoch_id: Utf8`与`ws_claimant_collector_admission_sequence: UInt64`。metadata v3 schema/version立即冻结，activation前仍是current metadata writer，activation后退出current runtime new-write；公开offline legacy writer只允许历史fixture、兼容测试和任务3.7 bounded A/B，不得复用digest、时间或物理行位置建立current authority。
+  -> 验证：v3 source schema包含非空epoch、正数sequence和正数UTC毫秒admission time，唯一source key只由epoch+sequence组成；metadata v4以metadata v3全部字段、顺序、类型、nullability和语义为不可变前缀，只在末尾追加nullable `ws_claimant_source_sequence_epoch_id: Utf8`与`ws_claimant_collector_admission_sequence: UInt64`。metadata v3 schema/version立即冻结，activation前仍是current metadata writer，activation后退出current runtime new-write；其exact schema/reader/validator与测试内冻结fixture保留，不得复用digest、时间或物理行位置建立current authority。原public offline metadata-v3 writer后来由方案B删除。
 
 ### 任务 3.2：建立单一 domain typed message
 
@@ -597,7 +606,7 @@ Decimal。
 - 步骤 3.3.1：在 schema owner中实现 event discriminator和 nested list/struct builders。
   -> 验证：实际 Parquet footer字段顺序、类型、nullability和 metadata匹配 golden。
 - 步骤 3.3.2：新增的v3 writer只写v3，但在任务3.5.6前不替换current v2 writer；v2 reader始终保持legacy read-only。
-  -> 验证：v3 writer拒绝unknown/legacy写入，reader兼容真实v2 fixture；未过activation barrier时生产调用图仍只激活v2 writer。W-B保留production-compiled public offline v2/metadata-v3 writer API，不要求硬拒绝legacy schema；它不能接入current runtime。
+  -> 验证：v3 writer拒绝unknown/legacy写入，reader兼容真实v2 fixture；未过activation barrier时生产调用图仍只激活v2 writer。W-B保留production-compiled public offline source-v2 writer API，不要求其硬拒绝legacy schema；它不能接入current runtime。public offline metadata-v3 writer由后续方案B删除，v3 exact reader/validator保持。
 - 步骤 3.3.3：保持 ZSTD、hour/day partition、sort order、atomic rename和 manifest file facts。
   -> 验证：finalized row/bytes/SHA/schema逐项一致。
 - 步骤 3.3.4：实现但暂不激活v3 writer；按collector admission order写入并验证同epoch内sequence严格递增，active v2 writer继续current new-write，v2 reader保持legacy read-only/receive-order。
@@ -643,9 +652,9 @@ Decimal。
 - 步骤 3.5.4：在validation前、validation后但queue admission前、typed row running、typed row finalized但terminal未finalized、terminal running/finalized、manifest finalize和UTC seal切点执行crash fixture。
   -> 验证：startup preflight/reconcile拒绝不一致manifest/file facts；running artifact不作为durable fact；source-only finalized prefix按上一步fail closed；recovery不另建snapshot validator。不存在post-horizon raw-only合法例外；只有finalized verified pending identity且仍有未来slot时best-effort恢复未来slot，过去slot只记missed且E+8后无第7次probe。
 - 步骤 3.5.5：真实 v2/v3 mixed dataset compatibility test。
-  -> 验证：activation前合法current runtime pair只有source v2 + metadata v3，activation后合法current runtime pair只有source v3 + metadata v4；source v3 + metadata v3、source v2 + metadata v4、dual-write、running/unknown/corrupt组合均fail closed。`polymarket_orderbook_v2`按独立legacy row view读取且raw-first只作历史audit兼容；metadata v2 reader保持只读，metadata v3保持既有schema且activation后退出current runtime new-write，它们都不能成为source v3 claimant authority或重建v3 canonical domain。offline legacy writer产物不得放入current canonical root冒充合法pair。
+  -> 验证：activation前合法current runtime pair只有source v2 + metadata v3，activation后合法current runtime pair只有source v3 + metadata v4；source v3 + metadata v3、source v2 + metadata v4、dual-write、running/unknown/corrupt组合均fail closed。`polymarket_orderbook_v2`按独立legacy row view读取且raw-first只作历史audit兼容；metadata v2 reader保持只读，metadata v3保持既有schema且activation后退出current runtime new-write，它们都不能成为source v3 claimant authority或重建v3 canonical domain。source-v2 offline legacy writer产物不得放入current canonical root冒充合法pair；metadata-v3 fixture由测试内冻结schema/batch构造。
 - 步骤 3.5.6：执行唯一current new-write activation barrier。
-  -> 验证：只有metadata v4实现、WS claimant/recovery矩阵及任务3.1至3.5其余硬门通过后，同一个本地activation diff才同时把`polymarket_orderbook_v2 -> v3`与`polymarket_market_metadata_v3 -> v4`两条current runtime new-write路径切换，并断开任务3.4登记的active v2 payload/fingerprint/fan-out/raw-recovery生产边；切换后source v2与metadata v3退出current runtime new-write。公开offline legacy writer继续只服务历史fixture、兼容测试和任务3.7，不得接入`LiveSegmentWriter`、current dispatch、recovery authority或dual-write。任一条件未满足时只保留未激活v3/v4实现和原source v2 + metadata v3路径，不关闭v3分支、不双写、不宣称cutover，也不改变production binary/dataset root。
+  -> 验证：只有metadata v4实现、WS claimant/recovery矩阵及任务3.1至3.5其余硬门通过后，同一个本地activation diff才同时把`polymarket_orderbook_v2 -> v3`与`polymarket_market_metadata_v3 -> v4`两条current runtime new-write路径切换，并断开任务3.4登记的active v2 payload/fingerprint/fan-out/raw-recovery生产边；切换后source v2与metadata v3退出current runtime new-write。公开offline source-v2 legacy writer继续只服务历史fixture、兼容测试和任务3.7，不得接入`LiveSegmentWriter`、current dispatch、recovery authority或dual-write；metadata-v3 public writer后来由方案B删除。任一条件未满足时只保留未激活v3/v4实现和原source v2 + metadata v3路径，不关闭v3分支、不双写、不宣称cutover，也不改变production binary/dataset root。
 
 ### 任务 3.6：canonical round-trip 与 future handoff mapping
 
@@ -684,8 +693,9 @@ Decimal。
 
 - 任务3.1至3.6的本地实现、current new-write单一activation diff和自审已经完成；
   本地current runtime source/metadata pair固定为v3/v4，不存在双写；W-B保留的
-  production-compiled public offline source-v2/metadata-v3 writer只用于历史fixture、
-  兼容测试和任务3.7，不得进入current runtime或recovery authority；
+  production-compiled public offline source-v2 writer只用于历史fixture、兼容测试
+  和任务3.7，不得进入current runtime或recovery authority。metadata-v3 public
+  offline writer后来按方案B删除，exact reader/validator与冻结fixture保留；
 - `data-collect/docs/sdk070-stage3-future-typed-handoff-mapping.md`登记为
   `NONBLOCKING_FUTURE_SPEC`，SHA-256为
   `9b8207c3a01b5356a1a365913d1e8368c69d686bbac36a3f39cbbb1629a31464`；
@@ -694,8 +704,9 @@ Decimal。
   fingerprint plumbing已登记为阶段5清理候选，不通过`allow`掩盖；
 - 用户已裁决S-B/M-B/W-B：storage probe移入任务3.7；production startup
   lease + manifest preflight/reconcile满足manifest authority且recovery不新增snapshot；
-  “只读”只约束current runtime new-write，offline legacy writer保留。对应文档、
-  probe/report和预算表修复已经完成；本地门及三名独立
+  当时“只读”只约束current runtime new-write，offline source-v2/metadata-v3
+  legacy writer均保留；其中metadata-v3 writer保留条款已被2026-07-28方案B窄覆盖。
+  对应文档、probe/report和预算表修复已经完成；本地门及三名独立
   `gpt-5.6-sol`/`ultra`重复审查均通过，期间发现的storage报告正式语义证据索引
   Important已修复并复审关闭。当前游标为`STAGE3_CLOSED`，以承载本记录的commit
   成功push及三方ref一致为生效条件。
@@ -729,16 +740,17 @@ Decimal。
 - 步骤 5.1.1：从 symbol矩阵筛出只计算后丢弃、重复 owner、test-only public path、legacy adapter和旧 JSON/fingerprint路径。
   -> 验证：每项记录当前消费者和预计终态。
 - 步骤 5.1.2：检查 binaries/public API/features/benches/scripts/docs/history。
-  -> 验证：只有测试引用不能直接判删；W-B已把public offline v2/metadata-v3 writer、
-  legacy schema/reader和任务3.7 probe定为`KEEP`，不得与已不可达的current-runtime
-  private v2 branches混为一项删除。
+  -> 验证：只有测试引用不能直接判删；W-B保留public offline source-v2 writer、
+  legacy schema/reader和任务3.7 probe，且不得与已不可达的current-runtime private
+  v2 branches混为一项删除。public offline metadata-v3 writer已由2026-07-28方案B
+  单独批准删除；v3 exact schema/reader/validator不随之删除。
 - 步骤 5.1.3：用户决定 `USER_DECISION` 项。
   -> 验证：不擅自删除 public module或 legacy兼容。
   -> 执行结果：2026-07-26用户批准四项推荐。`sources/rtds.rs`、
   `config.rs`、`scheduler.rs`及`segment.rs`两半均不再因`pub`或自引用测试而保留；
   它们统一进入`DELETE_PROVEN_REPLACED_BEHAVIOR`。W-B public offline
-  source-v2/metadata-v3 writer、legacy schema/reader和Stage3 probe继续`KEEP`，
-  不属于本次裁决。
+  source-v2 writer、legacy schema/reader和Stage3 probe继续`KEEP`；metadata-v3
+  public writer后来由2026-07-28方案B单独批准删除，不回写本次历史裁决。
 
 ### 任务 5.2：逐候选或同构小簇处理
 
@@ -858,7 +870,7 @@ git diff --check
 - 步骤 6.4.1：报告v3 schema/domain/writer/reader/recovery相关moved/deleted/rewritten/added/net LOC和artifact差异。
   -> 验证：只统计v3范围，不重复验收2-REST root结构。
 - 步骤 6.4.2：报告payload/fingerprint/fan-out旧路径的替代与删除证据。
-  -> 验证：同时逐项报告raw-first handler、invalid/unmatched persistence、Gamma-first raw-only、post-horizon raw-only和raw-to-metadata recovery矩阵的替代/删除证据；明确metadata v3 schema不可变且在activation后与source v2一起退出current runtime new-write，legacy schema/reader和W-B offline writer保留，metadata v4继承v3 traceability并只追加claimant pair。只覆盖v3/v4必需删除，不重复汇总阶段5的全局cleanup台账。
+  -> 验证：同时逐项报告raw-first handler、invalid/unmatched persistence、Gamma-first raw-only、post-horizon raw-only和raw-to-metadata recovery矩阵的替代/删除证据；明确metadata v3 schema不可变且在activation后与source v2一起退出current runtime new-write，legacy schema/reader和W-B source-v2 offline writer保留，metadata v4继承v3 traceability并只追加claimant pair。metadata-v3 public writer后来由方案B删除。只覆盖v3/v4必需删除，不重复汇总阶段5的全局cleanup台账。
 - 步骤 6.4.3：报告v3与原计划偏差。
   -> 验证：事实、影响、选项和用户决定写入 changelog。
   -> 执行结果：最终报告已写入

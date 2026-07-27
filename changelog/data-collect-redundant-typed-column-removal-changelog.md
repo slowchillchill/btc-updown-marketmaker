@@ -6,7 +6,108 @@
 >
 > 对应计划：`plan/data-collect-redundant-typed-column-removal-plan.md`
 >
-> 状态：`APPROVED_STAGE0_CLOSED_STAGE1_CLOSED_ON_PUBLISH_STAGE2_NEXT_ATTEMPT5_USER_TERMINATED_INCOMPLETE_8H`
+> 状态：`APPROVED_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_CLOSED_ON_PUBLISH_ATTEMPT5_USER_TERMINATED_INCOMPLETE_8H_ATTEMPT6_PENDING_AFTER_V7_V5`
+
+## 2026-07-28：阶段 2 三路最终复审通过
+
+方案 B、embedded row version 修复和测试命名修正完成后，原三路
+`gpt-5.6-sol`/Ultra 审查者重新检查最新完整 diff：
+
+- 代码正确性、版本传播与 legacy/current recovery：
+  `PASS / Critical 0 / Important 0 / Minor 0`；
+- 测试充分性、fixture 独立性与过度校验：
+  `PASS / Critical 0 / Important 0 / Minor 0`；
+- demand/plan/changelog、W-B 历史覆盖、方案 B 与简单性：
+  `PASS / Critical 0 / Important 0 / Minor 0`。
+
+独立复跑覆盖 recovery `36/36`、metadata layout `20/20`、v5 raw-event `2/2`
+与版本传播 `1/1`；主代理随后完成的完整 package tests、tests check、严格
+Clippy、fmt 和 diff check 也全部通过。审查确认：
+
+- public metadata-v3 writer 已删除，source-v2 public writer仍在；
+- V3 exact decode/validator、V4 pending/WS claimant recovery、V4+V5 coherent
+  lifecycle 和 V5 current recovery均保留；
+- 没有第二 writer、schema adapter、sidecar、migration framework 或新增独立
+  100-cycle 门。
+
+验收 2--6 与 8 的阶段 2 部分已通过。阶段 2 只在承载本记录的代码+文档 commit
+成功 push 且本地 HEAD、upstream 与远端 ref 一致后闭合；发布前状态为
+`STAGE2_CLOSED_ON_PUBLISH`。
+
+## 2026-07-28：阶段 2 首轮审查问题、方案 B 与最小修复
+
+三路独立 `gpt-5.6-sol`/Ultra 首轮审查识别出三项需要闭环的事实：
+
+- recovery 接受 footer/物理 schema 为 v5 的文件后，构造 current recovery row
+  前没有再次确认行内 `schema_version` 也是 v5，可能让错误的 embedded row version
+  进入 v5 wrapper；
+- SDK070 的 W-B 仍要求保留 production-compiled public offline metadata-v3
+  writer，而阶段 2 current writer 实现已删除该 API，文档和代码不能同时成立；
+- 一项测试名称/局部变量仍写成 v4/dual-layout，实际合同已经是“拒绝 v3 +
+  current v5”，名称会误导后续维护。
+
+主代理立即停止冲突相关的发布并请求用户裁决。用户选择方案 B，明确只撤销 W-B
+中的 public offline metadata-v3 writer 保留条款：
+
+- metadata-v3 writer API 删除；历史 v3 fixture 使用测试内显式冻结的 Arrow
+  schema/batch；
+- metadata v3 exact schema、reader、legacy validator 与精确文件解码继续保留；
+- public offline source-v2 writer、schema 与 legacy row-grain reader不在本次
+  裁决范围，继续保留。
+
+其余两项执行最小修复：recovery 在构造 v5 row 前精确拒绝行内版本不是 v5 的文件，
+并新增回归测试；误导测试名称/变量已改为 v5 实际语义。另补充 v4 WS claimant
+正向 recovery fixture，证明 legacy claimant 路径仍可用。本节只记录首轮问题；
+最终结果以上一节复审记录为准。
+
+## 2026-07-28：阶段 2 metadata v5 最小实现与本地验证
+
+阶段 1 commit `470b7cd82d6242cdf9040918ad46993e291b828c` 已成功 push
+到 `origin/fix-rtds-silents`，且本地 HEAD、upstream 与远端 ref 核对一致；阶段
+1 因此闭合。
+
+阶段 2 先以失败 contract 冻结 v5 精确等于 v4 删除
+`resolution_evidence_raw_sha256`，随后完成以下生产修改：
+
+- current schema/writer 升级为 `polymarket_market_metadata_v5`，只从
+  raw-event、Arrow/Parquet、current validator、producer 与内存估算删除目标字段；
+- crate-private v3 prefix 仅作字段 carrier，旧 digest slot 在构造 v5 时强制为
+  `None`，且不进入 v5 raw JSON、物理 schema、公开 current row 或校验合同；
+- Gamma/WS terminal 不再生成第二 digest；真实
+  `source_evidence_payload_json`/`source_evidence_raw_sha256` 完整性 owner、
+  winner/outcome、terminal owner 与 WS claimant pair 保持；
+- current writer 只接受 v5；v3/v4 只保留测试 fixture、exact reader/validator 与
+  v4 claimant recovery 所需路径；按用户方案 B 不保留 public offline
+  metadata-v3 writer，且 public offline source-v2 writer 不受影响；没有 dual
+  writer、迁移、schema adapter 或 v4/v5 混用禁令；
+- restart recovery 精确识别 v3/v4/v5 footer 与 schema：v3 只保留 exact
+  decode/旧 validator 且继续禁止成为 source-v3 claimant authority，v4 保留
+  legacy claimant recovery，v5 成为 current recovery；coherent v4/v5 lifecycle
+  组合允许恢复。
+
+验证结果：
+
+- metadata layout contract `20/20` 通过，覆盖 v5 exact schema、五类 row
+  round-trip、source digest owner、v3/v4 frozen contract；
+- event adapter、Polymarket source、writer supervisor、resolution recovery 与
+  claimant/version 定向测试通过；新增的单次版本传播测试证明 finalized delta、
+  footer、embedded recovery metadata 与 manifest per-file 均为 v5，且物理列不含
+  被删字段；
+- `cargo test -p data-collect --locked`、`cargo check -p data-collect --tests
+  --locked`、严格 Clippy、fmt check 与 `git diff --check` 均通过；
+- Attempt5 的五个 metadata v4 文件仍为 `319` 行、`70` 列、footer v4，旧 digest
+  列存在且 claimant pair 保持最后两列，PyArrow 全部可读；
+- 冻结 AC-12 validator SHA-256 仍为
+  `f254dea3db0f6049018d5b22a2595e85ddbdb67e821503ecf7fbe395df2042b8`；
+  三份既有报告 SHA-256 分别保持
+  `920f472b22d4adc9356ed22f47a68f991d18edad1370a2f665511a5fb519fc59`、
+  `72177d42b44257ebce0d1b2ed3f60d728907d2aca09ecf2072a1da721c0f0fc2`
+  与
+  `14db1525ad17e5e101f25b0c7779af372b64cdba6936499ce8e98d65b7bf6619`，
+  均与冻结 inventory 一致。
+
+本轮没有新增独立 100-cycle gate；完整 package tests 只是自然执行仓库既有测试。
+本节记录的是首轮审查前状态；当前最终复审结果以上文记录为准。
 
 ## 2026-07-28：阶段 1 aggTrade v7 最小实现与本地验证
 
@@ -46,8 +147,8 @@
   `git diff --check` 通过。
 
 没有新增或恢复独立 100-cycle 验收；完整 package test 自然执行仓库已有测试，不把
-历史循环测试重新定义为本阶段 gate。当前等待独立 `gpt-5.6-sol`/Ultra 阶段审查，
-尚未创建阶段 1 commit。
+历史循环测试重新定义为本阶段 gate。本节记录的是阶段 1 首轮审查前状态；阶段 1
+最终闭合事实以下文记录为准。
 
 ## 2026-07-28：阶段 1 首轮独立审查问题与修复
 
@@ -186,10 +287,10 @@ v6/v4 部分日前向与本次重复字段审计证据，不计为 v7/v5 或 RTD
 ## 当前执行游标
 
 阶段 0 已由 commit `3d5f37e3f95f82adf2d01f3cd6190944867bff38` 发布并完成
-本地 HEAD、upstream 与远端 ref 核对。阶段 1 的 v7 实现、本地门禁、首轮问题修复
-和三路最终复审均已完成，当前只等待阶段 1 commit/push 与三方 ref 核对；发布成功
-后进入 `polymarket_market_metadata_v5`，其后执行完整六源 8 小时 Attempt6 与最终
-收口。
+本地 HEAD、upstream 与远端 ref 核对。阶段 1 已由 commit
+`470b7cd82d6242cdf9040918ad46993e291b828c` 发布并完成三方 ref 核对。阶段 2
+的 metadata v5 实现、定向与完整本地门、三路最终复审已通过；发布阶段 2 commit
+并完成三方 ref 核对后，进入新 root 的完整六源 8 小时 Attempt6 与最终收口。
 
 本事项没有执行 production activation、canonical cutover、远端部署、历史迁移或数据
 清理。

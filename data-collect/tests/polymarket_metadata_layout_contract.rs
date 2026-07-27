@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::fs::File;
 use std::sync::Arc;
 
@@ -11,16 +10,17 @@ use data_collect::polymarket_market_metadata_layout::{
     ActiveUnavailableReason, ClosedTimeCheckFailureReason, MarketLifecycleState,
     MarketLifecycleTransition, MarketRuntimeRole, MarketRuntimeRoleTransition,
     POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
-    POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION, PolymarketMarketMetadataContext,
-    PolymarketMarketMetadataRow, PolymarketMarketMetadataV3Row, PolymarketMarketMetadataV4Row,
-    PolymarketMetadataOrigin, PolymarketMetadataRowKind,
-    PolymarketMetadataV3ReferenceIntegrityError, PolymarketMetadataV3ReferenceRecord,
-    ResolutionEvidenceSource, ResolutionFollowupStatus, ResolutionIntegrityErrorClass,
-    ResolutionPollResult, ResolutionTransportErrorClass, ResponseFieldsUnavailableReason,
-    SourceEndpointUnavailableReason, SourceEvidenceChannel, SourceEvidenceEventType,
-    SourceEvidenceOrigin, TerminalClaimOwner, TerminalPredicateFailureReason,
-    polymarket_market_metadata_schema, polymarket_market_metadata_v3_schema,
-    polymarket_market_metadata_v4_schema, validate_polymarket_metadata_v3_local_references,
+    POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION,
+    PolymarketMarketMetadataContext, PolymarketMarketMetadataRow, PolymarketMarketMetadataV3Row,
+    PolymarketMarketMetadataV4Row, PolymarketMarketMetadataV5Row, PolymarketMetadataOrigin,
+    PolymarketMetadataRowKind, PolymarketMetadataV3ReferenceIntegrityError,
+    PolymarketMetadataV3ReferenceRecord, ResolutionEvidenceSource, ResolutionFollowupStatus,
+    ResolutionIntegrityErrorClass, ResolutionPollResult, ResolutionTransportErrorClass,
+    ResponseFieldsUnavailableReason, SourceEndpointUnavailableReason, SourceEvidenceChannel,
+    SourceEvidenceEventType, SourceEvidenceOrigin, TerminalClaimOwner,
+    TerminalPredicateFailureReason, polymarket_market_metadata_schema,
+    polymarket_market_metadata_v3_schema, polymarket_market_metadata_v4_schema,
+    polymarket_market_metadata_v5_schema, validate_polymarket_metadata_v3_local_references,
 };
 use data_collect::sources::polymarket::{
     GammaTerminalAttemptContext, GammaTerminalFixedIdentity, GammaTerminalResponse,
@@ -51,54 +51,6 @@ fn string_column<'a>(batch: &'a RecordBatch, name: &str) -> &'a StringArray {
         .as_any()
         .downcast_ref::<StringArray>()
         .unwrap()
-}
-
-fn timestamp_column<'a>(batch: &'a RecordBatch, name: &str) -> &'a TimestampMillisecondArray {
-    batch
-        .column(batch.schema().index_of(name).unwrap())
-        .as_any()
-        .downcast_ref::<TimestampMillisecondArray>()
-        .unwrap()
-}
-
-fn v3_reference_records_from_batch(
-    batch: &RecordBatch,
-) -> Vec<PolymarketMetadataV3ReferenceRecord> {
-    let row_kind = string_column(batch, "metadata_row_kind");
-    let slug = string_column(batch, "slug");
-    let condition_id = string_column(batch, "condition_id");
-    let clob_market_id = string_column(batch, "clob_market_id");
-    let asset_ids = string_column(batch, "asset_ids");
-    let market_start = timestamp_column(batch, "market_start_utc");
-    let market_end = timestamp_column(batch, "market_end_utc");
-    let fixed_verified = timestamp_column(batch, "fixed_identity_verified_at_utc");
-    let source_origin = string_column(batch, "source_evidence_origin");
-    let source_received = timestamp_column(batch, "source_evidence_received_at_utc");
-    let source_digest = string_column(batch, "source_evidence_raw_sha256");
-    let source_payload = string_column(batch, "source_evidence_payload_json");
-
-    (0..batch.num_rows())
-        .map(|index| PolymarketMetadataV3ReferenceRecord {
-            metadata_row_kind: row_kind.value(index).to_owned(),
-            slug: slug.value(index).to_owned(),
-            condition_id: condition_id.value(index).to_owned(),
-            clob_market_id: clob_market_id.value(index).to_owned(),
-            asset_ids: asset_ids.value(index).to_owned(),
-            market_start_utc: market_start.value(index),
-            market_end_utc: market_end.value(index),
-            fixed_identity_verified_at_utc: fixed_verified.value(index),
-            source_evidence_origin: source_origin
-                .is_valid(index)
-                .then(|| source_origin.value(index).to_owned()),
-            source_evidence_received_at_utc: source_received
-                .is_valid(index)
-                .then(|| source_received.value(index)),
-            source_evidence_raw_sha256: source_digest
-                .is_valid(index)
-                .then(|| source_digest.value(index).to_owned()),
-            source_evidence_payload_present: source_payload.is_valid(index),
-        })
-        .collect()
 }
 
 #[test]
@@ -941,6 +893,69 @@ fn v4_schema_is_the_exact_v3_prefix_plus_the_nullable_claimant_pair() {
 }
 
 #[test]
+fn v5_schema_is_exactly_v4_without_the_resolution_digest_alias() {
+    let v4 = polymarket_market_metadata_v4_schema();
+    let v5 = polymarket_market_metadata_v5_schema();
+    let expected = v4
+        .fields()
+        .iter()
+        .filter(|field| field.name() != "resolution_evidence_raw_sha256")
+        .cloned()
+        .collect::<Vec<_>>();
+
+    assert_eq!(v5.fields().as_ref(), expected.as_slice());
+    assert!(
+        v5.field_with_name("resolution_evidence_raw_sha256")
+            .is_err()
+    );
+    assert_eq!(
+        v5.fields()
+            .iter()
+            .rev()
+            .take(2)
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>(),
+        [
+            "ws_claimant_collector_admission_sequence",
+            "ws_claimant_source_sequence_epoch_id",
+        ]
+    );
+    assert_eq!(
+        POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION,
+        "polymarket_market_metadata_v5"
+    );
+}
+
+#[test]
+fn v5_terminal_validation_keeps_the_source_payload_digest_as_the_integrity_owner() {
+    let terminal = terminal_gamma_attempt_v3();
+    let v5 = PolymarketMarketMetadataV5Row::from_v3_prefix(terminal.clone(), None, None);
+    assert!(
+        v5.validate().is_complete(),
+        "{:?}",
+        v5.validate().violations
+    );
+
+    let mut missing = terminal.clone();
+    missing.source_evidence_raw_sha256 = None;
+    assert!(
+        PolymarketMarketMetadataV5Row::from_v3_prefix(missing, None, None)
+            .validate()
+            .violations
+            .contains(&"source_evidence_raw_sha256:required".to_owned())
+    );
+
+    let mut mismatched = terminal;
+    mismatched.source_evidence_raw_sha256 = Some("f".repeat(64));
+    assert!(
+        PolymarketMarketMetadataV5Row::from_v3_prefix(mismatched, None, None)
+            .validate()
+            .violations
+            .contains(&"source_evidence_raw_sha256:payload_mismatch".to_owned())
+    );
+}
+
+#[test]
 fn v4_claimant_pair_is_required_only_for_the_ws_terminal_owner() {
     let qualified = PolymarketMarketMetadataV4Row::from_v3_prefix(
         resolution_terminal_ws_v3(),
@@ -1427,8 +1442,8 @@ fn source_payloads_reconstruct_through_the_pinned_sdk_and_unique_terminal_evalua
 }
 
 #[test]
-fn five_v3_row_kinds_round_trip_through_the_versioned_writer_in_admission_order() {
-    let mut rows = vec![
+fn five_v3_row_kinds_and_local_reference_rules_remain_frozen() {
+    let mut rows = [
         metadata_snapshot_v3(),
         market_state_transition_v3(),
         decoded_gamma_attempt_v3(),
@@ -1470,87 +1485,10 @@ fn five_v3_row_kinds_round_trip_through_the_versioned_writer_in_admission_order(
         row.collector_admission_sequence = index as u64 + 1;
     }
 
-    let tmp = tempdir().unwrap();
-    let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
-        tmp.path(),
-        "metadata-v3-layout-contract",
-        POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
-        "polymarket_market_metadata",
-    )
-    .unwrap();
-    writer
-        .write_polymarket_market_metadata_v3_rows(&rows)
-        .unwrap();
-
-    let mut duplicate = metadata_snapshot_v3();
-    duplicate.collector_admission_sequence = 5;
-    let error = writer
-        .write_polymarket_market_metadata_v3_rows(&[duplicate])
-        .unwrap_err();
-    assert!(error.to_string().contains("strictly increasing"));
-
-    let published = writer.finalize().unwrap();
-    assert_eq!(published.row_count, 5);
-    assert_eq!(
-        published.schema_version,
-        POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION
-    );
-
-    let builder =
-        ParquetRecordBatchReaderBuilder::try_new(File::open(&published.final_path).unwrap())
-            .unwrap();
-    let metadata = builder
-        .metadata()
-        .file_metadata()
-        .key_value_metadata()
-        .unwrap()
+    let references = rows
         .iter()
-        .map(|entry| (entry.key.clone(), entry.value.clone()))
-        .collect::<BTreeMap<_, _>>();
-    assert_eq!(
-        metadata
-            .get("parquet_raw_layout_version")
-            .and_then(|value| value.as_deref()),
-        Some(POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION)
-    );
-    assert_eq!(
-        metadata
-            .get("parquet_raw_source_kind")
-            .and_then(|value| value.as_deref()),
-        Some("polymarket_market_metadata")
-    );
-
-    let mut reader = builder.build().unwrap();
-    let batch = reader.next().unwrap().unwrap();
-    assert_eq!(batch.num_rows(), 5);
-    let row_kinds = batch
-        .column(batch.schema().index_of("metadata_row_kind").unwrap())
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap();
-    assert_eq!(
-        (0..5)
-            .map(|index| row_kinds.value(index))
-            .collect::<Vec<_>>(),
-        [
-            "metadata_snapshot",
-            "market_state_transition",
-            "resolution_poll_attempt",
-            "resolution_terminal_ws",
-            "resolution_followup_summary",
-        ]
-    );
-    let source_endpoint = batch.column(batch.schema().index_of("source_endpoint").unwrap());
-    assert!(source_endpoint.is_valid(0));
-    assert!(source_endpoint.is_null(4));
-    let poll_result = batch.column(batch.schema().index_of("resolution_poll_result").unwrap());
-    assert!(poll_result.is_null(0));
-    assert!(poll_result.is_valid(2));
-    let terminal_owner = batch.column(batch.schema().index_of("terminal_claim_owner").unwrap());
-    assert!(terminal_owner.is_null(2));
-    assert!(terminal_owner.is_valid(3));
-
-    let references = v3_reference_records_from_batch(&batch);
+        .map(PolymarketMetadataV3ReferenceRecord::from)
+        .collect::<Vec<_>>();
     validate_polymarket_metadata_v3_local_references(&references).unwrap();
 
     let mut unique_digest_collision = references.clone();
@@ -1583,7 +1521,7 @@ fn five_v3_row_kinds_round_trip_through_the_versioned_writer_in_admission_order(
 }
 
 #[test]
-fn five_v4_row_kinds_round_trip_with_only_the_ws_terminal_claimant_populated() {
+fn five_v5_row_kinds_round_trip_without_the_resolution_digest_alias() {
     let v3_rows = [
         metadata_snapshot_v3(),
         market_state_transition_v3(),
@@ -1597,13 +1535,13 @@ fn five_v4_row_kinds_round_trip_with_only_the_ws_terminal_claimant_populated() {
         .map(|(index, mut row)| {
             row.collector_admission_sequence = index as u64 + 1;
             if row.metadata_row_kind == PolymarketMetadataRowKind::ResolutionTerminalWs {
-                PolymarketMarketMetadataV4Row::from_v3_prefix(
+                PolymarketMarketMetadataV5Row::from_v3_prefix(
                     row,
                     Some("source-epoch-1".to_owned()),
                     Some(41),
                 )
             } else {
-                PolymarketMarketMetadataV4Row::from_v3_prefix(row, None, None)
+                PolymarketMarketMetadataV5Row::from_v3_prefix(row, None, None)
             }
         })
         .collect::<Vec<_>>();
@@ -1611,25 +1549,20 @@ fn five_v4_row_kinds_round_trip_with_only_the_ws_terminal_claimant_populated() {
     let tmp = tempdir().unwrap();
     let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
         tmp.path(),
-        "metadata-v4-layout-contract",
-        POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION,
+        "metadata-v5-layout-contract",
+        POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION,
         "polymarket_market_metadata",
     )
     .unwrap();
     writer
-        .write_polymarket_market_metadata_v4_rows(&rows)
+        .write_polymarket_market_metadata_v5_rows(&rows)
         .unwrap();
-
-    let error = writer
-        .write_polymarket_market_metadata_v3_rows(&[metadata_snapshot_v3()])
-        .unwrap_err();
-    assert!(error.to_string().contains("require a v3 writer"));
 
     let published = writer.finalize().unwrap();
     assert_eq!(published.row_count, 5);
     assert_eq!(
         published.schema_version,
-        POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION
+        POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION
     );
 
     let mut reader =
@@ -1640,7 +1573,21 @@ fn five_v4_row_kinds_round_trip_with_only_the_ws_terminal_claimant_populated() {
     let batch = reader.next().unwrap().unwrap();
     assert_eq!(
         batch.schema().as_ref(),
-        polymarket_market_metadata_v4_schema().as_ref()
+        polymarket_market_metadata_v5_schema().as_ref()
+    );
+    assert!(
+        batch
+            .schema()
+            .index_of("resolution_evidence_raw_sha256")
+            .is_err()
+    );
+    assert_eq!(
+        string_column(&batch, "resolution_evidence_source").value(3),
+        "market_resolved_ws"
+    );
+    assert_eq!(
+        string_column(&batch, "terminal_claim_owner").value(3),
+        "market_resolved_ws"
     );
 
     let epoch = batch

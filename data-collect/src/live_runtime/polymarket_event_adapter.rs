@@ -1,5 +1,5 @@
 use super::*;
-use crate::polymarket_market_metadata_layout::PolymarketMarketMetadataV4Row;
+use crate::polymarket_market_metadata_layout::PolymarketMarketMetadataV5Row;
 
 #[derive(Clone, Debug)]
 pub(super) struct TargetAdmittedPolymarketMessage<'a> {
@@ -718,7 +718,6 @@ where
                 row.winning_asset_id = Some(winner.winning_asset_id);
                 row.winning_outcome = Some(winner.winning_outcome);
                 row.resolution_evidence_source = Some(ResolutionEvidenceSource::GammaBySlug);
-                row.resolution_evidence_raw_sha256 = Some(payload_sha256);
                 row.terminal_claim_owner = Some(TerminalClaimOwner::GammaBySlug);
                 row.resolution_followup_status =
                     Some(ResolutionFollowupStatus::TerminalGammaFallback);
@@ -811,7 +810,6 @@ pub(super) fn polymarket_resolution_terminal_ws_v3_row(
     row.winning_asset_id = Some(evidence.winning_asset_id.clone());
     row.winning_outcome = Some(evidence.winning_outcome.clone());
     row.resolution_evidence_source = Some(ResolutionEvidenceSource::MarketResolvedWs);
-    row.resolution_evidence_raw_sha256 = Some(evidence.source_payload_sha256.clone());
     row.terminal_claim_owner = Some(TerminalClaimOwner::MarketResolvedWs);
     row.resolution_budget_horizon_utc = Some(pending.budget_horizon_utc_ms());
     row.resolution_followup_status = Some(ResolutionFollowupStatus::TerminalWs);
@@ -851,47 +849,90 @@ pub(super) fn polymarket_resolution_followup_summary_v3_row(
     Ok(row)
 }
 
-pub(super) fn polymarket_metadata_v4_raw_event(
-    row: PolymarketMarketMetadataV4Row,
+pub(super) fn polymarket_metadata_v5_raw_event(
+    row: PolymarketMarketMetadataV5Row,
 ) -> Result<RawEvent> {
-    let event_type = row.v3_prefix.metadata_row_kind.as_str();
-    let endpoint = row.v3_prefix.source_endpoint.as_deref().unwrap_or_default();
+    let prefix = row.compatibility_prefix();
+    let event_type = prefix.metadata_row_kind.as_str();
+    let endpoint = prefix.source_endpoint.as_deref().unwrap_or_default();
+    let Value::Object(mut raw) = serde_json::to_value(prefix)? else {
+        return Err(invalid_data("Polymarket metadata v5 draft is not a JSON object").into());
+    };
+    raw.remove("resolution_evidence_raw_sha256");
+    raw.insert(
+        "ws_claimant_source_sequence_epoch_id".to_owned(),
+        serde_json::to_value(&row.ws_claimant_source_sequence_epoch_id)?,
+    );
+    raw.insert(
+        "ws_claimant_collector_admission_sequence".to_owned(),
+        serde_json::to_value(row.ws_claimant_collector_admission_sequence)?,
+    );
     Ok(raw_event_with_recv_time(
         "polymarket_market_metadata",
         event_type,
-        &row.v3_prefix.slug,
+        &prefix.slug,
         None,
-        row.v3_prefix.timestamp_received,
+        prefix.timestamp_received,
         endpoint,
         &CollectorIdentity {
-            host_id: row.v3_prefix.collector_host_id.clone(),
-            region: row.v3_prefix.collector_region.clone(),
+            host_id: prefix.collector_host_id.clone(),
+            region: prefix.collector_region.clone(),
         },
-        serde_json::to_value(&row)?,
+        Value::Object(raw),
     ))
 }
 
-pub(super) fn polymarket_metadata_v4_rows_from_event(
+pub(super) fn polymarket_metadata_v5_rows_from_event(
     event: &RawEvent,
-) -> Result<Vec<PolymarketMarketMetadataV4Row>> {
+) -> Result<Vec<PolymarketMarketMetadataV5Row>> {
     let admission = event.collector_admission.as_ref().ok_or_else(|| {
-        invalid_data("Polymarket metadata v4 event is missing collector admission")
+        invalid_data("Polymarket metadata v5 event is missing collector admission")
     })?;
-    let mut row = serde_json::from_str::<PolymarketMarketMetadataV4Row>(&event.raw_json)?;
-    row.v3_prefix.collector_admission_sequence = admission.sequence;
-    row.v3_prefix.collector_admission_time_utc_ms = admission.time_utc_ms;
+    let mut raw = serde_json::from_str::<Value>(&event.raw_json)?;
+    let object = raw
+        .as_object_mut()
+        .ok_or_else(|| invalid_data("Polymarket metadata v5 event is not a JSON object"))?;
+    if object.contains_key("resolution_evidence_raw_sha256") {
+        return Err(invalid_data(
+            "Polymarket metadata v5 event contains removed field resolution_evidence_raw_sha256",
+        )
+        .into());
+    }
+    let claimant_epoch = serde_json::from_value::<Option<String>>(
+        object
+            .remove("ws_claimant_source_sequence_epoch_id")
+            .unwrap_or(Value::Null),
+    )?;
+    let claimant_sequence = serde_json::from_value::<Option<u64>>(
+        object
+            .remove("ws_claimant_collector_admission_sequence")
+            .unwrap_or(Value::Null),
+    )?;
+    let prefix = serde_json::from_value::<PolymarketMarketMetadataV3Row>(raw)?;
+    if prefix.schema_version != POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION {
+        return Err(invalid_data(format!(
+            "Polymarket metadata raw event has wrong schema version:actual={}:expected={POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION}",
+            prefix.schema_version
+        ))
+        .into());
+    }
+    let mut row =
+        PolymarketMarketMetadataV5Row::from_v3_prefix(prefix, claimant_epoch, claimant_sequence);
+    row.compatibility_prefix_mut().collector_admission_sequence = admission.sequence;
+    row.compatibility_prefix_mut()
+        .collector_admission_time_utc_ms = admission.time_utc_ms;
     Ok(vec![row])
 }
 
-pub(super) fn write_polymarket_metadata_v4_live_event(
+pub(super) fn write_polymarket_metadata_v5_live_event(
     writer: &mut TypedParquetSegmentWriter,
     event: &RawEvent,
     logical_bytes: u64,
 ) -> Result<u64> {
-    let rows = polymarket_metadata_v4_rows_from_event(event)?;
+    let rows = polymarket_metadata_v5_rows_from_event(event)?;
     let written = rows.len() as u64;
     require_at_most_one_typed_row(event, written)?;
-    writer.write_polymarket_market_metadata_v4_rows_with_logical_bytes(&rows, logical_bytes)?;
+    writer.write_polymarket_market_metadata_v5_rows_with_logical_bytes(&rows, logical_bytes)?;
     Ok(written)
 }
 

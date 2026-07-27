@@ -1091,12 +1091,6 @@ impl AcceptedPolymarketMetadataRow {
                     .as_ref()
                     .map_or(0, String::capacity),
             )
-            .saturating_add(
-                self.row
-                    .resolution_evidence_raw_sha256
-                    .as_ref()
-                    .map_or(0, String::capacity),
-            )
             .saturating_add(self.raw_day_ticket.dynamic_owned_bytes())
             .saturating_add(
                 self.ws_claimant_source_sequence_epoch_id
@@ -5440,31 +5434,32 @@ async fn send_polymarket_metadata_v3_row(
     run_started: Instant,
     row: PolymarketMarketMetadataV3Row,
 ) -> Result<()> {
-    let event = polymarket_metadata_v4_event(row, None, None)?;
+    let event = polymarket_metadata_v5_event(row, None, None)?;
     send_event(sink, run_started, event).await
 }
 
-fn polymarket_metadata_v4_event(
+fn polymarket_metadata_v5_event(
     row: PolymarketMarketMetadataV3Row,
     ws_claimant_source_sequence_epoch_id: Option<String>,
     ws_claimant_collector_admission_sequence: Option<u64>,
 ) -> Result<RawEvent> {
-    let mut row = PolymarketMarketMetadataV4Row::from_v3_prefix(
+    let mut row = PolymarketMarketMetadataV5Row::from_v3_prefix(
         row,
         ws_claimant_source_sequence_epoch_id,
         ws_claimant_collector_admission_sequence,
     );
-    validate_polymarket_metadata_v4_draft(&mut row)?;
-    polymarket_metadata_v4_raw_event(row)
+    validate_polymarket_metadata_v5_draft(&mut row)?;
+    polymarket_metadata_v5_raw_event(row)
 }
 
-fn validate_polymarket_metadata_v4_draft(row: &mut PolymarketMarketMetadataV4Row) -> Result<()> {
-    row.v3_prefix.collector_admission_sequence = 1;
-    row.v3_prefix.collector_admission_time_utc_ms = now_ms();
+fn validate_polymarket_metadata_v5_draft(row: &mut PolymarketMarketMetadataV5Row) -> Result<()> {
+    row.compatibility_prefix_mut().collector_admission_sequence = 1;
+    row.compatibility_prefix_mut()
+        .collector_admission_time_utc_ms = now_ms();
     let validation = row.validate();
     if !validation.is_complete() {
         return Err(invalid_data(format!(
-            "Polymarket metadata v4 validation failed before admission:{}",
+            "Polymarket metadata v5 validation failed before admission:{}",
             validation.violations.join(",")
         ))
         .into());
@@ -5477,7 +5472,7 @@ async fn send_polymarket_metadata_v3_row_with_ticket(
     run_started: Instant,
     accepted: AcceptedPolymarketMetadataRow,
 ) -> Result<()> {
-    let event = polymarket_metadata_v4_event(
+    let event = polymarket_metadata_v5_event(
         accepted.row,
         accepted.ws_claimant_source_sequence_epoch_id,
         accepted.ws_claimant_collector_admission_sequence,
@@ -5491,7 +5486,7 @@ pub(super) async fn send_polymarket_metadata_v3_source_authority_row(
     row: PolymarketMarketMetadataV3Row,
 ) -> Result<PolymarketMetadataV3ReferenceRecord> {
     let authority = PolymarketMetadataV3ReferenceRecord::from(&row);
-    let event = polymarket_metadata_v4_event(row, None, None)?;
+    let event = polymarket_metadata_v5_event(row, None, None)?;
     match send_event_with_admission_outcome(sink, run_started, event).await? {
         EventAdmissionOutcome::Admitted => Ok(authority),
         EventAdmissionOutcome::Deferred => Err(invalid_data(
@@ -5512,9 +5507,9 @@ async fn send_polymarket_metadata_v3_rows_atomically(
 ) -> Result<EventAdmissionOutcome> {
     let rows = rows
         .into_iter()
-        .map(|row| PolymarketMarketMetadataV4Row::from_v3_prefix(row, None, None))
+        .map(|row| PolymarketMarketMetadataV5Row::from_v3_prefix(row, None, None))
         .collect();
-    send_polymarket_metadata_v4_rows_atomically_with_authority(sink, run_started, rows, None).await
+    send_polymarket_metadata_v5_rows_atomically_with_authority(sink, run_started, rows, None).await
 }
 
 pub(super) async fn send_polymarket_metadata_v3_rows_atomically_with_tickets(
@@ -5540,14 +5535,14 @@ pub(super) async fn send_polymarket_metadata_v3_rows_atomically_with_tickets(
     let rows = accepted_rows
         .into_iter()
         .map(|accepted| {
-            PolymarketMarketMetadataV4Row::from_v3_prefix(
+            PolymarketMarketMetadataV5Row::from_v3_prefix(
                 accepted.row,
                 accepted.ws_claimant_source_sequence_epoch_id,
                 accepted.ws_claimant_collector_admission_sequence,
             )
         })
         .collect();
-    send_polymarket_metadata_v4_rows_atomically_with_authority(
+    send_polymarket_metadata_v5_rows_atomically_with_authority(
         sink,
         run_started,
         rows,
@@ -5556,18 +5551,18 @@ pub(super) async fn send_polymarket_metadata_v3_rows_atomically_with_tickets(
     .await
 }
 
-async fn send_polymarket_metadata_v4_rows_atomically_with_authority(
+async fn send_polymarket_metadata_v5_rows_atomically_with_authority(
     sink: &SourceEventSink,
     run_started: Instant,
-    mut rows: Vec<PolymarketMarketMetadataV4Row>,
+    mut rows: Vec<PolymarketMarketMetadataV5Row>,
     raw_day_ticket: Option<&RawDayAcceptedTicket>,
 ) -> Result<EventAdmissionOutcome> {
     for row in &mut rows {
-        validate_polymarket_metadata_v4_draft(row)?;
+        validate_polymarket_metadata_v5_draft(row)?;
     }
     if rows.len() <= 1 {
         if let Some(row) = rows.into_iter().next() {
-            let event = polymarket_metadata_v4_raw_event(row)?;
+            let event = polymarket_metadata_v5_raw_event(row)?;
             return match raw_day_ticket {
                 Some(ticket) => {
                     send_event_with_ticket_outcome(sink, run_started, event, ticket).await
@@ -5580,7 +5575,7 @@ async fn send_polymarket_metadata_v4_rows_atomically_with_authority(
 
     let events = rows
         .into_iter()
-        .map(polymarket_metadata_v4_raw_event)
+        .map(polymarket_metadata_v5_raw_event)
         .collect::<Result<Vec<_>>>()?;
     let recv_time_utc_ms = events[0].recv_time_utc_ms;
     let partition = utc_hour_string_from_ms(recv_time_utc_ms)

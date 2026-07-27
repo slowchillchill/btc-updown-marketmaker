@@ -18,7 +18,7 @@ use data_collect::handoff::{
 };
 use data_collect::polymarket_market_metadata_layout::{
     POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
-    POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION,
+    POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION,
 };
 use data_collect::polymarket_orderbook_layout::{
     PolymarketOrderbookContext, PolymarketOrderbookRow,
@@ -736,47 +736,39 @@ fn typed_writer_rejects_new_polymarket_market_metadata_v2_segments() {
 }
 
 #[test]
-fn polymarket_metadata_writer_does_not_mix_v2_and_v3() {
+fn polymarket_metadata_writer_only_opens_the_current_v5_layout() {
     let tmp = tempdir().unwrap();
-    let _v3_writer = TypedParquetSegmentWriter::create_for_typed_source(
+    let _v5_writer = TypedParquetSegmentWriter::create_for_typed_source(
         tmp.path(),
-        "metadata-v3",
-        POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
+        "metadata-v5",
+        POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION,
         "polymarket_market_metadata",
     )
     .unwrap();
 
-    let tmp = tempdir().unwrap();
-    let error = match TypedParquetSegmentWriter::create_for_typed_source(
-        tmp.path(),
-        "metadata-v2",
-        POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION,
-        "polymarket_market_metadata",
-    ) {
-        Ok(_) => panic!("historical metadata v2 must remain read-only"),
-        Err(error) => error,
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported Polymarket metadata schema")
-    );
-
-    let tmp = tempdir().unwrap();
-    let error = match TypedParquetSegmentWriter::create_for_typed_source(
-        tmp.path(),
-        "metadata-unknown",
-        "polymarket_market_metadata_v5",
-        "polymarket_market_metadata",
-    ) {
-        Ok(_) => panic!("unknown Polymarket metadata schema must be rejected"),
-        Err(error) => error,
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported Polymarket metadata schema")
-    );
+    for (version, label) in [
+        (POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION, "v2"),
+        (POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION, "v3"),
+        (POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION, "v4"),
+        ("polymarket_market_metadata_v999", "unknown"),
+    ] {
+        let tmp = tempdir().unwrap();
+        let error = match TypedParquetSegmentWriter::create_for_typed_source(
+            tmp.path(),
+            &format!("metadata-{label}"),
+            version,
+            "polymarket_market_metadata",
+        ) {
+            Ok(_) => panic!("{label} metadata writer must be rejected"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported Polymarket metadata schema"),
+            "{label}:{error}"
+        );
+    }
 }
 
 #[test]
@@ -784,7 +776,7 @@ fn typed_writer_constructors_publish_source_specific_schema_metadata() {
     let cases = [
         (
             "polymarket_market_metadata",
-            POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
+            POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION,
             "collector_admission_order",
         ),
         (
@@ -908,12 +900,12 @@ fn typed_writer_source_specific_schemas_omit_duplicate_time_columns() {
 }
 
 #[test]
-fn polymarket_metadata_v4_writer_appends_only_the_claimant_pair() {
+fn polymarket_metadata_v5_writer_removes_the_alias_and_keeps_the_claimant_pair() {
     let tmp = tempdir().unwrap();
     let writer = TypedParquetSegmentWriter::create_for_typed_source(
         tmp.path(),
-        "metadata-v4",
-        POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION,
+        "metadata-v5",
+        POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION,
         "polymarket_market_metadata",
     )
     .unwrap();
@@ -951,6 +943,7 @@ fn polymarket_metadata_v4_writer_appends_only_the_claimant_pair() {
             ),
         ]
     );
+    assert!(schema.index_of("resolution_evidence_raw_sha256").is_err());
 }
 
 #[test]

@@ -8,7 +8,7 @@
 >
 > 纳入的 RTDS 专项三件套：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`、`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`、`changelog/data-collect-rtds-business-silence-full-reconnect-changelog.md`
 >
-> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FAIL_INCOMPLETE_8H_P_B1E_IMPLEMENTATION_CLOSED_ATTEMPT5_USER_TERMINATED_SCHEMA_CHANGE_INCOMPLETE_8H_REDUNDANT_TYPED_COLUMNS_STAGE0_CLOSED_STAGE1_CLOSED_ON_PUBLISH_STAGE2_NEXT_ATTEMPT6_PENDING_AFTER_V7_V5`。其中`P-B1E`是本次获批的“nullable Decimal精确空串兼容”唯一标识，用于避免与Attempt1辅助文件污染处置的历史`E-A`重名；重复typed列阶段0已由commit `3d5f37e3f95f82adf2d01f3cd6190944867bff38`完成发布与三方ref核对；阶段1只有在独立复审通过、承载本记录的阶段1代码+文档commit成功push且三方ref一致后闭合。RTDS network-error方案A的`366fed7d`/`415470e`、Gamma `closedTime`方案A的`3a367386`/`e086017f`及P-B1E的`15feb12`/`9d8e59b`均已按authority/Rust分离发布并完成三方ref核对。RTDS阶段0和阶段1已闭合；Attempt1、Attempt3、Attempt4永久为`FAIL + INCOMPLETE_8H`，Attempt2永久为`USER_TERMINATED + INCOMPLETE_8H`。P-B1E定向验证与三路独立终审均已通过；Attempt5已按用户指令停止；当前先闭合v7/v5，再从新clean/pushed HEAD执行完整六源8小时Attempt6。总事项阶段0已以commit
+> 状态：`APPROVED_STANDING_EXECUTION_P_B1_CLOSED_2_PM_CLOSED_2_RTDS_CLOSED_STAGE3_CLOSED_STAGE5_CLOSED_STAGE6_CLOSED_2_REST_CLOSED_CORE_COMPLETE_RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FAIL_INCOMPLETE_8H_P_B1E_IMPLEMENTATION_CLOSED_ATTEMPT5_USER_TERMINATED_SCHEMA_CHANGE_INCOMPLETE_8H_REDUNDANT_TYPED_COLUMNS_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_CLOSED_ON_PUBLISH_ATTEMPT6_PENDING_AFTER_V7_V5`。其中`P-B1E`是本次获批的“nullable Decimal精确空串兼容”唯一标识，用于避免与Attempt1辅助文件污染处置的历史`E-A`重名；重复typed列阶段0已由commit `3d5f37e3f95f82adf2d01f3cd6190944867bff38`完成发布与三方ref核对，阶段1已由commit `470b7cd82d6242cdf9040918ad46993e291b828c`完成发布与三方ref核对，阶段2实现、本地门与三路独立终审均已通过，随承载本记录的commit成功push后闭合。RTDS network-error方案A的`366fed7d`/`415470e`、Gamma `closedTime`方案A的`3a367386`/`e086017f`及P-B1E的`15feb12`/`9d8e59b`均已按authority/Rust分离发布并完成三方ref核对。RTDS阶段0和阶段1已闭合；Attempt1、Attempt3、Attempt4永久为`FAIL + INCOMPLETE_8H`，Attempt2永久为`USER_TERMINATED + INCOMPLETE_8H`。P-B1E定向验证与三路独立终审均已通过；Attempt5已按用户指令停止；当前先闭合v5，再从新clean/pushed HEAD执行完整六源8小时Attempt6。总事项阶段0已以commit
 > `86d14a9f4225f9b941206b9d47bcfe5a736c7789`闭合并发布，阶段1已以commit
 > `b818e436a115eb61859fa281773342ee58f54f6a`闭合并发布；runtime为
 > `SDK_070_RUNTIME_USABLE`；阶段1闭合时typed contract为
@@ -41,6 +41,28 @@
 > RTDS行为专项当前为`RTDS_SHARED_CONTRACT_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_ATTEMPT1_RECORDED_SOLUTION_A_IMPLEMENTATION_CLOSED_ATTEMPT2_USER_TERMINATED_INCOMPLETE_ATTEMPT3_FAIL_INCOMPLETE_8H_GAMMA_CLOSED_TIME_A_IMPLEMENTATION_CLOSED_ATTEMPT4_FAIL_INCOMPLETE_8H_P_B1E_IMPLEMENTATION_CLOSED_ATTEMPT5_USER_TERMINATED_SCHEMA_CHANGE_INCOMPLETE_8H_ATTEMPT6_PENDING_AFTER_V7_V5`。
 > 本文件只记录本组三件套的事实、冲突、决定与执行，不回写旧changelog。
 
+## 2026-07-28：方案 B 窄覆盖 W-B 的 metadata-v3 writer 条款
+
+重复 typed 列删除阶段 2 的独立审查发现，2026-07-25 W-B 要求保留
+production-compiled public offline source-v2/metadata-v3 writer，但 current
+metadata-v5 实现已经删除 metadata-v3 writer API。两者不能同时成立，主代理按决策门
+停止阶段 2 发布并请求用户裁决。
+
+用户选择方案 B，精确裁决如下：
+
+- W-B 的 public offline metadata-v3 writer `KEEP` 被撤销，该 API 删除；
+- metadata v3 exact schema、reader、legacy validator 与精确文件解码仍保留，历史
+  fixture 使用测试内显式冻结的 Arrow schema/batch；
+- public offline source-v2 writer、schema 与 legacy row-grain reader不属于本次
+  裁决，继续 `KEEP`；
+- 2026-07-25 W-B、Stage3 和 Stage5 的旧记录仍如实表示当时发生过的合同与执行，不
+  回写为未发生；当前 authority 由本节与
+  `DC-REPAIR-20260728-REDUNDANT-TYPED-COLUMN-REMOVAL` 的三件套窄覆盖。
+
+代码实际边界与方案 B 一致，因此没有为兼容性恢复第二 writer、schema adapter 或
+shadow path；只同步当前需求、计划、changelog 与 cleanup ledger，并继续阶段 2
+验证和独立复审。
+
 ## 2026-07-28：两个重复字段新事项接管 current new-write，Attempt5 用户终止
 
 - 用户批准
@@ -57,6 +79,11 @@
 - 唯一下一长跑游标是在新事项 v7/v5 分阶段审查、commit、push 后，从新
   clean/pushed HEAD 与空 root 启动 Attempt6。顶部状态段中“Attempt5 为下一步”的
   旧句只保留停止前历史游标。
+- 新事项阶段 2 的 metadata v5 实现、方案 B、完整本地门和三路
+  `gpt-5.6-sol`/Ultra 最终复审均已通过；三路均为
+  `Critical 0 / Important 0 / Minor 0`。当前为
+  `STAGE2_CLOSED_ON_PUBLISH`，阶段 2 commit 成功 push 并完成三方 ref 核对后再
+  进入 Attempt6。
 
 ## 2026-07-24：用户要求建立一个新的总事项
 

@@ -1,20 +1,20 @@
 use super::*;
 
-fn polymarket_metadata_v4_prefixes_from_event(
+fn polymarket_metadata_v5_prefixes_from_event(
     event: &RawEvent,
 ) -> Result<Vec<PolymarketMarketMetadataV3Row>> {
-    polymarket_metadata_v4_rows_from_event(event)?
+    polymarket_metadata_v5_rows_from_event(event)?
         .into_iter()
         .map(|row| {
             let validation = row.validate();
             if !validation.is_complete() {
                 return Err(invalid_data(format!(
-                    "metadata v4 fixture validation failed:{}",
+                    "metadata v5 fixture validation failed:{}",
                     validation.violations.join(",")
                 ))
                 .into());
             }
-            let mut prefix = row.v3_prefix;
+            let mut prefix = row.into_compatibility_prefix();
             prefix.schema_version = POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION.to_owned();
             Ok(prefix)
         })
@@ -778,11 +778,6 @@ fn expected_accepted_polymarket_metadata_dynamic_bytes(
             .winning_outcome
             .as_ref()
             .map_or(0, String::capacity),
-        accepted
-            .row
-            .resolution_evidence_raw_sha256
-            .as_ref()
-            .map_or(0, String::capacity),
         accepted.raw_day_ticket.dynamic_owned_bytes(),
         accepted
             .ws_claimant_source_sequence_epoch_id
@@ -831,7 +826,6 @@ fn polymarket_pending_owned_bytes_counts_each_allocation_once() {
     row.ws_platform_timestamp_raw = Some(string_with_spare_capacity("timestamp", 5));
     row.winning_asset_id = Some(string_with_spare_capacity("winner", 4));
     row.winning_outcome = Some(string_with_spare_capacity("Up", 3));
-    row.resolution_evidence_raw_sha256 = Some(string_with_spare_capacity("resolution-digest", 2));
     let accepted = AcceptedPolymarketMetadataRow {
         row,
         raw_day_ticket: RawDayAcceptedTicket::Defer(RawDayDeferredEpoch {
@@ -1144,7 +1138,7 @@ async fn polymarket_recovered_pending_admits_missed_evidence_before_future_slots
     .unwrap();
 
     let event = rx.recv().await.unwrap().into_legacy_event();
-    let rows = polymarket_metadata_v4_prefixes_from_event(&event).unwrap();
+    let rows = polymarket_metadata_v5_prefixes_from_event(&event).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].resolution_poll_attempt_ordinal, Some(2));
     assert_eq!(
@@ -4057,7 +4051,7 @@ async fn polymarket_next_discovery_cancelled_at_e_is_not_fatal() {
     let metadata = std::iter::from_fn(|| event_rx.try_recv().ok())
         .filter(|event| event.event.source_kind == "polymarket_market_metadata")
         .map(|event| {
-            polymarket_metadata_v4_prefixes_from_event(&event.event)
+            polymarket_metadata_v5_prefixes_from_event(&event.event)
                 .unwrap()
                 .remove(0)
         })
@@ -4261,7 +4255,7 @@ async fn polymarket_mixed_and_zero_valid_sequences_exhaust_once_at_six() {
 
         let rows = std::iter::from_fn(|| rx.try_recv().ok())
             .map(|event| {
-                polymarket_metadata_v4_prefixes_from_event(&event.event)
+                polymarket_metadata_v5_prefixes_from_event(&event.event)
                     .unwrap()
                     .remove(0)
             })
@@ -4659,8 +4653,8 @@ async fn polymarket_day_fence_orders_ws_old_before_gamma_new() {
     assert!(context.pending.is_empty());
     let admitted = [rx.recv().await.unwrap(), rx.recv().await.unwrap()];
     assert!(polymarket_v3_message(&admitted[0]).is_some());
-    let terminal = polymarket_metadata_v4_prefixes_from_event(
-        polymarket_metadata_event(&admitted[1]).expect("second row must be metadata v4"),
+    let terminal = polymarket_metadata_v5_prefixes_from_event(
+        polymarket_metadata_event(&admitted[1]).expect("second row must be metadata v5"),
     )
     .unwrap()
     .remove(0);
@@ -4690,7 +4684,7 @@ async fn polymarket_day_fence_orders_ws_old_before_gamma_new() {
     flush_deferred_raw_events(&sink, "polymarket", &close)
         .await
         .unwrap();
-    let post = polymarket_metadata_v4_prefixes_from_event(&rx.recv().await.unwrap().event)
+    let post = polymarket_metadata_v5_prefixes_from_event(&rx.recv().await.unwrap().event)
         .unwrap()
         .remove(0);
     assert_eq!(
@@ -4816,7 +4810,7 @@ async fn polymarket_day_fence_orders_gamma_old_before_ws_new() {
 
         assert!(context.pending.is_empty());
         let old_day_row =
-            polymarket_metadata_v4_prefixes_from_event(&rx.recv().await.unwrap().event)
+            polymarket_metadata_v5_prefixes_from_event(&rx.recv().await.unwrap().event)
                 .unwrap()
                 .remove(0);
         if gamma_terminal {
@@ -4871,7 +4865,7 @@ async fn polymarket_day_fence_orders_gamma_old_before_ws_new() {
                     .iter()
                     .filter_map(polymarket_metadata_event)
                     .any(|event| {
-                        polymarket_metadata_v4_prefixes_from_event(event).is_ok_and(|rows| {
+                        polymarket_metadata_v5_prefixes_from_event(event).is_ok_and(|rows| {
                             rows[0].metadata_row_kind
                                 == PolymarketMetadataRowKind::ResolutionTerminalWs
                         })
@@ -4991,7 +4985,7 @@ async fn polymarket_hour_fence_keeps_gamma_claim_and_rejects_post_horizon_ws() {
     let metadata = events
         .iter()
         .filter_map(polymarket_metadata_event)
-        .flat_map(|event| polymarket_metadata_v4_prefixes_from_event(event).unwrap())
+        .flat_map(|event| polymarket_metadata_v5_prefixes_from_event(event).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(metadata.len(), 1);
     assert_eq!(
@@ -5138,7 +5132,7 @@ async fn polymarket_connected_stop_deadline_and_control_close_quiesce_ws_and_abo
             .iter()
             .find_map(polymarket_metadata_event)
             .and_then(|event| {
-                polymarket_metadata_v4_prefixes_from_event(event)
+                polymarket_metadata_v5_prefixes_from_event(event)
                     .ok()
                     .and_then(|mut rows| rows.pop())
             })
@@ -5255,7 +5249,7 @@ async fn polymarket_stop_materializes_accepted_current_ws_after_e_before_reply()
         let metadata = events
             .iter()
             .skip(1)
-            .flat_map(|event| polymarket_metadata_v4_prefixes_from_event(&event.event).unwrap())
+            .flat_map(|event| polymarket_metadata_v5_prefixes_from_event(&event.event).unwrap())
             .collect::<Vec<_>>();
         assert_eq!(metadata.len(), 2, "{clean_exit}");
         assert_eq!(
@@ -5627,7 +5621,7 @@ async fn polymarket_2355_stop_defers_raw_e_transition_and_terminal_without_deadl
     let metadata = events
         .iter()
         .skip(1)
-        .flat_map(|event| polymarket_metadata_v4_prefixes_from_event(&event.event).unwrap())
+        .flat_map(|event| polymarket_metadata_v5_prefixes_from_event(&event.event).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(metadata.len(), 2);
     assert_eq!(
@@ -5747,7 +5741,7 @@ async fn polymarket_2355_day_fence_finalizes_e_minus_one_ws_before_reply() {
                 assert_eq!(before_activation.len(), 2);
                 assert!(polymarket_v3_message(&before_activation[0]).is_some());
                 let terminal =
-                    polymarket_metadata_v4_prefixes_from_event(&before_activation[1].event)
+                    polymarket_metadata_v5_prefixes_from_event(&before_activation[1].event)
                         .unwrap()
                         .remove(0);
                 assert_eq!(
@@ -5774,7 +5768,7 @@ async fn polymarket_2355_day_fence_finalizes_e_minus_one_ws_before_reply() {
                 let transitions = after_activation
                     .iter()
                     .map(|event| {
-                        polymarket_metadata_v4_prefixes_from_event(&event.event)
+                        polymarket_metadata_v5_prefixes_from_event(&event.event)
                             .unwrap()
                             .remove(0)
                             .market_runtime_role_transition
@@ -5915,7 +5909,7 @@ async fn polymarket_exhausted_summary_uses_applied_day_ticket_across_rollover_cu
                 .unwrap();
         }
         let summary = event_rx.recv().await.unwrap();
-        let row = polymarket_metadata_v4_prefixes_from_event(&summary.event)
+        let row = polymarket_metadata_v5_prefixes_from_event(&summary.event)
             .unwrap()
             .remove(0);
         assert_eq!(
@@ -6034,7 +6028,7 @@ async fn polymarket_outer_stop_harvests_ready_gamma_before_reply() {
         .await
         .unwrap()
         .unwrap();
-    let row = polymarket_metadata_v4_prefixes_from_event(&event.event)
+    let row = polymarket_metadata_v5_prefixes_from_event(&event.event)
         .unwrap()
         .remove(0);
     assert_eq!(
@@ -6394,7 +6388,7 @@ async fn polymarket_outer_recovery_day_fence_advances_after_pre_e_select_sample(
                 let admitted = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
                 assert_eq!(admitted.len(), 2);
                 assert!(polymarket_v3_message(&admitted[0]).is_some());
-                let terminal = polymarket_metadata_v4_prefixes_from_event(&admitted[1].event)
+                let terminal = polymarket_metadata_v5_prefixes_from_event(&admitted[1].event)
                     .unwrap()
                     .remove(0);
                 assert_eq!(
@@ -6491,7 +6485,7 @@ async fn polymarket_outer_recovery_drives_due_slot_without_rebuilding_context() 
     assert_eq!(pending.valid_response_count, 1);
     assert!(pending.in_flight_ordinal.is_none());
     assert!(pending.poll_abort_handle.is_none());
-    let row = polymarket_metadata_v4_prefixes_from_event(&event_rx.recv().await.unwrap().event)
+    let row = polymarket_metadata_v5_prefixes_from_event(&event_rx.recv().await.unwrap().event)
         .unwrap()
         .remove(0);
     assert_eq!(row.resolution_poll_attempt_ordinal, Some(1));
@@ -6584,7 +6578,7 @@ async fn polymarket_outer_recovery_advances_current_across_e_before_retry() {
     assert_eq!(pending.next_attempt_ordinal, 2);
     let rows = std::iter::from_fn(|| event_rx.try_recv().ok())
         .map(|event| {
-            polymarket_metadata_v4_prefixes_from_event(&event.event)
+            polymarket_metadata_v5_prefixes_from_event(&event.event)
                 .unwrap()
                 .remove(0)
         })
@@ -6695,7 +6689,7 @@ async fn polymarket_outer_recovery_finalizes_terminal_and_exhausted_without_clob
         assert!(!context.pending.contains_key(&identity.slug));
         let rows = std::iter::from_fn(|| event_rx.try_recv().ok())
             .map(|event| {
-                polymarket_metadata_v4_prefixes_from_event(&event.event)
+                polymarket_metadata_v5_prefixes_from_event(&event.event)
                     .unwrap()
                     .remove(0)
             })
@@ -7027,18 +7021,12 @@ async fn polymarket_terminal_fence_finalizes_three_reverse_races_once() {
             .iter()
             .filter_map(polymarket_metadata_event)
             .map(|event| {
-                polymarket_metadata_v4_prefixes_from_event(event)
+                polymarket_metadata_v5_prefixes_from_event(event)
                     .unwrap()
                     .remove(0)
             })
             .collect::<Vec<_>>();
         for row in &metadata {
-            let validation = row.validate();
-            assert!(
-                validation.is_complete(),
-                "{mode} row must satisfy v3 matrix:{:?}",
-                validation.violations
-            );
             if let (Some(source_received_at_utc_ms), Some(validation_completed_at_utc_ms)) = (
                 row.source_evidence_received_at_utc,
                 row.row_evidence_validation_completed_at_utc,
@@ -7371,7 +7359,7 @@ async fn polymarket_two_ready_pending_sample_applied_time_per_transition() {
     assert_eq!(stats.wait_count.load(Ordering::Relaxed), 2);
 
     let rows = [first, second].map(|event| {
-        polymarket_metadata_v4_prefixes_from_event(&event)
+        polymarket_metadata_v5_prefixes_from_event(&event)
             .unwrap()
             .remove(0)
     });
@@ -7450,7 +7438,7 @@ async fn polymarket_decoded_attempt_binding_error_keeps_v3_evidence_then_fails_c
     assert!(error.to_string().contains("resolution integrity failure"));
 
     let event = rx.recv().await.unwrap().into_legacy_event();
-    let rows = polymarket_metadata_v4_prefixes_from_event(&event).unwrap();
+    let rows = polymarket_metadata_v5_prefixes_from_event(&event).unwrap();
     assert_eq!(rows.len(), 1);
     let row = &rows[0];
     assert_eq!(
@@ -7972,7 +7960,7 @@ async fn clob_current_and_prefetched_assets_survive_three_legacy_silence_cycles_
 async fn polymarket_resolution_timeline_is_absolute_green() {
     assert_eq!(
         typed_schema_version("polymarket_market_metadata"),
-        POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION
+        POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION
     );
     let real_windows = discovery_windows(1_783_392_404_599);
     let boundary_ms = real_windows.current.target_ts_s * 1_000;
@@ -8400,7 +8388,7 @@ async fn polymarket_resolution_timeline_is_absolute_green() {
         })
         .collect::<Vec<_>>();
     for (event, _) in &metadata {
-        let rows = polymarket_metadata_v4_prefixes_from_event(event).unwrap();
+        let rows = polymarket_metadata_v5_prefixes_from_event(event).unwrap();
         assert_eq!(rows.len(), 1);
         let validation = rows[0].validate();
         assert!(
@@ -10602,8 +10590,8 @@ fn polymarket_metadata_admission_uses_real_time_and_rejects_future_causal_fields
             inflight_budget: InflightBudget::new(),
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         };
-        let mut event = polymarket_metadata_v4_raw_event(
-            PolymarketMarketMetadataV4Row::from_v3_prefix(base_row.clone(), None, None),
+        let mut event = polymarket_metadata_v5_raw_event(
+            PolymarketMarketMetadataV5Row::from_v3_prefix(base_row.clone(), None, None),
         )
         .unwrap();
         let future = now_ms() + 60_000;
@@ -10635,8 +10623,8 @@ fn polymarket_metadata_admission_uses_real_time_and_rejects_future_causal_fields
         inflight_budget: InflightBudget::new(),
         enqueue_lock: Arc::new(AsyncMutex::new(())),
     };
-    let mut event = polymarket_metadata_v4_raw_event(
-        PolymarketMarketMetadataV4Row::from_v3_prefix(base_row, None, None),
+    let mut event = polymarket_metadata_v5_raw_event(
+        PolymarketMarketMetadataV5Row::from_v3_prefix(base_row, None, None),
     )
     .unwrap();
     let mut raw = serde_json::from_str::<Value>(&event.raw_json).unwrap();
@@ -10716,7 +10704,7 @@ fn polymarket_terminal_post_batch_rejects_future_post_without_consuming_sequence
     .unwrap();
 
     let terminal_event = InflightRawEvent::for_test(
-        polymarket_metadata_v4_raw_event(PolymarketMarketMetadataV4Row::from_v3_prefix(
+        polymarket_metadata_v5_raw_event(PolymarketMarketMetadataV5Row::from_v3_prefix(
             terminal,
             Some(evidence.source_sequence_epoch_id.clone()),
             Some(evidence.collector_admission_sequence),
@@ -10724,7 +10712,7 @@ fn polymarket_terminal_post_batch_rejects_future_post_without_consuming_sequence
         .unwrap(),
     );
     let mut post_event = InflightRawEvent::for_test(
-        polymarket_metadata_v4_raw_event(PolymarketMarketMetadataV4Row::from_v3_prefix(
+        polymarket_metadata_v5_raw_event(PolymarketMarketMetadataV5Row::from_v3_prefix(
             post, None, None,
         ))
         .unwrap(),

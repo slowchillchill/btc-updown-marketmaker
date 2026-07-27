@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-redundant-typed-column-removal-changelog.md`
 >
-> 状态：`APPROVED_STAGE0_CLOSED_STAGE1_CLOSED_ON_PUBLISH_STAGE2_NEXT_ATTEMPT5_USER_TERMINATED_INCOMPLETE_8H`
+> 状态：`APPROVED_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_CLOSED_ON_PUBLISH_ATTEMPT5_USER_TERMINATED_INCOMPLETE_8H_ATTEMPT6_PENDING_AFTER_V7_V5`
 
 ## 阶段 0：停止旧测试并同步 authority
 
@@ -82,6 +82,10 @@ push 到 `origin/fix-rtds-silents`。
 - 步骤 1.3.3 的三路独立审查、首轮问题闭环和最终复审已完成，最终均为
   `PASS / Critical 0 / Important 0 / Minor 0`。阶段 1 随承载本记录的
   代码+文档 commit 成功 push 且三方 ref 一致而闭合。
+- 阶段 1 commit
+  `470b7cd82d6242cdf9040918ad46993e291b828c` 已 push 到
+  `origin/fix-rtds-silents`，本地 HEAD、upstream 与远端 ref 已核对一致，故阶段
+  1 已闭合。
 
 ## 阶段 2：实现 `polymarket_market_metadata_v5`
 
@@ -90,9 +94,11 @@ push 到 `origin/fix-rtds-silents`。
 - 步骤 2.1.1：更新 schema contract，断言 v5 等于 v4 删除
   `resolution_evidence_raw_sha256`，claimant pair 保持末尾和原语义。
   - 验证：旧代码下测试先失败于目标字段仍存在。
-- 步骤 2.1.2：冻结 v3/v4 exact schema、owned terminal digest 旧规则和 legacy
-  recovery fixture。
-  - 验证：旧版本仍要求并校验旧列；v5 不使用该列。
+- 步骤 2.1.2：冻结 v3/v4 exact schema、owned terminal digest 旧规则、v3 精确
+  文件解码 fixture 和 v4 legacy claimant recovery fixture。
+  - 验证：旧版本仍要求并校验旧列；v3 fixture 使用测试内显式冻结的 Arrow
+    schema/batch，不依赖 current writer 或 public offline metadata-v3 writer；v3
+    不重新获得 claimant recovery authority；v5 不使用该列。
 - 步骤 2.1.3：增加旧标签 new-write、unknown version 和 v5 raw-event 仍出现被删
   字段的负例。
   - 验证：current writer/version dispatch 精确 fail closed；不新增跨文件
@@ -109,10 +115,13 @@ push 到 `origin/fix-rtds-silents`。
   - 验证：source payload/source digest 校验仍在唯一 owner 执行；terminal
     ownership、winner/outcome 和 claimant 约束不变。
 - 步骤 2.2.3：扩展精确 MetadataLayout/version dispatch、v5 reader/recovery 和
-  current writer，保留 v3/v4 legacy 路径。
+  current writer，保留 v3/v4 exact reader/validator 与 v4 legacy claimant
+  recovery；按用户方案 B 删除 public offline metadata-v3 writer，仅保留
+  public offline source-v2 writer。
   - 验证：同一 v5 常量传播到 footer、embedded recovery metadata、published
     result 与 manifest per-file fact，并拒绝“v5 物理布局 + v3/v4 标签”；不复制
-    整个通用框架、不增加第二 writer。
+    整个通用框架、不增加第二 writer；v3 fixture 由测试内冻结的旧 Arrow
+    schema/batch 构造，source-v2 public writer 合同不变。
 - 步骤 2.2.4：保留既有 AC-12 validation artifact 不变，新增 v5 repo-local
   contract validator/test 与受影响 fixtures。
   - 验证：v5 检查目标列不存在并用 source digest 验证 payload；冻结的 source v2
@@ -131,6 +140,28 @@ push 到 `origin/fix-rtds-silents`。
   - 验证：问题闭环后同步 changelog、commit/push。
 
 阶段 2 完成条件：需求验收 2--6、8 中 metadata 部分通过，阶段 2 commit 已 push。
+
+### 阶段 2 当前执行记录（2026-07-28）
+
+- 任务 2.1、2.2 与步骤 2.3.1--2.3.2 已完成；current writer 已精确升级为
+  metadata v5，旧 digest 不再进入 raw-event、Arrow、Parquet 或 current
+  validator。
+- source payload/source digest、terminal owner、winner/outcome 与 claimant pair
+  合同保持；v3 exact decode/validator、v4 legacy claimant recovery 与 coherent
+  v4/v5 lifecycle recovery 已通过测试。
+- finalized delta、Parquet footer、embedded recovery metadata 与每日 manifest
+  per-file version 均由同一 v5 常量传播；Attempt5 的五个 v4 文件仍按 70 列 exact
+  schema 可读。
+- 首轮独立审查发现旧 W-B 要求保留 public offline metadata-v3 writer，而 current
+  v5 实现已删除该 API。用户选择方案 B 后，计划明确撤销 W-B 的 metadata-v3
+  writer 窄条款；source-v2 public offline writer 与 metadata v3 exact
+  reader/validator 均不受影响。
+- 修复 embedded row version、误导测试名并同步方案 B 后，完整 package tests、
+  tests check、严格 Clippy、fmt 与 diff check 再次通过；既有 AC-12
+  validator/report 哈希与其冻结 inventory 一致。
+- 原三路 `gpt-5.6-sol`/Ultra 审查者最终复审均为
+  `PASS / Critical 0 / Important 0 / Minor 0`。阶段 2 随承载本记录的代码+文档
+  commit 成功 push 且本地 HEAD、upstream 与远端 ref 一致而闭合。
 
 ## 阶段 3：完整六源 Attempt6 与收口
 

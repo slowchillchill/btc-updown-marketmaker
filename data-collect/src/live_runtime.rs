@@ -145,8 +145,8 @@ use crate::market_discovery::{
 use crate::polymarket_market_metadata_layout::{
     ActiveUnavailableReason, ClosedTimeCheckFailureReason, MarketLifecycleTransition,
     MarketRuntimeRole, MarketRuntimeRoleTransition, POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
-    POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION, PolymarketMarketMetadataV3Row,
-    PolymarketMarketMetadataV4Row, PolymarketMetadataOrigin, PolymarketMetadataRowKind,
+    POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION, PolymarketMarketMetadataV3Row,
+    PolymarketMarketMetadataV5Row, PolymarketMetadataOrigin, PolymarketMetadataRowKind,
     PolymarketMetadataV3ReferenceRecord, ResolutionEvidenceSource, ResolutionFollowupStatus,
     ResolutionIntegrityErrorClass, ResolutionPollResult, ResolutionTransportErrorClass,
     ResponseFieldsUnavailableReason, SourceEndpointUnavailableReason, SourceEvidenceChannel,

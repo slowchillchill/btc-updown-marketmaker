@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-redundant-typed-column-removal-changelog.md`
 >
-> 状态：`APPROVED_STAGE0_CLOSED_STAGE1_CLOSED_ON_PUBLISH_STAGE2_NEXT_ATTEMPT5_USER_TERMINATED_INCOMPLETE_8H`
+> 状态：`APPROVED_STAGE0_CLOSED_STAGE1_CLOSED_STAGE2_CLOSED_ON_PUBLISH_ATTEMPT5_USER_TERMINATED_INCOMPLETE_8H_ATTEMPT6_PENDING_AFTER_V7_V5`
 
 ## 一、目标与用户裁决
 
@@ -20,6 +20,13 @@
 
 本需求只删除上述两个字段。其他列、artifact、source mapping、writer owner、manifest
 schema、业务事件、恢复策略和 source 行为保持不变。
+
+用户于 2026-07-28 在阶段 2 首轮独立审查暴露旧 W-B 与当前实现冲突后选择方案 B：
+撤销 W-B 中“保留 public offline metadata-v3 writer”的窄条款并删除该写入 API。
+metadata v3 的冻结 schema、exact reader、legacy validator 与精确文件解码继续保留；
+历史 v3 fixture 改由测试内显式冻结的 Arrow schema/batch 构造，不借用 current
+writer。该裁决不涉及 public offline source-v2 writer；source-v2 writer、schema 与
+legacy row-grain reader继续保留。
 
 ## 二、已核实事实
 
@@ -51,8 +58,9 @@ schema、业务事件、恢复策略和 source 行为保持不变。
   `source_evidence_raw_sha256` 的 payload/hash 对应关系。删除第二个别名不删除
   source payload、source digest、winner、outcome、evidence source、claim owner
   或 claimant pair。
-- metadata v3/v4 的 exact schema、旧行 validator、legacy recovery 和 offline
-  fixture 仍必须按旧合同识别并验证该字段。
+- metadata v3 的 exact schema、旧行 validator 与精确文件解码继续识别并验证该
+  字段；metadata v4 另保留 source-v3 claimant 的 legacy recovery。v3 不因此
+  重新获得 claimant recovery authority。
 
 ## 三、冻结的新写 schema
 
@@ -84,8 +92,10 @@ schema、业务事件、恢复策略和 source 行为保持不变。
 - owned terminal 继续要求完整 winner、outcome、resolution evidence source、
   terminal claim owner 及适用的 source evidence；不再要求或生成第二个相同 digest；
 - 非 owned-terminal row 不再执行“第二 digest 必须为空”的重复矩阵校验；
-- current writer 只接受精确 metadata v5 new-write。v3/v4 exact reader 和 legacy
-  validator 保留；不得用 v5 writer 伪造 v3/v4 fixture。
+- current writer 只接受精确 metadata v5 new-write。v3 保留 exact reader 和
+  legacy validator，v4 另保留 exact reader、legacy validator 与 claimant
+  recovery；public offline metadata-v3 writer 不再存在，v3/v4 fixture 必须由测试
+  内冻结的旧 Arrow schema/batch 显式构造，不得用 v5 writer 伪造。
 - 为避免复制 50 多个冻结字段，crate-private current 实现可以复用 v3 prefix 作为
   compatibility carrier，但其中旧 resolution digest slot 必须恒为 `None`，不得进入
   v5 raw-event JSON、Arrow schema、Parquet、公开 current row 或 v5 校验合同；这不
@@ -147,8 +157,10 @@ dataset root 执行完整六源 8 小时 Attempt6。
    `source_evidence_payload_json` 与 `source_evidence_raw_sha256` 完整性验证保持。
 3. current writer 精确拒绝用旧版本标签写新物理布局；footer、embedded metadata、
    published result 和 manifest per-file version 一致。
-4. aggTrade v5/v6 与 metadata v3/v4 的真实或冻结物理 fixture 继续按原 schema
-   read/recover；历史文件不被重写。
+4. aggTrade v5/v6 的 legacy recovery、metadata v3 的 exact
+   schema/read-validation，以及 metadata v4 的 legacy claimant recovery 继续按
+   原合同工作；public offline metadata-v3 new-write API 不存在，source-v2 public
+   offline writer 保持可用，历史文件不被重写。
 5. metadata v5 的 WS claimant pair、Gamma/WS terminal ownership、local reference
    和 source v3 claimant recovery 与 v4 保持等价，除被删别名外无行为变化。
 6. 受影响 contract/round-trip/recovery 测试、package tests、check、严格 Clippy、

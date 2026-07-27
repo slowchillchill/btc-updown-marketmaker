@@ -16,6 +16,14 @@
 > closure commit：
 > `9e0d264058ed64cd63fbd05280f0826afaba0509`
 
+> 2026-07-28 current authority 覆盖：用户在重复 typed 列删除阶段 2 选择方案 B，
+> 撤销且仅撤销 W-B 中 public offline metadata-v3 writer 的 `KEEP`。该 API
+> `DELETE_APPROVED_W_B_SUPERSEDED`；metadata v3 exact schema/reader/legacy
+> validator 与精确文件解码保留，fixture 使用测试内冻结 Arrow schema/batch。
+> public offline source-v2 writer、schema 与 legacy row-grain reader继续
+> `KEEP`。下文 Stage5 表格保留当时执行事实；与当前 writer authority 不同时以本
+> 覆盖为准。
+
 ## 1. 审计边界
 
 本台账处理两类已批准Stage5清理：
@@ -30,7 +38,7 @@
 - `data-collect`的lib、binary、tests、benches及Cargo targets；
 - public/crate-private API、serde/trait间接入口；
 - repo scripts、需求、计划、changelog与legacy artifact reader；
-- Stage3 S-B probe和W-B明确保留范围。
+- Stage3 S-B probe和Stage5当时的W-B保留范围；当前范围适用顶部方案B窄覆盖。
 
 当前基线命令为：
 
@@ -55,13 +63,14 @@ warning改名或抑制，而是删除下文登记的旧private owner及空plumbi
 | C05 | `POLYMARKET_PROCESSOR_STAGING_MAX_BYTES`；定义后无引用 | `DELETE_PROVEN_UNREACHABLE_PRIVATE` | 全targets只有定义；直接删除并compile/check |
 | C06 | `RecoveryPair::LegacyV2MetadataV3`、`restore_legacy_polymarket_resolution_recovery`、旧raw projection/parser/validator和仅保护该test-only recovery的tests | `DELETE_PROVEN_REPLACED_BEHAVIOR` | production recovery固定source-v3/metadata-v4；保留并测试source-v2/metadata-v3 cross-pair检测及legacy row-grain audit reader，不把v2重建为v3 |
 | C07 | internal `MetadataRecord.schema_version`字段；只赋值、不参与current恢复判断 | `DELETE_PROVEN_UNREACHABLE_PRIVATE` | metadata layout/footer及exact schema已在构造record前验证；删除字段与旧test-only mutation后current recovery矩阵通过 |
-| C08 | `write_polymarket_orderbook_rows_with_logical_bytes`与`write_polymarket_market_metadata_v3_rows_with_logical_bytes`；只有C01旧adapter和writer内部旧测试消费 | `DELETE_PROVEN_UNREACHABLE_PRIVATE` | W-B public offline `write_polymarket_orderbook_rows`/`write_polymarket_market_metadata_v3_rows`保持不变；旧测试改用公开入口或由现有public writer contract覆盖 |
+| C08 | `write_polymarket_orderbook_rows_with_logical_bytes`与`write_polymarket_market_metadata_v3_rows_with_logical_bytes`；只有C01旧adapter和writer内部旧测试消费 | `DELETE_PROVEN_UNREACHABLE_PRIVATE` | Stage5当时按W-B保留public offline `write_polymarket_orderbook_rows`/`write_polymarket_market_metadata_v3_rows`；后者后来由2026-07-28方案B删除，前者保持 |
 
 ## 3. KEEP边界
 
 | ID | 保留项 | 理由 |
 |---|---|---|
-| K01 | public offline source-v2/metadata-v3 writer、v2 schema与row-grain reader | W-B明确用于历史fixture、兼容测试和bounded A/B；不得因无current-runtime caller删除 |
+| K01 | public offline source-v2 writer、v2 schema与row-grain reader | W-B明确用于历史fixture、兼容测试和bounded A/B；2026-07-28方案B不涉及该source-v2边界 |
+| K01b | metadata v3 exact schema、reader、legacy validator与精确文件解码 | 方案B只删除public writer；fixture改用测试内冻结Arrow schema/batch，不恢复第二writer |
 | K02 | `polymarket_storage_ab_probe`及Stage3报告 | Stage6按hash消费且明确`NO_RERUN / NO_REIMPLEMENTATION / NO_SECOND_REVIEW` |
 | K03 | current source-v3/metadata-v4 adapter、writer、claimant与recovery；legacy layout cross-pair拒绝扫描 | Stage3正式authority与fail-closed门 |
 | K04 | Binance/RTDS dedupe、`structural_dedupe_dropped_events`通用计数及其manifest字段 | 仍有独立真实consumer；Polymarket删除不得扩大到其他source |
@@ -85,8 +94,10 @@ authority裁决，覆盖前五个终态条目；首次终审发现另外两套sh
 | U05 | `BackpressureConfig/Monitor`、逐queue age/lag阈值、`PauseIntake/ResumeIntake`及专属test/bench控制路径 | `DELETE_PROVEN_REPLACED_BEHAVIOR` | 真实控制owner为bounded channel、global inflight row/owned-byte、单行上限和有界acquire/send wait；只保留`QueueSample`纯观测DTO与`BackpressureReceipt`兼容字段，不由DTO产生控制决策 |
 | U06 | `health.rs`有限retry trace/circuit registry/`ReconnectGate`及三个专属合同 | `DELETE_PROVEN_REPLACED_BEHAVIOR` | production只需要确定性capped+jitter sleep数学，已收窄到现有私有`live_runtime::retry_delay`；真实`SourceRecoverySupervisor`保持有界单次等待、无限外层总attempt，business freshness不成为transport恢复门 |
 
-W-B public legacy writer/reader不是本次U裁决对象，继续`KEEP`。Stage5不会改变production
-cutover、历史artifact、paper/live、部署、远端状态或数据。
+W-B public legacy writer/reader不是本次U裁决对象，Stage5当时继续`KEEP`。后续
+2026-07-28方案B只删除metadata-v3 public writer；source-v2 writer和两类legacy
+reader合同不变。Stage5不会改变production cutover、历史artifact、paper/live、部署、
+远端状态或数据。
 
 ## 5. 执行顺序
 
@@ -110,7 +121,7 @@ C01–C08均已按上表终态执行。下表是private cleanup完成、进入cl
 | C01 adapter与其模块测试 | `+3 / -1,528` | 旧v2/raw/fan-out/current writer leaf及10项旧测试删除；target-admission与v3/v4测试保留 |
 | C02–C05 runtime/source/source tests | `+16 / -985` | payload fingerprint restore/drop、空lifecycle参数链、无caller pending fingerprint与staging常量删除；Binance/RTDS dedupe及source状态测试保留 |
 | C06–C07 recovery | `+164 / -1,126` | 旧raw recovery及test-only pair删除；current v3/v4 typed recovery、metadata真实schema校验和v2 cross-pair拒绝保留 |
-| C08 writer | `+0 / -93` | 两个crate-private logical-bytes入口及其孤立test/helper删除；W-B public offline writer保留 |
+| C08 writer | `+0 / -93` | 两个crate-private logical-bytes入口及其孤立test/helper删除；Stage5当时W-B public offline writer保留，metadata-v3 public writer后来由方案B删除 |
 | **合计** | **`+183 / -3,732`，净删除`3,549`行** | 只统计两类`DELETE_PROVEN_*`及为保留current合同而迁移的最小测试行 |
 
 随后all-target clippy暴露两个大enum variant以及机械lint；按最小范围把
@@ -259,9 +270,9 @@ polymarket_pending_union_and_terminal_claim_stay_within_frozen_bounds 1 passed
 ```
 
 旧adapter的三项正向测试被批准删除，因此lib计数从351降至348；这不是测试遗漏。
-`ResourceAction::ResumeIntake`仍属于独立global hard-resource watermark owner，
-offline metadata layout中的`fallback_close`仍属于W-B保留边界，二者均不是
-U05/I2残留。
+`ResourceAction::ResumeIntake`仍属于独立global hard-resource watermark owner；
+metadata v3冻结schema/reader中的`fallback_close`属于方案B明确保留的legacy读取
+边界，二者均不是U05/I2残留，也不要求恢复metadata-v3 public writer。
 
 SDK070三件套、base authority overlay、source-availability三件套的U06-A窄
 supersede、acceptance matrix与本台账已同步。文档/authority与代码/consumer两路
