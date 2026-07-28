@@ -1,6 +1,6 @@
 # DC-INCIDENT-20260728-LAG-IDENTITY-REPAIR Changelog
 
-> 状态：`STAGE4_REVIEW_PASSED_READY_FOR_RELEASE_COMMIT`
+> 状态：`STAGE4_COMPLETE_READY_FOR_REMOTE_DEPLOY`
 >
 > 对应需求：`demand/data-collect-20260728-lag-fixed-identity-repair-demand.md`
 >
@@ -470,3 +470,31 @@
   `SIGABRT` 或 `stack overflow`。
 - 下一步先提交/push 本阶段事实，再从该 clean commit 本地构建最终 release。远端
   删除、上传和启动仍未执行。
+
+## Stage 4 release
+
+- Stage 4 审查事实提交为
+  `58c6796ee652d89016556684f191e20ab239c1b2`
+  （`docs(data-collect): record final repair validation`），并已推送到
+  `origin/fix-rtds-silents`；构建前本地 HEAD、remote-tracking ref 一致且工作树
+  clean。
+- 从该 commit 本地执行：
+  `DATA_COLLECT_GIT_COMMIT=58c6796ee652d89016556684f191e20ab239c1b2 cargo build --release --locked --bin data-collect-training-collector`。
+- 最终部署产物：
+  - path：
+    `/home/chillchill/fix-rtds-silents/target/release/data-collect-training-collector`；
+  - size：30,322,304 bytes；
+  - SHA256：
+    `80fa49a4b2261e21bb58e4466da5d67f0b6f101d986e886d7248de40d1e2e18b`；
+  - ELF：x86-64 PIE、dynamic；
+  - Build ID：`c830ccb52dcc099fb4d46aa99fdd0dd526a93591`；
+  - 最大 GLIBC requirement：`GLIBC_2.38`；远端为 x86_64、glibc 2.39；
+  - `--version`：`data-collect-training-collector 0.1.0`；
+  - `--help` 与计划中的 dataset root、region、run mode、dataset byte limit 参数完全一致。
+- 对这一个最终 SHA 的 release 另以全新隔离 root 运行 15 秒：默认线程栈 exit 0，
+  maximum RSS `39,104 KiB`；manifest 中 build commit 与 binary SHA 精确匹配，
+  六个 source 均生成 finalized file，`gaps=[]`、所有 `lag_events=0` 和
+  `dropped_rows=0`。
+- Stage 4 完成。下一步严格按用户批准的简单开发流程：再次确认 UTC27/UTC28 本地
+  副本，停止远端服务，直接删除两个精确目录，创建程序目录、上传上述 SHA 的
+  release，并启动现有 unit。
