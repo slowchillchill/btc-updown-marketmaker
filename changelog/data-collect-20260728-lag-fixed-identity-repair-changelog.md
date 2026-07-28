@@ -1,6 +1,6 @@
 # DC-INCIDENT-20260728-LAG-IDENTITY-REPAIR Changelog
 
-> 状态：`STAGE3_COMPLETE`
+> 状态：`STAGE4_REVIEW_PASSED_READY_FOR_RELEASE_COMMIT`
 >
 > 对应需求：`demand/data-collect-20260728-lag-fixed-identity-repair-demand.md`
 >
@@ -370,3 +370,103 @@
   - Polymarket source 102 项和 `git diff --check` 复跑通过。
 - Stage 3 已满足实现、全量验证和独立审查完成门；本 changelog 与代码在同一阶段
   commit/push 后进入 Stage 4。远端清空和部署仍未开始。
+
+## Stage 3 发布
+
+- prospective fixed identity 修复与本 changelog 已提交为
+  `ff8f56014f4e8c83bee9a3e3089eb0d6bb06525d`
+  （`fix(data-collect): preserve restart fixed identity authority`）。
+- commit 已推送到 `origin/fix-rtds-silents`；提交后本地 HEAD 与 remote-tracking ref
+  完全一致，工作树 clean。
+
+## Stage 4 全量门
+
+- 在上述 clean commit 上执行
+  `cargo test --workspace --locked --quiet -- --test-threads=1`：
+  - lib 377 passed、1 ignored（显式八小时 public RTDS probe）；
+  - integration 231 passed；
+  - 三个 bin target 与 doctest 均退出 0。
+- `cargo check --workspace --locked --all-targets`、
+  `cargo clippy --workspace --locked --all-targets -- -D warnings`、
+  `cargo fmt --all -- --check` 和 `git diff --check` 全部通过。
+- workspace 只有 `data-collect` 一个 member，因此上述 workspace 门同时覆盖当前
+  crate 全量门。
+- 模块 authority 再次机械核对：
+  - `lib.rs` 只声明一次 `pub mod live_runtime`；
+  - `live_runtime.rs` 是唯一 root，并直接声明 28 个当前 production 子模块；
+  - `live_runtime/` 下不存在第二个 `mod.rs`；
+  - production 调用链仍为 training binary ->
+    `runtime::run_training_collector` -> `live_runtime::run_live_training_runtime`。
+  因此本轮修改的 root composition、`polymarket_source` 和 recovery 均属于同一当前
+  编译树，不是重构遗留的第二套旧实现。
+
+## Stage 4 恢复资源与 clean-root 双启动
+
+- 通过运行后已删除源码的临时 probe 和只读 symlink，对 UTC27 本地副本执行当前
+  recovery：
+  - `polymarket_market` 为 5 个 finalized Parquet、7,558,641 rows、
+    454,478,145 bytes；
+  - recovery time 为 `2026-07-28T00:02:13.160Z`；
+  - 结果为 `pending=1 current=true next=false`；
+  - elapsed `31.67s`，maximum RSS `194,516 KiB`，exit 0。
+- 同一 current-HEAD probe 随后在 user systemd scope 中以
+  `MemoryMax=1900M / MemorySwapMax=0` 复跑；结果仍为
+  `pending=1 current=true next=false`，elapsed `31.80s`，maximum RSS
+  `195,472 KiB`，无 OOM/timeout，exit 0。
+- 该 debug/热缓存完整扫描 RSS 约为 1.9 GiB 包络的十分之一，且与 Stage 1 两次
+  `194,296 / 194,856 KiB` 测量一致；原 UTC27 数据只读且未被修改。
+- 使用 optimized release 和独立空 root
+  `/tmp/data-collect-stage4-release-probe-kep0ypOV` 进行两次真实 source 启动，
+  每次 `--max-runtime-secs 20`：
+  - 两次都在默认线程栈下 exit 0，maximum RSS 分别为
+    `43,332 KiB / 46,256 KiB`；
+  - 第一次写出六个 source 的 6 个 finalized Parquet，第二次写出对应
+    `part-1`，manifest 为 `reactivated_within_day=true`；
+  - 两次累计 Polymarket market 18,357 rows、metadata 4 rows；
+  - manifest `gaps=[]`，六个 source 的 `lag_events=0`、`dropped_rows=0`。
+- 第一次 current/next 的首次 fixed time 分别为
+  `2026-07-28T22:00:54.317Z / 2026-07-28T22:00:55.366Z`。第二次 fresh Gamma
+  的 source/validation time 分别推进到约 `22:01:47.682Z` 与
+  `22:01:48.539Z / 22:01:48.716Z`，但两组
+  `fixed_identity_verified_at_utc` 与 slug、condition、CLOB、ordered assets、
+  start/end 全部保持精确一致。该真实双启动没有 fixed-identity conflict、
+  receiver lag、deadlock 或 writer backpressure。
+
+## Stage 4 debug 启动诊断边界
+
+- 同一代码的 unoptimized debug training binary 在默认 Tokio worker stack 下对另一
+  空 root 启动约 5 至 7 秒后发生 stack overflow 并以 SIGABRT/134 退出；manifest 尚为
+  `not_started`，没有 source file。
+- 同一 debug binary 设置 `RUST_MIN_STACK=8MiB` 后运行 15 秒正常 exit 0，
+  maximum RSS `69,316 KiB`。实际部署形态的 optimized release 不设置该变量，仍在
+  默认栈连续两次真实启动成功。
+- 独立 A/B 使用 `git archive` 和独立 target 构建 Stage 3 父提交
+  `63fed069509960594c564e03557beaba27e1766f`；该父提交的 debug binary 同样在默认栈
+  约 6.47 秒后 SIGABRT/134，当前 `ff8f560` 为约 6.61 秒后 SIGABRT/134。两 binary
+  SHA 不同，且两提交差异未触碰 training binary、startup coordinator 或 source task
+  supervision。GDB 将当前溢出收窄到既有 Polymarket producer 的大型 debug async
+  future；因此它不是 Stage 3 fixed-identity 修改引入的回归。
+- 当前不把 debug-only 现象转化为远端环境变量或额外 runtime 配置；是否属于本事项
+  release 阻断项，交由 Stage 4 `gpt-5.6-sol/ultra` 最终独立审查。远端仍未删除、
+  上传或重启。
+
+## Stage 4 最终独立审查
+
+- `gpt-5.6-sol/ultra` 最终独立审查结论为 `PASS`，可执行 finding 为 0。
+- 审查逐项确认需求 AC1 至 AC7 已有相符代码、测试与实物证据；AC8、AC9 正确保留为
+  `PENDING_BY_PLAN`，分别由 Stage 5 远端部署和 Stage 6 长跑验收完成，不在 Stage 4
+  提前宣称通过。
+- 独立复跑：
+  - recovery 44/44；
+  - Polymarket source 102/102；
+  - source supervision 8/8；
+  - format 与 diff check 通过。
+- 审查确认只有一个 `live_runtime` root 和一条生产调用链，不存在误改旧实现；
+  fixed identity 严格 equality、paused FIFO、primary/secondary、bounded recovery
+  均未建立 shadow authority 或过度校验。
+- debug 默认栈溢出因父提交与当前提交均可复现而判定为非本轮回归；optimized release
+  默认栈双启动及 1,900 MiB/无 swap recovery scope 均通过，因此不阻断 release，
+  也不允许为远端新增 `RUST_MIN_STACK`。Stage 6 继续监控 release 是否出现
+  `SIGABRT` 或 `stack overflow`。
+- 下一步先提交/push 本阶段事实，再从该 clean commit 本地构建最终 release。远端
+  删除、上传和启动仍未执行。
