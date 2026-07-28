@@ -5,8 +5,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use arrow_array::{
-    Array as _, BooleanArray, RecordBatch, StringArray, TimestampMillisecondArray, UInt8Array,
-    UInt16Array, UInt32Array, UInt64Array,
+    Array as _, BooleanArray, ListArray, RecordBatch, StringArray, TimestampMillisecondArray,
+    UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use parquet::arrow::{ProjectionMask, arrow_reader::ParquetRecordBatchReaderBuilder};
@@ -29,9 +29,7 @@ use crate::polymarket_market_metadata_layout::{
     polymarket_market_metadata_v5_schema, validate_polymarket_metadata_v3_local_references,
 };
 use crate::polymarket_orderbook_v3::{
-    POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION, PolymarketOrderbookV3Event,
-    PolymarketOrderbookV3Message, polymarket_orderbook_v3_messages_from_batch,
-    polymarket_orderbook_v3_schema, same_outcome_label,
+    POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION, polymarket_orderbook_v3_schema, same_outcome_label,
 };
 use crate::sources::polymarket::{
     GammaTerminalAttemptContext, GammaTerminalFixedIdentity, GammaTerminalResponse,
@@ -46,6 +44,7 @@ const SLOT_INTERVAL_MS: i64 = 60_000;
 const BUDGET_HORIZON_MS: i64 = 8 * 60_000;
 const MAX_RECOVERED_PENDING: usize = 2;
 const POLYMARKET_ORDERBOOK_V2_SCHEMA_VERSION: &str = "polymarket_orderbook_v2";
+const RECOVERY_BATCH_MAX_ROWS: usize = 16;
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -55,6 +54,22 @@ const LEGACY_V2_ROUTING_PROJECTION: [&str; 5] = [
     "event_type",
     "slug",
     "schema_version",
+];
+
+const TYPED_V3_RESOLUTION_PROJECTION: [&str; 13] = [
+    "timestamp_received",
+    "event_type",
+    "market",
+    "slug",
+    "schema_version",
+    "source_sequence_epoch_id",
+    "collector_admission_sequence",
+    "collector_admission_time_utc_ms",
+    "clob_market_id",
+    "asset_ids",
+    "outcomes",
+    "winning_asset_id",
+    "winning_outcome",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -901,6 +916,20 @@ struct QualifiedTypedSource {
     winning_outcome: String,
 }
 
+struct ProjectedMarketResolvedSource {
+    timestamp_received: i64,
+    collector_admission_time_utc_ms: i64,
+    source_sequence_epoch_id: String,
+    collector_admission_sequence: u64,
+    market: String,
+    slug: Option<String>,
+    clob_market_id: String,
+    asset_ids: Vec<String>,
+    outcomes: Vec<String>,
+    winning_asset_id: String,
+    winning_outcome: String,
+}
+
 #[derive(Default)]
 struct AttemptCounters {
     ordinals: BTreeSet<u8>,
@@ -1385,7 +1414,7 @@ fn read_finalized_metadata_for_validation(
             continue;
         }
         require_canonical_metadata_schema(builder.schema().as_ref(), &path, layout)?;
-        let mut reader = builder.with_batch_size(64).build()?;
+        let mut reader = builder.with_batch_size(RECOVERY_BATCH_MAX_ROWS).build()?;
         let mut file_row = 0_u64;
         for batch in &mut reader {
             let batch = batch?;
@@ -1427,7 +1456,7 @@ fn reject_dual_metadata_layout_for_current_lifecycles(
             continue;
         }
         require_canonical_metadata_schema(builder.schema().as_ref(), &path, layout)?;
-        let mut reader = builder.with_batch_size(64).build()?;
+        let mut reader = builder.with_batch_size(RECOVERY_BATCH_MAX_ROWS).build()?;
         for batch in &mut reader {
             let batch = batch?;
             for row in 0..batch.num_rows() {
@@ -1479,7 +1508,7 @@ fn read_precise_metadata_reference_authorities(
                 continue;
             }
             require_canonical_metadata_schema(builder.schema().as_ref(), &path, layout)?;
-            let mut reader = builder.with_batch_size(64).build()?;
+            let mut reader = builder.with_batch_size(RECOVERY_BATCH_MAX_ROWS).build()?;
             let mut file_row = 0_u64;
             for batch in &mut reader {
                 let batch = batch?;
@@ -1600,7 +1629,6 @@ fn read_qualified_typed_market_sources(
     recovery_time_ms: i64,
 ) -> Result<BTreeMap<String, Vec<QualifiedTypedSource>>> {
     let mut qualified = BTreeMap::<String, Vec<QualifiedTypedSource>>::new();
-    let mut source_keys = BTreeSet::<(String, u64)>::new();
     let mut last_sequence_by_epoch = BTreeMap::<String, u64>::new();
     for path in finalized_source_paths(dataset_root, days, "polymarket_market")? {
         let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&path)?)?;
@@ -1621,50 +1649,91 @@ fn read_qualified_typed_market_sources(
                     ))
                     .into());
                 }
-                let mut reader = builder.with_batch_size(64).build()?;
+                require_columns(
+                    builder.schema().as_ref(),
+                    &TYPED_V3_RESOLUTION_PROJECTION,
+                    &path,
+                )?;
+                let projection = ProjectionMask::columns(
+                    builder.parquet_schema(),
+                    TYPED_V3_RESOLUTION_PROJECTION,
+                );
+                let mut reader = builder
+                    .with_projection(projection)
+                    .with_batch_size(RECOVERY_BATCH_MAX_ROWS)
+                    .build()?;
                 for batch in &mut reader {
                     let batch = batch?;
-                    for message in polymarket_orderbook_v3_messages_from_batch(&batch)? {
-                        let key = (
-                            message.envelope.source_sequence_epoch_id.clone(),
-                            message.envelope.collector_admission_sequence,
-                        );
-                        if !source_keys.insert(key.clone()) {
-                            return Err(invalid_data(format!(
-                                "Polymarket restart duplicate v3 source key:epoch={}:sequence={}",
-                                key.0, key.1
-                            ))
-                            .into());
-                        }
-                        let previous = last_sequence_by_epoch.entry(key.0.clone()).or_insert(0);
-                        if key.1 <= *previous {
-                            return Err(invalid_data(format!(
-                                "Polymarket restart v3 source sequence regressed:epoch={}:previous={}:current={}",
-                                key.0, *previous, key.1
-                            ))
-                            .into());
-                        }
-                        *previous = key.1;
-                        let PolymarketOrderbookV3Event::MarketResolved(resolved) = &message.event
-                        else {
+                    for row in 0..batch.num_rows() {
+                        let schema_version = required_string(&batch, row, "schema_version")?;
+                        let source_sequence_epoch_id =
+                            required_string(&batch, row, "source_sequence_epoch_id")?;
+                        let collector_admission_sequence =
+                            required_u64(&batch, row, "collector_admission_sequence")?;
+                        validate_recovery_source_sequence(
+                            &mut last_sequence_by_epoch,
+                            &source_sequence_epoch_id,
+                            collector_admission_sequence,
+                        )?;
+                        let timestamp_received =
+                            required_timestamp(&batch, row, "timestamp_received")?;
+                        let collector_admission_time_utc_ms =
+                            required_timestamp(&batch, row, "collector_admission_time_utc_ms")?;
+                        validate_recovery_source_envelope(
+                            &schema_version,
+                            timestamp_received,
+                            collector_admission_time_utc_ms,
+                            &path,
+                            row,
+                        )?;
+                        let event_type = required_string(&batch, row, "event_type")?;
+                        if matches!(
+                            event_type.as_str(),
+                            "book"
+                                | "price_change"
+                                | "tick_size_change"
+                                | "last_trade_price"
+                                | "best_bid_ask"
+                                | "new_market"
+                        ) {
                             continue;
-                        };
-                        if message.envelope.timestamp_received > recovery_time_ms {
+                        }
+                        if event_type != "market_resolved" {
+                            return Err(invalid_data(format!(
+                                "Polymarket restart unknown v3 source event discriminator:file={}:row={row}:event_type={event_type}",
+                                path.display()
+                            ))
+                            .into());
+                        }
+                        if timestamp_received > recovery_time_ms {
                             return Err(invalid_data(format!(
                                 "Polymarket restart v3 source receive exceeds recovery time:file={}:received={}:recovery={recovery_time_ms}",
                                 path.display(),
-                                message.envelope.timestamp_received
+                                timestamp_received
                             ))
                             .into());
                         }
+                        let projected = ProjectedMarketResolvedSource {
+                            timestamp_received,
+                            collector_admission_time_utc_ms,
+                            source_sequence_epoch_id,
+                            collector_admission_sequence,
+                            market: required_string(&batch, row, "market")?,
+                            slug: optional_string(&batch, row, "slug")?,
+                            clob_market_id: required_string(&batch, row, "clob_market_id")?,
+                            asset_ids: required_string_list(&batch, row, "asset_ids")?,
+                            outcomes: required_string_list(&batch, row, "outcomes")?,
+                            winning_asset_id: required_string(&batch, row, "winning_asset_id")?,
+                            winning_outcome: required_string(&batch, row, "winning_outcome")?,
+                        };
                         let candidates = identities
                             .values()
                             .filter(|identity| {
-                                message.envelope.timestamp_received >= identity.market_start_utc_ms
-                                    && (message.envelope.market == identity.condition_id
-                                        || message.envelope.slug.as_deref()
+                                projected.timestamp_received >= identity.market_start_utc_ms
+                                    && (projected.market == identity.condition_id
+                                        || projected.slug.as_deref()
                                             == Some(identity.slug.as_str())
-                                        || resolved.clob_market_id == identity.clob_market_id)
+                                        || projected.clob_market_id == identity.clob_market_id)
                             })
                             .collect::<Vec<_>>();
                         let [identity] = candidates.as_slice() else {
@@ -1675,13 +1744,13 @@ fn read_qualified_typed_market_sources(
                             };
                             return Err(invalid_data(format!(
                                 "Polymarket restart v3 market_resolved has {detail}:market={}:slug={:?}:clob_market_id={}",
-                                message.envelope.market,
-                                message.envelope.slug,
-                                resolved.clob_market_id
+                                projected.market,
+                                projected.slug,
+                                projected.clob_market_id
                             ))
                             .into());
                         };
-                        let source = validate_typed_market_source(&message, resolved, identity)?;
+                        let source = validate_typed_market_source(&projected, identity)?;
                         qualified
                             .entry(identity.slug.clone())
                             .or_default()
@@ -1692,6 +1761,61 @@ fn read_qualified_typed_market_sources(
         }
     }
     Ok(qualified)
+}
+
+fn validate_recovery_source_sequence(
+    last_sequence_by_epoch: &mut BTreeMap<String, u64>,
+    source_sequence_epoch_id: &str,
+    collector_admission_sequence: u64,
+) -> Result<()> {
+    if source_sequence_epoch_id.trim().is_empty() {
+        return Err(invalid_data("Polymarket restart v3 source epoch is empty").into());
+    }
+    if collector_admission_sequence == 0 {
+        return Err(invalid_data("Polymarket restart v3 source sequence is zero").into());
+    }
+    if let Some(previous) = last_sequence_by_epoch.get_mut(source_sequence_epoch_id) {
+        if collector_admission_sequence <= *previous {
+            return Err(invalid_data(format!(
+                "Polymarket restart v3 source sequence regressed:epoch={source_sequence_epoch_id}:previous={previous}:current={collector_admission_sequence}"
+            ))
+            .into());
+        }
+        *previous = collector_admission_sequence;
+    } else {
+        last_sequence_by_epoch.insert(
+            source_sequence_epoch_id.to_owned(),
+            collector_admission_sequence,
+        );
+    }
+    Ok(())
+}
+
+fn validate_recovery_source_envelope(
+    schema_version: &str,
+    timestamp_received: i64,
+    collector_admission_time_utc_ms: i64,
+    path: &Path,
+    row: usize,
+) -> Result<()> {
+    if schema_version != POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION {
+        return Err(invalid_data(format!(
+            "Polymarket restart v3 source schema version mismatch:file={}:row={row}:actual={schema_version}",
+            path.display()
+        ))
+        .into());
+    }
+    if timestamp_received <= 0
+        || collector_admission_time_utc_ms <= 0
+        || timestamp_received > collector_admission_time_utc_ms
+    {
+        return Err(invalid_data(format!(
+            "Polymarket restart v3 source receive/admission order is invalid:file={}:row={row}:received={timestamp_received}:admission={collector_admission_time_utc_ms}",
+            path.display()
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 fn reject_relevant_legacy_v2_source(
@@ -1712,7 +1836,7 @@ fn reject_relevant_legacy_v2_source(
         ProjectionMask::columns(builder.parquet_schema(), LEGACY_V2_ROUTING_PROJECTION);
     let mut reader = builder
         .with_projection(projection)
-        .with_batch_size(64)
+        .with_batch_size(RECOVERY_BATCH_MAX_ROWS)
         .build()?;
     for batch in &mut reader {
         let batch = batch?;
@@ -1742,25 +1866,20 @@ fn reject_relevant_legacy_v2_source(
 }
 
 fn validate_typed_market_source(
-    message: &PolymarketOrderbookV3Message,
-    resolved: &crate::polymarket_orderbook_v3::PolymarketMarketResolvedV3,
+    source: &ProjectedMarketResolvedSource,
     identity: &FixedIdentity,
 ) -> Result<QualifiedTypedSource> {
-    if message.envelope.market != identity.condition_id
-        || message.envelope.slug.as_deref() != Some(identity.slug.as_str())
-        || resolved.clob_market_id != identity.clob_market_id
-        || !asset_set_matches(&resolved.asset_ids, identity)
-        || !winner_matches(
-            identity,
-            &resolved.winning_asset_id,
-            &resolved.winning_outcome,
-        )
-        || (!resolved.outcomes.is_empty()
-            && (resolved.outcomes.len() != resolved.asset_ids.len()
-                || resolved
+    if source.market != identity.condition_id
+        || source.slug.as_deref() != Some(identity.slug.as_str())
+        || source.clob_market_id != identity.clob_market_id
+        || !asset_set_matches(&source.asset_ids, identity)
+        || !winner_matches(identity, &source.winning_asset_id, &source.winning_outcome)
+        || (!source.outcomes.is_empty()
+            && (source.outcomes.len() != source.asset_ids.len()
+                || source
                     .asset_ids
                     .iter()
-                    .zip(&resolved.outcomes)
+                    .zip(&source.outcomes)
                     .any(|(asset, outcome)| {
                         (asset == &identity.up_asset_id && !same_outcome_label(outcome, "up"))
                             || (asset == &identity.down_asset_id
@@ -1770,12 +1889,12 @@ fn validate_typed_market_source(
         return Err(relevant_raw_error(identity, "typed v3 identity/winner contradiction").into());
     }
     Ok(QualifiedTypedSource {
-        timestamp_received: message.envelope.timestamp_received,
-        collector_admission_time_utc_ms: message.envelope.collector_admission_time_utc_ms,
-        source_sequence_epoch_id: message.envelope.source_sequence_epoch_id.clone(),
-        collector_admission_sequence: message.envelope.collector_admission_sequence,
-        winning_asset_id: resolved.winning_asset_id.clone(),
-        winning_outcome: resolved.winning_outcome.clone(),
+        timestamp_received: source.timestamp_received,
+        collector_admission_time_utc_ms: source.collector_admission_time_utc_ms,
+        source_sequence_epoch_id: source.source_sequence_epoch_id.clone(),
+        collector_admission_sequence: source.collector_admission_sequence,
+        winning_asset_id: source.winning_asset_id.clone(),
+        winning_outcome: source.winning_outcome.clone(),
     })
 }
 
@@ -1886,6 +2005,36 @@ fn optional_string(batch: &RecordBatch, row: usize, name: &str) -> Result<Option
     Ok(values.is_valid(row).then(|| values.value(row).to_owned()))
 }
 
+fn required_string_list(batch: &RecordBatch, row: usize, name: &str) -> Result<Vec<String>> {
+    let list = typed_column::<ListArray>(batch, name)?;
+    if list.is_null(row) {
+        return Err(invalid_data(format!(
+            "Polymarket restart required string list is null:column={name}:row={row}"
+        ))
+        .into());
+    }
+    let value = list.value(row);
+    let strings = value
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| {
+            invalid_data(format!(
+                "Polymarket restart string list item type mismatch:column={name}:row={row}"
+            ))
+        })?;
+    (0..strings.len())
+        .map(|index| {
+            if strings.is_null(index) {
+                return Err(invalid_data(format!(
+                    "Polymarket restart string list item is null:column={name}:row={row}:item={index}"
+                ))
+                .into());
+            }
+            Ok(strings.value(index).to_owned())
+        })
+        .collect()
+}
+
 fn required_timestamp(batch: &RecordBatch, row: usize, name: &str) -> Result<i64> {
     let values = typed_column::<TimestampMillisecondArray>(batch, name)?;
     if values.is_null(row) {
@@ -1987,7 +2136,8 @@ mod tests {
     };
     use crate::polymarket_orderbook_layout::{PolymarketOrderbookContext, PolymarketOrderbookRow};
     use crate::polymarket_orderbook_v3::{
-        PolymarketMarketResolvedV3, PolymarketOrderbookV3Envelope,
+        PolymarketMarketResolvedV3, PolymarketOrderbookV3Envelope, PolymarketOrderbookV3Event,
+        PolymarketOrderbookV3Message,
     };
     use crate::writer::{
         PolymarketOrderbookV3WriteSequenceState, TypedParquetSegmentWriter,
@@ -2923,6 +3073,76 @@ mod tests {
     }
 
     #[test]
+    fn typed_v3_recovery_projection_is_bounded_and_excludes_heavy_payloads() {
+        assert_eq!(RECOVERY_BATCH_MAX_ROWS, 16);
+        assert_eq!(TYPED_V3_RESOLUTION_PROJECTION.len(), 13);
+        for excluded in [
+            "bids",
+            "asks",
+            "price_changes",
+            "question",
+            "description",
+            "event_message",
+        ] {
+            assert!(
+                !TYPED_V3_RESOLUTION_PROJECTION.contains(&excluded),
+                "{excluded}"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_v3_recovery_sequence_cursor_accepts_gaps_and_rejects_invalid_order() {
+        let mut sequences = BTreeMap::new();
+        validate_recovery_source_sequence(&mut sequences, "epoch-a", 1).unwrap();
+        validate_recovery_source_sequence(&mut sequences, "epoch-a", 3).unwrap();
+        validate_recovery_source_sequence(&mut sequences, "epoch-b", 1).unwrap();
+
+        for (epoch, sequence, expected) in [
+            ("", 1, "epoch is empty"),
+            ("epoch-a", 0, "sequence is zero"),
+            ("epoch-a", 3, "sequence regressed"),
+            ("epoch-a", 2, "sequence regressed"),
+        ] {
+            let error = validate_recovery_source_sequence(&mut sequences, epoch, sequence)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn typed_v3_recovery_envelope_rejects_schema_and_time_contradictions() {
+        let path = Path::new("fixture.parquet");
+        for (schema, received, admission, expected) in [
+            ("wrong-schema", 1, 1, "schema version mismatch"),
+            (
+                POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,
+                0,
+                1,
+                "receive/admission order",
+            ),
+            (
+                POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,
+                1,
+                0,
+                "receive/admission order",
+            ),
+            (
+                POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,
+                2,
+                1,
+                "receive/admission order",
+            ),
+        ] {
+            let error = validate_recovery_source_envelope(schema, received, admission, path, 7)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
     fn legacy_v3_exact_row_decode_and_validation_remain_available() {
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("metadata-v3.parquet");
@@ -3054,7 +3274,7 @@ mod tests {
         ];
         let sources = vec![
             typed_market_resolved_source(epoch, 1, receive, receive + 1, "101", "Up"),
-            typed_market_resolved_source(epoch, 2, receive, receive + 2, "101", "up"),
+            typed_market_resolved_source(epoch, 3, receive, receive + 2, "101", "up"),
         ];
         write_current_fixture(tmp.path(), recovery_time, &metadata, &sources);
 

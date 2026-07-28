@@ -1,6 +1,6 @@
 # DC-INCIDENT-20260728-LAG-IDENTITY-REPAIR Changelog
 
-> 状态：`STAGE0_REVIEWED_PASS`
+> 状态：`STAGE1_IMPLEMENTED_REVIEW_PENDING`
 >
 > 对应需求：`demand/data-collect-20260728-lag-fixed-identity-repair-demand.md`
 >
@@ -71,3 +71,58 @@
   - 第二次 lag 只能证明端到端处理迟滞，不能定位 writer/queue 或声称因果；
   - 合法业务静默和稀疏 snapshot 不能被“六源持续写入”验收误判。
 - 三件套已同步修正。复审结论为 `PASS`，无剩余可执行 finding。
+
+## Stage 0 发布
+
+- 文档 authority commit：
+  `eeaacc2d411c9eb6b4718d195d2896e5f81b176f`。
+- commit 已推送到 `origin/fix-rtds-silents`，本地 HEAD 与远端 ref 一致后进入
+  Stage 1。
+
+## Stage 1 bounded recovery 实现
+
+- 首先新增 projection/batch 和 sequence cursor 失败测试；未实现时编译按预期因
+  `RECOVERY_BATCH_MAX_ROWS`、`TYPED_V3_RESOLUTION_PROJECTION` 与
+  `validate_recovery_source_sequence` 缺失而退出 101。
+- 新增固定 `RECOVERY_BATCH_MAX_ROWS=16`；本模块五个 recovery reader 全部由 batch
+  64 改为该常量。
+- v3 source recovery 只投影 13 列：
+  `timestamp_received/event_type/market/slug/schema_version/source_sequence_epoch_id/`
+  `collector_admission_sequence/collector_admission_time_utc_ms/clob_market_id/asset_ids/`
+  `outcomes/winning_asset_id/winning_outcome`。
+- 删除全量 `source_keys`；只保留每个 epoch 的最后 sequence。epoch 只在首次出现时
+  分配 String，sequence gap 合法，zero/duplicate/regression fail closed。
+- 普通 `book/price_change/tick_size_change/last_trade_price/best_bid_ask/new_market`
+  只验证 projected envelope 和 discriminator 后跳过，不再构造完整 canonical
+  message；仅 `market_resolved` 读取 identity/winner 列并沿用既有 claimant 校验。
+- 保留完整 Parquet schema/footer preflight、metadata terminal/summary、claimant、
+  winner、source-only、late row 和 cross-pair 矩阵；未新增 manifest authority、
+  sidecar、migration 或 gapless sequence。
+
+### Stage 1 测试与资源证据
+
+- `cargo test -p data-collect polymarket_resolution_recovery --lib`：
+  39 passed、0 failed、322 filtered。
+- 新测试覆盖：
+  - projection 恰好 13 列且不含 bids/asks/price_changes/question/description/event_message；
+  - `[1,3]` sequence gap 接受；
+  - empty epoch、sequence 0、duplicate/regression 拒绝；
+  - 错 schema、非正 receive/admission 及 receive-after-admission 拒绝。
+- `cargo check -p data-collect --all-targets --locked`：通过。
+- 使用临时 probe 和只读 symlink 对本地完整 UTC27 执行真实 recovery scan；
+  probe 运行后已删除，原数据未修改：
+  - 输入 Polymarket v3 约 7,558,641 rows；
+  - debug probe 成功，`pending=1`；
+  - elapsed `32.13s`；
+  - maximum RSS `194,296 KiB`；
+  - exit status 0。
+- 该 RSS 低于远端约 1.9 GiB 内存包络；它是本地 debug/热缓存只读测量，不冒充远端
+  生产时间或长期 RSS。
+
+## Stage 1 审查
+
+- 主代理自审确认改动只收窄 recovery scan 的列、batch 和常驻状态；没有改变
+  claimant/terminal/source-only/cross-pair 语义，也没有新增第二套恢复 authority。
+- `gpt-5.6-sol/ultra` 独立审查结论为 `PASS`，无需要修改的 finding。
+- 独立审查再次运行真实 UTC27 probe，得到 `31.84s / 194,856 KiB / exit 0`；
+  与上述本地 debug/热缓存测量同量级，且没有改变其证据边界。
