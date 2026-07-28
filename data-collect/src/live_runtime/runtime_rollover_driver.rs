@@ -652,7 +652,7 @@ pub(super) async fn complete_pending_exit_rollover(
     {
         let message = format!("pending_exit_stop_dispatch_failed:{error}");
         record_gap(source_gaps, message.clone());
-        *runtime_failure = Some(message);
+        append_runtime_failure(runtime_failure, message);
     }
     loop {
         let mut completed_synthetic_releases = Vec::new();
@@ -724,7 +724,11 @@ pub(super) async fn complete_pending_exit_rollover(
                 };
                 let message = format!("{prefix}:{}:{error}", termination.source_kind);
                 record_gap(source_gaps, message.clone());
-                *runtime_failure = Some(message);
+                if exit.cause.source_task_kind() == Some(termination.source_kind) {
+                    promote_runtime_primary(runtime_failure, message);
+                } else {
+                    append_runtime_failure(runtime_failure, message);
+                }
             }
             if !ready_latched && !producer_fenced {
                 match raw_day_gate.current_state() {
@@ -758,7 +762,7 @@ pub(super) async fn complete_pending_exit_rollover(
             poll_writer_completion(writer_handles, raw_day_gate, post_fence_epoch.as_ref())
         {
             record_gap(source_gaps, completion.message.clone());
-            *runtime_failure = Some(completion.message);
+            append_runtime_failure(runtime_failure, completion.message);
             let worker_fenced = completion
                 .worker_epoch
                 .or(completion.rendezvous_epoch)
@@ -860,14 +864,7 @@ pub(super) async fn complete_pending_exit_rollover(
                 deadline.saturating_duration_since(Instant::now()),
             )
             .await;
-            if !writer_outcome.all_terminal || !writer_outcome.all_close_proven {
-                let message = format!(
-                    "pending_exit_writer_termination_failed:{}",
-                    writer_outcome.errors.join(" | ")
-                );
-                record_gap(source_gaps, message.clone());
-                *runtime_failure = Some(message);
-            }
+            record_writer_stop_failure(&writer_outcome, source_gaps, runtime_failure);
             *completed_writer_outcome = Some(writer_outcome);
             let refreshed = match raw_day_gate.prepared_runtime_exit() {
                 Some(PreparedRuntimeExit::Rollover(refreshed)) => refreshed,
@@ -913,7 +910,7 @@ pub(super) async fn complete_pending_exit_rollover(
                 if let Err(error) = rollover_coordinator.issue_stop_with_close() {
                     let message = format!("pending_exit_stop_dispatch_failed:{error}");
                     record_gap(source_gaps, message.clone());
-                    *runtime_failure = Some(message);
+                    append_runtime_failure(runtime_failure, message);
                 }
             }
             received = event_rx.recv() => {

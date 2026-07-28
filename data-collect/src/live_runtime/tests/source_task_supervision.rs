@@ -27,11 +27,95 @@ async fn completed_source_task_is_detected_during_runtime() {
     .unwrap();
     let handles = vec![handle];
 
-    assert_eq!(finished_source_task(&handles), Some("binance_aggtrade"));
+    assert_eq!(finished_source_task_index(&handles), Some(0));
     assert_eq!(
         source_task_ended_unexpectedly("binance_aggtrade"),
         "source_task_ended_unexpectedly:binance_aggtrade"
     );
+}
+
+#[tokio::test]
+async fn exact_lag_report_remains_primary_before_writer_shutdown_secondary() {
+    for lag_count in [1_364, 781] {
+        let gate = current_day_active_gate().await;
+        let observation = SourceTaskObservationCell::default();
+        let handle = SourceTaskHandle::spawn(
+            "polymarket_market",
+            observe_inner_source_return(
+                "polymarket_market",
+                async move {
+                    Err::<(), Box<dyn Error + Send + Sync>>(
+                        SdkStreamError::Lagged(lag_count).into(),
+                    )
+                },
+                observation.clone(),
+                Arc::clone(&gate),
+            ),
+            observation,
+            Arc::clone(&gate),
+        );
+        timeout(Duration::from_secs(1), async {
+            while !handle.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut handles = vec![handle];
+        let index = finished_source_task_index(&handles).unwrap();
+        let Some(PreparedRuntimeExit::SameDay(close)) = gate.prepared_runtime_exit() else {
+            panic!("source lag must prepare the authoritative same-day close");
+        };
+        assert_eq!(close.cause.source_task_kind(), Some("polymarket_market"));
+        let termination = handles
+            .swap_remove(index)
+            .await_termination(&close.identity)
+            .await;
+        assert_eq!(
+            termination.error.as_deref(),
+            Some(format!("receiver lagged by {lag_count} messages").as_str())
+        );
+        let primary = assess_source_shutdown(&termination, None, &close.identity)
+            .error
+            .expect("the exact source report must classify the primary failure");
+        let expected_primary =
+            format!("source_task_error:polymarket_market:receiver lagged by {lag_count} messages");
+        assert_eq!(primary, expected_primary);
+
+        let source_gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        record_gap(&source_gaps, primary.clone());
+        let mut runtime_failure = None;
+        promote_runtime_primary(&mut runtime_failure, primary);
+        let writer_error = format!("writer shutdown timeout after lag {lag_count}");
+        writer_outputs_or_record_failure(
+            WriterStopOutcome {
+                outputs: Vec::new(),
+                errors: vec![writer_error.clone()],
+                all_terminal: false,
+                all_close_proven: false,
+            },
+            &source_gaps,
+            &mut runtime_failure,
+        );
+
+        promote_runtime_primary(&mut runtime_failure, expected_primary.clone());
+        assert_eq!(
+            runtime_failure,
+            Some(format!(
+                "{expected_primary}; shutdown_secondary:writer_finalize_failed:{writer_error}"
+            ))
+        );
+        assert_eq!(
+            source_gaps
+                .lock()
+                .expect("source gap mutex poisoned")
+                .all_reasons(),
+            vec![
+                expected_primary,
+                format!("writer_finalize_failed:{writer_error}")
+            ]
+        );
+    }
 }
 
 pub(super) async fn current_day_active_gate() -> Arc<RawDayGate> {

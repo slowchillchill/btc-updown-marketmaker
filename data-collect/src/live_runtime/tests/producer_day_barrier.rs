@@ -492,3 +492,96 @@ async fn polymarket_day_barrier_is_between_fenced_and_resumed_source_events() {
     assert!(barrier.control.is_none());
     assert_eq!(after.event.source_identifier, "after-resume");
 }
+
+#[tokio::test]
+async fn polymarket_terminal_stop_matches_post_activation_close_identity() {
+    let boundary_utc_ms = now_ms().div_euclid(UTC_DAY_MS).saturating_mul(UTC_DAY_MS);
+    let (stats, raw_day_gate, close) = prepared_gate_fixture("polymarket", boundary_utc_ms).await;
+    let (tx, mut rx) = mpsc::channel(2);
+    let sink = SourceEventSink {
+        tx,
+        gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+        source_queue_backpressure: stats,
+        inflight_budget: InflightBudget::new(),
+        enqueue_lock: Arc::new(AsyncMutex::new(())),
+    };
+    let (control_tx, mut control_rx) = mpsc::channel(POLYMARKET_CONTROL_CHANNEL_CAPACITY);
+    let source = async move {
+        let PolymarketSourceControl::Fence {
+            stop_after_fence,
+            resume_after_barrier,
+            reply,
+            ..
+        } = control_rx.recv().await.unwrap();
+        assert!(!stop_after_fence);
+        reply.send(Ok(())).unwrap();
+        resume_after_barrier.unwrap().await.unwrap();
+        Err::<(), Box<dyn Error + Send + Sync>>(SdkStreamError::Lagged(1_364).into())
+    };
+    tokio::pin!(source);
+    let consumer_gate = Arc::clone(&raw_day_gate);
+    let consumer_close = close.clone();
+    let consumer = tokio::spawn(async move {
+        let mut barrier = rx.recv().await.unwrap();
+        let Some(IngressControl::DayBarrier { reply, .. }) = barrier.control.take() else {
+            panic!("expected Polymarket day barrier");
+        };
+        let (phase_tx, phase_rx) = watch::channel(ProducerReleasePhase::Held);
+        let (ack_tx, mut ack_rx) = mpsc::channel(2);
+        reply
+            .send(Ok(DayBarrierRelease::PrepareResume(ProducerReleaseToken {
+                producer: "polymarket".to_owned(),
+                close: consumer_close.clone(),
+                phase_rx,
+                ack_tx,
+            })))
+            .unwrap();
+        let armed = ack_rx.recv().await.unwrap();
+        assert_eq!(armed.producer, "polymarket");
+        assert_eq!(armed.kind, ProducerReleaseAckKind::Armed);
+        assert!(armed.error.is_none());
+
+        commit_test_manifest_activation(&consumer_gate, &consumer_close);
+        phase_tx.send_replace(ProducerReleasePhase::FlushDeferred);
+        let flushed = ack_rx.recv().await.unwrap();
+        assert_eq!(flushed.producer, "polymarket");
+        assert_eq!(flushed.kind, ProducerReleaseAckKind::Flushed);
+        assert!(flushed.error.is_none());
+
+        let prepared = consumer_gate
+            .prepare_runtime_exit_with_cause(
+                boundary_utc_ms + 1,
+                RuntimeCloseCause::SourceInnerReturn {
+                    source_kind: "polymarket_market",
+                },
+            )
+            .unwrap();
+        let stop_identity = RawDayGate::runtime_exit_identity(&prepared);
+        phase_tx.send_replace(ProducerReleasePhase::Stop(stop_identity.clone()));
+        assert!(rx.try_recv().is_err());
+        stop_identity
+    });
+
+    let error = timeout(
+        Duration::from_secs(1),
+        fence_polymarket_and_send_day_barrier(
+            source.as_mut(),
+            &control_tx,
+            &sink,
+            Instant::now(),
+            &raw_day_gate,
+            &close,
+        ),
+    )
+    .await
+    .expect("post-activation stop must release the paused source")
+    .expect_err("the exact SDK terminal must escape the coordinated stop");
+    assert_eq!(error.to_string(), "receiver lagged by 1364 messages");
+    let stop_identity = consumer.await.unwrap();
+    assert_eq!(
+        raw_day_gate
+            .prepared_runtime_exit()
+            .map(|prepared| RawDayGate::runtime_exit_identity(&prepared)),
+        Some(stop_identity)
+    );
+}

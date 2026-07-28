@@ -345,6 +345,27 @@ fn is_exact_coordinated_source_stop(
         })
 }
 
+pub(super) fn coordinated_stop_matches_prepared_source_terminal(
+    error: &(dyn Error + Send + Sync + 'static),
+    producer: &str,
+    source_kind: &str,
+    raw_day_gate: &RawDayGate,
+) -> bool {
+    let Some(stop) = error.downcast_ref::<CoordinatedSourceStop>() else {
+        return false;
+    };
+    let Some(prepared) = raw_day_gate.prepared_runtime_exit() else {
+        return false;
+    };
+    let cause = match &prepared {
+        PreparedRuntimeExit::SameDay(close) => &close.cause,
+        PreparedRuntimeExit::Rollover(exit) => &exit.cause,
+    };
+    stop.producer == producer
+        && stop.close == RawDayGate::runtime_exit_identity(&prepared)
+        && cause.source_task_kind() == Some(source_kind)
+}
+
 async fn wait_for_source_fence_reply_or_source<F>(
     mut source: Pin<&mut F>,
     reply_rx: &mut oneshot::Receiver<std::result::Result<(), String>>,
@@ -478,11 +499,39 @@ where
         RawDaySealOutcome::SourceEnded(result) => return Ok(Some(result)),
     };
     let release = send_day_barrier(sink, run_started, "polymarket", close.clone()).await?;
-    if apply_day_barrier_release(sink, "polymarket", &close, release).await? {
-        let _ = resume_tx.send(());
-        Ok(None)
-    } else {
-        Ok(Some(Ok(())))
+    match apply_day_barrier_release(sink, "polymarket", &close, release).await {
+        Ok(true) => {
+            let _ = resume_tx.send(());
+            Ok(None)
+        }
+        Ok(false) => Ok(Some(Ok(()))),
+        Err(error)
+            if coordinated_stop_matches_prepared_source_terminal(
+                error.as_ref(),
+                "polymarket",
+                "polymarket_market",
+                raw_day_gate,
+            ) =>
+        {
+            let _ = resume_tx.send(());
+            let source_result = source.as_mut().await;
+            if let Err(flush_error) =
+                flush_accepted_deferred_raw_events_for_stop(sink, "polymarket", &close).await
+            {
+                record_gap(
+                    &sink.gaps,
+                    format!("polymarket_post_terminal_stop_flush_failed:{flush_error}"),
+                );
+                if source_result.is_ok() {
+                    return Err(flush_error);
+                }
+            }
+            match source_result {
+                Ok(()) => Err(error),
+                Err(source_error) => Err(source_error),
+            }
+        }
+        Err(error) => Err(error),
     }
 }
 

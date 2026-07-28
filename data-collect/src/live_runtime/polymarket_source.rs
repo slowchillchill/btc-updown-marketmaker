@@ -11,6 +11,7 @@ pub(super) const POLYMARKET_PENDING_MAX_MARKETS: usize = 2;
 pub(super) const POLYMARKET_PENDING_STATE_MAX_BYTES: usize = 1024 * 1024;
 pub(super) const POLYMARKET_DECODED_QUEUE_CAPACITY: usize = 25_000;
 pub(super) const POLYMARKET_DECODED_MAX_BYTES: usize = 67_108_864;
+pub(super) const POLYMARKET_DRAIN_CONTROL_SLOTS: usize = 2;
 pub(super) const POLYMARKET_CONTROL_CHANNEL_CAPACITY: usize = 4;
 
 pub(super) enum PolymarketSourceControl {
@@ -127,8 +128,9 @@ impl PolymarketDrainRuntime {
             POLYMARKET_DECODED_QUEUE_CAPACITY,
             POLYMARKET_DECODED_MAX_BYTES,
         );
-        let (event_tx, event_rx) =
-            mpsc::channel::<PolymarketPumpItem>(POLYMARKET_DECODED_QUEUE_CAPACITY);
+        let (event_tx, event_rx) = mpsc::channel::<PolymarketPumpItem>(
+            POLYMARKET_DECODED_QUEUE_CAPACITY + POLYMARKET_DRAIN_CONTROL_SLOTS,
+        );
         let (control_tx, control_rx) =
             mpsc::channel::<PolymarketPumpControl>(POLYMARKET_CONTROL_CHANNEL_CAPACITY);
         let pump_decoded_budget = decoded_budget.clone();
@@ -298,6 +300,7 @@ pub(super) async fn run_polymarket_fast_drain(
                         Err(error) => {
                             send_polymarket_terminal(
                                 &events,
+                                &raw_day_gate,
                                 PolymarketDrainTerminal::Sdk(error),
                             )
                             .await;
@@ -308,6 +311,7 @@ pub(super) async fn run_polymarket_fast_drain(
                 if let Some(error) = terminal_at_fence {
                     send_polymarket_terminal(
                         &events,
+                        &raw_day_gate,
                         PolymarketDrainTerminal::Sdk(error),
                     )
                     .await;
@@ -319,10 +323,54 @@ pub(super) async fn run_polymarket_fast_drain(
                 if stop_after_fence {
                     break;
                 }
-                if let Some(resume) = resume_after_fence
-                    && resume.await.is_err()
-                {
-                    break;
+                if let Some(mut resume) = resume_after_fence {
+                    let mut terminal_sent = false;
+                    loop {
+                        if terminal_sent {
+                            tokio::select! {
+                                _ = &mut resume => {}
+                                _ = events.closed() => {}
+                            }
+                            return;
+                        }
+                        tokio::select! {
+                            biased;
+                            resumed = &mut resume => {
+                                if resumed.is_err() {
+                                    return;
+                                }
+                                break;
+                            }
+                            received = receiver.recv(Duration::from_millis(250)) => {
+                                let message = match received {
+                                    Ok(Some(message)) => message,
+                                    Ok(None) => continue,
+                                    Err(error) => {
+                                        send_polymarket_terminal(
+                                            &events,
+                                            &raw_day_gate,
+                                            PolymarketDrainTerminal::Sdk(error),
+                                        )
+                                        .await;
+                                        terminal_sent = true;
+                                        continue;
+                                    }
+                                };
+                                if !enqueue_polymarket_decoded_message(
+                                    message,
+                                    &events,
+                                    &global_budget,
+                                    &decoded_budget,
+                                    &raw_day_gate,
+                                    recv_utc_now(),
+                                )
+                                .await
+                                {
+                                    terminal_sent = true;
+                                }
+                            }
+                        }
+                    }
                 }
             }
             received = receiver.recv(Duration::from_millis(250)) => {
@@ -332,6 +380,7 @@ pub(super) async fn run_polymarket_fast_drain(
                     Err(error) => {
                         send_polymarket_terminal(
                             &events,
+                            &raw_day_gate,
                             PolymarketDrainTerminal::Sdk(error),
                         )
                         .await;
@@ -373,6 +422,7 @@ pub(super) async fn enqueue_polymarket_decoded_message(
         );
         send_polymarket_terminal(
             events,
+            raw_day_gate,
             PolymarketDrainTerminal::Capacity {
                 reason,
                 recv_time_utc_ms,
@@ -393,6 +443,7 @@ pub(super) async fn enqueue_polymarket_decoded_message(
                 let reason = format!("polymarket_decoded_global_budget_failed:{error}");
                 send_polymarket_terminal(
                     events,
+                    raw_day_gate,
                     PolymarketDrainTerminal::Capacity {
                         reason,
                         recv_time_utc_ms,
@@ -413,6 +464,7 @@ pub(super) async fn enqueue_polymarket_decoded_message(
                 let reason = format!("polymarket_decoded_budget_failed:{error}");
                 send_polymarket_terminal(
                     events,
+                    raw_day_gate,
                     PolymarketDrainTerminal::Capacity {
                         reason,
                         recv_time_utc_ms,
@@ -432,6 +484,7 @@ pub(super) async fn enqueue_polymarket_decoded_message(
         Err(error) => {
             send_polymarket_terminal(
                 events,
+                raw_day_gate,
                 PolymarketDrainTerminal::Admission {
                     reason: format!("polymarket_raw_day_ticket_failed:{error}"),
                     recv_time_utc_ms,
@@ -458,6 +511,7 @@ pub(super) async fn enqueue_polymarket_decoded_message(
                     let reason = "polymarket_decoded_queue_backpressure_timeout".to_owned();
                     send_polymarket_terminal(
                         events,
+                        raw_day_gate,
                         PolymarketDrainTerminal::Capacity {
                             reason,
                             recv_time_utc_ms,
@@ -473,11 +527,30 @@ pub(super) async fn enqueue_polymarket_decoded_message(
     }
 }
 
-async fn send_polymarket_terminal(
+pub(super) async fn send_polymarket_terminal(
     events: &mpsc::Sender<PolymarketPumpItem>,
+    raw_day_gate: &RawDayGate,
     terminal: PolymarketDrainTerminal,
 ) {
+    if polymarket_drain_terminal_is_fatal(&terminal) {
+        let _ = raw_day_gate.observe_source_terminal_now(
+            RuntimeCloseCause::SourceInnerReturn {
+                source_kind: "polymarket_market",
+            },
+            None,
+            None,
+        );
+    }
     let _ = events.send(PolymarketPumpItem::Terminal(terminal)).await;
+}
+
+fn polymarket_drain_terminal_is_fatal(terminal: &PolymarketDrainTerminal) -> bool {
+    match terminal {
+        PolymarketDrainTerminal::Sdk(error) => !polymarket_sdk_error_is_retryable(error),
+        PolymarketDrainTerminal::Capacity { .. }
+        | PolymarketDrainTerminal::Admission { .. }
+        | PolymarketDrainTerminal::QueueClosed => true,
+    }
 }
 
 async fn acquire_polymarket_fast_path(
@@ -924,17 +997,22 @@ pub(super) async fn run_polymarket_source_with_spec(
 }
 
 pub(super) fn market_source_error_is_retryable(error: &(dyn Error + 'static)) -> bool {
-    matches!(
-        error.downcast_ref::<SdkStreamError>(),
-        Some(
-            SdkStreamError::Connection(_)
-                | SdkStreamError::Subscription(_)
-                | SdkStreamError::TerminalDisconnected
-                | SdkStreamError::Timeout(_)
+    error
+        .downcast_ref::<SdkStreamError>()
+        .is_some_and(polymarket_sdk_error_is_retryable)
+        || matches!(
+            error.downcast_ref::<PolymarketDiscoveryError>(),
+            Some(PolymarketDiscoveryError::Unavailable(_))
         )
-    ) || matches!(
-        error.downcast_ref::<PolymarketDiscoveryError>(),
-        Some(PolymarketDiscoveryError::Unavailable(_))
+}
+
+fn polymarket_sdk_error_is_retryable(error: &SdkStreamError) -> bool {
+    matches!(
+        error,
+        SdkStreamError::Connection(_)
+            | SdkStreamError::Subscription(_)
+            | SdkStreamError::TerminalDisconnected
+            | SdkStreamError::Timeout(_)
     )
 }
 
@@ -2149,6 +2227,45 @@ fn polymarket_processing_sink_unusable(
     })
 }
 
+fn replace_retryable_polymarket_primary(
+    primary_error: &mut Box<dyn Error + Send + Sync>,
+    later_error: Box<dyn Error + Send + Sync>,
+) {
+    if market_source_error_is_retryable(primary_error.as_ref())
+        && !market_source_error_is_retryable(later_error.as_ref())
+    {
+        *primary_error = later_error;
+    }
+}
+
+fn record_abandoned_polymarket_messages(
+    gaps: &SharedSourceGaps,
+    abandoned_by_day: BTreeMap<String, (usize, i64, i64)>,
+) {
+    for (utc_day, (messages, first_recv, last_recv)) in abandoned_by_day {
+        record_gap_for_day(
+            gaps,
+            &utc_day,
+            format!(
+                "polymarket_accepted_decoded_messages_discarded:messages={messages}:first_recv_time_utc_ms={first_recv}:last_recv_time_utc_ms={last_recv}",
+            ),
+        );
+    }
+}
+
+fn note_abandoned_polymarket_message(
+    abandoned_by_day: &mut BTreeMap<String, (usize, i64, i64)>,
+    recv_time_utc_ms: i64,
+) {
+    let utc_day = utc_day_string_from_ms(recv_time_utc_ms).unwrap_or_else(|| "unknown".to_owned());
+    let entry = abandoned_by_day
+        .entry(utc_day)
+        .or_insert((0, recv_time_utc_ms, recv_time_utc_ms));
+    entry.0 = entry.0.saturating_add(1);
+    entry.1 = entry.1.min(recv_time_utc_ms);
+    entry.2 = entry.2.max(recv_time_utc_ms);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn stop_polymarket_after_processing_error(
     first_error: Box<dyn Error + Send + Sync>,
@@ -2200,27 +2317,16 @@ pub(super) async fn stop_polymarket_after_processing_error(
                             recv_time_utc_ms,
                             format!("polymarket_processing_error_during_drain:{error}"),
                         );
-                        if market_source_error_is_retryable(primary_error.as_ref())
-                            && !market_source_error_is_retryable(error.as_ref())
-                        {
-                            primary_error = error;
-                        }
+                        replace_retryable_polymarket_primary(&mut primary_error, error);
                         if sink_unusable {
                             can_process = false;
                         }
                     }
                 } else {
-                    let recv_time_utc_ms = message.recv_time_utc_ms;
-                    let utc_day = utc_day_string_from_ms(recv_time_utc_ms)
-                        .unwrap_or_else(|| "unknown".to_owned());
-                    let entry = abandoned_by_day.entry(utc_day).or_insert((
-                        0,
-                        recv_time_utc_ms,
-                        recv_time_utc_ms,
-                    ));
-                    entry.0 = entry.0.saturating_add(1);
-                    entry.1 = entry.1.min(recv_time_utc_ms);
-                    entry.2 = entry.2.max(recv_time_utc_ms);
+                    note_abandoned_polymarket_message(
+                        &mut abandoned_by_day,
+                        message.recv_time_utc_ms,
+                    );
                 }
             }
             Ok(Some(PolymarketDrainEvent::Fence {
@@ -2247,11 +2353,7 @@ pub(super) async fn stop_polymarket_after_processing_error(
                         ),
                     );
                 }
-                if market_source_error_is_retryable(primary_error.as_ref())
-                    && !market_source_error_is_retryable(cleanup_error.as_ref())
-                {
-                    primary_error = cleanup_error;
-                }
+                replace_retryable_polymarket_primary(&mut primary_error, cleanup_error);
                 break;
             }
         }
@@ -2261,21 +2363,9 @@ pub(super) async fn stop_polymarket_after_processing_error(
             &sink.gaps,
             format!("polymarket_processing_error_pump_join_failed:{error}"),
         );
-        if market_source_error_is_retryable(primary_error.as_ref())
-            && !market_source_error_is_retryable(error.as_ref())
-        {
-            primary_error = error;
-        }
+        replace_retryable_polymarket_primary(&mut primary_error, error);
     }
-    for (utc_day, (messages, first_recv, last_recv)) in abandoned_by_day {
-        record_gap_for_day(
-            &sink.gaps,
-            &utc_day,
-            format!(
-                "polymarket_accepted_decoded_messages_discarded:messages={messages}:first_recv_time_utc_ms={first_recv}:last_recv_time_utc_ms={last_recv}",
-            ),
-        );
-    }
+    record_abandoned_polymarket_messages(&sink.gaps, abandoned_by_day);
     Err(primary_error)
 }
 
@@ -2425,6 +2515,60 @@ impl PolymarketBoundaryDrainItem {
     }
 }
 
+fn sort_polymarket_boundary_drain_items(
+    items: &mut [PolymarketBoundaryDrainItem],
+    day_boundary_utc_ms: Option<i64>,
+) {
+    items.sort_by_key(|item| {
+        (
+            day_boundary_utc_ms.map_or(0, |boundary| {
+                u8::from(item.received_at_utc_ms() >= boundary)
+            }),
+            item.received_at_utc_ms(),
+            item.source_order(),
+        )
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_polymarket_boundary_drain_item<N>(
+    item: PolymarketBoundaryDrainItem,
+    timeline_now: &N,
+    context: &mut PolymarketProcessingContext,
+    sink: &SourceEventSink,
+    collector_identity: &CollectorIdentity,
+    run_started: Instant,
+    recovery: &mut SourceRecoverySupervisor,
+) -> Result<()>
+where
+    N: Fn() -> PolymarketTimelineNow + Send + Sync,
+{
+    match item {
+        PolymarketBoundaryDrainItem::Market(message) => {
+            process_polymarket_budgeted_message(
+                *message,
+                context,
+                sink,
+                collector_identity,
+                run_started,
+                recovery,
+            )
+            .await
+        }
+        PolymarketBoundaryDrainItem::Gamma(completion) => {
+            record_gamma_resolution_completion(
+                *completion,
+                &|| timeline_now().utc_ms,
+                context,
+                sink,
+                collector_identity,
+                run_started,
+            )
+            .await
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn process_polymarket_boundary_drain_items<N>(
     mut items: Vec<PolymarketBoundaryDrainItem>,
@@ -2439,42 +2583,89 @@ pub(super) async fn process_polymarket_boundary_drain_items<N>(
 where
     N: Fn() -> PolymarketTimelineNow + Send + Sync,
 {
-    items.sort_by_key(|item| {
-        (
-            day_boundary_utc_ms.map_or(0, |boundary| {
-                u8::from(item.received_at_utc_ms() >= boundary)
-            }),
-            item.received_at_utc_ms(),
-            item.source_order(),
-        )
-    });
+    sort_polymarket_boundary_drain_items(&mut items, day_boundary_utc_ms);
     for item in items {
-        match item {
-            PolymarketBoundaryDrainItem::Market(message) => {
-                process_polymarket_budgeted_message(
-                    *message,
-                    context,
-                    sink,
-                    collector_identity,
-                    run_started,
-                    recovery,
-                )
-                .await?;
+        process_polymarket_boundary_drain_item(
+            item,
+            timeline_now,
+            context,
+            sink,
+            collector_identity,
+            run_started,
+            recovery,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_polymarket_subscription_drain_items<N>(
+    items: Vec<PolymarketBoundaryDrainItem>,
+    mut primary_error: Option<Box<dyn Error + Send + Sync>>,
+    timeline_now: &N,
+    context: &mut PolymarketProcessingContext,
+    sink: &SourceEventSink,
+    collector_identity: &CollectorIdentity,
+    run_started: Instant,
+    recovery: &mut SourceRecoverySupervisor,
+) -> Option<Box<dyn Error + Send + Sync>>
+where
+    N: Fn() -> PolymarketTimelineNow + Send + Sync,
+{
+    let mut can_process = primary_error
+        .as_ref()
+        .is_none_or(|error| !polymarket_processing_sink_unusable(error.as_ref(), sink));
+    let mut abandoned_by_day = BTreeMap::<String, (usize, i64, i64)>::new();
+    for item in items {
+        let received_at_utc_ms = item.received_at_utc_ms();
+        if !can_process {
+            match item {
+                PolymarketBoundaryDrainItem::Market(_) => {
+                    note_abandoned_polymarket_message(&mut abandoned_by_day, received_at_utc_ms);
+                }
+                PolymarketBoundaryDrainItem::Gamma(completion) => {
+                    record_gap_at(
+                        &sink.gaps,
+                        received_at_utc_ms,
+                        format!(
+                            "polymarket_gamma_completion_discarded_after_processing_error:slug={}:ordinal={}",
+                            completion.slug, completion.ordinal
+                        ),
+                    );
+                }
             }
-            PolymarketBoundaryDrainItem::Gamma(completion) => {
-                record_gamma_resolution_completion(
-                    *completion,
-                    &|| timeline_now().utc_ms,
-                    context,
-                    sink,
-                    collector_identity,
-                    run_started,
-                )
-                .await?;
+            continue;
+        }
+        if let Err(error) = process_polymarket_boundary_drain_item(
+            item,
+            timeline_now,
+            context,
+            sink,
+            collector_identity,
+            run_started,
+            recovery,
+        )
+        .await
+        {
+            let sink_unusable = polymarket_processing_sink_unusable(error.as_ref(), sink);
+            if let Some(primary) = primary_error.as_mut() {
+                record_gap_at(
+                    &sink.gaps,
+                    received_at_utc_ms,
+                    format!("polymarket_processing_error_during_subscription_change_drain:{error}"),
+                );
+                replace_retryable_polymarket_primary(primary, error);
+            } else {
+                primary_error = Some(error);
+            }
+            if sink_unusable {
+                can_process = false;
             }
         }
     }
-    Ok(())
+    record_abandoned_polymarket_messages(&sink.gaps, abandoned_by_day);
+    primary_error
 }
 
 fn preflight_polymarket_early_ws_claims_for_current_boundary(
@@ -3030,7 +3221,7 @@ enum PolymarketSubscriptionProgress {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn apply_polymarket_subscription_while_draining(
+pub(super) async fn apply_polymarket_subscription_while_draining(
     market_runtime: &mut PolymarketDrainRuntime,
     target_assets: BTreeSet<U256>,
     context: &mut PolymarketProcessingContext,
@@ -3049,6 +3240,7 @@ async fn apply_polymarket_subscription_while_draining(
             let mut operation_result = None;
             let mut drained = Vec::<PolymarketBoundaryDrainItem>::new();
             let mut processing_error = None;
+            let mut fifo_terminal_error = None;
             tokio::select! {
                 biased;
                 result = &mut operation => {
@@ -3074,11 +3266,11 @@ async fn apply_polymarket_subscription_while_draining(
                             drained.push(PolymarketBoundaryDrainItem::Market(Box::new(message)));
                         }
                         Some(PolymarketPumpItem::Terminal(terminal)) => {
-                            processing_error =
+                            fifo_terminal_error =
                                 Some(polymarket_drain_terminal_error(terminal, sink));
                         }
                         Some(PolymarketPumpItem::Fence { id, stop_after_fence }) => {
-                            processing_error = Some(
+                            fifo_terminal_error = Some(
                                 invalid_data(format!(
                                     "unexpected Polymarket fence during subscription change:id={id}:stop={stop_after_fence}"
                                 ))
@@ -3086,7 +3278,7 @@ async fn apply_polymarket_subscription_while_draining(
                             );
                         }
                         None => {
-                            processing_error = Some(
+                            fifo_terminal_error = Some(
                                 polymarket_drain_terminal_error(
                                     PolymarketDrainTerminal::QueueClosed,
                                     sink,
@@ -3097,19 +3289,19 @@ async fn apply_polymarket_subscription_while_draining(
                 }
             }
 
-            while processing_error.is_none() {
+            while processing_error.is_none() && fifo_terminal_error.is_none() {
                 match events.try_recv() {
                     Ok(PolymarketPumpItem::Message(message)) => {
                         drained.push(PolymarketBoundaryDrainItem::Market(Box::new(message)));
                     }
                     Ok(PolymarketPumpItem::Terminal(terminal)) => {
-                        processing_error = Some(polymarket_drain_terminal_error(terminal, sink));
+                        fifo_terminal_error = Some(polymarket_drain_terminal_error(terminal, sink));
                     }
                     Ok(PolymarketPumpItem::Fence {
                         id,
                         stop_after_fence,
                     }) => {
-                        processing_error = Some(
+                        fifo_terminal_error = Some(
                             invalid_data(format!(
                                 "unexpected Polymarket fence during subscription change:id={id}:stop={stop_after_fence}"
                             ))
@@ -3118,7 +3310,7 @@ async fn apply_polymarket_subscription_while_draining(
                     }
                     Err(mpsc::error::TryRecvError::Empty) => break,
                     Err(mpsc::error::TryRecvError::Disconnected) => {
-                        processing_error = Some(polymarket_drain_terminal_error(
+                        fifo_terminal_error = Some(polymarket_drain_terminal_error(
                             PolymarketDrainTerminal::QueueClosed,
                             sink,
                         ));
@@ -3126,6 +3318,7 @@ async fn apply_polymarket_subscription_while_draining(
                 }
             }
             if processing_error.is_none()
+                && fifo_terminal_error.is_none()
                 && let Err(error) = collect_ready_gamma_resolution_items(
                     resolution_poll_tasks,
                     context,
@@ -3135,11 +3328,11 @@ async fn apply_polymarket_subscription_while_draining(
             {
                 processing_error = Some(error);
             }
-            if processing_error.is_none() {
+            if !drained.is_empty() {
                 let validation_now_utc_ms = context.validation_now_utc_ms();
-                if let Err(error) = process_polymarket_boundary_drain_items(
+                processing_error = process_polymarket_subscription_drain_items(
                     drained,
-                    None,
+                    processing_error,
                     &|| PolymarketTimelineNow {
                         utc_ms: validation_now_utc_ms,
                         monotonic: TokioInstant::now(),
@@ -3150,9 +3343,19 @@ async fn apply_polymarket_subscription_while_draining(
                     run_started,
                     recovery,
                 )
-                .await
-                {
-                    processing_error = Some(error);
+                .await;
+            }
+            if let Some(terminal_error) = fifo_terminal_error {
+                if let Some(primary) = processing_error.as_mut() {
+                    record_gap(
+                        &sink.gaps,
+                        format!(
+                            "polymarket_processing_error_terminal_during_subscription_change:{terminal_error}"
+                        ),
+                    );
+                    replace_retryable_polymarket_primary(primary, terminal_error);
+                } else {
+                    processing_error = Some(terminal_error);
                 }
             }
             if let Some(error) = processing_error {

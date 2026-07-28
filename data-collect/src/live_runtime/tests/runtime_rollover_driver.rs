@@ -750,6 +750,56 @@ async fn pending_exit_synthetic_barriers_receive_exact_stop_and_finalize_cleanly
     let _ = owner_handle.await;
 }
 
+#[test]
+fn precompleted_rollover_writer_failure_is_recorded_once_after_source_primary() {
+    let source_gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+    let primary = "source_task_error:polymarket_market:receiver lagged by 1364 messages".to_owned();
+    record_gap(&source_gaps, primary.clone());
+    let mut runtime_failure = None;
+    promote_runtime_primary(&mut runtime_failure, primary.clone());
+    let outcome = WriterStopOutcome {
+        outputs: Vec::new(),
+        errors: vec!["writer returned a reliable terminal error".to_owned()],
+        all_terminal: true,
+        all_close_proven: true,
+    };
+
+    record_writer_stop_failure(&outcome, &source_gaps, &mut runtime_failure);
+    record_writer_stop_failure(&outcome, &source_gaps, &mut runtime_failure);
+    let before_root_unpack = runtime_failure.clone();
+    let (outputs, all_terminal, all_close_proven) = take_writer_stop_outcome(outcome);
+
+    assert!(outputs.is_empty());
+    assert!(all_terminal);
+    assert!(all_close_proven);
+    assert_eq!(runtime_failure, before_root_unpack);
+    assert_eq!(
+        runtime_failure.as_deref(),
+        Some(
+            "source_task_error:polymarket_market:receiver lagged by 1364 messages; \
+             shutdown_secondary:writer_finalize_failed:writer returned a reliable terminal error"
+        )
+    );
+    assert_eq!(
+        runtime_failure
+            .as_deref()
+            .unwrap()
+            .matches("shutdown_secondary:")
+            .count(),
+        1
+    );
+    assert_eq!(
+        source_gaps
+            .lock()
+            .expect("source gap mutex poisoned")
+            .all_reasons(),
+        vec![
+            primary,
+            "writer_finalize_failed:writer returned a reliable terminal error".to_owned()
+        ]
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn post_activation_exit_waits_for_all_flushes_then_stops_exact_next_generation() {
     let tmp = tempdir().unwrap();

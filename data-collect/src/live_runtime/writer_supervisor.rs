@@ -2,16 +2,31 @@ use super::*;
 
 pub(super) const DEFAULT_WRITER_CHANNEL_CAPACITY: usize = 8;
 
+pub(super) fn record_writer_stop_failure(
+    outcome: &WriterStopOutcome,
+    source_gaps: &SharedSourceGaps,
+    runtime_failure: &mut Option<String>,
+) {
+    if outcome.errors.is_empty() {
+        return;
+    }
+    let message = format!("writer_finalize_failed:{}", outcome.errors.join(" | "));
+    record_gap(source_gaps, message.clone());
+    append_runtime_failure(runtime_failure, message);
+}
+
 pub(super) fn writer_outputs_or_record_failure(
     outcome: WriterStopOutcome,
     source_gaps: &SharedSourceGaps,
     runtime_failure: &mut Option<String>,
 ) -> (Vec<SourceWriterOutput>, bool, bool) {
-    if !outcome.errors.is_empty() {
-        let message = format!("writer_finalize_failed:{}", outcome.errors.join(" | "));
-        record_gap(source_gaps, message.clone());
-        *runtime_failure = Some(message);
-    }
+    record_writer_stop_failure(&outcome, source_gaps, runtime_failure);
+    take_writer_stop_outcome(outcome)
+}
+
+pub(super) fn take_writer_stop_outcome(
+    outcome: WriterStopOutcome,
+) -> (Vec<SourceWriterOutput>, bool, bool) {
     (
         outcome.outputs,
         outcome.all_terminal,

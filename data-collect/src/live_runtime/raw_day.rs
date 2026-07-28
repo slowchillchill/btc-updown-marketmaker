@@ -65,6 +65,19 @@ pub(super) enum RuntimeCloseCause {
     CoordinatorFailure { stage: &'static str },
 }
 
+impl RuntimeCloseCause {
+    pub(super) fn source_task_kind(&self) -> Option<&'static str> {
+        match self {
+            Self::SourceInnerReturn { source_kind }
+            | Self::SourceWrapperReturn { source_kind }
+            | Self::SourceWrapperFailure { source_kind }
+            | Self::SourcePanic { source_kind }
+            | Self::SourceAbortWithoutPermit { source_kind } => Some(*source_kind),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct RuntimeExitRequest {
     pub(super) observed_utc_ms: i64,
@@ -881,16 +894,9 @@ impl RawDayGate {
         }) {
             return false;
         }
-        let source_kind = match cause {
-            RuntimeCloseCause::SourceInnerReturn { source_kind }
-            | RuntimeCloseCause::SourceWrapperReturn { source_kind }
-            | RuntimeCloseCause::SourceWrapperFailure { source_kind }
-            | RuntimeCloseCause::SourcePanic { source_kind }
-            | RuntimeCloseCause::SourceAbortWithoutPermit { source_kind } => Some(*source_kind),
-            _ => None,
-        };
-        let Some(producer) =
-            source_kind.and_then(|source_kind| logical_producer_for_source_task(source_kind).ok())
+        let Some(producer) = cause
+            .source_task_kind()
+            .and_then(|source_kind| logical_producer_for_source_task(source_kind).ok())
         else {
             return true;
         };

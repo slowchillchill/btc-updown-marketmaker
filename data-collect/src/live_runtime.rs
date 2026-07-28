@@ -217,6 +217,46 @@ const STARTUP_GATE_TIMEOUT: Duration = Duration::from_secs(30);
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
+fn append_runtime_failure(runtime_failure: &mut Option<String>, message: String) {
+    match runtime_failure {
+        None => *runtime_failure = Some(message),
+        Some(existing)
+            if !existing
+                .split("; shutdown_secondary:")
+                .any(|recorded| recorded == message) =>
+        {
+            existing.push_str("; shutdown_secondary:");
+            existing.push_str(&message);
+        }
+        Some(_) => {}
+    }
+}
+
+fn promote_runtime_primary(runtime_failure: &mut Option<String>, primary: String) {
+    match runtime_failure.take() {
+        None => *runtime_failure = Some(primary),
+        Some(existing) if existing == primary || existing.starts_with(&format!("{primary};")) => {
+            *runtime_failure = Some(existing);
+        }
+        Some(existing) => {
+            *runtime_failure = Some(format!("{primary}; shutdown_secondary:{existing}"));
+        }
+    }
+}
+
+fn runtime_error_with_secondary(
+    runtime_failure: &mut Option<String>,
+    error: Box<dyn Error + Send + Sync>,
+) -> Box<dyn Error + Send + Sync> {
+    append_runtime_failure(runtime_failure, error.to_string());
+    io::Error::other(
+        runtime_failure
+            .take()
+            .expect("runtime failure contains the supplied error"),
+    )
+    .into()
+}
+
 pub const LIVE_SOURCES: &[&str] = &[
     "polymarket_market",
     "polymarket_market_metadata",
@@ -707,7 +747,7 @@ where
                             "runtime_exit_request_channel_closed".to_owned(),
                         );
                         record_gap(&source_gaps, message.clone());
-                        runtime_failure = Some(message);
+                        append_runtime_failure(&mut runtime_failure, message);
                         break 'runtime;
                     };
                     match request.cause {
@@ -716,13 +756,13 @@ where
                         _ => {
                             let message = format!("invalid_runtime_exit_request:{request:?}");
                             record_gap(&source_gaps, message.clone());
-                            runtime_failure = Some(message);
+                            append_runtime_failure(&mut runtime_failure, message);
                         }
                     }
                     if let Err(error) = apply_runtime_exit_request(&raw_day_gate, &request) {
                         let message = format!("runtime_exit_prepare_failed:{error}");
                         record_gap(&source_gaps, message.clone());
-                        runtime_failure = Some(message);
+                        append_runtime_failure(&mut runtime_failure, message);
                     }
                     break 'runtime;
                 }
@@ -759,7 +799,7 @@ where
                                 Err(error) => {
                                     let message = format!("normal_rollover_failed:{error}");
                                     record_gap(&source_gaps, message.clone());
-                                    runtime_failure = Some(message);
+                                    append_runtime_failure(&mut runtime_failure, message);
                                     break 'runtime;
                                 }
                             }
@@ -771,7 +811,7 @@ where
                                 "manifest_rollover_ready_channel_closed".to_owned(),
                             );
                             record_gap(&source_gaps, message.clone());
-                            runtime_failure = Some(message);
+                            append_runtime_failure(&mut runtime_failure, message);
                             break 'runtime;
                         }
                     }
@@ -801,7 +841,7 @@ where
                                     format!("ingress_processing_failed:{error}"),
                                 );
                                 record_gap(&source_gaps, message.clone());
-                                runtime_failure = Some(message);
+                                append_runtime_failure(&mut runtime_failure, message);
                                 break 'runtime;
                             }
                         }
@@ -812,7 +852,7 @@ where
                                 "source_event_queue_closed_unexpectedly".to_owned(),
                             );
                             record_gap(&source_gaps, message.clone());
-                            runtime_failure = Some(message);
+                            append_runtime_failure(&mut runtime_failure, message);
                             break;
                         }
                         Err(_) => {}
@@ -820,16 +860,41 @@ where
                 }
             }
 
-            if let Some(source_kind) = finished_source_task(&handles)
+            if let Some(index) = finished_source_task_index(&handles)
                 && !deadline_reached(deadline)
             {
-                let message = freeze_coordinator_failure_message(
-                    &raw_day_gate,
-                    "source_task_ended_before_join",
-                    source_task_ended_unexpectedly(source_kind),
-                );
-                record_gap(&source_gaps, message.clone());
-                runtime_failure = Some(message);
+                match raw_day_gate.prepared_runtime_exit() {
+                    Some(PreparedRuntimeExit::SameDay(close)) => {
+                        let handle = handles.swap_remove(index);
+                        let termination = handle.await_termination(&close.identity).await;
+                        let message = assess_source_shutdown(&termination, None, &close.identity)
+                            .error
+                            .unwrap_or_else(|| {
+                                source_task_ended_unexpectedly(termination.source_kind)
+                            });
+                        record_gap(&source_gaps, message.clone());
+                        if close.cause.source_task_kind() == Some(termination.source_kind) {
+                            promote_runtime_primary(&mut runtime_failure, message);
+                        } else {
+                            append_runtime_failure(&mut runtime_failure, message);
+                        }
+                        completed_source_terminations.push(termination);
+                    }
+                    Some(PreparedRuntimeExit::Rollover(_)) => {
+                        // The pending-exit driver must retain and join this handle so it can
+                        // synthesize the producer fence for the old UTC day.
+                    }
+                    None => {
+                        let source_kind = handles[index].source_kind;
+                        let message = freeze_coordinator_failure_message(
+                            &raw_day_gate,
+                            "source_task_ended_before_join",
+                            source_task_ended_unexpectedly(source_kind),
+                        );
+                        record_gap(&source_gaps, message.clone());
+                        append_runtime_failure(&mut runtime_failure, message);
+                    }
+                }
                 break;
             }
 
@@ -837,7 +902,7 @@ where
                 poll_writer_completion(&mut writer_handles, &raw_day_gate, None)
             {
                 record_gap(&source_gaps, completion.message.clone());
-                runtime_failure = Some(completion.message);
+                append_runtime_failure(&mut runtime_failure, completion.message);
                 break;
             }
             if manifest_owner_handle.is_finished() {
@@ -847,7 +912,7 @@ where
                     "daily_manifest_owner_ended_unexpectedly".to_owned(),
                 );
                 record_gap(&source_gaps, message.clone());
-                runtime_failure = Some(message);
+                append_runtime_failure(&mut runtime_failure, message);
                 break;
             }
 
@@ -868,7 +933,7 @@ where
                         format!("writer_periodic_flush_failed:{error}"),
                     );
                     record_gap(&source_gaps, message.clone());
-                    runtime_failure = Some(message);
+                    append_runtime_failure(&mut runtime_failure, message);
                     break;
                 }
                 next_flush += Duration::from_millis(DEFAULT_MAX_FLUSH_INTERVAL_MS);
@@ -908,7 +973,7 @@ where
                                 "runtime-exit channel closed during capacity scan".to_owned(),
                             );
                             record_gap(&source_gaps, message.clone());
-                            runtime_failure = Some(message);
+                            append_runtime_failure(&mut runtime_failure, message);
                             break 'runtime;
                         };
                         if matches!(request.cause, RuntimeCloseCause::OperatorStop) {
@@ -917,7 +982,7 @@ where
                         if let Err(error) = apply_runtime_exit_request(&raw_day_gate, &request) {
                             let message = format!("runtime_exit_prepare_failed:{error}");
                             record_gap(&source_gaps, message.clone());
-                            runtime_failure = Some(message);
+                            append_runtime_failure(&mut runtime_failure, message);
                         }
                         break 'runtime;
                     }
@@ -936,7 +1001,7 @@ where
                                 if let Err(error) = apply_runtime_exit_request(&raw_day_gate, &request) {
                                     let message = format!("capacity_exit_prepare_failed:{error}");
                                     record_gap(&source_gaps, message.clone());
-                                    runtime_failure = Some(message);
+                                    append_runtime_failure(&mut runtime_failure, message);
                                 }
                                 break 'runtime;
                             }
@@ -950,7 +1015,7 @@ where
                                     ),
                                 );
                                 record_gap(&source_gaps, message.clone());
-                                runtime_failure = Some(message);
+                                append_runtime_failure(&mut runtime_failure, message);
                                 break 'runtime;
                             }
                             Err(error) => {
@@ -962,7 +1027,7 @@ where
                                     ),
                                 );
                                 record_gap(&source_gaps, message.clone());
-                                runtime_failure = Some(message);
+                                append_runtime_failure(&mut runtime_failure, message);
                                 break 'runtime;
                             }
                         }
@@ -991,7 +1056,7 @@ where
                     coordinated_shutdown_deadline,
                 )
                 .await;
-                return Err(error);
+                return Err(runtime_error_with_secondary(&mut runtime_failure, error));
             }
         };
         let observed_utc_ms = now_ms().max(close.boundary_utc_ms);
@@ -1013,7 +1078,7 @@ where
                 coordinated_shutdown_deadline,
             )
             .await;
-            return Err(error);
+            return Err(runtime_error_with_secondary(&mut runtime_failure, error));
         }
         completed_rollover_exit = Some(PendingExit {
             close,
@@ -1041,7 +1106,7 @@ where
                     coordinated_shutdown_deadline,
                 )
                 .await;
-                return Err(error);
+                return Err(runtime_error_with_secondary(&mut runtime_failure, error));
             }
         };
         match prepared_exit {
@@ -1087,7 +1152,7 @@ where
                             coordinated_shutdown_deadline,
                         )
                         .await;
-                        return Err(error);
+                        return Err(runtime_error_with_secondary(&mut runtime_failure, error));
                     }
                 };
                 completed_rollover_exit = Some(completed);
@@ -1109,10 +1174,11 @@ where
                     coordinated_shutdown_deadline,
                 )
                 .await;
-                return Err(invalid_data(format!(
+                let error = invalid_data(format!(
                     "runtime shutdown lost same-day close state: {other:?}"
                 ))
-                .into());
+                .into();
+                return Err(runtime_error_with_secondary(&mut runtime_failure, error));
             }
         },
     };
@@ -1134,6 +1200,15 @@ where
                 .map(|exit| RuntimeCloseIdentity::from_rollover_next_day(&exit.close))
         })
         .expect("runtime shutdown has a writer close identity");
+    let runtime_close_cause = prepared_runtime_close
+        .as_ref()
+        .map(|close| close.cause.clone())
+        .or_else(|| {
+            completed_rollover_exit
+                .as_ref()
+                .map(|exit| exit.cause.clone())
+        })
+        .expect("runtime shutdown has a close cause");
     let same_day_shutdown = prepared_runtime_close.is_some();
     let aborting_source_tasks = same_day_shutdown && !rollover_release_stop_issued;
     let mut termination_unclean = false;
@@ -1306,7 +1381,7 @@ where
         {
             let message = format!("shutdown_ingress_processing_failed:{error}");
             record_gap(&source_gaps, message.clone());
-            runtime_failure = Some(message);
+            append_runtime_failure(&mut runtime_failure, message);
             termination_unclean = true;
         }
         if Instant::now() >= next_flush {
@@ -1322,7 +1397,7 @@ where
             {
                 let message = format!("shutdown_periodic_flush_failed:{error}");
                 record_gap(&source_gaps, message.clone());
-                runtime_failure = Some(message);
+                append_runtime_failure(&mut runtime_failure, message);
                 termination_unclean = true;
             }
             next_flush = Instant::now() + Duration::from_millis(DEFAULT_MAX_FLUSH_INTERVAL_MS);
@@ -1374,7 +1449,7 @@ where
                     termination.source_kind
                 );
                 record_gap(&source_gaps, message.clone());
-                runtime_failure = Some(message);
+                append_runtime_failure(&mut runtime_failure, message);
                 termination_unclean = true;
                 continue;
             }
@@ -1386,7 +1461,11 @@ where
             termination_unclean |= assessment.unclean;
             if let Some(message) = assessment.error {
                 record_gap(&source_gaps, message.clone());
-                runtime_failure = Some(message);
+                if runtime_close_cause.source_task_kind() == Some(termination.source_kind) {
+                    promote_runtime_primary(&mut runtime_failure, message);
+                } else {
+                    append_runtime_failure(&mut runtime_failure, message);
+                }
             }
         }
         if assessed_sources.len() != LOGICAL_PRODUCERS.len() {
@@ -1396,7 +1475,7 @@ where
                 assessed_sources.len()
             );
             record_gap(&source_gaps, message.clone());
-            runtime_failure = Some(message);
+            append_runtime_failure(&mut runtime_failure, message);
             termination_unclean = true;
         }
     }
@@ -1415,7 +1494,7 @@ where
                     coordinated_shutdown_deadline,
                 )
                 .await;
-                return Err(error);
+                return Err(runtime_error_with_secondary(&mut runtime_failure, error));
             }
         };
         let PreparedRuntimeExit::SameDay(close) = marked else {
@@ -1429,10 +1508,10 @@ where
                 coordinated_shutdown_deadline,
             )
             .await;
-            return Err(invalid_data(
-                "same-day shutdown changed into rollover while marking unclean",
-            )
-            .into());
+            let error =
+                invalid_data("same-day shutdown changed into rollover while marking unclean")
+                    .into();
+            return Err(runtime_error_with_secondary(&mut runtime_failure, error));
         };
         prepared_runtime_close = Some(close);
     }
@@ -1455,7 +1534,7 @@ where
                     coordinated_shutdown_deadline,
                 )
                 .await;
-                return Err(error);
+                return Err(runtime_error_with_secondary(&mut runtime_failure, error));
             }
         });
     }
@@ -1479,7 +1558,7 @@ where
         {
             let message = format!("shutdown_ingress_processing_failed:{error}");
             record_gap(&source_gaps, message.clone());
-            runtime_failure = Some(message);
+            append_runtime_failure(&mut runtime_failure, message);
         }
     }
     let flush_remaining = coordinated_shutdown_deadline.saturating_duration_since(Instant::now());
@@ -1514,24 +1593,24 @@ where
     if let Err(error) = flush_result {
         let message = format!("flush_batches_failed:{error}");
         record_gap(&source_gaps, message.clone());
-        runtime_failure = Some(message);
+        append_runtime_failure(&mut runtime_failure, message);
         termination_unclean = true;
     }
 
     let writer_remaining = coordinated_shutdown_deadline.saturating_duration_since(Instant::now());
-    let writer_outputs_result = if let Some(outcome) = completed_rollover_writer_outcome.take() {
-        debug_assert!(writer_handles.is_empty());
-        outcome
-    } else {
-        shutdown_writer_workers_with_budget(
-            std::mem::take(&mut writer_handles),
-            writer_close_identity.clone(),
-            writer_remaining.min(Duration::from_millis(WRITER_FINALIZE_BUDGET_MS)),
-        )
-        .await
-    };
     let (writer_outputs, all_writers_terminal, all_writer_closes_proven) =
-        writer_outputs_or_record_failure(writer_outputs_result, &source_gaps, &mut runtime_failure);
+        if let Some(outcome) = completed_rollover_writer_outcome.take() {
+            debug_assert!(writer_handles.is_empty());
+            take_writer_stop_outcome(outcome)
+        } else {
+            let outcome = shutdown_writer_workers_with_budget(
+                std::mem::take(&mut writer_handles),
+                writer_close_identity.clone(),
+                writer_remaining.min(Duration::from_millis(WRITER_FINALIZE_BUDGET_MS)),
+            )
+            .await;
+            writer_outputs_or_record_failure(outcome, &source_gaps, &mut runtime_failure)
+        };
     if !all_writer_closes_proven {
         termination_unclean = true;
         if same_day_shutdown {
@@ -1548,7 +1627,7 @@ where
                         coordinated_shutdown_deadline,
                     )
                     .await;
-                    return Err(error);
+                    return Err(runtime_error_with_secondary(&mut runtime_failure, error));
                 }
             };
             let PreparedRuntimeExit::SameDay(close) = marked else {
@@ -1562,9 +1641,9 @@ where
                     coordinated_shutdown_deadline,
                 )
                 .await;
-                return Err(
-                    invalid_data("same-day writer failure changed shutdown into rollover").into(),
-                );
+                let error =
+                    invalid_data("same-day writer failure changed shutdown into rollover").into();
+                return Err(runtime_error_with_secondary(&mut runtime_failure, error));
             };
             prepared_runtime_close = Some(close);
         }
@@ -1583,7 +1662,7 @@ where
                     coordinated_shutdown_deadline,
                 )
                 .await;
-                return Err(error);
+                return Err(runtime_error_with_secondary(&mut runtime_failure, error));
             }
         };
         let PreparedRuntimeExit::SameDay(close) = marked else {
@@ -1597,10 +1676,10 @@ where
                 coordinated_shutdown_deadline,
             )
             .await;
-            return Err(invalid_data(
-                "same-day shutdown changed into rollover before manifest commit",
-            )
-            .into());
+            let error =
+                invalid_data("same-day shutdown changed into rollover before manifest commit")
+                    .into();
+            return Err(runtime_error_with_secondary(&mut runtime_failure, error));
         };
         prepared_runtime_close = Some(close);
     }
@@ -1725,7 +1804,7 @@ where
             .await;
         let message = format!("daily_manifest_shutdown_failed:{error}");
         record_gap(&source_gaps, message.clone());
-        runtime_failure = Some(message);
+        append_runtime_failure(&mut runtime_failure, message);
     }
 
     let source_coverage = coverage
@@ -1738,7 +1817,7 @@ where
     if Instant::now() > coordinated_shutdown_deadline {
         let message = "coordinated_shutdown_timeout".to_owned();
         record_gap(&source_gaps, message.clone());
-        runtime_failure = Some(message);
+        append_runtime_failure(&mut runtime_failure, message);
     }
     if capacity_shutdown && runtime_failure.is_none() {
         eprintln!("dataset_capacity_reached");

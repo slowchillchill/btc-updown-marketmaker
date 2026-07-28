@@ -561,10 +561,8 @@ impl SourceTaskHandle {
     }
 }
 
-pub(super) fn finished_source_task(handles: &[SourceTaskHandle]) -> Option<&'static str> {
-    handles
-        .iter()
-        .find_map(|handle| handle.is_finished().then_some(handle.source_kind))
+pub(super) fn finished_source_task_index(handles: &[SourceTaskHandle]) -> Option<usize> {
+    handles.iter().position(SourceTaskHandle::is_finished)
 }
 
 pub(super) fn source_task_ended_unexpectedly(source_kind: &str) -> String {
