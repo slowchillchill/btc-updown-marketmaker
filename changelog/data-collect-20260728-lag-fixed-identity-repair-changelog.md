@@ -1,6 +1,6 @@
 # DC-INCIDENT-20260728-LAG-IDENTITY-REPAIR Changelog
 
-> 状态：`STAGE4_COMPLETE_READY_FOR_REMOTE_DEPLOY`
+> 状态：`STAGE5_COMPLETE_STAGE6_RUNNING`
 >
 > 对应需求：`demand/data-collect-20260728-lag-fixed-identity-repair-demand.md`
 >
@@ -498,3 +498,60 @@
 - Stage 4 完成。下一步严格按用户批准的简单开发流程：再次确认 UTC27/UTC28 本地
   副本，停止远端服务，直接删除两个精确目录，创建程序目录、上传上述 SHA 的
   release，并启动现有 unit。
+
+## Stage 5 直接清空与部署
+
+- 破坏性操作前再次确认本地副本：
+  - UTC27 manifest SHA256：
+    `72ed09f2bbbe68d0b7a1d3d169a03f1f2e0f2778815664c912cd6f4154b4c192`，
+    目录内 27 个文件；
+  - UTC28 manifest SHA256 仍为
+    `0c08c357d3abbc901903efc83316d50edb92aadac51031903c2e66ed7f84c221`，
+    目录内 10 个文件。
+- 远端执行前服务仍为 failed、MainPID 0、exit 76；旧 binary SHA 仍为
+  `3e04f1b46ee8890f25db26b6bb1a3ae90e894173620b19e916ce611b7d34b9c5`。
+  现有 user unit 的 ExecStart 精确引用两个已批准目标目录。
+- 执行 `systemctl --user stop data-collect-training-collector.service` 后再次确认
+  MainPID 0，随后直接删除：
+  - `/home/ubuntu/btc-updown-marketmaker/datasets`；
+  - `/home/ubuntu/btc-updown-marketmaker/data-collect`。
+  两个目标均确认不存在；没有 staged rename、旧 root migration 或滚动替换。远端
+  删除不可原地恢复，但 UTC27/UTC28 故障数据仍完整保留在本地副本。
+- 保留原 user systemd unit；重新创建 `data-collect/bin` 并直接复制最终 release。
+  远端文件为 `ubuntu:ubuntu`、mode 0755、30,322,304 bytes；SHA256 和 Build ID
+  分别精确为：
+  - `80fa49a4b2261e21bb58e4466da5d67f0b6f101d986e886d7248de40d1e2e18b`；
+  - `c830ccb52dcc099fb4d46aa99fdd0dd526a93591`。
+- `systemctl --user reset-failed` 后于 `2026-07-28T22:18:58Z` 启动现有 unit：
+  - MainPID `1225568`；
+  - `active/running`；
+  - `NRestarts=0`；
+  - `/proc/1225568/exe` 路径为新程序，SHA 与上方最终 release 完全一致；
+  - 新 dataset root 由程序创建，manifest 的 build commit 为
+    `58c6796ee652d89016556684f191e20ab239c1b2`，binary SHA 与部署值一致，
+    coverage 为 active、`gaps=[]`。
+- 启动约 76 秒时 PID 未变、NRestarts 仍为 0、cgroup memory current/peak 约
+  35.6 MiB；Polymarket market running Parquet 从约 1.02 MiB 增长到约 1.58 MiB，
+  证明当前高流量 source 正在持续写入。journal 只有 systemd started 行，没有
+  receiver lag、backpressure、raw-after-close、fixed-identity conflict、stack
+  overflow 或其他 warning/error。
+- Stage 5 的路径、停止、删除、上传、SHA、PID 和新 root 门已满足；先完成独立阶段
+  审查和 commit/push，再进入 Stage 6 长跑验证。
+
+## Stage 5 独立审查
+
+- `gpt-5.6-sol/ultra` 独立只读审查结论为 `PASS`，可执行 finding 为 0。
+- 审查确认：
+  - UTC27/UTC28 本地副本仍分别为 27/10 个文件，manifest SHA 未变化；
+  - 只直接清空了用户批准的两个目录，unit 位于其外且保留原 mtime、enabled 状态；
+  - `data-collect` 新树只有 `bin/` 和最终 binary，没有旧程序残留；
+  - 唯一 collector PID 为 `1225568`，远端文件与 `/proc/PID/exe` 的 size、SHA、
+    Build ID 均与本地最终 release 匹配；
+  - 未增加 `RUST_MIN_STACK` 或其他 unit 环境配置；
+  - 新 manifest lineage 与 release 匹配，coverage active、gaps 0，进程同时持有
+    六个 source 的 running file descriptor；
+  - Polymarket running file 在 5 秒采样中继续增长 88,149 bytes，journal 无本事故
+    关键词。
+- Stage 5 部署与初始健康子门通过；需求 AC8 整体仍为
+  `PENDING_STAGE6`。六任务长期稳定、受控重启、UTC rollover 和完整 UTC 日尚未验收，
+  不得提前宣称健康训练日。
