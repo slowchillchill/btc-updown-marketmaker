@@ -1,6 +1,6 @@
 # DC-INCIDENT-20260728-LAG-IDENTITY-REPAIR Changelog
 
-> 状态：`STAGE5_COMPLETE_STAGE6_RUNNING`
+> 状态：`STAGE6_RESTART_FAILED_USER_DECISION_REQUIRED`
 >
 > 对应需求：`demand/data-collect-20260728-lag-fixed-identity-repair-demand.md`
 >
@@ -555,3 +555,109 @@
 - Stage 5 部署与初始健康子门通过；需求 AC8 整体仍为
   `PENDING_STAGE6`。六任务长期稳定、受控重启、UTC rollover 和完整 UTC 日尚未验收，
   不得提前宣称健康训练日。
+
+## Stage 6 受控重启失败与安全停止
+
+- 首次新程序从 `2026-07-28T22:18:58Z` 运行到 `22:25:06Z`。受控
+  `systemctl --user restart` 前 PID `1225568` 已采集：
+  - Polymarket market 189,578 rows；
+  - Polymarket metadata 9 rows；
+  - 六个 source 均无 lag/drop。
+  旧进程打印 `coordinated_shutdown_complete` 并成功 finalize。
+- 新 PID `1226197` 在约 2 秒后因
+  `Polymarket metadata v5 validation failed before admission:candidate_to_active:fixed_identity_not_validation`
+  退出 1。由于该错误没有 `operator_intervention_required:`，unit 的
+  `Restart=on-failure` 又自动启动三个进程；它们均以同一 primary error 退出。
+- 观察到 `NRestarts=3` 后立即执行 `systemctl --user stop` 冻结现场。当前远端：
+  - `inactive/dead`；
+  - MainPID 0；
+  - ExecMainStatus 1；
+  - 当前没有继续执行本次 `Restart=on-failure`；unit 仍为 `enabled`，主机或 user
+    manager 重启后仍可能启动。
+- 第一次 restart 的错误 candidate 在 admission 前被拒绝，没有写入错误 metadata
+  row。12 个 manifest 所列 Parquet 的 SHA 与 manifest 一致，PAR1 header/footer
+  完整，没有 running/tmp/partial/digesting 残留；文件本身未损坏。
+- 当前 UTC28 验证根为 `state=open / coverage=ended_known /
+  reactivated_within_day=true`，manifest 有 3 个 gap：
+  - 唯一 Polymarket primary 为上述 `fixed_identity_not_validation`；
+  - 两个 Binance depth `raw event arrived after same-day intake close` 是 primary
+    触发全局关闭后的 secondary。
+  所有 source 的 `lag_events=0`、`dropped_rows=0`，但 Polymarket 自受控重启后未恢复
+  连续写入，六源连续 coverage 已不可成立；失败重启期间写入的少量 Binance part
+  文件不能修复该缺口，因此该日不能成为健康训练日。
+
+## `live_runtime` 模块边界复核
+
+- `data-collect/src/lib.rs` 只声明一次 `pub mod live_runtime`；
+  `runtime::run_training_collector` 调用
+  `live_runtime::run_live_training_runtime`。`live_runtime.rs` 是父模块和运行时编排入口，
+  `live_runtime/*.rs` 是由它逐一 `mod` 声明的子模块；不存在第二个
+  `live_runtime/mod.rs` 或 `#[path = ...]` 旁路。
+- 重构不是把旧实现复制后遗留。Polymarket 拆分 commit `582eb154` 从
+  `live_runtime.rs` 删除 25,589 行并新增 Polymarket 子模块；后续整体拆分 commit
+  `e9c91c0` 又从父模块删除 30,895 行并新增其余运行时子模块。父模块相应从 31,904
+  行降到 4,966 行，当前父文件与子目录是同一模块树，不是两套并行采集程序。
+- 本次修复 commit `ff8f560` 修改的
+  `live_runtime.rs`、`live_runtime/polymarket_source.rs` 和
+  `polymarket_resolution_recovery.rs` 均列在最终 release 的 Rust dep-info 中。部署
+  build commit `58c6796` 是 `ff8f560` 的后代，远端受控重启也实际执行到该恢复路径；
+  因此本次不是改到了未生效的旧代码。
+
+## Stage 6 restart 根因与方案冲突
+
+- finalized metadata authority 本身合法。`polymarket_market_metadata_22.parquet`
+  0-based row 4 为后来成为 current 的 market
+  `btc-updown-5m-1785277500` 当时处于 `prefetched/next` 的
+  `metadata_snapshot`：
+  - fixed identity verified：`2026-07-28T22:20:00.032Z`；
+  - row validation：`2026-07-28T22:20:00.032Z`。
+  row 7 才将同一 identity 从 `prefetched/next` 提升为 `active/current`，fixed
+  time 保持不变。
+- restart 时旧 market 已有 recovered pending，因此
+  `PolymarketProcessingContext::from_recovery_with_source_epoch` 返回
+  `current=None + pending!=empty`；outer loop 只以 `context.is_none()` 判断是否走
+  initial discovery，故跳过普通 current snapshot 路径，进入 async late rollover。
+- late rollover 的 fresh Gamma current 与 recovered immutable identity 精确匹配，
+  本轮代码正确把 fixed time 保持为 `22:20:00.032Z`，同时保留本次更晚的 fresh
+  validation。随后旧路径把它构造成 `candidate_to_active`。
+- 既有已批准 candidate 合同要求
+  `source receive <= row validation = fixed identity <= applied`；validator 因此正确
+  拒绝两个不同时间。新需求又要求 restart exact match 时首次 fixed time 不变、fresh
+  validation 前进。当前生产路由把 restart current 错分为普通 late candidate，令两条
+  语义在该路径无法同时成立。
+- 现有测试分别覆盖了 recovered fixed time 和普通 candidate equality，但遗漏
+  `recovered pending + current none + recovered current + fresh validation`
+  组合，短时 clean-root 双启动也未跨到 pending 状态。
+
+### 等待用户决定的两个选项
+
+1. **推荐：保留 candidate 严格合同，修正 restart 路由。** 保持 pending-first
+   subscription 与现有 async discovery；仅当 fresh `discovery.current` 精确命中
+   任一未消费 recovered fixed authority（包括 recovered current，以及随时间成为
+   current 的 recovered next）时，让既有
+   `switch_polymarket_context(... emit_current_metadata=true)` 写正常 current
+   `metadata_snapshot`，并跳过 `candidate_to_active`。snapshot 既有合同已允许
+   `first fixed <= fresh validation`；普通无 recovered authority 的 late candidate
+   继续要求 equality。无需 schema、marker、第二状态机或额外校验。
+2. **不推荐：放宽所有 candidate。** 把 equality 改成
+   `fixed <= validation`，同时保留原有
+   `source receive <= validation <= applied`。这会直接修改旧批准需求并扩大所有
+   late candidate 的接受面，属于用户此前担心的过度放宽。
+
+- 推荐方案必须增加以下回归门：
+  - Gamma discovery 延迟或 unavailable 时，pending-first subscription 已先建立；
+  - recovered current 与 recovered-next-to-current 两个正例都输出 V5 current
+    snapshot，保留 old fixed 与 fresh validation，并且不输出 candidate；
+  - 无 recovered authority 的真正 late discovery 仍输出 candidate，且 equality
+    validator 不放宽；
+  - immutable mismatch 仍在 row admission 前 exit 76；
+  - `Expired` 不写 snapshot/candidate、不提前消费 recovered authority，并保留
+    pending；
+  - 真实受控重启必须先形成 pending 和 finalized current/next identity，不能再用未
+    形成 pending 的短时双启动代替。
+- 只有上述测试、独立审查、commit/push 和新 release 完成后，才可再次部署。
+- 若用户批准推荐方案，按既有简单开发决策再次直接删除并重建远端
+  `/home/ubuntu/btc-updown-marketmaker/datasets` 与
+  `/home/ubuntu/btc-updown-marketmaker/data-collect` 后部署；保留现有 systemd unit，
+  不做 migration、staged rename 或滚动替换，也不兼容本次已有 3 gap 的验证 root。
+  用户决定前保持服务停止，不修改代码，不清空现场。
