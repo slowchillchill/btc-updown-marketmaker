@@ -1,6 +1,6 @@
 # DC-INCIDENT-20260728-LAG-IDENTITY-REPAIR Changelog
 
-> 状态：`STAGE2_COMPLETE`
+> 状态：`STAGE3_COMPLETE`
 >
 > 对应需求：`demand/data-collect-20260728-lag-fixed-identity-repair-demand.md`
 >
@@ -273,3 +273,100 @@
   sidecar 或第二状态机。
 - Stage 2 已满足实现、验证和独立审查完成门；本 changelog 与代码在同一阶段提交中
   commit/push 后进入 Stage 3。
+
+## Stage 3 prospective fixed identity 实现
+
+- test-first 的 clean-restart scan 测试先因
+  `PolymarketRestartRecovery` 不存在 `fixed_identities` 字段而编译失败，确认旧实现
+  只返回 pending，无法保留仍可能作为 current/next 的首次 fixed identity authority。
+- `restore_polymarket_resolution_recovery` 复用同一次 finalized metadata bounded
+  scan 已构造的 identity map，只返回两个有界 `Option`：
+  `RecoveredPolymarketFixedIdentities::{current,next}`。没有第二次 scan、第二个
+  persisted map、artifact、receipt 或 runtime state 恢复路径。
+- current/next 候选同时按 canonical slug 与 start/end window 选择；canonical slug
+  与 window 任一侧竞争、同一 window 多 authority、非法首次 verified time，以及
+  同 slug 只有首次 verified time 不同，均继续 fail closed。恢复的 next 可在时间推进
+  后按 slug 成为 fresh current，不读取或恢复旧 `runtime_role`。
+- fresh Gamma 仍生成本次完整 discovery 和新的
+  `metadata_validation_completed_at_utc_ms`。初始 current、稍后 next attach 和
+  rollover discovery 只有在 slug、condition、CLOB、ordered Up/Down assets、
+  start/end 全部精确相等时，才把已恢复的首次
+  `fixed_identity_verified_at_utc_ms` 写回 fresh market；候选成功后即从两个
+  `Option` 中取走，但跨 fence 安装返回 `Expired` 时保留候选供 next-to-current
+  重试。
+- fresh Gamma 的 multiple candidate、slug/condition/CLOB/assets/window 等
+  immutable selection 冲突，只有在对应 recovered authority 仍存在时才添加既有
+  `operator_intervention_required:` sentinel 并映射退出码 76。无 recovered
+  authority，或 `Inactive` 等动态平台状态，保持既有错误分类；本阶段没有把全部
+  Gamma integrity 错误扩大成退出 76，也没有增加新的动态状态校验。
+
+## Stage 3 测试与旧数据边界
+
+- recovery 正向覆盖 current/next 两个候选、next 随时间成为 current；负向覆盖
+  competing canonical window authority、同结构不同首次 verified time、首次时间
+  `0`/`>=end`。
+- runtime 正向按真实顺序分两次应用 current 与稍后 attach 的 next，确认只继承首次
+  fixed time，并保留两次 fresh metadata validation time；表驱动负向逐项覆盖
+  condition、CLOB、Up、Down、ordered asset swap、start、end，全部映射退出码 76。
+- 真实 initial Gamma loopback 分别返回 wrong slug、wrong window 和两个 exact-slug
+  candidate，三条生产 discovery 路径都映射退出码 76；动态 `Inactive` 与没有
+  recovered authority 的相同分类保持退出码 1，冻结不过度分类边界。
+- 使用临时只读 symlink 和运行后已删除的临时 probe，对本地完整 UTC28 副本在
+  `2026-07-28T00:37:56Z` 执行真实 recovery；原数据未修改。结果仍按预期拒绝：
+  `Polymarket restart fixed identity conflict:slug=btc-updown-5m-1785196800`。因此旧
+  UTC28 root 没有被自动迁移、猜测修复或变成可部署 recovery authority。
+- 定向测试：
+  - `polymarket_resolution_recovery::tests`：44 passed；
+  - `live_runtime::tests::polymarket_source`：102 passed。
+- 完整 `cargo test -p data-collect --locked --quiet -- --test-threads=1`：
+  - lib 377 passed、1 ignored（显式八小时 public RTDS probe）；
+  - integration 231 passed；
+  - 三个 bin target 与 doctest 均退出 0。
+- `cargo check -p data-collect --locked --all-targets`、
+  `cargo clippy -p data-collect --locked --all-targets -- -D warnings`、
+  `cargo fmt --all -- --check` 和 `git diff --check` 全部通过。
+- Stage 3 当前等待自审与 `gpt-5.6-sol/ultra` 独立阶段审查；审查通过前不提交、
+  不推送，也不进入远端清空或部署。
+
+## Stage 3 首轮独立审查与修复
+
+- 首轮 `gpt-5.6-sol/ultra` 独立阶段审查结论为 `CHANGES_REQUIRED`，发现三项：
+  - initial/rollover 在错误完成后用当前时钟或 recovered 候选反推 expected slug，
+    跨 5 分钟边界可能把错误绑定到错误 authority；
+  - next 候选在 `switch_polymarket_context` 返回 `Expired` 前已被 `take()`，可能在
+    next 成为 current 时丢失首次 verified time；
+  - 全局可观察的 `fixed_identity_selection:` 字符串标签及
+    `NonBtcFiveMinuteMarket` 分类扩大了需求列明的 immutable exit-76 边界。
+- 最小修复没有新增 scanner、map 或状态机：
+  - `PolymarketDiscoveryError::FixedIdentitySelection` 以 typed 字段携带 selection
+    当时冻结的 `expected_slug` 和原 detail；Display 保持原 Gamma integrity 文本，
+    不向无 recovered authority 的 gap/error 注入额外 marker；
+  - 只有 multiple current/next、slug、condition、ordered assets、window，以及
+    next pair 中由 slug/condition/assets/window 导出的 relation conflict，才在对应
+    recovered slug 存在时映射 76；`NonBtcFiveMinuteMarket`、`Inactive`、SDK decode
+    和无 recovered authority 仍保持退出码 1；
+  - exact match 先返回最多两个布尔 match，不立即消费候选；initial context 建立或
+    next/rollover `Applied` 后才消费，`Expired` 和失败路径保留候选。
+- 新回归显式证明：
+  - 只有 recovered next 时，prior requested slug 的 immutable error 保持退出 1，
+    next requested slug 的同类错误为 76；
+  - `NonBtcFiveMinuteMarket` 与 `Inactive` 不会被过度转为 76；
+  - delayed fence 跨 E 返回 `Expired` 后 recovered candidate 仍存在，fresh
+    replacement 已使用首次 verified time但没有提前消费 authority。
+- 修复后 `live_runtime::tests::polymarket_source` 仍为 102 passed；Stage 3 等待
+  `gpt-5.6-sol/ultra` 聚焦复审。复审通过前不提交、不推送、不操作远端。
+
+## Stage 3 最终独立复审
+
+- 同一 `gpt-5.6-sol/ultra` 审查者对三项修复执行聚焦只读复审，最终结论为
+  `PASS`，无剩余可执行 finding。
+- 复审确认：
+  - initial/next/rollover 全部使用 request/selection 时冻结的 typed expected slug；
+  - 两个布尔 match 只决定何时消费既有 candidate，不携带 identity/time，不是第二
+    authority；
+  - initial context 接管后消费，next/rollover 仅 `Applied` 后消费，`Expired` 保留；
+  - 可观察 marker 已删除，`NonBtcFiveMinuteMarket`、`Inactive`、SDK decode 和无
+    recovered authority 均未被扩大为退出码 76；
+  - Polymarket source 102 项和 `git diff --check` 复跑通过。
+- Stage 3 已满足实现、全量验证和独立审查完成门；本 changelog 与代码在同一阶段
+  commit/push 后进入 Stage 4。远端清空和部署仍未开始。

@@ -863,6 +863,8 @@ pub(super) async fn run_polymarket_source_with_spec(
     );
     #[cfg(test)]
     recovery.set_wait_override(spec.recovery_wait_override);
+    let mut startup_recovery = startup_recovery;
+    let mut restart_fixed_identities = std::mem::take(&mut startup_recovery.fixed_identities);
     let mut context = PolymarketProcessingContext::from_recovery_with_source_epoch(
         startup_recovery,
         source_sequence_epoch_id.clone(),
@@ -870,7 +872,7 @@ pub(super) async fn run_polymarket_source_with_spec(
     let mut resolution_poll_tasks = JoinSet::<GammaResolutionPollCompletion>::new();
     while deadline_ms.is_none_or(|deadline_ms| now_ms() < deadline_ms) {
         let discovery = if context.is_none() {
-            let discovery = match discover_initial_polymarket_context(
+            let mut discovery = match discover_initial_polymarket_context(
                 &gamma,
                 spec.discovery_wait,
                 spec.discovery_retry_delay,
@@ -889,18 +891,36 @@ pub(super) async fn run_polymarket_source_with_spec(
                     }
                     continue;
                 }
-                Err(PolymarketDiscoveryError::Integrity(error)) => {
+                Err(error) => {
+                    let error = polymarket_restart_discovery_integrity_error(
+                        &restart_fixed_identities,
+                        &error,
+                    );
                     record_gap(
                         &sink.gaps,
                         format!("polymarket_discovery_integrity:{error}"),
                     );
-                    return Err(invalid_data(error).into());
+                    return Err(error.into());
+                }
+            };
+            let recovered_match = match preserve_recovered_polymarket_fixed_identity_authority(
+                &restart_fixed_identities,
+                &mut discovery,
+            ) {
+                Ok(recovered_match) => recovered_match,
+                Err(error) => {
+                    record_gap(
+                        &sink.gaps,
+                        format!("polymarket_restart_identity_integrity:{error}"),
+                    );
+                    return Err(error);
                 }
             };
             context = Some(PolymarketProcessingContext::new_with_source_epoch(
                 discovery.clone(),
                 source_sequence_epoch_id.clone(),
             ));
+            recovered_match.consume(&mut restart_fixed_identities);
             Some(discovery)
         } else {
             None
@@ -939,6 +959,7 @@ pub(super) async fn run_polymarket_source_with_spec(
             &mut control_rx,
             spec.discovery_wait,
             spec.discovery_retry_delay,
+            &mut restart_fixed_identities,
             production_polymarket_timeline_now,
         )
         .await;
@@ -1020,13 +1041,42 @@ fn polymarket_sdk_error_is_retryable(error: &SdkStreamError) -> bool {
 pub(super) enum PolymarketDiscoveryError {
     Unavailable(String),
     Integrity(String),
+    FixedIdentitySelection {
+        expected_slug: String,
+        detail: String,
+    },
+}
+
+impl PolymarketDiscoveryError {
+    #[cfg(test)]
+    pub(super) fn is_integrity(&self) -> bool {
+        !matches!(self, Self::Unavailable(_))
+    }
+
+    fn detail(&self) -> &str {
+        match self {
+            Self::Unavailable(detail)
+            | Self::Integrity(detail)
+            | Self::FixedIdentitySelection { detail, .. } => detail,
+        }
+    }
+
+    fn fixed_identity_expected_slug(&self) -> Option<&str> {
+        match self {
+            Self::FixedIdentitySelection { expected_slug, .. } => Some(expected_slug),
+            Self::Unavailable(_) | Self::Integrity(_) => None,
+        }
+    }
 }
 
 impl std::fmt::Display for PolymarketDiscoveryError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unavailable(message) => write!(formatter, "Gamma unavailable: {message}"),
-            Self::Integrity(message) => write!(formatter, "Gamma integrity failure: {message}"),
+            Self::Integrity(message)
+            | Self::FixedIdentitySelection {
+                detail: message, ..
+            } => write!(formatter, "Gamma integrity failure: {message}"),
         }
     }
 }
@@ -3564,6 +3614,110 @@ pub(super) fn preserve_polymarket_fixed_identity_authority(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct RecoveredPolymarketFixedIdentityMatch {
+    pub(super) current: bool,
+    pub(super) next: bool,
+}
+
+impl RecoveredPolymarketFixedIdentityMatch {
+    pub(super) fn consume(self, recovered: &mut RecoveredPolymarketFixedIdentities) {
+        if self.current {
+            recovered.current = None;
+        }
+        if self.next {
+            recovered.next = None;
+        }
+    }
+}
+
+pub(super) fn preserve_recovered_polymarket_fixed_identity_authority(
+    recovered: &RecoveredPolymarketFixedIdentities,
+    discovery: &mut BtcUpdownDiscovery,
+) -> Result<RecoveredPolymarketFixedIdentityMatch> {
+    let mut matched = RecoveredPolymarketFixedIdentityMatch::default();
+    for market in std::iter::once(&mut discovery.current).chain(discovery.next.as_mut()) {
+        let current_matches = recovered
+            .current
+            .as_ref()
+            .is_some_and(|identity| identity.slug == market.slug);
+        let next_matches = recovered
+            .next
+            .as_ref()
+            .is_some_and(|identity| identity.slug == market.slug);
+        if current_matches && next_matches {
+            return Err(invalid_data(format!(
+                "operator_intervention_required:Polymarket restart has multiple fixed identity candidates:slug={}",
+                market.slug
+            ))
+            .into());
+        }
+        let (identity, matched_current) = if current_matches {
+            (recovered.current.as_ref(), true)
+        } else if next_matches {
+            (recovered.next.as_ref(), false)
+        } else {
+            (None, false)
+        };
+        let Some(identity) = identity else {
+            continue;
+        };
+        if !recovered_polymarket_fixed_identity_matches(identity, market) {
+            return Err(invalid_data(format!(
+                "operator_intervention_required:Polymarket restart fixed identity conflict:slug={}",
+                market.slug
+            ))
+            .into());
+        }
+        market.fixed_identity_verified_at_utc_ms = identity.fixed_identity_verified_at_utc_ms;
+        if matched_current {
+            matched.current = true;
+        } else {
+            matched.next = true;
+        }
+    }
+    Ok(matched)
+}
+
+pub(super) fn recovered_polymarket_fixed_identity_matches(
+    recovered: &RecoveredPolymarketFixedIdentity,
+    fresh: &DiscoveredBtcUpdownMarket,
+) -> bool {
+    recovered.slug == fresh.slug
+        && recovered.condition_id == fresh.condition_id
+        && recovered.clob_market_id == fresh.id
+        && recovered.up_asset_id == fresh.up_asset_id
+        && recovered.down_asset_id == fresh.down_asset_id
+        && recovered.market_start_utc_ms == fresh.start_ts_s.saturating_mul(1_000)
+        && recovered.market_end_utc_ms == fresh.end_ts_s.saturating_mul(1_000)
+}
+
+pub(super) fn polymarket_restart_discovery_integrity_error(
+    recovered: &RecoveredPolymarketFixedIdentities,
+    error: &PolymarketDiscoveryError,
+) -> io::Error {
+    let expected_slug = error.fixed_identity_expected_slug();
+    let has_recovered_authority = expected_slug.is_some_and(|expected_slug| {
+        recovered
+            .current
+            .as_ref()
+            .is_some_and(|identity| identity.slug == expected_slug)
+            || recovered
+                .next
+                .as_ref()
+                .is_some_and(|identity| identity.slug == expected_slug)
+    });
+    if has_recovered_authority {
+        let expected_slug = expected_slug.unwrap_or_default();
+        invalid_data(format!(
+            "operator_intervention_required:Polymarket restart discovery identity conflict:slug={expected_slug}:error={}",
+            error.detail()
+        ))
+    } else {
+        invalid_data(error.detail())
+    }
+}
+
 fn stamp_polymarket_discovery_validation(
     market: &mut DiscoveredBtcUpdownMarket,
     validation_completed_at_utc_ms: i64,
@@ -4558,6 +4712,7 @@ pub(super) async fn collect_polymarket_single_receiver<N>(
     control_rx: &mut mpsc::Receiver<PolymarketSourceControl>,
     discovery_wait: Duration,
     discovery_retry_delay: Duration,
+    restart_fixed_identities: &mut RecoveredPolymarketFixedIdentities,
     timeline_now: N,
 ) -> Result<()>
 where
@@ -4859,6 +5014,22 @@ where
                                 next,
                                 validation_completed_at_utc_ms,
                             )?;
+                            let recovered_match =
+                                match preserve_recovered_polymarket_fixed_identity_authority(
+                                    restart_fixed_identities,
+                                    &mut updated,
+                                ) {
+                                    Ok(recovered_match) => recovered_match,
+                                    Err(error) => {
+                                        record_gap(
+                                            &sink.gaps,
+                                            format!(
+                                                "polymarket_restart_identity_integrity:{error}"
+                                            ),
+                                        );
+                                        return Err(error);
+                                    }
+                                };
                             let installed = switch_polymarket_context(
                                 updated,
                                 &*timeline_now,
@@ -4872,30 +5043,46 @@ where
                                 recovery,
                             )
                             .await?;
-                            if installed == PolymarketContextInstallOutcome::Expired {
-                                next_discovery_at = timeline_now().monotonic;
+                            match installed {
+                                PolymarketContextInstallOutcome::Applied { .. } => {
+                                    recovered_match.consume(restart_fixed_identities);
+                                }
+                                PolymarketContextInstallOutcome::Expired => {
+                                    next_discovery_at = timeline_now().monotonic;
+                                }
                             }
                         }
                         Ok(false) => {}
-                        Err(error) => match classify_discovery_selection_error(error) {
+                        Err(error) => match classify_next_discovery_selection_error(
+                            error,
+                            &batch.requested_slug,
+                        ) {
                             PolymarketDiscoveryError::Unavailable(_) => {}
-                            PolymarketDiscoveryError::Integrity(error) => {
+                            error => {
+                                let error = polymarket_restart_discovery_integrity_error(
+                                    restart_fixed_identities,
+                                    &error,
+                                );
                                 record_gap(
                                     &sink.gaps,
                                     format!("polymarket_next_discovery_integrity:{error}"),
                                 );
-                                return Err(invalid_data(error).into());
+                                return Err(error.into());
                             }
                         },
                     }
                 }
                 Ok(Ok(_)) | Ok(Err(PolymarketDiscoveryError::Unavailable(_))) => {}
-                Ok(Err(PolymarketDiscoveryError::Integrity(error))) => {
+                Ok(Err(error)) => {
+                    let error = polymarket_restart_discovery_integrity_error(
+                        restart_fixed_identities,
+                        &error,
+                    );
                     record_gap(
                         &sink.gaps,
                         format!("polymarket_next_discovery_integrity:{error}"),
                     );
-                    return Err(invalid_data(error).into());
+                    return Err(error.into());
                 }
                 Err(error) if error.is_cancelled() => {}
                 Err(error) => {
@@ -4925,9 +5112,23 @@ where
         }
         if let Some(result) = rollover_discovery_tasks.try_join_next() {
             match result {
-                Ok(Ok(discovery))
+                Ok(Ok(mut discovery))
                     if gamma_discovery_is_current(&discovery, timeline_now().utc_ms) =>
                 {
+                    let recovered_match =
+                        match preserve_recovered_polymarket_fixed_identity_authority(
+                            restart_fixed_identities,
+                            &mut discovery,
+                        ) {
+                            Ok(recovered_match) => recovered_match,
+                            Err(error) => {
+                                record_gap(
+                                    &sink.gaps,
+                                    format!("polymarket_restart_identity_integrity:{error}"),
+                                );
+                                return Err(error);
+                            }
+                        };
                     let late_current = discovery.current.clone();
                     let installed = switch_polymarket_context(
                         discovery,
@@ -4944,6 +5145,7 @@ where
                     .await?;
                     let applied_at_utc_ms = match installed {
                         PolymarketContextInstallOutcome::Applied { applied_at_utc_ms } => {
+                            recovered_match.consume(restart_fixed_identities);
                             applied_at_utc_ms
                         }
                         PolymarketContextInstallOutcome::Expired => {
@@ -4982,12 +5184,16 @@ where
                         &*timeline_now,
                     ));
                 }
-                Ok(Err(PolymarketDiscoveryError::Integrity(error))) => {
+                Ok(Err(error)) => {
+                    let error = polymarket_restart_discovery_integrity_error(
+                        restart_fixed_identities,
+                        &error,
+                    );
                     record_gap(
                         &sink.gaps,
                         format!("polymarket_rollover_discovery_integrity:{error}"),
                     );
-                    return Err(invalid_data(error).into());
+                    return Err(error.into());
                 }
                 Err(error) => {
                     let reason = format!("polymarket_rollover_discovery_task_failed:{error}");
@@ -5142,15 +5348,13 @@ where
                         }
                         Err(error) => match classify_discovery_selection_error(error) {
                             PolymarketDiscoveryError::Unavailable(message) => message,
-                            integrity @ PolymarketDiscoveryError::Integrity(_) => {
-                                return Err(integrity);
-                            }
+                            integrity => return Err(integrity),
                         },
                     }
                 }
             }
             Err(PolymarketDiscoveryError::Unavailable(message)) => message,
-            Err(integrity @ PolymarketDiscoveryError::Integrity(_)) => return Err(integrity),
+            Err(integrity) => return Err(integrity),
         };
         if started.elapsed() >= wait {
             break last_error;
@@ -5176,19 +5380,64 @@ pub(super) struct GammaCandidateBatch {
 pub(super) fn classify_discovery_selection_error(
     error: DiscoverySelectionError,
 ) -> PolymarketDiscoveryError {
+    let fixed_identity_expected_slug = match &error {
+        DiscoverySelectionError::MultipleCurrentCandidates { expected_slug, .. }
+        | DiscoverySelectionError::MultipleNextCandidates { expected_slug, .. } => {
+            Some(expected_slug.clone())
+        }
+        DiscoverySelectionError::InvalidCurrent {
+            expected_slug,
+            reason,
+            ..
+        }
+        | DiscoverySelectionError::InvalidNext {
+            expected_slug,
+            reason,
+            ..
+        } if matches!(
+            reason,
+            CandidateRejectReason::SlugMismatch
+                | CandidateRejectReason::MissingConditionId
+                | CandidateRejectReason::InvalidConditionId
+                | CandidateRejectReason::InvalidTokenCount
+                | CandidateRejectReason::UntrustedOutcomeMapping
+                | CandidateRejectReason::WindowBoundsMismatch
+        ) =>
+        {
+            Some(expected_slug.clone())
+        }
+        _ => None,
+    };
     match error {
         DiscoverySelectionError::MissingCurrentCandidate { .. }
         | DiscoverySelectionError::MissingNextCandidate { .. } => {
             PolymarketDiscoveryError::Unavailable(format!("{error:?}"))
         }
-        DiscoverySelectionError::MultipleCurrentCandidates { .. }
-        | DiscoverySelectionError::MultipleNextCandidates { .. }
-        | DiscoverySelectionError::InvalidCurrent { .. }
-        | DiscoverySelectionError::InvalidNext { .. }
-        | DiscoverySelectionError::PairRelationInvalid => {
-            PolymarketDiscoveryError::Integrity(format!("{error:?}"))
+        error => {
+            let detail = format!("{error:?}");
+            if let Some(expected_slug) = fixed_identity_expected_slug {
+                PolymarketDiscoveryError::FixedIdentitySelection {
+                    expected_slug,
+                    detail,
+                }
+            } else {
+                PolymarketDiscoveryError::Integrity(detail)
+            }
         }
     }
+}
+
+pub(super) fn classify_next_discovery_selection_error(
+    error: DiscoverySelectionError,
+    expected_slug: &str,
+) -> PolymarketDiscoveryError {
+    if error == DiscoverySelectionError::PairRelationInvalid {
+        return PolymarketDiscoveryError::FixedIdentitySelection {
+            expected_slug: expected_slug.to_owned(),
+            detail: format!("{error:?}"),
+        };
+    }
+    classify_discovery_selection_error(error)
 }
 
 fn classify_gamma_sdk_error(

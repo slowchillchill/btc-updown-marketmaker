@@ -39,6 +39,22 @@ fn polymarket_metadata_event(payload: &SourceIngressPayload) -> Option<&RawEvent
     }
 }
 
+fn recovered_fixed_identity(
+    market: &DiscoveredBtcUpdownMarket,
+    fixed_identity_verified_at_utc_ms: i64,
+) -> RecoveredPolymarketFixedIdentity {
+    RecoveredPolymarketFixedIdentity {
+        slug: market.slug.clone(),
+        clob_market_id: market.id.clone(),
+        condition_id: market.condition_id.clone(),
+        up_asset_id: market.up_asset_id.clone(),
+        down_asset_id: market.down_asset_id.clone(),
+        market_start_utc_ms: market.start_ts_s.saturating_mul(1_000),
+        market_end_utc_ms: market.end_ts_s.saturating_mul(1_000),
+        fixed_identity_verified_at_utc_ms,
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct DeferredIngressBatchFact {
     source_kinds: Vec<String>,
@@ -141,6 +157,7 @@ async fn gamma_outer_supervisor_survives_one_hundred_outer_cycles_with_bounded_f
         control_rx,
         PolymarketRestartRecovery {
             pending: Vec::new(),
+            fixed_identities: RecoveredPolymarketFixedIdentities::default(),
         },
     ));
 
@@ -267,6 +284,7 @@ async fn polymarket_source_spec_uses_private_gamma_endpoint_and_millisecond_dead
             control_rx,
             PolymarketRestartRecovery {
                 pending: Vec::new(),
+                fixed_identities: RecoveredPolymarketFixedIdentities::default(),
             },
         ),
     )
@@ -279,6 +297,117 @@ async fn polymarket_source_spec_uses_private_gamma_endpoint_and_millisecond_dead
         "valid empty discovery and subsequent network unavailability are not confirmed gaps"
     );
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn initial_fresh_gamma_identity_conflicts_with_recovered_authority_exit_76() {
+    let until_boundary_ms = 300_000_i64 - now_ms().rem_euclid(300_000);
+    if until_boundary_ms <= 2_000 {
+        sleep(Duration::from_millis(
+            u64::try_from(until_boundary_ms + 10).unwrap(),
+        ))
+        .await;
+    }
+
+    for case in ["slug", "window", "multiple"] {
+        let windows = discovery_windows(now_ms());
+        let mut body =
+            serde_json::from_str::<Value>(&gamma_market_response_for_window(&windows.current))
+                .unwrap();
+        match case {
+            "slug" => body[0]["slug"] = json!("wrong-slug"),
+            "window" => {
+                let end =
+                    OffsetDateTime::from_unix_timestamp(windows.current.end_ts_s + 300).unwrap();
+                body[0]["endDate"] = json!(format!(
+                    "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+                    end.year(),
+                    end.month() as u8,
+                    end.day(),
+                    end.hour(),
+                    end.minute(),
+                    end.second()
+                ));
+            }
+            "multiple" => {
+                let duplicate = body[0].clone();
+                body.as_array_mut().unwrap().push(duplicate);
+            }
+            _ => unreachable!(),
+        }
+        let body = body.to_string();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gamma_endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4_096];
+            let _ = socket.read(&mut request).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let dataset_root = tempdir().unwrap();
+        let dataset_root = dataset_root.path().canonicalize().unwrap();
+        let (tx, _rx) = mpsc::channel(8);
+        let (_control_tx, control_rx) = mpsc::channel(POLYMARKET_CONTROL_CHANNEL_CAPACITY);
+        let mut spec = PolymarketSourceSpec::production();
+        spec.gamma_endpoint = gamma_endpoint;
+        spec.discovery_wait = Duration::ZERO;
+        spec.discovery_retry_delay = Duration::ZERO;
+        let recovered = RecoveredPolymarketFixedIdentities {
+            current: Some(RecoveredPolymarketFixedIdentity {
+                slug: windows.current.slug,
+                clob_market_id: "gamma-current".to_owned(),
+                condition_id: "0x0000000000000000000000000000000000000000000000000000000000000002"
+                    .to_owned(),
+                up_asset_id: "101".to_owned(),
+                down_asset_id: "102".to_owned(),
+                market_start_utc_ms: windows.current.target_ts_s.saturating_mul(1_000),
+                market_end_utc_ms: windows.current.end_ts_s.saturating_mul(1_000),
+                fixed_identity_verified_at_utc_ms: now_ms(),
+            }),
+            next: None,
+        };
+
+        let error = timeout(
+            Duration::from_secs(1),
+            run_polymarket_source_with_spec(
+                spec,
+                dataset_root,
+                SourceEventSink {
+                    tx,
+                    gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+                    source_queue_backpressure: Arc::new(SourceQueueBackpressureStats::default()),
+                    inflight_budget: InflightBudget::new(),
+                    enqueue_lock: Arc::new(AsyncMutex::new(())),
+                },
+                CollectorIdentity {
+                    host_id: "collector-test".to_owned(),
+                    region: "local-test".to_owned(),
+                },
+                None,
+                Instant::now(),
+                control_rx,
+                PolymarketRestartRecovery {
+                    pending: Vec::new(),
+                    fixed_identities: recovered,
+                },
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+
+        assert_eq!(
+            crate::runtime::collector_exit_code(error.as_ref()),
+            76,
+            "{case}:{error}"
+        );
+        server.await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -385,6 +514,7 @@ async fn polymarket_source_recovers_through_gamma_network_rate_limit_and_empty_r
             control_rx,
             PolymarketRestartRecovery {
                 pending: Vec::new(),
+                fixed_identities: RecoveredPolymarketFixedIdentities::default(),
             },
         ),
     )
@@ -452,7 +582,7 @@ async fn gamma_rate_limit_is_availability_but_malformed_json_is_integrity() {
         .await
         .expect_err("the fixture must not produce a candidate batch");
         assert_eq!(
-            matches!(error, PolymarketDiscoveryError::Integrity(_)),
+            error.is_integrity(),
             expect_integrity,
             "unexpected Gamma classification: {error}"
         );
@@ -480,11 +610,283 @@ fn gamma_candidate_selection_separates_missing_from_contradictory_identity() {
         },
         DiscoverySelectionError::PairRelationInvalid,
     ] {
-        assert!(matches!(
-            classify_discovery_selection_error(error),
-            PolymarketDiscoveryError::Integrity(_)
-        ));
+        assert!(classify_discovery_selection_error(error).is_integrity());
     }
+}
+
+#[test]
+fn recovered_current_and_next_preserve_first_fixed_but_keep_fresh_validation() {
+    let mut initial = test_btc_discovery();
+    let mut next = initial.current.clone();
+    next.id = "market-next".to_owned();
+    next.slug = "btc-updown-5m-1783392600".to_owned();
+    next.condition_id =
+        "0x0000000000000000000000000000000000000000000000000000000000000003".to_owned();
+    next.up_asset_id = "201".to_owned();
+    next.down_asset_id = "202".to_owned();
+    next.start_ts_s += 300;
+    next.end_ts_s += 300;
+    next.candidate_start_ts_s += 300;
+    next.candidate_end_ts_s += 300;
+    refresh_test_discovery_evidence(&mut next, 1_783_392_480_010);
+
+    let fresh_current_validation = initial.current.metadata_validation_completed_at_utc_ms;
+    let fresh_next_validation = next.metadata_validation_completed_at_utc_ms;
+    let first_current_verified = initial
+        .current
+        .fixed_identity_verified_at_utc_ms
+        .saturating_sub(1_000);
+    let first_next_verified = next.fixed_identity_verified_at_utc_ms.saturating_sub(1_000);
+    let mut recovered = RecoveredPolymarketFixedIdentities {
+        current: Some(recovered_fixed_identity(
+            &initial.current,
+            first_current_verified,
+        )),
+        next: Some(recovered_fixed_identity(&next, first_next_verified)),
+    };
+
+    let current_match =
+        preserve_recovered_polymarket_fixed_identity_authority(&recovered, &mut initial).unwrap();
+    assert_eq!(
+        initial.current.fixed_identity_verified_at_utc_ms,
+        first_current_verified
+    );
+    assert_eq!(
+        initial.current.metadata_validation_completed_at_utc_ms,
+        fresh_current_validation
+    );
+    assert!(recovered.current.is_some());
+    assert!(recovered.next.is_some());
+    current_match.consume(&mut recovered);
+    assert!(recovered.current.is_none());
+
+    let mut updated = initial;
+    updated.next = Some(next);
+    let next_match =
+        preserve_recovered_polymarket_fixed_identity_authority(&recovered, &mut updated).unwrap();
+
+    assert_eq!(
+        updated
+            .next
+            .as_ref()
+            .unwrap()
+            .fixed_identity_verified_at_utc_ms,
+        first_next_verified
+    );
+    assert_eq!(
+        updated
+            .next
+            .as_ref()
+            .unwrap()
+            .metadata_validation_completed_at_utc_ms,
+        fresh_next_validation
+    );
+    assert!(recovered.next.is_some());
+    next_match.consume(&mut recovered);
+    assert!(recovered.current.is_none());
+    assert!(recovered.next.is_none());
+}
+
+#[test]
+fn recovered_exact_match_mismatch_is_exit_76() {
+    let discovery = test_btc_discovery();
+    let exact = recovered_fixed_identity(
+        &discovery.current,
+        discovery
+            .current
+            .fixed_identity_verified_at_utc_ms
+            .saturating_sub(1_000),
+    );
+
+    for field in [
+        "condition",
+        "clob",
+        "up",
+        "down",
+        "ordered_assets",
+        "start",
+        "end",
+    ] {
+        let mut candidate = exact.clone();
+        match field {
+            "condition" => candidate.condition_id.push('f'),
+            "clob" => candidate.clob_market_id.push_str("-different"),
+            "up" => candidate.up_asset_id.push('9'),
+            "down" => candidate.down_asset_id.push('9'),
+            "ordered_assets" => {
+                std::mem::swap(&mut candidate.up_asset_id, &mut candidate.down_asset_id);
+            }
+            "start" => candidate.market_start_utc_ms += 1_000,
+            "end" => candidate.market_end_utc_ms += 1_000,
+            _ => unreachable!(),
+        }
+        let recovered = RecoveredPolymarketFixedIdentities {
+            current: Some(candidate),
+            next: None,
+        };
+        let mut fresh = discovery.clone();
+        let error = preserve_recovered_polymarket_fixed_identity_authority(&recovered, &mut fresh)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("operator_intervention_required:"),
+            "{field}:{error}"
+        );
+        assert_eq!(
+            crate::runtime::collector_exit_code(error.as_ref()),
+            76,
+            "{field}:{error}"
+        );
+    }
+
+    let mut wrong_slug = exact.clone();
+    wrong_slug.slug.push_str("-different");
+    assert!(!recovered_polymarket_fixed_identity_matches(
+        &wrong_slug,
+        &discovery.current
+    ));
+}
+
+#[test]
+fn multiple_recovered_candidates_for_one_slug_are_exit_76() {
+    let mut discovery = test_btc_discovery();
+    let candidate = recovered_fixed_identity(
+        &discovery.current,
+        discovery
+            .current
+            .fixed_identity_verified_at_utc_ms
+            .saturating_sub(1_000),
+    );
+    let recovered = RecoveredPolymarketFixedIdentities {
+        current: Some(candidate.clone()),
+        next: Some(candidate),
+    };
+
+    let error = preserve_recovered_polymarket_fixed_identity_authority(&recovered, &mut discovery)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("multiple fixed identity"));
+    assert_eq!(crate::runtime::collector_exit_code(error.as_ref()), 76);
+}
+
+#[test]
+fn fresh_gamma_integrity_with_recovered_authority_is_exit_76_only_for_that_authority() {
+    let discovery = test_btc_discovery();
+    let recovered = RecoveredPolymarketFixedIdentities {
+        current: Some(recovered_fixed_identity(
+            &discovery.current,
+            discovery.current.fixed_identity_verified_at_utc_ms,
+        )),
+        next: None,
+    };
+    for selection_error in [
+        DiscoverySelectionError::MultipleCurrentCandidates {
+            expected_slug: discovery.current.slug.clone(),
+            count: 2,
+        },
+        DiscoverySelectionError::InvalidCurrent {
+            expected_slug: discovery.current.slug.clone(),
+            candidate_slug: Some("wrong-slug".to_owned()),
+            reason: crate::market_discovery::CandidateRejectReason::SlugMismatch,
+        },
+        DiscoverySelectionError::InvalidCurrent {
+            expected_slug: discovery.current.slug.clone(),
+            candidate_slug: Some(discovery.current.slug.clone()),
+            reason: crate::market_discovery::CandidateRejectReason::WindowBoundsMismatch,
+        },
+    ] {
+        let classified = classify_discovery_selection_error(selection_error);
+        assert!(classified.is_integrity());
+        let error = polymarket_restart_discovery_integrity_error(&recovered, &classified);
+        assert_eq!(crate::runtime::collector_exit_code(&error), 76);
+    }
+
+    for reason in [
+        crate::market_discovery::CandidateRejectReason::Inactive,
+        crate::market_discovery::CandidateRejectReason::NonBtcFiveMinuteMarket,
+    ] {
+        let classified =
+            classify_discovery_selection_error(DiscoverySelectionError::InvalidCurrent {
+                expected_slug: discovery.current.slug.clone(),
+                candidate_slug: Some(discovery.current.slug.clone()),
+                reason,
+            });
+        let error = polymarket_restart_discovery_integrity_error(&recovered, &classified);
+        assert_eq!(
+            crate::runtime::collector_exit_code(&error),
+            1,
+            "{reason:?} is not an immutable restart identity conflict"
+        );
+    }
+
+    let immutable_without_authority =
+        classify_discovery_selection_error(DiscoverySelectionError::InvalidCurrent {
+            expected_slug: discovery.current.slug.clone(),
+            candidate_slug: Some(discovery.current.slug.clone()),
+            reason: crate::market_discovery::CandidateRejectReason::SlugMismatch,
+        });
+    assert!(
+        !immutable_without_authority
+            .to_string()
+            .contains("fixed_identity_selection")
+    );
+    let no_recovered_authority = polymarket_restart_discovery_integrity_error(
+        &RecoveredPolymarketFixedIdentities::default(),
+        &immutable_without_authority,
+    );
+    assert_eq!(
+        crate::runtime::collector_exit_code(&no_recovered_authority),
+        1
+    );
+
+    let next_slug = "btc-updown-5m-1783392600".to_owned();
+    let mut recovered_next = recovered.current.clone().unwrap();
+    recovered_next.slug.clone_from(&next_slug);
+    let only_next = RecoveredPolymarketFixedIdentities {
+        current: None,
+        next: Some(recovered_next),
+    };
+    let old_window_error =
+        classify_discovery_selection_error(DiscoverySelectionError::InvalidCurrent {
+            expected_slug: discovery.current.slug.clone(),
+            candidate_slug: Some("wrong-slug".to_owned()),
+            reason: crate::market_discovery::CandidateRejectReason::SlugMismatch,
+        });
+    assert_eq!(
+        crate::runtime::collector_exit_code(&polymarket_restart_discovery_integrity_error(
+            &only_next,
+            &old_window_error,
+        )),
+        1,
+        "the recovered next must not claim an error from the prior requested slug"
+    );
+    let next_window_error =
+        classify_discovery_selection_error(DiscoverySelectionError::InvalidCurrent {
+            expected_slug: next_slug.clone(),
+            candidate_slug: Some("wrong-slug".to_owned()),
+            reason: crate::market_discovery::CandidateRejectReason::SlugMismatch,
+        });
+    assert_eq!(
+        crate::runtime::collector_exit_code(&polymarket_restart_discovery_integrity_error(
+            &only_next,
+            &next_window_error,
+        )),
+        76,
+        "the selection error must retain its request-time expected slug"
+    );
+    let pair_error = classify_next_discovery_selection_error(
+        DiscoverySelectionError::PairRelationInvalid,
+        &next_slug,
+    );
+    assert_eq!(
+        crate::runtime::collector_exit_code(&polymarket_restart_discovery_integrity_error(
+            &only_next,
+            &pair_error,
+        )),
+        76,
+        "a next pair conflict derives from immutable slug/condition/assets/window fields"
+    );
 }
 
 #[test]
@@ -628,6 +1030,7 @@ async fn initial_expired_gamma_discovery_retries_without_mutation_gap_or_false_r
         &mut control_rx,
         Duration::from_millis(10),
         Duration::from_millis(1),
+        &mut RecoveredPolymarketFixedIdentities::default(),
         production_polymarket_timeline_now,
     )
     .await
@@ -1106,6 +1509,7 @@ async fn polymarket_recovered_pending_admits_missed_evidence_before_future_slots
     let market = test_btc_discovery().current;
     let recovered = recovered_pending_for_test(&market, vec![1], vec![2], 3);
     let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        fixed_identities: RecoveredPolymarketFixedIdentities::default(),
         pending: vec![recovered],
     })
     .unwrap()
@@ -1160,6 +1564,7 @@ async fn polymarket_recovered_pending_admits_missed_evidence_before_future_slots
 fn polymarket_recovered_pending_reclassifies_elapsed_slots_before_probe() {
     let market = test_btc_discovery().current;
     let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        fixed_identities: RecoveredPolymarketFixedIdentities::default(),
         pending: vec![recovered_pending_for_test(
             &market,
             Vec::new(),
@@ -1186,6 +1591,7 @@ fn polymarket_recovered_pending_reclassifies_elapsed_slots_before_probe() {
     assert!(!pending.recovery_reclassification_pending);
 
     let mut expired = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        fixed_identities: RecoveredPolymarketFixedIdentities::default(),
         pending: vec![recovered_pending_for_test(
             &market,
             Vec::new(),
@@ -1217,6 +1623,7 @@ async fn polymarket_recovered_finalize_allows_fresh_v3_delivery_after_install() 
     let terminal_received_at_utc_ms = identity.market_end_utc_ms + 1;
     let actor_now_utc_ms = terminal_received_at_utc_ms + 1;
     let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        fixed_identities: RecoveredPolymarketFixedIdentities::default(),
         pending: vec![recovered_pending_for_test(
             &market,
             Vec::new(),
@@ -1375,6 +1782,7 @@ async fn polymarket_hour_budget_and_two_task_ownership_are_hard_bounded() {
     second.candidate_end_ts_s -= 300;
     refresh_test_discovery_evidence(&mut second, first.metadata_received_utc_ms.unwrap() - 1);
     let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        fixed_identities: RecoveredPolymarketFixedIdentities::default(),
         pending: vec![
             recovered_pending_for_test(&first, Vec::new(), Vec::new(), 1),
             recovered_pending_for_test(&second, Vec::new(), Vec::new(), 1),
@@ -1406,6 +1814,7 @@ async fn polymarket_hour_budget_and_two_task_ownership_are_hard_bounded() {
 fn polymarket_many_recovered_lifecycles_release_actor_owned_state() {
     let market = test_btc_discovery().current;
     let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        fixed_identities: RecoveredPolymarketFixedIdentities::default(),
         pending: vec![recovered_pending_for_test(
             &market,
             Vec::new(),
@@ -1833,6 +2242,7 @@ fn polymarket_v3_resolved_target_admission_covers_current_next_and_recovery_pend
     );
 
     let pending_context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        fixed_identities: RecoveredPolymarketFixedIdentities::default(),
         pending: vec![recovered_pending_for_test(
             &current,
             Vec::new(),
@@ -4016,6 +4426,7 @@ async fn polymarket_next_discovery_cancelled_at_e_is_not_fatal() {
             &mut control_rx,
             Duration::ZERO,
             Duration::from_millis(1),
+            &mut RecoveredPolymarketFixedIdentities::default(),
             move || PolymarketTimelineNow {
                 utc_ms: *timeline_for_collector.lock().unwrap(),
                 monotonic: TokioInstant::now(),
@@ -4565,6 +4976,7 @@ async fn polymarket_day_fence_orders_ws_old_before_gamma_new() {
     let mut pending = PendingPolymarketResolution::new(identity.clone(), None);
     pending.in_flight_ordinal = Some(1);
     let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        fixed_identities: RecoveredPolymarketFixedIdentities::default(),
         pending: vec![recovered_pending_for_test(
             &market,
             Vec::new(),
@@ -4718,6 +5130,7 @@ async fn polymarket_day_fence_orders_gamma_old_before_ws_new() {
         let mut pending = PendingPolymarketResolution::new(identity.clone(), None);
         pending.in_flight_ordinal = Some(1);
         let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+            fixed_identities: RecoveredPolymarketFixedIdentities::default(),
             pending: vec![recovered_pending_for_test(
                 &market,
                 Vec::new(),
@@ -4892,6 +5305,7 @@ async fn polymarket_hour_fence_keeps_gamma_claim_and_rejects_post_horizon_ws() {
     let actor_now_utc_ms = hour_boundary_utc_ms + 1;
 
     let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        fixed_identities: RecoveredPolymarketFixedIdentities::default(),
         pending: vec![recovered_pending_for_test(
             &market,
             Vec::new(),
@@ -5010,6 +5424,7 @@ async fn polymarket_connected_stop_deadline_and_control_close_quiesce_ws_and_abo
         let ws_received_at_utc_ms = identity.market_end_utc_ms + 1;
         let actor_now_utc_ms = ws_received_at_utc_ms + 1;
         let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+            fixed_identities: RecoveredPolymarketFixedIdentities::default(),
             pending: vec![recovered_pending_for_test(
                 &market,
                 Vec::new(),
@@ -5940,6 +6355,7 @@ async fn polymarket_outer_stop_harvests_ready_gamma_before_reply() {
     let completion_ticket =
         accepted_raw_day_ticket_from_gate_for_test(&raw_day_gate, completed_at_utc_ms).await;
     let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        fixed_identities: RecoveredPolymarketFixedIdentities::default(),
         pending: vec![recovered_pending_for_test(
             &market,
             Vec::new(),
@@ -7621,6 +8037,25 @@ async fn polymarket_context_switch_rechecks_applied_time_after_delayed_fence() {
     discovery.current.end_ts_s = window.end_ts_s;
     discovery.current.candidate_start_ts_s = window.target_ts_s;
     discovery.current.candidate_end_ts_s = window.end_ts_s;
+    let first_verified_at_utc_ms = boundary_ms - 2;
+    let restart_fixed_identities = RecoveredPolymarketFixedIdentities {
+        current: Some(recovered_fixed_identity(
+            &discovery.current,
+            first_verified_at_utc_ms,
+        )),
+        next: None,
+    };
+    let mut replacement = discovery.clone();
+    let recovered_match = preserve_recovered_polymarket_fixed_identity_authority(
+        &restart_fixed_identities,
+        &mut replacement,
+    )
+    .unwrap();
+    assert_eq!(
+        replacement.current.fixed_identity_verified_at_utc_ms,
+        first_verified_at_utc_ms
+    );
+    assert!(restart_fixed_identities.current.is_some());
 
     let global_budget = InflightBudget::new();
     let mut runtime = PolymarketDrainRuntime::new(
@@ -7689,7 +8124,7 @@ async fn polymarket_context_switch_rechecks_applied_time_after_delayed_fence() {
     };
 
     let switch = switch_polymarket_context(
-        discovery.clone(),
+        replacement,
         &timeline,
         false,
         &mut runtime,
@@ -7711,6 +8146,8 @@ async fn polymarket_context_switch_rechecks_applied_time_after_delayed_fence() {
     assert_eq!(installed.unwrap(), PolymarketContextInstallOutcome::Expired);
     assert_eq!(timeline_calls.load(Ordering::SeqCst), 1);
     assert_eq!(context.discovery_snapshot().unwrap(), discovery);
+    assert!(restart_fixed_identities.current.is_some());
+    assert!(recovered_match.current);
     assert!(rx.try_recv().is_err());
 }
 
@@ -7895,6 +8332,7 @@ async fn clob_current_and_prefetched_assets_survive_three_legacy_silence_cycles_
             &mut control_rx,
             Duration::from_millis(10),
             Duration::from_millis(1),
+            &mut RecoveredPolymarketFixedIdentities::default(),
             production_polymarket_timeline_now,
         ),
     )
@@ -8199,6 +8637,7 @@ async fn polymarket_resolution_timeline_is_absolute_green() {
             &mut control_rx,
             Duration::ZERO,
             Duration::from_secs(1),
+            &mut RecoveredPolymarketFixedIdentities::default(),
             move || PolymarketTimelineNow {
                 utc_ms: paused_timeline_utc_ms(timeline_anchor, fake_start_ms),
                 monotonic: TokioInstant::now(),

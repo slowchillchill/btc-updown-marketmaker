@@ -139,7 +139,7 @@ pub use crate::inflight::{
 use crate::latency::{LatencyStats, QueueDurationTracker};
 use crate::manifest::SourceCoverage;
 use crate::market_discovery::{
-    BtcUpdownDiscovery, BtcUpdownMarketCandidate, DiscoveredBtcUpdownMarket,
+    BtcUpdownDiscovery, BtcUpdownMarketCandidate, CandidateRejectReason, DiscoveredBtcUpdownMarket,
     DiscoverySelectionError, discovery_windows, select_btc_updown_markets,
 };
 use crate::polymarket_market_metadata_layout::{
@@ -161,7 +161,9 @@ use crate::polymarket_orderbook_v3::{
     same_outcome_label,
 };
 use crate::polymarket_resolution_recovery::{
-    PolymarketRestartRecovery, RecoveredPolymarketPending, restore_polymarket_resolution_recovery,
+    PolymarketRestartRecovery, RecoveredPolymarketFixedIdentities,
+    RecoveredPolymarketFixedIdentity, RecoveredPolymarketPending,
+    restore_polymarket_resolution_recovery,
 };
 use crate::polymarket_sdk_runtime::{
     MarketSdkMessageReceiver, MarketSdkRuntime, RtdsRuntimeEvent, RtdsSdkRuntime, SdkStreamError,

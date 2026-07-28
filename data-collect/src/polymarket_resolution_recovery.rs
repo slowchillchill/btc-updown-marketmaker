@@ -18,7 +18,7 @@ use sha2::{Digest as _, Sha256};
 use time::OffsetDateTime;
 
 use crate::market_discovery::{
-    MarketWindow, validate_recovered_btc_updown_market_from_sdk_payload,
+    MarketWindow, discovery_windows, validate_recovered_btc_updown_market_from_sdk_payload,
 };
 use crate::polymarket_market_metadata_layout::{
     POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
@@ -103,6 +103,25 @@ impl MetadataLayout {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PolymarketRestartRecovery {
     pub pending: Vec<RecoveredPolymarketPending>,
+    pub fixed_identities: RecoveredPolymarketFixedIdentities,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RecoveredPolymarketFixedIdentities {
+    pub current: Option<RecoveredPolymarketFixedIdentity>,
+    pub next: Option<RecoveredPolymarketFixedIdentity>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoveredPolymarketFixedIdentity {
+    pub slug: String,
+    pub clob_market_id: String,
+    pub condition_id: String,
+    pub up_asset_id: String,
+    pub down_asset_id: String,
+    pub market_start_utc_ms: i64,
+    pub market_end_utc_ms: i64,
+    pub fixed_identity_verified_at_utc_ms: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -193,6 +212,65 @@ impl FixedIdentity {
             .saturating_add(FIRST_SLOT_DELAY_MS)
             .saturating_add(i64::from(ordinal.saturating_sub(1)).saturating_mul(SLOT_INTERVAL_MS))
     }
+
+    fn recovered(&self) -> RecoveredPolymarketFixedIdentity {
+        RecoveredPolymarketFixedIdentity {
+            slug: self.slug.clone(),
+            clob_market_id: self.clob_market_id.clone(),
+            condition_id: self.condition_id.clone(),
+            up_asset_id: self.up_asset_id.clone(),
+            down_asset_id: self.down_asset_id.clone(),
+            market_start_utc_ms: self.market_start_utc_ms,
+            market_end_utc_ms: self.market_end_utc_ms,
+            fixed_identity_verified_at_utc_ms: self.fixed_identity_verified_at_utc_ms,
+        }
+    }
+}
+
+fn select_restart_fixed_identity(
+    identities: &BTreeMap<String, FixedIdentity>,
+    window: &MarketWindow,
+    role: &str,
+) -> Result<Option<RecoveredPolymarketFixedIdentity>> {
+    let market_start_utc_ms = window.target_ts_s.saturating_mul(1_000);
+    let market_end_utc_ms = window.end_ts_s.saturating_mul(1_000);
+    let mut candidates = identities.values().filter(|identity| {
+        identity.slug == window.slug
+            || (identity.market_start_utc_ms == market_start_utc_ms
+                && identity.market_end_utc_ms == market_end_utc_ms)
+    });
+    let Some(identity) = candidates.next() else {
+        return Ok(None);
+    };
+    if candidates.next().is_some() {
+        return Err(invalid_data(format!(
+            "operator_intervention_required:Polymarket restart {role} fixed identity authority is not unique:slug={}",
+            window.slug
+        ))
+        .into());
+    }
+    if identity.slug != window.slug
+        || identity.market_start_utc_ms != market_start_utc_ms
+        || identity.market_end_utc_ms != market_end_utc_ms
+    {
+        return Err(invalid_data(format!(
+            "operator_intervention_required:Polymarket restart {role} fixed identity conflicts with canonical window:slug={}",
+            window.slug
+        ))
+        .into());
+    }
+    Ok(Some(identity.recovered()))
+}
+
+fn select_restart_fixed_identities(
+    identities: &BTreeMap<String, FixedIdentity>,
+    recovery_time_ms: i64,
+) -> Result<RecoveredPolymarketFixedIdentities> {
+    let windows = discovery_windows(recovery_time_ms);
+    Ok(RecoveredPolymarketFixedIdentities {
+        current: select_restart_fixed_identity(identities, &windows.current, "current")?,
+        next: select_restart_fixed_identity(identities, &windows.next, "next")?,
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -958,6 +1036,7 @@ pub fn restore_polymarket_resolution_recovery(
         )?;
         return Ok(PolymarketRestartRecovery {
             pending: Vec::new(),
+            fixed_identities: RecoveredPolymarketFixedIdentities::default(),
         });
     }
 
@@ -989,6 +1068,7 @@ pub fn restore_polymarket_resolution_recovery(
         }
         identities.insert(slug.clone(), identity);
     }
+    let fixed_identities = select_restart_fixed_identities(&identities, recovery_time_ms)?;
     reject_dual_metadata_layout_for_current_lifecycles(
         dataset_root,
         &days,
@@ -1134,7 +1214,10 @@ pub fn restore_polymarket_resolution_recovery(
         ))
         .into());
     }
-    Ok(PolymarketRestartRecovery { pending: recovered })
+    Ok(PolymarketRestartRecovery {
+        pending: recovered,
+        fixed_identities,
+    })
 }
 
 fn terminal_rows(records: &[MetadataRecord]) -> Vec<&MetadataRecord> {
@@ -3140,6 +3223,123 @@ mod tests {
                 .to_string();
             assert!(error.contains(expected), "{error}");
         }
+    }
+
+    #[test]
+    fn restart_recovery_returns_bounded_current_and_next_fixed_identities() {
+        let tmp = tempdir().unwrap();
+        let recovery_time = T + 60_000;
+        let next_slug = fixture_slug(E);
+        let next = discovery_authority_record(
+            2,
+            &next_slug,
+            CONDITION_2,
+            "clob-market-2",
+            E,
+            E + 300_000,
+            T - 60_000,
+        );
+        write_finalized_fixture(tmp.path(), recovery_time, &[base_record(1), next]);
+
+        let recovery = restore_polymarket_resolution_recovery(tmp.path(), recovery_time).unwrap();
+
+        assert!(recovery.pending.is_empty());
+        let current = recovery.fixed_identities.current.unwrap();
+        assert_eq!(current.slug, SLUG);
+        assert_eq!(current.fixed_identity_verified_at_utc_ms, T - 119_995);
+        let next = recovery.fixed_identities.next.unwrap();
+        assert_eq!(next.slug, next_slug);
+        assert_eq!(next.fixed_identity_verified_at_utc_ms, T - 59_995);
+    }
+
+    #[test]
+    fn restart_recovery_rejects_ambiguous_current_authority() {
+        let tmp = tempdir().unwrap();
+        let recovery_time = T + 60_000;
+        let competing = discovery_authority_record(
+            2,
+            &format!("{SLUG}-alias"),
+            CONDITION_2,
+            "clob-market-2",
+            T,
+            E,
+            T - 60_000,
+        );
+        write_finalized_fixture(tmp.path(), recovery_time, &[base_record(1), competing]);
+
+        let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("current fixed identity authority is not unique"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn restart_recovery_rejects_same_structure_with_different_first_fixed_time() {
+        let tmp = tempdir().unwrap();
+        let recovery_time = T + 60_000;
+        let mut changed_first_time = base_record(2);
+        changed_first_time.fixed_identity_verified_at_utc_ms += 1;
+        write_finalized_fixture(
+            tmp.path(),
+            recovery_time,
+            &[base_record(1), changed_first_time],
+        );
+
+        let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("Polymarket restart fixed identity conflict"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn restart_recovery_rejects_invalid_first_fixed_time() {
+        for fixed_identity_verified_at_utc_ms in [0, E] {
+            let tmp = tempdir().unwrap();
+            let recovery_time = T + 60_000;
+            let mut invalid = base_record(1);
+            invalid.fixed_identity_verified_at_utc_ms = fixed_identity_verified_at_utc_ms;
+            write_finalized_fixture(tmp.path(), recovery_time, &[invalid]);
+
+            let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
+                .unwrap_err()
+                .to_string();
+
+            assert!(
+                error.contains("fixed_identity") || error.contains("fixed identity is invalid"),
+                "fixed_identity_verified_at_utc_ms={fixed_identity_verified_at_utc_ms}:{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn recovered_next_can_become_current_without_restoring_runtime_role() {
+        let tmp = tempdir().unwrap();
+        let recovery_time = E + 60_000;
+        let next_slug = fixture_slug(E);
+        let next = discovery_authority_record(
+            1,
+            &next_slug,
+            CONDITION_2,
+            "clob-market-2",
+            E,
+            E + 300_000,
+            T - 60_000,
+        );
+        write_finalized_fixture(tmp.path(), recovery_time, &[next]);
+
+        let recovery = restore_polymarket_resolution_recovery(tmp.path(), recovery_time).unwrap();
+
+        assert!(recovery.pending.is_empty());
+        assert_eq!(recovery.fixed_identities.current.unwrap().slug, next_slug);
+        assert!(recovery.fixed_identities.next.is_none());
     }
 
     #[test]
