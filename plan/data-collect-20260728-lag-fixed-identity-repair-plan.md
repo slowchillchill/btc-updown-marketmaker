@@ -1,6 +1,6 @@
 # DC-INCIDENT-20260728-LAG-IDENTITY-REPAIR 计划
 
-> 状态：`APPROVED_EXECUTING`
+> 状态：`APPROVED_EXECUTING_STAGE6R_B2`
 >
 > 对应需求：`demand/data-collect-20260728-lag-fixed-identity-repair-demand.md`
 >
@@ -86,7 +86,8 @@
 - 任务 4.2：执行 1.9 GiB 包络的恢复资源验证和 isolated clean-root 两次启动测试。
   - 验证：bounded RSS、首次 identity 稳定、无 lag/deadlock。
 - 任务 4.3：最终 `gpt-5.6-sol/ultra` 独立审查。
-  - 验证：需求 9 项验收逐项有代码/测试证据，无未解决 finding。
+  - 验证：需求当时原有的 9 项验收逐项有代码/测试证据，无未解决 finding；后来新增
+    的验收 10 由阶段 6R 单独关闭。
 - 任务 4.4：commit/push 后从 clean commit 本地构建 release。
   - 验证：记录 commit、构建命令、binary 路径、SHA256、Build ID、GLIBC requirement、
     `--help` 和 `--version`。
@@ -103,14 +104,52 @@
   user unit。
   - 验证：MainPID 非零，`/proc/<pid>/exe` SHA 为新值，新数据根由新程序创建。
 
+## 阶段 6R：pending-only restart B2 修复
+
+- 任务 6R.1：先增加真实遗漏状态的失败测试。
+  - 测试：`recovered pending + current none + recovered current + fresh validation`
+    写一个 current snapshot、零 candidate；recovered next 随时间成为 current 时
+    结果相同。
+  - 测试：只有 synthetic discovery.next 命中 recovered next 时，无 recovered
+    authority 的 discovery.current 仍写严格 candidate。
+- 任务 6R.2：让既有 recovered immutable exact-match 在同一次比较中返回
+  fresh-current 角色结果。
+  - 验证：不新增第二 comparator、schema、marker、sidecar、恢复 map 或 validator；
+    mismatch 仍在 row admission 前 exit 76。
+- 任务 6R.3：修正 late rollover row-kind 路由。
+  - 步骤 6R.3.1：fresh current 命中 recovered current 或 recovered-next-to-current
+    时，复用 `switch_polymarket_context(... emit_current_metadata=true)`。
+  - 步骤 6R.3.2：snapshot 成功 admission/register 后消费 authority，并跳过
+    `candidate_to_active`。
+  - 步骤 6R.3.3：fresh current 未命中时继续走原 candidate，且只在 candidate 成功
+    admission/register 后消费匹配的 recovered next。
+- 任务 6R.4：修正安装失败重试一致性。
+  - 测试：subscription replace 可重试失败后，不留下
+    `current-without-authority`；pending 和已处理 pending evidence 保持，下一次仍可
+    重新 discovery 并恰好写一条 current snapshot。
+  - 测试：使用单调前进时钟；recovered current A 在安装前 `Expired` 时零
+    snapshot/candidate/consume 且 A/B authority 均保留，时间前进后 recovered next
+    B 成为 fresh current，成功写一条 snapshot 后才消费 B。不得让 A 通过倒退时钟
+    重新有效。
+  - 验证：不回滚已 admission 的 row，不新增 transaction/state machine。
+- 任务 6R.5：运行定向测试、相关 crate 测试、workspace 测试、clippy、fmt 和
+  diff 检查。
+  - 验证：普通 candidate equality negative、snapshot time negative、immutable
+    mismatch exit 76、pending-first subscription 和既有 FIFO/fence tests 全部通过。
+- 任务 6R.6：自审与 `gpt-5.6-sol/ultra` 独立阶段审查。
+  - 验证：需求第六节和验收 6/10 全部有代码与测试证据，无可执行 finding。
+- 完成门：commit/push 后从 clean commit 构建 release，按阶段 5 的相同简单边界再次
+  直接清空两个远端目录并重部署，然后重新进入阶段 6。
+
 ## 阶段 6：长跑验收
 
 - 任务 6.1：启动后验证六个逻辑 source/writer 任务健康；有合格事件的 source 对应
   counter、running/finalized 文件和 manifest 按各自合同推进，RSS 保持稳定。
   合法业务静默和稀疏 snapshot 不要求持续产行。
 - 任务 6.2：在当前部分验证日形成 finalized current/next identity 后执行一次受控
-  restart。
-  - 验证：PID 更新、`NRestarts` 符合受控动作、首次 verified time 不改写、继续写入。
+  restart；还必须先形成至少一个可恢复 pending。
+  - 验证：PID 更新、`NRestarts` 符合受控动作、首次 verified time 不改写、fresh
+    validation 前进、写 current snapshot 而非 candidate，并继续写入。
 - 任务 6.3：跨一次 UTC rollover。
   - 验证：旧日协调关闭、新日激活、唯一 receiver 无 Lagged、无 fence deadlock。
 - 任务 6.4：继续运行到产生一个完整 UTC 日并审计。

@@ -1,8 +1,10 @@
 # DC-INCIDENT-20260728-LAG-IDENTITY-REPAIR 需求
 
-> 状态：`APPROVED_EXECUTING`
+> 状态：`APPROVED_EXECUTING_STAGE6R_B2`
 >
-> 用户批准时间：2026-07-29
+> 用户首次批准时间：2026-07-29
+>
+> Stage 6R B2 修复批准时间：2026-07-29
 >
 > 对应计划：`plan/data-collect-20260728-lag-fixed-identity-repair-plan.md`
 >
@@ -11,7 +13,10 @@
 ## 一、目标
 
 修复 2026-07-28 数据采集器连续两次因 Polymarket SDK receiver lag
-退出、随后因 fixed identity 冲突以退出码 76 停止重启的问题，并在新的空数据根上
+退出、随后因 fixed identity 冲突以退出码 76 停止重启的问题；同时修复第一次
+clean-root 重部署后，pending-only 受控重启把已有 fixed authority 的 fresh current
+错误路由为 `candidate_to_active`、导致
+`candidate_to_active:fixed_identity_not_validation` 退出的问题，并在新的空数据根上
 重新部署后持续采集。
 
 本事项不补写缺失数据，不把 UTC28 故障日改写为健康训练日，也不兼容或迁移已经
@@ -90,11 +95,48 @@
    - market start/end。
 3. 多候选、任一 immutable 字段冲突、首次时间非法或 current/next authority 不唯一时
    继续 exit 76；不得放宽严格 fixed identity 校验。
-4. 不恢复旧 runtime role、动态状态、旧 pending 行、poll slot 或 terminal owner。
+4. 本节新增的 fixed-identity authority 不得被用来额外恢复旧 runtime role、动态
+   状态、pending 行、poll slot 或 terminal owner；既有 resolution-followup recovery
+   按其独立合同恢复仍在窗口内的 pending，不属于本节新增 authority。
 5. 本要求只保证新数据根未来 clean restart。旧 UTC27/UTC28 数据只在本地离线保留，
    不得重新作为部署后生产 recovery authority。
 
-## 六、数据与部署边界
+## 六、pending-only restart B2 路由
+
+1. recovered pending 必须继续先建立唯一 Polymarket market subscription；fresh
+   Gamma current discovery 保持异步，不得改成阻塞 pending subscription 的同步启动
+   门。
+2. recovered authority 与 fresh discovery 的 immutable exact match 继续只使用既有
+   canonical 比较逻辑。该次比较必须同时产出仅存在于内存和当前调用栈的
+   `fresh discovery.current matched` 路由结果；不得新增第二套 comparator、schema
+   字段、持久化 marker、sidecar、恢复 map 或第二状态机。
+3. fresh `discovery.current` 精确命中未消费的 recovered current，或精确命中随时间
+   已成为 current 的 recovered next 时：
+   - 写既有 V5 current `metadata_snapshot`；
+   - 保留首次 `fixed_identity_verified_at_utc`；
+   - 保存本次 fresh source receive、payload、digest 和
+     `row_evidence_validation_completed_at_utc`；
+   - 不再写 `candidate_to_active`。
+4. 只有 fresh `discovery.next` 命中 recovered next、但 fresh current 没有命中任何
+   recovered authority 时，current 仍是普通 late candidate；next 可写保留首次 fixed
+   time 的 snapshot，不得利用 next 的 recovered match 让 current 绕过 candidate
+   equality。
+5. fresh current 没有 recovered authority 时，既有
+   `source receive <= validation = fixed <= applied` candidate 合同和 validator
+   完全不变。不得把 equality 全局放宽为 `fixed <= validation`。
+6. 任一 immutable 字段冲突、authority 不唯一或首次 fixed time 非法时，继续在任何
+   snapshot/candidate admission 前 exit 76。
+7. context 安装在 subscription 或 metadata authority admission 完成前发生错误时，
+   不得留下无法重新进入 discovery 的 `current-without-authority`。失败处理必须保留
+   已恢复 pending 及其已处理 evidence，同时恢复 pre-switch current/next discovery
+   状态或提供语义等价的可靠重试；不得回滚或伪造已接纳的 pending row。
+8. recovered authority 只能在对应 snapshot 或 candidate 成功 admission 并注册为
+   source authority 后消费。`Expired`、subscription/processing error、metadata
+   validation/admission error 均不得提前消费。
+9. B2 不新增、删除或放宽 V3/V4/V5 validator；它只修正 restart rediscovery 的 row
+   kind 路由和失败重试一致性。
+
+## 七、数据与部署边界
 
 1. UTC28 故障现场必须先完整复制到：
    `/home/chillchill/new-datasets/2026-07-28-deploy-ec92bd3999cc/typed_raw/utc_day=2026-07-28`。
@@ -112,7 +154,7 @@
 6. 新数据根首次启动形成新的 lineage。启动当日若不是从 00:00Z 开始，只作为部分
    验证日，不作为完整健康训练日。
 
-## 七、验收标准
+## 八、验收标准
 
 1. UTC28 本地副本与远端 10 个文件逐路径、大小和 SHA 完全一致；9 个 Parquet 均可读，
    总计 1,345,977 行。
@@ -125,8 +167,11 @@
    收敛，不死锁、不建立第二 authority。
 5. 两次 source failure fixture 均把精确 receiver lag 作为 primary，把后续 writer
    shutdown 错误保留为 secondary。
-6. clean root 运行产生 current/next finalized identity 后受控重启；immutable identity
-   一致时首次 verified time 不变，冲突时仍 exit 76。
+6. clean root 运行必须先形成 recovered pending 及 finalized current/next identity，
+   再执行受控重启；recovered current 与 recovered-next-to-current 都各写一个
+   current snapshot、零 candidate，首次 verified time 不变且 fresh validation
+   前进。只有 next 命中 recovered next 的负例必须让无 recovered authority 的
+   current 继续走严格 candidate；immutable 冲突仍 exit 76。
 7. 全量 workspace 格式、编译和相关测试通过；独立阶段审查与最终审查均无未解决的
    可执行问题。
 8. 远端删除后只运行新 binary；服务启动成功、六个逻辑 source/writer 任务健康、
@@ -135,3 +180,8 @@
    snapshot 不要求人为持续产行，也不得仅因静默判为故障。
 9. 长跑至少覆盖一次受控重启和一次 UTC rollover；只有随后完整 UTC 日满足 closed、
    无故障 gap/drop/lag 和逐文件完整性时，才可判为健康训练日。
+10. subscription 安装失败后重试不得留下 `current-without-authority`、不得丢失
+    pending 或重复 candidate。`Expired` 测试必须使用单调前进的时钟：首次发现的
+    recovered current A 在安装前过期时零 row、零 consume，A/B authority 均保留；
+    时间继续前进后，原 recovered next B 成为 fresh current，并成功写入恰好一条
+    current snapshot 后才消费 B。不得让已过期的 A 通过倒退测试时钟重新有效。

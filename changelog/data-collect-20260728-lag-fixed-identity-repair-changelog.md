@@ -1,6 +1,6 @@
 # DC-INCIDENT-20260728-LAG-IDENTITY-REPAIR Changelog
 
-> 状态：`STAGE6_RESTART_FAILED_USER_DECISION_REQUIRED`
+> 状态：`STAGE6R_B2_APPROVED_IMPLEMENTATION_PENDING`
 >
 > 对应需求：`demand/data-collect-20260728-lag-fixed-identity-repair-demand.md`
 >
@@ -661,3 +661,33 @@
   `/home/ubuntu/btc-updown-marketmaker/data-collect` 后部署；保留现有 systemd unit，
   不做 migration、staged rename 或滚动替换，也不兼容本次已有 3 gap 的验证 root。
   用户决定前保持服务停止，不修改代码，不清空现场。
+
+## Stage 6R B2 独立审查与用户批准
+
+- 2026-07-29，三路 `gpt-5.6-sol/ultra` 子代理分别从故障链、metadata/validator
+  合同和状态/重试边界进行只读反证审查：
+  - 根因定位通过：recovered pending 令启动保持 pending-first 并跳过 initial
+    snapshot，随后已有 fixed authority 的 fresh current 被错误路由为普通
+    `candidate_to_active`；
+  - B2 语义通过：later current snapshot 已允许
+    `first fixed <= fresh validation`，普通 candidate equality 不得放宽；
+  - Critical finding 为 0；
+  - 实施前必须补齐两个 Important 边界。
+- Important 1：`RecoveredPolymarketFixedIdentityMatch.current/next` 表示 recovered
+  authority 槽位，不表示 fresh discovery role。B2 必须在既有 exact-match 的同一次
+  比较中产出 fresh-current 角色结果；不能使用 `matched.current || matched.next`、
+  `fixed != validation` 或 slug-only 作为代理。必须增加“只有 discovery.next 命中”
+  的 current-candidate 负例。
+- Important 2：现有 `install_polymarket_context` 先
+  `replace_discovery`，再等待 subscription 和 metadata admission。可重试安装错误
+  可能留下 `current-without-authority`，令下一轮跳过 rollover discovery。B2 必须用
+  最小失败恢复保持 pending/evidence，同时让 current/next 回到 pre-switch 状态或提供
+  等价可靠重试；`Expired` 和任何错误都不得提前消费 authority。
+- 上述两项不是新增业务校验：
+  - fresh-current 结果只是同一次 immutable exact-match 的路由输出；
+  - 安装失败处理只是状态一致性；
+  - 不新增或放宽 V3/V4/V5 validator、schema、marker、sidecar、恢复 map 或第二
+    状态机。
+- 用户已明确同意并批准按上述审查修订后的 B2 执行。此前的
+  `USER_DECISION_REQUIRED` 已解除；实现、测试、独立阶段审查、commit/push 和新
+  release 完成前，远端 service 继续保持停止，当前验证 root 不清空。
