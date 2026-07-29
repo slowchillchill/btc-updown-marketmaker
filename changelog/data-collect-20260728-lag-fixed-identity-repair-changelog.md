@@ -1,6 +1,6 @@
 # DC-INCIDENT-20260728-LAG-IDENTITY-REPAIR Changelog
 
-> 状态：`STAGE5_B2_REDEPLOY_COMPLETE_STAGE6_PENDING`
+> 状态：`STAGE6_CONTROLLED_RESTART_RUNNING_CONTENT_PENDING`
 >
 > 对应需求：`demand/data-collect-20260728-lag-fixed-identity-repair-demand.md`
 >
@@ -950,3 +950,53 @@
 - 三件套状态现同步为 `STAGE5_B2_REDEPLOY_COMPLETE_STAGE6_PENDING`。本阶段
   commit/push 后进入 Stage 6；当前仍不宣称受控重启、UTC rollover 或完整健康 UTC
   日已经通过。
+
+## Stage 6 B2 真实受控重启进行中
+
+- Stage 5 checkpoint commit
+  `e2350c5c89bc4b14a6bff6583151075f65030084` 已推送；进入 Stage 6 前工作树与
+  `origin/fix-rtds-silents` 一致。
+- 重启前 `2026-07-29T06:14:49.102533144Z`：
+  - PID `1229293` 从 `06:01:30Z` 持续 active，`NRestarts=0`；
+  - `/proc/PID/exe` SHA 与 B2 release 一致；
+  - memory current/peak 约 112.6/113.1 MiB；
+  - Polymarket market `.running` 为 12,725,513 bytes，journal 仍只有 Started。
+- `systemctl --user restart` 于 `06:15:08.369175501Z` 发起、
+  `06:15:08.868052894Z` 返回。旧 PID 在 `06:15:08.853342Z` 输出
+  `coordinated_shutdown_complete`；新 PID `1231184` 于
+  `06:15:08.865523Z` 启动，`NRestarts=0`，`/proc` 路径和 SHA 均正确。
+- 旧 PID 协调退出形成六个 `shutdown_finalize` Parquet，共 378,888 rows：
+  - Binance aggTrade 6,112；
+  - Binance depth snapshot 1；
+  - Binance depth update 8,152；
+  - Polymarket market 363,815；
+  - Polymarket metadata 13；
+  - RTDS 795。
+  六个文件的实际 SHA256 均与 manifest 精确一致；manifest 保持
+  `open / active / reactivated_within_day=true / gaps=[]`，所有 source
+  `lag_events=0`、`dropped_rows=0`。
+- finalized metadata 证明本次不是未形成 pending 的短时重启：
+  - market `btc-updown-5m-1785305400` 于 `06:15:00.004Z` 进入仍未 terminal 的
+    `resolution_pending`，首次 fixed time 为 `06:05:00.049Z`；
+  - recovered current `btc-updown-5m-1785305700` 的首次 fixed time 为
+    `06:10:00.046Z`，于 `06:15:00.004Z` 从 next 提升为 current；
+  - recovered next `btc-updown-5m-1785306000` 的首次 fixed time 为
+    `06:15:00.053Z`。
+- 到 `06:19:18.924189966Z`，新 PID 保持 `active/running`、`NRestarts=0`，
+  memory current/peak 约 88.5/89.0 MiB；Polymarket market
+  `06-part-1.parquet.running` 已增长至 4,454,831 bytes。journal 只有本次受控停止、
+  `coordinated_shutdown_complete` 和新启动记录，没有
+  `candidate_to_active:fixed_identity_not_validation`、receiver lag、backpressure、
+  raw-after-close、panic 或其他 source error。
+- 旧 B1 在相同 pending-only 路径重启后约两秒即失败；本次新 PID 已持续运行并继续
+  写入，证明 runtime 失败门已通过。但重启后的 metadata
+  `06-part-1.parquet.running` 尚未自然 finalize，当前不能逐行确认 current snapshot、
+  零 candidate、首次 fixed time 保留与 fresh validation 前进。
+- 为避免第二次人工重启这种不必要的额外扰动，保持服务连续运行，等待该小时文件自然
+  finalize 后再做上述内容验收。UTC rollover 与完整 UTC 日仍未通过，三件套状态只
+  推进为 `STAGE6_CONTROLLED_RESTART_RUNNING_CONTENT_PENDING`。
+- `gpt-5.6-sol/ultra` 独立 checkpoint 审查逐文件复核六个 Parquet 的 SHA、
+  PAR1/footer rows、metadata 行级 pending/current/next 关系、重启时间线、新 PID
+  存活与 journal，结论为 `PASS — Critical 0 / Major 0 / Minor 0`。审查确认没有
+  越界把重启前 finalized metadata 当作重启后内容证据，也没有加入第二次重启或额外
+  校验流程。
