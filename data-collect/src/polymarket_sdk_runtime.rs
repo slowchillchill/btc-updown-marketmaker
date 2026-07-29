@@ -16,6 +16,8 @@ use polymarket_client_sdk_v2::ws::config::Config;
 use polymarket_client_sdk_v2::ws::connection::{
     ConnectionFault, ConnectionManager, ConnectionState,
 };
+#[cfg(test)]
+use tokio::sync::oneshot;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
@@ -223,6 +225,30 @@ impl MarketSdkRuntime {
         test_hooks: MarketActorTestHooks,
     ) -> Result<Self, SdkStreamError> {
         Self::new_inner(endpoint, config, Some(test_hooks))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_before_ack_pause(
+        endpoint: String,
+        config: Config,
+        generation: u64,
+        revision: u64,
+        reached: oneshot::Sender<()>,
+        resume: oneshot::Receiver<()>,
+    ) -> Result<Self, SdkStreamError> {
+        Self::new_with_test_hooks(
+            endpoint,
+            config,
+            MarketActorTestHooks {
+                before_apply: None,
+                before_ack: Some(MarketActorPause {
+                    generation,
+                    revision,
+                    reached: Some(reached),
+                    resume: Some(resume),
+                }),
+            },
+        )
     }
 
     fn new_inner(

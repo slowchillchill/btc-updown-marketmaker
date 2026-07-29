@@ -127,12 +127,26 @@ clean-root 重部署后，pending-only 受控重启把已有 fixed authority 的
 6. 任一 immutable 字段冲突、authority 不唯一或首次 fixed time 非法时，继续在任何
    snapshot/candidate admission 前 exit 76。
 7. context 安装在 subscription 或 metadata authority admission 完成前发生错误时，
-   不得留下无法重新进入 discovery 的 `current-without-authority`。失败处理必须保留
-   已恢复 pending 及其已处理 evidence，同时恢复 pre-switch current/next discovery
-   状态或提供语义等价的可靠重试；不得回滚或伪造已接纳的 pending row。
+   不得留下无法可靠重试的 `current-without-authority` 或 `next-without-authority`。
+   subscription 尚未开始前失败时恢复 pre-switch current/next；subscription 已开始
+   后可能已有目标 row/evidence 被接纳，不得回滚这些事实。此时 context switch 必须
+   按同一 row 路由提交 current snapshot、严格 current candidate 或新增 next
+   snapshot，再返回原错误；外层重连只重新订阅且不得重复 metadata。普通冷启动
+   subscription 失败在同一 UTC 日内保持零 metadata；后续外层重连成功后，必须对
+   缺失的 current 或 next authority 恰好补写一次 snapshot，再推进已越过的 market
+   boundary。若重连前到达 UTC day fence，则按用户批准的窄范围例外，只对
+   `metadata_received_utc_ms < day_boundary_utc_ms` 的旧日 Gamma evidence 在旧日
+   关闭前补写 snapshot；只有 current/next authority 随后完整时才推进 boundary，
+   不得在旧日关闭后回写。属于新日的 Gamma evidence 不得写入或 defer 到旧日；
+   context 必须原样跨过 seal/resume，成功重订阅后在新日恰好补写一次 snapshot。
+   initial discovery 与 fence 同时 ready 时必须由 fence 优先。首次 discovery 在
+   subscription 开始前已 `Expired` 时，清除未安装的 current/next 并重新 discovery，
+   同时保留 recovered authority。
 8. recovered authority 只能在对应 snapshot 或 candidate 成功 admission 并注册为
-   source authority 后消费。`Expired`、subscription/processing error、metadata
-   validation/admission error 均不得提前消费。
+   source authority 后消费；本实现进一步采用保守门：只有完整 context switch
+   成功才消费。`Expired`、subscription/processing error、metadata
+   validation/admission/register error 均保留 recovered 槽位；错误路径为保持
+   context 一致性而已提交的 authority row 不触发消费。
 9. B2 不新增、删除或放宽 V3/V4/V5 validator；它只修正 restart rediscovery 的 row
    kind 路由和失败重试一致性。
 
@@ -172,8 +186,11 @@ clean-root 重部署后，pending-only 受控重启把已有 fixed authority 的
    current snapshot、零 candidate，首次 verified time 不变且 fresh validation
    前进。只有 next 命中 recovered next 的负例必须让无 recovered authority 的
    current 继续走严格 candidate；immutable 冲突仍 exit 76。
-7. 全量 workspace 格式、编译和相关测试通过；独立阶段审查与最终审查均无未解决的
-   可执行问题。
+7. 全量 workspace 格式、编译和相关测试通过；唯一允许精确排除的既有测试为
+   `four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second`
+   在 12:00Z 前运行时把当日 12:00Z receive 当成未来的时间段依赖夹具。该测试不在
+   B2 diff 中，排除后其余 workspace 测试必须全部通过；独立阶段审查与最终审查均无
+   未解决的可执行问题。
 8. 远端删除后只运行新 binary；服务启动成功、六个逻辑 source/writer 任务健康、
    有合格事件的 source 按各自合同推进、内存稳定，且无 receiver
    lag/backpressure/raw-after-close/fixed-identity conflict。合法业务静默或稀疏
@@ -185,3 +202,8 @@ clean-root 重部署后，pending-only 受控重启把已有 fixed authority 的
     recovered current A 在安装前过期时零 row、零 consume，A/B authority 均保留；
     时间继续前进后，原 recovered next B 成为 fresh current，并成功写入恰好一条
     current snapshot 后才消费 B。不得让已过期的 A 通过倒退测试时钟重新有效。
+    冷启动 subscription failure 还必须覆盖跨普通 market boundary 后成功重订阅；
+    UTC day fence 必须分别覆盖旧日 evidence 在关闭前补齐 snapshot，以及新日
+    evidence 零旧日 row/零 defer、seal/resume 后重订阅恰好补一条 snapshot。
+    initial discovery 与 fence 同时 ready 的确定性测试必须证明 fence 先 reply，
+    resume 后才返回 discovery。

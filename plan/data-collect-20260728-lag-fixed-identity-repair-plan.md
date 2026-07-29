@@ -118,15 +118,38 @@
     mismatch 仍在 row admission 前 exit 76。
 - 任务 6R.3：修正 late rollover row-kind 路由。
   - 步骤 6R.3.1：fresh current 命中 recovered current 或 recovered-next-to-current
-    时，复用 `switch_polymarket_context(... emit_current_metadata=true)`。
-  - 步骤 6R.3.2：snapshot 成功 admission/register 后消费 authority，并跳过
-    `candidate_to_active`。
-  - 步骤 6R.3.3：fresh current 未命中时继续走原 candidate，且只在 candidate 成功
-    admission/register 后消费匹配的 recovered next。
+    时，使用 `CurrentSnapshot` 路由。
+  - 步骤 6R.3.2：snapshot admission/register 且完整 switch 成功后消费 authority，
+    并跳过 `candidate_to_active`。
+  - 步骤 6R.3.3：fresh current 未命中时继续走原 candidate，且只在 candidate
+    admission/register 与完整 switch 均成功后消费匹配的 recovered next。
 - 任务 6R.4：修正安装失败重试一致性。
-  - 测试：subscription replace 可重试失败后，不留下
-    `current-without-authority`；pending 和已处理 pending evidence 保持，下一次仍可
-    重新 discovery 并恰好写一条 current snapshot。
+  - 步骤 6R.4.1：普通冷启动 subscription 失败继续零 metadata；context switch
+    一旦开始 subscription，不回滚可能已接纳的 row/evidence，而按调用栈内
+    `ExistingCurrent / CurrentSnapshot / CurrentCandidate` 路由补齐新 context 的
+    current/next authority 后返回原错误。
+  - 测试：subscription ack 前发生可重试终止时，recovered current 写一条 snapshot，
+    普通 late current 写一条严格 candidate，只新增 next 时只写 next snapshot；
+    pending 和已处理 pending evidence 保持。新连接只重新订阅，不重复 metadata。
+  - 测试：普通冷启动首次 subscription 失败时零 metadata 且不消费 recovered 槽位；
+    即使已跨普通 market boundary，外层重连成功后也只补写一条缺失 current
+    snapshot，再推进 boundary 并消费对应 recovered 槽位。
+  - 步骤 6R.4.2：UTC day fence 遇到无 authority 的冷启动 context 时，只对
+    `metadata_received_utc_ms < day_boundary_utc_ms` 的旧日 evidence 复用同一缺失
+    metadata 补写；authority 完整后才执行既有 boundary transition。新日 evidence
+    保持 context，不写入或 defer 到旧日；seal/resume 后由成功重订阅在新日补写。
+  - 测试：day fence reply 前恰好 admission 一条旧日 current snapshot，随后
+    current-to-pending transition 进入既有 rollover defer；无 UTC day regression。
+  - 测试：新日 missing current 的旧日 fence reply 成功，旧日零 snapshot、零
+    transition、零 deferred ingress；seal/activation/resume 后首次重订阅恰好写一条
+    current snapshot 并消费 recovered authority。
+  - 步骤 6R.4.3：initial discovery 与 fence 同时 ready 时，生产 select 明确
+    control-first；不新增测试 pause 或生产状态。
+  - 测试：ready discovery 与已排队 fence 同轮就绪时，先收到 fence reply，resume
+    前 discovery future 不返回，resume 后返回同一 discovery。
+  - 步骤 6R.4.4：首次 discovery 在 subscription 前已 `Expired` 时，清除未安装
+    current/next 后重新 discovery；recovered authority 不消费。
+  - 验证：错误返回不消费 recovered 槽位；完整 switch 成功后才消费。
   - 测试：使用单调前进时钟；recovered current A 在安装前 `Expired` 时零
     snapshot/candidate/consume 且 A/B authority 均保留，时间前进后 recovered next
     B 成为 fresh current，成功写一条 snapshot 后才消费 B。不得让 A 通过倒退时钟
@@ -136,6 +159,8 @@
   diff 检查。
   - 验证：普通 candidate equality negative、snapshot time negative、immutable
     mismatch exit 76、pending-first subscription 和既有 FIFO/fence tests 全部通过。
+  - 例外：当日 12:00Z 前运行时，精确排除既有动态 12:00Z receive 负载夹具；记录
+    原始失败并要求其余 workspace 测试全部通过，不修改 B2 生产代码掩盖该夹具。
 - 任务 6R.6：自审与 `gpt-5.6-sol/ultra` 独立阶段审查。
   - 验证：需求第六节和验收 6/10 全部有代码与测试证据，无可执行 finding。
 - 完成门：commit/push 后从 clean commit 构建 release，按阶段 5 的相同简单边界再次

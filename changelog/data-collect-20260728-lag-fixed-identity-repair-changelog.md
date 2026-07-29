@@ -1,6 +1,6 @@
 # DC-INCIDENT-20260728-LAG-IDENTITY-REPAIR Changelog
 
-> 状态：`STAGE6R_B2_APPROVED_IMPLEMENTATION_PENDING`
+> 状态：`STAGE6R_B2_COMPLETE_RELEASE_PENDING`
 >
 > 对应需求：`demand/data-collect-20260728-lag-fixed-identity-repair-demand.md`
 >
@@ -691,3 +691,150 @@
 - 用户已明确同意并批准按上述审查修订后的 B2 执行。此前的
   `USER_DECISION_REQUIRED` 已解除；实现、测试、独立阶段审查、commit/push 和新
   release 完成前，远端 service 继续保持停止，当前验证 root 不清空。
+
+## Stage 6R B2 实现与自审
+
+- 唯一生产编译链再次核实为
+  `lib.rs -> runtime.rs -> live_runtime.rs -> live_runtime/polymarket_source.rs`；
+  `live_runtime.rs` 根模块只声明并导入拆分后的子模块，不存在第二套旧
+  Polymarket source owner。本次只修改该实际编译子模块与
+  `polymarket_sdk_runtime.rs` 的 `#[cfg(test)]` seam。
+- recovered immutable exact-match 仍只有原 comparator；其返回值新增
+  `fresh discovery.current` 命中 recovered current 或 recovered next 的调用栈内
+  角色结果。V3/V4/V5 validator、schema、discovery immutable 比较和普通 candidate
+  equality 均未修改。
+- late rollover 改为调用栈内
+  `ExistingCurrent / CurrentSnapshot / CurrentCandidate` 三态 row 路由：
+  - recovered current 或 recovered-next-to-current 写 current snapshot；
+  - 普通 late current 写既有严格 candidate；
+  - 只附加 next 时不重复 current，只写 next snapshot。
+- 首次实现曾把“subscription error 后提交 metadata”错误地扩展到普通冷启动；
+  `full_runtime_cross_platform_degradation_converges_at_run_deadline_and_finalizes_rows`
+  以“CLOB 不可用却多出 1 条 metadata”真实检出。修订后冷启动恢复原语义：失败时
+  在同一 UTC 日内零 metadata；后续外层重连成功时只补写缺失的 current/next
+  snapshot。只有 context switch 在 subscription 已开始后提交新 context 对应
+  authority，再返回原 retryable error。
+- 不能在 subscription error 后盲目回滚：`before_ack` fixture 证明 subscribe 已发送、
+  ack 尚未发布时，fresh target Book 已可经唯一 receiver 被接纳；同一 drain 还可能
+  更新 pending/terminal evidence。最终实现保留这些事实并补齐 authority，外层新
+  连接只重新订阅，不需要 marker、sidecar、恢复 map 或第二状态机。
+- 错误返回一律保留 recovered 槽位；只有完整 context switch 成功才消费。该保守门
+  明确落实“subscription/processing/metadata error 不得提前消费”，同时不影响已
+  注册 authority 保证 context 可重试。
+- `register_source_authority` 沿用全部既有业务校验，只把最终 bounds 检查改为事务性：
+  检查失败恢复原 vector，防止错误返回后留下假注册状态。pre-subscription
+  `desired_assets` 失败同样只恢复本次替换的 current/next、early claim 和 authority，
+  pending 及其已处理 evidence 保持。
+- 当前验证：
+  - Polymarket source 模块：`110 passed; 0 failed`；
+  - recovered current/next 正例、next-only 负例、Expired A->B、pre-subscription
+    rollback、三类 ack-before-terminal 路由、冷启动失败后单次 snapshot 补写及
+    只重订阅不重复 metadata 均通过；
+  - 全量退化场景恢复为零 fabricated metadata；
+  - `cargo check -p data-collect --all-targets`、`cargo clippy -p data-collect
+    --all-targets -- -D warnings`、`cargo fmt --all` 与 `git diff --check` 通过。
+- 排除下述既有时间段依赖夹具后，`cargo test -p data-collect --tests` 的库测试结果为
+  `384 passed; 0 failed; 1 ignored; 1 filtered out`，全部 integration contract tests
+  通过。
+- crate 未排除运行的唯一剩余失败是既有负载测试把运行当日 `12:00:00Z` 设为
+  receive；在 12:00Z 前执行时，该值晚于真实 admission，触发
+  `invalid_real_admission_clock` 并等待负载完成超时。该测试及其动态时间夹具不在
+  B2 diff 中，本事项不顺手修改；另一个最初失败的退化测试已由上述范围收窄修复。
+- 两轮实现中间审查发现并推动修正了普通 candidate、next-only attach 和冷启动三条
+  错误边界；当前仍须完成最终 `gpt-5.6-sol/ultra` 独立阶段审查，审查通过后才
+  commit/push 和构建 release。
+
+## Stage 6R B2 最终审查发现与 UTC 日界决策
+
+- 最终三路只读审查确认：生产模块 authority 唯一、没有旧实现旁路，没有新增
+  validator/schema/shadow comparator；同时发现冷启动失败跨 boundary 的遗漏。
+- 同一 UTC 日内若 current/next 尚无 source authority，outer recovery 不再推进
+  market boundary，也不让已过期 current 形成零延迟忙循环；成功重订阅后复用既有
+  缺失 metadata 补写，再执行 boundary transition。
+- UTC day fence 不能只等待：旧日关闭后补 snapshot 会被既有 `RawDayGate` 以
+  `raw event UTC day regressed` 正确拒绝。用户已批准推荐方案：在旧日关闭前补写
+  真实 Gamma snapshot，再推进 boundary；这是普通冷启动“失败零 metadata”的唯一
+  窄范围封盘例外。
+- 首次 discovery 在 subscription 前已 `Expired` 时不保留未安装 current/next，
+  而是清除后重新 discovery；recovered authority 保留。
+- 最小性审查提出的冗余已删除：`fresh_current` 只保留 bool，不再保存无消费方的
+  recovered 槽位枚举；重复 classifier 单测删除，其必要负例升级为
+  `discovery.next` 命中 recovered next 的真实 candidate + next snapshot 组合测试。
+- before-ack 并发夹具增加统一外层 timeout；冷启动跨 market boundary 测试改用已
+  完成的过去窗口和注入 actor clock，不依赖 100ms 墙钟调度。
+- 当前新增定向结果：
+  - 冷启动失败跨 market boundary 后重订阅、snapshot、transition：通过；
+  - UTC day fence 旧日 snapshot 后 transition defer：通过；
+  - next-only recovered match 仍写严格 current candidate：通过；
+  - initial `Expired` 清除未安装 context 且不消费 recovered authority：通过；
+  - pending-only before-ack 竞态及统一 timeout：通过。
+- 最终全量测试命令为
+  `cargo test -p data-collect --tests -- --test-threads=1 --skip four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second`：
+  library `384 passed; 0 failed; 1 ignored; 1 filtered out`，所有 integration
+  contract tests 通过。曾尝试的 `cargo test --workspace --all-targets -- ...`
+  已先完成同一批 library/integration tests，随后仅因自定义 bench
+  `polymarket_storage_ab_probe` 不接受 test-harness 参数而返回非零；这不是代码或测试
+  失败，bench 的编译已由 `cargo check/clippy --all-targets` 覆盖，因此不修改既有
+  probe CLI。
+
+## Stage 6R B2 新旧 UTC 日 evidence 竞态与批准修正
+
+- 最后一轮正确性反证发现 1 个 Important：initial discovery 与已排队 UTC fence
+  同时 ready 时，原随机 select 可能先返回 discovery。两层 current 检查会排除已
+  过期的旧日 23:55 market，因此能留下的是
+  `metadata_received_utc_ms >= day_boundary_utc_ms` 的新日 current。
+- 原实现会在旧日 fence 无条件补写所有 missing snapshot。新日 row 会被既有
+  `RawDayGate` 正确 defer，而 source-authority admission 又必须把 Deferred 视为
+  未接纳；结果是 fence reply 失败并令 source 退出。原旧日测试只覆盖
+  `metadata_received_utc_ms < boundary`，未覆盖该竞态。
+- 用户已批准最小修正：
+  - fence 前只补写 source receive 严格早于 boundary 的旧日 missing snapshot；
+  - 补写后重新检查 current/next authority 完整性，只有完整才推进 boundary；
+  - 新日 context 不写入或 defer 到旧日，完成 seal/resume 后由成功重订阅在新日
+    恰好补写一次 snapshot；
+  - initial discovery 的同就绪仲裁明确 control-first。
+- 实现没有增加 schema、validator、marker、状态机或测试 pause。缺失 metadata
+  helper 只增加调用方提供的 UTC fence 上界；普通重订阅仍走无上界的原路径。
+- 新增确定性测试结果：
+  - 旧日 missing current：fence reply 前 snapshot，随后既有 boundary transition，
+    通过；
+  - 新日 missing current：旧日零 row、零 defer，seal/activation/resume 后首次
+    重订阅恰好一条 snapshot并消费 recovered authority，通过；
+  - ready discovery 与已排队 fence：fence 先 reply、resume 前 discovery 不返回、
+    resume 后返回同一 discovery，通过。
+- 修正后验证：
+  - Polymarket source 模块：`112 passed; 0 failed`；
+  - `cargo test -p data-collect --tests -- --test-threads=1 --skip
+    four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second`：
+    library `386 passed; 0 failed; 1 ignored; 1 filtered out`，所有 integration
+    contract tests 通过；
+  - `cargo check -p data-collect --all-targets`、`cargo clippy -p data-collect
+    --all-targets -- -D warnings`、`cargo fmt --all -- --check` 和
+    `git diff --check` 通过。
+- 当前仍须完成最新冻结 diff 的最终三路独立复审；复审清零后才 commit/push。
+
+## Stage 6R B2 最终阶段审查闭环
+
+- 最新冻结源码 hash：
+  - `live_runtime/polymarket_source.rs`：
+    `33b8cbad83ca528483019be26f0771dbec660296`；
+  - `live_runtime/tests/polymarket_source.rs`：
+    `d207ca54a2a3eb716e28013bf08a0a5b0c62810a`；
+  - `polymarket_sdk_runtime.rs`：
+    `3ff05f12e00efaddebf94cf756e61cad555b1863`。
+- 三路 `gpt-5.6-sol/ultra` 最终只读阶段审查全部通过：
+  - 正确性：Critical 0 / Important 0 / Minor 0；
+  - 最小性：Critical 0 / Important 0 / Minor 0；
+  - 需求、计划、changelog 与测试合同：Critical 0 / Important 0 / Minor 0。
+- 正确性审查额外反证确认：
+  - `metadata_received_utc_ms == day_boundary_utc_ms` 属于新日，严格 `< boundary`
+    才能补入旧日；
+  - mixed current/next 只补旧日 evidence，任一 authority 缺失时完整性门阻止
+    boundary transition；resume 后无上界的普通重订阅补齐，再由主循环推进；
+  - control-first 同就绪仲裁确定，seal/resume 后新日只有一条 snapshot，成功后才
+    consume recovered authority。
+- 最小性审查确认没有新增 validator、shadow comparator、第二 discovery 实现、
+  marker、持久状态或第二状态机；generic Future core 与 source-receive 上界均只有
+  本事项的必要消费方。
+- Stage 6R B2 已满足需求与计划完成门。下一步是 commit/push，再从 clean commit
+  构建并记录新 release；完成前远端 service 继续保持停止。

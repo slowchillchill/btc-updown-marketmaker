@@ -300,6 +300,56 @@ async fn polymarket_source_spec_uses_private_gamma_endpoint_and_millisecond_dead
 }
 
 #[tokio::test]
+async fn initial_discovery_and_day_fence_ready_together_processes_fence_first() {
+    let boundary_utc_ms: i64 = 1_783_468_800_000;
+    let mut discovery = test_btc_discovery();
+    discovery.current.start_ts_s = boundary_utc_ms.div_euclid(1_000);
+    discovery.current.end_ts_s = discovery.current.start_ts_s.saturating_add(300);
+    discovery.current.candidate_start_ts_s = discovery.current.start_ts_s;
+    discovery.current.candidate_end_ts_s = discovery.current.end_ts_s;
+    discovery.current.slug = format!("btc-updown-5m-{}", discovery.current.candidate_start_ts_s);
+    refresh_test_discovery_evidence(&mut discovery.current, boundary_utc_ms.saturating_add(1));
+    discovery.next = None;
+    discovery.relation = None;
+    let expected_slug = discovery.current.slug.clone();
+
+    let (control_tx, mut control_rx) = mpsc::channel(POLYMARKET_CONTROL_CHANNEL_CAPACITY);
+    let (resume_tx, resume_rx) = oneshot::channel();
+    let (reply_tx, reply_rx) = oneshot::channel();
+    control_tx
+        .send(PolymarketSourceControl::Fence {
+            stop_after_fence: false,
+            day_boundary_utc_ms: Some(boundary_utc_ms),
+            resume_after_barrier: Some(resume_rx),
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+
+    let selected = tokio::spawn(async move {
+        select_initial_polymarket_context(std::future::ready(Ok(discovery)), &mut control_rx).await
+    });
+    timeout(Duration::from_secs(1), reply_rx)
+        .await
+        .expect("ready day fence must be acknowledged before ready discovery")
+        .unwrap()
+        .unwrap();
+    assert!(!selected.is_finished());
+    resume_tx.send(()).unwrap();
+    let selected = timeout(Duration::from_secs(1), selected)
+        .await
+        .expect("initial discovery must resume after the day fence")
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(selected.current.slug, expected_slug);
+    assert_eq!(
+        selected.current.metadata_received_utc_ms,
+        Some(boundary_utc_ms.saturating_add(1))
+    );
+}
+
+#[tokio::test]
 async fn initial_fresh_gamma_identity_conflicts_with_recovered_authority_exit_76() {
     let until_boundary_ms = 300_000_i64 - now_ms().rem_euclid(300_000);
     if until_boundary_ms <= 2_000 {
@@ -407,6 +457,190 @@ async fn initial_fresh_gamma_identity_conflicts_with_recovered_authority_exit_76
             "{case}:{error}"
         );
         server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn pending_only_restart_exact_current_uses_snapshot_for_either_recovered_slot() {
+    for recovered_slot in ["current", "next"] {
+        let until_boundary_ms = 300_000_i64 - now_ms().rem_euclid(300_000);
+        if until_boundary_ms <= 2_000 {
+            sleep(Duration::from_millis(
+                u64::try_from(until_boundary_ms + 10).unwrap(),
+            ))
+            .await;
+        }
+        let windows = discovery_windows(now_ms());
+        let recovered_fixed_at_utc_ms = windows.current.target_ts_s.saturating_mul(1_000) - 10;
+        let gamma_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gamma_endpoint = format!("http://{}", gamma_listener.local_addr().unwrap());
+        let gamma_body = gamma_market_response_for_window(&windows.current);
+        let gamma_server = tokio::spawn(async move {
+            let (mut socket, _) = gamma_listener.accept().await.unwrap();
+            read_loopback_http_request(&mut socket).await.unwrap();
+            write_loopback_http_response(&mut socket, "200 OK", &gamma_body).await;
+        });
+
+        let counters = Arc::new(GammaRecoveryLoopbackCounters::default());
+        let (clob_endpoint, clob_server) = silent_clob_loopback(counters).await;
+        let mut pending_market = test_btc_discovery().current;
+        pending_market.id = "recovered-pending".to_owned();
+        pending_market.slug = format!(
+            "btc-updown-5m-{}",
+            windows.current.target_ts_s.saturating_sub(300)
+        );
+        pending_market.condition_id =
+            "0x0000000000000000000000000000000000000000000000000000000000000003".to_owned();
+        pending_market.up_asset_id = "201".to_owned();
+        pending_market.down_asset_id = "202".to_owned();
+        pending_market.start_ts_s = windows.current.target_ts_s.saturating_sub(300);
+        pending_market.end_ts_s = windows.current.target_ts_s;
+        pending_market.candidate_start_ts_s = pending_market.start_ts_s;
+        pending_market.candidate_end_ts_s = pending_market.end_ts_s;
+        let pending_evidence_received_at_utc_ms =
+            pending_market.start_ts_s.saturating_mul(1_000) + 1;
+        refresh_test_discovery_evidence(&mut pending_market, pending_evidence_received_at_utc_ms);
+        let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+            fixed_identities: RecoveredPolymarketFixedIdentities::default(),
+            pending: vec![recovered_pending_for_test(
+                &pending_market,
+                vec![1, 2, 3, 4, 5],
+                Vec::new(),
+                6,
+            )],
+        })
+        .unwrap()
+        .unwrap();
+        let recovered_identity = RecoveredPolymarketFixedIdentity {
+            slug: windows.current.slug.clone(),
+            clob_market_id: "gamma-current".to_owned(),
+            condition_id: "0x0000000000000000000000000000000000000000000000000000000000000002"
+                .to_owned(),
+            up_asset_id: "101".to_owned(),
+            down_asset_id: "102".to_owned(),
+            market_start_utc_ms: windows.current.target_ts_s.saturating_mul(1_000),
+            market_end_utc_ms: windows.current.end_ts_s.saturating_mul(1_000),
+            fixed_identity_verified_at_utc_ms: recovered_fixed_at_utc_ms,
+        };
+        let mut recovered = match recovered_slot {
+            "current" => RecoveredPolymarketFixedIdentities {
+                current: Some(recovered_identity),
+                next: None,
+            },
+            "next" => RecoveredPolymarketFixedIdentities {
+                current: None,
+                next: Some(recovered_identity),
+            },
+            _ => unreachable!(),
+        };
+
+        let global_budget = InflightBudget::new();
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        install_active_raw_day_gate(&stats, now_ms()).await;
+        let mut runtime = PolymarketDrainRuntime::new(
+            clob_endpoint,
+            bounded_ws_config(),
+            global_budget.clone(),
+            stats.raw_day_gate().unwrap(),
+        )
+        .unwrap();
+        let (event_tx, mut event_rx) = mpsc::channel(64);
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let sink = SourceEventSink {
+            tx: event_tx,
+            gaps: Arc::clone(&gaps),
+            source_queue_backpressure: stats,
+            inflight_budget: global_budget,
+            enqueue_lock: Arc::new(AsyncMutex::new(())),
+        };
+        let (_control_tx, mut control_rx) = mpsc::channel(POLYMARKET_CONTROL_CHANNEL_CAPACITY);
+        let mut resolution_poll_tasks = JoinSet::new();
+        let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
+        let gamma = GammaClient::new(&gamma_endpoint).unwrap();
+
+        timeout(
+            Duration::from_secs(2),
+            collect_polymarket_single_receiver(
+                None,
+                &mut context,
+                &mut resolution_poll_tasks,
+                &sink,
+                &CollectorIdentity {
+                    host_id: "collector-restart".to_owned(),
+                    region: "local-test".to_owned(),
+                },
+                Some(now_ms() + 750),
+                Instant::now(),
+                &mut runtime,
+                &gamma,
+                &mut recovery,
+                &mut control_rx,
+                Duration::from_secs(1),
+                Duration::from_millis(5),
+                &mut recovered,
+                production_polymarket_timeline_now,
+            ),
+        )
+        .await
+        .expect("pending-only restart fixture must be bounded")
+        .unwrap();
+
+        let mut rows = Vec::new();
+        while let Ok(payload) = event_rx.try_recv() {
+            let Some(event) = polymarket_metadata_event(&payload) else {
+                continue;
+            };
+            rows.extend(polymarket_metadata_v5_prefixes_from_event(event).unwrap());
+        }
+        let current_rows = rows
+            .iter()
+            .filter(|row| row.slug == windows.current.slug)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            current_rows.len(),
+            1,
+            "recovered_slot={recovered_slot}: {current_rows:?}"
+        );
+        let snapshot = current_rows[0];
+        assert_eq!(
+            snapshot.metadata_row_kind,
+            PolymarketMetadataRowKind::MetadataSnapshot
+        );
+        assert_eq!(snapshot.market_runtime_role, MarketRuntimeRole::Current);
+        assert_eq!(
+            snapshot.market_lifecycle_state,
+            MarketLifecycleState::Active
+        );
+        assert!(snapshot.market_lifecycle_transition.is_none());
+        assert!(snapshot.market_runtime_role_transition.is_none());
+        assert_eq!(
+            snapshot.fixed_identity_verified_at_utc,
+            recovered_fixed_at_utc_ms
+        );
+        assert!(
+            snapshot
+                .row_evidence_validation_completed_at_utc
+                .is_some_and(|validation| validation > recovered_fixed_at_utc_ms)
+        );
+        assert!(snapshot.source_evidence_payload_json.is_some());
+        assert!(snapshot.source_evidence_raw_sha256.is_some());
+        assert!(rows.iter().all(|row| {
+            row.slug != windows.current.slug
+                || row.market_lifecycle_transition
+                    != Some(MarketLifecycleTransition::CandidateToActive)
+        }));
+        assert_eq!(
+            context.current.as_ref().map(|market| market.slug.as_str()),
+            Some(windows.current.slug.as_str())
+        );
+        assert!(context.pending.contains_key(&pending_market.slug));
+        assert!(recovered.current.is_none());
+        assert!(recovered.next.is_none());
+        assert!(gaps.lock().unwrap().is_empty());
+
+        gamma_server.await.unwrap();
+        clob_server.abort();
+        let _ = clob_server.await;
     }
 }
 
@@ -647,6 +881,7 @@ fn recovered_current_and_next_preserve_first_fixed_but_keep_fresh_validation() {
 
     let current_match =
         preserve_recovered_polymarket_fixed_identity_authority(&recovered, &mut initial).unwrap();
+    assert!(current_match.fresh_current);
     assert_eq!(
         initial.current.fixed_identity_verified_at_utc_ms,
         first_current_verified
@@ -665,6 +900,7 @@ fn recovered_current_and_next_preserve_first_fixed_but_keep_fresh_validation() {
     let next_match =
         preserve_recovered_polymarket_fixed_identity_authority(&recovered, &mut updated).unwrap();
 
+    assert!(!next_match.fresh_current);
     assert_eq!(
         updated
             .next
@@ -685,6 +921,29 @@ fn recovered_current_and_next_preserve_first_fixed_but_keep_fresh_validation() {
     next_match.consume(&mut recovered);
     assert!(recovered.current.is_none());
     assert!(recovered.next.is_none());
+}
+
+#[test]
+fn recovered_next_that_has_become_fresh_current_is_classified_by_discovery_role() {
+    let mut discovery = test_btc_discovery();
+    let recovered = RecoveredPolymarketFixedIdentities {
+        current: None,
+        next: Some(recovered_fixed_identity(
+            &discovery.current,
+            discovery
+                .current
+                .fixed_identity_verified_at_utc_ms
+                .saturating_sub(1_000),
+        )),
+    };
+
+    let matched =
+        preserve_recovered_polymarket_fixed_identity_authority(&recovered, &mut discovery).unwrap();
+
+    assert!(!matched.current);
+    assert!(matched.next);
+    assert!(matched.fresh_current);
+    assert!(recovered.next.is_some());
 }
 
 #[test]
@@ -977,12 +1236,22 @@ fn late_polymarket_identity_eligibility_uses_causal_times_but_only_applied_time_
 }
 
 #[tokio::test]
-async fn initial_expired_gamma_discovery_retries_without_mutation_gap_or_false_recovery() {
+async fn initial_expired_gamma_discovery_clears_uninstalled_context_for_rediscovery() {
     let mut stale = test_btc_discovery();
     stale.current.slug = discovery_windows(now_ms().saturating_sub(600_000))
         .current
         .slug;
     assert!(!gamma_discovery_is_current(&stale, now_ms()));
+    let mut recovered = RecoveredPolymarketFixedIdentities {
+        current: Some(recovered_fixed_identity(
+            &stale.current,
+            stale
+                .current
+                .fixed_identity_verified_at_utc_ms
+                .saturating_sub(1_000),
+        )),
+        next: None,
+    };
 
     let global_budget = InflightBudget::new();
     let mut runtime = PolymarketDrainRuntime::new(
@@ -1009,7 +1278,6 @@ async fn initial_expired_gamma_discovery_retries_without_mutation_gap_or_false_r
         region: "local-test".to_owned(),
     };
     let mut context = PolymarketProcessingContext::new(stale.clone());
-    let original_slug = context.current.as_ref().unwrap().slug.clone();
     let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
     let _ = recovery.next_wait();
     let _ = recovery.next_wait();
@@ -1030,14 +1298,16 @@ async fn initial_expired_gamma_discovery_retries_without_mutation_gap_or_false_r
         &mut control_rx,
         Duration::from_millis(10),
         Duration::from_millis(1),
-        &mut RecoveredPolymarketFixedIdentities::default(),
+        &mut recovered,
         production_polymarket_timeline_now,
     )
     .await
     .expect_err("an expired initial discovery must return to the availability loop");
 
     assert!(market_source_error_is_retryable(error.as_ref()));
-    assert_eq!(context.current.as_ref().unwrap().slug, original_slug);
+    assert!(context.current.is_none());
+    assert!(context.next.is_none());
+    assert!(recovered.current.is_some());
     assert_eq!(recovery.next_wait().attempt, 3);
     assert!(
         stats
@@ -1475,6 +1745,35 @@ fn polymarket_pending_union_and_terminal_claim_stay_within_frozen_bounds() {
             .to_string()
             .contains("pending market bound exceeded")
     );
+    let mut invalid_register_context = PolymarketProcessingContext::new(BtcUpdownDiscovery {
+        current: current.clone(),
+        next: None,
+        relation: None,
+    });
+    for market in [&pending_one, &pending_two] {
+        let identity = PendingPolymarketIdentity::from_discovered(market).unwrap();
+        invalid_register_context.pending.insert(
+            identity.slug.clone(),
+            PendingPolymarketResolution::new(identity, None),
+        );
+    }
+    let mut third = PendingPolymarketIdentity::from_discovered(&pending_two).unwrap();
+    third.slug = third_slug.clone();
+    invalid_register_context.pending.insert(
+        third.slug.clone(),
+        PendingPolymarketResolution::new(third, None),
+    );
+    assert!(
+        invalid_register_context
+            .register_source_authority(authorities[0].clone())
+            .unwrap_err()
+            .to_string()
+            .contains("pending market bound exceeded")
+    );
+    assert!(
+        invalid_register_context.source_authorities.is_empty(),
+        "a failed authority registration must not leave a false commit marker"
+    );
 
     context.pending.remove(&third_slug);
     let oversized_payload = "x".repeat(POLYMARKET_PENDING_STATE_MAX_BYTES);
@@ -1712,6 +2011,8 @@ async fn polymarket_recovered_finalize_allows_fresh_v3_delivery_after_install() 
     let mut resolution_poll_tasks = JoinSet::new();
     install_polymarket_context(
         fresh_discovery,
+        actor_now_utc_ms,
+        PolymarketCurrentMetadataRoute::ExistingCurrent,
         false,
         &mut runtime,
         &mut context,
@@ -6676,6 +6977,282 @@ async fn polymarket_outer_recovery_day_fence_drains_completed_poll_before_reply(
 }
 
 #[tokio::test]
+async fn polymarket_outer_recovery_day_fence_admits_missing_snapshot_before_close() {
+    let boundary_utc_ms: i64 = 1_783_468_800_000;
+    let mut current = test_btc_discovery().current;
+    current.start_ts_s = boundary_utc_ms.div_euclid(1_000).saturating_sub(300);
+    current.end_ts_s = boundary_utc_ms.div_euclid(1_000);
+    current.candidate_start_ts_s = current.start_ts_s;
+    current.candidate_end_ts_s = current.end_ts_s;
+    current.slug = format!("btc-updown-5m-{}", current.start_ts_s);
+    let source_received_at_utc_ms = boundary_utc_ms.saturating_sub(1_000);
+    refresh_test_discovery_evidence(&mut current, source_received_at_utc_ms);
+    let current_slug = current.slug.clone();
+    let mut context = PolymarketProcessingContext::new(BtcUpdownDiscovery {
+        current,
+        next: None,
+        relation: None,
+    });
+    assert!(!polymarket_context_discovery_authorities_complete(&context));
+
+    let stats = Arc::new(SourceQueueBackpressureStats::default());
+    let raw_day_gate = install_active_raw_day_gate(&stats, source_received_at_utc_ms).await;
+    raw_day_gate
+        .prepare_rollover(
+            &utc_day_string_from_ms(source_received_at_utc_ms).unwrap(),
+            boundary_utc_ms,
+        )
+        .unwrap();
+    let (event_tx, mut event_rx) = mpsc::channel(4);
+    let sink = SourceEventSink {
+        tx: event_tx,
+        gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+        source_queue_backpressure: Arc::clone(&stats),
+        inflight_budget: InflightBudget::new(),
+        enqueue_lock: Arc::new(AsyncMutex::new(())),
+    };
+    let (control_tx, mut control_rx) = mpsc::channel(POLYMARKET_CONTROL_CHANNEL_CAPACITY);
+    let (resume_tx, resume_rx) = oneshot::channel();
+    let (reply_tx, reply_rx) = oneshot::channel();
+    control_tx
+        .send(PolymarketSourceControl::Fence {
+            stop_after_fence: false,
+            day_boundary_utc_ms: Some(boundary_utc_ms),
+            resume_after_barrier: Some(resume_rx),
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+    let collector_identity = CollectorIdentity {
+        host_id: "collector-test".to_owned(),
+        region: "local-test".to_owned(),
+    };
+    let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
+    recovery.set_wait_override(Some(Duration::from_secs(60)));
+    let mut resolution_poll_tasks = JoinSet::new();
+    let gamma = GammaClient::new("http://127.0.0.1:9").unwrap();
+    let wait = wait_for_polymarket_outer_recovery(
+        &mut recovery,
+        &sink,
+        &gamma,
+        None,
+        &mut control_rx,
+        &mut resolution_poll_tasks,
+        &mut context,
+        &collector_identity,
+        Instant::now(),
+        Arc::new(move || PolymarketTimelineNow {
+            utc_ms: boundary_utc_ms.saturating_add(1),
+            monotonic: TokioInstant::now(),
+        }),
+    );
+    let release = async {
+        reply_rx
+            .await
+            .unwrap()
+            .expect("day fence must admit missing authority before replying");
+        resume_tx.send(()).unwrap();
+    };
+    let (result, ()) = timeout(Duration::from_secs(2), async {
+        tokio::join!(wait, release)
+    })
+    .await
+    .expect("missing-authority day-fence fixture must be bounded");
+
+    assert!(result.unwrap());
+    assert!(context.current.is_none());
+    assert!(context.pending.contains_key(&current_slug));
+    assert_eq!(
+        context
+            .source_authorities
+            .iter()
+            .filter(|authority| authority.slug == current_slug)
+            .count(),
+        1
+    );
+    let snapshot =
+        polymarket_metadata_v5_prefixes_from_event(&event_rx.recv().await.unwrap().event)
+            .unwrap()
+            .remove(0);
+    assert_eq!(
+        snapshot.metadata_row_kind,
+        PolymarketMetadataRowKind::MetadataSnapshot
+    );
+    assert_eq!(snapshot.timestamp_received, source_received_at_utc_ms);
+    assert_eq!(
+        deferred_ingress_facts(&stats, "polymarket")
+            .iter()
+            .flat_map(|fact| fact.recv_times_utc_ms.iter().copied())
+            .collect::<Vec<_>>(),
+        vec![boundary_utc_ms.saturating_add(1)]
+    );
+    assert!(event_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn polymarket_outer_recovery_day_fence_keeps_new_day_snapshot_for_resubscription() {
+    let boundary_utc_ms: i64 = 1_783_468_800_000;
+    let mut current = test_btc_discovery().current;
+    current.start_ts_s = boundary_utc_ms.div_euclid(1_000);
+    current.end_ts_s = current.start_ts_s.saturating_add(300);
+    current.candidate_start_ts_s = current.start_ts_s;
+    current.candidate_end_ts_s = current.end_ts_s;
+    current.slug = format!("btc-updown-5m-{}", current.start_ts_s);
+    let source_received_at_utc_ms = boundary_utc_ms.saturating_add(1);
+    refresh_test_discovery_evidence(&mut current, source_received_at_utc_ms);
+    let current_slug = current.slug.clone();
+    let mut context = PolymarketProcessingContext::new(BtcUpdownDiscovery {
+        current: current.clone(),
+        next: None,
+        relation: None,
+    });
+    let mut recovered = RecoveredPolymarketFixedIdentities {
+        current: Some(recovered_fixed_identity(
+            &current,
+            current.fixed_identity_verified_at_utc_ms,
+        )),
+        next: None,
+    };
+    assert!(!polymarket_context_discovery_authorities_complete(&context));
+
+    let stats = Arc::new(SourceQueueBackpressureStats::default());
+    let raw_day_gate = install_active_raw_day_gate(&stats, boundary_utc_ms.saturating_sub(1)).await;
+    let old_utc_day = utc_day_string_from_ms(boundary_utc_ms.saturating_sub(1)).unwrap();
+    let close = raw_day_gate
+        .prepare_rollover(&old_utc_day, boundary_utc_ms)
+        .unwrap();
+    let (event_tx, mut event_rx) = mpsc::channel(4);
+    let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+    let sink = SourceEventSink {
+        tx: event_tx,
+        gaps: Arc::clone(&gaps),
+        source_queue_backpressure: Arc::clone(&stats),
+        inflight_budget: InflightBudget::new(),
+        enqueue_lock: Arc::new(AsyncMutex::new(())),
+    };
+    let (control_tx, mut control_rx) = mpsc::channel(POLYMARKET_CONTROL_CHANNEL_CAPACITY);
+    let (resume_tx, resume_rx) = oneshot::channel();
+    let (reply_tx, reply_rx) = oneshot::channel();
+    control_tx
+        .send(PolymarketSourceControl::Fence {
+            stop_after_fence: false,
+            day_boundary_utc_ms: Some(boundary_utc_ms),
+            resume_after_barrier: Some(resume_rx),
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+    let collector_identity = CollectorIdentity {
+        host_id: "collector-test".to_owned(),
+        region: "local-test".to_owned(),
+    };
+    let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
+    recovery.set_wait_override(Some(Duration::from_secs(60)));
+    let mut resolution_poll_tasks = JoinSet::new();
+    let gamma = GammaClient::new("http://127.0.0.1:9").unwrap();
+    let wait = wait_for_polymarket_outer_recovery(
+        &mut recovery,
+        &sink,
+        &gamma,
+        None,
+        &mut control_rx,
+        &mut resolution_poll_tasks,
+        &mut context,
+        &collector_identity,
+        Instant::now(),
+        Arc::new(move || PolymarketTimelineNow {
+            utc_ms: source_received_at_utc_ms,
+            monotonic: TokioInstant::now(),
+        }),
+    );
+    let release = async {
+        reply_rx
+            .await
+            .unwrap()
+            .expect("new-day discovery must not fail the old-day fence");
+        assert!(event_rx.try_recv().is_err());
+        assert!(deferred_ingress_facts(&stats, "polymarket").is_empty());
+        for producer in LOGICAL_PRODUCERS {
+            raw_day_gate
+                .register_source_fence(producer, &close)
+                .unwrap();
+        }
+        let sealed = raw_day_gate.seal_prepared_rollover(&close).await.unwrap();
+        commit_test_manifest_activation(&raw_day_gate, &sealed);
+        raw_day_gate.activate_after_rollover(&sealed).await.unwrap();
+        resume_tx.send(()).unwrap();
+    };
+    let (result, ()) = timeout(Duration::from_secs(2), async {
+        tokio::join!(wait, release)
+    })
+    .await
+    .expect("new-day missing-authority day-fence fixture must be bounded");
+
+    assert!(result.unwrap());
+    assert_eq!(
+        context.current.as_ref().map(|market| market.slug.as_str()),
+        Some(current_slug.as_str())
+    );
+    assert!(context.pending.is_empty());
+    assert!(context.source_authorities.is_empty());
+    assert!(recovered.current.is_some());
+    assert!(event_rx.try_recv().is_err());
+    assert!(deferred_ingress_facts(&stats, "polymarket").is_empty());
+
+    let counters = Arc::new(GammaRecoveryLoopbackCounters::default());
+    let (endpoint, server) = silent_clob_loopback(counters).await;
+    let mut runtime = PolymarketDrainRuntime::new(
+        endpoint,
+        bounded_ws_config(),
+        sink.inflight_budget.clone(),
+        stats.raw_day_gate().unwrap(),
+    )
+    .unwrap();
+    let (_retry_control_tx, mut retry_control_rx) =
+        mpsc::channel(POLYMARKET_CONTROL_CHANNEL_CAPACITY);
+    collect_polymarket_single_receiver(
+        None,
+        &mut context,
+        &mut resolution_poll_tasks,
+        &sink,
+        &collector_identity,
+        Some(source_received_at_utc_ms),
+        Instant::now(),
+        &mut runtime,
+        &gamma,
+        &mut recovery,
+        &mut retry_control_rx,
+        Duration::from_millis(10),
+        Duration::from_millis(1),
+        &mut recovered,
+        move || PolymarketTimelineNow {
+            utc_ms: source_received_at_utc_ms,
+            monotonic: TokioInstant::now(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let snapshot =
+        polymarket_metadata_v5_prefixes_from_event(&event_rx.recv().await.unwrap().event)
+            .unwrap()
+            .remove(0);
+    assert_eq!(
+        snapshot.metadata_row_kind,
+        PolymarketMetadataRowKind::MetadataSnapshot
+    );
+    assert_eq!(snapshot.slug, current_slug);
+    assert_eq!(snapshot.timestamp_received, source_received_at_utc_ms);
+    assert!(event_rx.try_recv().is_err());
+    assert_eq!(context.source_authorities.len(), 1);
+    assert!(recovered.current.is_none());
+    assert!(gaps.lock().unwrap().is_empty());
+    runtime.abort_pump_and_wait().await;
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
 async fn polymarket_outer_recovery_day_fence_advances_after_pre_e_select_sample() {
     let boundary_utc_ms: i64 = 1_783_468_800_000;
     let mut current = test_btc_discovery().current;
@@ -8000,7 +8577,7 @@ async fn polymarket_rollover_rejects_prefetched_identity_mutation_before_fence_o
     let error = switch_polymarket_context(
         replacement,
         &production_polymarket_timeline_now,
-        true,
+        PolymarketCurrentMetadataRoute::CurrentSnapshot,
         &mut runtime,
         &mut context,
         &mut resolution_poll_tasks,
@@ -8025,6 +8602,842 @@ async fn polymarket_rollover_rejects_prefetched_identity_mutation_before_fence_o
             .any(|reason| { reason.starts_with("polymarket_rollover_identity_integrity:") })
     );
     assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn polymarket_context_install_pre_subscription_failure_restores_pending_only_slots() {
+    let pending_market = test_btc_discovery().current;
+    let mut fresh_market = next_market_for_test(&pending_market);
+    fresh_market.up_asset_id = "not-a-u256".to_owned();
+    let fresh_discovery = BtcUpdownDiscovery {
+        current: fresh_market,
+        next: None,
+        relation: None,
+    };
+    let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        fixed_identities: RecoveredPolymarketFixedIdentities::default(),
+        pending: vec![recovered_pending_for_test(
+            &pending_market,
+            vec![1],
+            Vec::new(),
+            2,
+        )],
+    })
+    .unwrap()
+    .unwrap();
+    let pending_slug = pending_market.slug.clone();
+    context
+        .pending
+        .get_mut(&pending_slug)
+        .unwrap()
+        .valid_response_count = 7;
+
+    let global_budget = InflightBudget::new();
+    let mut runtime = PolymarketDrainRuntime::new(
+        "ws://127.0.0.1:9".to_owned(),
+        bounded_ws_config(),
+        global_budget.clone(),
+        active_raw_day_gate_for_test(now_ms()).await,
+    )
+    .unwrap();
+    runtime.abort_pump_and_wait().await;
+    let stats = Arc::new(SourceQueueBackpressureStats::default());
+    install_active_raw_day_gate(&stats, now_ms()).await;
+    let (tx, _rx) = mpsc::channel(4);
+    let sink = SourceEventSink {
+        tx,
+        gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+        source_queue_backpressure: stats,
+        inflight_budget: global_budget,
+        enqueue_lock: Arc::new(AsyncMutex::new(())),
+    };
+    let mut resolution_poll_tasks = JoinSet::new();
+    let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
+
+    let error = install_polymarket_context(
+        fresh_discovery,
+        now_ms(),
+        PolymarketCurrentMetadataRoute::CurrentSnapshot,
+        false,
+        &mut runtime,
+        &mut context,
+        &mut resolution_poll_tasks,
+        &sink,
+        &CollectorIdentity {
+            host_id: "collector-test".to_owned(),
+            region: "local-test".to_owned(),
+        },
+        Instant::now(),
+        &mut recovery,
+    )
+    .await
+    .expect_err("invalid desired assets must fail before subscription");
+
+    assert!(!market_source_error_is_retryable(error.as_ref()));
+    assert!(context.current.is_none());
+    assert!(context.next.is_none());
+    let pending = &context.pending[&pending_slug];
+    assert_eq!(pending.valid_response_count, 7);
+    assert_eq!(pending.next_attempt_ordinal, 2);
+    assert_eq!(context.desired_assets().unwrap().len(), 2);
+}
+
+async fn context_install_with_terminal_before_ack(
+    discovery: BtcUpdownDiscovery,
+    mut context: PolymarketProcessingContext,
+    current_metadata_route: PolymarketCurrentMetadataRoute,
+    evaluation_ms: i64,
+    commit_metadata_after_subscription_error: bool,
+) -> (
+    Box<dyn Error + Send + Sync>,
+    PolymarketProcessingContext,
+    Vec<PolymarketMarketMetadataV3Row>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+    let (request_tx, request_rx) = oneshot::channel();
+    let (close_tx, close_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        while let Some(frame) = socket.next().await {
+            let frame = frame.unwrap();
+            let Message::Text(text) = frame else {
+                continue;
+            };
+            if text == "PING" {
+                socket.send(Message::Text("PONG".into())).await.unwrap();
+                continue;
+            }
+            if let Ok(request) = serde_json::from_str::<Value>(&text)
+                && request.get("operation").is_some()
+            {
+                request_tx.send(request).unwrap();
+                close_rx.await.unwrap();
+                let _ = socket.send(Message::Close(None)).await;
+                break;
+            }
+        }
+    });
+
+    let global_budget = InflightBudget::new();
+    let stats = Arc::new(SourceQueueBackpressureStats::default());
+    install_active_raw_day_gate(&stats, evaluation_ms).await;
+    let (before_ack_tx, before_ack_rx) = oneshot::channel();
+    let (resume_ack_tx, resume_ack_rx) = oneshot::channel();
+    let mut config = bounded_ws_config();
+    config.reconnect.initial_backoff = Duration::from_millis(1);
+    config.reconnect.max_backoff = Duration::from_millis(1);
+    config.heartbeat_interval = Duration::from_secs(3_600);
+    config.heartbeat_timeout = Duration::from_secs(7_200);
+    let mut runtime = PolymarketDrainRuntime::new_with_before_ack_pause(
+        endpoint,
+        config,
+        global_budget.clone(),
+        stats.raw_day_gate().unwrap(),
+        0,
+        1,
+        before_ack_tx,
+        resume_ack_rx,
+    )
+    .unwrap();
+    let (event_tx, mut event_rx) = mpsc::channel(8);
+    let sink = SourceEventSink {
+        tx: event_tx,
+        gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+        source_queue_backpressure: stats,
+        inflight_budget: global_budget,
+        enqueue_lock: Arc::new(AsyncMutex::new(())),
+    };
+    let identity = CollectorIdentity {
+        host_id: "collector-test".to_owned(),
+        region: "local-test".to_owned(),
+    };
+    let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
+    let mut resolution_poll_tasks = JoinSet::new();
+    let timeline = || PolymarketTimelineNow {
+        utc_ms: evaluation_ms,
+        monotonic: TokioInstant::now(),
+    };
+    let install: Pin<
+        Box<dyn Future<Output = Result<PolymarketContextInstallOutcome>> + Send + '_>,
+    > = if commit_metadata_after_subscription_error {
+        Box::pin(switch_polymarket_context(
+            discovery,
+            &timeline,
+            current_metadata_route,
+            &mut runtime,
+            &mut context,
+            &mut resolution_poll_tasks,
+            &sink,
+            &identity,
+            Instant::now(),
+            &mut recovery,
+        ))
+    } else {
+        Box::pin(install_polymarket_context_if_current(
+            discovery,
+            evaluation_ms,
+            current_metadata_route,
+            false,
+            &mut runtime,
+            &mut context,
+            &mut resolution_poll_tasks,
+            &sink,
+            &identity,
+            Instant::now(),
+            &mut recovery,
+        ))
+    };
+    let terminate = async {
+        request_rx.await.unwrap();
+        before_ack_rx.await.unwrap();
+        close_tx.send(()).unwrap();
+    };
+    let (result, ()) = timeout(Duration::from_secs(3), async {
+        tokio::join!(install, terminate)
+    })
+    .await
+    .expect("before-ack context installation fixture must be bounded");
+    let _ = resume_ack_tx.send(());
+    let error = result.expect_err("disconnect before subscription ack must remain an error");
+    assert!(market_source_error_is_retryable(error.as_ref()), "{error}");
+
+    let mut rows = Vec::new();
+    while let Ok(payload) = event_rx.try_recv() {
+        let Some(event) = polymarket_metadata_event(&payload) else {
+            continue;
+        };
+        rows.extend(polymarket_metadata_v5_prefixes_from_event(event).unwrap());
+    }
+    runtime.abort_pump_and_wait().await;
+    server.await.unwrap();
+    (error, context, rows)
+}
+
+async fn retry_installed_context_without_metadata(
+    context: &mut PolymarketProcessingContext,
+    evaluation_ms: i64,
+) {
+    let counters = Arc::new(GammaRecoveryLoopbackCounters::default());
+    let (endpoint, server) = silent_clob_loopback(counters).await;
+    let global_budget = InflightBudget::new();
+    let stats = Arc::new(SourceQueueBackpressureStats::default());
+    install_active_raw_day_gate(&stats, evaluation_ms).await;
+    let mut runtime = PolymarketDrainRuntime::new(
+        endpoint,
+        bounded_ws_config(),
+        global_budget.clone(),
+        stats.raw_day_gate().unwrap(),
+    )
+    .unwrap();
+    let (event_tx, mut event_rx) = mpsc::channel(4);
+    let sink = SourceEventSink {
+        tx: event_tx,
+        gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+        source_queue_backpressure: stats,
+        inflight_budget: global_budget,
+        enqueue_lock: Arc::new(AsyncMutex::new(())),
+    };
+    let mut resolution_poll_tasks = JoinSet::new();
+    let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
+    apply_polymarket_subscription_while_draining(
+        &mut runtime,
+        context.desired_assets().unwrap(),
+        context,
+        &mut resolution_poll_tasks,
+        &sink,
+        &CollectorIdentity {
+            host_id: "collector-test".to_owned(),
+            region: "local-test".to_owned(),
+        },
+        Instant::now(),
+        &mut recovery,
+    )
+    .await
+    .unwrap();
+    assert!(event_rx.try_recv().is_err());
+    runtime.abort_pump_and_wait().await;
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn switch_subscription_error_commits_candidate_or_new_next_authority() {
+    let evaluation_ms = now_ms();
+    let windows = discovery_windows(evaluation_ms);
+    let mut current = test_btc_discovery().current;
+    current.slug = windows.current.slug;
+    current.start_ts_s = windows.current.target_ts_s;
+    current.end_ts_s = windows.current.end_ts_s;
+    current.candidate_start_ts_s = current.start_ts_s;
+    current.candidate_end_ts_s = current.end_ts_s;
+    refresh_test_discovery_evidence(&mut current, evaluation_ms.saturating_sub(2));
+    let mut next = next_market_for_test(&current);
+    refresh_test_discovery_evidence(&mut next, evaluation_ms.saturating_sub(1));
+    let recovered_next_fixed_at_utc_ms =
+        next.fixed_identity_verified_at_utc_ms.saturating_sub(1_000);
+    let recovered_next = RecoveredPolymarketFixedIdentities {
+        current: None,
+        next: Some(recovered_fixed_identity(
+            &next,
+            recovered_next_fixed_at_utc_ms,
+        )),
+    };
+
+    let mut pending = current.clone();
+    pending.slug = format!("btc-updown-5m-{}", current.start_ts_s.saturating_sub(300));
+    pending.start_ts_s = current.start_ts_s.saturating_sub(300);
+    pending.end_ts_s = current.start_ts_s;
+    pending.candidate_start_ts_s = pending.start_ts_s;
+    pending.candidate_end_ts_s = pending.end_ts_s;
+    let pending_received_at_utc_ms = pending.start_ts_s.saturating_mul(1_000).saturating_add(1);
+    refresh_test_discovery_evidence(&mut pending, pending_received_at_utc_ms);
+    let pending_context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        fixed_identities: RecoveredPolymarketFixedIdentities::default(),
+        pending: vec![recovered_pending_for_test(
+            &pending,
+            vec![1, 2, 3, 4, 5],
+            Vec::new(),
+            6,
+        )],
+    })
+    .unwrap()
+    .unwrap();
+    let mut candidate_discovery = BtcUpdownDiscovery {
+        current: current.clone(),
+        next: Some(next.clone()),
+        relation: None,
+    };
+    let candidate_match = preserve_recovered_polymarket_fixed_identity_authority(
+        &recovered_next,
+        &mut candidate_discovery,
+    )
+    .unwrap();
+    assert!(!candidate_match.fresh_current);
+    assert!(candidate_match.next);
+    let (_, mut candidate_context, candidate_rows) = context_install_with_terminal_before_ack(
+        candidate_discovery,
+        pending_context,
+        recovered_polymarket_current_metadata_route(candidate_match),
+        evaluation_ms,
+        true,
+    )
+    .await;
+    assert_eq!(candidate_rows.len(), 2);
+    let candidate = candidate_rows
+        .iter()
+        .find(|row| row.slug == current.slug)
+        .unwrap();
+    assert_eq!(
+        candidate.market_lifecycle_transition,
+        Some(MarketLifecycleTransition::CandidateToActive)
+    );
+    assert_eq!(
+        candidate.row_evidence_validation_completed_at_utc,
+        Some(candidate.fixed_identity_verified_at_utc)
+    );
+    let recovered_next_snapshot = candidate_rows
+        .iter()
+        .find(|row| row.slug == next.slug)
+        .unwrap();
+    assert_eq!(
+        recovered_next_snapshot.metadata_row_kind,
+        PolymarketMetadataRowKind::MetadataSnapshot
+    );
+    assert_eq!(
+        recovered_next_snapshot.fixed_identity_verified_at_utc,
+        recovered_next_fixed_at_utc_ms
+    );
+    assert_eq!(
+        candidate_context
+            .source_authorities
+            .iter()
+            .filter(|authority| authority.slug == current.slug)
+            .count(),
+        1
+    );
+    retry_installed_context_without_metadata(&mut candidate_context, evaluation_ms).await;
+
+    let existing_context = PolymarketProcessingContext::new(BtcUpdownDiscovery {
+        current: current.clone(),
+        next: None,
+        relation: None,
+    });
+    let (_, mut next_context, next_rows) = context_install_with_terminal_before_ack(
+        BtcUpdownDiscovery {
+            current: current.clone(),
+            next: Some(next.clone()),
+            relation: None,
+        },
+        existing_context,
+        PolymarketCurrentMetadataRoute::ExistingCurrent,
+        evaluation_ms,
+        true,
+    )
+    .await;
+    assert_eq!(next_rows.len(), 1);
+    assert_eq!(next_rows[0].slug, next.slug);
+    assert_eq!(
+        next_rows[0].metadata_row_kind,
+        PolymarketMetadataRowKind::MetadataSnapshot
+    );
+    assert_eq!(next_rows[0].market_runtime_role, MarketRuntimeRole::Next);
+    assert!(next_rows.iter().all(|row| row.slug != current.slug));
+    assert_eq!(
+        next_context
+            .source_authorities
+            .iter()
+            .filter(|authority| authority.slug == next.slug)
+            .count(),
+        1
+    );
+    retry_installed_context_without_metadata(&mut next_context, evaluation_ms).await;
+}
+
+#[tokio::test]
+async fn initial_subscription_error_retries_snapshot_without_early_consume() {
+    let observed_now_utc_ms = now_ms();
+    let current_day_start_utc_ms = observed_now_utc_ms
+        .div_euclid(UTC_DAY_MS)
+        .saturating_mul(UTC_DAY_MS);
+    let current_window_start_utc_ms = observed_now_utc_ms
+        .div_euclid(300_000)
+        .saturating_mul(300_000);
+    let market_end_utc_ms = if current_window_start_utc_ms > current_day_start_utc_ms {
+        current_window_start_utc_ms
+    } else {
+        current_day_start_utc_ms.saturating_sub(300_000)
+    };
+    let market_start_utc_ms = market_end_utc_ms.saturating_sub(300_000);
+    let evaluation_ms = market_start_utc_ms.saturating_add(1_000);
+    let mut current = test_btc_discovery().current;
+    current.start_ts_s = market_start_utc_ms.div_euclid(1_000);
+    current.end_ts_s = current.start_ts_s.saturating_add(300);
+    current.slug = format!("btc-updown-5m-{}", current.start_ts_s);
+    current.candidate_start_ts_s = current.start_ts_s;
+    current.candidate_end_ts_s = current.end_ts_s;
+    refresh_test_discovery_evidence(&mut current, evaluation_ms.saturating_sub(2));
+    let current_slug = current.slug.clone();
+    let post_boundary_utc_ms = market_end_utc_ms.saturating_add(1);
+    let first_fixed_at_utc_ms = current
+        .fixed_identity_verified_at_utc_ms
+        .saturating_sub(1_000);
+    let mut recovered = RecoveredPolymarketFixedIdentities {
+        current: Some(recovered_fixed_identity(&current, first_fixed_at_utc_ms)),
+        next: None,
+    };
+    let mut discovery = BtcUpdownDiscovery {
+        current,
+        next: None,
+        relation: None,
+    };
+    let matched =
+        preserve_recovered_polymarket_fixed_identity_authority(&recovered, &mut discovery).unwrap();
+    assert!(matched.current);
+    let context = PolymarketProcessingContext::new(discovery.clone());
+    let (_, mut context, first_rows) = context_install_with_terminal_before_ack(
+        discovery,
+        context,
+        PolymarketCurrentMetadataRoute::CurrentSnapshot,
+        evaluation_ms,
+        false,
+    )
+    .await;
+    assert!(first_rows.is_empty());
+    assert!(context.source_authorities.is_empty());
+    assert!(recovered.current.is_some());
+
+    let counters = Arc::new(GammaRecoveryLoopbackCounters::default());
+    let (endpoint, server) = silent_clob_loopback(counters).await;
+    let global_budget = InflightBudget::new();
+    let stats = Arc::new(SourceQueueBackpressureStats::default());
+    install_active_raw_day_gate(&stats, evaluation_ms).await;
+    let mut runtime = PolymarketDrainRuntime::new(
+        endpoint,
+        bounded_ws_config(),
+        global_budget.clone(),
+        stats.raw_day_gate().unwrap(),
+    )
+    .unwrap();
+    let (event_tx, mut event_rx) = mpsc::channel(8);
+    let sink = SourceEventSink {
+        tx: event_tx,
+        gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+        source_queue_backpressure: stats,
+        inflight_budget: global_budget,
+        enqueue_lock: Arc::new(AsyncMutex::new(())),
+    };
+    let identity = CollectorIdentity {
+        host_id: "collector-test".to_owned(),
+        region: "local-test".to_owned(),
+    };
+    let mut resolution_poll_tasks = JoinSet::new();
+    let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
+    recovery.set_wait_override(Some(Duration::from_millis(10)));
+    let (_control_tx, mut control_rx) = mpsc::channel(POLYMARKET_CONTROL_CHANNEL_CAPACITY);
+    let gamma = GammaClient::new("http://127.0.0.1:9").unwrap();
+    assert!(
+        wait_for_polymarket_outer_recovery(
+            &mut recovery,
+            &sink,
+            &gamma,
+            None,
+            &mut control_rx,
+            &mut resolution_poll_tasks,
+            &mut context,
+            &identity,
+            Instant::now(),
+            Arc::new(move || PolymarketTimelineNow {
+                utc_ms: post_boundary_utc_ms,
+                monotonic: TokioInstant::now(),
+            }),
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(
+        context.current.as_ref().map(|market| market.slug.as_str()),
+        Some(current_slug.as_str())
+    );
+    assert!(context.pending.is_empty());
+    assert!(event_rx.try_recv().is_err());
+
+    timeout(
+        Duration::from_secs(2),
+        collect_polymarket_single_receiver(
+            None,
+            &mut context,
+            &mut resolution_poll_tasks,
+            &sink,
+            &identity,
+            Some(post_boundary_utc_ms),
+            Instant::now(),
+            &mut runtime,
+            &gamma,
+            &mut recovery,
+            &mut control_rx,
+            Duration::from_secs(1),
+            Duration::from_millis(5),
+            &mut recovered,
+            move || PolymarketTimelineNow {
+                utc_ms: post_boundary_utc_ms,
+                monotonic: TokioInstant::now(),
+            },
+        ),
+    )
+    .await
+    .expect("initial subscription retry must be bounded")
+    .unwrap();
+
+    let mut rows = Vec::new();
+    while let Ok(payload) = event_rx.try_recv() {
+        let Some(event) = polymarket_metadata_event(&payload) else {
+            continue;
+        };
+        rows.extend(polymarket_metadata_v5_prefixes_from_event(event).unwrap());
+    }
+    let current_rows = rows
+        .iter()
+        .filter(|row| row.slug == current_slug)
+        .collect::<Vec<_>>();
+    assert_eq!(current_rows.len(), 2);
+    let snapshot = current_rows
+        .iter()
+        .find(|row| row.metadata_row_kind == PolymarketMetadataRowKind::MetadataSnapshot)
+        .unwrap();
+    assert_eq!(
+        snapshot.fixed_identity_verified_at_utc,
+        first_fixed_at_utc_ms
+    );
+    assert_eq!(
+        current_rows
+            .iter()
+            .filter(|row| {
+                row.market_runtime_role_transition
+                    == Some(MarketRuntimeRoleTransition::CurrentToResolutionPending)
+            })
+            .count(),
+        1
+    );
+    assert!(current_rows.iter().all(|row| {
+        row.market_lifecycle_transition != Some(MarketLifecycleTransition::CandidateToActive)
+    }));
+    assert!(recovered.current.is_none());
+    assert!(context.current.is_none());
+    assert!(context.pending.contains_key(&current_slug));
+    assert_eq!(
+        context
+            .source_authorities
+            .iter()
+            .filter(|authority| authority.slug == current_slug)
+            .count(),
+        1
+    );
+
+    runtime.abort_pump_and_wait().await;
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn pending_only_rollover_terminal_before_ack_commits_snapshot_and_retains_recovery_slot() {
+    let until_boundary_ms = 300_000_i64 - now_ms().rem_euclid(300_000);
+    if until_boundary_ms <= 2_000 {
+        sleep(Duration::from_millis(
+            u64::try_from(until_boundary_ms + 10).unwrap(),
+        ))
+        .await;
+    }
+    let windows = discovery_windows(now_ms());
+    let mut pending_market = test_btc_discovery().current;
+    pending_market.id = "pending-before-current".to_owned();
+    pending_market.slug = format!(
+        "btc-updown-5m-{}",
+        windows.current.target_ts_s.saturating_sub(300)
+    );
+    pending_market.start_ts_s = windows.current.target_ts_s.saturating_sub(300);
+    pending_market.end_ts_s = windows.current.target_ts_s;
+    pending_market.candidate_start_ts_s = pending_market.start_ts_s;
+    pending_market.candidate_end_ts_s = pending_market.end_ts_s;
+    let pending_received_at_utc_ms = pending_market
+        .start_ts_s
+        .saturating_mul(1_000)
+        .saturating_add(1);
+    refresh_test_discovery_evidence(&mut pending_market, pending_received_at_utc_ms);
+    let fresh_current = next_market_for_test(&pending_market);
+    let old_fixed_at_utc_ms = now_ms().saturating_sub(1_000);
+    let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        fixed_identities: RecoveredPolymarketFixedIdentities::default(),
+        pending: vec![recovered_pending_for_test(
+            &pending_market,
+            vec![1, 2, 3, 4, 5],
+            Vec::new(),
+            6,
+        )],
+    })
+    .unwrap()
+    .unwrap();
+    context
+        .pending
+        .get_mut(&pending_market.slug)
+        .unwrap()
+        .valid_response_count = 7;
+    let mut recovered = RecoveredPolymarketFixedIdentities {
+        current: Some(recovered_fixed_identity(
+            &fresh_current,
+            old_fixed_at_utc_ms,
+        )),
+        next: None,
+    };
+
+    let gamma_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gamma_endpoint = format!("http://{}", gamma_listener.local_addr().unwrap());
+    let gamma_body = json!([gamma_market_value_for_discovered(&fresh_current)]).to_string();
+    let gamma_server = tokio::spawn(async move {
+        let (mut socket, _) = gamma_listener.accept().await.unwrap();
+        read_loopback_http_request(&mut socket).await.unwrap();
+        write_loopback_http_response(&mut socket, "200 OK", &gamma_body).await;
+    });
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+    let (second_request_tx, second_request_rx) = oneshot::channel();
+    let (send_book_tx, send_book_rx) = oneshot::channel();
+    let (close_tx, close_rx) = oneshot::channel();
+    let book_market = fresh_current.condition_id.clone();
+    let book_asset = fresh_current.up_asset_id.clone();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        let mut requests = Vec::new();
+        while requests.len() < 2 {
+            let frame = socket.next().await.unwrap().unwrap();
+            let Message::Text(text) = frame else {
+                continue;
+            };
+            if text == "PING" {
+                socket.send(Message::Text("PONG".into())).await.unwrap();
+                continue;
+            }
+            if let Ok(request) = serde_json::from_str::<Value>(&text)
+                && request.get("operation").is_some()
+            {
+                requests.push(request);
+            }
+        }
+        second_request_tx.send(()).unwrap();
+        send_book_rx.await.unwrap();
+        socket
+            .send(Message::Text(
+                json!({
+                    "event_type": "book",
+                    "asset_id": book_asset,
+                    "market": book_market,
+                    "timestamp": now_ms().to_string(),
+                    "bids": [],
+                    "asks": []
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        close_rx.await.unwrap();
+        let _ = socket.send(Message::Close(None)).await;
+        requests
+    });
+
+    let global_budget = InflightBudget::new();
+    let stats = Arc::new(SourceQueueBackpressureStats::default());
+    install_active_raw_day_gate(&stats, now_ms()).await;
+    let (before_ack_tx, before_ack_rx) = oneshot::channel();
+    let (resume_ack_tx, resume_ack_rx) = oneshot::channel();
+    let mut config = bounded_ws_config();
+    config.reconnect.initial_backoff = Duration::from_millis(1);
+    config.reconnect.max_backoff = Duration::from_millis(1);
+    config.heartbeat_interval = Duration::from_secs(3_600);
+    config.heartbeat_timeout = Duration::from_secs(7_200);
+    let mut runtime = PolymarketDrainRuntime::new_with_before_ack_pause(
+        endpoint,
+        config,
+        global_budget.clone(),
+        stats.raw_day_gate().unwrap(),
+        0,
+        2,
+        before_ack_tx,
+        resume_ack_rx,
+    )
+    .unwrap();
+    let (event_tx, mut event_rx) = mpsc::channel(16);
+    let sink = SourceEventSink {
+        tx: event_tx,
+        gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+        source_queue_backpressure: stats,
+        inflight_budget: global_budget,
+        enqueue_lock: Arc::new(AsyncMutex::new(())),
+    };
+    let identity = CollectorIdentity {
+        host_id: "collector-test".to_owned(),
+        region: "local-test".to_owned(),
+    };
+    let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
+    let mut resolution_poll_tasks = JoinSet::new();
+    let (_control_tx, mut control_rx) = mpsc::channel(POLYMARKET_CONTROL_CHANNEL_CAPACITY);
+    let gamma = GammaClient::new(&gamma_endpoint).unwrap();
+    let collect = collect_polymarket_single_receiver(
+        None,
+        &mut context,
+        &mut resolution_poll_tasks,
+        &sink,
+        &identity,
+        None,
+        Instant::now(),
+        &mut runtime,
+        &gamma,
+        &mut recovery,
+        &mut control_rx,
+        Duration::from_secs(1),
+        Duration::from_millis(5),
+        &mut recovered,
+        production_polymarket_timeline_now,
+    );
+    let induce_terminal = async {
+        second_request_rx.await.unwrap();
+        before_ack_rx.await.unwrap();
+        send_book_tx.send(()).unwrap();
+        let book = timeout(Duration::from_secs(2), async {
+            loop {
+                let payload = event_rx.recv().await.unwrap();
+                if polymarket_v3_message(&payload).is_some_and(|message| {
+                    message.envelope.slug.as_deref() == Some(fresh_current.slug.as_str())
+                }) {
+                    break payload;
+                }
+            }
+        })
+        .await
+        .expect("fresh current Book must be target-admitted before disconnect");
+        close_tx.send(()).unwrap();
+        book
+    };
+    let (collect_result, admitted_book) = timeout(Duration::from_secs(3), async {
+        tokio::join!(collect, induce_terminal)
+    })
+    .await
+    .expect("pending-only before-ack fixture must be bounded");
+    let _ = resume_ack_tx.send(());
+    let error = collect_result.expect_err("disconnect before ack must remain retryable");
+
+    assert!(market_source_error_is_retryable(error.as_ref()), "{error}");
+    assert!(recovered.current.is_some());
+    assert!(recovered.next.is_none());
+    let book = polymarket_v3_message(&admitted_book).unwrap();
+    assert_eq!(
+        book.envelope.slug.as_deref(),
+        Some(fresh_current.slug.as_str())
+    );
+    assert_eq!(
+        context.current.as_ref().map(|market| market.slug.as_str()),
+        Some(fresh_current.slug.as_str())
+    );
+    assert!(context.next.is_none());
+    let pending = &context.pending[&pending_market.slug];
+    assert_eq!(pending.valid_response_count, 7);
+    assert_eq!(pending.next_attempt_ordinal, 6);
+
+    let mut metadata = Vec::new();
+    while let Ok(payload) = event_rx.try_recv() {
+        let Some(event) = polymarket_metadata_event(&payload) else {
+            continue;
+        };
+        metadata.extend(polymarket_metadata_v5_prefixes_from_event(event).unwrap());
+    }
+    let current_rows = metadata
+        .iter()
+        .filter(|row| row.slug == fresh_current.slug)
+        .collect::<Vec<_>>();
+    assert_eq!(current_rows.len(), 1);
+    let snapshot = current_rows[0];
+    assert_eq!(
+        snapshot.metadata_row_kind,
+        PolymarketMetadataRowKind::MetadataSnapshot
+    );
+    assert_eq!(snapshot.market_runtime_role, MarketRuntimeRole::Current);
+    assert_eq!(
+        snapshot.market_lifecycle_state,
+        MarketLifecycleState::Active
+    );
+    assert_eq!(snapshot.fixed_identity_verified_at_utc, old_fixed_at_utc_ms);
+    assert!(
+        snapshot
+            .row_evidence_validation_completed_at_utc
+            .is_some_and(|validation| validation > old_fixed_at_utc_ms)
+    );
+    assert!(snapshot.validate().is_complete());
+    assert!(metadata.iter().all(|row| {
+        row.market_lifecycle_transition != Some(MarketLifecycleTransition::CandidateToActive)
+    }));
+    assert_eq!(
+        context
+            .source_authorities
+            .iter()
+            .filter(|authority| {
+                authority.slug == fresh_current.slug
+                    && authority.fixed_identity_verified_at_utc == old_fixed_at_utc_ms
+            })
+            .count(),
+        1
+    );
+
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["operation"], "subscribe");
+    assert_eq!(requests[0]["assets_ids"], json!(["101", "102"]));
+    assert_eq!(requests[1]["operation"], "subscribe");
+    assert_eq!(requests[1]["assets_ids"], json!(["201", "202"]));
+    gamma_server.await.unwrap();
+    runtime.abort_pump_and_wait().await;
 }
 
 #[tokio::test]
@@ -8126,7 +9539,7 @@ async fn polymarket_context_switch_rechecks_applied_time_after_delayed_fence() {
     let switch = switch_polymarket_context(
         replacement,
         &timeline,
-        false,
+        PolymarketCurrentMetadataRoute::ExistingCurrent,
         &mut runtime,
         &mut context,
         &mut resolution_poll_tasks,
@@ -8149,6 +9562,179 @@ async fn polymarket_context_switch_rechecks_applied_time_after_delayed_fence() {
     assert!(restart_fixed_identities.current.is_some());
     assert!(recovered_match.current);
     assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn pending_only_expired_current_then_recovered_next_uses_monotonic_snapshot_retry() {
+    let mut market_a = test_btc_discovery().current;
+    let mut market_b = next_market_for_test(&market_a);
+    let a_fixed_at_utc_ms = market_a
+        .fixed_identity_verified_at_utc_ms
+        .saturating_sub(2_000);
+    let b_fixed_at_utc_ms = market_b
+        .fixed_identity_verified_at_utc_ms
+        .saturating_sub(2_000);
+    let a_received_at_utc_ms = market_a.end_ts_s.saturating_mul(1_000).saturating_sub(2);
+    let b_received_at_utc_ms = market_b.start_ts_s.saturating_mul(1_000).saturating_add(1);
+    refresh_test_discovery_evidence(&mut market_a, a_received_at_utc_ms);
+    refresh_test_discovery_evidence(&mut market_b, b_received_at_utc_ms);
+    let mut pending_market = market_a.clone();
+    pending_market.id = "pending-before-a".to_owned();
+    pending_market.slug = format!("btc-updown-5m-{}", market_a.start_ts_s.saturating_sub(300));
+    pending_market.condition_id =
+        "0x0000000000000000000000000000000000000000000000000000000000000004".to_owned();
+    pending_market.up_asset_id = "301".to_owned();
+    pending_market.down_asset_id = "302".to_owned();
+    pending_market.start_ts_s = market_a.start_ts_s.saturating_sub(300);
+    pending_market.end_ts_s = market_a.start_ts_s;
+    pending_market.candidate_start_ts_s = pending_market.start_ts_s;
+    pending_market.candidate_end_ts_s = pending_market.end_ts_s;
+    let pending_received_at_utc_ms = pending_market
+        .start_ts_s
+        .saturating_mul(1_000)
+        .saturating_add(1);
+    refresh_test_discovery_evidence(&mut pending_market, pending_received_at_utc_ms);
+    let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        fixed_identities: RecoveredPolymarketFixedIdentities::default(),
+        pending: vec![recovered_pending_for_test(
+            &pending_market,
+            vec![1, 2, 3, 4, 5],
+            Vec::new(),
+            6,
+        )],
+    })
+    .unwrap()
+    .unwrap();
+    let mut recovered = RecoveredPolymarketFixedIdentities {
+        current: Some(recovered_fixed_identity(&market_a, a_fixed_at_utc_ms)),
+        next: Some(recovered_fixed_identity(&market_b, b_fixed_at_utc_ms)),
+    };
+    let global_budget = InflightBudget::new();
+    let stats = Arc::new(SourceQueueBackpressureStats::default());
+    install_active_raw_day_gate(&stats, market_a.end_ts_s.saturating_mul(1_000)).await;
+    let (tx, mut rx) = mpsc::channel(8);
+    let sink = SourceEventSink {
+        tx,
+        gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+        source_queue_backpressure: Arc::clone(&stats),
+        inflight_budget: global_budget.clone(),
+        enqueue_lock: Arc::new(AsyncMutex::new(())),
+    };
+    let identity = CollectorIdentity {
+        host_id: "collector-test".to_owned(),
+        region: "local-test".to_owned(),
+    };
+    let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
+    let mut resolution_poll_tasks = JoinSet::new();
+    let run_started = Instant::now();
+    let expired_at_utc_ms = market_a.end_ts_s.saturating_mul(1_000);
+    let retry_at_utc_ms = market_b.start_ts_s.saturating_mul(1_000).saturating_add(1);
+    assert!(retry_at_utc_ms >= expired_at_utc_ms);
+    let mut expired_runtime = PolymarketDrainRuntime::new(
+        "ws://127.0.0.1:9".to_owned(),
+        bounded_ws_config(),
+        global_budget.clone(),
+        stats.raw_day_gate().unwrap(),
+    )
+    .unwrap();
+    expired_runtime.abort_pump_and_wait().await;
+    let mut preserved_a = BtcUpdownDiscovery {
+        current: market_a.clone(),
+        next: None,
+        relation: None,
+    };
+    let matched_a =
+        preserve_recovered_polymarket_fixed_identity_authority(&recovered, &mut preserved_a)
+            .unwrap();
+    let first_outcome = install_polymarket_context_if_current(
+        preserved_a,
+        expired_at_utc_ms,
+        PolymarketCurrentMetadataRoute::CurrentSnapshot,
+        false,
+        &mut expired_runtime,
+        &mut context,
+        &mut resolution_poll_tasks,
+        &sink,
+        &identity,
+        run_started,
+        &mut recovery,
+    )
+    .await;
+    assert_eq!(
+        first_outcome.unwrap(),
+        PolymarketContextInstallOutcome::Expired
+    );
+    assert!(context.current.is_none());
+    assert!(context.next.is_none());
+    assert!(context.pending.contains_key(&pending_market.slug));
+    assert!(recovered.current.is_some());
+    assert!(recovered.next.is_some());
+    assert!(matched_a.current);
+    assert!(matched_a.fresh_current);
+    assert!(rx.try_recv().is_err());
+
+    let mut preserved_b = BtcUpdownDiscovery {
+        current: market_b.clone(),
+        next: None,
+        relation: None,
+    };
+    let matched_b =
+        preserve_recovered_polymarket_fixed_identity_authority(&recovered, &mut preserved_b)
+            .unwrap();
+    assert!(!matched_b.current);
+    assert!(matched_b.next);
+    assert!(matched_b.fresh_current);
+    let counters = Arc::new(GammaRecoveryLoopbackCounters::default());
+    let (clob_endpoint, clob_server) = silent_clob_loopback(counters).await;
+    let mut retry_runtime = PolymarketDrainRuntime::new(
+        clob_endpoint,
+        bounded_ws_config(),
+        global_budget,
+        stats.raw_day_gate().unwrap(),
+    )
+    .unwrap();
+    let second_outcome = install_polymarket_context_if_current(
+        preserved_b,
+        retry_at_utc_ms,
+        PolymarketCurrentMetadataRoute::CurrentSnapshot,
+        false,
+        &mut retry_runtime,
+        &mut context,
+        &mut resolution_poll_tasks,
+        &sink,
+        &identity,
+        run_started,
+        &mut recovery,
+    )
+    .await
+    .unwrap();
+    assert_eq!(second_outcome, PolymarketContextInstallOutcome::Applied);
+    matched_b.consume(&mut recovered);
+
+    assert!(recovered.current.is_some());
+    assert!(recovered.next.is_none());
+    assert!(context.pending.contains_key(&pending_market.slug));
+    assert_eq!(
+        context.current.as_ref().map(|market| market.slug.as_str()),
+        Some(market_b.slug.as_str())
+    );
+    let rows = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|payload| polymarket_metadata_event(&payload).cloned())
+        .flat_map(|event| polymarket_metadata_v5_prefixes_from_event(&event).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].slug, market_b.slug);
+    assert_eq!(
+        rows[0].metadata_row_kind,
+        PolymarketMetadataRowKind::MetadataSnapshot
+    );
+    assert_eq!(rows[0].market_runtime_role, MarketRuntimeRole::Current);
+    assert_eq!(rows[0].fixed_identity_verified_at_utc, b_fixed_at_utc_ms);
+    assert!(rows[0].market_lifecycle_transition.is_none());
+
+    retry_runtime.abort_pump_and_wait().await;
+    clob_server.abort();
+    let _ = clob_server.await;
 }
 
 #[tokio::test]
@@ -9223,7 +10809,9 @@ async fn polymarket_rollover_loopback_keeps_retained_lifecycle_and_filters_retir
         Duration::from_secs(5),
         install_polymarket_context(
             initial,
-            true,
+            fixture_received_at_utc_ms,
+            PolymarketCurrentMetadataRoute::CurrentSnapshot,
+            false,
             &mut runtime,
             &mut context,
             &mut resolution_poll_tasks,
@@ -9280,6 +10868,7 @@ async fn polymarket_rollover_loopback_keeps_retained_lifecycle_and_filters_retir
         install_polymarket_context_if_current(
             rollover,
             market_b.start_ts_s * 1_000,
+            PolymarketCurrentMetadataRoute::ExistingCurrent,
             false,
             &mut runtime,
             &mut context,
@@ -9293,12 +10882,7 @@ async fn polymarket_rollover_loopback_keeps_retained_lifecycle_and_filters_retir
     .await
     .expect("rollover subscription must be bounded")
     .unwrap();
-    assert_eq!(
-        installed,
-        PolymarketContextInstallOutcome::Applied {
-            applied_at_utc_ms: market_b.start_ts_s * 1_000,
-        }
-    );
+    assert_eq!(installed, PolymarketContextInstallOutcome::Applied);
 
     let requests = switch_requests_rx.await.unwrap();
     assert_eq!(requests[0]["operation"], "subscribe");

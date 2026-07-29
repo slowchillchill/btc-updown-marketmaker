@@ -122,7 +122,42 @@ impl PolymarketDrainRuntime {
         raw_day_gate: Arc<RawDayGate>,
         recv_utc_now: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> Result<Self> {
-        let mut sdk = MarketSdkRuntime::new(endpoint, config)?;
+        Self::from_market_sdk(
+            MarketSdkRuntime::new(endpoint, config)?,
+            global_budget,
+            raw_day_gate,
+            recv_utc_now,
+        )
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_with_before_ack_pause(
+        endpoint: String,
+        config: WsConfig,
+        global_budget: InflightBudget,
+        raw_day_gate: Arc<RawDayGate>,
+        generation: u64,
+        revision: u64,
+        reached: oneshot::Sender<()>,
+        resume: oneshot::Receiver<()>,
+    ) -> Result<Self> {
+        Self::from_market_sdk(
+            MarketSdkRuntime::new_with_before_ack_pause(
+                endpoint, config, generation, revision, reached, resume,
+            )?,
+            global_budget,
+            raw_day_gate,
+            Arc::new(now_ms),
+        )
+    }
+
+    fn from_market_sdk(
+        mut sdk: MarketSdkRuntime,
+        global_budget: InflightBudget,
+        raw_day_gate: Arc<RawDayGate>,
+        recv_utc_now: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> Result<Self> {
         let receiver = sdk.take_message_receiver()?;
         let decoded_budget = InflightBudget::with_limits(
             POLYMARKET_DECODED_QUEUE_CAPACITY,
@@ -644,8 +679,18 @@ where
     loop {
         let now = timeline_now();
         context.actor_now_utc_ms = now.utc_ms;
-        advance_polymarket_boundaries(now.utc_ms, context, sink, collector_identity, run_started)
+        let discovery_authorities_complete =
+            polymarket_context_discovery_authorities_complete(context);
+        if discovery_authorities_complete {
+            advance_polymarket_boundaries(
+                now.utc_ms,
+                context,
+                sink,
+                collector_identity,
+                run_started,
+            )
             .await?;
+        }
         finalize_polymarket_outer_ready_pending(
             &*timeline_now,
             context,
@@ -662,7 +707,8 @@ where
             now,
             sink,
         )?;
-        let next_actor_at = next_polymarket_outer_actor_at(&*timeline_now, context);
+        let next_actor_at =
+            next_polymarket_outer_actor_at(&*timeline_now, context, discovery_authorities_complete);
         let has_next_actor_wake = next_actor_at.is_some();
         let next_actor_at = next_actor_at.unwrap_or(retry_at);
         tokio::select! {
@@ -748,14 +794,24 @@ where
                             boundary_now.utc_ms,
                             context,
                         )?;
-                        advance_polymarket_boundaries(
-                            boundary_now.utc_ms,
+                        admit_missing_polymarket_context_metadata(
                             context,
                             sink,
                             collector_identity,
                             run_started,
+                            Some(day_boundary_utc_ms),
                         )
                         .await?;
+                        if polymarket_context_discovery_authorities_complete(context) {
+                            advance_polymarket_boundaries(
+                                boundary_now.utc_ms,
+                                context,
+                                sink,
+                                collector_identity,
+                                run_started,
+                            )
+                            .await?;
+                        }
                     }
                     let (latest_exhausted_applied_at_utc_ms, fatal_integrity) =
                         finalize_polymarket_ready_pending_while_paused(
@@ -872,7 +928,7 @@ pub(super) async fn run_polymarket_source_with_spec(
     let mut resolution_poll_tasks = JoinSet::<GammaResolutionPollCompletion>::new();
     while deadline_ms.is_none_or(|deadline_ms| now_ms() < deadline_ms) {
         let discovery = if context.is_none() {
-            let mut discovery = match discover_initial_polymarket_context(
+            let discovery = match discover_initial_polymarket_context(
                 &gamma,
                 spec.discovery_wait,
                 spec.discovery_retry_delay,
@@ -903,24 +959,10 @@ pub(super) async fn run_polymarket_source_with_spec(
                     return Err(error.into());
                 }
             };
-            let recovered_match = match preserve_recovered_polymarket_fixed_identity_authority(
-                &restart_fixed_identities,
-                &mut discovery,
-            ) {
-                Ok(recovered_match) => recovered_match,
-                Err(error) => {
-                    record_gap(
-                        &sink.gaps,
-                        format!("polymarket_restart_identity_integrity:{error}"),
-                    );
-                    return Err(error);
-                }
-            };
             context = Some(PolymarketProcessingContext::new_with_source_epoch(
                 discovery.clone(),
                 source_sequence_epoch_id.clone(),
             ));
-            recovered_match.consume(&mut restart_fixed_identities);
             Some(discovery)
         } else {
             None
@@ -1089,11 +1131,26 @@ async fn discover_initial_polymarket_context(
     discovery_retry_delay: Duration,
     control_rx: &mut mpsc::Receiver<PolymarketSourceControl>,
 ) -> std::result::Result<Option<BtcUpdownDiscovery>, PolymarketDiscoveryError> {
-    let discovery = discover_markets_with_wait(gamma, discovery_wait, discovery_retry_delay);
+    select_initial_polymarket_context(
+        discover_markets_with_wait(gamma, discovery_wait, discovery_retry_delay),
+        control_rx,
+    )
+    .await
+}
+
+pub(super) async fn select_initial_polymarket_context<D>(
+    discovery: D,
+    control_rx: &mut mpsc::Receiver<PolymarketSourceControl>,
+) -> std::result::Result<Option<BtcUpdownDiscovery>, PolymarketDiscoveryError>
+where
+    D: std::future::Future<
+            Output = std::result::Result<BtcUpdownDiscovery, PolymarketDiscoveryError>,
+        >,
+{
     tokio::pin!(discovery);
     loop {
         tokio::select! {
-            result = &mut discovery => return result.map(Some),
+            biased;
             control = control_rx.recv() => {
                 let Some(PolymarketSourceControl::Fence {
                     stop_after_fence,
@@ -1113,6 +1170,7 @@ async fn discover_initial_polymarket_context(
                     ))?;
                 }
             }
+            result = &mut discovery => return result.map(Some),
         }
     }
 }
@@ -1794,8 +1852,12 @@ impl PolymarketProcessingContext {
             ))
             .into());
         }
-        self.source_authorities = updated;
-        self.ensure_pending_bounds()
+        let previous = std::mem::replace(&mut self.source_authorities, updated);
+        if let Err(error) = self.ensure_pending_bounds() {
+            self.source_authorities = previous;
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub(super) fn validate_local_transition_authority(
@@ -1839,6 +1901,21 @@ fn polymarket_authority_matches_discovered(
         && authority.market_start_utc == market.start_ts_s.saturating_mul(1_000)
         && authority.market_end_utc == market.end_ts_s.saturating_mul(1_000)
         && authority.fixed_identity_verified_at_utc == market.fixed_identity_verified_at_utc_ms
+}
+
+pub(super) fn polymarket_context_discovery_authorities_complete(
+    context: &PolymarketProcessingContext,
+) -> bool {
+    context
+        .current
+        .iter()
+        .chain(context.next.iter())
+        .all(|market| {
+            context
+                .source_authorities
+                .iter()
+                .any(|authority| polymarket_authority_matches_discovered(authority, market))
+        })
 }
 
 fn polymarket_authority_matches_identity(
@@ -2286,6 +2363,26 @@ fn replace_retryable_polymarket_primary(
     {
         *primary_error = later_error;
     }
+}
+
+fn polymarket_context_install_metadata_error(
+    subscription_error: &mut Option<Box<dyn Error + Send + Sync>>,
+    metadata_error: Box<dyn Error + Send + Sync>,
+    gaps: &SharedSourceGaps,
+) -> Box<dyn Error + Send + Sync> {
+    let Some(mut primary) = subscription_error.take() else {
+        return metadata_error;
+    };
+    let metadata_becomes_primary = market_source_error_is_retryable(primary.as_ref())
+        && !market_source_error_is_retryable(metadata_error.as_ref());
+    if !metadata_becomes_primary {
+        record_gap(
+            gaps,
+            format!("polymarket_context_install_secondary_metadata_error:{metadata_error}"),
+        );
+    }
+    replace_retryable_polymarket_primary(&mut primary, metadata_error);
+    primary
 }
 
 fn record_abandoned_polymarket_messages(
@@ -3449,10 +3546,19 @@ pub(super) async fn apply_polymarket_subscription_while_draining(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PolymarketCurrentMetadataRoute {
+    ExistingCurrent,
+    CurrentSnapshot,
+    CurrentCandidate,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn install_polymarket_context(
     discovery: BtcUpdownDiscovery,
-    emit_current_metadata: bool,
+    evaluation_ms: i64,
+    current_metadata_route: PolymarketCurrentMetadataRoute,
+    commit_metadata_after_subscription_error: bool,
     market_runtime: &mut PolymarketDrainRuntime,
     context: &mut PolymarketProcessingContext,
     resolution_poll_tasks: &mut JoinSet<GammaResolutionPollCompletion>,
@@ -3461,9 +3567,23 @@ pub(super) async fn install_polymarket_context(
     run_started: Instant,
     recovery: &mut SourceRecoverySupervisor,
 ) -> Result<()> {
+    let previous_current = context.current.clone();
+    let previous_next = context.next.clone();
+    let previous_early_ws_claims = context.early_ws_claims.clone();
+    let previous_source_authorities = context.source_authorities.clone();
     context.replace_discovery(discovery);
-    let target_assets = context.desired_assets()?;
-    apply_polymarket_subscription_while_draining(
+    let target_assets = match context.desired_assets() {
+        Ok(target_assets) => target_assets,
+        Err(error) => {
+            context.current = previous_current;
+            context.next = previous_next;
+            context.early_ws_claims = previous_early_ws_claims;
+            context.source_authorities = previous_source_authorities;
+            context.rebuild_asset_to_slug();
+            return Err(error);
+        }
+    };
+    let mut subscription_error = apply_polymarket_subscription_while_draining(
         market_runtime,
         target_assets,
         context,
@@ -3473,27 +3593,92 @@ pub(super) async fn install_polymarket_context(
         run_started,
         recovery,
     )
-    .await?;
-    if emit_current_metadata {
-        let current = context
-            .current
-            .as_ref()
-            .ok_or_else(|| invalid_data("installed Polymarket context is missing current"))?;
-        let authority = send_polymarket_metadata_event(
-            sink,
-            run_started,
-            current,
-            "current",
-            collector_identity,
-        )
-        .await?;
-        context.register_source_authority(authority)?;
+    .await
+    .err();
+    if subscription_error.is_some() && !commit_metadata_after_subscription_error {
+        return Err(subscription_error.take().unwrap());
+    }
+    let current_authority = match current_metadata_route {
+        PolymarketCurrentMetadataRoute::ExistingCurrent => None,
+        PolymarketCurrentMetadataRoute::CurrentSnapshot => Some(
+            async {
+                let current = context.current.as_ref().ok_or_else(|| {
+                    invalid_data("installed Polymarket context is missing current")
+                })?;
+                send_polymarket_metadata_event(
+                    sink,
+                    run_started,
+                    current,
+                    "current",
+                    collector_identity,
+                )
+                .await
+            }
+            .await,
+        ),
+        PolymarketCurrentMetadataRoute::CurrentCandidate => Some(
+            async {
+                let current = context.current.as_ref().ok_or_else(|| {
+                    invalid_data("installed Polymarket context is missing current")
+                })?;
+                let row = polymarket_candidate_to_active_v3_row(
+                    current,
+                    evaluation_ms,
+                    collector_identity,
+                )?;
+                send_polymarket_metadata_v3_source_authority_row(sink, run_started, row).await
+            }
+            .await,
+        ),
+    };
+    if let Some(current_authority) = current_authority {
+        let authority = match current_authority {
+            Ok(authority) => authority,
+            Err(error) => {
+                return Err(polymarket_context_install_metadata_error(
+                    &mut subscription_error,
+                    error,
+                    &sink.gaps,
+                ));
+            }
+        };
+        if let Err(error) = context.register_source_authority(authority) {
+            return Err(polymarket_context_install_metadata_error(
+                &mut subscription_error,
+                error,
+                &sink.gaps,
+            ));
+        }
     }
     if let Some(next) = &context.next {
-        let authority =
-            send_polymarket_metadata_event(sink, run_started, next, "next", collector_identity)
-                .await?;
-        context.register_source_authority(authority)?;
+        let authority = match send_polymarket_metadata_event(
+            sink,
+            run_started,
+            next,
+            "next",
+            collector_identity,
+        )
+        .await
+        {
+            Ok(authority) => authority,
+            Err(error) => {
+                return Err(polymarket_context_install_metadata_error(
+                    &mut subscription_error,
+                    error,
+                    &sink.gaps,
+                ));
+            }
+        };
+        if let Err(error) = context.register_source_authority(authority) {
+            return Err(polymarket_context_install_metadata_error(
+                &mut subscription_error,
+                error,
+                &sink.gaps,
+            ));
+        }
+    }
+    if let Some(error) = subscription_error {
+        return Err(error);
     }
     recovery.record_business_recovery();
     sink.source_queue_backpressure
@@ -3501,9 +3686,45 @@ pub(super) async fn install_polymarket_context(
     Ok(())
 }
 
+async fn admit_missing_polymarket_context_metadata(
+    context: &mut PolymarketProcessingContext,
+    sink: &SourceEventSink,
+    collector_identity: &CollectorIdentity,
+    run_started: Instant,
+    source_received_before_utc_ms: Option<i64>,
+) -> Result<()> {
+    let missing = context
+        .current
+        .iter()
+        .map(|market| (market, "current"))
+        .chain(context.next.iter().map(|market| (market, "next")))
+        .filter(|(market, _)| {
+            !context
+                .source_authorities
+                .iter()
+                .any(|authority| polymarket_authority_matches_discovered(authority, market))
+        })
+        .map(|(market, role)| (market.clone(), role))
+        .collect::<Vec<_>>();
+    for (market, role) in missing {
+        if source_received_before_utc_ms.is_some_and(|boundary| {
+            market
+                .metadata_received_utc_ms
+                .is_some_and(|received| received >= boundary)
+        }) {
+            continue;
+        }
+        let authority =
+            send_polymarket_metadata_event(sink, run_started, &market, role, collector_identity)
+                .await?;
+        context.register_source_authority(authority)?;
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PolymarketContextInstallOutcome {
-    Applied { applied_at_utc_ms: i64 },
+    Applied,
     Expired,
 }
 
@@ -3511,7 +3732,8 @@ pub(super) enum PolymarketContextInstallOutcome {
 pub(super) async fn install_polymarket_context_if_current(
     discovery: BtcUpdownDiscovery,
     evaluation_ms: i64,
-    emit_current_metadata: bool,
+    current_metadata_route: PolymarketCurrentMetadataRoute,
+    commit_metadata_after_subscription_error: bool,
     market_runtime: &mut PolymarketDrainRuntime,
     context: &mut PolymarketProcessingContext,
     resolution_poll_tasks: &mut JoinSet<GammaResolutionPollCompletion>,
@@ -3525,7 +3747,9 @@ pub(super) async fn install_polymarket_context_if_current(
     }
     install_polymarket_context(
         discovery,
-        emit_current_metadata,
+        evaluation_ms,
+        current_metadata_route,
+        commit_metadata_after_subscription_error,
         market_runtime,
         context,
         resolution_poll_tasks,
@@ -3535,9 +3759,7 @@ pub(super) async fn install_polymarket_context_if_current(
         recovery,
     )
     .await?;
-    Ok(PolymarketContextInstallOutcome::Applied {
-        applied_at_utc_ms: evaluation_ms,
-    })
+    Ok(PolymarketContextInstallOutcome::Applied)
 }
 
 pub(super) fn validate_polymarket_context_switch(
@@ -3618,6 +3840,7 @@ pub(super) fn preserve_polymarket_fixed_identity_authority(
 pub(super) struct RecoveredPolymarketFixedIdentityMatch {
     pub(super) current: bool,
     pub(super) next: bool,
+    pub(super) fresh_current: bool,
 }
 
 impl RecoveredPolymarketFixedIdentityMatch {
@@ -3636,7 +3859,9 @@ pub(super) fn preserve_recovered_polymarket_fixed_identity_authority(
     discovery: &mut BtcUpdownDiscovery,
 ) -> Result<RecoveredPolymarketFixedIdentityMatch> {
     let mut matched = RecoveredPolymarketFixedIdentityMatch::default();
-    for market in std::iter::once(&mut discovery.current).chain(discovery.next.as_mut()) {
+    for (fresh_current, market) in std::iter::once((true, &mut discovery.current))
+        .chain(discovery.next.as_mut().map(|market| (false, market)))
+    {
         let current_matches = recovered
             .current
             .as_ref()
@@ -3675,8 +3900,21 @@ pub(super) fn preserve_recovered_polymarket_fixed_identity_authority(
         } else {
             matched.next = true;
         }
+        if fresh_current {
+            matched.fresh_current = true;
+        }
     }
     Ok(matched)
+}
+
+pub(super) fn recovered_polymarket_current_metadata_route(
+    recovered_match: RecoveredPolymarketFixedIdentityMatch,
+) -> PolymarketCurrentMetadataRoute {
+    if recovered_match.fresh_current {
+        PolymarketCurrentMetadataRoute::CurrentSnapshot
+    } else {
+        PolymarketCurrentMetadataRoute::CurrentCandidate
+    }
 }
 
 pub(super) fn recovered_polymarket_fixed_identity_matches(
@@ -3742,7 +3980,7 @@ fn stamp_polymarket_discovery_validation(
 pub(super) async fn switch_polymarket_context<N>(
     mut discovery: BtcUpdownDiscovery,
     timeline_now: &N,
-    emit_current_metadata: bool,
+    current_metadata_route: PolymarketCurrentMetadataRoute,
     market_runtime: &mut PolymarketDrainRuntime,
     context: &mut PolymarketProcessingContext,
     resolution_poll_tasks: &mut JoinSet<GammaResolutionPollCompletion>,
@@ -3778,7 +4016,8 @@ where
     install_polymarket_context_if_current(
         discovery,
         timeline_now().utc_ms,
-        emit_current_metadata,
+        current_metadata_route,
+        true,
         market_runtime,
         context,
         resolution_poll_tasks,
@@ -4314,15 +4553,20 @@ where
 fn next_polymarket_outer_actor_at<N>(
     timeline_now: &N,
     context: &PolymarketProcessingContext,
+    include_current_boundary: bool,
 ) -> Option<TokioInstant>
 where
     N: Fn() -> PolymarketTimelineNow + Send + Sync,
 {
     let now = timeline_now();
-    let current_boundary_utc_ms = context
-        .current
-        .as_ref()
-        .map(|current| current.end_ts_s.saturating_mul(1_000));
+    let current_boundary_utc_ms = if include_current_boundary {
+        context
+            .current
+            .as_ref()
+            .map(|current| current.end_ts_s.saturating_mul(1_000))
+    } else {
+        None
+    };
     let next_slot_utc_ms = context
         .pending
         .values()
@@ -4731,11 +4975,25 @@ where
         run_started,
     )
     .await?;
-    if let Some(discovery) = discovery {
+    if let Some(mut discovery) = discovery {
+        let recovered_match = match preserve_recovered_polymarket_fixed_identity_authority(
+            restart_fixed_identities,
+            &mut discovery,
+        ) {
+            Ok(recovered_match) => recovered_match,
+            Err(error) => {
+                record_gap(
+                    &sink.gaps,
+                    format!("polymarket_restart_identity_integrity:{error}"),
+                );
+                return Err(error);
+            }
+        };
         let installed = install_polymarket_context_if_current(
             discovery,
             initial_now.utc_ms,
-            true,
+            PolymarketCurrentMetadataRoute::CurrentSnapshot,
+            false,
             market_runtime,
             context,
             resolution_poll_tasks,
@@ -4746,11 +5004,15 @@ where
         )
         .await?;
         if installed == PolymarketContextInstallOutcome::Expired {
+            context.current = None;
+            context.next = None;
+            context.rebuild_asset_to_slug();
             return Err(PolymarketDiscoveryError::Unavailable(
                 "Gamma discovery expired before initial context installation".to_owned(),
             )
             .into());
         }
+        recovered_match.consume(restart_fixed_identities);
     } else {
         if context.current.is_none() && context.pending.is_empty() {
             return Err(invalid_data(
@@ -4758,6 +5020,25 @@ where
             )
             .into());
         }
+        let recovered_match = if let Some(mut discovery) = context.discovery_snapshot() {
+            let recovered_match = match preserve_recovered_polymarket_fixed_identity_authority(
+                restart_fixed_identities,
+                &mut discovery,
+            ) {
+                Ok(recovered_match) => recovered_match,
+                Err(error) => {
+                    record_gap(
+                        &sink.gaps,
+                        format!("polymarket_restart_identity_integrity:{error}"),
+                    );
+                    return Err(error);
+                }
+            };
+            context.replace_discovery(discovery);
+            recovered_match
+        } else {
+            RecoveredPolymarketFixedIdentityMatch::default()
+        };
         apply_polymarket_subscription_while_draining(
             market_runtime,
             context.desired_assets()?,
@@ -4769,6 +5050,15 @@ where
             recovery,
         )
         .await?;
+        admit_missing_polymarket_context_metadata(
+            context,
+            sink,
+            collector_identity,
+            run_started,
+            None,
+        )
+        .await?;
+        recovered_match.consume(restart_fixed_identities);
         recovery.record_business_recovery();
         sink.source_queue_backpressure
             .set_recovery_active("polymarket_market", false);
@@ -5033,7 +5323,7 @@ where
                             let installed = switch_polymarket_context(
                                 updated,
                                 &*timeline_now,
-                                false,
+                                PolymarketCurrentMetadataRoute::ExistingCurrent,
                                 market_runtime,
                                 context,
                                 resolution_poll_tasks,
@@ -5044,7 +5334,7 @@ where
                             )
                             .await?;
                             match installed {
-                                PolymarketContextInstallOutcome::Applied { .. } => {
+                                PolymarketContextInstallOutcome::Applied => {
                                     recovered_match.consume(restart_fixed_identities);
                                 }
                                 PolymarketContextInstallOutcome::Expired => {
@@ -5129,11 +5419,12 @@ where
                                 return Err(error);
                             }
                         };
-                    let late_current = discovery.current.clone();
+                    let current_metadata_route =
+                        recovered_polymarket_current_metadata_route(recovered_match);
                     let installed = switch_polymarket_context(
                         discovery,
                         &*timeline_now,
-                        false,
+                        current_metadata_route,
                         market_runtime,
                         context,
                         resolution_poll_tasks,
@@ -5143,29 +5434,15 @@ where
                         recovery,
                     )
                     .await?;
-                    let applied_at_utc_ms = match installed {
-                        PolymarketContextInstallOutcome::Applied { applied_at_utc_ms } => {
-                            recovered_match.consume(restart_fixed_identities);
-                            applied_at_utc_ms
-                        }
+                    match installed {
+                        PolymarketContextInstallOutcome::Applied => {}
                         PolymarketContextInstallOutcome::Expired => {
                             rollover_retry_at = Some(timeline_now().monotonic);
                             continue;
                         }
-                    };
+                    }
                     let installed_now = timeline_now();
-                    let activation_row = polymarket_candidate_to_active_v3_row(
-                        &late_current,
-                        applied_at_utc_ms,
-                        collector_identity,
-                    )?;
-                    let authority = send_polymarket_metadata_v3_source_authority_row(
-                        sink,
-                        run_started,
-                        activation_row,
-                    )
-                    .await?;
-                    context.register_source_authority(authority)?;
+                    recovered_match.consume(restart_fixed_identities);
                     next_discovery_at = if context.next.is_none() {
                         installed_now.monotonic
                     } else {
