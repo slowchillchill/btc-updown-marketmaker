@@ -1,6 +1,6 @@
 # DC-INCIDENT-20260728-LAG-IDENTITY-REPAIR 计划
 
-> 状态：`APPROVED_EXECUTING_STAGE6R_B2`
+> 状态：`STAGE6R_RELEASE_COMPLETE_DEPLOY_PENDING`
 >
 > 对应需求：`demand/data-collect-20260728-lag-fixed-identity-repair-demand.md`
 >

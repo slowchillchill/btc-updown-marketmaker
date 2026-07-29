@@ -1,6 +1,6 @@
 # DC-INCIDENT-20260728-LAG-IDENTITY-REPAIR Changelog
 
-> 状态：`STAGE6R_B2_COMPLETE_RELEASE_PENDING`
+> 状态：`STAGE6R_RELEASE_COMPLETE_DEPLOY_PENDING`
 >
 > 对应需求：`demand/data-collect-20260728-lag-fixed-identity-repair-demand.md`
 >
@@ -838,3 +838,41 @@
   本事项的必要消费方。
 - Stage 6R B2 已满足需求与计划完成门。下一步是 commit/push，再从 clean commit
   构建并记录新 release；完成前远端 service 继续保持停止。
+
+## Stage 6R B2 release
+
+- B2 实现提交为 `a3fed4050e5554bb2f24d567d182d4f3ce87aece`
+  （`fix(data-collect): repair pending restart metadata routing`），已推送到
+  `origin/fix-rtds-silents`；构建前本地 HEAD、remote-tracking ref 一致且工作树
+  clean。
+- 从该 commit 本地执行：
+  `DATA_COLLECT_GIT_COMMIT=a3fed4050e5554bb2f24d567d182d4f3ce87aece cargo build --release --locked --bin data-collect-training-collector`。
+- 新部署产物：
+  - path：
+    `/home/chillchill/fix-rtds-silents/target/release/data-collect-training-collector`；
+  - size：30,322,264 bytes；
+  - SHA256：
+    `5359b4cfcd397f8fd83a648808950e635df54b7fff5ee7ab584238d2c5784b0e`；
+  - ELF：x86-64 PIE、dynamic；
+  - Build ID：`b4a1f99177577a926e0db1811636c7923d927b2b`；
+  - 最大 GLIBC requirement：`GLIBC_2.38`；
+  - `--version`：`data-collect-training-collector 0.1.0`；
+  - binary strings 包含完整 build commit
+    `a3fed4050e5554bb2f24d567d182d4f3ce87aece`，`--help` 参数与部署合同一致。
+- 对同一 SHA 的 release 使用全新隔离 root
+  `/tmp/data-collect-stage6r-release-probe-h4a7Fm` 运行 15 秒：
+  - exit 0，elapsed `15.15s`，maximum RSS `39,660 KiB`；
+  - manifest build commit 与 binary SHA 精确匹配；
+  - 六个逻辑 source 各生成一个 finalized Parquet，共 5,810 rows；
+  - manifest `gaps=[]`，所有 source `lag_events=0`、`dropped_rows=0`；
+  - 六个 Parquet 的实际 SHA256 与 manifest 逐文件一致；
+  - 当日顶层 manifest 仍为 `open`，短时进程 coverage 为 `ended_known`，符合当日
+    dataset root 仍可继续激活的既有合同，不将短时 probe 误写为完整训练日。
+- `gpt-5.6-sol/ultra` 独立 release 审查重新核验远端 branch ref、binary 属性、probe
+  原始运行结果、manifest 与六个 Parquet，结论为
+  `PASS — Critical 0 / Major 0 / Minor 0`。
+- 审查发现 demand/plan 顶部状态仍停留在 B2 执行中；现已只把三件套状态同步为
+  `STAGE6R_RELEASE_COMPLETE_DEPLOY_PENDING`。复审确认无剩余 finding，也没有新增
+  migration、atomic replacement 或复杂删除流程。
+- 本节提交/push 后进入 Stage 5：复核 UTC27/UTC28 本地副本，再执行用户批准的两个
+  远端目录直接清空与重部署。
