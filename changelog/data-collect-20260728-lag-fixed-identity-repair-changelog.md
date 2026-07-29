@@ -1,6 +1,6 @@
 # DC-INCIDENT-20260728-LAG-IDENTITY-REPAIR Changelog
 
-> 状态：`STAGE6_CONTROLLED_RESTART_RUNNING_CONTENT_PENDING`
+> 状态：`STAGE6_CONTROLLED_RESTART_CONTENT_PASS_ROLLOVER_PENDING`
 >
 > 对应需求：`demand/data-collect-20260728-lag-fixed-identity-repair-demand.md`
 >
@@ -1000,3 +1000,41 @@
   存活与 journal，结论为 `PASS — Critical 0 / Major 0 / Minor 0`。审查确认没有
   越界把重启前 finalized metadata 当作重启后内容证据，也没有加入第二次重启或额外
   校验流程。
+
+## Stage 6 B2 真实受控重启内容门通过
+
+- 15 分钟只读监控第 2 个周期于 `2026-07-29T07:07:57Z` 准时触发。07:00 自然小时
+  finalize 已完成，服务仍为 PID `1231184`、`active/running`、`NRestarts=0`，
+  journal 事故关键词为零。
+- UTC29 manifest 从六个文件、378,888 rows 推进为 12 个 finalized Parquet、
+  1,664,602 rows；六源累计为：
+  - Binance aggTrade 38,905；
+  - Binance depth snapshot 2；
+  - Binance depth update 35,006；
+  - Polymarket market 1,587,245；
+  - Polymarket metadata 48；
+  - RTDS 3,396。
+  manifest 继续为 `open / active / reactivated_within_day=true / gaps=[]`，六源
+  `lag_events=0`、`dropped_rows=0`、`reconnect_events=0`。
+- 重启后的 finalized metadata 文件
+  `polymarket_market_metadata_06-part-1.parquet` 为 40,409 bytes、35 rows，SHA256
+  `f719050b32db675cb8f412d967016df36044fff6ee2793cf1f8a01f55ce32af3`；
+  远端 manifest、远端实际文件和本地只读副本一致，PAR1 header/footer 与 footer
+  row count 全部通过。
+- 该文件的前两行直接关闭 B2 内容门：
+  - current `btc-updown-5m-1785305700` 写 `metadata_snapshot`，首次 fixed time
+    保持 `06:10:00.046Z`，fresh receive/validation 为 `06:15:10.444Z`，
+    admission 为 `06:15:10.648Z`；
+  - next `btc-updown-5m-1785306000` 写 `metadata_snapshot`，首次 fixed time
+    保持 `06:15:00.053Z`，fresh receive 为 `06:15:10.691Z`，
+    validation/admission 为 `06:15:10.704Z`。
+- 全 35 行的 admission sequence 精确为 `1..35`，row kind 为 10 个 snapshot、
+  16 个 state transition、9 个 WS terminal；所有 69 列字符串中没有 `candidate`，
+  `candidate_to_active=0`、`none_to_current=0`。B2 前后 strict candidate validator
+  未修改，producer admission 前和 writer 落盘前仍执行完整 validation。
+- `gpt-5.6-sol/ultra` 独立内容审查结论为
+  `PASS — Critical 0 / Major 0 / Minor 0`；immutable identity、fixed time、时间
+  因果、role、pending/terminal 链均零失败。证据足以把三件套推进为
+  `STAGE6_CONTROLLED_RESTART_CONTENT_PASS_ROLLOVER_PENDING`。
+- 本次只证明真实受控重启及自然小时 finalize；UTC day rollover 与完整健康 UTC 日
+  仍未通过。当前 Codex 会话继续以 15 分钟周期只读监控，不重启服务或修改远端。
