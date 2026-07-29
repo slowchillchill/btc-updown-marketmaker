@@ -1,6 +1,6 @@
 # DC-INCIDENT-20260728-LAG-IDENTITY-REPAIR Changelog
 
-> 状态：`STAGE6R_RELEASE_COMPLETE_DEPLOY_PENDING`
+> 状态：`STAGE5_B2_REDEPLOY_COMPLETE_STAGE6_PENDING`
 >
 > 对应需求：`demand/data-collect-20260728-lag-fixed-identity-repair-demand.md`
 >
@@ -876,3 +876,77 @@
   migration、atomic replacement 或复杂删除流程。
 - 本节提交/push 后进入 Stage 5：复核 UTC27/UTC28 本地副本，再执行用户批准的两个
   远端目录直接清空与重部署。
+
+## Stage 5 B2 直接清空与重部署
+
+- 破坏性操作前重新只读核验本地副本：
+  - UTC27 manifest SHA256 为
+    `72ed09f2bbbe68d0b7a1d3d169a03f1f2e0f2778815664c912cd6f4154b4c192`；
+    文件集合为 26 个 manifest 所列 Parquet 加一个 manifest，逐文件
+    bytes/SHA256/PAR1 header/footer/footer rows 全部通过，共 7,858,199 rows、
+    486,395,408 Parquet bytes；
+  - UTC28 manifest SHA256 为
+    `0c08c357d3abbc901903efc83316d50edb92aadac51031903c2e66ed7f84c221`；
+    文件集合为 9 个 manifest 所列 Parquet 加一个 manifest，逐文件同样全部通过，
+    共 1,345,977 rows、82,699,349 Parquet bytes；
+  - UTC28 故障副本仍为 `open / unclean_end_unknown`、13 gaps，Polymarket
+    `lag_events=2145`、`dropped_rows=45`。
+- 远端后来存在的 2026-07-28 22:18--22:25 文件不是原始 10 文件故障副本，而是本文
+  已记录的首次 Stage 5 验证 root。该 root 的受控重启复现了
+  `candidate_to_active:fixed_identity_not_validation`，已在 Stage 6 固定为不兼容、
+  不可作为健康日；用户批准 B2 后的执行边界明确要求再次直接清空该验证 root，因此
+  不将它重新拉回或迁移。
+- `2026-07-29T05:58:46Z` 远端预检确认：
+  - unit 为 `inactive/dead`、`MainPID=0`；
+  - x86_64、glibc 2.39；
+  - ExecStart 仍精确引用批准的 datasets 与 data-collect 路径；
+  - 旧验证 binary SHA256 为
+    `80fa49a4b2261e21bb58e4466da5d67f0b6f101d986e886d7248de40d1e2e18b`。
+- 再次执行 `systemctl --user stop` 并确认 `MainPID=0` 后，直接删除且只删除：
+  - `/home/ubuntu/btc-updown-marketmaker/datasets`；
+  - `/home/ubuntu/btc-updown-marketmaker/data-collect`。
+  两个路径删除后均不存在；没有 staged rename、migration 或滚动替换。
+- 保留 `/home/ubuntu/.config/systemd/user/data-collect-training-collector.service`；
+  unit 仍为 `ubuntu:ubuntu`、mode 0644，mtime
+  `2026-07-15T18:12:58.479030609Z`。重新创建 `data-collect/bin` 后直接上传 B2
+  release，远端 binary 为 `ubuntu:ubuntu`、mode 0755、30,322,264 bytes，SHA256
+  与 Build ID 分别为：
+  - `5359b4cfcd397f8fd83a648808950e635df54b7fff5ee7ab584238d2c5784b0e`；
+  - `b4a1f99177577a926e0db1811636c7923d927b2b`。
+  `--version` 为 `0.1.0`，内嵌 build commit 为
+  `a3fed4050e5554bb2f24d567d182d4f3ce87aece`，远端 `ldd` 正常解析全部依赖。
+- `systemctl --user reset-failed` 后于 `2026-07-29T06:01:30Z` 启动原 unit：
+  - MainPID `1229293`，`active/running`、`Result=success`、`NRestarts=0`；
+  - `/proc/1229293/exe` 路径与 SHA256 精确匹配上述 release；
+  - 新 UTC29 manifest 的 build commit 与 binary SHA 正确，
+    coverage=`active`、`reactivated_within_day=false`、`gaps=[]`；
+  - 唯一进程同时持有六个 source 的 `.running` 文件。
+- 到 `2026-07-29T06:03:45Z`，PID 与 restart count 未变，memory current/peak 约
+  39.5/39.6 MiB。Polymarket market `.running` 已增长至 2,221,865 bytes；此前
+  20 秒采样从 1,202,128 增长到 1,540,591 bytes。其他 source 的 `.running`
+  在该时点仍为零长度；进程已持有对应文件描述符，但仅凭物理长度不能区分 writer
+  buffering 与业务静默，不据此误判写入失败或提前宣称其行级健康。
+- 启动后的 journal 只有 systemd started 行，未出现 receiver lag、backpressure、
+  raw-after-close、fixed-identity、validation failure、stack overflow、panic 或
+  source error。
+- 独立只读 live-health 从 `2026-07-29T06:08:06.764Z` 连续观察 `120.483s`：
+  - user unit 全程保持 PID `1229293`、`active/running`、`NRestarts=0`，`/proc`
+    binary 路径和 SHA 均未变化；
+  - Polymarket market `.running` 五次采样从 6,989,601 增长到 9,353,708 bytes，
+    每段都增长；其余五个 `.running` 全程仍为零长度，但六个文件均由同一 PID 持有；
+  - manifest 保持 `open / active / ended_utc_ms=null / reactivated=false /
+    gaps=[]`，当前 source counters 仍为零；
+  - journal 仍只有 Started；事故关键词为零；
+  - memory current 从 75,464,704 增至 93,138,944 bytes，`06:10:42Z` 末检为
+    97,275,904 bytes、peak 97,546,240 bytes。短窗口内上升是事实，不能据此判定
+    泄漏或长期稳定，继续交给 Stage 6 观察。
+- live-health 审查者首次漏用 `systemctl --user`，误查系统级同名 unit 并短暂报告
+  `inactive/dead`。直接 PID/cgroup 反证和修正后的 user-unit 查询均确认真实服务
+  未停止；该查询作用域误判已撤回，不作为运行异常证据。
+- `gpt-5.6-sol/ultra` Stage 5 独立审查结论为
+  `PASS — Critical 0 / Major 0 / Minor 0`。审查重新核验本地两日逐文件完整性、远端
+  删除范围、unit、binary、唯一 PID、六源文件描述符、manifest lineage、实时增长、
+  memory 边界和 journal；确认没有新增复杂部署流程或过度校验。
+- 三件套状态现同步为 `STAGE5_B2_REDEPLOY_COMPLETE_STAGE6_PENDING`。本阶段
+  commit/push 后进入 Stage 6；当前仍不宣称受控重启、UTC rollover 或完整健康 UTC
+  日已经通过。
