@@ -1,10 +1,12 @@
 # DC-INCIDENT-20260728-LAG-IDENTITY-REPAIR 需求
 
-> 状态：`STAGE6_CONTROLLED_RESTART_CONTENT_PASS_ROLLOVER_PENDING`
+> 状态：`CLOSED_BY_USER_ACCEPTANCE_20260730`
 >
 > 用户首次批准时间：2026-07-29
 >
 > Stage 6R B2 修复批准时间：2026-07-29
+>
+> 用户最终验收时间：2026-07-30
 >
 > 对应计划：`plan/data-collect-20260728-lag-fixed-identity-repair-plan.md`
 >
@@ -195,8 +197,11 @@ clean-root 重部署后，pending-only 受控重启把已有 fixed authority 的
    有合格事件的 source 按各自合同推进、内存稳定，且无 receiver
    lag/backpressure/raw-after-close/fixed-identity conflict。合法业务静默或稀疏
    snapshot 不要求人为持续产行，也不得仅因静默判为故障。
-9. 长跑至少覆盖一次受控重启和一次 UTC rollover；只有随后完整 UTC 日满足 closed、
-   无故障 gap/drop/lag 和逐文件完整性时，才可判为健康训练日。
+9. 真实受控重启、自然小时 finalize、fixed identity 保留、fresh validation 前进及
+   零 candidate 的运行证据已通过；用户于 2026-07-30 接受其作为本事故事项的最终
+   运行验收，并移除 UTC day rollover 和完整健康 UTC 日这两个完成阻断门。该决策
+   不声称两项未记录的运行证据已经发生；后续 rollover/full-day 健康检查属于持续
+   运维观察，不再阻断本事项关闭。
 10. subscription 安装失败后重试不得留下 `current-without-authority`、不得丢失
     pending 或重复 candidate。`Expired` 测试必须使用单调前进的时钟：首次发现的
     recovered current A 在安装前过期时零 row、零 consume，A/B authority 均保留；

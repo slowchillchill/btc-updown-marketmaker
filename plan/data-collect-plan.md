@@ -20,6 +20,10 @@
 
 > 状态：用户已在 2026-07-06 批准执行本文档；2026-07-10 又批准 Binance aggTrade schema v3、D+1 昨天归档修正、立即重新部署与重启采集；2026-07-11 批准只修复归档 depth checkpoint 并本地重跑，明确禁止审核前上传。本次执行仍不授权 paper/live 真实市场接入、真实下单、撤单或资金操作。
 >
+> 2026-07-30 排期 authority：paper/live 真实外部市场源 adapter 已延后到训练模块
+> 完成后，再另立三件套返回实施、测试和部署；它不再是本轮 `data-collect` closure
+> gate。当前只保留已实现 heartbeat/status binary 与 future 接入合同。
+>
 > 2026-07-18训练collector首次正式冷启动以`plan/data-collect-training-collector-direct-deployment-plan.md`为历史authority；2026-07-19用户批准的RTDS-PONG-A原路径重置部署以`plan/data-collect-rtds-pong-a-reset-deployment-plan.md`为当前执行authority。本计划中更早的gate、删除、重启或部署记录只保留为历史，不得重新执行。
 >
 > 2026-07-22 Polymarket resolution-followup窄authority已按用户批准同步到任务8.5附近；详细后续实现与验收只以`plan/data-collect-polymarket-resolution-followup-plan.md`为准。本事项AC-12真实source验收固定在本地原生Ubuntu环境使用已配置香港VPN线路，不再上传到AWS爱尔兰数据采集服务器执行。阶段0文档同步已完成；用户已后续授权完整执行阶段1至阶段4、本地构建/测试、每阶段独立审查后的commit/push与本地AC-12，但未授权production部署、服务操作或数据删除。

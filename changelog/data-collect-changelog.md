@@ -6,6 +6,16 @@
 
 > 对应计划文档：`/home/chillchill/btc-updown-marketmaker/plan/data-collect-plan.md`
 
+## 2026-07-30：paper/live 真实 adapter 延后
+
+- 用户决定把 paper/live 真实外部市场源 adapter 延后到训练模块完成后，再以独立
+  demand/plan/changelog 返回实施、测试和部署。
+- 当前 `data-collect-paper-hot` / `data-collect-live-hot` 仍只提供已实现的本机
+  heartbeat/status handoff；不得把 future `external_market_event` 合同写成当前能力。
+- 该排期变更不阻断本轮 `data-collect` 收尾。future `data-collect` adapter 仍须继承
+  handoff 与共同 RTDS 恢复合同；对应 paper/live runtime 独立负责本机 runtime
+  receive、消费背压处理和自身 append-only log，不把这些职责转移给 `data-collect`。
+
 ## 2026-07-28
 
 ### DC-REPAIR-20260728-REDUNDANT-TYPED-COLUMN-REMOVAL

@@ -4,6 +4,10 @@
 
 本矩阵只覆盖 `./data-collect/` 的外部市场源采集、证据、发布和消费者边界；不把 `data-pipeline`、训练标签/特征、paper/live 交易运行逻辑或 SDK 旁路实现纳入 `data-collect`。
 
+> 2026-07-30 排期边界：paper/live 真实外部市场源 adapter 延后到训练模块完成后
+> 另立三件套实施；当前 heartbeat/status handoff 和 future 接入合同的既有验收保持，
+> 真实 adapter 不阻断本轮 `data-collect` 收尾。
+
 | # | 需求验收点 | 覆盖证据 |
 |---|---|---|
 | 1 | `data-collect` 职责边界只到 raw evidence、`recv_time_utc`、typed raw parquet、每日采集事实 manifest、atomic rename、consumer boundary 与网络韧性；训练采集生产路径不生成 ResourceWatermark/receipt/sidecar | `event_envelope_contract`、`source_format_contract`、`consumer_format_compatibility_contract`、`training_consumer_boundary_contract`、`paper_live_boundary_contract`、`training_collector_runtime_contract` |

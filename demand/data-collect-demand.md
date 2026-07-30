@@ -2,6 +2,12 @@
 
 事项编号：`data-collect-demand`。
 
+> 2026-07-30 排期 authority：当前 training collector 能力和现有 paper/live
+> heartbeat/status binary 构成 `data-collect` 本轮收尾边界。paper/live 真实外部市场
+> 源 adapter 延后到训练模块完成后，再以独立 demand/plan/changelog 返回实施、测试和
+> 部署；该延期不阻断本轮 `data-collect` 完成，也不改变 future handoff、runtime
+> receive 和共同 RTDS 合同。
+>
 > 2026-07-18 authority同步：训练collector的外部availability、业务静默、连接生命周期、daily manifest coverage、SDK patch及Binance depth因果顺序边界，现以`demand/data-collect-source-availability-lifecycle-repair-demand.md`为准。普通业务静默、stale、空候选以及外部DNS/TCP/TLS/WS/HTTP故障不再自动构成confirmed gap、异常告警或进程退出；aggTrade ID前跳不再触发REST backfill；depth继续保留官方snapshot/update-id stitch，阶段6已把两个既有artifact升级为snapshot v3/update v4以区分raw ingress与collector admission。可靠operator stop/run deadline关闭共同intake后，尚未取得对应raw-day permit与queue ownership的depth generation-local pending或跨日deferred staging可以清空；正常snapshot unavailable、Close/EOF、reconnect、UTC rollover仍中性release，已取得permit并进入queue的evidence仍drain。跨日staging只在正常rollover flush时分配admission，受控清空不生成row/gap/告警/`dropped_rows`。专项阶段7已完成三个批准的完整collector场景、CLOB/Gamma各100-cycle、受控cutoff与跨日pre-admission staging验证并通过三路独立终审；阶段8及后续实施状态、验证证据和完成结论以专项需求、计划与changelog的最新记录为准。本文件未被该专项需求取代的source字段、typed raw、完整性、SDK-first与模块边界继续有效。专项计划不授权生产构建、部署、远端服务操作或数据清理。
 
 > 2026-07-22 Polymarket resolution-followup authority同步：`demand/data-collect-polymarket-resolution-followup-demand.md`已获用户批准为本事项的窄语义authority。它只取代本文中纯时间`current -> retired`、Gamma fallback要求`active=false`、expired-slug无例外以及普通transport证据绝不进入metadata typed row的冲突边界；冻结`resolution_pending`、E+3..E+8六个slot、metadata v3、terminal-once、restart/fail-closed与无future-skew上界合同。本事项AC-12真实source验收固定在本地原生Ubuntu环境通过已配置香港VPN线路执行，不使用AWS爱尔兰数据采集服务器；该测试拓扑不改变production部署拓扑。用户已后续授权完整执行专项阶段1至阶段4、每阶段独立审查后的commit/push与本地AC-12；production部署、服务操作和数据删除仍未授权。

@@ -1,6 +1,6 @@
 # DC-INCIDENT-20260728-LAG-IDENTITY-REPAIR 计划
 
-> 状态：`STAGE6_CONTROLLED_RESTART_CONTENT_PASS_ROLLOVER_PENDING`
+> 状态：`CLOSED_BY_USER_ACCEPTANCE_20260730`
 >
 > 对应需求：`demand/data-collect-20260728-lag-fixed-identity-repair-demand.md`
 >
@@ -166,17 +166,19 @@
 - 完成门：commit/push 后从 clean commit 构建 release，按阶段 5 的相同简单边界再次
   直接清空两个远端目录并重部署，然后重新进入阶段 6。
 
-## 阶段 6：长跑验收
+## 阶段 6：长跑验收（完成）
 
-- 任务 6.1：启动后验证六个逻辑 source/writer 任务健康；有合格事件的 source 对应
+- 任务 6.1（已完成）：启动后验证六个逻辑 source/writer 任务健康；有合格事件的 source 对应
   counter、running/finalized 文件和 manifest 按各自合同推进，RSS 保持稳定。
   合法业务静默和稀疏 snapshot 不要求持续产行。
-- 任务 6.2：在当前部分验证日形成 finalized current/next identity 后执行一次受控
+- 任务 6.2（已完成）：在当前部分验证日形成 finalized current/next identity 后执行一次受控
   restart；还必须先形成至少一个可恢复 pending。
   - 验证：PID 更新、`NRestarts` 符合受控动作、首次 verified time 不改写、fresh
     validation 前进、写 current snapshot 而非 candidate，并继续写入。
-- 任务 6.3：跨一次 UTC rollover。
-  - 验证：旧日协调关闭、新日激活、唯一 receiver 无 Lagged、无 fence deadlock。
-- 任务 6.4：继续运行到产生一个完整 UTC 日并审计。
-  - 验证：完整日 closed，六源文件/manifest 校验通过，无本事故相关 gap/drop/lag。
-- 任务 6.5：同步 changelog，独立审查运行证据，commit/push closure。
+- 任务 6.3：原计划跨一次 UTC rollover。
+  - 最终决策：用户于 2026-07-30 将其从本事故事项的完成阻断门移除；不再等待或执行
+    本任务作为 closure 前置条件，也不声称该运行证据已经取得。
+- 任务 6.4：原计划继续运行到产生一个完整 UTC 日并审计。
+  - 最终决策：用户于 2026-07-30 将其从本事故事项的完成阻断门移除；完整健康日后续
+    只属于持续运维观察。
+- 任务 6.5：同步三件套，独立审查最终用户验收语义并 commit/push closure。

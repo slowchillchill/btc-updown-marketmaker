@@ -2,6 +2,12 @@
 
 对应需求：`demand/data-collect-demand.md`
 
+> 当前状态：`DEFERRED_UNTIL_TRAINING_MODULE_COMPLETE`
+>
+> 2026-07-30 用户决策：paper/live 真实外部市场源 adapter 延后到训练模块完成后，
+> 再以独立 demand/plan/changelog 返回实施、测试和部署。该延期不阻断当前
+> `data-collect` 模块收尾；本文件保留 future 接入合同，不表示当前已经实现。
+
 本阶段不自动部署到 AWS paper/live 服务器。未来部署 `data-collect-paper-hot` 或 `data-collect-live-hot` 必须先获得用户单独批准。二者是分别部署在 paper/live 服务器上的独立 binary，不由训练 collector 或交易主程序兼任。live 服务器仍是运行目标，不是构建机，只能复制已构建 binary 和必要 runtime config；`data-collect-live-hot` 必须安装在 `/home/ubuntu/live-trade/data-collect/current/bin/` 下。
 
 当前阶段只验证 frame contract、heartbeat/status server 和 fake consumer；不宣称 paper/live 二进制已在交易服务器完成真实 Polymarket/Binance/RTDS `external_market_event` 长跑验收。真实 paper/live 外部市场源 handoff 部署前，必须另行获得用户批准，并由对应 paper/live runtime 写入本机 runtime receive timestamp 和自身 append-only event log。

@@ -1,6 +1,6 @@
 # DC-INCIDENT-20260728-LAG-IDENTITY-REPAIR Changelog
 
-> 状态：`STAGE6_CONTROLLED_RESTART_CONTENT_PASS_ROLLOVER_PENDING`
+> 状态：`CLOSED_BY_USER_ACCEPTANCE_20260730`
 >
 > 对应需求：`demand/data-collect-20260728-lag-fixed-identity-repair-demand.md`
 >
@@ -59,10 +59,10 @@
 - fixed identity 失败链已确认；严格 equality 保留，修复 active current/next 首次
   identity authority 的重启恢复。
 
-## 待执行
+## 当时待执行（历史 Stage 0 检查点，后续已完成）
 
-- Stage 0 commit/push。
-- Stage 1 bounded recovery 实现。
+- 当时下一步为 Stage 0 commit/push；后续已完成。
+- 当时下一步为 Stage 1 bounded recovery 实现；后续已完成。
 
 ## Stage 0 审查
 
@@ -325,8 +325,8 @@
 - `cargo check -p data-collect --locked --all-targets`、
   `cargo clippy -p data-collect --locked --all-targets -- -D warnings`、
   `cargo fmt --all -- --check` 和 `git diff --check` 全部通过。
-- Stage 3 当前等待自审与 `gpt-5.6-sol/ultra` 独立阶段审查；审查通过前不提交、
-  不推送，也不进入远端清空或部署。
+- 截至该历史检查点，Stage 3 等待自审与 `gpt-5.6-sol/ultra` 独立阶段审查；审查
+  通过前不提交、不推送，也不进入远端清空或部署。该审查和后续阶段现均已完成。
 
 ## Stage 3 首轮独立审查与修复
 
@@ -353,8 +353,9 @@
   - `NonBtcFiveMinuteMarket` 与 `Inactive` 不会被过度转为 76；
   - delayed fence 跨 E 返回 `Expired` 后 recovered candidate 仍存在，fresh
     replacement 已使用首次 verified time但没有提前消费 authority。
-- 修复后 `live_runtime::tests::polymarket_source` 仍为 102 passed；Stage 3 等待
-  `gpt-5.6-sol/ultra` 聚焦复审。复审通过前不提交、不推送、不操作远端。
+- 修复后 `live_runtime::tests::polymarket_source` 仍为 102 passed；截至该历史检查点，
+  Stage 3 等待 `gpt-5.6-sol/ultra` 聚焦复审。该复审后续已通过，原禁止提交、推送和
+  远端操作的临时门不再是当前指令。
 
 ## Stage 3 最终独立复审
 
@@ -368,8 +369,9 @@
   - 可观察 marker 已删除，`NonBtcFiveMinuteMarket`、`Inactive`、SDK decode 和无
     recovered authority 均未被扩大为退出码 76；
   - Polymarket source 102 项和 `git diff --check` 复跑通过。
-- Stage 3 已满足实现、全量验证和独立审查完成门；本 changelog 与代码在同一阶段
-  commit/push 后进入 Stage 4。远端清空和部署仍未开始。
+- Stage 3 已满足实现、全量验证和独立审查完成门；当时下一步是将本 changelog 与代码
+  在同一阶段 commit/push 后进入 Stage 4。该发布及后续部署现均已完成；“尚未开始”
+  只描述当时状态。
 
 ## Stage 3 发布
 
@@ -446,16 +448,17 @@
   SHA 不同，且两提交差异未触碰 training binary、startup coordinator 或 source task
   supervision。GDB 将当前溢出收窄到既有 Polymarket producer 的大型 debug async
   future；因此它不是 Stage 3 fixed-identity 修改引入的回归。
-- 当前不把 debug-only 现象转化为远端环境变量或额外 runtime 配置；是否属于本事项
-  release 阻断项，交由 Stage 4 `gpt-5.6-sol/ultra` 最终独立审查。远端仍未删除、
-  上传或重启。
+- 当时不把 debug-only 现象转化为远端环境变量或额外 runtime 配置；是否属于本事项
+  release 阻断项，交由 Stage 4 `gpt-5.6-sol/ultra` 最终独立审查。该审查后续已
+  PASS；“远端仍未删除、上传或重启”只描述本历史检查点。
 
 ## Stage 4 最终独立审查
 
 - `gpt-5.6-sol/ultra` 最终独立审查结论为 `PASS`，可执行 finding 为 0。
-- 审查逐项确认需求 AC1 至 AC7 已有相符代码、测试与实物证据；AC8、AC9 正确保留为
-  `PENDING_BY_PLAN`，分别由 Stage 5 远端部署和 Stage 6 长跑验收完成，不在 Stage 4
-  提前宣称通过。
+- 审查逐项确认需求 AC1 至 AC7 已有相符代码、测试与实物证据；截至该历史检查点，
+  AC8、AC9 保留为 `PENDING_BY_PLAN`，分别交给 Stage 5 远端部署和 Stage 6 验收，
+  不在 Stage 4 提前宣称通过。该 pending 状态后续已由 Stage 5/6 证据及
+  2026-07-30 用户最终验收取代。
 - 独立复跑：
   - recovery 44/44；
   - Polymarket source 102/102；
@@ -466,10 +469,10 @@
   均未建立 shadow authority 或过度校验。
 - debug 默认栈溢出因父提交与当前提交均可复现而判定为非本轮回归；optimized release
   默认栈双启动及 1,900 MiB/无 swap recovery scope 均通过，因此不阻断 release，
-  也不允许为远端新增 `RUST_MIN_STACK`。Stage 6 继续监控 release 是否出现
-  `SIGABRT` 或 `stack overflow`。
-- 下一步先提交/push 本阶段事实，再从该 clean commit 本地构建最终 release。远端
-  删除、上传和启动仍未执行。
+  也不允许为远端新增 `RUST_MIN_STACK`。当时计划由 Stage 6 继续监控 release 是否
+  出现 `SIGABRT` 或 `stack overflow`；后续运行检查未把它报告为本事故阻断项。
+- 当时下一步是提交/push 本阶段事实，再从该 clean commit 本地构建最终 release；
+  该构建、远端替换和启动后续均已完成。
 
 ## Stage 4 release
 
@@ -495,9 +498,9 @@
   maximum RSS `39,104 KiB`；manifest 中 build commit 与 binary SHA 精确匹配，
   六个 source 均生成 finalized file，`gaps=[]`、所有 `lag_events=0` 和
   `dropped_rows=0`。
-- Stage 4 完成。下一步严格按用户批准的简单开发流程：再次确认 UTC27/UTC28 本地
-  副本，停止远端服务，直接删除两个精确目录，创建程序目录、上传上述 SHA 的
-  release，并启动现有 unit。
+- Stage 4 完成。当时下一步严格按用户批准的简单开发流程执行远端替换；该 UTC27/28
+  副本复核、两个精确目录清空、release 上传和 unit 启动后续已完成，本段不再构成
+  当前执行指令。
 
 ## Stage 5 直接清空与部署
 
@@ -552,9 +555,10 @@
     六个 source 的 running file descriptor；
   - Polymarket running file 在 5 秒采样中继续增长 88,149 bytes，journal 无本事故
     关键词。
-- Stage 5 部署与初始健康子门通过；需求 AC8 整体仍为
-  `PENDING_STAGE6`。六任务长期稳定、受控重启、UTC rollover 和完整 UTC 日尚未验收，
-  不得提前宣称健康训练日。
+- 截至该历史检查点，Stage 5 部署与初始健康子门通过；需求 AC8 整体仍为
+  `PENDING_STAGE6`，六任务长期稳定、受控重启、UTC rollover 和完整 UTC 日尚未
+  验收。该 pending 状态后续已由 Stage 6 证据及 2026-07-30 用户最终验收取代；本段
+  不能作为当前游标。
 
 ## Stage 6 受控重启失败与安全停止
 
@@ -629,7 +633,7 @@
   `recovered pending + current none + recovered current + fresh validation`
   组合，短时 clean-root 双启动也未跨到 pending 状态。
 
-### 等待用户决定的两个选项
+### 当时等待用户决定的两个选项（历史决策点，后续已批准方案 1）
 
 1. **推荐：保留 candidate 严格合同，修正 restart 路由。** 保持 pending-first
    subscription 与现有 async discovery；仅当 fresh `discovery.current` 精确命中
@@ -690,7 +694,8 @@
     状态机。
 - 用户已明确同意并批准按上述审查修订后的 B2 执行。此前的
   `USER_DECISION_REQUIRED` 已解除；实现、测试、独立阶段审查、commit/push 和新
-  release 完成前，远端 service 继续保持停止，当前验证 root 不清空。
+  release 完成前，远端 service 当时继续保持停止，验证 root 不清空。上述工作后续
+  均已完成，该临时停止门不再是当前指令。
 
 ## Stage 6R B2 实现与自审
 
@@ -741,8 +746,8 @@
   `invalid_real_admission_clock` 并等待负载完成超时。该测试及其动态时间夹具不在
   B2 diff 中，本事项不顺手修改；另一个最初失败的退化测试已由上述范围收窄修复。
 - 两轮实现中间审查发现并推动修正了普通 candidate、next-only attach 和冷启动三条
-  错误边界；当前仍须完成最终 `gpt-5.6-sol/ultra` 独立阶段审查，审查通过后才
-  commit/push 和构建 release。
+  错误边界；截至该历史检查点仍须完成最终 `gpt-5.6-sol/ultra` 独立阶段审查。该
+  审查、commit/push 和 release 构建后续均已完成。
 
 ## Stage 6R B2 最终审查发现与 UTC 日界决策
 
@@ -811,7 +816,8 @@
   - `cargo check -p data-collect --all-targets`、`cargo clippy -p data-collect
     --all-targets -- -D warnings`、`cargo fmt --all -- --check` 和
     `git diff --check` 通过。
-- 当前仍须完成最新冻结 diff 的最终三路独立复审；复审清零后才 commit/push。
+- 截至该历史检查点仍须完成最新冻结 diff 的最终三路独立复审；该复审后续已清零并
+  完成 commit/push。
 
 ## Stage 6R B2 最终阶段审查闭环
 
@@ -836,8 +842,9 @@
 - 最小性审查确认没有新增 validator、shadow comparator、第二 discovery 实现、
   marker、持久状态或第二状态机；generic Future core 与 source-receive 上界均只有
   本事项的必要消费方。
-- Stage 6R B2 已满足需求与计划完成门。下一步是 commit/push，再从 clean commit
-  构建并记录新 release；完成前远端 service 继续保持停止。
+- Stage 6R B2 已满足需求与计划完成门。当时下一步是 commit/push，再从 clean
+  commit 构建并记录新 release；这些动作及后续重部署现均已完成，原远端停止门不再
+  是当前指令。
 
 ## Stage 6R B2 release
 
@@ -871,11 +878,11 @@
 - `gpt-5.6-sol/ultra` 独立 release 审查重新核验远端 branch ref、binary 属性、probe
   原始运行结果、manifest 与六个 Parquet，结论为
   `PASS — Critical 0 / Major 0 / Minor 0`。
-- 审查发现 demand/plan 顶部状态仍停留在 B2 执行中；现已只把三件套状态同步为
-  `STAGE6R_RELEASE_COMPLETE_DEPLOY_PENDING`。复审确认无剩余 finding，也没有新增
-  migration、atomic replacement 或复杂删除流程。
-- 本节提交/push 后进入 Stage 5：复核 UTC27/UTC28 本地副本，再执行用户批准的两个
-  远端目录直接清空与重部署。
+- 审查发现 demand/plan 顶部状态当时仍停留在 B2 执行中；该检查点把三件套状态同步为
+  `STAGE6R_RELEASE_COMPLETE_DEPLOY_PENDING`。该状态后续已被部署、Stage 6 证据和
+  2026-07-30 用户最终验收取代。
+- 当时计划在本节提交/push 后进入 Stage 5，并复核 UTC27/UTC28 本地副本后执行两个
+  远端目录直接清空与重部署；上述动作后续已完成，本段不再是执行指令。
 
 ## Stage 5 B2 直接清空与重部署
 
@@ -938,8 +945,8 @@
     gaps=[]`，当前 source counters 仍为零；
   - journal 仍只有 Started；事故关键词为零；
   - memory current 从 75,464,704 增至 93,138,944 bytes，`06:10:42Z` 末检为
-    97,275,904 bytes、peak 97,546,240 bytes。短窗口内上升是事实，不能据此判定
-    泄漏或长期稳定，继续交给 Stage 6 观察。
+  97,275,904 bytes、peak 97,546,240 bytes。短窗口内上升是事实，不能据此判定
+  泄漏或长期稳定；当时继续交给 Stage 6 观察，后续未把它认定为本事故阻断项。
 - live-health 审查者首次漏用 `systemctl --user`，误查系统级同名 unit 并短暂报告
   `inactive/dead`。直接 PID/cgroup 反证和修正后的 user-unit 查询均确认真实服务
   未停止；该查询作用域误判已撤回，不作为运行异常证据。
@@ -947,9 +954,10 @@
   `PASS — Critical 0 / Major 0 / Minor 0`。审查重新核验本地两日逐文件完整性、远端
   删除范围、unit、binary、唯一 PID、六源文件描述符、manifest lineage、实时增长、
   memory 边界和 journal；确认没有新增复杂部署流程或过度校验。
-- 三件套状态现同步为 `STAGE5_B2_REDEPLOY_COMPLETE_STAGE6_PENDING`。本阶段
-  commit/push 后进入 Stage 6；当前仍不宣称受控重启、UTC rollover 或完整健康 UTC
-  日已经通过。
+- 截至该历史检查点，三件套状态同步为
+  `STAGE5_B2_REDEPLOY_COMPLETE_STAGE6_PENDING`。该阶段 commit/push 后进入
+  Stage 6；当时尚未宣称受控重启、UTC rollover 或完整健康 UTC 日已经通过。本状态
+  后续已由 2026-07-30 用户最终验收章节取代，不能作为当前游标。
 
 ## Stage 6 B2 真实受控重启进行中
 
@@ -989,12 +997,13 @@
   `candidate_to_active:fixed_identity_not_validation`、receiver lag、backpressure、
   raw-after-close、panic 或其他 source error。
 - 旧 B1 在相同 pending-only 路径重启后约两秒即失败；本次新 PID 已持续运行并继续
-  写入，证明 runtime 失败门已通过。但重启后的 metadata
+  写入，证明 runtime 失败门已通过。截至该历史检查点，重启后的 metadata
   `06-part-1.parquet.running` 尚未自然 finalize，当前不能逐行确认 current snapshot、
   零 candidate、首次 fixed time 保留与 fresh validation 前进。
-- 为避免第二次人工重启这种不必要的额外扰动，保持服务连续运行，等待该小时文件自然
-  finalize 后再做上述内容验收。UTC rollover 与完整 UTC 日仍未通过，三件套状态只
-  推进为 `STAGE6_CONTROLLED_RESTART_RUNNING_CONTENT_PENDING`。
+- 为避免第二次人工重启这种不必要的额外扰动，当时保持服务连续运行，等待该小时文件
+  自然 finalize 后再做上述内容验收。当时 UTC rollover 与完整 UTC 日尚无通过证据，
+  三件套状态只推进为 `STAGE6_CONTROLLED_RESTART_RUNNING_CONTENT_PENDING`；该历史
+  pending 状态后续已被 2026-07-30 用户最终验收取代。
 - `gpt-5.6-sol/ultra` 独立 checkpoint 审查逐文件复核六个 Parquet 的 SHA、
   PAR1/footer rows、metadata 行级 pending/current/next 关系、重启时间线、新 PID
   存活与 journal，结论为 `PASS — Critical 0 / Major 0 / Minor 0`。审查确认没有
@@ -1035,6 +1044,18 @@
 - `gpt-5.6-sol/ultra` 独立内容审查结论为
   `PASS — Critical 0 / Major 0 / Minor 0`；immutable identity、fixed time、时间
   因果、role、pending/terminal 链均零失败。证据足以把三件套推进为
-  `STAGE6_CONTROLLED_RESTART_CONTENT_PASS_ROLLOVER_PENDING`。
-- 本次只证明真实受控重启及自然小时 finalize；UTC day rollover 与完整健康 UTC 日
-  仍未通过。当前 Codex 会话继续以 15 分钟周期只读监控，不重启服务或修改远端。
+  `STAGE6_CONTROLLED_RESTART_CONTENT_PASS_ROLLOVER_PENDING`。这是
+  2026-07-29 当时的历史检查点，不是当前状态。
+- 该检查点只证明真实受控重启及自然小时 finalize；当时尚无 UTC day rollover 与
+  完整健康 UTC 日证据。2026-07-30 用户最终验收已移除这两个 completion gate，
+  因此不得再从本段推导当前仍需等待；同时也不得反向声称两项证据已经发生。
+
+## 2026-07-30：用户最终验收并关闭事项
+
+- 用户明确确认 `ROLLOVER_PENDING` 已被其最终验收，本事项不再等待 UTC day
+  rollover 或完整健康 UTC 日。
+- 最终验收沿用已通过独立审查的真实受控重启、自然小时 finalize、current/next
+  snapshot、首次 fixed time 保留、fresh validation 前进和零 candidate 证据。
+- UTC day rollover 与完整健康 UTC 日作为 completion gate 被取消，而不是被伪记为
+  已获得运行证据；后续同类检查只属于持续运维观察。
+- 三件套当前状态统一为 `CLOSED_BY_USER_ACCEPTANCE_20260730`。

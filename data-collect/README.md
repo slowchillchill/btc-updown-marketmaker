@@ -10,7 +10,8 @@
 
 只有 `data-collect-training-collector` 当前连接真实外部数据源。`paper-hot` 和
 `live-hot` 当前不采集 Polymarket、RTDS 或 Binance 数据，也不负责交易、下单、撤单、
-钱包、模型输入或账本逻辑。
+钱包、模型输入或账本逻辑。真实 paper/live 外部市场源 adapter 已由用户决定延后到
+训练模块完成后，再以独立事项返回实施；该延期不阻断当前 `data-collect` 模块收尾。
 
 ## 训练采集器
 
