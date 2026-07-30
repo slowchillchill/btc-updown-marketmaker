@@ -874,7 +874,7 @@ mod tests {
     }
 
     #[test]
-    fn reject_empty_required_price_change_size() {
+    fn reject_empty_optional_decimal_outside_nullable_allowlist() {
         let json = r#"[{
             "event_type": "price_change",
             "market": "0x0000000000000000000000000000000000000000000000000000000000000001",

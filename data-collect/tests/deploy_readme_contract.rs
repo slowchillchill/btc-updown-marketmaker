@@ -1,108 +1,78 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const README: &str = "data-collect/docs/training-collector-deploy-readme.md";
-const HOT_DOC: &str = "data-collect/docs/paper-live-hot-path-integration.md";
+const OPERATIONS: &str = "data-collect/docs/current/operations.md";
+const INTERFACES: &str = "data-collect/docs/current/interfaces.md";
+const LIMITATIONS: &str = "data-collect/docs/current/known-limitations.md";
+const CONTRACTS: &str = "data-collect/docs/current/contracts.md";
+const ACCEPTANCE: &str = "data-collect/docs/current/acceptance.md";
+const MASTER_DEMAND: &str = "demand/data-collect-demand.md";
+const DEPLOY_ROUTE: &str = "data-collect/docs/training-collector-deploy-readme.md";
+const HOT_ROUTE: &str = "data-collect/docs/paper-live-hot-path-integration.md";
 const SYSTEMD: &str = "data-collect/deploy/systemd/data-collect-training-collector.service";
-const RELIABILITY_DEMAND: &str = "demand/data-collect-reliability-repair-demand.md";
-const RELIABILITY_PLAN: &str = "plan/data-collect-reliability-repair-plan.md";
-const LIFECYCLE_DEMAND: &str = "demand/data-collect-source-availability-lifecycle-repair-demand.md";
-const LIFECYCLE_PLAN: &str = "plan/data-collect-source-availability-lifecycle-repair-plan.md";
 
 #[test]
-fn training_deploy_readme_describes_single_binary_single_unit_flow() {
-    let readme = read(README);
+fn current_operations_describes_single_binary_single_unit_flow() {
+    let operations = read(OPERATIONS);
 
     for expected in [
-        "cargo build --release --locked -p data-collect --bin data-collect-training-collector",
-        "target/release/data-collect-training-collector",
+        "生命周期：`CURRENT_CONTRACT`",
+        "执行授权：`none`",
+        "clean、已 push 的完整 commit",
+        "DATA_COLLECT_GIT_COMMIT=<完整 commit>",
+        "服务器都不是 Rust 构建机",
         "/home/ubuntu/btc-updown-marketmaker/data-collect/bin/data-collect-training-collector",
+        "/home/ubuntu/btc-updown-marketmaker/datasets",
         "/home/ubuntu/.config/systemd/user/data-collect-training-collector.service",
         "data-collect/deploy/systemd/data-collect-training-collector.service",
-        "--dataset-root /home/ubuntu/btc-updown-marketmaker/datasets",
-        "--collector-region eu-west-1",
-        "--run-forever",
-        "--max-dataset-bytes 50000000000",
         "Restart=on-failure",
         "RestartPreventExitStatus=75 76",
         "StartLimitIntervalSec=600",
         "StartLimitBurst=5",
-        "dataset_capacity_reached",
-        "--help",
-        "--version",
-        "每个 UTC 日只能有一个 `manifest.json`",
-        "data-pipeline 只消费 `closed` 日",
-        "*.running",
-        "manifest.json.tmp",
-        "远端服务器禁止编译 Rust",
-        "paper/live 源码 binary 仍可分别",
-        "demand/data-collect-training-collector-direct-deployment-demand.md",
-        "历史首次部署流程（禁止直接复用）",
-        "不是当前重新部署、替换 binary、启停 service 或删除数据的授权",
-        "本 current guide 只提供运行合同和验收观察项",
-        "另行批准的部署或启动完成后",
-        "本文件不单独授权停服或修改远端状态",
-        "不再具有当前 authority",
-        "普通 source 静默、stale、网络恢复或暂时无数据不是整体启动失败",
-        "从日内开始得到的首日是部分 UTC 日",
-        "这些是运行证据，不是启动前 gate",
-        "无进程级故障时 PID 应保持不变",
-        "约24小时soak只能证明观察期间通过，不能冒充每种reconnect分支都被真实触发",
-        "collection-day coverage v1 为 `active`",
-        "启动时零行和稀疏 source 暂无文件均合法",
-        "`.parquet.running` 不是 finalized Parquet",
-        "若已经发生同identity restart",
-        "reconciled_legacy_coverage_unknown",
+        "## 3. Training 退出与容量",
+        "`75/76` 映射只属于 training binary",
+        "启动扫描已经达到上限",
+        "不启动 source、不创建 typed raw/manifest/runtime",
+        "运行期间达到上限",
+        "drain/finalize 已接纳数据",
+        "collector 不自动清理 finalized raw",
+        "另行批准的部署或启动已经发生后",
+        "本文件不授权停服或清理",
+        "`.parquet.running` 不作为 finalized 数据读取",
+        "不是当前部署路径",
+        "另行批准的活动需求、计划与 changelog",
     ] {
-        assert!(readme.contains(expected), "README missing {expected}");
+        assert!(
+            operations.contains(expected),
+            "current operations missing {expected}"
+        );
     }
 
     for forbidden in [
         "export-release-artifacts.sh",
         "train-data-collect-ver1-0",
         "data-collect-retention-admin",
-        "SHA256SUMS",
-        "RELEASE_INFO.env",
-        "service.example",
-        "retention receipt",
-        "run_manifests/<run_id>",
-        "data-collect/current",
-        "failed_gate",
-        "failed_long_running",
-        "按失败 build/day 身份清理",
-        "连续运行至少 26 小时",
         "## 任意时刻直接部署",
         "systemctl --user enable --now data-collect-training-collector.service",
         "preflight 通过后",
+        "rm -rf",
     ] {
         assert!(
-            !readme.contains(forbidden),
-            "README retains obsolete deployment path {forbidden}"
+            !operations.contains(forbidden),
+            "current operations retains obsolete deployment path {forbidden}"
         );
     }
 }
 
 #[test]
-fn current_authority_supersedes_the_old_utc_boundary_first_start() {
-    for path in [
-        RELIABILITY_DEMAND,
-        RELIABILITY_PLAN,
-        LIFECYCLE_DEMAND,
-        LIFECYCLE_PLAN,
-    ] {
+fn compatibility_docs_are_route_only_and_cannot_authorize_operations() {
+    for (path, owner) in [(DEPLOY_ROUTE, OPERATIONS), (HOT_ROUTE, INTERFACES)] {
         let doc = read(path);
-        assert!(doc.contains("data-collect-training-collector-direct-deployment"));
-        assert!(doc.contains("当前UTC日无任何collector产物"));
-        for obsolete in [
-            "首次启用coverage-aware binary只能由未来独立部署计划在UTC边界前",
-            "M8-A只冻结未来UTC边界部署策略：首次启用在边界前",
-            "M8-A`继续有效",
-        ] {
-            assert!(
-                !doc.contains(obsolete),
-                "{path} retains obsolete deployment authority: {obsolete}"
-            );
-        }
+        assert!(doc.contains("生命周期：`ROUTE_ONLY`"));
+        assert!(doc.contains("当前执行 authority：`none`"));
+        assert!(doc.contains(owner));
+        assert!(!doc.contains("systemctl --user enable --now"));
+        assert!(!doc.contains("执行授权：`self`"));
     }
 }
 
@@ -168,29 +138,111 @@ fn obsolete_release_retention_and_archive_entrypoints_are_absent() {
 }
 
 #[test]
-fn paper_live_hot_path_doc_preserves_independent_runtime_boundary() {
-    let doc = read(HOT_DOC);
+fn paper_live_current_docs_preserve_independent_runtime_boundary() {
+    let interfaces = read(INTERFACES);
+    let limitations = read(LIMITATIONS);
+    let acceptance = read(ACCEPTANCE);
 
     for expected in [
-        "本阶段不自动部署",
         "data-collect-paper-hot",
         "data-collect-live-hot",
+        "<dataset-root>/paper/data_collect_handoff/",
+        "<dataset-root>/live/data_collect_handoff/",
+        "data_collect_handoff_v1",
+        "frame_type=source_status",
+        "status=heartbeat",
+        "external_market_event",
+        "没有真实 source producer wiring",
         "runtime_receive_time_utc_ms",
-        "paper/data_collect_handoff/hot.sock",
-        "live/data_collect_handoff/hot.sock",
-        "source_gap",
-        "backpressure_state",
-        "不接管交易逻辑",
-        "NOE/ledger",
-        "execution feedback",
-        "只消费 `state=closed` 日期",
-        "不使用独立 sidecar 或 receipt",
+        "append-only event log",
+        "默认运行 `604800s`（7 天）后",
+        "`COLLECTOR_REGION`、AWS IMDS",
+        "文件内容不被解析为业务配置，也不进入 digest",
+        "`--run-id` 当前只校验 trim 后非空",
     ] {
-        assert!(doc.contains(expected), "hot path doc missing {expected}");
+        assert!(
+            interfaces.contains(expected),
+            "current interfaces missing {expected}"
+        );
     }
 
-    assert!(!doc.contains("当前阶段已验证真实 paper/live external_market_event"));
-    assert!(!doc.contains("retention receipt"));
+    for expected in [
+        "真实 Polymarket、RTDS、Binance adapter 与 producer wiring 尚未实现",
+        "当前不输出真实 `external_market_event`",
+        "authoritative systemd unit",
+        "不属于 `model-train`",
+        "不是 `data-collect-training-collector`",
+        "只有在用户决定返回 `data-collect` 时",
+        "hot binary 的 startup receipt → 长运行 heartbeat server 路径尚无端到端测试",
+        "confinement 写成已验收",
+    ] {
+        assert!(
+            limitations.contains(expected),
+            "known limitations missing {expected}"
+        );
+    }
+
+    for expected in [
+        "IMPLEMENTED_AND_COMPONENT_TESTED",
+        "IMPLEMENTED_NOT_END_TO_END_TESTED",
+        "DEFERRED_UNTIL_MODEL_TRAIN_COMPLETE_AND_USER_RETURN_DECISION",
+        "当前测试没有直接调用实际",
+    ] {
+        assert!(
+            acceptance.contains(expected),
+            "current acceptance missing {expected}"
+        );
+    }
+}
+
+#[test]
+fn current_docs_preserve_exact_capacity_and_rtds_boundaries() {
+    for path in [CONTRACTS, MASTER_DEMAND] {
+        let doc = read(path);
+        for expected in [
+            "startup",
+            "直接退出 `75`",
+            "每 `60s`",
+            "drain/finalize",
+            "`×2`",
+            "`±20%`",
+            "cap",
+            "无独立 attempt",
+            "SDK transport-control",
+            "不等同于 channel",
+        ] {
+            assert!(doc.contains(expected), "{path} missing {expected}");
+        }
+    }
+
+    let contracts = read(CONTRACTS);
+    for expected in [
+        "production `src/` delta 横跨四个文件",
+        "`clob/ws/types/response.rs`",
+        "`rtds/subscription.rs`",
+        "`ws/config.rs` 与 `ws/connection.rs`",
+        "tick_size_change",
+        "`MidpointUpdate.timestamp`",
+        "interested element 必须全部成功",
+        "不泄露合法前缀",
+        "Network error communicating with endpoint",
+        "不含\n  `topic/type/timestamp/payload`",
+        "target-like frame 仍是 sticky parser terminal",
+        "最大 `2048` bytes",
+        "connect timeout",
+        "generation-bound\n  outbound fencing",
+        "其中只有九个",
+        "nullable Decimal 字段",
+        "非空 malformed（含空白串）",
+        "optional Decimal 空串和 required Decimal 空串仍报错",
+        "configured capacity limit",
+        "测试或另行批准配置可以显式覆盖",
+    ] {
+        assert!(
+            contracts.contains(expected),
+            "current contracts missing {expected}"
+        );
+    }
 }
 
 fn resolve(path: &str) -> PathBuf {

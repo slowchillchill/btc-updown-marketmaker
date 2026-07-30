@@ -160,6 +160,130 @@ fn malformed_uninterested_array_element_is_still_ignored() {
     assert!(matches!(&messages[0], WsMessage::Book(_)));
 }
 
+#[test]
+fn clob_nullable_decimal_empty_strings_are_none_for_exact_nine_fields() {
+    let frame = r#"[
+        {
+            "event_type": "book",
+            "asset_id": "1",
+            "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "bids": [],
+            "asks": [],
+            "last_trade_price": ""
+        },
+        {
+            "event_type": "price_change",
+            "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "price_changes": [{
+                "asset_id": "1",
+                "price": "0.5",
+                "size": "1",
+                "side": "BUY",
+                "best_bid": "",
+                "best_ask": ""
+            }]
+        },
+        {
+            "event_type": "tick_size_change",
+            "asset_id": "1",
+            "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "old_tick_size": "",
+            "new_tick_size": "0.01"
+        },
+        {
+            "event_type": "last_trade_price",
+            "asset_id": "1",
+            "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "price": "0.5",
+            "size": "",
+            "fee_rate_bps": ""
+        },
+        {
+            "event_type": "best_bid_ask",
+            "asset_id": "1",
+            "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "best_bid": "",
+            "best_ask": "",
+            "spread": ""
+        }
+    ]"#;
+
+    let messages = parse_if_interested(frame.as_bytes(), &MessageInterest::ALL).unwrap();
+    assert_eq!(messages.len(), 5);
+    assert!(matches!(
+        &messages[0],
+        WsMessage::Book(event) if event.last_trade_price.is_none()
+    ));
+    assert!(matches!(
+        &messages[1],
+        WsMessage::PriceChange(event)
+            if event.price_changes[0].best_bid.is_none()
+                && event.price_changes[0].best_ask.is_none()
+    ));
+    assert!(matches!(
+        &messages[2],
+        WsMessage::TickSizeChange(event) if event.old_tick_size.is_none()
+    ));
+    assert!(matches!(
+        &messages[3],
+        WsMessage::LastTradePrice(event)
+            if event.size.is_none() && event.fee_rate_bps.is_none()
+    ));
+    assert!(matches!(
+        &messages[4],
+        WsMessage::BestBidAsk(event)
+            if event.best_bid.is_none()
+                && event.best_ask.is_none()
+                && event.spread.is_none()
+    ));
+}
+
+#[test]
+fn clob_nonempty_malformed_nullable_decimal_remains_an_error() {
+    let frame = r#"{
+        "event_type": "book",
+        "asset_id": "1",
+        "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "bids": [],
+        "asks": [],
+        "last_trade_price": " "
+    }"#;
+
+    assert!(parse_if_interested(frame.as_bytes(), &MessageInterest::ALL).is_err());
+}
+
+#[test]
+fn clob_empty_optional_decimal_outside_the_nine_field_allowlist_remains_an_error() {
+    let frame = r#"[{
+        "event_type": "price_change",
+        "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "price_changes": [{
+            "asset_id": "1",
+            "price": "0.5",
+            "size": "",
+            "side": "BUY"
+        }]
+    }]"#;
+
+    assert!(parse_if_interested(frame.as_bytes(), &MessageInterest::ALL).is_err());
+}
+
+#[test]
+fn clob_empty_required_decimal_remains_an_error() {
+    let frame = r#"[{
+        "event_type": "price_change",
+        "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "price_changes": [{
+            "asset_id": "1",
+            "price": "",
+            "size": "1",
+            "side": "BUY"
+        }]
+    }]"#;
+
+    assert!(parse_if_interested(frame.as_bytes(), &MessageInterest::ALL).is_err());
+}
+
 #[tokio::test]
 async fn interested_clob_array_is_all_or_error_and_terminal() {
     let frame = r#"[

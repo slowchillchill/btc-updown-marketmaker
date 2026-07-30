@@ -34,6 +34,31 @@ AWS 爱尔兰 live-trade 服务器 `108.130.74.143` 是运行目标，不是构�
 部署模型时必须从本地已验证 artifact 路径直接复制到服务器
 `/home/ubuntu/live-trade` 下的独立运行产物目录，记录来源路径与 sha256 证据。
 
+## data-collect 文档权威路由
+
+- 处理任何 `data-collect` 需求、代码、测试、运行或部署问题前，必须先读
+  `data-collect/docs/CURRENT.md`。它是唯一 current 路由入口；只有其列出的 master
+  demand/plan/changelog 和 `data-collect/docs/current/` 主题 owner 能提供当前文档
+  合同。
+- `data-collect/docs/archive-manifest.tsv` 及其指定 Git tag/commit/path/blob 只用于
+  回答“当时发生了什么”，不得作为当前执行 authority。读取历史后必须回到
+  `CURRENT.md`、当前代码和测试复核。
+- 不得为搜索方便把 manifest 中的历史长文恢复进活动工作树，也不得从历史片段中的
+  `当前/下一步/PENDING/READY/命令` 推导当前动作。
+- manifest `historical` 行对应的历史长文含首屏 banner；按需读取局部片段时，必须
+  同时读取同一 Git blob 的首屏生命周期/最终快照/supersession 字段，并核对
+  `CURRENT.md` 对应主题 owner。
+- manifest `snapshot` 行是活动路径被 current/route/governance 层替换前的冻结
+  快照，旧 blob 不保证含 banner；必须以 `kind=snapshot` 判定其当前 authority 为
+  `none`，并在读取前核对 manifest 行、活动树同路径文件和 `CURRENT.md` 对应主题
+  owner。不得从 snapshot 自身的状态词或命令推导当前状态。
+- 两类归档都不得只读搜索命中的中段；缺少所属 kind 要求的核对项时，只能作为未
+  采用线索。
+- `CURRENT.md`、current 文档、代码、测试或用户最新决策相互冲突时，必须停止并列出
+  精确冲突，交由用户决定。
+- current 运维文档本身不授权部署、启停服务、替换 binary、删除数据或其他远端状态
+  变更；这些动作仍需独立批准的活动三件套。
+
 ## 模型框架竞赛研究来源
 
 设计、审查或更新模型框架竞赛时，优先查询下列已核验来源。清单非穷举，也不是 PyTorch 或任何生态的准入白名单。这里固化的是检索入口和证据等级，不代表已批准任何框架、模型、依赖或实现路线；每次引用仍须记录访问日期、版本/tag/commit、许可证、维护状态和与本项目的适用边界。
