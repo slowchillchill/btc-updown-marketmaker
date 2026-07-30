@@ -2,6 +2,41 @@
 
 事项编号：`data-collect-demand`。
 
+> 生命周期：`CURRENT_MASTER_CONTRACT`
+>
+> 当前状态：`MODULE_COMPLETE_PAPER_LIVE_EXTERNAL_ADAPTER_DEFERRED`
+>
+> 当前代码基线：阶段 2 以 commit `e2de3c2b42c83253f4fca5ad0483d695c338d6ed`
+> 及其后仅文档修改为准；Rust/Cargo 基线未变。
+>
+> 当前整理事项：`DC-DOCS-20260730-CURRENT-AUTHORITY-CONSOLIDATION`
+>
+> 2026-07-30 当前权威摘要：
+>
+> 1. 当前有 training、paper-hot、live-hot 三个 binary；只有
+>    `data-collect-training-collector` 连接真实 Polymarket、RTDS 和 Binance 数据源，
+>    paper/live 当前只有本机 heartbeat/status handoff。
+> 2. Polymarket 使用官方 Rust SDK `=0.7.0` 和仓库唯一 `0.7.0-p1` patch；当前六类
+>    new-write schema 为 orderbook v3、metadata v5、depth snapshot v3、depth update
+>    v4、aggTrade v7、RTDS v4。
+> 3. training 按 UTC day/source/hour 写 finalized Parquet 和每日唯一 manifest；
+>    50GB 边界执行协调 finalize 并退出 75，不运行 retention admin，也不自动删除 raw。
+> 4. 普通业务静默/stale 不生成 gap、告警或 collector 退出。唯一当前窄例外是
+>    training RTDS：曾收到合格 fresh 后，满足 connected/latest desired applied 的
+>    steady 300s 无 fresh 时完整替换 runtime；后继 runtime/generation 按较晚
+>    connected/applied anchor 等待 60s first fresh，cold start 首次 fresh 前禁用，
+>    outer backoff 为 1s 指数增长、单次上限 300s、fresh 重置、总尝试不限。
+> 5. 2026-07-28 lag/fixed-identity/B2 事故事项已由用户于 2026-07-30 最终验收；
+>    UTC rollover 与完整健康 UTC 日被移出 completion gate，不伪记为已取得证据。
+> 6. 旧 Attempt6、旧部署 authority、metadata v4/v6、SDK 0.6 和 PMXT 自动删除路线
+>    均不是当前游标。
+> 7. paper/live 真实外部市场源 adapter 延后到训练模块完成后，再另立三件套实施；
+>    该延期不阻断本模块收尾。
+>
+> 下方 2026-07-06 至 2026-07-28 的 authority overlay、阶段状态、attempt 游标和执行
+> 命令均为历史汇编；只有被本摘要、当前代码或 current acceptance 重申的合同继续
+> 有效，任何旧 `当前/下一步/PENDING` 都不得单独产生执行 authority。
+>
 > 2026-07-30 排期 authority：当前 training collector 能力和现有 paper/live
 > heartbeat/status binary 构成 `data-collect` 本轮收尾边界。paper/live 真实外部市场
 > 源 adapter 延后到训练模块完成后，再以独立 demand/plan/changelog 返回实施、测试和
@@ -29,10 +64,11 @@
 > 2026-07-28 Attempt5 与当前游标 supersede：Attempt5 已按用户指令向精确
 > 进程组发送 SIGINT 后停止，固定为
 > `USER_TERMINATED_FOR_APPROVED_SCHEMA_CHANGE + INCOMPLETE_8H`，不是正常完成或
-> 新 schema 验收。当前实现 authority 为
+> 新 schema 验收。截至当时实现 authority 为
 > `demand/data-collect-redundant-typed-column-removal-demand.md`；依次闭合
-> aggTrade v7 与 metadata v5 后，唯一长跑游标是从新 clean/pushed HEAD 和空
-> dataset root 执行完整六源 8 小时 Attempt6。
+> aggTrade v7 与 metadata v5 后，当时计划从新 clean/pushed HEAD 和空 dataset
+> root 执行完整六源 8 小时 Attempt6。该游标已被后续 B2 修复和 2026-07-30 用户
+> 最终验收取代。
 
 本文定义当前项目 `./data-collect/` 的共用数据采集模块需求。`./data-collect/` 只负责把外部市场源转化为可审计、可回放、可验证覆盖率的原始采集证据，服务训练、paper trade 和 live trade 三类消费者；本文不包含实现计划，不修改代码，也不定义 `data-pipeline` 的训练样本加工逻辑。
 
@@ -78,12 +114,12 @@
 2. 保存每条原始事件的 raw evidence，包括原始 payload 或等价可还原 `raw_json`、source kind、source event type、source identifier、采集主机、采集区域和 `recv_time_utc`。
 3. 为每条源事件记录本地接收时间 `recv_time_utc`，同时保留各 source 原始 timestamp；Polymarket market event 必须保留平台原始 `timestamp` 字段，两者不得互相覆盖。
 4. 保存 market discovery / market metadata，包括 `new_market`、condition id、token id / asset id、CLOB market id、slug、start/end、active/acceptingOrders、`market_lifecycle_state`（candidate / prefetched / active / retired）与独立`market_runtime_role`（current / next / resolution_pending / none）、tick size、min size、fee / rebate / reward eligibility 相关原始字段；lifecycle与runtime role必须命名空间隔离，也不得与 ModelRegistry 的 candidate / active / retired 混用。
-5. 输出 typed raw parquet、每日唯一manifest、schema version、row count、sha256、既有逐source counter、confirmed integrity gap与顶层单一`collection_day_coverage`；普通transport availability只进入source-local运行态和有界operator日志，不生成receipt、重复sidecar、transport episode或逐事件debug artifact。唯一窄例外是已批准resolution-followup固定E+3..E+8业务slot的每slot最多一条metadata attempt row：activation前由current `polymarket_market_metadata_v3`承载，source v3 + metadata v4原子activation后由v4继承；它进入同一既有Parquet并只由既有manifest file facts覆盖，不扩张manifest schema、artifact、sidecar或通用transport episode，也不双写。
+5. 输出 typed raw parquet、每日唯一manifest、schema version、row count、sha256、既有逐source counter、confirmed integrity gap与顶层单一`collection_day_coverage`；普通transport availability只进入source-local运行态和有界operator日志，不生成receipt、重复sidecar、transport episode或逐事件debug artifact。唯一窄例外是已批准resolution-followup固定E+3..E+8业务slot的每slot最多一条metadata attempt row；current new-write 由 `polymarket_market_metadata_v5` 承载并进入同一既有Parquet，只由既有manifest file facts覆盖，不扩张manifest schema、artifact、sidecar或通用transport episode，也不双写。metadata v3/v4只读兼容。
 6. 通过 temp/running 分段文件、close/finalize、atomic rename 发布 finalized artifact，禁止消费者读取 partial artifact。
 7. 记录网络韧性、资源水位、writer queue、flush latency、RSS/CPU/disk watermark、backpressure 和异常恢复证据。
 8. Polymarket market channel覆盖当前active market，并从目标market start前`T-30s`开始采集prefetched next market；Binance depth/aggTrade与RTDS持续独立运行，不取得current/next/prefetched role，也不按market slug或T-30重启/切换。`T-30s`采集覆盖必须与`T-30`样本加工非范围明确区分。
 9. 技术验证必须覆盖真实`btc-updown-5m`冷启动market discovery、current active market、prefetched next market、market rollover，以及Polymarket/Binance depth/Binance aggTrade/RTDS Chainlink四个logical producer在同一墙钟期间的长时间独立采集；这不表示把Binance/RTDS绑定到Polymarket market role。generic BTC/Bitcoin open market smoke、HTTP reachability、单条业务消息或synthetic throughput不能替代该验收。
-10. 按训练、paper trade、live trade 三种独立运行拓扑导出独立二进制和部署/接入文档；训练二进制用于数据采集服务器持续写训练 raw mirror，paper/live 二进制用于各自交易服务器本机 hot path handoff 和外部市场源证据，不得混入交易决策、下单、撤单、NOE/ledger 或模型输入组装。
+10. 当前导出 training、paper-hot、live-hot 三个独立 binary；只有 training 二进制连接真实外部源并在数据采集服务器写训练 raw mirror。paper/live 当前只提供本机 heartbeat/status handoff；真实外部市场源 adapter 延后到训练模块完成后另立三件套，不得混入交易决策、下单、撤单、NOE/ledger 或模型输入组装。
 
 本文所有“每条JSON-like源保存parseable `raw_json`/raw evidence”及Polymarket
 `new_market` raw evidence条款，对future `source_kind=polymarket_market` v3
@@ -91,7 +127,8 @@ persisted artifact/data-pipeline合同收敛为官方SDK解码并通过target ad
 完整消费typed evidence：唯一canonical domain、每条SDK message一条nested row，
 `PriceChange`不逐change fan-out；不持久化`source_native_payload_json`或venue
 `hash`，不恢复payload fingerprint。该窄化不改变其他source的raw JSON/evidence、
-metadata v3/v4自身payload/digest traceability、历史source v2只读事实或
+历史 metadata v3/v4 exact reader、current metadata v5 的 payload/source-evidence
+digest traceability、历史source v2只读事实或
 `HandoffFrame v1.raw_json`。
 
 ### 1.2 data-collect 非范围
@@ -182,7 +219,7 @@ metadata v3/v4自身payload/digest traceability、历史source v2只读事实或
 15. 训练 cold path 必须迁移为 UTC day 文件夹 + 每 source kind 每小时一个逻辑 partition：`training/typed_raw/utc_day=YYYY-MM-DD/source_kind=<source_kind>/<source_kind>_YYYY-MM-DDTHH[--part=N].parquet`。正常目标是一小时一个 finalized parquet；`part=N`只用于同一小时已存在 finalized/running 路径时的启动或重启碰撞，不由 row count、logical bytes或segment duration触发。
 16. Polymarket `book` 事件必须保存完整 `bids` / `asks` price-size depth，能还原 token orderbook；不得只保存 `bids_len` / `asks_len` 却标记为 complete book。PMXT-like schema 只作为 Polymarket orderbook typed layout、hourly parquet、compression/sort 和 manifest 参考，不引入 PMXT archive source。
 17. Polymarket hourly typed layout 必须覆盖 `book`、`price_change`、`last_trade_price`、`tick_size_change`、`best_bid_ask`、`new_market`、`market_resolved` 的 typed 字段或 nullable unavailable reason，并保留 collector host/region、slug、condition id、asset id、coverage 和 source evidence。
-18. Binance depth snapshot/update、Binance aggTrade、RTDS Chainlink 必须进入 hourly typed layout 修改范围，分别使用官方字段的 source-specific schema：`binance_depth_snapshot_v3`保留`timestamp_received`、`lastUpdateId`、完整`bids/asks`、snapshot boundary及共同depth因果坐标，`binance_depth_update_v4`保留`timestamp_received`、`e/E/s/U/u/b/a`、stitch/not-applied verdict及同一坐标域；future current `binance_aggtrade_v7`按独立专项合同保留trade/invalid判别、官方trade字段与WS因果坐标，并只删除与`timestamp_received`恒等的`websocket_timestamp_received`；`polymarket_rtds_chainlink_btc_usd`保留`timestamp_received`、message timestamp、payload timestamp、symbol、value、topic和subscription filter。旧depth snapshot v2/update v3与aggTrade v3/v5/v6只读兼容，不得伪造新ordering字段。
+18. Binance depth snapshot/update、Binance aggTrade、RTDS Chainlink 当前分别使用 source-specific schema：`binance_depth_snapshot_v3`保留`timestamp_received`、`lastUpdateId`、完整`bids/asks`、snapshot boundary及共同depth因果坐标，`binance_depth_update_v4`保留`timestamp_received`、`e/E/s/U/u/b/a`、stitch/not-applied verdict及同一坐标域；current `binance_aggtrade_v7`保留trade/invalid判别、官方trade字段与WS因果坐标，并删除与`timestamp_received`恒等的`websocket_timestamp_received`；current `polymarket_rtds_chainlink_btc_usd_v4`保留`timestamp_received`、message timestamp、payload timestamp、symbol、value、topic和subscription filter。旧depth snapshot v2/update v3与aggTrade v3/v5/v6只读兼容，不得伪造新ordering字段。
 19. 训练dataset hard threshold固定为`50_000_000_000` bytes，作用域是`datasets/training`。达到阈值时collector按既有协调finalize合同保护已接收数据并以保留退出码75结束，不生成retention/threshold receipt，也不在collector内自动删除raw。
 20. 归档、retention和真实删除由独立运维事项处理；本需求与当前专项不授权删除任何UTC day、远端临时验证或生产数据清理。未来若批准删除，必须另建需求/计划/changelog和精确路径、安全门及验收，不得从50GB阈值或旧部署事实推导删除权限。
 21. 资源硬阈值的触发值、观测值、协调finalize与退出结果只进入有界operator日志、测试输出和对应changelog证据；不得为此扩张每日manifest或生成run-level policy/ResourceWatermark artifact。
@@ -199,7 +236,7 @@ metadata v3/v4自身payload/digest traceability、历史source v2只读事实或
 4. Binance depth update-ID中可证明的sequence hole、payload conflict、SDK `Lagged(n)`、queue drop/timeout、writer/manifest/atomic publish和内部不变量才进入confirmed integrity路径；aggTrade ID数值前跳不证明hole，只保留原始观察。
 5. 资源硬边界继续按既有合同保护已接收数据；普通诊断日志失败、计数饱和或缺少专用reason不得结束source/collector。
 
-外部availability只进入source-local运行态和有界、去重operator日志；每日manifest不保存transport current/open、scope、reason或episode，也不生成compact health receipt或逐事件debug artifact。唯一已批准例外是resolution-followup固定E+3..E+8业务slot的metadata attempt row：每slot最多一条，activation前写current metadata v3，source v3 + metadata v4原子activation后写v4，并进入同一既有metadata Parquet；manifest仍只保留既有file row count/bytes/sha256/schema facts。该例外不得双写或泛化到普通connect/read/backoff episode。
+外部availability只进入source-local运行态和有界、去重operator日志；每日manifest不保存transport current/open、scope、reason或episode，也不生成compact health receipt或逐事件debug artifact。唯一已批准例外是resolution-followup固定E+3..E+8业务slot的metadata attempt row：每slot最多一条，current new-write 写入 metadata v5 的同一既有 metadata Parquet；manifest仍只保留既有file row count/bytes/sha256/schema facts。metadata v3/v4保持历史只读；该例外不得双写或泛化到普通connect/read/backoff episode。
 
 ### 5.2 恢复策略需求
 
@@ -246,14 +283,14 @@ metadata v3/v4自身payload/digest traceability、历史source v2只读事实或
 
 `data-collect-demand` 后续实现或计划至少必须能验证：
 
-1. `./data-collect/`的职责边界不得超出外部市场源采集证据边界；允许范围包括raw evidence、`recv_time_utc`、typed raw parquet、last-qualifying、confirmed integrity gap、每日manifest、单一collection coverage、atomic publish、source-local网络韧性和有界operator/资源证据，不包括transport episode tape或模型调度。固定resolution业务slot的metadata attempt row只按第一节第5项current-v3/future-v4同一窄例外验收，不得泛化或双写。
+1. `./data-collect/`的职责边界不得超出外部市场源采集证据边界；允许范围包括raw evidence、`recv_time_utc`、typed raw parquet、last-qualifying、confirmed integrity gap、每日manifest、单一collection coverage、atomic publish、source-local网络韧性和有界operator/资源证据，不包括transport episode tape或模型调度。固定resolution业务slot的metadata attempt row只按第一节第5项 current metadata v5 窄例外验收；v3/v4仅作legacy exact reader，不得泛化或双写。
 2. 每条源事件都保留 `recv_time_utc`；Polymarket 每条 market event 同时保留平台 `timestamp` 和本地 `recv_time_utc`，并记录采集主机/区域。
 3. 非爱尔兰采集主机延迟不会被报告成爱尔兰 paper/live 交易主机接收延迟。
 4. Polymarket market channel在启动、重启和每次market lifecycle/role切换时必须覆盖当前active market；next market必须在planned market start前`T-30s`具备覆盖，并记录target market、planned market start、preload start、subscription confirmation evidence、first business event、coverage window、`prefetched -> active`、`next -> current`、`current -> resolution_pending`及terminal后的`active -> retired`边界证据。Binance depth/aggTrade和RTDS持续独立运行，不取得这些market role，也不按slug/T-30切换。预算耗尽路径必须证明只退出pending role而不伪造retired。
 5. `new_market`、market metadata、condition id、token id / asset id、start/end、`market_lifecycle_state`（candidate / prefetched / active / retired）与独立`market_runtime_role`（current / next / resolution_pending / none）全部可从artifact追溯；两者不得跨域比较，也不得与ModelRegistry状态混用。
 6. market discovery 必须证明 candidate slug + active scan / metadata snapshot 双路径，slug-only 不能作为完整 discovery 成功。
 7. Polymarket、Binance BTCUSDT orderbook/depth、Binance BTCUSDT aggTrade、RTDS Chainlink BTC/USD四个logical producer都保留required event types、IDs/timestamps、raw_json/typed fields、last-qualifying和confirmed integrity evidence；每日manifest只保存一个共同collection coverage，不复制四份producer或六份source coverage。
-8. `market_resolved`/retired验收必须证明事件路径或fallback metadata路径之一满足retired predicate；事件路径必须记录同一target condition/market的`subscribed_asset_ids_for_market`、`resolved_event_asset_ids`、`winning_asset_id`、`winning_outcome`、nullable`close_reason_if_present`。fallback路径必须覆盖固定identity、exact assets、fresh attempt、`closed=true`、`acceptingOrders=false`、可解析且不早于E的closedTime、精确resolved状态与one-hot winner；`active`值不得成为truth-value gate，closedTime与receive不得增加future-skew上界。另须验证E+3..E+8六slot、metadata v3的既有五种row/19项source failure/terminal-once/drain/exhausted/current source-v2 restart矩阵，以及future metadata v4对同一五种row的不可变继承、WS claimant pair null matrix、source-v3 recovery与cross-pair fail-closed矩阵。本事项真实source验收必须在本地原生Ubuntu环境通过已配置香港VPN线路执行，并按专项AC-12保存测试前、运行期间及结束后的线路证据；不得静默回退本地直连，也不得把本地接收延迟写成AWS爱尔兰paper/live延迟。
+8. `market_resolved`/retired验收必须证明事件路径或fallback metadata路径之一满足retired predicate；事件路径必须记录同一target condition/market的`subscribed_asset_ids_for_market`、`resolved_event_asset_ids`、`winning_asset_id`、`winning_outcome`、nullable`close_reason_if_present`。fallback路径必须覆盖固定identity、exact assets、fresh attempt、`closed=true`、`acceptingOrders=false`、可解析且不早于E的closedTime、精确resolved状态与one-hot winner；`active`值不得成为truth-value gate，closedTime与receive不得增加future-skew上界。另须验证E+3..E+8六slot、current source v3 + metadata v5 的五种row、source failure、terminal-once、drain/exhausted、claimant null matrix、restart recovery与cross-pair fail-closed矩阵；metadata v3/v4仅作 legacy exact-reader、claimant-prefix 与禁止迁移证据。本事项真实source验收必须在本地原生Ubuntu环境通过已配置香港VPN线路执行，并按专项AC-12保存测试前、运行期间及结束后的线路证据；不得静默回退本地直连，也不得把本地接收延迟写成AWS爱尔兰paper/live延迟。
 9. `best_bid_ask`、`new_market`、`market_resolved`验收必须证明`custom_feature_enabled: true`、订阅发送事实/直接错误和SDK支持状态；没有独立ack或尚无首个匹配业务事件只保留为未观测事实，不自动把manifest写成source gap/incomplete。
 10. Binance live源必须来自Binance官方WS/REST并继续由现有唯一direct owner实现；Cargo/lock和生产调用图不得新增Binance SDK/market-data engine。aggTrade必须保留原始`e,E,s,a,p,q,f,l,T,m`；depth update v4必须保留`e,E,s,U,u,b,a`及共同source epoch/generation/ingress/admission坐标，snapshot v3必须保留`lastUpdateId,bids,asks`及同一坐标域且不得伪造exchange timestamp；snapshot pending/success/failure release与depth stitch predicate必须可审计。
 11. 连续 parquet 写入通过 running/temp segment 承载，close/finalize 后 atomic rename；parquet / manifest 文件发现路径只读 finalized parquet；每个 source parquet 必须带 typed raw schema version 和 source kind metadata，至少包括 `parquet_raw_layout_version` 和 `parquet_raw_source_kind`。

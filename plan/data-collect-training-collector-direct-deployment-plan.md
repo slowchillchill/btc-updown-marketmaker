@@ -1,5 +1,18 @@
 # 训练数据采集器直接长期部署计划
 
+> 生命周期：`HISTORICAL_EVIDENCE_ONLY`
+>
+> 最终快照：`FROZEN_AT_20260730_CONSOLIDATION`
+>
+> 当前执行 authority：`none`
+>
+> superseded_by：`DC-DOCS-20260730-CURRENT-AUTHORITY-CONSOLIDATION`
+>
+> 读取规则：本文仅用于审计历史事实；内部“当前、下一步、待执行、命令”均属于
+> 当时检查点，不得驱动当前实现、测试、部署或远端操作。
+>
+> 2026-07-30：本计划只记录首次直接部署，已被后续部署事项取代，不得重新执行。
+>
 > 事项编号：`DC-DEPLOY-20260718-DIRECT-LONG-RUN`
 >
 > 对应需求：`demand/data-collect-training-collector-direct-deployment-demand.md`

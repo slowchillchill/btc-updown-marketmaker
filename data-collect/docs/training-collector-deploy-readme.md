@@ -1,10 +1,26 @@
 # data-collect 训练采集器部署说明
 
-对应需求：`demand/data-collect-training-collector-direct-deployment-demand.md`
+> 生命周期：`CURRENT_OPERATIONS_GUIDE`
+>
+> 当前基线：官方 Rust SDK `0.7.0` + 仓库唯一 `0.7.0-p1` patch；current new-write
+> schema 为 orderbook v3、metadata v5、depth snapshot v3、depth update v4、
+> aggTrade v7、RTDS v4。三个 binary 中只有 training collector 当前连接真实外部源。
+>
+> 2026-07-18 首次直接部署和 2026-07-19 RTDS-PONG-A 是历史部署证据，不是当前
+> 重部署授权。本文只描述当前训练运行合同；任何新部署仍须按届时另行批准的需求、
+> 计划和用户授权执行。
 
-对应计划：`plan/data-collect-training-collector-direct-deployment-plan.md`
+对应需求：`demand/data-collect-demand.md`
 
-对应 changelog：`changelog/data-collect-training-collector-direct-deployment-changelog.md`
+对应计划：`plan/data-collect-plan.md`
+
+对应 changelog：`changelog/data-collect-changelog.md`
+
+历史部署来源（只用于审计，不是当前重部署 authority）：
+
+- `demand/data-collect-training-collector-direct-deployment-demand.md`
+- `plan/data-collect-training-collector-direct-deployment-plan.md`
+- `changelog/data-collect-training-collector-direct-deployment-changelog.md`
 
 本文件只描述数据采集服务器上的训练 cold path。paper/live hot path 是分别部署、分别运行的独立角色，见 `data-collect/docs/paper-live-hot-path-integration.md`。远端服务器禁止编译 Rust。
 
@@ -99,36 +115,21 @@ TimeoutStopSec=120
 
 生产目录不得生成 segment/run manifest、startup/retention/resource/backpressure receipt、coverage/gap/reconnect/rollover sidecar、逐事件日志、queue samples 或 validation report。详细运行错误只进入 journald。collector 不删除 raw；`datasets/training` 达到 50,000,000,000 bytes 时协调停止并退出 75，等待独立归档运维清理。
 
-## 任意时刻直接部署
+## 历史首次部署流程（禁止直接复用）
 
-本流程用于多日停服、当日还没有 collector manifest 的首次正式冷启动。无需等待 UTC 00:00，也不运行 `Restart=no`、独立 gate unit、独立数据根、15 分钟 gate 或 26 小时放行门。唯一正式 unit 从第一次启动起就是 `Restart=on-failure`。
+2026-07-18/19 曾执行过一次性冷启动、带 SHA staging 上传、远端 preflight、
+原子替换和 `systemctl --user enable --now`。这些步骤只证明当时部署发生过，
+不是当前重新部署、替换 binary、启停 service 或删除数据的授权，也不得由本节局部
+摘取命令重新执行。
 
-上传只使用正式 binary 同目录下带 SHA 的瞬时独占 staging 路径：
-
-```text
-/home/ubuntu/btc-updown-marketmaker/data-collect/bin/data-collect-training-collector.upload-<sha256>
-```
-
-创建前必须对目标和逐级父目录做不跟随 symlink 的 owner/type/containment 检查；staging 路径必须不存在，并使用 exclusive-create 语义上传。远端必须复核 binary SHA、ELF、owner/mode、loader、`ldd`、最高 GLIBC requirement 不高于远端 2.39，以及无副作用的 `--help`/`--version`。
-
-原子替换前再做一次普通只读 preflight：
-
-1. service 仍为 inactive，MainPID/cgroup 已退出，dataset-root 独占 lease 没有占用；
-2. 本次首次冷启动的当前 UTC 日目录及manifest、finalized Parquet、`.running/.tmp/.partial/.digesting`等collector产物仍全部不存在；发现任何当前日产物都原样保留并停止，不得删除后绕过；
-3. unit、ExecStart、binary destination、逐级父路径、owner/type/mount 与 SHA 仍符合权威合同；
-4. staging 与 destination 位于同一 filesystem。
-
-preflight 通过后，`sync` staging、原子替换固定 binary、同步 destination 所在目录、复核正式 SHA/owner/mode，然后直接执行：
-
-```bash
-systemctl --user enable --now data-collect-training-collector.service
-```
-
-unit 内容已与仓库权威源一致时不重复替换。部署命令和operator不删除、移动、隔离或改写历史 raw、Parquet 或 manifest；唯一例外是prior legacy open manifest由启动后的runtime按state-aware recovery处理。
+完整历史事实保留在第 19--23 行列出的三件套及其后继部署事项中。任何未来部署都必须
+根据届时真实 commit、binary、远端 service、manifest、数据目录和运行环境，另建并批准
+对应需求、计划与 changelog；本 current guide 只提供运行合同和验收观察项。
 
 ## 启动即时验证
 
-启动后进行有界、只读验证，不停止 collector 等待报告：
+仅在另行批准的部署或启动完成后，才按本节进行有界、只读验证；本节本身不授权启动、
+停止或替换 collector：
 
 - service 为 `active/running`，MainPID 大于零，`/proc/<pid>/exe` SHA 与部署 SHA 相同，`NRestarts` 不持续增加；
 - 当前日 manifest 为顶层 v3、`state=open`，build/binary/config/host/region identity 正确，collection-day coverage v1 为 `active`；
@@ -145,15 +146,23 @@ unit 内容已与仓库权威源一致时不重复替换。部署命令和operat
 正式 service 在上述即时验证后继续长期运行：
 
 - 跨下一 UTC 小时观察实际有数据 source 的 finalize；静默 source 不要求生成空文件；
-- 跨下一 UTC 日观察旧日关闭、新日 `open + active` 和 rollover；无进程级故障时 PID 应保持不变；
+- 跨下一 UTC 日观察旧日关闭、新日 `open + active` 和 rollover；这是持续运维观察，
+  不是当前模块 completion gate，无进程级故障时 PID 应保持不变；
 - 约 24 小时及更长时间观察 PID/`NRestarts`、journal、逐 source 增长、RSS/FD/线程/磁盘趋势和真实连接恢复；约24小时soak只能证明观察期间通过，不能冒充每种reconnect分支都被真实触发。
 
 这些是运行证据，不是启动前 gate。从日内开始得到的首日是部分 UTC 日，不得冒充完整 00:00--24:00 UTC collection day。systemd 因真实进程级非零故障启动同 identity 新 PID 是批准的 `Restart=on-failure` 行为，但必须记录 restart 事实；单 source 外部故障仍由同一 PID 内 owner 持续恢复。
 
 ## 失败与未来切换边界
 
-发现本地完整性错误、启动失败或 restart storm 时，停止服务并保留全部真实数据、journal、manifest 与 digest 证据，不执行失败日期清理。退出 75/76 继续由 `RestartPreventExitStatus=75 76` 阻止自动重启。
+发现本地完整性错误、启动失败或 restart storm 时，必须保留全部真实数据、journal、
+manifest 与 digest 证据，不执行失败日期清理，并按另行批准的 incident/runbook 处置；
+本文件不单独授权停服或修改远端状态。退出 75/76 继续由
+`RestartPreventExitStatus=75 76` 阻止自动重启。
 
-本次冷启动不授权 future same-day 不同 identity 升级、回滚或删除历史数据。需要这些操作时，必须基于当时 manifest/coverage/service 事实另行批准；不得把当前直接冷启动合同扩展成通用 takeover。
+历史冷启动不授权 future same-day 不同 identity 升级、回滚或删除历史数据。需要这些
+操作时，必须基于当时 manifest/coverage/service 事实另行批准；不得把历史冷启动合同
+扩展成通用 takeover。
 
-2026-07-19 的 `RTDS-PONG-A` 同日替换是单独批准的精确 current-day 删除后冷启动，不是 identity takeover；其删除范围、构建、停服、原子替换和验收只以 `demand/data-collect-rtds-pong-a-reset-deployment-demand.md`、对应计划及 changelog 为 authority，不得据此扩大为通用同日升级或删除流程。
+2026-07-19 的 `RTDS-PONG-A` 同日替换是单独批准并已结束的历史事项，不是 identity
+takeover；其删除范围、构建、停服、原子替换和验收只作为对应历史三件套中的审计事实，
+不再具有当前 authority，也不得据此扩大为通用同日升级或删除流程。

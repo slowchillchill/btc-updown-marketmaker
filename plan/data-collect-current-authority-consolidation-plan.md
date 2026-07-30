@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-current-authority-consolidation-changelog.md`
 >
-> 状态：`PHASE_1_COMPLETE_PHASE_2_PENDING`
+> 状态：`PHASE_2_COMPLETE_PHASE_3_PENDING`
 
 ## 阶段 1：关闭旧验收门并冻结延期边界
 

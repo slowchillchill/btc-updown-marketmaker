@@ -14,7 +14,12 @@
 
 2026-07-26 已冻结future RTDS共同恢复合同：以后paper/live任一真实RTDS adapter接入时，必须与training使用相同合格fresh分类、`steady_silence_threshold=300s`、`first_fresh_observation_window=60s`、`Connected`与latest desired本地applied的后到monotonic anchor、首次fresh前禁用cold-start watchdog，以及`1s × 2 ±20%`、单次最长`300s`、fresh重置、总尝试不限的outer backoff。必须由唯一owner严格break-before-make，旧runtime真实完成后才能创建新runtime，任意时刻最多一个RTDS socket，每条connection只应用一次完整`btc/usd` filtered desired。
 
-该共同合同不表示当前paper/live已经实现或验证RTDS。future adapter仍须另立demand/plan/changelog，补齐本机handoff sink、runtime receive、背压、append-only log、进程重启后`ever_received_fresh=false`、长跑、资源与部署验收；不得启动或复用training专属Parquet、manifest、dedupe-restore和`SourceEventSink`路径，也不得另选不同RTDS恢复语义。
+该共同合同不表示当前paper/live已经实现或验证RTDS。future `data-collect` adapter
+仍须另立 demand/plan/changelog，负责真实 source adapter、本机 handoff sink 和共同
+RTDS 恢复合同；paper/live runtime 分别负责本机 runtime receive、consumer
+backpressure 和自身 append-only log。双方共同完成长跑、资源与部署验收，不得启动
+或复用training专属Parquet、manifest、dedupe-restore和`SourceEventSink`路径，也
+不得另选不同RTDS恢复语义。
 
 PMXT-like hourly parquet 只属于训练 cold path：`data-collect-training-collector` 在数据采集服务器写 finalized typed raw parquet 和每日唯一 `manifest.json`。paper/live hot path 仍消费本机 realtime handoff frame，不能等待 finalized hourly parquet，也不能把 hourly parquet 当成实时唯一数据来源。paper/live 可以把 hourly parquet 用于审计或离线对照，但实时交易可见性必须来自本机 handoff receive time 和对应 runtime append-only log。
 
@@ -56,6 +61,10 @@ live 服务器模板：
 frame 为 newline-delimited JSON，`frame_schema_version=data_collect_handoff_v1`。
 
 ## frame schema
+
+> 以下 `external_market_event` 是 future adapter 的版本化合同，不是当前 binary
+> 输出。当前 paper/live binary 只发送 heartbeat/status；不得用本节 schema 声称
+> 真实 source producer 已实现。
 
 `external_market_event` frame 至少包含：
 

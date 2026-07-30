@@ -6,6 +6,26 @@
 
 > 对应计划文档：`/home/chillchill/btc-updown-marketmaker/plan/data-collect-plan.md`
 
+> 读取规则：下方较早章节中的“当前”“下一步”“pending”“唯一游标”只表示对应日期的
+> 历史检查点；不得脱离本文件最新章节、当前代码和 current acceptance 生成执行
+> authority。
+
+## 2026-07-30：data-collect 当前实现与关闭状态
+
+- 当前 Polymarket SDK 为 `0.7.0`，使用仓库唯一 `0.7.0-p1` patch。
+- current new-write schema 为 orderbook v3、metadata v5、depth snapshot v3、
+  depth update v4、aggTrade v7 和 RTDS v4；旧 schema 只读，不迁移、不重写。
+- 只有 training collector 当前连接真实外部源；paper/live 仍为 heartbeat/status，
+  真实 adapter 延后到训练模块完成后另立三件套。
+- RTDS current 合同为 300s steady、60s first-fresh window、1s 指数 backoff、
+  单次最长 300s、fresh reset、总尝试不限和 break-before-make 完整 replacement。
+- 50GB 触发协调 finalize 并退出 75；collector 不运行 retention admin，也不自动
+  删除 raw。
+- 2026-07-28 事故事项已经用户最终验收；UTC rollover 与完整健康 UTC 日被移出
+  completion gate，旧 Attempt6 不再是执行游标。
+- 当前完整测试存在一个 UTC 12:00 前动态夹具已知失败；不得将聚焦测试结果扩大为
+  无条件 full-suite PASS。该夹具问题及已核实测试范围记录在 2026-07-30 文档审计中。
+
 ## 2026-07-30：paper/live 真实 adapter 延后
 
 - 用户决定把 paper/live 真实外部市场源 adapter 延后到训练模块完成后，再以独立
@@ -20,7 +40,7 @@
 
 ### DC-REPAIR-20260728-REDUNDANT-TYPED-COLUMN-REMOVAL
 
-- 用户批准 future current aggTrade v7 删除
+- 用户当时批准后继 aggTrade v7 删除
   `websocket_timestamp_received`，metadata v5 删除
   `resolution_evidence_raw_sha256`；历史 aggTrade v5/v6、metadata v3/v4 只读，
   不迁移、不重写。
@@ -29,7 +49,8 @@
   owner、artifact 和 manifest schema 不变。
 - Attempt5 按用户指令停止并固定为
   `USER_TERMINATED_FOR_APPROVED_SCHEMA_CHANGE + INCOMPLETE_8H`。v7/v5 分阶段
-  闭合后，从新 clean/pushed HEAD 和空 root 执行完整六源 8 小时 Attempt6。
+  闭合后，当时计划从新 clean/pushed HEAD 和空 root 执行完整六源 8 小时
+  Attempt6；该历史游标已被后续 B2 修复和 2026-07-30 用户最终验收取代。
 
 ## 2026-07-11
 

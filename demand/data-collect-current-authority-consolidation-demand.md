@@ -6,7 +6,7 @@
 >
 > 对应 changelog：`changelog/data-collect-current-authority-consolidation-changelog.md`
 >
-> 状态：`PHASE_1_COMPLETE_PHASE_2_PENDING`
+> 状态：`PHASE_2_COMPLETE_PHASE_3_PENDING`
 >
 > 用户批准时间：2026-07-30
 
@@ -53,7 +53,8 @@
 
 ## 五、非范围
 
-1. 本事项不修改 `data-collect` Rust 运行时代码、schema 或交易逻辑。
+1. 本事项不修改 `data-collect` Rust 运行时代码、schema 或交易逻辑；允许同步仅验证
+   Markdown 内容的文档契约测试，使其拒绝已失效的历史执行入口。
 2. 本事项不部署、重启或操作任何远端服务，不删除远端数据。
 3. 本事项不提前实现 paper/live 真实外部市场源 adapter。
 4. 本事项不把带日期的历史执行事实改写成从未发生，也不把用户取消的验收门伪装成

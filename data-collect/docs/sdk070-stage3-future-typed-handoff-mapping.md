@@ -1,5 +1,18 @@
 # SDK070 Stage3 future typed handoff mapping
 
+> 生命周期：`HISTORICAL_EVIDENCE_ONLY`
+>
+> 最终快照：`FROZEN_AT_20260730_CONSOLIDATION`
+>
+> 当前执行 authority：`none`
+>
+> superseded_by：`DC-DOCS-20260730-CURRENT-AUTHORITY-CONSOLIDATION`
+>
+> 读取规则：本文仅用于审计历史事实；内部“当前、下一步、待执行、命令”均属于
+> 当时检查点，不得驱动当前实现、测试、部署或远端操作。
+>
+> 2026-07-30：本文只保留 future mapping 研究快照，不是当前 paper/live 实现合同。
+>
 事项：`data-collect-sdk070-typed-schema-live-runtime-refactor`
 
 对应需求：

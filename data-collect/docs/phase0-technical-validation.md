@@ -1,5 +1,19 @@
 # data-collect Phase 0 Technical Validation
 
+> 生命周期：`HISTORICAL_EVIDENCE_ONLY`
+>
+> 最终快照：`FROZEN_AT_20260730_CONSOLIDATION`
+>
+> 当前执行 authority：`none`
+>
+> superseded_by：`DC-DOCS-20260730-CURRENT-AUTHORITY-CONSOLIDATION`
+>
+> 读取规则：本文仅用于审计历史事实；内部“当前、下一步、待执行、命令”均属于
+> 当时检查点，不得驱动当前实现、测试、部署或远端操作。
+>
+> 2026-07-30：本文只保留 Phase 0 验证历史；旧 SDK、RTDS“不重连”、sidecar 和
+> 阶段游标已被当前代码与后续决策取代。
+>
 事项编号：`data-collect-demand`
 
 对应需求文档：`/home/chillchill/btc-updown-marketmaker/demand/data-collect-demand.md`

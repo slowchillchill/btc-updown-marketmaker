@@ -1,5 +1,19 @@
 # 训练采集全数据源可用性与连接生命周期修复需求
 
+> 生命周期：`HISTORICAL_EVIDENCE_ONLY`
+>
+> 最终快照：`FROZEN_AT_20260730_CONSOLIDATION`
+>
+> 当前执行 authority：`none`
+>
+> superseded_by：`DC-DOCS-20260730-CURRENT-AUTHORITY-CONSOLIDATION`
+>
+> 读取规则：本文仅用于审计历史事实；内部“当前、下一步、待执行、命令”均属于
+> 当时检查点，不得驱动当前实现、测试、部署或远端操作。
+>
+> 2026-07-30：本文件保留 source-availability 专项历史；其中被后续 RTDS 完整
+> runtime replacement、SDK070 和 B2 修复覆盖的语义不再具有当前执行权。
+>
 > 事项编号：`DC-REPAIR-20260716-SOURCE-AVAILABILITY-LIFECYCLE`
 >
 > 对应计划：`plan/data-collect-source-availability-lifecycle-repair-plan.md`

@@ -1,5 +1,19 @@
 # 数据采集可靠性修复计划
 
+> 生命周期：`HISTORICAL_EVIDENCE_ONLY`
+>
+> 最终快照：`FROZEN_AT_20260730_CONSOLIDATION`
+>
+> 当前执行 authority：`none`
+>
+> superseded_by：`DC-DOCS-20260730-CURRENT-AUTHORITY-CONSOLIDATION`
+>
+> 读取规则：本文仅用于审计历史事实；内部“当前、下一步、待执行、命令”均属于
+> 当时检查点，不得驱动当前实现、测试、部署或远端操作。
+>
+> 2026-07-30：本计划只记录早期可靠性修复；旧 RTDS 和部署路径已被后续专项取代，
+> 不得重新作为当前计划执行。
+>
 > 对应需求：`demand/data-collect-reliability-repair-demand.md`
 >
 > 对应 changelog：`changelog/data-collect-reliability-repair-changelog.md`

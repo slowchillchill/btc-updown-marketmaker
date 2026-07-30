@@ -1,5 +1,19 @@
 # SDK070 typed schema / live runtime 阶段0执行基线
 
+> 生命周期：`HISTORICAL_EVIDENCE_ONLY`
+>
+> 最终快照：`FROZEN_AT_20260730_CONSOLIDATION`
+>
+> 当前执行 authority：`none`
+>
+> superseded_by：`DC-DOCS-20260730-CURRENT-AUTHORITY-CONSOLIDATION`
+>
+> 读取规则：本文仅用于审计历史事实；内部“当前、下一步、待执行、命令”均属于
+> 当时检查点，不得驱动当前实现、测试、部署或远端操作。
+>
+> 2026-07-30：本文是 SDK070 Stage 0 快照；其中 SDK 0.6.0、参数 pending 和后续步骤
+> 已被当前代码与完成记录取代。
+>
 > 事项编号：`DC-REPAIR-20260724-SDK070-TYPED-LIVE-RUNTIME`
 >
 > 对应需求：`demand/data-collect-sdk070-typed-schema-live-runtime-refactor-demand.md`

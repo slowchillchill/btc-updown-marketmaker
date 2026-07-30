@@ -1,5 +1,23 @@
 # data-collect Implementation Plan / 共用数据采集模块计划
 
+> 生命周期：`CURRENT_MASTER_PLAN_CLOSED`
+>
+> 当前状态：`IMPLEMENTATION_COMPLETE_NO_ACTIVE_DATA_COLLECT_EXECUTION_CURSOR`
+>
+> 2026-07-30：`data-collect` 当前没有 Rust、部署或远端运行执行游标。唯一正在执行的
+> 文档治理计划是
+> `plan/data-collect-current-authority-consolidation-plan.md`；paper/live 真实外部
+> 市场源 adapter 延后到训练模块完成后另立三件套。本文件下方所有带日期的阶段、
+> attempt、部署和命令只保留为历史计划证据，除非被顶部当前摘要、当前代码或
+> current acceptance 明确重申，否则不得重新执行。
+>
+> 当前实现摘要：官方 SDK `0.7.0` + 仓库唯一 `0.7.0-p1` patch；current new-write
+> schema 为 orderbook v3、metadata v5、depth snapshot v3、depth update v4、
+> aggTrade v7、RTDS v4。只有 training 连接真实源。training RTDS 使用
+> 300s steady / 60s first-fresh 完整 replacement；50GB 时协调 finalize 并退出 75，
+> 不运行 retention admin，也不自动删除 raw。2026-07-28 事故已经用户最终验收，
+> UTC rollover/full healthy day 不再是 completion gate，旧 Attempt6 失效。
+>
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 在 `./data-collect/` 建立只负责外部市场源采集证据的 Rust async/non-blocking 模块，为训练、paper trade 和 live trade 提供 finalized typed raw parquet、coverage、health/gap、reconnect trace、manifest 和 ResourceWatermark 证据。
@@ -24,7 +42,10 @@
 > 完成后，再另立三件套返回实施、测试和部署；它不再是本轮 `data-collect` closure
 > gate。当前只保留已实现 heartbeat/status binary 与 future 接入合同。
 >
-> 2026-07-18训练collector首次正式冷启动以`plan/data-collect-training-collector-direct-deployment-plan.md`为历史authority；2026-07-19用户批准的RTDS-PONG-A原路径重置部署以`plan/data-collect-rtds-pong-a-reset-deployment-plan.md`为当前执行authority。本计划中更早的gate、删除、重启或部署记录只保留为历史，不得重新执行。
+> 2026-07-18训练collector首次正式冷启动和2026-07-19 RTDS-PONG-A原路径重置部署
+> 均为历史部署 authority；它们已被后续 SDK070、schema v7/v5、2026-07-28
+> 事故事项及用户最终验收取代。本计划中更早的gate、删除、重启或部署记录只保留为
+> 历史，不得重新执行。
 >
 > 2026-07-22 Polymarket resolution-followup窄authority已按用户批准同步到任务8.5附近；详细后续实现与验收只以`plan/data-collect-polymarket-resolution-followup-plan.md`为准。本事项AC-12真实source验收固定在本地原生Ubuntu环境使用已配置香港VPN线路，不再上传到AWS爱尔兰数据采集服务器执行。阶段0文档同步已完成；用户已后续授权完整执行阶段1至阶段4、本地构建/测试、每阶段独立审查后的commit/push与本地AC-12，但未授权production部署、服务操作或数据删除。
 >
@@ -59,14 +80,20 @@
 > 保留为历史；current验收只使用上述真实owner和acceptance matrix，不恢复第二套
 > control model。
 >
-> 2026-07-27 RTDS current authority：详细执行只以`plan/data-collect-rtds-business-silence-full-reconnect-plan.md`为单一游标。阶段1已在training实现并验证同一owner内的break-before-make完整runtime replacement；阶段2 Attempt1因精确network-error服务对象固定为`FAIL + INCOMPLETE_8H`，对应方案A已由`366fed7d`/`415470e`分离闭合；Attempt2固定为`USER_TERMINATED + INCOMPLETE_8H`。Attempt3从clean/pushed `c05db6ba58676bec3e20878375608e395ad0971a`运行完整六源collector并在`3863.950s`后因Gamma顶层`closedTime`格式误判退出1，Gamma方案A已由`3a367386`/`e086017f`分离闭合。Attempt4从clean/pushed `a37cf1181597296b9b2d87f8bc2c93700bda8f48`运行同一完整collector，在`8192.100s`后因Polymarket market某个Decimal收到精确空串而退出1；失败raw frame/variant/path未知。Attempt3和Attempt4均永久为`FAIL + INCOMPLETE_8H`。SDK070三件套定义的`P-B1E`已由authority/Rust commits `15feb12`/`9d8e59b`分离闭合：只对九个官方nullable Decimal精确`"" -> None`，required与非空malformed仍fatal；只修改既有vendor `response.rs`，定向验证与三路独立终审均通过，未新增parser/诊断/schema/100-cycle。承载本closure的纯文档commit成功push并完成三方ref核对后，当前单一游标是从该新clean/pushed HEAD重建release-profile `data-collect-training-collector`，经香港线路用新隔离dataset root和`--max-runtime-secs 28800`运行完整四个logical producer、六个`LIVE_SOURCES`并正式落盘的Attempt5。该运行是本地部分日前向验证；除P-B1E typed decode规范化外，不修改CLOB、RTDS、Binance业务或恢复行为，也不新增paper/live RTDS adapter或提前抽象共享framework。future paper/live真实RTDS adapter仍须另立三件套实施、测试和部署，但必须继承相同fresh classifier、`300s/60s/cold-start disabled`、outer`1s × 2 ±20%/300s cap/unlimited`、唯一owner/socket与break-before-make合同。production binary激活、完整UTC日前向长跑、部署和远端操作仍不在该授权内。
+> 2026-07-27 RTDS 历史执行快照：Attempt1--4 的失败/终止、P-B1E 修复和 Attempt5
+> 启动事实由专项三件套与 changelog 保留；它们不再构成当前游标。当前 training RTDS
+> 合同为 `300s steady / 60s first-fresh / cold-start disabled`、outer
+> `1s × 2 ±20% / 300s cap / unlimited`、唯一 owner/socket 与
+> break-before-make 完整 runtime replacement。paper/live 真实 RTDS adapter 延后到
+> 训练模块完成后另立三件套，届时必须继承同一恢复合同。
 >
-> 2026-07-28 current cursor supersede：Attempt5 已按用户指令停止并永久记为
+> 2026-07-28 历史游标快照：Attempt5 已按用户指令停止并永久记为
 > `USER_TERMINATED_FOR_APPROVED_SCHEMA_CHANGE + INCOMPLETE_8H`。当前实现步骤只以
 > `plan/data-collect-redundant-typed-column-removal-plan.md`为 authority：先分别
 > 完成 aggTrade v7 与 metadata v5 的实现、验证、独立审查、commit 和 push，再从
 > 新 clean/pushed HEAD、新 binary、新 artifact root 与空 dataset root 执行完整六源
-> 8 小时 Attempt6。上述 2026-07-27 段落中的 Attempt5 游标仅保留为启动前历史事实。
+> 8 小时 Attempt6。该旧 Attempt6 已被后续 B2 修复和 2026-07-30 用户最终验收
+> 取代，不再是当前执行游标。
 
 ## 2026-07-10 已批准增量执行
 
@@ -256,7 +283,7 @@
 | 阶段 5 | 消费者边界与分区 | 训练 UTC day 分区、paper/live artifact 边界声明、finalized-only discovery | 不生成 labels/features/trading logic，且满足阶段推进通用 gate |
 | 阶段 6 | 端到端验收与交付 | soak test、source coverage、ResourceWatermark、final review、changelog | 需求验收项逐条可追溯，且满足阶段推进通用 gate |
 | 阶段 7 | 部署能力与三运行形态交付 | 训练/paper/live 独立二进制、训练部署 README、paper/live hot path 技术文档、systemd 示例、远端 smoke/2h 验收 | 三类二进制可导出，训练采集服务器持续采集验收通过，paper/live 接入边界文档明确，且满足阶段推进通用 gate |
-| 阶段 8 | 训练数据采集生产就绪与正式长跑上线 | 长期运行策略、3 秒 RTDS 重试、生产 retention 闭环、Resource hard-threshold、`polymarket_market_metadata` source、release/README 合同、正式 `train-data-collect-ver1-0`、远端清理和长跑 service | 最新代码 2 小时 systemd gate 通过，正式版本可追溯，旧测试产物已清理，长期采集 service active 且磁盘治理闭环成立 |
+| 阶段 8（历史） | 训练数据采集生产就绪与正式长跑上线 | 当时规划的 3 秒 RTDS、自动 retention、metadata v4 和 release alias 已被后续实现取代 | 仅保留历史，不得重新执行；current 见文件顶部摘要与 acceptance matrix |
 
 ### 阶段推进通用 gate
 
@@ -2527,7 +2554,12 @@ Phase 5 执行结果：
 
   执行结果：阶段 7 最终复审已完成，三个独立 subagent 均返回 `PASS_WITH_NOTES`，未发现阻塞问题。部署 gate 复审确认此前“最新二进制缺 2 小时 gate”的 blocker 已由 `training-systemd-phase7manifest-20260707T052135Z` 补齐；需求/文档一致性复审确认 `data-collect` 边界、训练 cold path、paper/live hot path、路径口径和 Phase 7 资源门控限制说明一致；代码/运行时质量复审确认 source kind 拆分、可恢复 backpressure wait、segment manifest atomic sidecar、soft rollover 和 release export 合同成立。非阻塞 notes：paper/live hot binary 当前仍只验收 heartbeat/status handoff server 与 fake consumer，不是正式交易服务器 `external_market_event` 长跑；完整 byte/age/writer-lag/memory hard constraint 属于后续生产硬化，不作为本阶段已完成项；提交时必须排除无关未跟踪文件。
 
-## 十三、阶段 8：训练数据采集生产就绪与正式长跑上线
+## 十三、阶段 8（历史实施计划；已被后续专项取代，禁止重新执行）
+
+> 本节保留 2026-07-07 当时的计划和实施沿革。其 3 秒 RTDS refresh、production
+> retention delete、retention admin/release alias、metadata v4 和 Attempt6 指令均
+> 不是当前合同。当前分别为 300s/60s 完整 replacement、50GB 协调退出 75 且不删除
+> raw、source v3 + metadata v5，以及无 Attempt6 当前游标。
 
 本阶段承接用户对正式训练数据采集的部署批准，但前置审查已确认当前代码仍不能直接作为长期生产服务上线。阶段 8 的目标不是重复阶段 7 的“能导出、能跑 2 小时”，而是补齐长期运行、磁盘治理、metadata source、RTDS 3 秒重试、resource hard-threshold、正式版本命名和远端清理后，再启动数据采集服务器的长期采集。
 
@@ -2550,6 +2582,9 @@ Phase 5 执行结果：
 - 把 release 合同当作测试对象：当前 README/script/service 仍是阶段 7 产物，已知与正式 `train-data-collect-ver1-0` 长跑要求不一致；8.6 必须修到 export script、README、systemd 示例、deploy_readme_contract、deployment_binary_contract 完全一致后，才允许进入正式 release。正式版本目录、sha256、RELEASE_INFO、README 不得依赖手工记忆。
 
 ### 任务 8.1：更新需求、文档合同和 RTDS 3 秒恢复口径
+
+> 历史警告：本任务的 3 秒 refresh 已被 300s steady / 60s first-fresh 完整 runtime
+> replacement 取代，以下命令和验收不得重新执行。
 
 **执行步骤：**
 
@@ -2587,6 +2622,9 @@ CARGO_TARGET_DIR=target/data-collect-ci \
 **验收：** 未传长期模式的测试仍可 bounded 结束；正式 service 命令不会 7 天后正常退出并停住；systemd 文档清楚区分 2 小时 gate 和长期 service。
 
 ### 任务 8.3：接入生产 retention enabled delete 与受控停采闭环
+
+> 历史警告：自动删除、retention admin 和 delete receipt 路线已被“50GB 协调
+> finalize 后退出 75，collector 不删除 raw”取代。
 
 **执行步骤：**
 
@@ -2630,10 +2668,13 @@ CARGO_TARGET_DIR=target/data-collect-ci \
 
 ### 任务 8.5：实现 `polymarket_market_metadata` live source
 
+> 历史警告：current new-write 是 source v3 + metadata v5；以下 v3/v4
+> current/future 游标及 Attempt6 语句只属于当时实施历史。
+
 **执行步骤：**
 
 - 2026-07-28 current-schema 窄 supersede：SDK070 Stage3 的 source v3 + metadata v4
-  实施事实保持历史完成；future current pair 升为 source v3 + metadata v5，唯一物理列
+  实施事实保持历史完成；其后 current pair 升为 source v3 + metadata v5，唯一物理列
   变化是删除 `resolution_evidence_raw_sha256`。实现、legacy exact reader、验证和
   Attempt6 只按
   `plan/data-collect-redundant-typed-column-removal-plan.md` 执行；本任务不建立
@@ -2643,7 +2684,9 @@ CARGO_TARGET_DIR=target/data-collect-ci \
 - `new_market` 事件同时继续保留在 `polymarket_market` 事件流，并生成对应 `polymarket_market_metadata` row；不得只在 orderbook schema 里用 `new_market` 代替 metadata source。
 - 2026-07-22批准的当前authority取代旧`active=false` fallback门：E时旧market lifecycle保持active、runtime role从current切到resolution_pending并保留terminal观察assets；只有合格`market_resolved`或fresh exact-slug Gamma证据才能写retired，预算耗尽只写`resolution_followup_exhausted`并退出role，不再新写`unresolved_window_end_observation`。
 - Gamma fallback固定为E+3 initial与E+4..E+8五次retry，总计最多6个绝对slot。terminal predicate要求固定same identity、exact二元asset/outcome映射、`closed=true`、`acceptingOrders=false`、存在且可解析并不早于E的closedTime、精确resolved状态与one-hot winner；`active`只原样记录为nullable字段，不参与truth-value判定，closedTime与receive之间没有future-skew上界门。
-- current source-v2路径的metadata升级为v3并采用批准需求RF-09的五种row kind、required/null matrix、19项稳定source failure枚举、可还原payload与digest/reference合同；每slot最多一条attempt row。2026-07-25批准的future metadata v4以v3完整schema为不可变前缀，只追加两个nullable WS claimant字段；source-v3 recovery与source v2 + metadata v3到source v3 + metadata v4的原子activation只由`plan/data-collect-sdk070-typed-schema-live-runtime-refactor-plan.md`阶段3执行，本计划不复制第二执行游标。attempt row进入同一既有Parquet与manifest file facts，但不扩张manifest schema/artifact/sidecar、不双写；terminal-once、WS/Gamma drain、prefix durability与restart fail-closed矩阵均以批准专项需求及SDK070总计划为准。
+- 历史 source-v2 路径的 metadata v3 及当时 future metadata v4 合同保留为实施沿革；
+  当前 new-write 已是 source v3 + metadata v5。旧 schema 只读，不得据此建立第二
+  执行游标、cross-pair、dual-write 或半切换。
 - 2026-07-22上述source-v2/metadata-v3三条后来已由resolution-followup专项阶段1至阶段4完成实现和验证；阶段2任务2.1步骤2.1.3的更早历史执行结果仍保留当时`active=false`事实，并由本节与对应changelog记录supersede。2026-07-24 future source-v3 validate-first与2026-07-25 metadata-v4 claimant/原子activation已完成文档批准和authority同步；2026-07-25持续执行授权覆盖其Stage3本地Rust/schema/test实施与常规发布，但未真实完成前不得冒充已实现。
 - 对 SDK 暴露不到的 tick size、min size、fee/reward 字段，优先通过 SDK/Gamma 类型补齐；无法补齐时必须在 typed schema、raw evidence 或 segment/run manifest 中写 `metadata_unavailable_reason` / `field_unavailable_reasons` / limitation 等等价证据，不能只写 null 后仍把 metadata 判为 complete。
 
@@ -2658,9 +2701,17 @@ CARGO_TARGET_DIR=target/data-collect-ci \
   cargo test -p data-collect live_runtime --lib -- --nocapture
 ```
 
-**验收：** 既有2小时live run仍只证明当时`source_coverage`包含`polymarket_market_metadata`、metadata parquet/finalized manifest及current/next可读；它不证明2026-07-22批准的resolution-followup合同已实现，也不证明2026-07-25批准的metadata v4 schema、claimant recovery或原子activation已经实施。既有resolution-followup阶段1至阶段4证据只覆盖当时source v2 + metadata v3实现；future source v3 + metadata v4必须按SDK070总计划阶段3在持续执行授权下完成schema/null matrix、claimant/restart、cross-pair和原子activation验收，才能宣称该未来合同完成。AC-12的既有执行固定在本地原生Ubuntu环境使用已配置香港VPN线路，不使用AWS爱尔兰数据采集服务器，且本地receive/latency不得冒充AWS爱尔兰paper/live主机延迟。
+**历史验收结论：** 既有2小时live run只证明当时的 metadata source 证据；后续
+SDK070 Stage3 已完成 source v3 + metadata v4，metadata v5 又取代 v4 成为 current
+new-write。AC-12的既有执行固定在本地原生Ubuntu环境使用已配置香港VPN线路，不使用
+AWS爱尔兰数据采集服务器，且本地receive/latency不得冒充AWS爱尔兰paper/live主机
+延迟。
 
 ### 任务 8.6：同步 release/README/systemd/contract
+
+> 历史警告：retention admin、release bundle、`current` symlink 和
+> `train-data-collect-ver1-0` alias 不是当前训练部署合同；current 只使用固定 training
+> binary 与唯一 user unit。
 
 **执行步骤：**
 
@@ -2682,6 +2733,9 @@ data-collect/scripts/export-release-artifacts.sh
 **验收：** 文档、脚本、测试和实际 release 包清单一致；README 不再写“三个二进制”；正式版本名与用户要求一致。
 
 ### 任务 8.7：本地最终验证与阶段审查
+
+> 历史警告：以下测试组合验证的是当时 Phase 8 路线，不是 current completion gate；
+> current 可运行验证以 current acceptance matrix 为准。
 
 **执行步骤：**
 
@@ -2710,6 +2764,9 @@ CARGO_TARGET_DIR=target/data-collect-ci \
 
 ### 任务 8.8：远端最新代码 15 分钟 smoke 与 2 小时 systemd gate
 
+> 历史警告：以下远端 gate、3 秒 RTDS 和 retention receipt 检查均已失去当前执行
+> authority，不得据此操作远端。
+
 **执行步骤：**
 
 - 本地构建 release，上传到数据采集服务器 `~/btc-updown-marketmaker/data-collect/releases/<release-id>/`，远端只运行 binary，不运行 cargo。
@@ -2727,6 +2784,9 @@ CARGO_TARGET_DIR=target/data-collect-ci \
 - 无 `.running` / `.digesting` / `.tmp` / `.rsync-partial` 残留进入 finalized discovery。
 
 ### 任务 8.9：生成正式 `train-data-collect-ver1-0` 并清理远端旧测试产物
+
+> 历史警告：本任务的 release alias、远端清理和删除 allowlist 不再获准执行。
+> current collector 不自动删除 raw，任何真实清理必须另立事项并重新获得用户批准。
 
 **执行步骤：**
 
@@ -2748,6 +2808,9 @@ CARGO_TARGET_DIR=target/data-collect-ci \
 
 ### 任务 8.10：启动长期采集并做上线后观察
 
+> 历史警告：本任务的 production retention enabled delete 和 release alias 已被
+> current 固定 binary、50GB exit 75 且无自动删除合同取代；不得执行以下命令。
+
 **执行步骤：**
 
 - 安装/更新 user systemd service，`ExecStart` 指向正式 `train-data-collect-ver1-0`，使用 `--run-forever`、production retention enabled、collector region `eu-west-1` 和 canonical dataset root；启动前向用户报告 production retention enabled delete 已启用，且边界只允许删除最老 finalized complete UTC day。
@@ -2759,6 +2822,9 @@ CARGO_TARGET_DIR=target/data-collect-ci \
 **验收：** 服务保持 `active/running`，`NRestarts` 无异常增长，磁盘治理处于 enabled 且 receipt 可写，初始数据写入正常；最终向用户报告长期服务已启动、run id、正式版本 sha256、远端清理结果和观察证据。
 
 ### 阶段 8 阻断条件
+
+> 历史警告：以下条件只说明当时为何不得推进 Phase 8，不是当前模块的 pending
+> completion gate。
 
 任一条件出现时不得生成正式版本、不得启用长期采集：
 
@@ -2838,7 +2904,7 @@ cargo bench -p data-collect --bench throughput_probe -- --sample-size 20
 | 27 | max rows/bytes/time/day/shutdown soft rollover 非停机 | 任务 7.2、7.6 | soft rollover tests、2 小时远端运行、backpressure/resource evidence |
 | 28 | 训练 availability time 与 paper/live runtime receive time 区分 | 任务 7.2、7.4、7.7 | causal time contract、hot handoff fake consumer、paper/live integration doc |
 | 29 | paper/live hot path IPC/local stream 接入合同与非范围边界 | 任务 7.4、7.7 | hot path handoff contract、paper/live hot path integration doc、非部署 gate |
-| 30 | 训练采集长期生产运行、3 秒 RTDS 恢复、metadata source、retention/resource 闭环和正式长跑上线 | 阶段 8 | 3 秒 RTDS 回归、本地全量验证、15 分钟 smoke、最新代码 2 小时 systemd gate、正式 release/README、远端清理证据、长期 service 观察 |
+| 30（历史） | 训练采集旧 Phase 8 路线 | 阶段 8（已取代） | 3 秒 RTDS、自动 retention、release alias 和远端清理均不得重新执行；current 见顶部摘要 |
 
 ## 十七、数据格式与消费者兼容性检查
 

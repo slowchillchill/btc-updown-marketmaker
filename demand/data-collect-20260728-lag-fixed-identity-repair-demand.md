@@ -1,5 +1,19 @@
 # DC-INCIDENT-20260728-LAG-IDENTITY-REPAIR 需求
 
+> 生命周期：`HISTORICAL_EVIDENCE_ONLY`
+>
+> 最终快照：`FROZEN_AT_20260730_CONSOLIDATION`
+>
+> 当前执行 authority：`none`
+>
+> superseded_by：`DC-DOCS-20260730-CURRENT-AUTHORITY-CONSOLIDATION`
+>
+> 读取规则：本文仅用于审计历史事实；内部“当前、下一步、待执行、命令”均属于
+> 当时检查点，不得驱动当前实现、测试、部署或远端操作。
+>
+> 2026-07-30：本文件保留事故事实和最终用户验收；内部阶段状态、游标和命令只描述
+> 当时过程。当前整理 authority 为 `DC-DOCS-20260730-CURRENT-AUTHORITY-CONSOLIDATION`。
+>
 > 状态：`CLOSED_BY_USER_ACCEPTANCE_20260730`
 >
 > 用户首次批准时间：2026-07-29

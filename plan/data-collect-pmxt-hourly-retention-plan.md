@@ -1,5 +1,20 @@
 # data-collect PMXT-inspired Source-specific Hourly Layout and Retention Implementation Plan
 
+> 生命周期：`HISTORICAL_EVIDENCE_ONLY`
+>
+> 最终快照：`FROZEN_AT_20260730_CONSOLIDATION`
+>
+> 当前执行 authority：`none`
+>
+> superseded_by：`DC-DOCS-20260730-CURRENT-AUTHORITY-CONSOLIDATION`
+>
+> 读取规则：本文仅用于审计历史事实；内部“当前、下一步、待执行、命令”均属于
+> 当时检查点，不得驱动当前实现、测试、部署或远端操作。
+>
+> 2026-07-30：hourly source-specific layout 已被当前代码吸收；本计划中的 retention
+> admin、自动删除、receipt 和 `APPROVED_EXECUTING` 路线已被“50GB 协调退出 75、
+> 不自动删除 raw”取代，任何命令均不得继续执行。
+>
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 参考 PMXT v2 Polymarket orderbook archive 的数据结构和压缩方法，修复 `data-collect` 的 Polymarket `btc-updown-5m` orderbook 完整性，并把 Polymarket、Binance depth snapshot/update、Binance aggTrade、RTDS Chainlink 全部训练源改为 UTC day 文件夹 + 每小时 finalized typed parquet，同时为训练采集增加 50GB 滚动磁盘保护。

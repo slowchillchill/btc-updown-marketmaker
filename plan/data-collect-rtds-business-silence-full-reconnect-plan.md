@@ -1,5 +1,19 @@
 # RTDS 业务静默彻底换连接恢复计划
 
+> 生命周期：`HISTORICAL_EVIDENCE_ONLY`
+>
+> 最终快照：`FROZEN_AT_20260730_CONSOLIDATION`
+>
+> 当前执行 authority：`none`
+>
+> superseded_by：`DC-DOCS-20260730-CURRENT-AUTHORITY-CONSOLIDATION`
+>
+> 读取规则：本文仅用于审计历史事实；内部“当前、下一步、待执行、命令”均属于
+> 当时检查点，不得驱动当前实现、测试、部署或远端操作。
+>
+> 2026-07-30：本计划保留 RTDS 参数和 attempt 历史；旧 Attempt6 游标已被后续事故
+> 修复与用户最终验收取代，不得继续执行。
+>
 > 事项编号：`DC-REPAIR-20260721-RTDS-BUSINESS-SILENCE-FULL-RECONNECT`
 >
 > 对应需求：`demand/data-collect-rtds-business-silence-full-reconnect-demand.md`

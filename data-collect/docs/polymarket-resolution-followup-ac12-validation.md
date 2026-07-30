@@ -1,5 +1,18 @@
 # Polymarket 结算追踪 AC-12 本地香港线路真实数据验收报告
 
+> 生命周期：`HISTORICAL_EVIDENCE_ONLY`
+>
+> 最终快照：`FROZEN_AT_20260730_CONSOLIDATION`
+>
+> 当前执行 authority：`none`
+>
+> superseded_by：`DC-DOCS-20260730-CURRENT-AUTHORITY-CONSOLIDATION`
+>
+> 读取规则：本文仅用于审计历史事实；内部“当前、下一步、待执行、命令”均属于
+> 当时检查点，不得驱动当前实现、测试、部署或远端操作。
+>
+> 2026-07-30：本文是 AC-12 当时的验收证据，不是 current schema 或执行入口。
+>
 > 事项编号：`DC-REPAIR-20260721-POLYMARKET-RESOLUTION-FOLLOWUP`
 >
 > 对应需求：`demand/data-collect-polymarket-resolution-followup-demand.md`

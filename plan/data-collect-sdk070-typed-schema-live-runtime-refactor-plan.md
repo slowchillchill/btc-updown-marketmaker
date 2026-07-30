@@ -1,5 +1,19 @@
 # data-collect SDK 0.7.0、typed schema、RTDS 恢复与 live runtime 模块化执行计划
 
+> 生命周期：`HISTORICAL_EVIDENCE_ONLY`
+>
+> 最终快照：`FROZEN_AT_20260730_CONSOLIDATION`
+>
+> 当前执行 authority：`none`
+>
+> superseded_by：`DC-DOCS-20260730-CURRENT-AUTHORITY-CONSOLIDATION`
+>
+> 读取规则：本文仅用于审计历史事实；内部“当前、下一步、待执行、命令”均属于
+> 当时检查点，不得驱动当前实现、测试、部署或远端操作。
+>
+> 2026-07-30：SDK070 核心已完成；本计划的旧 Attempt6、schema 和阶段游标只保留
+> 历史审计价值，不得继续执行。
+>
 > 事项编号：`DC-REPAIR-20260724-SDK070-TYPED-LIVE-RUNTIME`
 >
 > 对应需求：`demand/data-collect-sdk070-typed-schema-live-runtime-refactor-demand.md`
