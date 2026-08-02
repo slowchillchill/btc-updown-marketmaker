@@ -6,6 +6,6 @@
 >
 > superseded_by：`data-collect/docs/CURRENT.md`
 
-所有 `data-collect` current 状态、合同、接口、运行边界、验收和限制均从
+所有 `data-collect` 当前状态、合同、接口、运行边界、验收和限制均从
 `data-collect/docs/CURRENT.md` 进入。本文不复制技术规范，不授权代码修改、构建、
-部署、启停服务、替换 binary、删除数据或远端操作。
+部署、启停服务、替换二进制文件、删除数据或远端操作。

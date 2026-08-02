@@ -16,32 +16,29 @@
 
 以下内容是边界，不是隐含“下一步”或执行计划：
 
-1. paper/live 真实 Polymarket、RTDS、Binance adapter 与 producer wiring 尚未实现。
-2. paper/live 当前不输出真实 `external_market_event`；只输出 heartbeat/status。
-3. paper/live runtime receive artifact、authoritative systemd unit 和 production
-   deployment 尚未实现或验收。
-4. paper/live frame/schema 与一次性 Unix socket helper 有 component test，但完整
-   hot binary 的 startup receipt → 长运行 heartbeat server 路径尚无端到端测试。
-5. hot `--run-id` 当前只校验 trim 后非空，并原样参与
-   `<run-id>.startup_receipt.json` 路径拼接；含路径分隔符/parent-like 内容时 receipt
-   可能离开角色派生的 handoff root。当前代码尚未提供对此的不可信输入
-   fail-closed，任何 future 部署必须先另立事项修复并补负例，不能把 output-root
-   confinement 写成已验收。
-6. paper/live 真实 adapter 不属于 `model-train`，并继续保持延期。必须先完成
+1. 模拟盘和实盘的真实 Polymarket、RTDS、Binance 适配器与生产者接线尚未实现。
+2. 模拟盘和实盘当前不输出真实 `external_market_event`；只输出心跳、状态。
+3. 模拟盘和实盘的运行时接收产物、权威 systemd 单元和生产部署尚未实现或验收。
+4. 模拟盘和实盘的帧、schema 与一次性 Unix 套接字辅助函数有组件测试，但完整热路径
+   二进制程序从启动回执到长运行心跳服务端的路径尚无端到端测试。
+5. 热路径 `--run-id` 当前只校验去除首尾空白后非空，并原样参与
+   `<run-id>.startup_receipt.json` 路径拼接；含路径分隔符或类似父目录的内容时，回执
+   可能离开角色派生的交接根目录。当前代码尚未对这种不可信输入提供失败即关闭保证，
+   任何后续部署必须先另立事项修复并补负例，不能把输出根目录限制写成已验收。
+6. 模拟盘和实盘真实适配器不属于 `model-train`，并继续保持延期。必须先完成
    `model-train`（模型训练模块，不是 `data-collect-training-collector`）；之后仍
-   只有在用户决定返回 `data-collect` 时，才另立 demand/plan/changelog 开发，并
-   重新核对 current 代码和外部环境。
-7. 真实 UTC rollover 与完整健康 UTC 日运行证据不作已取得声明，但不再阻断当前模块
-   完成；确定性 rollover 合同测试仍是 current 验收的一部分。
-8. named throughput fixture 在 UTC 12:00 前有 wall-clock 限制；八小时 RTDS public
-   probe 默认 ignored，详见 `current/acceptance.md`。
-9. collector 不自动归档或删除 finalized raw；退出 75 后的任何迁移、归档或清理都
+   只有在用户决定返回 `data-collect` 时，才另立需求、计划和变更记录开发，并重新核对
+   当前代码和外部环境。
+7. 真实 UTC 日切换与完整健康 UTC 日运行证据不作已取得声明，但不再阻断当前模块完成；
+   确定性 UTC 日切换合同测试仍是当前验收的一部分。
+8. 具名吞吐测试夹具在 UTC 12:00 前有实际时钟限制；八小时 RTDS 公开探测默认被忽略，
+   详见 `current/acceptance.md`。
+9. 采集器不自动归档或删除最终化原始数据；退出 75 后的任何迁移、归档或清理都
    需要独立授权。
-10. current 文档描述代码合同，不证明任一远端服务的实时状态。需要远端事实时必须另行
+10. 当前文档描述代码合同，不证明任一远端服务的实时状态。需要远端事实时必须另行
     进行只读核实。
-11. vendored SDK 的 outbound request 与 heartbeat ping transport-control channel
-    使用 unbounded channel type。当前 wrapper 用 latest-desired coalescing、固定小
-    desired set 和单 outstanding heartbeat 约束调用量，但没有 memory hard cap；
-    不得把 collector data queue 的 hard bound 泛化到这些 SDK control channel。
-12. 本轮没有修改 Rust runtime、schema、交易逻辑或远端状态；文档整理不能替代未来
-    代码、数据、artifact 与运行环境验证。
+11. 供应商版 SDK 的出站请求与 `heartbeat PING` 传输控制通道使用无界通道类型。
+    当前封装器通过合并最新期望状态、固定且较小的期望状态集合，以及单个待处理心跳来
+    约束调用量，但没有内存硬上限；不得把采集器数据队列的硬上限泛化到这些 SDK 控制通道。
+12. 本轮没有修改 Rust 运行时、schema、交易逻辑或远端状态；文档整理不能替代未来代码、
+    数据、产物与运行环境验证。

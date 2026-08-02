@@ -13,34 +13,33 @@
 > 状态：`COMPLETE_NO_EXECUTION_CURSOR`
 
 本计划记录当前已实现模块的验证闭环，不含待执行代码、部署或远端操作任务。
-历史开发步骤由 archive manifest 指定的 Git 对象保留，不在本文件重放。
+历史开发步骤由归档清单指定的 Git 对象保留，不在本文件重放。
 
 ## 1. 已完成实施单元
 
-| 单元 | 当前结果 | 验证 owner |
+| 单元 | 当前结果 | 验证归属文档 |
 | --- | --- | --- |
-| binary 与职责隔离 | training 真实六源；paper/live heartbeat/status 实现，完整 loop 尚无 E2E | `current/interfaces.md` |
-| SDK 与 typed schema | SDK 0.7.0 + 唯一 patch；六个 current schema | `current/contracts.md` |
-| storage | receive-time UTC day/source/hour、finalized Parquet、daily manifest | `current/contracts.md` |
-| bounded runtime | collector data queues 有 hard bound；SDK control queue 仅逻辑约束；协调 stop/rollover | `current/contracts.md` |
-| capacity | 默认 50GB；startup direct 75；runtime 协调 finalize/75；无自动 raw 删除 | `current/operations.md` |
-| RTDS | 300/60 replacement、×2/±20%/300s、无独立 exhaustion、fresh reset | `current/contracts.md` |
-| identity/resolution | fixed identity、E+3..E+8、terminal once、restart fail closed | `current/contracts.md` |
-| operations | clean pushed commit 本地构建、固定路径/unit、无远端编译 | `current/operations.md` |
-| document authority | 单一 CURRENT、主题 owner、tag/manifest 历史隔离 | `current/document-authority-audit.md` |
-| 跨模块顺序 | 当前后继为 sim-system；paper/live adapter 延期门保持不变 | `data-collect/docs/CURRENT.md`、master triplet |
+| 二进制程序与职责隔离 | 训练程序连接六个真实数据源；模拟盘和实盘的心跳、状态已实现，完整循环尚无端到端测试 | `current/interfaces.md` |
+| SDK 与类型化 schema | SDK 0.7.0 加唯一补丁；六个当前 schema | `current/contracts.md` |
+| 存储 | 以接收时间划分 UTC 日、数据源和小时，写最终化 Parquet 与每日清单 | `current/contracts.md` |
+| 有界运行时 | 采集器数据队列有硬上限；SDK 控制队列仅有逻辑约束；协调停止和 UTC 日切换 | `current/contracts.md` |
+| 容量 | 默认 50GB；启动时直接退出 75；运行时协调最终化并退出 75；不自动删除原始数据 | `current/operations.md` |
+| RTDS | 300/60 秒替换、×2/±20%/300 秒退避、无独立耗尽门、有效新鲜消息后重置 | `current/contracts.md` |
+| 身份与市场判定 | 固定身份信息、E+3..E+8、终态仅一次、重启时失败即关闭 | `current/contracts.md` |
+| 运行 | 干净且已推送的提交在本地构建、固定路径和单元、远端不编译 | `current/operations.md` |
+| 文档权威 | 单一 `CURRENT`、主题归属文档、标签和清单隔离历史 | `current/document-authority-audit.md` |
+| 跨模块顺序 | 当前后继为 `sim-system`；模拟盘和实盘适配器延期门保持不变 | `data-collect/docs/CURRENT.md`、主三件套 |
 
 ## 2. 当前验证方式
 
-1. 对需求每项合同核对 current owner、Cargo/代码和测试。
-2. 运行 fmt、check、strict clippy、current integration targets、lib regression 和
-   document authority guard。
-3. 对唯一 wall-clock fixture 使用精确 named skip，并明确记录限制；不得扩大 skip 或
-   把排除后的结果写成无条件 full-suite PASS。
-4. 每次 current 文档、代码或测试变化都必须更新
-   `data-collect/docs/current/acceptance.md` 的真实 dated snapshot。
-5. 跨模块顺序变更还必须检索 active current/master 和两份跨模块 draft 中的旧“下一
-   模块”措辞，运行 document authority guard 与 `git diff --check`，且不得改写历史
+1. 对需求每项合同核对当前主题归属文档、Cargo、代码和测试。
+2. 运行格式、检查、严格 Clippy、当前集成目标、库回归测试和文档权威守卫。
+3. 对唯一依赖实际时钟的测试夹具使用精确的具名跳过，并明确记录限制；不得扩大跳过
+   范围，或把排除后的结果写成无条件全套测试通过。
+4. 每次当前文档、代码或测试变化都必须更新
+   `data-collect/docs/current/acceptance.md` 的真实日期快照。
+5. 跨模块顺序变更还必须检索活动的当前文档、主三件套和两份跨模块草案中的旧“下一
+   模块”措辞，运行文档权威守卫与 `git diff --check`，且不得改写历史
    治理记录。
 
 精确命令和最新结果由 `data-collect/docs/current/acceptance.md` 单独拥有。
@@ -49,10 +48,10 @@
 
 本计划已满足：
 
-- current module contract 与代码/测试一致；
+- 当前模块合同与代码、测试一致；
 - 用户已完成事故和模块最终验收；
-- 未取得的真实 UTC 日证据没有被伪造成 PASS，也不再阻断完成；
-- paper/live 真实 adapter 明确延期；
+- 未取得的真实 UTC 日证据没有被伪造成通过，也不再阻断完成；
+- 模拟盘和实盘的真实适配器明确延期；
 - 历史长文已冻结并移出活动搜索面；
 - 当前文档不携带旧执行游标。
 
@@ -60,11 +59,11 @@
 
 ## 4. 未来变更规则
 
-任何新增 source、schema、SDK 路线、paper/live adapter、部署、远端状态变更或 raw
+任何新增数据源、schema、SDK 路线、模拟盘和实盘适配器、部署、远端状态变更或原始数据
 清理都必须：
 
 1. 先核对 `data-collect/docs/CURRENT.md`、当前代码和测试；
-2. 新建同一事项编号的 demand/plan/changelog；
+2. 新建同一事项编号的需求、计划和变更记录；
 3. 写出需求与验收标准、逐步实施和测试；
-4. 遇到 current 文档、代码、环境或用户描述冲突时停止并由用户决定；
-5. 完成后更新 current owner，而不是把历史计划恢复成执行入口。
+4. 遇到当前文档、代码、环境或用户描述冲突时停止并由用户决定；
+5. 完成后更新当前主题归属文档，而不是把历史计划恢复成执行入口。
