@@ -18,7 +18,7 @@ fn current_operations_describes_single_binary_single_unit_flow() {
     for expected in [
         "生命周期：`CURRENT_CONTRACT`",
         "执行授权：`none`",
-        "clean、已 push 的完整 commit",
+        "干净且已推送的完整提交",
         "DATA_COLLECT_GIT_COMMIT=<完整 commit>",
         "服务器都不是 Rust 构建机",
         "/home/ubuntu/btc-updown-marketmaker/data-collect/bin/data-collect-training-collector",
@@ -29,18 +29,18 @@ fn current_operations_describes_single_binary_single_unit_flow() {
         "RestartPreventExitStatus=75 76",
         "StartLimitIntervalSec=600",
         "StartLimitBurst=5",
-        "## 3. Training 退出与容量",
-        "`75/76` 映射只属于 training binary",
+        "## 3. 训练程序退出与容量",
+        "`75/76` 映射只属于训练二进制程序",
         "启动扫描已经达到上限",
-        "不启动 source、不创建 typed raw/manifest/runtime",
+        "不启动数据源、不创建类型化原始数据、清单或运行时产物",
         "运行期间达到上限",
-        "drain/finalize 已接纳数据",
-        "collector 不自动清理 finalized raw",
+        "排空并最终化已接纳数据",
+        "采集器不自动清理最终化原始数据",
         "另行批准的部署或启动已经发生后",
         "本文件不授权停服或清理",
-        "`.parquet.running` 不作为 finalized 数据读取",
+        "`.parquet.running` 不作为最终化数据读取",
         "不是当前部署路径",
-        "另行批准的活动需求、计划与 changelog",
+        "另行批准的活动需求、计划与变更记录",
     ] {
         assert!(
             operations.contains(expected),
@@ -152,13 +152,13 @@ fn paper_live_current_docs_preserve_independent_runtime_boundary() {
         "frame_type=source_status",
         "status=heartbeat",
         "external_market_event",
-        "没有真实 source producer wiring",
+        "没有真实数据源生产者接线",
         "runtime_receive_time_utc_ms",
-        "append-only event log",
+        "仅追加事件日志",
         "默认运行 `604800s`（7 天）后",
         "`COLLECTOR_REGION`、AWS IMDS",
-        "文件内容不被解析为业务配置，也不进入 digest",
-        "`--run-id` 当前只校验 trim 后非空",
+        "文件内容不被解析为业务配置，也不进入摘要",
+        "`--run-id` 当前只校验去除首尾空白后非空",
     ] {
         assert!(
             interfaces.contains(expected),
@@ -167,14 +167,14 @@ fn paper_live_current_docs_preserve_independent_runtime_boundary() {
     }
 
     for expected in [
-        "真实 Polymarket、RTDS、Binance adapter 与 producer wiring 尚未实现",
+        "真实 Polymarket、RTDS、Binance 适配器与生产者接线尚未实现",
         "当前不输出真实 `external_market_event`",
-        "authoritative systemd unit",
+        "权威 systemd 单元",
         "不属于 `model-train`",
         "不是 `data-collect-training-collector`",
         "只有在用户决定返回 `data-collect` 时",
-        "hot binary 的 startup receipt → 长运行 heartbeat server 路径尚无端到端测试",
-        "confinement 写成已验收",
+        "二进制程序从启动回执到长运行心跳服务端的路径尚无端到端测试",
+        "输出根目录限制写成已验收",
     ] {
         assert!(
             limitations.contains(expected),
@@ -200,16 +200,16 @@ fn current_docs_preserve_exact_capacity_and_rtds_boundaries() {
     for path in [CONTRACTS, MASTER_DEMAND] {
         let doc = read(path);
         for expected in [
-            "startup",
+            "启动容量扫描",
             "直接退出 `75`",
             "每 `60s`",
-            "drain/finalize",
+            "排空并最终化",
             "`×2`",
             "`±20%`",
-            "cap",
-            "无独立 attempt",
-            "SDK transport-control",
-            "不等同于 channel",
+            "单次休眠上限",
+            "没有独立尝试次数",
+            "SDK 的出站请求与 `heartbeat PING` 传输控制通道",
+            "不等同于通道具有容量硬上限",
         ] {
             assert!(doc.contains(expected), "{path} missing {expected}");
         }
@@ -217,26 +217,26 @@ fn current_docs_preserve_exact_capacity_and_rtds_boundaries() {
 
     let contracts = read(CONTRACTS);
     for expected in [
-        "production `src/` delta 横跨四个文件",
+        "生产 `src/` 差异横跨四个文件",
         "`clob/ws/types/response.rs`",
         "`rtds/subscription.rs`",
         "`ws/config.rs` 与 `ws/connection.rs`",
         "tick_size_change",
         "`MidpointUpdate.timestamp`",
-        "interested element 必须全部成功",
+        "每个关心的元素必须全部成功",
         "不泄露合法前缀",
         "Network error communicating with endpoint",
         "不含\n  `topic/type/timestamp/payload`",
-        "target-like frame 仍是 sticky parser terminal",
-        "最大 `2048` bytes",
-        "connect timeout",
-        "generation-bound\n  outbound fencing",
+        "带任一目标字段的类目标帧仍是粘性解析器终态",
+        "最大 `2048` 字节",
+        "连接超时",
+        "绑定代际的出站围栏",
         "其中只有九个",
-        "nullable Decimal 字段",
-        "非空 malformed（含空白串）",
-        "optional Decimal 空串和 required Decimal 空串仍报错",
-        "configured capacity limit",
-        "测试或另行批准配置可以显式覆盖",
+        "可空 Decimal 字段",
+        "非空畸形值（含空白串）",
+        "可选 Decimal 空串和必填 Decimal 空串仍报错",
+        "配置的容量上限",
+        "测试或另行批准的配置可以显式覆盖",
     ] {
         assert!(
             contracts.contains(expected),

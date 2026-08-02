@@ -118,9 +118,9 @@ fn current_authority_graph_is_unique_and_closed() {
     for rule in [
         "`historical` 行是已移出活动树的历史长文",
         "`snapshot` 行是仍有活动路径",
-        "旧 blob 不保证含 lifecycle banner",
-        "manifest 中的 `kind=snapshot`",
-        "活动树同路径文件和本 CURRENT 的对应主题 owner",
+        "旧 blob 不保证含生命周期首屏标记",
+        "清单中的 `kind=snapshot`",
+        "活动树同路径文件和本 `CURRENT` 的对应主题归属文档",
     ] {
         assert!(
             current.contains(rule),
@@ -129,11 +129,11 @@ fn current_authority_graph_is_unique_and_closed() {
     }
     let agents = read(&root.join("AGENTS.md")).unwrap();
     for rule in [
-        "manifest `historical` 行对应的历史长文含首屏 banner",
-        "manifest `snapshot` 行是活动路径",
-        "旧 blob 不保证含 banner",
-        "以 `kind=snapshot` 判定其当前 authority 为",
-        "manifest 行、活动树同路径文件和 `CURRENT.md` 对应主题",
+        "清单中 `historical` 行对应的历史长文含首屏标记",
+        "清单中 `snapshot` 行是活动路径",
+        "旧 blob 不保证含首屏标记",
+        "以 `kind=snapshot` 判定其当前执行权威为",
+        "清单行、活动树同路径文件和 `CURRENT.md` 对应主题",
     ] {
         assert!(
             agents.contains(rule),
@@ -143,13 +143,18 @@ fn current_authority_graph_is_unique_and_closed() {
 
     let rebuild = read(&root.join("demand/rebuild-core-demand.md")).unwrap();
     assert!(rebuild.contains("data-collect/docs/CURRENT.md"));
-    assert!(rebuild.contains("不是 current data-collect authority"));
+    assert!(rebuild.contains("不是 `data-collect` 的当前权威文档"));
+
+    let sim_system = read(&root.join("demand/sim-system-demand.md")).unwrap();
+    assert!(sim_system.contains("data-collect/docs/CURRENT.md"));
+    assert!(sim_system.contains("继续拥有 `data-collect` 当前事实"));
 
     let mut expected_related = BTreeSet::from([
         "AGENTS.md".to_owned(),
         "data-collect/README.md".to_owned(),
         CURRENT.to_owned(),
         "demand/rebuild-core-demand.md".to_owned(),
+        "demand/sim-system-demand.md".to_owned(),
     ]);
     expected_related.extend(MASTER_TRIPLET.map(str::to_owned));
     expected_related.extend(CURRENT_DOCS.map(str::to_owned));
