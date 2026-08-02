@@ -28,6 +28,7 @@
 | identity/resolution | fixed identity、E+3..E+8、terminal once、restart fail closed | `current/contracts.md` |
 | operations | clean pushed commit 本地构建、固定路径/unit、无远端编译 | `current/operations.md` |
 | document authority | 单一 CURRENT、主题 owner、tag/manifest 历史隔离 | `current/document-authority-audit.md` |
+| 跨模块顺序 | 当前后继为 sim-system；paper/live adapter 延期门保持不变 | `data-collect/docs/CURRENT.md`、master triplet |
 
 ## 2. 当前验证方式
 
@@ -38,6 +39,9 @@
    把排除后的结果写成无条件 full-suite PASS。
 4. 每次 current 文档、代码或测试变化都必须更新
    `data-collect/docs/current/acceptance.md` 的真实 dated snapshot。
+5. 跨模块顺序变更还必须检索 active current/master 和两份跨模块 draft 中的旧“下一
+   模块”措辞，运行 document authority guard 与 `git diff --check`，且不得改写历史
+   治理记录。
 
 精确命令和最新结果由 `data-collect/docs/current/acceptance.md` 单独拥有。
 

@@ -24,9 +24,10 @@
 - 仓库构建 training、paper-hot、live-hot 三个 binary；当前只有 training binary
   连接真实 Polymarket、RTDS 和 Binance 数据源。
 - paper/live binary 当前只提供 startup receipt、Unix socket 和 heartbeat/status；
-  真实外部市场源 adapter 不属于 `model-train`，继续保持延期。等下一模块
-  `model-train`（模型训练模块，不是 `data-collect-training-collector`）完成之后，
-  只有在用户决定返回 `data-collect` 时，才另立三件套开发。
+  真实外部市场源 adapter 不属于 `model-train`，继续保持延期。用户确认的当前跨模块
+  主线为 `data-collect(training) -> sim-system -> data-pipeline(training) -> model-train`。
+  必须先完成 `model-train`（模型训练模块，不是 `data-collect-training-collector`）；
+  之后仍只有在用户决定返回 `data-collect` 时，才另立三件套开发。
 - 上述 paper/live 完整 binary heartbeat loop 尚无端到端测试，hot run-id receipt
   confinement 也尚未 fail-closed；精确测试强度与风险分别由 acceptance/limitations
   owner 记录，不得从“代码已有”推导为 production 验收。

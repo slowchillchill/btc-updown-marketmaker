@@ -38,8 +38,8 @@
 `run_hot_collector` 或长运行 `run_heartbeat_handoff_server`，因此不得把 component
 测试写成完整 hot binary wiring 的端到端 PASS。
 
-paper/live 真实 adapter 不属于 `model-train`。等下一模块 `model-train`（模型训练
-模块，不是 `data-collect-training-collector`）完成之后，只有在用户决定返回
+paper/live 真实 adapter 不属于 `model-train`。必须先完成 `model-train`（模型训练
+模块，不是 `data-collect-training-collector`）；之后仍只有在用户决定返回
 `data-collect` 时，才另立三件套开发。
 
 ## 2. 格式与静态检查
@@ -127,3 +127,24 @@ CURRENT、坏三件套引用、坏 blob、恢复历史路径和损坏 evidence b
 
 以上是本次实际快照，不是永久测试数量门，也不冒充被 filtered fixture 或 ignored
 public probe 已通过。
+
+## 7. 2026-08-02 跨模块文档同步验证
+
+本次只同步当前跨模块顺序、职责术语和 authority disposition，不修改 data-collect
+production runtime、schema、部署或远端状态。
+
+- 首次运行 `document_authority_contract` 为 `3 passed; 1 failed`：新活动文档
+  `demand/sim-system-demand.md` 尚未进入旧 authority 图的显式 disposition 集合。
+- 补充第二份跨模块审核中草案的无 authority 分类并同步契约测试后，重跑结果为
+  `4 passed; 0 failed`。
+- 随后扩展运行 deploy README contract，首次结果为 `5 passed; 1 failed`：同步顺序时
+  误删了用于区分 `model-train` 与 `data-collect-training-collector` 的防误读措辞。
+  恢复该区分但不恢复旧“下一模块”判断后，定向契约测试全部通过。
+- 最终合并验证为：`deploy_readme_contract` `6 passed; 0 failed`，
+  `document_authority_contract` `4 passed; 0 failed`，`cargo fmt --all -- --check` 通过。
+- active CURRENT、current owner、master triplet 与两份跨模块需求中已不存在把
+  `model-train` 称为当前“下一模块”的表述；无 authority 的历史治理记录保持不改。
+- 独立最终审查最初发现 `sim-system` 第 3 节仍把 paper/live 写成无条件第 5 至 8 项；
+  修正为需用户届时决定返回 data-collect 的条件性 future 路径后，复审结果为
+  `Critical 0 / Important 0 / Minor 0`。
+- `git diff --check` 通过。

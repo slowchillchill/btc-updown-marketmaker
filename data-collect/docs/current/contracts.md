@@ -27,9 +27,9 @@ coverage/gap/recovery、存储和 manifest。它不负责 labels、features、�
 | `data-collect-live-hot` | 写 startup receipt，运行本机 Unix socket heartbeat/status server |
 
 只有 training binary 当前连接真实外部源。paper/live 真实 adapter 不属于
-`model-train`，继续保持延期。等下一模块 `model-train`（模型训练模块，不是
-`data-collect-training-collector`）完成之后，只有在用户决定返回 `data-collect`
-时，才另立三件套开发。
+`model-train`，继续保持延期。必须先完成 `model-train`（模型训练模块，不是
+`data-collect-training-collector`）；之后仍只有在用户决定返回 `data-collect` 时，
+才另立三件套开发。
 
 ## 2. SDK 与 schema
 
@@ -145,6 +145,6 @@ RTDS fresh 只接受正确 topic/type/symbol、合理 timestamp 且
 非 hard-bound transport-control channel 外，当前实现和确定性测试覆盖上述合同。
 2026-07-28 事故事项已由用户最终验收；真实 UTC rollover 与完整健康 UTC 日运行证据
 不作已取得声明，但不再是完成门。paper/live 真实 external-source adapter 尚未实现、
-不属于 `model-train`，并继续保持延期。等下一模块 `model-train`（模型训练模块，不是
-`data-collect-training-collector`）完成之后，只有在用户决定返回 `data-collect`
-时，才另立三件套开发。
+不属于 `model-train`，并继续保持延期。必须先完成 `model-train`（模型训练模块，不是
+`data-collect-training-collector`）；之后仍只有在用户决定返回 `data-collect` 时，
+才另立三件套开发。

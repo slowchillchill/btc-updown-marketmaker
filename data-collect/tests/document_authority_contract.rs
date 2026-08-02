@@ -145,11 +145,16 @@ fn current_authority_graph_is_unique_and_closed() {
     assert!(rebuild.contains("data-collect/docs/CURRENT.md"));
     assert!(rebuild.contains("不是 current data-collect authority"));
 
+    let sim_system = read(&root.join("demand/sim-system-demand.md")).unwrap();
+    assert!(sim_system.contains("data-collect/docs/CURRENT.md"));
+    assert!(sim_system.contains("继续拥有 `data-collect` 当前事实"));
+
     let mut expected_related = BTreeSet::from([
         "AGENTS.md".to_owned(),
         "data-collect/README.md".to_owned(),
         CURRENT.to_owned(),
         "demand/rebuild-core-demand.md".to_owned(),
+        "demand/sim-system-demand.md".to_owned(),
     ]);
     expected_related.extend(MASTER_TRIPLET.map(str::to_owned));
     expected_related.extend(CURRENT_DOCS.map(str::to_owned));

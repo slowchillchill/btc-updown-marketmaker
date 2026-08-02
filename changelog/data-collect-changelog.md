@@ -39,11 +39,34 @@ tag/path/blob 保留，不在活动文档重复。
 - 2026-07-28 事故事项已由用户最终验收。
 - 真实 UTC rollover 和完整健康 UTC 日不再是 completion gate；文档不反向声称未记录
   的运行证据已经发生。
-- paper/live 真实 external-source adapter 不属于 `model-train`，保持延期；等下一
-  模块 `model-train`（模型训练模块，不是 `data-collect-training-collector`）完成
-  之后，只有在用户决定返回 `data-collect` 时才以独立三件套开发。该延期不阻断
+- 2026-08-02 用户确认当前跨模块开发主线为
+  `data-collect(training) -> sim-system -> data-pipeline(training) -> model-train`。
+- paper/live 真实 external-source adapter 不属于 `model-train`，保持延期；必须先
+  完成 `model-train`（模型训练模块，不是 `data-collect-training-collector`）；之后
+  仍只有在用户决定返回 `data-collect` 时，才以独立三件套开发。该延期不阻断
   data-collect 完成。
 - data-collect 当前没有 Rust 实现、部署或远端操作游标。
+
+## 2026-08-02 跨模块顺序同步
+
+- 复审确认 data-collect current 只需同步跨模块主线，并继续明确 transport/source-level
+  coverage、health/gap、recovery/reconnect evidence 与 data-pipeline canonical 层的
+  分工；其他 sim/rebuild 澄清不改变 data-collect 运行时职责或完成状态。
+- CURRENT、master triplet、current contracts/acceptance/limitations 和两份
+  跨模块需求已同步当前主线；paper/live adapter 的既有延期门保持不变。
+- 首次运行 document authority contract 为 `3 passed / 1 failed`：活动
+  `demand/sim-system-demand.md` 已提及 data-collect，但旧 authority 图只枚举一份
+  跨模块草案。随后将该文件明确分类为第二份无 data-collect authority 的审核中草案，
+  并同步契约测试；这不是 production runtime、schema 或部署变更。
+- 修正后 document authority contract 为 `4 passed / 0 failed`，`git diff --check`
+  通过。随后扩展的 deploy README contract 首次为 `5 passed / 1 failed`，原因是同步
+  时误删了“`model-train` 不是 `data-collect-training-collector`”的防误读措辞；现已
+  恢复该区分而未恢复旧顺序。最终 deploy README contract 为 `6 passed / 0 failed`，
+  document authority contract 为 `4 passed / 0 failed`；精确证据记录在
+  `data-collect/docs/current/acceptance.md`。
+- 独立最终审查发现 `sim-system` 第 3 节仍把 paper/live 写成无条件第 5 至 8 项；已将
+  当前主线明确止于 `model-train`，并把后续路径改为需用户届时决定返回 data-collect
+  才能启动的 conditional future。复审为 `Critical 0 / Important 0 / Minor 0`。
 
 ## 2026-07-30 文档权威整理
 

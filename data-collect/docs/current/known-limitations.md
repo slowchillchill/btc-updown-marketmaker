@@ -27,8 +27,8 @@
    可能离开角色派生的 handoff root。当前代码尚未提供对此的不可信输入
    fail-closed，任何 future 部署必须先另立事项修复并补负例，不能把 output-root
    confinement 写成已验收。
-6. paper/live 真实 adapter 不属于 `model-train`，并继续保持延期。等下一模块
-   `model-train`（模型训练模块，不是 `data-collect-training-collector`）完成之后，
+6. paper/live 真实 adapter 不属于 `model-train`，并继续保持延期。必须先完成
+   `model-train`（模型训练模块，不是 `data-collect-training-collector`）；之后仍
    只有在用户决定返回 `data-collect` 时，才另立 demand/plan/changelog 开发，并
    重新核对 current 代码和外部环境。
 7. 真实 UTC rollover 与完整健康 UTC 日运行证据不作已取得声明，但不再阻断当前模块

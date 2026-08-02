@@ -27,9 +27,12 @@ typed raw，并为 future paper/live 在线接入提供隔离的 binary 与版�
 3. `data-collect` 不负责 labels、features、训练切分、模型输入、订单、撤单、钱包、
    NOE、ledger、PnL 或策略。
 4. 当前只有 training 连接真实外部源。paper/live 真实 adapter 不属于
-   `model-train`，继续保持延期。等下一模块 `model-train`（模型训练模块，不是
-   `data-collect-training-collector`）完成之后，只有在用户决定返回 `data-collect`
-   时，才另立 demand/plan/changelog 开发；该延期不阻断当前模块完成。
+   `model-train`，继续保持延期。必须先完成 `model-train`（模型训练模块，不是
+   `data-collect-training-collector`）；之后仍只有在用户决定返回 `data-collect` 时，
+   才另立 demand/plan/changelog 开发；该延期不阻断当前模块完成。
+5. 当前跨模块主线为
+   `data-collect(training) -> sim-system -> data-pipeline(training) -> model-train`；
+   该顺序不重开已完成的 data-collect，也不提前授权 paper/live 真实 adapter。
 
 ## 3. SDK 与数据合同
 
@@ -113,3 +116,5 @@ typed raw，并为 future paper/live 在线接入提供隔离的 binary 与版�
    路径或 evidence-only banner 缺失。
 7. 当前验收命令和实际结果记录在
    `data-collect/docs/current/acceptance.md`。
+8. CURRENT、master demand/plan/changelog 和 active current owner 对跨模块主线与
+   paper/live adapter 延期门的表述一致，不再把 `model-train` 误称为当前下一模块。
