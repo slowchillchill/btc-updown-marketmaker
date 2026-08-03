@@ -30,9 +30,13 @@
    `model-train`，继续保持延期。必须先完成 `model-train`（模型训练模块，不是
    `data-collect-training-collector`）；之后仍只有在用户决定返回 `data-collect` 时，
    才另立需求、计划和变更记录开发；该延期不阻断当前模块完成。
-5. 当前跨模块主线为
-   `data-collect(training) -> sim-system -> data-pipeline(training) -> model-train`；
-   该顺序不重开已完成的 `data-collect`，也不提前授权模拟盘和实盘的真实适配器。
+5. 2026-08-03 纠正后的当前跨模块主线为：已完成 `data-collect(training)` 后，先冻结
+   `data-pipeline(training)` 需求和共享合同，并完成“最终化类型化原始数据 -> 规范全序
+   -> ExecutionMarketEvent”最小真实纵向链路；随后由 `sim-system` 同时使用黄金事件和
+   真实管道事件开发、验收；再补齐 `data-pipeline(training)` 的 Ledger 投影合并、完整
+   `Observation`、标签、切分、归一化与训练产物闭环，最后进入 `model-train`。这是同一
+   `data-pipeline(training)` 的两个交付门，不是两套处理实现。该顺序不重开已完成的
+   `data-collect`，也不提前授权模拟盘和实盘的真实适配器。
 
 ## 3. SDK 与数据合同
 
@@ -46,6 +50,14 @@
 3. 旧 schema 只能用于代码明确保留的精确旧版读取和恢复，不得成为新写入依据。
 4. UTC 日和小时必须按采集器接收时间分区；`*.running` 不得被当作最终化产物。
 5. 每个 UTC 日只有一个每日清单 v3 和一个归属方，并直接包含单一采集日覆盖信息 v1。
+6. `sim-system` 所需的 CLOB `min_order_size`、完整 `feeSchedule`、`itode` 等低频平台规则
+   由模拟器新运行冷启动通过固定的官方公开 HTTPS 窄加载器查询并冻结；首版未消费的 `oas`
+   只登记为未消费字段。该模拟器例外不改变第 1 项的 `data-collect` 官方 Rust SDK 合同，也不
+   授权采集器使用原始 REST。
+   它们都不是当前采集 schema 的专用字段，也不要求 `data-collect` 新增。当前 v5
+   `source_evidence_payload_json` 中自然
+   存在的同名或相似键仍是采集时点原始证据，必须无损保留，不得为外置配置而删键或重写
+   摘要。运行中 `tick_size_change`、生命周期、接单状态和市场判定仍属于采集事件事实。
 
 ## 4. 运行时合同
 
@@ -107,4 +119,8 @@
 7. 当前验收命令和实际结果记录在
    `data-collect/docs/current/acceptance.md`。
 8. `CURRENT`、主需求、计划、变更记录和活动的当前主题归属文档对跨模块主线与模拟盘、
-   实盘适配器延期门的表述一致，不再把 `model-train` 误称为当前下一模块。
+   实盘适配器延期门的表述一致；当前后继明确为 `data-pipeline(training)` 的需求/合同
+   和最小真实纵向链路，不把 `sim-system` 或 `model-train` 误称为当前下一模块。
+9. 字段所有权审查证明当前 v5 没有规则专用列；四日合格数据中删除专用列的实际收益为
+   0 字节，删除 Gamma 原始证据 JSON 中十个同名或相似键的压缩反事实约 9,317 字节且会
+   破坏证据摘要，因此当前不修改 schema、不重写数据、不删除证据键。

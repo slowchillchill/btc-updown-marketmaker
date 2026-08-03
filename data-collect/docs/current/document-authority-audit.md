@@ -22,23 +22,29 @@
   `changelog/data-collect-changelog.md`。
 - 六个 `docs/current/` 文件分别拥有单一主题，不互相发展影子合同。
 - `data-collect/README.md` 与四个旧当前文档原路径只作路由兼容。
-- `demand/rebuild-core-demand.md` 是跨模块审核中草案，不是当前 `data-collect`
-  权威；其中后续要求不得覆盖本入口、当前代码或测试。
-- `demand/sim-system-demand.md` 是独立模块审核中草案，不是当前 `data-collect`
-  权威；其中只可引用本入口的当前事实和已确认跨模块主线，不得覆盖
+- `demand/rebuild-core-demand.md`、`plan/rebuild-core-plan.md` 和
+  `changelog/rebuild-core-changelog.md` 是同一跨模块事项的审核中三件套，不是当前
+  `data-collect` 权威；其中后续要求不得覆盖本入口、当前代码或测试。
+- `demand/sim-system-demand.md`、`plan/sim-system-plan.md` 和
+  `changelog/sim-system-changelog.md` 是同一独立模块事项的审核中三件套，不是当前
+  `data-collect` 权威；其中只可引用本入口的当前事实和已确认跨模块主线，不得覆盖
   `data-collect` 模块合同、代码、测试或完成状态。
+- `demand/data-pipeline-training-demand.md`、`plan/data-pipeline-training-plan.md` 和
+  `changelog/data-pipeline-training-changelog.md` 是同一跨模块事项的审核中三件套，
+  当前执行 authority 和执行授权均为 `none`；它们只能引用本入口的当前事实，不得重开
+  或覆盖已完成的 `data-collect`。
 
 当前活动树中所有直接出现 `data-collect` / `data_collect` / `DataCollect` 的
-Markdown 恰为 25 份，且每份都有明确处置：
+Markdown 恰为 32 份，且每份都有明确处置：
 
 | 类别 | 数量 |
 | --- | ---: |
 | `CURRENT` 入口、六个主题归属文档和当前主三件套 | 10 |
 | AGENTS 路由政策、README 和四个仅路由入口 | 6 |
 | 已完成治理记录三件套 | 3 |
-| 跨模块审核中草案 | 2 |
+| 跨模块审核中草案/记录 | 9 |
 | 仅作证据的错误记录 | 4 |
-| 合计 | 25 |
+| 合计 | 32 |
 
 ## 历史处置
 
@@ -82,6 +88,17 @@ Markdown 恰为 25 份，且每份都有明确处置：
 2026-08-02 将 `demand/sim-system-demand.md` 作为第二份无 `data-collect` 权威的跨模块
 审核中草案纳入显式归类后，当前重跑结果仍为 `4 passed / 0 failed`；历史标签、快照与
 历史文档数量和读取协议均未修改。
+
+2026-08-03 新增 `DATA-PIPELINE-TRAINING-20260803` 审核中三件套，并把它们作为三份无
+`data-collect` 权威、无执行授权的跨模块草案/记录纳入显式归类。活动 Markdown 总数由
+25 增为 28；当前主三件套、六个主题归属文档、归档标签、快照和历史文档数量均未修改。
+实际测试结果记录在 `current/acceptance.md`，不得从本段预先推导为已通过。
+
+2026-08-04 为满足需求、计划与变更记录一一对应，补齐 `rebuild-core-demand` 和
+`SIM-SYSTEM-20260731` 两项的无执行权威计划/变更记录，并把四份新增文件纳入显式归类。
+活动 Markdown 总数由 28 增为 32；三套跨模块三件套均保持 `authority=none` 和
+`执行授权=none`，当前 `data-collect` 主三件套、唯一 `CURRENT`、归档标签、快照和历史
+文档数量均未改变。实际测试结果记录在 `current/acceptance.md`，不得从本段预先推导为已通过。
 
 运行限制只由 `current/known-limitations.md` 拥有。若本审计、当前主题归属文档、代码、
 测试或用户最新决策不一致，必须停止并交由用户判断；当前无已知未解决的权威冲突。

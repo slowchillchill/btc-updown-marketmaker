@@ -24,8 +24,12 @@
 - 仓库构建训练、模拟盘热路径和实盘热路径三个二进制程序；当前只有训练二进制程序
   连接真实 Polymarket、RTDS 和 Binance 数据源。
 - 模拟盘和实盘二进制程序当前只提供启动回执、Unix 套接字和心跳、状态；
-  真实外部市场数据源适配器不属于 `model-train`，继续保持延期。用户确认的当前跨模块
-  主线为 `data-collect(training) -> sim-system -> data-pipeline(training) -> model-train`。
+  真实外部市场数据源适配器不属于 `model-train`，继续保持延期。用户在 2026-08-03
+  纠正后的当前跨模块主线为：已完成 `data-collect(training)` 后，先冻结
+  `data-pipeline(training)` 需求和共享合同，并完成“最终化类型化原始数据 -> 规范全序
+  -> ExecutionMarketEvent”最小真实纵向链路；随后由 `sim-system` 同时使用黄金事件和
+  真实管道事件开发、验收；再补齐 `data-pipeline(training)` 的 Ledger 投影合并、完整
+  `Observation`、标签、切分、归一化与训练产物闭环，最后进入 `model-train`。
   必须先完成 `model-train`（模型训练模块，不是 `data-collect-training-collector`）；
   之后仍只有在用户决定返回 `data-collect` 时，才另立三件套开发。
 - 上述模拟盘和实盘完整二进制程序的心跳循环尚无端到端测试，热路径运行标识的回执
@@ -35,6 +39,14 @@
   不作已取得声明，也不再是模块完成阻断门。
 - 当前没有 `data-collect` Rust 实现、生产部署或远端操作游标；新工作必须另立活动
   需求、计划和变更记录。
+- `sim-system` 的低频平台规则改由每个新运行通过固定的官方公开 HTTPS 窄加载器冷启动查询
+  并冻结；该例外只属于模拟器冷启动，不改变 `data-collect` 必须使用官方 Rust SDK 的合同。
+  平台响应缺少必需字段、字段非法或身份/来源冲突时，由模拟器事项失败即关闭。当前
+  `data-collect` 不新增 `min_order_size`、`feeSchedule`、`itode` 等规则专用列；未消费的
+  `oas` 也不是采集字段补齐任务。
+  v5 原始证据 JSON 中自然存在的同名或相似键继续无损保留；运行中动态
+  `tick_size_change`、生命周期和市场判定也继续属于采集事实。四日合格数据中可安全删除的
+  规则字段为零，故本决定不重开当前模块、不修改 schema 或既有数据。
 
 ## 当前文档归属
 

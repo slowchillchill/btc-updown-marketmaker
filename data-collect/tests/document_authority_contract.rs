@@ -44,6 +44,144 @@ const GOVERNANCE_TRIPLET: [&str; 3] = [
     "changelog/data-collect-current-authority-consolidation-changelog.md",
 ];
 
+const CROSS_MODULE_DRAFT_DOCS: [&str; 9] = [
+    "demand/rebuild-core-demand.md",
+    "plan/rebuild-core-plan.md",
+    "changelog/rebuild-core-changelog.md",
+    "demand/sim-system-demand.md",
+    "plan/sim-system-plan.md",
+    "changelog/sim-system-changelog.md",
+    "demand/data-pipeline-training-demand.md",
+    "plan/data-pipeline-training-plan.md",
+    "changelog/data-pipeline-training-changelog.md",
+];
+
+const REBUILD_DRAFT_TRIPLET: [&str; 3] = [
+    "demand/rebuild-core-demand.md",
+    "plan/rebuild-core-plan.md",
+    "changelog/rebuild-core-changelog.md",
+];
+
+const SIM_SYSTEM_DRAFT_TRIPLET: [&str; 3] = [
+    "demand/sim-system-demand.md",
+    "plan/sim-system-plan.md",
+    "changelog/sim-system-changelog.md",
+];
+
+const PIPELINE_DRAFT_TRIPLET: [&str; 3] = [
+    "demand/data-pipeline-training-demand.md",
+    "plan/data-pipeline-training-plan.md",
+    "changelog/data-pipeline-training-changelog.md",
+];
+
+#[derive(Clone, Copy)]
+struct DraftHeaderExpectation {
+    path: &'static str,
+    matter_id: &'static str,
+    lifecycle: &'static str,
+    status_marker: &'static str,
+    peer_fields: [(&'static str, &'static str); 2],
+}
+
+const DRAFT_HEADER_EXPECTATIONS: [DraftHeaderExpectation; 9] = [
+    DraftHeaderExpectation {
+        path: "demand/rebuild-core-demand.md",
+        matter_id: "rebuild-core-demand",
+        lifecycle: "DRAFT_AWAITING_USER_REVIEW",
+        status_marker: "需求审核中",
+        peer_fields: [
+            ("对应计划", "plan/rebuild-core-plan.md"),
+            ("对应变更日志", "changelog/rebuild-core-changelog.md"),
+        ],
+    },
+    DraftHeaderExpectation {
+        path: "plan/rebuild-core-plan.md",
+        matter_id: "rebuild-core-demand",
+        lifecycle: "DRAFT_PLAN_AWAITING_DEMAND_APPROVAL",
+        status_marker: "仅供审核",
+        peer_fields: [
+            ("对应需求", "demand/rebuild-core-demand.md"),
+            ("对应 changelog", "changelog/rebuild-core-changelog.md"),
+        ],
+    },
+    DraftHeaderExpectation {
+        path: "changelog/rebuild-core-changelog.md",
+        matter_id: "rebuild-core-demand",
+        lifecycle: "DRAFT_REQUIREMENTS_CHANGELOG",
+        status_marker: "只记录需求事实",
+        peer_fields: [
+            ("对应需求", "demand/rebuild-core-demand.md"),
+            ("对应计划", "plan/rebuild-core-plan.md"),
+        ],
+    },
+    DraftHeaderExpectation {
+        path: "demand/sim-system-demand.md",
+        matter_id: "SIM-SYSTEM-20260731",
+        lifecycle: "DRAFT_AWAITING_USER_REVIEW",
+        status_marker: "需求草案，等待需求与计划审核",
+        peer_fields: [
+            ("对应计划", "plan/sim-system-plan.md"),
+            ("对应变更日志", "changelog/sim-system-changelog.md"),
+        ],
+    },
+    DraftHeaderExpectation {
+        path: "plan/sim-system-plan.md",
+        matter_id: "SIM-SYSTEM-20260731",
+        lifecycle: "DRAFT_PLAN_AWAITING_DEMAND_APPROVAL",
+        status_marker: "仅供审核",
+        peer_fields: [
+            ("对应需求", "demand/sim-system-demand.md"),
+            ("对应 changelog", "changelog/sim-system-changelog.md"),
+        ],
+    },
+    DraftHeaderExpectation {
+        path: "changelog/sim-system-changelog.md",
+        matter_id: "SIM-SYSTEM-20260731",
+        lifecycle: "DRAFT_REQUIREMENTS_CHANGELOG",
+        status_marker: "只记录需求演进",
+        peer_fields: [
+            ("对应需求", "demand/sim-system-demand.md"),
+            ("对应计划", "plan/sim-system-plan.md"),
+        ],
+    },
+    DraftHeaderExpectation {
+        path: "demand/data-pipeline-training-demand.md",
+        matter_id: "DATA-PIPELINE-TRAINING-20260803",
+        lifecycle: "DRAFT_AWAITING_USER_REVIEW",
+        status_marker: "需求草案，等待需求与计划审核",
+        peer_fields: [
+            ("对应计划", "plan/data-pipeline-training-plan.md"),
+            (
+                "对应 changelog",
+                "changelog/data-pipeline-training-changelog.md",
+            ),
+        ],
+    },
+    DraftHeaderExpectation {
+        path: "plan/data-pipeline-training-plan.md",
+        matter_id: "DATA-PIPELINE-TRAINING-20260803",
+        lifecycle: "DRAFT_PLAN_AWAITING_DEMAND_APPROVAL",
+        status_marker: "仅供审核",
+        peer_fields: [
+            ("对应需求", "demand/data-pipeline-training-demand.md"),
+            (
+                "对应 changelog",
+                "changelog/data-pipeline-training-changelog.md",
+            ),
+        ],
+    },
+    DraftHeaderExpectation {
+        path: "changelog/data-pipeline-training-changelog.md",
+        matter_id: "DATA-PIPELINE-TRAINING-20260803",
+        lifecycle: "DRAFT_REQUIREMENTS_CHANGELOG",
+        status_marker: "只记录需求起草",
+        peer_fields: [
+            ("对应需求", "demand/data-pipeline-training-demand.md"),
+            ("对应计划", "plan/data-pipeline-training-plan.md"),
+        ],
+    },
+];
+
 #[derive(Debug)]
 struct ArchiveManifest {
     meta: BTreeMap<String, String>,
@@ -105,6 +243,35 @@ fn current_authority_graph_is_unique_and_closed() {
         assert!(doc.contains("> superseded_by：`data-collect/docs/CURRENT.md`"));
     }
 
+    for expected in DRAFT_HEADER_EXPECTATIONS {
+        let doc = read(&root.join(expected.path)).unwrap();
+        assert!(
+            doc.contains("data-collect/docs/CURRENT.md"),
+            "{} does not route data-collect facts to CURRENT",
+            expected.path
+        );
+        validate_cross_module_draft_header(&doc, expected).unwrap();
+    }
+
+    for (triplet, matter_id) in [
+        (REBUILD_DRAFT_TRIPLET, "rebuild-core-demand"),
+        (SIM_SYSTEM_DRAFT_TRIPLET, "SIM-SYSTEM-20260731"),
+        (PIPELINE_DRAFT_TRIPLET, "DATA-PIPELINE-TRAINING-20260803"),
+    ] {
+        for path in triplet {
+            let doc = read(&root.join(path)).unwrap();
+            assert!(
+                doc.contains(matter_id),
+                "{path} missing matter id {matter_id}"
+            );
+            for peer in triplet {
+                if peer != path {
+                    assert!(doc.contains(peer), "{path} does not reference {peer}");
+                }
+            }
+        }
+    }
+
     for path in ["AGENTS.md", "data-collect/README.md"] {
         assert!(
             read(&root.join(path))
@@ -141,11 +308,11 @@ fn current_authority_graph_is_unique_and_closed() {
         );
     }
 
-    let rebuild = read(&root.join("demand/rebuild-core-demand.md")).unwrap();
+    let rebuild = read(&root.join(REBUILD_DRAFT_TRIPLET[0])).unwrap();
     assert!(rebuild.contains("data-collect/docs/CURRENT.md"));
     assert!(rebuild.contains("不是 `data-collect` 的当前权威文档"));
 
-    let sim_system = read(&root.join("demand/sim-system-demand.md")).unwrap();
+    let sim_system = read(&root.join(SIM_SYSTEM_DRAFT_TRIPLET[0])).unwrap();
     assert!(sim_system.contains("data-collect/docs/CURRENT.md"));
     assert!(sim_system.contains("继续拥有 `data-collect` 当前事实"));
 
@@ -153,13 +320,12 @@ fn current_authority_graph_is_unique_and_closed() {
         "AGENTS.md".to_owned(),
         "data-collect/README.md".to_owned(),
         CURRENT.to_owned(),
-        "demand/rebuild-core-demand.md".to_owned(),
-        "demand/sim-system-demand.md".to_owned(),
     ]);
     expected_related.extend(MASTER_TRIPLET.map(str::to_owned));
     expected_related.extend(CURRENT_DOCS.map(str::to_owned));
     expected_related.extend(ROUTE_ONLY_DOCS.map(str::to_owned));
     expected_related.extend(GOVERNANCE_TRIPLET.map(str::to_owned));
+    expected_related.extend(CROSS_MODULE_DRAFT_DOCS.map(str::to_owned));
     expected_related.extend(tag_marker_paths(&root, EVIDENCE_MARKER).unwrap());
     assert_eq!(
         paths_containing_any(&root, &["data-collect", "data_collect", "DataCollect"]).unwrap(),
@@ -293,6 +459,94 @@ fn authority_guard_rejects_negative_fixtures_without_touching_the_worktree() {
         .replace(EVIDENCE_MARKER, "> 生命周期：`DAMAGED`");
     fs::write(first_evidence, damaged).unwrap();
     assert!(validate_evidence_tree(evidence_fixture.path(), &expected).is_err());
+
+    let draft_expected = DRAFT_HEADER_EXPECTATIONS[6];
+    let draft = read(&root.join(draft_expected.path)).unwrap();
+    validate_cross_module_draft_header(&draft, draft_expected).unwrap();
+    for (original, replacement) in [
+        (
+            "事项编号：`DATA-PIPELINE-TRAINING-20260803`",
+            "事项编号：`WRONG-ID`",
+        ),
+        (
+            "生命周期：`DRAFT_AWAITING_USER_REVIEW`",
+            "生命周期：`APPROVED`",
+        ),
+        ("当前执行 authority：`none`", "当前执行 authority：`self`"),
+        ("执行授权：`none`", "执行授权：`ALLOW`"),
+        ("状态：`需求草案", "状态：`APPROVED"),
+        (
+            "对应计划：`plan/data-pipeline-training-plan.md`",
+            "对应计划：`plan/wrong-plan.md`",
+        ),
+    ] {
+        let damaged = draft.replacen(original, replacement, 1);
+        assert_ne!(damaged, draft, "negative fixture did not alter {original}");
+        assert!(
+            validate_cross_module_draft_header(&damaged, draft_expected).is_err(),
+            "draft header guard accepted replacement {replacement}"
+        );
+    }
+}
+
+fn validate_cross_module_draft_header(
+    doc: &str,
+    expected: DraftHeaderExpectation,
+) -> Result<(), String> {
+    for (label, value) in [
+        ("事项编号", format!("`{}`", expected.matter_id)),
+        ("生命周期", format!("`{}`", expected.lifecycle)),
+        ("当前执行 authority", "`none`".to_owned()),
+        ("执行授权", "`none`".to_owned()),
+    ] {
+        let actual = draft_header_field(doc, label)?;
+        if actual != value {
+            return Err(format!(
+                "{} header {label} is {actual}, expected {value}",
+                expected.path
+            ));
+        }
+    }
+
+    let status = draft_header_field(doc, "状态")?;
+    if !status.contains(expected.status_marker) {
+        return Err(format!(
+            "{} header status does not contain {}",
+            expected.path, expected.status_marker
+        ));
+    }
+    for (label, path) in expected.peer_fields {
+        let actual = draft_header_field(doc, label)?;
+        let expected_path = format!("`{path}`");
+        if actual != expected_path {
+            return Err(format!(
+                "{} header {label} is {actual}, expected {expected_path}",
+                expected.path
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn draft_header_field(doc: &str, label: &str) -> Result<String, String> {
+    let prefix = format!("{label}：");
+    let values = doc
+        .lines()
+        .take(24)
+        .filter_map(|line| {
+            let line = line.trim();
+            let line = line.strip_prefix('>').unwrap_or(line).trim();
+            let line = line.trim_end_matches(&['。', '.'][..]);
+            line.strip_prefix(&prefix).map(str::trim).map(str::to_owned)
+        })
+        .collect::<Vec<_>>();
+    match values.as_slice() {
+        [value] => Ok(value.clone()),
+        _ => Err(format!(
+            "draft header must contain exactly one {label} field, found {}",
+            values.len()
+        )),
+    }
 }
 
 fn validate_entry_graph(root: &Path) -> Result<(), String> {

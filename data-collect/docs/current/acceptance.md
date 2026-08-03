@@ -108,8 +108,9 @@ cargo test -p data-collect --locked \
 ```
 
 守卫必须验证唯一 `CURRENT` 入口、唯一主三件套、六个主题归属文档、归档标签、路径和
-blob、45 个历史路径不在活动树、四份仅作证据文档的首屏标记，以及第二个 `CURRENT`、
-错误三件套引用、错误 blob、恢复历史路径和损坏证据首屏标记五类负例会被拒绝。
+blob、45 个历史路径不在活动树、四份仅作证据文档的首屏标记、九份跨模块审核中草案/
+记录均无 `data-collect` 权威，以及第二个 `CURRENT`、错误三件套引用、错误 blob、恢复
+历史路径和损坏证据首屏标记五类负例会被拒绝。
 
 ## 6. 最新验证快照
 
@@ -147,3 +148,99 @@ schema、部署或远端状态。
   修正为需用户届时决定返回 `data-collect` 的条件性后续路径后，复审结果为
   `Critical 0 / Important 0 / Minor 0`（三个等级均无问题）。
 - `git diff --check` 通过。
+
+## 8. 2026-08-03 顺序纠偏与 data-pipeline(training) 草案验证
+
+本次只纠正跨模块顺序，创建无执行权威的 `DATA-PIPELINE-TRAINING-20260803` 审核中
+三件套，并同步文档治理守卫；不修改 `data-collect` 生产运行时、数据 schema、部署或
+远端状态。
+
+- 当前顺序明确为：已完成 `data-collect(training)` 后，先完成同一
+  `data-pipeline(training)` 的上游投影门；再由 `sim-system` 使用黄金事件和真实管道
+  事件验收；随后完成训练闭环门，最后进入 `model-train`。门 A 与门 B 不形成两套
+  语义规范化实现。
+- 新 demand/plan/changelog 均使用 `DATA-PIPELINE-TRAINING-20260803`，当前执行
+  authority 和执行授权均为 `none`，并互相引用；活动 Markdown 显式处置集合由 25 份
+  增为 28 份，归档标签、快照和历史文档数量未改变。
+- `document_authority_contract` 实际结果：`4 passed; 0 failed`。新增三件套均被归类为
+  无 `data-collect` 权威的跨模块审核中草案/记录，主三件套和唯一 `CURRENT` 未改变。
+- `deploy_readme_contract` 实际结果：`6 passed; 0 failed`。模拟盘/实盘真实适配器仍需
+  `model-train` 完成后由用户决定返回 `data-collect`，既有延期门没有被新顺序绕过。
+- `cargo fmt --all -- --check` 与 `git diff --check` 通过。
+- 对活动当前文档、主三件套和跨模块草案反查“把模拟器放在训练管道之前”或“仅凭黄金
+  事件即可宣告真实训练适用”等旧当前语义，未发现残留；2026-08-02 带日期的历史过程
+  记录保持不改。
+- 独立审查发现并推动修正：门 A/模拟器循环完成条件、部分能力冒充 READY、
+  RewardContract 前置循环、Ledger 绕过门 B、`tick_stream` 误作决策触发器，以及
+  metadata v5 专用字段的事实精度和草案 authority 精确断言。修正后的独立终审结果为
+  `Critical 0 / Important 0 / Minor 0`。
+
+以上结果只证明本轮文档、治理分类和既有部署边界一致，不证明管道实现、逐文件输入准入、
+模拟器集成、训练数据集或模型训练已经完成。
+
+## 9. 2026-08-04 跨模块三件套补齐验证
+
+本次为 `rebuild-core-demand` 和 `SIM-SYSTEM-20260731` 各补齐无执行权威的 plan/changelog
+审核草案，并同步文档权威守卫；不修改 `data-collect` 生产运行时、数据 schema、服务、
+部署或远端状态。
+
+- 四份新增文档与各自 demand 使用同一事项编号并相互引用，当前执行 authority 和执行
+  授权均为 `none`；活动 Markdown 显式处置集合由 28 份增为 32 份。
+- 首次并行验证中 `document_authority_contract` 为 `3 passed; 1 failed`：两份新增
+  `rebuild-core` 文档已经提及 `data-collect`，但尚未进入显式处置集合。
+- 将两套新增 plan/changelog 统一路由到 `data-collect/docs/CURRENT.md`，并把三套跨模块
+  三件套纳入同事项编号、相互引用、无权威和无执行授权检查后，
+  `document_authority_contract` 为 `4 passed; 0 failed`。
+- 同次回归中 `deploy_readme_contract` 为 `6 passed; 0 failed`，
+  `deployment_binary_contract` 为 `3 passed; 0 failed`，`cargo fmt --all -- --check` 通过。
+- 归档标签、快照、历史文档数量、当前主三件套的路径与身份，以及唯一 `CURRENT` 入口的
+  身份和数量均未改变；新增草案不授权代码实施、正式数据构建、远端操作、部署、推送/发布、
+  钱包/凭据、真实下单或资金。
+
+## 10. 2026-08-04 模拟器低频规则责任与存储复核验证
+
+本轮只更新低频平台规则的模块归属、冷启动合同和现有数据空间反事实；没有修改
+`data-collect` Rust 代码、schema、Parquet、清单、服务、部署或远端状态，也没有创建
+`sim-system` 配置实现。
+
+- 只读空间复核仅使用 `/home/chillchill/new-datasets` 中 UTC 日不早于 2026-07-30 的
+  2026-07-30 至 2026-08-02 四日：491 个 Parquet、151,056,246 行、
+  9,202,902,694 字节；metadata 为 97 个 v5 文件、4,620 行、4,119,473 字节。
+- 当前 metadata v5 没有规则专用列，因此专用列删除收益和语义上安全可删除量均为 0 字节。
+  十个 Gamma 原始证据键的组合反事实为 255,582 个逻辑字节、约 9,317 个 ZSTD-3 压缩
+  字节，即 metadata 约 0.226%、全数据约 0.000101%；删除会破坏载荷及摘要，故不执行。
+- 十键中只有 `orderMinSize`、`orderPriceMinTickSize`、`feesEnabled`、`negRisk` 是来源时点
+  不同的直接重叠候选；其余是旧键、主题近似或本次配置明确排除项。完整 `feeSchedule`、
+  `feeSchedule.rebateRate`、`itode`、`oas` 的重叠和删除收益均为 0。
+- 动态数据独立复核为 624 条 `tick_size_change`、156 个市场，全部
+  `0.01 -> 0.001`；2,039,650 个非空 `fee_rate_bps` 均为字符串 `"0"`。两者都是事件证据，
+  不是冷启动配置副本。
+- 独立审查发现当前 SDK 的 `mos/nr/fd.r/e/to` 默认反序列化无法证明字段存在，以及
+  `Client::version()` 会在客户端实例内缓存。文档已把前者加入 SDK 类型覆盖门，并要求每个
+  新运行新建不跨运行复用的 CLOB/Gamma 客户端；`itode`、
+  `feeSchedule.rebateRate` 仍是必需字段缺口，未消费的 `oas` 不单独阻断。
+- 最终合并验证为：`deploy_readme_contract` `6 passed; 0 failed`，
+  `deployment_binary_contract` `3 passed; 0 failed`，`document_authority_contract`
+  `4 passed; 0 failed`；`cargo fmt --all -- --check` 与 `git diff --check` 均通过。
+
+以上结果只证明文档权威、既有部署边界和只读测量结论一致，不证明正式冷启动加载器、
+`PlatformRuleSnapshot` 或模拟器已经实现；当前相关跨模块三件套仍为
+`authority=none`、`执行授权=none`。
+
+## 11. 2026-08-04 模拟器冷启动来源纠正
+
+用户随后批准把 `sim-system` 冷启动来源改为固定的官方公开 HTTPS 端点和窄类型响应
+加载器。本决定取代第 10 节中“模拟器冷启动受官方 Rust SDK 类型覆盖门阻断”的当前含义；
+第 10 节的测试计数和只读测量仍只作为当时实际快照保留，不是新加载器的验证证据。
+
+- 官方 Rust SDK 类型覆盖缺口不再阻断模拟器；平台响应缺少必需字段、字段非法、身份不一致
+  或来源冲突仍由模拟器事项失败即关闭。
+- 本次只纠正文档中的来源与责任边界，不修改 `data-collect` Rust、schema、Parquet、清单、
+  服务、部署、远端状态、当前 authority 或执行授权。
+- 本轮最终实际运行 `cargo test -p data-collect --locked --test document_authority_contract
+  --test deploy_readme_contract --test deployment_binary_contract -- --test-threads=1`，结果依次为
+  `4 passed; 0 failed`、`6 passed; 0 failed`、`3 passed; 0 failed`；
+  `cargo fmt --all -- --check` 与 `git diff --check` 均通过。这些结果只验证当前文档权威、既有
+  部署合同、Rust 格式和差异格式，不验证公开 HTTPS 加载器。
+- 本节不声称公开 HTTPS 加载器、`PlatformRuleSnapshot` 或其测试已经实现，也不复用第 10 节
+  的既有测试结果为该加载器背书。

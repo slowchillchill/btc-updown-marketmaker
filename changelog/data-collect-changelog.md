@@ -38,13 +38,84 @@
 - 2026-07-28 事故事项已由用户最终验收。
 - 真实 UTC 日切换和完整健康 UTC 日不再是完成门；文档不反向声称未记录
   的运行证据已经发生。
-- 2026-08-02 用户确认当前跨模块开发主线为
-  `data-collect(training) -> sim-system -> data-pipeline(training) -> model-train`。
+- 2026-08-03 用户纠正并取代 2026-08-02 的当前跨模块顺序：已完成
+  `data-collect(training)` 后，先冻结 `data-pipeline(training)` 需求和共享合同，并完成
+  “最终化类型化原始数据 -> 规范全序 -> ExecutionMarketEvent”最小真实纵向链路；随后
+  由 `sim-system` 同时使用黄金事件和真实管道事件开发、验收；再补齐同一
+  `data-pipeline(training)` 的 Ledger 投影合并、完整 `Observation`、标签、切分、
+  归一化与训练产物闭环，最后进入 `model-train`。
 - 模拟盘和实盘的真实外部数据源适配器不属于 `model-train`，保持延期；必须先
   完成 `model-train`（模型训练模块，不是 `data-collect-training-collector`）；之后
   仍只有在用户决定返回 `data-collect` 时，才以独立三件套开发。该延期不阻断
   `data-collect` 完成。
 - `data-collect` 当前没有 Rust 实现、部署或远端操作游标。
+
+## 2026-08-04 模拟器低频规则责任与存储复核
+
+- 用户确认：CLOB 最小订单数量、完整 `feeSchedule`、`itode` 等低频平台规则不再要求
+  `data-collect` 补齐；它们由 `sim-system` 每个新运行在冷启动阶段通过官方 Rust SDK 按
+  目标市场查询，并在运行内冻结。
+- 当前 v5 没有 `min_size`、`fee_schedule_raw`、`feeSchedule`、`itode` 或
+  `rebateRate` 专用列，删除这类专用列的真实收益为 0 字节。旧同名字段只存在于旧布局或
+  发现阶段内存结构，不是当前 Parquet 列。
+- 只读审查仅使用 `/home/chillchill/new-datasets` 中 2026-07-30 至 2026-08-02 四日，合计
+  491 个 Parquet、151,056,246 行、9,202,902,694 字节；metadata 为 97 个 v5 文件、
+  4,620 行、4,119,473 字节。
+- 1,167 个 Gamma 原始证据载荷中存在十个同名或相似键。全部删除的逻辑字节减少为
+  255,582，按相同每小时分片和 ZSTD-3 的反事实压缩收益约 9,317 字节，即 metadata 约
+  0.226%、全部合格数据约 0.000101%。删除还会破坏原始载荷和关联摘要，因此决定不删键、
+  不重写既有数据。`current/contracts.md` 已逐键记录
+  `orderMinSize`、`orderPriceMinTickSize`、`feesEnabled`、`makerBaseFee`、
+  `takerBaseFee`、`makerRebatesFeeShareBps`、`secondsDelay`、`negRisk`、
+  `enableOrderBook`、`rfqEnabled` 的观测值和空间反事实；它们都只是原始 JSON 键，不是
+  可删除的类型化专用列。
+- 十键中只有 `orderMinSize`、`orderPriceMinTickSize`、`feesEnabled`、`negRisk` 是直接
+  重叠候选；三个旧手续费/返佣键只是主题近似，`secondsDelay`、`enableOrderBook`、
+  `rfqEnabled` 不是本次配置参数。十键合计只是空间反事实上限，不是“十个重复字段”。
+- 完整 `feeSchedule`、`feeSchedule.rebateRate`、`itode` 和 `oas` 在当前 v5 载荷中不存在，
+  因而其字段重叠和删除收益均为 0。四日范围的公开成交虽有 2,039,650 个非空
+  `fee_rate_bps` 且均为字符串 `"0"`，但这是逐成交事件证据，不是冷启动规则副本。
+- 四日数据另有 624 条 `tick_size_change`，涉及 156 个市场，均为 `0.01 -> 0.001`；这是
+  运行中动态事实，继续保留。`last_trade_price.fee_rate_bps` 也是公开成交证据，不是
+  `feeSchedule` 配置副本。
+- 本次只同步当前文档责任边界与只读测量结论；没有修改 Rust、schema、Parquet、服务、
+  部署或远端状态，也没有产生新 `data-collect` 实施游标。
+- 独立审查进一步确认：模拟器当前 SDK 不仅缺少 `itode` 和
+  `feeSchedule.rebateRate`，`mos/nr/fd.r/e/to` 的默认反序列化也无法审计字段存在性；这是
+  `sim-system` 的 SDK 类型覆盖门，不改变 `data-collect` 已关闭状态或采集 schema。
+
+## 2026-08-04 跨模块三件套治理补齐
+
+- 为保持需求、计划和变更记录一一对应，`rebuild-core-demand` 与
+  `SIM-SYSTEM-20260731` 各新增无执行权威的 plan/changelog 审核草案；这些文档不改变
+  `data-collect` 当前合同、代码、完成状态或部署状态。
+- `data-collect` 文档权威守卫把三套跨模块三件套统一归类为
+  `authority=none`、`执行授权=none`，并机械检查同一事项编号和相互引用。活动 Markdown
+  显式处置集合由 28 份增为 32 份；唯一 `CURRENT` 入口及当前主三件套的路径、身份和数量
+  不变，归档标签、快照和历史文档数量不变。
+- 首次检查暴露两份新增 `rebuild-core` 文档尚未进入显式处置集合；补齐归类后，
+  `document_authority_contract` 为 `4 passed; 0 failed`，`deploy_readme_contract` 为
+  `6 passed; 0 failed`，`deployment_binary_contract` 为 `3 passed; 0 failed`，
+  `cargo fmt --all -- --check` 通过。
+- 本次仅修正文档治理完整性；没有修改生产运行时/schema、正式数据、服务或远端状态，
+  也没有产生部署、推送/发布、敏感材料、真实下单或真实资金授权。
+
+## 2026-08-03 跨模块顺序纠偏
+
+- 用户确认此前先独立完成 `sim-system`、再建设 `data-pipeline(training)` 的顺序有误，
+  并批准修改旧活动文档的顺序以及开始独立的 `data-pipeline(training)` 需求草案。
+- 新顺序把同一 `data-pipeline(training)` 分为两个交付门：模拟器之前的上游投影门只
+  建立清单准入、唯一规范全序、`ExecutionMarketEvent` 和同源市场侧 Observation；
+  模拟器之后的训练闭环门再接入归一化反馈/Ledger 投影，补齐完整 Observation、标签、
+  切分、归一化和训练产物。该分层不允许形成两套语义规范化器或两条影子管道。
+- 黄金事件仍是 `sim-system` 组件符合性、边界和确定性回归的必要证据，但不能替代至少
+  一条“最终化类型化原始数据 -> 规范全序 -> ExecutionMarketEvent -> sim-system”的
+  真实纵向验证链路。完整归一化层、Ledger 和 RewardContract 仍不是模拟器开发前置。
+- 本次只调整文档顺序、增加审核中草案及其文档治理分类；不重开已完成的
+  `data-collect`，不修改采集运行时/schema，不授权部署或远端状态变化。
+- 最终文档权威测试为 `4 passed; 0 failed`，部署说明测试为 `6 passed; 0 failed`，
+  `cargo fmt --all -- --check` 与 `git diff --check` 通过；修正后的独立终审结果为
+  `Critical 0 / Important 0 / Minor 0`。
 
 ## 2026-08-02 跨模块顺序同步
 
@@ -90,3 +161,16 @@
 - 当前验收命令与真实结果：`data-collect/docs/current/acceptance.md`
 - 当前限制：`data-collect/docs/current/known-limitations.md`
 - 文档治理结论：`data-collect/docs/current/document-authority-audit.md`
+
+## 2026-08-04 模拟器冷启动来源纠正
+
+- 用户批准 `sim-system` 每个新运行通过固定的官方公开 HTTPS 端点和窄类型响应加载器查询
+  低频平台规则。本决定取代本文件此前“模拟器通过官方 Rust SDK 冷启动”以及“SDK 类型覆盖
+  缺口阻断模拟器冷启动”的表述；旧段落保留为历史决策记录。
+- 官方 Rust SDK 类型覆盖缺口不再阻断模拟器。平台响应缺少必需字段、字段非法、身份不一致
+  或来源冲突时，受影响的模拟器能力仍失败即关闭；未消费的 `oas` 只登记为未消费字段。
+- 该例外只属于 `sim-system` 冷启动，不改变 `data-collect` 必须使用官方 Rust SDK 的合同，
+  不授权采集器使用原始 REST，也不改变当前 schema、原始证据保留、模块完成状态、authority
+  或执行授权。
+- 本次只修正文档语义；没有实现加载器、修改 Rust/schema/数据、操作服务或远端、部署、
+  提交或推送，也没有把既有测试结果冒充为加载器验证。

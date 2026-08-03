@@ -4,21 +4,26 @@
 
 生命周期：`DRAFT_AWAITING_USER_REVIEW`。
 
-当前执行权威（`authority`）：`none`。
+当前执行 authority：`none`。
 
-对应计划：用户审核并明确批准本需求后，才允许创建
-`plan/sim-system-plan.md`。
+执行授权：`none`。
 
-对应变更日志：用户审核并明确批准本需求后，随获批计划创建
-`changelog/sim-system-changelog.md`。
+状态：`需求草案，等待需求与计划审核；不得据此编写实现、运行数据构建、部署或改变远端状态`。
 
-本文只定义独立 `sim-system` 模块的需求、边界和验收标准，不授权编写实现、
-创建计划、部署、启停服务、修改远端状态或执行任何真实资金操作。
+对应计划：`plan/sim-system-plan.md`。
+
+对应变更日志：`changelog/sim-system-changelog.md`。
+
+为审核和三件套对齐可以创建明确标为 `authority=none` 的计划与变更记录草案；需求及计划
+获批前没有实施游标，变更记录只记录事实、冲突和决定，不产生执行权威。
+
+本文只定义独立 `sim-system` 模块的需求、边界和验收标准，不授权编写实现、部署、启停
+服务、修改远端状态或执行任何真实资金操作；无权威的审核计划和变更记录草案不是实施。
 
 同一路径下的前一版草稿把盘口写成不接收任何外部市场状态的静态冻结场景。用户在
 2026-07-31 审核中明确纠正：训练和模拟盘的模拟撮合必须由与模型 `Observation`
 同源、同因果边界的订单簿事件驱动；首版还必须覆盖批量、全撤、
-`ListOpenOrders` 和 `ListTrades`。前一版草稿没有执行权威，本版按这些最新
+`orders` 和 `trades`。前一版草稿没有执行权威，本版按这些最新
 决定整体替代其冲突内容。用户随后进一步冻结：合格 `MarketResolved` 到达时
 必须在同一逻辑时点立即完成模拟自动赎回；首版还必须把 `venue_dust` 作为独立
 平台终态。用户在 2026-08-01 至 2026-08-02 的审核中进一步纠正：平台小额余量只属于
@@ -31,15 +36,69 @@
 `UNKNOWN_MARKET_STATE`/隔离；模拟结果必须明确标记为项目批准的 L2 队列推定，
 不能冒充真实平台逐订单 FIFO 复原。
 
+用户在 2026-08-04 进一步纠正此前把低频平台规则交给 `data-collect` 持久化、并把
+`itode` 固定为无条件 250ms 代码常量的方案。新运行的 `sim-system` 必须在接收首个业务
+请求前进入一次有界冷启动加载阶段：通过只读、无凭据的官方公开 HTTPS 规则端点，按本次
+运行明确列出的每个目标 `condition_id` 查询当前平台规则，完成跨端点一致性和市场身份校验后，密封为本次
+运行不可变的 `PlatformRuleSnapshot`。这里的“访问一次”是“一次冷启动加载阶段”，不是
+“整个运行只允许一个 HTTP 请求”；CLOB 与 Gamma 的必要公开 `GET` 按有界市场集合调用，
+每个市场、每个来源只接受一个成功逻辑结果，且不得在运行中轮询、热刷新或按订单重新查询。
+同一运行崩溃恢复时必须加载已经落盘的原
+快照，不得重新访问平台；只有新运行才重新查询并生成新快照。历史训练运行也必须按其有界
+目标市场集合逐市场取得规则，不能把一个当前市场的值套用到其他历史市场。
+
+`data-collect` 不为这组低频规则新增专用列，`data-pipeline` 和
+`ExecutionMarketEvent` 也不传播 `min_order_size`、`feeSchedule` 或 `itode`。但运行中会
+变化的 `tick_size_change`、盘口、成交、接单状态、生命周期和市场判定仍由
+`ExecutionMarketEvent` 推进，不能被冷启动快照替代。现有源级原始证据载荷继续无损保留；
+其与冷启动快照数值相同不等于语义冗余。该边界只约束模拟器；`live-trade` 仍由官方 Rust
+SDK 和真实平台直接决定实际行为。
+
+用户在 2026-08-02 又纠正了此前首版遗漏 maker rebate 的决定，并在 2026-08-03
+进一步确认首版同时实现 maker rebate 与 taker rebate 的应计和付款；两者都是本项目
+真实经济结果的重要组成，但不得与 Liquidity Rewards 混合。maker 路径按每笔最终成功、
+实际为 maker 的模拟成交，使用撮合时该市场冻结的官方 `feeSchedule` 计算并按市场汇总
+`MakerRebateAccrualFinalized`。taker 路径按每笔最终成功、实际为 taker 的模拟成交已经
+收取的 `actual_taker_fee_pusd`，以用户冻结的首版 Silver 等级和 `8%` 返佣率计算
+`TakerRebateAccrualApplied`；`20,000 wV` 只记录为当前官方 Silver 等级门槛背景，首版
+不累计或校验 wV，不实现等级更新、降级宽限期、Profile 查询或一次性等级奖金。
+两类应计分别进入不可支出的应收款，不是即时负手续费、训练 `RewardContract` 或已支付
+现金。当前官方 Taker Rebates 页面明确名义付款时刻为每日 `00:00 UTC`；Maker Rebates
+页面只明确每日计算/支付，没有承诺具体分钟。经香港线路复核的账户活动和链上收款表明，
+当前常规 taker 收款主要在 `00:10 UTC` 附近、maker 收款主要在 `00:45-00:46 UTC`。
+因此首版按账户、返佣种类和成交归属 UTC 日分别汇总，并把 D 日 taker 在 D+1
+`00:10 UTC`、maker 在 D+1 `00:45 UTC` 作为正常现金可用时刻。正常时刻到达时，只有
+已经归属 D 的全部潜在合格贡献在模拟平台内部最终闭合，才日结并付款；仍有内部最终性
+未闭合的贡献时，原日桶保持未日结，待最后一项闭合后在首个因果可用内部时刻只日结、
+付款一次。普通训练窗口结束或调用方主动截尾本身不生成未知；无论是否跨过正常现金可用
+时刻，尚未闭合的日桶都只保留未日结状态和已有应收款，不提前日结；客户端反馈迟到不
+推迟模拟平台内部付款。当日同类应计合计低于 `1 pUSD` 时
+不付款且不并入后续日期门槛，合计达到门槛时向下截取至四位小数付款；低于门槛的金额和
+截取余数继续保留为不可支出、不参与后续日付款的应收款。上述正常现金可用时刻、低于
+门槛不跨日合并和四位向下截取是基于当前真实证据并由用户冻结的
+`PROJECT_ASSUMPTION`，不是官方对未来永久不变的保证；后续证据冲突时必须发布新规则
+版本，不得追溯改写旧运行。
+
+用户在 2026-08-03 进一步冻结执行调用边界：`model-train`、`offline-evaluation`、
+`paper-trade` 和 `live-trade` 都先调用共用的 `Intent Bridge / Execution Adapter`；
+模拟后端使用 `post_order`、`post_orders`、`cancel_order`、`cancel_orders`、
+`cancel_all_orders`、`order`、`orders`、`trades` 调用 `sim-system`，并传递模拟领域
+订单及其会话、幂等、逻辑时间和因果上下文；实盘后端只把同名操作委托给官方 Rust SDK，
+其中提交操作使用官方 `SignedOrder`。方法名和操作划分必须复用官方 SDK 的当前词汇，但
+模拟后端不复用真实签名、认证、网络客户端或完整 SDK 参数/响应类型。固定版本 SDK 的
+实际返回类型和实现与当前官方 API 均按项返回 `post_orders` 结果，并明确允许同批混合
+成功/失败，因此批量提交固定为逐项、非原子语义。
+
 ## 1. 用户冻结的模块定义
 
 用户已经明确以下架构语义，后续计划和实现不得改变：
 
 1. `sim-system` 是独立的平台订单处理模拟模块。
-2. 它只接受 `model-train`、`offline-evaluation` 或 `paper-trade` 发来的订单
-   业务请求，首版请求面为：
-   `SubmitOrder`、`SubmitOrders`、`CancelOrder`、`CancelOrders`、
-   `CancelAllOrders`、`QueryOrder`、`ListOpenOrders` 和 `ListTrades`。
+2. 它只接受共用 `Intent Bridge / Execution Adapter` 的模拟后端路由的模拟领域
+   请求，原始调用方角色只能是 `model-train`、`offline-evaluation` 或 `paper-trade`；
+   三者不得绕过桥接器直接依赖模拟器私有派发类型。首版唯一公开操作词汇为：
+   `post_order`、`post_orders`、`cancel_order`、`cancel_orders`、
+   `cancel_all_orders`、`order`、`orders` 和 `trades`。
 3. `data-pipeline` 从同一规范市场事件序列分别输出模型可见
    `Observation` 和独立的 `ExecutionMarketEvent`。前者只进入模型消费者，后者通过
    与订单业务面分离的只读市场状态数据面进入 `sim-system`。
@@ -61,10 +120,13 @@
    本文规定分两级释放热状态，只保留查询、幂等和审计所需的紧凑订单/成交记录。
 9. `model-train` 独占训练方法、奖惩方法和训练结果筛选。当前只使用一个训练框架，
    不开展框架竞赛。
-10. 后续更换模型框架时，只替换 `model-train` 内部实现；只要统一模型数据合同、
-   模型产物/推理合同和本模块订单请求/反馈合同不变，其他模块无需随框架修改。
-11. `live-trade` 只调用官方 Polymarket Rust SDK 和真实平台，不得调用
-   `sim-system` 生成或覆盖真实平台事实。
+10. 当前唯一训练框架只通过统一模型数据合同、模型产物/推理合同和共用桥接器的
+    订单请求/反馈合同与其他模块交互；原始调用方角色仍必须透传到模拟请求上下文，
+    但不表示调用方可以绕过桥接器；其他模块不得引入该训练框架的运行时类型，
+    这一边界不构成多框架、框架替换或框架竞赛能力。
+11. `live-trade` 只通过共用桥接器的实盘后端调用官方 Polymarket Rust SDK 和真实平台；
+    实盘后端只能委托官方 `Client` 的同名方法，不得路由到 `sim-system`，也不得用模拟
+    结果生成或覆盖真实平台事实。
 12. 合格 `MarketResolved` 一旦在会话的规范因果时间线可用，
     `sim-system` 必须在同一逻辑时点、按稳定子顺序原子更新模拟平台账户并生成独立
     `AutoRedeemApplied` 反馈；首版不模拟人为等待、失败或重试。
@@ -74,14 +136,31 @@
     该账户小余量外的队列已由同一冻结规则耗尽，平台据此关闭该账户余量。外部盘口余量无论
     多小都不是平台小额余量；
     平台小额余量不等于成交已最终结算，也不得生成额外成交、份额、费用或现金流。
+14. 整个项目的市场类型范围固定为 Polymarket Global CLOB 的
+    `btc-updown-5m`；`sim-system` 不是通用多市场模拟器，也不得为其他市场类型建设插件或
+    策略选择入口。市场系列、窗口、条件和代币身份仍由上游规范事件合同限定；模拟器冷启动
+    只用精确 `condition_id` 和代币/结果身份从官方公开规则端点查询并与该合同交叉核对，不重新
+    解析 slug，也不建立第二套市场发现或系列准入逻辑。只有快照中的
+    `taker_order_delay_enabled=true` 时，可立即成交订单才应用版本化文档规则中的
+    `taker_order_delay_ms=250`；为 false 时不应用。体育/赛事的 `secondsDelay` 不在本项目
+    范围，且不得与 `itode` 混淆。
+15. maker rebate 与 taker rebate 都是模拟平台经济事实，不是训练奖励。`sim-system`
+    分别计算并输出本账户最终成功 maker/taker 成交产生的应计、日结和付款；调用方
+    归一化层（订单 NOE / 非订单经济归一化合同）和 Ledger 负责归一化与记录，
+    `model-train` 的唯一 `RewardContract` 只能从已记录的账本经济变化派生训练奖励。
+    应计只增加一次经济价值；付款只是对应应收款一比一转为现金，不得再次产生 PnL 或
+    训练奖励。首版不实现 Liquidity Rewards、taker wV/动态等级或一次性等级奖金，也不因
+    固定市场范围增加第二套市场类别、slug、Crypto 类别或奖励资格校验。
 
 现有文档的适用关系为：
 
 - `demand/rebuild-core-demand.md` 仍是审核中草案。其中把
   `offline-evaluation` 作为独立样本外评估调用方，以及
-  `sim-system -> 模拟平台原始证据 -> NOE -> 调用方自有 Ledger` 的边界，已经用户
-  确认纳入本文合同。`NOE` 和 Ledger 仍在 `sim-system` 之外；
-  `sim-system` 不直接生成 `NormalizedOrderEvent` 或 Ledger 事件。
+  `Intent Bridge / Execution Adapter（模拟后端） -> sim-system -> 模拟平台原始证据
+  -> 调用方归一化层（订单 NOE / 非订单经济归一化合同）
+  -> 调用方自有 Ledger` 的边界，已经用户确认纳入本文合同。归一化层和 Ledger 仍在
+  `sim-system` 之外；共用桥接器也位于业务调用方与模拟/实盘后端之间，不属于
+  `sim-system` 的撮合、账户或市场状态；`sim-system` 不直接生成归一化事件或 Ledger 事件。
 - `data-collect/docs/CURRENT.md` 继续拥有 `data-collect` 当前事实，并已同步本文第 3 节
   用户确认的跨模块主线。模拟盘/实盘真实适配器仍属于后续 `data-collect`
   独立事项；必须先完成 `model-train`（模型训练模块，不是
@@ -95,34 +174,48 @@
 
 ```mermaid
 flowchart LR
-    DCT["data-collect(training)"] --> DPT["data-pipeline(training)"]
-    DPT -- "Observation" --> MT["model-train<br/>单一框架、训练、奖励、筛选"]
-    DPT -- "ExecutionMarketEvent" --> SIMT["sim-system<br/>训练会话"]
-    MT -- "单笔/批量提交<br/>单笔/批量/全撤<br/>单笔/列表查询" --> SIMT
-    SIMT -- "模拟平台原始证据" --> NOET["NOE(training)"]
+    RULEHTTP["官方公开 HTTPS 规则端点<br/>新运行窄型只读查询"] --> RSNAP["不可变 PlatformRuleSnapshot<br/>按目标 condition_id 冷启动一次"]
+    RSNAP --> SIMT
+    RSNAP --> SIME
+    RSNAP --> SIMP
+    DCT["data-collect(training)"] --> DPTA["data-pipeline(training)-A<br/>同一规范化核心、真实上游投影"]
+    DPTA -- "市场状态 / 规范谱系" --> DPTB["data-pipeline(training)-B<br/>同一模块、Ledger 投影合并 / 完整 Observation"]
+    DPTA -- "ExecutionMarketEvent" --> SIMT["sim-system<br/>训练会话"]
+    DPTB -- "完整 Observation / 训练产物" --> MT["model-train<br/>单一框架、训练、奖励、筛选"]
+    MT --> BRT["共用 Intent Bridge / Execution Adapter<br/>training 实例，模拟后端"]
+    BRT -- "SDK 对齐方法名<br/>模拟领域请求/响应，无签名/网络" --> SIMT
+    SIMT -- "模拟平台原始证据" --> NOET["归一化层(training)<br/>订单 NOE / 非订单经济归一化合同"]
     NOET --> LEDGERT["调用方自有 Ledger(training)"]
-    LEDGERT --> MT
+    LEDGERT -- "本训练实例只读投影" --> DPTB
 
     DPE["data-pipeline(offline-evaluation)"] -- "Observation" --> OE["offline-evaluation<br/>冻结模型、独立时间外留出集"]
     DPE -- "ExecutionMarketEvent" --> SIME["sim-system<br/>offline-evaluation 会话"]
-    OE -- "单笔/批量提交<br/>单笔/批量/全撤<br/>单笔/列表查询" --> SIME
-    SIME -- "模拟平台原始证据" --> NOEE["NOE(offline-evaluation)"]
+    OE --> BRE["共用 Intent Bridge / Execution Adapter<br/>offline-evaluation 实例，模拟后端"]
+    BRE -- "SDK 对齐方法名<br/>模拟领域请求/响应，无签名/网络" --> SIME
+    SIME -- "模拟平台原始证据" --> NOEE["归一化层(offline-evaluation)<br/>订单 NOE / 非订单经济归一化合同"]
     NOEE --> LEDGERE["调用方自有 Ledger(offline-evaluation)"]
     LEDGERE --> OE
 
     DCP["data-collect(paper)"] --> DPP["data-pipeline(paper)"]
     DPP -- "Observation" --> PT["paper-trade<br/>模型推理与交易编排"]
     DPP -- "ExecutionMarketEvent" --> SIMP["sim-system<br/>模拟盘会话"]
-    PT -- "单笔/批量提交<br/>单笔/批量/全撤<br/>单笔/列表查询" --> SIMP
-    SIMP -- "模拟平台原始证据" --> NOEP["NOE(paper)"]
+    PT --> BRP["共用 Intent Bridge / Execution Adapter<br/>paper 实例，模拟后端"]
+    BRP -- "SDK 对齐方法名<br/>模拟领域请求/响应，无签名/网络" --> SIMP
+    SIMP -- "模拟平台原始证据" --> NOEP["归一化层(paper)<br/>订单 NOE / 非订单经济归一化合同"]
     NOEP --> LEDGERP["调用方自有 Ledger(paper)"]
     LEDGERP --> PT
 
     DCL["data-collect(live)"] --> DPL["data-pipeline(live)"]
     DPL --> LT["live-trade"]
-    LT -- "真实订单操作" --> VENUE["官方 Rust SDK / 真实 Polymarket"]
-    VENUE -- "真实平台反馈" --> LT
+    LT --> BRL["共用 Intent Bridge / Execution Adapter<br/>live 实例，实盘后端"]
+    BRL -- "官方 Client 同名方法<br/>提交使用 SignedOrder" --> VENUE["官方 Rust SDK / 真实 Polymarket"]
+    VENUE -- "真实平台反馈" --> BRL
+    BRL --> LT
 ```
+
+上图中的“共用”表示四类隔离运行时复用同一版本化桥接/适配合同与实现，不表示共享
+会话、账户、后端或运行状态。每个实例在创建时必须固定为模拟后端或实盘后端，
+不得由单次请求动态切换，也不得在任一失败路径上跨后端回退。
 
 ### 2.1 模块唯一职责
 
@@ -131,12 +224,13 @@ flowchart LR
 | `data-collect(training)` | 采集离线训练所需的外部原始数据，生成类型化原始数据、覆盖度和清单 |
 | `data-collect(paper/live)` | 分别采集模拟盘/实盘在线外部数据并提供实时交接 |
 | `data-pipeline` | 将离线或在线源证据规范为唯一规范市场事件序列，同源输出 `Observation` 和独立 `ExecutionMarketEvent` |
-| `model-train` | 使用当前单一框架训练，定义奖惩方法并筛选训练结果 |
-| `offline-evaluation` | 只读加载冻结候选模型和从未进入训练或自适应决策的时间外留出集，使用隔离模拟器/NOE/Ledger 实例生成独立评估证据 |
-| `sim-system` | 消费 `ExecutionMarketEvent` 维护有界影子 CLOB、订单/账户/结算状态，并将提交、撤单和查询请求按冻结平台规则、账户侧平台小额余量规则和潜规则映射为模拟平台原始证据 |
-| `NOE / Ledger` | 位于 `sim-system` 之外；NOE 将模拟原始证据归一化，各调用方自有 Ledger 只更新本运行实例的账户投影 |
-| `paper-trade` | 使用实时统一模型输入和模型产物进行模拟盘交易编排，调用 `sim-system` |
-| `live-trade` | 使用实时统一模型输入和模型产物，通过官方 SDK 调用真实平台 |
+| `model-train` | 使用当前单一框架训练，定义奖惩方法并筛选训练结果；通过共用桥接器的模拟后端发送执行调用 |
+| `offline-evaluation` | 只读加载冻结候选模型和从未进入训练或自适应决策的时间外留出集，通过共用桥接器使用隔离模拟器/归一化层/Ledger 实例生成独立评估证据 |
+| `Intent Bridge / Execution Adapter` | 向四类业务运行时提供唯一的 SDK 对齐方法词汇；模拟后端把项目领域请求和原始调用方上下文路由到隔离 `sim-system`，实盘后端只使用官方构建器、认证和 `Client` 调用真实平台；不拥有策略、撮合、账户或 Ledger 状态 |
+| `sim-system` | 新运行先通过官方公开 HTTPS 规则端点查询并冻结有界目标市场的低频规则；随后消费 `ExecutionMarketEvent` 维护有界影子 CLOB、订单/账户/结算状态，接收桥接器路由的模拟领域提交、撤单和查询请求，并将其以及最终成功 maker/taker 成交的返佣应计、两类日结/付款按冻结平台规则映射为模拟平台原始证据 |
+| `归一化层 / Ledger` | 位于 `sim-system` 之外；订单 NOE 与非订单经济归一化合同分别处理对应模拟原始证据，各调用方自有 Ledger 只更新本运行实例的账户投影 |
+| `paper-trade` | 使用实时统一模型输入和模型产物进行模拟盘交易编排，通过共用桥接器的模拟后端调用隔离 `sim-system` |
+| `live-trade` | 使用实时统一模型输入和模型产物，通过共用桥接器的实盘后端只委托官方 SDK 调用真实平台 |
 
 ### 2.2 禁止存在的数据流
 
@@ -150,52 +244,90 @@ Observation / 特征 / 标签 / 奖励 -> sim-system
 sim-system -> data-pipeline
 sim-system -> live-trade
 sim-system -> 奖励 / 模型筛选 / 框架竞赛
+model-train / offline-evaluation / paper-trade / live-trade -> 绕过 Intent Bridge / Execution Adapter 的执行后端
+Intent Bridge / Execution Adapter（实盘后端） -> sim-system
+Intent Bridge / Execution Adapter（模拟后端） -> 官方 Rust SDK / 真实 Polymarket
 ```
 
 `data-pipeline -> sim-system` 只允许版本化 `ExecutionMarketEvent` 数据面，不允许
 `Observation`、模型特征或原始传输帧。调用方把行情、特征、模型
 状态或账本状态包装进订单请求，也不能绕过上述边界。
-`sim-system -> NOE -> 调用方自有 Ledger` 是模拟执行证据的唯一正向消费路径；
-NOE 与 Ledger 不因此成为 `sim-system` 内部模块。
+`sim-system -> 调用方归一化层（订单 NOE / 非订单经济归一化合同） -> 调用方自有 Ledger`
+是模拟执行/经济证据的唯一正向消费路径；归一化层与 Ledger 不因此成为
+`sim-system` 内部模块。桥接器必须透传并审计原始调用方角色；模拟后端不得
+接收 `live-trade`，实盘后端也不得加载、调用或回退到模拟器。
 
 ## 3. 开发顺序
 
-用户确认的当前模块主线为：
+用户在 2026-08-03 纠正并取代此前“先独立完成 `sim-system`、再实现
+`data-pipeline(training)`”的顺序。当前模块主线为：
 
 ```text
-1. data-collect(training)                 [已完成]
-2. sim-system
-3. data-pipeline(training)
-4. model-train
+1. data-collect(training)                                      [已完成]
+2. data-pipeline(training) 需求批准与共享合同冻结
+3. data-pipeline(training)-A 上游投影门
+   最终化 typed_raw -> 规范全序 -> ExecutionMarketEvent
+   + 同源市场侧 Observation
+4. sim-system
+   黄金事件组件验收 + 真实管道事件纵向验收
+5. data-pipeline(training)-B 训练闭环门
+   归一化反馈/Ledger 投影合并 -> 完整 Observation
+   -> 标签、切分、归一化与训练产物
+6. model-train
 ```
 
 `model-train` 之后只存在以下条件性后续路径，不是已经无条件批准的当前主线或执行
 授权：必须先完成 `model-train`，并由用户届时明确决定返回 `data-collect`，才可从
-第 5 项另立三件套继续：
+第 7 项另立三件套继续：
 
 ```text
-5. data-collect(paper/live)
-6. data-pipeline(paper/live)
-7. paper-trade
-8. live-trade
+7. data-collect(paper/live)
+8. data-pipeline(paper/live)
+9. paper-trade
+10. live-trade
 ```
 
-该顺序与本架构一致：
+其中 `data-pipeline(training)-A` 与 `data-pipeline(training)-B` 是同一模块、同一共享
+语义规范化核心的两个交付门，不是两个程序、两套规范事件或可独立演进的影子实现。
+该分层同时满足两组真实依赖：
 
-- `sim-system` 先冻结订单业务合同、`ExecutionMarketEvent` 消费合同、平台规则和撮合
-  引擎，并用符合该合同的合成/固定预期黄金 L2 事件序列（`golden L2 tape`）独立开发和验收；
-- `data-pipeline(training)` 随后实现同源 `Observation` 与
-  `ExecutionMarketEvent` 生产器，完成真实历史数据的端到端接入；
-- `model-train` 通过稳定订单合同调用已经独立完成的 `sim-system`；
+- 上游投影门先把真实、已最终化的类型化原始数据变成唯一规范事件带，并同源产生
+  `ExecutionMarketEvent` 与市场侧 Observation，使 `sim-system` 能在真实采集语义、
+  排序、去重、缺口和因果边界上接受验证；
+- `sim-system` 仍先用合成/固定预期黄金 L2 事件序列（`golden L2 tape`）完成组件级
+  业务语义、边界、故障和确定性回归，再用上游投影门产生的真实管道事件完成至少一条
+  “最终化类型化原始数据 -> 规范全序 -> ExecutionMarketEvent -> sim-system”纵向链路；
+- 模拟器形成稳定原始反馈后，训练闭环门才接入归一化反馈和 Ledger 投影，组装完整
+  Observation，并生成标签、切分、归一化和可交给 `model-train` 的训练产物；
+- `model-train` 通过共用桥接器的 SDK 对齐方法面和模拟后端，调用已经通过上述双重验证
+  的 `sim-system`；
 - `offline-evaluation` 在候选模型训练完成后，使用从未进入训练或自适应决策的时间外
-  留出集、冻结模型和隔离的模拟器/NOE/Ledger 实例，生成晋级模拟盘前的独立泛化证据；
+  留出集、冻结模型和隔离的模拟器/归一化层/Ledger 实例，生成晋级模拟盘前的独立泛化证据；
 - 只有用户在 `model-train` 完成后决定返回 `data-collect`，模拟盘/实盘的真实数据接入
   和在线处理才分别建设；模拟盘使用模拟平台，实盘使用真实平台。
 
-`data-pipeline` 的实现不是 `sim-system` 核心撮合引擎的开发前置条件，但真实训练
-事件序列和模拟盘实时流的集成必须等待相应 `data-pipeline` 生产器。不得把 NOE、
-Ledger、模型框架竞赛、`offline-evaluation` 或 `Promotion Controller` 插到
-`sim-system` 前面作为当前完成门。
+因此，完整 `data-pipeline(training)` 训练闭环不是 `sim-system` 核心撮合引擎的
+开发前置条件，但上游投影门及至少一条真实纵向链路是 `sim-system` 面向真实训练需要的
+完成前置。不得把归一化层、完整 Ledger、RewardContract、模型框架竞赛、
+`offline-evaluation` 或 `Promotion Controller` 插到 `sim-system` 前面；也不得退回
+“只凭黄金事件即可宣告真实训练适用”的旧判断。
+
+本文第 16 节验收标准必须按开发顺序分成三个层级：
+
+- `sim-system` 组件符合性门使用合同有效的合成/固定预期黄金
+  `ExecutionMarketEvent`、合成请求、合成有界压力工作负载和最小合同一致测试替身，
+  验收模拟器自身的业务语义、输出合同、确定性、幂等和资源边界；
+- `sim-system` 真实纵向门使用 `data-pipeline(training)-A` 从最终化类型化原始分片建立的
+  规范全序和真实 `ExecutionMarketEvent`，验收合同兼容、真实事件语义、性能重新定标和
+  至少一个代表性市场窗口；该门不能由测试替身或原始行数量替代；
+- 训练闭环门在 `sim-system` 之后验收实际归一化层与 Ledger 对模拟器输出的端到端消费、
+  完整 Observation、训练产物，以及这些产物对后续 RewardContract 输入合同的兼容性；
+  RewardContract 的实际计算归 `model-train` 首门，不是训练闭环门前置。该门不阻断
+  模拟器组件开发或真实纵向门，但阻断进入 `model-train`。
+
+获批计划必须显式标注这三个层级，不得为了满足真实纵向或训练闭环验收而在当前
+`sim-system` 范围内临时实现原始文件排序器、第二套 `data-pipeline`、归一化层、Ledger
+或 RewardContract。
 
 ## 4. 已采集样本的适用边界
 
@@ -223,11 +355,41 @@ Ledger、模型框架竞赛、`offline-evaluation` 或 `Promotion Controller` �
 源事件、获胜结果身份标识和派生规则来源追溯一并写入
 `ExecutionMarketEvent`；`sim-system` 不得把派生值冒充原始字段或自行猜测。
 
-该样本是后续 `data-pipeline(training)` 的输入证据。它可以由后续
+该样本是当前前置的 `data-pipeline(training)-A` 上游投影门的输入证据。它可以由
 `data-pipeline` 生成与模型 `Observation` 同源的 `ExecutionMarketEvent` 历史回放
 产物，但类型化原始数据、Parquet 和实时交接仍不得被 `sim-system` 直接
 读取。本文不要求也不授权在 `sim-system` 内开发原始转换器或第二套
 规范化组件。
+
+截至 2026-08-04，当前元数据 v5 schema 没有专用 `min_size`、`fee_schedule_raw`、
+`feeSchedule`、`itode` 或 `rebateRate` 列。旧 `min_size` / `fee_schedule_raw` 只存在于旧
+metadata 布局或发现阶段内存结构，不得被误读为当前 Parquet 字段。现有
+`source_evidence_payload_json` 是采集时点的 Gamma `Market` 再序列化证据，其中可能自然
+包含 `orderMinSize`、`feesEnabled`、旧手续费键及其他市场事实；它不是模拟器运行规则表，
+也不能用一个新运行冷启动时点的快照追溯替换。
+
+因此，CLOB `min_order_size`、完整逐市场 `feeSchedule` 和 `itode` 的目标归属已经改为
+`sim-system` 的新运行冷启动规则快照，而不是 `ExecutionMarketEvent` 或未来
+`data-collect` 字段补齐事项。用户已于 2026-08-04 明确批准这一个冷启动边界不再受官方
+Rust SDK 类型覆盖限制：加载器直接使用官方公开 CLOB/Gamma HTTPS `GET`、`reqwest` 和
+专用 `serde` 强类型响应结构。由此，SDK 未暴露 `itode`、`oas`、完整
+`feeSchedule.rebateRate`，以及 SDK 默认反序列化无法审计部分字段存在性的事实，不再构成
+正式加载器的开发阻断；平台响应自身缺失、非法、身份不匹配或跨端点冲突仍必须使本次新
+运行失败即关闭。`oas` 只有“最小订单年龄”的字段说明，首版没有已定义消费者或足以实现的
+行为语义，因此只作为可选原始响应证据记录，不因它扩大实现或阻断冷启动。该窄例外禁止
+`serde_json::Value` 任意探测、通用 Polymarket 客户端、订单/账户/用户频道调用、手动签名、
+影子交易 SDK、网页当前值或旧
+`makerBaseFee`/`takerBaseFee`/`makerRebatesFeeShareBps` 冒充查询结果。黄金组件测试可注入
+合同一致的固定规则快照；正式加载器是否通过仍由真实公开端点合同测试和运行快照决定。
+
+对仅使用 UTC 日不早于 `2026-07-30` 的四日合格数据所作只读空间审查显示：491 个
+Parquet、151,056,246 行、9,202,902,694 字节中，metadata 为 97 个 v5 文件、4,620 行、
+4,119,473 字节。当前没有可删除的规则专用列，因此删除这类列实际节省为 0 字节。若从
+1,167 个 Gamma 原始证据载荷中同时删除十个同名或相似键，并重写关联摘要，反事实压缩收益
+也只有约 9,317 字节，即 metadata 的约 0.226%、全部合格数据的约 0.000101%；同时会破坏
+原始证据载荷和摘要合同。故当前要求是 `data-collect` 不新增规则专用列，也不删除现有证据
+JSON 的任何键；逐键观测值和空间反事实由 `data-collect/docs/current/contracts.md` 第 3 节
+唯一记录。
 
 样本不包含本账户真实的提交响应、撤单响应、订单查询、`user-channel`、
 撮合成交、成交结算或账户状态证据。因此它不能单独证明或校准真实平台的
@@ -250,13 +412,12 @@ Ledger、模型框架竞赛、`offline-evaluation` 或 `Promotion Controller` �
 校验派生最优价。`price_change` 的绝对变更后数量、`last_trade_price` 的成交信息和
 完整 `book` 才能经规范去重后形成第 10.2 节的唯一净价位状态转换。
 
-该日市场元数据的 299 份可解析载荷都带有 `secondsDelay` 键，其值全部为
-`null`；这只排除了该样本中已记录的秒级延迟，不能排除官方独立定义的
-`itode` 250ms taker 暂缓窗口（`hold`）。当前类型化原始数据没有保存 `itode`；2026-08-02 以本样本
-条件 `0x34df9f8c34766d66d72fab055400c4eec5413a6be4c644bb023a4c1a683267de`
-查询官方公开 `GET /clob-markets/{condition_id}` 返回 `itode=true`。后续
-`data-pipeline` 必须把有来源追溯的适用市场延迟策略放入
-`ExecutionMarketEvent`/规则谱系；`sim-system` 不得为所有市场硬编码 250ms。
+样本元数据中的 `secondsDelay=null` 只描述体育/赛事秒级延迟字段，不能替代官方独立定义的
+`itode` 250ms taker 暂缓开关。`itode` 不进入 `data-collect` 专用 schema 或
+`ExecutionMarketEvent`；它由每次新运行的规则冷启动按目标 `condition_id` 查询，并在本次
+运行快照中冻结。250ms 数值来自版本化官方文档规则配置，只有查询值为 true 时才生效。
+若查询失败、身份不匹配或响应不能按冻结强类型合同解释，受影响的新运行必须在接收业务请求前
+失败即关闭，不能回退到无条件常量或把 `secondsDelay` 当作替代。
 
 只读样本还实际包含两种相邻顺序：同一市场/资产的
 `polymarket_market_01.parquet` 中，从 0 开始计数的第 1469/1470 行接入序列
@@ -278,25 +439,28 @@ Ledger、模型框架竞赛、`offline-evaluation` 或 `Promotion Controller` �
 
 ## 5. 模块目标
 
-1. `SIM-G-001`：为 `model-train`、`offline-evaluation` 和 `paper-trade` 提供
-   同一套稳定、版本化、
-   与模型框架无关的订单操作接口。
-2. `SIM-G-002`：根据冻结的平台公开规则、SDK 合同、有证据的平台潜规则、明确标记的
-   项目假设和 `ExecutionMarketEvent`，模拟每笔提交、撤单和查询请求的处理反馈。
+1. `SIM-G-001`：为共用 `Intent Bridge / Execution Adapter` 的模拟后端提供
+   稳定、版本化、与模型框架无关并与官方 Rust SDK 方法名对齐的订单操作面；
+   `model-train`、`offline-evaluation` 和 `paper-trade` 只能经该桥接器调用。
+2. `SIM-G-002`：使用模拟领域请求和上下文，根据冻结的平台公开规则、SDK 合同、
+   有证据的平台潜规则、明确标记的项目假设和 `ExecutionMarketEvent`，模拟每笔提交、
+   撤单和查询请求的处理反馈；不接受 `SignedOrder`、认证材料或真实网络请求。
 3. `SIM-G-003`：盘口由同源 `ExecutionMarketEvent` 驱动；可变影子订单簿、模拟
    订单叠加层、基于净差额的 L2 FIFO 队列估计、账户、订单、时间和结算状态全部由
    `sim-system` 的会话内运行时拥有。
 4. `SIM-G-004`：输出既覆盖即时请求响应，也覆盖独立的订单生命周期反馈、每笔本账户
-   撮合成交及其成交记录的生命周期反馈，以及与市场判定关联的独立
-   自动赎回结算生命周期反馈；三者只能通过稳定 ID 关联，不能混成一种事件。
+   撮合成交及其成交记录的生命周期反馈，以及与市场判定关联的独立自动赎回、maker/taker
+   rebate 应计、日结和付款反馈；这些事实只能通过稳定 ID 关联，不能混成一种事件。
 5. `SIM-G-005`：相同请求序列、`ExecutionMarketEvent` 流、初始场景、规则版本、
-   队列规则、平台小额余量规则、结算配置档（`settlement profile`）、逻辑时间和随机种子必须产生相同反馈
+   队列规则、平台小额余量规则、手续费/返佣规则、结算配置档（`settlement profile`）、逻辑时间和随机种子必须产生相同反馈
    序列和最终模拟平台状态。
-6. `SIM-G-006`：在真实 `data-collect`、`data-pipeline` 生产器、模型框架、模拟盘
-   运行时、网络、钱包和真实平台均不存在时，仍可用合成请求和合成/固定预期黄金的
-   `ExecutionMarketEvent` 测试数据（`golden ExecutionMarketEvent fixture`）独立完成核心引擎验收。
-7. `SIM-G-007`：后续更换 `model-train` 框架时，只要外部合同兼容，
-   `sim-system` 不需要修改或增加框架分支。
+6. `SIM-G-006`：在模型框架、模拟盘运行时、网络、钱包和真实平台均不存在时，仍可用
+   合成请求和合成/固定预期黄金的 `ExecutionMarketEvent` 测试数据
+   （`golden ExecutionMarketEvent fixture`）完成核心引擎的组件符合性验收；但
+   `sim-system` 面向真实训练需要的完成还必须通过 `data-pipeline(training)-A` 产生的
+   真实管道事件纵向验收。
+7. `SIM-G-007`：`sim-system` 对桥接器公开的模拟领域合同不得引入当前训练框架的运行时类型；
+   这一模块边界不表示预留框架替换路径或框架分支，本项目也不建设或验收这些能力。
 8. `SIM-G-008`：5 分钟市场按预加载、活跃、待市场判定、终态/已移除
    生命周期滚动处理；热内存、事件队列和本地产物均必须有硬边界。
 9. `SIM-G-009`：对合格 `MarketResolved`，模拟兑付、结果代币销毁、
@@ -308,21 +472,21 @@ Ledger、模型框架竞赛、`offline-evaluation` 或 `Promotion Controller` �
     未成交余量。不得把外部盘口余量归入平台小额余量，不得使用概率或随机数量制造平台小额余量，也
     不得倒扣已冻结的订单已撮合数量或借平台小额余量合成成交。
 
-## 6. 首版范围和非目标
+## 6. 固定市场范围、首版功能范围和非目标
 
-### 6.1 首版范围
+### 6.1 固定市场范围与首版功能范围
 
-首版业务范围冻结为：
+整个项目的市场类型范围与首版业务功能冻结为：
 
-- Polymarket Global CLOB 的 `btc-updown-5m` 市场系列；
+- 整个项目只支持 Polymarket Global CLOB 的 `btc-updown-5m` 市场系列；
 - pUSD 和两个结果代币；
 - 本系统主动订单面为 `BUY-only`；
-- 单笔 `SubmitOrder`；
-- 1 至 15 笔的 `SubmitOrders`；
-- 按一个或一组模拟平台订单 ID 的 `CancelOrder` / `CancelOrders`；
-- 当前模拟账户/会话的 `CancelAllOrders`；
-- 按一个模拟平台订单 ID 的 `QueryOrder`；
-- 分页 `ListOpenOrders` 和 `ListTrades`；
+- 单笔 `post_order`；
+- 1 至 15 笔的 `post_orders`；
+- 按一个或一组模拟平台订单 ID 的 `cancel_order` / `cancel_orders`；
+- 当前模拟账户/会话的 `cancel_all_orders`；
+- 按一个模拟平台订单 ID 的 `order`；
+- 分页 `orders` 和 `trades`；
 - GTC、GTD、FOK、FAK 和适用的 post-only；
 - 即时提交/撤单/查询响应；
 - 与订单关联的活动挂单、部分/全部撮合成交、撤单、到期订单生命周期反馈，
@@ -334,8 +498,8 @@ Ledger、模型框架竞赛、`offline-evaluation` 或 `Promotion Controller` �
 - 训练历史回放与模拟盘实时流共用的 `ExecutionMarketEvent` 合同；
 - 5 分钟市场的预加载、活跃、待市场判定、终态/已移除生命周期；
 - 动态影子订单簿、单一基于 `book`/价位净差额的 L2 FIFO 队列模型、余额、授权额度、
-  活动订单资金占用、费用、适用市场的内部 taker 时延、账户侧平台小额余量
-  终态规则和反馈
+  活动订单资金占用、费用、最终成功 maker/taker 成交的返佣应计、两类独立日结与付款、
+  按逐市场 `itode` 开关适用的 250ms 平台内部 taker 暂缓、账户侧平台小额余量终态规则和反馈
   可见性；
 - 市场级热状态释放、紧凑订单/成交索引、分页查询和有界运行/会话产物。
 
@@ -343,7 +507,7 @@ Ledger、模型框架竞赛、`offline-evaluation` 或 `Promotion Controller` �
 
 1. 不接受 SELL 意图。外部市场事实中的 BUY/SELL、买价/卖价、maker/taker 不等于
    本系统具有自有 SELL 操作面。
-2. 不提供 `AmendOrder`、`ModifyOrder`、`ReplaceOrder` 或等价隐藏入口。
+2. 不提供 `amend_order`、`modify_order`、`replace_order` 或等价隐藏入口。
 3. 不支持按市场/代币撤单、余额查询、市场数据查询、构建器成交
    列表或通知查询；这些能力必须另立需求后才能进入。
 4. 不采集或订阅外部市场，不直接解码类型化原始数据、Parquet、实时交接或原始
@@ -354,40 +518,74 @@ Ledger、模型框架竞赛、`offline-evaluation` 或 `Promotion Controller` �
 7. 不建设多框架插件、适配器注册表、框架竞赛、HPO 或 `Promotion Controller`。
 8. 不拥有调用方 Ledger、现金、持仓、PnL、NAV、风险、暂停或下一步动作
    决策。
-9. 不连接真实 Polymarket，不签名，不持有钱包、私钥、API 凭据，
-   不提交真实订单，也不是官方 SDK 的影子客户端。
+9. 除新运行冷启动通过固定官方公开 HTTPS `GET` 读取市场规则外，不连接真实 Polymarket；
+   冷启动加载器同样不签名、不持有钱包、私钥或 API 凭据，不提交真实订单，也不是通用
+   Polymarket 客户端或官方 SDK 的影子客户端。与官方 SDK 使用同名方法只统一
+   操作词汇，不表示接受 `SignedOrder`、复制 `Client` 或复用真实请求/响应类型。
 10. 不向实盘环境提供模拟回退，不把模拟反馈描述成真实平台事实。
 11. 不声称 L2 回放恢复了真实逐订单队列位置（排位），也不模拟自身订单对外部市场
     后续事件产生的真实市场影响。
 12. 不把完整 `ExecutionMarketEvent` 事件序列复制进每个会话或模拟器产物；
     `data-pipeline` 是事件序列归属方，模拟器产物只保留必要谱系、游标、订单、
     成交和验证证据。
+13. 不支持 `btc-updown-5m` 之外的市场系列，不建设通用多市场模拟器，也不为
+    `itode`、秒级延迟或体育/赛事市场预留运行时选择器、兼容状态或扩展入口。
+14. 不实现 Liquidity Rewards，不读取或复用其
+    `rewardsMinSize`、`rewardsMaxSpread`、`clobRewards`、报价时长、价差、双边性或
+    采样评分规则来判断 maker rebate。
+15. 不把返佣应计当作可用现金，不把 maker 与 taker 应计合并凑足 `1 pUSD` 门槛，
+    不让低于门槛的金额或四位截取余数参与后续日期门槛，也不把付款再次计为 PnL 或奖励。
+16. 不累计或校验 taker wV，不实现动态等级、升级/降级、降级宽限期、Profile 查询、
+    活动加成倍数或一次性等级奖金；首版固定使用 Silver `8%` 返佣率。
+17. 不为 maker/taker rebate 建设程序注册表、插件机制、规则专用语言（DSL）或其他
+    通用返佣框架；首版只实现本文冻结的两套直接计算、独立日结和付款规则。
+18. 不在当前 `sim-system` 首版计划中实现 `sim-calibration` 写入器、校准 CLI、
+    `feedback-ingestion`、校准数据切分、原子发布器或晋级凭据失效链。当前模块只实现
+    冻结的规则/配置档消费合同、版本身份和来源追溯；`sim-calibration` 仍是
+    `rebuild-core-demand.md` 定义的独立后续角色。
+19. 不在当前 `sim-system` 首版范围或两项验收门中实现共用桥接器的实盘后端、钱包/认证/签名、
+    官方网络客户端或四类业务宿主集成。当前模块只冻结并实现供模拟后端调用的八个
+    SDK 对齐方法及模拟领域合同；组件符合性验收可以使用合同一致的最小测试桥接器，不能据此
+    宣称 paper/live 生产适配器已经实现或获准部署。
 
-## 7. 外部请求合同
+## 7. SDK 对齐外部方法面与模拟领域合同
 
-### 7.1 唯一业务请求联合类型
+### 7.1 唯一公开方法面与后端分流
 
-1. `SIM-I-001`：公开业务请求必须是封闭联合类型：
+1. `SIM-I-001`：共用 `Intent Bridge / Execution Adapter` 是业务调用方唯一的执行
+   方法面，公开方法精确为：
 
    ```text
-   SimRequest =
-       SubmitOrder
-     | SubmitOrders
-     | CancelOrder
-     | CancelOrders
-     | CancelAllOrders
-     | QueryOrder
-     | ListOpenOrders
-     | ListTrades
+   post_order | post_orders | cancel_order | cancel_orders |
+   cancel_all_orders | order | orders | trades
    ```
 
-   任何新增变体都必须先修改并重新批准需求。
-2. `SIM-I-002`：`ExecutionMarketEvent` 输入、规则发布、会话创建、市场状态
-   初始装载和内部时钟调度属于独立配置/市场状态数据面，不得伪装成调用方业务
-   请求。
-3. `SIM-I-003`：每个请求封装必须包含：
+   不得再公开 `Submit*`、`QueryOrder`、`List*` 或 `SimRequest` 等第二套跨模块
+   操作词汇。若 `sim-system` 实现内部需要联合类型或派发枚举，它只能是私有实现细节；
+   调用方、跨模块数据模式和公开验收不得依赖其名称或变体。任何新增公开方法都必须先
+   修改并重新批准需求。
+2. `SIM-I-002`：方法名和操作划分与官方 Rust SDK 对齐，但模拟与实盘的
+   参数、响应和副作用边界必须分离：
+
+   | 公开方法 | 模拟后端 | 实盘后端 |
+   | --- | --- | --- |
+   | `post_order` | `post_order`，接收一个模拟领域订单 | 官方 `Client::post_order(SignedOrder)` |
+   | `post_orders` | `post_orders`，接收 1 至 15 个有序模拟领域订单 | 官方 `Client::post_orders(Vec<SignedOrder>)` |
+   | `cancel_order` | 一个模拟平台订单 ID | 官方 `Client::cancel_order` |
+   | `cancel_orders` | 一组模拟平台订单 ID | 官方 `Client::cancel_orders` |
+   | `cancel_all_orders` | 当前模拟会话/账户全撤 | 官方 `Client::cancel_all_orders` |
+   | `order` | 一个模拟平台订单 ID 的当前投影 | 官方 `Client::order` |
+   | `orders` | 模拟领域过滤条件和不透明游标 | 官方 `Client::orders` |
+   | `trades` | 模拟领域过滤条件和不透明游标 | 官方 `Client::trades` |
+
+   模拟后端使用自身的会话、账户、幂等、逻辑时间、因果游标、分页和未知结果领域
+   类型，不复用 `SignedOrder` 或官方具体响应类型；实盘后端只有通过官方构建器、签名、认证
+   和 `Client` 才能调用真实平台。本文不要求 `sim-system` 实现或伪装官方 `Client`；首版也不
+   建设通用后端 trait。共用桥接器表示共享的八方法合同与最小显式分流，不预先授权运行时
+   多态、插件注册表或其他扩展抽象；若后续出现经核实的实际需求，必须另立需求。
+3. `SIM-I-003`：桥接器为每个模拟领域方法请求传递以下上下文：
    - 合同版本；
-   - 调用方角色，且只能是 `model-train`、`offline-evaluation` 或
+   - 原始调用方角色，且只能是 `model-train`、`offline-evaluation` 或
      `paper-trade`；
    - 调用方实例/运行 ID；
    - 模拟会话 ID；
@@ -398,13 +596,16 @@ Ledger、模型框架竞赛、`offline-evaluation` 或 `Promotion Controller` �
    - 单调调用方序列；
    - 请求发出逻辑时间；
    - 产生该请求的模型可见因果截止点 / 规范游标引用。
-4. `SIM-I-004`：请求不得包含模型张量、框架对象、特征、`Observation`、奖励、
-   标签、类型化原始数据、行情事件、订单簿、成交事件序列、调用方 Ledger 或机密。
-5. `SIM-I-005`：`live-trade`、未知调用方、跨会话/账户 ID、错误合同
-   版本、重复请求 ID 冲突、非单调序列或引用模拟器尚未达到的未来因果
-   游标必须安全拒绝（`fail closed`），且不得改变业务状态。
+4. `SIM-I-004`：`ExecutionMarketEvent` 输入、规则发布、会话创建、市场状态初始装载和
+   内部时钟调度属于独立配置/市场状态数据面，不得伪装成业务方法。模拟请求不得
+   包含模型张量、框架对象、特征、`Observation`、奖励、标签、类型化原始数据、行情事件、
+   订单簿、成交事件序列、调用方 Ledger、`SignedOrder`、认证材料或机密。
+5. `SIM-I-005`：桥接器实例的后端必须在创建时固定。`live-trade`、未知调用方、跨会话/
+   账户 ID、错误合同版本、重复请求 ID 冲突、非单调序列或引用模拟器尚未达到的未来
+   因果游标必须在模拟路径中安全拒绝（`fail closed`），且不得改变业务状态；任何
+   模拟/实盘后端失败都不得触发跨后端回退。
 
-### 7.2 `SubmitOrder` 与 `SubmitOrders`
+### 7.2 `post_order` 与 `post_orders`
 
 1. `SIM-I-006`：每个提交项至少包含：
    - 市场/条件/代币/结果身份标识；
@@ -415,10 +616,17 @@ Ledger、模型框架竞赛、`offline-evaluation` 或 `Promotion Controller` �
    - GTD 到期时间（适用时）；
    - post-only（适用时）；
    - 调用方本地订单引用。
-2. `SIM-I-007`：GTC/GTD 限价 BUY 使用明确的价格和份额；FOK/FAK 市价 BUY
-   使用明确的支出金额和最差价格约束。两种数量计量基准不得通过
-   一个含义不明的裸 `size` 字段混用。
-3. `SIM-I-008`：`SubmitOrder` 精确包含一个项；`SubmitOrders` 精确包含 1 至 15
+2. `SIM-I-007`：GTC/GTD 限价 BUY 使用明确的
+   `limit_price_pusd_per_share + size_shares`；FOK/FAK 市价 BUY 使用明确的
+   `spend_pusd + worst_price_pusd_per_share`。GTC/GTD 的 `size_shares`，以及
+   FOK/FAK 按仓库固定版本官方 Rust SDK 的精度和编码规则得到的
+   `takerAmount`（shares）签名等价投影，都必须与已冻结规则快照中的
+   `min_order_size_shares` 比较。不得在领域层手写 SDK 舍入，也不得把
+   pUSD 与 shares 跨单位比较；两种数量计量基准不得通过一个含义不明的裸
+   `size` 字段混用。GTC/GTD 的 `max_principal_pusd` 必须由固定 SDK 按冻结精度对
+   价格和份额编码，并与提交 BUY 的 `makerAmount` 语义一致；它不是价格改善后的
+   实际花费。
+3. `SIM-I-008`：`post_order` 精确包含一个项；`post_orders` 精确包含 1 至 15
    个有稳定项索引和唯一本地订单引用的项。空批量、超过当前
    规则上限、重复本地引用或项合同非法必须产生明确结果。
 4. `SIM-I-009`：批量提交是一个请求封装，但每个项独立校验和处理，
@@ -435,10 +643,10 @@ Ledger、模型框架竞赛、`offline-evaluation` 或 `Promotion Controller` �
    幂等身份标识和稳定批量项身份标识，不得来自会因插入无关订单而漂移的
    全局顺序号。
 
-### 7.3 `CancelOrder`、`CancelOrders` 与 `CancelAllOrders`
+### 7.3 `cancel_order`、`cancel_orders` 与 `cancel_all_orders`
 
-1. `SIM-I-013`：`CancelOrder` 只接受同一会话/账户内一个模拟平台
-   订单 ID；`CancelOrders` 接受一个非空、有版本化硬上限的订单 ID 列表。
+1. `SIM-I-013`：`cancel_order` 只接受同一会话/账户内一个模拟平台
+   订单 ID；`cancel_orders` 接受一个非空、有版本化硬上限的订单 ID 列表。
    首版默认上限冻结为 `1,000`：当前 API 引用与 2026-06-15 官方
    变更日志均写为 `1,000`，`Manage Orders` 页面仍写 `3,000`。该冲突必须保留在
    规则证据中；后续只能通过新规则版本变更上限，不能在会话内切换。
@@ -446,7 +654,7 @@ Ledger、模型框架竞赛、`offline-evaluation` 或 `Promotion Controller` �
    忽略，不得重复执行或生成互相冲突的结果。响应以唯一目标 ID 关联
    已撤单/未撤单/未知；无论整体类 HTTP 响应是否成功，都不得把
    部分成功写成全成或全败。该语义与其他规则一样进入版本化规则产物。
-3. `SIM-I-015`：`CancelAllOrders` 不携带调用方任意指定的订单集合，作用域固定为
+3. `SIM-I-015`：`cancel_all_orders` 不携带调用方任意指定的订单集合，作用域固定为
    请求平台处理截点时该模拟会话/账户中全部可撤的未成交
    剩余量；不得跨会话/账户，也不等于首版未纳入的
    按市场/代币撤单。
@@ -459,35 +667,47 @@ Ledger、模型框架竞赛、`offline-evaluation` 或 `Promotion Controller` �
    生成调用方撤单请求。平台自身的 FAK 剩余量终止、GTD 到期、市场
    关闭等终态行为属于内部生命周期事件，不冒充调用方撤单或全撤。
 
-### 7.4 `QueryOrder`、`ListOpenOrders` 与 `ListTrades`
+### 7.4 `order`、`orders` 与 `trades`
 
-1. `SIM-I-019`：`QueryOrder` 只接受同一会话/账户内的一个模拟平台
-   订单 ID。结果必须是请求在模拟平台处理时刻可见的当前快照，至少包含订单
+1. `SIM-I-019`：`order` 只接受同一会话/账户内的一个模拟平台
+   订单 ID。结果必须是该查询请求在模拟平台处理截点的当前平台投影，不等待此前
+   订单响应或生命周期反馈到达调用方；查询响应本身仍按独立的响应可见时间交付。
+   结果至少包含订单
    身份标识、状态、原始请求数量计量基准/值、价格、订单类型、
    创建时间/到期时间、终态原因和关联成交引用。所有数量和金额必须
    携带 base/quote 计量基准、小数标度（`scale`）与币种，禁止裸 `quantity` 跨单位解释：
-   - 按 base 计量订单表达已接受/订单已撮合/平台小额余量已关闭/已撤单/已到期/
-     市场已关闭/其他终态/活动未成交 base 数量；订单已撮合还必须按成交最终性
+   - 按 base 计量订单表达已接受/订单已撮合/平台小额余量已关闭/已取消/已到期/
+     市场已关闭/活动未成交 base 数量；订单已撮合还必须按成交最终性
      分解为最终成功、待处理且经济变化已应用、待处理且经济变化未应用、
      失败补偿待处理（failed-compensation-pending）、终态失败且已补偿（terminal-failed-compensated）和
      终态失败且未应用（terminal-failed-unapplied），不能把订单撮合与链上/平台成交最终性混成同一
      字段；
    - 按 quote 预算计量订单表达已接受 quote 预算、最终成功已消耗、待处理且已应用
      已消耗、待处理且未应用已占用、已释放或未使用和仍由活动订单占用的 quote
-     金额，同时单独表达各成交的 base 数量、名义金额、手续费与结算状态；
-   - FAK 部分执行后终止或其他终态必须由明确终态原因解释对应 base/quote
-     分桶，不能塞入平台小额余量。
+     金额，同时单独表达各成交的 base 数量、名义金额、手续费与结算状态。按固定 SDK
+     编码规则得到的 `takerAmount`（shares）签名等价投影作为 `accepted_base_quantity` 的 base
+     审计投影保存，但不把该订单改成按 base 计量，也不作为 quote 资金守恒左项；响应
+     `takingAmount` 和逐笔撮合成交只表达实际执行证据，不得替代该编码等价投影；
+   - 已经接受的 FAK 在部分成交或零成交后由订单类型终止时，
+     `canceled_base_quantity = max(accepted_base_quantity - order_matched_base_quantity, 0)`；
+     若冻结规则存在 FOK 已接受后才终止的路径，同样使用该投影口径。价格改善或精度语义
+     使实际已撮合 base 大于该 SDK 编码投影时，`canceled_base_quantity=0`，正差额仍只属于
+     实际成交，不得塞入通用其他终态分桶。两者必须用各自 `terminal_reason` 和事件来源
+     与调用方 `cancel_order | cancel_orders | cancel_all_orders` 区分，不得生成调用方撤单，
+     也不能塞入平台小额余量。按 quote 预算计量订单的未花预算只进入
+     `released_or_unspent_quote_amount`，不得按价格反推为 canceled base 或与 base 份额混算。
    `accepted_base_quantity - order_matched_base_quantity > 0` 不等于仍有活动未成交
    剩余量；
    小额余量终态订单必须明确表达 `venue_dust_closed_base_quantity > 0` 且
    `open_base_quantity = 0`。上述数量都只属于查询目标的本账户订单；同价外部
    影子订单簿数量不得进入该订单快照。
-2. `SIM-I-020`：`ListOpenOrders` 返回同一会话/账户在请求处理截点
-   仍有活动未成交剩余量的调用方可见订单。首版支持可选订单 ID、
+2. `SIM-I-020`：`orders` 返回同一会话/账户在请求处理截点的当前平台投影中
+   仍有活动未成交剩余量的订单。首版支持可选订单 ID、
    条件/市场和代币/资产过滤条件；终态订单不得混入，外部影子
    订单永不进入该账户列表。
-3. `SIM-I-021`：`ListTrades` 返回同一会话/账户已经调用方可见的模拟
-   成交。首版有意只提供不改变固定会话/账户身份标识的过滤子集：可选
+3. `SIM-I-021`：`trades` 返回同一会话/账户截至请求处理截点已经在模拟平台
+   形成的成交，不等待对应成交生命周期反馈先到达调用方。首版有意只提供不改变固定
+   会话/账户身份标识的过滤子集：可选
    成交 ID、条件/市场、代币/资产和起止时间；不额外发明平台
    当前未提供的按订单 ID 查询参数，也不暴露 maker/taker 地址过滤条件。官方
    文档的 `maker_address` 与固定版本的 SDK 的 `maker`/`taker` 参数面存在差异，且本
@@ -498,7 +718,7 @@ Ledger、模型框架竞赛、`offline-evaluation` 或 `Promotion Controller` �
    `queue_result_quality`、经济闭合状态、撮合/更新时间和可用的链上交易
    引用。
    平台小额余量终态和自动赎回都不是成交，不得生成伪成交 ID 或进入
-   `ListTrades`。按 `SIM-R-008` 确定性推定并实际增加本账户已撮合数量的撮合成交
+   `trades`。按 `SIM-R-008` 确定性推定并实际增加本账户已撮合数量的撮合成交
    必须作为模拟账户成交返回并携带推定依据；外部市场成交或价位变化若只推进影子
    订单簿/队列而未穿过本账户订单，则不得作为本账户成交返回。
    `after` 缺省表示从该查询 epoch/会话起点开始，`before` 缺省表示当前查询
@@ -512,18 +732,19 @@ Ledger、模型框架竞赛、`offline-evaluation` 或 `Promotion Controller` �
    必须绑定该水位线和完整过滤条件，避免新状态插入导致重复或漏项。游标不得被
    调用方解释成内部数组下标，也不得跨查询种类、过滤条件、会话/账户或
    合同版本复用。
-5. `SIM-I-023`：查询/列表不得暴露尚未到达调用方可见时间的内部真相、场景
-   随机种子、隐藏队列估计、其他会话数据或模拟器私有状态。
-6. `SIM-I-024`：查询目标不存在、不可见或不属于调用方/会话时，必须返回明确的
+5. `SIM-I-023`：查询/列表只读取各自处理截点的当前平台投影；不得暴露该截点之后的
+   状态、场景随机种子、隐藏队列估计、其他会话数据或模拟器私有状态。此前异步响应或
+   生命周期反馈尚未到达调用方，不得阻止查询响应返回截点内已经形成的平台事实。
+6. `SIM-I-024`：查询目标不存在或不属于调用方/会话时，必须返回明确的
    未找到/禁止/未知语义；合法列表无匹配项可以返回空页，但不能把
    合同错误伪装为空结果。
 7. `SIM-I-025`：查询/列表是只读平台操作。处理前可以先结算在查询平台到达时刻之前
    已经到期的市场/订单事件，但请求自身不得产生成交、撤单、余额变化或其他业务状态
    转换。
 8. `SIM-I-026`：已取得合格市场判定并进入终态的市场安全释放热状态后，
-   `QueryOrder` 和 `ListTrades` 必须在会话/运行查询合同仍有效期间从紧凑
+   `order` 和 `trades` 必须在会话/运行查询合同仍有效期间从紧凑
    持久化紧凑订单/成交索引返回相同的终态可见结果；不得为了支持查询重新
-   加载完整市场事件序列，且按该市场过滤的 `ListOpenOrders` 必须为空。若
+   加载完整市场事件序列，且按该市场过滤的 `orders` 必须为空。若
    市场因证据缺失进入 `EXHAUSTED_QUARANTINED`，受影响查询/列表必须返回持久化的
    `UNKNOWN_INCOMPLETE_HORIZON` 或等价的明确暴露失败结果（`fail visible`），不能伪装成终态
    快照、未找到或合法空页。
@@ -532,8 +753,8 @@ Ledger、模型框架竞赛、`offline-evaluation` 或 `Promotion Controller` �
 
 1. `SIM-I-027`：任何改单/修改/替换请求种类或改变既有订单参数的请求
    必须以 `UNSUPPORTED_OPERATION` 拒绝，不能偷偷转换成撤单或新订单。
-2. `SIM-I-028`：调用方若要改变订单，必须先提交 `CancelOrder`，再使用新的请求
-   ID、幂等键和本地引用提交新的 `SubmitOrder`；新提交被接受后，由
+2. `SIM-I-028`：调用方若要改变订单，必须先提交 `cancel_order`，再使用新的请求
+   ID、幂等键和本地引用提交新的 `post_order`；新提交被接受后，由
    模拟器生成全新的平台订单 ID。
 3. `SIM-I-029`：撤单与新提交是两个独立、非原子的操作。撤单失败、迟到成交或反馈
    未知时，模拟器不得回滚、覆盖或合并成虚构的原子替换。
@@ -542,25 +763,32 @@ Ledger、模型框架竞赛、`offline-evaluation` 或 `Promotion Controller` �
 
 ## 8. 冻结场景、市场状态数据面和动态影子 CLOB
 
-1. `SIM-S-001`：每个模拟会话必须在接收首个业务请求前绑定不可变的
-   `PlatformScenario` 身份标识、版本和摘要，以及一个
-   `ExecutionMarketEventContract` 版本。
-2. `SIM-S-002`：冻结的是规则、市场窗口身份标识、预加载/终态策略、
+1. `SIM-S-001`：每个新模拟运行必须在接收首个业务请求前，先冻结有界且不可扩展的
+   `run_market_set`，再通过官方公开 HTTPS 规则端点完成一次冷启动加载阶段，生成并持久化不可变
+   `PlatformRuleSnapshot`。每个会话必须绑定该快照、`PlatformScenario` 身份标识/版本/摘要
+   和一个 `ExecutionMarketEventContract` 版本。新 `condition_id` 不得在运行中临时加入；
+   需要滚动到快照之外的新市场时必须结束或交接旧运行并创建新运行。恢复同一运行只读取原
+   快照，禁止重新查询平台。
+2. `SIM-S-002`：冻结的是规则快照、市场窗口身份标识、预加载/终态策略、
    `ExecutionMarketEvent` 事件序列/流谱系、队列模型版本、初始模拟账户、
    平台小额余量规则/结算策略、时延/可见性配置档（`latency/visibility profile`）和随机种子；订单簿数值及
    订单、账户和结算状态必须按事件和请求继续演进，不能被误写成整场静态不变。
    `sim-system` 提供通用的版本化时延/可见性配置档插槽，不把任一地域样本
    硬编码为模块唯一合法配置档；但当前 `rebuild-core` 范围内的正式训练、
    `offline-evaluation` 与模拟盘运行必须绑定 `demand/rebuild-core-demand.md` 第七节第
-   20 至 22 条冻结的同一个爱尔兰双向代理配置档。其他配置档只能用于明确标识的
+   20 至 22 条规定的、只用 UTC 日不早于 `2026-07-30` 的合格数据，依获批的对应计划重新
+   计算并通过配置档门禁与独立复核的同一个爱尔兰双向代理配置档。该配置档的
+   `profile_id/version/hash` 尚未形成时，正式时延配置档
+   状态为 `NOT_READY`，不得取得正式运行判定。其他配置档只能用于明确标识的
    模块级固定预期黄金样例/符合性测试（`golden/conformance`）、受控模拟校准或后续新版本，未经新需求和
    版本决策不得替代当前正式运行的配置档。
+   逐市场 `taker_order_delay_enabled` 和适用时的 250ms 平台内部 taker 暂缓不是地域网络
+   时延配置项；任何 `latency/visibility profile` 均不得修改、关闭或重复叠加该暂缓。
 3. `SIM-S-003`：`data-pipeline` 是唯一 `ExecutionMarketEvent` 生产器。训练
    使用不可变历史回放产物，模拟盘使用持续实时流；两者必须使用同一
    版本化载荷、全序键、因果可用性、缺口和生命周期语义。
 4. `SIM-S-004`：`ExecutionMarketEvent` 至少能够表达：
    - 市场/条件/代币身份标识、市场窗口和生命周期状态转换；
-   - 适用市场的 `itode`、秒级延迟及其源/版本/摘要；
    - 完整 L2 初始装载快照及其源 epoch/游标/摘要；
    - 价格档位数量变化、最优买价/卖价和最小价格变动单位变化；
    - 具有价格、数量、方向和可用时间的成交证据；
@@ -584,6 +812,11 @@ Ledger、模型框架竞赛、`offline-evaluation` 或 `Promotion Controller` �
      等待窗口已耗尽并进入隔离的终态。该市场事件只提供市场判定事实与
      因果终态证据；模拟账户自身的成交/账户结算屏障仍由
      `sim-system` 按第 10.4 节核验，不能由生产器替其宣称完成。
+   CLOB `min_order_size`、逐市场 `feeSchedule`、`itode`、`oas` 和其他低频平台字段不得进入
+   `ExecutionMarketEvent`；事件只携带精确市场/条件/代币身份，供模拟器查询已冻结快照中的
+   `min_order_size`、`feeSchedule` 与 `itode`。未消费的 `oas` 只在规则查询响应覆盖记录中保存，不是
+   查表规则。初始 `mts` 可以在冷启动快照中保存用于一致性校验，但运行中当前最小价格变动
+   单位仍由事件中的 `tick_size_change` 推进。
 5. `SIM-S-005`：会话必须先取得合格初始装载快照，再按严格单调的全序
    应用规范流动性/成交状态转换。完整、合同有效的新 `book` 是外部盘口的
    重校准边界：相同状态只确认；存在净差额时，必须先扣除同一底层变化已由
@@ -621,8 +854,9 @@ Ledger、模型框架竞赛、`offline-evaluation` 或 `Promotion Controller` �
 9. `SIM-S-009`：模型 `Observation` 与模拟器执行状态必须可追溯到同一
    规范事件谱系和已最终确定的因果截止点。`data-pipeline` 不得在
    `Observation` 中提前暴露尚未最终确定的状态转换，同时在模拟器数据面将其延后
-   或反之。请求引用的决策因果游标之后、模拟平台到达截点
-   之前的符合条件的事件按冻结延迟和排序规则推进；不得让模拟器使用模型决策时
+   或反之。请求引用的决策因果游标之后、按请求规则确定的执行截点
+   之前的符合条件的事件按冻结延迟和排序规则推进；不适用内部暂缓时执行截点为
+   模拟平台到达时，适用固定 taker 暂缓时执行截点为暂缓结束并完成重校验时。不得让模拟器使用模型决策时
    不可能看见的未来事件决定过去的请求。订单到达落在因果组的早期
    证据与后到证据之间时，尚未最终确定的组不得影响该订单；后续
    最终确定也不得追溯改写已经输出的结果。
@@ -635,22 +869,33 @@ Ledger、模型框架竞赛、`offline-evaluation` 或 `Promotion Controller` �
 12. `SIM-S-012`：处理某项请求所需的市场状态、规则或账户状态缺失，且无法由合同有效
     的完整 `book` 按 `SIM-S-005` 形成唯一新基准时，必须返回 `UNKNOWN_UNMODELED`、
     `UNKNOWN_MARKET_STATE` 或 `UNSUPPORTED_SCENARIO`，不得猜测一个确定平台结果。
+    该通用运行时未知语义不得用于绕过冷启动快照门：缺少必需平台规则、费用启用但完整
+    `feeSchedule/fd` 不存在，或快照非法/冲突时，必须在创建会话或恢复核心状态前拒绝整个
+    快照，不能让请求处理器继续运行并输出返佣 `UNKNOWN_INCOMPLETE`。在已验证快照下，全部
+    成交经济状态闭合且没有正的实际 maker 成交时确定
+    `ZERO_NO_ELIGIBLE_MAKER_FILL`；`fees_enabled=false` 或 `rebate_rate=0` 时也确定为零。
+    maker 返佣的 `UNKNOWN_INCOMPLETE` 只用于规则完整有效、但异常输入终态导致潜在合格成交
+    的运行时经济最终性永远无法闭合；taker 返佣不需要 wV/等级证据，实际 taker 手续费已经
+    唯一确定时直接乘固定 `8%`，只有运行时实际手续费本身未知时才不完整。正式运行不得宣称
+    未知范围经济结果完整，也不得把真正未知的返佣静默写成零或硬编码当前逐市场费率。
 
 ## 9. 时间、状态和处理语义
 
 ### 9.1 统一逻辑时间和可见性
 
 1. `SIM-T-001`：每个会话只有一个单调模拟平台时钟。训练会话使用可复现的
-   逻辑时间；模拟盘会话使用单调时间并另记 UTC 审计时间。
+   逻辑时间；模拟盘会话使用单调时间并另记 UTC 审计时间。会话必须冻结逻辑时间到
+   UTC 的唯一映射，返佣归属日和付款时刻只能由该映射计算，不得读取运行机器墙上时钟。
 2. `SIM-T-002`：调用方请求携带的是该请求的发送逻辑时间，不是平台内部真相时间；
    平台到达、校验、撮合、撤单生效、响应发出和客户端
    可见性时间由内部规则/场景计算。
-3. `SIM-T-003`：`ExecutionMarketEvent`、订单请求到达、内部延迟/到期/结算
+3. `SIM-T-003`：`ExecutionMarketEvent`、订单请求到达、内部延迟/到期/结算、返佣日结/付款
    和查询截点必须进入一个版本化全序合同。处理请求前，先处理所有
    排在其平台到达之前的符合条件的市场/内部事件；同一逻辑时刻使用
    稳定的同刻排序裁决规则（`tie-break`）。
-4. `SIM-T-004`：平台内部状态先变化，调用方随后在反馈可见时间看到结果。
-   响应或生命周期更新尚未可见时，查询/列表不得泄漏未来状态。
+4. `SIM-T-004`：平台内部状态先变化，调用方随后在各自反馈可见时间看到异步结果。
+   查询/列表拥有独立处理截点和响应可见时间，可以返回该处理截点内已经形成的平台事实，
+   不受此前异步响应或生命周期反馈可见时间约束；任何通道都不得泄漏自身截点之后的状态。
 5. `SIM-T-005`：输出可以包含当前请求的直接响应和已经到达可见时间的订单/
    成交生命周期反馈；后续订单事件及事件触发结算反馈通过
    同一版本化反馈通道交付。
@@ -701,7 +946,8 @@ Ledger、模型框架竞赛、`offline-evaluation` 或 `Promotion Controller` �
    超界时不得静默删除或继续增长，必须停止受影响市场接入并明确暴露失败（`fail visible`）。
 5. `SIM-L-005`：`sim-system` 不保存每个 5 分钟市场的完整规范事件序列。热状态
    只保留当前 L2 订单簿、模拟订单叠加层、队列估计、模拟账户、游标/摘要、
-   有界去重/恢复窗口和未完成反馈；不可变事件序列继续由 `data-pipeline` 拥有。
+   有界去重/恢复窗口、逐市场 maker rebate 贡献汇总、未闭合返佣贡献和未完成反馈；不可变事件序列继续由
+   `data-pipeline` 拥有。
 6. `SIM-L-006`：市场结束 `E` 到达后，必须停止接受不再符合平台规则的新订单。只有
    在结束水位线已到达、所有仍需市场结束前（pre-E）订单簿的在途请求/延迟已按全序
    处理、订单簿不再被任何在途操作引用后，才能释放完整订单簿、价格档位
@@ -712,21 +958,32 @@ Ledger、模型框架竞赛、`offline-evaluation` 或 `Promotion Controller` �
    账户订单反馈、成交或账户资金变化；市场结束之后不得再用后到成交把已关闭余量改写
    为撮合成交或平台小额余量。
 7. `SIM-L-007`：第一阶段释放后保留的紧凑待处理状态只包含尚未终态的
-   订单/成交、资金占用、市场判定依赖、待交付反馈、查询
+   订单/成交、资金占用、因成交经济状态尚未闭合而未最终应计的 maker/taker rebate 贡献、市场判定依赖、待交付反馈、查询
    投影、幂等墓碑记录和恢复所需最小谱系，不得继续保留完整订单簿/事件序列。
 8. `SIM-L-008`：收到合格 `market_resolved` 还不等于可以立即删除全部状态。
    模拟器必须先核验市场结束订单终止与资金占用释放已完成，再完成第
    10.4 节的结算屏障和原子自动赎回。只有订单/成交已按规则终态、
    `AutoRedeemApplied` 及所有其他应交付反馈已持久化并可恢复且
    调用方可见、查询投影和幂等记录已持久化、无在途
-   查询/引用后，才能完成第二阶段热移除。
-9. `SIM-L-009`：若在版本化市场判定等待期限（`horizon`）内未取得合格的市场判定事件，
-   必须转为 `EXHAUSTED_QUARANTINED`，持久化原因、已完成的市场结束订单终态、
-   右删失成交/结算投影和受影响查询的未知/不完整判定
-   后释放热状态；不得伪造获胜结果、赎回、未知成交终态或合法空列表，也不得为
-   等待永远不会到来的市场判定事件而无限常驻。
+   查询/引用后，才能完成第二阶段热移除。每个市场都必须先生成并持久化唯一
+   `MakerRebateAccrualFinalized`，且该市场全部合格 taker 成交已经生成唯一
+   `TakerRebateAccrualApplied`；存在合格 maker 成交、零合格成交、费用关闭/零返佣或
+   未知不完整结果都必须有明确终态，不能靠删除热状态隐式表示零返佣。已经进入账户级
+   UTC 日桶的贡献身份与金额在对应日结前不得随市场热状态删除；日桶只保留付款所需的
+   紧凑汇总和身份集合摘要，不保留完整市场订单簿或事件序列。
+9. `SIM-L-009`：只有收到合同有效的 `ExecutionMarketEvent` 市场判定等待耗尽终态时，
+   才转为 `EXHAUSTED_QUARANTINED`，持久化上游终态原因、已完成的市场结束订单终态、
+   右删失成交/结算投影和受影响查询的未知/不完整判定。释放热状态前仍必须按第 10.5 节
+   生成并持久化一次 maker 返佣终态：证据足以唯一计算或确定为零时保留相应结果，否则写入
+   `UNKNOWN_INCOMPLETE`；不得丢弃未汇总贡献。`sim-system`
+   不得自行启动第二个市场判定等待计时器，也不得仅因一段时间没有事件而宣称等待耗尽；
+   输入流结束或失败且缺少市场判定终态或等待耗尽终态时，必须明确报告输入终态缺失，
+   使受影响会话按 `SIM-N-005` 安全失败并封存；封存前必须为每个尚未形成 maker 返佣终态的
+   受影响市场持久化 `UNKNOWN_INCOMPLETE`，再按 `SIM-L-012` 释放会话可变热状态。
+   这是会话失败关闭路径，不得把市场伪记为 `RESOLUTION_TERMINAL`、
+   `EXHAUSTED_QUARANTINED` 或 `EVICTED`，也不得伪造获胜结果、赎回、未知成交终态或合法空列表。
 10. `SIM-L-010`：热移除不等于持久查询/审计记录删除。终态
-    `QueryOrder` 和 `ListTrades` 所需的紧凑索引必须保留到会话/运行的查询、
+    `order` 和 `trades` 所需的紧凑索引必须保留到会话/运行的查询、
     幂等、恢复和审计保留期全部到期。明细被删除后，在有界的
     会话/保留期水位线仍有效期间，查询返回明确 `OUT_OF_RETENTION`，不得
     伪装成从未存在的未找到。
@@ -742,7 +999,7 @@ Ledger、模型框架竞赛、`offline-evaluation` 或 `Promotion Controller` �
     合计突破全局上限。具体数值由获批计划根据性能分析器冻结。
 12. `SIM-L-012`：训练回合/运行封存后立即释放该会话可变热状态；
     长驻模拟盘运行时必须使用有界恢复状态和市场/会话滚动切换，不能让 5 分钟
-    市场数量、`ListTrades` 历史或产物字节随运行时间无界常驻内存。具体持久化与
+    市场数量、`trades` 历史或产物字节随运行时间无界常驻内存。具体持久化与
     索引结构由计划决定。
 13. `SIM-L-013`：重复或重放同一合格 `market_resolved` 只能引用第一次原子
     自动赎回结果，不得重复销毁代币、重复增加 pUSD/现金或重复反馈。未取得
@@ -753,45 +1010,151 @@ Ledger、模型框架竞赛、`offline-evaluation` 或 `Promotion Controller` �
 
 ### 10.1 必须覆盖的规则、观察行为和项目合同
 
+`sim-system` 的目标配置分为两个物理层次，但对运行时形成一个不可变配置对象：
+
+1. 仓库内版本化文件 `sim-system/config/platform-rules-v1.toml` 只保存无法通过官方公开规则
+   端点查询的官方文档规则、用户冻结的项目/账户规则、所需查询字段清单和失败语义；不得复制
+   某个当前市场的逐市场数值作为未来默认值。
+2. 每个新运行的冷启动加载器把上述文件与官方公开 HTTPS 查询结果合并，生成运行产物
+   `platform-rule-snapshot.json`。确定性核心只读该快照，不访问网络。快照形成后禁止热刷新；
+   同一运行恢复读取同一文件，新运行重新查询并生成新的快照身份。
+
+冷启动只允许一个私有 `PlatformRuleHttpLoader`，优先复用工作区已经锁定的 `reqwest`、
+`serde`、`serde_json`、`sha2`、`rust_decimal`，并只为读取静态配置直接声明成熟的 `toml`；
+它不依赖官方 SDK，也不建设通用 REST SDK。每个新
+运行只创建一个无凭据 `reqwest::Client`，固定 HTTPS 主机、拒绝重定向、设置连接/请求超时
+和响应体上限，只访问以下两个官方公开端点：
+
+1. 每个目标 `condition_id` 调用一次
+   `GET https://clob.polymarket.com/clob-markets/{condition_id}`；CLOB 没有该端点的批量版本。
+2. 对有界目标集合调用
+   `GET https://gamma-api.polymarket.com/markets/keyset`。每批不超过官方 `100` 项，查询参数
+   必须编码为重复的 `condition_ids=id`，禁止使用会被服务端静默忽略的
+   `condition_ids[]=id`；分别查询 `closed=false` 与 `closed=true` 后按 `conditionId` 合并。
+   只以目标集合完整性判断结束，不因 `next_cursor` 存在而扫描无关全市场，也不使用已被官方
+   标为未来弃用的旧 `/markets`。
+
+每个市场、每个来源只接受一个成功逻辑结果；响应顺序没有语义。任何重复、缺失或非目标
+`conditionId` 都失败即关闭。只读 GET 的瞬时传输错误或官方列明的 `500/503` 在同一冷启动
+总时限内最多额外重试一次；`400/404/422`、解析错误、身份或规则冲突不重试。全部目标成功
+后才能原子密封快照；同一运行恢复不创建 HTTP 客户端、不联网。这里不调用订单簿、订单、
+账户、用户频道或任何认证端点，也不把“一次冷启动阶段”误写成“所有市场只能共用一个 HTTP
+请求”。
+
+响应必须先按原始字节保存 SHA-256，再用专用窄 DTO 解析；禁止经
+`serde_json::Value` 任意探测。DTO 允许并忽略无关新增字段，不得使用会因官方追加字段而
+失败的 `deny_unknown_fields`。数值必须用精确十进制解析，并接受官方线协议中数值或字符串
+两种表示，禁止先进入 `f64`。Gamma 的 `outcomes` 与 `clobTokenIds` 当前是 JSON 编码字符串，
+必须二次强类型解析、按索引配对并与 CLOB `t[].t/t[].o` 及 `run_market_set` 一致。
+
+`PlatformRuleSnapshot` 必须至少分成以下四个命名区，不能把不同证据等级压成无来源平面表：
+
+| 配置区 | 参数 | 取得方式与用途 |
+| --- | --- | --- |
+| `queried_market_rules` | `condition_id`、`token_id`、`outcome` | 规则绑定身份；必须与 `run_market_set` 和规范事件合同逐项相等 |
+| `queried_market_rules` | `min_order_size_shares` | 取 CLOB `mos`；逐市场订单最小 shares，不用 Gamma `orderMinSize` 替代 |
+| `queried_market_rules` | `initial_tick_size` | 取 CLOB `mts`；只作为启动基线和一致性校验，运行中由 `tick_size_change` 更新当前值 |
+| `queried_market_rules` | `neg_risk` | 取 Gamma `negRisk`；CLOB 当前公开合同不要求 `nr`，响应自然含 `nr` 时只作交叉诊断 |
+| `queried_market_rules` | `fees_enabled` | 取 Gamma `feesEnabled`；该字段缺失必须失败 |
+| `queried_market_rules` | `fee_rate`、`fee_exponent`、`fee_taker_only`、`maker_rebate_rate` | 以 Gamma 完整 `feeSchedule.rate/exponent/takerOnly/rebateRate` 为规则源；启用费用时必须完整，并与 CLOB `fd.r/e/to` 一致；禁用费用时按零处理且允许两对象省略 |
+| `queried_market_rules` | `taker_order_delay_enabled` | 取 CLOB `itode`；官方明确 false 时省略，因此缺失解释为 false，只有 true 时才启用 250ms 平台内部暂缓 |
+| `documented_platform_rules` | `taker_order_delay_ms=250` | 官方文档数值；只在 `taker_order_delay_enabled=true` 时生效 |
+| `documented_platform_rules` | `post_orders_max_items=15` | 批量提交上限 |
+| `documented_platform_rules` | `cancel_orders_max_items=1000` | 用户已于 2026-08-02 决定保守采用 API 引用与 2026-06-15 变更记录值，同时保留 `Manage Orders` 的 3,000 冲突证据 |
+| `documented_platform_rules` | `gtd_min_declared_lead_seconds=180`、`gtd_expiration_safety_offset_seconds=60` | GTD 声明和实际到期边界 |
+| `documented_platform_rules` | `fee_formula_version`、`fee_decimal_places=5`、`minimum_nonzero_fee_pusd=0.00001` | 版本化手续费公式及精度；不得另造 SDK 价格/份额精度映射 |
+| `documented_platform_rules` | `maker_rebate_formula_version`、`rebate_day_boundary_utc=00:00`、`rebate_payout_min_pusd=1` | 版本化 maker 返佣公式、UTC 日桶边界及 maker/taker 返佣官方最低付款门槛 |
+| `project_account_rules` | `marketable_limit_buy_min_submitted_pusd=1` | 本项目真实资金证据支持的可立即成交 GTC/GTD BUY 提交本金门；标为 `OBSERVED_PLATFORM_BEHAVIOR` |
+| `project_account_rules` | `venue_dust_upper_exclusive_shares=0.01` | 用户确认的平台小额余量规则，只作用于本账户订单 |
+| `project_account_rules` | `taker_rebate_tier=Silver`、`taker_rebate_rate=0.08` | 首版冻结账户档位；不查询或累计 wV |
+| `project_account_rules` | `taker_cash_available_time_utc=00:10`、`maker_cash_available_time_utc=00:45` | 当前账户证据支持的正常现金可用时刻 |
+| `project_account_rules` | `rebate_payment_decimal_places=4`、`rebate_below_threshold_carry_forward=false` | 用户冻结的付款向下截取与不跨日凑门槛规则 |
+| `provenance` | `snapshot_schema_version`、`run_market_set_hash`、逐响应 `fetched_at`、固定端点/HTTP 客户端和依赖版本、`rule_query_response_coverage`、未消费字段、HTTP 状态/尝试数、原始响应 SHA-256、静态配置摘要、最终快照摘要 | 证明“何时、通过哪个官方端点、为哪些市场取得何值”并显式记录可选 `oas`；不得含钱包、认证或其他机密 |
+
+以下值明确不进入可执行规则配置：运行中的订单簿/成交/余额/授权额度/订单状态、市场生命周期
+和判定、当前 `tick_size`、公开成交的 `fee_rate_bps`、Liquidity Rewards 的
+`rewardsMinSize`/`rewardsMaxSpread`/`clobRewards`、RFQ、Blockaid、体育
+`secondsDelay`、V1 `mbf/tbf` 与 `/fee-rate`。`oas`、`rfqe`、`ibce` 等官方响应中首版不消费
+或没有足够行为语义的字段，只可留在规则查询响应覆盖记录、查询证据摘要或明确的“不支持字段”记录
+中；它们不是可执行配置，不得为了这些字段扩展通用规则引擎或阻断不依赖它们的路径。
+
+价格合法下界/上界分别由运行时当前 tick 与 `1-current_tick` 推导，不能再保存一对会与
+`tick_size_change` 漂移的独立配置值；订单精度、计量编码和舍入必须复用固定官方 SDK 的类型与
+工具函数并由合同测试锁定，也不再复制为第二套手写参数。速率限制、平台维护状态、
+`closed-only`、余额、授权额度和接单状态属于外部运行状态，不是历史模拟运行的低频配置。
+BUY-only、GTC/GTD/FOK/FAK、post-only 合法组合、逐项非原子批量结果、撤单与订单生命周期
+属于版本化状态机和 `RuleCoverageManifest`，不是允许运维任意改写的配置项；修改这些语义
+必须走新需求、代码和验收，不能把配置文件扩展成规则专用语言（DSL）。
+
+此前确认的官方 Rust SDK 类型缺口仍是技术事实，但用户已批准冷启动改用上述窄型官方 HTTP
+加载器，因此这些 SDK 缺口不再是正式冷启动的实施阻断。`itode` 缺失按官方合同解释为
+false；`oas` 可缺失且首版不消费；费用未启用时 `fd`/`feeSchedule` 可缺失。除此之外，平台
+响应中的必需身份、`mos/mts`、`feesEnabled`、启用时完整 `feeSchedule`/`fd`、两端重叠规则
+仍必须存在、可精确解析且一致。未知附加字段不得触发失败，必需语义缺失或冲突不得以 SDK、
+旧 Gamma 键、静态常量、网页值或另一端点回退。
+
 首版 `RuleCoverageManifest` 至少覆盖：
 
 1. 市场/条件/代币/结果身份标识和是否接受订单的状态；
 2. BUY-only、GTC、GTD、FOK、FAK 和 post-only 的合法组合；
-3. 最小价格变动单位、最小订单数量、价格/数量精度和数量编码；
+3. 最小价格变动单位、CLOB `min_order_size` 的 shares 下限、价格/数量精度和数量
+   编码，以及只适用于可立即成交 GTC/GTD 限价 BUY 的版本化最小提交本金规则；
 4. 余额、授权额度、现有活动订单资金占用和风险校验；
-5. GTC/GTD 挂单中、FOK 全成或全不成、FAK 部分成交后终止；
+5. GTC/GTD 挂单中、FOK 全成或全不成、FAK 部分成交后终止，以及 FOK 是否存在
+   已接受后因不能全成而终止的适用性声明；适用时必须记录规则和证据，不适用时必须
+   记录不适用结论及其证据，不能默认存在或不存在；
 6. post-only 会立即成交时拒绝；
 7. 可立即成交的 BUY、maker/taker 角色、价格改善和手续费；
-8. 适用加密资产/金融上涨/下跌市场的 taker 延迟、延迟后重新校验，以及
-   延迟内部待处理阶段不可撤单；
-9. 已接受/已拒绝以及 `live`、`matched`、`delayed`、`unmatched`、
+8. `btc-updown-5m` 逐市场 `itode` 开关；开关为 true 且订单通过适用接受前检查时，应用
+   文档规则中的 250ms 平台内部 taker 暂缓、暂缓结束时重新校验，以及暂缓目标自身在
+   内部待处理阶段不可撤；开关为 false 时不进入该暂缓；
+9. 已接受/已拒绝以及 `live`、`matched`、`unmatched`、
    `canceled` 订单状态；
 10. 部分撮合成交、全部撮合成交、剩余数量、GTD 到期和平台终态原因；
 11. 成交的 `MATCHED_NOT_BROADCASTED`、`MATCHED`、`MINED`、`CONFIRMED`、
     `RETRYING`、`FAILED` 状态；
 12. 单笔/批量撤单只取消未成交剩余量，并逐 ID 表达部分成功；
 13. 账户全局全撤的作用域、截点和逐 ID 结果；
-14. 单笔订单查询、活动订单列表和账户成交列表与同一时刻调用方可见平台
-    状态一致，并使用有界分页；
+14. 单笔订单查询、活动订单列表和账户成交列表按各自查询处理截点返回当前平台
+    投影，并使用有界分页；
 15. 批量提交的 1 至 15 个项、逐项独立结果和非原子混合结果；
 16. 当前平台没有原生改单/修改/替换操作；
 17. 带小数标度（`scale`）的订单已撮合、互斥成交结算子分桶、本账户
     平台小额余量已关闭/活动未成交 base 数量，独立按 quote 预算计量/当前分配金额与
     终态原因，以及小额余量终态后到撤单的处理；
 18. 合格市场判定、获胜结果/兑付和同一逻辑时点的模拟自动赎回。
+19. maker rebate 的实际 maker 成交资格、撮合时逐市场 `feeSchedule`、官方
+    fee-curve 公式和按市场汇总，以及 taker rebate 的实际 taker 手续费、固定 Silver
+    `8%` 返佣率、两类独立应计、日结、付款与可用现金隔离。
 
-截至 2026-08-01 的当前官方证据包括：
+截至 2026-08-04 的当前官方证据包括：
 
 - `https://docs.polymarket.com/trading/place-orders`
 - `https://docs.polymarket.com/trading/manage-orders`
 - `https://docs.polymarket.com/trading/realtime-order-updates`
 - `https://docs.polymarket.com/concepts/order-lifecycle`
+- `https://docs.polymarket.com/api-reference/markets/get-clob-market-info`
+- `https://docs.polymarket.com/api-reference/markets/list-markets-keyset-pagination`
+- `https://docs.polymarket.com/getting-started/api`
+- `https://docs.polymarket.com/api-reference/rate-limits`
 - `https://docs.polymarket.com/trading/fees`
+- `https://docs.polymarket.com/programs/maker-rebates`
+- `https://docs.polymarket.com/programs/taker-rebates`
+- `https://docs.polymarket.com/programs/liquidity-rewards`
+- `https://docs.polymarket.com/concepts/pusd`
+- `https://docs.polymarket.com/v2-migration`
+- `https://docs.polymarket.com/api-reference/core/get-user-activity`
+- `https://docs.polymarket.com/market-data/market-details#trading-fees`
+- `https://docs.polymarket.com/api-reference/rebates/get-current-rebated-fees-for-a-maker`
+- `https://docs.polymarket.com/changelog/predictions`
+- `https://gamma-api.polymarket.com/events/slug/btc-updown-5m-1770984000`
+- `https://gamma-api.polymarket.com/events/slug/btc-updown-5m-1774958400`
 - `https://docs.polymarket.com/api-reference/trade/get-single-order-by-id`
 - `https://docs.polymarket.com/api-reference/market-data/get-order-books-request-body`
 - `https://docs.polymarket.com/concepts/resolution`
 - `https://docs.polymarket.com/trading/ctf/redeem`
 - `https://github.com/Polymarket/rs-clob-client-v2/tree/222143d321eba97d5711a848265eb9aab3bc7ff4`
+- `https://github.com/Polymarket/rs-clob-client-v2/blob/222143d321eba97d5711a848265eb9aab3bc7ff4/src/clob/utilities.rs#L183-L215`
 - `https://github.com/Polymarket/ctf-exchange-v2/tree/ccc0596074f4dfd62c944fbca4de252893b82b4b`
 - `https://github.com/Polymarket/ctf-exchange-v2/blob/ccc0596074f4dfd62c944fbca4de252893b82b4b/src/exchange/libraries/CalculatorHelper.sol`
 - 本仓库固定版本的 SDK：
@@ -808,17 +1171,88 @@ Ledger、模型框架竞赛、`offline-evaluation` 或 `Promotion Controller` �
 - GTD 声明的到期时间至少在提交时三分钟后，并在声明的到期时间前一分钟
   有效到期；
 - 选定加密资产/金融上涨/下跌市场在官方市场元数据 `itode=true` 时
-  使用 250ms taker 暂缓窗口（`hold`），内部待处理期间不可撤单，并在暂缓窗口结束时
+  使用 250ms taker 暂缓窗口（`hold`），暂缓目标自身在内部待处理期间不可撤，并在暂缓窗口结束时
   重新校验；API 会等待该时段结束后返回最终结果，因此 250ms 内部待处理
   本身不产生调用方可见 `delayed` 中间响应；
 - 调用方可见 `delayed` 属于已配置秒级延迟等异步窗口状态，例如
-  体育/赛事延迟；该市场系列不在首版范围，首版只保留其原始状态
-  兼容性，不生成该路径；
+  体育/赛事延迟；这些市场完全不在本项目范围，`sim-system` 不保留兼容状态，
+  也不生成该路径；
 - taker 手续费使用逐市场参数，手续费精度为 5 位小数；
+- BTC 5 分钟加密市场启用由 taker 手续费资助的每日 maker rebate；只有加入订单簿并
+  实际以 maker 身份被成交的流动性合格，maker 平台手续费仍为零；
+- 每笔合格 maker 成交的手续费等价值按
+  `C × rate × [p × (1 - p)]^exponent` 计算；当前 Maker Rebates 页面把
+  `exponent=1` 的形式写为 `C × feeRate × p × (1 - p)`，当前市场详情则要求从逐市场
+  `feeSchedule` 读取 `rate`、`exponent`、`takerOnly` 和 `rebateRate`；
+- 官方逐市场日分配公式为
+  `(本账户 fee_equivalent / 该市场 total_fee_equivalent) × rebate_pool`。
+  在同一逐市场手续费计划下，`rebate_pool = total_fee_equivalent × rebateRate`，因此在
+  不引入官方未公开的最终舍入/余数处理前，可代数化为本账户各合格 maker 成交
+  `fee_equivalent × rebateRate` 的和。该代数化是对官方两条规则的
+  `RULE_DERIVATION`，不是另一条官方逐笔付款公式，也不要求模拟外部 maker 明细；
+- 当前官方页面列出 Crypto 的 `rate=0.07`、maker rebate 比例 `20%`，但官方历史变更和
+  市场快照证明参数会变化：官方 Gamma 历史对象
+  `btc-updown-5m-1770984000` 为 `rate=0.25, exponent=2, rebateRate=0.20`，
+  `btc-updown-5m-1774958400` 为 `rate=0.07, exponent=1, rebateRate=0.20`。当前值只能
+  作为对应规则版本的固定预期黄金样例，不能硬编码为全部历史/未来市场规则；
+- 当前官方 Taker Rebates 页面以加权成交量（`wV`）描述等级，Silver 当前门槛为
+  `$20,000 wV`、返佣率为 `8%`，并另有一次性等级奖金；本项目不需要模拟账户晋级，
+  因而只冻结 Silver `8%` 返佣率，不累计或校验 wV，也不实现一次性等级奖金；
+- 当前官方规则分别说明 maker 与 taker 返佣每日计算/支付，并要求累计返佣至少达到
+  `1 pUSD` 才付款；Taker Rebates 页面进一步把名义付款时刻写为每日午夜
+  `00:00 UTC`，Maker Rebates 页面没有承诺具体付款分钟。两页均没有承诺低于门槛的
+  跨日处理、最终返佣舍入或余数分配；
+- 当前 CLOB V2 资金与返佣统一按 pUSD 表达；首版只实现当前 pUSD 路径，不实现
+  USDC.e 到 pUSD 的历史迁移或兼容分支；
+- Liquidity Rewards 是按报价大小、价差、双边性和采样评分的另一套计划，其
+  `rewardsMinSize`、`rewardsMaxSpread` 和 `clobRewards` 不是 maker rebate 资格条件；
 - 订单状态与成交状态是不同生命周期轴；
 - 订单查询和 `user-channel` 分别表达订单状态、原始数量和已撮合数量；
-- 订单簿/市场元数据分别暴露动态最小订单数量和最小价格变动单位；
+- `Place Orders` 把 CLOB `/book.min_order_size` 明确定义为订单可接受的最小 shares
+  数量，并要求 FOK/FAK 市场 BUY 按固定 SDK 编码后得到的 shares 仍满足该下限；
+- `Market Details` 当前却把近似命名的 Gamma `minimumOrderSize`/`orderMinSize`
+  描述为最小 USDC 名义金额。两处官方页面存在来源冲突；首版执行只采用 CLOB
+  `/book.min_order_size` 的 shares 语义，保留冲突证据，不把 Gamma 值转换成第二道
+  pUSD 下单门槛；
 - 市场判定后获胜代币可按兑付赎回，未获胜代币价值为零。
+
+本项目真实资金证据还反复出现一条范围更窄的服务端门槛：R3 的可立即成交 GTC
+限价 BUY 以提交本金 `0.9 pUSD` 被拒，原始错误为
+`invalid amount for a marketable BUY order ($0.9), min size: $1`，见
+[R3 变更记录](/home/chillchill/sdk-live-trade/poly-arb-ai/sdk-live-trade-docs/changelog/2026-06-10-phase8-task8-6-r3-runtime-plan.md:1041)。后续 R5 中，两次参数同为
+`5 shares @ 0.16 pUSD/share` 的独立新提交，非可立即成交的一次进入 `LIVE`，见
+[订单产物](/home/chillchill/sdk-live-trade/poly-arb-ai/rust/sdk-live-trade/artifacts/remote-r5-runs/r5-three-market-live-funds-20260622T120633Z/trading-runtime/orders.jsonl:202)；可立即成交的另一次因提交本金
+`0.8 pUSD < 1 pUSD` 被拒，见[同一运行的后续新提交](/home/chillchill/sdk-live-trade/poly-arb-ai/rust/sdk-live-trade/artifacts/remote-r5-runs/r5-three-market-live-funds-20260622T120633Z/trading-runtime/orders.jsonl:277)。另有提交本金恰好
+`5 × 0.20 = 1.00 pUSD` 的 GTC BUY，报告分别记录[提交本金](/home/chillchill/sdk-live-trade/poly-arb-ai/rust/sdk-live-trade/artifacts/live-validation/pullback/platform-sellable-maturity-live-20260626T053750Z/platform_sellable_maturity_gate_report.json:6)、
+[接受结果](/home/chillchill/sdk-live-trade/poly-arb-ai/rust/sdk-live-trade/artifacts/live-validation/pullback/platform-sellable-maturity-live-20260626T053750Z/platform_sellable_maturity_gate_report.json:10)、价格改善后的
+[实际 `making_amount=0.9`](/home/chillchill/sdk-live-trade/poly-arb-ai/rust/sdk-live-trade/artifacts/live-validation/pullback/platform-sellable-maturity-live-20260626T053750Z/platform_sellable_maturity_gate_report.json:112)和
+[`MATCHED` 状态](/home/chillchill/sdk-live-trade/poly-arb-ai/rust/sdk-live-trade/artifacts/live-validation/pullback/platform-sellable-maturity-live-20260626T053750Z/platform_sellable_maturity_gate_report.json:130)。因此首版把
+`marketable_limit_buy_min_submitted_pusd=1` 记录为
+`OBSERVED_PLATFORM_BEHAVIOR`：判断基准是固定 SDK 按冻结精度编码的提交 BUY
+`makerAmount`/最大本金，不是价格改善后的实际花费；它不是官方对未来永久不变的保证。
+
+经用户提供的[公开账户活动页](https://polymarket.com/@jnsttrdrbnusfnd?tab=activity)
+及地址 `0x1465b79bff7992bc703e1aafb3683b1089647072`，使用香港线路复核截至
+2026-08-03 的官方活动记录与链上收款：从该账户首笔可见 pUSD maker rebate
+（2026-05-02）起的 63 笔 maker 付款中，60 笔在 `00:45-00:46 UTC`，另有 3 笔分别
+延迟至 `02:55`、`04:14` 和 `16:06 UTC`。官方活动接口返回 30 条
+`type=TAKER_REBATE` 记录，其中 28 条在 `00:10 UTC` 附近；但其中包含 2026-07-21
+同日另一笔精确 `250 pUSD` 收款，该金额与官方 Gold 一次性等级奖金高度一致。仅凭活动
+记录不能证明其来源，因此将其作为推断排除后，普通 taker 日返佣校准候选为 29 条：
+27 条在 `00:10 UTC` 附近，另有 2 条分别延迟至 `16:50` 和 `21:10 UTC`。2026-04-28
+V2 切换日的 `4.0123 USDC.e` 记录是旧版 USDC.e maker rebate，不是已经证明的迁移或
+转换付款，因首版只模拟 pUSD 而排除。上述延迟收款只能证明到账时刻存在长尾，不能证明
+由内部成交最终性延迟导致。
+这些活动/链上观测记录为 `OBSERVED_PLATFORM_BEHAVIOR`；由此把 D 日 taker 的正常现金
+可用时刻冻结为 D+1 `00:10 UTC`、maker 冻结为 D+1 `00:45 UTC`，以及低于
+`1 pUSD` 不跨日凑门槛、付款金额向下截取至四位小数的可执行处理，记录为
+`PROJECT_ASSUMPTION`，不是平台对未来永久不变的官方保证。
+
+上述“`itode=true` 对应 250ms 暂缓”属于 `OFFICIAL_PLATFORM_RULE`。开关由新运行冷启动
+按精确市场通过官方公开 CLOB 规则端点查询，250ms 数值由版本化 `documented_platform_rules` 提供；两者
+必须同时满足才执行暂缓。该值不得由市场事件、调用参数、地域时延配置档或
+`sim-calibration` 覆盖，也不得回退为全部市场无条件适用的代码常量。该规则只约束模拟器，
+`live-trade` 仍由官方 Rust SDK 和真实平台决定实际行为。
 
 截至 2026-08-01，当前官方文档、官方 Rust SDK 和 CTF Exchange V2 合约均没有定义
 `venue_dust` 这一公开事件/字段，也没有公布 Global CLOB 统一平台小额余量终态规则。
@@ -837,18 +1271,19 @@ NautilusTrader 提交
 首版按第 12 节标为 `USER_CONFIRMED_PLATFORM_BEHAVIOR`，而不是官方公开保证或普通
 项目假设。
 
-这些数值和枚举必须进入版本化规则产物，不能散落硬编码；实现和验收时必须
-重新核验当前官方页面、仓库固定版本的 SDK、本地补丁和真实产物。
+所有低频平台数值和枚举必须进入版本化规则配置或冷启动规则快照，不能散落硬编码。
+逐市场查询值只在新运行冷启动加载，文档规则和项目规则只由仓库内单一配置文件定义；
+调用方、地域时延配置档和校准产物均不得覆盖。实现和验收时仍须核验当前官方页面、仓库
+固定版本的 SDK、本地补丁和真实产物；核验结果若与冻结规则冲突，必须进入决策门并发布
+后续新运行使用的新版本，不能热改正在运行的快照或追溯修改旧结果。
 当前 `Manage Orders` 页面写批量撤单最多 3,000 个 ID，但 API 引用
 与 2026-06-15 官方变更日志写 1,000，固定版本的 SDK 也没有在类型层冻结该上限。
 用户在 2026-08-02 确认首版保守默认为 1,000，同时保留上述证据冲突；
 后续核验支持更大上限时只能发布新规则版本。
 
-固定版本的 SDK 的批量提交方法文档注释仍写成原子/一项失败导致整体错误，
-但同一 SDK 的实际返回类型/实现和当前官方 API 都是逐项响应，并明确允许
-混合成功/失败。这是已知陈旧注释与当前服务端合同冲突；本文采用当前
-官方服务端文档和实际类型化向量响应的非原子语义，不允许后续实现仅凭该
-注释改回全成或全不成。
+固定版本 SDK 的实际返回类型和实现与当前官方 API 均按项返回结果，并明确允许
+混合成功/失败。`post_orders` 固定采用逐项、非原子语义；一项失败不得回滚已经
+接受的其他项，任何批量级状态也不得覆盖逐项结果。
 
 当前账户成交文档列出 `maker_address`，其中必需/可选表述不一致；
 固定版本的 SDK 则暴露序列化为 `maker`/`taker` 的两个地址参数。首版因会话/账户
@@ -864,9 +1299,20 @@ NautilusTrader 提交
    的会话内外部影子订单簿、外部符合条件的流动性和本账户模拟订单
    叠加层；不得读取原始行情，也不得使用未来事件。外部影子订单簿与本账户
    订单叠加层必须分别维护所有权和数量，只有派生的有效盘口可以聚合展示。
-2. `SIM-R-002`：可立即成交的 BUY 在模拟平台到达时从最低符合条件的卖价开始，
-   按价格优先逐档消费至限价/最差价格约束；实际撮合成交价格、价格
+2. `SIM-R-002`：可立即成交的 BUY 在模拟平台到达时先完成适用的接受前检查；通过后，仅当
+   该市场冻结的 `taker_order_delay_enabled=true` 时进入 250ms taker 暂缓，否则直接进入
+   后续撮合检查。暂缓结束后先按期间已到达的市场、账户和规则状态重新校验，
+   仍可立即成交时才从最低符合条件的
+   卖价开始，按价格优先逐档消费至限价/最差价格约束。普通非可立即成交 maker 挂单和
+   因 post-only 会立即成交而被拒绝的订单不进入该暂缓，并按各自处理截点执行；实际撮合成交价格、价格
    改善、FOK、FAK、GTC/GTD 剩余量和 post-only 必须遵守版本化平台规则。
+   GTC/GTD 限价 BUY 的每次新提交在平台校验截点被判定为可立即成交时，还必须按
+   `RuleCoverageManifest` 检查固定 SDK 编码后的提交 BUY `makerAmount`，即领域合同中的
+   `max_principal_pusd`：当前规则版本中 `< 1 pUSD` 在接受前拒绝，`= 1 pUSD` 不得仅由
+   本门拒绝。非可立即成交 GTC/GTD 不适用本门；价格改善使最终实际花费低于
+   `1 pUSD` 不得追溯拒绝已经接受的订单。FOK/FAK 当前没有直接证据支持同一 `$1` 门，
+   首版只对其执行 `min_order_size_shares` 和既有订单规则；后续只能以新证据和新规则
+   版本扩展，不能在本版推测套用。
 3. `SIM-R-003`：一个外部或模拟流动性单位在同一会话内只能被消费一次；
    并发订单、批量项和回放成交不得重复使用同一流动性。同一规范
    队列消耗证据也只能推进队列一次。外部 `book` 重校准和本账户叠加层
@@ -917,9 +1363,8 @@ NautilusTrader 提交
    重复交付或零差额 `book` 不得产生撮合成交、平台小额余量或队列推进。首版没有改单操作。
 10. `SIM-R-010`：同价合格队头消耗量必须依因果顺序消费外部数量与账户订单；只有实际
     穿过账户订单的数量才形成该订单已撮合，外部状态层与本账户叠加层始终保持各自
-    所有权。严格穿过订单价位的合格消耗按价格优先规则处理，但仍受版本化
-    无市场影响适用数量上限约束；超过上限返回未知/不支持，不得假装
-    精确成交。具体内部表示和消费步骤由计划决定。
+    所有权。严格穿过订单价位的合格消耗按价格优先规则处理，并继续受可见盘口深度、
+    最差价格、余额、订单规则和会话内流动性唯一消费约束。具体内部表示和消费步骤由计划决定。
 11. `SIM-R-011`：只有以下不能形成唯一、合同有效队列状态转换的情况，才使相关
     maker 撮合成交进入 `UNKNOWN_MARKET_STATE`、`OPEN_RIGHT_CENSORED` 或
     `UNKNOWN_INCOMPLETE_HORIZON`，不得输出确定成交：
@@ -928,7 +1373,6 @@ NautilusTrader 提交
     - 同一底层变化无法去重，规范变更前/变更后数量、因果组或全序
       相互矛盾，继续应用会产生负数、重复消费或不守恒；
     - 队列模型版本/摘要不匹配；
-    - 版本化无市场影响上限缺失、口径不匹配或合格队头消耗量超过该上限；
     - 事件序列在订单仍处于活动状态时结束且没有权威终态原因。
 
     缺口、陈旧、epoch 切换、无法取得真实订单 ID 或成交/深度原因仍为
@@ -950,10 +1394,16 @@ NautilusTrader 提交
    + canceled_base_quantity
    + expired_base_quantity
    + market_closed_base_quantity
-   + other_terminal_base_quantity
    + open_base_quantity
    ```
 
+   按 quote 预算计量的 FAK/FOK 不适用上述 base 守恒等式。其按固定 SDK 编码规则得到的
+   `takerAmount`（shares）签名等价投影只作为 `accepted_base_quantity` 的 base 审计投影；订单类型终止时
+   `canceled_base_quantity = max(accepted_base_quantity - order_matched_base_quantity, 0)`，
+   并通过 `terminal_reason` 和事件来源与调用方撤单区分。价格改善或精度语义使实际已撮合
+   base 大于该投影时，`canceled_base_quantity=0`，正差额仍属于实际成交，不增加通用
+   其他终态分桶。对应未花 quote 预算按本条后续 quote 守恒式独立进入
+   `released_or_unspent_quote_amount`，该 quote 等式才是这类订单的资金守恒权威。
    该公式只包含本账户订单的数量分桶，外部价格档位/前方/后方数量绝不进入
    其中。订单侧 `order_matched_base_quantity` 与成交结算是不同生命周期轴，
    还必须满足：
@@ -1021,19 +1471,33 @@ NautilusTrader 提交
    资金占用释放迁移到已释放/未使用；不能因“撮合成交变化量为零”而永久冻结。
    每项非负，同一数量或金额不能进入多个分桶；base 份额、quote/pUSD 和手续费
    币种绝不能跨单位相加。
-14. `SIM-R-014`：已拒绝订单不进入已接受 base 或已接受 quote 领域；若拒单前
-    形成过暂时资金占用，必须由同一平台结果明确、幂等地全量释放。
+14. `SIM-R-014`：能够安全确定为 `rejected` 的提交项不进入已接受 base 或已接受
+    quote 领域：按 base 计量时 `accepted_base_quantity=0`；按 quote 预算计量时
+    `accepted_quote_budget=0`，其 `accepted_base_quantity` 审计投影也为零；不适用的
+    另一计量字段保持明确“不适用”。它也不进入平台订单队列或挂单预留。请求合同/本地
+    前置检查拒绝不得创建待处理提交预留；已经进入平台处理且拒绝证据能够安全关联到
+    该项时，只幂等释放一次其待处理提交预留。结果不确定时仍是未知提交结果，不得
+    猜成拒单。
 15. `SIM-R-015`：每笔撮合成交必须记录实际价格、已执行 base 数量/小数标度（`scale`）、
     成交名义金额/币种、maker/taker 角色、手续费金额/币种、成交引用和
-    撮合成交计量基准；部分撮合成交后的撤单只能关闭适用域内的剩余 base 数量或
-    quote 预算，不能把两者互换。
+    撮合成交计量基准；还必须引用撮合时生效的 `fee_schedule_snapshot_id`。maker 段
+    记录手续费等价值和 maker 返佣应计贡献，taker 段记录实际收取的 taker 手续费和
+    按固定 Silver `8%` 推导的 taker 返佣应计贡献；同一订单先 taker 后 maker 时必须
+    逐段按实际角色计算。部分撮合成交后的撤单只能关闭适用域内的剩余 base 数量或
+    quote 预算，不能把两者互换。逐笔返佣贡献只供模拟器内部按市场汇总和审计，绝不形成
+    该成交反馈自身的应收款、Ledger/NAV 或 `PlatformAccountDelta`；其返佣账户变化量恒为零。
 16. `SIM-R-016`：模拟器只维护规则处理所需的模拟平台账户状态。
-    实际撮合成交、预留资金/资金占用释放和自动赎回对该模拟平台账户的变化必须
+    实际撮合成交、预留资金/资金占用释放、maker/taker rebate 应计与付款和自动赎回对该模拟平台账户的变化必须
     各自原子且只应用一次。每个会改变可用/冻结余额的反馈必须携带可应用的
     `PlatformAccountDelta`、按会话/账户单调且无重复的 `account_transition_seq`、
     前驱状态转换身份标识/摘要、之前/之后摘要和幂等身份标识；调用方的
     PnL、NAV 和 Ledger 内部实现不属于本模块，但调用方不得被迫从裸份额反推平台
-    金额变化，也不得无法识别后到/缺失的前驱变化量。
+    金额变化，也不得无法识别后到/缺失的前驱变化量。maker/taker rebate 应计分别只增加
+    `maker_rebate_receivable_pusd` 或 `taker_rebate_receivable_pusd`，其
+    `cash_balance_pusd`、`available_cash_pusd` 和订单资金占用变化量必须全部为零；
+    不得让调用方把应收款误用为下单资金。付款只把对应种类的可付款应收款一比一转入
+    `cash_balance_pusd`，并同步增加 `available_cash_pusd`；不得减少另一种返佣应收款，
+    也不得再次产生 NAV、PnL 或奖励。
 17. `SIM-R-017`：每个计入订单已成交数量的撮合执行或成交记录引用只有一个稳定
     `fill_economic_delta_identity`。冻结的
     成交结算规则配置档（`profile`）必须为适用市场系列指定唯一经济应用
@@ -1058,7 +1522,10 @@ NautilusTrader 提交
    （`first-class platform terminal cause`），规范化名称为 `VENUE_DUST_TERMINAL`。它只关闭本账户某一张已接受
    按 base 计量订单自己的合格未成交小余量，不是外部订单簿价格档位、外部订单或
    聚合盘口的属性。它不声明对应成交已 `CONFIRMED` 或最终经济结算成功；与全部
-   撮合成交、调用方撤单、FAK 终止、GTD 到期、市场关闭和拒绝分开记录。
+   撮合成交、调用方撤单、GTD 到期、市场关闭和拒绝分开记录。按 quote 预算计量的
+   已接受 FAK 只把相对固定 SDK 编码规则得到的 `takerAmount`（shares）签名等价审计投影的未成交 base 记入
+   `canceled_base_quantity`，并与调用方撤单使用不同的 `terminal_reason` 和事件来源；
+   这不把 FAK 订单类型终止改写成调用方撤单，也不让该投影取代 quote 资金守恒。
 2. `SIM-D-002`：模拟器必须分别维护以下数量和所有权：
    - 外部盘口：`external_price_level_quantity`、`estimated_external_front_quantity` 和
      `estimated_external_back_quantity`，只表示其他市场参与者的数量；前方/后方是相对
@@ -1068,8 +1535,8 @@ NautilusTrader 提交
    - 有效聚合盘口：由外部盘口和仍处于活动状态的账户订单叠加层派生，只供撮合与展示。
    本账户订单进入盘口后仍保留账户所有权；任何外部数量无论多小都不得写入
    本账户的订单已撮合、活动未成交数量、平台小额余量、预留资金或账户经济变化。
-3. `SIM-D-003`：在一次撮合和队列推进完全冻结后，本账户订单余量按第 10.2 节数量守恒
-   精确计算：
+3. `SIM-D-003`：在一次撮合和队列推进完全冻结后，本账户按 base 计量的订单余量按第
+   10.2 节数量守恒精确计算：
 
    ```text
    account_order_remainder
@@ -1079,7 +1546,6 @@ NautilusTrader 提交
    - canceled_base_quantity
    - expired_base_quantity
    - market_closed_base_quantity
-   - other_terminal_base_quantity
    ```
 
    平台小额余量判断前尚未生效的终态分桶按零计算。该公式不得读取或减去任何外部
@@ -1143,10 +1609,10 @@ NautilusTrader 提交
     确定的订单终态返回逐目标未撤单/终态结果；撤单响应不能反向
     推断、制造或扩充撮合成交、累计已撮合数量、平台小额余量或账户资金变化。通用
     未找到、已经撤单、已到期和市场已关闭必须保留各自语义。
-11. `SIM-D-011`：`QueryOrder` 必须保留订单已撮合、独立成交结算子分桶、
+11. `SIM-D-011`：`order` 必须保留订单已撮合、独立成交结算子分桶、
     平台小额余量已关闭、活动未成交数量为 0 和终态原因，且全部使用带小数标度（`scale`）的本账户 base 数量，
-    并投影同一 `encumbrance_release`；`ListOpenOrders` 必须排除小额余量终态订单；
-    `ListTrades` 只能返回本账户实际模拟撮合成交，包括按 `SIM-R-008` 形成且明确标记
+    并投影同一 `encumbrance_release`；`orders` 必须排除小额余量终态订单；
+    `trades` 只能返回本账户实际模拟撮合成交，包括按 `SIM-R-008` 形成且明确标记
     依据的确定性推定撮合成交；不能包含平台小额余量伪成交。
 12. `SIM-D-012`：按 quote 预算计量的 FOK/FAK 市价 BUY，其未花预算是已释放/未使用 quote，
     不是 base 份额平台小额余量。taker 手续费导致的净份额差异、正向超额成交/微小份额
@@ -1174,13 +1640,16 @@ NautilusTrader 提交
    成交经济变化量已按唯一截点 `FINAL_SUCCESS_APPLIED`，或已明确 `FAILED` 并处于
    `NOT_APPLIED_FAILED`/`COMPENSATED`；不存在未闭合的
    `MATCHED_NOT_BROADCASTED`、`MATCHED`、`MINED`、`RETRYING` 或证据缺失的更早成交；
-   所有更早账户状态转换已幂等落地，市场结束已关闭全部相关本账户活动订单
+   对应市场的 `MakerRebateAccrualFinalized` 和全部合格 taker 成交的
+   `TakerRebateAccrualApplied` 已按第 10.5 节形成；所有更早账户状态转换已幂等落地，市场结束已关闭全部相关本账户活动订单
    并释放对应预留资金，且内部 `account_transition_seq` 到屏障水位线连续
    无缺口。合格性只依据模拟平台内部经济真相，不以旧反馈
    是否已经调用方可见为条件。调用方请求不能注入获胜结果、兑付、屏障判定
    或赎回结果。
 2. `SIM-SET-002`：在合格 `MarketResolved.available_at` 同一逻辑时点，稳定子顺序
-   必须为：应用全部因果上更早成交/账户变化量/补偿 -> 核验市场结束
+   必须为：应用全部因果上更早成交/账户变化量/补偿 -> 核验并引用已由第 10.5 节独立
+   终态条件形成的该市场 `MakerRebateAccrualFinalized` 及全部合格 taker 应计，不得在
+   市场判定处理器中重新汇总或应用 -> 核验市场结束
    已关闭全部相关本账户活动订单/未成交剩余量且资金占用释放完整 -> 写入仅供
    全序/审计使用的内部 `MarketResolvedObserved` 标记 -> 以模拟平台账户此时
    实际持有的
@@ -1189,8 +1658,8 @@ NautilusTrader 提交
    `account_transition_seq` 严格排序；其他反馈可按冻结时延/可见性配置档（`profile`）
    后到，但不得改变内部顺序或让自动赎回延后。已接受 base 数量、quote
    预算、毛额请求、平台小额余量已关闭 base 数量或尚未实际取得的份额均不得作为
-   赎回数量。`MarketResolvedObserved` 不属于调用方反馈；首版对外新增的
-   结算反馈变体仍只有 `AutoRedeemApplied`。若市场判定到达时仍存在
+   赎回数量。`MarketResolvedObserved` 不属于调用方反馈；自动赎回路径的对外
+   结算反馈变体只有 `AutoRedeemApplied`。若市场判定到达时仍存在
    未按市场结束规则关闭的本账户订单或未释放预留资金，市场判定不合格并进入
    明确暴露失败（`fail visible`）/隔离；不得在市场判定路径补做另一套订单关闭或重复释放。
 3. `SIM-SET-003`：首版必须生成独立
@@ -1211,7 +1680,7 @@ NautilusTrader 提交
    因果上更早反馈因时延后到不影响已经完整的内部屏障，也不改变
    `AutoRedeemApplied` 的即时可见时间；其较小 `account_transition_seq` 必须让调用方
    明确识别缺口，而不能误当作新变化重复应用。
-5. `SIM-SET-005`：自动赎回不是订单成交或成交记录，不进入 `ListTrades` 或
+5. `SIM-SET-005`：自动赎回不是订单成交或成交记录，不进入 `trades` 或
    `OrderLifecycleFeedback`。调用方只可在 `AutoRedeemApplied` 调用方可见后更新其
    自有 Ledger/现金，且必须按 `account_transition_seq` 确认不存在未应用前驱；存在缺口
    时应缓冲后继变化量，而不是错误地进入安全失败终态（`fail closed`）或越序应用。模拟器不替调用方执行
@@ -1219,13 +1688,136 @@ NautilusTrader 提交
 6. `SIM-SET-006`：`AutoRedeemApplied` 已持久化并可恢复且调用方可见、结算投影
    已持久化并解除所有引用之前，不得完成该市场的第二阶段热移除。
 
+### 10.5 maker/taker rebate 应计、按日结算与付款
+
+1. `SIM-REB-001`：先从本模拟账户已实际加入订单簿、随后以 maker 角色产生正的模拟
+   撮合成交，并最终进入 `FINAL_SUCCESS_APPLIED` 的数量形成 maker 成交候选集合。
+   订单类型不是永久角色；同一订单立即成交的 taker 段、未成交数量、平台小额余量、
+   撤单、到期、拒单和失败且未应用/已补偿的成交都不得产生返佣应计。基于 L2 队列
+   推定的 maker 成交可以在模拟场景内产生返佣，但必须继承
+   `queue_result_quality=DETERMINISTIC_INFERRED` 和全部来源追溯，不能冒充真实平台返佣。
+   全部成交经济状态闭合后候选集合为空时，无需 `feeSchedule` 即形成
+   `ZERO_NO_ELIGIBLE_MAKER_FILL`。候选集合非空时必须按以下互斥顺序判定：权威规则证据
+   明确 `fees_enabled=false` 或 `rebate_rate=0` 时先形成明确零返佣结果，该结果优先于
+   其他未使用字段；否则，冷启动已保证 `fees_enabled`、`rebate_rate`、`rate`、`exponent`
+   和 `taker_only` 完整有效，任一字段缺失都属于不可进入核心的无效快照，不是返佣降级
+   分支。只有已明确 `fees_enabled=true` 且 `rebate_rate>0` 后，`taker_only=false` 才表示超出首版冻结的
+   官方规则版本并进入 `UNSUPPORTED_RULE_VERSION`；`taker_only=true` 才可按第 2 条计算。
+   `UNKNOWN_INCOMPLETE` 只用于规则完整有效但运行时潜在合格成交的经济最终性因异常终态永远
+   无法闭合，不用于缺字段快照。不得继续把不支持的规则套用当前公式。上述处理只消费逐市场
+   经济参数，不增加市场类别、slug 或 Liquidity Rewards 准入校验。
+2. `SIM-REB-002`：每笔合格成交必须使用撮合时冻结的逐市场
+   `MarketFeeScheduleSnapshot`，按固定精度十进制计算：
+
+   ```text
+   maker_fee_equivalent_pusd
+   = executed_maker_shares × rate × [price × (1 - price)]^exponent
+
+   maker_rebate_accrual_contribution_pusd
+   = maker_fee_equivalent_pusd × rebate_rate
+   ```
+
+   第二式是第 10.1 节记录的官方逐市场日分配公式在同一手续费计划、尚未应用按日付款
+   截取规则时的代数化结果，证据类别为 `RULE_DERIVATION`。实现必须保留
+   公式版本、未舍入中间值、官方手续费 5 位精度处理、内部固定精度/舍入规则和逐笔贡献；
+   内部固定精度只用于确定性复现，必须标为 `PROJECT_ASSUMPTION`，不得宣称为官方付款精度。
+3. `SIM-REB-003`：一个 5 分钟市场结束且其全部结束前 maker 成交经济状态闭合后，
+   `sim-system` 必须在两项条件中较晚者的因果可用时刻把逐笔贡献按 `condition_id` 只汇总一次，生成
+   `SettlementLifecycleFeedback::MakerRebateAccrualFinalized`。结果状态至少区分
+   `CALCULATED`、`ZERO_NO_ELIGIBLE_MAKER_FILL`、`ZERO_FEES_DISABLED_OR_NO_REBATE`、
+   `UNKNOWN_INCOMPLETE` 和 `UNSUPPORTED_RULE_VERSION`；规则缺失或覆盖不完整必须在核心入口
+   前拒绝快照，不支持的完整规则版本必须显式报告，运行时成交最终性未闭合也不得静默写成
+   零。该正常最终化由市场结束和成交经济
+   闭合唯一触发，与 `MarketResolved` 是否到达无关；市场判定处理器只能引用结果，不得重新
+   计算或应用。同一市场结束、成交反馈、市场判定或检查点重放只能引用第一次结果，不得
+   重复应计。若 `EXHAUSTED_QUARANTINED` 或会话失败封存先使正常条件永远无法闭合，则只在
+   该互斥终止边界生成一次 `UNKNOWN_INCOMPLETE`，不得继续保留或猜算贡献。每笔贡献还必须
+   按其成交经济应用时刻归入唯一半开 UTC 日 `[D 00:00, D+1 00:00)`；市场结束或最终化
+   发生在下一 UTC 日时，不得把前一日成交改归到最终化日期。
+4. `SIM-REB-004`：`CALCULATED` 结果必须用独立幂等身份把金额增加到模拟平台账户的
+   `maker_rebate_receivable_pusd`，并携带连续的 `account_transition_seq`、前驱和账户
+   之前/之后摘要；现金、可用现金、持仓、订单已撮合数量和资金占用变化量均为零。
+   调用方只能在反馈可见且前驱连续后，由与订单 NOE 同层的非订单经济归一化合同向本实例
+   Ledger 记录同一笔不可支出应收款；`MakerRebateAccrualFinalized` 是 maker 返佣应收款唯一可应用
+   经济事件，逐笔贡献永远只供审计/汇总。`sim-system` 不生成 Ledger 事件，
+   `RewardContract` 也不得把同一应计通过
+   Ledger/NAV 变化和额外 rebate bonus 重复计入。
+5. `SIM-REB-005`：每笔实际以 taker 角色成交、实际收取正 taker 手续费并最终进入
+   `FINAL_SUCCESS_APPLIED` 的成交，必须生成独立幂等的
+   `TakerRebateAccrualApplied`：
+
+   ```text
+   taker_rebate_accrual_pusd = actual_taker_fee_pusd × 0.08
+   ```
+
+   `actual_taker_fee_pusd` 必须来自该成交撮合时冻结的逐市场 `feeSchedule` 和已实际应用的
+   手续费，不得按名义金额另算第二笔手续费。`0.08` 是用户冻结的首版 Silver 返佣率；
+   公式是当前官方“实际 taker 手续费按等级返还比例”的机械推导，记录为
+   `RULE_DERIVATION`。未实际收取手续费、maker 段、失败且未应用或已经补偿的 taker 成交
+   均不产生应计。该事件只增加 `taker_rebate_receivable_pusd`，现金、可用现金、持仓和
+   订单资金占用变化均为零，并按该成交经济应用时刻归入唯一 UTC 日。首版不累计或校验
+   wV，不查询账户等级，不实现等级更新、降级宽限期、活动加成或一次性等级奖金。
+6. `SIM-REB-006`：模拟账户必须分别维护 maker 与 taker 的“返佣种类 + 成交归属 UTC 日”
+   日桶。maker 逐笔贡献在 `MakerRebateAccrualFinalized` 时进入其原成交归属日，taker
+   应计在 `TakerRebateAccrualApplied` 时进入其成交归属日；两类金额和不同日期永不合并
+   凑足付款门槛。日桶保留未截取内部金额、贡献数量与身份摘要、完整/未知状态及日结身份。
+   日结前还必须受已经按成交经济应用时刻归属该日、但模拟平台内部最终性尚未闭合的
+   潜在合格贡献约束。同一账户同一返佣种类同一 UTC 日只能日结一次；重复事件或恢复
+   重放不能重复消费同一应计。首版只使用既有日桶的未日结状态和既有成交/市场最终性，
+   不新增公开的“等待最终性”枚举、第二套待付款状态机或重试框架。
+7. `SIM-REB-007`：D 日 taker 日桶的正常现金可用时刻为 D+1 `00:10 UTC`，maker 日桶
+   为 D+1 `00:45 UTC`。正常时刻到达时，若已经归属 D 的全部潜在合格贡献均在模拟平台
+   内部最终闭合，则在该时刻日结；若仍有任一项内部最终性未闭合，则原 D 日桶保持未日结，
+   不生成 `TakerRebateDayFinalized`、`MakerRebateDayFinalized` 或付款。最后一项闭合后，
+   在首个因果可用的模拟平台内部时刻只日结一次。客户端创建订单响应、user-channel、
+   归一化反馈或调用方 Ledger 可见性迟到，均不推迟已经完成的模拟平台内部日结/付款。
+   计算完整且当日同类应计合计 `< 1 pUSD` 时，生成对应
+   `TakerRebateDayFinalized` 或
+   `MakerRebateDayFinalized`，状态为 `BELOW_MINIMUM_LOCKED`，不生成付款；全部金额继续
+   作为不可支出应收款，但永久排除在后续日期门槛之外。合计 `>= 1 pUSD` 时：
+
+   ```text
+   paid_pusd = floor(daily_accrual_pusd × 10_000) / 10_000
+   locked_residual_pusd = daily_accrual_pusd - paid_pusd
+   ```
+
+   随后必须先生成对应 `TakerRebateDayFinalized` 或 `MakerRebateDayFinalized`，状态为
+   `PAYABLE`，并记录 `daily_accrual_pusd`、`paid_pusd` 与 `locked_residual_pusd`；四位小数
+   向下截取后的余数继续作为不可支出应收款，并永久排除在后续日期门槛之外。恰好
+   `1.0000 pUSD` 必须付款。普通训练窗口结束或调用方主动截尾本身不生成
+   `UNKNOWN_INCOMPLETE`；无论是否跨过正常现金可用时刻，尚未闭合的原日桶都保持未日结，
+   终点 Ledger 只保留已有应收款。输入范围在正常现金可用时刻前结束时同理。只有已经到达
+   应结算边界，且既有 `EXHAUSTED_QUARANTINED`、异常
+   会话失败封存或其他终态证据证明实际 taker 手续费或潜在合格贡献永久无法闭合时，
+   才使用既有 `UNKNOWN_INCOMPLETE` 日结结果。不得在正常时刻把仍可能闭合的贡献提前写成
+   未知终态，也不得把缺口写成零、猜测付款或借用另一返佣种类的金额补足。taker 与 maker
+   的未知状态不得互相传播。
+8. `SIM-REB-008`：计算出的 maker 付款生成 `MakerRebatePaid`，taker 付款生成
+   `TakerRebatePaid`；二者只允许在各自第 7 条日结事件之后以稳定同刻子顺序应用。
+   付款事件必须引用账户、返佣种类、成交归属日、日结身份、被消费应计的数量与摘要和
+   `paid_pusd`，并携带连续的 `account_transition_seq`、幂等身份及账户之前/之后摘要；逐笔
+   应计身份只保留在既有仅追加证据中，不得复制成随日成交数增长的付款事件载荷。
+   对应应收款减少 `paid_pusd`，`cash_balance_pusd` 和 `available_cash_pusd` 各增加同额，
+   总 NAV、PnL 和训练奖励变化均为零；低于门槛金额和四位截取余数不转为现金。
+   平台内部付款一经发生即取得连续的 `account_transition_seq`；客户端反馈可以随后迟到或
+   乱序交付，但不得改变内部付款时刻。重复日结、迟到反馈或检查点恢复均不得重复付款。
+9. `SIM-REB-009`：当前规则只使用 pUSD。不得为历史 USDC.e 迁移增加运行分支，
+   也不得把 V2 切换日的旧版 USDC.e maker rebate 或疑似一次性等级奖金当作常规 pUSD
+   返佣付款样本。taker 每日
+   `00:00 UTC` 名义付款时刻属于当前 `OFFICIAL_PLATFORM_RULE`；`00:10/00:45 UTC`
+   正常现金可用时刻、低于门槛不跨日合并和四位向下截取是当前观察证据支持且由用户冻结
+   的 `PROJECT_ASSUMPTION`。观察到的延迟到账不能反推内部最终性原因；后续平台证据冲突
+   时必须发布新规则版本，不能追溯修改旧运行。
+
 ## 11. 平台反馈合同
 
 1. `SIM-O-001`：所有输出必须绑定会话 ID、合同版本、规则版本和
    场景摘要。请求响应及订单/成交反馈还必须绑定原请求 ID、调用方
-   关联和平台订单/成交 ID（适用时）；事件触发结算
-   反馈必须绑定源 `MarketResolved` 事件 ID 和结算 ID，不得为其伪造
-   调用方请求 ID。
+   关联和平台订单/成交 ID（适用时）；自动赎回反馈必须绑定源
+   `MarketResolved` 事件 ID 和结算 ID；maker rebate 应计反馈必须绑定市场结束水位线、
+   合格 maker 成交集合摘要和应计 ID；taker rebate 应计必须绑定成交、实际手续费和应计 ID；
+   两类日结/付款必须绑定返佣种类、成交归属 UTC 日、日桶摘要和日结 ID。上述事件都不得
+   伪造调用方请求 ID。
 2. `SIM-O-002`：每个提交项响应至少表达以下语义；未标为代码的条目不预设固定枚举或字段拼写：
    - 接受/拒绝/未知的结果；
    - 平台订单 ID；
@@ -1234,24 +1826,27 @@ NautilusTrader 提交
    - 成交引用；
    - 错误/原因；
    - 响应发出和调用方可见时间。
-   `SubmitOrdersResponse` 还必须保留批量请求身份标识、稳定项索引和每项
+   `post_orders` 的模拟领域批量响应还必须保留批量请求身份标识、稳定项索引和每项
    独立结果；不能用一个批量级成功覆盖混合结果。
 3. `SIM-O-003`：单笔/批量/全部撤单响应至少逐目标表达
    撤单成功/撤单未成功/未知的结果语义、目标订单 ID、原因和可见时间；批量/全部请求
    必须同时表达完整已撤单与未撤单集合。
-4. `SIM-O-004`：`QueryOrderResponse` 至少表达找到/未找到/禁止/未知/
-   超出保留期的结果语义，以及第 7.4 节冻结的调用方可见订单快照。
-5. `SIM-O-005`：`ListOpenOrdersResponse` 和 `ListTradesResponse` 至少表达当前页
-   项、下一页游标或分页结束标记、查询水位线、过滤条件回显和
-   找到但为空/未知/超出保留期的结果语义；`ListTradesResponse` 还必须表达
+4. `SIM-O-004`：`order` 的模拟领域响应至少表达找到/未找到/禁止/未知/
+   超出保留期的结果语义，以及第 7.4 节冻结的查询处理截点平台投影。
+5. `SIM-O-005`：`orders` 和 `trades` 的模拟领域分页响应至少表达当前页项、
+   下一页游标或分页结束标记、查询水位线、过滤条件回显和
+   找到但为空/未知/超出保留期的结果语义；`trades` 的模拟领域分页响应还必须表达
    保留期下限水位线和覆盖度判定。空页不等于请求失败，部分保留区间
    也不得静默返回为完整页。
 6. `SIM-O-006`：`OrderLifecycleFeedback` 只拥有订单生命周期语义，至少表达订单
-   状态变化、累计订单已撮合/活动未成交/平台小额余量已关闭/其他终态 base
-   数量、quote 预算的已占用/已释放投影、终态原因、到期、
+   状态变化、累计订单已撮合/活动未成交/平台小额余量已关闭/已取消/已到期/
+   市场已关闭 base 数量、quote 预算的已占用/已释放投影、终态原因、到期、
    撤单生效，以及关联成交/撮合成交 ID。它不得把某笔撮合成交、成交状态或成交
    经济变化量作为自身事件；订单上的累计已撮合和金额字段只是引用独立成交
    记录得到的查询/状态投影。
+   FAK 订单类型终止必须按第 10.2 节的 SDK 编码等价 `takerAmount`（shares）审计投影口径输出
+   `canceled_base_quantity` 变化量和 FAK 专属 `terminal_reason`；实际已撮合 base 超过
+   该投影时该变化量为零。未花 quote 预算只通过 quote 释放投影表达，不能反推 base。
    撤单、FAK 终止、到期、市场关闭、平台小额余量或其他路径只要释放
    资金占用，都必须携带同一种结构化 `encumbrance_release`：释放身份标识、
    base 数量、quote 金额/币种、可用/已占用/余额总额变化量、
@@ -1265,8 +1860,11 @@ NautilusTrader 提交
    - 证据或场景不足导致的未知/未建模。
 9. `SIM-O-009`：反馈只交付给原调用方/会话。`model-train`、`offline-evaluation`
    与 `paper-trade` 会话不得交叉读取。
-10. `SIM-O-010`：模拟器不直接输出奖励、训练标签、模型排名、Ledger 事件
-   或下一步交易动作。
+10. `SIM-O-010`：模拟器不直接输出训练奖励、训练标签、模型排名、Ledger 事件
+    或下一步交易动作。`MakerRebateAccrualFinalized`、`TakerRebateAccrualApplied`、
+    `MakerRebatePaid` 和 `TakerRebatePaid` 是可由非订单经济归一化合同/Ledger 消费的
+    平台经济事实，不是训练 `RewardContract` 输出，不违反本边界；两类日结事件只表达
+    日桶终态和付款判定，不重新创造应计价值。
 11. `SIM-O-011`：模拟平台原始证据必须原样保留平台状态拼写；模拟器
     可以依据版本化别名表执行内部规则，但不得直接输出
     `NormalizedOrderEvent`。下游 NOE 独立负责按端点/接口面/版本将
@@ -1281,13 +1879,19 @@ NautilusTrader 提交
     变化量或补偿身份标识（适用时）、`account_transition_seq`、前驱
     身份标识/摘要及账户之前/之后摘要；状态推进本身不得被调用方误当成
     第二次经济应用。
-13. `SIM-O-013`：`SettlementLifecycleFeedback` 是独立封闭联合类型；首版唯一变体
-    为 `AutoRedeemApplied`。它必须与对应 `MarketResolved`、市场/会话、模拟
-    账户和结算 ID 稳定关联，不得塞进订单响应、订单生命周期或
-    成交列表。
+13. `SIM-O-013`：`SettlementLifecycleFeedback` 是独立封闭联合类型；首版变体精确为
+    `AutoRedeemApplied`、`MakerRebateAccrualFinalized`、`TakerRebateAccrualApplied`、
+    `MakerRebateDayFinalized`、`TakerRebateDayFinalized`、`MakerRebatePaid` 和
+    `TakerRebatePaid`。自动赎回必须与对应 `MarketResolved`、市场/会话、模拟账户和结算 ID
+    稳定关联；maker 应计必须与市场结束水位线、逐市场 `feeSchedule`、合格 maker 成交
+    集合摘要、模拟账户和应计 ID 稳定关联；taker 应计必须与最终成功成交、实际手续费、
+    模拟账户和应计 ID 稳定关联；日结/付款必须与返佣种类、成交归属 UTC 日、日桶摘要、
+    模拟账户和日结 ID 稳定关联。它们必须表达第 10.5 节适用的状态、公式/精度谱系、
+    应收款/现金变化量及证据质量，不得塞进订单响应、订单生命周期或成交列表。
 14. `SIM-O-014`：模拟平台内部真相与调用方可见反馈必须分层。平台小额余量和
     已撮合后撤单的内部生效时间、发出时间、可见时间、重复/迟到/缺失情景和
-    最终投影必须可追溯；任何不可见内部数量都不能通过查询/列表提前泄漏。
+    最终投影必须可追溯；查询/列表可以按自身处理截点独立返回已经形成的平台事实，
+    但不能泄漏该截点之后的内部数量或模拟器私有状态。
     自动赎回是首版例外：其应用、发出和可见时间都等于合格
     `MarketResolved.available_at`，不得等待旧反馈可见。所有账户变化量共用同一
     单调 `account_transition_seq` 和摘要链；可见性配置档（`profile`）可以模拟前驱
@@ -1295,18 +1899,24 @@ NautilusTrader 提交
     强行重排成永远顺序可见来掩盖真实账本同步风险。
 15. `SIM-O-015`：`TradeLifecycleFeedback` 是独立封闭类型，每个实例只拥有本模拟
     账户一笔成交的生命周期：关联订单 ID、撮合执行 ID、成交记录 ID、实际价格、base 数量、
-    名义金额、手续费/币种、maker/taker、撮合成交计量基准/队列质量、原始成交状态、
+    名义金额、手续费/币种、maker/taker、`fee_schedule_snapshot_id`、适用时的 maker
+    手续费等价值/maker 返佣应计贡献或 taker 返佣应计贡献、撮合成交计量基准/队列质量、原始成交状态、
     链上交易引用、经济变化量/补偿身份标识、账户状态转换链和
     时间。公开行情 `last_trade_price` 只属于 `ExecutionMarketEvent` 市场证据，绝不能
     直接变成本账户 `TradeLifecycleFeedback`；只有队列/撮合规则实际穿过本账户订单并
-    形成撮合成交时，才能创建本账户成交。
+    形成撮合成交时，才能创建本账户成交。其中返佣贡献字段只供审计和模拟器内部汇总，
+    必须带不可应用于 Ledger/NAV 的语义，不能产生返佣应收款或返佣账户变化量；只有
+    `MakerRebateAccrualFinalized` 或 `TakerRebateAccrualApplied` 可以携带对应返佣应收款
+    变化量，只有对应 `*RebatePaid` 可以把应收款转为现金。
 
 ## 12. 平台规则、潜规则和版本
 
-1. `SIM-C-001`：每次会话只读绑定一个不可变 `RuleCoverageManifest`；
-   运行期间不得自行学习、调参或切换规则；清单必须同时绑定
+1. `SIM-C-001`：每次运行只读绑定一个不可变 `PlatformRuleSnapshot`，每次会话再只读绑定
+   该快照和一个不可变 `RuleCoverageManifest`；运行期间不得重新访问平台、自行学习、调参
+   或切换规则；清单必须同时绑定
    `ExecutionMarketEventContract`、市场窗口策略、队列模型、
-   确定性 `VenueDustRule`、结算/自动赎回策略和保留期策略
+   确定性 `VenueDustRule`、逐市场手续费/maker rebate 规则、固定 taker Silver `8%`
+   规则、两类日结/付款规则、结算/自动赎回策略和保留期策略
    版本/摘要。
 2. `SIM-C-002`：每条规则必须且只能归入一种证据类别：
    - `OFFICIAL_PLATFORM_RULE`：当前平台官方文档明确规定的服务端行为；
@@ -1316,6 +1926,8 @@ NautilusTrader 提交
    - `OBSERVED_PLATFORM_BEHAVIOR`：真实平台产物稳定支持但官方未完整保证；
    - `USER_CONFIRMED_PLATFORM_BEHAVIOR`：用户明确确认是其真实平台运行观察，但当前
      文档集尚无可独立审计产物或官方保证；
+   - `RULE_DERIVATION`：只由已列官方规则进行可机械复算的代数或逻辑推导，必须同时
+     记录前提、推导过程和官方未公开的舍入/实现边界，不能把推导冒充官方原文；
    - `PROJECT_ASSUMPTION`：用户明确冻结的项目假设；
    - `UNCERTAINTY_PROFILE`：证据不足，只能作为枚举或概率情景处理的行为。
 3. `SIM-C-003`：每条规则至少记录规则 ID、版本、证据类别、来源及摘要、
@@ -1326,19 +1938,22 @@ NautilusTrader 提交
    `PROJECT_ASSUMPTION` 或 `UNCERTAINTY_PROFILE`，不得包装成官方事实。
 5. `SIM-C-005`：官方服务端规则、SDK 客户端合同和本地补丁必须分层记录。
    SDK 类型或注释不自动证明真实服务端行为。
-6. `SIM-C-006`：真实新证据与冻结规则冲突时，停止受影响的新会话，保留旧运行
-   谱系，列出冲突交由用户决定；不得静默改写历史结果。
-7. `SIM-C-007`：新规则版本只供后续会话显式选择，不追溯修改旧会话。
+6. `SIM-C-006`：冷启动查询、真实新证据与冻结规则冲突时，停止受影响的新运行或新会话，
+   保留旧运行谱系，列出冲突交由用户决定；不得静默改写历史结果。运行中平台随后变化不
+   热刷新当前快照，只影响下一次新运行；但动态 `tick_size_change` 仍按事件合同正常推进。
+7. `SIM-C-007`：新规则版本只供后续新运行显式选择，不追溯修改旧运行或旧会话。
 8. `SIM-C-008`：模拟器自己的输出和模拟盘模拟结果不能反向证明或校准
    模拟器；经验校准只能使用经审查的真实平台反馈。
 9. `SIM-C-009`：2026-07-30 类型化原始数据可以经 `data-pipeline` 生成历史
    `ExecutionMarketEvent`，但它没有本账户订单处理反馈，不能作为接受、
    撤单竞态、时延、真实队列排位、平台小额余量或成交结算潜规则的
    校准真值。
-10. `SIM-C-010`：订单字段、类型、数量编码、精度和反馈解析必须以仓库
-    固定版本的官方 Polymarket Rust SDK 作为客户端一致性权威，不得另写原始 REST、
-    手工签名或自建 SDK 旁路。若 SDK 覆盖不足或与服务端证据冲突，必须列出
-    缺口并取得用户决定后再继续。
+10. `SIM-C-010`：订单字段、类型、数量编码、精度和反馈解析必须以仓库固定版本的
+    官方 Polymarket Rust SDK 作为客户端一致性权威。共用桥接器的模拟后端只
+    使用模拟领域类型和 SDK 编码等价语义；实盘后端必须使用官方请求/响应类型、构建器、
+    签名、认证和 `Client`。方法名对齐不授权复制交易 `Client`、另写订单/账户 REST、手工签名
+    或自建 SDK 旁路；本条禁令不覆盖第 10.1 节已经单独批准的只读规则加载器。若执行 SDK
+    覆盖不足或与服务端证据冲突，必须列出缺口并取得用户决定后再继续。
 11. `SIM-C-011`：当前官方接口面已同时出现裸形式、大写和带前缀状态：
     订单至少包括 `live`、`LIVE`、`ORDER_STATUS_LIVE`，成交至少包括 `MATCHED`、
     `TRADE_STATUS_MATCHED`；`realtime-order-updates` 还列出
@@ -1372,6 +1987,46 @@ NautilusTrader 提交
     `USER_CONFIRMED_PLATFORM_BEHAVIOR`；该分类不得降格为普通项目假设，也不得升级成
     官方 SLA。后续取得经审查的平台产物后只能发布新规则版本转为
     `OBSERVED_PLATFORM_BEHAVIOR`，不能追溯改写旧运行。
+17. `SIM-C-017`：`itode=true` 对应 250ms taker 暂缓的语义归类为
+    `OFFICIAL_PLATFORM_RULE`。`itode` 必须由新运行冷启动按目标市场通过官方公开 CLOB
+    规则端点查询，
+    250ms 必须来自 `documented_platform_rules`；只作用于经价格校验确认可立即成交的 taker
+    路径，普通 maker 挂单与 post-only 拒单路径不适用。两者不得进入
+    `ExecutionMarketEvent`、请求参数、地域时延配置档或 `sim-calibration` 可写参数，也不得
+    由调用方覆盖。官方明确 `itode=false` 时省略该键，因此缺失解释为 false；HTTP/解析
+    失败、非法值或跨端点身份/值冲突必须在新运行接受首个业务请求前失败即关闭，不得使用
+    无条件代码常量、`secondsDelay` 或网页值回退。
+18. `SIM-C-018`：maker rebate 的实际 maker 成交资格、逐市场 `feeSchedule`、
+    fee-curve、逐市场分配，以及 taker rebate 的 Silver `$20,000 wV` 等级背景、`8%`、
+    每日计算/支付和“累计返佣至少 `1 pUSD` 才付款”，以及 taker 名义付款时刻
+    `00:00 UTC`，分别记录为 `OFFICIAL_PLATFORM_RULE`。从 maker
+    逐市场池公式代数化到本账户逐笔贡献之和，以及从实际 taker 手续费与固定等级返佣率
+    推导 `actual_taker_fee_pusd × 0.08` 的过程记录为 `RULE_DERIVATION`。内部固定精度、
+    首版固定 Silver 且不累计/校验 wV，以及 `00:10/00:45 UTC` 正常现金可用时刻、低于
+    门槛不跨日凑门槛、四位向下截取和余数锁定分别记录为 `PROJECT_ASSUMPTION`，并引用
+    当前观察证据。观察到的延迟到账及精确 `250 pUSD` 收款分别只记录为长尾观察和疑似
+    Gold 一次性等级奖金推断，不得据此声称延迟由内部最终性导致，也不得把奖金混入普通
+    taker 返佣。不得把项目假设冒充官方永久保证，也不得据此增加市场类别/slug 校验、
+    通用等级引擎、通用返佣框架或 Liquidity Rewards 实现。
+19. `SIM-C-019`：`PlatformRuleSnapshot` 与 `RuleCoverageManifest` 必须保存两类彼此独立的
+    最小下单规则：冷启动从 CLOB `mos` 查询的 `min_order_size_shares` 及其
+    `OFFICIAL_PLATFORM_RULE` 身份；以及只保存一次参数值
+    `marketable_limit_buy_min_submitted_pusd=1` 的可立即成交限价 BUY 规则组。
+    后者对 GTC 的适用性为 `OBSERVED_PLATFORM_BEHAVIOR`；GTD 复用同一限价提交、
+    SDK 编码和撮合路径的适用性必须作为单独的 `RULE_DERIVATION` 身份，明确记录尚无
+    GTD 直接样本。清单必须记录数值、单位、适用订单类型、可立即成交条件、证据来源、
+    观测日期、限制和测试；非可立即成交 GTC/GTD 与全部 FOK/FAK 明确在该 `$1` 规则
+    范围外。Gamma 近似命名字段的官方说明冲突必须保留，不得形成第二个执行门；首版
+    不为这两条规则建设阈值注册表、插件、第二套元数据源或通用校验框架。
+20. `SIM-C-020`：一次冷启动加载阶段必须新建不跨运行复用、无凭据的窄型 HTTP 客户端，并
+    为冻结的每个 `condition_id` 只接受一个所需 CLOB 成功逻辑结果和一个所需 Gamma 成功
+    逻辑结果，校验 CLOB/Gamma/事件合同中重叠的条件、代币、结果、手续费启用状态和规则值；
+    成功后不得重查。Gamma 必须使用 `/markets/keyset`、重复 `condition_ids` 参数以及
+    `closed=false/true` 两组有界查询；非目标、重复或缺失结果都失败。允许的瞬时失败最多额外
+    重试一次；任一请求最终失败，以及必需字段缺失、非法或冲突都不得形成成功快照。快照
+    必须绑定 `run_market_set_hash`、逐响应查询时刻、端点、HTTP 客户端/依赖版本、尝试数、
+    原始响应 SHA-256、静态配置摘要和最终 SHA-256。确定性核心只能接收已验证快照，不能持有
+    网络客户端；同一运行恢复必须验证并复用原快照，新市场或新查询结果只能进入新运行。
 
 ## 13. `model-train` 和模型框架边界
 
@@ -1381,21 +2036,38 @@ NautilusTrader 提交
    竞赛能力。
 3. `SIM-M-003`：`sim-system` 的请求、反馈、规则和场景合同中不得出现 PyTorch、
    JAX、TensorFlow 或其他框架专属张量、模块、检查点或运行时类型。
-4. `SIM-M-004`：后续新框架只要：
-   - 消费 `data-pipeline` 的同一统一模型数据合同；
-   - 产生同一订单请求合同；
-   - 消费同一平台反馈合同；
-   - 产出模拟盘/实盘可加载的同一模型产物/推理合同；
-
-   就只需要替换 `model-train`，不得要求修改 `sim-system`。
+4. `SIM-M-004`：本项目不建设或验收多框架插件、框架注册表、框架替换路径或框架竞赛；
+   `sim-system` 保持框架运行时类型不可达，只是模块边界要求，不表示预留多框架能力。
 5. `SIM-M-005`：`sim-system` 不比较不同模型，不生成排名，不选择胜出模型，不判断
    晋级，不持有模型注册表。
+6. `SIM-M-006`：训练调用方只能把 `data-pipeline` 已建立稳定全序的规范事件送入
+   `sim-system`。原始文件枚举顺序、源目录顺序、Parquet 分片顺序和 UTC 日分区边界均不
+   具有跨源时间语义；`sim-system` 不读取、排序或校验类型化原始文件，也不建设第二套
+   数据排序器或完整 UTC 日校验器。
+7. `SIM-M-007`：首版每条训练账户轨迹都由场景直接声明干净初始账户：固定初始现金，
+   历史持仓、订单、预留、返佣应收款和返佣日桶均为空。该声明不是运行时市场
+   类型校验，也不要求扫描更早历史证明账户“确实新鲜”。完成既有 T-30 热身/引导后，
+   轨迹可以从任意逻辑时刻开始，不必对齐或覆盖完整 UTC 日；同一账户的可变状态按规范
+   事件顺序在内存中跨文件、跨市场和跨 UTC 日连续推进，不同隔离账户轨迹才可并行。
+8. `SIM-M-008`：首版训练不支持从中途 `sim-system`/账户/Ledger 检查点续跑；训练中断
+   后从该干净账户轨迹起点按相同输入和随机种子确定性重放。此限制不改变第 14 节
+   `SIM-N-010` 的模拟盘恢复要求，也不限制 `model-train` 保存模型权重和优化器检查点。
+9. `SIM-M-009`：训练模块只有在该训练单元对应训练目标所需的
+   `sim-system -> 归一化层 -> Ledger -> RewardContract` 字段达到冻结成熟度后，才把结果
+   固化为就绪训练单元。`model-train` 可以重新安排彼此独立且已经就绪的训练单元，包括
+   算法明确定义为独立、但来自同一账户回放的单元；必须保持序列/窗口单元内部顺序和算法
+   明确声明的跨单元依赖。首版不强制随机打乱，也不把“单个状态转换”硬编码为唯一训练单元。
+10. `SIM-M-010`：训练轨迹在未来返佣付款前结束时，`sim-system` 不提前付款，终点
+    Ledger 保留返佣应收款；应计已经通过 Ledger/NAV 进入一次经济结果。只有明确依赖
+    未来可支出现金的训练目标才由 `model-train` 使用普通截尾掩码；首版不建设返佣专用
+    右删失状态机、人工快进到付款时刻或完整 UTC 日/固定市场数量要求。
 
 ## 14. 确定性、隔离、安全和失败语义
 
 1. `SIM-N-001`：相同 `ExecutionMarketEvent` 流、请求流、初始
    场景、规则/配置档（`profile`）、逻辑时间和随机种子重跑，响应、生命周期反馈
-   （包括确定性平台小额余量终态和自动赎回）、查询页和最终状态摘要
+   （包括确定性平台小额余量终态、maker/taker rebate 应计、日结/付款和自动赎回）、
+   查询页和最终状态摘要
    必须一致。
 2. `SIM-N-002`：提交/撤单变更的幂等键重复且载荷相同，必须返回原
    变更结果或等价引用；同一键对应不同载荷必须安全拒绝（`fail closed`），不能创建或
@@ -1409,18 +2081,22 @@ NautilusTrader 提交
    根目录的已保留记录数量/字节必须分别有明确硬上限；超限不得静默
    丢弃、重排、重复请求、删除未到期证据或无限扩容。
 5. `SIM-N-005`：合同、schema 或摘要不匹配、非法状态转换、数量不守恒、跨
-   会话引用或重复事件冲突必须使受影响会话进入安全失败终态（`fail closed`）。
+   会话引用、重复事件冲突或输入终态缺失，必须使受影响会话进入安全失败终态（`fail closed`）。
 6. `SIM-N-006`：合法的无成交、未找到、超出保留期、平台拒绝、
    反馈延迟、右删失、未知/未建模不得误报为程序损坏。
-7. `SIM-N-007`：核心运行时必须能在网络禁用、无钱包、无凭据环境运行；
-   可执行文件、日志和产物不得包含真实机密。
-8. `SIM-N-008`：运行时不得依赖机器学习框架、GPU、远端服务或真实 Polymarket
-   可用性；核心测试可以替换 `data-pipeline` 生产器，但不能绕过
-   `ExecutionMarketEvent` 合同。
-9. `SIM-N-009`：具体吞吐、延迟、内存、队列容量和检查点策略由获批后的计划
-   根据性能分析器冻结；需求验收必须证明资源有界，不能只写“能运行”。
+7. `SIM-N-007`：冷启动加载完成并密封规则快照后，确定性核心运行时必须能在网络禁用、
+   无钱包、无凭据环境运行；冷启动公开市场规则查询同样不得要求钱包或交易凭据，可执行文件、
+   日志和产物不得包含真实机密。
+8. `SIM-N-008`：确定性核心不得依赖机器学习框架、GPU、远端服务或运行中的真实 Polymarket
+   可用性；网络能力只能存在于新运行的有界冷启动加载器。核心测试可以替换
+   `data-pipeline` 生产器并注入合同一致的冻结规则快照，但不能绕过
+   `ExecutionMarketEvent` 或 `PlatformRuleSnapshot` 合同。
+9. `SIM-N-009`：具体吞吐、延迟、内存和队列容量由获批后的计划根据性能分析器冻结；
+   检查点策略不得改变 `SIM-M-008` 已冻结的训练首版不支持中途续跑或
+   `SIM-N-010` 的模拟盘恢复语义。需求验收必须证明资源有界，不能只写“能运行”。
 10. `SIM-N-010`：模拟盘崩溃/重启必须能从模拟器检查点、紧凑日志和
-    `data-pipeline` 仅追加规范日志恢复，且不会重复撮合成交、撤单或反馈；
+    `data-pipeline` 仅追加规范日志恢复，且不会重复撮合成交、撤单、maker/taker rebate
+    应计、日结、付款或反馈；
     当前模拟盘数据源尚未实现，首版以合同一致的测试替身生产器验收该语义。
 11. `SIM-N-011`：并行训练会话可以共享不可变内容寻址事件序列
     页，但订单簿、账户、订单叠加层、队列估计、游标和 RNG 必须隔离；
@@ -1431,7 +2107,7 @@ NautilusTrader 提交
     批量/线程调度，不得改变目标订单的平台小额余量判断或数量；检查点恢复不得重复终止、
     重复释放预留资金或把外部数量写入本账户订单。
 13. `SIM-N-013`：实际撮合成交经济变化量、仅在该变化量已应用后才允许的失败
-    补偿、平台小额余量终态、资金占用释放和自动赎回必须使用
+    补偿、平台小额余量终态、资金占用释放、maker/taker rebate 应计、日结/付款和自动赎回必须使用
     独立幂等身份标识。成交生命周期状态在唯一应用截点之外只改变状态，
     不是另一笔经济变化量；任一重复/恢复路径不得把一种变化当成另一种补偿，也不得
     重复应用。所有实际改变账户的变化量无论来自哪个订单或结算，都必须进入
@@ -1442,38 +2118,53 @@ NautilusTrader 提交
 
 每个正式模拟运行至少绑定或生成：
 
-1. 不可变 `RuleCoverageManifest` 及其版本、摘要；
+1. 不可变 `PlatformRuleSnapshot`、`RuleCoverageManifest` 及各自版本、摘要；其中必须
+   逐市场记录冷启动查询的 `itode`、适用时引用的 250ms 文档规则、CLOB 最小 shares、
+   完整 `feeSchedule`、查询/SDK/身份/配置来源和失败门。清单还必须记录第 10.5 节
+   maker/taker rebate 的官方规则、两条代数推导、内部精度、固定 Silver `8%`、两类
+   日结/付款项目假设及其当前观察证据；
 2. 不可变 `PlatformScenario` 及其版本、摘要；
 3. `RuleCoverageManifest` 中不可变的确定性 `VenueDustRule`：记录证据
    类别、只作用于本账户订单的所有权边界、严格 `(0, 0.01 shares)` 区间、
    base 份额精度单位/版本、合格执行/队列触发条件、同价队列耗尽条件、
    外部数量排除规则、终态优先级、源引用和摘要；
-4. `ExecutionMarketEvent` 合同、生产器/流水线身份标识、输入事件序列/流
-   摘要、市场/窗口、预加载游标、终态水位线和缺口/覆盖度谱系；
+4. `ExecutionMarketEvent` 合同、生产器/流水线身份标识、输入事件序列/流摘要、市场/窗口、
+   预加载游标、终态水位线和缺口/覆盖度谱系；逐市场规则只由第 1 项快照拥有，不复制进
+   事件带；
 5. `SimulationRunManifest`，记录：
    - `sim-system` 代码/构建身份标识；
    - 调用方角色、运行和会话身份标识；
-   - 规则/场景/队列/结算/时延/可见性/保留期配置档（`profile`）、平台小额余量规则
+   - 规则/场景/队列/结算/网络时延/可见性/保留期配置档（`profile`）、平台小额余量规则
      和随机种子身份标识；
+   - `run_market_set`、`PlatformRuleSnapshot`、静态配置及其 SHA-256，以及逐市场
+     `taker_order_delay_enabled` 与适用的 250ms 文档规则身份；该规则不得作为地域时延
+     配置档参数再次保存或叠加；
+   - maker/taker rebate 公式/精度版本、`feeSchedule` 身份、两类应收款起止值、逐日
+     日结/付款计数、锁定金额和未知/不完整计数；
    - 请求/反馈合同版本；
    - 逻辑时间范围；
    - 市场/请求/反馈/订单/成交数量、峰值常驻字节和最终状态摘要；
    - 完成/隔离/失败判定；
 6. 仅追加请求/响应/订单/成交/结算生命周期反馈
-   日志，以及支持 `QueryOrder`、`ListOpenOrders`、`ListTrades` 的紧凑
+   日志，以及支持 `order`、`orders`、`trades` 的紧凑
    订单/成交/结算投影；全部 `PlatformAccountDelta` 的
    `account_transition_seq`、前驱/之前/之后摘要链和交付水位线
-   必须可审计；平台小额余量日志还必须保留账户/订单身份标识、触发它的实际
+   必须可审计；maker/taker rebate 日志必须保留逐笔合格贡献/成交引用、实际角色、
+   价格/份额、实际 taker 手续费、`feeSchedule`、公式中间值、maker 按市场汇总、成交
+   归属 UTC 日、日桶状态、付款/锁定金额、应计与日结/付款身份及账户变化；
+   平台小额余量日志还必须保留账户/订单身份标识、触发它的实际
    撮合成交和执行/队列状态转换身份标识、已接受/已撮合、终态前本账户
    活动未成交数量、小额余量已关闭数量、终态后活动未成交数量为 0、外部前方/后方及同价
    其他模拟订单的变更后数量、完整队列所有权快照摘要、规则
    版本/摘要、终态/可见时间、资金占用释放身份标识和账户
    之前/之后摘要；
 7. 市场生命周期/移除/保留期报告，记录两阶段释放、自动赎回、终态
-   或市场判定等待期限耗尽原因、记录最终确定、删除资格和实际常驻高水位线；
+   或上游 `ExecutionMarketEvent` 市场判定等待耗尽终态原因、记录最终确定、删除资格和实际常驻高水位线；
 8. 不变量校验报告，至少覆盖幂等、状态转换、本账户 base 份额、外部
    价格档位/队列归因与结算币种各自独立守恒、平台小额余量
-   不增发/不生成成交、自动赎回原子性、队列归因、会话隔离和首次
+   不增发/不生成成交、maker/taker rebate 只由对应角色的最终成功成交产生且应计不增加
+   可用现金、两类日桶隔离、门槛/向下截取/锁定余数、付款只迁移资产分桶且不重复奖励、
+   自动赎回原子性、队列归因、会话隔离和首次
    差异。
 
 这些产物不得包含真实钱包机密、API 凭据、模型张量、训练
@@ -1484,25 +2175,42 @@ NautilusTrader 提交
 
 获批后的计划必须把每项验收标准映射到具体测试和证据：
 
-1. `SIM-AC-001`：静态依赖和运行测试证明 `sim-system` 不直接依赖
+映射必须同时标明“组件符合性门”“真实管道纵向门”或“训练闭环门”。组件符合性门和
+真实管道纵向门共同构成 `sim-system` 面向真实训练需要的完成条件；训练闭环门在模拟器
+之后完成并阻断进入 `model-train`。这些分层不授权 `sim-system` 实现对应的
+`data-pipeline`、归一化层、Ledger 或 RewardContract。
+
+1. `SIM-AC-001`：静态依赖和运行测试证明 `sim-system` 的确定性核心不直接依赖
    `data-collect`、类型化原始数据、Parquet、实时交接、原始市场 schema 或 ML
-   框架；它只消费版本化 `ExecutionMarketEvent` 合同。真实
-   `data-pipeline` 生产器可以被合同一致的测试替身/固定预期黄金生产器（`fake/golden producer`）替换。
-2. `SIM-AC-002`：只有 `model-train`、`offline-evaluation` 和 `paper-trade` 调用方
-   可以创建会话并发出业务请求；`live-trade` 和未知调用方必须被安全拒绝（`fail closed`）。
-3. `SIM-AC-003`：公开业务请求变体精确为
-   `SubmitOrder | SubmitOrders | CancelOrder | CancelOrders | CancelAllOrders |
-   QueryOrder | ListOpenOrders | ListTrades`；改单、按市场/代币撤单、
-   余额、市场数据和未知查询被明确拒绝。
+   框架；它只消费版本化 `ExecutionMarketEvent` 和已验证 `PlatformRuleSnapshot` 合同。
+   只有新运行的窄型只读规则加载器可以通过固定官方 HTTPS `GET` 访问平台。组件符合性测试
+   可以用合同一致的 HTTP 测试替身/固定预期黄金生产器和规则快照夹具，但替身不能替代真实
+   管道纵向门或正式公开端点
+   冷启动能力验收。
+2. `SIM-AC-002`：只有原始角色为 `model-train`、`offline-evaluation` 和
+   `paper-trade` 的调用方可以通过共用桥接器的模拟后端创建会话并发出业务请求；
+   绕过桥接器的直连、`live-trade` 和未知调用方必须被安全拒绝（`fail closed`）。
+3. `SIM-AC-003`：共用桥接器的公开执行方法精确为
+   `post_order | post_orders | cancel_order | cancel_orders | cancel_all_orders |
+   order | orders | trades`；不存在公开 `SimRequest` 或旧的 `Submit*`、`QueryOrder`、
+   `List*` 操作词汇，模拟器内部派发类型对调用方不可见；改单、按市场/代币撤单、余额、
+   市场数据和未知查询被明确拒绝。
 4. `SIM-AC-004`：合法 BUY GTC、GTD、FOK、FAK 和 post-only，以及非法 SELL、
-   订单类型/数量计量基准/到期时间/最小价格变动单位/最小数量/精度组合均有正负例。
-5. `SIM-AC-005`：`AmendOrder`、`ModifyOrder`、`ReplaceOrder` 及对既有订单字段的
+   订单类型/数量计量基准/到期时间/最小价格变动单位/精度组合均有正负例。
+   `min_order_size_shares` 必须覆盖小于和等于下限：GTC/GTD 使用明确
+   `size_shares`，FOK/FAK 使用固定 SDK 编码后得到的 shares。可立即成交限价 BUY 的
+   `$1` 门必须用彼此独立的新提交覆盖：提交本金 `< 1 pUSD` 且非可立即成交的 GTC/GTD
+   不因本门拒绝并可进入 `live`；相同参数的新提交在当前盘口下可立即成交时于接受前
+   拒绝；提交本金 `= 1 pUSD` 不因本门拒绝；价格改善后的实际花费低于 `1 pUSD`
+   不回滚已接受订单。FOK/FAK 只验收 shares 下限和既有规则，不得因本版 `$1` 门拒绝。
+5. `SIM-AC-005`：`amend_order`、`modify_order`、`replace_order` 及对既有订单字段的
    就地修改全部被拒绝；撤单后重新提交产生两个请求、两个结果和新的订单 ID，
    且不是原子替换。
-6. `SIM-AC-006`：批量提交覆盖 0、1、15、16 项以及逐项混合
+6. `SIM-AC-006`：`post_orders` 覆盖 0、1、15、16 项以及逐项混合
    已接受/已拒绝/未知；同一批量幂等重试不重复创建任何项，同一键搭配
-   不同项数量、顺序或载荷必须被安全拒绝（`fail closed`）。
-7. `SIM-AC-007`：单笔/批量撤单和全撤覆盖未成交、部分成交、
+   不同项数量、顺序或载荷必须被安全拒绝（`fail closed`），并证明一项失败不回滚
+   已接受的其他项，批量级状态不覆盖逐项结果。
+7. `SIM-AC-007`：`cancel_order`、`cancel_orders` 和 `cancel_all_orders` 覆盖未成交、部分成交、
    全部成交、平台小额余量终态、已到期、已撤、不存在、重复 ID 和竞态；
    批量/全部能产生逐 ID 部分成功。重复 ID 只处理一次且只产生一个唯一目标
    结果。首版上限为 `1,000`，必须测试 999/1,000/1,001；后续上限变更必须先创建
@@ -1538,6 +2246,14 @@ NautilusTrader 提交
 11. `SIM-AC-011`：可立即成交的 BUY 逐档撮合、GTC/GTD 挂单中、FOK 全成或全不成、
     FAK 部分执行后终止、post-only 拒绝、部分/全部撮合成交、价格改善
     和实际撮合成交价格/手续费均有确定性固定预期黄金事件序列（`golden tape`）。
+    已接受 FAK 相对固定 SDK 编码等价 `takerAmount`（shares）审计投影的未成交 base 必须全部进入
+    `canceled_base_quantity`，以 FAK `terminal_reason` 与调用方撤单区分；实际已撮合
+    base 超过该投影时 canceled 为零且正差额只保留为实际成交。未花 quote 预算进入
+    `released_or_unspent_quote_amount`，并由 quote 等式独立守恒。FOK/FAK 在接受前
+    明确拒绝时 `accepted_quote_budget=0`、base 审计投影为零，不进入已接受订单守恒域。
+    `RuleCoverageManifest` 若声明存在已接受后因不能全成而终止的 FOK 路径，还必须用
+    固定预期黄金序列验收该路径的全额 quote 释放、上述 canceled 投影和 FOK 专属
+    `terminal_reason`；若声明不适用，则黄金反例必须证明模拟器不会生成该路径。
 12. `SIM-AC-012`：`L2_BOOK_DELTA_FIFO_ESTIMATE_V1` 固定预期黄金用例（`golden case`）至少覆盖：初始外部
     前方 500、接受本账户 maker 订单 5 后，净缩量 195 只把前方推进到 305，不产生成交；
     正差额 40 放到本账户订单后方。另以外部前方 300、本账户订单 5 和足量
@@ -1565,44 +2281,65 @@ NautilusTrader 提交
     但合同有效的净缩量可以形成确定性 maker 撮合成交；只有 `best_bid_ask` 而没有数量
     状态转换时不推进队列。缺口/epoch/陈旧后的有效完整 `book` 对既有活动 maker
     订单使用同一规则，不进入隔离。缺初始完整 `book`、
-    `book` 自身非法、无法去重的冲突、右删失事件序列和无市场影响上限超限
+    `book` 自身非法、无法去重的冲突和右删失事件序列
     才产生对应未就绪/未知/删失结果。同价批量项按冻结顺序成交；订单
     到达落在尚未最终确定的早期证据与后到证据之间时，未最终确定的
     组不影响该订单，后到证据不能回写既有结果；输出明确标记 L2 估计
     而非真实 FIFO。
-14. `SIM-AC-014`：适用的官方 `itode=true` 250ms 内部 taker 暂缓窗口（`hold`）场景覆盖内部
-    待处理、结束时重新校验及
-    已撮合（`matched`）/未撮合（`unmatched`）/已拒绝（`rejected`）分支；不得产生无证据的调用方可见中间状态。
-    待处理期间的单笔/批量/全部撤单均按当前官方规则返回不可撤结果；该规则
-    与其他平台规则一样在实现前重新核验并冻结到规则产物。
+14. `SIM-AC-014`：每个新运行都以有界 `run_market_set` 执行一次冷启动加载阶段并新建不跨
+    运行复用的窄型 HTTP 客户端；每个目标 `condition_id` 的 CLOB/Gamma 查询各只接受一个
+    成功逻辑结果，成功快照绑定身份、端点、HTTP 客户端/依赖、原始响应摘要、配置和 SHA-256。
+    测试替身还必须证明重复 `condition_ids` 查询参数编码正确，`condition_ids[]`、旧
+    `/markets`、非目标/重复/缺失响应均被拒绝，`closed=false/true` 结果正确合并，成功后不
+    重查，请求最终失败时整体失败即关闭；
+    同一运行恢复在网络禁用时复用原快照；运行中不轮询、不热刷新，快照外新市场
+    必须创建新运行。分别以 `itode=true` 和 false 验收：只有 true 时，可立即成交订单通过
+    适用接受前检查后才进入配置中的 250ms 内部待处理，结束时按期间已到达的市场、账户和规则状态重新
+    校验，并产生已撮合（`matched`）/未撮合（`unmatched`）/已拒绝（`rejected`）
+    最终分支；普通非可立即成交 maker 挂单和因 post-only 会立即成交而被拒绝的订单
+    不得进入该暂缓。暂缓目标自身不能被暂缓期间到达的 `cancel_all_orders` 取消，但同一
+    `cancel_all_orders` 中其他可撤活动订单仍正常处理；首版不要求验收调用方尚未取得可用
+    订单 ID 时对该暂缓目标发起的单笔/批量撤单。该阶段不产生调用方可见 `delayed` 中间状态。
+    `ExecutionMarketEvent` 不含 `itode`、`min_order_size`、`feeSchedule` 或秒级延迟字段；
+    除官方规定的 `itode=false` 省略及费用禁用时允许省略的费用对象外，必需字段缺失、跨
+    端点冲突、错误市场绑定、查询失败、调用方覆盖和把 `secondsDelay` 当 `itode` 都必须在
+    首个业务请求前失败即关闭。未知附加字段不得触发失败。
 15. `SIM-AC-015`：撤单与撮合成交同刻的两种冻结排序场景可复现，任何数量只处理一次，
     不出现追溯取消、重复成交或全撤跨会话。
-16. `SIM-AC-016`：`QueryOrder` 在挂单中、部分撮合成交、全部撮合成交、平台小额余量
+16. `SIM-AC-016`：`order` 在挂单中、部分撮合成交、全部撮合成交、平台小额余量
     终态、撤单、到期、结算、热移除后和保留期到期后分别返回
-    正确的调用方可见快照、带计量基准/小数标度（`scale`）/币种的订单已撮合、成交最终性
-    与 quote 当前状态分桶、
-    `other_terminal_base_quantity`/明确终态原因、资金占用释放投影或
+    与独立查询处理截点对应的正确平台投影、带计量基准/小数标度（`scale`）/币种的订单已撮合、成交最终性
+    与 quote 当前状态分桶、`canceled_base_quantity`、`expired_base_quantity`、
+    `market_closed_base_quantity` 及与数量分桶一致的明确终态原因、资金占用释放投影或
     `OUT_OF_RETENTION`；外层会话水位线到期后整个旧会话明确不可查询，
-    且没有永久逐订单墓碑记录。查询自身不改变业务状态。
-17. `SIM-AC-017`：`ListOpenOrders` 的订单/市场/代币过滤条件与分页不返回
-    终态订单；`ListTrades` 的成交/市场/代币/时间过滤条件与分页只返回
-    已可见实际成交，平台小额余量和自动赎回均不进入。`ListTrades` 的区间完全
+    且没有永久逐订单墓碑记录。订单内部状态已经改变但对应异步反馈尚未到达调用方时，
+    查询仍返回自身处理截点对应的平台投影；查询响应和原异步反馈各自保持原可见时间，
+    不重排或重复应用状态变化。查询自身不改变业务状态。
+17. `SIM-AC-017`：`orders` 的订单/市场/代币过滤条件与分页不返回
+    终态订单；`trades` 的成交/市场/代币/时间过滤条件与分页只返回查询处理截点内
+    已经在模拟平台形成的实际成交，不等待异步成交反馈先到达调用方；平台小额余量和
+    maker/taker rebate 应计、日结/付款和自动赎回均不进入。`trades` 的区间完全
     早于或跨越保留期下限水位线，
     以及未提供 `after` 而会话早期历史已删除时，均返回
     `OUT_OF_RETENTION_RANGE` 且不返回误导性不完整结果页；调用方将 `after` 收窄到
     水位线后可正常查询。首版 maker/taker 地址过滤条件被明确拒绝，而不是
     静默忽略；游标跨过滤条件/会话/版本复用必须失败。
 18. `SIM-AC-018`：同一已取得合格市场判定并进入终态的市场在热移除前后
-    执行 `QueryOrder` 和 `ListTrades` 得到相同业务结果；`ListOpenOrders` 为空；
+    执行 `order` 和 `trades` 得到相同业务结果；`orders` 为空；
     此处三类查询均按该市场过滤，且不触发完整事件序列重新加载。
-    合格市场判定路径必须先有已持久化并可恢复且调用方可见的 `AutoRedeemApplied` 才能移除。
+    合格市场判定路径必须先有已持久化并可恢复且调用方可见的
+    `MakerRebateAccrualFinalized`、全部合格 `TakerRebateAccrualApplied` 和
+    `AutoRedeemApplied` 才能移除。
     `EXHAUSTED_QUARANTINED` 市场返回持久化的
-    未知/不完整判定，而不是终态快照或合法空页；保留期
+    未知/不完整判定，而不是终态快照或合法空页；它在移除前也必须有已持久化并可恢复的
+    `MakerRebateAccrualFinalized`，可确定时为计算/零结果，否则为 `UNKNOWN_INCOMPLETE`。
+    输入流异常导致会话失败封存时同样先持久化受影响市场的 maker 返佣未知终态。保留期
     到期与上述结果也可明确区分。
-19. `SIM-AC-019`：单笔/批量提交、单笔/批量/全部撤单、单笔/列表查询
-    响应、订单/成交生命周期反馈和结算反馈均能与原
-    请求/事件、批量项、订单、成交、市场和会话稳定关联；混合结果
-    不被批量级成功覆盖。
+19. `SIM-AC-019`：`post_order`/`post_orders`、`cancel_order`/`cancel_orders`/
+    `cancel_all_orders`、`order`/`orders`/`trades` 的模拟领域响应，以及订单/成交
+    生命周期反馈、maker/taker rebate 应计、日结/付款和结算反馈，均能与原请求/事件、
+    批量项、订单、成交、市场和会话稳定关联；`post_orders` 的逐项混合结果不被批量级
+    成功覆盖。
 20. `SIM-AC-020`：成交生命周期覆盖
     `MATCHED_NOT_BROADCASTED -> MATCHED -> MINED -> CONFIRMED`、重试中和失败；
     终态不重新打开，链上交易哈希暂缺时仍可关联，SDK `Unknown(raw)` 原值
@@ -1618,70 +2355,87 @@ NautilusTrader 提交
     均互斥；重复 `FAILED`、反馈或恢复不得再次释放。
 21. `SIM-AC-021`：响应先到、生命周期反馈先到、迟到、重复和在观测窗口
     内缺失的场景不会泄漏未来真相、重复应用或破坏最终状态。跨订单的撮合成交、失败
-    补偿、平台小额余量/撤单释放与自动赎回至少覆盖先交付账户序列
+    补偿、平台小额余量/撤单释放、maker/taker rebate 应计、日结/付款与自动赎回至少覆盖先交付账户序列
     `n+1`、后交付 `n`：前驱/摘要能由程序确定性识别缺口，补齐后按序应用得到与模拟
     平台账户状态变更前/后摘要一致的最终账户，重复变化量被幂等忽略；不得因乱序本身
     把合法平台状态误报为永久账本损坏。
-22. `SIM-AC-022`：相同 `ExecutionMarketEvent`、请求流、场景、
-    规则/队列/结算/时延/可见性/保留期配置档（`profile`）、平台小额余量规则、逻辑
+22. `SIM-AC-022`：相同 `ExecutionMarketEvent`、`PlatformRuleSnapshot`、请求流、场景、
+    规则/队列/手续费及返佣/结算/网络时延/可见性/保留期配置档（`profile`）、平台小额余量规则、逻辑
     时间和随机种子至少重跑两次，全部反馈、查询页和最终状态摘要精确一致。
 23. `SIM-AC-023`：至少一个 `model-train`、一个 `offline-evaluation` 和一个
     `paper-trade` 会话并行运行，只共享不可变事件序列页；账户、订单簿、订单
     叠加层、队列估计、RNG、游标、反馈和产物无交叉读写。作为当前
-    `rebuild-core` 正式验收时，三个调用方的运行清单还必须绑定相同的爱尔兰
-    双向代理 `profile_id/version/hash`；使用其他配置档（`profile`）的会话必须明确标为模块级
+    `rebuild-core` 正式验收时，三个调用方的运行清单还必须绑定仅用日期不早于
+    `2026-07-30` 的合格数据，依获批的对应计划重新计算并通过配置档门禁与独立复核的同一
+    爱尔兰双向代理 `profile_id/version/hash`；该身份未形成时正式验收保持 `NOT_READY`。使用其他配置档
+    （`profile`）的会话必须明确标为模块级
     符合性测试（`conformance`）、校准或后续版本，不得取得当前正式运行判定。
-24. `SIM-AC-024`：每条平台规则、潜规则和队列/平台小额余量/结算/保留期
-    假设都能机械检查其证据类别、来源、适用范围、版本、摘要、限制和测试；
-    平台小额余量账户余量边界不会被误标为官方规则。原始状态未知值被保留并显式报告。
+24. `SIM-AC-024`：每条平台规则、潜规则和队列/平台小额余量/maker/taker rebate
+    应计与日结/付款/结算/保留期假设都能机械检查其证据类别、来源、适用范围、版本、摘要、限制和测试；
+    平台小额余量账户余量边界不会被误标为官方规则。还必须机械核对第 10.1 节配置矩阵的
+    查询字段、文档规则、项目/账户规则、排除字段和 provenance 均有唯一归属；SDK 类型缺口
+    不再阻断冷启动，但只读 HTTP 窄例外不得扩到交易、账户、认证或任意 JSON。`oas` 只形成
+    显式未消费响应字段记录而不单独阻断；必需响应语义缺失、非法或冲突仍失败即关闭。原始
+    状态未知值被保留并显式报告。
     下游 NOE 的状态别名表逐端点/接口面覆盖已知原始拼写，只有
     产物未列值进入未知/未建模；模拟器原始证据不冒充 NOE 输出。
-25. `SIM-AC-025`：2026-07-30 类型化原始数据不能被模拟器运行时直接读取；由后续
-    `data-pipeline` 从该样本生成的合同有效 `ExecutionMarketEvent` 可以进入
-    训练回放。样本不得被冒充为本账户提交/撤单/时延/队列排位
+25. `SIM-AC-025`：模拟器运行时不能直接读取任何类型化原始数据；正式真实纵向门只能消费
+    `data-pipeline(training)-A` 从谱系源自 `/home/chillchill/new-datasets`、日期不早于
+    `2026-07-30` 且被合格门 A 回执覆盖的数据生成的合同有效 `ExecutionMarketEvent`。
+    `sim-system` 不自行扫描原始目录、校验日期或扩大门 A 输入。样本不得被冒充为本账户提交/撤单/时延/队列排位
     或平台小额余量账户订单终态规则真值。
-26. `SIM-AC-026`：使用两个内部实现完全不同但外部合同相同的 `model-train` 测试替身
-    调用方，`sim-system` 无需修改即可处理全部首版请求，证明不存在框架耦合。
-27. `SIM-AC-027`：网络禁用、无钱包/凭据、无真实 `data-pipeline` 生产器
-    和无模型环境下，使用合成请求与合同有效的固定预期黄金
-    `ExecutionMarketEvent` 完成核心引擎验收。
+26. `SIM-AC-026`：使用当前唯一训练框架对外请求合同的最小测试调用方，通过合同一致的
+    最小测试桥接器逐一调用全部八个模拟方法；`sim-system` 无需加载或引用该框架运行时
+    类型即可处理全部首版模拟领域请求，并且不会接收 `SignedOrder`、认证材料或网络配置。
+    该验收不要求、实现或授权共用桥接器的实盘后端和生产宿主集成。
+27. `SIM-AC-027`：冷启动加载器以官方 HTTPS 合同测试替身覆盖请求路径、查询编码、次数、
+    强类型解析、一致性和失败门；加载
+    完成后，在网络禁用、无钱包/凭据和无模型环境下，使用合成请求、合同有效的固定预期黄金
+    `ExecutionMarketEvent` 与冻结规则快照完成核心引擎组件符合性验收；随后在仍禁用
+    网络和凭据的条件下，使用 `data-pipeline(training)-A` 从已最终化输入生成的真实
+    管道事件完成纵向验收。
 28. `SIM-AC-028`：同一规范事件序列经训练回放生产器与模拟盘
     回放测试生产器进入模拟器后产生相同影子订单簿状态转换；真实模拟盘
     路径只允许使用本机已可用事件。
 29. `SIM-AC-029`：训练物理预取未来事件序列页不改变当前逻辑游标前的
     订单簿、队列或撮合成交；模拟盘在快照/epoch/缺口就绪前拒绝新订单或返回
     市场未就绪。
-30. `SIM-AC-030`：使用 2026-07-30 清单所示每日 288 个 5 分钟市场规模的等价
-    压力工作负载，并以模拟时间跨过至少两个完整保留期/滚动切换周期。获批计划
-    必须从该日 41,355,216 条 `polymarket_market` 原始行经过后续规范
-    投影的性能分析器结果，冻结合理的 `ExecutionMarketEvent` 数量/速率/突发量
-    以及订单、成交和分页查询负载，并解释为何不把原始行数量直接冒充模拟器输入
-    数量。常驻市场数量、热字节、队列达到稳定上界；到期记录被
+30. `SIM-AC-030`：组件符合性门使用与 2026-07-30 清单所示每日 288 个 5 分钟市场
+    规模等价的合同有效合成压力工作负载，并以模拟时间跨过至少两个完整保留期/滚动切换
+    周期。获批计划必须冻结合成 `ExecutionMarketEvent` 数量/速率/突发量以及订单、成交和
+    分页查询负载，并明确这些数值只是当前有界性验收负载，不冒充真实规范投影或生产容量
+    基线。常驻市场数量、热字节、队列达到稳定上界；到期记录被
     删除，未到期记录不被误删；运行时/产物根目录的已保留记录数量
     与已保留字节始终不超过全局配额，而不是随市场、会话或运行数
-    单调增长。
+    单调增长。待 `data-pipeline(training)` 实现后，必须以该日 41,355,216 条
+    `polymarket_market` 原始行经实际规范投影的性能分析器结果重新冻结合理的真实
+    `ExecutionMarketEvent` 数量/速率/突发量和调用负载，并解释为何不把原始行数量直接
+    冒充模拟器输入数量；该重新定标属于真实管道纵向门，不能由合成负载替代。
 31. `SIM-AC-031`：市场结束后满足屏障条件即释放占用较大的订单簿/事件缓冲区；
     外部盘口余量的释放不生成本账户订单/成交/平台小额余量/账户变化量，本账户活动订单
     则按市场结束终态关闭并只释放自身预留资金；
-    已取得合格市场判定的路径在自动赎回和紧凑投影已持久化并可恢复且调用方可见后清理，
-    市场判定等待期限已耗尽并进入隔离的路径在持久化市场结束订单终态和未知结算
-    投影后清理；未取得合格市场判定的市场不无限常驻、不伪造获胜结果、赎回、未知成交终态或
-    空查询结果。
+    已取得合格市场判定的路径在 maker/taker rebate 应计、自动赎回和紧凑投影已持久化并可恢复且调用方可见后清理，
+    已收到上游市场判定等待耗尽终态并进入隔离的路径在持久化市场结束订单终态和未知结算
+    投影后清理；输入流结束或失败且没有提供上述任一终态时，受影响会话安全失败并封存，
+    释放会话可变热状态且保留输入终态缺失报告，不把市场伪记为正常终态、耗尽隔离或已移除。
+    未取得合格市场判定的市场不无限常驻、不伪造获胜结果、赎回、未知成交终态或空查询结果。
 32. `SIM-AC-032`：模拟盘崩溃后从模拟器检查点、紧凑日志和流水线
     仅追加日志恢复后，不重复撮合成交经济变化量/失败补偿/平台小额余量/
-    预留资金释放/撤单/自动赎回/反馈，分页查询与恢复前一致。
+    预留资金释放/撤单/maker/taker rebate 应计、日结/付款、自动赎回/反馈，分页查询与恢复前一致。
 33. `SIM-AC-033`：产物能从请求到响应、生命周期、市场游标、
-    队列归因、确定性平台小额余量决策、结算、规则和最终状态完整
+    队列归因、确定性平台小额余量决策、maker/taker rebate 应计、日结/付款、结算、规则和最终状态完整
     追溯，且不含机密、模型状态、类型化原始数据、调用方 Ledger 或完整规范事件序列副本。
-34. `SIM-AC-034`：共享请求封装对合同版本、调用方/会话/
-    账户、请求 ID、关联/本地意图、调用方序列、逻辑时间和
-    因果游标逐字段进行正负测试；提交/撤单另测试变更幂等键，
+34. `SIM-AC-034`：逐个模拟领域方法请求对合同版本、原始调用方/会话/
+    账户、请求 ID、关联/本地意图、调用方序列、逻辑时间和因果游标逐字段进行正负测试；
+    提交/撤单另测试变更幂等键，
     查询/列表测试同请求 ID 重试与新请求 ID 的不同截点语义。非法
     输入在改变业务状态前必须被安全拒绝（`fail closed`）。
-35. `SIM-AC-035`：没有显式 `CancelOrder`、`CancelOrders` 或 `CancelAllOrders` 时，
+35. `SIM-AC-035`：没有显式 `cancel_order`、`cancel_orders` 或 `cancel_all_orders` 时，
     模拟器不产生调用方撤单。FAK 剩余量终止、GTD 到期、市场关闭等
     内部结果以及平台小额余量终态只使用经规则确认的各自终态原因，不能
-    为了资源释放伪装成调用方撤单。
+    为了资源释放伪装成调用方撤单。FAK 相对固定 SDK 编码等价 `takerAmount`（shares）审计投影的未成交
+    余量进入 `canceled_base_quantity` 只表示数量归宿；事件来源和 `terminal_reason`
+    仍必须表明订单类型自动终止，模拟器不得因此生成任何调用方撤单请求。
 36. `SIM-AC-036`：给定订单已有权威累计部分撮合成交，随后撤单返回精确原始原因
     `matched orders can't be canceled`，该响应只更新撤单结果；新增撮合成交变化量、
     成交数量、现金变化量和份额变化量必须全部为零，既有累计已撮合不得被原始
@@ -1698,7 +2452,7 @@ NautilusTrader 提交
 38. `SIM-AC-038`：外部小余量隔离反例将本账户订单 `5 shares @ 0.7 pUSD/share` 放在同价
     外部后方 `0.0067 shares` 之前，有效聚合档位为 `5.0067 shares`。合格成交量为
     `5 shares` 时，本账户必须全部撮合、`open=0`、`venue_dust=0`；外部
-    `0.0067 shares` 保持在外部影子订单簿，不进入本账户 `QueryOrder`、预留资金、
+    `0.0067 shares` 保持在外部影子订单簿，不进入本账户 `order`、预留资金、
     成交或账户变化。市场结束时该外部余量只随外部订单簿状态释放，仍不生成任何
     本账户订单/成交/平台小额余量/账户变化量。
 39. `SIM-AC-039`：平台小额余量边界矩阵至少覆盖：本账户余量为零是全部撮合成交；最小正
@@ -1707,9 +2461,12 @@ NautilusTrader 提交
     订单时继续处于活动未成交状态。只有队列前移而没有穿过本账户订单、零差额/重复 `book`、尚无
     合格重校准 `book` 或数量所有权不明时不得触发平台小额余量；`SIM-R-008` 的有效净差额已经
     穿过本账户订单并形成正的已撮合数量时，不得仅因缺显式成交或跨过缺口而阻止平台小额余量。
-    FAK 终止、调用方单笔/批量/全部撤单、GTD 到期、市场结束、拒绝、仅手续费
-    净份额差异、超额成交、余额/授权额度和可卖出成熟状态均使用各自
-    终态/字段，不得改记为平台小额余量。
+    已接受 FAK 相对固定 SDK 编码等价 `takerAmount`（shares）审计投影的未成交 base 使用
+    `canceled_base_quantity` 和 FAK 终态原因，实际已撮合 base 超过投影时 canceled 为零；
+    未花 quote 使用 `released_or_unspent_quote_amount`；拒单的接受 quote 预算和 base
+    审计投影均为零。上述路径与
+    调用方单笔/批量/全部撤单、GTD 到期、市场结束、仅手续费净份额差异、超额成交、
+    余额/授权额度和可卖出成熟状态均不得改记为平台小额余量。
 40. `SIM-AC-040`：相同 `ExecutionMarketEvent`、请求、规则版本、队列所有权及初始
     状态必须逐订单复现相同的确定性平台小额余量结果；增加不影响目标订单队列的无关订单、改变
     工作单元（`worker`）或线程调度不得改变结果。检查点恢复不得重复关闭订单、重复释放
@@ -1720,13 +2477,17 @@ NautilusTrader 提交
     未撤单/终态。覆盖订单更新先到、撤单响应先到、同逻辑时刻两种
     稳定子顺序、迟到 `user-channel`、重复终态和通用未找到，均不得制造撮合成交、
     重复释放预留资金或重新打开订单。
-42. `SIM-AC-042`：平台小额余量终态前后及热移除后，`QueryOrder` 都正确表达
+42. `SIM-AC-042`：平台小额余量终态前后及热移除后，`order` 都正确表达
     原始请求计量基准/值、已接受/订单已撮合/成交结算子分桶/
     小额余量已关闭/活动未成交 base 数量、终态原因和幂等 `encumbrance_release`；
-    `ListOpenOrders` 排除该订单，
-    `ListTrades` 的数量和条目数只反映实际撮合成交，不含平台小额余量伪成交。
+    `orders` 排除该订单，
+    `trades` 的数量和条目数只反映实际撮合成交，不含平台小额余量伪成交。
 43. `SIM-AC-043`：合格 `MarketResolved` 在 `available_at=T` 到达时，
-    全部因果上更早成交经济变化量/补偿先在模拟平台内部闭合，并核验
+    全部因果上更早成交经济变化量/补偿先在模拟平台内部闭合，核验并引用此前已由
+    “市场结束 + 成交经济闭合”唯一条件形成的 `MakerRebateAccrualFinalized` 及全部合格
+    taker 应计，不得由
+    `MarketResolved` 处理器重新汇总或应用；若两者同为逻辑时间 `T`，返佣最终化按其自身
+    条件排在 `MarketResolvedObserved` 之前。随后核验
     市场结束已关闭全部本账户活动订单/未成交剩余量、释放对应预留资金；随后
     内部 `MarketResolvedObserved` 标记与外部 `AutoRedeemApplied` 都使用逻辑
     时间 `T` 和冻结子顺序；标记不进入任何对外反馈联合类型；
@@ -1745,20 +2506,76 @@ NautilusTrader 提交
     `AutoRedeemApplied`。`visible_at <= T` 的前驱在同一输出截点按稳定
     顺序先交付；合法 `visible_at > T` 的前驱保留原时延，自动赎回
     携带其状态转换身份标识/水位线，调用方可检测序列缺口、缓冲并在后到时去重。
-45. `SIM-AC-045`：已取得合格市场判定的市场只有在自动赎回和结算反馈已持久化并可恢复且
+45. `SIM-AC-045`：已取得合格市场判定的市场只有在 maker rebate 应计、该市场全部 taker
+    应计、自动赎回和结算反馈已持久化并可恢复且
     调用方可见后才完成第二阶段移除；`EXHAUSTED_QUARANTINED`、兑付冲突或
-    缺合格市场判定的市场不执行赎回，并在有界判定等待期限（`horizon`）结束后保留可查询的
-    未知/不完整投影再释放热状态。
+    缺合格市场判定的市场不执行赎回；收到上游合同有效的市场判定等待耗尽终态后，
+    先按证据形成一次可计算、零或 `UNKNOWN_INCOMPLETE` 的 maker 返佣终态并保留可查询的
+    未知/不完整投影，再释放热状态。输入流异常的会话失败封存路径也必须先持久化 maker 返佣
+    未知终态。`sim-system` 不自行维护第二个判定期限。
+46. `SIM-AC-046`：maker rebate 固定预期黄金矩阵至少覆盖：maker 与 taker 分段、同一订单
+    先 taker 后 maker、部分 maker 成交、零合格成交、maker 成交最终成功/失败未应用/失败
+    已补偿、L2 确定性推定 maker 成交、价格接近 0/1 和等于 0.5、手续费 5 位精度归零边界、
+    `fees_enabled=false`、`rebate_rate=0`、`fees_enabled=false` 与 `taker_only=false` 同时出现时
+    仍按优先级为零、费用启用且正返佣下 `taker_only=false` 为 `UNSUPPORTED_RULE_VERSION`、
+    `taker_only` 或规则快照其他必需字段缺失/不完整时在创建会话前拒绝无效快照、规则完整
+    有效但异常输入终态使潜在合格成交经济最终性永远无法闭合时为 `UNKNOWN_INCOMPLETE`、
+    两个历史 `feeSchedule`（至少 `rate=0.25, exponent=2, rebateRate=0.20` 与
+    `rate=0.07, exponent=1, rebateRate=0.20`）、市场汇总和逐笔代数和一致、重复/乱序反馈及
+    检查点恢复。每个 `CALCULATED` 结果只增加一次
+    `maker_rebate_receivable_pusd`，现金/可用现金/持仓/订单资金占用变化均为零；
+    没有正 maker 成交时即使费用关闭而合法省略未使用的 `feeSchedule` 也确定为零；无效规则
+    快照不得进入核心，运行时经济最终性不完整时不造零值或现金。逐笔贡献只供审计/汇总，
+    其返佣账户变化量恒为零，只有最终化反馈能增加应收款。通过代码审查与既有依赖边界/
+    合同断言确认没有读取 Liquidity Rewards 字段、没有市场类别/slug 第二校验器、没有
+    硬编码当前逐市场参数。组件符合性门使用最小合同一致测试替身，证明输出包含足够的
+    幂等身份，使同一应计最多被归一化和应用一次，且不会在 RewardContract 中形成第二笔
+    返佣奖励；实际归一化层/Ledger 的端到端消费和 RewardContract 输入合同兼容性属于
+    训练闭环门，RewardContract 的实际计算由 `model-train` 首门验收。
+    不为证明“不存在”再建设静态分析器或运行时校验器。
+47. `SIM-AC-047`：taker rebate 与两类日结/付款固定预期黄金矩阵至少覆盖：实际 maker/taker
+    混合分段、最终成功且实际收取 taker 手续费、未收手续费、失败未应用、失败已补偿、
+    `actual_taker_fee_pusd × 0.08`、重复/乱序/恢复，以及不查询或累计 wV、不实现动态等级和
+    一次性等级奖金。日结必须覆盖同日 maker `0.6 pUSD` 与 taker `0.6 pUSD` 均不付款、
+    同类 `0.9999 pUSD` 不付款、`1.0000 pUSD` 全额付款、`1.23459 pUSD` 付款
+    `1.2345 pUSD` 且锁定 `0.00009 pUSD`、低于门槛金额及截取余数不参与下一日门槛、
+    日桶未知不完整不猜测付款，以及 D 日 taker 在 D+1 `00:10 UTC`、maker 在 D+1
+    `00:45 UTC` 正常路径的稳定同刻顺序。还必须覆盖：正常时刻到达时已经归属 D 的潜在
+    合格贡献仍有一项内部最终性未闭合，原日桶保持未日结且不付款；最后一项闭合后在首个
+    因果可用内部时刻只日结、付款一次；普通训练窗口结束或调用方主动截尾本身不生成
+    `UNKNOWN_INCOMPLETE`，无论是否跨过正常现金可用时刻，尚未闭合的原日桶都保持未日结；
+    已经到达应结算边界且既有异常封存/隔离终态证明闭合永久不可能时才使用既有
+    `UNKNOWN_INCOMPLETE`；客户端反馈迟到不改变已经发生的内部付款时刻；
+    重复日结和检查点恢复不重复付款。付款事件只携带被消费应计的数量和摘要，不复制完整
+    身份集合。每次应计只增加对应不可支出应收款；每次付款只把对应
+    `paid_pusd` 从应收款转为现金，使可用现金增加同额而 NAV/PnL/RewardContract 奖励变化
+    为零。测试还必须证明只存在当前 pUSD 路径，maker/taker 应收款和门槛互不混用，疑似
+    `250 pUSD` 一次性等级奖金与 V2 切换日的旧版 USDC.e maker rebate 均不进入普通
+    pUSD 返佣校准。组件符合性门使用最小合同一致测试替身证明付款反馈具备幂等身份且
+    最多应用一次；实际非订单经济归一化合同/Ledger 的端到端消费属于训练闭环门。
+48. `SIM-AC-048`：真实管道纵向门必须从已最终化、已准入但物理枚举顺序不代表
+    跨源时间顺序的类型化原始分片开始，由 `data-pipeline(training)-A` 产生唯一规范
+    全序和真实 `ExecutionMarketEvent`，并证明至少一个代表性市场窗口可驱动
+    `sim-system`。训练闭环门随后以干净
+    初始账户和固定随机种子驱动同一账户轨迹。场景时间范围不对齐完整 UTC 日并跨越至少
+    一个 UTC 日边界；轨迹内部顺序和账户状态连续，不同隔离轨迹可以并行。场景必须证明
+    D 日返佣先进入不可支出应收款，只有到正常付款时刻且内部最终性已闭合后才转为现金并
+    可供后续 BUY 使用；在付款前截尾的对照轨迹只保留应收款且不提前付款。训练中断后从
+    干净轨迹起点确定性重放，不从中途账户/模拟器检查点续跑。验收不得要求每条轨迹覆盖
+    完整 UTC 日、固定 288 个市场、人工快进至付款，也不得在 `sim-system` 内重做原始文件
+    排序、完整日校验或返佣专用截尾状态机。黄金矩阵与合同一致测试替身继续覆盖组件级
+    返佣和跨日语义，但不得替代真实管道纵向门；完整归一化反馈、Ledger、Observation
+    和 RewardContract 输入合同兼容性不阻断模拟器开发，但在进入 `model-train` 前必须
+    通过训练闭环门；RewardContract 的实际计算由 `model-train` 首门验收。
 
 ## 17. 本需求审核通过的判定
 
-只有用户明确批准本文后，才能：
+只有用户明确批准本文后，才能把需求生命周期改为已批准；只有对应计划再获批准，计划范围
+内的本地实现才取得执行游标。无权威的审核 plan/changelog 草案可在批准前创建，不表示实施。
+对应计划获批后，才能：
 
-1. 把生命周期改为已批准状态；
-2. 创建一一对应的 `plan/sim-system-plan.md`；
-3. 创建 `changelog/sim-system-changelog.md` 并记录需求审核决定；
-4. 在计划中选择成熟工具/依赖、冻结技术实现、数值资源预算、测试矩阵和执行顺序；
-5. 开始任何 `sim-system` 代码开发。
+1. 依获批计划选择成熟工具/依赖、冻结技术实现、实测数值资源预算、测试矩阵和执行顺序；
+2. 开始计划范围内的本地 `sim-system` 代码开发。
 
-需求审核通过不等于计划审核通过、代码验收、模拟盘/实盘准入、部署授权或真实资金
-授权。
+需求审核通过不等于计划审核通过、代码验收、模拟盘/实盘准入、部署授权、推送/发布或
+真实资金授权；获批计划内成熟依赖选择和既定硬件范围内的资源实测无需逐项重复申请。

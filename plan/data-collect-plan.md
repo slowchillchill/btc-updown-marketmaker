@@ -28,7 +28,8 @@
 | 身份与市场判定 | 固定身份信息、E+3..E+8、终态仅一次、重启时失败即关闭 | `current/contracts.md` |
 | 运行 | 干净且已推送的提交在本地构建、固定路径和单元、远端不编译 | `current/operations.md` |
 | 文档权威 | 单一 `CURRENT`、主题归属文档、标签和清单隔离历史 | `current/document-authority-audit.md` |
-| 跨模块顺序 | 当前后继为 `sim-system`；模拟盘和实盘适配器延期门保持不变 | `data-collect/docs/CURRENT.md`、主三件套 |
+| 跨模块顺序 | 当前后继为 `data-pipeline(training)` 的需求/合同和最小真实纵向链路；随后以黄金事件和真实管道事件验收 `sim-system`，再完成训练管道闭环；模拟盘和实盘适配器延期门保持不变 | `data-collect/docs/CURRENT.md`、主三件套 |
+| 低频平台规则边界 | `sim-system` 新运行通过固定官方公开 HTTPS 窄加载器冷启动查询并冻结；该模拟器例外不改变 `data-collect` 官方 Rust SDK 合同，当前 schema 不增规则专用列，原始证据 JSON 不删键，动态 tick 事件继续保留 | `current/contracts.md`、`current/known-limitations.md` |
 
 ## 2. 当前验证方式
 
@@ -38,9 +39,11 @@
    范围，或把排除后的结果写成无条件全套测试通过。
 4. 每次当前文档、代码或测试变化都必须更新
    `data-collect/docs/current/acceptance.md` 的真实日期快照。
-5. 跨模块顺序变更还必须检索活动的当前文档、主三件套和两份跨模块草案中的旧“下一
+5. 跨模块顺序变更还必须检索活动的当前文档、主三件套和全部跨模块草案/记录中的旧“下一
    模块”措辞，运行文档权威守卫与 `git diff --check`，且不得改写历史
    治理记录。
+6. 低频规则责任变化只做字段所有权、当前 schema 和只读空间反事实核验；除非未来另立并
+   批准新的 `data-collect` 事项，不修改采集代码/schema，也不重写既有 Parquet 或证据摘要。
 
 精确命令和最新结果由 `data-collect/docs/current/acceptance.md` 单独拥有。
 
