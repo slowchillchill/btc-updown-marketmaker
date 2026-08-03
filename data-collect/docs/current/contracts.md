@@ -20,6 +20,12 @@
 缺口、恢复、存储和清单。它不负责标签、特征、训练切分、模型输入加工、订单、撤单、
 钱包、NOE、账本、PnL 或交易策略。
 
+消费者边界中的历史名称 `ConsumerKind::Training` 明确表示下游 `model-train`，不是
+`data-pipeline(training)` 或 `data-collect-training-collector`。它不得直接读取
+`typed_raw` Parquet，必须消费 `data-pipeline` 输出；`ConsumerKind::DataPipeline` 是离线
+训练路径中唯一直接读取最终化 `typed_raw` 的消费种类。本边界不改变采集器写入内容、
+Parquet schema 或每日清单 schema。
+
 | 二进制程序 | 当前能力 |
 | --- | --- |
 | `data-collect-training-collector` | 连接真实 Polymarket CLOB、Gamma、RTDS 和 Binance，写六类类型化原始数据与每日清单 |

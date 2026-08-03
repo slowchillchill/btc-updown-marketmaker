@@ -1,10 +1,10 @@
-# data-pipeline(training) 审核中实施计划
+# data-pipeline(training) 已批准实施计划
 
 > 事项编号：`DATA-PIPELINE-TRAINING-20260803`
 >
-> 生命周期：`DRAFT_PLAN_AWAITING_DEMAND_APPROVAL`
+> 生命周期：`APPROVED_ACTIVE_PLAN`
 >
-> 当前执行 authority：`none`
+> 当前执行 authority：`plan/data-pipeline-training-plan.md`
 >
 > 对应需求：`demand/data-pipeline-training-demand.md`
 >
@@ -12,12 +12,12 @@
 >
 > `data-collect` 当前权威入口：`data-collect/docs/CURRENT.md`
 >
-> 执行授权：`none`
+> 执行授权：`LOCAL_IMPLEMENTATION_ONLY`
 >
-> 状态：`仅供审核；需求与本计划均获批前，所有实施任务均为 BLOCKED`
+> 状态：`用户已批准；阶段 0 实施准入复核中`
 
 本计划为需求、计划、变更记录一一对应而建立。它把需求中的每项验收映射到可验证的
-实施单元。需求批准只冻结范围；本计划获批后，计划范围内的本地代码、测试和不可变本地
+实施单元。用户已于 2026-08-04 批准需求和本计划；计划范围内的本地代码、测试和不可变本地
 测试产物取得执行游标，不再追加第三个通用“实施授权”。本计划无论是否获批，都不授权
 远端操作、部署、推送/发布、敏感材料、真实下单或真实资金。用户若修改需求，必须先同步
 本计划和变更记录，再判断已有游标是否仍然有效。
@@ -55,7 +55,10 @@
 `/home/chillchill/sim-system` 只是分支工作树和文档位置，不是部署根。开始时必须以正式根
 真实 `Cargo.toml` 为准；本事项只创建或修改 `contracts`、`data-pipeline/core` 和
 `data-pipeline/training`，不预建未来 online、paper/live、`model-train`、PyO3、
-`execution` 或 `ledger` 空 crate。三者边界按需求第 2.4 节执行，并以 `cargo metadata`、
+`execution` 或 `ledger` 空 crate。用户另行批准的
+`DATA-COLLECT-MODEL-TRAIN-BOUNDARY-20260804` 只修正既有 `data-collect` 模型训练消费
+边界与文档守卫，不形成第四个 DPT 实施单元，也不授权改变采集运行时或 schema。三者边界
+按需求第 2.4 节执行，并以 `cargo metadata`、
 `cargo tree` 和实际产物证明。
 
 每个任务完成后先自审差异、合同、测试和剩余风险；每个阶段的全部任务与该阶段所需验证
@@ -347,12 +350,13 @@
 
 ## 9. 当前游标
 
-当前只完成需求草案、审核计划和变更记录的起草；没有代码实施、数据构建、模型训练、
-部署、远端操作、提交或推送游标。下一动作只能是用户审核
-`demand/data-pipeline-training-demand.md` 和本计划；只有两者都获批，本计划范围内的本地实施
-才取得游标。进入受影响的门 B 工作前，还须决定三项外部能力采用两个还是三个批准事项；
+用户已于 2026-08-04 批准需求和本计划。本地实现游标为
+`阶段 0 -> 任务 0.1 -> 步骤 0.1.1`；当前先完成获批状态记录、窄消费边界修正和实施准入
+复核；其中窄消费边界修正已经通过独立审查并关闭，实施准入复核继续进行，尚未把阶段 0
+或任何 DPT 验收写成通过。进入受影响的门 B 工作前，还须决定三项外部能力
+采用两个还是三个批准事项；
 进入受影响的门 B 阶段或签发门 B 前，须决定正式时延配置档回执位于门 B 之前，还是位于
 门 B 与正式 `model-train` 之间；这些待决项不阻断门 A 或其他 DPT 局部开发，
 选择后一推荐位置时，正式配置档继续在 `model-train` 前阻断。CLOB 最小订单数量、完整
 `feeSchedule` 与 `itode` 已改归 `sim-system` 冷启动规则快照，不再是门 A 缺口。当前用户对
-文档修订的授权不等于需求或计划整体获批。
+需求和计划已经整体获批；推送、发布、部署和远端状态变化仍未授权。

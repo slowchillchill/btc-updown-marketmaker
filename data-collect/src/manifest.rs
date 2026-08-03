@@ -13,12 +13,12 @@ pub enum ValidationVerdict {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConsumerBoundaryKind {
+    /// 历史兼容标识，表示下游 `model-train` 消费方。
     Training,
     PaperLive,
 }
 
 pub const TRAINING_ALLOWED_DATA_COLLECT_ROLES: &[&str] = &[
-    "finalized_typed_raw_parquet",
     "manifest",
     "source_coverage",
     "source_health",
@@ -35,6 +35,7 @@ pub const TRAINING_REQUIRED_EXTERNAL_ROLES: &[&str] = &[
 ];
 
 pub const TRAINING_FORBIDDEN_DATA_COLLECT_ROLES: &[&str] = &[
+    "finalized_typed_raw_parquet",
     "labels",
     "features",
     "tick_stream",

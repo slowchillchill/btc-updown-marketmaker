@@ -7,11 +7,12 @@ use data_collect::source_format::{ConsumerBoundaryContract, ConsumerKind};
 use tempfile::tempdir;
 
 #[test]
-fn training_consumer_reads_finalized_raw_mirror_but_not_training_outputs() {
+fn model_train_consumer_rejects_finalized_raw_mirror_and_requires_pipeline_outputs() {
     let declaration = training_consumer_boundary_declaration();
 
     assert_eq!(declaration.consumer, ConsumerBoundaryKind::Training);
-    assert!(declaration.allows_data_collect_role("finalized_typed_raw_parquet"));
+    assert!(!declaration.allows_data_collect_role("finalized_typed_raw_parquet"));
+    assert!(declaration.forbids_data_collect_role("finalized_typed_raw_parquet"));
     assert!(declaration.allows_data_collect_role("manifest"));
     assert!(declaration.allows_data_collect_role("source_coverage"));
     assert!(declaration.requires_external_role("data_pipeline_labels"));
@@ -31,7 +32,7 @@ fn training_consumer_reads_finalized_raw_mirror_but_not_training_outputs() {
 }
 
 #[test]
-fn training_boundary_uses_utc_day_finalized_partition_under_dataset_root() {
+fn training_collector_uses_utc_day_finalized_partition_under_dataset_root() {
     let tmp = tempdir().unwrap();
     let partition =
         training_utc_day_partition(tmp.path(), "polymarket_market", 1_767_225_600_000).unwrap();
@@ -47,6 +48,7 @@ fn training_consumer_boundary_matches_source_format_contract() {
     let contract = ConsumerBoundaryContract::training();
 
     assert_eq!(contract.consumer, ConsumerKind::Training);
+    assert!(!contract.consumes_typed_raw_parquet);
     assert!(contract.requires_data_pipeline_outputs);
     assert!(!contract.data_collect_generates_labels);
     assert!(!contract.data_collect_generates_features);

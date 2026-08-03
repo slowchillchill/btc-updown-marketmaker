@@ -30,21 +30,28 @@
   `data-collect` 权威；其中只可引用本入口的当前事实和已确认跨模块主线，不得覆盖
   `data-collect` 模块合同、代码、测试或完成状态。
 - `demand/data-pipeline-training-demand.md`、`plan/data-pipeline-training-plan.md` 和
-  `changelog/data-pipeline-training-changelog.md` 是同一跨模块事项的审核中三件套，
-  当前执行 authority 和执行授权均为 `none`；它们只能引用本入口的当前事实，不得重开
-  或覆盖已完成的 `data-collect`。
+  `changelog/data-pipeline-training-changelog.md` 是同一已批准跨模块事项的活动三件套；
+  它们只拥有 DPT 对应计划范围内的本地实施权威，引用本入口的 `data-collect` 当前事实，
+  不得重开或覆盖已完成的采集器运行时、schema、数据或部署合同。
+- `demand/data-collect-model-train-consumer-boundary-demand.md`、
+  `plan/data-collect-model-train-consumer-boundary-plan.md` 和
+  `changelog/data-collect-model-train-consumer-boundary-changelog.md` 是由本 `CURRENT`
+  显式路由的已完成窄修正三件套，记录 `model-train` 禁止直接读取 `typed_raw` 及关联文档
+  守卫同步结果，不再拥有执行游标。
 
 当前活动树中所有直接出现 `data-collect` / `data_collect` / `DataCollect` 的
-Markdown 恰为 32 份，且每份都有明确处置：
+Markdown 恰为 35 份，且每份都有明确处置：
 
 | 类别 | 数量 |
 | --- | ---: |
 | `CURRENT` 入口、六个主题归属文档和当前主三件套 | 10 |
 | AGENTS 路由政策、README 和四个仅路由入口 | 6 |
 | 已完成治理记录三件套 | 3 |
-| 跨模块审核中草案/记录 | 9 |
+| 跨模块审核中草案/记录 | 6 |
+| 已批准 DPT 跨模块三件套 | 3 |
+| 已完成窄修正三件套 | 3 |
 | 仅作证据的错误记录 | 4 |
-| 合计 | 32 |
+| 合计 | 35 |
 
 ## 历史处置
 
@@ -99,6 +106,13 @@ Markdown 恰为 32 份，且每份都有明确处置：
 活动 Markdown 总数由 28 增为 32；三套跨模块三件套均保持 `authority=none` 和
 `执行授权=none`，当前 `data-collect` 主三件套、唯一 `CURRENT`、归档标签、快照和历史
 文档数量均未改变。实际测试结果记录在 `current/acceptance.md`，不得从本段预先推导为已通过。
+
+2026-08-04 用户批准 DPT 需求与计划后，DPT 三件套由审核中草案改为已批准活动事项；随后
+用户裁定历史名称 `ConsumerKind::Training` 表示下游 `model-train`，并批准
+`DATA-COLLECT-MODEL-TRAIN-BOUNDARY-20260804` 窄修正三件套。活动 Markdown 总数由 32
+增为 35；`rebuild-core` 与 `sim-system` 六份文档仍为草案，当前主三件套、唯一
+`CURRENT`、归档标签、快照和历史文档数量不变。真实测试结果只记录在
+`current/acceptance.md`，不得从本段预先推导为已通过。
 
 运行限制只由 `current/known-limitations.md` 拥有。若本审计、当前主题归属文档、代码、
 测试或用户最新决策不一致，必须停止并交由用户判断；当前无已知未解决的权威冲突。

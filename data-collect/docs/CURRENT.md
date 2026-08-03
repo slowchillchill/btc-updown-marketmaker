@@ -21,6 +21,12 @@
 ## 当前结论
 
 - `data-collect` 当前模块已经完成并由用户验收。
+- 用户于 2026-08-04 批准并完成窄事项
+  `DATA-COLLECT-MODEL-TRAIN-BOUNDARY-20260804`，只修正历史名称
+  `ConsumerKind::Training`（下游 `model-train`）的消费边界和关联文档守卫：
+  `model-train` 不得直接读取 `typed_raw`，必须消费 `data-pipeline` 输出；
+  `ConsumerKind::DataPipeline` 继续是离线训练路径中唯一直接读取最终化 `typed_raw` 的消费
+  种类。该事项不重开采集器运行时、schema、数据、paper/live、部署或远端操作。
 - 仓库构建训练、模拟盘热路径和实盘热路径三个二进制程序；当前只有训练二进制程序
   连接真实 Polymarket、RTDS 和 Binance 数据源。
 - 模拟盘和实盘二进制程序当前只提供启动回执、Unix 套接字和心跳、状态；
@@ -37,7 +43,7 @@
   从“代码已有”推导为生产验收。
 - 2026-07-28 事故已由用户最终验收。真实 UTC 日切换和完整健康 UTC 日运行证据
   不作已取得声明，也不再是模块完成阻断门。
-- 当前没有 `data-collect` Rust 实现、生产部署或远端操作游标；新工作必须另立活动
+- 当前没有 `data-collect` Rust 实现、生产部署或远端操作游标；任何新工作仍必须另立活动
   需求、计划和变更记录。
 - `sim-system` 的低频平台规则改由每个新运行通过固定的官方公开 HTTPS 窄加载器冷启动查询
   并冻结；该例外只属于模拟器冷启动，不改变 `data-collect` 必须使用官方 Rust SDK 的合同。
@@ -61,6 +67,20 @@
 
 `data-collect/README.md` 和旧文档原路径只提供入口兼容，不拥有独立执行权威。
 同一主题不得在多个当前文件中发展第二套规范。
+
+## 已完成窄修正事项
+
+当前主三件套继续描述已完成的 `data-collect` 主合同；以下三件套记录已经完成的消费边界
+修正，不得作为采集器或部署工作的活动入口：
+
+> 已完成修正需求：`demand/data-collect-model-train-consumer-boundary-demand.md`
+>
+> 已完成修正计划：`plan/data-collect-model-train-consumer-boundary-plan.md`
+>
+> 已完成修正 changelog：`changelog/data-collect-model-train-consumer-boundary-changelog.md`
+
+该窄事项的本地执行授权已经随计划完成而关闭；本 `CURRENT` 首屏的 `执行授权=none`
+继续表示当前没有代码、部署、远端状态变化、数据改写或其他外部动作游标。
 
 ## 证据优先级与冲突门
 

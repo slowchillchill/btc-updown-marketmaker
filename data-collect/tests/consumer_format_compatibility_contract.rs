@@ -23,8 +23,39 @@ fn training_contract_requires_data_pipeline_outputs_before_training() {
 
     assert_eq!(report.verdict, ValidationVerdict::Complete);
     assert_eq!(contract.consumer, ConsumerKind::Training);
+    assert!(!contract.consumes_typed_raw_parquet);
     assert!(contract.requires_data_pipeline_outputs);
     assert!(!contract.data_collect_output_is_training_approved);
+}
+
+#[test]
+fn model_train_contract_rejects_direct_typed_raw_consumption() {
+    let mut contract = ConsumerBoundaryContract::training();
+    contract.consumes_typed_raw_parquet = true;
+
+    let report = contract.validate();
+
+    assert_eq!(report.verdict, ValidationVerdict::Incomplete);
+    assert!(
+        report
+            .source_gaps
+            .contains(&"model_train_may_not_consume_typed_raw_parquet".to_owned())
+    );
+}
+
+#[test]
+fn data_pipeline_contract_rejects_missing_typed_raw_consumption_boundary() {
+    let mut contract = ConsumerBoundaryContract::data_pipeline();
+    contract.consumes_typed_raw_parquet = false;
+
+    let report = contract.validate();
+
+    assert_eq!(report.verdict, ValidationVerdict::Incomplete);
+    assert!(
+        report
+            .missing_fields
+            .contains(&"typed_raw_parquet_consumer_boundary".to_owned())
+    );
 }
 
 #[test]

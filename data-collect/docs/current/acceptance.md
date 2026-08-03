@@ -108,9 +108,16 @@ cargo test -p data-collect --locked \
 ```
 
 守卫必须验证唯一 `CURRENT` 入口、唯一主三件套、六个主题归属文档、归档标签、路径和
-blob、45 个历史路径不在活动树、四份仅作证据文档的首屏标记、九份跨模块审核中草案/
-记录均无 `data-collect` 权威，以及第二个 `CURRENT`、错误三件套引用、错误 blob、恢复
-历史路径和损坏证据首屏标记五类负例会被拒绝。
+blob、45 个历史路径不在活动树、四份仅作证据文档的首屏标记，以及以下三类跨模块文档：
+
+- `rebuild-core` 与 `sim-system` 六份文档仍是无执行权威的审核中草案/记录；
+- DPT 三件套已经批准，其本地执行权威只属于 DPT 计划，不拥有 `data-collect` 当前权威；
+- `DATA-COLLECT-MODEL-TRAIN-BOUNDARY-20260804` 三件套记录已完成窄修正且执行授权为
+  `none`。
+
+守卫还必须拒绝第二个 `CURRENT`、错误三件套引用、错误 blob、恢复历史路径、损坏证据
+首屏标记，以及把已批准 DPT 改回草案或扩大窄事项授权的负例。活动 Markdown 集合只包括
+Git 已跟踪或未被忽略的新文件，不把 Git 忽略的本地发布产物副本冒充活动文档。
 
 ## 6. 最新验证快照
 
@@ -244,3 +251,34 @@ schema、部署或远端状态。
   部署合同、Rust 格式和差异格式，不验证公开 HTTPS 加载器。
 - 本节不声称公开 HTTPS 加载器、`PlatformRuleSnapshot` 或其测试已经实现，也不复用第 10 节
   的既有测试结果为该加载器背书。
+
+## 12. 2026-08-04 model-train 消费边界窄修正验证
+
+本轮只把历史兼容标识 `ConsumerKind::Training` 明确为下游 `model-train`，取消它直接
+读取 `typed_raw` 的权限，并同步 DPT 已批准状态及文档权威守卫；没有修改最终化写入、
+每日清单 schema、既有 Parquet、采集器运行时、paper/live、部署或远端状态。
+
+- `ConsumerBoundaryContract::training()` 现在声明
+  `consumes_typed_raw_parquet=false`，同时继续要求 `data-pipeline` 输出；把该值临时改回
+  `true` 的负例得到 `Incomplete` 和
+  `model_train_may_not_consume_typed_raw_parquet`。
+- `ConsumerBoundaryContract::data_pipeline()` 继续声明原始读取为真；把该值临时改为
+  `false` 的负例得到 `Incomplete` 和 `typed_raw_parquet_consumer_boundary` 缺失。
+- `finalized_typed_raw_parquet` 只从 `Training` 的允许角色集合移入禁止集合；生产者的
+  `training_utc_day_partition`、最终化发现和原子发布合同保持不变。
+- 首次运行文档权威守卫为 `3 passed; 1 failed`：正式实施工作树中存在两份 2026-07-09
+  生成且被 Git 忽略的发布包文档副本，旧守卫的全文件系统递归误把它们计入活动文档。
+  用户指出它们不属于 `/home/chillchill/sim-system` 工作树后，核实失败只发生在正式实施根；
+  守卫随即改为只枚举 Git 已跟踪或未被忽略的新 Markdown，不修改、删除或纳入这两份发布
+  产物。重跑 `document_authority_contract` 为 `4 passed; 0 failed`。
+- 最终定向测试共 `31 passed; 0 failed`：
+  `consumer_format_compatibility_contract` 6 项、`document_authority_contract` 4 项、
+  `finalized_discovery_contract` 3 项、`manifest_contract` 5 项、
+  `paper_live_boundary_contract` 4 项、`training_consumer_boundary_contract` 4 项、
+  `writer_publish_contract` 5 项。
+- `cargo clippy -p data-collect --locked --tests -- -D warnings`、
+  `cargo fmt --all -- --check` 与 `git diff --check` 均通过。
+
+独立审查代理使用 `gpt-5.6-sol` 和 `ultra` 推理等级复核并重跑上述验证，最终结论为
+`Critical 0 / Important 0 / Minor 0`。本窄事项已完成并关闭本地执行授权；该结果不代表
+DPT 阶段 0 完成。

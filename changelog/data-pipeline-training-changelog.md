@@ -2,9 +2,9 @@
 
 > 事项编号：`DATA-PIPELINE-TRAINING-20260803`
 >
-> 生命周期：`DRAFT_REQUIREMENTS_CHANGELOG`
+> 生命周期：`ACTIVE_IMPLEMENTATION_CHANGELOG`
 >
-> 当前执行 authority：`none`
+> 当前执行 authority：`plan/data-pipeline-training-plan.md`
 >
 > 对应需求：`demand/data-pipeline-training-demand.md`
 >
@@ -12,9 +12,9 @@
 >
 > `data-collect` 当前权威入口：`data-collect/docs/CURRENT.md`
 >
-> 执行授权：`none`
+> 执行授权：`LOCAL_IMPLEMENTATION_ONLY`
 >
-> 状态：`只记录需求起草和决策变化；没有代码、数据构建、部署或远端执行`
+> 状态：`用户已批准；活动实施记录；阶段 0 实施准入复核中`
 
 ## 2026-08-03：创建独立需求草案
 
@@ -262,3 +262,37 @@
   能力门，不降低 Gate A，也不要求 `data-collect` 增列、删键、改 schema 或重写数据。
 - 本次只修订审核中文档语义，没有实现加载器、运行正式数据构建、修改 schema、操作远端、
   部署、提交或推送；事项 authority 和执行授权继续保持 `none`。
+
+## 2026-08-04：需求与计划获批并开始阶段 0
+
+### 用户决定
+
+- 用户明确批准 `demand/data-pipeline-training-demand.md` 和
+  `plan/data-pipeline-training-plan.md`，要求按需求与计划开始执行。
+- 用户要求实际情况与需求、计划或上下文不能同时成立时立即停止并报告，由用户决策。
+- 只读准入复核发现旧 `ConsumerKind::Training` 同时直接读取 `typed_raw` 并要求 DPT 输出；
+  用户裁定该历史名称表示下游 `model-train`，批准建立
+  `DATA-COLLECT-MODEL-TRAIN-BOUNDARY-20260804` 窄事项，取消其直接原始读取权限并同步
+  文档守卫。
+
+### 权威和游标
+
+- 需求改为 `APPROVED_REQUIREMENTS`，计划改为 `APPROVED_ACTIVE_PLAN`，本记录改为
+  `ACTIVE_IMPLEMENTATION_CHANGELOG`；当前执行 authority 为对应计划。
+- 计划范围内本地实现与本地提交已授权；推送、发布、部署、远端操作、敏感材料、真实下单
+  和真实资金仍未授权。
+- 当前游标为 `阶段 0 -> 任务 0.1 -> 步骤 0.1.1`；本条不宣称阶段 0 或任何验收已经通过。
+
+### 仓库基线
+
+- 正式根 `/home/chillchill/btc-updown-marketmaker` 已创建本地 `data-pipeline` 分支，基于
+  `3145a63594333fee50260db116db1ce11bf8a07e`，使已批准文档与后续代码处于同一谱系。
+- 正式根已有未跟踪二进制 `data-collect-training-collector` 保持未修改、未暂存；其
+  SHA-256 为 `5359b4cfcd397f8fd83a648808950e635df54b7fff5ee7ab584238d2c5784b0e`。
+
+### 前置窄事项完成
+
+- `DATA-COLLECT-MODEL-TRAIN-BOUNDARY-20260804` 已完成定向测试、自审和独立审查；独立
+  审查结论为 `Critical 0 / Important 0 / Minor 0`。
+- 该事项已经关闭执行授权，不形成第四个 DPT 实施单元；DPT 阶段 0 继续消费其已验证边界，
+  但本条不宣称阶段 0 或 `DPT-AC-018` 已完成。

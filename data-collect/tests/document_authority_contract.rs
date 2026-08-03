@@ -44,7 +44,7 @@ const GOVERNANCE_TRIPLET: [&str; 3] = [
     "changelog/data-collect-current-authority-consolidation-changelog.md",
 ];
 
-const CROSS_MODULE_DRAFT_DOCS: [&str; 9] = [
+const CROSS_MODULE_DOCS: [&str; 12] = [
     "demand/rebuild-core-demand.md",
     "plan/rebuild-core-plan.md",
     "changelog/rebuild-core-changelog.md",
@@ -54,6 +54,9 @@ const CROSS_MODULE_DRAFT_DOCS: [&str; 9] = [
     "demand/data-pipeline-training-demand.md",
     "plan/data-pipeline-training-plan.md",
     "changelog/data-pipeline-training-changelog.md",
+    "demand/data-collect-model-train-consumer-boundary-demand.md",
+    "plan/data-collect-model-train-consumer-boundary-plan.md",
+    "changelog/data-collect-model-train-consumer-boundary-changelog.md",
 ];
 
 const REBUILD_DRAFT_TRIPLET: [&str; 3] = [
@@ -68,87 +71,109 @@ const SIM_SYSTEM_DRAFT_TRIPLET: [&str; 3] = [
     "changelog/sim-system-changelog.md",
 ];
 
-const PIPELINE_DRAFT_TRIPLET: [&str; 3] = [
+const PIPELINE_ACTIVE_TRIPLET: [&str; 3] = [
     "demand/data-pipeline-training-demand.md",
     "plan/data-pipeline-training-plan.md",
     "changelog/data-pipeline-training-changelog.md",
 ];
 
+const MODEL_TRAIN_BOUNDARY_TRIPLET: [&str; 3] = [
+    "demand/data-collect-model-train-consumer-boundary-demand.md",
+    "plan/data-collect-model-train-consumer-boundary-plan.md",
+    "changelog/data-collect-model-train-consumer-boundary-changelog.md",
+];
+
 #[derive(Clone, Copy)]
-struct DraftHeaderExpectation {
+struct HeaderExpectation {
     path: &'static str,
     matter_id: &'static str,
     lifecycle: &'static str,
+    authority: &'static str,
+    execution_authorization: &'static str,
     status_marker: &'static str,
     peer_fields: [(&'static str, &'static str); 2],
 }
 
-const DRAFT_HEADER_EXPECTATIONS: [DraftHeaderExpectation; 9] = [
-    DraftHeaderExpectation {
+const HEADER_EXPECTATIONS: [HeaderExpectation; 12] = [
+    HeaderExpectation {
         path: "demand/rebuild-core-demand.md",
         matter_id: "rebuild-core-demand",
         lifecycle: "DRAFT_AWAITING_USER_REVIEW",
+        authority: "none",
+        execution_authorization: "none",
         status_marker: "需求审核中",
         peer_fields: [
             ("对应计划", "plan/rebuild-core-plan.md"),
             ("对应变更日志", "changelog/rebuild-core-changelog.md"),
         ],
     },
-    DraftHeaderExpectation {
+    HeaderExpectation {
         path: "plan/rebuild-core-plan.md",
         matter_id: "rebuild-core-demand",
         lifecycle: "DRAFT_PLAN_AWAITING_DEMAND_APPROVAL",
+        authority: "none",
+        execution_authorization: "none",
         status_marker: "仅供审核",
         peer_fields: [
             ("对应需求", "demand/rebuild-core-demand.md"),
             ("对应 changelog", "changelog/rebuild-core-changelog.md"),
         ],
     },
-    DraftHeaderExpectation {
+    HeaderExpectation {
         path: "changelog/rebuild-core-changelog.md",
         matter_id: "rebuild-core-demand",
         lifecycle: "DRAFT_REQUIREMENTS_CHANGELOG",
+        authority: "none",
+        execution_authorization: "none",
         status_marker: "只记录需求事实",
         peer_fields: [
             ("对应需求", "demand/rebuild-core-demand.md"),
             ("对应计划", "plan/rebuild-core-plan.md"),
         ],
     },
-    DraftHeaderExpectation {
+    HeaderExpectation {
         path: "demand/sim-system-demand.md",
         matter_id: "SIM-SYSTEM-20260731",
         lifecycle: "DRAFT_AWAITING_USER_REVIEW",
+        authority: "none",
+        execution_authorization: "none",
         status_marker: "需求草案，等待需求与计划审核",
         peer_fields: [
             ("对应计划", "plan/sim-system-plan.md"),
             ("对应变更日志", "changelog/sim-system-changelog.md"),
         ],
     },
-    DraftHeaderExpectation {
+    HeaderExpectation {
         path: "plan/sim-system-plan.md",
         matter_id: "SIM-SYSTEM-20260731",
         lifecycle: "DRAFT_PLAN_AWAITING_DEMAND_APPROVAL",
+        authority: "none",
+        execution_authorization: "none",
         status_marker: "仅供审核",
         peer_fields: [
             ("对应需求", "demand/sim-system-demand.md"),
             ("对应 changelog", "changelog/sim-system-changelog.md"),
         ],
     },
-    DraftHeaderExpectation {
+    HeaderExpectation {
         path: "changelog/sim-system-changelog.md",
         matter_id: "SIM-SYSTEM-20260731",
         lifecycle: "DRAFT_REQUIREMENTS_CHANGELOG",
+        authority: "none",
+        execution_authorization: "none",
         status_marker: "只记录需求演进",
         peer_fields: [
             ("对应需求", "demand/sim-system-demand.md"),
             ("对应计划", "plan/sim-system-plan.md"),
         ],
     },
-    DraftHeaderExpectation {
+    HeaderExpectation {
         path: "demand/data-pipeline-training-demand.md",
         matter_id: "DATA-PIPELINE-TRAINING-20260803",
-        lifecycle: "DRAFT_AWAITING_USER_REVIEW",
-        status_marker: "需求草案，等待需求与计划审核",
+        lifecycle: "APPROVED_REQUIREMENTS",
+        authority: "plan/data-pipeline-training-plan.md",
+        execution_authorization: "LOCAL_IMPLEMENTATION_ONLY",
+        status_marker: "用户已批准；范围已冻结；阶段 0 实施准入复核中",
         peer_fields: [
             ("对应计划", "plan/data-pipeline-training-plan.md"),
             (
@@ -157,11 +182,13 @@ const DRAFT_HEADER_EXPECTATIONS: [DraftHeaderExpectation; 9] = [
             ),
         ],
     },
-    DraftHeaderExpectation {
+    HeaderExpectation {
         path: "plan/data-pipeline-training-plan.md",
         matter_id: "DATA-PIPELINE-TRAINING-20260803",
-        lifecycle: "DRAFT_PLAN_AWAITING_DEMAND_APPROVAL",
-        status_marker: "仅供审核",
+        lifecycle: "APPROVED_ACTIVE_PLAN",
+        authority: "plan/data-pipeline-training-plan.md",
+        execution_authorization: "LOCAL_IMPLEMENTATION_ONLY",
+        status_marker: "用户已批准；阶段 0 实施准入复核中",
         peer_fields: [
             ("对应需求", "demand/data-pipeline-training-demand.md"),
             (
@@ -170,14 +197,70 @@ const DRAFT_HEADER_EXPECTATIONS: [DraftHeaderExpectation; 9] = [
             ),
         ],
     },
-    DraftHeaderExpectation {
+    HeaderExpectation {
         path: "changelog/data-pipeline-training-changelog.md",
         matter_id: "DATA-PIPELINE-TRAINING-20260803",
-        lifecycle: "DRAFT_REQUIREMENTS_CHANGELOG",
-        status_marker: "只记录需求起草",
+        lifecycle: "ACTIVE_IMPLEMENTATION_CHANGELOG",
+        authority: "plan/data-pipeline-training-plan.md",
+        execution_authorization: "LOCAL_IMPLEMENTATION_ONLY",
+        status_marker: "用户已批准；活动实施记录；阶段 0 实施准入复核中",
         peer_fields: [
             ("对应需求", "demand/data-pipeline-training-demand.md"),
             ("对应计划", "plan/data-pipeline-training-plan.md"),
+        ],
+    },
+    HeaderExpectation {
+        path: "demand/data-collect-model-train-consumer-boundary-demand.md",
+        matter_id: "DATA-COLLECT-MODEL-TRAIN-BOUNDARY-20260804",
+        lifecycle: "APPROVED_REQUIREMENTS",
+        authority: "data-collect/docs/CURRENT.md",
+        execution_authorization: "none",
+        status_marker: "用户已批准；需求已实现并验证；窄事项已关闭",
+        peer_fields: [
+            (
+                "对应计划",
+                "plan/data-collect-model-train-consumer-boundary-plan.md",
+            ),
+            (
+                "对应 changelog",
+                "changelog/data-collect-model-train-consumer-boundary-changelog.md",
+            ),
+        ],
+    },
+    HeaderExpectation {
+        path: "plan/data-collect-model-train-consumer-boundary-plan.md",
+        matter_id: "DATA-COLLECT-MODEL-TRAIN-BOUNDARY-20260804",
+        lifecycle: "APPROVED_PLAN_COMPLETED",
+        authority: "data-collect/docs/CURRENT.md",
+        execution_authorization: "none",
+        status_marker: "本地修正、验证与独立审查已完成；计划已关闭",
+        peer_fields: [
+            (
+                "对应需求",
+                "demand/data-collect-model-train-consumer-boundary-demand.md",
+            ),
+            (
+                "对应 changelog",
+                "changelog/data-collect-model-train-consumer-boundary-changelog.md",
+            ),
+        ],
+    },
+    HeaderExpectation {
+        path: "changelog/data-collect-model-train-consumer-boundary-changelog.md",
+        matter_id: "DATA-COLLECT-MODEL-TRAIN-BOUNDARY-20260804",
+        lifecycle: "COMPLETED_IMPLEMENTATION_CHANGELOG",
+        authority: "data-collect/docs/CURRENT.md",
+        execution_authorization: "none",
+        status_marker: "窄修正已完成；无后续执行游标；未授权推送",
+        peer_fields: [
+            (
+                "对应需求",
+                "demand/data-collect-model-train-consumer-boundary-demand.md",
+            ),
+            (
+                "对应计划",
+                "plan/data-collect-model-train-consumer-boundary-plan.md",
+            ),
         ],
     },
 ];
@@ -243,20 +326,24 @@ fn current_authority_graph_is_unique_and_closed() {
         assert!(doc.contains("> superseded_by：`data-collect/docs/CURRENT.md`"));
     }
 
-    for expected in DRAFT_HEADER_EXPECTATIONS {
+    for expected in HEADER_EXPECTATIONS {
         let doc = read(&root.join(expected.path)).unwrap();
         assert!(
             doc.contains("data-collect/docs/CURRENT.md"),
             "{} does not route data-collect facts to CURRENT",
             expected.path
         );
-        validate_cross_module_draft_header(&doc, expected).unwrap();
+        validate_cross_module_header(&doc, expected).unwrap();
     }
 
     for (triplet, matter_id) in [
         (REBUILD_DRAFT_TRIPLET, "rebuild-core-demand"),
         (SIM_SYSTEM_DRAFT_TRIPLET, "SIM-SYSTEM-20260731"),
-        (PIPELINE_DRAFT_TRIPLET, "DATA-PIPELINE-TRAINING-20260803"),
+        (PIPELINE_ACTIVE_TRIPLET, "DATA-PIPELINE-TRAINING-20260803"),
+        (
+            MODEL_TRAIN_BOUNDARY_TRIPLET,
+            "DATA-COLLECT-MODEL-TRAIN-BOUNDARY-20260804",
+        ),
     ] {
         for path in triplet {
             let doc = read(&root.join(path)).unwrap();
@@ -325,7 +412,7 @@ fn current_authority_graph_is_unique_and_closed() {
     expected_related.extend(CURRENT_DOCS.map(str::to_owned));
     expected_related.extend(ROUTE_ONLY_DOCS.map(str::to_owned));
     expected_related.extend(GOVERNANCE_TRIPLET.map(str::to_owned));
-    expected_related.extend(CROSS_MODULE_DRAFT_DOCS.map(str::to_owned));
+    expected_related.extend(CROSS_MODULE_DOCS.map(str::to_owned));
     expected_related.extend(tag_marker_paths(&root, EVIDENCE_MARKER).unwrap());
     assert_eq!(
         paths_containing_any(&root, &["data-collect", "data_collect", "DataCollect"]).unwrap(),
@@ -460,46 +547,108 @@ fn authority_guard_rejects_negative_fixtures_without_touching_the_worktree() {
     fs::write(first_evidence, damaged).unwrap();
     assert!(validate_evidence_tree(evidence_fixture.path(), &expected).is_err());
 
-    let draft_expected = DRAFT_HEADER_EXPECTATIONS[6];
-    let draft = read(&root.join(draft_expected.path)).unwrap();
-    validate_cross_module_draft_header(&draft, draft_expected).unwrap();
+    let active_expected = HEADER_EXPECTATIONS[6];
+    let active = read(&root.join(active_expected.path)).unwrap();
+    validate_cross_module_header(&active, active_expected).unwrap();
     for (original, replacement) in [
         (
             "事项编号：`DATA-PIPELINE-TRAINING-20260803`",
             "事项编号：`WRONG-ID`",
         ),
         (
+            "生命周期：`APPROVED_REQUIREMENTS`",
             "生命周期：`DRAFT_AWAITING_USER_REVIEW`",
-            "生命周期：`APPROVED`",
         ),
-        ("当前执行 authority：`none`", "当前执行 authority：`self`"),
-        ("执行授权：`none`", "执行授权：`ALLOW`"),
-        ("状态：`需求草案", "状态：`APPROVED"),
+        (
+            "当前执行 authority：`plan/data-pipeline-training-plan.md`",
+            "当前执行 authority：`none`",
+        ),
+        (
+            "执行授权：`LOCAL_IMPLEMENTATION_ONLY`",
+            "执行授权：`ALLOW_ALL`",
+        ),
+        ("状态：`用户已批准", "状态：`需求草案"),
         (
             "对应计划：`plan/data-pipeline-training-plan.md`",
             "对应计划：`plan/wrong-plan.md`",
         ),
     ] {
-        let damaged = draft.replacen(original, replacement, 1);
-        assert_ne!(damaged, draft, "negative fixture did not alter {original}");
+        let damaged = active.replacen(original, replacement, 1);
+        assert_ne!(damaged, active, "negative fixture did not alter {original}");
         assert!(
-            validate_cross_module_draft_header(&damaged, draft_expected).is_err(),
-            "draft header guard accepted replacement {replacement}"
+            validate_cross_module_header(&damaged, active_expected).is_err(),
+            "approved header guard accepted replacement {replacement}"
+        );
+    }
+
+    let boundary_expected = HEADER_EXPECTATIONS[9];
+    let boundary = read(&root.join(boundary_expected.path)).unwrap();
+    validate_cross_module_header(&boundary, boundary_expected).unwrap();
+    for (original, replacement) in [
+        (
+            "事项编号：`DATA-COLLECT-MODEL-TRAIN-BOUNDARY-20260804`",
+            "事项编号：`WRONG-ID`",
+        ),
+        (
+            "当前执行 authority：`data-collect/docs/CURRENT.md`",
+            "当前执行 authority：`self`",
+        ),
+        ("执行授权：`none`", "执行授权：`LOCAL_IMPLEMENTATION_ONLY`"),
+        (
+            "状态：`用户已批准；需求已实现并验证；窄事项已关闭`",
+            "状态：`用户已批准；窄范围本地修正执行中`",
+        ),
+        (
+            "对应计划：`plan/data-collect-model-train-consumer-boundary-plan.md`",
+            "对应计划：`plan/wrong-plan.md`",
+        ),
+    ] {
+        let damaged = boundary.replacen(original, replacement, 1);
+        assert_ne!(
+            damaged, boundary,
+            "negative fixture did not alter {original}"
+        );
+        assert!(
+            validate_cross_module_header(&damaged, boundary_expected).is_err(),
+            "boundary header guard accepted replacement {replacement}"
+        );
+    }
+
+    for (index, original, replacement) in [
+        (
+            10,
+            "生命周期：`APPROVED_PLAN_COMPLETED`",
+            "生命周期：`APPROVED_ACTIVE_PLAN`",
+        ),
+        (
+            11,
+            "生命周期：`COMPLETED_IMPLEMENTATION_CHANGELOG`",
+            "生命周期：`ACTIVE_IMPLEMENTATION_CHANGELOG`",
+        ),
+    ] {
+        let expected = HEADER_EXPECTATIONS[index];
+        let doc = read(&root.join(expected.path)).unwrap();
+        validate_cross_module_header(&doc, expected).unwrap();
+        let damaged = doc.replacen(original, replacement, 1);
+        assert_ne!(damaged, doc, "negative fixture did not alter {original}");
+        assert!(
+            validate_cross_module_header(&damaged, expected).is_err(),
+            "closed header guard accepted replacement {replacement}"
         );
     }
 }
 
-fn validate_cross_module_draft_header(
-    doc: &str,
-    expected: DraftHeaderExpectation,
-) -> Result<(), String> {
+fn validate_cross_module_header(doc: &str, expected: HeaderExpectation) -> Result<(), String> {
     for (label, value) in [
         ("事项编号", format!("`{}`", expected.matter_id)),
         ("生命周期", format!("`{}`", expected.lifecycle)),
-        ("当前执行 authority", "`none`".to_owned()),
-        ("执行授权", "`none`".to_owned()),
+        ("当前执行 authority", format!("`{}`", expected.authority)),
+        (
+            "执行授权",
+            format!("`{}`", expected.execution_authorization),
+        ),
     ] {
-        let actual = draft_header_field(doc, label)?;
+        let actual = header_field(doc, label)?;
         if actual != value {
             return Err(format!(
                 "{} header {label} is {actual}, expected {value}",
@@ -508,7 +657,7 @@ fn validate_cross_module_draft_header(
         }
     }
 
-    let status = draft_header_field(doc, "状态")?;
+    let status = header_field(doc, "状态")?;
     if !status.contains(expected.status_marker) {
         return Err(format!(
             "{} header status does not contain {}",
@@ -516,7 +665,7 @@ fn validate_cross_module_draft_header(
         ));
     }
     for (label, path) in expected.peer_fields {
-        let actual = draft_header_field(doc, label)?;
+        let actual = header_field(doc, label)?;
         let expected_path = format!("`{path}`");
         if actual != expected_path {
             return Err(format!(
@@ -528,7 +677,7 @@ fn validate_cross_module_draft_header(
     Ok(())
 }
 
-fn draft_header_field(doc: &str, label: &str) -> Result<String, String> {
+fn header_field(doc: &str, label: &str) -> Result<String, String> {
     let prefix = format!("{label}：");
     let values = doc
         .lines()
@@ -543,7 +692,7 @@ fn draft_header_field(doc: &str, label: &str) -> Result<String, String> {
     match values.as_slice() {
         [value] => Ok(value.clone()),
         _ => Err(format!(
-            "draft header must contain exactly one {label} field, found {}",
+            "header must contain exactly one {label} field, found {}",
             values.len()
         )),
     }
@@ -564,6 +713,9 @@ fn validate_entry_graph(root: &Path) -> Result<(), String> {
         ("当前计划", MASTER_TRIPLET[1]),
         ("当前 changelog", MASTER_TRIPLET[2]),
         ("历史读取入口", MANIFEST),
+        ("已完成修正需求", MODEL_TRAIN_BOUNDARY_TRIPLET[0]),
+        ("已完成修正计划", MODEL_TRAIN_BOUNDARY_TRIPLET[1]),
+        ("已完成修正 changelog", MODEL_TRAIN_BOUNDARY_TRIPLET[2]),
     ] {
         let field = format!("> {label}：`{path}`");
         if current.matches(&field).count() != 1 {
@@ -736,13 +888,22 @@ fn marker_paths(root: &Path, marker: &str) -> Result<BTreeSet<String>, String> {
 }
 
 fn paths_containing_any(root: &Path, needles: &[&str]) -> Result<BTreeSet<String>, String> {
-    let mut markdown = Vec::new();
-    collect_markdown(root, root, &mut markdown)?;
     let mut result = BTreeSet::new();
-    for (relative, path) in markdown {
-        let content = read(&path)?;
+    let active_markdown = git(
+        root,
+        &[
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+            "*.md",
+        ],
+    )?;
+    for relative in active_markdown.lines() {
+        let content = read(&root.join(relative))?;
         if needles.iter().any(|needle| content.contains(needle)) {
-            result.insert(relative);
+            result.insert(relative.to_owned());
         }
     }
     Ok(result)
@@ -792,12 +953,19 @@ fn write_entry_fixture(root: &Path, demand_path: &str) {
         "changelog",
     )
     .unwrap();
+    for path in MODEL_TRAIN_BOUNDARY_TRIPLET {
+        fs::write(root.join(path), "boundary").unwrap();
+    }
     fs::write(root.join(MANIFEST), "kind\tkey_or_path\tvalue_or_blob\n").unwrap();
     fs::write(
         root.join(CURRENT),
         format!(
-            "# current\n\n{CURRENT_ENTRY_MARKER}\n\n> 当前需求：`{demand_path}`\n\n> 当前计划：`{}`\n\n> 当前 changelog：`{}`\n\n> 历史读取入口：`{MANIFEST}`\n",
-            MASTER_TRIPLET[1], MASTER_TRIPLET[2]
+            "# current\n\n{CURRENT_ENTRY_MARKER}\n\n> 当前需求：`{demand_path}`\n\n> 当前计划：`{}`\n\n> 当前 changelog：`{}`\n\n> 历史读取入口：`{MANIFEST}`\n\n> 已完成修正需求：`{}`\n\n> 已完成修正计划：`{}`\n\n> 已完成修正 changelog：`{}`\n",
+            MASTER_TRIPLET[1],
+            MASTER_TRIPLET[2],
+            MODEL_TRAIN_BOUNDARY_TRIPLET[0],
+            MODEL_TRAIN_BOUNDARY_TRIPLET[1],
+            MODEL_TRAIN_BOUNDARY_TRIPLET[2]
         ),
     )
     .unwrap();

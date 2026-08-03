@@ -48,6 +48,10 @@ data-collect-training-collector
 文件。数据消费方只能读取最终化 Parquet 和满足自身准入合同的已关闭日期；不得读取
 `.running`。
 
+在离线训练链路中，上述直接消费方只允许是 `ConsumerKind::DataPipeline`。
+历史名称 `ConsumerKind::Training` 表示下游 `model-train`，不得直接读取该目录；它只能
+消费经过唯一 `data-pipeline(training)` 规范化、准入和发布的版本化输出。
+
 ## 3. 模拟盘、实盘 CLI 与当前输出
 
 ```text
