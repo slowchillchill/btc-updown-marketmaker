@@ -30,6 +30,13 @@ Parquet，属于早期命名与消费边界不规范。
    消费种类；
 4. 同步 `DATA-PIPELINE-TRAINING-20260803` 已批准状态和文档权威守卫。
 
+用户随后批准推荐方案 2，进一步明确：`model-train` 进程可直接读取 `manifest`、
+`source_coverage`、`source_health`、`source_gap`、`reconnect_trace`、
+`backpressure_state` 六类角色，但它们只用于血缘、审计和质量诊断。它们不得参与训练准入
+或放行，不得进入 Observation、特征、标签、训练样本、训练切分、样本选择、模型输入或任何
+决策触发；训练数据和模型输入只来自版本化 DPT 输出。该后续澄清由 DPT 任务 0.9 实施，不
+重开本已关闭窄事项的执行授权。
+
 ## 2. 修正前已核实冲突
 
 - 修正前，`data-collect/src/source_format.rs` 中 `DataPipeline` 与 `Training` 的
@@ -56,6 +63,9 @@ Parquet，属于早期命名与消费边界不规范。
 6. 文档权威守卫必须同时机械验证：`rebuild-core` 与 `sim-system` 三件套仍是草案；DPT
    三件套已获批准并只拥有自身事项的本地实施权威；本窄事项由
    `data-collect/docs/CURRENT.md` 路由。
+7. `training_consumer_boundary_declaration()` 的允许集合必须精确保留上述六类角色，必需
+   外部集合必须精确指向版本化 DPT 产物，禁止集合继续拒绝采集器原始数据、标签、特征、
+   切分、样本和训练批准角色；不得新增无实际消费路径执行的字段。
 
 ## 4. 明确非目标
 
@@ -75,6 +85,8 @@ paper/live 热路径、部署、远端服务、钱包、交易、模型训练或
    历史对象数量不改变。
 5. `cargo fmt --all -- --check`、相关定向 Clippy、`git diff --check` 通过。
 6. 差异中不包含采集运行时、schema、数据、部署或远端状态改动。
+7. 行为断言机械锁定六类允许集合、DPT 必需输出集合和禁止模型输入集合；文档同时明确
+   “进程可读”不等于“模型可达”，且不把直接绿灯冒充实施前红灯。
 
 ## 6. 授权边界
 

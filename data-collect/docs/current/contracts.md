@@ -26,6 +26,12 @@
 训练路径中唯一直接读取最终化 `typed_raw` 的消费种类。本边界不改变采集器写入内容、
 Parquet schema 或每日清单 schema。
 
+`model-train` 进程仍可直接读取 `manifest`、`source_coverage`、`source_health`、
+`source_gap`、`reconnect_trace`、`backpressure_state` 六类 `data-collect` 角色，但这些
+角色只用于血缘、审计和质量诊断。它们不得参与训练准入或放行，不得进入 Observation、
+特征、标签、训练样本、训练切分、样本选择、模型输入或任何决策触发；版本化
+`data-pipeline` 输出是训练数据和模型输入的唯一来源。
+
 | 二进制程序 | 当前能力 |
 | --- | --- |
 | `data-collect-training-collector` | 连接真实 Polymarket CLOB、Gamma、RTDS 和 Binance，写六类类型化原始数据与每日清单 |

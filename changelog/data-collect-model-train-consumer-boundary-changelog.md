@@ -98,3 +98,15 @@
   `APPROVED_PLAN_COMPLETED` 与 `COMPLETED_IMPLEMENTATION_CHANGELOG` 损坏负例。
 - 修正后文档权威守卫为 `4 passed; 0 failed`，Rust 格式和差异格式检查通过；最终关闭复审
   结论为 `Critical 0 / Important 0 / Minor 0`。
+
+## 2026-08-04：DPT 任务 0.9 后续语义澄清
+
+- 用户批准推荐方案 2：`model-train` 进程继续直接读取 `manifest`、`source_coverage`、
+  `source_health`、`source_gap`、`reconnect_trace`、`backpressure_state` 六类角色，但只
+  用于血缘、审计和质量诊断；不得用于训练准入、切分、样本选择、模型输入或决策触发，也
+  不得进入 Observation、特征、标签或训练样本。版本化 DPT 输出是唯一训练数据和模型输入。
+- DPT 任务 0.9 只为现有常量增加用途注释，并在原
+  `training_consumer_boundary_contract` 中直接断言六类允许集合、DPT 必需输出集合和禁止
+  模型输入集合；没有新增字段、抽象、运行时路径或 `model-train` 占位实现。
+- 上述断言在现有行为上首次运行即通过，只属于特征化绿灯，不冒充 TDD 红灯。本同步不重开
+  已关闭窄事项的执行授权；实际完整验证结果记录在 DPT 变更记录和 Task 0.9 报告中。

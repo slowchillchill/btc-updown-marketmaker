@@ -50,7 +50,11 @@ data-collect-training-collector
 
 在离线训练链路中，上述直接消费方只允许是 `ConsumerKind::DataPipeline`。
 历史名称 `ConsumerKind::Training` 表示下游 `model-train`，不得直接读取该目录；它只能
-消费经过唯一 `data-pipeline(training)` 规范化、准入和发布的版本化输出。
+把经过唯一 `data-pipeline(training)` 规范化、准入和发布的版本化输出作为训练数据和模型
+输入。`model-train` 进程仍可直接读取 `manifest`、`source_coverage`、`source_health`、
+`source_gap`、`reconnect_trace`、`backpressure_state` 六类角色，但只能用于血缘、审计和
+质量诊断；这些元数据不得参与训练准入或放行，也不得进入 Observation、特征、标签、训练
+样本、训练切分、样本选择、模型输入或任何决策触发。
 
 ## 3. 模拟盘、实盘 CLI 与当前输出
 

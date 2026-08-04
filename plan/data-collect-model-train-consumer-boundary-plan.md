@@ -72,3 +72,12 @@
 Rust 格式和差异格式检查均通过；独立审查结论为
 `Critical 0 / Important 0 / Minor 0`。本计划的本地执行游标和执行授权现已关闭；该结果
 只完成本窄事项，不代表 DPT 阶段 0 完成，也不授权推送、发布、部署或远端操作。
+
+## 6. DPT 任务 0.9 后续同步
+
+用户批准推荐方案 2 后，`plan/data-pipeline-training-plan.md` 的任务 0.9 在其既有
+`LOCAL_IMPLEMENTATION_ONLY` 权威内补充语义和机械断言：精确保留
+`manifest`、`source_coverage`、`source_health`、`source_gap`、`reconnect_trace`、
+`backpressure_state` 六类进程可读角色，但只允许用于血缘、审计和质量诊断；它们不得用于
+训练准入、切分、样本选择、模型输入或决策触发。版本化 DPT 输出仍是唯一训练数据和模型
+输入。本节只同步已关闭计划与最新用户决定，不恢复本计划的执行游标或提交授权。

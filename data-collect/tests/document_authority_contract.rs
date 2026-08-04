@@ -173,7 +173,7 @@ const HEADER_EXPECTATIONS: [HeaderExpectation; 12] = [
         lifecycle: "APPROVED_REQUIREMENTS",
         authority: "plan/data-pipeline-training-plan.md",
         execution_authorization: "LOCAL_IMPLEMENTATION_ONLY",
-        status_marker: "用户已批准；范围已冻结；阶段 0 实施准入复核中",
+        status_marker: "用户已批准；范围已冻结；阶段 0 已通过；停在推送授权门",
         peer_fields: [
             ("对应计划", "plan/data-pipeline-training-plan.md"),
             (
@@ -188,7 +188,7 @@ const HEADER_EXPECTATIONS: [HeaderExpectation; 12] = [
         lifecycle: "APPROVED_ACTIVE_PLAN",
         authority: "plan/data-pipeline-training-plan.md",
         execution_authorization: "LOCAL_IMPLEMENTATION_ONLY",
-        status_marker: "用户已批准；阶段 0 实施准入复核中",
+        status_marker: "用户已批准；阶段 0 已通过；停在推送授权门",
         peer_fields: [
             ("对应需求", "demand/data-pipeline-training-demand.md"),
             (
@@ -203,7 +203,7 @@ const HEADER_EXPECTATIONS: [HeaderExpectation; 12] = [
         lifecycle: "ACTIVE_IMPLEMENTATION_CHANGELOG",
         authority: "plan/data-pipeline-training-plan.md",
         execution_authorization: "LOCAL_IMPLEMENTATION_ONLY",
-        status_marker: "用户已批准；活动实施记录；阶段 0 实施准入复核中",
+        status_marker: "用户已批准；阶段 0 已通过；停在推送授权门",
         peer_fields: [
             ("对应需求", "demand/data-pipeline-training-demand.md"),
             ("对应计划", "plan/data-pipeline-training-plan.md"),

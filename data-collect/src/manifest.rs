@@ -18,6 +18,8 @@ pub enum ConsumerBoundaryKind {
     PaperLive,
 }
 
+/// 下游 `model-train` 进程只可把这六类角色用于血缘、审计和质量诊断；它们不得成为
+/// 模型输入、Observation、特征、标签、训练样本、训练切分、样本选择或决策触发器。
 pub const TRAINING_ALLOWED_DATA_COLLECT_ROLES: &[&str] = &[
     "manifest",
     "source_coverage",
@@ -27,6 +29,7 @@ pub const TRAINING_ALLOWED_DATA_COLLECT_ROLES: &[&str] = &[
     "backpressure_state",
 ];
 
+/// 下游 `model-train` 的训练数据和模型输入只来自这些版本化 `data-pipeline` 产物。
 pub const TRAINING_REQUIRED_EXTERNAL_ROLES: &[&str] = &[
     "data_pipeline_labels",
     "data_pipeline_features",
@@ -34,6 +37,7 @@ pub const TRAINING_REQUIRED_EXTERNAL_ROLES: &[&str] = &[
     "data_pipeline_training_split",
 ];
 
+/// 禁止 `data-collect` 角色冒充模型输入、训练样本、切分或训练批准。
 pub const TRAINING_FORBIDDEN_DATA_COLLECT_ROLES: &[&str] = &[
     "finalized_typed_raw_parquet",
     "labels",

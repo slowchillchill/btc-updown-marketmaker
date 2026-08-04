@@ -282,3 +282,23 @@ schema、部署或远端状态。
 独立审查代理使用 `gpt-5.6-sol` 和 `ultra` 推理等级复核并重跑上述验证，最终结论为
 `Critical 0 / Important 0 / Minor 0`。本窄事项已完成并关闭本地执行授权；该结果不代表
 DPT 阶段 0 完成。
+
+## 13. 2026-08-04 DPT 任务 0.9 后续边界验证快照
+
+本轮由活动 DPT 任务 0.9 在不重开已关闭窄事项执行授权的前提下，澄清推荐方案 2：
+`model-train` 进程继续直接读取六类 `data-collect` 审计与质量诊断元数据，但训练数据和模型
+输入只来自版本化 DPT 输出。没有修改采集器运行时、schema、Parquet、清单 schema、数据、
+服务、部署或远端状态。
+
+- `training_consumer_boundary_contract` 的现有行为断言首次运行即为
+  `1 passed; 0 failed; 3 filtered out`；该结果只属于特征化绿灯，不是实施前红灯。
+- 当前合并定向测试结果为：`consumer_format_compatibility_contract` 6 项、
+  `document_authority_contract` 4 项、`manifest_contract` 5 项、
+  `training_consumer_boundary_contract` 4 项全部通过。
+- 严格 Clippy 已覆盖 `data-pipeline-core` 与 `data-collect` 的全部目标并使用
+  `-D warnings`；`cargo fmt --all -- --check`、已跟踪差异和三个受影响未跟踪文件的空白
+  检查已通过。
+
+上述是当前实际快照。Task 0.9 范围复审最终结论为
+`Critical 0 / Important 0 / Minor 0` 并已通过，Task 0.9 后的完整阶段验证和新的广泛独立
+阶段复审也均已通过。DPT 阶段 0 已通过，当前外部推进门为推送授权；未推送、未进入阶段 1。

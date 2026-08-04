@@ -26,7 +26,12 @@
   `ConsumerKind::Training`（下游 `model-train`）的消费边界和关联文档守卫：
   `model-train` 不得直接读取 `typed_raw`，必须消费 `data-pipeline` 输出；
   `ConsumerKind::DataPipeline` 继续是离线训练路径中唯一直接读取最终化 `typed_raw` 的消费
-  种类。该事项不重开采集器运行时、schema、数据、paper/live、部署或远端操作。
+  种类。用户随后澄清：`model-train` 进程可继续直接读取 `manifest`、
+  `source_coverage`、`source_health`、`source_gap`、`reconnect_trace`、
+  `backpressure_state` 六类角色，但它们只用于血缘、审计和质量诊断，不得进入训练准入、
+  Observation、特征、标签、训练样本、切分、样本选择、模型输入或决策触发；训练数据和
+  模型输入只来自版本化 `data-pipeline` 输出。该事项不重开采集器运行时、schema、数据、
+  paper/live、部署或远端操作。
 - 仓库构建训练、模拟盘热路径和实盘热路径三个二进制程序；当前只有训练二进制程序
   连接真实 Polymarket、RTDS 和 Binance 数据源。
 - 模拟盘和实盘二进制程序当前只提供启动回执、Unix 套接字和心跳、状态；

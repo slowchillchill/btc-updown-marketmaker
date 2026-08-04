@@ -3,6 +3,10 @@
 ## 开发环境与部署拓扑
 
 - 当前本地开发、文档落盘、代码编写与本地构建仓库：`/home/chillchill/btc-updown-marketmaker`
+- 用户已于 2026-08-04 对事项 `DATA-PIPELINE-TRAINING-20260803` 作出窄范围路径覆盖：
+  该事项后续开发、文档落盘、代码编写、本地构建和验收只在当前工作树
+  `/home/chillchill/sim-system` 进行，不得切换到 `/home/chillchill/btc-updown-marketmaker`。
+  本条不改变其他事项、远端目录或部署拓扑；若要再次改变该事项工作树，必须由用户明确决定。
 - 各远端服务器上的源码/工作目录统一写作 `~/btc-updown-marketmaker`；在 `ubuntu` 用户服务器上该路径通常解析为 `/home/ubuntu/btc-updown-marketmaker`，但文档和命令不得把它误写成本地开发路径。
 - 与 Polymarket 相关开发必须基于官方 Polymarket Rust SDK。若
   Polymarket Rust SDK 的能力、类型、认证、签名、请求构造、响应解析或覆盖范围
