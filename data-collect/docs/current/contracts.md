@@ -1,8 +1,10 @@
-# data-collect 当前行为合同
+# data-collect 当前行为参考
 
-> 生命周期：`CURRENT_CONTRACT`
+> 生命周期：`CURRENT_REFERENCE`
 >
-> 当前执行 authority：`data-collect/docs/CURRENT.md`
+> 当前执行 authority：`none`
+>
+> 当前规范来源：`plan/data-collect-plan.md`
 >
 > 当前需求：`demand/data-collect-demand.md`
 >
@@ -13,6 +15,9 @@
 > 历史读取入口：`data-collect/docs/archive-manifest.tsv`
 >
 > 执行授权：`none`
+
+本文是从主计划和真实实现派生的非权威参考，不得新增或改变计划语义；出现不一致时按
+`data-collect/docs/CURRENT.md` 的冲突门处理。
 
 ## 1. 模块边界
 
@@ -73,9 +78,9 @@ Polymarket 当前依赖固定为
   SDK 的出站请求与 `heartbeat PING` 传输控制通道使用 `mpsc::unbounded_channel()`；
   这些通道不具备内存硬上限。
 
-完整补丁范围由上述供应商源代码、`polymarket_sdk_patch_contract` 与
-`polymarket_sdk_runtime_contract` 共同拥有；不得
-只凭版本名删除、缩小或扩大其中任一行为。
+以上是当前供应商源代码、`polymarket_sdk_patch_contract` 与
+`polymarket_sdk_runtime_contract` 的证据摘要；规范归属仍是主计划，不得只凭版本名推断
+补丁行为。
 
 | `source_kind` | 当前新写入 schema |
 | --- | --- |
@@ -200,7 +205,7 @@ RTDS 有效新鲜消息（`fresh`）只接受正确主题、类型、交易标�
 ## 6. 完成与延期
 
 除 `current/acceptance.md` 与 `current/known-limitations.md` 明列的未端到端测试和
-没有硬上限的传输控制通道外，当前实现和确定性测试覆盖上述合同。
+没有硬上限的传输控制通道外，当前实现和确定性测试覆盖上述行为参考。
 2026-07-28 事故事项已由用户最终验收；真实 UTC 日切换与完整健康 UTC 日运行证据
 不作已取得声明，但不再是完成门。模拟盘和实盘的真实外部数据源适配器尚未实现、
 不属于 `model-train`，并继续保持延期。必须先完成 `model-train`（模型训练模块，不是

@@ -1,22 +1,22 @@
-# data-collect 当前变更记录
+# data-collect 变更记录
 
 > 事项编号：`DATA-COLLECT-CURRENT`
 >
-> 生命周期：`CURRENT_MASTER_CHANGELOG`
+> 生命周期：`HISTORICAL_CHANGELOG`
 >
-> 当前执行 authority：`data-collect/docs/CURRENT.md`
+> 当前执行 authority：`none`
 >
 > 对应需求：`demand/data-collect-demand.md`
 >
 > 对应计划：`plan/data-collect-plan.md`
 >
-> 状态：`COMPLETE_CURRENT_SNAPSHOT`
+> 状态：`仅记录当时事实与后续取代关系`
 
-本文件只保留当前最终状态和仍影响后续模块的决策。逐阶段实现、失败尝试、远端命令、
-运行采样和审查时间线已由 `data-collect/docs/archive-manifest.tsv` 指定的 Git
-标签、路径和 blob 保留，不在活动文档重复。
+本文件按发生时间记录实施事实、验证结果、用户决策和后续取代关系，不定义当前业务或技术
+语义。当前规范只在 `plan/data-collect-plan.md`；以下旧状态、命令和路径不得作为当前动作
+依据。更完整的逐阶段过程由 `data-collect/docs/archive-manifest.tsv` 指定的 Git 对象保留。
 
-## 当前实现快照
+## 已关闭事项的最终实现事实（截至 2026-08-04）
 
 - Cargo 定义训练、模拟盘热路径和实盘热路径三个二进制程序。
 - 当前只有训练程序连接真实 Polymarket、RTDS 和 Binance 数据源；模拟盘和实盘程序只
@@ -33,7 +33,7 @@
   并严格先断开再连接。
 - 固定身份信息、E+3..E+8 市场判定、重启时失败即关闭与确定性 UTC 日切换已实现并有测试。
 
-## 用户最终决策
+## 截至 2026-08-04 的用户决策事实
 
 - 2026-07-28 事故事项已由用户最终验收。
 - 真实 UTC 日切换和完整健康 UTC 日不再是完成门；文档不反向声称未记录
@@ -153,14 +153,14 @@
 - 模拟盘和实盘的心跳帧、套接字辅助函数只有组件测试，完整二进制程序长运行循环尚无
   端到端测试；热路径运行标识的回执路径限制也尚未失败即关闭，详见当前验收与限制文档。
 
-## 当前证据入口
+## 2026-07-30 当时证据入口
 
-- 当前实现与边界：`data-collect/docs/current/contracts.md`
-- 当前 CLI 与产物：`data-collect/docs/current/interfaces.md`
-- 当前运行权限边界：`data-collect/docs/current/operations.md`
-- 当前验收命令与真实结果：`data-collect/docs/current/acceptance.md`
-- 当前限制：`data-collect/docs/current/known-limitations.md`
-- 文档治理结论：`data-collect/docs/current/document-authority-audit.md`
+- 当时实现与边界：`data-collect/docs/current/contracts.md`
+- 当时 CLI 与产物：`data-collect/docs/current/interfaces.md`
+- 当时运行权限边界：`data-collect/docs/current/operations.md`
+- 当时验收命令与真实结果：`data-collect/docs/current/acceptance.md`
+- 当时限制：`data-collect/docs/current/known-limitations.md`
+- 当时文档治理结论：`data-collect/docs/current/document-authority-audit.md`
 
 ## 2026-08-04 模拟器冷启动来源纠正
 
@@ -190,3 +190,42 @@
   不修改生产 Rust、schema、Parquet、清单、服务、部署、远端状态、模块 authority 或执行
   授权。唯一 `data-collect` Rust 变化是把 DPT 三件套状态标记从临时阶段整句收窄为稳定的
   “用户已批准”，生命周期、执行权威、执行授权和负例仍保持精确校验。
+
+## 2026-08-04 文档守卫退役
+
+- 用户确认 `data-collect` 不属于当前 DPT 开发目标，并批准删除
+  `data-collect/tests/document_authority_contract.rs`，不建立替代守卫。
+- 该测试及仅为其存在的当前审计文档已经删除；`CURRENT`、主需求、主计划、当前验收和旧
+  审计路由已去除现行依赖。此前带日期的测试结果继续作为当时真实发生的历史，不改写为
+  从未运行。
+- 该治理清理没有修改采集生产 Rust、schema、Parquet、清单、运行时、服务、部署、远端状态、
+  模块 authority 或执行授权，也没有重开已完成的采集模块。
+- 删除前既有守卫为 `4 passed; 0 failed`；删除后 Cargo 元数据已确认该测试目标不存在。
+  DPT 三个实施包测试、严格 Clippy、格式和差异检查通过；未把这些结果冒充为 `data-collect`
+  生产回归。
+
+## 2026-08-04 Markdown 测试目标退役
+
+- 用户批准删除 `data-collect/tests/deploy_readme_contract.rs` 的全部六项测试，包括四项
+  Markdown 精确措辞测试、一项 systemd 单元固定文本检查和一项废弃入口不存在检查；不建立
+  替代文档守卫或治理系统。
+- 删除前该测试目标真实运行结果为 `6 passed; 0 failed`。删除原因是这些检查不验证当前
+  业务行为且增加文档耦合，不是规避失败。
+- 当前验收命令已移除该测试目标；当前验收文档中的带日期历史快照已删除，历史事实和取代
+  关系只留在本 changelog 与 Git 历史中。
+- 本次没有修改 `data-collect` 生产 Rust、schema、Parquet、清单、运行时、服务、部署或
+  远端状态，也不声称执行了 `data-collect` 生产回归。
+- Cargo 元数据确认 `deploy_readme_contract` 与先前退役的 `document_authority_contract`
+  均已不再是测试目标；静态检查确认仓库测试代码不读取或搜索 Markdown，剩余
+  `data-collect` 测试目标通过 `cargo check -p data-collect --locked --offline --tests`。
+
+## 2026-08-04 需求、计划与当前路由职责迁移
+
+- 用户决定把需求收敛为产品经理层面的宏观目标与验收，把计划设为当前业务和技术语义的
+  唯一规范来源，并把 changelog 限定为当时事实与后续取代关系。
+- 主需求已压缩为业务目标、范围、非目标和六项结果级验收；SDK、六个精确 schema、运行时、
+  容量、RTDS、身份终态、部署边界、成熟工具复用和验证方法已迁入主计划。
+- `data-collect/docs/CURRENT.md` 已改为纯路由入口；`docs/current/` 只提供从计划派生的接口、
+  操作、验收和限制参考，不再与主计划并列拥有语义。
+- 当前验收页已删除带日期结果快照，只保留现行命令、状态边界和已知限制；实际运行结果继续
+  只记录在本文件。本轮没有修改采集生产 Rust、schema、数据、运行时、部署或远端状态。

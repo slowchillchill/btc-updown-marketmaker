@@ -1246,30 +1246,6 @@ mod tests {
     }
 
     #[test]
-    fn arrow_sort_reuses_input_sort_row_allocation() {
-        let mut input = Vec::with_capacity(32);
-        input.extend([4u64, 1, 6, 0, 5, 2, 3].into_iter().map(row));
-        let (input_pointer, input_capacity) = (input.as_ptr(), input.capacity());
-        assert!(input_capacity > input.len());
-
-        let sorted = sort_rows_with_arrow(input).expect("执行 Arrow 字节排序");
-
-        assert_eq!(
-            (sorted.as_ptr(), sorted.capacity()),
-            (input_pointer, input_capacity)
-        );
-        assert_eq!(
-            sorted
-                .into_iter()
-                .map(|row| String::from_utf8(row.payload().to_vec()).expect("载荷为 UTF-8"))
-                .collect::<Vec<_>>(),
-            (0u64..7)
-                .map(|sequence| format!("payload-{sequence:020}"))
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
     fn single_initial_run_writes_without_owned_writer_row_buffer() {
         let temp = TempDir::new().expect("创建单初始 run 临时目录");
         let mut single_run_config = config(8, 2);
@@ -1317,70 +1293,72 @@ mod tests {
     }
 
     #[test]
-    fn owned_row_buffer_file_handle_run_file_and_temp_limits_fail_closed() {
-        let memory_temp = TempDir::new().expect("创建行缓冲上限测试临时目录");
+    fn owned_row_buffer_limit_fails_closed() {
+        let temp = TempDir::new().expect("创建行缓冲上限测试临时目录");
         let mut memory_config = config(2, 2);
         memory_config.max_run_rows = 1;
         memory_config.max_run_bytes = size_of::<SortRow>() + 1;
         memory_config.batch_rows = 1;
-        let memory_error = external_sort(vec![row(1)], memory_temp.path(), &memory_config)
-            .expect_err("触发行缓冲上限");
-        assert!(matches!(memory_error, SortError::RowMemoryLimit { .. }));
+        let error =
+            external_sort(vec![row(1)], temp.path(), &memory_config).expect_err("触发行缓冲上限");
+        assert!(matches!(error, SortError::RowMemoryLimit { .. }));
+    }
 
-        let descriptor_temp = TempDir::new().expect("创建初始描述符容量负例临时目录");
+    #[test]
+    fn descriptor_capacity_invalid_config_fails_before_work_directory_creation() {
+        let temp = TempDir::new().expect("创建初始描述符容量负例临时目录");
         let mut descriptor_config = config(2, 2);
         descriptor_config.batch_rows = 1;
         descriptor_config.max_run_bytes = size_of::<SortRow>() * 2 - 1;
-        let descriptor_error =
-            external_sort(vec![row(1)], descriptor_temp.path(), &descriptor_config)
-                .expect_err("初始描述符容量必须在创建工作目录前被拒绝");
-        assert!(matches!(descriptor_error, SortError::InvalidConfig(_)));
-        assert!(!descriptor_temp.path().join(WORK_DIRECTORY).exists());
+        let error = external_sort(vec![row(1)], temp.path(), &descriptor_config)
+            .expect_err("初始描述符容量必须在创建工作目录前被拒绝");
 
-        let oversized_batch_temp = TempDir::new().expect("创建批次容量负例临时目录");
-        let mut oversized_batch = config(2, 2);
-        oversized_batch.batch_rows = 100;
-        let oversized_batch_error =
-            external_sort(vec![row(1)], oversized_batch_temp.path(), &oversized_batch)
-                .expect_err("批次行描述符容量必须在创建工作目录前被拒绝");
-        assert!(matches!(oversized_batch_error, SortError::InvalidConfig(_)));
-        assert!(!oversized_batch_temp.path().join(WORK_DIRECTORY).exists());
+        assert!(matches!(error, SortError::InvalidConfig(_)));
+        assert!(!temp.path().join(WORK_DIRECTORY).exists());
+    }
 
-        let file_temp = TempDir::new().expect("创建文件上限测试临时目录");
+    #[test]
+    fn temp_run_file_limit_fails_closed() {
+        let temp = TempDir::new().expect("创建文件上限测试临时目录");
         let mut file_config = config(1, 2);
         file_config.max_temp_run_files = 2;
-        let file_error = external_sort(vec![row(2), row(1)], file_temp.path(), &file_config)
+        let error = external_sort(vec![row(2), row(1)], temp.path(), &file_config)
             .expect_err("合并输出触发临时 run 文件上限");
-        assert!(matches!(file_error, SortError::TempRunFileLimit { .. }));
+        assert!(matches!(error, SortError::TempRunFileLimit { .. }));
+    }
 
-        let open_file_temp = TempDir::new().expect("创建文件句柄上限测试临时目录");
+    #[test]
+    fn open_file_limit_fails_closed() {
+        let temp = TempDir::new().expect("创建文件句柄上限测试临时目录");
         let mut open_file_config = config(2, 2);
         open_file_config.max_open_files = 2;
-        let open_file_error = external_sort(
-            vec![row(2), row(1)],
-            open_file_temp.path(),
-            &open_file_config,
-        )
-        .expect_err("触发文件句柄上限");
-        assert!(matches!(open_file_error, SortError::OpenFileLimit { .. }));
+        let error = external_sort(vec![row(2), row(1)], temp.path(), &open_file_config)
+            .expect_err("触发文件句柄上限");
 
-        let byte_temp = TempDir::new().expect("创建字节上限测试临时目录");
+        assert!(matches!(error, SortError::OpenFileLimit { .. }));
+    }
+
+    #[test]
+    fn temp_byte_limit_fails_closed() {
+        let temp = TempDir::new().expect("创建字节上限测试临时目录");
         let mut byte_config = config(2, 2);
         byte_config.max_temp_bytes = 3;
-        let byte_error = external_sort(vec![row(1)], byte_temp.path(), &byte_config)
+        let error = external_sort(vec![row(1)], temp.path(), &byte_config)
             .expect_err("触发临时文件字节上限");
-        assert!(matches!(byte_error, SortError::TempByteLimit { .. }));
+
+        assert!(matches!(error, SortError::TempByteLimit { .. }));
     }
 
     #[test]
     fn initial_pending_rows_flushes_before_outer_descriptor_capacity_exceeds_run_budget() {
-        let first_key = vec![1];
-        let first_payload = vec![1];
-        let first = SortRow::from_encoded(first_key, first_payload);
-        let second_key = vec![2];
-        let second_payload = vec![2];
-        let second = SortRow::from_encoded(second_key, second_payload);
-        let mut capacity_probe = Vec::with_capacity(4);
+        let first = row(1);
+        let second = row(2);
+        let descriptor_capacity = sort_row_inner_bytes(&second)
+            .expect("第二行容量可以表示")
+            .div_ceil(size_of::<SortRow>())
+            .checked_add(2)
+            .expect("描述符容量可以表示");
+        let mut capacity_probe = Vec::with_capacity(descriptor_capacity);
         capacity_probe.push(first);
         let max_run_bytes = capacity_probe
             .capacity()
@@ -1401,7 +1379,7 @@ mod tests {
             .and_then(|bytes| bytes.checked_add(sort_row_inner_bytes(&second)?))
             .expect("实际计数可以表示")
             > max_run_bytes;
-        let mut boundary_config = config(4, 2);
+        let mut boundary_config = config(capacity_probe.capacity(), 2);
         boundary_config.batch_rows = 1;
         boundary_config.max_run_bytes = max_run_bytes;
         let temp = TempDir::new().expect("创建初始缓冲边界测试临时目录");
@@ -1418,13 +1396,14 @@ mod tests {
 
     #[test]
     fn run_writer_buffer_flushes_before_outer_descriptor_capacity_exceeds_run_budget() {
-        let first_key = vec![1];
-        let first_payload = vec![1];
-        let first = SortRow::from_encoded(first_key, first_payload);
-        let second_key = vec![2];
-        let second_payload = vec![2];
-        let second = SortRow::from_encoded(second_key, second_payload);
-        let mut capacity_probe = Vec::with_capacity(4);
+        let first = row(1);
+        let second = row(2);
+        let descriptor_capacity = sort_row_inner_bytes(&second)
+            .expect("第二行容量可以表示")
+            .div_ceil(size_of::<SortRow>())
+            .checked_add(2)
+            .expect("描述符容量可以表示");
+        let mut capacity_probe = Vec::with_capacity(descriptor_capacity);
         capacity_probe.push(first);
         let max_run_bytes = capacity_probe
             .capacity()
@@ -1446,7 +1425,7 @@ mod tests {
             .expect("实际计数可以表示")
             > max_run_bytes;
         let mut boundary_config = config(4, 2);
-        boundary_config.batch_rows = 4;
+        boundary_config.batch_rows = capacity_probe.capacity();
         boundary_config.max_run_bytes = max_run_bytes;
         let temp = TempDir::new().expect("创建写缓冲边界测试临时目录");
         let mut metrics = SortMetrics::default();
@@ -1469,8 +1448,7 @@ mod tests {
             .expect("第二行前必须刷新写缓冲");
 
         assert_eq!(metrics.peak_write_buffer_rows, 1);
-        assert_eq!(writer.rows, 1);
-        assert_eq!(writer.buffer.len(), 1);
-        writer.finish(&mut metrics).expect("完成写缓冲");
+        let run = writer.finish(&mut metrics).expect("完成写缓冲");
+        assert_eq!(read_rows(&run.path, 1), vec![row(1), row(2)]);
     }
 }

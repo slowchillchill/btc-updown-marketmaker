@@ -1,8 +1,10 @@
 # data-collect 当前限制与未声明事项
 
-> 生命周期：`CURRENT_CONTRACT`
+> 生命周期：`CURRENT_REFERENCE`
 >
-> 当前执行 authority：`data-collect/docs/CURRENT.md`
+> 当前执行 authority：`none`
+>
+> 当前规范来源：`plan/data-collect-plan.md`
 >
 > 当前需求：`demand/data-collect-demand.md`
 >
@@ -13,6 +15,9 @@
 > 历史读取入口：`data-collect/docs/archive-manifest.tsv`
 >
 > 执行授权：`none`
+
+本文是从主计划和真实实现派生的非权威参考，不得新增或改变计划语义；出现不一致时按
+`data-collect/docs/CURRENT.md` 的冲突门处理。
 
 以下内容是边界，不是隐含“下一步”或执行计划：
 
@@ -35,7 +40,7 @@
    详见 `current/acceptance.md`。
 9. 采集器不自动归档或删除最终化原始数据；退出 75 后的任何迁移、归档或清理都
    需要独立授权。
-10. 当前文档描述代码合同，不证明任一远端服务的实时状态。需要远端事实时必须另行
+10. 当前文档汇总代码边界参考，不证明任一远端服务的实时状态。需要远端事实时必须另行
     进行只读核实。
 11. 供应商版 SDK 的出站请求与 `heartbeat PING` 传输控制通道使用无界通道类型。
     当前封装器通过合并最新期望状态、固定且较小的期望状态集合，以及单个待处理心跳来

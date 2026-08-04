@@ -1,8 +1,10 @@
 # data-collect 当前接口与产物
 
-> 生命周期：`CURRENT_CONTRACT`
+> 生命周期：`CURRENT_REFERENCE`
 >
-> 当前执行 authority：`data-collect/docs/CURRENT.md`
+> 当前执行 authority：`none`
+>
+> 当前规范来源：`plan/data-collect-plan.md`
 >
 > 当前需求：`demand/data-collect-demand.md`
 >
@@ -13,6 +15,9 @@
 > 历史读取入口：`data-collect/docs/archive-manifest.tsv`
 >
 > 执行授权：`none`
+
+本文是从主计划和真实实现派生的非权威参考，不得新增或改变计划语义；出现不一致时按
+`data-collect/docs/CURRENT.md` 的冲突门处理。
 
 ## 1. 训练程序 CLI
 
@@ -32,7 +37,7 @@ data-collect-training-collector
 
 ## 2. 训练数据源与产物
 
-六个数据源及当前 schema 由 `current/contracts.md` 唯一规定。输出布局为：
+六个数据源及当前 schema 由主计划唯一规定，`current/contracts.md` 只提供派生参考。输出布局为：
 
 ```text
 <dataset-root>/training/typed_raw/
@@ -114,4 +119,4 @@ target/release/data-collect-paper-hot
 target/release/data-collect-live-hot
 ```
 
-构建和远端状态变更边界只以 `current/operations.md` 为准。
+构建和远端状态变更边界以主计划为规范，`current/operations.md` 只提供派生参考。
