@@ -174,3 +174,19 @@
   或执行授权。
 - 本次只修正文档语义；没有实现加载器、修改 Rust/schema/数据、操作服务或远端、部署、
   提交或推送，也没有把既有测试结果冒充为加载器验证。
+
+## 2026-08-04 DPT 任务 0.10 tick 权威归属同步
+
+本节取代此前把 `orderPriceMinTickSize` 归为模拟器冷启动规则重叠候选、以及把全部新运行都
+写成查询当前平台的当前含义；旧段落的测试计数和测量结果仍只作为当时历史快照保留。
+
+- `orderPriceMinTickSize` 是采集时点的初始 tick 源证据，orderbook v3 的
+  `old_tick_size/new_tick_size` 是动态 tick 事件证据；两者都经 `data-pipeline` 进入规范
+  事件链，不属于 `PlatformRuleSnapshot`。
+- `sim-system` 当前时点运行使用官方公开 HTTPS 查询形成 `CURRENT_QUERY` 快照；历史运行只
+  绑定适用时点合法的 `HISTORICAL_AS_OF` 同 schema 快照，禁止查询当前平台回填。两种模式
+  都不包含、查询或交叉校验 tick。
+- 本次只同步主三件套、`CURRENT`、当前合同、当前限制、验收快照和文档权威守卫；不重开采集器运行时，
+  不修改生产 Rust、schema、Parquet、清单、服务、部署、远端状态、模块 authority 或执行
+  授权。唯一 `data-collect` Rust 变化是把 DPT 三件套状态标记从临时阶段整句收窄为稳定的
+  “用户已批准”，生命周期、执行权威、执行授权和负例仍保持精确校验。

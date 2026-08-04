@@ -14,7 +14,7 @@
 >
 > 执行授权：`LOCAL_IMPLEMENTATION_ONLY`
 >
-> 状态：`用户已批准；阶段 0 已通过；停在推送授权门`
+> 状态：`用户已批准；范围已冻结；阶段 0 修正已通过；停在推送授权门`
 
 ## 2026-08-03：创建独立需求草案
 
@@ -984,3 +984,133 @@ CARGO_TARGET_DIR=/tmp/sim-system-task09-target cargo test -p data-pipeline-core 
   `Critical 0 / Important 0 / Minor 0`。
 - 最终审查未发现过度设计或需要用户决定的新冲突，阶段 0 实质关闭门已满足。阶段 0 本地阶段
   提交只归档已经审查的差异，当前外部推进门为推送授权；未推送、未进入阶段 1。
+
+## 2026-08-04：Task 0.10 重新打开阶段 0，恢复 tick 的上游事件权威
+
+### 用户决定与错误复核
+
+- 用户明确纠正：`sim-system` 冷启动不得包含 tick。逐资产初始 tick 必须来自
+  `data-collect` 冷路径保存的训练证据，paper 热路径则由 `data-collect` 实时交接进入在线
+  `data-pipeline`；两者最终都只经 `ExecutionMarketEvent` 传给 `sim-system`。用户同时批准
+  其余最小合同修正：动态旧 tick 合法未知、三个平台交易状态独立、公开成交身份来源可辨，
+  以及历史规则证据、私有校准证据、固定二元兑付和 `delayed` 可见性文字修正。
+- 用户随后批准删除 `InitialL2SnapshotV1` 中无真实消费者的初始/重同步共用分支。复核确认
+  `L2SnapshotPurpose::{InitialLoad, Resync}` 由阶段 0 提交 `2b18359` 自行引入，获批需求只
+  要求首个 `book` 装载基准、后续 `book` 形成确认或唯一净差额；仓库没有任何 `Resync`
+  构造、测试或消费者，既有 `BookResyncDeltaInference` 和质量边界已经分别承担后续净差额与
+  重同步状态。此前变更记录所称“初始/重同步快照”是过度设计，本节明确取代该表述。
+- 只读复核证明该纠正正确。四日样本中，全部 156 个发生 tick 变化的市场在首次变化前均有
+  metadata `orderPriceMinTickSize="0.01"` 证据；624 条物理 `tick_size_change` 行按
+  `(market, asset, old, new)` 去重后是 312 个状态变化键。当前合同只表达动态变化，尚未表达
+  上游初始 tick；当前代码并没有已经实施的模拟器冷启动 tick。
+- 错误根因追溯到提交 `3145a635`：当时把 CLOB `mts` 与真正的低频规则一并纳入
+  `PlatformRuleSnapshot`，又保留动态 tick 事件，形成双权威。审查中“当前 HTTP 值不能还原
+  历史初始 tick”的发现正确，但据此继续设计模拟器冷启动 tick 是错误归属；本节取代此前
+  相关决定，旧条目只保留历史事实。
+
+### 冻结的最小修正与当前进度
+
+- tick 唯一权威链冻结为
+  `data-collect -> data-pipeline -> ExecutionMarketEvent -> sim-system`。初始 L2 快照增加
+  必填正数逐资产初始 tick，并删除 `L2SnapshotPurpose` 与 `purpose`，只表示首次装载；后续
+  完整 `book` 只沿既有净差额转换和质量边界处理。动态旧 tick 允许缺失。规则快照的
+  `CURRENT_QUERY` 与 `HISTORICAL_AS_OF` 两种证据模式都不包含、不查询也不交叉校验 tick。
+- 三个平台布尔状态使用独立事件载荷，不扩展生命周期枚举或建立组合状态机；公开成交继续
+  使用字符串 `trade_id`，只增加平台交易哈希或派生源证据的必填来源枚举。既有能力枚举、
+  `data-collect` schema、网络边界和未来映射器均不扩展。
+- 本事项需求、计划及审核中的 `sim-system`、`rebuild-core` 文档已开始同步，阶段 0 重新打开。
+  本节记录时尚未修改生产代码；后续必须先逐行为取得互不遮蔽的真实红灯，再做最小实现、
+  完整验证和新的独立阶段复审。推送仍未获授权。
+
+### Task 0.10 独立红灯与最小实现证据
+
+生产代码修改前，以下六项分别使用
+`CARGO_TARGET_DIR=/tmp/sim-system-task010-target cargo test -p data-pipeline-core --locked --offline --test phase0_contract <测试名> -- --exact`
+运行，均以退出码 `101`、`0 passed; 1 failed; 38 filtered out` 形成互不遮蔽的红灯：
+
+1. `initial_l2_snapshot_decodes_source_initial_tick`：明确失败于未知字段
+   `initial_tick_size_pusd_per_share`；
+2. `initial_l2_snapshot_requires_source_initial_tick`：明确证明缺失初始 tick 仍被接受；
+3. `tick_size_change_accepts_unknown_old_tick`：明确失败于 `null` 不能解码为字符串；
+4. `market_trading_state_roundtrips_independent_flags`：明确失败于不存在
+   `market_trading_state` 事件变体；
+5. `public_trade_id_source_roundtrips`：明确失败于未知字段 `trade_id_source`；
+6. `public_trade_id_source_is_required`：明确证明缺失成交 ID 来源仍被接受。
+
+先只增加对应字段、枚举和载荷后，上述六项分别转为 `1 passed; 0 failed`。随后新增
+`initial_l2_snapshot_rejects_nonpositive_source_initial_tick`，在初始 tick 尚未进入正数校验时
+以退出码 `101`、`0 passed; 1 failed; 39 filtered out` 形成独立红灯；只复用既有
+`validate_positive_decimal` 后转为 `1 passed; 0 failed`。平台三状态逐字段可空、成交来源未知
+枚举负例和已知旧 tick 非正数拒绝作为新类型或既有不变量的补充回归覆盖直接通过，不冒充
+实施前红灯。
+
+用户批准删除多余用途分支后，又在删除生产类型前分别执行：
+
+1. `initial_l2_snapshot_decodes_without_purpose`：退出码 `101`，明确失败于缺少必填
+   `purpose`；
+2. `initial_l2_snapshot_rejects_legacy_purpose`：退出码 `101`，明确证明旧合同仍接受
+   `purpose`。
+
+两项均为 `0 passed; 1 failed; 43 filtered out`。只删除 `L2SnapshotPurpose`、`purpose` 和测试
+构造器中的旧值后，两项分别转为 `1 passed; 0 failed`；没有添加兼容旧字段的双路径。当前
+`phase0_contract` 全集在补齐已知旧 tick 正数回归后为 `45 passed; 0 failed`，稳定基础 tick
+事件黄金编码未变化。该结果是
+Task 0.10 的定向绿灯，不代替后续完整阶段验证和独立阶段复审。
+
+### 文档权威守卫的阶段游标修正
+
+- 完整验证首次运行 `document_authority_contract` 时为 `2 passed; 2 failed`。两项失败都源于
+  守卫仍要求三件套状态包含旧终态“阶段 0 已通过；停在推送授权门”，而三件套已按本次批准
+  的修正如实标为阶段 0 重新打开；事项编号、生命周期、执行权威、执行授权和互引路径均未
+  发生冲突。
+- 守卫改为只在三件套状态中钉住稳定事实“用户已批准”，继续逐字段精确校验
+  `APPROVED_REQUIREMENTS`、`APPROVED_ACTIVE_PLAN`、`ACTIVE_IMPLEMENTATION_CHANGELOG`、
+  `plan/data-pipeline-training-plan.md` 和 `LOCAL_IMPLEMENTATION_ONLY`。既有负例仍把“用户已批准”
+  替换为“需求草案”并要求拒绝，因此没有把草案、无权威或越权授权放行，也没有为临时阶段游标
+  增加解析器或状态机。
+- 自审同时发现计划任务 0.2 仍只写动态 tick 和当前时点冷启动，虽然后续任务 0.10 已取代该
+  语义，但会在同一活动计划内形成歧义。现已把任务 0.2 同步为“初始与动态 tick 都归事件带，
+  当前查询与历史截至时点规则快照均不含 tick”，没有改变实施范围。
+
+### 首轮独立阶段复审问题
+
+- 首轮独立复审结论为 `Critical 0 / Important 1 / Minor 1`，因此没有关闭阶段或提交。
+- `Important` 是 `data-collect/docs/current/acceptance.md` 仍把 `orderPriceMinTickSize` 归为
+  模拟器冷启动规则的直接重叠候选，并遗漏本次当前文档验收快照。现已按最新决定追加明确
+  取代条目，并同步 `data-collect` 主三件套、`CURRENT`、当前合同和变更记录；旧测试计数只作
+  当时快照保留。
+- `Minor` 是动态旧 tick 测试只覆盖显式 `null`，没有直接覆盖源字段缺失。生产类型
+  `Option<ExactDecimal>` 已正确接受缺失；现于同一测试补充缺字段解码、校验、规范编码为
+  `null` 和往返断言。该断言在生产实现已存在后增加，只记为直接绿灯回归，不冒充实施前红灯。
+
+### 首轮复审修正后的验证
+
+- 动态旧 tick 缺字段回归以 `1 passed; 0 failed; 44 filtered out` 直接通过；完整核心合同为
+  `45 passed; 0 failed`，训练排序试验为 `9 passed; 0 failed`。
+- `data-collect` 的 `consumer_format_compatibility_contract`、`source_format_contract`、
+  `training_consumer_boundary_contract`、`manifest_contract`、`document_authority_contract`
+  分别为 `6/6`、`6/6`、`4/4`、`5/5`、`4/4`。四个包的全部目标通过 `-D warnings` 严格
+  Clippy；格式、差异、工作区元数据和三个一级依赖树检查通过。
+- 第一次重跑三个核心包全集时，链接器在写旧测试二进制过程中以
+  `ld terminated with signal 7 [Bus error]` 退出；同一 `/tmp` 挂载尚余约 12 GiB，独立复审
+  的新构建目录此前也出现过 `Disk quota exceeded`。没有删除或改写任何工作树、共享缓存或
+  用户数据；立即单独重跑核心合同 `45/45` 通过，随后原三个包命令完整通过。该环境异常不冒充
+  测试失败，也不从记录中隐藏。
+- 第二轮复审发现当前合同文档的一处编辑残留把 metadata v5 的
+  `source_evidence_payload_json.orderPriceMinTickSize` 错写成归属
+  `polymarket_orderbook_v3`。现已只修正归属名；orderbook v3 仍只负责
+  `old_tick_size/new_tick_size` 动态事件字段，没有改变 schema 或代码。
+- 同轮完整当前文档复查又发现 `data-collect/docs/current/known-limitations.md` 仍把所有
+  `sim-system` 新运行笼统写成查询当前平台。现已同步为只有当前平台时点运行形成
+  `CURRENT_QUERY`、历史运行只绑定 `HISTORICAL_AS_OF`，并明确两种规则证据均不含 tick。
+
+### 第二轮独立阶段复审与关闭
+
+- 第二轮最终复审结论为 `Critical 0 / Important 0 / Minor 0`。复审确认首轮两项问题、
+  metadata/orderbook 字段归属残留和当前限制文档残留均已关闭。
+- 最终差异没有 `L2SnapshotPurpose`、`InitialLoad`、第二条完整快照应用路径、影子映射器、
+  网络查询、能力枚举扩张或组合状态机；没有发现过度校验或过度设计。当前仅冻结阶段 0
+  公共合同，尚未实现映射器、真实事件生产、模拟器消费或规则加载器，这些是计划内后续工作，
+  不是本轮缺陷。
+- 阶段 0 修正关闭门已经满足。下一动作只允许创建本地阶段修正提交；推送仍未获授权，不能
+  进入阶段 1。

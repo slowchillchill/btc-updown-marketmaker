@@ -16,7 +16,7 @@
 >
 > 执行授权：`LOCAL_IMPLEMENTATION_ONLY`
 >
-> 状态：`用户已批准；范围已冻结；阶段 0 已通过；停在推送授权门`
+> 状态：`用户已批准；范围已冻结；阶段 0 修正已通过；停在推送授权门`
 
 本文定义独立 `data-pipeline(training)` 模块的需求、边界、两级完成门和验收标准。
 用户已于 2026-08-04 批准本需求和对应计划。需求批准冻结业务范围；计划批准使计划范围内
@@ -398,14 +398,23 @@ schema 的负向测试只能使用位于合格日期中的合成夹具，不得�
 1. `DPT-E-001`：`data-pipeline` 是唯一 `ExecutionMarketEvent` 生产器。历史回放产物必须
    是不可变、可分页、可按市场和因果范围读取的版本化事件带；不得要求每个模拟会话复制
    完整事件带。
-2. `DPT-E-002`：合同至少能表达市场/条件/代币身份、窗口和生命周期、完整 L2 初始快照、
-   价位状态转换、最优价格、最小价格变动单位、公开成交、规范事件 ID、源/接收/接纳/
-   可用时间、全序键、覆盖/缺口/陈旧/重同步和终态水位线。
+2. `DPT-E-002`：合同至少能表达市场/条件/代币身份、窗口和生命周期、彼此独立的
+   `active/closed/accepting_orders` 市场交易状态、完整 L2 首次装载快照及其逐资产初始最小
+   价格变动单位、价位状态转换、最优价格、最小价格变动单位变化、来源可辨的公开成交、
+   规范事件 ID、源/接收/接纳/可用时间、全序键、覆盖/缺口/陈旧/重同步和终态水位线。
 3. `DPT-E-003`：事件必须保存精确市场/条件/代币/结果身份，使 `sim-system` 能在已冻结的
    `PlatformRuleSnapshot` 中唯一查表。CLOB `/book.min_order_size`、逐市场
-   `feeSchedule`、`itode`、未消费的 `oas` 和其他低频平台字段不得复制进事件带。启动时的
-   `initial_tick_size` 可用于跨模块一致性校验，但运行中的当前 tick 必须继续由
-   `tick_size_change` 事件推进。
+   `feeSchedule`、`itode`、未消费的 `oas` 和其他低频平台字段不得复制进事件带。
+   tick 不属于 `PlatformRuleSnapshot`：冷路径必须从 `data-collect` 已保存且在因果时点可用的
+   `orderPriceMinTickSize` 等源证据建立逐资产初始 tick，热路径必须从上游盘口事件携带的
+   tick 建立同一状态；两者都由 `data-pipeline` 规范为初始快照字段，之后只由逐资产
+   `tick_size_change` 推进。不得联网查询当前 `mts` 回填历史起点，也不得把一个市场或资产的
+   tick 套用到另一个市场或资产。官方源合同允许 `tick_size_change.old_tick_size` 缺失或为
+   `null`；规范事件必须保留该未知，而不能伪造旧值。`InitialL2SnapshotV1` 只表示首次
+   装载，不得再用 `purpose` 或其他分支兼任重同步快照。后续完整 `book` 状态相同时只确认，
+   有唯一净差额时只输出以 `BOOK_RESYNC_DELTA_INFERENCE` 为依据的
+   `LevelExecutionTransitionV1`；适用的缺口和重同步边界由质量合同表达，不得形成第二条完整
+   盘口应用路径。
 4. `DPT-E-004`：`market_resolved` 可以由二元市场的获胜资产/结果按版本化规则派生兑付
    向量，但必须保存源事件、获胜身份和映射规则，并明确字段为派生值。WebSocket
    与 metadata 的重复判定只能合并为一个规范终态或产生显式冲突，不能重复结算。
@@ -586,10 +595,12 @@ schema 的负向测试只能使用位于合格日期中的合成夹具，不得�
    安全删除的重复字段；`data-collect` 不新增规则专用列，也不删除现有证据 JSON 键。十个
    键的观测值、逻辑字节和逐键压缩反事实由
    `data-collect/docs/current/contracts.md` 第 3 节唯一记录。
-4. 四日数据实际有 624 条 `tick_size_change`，涉及 156 个市场，均为 `0.01 -> 0.001`；
-   `old_tick_size/new_tick_size` 是运行中动态事实，必须继续进入规范事件带，不能由冷启动
-   `initial_tick_size` 替代。公开成交 `fee_rate_bps` 同样是事件证据，不是
-   `feeSchedule`。
+4. 四日数据物理上有 624 条 `tick_size_change`，涉及 156 个市场，均为
+   `0.01 -> 0.001`；每个市场的两个资产各有两次交付，按
+   `(market, asset, old_tick_size, new_tick_size)` 去重后为 312 个状态变化键。156 个市场在
+   首次变化前均已有采集侧 `orderPriceMinTickSize="0.01"` 证据。初始值和动态变化都必须由
+   `data-collect -> data-pipeline -> ExecutionMarketEvent` 传递，不能由 `sim-system` 冷启动
+   查询当前 `mts` 替代；公开成交 `fee_rate_bps` 同样是事件证据，不是 `feeSchedule`。
 5. RTDS v4 没有独立采集器接纳时间/序号，只能显式降低该源的排序与因果证据质量。
 6. 2026-07-31 清单能证明发生缺口和日内重新激活，但自由文本不能证明精确缺口区间。
 7. 公共 L2 没有逐订单队列身份，`price_change` 与 `last_trade_price` 没有共同权威因果
@@ -597,8 +608,9 @@ schema 的负向测试只能使用位于合格日期中的合成夹具，不得�
 8. 当前样本没有账户提交/撤单/`user-channel`/Ledger 证据，不能生成执行反馈标签或校准
    全部模拟平台行为。
 
-`sim-system` 的冷启动规则来源限定为固定的官方公开 HTTPS 端点，并由窄类型响应加载器
-只解析首版已定义消费者所需的字段。官方 Rust SDK 的类型覆盖缺口不再阻断该加载器；但
+`sim-system` 当前时点运行的冷启动规则来源限定为固定的官方公开 HTTPS 端点，并由窄类型
+响应加载器只解析首版已定义消费者所需的字段；历史运行只绑定适用的
+`HISTORICAL_AS_OF` 同 schema 快照，不得联网回填。官方 Rust SDK 的类型覆盖缺口不再阻断该加载器；但
 平台响应缺少必需字段、字段非法、条件/市场/代币身份不一致、重复结果冲突，或 CLOB 与
 Gamma 的交叉绑定冲突时，受影响的模拟器冷启动能力仍必须失败即关闭。首版未消费的 `oas`
 只登记为未消费字段，不单独阻断冷启动。本管道本身继续保持完全离线，不得调用该加载器、
@@ -649,9 +661,12 @@ Gamma 的交叉绑定冲突时，受影响的模拟器冷启动能力仍必须�
    Binance 快照/更新的 `stitch/not-applied`、metadata/WebSocket 终态合并和市场隔离。
 8. `DPT-AC-008`【门 A】：能力矩阵逐项对齐 `SIM-S-004`，并由框架中立的合同解码器、
    schema 黄金文件和字段级正负例独立验证；事件带不可变、可分页、可按市场和因果范围
-   读取，且不要求每个会话复制整带。合同必须保留精确市场身份和动态
-   `tick_size_change`，并拒绝 `min_order_size`、`feeSchedule`、`itode`、`oas` 或秒级
-   延迟规则字段；这些字段缺失不降低门 A 能力。该项不依赖 `sim-system` 实现。
+   读取，且不要求每个会话复制整带。合同必须保留精确市场身份、逐资产初始 tick、允许旧值
+   未知的动态 `tick_size_change`、彼此独立的 `active/closed/accepting_orders` 和来源可辨的
+   公开成交身份；初始快照不得携带用途分支或兼任重同步快照，后续完整 `book` 只能按
+   `DPT-D-003` 形成确认或唯一净差额转换。同时拒绝 `min_order_size`、`feeSchedule`、
+   `itode`、`oas` 或秒级延迟规则字段。这些低频规则字段缺失不降低门 A 能力。该项不依赖
+   `sim-system` 实现。
 9. `DPT-AC-009`【门 A】：Observation 与 `ExecutionMarketEvent` 共享规范谱系和截止点，
    `fresh`、`stale`、`missing`、`unknown_not_observed`、`confirmed_gap` 和 `invalid` 保持可区分；
    未来判定/标签、原始 JSON、解析器诊断及重连信息对模型不可达。即使 `model-train` 进程

@@ -90,15 +90,19 @@ Polymarket 当前依赖固定为
 也不得把六类数据源降级成不透明宽表。
 
 模拟器低频平台规则不属于当前采集 schema：CLOB `min_order_size`、完整
-`feeSchedule`、`itode` 由 `sim-system` 每个新运行在首个业务请求前通过固定的官方公开
-HTTPS 窄加载器查询并冻结；平台响应缺少必需字段、字段非法、身份不一致或来源冲突时，
+`feeSchedule`、`itode` 由 `sim-system` 面向当前平台时点的新运行在首个业务请求前通过固定的
+官方公开 HTTPS 窄加载器查询并冻结；历史运行只绑定适用时点合法的 `HISTORICAL_AS_OF`
+快照，不得查询当前平台回填。当前查询响应缺少必需字段、字段非法、身份不一致或来源冲突时，
 由模拟器事项失败即关闭。首版未消费的 `oas` 只进入未消费字段清单，也不属于采集任务。
 该模拟器例外不授权 `data-collect` 使用原始 REST，且不改变本节前述官方 Rust SDK 合同。
 当前 metadata v5 没有这些规则专用列，也不为此新增。其
 `source_evidence_payload_json` 中的 `orderMinSize`、`feesEnabled`、旧手续费及其他同名或
 相似键仍是采集时点的 Gamma 原始证据；数值可能与模拟器快照相同，但证据时间、来源和用途
-不同，不构成可删除的语义冗余。`polymarket_orderbook_v3` 的
-`old_tick_size/new_tick_size` 表达运行中 `tick_size_change`，不得由冷启动初始 tick 替代。
+不同，不构成可删除的语义冗余。metadata v5 的 `source_evidence_payload_json` 中的
+`orderPriceMinTickSize` 是采集时点的初始 tick 源证据，`polymarket_orderbook_v3` 的
+`old_tick_size/new_tick_size` 表达运行中
+`tick_size_change`。两者都必须由 `data-pipeline` 进入规范事件链，不属于也不得被
+`sim-system` 冷启动规则快照替代。
 
 ## 3. 存储与容量
 
@@ -129,8 +133,9 @@ HTTPS 窄加载器查询并冻结；平台响应缺少必需字段、字段非�
 的类型化专用列。逐键反事实如下；“估算压缩字节”只表示从这些载荷移除单键后以相同 ZSTD-3
 条件重压的近似差额，不能相加后当作可安全回收空间：
 
-语义上必须再分三类：`orderMinSize`、`orderPriceMinTickSize`、`feesEnabled`、`negRisk` 是与
-冷启动快照直接对应但来源时点不同的四个重叠候选；`makerBaseFee`、`takerBaseFee`、
+语义上必须再分三类：`orderMinSize`、`feesEnabled`、`negRisk` 是与冷启动快照直接对应但
+来源时点不同的三个重叠候选；`orderPriceMinTickSize` 是只供上游规范事件链建立初始 tick
+的采集证据，不是冷启动规则。`makerBaseFee`、`takerBaseFee`、
 `makerRebatesFeeShareBps` 只是名称或主题近似，不能替代当前手续费/返佣参数；
 `secondsDelay`、`enableOrderBook`、`rfqEnabled` 不属于本次可执行配置，只为完整说明载荷中的
 近似市场规则键及空间上限而纳入反事实。不得把十键合计误写成十个真正重复字段。
@@ -138,7 +143,7 @@ HTTPS 窄加载器查询并冻结；平台响应缺少必需字段、字段非�
 | Gamma 原始 JSON 键 | 四日样本中的值 | 未压缩逻辑字节 | 估算压缩字节 | 与冷启动配置的关系及删除判断 |
 | --- | --- | ---: | ---: | --- |
 | `orderMinSize` | 1,167 项均为字符串 `"5"` | 22,173 | 1,070 | 名称和值可能与 `min_order_size_shares` 重叠，但不是权威 CLOB `mos`；保留原始证据 |
-| `orderPriceMinTickSize` | 1,158 项为 `"0.01"`，9 项为 `"0.001"` | 36,186 | 2,054 | 与冷启动初始 tick 相似，但不能替代运行中动态 tick；保留原始证据 |
+| `orderPriceMinTickSize` | 1,158 项为 `"0.01"`，9 项为 `"0.001"` | 36,186 | 2,054 | 采集时点的初始 tick 源证据；须经 `data-pipeline` 进入规范事件链，不属于模拟器冷启动规则；保留原始证据 |
 | `feesEnabled` | 1,167 项均为 `true` | 22,173 | 1,245 | 是冷启动需要交叉绑定的 Gamma 值，但采集时点不同；保留原始证据 |
 | `makerBaseFee` | 1,167 项均为 `1000` | 23,340 | 797 | 旧 Gamma 手续费键，不等于 CLOB V2 `fd` 或完整 `feeSchedule`；不纳入可执行配置，保留证据 |
 | `takerBaseFee` | 1,167 项均为 `1000` | 23,340 | 1,152 | 旧 Gamma 手续费键，不等于 CLOB V2 `fd` 或完整 `feeSchedule`；不纳入可执行配置，保留证据 |

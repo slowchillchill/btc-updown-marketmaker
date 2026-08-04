@@ -51,13 +51,16 @@
 4. UTC 日和小时必须按采集器接收时间分区；`*.running` 不得被当作最终化产物。
 5. 每个 UTC 日只有一个每日清单 v3 和一个归属方，并直接包含单一采集日覆盖信息 v1。
 6. `sim-system` 所需的 CLOB `min_order_size`、完整 `feeSchedule`、`itode` 等低频平台规则
-   由模拟器新运行冷启动通过固定的官方公开 HTTPS 窄加载器查询并冻结；首版未消费的 `oas`
-   只登记为未消费字段。该模拟器例外不改变第 1 项的 `data-collect` 官方 Rust SDK 合同，也不
-   授权采集器使用原始 REST。
+   由模拟器面向当前平台时点的新运行通过固定的官方公开 HTTPS 窄加载器查询并冻结；历史运行
+   只绑定适用时点合法的 `HISTORICAL_AS_OF` 快照，不得查询当前平台回填。首版未消费的 `oas`
+   只登记为未消费字段。该模拟器当前查询例外不改变第 1 项的 `data-collect` 官方 Rust SDK
+   合同，也不授权采集器使用原始 REST。
    它们都不是当前采集 schema 的专用字段，也不要求 `data-collect` 新增。当前 v5
    `source_evidence_payload_json` 中自然
    存在的同名或相似键仍是采集时点原始证据，必须无损保留，不得为外置配置而删键或重写
-   摘要。运行中 `tick_size_change`、生命周期、接单状态和市场判定仍属于采集事件事实。
+   摘要。`orderPriceMinTickSize` 是采集时点的初始 tick 源证据，运行中
+   `tick_size_change` 是动态 tick 事件证据；两者都必须经 `data-pipeline` 进入规范事件链，
+   不属于模拟器规则快照。生命周期、接单状态和市场判定仍属于采集事件事实。
 
 ## 4. 运行时合同
 

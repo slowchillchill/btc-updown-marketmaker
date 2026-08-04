@@ -242,18 +242,20 @@ pub struct MarketLifecycleTransitionV1 {
     pub source_event_ids: Vec<CanonicalEventId>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum L2SnapshotPurpose {
-    InitialLoad,
-    Resync,
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MarketTradingStateV1 {
+    pub active: Option<bool>,
+    pub closed: Option<bool>,
+    pub accepting_orders: Option<bool>,
+    pub source_event_ids: Vec<CanonicalEventId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InitialL2SnapshotV1 {
-    pub purpose: L2SnapshotPurpose,
     pub asset: AssetIdentityV1,
+    pub initial_tick_size_pusd_per_share: ExactDecimal,
     pub source_sequence_epoch_id: String,
     pub source_cursor: u64,
     pub book_digest_sha256: Sha256Hex,
@@ -275,9 +277,16 @@ pub struct BestBidAskV1 {
 #[serde(deny_unknown_fields)]
 pub struct TickSizeChangeV1 {
     pub asset: AssetIdentityV1,
-    pub old_tick_size_pusd_per_share: ExactDecimal,
+    pub old_tick_size_pusd_per_share: Option<ExactDecimal>,
     pub new_tick_size_pusd_per_share: ExactDecimal,
     pub source_event_ids: Vec<CanonicalEventId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum PublicTradeIdSourceV1 {
+    PlatformTransactionHash,
+    DerivedSourceEvidence,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -285,6 +294,7 @@ pub struct TickSizeChangeV1 {
 pub struct PublicTradeV1 {
     pub asset: AssetIdentityV1,
     pub trade_id: String,
+    pub trade_id_source: PublicTradeIdSourceV1,
     pub price_pusd_per_share: ExactDecimal,
     pub quantity_shares: ExactDecimal,
     pub aggressor_side: TradeSide,
@@ -404,6 +414,7 @@ pub enum MarketResolutionTerminalV1 {
 )]
 pub enum ExecutionMarketEventPayloadV1 {
     MarketLifecycleTransition(MarketLifecycleTransitionV1),
+    MarketTradingState(MarketTradingStateV1),
     InitialL2Snapshot(InitialL2SnapshotV1),
     BestBidAsk(BestBidAskV1),
     TickSizeChange(TickSizeChangeV1),

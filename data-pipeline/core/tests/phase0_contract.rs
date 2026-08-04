@@ -121,7 +121,7 @@ fn base_event() -> ExecutionMarketEventV1 {
         },
         payload: ExecutionMarketEventPayloadV1::TickSizeChange(TickSizeChangeV1 {
             asset: asset("123", 0, "UP"),
-            old_tick_size_pusd_per_share: ExactDecimal("0.01".to_owned()),
+            old_tick_size_pusd_per_share: Some(ExactDecimal("0.01".to_owned())),
             new_tick_size_pusd_per_share: ExactDecimal("0.001".to_owned()),
             source_event_ids: vec![event_id('a')],
         }),
@@ -189,8 +189,8 @@ fn all_event_payloads() -> Vec<ExecutionMarketEventPayloadV1> {
             source_event_ids: vec![event_id('a')],
         }),
         ExecutionMarketEventPayloadV1::InitialL2Snapshot(InitialL2SnapshotV1 {
-            purpose: L2SnapshotPurpose::InitialLoad,
             asset: up.clone(),
+            initial_tick_size_pusd_per_share: ExactDecimal("0.01".to_owned()),
             source_sequence_epoch_id: "epoch-1".to_owned(),
             source_cursor: 7,
             book_digest_sha256: sha('b'),
@@ -224,13 +224,14 @@ fn all_event_payloads() -> Vec<ExecutionMarketEventPayloadV1> {
         }),
         ExecutionMarketEventPayloadV1::TickSizeChange(TickSizeChangeV1 {
             asset: up.clone(),
-            old_tick_size_pusd_per_share: ExactDecimal("0.01".to_owned()),
+            old_tick_size_pusd_per_share: Some(ExactDecimal("0.01".to_owned())),
             new_tick_size_pusd_per_share: ExactDecimal("0.001".to_owned()),
             source_event_ids: vec![event_id('a')],
         }),
         ExecutionMarketEventPayloadV1::PublicTrade(PublicTradeV1 {
             asset: up.clone(),
             trade_id: "trade-1".to_owned(),
+            trade_id_source: PublicTradeIdSourceV1::DerivedSourceEvidence,
             price_pusd_per_share: ExactDecimal("0.4".to_owned()),
             quantity_shares: ExactDecimal("2.5".to_owned()),
             aggressor_side: TradeSide::Buy,
@@ -299,6 +300,12 @@ fn all_event_payloads() -> Vec<ExecutionMarketEventPayloadV1> {
             previous_quality: MarketDataQuality::Fresh,
             current_quality: MarketDataQuality::ConfirmedGap,
             reason_code: "confirmed_sequence_gap".to_owned(),
+            source_event_ids: vec![event_id('a')],
+        }),
+        ExecutionMarketEventPayloadV1::MarketTradingState(MarketTradingStateV1 {
+            active: Some(true),
+            closed: Some(false),
+            accepting_orders: Some(true),
             source_event_ids: vec![event_id('a')],
         }),
         ExecutionMarketEventPayloadV1::MarketResolutionTerminal(
@@ -454,6 +461,202 @@ fn every_frozen_event_payload_validates() {
     for payload in all_event_payloads() {
         validate_execution_market_event(&event_with_payload(payload)).unwrap();
     }
+}
+
+#[test]
+fn initial_l2_snapshot_decodes_source_initial_tick() {
+    let snapshot = event_with_payload(all_event_payloads().remove(1));
+    let mut value = serde_json::to_value(snapshot).unwrap();
+    value["payload"]["event"]["initial_tick_size_pusd_per_share"] = json!("0.01");
+
+    let mut decoded: ExecutionMarketEventV1 = serde_json::from_value(value).unwrap();
+    seal_event(&mut decoded);
+    validate_execution_market_event(&decoded).unwrap();
+}
+
+#[test]
+fn initial_l2_snapshot_requires_source_initial_tick() {
+    let snapshot = event_with_payload(all_event_payloads().remove(1));
+    let mut value = serde_json::to_value(snapshot).unwrap();
+    value["payload"]["event"]
+        .as_object_mut()
+        .unwrap()
+        .remove("initial_tick_size_pusd_per_share");
+
+    assert!(serde_json::from_value::<ExecutionMarketEventV1>(value).is_err());
+}
+
+#[test]
+fn initial_l2_snapshot_decodes_without_purpose() {
+    let snapshot = event_with_payload(all_event_payloads().remove(1));
+    let mut value = serde_json::to_value(snapshot).unwrap();
+    value["payload"]["event"]
+        .as_object_mut()
+        .unwrap()
+        .remove("purpose");
+
+    let mut decoded: ExecutionMarketEventV1 = serde_json::from_value(value).unwrap();
+    seal_event(&mut decoded);
+    validate_execution_market_event(&decoded).unwrap();
+}
+
+#[test]
+fn initial_l2_snapshot_rejects_legacy_purpose() {
+    let snapshot = event_with_payload(all_event_payloads().remove(1));
+    let mut value = serde_json::to_value(snapshot).unwrap();
+    value["payload"]["event"]["purpose"] = json!("INITIAL_LOAD");
+
+    assert!(serde_json::from_value::<ExecutionMarketEventV1>(value).is_err());
+}
+
+#[test]
+fn initial_l2_snapshot_rejects_nonpositive_source_initial_tick() {
+    let mut payload = all_event_payloads().remove(1);
+    let ExecutionMarketEventPayloadV1::InitialL2Snapshot(snapshot) = &mut payload else {
+        unreachable!();
+    };
+    snapshot.initial_tick_size_pusd_per_share = ExactDecimal("0".to_owned());
+    let event = event_with_payload(payload);
+
+    assert!(matches!(
+        validate_execution_market_event(&event),
+        Err(ContractError::InvalidField { field, .. })
+            if field == "payload.event.initial_tick_size_pusd_per_share"
+    ));
+}
+
+#[test]
+fn tick_size_change_accepts_unknown_old_tick() {
+    let mut value = serde_json::to_value(base_event()).unwrap();
+    value["payload"]["event"]["old_tick_size_pusd_per_share"] = Value::Null;
+
+    let mut decoded: ExecutionMarketEventV1 = serde_json::from_value(value).unwrap();
+    seal_event(&mut decoded);
+    validate_execution_market_event(&decoded).unwrap();
+    let encoded = encode_execution_market_event(&decoded).unwrap();
+    assert_eq!(decode_execution_market_event(&encoded).unwrap(), decoded);
+
+    let mut missing_value = serde_json::to_value(base_event()).unwrap();
+    missing_value["payload"]["event"]
+        .as_object_mut()
+        .unwrap()
+        .remove("old_tick_size_pusd_per_share");
+    let mut missing: ExecutionMarketEventV1 = serde_json::from_value(missing_value).unwrap();
+    seal_event(&mut missing);
+    validate_execution_market_event(&missing).unwrap();
+    let encoded_missing = encode_execution_market_event(&missing).unwrap();
+    assert!(serde_json::from_slice::<Value>(&encoded_missing).unwrap()["payload"]["event"]
+        ["old_tick_size_pusd_per_share"]
+        .is_null());
+    assert_eq!(
+        decode_execution_market_event(&encoded_missing).unwrap(),
+        missing
+    );
+}
+
+#[test]
+fn tick_size_change_rejects_nonpositive_known_old_tick() {
+    let mut event = base_event();
+    let ExecutionMarketEventPayloadV1::TickSizeChange(change) = &mut event.payload else {
+        unreachable!();
+    };
+    change.old_tick_size_pusd_per_share = Some(ExactDecimal("0".to_owned()));
+    seal_event(&mut event);
+
+    assert!(matches!(
+        validate_execution_market_event(&event),
+        Err(ContractError::InvalidField { field, .. })
+            if field == "payload.event.old_tick_size_pusd_per_share"
+    ));
+}
+
+#[test]
+fn market_trading_state_roundtrips_independent_flags() {
+    let lifecycle = event_with_payload(all_event_payloads().remove(0));
+    let mut first_value = serde_json::to_value(lifecycle).unwrap();
+    first_value["payload"]["event_type"] = json!("market_trading_state");
+    first_value["payload"]["event"] = json!({
+        "active": true,
+        "closed": false,
+        "accepting_orders": false,
+        "source_event_ids": [event_id('a').0],
+    });
+
+    let mut first: ExecutionMarketEventV1 = serde_json::from_value(first_value.clone()).unwrap();
+    seal_event(&mut first);
+    validate_execution_market_event(&first).unwrap();
+    let encoded = encode_execution_market_event(&first).unwrap();
+    assert_eq!(decode_execution_market_event(&encoded).unwrap(), first);
+
+    first_value["payload"]["event"]["accepting_orders"] = json!(true);
+    let mut second: ExecutionMarketEventV1 = serde_json::from_value(first_value).unwrap();
+    seal_event(&mut second);
+    validate_execution_market_event(&second).unwrap();
+    assert_ne!(first.event_id, second.event_id);
+}
+
+#[test]
+fn market_trading_state_accepts_each_independent_optional_fact() {
+    for (field, value) in [
+        ("active", true),
+        ("closed", false),
+        ("accepting_orders", true),
+    ] {
+        let lifecycle = event_with_payload(all_event_payloads().remove(0));
+        let mut event_value = serde_json::to_value(lifecycle).unwrap();
+        event_value["payload"]["event_type"] = json!("market_trading_state");
+        event_value["payload"]["event"] = json!({
+            "source_event_ids": [event_id('a').0],
+        });
+        event_value["payload"]["event"]
+            .as_object_mut()
+            .unwrap()
+            .insert(field.to_owned(), json!(value));
+
+        let mut event: ExecutionMarketEventV1 = serde_json::from_value(event_value).unwrap();
+        seal_event(&mut event);
+        validate_execution_market_event(&event).unwrap();
+    }
+}
+
+#[test]
+fn public_trade_id_source_roundtrips() {
+    let trade = event_with_payload(all_event_payloads().remove(4));
+    let mut value = serde_json::to_value(trade).unwrap();
+    value["payload"]["event"]["trade_id_source"] = json!("DERIVED_SOURCE_EVIDENCE");
+
+    let mut decoded: ExecutionMarketEventV1 = serde_json::from_value(value).unwrap();
+    seal_event(&mut decoded);
+    validate_execution_market_event(&decoded).unwrap();
+    let encoded = encode_execution_market_event(&decoded).unwrap();
+    assert_eq!(decode_execution_market_event(&encoded).unwrap(), decoded);
+}
+
+#[test]
+fn public_trade_id_source_is_required() {
+    let trade = event_with_payload(all_event_payloads().remove(4));
+    let mut value = serde_json::to_value(trade).unwrap();
+    value["payload"]["event"]
+        .as_object_mut()
+        .unwrap()
+        .remove("trade_id_source");
+
+    assert!(serde_json::from_value::<ExecutionMarketEventV1>(value).is_err());
+}
+
+#[test]
+fn public_trade_id_source_rejects_unknown_and_changes_identity() {
+    let derived = event_with_payload(all_event_payloads().remove(4));
+    let mut platform_value = serde_json::to_value(&derived).unwrap();
+    platform_value["payload"]["event"]["trade_id_source"] = json!("PLATFORM_TRANSACTION_HASH");
+    let mut platform: ExecutionMarketEventV1 =
+        serde_json::from_value(platform_value.clone()).unwrap();
+    seal_event(&mut platform);
+    validate_execution_market_event(&platform).unwrap();
+    assert_ne!(derived.event_id, platform.event_id);
+
+    platform_value["payload"]["event"]["trade_id_source"] = json!("UNKNOWN_SOURCE");
+    assert!(serde_json::from_value::<ExecutionMarketEventV1>(platform_value).is_err());
 }
 
 #[test]

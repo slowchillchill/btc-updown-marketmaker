@@ -37,20 +37,25 @@
 不能冒充真实平台逐订单 FIFO 复原。
 
 用户在 2026-08-04 进一步纠正此前把低频平台规则交给 `data-collect` 持久化、并把
-`itode` 固定为无条件 250ms 代码常量的方案。新运行的 `sim-system` 必须在接收首个业务
+`itode` 固定为无条件 250ms 代码常量的方案。面向当前平台时点的新运行必须在接收首个业务
 请求前进入一次有界冷启动加载阶段：通过只读、无凭据的官方公开 HTTPS 规则端点，按本次
-运行明确列出的每个目标 `condition_id` 查询当前平台规则，完成跨端点一致性和市场身份校验后，密封为本次
-运行不可变的 `PlatformRuleSnapshot`。这里的“访问一次”是“一次冷启动加载阶段”，不是
+运行明确列出的每个目标 `condition_id` 查询当前低频平台规则，完成跨端点一致性和市场身份
+校验后，密封为本次运行不可变且标记 `rule_evidence_mode=CURRENT_QUERY` 的
+`PlatformRuleSnapshot`。这里的“访问一次”是“一次冷启动加载阶段”，不是
 “整个运行只允许一个 HTTP 请求”；CLOB 与 Gamma 的必要公开 `GET` 按有界市场集合调用，
 每个市场、每个来源只接受一个成功逻辑结果，且不得在运行中轮询、热刷新或按订单重新查询。
-同一运行崩溃恢复时必须加载已经落盘的原
-快照，不得重新访问平台；只有新运行才重新查询并生成新快照。历史训练运行也必须按其有界
-目标市场集合逐市场取得规则，不能把一个当前市场的值套用到其他历史市场。
+同一运行崩溃恢复时必须加载已经落盘的原快照，不得重新访问平台；只有新的当前时点运行才
+重新查询并生成新快照。历史 training/offline-evaluation 运行不得查询当前端点回填历史：
+它只能绑定在回放因果起点已经存在、带适用时点与不可变来源追溯且标记
+`rule_evidence_mode=HISTORICAL_AS_OF` 的 `PlatformRuleSnapshot`；缺少任一必需历史规则时，
+对应市场不得进入正式历史运行。两种模式复用同一快照 schema 和核心消费路径，不建立第二套
+规则引擎。
 
 `data-collect` 不为这组低频规则新增专用列，`data-pipeline` 和
-`ExecutionMarketEvent` 也不传播 `min_order_size`、`feeSchedule` 或 `itode`。但运行中会
-变化的 `tick_size_change`、盘口、成交、接单状态、生命周期和市场判定仍由
-`ExecutionMarketEvent` 推进，不能被冷启动快照替代。现有源级原始证据载荷继续无损保留；
+`ExecutionMarketEvent` 也不传播 `min_order_size`、`feeSchedule` 或 `itode`。tick 不属于
+低频规则快照：逐资产初始 tick、后续 `tick_size_change`、盘口、成交、接单状态、生命周期
+和市场判定都必须由 `data-collect -> data-pipeline -> ExecutionMarketEvent` 推进，不能被
+冷启动快照或当前 HTTP 响应替代。现有源级原始证据载荷继续无损保留；
 其与冷启动快照数值相同不等于语义冗余。该边界只约束模拟器；`live-trade` 仍由官方 Rust
 SDK 和真实平台直接决定实际行为。
 
@@ -368,8 +373,15 @@ metadata 布局或发现阶段内存结构，不得被误读为当前 Parquet �
 包含 `orderMinSize`、`feesEnabled`、旧手续费键及其他市场事实；它不是模拟器运行规则表，
 也不能用一个新运行冷启动时点的快照追溯替换。
 
+四日样本的 metadata v5 虽没有 tick 专用列，但其采集时点 Gamma 原始证据保存
+`orderPriceMinTickSize`；orderbook v3 则强类型保存逐资产可空旧值和必填新值的
+`tick_size_change`。这些证据必须先由 `data-pipeline` 形成逐资产初始 tick 和变化事件，
+`sim-system` 不直接解析原始 JSON，也不联网补查。未来 paper 热路径应由
+`data-collect-paper-hot -> data-pipeline(online)` 沿同一事件合同传递；当前 paper/live 热路径
+只有心跳和状态能力，不能冒充已经完成接线。
+
 因此，CLOB `min_order_size`、完整逐市场 `feeSchedule` 和 `itode` 的目标归属已经改为
-`sim-system` 的新运行冷启动规则快照，而不是 `ExecutionMarketEvent` 或未来
+`sim-system` 的规则快照，而不是 `ExecutionMarketEvent` 或未来
 `data-collect` 字段补齐事项。用户已于 2026-08-04 明确批准这一个冷启动边界不再受官方
 Rust SDK 类型覆盖限制：加载器直接使用官方公开 CLOB/Gamma HTTPS `GET`、`reqwest` 和
 专用 `serde` 强类型响应结构。由此，SDK 未暴露 `itode`、`oas`、完整
@@ -764,8 +776,10 @@ JSON 的任何键；逐键观测值和空间反事实由 `data-collect/docs/curr
 ## 8. 冻结场景、市场状态数据面和动态影子 CLOB
 
 1. `SIM-S-001`：每个新模拟运行必须在接收首个业务请求前，先冻结有界且不可扩展的
-   `run_market_set`，再通过官方公开 HTTPS 规则端点完成一次冷启动加载阶段，生成并持久化不可变
-   `PlatformRuleSnapshot`。每个会话必须绑定该快照、`PlatformScenario` 身份标识/版本/摘要
+   `run_market_set`，再绑定一个不可变 `PlatformRuleSnapshot`。当前时点运行通过官方公开
+   HTTPS 规则端点完成一次冷启动加载阶段并生成 `CURRENT_QUERY` 快照；历史运行只加载已经
+   存在且适用时点不晚于回放因果起点的 `HISTORICAL_AS_OF` 快照，禁止联网回填。
+   每个会话必须绑定该快照、`PlatformScenario` 身份标识/版本/摘要
    和一个 `ExecutionMarketEventContract` 版本。新 `condition_id` 不得在运行中临时加入；
    需要滚动到快照之外的新市场时必须结束或交接旧运行并创建新运行。恢复同一运行只读取原
    快照，禁止重新查询平台。
@@ -789,9 +803,11 @@ JSON 的任何键；逐键观测值和空间反事实由 `data-collect/docs/curr
    版本化载荷、全序键、因果可用性、缺口和生命周期语义。
 4. `SIM-S-004`：`ExecutionMarketEvent` 至少能够表达：
    - 市场/条件/代币身份标识、市场窗口和生命周期状态转换；
-   - 完整 L2 初始装载快照及其源 epoch/游标/摘要；
-   - 价格档位数量变化、最优买价/卖价和最小价格变动单位变化；
-   - 具有价格、数量、方向和可用时间的成交证据；
+   - 不压成生命周期枚举的 `active/closed/accepting_orders` 独立市场交易状态；
+   - 只表示首次装载的完整 L2 初始快照及其源 epoch/游标/摘要和逐资产初始 tick，不携带
+     初始/重同步用途分支；
+   - 价格档位数量变化、最优买价/卖价和允许旧值未知的逐资产最小价格变动单位变化；
+   - 具有价格、数量、方向、可用时间和“平台交易哈希或派生源证据”身份来源的成交证据；
    - 原子 `LevelExecutionTransition` 或等价语义，包含因果组 ID、
      市场/资产/方向/价格、外部影子订单簿的变更前/变更后数量、已归因成交数量、
      已被同一底层变化覆盖的数量、去重后的有效价位/`book` 净增加量与净缩量、供队列
@@ -814,14 +830,16 @@ JSON 的任何键；逐键观测值和空间反事实由 `data-collect/docs/curr
      `sim-system` 按第 10.4 节核验，不能由生产器替其宣称完成。
    CLOB `min_order_size`、逐市场 `feeSchedule`、`itode`、`oas` 和其他低频平台字段不得进入
    `ExecutionMarketEvent`；事件只携带精确市场/条件/代币身份，供模拟器查询已冻结快照中的
-   `min_order_size`、`feeSchedule` 与 `itode`。未消费的 `oas` 只在规则查询响应覆盖记录中保存，不是
-   查表规则。初始 `mts` 可以在冷启动快照中保存用于一致性校验，但运行中当前最小价格变动
-   单位仍由事件中的 `tick_size_change` 推进。
+   `min_order_size`、`feeSchedule` 与 `itode`。未消费的 `oas` 只在规则查询响应覆盖记录中保存，
+   不是查表规则。tick 不得进入规则快照、冷启动查询字段或跨端点一致性门；模拟器必须先从
+   初始 L2 快照取得逐资产当前 tick，再只由该资产的 `tick_size_change` 推进。
 5. `SIM-S-005`：会话必须先取得合格初始装载快照，再按严格单调的全序
    应用规范流动性/成交状态转换。完整、合同有效的新 `book` 是外部盘口的
    重校准边界：相同状态只确认；存在净差额时，必须先扣除同一底层变化已由
    `price_change`、成交或更早规范状态转换应用的数量，再把剩余净差额按第
-   10.2 节只应用一次，并以该 `book` 作为后续新基准。游标缺口、epoch 切换、陈旧、
+   10.2 节只应用一次，并以该 `book` 作为后续新基准。后续 `book` 不得再次生成或应用
+   `InitialL2SnapshotV1`；其净差额只经 `BOOK_RESYNC_DELTA_INFERENCE` 转换表达，缺口和重同步
+   边界只经质量合同表达。游标缺口、epoch 切换、陈旧、
    乱序或关联超时可以使市场在下一份合格完整 `book` 到达前暂不接受新
    maker 提交，但不得仅凭这些信号关闭、隔离或把既有活动 maker 订单变成未知；
    下一份合格完整 `book` 必须在其规范可用时间对这些订单完成确定性重校准
@@ -1015,11 +1033,14 @@ JSON 的任何键；逐键观测值和空间反事实由 `data-collect/docs/curr
 1. 仓库内版本化文件 `sim-system/config/platform-rules-v1.toml` 只保存无法通过官方公开规则
    端点查询的官方文档规则、用户冻结的项目/账户规则、所需查询字段清单和失败语义；不得复制
    某个当前市场的逐市场数值作为未来默认值。
-2. 每个新运行的冷启动加载器把上述文件与官方公开 HTTPS 查询结果合并，生成运行产物
-   `platform-rule-snapshot.json`。确定性核心只读该快照，不访问网络。快照形成后禁止热刷新；
-   同一运行恢复读取同一文件，新运行重新查询并生成新的快照身份。
+2. 当前时点运行的冷启动加载器把上述文件与官方公开 HTTPS 查询结果合并，生成
+   `rule_evidence_mode=CURRENT_QUERY` 的运行产物 `platform-rule-snapshot.json`。历史运行只
+   接受预先形成、适用时点不晚于回放因果起点且
+   `rule_evidence_mode=HISTORICAL_AS_OF` 的同 schema 产物；它不得创建 HTTP 客户端或用当前
+   查询值回填历史。确定性核心只读快照，不访问网络。快照形成后禁止热刷新；同一运行恢复
+   读取同一文件。
 
-冷启动只允许一个私有 `PlatformRuleHttpLoader`，优先复用工作区已经锁定的 `reqwest`、
+`CURRENT_QUERY` 冷启动只允许一个私有 `PlatformRuleHttpLoader`，优先复用工作区已经锁定的 `reqwest`、
 `serde`、`serde_json`、`sha2`、`rust_decimal`，并只为读取静态配置直接声明成熟的 `toml`；
 它不依赖官方 SDK，也不建设通用 REST SDK。每个新
 运行只创建一个无凭据 `reqwest::Client`，固定 HTTPS 主机、拒绝重定向、设置连接/请求超时
@@ -1053,7 +1074,6 @@ JSON 的任何键；逐键观测值和空间反事实由 `data-collect/docs/curr
 | --- | --- | --- |
 | `queried_market_rules` | `condition_id`、`token_id`、`outcome` | 规则绑定身份；必须与 `run_market_set` 和规范事件合同逐项相等 |
 | `queried_market_rules` | `min_order_size_shares` | 取 CLOB `mos`；逐市场订单最小 shares，不用 Gamma `orderMinSize` 替代 |
-| `queried_market_rules` | `initial_tick_size` | 取 CLOB `mts`；只作为启动基线和一致性校验，运行中由 `tick_size_change` 更新当前值 |
 | `queried_market_rules` | `neg_risk` | 取 Gamma `negRisk`；CLOB 当前公开合同不要求 `nr`，响应自然含 `nr` 时只作交叉诊断 |
 | `queried_market_rules` | `fees_enabled` | 取 Gamma `feesEnabled`；该字段缺失必须失败 |
 | `queried_market_rules` | `fee_rate`、`fee_exponent`、`fee_taker_only`、`maker_rebate_rate` | 以 Gamma 完整 `feeSchedule.rate/exponent/takerOnly/rebateRate` 为规则源；启用费用时必须完整，并与 CLOB `fd.r/e/to` 一致；禁用费用时按零处理且允许两对象省略 |
@@ -1069,7 +1089,7 @@ JSON 的任何键；逐键观测值和空间反事实由 `data-collect/docs/curr
 | `project_account_rules` | `taker_rebate_tier=Silver`、`taker_rebate_rate=0.08` | 首版冻结账户档位；不查询或累计 wV |
 | `project_account_rules` | `taker_cash_available_time_utc=00:10`、`maker_cash_available_time_utc=00:45` | 当前账户证据支持的正常现金可用时刻 |
 | `project_account_rules` | `rebate_payment_decimal_places=4`、`rebate_below_threshold_carry_forward=false` | 用户冻结的付款向下截取与不跨日凑门槛规则 |
-| `provenance` | `snapshot_schema_version`、`run_market_set_hash`、逐响应 `fetched_at`、固定端点/HTTP 客户端和依赖版本、`rule_query_response_coverage`、未消费字段、HTTP 状态/尝试数、原始响应 SHA-256、静态配置摘要、最终快照摘要 | 证明“何时、通过哪个官方端点、为哪些市场取得何值”并显式记录可选 `oas`；不得含钱包、认证或其他机密 |
+| `provenance` | `snapshot_schema_version`、`rule_evidence_mode`、`rules_as_of_utc_ms`、`run_market_set_hash`、适用时的逐响应 `fetched_at`、固定端点/HTTP 客户端和依赖版本、`rule_query_response_coverage`、未消费字段、HTTP 状态/尝试数、原始响应 SHA-256、静态配置摘要、最终快照摘要 | 区分当前查询与历史截至时点证据，并证明何时、通过何种证据为哪些市场取得何值；显式记录可选 `oas`，不得含钱包、认证或其他机密，也不得把 tick 值写入快照 |
 
 以下值明确不进入可执行规则配置：运行中的订单簿/成交/余额/授权额度/订单状态、市场生命周期
 和判定、当前 `tick_size`、公开成交的 `fee_rate_bps`、Liquidity Rewards 的
@@ -1089,7 +1109,8 @@ BUY-only、GTC/GTD/FOK/FAK、post-only 合法组合、逐项非原子批量结�
 此前确认的官方 Rust SDK 类型缺口仍是技术事实，但用户已批准冷启动改用上述窄型官方 HTTP
 加载器，因此这些 SDK 缺口不再是正式冷启动的实施阻断。`itode` 缺失按官方合同解释为
 false；`oas` 可缺失且首版不消费；费用未启用时 `fd`/`feeSchedule` 可缺失。除此之外，平台
-响应中的必需身份、`mos/mts`、`feesEnabled`、启用时完整 `feeSchedule`/`fd`、两端重叠规则
+`CURRENT_QUERY` 响应中的必需身份、`mos`、`feesEnabled`、启用时完整
+`feeSchedule`/`fd`、两端重叠规则
 仍必须存在、可精确解析且一致。未知附加字段不得触发失败，必需语义缺失或冲突不得以 SDK、
 旧 Gamma 键、静态常量、网页值或另一端点回退。
 
@@ -1172,11 +1193,11 @@ false；`oas` 可缺失且首版不消费；费用未启用时 `fd`/`feeSchedule
   有效到期；
 - 选定加密资产/金融上涨/下跌市场在官方市场元数据 `itode=true` 时
   使用 250ms taker 暂缓窗口（`hold`），暂缓目标自身在内部待处理期间不可撤，并在暂缓窗口结束时
-  重新校验；API 会等待该时段结束后返回最终结果，因此 250ms 内部待处理
-  本身不产生调用方可见 `delayed` 中间响应；
-- 调用方可见 `delayed` 属于已配置秒级延迟等异步窗口状态，例如
-  体育/赛事延迟；这些市场完全不在本项目范围，`sim-system` 不保留兼容状态，
-  也不生成该路径；
+  重新校验；
+- 官方下单响应合同把 `delayed` 定义为“可成交订单受撮合延迟影响”的合法插入状态，并未把
+  它限定为体育/赛事市场。当前公开证据没有明确证明 250ms `itode` 路径必然先返回
+  `delayed`，也没有证明它必然只返回最终结果；首版响应类型必须保留 `delayed`，具体可见时机
+  复用既有版本化可见性情景，不得硬编码删除该状态或冒充已确认平台事实；
 - taker 手续费使用逐市场参数，手续费精度为 5 位小数；
 - BTC 5 分钟加密市场启用由 taker 手续费资助的每日 maker rebate；只有加入订单簿并
   实际以 maker 身份被成交的流动性合格，maker 平台手续费仍为零；
@@ -2299,7 +2320,9 @@ NautilusTrader 提交
     最终分支；普通非可立即成交 maker 挂单和因 post-only 会立即成交而被拒绝的订单
     不得进入该暂缓。暂缓目标自身不能被暂缓期间到达的 `cancel_all_orders` 取消，但同一
     `cancel_all_orders` 中其他可撤活动订单仍正常处理；首版不要求验收调用方尚未取得可用
-    订单 ID 时对该暂缓目标发起的单笔/批量撤单。该阶段不产生调用方可见 `delayed` 中间状态。
+    订单 ID 时对该暂缓目标发起的单笔/批量撤单。合同必须能表达 `delayed`；是否在 250ms
+    暂缓开始时对调用方可见，按冻结可见性情景执行并记录证据类别，不能由实现无条件抑制或
+    无条件生成。
     `ExecutionMarketEvent` 不含 `itode`、`min_order_size`、`feeSchedule` 或秒级延迟字段；
     除官方规定的 `itode=false` 省略及费用禁用时允许省略的费用对象外，必需字段缺失、跨
     端点冲突、错误市场绑定、查询失败、调用方覆盖和把 `secondsDelay` 当 `itode` 都必须在
@@ -2494,7 +2517,7 @@ NautilusTrader 提交
     以此时实际结果代币余额和兑付向量计算兑付，再销毁结果代币余额并原子增加模拟
     pUSD/现金，不存在已调度/待处理/延迟/失败/重试中间状态。全部账户变化的
     `account_transition_seq`、前驱和之前/之后摘要形成连续可核验链。
-44. `SIM-AC-044`：自动赎回覆盖获胜/未获胜/零持仓和适用的非 1/0 兑付向量；
+44. `SIM-AC-044`：自动赎回覆盖获胜结果 `1`、未获胜结果 `0` 和零持仓；
     taker 手续费、实际净份额和平台小额余量后只赎回模拟平台账户真实持有量。重复
     交付合格市场判定事件、重复反馈、检查点恢复和零兑付均不会重复销毁、增加
     现金或产生成交；调用方在 `AutoRedeemApplied` 可见前不能看到结算后余额。

@@ -789,6 +789,10 @@ fn validate_source_evidence(
 
 fn validate_snapshot(snapshot: &InitialL2SnapshotV1) -> Result<(), ContractError> {
     validate_asset(&snapshot.asset, "payload.event.asset")?;
+    validate_positive_decimal(
+        &snapshot.initial_tick_size_pusd_per_share,
+        "payload.event.initial_tick_size_pusd_per_share",
+    )?;
     if snapshot.source_sequence_epoch_id.is_empty() {
         return Err(invalid(
             "payload.event.source_sequence_epoch_id",
@@ -1050,6 +1054,9 @@ fn validate_payload(event: &ExecutionMarketEventV1) -> Result<(), ContractError>
                 "payload.event.source_event_ids",
             )?;
         }
+        ExecutionMarketEventPayloadV1::MarketTradingState(state) => {
+            validate_sorted_event_ids(&state.source_event_ids, "payload.event.source_event_ids")?;
+        }
         ExecutionMarketEventPayloadV1::InitialL2Snapshot(snapshot) => {
             validate_snapshot(snapshot)?;
         }
@@ -1079,10 +1086,12 @@ fn validate_payload(event: &ExecutionMarketEventV1) -> Result<(), ContractError>
         }
         ExecutionMarketEventPayloadV1::TickSizeChange(change) => {
             validate_asset(&change.asset, "payload.event.asset")?;
-            validate_positive_decimal(
-                &change.old_tick_size_pusd_per_share,
-                "payload.event.old_tick_size_pusd_per_share",
-            )?;
+            if let Some(old_tick_size) = &change.old_tick_size_pusd_per_share {
+                validate_positive_decimal(
+                    old_tick_size,
+                    "payload.event.old_tick_size_pusd_per_share",
+                )?;
+            }
             validate_positive_decimal(
                 &change.new_tick_size_pusd_per_share,
                 "payload.event.new_tick_size_pusd_per_share",

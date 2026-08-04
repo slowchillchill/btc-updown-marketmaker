@@ -72,7 +72,7 @@
 - 用户尚未批准 `demand/rebuild-core-demand.md` 或本计划；
 - 需求、计划、当前代码、当前 schema、真实数据或已批准子事项出现不能同时成立的冲突；
 - `sim-system` 冷启动的官方 HTTPS 响应缺失、非法、重复、查询失败或跨端点冲突，目标
-  `condition_id`、代币、结果、CLOB `mos/mts`、Gamma `negRisk`、费用启用状态或适用费用规则无法按字段归属闭合，原始响应哈希
+  `condition_id`、代币、结果、CLOB `mos`、Gamma `negRisk`、费用启用状态或适用费用规则无法按字段归属闭合，原始响应哈希
   无法留存，或无法在快照密封后释放网络能力；此时停止受影响的新运行，不得把责任转回
   `data-collect` 或 DPT。官方 Rust SDK 未类型化覆盖所需字段本身不再构成本加载器的阻断；
 - 官方 SDK 对提交、撤单、查询、认证、签名、响应解析或其他受影响能力覆盖不足，继续工作
@@ -242,9 +242,9 @@
 `REAL_EXECUTION_TAPE_READY`。`sim-system` 冷启动官方 HTTPS 规则加载器尚未通过端点响应、
 目标身份、规则闭合、原始响应哈希与密封后断网验收时，只阻塞依赖其规则的模拟器能力和完整
 正式回执；不得反向降级 DPT 门 A，不得阻塞使用冻结测试快照的核心组件与黄金样例工作，也
-不得以 `REAL_EXECUTION_TAPE_PARTIAL` 冒充真实纵向就绪。
+不得以失败诊断或缺少成功回执冒充真实纵向就绪。
 
-- 任务 3.0：实现新运行低频平台规则冷启动边界
+- 任务 3.0：实现当前查询与历史截至时点的低频平台规则边界
   - 步骤 3.0.1：加载 `sim-system/config/platform-rules-v1.toml`，冻结有界
     `run_market_set`；为每个新运行新建不跨运行复用的窄型、只读、无凭据官方 HTTPS 规则
     加载器，逐个调用 CLOB `GET /clob-markets/{condition_id}`，并对 Gamma 每批不超过 100 个
@@ -254,14 +254,16 @@
     禁止先进入 `f64`。除官方
     明确允许 `itode=false` 时省略字段、费用禁用时省略费用对象外，必须区分缺失字段与真实
     `0/false`。合并 Gamma 两类结果后，每个目标在每个来源只能有一个成功逻辑结果，再校验
-    `condition_id`、代币和结果；CLOB `mos/mts`、Gamma `negRisk` 与完整 `feeSchedule` 分别作为
-    对应规则来源，费用启用时再核对 CLOB `fd` 的重叠字段。Gamma `orderMinSize`/
-    `orderPriceMinTickSize` 和响应自然含有的 CLOB `nr` 只作诊断，不构成硬相等门。
+    `condition_id`、代币和结果；CLOB `mos`、Gamma `negRisk` 与完整 `feeSchedule` 分别作为
+    对应规则来源，费用启用时再核对 CLOB `fd` 的重叠字段。CLOB `mts` 与 Gamma
+    `orderPriceMinTickSize` 均不得进入规则快照或一致性门，逐资产初始 tick 只来自上游规范
+    事件；Gamma `orderMinSize` 和响应自然含有的 CLOB `nr` 只作诊断，不构成硬相等门。
     -> 验证：端点、方法、查询形状、目标集合、请求次数、原始响应 SHA-256、窄 DTO 字段存在性
-    和成功逻辑结果数均可审计；`mos/mts`、`negRisk`、`feesEnabled`、条件适用的完整
+    和成功逻辑结果数均可审计；`mos`、`negRisk`、`feesEnabled`、条件适用的完整
     `feeSchedule/fd`、`itode` 与 `rebateRate` 正负矩阵通过；除上述允许省略项外，必需语义
     缺失、非法、重复、查询失败和跨端点冲突均在首个业务请求前失败即关闭；未消费
-    的 `oas` 只进入官方响应覆盖清单，不触发额外实现。
+    的 `oas` 只进入官方响应覆盖清单，不触发额外实现。该步骤只形成
+    `rule_evidence_mode=CURRENT_QUERY` 快照；tick 不进入 DTO 的消费字段、规则快照或一致性门。
     本任务只负责总集成和证据闭合；冷启动详细字段与负向合同必须直接复用
     `demand/sim-system-demand.md` 第 10.1 节及 `plan/sim-system-plan.md` 任务 1.0，不另建第二套
     响应 DTO 或字段规则。
@@ -277,6 +279,11 @@
     SDK 或网页值回退；官方 SDK 未覆盖 `itode`、`feeSchedule.rebateRate` 或字段存在性不再
     阻断该加载器，`oas` 缺失不单独阻断。实盘提交、撤单、查询、认证、签名和响应解析仍只
     经官方 Rust SDK，加载器不得进入实盘后端、`data-collect` 或 DPT。
+  - 步骤 3.0.4：对历史 training/offline-evaluation 运行只加载同一 schema 的
+    `rule_evidence_mode=HISTORICAL_AS_OF` 不可变规则快照，不执行任何平台查询。
+    -> 验证：快照的适用时点和来源证据不晚于回放因果起点；缺少任一必需历史规则、来源
+    不可验证或适用时点越界时，只阻断受影响的正式历史运行。当前端点响应不得回填历史，
+    tick 仍只从上游规范事件推进，不进入任一规则证据模式。
 
 - 任务 3.1：实现唯一模拟平台入口和确定性内核
   - 步骤 3.1.1：实现 `execution/core` 方法面、`execution/sim` 路由和隔离 `sim-system`
@@ -297,7 +304,8 @@
   - 步骤 3.2.3：仅在规则快照 `taker_order_delay_enabled=true` 时，对可立即成交订单恰好
     执行一次配置中的 250ms 暂缓并在到期重校验；false 时不暂缓。
     -> 验证：true/false、普通 maker、post-only 拒单、期间全撤和恢复矩阵通过；不产生
-    客户端 `delayed`，地域时延配置不能覆盖，live 不插入本地 250ms 等待。
+    未经证据支持的客户端 `delayed` 假设，具体可见性按冻结情景和真实响应证据表达；地域
+    时延配置不能覆盖，live 不插入本地 250ms 等待。
 - 任务 3.3：实现单笔、批量和多通道可见性
   - 步骤 3.3.1：单笔生成一个响应对象，批量最多 15 项并生成一个整体数组封装；项级结果
     独立、非原子且允许混合成功/失败。

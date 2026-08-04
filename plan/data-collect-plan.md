@@ -29,7 +29,7 @@
 | 运行 | 干净且已推送的提交在本地构建、固定路径和单元、远端不编译 | `current/operations.md` |
 | 文档权威 | 单一 `CURRENT`、主题归属文档、标签和清单隔离历史 | `current/document-authority-audit.md` |
 | 跨模块顺序 | 当前后继为 `data-pipeline(training)` 的需求/合同和最小真实纵向链路；随后以黄金事件和真实管道事件验收 `sim-system`，再完成训练管道闭环；模拟盘和实盘适配器延期门保持不变 | `data-collect/docs/CURRENT.md`、主三件套 |
-| 低频平台规则边界 | `sim-system` 新运行通过固定官方公开 HTTPS 窄加载器冷启动查询并冻结；该模拟器例外不改变 `data-collect` 官方 Rust SDK 合同，当前 schema 不增规则专用列，原始证据 JSON 不删键，动态 tick 事件继续保留 | `current/contracts.md`、`current/known-limitations.md` |
+| 低频平台规则边界 | `sim-system` 当前时点运行通过固定官方公开 HTTPS 窄加载器查询并冻结，历史运行只绑定适用的 `HISTORICAL_AS_OF` 快照；该模拟器例外不改变 `data-collect` 官方 Rust SDK 合同，当前 schema 不增规则专用列，原始证据 JSON 不删键，初始与动态 tick 证据都经 `data-pipeline` 进入规范事件链 | `current/contracts.md`、`current/known-limitations.md` |
 
 ## 2. 当前验证方式
 

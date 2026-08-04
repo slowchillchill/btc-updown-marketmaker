@@ -302,3 +302,27 @@ DPT 阶段 0 完成。
 上述是当前实际快照。Task 0.9 范围复审最终结论为
 `Critical 0 / Important 0 / Minor 0` 并已通过，Task 0.9 后的完整阶段验证和新的广泛独立
 阶段复审也均已通过。DPT 阶段 0 已通过，当前外部推进门为推送授权；未推送、未进入阶段 1。
+
+## 14. 2026-08-04 DPT 任务 0.10 tick 权威归属修正验收
+
+本节明确取代第 10 节把 `orderPriceMinTickSize` 归为模拟器冷启动规则“直接重叠候选”的当前
+含义，也取代第 13 节“DPT 阶段 0 已通过”的当前游标；两节原测试计数只作为当时快照保留。
+
+- `orderPriceMinTickSize` 是采集时点的初始 tick 源证据，orderbook v3 的
+  `old_tick_size/new_tick_size` 是动态 tick 事件证据；两者都必须经 `data-pipeline` 进入
+  规范事件链，不属于模拟器规则快照。
+- `sim-system` 只有面向当前平台时点的新运行才通过固定官方公开 HTTPS 窄加载器查询低频
+  规则；历史运行只绑定适用时点合法的 `HISTORICAL_AS_OF` 同 schema 快照，不得查询当前
+  平台回填。两类规则证据都不包含、查询或交叉校验 tick。
+- 本次只同步当前文档、DPT 文档权威守卫和公共事件合同；`data-collect` 的 Rust 变化只限于
+  文档权威测试中的稳定批准标记，没有修改采集生产 Rust、schema、Parquet、清单、服务、
+  部署、远端状态、当前 authority 或执行授权。
+- 首轮独立复审发现本文件遗漏后，DPT 阶段 0 保持重新打开；完成本节同步和定向验证后，
+  第二轮最终独立复审为 `Critical 0 / Important 0 / Minor 0`，阶段 0 修正关闭门已满足。
+- 修正后的当前定向结果为：`data-pipeline-core` 合同 `45 passed; 0 failed`，
+  `data-pipeline-training` `9 passed; 0 failed`；`data-collect` 的
+  `consumer_format_compatibility_contract`、`source_format_contract`、
+  `training_consumer_boundary_contract`、`manifest_contract`、`document_authority_contract`
+  分别为 `6/6`、`6/6`、`4/4`、`5/5`、`4/4`。四个包的全部目标通过 `-D warnings` 严格
+  Clippy，格式、差异、工作区元数据和三个一级依赖树检查通过；第二轮独立复审已关闭首轮
+  问题。当前外部推进门为推送授权，未推送、未进入阶段 1。

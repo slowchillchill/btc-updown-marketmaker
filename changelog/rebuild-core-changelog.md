@@ -304,3 +304,22 @@ DPT 离线边界以及其余未实施、未授权状态不变。
   `data-collect` 的既有 SDK/协议边界、当前 schema 和原始证据不变，DPT Gate A 继续保持离线
   消费边界。本次只同步需求、计划和变更记录，没有授予代码实施、依赖安装、联网运行、远端
   变更、部署、钱包访问、真实下单、Git 提交或推送权限。
+
+## 2026-08-04：总集成合同同步 tick 上游权威和历史规则证据
+
+本节取代此前把 CLOB `mts` 归入模拟器冷启动规则的决定；旧段落只保留历史事实。
+
+- tick 唯一由 `data-collect -> data-pipeline -> ExecutionMarketEvent -> sim-system` 推进。
+  初始值来自采集时点证据，动态变化来自市场事件；CLOB `mts` 与 Gamma
+  `orderPriceMinTickSize` 均不得进入 `PlatformRuleSnapshot` 或一致性门。
+- 当前时点新运行可以形成 `CURRENT_QUERY` 规则快照；历史 training/offline-evaluation 只能
+  绑定适用时点合法、来源不可变的 `HISTORICAL_AS_OF` 同 schema 快照，不能查询当前平台
+  回填历史。缺少必需历史规则只阻断受影响的正式历史运行。
+- DPT 公共事件合同同步增加逐资产初始 tick、允许旧值未知的动态 tick、三个独立市场交易
+  状态和来源可辨的公开成交身份；不新增第二套状态机、规则引擎、采集 schema 或网络路径。
+- 初始 L2 载荷只表示首次装载，不再携带初始/重同步用途分支；后续完整 `book` 只形成确认或
+  `BOOK_RESYNC_DELTA_INFERENCE` 净差额转换，避免总集成中出现第二条完整盘口应用路径。
+- 固定 BTC 二元市场不再被要求使用非 1/0 兑付向量；250ms 平台暂缓的 `delayed` 可见性按
+  冻结情景和真实响应证据表达，不做无证据的绝对断言。
+- 本次只是审核中总集成文档同步，不授予 rebuild-core 代码、数据构建、远端、部署、提交、
+  推送、钱包或真实资金权限。

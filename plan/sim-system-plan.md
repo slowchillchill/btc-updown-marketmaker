@@ -34,7 +34,7 @@
    队列、订单/成交/结算、返佣、查询、恢复、确定性、隔离和有界资源语义。
 2. 真实管道纵向门只在 DPT Gate A 已机械签发 `REAL_EXECUTION_TAPE_READY` 后，消费由
    `data-pipeline(training)-A` 产生的真实 `ExecutionMarketEvent`，完成至少一个代表性市场
-   窗口和真实性能重新定标。`REAL_EXECUTION_TAPE_PARTIAL` 不满足该入口。
+   窗口和真实性能重新定标。失败诊断或缺少成功回执不满足该入口。
 3. 训练闭环门位于模拟器之后，由外部归一化层和 training Ledger 消费模拟器原始证据，
    再由 `data-pipeline(training)-B` 形成完整 Observation 与训练产物。该门不是模拟器核心
    开发前置，但未通过时不得进入正式 `model-train`；RewardContract 的实际计算仍属于
@@ -67,11 +67,12 @@ DPT 需求/计划批准并冻结共享合同
 - `SIM-S-004` 与获批 DPT 合同、真实 Gate A 产物或代码事实冲突时停止；不得在模拟器中
   添加第二套原始解析、排序、去重或字段补查。
 - 官方 Rust SDK 尚未类型化覆盖 `itode`、`oas` 或完整 `feeSchedule.rebateRate` 的缺口不再
-  阻断冷启动；冷启动只允许私有 `PlatformRuleHttpLoader` 访问需求冻结的两个官方公开
-  HTTPS `GET` 端点。任一目标响应最终失败，或必需身份、`mos/mts`、`feesEnabled`、启用
+  阻断当前时点冷启动；`CURRENT_QUERY` 冷启动只允许私有 `PlatformRuleHttpLoader` 访问需求冻结的两个官方公开
+  HTTPS `GET` 端点。任一目标响应最终失败，或必需身份、`mos`、`feesEnabled`、启用
   时完整 `feeSchedule`/`fd` 缺失、非法或冲突时，冷启动仍须失败即关闭；不得以 SDK、旧
   Gamma 键、网页常量、其他端点或静默零值回退。`itode` 缺失按官方合同解释为 false，
-  `oas` 只记录为首版未消费字段，不为它扩展实现或单独阻断冷启动。
+  `oas` 只记录为首版未消费字段，不为它扩展实现或单独阻断冷启动。历史运行只接受适用时点
+  合法的 `HISTORICAL_AS_OF` 快照；缺少必需历史规则时阻断对应历史运行，不得联网回填。
 - 只要正式爱尔兰时延/可见性配置档仍为 `NOT_READY`，就不得签发需求中要求该身份的正式
   `rebuild-core` 运行判定，也不得进入正式 `model-train`。`sim-calibration` 回执位于 DPT
   Gate B 前还是 Gate B 后、`model-train` 前，仍按 DPT 事项记录为待用户决定；本计划不替
@@ -117,8 +118,10 @@ DPT 需求/计划批准并冻结共享合同
     `QueryOrder`、`List*`、`SimRequest`、改单或通用后端插件面。
   - 步骤 0.2.2：逐字段对齐 `ExecutionMarketEvent`、`PlatformRuleSnapshot`、
     `PlatformScenario`、`RuleCoverageManifest`、请求/响应、三类生命周期反馈和运行清单。
-    -> 验证：`SIM-S-004` 字段矩阵无无归属字段；事件只保留精确市场身份和动态 tick，
-    `min_order_size`、`feeSchedule`、`itode`、`oas`/秒级延迟只归冷启动快照或明确排除。
+    -> 验证：`SIM-S-004` 字段矩阵无无归属字段；事件保留精确市场身份、逐资产初始 tick、
+    允许旧值未知的动态 tick、三个独立市场交易状态和来源可辨的公开成交，
+    初始 L2 载荷不携带用途分支且不兼任重同步快照；`min_order_size`、`feeSchedule`、
+    `itode`、`oas`/秒级延迟只归冷启动快照或明确排除。
   - 步骤 0.2.3：冻结固定精度、单位、稳定 ID、摘要编码、逻辑全序和账户摘要链规则。
     -> 验证：base、quote、pUSD、手续费币种和小数标度不能跨单位比较或相加；稳定编码有
     正负黄金文件。
@@ -176,11 +179,13 @@ DPT 需求/计划批准并冻结共享合同
     -> 验证：每个响应先对原始字节计算 SHA-256，再由 `serde` 专用窄 DTO 强类型解析；数值
     使用精确十进制并允许官方线协议的数值或字符串表示，禁止先进入 `f64`。Gamma
     `outcomes`/`clobTokenIds` 二次强类型解析并按索引与 CLOB `t[].t/t[].o`、目标集合一致；
-    DTO 忽略未知附加字段且不使用 `deny_unknown_fields`。快照包含市场集合、查询时刻、固定
+    DTO 忽略未知附加字段且不使用 `deny_unknown_fields`。快照包含
+    `rule_evidence_mode=CURRENT_QUERY`、市场集合、查询时刻、固定
     端点、HTTP 客户端/依赖版本、尝试数、原始响应摘要、静态配置和最终摘要且无机密；只有
     全部目标通过后才原子密封，同一运行恢复在断网下复用原快照，快照外市场必须新建运行。
-    字段归属负例必须证明：CLOB `mos/mts` 分别是最小下单量和初始价格步长的规则源；Gamma
-    `orderMinSize`/`orderPriceMinTickSize` 只作诊断，不构成硬相等门；`negRisk` 取 Gamma，CLOB
+    字段归属负例必须证明：CLOB `mos` 是最小下单量规则源；CLOB `mts` 与 Gamma
+    `orderPriceMinTickSize` 均不进入规则快照或一致性门，初始 tick 只能来自上游规范事件；
+    Gamma `orderMinSize` 只作诊断，不构成硬相等门；`negRisk` 取 Gamma，CLOB
     响应自然含 `nr` 时也只作诊断；完整费用规则取 Gamma `feesEnabled + feeSchedule`，只有
     费用启用时才要求 CLOB `fd` 存在，并只核对 `rate/exponent/takerOnly` 与 `r/e/to`。任何
     实现不得把来源不同但名称近似的字段加入全量硬相等校验。
@@ -190,6 +195,11 @@ DPT 需求/计划批准并冻结共享合同
     为 false，`oas` 缺失不阻断，费用禁用时允许 `fd`/`feeSchedule` 省略。除此之外，任一
     请求最终失败、必需字段缺失/非法或跨端点冲突都不能形成快照；`live-trade` 与
     `data-collect` 继续遵守原官方 SDK 边界。
+  - 步骤 1.0.4：验证历史运行只加载 `rule_evidence_mode=HISTORICAL_AS_OF` 的同 schema
+    快照，且 `rules_as_of_utc_ms` 不晚于回放因果起点。
+    -> 验证：历史模式不创建 HTTP 客户端；当前查询响应不能转换成历史证据；缺少任一必需
+    历史规则、适用时点越界、来源追溯或摘要不合法时，受影响市场在首个业务请求前失败即关闭。
+    两种模式进入同一确定性核心，不产生第二套规则引擎。
 
 - 任务 1.1：实现隔离会话和不可变场景绑定
   - 步骤 1.1.1：实现会话/账户/调用方身份、不可变场景、规则快照、合同、配置和随机种子绑定。
@@ -236,8 +246,9 @@ DPT 需求/计划批准并冻结共享合同
     -> 验证：0/1/15/16、混合接受/拒绝/未知、逐项幂等和一项失败不回滚其他项。
   - 步骤 2.2.3：仅在规则快照 `taker_order_delay_enabled=true` 时实现配置中的 250ms
     taker 暂缓和结束时重校验；false 时直接进入后续撮合检查。
-    -> 验证：true/false、maker/post-only 拒绝、期间全撤和恢复矩阵通过；无调用方可见
-    `delayed`，地域时延配置和请求不能覆盖平台规则。
+    -> 验证：true/false、maker/post-only 拒绝、期间全撤和恢复矩阵通过；响应类型保留
+    `delayed`，其可见时机按冻结的可见性情景分别验证，不得无条件抑制或生成；地域时延配置
+    和请求不能覆盖平台规则。
 
 - 任务 2.3：实现唯一 L2 队列估计和撮合守恒
   - 步骤 2.3.1：实现 `L2_BOOK_DELTA_FIFO_ESTIMATE_V1` 的净差额、队头消耗、队尾新增和
@@ -298,7 +309,7 @@ DPT 需求/计划批准并冻结共享合同
   - 步骤 3.4.1：实现市场结束订单关闭、资金释放和结算屏障。
     -> 验证：外部盘口释放不产生账户事实，所有更早经济变化和返佣应计先闭合。
   - 步骤 3.4.2：在合格 `MarketResolved.available_at` 同一逻辑时点按冻结子顺序原子赎回。
-    -> 验证：胜/负/零持仓/非 1/0 向量、重复、恢复、未闭合成交和反馈迟到矩阵；只有
+    -> 验证：获胜结果 1、未获胜结果 0、零持仓、重复、恢复、未闭合成交和反馈迟到矩阵；只有
     `AutoRedeemApplied` 对外。
   - 步骤 3.4.3：实现请求响应、订单、成交和结算反馈的稳定关联与原始状态保留。
     -> 验证：三类生命周期不混合，SDK `Unknown(raw)` 原值保留，模拟证据不冒充 NOE、
@@ -374,8 +385,7 @@ DPT 需求/计划批准并冻结共享合同
 ## 8. 阶段 6：DPT Gate A 后的真实管道纵向门
 
 阶段入口必须机械验证 DPT `REAL_EXECUTION_TAPE_READY` 的 ID/SHA、
-`pipeline_core_identity`、输入集合和能力矩阵；`tape_assessment=PARTIAL` 或
-`REAL_EXECUTION_TAPE_PARTIAL` 不满足入口。
+`pipeline_core_identity`、输入集合和能力矩阵；失败诊断或缺少成功回执不满足入口。
 
 - 任务 6.1：准入真实事件带而不接触原始数据
   - 步骤 6.1.1：只通过版本化事件带接口读取真实 `ExecutionMarketEvent`。
@@ -387,7 +397,8 @@ DPT 需求/计划批准并冻结共享合同
 - 任务 6.2：执行代表性市场纵向和语义对照
   - 步骤 6.2.1：至少一个代表性市场窗口由真实事件带驱动影子簿、队列和市场生命周期。
     -> 验证：初始 `book`、净差额、成交/`book` 邻接、缺口/重同步、市场判定和谱系逐事件
-    可追溯；同语义黄金事件产生相同状态转换。
+    可追溯；后续 `book` 不产生第二个初始快照，只形成确认或
+    `BOOK_RESYNC_DELTA_INFERENCE` 净差额转换；同语义黄金事件产生相同状态转换。
   - 步骤 6.2.2：执行训练回放生产器与模拟盘回放测试生产器一致性。
     -> 验证：同一规范序列产生相同影子簿状态；模拟盘路径只应用本机已可用事件。
 
@@ -543,7 +554,7 @@ DPT 需求/计划批准并冻结共享合同
 | `SIM-AC-041` | 组件，2/3/5 | 小额余量内部终态与撤单/反馈两种同刻顺序、迟到、重复和未找到矩阵 |
 | `SIM-AC-042` | 组件，3/4/5 | 小额余量前后及热移除后 `order/orders/trades` 投影且无伪成交 |
 | `SIM-AC-043` | 组件，3/5 | 时间 T 的更早经济闭合、返佣引用、市场结束屏障、标记和自动赎回稳定子顺序 |
-| `SIM-AC-044` | 组件，3/5 | 胜/负/零/非 1/0 兑付、成交最终性、反馈迟到、重复和恢复矩阵 |
+| `SIM-AC-044` | 组件，3/5 | 获胜结果 1、未获胜结果 0、零持仓、成交最终性、反馈迟到、重复和恢复矩阵 |
 | `SIM-AC-045` | 组件，3/4/5 | 正常、耗尽隔离、兑付冲突和输入失败封存的返佣/赎回/热移除屏障 |
 | `SIM-AC-046` | 组件/训练闭环，3/5/7 | maker 返佣完整黄金矩阵；组件验证幂等原始证据，外部闭环验证只应用一次 |
 | `SIM-AC-047` | 组件/训练闭环，3/5/7 | taker、日桶、门槛、截取、最终性延迟、截尾、恢复和外部 Ledger 消费矩阵 |
