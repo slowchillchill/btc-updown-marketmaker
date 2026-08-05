@@ -77,7 +77,7 @@ changelog 只记录当时事实与后续取代关系，不承担当前权威。
   -> 逐次用户授权的真实资金阶段
 ```
 
-`data-pipeline(training)` 门 A、门 B、公共 V1 合同和两类回执由
+`data-pipeline(training)` 门 A、门 B、公共 V2 合同和两类回执由
 `plan/data-pipeline-training-plan.md` 唯一拥有；rebuild-core 只消费其合同与回执，不实现、
 复制或签发 DPT 产物。`sim-system` 的领域实现与验收由 `plan/sim-system-plan.md` 唯一拥有；
 rebuild-core 只负责跨模块顺序、身份绑定和总集成证据。

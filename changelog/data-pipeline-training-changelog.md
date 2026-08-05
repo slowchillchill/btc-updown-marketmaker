@@ -1950,10 +1950,12 @@ Task 0.10 的定向绿灯，不代替后续完整阶段验证和独立阶段复�
   阶段 1 集成测试 2 项通过、6 项按既有设置忽略。四日 9.2 GB 完整准入资源试验未重复运行。
   `cargo check --workspace --all-targets`、全工作区严格 Clippy、格式、差异、黄金 JSON、Cargo
   metadata 和核心依赖边界检查均通过；核心正常依赖仍不含 Arrow、Parquet、网络或 I/O。
-- 一次额外扩大范围的 `cargo test --workspace --all-targets` 触发 `data-collect` 的
-  `real_source_alignment_probe` bench，并以 `writer chunk channel disconnected`、退出码 1
-  失败。该 bench 不属于阶段 0R 完成门，本轮没有修改或重跑修复 `data-collect`；本结果只按
-  事实保留，不能写成全工作区测试通过。
+- 两次额外扩大范围的 `cargo test --workspace --all-targets` 在前一次尚未结束时重叠运行，
+  共同触发 `data-collect` 的 `real_source_alignment_probe` bench，并共用其默认产物目录和固定
+  写入文件名。后一次运行在已有 `running.parquet` 后退出，发送端只显示二级错误
+  `writer chunk channel disconnected` 和退出码 1；该结果属于测试编排造成的 bench 运行隔离
+  问题，不是生产写入器故障或当前开发遗留。该 bench 不属于阶段 0R 完成门，本轮没有修改或
+  重跑 `data-collect`，也不能把此次扩大范围命令写成通过。
 - 阶段 0R 当前等待独立阶段审查，尚未关闭，也尚未签发新的门 A 回执。
 
 ### 第一轮独立审查与修正
@@ -1988,8 +1990,21 @@ Task 0.10 的定向绿灯，不代替后续完整阶段验证和独立阶段复�
   关闭；本轮没有物化阶段 2 双索引、修改 `data-collect` 或实现 `sim-system`。
 - 最终受影响验证为：阶段 0 合同测试 `48 passed`、双时间聚焦测试 `1 passed`、训练库
   `42 passed`、阶段 1 集成测试 `2 passed / 6 ignored`；全工作区 `cargo check`、严格 Clippy、
-  格式、差异、黄金 JSON、Cargo metadata 和核心依赖边界检查均通过。扩大范围触发的
-  `data-collect` bench 失败仍只按上一节事实保留，不属于阶段 0R 完成门。
+  格式、差异、黄金 JSON、Cargo metadata 和核心依赖边界检查均通过。上述重叠运行事实只按
+  上一节保留，不属于阶段 0R 完成门或后续开发事项。
 - 阶段 0R 完成门据此关闭。阶段 1 已完成成果继续保留；完整双索引、真实六类映射、状态归约
   和门 A 产物仍属于阶段 2。当前没有签发新的门 A 回执，也没有开始阶段 2；下一游标停在阶段
   2 的用户另行授权门前。
+
+## 2026-08-06：普通开发验证排除专用 bench
+
+- 对原始命令记录、临时产物时间和 bench 写入路径的只读复核确认：此前的
+  `writer chunk channel disconnected` 来自两次扩大范围命令重叠运行并共用默认产物路径，
+  不是独立运行下复现的生产写入器故障。
+- 用户同意把全工作区普通回归固定为
+  `cargo test --workspace --lib --bins --tests --examples --locked --offline`，不得再把
+  `cargo test --workspace --all-targets` 用作普通开发、提交或阶段完成门；`data-collect` 的 bench
+  只在当前计划要求或用户明确批准后单独运行，并使用独立产物目录。该规则已写入根目录
+  `AGENTS.md`。
+- 本次只修正仓库级开发约束和历史事实定性，没有修改 `data-collect` Cargo 配置、实现、需求、
+  计划或验收，也没有修改 DPT、门 A 或 `rebuild-core` 的需求与计划。

@@ -369,3 +369,25 @@ changelog 旧段落中仍像当前规范的“同步文档权威契约测试”�
   1.1；没有复制模拟器字段或测试合同。
 - 本轮没有新建回执、登记系统、测试或文档守卫，也没有修改需求、sim 计划、DPT 文档、代码
   或测试，没有提交或推送；当前执行 authority 与执行授权继续为 `none`。
+
+## 2026-08-06：无权威草案同步 DPT 阶段 0R 公共 V2 合同
+
+用户要求先修复 rebuild-core 无权威草案中仍引用 DPT 公共 V1 合同的过时内容。本节取代当前
+需求与计划中的 V1 消费语义；上文 V1 条目继续只作为当时真实历史，不提供当前技术规范。
+
+- DPT 阶段 0R 已关闭公共合同修正切片，当前顶层公共合同为
+  `ExecutionMarketEventV2`、`EventTimeIndexEntryV2`、`VisibilityIndexEntryV2`、
+  `MarketObservationCausalShellV2`、`GateACapabilityMatrixV2` 和 `GateAReceiptV2`。完整双索引
+  与门 A 产物仍归 DPT 阶段 2，当前没有新的门 A 回执，也没有取得阶段 2 推进授权。
+- rebuild-core 需求只把跨模块归属更新为公共 V2 合同；计划同步了双索引的角色边界、门 A
+  回执对唯一事件存储、事件时间索引、模型可见索引和 Observation 四份清单的绑定、阶段 2
+  只读消费门，以及阶段 3 的双时间联合验收。
+- `ExecutionMarketEventV2` 当前仍复用 `InitialL2SnapshotV1`、`TickSizeChangeV1`、
+  `MarketTradingStateV1`、`PublicTradeV1` 等未改版嵌套载荷。它们不是过时的顶层 V1 消费路径，
+  本轮没有改名或扩展。
+- 定向检索确认当前需求与计划中不再存在过时顶层 V1 消费引用，`git diff --check` 通过；
+  `gpt-5.6-sol/ultra` 独立只读复审结论为 `Approved / PASS`、
+  `Critical 0 / Important 0 / Minor 0`。
+- 本轮只修改 rebuild-core 的需求、计划和本变更记录，没有修改代码、测试、DPT 或
+  `sim-system` 归属文档，没有运行 Rust 测试，也没有读取或构建数据、执行远端或部署操作、
+  提交或推送。rebuild-core 继续保持 `authority=none`、`执行授权=none` 和审核中生命周期。
