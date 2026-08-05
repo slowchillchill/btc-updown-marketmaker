@@ -1674,8 +1674,11 @@ dependencies = [
  "contracts",
  "data-pipeline-core",
  "parquet",
+ "serde",
+ "serde_json",
  "sha2",
  "tempfile",
+ "time",
 ]
 
 [[package]]

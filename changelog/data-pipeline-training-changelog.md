@@ -1307,3 +1307,601 @@ Task 0.10 的定向绿灯，不代替后续完整阶段验证和独立阶段复�
 - 改用明确排除基准程序的 `cargo test --workspace --lib --bins --tests --examples --locked
   --offline` 后，全工作区库、二进制、示例和集成测试通过；严格 Clippy、格式检查和
   `git diff --check` 同步通过。阶段 0 收口提交只允许显式暂存已审查文件。
+
+## 2026-08-05：阶段 1 任务 1.1 首个路径资格切片及审查修正
+
+### 首次实现与审查结论
+
+- 首次实现曾在路径检查后读取清单 JSON 的 `utc_day`，并返回名为
+  `AdmittedSourceManifest` 的对象。该对象没有验证任务 1.1.2 才负责的 schema、`state`、
+  关闭原因和覆盖对象，不能代表真实成功准入；本轮审查后不再把它记述为有效准入切片。
+- 独立审查结论为 `Critical 1 / Important 2 / Minor 0`。Critical 是非法日期目录会失败开放，
+  且词法合格日期可通过根内符号链接解析到日期下限前文件；Important 1 是提前解析 JSON 并
+  返回语义不真实的“已准入”对象；Important 2 是原先使用本机真实旧日期路径，不能证明
+  日期下限在候选文件 I/O 前拒绝。
+
+### 审查修正的测试驱动开发事实
+
+- 真实非法目录回归先用
+  `TMPDIR=/dev/shm cargo test -p data-pipeline-training --test phase1_admission_contract
+  invalid_date_directory_cannot_fail_open --locked --offline -- --ignored --exact` 运行，当前实现
+  错误返回成功并触发断言，得到真实 `0 passed / 1 failed` 红灯。
+- 根内跨日期符号链接回归的首条命令因 `--exact` 缺少 `tests::` 前缀而执行 `0 tests`，不作为
+  证据；纠正为 `TMPDIR=/dev/shm cargo test -p data-pipeline-training --lib
+  tests::canonical_manifest_path_rejects_symlink_to_older_day_inside_root --locked --offline --
+  --exact` 后，当前实现返回规范旧日期路径并触发 `expect_err`，得到真实
+  `0 passed / 1 failed` 红灯。两条红灯均在生产修正前取得。
+- 日期下限前的集成测试已改用确认不存在的合成合法路径
+  `/home/chillchill/new-datasets/1900-01-01/.../manifest.json`，避免本机真实旧数据的存在掩盖
+  “候选 I/O 前拒绝”语义。
+
+### 修正后的实现边界与验证
+
+- 唯一公共入口改为 `qualify_direct_source_manifest_path`，只返回路径资格对象
+  `QualifiedSourceManifestPath`，不读取或解析 JSON，不签发成功准入或门 A 回执。直接
+  `serde`、`serde_json` 依赖及其锁文件依赖记录已移除。
+- 词法路径先拒绝 `..`，并强制把首分量分类为合法 UTC 日；普通日期下限前路径在候选 I/O
+  前失败。规范化后再次确认物理路径仍在固定根内，并从规范相对路径重新强制分类和执行日期
+  下限；返回的 `utc_day` 只来自这条规范安全路径。非法、非 UTF-8 或缺失日期分量均以
+  类型化错误失败关闭。
+- 修正后可移植集成测试为 `2 passed / 2 ignored`，两个本机真实路径测试分别显式通过，
+  `data-pipeline-training` 库回归为 `14 passed`，`data-pipeline-core` 阶段 0 合同回归为
+  `68 passed`。严格 Clippy、格式检查、锁定离线元数据、一级依赖树和 `git diff --check`
+  均通过；一级依赖树不含直接 `serde` 或 `serde_json`。
+- 本切片仍未进入 schema、`state`、覆盖对象、清单文件集合、任务 1.2、副本协议或门 A，
+  也不表示任务 1.1、阶段 1、提交或推送已经完成。
+
+### 第二轮审查与修正
+
+- 第二轮独立审查结论为 `Critical 0 / Important 1 / Minor 1`：路径资格对象的两个公共字段
+  可被调用方绕过资格函数伪造；缺失、非 UTF-8 和格式非法日期使用三个错误变体，超过当前
+  消费者需要的诊断粒度。
+- 真实合格路径测试先改用 `manifest_path()` 和 `utc_day()`，聚焦运行因两个方法不存在得到
+  编译红灯；随后字段改为私有，并只增加两个只读访问器，唯一构造仍由路径资格函数持有。
+- 真实非法日期目录测试先改为单一 `InvalidDatasetDate { path }` 并因变体不存在得到编译红灯；
+  随后原三个过细变体合并为该变体，缺失、非 UTF-8 和日期分类失败均保留候选路径，不新增
+  理论排列测试。
+- 第三轮需求符合性复审和独立代码质量审查均为
+  `Critical 0 / Important 0 / Minor 0`；主代理重新执行可移植测试、两个本机真实路径测试、
+  训练库与核心合同回归、严格 Clippy、格式、元数据、依赖树和差异检查，结果全部通过。
+- 修正后默认集成测试为 `2 passed / 2 ignored`，两个真实本机测试与两个符号链接测试分别
+  通过，训练库回归为 `14 passed`，阶段 0 核心合同回归为 `68 passed`；严格 Clippy、格式、
+  差异、锁定离线元数据和一级依赖树检查均通过。
+
+## 2026-08-05：阶段 1 步骤 1.1.2 每日清单窄头部校验
+
+### 测试驱动开发事实
+
+- 真实 `2026-07-30` 清单正例先调用尚不存在的
+  `validate_direct_source_daily_manifest_header`，聚焦命令因 `E0432` 缺少公共入口得到真实
+  编译红灯；最小实现先复用 `qualify_direct_source_manifest_path`，再读取并解析清单窄头部，
+  同一真实正例随后通过。
+- 旧 schema 使用合格日期 `2026-07-30` 的合成字节；生产校验前，解析器错误返回
+  `schema_version=data_collect_daily_manifest_v2` 的成功对象并得到真实运行红灯。只增加
+  `data_collect_daily_manifest_v3` 校验后聚焦测试通过。
+- `state=open`、仅含空白的 `closure_reason`、`ended_known` 覆盖首末时间倒序，以及清单
+  `utc_day=2026-07-31` 与安全路径日期 `2026-07-30` 不一致，均分别在对应生产校验前运行
+  聚焦测试并得到“错误返回成功对象”的真实红灯；每项只增加对应最小失败关闭校验后转绿。
+
+### 实现边界与验证
+
+- 新公共结果 `ValidatedDailyManifestHeaderV3` 的字段保持私有，只提供只读访问器；该结果仅
+  代表每日清单头部已验证，不代表完整输入准入，也不签发门 A 回执。
+- 顶层窄 DTO 只反序列化 `schema_version`、`state`、`utc_day`、`closure_reason` 和
+  `collection_day_coverage`。覆盖对象只反序列化 v1 的六个字段；`files`、`gaps`、来源健康、
+  摘要和围栏等后续字段仍未解析，未知顶层字段由 `serde` 忽略。
+- `closure_reason` 只要求存在字符串且去除首尾空白后非空，返回值保留原始字符串；没有新增
+  关闭原因枚举，也没有建立关闭原因与覆盖状态的映射。
+- 已关闭清单拒绝 `active` 覆盖；`not_started` 要求三个时间均为空且未重新激活；
+  `unclean_end_unknown` 要求首末时间存在、有序、位于该 UTC 日内且结束时间为空；
+  `ended_known` 要求三个时间存在、`first <= last <= end`、首末启动时间位于该 UTC 日内且结束
+  时间允许等于次日零点。`reactivated_within_day=true` 本身不构成失败。UTC 日界使用锁定的
+  `time 0.3.53` 计算，没有手写历法。
+- 默认 `data-pipeline-training` 测试为库测试 `19 passed`、集成测试
+  `2 passed / 3 ignored`；本机真实 `2026-07-30` 窄头部测试显式运行并通过；阶段 0 核心合同
+  回归为 `68 passed`。严格 Clippy、格式检查、锁定离线元数据、一级依赖树和
+  `git diff --check` 均通过。
+- 本步骤没有解析或校验清单文件集合、SHA-256、业务缺口、围栏或副本协议，没有进入步骤
+  1.1.3、任务 1.2 或门 A；提交和推送均未执行。
+
+### 独立审查与最小修正
+
+- 规格审查结论为 `Critical 0 / Important 2 / Minor 0`。第一项真实问题是初版
+  `ended_known` 校验允许 `last_started_utc_ms` 等于次日零点，与 `data-collect` 当前生产
+  合同“首末启动时间均位于半开 UTC 日区间内”不一致；第二项是五个损坏代表只断言任意错误，
+  不能持续证明各自命中了正确分支。
+- 覆盖损坏的最终代表改为“最后启动时间等于次日零点”。生产修正前运行
+  `tests::collection_last_start_at_next_midnight_is_rejected`，实现错误返回成功头部并得到真实
+  `0 passed / 1 failed` 红灯；随后只增加 `last_started_utc_ms < day_end`，聚焦测试转绿。
+  原真实清单正例仍证明 `ended_utc_ms == day_end` 合法，没有增加时间排列矩阵。
+- 原有五个损坏测试均改为精确匹配对应错误变体和关键值，没有增加损坏测试数量。代码质量
+  复审进一步确认，仅有精确失败分支仍不能防止覆盖校验未来错误拒绝全部合法 `ended_known`；
+  因此增加一个非忽略的共享夹具成功正例，只证明合法覆盖可通过，不增加字段排列矩阵。
+- 代码质量审查另报一个真实 TOCTOU：路径资格完成后再以字符串路径调用 `fs::read`，可在两次
+  路径解析之间把当前用户可写的日期目录替换为根外符号链接。该问题属于步骤 1.1.1 已冻结的
+  路径逃逸边界，不由步骤 1.2.2 的同一文件内容冻结替代。
+- 受控回归先在临时根中完成路径资格，再把日期目录替换为根外符号链接并打开替换后的文件；
+  聚焦测试因缺少句柄绑定读取函数得到真实 `E0425` 编译红灯。最小修正只使用标准库：打开
+  `File` 一次，通过 `/proc/self/fd/<fd>` 取得该句柄的实际路径，重新核对固定根、日期和初始
+  资格，再从同一 `File` 读取；受控竞态测试和真实清单正例随后转绿。
+- 未引入 `openat2`、`rustix` 或新的抽象层，也未在本步骤冻结同一 inode 的并发原地写入；后者
+  仍由步骤 1.2.2 的输入摘要和运行中变化检测负责。
+- 代码质量复审指出初版错误名 `ManifestSourceChanged` 会暗示同路径 inode 或内容变化也由本
+  步骤检测；该名称已收窄为 `OpenedManifestPathMismatch`，只描述实际核对的规范路径和日期。
+- 最终规格复审和代码质量复审均为 `Critical 0 / Important 0 / Minor 0`。最终默认训练库测试为
+  `21 passed`，集成测试为 `2 passed / 3 ignored`；本机真实 `2026-07-30` 窄头部正例和阶段
+  0 核心合同回归分别为 `1 passed` 与 `68 passed`。严格 Clippy、格式和差异检查均通过。
+
+## 2026-08-05：阶段 1 步骤 1.1.3 清单文件集资格
+
+### 合法文件集的首个红灯
+
+- 只新增可移植的合成清单和一个清单内最终 `.parquet` 路径测试，文件内容特意不是
+  Parquet，用于证明本步骤不提前解码文件内容。生产代码修改前运行
+  `TMPDIR=/dev/shm cargo test -p data-pipeline-training --lib
+  tests::listed_final_parquet_path_is_qualified_without_reading_its_content --locked --offline --
+  --exact`，结果因缺少 `qualify_direct_source_daily_manifest_files_at_root` 以 `E0425`
+  编译失败，退出码为 `101`。
+- 该红灯只证明当前缺少清单文件集资格入口；本记录时尚未修改生产代码，也尚未校验
+  路径逃逸、重复、临时对象或清单外文件。
+
+### 文件相对路径逃逸红灯
+
+- 合法文件集转绿后，只新增一个 `../outside.parquet` 文件条目，并在清单 UTC 日目录的
+  父目录写入实际候选文件。生产路径校验修改前运行
+  `TMPDIR=/dev/shm cargo test -p data-pipeline-training --lib
+  tests::manifest_file_parent_escape_is_rejected --locked --offline -- --exact`，当时实现错误
+  返回成功文件集，其规范目标已位于 UTC 日目录之外；结果为 `0 passed / 1 failed /
+  22 filtered out`。
+- 最小修正只允许非空且由 `Component::Normal` 组成的清单成员相对路径，拒绝该代表中的
+  父目录组件及绝对路径。相同聚焦命令随后通过，结果为
+  `1 passed / 0 failed / 22 filtered out`，并精确命中 `UnsafeManifestFilePath`。
+
+### 文件符号链接逃逸红灯
+
+- 父目录逃逸转绿后，只新增一个路径字面安全、但最终符号链接目标位于 UTC 日目录外的
+  `.parquet` 条目。生产规范目标边界校验修改前运行
+  `TMPDIR=/dev/shm cargo test -p data-pipeline-training --lib
+  tests::manifest_file_symlink_escape_is_rejected --locked --offline -- --exact`，当时实现错误返回
+  成功文件集，返回的规范路径明确位于临时数据根外；结果为 `0 passed / 1 failed /
+  23 filtered out`。
+- 最小修正只要求每个清单成员的规范目标仍位于规范 UTC 日目录内，错误保留清单相对路径与
+  规范目标。相同聚焦命令随后通过，结果为 `1 passed / 0 failed / 23 filtered out`，并精确
+  命中 `ManifestFileEscapesDay`。
+
+### 清单相对路径重复红灯
+
+- 符号链接逃逸转绿后，只新增一个将同一合法 `.parquet` 相对路径列出两次的清单。生产去重
+  修改前运行 `TMPDIR=/dev/shm cargo test -p data-pipeline-training --lib
+  tests::duplicate_manifest_relative_path_is_rejected --locked --offline -- --exact`，当时实现错误
+  返回含两个相同成员的成功文件集；结果为 `0 passed / 1 failed / 24 filtered out`。
+- 最小修正只在规范目标解析前用一个相对路径集合拒绝第二次相同路径；相同聚焦命令随后
+  通过，结果为 `1 passed / 0 failed / 24 filtered out`，并精确命中
+  `DuplicateManifestRelativePath`。
+
+### 清单规范目标重复红灯
+
+- 相对路径去重转绿后，只新增一个不同相对路径通过日目录内符号链接指向同一规范文件的
+  清单。生产规范目标去重修改前运行 `TMPDIR=/dev/shm cargo test -p
+  data-pipeline-training --lib tests::duplicate_manifest_canonical_target_is_rejected --locked
+  --offline -- --exact`，当时实现错误返回两个相对路径、同一规范目标的成功文件集；结果为
+  `0 passed / 1 failed / 25 filtered out`。
+- 最小修正只增加一个规范目标集合并拒绝第二个相同规范目标；相同聚焦命令随后通过，结果为
+  `1 passed / 0 failed / 25 filtered out`，并精确命中
+  `DuplicateManifestCanonicalTarget`。
+
+### 运行中 Parquet 红灯
+
+- 规范目标去重转绿后，只新增一个清单列出并落盘当前写入器真实命名形态
+  `.parquet.running` 的代表。生产最终化名称检查前运行 `TMPDIR=/dev/shm cargo test -p
+  data-pipeline-training --lib tests::running_parquet_manifest_entry_is_rejected --locked
+  --offline -- --exact`，当时实现错误返回成功文件集；结果为 `0 passed / 1 failed /
+  26 filtered out`。
+- 最小修正识别当前生产代码可达的临时文件后缀，并要求普通清单成员以 `.parquet` 结尾；
+  相同聚焦命令随后通过，结果为 `1 passed / 0 failed / 26 filtered out`，并精确命中
+  `TemporaryManifestObject`。自审发现助手初版提前包含下一项 `.rsync-partial` 分类；为保留
+  下一行为的真实红灯，该两条分类在新增下一测试前移除，不影响本项 `.running` 结果。
+
+### rsync 临时对象红灯
+
+- 在确认生产助手不含 `.rsync-partial` 分类后，只新增一个清单列出并落盘
+  `source_kind=.../.rsync-partial/upload.parquet` 的代表。生产分类修改前运行
+  `TMPDIR=/dev/shm cargo test -p data-pipeline-training --lib
+  tests::rsync_partial_manifest_entry_is_rejected --locked --offline -- --exact`，当时实现错误返回
+  成功文件集；结果为 `0 passed / 1 failed / 27 filtered out`。
+- 最小修正只补回路径组件等于或包含 `.rsync-partial` 的临时对象分类；相同聚焦命令随后
+  通过，结果为 `1 passed / 0 failed / 27 filtered out`，并精确命中
+  `TemporaryManifestObject`。
+
+### 清单外最终 Parquet 红灯
+
+- rsync 临时对象转绿后，只新增一个当前真实布局代表：同一层
+  `source_kind=binance_aggtrade` 目录同时存在已列和未列的普通最终 `.parquet`。生产目录扫描
+  修改前运行 `TMPDIR=/dev/shm cargo test -p data-pipeline-training --lib
+  tests::unlisted_finalized_parquet_in_one_level_source_directory_is_rejected --locked --offline --
+  --exact`，当时实现错误返回只含已列成员的成功文件集；结果为 `0 passed / 1 failed /
+  28 filtered out`。
+- 最小修正只扫描规范 UTC 日目录及其一层真实子目录的名称和文件类型；目录项复用同一临时
+  分类，普通最终 `.parquet` 以相对路径集合核对是否列出，不打开 Parquet 内容，也不递归
+  更深。相同清单外文件聚焦命令随后通过，结果为 `1 passed / 0 failed / 28 filtered out`，
+  并精确命中 `UnlistedFinalizedParquet`。
+- 最终 `.running` 与 `.rsync-partial` 代表按实际残留形态收窄为“清单未列、日目录中实际
+  存在”，不再把临时对象伪造成清单成员；测试数量不变。前述红灯仍准确记录分类校验尚未
+  实现时的历史事实。
+- 自审删除了扫描初版附带的“清单成员最多两层、父目录必须是真目录”限制：有界扫描只描述
+  本步骤主动检查的日目录范围，不授权冻结未来清单成员目录深度或拒绝根内非逃逸别名。
+  保留的路径合同只有安全相对路径、最终 `.parquet`、目标仍位于规范日目录内且是文件。
+
+### CurDir 静默规范化红灯
+
+- 全量验证前自审确认 `Path::components()` 会消去路径中间的 `.`，因此初版“全部组件为
+  `Normal`”不足以落实不静默规范化 `CurDir` 的已批准边界。只新增
+  `source_kind=..././curdir.parquet` 且规范目标真实存在的代表后运行
+  `TMPDIR=/dev/shm cargo test -p data-pipeline-training --lib
+  tests::manifest_file_curdir_component_is_not_silently_normalized --locked --offline -- --exact`，
+  当时实现错误返回成功文件集；结果为 `0 passed / 1 failed / 30 filtered out`。
+- 最小修正直接对 DTO 原始字符串按 `/` 分段，拒绝空段、`.` 和 `..`，同时保留
+  `Component::Normal` 检查；相同聚焦命令随后通过，结果为
+  `1 passed / 0 failed / 30 filtered out`，并精确保留原始 `./` 路径。
+
+### 有界目录布局绕过红灯
+
+- 对照当前生产者后确认，`data-collect::finalized_file_facts` 只从 UTC 日目录的一层真实
+  `source_kind=*` 子目录收集普通文件，四日 491 个真实条目也均为“一个目录组件 + 文件名”。
+  因此前述删除路径层级限制的自审判断被本项证据取代；不限制 listed 深度会使深层 listed
+  与 unlisted 文件集合一起绕过一层扫描。
+- 只新增一个深层目录同时含清单内与清单外 `.parquet` 的代表。生产布局校验前运行
+  `TMPDIR=/dev/shm cargo test -p data-pipeline-training --lib
+  tests::listed_path_outside_bounded_day_layout_is_rejected --locked --offline -- --exact`，当时实现
+  错误返回成功文件集；结果为 `0 passed / 1 failed / 31 filtered out`。
+- 最小修正新增单一 `ManifestFileOutsideBoundedLayout`，要求清单字面相对路径及其规范目标相对
+  UTC 日目录均为“一个目录组件 + 文件名”；不校验首组件名称或 source 业务语义。相同聚焦
+  命令随后通过，结果为 `1 passed / 0 failed / 31 filtered out`。
+
+### 最终实现边界与验证
+
+- 公共窄结果 `QualifiedDailyManifestFileSetV3` 和 `QualifiedManifestParquetPath` 字段保持私有，
+  只提供清单路径、已验证头部和清单成员路径的只读访问器；类型名与说明均不声称完整准入或
+  门 A。`files` 窄 DTO 只解析 `path`，合成正例中的 `source_kind`、`rows` 等未知字段被忽略。
+- 清单头部校验和 `files` 解析复用同一次 `File` 打开、经 `/proc/self/fd` 重新核对后的同一份
+  字节；没有第二次读取清单。目录扫描只读取规范 UTC 日目录及一层真实子目录的名称和文件
+  类型，不打开 Parquet 内容，也不递归更深。
+- `files` 非数组代表直接精确命中 `Json`。该行为由首个正例所需的 `Vec<{path}>` 窄 DTO 已先
+  失败关闭，因此没有伪造独立红灯；测试结果为 `1 passed / 0 failed / 29 filtered out`。
+- 最终 `.running` 与 `.rsync-partial` 测试均使用空 `files` 清单和目录实际残留，分别精确
+  命中 `TemporaryManifestObject`；普通清单外 `.parquet` 精确命中
+  `UnlistedFinalizedParquet`。符号链接逃逸、重复相对路径、重复规范目标、CurDir 和有界布局
+  代表均精确命中各自错误分支。
+- 四日真实忽略测试逐日核对 `2026-07-30/31`、`2026-08-01/02` 的文件数分别为
+  `121/127/121/122`，总计 `491`，显式运行结果为 `1 passed / 0 failed / 5 filtered out`；本步骤
+  未核对行数、字节、SHA-256、围栏、业务质量或 Parquet 内容。
+- 最终默认 `data-pipeline-training` 测试为库测试 `32 passed`、集成测试
+  `2 passed / 4 ignored`；`data-pipeline-core` 阶段 0 合同回归为 `68 passed`。严格 Clippy、
+  格式、锁定离线元数据和 `git diff --check` 均通过。本步骤未提交或推送。
+
+### 独立审查后的普通文件边界修正
+
+- 独立审查确认初版有界扫描仍忽略一层来源目录中的嵌套目录。现有层级测试先改为只在
+  manifest 列出合法浅层 `listed.parquet`，同时在同一来源目录留下
+  `nested/unlisted.parquet`；生产修改前运行 `TMPDIR=/dev/shm cargo test -p
+  data-pipeline-training --lib tests::nested_directory_with_unlisted_parquet_is_rejected --locked
+  --offline -- --exact`，实现错误返回成功文件集，结果为 `0 passed / 1 failed /
+  31 filtered out`。
+- 旧规范目标重复测试改为 manifest 只列同日来源目录中的 `alias.parquet`，该路径是指向普通
+  非 Parquet 文件 `ordinary-target.bin` 的符号链接。生产修改前运行 `TMPDIR=/dev/shm cargo
+  test -p data-pipeline-training --lib
+  tests::manifest_parquet_symlink_to_non_parquet_file_is_rejected --locked --offline -- --exact`，实现
+  错误返回成功文件集，结果为 `0 passed / 1 failed / 31 filtered out`。
+- 旧 `DuplicateManifestCanonicalTarget` 及其规范目标集合只处理两个清单相对路径解析到同一
+  目标的情况；当前 `data-collect::finalized_file_facts` 只产出一层真实目录中的普通文件，
+  因此该别名判断由更直接的普通文件合同取代。对应错误变体、显示文本、规范目标集合和旧
+  canonical duplicate 测试均删除，不保留不可达分支。
+- 独立复审确认，`data-collect/src/publish.rs:258-267` 只是发现侧名称分类器，不能证明
+  `.partial`、`.incomplete` 是当前 `typed_raw` 写入路径或真实样本中的可达名称；训练准入器
+  删除这两个未证实分支，不把未列的普通非 Parquet 对象升级为阻断语义。计划明列且当前
+  分类器仍识别的 `.rsync-partial`，以及现有写入路径可达的运行中/临时名称继续保留。
+- 最小生产修正复用 `ManifestFileOutsideBoundedLayout`：UTC 日目录根只允许普通文件或真实
+  目录，一层来源目录只允许普通文件；临时名称仍先命中 `TemporaryManifestObject`，且扫描
+  不递归。两个聚焦命令随后分别通过，均为 `1 passed / 0 failed / 31 filtered out`。
+- 修正后默认 `data-pipeline-training` 测试仍为库测试 `32 passed`、集成测试
+  `2 passed / 4 ignored`；四日真实文件集为 `1 passed / 0 failed / 5 filtered out`，阶段 0
+  核心合同回归为 `68 passed`。严格 Clippy 首次只报告等价布尔表达式可简化，按其建议做
+  不改变行为的机械改写后通过；随后重新运行完整训练测试仍全部通过。格式、锁定离线元数据、
+  旧 canonical duplicate 符号搜索及 `git diff --check` 均通过。本步骤未提交或推送。
+
+## 2026-08-05：阶段 1 直接源范围收敛与任务 1.1 关闭
+
+- 欠规范证据：计划 2.2 第 3 项仍把训练服务器副本及其传输清单、逐文件 SHA-256 身份证明列为
+  当前准入语义，但任务 1.1 已实现、测试和复审的范围只有固定根
+  `/home/chillchill/new-datasets` 的直接源；该副本语义没有对应的当前传输合同或已批准实现。
+- 用户批准当前阶段只支持该固定根的直接源，删除任务 1.1 验证中的“副本身份不符”；列投影、
+  分批扫描及其过滤条件、投影列和跳过列写入运行清单的要求不变。
+- 原“训练服务器副本可凭传输清单和逐文件 SHA-256 准入”的当前语义被取代。未来确有远端训练
+  副本需求时，必须另行冻结并取得批准的传输合同，不能由本次修正或既有任务 1.1 证据推导。
+- 任务 1.1 关闭依据：三个步骤已有代码与测试证据；当前训练库列出 32 个库测试，默认集成测试
+  为 `2 passed / 4 ignored`，四日真实文件集显式通过；三个步骤的独立复审记录及其修正后验证
+  均已完成。计划游标据此推进到任务 1.2.1。
+- 本次决定不新增远端同步、训练服务器副本、传输合同、提交、推送、发布或运行环境状态变化
+  权限；阶段 1 本地开发继续沿用既有授权，任务 1.2.2 仍按计划顺序执行。
+
+## 2026-08-05：阶段 1 任务 1.2.1 完整 Parquet 准入与 manifest v3 围栏
+
+### 欠规范事实与用户决定
+
+- 原计划的“适用围栏证据/围栏回执”没有定义首版成功准入可接受的关闭终态和精确证据集合，
+  不能据此把任意已关闭清单解释为成功准入。
+- 用户批准：首版只接受 `closure_reason=utc_day_barrier`、
+  `collection_day_coverage.state=ended_known`、精确无重复的四个 producer barrier
+  （`binance_aggtrade`、`binance_depth`、`polymarket`、`polymarket_rtds`）及六个当前
+  source kind 的 writer finalize ack。4/6 只证明 manifest v3 结构性围栏，不是独立运行时或
+  密码学回执；其他当前关闭原因失败关闭，只产生分类诊断。
+
+### 测试驱动开发事实
+
+- 身份元组测试先运行 `TMPDIR=/dev/shm cargo test -p data-pipeline-training --lib
+  tests::manifest_file_identity_tuple_must_match_its_derived_layout_identity --locked --offline
+  -- --exact`，因缺少 `validate_daily_manifest_admission_at_root` 与
+  `ManifestAdmissionValidationError` 得到 `E0425/E0433` 红灯；最小实现后同一命令为
+  `1 passed / 0 failed`，错误保留完整派生/清单 source、schema、UTC 日、小时和 part 元组。
+- 真实可达的 `unclean_rollover + unclean_end_unknown` 终态代表先因缺少
+  `AdmissionTerminalMismatch` 得到 `E0599` 红灯；增加精确成功终态限制后同一聚焦命令转绿。
+  未采用 `operator_shutdown`，因为该值不是已核实的 closed-manifest 关闭原因。
+- 同一持久 Parquet 的 footer 行数、字节和完整文件 SHA-256 分支均从干净 base 清单单独写入
+  错误事实；每个分支加入前均以缺少对应错误变体的 `E0599` 取得红灯，随后同一
+  `persistent_file_integrity_mismatches_are_rejected` 命令转绿。摘要值另有大写十六进制格式
+  代表：先 `E0599`，再拒绝非 64 位小写十六进制。
+- `data_collect_daily_file_fact_v1` footer 窄 DTO 的 part 交叉代表、非规范
+  `-part-01`、缺失 writer finalize ack 分别先以 `E0599` 红灯，再以同名聚焦命令转绿；前者
+  同时要求三项原始 footer key 和 daily file fact 各恰一次且有值。
+- 四日真实正例先在集成测试中导入尚不存在的
+  `validate_direct_source_daily_manifest_admission`，得到 `E0432` 红灯；随后公共入口返回 DPT
+  自有的私有字段验证输入/文件事实，而非上游 DTO 或 `()`，对四日 491 个文件执行完整流式
+  SHA-256、footer 与 metadata 交叉验证。
+
+### 实现与验证边界
+
+- 每个 Parquet 只打开一次，通过 `/proc/self/fd` 反查并绑定已验证 canonical path；同一对象的
+  metadata 提取字节数、固定 64 KiB 缓冲流式计算 SHA-256、seek 回起点后读取 footer。返回后的
+  输入冻结变化仍由任务 1.2.2 负责。
+- footer 只读取成熟 Parquet crate；要求
+  `parquet_raw_source_kind`、`parquet_raw_layout_version`、
+  `data_collect_artifact_kind=typed_raw_parquet` 和 `data_collect_daily_file_fact_v1`，后者窄交叉
+  source/schema/UTC 小时/part/rows。允许其他合法 metadata，不自建 Parquet 解析器。
+- `cargo test -p data-pipeline-training --lib --locked --offline` 最终为 `39 passed`。本任务未修改
+  `data-collect`、需求、当前游标、远端状态、提交或推送。
+
+### 独立审查第一轮后的 I1/I2 修正
+
+- 独立审查指出两个可执行问题：I1 是只在完整 admission DTO 反序列化后检查成功终态，导致真实
+  恢复形态在缺少成功专用 `producer_barriers` / `writer_finalize_acks` 时先落入泛化 `Json` 错误；I2
+  是外层数据集日期与 `typed_raw/utc_day=*` 内层分区尚可不一致。审查同时确认 M0：公共结果仍为
+  DPT 自有私有字段事实，未暴露上游 DTO 或 `()`。
+- I1 使用真实恢复形态：`closure_reason=reconciled_collection_not_started`、
+  `collection_day_coverage.state=not_started`、三个覆盖时间均为 `null`、
+  `reactivated_within_day=false`，并删除成功专用 barriers、acks 和文件。生产修正前，
+  `tests::success_admission_requires_the_exact_closed_terminal_tuple` 精确运行后返回
+  `Json(missing field producer_barriers)`；把精确成功终态检查移到完整 admission DTO 解析之前后，
+  同一命令通过并命中 `AdmissionTerminalMismatch`。
+- I2 使用外层目录和 header 均为 `2026-07-30`、内层路径为
+  `typed_raw/utc_day=2026-07-31` 的合成清单。生产修正前，
+  `tests::manifest_inner_utc_day_partition_must_match_outer_dataset_day` 返回合格路径而触发
+  `expect_err`；路径资格层在词法和规范路径上都核对该内层分区后，同一命令通过并拒绝为
+  `InvalidDatasetDate`。
+- 上述两项聚焦回归各为 `1 passed / 0 failed`。I1/I2 修正后，主代理显式运行
+  `TMPDIR=/dev/shm cargo test -p data-pipeline-training --test phase1_admission_contract
+  real_four_day_daily_manifests_pass_complete_admission --locked --offline -- --ignored --exact`，退出码为
+  `0`，结果为 `1 passed / 0 failed / 6 filtered out / 182.26s`。这次结果替代 I2 修正前的四日
+  admission 证据；当前游标仍为任务 1.2.1，未推进、未改 `data-collect`、未提交或推送。
+
+### 独立审查第二轮：恢复完整 admission 身份元组回归
+
+- 首轮“用 I2 内层分区测试替换 identity test”的建议不完整：内层路径分区属于路径资格边界，
+  不能覆盖任务 1.2.1 明列的“清单文件项身份元组与由文件布局派生元组”完整 admission 边界。
+  I2 继续保留，且本轮不新增逐字段矩阵。
+- 恢复
+  `tests::manifest_file_identity_tuple_must_match_its_derived_layout_identity`：只把最终 Parquet
+  文件名小时从 `00` 改为 `01`，同步清单 `path` 而不改清单 `utc_hour`，经完整 admission 入口精确
+  命中 `FileIdentityMismatch`。断言同时固定 expected/found 的 source、schema、UTC 日、UTC 小时和
+  part 五字段完整元组。
+- 该测试首轮实现前的 `E0425/E0433` 红灯和最小实现后的绿灯已在本 changelog 的任务 1.2.1 记录；
+  本轮只是恢复被错误删除的覆盖，不伪造新的红灯。恢复后的聚焦命令为 `1 passed / 0 failed / 39
+  filtered out`。未改生产代码、计划语义或游标，未重跑 9.2GB 四日测试，未提交或推送。
+
+### 最终定向复审与任务 1.2.1 关闭
+
+- 最终定向复审确认首轮 finding 已处理，新结论为 `Critical 0 / Important 0 / Minor 0`；需求符合性
+  为 `PASS`，代码质量为 `APPROVED`。
+- 关闭证据包括：默认包测试库 `40 passed`、集成 `2 passed / 5 ignored`，以及生产修复后的四日真实
+  完整准入退出码 `0`、`1 passed / 0 failed / 6 filtered out / 182.26s`。
+- 任务 1.2.1 至此关闭，计划当前游标推进至任务 1.2.2 的输入摘要冻结与运行中变化检测。本记录仅
+  保存事实，不承担当前权威；未改代码、需求、`data-collect`、远端状态，未提交或推送。
+
+## 2026-08-05：任务 1.2.2 历史事故归属纠正
+
+- 任务预检核实，历史 T08 对象是日期下限前
+  `2026-07-09T08` 只写入 `PAR1` 四字节且从未最终化的 `.running` 文件；它没有进入正式
+  reader，也不是已准入最终化输入在运行中被截断或改写的事故。
+- 当前四日验收基线的 491 个清单成员全部是最终化文件，目录与清单均没有 `.running`、
+  `.tmp`、`.digesting` 或 `.rsync-partial`。T08 事故形态归步骤 1.1.3 的临时对象拒绝边界，
+  现有测试已经证明 `.running` 不能取得准入资格，不增加重复事故测试。
+- 用户批准删除任务 1.2.2 中“已发生的截断事故另作回归”的错误归因。任务 1.2.2 只用一个
+  已准入最终化输入在运行中发生字节变化的代表，证明重新校验失败并终止构建；该代表是当前
+  合同的故障注入，不冒充历史事故。
+- 本次纠正不修改需求、`data-collect`、真实数据或既有任务 1.1/1.2.1 实现，也不形成提交、
+  推送、部署或远端状态变化权限。
+
+## 2026-08-05：任务 1.2.2 输入集合冻结与变化检测实现
+
+### RED 与最小实现
+
+- 先增加唯一聚焦行为测试
+  `tests::frozen_input_set_rejects_a_changed_but_independently_admissible_input`，再执行
+  `TMPDIR=/dev/shm cargo test -p data-pipeline-training --lib
+  frozen_input_set_rejects_a_changed_but_independently_admissible_input --locked --offline`。生产 API
+  尚不存在时，编译以退出码 `101` 失败，精确报告两处缺少
+  `freeze_direct_source_input_set_with_admission` 的 `E0425` 和一处缺少
+  `InputSetSnapshotError` 的 `E0433`；该失败只由任务 1.2.2 能力缺失导致，构成预期红灯。
+- 最小生产实现增加 `FrozenDirectSourceInputSetV1`、`freeze_direct_source_input_set` 和窄
+  `verify_unchanged`。公开冻结入口逐个调用任务 1.2.1 的
+  `validate_direct_source_daily_manifest_admission`；快照私有持有已准入每日输入，只暴露只读切片、
+  `input_set_identity_sha256` 与 `input_manifest_set_sha256`。
+- 两类摘要使用独立 v1 域。输入集合身份只编码排序后的 UTC 日、source、schema、UTC 小时、part、
+  bytes、rows 与文件 SHA-256；不编码调用参数顺序、绝对路径、inode、mtime 或其他机器本地事实。
+  清单集合身份独立编码排序后的 UTC 日和精确 manifest SHA-256。快照内每日输入排序仅用于稳定只读
+  暴露；绝对路径不参与任一摘要。
+- `verify_unchanged` 重新对冻结的 manifest 路径执行同一完整准入流程，再同时比较两类摘要。当前
+  准入失败直接返回带 manifest 路径的 `Admission` 错误；任一摘要不一致返回同时携带两类预期值与
+  当前值的 `DigestMismatch`，成功只返回 `()`，不签发任何回执。
+
+### GREEN、回归与边界
+
+- 聚焦测试先冻结有效合成 Parquet/manifest，重复冻结证明两类摘要确定且均为 64 位小写 SHA-256；
+  随后把 Parquet 从 `[1, 2]` 改为不同的有效内容 `[2, 1]`，同步更新 manifest 的 bytes 和 SHA-256，
+  并先证明变化后的输入仍独立通过任务 1.2.1 完整准入。冻结快照的重新校验随后精确返回
+  `DigestMismatch`，证明拒绝来自冻结身份比较，而非损坏 Parquet 准入。
+- 同一聚焦命令在最小实现后退出码为 `0`，结果为 `1 passed / 0 failed / 40 filtered out`。
+  `TMPDIR=/dev/shm cargo test -p data-pipeline-training --lib --locked --offline` 为
+  `41 passed / 0 failed`；默认包命令
+  `TMPDIR=/dev/shm cargo test -p data-pipeline-training --locked --offline` 为库测试
+  `41 passed`、集成测试 `2 passed / 5 ignored`、文档测试 `0`。
+- 本实现没有增加 watcher、轮询、inode/mtime 权威、长持有文件描述符、输入文件副本、构建管道、
+  收据、网络或配置；没有增加或改名 T08 测试，也没有修改依赖、需求、计划游标、`data-collect`、
+  真实数据或远端状态，未提交或推送。
+
+### 独立审查、主代理复验与任务关闭
+
+- `gpt-5.6-sol/ultra` 独立任务审查结论为规范符合性 `PASS`、代码与测试质量 `APPROVED`，
+  `Critical 0 / Important 0 / Minor 0`。审查确认两类摘要字段完整且独立域分离，冻结与复核均
+  复用任务 1.2.1 准入入口，变化测试先证明新输入独立合格再命中冻结摘要不一致，且没有影子
+  准入、回执、监听、轮询、网络、配置或 T08 范围扩张。
+- 主代理在审查前从当前代码重新运行聚焦测试、默认包测试、严格 Clippy、格式和差异检查，全部
+  退出码为 `0`：聚焦变化测试 `1 passed`；库测试 `41 passed`；默认集成测试
+  `2 passed / 5 ignored`；Clippy 无警告。五个忽略测试保持既有真实数据依赖，本任务没有把它们
+  写成已运行。
+- 任务自审确认，`input_set_identity_sha256` 绑定排序后的语义文件事实，
+  `input_manifest_set_sha256` 独立绑定精确清单事实；两者在每次复核时同时比较。当前任务不增加
+  空日、重复调用参数或逐字段排列测试，也不把未来运行配置职责提前放入冻结原语。
+- 任务 1.2.2 至此关闭，计划游标推进至任务 1.3 的四日真实样本基线。本轮仍未修改需求、
+  `data-collect`、真实数据或远端状态，未创建 `.superpowers`，未提交或推送。
+
+## 2026-08-05：任务 1.3 四日真实样本基线
+
+- 本任务只增加真实数据和既有准入行为的特征化测试，没有新增或修改生产 API、质量分类器、
+  需求、`data-collect` 或真实数据。按计划第 1.1 节第 8 项，没有为已有行为伪造 TDD 红灯。
+- 现有四日完整准入测试在每个日期唯一一次调用
+  `validate_direct_source_daily_manifest_admission`，直接复用已准入文件事实逐日断言文件、行数和
+  字节，并合计得到 491 个文件、151,056,246 行和 9,202,902,694 字节。该测试不枚举输入目录，
+  也没有增加第二次四日完整扫描。
+- 新增测试私有强类型 DTO，把 manifest 顶层 `gaps` 只读取为不透明 `Vec<String>`。真实
+  2026-07-30 同时为 `closed`、`gaps=0`、未重新激活；2026-07-31 同时为 `closed`、
+  `gaps=6`、`reactivated_within_day=true`。测试不解析自由文本时间、不构造精确缺口区间，也不
+  硬编码六条诊断全文。
+- 实施代理唯一一次运行四日完整准入测试，退出码为 `0`，结果为 `1 passed / 0 failed / 7
+  filtered out`，测试本体耗时 189.46 秒；逐日事实分别为 121/43,741,059/2,658,237,003、
+  127/42,259,888/2,604,557,207、121/31,336,754/1,892,535,675、
+  122/33,718,545/2,047,572,809。默认包测试为库测试 `41 passed`、集成测试
+  `2 passed / 6 ignored`，严格 Clippy、格式和差异检查通过。首次格式检查只提示新增断言换行，
+  机械格式化后复核通过。
+- `gpt-5.6-sol/ultra` 独立任务审查结论为规范符合、任务质量 `Approved`，
+  `Critical 0 / Important 0 / Minor 0`；审查没有重复运行四日扫描。
+- 主代理随后重新运行小型质量事实测试、默认包测试、严格 Clippy、格式和差异检查，全部退出码
+  为 `0`；同时独立读取四份 manifest，重新得到相同逐日文件、行数、字节、`gaps` 和重新激活
+  事实。按“一次四日完整扫描”边界，没有重复执行 9.2 GB SHA/footer 准入。
+- 任务 1.3 至此关闭，计划游标推进至任务 1.4 的资源预算实测。本轮未提交、推送、部署或执行
+  远端操作；阶段 1 推送仍未获授权。
+
+## 2026-08-05：资源预算执行顺序冲突与用户决定
+
+- 任务 1.4 实施前核查确认，原计划要求阶段 1 立即用真实输入实测并冻结分批解码、语义排序、
+  业务队列、市场热状态、常驻内存和总内存；但六类真实 schema 解码、规范全序和市场状态归约
+  分别尚待任务 2.1 至 2.3 实现。当前代码只有清单准入与不透明 `SortRow` 通用外部排序器，
+  无法在不建立第二语义路径或冒充指标的前提下完成原任务 1.4。
+- 该不一致属于计划执行顺序错误，不是需求冲突、真实样本混入 `.running`、历史 T08 或其他
+  工作树造成。需求 `DPT-AC-010` 只要求门 A 发布前基于真实输入形成资源硬上限，没有要求
+  完整生产管道预算必须在阶段 1 冻结。
+- 主代理与独立 `gpt-5.6-sol/ultra` 只读核查一致判定：原任务 1.4 不可按当前顺序完整验收；
+  合成排序行、局部 `max_run_bytes` 或临时解码/市场状态实现均不能替代真实生产路径。
+- 用户批准推荐调整：阶段 1 的任务 1.4 只实测并冻结当前已存在的清单读取、完整文件 SHA-256
+  与 Parquet footer 准入路径；阶段 0 排序器局部硬上限继续有效，但不声明为完整管道预算。
+  六类真实解码、规范全序、业务队列、市场热状态、常驻内存、总内存及临时磁盘的最终预算，
+  移至任务 2.1 至 2.3 接通后的新任务 2.4，并须在门 A 输出任务开始前完成。
+- 当前计划已直接替换相冲突的旧任务 1.4 和阶段 1 完成门措辞，原门 A 输出顺延为任务 2.5；
+  需求保持不变。获得本次决定后，执行游标恢复至调整后的任务 1.4；本轮决定本身不授权提交、
+  推送、部署、远端操作或真实数据修改。
+
+## 2026-08-05：任务 1.4 每日 manifest 资源合同最终决定
+
+- 调整后的任务 1.4 初版细化曾提出独立的每日成员数硬上限。复核当前 `data-collect` 后确认，
+  同一小时合法重启会继续生成 `part-N`，四日 `121/127/121/122` 只是观测值而不是业务上限；
+  因此删除独立成员数上限，也不增加 `129` 成员测试。成员集合和单日准入结果只由每日
+  manifest 原始字节上限自然约束，真实成员高水位 `127` 仅作为测量事实。
+- 当前准入实现使用无上限的 `read_to_end` 完整读入 manifest。用户先质疑根据四日样本冻结
+  `1 MiB` 缺少依据，随后作出最终精确决定：每日 manifest 原始字节上限为 `10 MiB`
+  （`10 * 1024 * 1024` 字节）；超过上限必须在 JSON 解析前失败。TDD 只增加这一个代表性
+  超限红灯，不建立成员数或资源排列矩阵。
+- 用户进一步确认，保留当前 `64 KiB` SHA-256 读取缓冲、串行准入、一次处理一个目标
+  Parquet 和准入路径零临时磁盘边界。这些内容只描述 DPT 内部从最终化 manifest/Parquet
+  生成已验证文件事实的准入实现，不改变下游消费合同：阶段 2 尚未实现的规范核心消费准入
+  结果，`sim-system` 只消费门 A 规范事件，`model-train` 只消费门 B 成功产物。
+- 本次决定不授权独立成员上限、并发准入、通用资源管理器、新配置系统、第二语义核心、
+  `data-collect` 修改、真实数据修改、提交、推送、部署或远端操作。
+
+### TDD、审查修正与真实资源试验
+
+- 生产代码修改前只增加
+  `tests::manifest_larger_than_10_mib_is_rejected_before_json_parsing`。首次测试写法因 Rust 模式
+  中含算术表达式而发生语法错误，不作为有效红灯；只修正测试写法且仍未修改生产代码后，
+  聚焦命令以退出码 `101` 精确失败于缺少
+  `ManifestHeaderValidationError::ManifestBytesLimitExceeded`，构成实际 RED。
+- 最小实现增加私有 `DAILY_MANIFEST_MAX_BYTES = 10 * 1024 * 1024`、结构化超限错误，并用
+  `File::take(10 MiB + 1)` 实际限制读取。第一个超限检测字节到达后立即失败，JSON 解析不可达；
+  文件在读取期间增长也不能绕过上限。唯一聚焦测试转为 `1 passed / 0 failed`，默认包为库测试
+  `42 passed`、集成测试 `2 passed / 6 ignored`，严格 Clippy、格式和差异检查通过。
+- 独立规范审查为 `PASS`、`Critical 0 / Important 0 / Minor 0`。首轮独立代码质量审查发现
+  `Vec::with_capacity(10 MiB + 1)` 会让约 `350 KiB` 的正常清单无条件预分配约 30 倍内存，
+  污染本任务要测量的常驻内存，因此结论为 `Critical 0 / Important 1 / Minor 0`。最小修正只
+  改为 `Vec::new()`，保留 `take(10 MiB + 1)`；复审为 `Approved`、
+  `Critical 0 / Important 0 / Minor 0`，全部轻量验证重新通过。
+- 唯一一次四日真实完整准入资源试验直接运行已构建的集成测试二进制，避免把 Cargo 编译内存
+  混入准入进程。代码身份为基准提交 `a5db59d6b114df852f6cbd7d171f68a4d4d15ba5` 加
+  `data-pipeline/training/src/lib.rs` SHA-256
+  `274f046c3d9bcd7c88b2bc223f3af205b0c0b9ae92bc1bf7e97470b547fa7088`；四份 manifest
+  SHA-256 依次为 `4b2cd62cea8740bf4cdb29971941118e70d869835496aece714458d12ea96557`、
+  `4fac5a9440c14dbb8acfca18c7a944b2fc33f7f67b5866caeb89d646b87f2296`、
+  `e31b122f6debad9863fac973903714baa739282e4ebba1c9093d9972618a3d30`、
+  `2ea1a7460cf7fde05a498d0b3e338eb3c10a305333fd3a7ddeca46a4a9e19889`。
+- 真实 manifest 字节为 `353,534 / 367,637 / 353,128 / 355,114`，成员为
+  `121 / 127 / 121 / 122`；成员最大值 `127` 只记录为高水位。试验结果为
+  `1 passed / 0 failed / 7 filtered out`，491 个文件、151,056,246 行和
+  9,202,902,694 字节全部通过；测试耗时 `182.33s`，进程墙钟 `3:02.33`，用户态
+  `181.25s`，系统态 `0.94s`，最大常驻内存 `282,484 KiB`，交换 `0`，文件系统写出 `0`，
+  退出码 `0`。该试验没有执行阶段 2 解码、排序或状态归约，也不把页缓存命中统计冒充实际
+  输入字节。
+
+## 2026-08-05：阶段 1 完成门关闭
+
+- 主代理对任务 1.1 至 1.4 的全部当前差异完成阶段自审。改动只涉及训练 crate 的依赖、准入
+  实现、一个阶段 1 集成测试、计划、changelog 和锁文件；需求与 `data-collect` 无差异，
+  `.superpowers` 仍为 Git 忽略的过程目录。代码中不存在每日成员数硬上限、`129` 成员测试、
+  并发准入、新配置系统、文档文本守卫、测试登记表、网络、钱包、签名或凭据路径。
+- 新鲜轻量验证均以退出码 `0` 完成：超限聚焦测试 `1 passed`；训练 crate 库测试
+  `42 passed`，集成测试 `2 passed / 6 ignored`；核心合同测试 `68 passed`；`contracts`
+  测试通过；三个 DPT crate 的严格 Clippy、全仓格式、`git diff --check`、Cargo metadata 和
+  `data-pipeline-training` 正常依赖树检查通过。六个真实数据测试保持忽略，没有重复执行四日
+  9.2 GB 完整准入扫描。
+- `gpt-5.6-sol/ultra` 最终独立阶段审查及其代码边界、文档合同交叉审查结论均为
+  `Approved / PASS`，`Critical 0 / Important 0 / Minor 0`。审查确认固定直接源、日期下限、
+  manifest v3 终态与围栏、文件身份与完整性、输入集合冻结和变化复核符合当前计划；任务 1.4
+  精确保持 `10 MiB`、解析前失败、`Vec::new()`、`64 KiB` SHA-256 缓冲、串行单文件准入和
+  零准入临时磁盘边界，没有额外成员合同或阶段 2 实现。
+- 任务 1.4 与阶段 1 完成门据此关闭。阶段 1 只冻结准入路径资源预算，未宣称完整满足
+  `DPT-AC-010`；真实解码、全序、状态归约和完整生产路径资源预算仍归任务 2.1 至 2.4。
+  本轮未提交、推送、部署或进入阶段 2，当前停在阶段 1 收口提交、推送及阶段 2 本地开发的
+  明确授权门前。
+
+## 2026-08-05：阶段 1 收口提交与推送授权
+
+- 用户明确批准创建阶段 1 收口提交并推送当前 `sim-system` 分支。提交范围只包含阶段 1 已经
+  完成自审、独立审查和最终复验的训练准入代码、测试、依赖锁定、计划与本 changelog。
+- 本次授权不包含阶段 2 本地开发、PR、部署、远端运行、真实数据修改或其他工作树操作；
+  推送完成后仍停在阶段 2 明确授权门前。
