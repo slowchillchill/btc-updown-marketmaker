@@ -1,5 +1,19 @@
 # 仓库指南
 
+## 当前活动事项与首读路由
+
+- 截至 2026-08-06，当前工作树的活动开发事项为
+  `DATA-PIPELINE-TRAINING-20260803`。该事项的需求为
+  `demand/data-pipeline-training-demand.md`，当前业务语义和技术实施的唯一规范来源为
+  `plan/data-pipeline-training-plan.md`，历史事实记录为
+  `changelog/data-pipeline-training-changelog.md`。
+- 处理该事项前，必须先读取需求和计划首屏，并读取计划中的“当前游标”；然后只按当前任务
+  读取计划相关小节、真实代码、数据和测试。不得从 changelog 的旧状态推导当前状态或动作。
+- `data-collect/docs/CURRENT.md` 仅属于 `data-collect`。只有任务实际涉及 `data-collect` 的
+  需求、代码、测试、运行、部署或需要核对其上游合同时，才按下文 `data-collect` 专属规则
+  读取；不得因为该文件存在而把它作为无关 `data-pipeline` 工作的默认首读文档。
+- 用户明确改变当前活动事项后，必须先同步更新本节的事项和首读路由，再按新的当前事项工作。
+
 ## 开发环境与部署拓扑
 
 - 当前本地开发、文档落盘、代码编写与本地构建仓库：`/home/chillchill/btc-updown-marketmaker`
@@ -65,7 +79,7 @@ AWS 爱尔兰实盘服务器 `108.130.74.143` 是运行目标，不是构建机�
 - 输入通过边界校验后，内部测试不得绕过真实构造或解析入口，直接篡改类型来制造平台不可
   能状态。
 
-## data-collect 文档权威路由
+## 仅适用于 data-collect 的文档权威路由
 
 - 处理任何 `data-collect` 需求、代码、测试、运行或部署问题前，必须先读
   `data-collect/docs/CURRENT.md`。它是唯一当前路由入口；其中列出的计划是当前业务语义和

@@ -1,7 +1,7 @@
 //! 训练数据管道的只读准入与确定性、有界外部排序能力。
 //!
-//! 准入边界只接受固定直接数据根；排序行结构固定为 `data-pipeline-core` 编码的
-//! 完整全序键字节和不透明载荷。本 crate 不是通用存储层或查询层。
+//! 准入边界只接受固定直接数据根；排序行结构只包含调用方提供的不透明字节排序键
+//! 和不透明载荷。本 crate 不是通用存储层或查询层，也不解释排序键的业务语义。
 
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap};
@@ -17,8 +17,8 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use arrow_array::{Array, ArrayRef, BinaryArray, RecordBatch};
 use arrow_ord::sort::{SortColumn, SortOptions, lexsort_to_indices};
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
-use contracts::{DATASET_LINEAGE_ROOT, DatasetDateEligibility, TotalOrderKeyV1};
-use data_pipeline_core::{ContractError, classify_dataset_date, total_order_key_bytes};
+use contracts::{DATASET_LINEAGE_ROOT, DatasetDateEligibility};
+use data_pipeline_core::classify_dataset_date;
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use parquet::basic::Compression;
@@ -30,7 +30,7 @@ use time::Date;
 use time::macros::format_description;
 
 const WORK_DIRECTORY: &str = "dpt-external-sort";
-const KEY_COLUMN: &str = "complete_order_key";
+const KEY_COLUMN: &str = "sort_key";
 const PAYLOAD_COLUMN: &str = "payload";
 const DIGEST_DOMAIN: &[u8] = b"data-pipeline-training/external-sort/logical-v1\0";
 const INPUT_SET_IDENTITY_DIGEST_DOMAIN_V1: &[u8] =
@@ -1622,48 +1622,36 @@ fn validate_inner_utc_day_partition(
 /// 能力试验使用的固定行结构。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SortRow {
-    complete_order_key: Vec<u8>,
+    sort_key: Vec<u8>,
     payload: Vec<u8>,
 }
 
 impl SortRow {
-    /// 使用唯一权威的全序编码创建一行。
-    pub fn from_total_order_key(
-        complete_order_key: &TotalOrderKeyV1,
-        payload: impl Into<Vec<u8>>,
-    ) -> Result<Self, ContractError> {
-        Ok(Self::from_encoded(
-            total_order_key_bytes(complete_order_key)?,
-            payload.into(),
-        ))
+    /// 使用调用方已经编码的不透明字节排序键创建一行。
+    pub fn from_sort_key(sort_key: impl Into<Vec<u8>>, payload: impl Into<Vec<u8>>) -> Self {
+        Self {
+            sort_key: sort_key.into(),
+            payload: payload.into(),
+        }
     }
 
-    pub fn complete_order_key_bytes(&self) -> &[u8] {
-        &self.complete_order_key
+    pub fn sort_key_bytes(&self) -> &[u8] {
+        &self.sort_key
     }
 
     pub fn payload(&self) -> &[u8] {
         &self.payload
     }
 
-    fn from_encoded(complete_order_key: Vec<u8>, payload: Vec<u8>) -> Self {
-        Self {
-            complete_order_key,
-            payload,
-        }
-    }
-
     fn resident_bytes(&self) -> usize {
         size_of::<Self>()
-            .saturating_add(self.complete_order_key.capacity())
+            .saturating_add(self.sort_key.capacity())
             .saturating_add(self.payload.capacity())
     }
 }
 
 fn sort_row_inner_bytes(row: &SortRow) -> Option<usize> {
-    row.complete_order_key
-        .capacity()
-        .checked_add(row.payload.capacity())
+    row.sort_key.capacity().checked_add(row.payload.capacity())
 }
 
 fn sort_row_buffer_bytes(rows: &Vec<SortRow>) -> Option<usize> {
@@ -1727,7 +1715,7 @@ pub enum SortError {
     TempRunFileLimit { needed: usize, limit: usize },
     OpenFileLimit { needed: usize, limit: usize },
     TempByteLimit { limit: u64 },
-    CompleteKeyCollision { key_hex: String },
+    SortKeyCollision { key_hex: String },
     InvalidRun(&'static str),
     WorkspaceExists(PathBuf),
     Io(io::Error),
@@ -1754,8 +1742,8 @@ impl fmt::Display for SortError {
             Self::TempByteLimit { limit } => {
                 write!(formatter, "外部排序超过临时文件字节上限 {limit}")
             }
-            Self::CompleteKeyCollision { key_hex } => {
-                write!(formatter, "完整全序键冲突：{key_hex}")
+            Self::SortKeyCollision { key_hex } => {
+                write!(formatter, "排序键冲突：{key_hex}")
             }
             Self::InvalidRun(message) => write!(formatter, "Parquet run 无效：{message}"),
             Self::WorkspaceExists(path) => {
@@ -1788,7 +1776,7 @@ impl From<ParquetError> for SortError {
     }
 }
 
-/// 使用有界 Parquet run，按完整字节键排序不透明行。
+/// 使用有界 Parquet run，按不透明字节排序键排序不透明行。
 ///
 /// `temp_root` 必须已经存在。函数会创建专用子目录，成功时保留它，失败时尽力
 /// 清理它；已经存在的同名子目录不会被复用或删除。
@@ -2192,14 +2180,14 @@ fn merge_group(
     while let Some(entry) = heap.pop() {
         if previous_key
             .as_deref()
-            .is_some_and(|previous| previous >= entry.row.complete_order_key.as_slice())
+            .is_some_and(|previous| previous >= entry.row.sort_key.as_slice())
         {
-            if previous_key.as_deref() == Some(entry.row.complete_order_key.as_slice()) {
-                return Err(collision_error(&entry.row.complete_order_key));
+            if previous_key.as_deref() == Some(entry.row.sort_key.as_slice()) {
+                return Err(collision_error(&entry.row.sort_key));
             }
             return Err(SortError::InvalidRun("输入 run 未严格递增"));
         }
-        previous_key = Some(entry.row.complete_order_key.clone());
+        previous_key = Some(entry.row.sort_key.clone());
         let run_slot = entry.run_slot;
         writer.push(entry.row, metrics)?;
 
@@ -2263,15 +2251,15 @@ fn sort_rows_with_arrow(mut rows: Vec<SortRow>) -> Result<Vec<SortRow>, SortErro
 
 fn ensure_unique_keys(rows: &[SortRow]) -> Result<(), SortError> {
     for pair in rows.windows(2) {
-        if pair[0].complete_order_key == pair[1].complete_order_key {
-            return Err(collision_error(&pair[0].complete_order_key));
+        if pair[0].sort_key == pair[1].sort_key {
+            return Err(collision_error(&pair[0].sort_key));
         }
     }
     Ok(())
 }
 
 fn collision_error(key: &[u8]) -> SortError {
-    SortError::CompleteKeyCollision {
+    SortError::SortKeyCollision {
         key_hex: bytes_to_hex(key),
     }
 }
@@ -2288,8 +2276,7 @@ fn trial_schema() -> SchemaRef {
 }
 
 fn batch_from_rows(rows: &[SortRow]) -> Result<RecordBatch, SortError> {
-    let keys =
-        BinaryArray::from_iter_values(rows.iter().map(|row| row.complete_order_key.as_slice()));
+    let keys = BinaryArray::from_iter_values(rows.iter().map(|row| row.sort_key.as_slice()));
     let payloads = BinaryArray::from_iter_values(rows.iter().map(|row| row.payload.as_slice()));
     Ok(RecordBatch::try_new(
         trial_schema(),
@@ -2301,7 +2288,7 @@ fn rows_from_arrays(keys: &ArrayRef, payloads: &ArrayRef) -> Result<Vec<SortRow>
     let keys = keys
         .as_any()
         .downcast_ref::<BinaryArray>()
-        .ok_or(SortError::InvalidRun("完整键列不是 Binary"))?;
+        .ok_or(SortError::InvalidRun("排序键列不是 Binary"))?;
     let payloads = payloads
         .as_any()
         .downcast_ref::<BinaryArray>()
@@ -2311,7 +2298,7 @@ fn rows_from_arrays(keys: &ArrayRef, payloads: &ArrayRef) -> Result<Vec<SortRow>
     }
     Ok((0..keys.len())
         .map(|index| {
-            SortRow::from_encoded(keys.value(index).to_vec(), payloads.value(index).to_vec())
+            SortRow::from_sort_key(keys.value(index).to_vec(), payloads.value(index).to_vec())
         })
         .collect())
 }
@@ -2641,10 +2628,7 @@ struct HeapEntry {
 
 impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        other
-            .row
-            .complete_order_key
-            .cmp(&self.row.complete_order_key)
+        other.row.sort_key.cmp(&self.row.sort_key)
     }
 }
 
@@ -2656,7 +2640,7 @@ impl PartialOrd for HeapEntry {
 
 impl PartialEq for HeapEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.row.complete_order_key == other.row.complete_order_key
+        self.row.sort_key == other.row.sort_key
     }
 }
 
@@ -2674,16 +2658,16 @@ fn scan_logical_output(
     while let Some(row) = cursor.next_row()? {
         if previous_key
             .as_deref()
-            .is_some_and(|previous| previous >= row.complete_order_key.as_slice())
+            .is_some_and(|previous| previous >= row.sort_key.as_slice())
         {
-            if previous_key.as_deref() == Some(row.complete_order_key.as_slice()) {
-                return Err(collision_error(&row.complete_order_key));
+            if previous_key.as_deref() == Some(row.sort_key.as_slice()) {
+                return Err(collision_error(&row.sort_key));
             }
             return Err(SortError::InvalidRun("最终输出未严格递增"));
         }
-        hash_length_prefixed(&mut hasher, &row.complete_order_key)?;
+        hash_length_prefixed(&mut hasher, &row.sort_key)?;
         hash_length_prefixed(&mut hasher, &row.payload)?;
-        previous_key = Some(row.complete_order_key);
+        previous_key = Some(row.sort_key);
         rows += 1;
     }
     hasher.update(rows.to_be_bytes());
@@ -2711,10 +2695,6 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use contracts::{
-        CanonicalSourceKind, OrderingCoordinateV1, Sha256Hex, SourceNativeIdentityV1,
-        TOTAL_ORDER_KEY_VERSION_V1,
-    };
     use parquet::file::metadata::KeyValue;
     use serde_json::{Value, json};
     use std::os::unix::fs::symlink;
@@ -3682,29 +3662,15 @@ mod tests {
         ));
     }
 
-    fn contract_key(sequence: u64) -> TotalOrderKeyV1 {
-        TotalOrderKeyV1 {
-            version: TOTAL_ORDER_KEY_VERSION_V1.to_owned(),
-            available_at_utc_ms: 1_725_000_000_000,
-            source_kind: CanonicalSourceKind::BinanceDepthUpdate,
-            ordering_coordinate: OrderingCoordinateV1::CollectorAdmission {
-                source_sequence_epoch_id: "phase-0-trial".to_owned(),
-                collector_admission_sequence: sequence + 1,
-            },
-            source_native_identity: Some(SourceNativeIdentityV1::BinanceDepthUpdate {
-                first_update_id: sequence + 1,
-                final_update_id: sequence + 1,
-            }),
-            semantic_tiebreak_sha256: Sha256Hex(format!("{sequence:064x}")),
-        }
+    fn sort_key(sequence: u64) -> Vec<u8> {
+        sequence.to_be_bytes().to_vec()
     }
 
     fn row(sequence: u64) -> SortRow {
-        SortRow::from_total_order_key(
-            &contract_key(sequence),
+        SortRow::from_sort_key(
+            sort_key(sequence),
             format!("payload-{sequence:020}").into_bytes(),
         )
-        .expect("合同键有效")
     }
 
     fn config(max_run_rows: usize, merge_fan_in: usize) -> SortConfig {
@@ -3752,14 +3718,9 @@ mod tests {
 
         let keys: Vec<_> = read_rows(&outcome.output_path, 2)
             .into_iter()
-            .map(|row| row.complete_order_key_bytes().to_vec())
+            .map(|row| row.sort_key_bytes().to_vec())
             .collect();
-        assert_eq!(
-            keys,
-            (0u64..17)
-                .map(|sequence| total_order_key_bytes(&contract_key(sequence)).expect("键有效"))
-                .collect::<Vec<_>>()
-        );
+        assert_eq!(keys, (0u64..17).map(sort_key).collect::<Vec<_>>());
     }
 
     #[test]
@@ -3786,7 +3747,7 @@ mod tests {
     }
 
     #[test]
-    fn arrow_binary_order_matches_known_admission_sequence_order() {
+    fn arrow_binary_order_matches_opaque_sort_key_bytes() {
         let input = [9u64, 0, 7, 2, 8, 1, 6].into_iter().map(row).collect();
         let sorted = sort_rows_with_arrow(input).expect("执行 Arrow 字节排序");
 
@@ -3829,20 +3790,18 @@ mod tests {
     }
 
     #[test]
-    fn complete_key_collision_fails_across_runs() {
+    fn sort_key_collision_fails_across_runs() {
         let temp = TempDir::new().expect("创建临时目录");
-        let duplicate_key = contract_key(2);
+        let duplicate_key = sort_key(2);
         let input = vec![
-            SortRow::from_total_order_key(&duplicate_key, b"first".to_vec())
-                .expect("重复键本身有效"),
+            SortRow::from_sort_key(duplicate_key.clone(), b"first".to_vec()),
             row(1),
-            SortRow::from_total_order_key(&duplicate_key, b"different payload".to_vec())
-                .expect("重复键本身有效"),
+            SortRow::from_sort_key(duplicate_key, b"different payload".to_vec()),
         ];
 
         let error = external_sort(input, temp.path(), &config(1, 2)).expect_err("检测到冲突");
 
-        assert!(matches!(error, SortError::CompleteKeyCollision { .. }));
+        assert!(matches!(error, SortError::SortKeyCollision { .. }));
         assert!(!temp.path().join(WORK_DIRECTORY).exists());
     }
 
@@ -3917,7 +3876,7 @@ mod tests {
         let max_run_bytes = capacity_probe
             .capacity()
             .checked_mul(size_of::<SortRow>())
-            .and_then(|bytes| bytes.checked_add(capacity_probe[0].complete_order_key.capacity()))
+            .and_then(|bytes| bytes.checked_add(capacity_probe[0].sort_key.capacity()))
             .and_then(|bytes| bytes.checked_add(capacity_probe[0].payload.capacity()))
             .expect("测试边界可以表示");
         let first = capacity_probe.pop().expect("测试探针含第一行");
@@ -3962,7 +3921,7 @@ mod tests {
         let max_run_bytes = capacity_probe
             .capacity()
             .checked_mul(size_of::<SortRow>())
-            .and_then(|bytes| bytes.checked_add(capacity_probe[0].complete_order_key.capacity()))
+            .and_then(|bytes| bytes.checked_add(capacity_probe[0].sort_key.capacity()))
             .and_then(|bytes| bytes.checked_add(capacity_probe[0].payload.capacity()))
             .expect("测试边界可以表示");
         let first = capacity_probe.pop().expect("测试探针含第一行");
