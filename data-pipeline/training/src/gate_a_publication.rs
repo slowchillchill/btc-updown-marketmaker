@@ -51,6 +51,7 @@ pub const GATE_A_MEASURED_BUILD_STATE_SCHEMA_V1: &str = "gate_a_measured_build_s
 
 pub const GATE_A_MAX_RSS_KIB: u64 = 1024 * 1024;
 pub const GATE_A_CGROUP_MEMORY_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub(crate) const QUALITY_SCAN_CANONICAL_PAGE_ROWS: usize = 1;
 
 pub fn gate_a_formal_sort_config() -> SortConfig {
     SortConfig {
@@ -761,10 +762,10 @@ pub fn build_quality_isolation_report(
         &candidate.canonical_event_store.manifest_path,
         candidate.output_config.sort.batch_rows,
         candidate.output_config.sort.max_run_bytes,
-        candidate.output_config.sort.batch_rows,
+        QUALITY_SCAN_CANONICAL_PAGE_ROWS,
     )?;
     loop {
-        let page = records.next_page(candidate.output_config.sort.batch_rows)?;
+        let page = records.next_page(QUALITY_SCAN_CANONICAL_PAGE_ROWS)?;
         if page.is_empty() {
             break;
         }

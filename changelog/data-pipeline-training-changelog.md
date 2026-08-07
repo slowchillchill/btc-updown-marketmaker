@@ -2858,3 +2858,45 @@ Task 0.10 的定向绿灯，不代替后续完整阶段验证和独立阶段复�
   `0` 通过，并按批准边界跳过
   `four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second`，没有把该项
   写成通过。相同范围正式重跑、发布和阶段复审仍待后续证据补齐，当前尚未签发门 A 回执。
+
+### 任务 2.5 第二次正式质量报告 OOM 根因纠正与规范事件单条扫描
+
+- 提交 `e5529459261aaae43e30bea26882344852c8d49f` 已删除整份 `QualityScan` 复制及随输入增长的
+  见证集合，但使用同一正式清单、市场和接收时间范围的
+  `dpt-gate-a-20260807-e552945-build.service` 仍在运行 `39min 41.262s` 后被 cgroup OOM 终止。
+  systemd 记录 `Result=oom-kill`、`memory.peak=2147483648` 字节、交换峰值为 `0`；内核记录
+  cgroup 匿名内存为 `2142584832` 字节、文件内存为 `0`，被终止子进程的匿名 RSS 为
+  `2091108 KiB`、文件 RSS 为 `12384 KiB`。本轮 `.time-v.txt` 为空，因此仍没有把内核终止
+  瞬间数据冒充正式 `/usr/bin/time -v` 最大 RSS。
+- 本轮五份 Parquet 与五份 manifest 已完整生成，`reports/` 为空，且没有计量状态、资源报告、
+  运行清单或回执。逐路径复核确认，质量报告扫描把正式物理 `batch_rows=1024` 同时用作
+  `CanonicalEventStoreCursor` 的类型化分页上限和 `next_page` 请求量；游标会先把整页解码为
+  `1024` 个拥有独立载荷所有权的 `CanonicalEventRecordV1`，再交给质量扫描。物理 Parquet
+  批次会在读取推进时释放，不能把一页序列化载荷总和写成全部原始批次同时驻留。
+- 对失败候选逐页只读测量确认，规范事件每 `1024` 条的序列化载荷峰值为 `2663750041` 字节，
+  位于逻辑行 `[206848,207872)`；首个超过 `1 GiB` 的页从逻辑行 `202752` 开始，首个超过
+  `2 GiB` 的页从逻辑行 `205824` 开始。相同页宽下 Observation 峰值为 `4868069` 字节，归约
+  报告峰值为 `8863967` 字节。运行时匿名内存和被终止进程 RSS 是直接证据；序列化载荷总和
+  只用于证明规范事件类型化页的数量级，不等同于精确 RSS。
+- 上一节将 `scan.clone()` 和三份随输入增长的见证集合写成“最强根因证据”的推断已被本轮
+  事实取代：它们确实是不必要的无界实现，删除仍然正确，但不是第二次正式 OOM 的直接主因。
+  当前直接主因是质量报告一次保留 `1024` 个已解码规范事件。Observation 和归约报告的实测
+  页规模没有支持同步改动，继续保持原分页；物理 Parquet `1024` 行批次和 `64 MiB` 驻留门也
+  保持不变。
+- 用户批准只把规范事件质量扫描的内部类型化分页冻结为 `1`，并同时用于游标最大页行数与
+  每次读取请求；不新增公共逐条接口、不改变合同、产物格式、摘要或需求与计划语义，也不
+  放宽最大 RSS `1 GiB`、cgroup `2 GiB` 和交换 `0` 的正式资源门。聚焦回归先以缺少
+  `QUALITY_SCAN_CANONICAL_PAGE_ROWS` 正确失败；最小实现后证明请求 `2` 条会被既有游标边界
+  拒绝，连续单条读取完整保留三条夹具事件的顺序、数量和身份，测试以
+  `1 passed / 0 failed` 通过。
+- 最小实现后的 `cargo test -p data-pipeline-training --lib --bins --tests --examples --locked --offline`
+  以退出码 `0` 通过，其中训练库为 `73 passed / 0 failed`；需要本地真实数据的既有集成测试
+  继续按自身声明保持忽略。严格 Clippy、格式和差异检查均通过。计划冻结的全工作区命令以
+  退出码 `0` 通过，并按批准边界跳过
+  `four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second`，没有把该项
+  写成通过。
+- 失败候选
+  `/home/chillchill/sim-system/.local-artifacts/data-pipeline-training/gate-a/.gate-a-20260807-e552945.candidate`
+  已按批准范围移入系统回收站；原路径不存在，发布根当前为空，且该候选与上一轮
+  `.gate-a-20260807-cac9e50.candidate` 均可由回收站恢复。相同范围正式重跑、发布及阶段复审
+  仍待后续真实结果，当前尚未签发门 A 回执。

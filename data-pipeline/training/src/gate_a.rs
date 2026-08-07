@@ -3621,6 +3621,49 @@ mod tests {
     }
 
     #[test]
+    fn quality_scan_canonical_page_is_single_record_and_counts_all_rows() {
+        let fixture = build_micro_candidate();
+        let manifest_path = &fixture.validated.canonical_event_store.manifest_path;
+        let batch_rows = fixture.output_config.sort.batch_rows;
+        let max_batch_bytes = fixture.output_config.sort.max_run_bytes;
+
+        let mut rejected = CanonicalEventStoreCursor::open(
+            manifest_path,
+            batch_rows,
+            max_batch_bytes,
+            crate::gate_a_publication::QUALITY_SCAN_CANONICAL_PAGE_ROWS,
+        )
+        .unwrap();
+        assert!(matches!(
+            rejected.next_page(2),
+            Err(GateAError::InvalidConfig(_))
+        ));
+        assert_eq!(rejected.next_logical_position(), 0);
+
+        let mut records = CanonicalEventStoreCursor::open(
+            manifest_path,
+            batch_rows,
+            max_batch_bytes,
+            crate::gate_a_publication::QUALITY_SCAN_CANONICAL_PAGE_ROWS,
+        )
+        .unwrap();
+        let mut actual_event_ids = Vec::new();
+        loop {
+            let page = records
+                .next_page(crate::gate_a_publication::QUALITY_SCAN_CANONICAL_PAGE_ROWS)
+                .unwrap();
+            assert!(page.len() <= 1);
+            if page.is_empty() {
+                break;
+            }
+            actual_event_ids.push(record_event_id(&page[0]).clone());
+        }
+
+        assert_eq!(actual_event_ids, fixture.event_ids);
+        assert_eq!(records.next_logical_position(), 3);
+    }
+
+    #[test]
     fn platform_replay_uses_source_time_then_emission_sequence() {
         let fixture = build_micro_candidate();
         let mut replay = PlatformReplayCursor::open(
