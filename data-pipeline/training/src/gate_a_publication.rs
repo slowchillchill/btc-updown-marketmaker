@@ -36,8 +36,9 @@ use crate::canonical_run::{
 use crate::gate_a::{
     CanonicalEventStoreCursor, GATE_A_ARTIFACT_MANIFEST_SCHEMA_V1, GateAArtifactDescriptor,
     GateABuildResourceMetrics, GateACandidate, GateAError, GateAOutputConfig,
-    MarketObservationCursor, ReductionReportCursor, ValidatedGateACandidate,
-    pipeline_core_identity_sha256, supported_schema_set_identity_sha256, validate_gate_a_candidate,
+    GateAProjectionWitnessKind, GateAProjectionWitnesses, MarketObservationCursor,
+    ReductionReportCursor, ValidatedGateACandidate, pipeline_core_identity_sha256,
+    supported_schema_set_identity_sha256, validate_gate_a_candidate,
 };
 use crate::{SortConfig, SortMetrics};
 
@@ -48,8 +49,8 @@ pub const GATE_A_TEST_EVIDENCE_REPORT_SCHEMA_V1: &str = "gate_a_test_evidence_re
 pub const GATE_A_RUN_MANIFEST_SCHEMA_V1: &str = "gate_a_run_manifest_v1";
 pub const GATE_A_MEASURED_BUILD_STATE_SCHEMA_V1: &str = "gate_a_measured_build_state_v1";
 
-pub const GATE_A_MAX_RSS_KIB: u64 = 768 * 1024;
-pub const GATE_A_CGROUP_MEMORY_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+pub const GATE_A_MAX_RSS_KIB: u64 = 1024 * 1024;
+pub const GATE_A_CGROUP_MEMORY_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 pub fn gate_a_formal_sort_config() -> SortConfig {
     SortConfig {
@@ -282,7 +283,6 @@ pub struct GateAQualityIsolationReportV1 {
     pub best_bid_ask_tokens: Vec<String>,
     pub tick_change_tokens: Vec<String>,
     pub known_old_tick_change_tokens: Vec<String>,
-    pub dynamic_tick_observation_tokens: Vec<String>,
     pub public_trade_platform_id: u64,
     pub public_trade_derived_id: u64,
     pub level_execution_basis_counts: BTreeMap<String, u64>,
@@ -541,7 +541,7 @@ impl From<serde_json::Error> for GateAPublicationError {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct QualityScan {
     market_event_counts: GateAMarketEventCountsV1,
     trading_state_field_counts: GateATradingStateFieldCountsV1,
@@ -568,10 +568,6 @@ struct QualityScan {
     reduction_reason_counts: BTreeMap<String, u64>,
     quantity_conservation_reports: u64,
     blocking_terminal_reports: u64,
-    event_witnesses: BTreeMap<&'static str, BTreeSet<String>>,
-    event_observation_witnesses: BTreeMap<String, Sha256Hex>,
-    dynamic_tick_tokens_by_event: BTreeMap<String, String>,
-    dynamic_tick_observation_tokens: BTreeSet<String>,
     observation_witnesses: BTreeMap<ObservationComponentId, Sha256Hex>,
 }
 
@@ -598,13 +594,6 @@ impl QualityScan {
                 self.event_quality_counts
                     .increment(event.quality.availability);
                 self.event_resync_counts.increment(event.quality.resync);
-                if (matches!(
-                    event.quality.availability,
-                    MarketDataQuality::Missing | MarketDataQuality::ConfirmedGap
-                ) && event.quality.resync == ResyncQuality::Required)
-                {
-                    remember_event(&mut self.event_witnesses, "gap_resync", &event.event_id);
-                }
                 if event.lineage.source_evidence.is_empty() {
                     self.event_without_source_evidence =
                         self.event_without_source_evidence.saturating_add(1);
@@ -618,11 +607,6 @@ impl QualityScan {
                 match event.payload {
                     ExecutionMarketEventPayloadV3::MarketLifecycleTransition(_) => {
                         self.market_event_counts.market_lifecycle_transition += 1;
-                        remember_event(
-                            &mut self.event_witnesses,
-                            "market_lifecycle",
-                            &event.event_id,
-                        );
                     }
                     ExecutionMarketEventPayloadV3::MarketTradingState(state) => {
                         self.market_event_counts.market_trading_state += 1;
@@ -630,11 +614,6 @@ impl QualityScan {
                         self.trading_state_field_counts.closed += u64::from(state.closed.is_some());
                         self.trading_state_field_counts.accepting_orders +=
                             u64::from(state.accepting_orders.is_some());
-                        remember_event(
-                            &mut self.event_witnesses,
-                            "market_trading_state",
-                            &event.event_id,
-                        );
                     }
                     ExecutionMarketEventPayloadV3::InitialL2Snapshot(snapshot) => {
                         self.market_event_counts.initial_l2_snapshot += 1;
@@ -642,12 +621,10 @@ impl QualityScan {
                             .initial_snapshot_token_counts
                             .entry(snapshot.asset.token_id.0)
                             .or_default() += 1;
-                        remember_event(&mut self.event_witnesses, "initial_l2", &event.event_id);
                     }
                     ExecutionMarketEventPayloadV3::BestBidAsk(bba) => {
                         self.market_event_counts.best_bid_ask += 1;
                         self.best_bid_ask_tokens.insert(bba.asset.token_id.0);
-                        remember_event(&mut self.event_witnesses, "bba", &event.event_id);
                     }
                     ExecutionMarketEventPayloadV3::TickSizeChange(change) => {
                         self.market_event_counts.tick_size_change += 1;
@@ -655,10 +632,7 @@ impl QualityScan {
                         if change.old_tick_size_pusd_per_share.is_some() {
                             self.known_old_tick_change_tokens.insert(token_id.clone());
                         }
-                        self.tick_change_tokens.insert(token_id.clone());
-                        self.dynamic_tick_tokens_by_event
-                            .insert(event.event_id.0.clone(), token_id);
-                        remember_event(&mut self.event_witnesses, "dynamic_tick", &event.event_id);
+                        self.tick_change_tokens.insert(token_id);
                     }
                     ExecutionMarketEventPayloadV3::PublicTrade(trade) => {
                         self.market_event_counts.public_trade += 1;
@@ -670,7 +644,6 @@ impl QualityScan {
                                 self.public_trade_derived_id += 1;
                             }
                         }
-                        remember_event(&mut self.event_witnesses, "public_trade", &event.event_id);
                     }
                     ExecutionMarketEventPayloadV3::LevelExecutionTransition(transition) => {
                         self.market_event_counts.level_execution_transition += 1;
@@ -685,11 +658,6 @@ impl QualityScan {
                             .level_execution_basis_counts
                             .entry(basis.to_owned())
                             .or_default() += 1;
-                        remember_event(
-                            &mut self.event_witnesses,
-                            "level_execution",
-                            &event.event_id,
-                        );
                     }
                     ExecutionMarketEventPayloadV3::QualityBoundary(boundary) => {
                         self.market_event_counts.quality_boundary += 1;
@@ -700,17 +668,7 @@ impl QualityScan {
                         {
                             self.fresh_resync_boundary =
                                 self.fresh_resync_boundary.saturating_add(1);
-                            remember_event(
-                                &mut self.event_witnesses,
-                                "gap_resync",
-                                &event.event_id,
-                            );
                         }
-                        remember_event(
-                            &mut self.event_witnesses,
-                            "quality_boundary",
-                            &event.event_id,
-                        );
                     }
                     ExecutionMarketEventPayloadV3::MarketResolutionTerminal(_) => {
                         self.market_event_counts.market_resolution_terminal += 1;
@@ -719,7 +677,6 @@ impl QualityScan {
                         } else {
                             self.terminal_without_source_time += 1;
                         }
-                        remember_event(&mut self.event_witnesses, "terminal", &event.event_id);
                     }
                 }
             }
@@ -727,13 +684,6 @@ impl QualityScan {
                 self.event_quality_counts
                     .increment(event.quality.availability);
                 self.event_resync_counts.increment(event.quality.resync);
-                if (matches!(
-                    event.quality.availability,
-                    MarketDataQuality::Missing | MarketDataQuality::ConfirmedGap
-                ) && event.quality.resync == ResyncQuality::Required)
-                {
-                    remember_event(&mut self.event_witnesses, "gap_resync", &event.event_id);
-                }
                 if event.lineage.source_evidence.is_empty() {
                     self.event_without_source_evidence =
                         self.event_without_source_evidence.saturating_add(1);
@@ -753,11 +703,6 @@ impl QualityScan {
                         {
                             self.fresh_resync_boundary =
                                 self.fresh_resync_boundary.saturating_add(1);
-                            remember_event(
-                                &mut self.event_witnesses,
-                                "gap_resync",
-                                &event.event_id,
-                            );
                         }
                     }
                     CanonicalReferenceEventPayloadV1::BinanceAggregateTrade(_) => {
@@ -768,14 +713,6 @@ impl QualityScan {
         }
         Ok(())
     }
-}
-
-fn remember_event(
-    witnesses: &mut BTreeMap<&'static str, BTreeSet<String>>,
-    key: &'static str,
-    event_id: &CanonicalEventId,
-) {
-    witnesses.entry(key).or_default().insert(event_id.0.clone());
 }
 
 fn increment_reason(reasons: &mut BTreeMap<String, u64>, reason: &str) {
@@ -868,18 +805,11 @@ pub fn build_quality_isolation_report(
                 if observation.missing_mask.contains(&state.component) {
                     facts.missing_rows = facts.missing_rows.saturating_add(1);
                 }
-                if let Some(event_id) = &state.last_visible_event_id {
+                if state.last_visible_event_id.is_some() {
                     facts.anchored_rows = facts.anchored_rows.saturating_add(1);
                     scan.observation_witnesses
                         .entry(state.component)
                         .or_insert_with(|| observation.observation_id.clone());
-                    scan.event_observation_witnesses
-                        .entry(event_id.0.clone())
-                        .or_insert_with(|| observation.observation_id.clone());
-                    if let Some(token_id) = scan.dynamic_tick_tokens_by_event.get(&event_id.0) {
-                        scan.dynamic_tick_observation_tokens
-                            .insert(token_id.clone());
-                    }
                 }
             }
         }
@@ -919,7 +849,7 @@ pub fn build_quality_isolation_report(
         }
     }
 
-    let evidence_scan = scan.clone();
+    let observation_witnesses = std::mem::take(&mut scan.observation_witnesses);
     let mut report = GateAQualityIsolationReportV1 {
         schema_version: GATE_A_QUALITY_ISOLATION_REPORT_SCHEMA_V1.to_owned(),
         pipeline_core_identity_sha256: pipeline_core_identity_sha256(),
@@ -949,7 +879,6 @@ pub fn build_quality_isolation_report(
         best_bid_ask_tokens: scan.best_bid_ask_tokens.into_iter().collect(),
         tick_change_tokens: scan.tick_change_tokens.into_iter().collect(),
         known_old_tick_change_tokens: scan.known_old_tick_change_tokens.into_iter().collect(),
-        dynamic_tick_observation_tokens: scan.dynamic_tick_observation_tokens.into_iter().collect(),
         public_trade_platform_id: scan.public_trade_platform_id,
         public_trade_derived_id: scan.public_trade_derived_id,
         level_execution_basis_counts: scan.level_execution_basis_counts,
@@ -964,35 +893,35 @@ pub fn build_quality_isolation_report(
         blocking_terminal_reports: scan.blocking_terminal_reports,
         evidence: Vec::new(),
     };
-    report.evidence = quality_evidence(&report, &evidence_scan);
+    report.evidence = quality_evidence(
+        &report,
+        &validated.projection_witnesses,
+        &observation_witnesses,
+    );
     validate_quality_isolation_report(&report)?;
     Ok(report)
 }
 
 fn quality_evidence(
     report: &GateAQualityIsolationReportV1,
-    scan: &QualityScan,
+    projection_witnesses: &GateAProjectionWitnesses,
+    observation_witnesses: &BTreeMap<ObservationComponentId, Sha256Hex>,
 ) -> Vec<GateAEvidenceRecordV1> {
     let manifests = report.artifact_manifests.all();
     let predicates = quality_predicates(report);
     let checks = [
-        ("quality/input-six-schemas", predicates[0], &[][..], &[][..]),
-        (
-            "quality/dual-time-projection",
-            predicates[1],
-            &[][..],
-            &[][..],
-        ),
+        ("quality/input-six-schemas", predicates[0], None, &[][..]),
+        ("quality/dual-time-projection", predicates[1], None, &[][..]),
         (
             "quality/market-lifecycle",
             predicates[2],
-            &["market_lifecycle", "market_trading_state"][..],
+            Some(GateAProjectionWitnessKind::MarketLifecycle),
             &[ObservationComponentId::MarketLifecycle][..],
         ),
         (
             "quality/initial-l2",
             predicates[3],
-            &["initial_l2"][..],
+            Some(GateAProjectionWitnessKind::InitialL2),
             &[
                 ObservationComponentId::PolymarketL2,
                 ObservationComponentId::CurrentTick,
@@ -1001,37 +930,37 @@ fn quality_evidence(
         (
             "quality/price-level-transition",
             predicates[4],
-            &["level_execution"][..],
+            Some(GateAProjectionWitnessKind::LevelExecution),
             &[ObservationComponentId::PolymarketL2][..],
         ),
         (
             "quality/best-bid-ask",
             predicates[5],
-            &["bba"][..],
+            Some(GateAProjectionWitnessKind::BestBidAsk),
             &[ObservationComponentId::BestBidAsk][..],
         ),
         (
             "quality/dynamic-tick",
             predicates[6],
-            &["dynamic_tick"][..],
+            Some(GateAProjectionWitnessKind::DynamicTick),
             &[ObservationComponentId::CurrentTick][..],
         ),
         (
             "quality/public-trade",
             predicates[7],
-            &["public_trade"][..],
+            Some(GateAProjectionWitnessKind::PublicTrade),
             &[ObservationComponentId::PublicTrade][..],
         ),
         (
             "quality/level-execution",
             predicates[8],
-            &["level_execution"][..],
+            Some(GateAProjectionWitnessKind::LevelExecution),
             &[ObservationComponentId::PolymarketL2][..],
         ),
         (
             "quality/gap-resync-watermark",
             predicates[9],
-            &["gap_resync"][..],
+            Some(GateAProjectionWitnessKind::GapResync),
             &[
                 ObservationComponentId::PolymarketL2,
                 ObservationComponentId::BinanceBtcUsdtDepth,
@@ -1040,46 +969,35 @@ fn quality_evidence(
         (
             "quality/market-terminal",
             predicates[10],
-            &["terminal"][..],
+            Some(GateAProjectionWitnessKind::MarketTerminal),
             &[ObservationComponentId::MarketResolution][..],
         ),
         (
             "quality/observation-lineage",
             predicates[11],
-            &[][..],
+            None,
             &REQUIRED_OBSERVATION_COMPONENTS[..],
         ),
-        ("quality/artifact-closure", predicates[12], &[][..], &[][..]),
-        (
-            "quality/source-traceability",
-            predicates[13],
-            &[][..],
-            &[][..],
-        ),
+        ("quality/artifact-closure", predicates[12], None, &[][..]),
+        ("quality/source-traceability", predicates[13], None, &[][..]),
     ];
     checks
         .into_iter()
-        .map(|(id, passed, event_keys, components)| {
-            let linked_witness = event_keys.iter().find_map(|key| {
-                scan.event_witnesses.get(key).and_then(|event_ids| {
-                    event_ids.iter().find_map(|event_id| {
-                        scan.event_observation_witnesses.get(event_id).cloned().map(
-                            |observation_id| (CanonicalEventId(event_id.clone()), observation_id),
-                        )
-                    })
-                })
-            });
+        .map(|(id, passed, witness_kind, components)| {
+            let linked_witness =
+                witness_kind.and_then(|kind| projection_witnesses.linked.get(&kind));
             let event_ids = linked_witness
-                .as_ref()
-                .map(|(event_id, _)| vec![event_id.clone()])
+                .map(|witness| vec![witness.event_id.clone()])
                 .unwrap_or_default();
-            let mut observation_ids = if let Some((_, observation_id)) = linked_witness {
-                vec![observation_id]
-            } else {
+            let mut observation_ids = if let Some(witness) = linked_witness {
+                vec![witness.observation_id.clone()]
+            } else if witness_kind.is_none() {
                 components
                     .iter()
-                    .filter_map(|component| scan.observation_witnesses.get(component).cloned())
+                    .filter_map(|component| observation_witnesses.get(component).cloned())
                     .collect::<Vec<_>>()
+            } else {
+                Vec::new()
             };
             observation_ids.sort_by(|left, right| left.0.cmp(&right.0));
             observation_ids.dedup();
@@ -1142,8 +1060,7 @@ fn quality_predicates(report: &GateAQualityIsolationReportV1) -> [bool; 14] {
         report.market_event_counts.best_bid_ask > 0 && report.best_bid_ask_tokens.len() == 2,
         report.market_event_counts.tick_size_change > 0
             && report.tick_change_tokens.len() == 2
-            && report.known_old_tick_change_tokens.len() == 2
-            && report.dynamic_tick_observation_tokens == report.known_old_tick_change_tokens,
+            && report.known_old_tick_change_tokens.len() == 2,
         report.market_event_counts.public_trade > 0
             && report
                 .public_trade_platform_id
@@ -1327,13 +1244,8 @@ pub fn validate_quality_isolation_report(
     if !is_sorted_unique_strings(&report.best_bid_ask_tokens)
         || !is_sorted_unique_strings(&report.tick_change_tokens)
         || !is_sorted_unique_strings(&report.known_old_tick_change_tokens)
-        || !is_sorted_unique_strings(&report.dynamic_tick_observation_tokens)
         || report
             .known_old_tick_change_tokens
-            .iter()
-            .any(|token| report.tick_change_tokens.binary_search(token).is_err())
-        || report
-            .dynamic_tick_observation_tokens
             .iter()
             .any(|token| report.tick_change_tokens.binary_search(token).is_err())
     {
@@ -1680,7 +1592,11 @@ fn resource_facts_fit(
     config == &gate_a_formal_canonical_config()
         && output == &gate_a_formal_output_config()
         && external.build_exit_code == 0
-        && external.maximum_resident_set_size_kib <= GATE_A_MAX_RSS_KIB
+        && formal_memory_gate_fits(
+            external.maximum_resident_set_size_kib,
+            external.memory_max_bytes,
+            external.memory_peak_bytes,
+        )
         && external.publication_filesystem_type == "ext4"
         && external.publication_root_device_id != 0
         && external.publication_root_device_id == external.candidate_device_id
@@ -1694,8 +1610,6 @@ fn resource_facts_fit(
         && external
             .cgroup_process_ids_before
             .contains(&external.network_isolation_supervisor_pid)
-        && external.memory_max_bytes == GATE_A_CGROUP_MEMORY_MAX_BYTES
-        && external.memory_peak_bytes <= GATE_A_CGROUP_MEMORY_MAX_BYTES
         && external.memory_swap_max_bytes == 0
         && external.memory_swap_peak_bytes == 0
         && external.memory_events_after.max == external.memory_events_before.max
@@ -1748,6 +1662,16 @@ fn resource_facts_fit(
         && sort_metrics_fit(&artifact_write_metrics.visibility_index, &output.sort)
         && sort_metrics_fit(&artifact_write_metrics.market_observations, &output.sort)
         && sort_metrics_fit(&artifact_write_metrics.reduction_reports, &output.sort)
+}
+
+fn formal_memory_gate_fits(
+    maximum_resident_set_size_kib: u64,
+    memory_max_bytes: u64,
+    memory_peak_bytes: u64,
+) -> bool {
+    maximum_resident_set_size_kib <= GATE_A_MAX_RSS_KIB
+        && memory_max_bytes == GATE_A_CGROUP_MEMORY_MAX_BYTES
+        && memory_peak_bytes <= GATE_A_CGROUP_MEMORY_MAX_BYTES
 }
 
 fn formal_work_directory_bound_covers(
@@ -3275,6 +3199,32 @@ mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
     use tempfile::TempDir;
+
+    #[test]
+    fn formal_memory_gates_use_one_gib_rss_and_two_gib_cgroup() {
+        assert_eq!(GATE_A_MAX_RSS_KIB, 1024 * 1024);
+        assert_eq!(GATE_A_CGROUP_MEMORY_MAX_BYTES, 2 * 1024 * 1024 * 1024);
+        assert!(formal_memory_gate_fits(
+            GATE_A_MAX_RSS_KIB,
+            GATE_A_CGROUP_MEMORY_MAX_BYTES,
+            GATE_A_CGROUP_MEMORY_MAX_BYTES,
+        ));
+        assert!(!formal_memory_gate_fits(
+            GATE_A_MAX_RSS_KIB + 1,
+            GATE_A_CGROUP_MEMORY_MAX_BYTES,
+            GATE_A_CGROUP_MEMORY_MAX_BYTES,
+        ));
+        assert!(!formal_memory_gate_fits(
+            GATE_A_MAX_RSS_KIB,
+            GATE_A_CGROUP_MEMORY_MAX_BYTES / 2,
+            GATE_A_CGROUP_MEMORY_MAX_BYTES / 2,
+        ));
+        assert!(!formal_memory_gate_fits(
+            GATE_A_MAX_RSS_KIB,
+            GATE_A_CGROUP_MEMORY_MAX_BYTES,
+            GATE_A_CGROUP_MEMORY_MAX_BYTES + 1,
+        ));
+    }
 
     #[test]
     fn formal_work_directory_bound_rejects_missing_control_file_budget() {

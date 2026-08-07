@@ -919,7 +919,7 @@ impl CgroupFacts {
             || self.read_number("memory.swap.max")? != 0
         {
             return Err(
-                "正式命令必须运行在 memory.max=1GiB、memory.swap.max=0 的独立 cgroup 中".into(),
+                "正式命令必须运行在 memory.max=2GiB、memory.swap.max=0 的独立 cgroup 中".into(),
             );
         }
         let process_ids = self.process_ids()?;

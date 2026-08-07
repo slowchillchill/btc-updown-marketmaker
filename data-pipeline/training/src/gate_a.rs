@@ -1,6 +1,6 @@
 //! 门 A 物理产物、类型化读取与原子发布。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -10,9 +10,11 @@ use std::sync::{Arc, Mutex};
 use arrow_schema::DataType;
 use contracts::{
     CANONICAL_EVENT_RECORD_SCHEMA_V1, CanonicalEventId, CanonicalEventRecordV1,
-    CanonicalReferenceEventV1, EVENT_TIME_INDEX_SCHEMA_V2, EventTimeIndexEntryV2,
-    ExecutionMarketEventV3, MARKET_OBSERVATION_CAUSAL_SHELL_SCHEMA_V3,
-    MarketObservationCausalShellV3, Sha256Hex, VISIBILITY_INDEX_SCHEMA_V2, VisibilityIndexEntryV2,
+    CanonicalReferenceEventPayloadV1, CanonicalReferenceEventV1, EVENT_TIME_INDEX_SCHEMA_V2,
+    EventTimeIndexEntryV2, ExecutionMarketEventPayloadV3, ExecutionMarketEventV3,
+    MARKET_OBSERVATION_CAUSAL_SHELL_SCHEMA_V3, MarketDataQuality, MarketObservationCausalShellV3,
+    ObservationComponentId, QualityScopeV1, ResyncQuality, Sha256Hex, VISIBILITY_INDEX_SCHEMA_V2,
+    VisibilityIndexEntryV2,
 };
 use data_pipeline_core::reduction::{
     REDUCTION_REPORT_SCHEMA_V1, ReductionDispositionV1, ReductionReportEntryV1,
@@ -1392,6 +1394,36 @@ pub struct ValidatedGateAArtifact {
     artifact_path: PathBuf,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum GateAProjectionWitnessKind {
+    MarketLifecycle,
+    InitialL2,
+    LevelExecution,
+    BestBidAsk,
+    DynamicTick,
+    PublicTrade,
+    GapResync,
+    MarketTerminal,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct GateAProjectionWitness {
+    pub(crate) event_id: CanonicalEventId,
+    pub(crate) observation_id: Sha256Hex,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct GateAProjectionWitnesses {
+    pub(crate) linked: BTreeMap<GateAProjectionWitnessKind, GateAProjectionWitness>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProjectionWitnessCandidate {
+    event_id: CanonicalEventId,
+    primary_kind: Option<GateAProjectionWitnessKind>,
+    gap_resync: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidatedGateACandidate {
     pub root: PathBuf,
@@ -1403,6 +1435,7 @@ pub struct ValidatedGateACandidate {
     pub recomputed_stream_digests: CanonicalRunDigests,
     pub peak_observation_l2_levels: usize,
     pub peak_formal_work_directory_bytes_bound: u64,
+    pub(crate) projection_witnesses: GateAProjectionWitnesses,
 }
 
 impl ValidatedGateAArtifact {
@@ -1744,7 +1777,7 @@ pub fn validate_gate_a_candidate(
     let event_time_projections_sha256 = event_time_digest.finish();
     fs::remove_dir_all(&expected_event_time_stage)?;
 
-    let peak_observation_l2_levels = validate_observation_projection(
+    let (peak_observation_l2_levels, projection_witnesses) = validate_observation_projection(
         &visibility_material.output_path,
         canonical_event_store.manifest(),
         &market_observations,
@@ -1823,6 +1856,7 @@ pub fn validate_gate_a_candidate(
         },
         peak_observation_l2_levels,
         peak_formal_work_directory_bytes_bound,
+        projection_witnesses,
     })
 }
 
@@ -1985,6 +2019,160 @@ fn compare_sorted_artifacts(
     }
 }
 
+fn replace_projection_witness_candidates(
+    candidates: &mut BTreeMap<ObservationComponentId, ProjectionWitnessCandidate>,
+    components: &[ObservationComponentId],
+    candidate: &ProjectionWitnessCandidate,
+) {
+    for component in components {
+        candidates.insert(*component, candidate.clone());
+    }
+}
+
+fn update_projection_witness_candidates(
+    candidates: &mut BTreeMap<ObservationComponentId, ProjectionWitnessCandidate>,
+    record: &CanonicalEventRecordV1,
+) {
+    match record {
+        CanonicalEventRecordV1::ExecutionMarketEvent(event) => {
+            let gap_resync = matches!(
+                &event.payload,
+                ExecutionMarketEventPayloadV3::QualityBoundary(boundary)
+                    if matches!(&boundary.scope, QualityScopeV1::Asset(_))
+                        && boundary.previous_quality == MarketDataQuality::Missing
+                        && boundary.current_quality == MarketDataQuality::Fresh
+            ) && event.quality.availability == MarketDataQuality::Fresh
+                && event.quality.resync == ResyncQuality::ResyncBoundary;
+            let (primary_kind, components): (
+                Option<GateAProjectionWitnessKind>,
+                &[ObservationComponentId],
+            ) = match &event.payload {
+                ExecutionMarketEventPayloadV3::MarketLifecycleTransition(_)
+                | ExecutionMarketEventPayloadV3::MarketTradingState(_) => (
+                    Some(GateAProjectionWitnessKind::MarketLifecycle),
+                    &[ObservationComponentId::MarketLifecycle],
+                ),
+                ExecutionMarketEventPayloadV3::InitialL2Snapshot(_) => (
+                    Some(GateAProjectionWitnessKind::InitialL2),
+                    &[
+                        ObservationComponentId::PolymarketL2,
+                        ObservationComponentId::CurrentTick,
+                    ],
+                ),
+                ExecutionMarketEventPayloadV3::BestBidAsk(_) => (
+                    Some(GateAProjectionWitnessKind::BestBidAsk),
+                    &[ObservationComponentId::BestBidAsk],
+                ),
+                ExecutionMarketEventPayloadV3::TickSizeChange(_) => (
+                    Some(GateAProjectionWitnessKind::DynamicTick),
+                    &[ObservationComponentId::CurrentTick],
+                ),
+                ExecutionMarketEventPayloadV3::PublicTrade(_) => (
+                    Some(GateAProjectionWitnessKind::PublicTrade),
+                    &[ObservationComponentId::PublicTrade],
+                ),
+                ExecutionMarketEventPayloadV3::LevelExecutionTransition(_) => (
+                    Some(GateAProjectionWitnessKind::LevelExecution),
+                    &[ObservationComponentId::PolymarketL2],
+                ),
+                ExecutionMarketEventPayloadV3::QualityBoundary(boundary) => {
+                    let components = match &boundary.scope {
+                        QualityScopeV1::Asset(_) => &[ObservationComponentId::PolymarketL2][..],
+                        QualityScopeV1::Market => &[ObservationComponentId::MarketResolution][..],
+                    };
+                    (None, components)
+                }
+                ExecutionMarketEventPayloadV3::MarketResolutionTerminal(_) => (
+                    Some(GateAProjectionWitnessKind::MarketTerminal),
+                    &[ObservationComponentId::MarketResolution],
+                ),
+            };
+            let candidate = ProjectionWitnessCandidate {
+                event_id: event.event_id.clone(),
+                primary_kind,
+                gap_resync,
+            };
+            replace_projection_witness_candidates(candidates, components, &candidate);
+        }
+        CanonicalEventRecordV1::ReferenceEvent(event) => {
+            let gap_resync = matches!(
+                &event.payload,
+                CanonicalReferenceEventPayloadV1::BinanceDepthState(_)
+            ) && event.quality.availability == MarketDataQuality::Fresh
+                && event.quality.resync == ResyncQuality::ResyncBoundary;
+            let component = match &event.payload {
+                CanonicalReferenceEventPayloadV1::ChainlinkBtcUsd(_) => {
+                    ObservationComponentId::ChainlinkBtcUsd
+                }
+                CanonicalReferenceEventPayloadV1::BinanceDepthState(_) => {
+                    ObservationComponentId::BinanceBtcUsdtDepth
+                }
+                CanonicalReferenceEventPayloadV1::BinanceAggregateTrade(_) => {
+                    ObservationComponentId::BinanceBtcUsdtTrade
+                }
+            };
+            replace_projection_witness_candidates(
+                candidates,
+                &[component],
+                &ProjectionWitnessCandidate {
+                    event_id: event.event_id.clone(),
+                    primary_kind: None,
+                    gap_resync,
+                },
+            );
+        }
+    }
+}
+
+fn remember_projection_witness(
+    component: ObservationComponentId,
+    last_visible_event_id: Option<&CanonicalEventId>,
+    observation_id: &Sha256Hex,
+    candidates: &BTreeMap<ObservationComponentId, ProjectionWitnessCandidate>,
+    witnesses: &mut GateAProjectionWitnesses,
+) {
+    let Some(event_id) = last_visible_event_id else {
+        return;
+    };
+    let Some(candidate) = candidates
+        .get(&component)
+        .filter(|candidate| candidate.event_id == *event_id)
+    else {
+        return;
+    };
+    let mut remember = |kind| {
+        witnesses
+            .linked
+            .entry(kind)
+            .or_insert_with(|| GateAProjectionWitness {
+                event_id: event_id.clone(),
+                observation_id: observation_id.clone(),
+            });
+    };
+    if let Some(kind) = candidate.primary_kind {
+        remember(kind);
+    }
+    if candidate.gap_resync {
+        remember(GateAProjectionWitnessKind::GapResync);
+    }
+}
+
+fn observe_projection_witnesses(
+    observation: &MarketObservationCausalShellV3,
+    candidates: &BTreeMap<ObservationComponentId, ProjectionWitnessCandidate>,
+    witnesses: &mut GateAProjectionWitnesses,
+) {
+    for state in &observation.component_states {
+        remember_projection_witness(
+            state.component,
+            state.last_visible_event_id.as_ref(),
+            &observation.observation_id,
+            candidates,
+            witnesses,
+        );
+    }
+}
+
 fn validate_observation_projection(
     visibility_material_path: &Path,
     store_manifest: &GateAArtifactManifestV1,
@@ -1992,7 +2180,7 @@ fn validate_observation_projection(
     visibility_manifest_sha256: &Sha256Hex,
     output_config: &GateAOutputConfig,
     max_retained_l2_levels: usize,
-) -> Result<usize, GateAError> {
+) -> Result<(usize, GateAProjectionWitnesses), GateAError> {
     let mut projector = ObservationProjector::new(
         store_manifest.covered_condition_ids[0].clone(),
         store_manifest.input_set_identity_sha256.clone(),
@@ -2005,21 +2193,26 @@ fn validate_observation_projection(
         output_config.sort.max_run_bytes,
     )?;
     let mut observations = artifact_cursor(observation_artifact, output_config)?;
+    let mut candidates = BTreeMap::new();
+    let mut witnesses = GateAProjectionWitnesses::default();
     while let Some(row) = visibility_material.next_row()? {
         let record = decode_canonical_event_record_v1(row.payload())?;
         if let Some(projected) = projector.push(&record)? {
             compare_projected_observation(&projected.observation, &mut observations)?;
+            observe_projection_witnesses(&projected.observation, &candidates, &mut witnesses);
         }
+        update_projection_witness_candidates(&mut candidates, &record);
     }
     if let Some(projected) = projector.finish()? {
         compare_projected_observation(&projected.observation, &mut observations)?;
+        observe_projection_witnesses(&projected.observation, &candidates, &mut witnesses);
     }
     if observations.next_row()?.is_some() {
         return Err(GateAError::ArtifactMismatch(
             "Observation 多于唯一事件存储的确定投影".to_owned(),
         ));
     }
-    Ok(projector.peak_retained_l2_levels())
+    Ok((projector.peak_retained_l2_levels(), witnesses))
 }
 
 fn compare_projected_observation(
@@ -3119,6 +3312,65 @@ mod tests {
                 sort,
             },
         )
+    }
+
+    #[test]
+    fn quality_witness_selection_is_bounded_and_requires_real_link() {
+        let component = ObservationComponentId::CurrentTick;
+        let mut candidates = BTreeMap::new();
+        for sequence in 0u64..10_000 {
+            replace_projection_witness_candidates(
+                &mut candidates,
+                &[component],
+                &ProjectionWitnessCandidate {
+                    event_id: CanonicalEventId(format!("{sequence:064x}")),
+                    primary_kind: Some(GateAProjectionWitnessKind::DynamicTick),
+                    gap_resync: false,
+                },
+            );
+        }
+        assert_eq!(candidates.len(), 1, "每个组件只能保留最后一个待匹配事件");
+
+        let latest_event_id = CanonicalEventId(format!("{:064x}", 9_999u64));
+        let unrelated_event_id = CanonicalEventId("f".repeat(64));
+        let observation_id = Sha256Hex("a".repeat(64));
+        let mut witnesses = GateAProjectionWitnesses::default();
+        remember_projection_witness(
+            component,
+            Some(&unrelated_event_id),
+            &observation_id,
+            &candidates,
+            &mut witnesses,
+        );
+        remember_projection_witness(
+            ObservationComponentId::BestBidAsk,
+            Some(&latest_event_id),
+            &observation_id,
+            &candidates,
+            &mut witnesses,
+        );
+        assert!(
+            witnesses.linked.is_empty(),
+            "不得拼接无关事件与 Observation"
+        );
+
+        remember_projection_witness(
+            component,
+            Some(&latest_event_id),
+            &observation_id,
+            &candidates,
+            &mut witnesses,
+        );
+        assert_eq!(witnesses.linked.len(), 1);
+        assert_eq!(
+            witnesses
+                .linked
+                .get(&GateAProjectionWitnessKind::DynamicTick),
+            Some(&GateAProjectionWitness {
+                event_id: latest_event_id,
+                observation_id,
+            })
+        );
     }
 
     #[test]

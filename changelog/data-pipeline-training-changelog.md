@@ -2814,3 +2814,47 @@ Task 0.10 的定向绿灯，不代替后续完整阶段验证和独立阶段复�
   `cargo test --workspace --lib --bins --tests --examples --locked --offline -- --skip four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second`，并要求验收证据明确记录
   该项被跳过，不得写成该测试通过。此次决定不修改 `data-collect` 代码、计划、验收文档或
   DPT 需求，也不增加 `#[ignore]`、等待 UTC 中午执行或其他测试旁路。
+
+### 任务 2.5 正式质量报告 OOM 与有界精确见证修复
+
+- 提交 `cac9e501ffa865d4a46014349822eca7361b6779` 的首次正式计量构建在独立
+  `dpt-gate-a-20260807-cac9e50-build.service`、`memory.max=1 GiB`、
+  `memory.swap.max=0` 下运行 `39min 38.763s` 后被 cgroup OOM 终止。systemd 报告内存峰值
+  `1G`；内核记录终止时匿名内存为 `1070923776` 字节，被终止子进程匿名 RSS 为
+  `1044436 KiB`。该轮没有形成完整 `/usr/bin/time -v` 输出，因此没有把内核终止瞬间数据
+  冒充正式最大 RSS 验收结果。
+- 失败候选中的五份 Parquet 和五份 manifest 已完整写出，但没有
+  `.primary-validation`，`reports/` 为空，也没有资源报告、测试证据、运行清单或回执；据此可
+  定位为候选构建和闭包复核后、质量报告生成期间失败。源码复核发现 `QualityScan` 同时保存
+  随事件数增长的类别事件集合、完整 `event_id -> observation_id` 映射和动态 tick 事件映射，
+  随后又执行整份 `scan.clone()`；结合 OOM 时点，这是最强根因证据，但没有把未符号化的内核
+  指令地址写成绝对函数级证明。
+- 用户批准删除整份 `QualityScan` 复制和三份随输入增长的见证集合，复用既有 Observation
+  精确重投影：每个九组件只保留当前待匹配事件，只有该事件 ID 等于物理逐字节复核通过的
+  Observation `last_visible_event_id` 时才登记；每项能力只保留一个真实
+  `event_id ↔ observation_id`，不得退回无关联首项。缺口/重同步的直接见证只来自可见的 L2
+  或 `BinanceDepthState` 恢复端点；缺口起点继续由质量计数证明。该实现没有新增外部排序、临时
+  产物或第二语义路径。
+- 同一决定把正式外层门冻结为最大 RSS `1 GiB`、cgroup v2 `memory.max=2 GiB`、
+  `memory.swap.max=0`；正式数据清单、市场、接收时间范围、临时排序 `1 GiB`、共享捕获
+  `1 GiB` 和候选目录 `4 GiB` 均保持不变。需求语义不变，计划只同步当前技术门与精确有界
+  见证验证方式。
+- 实现后独立复核发现，提交 `cac9e50` 新增但需求和计划均未定义的
+  `dynamic_tick_observation_tokens == known_old_tick_change_tokens` 会错误要求两个 token 各自成为
+  `CurrentTick.last_visible_event_id`。正式范围真实文件中，两个 token 的有效
+  `tick_size_change` 在接收时间 `1785715753026` 同毫秒连续到达，来源接纳序号分别为
+  `99373526/99373527`；接收时间 `1785715753029` 又以 `99373528/99373529` 同值确认。
+  Observation 合同会应用同毫秒全部变化，但每个组件只保留最后锚点，因此该额外全等谓词
+  必然失败。当前删除这项重复报告字段、token 集和全等谓词；两 token 真实事实继续由
+  `tick_change_tokens`、`known_old_tick_change_tokens` 与精确重投影证明，能力证据只保留一个真实
+  `DynamicTick event_id ↔ observation_id`，与用户批准语义一致。
+- 唯一失败候选
+  `/home/chillchill/sim-system/.local-artifacts/data-pipeline-training/gate-a/.gate-a-20260807-cac9e50.candidate`
+  已按批准范围移入系统回收站并确认原路径不存在；该操作没有触及发布根中的其他路径，候选
+  可由回收站恢复。聚焦回归
+  `quality_witness_selection_is_bounded_and_requires_real_link` 与
+  `formal_memory_gates_use_one_gib_rss_and_two_gib_cgroup` 已分别通过；训练包测试为
+  `72 passed / 0 failed`，严格 Clippy、格式和差异检查通过。计划冻结的全工作区命令以退出码
+  `0` 通过，并按批准边界跳过
+  `four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second`，没有把该项
+  写成通过。相同范围正式重跑、发布和阶段复审仍待后续证据补齐，当前尚未签发门 A 回执。
