@@ -79,9 +79,12 @@ AWS 爱尔兰实盘服务器 `108.130.74.143` 是运行目标，不是构建机�
 - 输入通过边界校验后，内部测试不得绕过真实构造或解析入口，直接篡改类型来制造平台不可
   能状态。
 - 普通开发、提交和阶段完成验证不得使用 `cargo test --workspace --all-targets`；全工作区普通
-  回归固定使用 `cargo test --workspace --lib --bins --tests --examples --locked --offline`。
-  `--all-targets` 可以用于 `cargo check` 和 `cargo clippy` 的静态验证；`data-collect` 中的 bench
-  只有在当前计划明确要求或用户明确批准后才能单独运行，并必须使用独立产物目录。
+  回归固定使用
+  `cargo test --workspace --lib --bins --tests --examples --locked --offline -- --skip four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second`。
+  该具名测试因当前 `data-collect` 测试夹具依赖实际 UTC 时钟而被精确跳过；验证记录必须明确
+  写作“跳过”，不得表述为该测试通过。`--all-targets` 可以用于 `cargo check` 和
+  `cargo clippy` 的静态验证；`data-collect` 中的 bench 只有在当前计划明确要求或用户明确批准后
+  才能单独运行，并必须使用独立产物目录。
 
 ## 仅适用于 data-collect 的文档权威路由
 

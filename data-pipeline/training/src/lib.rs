@@ -4,10 +4,18 @@
 //! 和不透明载荷。本 crate 不是通用存储层或查询层，也不解释排序键的业务语义。
 
 pub mod canonical_run;
+mod dpt_gate_a_cli;
 pub mod gate_a;
-pub mod gate_a_publication;
+mod gate_a_publication;
 pub mod observation;
 pub mod typed_raw;
+
+pub use gate_a_publication::{gate_a_formal_canonical_config, gate_a_formal_output_config};
+
+/// 运行唯一正式门 A 命令入口；参数解析、测量和签发检查均在库内私有实现中完成。
+pub fn run_dpt_gate_a_cli() {
+    dpt_gate_a_cli::main();
+}
 
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap};

@@ -486,6 +486,52 @@ fn an_applied_pending_update_cannot_become_visible_before_its_snapshot() {
 }
 
 #[test]
+fn consecutive_applied_updates_preserve_the_depth_visibility_frontier() {
+    let mut reducer = BinanceDepthReducer::new(RULE_VERSION).unwrap();
+    reducer
+        .apply_snapshot(&snapshot("depth-epoch-1", 100, 1), &sha('a'), &sha('b'))
+        .unwrap();
+
+    let mut first = update(
+        "depth-epoch-1",
+        101,
+        101,
+        2,
+        Some(100),
+        None,
+        BinanceDepthStitchVerdict::Applied,
+        vec![level("64100", "0.8")],
+    );
+    first.timestamp_received = 5_000;
+    first.collector_admission_time_utc_ms = 5_100;
+    reducer.apply_update(&first, &sha('a'), &sha('c')).unwrap();
+
+    let mut second = update(
+        "depth-epoch-1",
+        102,
+        102,
+        3,
+        Some(100),
+        Some(101),
+        BinanceDepthStitchVerdict::Applied,
+        vec![level("64000", "0.8")],
+    );
+    second.timestamp_received = 4_000;
+    second.collector_admission_time_utc_ms = 5_200;
+    let outcome = reducer.apply_update(&second, &sha('a'), &sha('d')).unwrap();
+    let event = produced_event(&outcome);
+
+    assert_eq!(event.time.source_event_at_utc_ms, Some(second.event_time));
+    assert_eq!(event.time.received_at_utc_ms, 5_000);
+    assert!(event.lineage.source_evidence.iter().any(|evidence| {
+        evidence
+            .collector_admission
+            .as_ref()
+            .is_some_and(|coordinate| coordinate.collector_admission_sequence == 2)
+    }));
+}
+
+#[test]
 fn only_applied_stitch_verdict_emits_a_new_depth_state() {
     let mut applied_reducer = BinanceDepthReducer::new(RULE_VERSION).unwrap();
     applied_reducer
@@ -642,6 +688,19 @@ fn confirmed_hole_preserves_the_last_trusted_book_until_a_full_snapshot_resyncs(
         MarketDataQuality::Fresh
     );
     assert_eq!(recovery_event.quality.resync, ResyncQuality::ResyncBoundary);
+    assert_eq!(recovery_event.time.source_event_at_utc_ms, None);
+    assert!(
+        recovery_event
+            .lineage
+            .source_evidence
+            .iter()
+            .all(|source| { source.source_kind == CanonicalSourceKind::BinanceDepthSnapshot })
+    );
+    let record = CanonicalEventRecordV1::ReferenceEvent(Box::new(recovery_event.clone()));
+    assert_eq!(
+        project_record_event_time_index_entry(&record).unwrap(),
+        None
+    );
 }
 
 #[test]

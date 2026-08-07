@@ -120,6 +120,32 @@ pub struct ReferenceReductionOutcomeV1 {
     pub report: ReductionReportEntryV1,
 }
 
+pub fn build_chainlink_reference_outcome_v1(
+    row: &typed_raw::PolymarketRtdsChainlinkBtcUsdRow,
+    input_manifest_sha256: &Sha256Hex,
+    input_file_sha256: &Sha256Hex,
+    canonical_rule_version: &str,
+) -> Result<ReferenceReductionOutcomeV1, ContractError> {
+    let event = crate::build_chainlink_reference_event_v1(
+        row,
+        input_manifest_sha256,
+        input_file_sha256,
+        canonical_rule_version,
+    )?;
+    let report = produced_report(
+        canonical_rule_version,
+        format!("chainlink_reference:{}", row.symbol),
+        ReductionOperationKindV1::Merge,
+        "CHAINLINK_REFERENCE_UPDATE",
+        None,
+        event.event_id.clone(),
+    )?;
+    Ok(ReferenceReductionOutcomeV1 {
+        event: Some(event),
+        report,
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PolymarketReductionBatch {
     pub events: Vec<ExecutionMarketEventV3>,
@@ -151,6 +177,15 @@ fn canonicalize_source_evidence(
         .collect::<Vec<_>>();
     validate_source_evidence(&canonical)?;
     Ok(canonical)
+}
+
+fn visibility_frontier_evidence(
+    evidence: Vec<SourceEvidenceRefV2>,
+) -> Result<SourceEvidenceRefV2, ContractError> {
+    canonicalize_source_evidence(evidence)?
+        .into_iter()
+        .max_by_key(|item| item.received_at_utc_ms)
+        .ok_or_else(|| invalid("source_evidence", "visibility frontier requires evidence"))
 }
 
 fn canonicalize_operation_evidence(
@@ -472,6 +507,7 @@ struct BinanceDepthBookState {
     deleted_asks: BTreeMap<Decimal, SourceEvidenceRefV2>,
     snapshot_evidence: SourceEvidenceRefV2,
     anchor_evidence: SourceEvidenceRefV2,
+    visibility_frontier_evidence: SourceEvidenceRefV2,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -569,19 +605,6 @@ impl BinanceDepthReducer {
             } else {
                 ResyncQuality::NotRequired
             };
-        state.book = Some(BinanceDepthBookState {
-            snapshot_last_update_id: row.last_update_id,
-            local_u: None,
-            bids,
-            asks,
-            deleted_bids: BTreeMap::new(),
-            deleted_asks: BTreeMap::new(),
-            snapshot_evidence: evidence.clone(),
-            anchor_evidence: evidence.clone(),
-        });
-        state.awaiting_after_confirmed_gap = false;
-        state.epoch_switch_prior_book = None;
-        state.epoch_switch_missing_emitted = false;
 
         let scope = format!("binance_depth:{}", row.source_sequence_epoch_id);
         if same_state {
@@ -599,9 +622,20 @@ impl BinanceDepthReducer {
                 )?,
             });
         }
+        let book = BinanceDepthBookState {
+            snapshot_last_update_id: row.last_update_id,
+            local_u: None,
+            bids,
+            asks,
+            deleted_bids: BTreeMap::new(),
+            deleted_asks: BTreeMap::new(),
+            snapshot_evidence: evidence.clone(),
+            anchor_evidence: evidence.clone(),
+            visibility_frontier_evidence: evidence,
+        };
         let event = finalize_binance_depth_event(
             &self.canonical_rule_version,
-            state.book.as_ref().expect("snapshot established a book"),
+            &book,
             MarketDataQuality::Fresh,
             resync,
             Vec::new(),
@@ -614,6 +648,10 @@ impl BinanceDepthReducer {
             None,
             event.event_id.clone(),
         )?;
+        state.book = Some(book);
+        state.awaiting_after_confirmed_gap = false;
+        state.epoch_switch_prior_book = None;
+        state.epoch_switch_missing_emitted = false;
         Ok(ReferenceReductionOutcomeV1 {
             event: Some(event),
             report,
@@ -662,7 +700,7 @@ impl BinanceDepthReducer {
                         previous_book,
                         MarketDataQuality::Missing,
                         ResyncQuality::Required,
-                        vec![evidence],
+                        vec![evidence.clone()],
                     )?;
                     let report = produced_report(
                         &self.canonical_rule_version,
@@ -713,7 +751,7 @@ impl BinanceDepthReducer {
                     book,
                     MarketDataQuality::ConfirmedGap,
                     ResyncQuality::Required,
-                    vec![evidence],
+                    vec![evidence.clone()],
                 )?;
                 let report = produced_report(
                     &self.canonical_rule_version,
@@ -735,6 +773,7 @@ impl BinanceDepthReducer {
                     .book
                     .as_mut()
                     .expect("expected verdict requires a book");
+                let previous_frontier = book.visibility_frontier_evidence.clone();
                 let (bid_summary, mut prior_evidence) = apply_reference_level_updates(
                     &mut book.bids,
                     &mut book.deleted_bids,
@@ -752,7 +791,9 @@ impl BinanceDepthReducer {
                 prior_evidence.extend(ask_prior_evidence);
                 let summary = bid_summary.combine(ask_summary)?;
                 book.local_u = Some(row.final_update_id);
-                book.anchor_evidence = evidence;
+                book.anchor_evidence = evidence.clone();
+                book.visibility_frontier_evidence =
+                    visibility_frontier_evidence(vec![previous_frontier, evidence])?;
                 let event = finalize_binance_depth_event(
                     &self.canonical_rule_version,
                     book,
@@ -1071,7 +1112,11 @@ fn binance_depth_evidence(
             .map(|level| level.direct_evidence.clone())
             .chain(book.deleted_bids.values().cloned())
             .chain(book.deleted_asks.values().cloned())
-            .chain([book.snapshot_evidence.clone(), book.anchor_evidence.clone()])
+            .chain([
+                book.snapshot_evidence.clone(),
+                book.anchor_evidence.clone(),
+                book.visibility_frontier_evidence.clone(),
+            ])
             .collect(),
     )
 }
@@ -1595,10 +1640,14 @@ impl PolymarketTerminalMerger {
             } else {
                 MarketDataQuality::UnknownNotObserved
             };
+            let mut conflict_evidence = evidence;
+            if self.emitted_terminal.is_some() {
+                conflict_evidence.extend(self.emitted_terminal_evidence.clone());
+            }
             let event = finalize_execution_event(
                 self.market.clone(),
                 &self.canonical_rule_version,
-                evidence,
+                conflict_evidence,
                 EventQualityV2 {
                     availability: MarketDataQuality::Invalid,
                     resync: ResyncQuality::NotRequired,
@@ -1667,10 +1716,12 @@ impl PolymarketTerminalMerger {
 
         if let Some(previous) = &self.emitted_terminal {
             if previous != &terminal {
+                let mut conflict_evidence = evidence;
+                conflict_evidence.extend(self.emitted_terminal_evidence.clone());
                 let conflict = finalize_execution_event(
                     self.market.clone(),
                     &self.canonical_rule_version,
-                    evidence,
+                    conflict_evidence,
                     EventQualityV2 {
                         availability: MarketDataQuality::Invalid,
                         resync: ResyncQuality::NotRequired,
@@ -1771,10 +1822,14 @@ impl PolymarketTerminalMerger {
             } else {
                 MarketDataQuality::UnknownNotObserved
             };
+            let mut conflict_evidence = evidence;
+            if self.emitted_terminal.is_some() {
+                conflict_evidence.extend(self.emitted_terminal_evidence.clone());
+            }
             let event = finalize_execution_event(
                 self.market.clone(),
                 &self.canonical_rule_version,
-                evidence,
+                conflict_evidence,
                 EventQualityV2 {
                     availability: MarketDataQuality::Invalid,
                     resync: ResyncQuality::NotRequired,
@@ -1842,10 +1897,12 @@ impl PolymarketTerminalMerger {
 
         if let Some(previous) = &self.emitted_terminal {
             if previous != &terminal {
+                let mut conflict_evidence = evidence;
+                conflict_evidence.extend(self.emitted_terminal_evidence.clone());
                 let conflict = finalize_execution_event(
                     self.market.clone(),
                     &self.canonical_rule_version,
-                    evidence,
+                    conflict_evidence,
                     EventQualityV2 {
                         availability: MarketDataQuality::Invalid,
                         resync: ResyncQuality::NotRequired,
@@ -1939,6 +1996,13 @@ struct PolymarketLevelState {
     price: ExactDecimal,
     quantity: ExactDecimal,
     direct_evidence: SourceEvidenceRefV2,
+    visibility_frontier_evidence: SourceEvidenceRefV2,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PolymarketAbsenceState {
+    direct_evidence: SourceEvidenceRefV2,
+    visibility_frontier_evidence: SourceEvidenceRefV2,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1946,6 +2010,7 @@ struct PolymarketBbaState {
     best_bid: Option<ExactDecimal>,
     best_ask: Option<ExactDecimal>,
     direct_evidence: SourceEvidenceRefV2,
+    visibility_frontier_evidence: SourceEvidenceRefV2,
 }
 
 #[derive(Clone, Debug)]
@@ -1955,9 +2020,14 @@ struct PolymarketAssetState {
     book_ready: bool,
     tick_size: ExactDecimal,
     tick_direct_evidence: Vec<SourceEvidenceRefV2>,
+    tick_visibility_frontier_evidence: SourceEvidenceRefV2,
     bids: BTreeMap<Decimal, PolymarketLevelState>,
     asks: BTreeMap<Decimal, PolymarketLevelState>,
+    bid_absences: BTreeMap<Decimal, PolymarketAbsenceState>,
+    ask_absences: BTreeMap<Decimal, PolymarketAbsenceState>,
+    l2_absence_baseline: Option<PolymarketAbsenceState>,
     bba: Option<PolymarketBbaState>,
+    bba_reanchor_frontier_evidence: Option<SourceEvidenceRefV2>,
 }
 
 #[derive(Clone, Debug)]
@@ -2009,6 +2079,8 @@ impl PolymarketReducer {
 
         let mut outcome_indices = BTreeSet::new();
         let mut assets = BTreeMap::new();
+        let identity_visibility_frontier =
+            visibility_frontier_evidence(identity_source_evidence.clone())?;
         for asset_context in context.assets {
             crate::validate_asset(&asset_context.asset, "assets.asset")?;
             if !outcome_indices.insert(asset_context.asset.outcome.index) {
@@ -2031,12 +2103,17 @@ impl PolymarketReducer {
                     PolymarketAssetState {
                         tick_size: asset_context.initial_tick_size_pusd_per_share.clone(),
                         tick_direct_evidence: identity_source_evidence.clone(),
+                        tick_visibility_frontier_evidence: identity_visibility_frontier.clone(),
                         context: asset_context,
                         has_initial_snapshot: false,
                         book_ready: false,
                         bids: BTreeMap::new(),
                         asks: BTreeMap::new(),
+                        bid_absences: BTreeMap::new(),
+                        ask_absences: BTreeMap::new(),
+                        l2_absence_baseline: None,
                         bba: None,
+                        bba_reanchor_frontier_evidence: None,
                     },
                 )
                 .is_some()
@@ -2068,6 +2145,10 @@ impl PolymarketReducer {
                 total
                     .saturating_add(state.bids.len())
                     .saturating_add(state.asks.len())
+                    .saturating_add(state.bid_absences.len())
+                    .saturating_add(state.ask_absences.len())
+                    .saturating_add(usize::from(state.l2_absence_baseline.is_some()))
+                    .saturating_add(usize::from(state.bba_reanchor_frontier_evidence.is_some()))
             },
         )
     }
@@ -2114,17 +2195,66 @@ impl PolymarketReducer {
             self.seen_admission_sequences.clear();
             self.last_row = None;
             self.last_evidence = None;
+            let epoch_trigger = inputs[0].evidence.clone();
             let mut invalidated_assets = Vec::new();
             for state in self.assets.values_mut() {
+                if switching_epoch && let Some(current) = &state.bba {
+                    state.bba_reanchor_frontier_evidence = Some(visibility_frontier_evidence(
+                        state
+                            .bba_reanchor_frontier_evidence
+                            .iter()
+                            .cloned()
+                            .chain([current.visibility_frontier_evidence.clone()])
+                            .collect(),
+                    )?);
+                }
                 if switching_epoch && state.book_ready {
-                    invalidated_assets.push(state.context.asset.clone());
+                    let reset_frontier = visibility_frontier_evidence(
+                        state
+                            .bids
+                            .values()
+                            .chain(state.asks.values())
+                            .map(|level| level.visibility_frontier_evidence.clone())
+                            .chain(
+                                state
+                                    .bid_absences
+                                    .values()
+                                    .chain(state.ask_absences.values())
+                                    .map(|absence| absence.visibility_frontier_evidence.clone()),
+                            )
+                            .chain(
+                                state
+                                    .l2_absence_baseline
+                                    .iter()
+                                    .map(|baseline| baseline.visibility_frontier_evidence.clone()),
+                            )
+                            .chain([epoch_trigger.clone()])
+                            .collect(),
+                    )?;
+                    let reset = PolymarketAbsenceState {
+                        direct_evidence: epoch_trigger.clone(),
+                        visibility_frontier_evidence: reset_frontier,
+                    };
+                    invalidated_assets.push((state.context.asset.clone(), reset.clone()));
+                    state.l2_absence_baseline = Some(reset);
+                } else if switching_epoch && let Some(previous) = state.l2_absence_baseline.clone()
+                {
+                    state.l2_absence_baseline = Some(PolymarketAbsenceState {
+                        direct_evidence: epoch_trigger.clone(),
+                        visibility_frontier_evidence: visibility_frontier_evidence(vec![
+                            previous.visibility_frontier_evidence,
+                            epoch_trigger.clone(),
+                        ])?,
+                    });
                 }
                 state.book_ready = false;
                 state.bids.clear();
                 state.asks.clear();
+                state.bid_absences.clear();
+                state.ask_absences.clear();
                 state.bba = None;
             }
-            for asset in invalidated_assets {
+            for (asset, reset) in invalidated_assets {
                 append_polymarket_quality_boundary(
                     &self.market,
                     &self.canonical_rule_version,
@@ -2135,7 +2265,8 @@ impl PolymarketReducer {
                     ResyncQuality::Required,
                     POLYMARKET_L2_EPOCH_BASELINE_REQUIRED,
                     ReductionOperationKindV1::Reject,
-                    &inputs[0].evidence,
+                    &reset.direct_evidence,
+                    std::slice::from_ref(&reset.visibility_frontier_evidence),
                     &mut batch,
                 )?;
             }
@@ -2314,8 +2445,8 @@ impl PolymarketReducer {
         input: &PolymarketOrderbookInputV1,
         batch: &mut PolymarketReductionBatch,
     ) -> Result<(), ContractError> {
-        let incoming_bids = polymarket_level_map(bids, &input.evidence, "bids")?;
-        let incoming_asks = polymarket_level_map(asks, &input.evidence, "asks")?;
+        let mut incoming_bids = polymarket_level_map(bids, &input.evidence, "bids")?;
+        let mut incoming_asks = polymarket_level_map(asks, &input.evidence, "asks")?;
         let state = self
             .assets
             .get_mut(asset_id)
@@ -2327,7 +2458,17 @@ impl PolymarketReducer {
             state.bids = incoming_bids;
             state.asks = incoming_asks;
             let mut evidence = self.identity_source_evidence.clone();
+            evidence.extend(state.tick_direct_evidence.clone());
+            evidence.push(state.tick_visibility_frontier_evidence.clone());
             evidence.push(input.evidence.clone());
+            let snapshot_frontier = visibility_frontier_evidence(evidence.clone())?;
+            for level in state.bids.values_mut().chain(state.asks.values_mut()) {
+                level.visibility_frontier_evidence = snapshot_frontier.clone();
+            }
+            state.l2_absence_baseline = Some(PolymarketAbsenceState {
+                direct_evidence: input.evidence.clone(),
+                visibility_frontier_evidence: snapshot_frontier,
+            });
             let digest = polymarket_book_digest(&state.context.asset, &state.bids, &state.asks)?;
             let event = finalize_execution_event(
                 self.market.clone(),
@@ -2359,26 +2500,33 @@ impl PolymarketReducer {
         let recovering_from_epoch_switch = !state.book_ready && state.has_initial_snapshot;
         let previous_bids = std::mem::take(&mut state.bids);
         let previous_asks = std::mem::take(&mut state.asks);
-        state.book_ready = true;
-        append_polymarket_book_transitions(
+        let previous_absence_baseline = state
+            .l2_absence_baseline
+            .clone()
+            .ok_or_else(|| invalid("book", "post-initial book requires an L2 absence baseline"))?;
+        incoming_bids = reconcile_polymarket_book_side(
             &self.market,
             &self.canonical_rule_version,
             &self.identity_source_evidence,
             &state.context.asset,
             BookSide::Bid,
             &previous_bids,
-            &incoming_bids,
+            incoming_bids,
+            &mut state.bid_absences,
+            &previous_absence_baseline,
             input,
             batch,
         )?;
-        append_polymarket_book_transitions(
+        incoming_asks = reconcile_polymarket_book_side(
             &self.market,
             &self.canonical_rule_version,
             &self.identity_source_evidence,
             &state.context.asset,
             BookSide::Ask,
             &previous_asks,
-            &incoming_asks,
+            incoming_asks,
+            &mut state.ask_absences,
+            &previous_absence_baseline,
             input,
             batch,
         )?;
@@ -2386,6 +2534,16 @@ impl PolymarketReducer {
             && same_polymarket_levels(&previous_asks, &incoming_asks);
         state.bids = incoming_bids;
         state.asks = incoming_asks;
+        state.l2_absence_baseline = Some(PolymarketAbsenceState {
+            direct_evidence: input.evidence.clone(),
+            visibility_frontier_evidence: visibility_frontier_evidence(vec![
+                previous_absence_baseline
+                    .visibility_frontier_evidence
+                    .clone(),
+                input.evidence.clone(),
+            ])?,
+        });
+        state.book_ready = true;
         if recovering_from_epoch_switch {
             append_polymarket_quality_boundary(
                 &self.market,
@@ -2398,6 +2556,10 @@ impl PolymarketReducer {
                 POLYMARKET_L2_EPOCH_BASELINE_RESTORED,
                 ReductionOperationKindV1::Overwrite,
                 &input.evidence,
+                &[
+                    previous_absence_baseline.direct_evidence,
+                    previous_absence_baseline.visibility_frontier_evidence,
+                ],
                 batch,
             )?;
         } else if no_change {
@@ -2407,7 +2569,12 @@ impl PolymarketReducer {
                 previous_bids
                     .values()
                     .chain(previous_asks.values())
-                    .map(|level| level.direct_evidence.clone()),
+                    .flat_map(|level| {
+                        [
+                            level.direct_evidence.clone(),
+                            level.visibility_frontier_evidence.clone(),
+                        ]
+                    }),
             );
             batch.reports.push(non_event_report(
                 &self.canonical_rule_version,
@@ -2474,9 +2641,15 @@ impl PolymarketReducer {
             let quantity = typed_raw::normalize_decimal_text(size, "price_change.size")
                 .map_err(typed_raw_contract_error)?;
             let key = parse_canonical_decimal(&price, "price_change.price")?;
-            let levels = match side {
-                BookSide::Bid => &mut state.bids,
-                BookSide::Ask => &mut state.asks,
+            let absence_baseline = state.l2_absence_baseline.clone().ok_or_else(|| {
+                invalid(
+                    "price_change",
+                    "book-ready state requires an L2 absence baseline",
+                )
+            })?;
+            let (levels, absences) = match side {
+                BookSide::Bid => (&mut state.bids, &mut state.bid_absences),
+                BookSide::Ask => (&mut state.asks, &mut state.ask_absences),
             };
             let previous = levels.get(&key).cloned();
             let before = previous
@@ -2486,11 +2659,18 @@ impl PolymarketReducer {
                 .unwrap_or(Decimal::ZERO);
             let after = parse_canonical_decimal(&quantity, "quantity_after")?;
             let scope = polymarket_level_scope(&self.market, &state.context.asset, side, &price);
+            let predecessor = previous
+                .as_ref()
+                .map(|level| PolymarketAbsenceState {
+                    direct_evidence: level.direct_evidence.clone(),
+                    visibility_frontier_evidence: level.visibility_frontier_evidence.clone(),
+                })
+                .or_else(|| absences.get(&key).cloned())
+                .unwrap_or(absence_baseline);
             let mut evidence = self.identity_source_evidence.clone();
             evidence.push(input.evidence.clone());
-            if let Some(previous) = &previous {
-                evidence.push(previous.direct_evidence.clone());
-            }
+            evidence.push(predecessor.direct_evidence);
+            evidence.push(predecessor.visibility_frontier_evidence);
             if before == after {
                 batch.reports.push(non_event_report(
                     &self.canonical_rule_version,
@@ -2501,6 +2681,7 @@ impl PolymarketReducer {
                     true,
                 )?);
             } else {
+                let next_frontier = visibility_frontier_evidence(evidence.clone())?;
                 let event = polymarket_level_transition_event(
                     &self.market,
                     &self.canonical_rule_version,
@@ -2531,18 +2712,27 @@ impl PolymarketReducer {
                     event.event_id.clone(),
                 )?);
                 batch.events.push(event);
-            }
-            if after.is_zero() {
-                levels.remove(&key);
-            } else {
-                levels.insert(
-                    key,
-                    PolymarketLevelState {
-                        price,
-                        quantity,
-                        direct_evidence: input.evidence.clone(),
-                    },
-                );
+                if after.is_zero() {
+                    levels.remove(&key);
+                    absences.insert(
+                        key,
+                        PolymarketAbsenceState {
+                            direct_evidence: input.evidence.clone(),
+                            visibility_frontier_evidence: next_frontier,
+                        },
+                    );
+                } else {
+                    absences.remove(&key);
+                    levels.insert(
+                        key,
+                        PolymarketLevelState {
+                            price,
+                            quantity,
+                            direct_evidence: input.evidence.clone(),
+                            visibility_frontier_evidence: next_frontier,
+                        },
+                    );
+                }
             }
         }
         if change.best_bid.is_some() || change.best_ask.is_some() {
@@ -2620,6 +2810,14 @@ impl PolymarketReducer {
                     .direct_evidence
                     .clone(),
             );
+            evidence.push(
+                state
+                    .bba
+                    .as_ref()
+                    .expect("matched BBA state")
+                    .visibility_frontier_evidence
+                    .clone(),
+            );
             batch.reports.push(non_event_report(
                 &self.canonical_rule_version,
                 scope,
@@ -2631,16 +2829,15 @@ impl PolymarketReducer {
             return Ok(());
         }
         let previous = state.bba.clone();
-        state.bba = Some(PolymarketBbaState {
-            best_bid: best_bid.clone(),
-            best_ask: best_ask.clone(),
-            direct_evidence: input.evidence.clone(),
-        });
         let mut evidence = self.identity_source_evidence.clone();
         evidence.push(input.evidence.clone());
         if let Some(previous) = &previous {
             evidence.push(previous.direct_evidence.clone());
+            evidence.push(previous.visibility_frontier_evidence.clone());
+        } else if let Some(frontier) = &state.bba_reanchor_frontier_evidence {
+            evidence.push(frontier.clone());
         }
+        let next_frontier = visibility_frontier_evidence(evidence.clone())?;
         let event = finalize_execution_event(
             self.market.clone(),
             &self.canonical_rule_version,
@@ -2648,10 +2845,17 @@ impl PolymarketReducer {
             fresh_quality(ResyncQuality::NotRequired),
             ExecutionMarketEventPayloadV3::BestBidAsk(BestBidAskV2 {
                 asset: state.context.asset.clone(),
-                best_bid_pusd_per_share: best_bid,
-                best_ask_pusd_per_share: best_ask,
+                best_bid_pusd_per_share: best_bid.clone(),
+                best_ask_pusd_per_share: best_ask.clone(),
             }),
         )?;
+        state.bba = Some(PolymarketBbaState {
+            best_bid: best_bid.clone(),
+            best_ask: best_ask.clone(),
+            direct_evidence: input.evidence.clone(),
+            visibility_frontier_evidence: next_frontier,
+        });
+        state.bba_reanchor_frontier_evidence = None;
         batch.reports.push(produced_report(
             &self.canonical_rule_version,
             scope,
@@ -2689,6 +2893,7 @@ impl PolymarketReducer {
         let scope = polymarket_asset_scope(&self.market, &state.context.asset);
         if new_tick == state.tick_size {
             let mut evidence = state.tick_direct_evidence.clone();
+            evidence.push(state.tick_visibility_frontier_evidence.clone());
             evidence.push(input.evidence.clone());
             batch.reports.push(non_event_report(
                 &self.canonical_rule_version,
@@ -2711,7 +2916,9 @@ impl PolymarketReducer {
         }
         let mut evidence = self.identity_source_evidence.clone();
         evidence.extend(state.tick_direct_evidence.clone());
+        evidence.push(state.tick_visibility_frontier_evidence.clone());
         evidence.push(input.evidence.clone());
+        let next_frontier = visibility_frontier_evidence(evidence.clone())?;
         let event = finalize_execution_event(
             self.market.clone(),
             &self.canonical_rule_version,
@@ -2725,6 +2932,7 @@ impl PolymarketReducer {
         )?;
         state.tick_size = new_tick;
         state.tick_direct_evidence = vec![input.evidence.clone()];
+        state.tick_visibility_frontier_evidence = next_frontier;
         batch.reports.push(produced_report(
             &self.canonical_rule_version,
             scope,
@@ -3387,6 +3595,7 @@ fn polymarket_level_map(
                     price,
                     quantity,
                     direct_evidence: evidence.clone(),
+                    visibility_frontier_evidence: evidence.clone(),
                 },
             )
             .is_some()
@@ -3449,17 +3658,19 @@ fn polymarket_book_digest(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn append_polymarket_book_transitions(
+fn reconcile_polymarket_book_side(
     market: &MarketIdentityV2,
     canonical_rule_version: &str,
     identity_source_evidence: &[SourceEvidenceRefV2],
     asset: &AssetIdentityV1,
     side: BookSide,
     previous: &BTreeMap<Decimal, PolymarketLevelState>,
-    current: &BTreeMap<Decimal, PolymarketLevelState>,
+    mut current: BTreeMap<Decimal, PolymarketLevelState>,
+    absences: &mut BTreeMap<Decimal, PolymarketAbsenceState>,
+    absence_baseline: &PolymarketAbsenceState,
     input: &PolymarketOrderbookInputV1,
     batch: &mut PolymarketReductionBatch,
-) -> Result<(), ContractError> {
+) -> Result<BTreeMap<Decimal, PolymarketLevelState>, ContractError> {
     let mut keys = previous
         .keys()
         .chain(current.keys())
@@ -3481,18 +3692,28 @@ fn append_polymarket_book_transitions(
             .map(|level| parse_canonical_decimal(&level.quantity, "quantity_after"))
             .transpose()?
             .unwrap_or(Decimal::ZERO);
-        if before == after {
-            continue;
-        }
         let price = after_state
             .or(before_state)
             .expect("union key belongs to at least one book")
             .price
             .clone();
+        let predecessor = before_state
+            .map(|level| PolymarketAbsenceState {
+                direct_evidence: level.direct_evidence.clone(),
+                visibility_frontier_evidence: level.visibility_frontier_evidence.clone(),
+            })
+            .or_else(|| absences.get(&key).cloned())
+            .unwrap_or_else(|| absence_baseline.clone());
         let mut evidence = identity_source_evidence.to_vec();
         evidence.push(input.evidence.clone());
-        if let Some(previous) = before_state {
-            evidence.push(previous.direct_evidence.clone());
+        evidence.push(predecessor.direct_evidence);
+        evidence.push(predecessor.visibility_frontier_evidence);
+        let next_frontier = visibility_frontier_evidence(evidence.clone())?;
+        if before == after {
+            if let Some(previous) = before_state {
+                current.insert(key, previous.clone());
+            }
+            continue;
         }
         let event = polymarket_level_transition_event(
             market,
@@ -3523,8 +3744,24 @@ fn append_polymarket_book_transitions(
             event.event_id.clone(),
         )?);
         batch.events.push(event);
+        if after.is_zero() {
+            current.remove(&key);
+            absences.insert(
+                key,
+                PolymarketAbsenceState {
+                    direct_evidence: input.evidence.clone(),
+                    visibility_frontier_evidence: next_frontier,
+                },
+            );
+        } else {
+            absences.remove(&key);
+            let current_level = current
+                .get_mut(&key)
+                .expect("non-zero incoming book level must remain present");
+            current_level.visibility_frontier_evidence = next_frontier;
+        }
     }
-    Ok(())
+    Ok(current)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3619,9 +3856,11 @@ fn append_polymarket_quality_boundary(
     reason_code: &str,
     operation: ReductionOperationKindV1,
     trigger_evidence: &SourceEvidenceRefV2,
+    causal_frontier_evidence: &[SourceEvidenceRefV2],
     batch: &mut PolymarketReductionBatch,
 ) -> Result<(), ContractError> {
     let mut evidence = identity_source_evidence.to_vec();
+    evidence.extend_from_slice(causal_frontier_evidence);
     evidence.push(trigger_evidence.clone());
     let event = finalize_execution_event(
         market.clone(),

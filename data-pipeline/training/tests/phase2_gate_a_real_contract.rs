@@ -5,9 +5,7 @@ use data_pipeline_training::freeze_direct_source_input_set;
 use data_pipeline_training::gate_a::{
     PlatformReplayCursor, build_gate_a_candidate, validate_gate_a_candidate,
 };
-use data_pipeline_training::gate_a_publication::{
-    gate_a_formal_canonical_config, gate_a_formal_output_config,
-};
+use data_pipeline_training::{gate_a_formal_canonical_config, gate_a_formal_output_config};
 use tempfile::TempDir;
 
 const DATASET_LINEAGE_ROOT: &str = "/home/chillchill/new-datasets";

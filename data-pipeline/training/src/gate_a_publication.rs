@@ -274,6 +274,7 @@ pub struct GateAQualityIsolationReportV1 {
     pub reference_event_counts: GateAReferenceEventCountsV1,
     pub event_quality_counts: GateAQualityCountsV1,
     pub event_resync_counts: GateAResyncCountsV1,
+    pub fresh_resync_boundary: u64,
     pub event_without_source_evidence: u64,
     pub event_without_source_time: u64,
     pub distinct_market_windows: u64,
@@ -281,6 +282,7 @@ pub struct GateAQualityIsolationReportV1 {
     pub best_bid_ask_tokens: Vec<String>,
     pub tick_change_tokens: Vec<String>,
     pub known_old_tick_change_tokens: Vec<String>,
+    pub dynamic_tick_observation_tokens: Vec<String>,
     pub public_trade_platform_id: u64,
     pub public_trade_derived_id: u64,
     pub level_execution_basis_counts: BTreeMap<String, u64>,
@@ -322,13 +324,23 @@ pub struct GateACgroupMemoryEventsV1 {
 pub struct GateAExternalResourceFactsV1 {
     pub build_exit_code: i32,
     pub maximum_resident_set_size_kib: u64,
+    pub publication_filesystem_type: String,
+    pub publication_root_device_id: u64,
+    pub candidate_device_id: u64,
     pub cgroup_v2_relative_path: String,
+    pub cgroup_process_ids_before: Vec<u32>,
+    pub cgroup_process_ids_after: Vec<u32>,
     pub memory_peak_bytes: u64,
     pub memory_max_bytes: u64,
     pub memory_swap_peak_bytes: u64,
     pub memory_swap_max_bytes: u64,
     pub memory_events_before: GateACgroupMemoryEventsV1,
     pub memory_events_after: GateACgroupMemoryEventsV1,
+    pub network_namespace: String,
+    pub network_interfaces: Vec<String>,
+    pub network_isolation_supervisor_pid: u32,
+    pub network_isolation_supervisor_name: String,
+    pub network_isolation_supervisor_argv: Vec<String>,
     pub time_v_output: String,
     pub time_v_output_sha256: Sha256Hex,
 }
@@ -468,11 +480,12 @@ pub struct GateARunManifestV1 {
     pub validation_result: String,
 }
 
-/// 只在计时子进程与其父进程之间短暂存在；正式发布前必须删除。
+/// 只在计时构建与正式发布之间短暂存在；原子发布前必须删除。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GateAMeasuredBuildStateV1 {
     pub schema_version: String,
+    pub git_commit: String,
     pub candidate_path: String,
     pub pipeline_core_identity_sha256: Sha256Hex,
     pub input_set_identity_sha256: Sha256Hex,
@@ -535,6 +548,7 @@ struct QualityScan {
     reference_event_counts: GateAReferenceEventCountsV1,
     event_quality_counts: GateAQualityCountsV1,
     event_resync_counts: GateAResyncCountsV1,
+    fresh_resync_boundary: u64,
     event_without_source_evidence: u64,
     event_without_source_time: u64,
     market_windows: BTreeSet<Vec<u8>>,
@@ -554,7 +568,10 @@ struct QualityScan {
     reduction_reason_counts: BTreeMap<String, u64>,
     quantity_conservation_reports: u64,
     blocking_terminal_reports: u64,
-    event_witnesses: BTreeMap<&'static str, CanonicalEventId>,
+    event_witnesses: BTreeMap<&'static str, BTreeSet<String>>,
+    event_observation_witnesses: BTreeMap<String, Sha256Hex>,
+    dynamic_tick_tokens_by_event: BTreeMap<String, String>,
+    dynamic_tick_observation_tokens: BTreeSet<String>,
     observation_witnesses: BTreeMap<ObservationComponentId, Sha256Hex>,
 }
 
@@ -581,6 +598,13 @@ impl QualityScan {
                 self.event_quality_counts
                     .increment(event.quality.availability);
                 self.event_resync_counts.increment(event.quality.resync);
+                if (matches!(
+                    event.quality.availability,
+                    MarketDataQuality::Missing | MarketDataQuality::ConfirmedGap
+                ) && event.quality.resync == ResyncQuality::Required)
+                {
+                    remember_event(&mut self.event_witnesses, "gap_resync", &event.event_id);
+                }
                 if event.lineage.source_evidence.is_empty() {
                     self.event_without_source_evidence =
                         self.event_without_source_evidence.saturating_add(1);
@@ -631,7 +655,9 @@ impl QualityScan {
                         if change.old_tick_size_pusd_per_share.is_some() {
                             self.known_old_tick_change_tokens.insert(token_id.clone());
                         }
-                        self.tick_change_tokens.insert(token_id);
+                        self.tick_change_tokens.insert(token_id.clone());
+                        self.dynamic_tick_tokens_by_event
+                            .insert(event.event_id.0.clone(), token_id);
                         remember_event(&mut self.event_witnesses, "dynamic_tick", &event.event_id);
                     }
                     ExecutionMarketEventPayloadV3::PublicTrade(trade) => {
@@ -665,8 +691,21 @@ impl QualityScan {
                             &event.event_id,
                         );
                     }
-                    ExecutionMarketEventPayloadV3::QualityBoundary(_) => {
+                    ExecutionMarketEventPayloadV3::QualityBoundary(boundary) => {
                         self.market_event_counts.quality_boundary += 1;
+                        if boundary.previous_quality == MarketDataQuality::Missing
+                            && boundary.current_quality == MarketDataQuality::Fresh
+                            && event.quality.availability == MarketDataQuality::Fresh
+                            && event.quality.resync == ResyncQuality::ResyncBoundary
+                        {
+                            self.fresh_resync_boundary =
+                                self.fresh_resync_boundary.saturating_add(1);
+                            remember_event(
+                                &mut self.event_witnesses,
+                                "gap_resync",
+                                &event.event_id,
+                            );
+                        }
                         remember_event(
                             &mut self.event_witnesses,
                             "quality_boundary",
@@ -688,6 +727,13 @@ impl QualityScan {
                 self.event_quality_counts
                     .increment(event.quality.availability);
                 self.event_resync_counts.increment(event.quality.resync);
+                if (matches!(
+                    event.quality.availability,
+                    MarketDataQuality::Missing | MarketDataQuality::ConfirmedGap
+                ) && event.quality.resync == ResyncQuality::Required)
+                {
+                    remember_event(&mut self.event_witnesses, "gap_resync", &event.event_id);
+                }
                 if event.lineage.source_evidence.is_empty() {
                     self.event_without_source_evidence =
                         self.event_without_source_evidence.saturating_add(1);
@@ -702,6 +748,17 @@ impl QualityScan {
                     }
                     CanonicalReferenceEventPayloadV1::BinanceDepthState(_) => {
                         self.reference_event_counts.binance_depth_state += 1;
+                        if event.quality.availability == MarketDataQuality::Fresh
+                            && event.quality.resync == ResyncQuality::ResyncBoundary
+                        {
+                            self.fresh_resync_boundary =
+                                self.fresh_resync_boundary.saturating_add(1);
+                            remember_event(
+                                &mut self.event_witnesses,
+                                "gap_resync",
+                                &event.event_id,
+                            );
+                        }
                     }
                     CanonicalReferenceEventPayloadV1::BinanceAggregateTrade(_) => {
                         self.reference_event_counts.binance_aggregate_trade += 1;
@@ -714,11 +771,11 @@ impl QualityScan {
 }
 
 fn remember_event(
-    witnesses: &mut BTreeMap<&'static str, CanonicalEventId>,
+    witnesses: &mut BTreeMap<&'static str, BTreeSet<String>>,
     key: &'static str,
     event_id: &CanonicalEventId,
 ) {
-    witnesses.entry(key).or_insert_with(|| event_id.clone());
+    witnesses.entry(key).or_default().insert(event_id.0.clone());
 }
 
 fn increment_reason(reasons: &mut BTreeMap<String, u64>, reason: &str) {
@@ -811,11 +868,18 @@ pub fn build_quality_isolation_report(
                 if observation.missing_mask.contains(&state.component) {
                     facts.missing_rows = facts.missing_rows.saturating_add(1);
                 }
-                if state.last_visible_event_id.is_some() {
+                if let Some(event_id) = &state.last_visible_event_id {
                     facts.anchored_rows = facts.anchored_rows.saturating_add(1);
                     scan.observation_witnesses
                         .entry(state.component)
                         .or_insert_with(|| observation.observation_id.clone());
+                    scan.event_observation_witnesses
+                        .entry(event_id.0.clone())
+                        .or_insert_with(|| observation.observation_id.clone());
+                    if let Some(token_id) = scan.dynamic_tick_tokens_by_event.get(&event_id.0) {
+                        scan.dynamic_tick_observation_tokens
+                            .insert(token_id.clone());
+                    }
                 }
             }
         }
@@ -877,6 +941,7 @@ pub fn build_quality_isolation_report(
         reference_event_counts: scan.reference_event_counts,
         event_quality_counts: scan.event_quality_counts,
         event_resync_counts: scan.event_resync_counts,
+        fresh_resync_boundary: scan.fresh_resync_boundary,
         event_without_source_evidence: scan.event_without_source_evidence,
         event_without_source_time: scan.event_without_source_time,
         distinct_market_windows: scan.market_windows.len() as u64,
@@ -884,6 +949,7 @@ pub fn build_quality_isolation_report(
         best_bid_ask_tokens: scan.best_bid_ask_tokens.into_iter().collect(),
         tick_change_tokens: scan.tick_change_tokens.into_iter().collect(),
         known_old_tick_change_tokens: scan.known_old_tick_change_tokens.into_iter().collect(),
+        dynamic_tick_observation_tokens: scan.dynamic_tick_observation_tokens.into_iter().collect(),
         public_trade_platform_id: scan.public_trade_platform_id,
         public_trade_derived_id: scan.public_trade_derived_id,
         level_execution_basis_counts: scan.level_execution_basis_counts,
@@ -965,8 +1031,11 @@ fn quality_evidence(
         (
             "quality/gap-resync-watermark",
             predicates[9],
-            &["quality_boundary"][..],
-            &[ObservationComponentId::PolymarketL2][..],
+            &["gap_resync"][..],
+            &[
+                ObservationComponentId::PolymarketL2,
+                ObservationComponentId::BinanceBtcUsdtDepth,
+            ][..],
         ),
         (
             "quality/market-terminal",
@@ -991,16 +1060,27 @@ fn quality_evidence(
     checks
         .into_iter()
         .map(|(id, passed, event_keys, components)| {
-            let mut event_ids = event_keys
-                .iter()
-                .filter_map(|key| scan.event_witnesses.get(key).cloned())
-                .collect::<Vec<_>>();
-            event_ids.sort_by(|left, right| left.0.cmp(&right.0));
-            event_ids.dedup();
-            let mut observation_ids = components
-                .iter()
-                .filter_map(|component| scan.observation_witnesses.get(component).cloned())
-                .collect::<Vec<_>>();
+            let linked_witness = event_keys.iter().find_map(|key| {
+                scan.event_witnesses.get(key).and_then(|event_ids| {
+                    event_ids.iter().find_map(|event_id| {
+                        scan.event_observation_witnesses.get(event_id).cloned().map(
+                            |observation_id| (CanonicalEventId(event_id.clone()), observation_id),
+                        )
+                    })
+                })
+            });
+            let event_ids = linked_witness
+                .as_ref()
+                .map(|(event_id, _)| vec![event_id.clone()])
+                .unwrap_or_default();
+            let mut observation_ids = if let Some((_, observation_id)) = linked_witness {
+                vec![observation_id]
+            } else {
+                components
+                    .iter()
+                    .filter_map(|component| scan.observation_witnesses.get(component).cloned())
+                    .collect::<Vec<_>>()
+            };
             observation_ids.sort_by(|left, right| left.0.cmp(&right.0));
             observation_ids.dedup();
             GateAEvidenceRecordV1 {
@@ -1062,15 +1142,17 @@ fn quality_predicates(report: &GateAQualityIsolationReportV1) -> [bool; 14] {
         report.market_event_counts.best_bid_ask > 0 && report.best_bid_ask_tokens.len() == 2,
         report.market_event_counts.tick_size_change > 0
             && report.tick_change_tokens.len() == 2
-            && report.known_old_tick_change_tokens.len() == 2,
+            && report.known_old_tick_change_tokens.len() == 2
+            && report.dynamic_tick_observation_tokens == report.known_old_tick_change_tokens,
         report.market_event_counts.public_trade > 0
             && report
                 .public_trade_platform_id
                 .checked_add(report.public_trade_derived_id)
                 == Some(report.market_event_counts.public_trade),
         report.market_event_counts.level_execution_transition > 0,
-        report.market_event_counts.quality_boundary > 0
-            && report.event_resync_counts.resync_boundary > 0
+        (report.event_quality_counts.confirmed_gap > 0 || report.event_quality_counts.missing > 0)
+            && report.event_resync_counts.required > 0
+            && report.fresh_resync_boundary > 0
             && report.event_quality_counts.invalid == 0,
         report.market_event_counts.market_resolution_terminal == 1
             && report.terminal_with_source_time == 1
@@ -1205,6 +1287,8 @@ pub fn validate_quality_isolation_report(
             > report.market_event_counts.market_trading_state
         || report.trading_state_field_counts.accepting_orders
             > report.market_event_counts.market_trading_state
+        || report.fresh_resync_boundary > report.event_quality_counts.fresh
+        || report.fresh_resync_boundary > report.event_resync_counts.resync_boundary
     {
         return Err(GateAPublicationError::Invalid(
             "质量报告事件、索引、Observation 或归约计数不守恒",
@@ -1243,8 +1327,13 @@ pub fn validate_quality_isolation_report(
     if !is_sorted_unique_strings(&report.best_bid_ask_tokens)
         || !is_sorted_unique_strings(&report.tick_change_tokens)
         || !is_sorted_unique_strings(&report.known_old_tick_change_tokens)
+        || !is_sorted_unique_strings(&report.dynamic_tick_observation_tokens)
         || report
             .known_old_tick_change_tokens
+            .iter()
+            .any(|token| report.tick_change_tokens.binary_search(token).is_err())
+        || report
+            .dynamic_tick_observation_tokens
             .iter()
             .any(|token| report.tick_change_tokens.binary_search(token).is_err())
     {
@@ -1282,6 +1371,9 @@ pub fn validate_quality_isolation_report(
             || (expected_pass
                 && requires_observation_witness
                 && evidence.observation_ids.is_empty())
+            || (expected_pass
+                && requires_event_witness
+                && (evidence.event_ids.len() != 1 || evidence.observation_ids.len() != 1))
         {
             return Err(GateAPublicationError::Invalid(
                 "质量证据状态与报告事实或阻断原因不一致",
@@ -1420,9 +1512,11 @@ pub fn build_measured_build_state(
     candidate: &GateACandidate,
     quality_isolation_report_sha256: Sha256Hex,
     artifact_directory_bytes: u64,
+    git_commit: String,
 ) -> Result<GateAMeasuredBuildStateV1, GateAPublicationError> {
     let state = GateAMeasuredBuildStateV1 {
         schema_version: GATE_A_MEASURED_BUILD_STATE_SCHEMA_V1.to_owned(),
+        git_commit,
         candidate_path: candidate.candidate_path.to_string_lossy().into_owned(),
         pipeline_core_identity_sha256: pipeline_core_identity_sha256(),
         input_set_identity_sha256: candidate.input_set_identity_sha256.clone(),
@@ -1459,6 +1553,11 @@ pub fn validate_measured_build_state(
 ) -> Result<(), GateAPublicationError> {
     if state.schema_version != GATE_A_MEASURED_BUILD_STATE_SCHEMA_V1
         || state.pipeline_core_identity_sha256 != pipeline_core_identity_sha256()
+        || state.git_commit.len() != 40
+        || !state
+            .git_commit
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         || !Path::new(&state.candidate_path).is_absolute()
         || state.canonical_config != gate_a_formal_canonical_config()
         || state.output_config != gate_a_formal_output_config()
@@ -1507,21 +1606,6 @@ pub fn decode_measured_build_state(
     let state = serde_json::from_slice(bytes)?;
     validate_measured_build_state(&state)?;
     Ok(state)
-}
-
-pub fn build_resource_high_water_report(
-    candidate: &GateACandidate,
-    quality_isolation_report_sha256: Sha256Hex,
-    final_artifact_directory_bytes: u64,
-    host: GateAHostFactsV1,
-    external: GateAExternalResourceFactsV1,
-) -> Result<GateAResourceHighWaterReportV1, GateAPublicationError> {
-    let state = build_measured_build_state(
-        candidate,
-        quality_isolation_report_sha256,
-        final_artifact_directory_bytes,
-    )?;
-    build_resource_high_water_report_from_state(&state, host, external)
 }
 
 pub fn build_resource_high_water_report_from_state(
@@ -1597,6 +1681,19 @@ fn resource_facts_fit(
         && output == &gate_a_formal_output_config()
         && external.build_exit_code == 0
         && external.maximum_resident_set_size_kib <= GATE_A_MAX_RSS_KIB
+        && external.publication_filesystem_type == "ext4"
+        && external.publication_root_device_id != 0
+        && external.publication_root_device_id == external.candidate_device_id
+        && external.cgroup_process_ids_before.len() == 2
+        && external
+            .cgroup_process_ids_before
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+        && external.cgroup_process_ids_before == external.cgroup_process_ids_after
+        && external.network_isolation_supervisor_pid > 0
+        && external
+            .cgroup_process_ids_before
+            .contains(&external.network_isolation_supervisor_pid)
         && external.memory_max_bytes == GATE_A_CGROUP_MEMORY_MAX_BYTES
         && external.memory_peak_bytes <= GATE_A_CGROUP_MEMORY_MAX_BYTES
         && external.memory_swap_max_bytes == 0
@@ -1606,6 +1703,17 @@ fn resource_facts_fit(
         && external.memory_events_after.oom_kill == external.memory_events_before.oom_kill
         && external.memory_events_after.oom_group_kill
             == external.memory_events_before.oom_group_kill
+        && external.memory_events_before
+            == (GateACgroupMemoryEventsV1 {
+                low: 0,
+                high: 0,
+                max: 0,
+                oom: 0,
+                oom_kill: 0,
+                oom_group_kill: 0,
+            })
+        && !external.network_namespace.is_empty()
+        && external.network_interfaces == ["lo"]
         && metrics.peak_decode_batch_rows <= config.decode_batch_rows
         && metrics.peak_decode_batch_bytes <= config.max_decode_batch_bytes
         && metrics.peak_temporary_row_bytes <= config.max_temporary_row_bytes
@@ -1714,6 +1822,49 @@ pub fn validate_resource_high_water_report(
         || Path::new(&report.external.cgroup_v2_relative_path)
             .components()
             .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+        || Path::new(&report.external.cgroup_v2_relative_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_none_or(|name| !name.starts_with("dpt-gate-a-") || !name.ends_with(".service"))
+        || report.external.publication_filesystem_type != "ext4"
+        || report.external.publication_root_device_id == 0
+        || report.external.publication_root_device_id != report.external.candidate_device_id
+        || report.external.cgroup_process_ids_before.len() != 2
+        || !report
+            .external
+            .cgroup_process_ids_before
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+        || report.external.cgroup_process_ids_before != report.external.cgroup_process_ids_after
+        || report.external.network_namespace.is_empty()
+        || report.external.network_interfaces != ["lo"]
+        || report.external.network_isolation_supervisor_pid == 0
+        || !report
+            .external
+            .cgroup_process_ids_before
+            .contains(&report.external.network_isolation_supervisor_pid)
+        || report.external.network_isolation_supervisor_name != "bwrap"
+        || report.external.network_isolation_supervisor_argv.len() <= 7
+        || report.external.network_isolation_supervisor_argv[0] != "/usr/bin/bwrap"
+        || report.external.network_isolation_supervisor_argv[1..7]
+            != [
+                "--unshare-user",
+                "--uid",
+                "0",
+                "--gid",
+                "0",
+                "--unshare-net",
+            ]
+        || report
+            .external
+            .network_isolation_supervisor_argv
+            .iter()
+            .any(|argument| argument == "--share-net")
+        || !report
+            .external
+            .network_isolation_supervisor_argv
+            .windows(2)
+            .any(|pair| pair == ["--proc", "/proc"])
         || time_digest != report.external.time_v_output_sha256
         || parse_time_v_maximum_rss_kib(&report.external.time_v_output)
             != Some(report.external.maximum_resident_set_size_kib)
@@ -1806,12 +1957,11 @@ pub const GATE_A_WORKSPACE_TEST_ARGV: [&str; 12] = [
     "four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second",
 ];
 
-pub const GATE_A_WORKSPACE_TEST_EVIDENCE_IDS: [&str; 8] = [
+pub const GATE_A_WORKSPACE_TEST_EVIDENCE_IDS: [&str; 7] = [
     "test/atomic-publication",
     "test/candidate-corruption",
     "test/epoch-bba",
     "test/forbidden-low-frequency-fields",
-    "test/offline-boundary",
     "test/quality-boundaries",
     "test/training-entry-rejects-gate-a",
     "test/workspace-regression",
@@ -1916,7 +2066,7 @@ pub fn validate_test_evidence_report(
     }
     let physical = &report.commands[0];
     let workspace = &report.commands[1];
-    if physical.covered_evidence_ids != ["test/physical-perturbation"]
+    if physical.covered_evidence_ids != ["test/offline-boundary", "test/physical-perturbation"]
         || physical.argv.first().map(String::as_str) != Some("/usr/bin/time")
         || !physical.argv.iter().any(|argument| argument == "-v")
         || !physical
@@ -1926,6 +2076,9 @@ pub fn validate_test_evidence_report(
         || !physical
             .combined_output
             .contains("physical_perturbation=PASS")
+        || !physical
+            .combined_output
+            .contains("runtime_network_isolation=PASS")
         || workspace.argv
             != GATE_A_WORKSPACE_TEST_ARGV
                 .into_iter()

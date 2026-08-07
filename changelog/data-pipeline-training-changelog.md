@@ -2801,3 +2801,16 @@ Task 0.10 的定向绿灯，不代替后续完整阶段验证和独立阶段复�
   放大分配的发现，源码事实成立，但当前批准的本地产物损坏模型没有敌对本地写入者；普通
   单文件损坏会先被完整文件 SHA 拒绝。当前不增加无效 footer 魔数或自研 Thrift 解析器；若
   未来扩大威胁模型，应先冻结外部可信摘要和受限解析进程，而不是在本轮形成影子解析。
+
+### 任务 2.5 全工作区回归命令冲突修正
+
+- 2026-08-07 正式执行前复核发现，根 `AGENTS.md` 把普通全工作区回归写成无过滤命令，但
+  `plan/data-collect-plan.md` 与 `data-collect/docs/current/acceptance.md` 已一致要求精确跳过
+  `four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second`。实际无过滤
+  运行也只在该测试失败：测试夹具把当日 `12:00:00Z` 固定为接收时间，在 UTC 12:00 前会因
+  晚于真实准入时钟而触发 `invalid_real_admission_clock` 并最终超时。这是测试夹具的当前限制，
+  不是已证明的生产运行时失败，也不是此前 bench 的 `writer chunk channel disconnected`。
+- 用户批准最小修正：根 `AGENTS.md` 和本计划任务 2.5.3 统一采用
+  `cargo test --workspace --lib --bins --tests --examples --locked --offline -- --skip four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second`，并要求验收证据明确记录
+  该项被跳过，不得写成该测试通过。此次决定不修改 `data-collect` 代码、计划、验收文档或
+  DPT 需求，也不增加 `#[ignore]`、等待 UTC 中午执行或其他测试旁路。

@@ -16,17 +16,16 @@ use data_pipeline_core::reduction::{
     BinanceAggTradeReducer, BinanceDepthReducer, PolymarketMetadataInputV1,
     PolymarketMetadataReducer, PolymarketOrderbookInputV1, PolymarketReducer,
     PolymarketReductionBatch, PolymarketTerminalMerger, ReductionReportEntryV1,
-    encode_reduction_report_entry_v1,
+    build_chainlink_reference_outcome_v1, encode_reduction_report_entry_v1,
 };
 use data_pipeline_core::typed_raw::{
     BinanceAggTradeRecord, MetadataResolutionEvidenceSource, MetadataResolutionPollResult,
     PolymarketMetadataRowKind, PolymarketOrderbookEvent, TypedRawRow, TypedRawSourceKind,
 };
 use data_pipeline_core::{
-    ContractError, build_chainlink_reference_event_v1, encode_canonical_event_record_v1,
-    encode_event_time_index_entry, encode_visibility_index_entry,
-    project_record_event_time_index_entry, project_record_visibility_index_entry,
-    source_evidence_from_typed_raw,
+    ContractError, encode_canonical_event_record_v1, encode_event_time_index_entry,
+    encode_visibility_index_entry, project_record_event_time_index_entry,
+    project_record_visibility_index_entry, source_evidence_from_typed_raw,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1460,13 +1459,16 @@ fn process_sorted_input(
             }
             TypedRawRow::PolymarketRtdsChainlinkBtcUsd(row) => {
                 // 资格和失败原因继续由唯一核心 builder 给出，不在编排层创建新质量语义。
-                let event = build_chainlink_reference_event_v1(
+                let outcome = build_chainlink_reference_outcome_v1(
                     &row,
                     &manifest_sha256,
                     &file_sha256,
                     &config.canonical_rule_version,
                 )?;
-                sink.push_reference_event(event)?;
+                if let Some(event) = outcome.event {
+                    sink.push_reference_event(event)?;
+                }
+                sink.push_report(outcome.report)?;
             }
             TypedRawRow::BinanceDepthSnapshot(row) => {
                 let outcome = binance_depth.apply_snapshot(&row, &manifest_sha256, &file_sha256)?;

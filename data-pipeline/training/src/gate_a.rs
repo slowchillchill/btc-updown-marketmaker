@@ -52,7 +52,7 @@ const CAPTURE_RECORD_DIRECTORY: &str = "capture-canonical-records";
 const CAPTURE_REPORT_DIRECTORY: &str = "capture-reduction-reports";
 const CAPTURE_FILE: &str = "captured.parquet";
 const WORK_DIRECTORY: &str = ".work";
-const PIPELINE_CORE_SOURCES: [(&str, &[u8]); 16] = [
+const PIPELINE_CORE_SOURCES: [(&str, &[u8]); 17] = [
     ("Cargo.lock", include_bytes!("../../../Cargo.lock")),
     ("Cargo.toml", include_bytes!("../../../Cargo.toml")),
     (
@@ -106,6 +106,10 @@ const PIPELINE_CORE_SOURCES: [(&str, &[u8]); 16] = [
     (
         "data-pipeline/training/src/gate_a_publication.rs",
         include_bytes!("gate_a_publication.rs"),
+    ),
+    (
+        "data-pipeline/training/src/dpt_gate_a_cli.rs",
+        include_bytes!("dpt_gate_a_cli.rs"),
     ),
     (
         "data-pipeline/training/src/bin/dpt-gate-a.rs",
@@ -1792,7 +1796,7 @@ pub fn validate_gate_a_candidate(
         validation_work_path,
         output_config,
     )?;
-    validate_event_reference_membership(
+    validate_event_report_closure(
         &event_ids.output_path,
         &report_references.output_path,
         output_config,
@@ -2038,7 +2042,7 @@ fn compare_projected_observation(
     Ok(())
 }
 
-fn validate_event_reference_membership(
+fn validate_event_report_closure(
     event_ids_path: &Path,
     references_path: &Path,
     output_config: &GateAOutputConfig,
@@ -2053,26 +2057,45 @@ fn validate_event_reference_membership(
         output_config.sort.batch_rows,
         output_config.sort.max_run_bytes,
     )?;
-    let mut current_event = event_ids.next_row()?;
-    while let Some(reference) = references.next_row()? {
-        let reference_event_key = reference
-            .sort_key_bytes()
-            .get(..65)
-            .ok_or_else(|| GateAError::ArtifactMismatch("归约报告事件引用键无效".to_owned()))?;
-        while current_event
+    let mut current_reference = references.next_row()?;
+    while let Some(event) = event_ids.next_row()? {
+        let event_key = event.sort_key_bytes();
+        let reference_key = current_reference
             .as_ref()
-            .is_some_and(|event| event.sort_key_bytes() < reference_event_key)
-        {
-            current_event = event_ids.next_row()?;
-        }
-        if current_event
-            .as_ref()
-            .is_none_or(|event| event.sort_key_bytes() != reference_event_key)
-        {
+            .map(|reference| {
+                reference.sort_key_bytes().get(..65).ok_or_else(|| {
+                    GateAError::ArtifactMismatch("归约报告事件引用键无效".to_owned())
+                })
+            })
+            .transpose()?;
+        if reference_key.is_some_and(|reference_key| reference_key < event_key) {
             return Err(GateAError::ArtifactMismatch(
                 "归约报告 produced 结果未解析到唯一事件存储".to_owned(),
             ));
         }
+        if reference_key != Some(event_key) {
+            return Err(GateAError::ArtifactMismatch(
+                "唯一事件存储中的事件缺少 produced 归约报告".to_owned(),
+            ));
+        }
+        loop {
+            current_reference = references.next_row()?;
+            let Some(reference) = &current_reference else {
+                break;
+            };
+            let reference_key = reference
+                .sort_key_bytes()
+                .get(..65)
+                .ok_or_else(|| GateAError::ArtifactMismatch("归约报告事件引用键无效".to_owned()))?;
+            if reference_key != event_key {
+                break;
+            }
+        }
+    }
+    if current_reference.is_some() {
+        return Err(GateAError::ArtifactMismatch(
+            "归约报告 produced 结果未解析到唯一事件存储".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -3044,12 +3067,13 @@ fn validate_optional_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use data_pipeline_core::encode_canonical_event_record_v1;
+    use data_pipeline_core::reduction::{
+        build_chainlink_reference_outcome_v1, encode_reduction_report_entry_v1,
+    };
     use data_pipeline_core::typed_raw::{
         POLYMARKET_RTDS_CHAINLINK_BTC_USD_SCHEMA, PolymarketRtdsChainlinkBtcUsdRow,
         RtdsFreshnessStatus,
-    };
-    use data_pipeline_core::{
-        build_chainlink_reference_event_v1, encode_canonical_event_record_v1,
     };
     use rustix::fs::{CWD, Mode, mkfifoat};
     use tempfile::TempDir;
@@ -3138,11 +3162,11 @@ mod tests {
         );
     }
 
-    fn chainlink_record(
+    fn chainlink_outcome(
         sequence: u64,
         source_event_at_utc_ms: i64,
         received_at_utc_ms: i64,
-    ) -> CanonicalEventRecordV1 {
+    ) -> (CanonicalEventRecordV1, ReductionReportEntryV1) {
         let value = format!("{}", 64_000 + sequence);
         let row = PolymarketRtdsChainlinkBtcUsdRow {
             timestamp_received: received_at_utc_ms,
@@ -3163,15 +3187,17 @@ mod tests {
             source_endpoint: "wss://example.invalid".to_owned(),
             schema_version: POLYMARKET_RTDS_CHAINLINK_BTC_USD_SCHEMA.to_owned(),
         };
-        CanonicalEventRecordV1::ReferenceEvent(Box::new(
-            build_chainlink_reference_event_v1(
-                &row,
-                &Sha256Hex("a".repeat(64)),
-                &Sha256Hex("b".repeat(64)),
-                "canonical-test-v1",
-            )
-            .unwrap(),
-        ))
+        let outcome = build_chainlink_reference_outcome_v1(
+            &row,
+            &Sha256Hex("a".repeat(64)),
+            &Sha256Hex("b".repeat(64)),
+            "canonical-test-v1",
+        )
+        .unwrap();
+        (
+            CanonicalEventRecordV1::ReferenceEvent(Box::new(outcome.event.unwrap())),
+            outcome.report,
+        )
     }
 
     fn build_micro_candidate() -> MicroCandidate {
@@ -3181,11 +3207,15 @@ mod tests {
         let validation_path = temporary.path().join("validation");
         let (config, output_config) = micro_configs();
         let scope = CanonicalRunScope::new(format!("0x{}", "1".repeat(64)), 3_000, 7_000).unwrap();
-        let records = [
-            chainlink_record(0, 3_000, 4_000),
-            chainlink_record(1, 1_000, 5_000),
-            chainlink_record(2, 1_000, 6_000),
+        let outcomes = [
+            chainlink_outcome(0, 3_000, 4_000),
+            chainlink_outcome(1, 1_000, 5_000),
+            chainlink_outcome(2, 1_000, 6_000),
         ];
+        let records = outcomes
+            .iter()
+            .map(|(record, _)| record.clone())
+            .collect::<Vec<_>>();
         let event_ids = records.iter().map(record_event_id).cloned().collect();
 
         let mut record_digest = StreamDigest::new(RECORD_DIGEST_DOMAIN);
@@ -3217,7 +3247,15 @@ mod tests {
                 encoded
             })
             .collect::<Vec<_>>();
-        let report_digest = StreamDigest::new(REDUCTION_REPORT_DIGEST_DOMAIN);
+        let mut report_digest = StreamDigest::new(REDUCTION_REPORT_DIGEST_DOMAIN);
+        let encoded_reports = outcomes
+            .iter()
+            .map(|(_, report)| {
+                let encoded = encode_reduction_report_entry_v1(report).unwrap();
+                report_digest.push(&encoded, "micro_reports").unwrap();
+                encoded
+            })
+            .collect::<Vec<_>>();
         let staging = crate::canonical_run::CanonicalRunStaging {
             workspace_path: work_path.join("unused-workspace"),
             temporary_sorted_input_path: work_path.join("unused-input.parquet"),
@@ -3238,6 +3276,7 @@ mod tests {
                 reference_events: 3,
                 event_time_projections: 3,
                 visibility_projections: 3,
+                reduction_reports: 3,
                 ..CanonicalRunMetrics::default()
             },
         };
@@ -3246,6 +3285,11 @@ mod tests {
         for (sequence, encoded) in encoded_records.iter().enumerate() {
             capture
                 .capture_record(u64::try_from(sequence).unwrap(), encoded)
+                .unwrap();
+        }
+        for (sequence, encoded) in encoded_reports.iter().enumerate() {
+            capture
+                .capture_report(u64::try_from(sequence).unwrap(), encoded)
                 .unwrap();
         }
         let (record_capture, report_capture, _) = capture.finish(&output_config).unwrap();
@@ -3358,6 +3402,47 @@ mod tests {
                 (1_000, fixture.event_ids[2].clone()),
                 (3_000, fixture.event_ids[0].clone()),
             ]
+        );
+    }
+
+    #[test]
+    fn candidate_closure_rejects_an_event_without_a_produced_report() {
+        let temporary = TempDir::new().unwrap();
+        let (_, output_config) = micro_configs();
+        fs::create_dir(temporary.path().join("event-ids")).unwrap();
+        fs::create_dir(temporary.path().join("report-references")).unwrap();
+        let mut event_ids =
+            ExternalSorter::new(&temporary.path().join("event-ids"), &output_config.sort).unwrap();
+        event_ids
+            .push(SortRow::from_sort_key(
+                event_id_sort_key(&CanonicalEventId("1".repeat(64))),
+                Vec::new(),
+            ))
+            .unwrap();
+        let event_ids = event_ids.finish().unwrap();
+        let mut references = ExternalSorter::new(
+            &temporary.path().join("report-references"),
+            &output_config.sort,
+        )
+        .unwrap();
+        references
+            .push(SortRow::from_sort_key(
+                event_reference_key(&CanonicalEventId("2".repeat(64)), 0),
+                Vec::new(),
+            ))
+            .unwrap();
+        let references = references.finish().unwrap();
+
+        let error = validate_event_report_closure(
+            &event_ids.output_path,
+            &references.output_path,
+            &output_config,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("唯一事件存储中的事件缺少 produced 归约报告")
         );
     }
 

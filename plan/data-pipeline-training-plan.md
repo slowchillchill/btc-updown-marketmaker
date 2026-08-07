@@ -698,6 +698,10 @@ changelog 与 Git 中。
     -> 验证：`DPT-AC-001` 至 `DPT-AC-012` 及适用的 `DPT-AC-016/017`、确定性、资源、
     故障和离线边界测试全部已有真实结果；每类可达发布损坏使用一个代表，已发生事故保留
     回归，失败不留下成功清单或门 A 回执，只保留实际能力/失败诊断或临时失败证据。
+    全工作区普通回归固定使用
+    `cargo test --workspace --lib --bins --tests --examples --locked --offline -- --skip four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second`；该命令遵循
+    `data-collect` 当前权威测试边界，只精确跳过依赖实际 UTC 时钟的具名测试，验收证据必须
+    明确记录该测试被跳过，不得表述为该测试通过。
     首个正式门 A 运行固定使用
     `/home/chillchill/new-datasets/2026-08-03/typed_raw/utc_day=2026-08-03/manifest.json`、市场
     `0xd4346bcf419856fa3261d3c0705597d5c909ead020b9f1a0de468092704fc65f` 和接收时间左闭右开

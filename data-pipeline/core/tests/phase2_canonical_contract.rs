@@ -1,4 +1,7 @@
 use contracts::*;
+use data_pipeline_core::reduction::{
+    ReductionDispositionV1, ReductionOperationKindV1, build_chainlink_reference_outcome_v1,
+};
 use data_pipeline_core::typed_raw::{
     BinanceAggTradeRecord, BinanceAggTradeRow, BinanceDepthSnapshotRow, BinanceDepthStitchVerdict,
     BinanceDepthUpdateRow, DepthLevel, MetadataMarketLifecycleState, MetadataMarketRuntimeRole,
@@ -742,6 +745,26 @@ fn typed_raw_source_evidence_uses_the_frozen_time_mappings() {
         unreachable!();
     };
     assert_eq!(payload.message_timestamp_utc_ms, 950);
+    let rtds_outcome = build_chainlink_reference_outcome_v1(
+        match &rtds {
+            TypedRawRow::PolymarketRtdsChainlinkBtcUsd(row) => row,
+            _ => unreachable!(),
+        },
+        &sha('c'),
+        &sha('d'),
+        "canonical-rule-v3",
+    )
+    .unwrap();
+    assert_eq!(rtds_outcome.event.as_ref(), Some(&rtds_event));
+    assert_eq!(
+        rtds_outcome.report.operation,
+        ReductionOperationKindV1::Merge
+    );
+    assert!(matches!(
+        rtds_outcome.report.disposition,
+        ReductionDispositionV1::Produced { result_event_id }
+            if result_event_id == rtds_event.event_id
+    ));
 
     let mut stale_rtds = match &rtds {
         TypedRawRow::PolymarketRtdsChainlinkBtcUsd(row) => row.clone(),

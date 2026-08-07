@@ -686,9 +686,26 @@ fn conflicting_claim_after_a_valid_terminal_transitions_from_fresh_to_invalid() 
     )
     .unwrap();
     let (metadata, orderbook) = terminal_inputs(&market);
-    merger.merge_ws_terminal(metadata, orderbook).unwrap();
-    let (conflicting_metadata, conflicting_orderbook) =
+    let terminal = merger.merge_ws_terminal(metadata, orderbook).unwrap();
+    let terminal_event = terminal.events[0].clone();
+    let (mut conflicting_metadata, mut conflicting_orderbook) =
         conflicting_inputs(&market, TerminalConflict::Winner);
+    conflicting_metadata.row.timestamp_received = TERMINAL_RECEIVED_TIME_MS - 100;
+    conflicting_metadata.row.source_evidence_received_at_utc =
+        Some(TERMINAL_RECEIVED_TIME_MS - 100);
+    conflicting_metadata.evidence = source_evidence_from_typed_raw(
+        &TypedRawRow::PolymarketMarketMetadata(Box::new(conflicting_metadata.row.clone())),
+        &sha('b'),
+        &sha('c'),
+    )
+    .unwrap();
+    conflicting_orderbook.row.timestamp_received = TERMINAL_RECEIVED_TIME_MS - 100;
+    conflicting_orderbook.evidence = source_evidence_from_typed_raw(
+        &TypedRawRow::PolymarketOrderbook(conflicting_orderbook.row.clone()),
+        &sha('d'),
+        &sha('e'),
+    )
+    .unwrap();
 
     let conflict = merger
         .merge_ws_terminal(conflicting_metadata, conflicting_orderbook)
@@ -701,6 +718,20 @@ fn conflicting_claim_after_a_valid_terminal_transitions_from_fresh_to_invalid() 
     };
     assert_eq!(boundary.previous_quality, MarketDataQuality::Fresh);
     assert_eq!(boundary.current_quality, MarketDataQuality::Invalid);
+    assert_eq!(
+        conflict.events[0].time.received_at_utc_ms,
+        terminal_event.time.received_at_utc_ms
+    );
+    assert!(
+        terminal_event
+            .lineage
+            .source_evidence
+            .iter()
+            .all(|evidence| conflict.events[0]
+                .lineage
+                .source_evidence
+                .contains(evidence))
+    );
 }
 
 #[derive(Clone, Copy)]

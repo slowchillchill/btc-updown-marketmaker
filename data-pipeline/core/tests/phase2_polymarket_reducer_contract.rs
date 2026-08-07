@@ -479,6 +479,240 @@ fn first_book_emits_one_initial_snapshot_with_canonical_levels_and_initial_tick(
 }
 
 #[test]
+fn first_book_carries_prior_dynamic_tick_evidence_and_visibility_time() {
+    let mut reducer = reducer();
+    let tick = row(
+        "epoch-1",
+        301,
+        1_000,
+        1_300,
+        PolymarketOrderbookEvent::TickSizeChange {
+            asset_id: UP_TOKEN_ID.to_owned(),
+            old_tick_size: Some("0.01".to_owned()),
+            new_tick_size: "0.001".to_owned(),
+        },
+    );
+    let book = book_row("epoch-1", 300, 1_100, 1_200, "250");
+
+    let batch = reducer
+        .reduce_orderbook_group(vec![input(book), input(tick)])
+        .unwrap();
+    let (event, snapshot) = batch
+        .events
+        .iter()
+        .find_map(|event| match &event.payload {
+            ExecutionMarketEventPayloadV3::InitialL2Snapshot(snapshot) => Some((event, snapshot)),
+            _ => None,
+        })
+        .expect("首个完整 book 必须形成初始 L2 快照");
+
+    assert_eq!(
+        snapshot.initial_tick_size_pusd_per_share,
+        ExactDecimal("0.001".to_owned())
+    );
+    assert_eq!(event.time.source_event_at_utc_ms, Some(1_100));
+    assert_eq!(event.time.received_at_utc_ms, 1_300);
+    assert!(event.lineage.source_evidence.iter().any(|source| {
+        source.source_kind == CanonicalSourceKind::PolymarketOrderbook
+            && source
+                .collector_admission
+                .as_ref()
+                .is_some_and(|coordinate| coordinate.collector_admission_sequence == 301)
+    }));
+}
+
+#[test]
+fn new_book_level_waits_for_the_full_book_that_previously_established_its_absence() {
+    let mut reducer = reducer();
+    reducer
+        .reduce_orderbook_group(vec![input(book_row("epoch-1", 300, 1_000, 5_000, "250"))])
+        .unwrap();
+
+    let mut with_new_level = book_row("epoch-1", 301, 1_100, 4_000, "250");
+    let PolymarketOrderbookEvent::Book { bids, .. } = &mut with_new_level.event else {
+        unreachable!();
+    };
+    bids.push(PolymarketPriceLevel {
+        price: "0.51".to_owned(),
+        size: "75".to_owned(),
+    });
+
+    let batch = reducer
+        .reduce_orderbook_group(vec![input(with_new_level)])
+        .unwrap();
+    let event = batch
+        .events
+        .iter()
+        .find(|event| {
+            matches!(
+                &event.payload,
+                ExecutionMarketEventPayloadV3::LevelExecutionTransition(transition)
+                    if transition.price_pusd_per_share.0 == "0.51"
+            )
+        })
+        .expect("新增档位必须形成转换事件");
+
+    assert_eq!(event.time.source_event_at_utc_ms, Some(1_100));
+    assert_eq!(event.time.received_at_utc_ms, 5_000);
+}
+
+#[test]
+fn deleted_level_readd_and_overwrite_preserve_the_price_local_visibility_frontier() {
+    let mut reducer = reducer();
+    reducer
+        .reduce_orderbook_group(vec![input(book_row("epoch-1", 300, 1_000, 1_010, "250"))])
+        .unwrap();
+
+    let deleted = reducer
+        .reduce_orderbook_group(vec![input(price_change_row(
+            "epoch-1", 301, 1_100, 3_000, "0",
+        ))])
+        .unwrap();
+    assert_eq!(deleted.events[0].time.received_at_utc_ms, 3_000);
+
+    let readded = reducer
+        .reduce_orderbook_group(vec![input(price_change_row(
+            "epoch-1", 302, 1_200, 1_000, "70",
+        ))])
+        .unwrap();
+    assert_eq!(readded.events[0].time.received_at_utc_ms, 3_000);
+
+    let overwritten = reducer
+        .reduce_orderbook_group(vec![input(price_change_row(
+            "epoch-1", 303, 1_300, 2_000, "60",
+        ))])
+        .unwrap();
+    assert_eq!(overwritten.events[0].time.received_at_utc_ms, 3_000);
+}
+
+#[test]
+fn repeated_level_updates_keep_lineage_bounded_instead_of_copying_full_history() {
+    let mut reducer = reducer();
+    reducer
+        .reduce_orderbook_group(vec![input(book_row("epoch-1", 300, 1_000, 1_010, "250"))])
+        .unwrap();
+
+    for offset in 1_u64..=16 {
+        let quantity = (250_u64 + offset).to_string();
+        let batch = reducer
+            .reduce_orderbook_group(vec![input(price_change_without_bba_row(
+                UP_TOKEN_ID,
+                "epoch-1",
+                300 + offset,
+                1_000 + i64::try_from(offset).unwrap(),
+                2_000 - i64::try_from(offset % 3).unwrap(),
+                &quantity,
+            ))])
+            .unwrap();
+        assert_eq!(batch.events.len(), 1);
+        let level_event = batch
+            .events
+            .iter()
+            .find(|event| {
+                matches!(
+                    &event.payload,
+                    ExecutionMarketEventPayloadV3::LevelExecutionTransition(_)
+                )
+            })
+            .unwrap();
+        assert!(level_event.lineage.source_evidence.len() <= 4);
+    }
+}
+
+#[test]
+fn consecutive_bba_and_tick_changes_preserve_their_component_visibility_frontiers() {
+    let mut reducer = reducer();
+    reducer
+        .reduce_orderbook_group(vec![input(book_row("epoch-1", 300, 1_000, 1_010, "250"))])
+        .unwrap();
+
+    reducer
+        .reduce_orderbook_group(vec![input(best_bid_ask_row("epoch-1", 301, 1_100, 5_000))])
+        .unwrap();
+    let mut second_bba = best_bid_ask_row("epoch-1", 302, 1_200, 4_000);
+    let PolymarketOrderbookEvent::BestBidAsk {
+        best_bid,
+        best_ask,
+        spread,
+        ..
+    } = &mut second_bba.event
+    else {
+        unreachable!();
+    };
+    *best_bid = Some("0.51".to_owned());
+    *best_ask = Some("0.54".to_owned());
+    *spread = Some("0.03".to_owned());
+    let second_bba = reducer
+        .reduce_orderbook_group(vec![input(second_bba)])
+        .unwrap();
+    assert_eq!(second_bba.events[0].time.received_at_utc_ms, 5_000);
+
+    let mut third_bba = best_bid_ask_row("epoch-1", 303, 1_250, 4_500);
+    let PolymarketOrderbookEvent::BestBidAsk {
+        best_bid,
+        best_ask,
+        spread,
+        ..
+    } = &mut third_bba.event
+    else {
+        unreachable!();
+    };
+    *best_bid = Some("0.50".to_owned());
+    *best_ask = Some("0.55".to_owned());
+    *spread = Some("0.05".to_owned());
+    let third_bba = reducer
+        .reduce_orderbook_group(vec![input(third_bba)])
+        .unwrap();
+    assert_eq!(third_bba.events[0].time.received_at_utc_ms, 5_000);
+
+    let first_tick = row(
+        "epoch-1",
+        304,
+        1_300,
+        6_000,
+        PolymarketOrderbookEvent::TickSizeChange {
+            asset_id: UP_TOKEN_ID.to_owned(),
+            old_tick_size: Some("0.01".to_owned()),
+            new_tick_size: "0.001".to_owned(),
+        },
+    );
+    reducer
+        .reduce_orderbook_group(vec![input(first_tick)])
+        .unwrap();
+    let second_tick = row(
+        "epoch-1",
+        305,
+        1_400,
+        5_500,
+        PolymarketOrderbookEvent::TickSizeChange {
+            asset_id: UP_TOKEN_ID.to_owned(),
+            old_tick_size: Some("0.001".to_owned()),
+            new_tick_size: "0.0001".to_owned(),
+        },
+    );
+    let second_tick = reducer
+        .reduce_orderbook_group(vec![input(second_tick)])
+        .unwrap();
+    assert_eq!(second_tick.events[0].time.received_at_utc_ms, 6_000);
+
+    let third_tick = row(
+        "epoch-1",
+        306,
+        1_500,
+        5_800,
+        PolymarketOrderbookEvent::TickSizeChange {
+            asset_id: UP_TOKEN_ID.to_owned(),
+            old_tick_size: Some("0.0001".to_owned()),
+            new_tick_size: "0.00001".to_owned(),
+        },
+    );
+    let third_tick = reducer
+        .reduce_orderbook_group(vec![input(third_tick)])
+        .unwrap();
+    assert_eq!(third_tick.events[0].time.received_at_utc_ms, 6_000);
+}
+
+#[test]
 fn later_full_books_confirm_identical_state_and_delete_missing_levels_with_conservation() {
     let mut reducer = reducer();
     reducer
@@ -1088,6 +1322,89 @@ fn new_epoch_marks_only_fresh_l2_missing_and_other_components_cannot_restore_it(
         next_epoch_still_missing.reports[0].reason_code,
         "POLYMARKET_PRICE_CHANGE_FULL_BOOK_REQUIRED"
     );
+}
+
+#[test]
+fn epoch_l2_boundaries_and_bba_reanchor_wait_for_their_independent_predecessors() {
+    let mut reducer = reducer();
+    reducer
+        .reduce_orderbook_group(vec![input(book_row("epoch-1", 300, 1_000, 5_000, "250"))])
+        .unwrap();
+    reducer
+        .reduce_orderbook_group(vec![input(price_change_without_bba_row(
+            UP_TOKEN_ID,
+            "epoch-1",
+            301,
+            1_050,
+            7_000,
+            "0",
+        ))])
+        .unwrap();
+    reducer
+        .reduce_orderbook_group(vec![input(best_bid_ask_row("epoch-1", 302, 1_100, 6_000))])
+        .unwrap();
+
+    let missing = reducer
+        .reduce_orderbook_group(vec![input(price_change_without_bba_row(
+            UP_TOKEN_ID,
+            "epoch-2",
+            1,
+            2_000,
+            4_000,
+            "70",
+        ))])
+        .unwrap();
+    let missing_event = missing
+        .events
+        .iter()
+        .find(|event| {
+            matches!(
+                &event.payload,
+                ExecutionMarketEventPayloadV3::QualityBoundary(boundary)
+                    if boundary.reason_code == "POLYMARKET_L2_EPOCH_BASELINE_REQUIRED"
+            )
+        })
+        .expect("epoch 切换必须形成 L2 缺失边界");
+    assert_eq!(missing_event.time.received_at_utc_ms, 7_000);
+
+    let recovered = reducer
+        .reduce_orderbook_group(vec![input(book_row("epoch-2", 2, 2_100, 3_000, "250"))])
+        .unwrap();
+    let recovery_event = recovered
+        .events
+        .iter()
+        .find(|event| {
+            matches!(
+                &event.payload,
+                ExecutionMarketEventPayloadV3::QualityBoundary(boundary)
+                    if boundary.reason_code == "POLYMARKET_L2_EPOCH_BASELINE_RESTORED"
+            )
+        })
+        .expect("新 epoch 完整 book 必须形成 L2 恢复边界");
+    assert_eq!(recovery_event.time.received_at_utc_ms, 7_000);
+
+    let mut next_bba = best_bid_ask_row("epoch-2", 3, 2_200, 2_000);
+    let PolymarketOrderbookEvent::BestBidAsk {
+        best_bid,
+        best_ask,
+        spread,
+        ..
+    } = &mut next_bba.event
+    else {
+        unreachable!();
+    };
+    *best_bid = Some("0.51".to_owned());
+    *best_ask = Some("0.54".to_owned());
+    *spread = Some("0.03".to_owned());
+    let next_bba = reducer
+        .reduce_orderbook_group(vec![input(next_bba)])
+        .unwrap();
+    let bba_event = next_bba
+        .events
+        .iter()
+        .find(|event| matches!(&event.payload, ExecutionMarketEventPayloadV3::BestBidAsk(_)))
+        .expect("新 epoch 首个 BBA 必须重新形成事件");
+    assert_eq!(bba_event.time.received_at_utc_ms, 6_000);
 }
 
 #[test]
