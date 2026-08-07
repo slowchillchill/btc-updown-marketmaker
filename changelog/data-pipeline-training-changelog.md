@@ -2788,6 +2788,14 @@ Task 0.10 的定向绿灯，不代替后续完整阶段验证和独立阶段复�
   `cargo test --workspace --lib --bins --tests --examples --locked --offline -- --skip four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second`
   以退出码 0 通过。`cargo clippy -p data-pipeline-training --all-targets --locked --offline -- -D warnings`、
   `cargo fmt --all -- --check` 和 `git diff --check` 均通过。
+- 干净提交后的首个正式 release 二进制构建暴露了测试依赖图掩盖的 `rustix` 特性缺口：
+  普通测试和全目标 Clippy 会经开发依赖间接启用 `rustix/std`，而只构建正式二进制时，原显式
+  `features=["fs"]` 无法让 `std::fs::File` 和 `OsStr` 实现 `rustix` 的适配特性，编译以 7 个
+  `E0277` 失败。锁定的 `rustix 1.1.4` 本地包清单确认默认特性就是 `std`；当前依赖只显式
+  增加 `std`，保持 `default-features=false` 和已有 `fs`，没有改动文件缓存或原子重命名语义，
+  也没有引入新依赖。修复后正式 release 在 `14.28s` 内构建成功，二进制 SHA-256 为
+  `ce9016ec8d7a03978954332ecf99c614c32daa0c79f1b4c5d2a8e83160e6280f`；训练库测试 `66/66`、
+  命令行测试 `1/1`、严格 Clippy、格式和差异检查再次通过。
 - 两轮独立 `gpt-5.6-sol/ultra` 复审均确认上述修复不改变排序、载荷或摘要，没有新增第二套
   Arrow/Parquet 路径。关于恶意主体同时改写 Parquet、manifest 和 SHA 后用 Thrift 集合计数
   放大分配的发现，源码事实成立，但当前批准的本地产物损坏模型没有敌对本地写入者；普通
