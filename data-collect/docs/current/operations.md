@@ -1,8 +1,10 @@
 # data-collect 当前运行与部署边界
 
-> 生命周期：`CURRENT_CONTRACT`
+> 生命周期：`CURRENT_REFERENCE`
 >
-> 当前执行 authority：`data-collect/docs/CURRENT.md`
+> 当前执行 authority：`none`
+>
+> 当前规范来源：`plan/data-collect-plan.md`
 >
 > 当前需求：`demand/data-collect-demand.md`
 >
@@ -14,7 +16,10 @@
 >
 > 执行授权：`none`
 
-本文只定义当前构建、路径、进程与观察合同。它不证明远端服务当前状态，也不授权部署、
+本文是从主计划和真实实现派生的非权威参考，不得新增或改变计划语义；出现不一致时按
+`data-collect/docs/CURRENT.md` 的冲突门处理。
+
+本文只汇总当前构建、路径、进程与观察参考。它不证明远端服务当前状态，也不授权部署、
 上传、替换二进制文件、启停服务、删除数据或其他远端变更；这些动作必须由届时真实状态
 支持，并有另行批准的活动需求、计划与变更记录。
 

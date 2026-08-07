@@ -1,8 +1,10 @@
 # data-collect 当前接口与产物
 
-> 生命周期：`CURRENT_CONTRACT`
+> 生命周期：`CURRENT_REFERENCE`
 >
-> 当前执行 authority：`data-collect/docs/CURRENT.md`
+> 当前执行 authority：`none`
+>
+> 当前规范来源：`plan/data-collect-plan.md`
 >
 > 当前需求：`demand/data-collect-demand.md`
 >
@@ -13,6 +15,9 @@
 > 历史读取入口：`data-collect/docs/archive-manifest.tsv`
 >
 > 执行授权：`none`
+
+本文是从主计划和真实实现派生的非权威参考，不得新增或改变计划语义；出现不一致时按
+`data-collect/docs/CURRENT.md` 的冲突门处理。
 
 ## 1. 训练程序 CLI
 
@@ -32,7 +37,7 @@ data-collect-training-collector
 
 ## 2. 训练数据源与产物
 
-六个数据源及当前 schema 由 `current/contracts.md` 唯一规定。输出布局为：
+六个数据源及当前 schema 由主计划唯一规定，`current/contracts.md` 只提供派生参考。输出布局为：
 
 ```text
 <dataset-root>/training/typed_raw/
@@ -47,6 +52,14 @@ data-collect-training-collector
 分区只按采集器接收时间；数据源时间戳不决定分区。快照是稀疏数据源，不要求每小时都有
 文件。数据消费方只能读取最终化 Parquet 和满足自身准入合同的已关闭日期；不得读取
 `.running`。
+
+在离线训练链路中，上述直接消费方只允许是 `ConsumerKind::DataPipeline`。
+历史名称 `ConsumerKind::Training` 表示下游 `model-train`，不得直接读取该目录；它只能
+把经过唯一 `data-pipeline(training)` 规范化、准入和发布的版本化输出作为训练数据和模型
+输入。`model-train` 进程仍可直接读取 `manifest`、`source_coverage`、`source_health`、
+`source_gap`、`reconnect_trace`、`backpressure_state` 六类角色，但只能用于血缘、审计和
+质量诊断；这些元数据不得参与训练准入或放行，也不得进入 Observation、特征、标签、训练
+样本、训练切分、样本选择、模型输入或任何决策触发。
 
 ## 3. 模拟盘、实盘 CLI 与当前输出
 
@@ -106,4 +119,4 @@ target/release/data-collect-paper-hot
 target/release/data-collect-live-hot
 ```
 
-构建和远端状态变更边界只以 `current/operations.md` 为准。
+构建和远端状态变更边界以主计划为规范，`current/operations.md` 只提供派生参考。

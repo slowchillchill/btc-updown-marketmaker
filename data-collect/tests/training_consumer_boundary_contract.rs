@@ -1,17 +1,64 @@
 use data_collect::manifest::{
-    ConsumerBoundaryKind, required_consumer_boundary_declarations,
-    training_consumer_boundary_declaration,
+    ConsumerBoundaryKind, TRAINING_ALLOWED_DATA_COLLECT_ROLES,
+    TRAINING_FORBIDDEN_DATA_COLLECT_ROLES, TRAINING_REQUIRED_EXTERNAL_ROLES,
+    required_consumer_boundary_declarations, training_consumer_boundary_declaration,
 };
 use data_collect::publish::training_utc_day_partition;
 use data_collect::source_format::{ConsumerBoundaryContract, ConsumerKind};
 use tempfile::tempdir;
 
 #[test]
-fn training_consumer_reads_finalized_raw_mirror_but_not_training_outputs() {
+fn model_train_consumer_rejects_finalized_raw_mirror_and_requires_pipeline_outputs() {
     let declaration = training_consumer_boundary_declaration();
 
+    assert_eq!(
+        TRAINING_ALLOWED_DATA_COLLECT_ROLES,
+        [
+            "manifest",
+            "source_coverage",
+            "source_health",
+            "source_gap",
+            "reconnect_trace",
+            "backpressure_state",
+        ]
+    );
+    assert_eq!(
+        declaration.allowed_data_collect_roles,
+        TRAINING_ALLOWED_DATA_COLLECT_ROLES
+    );
+    assert_eq!(
+        TRAINING_REQUIRED_EXTERNAL_ROLES,
+        [
+            "data_pipeline_labels",
+            "data_pipeline_features",
+            "data_pipeline_tick_stream",
+            "data_pipeline_training_split",
+        ]
+    );
+    assert_eq!(
+        declaration.required_external_roles,
+        TRAINING_REQUIRED_EXTERNAL_ROLES
+    );
+    assert_eq!(
+        TRAINING_FORBIDDEN_DATA_COLLECT_ROLES,
+        [
+            "finalized_typed_raw_parquet",
+            "labels",
+            "features",
+            "tick_stream",
+            "canonical_split",
+            "purged_embargo_split",
+            "t30_training_sample",
+            "training_approval",
+        ]
+    );
+    assert_eq!(
+        declaration.forbidden_data_collect_roles,
+        TRAINING_FORBIDDEN_DATA_COLLECT_ROLES
+    );
     assert_eq!(declaration.consumer, ConsumerBoundaryKind::Training);
-    assert!(declaration.allows_data_collect_role("finalized_typed_raw_parquet"));
+    assert!(!declaration.allows_data_collect_role("finalized_typed_raw_parquet"));
+    assert!(declaration.forbids_data_collect_role("finalized_typed_raw_parquet"));
     assert!(declaration.allows_data_collect_role("manifest"));
     assert!(declaration.allows_data_collect_role("source_coverage"));
     assert!(declaration.requires_external_role("data_pipeline_labels"));
@@ -31,7 +78,7 @@ fn training_consumer_reads_finalized_raw_mirror_but_not_training_outputs() {
 }
 
 #[test]
-fn training_boundary_uses_utc_day_finalized_partition_under_dataset_root() {
+fn training_collector_uses_utc_day_finalized_partition_under_dataset_root() {
     let tmp = tempdir().unwrap();
     let partition =
         training_utc_day_partition(tmp.path(), "polymarket_market", 1_767_225_600_000).unwrap();
@@ -47,6 +94,7 @@ fn training_consumer_boundary_matches_source_format_contract() {
     let contract = ConsumerBoundaryContract::training();
 
     assert_eq!(contract.consumer, ConsumerKind::Training);
+    assert!(!contract.consumes_typed_raw_parquet);
     assert!(contract.requires_data_pipeline_outputs);
     assert!(!contract.data_collect_generates_labels);
     assert!(!contract.data_collect_generates_features);

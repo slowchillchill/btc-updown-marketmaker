@@ -591,6 +591,7 @@ fn rtds_subscription_matches(raw_json: &str, symbol: &str) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConsumerKind {
     DataPipeline,
+    /// 历史兼容标识，表示下游 `model-train` 消费方。
     Training,
     PaperLive,
 }
@@ -634,7 +635,7 @@ impl ConsumerBoundaryContract {
     pub fn training() -> Self {
         Self {
             consumer: ConsumerKind::Training,
-            consumes_typed_raw_parquet: true,
+            consumes_typed_raw_parquet: false,
             requires_data_pipeline_outputs: true,
             data_collect_generates_labels: false,
             data_collect_generates_features: false,
@@ -669,10 +670,20 @@ impl ConsumerBoundaryContract {
 
     pub fn validate(&self) -> FormatValidationReport {
         let mut report = FormatValidationReport::new();
-        if !self.consumes_typed_raw_parquet {
-            report
-                .missing_fields
-                .push("typed_raw_parquet_consumer_boundary".to_owned());
+        match self.consumer {
+            ConsumerKind::DataPipeline | ConsumerKind::PaperLive
+                if !self.consumes_typed_raw_parquet =>
+            {
+                report
+                    .missing_fields
+                    .push("typed_raw_parquet_consumer_boundary".to_owned());
+            }
+            ConsumerKind::Training if self.consumes_typed_raw_parquet => {
+                report
+                    .source_gaps
+                    .push("model_train_may_not_consume_typed_raw_parquet".to_owned());
+            }
+            _ => {}
         }
         if self.data_collect_generates_labels
             || self.data_collect_generates_features
