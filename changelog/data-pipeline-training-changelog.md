@@ -2943,3 +2943,39 @@ Task 0.10 的定向绿灯，不代替后续完整阶段验证和独立阶段复�
   `Fresh + ResyncBoundary` 端点；当前谓词因此进一步收紧为缺口总数、`Required` 数和真实恢复
   端点数三者完全相等且大于零。聚焦回归已同时覆盖 `0/0/0` 洁净通过、`1/1/0` 与 `2/2/1`
   不完整链失败、`1/1/1` 完整恢复通过并启用精确见证；没有增加逐链映射或公共 schema。
+
+### 任务 2.5 正式签发与阶段 2 关闭
+
+- 洁净范围最小修正形成提交 `38466de2e25627fe36fc97fa6cdb3b32c4c7e4c7`；正式 release
+  `dpt-gate-a` 的 SHA-256 为
+  `94ca73715d66b01f545e4295488b322b825fdcc48da1c8277acdf9390c3d53fa`。相同正式清单、市场和
+  接收时间范围在 `dpt-gate-a-20260807-38466de-build.service` 中重新执行，墙钟
+  `39min 33.734s`，`/usr/bin/time -v` 最大 RSS 为 `633700 KiB`，cgroup 总内存峰值为
+  `853106688` 字节，交换峰值为 `0`；前后 `memory.events` 的 `max/oom/oom_kill` 均为 `0`，
+  网络命名空间只有 `lo`，计量构建以退出码 `0` 通过。
+- 新候选绑定核心身份
+  `3b134caa2be5e4340747541880fadd1d96ed139cea68984d3d326e067c20179d`，产出规范事件
+  `213458` 条、事件时间索引 `213454` 条、模型可见索引 `213458` 条、Observation `71114` 条、
+  归约报告 `419546` 条。五份 Parquet 的实际 SHA-256、字节数和行数与各自 manifest 一致；
+  质量报告的 `Fresh=213458`、`Missing=0`、`ConfirmedGap=0`、`Required=0`、
+  `fresh_resync_boundary=0`、`Invalid=0`，`quality/gap-resync-watermark` 以空事件和空 Observation
+  见证通过，没有伪造事故。
+- 发布命令在相同 `memory.max=2 GiB`、`memory.swap.max=0` 和仅 `lo` 的隔离环境中重新执行
+  计划冻结的全工作区命令并以退出码 `0` 通过；具名
+  `four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second` 仍按批准边界
+  被跳过，没有写成通过，`gate_a_receipt_alone_is_rejected_by_training_admission` 明确通过。发布
+  复核期间 cgroup `memory.peak` 触及 `2147483648` 字节，`memory.events.max=1766`，交换、
+  `oom` 和 `oom_kill` 均为 `0`，最终在 `17min 0.367s` 内成功；这是固定发布范围发生强内存
+  回收且没有余量的真实压力事实，但当前硬门没有失败，未据此放宽资源门或增加实现。未来扩大
+  正式范围时仍按计划重新实测。
+- 门 A 已通过同父目录禁止覆盖的原子重命名签发。最终发布根和 `GateAReceiptV3.receipt_id`
+  均为 `cf2cd397fd619219f494f39f21934d49a7ef4db8c1e6d3ae9ae49e53e15d2706`；能力矩阵 16 项全部
+  `PASS`，运行清单验证结果为 `PASS`，回执保持 `training_dataset_ready=false`。发布根只有
+  冻结的 16 个普通文件、没有符号链接；原新候选路径已不存在。旧成功计量候选
+  `.gate-a-20260807-1b4a4e7.candidate` 按用户决定继续保留，仍绑定旧提交和旧核心身份，没有回执，
+  不会冒充本次正式发布。
+- 独立 `gpt-5.6-sol/ultra` 阶段审查复核需求、计划、代码、测试、六份真实输入、五份发布产物
+  及全部控制文件，结论为 `Approved / PASS`、`Critical 0 / Important 0 / Minor 0`。审查确认
+  洁净与完整恢复两条质量路径、精确见证、资源门、原子发布和训练入口边界均正确，没有影子
+  实现、重复语义路径或过度设计；阶段 2 完成门已经满足。需求文档无需修改，计划首屏和当前
+  游标据此进入阶段 3 的任务 3.1 外部 `sim-system` 组件回执核对。
