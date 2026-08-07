@@ -1022,6 +1022,28 @@ fn report_reason_count(report: &GateAQualityIsolationReportV1, reason: &str) -> 
         .unwrap_or(0)
 }
 
+fn quality_gap_resync_predicate(
+    quality: &GateAQualityCountsV1,
+    resync: &GateAResyncCountsV1,
+    fresh_resync_boundary: u64,
+) -> bool {
+    let gap_count = u128::from(quality.confirmed_gap) + u128::from(quality.missing);
+    let clean = gap_count == 0 && resync.required == 0 && fresh_resync_boundary == 0;
+    (clean || quality_gap_resync_is_complete(quality, resync, fresh_resync_boundary))
+        && quality.invalid == 0
+}
+
+fn quality_gap_resync_is_complete(
+    quality: &GateAQualityCountsV1,
+    resync: &GateAResyncCountsV1,
+    fresh_resync_boundary: u64,
+) -> bool {
+    let gap_count = u128::from(quality.confirmed_gap) + u128::from(quality.missing);
+    gap_count > 0
+        && gap_count == u128::from(resync.required)
+        && gap_count == u128::from(fresh_resync_boundary)
+}
+
 fn quality_predicates(report: &GateAQualityIsolationReportV1) -> [bool; 14] {
     let all_sources = &report.selected_source_rows;
     let all_nine_components_anchored = report
@@ -1068,10 +1090,11 @@ fn quality_predicates(report: &GateAQualityIsolationReportV1) -> [bool; 14] {
                 .checked_add(report.public_trade_derived_id)
                 == Some(report.market_event_counts.public_trade),
         report.market_event_counts.level_execution_transition > 0,
-        (report.event_quality_counts.confirmed_gap > 0 || report.event_quality_counts.missing > 0)
-            && report.event_resync_counts.required > 0
-            && report.fresh_resync_boundary > 0
-            && report.event_quality_counts.invalid == 0,
+        quality_gap_resync_predicate(
+            &report.event_quality_counts,
+            &report.event_resync_counts,
+            report.fresh_resync_boundary,
+        ),
         report.market_event_counts.market_resolution_terminal == 1
             && report.terminal_with_source_time == 1
             && report.terminal_without_source_time == 0
@@ -1269,8 +1292,15 @@ pub fn validate_quality_isolation_report(
     let predicates = quality_predicates(report);
     for (index, evidence) in report.evidence.iter().enumerate() {
         let expected_pass = predicates[index];
-        let requires_event_witness = matches!(index, 2..=10);
-        let requires_observation_witness = matches!(index, 2..=11);
+        let requires_gap_resync_witness = index == 9
+            && quality_gap_resync_is_complete(
+                &report.event_quality_counts,
+                &report.event_resync_counts,
+                report.fresh_resync_boundary,
+            );
+        let requires_event_witness = matches!(index, 2..=8 | 10) || requires_gap_resync_witness;
+        let requires_observation_witness =
+            matches!(index, 2..=8 | 10..=11) || requires_gap_resync_witness;
         if evidence.artifact_manifest_sha256s != expected_manifests {
             return Err(GateAPublicationError::Invalid(
                 "质量证据未绑定当前五份产物 manifest",
@@ -3225,6 +3255,66 @@ mod tests {
             GATE_A_CGROUP_MEMORY_MAX_BYTES,
             GATE_A_CGROUP_MEMORY_MAX_BYTES + 1,
         ));
+    }
+
+    #[test]
+    fn clean_quality_scope_passes_without_fabricated_gap_witness() {
+        let quality = GateAQualityCountsV1 {
+            fresh: 213_458,
+            ..GateAQualityCountsV1::default()
+        };
+        let resync = GateAResyncCountsV1 {
+            not_required: 213_096,
+            required: 0,
+            resync_boundary: 362,
+        };
+
+        assert!(quality_gap_resync_predicate(&quality, &resync, 0));
+        assert!(!quality_gap_resync_is_complete(&quality, &resync, 0));
+
+        let observed_gap = GateAQualityCountsV1 {
+            fresh: 213_457,
+            missing: 1,
+            ..GateAQualityCountsV1::default()
+        };
+        let required_resync = GateAResyncCountsV1 {
+            not_required: 213_096,
+            required: 1,
+            resync_boundary: 363,
+        };
+        assert!(!quality_gap_resync_predicate(
+            &observed_gap,
+            &required_resync,
+            0,
+        ));
+        assert!(!quality_gap_resync_is_complete(
+            &observed_gap,
+            &required_resync,
+            0,
+        ));
+        assert!(quality_gap_resync_predicate(
+            &observed_gap,
+            &required_resync,
+            1,
+        ));
+        assert!(quality_gap_resync_is_complete(
+            &observed_gap,
+            &required_resync,
+            1,
+        ));
+
+        let two_gaps = GateAQualityCountsV1 {
+            fresh: 213_456,
+            missing: 2,
+            ..GateAQualityCountsV1::default()
+        };
+        let two_required = GateAResyncCountsV1 {
+            not_required: 213_096,
+            required: 2,
+            resync_boundary: 363,
+        };
+        assert!(!quality_gap_resync_predicate(&two_gaps, &two_required, 1,));
+        assert!(!quality_gap_resync_is_complete(&two_gaps, &two_required, 1,));
     }
 
     #[test]

@@ -2900,3 +2900,46 @@ Task 0.10 的定向绿灯，不代替后续完整阶段验证和独立阶段复�
   已按批准范围移入系统回收站；原路径不存在，发布根当前为空，且该候选与上一轮
   `.gate-a-20260807-cac9e50.candidate` 均可由回收站恢复。相同范围正式重跑、发布及阶段复审
   仍待后续真实结果，当前尚未签发门 A 回执。
+
+### 任务 2.5 洁净范围质量能力过度校验纠正
+
+- 提交 `1b4a4e766ea0ba175e5b9ed9b1f3e313c798a624` 的同范围正式计量构建已在隔离单元
+  `dpt-gate-a-20260807-1b4a4e7-build.service` 中通过。运行墙钟 `39min 39.533s`，
+  `/usr/bin/time -v` 最大 RSS 为 `635180 KiB`，cgroup 总内存峰值为 `702832640` 字节，交换
+  峰值为 `0`，前后 `memory.events` 的 OOM 计数均为 `0`，隔离网络只有 `lo`。这证明规范事件
+  质量扫描单条分页已经修复此前 OOM；既有资源结论继续有效。
+- 该计量候选随后生成有效质量报告，但
+  `quality/gap-resync-watermark` 为 `passed=false`：规范事件全部 `Fresh`，`Missing=0`、
+  `ConfirmedGap=0`、`Invalid=0`、`Required=0`、`fresh_resync_boundary=0`。报告中的 `362` 个
+  `ResyncBoundary` 全部来自普通 `POLYMARKET_BOOK_RESYNC_DELTA`，不是缺口恢复。发布前机械
+  核对确认该证据会使必需能力 `QualityGapResyncAndWatermark` 为 `FAIL`，且失败发布会清理
+  候选，因此没有执行 `publish`。
+- 对固定正式清单的只读复核确认，2026-08-03 整日 `gaps=[]`、
+  `reactivated_within_day=false`；Polymarket 全日只有一个 `source_sequence_epoch_id`，Binance
+  depth 全日 `gap_rows=0`。所以当前代码强制的
+  `Missing/ConfirmedGap + Required + Fresh ResyncBoundary` 事故正例不只是当前窗口缺少，而是
+  计划固定日期本身不可能产生。需求和计划只要求缺口语义正确、已知事故保持可见及聚焦回归，
+  没有要求每个正式范围必须发生事故；该条件属于代码加入但文档未批准的过度校验。
+- 用户批准最小纠正：需求和公共 schema 不变；计划明确区分洁净范围与真实恢复范围。洁净
+  范围以零缺口、零恢复要求、零缺口恢复端点、零无效事件的完整计数及五份 manifest 作证，
+  可以在不伪造事件或 Observation 见证时通过；真实出现并完成缺口恢复时，仍必须保留现有
+  精确 `event_id ↔ observation_id` 关联；不完整缺口链或无效事件继续失败。此前 Binance、
+  Polymarket 缺口恢复语义测试及本次 OOM 资源实测继续有效，不重复制造事故样本。
+- 聚焦回归 `clean_quality_scope_passes_without_fabricated_gap_witness` 先用本次正式报告同形计数
+  证明旧谓词错误失败；最小实现后以 `1 passed / 0 failed` 通过。当前计量候选
+  `/home/chillchill/sim-system/.local-artifacts/data-pipeline-training/gate-a/.gate-a-20260807-1b4a4e7.candidate`
+  保持原样，没有发布或清理。由于质量谓词源码和 Git 提交身份已经改变，该候选不能冒充新
+  提交的成功发布证据；后续只需按原范围和原资源门重新执行正式计量，不重做已经成立的语义
+  调研或 OOM 根因分析。
+- 受影响回归已经完成：`data-pipeline-training` 包级测试为 `74 passed / 0 failed`，需要本地
+  真实数据的既有集成测试继续按自身声明保持忽略；严格 Clippy、格式和差异检查均通过。计划
+  冻结的全工作区命令以退出码 `0` 通过，并按既有批准边界跳过
+  `four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second`，没有把该项
+  写成通过。既有生产构造入口中的 Binance 确认缺口恢复、Binance epoch 缺失恢复及
+  Polymarket epoch 缺失恢复测试均在本轮全工作区回归中继续通过。
+- 预提交只读复核发现，最初最小实现只判断缺口、`Required` 和恢复端点三类计数是否分别大于
+  零，会让“两个缺口、两个恢复要求、只有一个恢复端点”的不完整链误通过。生产归约器复核
+  确认每个 `Missing/ConfirmedGap` 同时产生一个 `Required`，每个真实恢复产生一个
+  `Fresh + ResyncBoundary` 端点；当前谓词因此进一步收紧为缺口总数、`Required` 数和真实恢复
+  端点数三者完全相等且大于零。聚焦回归已同时覆盖 `0/0/0` 洁净通过、`1/1/0` 与 `2/2/1`
+  不完整链失败、`1/1/1` 完整恢复通过并启用精确见证；没有增加逐链映射或公共 schema。

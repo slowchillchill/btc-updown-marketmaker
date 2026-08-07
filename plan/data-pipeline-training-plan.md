@@ -696,7 +696,14 @@ changelog 与 Git 中。
     与产物证据存在后才能标记 `PASS`，不扩展能力枚举。需要事件与 Observation 共同作证的
     能力必须由 Observation 精确重投影中相同的 `event_id` 与 `last_visible_event_id` 形成真实
     关联；生成过程保持有界，每项能力只保留一个真实命中，不得用无关联的首个事件与首个
-    Observation 兜底。
+    Observation 兜底。质量/缺口/重同步能力区分洁净范围与真实恢复范围：若本次范围没有
+    `Missing`、`ConfirmedGap`、`Required`、缺口恢复端点或 `Invalid`，则以完整质量计数和
+    五份产物 manifest 作证并通过，事件与 Observation 见证保持为空，不得为了能力矩阵伪造
+    事故；普通完整 `book` 重校准产生的 `ResyncBoundary` 不冒充缺口恢复。只有范围内真实出现
+    缺口并完成恢复时，才同时要求缺口/恢复计数成立以及恢复端点的精确
+    `event_id ↔ observation_id` 关联；缺口链不完整或存在 `Invalid` 时仍为 `FAIL`。既有生产
+    构造入口的聚焦测试继续验证 Binance 与 Polymarket 的缺口、epoch 和恢复分支，不要求每个
+    正式真实范围都必须发生事故。
   - 步骤 2.5.3：在同一文件系统临时目录生成门 A 产物，并执行全部门 A 验证。
     -> 验证：`DPT-AC-001` 至 `DPT-AC-012` 及适用的 `DPT-AC-016/017`、确定性、资源、
     故障和离线边界测试全部已有真实结果；每类可达发布损坏使用一个代表，已发生事故保留
