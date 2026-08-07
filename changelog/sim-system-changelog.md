@@ -437,3 +437,75 @@
   本事项后续审核和获批实施后的外部输入合同。
 - 该外部前置关闭不改变本事项状态：`sim-system` 需求和计划仍为审核草案，authority 与执行
   授权仍为 `none`；本轮没有创建或修改 `sim-system` 代码、依赖、配置或运行产物。
+
+## 2026-08-06：阶段 6 双索引角色措辞收口
+
+- 对 DPT 阶段 2 前置复审确认，同一 training 或 offline-evaluation 运行同时包含隐藏平台状态
+  路径和交易侧公开视图路径；前者只消费 `EventTimeIndexEntryV2`，后者只消费
+  `VisibilityIndexEntryV2`，两者通过同一 `event_id` 引用唯一事件，互不重建。paper 仍只能
+  消费本机已经到达的可见路径。
+- 阶段 6 入口已把容易误解为“每个运行只取得一种索引”的措辞改为上述路径职责，并明确门 A
+  覆盖唯一事件存储及四份 manifest。该修改只消除审核草案歧义，不改变需求、公共 V2 合同或
+  `sim-system` 的 `authority=none`、执行授权 `none` 状态，也不构成 `sim-system` 实施。
+
+## 2026-08-06：同步 DPT ExecutionMarketEventV3 来源追溯合同
+
+- 用户在 DPT 事项中批准方案 2：市场事件升级为 `ExecutionMarketEventV3`，删除各载荷内
+  `source_event_ids`，只由顶层 `EventLineageV2.source_evidence` 保存直接来源证据；同时以
+  `CanonicalEventRecordV1` 封闭市场事件和全局参考事件。
+- 本事项需求与计划已机械同步新的公共合同版本。模拟器仍只消费
+  `ExecutionMarketEventV3` 市场事件；`CanonicalReferenceEventV1` 只供 DPT 构建模型公开
+  Observation，不进入模拟撮合、隐藏平台状态或私有响应。
+- `EventLineageV2.source_evidence` 对模拟器保持不透明，只用于审计；平台推进顺序继续由
+  DPT 事件时间投影和已冻结的同毫秒归约顺序决定，模拟器不得根据谱系内容、物理文件位置或
+  `event_id` 二次排序、去重或归约。
+- 本次只同步审核中需求、计划与本变更记录，没有实施 `sim-system` 代码，也不改变
+  `authority=none`、执行授权 `none` 或草案生命周期。
+
+## 2026-08-06：冻结市场结束至合格判定的订单与资金语义
+
+- 用户纠正当前计划中“市场结束后先关闭本账户活动订单并释放资金占用”的旧描述。该描述把
+  `end_at` 操作门与合格 `MarketResolved` 订单终态错误合并，本节决定及同步后的需求、计划
+  取代该旧语义。
+- 当前冻结为用户确认的平台行为：有效处理时点大于或等于 `end_at` 的新订单在创建订单、资金
+  预留或成交前拒绝；`end_at` 至合格 `MarketResolved` 期间，已有开放订单保持可查询、可撤并
+  继续保留未成交余量预留，但不再参与撮合。
+- 合格 `MarketResolved` 按数据源事件时间到达时，届时仍开放的未成交余量转为官方订单状态
+  合同已有的原始状态 `ORDER_STATUS_CANCELED_MARKET_RESOLVED`，并用独立幂等变化只释放该余量
+  的资金预留。`end_at` 本身不写入该终态，也不释放该预留；对应订单终态反馈仍须经过适用
+  返回延迟后才能被交易侧看到。
+- 已成交并完成经济应用的资金已经转换为结果代币持仓，不属于开放订单资金预留。判定关闭
+  订单余量后，仍须先满足成交、补偿和返佣结算屏障，再以另一账户变化身份对实际结果代币
+  余额应用唯一 `AutoRedeemApplied`；订单余量释放不得冒充结果代币兑付。
+- 独立复审发现，若笼统禁止私有反馈“暗示”尚未接收的公开状态，会同时禁止先到反馈自身的
+  `ORDER_STATUS_CANCELED_MARKET_RESOLVED` 或结算事实，与既有双时间合同冲突。当前计划因此
+  明确：响应或反馈到达后可以暴露自身携带的私有事实，但不得连带暴露对应公开消息、盘口或
+  其他隐藏平台状态。
+- `active`、`closed`、`accepting_orders` 继续作为互相独立的平台来源事实保留，不由
+  `end_at` 或判定阶段改写，也不单独充当盘前、盘中、盘后或结算后的判断条件。DPT 现有
+  `MarketIdentityV1.window.end_at_utc_ms` 与 `MarketResolutionTerminalV3::Resolved` 已经提供
+  所需公共事实，因此本决定不要求修改 DPT 合同、计划或实现，也不向 DPT 增加模拟订单状态、
+  权限、资金预留或自动赎回职责。
+- 本次只同步 `demand/sim-system-demand.md`、`plan/sim-system-plan.md`、本变更记录，以及
+  `plan/rebuild-core-plan.md` 与 `changelog/rebuild-core-changelog.md` 的跨模块验收记录；没有
+  实施 `sim-system` 代码、修改 Rust 合同或运行测试，也没有改变草案生命周期、
+  `authority=none`、执行授权 `none`，没有提交或推送。
+
+## 2026-08-06：清除 DPT 陈旧任务游标副本
+
+- 用户批准删除 sim-system 当前游标中复制的“DPT 当前任务 2.2”陈旧状态。当前计划只保留
+  DPT 已升级 `ExecutionMarketEventV3`、统一事件记录、参考事件、Observation 和门 A 回执的
+  稳定合同事实；DPT 当前实施游标必须回到其归属计划读取。
+- 本次不改变 sim-system 需求、双时间消费语义、草案生命周期、`authority=none` 或执行授权，
+  没有实施 sim-system 代码、修改公共 Rust 合同或运行其测试。
+
+## 2026-08-06：删除等待耗尽的外部生命周期分支
+
+- 用户批准 DPT 推荐方案：采集等待耗尽只属于 DPT typed_raw 隔离审计，不是公共平台终态、
+  模型可见质量或模拟器外部输入。公共
+  `MarketResolutionTerminalV3::WaitingExhaustedQuarantine` 已删除，不增加第三控制索引。
+- 当前计划同步删除 `EXHAUSTED_QUARANTINED` 外部生命周期分支。输入结束仍缺少合格
+  `MarketResolved` 时，模拟器只形成内部运行失败封存和隔离；该状态不能伪造公共市场终态、
+  关闭订单、释放资金、结算、赎回或查询空页。
+- 本次只同步审核中的 sim-system 计划和本变更记录，没有实施 sim-system 代码，也不改变
+  需求、草案生命周期、`authority=none` 或执行授权。

@@ -35,11 +35,11 @@
 
 ### 1.1 总成功标准
 
-1. 组件符合性门以固定规则、符合 DPT 阶段 0R 双时间合同的黄金 `ExecutionMarketEventV2` 和
+1. 组件符合性门以固定规则、符合 DPT 当前双时间合同的黄金 `ExecutionMarketEventV3` 市场事件和
    合成请求，证明
    八方法、动态影子 CLOB、订单、成交、账户、返佣、自动赎回、查询、恢复、确定性和资源
    语义；只有规则冷启动合同测试可以启用本地 HTTP 测试替身，确定性核心必须断网运行。
-2. 真实管道纵向门只接受 DPT 成功 `GateAReceiptV2` / `REAL_EXECUTION_TAPE_READY` 覆盖的
+2. 真实管道纵向门只接受 DPT 成功 `GateAReceiptV3` / `REAL_EXECUTION_TAPE_READY` 覆盖的
    真实事件集合及双时间投影，至少完成一个代表市场的合同兼容、状态转换、模型可见性隔离和
    真实性能复核。
 3. 训练闭环门由外部归一化层和 training Ledger 消费模拟器原始证据，再与同一 DPT 候选
@@ -125,10 +125,13 @@ cancel_all_orders | order | orders | trades
    `platform_arrived_at`、`platform_responded_at` 和 `response_received_at`；变更请求另有
    幂等键，批量项另有稳定项身份。跨会话/账户、未知角色、`live-trade`、错误版本、未来游标
    和幂等载荷冲突必须在改变状态前安全拒绝。
-3. 训练与离线评估在 `platform_arrived_at` 只读取当时按 Polymarket orderbook 数据源事件
-   时间已经生效的隐藏平台状态，并据此撮合、拒绝或生成响应。响应从
-   `response_received_at` 起才对交易侧可见；即使它先于对应公开市场消息到达，也只暴露响应
-   自身及其明确携带的订单/账户事实，不得携带、触发或摘要化尚未接收的公开消息或隐藏状态。
+3. 请求在 `platform_arrived_at` 到达模拟平台。未进入平台内部暂缓的订单以该时点作为有效
+   处理时点；只有符合第 2.5 节条件并进入 250ms `itode` 暂缓的订单，才以暂缓结束后的重新
+   校验时点作为有效处理时点。训练与离线评估只读取有效处理时点按 Polymarket orderbook
+   数据源事件时间已经生效的隐藏平台状态，并据此撮合、拒绝或生成响应；有效处理时点大于
+   或等于 `end_at` 时必须在创建订单、资金预留或成交前拒绝。响应从 `response_received_at`
+   起才对交易侧可见；即使它先于对应公开市场消息到达，也只暴露响应自身及其明确携带的
+   订单/账户事实，不得携带、触发或摘要化尚未接收的公开消息或隐藏状态。
 4. GTC/GTD 限价 BUY 使用 `limit_price_pusd_per_share + size_shares`；FOK/FAK 市价 BUY
    使用 `spend_pusd + worst_price_pusd_per_share`。订单精度、计量编码和舍入复用固定官方
    SDK 的类型或工具，不以手写浮点或含义不明的裸 `size` 混用 base 与 quote。
@@ -136,10 +139,12 @@ cancel_all_orders | order | orders | trades
    保持原项到结果映射。`post_order` 只包含一项。
 6. `cancel_order`、`cancel_orders` 和 `cancel_all_orders` 只取消平台处理截点仍未成交且
    可撤的本账户剩余量。批撤上限冻结为 1,000，重复 ID 只处理一次，批量和全撤都保留逐 ID
-   已撤、未撤或未知结果；模拟器不得自行制造调用方撤单。
+   已撤、未撤或未知结果；`end_at` 至合格 `MarketResolved` 到达前继续允许撤销已有开放订单，
+   模拟器不得自行制造调用方撤单。
 7. `order` 返回请求处理截点的单笔平台投影；`orders` 只列活动订单；`trades` 只列已经
    形成的本账户模拟成交。两个列表使用绑定查询种类、过滤条件、会话、合同版本和冻结水位线
-   的不透明游标。跨保留期请求必须明确返回范围错误，不得把残缺页伪装成完整结果。
+   的不透明游标。已有开放订单在 `end_at` 后、合格 `MarketResolved` 到达前仍属于活动订单并
+   可查询。跨保留期请求必须明确返回范围错误，不得把残缺页伪装成完整结果。
 8. 首版不存在 `amend_order`、`modify_order`、`replace_order` 或隐藏等价入口。改变订单
    必须先撤单，再以新请求、幂等键、本地引用和新平台订单 ID 独立提交；二者不是原子替换。
 9. 合同错误、合法平台拒绝和证据不足的未知/未建模结果必须分层；合法空页、未找到、右删失
@@ -185,6 +190,8 @@ cancel_all_orders | order | orders | trades
    - 手续费公式版本、5 位手续费精度、最小非零手续费、返佣日界与 1 pUSD 付款门槛；
    - 可立即成交 GTC/GTD 限价 BUY 的提交本金至少 1 pUSD；非可立即成交限价单及
      FOK/FAK 不推测套用该门；
+   - `end_at` 起拒绝新订单，已有开放订单保持可查询、可撤但不再参与撮合；合格
+     `MarketResolved` 到达时仍开放的余量才进入 `ORDER_STATUS_CANCELED_MARKET_RESOLVED`；
    - 平台小额余量、固定 Silver 8% taker 返佣、两类正常现金可用时刻和付款截取规则。
 8. 快照按 `queried_market_rules`、`documented_platform_rules`、
    `project_account_rules` 与 `provenance` 分区，绑定市场集合、适用时点、端点、依赖、
@@ -193,9 +200,11 @@ cancel_all_orders | order | orders | trades
    `OFFICIAL_SDK_CONTRACT`、`LOCAL_SDK_PATCH_CONTRACT`、`OBSERVED_PLATFORM_BEHAVIOR`、
    `USER_CONFIRMED_PLATFORM_BEHAVIOR`、`RULE_DERIVATION`、`PROJECT_ASSUMPTION` 或
    `UNCERTAINTY_PROFILE`。当前 250ms `itode` 路径属于官方规则，L2 队列模型与返佣付款时刻/
-   截取属于项目假设，平台小额余量与即时自动赎回属于用户确认的平台行为，可立即成交 GTC
-   的 1 pUSD 门属于已观察平台行为，GTD 复用该门属于机械推导。规则产物记录来源、日期、
-   范围、限制、版本、摘要和失败语义；不得把观察、推导或假设升级成官方永久保证。
+   截取属于项目假设，平台小额余量、即时自动赎回及 `end_at` 至合格 `MarketResolved` 的订单
+   行为属于用户确认的平台行为，可立即成交 GTC 的 1 pUSD 门属于已观察平台行为，GTD 复用
+   该门属于机械推导；`ORDER_STATUS_CANCELED_MARKET_RESOLVED` 的原始状态拼写属于官方订单
+   状态合同。规则产物记录来源、日期、范围、限制、版本、摘要和失败语义；不得把观察、推导
+   或假设升级成官方永久保证。
 10. 优先复用正式工作区已锁定的成熟 Rust 依赖：`reqwest` 负责固定 HTTPS 与查询编码，
    `serde/serde_json` 负责窄 DTO，`sha2` 负责内容身份，`rust_decimal` 负责精确数值，
    `toml` 只负责静态配置。阶段 0 复核实际解析版本、许可证、安全公告、Rust 版本和锁
@@ -203,29 +212,40 @@ cancel_all_orders | order | orders | trades
 
 ### 2.4 公共事件消费合同（`SIM-S-004`）
 
-1. `ExecutionMarketEventV2`、`EventTimeIndexEntryV2`、`VisibilityIndexEntryV2` 和
-   `MarketObservationCausalShellV2` 的生产语义、字段和版本由
+1. `CanonicalEventRecordV1`、`ExecutionMarketEventV3`、`CanonicalReferenceEventV1`、
+   `EventTimeIndexEntryV2`、`VisibilityIndexEntryV2` 和 `MarketObservationCausalShellV3` 的
+   生产语义、字段和版本由
    `plan/data-pipeline-training-plan.md` 及公共 Rust 类型拥有；本计划只规定模拟器消费
    不变量，不复制 DPT 字段清单或建立兼容猜值层。
-2. 初始 tick 与动态 tick 的唯一输入都是 `ExecutionMarketEventV2`。首次逐资产完整 L2
+2. 初始 tick 与动态 tick 的唯一输入都是 `ExecutionMarketEventV3`。首次逐资产完整 L2
    快照携带必填正数初始 tick；动态 `tick_size_change` 的旧 tick 可以未知，新 tick 推进
    当前状态。冷启动规则快照不得提供、覆盖或交叉校验 tick。
 3. 首次完整 L2 快照只表达初始装载，不携带 `purpose`。后续完整 `book` 状态相同时只
    确认，有唯一净差额时只沿公共 `BookResyncDeltaInference` 与质量边界路径应用；不得
    再生成第二个初始快照或恢复初始/重同步用途分支。
 4. `active`、`closed`、`accepting_orders` 三个可空布尔彼此独立，不压成生命周期枚举
-   或组合状态机。公开成交必须保留 `trade_id`，且 `trade_id_source` 能区分平台交易哈希
-   与派生源证据；模拟器不得猜测平台 ID。
+   或组合状态机，也不得根据 `end_at` 或结算阶段改写。模拟器的盘后操作门消费公共
+   `ExecutionMarketEventV3.market.window.end_at_utc_ms`；只有在事件时间索引中具有真实数据源
+   事件时间的合格市场判定才能推进隐藏平台判定与结算。仅有接收时间的公开结果证据不能用
+   `end_at`、接收时间或其他本地时间补成平台判定时间，受影响市场必须按 DPT 能力范围失败或
+   隔离。三个布尔中的任一个都不能作为盘前、盘中、盘后或结算后的单一判据。公开成交必须
+   保留 `trade_id`，且 `trade_id_source` 能区分平台交易哈希与派生源证据；模拟器不得猜测
+   平台 ID。
 5. 训练和离线评估的隐藏平台状态只在初始装载完整且当时市场状态允许时接受相应订单。缺口、
    陈旧、epoch 切换或 `source_attribution_quality=UNATTRIBUTED` 本身不关闭既有 maker 订单；
-   下一份合同有效完整 `book` 在其数据源事件时间形成唯一新平台基准。初始快照始终缺失、
-   完整 `book` 自身非法/冲突或规范数量不能去重守恒时，相关市场进入明确未知或失败。模拟盘
-   只有在该事件已按模型可见时间到达本机后才能应用它，不得回填更早的模拟盘决策。
-6. 同一 `event_id` 只引用一份 `ExecutionMarketEventV2`；`EventTimeIndexEntryV2` 只推进训练
-   与离线评估的隐藏平台状态，`VisibilityIndexEntryV2` 只推进交易侧公开视图。请求撮合读取
-   `platform_arrived_at` 对应的隐藏
-   平台状态；模型决策只能读取自身截止点前已经接收的公开事件和已经收到的私有响应。物理
-   预取、隐藏状态和尚未接收的公开消息都不得产生未来可见性或事后回写。
+   下一份合同有效完整 `book` 在其数据源事件时间形成唯一新平台基准。`end_at` 后任何后续
+   市场事件都不得再使本账户开放订单成交。初始快照始终缺失、完整 `book` 自身非法/冲突或
+   规范数量不能去重守恒时，相关市场进入明确未知或失败。模拟盘只有在该事件已按模型可见
+   时间到达本机后才能应用它，不得回填更早的模拟盘决策。
+6. 同一 `event_id` 只引用唯一事件存储中的一份 `CanonicalEventRecordV1`。模拟器输入只允许
+   其中的 `ExecutionMarketEventV3` 市场事件；`CanonicalReferenceEventV1` 只供 DPT 构建
+   Observation，不得进入模拟器撮合、平台状态或私有响应。市场事件的
+   `EventTimeIndexEntryV2` 只推进训练与离线评估的隐藏平台状态，市场事件的
+   `VisibilityIndexEntryV2` 只推进交易侧公开视图。订单准入与撮合读取第 2.2 和 2.5 节定义的
+   有效处理时点对应的隐藏平台状态；模型决策只能读取自身截止点前已经接收的公开事件和已经
+   收到的私有响应。物理预取、隐藏状态和尚未接收的公开消息都不得产生未来可见性或事后回写。
+   模拟器把 `EventLineageV2.source_evidence` 作为不透明审计证据，不以其内容二次排序、去重、
+   归约或重建来源语义。
 7. `observed_transport_delay_ms` 只作可空诊断，不是平台顺序、模型可见性、数据质量或正式网络
    时延配置档。数据源服务器和采集服务器时钟没有共同权威保证时，模拟器不得把该差值解释为
    精确网络延迟或跨时钟不变量。
@@ -235,9 +255,10 @@ cancel_all_orders | order | orders | trades
 1. 每个会话分别维护外部影子订单簿、本账户订单叠加层和只读派生聚合盘口。外部数量、账户
    数量和所有权不能互写；账户订单进入盘口后仍保持账户身份。
 2. 唯一 maker 队列模型为 `L2_BOOK_DELTA_FIFO_ESTIMATE_V1`，证据类别为
-   `PROJECT_ASSUMPTION`。账户订单排在其 `platform_arrived_at` 前已经存在于隐藏平台状态的
-   同价数量之后；后续外部新增按 DPT 的数据源事件时间投影推进并进入当时队尾。缺少平台
-   回放所需源时间时明确失败或隔离；不得提供乐观、保守、比例或随机配置档选择。
+   `PROJECT_ASSUMPTION`。账户订单排在其有效处理时点前已经存在于隐藏平台状态的同价数量
+   之后；未暂缓订单的该时点是 `platform_arrived_at`，进入 `itode` 暂缓的订单则是重新校验
+   时点。后续外部新增按 DPT 的数据源事件时间投影推进并进入当时队尾。缺少平台回放所需源
+   时间时明确失败或隔离；不得提供乐观、保守、比例或随机配置档选择。
 3. 对去除同一底层变化已应用数量后的外部旧数量 `E` 与新规范数量 `S`，唯一残差为
    `R=S-E`：零只确认，正值排到当时队尾，负值 `D=-R` 作为一次性队头消耗。只有消耗
    穿过本账户订单的部分才形成 maker 撮合成交；完成后外部状态仍精确锚定 `S`。
@@ -245,9 +266,11 @@ cancel_all_orders | order | orders | trades
    `best_bid_ask` 只更新或校验最优价格，不推进数量。公开成交与盘口变化没有权威共同
    因果 ID 时保留 `UNATTRIBUTED`，L2 推定结果标记 `DETERMINISTIC_INFERRED` 与
    `not_official_fifo=true`，不能冒充真实订单排位。
-5. 可立即成交 BUY 在平台到达时完成适用准入；只有规则快照 `itode=true` 才进入 250ms
-   内部暂缓并在结束时重校验。随后按价格优先从最优卖价逐档消费至限价/最差价格。GTC/GTD
-   剩余量挂单，FOK 全成或全不成，FAK 成交后终止，post-only 会立即成交时拒绝。
+5. 可立即成交 BUY 在有效处理时点完成适用准入；只有规则快照 `itode=true` 才进入 250ms
+   内部暂缓并在结束时重校验。未暂缓订单的有效处理时点为 `platform_arrived_at`，暂缓订单为
+   重新校验时点；该时点大于或等于 `end_at` 时拒绝且不产生订单、资金预留或成交。通过准入
+   后按价格优先从最优卖价逐档消费至限价/最差价格。GTC/GTD 剩余量挂单，FOK 全成或全不成，
+   FAK 成交后终止，post-only 会立即成交时拒绝。
 6. 同一外部流动性、账户流动性或规范队列消耗证据在会话内只能消费一次。外部档位、队列
    归因、账户 taker、订单 base、成交最终性分桶与 quote 资金必须分别守恒，任何单位不得
    跨 base、quote、pUSD 或手续费币种相加。
@@ -271,8 +294,8 @@ account_taker_matched_quantity
 ### 2.6 订单、成交、账户和平台小额余量
 
 1. 订单撮合轴与成交最终性轴分离。订单投影区分已接受、已撮合、活动未成交、平台小额余量
-   关闭、调用方撤单、订单类型终止、到期和市场关闭；成交投影区分待处理且经济已应用、
-   待处理且未应用、最终成功、失败补偿待处理、已补偿和未应用失败。
+   关闭、调用方撤单、订单类型终止、到期和合格市场判定关闭；成交投影区分待处理且经济已
+   应用、待处理且未应用、最终成功、失败补偿待处理、已补偿和未应用失败。
 2. 每笔撮合成交拥有唯一 `fill_economic_delta_identity` 和规则选定的经济应用截点。后续
    `MATCHED_NOT_BROADCASTED`、`MATCHED`、`MINED`、`CONFIRMED`、`RETRYING`、
    `FAILED` 只推进生命周期；补偿只在原变化量已应用时引用原身份幂等执行一次。原变化量
@@ -286,7 +309,7 @@ account_taker_matched_quantity
    余量归零。
 5. 平台小额余量不得读取外部盘口余量、使用概率或随机数量、夹紧余量、倒扣已撮合数量或
    生成额外成交、份额、费用、名义金额和现金流；只幂等释放该活动余量对应的实际资金占用。
-   FAK 未花 quote、撤单、到期、市场结束、手续费份额差异和外部小量均使用各自语义。
+   FAK 未花 quote、撤单、到期、合格市场判定关闭、手续费份额差异和外部小量均使用各自语义。
 6. 查询和反馈中的 base、quote、pUSD、手续费、原始计量基准、标度和币种必须显式。调用方
    不得被迫从裸份额反推资金变化，也不得把外部盘口数量写入本账户分桶。
 
@@ -298,7 +321,7 @@ accepted_base_quantity
 + venue_dust_closed_base_quantity
 + canceled_base_quantity
 + expired_base_quantity
-+ market_closed_base_quantity
++ market_resolved_canceled_base_quantity
 + open_base_quantity
 ```
 
@@ -316,8 +339,13 @@ accepted_quote_budget
 
 FOK/FAK 的固定 SDK `takerAmount` shares 等价值只作 base 审计投影；订单类型终止的未成交投影
 进入 `canceled_base_quantity` 并保留专属 `terminal_reason`，未花预算只进入 quote 释放分桶。
-每次余额或资金占用变化均由结构化 `PlatformAccountDelta` 表达；撤单、订单类型终止、到期、
-市场关闭、平台小额余量和未应用失败各使用独立幂等 `encumbrance_release`，不得重复释放。
+`end_at` 本身不增加 `market_resolved_canceled_base_quantity`，也不释放开放订单的资金预留；
+只有合格 `MarketResolved` 才把当时仍开放的未成交余量移入该分桶，并把订单原始状态转为
+`ORDER_STATUS_CANCELED_MARKET_RESOLVED`。每次余额或资金占用变化均由结构化
+`PlatformAccountDelta` 表达；调用方撤单、订单类型终止、到期、合格市场判定关闭、平台小额
+余量和未应用失败各使用独立幂等 `encumbrance_release`，不得重复释放。合格市场判定关闭只
+释放该订单未成交余量的 `open_encumbered_quote_amount`；已经撮合并经济应用的 quote 已转换
+为结果代币持仓，既不属于该资金预留，也不得由同一变化量当作自动赎回兑付资金再次释放。
 
 ### 2.7 maker/taker 返佣与自动赎回
 
@@ -356,10 +384,12 @@ FOK/FAK 的固定 SDK `takerAmount` shares 等价值只作 base 审计投影；�
    `MakerRebatePaid` / `TakerRebatePaid`；日结与付款各自只发生一次。
 5. 每个市场在市场结束且潜在 maker 经济最终性闭合后形成一次 maker 应计终态，全部合格
    taker 应计也必须形成。市场判定处理器只引用这些结果，不重新汇总或应用。
-6. 合格 `MarketResolved` 在其数据源事件时间进入平台状态后，先闭合结算屏障要求的成交、
-   补偿、返佣和市场结束订单/资金释放；屏障满足后，以模拟账户实际结果
-   代币余额和兑付向量执行一次原子赎回并生成唯一 `AutoRedeemApplied`。零余额也生成零变化
-   终态反馈；重复、恢复或迟到不得重复赎回。
+6. 合格 `MarketResolved` 在其数据源事件时间进入平台状态后，先把仍开放订单的未成交余量
+   原子转为 `ORDER_STATUS_CANCELED_MARKET_RESOLVED`，并用独立幂等变化只释放该余量的资金
+   预留；这一步不释放已成交资金，也不产生兑付现金。随后闭合结算屏障要求的成交、补偿和
+   返佣终态；屏障满足后，以模拟账户实际结果代币余额和兑付向量执行一次原子赎回并生成唯一
+   `AutoRedeemApplied`。订单余量释放与结果代币兑付使用不同账户变化身份并保持上述前后顺序；
+   零余额也生成零变化终态反馈，重复、恢复或迟到不得重复关闭、释放或赎回。
 7. 结算屏障不完整、兑付冲突或缺少合格市场判定时明确失败/隔离，不得猜测、先按较小余额
    赎回，或新增调度、待处理、重试和失败赎回状态。
 
@@ -368,8 +398,11 @@ FOK/FAK 的固定 SDK `takerAmount` shares 等价值只作 base 审计投影；�
 1. 直接请求响应、`OrderLifecycleFeedback`、`TradeLifecycleFeedback` 和
    `SettlementLifecycleFeedback` 是彼此独立的封闭合同，通过稳定请求、订单、成交、市场、
    账户和结算身份关联。直接响应绑定 `platform_responded_at` 与 `response_received_at`，只在
-   后者对交易侧可见；任何响应都不得附带或暗示尚未按模型可见时间接收的公开市场状态。结算
-   反馈首版包含自动赎回、两类返佣应计、两类日结和两类付款。
+   后者对交易侧可见；三类生命周期反馈分别绑定 `platform_event_at` 及经过适用返回延迟后的
+   `feedback_received_at`，也只能从后者起对交易侧可见。响应或反馈可以暴露自身明确携带的
+   请求、订单、成交、账户或结算事实，即使对应公开消息尚未按模型可见时间到达；但不得附带、
+   触发或摘要化该公开消息、盘口或其他隐藏平台状态。结算反馈首版包含自动赎回、两类返佣
+   应计、两类日结和两类付款。
 2. 输出保留模拟平台原始状态拼写和 SDK `Unknown(raw)`，明确标记为模拟；下游 NOE 才负责
    按接口面归一化。模拟器不输出 NOE、Ledger 事件、奖励、标签或真实平台格式。
 3. 市场生命周期单向为：
@@ -378,19 +411,27 @@ FOK/FAK 的固定 SDK `takerAmount` shares 等价值只作 base 审计投影；�
    PRELOADING
      -> ACTIVE
      -> POST_END_PENDING_RESOLUTION
-     -> RESOLUTION_TERMINAL | EXHAUSTED_QUARANTINED
+     -> RESOLUTION_TERMINAL
      -> EVICTED
    ```
 
-   市场结束后先关闭本账户活动订单并释放其资金占用，再释放完整盘口和大缓冲；结算、返佣、
-   反馈、查询投影和幂等证据持久化并满足引用屏障后，才移除紧凑热状态。输入终态缺失使用
-   会话失败封存，不能伪造市场终态。
+   到达 `end_at` 时进入 `POST_END_PENDING_RESOLUTION`：有效处理时点不早于该边界的新订单
+   一律拒绝，已有开放订单保持可查询、可撤并继续保留未成交余量的资金预留，但不再参与撮合。
+   边界前已进入的普通处理完成、`itode` 暂缓也完成重新校验后，可以释放完整外部盘口与撮合
+   大缓冲，但必须保留支持开放订单、资金预留、撤单和查询的紧凑状态。合格
+   `MarketResolved` 到达时，仍开放的未成交余量才按第 2.6 至 2.7 节转为
+   `ORDER_STATUS_CANCELED_MARKET_RESOLVED` 并释放对应资金预留；结算、返佣、反馈、查询投影和
+   幂等证据持久化并满足引用屏障后，才移除紧凑热状态。输入结束仍缺少合格终态时，只形成
+   模拟器内部的运行失败封存和隔离，不生成公共市场事件或外部生命周期分支，也不能伪造订单
+   终态、资金释放或自动赎回。
 4. 热移除不等于查询记录删除。`order` 和 `trades` 在保留期内从紧凑索引返回相同终态；
    `orders` 不含终态订单；历史被裁剪时返回明确水位线/超出保留期，保留期到期后旧会话
    整体不可查询，不永久积累逐订单墓碑。
 5. 训练首版从干净账户轨迹起点确定性重放，不从中途模拟器、账户或 Ledger 检查点续跑。
    模拟盘必须能从原规则快照、原子检查点、紧凑仅追加日志和 DPT 仅追加事件日志恢复，且不
-   重复撮合、撤单、资金释放、返佣、付款、赎回或反馈。
+   重复撮合、撤单、资金释放、返佣、付款、赎回或反馈。恢复点位于 `end_at` 与合格
+   `MarketResolved` 之间时，开放订单仍须保持可查询、可撤、不撮合且资金预留不变；恢复点
+   位于判定处理期间时，不得重复写入订单终态、释放未成交余量预留或应用自动赎回。
 6. 内存、热市场、输入/请求/反馈队列、活动订单、内部事件、查询缓存、单会话索引、单运行
    产物，以及整个运行时/产物根的记录数量和字节分别具有实测硬上限。超限时停止新接入并
    明确失败，不静默丢弃、删除未到期证据或无界扩容。
@@ -407,7 +448,7 @@ FOK/FAK 的固定 SDK `takerAmount` shares 等价值只作 base 审计投影；�
 ### 2.9 外部完成门与回执身份
 
 1. 组件符合性可以在共享公共合同冻结后与 DPT Gate A 实现并行；正式真实纵向必须等 DPT
-   `GateAReceiptV2` / `REAL_EXECUTION_TAPE_READY` 成功签发。DPT 失败诊断、部分能力或缺少成功
+   `GateAReceiptV3` / `REAL_EXECUTION_TAPE_READY` 成功签发。DPT 失败诊断、部分能力或缺少成功
    回执均不满足入口。
 2. 阶段 6 既定的不可变联合清单是 DPT/sim 双方真实纵向门的唯一联合回执载体。该清单必须
    绑定 Gate A、模拟器组件证据、代表市场、公共合同、实现和资源基线；清单的内容身份与
@@ -416,8 +457,9 @@ FOK/FAK 的固定 SDK `takerAmount` shares 等价值只作 base 审计投影；�
    实现这些外部能力。联合训练闭环证据交还 DPT，供其完成全量验证和
    `TRAINING_DATASET_READY` 签发；本计划不能签发 Gate B。
 4. 正式爱尔兰订单请求与私有响应时延配置档当前仍为 `NOT_READY`。该配置档只决定
-   `platform_arrived_at`、`platform_responded_at` 和 `response_received_at`，不得替代或改写
-   公开市场数据已记录的数据源事件时间与 `timestamp_received`。若用户选择 Gate B 前置方案，阶段 7
+   `platform_arrived_at`、`platform_responded_at`、`response_received_at` 及生命周期反馈的
+   `feedback_received_at`，不得替代或改写公开市场数据已记录的数据源事件时间、
+   `timestamp_received` 或反馈的 `platform_event_at`。若用户选择 Gate B 前置方案，阶段 7
    必须先取得正式 `profile_id/version/hash`；若选择 Gate B 后置、`model-train` 前方案，
    阶段 7 只能绑定固定符合性配置档、`NOT_READY` 和后续 `sim-calibration` 门。两种方案
    仍待用户决定，均不得提前宣称正式 `model-train` 或生产适用。
@@ -481,10 +523,11 @@ FOK/FAK 的固定 SDK `takerAmount` shares 等价值只作 base 审计投影；�
   - 步骤 1.2.1：绑定运行市场集合、规则、场景、公共合同、账户、调用方、随机种子、平台时间
     与模型可见时间到 UTC 的映射。
     -> 验证：跨会话、未来游标、错误版本和后端切换在改状态前拒绝；墙上时钟不决定业务结果。
-  - 步骤 1.2.2：实现平台回放游标、模型可见游标、请求/响应四个时间坐标、请求幂等和查询
-    截点。
+  - 步骤 1.2.2：实现平台回放游标、模型可见游标、请求/直接响应四个时间坐标、生命周期反馈
+    的 `platform_event_at` 与 `feedback_received_at`、请求幂等和查询截点。
     -> 验证：物理调度改变不改变逻辑结果；变更重试不重复创建对象，查询重试保持原截点；
-    私有响应先到时模型仍无法读取尚未接收的公开市场状态。
+    直接响应和生命周期反馈都只在各自交易侧接收时点后可见；先到时只暴露自身明确携带的
+    私有事实，不能连带读取尚未接收的公开消息、盘口或其他隐藏平台状态。
 
 - 任务 1.3：实现八方法模拟领域入口
   - 步骤 1.3.1：实现精确公开名字、模拟请求上下文和错误分层。
@@ -497,12 +540,13 @@ FOK/FAK 的固定 SDK `takerAmount` shares 等价值只作 base 审计投影；�
 ## 5. 阶段 2：动态影子 CLOB、撮合、撤单和查询
 
 - 任务 2.1：实现公共事件消费与市场前半生命周期
-  - 步骤 2.1.1：通过 DPT 阶段 0R 冻结的 `ExecutionMarketEventV2` 唯一解码入口实现
+  - 步骤 2.1.1：通过 DPT 当前冻结的 `ExecutionMarketEventV3` 唯一解码入口实现
     首次装载、因果组、tick、
-    独立交易状态、后续 `book` 重校准和市场就绪。
+    独立交易状态、后续 `book` 重校准、`end_at` 盘后门和合格市场判定终态。
     -> 验证：一个合法代表序列覆盖 2.4 节关键不变量；训练和离线评估的隐藏订单簿按
     Polymarket orderbook 数据源事件时间推进，模拟盘只应用本机已接收事件；非法初始状态或
-    不守恒失败可见，缺口后的有效完整 `book` 不回写历史决策。
+    不守恒失败可见，缺口后的有效完整 `book` 不回写历史决策，三个平台布尔不被改写或冒充
+    盘前、盘中、盘后及结算后的单一判据。
   - 步骤 2.1.2：实现外部簿、本账户叠加层和派生盘口的所有权隔离。
     -> 验证：外部和账户数量不能互写，完整事件带不被复制到每个会话。
 
@@ -513,7 +557,8 @@ FOK/FAK 的固定 SDK `takerAmount` shares 等价值只作 base 审计投影；�
     本金门。
   - 步骤 2.2.2：实现单笔和逐项非原子批量提交，以及 `itode` 条件化 250ms 暂缓。
     -> 验证：批量边界、混合结果和重试幂等；`itode` true/false 各一条真实路径，maker 与
-    post-only 拒绝不进入暂缓。
+    post-only 拒绝不进入暂缓；未暂缓订单在 `end_at` 到达、暂缓订单从边界前跨至重新校验
+    时点时均拒绝，且不创建订单、资金预留或成交。
 
 - 任务 2.3：实现 L2 队列估计和撮合守恒
   - 步骤 2.3.1：实现净差额、队头消耗、队尾新增和交错账户订单的稳定相对顺序。
@@ -522,13 +567,16 @@ FOK/FAK 的固定 SDK `takerAmount` shares 等价值只作 base 审计投影；�
   - 步骤 2.3.2：实现 taker 逐档消费、maker 推定、FOK/FAK、价格改善、手续费引用和同一证据
     只应用一次。
     -> 验证：用真实邻接样本覆盖成交/`price_change`/`book` 防双算，五类独立守恒均成立。
+    `end_at` 后到达的后续成交或盘口事件不得再使本账户开放订单成交。
 
 - 任务 2.4：实现撤单、查询、分页和保留期读取
   - 步骤 2.4.1：实现单撤、批撤、全撤与逐目标结果。
     -> 验证：活动、部分成交、终态、重复 ID、平台时间边界和跨会话各用最小代表；模拟器
-    不生成策略性撤单。
+    不生成策略性撤单。`end_at` 后、合格 `MarketResolved` 前的撤单仍成功且只释放未成交余量
+    预留。
   - 步骤 2.4.2：实现 `order`、`orders`、`trades` 的截点投影和不透明游标。
-    -> 验证：活动/终态、空页、游标滥用和跨保留期各有代表；查询自身不改变业务状态。
+    -> 验证：活动/终态、空页、游标滥用和跨保留期各有代表；盘后未判定的开放订单仍可由
+    `order` 和 `orders` 查询，查询自身不改变业务状态。
 
 阶段 2 完成门：市场状态、准入、队列、撮合、撤单和查询满足业务合同与守恒，任务自审和
 独立阶段审查通过。
@@ -537,7 +585,8 @@ FOK/FAK 的固定 SDK `takerAmount` shares 等价值只作 base 审计投影；�
 
 - 任务 3.1：实现成交最终性和账户变化链
   - 步骤 3.1.1：实现订单撮合/成交最终性分轴、唯一经济应用截点、补偿和资金占用释放。
-    -> 验证：成功、待处理、未应用失败与已应用后补偿各用一个代表，重复状态不重复计值。
+    -> 验证：成功、待处理、未应用失败与已应用后补偿各用一个代表；开放订单未成交余量预留、
+    已成交结果代币及其后续兑付分别守恒，重复状态不重复计值。
   - 步骤 3.1.2：所有账户变化接入统一 `account_transition_seq` 和摘要链。
     -> 验证：后继反馈先可见时能识别缺口，前驱到达后按序应用并去重。
 
@@ -559,11 +608,15 @@ FOK/FAK 的固定 SDK `takerAmount` shares 等价值只作 base 审计投影；�
     重复付款，两类返佣不互相凑门槛。
 
 - 任务 3.4：实现市场结束、结算屏障和自动赎回
-  - 步骤 3.4.1：先关闭本账户活动订单、释放其资金并核验更早经济与返佣终态。
-    -> 验证：外部盘口释放不生成账户事实；屏障缺失或冲突明确失败。
+  - 步骤 3.4.1：在合格 `MarketResolved` 到达时，把仍开放订单的未成交余量转为
+    `ORDER_STATUS_CANCELED_MARKET_RESOLVED`，并用独立幂等变化只释放其资金预留。
+    -> 验证：`end_at` 本身不关闭订单或释放预留；调用方盘后撤单与判定关闭分别只发生一次，
+    外部盘口释放不生成账户事实，已成交结果代币不被当作未成交余量释放；订单终态反馈只在
+    经过适用返回延迟后对交易侧可见。
   - 步骤 3.4.2：在合格 `MarketResolved` 按数据源事件时间生效且结算屏障满足后原子赎回并
     生成唯一反馈。
-    -> 验证：获胜、未获胜、零持仓、重复/恢复和前驱反馈迟到各有代表；不生成中间赎回状态。
+    -> 验证：获胜、未获胜、零持仓、重复/恢复和前驱反馈迟到各有代表；订单余量释放与结果
+    代币兑付的账户变化身份和顺序可辨，不生成中间赎回状态，屏障缺失或冲突明确失败。
   - 步骤 3.4.3：实现请求、订单、成交和结算反馈的稳定关联与原始状态保留。
     -> 验证：三类生命周期不混合，模拟证据不冒充 NOE、Ledger 或真实平台产物。
 
@@ -573,8 +626,10 @@ FOK/FAK 的固定 SDK `takerAmount` shares 等价值只作 base 审计投影；�
 ## 7. 阶段 4：释放、恢复、产物和资源硬上限
 
 - 任务 4.1：实现市场两阶段释放和有界保留
-  - 步骤 4.1.1：实现 2.8 节单向生命周期、市场结束屏障、耗尽隔离和输入失败封存。
-    -> 验证：正常、隔离和输入终态缺失各用一个代表；不得伪造市场终态或查询空页。
+  - 步骤 4.1.1：实现 2.8 节单向生命周期、`end_at` 后外部撮合状态释放、合格判定后的订单与
+    结算释放，以及输入终态缺失时的内部运行失败封存。
+    -> 验证：正常路径在盘后保留开放订单、资金预留和查询/撤单能力，合格判定后才写入订单
+    终态并释放对应预留；失败封存不得生成公共市场终态、查询空页、资金释放或赎回。
   - 步骤 4.1.2：实现紧凑索引、幂等记录、保留期水位线和最终删除。
     -> 验证：热移除前后查询等价，保留期结束后旧会话不可查询且没有永久墓碑。
 
@@ -582,7 +637,8 @@ FOK/FAK 的固定 SDK `takerAmount` shares 等价值只作 base 审计投影；�
   - 步骤 4.2.1：实现仅追加证据、紧凑状态和原子检查点。
     -> 验证：检查点绑定代码、规则、场景、输入游标和摘要；一个截断或摘要不符代表拒绝恢复。
   - 步骤 4.2.2：实现模拟盘恢复，训练保持干净起点重放。
-    -> 验证：恢复不重复撮合、撤单、补偿、资金释放、返佣、付款、赎回或反馈。
+    -> 验证：分别从 `end_at` 与合格 `MarketResolved` 之间、判定处理期间恢复；开放订单权限与
+    预留不漂移，且不重复撮合、撤单、订单终态、补偿、资金释放、返佣、付款、赎回或反馈。
 
 - 任务 4.3：生成并原子封存最小产物
   - 步骤 4.3.1：生成 2.8 节运行清单、证据、投影、生命周期、资源和不变量产物。
@@ -626,16 +682,19 @@ FOK/FAK 的固定 SDK `takerAmount` shares 等价值只作 base 审计投影；�
 
 ## 9. 阶段 6：DPT Gate A 后的联合真实管道纵向门
 
-阶段入口必须机械验证 DPT 成功 `GateAReceiptV2` / `REAL_EXECUTION_TAPE_READY` 的 ID/SHA、
+阶段入口必须机械验证 DPT 成功 `GateAReceiptV3` / `REAL_EXECUTION_TAPE_READY` 的 ID/SHA、
 公共合同版本、唯一事件存储 manifest、事件时间索引 manifest、模型可见索引 manifest、
 Observation manifest、实现身份、输入集合和能力范围；
 部分能力、失败诊断或缺少成功回执不满足入口。
 
 - 任务 6.1：只通过公共事件带准入真实输入
-  - 步骤 6.1.1：通过版本化事件接口读取真实 `ExecutionMarketEventV2`，并按角色只消费
-    `EventTimeIndexEntryV2` 或 `VisibilityIndexEntryV2`。
-    -> 验证：输入及三个 manifest 被 Gate A 覆盖；模拟器不扫描原始目录、不判断 DPT 日期、
-    不读 Parquet，也不从一个索引重建另一个索引。
+  - 步骤 6.1.1：通过版本化事件接口从 `CanonicalEventRecordV1` 唯一存储读取真实
+    `ExecutionMarketEventV3` 市场事件视图，不向模拟器暴露参考事件。同一 training 或
+    offline-evaluation 运行中，隐藏平台状态路径只消费市场事件的 `EventTimeIndexEntryV2`，
+    交易侧公开视图路径只消费市场事件的 `VisibilityIndexEntryV2`；两条路径通过同一
+    `event_id` 引用唯一市场事件，互不重建。paper 只允许消费本机已经到达的可见路径。
+    -> 验证：唯一事件存储及上述四份 manifest 被 Gate A 覆盖；模拟器不扫描原始目录、不判断
+    DPT 日期、不读 Parquet，也不从一个索引重建另一个索引。
   - 步骤 6.1.2：核对公共合同、事件带身份、模拟器规则快照和组件证据。
     -> 验证：不兼容项产生带归属的联合失败证据，不在模拟器中补字段、兼容猜值或重做 DPT。
 
@@ -721,8 +780,14 @@ Observation manifest、实现身份、输入集合和能力范围；
 - 本轮已把审核中文档同步为双时间合同：训练与离线评估的隐藏平台状态按 Polymarket
   orderbook 数据源事件时间推进，模型公开数据按采集端接收时间可见，私有响应先到时只暴露
   响应自身；该同步不改变草案状态或产生实施 authority；
-- DPT 阶段 0R 的双时间 V2 公共合同完成门已经关闭，最终独立复审为
-  `Approved / PASS`；该外部合同可用不改变本事项的草案状态，也不产生实施 authority；
+- 用户已冻结 `end_at` 至合格 `MarketResolved` 的订单语义：盘后拒绝新订单，已有开放订单
+  保持可查询、可撤但不再撮合；合格判定到达时仍开放的未成交余量才转为
+  `ORDER_STATUS_CANCELED_MARKET_RESOLVED` 并释放对应资金预留，已成交结果代币另由判定后的
+  自动赎回兑付；该同步不改变草案状态或产生实施 authority；
+- DPT 阶段 0R 的市场双时间 V2 基线完成门已经关闭；DPT 已将市场事件合同升级为
+  `ExecutionMarketEventV3`，删除载荷内来源事件 ID，并以顶层 lineage 作为唯一来源追溯，
+  同时增加统一事件记录和参考事件合同并升级 Observation 与门 A 回执；该外部推进不改变
+  本事项的草案状态，也不产生实施 authority；
 - 没有创建或修改 `sim-system` 代码、Cargo 依赖、schema、配置或运行产物；
 - 未运行组件、真实纵向、训练闭环、性能分析或正式时延配置档复算；
 - 正式时延配置档状态仍为 `NOT_READY`，门位仍待用户决定；

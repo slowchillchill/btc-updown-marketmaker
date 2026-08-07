@@ -14,7 +14,7 @@
 >
 > 执行授权：`LOCAL_IMPLEMENTATION_ONLY`
 >
-> 状态：`阶段 0R 完成门已关闭，独立复审为 Approved / PASS；阶段 1 已完成成果保留；当前停在阶段 2 另行授权门前`
+> 状态：`阶段 0R、阶段 1、任务 2.1、任务 2.2.1 至 2.2.3、任务 2.3 及任务 2.4 已关闭；当前执行任务 2.5，任务 2.2.4 集合级验收待任务 2.5 索引物化接通`
 
 本计划依据简洁业务需求制定，是本事项当前业务语义和技术实施的唯一规范来源。它把需求
 验收映射到可验证的实施单元，并包含技术框架实践、成熟工具复用可行性、必要技术试验、
@@ -30,8 +30,9 @@ changelog 与 Git 中。
 ### 1.1 总成功标准
 
 1. 门 A 签发带能力范围的 `REAL_EXECUTION_TAPE_READY`，从同一真实规范事件集合建立
-   “最终化 typed_raw -> 数据源事件时间平台回放投影 + 采集端接收时间模型可见投影 ->
-   `ExecutionMarketEventV2` + `MarketObservationCausalShellV2`”；该门不依赖 `sim-system`
+   “最终化 typed_raw -> `CanonicalEventRecordV1` 唯一事件存储 -> 数据源事件时间平台回放
+   投影 + 采集端接收时间模型可见投影 -> `ExecutionMarketEventV3` 市场事件、
+   `CanonicalReferenceEventV1` 参考事件和 `MarketObservationCausalShellV3`”；该门不依赖 `sim-system`
    实现，也不能被
    测试替身替代。两种投影不是两套管道。
 2. 门 A 通过后，`sim-system` 同时通过黄金事件组件符合性和真实管道事件纵向验收。
@@ -85,10 +86,11 @@ changelog 与 Git 中。
 
 1. `data-pipeline(training)` 是合格类型化原始证据到唯一规范事件带的唯一语义归属方；门 A
    与门 B 复用同一个版本化核心，不得分别建立临时和正式的排序、去重、状态重建或源解释。
-2. 唯一允许的主数据流是：最终化 `typed_raw` 与每日清单进入 DPT；DPT 从同一规范事件集合
-   生成数据源事件时间平台回放投影、采集端接收时间模型可见投影，以及
-   `ExecutionMarketEventV2` 和 `MarketObservationCausalShellV2` 供 `sim-system` 使用；门 B
-   再只读
+2. 唯一允许的主数据流是：最终化 `typed_raw` 与每日清单进入 DPT；DPT 以
+   `CanonicalEventRecordV1` 封闭市场事件和全局参考事件，并从同一唯一事件存储生成数据源
+   事件时间平台回放投影、采集端接收时间模型可见投影和
+   `MarketObservationCausalShellV3`。`sim-system` 只消费其中的
+   `ExecutionMarketEventV3` 市场事件视图，不消费参考事件；门 B 再只读
    合并同一训练实例的 Ledger 投影，生成完整 Observation、成熟标签和训练数据集供
    `model-train` 使用。
 3. `model-train` 进程可为血缘、审计和质量诊断直接读取 `manifest`、`source_coverage`、
@@ -138,14 +140,18 @@ changelog 与 Git 中。
    的最大 `timestamp_received`。缺少受影响平台状态所需的数据源事件时间时，该能力失败或按
    已冻结范围隔离，不得用接收时间、文件位置或采集器接纳序号伪造平台时间。
 3. 规范事件 ID 和两种时间投影游标都必须版本化，且独立于目录、文件、分片、行组、读取批次、
-   线程和机器。事件 ID 由版本化语义身份、规范载荷和稳定来源证据确定；物理重分片不改变
-   ID，业务证据变化必须改变 ID 或产生显式冲突。
+   线程和机器。市场身份只由真实 `condition_id`、`clob_market_id`、`market_start_utc` 与
+   `market_end_utc` 映射形成，不增加没有生产前像或消费语义的 `window_id`。事件 ID 由版本化
+   语义身份、规范载荷和稳定来源证据确定；物理重分片不改变 ID，业务证据变化必须改变 ID
+   或产生显式冲突。
 4. `observed_transport_delay_ms` 只允许作为可空诊断字段：它不能替代任一时间坐标，也不能
    作为模型可见性、数据质量或正式网络时延配置档的证据。数据源服务器与采集服务
    器时钟不属于同一权威时钟时，不得把两者差值宣称为精确网络延迟或跨时钟不变量。
 5. 每个输出可追溯到日清单、文件 SHA、源行或接纳坐标、规范规则版本及合并/去重证据。
    规范事件保存语义身份所需前像，独立报告保存操作证据，运行清单绑定报告 SHA；不重复
-   增加没有独立前像的派生摘要。
+   增加没有独立前像的派生摘要。`EventLineageV2.source_evidence` 必须非空、规范排序且去重，
+   并且只保存形成本事件直接使用的完整证据集合；不得遗漏直接贡献者、混入无关证据，或递归
+   复制先前状态事件的全部历史谱系。事件外层两种时间分别取该直接证据集合对应时间的最大值。
 6. 价格、数量、费率和金额在规范层保持精确十进制。单位、方向、资产侧、状态和枚举显式
    映射；未知值只进入版本化 `unknown/unmodeled` 路径或隔离，不得默认为零、空字符串或
    最相似枚举。模型浮点转换只发生在后续冻结的编码边界。
@@ -153,16 +159,19 @@ changelog 与 Git 中。
 ### 2.4 状态归约、质量与公开事件合同
 
 1. 去重由事件类型特定身份和状态规则驱动，禁止用全局内容哈希删除看似相同但实际独立的
-   事件。每次合并、覆盖、删除或确认进入版本化独立报告，记录源事件、原因、规则版本、
+   事件。每次合并、覆盖、删除或确认进入版本化独立报告，记录可定位的来源证据、原因、规则版本、
    数量守恒和结果事件或明确的 `NO_OUTPUT`/`SUPPRESSED`。
 2. 初始完整 `book` 只装载基准；绝对 `price_change` 只应用一次；后续完整 `book` 状态相同
-   时只确认，只有剩余唯一净差额才重校准并形成 `LevelExecutionTransitionV2`。该转换至少
-   保存前后数量、净增、净缩、队头只应用一次的数量、组成事件、因果组、平台生效时间、模型
+   时只确认，只有剩余唯一净差额才重校准并形成 `LevelExecutionTransitionV3`。该转换至少
+   保存前后数量、净增、净缩、队头只应用一次的数量、组成证据、因果组、平台生效时间、模型
    可见时间、`source_attribution_quality` 和 `queue_result_quality`。
-3. `best_bid_ask` 只更新或验证价格，不能推进数量队列。公开成交与盘口变化没有共同权威
-   因果 ID 时不得因邻接而双算或标为真实逐订单 `EXACT`；无法归因为 `UNATTRIBUTED`，合同
-   允许的 L2 净缩推断为 `DETERMINISTIC_INFERRED`。公开 L2 不能证明真实 FIFO、账户成交、
-   市场冲击或模拟订单对历史市场的反事实影响。
+3. `best_bid_ask` 只更新或验证价格，不能推进数量队列。Polymarket 源
+   `best_bid=0` 与 `best_ask=1` 分别表示对应买侧与卖侧为空的边界哨兵：typed_raw 原样保留
+   来源文本和证据，唯一规范归约路径将其映射为现有 BBA 可空字段的 `None`，不得把边界哨兵
+   当作可成交价格；`price_change` 内嵌 BBA 与独立 `best_bid_ask` 使用同一映射。公开成交与
+   盘口变化没有共同权威因果 ID 时不得因邻接而双算或标为真实逐订单 `EXACT`；无法归因为
+   `UNATTRIBUTED`，合同允许的 L2 净缩推断为 `DETERMINISTIC_INFERRED`。公开 L2 不能证明
+   真实 FIFO、账户成交、市场冲击或模拟订单对历史市场的反事实影响。
 4. Binance 深度归约共同尊重 epoch、接纳坐标、`stitch`、`stale`、`confirmed-hole` 和
    `not-applied`，只有合法 `applied` 更新推进锚点。更新先到而快照后返回时，不得以后见
    连续性回填过去；待处理项使用实际形成连续性的可用时间。合法 aggTrade 保留原生 ID
@@ -171,21 +180,43 @@ changelog 与 Git 中。
    `confirmed_gap`、`invalid` 六种状态。只有当时已可用、结构化且可定位的证据可生成
    `confirmed_gap`；自由文本或事后日志不得反推精确缺口。缺口、epoch、陈旧、重同步和身份
    冲突只影响可定位市场或范围，不得跨市场传播。
-6. 现有 V1 公共类型不满足当前双时间合同，不得静默改义或继续用于门 A 成功产物。当前公共
-   类型固定为 `ExecutionMarketEventV2`、`EventTimeIndexEntryV2`、
-   `VisibilityIndexEntryV2`、`MarketObservationCausalShellV2` 和 `GateAReceiptV2`。两个索引
-   以同一 `event_id` 引用唯一规范事件，分别携带 `source_event_at_utc_ms` 与
-   `received_at_utc_ms`；Observation 使用 `ObservationVisibilityCutoffV2`。新版本事件仍必须
-   表达市场/条件/代币、窗口和生命周期，彼此独立的 `active/closed/accepting_orders`，首次完整 L2、价位
-   转换、最优价、tick 变化、来源可辨成交、质量状态和双时间终态水位线。审核中的
-   `SIM-S-004` 只能用于兼容性复核，不能覆盖本计划语义。
-7. tick 的唯一权威链为 `data-collect -> data-pipeline -> ExecutionMarketEventV2 ->
+6. 现有类型不得静默扩义。当前门 A 公共类型固定为 `CanonicalEventRecordV1`、
+   `ExecutionMarketEventV3`、`CanonicalReferenceEventV1`、`EventTimeIndexEntryV2`、
+   `VisibilityIndexEntryV2`、`MarketObservationCausalShellV3`、`GateACapabilityMatrixV2` 和
+   `GateAReceiptV3`。`ExecutionMarketEventV3` 及其九类载荷不再保存
+   `source_event_ids`；顶层 `EventLineageV2.source_evidence` 是规范事件唯一的来源前像和追溯
+   真相，不增加来源事件实体或第二份来源引用。`CanonicalEventRecordV1` 是唯一事件存储的封闭记录，只允许市场事件与
+   全局参考事件两个变体，不建立平行事件带；全局参考事件不按重叠市场复制。每个模型可见
+   事件都进入 `VisibilityIndexEntryV2`，只有确有真实数据源事件时间的事件才进入
+   `EventTimeIndexEntryV2`，两个索引中的每个 `event_id` 都必须解析到同一唯一事件存储；同一
+   事件同时出现在两个索引时必须共享 `event_id`。Binance REST snapshot 没有数据源事件时间，
+   只能进入模型可见索引。Observation 继续使用 `ObservationVisibilityCutoffV2`，其 V3 谱系
+   绑定上述封闭事件记录；`GateAReceiptV3` 绑定事件记录、市场事件、参考事件、Observation
+   和双索引合同版本。市场事件继续表达市场/条件/代币、窗口和生命周期，彼此独立的
+   `active/closed/accepting_orders`，首次完整 L2、价位转换、最优价、tick 变化、来源可辨
+   成交、质量状态和保留真实双时间来源证据的终态事件；不得增加没有独立生成、消费和验收
+   语义的逐终态水位或摘要。审核中的 `SIM-S-004` 只能用于兼容性复核，不能覆盖
+   本计划语义。
+7. `MarketWindowV2.start_at_utc_ms` 精确取 metadata v5 的 `market_start_utc`，
+   `end_at_utc_ms` 精确取 `market_end_utc`；不存在另一套 `start_at` 触发条件。模拟器直接消费
+   该窗口判断盘前、盘中和 `end_at` 后边界。metadata 已有生命周期状态及转换只映射到现有
+   `MarketLifecycleTransitionV2`：`current_to_resolution_pending` 不产生退休，只有合格终态的
+   `active_to_retired` 才进入 `Retired`。`active`、`closed`、`accepting_orders` 原样映射到
+   `MarketTradingStateV2` 并保持彼此独立，不推导生命周期或盘前、盘中、盘后、结算后；不得
+   为此增加四阶段公开状态机或第十个 Observation 组件。metadata 本地调度、应用或验证时间
+   不得冒充数据源事件时间。
+8. tick 的唯一权威链为 `data-collect -> data-pipeline -> ExecutionMarketEventV3 ->
    sim-system`。初始逐资产 tick 来自当时已保存的源证据，动态变化由 `tick_size_change`
    推进；旧 tick 可未知，首次快照不携带用途分支。模拟器冷启动规则快照不得查询、保存或
    交叉校验 tick。`min_order_size`、`feeSchedule`、`itode`、`oas` 和秒级延迟规则不得进入
    事件或 Observation。
-8. metadata 与 WebSocket 终态只能合并成一个规范终态或产生显式冲突。派生兑付向量必须
-   保存源事件、获胜身份和版本化映射规则，并明确其派生属性；冲突不得重复结算。
+9. metadata 与 WebSocket 终态只能合并成一个规范终态或产生显式冲突。派生兑付向量必须
+   保存源事件、获胜身份和版本化映射规则，并明确其派生属性；冲突不得重复结算。只有明确
+   携带 WebSocket `market_resolved.timestamp` 的合格终态才能形成数据源事件时间投影并驱动
+   隐藏平台判定。Gamma 兜底终态可以按 `timestamp_received` 保留公开结果与可见证据，但
+   `market_end_utc`、`closed_time_utc`、接收时间、请求时间和本地调度时间都不得替代其缺失的
+   数据源事件时间；受影响市场的隐藏判定、资金释放和结算能力必须失败或按本计划冻结的范围
+   隔离。
 
 ### 2.5 Observation、标签、切分与归一化
 
@@ -194,6 +225,26 @@ changelog 与 Git 中。
    状态；门 A Observation 只能纳入模型截止点前 `timestamp_received` 已到达的公开数据，
    不得读取或摘要化隐藏平台状态。门 A 外壳只含市场身份、规范谱系、模型可见截止点、市场
    可见状态、信息年龄、缺失掩码、覆盖质量和规范哈希，不冻结训练框架张量。
+   模型可见索引逐条保留每个规范事件，不因同毫秒或 Observation 物化而合并或删除事件。
+   Observation 对每个运行清单显式覆盖的市场，以 `received_at_utc_ms` 为截止坐标：同一接收
+   毫秒中所有能改变九组件之一的可见事件全部应用后，最多生成一条该市场 Observation；
+   同毫秒内的确定性内部顺序只用于得到唯一状态，不冒充真实跨来源网络先后，也不为模型创建毫秒内
+   中间可见点。全局参考事件在其接收时间后只组合进本次运行显式覆盖市场的 Observation，
+   原事件仍只存储一次；不向数据集全部市场隐式扇出，也不为会话复制状态。
+   九组件更新归属固定为：`InitialL2SnapshotV2` 同时更新 `PolymarketL2` 与
+   `CurrentTick`，`LevelExecutionTransitionV3` 更新 `PolymarketL2`，`BestBidAskV2`、
+   `TickSizeChangeV2`、`PublicTradeV2` 分别更新同名组件；
+   `MarketLifecycleTransitionV2` 与 `MarketTradingStateV2` 共同更新 `MarketLifecycle`，
+   `MarketResolutionTerminalV3` 更新 `MarketResolution`；资产作用域的当前
+   `QualityBoundaryV2` 只更新 `PolymarketL2` 质量，市场作用域的当前终态冲突边界只更新
+   `MarketResolution` 质量；三类 `CanonicalReferenceEventV1` 分别更新
+   `ChainlinkBtcUsd`、`BinanceBtcUsdtDepth` 和 `BinanceBtcUsdtTrade`。新的质量原因与作用域
+   若无法按该映射唯一归属，必须失败，不得猜测组件。
+   每个 `state_digest_sha256` 的前像是版本化组件标识、规范排序的当前领域状态、质量和当前锚点
+   事件 ID；`market_state_digest_sha256` 的前像是市场身份与按固定九组件顺序排列的组件
+   质量、缺失状态和组件摘要。`contributing_event_ids` 精确取九组件非空
+   `last_visible_event_id` 的规范排序去重并集，最多九项；它是当前组件锚点，不冒充累计状态的
+   全历史因果清单。完整重建依赖同一唯一事件存储、可见索引清单与截止点。
 2. 门 B 只读同一实例的 Ledger 投影，并绑定 `ledger_projection_sequence`、
    `ledger_projection_digest` 和因果可用时间。完整 Observation 分别拥有市场状态、账户
    状态、活动订单/预留、两侧持仓、现金、返佣应收和可用现金，冻结单位、缺失语义和唯一
@@ -222,7 +273,7 @@ changelog 与 Git 中。
 
 ### 2.6 完成门、产物、资源与失败语义
 
-1. 门 A 只有在全部必需能力为 `PASS` 后才签发成功态 `GateAReceiptV2` /
+1. 门 A 只有在全部必需能力为 `PASS` 后才签发成功态 `GateAReceiptV3` /
    `REAL_EXECUTION_TAPE_READY`；能力 `FAIL`、准入/构建失败或运行中断只产生实际能力或失败
    诊断，不签发门 A 回执。门 A 成功回执固定 `training_dataset_ready=false`。
 2. 门 B 必须引用同一输入谱系的门 A，并在外部前置、完整 Observation、成熟标签、切分、
@@ -234,9 +285,10 @@ changelog 与 Git 中。
 3. 输入、核心身份或语义配置改变时相应成功回执失效。改变规范事件 ID、数据源事件时间平台
    投影、采集端接收时间模型可见投影或字段语义必须发布新合同、重建受影响门 A 产物，并使
    其派生的旧门 B 回执失效。
-4. 门 A 产物至少包含准入/质量报告、唯一规范事件存储、`ExecutionMarketEventV2`、事件时间
-   索引、模型可见索引、`MarketObservationCausalShellV2`、能力矩阵、去重/守恒/隔离报告、
-   资源高水位和成功回执；`GateAReceiptV2` 分别绑定
+4. 门 A 产物至少包含准入/质量报告、`CanonicalEventRecordV1` 唯一规范事件存储、
+   `ExecutionMarketEventV3` 市场事件视图、`CanonicalReferenceEventV1` 参考事件视图、事件
+   时间索引、模型可见索引、`MarketObservationCausalShellV3`、能力矩阵、去重/守恒/隔离
+   报告、资源高水位和成功回执；`GateAReceiptV3` 分别绑定
    `canonical_event_store_manifest_sha256`、`event_time_index_manifest_sha256`、
    `visibility_index_manifest_sha256` 和 `observation_manifest_sha256`。门 B 增加
    Ledger 投影证据、完整 Observation、成熟标签/删失报告、`tick_stream`、权威触发与调度
@@ -287,7 +339,7 @@ changelog 与 Git 中。
     -> 验证：日期下限前为 `INELIGIBLE_BEFORE_DATASET_FLOOR`，合格但未分配日期为
     `UNASSIGNED`，没有逐日人工批准门或回退到更早日期的路径。
 - 任务 0.2：冻结低频规则与动态事件的所有权边界
-  - 步骤 0.2.1：逐字段核对 metadata v5、`ExecutionMarketEventV2` 和
+  - 步骤 0.2.1：逐字段核对 metadata v5、当前 `ExecutionMarketEvent` 和
     `PlatformRuleSnapshot`，确认当前时点运行的必需低频平台规则由 `sim-system` 通过固定官方
     公开 HTTPS 窄加载器冷启动查询，历史运行只绑定适用的 `HISTORICAL_AS_OF` 快照；未消费的
     `oas` 只进入未消费字段清单，逐资产初始 tick 和动态 `tick_size_change` 都归事件带。
@@ -301,9 +353,9 @@ changelog 与 Git 中。
   - 步骤 0.3.1：冻结规范事件 ID、双时间命名空间、平台回放游标、模型可见游标、能力矩阵和
     回执 schema。
     -> 验证：逐能力只使用 `PASS|FAIL`，`FAIL` 表示尚未满足或尚未由证据证明并强制携带
-    `blocking_reason`；`GateAReceiptV2` 只编码全部能力通过的
+    `blocking_reason`；版本化门 A 成功回执只编码全部能力通过的
     `REAL_EXECUTION_TAPE_READY`。合同黄金文件覆盖稳定编码、未知值和版本不兼容负例。
-  - 步骤 0.3.2：与 `SIM-S-004` 逐字段对齐 `ExecutionMarketEventV2`。
+  - 步骤 0.3.2：与 `SIM-S-004` 逐字段对齐当前 `ExecutionMarketEvent`。
     -> 验证：逐项矩阵没有无归属字段；缺口有明确上游归属和阻断范围。
   - 步骤 0.3.3：冻结门 A 市场侧 Observation 模型可见外壳，不冻结训练框架张量。
     -> 验证：合同只含框架中立领域字段、模型可见截止点、缺失/质量状态和摘要，且不能读取
@@ -317,7 +369,7 @@ changelog 与 Git 中。
     -> 验证：记录实际解析版本、许可证、安全公告和锁文件；不预填未经验证的版本，不自研
     Parquet 或通用排序数据库，试验不形成第二个语义核心。
 - 任务 0.5：冻结门 A 成功回执合同
-  - 步骤 0.5.1：`GateAReceiptV2` 只表达完整能力矩阵全部通过后的
+  - 步骤 0.5.1：版本化门 A 成功回执只表达完整能力矩阵全部通过后的
     `REAL_EXECUTION_TAPE_READY`；能力失败、准入失败、构建失败或运行中断只产生诊断，不
     签发回执。
     -> 验证：一个真实成功黄金样例、每类可达损坏的一个代表输入和既有事故回归；成功回执
@@ -349,7 +401,7 @@ changelog 与 Git 中。
     -> 验证：只记录本次真实结果；历史红灯、旧审查过程和取代关系只写入 changelog。
 - 任务 0.10：冻结 tick 权威归属及关联平台事件合同
   - 步骤 0.10.1：更新本计划和受影响的当前跨模块合同，并在 changelog 记录决定，明确
-    tick 的唯一权威链为 `data-collect -> data-pipeline -> ExecutionMarketEventV2 -> sim-system`；
+    tick 的唯一权威链为 `data-collect -> data-pipeline -> ExecutionMarketEventV3 -> sim-system`；
     冷启动规则快照不得查询、保存或交叉校验 tick。
     -> 验证：活动需求和计划中没有把 CLOB `mts`、Gamma `orderPriceMinTickSize` 或当前 HTTP
     响应写成模拟器冷启动 tick；决定及实际修改结果记录在 changelog。
@@ -387,15 +439,16 @@ changelog 与 Git 中。
     -> 验证：联合合同用一个代表序列证明响应先到不会泄漏尚未接收的公开消息、盘口或隐藏
     平台状态。
 - 任务 0R.2：发布新的版本化公共合同
-  - 步骤 0R.2.1：先增加一个双时间平台回放/模型可见分离的聚焦失败测试，再最小升级
-    `ExecutionMarketEventV2`、`EventTimeIndexEntryV2`、`VisibilityIndexEntryV2`、
-    `LevelExecutionTransitionV2`、`MarketObservationCausalShellV2` 和 `GateAReceiptV2`；现有
-    V1 不得静默改义，也不得用于新的门 A 成功产物。
+  - 步骤 0R.2.1：先增加一个双时间平台回放/模型可见分离的聚焦失败测试，再最小发布
+    `EventTimeV2`、`EventLineageV2`、`EventTimeIndexEntryV2`、`VisibilityIndexEntryV2`、
+    `ObservationVisibilityCutoffV2` 和 `GateACapabilityMatrixV2` 双时间基线；顶层市场事件、
+    Observation 和门 A 回执的当前版本由任务 2.2 发布，现有 V1 不得静默改义，也不得用于
+    新的门 A 成功产物。
     -> 验证：两个索引使用同一 `event_id` 引用唯一规范事件；Observation 使用
-    `ObservationVisibilityCutoffV2`；`GateAReceiptV2` 分别绑定唯一事件存储、事件时间索引、
+    `ObservationVisibilityCutoffV2`；门 A 成功回执分别绑定唯一事件存储、事件时间索引、
     模型可见索引和 Observation manifest；旧 V1 消费方以明确版本不兼容失败。
   - 步骤 0R.2.2：更新核心校验、事件身份、双索引条目编码和最小黄金载荷。
-    -> 验证：同一合法 V2 事件稳定投影为共享 `event_id` 的事件时间条目与模型可见条目，并能
+    -> 验证：同一合法事件稳定投影为共享 `event_id` 的事件时间条目与模型可见条目，并能
     完成编码往返；派生事件的源事件时间和接收时间分别取组成证据的最大值；Observation 与
     其贡献事件的可见索引条目联合校验，拒绝任一接收时间晚于可见截止点的贡献事件；
     Polymarket orderbook 缺少源事件时间时失败关闭。本步骤不物化完整索引或 manifest。
@@ -478,68 +531,160 @@ changelog 与 Git 中。
 
 ## 5. 阶段 2：唯一规范化核心和门 A 产物
 
-阶段 2 只有在阶段 0R 完成门关闭并由用户另行明确授权推进后才能开始；当前不得把阶段 0R
-文档或合同工作解释为阶段 2 开发授权。
+阶段 2 只有在阶段 0R 完成门关闭并由用户另行明确授权推进后才能开始；用户已于 2026-08-06
+明确授权阶段 2 本地实施，并批准任务 2.1 的验收归属纠正和任务 2.2 的参考事件语义。任务
+2.1 只关闭六类无损解码、字段语义和精确十进制边界；最终公开事件映射分别在任务 2.2、2.3
+和 2.5 的产物边界验收，实际模型数值编码边界归任务 4.2.2。RTDS/Binance 参考更新作为同一
+唯一规范事件存储中的一等全局事件，不伪造 Polymarket 市场身份，不复制为逐市场事件，也不
+产生悬空 ID。本授权不包含推送、发布、部署、远端操作、敏感材料、真实下单或真实资金。
 
 - 任务 2.1：实现六类无损解码适配器
   - 步骤 2.1.1：为六个当前 schema 建立显式字段、单位、枚举和原始/派生标识映射。
     -> 验证：六类真实样本均能成功映射；在真实解码边界上，每类可达损坏只保留一个代表性
-    输入，另保留真实事故回归；不读取日期下限前的真实数据。当前公开事件映射必须完整实现
-    第 2.3 节和第 2.4 节第 6、7 项；Polymarket orderbook 映射必须保留真实数据源事件时间和
-    `timestamp_received`，不以阶段 0 的类型解码测试替代真实映射证据。
+    输入，另保留真实事故回归；不读取日期下限前的真实数据；后续规范事件映射所需的来源
+    字段、时间、单位、枚举、原生身份和采集证据不得丢失。
   - 步骤 2.1.2：精确十进制贯穿规范层，模型浮点编码保持在后续边界。
-    -> 验证：使用真实精确小数样本和实际浮点转换边界的一个代表性失败输入，证明规范真相
-    不被浮点编码、溢出或舍入反向改写；不穷举理论非法值。
+    -> 验证：使用真实精确小数样本和一个规范十进制范围失败输入，证明原始文本到
+    `ExactDecimal` 的转换精确且规范真相不被溢出、舍入或二进制浮点改写；不穷举理论非法值。
 - 任务 2.2：实现双时间投影与规范身份
-  - 步骤 2.2.1：分别计算数据源事件时间平台生效坐标和 `timestamp_received` 模型可见坐标；
-    因果组分别绑定组成证据的平台生效时间和最大模型可见时间。
-    -> 验证：未来预取、迟到和因果组晚确定不回写过去；模型侧无法读取尚未接收的消息或隐藏
-    平台状态。
-  - 步骤 2.2.2：以 `EventTimeIndexEntryV2` 物化数据源事件时间索引，以
-    `VisibilityIndexEntryV2` 物化模型可见索引，并实现 `ExecutionMarketEventV2` 规范事件 ID。
-    -> 验证：打乱文件、行组、批次、线程和等价重分片后两种投影及摘要不变；缺少平台回放
-    所需源时间时按能力失败或已冻结范围隔离。
-  - 步骤 2.2.3：为 RTDS v4 和其他公开数据使用真实 `timestamp_received` 作为模型可见时间，
-    采集器接纳坐标只进入谱系。
-    -> 验证：不读取不存在的接纳坐标，不把文件顺序、热路径 `event_seq` 或接纳时间冒充数据
-    源事件时间或模型可见时间。
+  - 步骤 2.2.1：发布删除载荷内 `source_event_ids` 的 `ExecutionMarketEventV3` 及其同步升版
+    载荷、`CanonicalReferenceEventV1` 和薄的 `CanonicalEventRecordV1` 封闭记录，并升级
+    `MarketObservationCausalShellV3` 与 `GateAReceiptV3`；保留 `EventLineageV2`、
+    `GateACapabilityMatrixV2` 和双索引 V2。市场事件和参考事件都只以各自顶层
+    `lineage.source_evidence` 保存来源前像；不得新增来源事件实体、载荷来源 ID 或重复来源真相。
+    -> 验证：V3 市场事件载荷不能编码 `source_event_ids`，市场事件校验拒绝 RTDS/Binance 来源；参考事件按 RTDS 价格、Binance 深度和
+    Binance 成交使用窄载荷；统一记录只允许两个已知变体；模拟器只能取得市场事件视图；旧
+    Observation/回执解码入口不会静默接受新版本。
+  - 步骤 2.2.2：从六类 `TypedRawRow` 分别提取数据源事件时间、`timestamp_received`、来源
+    原生身份和采集谱系候选。Polymarket orderbook 使用 `timestamp`；RTDS 使用
+    `payload_timestamp` 并把 `message_timestamp` 保留为来源证据；Binance depth update 使用
+    `event_time`；Binance aggTrade 使用 `trade_time` 并保留 `event_time`；Binance snapshot 的
+    数据源事件时间为空。metadata 只有明确的 WebSocket 平台时间可以直接成为来源事件时间，
+    其余最终平台生效时间归任务 2.3 的状态归约确定。
+    -> 验证：`timestamp_received` 始终是模型可见时间；不读取不存在的接纳坐标，不把文件顺序、
+    热路径 `event_seq`、采集器接纳时间、REST 请求时间或 metadata 本地调度时间冒充数据源
+    事件时间或模型可见时间。映射器和后续归约器负责证明直接来源证据没有遗漏或夹带；通用
+    JSON 合同校验不得把无法从单事件结构验证的证据完整性宣称为已证明。
+  - 步骤 2.2.3：为可直接形成的行级参考更新封装稳定 `CanonicalEventId`，并为所有后续归约
+    输出提供同一版本化身份机制。依赖任务 2.3 最终载荷、质量或去重结果的 Polymarket 事件、
+    Binance depth 状态和无效/抑制处置，只在最终载荷确定后封装 ID；不得提前以原始行身份
+    冒充最终事件身份。
+    -> 验证：规范 ID 绑定最终载荷、质量、双时间和 `lineage.source_evidence` 中排除物理清单与
+    文件 SHA 的稳定语义来源证据；目录、文件、分片、行组、批次、线程和等价重分片变化不改变 ID，业务证据或最终处置变化必须改变 ID 或形成显式
+    冲突；参考事件与市场事件使用同一 `CanonicalEventId` 命名空间但不同版本化哈希域。
+  - 步骤 2.2.4：从 `CanonicalEventRecordV1` 统一投影 `EventTimeIndexEntryV2` 和
+    `VisibilityIndexEntryV2`。所有可见事件产生模型可见条目；只有具有真实
+    `source_event_at_utc_ms` 的事件产生事件时间条目。
+    数据源事件时间相同时，事件时间索引必须保留任务 2.3 已确定的归约顺序；`event_id` 只提供
+    唯一引用，不作为因果排序键。
+    -> 验证：在同一冻结输入下，改变 Parquet 解码批次、外排 run、读写批次和输出行组后，
+    规范事件、两种投影及逻辑结果不变；合同测试另行证明物理 manifest/file SHA 不进入事件
+    语义身份，而输入和产物谱系身份在物理证据变化时必须如实变化。当前业务处理并行度固定为
+    `1` 并作为资源事实断言，不为验收新增并行或源文件重分片路径。相同数据源事件时间的事件
+    不因 `event_id` 哈希顺序重排；Binance snapshot 只有模型可见条目；缺少受影响平台回放所需
+    源时间时按能力失败或已冻结范围隔离。
 - 任务 2.3：实现状态归约与事件特定去重
   - 步骤 2.3.1：实现初始 `book`、绝对 `price_change`、后续 `book` 重校准和 BBA 只价校验。
-    -> 验证：数量守恒；相同快照只确认；剩余净差额只应用一次。
+    对 `polymarket_orderbook_v3`，数据源事件时间仍是平台生效时间；同一
+    `source_sequence_epoch_id` 内源时间相同的多条消息按 `collector_admission_sequence` 保存的
+    WebSocket 采集先后归约。该坐标只证明已采集消息的先后，不生成、提前或改写平台生效时间
+    与模型可见时间；单条 `price_change` 的消息边界和列表顺序必须保留，不得把同一毫秒的
+    多条独立消息合并。`collector_admission_sequence` 不得跨 epoch 比较；epoch 切换后继续按
+    既有完整 `book` 重同步规则为每个受影响资产建立新基准，不得继承旧 epoch 的 L2 数量归约
+    状态，缺少新基准或存在已确认缺口时失败或隔离。归约器同时清空仅供同值确认和直接证据
+    归属的内部 BBA 基线，使新 epoch 首条相同数值的绝对 BBA 仍形成新事件；该内部动作不生成
+    模型可见缺失状态。Observation 保留最后实际可见 BBA 及其原时间锚点，直到新的
+    `BestBidAskV2` 到达。
+    -> 验证：数量守恒；相同快照只确认；剩余净差额只应用一次。使用一个真实相同数据源事件时间的连续
+    绝对数量更新样本证明，在同一冻结输入的解码批次和外排 run 改变后仍完整保留每次转换及其
+    接纳先后，并得到相同最终盘口；测试不得只断言最后数量而允许中间消息被合并。新 epoch
+    必须按受影响资产从完整 `book` 重建，不恢复旧全局总序，也不用 `event_id` 充当盘口因果顺序。
   - 步骤 2.3.2：实现公开成交与价位变化的非精确归因语义。
     -> 验证：`trade -> book`、`book -> trade` 都不会因邻接被标成 `EXACT` 或双算。
   - 步骤 2.3.3：实现 Binance 快照/更新的 `stitch` 和 aggTrade v7 合法/无效路径。
     -> 验证：只有 `applied` 推进锚点；无效成交证据不消失也不成为成交。
-  - 步骤 2.3.4：实现 metadata/WS 市场终态合并、派生兑付向量和冲突隔离。
-    -> 验证：同一终态只输出一次；冲突不结算且不污染其他市场。
-  - 步骤 2.3.5：实现六种质量状态、市场隔离和有界首分歧诊断。
+  - 步骤 2.3.4：从首个完整 Gamma 身份快照（`metadata_snapshot`）构建现有市场窗口、资产、初始 tick、
+    生命周期和独立交易状态，并实现 metadata/WS 市场终态合并、派生兑付向量和冲突隔离；
+    后续 `new_market` 只确认既有固定身份，不把“市场创建”推导为 `Active` 或市场开始。
+    -> 验证：`start_at_utc_ms/end_at_utc_ms` 分别精确等于
+    `market_start_utc/market_end_utc`；`end_at` 不产生退休，合格终态才产生
+    `active_to_retired`；`active/closed/accepting_orders` 原样独立且不推导四阶段；只有通过同一
+    终态资格校验的 `active_to_retired` 才输出生命周期退休，同一终态只输出一次，冲突不结算
+    且不污染其他市场，也不增加第十个 Observation 组件。只有明确的 WebSocket 平台时间进入
+    事件时间索引；Gamma 兜底的公开结果、退休状态和独立交易状态只按接收时间保留可见证据，
+    不能使用 `market_end_utc`、`closed_time_utc` 或本地时间驱动隐藏判定、退休或结算。
+  - 步骤 2.3.5：实现六种质量状态和市场隔离。
     -> 验证：`fresh/stale/missing/unknown_not_observed/confirmed_gap/invalid` 不互相折叠；
-    原始 JSON、解析器诊断和仅采集器可见重连信息对 Observation 不可达。
+    原始 JSON、解析器诊断和仅采集器可见重连信息对 Observation 不可达。合法等待耗尽摘要只
+    表示采集跟踪预算结束，不是平台终态或 `Missing`；两类上游原因只进入隔离审计，不额外
+    生成 `QualityBoundary`，不产生数据源事件时间、退休、获胜结果、兑付、资金释放或结算，
+    模型侧市场判定继续为 `UnknownNotObserved`。请求范围包含因等待耗尽而缺少合格
+    `MarketResolutionTerminal` 的市场时，该能力标记为 `FAIL` 且不得签发门 A；只有另行启动
+    显式排除该市场的新范围运行才能对其余范围重新验收，不得静默丢弃市场或增加第三控制索引。
   - 步骤 2.3.6：为合并、覆盖、删除和确认生成版本化独立去重/守恒报告。
-    -> 验证：每项操作记录源事件 ID、原因、规则版本、适用的数量守恒摘要，以及
-    `result_event_id` 或明确的 `NO_OUTPUT`/`SUPPRESSED` 处置；规范载荷和事件 ID 已绑定的
-    内容不再增加无独立前像的逐事件摘要。
+    -> 验证：每项操作记录可确定定位的来源证据、原因、规则版本、适用的数量守恒摘要，以及
+    `result_event_id` 或明确的 `NO_OUTPUT`/`SUPPRESSED` 处置；有输出项只通过结果事件的
+    `lineage.source_evidence` 追溯，`NO_OUTPUT`/`SUPPRESSED` 因没有事件包络而由报告自身保存
+    规范来源证据。不得新增 `SourceEvent`、`SourceEvidenceId` 或第三种统一存储记录；规范载荷
+    和事件 ID 已绑定的内容不再增加无独立前像的逐事件摘要。
 - 任务 2.4：实测并冻结完整生产管道资源预算
   - 步骤 2.4.1：在任务 2.1 至 2.3 的真实解码、双时间投影和状态归约使用同一路径接通后，只用
-    日期合格的真实输入执行最小完整资源试验。
+    日期合格的真实输入执行最小完整资源试验；同时在该实际运行路径记录首个分歧，不提前增加
+    没有生产方和消费方的独立诊断合同。
     -> 验证：试验记录输入清单、代码、配置、解码批次、排序分区、并行度、打开文件、业务
-    队列、市场热状态、常驻内存、总内存和临时磁盘水位；不得用合成行、阶段 0 局部指标或
-    第二语义路径替代真实生产路径。
+    队列、热市场数、归约器保留集合条目、常驻内存、总内存和临时磁盘水位；若确定性核验出现
+    分歧，首条诊断必须直接记录实际输入证据、规范规则、平台回放游标、模型可见游标、前后
+    状态摘要和差异字段；不把该诊断写成规范市场事件、Observation 组件、终态摘要或水位。
+    不得用合成行、阶段 0 局部指标或第二语义路径替代真实生产路径。冻结基线采用
+    `2026-08-04` 合格清单、市场
+    `0x242b1d2421714f5f93a1e30239e732bca05ced7c86393b7b204a32eb0f615bee` 和接收时间左闭右开
+    区间 `[1785867275000,1785867421000)`；该范围只证明资源与确定性基线，不自动成为任务
+    2.5 的正式门 A 覆盖范围。
   - 步骤 2.4.2：在门 A 输出构建前冻结批次行数/字节、排序分区、打开文件、队列、市场热
     状态、临时磁盘、并行度、常驻内存和总内存数值上限。
-    -> 验证：每个数值均来自同一真实试验；用一个代表性超限场景证明冻结的失败语义和证据，
-    不建立资源排列矩阵。
+    当前唯一生产配置为：Parquet 解码批次 `8192` 行；Arrow
+    `RecordBatch::get_array_memory_size()` 报告的物理数组大小上限 `64 MiB`；单条临时排序行
+    `128 KiB`；每来源 epoch 数 `1`；待配对 WS 终态 `1`；归约器保留集合条目 `163840`；
+    外排初始 run `8192` 行/`64 MiB`，临时 run 文件 `512`，合并扇入 `4`，排序器同时打开
+    文件 `5`，读写批次 `1024` 行，临时排序字节 `1 GiB`。输出统一单行载荷门为 `3 MiB`，
+    规范记录与归约报告共享捕获字节门为 `1 GiB`，候选目录门为 `4 GiB`，单市场
+    Observation 保留 L2 层级门为 `256`。直接来源输入文件同时打开数、待归约业务输入行、
+    热市场数和业务处理并行度均由当前结构固定为 `1`；这些值不冒充进程总文件描述符或线程
+    数。外层最大 RSS 验收上限为 `768 MiB`，独立 cgroup v2 的 `memory.max` 为 `1 GiB`、
+    `memory.swap.max=0`；RSS 只取 `/usr/bin/time -v`，总计费内存只取 cgroup `memory.peak`，
+    不增加进程内采样器，也不把内部指标相加冒充内存。Arrow 字节门在批次形成后、业务解码
+    前检查，不声称阻止 Arrow 瞬时分配；cgroup 负责完整进程硬门。资源证据必须在正式候选
+    发布根所在的同一 `ext4` 文件系统产生，不得把 `/tmp` 的 `tmpfs` 文件占用冒充正式路径
+    的页缓存或磁盘证据。
+    -> 验证：`4096` 行解码、`4096` 行初始 run 和 `2048` 行读写批次只用于物理扰动，其他
+    硬门不变，不形成第二生产配置。扰动与主配置都必须完成候选构建和闭包复核，规范记录、
+    双索引投影、归约报告及去除物理 manifest 身份后的 Observation 语义摘要必须完全相同。
+    唯一代表性超限把真实 Arrow 批次上限降为 `1` 字节，必须返回结构化失败并清理暂存目录，
+    不建立资源排列矩阵。任务 2.5 若再次扩大正式范围，必须重新实测，不得静默放宽限额。
 - 任务 2.5：实现门 A 输出
-  - 步骤 2.5.1：在临时目录从同一规范事件集合流式生成 `ExecutionMarketEventV2` 存储、
+  - 步骤 2.5.1：在临时目录从同一规范事件集合流式生成 `CanonicalEventRecordV1` 唯一存储、
+    `ExecutionMarketEventV3` 市场事件视图、`CanonicalReferenceEventV1` 参考事件视图、
     `EventTimeIndexEntryV2` 平台回放投影、`VisibilityIndexEntryV2` 模型可见投影和
-    `MarketObservationCausalShellV2`。
-    -> 验证：三者共享事件谱系和事件集合身份，但平台回放游标与模型可见游标保持独立，且无
+    `MarketObservationCausalShellV3`。
+    四份主要数据产物分别为唯一事件存储、事件时间索引、模型可见索引和 Observation；市场/参考
+    视图是同一事件存储上返回公共合同类型的两个逻辑读取入口，不单独物化、不增加 manifest、不复制事件。
+    四份主数据产物使用当前 Arrow/Parquet/Zstd 依赖族和版本化 JSON manifest；公共 Rust 薄读取入口
+    只返回已校验的合同类型，分页只使用绑定不可变 manifest 和下一逻辑位置的有界强类型游标，
+    不建立跨进程不透明令牌或通用查询层。事件时间索引与模型可见索引的同时间内部顺序使用确定性
+    归约发射位置；该位置只属物化和读取层，不进入公共索引合同、事件身份或模型可见事实。
+    Observation 必须在模型可见索引 manifest 关闭并计算摘要后生成，因其谱系必须绑定该最终摘要；
+    这只是同一语义路径的两步投影，不是第二套归约核心。
+    -> 验证：四份主数据产物共享事件谱系和事件集合身份，但平台回放游标与模型可见游标保持独立，且无
     标签、奖励或账户状态；事件集合不可变、可分页、可按市场和两种时间范围读取，不为每个
     会话复制整带。一个真实代表市场链路必须证明
     首个合法 `book` 只产生一次初始快照并以源证据初始 tick 建立 `CurrentTick`，后续完整
-    `book` 不再产生初始快照；未知旧 tick、三个独立交易状态和成交 ID 来源在规范事件、
-    Observation 市场状态摘要、谱系及各自时间投影中保持当前双时间语义，不增加第十个
-    Observation 组件或用途分支。
+    `book` 不再产生初始快照；真实动态 old/new tick 及其两 token/asset 链路、三个独立交易状态
+    和成交 ID 来源在规范事件、Observation 市场状态摘要、谱系及各自时间投影中保持当前双时间
+    语义，不增加第十个 Observation 组件或用途分支。合同允许但当前合格真实数据没有出现的
+    未知旧 tick 继续由既有合同边界测试验证，不伪造真实样本。一个聚焦序列还必须证明 epoch
+    切换只使 L2 进入缺失状态，
+    BBA 继续保留模型最后实际收到的值、事件锚点与时间；新 epoch 首条相同数值 BBA 重新锚定
+    BBA 而不恢复 L2，完整 `book` 只恢复 L2 而不派生或覆盖 BBA。
   - 步骤 2.5.2：生成能力矩阵、质量/隔离报告、版本化独立去重/守恒报告和资源高水位，
     并由运行清单绑定各报告 SHA。
     -> 验证：跨产物链可从结果事件或明确无输出处置反查源证据和操作记录，不要求事件嵌入
@@ -553,10 +698,21 @@ changelog 与 Git 中。
     -> 验证：`DPT-AC-001` 至 `DPT-AC-012` 及适用的 `DPT-AC-016/017`、确定性、资源、
     故障和离线边界测试全部已有真实结果；每类可达发布损坏使用一个代表，已发生事故保留
     回归，失败不留下成功清单或门 A 回执，只保留实际能力/失败诊断或临时失败证据。
+    首个正式门 A 运行固定使用
+    `/home/chillchill/new-datasets/2026-08-03/typed_raw/utc_day=2026-08-03/manifest.json`、市场
+    `0xd4346bcf419856fa3261d3c0705597d5c909ead020b9f1a0de468092704fc65f` 和接收时间左闭右开
+    区间 `[1785715201837,1785715888412)`；运行清单绑定该精确市场、参考事件范围、UTC 日和
+    输入清单。正式候选是
+    `/home/chillchill/sim-system/.local-artifacts/data-pipeline-training/gate-a` 下的隐藏直接子目录，
+    构建、资源测量、复核和原子发布均在该发布根的同一文件系统完成。任何范围变化都必须重新
+    实测受影响资源门。
   - 步骤 2.5.4：完成任务自审和独立阶段审查后原子签发带范围回执。
-    -> 验证：只有全部必需能力通过时才签发 `GateAReceiptV2` /
+    -> 验证：只有全部必需能力通过时才签发 `GateAReceiptV3` /
     `REAL_EXECUTION_TAPE_READY`；任何能力未通过或运行失败均不签发回执。成功回执明确
     `training_dataset_ready=false`，最小训练入口消费者仍因缺少门 B 成功回执而拒绝启动。
+    发布实现只保留同文件系统候选目录、完整重验、一次原子重命名和失败清理；外层命令可在候选构建
+    进程退出后收集 RSS/cgroup 证据并触发最终校验，但不增加常驻发布服务、通用 finalizer 协议或人工
+    批准回执字段。
 
 阶段 2 完成门：门 A 的全部必需能力、门 A 测试、自审和独立阶段审查通过并已原子签发
 `REAL_EXECUTION_TAPE_READY` 回执；该完成门不依赖 `sim-system` 实现。部分能力结果只能
@@ -573,9 +729,10 @@ changelog 与 Git 中。
 
 - 任务 3.1：消费模拟器组件符合性证据
   - 步骤 3.1.1：核对独立、已批准 `sim-system` 计划产出的组件符合性通过回执。
-    -> 验证：固定预期黄金事件覆盖合法、边界、故障、幂等、确定性和资源测试；DPT 不实现
-    或复制完整模拟器测试套件。
-  - 步骤 3.1.2：核对黄金与真实事件使用同一 `ExecutionMarketEventV2` 解码入口。
+    -> 验证：固定预期黄金事件覆盖合法、边界、故障、幂等、确定性和资源测试，并覆盖合同允许
+    但当前合格真实数据没有出现的未知旧 tick；DPT 不实现或复制完整模拟器测试套件。
+  - 步骤 3.1.2：核对黄金与真实市场事件使用同一 `ExecutionMarketEventV3` 解码入口；统一
+    事件存储中的参考事件不得进入模拟器平台状态或撮合入口。
     -> 验证：不存在仅供测试的第二套字段解释；组件回执绑定合同版本和实现身份。
 - 任务 3.2：接入真实门 A 事件
   - 步骤 3.2.1：选择至少一个代表性完整市场窗口，绑定输入清单、规范事件摘要和能力范围。
@@ -584,10 +741,11 @@ changelog 与 Git 中。
     -> 验证：隐藏平台状态按 Polymarket orderbook 数据源事件发生时间得到相同转换，模型
     公开市场视图只按 `timestamp_received` 推进，首次分歧诊断满足合同；一个代表序列同时
     证明私有订单响应可以先于对应公开消息可见但不会暴露该消息或隐藏状态，并证明初始 tick
-    只来自事件链、规则快照不能提供或覆盖 tick，且能处理未知旧 tick 和独立交易状态，不重复
+    只来自事件链、规则快照不能提供或覆盖 tick，真实出现的动态 old/new tick 和独立交易状态
+    得到正确处理；未知旧 tick 由步骤 3.1.1 的黄金合同序列验证，不伪造真实样本，也不重复
     阶段 2 的逐字段验证。
   - 步骤 3.2.3：用真实投影重新定标事件数量、速率、突发、内存和查询负载。
-    -> 验证：不把原始行数冒充 `ExecutionMarketEventV2` 数量或生产容量。
+    -> 验证：不把原始行数冒充 `ExecutionMarketEventV3` 数量或生产容量。
 - 任务 3.3：完成跨模块审查
   - 步骤 3.3.1：审查模拟器没有读取 Parquet、重新排序、重新去重或解释源 schema。
     -> 验证：依赖图、代码检索和负向合同测试通过。
@@ -632,7 +790,9 @@ changelog 与 Git 中。
     -> 验证：字段所有权唯一，每项公开数据、私有响应和经济事实遵守自身模型可见时间，未来
     反馈和隐藏平台状态不可达。
   - 步骤 4.2.2：冻结最终逻辑 schema 和模型编码边界。
-    -> 验证：框架中立合同可被最小测试消费者读取，不泄漏训练框架私有类型。
+    -> 验证：框架中立合同可被最小测试消费者读取，不泄漏训练框架私有类型；使用最终选定的
+    数值编码及一个真实代表性范围、精度或转换失败输入，证明编码失败不会反向改写规范
+    `ExactDecimal`。只有最终合同实际使用二进制浮点时才测试对应浮点边界。
 - 任务 4.3：生成标签与删失状态
   - 步骤 4.3.1：构建市场监督标签和成熟执行反馈标签。
     -> 验证：每个标签绑定权威证据、成熟时刻和对应的模型可见 Observation；门 A 不产生
@@ -716,7 +876,7 @@ changelog 与 Git 中。
 | 需求验收 | 主要阶段 | 核心证据 |
 | --- | --- | --- |
 | `DPT-AC-001` | 阶段 1 | 数据根/日期下限、四日清单/文件准入、投影清单与 2026-07-31 负例 |
-| `DPT-AC-002` | 阶段 2/5 | 枚举、批次、并行度、重分片不变性与首分歧诊断 |
+| `DPT-AC-002` | 阶段 2/5 | 物理 SHA 与事件身份分层、受支持批次/run/行组不变性及首分歧诊断 |
 | `DPT-AC-003` | 阶段 1/2/5 | 干净重跑、输入改变和身份失效 |
 | `DPT-AC-004` | 阶段 2 | 未来预取、迟到与因果组双时间边界 |
 | `DPT-AC-005` | 阶段 2 | 真实 `book` 重校准和数量守恒 |
@@ -737,18 +897,59 @@ changelog 与 Git 中。
 
 ## 10. 当前游标
 
-当前游标为：`阶段 0R 完成门已关闭 -> 阶段 2 另行授权门`。双时间公共 V2 类型、核心校验、
-索引条目编码、黄金载荷、受影响回归和独立阶段复审均已完成，最终复审结论为
-`Approved / PASS`、`Critical 0 / Important 0 / Minor 0`。阶段 0R 只关闭公共合同修正切片，
-没有物化完整双索引，也没有签发新的门 A 回执。
+当前游标为：`阶段 2 -> 任务 2.5 实施`。任务 2.1 已按纠正后的
+职责关闭：六类严格物理 schema 校验、有界 Parquet 解码、字段/单位/枚举映射、精确十进制
+边界和真实同源毫秒顺序回归均已完成；任务 2.2.1 至 2.2.3 与任务 2.3 已关闭，任务 2.2.4
+集合级验收和最终规范事件集合的纵向物化继续由任务 2.5 验收，实际模型数值编码边界归任务
+4.2.2。
 
-阶段 1 已完成的准入实现、四日样本基线和资源试验结果继续保留；本轮只运行受影响回归，
-没有重做四日 9.2 GB 完整准入资源试验。阶段 2 的阶段 0R 前置已经满足，但当前仍未取得
-用户另行推进授权；既有阶段 1 审查结论继续只覆盖其准入范围。
+用户已批准 RTDS/Binance 参考更新作为同一唯一规范事件存储中的一等全局事件，并批准以
+`ExecutionMarketEventV3` 删除载荷内 `source_event_ids`，由
+`EventLineageV2.source_evidence` 承担唯一来源追溯。任务 2.2 已发布市场事件 V3、
+`CanonicalReferenceEventV1`、`CanonicalEventRecordV1`、
+`MarketObservationCausalShellV3` 和 `GateAReceiptV3`，并完成六类来源的逐行双时间、来源证据、
+规范身份与单记录双索引投影。同源时间的最终归约顺序已由任务 2.3 确定；任务 2.2.4 的完整
+同一冻结输入下的解码批次、外排 run、读写批次与输出行组扰动，以及索引摘要和物化仍依赖
+任务 2.5；物理 SHA 与事件身份分层由既有合同测试证明，当前固定业务并行度 `1` 只作资源事实
+断言，不得提前宣称集合级验收完成，也不得为验收新增并行或源文件重分片路径。
+
+任务 2.3 已关闭：六类输入的状态归约、事件特定去重、质量边界、终态资格与版本化独立
+归约报告均已实现。Polymarket 同一数据源毫秒按采集接纳先后归约，跨纪元从完整 `book`
+重建；metadata 直接使用 `market_start_utc/market_end_utc` 构建固定窗口，只有合格平台终态
+产生公开判定与退休。等待耗尽摘要只生成带精确原因和来源证据的 `Reject + NO_OUTPUT` 审计
+报告，不生成规范事件、质量边界、第三索引或外部模拟器状态。任务 2.4 已把真实解码、双时间
+投影和各归约器接入唯一完整生产路径；任务 2.5 因正式范围扩大，已按第 2.4.2 节重新实测并
+更新当前资源配置。当前主配置真实候选及闭包复核已经在发布根同类 `ext4` 文件系统、
+`memory.max=1 GiB`、无交换空间下通过，实测最大 RSS 为 `642092 KiB`、cgroup 总内存峰值为
+`693571584` 字节、临时排序峰值为 `904511002` 字节、临时 run 文件峰值为 `195`、
+Observation L2 保留层级峰值为 `240`；这只关闭主配置诊断，不替代尚待正式命令完成的物理
+扰动、逻辑一致性、能力矩阵、原子发布和阶段审查。任务 2.5 不得另建语义路径。
+
+用户已于 2026-08-07 批准任务 2.5 的收窄实施语义：四份主要数据产物及同一事件存储上的两个逻辑视图；
+底层事件和双索引逐条保留，Observation 在每个明确覆盖市场的同一接收毫秒可见事件全部应用后最多生成一条，
+不暴露跨来源人造毫秒内先后；全局参考状态只在明确覆盖市场的 Observation 生成或读取时组合，不向全数据集预复制。
+`contributing_event_ids` 是最多九项的当前组件锚点，九组件映射和摘要前像按第 2.5 节实施。首个正式门 A
+直接选择能让全部必需能力通过的最小完整真实单市场范围，精确范围由真实数据证据和运行清单决定，不增加逐市场人工批准。
+分页只使用有界强类型游标，发布只使用候选目录验证后的一次原子重命名；不建设不透明令牌协议、通用查询层、常驻 finalizer 或人工回执字段。
+
+任务 2.2 编码前发现的来源 ID 闭包缺口已经由用户决定：不增加来源事件实体，不把原始消息
+包装成 `CanonicalEventId` 外键，也不在载荷中复制完整 `SourceEvidenceRefV2`。本次市场合同
+升为 V3，所有原含 `source_event_ids` 的载荷同步升版并删除该字段；事件身份继续绑定顶层
+lineage 的稳定语义来源证据，但排除物理清单和文件 SHA。V2 旧形态只保留在 changelog 与
+Git 历史中，不形成当前兼容路径。
+
+阶段 0R 的双时间公共 V2 类型、核心校验、索引条目编码、
+黄金载荷、受影响回归和独立阶段复审均已完成，最终复审结论为 `Approved / PASS`、
+`Critical 0 / Important 0 / Minor 0`；用户已于 2026-08-06 明确授权阶段 2 本地实施。阶段 0R
+只关闭公共合同修正切片，没有物化完整双索引，也没有签发新的门 A 回执。
+
+阶段 1 已完成的准入实现、四日样本基线和资源试验结果继续保留；阶段 0R 只运行了受影响
+回归，没有重做四日 9.2 GB 完整准入资源试验。既有阶段 1 审查结论继续只覆盖其准入范围；
+完整生产路径资源预算仍按任务 2.4 在任务 2.1 至 2.3 接通后实测冻结。
 
 进入受影响的门 B 工作前，仍须由用户决定三项外部能力采用两个还是三个批准事项，并决定
 订单请求与私有响应通道的正式时延配置档回执位于门 B 之前，还是位于门 B 与正式
 `model-train` 之间。这些待决项不阻断门 A，也不替代公开数据已经记录的双时间坐标。CLOB
 最小订单数量、完整 `feeSchedule` 与 `itode` 归 `sim-system` 冷启动规则快照，不是门 A 缺口。
-用户已批准本轮阶段 0R 本地实现、一次收口提交和推送；本授权不包含阶段 2、`sim-system`
-实施、发布、部署或任何远端运行状态变化。
+当前阶段 2 授权只覆盖本地代码、测试和不可变本地产物，不包含 `sim-system` 实施、推送、
+发布、部署或任何远端运行状态变化。

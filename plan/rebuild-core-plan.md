@@ -63,10 +63,11 @@
   `/home/chillchill/sim-system` 只是文档与分支工作树，不是部署根。
 - `data-collect` 现状只能由 `data-collect/docs/CURRENT.md`、当前代码和当前测试确定；本文
   不重开已完成事项，不恢复旧游标。
-- `data-pipeline(training)` 当前公共合同为 V2；其当前游标、门 A/门 B 实施和回执签发只以
+- `data-pipeline(training)` 当前市场事件合同为 `ExecutionMarketEventV3`。当前游标、门 A/门 B
+  实施和回执签发只以
   `plan/data-pipeline-training-plan.md` 为准。本文只消费公开类型、产物和回执，并规定它们在
   总链路中的前后关系；公共类型存在不得写成门 A 已经签发。
-- `sim-system` 的领域技术细节只以 `plan/sim-system-plan.md` 及其消费的公共 Rust V2 顶层类型为
+- `sim-system` 的领域技术细节只以 `plan/sim-system-plan.md` 及其消费的公共 Rust 市场事件类型为
   准；`demand/sim-system-demand.md` 只提供宏观范围与验收。若归属计划、本文、公共类型或
   真实代码不能同时成立，必须停止并交由用户决定，不能自行调和。
 - 官方文档、官方 HTTPS 规则响应、锁定官方 Rust SDK、真实产物和用户冻结的项目规则假设
@@ -109,7 +110,7 @@
    联合验收 -> 外部归一化与 training Ledger 就绪 -> DPT 门 B -> `model-train` -> 独立
    offline-evaluation -> paper -> live shadow -> 逐次用户授权的真实资金阶段。
 3. `data-pipeline(training)` 是类型化原始证据到规范市场事件的唯一语义归属方。DPT 门 A、
-   门 B、公共 V2 类型、产物和回执都由 `plan/data-pipeline-training-plan.md` 实现与签发；本文
+   门 B、版本化公共类型、产物和回执都由 `plan/data-pipeline-training-plan.md` 实现与签发；本文
    不解码原始 schema、不排序或去重原始证据、不构建 DPT 产物，也不签发 DPT 回执。
 4. `sim-system` 只消费公共市场事件和已冻结规则快照并输出模拟平台原始证据；具体方法、规则、
    状态机、资源和三层验收只由 `plan/sim-system-plan.md` 拥有。本文不复制其字段清单、阶段状态
@@ -118,32 +119,43 @@
    调用模拟器，模拟证据也不得进入 live 状态。模型和 DPT 只读本实例 Ledger 投影，不拥有
    归一化或 Ledger 写权限。
 
-### 1.6 DPT 公共 V2 消费合同
+### 1.6 DPT 版本化公共消费合同
 
-1. rebuild-core 直接消费仓库公共 Rust 类型 `ExecutionMarketEventV2`、
-   `EventTimeIndexEntryV2`、`VisibilityIndexEntryV2`、
-   `MarketObservationCausalShellV2` 和 `GateAReceiptV2`，不另建总集成副本。公共类型与
+1. rebuild-core 直接消费仓库公共 Rust 类型 `CanonicalEventRecordV1`、
+   `ExecutionMarketEventV3`、`CanonicalReferenceEventV1`、`EventTimeIndexEntryV2`、
+   `VisibilityIndexEntryV2`、`MarketObservationCausalShellV3` 和 `GateAReceiptV3`，不另建
+   总集成副本。公共类型与
    `plan/data-pipeline-training-plan.md` 不一致时必须停止，不能在本文兼容猜值。
-2. 两个索引以同一 `event_id` 引用唯一 `ExecutionMarketEventV2`。训练与离线评估的隐藏平台
-   状态只消费数据源事件时间索引；交易侧公开视图和 `MarketObservationCausalShellV2` 只消费
-   采集端接收时间可见索引。隐藏平台状态不得进入模型公开视图，模拟盘不得取得完整历史隐藏
-   回放，实盘不得调用模拟器。
-3. 当前 `ExecutionMarketEventV2` 的总集成兼容边界是：首次 `InitialL2SnapshotV1` 必须携带
+2. `CanonicalEventRecordV1` 封闭市场事件和全局参考事件，并作为唯一事件存储记录；不建立
+   平行事件带，也不按市场复制参考事件。所有模型可见事件进入接收时间可见索引，只有存在
+   真实数据源事件时间的事件进入事件时间索引；每个索引 ID 都必须解析到唯一存储记录。
+   训练与离线评估的隐藏平台状态及 `sim-system` 只消费 `ExecutionMarketEventV3` 市场事件的
+   数据源事件时间投影；交易侧公开视图和 `MarketObservationCausalShellV3` 可以引用市场与
+   参考事件的接收时间可见投影。隐藏平台状态不得进入模型公开视图，模拟盘不得取得完整历史
+   隐藏回放，实盘不得调用模拟器。只有具有真实数据源事件时间的合格市场判定才能驱动隐藏
+   平台退休、资金释放和结算；只有接收时间的公开结果证据不能用市场结束时间、接收时间或
+   本地时间补成平台判定时间。受影响范围只能得到 DPT 失败诊断且不存在门 A 回执；若另行
+   显式缩小范围并重新验收，总集成只能消费该新范围成功回执实际覆盖的结果。采集等待耗尽
+   摘要只属于 DPT 隔离审计，不是公共市场终态；总集成不得为它增加第三控制索引或模拟器外部
+   生命周期分支。
+3. 当前 `ExecutionMarketEventV3` 的总集成兼容边界是：首次 `InitialL2SnapshotV2` 必须携带
    逐资产正数 `initial_tick_size_pusd_per_share`，且只表示首次装载、没有 `purpose` 用途分支；动态
-   `TickSizeChangeV1.old_tick_size_pusd_per_share` 可以未知，`new_tick_size_pusd_per_share`
-   必须存在；`MarketTradingStateV1` 分别表达可空的 `active`、`closed`、
-   `accepting_orders`，不得压成组合状态机；`PublicTradeV1.trade_id_source` 必须区分平台交易
-   哈希与派生源证据。这些嵌套 `V1` 载荷仍由当前 V2 事件包络复用，不得因顶层版本升级而
-   擅自改名。
+   `TickSizeChangeV2.old_tick_size_pusd_per_share` 可以未知，`new_tick_size_pusd_per_share`
+   必须存在；`MarketTradingStateV2` 分别表达可空的 `active`、`closed`、
+   `accepting_orders`，不得压成组合状态机；`PublicTradeV2.trade_id_source` 必须区分平台交易
+   哈希与派生源证据。所有原含 `source_event_ids` 的嵌套载荷已经随市场事件 V3 同步升版并
+   删除该字段；`EventLineageV2.source_evidence` 是唯一来源追溯，rebuild-core 不解析它来
+   重建排序、去重或归约。
 4. 后续完整 `book` 不得再次产生初始快照。状态相同时只确认，存在唯一净差额时只通过
    `LevelExecutionBasis::BookResyncDeltaInference` 及其既有归因/队列质量边界表达和应用一次；
    质量事件负责缺口与重同步，不建立第二条完整盘口应用路径。
-5. tick 的唯一权威链为 `data-collect -> data-pipeline -> ExecutionMarketEventV2 ->
+5. tick 的唯一权威链为 `data-collect -> data-pipeline -> ExecutionMarketEventV3 ->
    sim-system`。CLOB `min_order_size`、完整 `feeSchedule`、`itode`、`oas` 和秒级延迟规则不进入
    DPT 市场事件或 Observation；模拟器规则快照不得查询、保存或交叉校验 tick。
-6. 门 A 只接受 DPT 原子签发、能够按公共合同解码的 `GateAReceiptV2`：其绑定的
+6. 门 A 只接受 DPT 原子签发、能够按公共合同解码的 `GateAReceiptV3`：其绑定的
    `GateACapabilityMatrixV2` 必须全部为 `CapabilityStatus::Pass`，
-   `training_dataset_ready` 必须为 false，V2 合同版本、输入与实现身份以及唯一事件存储、
+   `training_dataset_ready` 必须为 false，统一事件记录、市场事件、参考事件、Observation、
+   双索引合同版本、输入与实现身份以及唯一事件存储、
    事件时间索引、模型可见索引和 Observation 四份清单摘要必须一致；不读取回执中不存在的
    `status`、`verdict` 或 `artifact_kind`。上述条件共同关闭
    `REAL_EXECUTION_TAPE_READY`。能力失败、准入失败、构建失败或运行中断只构成诊断。
@@ -280,8 +292,8 @@
     -> 验证：依赖图不含业务 crate、Python 或官方 SDK；合同中没有排序、撮合、归一化、
     Ledger 或生产行为。
 - 任务 1.2：接入归属方公共合同
-  - 步骤 1.2.1：直接消费 DPT 归属计划和仓库公共 Rust V2 顶层类型，并按第 1.6 节验证总集成兼容
-    边界；rebuild-core 不冻结、复制或扩展 DPT 字段。
+  - 步骤 1.2.1：直接消费 DPT 归属计划和第 1.6 节列明的仓库当前公共 Rust 顶层类型，并验证
+    总集成兼容边界；rebuild-core 不冻结、复制或扩展 DPT 字段。
     -> 验证：唯一事件与双索引共享 `event_id`，模型公开视图不纳入接收时间晚于可见截止点的
     事件；首次逐资产正数 tick、动态旧 tick 可未知、首次快照无 `purpose`、三个独立交易状态、
     来源可辨的 `trade_id_source`，以及后续完整盘口只确认或形成
@@ -321,15 +333,16 @@
 `data-collect` 若需改变，必须另有获批三件套。
 
 - 任务 2.1：验证 DPT 门 A 回执
-  - 步骤 2.1.1：按公共解码入口读取 `GateAReceiptV2` 及其绑定的
+  - 步骤 2.1.1：按公共解码入口读取 `GateAReceiptV3` 及其绑定的
     `GateACapabilityMatrixV2`，验证矩阵全部为 `CapabilityStatus::Pass`、
-    `training_dataset_ready=false`，V2 合同版本、输入与实现身份以及四份产物清单摘要一致。
+    `training_dataset_ready=false`，当前合同版本、输入与实现身份以及四份产物清单摘要一致。
     -> 验证：回执缺失、解码失败、矩阵非全 PASS、布尔值不符、合同版本不符或任一身份/摘要
     不符均阻断本阶段；失败诊断不能代替回执，rebuild-core 不读取不存在的 `status`、
     `verdict` 或 `artifact_kind`。
 - 任务 2.2：消费不可变门 A 产物
-  - 步骤 2.2.1：只读加载回执绑定的唯一规范事件存储、事件时间索引、模型可见索引、市场侧
-    因果外壳和真实 `ExecutionMarketEventV2`，核对其与第 1.6 节公共消费合同一致。
+  - 步骤 2.2.1：只读加载回执绑定的 `CanonicalEventRecordV1` 唯一规范事件存储、事件时间
+    索引、模型可见索引、市场侧因果外壳，以及市场与参考事件视图；传给模拟器的输入只允许
+    真实 `ExecutionMarketEventV3` 市场事件，核对其与第 1.6 节公共消费合同一致。
     -> 验证：两个索引以同一 `event_id` 引用唯一事件并保持各自时间用途；输入谱系根、日期
     下限、最终化准入和四份产物清单摘要都由 DPT 回执可追溯；rebuild-core 不直接读取
     typed_raw、不建立第二排序器，也不从测试替身推导真实纵向就绪。
@@ -338,7 +351,7 @@
     -> 验证：黄金事件可独立验证组件，但只有门 A 绑定的真实事件能关闭真实纵向部分；模拟器
     规则冷启动或联合验收失败不反向改变 DPT 回执。
 
-阶段 2 完成门：DPT 已由其归属计划原子签发有效 `GateAReceiptV2`，且 rebuild-core 对可
+阶段 2 完成门：DPT 已由其归属计划原子签发有效 `GateAReceiptV3`，且 rebuild-core 对可
 解码性、全 PASS 能力矩阵、`training_dataset_ready=false` 及全部绑定身份/摘要的只读检查
 通过，由此关闭 `REAL_EXECUTION_TAPE_READY`。
 
@@ -346,7 +359,7 @@
 
 ## 5. 阶段 3：Intent Bridge 模拟后端与 sim-system
 
-本阶段只按 `plan/sim-system-plan.md` 和仓库公共 Rust V2 顶层类型消费模拟器实现与三层验收证据，
+本阶段只按 `plan/sim-system-plan.md` 和仓库公共 Rust 市场事件类型消费模拟器实现与三层验收证据，
 不在总集成计划内重建其字段清单、阶段状态或测试矩阵。黄金事件组件验收可按归属计划推进；
 真实纵向结论必须等待阶段 2 的 `REAL_EXECUTION_TAPE_READY`。冷启动或联合验收失败只阻断
 模拟器及其下游，不反向改变 DPT 门 A。
@@ -376,16 +389,18 @@
     -> 验证：固定场景和种子可重放响应先后、迟到、缺失与同刻竞态；客户端未知不改写平台
     真值，总集成层不重做关联或仲裁。
 - 任务 3.4：验收撤单、dust 与终态
-  - 步骤 3.4.1：按归属计划核对模型撤单、到期、市场关闭、紧急撤单、迟到成交和 dust 证据。
-    -> 验证：撤单响应不制造成交，实际成交、dust 和预留释放边界清晰，并可供外部归一化层
-    一次性消费。
+  - 步骤 3.4.1：按归属计划核对模型撤单、到期、`end_at` 后操作门、合格
+    `MarketResolved` 订单终态、紧急撤单、迟到成交和 dust 证据。
+    -> 验证：`end_at` 不自动关单或释放资金预留，盘后撤单不制造成交，合格判定只关闭仍开放
+    的未成交余量并释放其预留；缺少数据源事件时间的结果证据不触发隐藏平台判定或结算；实际
+    成交、dust 与后续结算边界可供外部归一化层一次性消费。
 - 任务 3.5：验收手续费、返佣与结算平台事实
   - 步骤 3.5.1：消费归属计划对逐市场规则、实际成交角色、应计、日桶、付款和结算的证据。
     -> 验证：maker/taker 经济分开追溯，应计只增加一次价值，付款只迁移资产分桶；模拟器不
     写外部 Ledger，也不建立通用规则引擎。
 - 任务 3.6：关闭组件、真实纵向与资源验收
   - 步骤 3.6.1：先用黄金事件完成组件验收，再用阶段 2 回执绑定的真实
-    `ExecutionMarketEventV2` 通过同一公共入口完成联合验收。
+    `ExecutionMarketEventV3` 市场事件通过同一公共入口完成联合验收；参考事件不进入模拟器。
     -> 验证：两类输入均通过归属计划规定的组件、确定性、边界和资源层；黄金事件不能代替
     真实纵向，模拟器也不读取 typed_raw 或形成第二套 DPT 路径。
   - 步骤 3.6.2：只为组件和联合验收使用明确标识的固定符合性时延配置。
@@ -738,7 +753,7 @@
 ## 17. 当前草案非授权声明
 
 截至 2026-08-06 本次同步，DPT 当前游标只从 `plan/data-pipeline-training-plan.md` 读取；
-rebuild-core 阶段 2 在实际取得有效 `GateAReceiptV2` 前保持条件性阻断。rebuild-core 本身仍
+rebuild-core 阶段 2 在实际取得有效 `GateAReceiptV3` 前保持条件性阻断。rebuild-core 本身仍
 没有任何阶段取得执行游标，也没有发生代码创建、数据读取/构建、模拟器实现、训练、校准、
 远端同步、依赖安装、部署、提交、推送、钱包访问、真实下单或资金操作。下一步仅为用户审核
 需求与本计划；审核意见若改变语义，必须先同步需求、计划和 changelog，再重新判断实施游标。

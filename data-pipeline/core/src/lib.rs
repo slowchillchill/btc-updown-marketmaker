@@ -1,3 +1,6 @@
+pub mod reduction;
+pub mod typed_raw;
+
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fmt::{Display, Formatter};
@@ -8,11 +11,18 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const EVENT_ID_DOMAIN: &[u8] = b"data-pipeline/canonical-event-id/v2\0";
-const OBSERVATION_ID_DOMAIN: &[u8] = b"data-pipeline/market-observation-id/v2\0";
-const OBSERVATION_HASH_DOMAIN: &[u8] = b"data-pipeline/market-observation-hash/v2\0";
+const EXECUTION_EVENT_ID_DOMAIN_V3: &[u8] =
+    b"data-pipeline/canonical-event-id/execution-market-event/v3\0";
+const REFERENCE_EVENT_ID_DOMAIN_V1: &[u8] =
+    b"data-pipeline/canonical-event-id/reference-event/v1\0";
+const OBSERVATION_ID_DOMAIN_V3: &[u8] = b"data-pipeline/market-observation-id/v3\0";
+const OBSERVATION_HASH_DOMAIN_V3: &[u8] = b"data-pipeline/market-observation-hash/v3\0";
 const CONTRACT_DIGEST_DOMAIN: &[u8] = b"data-pipeline/contract-digest/v2\0";
-const GATE_A_RECEIPT_ID_DOMAIN: &[u8] = b"data-pipeline/gate-a-receipt-id/v2\0";
+const GATE_A_RECEIPT_ID_DOMAIN_V3: &[u8] = b"data-pipeline/gate-a-receipt-id/v3\0";
+const METADATA_SEMANTIC_LOCATOR_DOMAIN_V1: &[u8] =
+    b"data-pipeline/source-evidence/metadata-semantic-locator/v1\0";
+const RTDS_NATIVE_PAYLOAD_DOMAIN_V1: &[u8] =
+    b"data-pipeline/source-evidence/rtds-native-payload/v1\0";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ContractError {
@@ -143,6 +153,213 @@ fn hash_domain_bytes(domain: &[u8], bytes: &[u8]) -> Sha256Hex {
     Sha256Hex(format!("{:x}", hasher.finalize()))
 }
 
+fn typed_raw_contract_error(error: typed_raw::TypedRawError) -> ContractError {
+    invalid("typed_raw", error.to_string())
+}
+
+const fn metadata_row_kind_name(kind: typed_raw::PolymarketMetadataRowKind) -> &'static str {
+    match kind {
+        typed_raw::PolymarketMetadataRowKind::MetadataSnapshot => "metadata_snapshot",
+        typed_raw::PolymarketMetadataRowKind::MarketStateTransition => "market_state_transition",
+        typed_raw::PolymarketMetadataRowKind::ResolutionPollAttempt => "resolution_poll_attempt",
+        typed_raw::PolymarketMetadataRowKind::ResolutionTerminalWs => "resolution_terminal_ws",
+        typed_raw::PolymarketMetadataRowKind::ResolutionFollowupSummary => {
+            "resolution_followup_summary"
+        }
+    }
+}
+
+const fn metadata_source_origin_name(
+    origin: typed_raw::MetadataSourceEvidenceOrigin,
+) -> &'static str {
+    match origin {
+        typed_raw::MetadataSourceEvidenceOrigin::GammaMarketsDiscovery => "gamma_markets_discovery",
+        typed_raw::MetadataSourceEvidenceOrigin::GammaBySlug => "gamma_by_slug",
+        typed_raw::MetadataSourceEvidenceOrigin::MarketResolvedWs => "market_resolved_ws",
+    }
+}
+
+#[derive(Serialize)]
+struct MetadataSemanticLocatorV1<'a> {
+    schema_version: &'a str,
+    metadata_row_kind: &'static str,
+    timestamp_received: i64,
+    collector_host_id: &'a str,
+    collector_admission_sequence: u64,
+    collector_admission_time_utc_ms: i64,
+    slug: &'a str,
+    condition_id: &'a str,
+    clob_market_id: &'a str,
+    source_evidence_origin: Option<&'static str>,
+    source_evidence_received_at_utc: Option<i64>,
+    ws_platform_timestamp_utc: Option<i64>,
+    ws_claimant_source_sequence_epoch_id: Option<&'a str>,
+    ws_claimant_collector_admission_sequence: Option<u64>,
+}
+
+fn metadata_semantic_identity(
+    row: &typed_raw::PolymarketMarketMetadataRow,
+) -> Result<SourceNativeIdentityV1, ContractError> {
+    let sha256 = match &row.source_evidence_raw_sha256 {
+        Some(value) => Sha256Hex(value.clone()),
+        None => {
+            let locator = MetadataSemanticLocatorV1 {
+                schema_version: &row.schema_version,
+                metadata_row_kind: metadata_row_kind_name(row.metadata_row_kind),
+                timestamp_received: row.timestamp_received,
+                collector_host_id: &row.collector_host_id,
+                collector_admission_sequence: row.collector_admission_sequence,
+                collector_admission_time_utc_ms: row.collector_admission_time_utc_ms,
+                slug: &row.slug,
+                condition_id: &row.condition_id,
+                clob_market_id: &row.clob_market_id,
+                source_evidence_origin: row.source_evidence_origin.map(metadata_source_origin_name),
+                source_evidence_received_at_utc: row.source_evidence_received_at_utc,
+                ws_platform_timestamp_utc: row.ws_platform_timestamp_utc,
+                ws_claimant_source_sequence_epoch_id: row
+                    .ws_claimant_source_sequence_epoch_id
+                    .as_deref(),
+                ws_claimant_collector_admission_sequence: row
+                    .ws_claimant_collector_admission_sequence,
+            };
+            hash_domain_bytes(METADATA_SEMANTIC_LOCATOR_DOMAIN_V1, &stable_json(&locator)?)
+        }
+    };
+    Ok(SourceNativeIdentityV1::SemanticEvidenceSha256 { sha256 })
+}
+
+fn collector_admission(
+    source_sequence_epoch_id: &str,
+    collector_admission_sequence: u64,
+    collector_admission_time_utc_ms: i64,
+) -> CollectorAdmissionCoordinateV1 {
+    CollectorAdmissionCoordinateV1 {
+        source_sequence_epoch_id: source_sequence_epoch_id.to_owned(),
+        collector_admission_sequence,
+        admitted_at_utc_ms: collector_admission_time_utc_ms,
+    }
+}
+
+pub fn source_evidence_from_typed_raw(
+    row: &typed_raw::TypedRawRow,
+    input_manifest_sha256: &Sha256Hex,
+    input_file_sha256: &Sha256Hex,
+) -> Result<SourceEvidenceRefV2, ContractError> {
+    row.validate().map_err(typed_raw_contract_error)?;
+    decode_sha256(input_manifest_sha256, "input_manifest_sha256")?;
+    decode_sha256(input_file_sha256, "input_file_sha256")?;
+
+    let (
+        source_kind,
+        source_native_identity,
+        source_event_at_utc_ms,
+        received_at_utc_ms,
+        admission,
+    ) = match row {
+        typed_raw::TypedRawRow::PolymarketOrderbook(row) => (
+            CanonicalSourceKind::PolymarketOrderbook,
+            None,
+            row.timestamp,
+            row.timestamp_received,
+            Some(collector_admission(
+                &row.source_sequence_epoch_id,
+                row.collector_admission_sequence,
+                row.collector_admission_time_utc_ms,
+            )),
+        ),
+        typed_raw::TypedRawRow::PolymarketMarketMetadata(row) => (
+            CanonicalSourceKind::PolymarketMarketMetadata,
+            Some(metadata_semantic_identity(row)?),
+            match row.source_evidence_origin {
+                Some(typed_raw::MetadataSourceEvidenceOrigin::MarketResolvedWs) => {
+                    row.ws_platform_timestamp_utc
+                }
+                _ => None,
+            },
+            row.timestamp_received,
+            None,
+        ),
+        typed_raw::TypedRawRow::PolymarketRtdsChainlinkBtcUsd(row) => (
+            CanonicalSourceKind::PolymarketRtdsChainlinkBtcUsd,
+            Some(SourceNativeIdentityV1::SemanticEvidenceSha256 {
+                sha256: hash_domain_bytes(
+                    RTDS_NATIVE_PAYLOAD_DOMAIN_V1,
+                    row.source_native_payload_json.as_bytes(),
+                ),
+            }),
+            (row.freshness_status != typed_raw::RtdsFreshnessStatus::InvalidTimestamp)
+                .then_some(row.payload_timestamp),
+            row.timestamp_received,
+            None,
+        ),
+        typed_raw::TypedRawRow::BinanceDepthSnapshot(row) => (
+            CanonicalSourceKind::BinanceDepthSnapshot,
+            Some(SourceNativeIdentityV1::BinanceDepthSnapshot {
+                last_update_id: row.last_update_id,
+            }),
+            None,
+            row.timestamp_received,
+            Some(collector_admission(
+                &row.source_sequence_epoch_id,
+                row.collector_admission_sequence,
+                row.collector_admission_time_utc_ms,
+            )),
+        ),
+        typed_raw::TypedRawRow::BinanceDepthUpdate(row) => (
+            CanonicalSourceKind::BinanceDepthUpdate,
+            Some(SourceNativeIdentityV1::BinanceDepthUpdate {
+                first_update_id: row.first_update_id,
+                final_update_id: row.final_update_id,
+            }),
+            Some(row.event_time),
+            row.timestamp_received,
+            Some(collector_admission(
+                &row.source_sequence_epoch_id,
+                row.collector_admission_sequence,
+                row.collector_admission_time_utc_ms,
+            )),
+        ),
+        typed_raw::TypedRawRow::BinanceAggTrade(row) => {
+            let (source_native_identity, source_event_at_utc_ms) = match &row.record {
+                typed_raw::BinanceAggTradeRecord::Trade {
+                    aggregate_trade_id,
+                    trade_time,
+                    ..
+                } => (
+                    Some(SourceNativeIdentityV1::BinanceAggregateTrade {
+                        aggregate_trade_id: *aggregate_trade_id,
+                    }),
+                    Some(*trade_time),
+                ),
+                typed_raw::BinanceAggTradeRecord::InvalidInput { .. } => (None, None),
+            };
+            (
+                CanonicalSourceKind::BinanceAggtrade,
+                source_native_identity,
+                source_event_at_utc_ms,
+                row.timestamp_received,
+                Some(collector_admission(
+                    &row.source_sequence_epoch_id,
+                    row.collector_admission_sequence,
+                    row.collector_admission_time_utc_ms,
+                )),
+            )
+        }
+    };
+
+    let evidence = SourceEvidenceRefV2 {
+        source_kind,
+        source_native_identity,
+        source_event_at_utc_ms,
+        received_at_utc_ms,
+        collector_admission: admission,
+        input_manifest_sha256: input_manifest_sha256.clone(),
+        input_file_sha256: input_file_sha256.clone(),
+    };
+    validate_source_evidence(std::slice::from_ref(&evidence))?;
+    Ok(evidence)
+}
+
 pub fn gate_a_capability_matrix_digest(
     matrix: &GateACapabilityMatrixV2,
 ) -> Result<Sha256Hex, ContractError> {
@@ -163,18 +380,20 @@ struct SemanticSourceEvidence<'a> {
 }
 
 #[derive(Serialize)]
-struct EventIdentityMaterial<'a> {
+struct ExecutionEventIdentityMaterialV3<'a> {
     schema_version: &'a str,
-    market: &'a MarketIdentityV1,
+    market: &'a MarketIdentityV2,
     time: &'a EventTimeV2,
     canonical_rule_version: &'a str,
     source_evidence: Vec<SemanticSourceEvidence<'a>>,
     quality: &'a EventQualityV2,
-    payload: &'a ExecutionMarketEventPayloadV2,
+    payload: &'a ExecutionMarketEventPayloadV3,
 }
 
-fn event_identity_material(event: &ExecutionMarketEventV2) -> EventIdentityMaterial<'_> {
-    EventIdentityMaterial {
+fn execution_event_identity_material_v3(
+    event: &ExecutionMarketEventV3,
+) -> ExecutionEventIdentityMaterialV3<'_> {
+    ExecutionEventIdentityMaterialV3 {
         schema_version: &event.schema_version,
         market: &event.market,
         time: &event.time,
@@ -196,12 +415,12 @@ fn event_identity_material(event: &ExecutionMarketEventV2) -> EventIdentityMater
     }
 }
 
-pub fn derive_canonical_event_id(
-    event: &ExecutionMarketEventV2,
+pub fn derive_execution_market_event_v3_id(
+    event: &ExecutionMarketEventV3,
 ) -> Result<CanonicalEventId, ContractError> {
-    let bytes = stable_json(&event_identity_material(event))?;
+    let bytes = stable_json(&execution_event_identity_material_v3(event))?;
     Ok(CanonicalEventId(
-        hash_domain_bytes(EVENT_ID_DOMAIN, &bytes).0,
+        hash_domain_bytes(EXECUTION_EVENT_ID_DOMAIN_V3, &bytes).0,
     ))
 }
 
@@ -429,13 +648,9 @@ fn validate_sorted_assets(values: &[AssetIdentityV1], field: &str) -> Result<(),
     Ok(())
 }
 
-fn validate_market(market: &MarketIdentityV1, field: &str) -> Result<(), ContractError> {
+fn validate_market(market: &MarketIdentityV2, field: &str) -> Result<(), ContractError> {
     validate_condition_id(&market.condition_id.0, &format!("{field}.condition_id"))?;
     validate_unsigned_decimal_id(&market.clob_market_id.0, &format!("{field}.clob_market_id"))?;
-    decode_sha256(
-        &market.window.window_id,
-        &format!("{field}.window.window_id"),
-    )?;
     if market.window.start_at_utc_ms >= market.window.end_at_utc_ms {
         return Err(invalid(
             format!("{field}.window"),
@@ -514,7 +729,6 @@ fn validate_source_native_identity(
         ) if *first_update_id > 0 && *final_update_id >= *first_update_id => {}
         (
             CanonicalSourceKind::PolymarketMarketMetadata
-            | CanonicalSourceKind::PolymarketOrderbook
             | CanonicalSourceKind::PolymarketRtdsChainlinkBtcUsd,
             SourceNativeIdentityV1::SemanticEvidenceSha256 { sha256 },
         ) => {
@@ -617,6 +831,12 @@ fn validate_source_evidence(values: &[SourceEvidenceRefV2]) -> Result<(), Contra
                 ));
             }
         }
+        if value.source_native_identity.is_none() && value.collector_admission.is_none() {
+            return Err(invalid(
+                format!("lineage.source_evidence[{index}]"),
+                "requires a source-native identity or complete collector admission coordinate",
+            ));
+        }
         validate_source_native_identity(
             value.source_kind,
             &value.source_native_identity,
@@ -652,7 +872,45 @@ fn validate_source_evidence(values: &[SourceEvidenceRefV2]) -> Result<(), Contra
     Ok(())
 }
 
-fn validate_snapshot(snapshot: &InitialL2SnapshotV1) -> Result<(), ContractError> {
+fn validate_event_lineage_and_time(
+    time: &EventTimeV2,
+    lineage: &EventLineageV2,
+) -> Result<(), ContractError> {
+    validate_event_time(time)?;
+    if lineage.canonical_rule_version.is_empty() {
+        return Err(invalid(
+            "lineage.canonical_rule_version",
+            "must not be empty",
+        ));
+    }
+    validate_source_evidence(&lineage.source_evidence)?;
+    let expected_source_event_at = lineage
+        .source_evidence
+        .iter()
+        .filter_map(|source| source.source_event_at_utc_ms)
+        .max();
+    if time.source_event_at_utc_ms != expected_source_event_at {
+        return Err(invalid(
+            "time.source_event_at_utc_ms",
+            "must equal the latest source event time in lineage evidence",
+        ));
+    }
+    let expected_received_at = lineage
+        .source_evidence
+        .iter()
+        .map(|source| source.received_at_utc_ms)
+        .max()
+        .expect("source evidence is non-empty after validation");
+    if time.received_at_utc_ms != expected_received_at {
+        return Err(invalid(
+            "time.received_at_utc_ms",
+            "must equal the latest receive time in lineage evidence",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_snapshot(snapshot: &InitialL2SnapshotV2) -> Result<(), ContractError> {
     validate_asset(&snapshot.asset, "payload.event.asset")?;
     validate_positive_decimal(
         &snapshot.initial_tick_size_pusd_per_share,
@@ -668,7 +926,6 @@ fn validate_snapshot(snapshot: &InitialL2SnapshotV1) -> Result<(), ContractError
         &snapshot.book_digest_sha256,
         "payload.event.book_digest_sha256",
     )?;
-    validate_sorted_event_ids(&snapshot.source_event_ids, "payload.event.source_event_ids")?;
     let mut prior_bid: Option<Decimal> = None;
     for (index, level) in snapshot.bids.iter().enumerate() {
         let price = validate_positive_decimal(
@@ -707,9 +964,9 @@ fn validate_snapshot(snapshot: &InitialL2SnapshotV1) -> Result<(), ContractError
 }
 
 fn validate_level_transition(
-    outer_market: &MarketIdentityV1,
+    outer_market: &MarketIdentityV2,
     outer_time: &EventTimeV2,
-    transition: &LevelExecutionTransitionV2,
+    transition: &LevelExecutionTransitionV3,
 ) -> Result<(), ContractError> {
     if transition.market != *outer_market {
         return Err(invalid(
@@ -763,6 +1020,17 @@ fn validate_level_transition(
             "quantity conservation requires before + net_added == after + net_reduced",
         ));
     }
+    let (expected_added, expected_reduced) = match after.cmp(&before) {
+        Ordering::Greater => (after - before, Decimal::ZERO),
+        Ordering::Less => (Decimal::ZERO, before - after),
+        Ordering::Equal => (Decimal::ZERO, Decimal::ZERO),
+    };
+    if added != expected_added || reduced != expected_reduced {
+        return Err(invalid(
+            "payload.event",
+            "net_added and net_reduced must be the unique non-overlapping difference between before and after",
+        ));
+    }
     if queue > reduced {
         return Err(invalid(
             "payload.event.queue_consumption_quantity_shares",
@@ -793,10 +1061,6 @@ fn validate_level_transition(
             "must equal the event envelope receive time",
         ));
     }
-    validate_sorted_event_ids(
-        &transition.source_event_ids,
-        "payload.event.source_event_ids",
-    )?;
     if transition.basis != LevelExecutionBasis::TradeEvidence
         && transition.source_attribution_quality == SourceAttributionQuality::Exact
     {
@@ -817,17 +1081,15 @@ fn validate_level_transition(
 }
 
 fn validate_terminal(
-    terminal: &MarketResolutionTerminalV2,
-    event_time: &EventTimeV2,
+    terminal: &MarketResolutionTerminalV3,
+    _event_time: &EventTimeV2,
 ) -> Result<(), ContractError> {
-    let (source_event_ids, watermark) = match terminal {
-        MarketResolutionTerminalV2::Resolved {
+    match terminal {
+        MarketResolutionTerminalV3::Resolved {
             winning_asset_id,
             winning_outcome,
             payout_vector,
             mapping_rule_version,
-            source_event_ids,
-            terminal_watermark,
         } => {
             if winning_asset_id.is_empty()
                 || winning_outcome.is_empty()
@@ -887,65 +1149,14 @@ fn validate_terminal(
                     "binary payout must sum to one and identify the unit winning asset",
                 ));
             }
-            (source_event_ids, terminal_watermark)
-        }
-        MarketResolutionTerminalV2::WaitingExhaustedQuarantine {
-            reason_code,
-            source_event_ids,
-            terminal_watermark,
-        } => {
-            if reason_code.is_empty() {
-                return Err(invalid("payload.event.reason_code", "must not be empty"));
-            }
-            (source_event_ids, terminal_watermark)
-        }
-    };
-    validate_sorted_event_ids(source_event_ids, "payload.event.source_event_ids")?;
-    if watermark.last_received_at_utc_ms <= 0 {
-        return Err(invalid(
-            "payload.event.terminal_watermark.last_received_at_utc_ms",
-            "must be positive",
-        ));
-    }
-    if watermark.last_received_at_utc_ms > event_time.received_at_utc_ms {
-        return Err(invalid(
-            "payload.event.terminal_watermark.last_received_at_utc_ms",
-            "must not follow the terminal event receive time",
-        ));
-    }
-    match (
-        watermark.last_source_event_at_utc_ms,
-        event_time.source_event_at_utc_ms,
-    ) {
-        (Some(last), Some(current)) if last > 0 && last <= current => {}
-        (None, None) => {}
-        (Some(last), _) if last <= 0 => {
-            return Err(invalid(
-                "payload.event.terminal_watermark.last_source_event_at_utc_ms",
-                "must be positive when present",
-            ));
-        }
-        _ => {
-            return Err(invalid(
-                "payload.event.terminal_watermark.last_source_event_at_utc_ms",
-                "must use the same source-time namespace and not follow the terminal event",
-            ));
         }
     }
-    decode_sha256(
-        &watermark.canonical_event_root_sha256,
-        "payload.event.terminal_watermark.canonical_event_root_sha256",
-    )?;
-    decode_sha256(
-        &watermark.lineage_identity_sha256,
-        "payload.event.terminal_watermark.lineage_identity_sha256",
-    )?;
     Ok(())
 }
 
-fn validate_payload(event: &ExecutionMarketEventV2) -> Result<(), ContractError> {
+fn validate_payload(event: &ExecutionMarketEventV3) -> Result<(), ContractError> {
     match &event.payload {
-        ExecutionMarketEventPayloadV2::MarketLifecycleTransition(transition) => {
+        ExecutionMarketEventPayloadV3::MarketLifecycleTransition(transition) => {
             if let Some(previous) = &transition.previous_state {
                 validate_mapped_lifecycle_state(previous, "payload.event.previous_state")?;
             }
@@ -954,18 +1165,12 @@ fn validate_payload(event: &ExecutionMarketEventV2) -> Result<(), ContractError>
                 "payload.event.current_state",
             )?;
             validate_sorted_assets(&transition.assets, "payload.event.assets")?;
-            validate_sorted_event_ids(
-                &transition.source_event_ids,
-                "payload.event.source_event_ids",
-            )?;
         }
-        ExecutionMarketEventPayloadV2::MarketTradingState(state) => {
-            validate_sorted_event_ids(&state.source_event_ids, "payload.event.source_event_ids")?;
-        }
-        ExecutionMarketEventPayloadV2::InitialL2Snapshot(snapshot) => {
+        ExecutionMarketEventPayloadV3::MarketTradingState(_) => {}
+        ExecutionMarketEventPayloadV3::InitialL2Snapshot(snapshot) => {
             validate_snapshot(snapshot)?;
         }
-        ExecutionMarketEventPayloadV2::BestBidAsk(best) => {
+        ExecutionMarketEventPayloadV3::BestBidAsk(best) => {
             validate_asset(&best.asset, "payload.event.asset")?;
             let bid = best
                 .best_bid_pusd_per_share
@@ -987,9 +1192,8 @@ fn validate_payload(event: &ExecutionMarketEventV2) -> Result<(), ContractError>
                     "best bid must not exceed best ask",
                 ));
             }
-            validate_sorted_event_ids(&best.source_event_ids, "payload.event.source_event_ids")?;
         }
-        ExecutionMarketEventPayloadV2::TickSizeChange(change) => {
+        ExecutionMarketEventPayloadV3::TickSizeChange(change) => {
             validate_asset(&change.asset, "payload.event.asset")?;
             if let Some(old_tick_size) = &change.old_tick_size_pusd_per_share {
                 validate_positive_decimal(
@@ -1001,9 +1205,8 @@ fn validate_payload(event: &ExecutionMarketEventV2) -> Result<(), ContractError>
                 &change.new_tick_size_pusd_per_share,
                 "payload.event.new_tick_size_pusd_per_share",
             )?;
-            validate_sorted_event_ids(&change.source_event_ids, "payload.event.source_event_ids")?;
         }
-        ExecutionMarketEventPayloadV2::PublicTrade(trade) => {
+        ExecutionMarketEventPayloadV3::PublicTrade(trade) => {
             validate_asset(&trade.asset, "payload.event.asset")?;
             if trade.trade_id.is_empty() {
                 return Err(invalid("payload.event.trade_id", "must not be empty"));
@@ -1016,34 +1219,35 @@ fn validate_payload(event: &ExecutionMarketEventV2) -> Result<(), ContractError>
             if let Some(fee_rate) = &trade.fee_rate_bps {
                 validate_nonnegative_decimal(fee_rate, "payload.event.fee_rate_bps")?;
             }
-            validate_sorted_event_ids(&trade.source_event_ids, "payload.event.source_event_ids")?;
         }
-        ExecutionMarketEventPayloadV2::LevelExecutionTransition(transition) => {
+        ExecutionMarketEventPayloadV3::LevelExecutionTransition(transition) => {
             validate_level_transition(&event.market, &event.time, transition)?;
         }
-        ExecutionMarketEventPayloadV2::QualityBoundary(boundary) => {
+        ExecutionMarketEventPayloadV3::QualityBoundary(boundary) => {
             if let QualityScopeV1::Asset(asset) = &boundary.scope {
                 validate_asset(asset, "payload.event.scope.asset")?;
+            }
+            if boundary.current_quality != event.quality.availability {
+                return Err(invalid(
+                    "payload.event.current_quality",
+                    "must equal the event envelope availability",
+                ));
             }
             if boundary.reason_code.is_empty() {
                 return Err(invalid("payload.event.reason_code", "must not be empty"));
             }
-            validate_sorted_event_ids(
-                &boundary.source_event_ids,
-                "payload.event.source_event_ids",
-            )?;
         }
-        ExecutionMarketEventPayloadV2::MarketResolutionTerminal(terminal) => {
+        ExecutionMarketEventPayloadV3::MarketResolutionTerminal(terminal) => {
             validate_terminal(terminal, &event.time)?;
         }
     }
     Ok(())
 }
 
-pub fn validate_execution_market_event(
-    event: &ExecutionMarketEventV2,
+pub fn validate_execution_market_event_v3(
+    event: &ExecutionMarketEventV3,
 ) -> Result<(), ContractError> {
-    if event.schema_version != EXECUTION_MARKET_EVENT_SCHEMA_V2 {
+    if event.schema_version != EXECUTION_MARKET_EVENT_SCHEMA_V3 {
         return Err(ContractError::UnsupportedSchema {
             contract: "execution market event",
             actual: event.schema_version.clone(),
@@ -1051,41 +1255,41 @@ pub fn validate_execution_market_event(
     }
     validate_event_id(&event.event_id, "event_id")?;
     validate_market(&event.market, "market")?;
-    validate_event_time(&event.time)?;
-    if event.lineage.canonical_rule_version.is_empty() {
+    validate_event_lineage_and_time(&event.time, &event.lineage)?;
+    if event.lineage.source_evidence.iter().any(|source| {
+        !matches!(
+            source.source_kind,
+            CanonicalSourceKind::PolymarketMarketMetadata
+                | CanonicalSourceKind::PolymarketOrderbook
+        )
+    }) {
         return Err(invalid(
-            "lineage.canonical_rule_version",
-            "must not be empty",
+            "lineage.source_evidence.source_kind",
+            "execution market events only accept Polymarket market evidence",
         ));
     }
-    validate_source_evidence(&event.lineage.source_evidence)?;
-    let expected_source_event_at = event
-        .lineage
-        .source_evidence
-        .iter()
-        .filter_map(|source| source.source_event_at_utc_ms)
-        .max();
-    if event.time.source_event_at_utc_ms != expected_source_event_at {
-        return Err(invalid(
-            "time.source_event_at_utc_ms",
-            "must equal the latest source event time in lineage evidence",
-        ));
-    }
-    let expected_received_at = event
-        .lineage
-        .source_evidence
-        .iter()
-        .map(|source| source.received_at_utc_ms)
-        .max()
-        .expect("source evidence is non-empty after validation");
-    if event.time.received_at_utc_ms != expected_received_at {
-        return Err(invalid(
-            "time.received_at_utc_ms",
-            "must equal the latest receive time in lineage evidence",
-        ));
+    for (index, source) in event.lineage.source_evidence.iter().enumerate() {
+        let provenance_matches = match source.source_kind {
+            CanonicalSourceKind::PolymarketOrderbook => {
+                source.source_native_identity.is_none() && source.collector_admission.is_some()
+            }
+            CanonicalSourceKind::PolymarketMarketMetadata => {
+                matches!(
+                    source.source_native_identity.as_ref(),
+                    Some(SourceNativeIdentityV1::SemanticEvidenceSha256 { .. })
+                ) && source.collector_admission.is_none()
+            }
+            _ => false,
+        };
+        if !provenance_matches {
+            return Err(invalid(
+                format!("lineage.source_evidence[{index}]"),
+                "does not match the frozen Polymarket source provenance mapping",
+            ));
+        }
     }
     validate_payload(event)?;
-    if derive_canonical_event_id(event)? != event.event_id {
+    if derive_execution_market_event_v3_id(event)? != event.event_id {
         return Err(invalid(
             "event_id",
             "does not match the canonical semantic identity",
@@ -1094,57 +1298,450 @@ pub fn validate_execution_market_event(
     Ok(())
 }
 
-pub fn project_event_time_index_entry(
-    event: &ExecutionMarketEventV2,
-) -> Result<Option<EventTimeIndexEntryV2>, ContractError> {
-    validate_execution_market_event(event)?;
-    Ok(event
-        .time
-        .source_event_at_utc_ms
-        .map(|source_event_at_utc_ms| EventTimeIndexEntryV2 {
-            schema_version: EVENT_TIME_INDEX_SCHEMA_V2.to_owned(),
-            event_id: event.event_id.clone(),
-            source_event_at_utc_ms,
-        }))
-}
-
-pub fn project_visibility_index_entry(
-    event: &ExecutionMarketEventV2,
-) -> Result<VisibilityIndexEntryV2, ContractError> {
-    validate_execution_market_event(event)?;
-    Ok(VisibilityIndexEntryV2 {
-        schema_version: VISIBILITY_INDEX_SCHEMA_V2.to_owned(),
-        event_id: event.event_id.clone(),
-        received_at_utc_ms: event.time.received_at_utc_ms,
-    })
-}
-
-pub fn encode_execution_market_event(
-    event: &ExecutionMarketEventV2,
+pub fn encode_execution_market_event_v3(
+    event: &ExecutionMarketEventV3,
 ) -> Result<Vec<u8>, ContractError> {
-    validate_execution_market_event(event)?;
+    validate_execution_market_event_v3(event)?;
     stable_json(event)
 }
 
-pub fn decode_execution_market_event(
+pub fn decode_execution_market_event_v3(
     bytes: &[u8],
-) -> Result<ExecutionMarketEventV2, ContractError> {
+) -> Result<ExecutionMarketEventV3, ContractError> {
     require_schema_version(
         bytes,
-        EXECUTION_MARKET_EVENT_SCHEMA_V2,
+        EXECUTION_MARKET_EVENT_SCHEMA_V3,
         "execution market event",
     )?;
     let event =
         serde_json::from_slice(bytes).map_err(|error| ContractError::Json(error.to_string()))?;
-    validate_execution_market_event(&event)?;
+    validate_execution_market_event_v3(&event)?;
     Ok(event)
+}
+
+#[derive(Serialize)]
+struct ReferenceEventIdentityMaterialV1<'a> {
+    schema_version: &'a str,
+    time: &'a EventTimeV2,
+    canonical_rule_version: &'a str,
+    source_evidence: Vec<SemanticSourceEvidence<'a>>,
+    quality: &'a EventQualityV2,
+    payload: &'a CanonicalReferenceEventPayloadV1,
+}
+
+fn reference_event_identity_material_v1(
+    event: &CanonicalReferenceEventV1,
+) -> ReferenceEventIdentityMaterialV1<'_> {
+    ReferenceEventIdentityMaterialV1 {
+        schema_version: &event.schema_version,
+        time: &event.time,
+        canonical_rule_version: &event.lineage.canonical_rule_version,
+        source_evidence: event
+            .lineage
+            .source_evidence
+            .iter()
+            .map(semantic_source_evidence)
+            .collect(),
+        quality: &event.quality,
+        payload: &event.payload,
+    }
+}
+
+pub fn derive_reference_event_v1_id(
+    event: &CanonicalReferenceEventV1,
+) -> Result<CanonicalEventId, ContractError> {
+    let bytes = stable_json(&reference_event_identity_material_v1(event))?;
+    Ok(CanonicalEventId(
+        hash_domain_bytes(REFERENCE_EVENT_ID_DOMAIN_V1, &bytes).0,
+    ))
+}
+
+fn finalize_reference_event_v1(
+    evidence: SourceEvidenceRefV2,
+    canonical_rule_version: &str,
+    quality: EventQualityV2,
+    payload: CanonicalReferenceEventPayloadV1,
+) -> Result<CanonicalReferenceEventV1, ContractError> {
+    let mut event = CanonicalReferenceEventV1 {
+        schema_version: CANONICAL_REFERENCE_EVENT_SCHEMA_V1.to_owned(),
+        event_id: CanonicalEventId("0".repeat(64)),
+        time: EventTimeV2 {
+            source_event_at_utc_ms: evidence.source_event_at_utc_ms,
+            received_at_utc_ms: evidence.received_at_utc_ms,
+        },
+        lineage: EventLineageV2 {
+            canonical_rule_version: canonical_rule_version.to_owned(),
+            source_evidence: vec![evidence],
+        },
+        quality,
+        payload,
+    };
+    event.event_id = derive_reference_event_v1_id(&event)?;
+    validate_reference_event_v1(&event)?;
+    Ok(event)
+}
+
+pub fn build_chainlink_reference_event_v1(
+    row: &typed_raw::PolymarketRtdsChainlinkBtcUsdRow,
+    input_manifest_sha256: &Sha256Hex,
+    input_file_sha256: &Sha256Hex,
+    canonical_rule_version: &str,
+) -> Result<CanonicalReferenceEventV1, ContractError> {
+    let availability = match row.freshness_status {
+        typed_raw::RtdsFreshnessStatus::Fresh => MarketDataQuality::Fresh,
+        typed_raw::RtdsFreshnessStatus::Stale => MarketDataQuality::Stale,
+        _ => {
+            return Err(invalid(
+                "typed_raw.freshness_status",
+                "invalid RTDS rows cannot form a Chainlink reference update",
+            ));
+        }
+    };
+    let evidence = source_evidence_from_typed_raw(
+        &typed_raw::TypedRawRow::PolymarketRtdsChainlinkBtcUsd(row.clone()),
+        input_manifest_sha256,
+        input_file_sha256,
+    )?;
+    let price_usd_per_btc =
+        typed_raw::normalize_decimal_text(&row.value, "value").map_err(typed_raw_contract_error)?;
+    finalize_reference_event_v1(
+        evidence,
+        canonical_rule_version,
+        EventQualityV2 {
+            availability,
+            resync: ResyncQuality::NotRequired,
+        },
+        CanonicalReferenceEventPayloadV1::ChainlinkBtcUsd(ChainlinkBtcUsdReferenceV1 {
+            symbol: row.symbol.clone(),
+            price_usd_per_btc,
+            message_timestamp_utc_ms: row.message_timestamp,
+        }),
+    )
+}
+
+pub fn build_binance_aggregate_trade_reference_event_v1(
+    row: &typed_raw::BinanceAggTradeRow,
+    input_manifest_sha256: &Sha256Hex,
+    input_file_sha256: &Sha256Hex,
+    canonical_rule_version: &str,
+) -> Result<CanonicalReferenceEventV1, ContractError> {
+    let typed_raw::BinanceAggTradeRecord::Trade {
+        event_time,
+        symbol,
+        aggregate_trade_id,
+        price,
+        quantity,
+        first_trade_id,
+        last_trade_id,
+        buyer_is_maker,
+        ..
+    } = &row.record
+    else {
+        return Err(invalid(
+            "typed_raw.record",
+            "invalid aggTrade rows cannot form aggregate-trade reference updates",
+        ));
+    };
+    let evidence = source_evidence_from_typed_raw(
+        &typed_raw::TypedRawRow::BinanceAggTrade(row.clone()),
+        input_manifest_sha256,
+        input_file_sha256,
+    )?;
+    let price_usdt_per_btc =
+        typed_raw::normalize_decimal_text(price, "price").map_err(typed_raw_contract_error)?;
+    let quantity_btc = typed_raw::normalize_decimal_text(quantity, "quantity")
+        .map_err(typed_raw_contract_error)?;
+    finalize_reference_event_v1(
+        evidence,
+        canonical_rule_version,
+        EventQualityV2 {
+            availability: MarketDataQuality::Fresh,
+            resync: ResyncQuality::NotRequired,
+        },
+        CanonicalReferenceEventPayloadV1::BinanceAggregateTrade(BinanceAggregateTradeReferenceV1 {
+            symbol: symbol.clone(),
+            aggregate_trade_id: *aggregate_trade_id,
+            first_trade_id: *first_trade_id,
+            last_trade_id: *last_trade_id,
+            price_usdt_per_btc,
+            quantity_btc,
+            buyer_is_maker: *buyer_is_maker,
+            event_time_utc_ms: *event_time,
+        }),
+    )
+}
+
+fn validate_reference_levels(
+    bids: &[ReferencePriceLevelV1],
+    asks: &[ReferencePriceLevelV1],
+) -> Result<(), ContractError> {
+    let mut previous_bid: Option<Decimal> = None;
+    for (index, level) in bids.iter().enumerate() {
+        let price = validate_positive_decimal(
+            &level.price_usdt_per_btc,
+            &format!("payload.reference.bids[{index}].price_usdt_per_btc"),
+        )?;
+        validate_nonnegative_decimal(
+            &level.quantity_btc,
+            &format!("payload.reference.bids[{index}].quantity_btc"),
+        )?;
+        if previous_bid.is_some_and(|previous| previous <= price) {
+            return Err(ContractError::NonCanonicalOrder {
+                field: "payload.reference.bids".to_owned(),
+            });
+        }
+        previous_bid = Some(price);
+    }
+    let mut previous_ask: Option<Decimal> = None;
+    for (index, level) in asks.iter().enumerate() {
+        let price = validate_positive_decimal(
+            &level.price_usdt_per_btc,
+            &format!("payload.reference.asks[{index}].price_usdt_per_btc"),
+        )?;
+        validate_nonnegative_decimal(
+            &level.quantity_btc,
+            &format!("payload.reference.asks[{index}].quantity_btc"),
+        )?;
+        if previous_ask.is_some_and(|previous| previous >= price) {
+            return Err(ContractError::NonCanonicalOrder {
+                field: "payload.reference.asks".to_owned(),
+            });
+        }
+        previous_ask = Some(price);
+    }
+    Ok(())
+}
+
+fn validate_reference_payload(event: &CanonicalReferenceEventV1) -> Result<(), ContractError> {
+    match &event.payload {
+        CanonicalReferenceEventPayloadV1::ChainlinkBtcUsd(reference) => {
+            if reference.symbol.is_empty() {
+                return Err(invalid("payload.reference.symbol", "must not be empty"));
+            }
+            validate_positive_decimal(
+                &reference.price_usd_per_btc,
+                "payload.reference.price_usd_per_btc",
+            )?;
+            if reference.message_timestamp_utc_ms <= 0 {
+                return Err(invalid(
+                    "payload.reference.message_timestamp_utc_ms",
+                    "must be positive",
+                ));
+            }
+            let [source] = event.lineage.source_evidence.as_slice() else {
+                return Err(invalid(
+                    "lineage.source_evidence",
+                    "a Chainlink reference update requires exactly one direct RTDS evidence item",
+                ));
+            };
+            if source.source_kind != CanonicalSourceKind::PolymarketRtdsChainlinkBtcUsd
+                || !matches!(
+                    source.source_native_identity.as_ref(),
+                    Some(SourceNativeIdentityV1::SemanticEvidenceSha256 { .. })
+                )
+                || source.collector_admission.is_some()
+                || source.source_event_at_utc_ms.is_none()
+            {
+                return Err(invalid(
+                    "lineage.source_evidence[0]",
+                    "Chainlink reference evidence requires its semantic payload identity, real payload time, and no fabricated collector admission coordinate",
+                ));
+            }
+        }
+        CanonicalReferenceEventPayloadV1::BinanceDepthState(reference) => {
+            if reference.symbol.is_empty() || reference.last_update_id == 0 {
+                return Err(invalid(
+                    "payload.reference",
+                    "Binance depth symbol and last_update_id are required",
+                ));
+            }
+            validate_reference_levels(&reference.bids, &reference.asks)?;
+            let mut terminal_update_id_is_present = false;
+            for (index, source) in event.lineage.source_evidence.iter().enumerate() {
+                let source_matches =
+                    match (source.source_kind, source.source_native_identity.as_ref()) {
+                        (
+                            CanonicalSourceKind::BinanceDepthSnapshot,
+                            Some(SourceNativeIdentityV1::BinanceDepthSnapshot { last_update_id }),
+                        ) => {
+                            terminal_update_id_is_present |=
+                                *last_update_id == reference.last_update_id;
+                            source.source_event_at_utc_ms.is_none()
+                                && source.collector_admission.is_some()
+                        }
+                        (
+                            CanonicalSourceKind::BinanceDepthUpdate,
+                            Some(SourceNativeIdentityV1::BinanceDepthUpdate {
+                                final_update_id,
+                                ..
+                            }),
+                        ) => {
+                            terminal_update_id_is_present |=
+                                *final_update_id == reference.last_update_id;
+                            source.source_event_at_utc_ms.is_some()
+                                && source.collector_admission.is_some()
+                        }
+                        _ => false,
+                    };
+                if !source_matches {
+                    return Err(invalid(
+                        format!("lineage.source_evidence[{index}]"),
+                        "does not match the frozen Binance depth source provenance and time mapping",
+                    ));
+                }
+            }
+            if !terminal_update_id_is_present {
+                return Err(invalid(
+                    "payload.reference.last_update_id",
+                    "must equal a directly evidenced snapshot or update terminal ID",
+                ));
+            }
+        }
+        CanonicalReferenceEventPayloadV1::BinanceAggregateTrade(reference) => {
+            if reference.symbol.is_empty()
+                || reference.aggregate_trade_id == 0
+                || reference.first_trade_id == 0
+                || reference.last_trade_id < reference.first_trade_id
+                || reference.event_time_utc_ms <= 0
+            {
+                return Err(invalid(
+                    "payload.reference",
+                    "Binance aggregate trade identity and event time are invalid",
+                ));
+            }
+            validate_positive_decimal(
+                &reference.price_usdt_per_btc,
+                "payload.reference.price_usdt_per_btc",
+            )?;
+            validate_positive_decimal(&reference.quantity_btc, "payload.reference.quantity_btc")?;
+            let [source] = event.lineage.source_evidence.as_slice() else {
+                return Err(invalid(
+                    "lineage.source_evidence",
+                    "a Binance aggregate trade reference requires exactly one direct evidence item",
+                ));
+            };
+            if source.source_kind != CanonicalSourceKind::BinanceAggtrade
+                || !matches!(
+                    source.source_native_identity.as_ref(),
+                    Some(SourceNativeIdentityV1::BinanceAggregateTrade { aggregate_trade_id })
+                        if *aggregate_trade_id == reference.aggregate_trade_id
+                )
+                || source.source_event_at_utc_ms.is_none()
+                || source.collector_admission.is_none()
+            {
+                return Err(invalid(
+                    "lineage.source_evidence[0]",
+                    "must carry the matching Binance aggregate_trade_id, real trade time, and collector admission coordinate",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_reference_event_v1(event: &CanonicalReferenceEventV1) -> Result<(), ContractError> {
+    if event.schema_version != CANONICAL_REFERENCE_EVENT_SCHEMA_V1 {
+        return Err(ContractError::UnsupportedSchema {
+            contract: "canonical reference event",
+            actual: event.schema_version.clone(),
+        });
+    }
+    validate_event_id(&event.event_id, "event_id")?;
+    validate_event_lineage_and_time(&event.time, &event.lineage)?;
+    validate_reference_payload(event)?;
+    if derive_reference_event_v1_id(event)? != event.event_id {
+        return Err(invalid(
+            "event_id",
+            "does not match the canonical reference identity",
+        ));
+    }
+    Ok(())
+}
+
+pub fn encode_reference_event_v1(
+    event: &CanonicalReferenceEventV1,
+) -> Result<Vec<u8>, ContractError> {
+    validate_reference_event_v1(event)?;
+    stable_json(event)
+}
+
+pub fn decode_reference_event_v1(bytes: &[u8]) -> Result<CanonicalReferenceEventV1, ContractError> {
+    require_schema_version(
+        bytes,
+        CANONICAL_REFERENCE_EVENT_SCHEMA_V1,
+        "canonical reference event",
+    )?;
+    let event =
+        serde_json::from_slice(bytes).map_err(|error| ContractError::Json(error.to_string()))?;
+    validate_reference_event_v1(&event)?;
+    Ok(event)
+}
+
+pub fn validate_canonical_event_record_v1(
+    record: &CanonicalEventRecordV1,
+) -> Result<(), ContractError> {
+    match record {
+        CanonicalEventRecordV1::ExecutionMarketEvent(event) => {
+            validate_execution_market_event_v3(event)
+        }
+        CanonicalEventRecordV1::ReferenceEvent(event) => validate_reference_event_v1(event),
+    }
+}
+
+pub fn encode_canonical_event_record_v1(
+    record: &CanonicalEventRecordV1,
+) -> Result<Vec<u8>, ContractError> {
+    validate_canonical_event_record_v1(record)?;
+    stable_json(record)
+}
+
+pub fn decode_canonical_event_record_v1(
+    bytes: &[u8],
+) -> Result<CanonicalEventRecordV1, ContractError> {
+    let record =
+        serde_json::from_slice(bytes).map_err(|error| ContractError::Json(error.to_string()))?;
+    validate_canonical_event_record_v1(&record)?;
+    Ok(record)
+}
+
+fn record_identity_and_time(record: &CanonicalEventRecordV1) -> (&CanonicalEventId, &EventTimeV2) {
+    match record {
+        CanonicalEventRecordV1::ExecutionMarketEvent(event) => (&event.event_id, &event.time),
+        CanonicalEventRecordV1::ReferenceEvent(event) => (&event.event_id, &event.time),
+    }
+}
+
+pub fn project_record_event_time_index_entry(
+    record: &CanonicalEventRecordV1,
+) -> Result<Option<EventTimeIndexEntryV2>, ContractError> {
+    validate_canonical_event_record_v1(record)?;
+    let (event_id, time) = record_identity_and_time(record);
+    Ok(time
+        .source_event_at_utc_ms
+        .map(|source_event_at_utc_ms| EventTimeIndexEntryV2 {
+            schema_version: EVENT_TIME_INDEX_SCHEMA_V2.to_owned(),
+            event_id: event_id.clone(),
+            source_event_at_utc_ms,
+        }))
+}
+
+pub fn project_record_visibility_index_entry(
+    record: &CanonicalEventRecordV1,
+) -> Result<VisibilityIndexEntryV2, ContractError> {
+    validate_canonical_event_record_v1(record)?;
+    let (event_id, time) = record_identity_and_time(record);
+    Ok(VisibilityIndexEntryV2 {
+        schema_version: VISIBILITY_INDEX_SCHEMA_V2.to_owned(),
+        event_id: event_id.clone(),
+        received_at_utc_ms: time.received_at_utc_ms,
+    })
 }
 
 #[derive(Serialize)]
 struct ObservationIdentityMaterial<'a> {
     schema_version: &'a str,
-    market: &'a MarketIdentityV1,
-    lineage: &'a ObservationLineageV2,
+    market: &'a MarketIdentityV2,
+    lineage: &'a ObservationLineageV3,
     visibility_cutoff: &'a ObservationVisibilityCutoffV2,
 }
 
@@ -1152,16 +1749,16 @@ struct ObservationIdentityMaterial<'a> {
 struct ObservationHashMaterial<'a> {
     schema_version: &'a str,
     observation_id: &'a Sha256Hex,
-    market: &'a MarketIdentityV1,
-    lineage: &'a ObservationLineageV2,
+    market: &'a MarketIdentityV2,
+    lineage: &'a ObservationLineageV3,
     visibility_cutoff: &'a ObservationVisibilityCutoffV2,
     market_state_digest_sha256: &'a Sha256Hex,
     component_states: &'a [ObservationComponentStateV2],
     missing_mask: &'a [ObservationComponentId],
 }
 
-pub fn derive_observation_id(
-    observation: &MarketObservationCausalShellV2,
+pub fn derive_observation_v3_id(
+    observation: &MarketObservationCausalShellV3,
 ) -> Result<Sha256Hex, ContractError> {
     let material = ObservationIdentityMaterial {
         schema_version: &observation.schema_version,
@@ -1170,13 +1767,13 @@ pub fn derive_observation_id(
         visibility_cutoff: &observation.visibility_cutoff,
     };
     Ok(hash_domain_bytes(
-        OBSERVATION_ID_DOMAIN,
+        OBSERVATION_ID_DOMAIN_V3,
         &stable_json(&material)?,
     ))
 }
 
-pub fn derive_observation_hash(
-    observation: &MarketObservationCausalShellV2,
+pub fn derive_observation_v3_hash(
+    observation: &MarketObservationCausalShellV3,
 ) -> Result<Sha256Hex, ContractError> {
     let material = ObservationHashMaterial {
         schema_version: &observation.schema_version,
@@ -1189,7 +1786,7 @@ pub fn derive_observation_hash(
         missing_mask: &observation.missing_mask,
     };
     Ok(hash_domain_bytes(
-        OBSERVATION_HASH_DOMAIN,
+        OBSERVATION_HASH_DOMAIN_V3,
         &stable_json(&material)?,
     ))
 }
@@ -1222,10 +1819,10 @@ pub const REQUIRED_OBSERVATION_COMPONENTS: [ObservationComponentId; 9] = [
     ObservationComponentId::BinanceBtcUsdtTrade,
 ];
 
-pub fn validate_market_observation_causal_shell(
-    observation: &MarketObservationCausalShellV2,
+pub fn validate_market_observation_causal_shell_v3(
+    observation: &MarketObservationCausalShellV3,
 ) -> Result<(), ContractError> {
-    if observation.schema_version != MARKET_OBSERVATION_CAUSAL_SHELL_SCHEMA_V2 {
+    if observation.schema_version != MARKET_OBSERVATION_CAUSAL_SHELL_SCHEMA_V3 {
         return Err(ContractError::UnsupportedSchema {
             contract: "market observation causal shell",
             actual: observation.schema_version.clone(),
@@ -1233,10 +1830,15 @@ pub fn validate_market_observation_causal_shell(
     }
     decode_sha256(&observation.observation_id, "observation_id")?;
     validate_market(&observation.market, "market")?;
-    if observation.lineage.execution_event_contract_version != EXECUTION_MARKET_EVENT_SCHEMA_V2 {
+    if observation.lineage.canonical_event_record_contract_version
+        != CANONICAL_EVENT_RECORD_SCHEMA_V1
+        || observation.lineage.execution_event_contract_version != EXECUTION_MARKET_EVENT_SCHEMA_V3
+        || observation.lineage.reference_event_contract_version
+            != CANONICAL_REFERENCE_EVENT_SCHEMA_V1
+    {
         return Err(invalid(
-            "lineage.execution_event_contract_version",
-            "must reference execution_market_event_v2",
+            "lineage.contract_version",
+            "must bind canonical record V1, execution event V3, and reference event V1",
         ));
     }
     decode_sha256(
@@ -1387,13 +1989,13 @@ pub fn validate_market_observation_causal_shell(
             )?;
         }
     }
-    if derive_observation_id(observation)? != observation.observation_id {
+    if derive_observation_v3_id(observation)? != observation.observation_id {
         return Err(invalid(
             "observation_id",
             "does not match the causal observation identity",
         ));
     }
-    if derive_observation_hash(observation)? != observation.canonical_hash_sha256 {
+    if derive_observation_v3_hash(observation)? != observation.canonical_hash_sha256 {
         return Err(invalid(
             "canonical_hash_sha256",
             "does not match the canonical observation content",
@@ -1402,11 +2004,11 @@ pub fn validate_market_observation_causal_shell(
     Ok(())
 }
 
-pub fn validate_market_observation_visibility_index_entries(
-    observation: &MarketObservationCausalShellV2,
+pub fn validate_market_observation_v3_visibility_index_entries(
+    observation: &MarketObservationCausalShellV3,
     visibility_entries: &[VisibilityIndexEntryV2],
 ) -> Result<(), ContractError> {
-    validate_market_observation_causal_shell(observation)?;
+    validate_market_observation_causal_shell_v3(observation)?;
     if visibility_entries.len() != observation.lineage.contributing_event_ids.len() {
         return Err(invalid(
             "visibility_index_entries",
@@ -1462,24 +2064,24 @@ fn validate_sorted_event_ids_allow_empty(
     validate_sorted_event_ids(values, field)
 }
 
-pub fn encode_market_observation_causal_shell(
-    observation: &MarketObservationCausalShellV2,
+pub fn encode_market_observation_causal_shell_v3(
+    observation: &MarketObservationCausalShellV3,
 ) -> Result<Vec<u8>, ContractError> {
-    validate_market_observation_causal_shell(observation)?;
+    validate_market_observation_causal_shell_v3(observation)?;
     stable_json(observation)
 }
 
-pub fn decode_market_observation_causal_shell(
+pub fn decode_market_observation_causal_shell_v3(
     bytes: &[u8],
-) -> Result<MarketObservationCausalShellV2, ContractError> {
+) -> Result<MarketObservationCausalShellV3, ContractError> {
     require_schema_version(
         bytes,
-        MARKET_OBSERVATION_CAUSAL_SHELL_SCHEMA_V2,
+        MARKET_OBSERVATION_CAUSAL_SHELL_SCHEMA_V3,
         "market observation causal shell",
     )?;
     let observation =
         serde_json::from_slice(bytes).map_err(|error| ContractError::Json(error.to_string()))?;
-    validate_market_observation_causal_shell(&observation)?;
+    validate_market_observation_causal_shell_v3(&observation)?;
     Ok(observation)
 }
 
@@ -1621,21 +2223,21 @@ fn validate_receipt_digest(value: &Sha256Hex, field: &str) -> Result<(), Contrac
     decode_sha256(value, field).map(|_| ())
 }
 
-pub fn derive_gate_a_receipt_id(receipt: &GateAReceiptV2) -> Result<Sha256Hex, ContractError> {
+pub fn derive_gate_a_receipt_v3_id(receipt: &GateAReceiptV3) -> Result<Sha256Hex, ContractError> {
     let mut material = receipt.clone();
     material.receipt_id = Sha256Hex("0".repeat(64));
     Ok(hash_domain_bytes(
-        GATE_A_RECEIPT_ID_DOMAIN,
+        GATE_A_RECEIPT_ID_DOMAIN_V3,
         &stable_json(&material)?,
     ))
 }
 
-pub fn validate_gate_a_receipt(
-    receipt: &GateAReceiptV2,
+pub fn validate_gate_a_receipt_v3(
+    receipt: &GateAReceiptV3,
     matrix: &GateACapabilityMatrixV2,
 ) -> Result<(), ContractError> {
     validate_gate_a_capability_matrix(matrix)?;
-    if receipt.schema_version != GATE_A_RECEIPT_SCHEMA_V2 {
+    if receipt.schema_version != GATE_A_RECEIPT_SCHEMA_V3 {
         return Err(ContractError::UnsupportedSchema {
             contract: "Gate A receipt",
             actual: receipt.schema_version.clone(),
@@ -1648,14 +2250,16 @@ pub fn validate_gate_a_receipt(
             "must bind DATA-PIPELINE-TRAINING-20260803",
         ));
     }
-    if receipt.execution_event_contract_version != EXECUTION_MARKET_EVENT_SCHEMA_V2
-        || receipt.observation_contract_version != MARKET_OBSERVATION_CAUSAL_SHELL_SCHEMA_V2
+    if receipt.canonical_event_record_contract_version != CANONICAL_EVENT_RECORD_SCHEMA_V1
+        || receipt.execution_event_contract_version != EXECUTION_MARKET_EVENT_SCHEMA_V3
+        || receipt.reference_event_contract_version != CANONICAL_REFERENCE_EVENT_SCHEMA_V1
+        || receipt.observation_contract_version != MARKET_OBSERVATION_CAUSAL_SHELL_SCHEMA_V3
         || receipt.event_time_index_contract_version != EVENT_TIME_INDEX_SCHEMA_V2
         || receipt.visibility_index_contract_version != VISIBILITY_INDEX_SCHEMA_V2
     {
         return Err(invalid(
             "contract_version",
-            "must bind the frozen Phase 0R event, observation, and dual-time index contracts",
+            "must bind the current record, event, observation, and dual-time index contracts",
         ));
     }
     if receipt.dataset_lineage_root != DATASET_LINEAGE_ROOT
@@ -1761,7 +2365,7 @@ pub fn validate_gate_a_receipt(
             "Gate A receipt requires every capability to PASS",
         ));
     }
-    if derive_gate_a_receipt_id(receipt)? != receipt.receipt_id {
+    if derive_gate_a_receipt_v3_id(receipt)? != receipt.receipt_id {
         return Err(invalid(
             "receipt_id",
             "does not match the content-addressed Gate A receipt identity",
@@ -1770,21 +2374,21 @@ pub fn validate_gate_a_receipt(
     Ok(())
 }
 
-pub fn encode_gate_a_receipt(
-    receipt: &GateAReceiptV2,
+pub fn encode_gate_a_receipt_v3(
+    receipt: &GateAReceiptV3,
     matrix: &GateACapabilityMatrixV2,
 ) -> Result<Vec<u8>, ContractError> {
-    validate_gate_a_receipt(receipt, matrix)?;
+    validate_gate_a_receipt_v3(receipt, matrix)?;
     stable_json(receipt)
 }
 
-pub fn decode_gate_a_receipt(
+pub fn decode_gate_a_receipt_v3(
     bytes: &[u8],
     matrix: &GateACapabilityMatrixV2,
-) -> Result<GateAReceiptV2, ContractError> {
-    require_schema_version(bytes, GATE_A_RECEIPT_SCHEMA_V2, "Gate A receipt")?;
+) -> Result<GateAReceiptV3, ContractError> {
+    require_schema_version(bytes, GATE_A_RECEIPT_SCHEMA_V3, "Gate A receipt")?;
     let receipt =
         serde_json::from_slice(bytes).map_err(|error| ContractError::Json(error.to_string()))?;
-    validate_gate_a_receipt(&receipt, matrix)?;
+    validate_gate_a_receipt_v3(&receipt, matrix)?;
     Ok(receipt)
 }

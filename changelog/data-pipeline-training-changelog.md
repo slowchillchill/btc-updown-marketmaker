@@ -2008,3 +2008,788 @@ Task 0.10 的定向绿灯，不代替后续完整阶段验证和独立阶段复�
   `AGENTS.md`。
 - 本次只修正仓库级开发约束和历史事实定性，没有修改 `data-collect` Cargo 配置、实现、需求、
   计划或验收，也没有修改 DPT、门 A 或 `rebuild-core` 的需求与计划。
+
+## 2026-08-06：阶段 2 授权与相同数据源事件时间消息归约复核
+
+- 用户同意独立复审与主代理交叉验收结论，并明确批准执行阶段 2。本授权覆盖当前工作树内的
+  本地代码、测试和不可变本地产物，不包含 `sim-system` 实施、推送、发布、部署、远端操作、
+  敏感材料、真实下单或真实资金。
+- 复审纠正了先前“删除旧总序后，同一毫秒事件没有还原顺序”的过度判断。真实
+  `polymarket_orderbook_v3` 保存 `source_sequence_epoch_id`、严格递增的
+  `collector_admission_sequence`、单条消息边界及嵌套 `price_changes` 顺序；V2 规范谱系仍
+  保存该接纳坐标。删除的是旧跨来源业务总序，不是已采集 WebSocket 流的先后证据。
+- 对 2026-08-04 的 25 个 `polymarket_market` Parquet 只读扫描覆盖 39,908,199 行和两个
+  epoch；各 epoch 内接纳序号连续、无倒退、重复或缺口，同一源时间、同一档位存在连续不同
+  绝对数量。该证据足以确定性还原实际采集且通过质量门的消息流，但不证明上游从未丢消息；
+  连接缺口、epoch 切换和完整 `book` 重同步继续按既有质量规则处理。
+- 计划已补清阶段 2 的最小实现边界：平台生效时间仍取数据源事件时间；同一 epoch 内数据源事件时间
+  相同的消息只按接纳序号恢复采集先后，接纳序号不得改写平台时间或模型可见时间；不得恢复
+  `TotalOrderKeyV1`、以 `event_id` 充当盘口因果顺序或把同毫秒独立消息合并。对应验证只增加
+  一个真实相同数据源事件时间回归和一个新 epoch 完整 `book` 基准边界；回归必须断言每次
+  连续转换及其顺序，不能只比较最终盘口而放过中间消息合并。事件时间索引在数据源事件时间
+  相同时保留归约顺序，不按 `event_id` 哈希重排。接纳序号不得跨 epoch 比较；每个受影响资产
+  都必须用新 epoch 的合法完整 `book` 建立新基准，不得继承旧盘口状态。
+- 同步修正了计划中遗漏的 `GateACapabilityMatrixV2` 名称、四项门 A 输出被误写为“三者”及
+  已有规范事件 ID 被误写为重新实现的措辞。需求宏观语义和 V2 公共合同无需修改。
+- 阶段 1 已完成成果继续保留；完整生产路径资源预算仍归任务 2.4。阶段 2 当前游标进入任务
+  2.1。阶段 2 前既有五文件文档和验证规则修改已经独立审查通过并形成提交 `854a6aa`，尚未
+  推送。
+
+## 2026-08-06：阶段 2 任务 2.1 实现收口与后续决策门
+
+### 六类无损解码实现
+
+- 聚焦测试先以 `data_pipeline_training::typed_raw` 不存在的编译错误形成真实红灯；随后只在
+  `data-pipeline-core` 增加六类纯 Rust typed_raw DTO、精确十进制和行内校验，在
+  `data-pipeline-training` 增加 Arrow/Parquet 物理 schema 校验、逐行解码及受阶段 1 准入类型
+  约束的有界批次流。核心不依赖 Arrow、Parquet、文件系统或 `data-collect`，训练 crate 不
+  依赖 `data-collect`，没有第二套 SDK、网络或浮点规范真相路径。
+- 六类当前物理 schema 按生产端权威逐字段映射：orderbook v3 为 34 列、metadata v5 为
+  69 列、RTDS v4 为 15 列、depth snapshot v3 为 16 列、depth update v4 为 23 列、
+  aggTrade v7 为 35 列。orderbook 保留外层消息、epoch、接纳序号、数据源事件时间、接收
+  时间和嵌套列表顺序；价格、数量、费率和值保留原始十进制文本，并以 `ExactDecimal` 规范
+  解析验证，不使用 `f32`/`f64` 改写规范真相。
+- 核心层为六类来源增加了可枚举的字段语义映射：Polymarket 价格为
+  `PusdPerShare`、数量为 `Shares`、费率为 `BasisPoints`；RTDS 值为 `UsdPerBtc`；
+  Binance 价格为 `UsdtPerBtc`、数量为 `Btc`。标识映射区分 `SourceNative`、
+  `CollectorDerived` 和 `EvidenceDigest`；`age_ms`、`freshness_status`、
+  `snapshot_status` 与 `stitch_*` 等采集器派生证据也不再依赖读取方猜测。
+- 第一轮独立复审发现上述映射仍有错路径和过宽语义：orderbook 与 aggTrade 标识没有按枚举
+  分支展开，metadata `winning_asset_id` 在 WebSocket 终态是源原生、在 Gamma 终态则由结果
+  价格派生，不能固定标成 `SourceNative`；双时间、方向、metadata 独立状态及 Binance
+  衔接坐标也有遗漏。修正后路径与真实 DTO 分支一一对应，毫秒时间和经济单位分开标明；
+  `snapshot_last_update_id` 为源快照坐标，`local_u_before` 为采集器状态坐标。
+- metadata 的 19 个上游封闭枚举以及 aggTrade 的 `invalid_reason_code` 和
+  `payload_encoding` 曾以任意字符串进入核心，未知值可以穿过不可信 Parquet 边界。
+  当前已按上游权威枚举逐值强类型化；`uma_resolution_status`、原始时间文本、自由文本和结果
+  标签等开放字段保持原样，没有误收紧为本地枚举。metadata 的 `asset_ids`、`outcomes_raw`
+  与 `outcome_prices_raw` 保留原始 JSON，同时在核心边界按索引建立资产、结果和精确价格
+  的一对一证据；获胜资产必须属于该固定资产集，且归属根据
+  `resolution_evidence_source` 逐行解析。
+- 第三轮独立复审发现，前述索引边界仍会放过非二元、重复或非规范 JSON 编码的 `asset_ids`，
+  并会在没有 `outcomes_raw` 时放过空的 `winning_outcome`。这与 metadata v5 生产端固定身份
+  合同不一致，也会使按资产查找获胜结果不再唯一。当前已在真实解码可达的核心边界要求
+  `asset_ids` 为规范 JSON 编码的两个互异十进制 ID，并要求存在的 `winning_outcome` 非空；
+  一个重复资产 ID 和一个空获胜结果作为各自的代表性损坏回归。
+- 首版 metadata DTO 曾错误遗漏 v5 字段，并把合法的仅摘要跨行引用判为无效。真实
+  schema 复核后，DTO 改为完整 69 列；`source_evidence_payload_json` 与
+  `source_evidence_raw_sha256` 同时存在时必须按原始 UTF-8 字节核对 SHA-256，
+  仅摘要引用合法保留，仅有载荷而无摘要时拒绝。对 2026-07-30 至 2026-08-04 的 6,958 条
+  真实 metadata 只读核实结果为：3,504 条载荷与摘要同时存在、3,452 条仅有摘要、2 条两者
+  均无、0 条仅有载荷，3,504 个可核对摘要全部匹配。
+- 真实生产枚举核对补回了 orderbook schema 明确允许的 `side=UNKNOWN`。Binance depth 的
+  JSON 顶层序列化空白不进入语义 DTO，但每个价位的价格/数量原文和列表顺序完整保留；这与
+  “无语义物理布局不改变身份”的计划一致，不建立 JSON 字节往返影子合同。
+
+### 任务 2.1 验证与主代理自审
+
+- `cargo test -p data-pipeline-core --locked --offline`：新增 typed_raw 单元测试 9 项、既有
+  阶段 0 合同 48 项和双时间测试 1 项全部通过。
+- `cargo test -p data-pipeline-training --lib --locked --offline`：既有 42 项及新增的错误物理
+  schema、准入后同字节数替换边界测试共 44 项全部通过；
+  `cargo test -p data-pipeline-training --test phase2_typed_raw_adapter_contract --locked --offline`
+  为 `0 passed / 2 ignored / 0 failed`，两个集成项只保留必须经过阶段 1 准入类型的真实测试。
+- 六类真实测试先对 2026-08-04 完整清单及文件执行阶段 1 准入；为避免只用首批数据
+  证明新增封闭枚举，metadata 的 25 个文件、1,182 行全部解码，其他五类各以 64 行上限解码
+  首批，其中 depth snapshot 的首文件实际为 1 行。结果 `1 passed / 0 failed`，最新复验耗时为
+  `53.99s`。固定真实同源
+  毫秒回归分别以
+  批次大小 `1` 和 `8192` 读取相同 orderbook 文件，均保留接纳序号
+  `140535301 -> 140535304 -> 140535305`、数量 `210 -> 160 -> 110`、接收时间
+  `.435Z/.436Z/.436Z` 及消息内列表顺序，结果 `1 passed / 0 failed`，最终耗时 `55.20s`。
+- 两个 crate 的库与测试目标严格 Clippy、全工作区格式和 `git diff --check` 通过。任务自审
+  未发现 data-collect 依赖、浮点规范字段、无界整文件物化、未知 schema 放行、同毫秒消息
+  合并或 `event_id` 哈希重排路径。完整生产资源预算仍归任务 2.4，任务 2.1 不提前宣称该门。
+- 普通全工作区回归
+  `cargo test --workspace --lib --bins --tests --examples --locked --offline` 通过；该命令按已冻结
+  规则排除 bench，未触发已隔离的 `data-collect` 吞吐 bench。
+- 最终独立审查发现，首版把内存 `RecordBatch` 解码入口作为正常库的公开函数，仅靠“仅测试”
+  命名约束，生产调用方可以绕过 `ValidatedDirectSourceParquetFileV3`。最小修正删除该公开
+  入口，把错误 schema 测试下沉为模块内单元测试；生产 API 现在只保留从已准入文件开始的
+  有界 Parquet 流及其首批读取辅助函数。
+- 同一审查还指出生产流只复核字节数、footer 行数和 schema，没有把读取内容与阶段 1
+  准入的 SHA-256 绑定。修正后，流式读取在同一已打开文件描述符上以 64 KiB 缓冲区重算
+  SHA-256，匹配准入摘要后回到文件起点建立 Parquet 流。首个回归手工构造了不可能经阶段 1
+  准入的非 Parquet `aaaa`，只证明摘要分支早于 Parquet EOF，不是合法边界证据，已删除且不计为
+  红灯。最终回归使用当前精确 aggTrade schema 和 footer 元数据生成合法微型 Parquet，经真实
+  阶段 1 准入入口取得 `ValidatedDirectSourceParquetFileV3`，再翻转文件中部一个字节并保持文件
+  长度不变，精确命中 `AdmittedFileDigestMismatch` 及替换前后摘要。这会使每次打开文件先增加
+  一次有界缓冲的顺序读取，完整资源和吞吐影响仍由任务 2.4 使用真实全链路实测冻结。
+- metadata 固定身份和空获胜结果修复后的第四轮独立只读复审结论为代码实现切片
+  `PASS`、`Critical 0 / Important 0 / Minor 0`。最新核心测试 9 项、既有阶段 0 合同 48 项、
+  双时间测试 1 项、训练库测试 44 项、六类真实准入解码以及排除 bench 的普通全工作区回归
+  均通过；严格 Clippy、格式和 `git diff --check` 通过。该结论只关闭当前可执行缺陷，不替代
+  下述两项任务 2.1 完成门决策和任务 2.2 公共合同决策。
+
+### 任务 2.2 前发现的现行合同冲突
+
+- 两名独立只读代理分别核对计划、公共类型、核心身份函数和真实样本，得到相同结论：当前
+  `ExecutionMarketEventV2` 强制携带只适用于 Polymarket 的 `MarketIdentityV1`，其九种载荷
+  也没有 RTDS 值、Binance 深度或 Binance 成交；但 `MarketObservationCausalShellV2` 又有
+  `ChainlinkBtcUsd`、`BinanceBtcUsdtDepth`、`BinanceBtcUsdtTrade` 组件，并要求贡献事件 ID
+  与可见索引可追溯。计划同时要求从同一规范事件集合产生规范事件存储、双索引与
+  Observation，当前代码无法同时满足这些语义。
+- 该冲突不影响已经完成的六类无损解码，但阻断完整任务 2.2。实现层不得给参考数据伪造
+  Polymarket 市场身份、借用 `QualityBoundary` 保存参考值、按重叠市场复制全局参考事件，或
+  生成在事件存储中没有实体的悬空 ID。
+- 当前真实可选项为：一，明确参考数据只形成内部规范参考状态，不进入
+  `ExecutionMarketEventV2`/双索引，并同步修改 Observation 的身份与追溯合同；二，把参考
+  更新提升为一等规范事件，增加非 Polymarket 作用域、RTDS/Binance 载荷及相同规范 ID/双时间
+  谱系。第二项更符合现有“唯一事件带、同源追溯”目标，但属于公共合同修改，必须由用户决定。
+  Binance snapshot 本身没有交易所事件时间；无论选择哪项，都不得为它伪造事件时间索引。
+- 当前还不能进入任务 2.2。任务 2.2 至 2.5 尚未实施，本轮尚未提交、推送、发布、部署或
+  执行远端操作。
+
+### 任务 2.1 独立审查发现的完成门不一致
+
+- 最终只读审查指出：步骤 2.1.2 明确要求用“实际浮点转换边界的一个代表性失败输入”验证
+  浮点编码、溢出或舍入不会反写规范真相；当前实现只有原始十进制文本到 `ExactDecimal` 的
+  精确解析、规范化和超范围失败，没有模型浮点编码函数或实际转换边界。由于计划同时要求
+  模型浮点编码留在后续边界，不能把“不存在浮点路径”解释成该验收已通过，也不能在没有
+  编码类型、精度和失败语义的情况下凭空新增编码器。
+- 现实选项为：一，把实际模型浮点转换及其代表性失败验证明确移交给后续真正拥有编码合同的
+  任务，本任务只验收原始文本、`ExactDecimal`、规范范围失败及不反写；二，先由用户冻结当前
+  阶段可实施的模型编码类型、精度和失败语义，再补实际边界。第一项更符合现有职责分层，但会
+  改变已批准计划中步骤 2.1.2 的验收归属，仍必须由用户决定。
+- 同一复审又发现，步骤 2.1.1 把“完整实现第 2.3 节及第 2.4 节第 6、7 项的公开事件
+  映射”列为六类无损解码的当前验证，但计划又把双时间规范身份、状态归约和最终产物生成
+  分别安排在任务 2.2、2.3 和 2.5。当前代码只产生 `TypedRawRow`，不存在
+  `typed_raw -> ExecutionMarketEventV2` 映射；因此不能把该句默认解读为“仅约束后续任务”。
+  建议把该验证明确移交到任务 2.2、2.3 和 2.5 各自的产物边界，但这会改变已批准计划中的
+  完成门归属，仍必须由用户决定。
+- 因此，前述实现和测试事实保持有效，但任务 2.1 完成门尚未关闭。当前游标停在任务 2.1
+  完成门决策；任务 2.2 的参考事件合同决策紧随其后。
+
+## 2026-08-06：用户批准验收归属与参考事件方案，随后发现来源 ID 闭包缺口
+
+- 用户批准独立复审后的纠正结论：实际模型数值编码验证移交任务 4.2.2，完整公开事件映射
+  分配到任务 2.2、2.3 和 2.5；任务 2.1 的六类无损解码切片据此关闭。RTDS/Binance 参考更新
+  确认为同一唯一规范事件存储中的一等全局事件，Binance REST snapshot 只进入模型可见索引，
+  不伪造数据源事件时间。
+- 主代理据此同步了 DPT、sim-system、rebuild-core 的未提交文档草案；宏观需求没有变化，
+  但 sim-system 与 rebuild-core 需求中写死的旧公共版本引用需要机械同步。相关修改尚未提交，
+  也没有开始参考事件合同代码。
+- 编码前闭包复核新发现：`ExecutionMarketEventV2` 的九类载荷均要求
+  `source_event_ids: Vec<CanonicalEventId>`，但现有类型没有这些 ID 对应的原始 Polymarket
+  来源事件实体，也没有规定它们解析到 `EventLineageV2.source_evidence`。核心只校验 64 位
+  十六进制、排序和去重，阶段 0 黄金测试使用任意占位哈希，未验证跨记录闭包。
+- 三名独立只读代理确认“命名空间和解析目标未定义”是真实合同缺口；其中对抗审查同时确认，
+  仅凭字段类型不能直接推断它必须成为唯一事件存储外键。现实选项为：在统一存储内增加来源
+  事件实体；或升级市场事件合同，删除/替换载荷内来源事件 ID，由 envelope lineage 成为唯一
+  来源真相。前者增加来源事件语义层，后者会升级模拟器消费的市场事件版本，均不能由实现层
+  静默选择。
+- 按方案不一致决策门，任务 2.2 合同编码暂停，等待用户决定上述来源引用语义。未修改
+  contracts 代码，未运行新增测试，未提交、推送、发布、部署或执行远端操作。
+
+## 2026-08-06：用户批准 ExecutionMarketEventV3 来源追溯方案
+
+- 用户明确选择升级市场事件合同，不增加原始来源事件实体。当前市场合同升级为
+  `ExecutionMarketEventV3`，所有原含 `source_event_ids` 的载荷同步升版并删除该字段；
+  `EventLineageV2.source_evidence` 成为市场事件和参考事件唯一的来源前像与追溯真相。
+- 本决定不把完整 `SourceEvidenceRefV2` 复制进载荷，也不新增另一种来源 ID。事件身份继续
+  绑定排除物理清单和文件 SHA 的稳定语义来源证据，清单与文件 SHA 只保留为可审计的物理
+  谱系，因此等价重分片不得改变 `CanonicalEventId`。
+- 任务 2.2 的合同决策门据此解除；当前执行顺序为先同步三份当前计划和受影响需求，再以
+  失败测试驱动 V3 合同、参考事件、统一记录、Observation V3、Gate A 回执 V3、六类来源
+  双时间提取与统一双索引投影。阶段 2 其余授权边界不变。
+
+## 2026-08-06：任务 2.2 可独立实施切片通过审查
+
+### V3 合同与唯一来源追溯
+
+- 先以缺少 V3 公共类型和构建入口的编译失败形成聚焦红灯，随后发布
+  `ExecutionMarketEventV3` 及九类同步升版载荷；所有载荷均删除 `source_event_ids`，顶层
+  `EventLineageV2.source_evidence` 成为唯一直接来源真相。市场事件身份使用新的 V3 哈希域，
+  继续排除物理清单与文件 SHA；等价重分片不改变 ID，语义证据或最终载荷变化会改变 ID。
+- 同步发布 `CanonicalReferenceEventV1`、仅含市场事件和参考事件两个已知变体的薄
+  `CanonicalEventRecordV1`、`MarketObservationCausalShellV3` 与 `GateAReceiptV3`。统一记录
+  使用装箱持有两个完整事件，保持 JSON 线格式不变并避免大枚举栈布局；记录拒绝未知变体和
+  额外顶层字段。Observation 与门 A 回执显式绑定统一记录 V1、市场事件 V3、参考事件 V1 和
+  双索引 V2。
+- V3 市场事件只接受 Polymarket orderbook 或 metadata 直接证据。orderbook 证据固定为无
+  原生身份且具有完整接纳坐标；metadata 固定为语义证据摘要且不虚构接纳 epoch。RTDS 和
+  Binance 只能形成参考事件，不能伪造 Polymarket 市场身份或进入模拟器市场事件视图。
+
+### 六类双时间与参考事件映射
+
+- 六类 `TypedRawRow` 的逐行映射已经接通：orderbook 使用 `timestamp`；metadata 只有明确
+  `market_resolved_ws` 平台时间时使用 `ws_platform_timestamp_utc`；RTDS 使用
+  `payload_timestamp` 并在参考载荷保存 `message_timestamp`；Binance depth snapshot 不生成
+  数据源事件时间；depth update 使用 `event_time`；合法 aggTrade 使用 `trade_time` 并在参考
+  载荷保存 `event_time`。所有公开可见时间均使用各行 `timestamp_received`。
+- 当前没有完整来源 epoch 的 metadata 与 RTDS 不生成虚构接纳坐标；前者优先使用已核对的
+  原始证据摘要，无摘要的本地行使用版本化稳定语义定位摘要，后者使用权威原始载荷的版本化
+  摘要。orderbook、Binance snapshot/update/aggTrade 使用真实完整接纳坐标；合法 Binance
+  原生 ID 与参考载荷必须一致。
+- Chainlink 与合法 aggTrade 行级参考更新均要求恰好一条直接证据和真实数据源事件时间；
+  Chainlink 不接受虚构接纳坐标，aggTrade 必须保留当前 v7 已有接纳坐标。Binance snapshot
+  证据必须保持数据源事件时间为空，因此只产生可见索引条目；depth update 必须具有
+  `event_time`，且深度状态的 `last_update_id` 必须由直接 snapshot/update 终端 ID 支撑。
+- `CanonicalEventRecordV1` 已统一产生单记录事件时间和模型可见索引条目。该切片不对集合
+  重新排序；`event_id` 只用于引用，不能成为因果顺序键。
+
+### 验证、复审与剩余完成门
+
+- V3 市场事件、Observation 和门 A 回执新增稳定黄金文件；旧 V2 文件只保留为拒绝测试。
+  `phase0_contract` 为 `50 passed`，新增任务 2.2 合同测试为 `10 passed`，核心 typed_raw 单元
+  测试为 `9 passed`，双时间测试为 `1 passed`，训练库测试为 `44 passed`。
+- 2026-08-04 六类真实 schema 经完整阶段 1 准入后执行来源证据映射，结果 `1 passed`，耗时
+  `53.49s`；固定真实同源同毫秒 orderbook 回归结果 `1 passed`，本轮耗时 `54.58s`。标准
+  全工作区库、二进制、测试与示例回归退出码为 0；严格 Clippy、格式和 `git diff --check`
+  全部通过。
+- `gpt-5.6-sol/ultra` 独立只读复审在修正统一记录未知字段、参考事件不可能证据组合、来源
+  形状、黄金身份及 rebuild-core 一处 V2 当前陈述后，结论为 `PASS`、
+  `Critical 0 / Important 0 / Minor 0`。
+- 当前只关闭任务 2.2 可独立实施的合同、逐行映射、身份与单记录投影切片。步骤 2.2.4 的
+  完整文件/行组/批次/线程扰动、索引摘要和同源时间最终归约顺序，必须在任务 2.3 形成归约
+  结果、任务 2.5 物化完整索引后验收；不能用当前单记录测试提前宣称整项完成。当前游标进入
+  任务 2.3。本轮没有提交、推送、发布、部署或远端状态变化。
+
+## 2026-08-06：任务 2.3 纠偏、已完成切片与生产语义决策门
+
+### 用户纠正及当前计划同步
+
+- 用户确认 `start_at` 就是 metadata v5 的 `market_start_utc`。重新核对公共类型、真实字段和
+  当前计划后确认该纠正成立：`MarketWindowV1.start_at_utc_ms <- market_start_utc`、
+  `end_at_utc_ms <- market_end_utc`，不存在另一套开始触发条件。先前把 `start_at` 列为缺口的
+  判断已撤回。
+- 生命周期继续使用现有 `MarketLifecycleTransitionV2`，三个官方布尔状态继续使用现有
+  `MarketTradingStateV2`；不新增盘前、盘中、盘后、结算后的四阶段公开状态机，也不新增
+  第十个 Observation 组件。`current_to_resolution_pending` 只改变采集运行角色，不产生退休；
+  只有合格终态的 `active_to_retired` 才进入 `Retired`。`active`、`closed`、
+  `accepting_orders` 原样独立，不参与上述阶段推断。
+- 上述已批准语义已直接同步到当前计划第 2.4 节和步骤 2.3.4；需求的宏观目标与验收标准没有
+  改变，因此没有增加需求条目。
+
+### 跨模块陈旧叙事清理
+
+- `plan/rebuild-core-plan.md` 已删除 DPT “当前任务 2.2 实施中”的陈旧游标，并把笼统的“公共
+  Rust V2 顶层类型”改为引用其第 1.6 节列明的当前公共类型；对应事实已记录到
+  `changelog/rebuild-core-changelog.md`。
+- `plan/sim-system-plan.md` 已删除 DPT “当前任务 2.2”的陈旧游标副本，只保留稳定的 V3 公共
+  合同依赖事实；对应事实已记录到 `changelog/sim-system-changelog.md`。两份跨模块计划均不
+  复制 DPT 当前执行游标。
+
+### 已完成且不依赖新决策的归约修正
+
+- `canonical_reduction_report_v1` 校验现在拒绝操作和处置的不可能组合：有输出只允许
+  `Merge/Overwrite/Delete/Reject + Produced`，无输出只允许 `Reject + NoOutput`，抑制只允许
+  `Confirm/Suppress + Suppressed`。新增聚焦回归证明错误组合不能通过编码或解码边界。
+- Polymarket 后续完整 `book` 回归已补齐：与现状完全相同的独立快照只生成
+  `POLYMARKET_IDENTICAL_BOOK_CONFIRMATION` 确认报告；下一份缺少既有价位的完整快照生成
+  `BookResyncDeltaInference` 删除转换、`ResyncBoundary`、精确数量守恒和指向结果事件的
+  `Delete + Produced` 报告。该测试不把独立快照误当重复消息。
+- 当前保留改动下执行
+  `cargo test -p data-pipeline-core --tests --locked --offline`，结果依次为核心单元 9 项、阶段 0
+  合同 51 项、双时间 1 项、Binance 归约 15 项、规范合同 10 项、Polymarket 归约 10 项、终态
+  合并 3 项全部通过，0 项失败；`cargo fmt --all -- --check` 与
+  `cargo test -p data-pipeline-training --tests --locked --offline` 通过，后者普通测试为 46 项通过、
+  0 项失败、11 项按真实数据门忽略。随后显式运行这些真实数据测试：阶段 1 准入 6 项、真实
+  Binance 归约 1 项、typed_raw 真实适配与终态合并 4 项全部通过，0 项失败；
+  `git diff --check` 通过。这些真实回归只证明现有切片，不代表尚未接通的完整生产路径。
+
+### 真实 metadata 复核
+
+- 主代理只读扫描 2026-08-03 与 2026-08-04 的 49 个 metadata v5 Parquet。两日分别为
+  1,156 与 1,182 行；两日合计 575 个 `prefetched_to_active` 均满足
+  `lifecycle_scheduled_at_utc == market_start_utc`，575 个
+  `current_to_resolution_pending` 均满足
+  `runtime_role_scheduled_at_utc == market_end_utc`。2026-08-04 少一个开始/结束转换，是当日重启
+  后恢复的当前市场快照，证明生产路径不能假设一定看到原始开始转换。
+- 两日各有 288 个 `active_to_retired`，均由合格终态形成；Gamma 普通观察为
+  `(active=true, closed=false, accepting_orders=true)`，三个 Gamma 兜底终态为
+  `(active=true, closed=true, accepting_orders=false)`。该事实再次证明 `active=true` 在盘前、
+  盘中、盘后及结算后都可能出现，不能承担生命周期判断。
+- 两日终态分别为 287/286 个 WebSocket 终态和 1/2 个 Gamma 兜底终态。三个 Gamma 终态的
+  `closed_time_utc` 均早于采集接收约 342 至 399 秒，但这只是当前样本事实，不足以把字段冻结
+  为通用平台判定生效时间。
+
+### 发现冲突后的回退与当前决策门
+
+- 实现 Gamma 兜底终态时发现现行计划、统一来源映射和上游合同不能同时支持“直接把
+  `closed_time_utc` 写入 `source_event_at_utc_ms`”。相关临时代码和测试已完整撤回；当前
+  `source_evidence_from_typed_raw` 仍只允许明确的 WebSocket 平台时间成为 metadata 来源事件
+  时间。
+- 当前官方 Gamma 市场接口只给出 `closedTime` 字段及类型，没有定义它等于市场判定的发布或
+  平台生效时刻；上游当前合同还明确允许该值晚于响应接收时间。因此不能从三个当前样本反推
+  通用语义，也不能使用接收、请求、验证、本地调度或 `end_at` 时间替代平台来源时间。
+- 生产 `MarketIdentityV1` 仍缺少 `window_id` 的规范前像、领域分隔和版本规则。活动树只有字段、
+  任意测试值及两处“不得作为生产派生规则”的注释；`start_at/end_at` 的来源已经明确，并不能
+  自动确定 `window_id` 的身份语义。
+- `TerminalWatermarkV2.canonical_event_root_sha256` 与
+  `lineage_identity_sha256` 仍只有公共字段和测试占位，没有生产计算前像、截止范围及是否包含
+  当前终态的规则。直接使用最终事件存储根会与包含该字段的终态事件身份形成循环依赖。
+- 六质量状态的类型已经存在，但 `Missing/UnknownNotObserved` 的生产边界、Binance
+  `confirmed-hole` 如何进入模型可见的唯一事件存储、以及两类终态等待耗尽状态的对应质量仍
+  需最终收口。当前确认缺口只产生 `NO_OUTPUT` 报告并清空盘口，尚不能满足任务 2.3.5。
+- 独立质量审查进一步确认：连续必需状态尚无基准或丢失基准应为 `Missing`，尚未发生的稀疏
+  事件应为 `UnknownNotObserved`；Binance 陈旧重复更新只抑制，不能冒充模型可见的 `Stale`，
+  当前可生成 `Stale` 的真实强类型来源是 RTDS `freshness_status=stale`。推荐把
+  `budget_exhausted_after_valid_nonterminal` 映射为 `Missing`、把
+  `budget_exhausted_without_valid_response` 映射为 `UnknownNotObserved`，两者都使用既有
+  `WaitingExhaustedQuarantine` 且不得结算；该精确映射尚未写入当前计划，等待用户决定。
+- 当前终态合同校验还会拒绝“等待耗尽事件自身无数据源事件时间、但终态水位保留此前合法
+  数据源事件时间”的真实可达组合；首次终态声明冲突也被错误固定为 `Fresh -> Invalid`，而
+  完整流起点应是 `UnknownNotObserved -> Invalid`，只有已经输出合格终态后的矛盾声明才是
+  `Fresh -> Invalid`。这些属于任务 2.3.5 的真实实现缺口，不要求新增公共质量枚举。
+- 真实生产连接层尚不存在：当前真实回归仍由测试手工选择文件、注入 `window_id` 和终态水位
+  摘要后调用各归约器。步骤 2.4.1 明确要求任务 2.1 至 2.3 的真实解码、双时间和状态归约使用
+  同一路径接通，因此任务 2.4 尚未开始；不得用组件测试或第二条语义路径冒充完整生产资源
+  试验。
+- 当前游标保持 `阶段 2 -> 任务 2.3`。上述事实首次触发方案不一致决策门；本轮尚未提交、
+  推送、发布、部署或执行远端状态变更。
+
+### 决策门外可独立修复的质量边界与归约顺序
+
+- 对任务 2.3.5 的可执行切片继续核对后，已修正此前“Binance 已确认缺口只产生
+  `NO_OUTPUT`”的实现缺口：`not_applied_confirmed_hole` 现在以最后一个可信完整盘口形成
+  `ConfirmedGap + Required` 参考深度事件和 `Reject + Produced` 报告，随后清除可继续推进的
+  当前盘口；只有新的完整 snapshot 才能以 `Fresh + ResyncBoundary` 恢复。新采集纪元在尚未
+  取得本纪元 snapshot 时，会把上一纪元的最后可信盘口标成 `Missing + Required`，而运行起点
+  在从未取得任何基准时只保留无输出拒绝报告。陈旧重复更新仍然只抑制，不冒充模型可见的
+  `Stale`。
+- 公共 `QualityBoundaryV2` 校验已补上包络一致性：边界的 `current_quality` 必须精确等于外层
+  `EventQualityV2.availability`。这防止质量载荷与统一事件包络对同一时刻给出两种状态。
+- Polymarket 跨 `source_sequence_epoch_id` 的旧实现会保留上一纪元盘口，并把新纪元首次完整
+  `book` 错误解释为旧数量到新数量的连续变化。聚焦红灯证明该行为与步骤 2.3.1 冲突；最小
+  修正现在在纪元切换时按资产清空 L2/BBA，仅为原本 `Fresh` 的资产生成
+  `Fresh -> Missing + Required`，拒绝新纪元完整 `book` 之前的绝对 `price_change`，再由本纪元
+  首个完整 `book` 从空状态重建价位，最后形成 `Missing -> Fresh + ResyncBoundary`。同一纪元的
+  相同完整 `book` 仍只确认；跨纪元的相同完整 `book` 必须重建，空完整 `book` 也能建立合法
+  空基准。
+- 补齐步骤 2.3.2 的完整盘口路径后，`trade -> book` 与 `book -> trade` 两种事件时间顺序均只
+  产生一条公开成交和一条 `250 -> 200` 盘口转换；转换的队列消耗为 `50`，已归因成交量与已
+  覆盖量均为 `0`，质量保持 `Unattributed/DeterministicInferred`，不会因邻接建立精确因果或
+  双算。此前同类 `price_change` 双顺序测试继续保留。
+- 只读扫描 2026-08-04 的 39,908,199 条真实 Polymarket orderbook 行，按
+  `(source_sequence_epoch_id, market)` 分为 291 组：物理采集顺序中的
+  `collector_admission_sequence` 没有倒退，但 290 组都至少发生一次相邻数据源事件时间倒退，
+  合计 464,975 次。一个已核实实例为同一市场、同一纪元中接纳序号 `138738963` 的来源时间
+  `1785801600021` 紧邻接纳序号 `138738964` 的来源时间 `1785801600012`。因此把数据按来源
+  事件时间重排后，不能再要求接纳序号全局递增；步骤 2.3.1 只要求它在相同来源毫秒内保存
+  采集先后。
+- 对应修正把 Polymarket 归约器的“上一接纳序号”改为当前纪元内已见坐标集合：不同来源
+  毫秒先按数据源事件时间推进，同一来源毫秒再按接纳序号推进；同一接纳坐标仍只能标识一条
+  消息，完全相同的重试仍显式抑制，跨纪元仍不比较。新增回归以来源时间
+  `1099/1100`、接纳序号 `302/301` 证明先产生 `250 -> 200`、再产生 `200 -> 210`，并保留同一
+  接纳坐标绑定不同来源时间时失败关闭的原有回归。
+- 完成上述修复后，`cargo test -p data-pipeline-core` 为 106 项通过、0 项失败；其中 Polymarket
+  归约合同为 14 项通过。`cargo clippy -p data-pipeline-core --all-targets -- -D warnings`、
+  `cargo fmt --all -- --check` 与 `git diff --check` 均通过。该结果只关闭不依赖四项当前语义
+  决策的代码切片，不代表任务 2.3、任务 2.4 或阶段 2 已完成。
+
+## 2026-08-06：四项过度设计复核、metadata 生产归约与剩余等待耗尽冲突
+
+### 用户质疑与复核结论
+
+- 用户指出 `window_id` 当初可能属于多写字段、`market_end_utc` 已存在、两个终态摘要可能
+  多余，并要求重新证明等待耗尽与六类质量建议是否真实。主代理与两名独立只读审查代理逐项
+  复核当前计划、合同、生产代码、真实 metadata v5 和上游当前合同后确认：
+  - `window_id` 没有生产者、消费者或验收语义，只有任意测试占位；当前公共身份改为
+    `MarketWindowV2/MarketIdentityV2`，只保留 `market_start_utc/market_end_utc` 的直接映射，
+    不增加替代字段。
+  - `market_end_utc` 是市场交易窗口结束时间，不是平台判定发布或生效时间。只有
+    WebSocket `market_resolved.timestamp` 能形成终态事件时间投影；Gamma 兜底不得用
+    `market_end_utc`、`closed_time_utc`、接收、请求、调度或应用时间补造该坐标。
+  - `TerminalWatermarkV2` 的时间与外层 `EventTimeV2` 重复，两个摘要没有生产前像或消费方，
+    其中事件根摘要还会形成循环依赖；该类型和终态字段已完整删除，没有增加替代摘要。
+  - 先前把 `budget_exhausted_after_valid_nonterminal` 映射为 `Missing`、把另一原因映射为
+    `UnknownNotObserved` 的建议没有证据支持，现已撤回。两类上游摘要都只表示采集跟踪预算
+    结束，不是平台终态、市场数据丢失或模型可见质量转换，不生成 `QualityBoundary`。
+- 上述决定改变当前合同和实现细节，但没有改变需求文档的宏观业务目标与验收，因此只同步
+  当前计划、代码和本历史记录，没有给需求文档增加字段级声明。
+
+### 任务 2.3.4 生产归约
+
+- 新增 `PolymarketMetadataReducer`：首个完整 Gamma `metadata_snapshot` 直接构建
+  `MarketIdentityV2`、`MarketWindowV2`、固定资产/outcome 映射和源证据初始 tick；
+  `start_at_utc_ms/end_at_utc_ms` 分别精确取 `market_start_utc/market_end_utc`。后续 metadata
+  强校验固定身份和资产顺序，显式生命周期转换校验前态，三个交易状态字段保持独立
+  `Option<bool>`，相同三元组只确认，不推导盘前、盘中、盘后或结算后状态机。
+- `prefetched_to_active/candidate_to_active` 只按显式 metadata 转换产生生命周期事件；
+  `current_to_resolution_pending` 只是采集运行角色变化，在 `end_at` 不产生退休。通用 metadata
+  归约器拒绝直接生成 `active_to_retired`，该事件只由通过同一资格校验的终态合并器生成。
+- WebSocket 合格终态现在同时产生公开 `Resolved` 和 `Active -> Retired`；Gamma 合格终态产生
+  公开 `Resolved`、`Active -> Retired` 及原样的独立交易状态。WebSocket 两项保留平台事件
+  时间；Gamma 三项都保持 `source_event_at_utc_ms=None`，只按接收时间进入模型可见投影，不能
+  驱动隐藏平台退休、资金释放或结算。
+- 首次冲突终态声明从 `UnknownNotObserved -> Invalid`；已经输出合格终态后的矛盾声明才从
+  `Fresh -> Invalid`。相同终态重投仍只抑制，不重复产生退休或结算输入。
+- 真实 Gamma 回归首次暴露并纠正了一项审查建议：固定样本的
+  `source_evidence_channel=None`，不是 WebSocket 的 `market` 频道。生产资格校验现按真实 HTTP
+  Gamma 证据要求空值，没有复制错误建议。
+- 官方 Polymarket 市场频道文档只把 `new_market` 定义为“市场创建”，并不等于
+  `market_start_utc` 或 `Active`。2026-08-03/04 当前清单也没有 `new_market` 计数；因此通用
+  orderbook 归约器只用它确认已由 metadata 建立的固定市场身份并形成无输出报告，不生成生命周期
+  事件。核对入口：`https://docs.polymarket.com/market-data/websocket/market-channel`，访问日期
+  `2026-08-06`。
+
+### 质量、诊断与验证
+
+- RTDS `freshness_status=stale` 已增加聚焦合同测试，明确映射为现有 `Stale`；没有为了覆盖六个
+  枚举而制造 `UnknownNotObserved` 或其他伪事件。
+- “有界首分歧诊断”需要真实生产编排器同时拥有输入证据、两个实际游标和前后状态；若在任务
+  2.3 预先增加独立结构只会形成无生产者、无消费者的闲置合同。当前计划已把实际诊断记录移到
+  步骤 2.4.1 的唯一生产路径，仍保留第 2.6 节与验收项的内容要求，且明确不得写成规范事件、
+  Observation 组件、终态摘要或水位。
+- 当前代码执行 `cargo test -p data-pipeline-core --locked --offline` 为 114 项通过、0 项失败；
+  `cargo clippy -p data-pipeline-core --all-targets --locked --offline -- -D warnings`、
+  `cargo fmt --all -- --check` 与 `git diff --check` 均通过。固定真实 Gamma 回归
+  `real_gamma_terminal_is_visible_but_has_no_event_time_projection` 通过，证明接收时间
+  `1785831360020` 可见而事件时间投影为空；固定真实 WebSocket 终态回归
+  `real_ws_terminal_metadata_pair_merges_once` 通过。
+
+### 尚未自行调和的等待耗尽冲突
+
+- 上游 `resolution_followup_summary` 两类等待耗尽行真实存在，必须用于运行隔离审计；但当前
+  DPT 计划明确它们只进入审计、不得成为模型可见质量或平台终态。与此同时，公共合同仍保留
+  `MarketResolutionTerminalV3::WaitingExhaustedQuarantine`，`sim-system` 计划仍保留
+  `EXHAUSTED_QUARANTINED` 输入状态，而模拟器正式入口只消费唯一事件存储及双索引。
+- 若把该变体写入现有模型可见索引，会让仅采集器/运行控制信息进入模型可见事件集合；若不写
+  索引，模拟器现有正式入口无法取得它。当前没有第三个已批准控制索引，也不应为保留一个闲置
+  枚举而新增。相关实现继续暂停，等待用户决定删除陈旧公共变体及模拟器输入状态，或明确批准
+  一条与 Observation 隔离的版本化控制入口；任务 2.4 在该冲突关闭前不开始。
+
+### 独立审查纠正与最终聚焦回归
+
+- 三名使用 `gpt-5.6-sol/ultra` 的独立只读审查代理分别核对身份/水位删除、Gamma 与
+  `end_at`、等待耗尽与跨模块入口。审查确认 `window_id` 与 `TerminalWatermarkV2` 删除完整，
+  Gamma 没有把 `market_end_utc`、`closed_time_utc` 或接收时间冒充平台事件时间，
+  `new_market` 只确认固定身份。对 2026-08-03/04 真实 metadata 的扫描显示 576 个终态市场
+  恰有 576 条唯一终态归属方记录，其中 573 条为 WebSocket、3 条为 Gamma，同市场双归属方为
+  0；三个 Gamma 市场也没有对应 WebSocket `market_resolved`。因此“Gamma 先到、同结果
+  WebSocket 后到”没有当前生产合同或真实样本证据，不增加跨来源归属方状态机或理论冲突
+  测试。
+- 审查发现两个真实不可信边界缺陷。第一，WebSocket 终态资格校验虽然随后无条件生成
+  `Active -> Retired`，却没有复核上游完成终态转换已经要求的生命周期状态、生命周期转换、
+  运行角色及运行角色转换。新增一个损坏 metadata 行回归先证明旧实现会错误接纳，再补齐
+  四项既有资格条件；没有为四个字段穷举排列组合。第二，Gamma
+  `uma_resolution_status` 以及 WebSocket/Gamma outcome 比较没有遵循采集端已有的
+  `trim() + ASCII 大小写不敏感` 语义。一个组合回归先证明合法空白会被错误拒绝，再统一比较
+  语义；规范输出继续使用固定身份中的 outcome 标签。
+- 修复后 `cargo test -p data-pipeline-core --locked --offline` 为 116 项通过、0 项失败；
+  `cargo test -p data-pipeline-training --tests --locked --offline` 的非忽略项为 46 项通过、0 项
+  失败。固定真实 Gamma 与 WebSocket 终态回归各 1 项通过，核心严格 Clippy、全工作区格式和
+  `git diff --check` 通过。
+- 一次未带具名跳过项的扩大工作区测试在 UTC 12:00 前命中 `data-collect` 当前验收文档已经
+  登记的时钟依赖夹具：它把当日 `12:00:00Z` 固定成接收时间，触发
+  `invalid_real_admission_clock` 后超时。这不是本次改动或已证明的生产故障。随后按仓库普通
+  回归边界运行
+  `cargo test --workspace --lib --bins --tests --examples --locked --offline -- --skip four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second`
+  通过；其中 `data-collect` 库为 386 项通过、1 项忽略、1 项具名跳过。
+- 能力枚举旧名称 `QualityGapResyncAndWatermark` 属于既有序列化合同值。本轮不在任务 2.3
+  无升版静默改名；任务 2.5 定稿能力矩阵时再按当前质量/隔离语义决定版本化名称。归约器尚无
+  生产编排器消费是任务 2.4.1 明确要完成的下一项工作，不是当前组件测试可以替代的证据。
+
+### 用户批准关闭等待耗尽外部合同冲突
+
+- 用户批准推荐方案：删除公共
+  `MarketResolutionTerminalV3::WaitingExhaustedQuarantine` 及模拟器外部生命周期
+  `EXHAUSTED_QUARANTINED`，不增加第三控制索引。上游
+  `resolution_followup_summary` 继续作为 typed_raw 隔离审计事实保留，不转换为规范市场事件、
+  `QualityBoundary`、数据源事件时间或模型可见状态。
+- 公共终态现在只表达合格 `Resolved`。若请求范围包含因等待耗尽而缺少合格市场判定的市场，
+  `MarketResolutionTerminal` 能力必须为 `FAIL` 且不得签发门 A；只有显式排除该市场的新范围
+  运行才能重新验收其余范围，不得在原运行中静默丢弃。
+- `sim-system` 计划同步删除外部耗尽分支。输入结束仍无合格判定时，只使用模拟器内部运行失败
+  封存与隔离，不生成公共市场终态、订单终态、查询空页、资金释放、结算或赎回。
+- 本决定不改变 DPT 与 sim-system 需求文档已经冻结的宏观失败关闭语义，因此只修改当前
+  DPT/sim-system/rebuild-core 计划、公共合同、对应测试和三份变更记录；历史条目继续保留当时
+  的决策过程，不承担当前权威。
+
+### 等待耗尽审计闭环、上游身份语义修复与任务 2.3 验收
+
+- 主代理通过生产准入和 Parquet 解码入口核实了闭合的
+  `/home/chillchill/new-datasets/2026-08-05/typed_raw/utc_day=2026-08-05/manifest.json`；其
+  `state=closed`、`closure_reason=utc_day_barrier`。前一小时身份快照文件
+  `polymarket_market_metadata_14.parquet` 的 SHA-256 为
+  `b1dbc1462b24856a6402eed60ecd6d1b4625c19f148070e4847d847276d85746`，含唯一等待耗尽摘要的
+  `polymarket_market_metadata_15.parquet` 的 SHA-256 为
+  `8718d8af818172214abf5a77762f90fe3d8fb4905d4218917e7c162704cdfefe`。真实摘要归属
+  `btc-updown-5m-1785941700`，接收时间为 `1785942480031`，状态为
+  `budget_exhausted_after_valid_nonterminal`，记录 6 次尝试、6 次有效非终态响应、0 次传输不可用
+  和 0 次错过调度槽；该本地调度摘要没有数据源事件时间。
+- typed_raw 边界现在强制 `resolution_followup_summary` 只能搭配两种预算耗尽状态，并拒绝把
+  预算耗尽状态放入其他行种类。`PolymarketMetadataReducer` 对这两种真实摘要分别生成精确原因
+  `POLYMARKET_RESOLUTION_WAIT_BUDGET_EXHAUSTED_AFTER_VALID_NONTERMINAL` 或
+  `POLYMARKET_RESOLUTION_WAIT_BUDGET_EXHAUSTED_WITHOUT_VALID_RESPONSE` 的
+  `Reject + NO_OUTPUT` 报告；报告保留固定身份与输入来源证据，但不生成规范事件、质量边界、
+  数据源事件时间、退休、判定或任何经济副作用。
+- 独立审查发现并由聚焦红灯证明三项与上游现行边界不一致的身份处理：`new_market` 只校验长度
+  会放过重复资产集合，标签比较没有采用上游首尾空白规则，WebSocket 原始平台时间也没有先
+  去除首尾空白再解析。最小修正现在要求资产 ID 精确集合相等，并统一采用上游已有的
+  `trim() + ASCII 大小写不敏感` 标签比较及 `trim().parse()` 时间解析；没有增加新类型、配置
+  或第二条身份路径。
+- 新增真实回归 `real_waiting_exhaustion_summary_remains_audit_only`，固定上述闭合清单、两个文件
+  SHA 和真实市场，通过生产准入、Parquet 解码、来源证据映射、身份快照构造与 metadata 归约
+  入口证明该摘要只形成审计拒绝。任务 2.3 的全部 6 项 Polymarket 真实回归为 6 项通过，耗时
+  113.10 秒；真实 Binance 归约回归为 1 项通过，耗时 61.70 秒。
+- 最终本地验证为：`data-pipeline-core` 119 项通过、0 项失败；
+  `data-pipeline-training` 非忽略测试 46 项通过、0 项失败，另有 13 项真实数据门按默认规则忽略；
+  普通工作区回归按既定边界具名跳过
+  `four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second` 后全部通过，
+  其中 `data-collect` 库为 386 项通过、1 项忽略、1 项具名过滤。核心与 training 的严格 Clippy、
+  全工作区格式检查和 `git diff --check` 全部通过。
+- 任务 2.3 已据此关闭，计划当前游标前移至任务 2.4。该关闭只证明各真实解码、双时间和归约
+  组件及其真实样本回归；任务 2.4.1 仍须用唯一生产编排路径接通这些组件并实测资源，不能以
+  当前测试手工选取文件和市场的路径冒充生产资源证据。
+- 两名 `gpt-5.6-sol/ultra` 独立只读审查代理完成关闭复核。身份与完整任务审查结论为
+  `PASS / Critical 0 / Important 0 / Minor 0`；等待耗尽与跨模块边界审查结论为
+  `PASS / Critical 0 / Important 0 / Minor 1`。后一项 Minor 指出计划首屏曾同时写“任务 2.2
+  已关闭”和“步骤 2.2.4 待任务 2.5”，现已手术式改为任务 2.2.1 至 2.2.3 已关闭、步骤
+  2.2.4 集合级验收待任务 2.5；该修正不改变代码或后续范围。两份审查均确认任务 2.3 可以
+  关闭并进入任务 2.4。
+
+### 任务 2.4 初次真实试验与 Polymarket 空盘口边界决策
+
+- 任务 2.4.1 已开始接通唯一生产编排路径。第一次真实试验暴露准入清单中的 `utc_hour` 为
+  `YYYY-MM-DDTHH`，而试验编排器错误按裸小时解析；修正后聚焦回归证明精确小时区间映射
+  正确。第二次试验在完整解码小时文件时命中 `price_changes[1].best_bid=0`，旧 typed_raw
+  校验将其错误判为必须为正数，运行因此在归约前失败。这两次失败均未形成任务 2.4 通过证据。
+- 对真实文件
+  `/home/chillchill/new-datasets/2026-08-04/typed_raw/utc_day=2026-08-04/source_kind=polymarket_market/polymarket_market_18-part-1.parquet`
+  的只读核查显示：市场
+  `0x242b1d2421714f5f93a1e30239e732bca05ced7c86393b7b204a32eb0f615bee` 在接收时间范围
+  `[1785867275000,1785867421000)` 内共有 3935 行，其中 3897 条 `price_change` 的两项 BBA
+  分别稳定为 `0.99/1` 与 `0/0.01`；14 条独立 `best_bid_ask` 也呈现相同组合。同期完整
+  `book` 分别显示空 asks 与空 bids，证明 `best_ask=1` 与 `best_bid=0` 是对应盘口侧为空的
+  来源边界哨兵，而不是可成交价。
+- 官方 Rust SDK 的下单构造器只接受 `[tick_size, 1-tick_size]` 内价格，进一步排除把 `0/1`
+  解释为可成交价。用户批准：typed_raw 原样保留合法十进制 `0/1` 来源证据；唯一 core 归约
+  路径将 `best_bid=0` 和 `best_ask=1` 映射为现有 BBA 可空字段的 `None`，同时覆盖
+  `price_change` 内嵌 BBA 与独立 `best_bid_ask`。不得在训练范围过滤器中另写转换，不新增
+  状态、质量枚举或第二语义路径。宏观需求不变，当前计划已同步这项技术语义。
+
+### 任务 2.4 唯一生产路径、资源硬门与最终真实试验
+
+- `data-pipeline/training/src/canonical_run.rs` 已把冻结输入准入、六类范围内 Parquet 解码、统一
+  外部排序、任务 2.3 归约器、`CanonicalEventRecordV1` 封装、双时间投影和四类逻辑摘要接入
+  同一生产函数。`data-pipeline/training/src/typed_raw.rs` 的范围读取只在当前生产编排器内部按
+  精确市场和接收时间左闭右开区间选择业务行；物理 schema 和选择坐标仍对每个物理批次严格
+  校验，公共完整文件读取入口没有放宽。当前暂存结果仍明确不是门 A 产物、manifest 或回执。
+- 独立资源审查发现 `peak_hot_markets=1` 只约束单市场数量，不能约束单市场内部的累计状态。
+  Polymarket 的纪元/接纳序号/活动盘口集合和 Binance depth 的纪元/活动价位/删除证据集合会
+  随输入增长。最小修正只增加统一的 `max_retained_reducer_entries`、
+  `peak_retained_reducer_entries` 和 `RetainedReducerStateLimit`；它们统计当前仍保留的累计集合
+  条目，不表示字节、RSS 或增长速率，也没有按来源建立配置矩阵。Arrow 批次字节采用
+  `RecordBatch::get_array_memory_size()` 报告的物理数组大小，在转换业务行前检查；该口径不
+  表示分配器精确值、RSS 或进程总内存，批次形成时的瞬时分配由外层 cgroup 硬门兜底。
+- 最终试验范围为 `2026-08-04` 合格清单中的市场
+  `0x242b1d2421714f5f93a1e30239e732bca05ced7c86393b7b204a32eb0f615bee`，接收时间
+  `[1785867275000,1785867421000)`。`input_set_identity_sha256` 为
+  `a84276dc04344fcb8c634f60b0c01dda097a15a5ae924e8f196c0b3d5a45044a`，
+  `input_manifest_set_sha256` 为
+  `c0a4d65bc097d658cedbac11af3be4af60b3b3f36aaf35fa63bcc84173f4ae51`，每日 manifest SHA-256
+  为 `f5b4a00f5aacf1bd3f15c2d54ec85276ca893c2bb43608dbf52a2181ccbf5624`。选中的 11 个真实文件
+  身份为：metadata part 0/1 分别是 `c5c65351811e7717bbb1781c73f5926a16dc1f9c481bcf414217138cd916ed3f`
+  和 `75d63e62b6b42f228ab950eddcea2ac0fc02f0a2d7cefee6b934a97481d3764a`；Polymarket orderbook
+  part 0/1 分别是 `79e7064df1b0e8087fdd4d27284c1c03fdde46c9b46f91887dc3485ffa6dccb7` 和
+  `76bfcc1129f665f9e212a432d43c0fa931d2302b169b4d62878fd063b7647533`；RTDS part 0/1 分别是
+  `45ab0c61f1e744ec2d0985b7569f6a908ec97663103c52ace60252c6d0dca3c1` 和
+  `5688a7155b78a8a578ddc3a76fb611ee31c115bb7d3deb6becb7471d2f9653e4`；Binance depth snapshot
+  是 `87ed05f5e9a2d757b55cd360af2824eac8dce34a9d7e3db3f30bcae63a634775`；depth update part 0/1
+  分别是 `0c73f67feff706382e6f65a3079e119edc2fead7f7f113f93fea9ab39697b9c2` 和
+  `dcbc05e742a1ca029c479b788c451337a286da82010e29896b2c4cbe1a6709c1`；aggTrade part 0/1 分别
+  是 `845b786982bc6446b291390f68f6a3707fd6b8e235384a7ab835b2abe7868246` 和
+  `d89bac33f10a3e33539ceba44893ed6a6e29ce8eac8e38e3691b6356fa3ef9ff`。
+- 试验直接执行已构建测试二进制，外层命令为
+  `systemd-run --user --unit=dpt-task24-final --property=MemoryAccounting=yes --property=MemoryMax=1073741824 --property=MemorySwapMax=0 --wait --pipe /usr/bin/time -v /home/chillchill/sim-system/target/debug/deps/phase2_canonical_run_contract-9456c258d8c7efd1 real_scoped_six_source_run_uses_one_deterministic_production_path --ignored --exact --nocapture`。
+  二进制 SHA-256 为 `23eee197a8a990b805dd3082953c60fa72377465e6592c11cce737d493f1c1f4`，基线
+  `HEAD=854a6aabb8ff70ef01bd86f31bf96fd06b5b878e`，`Cargo.lock` SHA-256 为
+  `1122bc61e47c1b91099e62572ad2a33e9b668008545c5a90e2d7ef9a0cf1f825`，工具链为
+  `rustc 1.95.0 (59807616e 2026-04-14)` 与 `cargo 1.95.0 (f2d3ce0bd 2026-03-21)`。未提交工作树
+  的 `HEAD` 不被冒充为试验代码身份；实际代码身份由上述直跑二进制摘要固定。
+- 唯一生产配置为：解码 `8192` 行、Arrow 报告批次 `64 MiB`、临时排序行 `128 KiB`、每来源
+  epoch `1`、待配对 WS 终态 `1`、保留归约状态 `32768` 条；排序 run `2048` 行/`32 MiB`、
+  临时文件 `8`、扇入 `4`、打开排序文件 `5`、读写批次 `1024` 行、临时磁盘 `4 MiB`。第二次
+  运行只把解码改为 `4096` 行、排序 run 改为 `4096` 行、读写批次改为 `2048` 行，其余硬门
+  相同；它只用于物理扰动，不形成第二生产配置。
+- 两次运行均选中 9379 行：Polymarket orderbook 3935、metadata 3、RTDS 143、Binance depth
+  snapshot 1、depth update 1443、aggTrade 3854。两次结果均为规范记录 13245 条，其中市场
+  事件 7809、参考事件 5436；事件时间投影 13242、模型可见投影 13245、归约报告 20928。
+  四类摘要完全相同：规范记录
+  `6201d3cff4147f98daf816fc7d9ba8418ddc8e5edbbff6b19155c1f5f7c8ed9f`、事件时间投影
+  `08bcdb6e9e2eba2f7d43febb5e4a5c256190b62f0042d7fb4aa3955bebd91e39`、模型可见投影
+  `399bde97295b2f85e1a6bf474a1960fa1e83018d18ed269cdc9f137a73820ab9`、归约报告
+  `f515529de5978b3226af7b850674569e084ec01143933fb4583fa9248c14c481`。测试结果为
+  `1 passed / 0 failed / 1361.14s`，墙钟 `22:41.15`。
+- 唯一生产配置的实测高水位为：物理解码批次 8192 行、Arrow 报告物理数组 16221452 字节、
+  选中业务行批次 3934 行、临时排序行 102808 字节、Polymarket/Binance epoch 各 1、直接来源
+  输入文件 1、待归约业务输入行 1、热市场 1、待配对 WS 终态 1、保留归约状态 24684 条、
+  业务处理并行度 1。排序器产生 5 个初始 run、2 轮合并，run 峰值 2048 行/11009024 字节，
+  写缓冲 1024 行/4786084 字节，临时文件 6、排序器打开文件 5、堆条目 4、临时磁盘 2322936
+  字节。这里的业务处理并行度不等于进程线程数，来源输入文件与排序器文件也不冒充进程全部
+  文件描述符。
+- 单条规范记录、投影和归约报告的编码峰值分别为 946318、157 和 47806 字节；它们只作为
+  任务 2.5 正式写入批次边界的真实依据，本任务没有为三类输出分别增加配置。直接二进制的
+  最大 RSS 为 290020 KiB，冻结外层验收上限为 320 MiB；cgroup v2 总计费内存峰值为
+  278515712 字节，`memory.max=1 GiB`，`memory.swap.max=0`，交换峰值为 0。运行中末次读取的
+  `memory.events` 为 `low/high/max/oom/oom_kill/oom_group_kill=0`，服务最终以
+  `status=0/SUCCESS` 退出。没有增加进程内 RSS 轮询器或通用资源管理器。
+- 同一真实测试随后把 Arrow 报告批次字节上限降为 `1`，断言命中带路径、批次、观测值和上限
+  的 `TypedRawReadError::DecodeBatchBytesLimit`，并证明失败工作根为空；整个测试通过，因此该
+  代表性超限没有留下半成功暂存结果，也没有为其他资源建立超限排列矩阵。
+- 长测完成后，独立审查发现待配对 WS 终态在集合已满且 claimant 键重复时会先误报容量
+  超限。主代理先把既有顺序抽为窄判定函数并运行聚焦回归，旧顺序按预期失败；随后只把重复
+  判定移到容量判定之前，回归转绿。该修正不改变成功输入的 `pending_ws_terminals` 映射、状态、
+  配置、持久分配、输出或资源水位；上述长测二进制不包含该后续失败分类修正，成功长测本身
+  证明真实范围未命中该分支，不把长测误写成修正后源码的完整重跑。
+- 最终受影响回归为：`data-pipeline-core` 120 项通过、0 项失败；
+  `data-pipeline-training --tests` 的库测试 48 项和普通集成测试 2 项通过，14 项真实数据门按
+  默认规则忽略；严格 Clippy、全工作区格式检查和 `git diff --check` 全部通过。任务 2.4 只
+  关闭 `DPT-AC-010/011` 在唯一生产路径资源与代表性失败清理上的当前切片；正式写入、损坏
+  检查、原子发布和完整门 A 验收仍归任务 2.5。
+
+### 任务 2.5 实施前方案不一致决策门
+
+- 任务 2.5.1 当前列出唯一事件存储、市场事件视图、参考事件视图、事件时间索引、模型可见
+  索引和 Observation 六个名称，却要求验证“四项输出”；`GateAReceiptV3` 只绑定唯一事件
+  存储、事件时间索引、模型可见索引和 Observation 四个 manifest。当前代码只有统一事件
+  存储中的两个类型变体，没有第二份市场/参考事件带。独立审查推荐把它冻结为“四个物理产物
+  组、两个逻辑类型化视图”，市场/参考视图都读取同一存储，不复制事件或增加 manifest；用户
+  尚未决定，不能由实现自行调和。
+- `MarketObservationCausalShellV3` 只冻结外壳和校验，没有冻结何时生成 Observation、九组件
+  分别由哪些可见事件更新、全局参考事件作用于哪些市场、`contributing_event_ids` 是全历史
+  还是最小状态前沿，以及组件/市场状态摘要的前像。推荐方案是每个改变九组件之一的可见事件
+  处理后立即为覆盖市场物化一条 Observation，同一接收毫秒不合并，贡献事件只保留各组件
+  当前状态或质量的最小因果前沿；按任意可见截止点即时构造需要改变当前产物与消费者措辞，同一
+  毫秒合并会丢失可见顺序。该选择会改变因果语义，必须由用户决定。
+- 首个正式门 A 的覆盖范围也未冻结。推荐先选择一个已经证明具有完整事件链的代表市场，run
+  manifest 明确市场集合、接收时间左闭右开区间、纳入的全局参考范围和输入日；任务 2.4 的
+  146 秒资源窗口在证明完整事件链前不能直接晋升。若选择整日全部市场，现有单市场归约器和
+  资源证据不足，必须先扩展计划、实现与资源试验。任务 2.4 至此关闭，当前游标停在上述用户
+  决策门；需求文档的宏观 `DPT-AC-010/011` 无需修改，任务 2.5 尚未开始编码或签发回执。
+
+### 任务 2.5 方案复核与实施授权
+
+- 2026-08-07 复核确认，需求文档已经准确要求门 A 生成唯一规范事件集合、两种时间投影、
+  Observation、完整谱系、确定性与原子回执，保持产品经理层面的宏观表述即可，不需要为了
+  任务 2.5 的物化细节修改需求。上一节把若干已能由现有合同、代码和计划确定的普通实现选择
+  写成了四项额外用户决策，范围过宽；其“每个事件后立即生成 Observation、同一毫秒不合并”
+  的推荐也会把采集时间戳分辨率无法证明的跨来源先后暴露给模型，不再作为当前方案。
+- 用户批准以收窄后的当前计划直接实施：模型可见索引逐条保留所有规范事件；Observation
+  只对运行清单显式覆盖的市场生成，并在同一 `received_at_utc_ms` 中所有能改变九组件之一的
+  可见事件全部应用后，最多生成一条该市场 Observation。同毫秒内可使用确定性内部顺序形成
+  唯一状态，但该顺序不进入公共合同、事件身份或模型可见事实。全局参考事件只存储一次，
+  在其可见后组合进本次运行显式覆盖市场，不向数据集全部市场隐式扇出，也不为会话复制状态。
+- 四份主要数据产物固定为唯一事件存储、事件时间索引、模型可见索引和 Observation；
+  `ExecutionMarketEventV3` 与 `CanonicalReferenceEventV1` 是唯一事件存储上的两个类型化逻辑
+  读取入口，不重复物化、不增加 manifest。使用现有 Arrow/Parquet/Zstd 与版本化 JSON
+  manifest；分页仅使用绑定不可变 manifest 和下一逻辑位置的有界强类型游标，不增加不透明
+  令牌或通用查询层。
+- `contributing_event_ids` 固定为九组件当前非空锚点事件 ID 的排序去重并集，最多九项，不
+  冒充累计状态的完整历史谱系；完整重建继续依赖唯一事件存储、模型可见索引 manifest 与
+  Observation 截止点。组件摘要绑定版本化组件标识、当前规范领域状态、质量和锚点；市场摘要
+  绑定市场身份以及固定九组件顺序的质量、缺失状态和组件摘要。
+- 首个正式门 A 使用能让全部必需能力真实通过的最小完整单市场范围。任务 2.4 的既有范围
+  只有在真实数据证明其覆盖完整能力后才能复用，否则扩展合格输入范围并重新测量受影响资源
+  门。发布路径只实现同文件系统候选目录、完整重验、一次原子重命名与失败清理；不增加常驻
+  发布服务、通用完成器协议或人工批准字段。用户已批准该修订并授权进入任务 2.5 实施。
+
+### BBA epoch 误判复核与任务 2.5 恢复
+
+- 实施前审查一度把 Polymarket 归约器在 epoch 切换时执行的 `state.bba=None` 解释为公开
+  BBA 被静默清除，并推荐新增 `POLYMARKET_BBA_EPOCH_BASELINE_REQUIRED`。重新核对全部读写
+  路径后确认，该字段只承担当前 epoch 内的同值确认、前一直接证据和报告基线；清空它会让
+  新 epoch 首条数值相同的绝对 BBA 重新形成规范事件，不等于模型公开 BBA 变为 `Missing`。
+- 当前计划已经规定只有 `BestBidAskV2` 更新 BBA、资产级当前 `QualityBoundaryV2` 只更新
+  `PolymarketL2`，且仅采集器可见的重连信息不能进入 Observation。现有跨 epoch 回归也明确
+  只生成 L2 缺失边界，并允许 BBA 在没有完整 `book` 时独立更新。因此新增 BBA 缺失事件会
+  把采集任务换代误写为平台市场事实，删除模型最后真实收到的价格，并同时污染事件时间投影
+  与模型可见投影；该推荐不成立，现已撤回。
+- 只读真实数据复核确认 BBA-before-book 合法可达；2026-08-04 重启边界的 1,859,801 行中，
+  新 epoch 的 11 个市场、22 个资产均为完整 `book` 先到再到 BBA。事件顺序事实既不能把
+  collector epoch 解释为平台 BBA 缺失，也不改变最后实际可见状态语义。用户同意本次纠正并
+  批准继续执行：不新增质量原因、不升级合同或 `canonical_rule_version`；只收窄任务 2.3.1
+  中“盘口状态”为“L2 数量归约状态”，并把 BBA 保留、重新锚定和 L2 独立恢复并入任务 2.5
+  现有 Observation 聚焦测试。
+
+### 任务 2.5 正式前真实样本门与物理扰动边界纠正
+
+- 正式前独立审查发现，计划曾要求首个真实代表市场链证明未知旧 tick。两次独立只读扫描
+  复核 `2026-07-30` 至 `2026-08-05` 的合格日期数据，共有 1,136 条
+  `tick_size_change`，没有 `old_tick_size` 为空或空白的行，实际均为
+  `0.01 -> 0.001`。这不否定合同允许未知旧 tick；它证明把可空合同变体强制写成真实范围
+  必须出现的事实无法由现有数据满足，也不属于宏观需求。用户批准真实门只验证实际动态
+  old/new tick 及两 token/asset 链路，未知旧 tick 继续由既有合同边界测试和阶段 3 黄金合同
+  序列验证，不伪造真实样本。
+- 同轮审查确认，计划曾把文件、行组、批次、线程和等价重分片混写成全部产物摘要不变。
+  当前生产核心固定业务处理并行度为 `1`；输入清单和完整来源谱系又必须如实绑定物理
+  manifest/file SHA。真实源文件重分片时，规范事件 ID 应保持稳定，但输入集合、完整记录流
+  和产物谱系身份必须改变，不能把两类身份强制相等。用户批准把 `DPT-AC-002` 收窄为计划
+  实际支持的无语义物理执行变化，并按三层证据验收：合同测试证明物理 SHA 不进入事件语义
+  身份；正式同输入运行扰动 Parquet 解码批次、外排 run、读写批次和输出行组；固定并行度
+  `1` 只作资源事实断言，不为验收新增并行或源文件重分片路径。
+- 需求、计划、当前游标、阶段 3 黄金/真实证据归属和验收映射已经按上述批准决定直接覆盖
+  旧语义。该修正删除无法满足和会制造第二路径的过度验收，不改变双时间、事件语义身份、
+  真实物理谱系或门 A 成功条件。
+
+### 任务 2.5 正式范围资源诊断与有界 Parquet 行组修复
+
+- 首个正式范围使用 `2026-08-03` 合格清单、市场
+  `0xd4346bcf419856fa3261d3c0705597d5c909ead020b9f1a0de468092704fc65f` 和接收时间左闭右开
+  区间 `[1785715201837,1785715888412)`。扩大范围后的首次诊断先证明原 `131072` 条归约器
+  保留集合上限不足，真实峰值在下一条输入到达时为 `131082`；该上限据真实范围提高为
+  `163840`，没有改变归约语义或新增按来源配置。
+- 随后的诊断在规范记录捕获阶段命中原统一 `2 MiB` 单行载荷门。专用只读探针通过同一生产
+  归约路径精确测得：最大规范记录为 `2896901` 字节，对应来源接纳序号 `2515346`、直接证据
+  `4544` 项、`1362` 个 bids 和 `1563` 个 asks。该序号是来源接纳坐标，不是规范记录发射位置
+  或输出行数；一度据它推导数百万规范记录和 `1024` 个临时 run 文件的判断错误，随后已撤回。
+  独立语义审查确认该载荷是当前 Binance 完整状态与去重直接证据前沿的合法结果，不是报告
+  重复或递归历史复制。统一单行载荷门因此只提高到 `3 MiB`；没有拆出逐产物配置或改变公共
+  事件合同。探针当时报告的归约报告峰值 `1616` 字节不是完整正式范围最终高水位；后续完整
+  主配置实测以 `55836` 字节取代该局部数值，仍远低于同一统一载荷门。
+- 早期 release 诊断在 `MemoryMax=1 GiB`、`MemorySwapMax=0` 下被 cgroup OOM 终止，但随后
+  核对发现其 `TempDir` 位于 `/tmp`，而本机 `/tmp` 是 `tmpfs`；实时 `memory.stat` 的
+  `file == shmem` 证明候选文件本身被计入内存，不能据此把 OOM 归因于正式 `ext4` 路径的页
+  缓存，也不能把该次运行作为资源门证据。核对后只删除了精确失败目录 `/tmp/.tmpNCHdNo`
+  和 `/tmp/.tmpFto612`，分别约 `473 MiB` 和 `226 MiB`；它们没有成功 manifest 或回执，
+  属于不可恢复但可由同一输入重现的诊断产物。后续全部资源诊断改用正式发布根同类
+  `/home/chillchill/sim-system/.local-artifacts/data-pipeline-training/gate-a-diagnostics` 的
+  `ext4` 文件系统。
+- 最小修复在两条 Parquet 写入路径的每个既有有界批次后关闭行组、同步文件并提示内核回收
+  已落盘缓存；外排读取器改为一次只打开并解码一个行组，解码后仍按真实 `SortRow` 驻留分配
+  检查 `64 MiB` 门。没有新增 Parquet 物理字节上限；独立审查确认
+  `RowGroupMetaData::total_byte_size()` 是未压缩列字节，不能与行对象驻留内存直接比较。该修复
+  是对既有批次和读取内存门的正确有界实现，但不再声称它单独解释了上述 `tmpfs` OOM。
+- 两次后续 release 诊断没有再发生 OOM，交换峰值均为 0，但先后暴露两项自产物口径错误：
+  一次以 Parquet 未压缩列字节 `67113597 > 67108864` 错误拒绝合法行组；删除该异构口径后，
+  一次又以解码后行驻留量 `67149720 > 67108864` 拒绝捕获写入器按纯
+  `key.len() + payload.len()` 放行的边缘批次。后一项通过把捕获缓冲统一为已有
+  `Vec<SortRow>`，复用与外排相同的容量和行分配口径修复；近边界回归证明旧口径会放行
+  `65456` 字节的两行原始载荷并在计入 `96` 字节描述符后自拒绝，当前实现会在第二行前刷新。
+- 首次正确使用 `ext4` 的完整主配置诊断没有 OOM，最大 RSS 为 `451924 KiB`、cgroup 总内存
+  峰值为 `685621248` 字节、交换为 0；它继续推进到结构化
+  `TempRunFileLimit { needed: 129, limit: 128 }`。把统一临时 run 文件门改为 `512` 后，下一轮
+  真实运行进入 `sort-visibility-material` 第二轮合并，再以
+  `TempByteLimit { limit: 536870912 }` 失败；该轮最大 RSS 为 `647932 KiB`、cgroup 总内存
+  峰值为 `690204672` 字节、交换为 0。现场连续文件编号精确还原该最重排序为
+  `194 -> 49 -> 13 -> 4 -> 1`，主配置文件峰值为 `195`；`4096` 行物理扰动最多把每个主 run
+  拆为两个，文件峰值上界为 `389`，所以 `512` 是覆盖两种配置的最小清晰二进制门，不需要
+  改写合并生命周期或提高到 `1024`。
+- `sort-visibility-material` 的最终文件为 `454862895` 字节；最后一轮必须让上一代完整输入和
+  新完整输出同时存在，结构占用接近其两倍，`768 MiB` 没有可靠余量。统一临时排序字节门据此
+  提高为 `1 GiB`，不改变合并扇入 `4`、同时打开文件 `5` 或候选目录 `4 GiB` 门。下一轮主
+  配置在该门下完整构建并复核成功：规范记录 `213458`、事件时间投影 `213454`、模型可见投影
+  `213458`、Observation `71114`、归约报告 `418877`；临时排序峰值 `904511002` 字节、文件
+  峰值 `195`、Observation L2 保留层级峰值 `240`、候选目录上界 `1377583253` 字节、含复核
+  控制文件的正式工作目录上界 `1431060629` 字节。四类规范流摘要分别为
+  `949e621b694fae8ec9a74f6dda0d7dc2c2ffe16280bc8ef6c4675e0fc596e277`、
+  `bb8ac3ca9c59e88f8ccc0a698058e0e5dca2556ae680598c6ac76eababce5566`、
+  `c70df7b7777063a24e930f3a6552106576a56b7cd41f1b0d14e2b23531990181`、
+  `a47dd5b33fa5fbc5e5f96543652a45729a08e5108488a7a6bd318ae0d82505f3`，候选复算完全一致。
+- 上述成功诊断墙钟 `1208.32s`，最大 RSS `642092 KiB`，cgroup 总内存峰值 `693571584`
+  字节，交换为 0，测试结果 `1 passed / 0 failed`；临时测试目录按 `TempDir` 生命周期清理，
+  没有签发正式回执。当前 Observation L2 门据 `240` 收紧为 `256`，外层 RSS 门据相邻真实
+  诊断提高为 `768 MiB`；临时 run 文件 `512`、临时排序字节 `1 GiB`、单行载荷 `3 MiB`、
+  共享捕获 `1 GiB` 和候选目录 `4 GiB` 保持统一配置。完整 `4096` 行物理扰动、主配置逻辑
+  一致性、能力矩阵和原子发布仍须由正式干净提交命令完成，不能用本次主配置诊断替代。
+- 当前源码的 `data-pipeline-training` 库测试 `66/66`、命令行测试 `1/1` 通过；计划冻结的
+  `cargo test --workspace --lib --bins --tests --examples --locked --offline -- --skip four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second`
+  以退出码 0 通过。`cargo clippy -p data-pipeline-training --all-targets --locked --offline -- -D warnings`、
+  `cargo fmt --all -- --check` 和 `git diff --check` 均通过。
+- 两轮独立 `gpt-5.6-sol/ultra` 复审均确认上述修复不改变排序、载荷或摘要，没有新增第二套
+  Arrow/Parquet 路径。关于恶意主体同时改写 Parquet、manifest 和 SHA 后用 Thrift 集合计数
+  放大分配的发现，源码事实成立，但当前批准的本地产物损坏模型没有敌对本地写入者；普通
+  单文件损坏会先被完整文件 SHA 拒绝。当前不增加无效 footer 魔数或自研 Thrift 解析器；若
+  未来扩大威胁模型，应先冻结外部可信摘要和受限解析进程，而不是在本轮形成影子解析。

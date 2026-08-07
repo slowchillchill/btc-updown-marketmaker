@@ -391,3 +391,51 @@ changelog 旧段落中仍像当前规范的“同步文档权威契约测试”�
 - 本轮只修改 rebuild-core 的需求、计划和本变更记录，没有修改代码、测试、DPT 或
   `sim-system` 归属文档，没有运行 Rust 测试，也没有读取或构建数据、执行远端或部署操作、
   提交或推送。rebuild-core 继续保持 `authority=none`、`执行授权=none` 和审核中生命周期。
+
+## 2026-08-06：同步 DPT ExecutionMarketEventV3 来源追溯合同
+
+- 用户随后在 DPT 事项中批准方案 2，本节取代上一节对当前 V2 市场合同及其嵌套载荷版本的
+  描述；上一节继续只记录当时的真实同步事实。
+- rebuild-core 计划已改为只读消费 `CanonicalEventRecordV1` 唯一事件存储、
+  `ExecutionMarketEventV3`、`CanonicalReferenceEventV1`、
+  `MarketObservationCausalShellV3`、`GateAReceiptV3` 和双索引 V2。市场事件原含
+  `source_event_ids` 的载荷均使用新的显式版本，唯一来源追溯位于顶层
+  `EventLineageV2.source_evidence`。
+- 总集成仍只核验 DPT 回执、合同版本、唯一存储与索引闭包并透传市场事件；不新增来源事件
+  实体、第三种统一记录、字段级来源映射或 rebuild-core 自有规范化路径。参考事件不进入
+  `sim-system`。
+- 本次只同步审核中需求、计划与本变更记录，没有实施 rebuild-core 代码，也不改变
+  `authority=none`、执行授权 `none` 或草案生命周期。
+
+## 2026-08-06：同步市场结束至合格判定的总集成验收边界
+
+- `sim-system` 归属需求与计划已冻结：`end_at` 后拒绝新订单，已有开放订单保持可查询、可撤
+  但不再撮合；合格 `MarketResolved` 到达时仍开放的未成交余量才转为
+  `ORDER_STATUS_CANCELED_MARKET_RESOLVED` 并释放对应资金预留，已成交结果代币另由后续自动
+  赎回兑付。
+- rebuild-core 不复制该状态机或拥有其实现，只把阶段 3 任务 3.4 的总集成验收措辞从笼统的
+  “市场关闭”改为核对归属计划的 `end_at` 操作门、合格判定订单终态、未成交余量预留释放与
+  后续结算边界。
+- 本次不修改 `demand/rebuild-core-demand.md`、DPT 文档、公共 Rust 合同或代码，不运行 Rust
+  测试，不改变 rebuild-core 草案生命周期、`authority=none` 或执行授权 `none`，不提交或推送。
+
+## 2026-08-06：清除跨模块陈旧游标与笼统版本表述
+
+- 用户批准修复复审确认的三处陈旧跨模块叙事。rebuild-core 计划不再复制 DPT 已过期的任务
+  2.2 实施状态，DPT 当前游标继续只由 `plan/data-pipeline-training-plan.md` 提供。
+- “仓库公共 Rust V2 顶层类型”已改为引用第 1.6 节列明的当前公共 Rust 顶层类型，避免把实际
+  混合使用的 V1、V2、V3 合同错误概括成单一版本。
+- 本次只清理当前计划中的易漂移叙事，不改变 rebuild-core 需求、公共合同、总集成语义、草案
+  生命周期、`authority=none` 或执行授权，也没有实施 rebuild-core 代码或运行其测试。
+
+## 2026-08-06：同步等待耗尽的公共消费边界
+
+- 用户批准删除 DPT 公共
+  `MarketResolutionTerminalV3::WaitingExhaustedQuarantine` 和 sim-system 外部
+  `EXHAUSTED_QUARANTINED` 分支。采集等待耗尽摘要只保留在 DPT 隔离审计中，不进入唯一事件
+  存储、双索引或模拟器外部生命周期。
+- rebuild-core 计划同步明确不得增加第三控制索引或平行事件带。缺少合格平台判定时，只消费
+  DPT 失败诊断且不存在门 A 回执；若显式缩小范围并重新验收，只消费该新范围成功回执实际
+  覆盖的结果，不在总集成层补造终态或时间。
+- 本次只同步审核中的 rebuild-core 计划和本变更记录，没有修改需求、实施代码、运行测试，
+  也不改变草案生命周期、`authority=none` 或执行授权。

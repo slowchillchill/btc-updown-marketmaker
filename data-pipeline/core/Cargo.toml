@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+base64 = "0.22.1"
 contracts = { path = "../../contracts" }
 rust_decimal = "=1.42.1"
 serde = { version = "1", features = ["derive"] }

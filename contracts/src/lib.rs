@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-pub const EXECUTION_MARKET_EVENT_SCHEMA_V2: &str = "execution_market_event_v2";
-pub const MARKET_OBSERVATION_CAUSAL_SHELL_SCHEMA_V2: &str = "market_observation_causal_shell_v2";
+pub const EXECUTION_MARKET_EVENT_SCHEMA_V3: &str = "execution_market_event_v3";
+pub const CANONICAL_REFERENCE_EVENT_SCHEMA_V1: &str = "canonical_reference_event_v1";
+pub const CANONICAL_EVENT_RECORD_SCHEMA_V1: &str = "canonical_event_record_v1";
+pub const MARKET_OBSERVATION_CAUSAL_SHELL_SCHEMA_V3: &str = "market_observation_causal_shell_v3";
 pub const GATE_A_CAPABILITY_MATRIX_SCHEMA_V2: &str = "gate_a_capability_matrix_v2";
-pub const GATE_A_RECEIPT_SCHEMA_V2: &str = "real_execution_tape_receipt_v2";
+pub const GATE_A_RECEIPT_SCHEMA_V3: &str = "real_execution_tape_receipt_v3";
 pub const EVENT_TIME_INDEX_SCHEMA_V2: &str = "event_time_index_v2";
 pub const VISIBILITY_INDEX_SCHEMA_V2: &str = "visibility_index_v2";
 pub const DATASET_LINEAGE_ROOT: &str = "/home/chillchill/new-datasets";
@@ -76,18 +78,17 @@ pub struct AssetIdentityV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MarketWindowV1 {
-    pub window_id: Sha256Hex,
+pub struct MarketWindowV2 {
     pub start_at_utc_ms: i64,
     pub end_at_utc_ms: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MarketIdentityV1 {
+pub struct MarketIdentityV2 {
     pub condition_id: ConditionId,
     pub clob_market_id: ClobMarketId,
-    pub window: MarketWindowV1,
+    pub window: MarketWindowV2,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,25 +219,23 @@ pub struct PriceLevelV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MarketLifecycleTransitionV1 {
+pub struct MarketLifecycleTransitionV2 {
     pub previous_state: Option<MappedMarketLifecycleStateV1>,
     pub current_state: MappedMarketLifecycleStateV1,
     pub assets: Vec<AssetIdentityV1>,
-    pub source_event_ids: Vec<CanonicalEventId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MarketTradingStateV1 {
+pub struct MarketTradingStateV2 {
     pub active: Option<bool>,
     pub closed: Option<bool>,
     pub accepting_orders: Option<bool>,
-    pub source_event_ids: Vec<CanonicalEventId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct InitialL2SnapshotV1 {
+pub struct InitialL2SnapshotV2 {
     pub asset: AssetIdentityV1,
     pub initial_tick_size_pusd_per_share: ExactDecimal,
     pub source_sequence_epoch_id: String,
@@ -244,25 +243,22 @@ pub struct InitialL2SnapshotV1 {
     pub book_digest_sha256: Sha256Hex,
     pub bids: Vec<PriceLevelV1>,
     pub asks: Vec<PriceLevelV1>,
-    pub source_event_ids: Vec<CanonicalEventId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct BestBidAskV1 {
+pub struct BestBidAskV2 {
     pub asset: AssetIdentityV1,
     pub best_bid_pusd_per_share: Option<ExactDecimal>,
     pub best_ask_pusd_per_share: Option<ExactDecimal>,
-    pub source_event_ids: Vec<CanonicalEventId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TickSizeChangeV1 {
+pub struct TickSizeChangeV2 {
     pub asset: AssetIdentityV1,
     pub old_tick_size_pusd_per_share: Option<ExactDecimal>,
     pub new_tick_size_pusd_per_share: ExactDecimal,
-    pub source_event_ids: Vec<CanonicalEventId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -274,7 +270,7 @@ pub enum PublicTradeIdSourceV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PublicTradeV1 {
+pub struct PublicTradeV2 {
     pub asset: AssetIdentityV1,
     pub trade_id: String,
     pub trade_id_source: PublicTradeIdSourceV1,
@@ -282,7 +278,6 @@ pub struct PublicTradeV1 {
     pub quantity_shares: ExactDecimal,
     pub aggressor_side: TradeSide,
     pub fee_rate_bps: Option<ExactDecimal>,
-    pub source_event_ids: Vec<CanonicalEventId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -309,9 +304,9 @@ pub enum QueueResultQuality {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LevelExecutionTransitionV2 {
+pub struct LevelExecutionTransitionV3 {
     pub causal_group_id: Sha256Hex,
-    pub market: MarketIdentityV1,
+    pub market: MarketIdentityV2,
     pub asset: AssetIdentityV1,
     pub side: BookSide,
     pub price_pusd_per_share: ExactDecimal,
@@ -322,7 +317,6 @@ pub struct LevelExecutionTransitionV2 {
     pub net_added_quantity_shares: ExactDecimal,
     pub net_reduced_quantity_shares: ExactDecimal,
     pub queue_consumption_quantity_shares: ExactDecimal,
-    pub source_event_ids: Vec<CanonicalEventId>,
     pub basis: LevelExecutionBasis,
     pub platform_effective_at_utc_ms: i64,
     pub visible_at_utc_ms: i64,
@@ -344,12 +338,11 @@ pub enum QualityScopeV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct QualityBoundaryV1 {
+pub struct QualityBoundaryV2 {
     pub scope: QualityScopeV1,
     pub previous_quality: MarketDataQuality,
     pub current_quality: MarketDataQuality,
     pub reason_code: String,
-    pub source_event_ids: Vec<CanonicalEventId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -360,33 +353,17 @@ pub struct PayoutEntryV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TerminalWatermarkV2 {
-    pub last_source_event_at_utc_ms: Option<i64>,
-    pub last_received_at_utc_ms: i64,
-    pub canonical_event_root_sha256: Sha256Hex,
-    pub lineage_identity_sha256: Sha256Hex,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     deny_unknown_fields,
     tag = "status",
     rename_all = "SCREAMING_SNAKE_CASE"
 )]
-pub enum MarketResolutionTerminalV2 {
+pub enum MarketResolutionTerminalV3 {
     Resolved {
         winning_asset_id: String,
         winning_outcome: String,
         payout_vector: Vec<PayoutEntryV1>,
         mapping_rule_version: String,
-        source_event_ids: Vec<CanonicalEventId>,
-        terminal_watermark: TerminalWatermarkV2,
-    },
-    WaitingExhaustedQuarantine {
-        reason_code: String,
-        source_event_ids: Vec<CanonicalEventId>,
-        terminal_watermark: TerminalWatermarkV2,
     },
 }
 
@@ -397,37 +374,110 @@ pub enum MarketResolutionTerminalV2 {
     content = "event",
     rename_all = "snake_case"
 )]
-pub enum ExecutionMarketEventPayloadV2 {
-    MarketLifecycleTransition(MarketLifecycleTransitionV1),
-    MarketTradingState(MarketTradingStateV1),
-    InitialL2Snapshot(InitialL2SnapshotV1),
-    BestBidAsk(BestBidAskV1),
-    TickSizeChange(TickSizeChangeV1),
-    PublicTrade(PublicTradeV1),
-    LevelExecutionTransition(LevelExecutionTransitionV2),
-    QualityBoundary(QualityBoundaryV1),
-    MarketResolutionTerminal(MarketResolutionTerminalV2),
+pub enum ExecutionMarketEventPayloadV3 {
+    MarketLifecycleTransition(MarketLifecycleTransitionV2),
+    MarketTradingState(MarketTradingStateV2),
+    InitialL2Snapshot(InitialL2SnapshotV2),
+    BestBidAsk(BestBidAskV2),
+    TickSizeChange(TickSizeChangeV2),
+    PublicTrade(PublicTradeV2),
+    LevelExecutionTransition(LevelExecutionTransitionV3),
+    QualityBoundary(QualityBoundaryV2),
+    MarketResolutionTerminal(MarketResolutionTerminalV3),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionMarketEventV2 {
+pub struct ExecutionMarketEventV3 {
     pub schema_version: String,
     pub event_id: CanonicalEventId,
-    pub market: MarketIdentityV1,
+    pub market: MarketIdentityV2,
     pub time: EventTimeV2,
     pub lineage: EventLineageV2,
     pub quality: EventQualityV2,
-    pub payload: ExecutionMarketEventPayloadV2,
+    pub payload: ExecutionMarketEventPayloadV3,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ObservationLineageV2 {
-    pub execution_event_contract_version: String,
-    pub input_set_identity_sha256: Sha256Hex,
-    pub visibility_index_manifest_sha256: Sha256Hex,
-    pub contributing_event_ids: Vec<CanonicalEventId>,
+pub struct ReferencePriceLevelV1 {
+    pub price_usdt_per_btc: ExactDecimal,
+    pub quantity_btc: ExactDecimal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChainlinkBtcUsdReferenceV1 {
+    pub symbol: String,
+    pub price_usd_per_btc: ExactDecimal,
+    pub message_timestamp_utc_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BinanceDepthStateReferenceV1 {
+    pub symbol: String,
+    pub last_update_id: u64,
+    pub bids: Vec<ReferencePriceLevelV1>,
+    pub asks: Vec<ReferencePriceLevelV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BinanceAggregateTradeReferenceV1 {
+    pub symbol: String,
+    pub aggregate_trade_id: u64,
+    pub first_trade_id: u64,
+    pub last_trade_id: u64,
+    pub price_usdt_per_btc: ExactDecimal,
+    pub quantity_btc: ExactDecimal,
+    pub buyer_is_maker: bool,
+    pub event_time_utc_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    deny_unknown_fields,
+    tag = "reference_type",
+    content = "reference",
+    rename_all = "snake_case"
+)]
+pub enum CanonicalReferenceEventPayloadV1 {
+    ChainlinkBtcUsd(ChainlinkBtcUsdReferenceV1),
+    BinanceDepthState(BinanceDepthStateReferenceV1),
+    BinanceAggregateTrade(BinanceAggregateTradeReferenceV1),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalReferenceEventV1 {
+    pub schema_version: String,
+    pub event_id: CanonicalEventId,
+    pub time: EventTimeV2,
+    pub lineage: EventLineageV2,
+    pub quality: EventQualityV2,
+    pub payload: CanonicalReferenceEventPayloadV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    deny_unknown_fields,
+    tag = "record_type",
+    content = "record",
+    rename_all = "snake_case"
+)]
+pub enum CanonicalEventRecordV1 {
+    ExecutionMarketEvent(Box<ExecutionMarketEventV3>),
+    ReferenceEvent(Box<CanonicalReferenceEventV1>),
+}
+
+impl CanonicalEventRecordV1 {
+    pub fn as_execution_market_event(&self) -> Option<&ExecutionMarketEventV3> {
+        match self {
+            Self::ExecutionMarketEvent(event) => Some(event.as_ref()),
+            Self::ReferenceEvent(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -465,11 +515,22 @@ pub struct ObservationComponentStateV2 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MarketObservationCausalShellV2 {
+pub struct ObservationLineageV3 {
+    pub canonical_event_record_contract_version: String,
+    pub execution_event_contract_version: String,
+    pub reference_event_contract_version: String,
+    pub input_set_identity_sha256: Sha256Hex,
+    pub visibility_index_manifest_sha256: Sha256Hex,
+    pub contributing_event_ids: Vec<CanonicalEventId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MarketObservationCausalShellV3 {
     pub schema_version: String,
     pub observation_id: Sha256Hex,
-    pub market: MarketIdentityV1,
-    pub lineage: ObservationLineageV2,
+    pub market: MarketIdentityV2,
+    pub lineage: ObservationLineageV3,
     pub visibility_cutoff: ObservationVisibilityCutoffV2,
     pub market_state_digest_sha256: Sha256Hex,
     pub component_states: Vec<ObservationComponentStateV2>,
@@ -524,12 +585,14 @@ pub struct GateACapabilityMatrixV2 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct GateAReceiptV2 {
+pub struct GateAReceiptV3 {
     pub schema_version: String,
     pub receipt_id: Sha256Hex,
     pub requirement_id: String,
     pub pipeline_core_identity_sha256: Sha256Hex,
+    pub canonical_event_record_contract_version: String,
     pub execution_event_contract_version: String,
+    pub reference_event_contract_version: String,
     pub observation_contract_version: String,
     pub event_time_index_contract_version: String,
     pub visibility_index_contract_version: String,

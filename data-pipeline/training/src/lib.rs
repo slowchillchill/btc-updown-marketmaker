@@ -3,6 +3,12 @@
 //! 准入边界只接受固定直接数据根；排序行结构只包含调用方提供的不透明字节排序键
 //! 和不透明载荷。本 crate 不是通用存储层或查询层，也不解释排序键的业务语义。
 
+pub mod canonical_run;
+pub mod gate_a;
+pub mod gate_a_publication;
+pub mod observation;
+pub mod typed_raw;
+
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap};
 use std::fmt;
@@ -17,14 +23,17 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use arrow_array::{Array, ArrayRef, BinaryArray, RecordBatch};
 use arrow_ord::sort::{SortColumn, SortOptions, lexsort_to_indices};
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
-use contracts::{DATASET_LINEAGE_ROOT, DatasetDateEligibility};
+use contracts::{DATASET_LINEAGE_ROOT, DatasetDateEligibility, GateAReceiptV3};
 use data_pipeline_core::classify_dataset_date;
 use parquet::arrow::ArrowWriter;
-use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
+use parquet::arrow::arrow_reader::{
+    ArrowReaderMetadata, ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder,
+};
 use parquet::basic::Compression;
 use parquet::errors::ParquetError;
 use parquet::file::properties::WriterProperties;
-use serde::Deserialize;
+use rustix::fs::{Advice, fadvise};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::Date;
 use time::macros::format_description;
@@ -54,6 +63,30 @@ const REQUIRED_WRITER_FINALIZE_ACKS: [&str; 6] = [
     "polymarket_market_metadata",
     "polymarket_rtds_chainlink_btc_usd",
 ];
+
+/// 仅有门 A 成功回执仍不构成训练数据集准入。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TrainingAdmissionError {
+    GateAIsNotTrainingDatasetReady,
+}
+
+impl fmt::Display for TrainingAdmissionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::GateAIsNotTrainingDatasetReady => {
+                write!(formatter, "门 A 回执不能替代门 B 训练数据集成功回执")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TrainingAdmissionError {}
+
+pub fn admit_gate_a_receipt_for_training(
+    _receipt: &GateAReceiptV3,
+) -> Result<(), TrainingAdmissionError> {
+    Err(TrainingAdmissionError::GateAIsNotTrainingDatasetReady)
+}
 
 /// 已通过固定数据根和日期下限检查的清单路径。
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1665,7 +1698,8 @@ fn sort_row_buffer_bytes(rows: &Vec<SortRow>) -> Option<usize> {
 }
 
 /// 单次排序调用的显式硬上限。
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SortConfig {
     /// 形成一个初始有序 run 时最多保留的行数。
     pub max_run_rows: usize,
@@ -1684,7 +1718,8 @@ pub struct SortConfig {
 }
 
 /// 实测资源用量与行守恒计数器。
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SortMetrics {
     pub input_rows: u64,
     pub output_rows: u64,
@@ -1788,22 +1823,277 @@ pub fn external_sort<I>(
 where
     I: IntoIterator<Item = SortRow>,
 {
-    validate_config(config)?;
+    let mut sorter = ExternalSorter::new(temp_root, config)?;
+    for row in rows {
+        sorter.push(row)?;
+    }
+    sorter.finish()
+}
 
-    let work_directory = temp_root.join(WORK_DIRECTORY);
-    match fs::create_dir(&work_directory) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            return Err(SortError::WorkspaceExists(work_directory));
+pub(crate) struct ExternalSorter {
+    work_directory: PathBuf,
+    config: SortConfig,
+    metrics: SortMetrics,
+    runs: Vec<RunInfo>,
+    pending_rows: Vec<SortRow>,
+    current_temp_bytes: u64,
+    active_temp_run_files: usize,
+    next_file_id: usize,
+    retain_work_directory: bool,
+}
+
+impl ExternalSorter {
+    pub(crate) fn new(temp_root: &Path, config: &SortConfig) -> Result<Self, SortError> {
+        validate_config(config)?;
+
+        let work_directory = temp_root.join(WORK_DIRECTORY);
+        match fs::create_dir(&work_directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(SortError::WorkspaceExists(work_directory));
+            }
+            Err(error) => return Err(error.into()),
         }
-        Err(error) => return Err(error.into()),
+
+        let mut sorter = Self {
+            work_directory,
+            config: config.clone(),
+            metrics: SortMetrics::default(),
+            runs: Vec::new(),
+            pending_rows: Vec::with_capacity(config.max_run_rows),
+            current_temp_bytes: 0,
+            active_temp_run_files: 0,
+            next_file_id: 0,
+            retain_work_directory: false,
+        };
+        let pending_base_bytes =
+            sort_row_buffer_bytes(&sorter.pending_rows).ok_or(SortError::RowMemoryLimit {
+                observed: usize::MAX,
+                limit: config.max_run_bytes,
+            })?;
+        if pending_base_bytes > config.max_run_bytes {
+            return Err(SortError::RowMemoryLimit {
+                observed: pending_base_bytes,
+                limit: config.max_run_bytes,
+            });
+        }
+        sorter.metrics.peak_run_bytes = pending_base_bytes;
+        Ok(sorter)
     }
 
-    let result = external_sort_inner(rows, &work_directory, config);
-    if result.is_err() {
-        let _ = fs::remove_dir_all(&work_directory);
+    pub(crate) fn push(&mut self, row: SortRow) -> Result<(), SortError> {
+        let exceeds_rows = self.pending_rows.len() >= self.config.max_run_rows;
+        let mut prospective_bytes = sort_row_buffer_bytes(&self.pending_rows)
+            .and_then(|bytes| bytes.checked_add(sort_row_inner_bytes(&row)?))
+            .filter(|bytes| *bytes <= self.config.max_run_bytes);
+        let exceeds_bytes = prospective_bytes.is_none();
+        if exceeds_rows || exceeds_bytes {
+            if self.pending_rows.is_empty() {
+                return Err(SortError::RowMemoryLimit {
+                    observed: sort_row_buffer_bytes(&self.pending_rows)
+                        .and_then(|bytes| bytes.checked_add(sort_row_inner_bytes(&row)?))
+                        .unwrap_or(usize::MAX),
+                    limit: self.config.max_run_bytes,
+                });
+            }
+            self.flush_pending()?;
+            prospective_bytes = sort_row_buffer_bytes(&self.pending_rows)
+                .and_then(|bytes| bytes.checked_add(sort_row_inner_bytes(&row)?))
+                .filter(|bytes| *bytes <= self.config.max_run_bytes);
+        }
+
+        let observed = prospective_bytes.ok_or(SortError::RowMemoryLimit {
+            observed: sort_row_buffer_bytes(&self.pending_rows)
+                .and_then(|bytes| bytes.checked_add(sort_row_inner_bytes(&row)?))
+                .unwrap_or(usize::MAX),
+            limit: self.config.max_run_bytes,
+        })?;
+        self.pending_rows.push(row);
+        self.metrics.input_rows += 1;
+        self.metrics.peak_run_rows = self.metrics.peak_run_rows.max(self.pending_rows.len());
+        self.metrics.peak_run_bytes = self.metrics.peak_run_bytes.max(observed);
+        Ok(())
     }
-    result
+
+    fn flush_pending(&mut self) -> Result<(), SortError> {
+        let run = flush_initial_run(
+            std::mem::take(&mut self.pending_rows),
+            RunDestination {
+                work_directory: &self.work_directory,
+                pass: 0,
+                file_id: self.next_file_id,
+                current_temp_bytes: self.current_temp_bytes,
+                active_temp_run_files: self.active_temp_run_files,
+            },
+            &self.config,
+            &mut self.metrics,
+        )?;
+        self.next_file_id += 1;
+        self.current_temp_bytes =
+            self.current_temp_bytes
+                .checked_add(run.bytes)
+                .ok_or(SortError::TempByteLimit {
+                    limit: self.config.max_temp_bytes,
+                })?;
+        self.active_temp_run_files += 1;
+        self.metrics.peak_temp_run_files = self
+            .metrics
+            .peak_temp_run_files
+            .max(self.active_temp_run_files);
+        self.metrics.peak_temp_bytes = self.metrics.peak_temp_bytes.max(self.current_temp_bytes);
+        self.runs.push(run);
+
+        self.pending_rows = Vec::with_capacity(self.config.max_run_rows);
+        let pending_base_bytes =
+            sort_row_buffer_bytes(&self.pending_rows).ok_or(SortError::RowMemoryLimit {
+                observed: usize::MAX,
+                limit: self.config.max_run_bytes,
+            })?;
+        if pending_base_bytes > self.config.max_run_bytes {
+            return Err(SortError::RowMemoryLimit {
+                observed: pending_base_bytes,
+                limit: self.config.max_run_bytes,
+            });
+        }
+        self.metrics.peak_run_bytes = self.metrics.peak_run_bytes.max(pending_base_bytes);
+        Ok(())
+    }
+
+    pub(crate) fn finish(mut self) -> Result<SortOutcome, SortError> {
+        if !self.pending_rows.is_empty() {
+            self.flush_pending()?;
+        }
+
+        self.metrics.initial_runs = self.runs.len();
+
+        if self.runs.is_empty() {
+            let final_path = self.work_directory.join("sorted.parquet");
+            let empty_run = RunWriter::new(
+                final_path.clone(),
+                self.current_temp_bytes,
+                self.active_temp_run_files,
+                &self.config,
+                &mut self.metrics,
+            )?
+            .finish(&mut self.metrics)?;
+            self.metrics.peak_temp_bytes = empty_run.bytes;
+            self.metrics.peak_temp_run_files = 1;
+            self.metrics.peak_open_files = 1;
+            let (logical_sha256, output_rows) = scan_logical_output(
+                &final_path,
+                self.config.batch_rows,
+                self.config.max_run_bytes,
+            )?;
+            self.metrics.output_rows = output_rows;
+            self.retain_work_directory = true;
+            return Ok(SortOutcome {
+                output_path: final_path,
+                logical_sha256,
+                metrics: std::mem::take(&mut self.metrics),
+            });
+        }
+
+        let mut runs = std::mem::take(&mut self.runs);
+        let mut pass = 0usize;
+        while runs.len() > 1 {
+            pass += 1;
+            self.metrics.merge_passes += 1;
+            let mut next_runs = Vec::with_capacity(runs.len().div_ceil(self.config.merge_fan_in));
+            let mut remaining = runs.into_iter();
+
+            loop {
+                let group: Vec<_> = remaining.by_ref().take(self.config.merge_fan_in).collect();
+                if group.is_empty() {
+                    break;
+                }
+                if group.len() == 1 {
+                    next_runs.push(group.into_iter().next().expect("恰有一个 run"));
+                    continue;
+                }
+
+                let merged = merge_group(
+                    &group,
+                    RunDestination {
+                        work_directory: &self.work_directory,
+                        pass,
+                        file_id: self.next_file_id,
+                        current_temp_bytes: self.current_temp_bytes,
+                        active_temp_run_files: self.active_temp_run_files,
+                    },
+                    &self.config,
+                    &mut self.metrics,
+                )?;
+                let expected_rows = group.iter().try_fold(0u64, |total, run| {
+                    total
+                        .checked_add(run.rows)
+                        .ok_or(SortError::InvalidRun("run 行数记账溢出"))
+                })?;
+                if merged.rows != expected_rows {
+                    return Err(SortError::InvalidRun("合并行守恒检查失败"));
+                }
+                self.next_file_id += 1;
+
+                self.current_temp_bytes = self.current_temp_bytes.checked_add(merged.bytes).ok_or(
+                    SortError::TempByteLimit {
+                        limit: self.config.max_temp_bytes,
+                    },
+                )?;
+                self.active_temp_run_files += 1;
+                self.metrics.peak_temp_run_files = self
+                    .metrics
+                    .peak_temp_run_files
+                    .max(self.active_temp_run_files);
+                self.metrics.peak_temp_bytes =
+                    self.metrics.peak_temp_bytes.max(self.current_temp_bytes);
+
+                for input in &group {
+                    fs::remove_file(&input.path)?;
+                    self.current_temp_bytes = self
+                        .current_temp_bytes
+                        .checked_sub(input.bytes)
+                        .ok_or(SortError::InvalidRun("临时文件字节记账下溢"))?;
+                    self.active_temp_run_files = self
+                        .active_temp_run_files
+                        .checked_sub(1)
+                        .ok_or(SortError::InvalidRun("run 文件记账下溢"))?;
+                }
+                next_runs.push(merged);
+            }
+            runs = next_runs;
+        }
+
+        let final_run = runs.pop().expect("run 列表非空");
+        if final_run.rows != self.metrics.input_rows {
+            return Err(SortError::InvalidRun("run 行守恒检查失败"));
+        }
+        let final_path = self.work_directory.join("sorted.parquet");
+        fs::rename(&final_run.path, &final_path)?;
+        self.metrics.peak_open_files = self.metrics.peak_open_files.max(1);
+        let (logical_sha256, output_rows) = scan_logical_output(
+            &final_path,
+            self.config.batch_rows,
+            self.config.max_run_bytes,
+        )?;
+        self.metrics.output_rows = output_rows;
+        if self.metrics.output_rows != self.metrics.input_rows {
+            return Err(SortError::InvalidRun("行守恒检查失败"));
+        }
+
+        self.retain_work_directory = true;
+        Ok(SortOutcome {
+            output_path: final_path,
+            logical_sha256,
+            metrics: std::mem::take(&mut self.metrics),
+        })
+    }
+}
+
+impl Drop for ExternalSorter {
+    fn drop(&mut self) {
+        if !self.retain_work_directory {
+            let _ = fs::remove_dir_all(&self.work_directory);
+        }
+    }
 }
 
 fn validate_config(config: &SortConfig) -> Result<(), SortError> {
@@ -1871,236 +2161,6 @@ fn validate_config(config: &SortConfig) -> Result<(), SortError> {
         return Err(SortError::InvalidConfig("max_temp_bytes 必须为正数"));
     }
     Ok(())
-}
-
-fn external_sort_inner<I>(
-    rows: I,
-    work_directory: &Path,
-    config: &SortConfig,
-) -> Result<SortOutcome, SortError>
-where
-    I: IntoIterator<Item = SortRow>,
-{
-    let mut metrics = SortMetrics::default();
-    let mut runs = Vec::new();
-    let mut pending_rows = Vec::with_capacity(config.max_run_rows);
-    let pending_base_bytes =
-        sort_row_buffer_bytes(&pending_rows).ok_or(SortError::RowMemoryLimit {
-            observed: usize::MAX,
-            limit: config.max_run_bytes,
-        })?;
-    if pending_base_bytes > config.max_run_bytes {
-        return Err(SortError::RowMemoryLimit {
-            observed: pending_base_bytes,
-            limit: config.max_run_bytes,
-        });
-    }
-    metrics.peak_run_bytes = pending_base_bytes;
-    let mut current_temp_bytes = 0u64;
-    let mut active_temp_run_files = 0usize;
-    let mut next_file_id = 0usize;
-
-    for row in rows {
-        let exceeds_rows = pending_rows.len() >= config.max_run_rows;
-        let mut prospective_bytes = sort_row_buffer_bytes(&pending_rows)
-            .and_then(|bytes| bytes.checked_add(sort_row_inner_bytes(&row)?))
-            .filter(|bytes| *bytes <= config.max_run_bytes);
-        let exceeds_bytes = prospective_bytes.is_none();
-        if exceeds_rows || exceeds_bytes {
-            if pending_rows.is_empty() {
-                return Err(SortError::RowMemoryLimit {
-                    observed: sort_row_buffer_bytes(&pending_rows)
-                        .and_then(|bytes| bytes.checked_add(sort_row_inner_bytes(&row)?))
-                        .unwrap_or(usize::MAX),
-                    limit: config.max_run_bytes,
-                });
-            }
-            let run = flush_initial_run(
-                std::mem::take(&mut pending_rows),
-                RunDestination {
-                    work_directory,
-                    pass: 0,
-                    file_id: next_file_id,
-                    current_temp_bytes,
-                    active_temp_run_files,
-                },
-                config,
-                &mut metrics,
-            )?;
-            next_file_id += 1;
-            current_temp_bytes =
-                current_temp_bytes
-                    .checked_add(run.bytes)
-                    .ok_or(SortError::TempByteLimit {
-                        limit: config.max_temp_bytes,
-                    })?;
-            active_temp_run_files += 1;
-            metrics.peak_temp_run_files = metrics.peak_temp_run_files.max(active_temp_run_files);
-            metrics.peak_temp_bytes = metrics.peak_temp_bytes.max(current_temp_bytes);
-            runs.push(run);
-            pending_rows = Vec::with_capacity(config.max_run_rows);
-            let pending_base_bytes =
-                sort_row_buffer_bytes(&pending_rows).ok_or(SortError::RowMemoryLimit {
-                    observed: usize::MAX,
-                    limit: config.max_run_bytes,
-                })?;
-            if pending_base_bytes > config.max_run_bytes {
-                return Err(SortError::RowMemoryLimit {
-                    observed: pending_base_bytes,
-                    limit: config.max_run_bytes,
-                });
-            }
-            metrics.peak_run_bytes = metrics.peak_run_bytes.max(pending_base_bytes);
-            prospective_bytes = sort_row_buffer_bytes(&pending_rows)
-                .and_then(|bytes| bytes.checked_add(sort_row_inner_bytes(&row)?))
-                .filter(|bytes| *bytes <= config.max_run_bytes);
-        }
-
-        let observed = prospective_bytes.ok_or(SortError::RowMemoryLimit {
-            observed: sort_row_buffer_bytes(&pending_rows)
-                .and_then(|bytes| bytes.checked_add(sort_row_inner_bytes(&row)?))
-                .unwrap_or(usize::MAX),
-            limit: config.max_run_bytes,
-        })?;
-        pending_rows.push(row);
-        metrics.input_rows += 1;
-        metrics.peak_run_rows = metrics.peak_run_rows.max(pending_rows.len());
-        metrics.peak_run_bytes = metrics.peak_run_bytes.max(observed);
-    }
-
-    if !pending_rows.is_empty() {
-        let run = flush_initial_run(
-            pending_rows,
-            RunDestination {
-                work_directory,
-                pass: 0,
-                file_id: next_file_id,
-                current_temp_bytes,
-                active_temp_run_files,
-            },
-            config,
-            &mut metrics,
-        )?;
-        next_file_id += 1;
-        current_temp_bytes =
-            current_temp_bytes
-                .checked_add(run.bytes)
-                .ok_or(SortError::TempByteLimit {
-                    limit: config.max_temp_bytes,
-                })?;
-        active_temp_run_files += 1;
-        metrics.peak_temp_run_files = metrics.peak_temp_run_files.max(active_temp_run_files);
-        metrics.peak_temp_bytes = metrics.peak_temp_bytes.max(current_temp_bytes);
-        runs.push(run);
-    }
-
-    metrics.initial_runs = runs.len();
-
-    if runs.is_empty() {
-        let final_path = work_directory.join("sorted.parquet");
-        let empty_run = RunWriter::new(
-            final_path.clone(),
-            current_temp_bytes,
-            active_temp_run_files,
-            config,
-            &mut metrics,
-        )?
-        .finish(&mut metrics)?;
-        metrics.peak_temp_bytes = empty_run.bytes;
-        metrics.peak_temp_run_files = 1;
-        metrics.peak_open_files = 1;
-        let (logical_sha256, output_rows) =
-            scan_logical_output(&final_path, config.batch_rows, config.max_run_bytes)?;
-        metrics.output_rows = output_rows;
-        return Ok(SortOutcome {
-            output_path: final_path,
-            logical_sha256,
-            metrics,
-        });
-    }
-
-    let mut pass = 0usize;
-    while runs.len() > 1 {
-        pass += 1;
-        metrics.merge_passes += 1;
-        let mut next_runs = Vec::with_capacity(runs.len().div_ceil(config.merge_fan_in));
-        let mut remaining = runs.into_iter();
-
-        loop {
-            let group: Vec<_> = remaining.by_ref().take(config.merge_fan_in).collect();
-            if group.is_empty() {
-                break;
-            }
-            if group.len() == 1 {
-                next_runs.push(group.into_iter().next().expect("恰有一个 run"));
-                continue;
-            }
-
-            let merged = merge_group(
-                &group,
-                RunDestination {
-                    work_directory,
-                    pass,
-                    file_id: next_file_id,
-                    current_temp_bytes,
-                    active_temp_run_files,
-                },
-                config,
-                &mut metrics,
-            )?;
-            let expected_rows = group.iter().try_fold(0u64, |total, run| {
-                total
-                    .checked_add(run.rows)
-                    .ok_or(SortError::InvalidRun("run 行数记账溢出"))
-            })?;
-            if merged.rows != expected_rows {
-                return Err(SortError::InvalidRun("合并行守恒检查失败"));
-            }
-            next_file_id += 1;
-
-            current_temp_bytes =
-                current_temp_bytes
-                    .checked_add(merged.bytes)
-                    .ok_or(SortError::TempByteLimit {
-                        limit: config.max_temp_bytes,
-                    })?;
-            active_temp_run_files += 1;
-            metrics.peak_temp_run_files = metrics.peak_temp_run_files.max(active_temp_run_files);
-            metrics.peak_temp_bytes = metrics.peak_temp_bytes.max(current_temp_bytes);
-
-            for input in &group {
-                fs::remove_file(&input.path)?;
-                current_temp_bytes = current_temp_bytes
-                    .checked_sub(input.bytes)
-                    .ok_or(SortError::InvalidRun("临时文件字节记账下溢"))?;
-                active_temp_run_files = active_temp_run_files
-                    .checked_sub(1)
-                    .ok_or(SortError::InvalidRun("run 文件记账下溢"))?;
-            }
-            next_runs.push(merged);
-        }
-        runs = next_runs;
-    }
-
-    let final_run = runs.pop().expect("run 列表非空");
-    if final_run.rows != metrics.input_rows {
-        return Err(SortError::InvalidRun("run 行守恒检查失败"));
-    }
-    let final_path = work_directory.join("sorted.parquet");
-    fs::rename(&final_run.path, &final_path)?;
-    metrics.peak_open_files = metrics.peak_open_files.max(1);
-    let (logical_sha256, output_rows) =
-        scan_logical_output(&final_path, config.batch_rows, config.max_run_bytes)?;
-    metrics.output_rows = output_rows;
-    if metrics.output_rows != metrics.input_rows {
-        return Err(SortError::InvalidRun("行守恒检查失败"));
-    }
-
-    Ok(SortOutcome {
-        output_path: final_path,
-        logical_sha256,
-        metrics,
-    })
 }
 
 fn flush_initial_run(
@@ -2504,18 +2564,21 @@ impl RunWriter {
     }
 
     fn write_batch(&mut self, batch: &RecordBatch, rows: usize) -> Result<(), SortError> {
-        let result = self
-            .writer
-            .as_mut()
-            .expect("完成前 writer 必须存在")
-            .write(batch);
+        let writer = self.writer.as_mut().expect("完成前 writer 必须存在");
+        let result: Result<(), SortError> = (|| {
+            writer.write(batch)?;
+            writer.flush()?;
+            writer.sync()?;
+            writer.inner_mut().sync_data_and_drop_cache()?;
+            Ok(())
+        })();
         if let Err(error) = result {
             if self.quota_exceeded.load(AtomicOrdering::Relaxed) {
                 return Err(SortError::TempByteLimit {
                     limit: self.max_temp_bytes,
                 });
             }
-            return Err(error.into());
+            return Err(error);
         }
         self.rows += rows as u64;
         Ok(())
@@ -2558,6 +2621,20 @@ impl<W> QuotaWriter<W> {
     }
 }
 
+impl QuotaWriter<File> {
+    fn sync_data_and_drop_cache(&mut self) -> io::Result<()> {
+        self.inner.sync_data()?;
+        fadvise(&self.inner, 0, None, Advice::DontNeed)
+            .map_err(|error| io::Error::from_raw_os_error(error.raw_os_error()))
+    }
+}
+
+fn drop_file_cache(path: &Path) -> io::Result<()> {
+    let file = File::open(path)?;
+    fadvise(&file, 0, None, Advice::DontNeed)
+        .map_err(|error| io::Error::from_raw_os_error(error.raw_os_error()))
+}
+
 impl<W: Write> Write for QuotaWriter<W> {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         if buffer.len() as u64 > self.remaining {
@@ -2578,21 +2655,47 @@ impl<W: Write> Write for QuotaWriter<W> {
 }
 
 struct RunCursor {
-    reader: ParquetRecordBatchReader,
+    path: PathBuf,
+    metadata: ArrowReaderMetadata,
+    next_row_group: usize,
+    reader: Option<ParquetRecordBatchReader>,
     batch: std::vec::IntoIter<SortRow>,
+    batch_rows: usize,
     max_batch_bytes: usize,
 }
 
 impl RunCursor {
     fn open(path: &Path, batch_rows: usize, max_batch_bytes: usize) -> Result<Self, SortError> {
-        let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)?
-            .with_batch_size(batch_rows)
-            .build()?;
+        let file = File::open(path)?;
+        let metadata = ArrowReaderMetadata::load(&file, Default::default())?;
         Ok(Self {
-            reader,
+            path: path.to_path_buf(),
+            metadata,
+            next_row_group: 0,
+            reader: None,
             batch: Vec::new().into_iter(),
+            batch_rows,
             max_batch_bytes,
         })
+    }
+
+    fn open_next_row_group(&mut self) -> Result<bool, SortError> {
+        let row_group_count = self.metadata.metadata().num_row_groups();
+        if self.next_row_group >= row_group_count {
+            return Ok(false);
+        }
+        let row_group_index = self.next_row_group;
+        self.next_row_group += 1;
+        self.reader = Some(
+            ParquetRecordBatchReaderBuilder::new_with_metadata(
+                File::open(&self.path)?,
+                self.metadata.clone(),
+            )
+            .with_row_groups(vec![row_group_index])
+            .with_batch_size(self.batch_rows)
+            .build()?,
+        );
+        Ok(true)
     }
 
     fn next_row(&mut self) -> Result<Option<SortRow>, SortError> {
@@ -2600,7 +2703,13 @@ impl RunCursor {
             if let Some(row) = self.batch.next() {
                 return Ok(Some(row));
             }
-            match self.reader.next() {
+            let Some(reader) = self.reader.as_mut() else {
+                if self.open_next_row_group()? {
+                    continue;
+                }
+                return Ok(None);
+            };
+            match reader.next() {
                 Some(batch) => {
                     let rows = rows_from_batch(&batch?)?;
                     let observed = rows
@@ -2614,7 +2723,10 @@ impl RunCursor {
                     }
                     self.batch = rows.into_iter();
                 }
-                None => return Ok(None),
+                None => {
+                    self.reader = None;
+                    drop_file_cache(&self.path)?;
+                }
             }
         }
     }
@@ -2699,6 +2811,68 @@ mod tests {
     use serde_json::{Value, json};
     use std::os::unix::fs::symlink;
     use tempfile::TempDir;
+
+    fn gate_a_only_receipt() -> (GateAReceiptV3, contracts::GateACapabilityMatrixV2) {
+        let sha = || contracts::Sha256Hex("a".repeat(64));
+        let matrix = contracts::GateACapabilityMatrixV2 {
+            schema_version: contracts::GATE_A_CAPABILITY_MATRIX_SCHEMA_V2.to_owned(),
+            entries: data_pipeline_core::REQUIRED_GATE_A_CAPABILITIES
+                .into_iter()
+                .enumerate()
+                .map(|(index, capability)| contracts::GateACapabilityEntryV2 {
+                    capability,
+                    status: contracts::CapabilityStatus::Pass,
+                    contract_field_paths: vec!["training.admission".to_owned()],
+                    evidence_ids: vec![format!("training-admission-{index}")],
+                    blocking_reason: None,
+                })
+                .collect(),
+        };
+        let mut receipt = GateAReceiptV3 {
+            schema_version: contracts::GATE_A_RECEIPT_SCHEMA_V3.to_owned(),
+            receipt_id: contracts::Sha256Hex("0".repeat(64)),
+            requirement_id: "DATA-PIPELINE-TRAINING-20260803".to_owned(),
+            pipeline_core_identity_sha256: sha(),
+            canonical_event_record_contract_version: contracts::CANONICAL_EVENT_RECORD_SCHEMA_V1
+                .to_owned(),
+            execution_event_contract_version: contracts::EXECUTION_MARKET_EVENT_SCHEMA_V3
+                .to_owned(),
+            reference_event_contract_version: contracts::CANONICAL_REFERENCE_EVENT_SCHEMA_V1
+                .to_owned(),
+            observation_contract_version: contracts::MARKET_OBSERVATION_CAUSAL_SHELL_SCHEMA_V3
+                .to_owned(),
+            event_time_index_contract_version: contracts::EVENT_TIME_INDEX_SCHEMA_V2.to_owned(),
+            visibility_index_contract_version: contracts::VISIBILITY_INDEX_SCHEMA_V2.to_owned(),
+            dataset_lineage_root: DATASET_LINEAGE_ROOT.to_owned(),
+            dataset_date_floor: contracts::DATASET_DATE_FLOOR.to_owned(),
+            covered_utc_dates: vec!["2026-08-03".to_owned()],
+            input_set_identity_sha256: sha(),
+            supported_schema_set_identity_sha256: sha(),
+            input_manifest_set_sha256: sha(),
+            canonical_event_store_manifest_sha256: sha(),
+            event_time_index_manifest_sha256: sha(),
+            visibility_index_manifest_sha256: sha(),
+            observation_manifest_sha256: sha(),
+            capability_matrix_sha256: data_pipeline_core::gate_a_capability_matrix_digest(&matrix)
+                .unwrap(),
+            run_manifest_sha256: sha(),
+            training_dataset_ready: false,
+            training_split_manifest_id: "N/A".to_owned(),
+            training_split_manifest_sha256: "N/A".to_owned(),
+        };
+        receipt.receipt_id = data_pipeline_core::derive_gate_a_receipt_v3_id(&receipt).unwrap();
+        (receipt, matrix)
+    }
+
+    #[test]
+    fn gate_a_receipt_alone_is_rejected_by_training_admission() {
+        let (receipt, matrix) = gate_a_only_receipt();
+        data_pipeline_core::validate_gate_a_receipt_v3(&receipt, &matrix).unwrap();
+        assert_eq!(
+            admit_gate_a_receipt_for_training(&receipt),
+            Err(TrainingAdmissionError::GateAIsNotTrainingDatasetReady)
+        );
+    }
 
     fn valid_daily_manifest_header_value() -> Value {
         json!({
@@ -3724,6 +3898,34 @@ mod tests {
     }
 
     #[test]
+    fn parquet_row_groups_follow_the_bounded_write_batches() {
+        let temp = TempDir::new().expect("创建临时目录");
+        let mut sort_config = config(2, 2);
+        sort_config.batch_rows = 100;
+        sort_config.max_run_bytes = 8 * 1024;
+        let input = (0u64..9)
+            .rev()
+            .map(|sequence| SortRow::from_sort_key(sort_key(sequence), vec![b'x'; 3_000]))
+            .collect::<Vec<_>>();
+
+        let outcome = external_sort(input, temp.path(), &sort_config).expect("执行外部排序");
+        let builder = ParquetRecordBatchReaderBuilder::try_new(
+            File::open(&outcome.output_path).expect("打开外排结果"),
+        )
+        .expect("读取外排结果元数据");
+        let row_groups = builder.metadata().row_groups();
+
+        assert!(row_groups.len() > 1);
+        assert!(
+            row_groups.iter().all(|row_group| {
+                usize::try_from(row_group.num_rows())
+                    .is_ok_and(|rows| rows <= outcome.metrics.peak_write_buffer_rows)
+            }),
+            "Parquet writer 不得跨越已经按字节上限刷新的内存批次重新累计大行组"
+        );
+    }
+
+    #[test]
     fn run_size_and_fan_in_do_not_change_logical_digest() {
         let input: Vec<_> = [9u64, 1, 8, 2, 7, 3, 6, 4, 5, 0]
             .into_iter()
@@ -3744,6 +3946,33 @@ mod tests {
         );
         assert_ne!(first.metrics.initial_runs, second.metrics.initial_runs);
         assert_ne!(first.metrics.merge_passes, second.metrics.merge_passes);
+    }
+
+    #[test]
+    fn incremental_sort_pushes_the_same_bounded_runs_as_the_iterator_wrapper() {
+        let input = [9u64, 1, 8, 2, 7, 3, 6, 4, 5, 0]
+            .into_iter()
+            .map(row)
+            .collect::<Vec<_>>();
+        let wrapper_temp = TempDir::new().expect("创建迭代器包装临时目录");
+        let incremental_temp = TempDir::new().expect("创建增量临时目录");
+        let sort_config = config(2, 2);
+
+        let wrapper = external_sort(input.clone(), wrapper_temp.path(), &sort_config)
+            .expect("执行迭代器包装排序");
+        let mut incremental =
+            ExternalSorter::new(incremental_temp.path(), &sort_config).expect("初始化增量排序器");
+        for row in input.clone() {
+            incremental.push(row).expect("增量写入排序行");
+        }
+        let incremental = incremental.finish().expect("完成增量排序");
+
+        assert_eq!(wrapper.logical_sha256, incremental.logical_sha256);
+        assert_eq!(wrapper.metrics, incremental.metrics);
+        assert_eq!(
+            read_rows(&wrapper.output_path, 1),
+            read_rows(&incremental.output_path, 7)
+        );
     }
 
     #[test]
