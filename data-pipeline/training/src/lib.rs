@@ -1220,33 +1220,46 @@ fn inspect_verified_parquet(
             },
         );
     }
-    let file_bytes = file
-        .metadata()
-        .map_err(ManifestAdmissionValidationError::Io)?
-        .len();
-    let sha256 = sha256_open_file(&mut file)?;
-    file.seek(SeekFrom::Start(0))
-        .map_err(ManifestAdmissionValidationError::Io)?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+    let inspection = (|| {
+        let file_bytes = file
+            .metadata()
+            .map_err(ManifestAdmissionValidationError::Io)?
+            .len();
+        let sha256 = sha256_open_file(&mut file)?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(ManifestAdmissionValidationError::Io)?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(
+            file.try_clone()
+                .map_err(ManifestAdmissionValidationError::Io)?,
+        )
         .map_err(ManifestAdmissionValidationError::Parquet)?;
-    let footer_rows =
-        u64::try_from(builder.metadata().file_metadata().num_rows()).map_err(|_| {
-            ManifestAdmissionValidationError::Parquet(ParquetError::General(
-                "Parquet footer 行数不能转换为 u64".to_owned(),
-            ))
-        })?;
-    let footer_metadata = builder
-        .metadata()
-        .file_metadata()
-        .key_value_metadata()
-        .cloned()
-        .unwrap_or_default();
-    Ok(ParquetInspection {
-        file_bytes,
-        sha256,
-        footer_rows,
-        footer_metadata,
-    })
+        let footer_rows =
+            u64::try_from(builder.metadata().file_metadata().num_rows()).map_err(|_| {
+                ManifestAdmissionValidationError::Parquet(ParquetError::General(
+                    "Parquet footer 行数不能转换为 u64".to_owned(),
+                ))
+            })?;
+        let footer_metadata = builder
+            .metadata()
+            .file_metadata()
+            .key_value_metadata()
+            .cloned()
+            .unwrap_or_default();
+        Ok(ParquetInspection {
+            file_bytes,
+            sha256,
+            footer_rows,
+            footer_metadata,
+        })
+    })();
+    let cache_release = fadvise(&file, 0, None, Advice::DontNeed).map_err(|error| {
+        ManifestAdmissionValidationError::Io(io::Error::from_raw_os_error(error.raw_os_error()))
+    });
+    match (inspection, cache_release) {
+        (Err(primary_error), _) => Err(primary_error),
+        (Ok(_), Err(cache_error)) => Err(cache_error),
+        (Ok(inspection), Ok(())) => Ok(inspection),
+    }
 }
 
 fn validate_parquet_footer_metadata(
