@@ -46,7 +46,7 @@ pub const GATE_A_QUALITY_ISOLATION_REPORT_SCHEMA_V1: &str = "gate_a_quality_isol
 pub const GATE_A_RESOURCE_HIGH_WATER_REPORT_SCHEMA_V1: &str =
     "gate_a_resource_high_water_report_v1";
 pub const GATE_A_TEST_EVIDENCE_REPORT_SCHEMA_V1: &str = "gate_a_test_evidence_report_v1";
-pub const GATE_A_RUN_MANIFEST_SCHEMA_V1: &str = "gate_a_run_manifest_v1";
+pub const GATE_A_RUN_MANIFEST_SCHEMA_V2: &str = "gate_a_run_manifest_v2";
 pub const GATE_A_MEASURED_BUILD_STATE_SCHEMA_V1: &str = "gate_a_measured_build_state_v1";
 
 pub const GATE_A_MAX_RSS_KIB: u64 = 1024 * 1024;
@@ -448,7 +448,21 @@ pub struct GateAContractVersionsV1 {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct GateARunManifestV1 {
+pub struct GateATypedRawScanPolicyV1 {
+    pub source_kind: String,
+    pub schema_version: String,
+    pub received_time_column: String,
+    pub received_start_inclusive_utc_ms: i64,
+    pub received_end_exclusive_utc_ms: i64,
+    pub condition_id_column: Option<String>,
+    pub condition_id_equals: Option<String>,
+    pub projected_columns: Vec<String>,
+    pub skipped_columns: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GateARunManifestV2 {
     pub schema_version: String,
     pub requirement_id: String,
     pub git_commit: String,
@@ -467,6 +481,7 @@ pub struct GateARunManifestV1 {
     pub input_manifest_set_sha256: Sha256Hex,
     pub supported_schema_set_identity_sha256: Sha256Hex,
     pub supported_schemas: Vec<String>,
+    pub typed_raw_scan_policies: Vec<GateATypedRawScanPolicyV1>,
     pub input_manifests: Vec<GateAInputManifestBindingV1>,
     pub selected_files: Vec<CanonicalRunInputFile>,
     pub canonical_config: CanonicalRunConfig,
@@ -2263,7 +2278,7 @@ pub fn build_gate_a_run_manifest(
     matrix: &GateACapabilityMatrixV2,
     matrix_file_sha256: Sha256Hex,
     validated: &ValidatedGateACandidate,
-) -> Result<GateARunManifestV1, GateAPublicationError> {
+) -> Result<GateARunManifestV2, GateAPublicationError> {
     validate_quality_isolation_report(quality)?;
     validate_resource_high_water_report(resource)?;
     validate_test_evidence_report(tests)?;
@@ -2342,8 +2357,13 @@ pub fn build_gate_a_run_manifest(
         })
         .collect::<Vec<_>>();
 
-    let manifest = GateARunManifestV1 {
-        schema_version: GATE_A_RUN_MANIFEST_SCHEMA_V1.to_owned(),
+    let typed_raw_scan_policies = expected_typed_raw_scan_policies(
+        quality.scope.condition_id(),
+        quality.scope.received_start_utc_ms(),
+        quality.scope.received_end_utc_ms(),
+    )?;
+    let manifest = GateARunManifestV2 {
+        schema_version: GATE_A_RUN_MANIFEST_SCHEMA_V2.to_owned(),
         requirement_id: "DATA-PIPELINE-TRAINING-20260803".to_owned(),
         git_commit: tests.git_commit.clone(),
         pipeline_core_identity_sha256: quality.pipeline_core_identity_sha256.clone(),
@@ -2374,6 +2394,7 @@ pub fn build_gate_a_run_manifest(
         input_manifest_set_sha256: quality.input_manifest_set_sha256.clone(),
         supported_schema_set_identity_sha256: supported_schema_set_identity_sha256(),
         supported_schemas: supported_schema_bindings(),
+        typed_raw_scan_policies,
         input_manifests,
         selected_files: quality.selected_files.clone(),
         canonical_config: resource.canonical_config.clone(),
@@ -2493,9 +2514,70 @@ fn supported_schema_bindings() -> Vec<String> {
     .collect()
 }
 
-pub fn validate_gate_a_run_manifest(
-    manifest: &GateARunManifestV1,
+fn expected_typed_raw_scan_policies(
+    condition_id: &str,
+    received_start_utc_ms: i64,
+    received_end_utc_ms: i64,
+) -> Result<Vec<GateATypedRawScanPolicyV1>, GateAPublicationError> {
+    supported_schema_bindings()
+        .into_iter()
+        .map(|binding| {
+            let (source_kind, schema_version) =
+                binding
+                    .split_once('=')
+                    .ok_or(GateAPublicationError::Invalid(
+                        "固定 typed_raw schema 绑定无效",
+                    ))?;
+            let condition_id_column = match source_kind {
+                "polymarket_market" => Some("market"),
+                "polymarket_market_metadata" => Some("condition_id"),
+                _ => None,
+            };
+            let projected_columns =
+                crate::typed_raw::expected_projection_columns(source_kind, schema_version)
+                    .map_err(|_| {
+                        GateAPublicationError::Invalid("固定 typed_raw schema 无法生成完整投影列")
+                    })?;
+            Ok(GateATypedRawScanPolicyV1 {
+                source_kind: source_kind.to_owned(),
+                schema_version: schema_version.to_owned(),
+                received_time_column: "timestamp_received".to_owned(),
+                received_start_inclusive_utc_ms: received_start_utc_ms,
+                received_end_exclusive_utc_ms: received_end_utc_ms,
+                condition_id_column: condition_id_column.map(str::to_owned),
+                condition_id_equals: condition_id_column.map(|_| condition_id.to_owned()),
+                projected_columns,
+                skipped_columns: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+fn validate_typed_raw_scan_policies(
+    policies: &[GateATypedRawScanPolicyV1],
+    condition_id: &str,
+    received_start_utc_ms: i64,
+    received_end_utc_ms: i64,
 ) -> Result<(), GateAPublicationError> {
+    let expected =
+        expected_typed_raw_scan_policies(condition_id, received_start_utc_ms, received_end_utc_ms);
+    match expected {
+        Ok(expected) if expected == policies => Ok(()),
+        _ => Err(GateAPublicationError::Invalid(
+            "运行清单 typed_raw 扫描策略无效",
+        )),
+    }
+}
+
+pub fn validate_gate_a_run_manifest(
+    manifest: &GateARunManifestV2,
+) -> Result<(), GateAPublicationError> {
+    validate_typed_raw_scan_policies(
+        &manifest.typed_raw_scan_policies,
+        &manifest.condition_id,
+        manifest.received_start_utc_ms,
+        manifest.received_end_utc_ms,
+    )?;
     let expected_contracts = GateAContractVersionsV1 {
         canonical_event_record: CANONICAL_EVENT_RECORD_SCHEMA_V1.to_owned(),
         execution_market_event: EXECUTION_MARKET_EVENT_SCHEMA_V3.to_owned(),
@@ -2506,7 +2588,7 @@ pub fn validate_gate_a_run_manifest(
         artifact_manifest: GATE_A_ARTIFACT_MANIFEST_SCHEMA_V1.to_owned(),
         reduction_report: REDUCTION_REPORT_SCHEMA_V1.to_owned(),
     };
-    if manifest.schema_version != GATE_A_RUN_MANIFEST_SCHEMA_V1
+    if manifest.schema_version != GATE_A_RUN_MANIFEST_SCHEMA_V2
         || manifest.requirement_id != "DATA-PIPELINE-TRAINING-20260803"
         || manifest.git_commit.len() != 40
         || !manifest
@@ -2634,7 +2716,7 @@ pub fn validate_gate_a_run_manifest(
 }
 
 pub fn encode_gate_a_run_manifest(
-    manifest: &GateARunManifestV1,
+    manifest: &GateARunManifestV2,
 ) -> Result<Vec<u8>, GateAPublicationError> {
     validate_gate_a_run_manifest(manifest)?;
     encode_bounded_json(manifest, 16 * 1024 * 1024, "运行清单超过 16 MiB 上限")
@@ -2642,7 +2724,7 @@ pub fn encode_gate_a_run_manifest(
 
 pub fn decode_gate_a_run_manifest(
     bytes: &[u8],
-) -> Result<GateARunManifestV1, GateAPublicationError> {
+) -> Result<GateARunManifestV2, GateAPublicationError> {
     if bytes.len() > 16 * 1024 * 1024 {
         return Err(GateAPublicationError::Invalid("运行清单超过 16 MiB 上限"));
     }
@@ -2652,7 +2734,7 @@ pub fn decode_gate_a_run_manifest(
 }
 
 pub fn build_gate_a_receipt(
-    run_manifest: &GateARunManifestV1,
+    run_manifest: &GateARunManifestV2,
     run_manifest_sha256: Sha256Hex,
     matrix: &GateACapabilityMatrixV2,
     matrix_file_sha256: Sha256Hex,
@@ -3230,6 +3312,62 @@ mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
     use tempfile::TempDir;
+
+    #[test]
+    fn gate_a_run_manifest_scan_policies_bind_exact_filters_and_full_schema_projection() {
+        let condition_id = "condition-1";
+        let policies = expected_typed_raw_scan_policies(condition_id, 100, 200)
+            .expect("固定扫描策略必须可生成");
+        let expected_bindings = supported_schema_bindings();
+
+        assert_eq!(policies.len(), 6);
+        assert_eq!(policies.len(), expected_bindings.len());
+        for (policy, binding) in policies.iter().zip(expected_bindings) {
+            let (source_kind, schema_version) =
+                binding.split_once('=').expect("固定 schema 绑定必须合法");
+            assert_eq!(policy.source_kind, source_kind);
+            assert_eq!(policy.schema_version, schema_version);
+            assert_eq!(policy.received_time_column, "timestamp_received");
+            assert_eq!(policy.received_start_inclusive_utc_ms, 100);
+            assert_eq!(policy.received_end_exclusive_utc_ms, 200);
+            assert_eq!(
+                policy.projected_columns,
+                crate::typed_raw::expected_projection_columns(source_kind, schema_version)
+                    .expect("固定 schema 必须可生成完整投影列")
+            );
+            assert!(policy.skipped_columns.is_empty());
+
+            match source_kind {
+                "polymarket_market" => {
+                    assert_eq!(policy.condition_id_column.as_deref(), Some("market"));
+                    assert_eq!(policy.condition_id_equals.as_deref(), Some(condition_id));
+                }
+                "polymarket_market_metadata" => {
+                    assert_eq!(policy.condition_id_column.as_deref(), Some("condition_id"));
+                    assert_eq!(policy.condition_id_equals.as_deref(), Some(condition_id));
+                }
+                _ => {
+                    assert_eq!(policy.condition_id_column, None);
+                    assert_eq!(policy.condition_id_equals, None);
+                }
+            }
+        }
+
+        let encoded = serde_json::to_value(&policies).expect("扫描策略必须可编码");
+        for policy in encoded.as_array().expect("扫描策略必须编码为数组") {
+            assert!(policy.get("projected_columns").is_some());
+            assert!(policy.get("skipped_columns").is_some());
+        }
+
+        let mut missing_projection = policies;
+        assert!(missing_projection[0].projected_columns.pop().is_some());
+        assert!(matches!(
+            validate_typed_raw_scan_policies(&missing_projection, condition_id, 100, 200,),
+            Err(GateAPublicationError::Invalid(
+                "运行清单 typed_raw 扫描策略无效"
+            ))
+        ));
+    }
 
     #[test]
     fn formal_memory_gates_use_one_gib_rss_and_two_gib_cgroup() {
