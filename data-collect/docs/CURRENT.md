@@ -12,7 +12,7 @@
 >
 > 历史读取入口：`data-collect/docs/archive-manifest.tsv`
 >
-> 执行授权：`none`
+> 执行授权：`阶段 2 / 任务 2.5：提交推送并部署启用 UTC 12:00 timer`
 
 这是所有 `data-collect` 需求、代码、测试、运行和部署问题的强制首读路由，不直接规定业务或
 技术语义。`plan/data-collect-external-disk-guard-plan.md` 是当前活动事项的唯一规范来源；
@@ -22,8 +22,11 @@
 
 ## 当前状态路由
 
-- 主模块既有事项已完成并由用户验收；本事项阶段 1 已完成，当前没有阶段 2、生产部署或远端
-  操作游标。
+- 主模块既有事项已完成并由用户验收；本事项阶段 1、任务 2.1、任务 2.2 和任务 2.3 已完成。
+  任务 2.4 已正常停止旧服务、永久删除当前 UTC 日目录并安装四个冻结产物；首次候选启动被
+  错误的 `NRestarts` 验收门主动停止。第二次启动在 180 秒内保持候选进程稳定且没有重启，但
+  尚未完成启动恢复，随后按获批验收门停止。取消该硬时限后，同一候选已完成启动恢复和就绪后
+  182 秒稳定写入验收，当前长期运行。
 - 事项 `DATA-COLLECT-EXTERNAL-DISK-GUARD-20260807` 的需求和计划已经获得用户批准。当前获批
   范围只有两个目标：根文件系统达到 30GB 时由每日外部任务删除最早一个历史日，
   同时只移除采集器运行期间每 60 秒的容量扫描；修复 `real_source_alignment_probe` 原 bench
@@ -33,8 +36,13 @@
   `plan/data-collect-external-disk-guard-plan.md` 和
   `changelog/data-collect-external-disk-guard-changelog.md`。当前主需求已经完成窄范围同步；
   阶段 0 的批准后文档同步、最终独立复审、提交和首次分支推送已经完成；阶段 1 两个目标的
-  实现、完整验证、独立阶段复审、提交和推送也已经完成。当前合同已同步区分已提交候选与
-  尚未改变的生产状态；阶段 2、PR、发布构建、远端服务器、服务和数据操作仍未获授权。
+  实现、完整验证、独立阶段复审、提交和推送也已经完成。阶段 2 的发布候选从干净且已推送的
+  提交隔离构建并完成生产换版；新清理产物已经安装，timer 为 `disabled/inactive` 且清理脚本
+  未运行。当前日清单为候选身份、`open/active`，已有 6 个运行中 Parquet；采集服务为 `active/running`、
+  `MainPID=1315799`、`NRestarts=0`。生产事实文档同步和两路独立审查已经通过。用户已授权把
+  timer 调度更新为每日 UTC `12:00:00` 并首次启用，并已选择先复审、提交和推送当前 10 份
+  文档与 1 份 timer 源文件，再部署这个 timer 单文件候选。服务器在部署前仍为原调度且
+  `disabled/inactive`；手动运行清理服务、其他产物重装、再次手动删除和 PR 均未获授权。
 - 已完成的模型训练消费边界修正由
   `plan/data-collect-model-train-consumer-boundary-plan.md` 规范；该计划执行授权为 `none`。
 - 当前获批的后续开发事项是 `plan/data-pipeline-training-plan.md`，它不重开

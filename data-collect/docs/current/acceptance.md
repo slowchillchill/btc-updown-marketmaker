@@ -31,9 +31,9 @@
 | 每小时 Parquet 与每日清单 | `IMPLEMENTED_AND_TESTED` |
 | 采集器承载数据、准入、延后处理及写入器的硬上限 | `IMPLEMENTED_AND_TESTED` |
 | SDK 的出站请求与 `heartbeat PING` 传输控制通道的容量硬上限 | `NOT_IMPLEMENTED_LOGICALLY_CONSTRAINED` |
-| 当前生产默认 50GB；启动时直接退出 75、运行期协调退出 75 | `IMPLEMENTED_AND_TESTED` |
-| 本地候选保留启动 50GB 扫描并移除运行期扫描 | `IMPLEMENTED_AND_TESTED_LOCALLY_NOT_DEPLOYED` |
-| 30GB 每日外部清理每轮只删除最早一个合格日期 | `IMPLEMENTED_AND_TESTED_LOCALLY_NOT_DEPLOYED` |
+| 当前生产默认 50GB；启动时达到上限直接退出 75 | `IMPLEMENTED_AND_TESTED` |
+| 当前生产保留启动 50GB 扫描并移除运行期扫描 | `IMPLEMENTED_TESTED_AND_DEPLOYED` |
+| 30GB 每日 UTC 12:00 外部清理每轮只删除最早一个合格日期 | `IMPLEMENTED_TESTED_AND_INSTALLED_PENDING_TIMER_ONLY_DEPLOYMENT` |
 | RTDS 300/60 秒替换、×2/±20%/300 秒退避、无独立尝试耗尽门 | `IMPLEMENTED_AND_TESTED` |
 | 市场判定迟到事件忽略、矛盾时失败即关闭、固定身份信息、重启与 UTC 日切换 | `IMPLEMENTED_AND_TESTED` |
 | 模拟盘和实盘的帧、schema 与一次性 Unix 套接字辅助函数 | `IMPLEMENTED_AND_COMPONENT_TESTED` |
