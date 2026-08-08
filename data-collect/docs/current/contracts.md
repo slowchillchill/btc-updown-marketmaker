@@ -56,7 +56,11 @@ Polymarket 当前依赖固定为
 `third_party/polymarket_client_sdk_v2-0.7.0-p1` 一个补丁。
 未经用户批准，不得改用 Polymarket 原始 REST、手动签名、自建 SDK 或影子实现。
 
-相对 crates.io `0.7.0`，`0.7.0-p1` 的生产 `src/` 差异横跨四个文件：
+相对 crates.io `0.7.0`，`0.7.0-p1` 的生产 `src/` 共有五个差异文件：其中四个包含可执行
+行为补丁，另一个只修正文档注释：
+
+- `clob/client.rs`：只把 `post_orders` 的批量语义注释修正为并行处理和逐项结果，明确单项
+  失败不回滚成功项；此项不改变方法签名、方法体、请求、响应解析或任何运行行为。
 
 - `clob/ws/types/response.rs`：保留 `book`、`price_change`、`tick_size_change`、
   `last_trade_price`、`best_bid_ask`、`new_market`、`market_resolved` 的当前

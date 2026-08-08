@@ -2,7 +2,7 @@
 
 > 事项编号：`SIM-SYSTEM-20260731`
 >
-> 生命周期：`DRAFT_REQUIREMENTS_CHANGELOG`
+> 生命周期：`IMPLEMENTATION_CHANGELOG`
 >
 > 当前执行 authority：`none`
 >
@@ -12,15 +12,16 @@
 >
 > `data-collect` 当前权威入口：`data-collect/docs/CURRENT.md`
 >
-> 执行授权：`none`
+> 执行授权：`LOCAL_IMPLEMENTATION_ONLY`
 >
 > 部署、远端操作和真实资金授权：`none`
 >
-> 状态：`只记录需求演进、冲突和决定；没有代码实施、部署或远端执行`
+> 状态：`只记录需求演进、冲突、决定与实施事实；不承担当前执行权威`
 
-本记录按发生时间保存需求演进。较早条目只说明当时发生了什么；如果与后续用户决定冲突，
-以后续明确取代条目和当前需求正文为准。草案需求、计划和本记录都不产生实施、部署、远端
-操作、钱包/凭据、真实下单或真实资金权限。
+本记录按发生时间保存需求演进与实施事实。较早条目只说明当时发生了什么；如果与后续用户
+决定冲突，以后续明确取代条目和当前需求、计划正文为准。本记录本身不产生实施、提交、推送、
+部署、远端操作、钱包/凭据、真实下单或真实资金权限；本事项的当前执行权威和授权以需求及
+计划首屏为准。
 
 ## 2026-07-31：建立独立 sim-system 需求事项
 
@@ -509,3 +510,250 @@
   关闭订单、释放资金、结算、赎回或查询空页。
 - 本次只同步审核中的 sim-system 计划和本变更记录，没有实施 sim-system 代码，也不改变
   需求、草案生命周期、`authority=none` 或执行授权。
+
+## 2026-08-09：Gate A V2 外部前置与阶段 6 公共读取边界复核
+
+### 已核实事实
+
+- DPT 已正式签发成功 `GateAReceiptV3`，其绑定当前运行清单 V2、
+  `CanonicalEventRecordV1`、`ExecutionMarketEventV3`、双索引 V2 和
+  `MarketObservationCausalShellV3`。该事实满足未来阶段 6 的 Gate A 外部前置，但不代表
+  sim-system 组件、真实纵向或训练闭环已经完成。
+- DPT 当前公开 `PlatformReplayCursor` 按事件时间索引顺序返回
+  `CanonicalEventRecordV1`，其中可能同时包含市场事件和参考事件；公开
+  `VisibilityIndexCursor` 只返回 `VisibilityIndexEntryV2`；公开
+  `ExecutionMarketEventCursor` 只按唯一事件存储的发射顺序返回市场事件。当前没有现成、
+  对称、受测的模型可见索引解析市场事件游标。
+- 现有公开原语仍足以形成保守的阶段 6 联合适配：事件时间路径保持
+  `PlatformReplayCursor` 顺序并过滤参考事件；模型可见路径保持 `VisibilityIndexCursor`
+  顺序，以有界索引页和 `ExecutionMarketEventCursor` 的完整市场事件扫描解析当前页，再按
+  原索引位置输出。该组合不需要从一个索引重建另一个索引，也不需要在内存复制完整事件带，
+  但可能增加扫描成本，必须由阶段 6 真实资源复核决定是否合格。
+
+### 文档决定与边界
+
+- 用户同意把上述实际读取边界写入计划。阶段 0 至 5 的黄金组件入口和模拟器确定性核心只接收
+  有界、强类型、仅含市场事件的 `ExecutionMarketEventV3` 流；阶段 6 的 DPT/联合适配层位于
+  sim-system 公共输入边界之前，只组合 DPT 已验证公开读取器，并绑定实现身份、页上限、完整性
+  和资源证据。
+- 若现有公开原语无法在真实输入下同时满足正确性和资源硬上限，阶段 6 必须停止并回到 DPT
+  公共读取合同决策；不得让模拟器直接读 Parquet、重排、重建索引或复制完整事件带。该缺口
+  不阻断阶段 0 至 5，也不要求用新代码追溯改写现有 Gate A 回执。
+- 组件符合性门封存的组件运行清单内容身份与文件 SHA-256 直接作为 DPT 消费的组件回执
+  ID/SHA，不新增第二回执类型或登记系统。
+- 需求正文的产品目标、范围和验收标准已经覆盖这些边界，无需修改。本次只修正审核中计划的
+  技术实施语义并记录事实；没有实施 sim-system 代码、修改 Cargo 依赖、运行组件测试、提交、
+  推送、部署或执行远端操作。需求与计划仍为草案，当前 `authority=none`、执行授权 `none`；
+  下一步仍是用户批准需求与计划后，从阶段 0 开始，不得因 Gate A 已存在而直接跳到阶段 6。
+
+## 2026-08-09：需求、计划批准与正式实施根变更
+
+- 用户明确批准 `demand/sim-system-demand.md` 与 `plan/sim-system-plan.md`，同意按阶段 0 至 5
+  完成组件符合性，再由 DPT 阶段 3 与 sim-system 阶段 6 运行联合真实纵向的顺序开始执行。
+- 用户明确把本事项的文档、代码、本地构建、测试和验收根改为当前工作树
+  `/home/chillchill/sim-system`，不再以 `/home/chillchill/btc-updown-marketmaker` 作为本事项
+  实施根。该路径决定不改变其他事项或部署拓扑。
+- 需求生命周期更新为 `APPROVED_REQUIREMENTS`，计划生命周期更新为
+  `APPROVED_ACTIVE_PLAN`；当前执行 authority 为计划，执行授权为
+  `LOCAL_IMPLEMENTATION_ONLY`，当前游标进入 `阶段 0 -> 任务 0.1`。
+- 批准不包含提交、推送、发布、部署、远端操作、钱包或凭据访问、真实下单和真实资金变化。
+  阶段 0 开始时当前工作区尚不存在 `sim-system` crate、模拟器专用依赖、配置或运行产物；该
+  事实是实施基线，不是缺陷，也不得通过预建后续阶段空壳来掩盖。
+
+## 2026-08-09：阶段 0 `toml` 依赖现状冲突与用户决定
+
+- 阶段 0 任务 0.1 的机械基线复核发现，已批准计划曾把 `toml` 与 `reqwest`、
+  `serde/serde_json`、`sha2`、`rust_decimal` 一并表述为“正式工作区已锁定”；真实
+  `Cargo.toml`、`cargo metadata --locked --offline`、`Cargo.lock` 和
+  `cargo tree --workspace --locked --offline -i toml` 证明当前工作区没有 `toml` 包。
+- 该事实触发方案不一致决策门。主代理停止新增依赖和技术试验，向用户列出修正文档现状、
+  现在向无消费者的工作区加入依赖、删除成熟 TOML 解析路线三个选项；用户同意保守的最小
+  修正方案。
+- 当前计划据此明确：现有四类工具依赖已经锁定；`toml` 是静态配置的已选成熟工具，但尚未
+  进入工作区。待阶段 1 创建真实目标 crate 时，先核验当时版本、许可证、安全公告和 Rust
+  兼容性，再只由该 crate 精确声明并更新锁文件。不得把依赖塞入无关 crate，也不改为手写
+  TOML 解析。
+- 本次决定只纠正计划中的技术现状并记录决策，不改变需求业务语义、阶段顺序、授权范围或
+  模块边界，也没有新增 Cargo 依赖、Rust 代码、配置、运行产物、提交或推送。
+- 修正后重新执行 `cargo metadata --format-version 1 --locked --offline --no-deps`、计划措辞
+  检索和 `git diff --check` 均通过。任务 0.1 自审确认：正式根、Git 身份、四个既有工作区
+  成员和禁止边界一致；不存在第二个模拟器、模拟/实盘回退、影子规范化或未获准宿主接线。
+  当前游标因此进入任务 0.2；这不是阶段 0 完成结论。
+
+## 2026-08-09：固定 SDK 批量提交注释冲突与用户决定
+
+- 任务 0.2 复核发现，固定 SDK 的 `post_orders` 文档注释曾宣称批量订单原子处理、任一订单
+  校验失败即返回整体错误；这与已批准计划的逐项非原子语义不能同时成立。
+- 当前官方 `POST /orders` 文档明确规定每请求最多 15 项、并行处理并逐项返回结果，示例在
+  同一响应中同时包含 `success=true` 与 `success=false`；固定 SDK 的真实返回类型同样是
+  `Vec<PostOrderResponse>`，每项分别携带 `success` 和 `error_msg`。因此冲突归因于 SDK
+  注释陈旧，不是计划或运行实现的原子语义。
+- 用户同意最小修正：只把注释改为并行处理、逐项结果和单项失败不回滚成功项，并明确只有
+  请求整体失败才返回方法错误；未修改方法签名、请求、响应解析或任何可执行行为。
+
+## 2026-08-09：sim-system 自有合同首版标识冻结
+
+- 任务 0.2 发现，计划虽然要求错误合同版本在改变状态前拒绝，但尚未给出请求/响应、规则
+  快照、三类生命周期反馈和运行清单的精确首版标识；当前工作树和完整 Git 历史均不存在这些
+  sim-system schema 的既有 V1 或 V2。
+- 用户指出正式样本使用 V2，要求核实为何拟冻结为 V1。机械复核确认 Gate A 样本不是统一
+  版本：DPT 运行清单为 V2、回执和市场事件为 V3、双索引为 V2、统一事件记录及部分其他
+  合同为 V1。版本号属于各自独立合同，不是整条链路的统一发布代号。
+- 用户同意保守建议：sim-system 首次创建的执行合同、规则快照、订单/成交/结算反馈和运行
+  清单分别从 V1 开始。`simulation_run_manifest_v1` 在真实纵向中原样绑定 DPT 的实际 V1/V2/V3
+  合同身份，不伪装成 DPT 运行清单的后续版本，也不虚构不存在的 sim-system V0/V1 历史。
+- 本次只冻结计划中的精确首版标识，不创建 Rust 类型、schema 文件、运行产物或兼容层；八个
+  方法继续使用方法特定请求和响应，共用执行合同版本不增加公开 `SimRequest` 总派发类型。
+
+## 2026-08-09：阶段 0 任务 0.2 公共合同与正式样本复核完成
+
+- 正式输入固定为 Gate A 回执
+  `bc2fdeddd1ea9a6c931823be498591ccaf32dfad61ed969f86c92b16ae3cc574`；其回执 V3 绑定
+  DPT 运行清单 V2、统一事件记录 V1、市场事件 V3、参考事件 V1、Observation V3 和双索引
+  V2。各合同独立版本与 sim-system 新冻结的自有 V1 合同可以同时成立。
+- 使用本机 `pyarrow 23.0.1` 以每批 256 行、只读取 `payload` 列的方式有界扫描正式唯一事件
+  存储；未读取 `typed_raw`、未复制完整事件带、未生成新产物。213,458 条记录中有 200,675
+  条市场事件和 12,783 条参考事件；市场事件包含 2 条首次 L2 快照、2 条动态 tick、362 条
+  `BOOK_RESYNC_DELTA_INFERENCE`、1 条同时保留三个独立布尔的交易状态以及 1,918 条公开成交。
+- 两条首次快照的初始 tick 均来自市场事件且为正，载荷没有旧 `purpose` 字段；真实动态 tick
+  见证从 `0.01` 变为 `0.001`。正式范围的 1,918 条成交均使用
+  `DERIVED_SOURCE_EVIDENCE`；另一种 `PLATFORM_TRANSACTION_HASH` 由既有黄金合同正例覆盖，
+  不伪造正式范围中不存在的平台哈希样本。
+- 执行
+  `cargo test -p data-pipeline-core --test phase0_contract --test phase0_dual_time_contract --locked --offline`
+  返回 0：两个测试目标分别为 50/50 和 1/1 通过。最小异常证据固定为实际解码损坏代表
+  `nonpositive_tick_is_rejected_at_decode_boundary`，已发生兼容事故回归固定为
+  `initial_l2_snapshot_rejects_legacy_purpose`；不另建 DPT 逐字段重复测试。
+- 任务自审及独立只读复核均未发现剩余问题，分级为严重 0、重要 0、次要 0。任务 0.2 完成，
+  当前游标进入任务 0.3；该结论不代表阶段 0、模拟器组件或真实纵向已经完成。
+
+## 2026-08-09：阶段 0 任务 0.3 成熟依赖审计与临时技术试验
+
+### 依赖事实与风险
+
+- 工作区当前解析 `reqwest 0.13.4`、`serde 1.0.228`、`serde_json 1.0.150`、
+  `sha2 0.10.9`、`rust_decimal 1.42.1`、`rustix 1.1.4` 和固定 SDK `0.7.0`；本机
+  `rustc/cargo 1.95.0` 高于这些依赖已声明的最低 Rust 版本。固定 SDK 的真实来源是官方
+  `0.7.0` 基线与根 `[patch.crates-io]` 指向的唯一 `0.7.0-p1` 供应商目录，不能描述成未修改
+  的注册表包。
+- `toml` 尚未进入工作区。截至 2026-08-09 的候选为注册表身份
+  `1.1.4+spec-1.1.0`，只需 `parse/serde/std`；正式目标 crate 创建时仍须重新核验并精确
+  入锁，不在阶段 0 向无消费者的既有 crate 塞入依赖。
+- 定向核验没有发现上述目标包版本的适用安全公告；该结论不是一次完整自动化锁文件审计。
+  既有 `data-collect` 因 SDK `rtds/ws` 激活的 `backoff 0.4.0` 被 RustSec
+  `RUSTSEC-2025-0012` 标记为停止维护、且无修复版本；它不是已知漏洞，也不是 sim-system
+  所需 `clob` 路径引入的依赖。本事项只记录该中等级现存风险并禁止模拟器启用 `rtds/ws`，
+  不越界替换采集重试库或扩大 SDK 补丁。
+- `rust_decimal 1.42.1` 的通用 Serde 实现即使启用任意精度相关特性仍保留 `visit_f64` 路径，
+  不能满足“绝不先进入 `f64`”的证明。当前路线改为专用强类型读取 `RawValue` 原始数字词法，
+  字符串只解码为 `String`，两者再交给 `Decimal::from_str_exact/from_scientific`，并拒绝其他
+  JSON 类型；不使用 `serde_json::Value` 任意探测。
+
+### 一次性技术试验
+
+- 试验根为
+  `/home/chillchill/sim-system/.sim-system-phase0-tech-trial.15e1YQ`，包含一次性独立 crate、
+  独立锁文件、独立 `target`、密封目录和零字节 `network.trace` 证据文件。它不是工作区成员，
+  也没有创建正式 `sim-system` crate；根 `Cargo.toml` 与 `Cargo.lock` SHA-256 始终分别为
+  `31c915cf967fad063582122b8c0f1866a632eef1354d69013c919f11f4f98955` 和
+  `dde8bcd1426182b2c55e8da49b3d38be964f8deaa3faa5863edf7669f7634c20`。
+- 临时清单、源码和最终锁文件 SHA-256 分别为
+  `c47f3a2d2e2cbdbb1218edb3714235257294b7f64a208656cd8f0451bf7ccd56`、
+  `c67c929eb0a649e48ef124ca97010036797d107c1817d16269647bb2a373d467`、
+  `1d0760c5a6c8a9a4d5c176a16a51b98dc0cf4c5f410f353a5c977b84c08183e0`。独立生成锁文件时
+  五个传递包最初选择了本机缓存中的更新补丁版本；试验在运行前用 `cargo update --precise`
+  收敛到根锁文件版本，最终 140 个依赖包的名称、版本和来源全部是根锁图子集。
+- 试验只构建两个固定 Gamma `markets/keyset` 请求而不发送，证明两个重复
+  `condition_ids` 保持顺序、`closed=false/true` 分离、没有 `condition_ids[]` 或逗号拼接，
+  并使用禁重定向客户端。固定 CLOB/Gamma 原始响应先分别形成 SHA-256，再进入忽略未知字段
+  的窄 DTO；数字和字符串两种线形态精确得到同一 28 位 `Decimal`，JSON 编码的
+  `outcomes/clobTokenIds` 再解析为强类型列表。
+- 同一父目录候选在写入与同步后通过 `RENAME_NOREPLACE` 密封并同步父目录；第二个不同候选
+  撞击同名目标得到 `AlreadyExists`，已密封文件 SHA-256 保持
+  `fe21700e92b4a324873bb21ab714bb5599aa2a88dfccfe6dcbef74c56a652e36`，碰撞候选 SHA-256 为
+  `81029ca79330220705e5c8a25993b5b63189c964042c0a6b02a047e21a5e1dd8`。
+- 最终程序唯一标准输出为
+  `phase0_tech_trial=PASS query=PASS raw_sha=PASS dto=PASS decimal=PASS seal=PASS collision=PASS`，
+  退出码为 0；`strace -f -e trace=network` 记录文件为 0 字节。试验前后
+  `git status --porcelain=v1 -z` 摘要均为
+  `762bebddba8490f9974b40576ec0b84031b25a2e107f8293ba9e3178d701864b`。
+- 证据收齐后只把经过非空、非符号链接、固定父目录和固定前缀核验的精确临时根移入回收站；
+  原路径已经不存在，操作可从桌面回收站恢复。没有网络请求、正式规则快照、生产实现、根锁
+  文件变更、提交或推送。
+
+## 2026-08-09：阶段 0 任务 0.4 资源测量预登记
+
+- 当前正式 Gate A 范围再次证明来源计数不能互换：6 个所选 `typed_raw` 文件共有 1,677,687
+  行，生产路径在接收时间和市场范围过滤后解码 122,498 行，生成 200,675 个
+  `ExecutionMarketEventV3`、12,783 个参考事件、213,458 行唯一事件存储、213,454 行事件
+  时间索引和 213,458 行模型可见索引。这些是 DPT 来源与产物事实，不是模拟器容量。
+- 计划据此预登记 `COMPONENT_GOLDEN` 与 `REAL_VERTICAL` 两种负载，冻结唯一事件与双路径投递、
+  八方法调用与批量项、唯一成交与三类反馈、查询分页与返回行、至少两个完整保留滚动周期的
+  独立计数边界。模拟器核心的参考事件计数必须为零；所有计数必须能由输入和运行证据重算。
+- 性能口径只使用单调墙钟，分开记录吞吐、p50/p95/p99/最大执行延迟、整次墙钟、CPU、RSS、
+  cgroup、文件描述符、读写字节、产物字节以及各内部队列和状态高水位；模拟逻辑时间和正式
+  配置档时延都不能冒充执行性能。
+- 阶段 0 只冻结负载单位、计数边界、测量方法和证据身份，不冻结任何吞吐下限、延迟上限、
+  并发量、资源配额、保留期长度、负载倍率或重复次数。阶段 4 必须先密封确切黄金负载再查看
+  正式测量并冻结数值；阶段 6 使用成功 Gate A 覆盖的真实范围单次重新定标，不循环或复制
+  真实事件，并将联合适配层与模拟器核心资源分栏记录。
+- 任务 0.4 自审和独立只读复核均通过，分级为严重 0、重要 0、次要 0。阶段 0 的四个任务已
+  完成，当前只进入阶段完成门自审与独立阶段审查；尚未宣布阶段 0 完成，也未进入阶段 1。
+
+## 2026-08-09：阶段 0 完成门自审与跨模块来源说明冲突
+
+- 完成门自审把当前计划中遗留的类型化原始数据字段名 `timestamp_received` 收口为模拟器实际
+  消费的公共事件字段 `received_at_utc_ms`，并把本变更记录首屏从草案期同步为实施记录；这两项
+  只纠正当前文档身份和公共字段名，不改变双时间业务语义、DPT 原始输入 schema 或历史条目。
+- 当前分支 `sim-system` 的 `HEAD` 与 `origin/sim-system` 均为
+  `2ea4e28eee5332ef537e365a11665ef28e760933`，分歧为 `0/0`。根 `Cargo.toml` 与 `Cargo.lock`
+  SHA-256 仍分别为 `31c915cf967fad063582122b8c0f1866a632eef1354d69013c919f11f4f98955` 和
+  `dde8bcd1426182b2c55e8da49b3d38be964f8deaa3faa5863edf7669f7634c20`，两者均无差异；工作区
+  仍只有四个既有成员，没有 `sim-system` crate、专用配置、schema 或生产产物。
+- `cargo fmt --all -- --check` 与固定 SDK 独立清单的 `cargo fmt --manifest-path ... -- --check`
+  均退出 `0`；后者只输出稳定工具链不支持 `group_imports` 的既有警告，没有格式差异。
+  `cargo check --workspace --all-targets --locked --offline` 和
+  `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` 均退出 `0`。
+- 仓库规定的全工作区回归
+  `cargo test --workspace --lib --bins --tests --examples --locked --offline -- --skip four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second`
+  连续两次退出 `0`。具名 UTC 时钟夹具测试按命令明确跳过，没有写成通过；已有需要本地完整
+  数据集的 `ignored` 测试仍按各自注解忽略，也没有写成通过。
+- `git diff --check` 退出 `0`；发现下述冲突前只有七个预期的已跟踪文件差异，没有暂存或未
+  跟踪文件。阶段 0 尚未完成，也未进入阶段 1、提交或推送。
+- 后续依赖来源与完整差异辅助复核发现：`data-collect/docs/current/contracts.md` 仍明确写固定
+  SDK 相对 crates.io 0.7.0 的生产 `src/` 差异横跨四个文件；当前已批准的
+  `clob/client.rs` 批量非原子语义注释修正使机械比较结果变为五个差异文件。该第五项只有
+  文档注释差异，不改变方法签名、方法体、返回类型或运行行为，但“横跨四个文件”与真实源码
+  范围已经不能同时成立。
+- 该事实触发方案不一致决策门。全新独立阶段审查未启动，阶段 0 完成门停止在用户决定前；
+  当前未修改 `data-collect` 派生参考，也未自行撤销已批准的 SDK 注释修正。保守选项是把该参考
+  收口为“四个可执行行为补丁文件，另有一个 `clob/client.rs` 文档注释修正”，明确不扩大运行
+  补丁语义；是否采用须由用户决定。
+- 用户批准上述保守最小方案。`data-collect/docs/current/contracts.md` 现准确记录五个生产
+  `src/` 差异文件，并明确区分四个可执行行为补丁文件与一个只修正 `post_orders` 批量语义
+  注释的 `clob/client.rs`；后者不改变方法签名、方法体、请求、响应解析或运行行为。该派生
+  参考同步不改变 data-collect 需求、计划、schema、测试或运行语义，因此没有扩展到该模块的
+  三件套或当前外部磁盘事项。阶段 0 停止点解除，进入全新独立阶段审查。
+
+## 2026-08-09：阶段 0 独立阶段审查通过
+
+- 全新 `gpt-5.6-sol/ultra` 独立阶段审查结论为 `PASS`，分级为严重 0、重要 0、次要 0。
+  审查独立核对当前八个已跟踪差异、无暂存或未跟踪文件、根 Cargo 清单与锁文件无差异、四个
+  既有工作区成员和不存在阶段 1 模拟器实现；并核对需求、计划、本变更记录、AGENTS 路由、
+  DPT 外部前置和 data-collect 当前派生参考可以同时成立。
+- 审查机械确认正式 Gate A V2 的回执、版本、16 项能力和产物计数，三种公开游标与阶段 6
+  适配边界，以及官方注册表 SDK 与供应商 `src/` 恰有五个差异文件。其中四个含可执行行为
+  补丁，`clob/client.rs` 只有已批准的注释修正；`post_orders` 的真实返回类型和逐项结果字段
+  支持该注释，未形成第五条运行补丁语义。
+- 独立执行 `cargo test -p data-pipeline-core --test phase0_contract --test phase0_dual_time_contract --locked --offline`
+  取得 50 项与 1 项通过；执行
+  `cargo test -p data-collect --test polymarket_sdk_patch_contract --test polymarket_sdk_runtime_contract --locked --offline`
+  取得 21 项与 20 项通过。`git diff --check`、`cargo metadata --locked --offline --no-deps` 和
+  相关 Git/Cargo 边界核对均退出 0。此前固定全工作区回归的两次退出 0 继续作为阶段证据；
+  具名 UTC 时钟测试仍明确记为跳过，不写成通过。
+- 阶段 0 的当前合同、成熟依赖路线、实施边界、测量方法、任务自审和独立阶段审查均满足完成
+  门，阶段 0 至此关闭。剩余非阻断风险是阶段 6 适配器尚未实现、`toml` 仍须在实际引入前重新
+  核验、既有 `backoff 0.4.0` 维护风险仍存在，以及 Gate A 仍正确保持
+  `training_dataset_ready=false`；这些边界均已由后续阶段或外部门拥有，不反向重开阶段 0。
+- 当前没有提交或推送，也没有进入阶段 1。按阶段关闭规则，须等待用户对阶段 0 当前完整差异
+  的提交与推送作出另行授权；该授权完成前不得开始阶段 1。

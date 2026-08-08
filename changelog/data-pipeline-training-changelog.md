@@ -3128,3 +3128,42 @@ Task 0.10 的定向绿灯，不代替后续完整阶段验证和独立阶段复�
   缓存释放并保留 Parquet 主错误，不会由后续清理错误掩盖主因。
 - 本地实现与确定性回归已经完成；尚未执行主机重启、冷态正式 `measured-build`、V2 运行清单
   生成、原子发布或新回执签发，因此步骤 2.5.6 和阶段 2 补充门尚未关闭。
+
+### 冷态正式复验、V2 原子签发与取代关系
+
+- 用户完成主机重启后，正式复验记录新 `boot_id=64a288a0-830f-4499-9f2d-fc5716163b8b`、
+  启动时间 `2026-08-09 00:52:31`，并在正式构建前核对当前启动 journal 未出现目标输入路径、
+  没有进程持有目标输入文件描述符。随后未执行其他目标目录或清单读取，直接启动正式构建。
+  本机没有 `auditd`、`fincore` 或 `vmtouch`，因此该证据只证明新启动、journal 无路径命中和
+  启动前无打开描述符，不能冒充对所有已经关闭且未记录读取的逐 inode 绝对证明。
+- 正式构建使用提交 `2ea4e28eee5332ef537e365a11665ef28e760933`、二进制 SHA-256
+  `1f97745c031abee952ea948be9a4fecbe2b8eca77efb450addcdc8d2e96610b5`、全新候选
+  `.gate-a-20260809-2ea4e28-v2-cold-r1.candidate`，以及与首次正式运行完全相同的清单、市场和
+  接收范围。构建退出码为 `0`，最大 RSS 为 `640984 KiB`，cgroup 峰值为 `728817664` 字节，
+  交换峰值为 `0`；`memory.events` 的 `max/oom/oom_kill/oom_group_kill` 前后均为 `0`，网络
+  命名空间仅有 `lo`。
+- 正式发布命令退出码为 `0`，输出 `gate_a_publication=PASS`，运行 `17min 32.277s`，发布阶段
+  峰值为 `1354436608` 字节、交换为 `0`。候选经同文件系统
+  `renameat2(RENAME_NOREPLACE)` 原子迁移为发布根
+  `.local-artifacts/data-pipeline-training/gate-a/bc2fdeddd1ea9a6c931823be498591ccaf32dfad61ed969f86c92b16ae3cc574`；
+  候选随后不存在，旧 V1 正式根和两份失败候选均未被覆盖或改写。
+- 新 `GateAReceiptV3` 的 `receipt_id` 为
+  `bc2fdeddd1ea9a6c931823be498591ccaf32dfad61ed969f86c92b16ae3cc574`，回执文件 SHA-256 为
+  `e795a3b1c05c655092ce620e30050101dcb092cd86905b0d0627d6bc61a702ec`；绑定的 V2 运行清单
+  SHA-256 为 `ceccb9bfbbee0ead000ae284515a870cedf6ae4d13180ca60ef247c1d69a9696`。发布根含 `16` 个
+  普通文件、`0` 个符号链接，能力矩阵 `16/16 PASS`，`training_dataset_ready=false`。
+- 六类 `typed_raw_scan_policies` 均绑定同一接收范围，两个 Polymarket 来源另绑定同一
+  `condition_id`；各策略的投影列逐项等于冻结 Arrow schema 的全部顶层列，且
+  `skipped_columns=[]`。五份新产物的行数、字节数、物理 SHA-256 和逻辑 SHA-256 均与首次
+  正式 V1 同范围产物完全一致。
+- 独立 `gpt-5.6-sol/ultra` 终态审查结论为 `PASS`，`Critical 0 / Important 0 / Minor 0`。
+  审查独立重算回执身份、核心身份、输入身份、能力矩阵合同摘要、121 个清单成员及五份产物
+  的物理/逻辑绑定，并确认原子迁移和旧产物隔离。步骤 2.5.6 至此关闭；历史 V1 继续作为不可变
+  历史证据，但后续阶段当前只使用本次 V2 回执。DPT 当前游标回到
+  `阶段 3 -> 任务 3.1 外部 sim-system 组件回执核对`。
+- 跨模块读取复核确认，当前公开 `PlatformReplayCursor` 返回事件时间顺序的统一规范记录，
+  `VisibilityIndexCursor` 只返回模型可见索引条目，`ExecutionMarketEventCursor` 返回唯一存储
+  发射顺序的市场事件；当前没有现成、对称的模型可见索引解析市场事件游标。用户同意阶段 3
+  在 sim-system 公共输入边界之前使用有界 DPT/联合适配层组合这些既有公开原语，并把适配层
+  身份和资源单独绑定联合清单；不修改 Gate A 核心、不让新适配代码冒充本次回执覆盖，也不把
+  Parquet、参考事件、重排或索引重建职责推给模拟器。

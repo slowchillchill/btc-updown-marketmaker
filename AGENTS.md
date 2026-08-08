@@ -2,11 +2,9 @@
 
 ## 当前活动事项与首读路由
 
-- 截至 2026-08-08，当前工作树的活动开发事项为
-  `DATA-PIPELINE-TRAINING-20260803`。该事项的需求为
-  `demand/data-pipeline-training-demand.md`，当前业务语义和技术实施的唯一规范来源为
-  `plan/data-pipeline-training-plan.md`，历史事实记录为
-  `changelog/data-pipeline-training-changelog.md`。
+- 截至 2026-08-09，当前工作树的活动开发事项为 `SIM-SYSTEM-20260731`。该事项的需求为
+  `demand/sim-system-demand.md`，当前业务语义和技术实施的唯一规范来源为
+  `plan/sim-system-plan.md`，历史事实记录为 `changelog/sim-system-changelog.md`。
 - 处理该事项前，必须先读取需求和计划首屏，并读取计划中的“当前游标”；然后只按当前任务
   读取计划相关小节、真实代码、数据和测试。不得从 changelog 的旧状态推导当前状态或动作。
 - `data-collect/docs/CURRENT.md` 仅属于 `data-collect`。只有任务实际涉及 `data-collect` 的
@@ -21,6 +19,10 @@
   该事项后续开发、文档落盘、代码编写、本地构建和验收只在当前工作树
   `/home/chillchill/sim-system` 进行，不得切换到 `/home/chillchill/btc-updown-marketmaker`。
   本条不改变其他事项、远端目录或部署拓扑；若要再次改变该事项工作树，必须由用户明确决定。
+- 用户已于 2026-08-09 对事项 `SIM-SYSTEM-20260731` 作出窄范围路径覆盖：该事项的文档、
+  代码、本地构建、测试和验收只在当前工作树 `/home/chillchill/sim-system` 进行，不得切换到
+  `/home/chillchill/btc-updown-marketmaker` 实施。本条不改变其他事项、远端目录或部署拓扑；
+  若要再次改变该事项工作树，必须由用户明确决定。
 - 用户已于 2026-08-07 对事项 `DATA-COLLECT-EXTERNAL-DISK-GUARD-20260807` 作出窄范围路径
   覆盖：该事项的文档、后续获批代码、本地构建和验收只在工作树
   `/home/chillchill/data-collect-external-disk-guard` 进行，并以合并 PR #3 后的
