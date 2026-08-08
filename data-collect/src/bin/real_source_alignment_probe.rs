@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
@@ -31,7 +31,7 @@ use polymarket_client_sdk_v2::ws::config::Config as WsConfig;
 use polymarket_client_sdk_v2::ws::connection::ConnectionState;
 use serde::Serialize;
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep, timeout};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -58,6 +58,7 @@ const BINANCE_HTTP_TOTAL_TIMEOUT_SECS: u64 = 15;
 const WS_CONNECT_TIMEOUT_SECS: u64 = 20;
 const RTDS_FRESHNESS_TIMEOUT_SECS: u64 = 60;
 const SOURCE_SEND_TIMEOUT_MS: u64 = 2_000;
+static RUN_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -70,13 +71,12 @@ async fn main() {
 async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let config = ProbeConfig::from_env_and_args()?;
     let run_started = Instant::now();
-    fs::create_dir_all(&config.artifact_dir)?;
-    validate_artifact_root(&config)?;
-
-    let run_id = env_or_default(
-        "REAL_SOURCE_RUN_ID",
-        format!("phase0-real-source-{}-{}", now_ms(), std::process::id()),
-    );
+    prepare_artifact_dir(
+        &config.artifact_dir,
+        config.dataset_root.as_deref(),
+        &config.run_id,
+    )?;
+    let run_id = config.run_id.clone();
     let collector_host_id = collector_host_id();
     let collector_region = resolve_collector_region().await;
     let source_gaps = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -138,49 +138,21 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let (chunk_tx, chunk_rx) = std::sync::mpsc::sync_channel::<WriteChunk>(8);
     let writer_queue_rows = Arc::new(AtomicU64::new(0));
     let writer_queue_bytes = Arc::new(AtomicU64::new(0));
-    let writer_queue_rows_for_worker = Arc::clone(&writer_queue_rows);
-    let writer_queue_bytes_for_worker = Arc::clone(&writer_queue_bytes);
+    let writer_failure = Arc::new(Mutex::new(None::<String>));
     let writer_dir = config.artifact_dir.join("typed_raw");
-    let writer_handle = tokio::task::spawn_blocking(move || {
-        let mut writer = ParquetSegmentWriter::create(
-            &writer_dir,
-            "real-source-alignment-typed-raw",
-            "parquet_raw_layout_v1",
-        )?;
-        let mut receipts = Vec::new();
-        while let Ok(chunk) = chunk_rx.recv() {
-            writer_queue_rows_for_worker.fetch_sub(chunk.rows, Ordering::Relaxed);
-            writer_queue_bytes_for_worker.fetch_sub(chunk.bytes_estimate, Ordering::Relaxed);
-            let writer_dequeue_time_utc_ms = now_ms();
-            let raw_events = chunk
-                .events
-                .iter()
-                .map(|event| event.event.clone())
-                .collect::<Vec<_>>();
-            let write_started = Instant::now();
-            let write_start_time_utc_ms = now_ms();
-            writer.write_events(&raw_events)?;
-            let write_done_time_utc_ms = now_ms();
-            let write_events_us = write_started.elapsed().as_micros() as u64;
-            let receipt = DurableWriteBatch::new(
-                chunk.batch_seq,
-                chunk.events,
-                chunk.flush_reason,
-                chunk.batch_send_time_utc_ms,
-                writer_dequeue_time_utc_ms,
-                write_start_time_utc_ms,
-                write_done_time_utc_ms,
-                write_events_us,
-            )
-            .receipt();
-            receipts.push(receipt);
-        }
-        let published = writer.finalize_with_timing()?;
-        Ok::<_, Box<dyn Error + Send + Sync>>(WriterOutput {
-            published,
-            write_receipts: receipts,
-        })
-    });
+    let (writer_startup, writer_handle) = spawn_writer_worker(
+        writer_dir,
+        chunk_rx,
+        Arc::clone(&writer_queue_rows),
+        Arc::clone(&writer_queue_bytes),
+        Arc::clone(&writer_failure),
+        WriterOperations::production(),
+    );
+    match writer_startup.await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return Err(error.into()),
+        Err(_) => return Err(writer_disconnected_message(&writer_failure).into()),
+    }
 
     let deadline = run_started + Duration::from_secs(config.duration_secs);
     let deadline_ms = now_ms() + (config.duration_secs * 1000) as i64;
@@ -279,6 +251,7 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
                     send_chunk(
                         WriterChunkSendContext {
                             chunk_tx: &chunk_tx,
+                            writer_failure: &writer_failure,
                             writer_queue_rows: &writer_queue_rows,
                             writer_queue_bytes: &writer_queue_bytes,
                             writer_queue_tracker: &mut writer_queue_tracker,
@@ -302,6 +275,7 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
                     send_chunk(
                         WriterChunkSendContext {
                             chunk_tx: &chunk_tx,
+                            writer_failure: &writer_failure,
                             writer_queue_rows: &writer_queue_rows,
                             writer_queue_bytes: &writer_queue_bytes,
                             writer_queue_tracker: &mut writer_queue_tracker,
@@ -381,6 +355,7 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
             send_chunk(
                 WriterChunkSendContext {
                     chunk_tx: &chunk_tx,
+                    writer_failure: &writer_failure,
                     writer_queue_rows: &writer_queue_rows,
                     writer_queue_bytes: &writer_queue_bytes,
                     writer_queue_tracker: &mut writer_queue_tracker,
@@ -397,6 +372,7 @@ async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     send_chunk(
         WriterChunkSendContext {
             chunk_tx: &chunk_tx,
+            writer_failure: &writer_failure,
             writer_queue_rows: &writer_queue_rows,
             writer_queue_bytes: &writer_queue_bytes,
             writer_queue_tracker: &mut writer_queue_tracker,
@@ -1103,7 +1079,7 @@ async fn send_chunk(
                 context
                     .writer_queue_bytes
                     .fetch_sub(bytes_estimate, Ordering::Relaxed);
-                return Err("writer chunk channel disconnected".into());
+                return Err(writer_disconnected_message(context.writer_failure).into());
             }
         }
     }
@@ -1491,6 +1467,7 @@ fn build_rollover_receipts(
 
 #[derive(Clone)]
 struct ProbeConfig {
+    run_id: String,
     artifact_dir: PathBuf,
     dataset_root: Option<PathBuf>,
     duration_secs: u64,
@@ -1522,6 +1499,134 @@ struct WriterOutput {
     write_receipts: Vec<WriteBatchReceipt>,
 }
 
+type WriterResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
+type SharedWriterFailure = Arc<Mutex<Option<String>>>;
+
+#[derive(Clone, Copy)]
+struct WriterOperations {
+    create: fn(&Path) -> WriterResult<ParquetSegmentWriter>,
+    write_events: fn(&mut ParquetSegmentWriter, &[RawEvent]) -> WriterResult<()>,
+    finalize: fn(ParquetSegmentWriter) -> WriterResult<InstrumentedPublishedSegment>,
+}
+
+impl WriterOperations {
+    fn production() -> Self {
+        Self {
+            create: create_probe_writer,
+            write_events: write_probe_events,
+            finalize: finalize_probe_writer,
+        }
+    }
+}
+
+fn create_probe_writer(writer_dir: &Path) -> WriterResult<ParquetSegmentWriter> {
+    ParquetSegmentWriter::create(
+        writer_dir,
+        "real-source-alignment-typed-raw",
+        "parquet_raw_layout_v1",
+    )
+}
+
+fn write_probe_events(writer: &mut ParquetSegmentWriter, events: &[RawEvent]) -> WriterResult<()> {
+    writer.write_events(events)
+}
+
+fn finalize_probe_writer(
+    writer: ParquetSegmentWriter,
+) -> WriterResult<InstrumentedPublishedSegment> {
+    writer.finalize_with_timing()
+}
+
+fn spawn_writer_worker(
+    writer_dir: PathBuf,
+    chunk_rx: std::sync::mpsc::Receiver<WriteChunk>,
+    writer_queue_rows: Arc<AtomicU64>,
+    writer_queue_bytes: Arc<AtomicU64>,
+    writer_failure: SharedWriterFailure,
+    operations: WriterOperations,
+) -> (
+    oneshot::Receiver<Result<(), String>>,
+    tokio::task::JoinHandle<WriterResult<WriterOutput>>,
+) {
+    let (startup_tx, startup_rx) = oneshot::channel();
+    let handle = tokio::task::spawn_blocking(move || {
+        let mut writer = match (operations.create)(&writer_dir) {
+            Ok(writer) => writer,
+            Err(error) => {
+                let message = error.to_string();
+                remember_writer_failure(&writer_failure, message.clone());
+                let _ = startup_tx.send(Err(message.clone()));
+                return Err(message.into());
+            }
+        };
+        let _ = startup_tx.send(Ok(()));
+
+        let mut receipts = Vec::new();
+        while let Ok(chunk) = chunk_rx.recv() {
+            writer_queue_rows.fetch_sub(chunk.rows, Ordering::Relaxed);
+            writer_queue_bytes.fetch_sub(chunk.bytes_estimate, Ordering::Relaxed);
+            let writer_dequeue_time_utc_ms = now_ms();
+            let raw_events = chunk
+                .events
+                .iter()
+                .map(|event| event.event.clone())
+                .collect::<Vec<_>>();
+            let write_started = Instant::now();
+            let write_start_time_utc_ms = now_ms();
+            if let Err(error) = (operations.write_events)(&mut writer, &raw_events) {
+                let message = error.to_string();
+                remember_writer_failure(&writer_failure, message.clone());
+                return Err(message.into());
+            }
+            let write_done_time_utc_ms = now_ms();
+            let write_events_us = write_started.elapsed().as_micros() as u64;
+            let receipt = DurableWriteBatch::new(
+                chunk.batch_seq,
+                chunk.events,
+                chunk.flush_reason,
+                chunk.batch_send_time_utc_ms,
+                writer_dequeue_time_utc_ms,
+                write_start_time_utc_ms,
+                write_done_time_utc_ms,
+                write_events_us,
+            )
+            .receipt();
+            receipts.push(receipt);
+        }
+
+        let published = match (operations.finalize)(writer) {
+            Ok(published) => published,
+            Err(error) => {
+                let message = error.to_string();
+                remember_writer_failure(&writer_failure, message.clone());
+                return Err(message.into());
+            }
+        };
+        Ok(WriterOutput {
+            published,
+            write_receipts: receipts,
+        })
+    });
+    (startup_rx, handle)
+}
+
+fn remember_writer_failure(writer_failure: &SharedWriterFailure, message: String) {
+    let mut failure = writer_failure
+        .lock()
+        .expect("writer failure mutex poisoned");
+    if failure.is_none() {
+        *failure = Some(message);
+    }
+}
+
+fn writer_disconnected_message(writer_failure: &SharedWriterFailure) -> String {
+    writer_failure
+        .lock()
+        .expect("writer failure mutex poisoned")
+        .clone()
+        .unwrap_or_else(|| "writer task ended unexpectedly".to_owned())
+}
+
 struct WriteChunk {
     batch_seq: u64,
     events: Vec<SequencedRawEvent>,
@@ -1551,6 +1656,7 @@ struct QueueSampleContext<'a> {
 
 struct WriterChunkSendContext<'a> {
     chunk_tx: &'a std::sync::mpsc::SyncSender<WriteChunk>,
+    writer_failure: &'a SharedWriterFailure,
     writer_queue_rows: &'a AtomicU64,
     writer_queue_bytes: &'a AtomicU64,
     writer_queue_tracker: &'a mut QueueDurationTracker,
@@ -1600,9 +1706,27 @@ struct LatencySummary {
 
 impl ProbeConfig {
     fn from_env_and_args() -> Result<Self, Box<dyn Error + Send + Sync>> {
+        let args = std::env::args().skip(1).collect::<Vec<_>>();
+        let dataset_root = std::env::var("DATASET_ROOT").ok().map(PathBuf::from);
+        let explicit_artifact_dir = artifact_dir_from_args(&args)?.or_else(|| {
+            std::env::var("REAL_SOURCE_ARTIFACT_DIR")
+                .ok()
+                .filter(|path| !path.trim().is_empty())
+                .map(PathBuf::from)
+        });
+        let explicit_run_id = std::env::var("REAL_SOURCE_RUN_ID").ok();
+        let current_dir = std::env::current_dir()?;
+        let (run_id, artifact_dir) = resolve_run_identity(
+            explicit_artifact_dir,
+            dataset_root.as_deref(),
+            explicit_run_id.as_deref(),
+            &current_dir,
+        )?;
+
         Ok(Self {
-            artifact_dir: artifact_dir()?,
-            dataset_root: std::env::var("DATASET_ROOT").ok().map(PathBuf::from),
+            run_id,
+            artifact_dir,
+            dataset_root,
             duration_secs: env_u64_alias(
                 "PHASE0_REAL_SOURCE_DURATION_SECS",
                 "REAL_SOURCE_RUN_SECS",
@@ -1632,50 +1756,104 @@ impl ProbeConfig {
     }
 }
 
-fn validate_artifact_root(config: &ProbeConfig) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let Some(dataset_root) = &config.dataset_root else {
-        return Ok(());
+fn artifact_dir_from_args(
+    args: &[String],
+) -> Result<Option<PathBuf>, Box<dyn Error + Send + Sync>> {
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--artifact-dir" {
+            let path = args
+                .get(index + 1)
+                .ok_or("--artifact-dir requires a following path")?;
+            return Ok(Some(PathBuf::from(path)));
+        }
+        index += 1;
+    }
+    Ok(None)
+}
+
+fn resolve_run_identity(
+    explicit_artifact_dir: Option<PathBuf>,
+    dataset_root: Option<&Path>,
+    explicit_run_id: Option<&str>,
+    current_dir: &Path,
+) -> Result<(String, PathBuf), Box<dyn Error + Send + Sync>> {
+    let run_id = match explicit_run_id {
+        Some(run_id) => {
+            validate_run_id(run_id)?;
+            run_id.to_owned()
+        }
+        None => format!(
+            "phase0-real-source-{}-{}-{}",
+            now_ms(),
+            std::process::id(),
+            RUN_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ),
     };
-    fs::create_dir_all(dataset_root)?;
-    fs::create_dir_all(&config.artifact_dir)?;
-    let root = fs::canonicalize(dataset_root)?;
-    let artifact = fs::canonicalize(&config.artifact_dir)?;
-    if !artifact.starts_with(&root) {
-        return Err(format!(
-            "artifact dir {} is outside DATASET_ROOT {}",
-            artifact.display(),
-            root.display()
-        )
-        .into());
+    let artifact_dir = match explicit_artifact_dir {
+        Some(path) => path,
+        None => match dataset_root {
+            Some(root) => root.join("phase0-validation").join(&run_id),
+            None => current_dir
+                .join("real-source-alignment-artifacts")
+                .join(&run_id),
+        },
+    };
+    Ok((run_id, artifact_dir))
+}
+
+fn validate_run_id(run_id: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    if run_id.is_empty()
+        || run_id == "."
+        || run_id == ".."
+        || !run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(format!("REAL_SOURCE_RUN_ID is not a safe path component: {run_id:?}").into());
     }
     Ok(())
 }
 
-fn artifact_dir() -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "--artifact-dir" {
-            let path = args
-                .next()
-                .ok_or("--artifact-dir requires a following path")?;
-            return Ok(PathBuf::from(path));
+fn prepare_artifact_dir(
+    artifact_dir: &Path,
+    dataset_root: Option<&Path>,
+    run_id: &str,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    if let Some(dataset_root) = dataset_root {
+        fs::create_dir_all(dataset_root)?;
+    }
+    fs::create_dir_all(artifact_dir)?;
+
+    if let Some(dataset_root) = dataset_root {
+        let root = fs::canonicalize(dataset_root)?;
+        let artifact = fs::canonicalize(artifact_dir)?;
+        if !artifact.starts_with(&root) {
+            return Err(format!(
+                "artifact dir {} is outside DATASET_ROOT {}",
+                artifact.display(),
+                root.display()
+            )
+            .into());
         }
     }
-    if let Ok(path) = std::env::var("REAL_SOURCE_ARTIFACT_DIR")
-        && !path.trim().is_empty()
-    {
-        return Ok(PathBuf::from(path));
+
+    if fs::read_dir(artifact_dir)?.next().transpose()?.is_some() {
+        return Err(format!("artifact dir is not empty: {}", artifact_dir.display()).into());
     }
-    if let Ok(root) = std::env::var("DATASET_ROOT") {
-        let run_id = env_or_default(
-            "REAL_SOURCE_RUN_ID",
-            format!("phase0-real-source-{}-{}", now_ms(), std::process::id()),
-        );
-        return Ok(PathBuf::from(root).join("phase0-validation").join(run_id));
-    }
-    std::env::current_dir()
-        .map(|cwd| cwd.join("real-source-alignment-artifacts"))
-        .map_err(Into::into)
+
+    let owner_path = artifact_dir.join("run_owner.json");
+    let mut owner = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&owner_path)?;
+    owner.write_all(&serde_json::to_vec_pretty(&json!({
+        "run_id": run_id,
+        "pid": std::process::id(),
+        "created_at_utc_ms": now_ms(),
+        "artifact_dir": artifact_dir,
+    }))?)?;
+    Ok(())
 }
 
 fn expected_sources() -> &'static [&'static str] {
@@ -1685,13 +1863,6 @@ fn expected_sources() -> &'static [&'static str] {
         "binance_aggtrade",
         "polymarket_rtds_chainlink_btc_usd",
     ]
-}
-
-fn env_or_default(key: &str, default: String) -> String {
-    std::env::var(key)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(default)
 }
 
 fn env_u64(key: &str, default: u64) -> u64 {
@@ -1800,4 +1971,214 @@ fn now_ms() -> i64 {
 
 fn monotonic_ms(started: Instant) -> u64 {
     started.elapsed().as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+    use tempfile::tempdir;
+
+    const STARTUP_FAILURE: &str = "injected writer startup failure";
+    const RUNTIME_FAILURE: &str = "injected writer runtime failure";
+
+    #[test]
+    fn cargo_metadata_exposes_probe_only_as_bin() {
+        let output = Command::new(env!("CARGO"))
+            .args([
+                "metadata",
+                "--no-deps",
+                "--format-version",
+                "1",
+                "--locked",
+                "--offline",
+            ])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("cargo metadata must run");
+        assert!(
+            output.status.success(),
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let metadata: Value =
+            serde_json::from_slice(&output.stdout).expect("metadata must be valid JSON");
+        let targets = metadata["packages"]
+            .as_array()
+            .expect("metadata packages must be an array")
+            .iter()
+            .flat_map(|package| {
+                package["targets"]
+                    .as_array()
+                    .expect("package targets must be an array")
+            })
+            .filter(|target| target["name"] == "real_source_alignment_probe")
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0]["kind"], json!(["bin"]));
+    }
+
+    #[test]
+    fn default_run_identity_is_unique_and_consistent() -> WriterResult<()> {
+        let root = tempdir()?;
+        let (first_run_id, first_dir) = resolve_run_identity(None, None, None, root.path())?;
+        let (second_run_id, second_dir) = resolve_run_identity(None, None, None, root.path())?;
+
+        assert_ne!(first_run_id, second_run_id);
+        assert_ne!(first_dir, second_dir);
+        assert_eq!(
+            first_dir.file_name().and_then(|name| name.to_str()),
+            Some(first_run_id.as_str())
+        );
+        assert_eq!(
+            second_dir.file_name().and_then(|name| name.to_str()),
+            Some(second_run_id.as_str())
+        );
+
+        prepare_artifact_dir(&first_dir, None, &first_run_id)?;
+        prepare_artifact_dir(&second_dir, None, &second_run_id)?;
+        let first_owner: Value =
+            serde_json::from_slice(&fs::read(first_dir.join("run_owner.json"))?)?;
+        let second_owner: Value =
+            serde_json::from_slice(&fs::read(second_dir.join("run_owner.json"))?)?;
+        assert_eq!(first_owner["run_id"], first_run_id);
+        assert_eq!(second_owner["run_id"], second_run_id);
+        Ok(())
+    }
+
+    #[test]
+    fn nonempty_explicit_artifact_dir_is_preserved() -> WriterResult<()> {
+        let root = tempdir()?;
+        let artifact_dir = root.path().join("explicit-artifacts");
+        fs::create_dir_all(&artifact_dir)?;
+        let sentinel_path = artifact_dir.join("sentinel.txt");
+        let sentinel = b"existing artifact bytes";
+        fs::write(&sentinel_path, sentinel)?;
+
+        let error = prepare_artifact_dir(&artifact_dir, None, "explicit-run")
+            .expect_err("nonempty explicit artifact directory must be rejected");
+        assert!(error.to_string().contains("artifact dir is not empty"));
+        assert_eq!(fs::read(&sentinel_path)?, sentinel);
+        assert!(!artifact_dir.join("run_owner.json").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn writer_startup_error_is_primary() -> WriterResult<()> {
+        let root = tempdir()?;
+        let (_chunk_tx, chunk_rx) = std::sync::mpsc::sync_channel(1);
+        let writer_failure = Arc::new(Mutex::new(None));
+        let operations = WriterOperations {
+            create: injected_startup_failure,
+            ..WriterOperations::production()
+        };
+        let (startup, handle) = spawn_writer_worker(
+            root.path().join("typed_raw"),
+            chunk_rx,
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::clone(&writer_failure),
+            operations,
+        );
+
+        assert_eq!(startup.await?, Err(STARTUP_FAILURE.to_owned()));
+        let task_error = match handle.await? {
+            Ok(_) => panic!("writer must fail"),
+            Err(error) => error,
+        };
+        assert_eq!(task_error.to_string(), STARTUP_FAILURE);
+        assert_eq!(
+            writer_disconnected_message(&writer_failure),
+            STARTUP_FAILURE
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn writer_runtime_error_wins_over_disconnect() -> WriterResult<()> {
+        let root = tempdir()?;
+        let (chunk_tx, chunk_rx) = std::sync::mpsc::sync_channel(1);
+        let writer_failure = Arc::new(Mutex::new(None));
+        let operations = WriterOperations {
+            write_events: injected_runtime_failure,
+            ..WriterOperations::production()
+        };
+        let (startup, handle) = spawn_writer_worker(
+            root.path().join("typed_raw"),
+            chunk_rx,
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::clone(&writer_failure),
+            operations,
+        );
+        assert_eq!(startup.await?, Ok(()));
+        chunk_tx.send(WriteChunk {
+            batch_seq: 1,
+            events: Vec::new(),
+            flush_reason: FlushReason::Rows,
+            batch_send_time_utc_ms: 0,
+            rows: 0,
+            bytes_estimate: 0,
+        })?;
+        let task_error = match handle.await? {
+            Ok(_) => panic!("writer must fail"),
+            Err(error) => error,
+        };
+        assert_eq!(task_error.to_string(), RUNTIME_FAILURE);
+
+        let writer_queue_rows = AtomicU64::new(0);
+        let writer_queue_bytes = AtomicU64::new(0);
+        let run_started = Instant::now();
+        let mut writer_queue_tracker = QueueDurationTracker::new("writer_chunk_queue");
+        let mut batch = vec![sample_sequenced_event()];
+        let mut batch_seq = 1;
+        let error = send_chunk(
+            WriterChunkSendContext {
+                chunk_tx: &chunk_tx,
+                writer_failure: &writer_failure,
+                writer_queue_rows: &writer_queue_rows,
+                writer_queue_bytes: &writer_queue_bytes,
+                writer_queue_tracker: &mut writer_queue_tracker,
+                run_started,
+            },
+            &mut batch,
+            &mut batch_seq,
+            FlushReason::Shutdown,
+        )
+        .await
+        .expect_err("disconnected writer channel must fail");
+        assert_eq!(error.to_string(), RUNTIME_FAILURE);
+        Ok(())
+    }
+
+    fn injected_startup_failure(_: &Path) -> WriterResult<ParquetSegmentWriter> {
+        Err(STARTUP_FAILURE.into())
+    }
+
+    fn injected_runtime_failure(_: &mut ParquetSegmentWriter, _: &[RawEvent]) -> WriterResult<()> {
+        Err(RUNTIME_FAILURE.into())
+    }
+
+    fn sample_sequenced_event() -> SequencedRawEvent {
+        SequencedRawEvent {
+            event_seq: 1,
+            event: RawEvent {
+                source_kind: "test".to_owned(),
+                source_event_type: "test".to_owned(),
+                source_identifier: "test".to_owned(),
+                source_ts: None,
+                recv_time_utc_ms: 0,
+                collector_admission: None,
+                collector_host_id: "test".to_owned(),
+                collector_region: "test".to_owned(),
+                source_endpoint: "test".to_owned(),
+                raw_json: "{}".to_owned(),
+                parquet_raw_layout_version: 1,
+                parquet_raw_source_kind: "test".to_owned(),
+            },
+            source_recv_monotonic_ms: 0,
+            collector_dequeue_time_utc_ms: 0,
+            collector_dequeue_monotonic_ms: 0,
+        }
+    }
 }

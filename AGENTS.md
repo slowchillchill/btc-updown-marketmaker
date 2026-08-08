@@ -2,13 +2,29 @@
 
 ## 当前活动事项与首读路由
 
-- 截至 2026-08-06，当前工作树的活动开发事项为
-  `DATA-PIPELINE-TRAINING-20260803`。该事项的需求为
-  `demand/data-pipeline-training-demand.md`，当前业务语义和技术实施的唯一规范来源为
-  `plan/data-pipeline-training-plan.md`，历史事实记录为
-  `changelog/data-pipeline-training-changelog.md`。
-- 处理该事项前，必须先读取需求和计划首屏，并读取计划中的“当前游标”；然后只按当前任务
-  读取计划相关小节、真实代码、数据和测试。不得从 changelog 的旧状态推导当前状态或动作。
+- 截至 2026-08-08，当前工作树的活动事项为
+  `DATA-COLLECT-EXTERNAL-DISK-GUARD-20260807`。该事项的需求为
+  `demand/data-collect-external-disk-guard-demand.md`，已批准规范计划为
+  `plan/data-collect-external-disk-guard-plan.md`，历史事实记录为
+  `changelog/data-collect-external-disk-guard-changelog.md`。需求和计划已于 2026-08-08 获得
+  用户批准；阶段 0 的批准后文档同步、独立复审、提交和首次分支推送已经完成。用户随后授权
+  阶段 1 本地代码实现、必要测试、静态验证、提交和推送；两个目标的实现、完整验证、独立
+  阶段复审、提交和推送已经完成。用户随后授权并完成阶段 2 的发布候选构建和生产只读核查；
+  任务 2.3 确认同日清单身份阻断后，用户否决跨 UTC 日候选维护窗，确认 UTC 昨日及更早数据
+  已经备份并接受当前日数据缺口，授权任务 2.4 停止旧服务、永久删除且只删除当前 UTC 日目录、
+  安装冻结产物并启动候选长期运行。当前已完成停止、删除和安装，但首次候选启动被错误的
+  `NRestarts` 验收门主动停止；第二次启动在 180 秒内保持候选进程稳定且没有重启，但启动恢复
+  尚未完成，随后按获批验收门停止。取消该硬时限后，同一候选已完成 302 秒启动恢复和就绪后
+  182 秒稳定写入验收；当前服务为 `active/running`，清单覆盖为 `active`。生产事实文档同步和
+  两路独立审查已经通过。用户随后授权把清理 timer 调度更新为每日 UTC `12:00:00` 并首次启用；
+  提交 `800bca07b98605339d0929eccbb2d9c8b156cb53` 已推送，生产 timer 当前为
+  `enabled/active/waiting`，下一次名义触发为 `2026-08-08T12:00:00Z`。启用没有立即运行清理
+  服务，采集服务和日期目录均未变化；首次自然调度结果尚未发生。生产证据文档同步与独立复审
+  已通过；用户现已授权提交并推送当前 10 份最终证据文档，再向 `main` 创建草稿 PR。不授权
+  合并、转为正式评审、其他 Git/PR、手动运行清理服务、其他产物重装或额外手动删除。
+- 处理该事项前，必须先读取需求和计划首屏、计划中的“当前游标”和“已冻结的用户决定”；然后按
+  当前任务读取 `data-collect/docs/CURRENT.md`、真实代码、数据和测试。不得从 changelog 的
+  旧状态推导当前状态或动作。
 - `data-collect/docs/CURRENT.md` 仅属于 `data-collect`。只有任务实际涉及 `data-collect` 的
   需求、代码、测试、运行、部署或需要核对其上游合同时，才按下文 `data-collect` 专属规则
   读取；不得因为该文件存在而把它作为无关 `data-pipeline` 工作的默认首读文档。
@@ -21,6 +37,12 @@
   该事项后续开发、文档落盘、代码编写、本地构建和验收只在当前工作树
   `/home/chillchill/sim-system` 进行，不得切换到 `/home/chillchill/btc-updown-marketmaker`。
   本条不改变其他事项、远端目录或部署拓扑；若要再次改变该事项工作树，必须由用户明确决定。
+- 用户已于 2026-08-07 对事项 `DATA-COLLECT-EXTERNAL-DISK-GUARD-20260807` 作出窄范围路径
+  覆盖：该事项的文档、后续获批代码、本地构建和验收只在工作树
+  `/home/chillchill/data-collect-external-disk-guard` 进行，并以合并 PR #3 后的
+  `main@de51c297882016aa9b68e8079d648508973cc2c4` 为创建基线。不得回到旧
+  `/home/chillchill/btc-updown-marketmaker` 工作树实施本事项，也不得把旧工作树中的未跟踪
+  `data-collect-training-collector` 纳入本事项提交。
 - 各远端服务器上的源码/工作目录统一写作 `~/btc-updown-marketmaker`；在 `ubuntu` 用户服务器上该路径通常解析为 `/home/ubuntu/btc-updown-marketmaker`，但文档和命令不得把它误写成本地开发路径。
 - 与 Polymarket 相关开发必须基于官方 Polymarket Rust SDK。若
   Polymarket Rust SDK 的能力、类型、认证、签名、请求构造、响应解析或覆盖范围
