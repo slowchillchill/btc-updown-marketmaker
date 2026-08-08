@@ -12,7 +12,7 @@
 >
 > 历史读取入口：`data-collect/docs/archive-manifest.tsv`
 >
-> 执行授权：`none`
+> 执行授权：`STAGE_1_COMMIT_AND_PUSH_ONLY`
 
 这是所有 `data-collect` 需求、代码、测试、运行和部署问题的强制首读路由，不直接规定业务或
 技术语义。`plan/data-collect-external-disk-guard-plan.md` 是当前活动事项的唯一规范来源；
@@ -22,7 +22,8 @@
 
 ## 当前状态路由
 
-- 主模块已完成并由用户验收，当前没有 Rust 实现、生产部署或远端操作游标。
+- 主模块既有事项已完成并由用户验收；本事项当前只有阶段 1 任务 1.4.4 的提交和推送游标，
+  没有阶段 2、生产部署或远端操作游标。
 - 事项 `DATA-COLLECT-EXTERNAL-DISK-GUARD-20260807` 的需求和计划已经获得用户批准。当前获批
   范围只有两个目标：根文件系统达到 30GB 时由每日外部任务删除最早一个历史日，
   同时只移除采集器运行期间每 60 秒的容量扫描；修复 `real_source_alignment_probe` 原 bench
@@ -31,9 +32,10 @@
   `demand/data-collect-external-disk-guard-demand.md`、
   `plan/data-collect-external-disk-guard-plan.md` 和
   `changelog/data-collect-external-disk-guard-changelog.md`。当前主需求已经完成窄范围同步；
-  阶段 0 的批准后文档同步、最终独立复审、提交和首次分支推送已经完成，阶段 1 尚未授权。
-  在实现和部署完成前，获批计划不改变 `plan/data-collect-plan.md` 所记录的当前生产事实，也
-  不授权任何代码、部署、服务或数据操作。
+  阶段 0 的批准后文档同步、最终独立复审、提交和首次分支推送已经完成；阶段 1 两个目标的
+  本地实现、完整验证和独立阶段复审已经通过，任务 1.4.4 的提交和推送已获授权、正在执行。
+  当前合同已同步区分本地候选与尚未改变的生产状态；阶段 2、PR、发布构建、远端服务器、
+  服务和数据操作仍未获授权。
 - 已完成的模型训练消费边界修正由
   `plan/data-collect-model-train-consumer-boundary-plan.md` 规范；该计划执行授权为 `none`。
 - 当前获批的后续开发事项是 `plan/data-pipeline-training-plan.md`，它不重开

@@ -2,7 +2,7 @@
 
 > 事项编号：`DATA-COLLECT-EXTERNAL-DISK-GUARD-20260807`
 >
-> 生命周期：`APPROVED_PLAN_AWAITING_IMPLEMENTATION`
+> 生命周期：`APPROVED_ACTIVE_PLAN`
 >
 > 当前执行 authority：`plan/data-collect-external-disk-guard-plan.md`
 >
@@ -16,14 +16,15 @@
 >
 > 创建基线：`main@de51c297882016aa9b68e8079d648508973cc2c4`
 >
-> 执行授权：`none`
+> 执行授权：`STAGE_1_COMMIT_AND_PUSH_ONLY`
 >
-> 当前游标：`阶段 0 已完成；等待用户单独授权阶段 1 本地实现`
+> 当前游标：`阶段 1 / 任务 1.4.4：提交和推送已授权、执行中`
 >
-> 阻断声明：`不得开始阶段 1、构建、PR、远端服务器、服务或数据操作`
+> 阻断声明：`只允许阶段 1 提交和推送；阶段 2、PR、发布构建、远端、服务和数据操作未授权`
 
 本文是已批准需求的技术规范和执行顺序。当前生产事实仍由 `plan/data-collect-plan.md` 拥有；
-本文的批准不授权阶段 1，本计划中的未来式步骤也不构成远端、服务或数据操作授权。
+用户已单独授权阶段 1 的实现、验证和独立复审，并已授权任务 1.4.4 的提交和推送。本计划中
+的阶段 2 未来式步骤不构成 PR、发布构建、远端、服务或数据操作授权。
 
 ## 1. 目标、完成定义与已核实边界
 
@@ -57,10 +58,9 @@
 
 - 用户提供的当前业务量是每天约增加 2–3GB；外部触发线据此固定为 30GB，调度固定为每日
   一次。
-- 当前 `data-collect/src/live_runtime.rs` 在启动时调用
-  `training_dataset_size_bytes`；运行后还维护 `DATASET_CAPACITY_SCAN_INTERVAL_SECS = 60`、
-  `next_capacity_scan` 和 `capacity_shutdown`，每 60 秒再次递归扫描。周期扫描达到阈值会用
-  `RuntimeCloseCause::CapacityLimit` 协调关闭；扫描或阻塞任务报错会进入完整性失败路径。
+- 当前已验证候选中的 `data-collect/src/live_runtime.rs` 只在启动时调用
+  `training_dataset_size_bytes`；运行期周期容量定时状态、递归扫描分支、容量终态和孤立的
+  `RuntimeCloseCause::CapacityLimit` 已移除。
 - 当前启动扫描达到配置上限会产生 `dataset_capacity_reached`，再由
   `data-collect/src/runtime.rs` 映射为退出码 `75`。生产单元仍传入
   `--max-dataset-bytes 50000000000`，并配置 `RestartPreventExitStatus=75 76`。
@@ -68,16 +68,15 @@
   周期扫描一起删除。
 - 当前采集器已有全生命周期数据集根锁。本事项不修改该锁，也不让外部脚本取得或等待它；
   不新增第二把协调锁。
-- 当前仓库没有外部清理脚本、清理服务或定时器。
+- 当前仓库已实现并验证固定 30GB 水位的外部清理脚本、两个 Shell 夹具、oneshot 服务和每日
+  timer；尚未部署、启用或执行真实删除。
 - 当前主需求 `demand/data-collect-demand.md` 已按获批需求完成窄范围同步：继续禁止采集器
   静默删除原始数据，并明确经独立需求批准的外部历史数据保留任务不属于采集器静默删数。
-- 历史输出和当前代码共同证明：`cargo test --workspace --all-targets` 会执行
-  `harness = false` 的 `real_source_alignment_probe` 自带主程序；重叠运行共用默认目录和固定
-  Parquet 文件名，写入器正确拒绝既有运行文件后，调用方只显示
-  `writer chunk channel disconnected`。
-- 当前 `data-collect/Cargo.toml` 仍将该程序登记为 `[[bench]]`。其他 `bench`、三个生产二进制
-  程序和生产写入器均不属于本次目标归类修改范围。
-- 当前工作树仍只有审查文档变化；尚未实施上述两个修复目标。
+- 基线事故与基线代码已经证明：`cargo test --workspace --all-targets` 会执行原
+  `harness = false` bench 的真实网络主程序，并可能以二级通道断开错误掩盖写入器主因。当前
+  已验证候选把 `real_source_alignment_probe` 迁为 `bench = false` 的显式二进制程序，并
+  完成运行身份、产物目录归属和写入器主错误传播修复；其他 bench、三个生产角色二进制程序
+  和生产写入器未修改。
 
 ### 1.4 已冻结的用户决定
 
@@ -388,8 +387,8 @@ systemd 负责同一 oneshot 单元不重入和 journal 记录；脚本不增加
 
 ## 6. 当前游标与下一次允许动作
 
-用户已批准需求和计划。阶段 0 的批准后权威与状态同步、最终独立复审、获授权文档提交和首次
-分支推送均已完成；当前执行授权为 `none`。
+用户已批准需求和计划，并已单独授权阶段 1 的实现、必要测试和静态验证。任务 1.1 至 1.4.3
+已完成并通过独立阶段复审；用户现已授权任务 1.4.4 的提交和推送，当前正在执行该任务。真实
+网络探针未执行。
 
-下一步必须等待用户单独授权阶段 1 本地实现。阶段 1 授权不会自动包含提交、推送、PR、构建、
-远端部署、服务操作或真实数据删除，具体边界以用户届时授权为准。
+阶段 2、PR、发布构建、远端部署、服务操作和真实数据删除均未获授权。

@@ -1,0 +1,8 @@
+[Unit]
+Description=Prune oldest historical UTC training data day daily
+
+[Timer]
+OnCalendar=daily
+
+[Install]
+WantedBy=timers.target
