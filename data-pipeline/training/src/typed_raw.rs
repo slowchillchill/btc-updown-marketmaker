@@ -30,6 +30,7 @@ use data_pipeline_core::typed_raw::{
     PolymarketPriceLevel, PolymarketRtdsChainlinkBtcUsdRow, PolymarketSide, RtdsFreshnessStatus,
     TypedRawError, TypedRawRow, parse_depth_levels_json,
 };
+use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use sha2::{Digest, Sha256};
 
@@ -297,6 +298,17 @@ fn expected_schema(
         }
     };
     Ok(schema)
+}
+
+pub(crate) fn expected_projection_columns(
+    source_kind: &str,
+    schema_version: &str,
+) -> Result<Vec<String>, TypedRawReadError> {
+    Ok(expected_schema(source_kind, schema_version)?
+        .fields()
+        .iter()
+        .map(|field| field.name().to_owned())
+        .collect())
 }
 
 fn validate_physical_schema(
@@ -2498,6 +2510,11 @@ fn open_validated_typed_raw_parquet_inner(
         file.schema_version(),
         builder.schema().as_ref(),
     )?;
+    let projected_columns = expected_projection_columns(file.source_kind(), file.schema_version())?;
+    let projection = ProjectionMask::columns(
+        builder.parquet_schema(),
+        projected_columns.iter().map(String::as_str),
+    );
     let actual_rows =
         u64::try_from(builder.metadata().file_metadata().num_rows()).map_err(|_| {
             TypedRawReadError::Parquet {
@@ -2515,6 +2532,7 @@ fn open_validated_typed_raw_parquet_inner(
     }
     let reader = builder
         .with_batch_size(batch_size)
+        .with_projection(projection)
         .build()
         .map_err(|error| TypedRawReadError::Parquet {
             path: path.clone(),
