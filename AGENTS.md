@@ -2,7 +2,7 @@
 
 ## 当前活动事项与首读路由
 
-- 截至 2026-08-06，当前工作树的活动开发事项为
+- 截至 2026-08-08，当前工作树的活动开发事项为
   `DATA-PIPELINE-TRAINING-20260803`。该事项的需求为
   `demand/data-pipeline-training-demand.md`，当前业务语义和技术实施的唯一规范来源为
   `plan/data-pipeline-training-plan.md`，历史事实记录为
@@ -21,6 +21,12 @@
   该事项后续开发、文档落盘、代码编写、本地构建和验收只在当前工作树
   `/home/chillchill/sim-system` 进行，不得切换到 `/home/chillchill/btc-updown-marketmaker`。
   本条不改变其他事项、远端目录或部署拓扑；若要再次改变该事项工作树，必须由用户明确决定。
+- 用户已于 2026-08-07 对事项 `DATA-COLLECT-EXTERNAL-DISK-GUARD-20260807` 作出窄范围路径
+  覆盖：该事项的文档、后续获批代码、本地构建和验收只在工作树
+  `/home/chillchill/data-collect-external-disk-guard` 进行，并以合并 PR #3 后的
+  `main@de51c297882016aa9b68e8079d648508973cc2c4` 为创建基线。不得回到旧
+  `/home/chillchill/btc-updown-marketmaker` 工作树实施本事项，也不得把旧工作树中的未跟踪
+  `data-collect-training-collector` 纳入本事项提交。
 - 各远端服务器上的源码/工作目录统一写作 `~/btc-updown-marketmaker`；在 `ubuntu` 用户服务器上该路径通常解析为 `/home/ubuntu/btc-updown-marketmaker`，但文档和命令不得把它误写成本地开发路径。
 - 与 Polymarket 相关开发必须基于官方 Polymarket Rust SDK。若
   Polymarket Rust SDK 的能力、类型、认证、签名、请求构造、响应解析或覆盖范围

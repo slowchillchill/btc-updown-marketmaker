@@ -202,7 +202,6 @@ const DEFAULT_CONTINUOUS_DURATION_SECS: u64 = 7 * 24 * 60 * 60;
 const DEFAULT_QUEUE_CAPACITY: usize = 25_000;
 const DEFAULT_FLUSH_ROWS: usize = 5_000;
 const DEFAULT_MAX_FLUSH_INTERVAL_MS: u64 = 1_000;
-const DATASET_CAPACITY_SCAN_INTERVAL_SECS: u64 = 60;
 const WRITER_FINALIZE_BUDGET_MS: u64 = 30_000;
 const COORDINATED_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(90);
 const WS_CONNECT_TIMEOUT_SECS: u64 = 20;
@@ -417,12 +416,9 @@ where
     let mut writer_queue_tracker = QueueDurationTracker::new("writer_chunk_queue");
     let mut next_flush = run_started + Duration::from_millis(DEFAULT_MAX_FLUSH_INTERVAL_MS);
     let mut next_queue_sample = run_started;
-    let mut next_capacity_scan =
-        run_started + Duration::from_secs(DATASET_CAPACITY_SCAN_INTERVAL_SECS);
     let mut average_event_bytes = 512_u64;
     let mut received_rows = 0_u64;
     let mut operator_shutdown = false;
-    let mut capacity_shutdown = false;
     let mut runtime_failure = None::<String>;
     let (runtime_exit_tx, mut runtime_exit_rx) = mpsc::channel(1);
     let runtime_exit_deadline = deadline;
@@ -960,82 +956,6 @@ where
                     writer_queue_bytes,
                 );
                 next_queue_sample += Duration::from_secs(1);
-            }
-            if Instant::now() >= next_capacity_scan {
-                let scan_root = dataset_root.clone();
-                let capacity_scan =
-                    tokio::task::spawn_blocking(move || training_dataset_size_bytes(&scan_root));
-                tokio::pin!(capacity_scan);
-                tokio::select! {
-                    request = runtime_exit_rx.recv() => {
-                        let Some(request) = request else {
-                            let message = freeze_coordinator_failure_message(
-                                &raw_day_gate,
-                                "runtime_exit_channel_closed_during_capacity_scan",
-                                "runtime-exit channel closed during capacity scan".to_owned(),
-                            );
-                            record_gap(&source_gaps, message.clone());
-                            append_runtime_failure(&mut runtime_failure, message);
-                            break 'runtime;
-                        };
-                        if matches!(request.cause, RuntimeCloseCause::OperatorStop) {
-                            operator_shutdown = true;
-                        }
-                        if let Err(error) = apply_runtime_exit_request(&raw_day_gate, &request) {
-                            let message = format!("runtime_exit_prepare_failed:{error}");
-                            record_gap(&source_gaps, message.clone());
-                            append_runtime_failure(&mut runtime_failure, message);
-                        }
-                        break 'runtime;
-                    }
-                    result = &mut capacity_scan => {
-                        match result {
-                            Ok(Ok(bytes)) if bytes >= config.max_dataset_bytes => {
-                                record_gap(&source_gaps, format!(
-                                    "dataset_capacity_reached:bytes={bytes}:limit={}",
-                                    config.max_dataset_bytes
-                                ));
-                                capacity_shutdown = true;
-                                let request = RuntimeExitRequest {
-                                    observed_utc_ms: now_ms(),
-                                    cause: RuntimeCloseCause::CapacityLimit,
-                                };
-                                if let Err(error) = apply_runtime_exit_request(&raw_day_gate, &request) {
-                                    let message = format!("capacity_exit_prepare_failed:{error}");
-                                    record_gap(&source_gaps, message.clone());
-                                    append_runtime_failure(&mut runtime_failure, message);
-                                }
-                                break 'runtime;
-                            }
-                            Ok(Ok(_)) => {}
-                            Ok(Err(error)) => {
-                                let message = freeze_coordinator_failure_message(
-                                    &raw_day_gate,
-                                    "dataset_size_scan_failed",
-                                    format!(
-                                        "operator_intervention_required:dataset_size_scan_failed:{error}"
-                                    ),
-                                );
-                                record_gap(&source_gaps, message.clone());
-                                append_runtime_failure(&mut runtime_failure, message);
-                                break 'runtime;
-                            }
-                            Err(error) => {
-                                let message = freeze_coordinator_failure_message(
-                                    &raw_day_gate,
-                                    "dataset_size_scan_join_failed",
-                                    format!(
-                                        "operator_intervention_required:dataset_size_scan_join_failed:{error}"
-                                    ),
-                                );
-                                record_gap(&source_gaps, message.clone());
-                                append_runtime_failure(&mut runtime_failure, message);
-                                break 'runtime;
-                            }
-                        }
-                    }
-                }
-                next_capacity_scan += Duration::from_secs(DATASET_CAPACITY_SCAN_INTERVAL_SECS);
             }
         }
     }
@@ -1820,10 +1740,6 @@ where
         let message = "coordinated_shutdown_timeout".to_owned();
         record_gap(&source_gaps, message.clone());
         append_runtime_failure(&mut runtime_failure, message);
-    }
-    if capacity_shutdown && runtime_failure.is_none() {
-        eprintln!("dataset_capacity_reached");
-        return Err(io::Error::other("dataset_capacity_reached").into());
     }
     if operator_shutdown && runtime_failure.is_none() {
         eprintln!("coordinated_shutdown_complete");

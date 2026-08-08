@@ -1,0 +1,9 @@
+[Unit]
+Description=Prune oldest historical UTC training data day
+
+[Service]
+Type=oneshot
+ExecStart=/home/ubuntu/btc-updown-marketmaker/data-collect/bin/prune-oldest-utc-day.sh
+Restart=no
+StandardOutput=journal
+StandardError=journal

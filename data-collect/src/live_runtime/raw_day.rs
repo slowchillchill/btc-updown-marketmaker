@@ -53,7 +53,6 @@ pub(super) struct RuntimeEpoch {
 pub(super) enum RuntimeCloseCause {
     OperatorStop,
     RunDeadline,
-    CapacityLimit,
     SourceInnerReturn { source_kind: &'static str },
     SourceWrapperReturn { source_kind: &'static str },
     SourceWrapperFailure { source_kind: &'static str },

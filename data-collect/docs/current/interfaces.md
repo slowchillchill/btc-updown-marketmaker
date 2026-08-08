@@ -53,6 +53,17 @@ data-collect-training-collector
 文件。数据消费方只能读取最终化 Parquet 和满足自身准入合同的已关闭日期；不得读取
 `.running`。
 
+`real_source_alignment_probe` 是操作员显式运行的本地验证二进制程序，不是生产角色，也不
+部署到服务器：
+
+```bash
+cargo run --release --locked --offline -p data-collect --bin real_source_alignment_probe
+```
+
+默认产物目录以同一次配置生成的唯一 `run_id` 隔离；显式产物目录必须为空，探针会在联网前
+使用 `create_new` 创建 `run_owner.json`，不会覆盖已有产物。普通 Cargo 回归只运行该目标的
+离线单元测试，不执行其真实网络业务入口。
+
 在离线训练链路中，上述直接消费方只允许是 `ConsumerKind::DataPipeline`。
 历史名称 `ConsumerKind::Training` 表示下游 `model-train`，不得直接读取该目录；它只能
 把经过唯一 `data-pipeline(training)` 规范化、准入和发布的版本化输出作为训练数据和模型
@@ -119,4 +130,5 @@ target/release/data-collect-paper-hot
 target/release/data-collect-live-hot
 ```
 
-构建和远端状态变更边界以主计划为规范，`current/operations.md` 只提供派生参考。
+`real_source_alignment_probe` 不属于发布或部署产物。构建和远端状态变更边界以主计划为
+规范，`current/operations.md` 只提供派生参考。

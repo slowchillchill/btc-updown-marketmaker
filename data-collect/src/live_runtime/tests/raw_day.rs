@@ -583,33 +583,31 @@ async fn controlled_runtime_cutoff_discards_only_unadmitted_events() {
         "an elapsed installed deadline must close optional admission before the watcher runs"
     );
 
-    for cause in [
-        RuntimeCloseCause::CapacityLimit,
+    let gate = Arc::new(RawDayGate::new());
+    gate.activate_startup(
+        utc_day_string_from_ms(observed_utc_ms).unwrap(),
+        INITIAL_RAW_DAY_GENERATION,
+    )
+    .await
+    .unwrap();
+    gate.prepare_runtime_exit_with_cause(
+        observed_utc_ms,
         RuntimeCloseCause::CoordinatorFailure {
             stage: "controlled_cutoff_negative_control",
         },
-    ] {
-        let gate = Arc::new(RawDayGate::new());
-        gate.activate_startup(
-            utc_day_string_from_ms(observed_utc_ms).unwrap(),
-            INITIAL_RAW_DAY_GENERATION,
-        )
-        .await
-        .unwrap();
-        gate.prepare_runtime_exit_with_cause(observed_utc_ms, cause)
-            .unwrap();
-        gate.install_runtime_deadline(Some(RuntimeDeadlineCandidate {
-            deadline: Instant::now(),
-            observed_utc_ms,
-        }))
-        .unwrap();
-        assert!(
-            gate.begin_unadmitted_event_enqueue("binance_depth", observed_utc_ms + 1)
-                .await
-                .is_err(),
-            "capacity and integrity exits must remain terminal"
-        );
-    }
+    )
+    .unwrap();
+    gate.install_runtime_deadline(Some(RuntimeDeadlineCandidate {
+        deadline: Instant::now(),
+        observed_utc_ms,
+    }))
+    .unwrap();
+    assert!(
+        gate.begin_unadmitted_event_enqueue("binance_depth", observed_utc_ms + 1)
+            .await
+            .is_err(),
+        "integrity exits must remain terminal"
+    );
 }
 
 #[tokio::test]

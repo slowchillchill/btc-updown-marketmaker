@@ -24,13 +24,16 @@
 | 合同 | 状态 |
 | --- | --- |
 | 训练程序真实采集六个数据源 | `IMPLEMENTED_AND_TESTED` |
-| Cargo 定义三个二进制程序并隔离角色、输出配置 | `IMPLEMENTED_AND_COMPONENT_TESTED` |
+| Cargo 定义三个生产角色二进制程序并隔离角色、输出配置 | `IMPLEMENTED_AND_COMPONENT_TESTED` |
+| `real_source_alignment_probe` 为操作员显式二进制程序，不作为 bench 执行业务入口 | `IMPLEMENTED_AND_TESTED_LOCALLY` |
 | Polymarket SDK 0.7.0 加唯一补丁 | `IMPLEMENTED_AND_TESTED` |
 | 六个当前类型化 schema | `IMPLEMENTED_AND_TESTED` |
 | 每小时 Parquet 与每日清单 | `IMPLEMENTED_AND_TESTED` |
 | 采集器承载数据、准入、延后处理及写入器的硬上限 | `IMPLEMENTED_AND_TESTED` |
 | SDK 的出站请求与 `heartbeat PING` 传输控制通道的容量硬上限 | `NOT_IMPLEMENTED_LOGICALLY_CONSTRAINED` |
-| 默认 50GB；启动时直接退出 75、运行时协调退出 75，不自动执行保留策略 | `IMPLEMENTED_AND_TESTED` |
+| 当前生产默认 50GB；启动时达到上限直接退出 75 | `IMPLEMENTED_AND_TESTED` |
+| 当前生产保留启动 50GB 扫描并移除运行期扫描 | `IMPLEMENTED_TESTED_AND_DEPLOYED` |
+| 30GB 每日 UTC 12:00 外部清理每轮只删除最早一个合格日期 | `IMPLEMENTED_TESTED_DEPLOYED_AND_ENABLED_FIRST_TRIGGER_PENDING` |
 | RTDS 300/60 秒替换、×2/±20%/300 秒退避、无独立尝试耗尽门 | `IMPLEMENTED_AND_TESTED` |
 | 市场判定迟到事件忽略、矛盾时失败即关闭、固定身份信息、重启与 UTC 日切换 | `IMPLEMENTED_AND_TESTED` |
 | 模拟盘和实盘的帧、schema 与一次性 Unix 套接字辅助函数 | `IMPLEMENTED_AND_COMPONENT_TESTED` |
@@ -55,6 +58,18 @@ cargo check -p data-collect --locked --all-targets
 cargo clippy -p data-collect --locked --all-targets -- -D warnings
 git diff --check
 ```
+
+外部清理候选和真实源验证工具的本地定向验证为：
+
+```bash
+bash -n data-collect/deploy/scripts/prune-oldest-utc-day.sh
+bash -n data-collect/deploy/tests/prune-oldest-utc-day-test.sh
+data-collect/deploy/tests/prune-oldest-utc-day-test.sh
+cargo test -p data-collect --bin real_source_alignment_probe --locked --offline
+```
+
+systemd 单元只在临时 `--root` 中配合同路径可执行占位执行 `systemd-analyze verify`；不得为
+静态验证在本机创建真实 `/home/ubuntu/...` 路径，也不得启动单元。
 
 ## 3. 当前集成测试目标
 

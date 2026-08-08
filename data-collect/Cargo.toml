@@ -60,9 +60,10 @@ path = "src/bin/data_collect_live_hot.rs"
 name = "market_discovery_probe"
 harness = false
 
-[[bench]]
+[[bin]]
 name = "real_source_alignment_probe"
-harness = false
+path = "src/bin/real_source_alignment_probe.rs"
+bench = false
 
 [dev-dependencies]
 tempfile = "3.27.0"
