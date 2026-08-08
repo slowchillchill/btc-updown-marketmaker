@@ -12,7 +12,7 @@
 >
 > 历史读取入口：`data-collect/docs/archive-manifest.tsv`
 >
-> 执行授权：`阶段 2 / 任务 2.5：提交推送并部署启用 UTC 12:00 timer`
+> 执行授权：`阶段 2 / 任务 2.7：最终 10 份文档提交、推送并向 main 创建草稿 PR`
 
 这是所有 `data-collect` 需求、代码、测试、运行和部署问题的强制首读路由，不直接规定业务或
 技术语义。`plan/data-collect-external-disk-guard-plan.md` 是当前活动事项的唯一规范来源；
@@ -37,12 +37,14 @@
   `changelog/data-collect-external-disk-guard-changelog.md`。当前主需求已经完成窄范围同步；
   阶段 0 的批准后文档同步、最终独立复审、提交和首次分支推送已经完成；阶段 1 两个目标的
   实现、完整验证、独立阶段复审、提交和推送也已经完成。阶段 2 的发布候选从干净且已推送的
-  提交隔离构建并完成生产换版；新清理产物已经安装，timer 为 `disabled/inactive` 且清理脚本
-  未运行。当前日清单为候选身份、`open/active`，已有 6 个运行中 Parquet；采集服务为 `active/running`、
-  `MainPID=1315799`、`NRestarts=0`。生产事实文档同步和两路独立审查已经通过。用户已授权把
-  timer 调度更新为每日 UTC `12:00:00` 并首次启用，并已选择先复审、提交和推送当前 10 份
-  文档与 1 份 timer 源文件，再部署这个 timer 单文件候选。服务器在部署前仍为原调度且
-  `disabled/inactive`；手动运行清理服务、其他产物重装、再次手动删除和 PR 均未获授权。
+  提交隔离构建并完成生产换版；当前日清单为候选身份、`open/active`，采集服务为
+  `active/running`、`MainPID=1315799`、`NRestarts=0`。生产事实文档同步和两路独立
+  审查已经通过。用户随后授权把 timer 调度更新为每日 UTC `12:00:00` 并首次启用；提交
+  `800bca07b98605339d0929eccbb2d9c8b156cb53` 已推送，生产 timer 当前为
+  `enabled/active/waiting`，下一次名义触发为 `2026-08-08T12:00:00Z`。启用没有立即运行清理
+  服务，采集服务和日期目录均未变化；首次自然调度结果尚未发生。生产证据文档同步与独立复审
+  已通过；用户现已授权提交并推送当前 10 份最终证据文档，再向 `main` 创建草稿 PR。不授权
+  合并、转为正式评审、其他 Git/PR、手动运行清理服务、其他产物重装或额外手动删除。
 - 已完成的模型训练消费边界修正由
   `plan/data-collect-model-train-consumer-boundary-plan.md` 规范；该计划执行授权为 `none`。
 - 当前获批的后续开发事项是 `plan/data-pipeline-training-plan.md`，它不重开

@@ -61,9 +61,9 @@ data-collect/deploy/systemd/data-collect-prune-oldest-day.timer
 ```
 
 安装路径为 `/home/ubuntu/btc-updown-marketmaker/data-collect/bin/prune-oldest-utc-day.sh` 及
-`/home/ubuntu/.config/systemd/user/` 下的同名单元。生产 timer 在本次仅 timer 部署前仍为
-`disabled/inactive`，清理服务为 `inactive`，脚本没有生产运行或真实删除证据；获批新调度为
-每日 UTC `12:00:00`，正在按活动计划形成可追溯候选并首次启用。
+`/home/ubuntu/.config/systemd/user/` 下的同名单元。生产 timer 已按活动计划更新为每日 UTC
+`12:00:00`，当前为 `enabled/active/waiting`；下一次名义触发为
+`2026-08-08T12:00:00Z`。清理服务仍为 `inactive`，脚本尚无生产运行或真实删除证据。
 
 ## 3. 训练程序退出与容量
 
@@ -84,7 +84,7 @@ data-collect/deploy/systemd/data-collect-prune-oldest-day.timer
 独立外部任务每日 UTC `12:00:00` 读取根文件系统 `df /` 已用字节数：低于十进制 30GB 时不
 删除；达到或超过 30GB 时，只删除活动数据根中严格早于 UTC 昨日的最早一个日期目录。脚本
 不控制采集服务，不读取日期目录的业务内容，也不使用文件锁或隔离目录。脚本和单元已安装，
-生产 timer 在本次仅 timer 部署前尚未启用，脚本尚未在生产运行。
+timer 已启用；首次自然调度尚未发生，脚本尚未在生产运行。
 
 ## 4. 只读运行观察
 
@@ -108,6 +108,6 @@ data-collect/deploy/systemd/data-collect-prune-oldest-day.timer
 `digest` 证据，并按另行批准的事故处置手册处理。本文件不授权停服或清理。
 
 旧直接冷启动、同日重置、发布包、保留策略管理器、归档上传器、二进制文件别名和服务器
-源码检出目录均不是当前部署路径。每日外部清理产物已安装但尚未启用；当前活动计划已经取得
-UTC `12:00:00` timer 单文件候选提交、推送、部署和首次启用授权，其他未来变更或手动运行仍须
-按届时提交、脚本、服务、数据目录和环境重新核实并取得授权。
+源码检出目录均不是当前部署路径。每日外部清理 timer 已按 UTC `12:00:00` 启用；首次自然
+调度结果尚未发生。其他未来变更或手动运行仍须按届时提交、脚本、服务、数据目录和环境重新
+核实并取得授权。
