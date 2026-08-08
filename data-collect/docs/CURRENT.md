@@ -4,24 +4,36 @@
 >
 > 当前路由 authority：`self`
 >
-> 当前需求：`demand/data-collect-demand.md`
+> 当前需求：`demand/data-collect-external-disk-guard-demand.md`
 >
-> 当前规范计划：`plan/data-collect-plan.md`
+> 当前规范计划：`plan/data-collect-external-disk-guard-plan.md`
 >
-> 当前 changelog：`changelog/data-collect-changelog.md`
+> 当前 changelog：`changelog/data-collect-external-disk-guard-changelog.md`
 >
 > 历史读取入口：`data-collect/docs/archive-manifest.tsv`
 >
 > 执行授权：`none`
 
 这是所有 `data-collect` 需求、代码、测试、运行和部署问题的强制首读路由，不直接规定业务或
-技术语义。`plan/data-collect-plan.md` 是唯一当前规范来源；需求只描述宏观业务目标和验收，
-changelog 只保存当时事实与取代关系，`data-collect/docs/current/` 只提供由计划派生的操作、
-接口、验收和限制参考。本入口不授权任何代码、数据、部署或远端状态变化。
+技术语义。`plan/data-collect-external-disk-guard-plan.md` 是当前活动事项的唯一规范来源；
+`plan/data-collect-plan.md` 继续拥有尚未改变的合同和已部署事实。需求只描述宏观业务目标和
+验收，changelog 只保存当时事实与取代关系，`data-collect/docs/current/` 只提供由计划派生的
+操作、接口、验收和限制参考。本入口不授权任何代码、数据、部署或远端状态变化。
 
 ## 当前状态路由
 
 - 主模块已完成并由用户验收，当前没有 Rust 实现、生产部署或远端操作游标。
+- 事项 `DATA-COLLECT-EXTERNAL-DISK-GUARD-20260807` 的需求和计划已经获得用户批准。当前获批
+  范围只有两个目标：根文件系统达到 30GB 时由每日外部任务删除最早一个历史日，
+  同时只移除采集器运行期间每 60 秒的容量扫描；修复 `real_source_alignment_probe` 原 bench
+  事故。启动时 50GB 检查、容量参数和退出码 `75` 保留，不新增清理协调锁，清理脚本不控制
+  采集服务且执行后只验收服务仍为 `active`。路由为
+  `demand/data-collect-external-disk-guard-demand.md`、
+  `plan/data-collect-external-disk-guard-plan.md` 和
+  `changelog/data-collect-external-disk-guard-changelog.md`。当前主需求已经完成窄范围同步；
+  阶段 0 的批准后文档同步、最终独立复审、提交和首次分支推送已经完成，阶段 1 尚未授权。
+  在实现和部署完成前，获批计划不改变 `plan/data-collect-plan.md` 所记录的当前生产事实，也
+  不授权任何代码、部署、服务或数据操作。
 - 已完成的模型训练消费边界修正由
   `plan/data-collect-model-train-consumer-boundary-plan.md` 规范；该计划执行授权为 `none`。
 - 当前获批的后续开发事项是 `plan/data-pipeline-training-plan.md`，它不重开
