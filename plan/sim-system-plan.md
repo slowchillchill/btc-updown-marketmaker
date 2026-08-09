@@ -20,7 +20,7 @@
 >
 > 部署、远端操作和真实资金授权：`none`
 >
-> 状态：`阶段 0 已完成；等待用户另行授权阶段提交与推送，阶段 1 未开始`
+> 状态：`阶段 1 -> 任务 1.2 已完成；任务 1.3：实现八方法模拟领域入口（待开始）`
 
 本计划依据简洁业务需求制定，是本事项当前业务语义与技术实施的唯一规范来源。它直接规定
 模块边界、业务合同、成熟工具复用、执行顺序和验收方法；需求只描述宏观目标、范围与结果级
@@ -123,12 +123,16 @@ cancel_all_orders | order | orders | trades
    八个方法特定请求、共享请求上下文和方法特定直接响应统一绑定
    `SIM_EXECUTION_CONTRACT_V1 = "sim_execution_contract_v1"`；共同版本标识不产生总派发类型。
 2. 每个请求绑定合同版本、原始调用方角色和实例、会话、账户、全局请求 ID、调用方关联 ID、
-   单调调用方序列、`request_sent_at`、决策模型可见游标，以及由正式时延配置档决定的
+   单调调用方序列、不得倒退且不得早于所引用可见事实的 `request_sent_at`、决策模型可见游标，
+   以及由获批首版项目代理时延配置档决定的
    `platform_arrived_at`、`platform_responded_at` 和 `response_received_at`；变更请求另有
    幂等键，批量项另有稳定项身份。跨会话/账户、未知角色、`live-trade`、错误版本、未来游标
-   和幂等载荷冲突必须在改变状态前安全拒绝。
+   和幂等载荷冲突必须在改变状态前安全拒绝。同一 `global_request_id` 的物理重投必须复用
+   原 `caller_sequence`、发送时点、模型可见截点、代理时延样本和全部派生时间；同一身份绑定
+   不同规范载荷时失败，只有新的逻辑请求才分配新身份、序列和样本，物理尝试次数只作诊断。
 3. 请求在 `platform_arrived_at` 到达模拟平台。未进入平台内部暂缓的订单以该时点作为有效
-   处理时点；只有符合第 2.5 节条件并进入 250ms `itode` 暂缓的订单，才以暂缓结束后的重新
+   处理时点；只有 FOK/FAK 市价 BUY 在冻结规则 `itode=true` 时进入 250ms 平台内部暂缓，
+   并以暂缓结束后的重新
    校验时点作为有效处理时点。训练与离线评估只读取有效处理时点按 Polymarket orderbook
    数据源事件时间已经生效的隐藏平台状态，并据此撮合、拒绝或生成响应；有效处理时点大于
    或等于 `end_at` 时必须在创建订单、资金预留或成交前拒绝。响应从 `response_received_at`
@@ -146,87 +150,102 @@ cancel_all_orders | order | orders | trades
 7. `order` 返回请求处理截点的单笔平台投影；`orders` 只列活动订单；`trades` 只列已经
    形成的本账户模拟成交。两个列表使用绑定查询种类、过滤条件、会话、合同版本和冻结水位线
    的不透明游标。已有开放订单在 `end_at` 后、合格 `MarketResolved` 到达前仍属于活动订单并
-   可查询。跨保留期请求必须明确返回范围错误，不得把残缺页伪装成完整结果。
+   可查询。查询根请求只冻结一个平台状态修订号；同一请求身份和查询指纹的物理重投返回原
+   修订号，同一身份绑定不同查询指纹时失败，新查询根才取得新修订号，后续分页继续服从不透明
+   游标内的原修订号。`caller_correlation_id` 只作追踪，不能充当重试或截点身份。跨保留期请求
+   必须明确返回范围错误，不得把残缺页伪装成完整结果。
 8. 首版不存在 `amend_order`、`modify_order`、`replace_order` 或隐藏等价入口。改变订单
    必须先撤单，再以新请求、幂等键、本地引用和新平台订单 ID 独立提交；二者不是原子替换。
 9. 合同错误、合法平台拒绝和证据不足的未知/未建模结果必须分层；合法空页、未找到、右删失
    和反馈延迟不得误报成程序损坏。
 
-### 2.3 低频规则冷启动与成熟工具
+### 2.3 进程级低频规则初始化与成熟工具
 
-1. 每个新运行在首个业务请求前冻结有界、运行中不可扩展的 `run_market_set`，完成一次
-   `CURRENT_QUERY` 冷启动并原子密封 `PlatformRuleSnapshot`。同一运行恢复只验证并读取
-   原快照；运行中不轮询、不热刷新，新市场或新规则只能进入新运行。首版快照 schema 固定为
-   `PLATFORM_RULE_SNAPSHOT_SCHEMA_V1 = "platform_rule_snapshot_v1"`。
-2. 历史训练和离线评估禁止联网回填，只接受回放因果起点已经存在、适用时点不晚于该起点且
-   来源追溯完整的 `HISTORICAL_AS_OF` 同 schema 快照。两种模式进入同一确定性核心，不
-   建立第二套规则引擎。
-3. 私有 `PlatformRuleHttpLoader` 只允许：
-   - 每个目标 `condition_id` 调用 CLOB
+1. `sim-system` 进程的组合根必须在创建任何训练、离线评估或模拟盘会话、处理任何业务请求
+   前取得唯一不可变 `PlatformRuleSnapshot`。当前进程使用 `CURRENT_QUERY`，只对调用方
+   显式给出的一个 `btc-updown-5m` 参考市场完成一次同步；随后全部运行、会话和后续同系列
+   市场共享同一快照身份与 SHA-256 到进程退出，不得逐运行、逐会话或逐目标市场查询、扩展或
+   热刷新。首个已实施进程快照 schema 固定为
+   `PLATFORM_RULE_SNAPSHOT_SCHEMA_V2 = "platform_rule_snapshot_v2"`；此前审核中的逐运行 V1
+   从未形成正式产物，不得被读取或伪装成 V2。
+2. 参考市场由进程组合根作为唯一 `ReferenceMarketSpecV1` 提供，必须包含精确
+   `condition_id`、CLOB/Gamma 市场身份及两个 token/outcome。加载器不发现市场，也不接受
+   市场集合。私有 `PlatformRuleHttpLoader` 只允许：
+   - 对该参考 `condition_id` 调用一次 CLOB
      `GET https://clob.polymarket.com/clob-markets/{condition_id}`；
-   - 对每批不超过 100 个目标调用 Gamma
-     `GET https://gamma-api.polymarket.com/markets/keyset`，使用重复
-     `condition_ids=id`，分别查询 `closed=false` 与 `closed=true` 后按
-     `conditionId` 合并。
-   响应顺序无语义；重复、缺失和非目标市场都失败。不使用 `condition_ids[]`、旧
-   `/markets`、无关全市场扫描、重定向、订单簿、订单、账户、用户频道或认证端点。
-4. 每个响应先对原始字节计算 SHA-256，再由专用窄 DTO 强类型解析。DTO 忽略未知附加字段，
-   不使用 `deny_unknown_fields`；数值接受官方线协议的数字或字符串表达并直接进入精确
-   十进制，禁止先进入 `f64` 或用 `serde_json::Value` 任意探测。Gamma 的 JSON 编码
-   `outcomes` 与 `clobTokenIds` 必须二次强类型解析并与 CLOB 和目标集合逐项核对。数字或
-   字符串双形态使用专用十进制线类型先取得 `serde_json::value::RawValue` 的原始词法，再交给
-   `rust_decimal` 精确解析；不得把 `rust_decimal` 的通用 Serde 浮点访问路径当作“未经
-   `f64`”的证明。
-5. 只读 GET 的瞬时传输错误或官方列明的 `500/503` 在同一冷启动总时限内最多额外重试
-   一次；请求最终失败、解析失败、必需身份或规则缺失/非法/冲突不重试并使整个快照失败。
-6. 规则来源固定为：
-   - CLOB `mos` 提供逐市场最小下单 shares；
-   - Gamma `negRisk`、`feesEnabled` 与完整 `feeSchedule` 提供对应规则，费用启用时
-     与 CLOB `fd.r/e/to` 核对；
-   - CLOB `itode` 提供 taker 暂缓开关，按官方省略语义缺失解释为 false；
-   - Gamma `orderMinSize/orderPriceMinTickSize` 和 CLOB `nr` 仅作诊断，未消费的
-     `oas` 只保留响应覆盖证据。
-   tick 不属于低频规则快照，任何 CLOB/Gamma 当前 tick 近似字段都不得查询为模拟器当前
-   tick、写入快照或参与跨端点一致性门。
-7. 仓库版本化 `sim-system/config/platform-rules-v1.toml` 只保存官方文档规则和用户冻结的
-   项目/账户规则，不保存会随市场变化的逐市场当前值。首版至少固定：
-   - 只有 `itode=true` 的可立即成交订单应用 250ms 平台内部 taker 暂缓，并在结束时按
-     已到达状态重新校验；地域网络时延配置档不能覆盖或重复叠加；
+   - 对同一 `condition_id` 调用 Gamma
+     `GET https://gamma-api.polymarket.com/markets/keyset`，分别查询 `closed=false` 与
+     `closed=true`，两份响应合并后必须恰好得到一个参考市场。
+   不使用批量目标、`condition_ids[]`、逗号拼接、旧 `/markets`、全市场扫描、重定向、订单簿、
+   订单、账户、用户频道或认证端点。
+3. 每个完整响应先对原始字节计算 SHA-256，再由专用窄 DTO 强类型解析。DTO 忽略未知附加
+   字段，不使用 `deny_unknown_fields`；数值先取得 `serde_json::value::RawValue` 原始词法，
+   再由 `rust_decimal` 精确解析，禁止先进入 `f64` 或用 `serde_json::Value` 任意探测。
+   Gamma 的 JSON 编码 `outcomes` 与 `clobTokenIds` 必须二次强类型解析，并与参考身份和 CLOB
+   token/outcome 精确一致。未完整接收的响应不得把前缀摘要冒充完整原始响应 SHA。
+4. 同步出的进程规则只包含：CLOB `mos`、CLOB `itode`、Gamma `feesEnabled` 和完整
+   `feeSchedule`；费用必须启用，`feeSchedule` 必须合法，且其
+   `rate/exponent/takerOnly` 与 CLOB `fd.r/e/to` 精确一致。maker `rebateRate` 必须为用户冻结
+   的 20%，否则进程启动失败。`negRisk`、CLOB `nr/oas`、Gamma
+   `orderMinSize/orderPriceMinTickSize` 没有首版消费者，不进入快照、诊断或一致性门。tick 只
+   来自规范事件链，规则初始化不得查询、保存、覆盖或交叉校验 tick。
+5. 官方响应只证明参考市场在 `rules_observed_at_utc_ms` 的真实取值；把该组值应用到本进程
+   后续全部 `btc-updown-5m` 市场，是用户确认的
+   `BTC_UPDOWN_5M_PROCESS_RULE_TEMPLATE_V1` 项目范围假设，不得写成对后续每个市场逐项查询
+   或平台永久保证。规则实际变化只在新进程启动时重新同步；恢复既有进程或运行必须读取原
+   快照，不能以新查询改写旧结果。
+6. 历史训练和离线评估进程禁止联网回填。`HISTORICAL_AS_OF` 是读取既有同 schema 密封快照
+   的访问模式，不重写其创建来源；快照观测时点必须不晚于回放因果起点。`RECOVERY` 同样只
+   验证并读取既有快照及实现身份。三种入口进入同一确定性核心，历史与恢复入口的签名不接受
+   HTTP 客户端、端点或参考市场；同一进程只能选择一种启动模式并绑定一份快照。
+7. 只读 GET 的瞬时传输错误或官方列明的 `500/503` 在同一初始化总时限内最多额外重试一次；
+   请求最终失败、解析失败、必需身份或规则缺失、非法或冲突不重试，并在任何会话创建前使
+   整个进程规则能力失败关闭。单个完整 HTTP 响应和最终快照落盘字节分别硬限 16 MiB；不够
+   时只能经后续明确计划调整到用户允许的 52 MiB，不能在运行时自动放宽。
+8. 仓库版本化 `sim-system/config/platform-rules-v1.toml` 保存官方文档规则和用户冻结的
+   项目/账户规则。首版至少固定：
+   - 只有 `itode=true` 的 FOK/FAK 市价 BUY 应用 250ms 平台内部 taker 暂缓，并在结束时按
+     已到达状态重新校验；GTC/GTD 限价 BUY 不因到达时盘口可立即成交而进入该路径，地域网络
+     时延配置档不能覆盖或重复叠加；
    - 批量提交 15、批量撤单 1,000、GTD 声明提前 180 秒并含 60 秒安全偏移；
    - 手续费公式版本、5 位手续费精度、最小非零手续费、返佣日界与 1 pUSD 付款门槛；
    - 可立即成交 GTC/GTD 限价 BUY 的提交本金至少 1 pUSD；非可立即成交限价单及
      FOK/FAK 不推测套用该门；
    - `end_at` 起拒绝新订单，已有开放订单保持可查询、可撤但不再参与撮合；合格
      `MarketResolved` 到达时仍开放的余量才进入 `ORDER_STATUS_CANCELED_MARKET_RESOLVED`；
-   - 平台小额余量、固定 Silver 8% taker 返佣、两类正常现金可用时刻和付款截取规则。
-8. 快照按 `queried_market_rules`、`documented_platform_rules`、
-   `project_account_rules` 与 `provenance` 分区，绑定市场集合、适用时点、端点、依赖、
-   尝试数、原始响应 SHA、静态配置摘要和最终 SHA-256，且不含机密。
-   密封使用同一父目录候选、文件与父目录同步，以及 `rustix::fs::renameat_with` 的
-   `RenameFlags::NOREPLACE`；目标已经存在时失败，不以先检查后覆盖的普通重命名代替。
-9. 每条可执行规则必须且只能归入一种证据类别：`OFFICIAL_PLATFORM_RULE`、
+   - 平台小额余量、固定 8% taker 返佣、固定 20% maker 返佣、两类正常现金可用时刻和付款
+     截取规则；不查询或累计 wV，不动态定级，不实现一次性奖金或 Liquidity Rewards。
+9. 快照按 `synchronized_platform_rules`、`documented_platform_rules`、
+   `project_account_rules` 与 `provenance` 分区；来源追溯绑定参考市场、系列适用策略、观测时点、
+   两个端点、尝试数、完整原始响应 SHA、静态配置、依赖、实现身份、内容摘要和文件 SHA，
+   不伪造后续市场查询证据且不含机密。序列化尾换行后的精确落盘字节必须在创建候选前通过
+   16 MiB 门；同父目录候选、文件同步、`RenameFlags::NOREPLACE` 和父目录同步共同完成无覆盖
+   密封，读取时使用同一上限和同一已打开文件验证。
+10. 每条可执行规则必须且只能归入一种证据类别：`OFFICIAL_PLATFORM_RULE`、
    `OFFICIAL_SDK_CONTRACT`、`LOCAL_SDK_PATCH_CONTRACT`、`OBSERVED_PLATFORM_BEHAVIOR`、
    `USER_CONFIRMED_PLATFORM_BEHAVIOR`、`RULE_DERIVATION`、`PROJECT_ASSUMPTION` 或
-   `UNCERTAINTY_PROFILE`。当前 250ms `itode` 路径属于官方规则，L2 队列模型与返佣付款时刻/
-   截取属于项目假设，平台小额余量、即时自动赎回及 `end_at` 至合格 `MarketResolved` 的订单
+   `UNCERTAINTY_PROFILE`。参考市场响应属于官方平台观测；跨市场/进程期复用、固定 8% taker
+   返佣、固定 20% maker 返佣、L2 队列模型与返佣付款时刻/截取属于项目假设。当前 250ms
+   `itode` 行为来源属于官方规则，平台小额余量、即时自动赎回及 `end_at` 至合格 `MarketResolved` 的订单
    行为属于用户确认的平台行为，可立即成交 GTC 的 1 pUSD 门属于已观察平台行为，GTD 复用
    该门属于机械推导；`ORDER_STATUS_CANCELED_MARKET_RESOLVED` 的原始状态拼写属于官方订单
    状态合同。规则产物记录来源、日期、范围、限制、版本、摘要和失败语义；不得把观察、推导
    或假设升级成官方永久保证。
-10. 优先复用正式工作区现有已锁定的成熟 Rust 依赖：`reqwest 0.13.4` 负责固定 HTTPS 与查询
+11. 优先复用正式工作区现有已锁定的成熟 Rust 依赖：`reqwest 0.13.4` 负责固定 HTTPS 与查询
     编码，目标 crate 直接声明 `default-features=false` 及实际需要的 `query/rustls`，并显式
     配置 `redirect::Policy::none()`；`serde 1.0.228`、带 `raw_value` 的
     `serde_json 1.0.150` 负责窄 DTO；`sha2 0.10.9` 负责内容身份；
     `rust_decimal 1.42.1` 负责精确数值；`rustix 1.1.4` 的 `fs/std` 负责无覆盖原子密封。
     固定 SDK 身份为官方 `0.7.0` 基线加仓库唯一 `0.7.0-p1` 补丁，模拟器只启用所需
     `clob` 能力，不启用 `gamma/rtds/ws`；模拟器自己的最小 `reqwest` 声明不代表能从全工作区
-    解析图移除 SDK 已激活的默认特性。`toml` 已选定只负责静态配置，但当前尚未进入
-    工作区；截至阶段 0 的候选为 `1.1.4+spec-1.1.0` 及 `parse/serde/std`，创建目标 crate
-    时必须重新核验实际版本、许可证、安全公告和 Rust 兼容性，再由该 crate 精确声明并更新
-    锁文件。阶段 0 已复核其余依赖的实际解析版本、许可证、安全公告、Rust 版本和锁文件；
+    解析图移除 SDK 已激活的默认特性。`toml` 只负责静态配置，目标 crate 已直接精确声明
+    `1.1.4+spec-1.1.0` 及 `parse/serde/std`，当前锁文件绑定该包、`toml_parser 1.1.3`、
+    `toml_writer 1.1.2` 和 `serde_spanned 1.1.1`。阶段 0 已复核目标依赖的实际解析版本、许可证、
+    安全公告、Rust 版本和锁文件，任务 1.1 实际引入时再次机械核对锁图；
     不自研 HTTP、十进制、哈希、TOML、数据库、重试框架、调度器或通用规则引擎。既有
     `data-collect` 通过 SDK `rtds/ws` 激活的 `backoff 0.4.0` 停止维护公告只作为现存工作区
-    风险记录，不授权本事项改写采集依赖或扩大 SDK 补丁。
+    风险记录，不授权本事项改写采集依赖或扩大 SDK 补丁。进程组合根只初始化一次；后续会话
+    只接收共享不可变快照引用，不接收加载器、端点或刷新能力，也不增加全局可变单例。
 
 ### 2.4 公共事件消费合同（`SIM-S-004`）
 
@@ -263,11 +282,35 @@ cancel_all_orders | order | orders | trades
    有效处理时点对应的隐藏平台状态；模型决策只能读取自身截止点前已经接收的公开事件和已经
    收到的私有响应。物理预取、隐藏状态和尚未接收的公开消息都不得产生未来可见性或事后回写。
    模拟器把 `EventLineageV2.source_evidence` 作为不透明审计证据，不以其内容二次排序、去重、
-   归约或重建来源语义。
+   归约或重建来源语义。训练与离线评估在有效处理时点 `t` 只应用 DPT 事件时间索引中数据源
+   事件时间小于或等于 `t` 的完整毫秒桶前缀，并保持 DPT 原有桶内顺序；“包含 `t`”是毫秒
+   离散边界的 `PROJECT_ASSUMPTION`，不得按 `event_id` 或事件类别另排。平台前缀不得跨过更早
+   未密封请求或待处理动作；同一有效处理时点的动作按 `caller_sequence`、批量项稳定次序逐项
+   释放，前一项完成前不得处理后一项。批量项只根据已解析的方法类型和冻结 `itode` 规则，在
+   读取盘口前静态绑定 `platform_arrived_at` 或 `platform_arrived_at + 250ms`：只有 FOK/FAK
+   市价 BUY 使用后者，GTC/GTD 限价 BUY 不按盘口动态归类。模型可见截点分别绑定公开可见游标
+   和私有反馈序号；私有事实只有在其接收时间前缀闭合后，才按接收时点与稳定私有发射序号分配
+   私有反馈序号。公开、私有事实之间不建立全局同毫秒优先级，也不要求模型等待两条流共同闭桶。
+   前缀闭合入口只供 crate 内公共桥接器背后的受信输入驱动器使用：驱动器必须已经按原序应用
+   所有 `event_at <= t` 事件，并通过窥视下一条 `event_at > t` 或到达 EOF 证明完整桶闭合，
+   再把对应位置与 `t` 一次提交给水位原语；模型、调用方和八方法入口均不能自行声明游标。
+   任务 1.2 只实现并验证该受信水位原语，不把尚未接入的 DPT 读取器或阶段 6 适配器冒充完成。
 7. `observed_transport_delay_ms` 只作可空诊断，不是平台顺序、模型可见性、数据质量或正式网络
    时延配置档。数据源服务器和采集服务器时钟没有共同权威保证时，模拟器不得把该差值解释为
-   精确网络延迟或跨时钟不变量。
-8. 阶段 0 至 5 的黄金组件入口和模拟器确定性核心只接收有界、强类型、仅含市场事件的
+   精确网络延迟或跨时钟不变量。尽管如此，用户已批准把同日合格消息的
+   `timestamp_received - timestamp` 经验分布作为首版请求出站、直接响应入站和生命周期私有
+   反馈入站的双向项目代理；这只升级其项目用途，不升级证据等级。历史公开事件继续使用自身
+   已记录的数据源时间和接收时间，绝不再次抽样或改写延迟。
+8. 首版代理配置档固定使用 2026-08-03 已关闭且无缺口的单日清单中全部 24 个
+   `polymarket_orderbook_v3` 小时文件，并以每条解码 WebSocket 消息为一个样本。样本总数为
+   `39,618,963`，源时间缺失数和负差值数均为 `0`，最小值为 `6ms`、最大值为 `29,697ms`；
+   nearest-rank `p50/p85/p90/p95/p99` 分别为 `10/19/30/63/187ms`。正式配置档必须保存全部
+   `9,666` 个升序整数毫秒频数，而不是按五个分位点或固定百分比桶近似；运行时以配置档
+   SHA-256、会话种子、稳定逻辑请求或反馈身份和出站/直接响应入站/生命周期反馈入站采样域做
+   无状态 SHA-256 秩映射，从经验累计频数确定样本。算法版本作为固定域前缀，不增加运行时可变
+   输入；物理重投不重采样。`itode` 不属于该配置档，只对 FOK/FAK 市价 BUY 按第 2.5 节独立
+   追加 250ms 平台内部暂缓。
+9. 阶段 0 至 5 的黄金组件入口和模拟器确定性核心只接收有界、强类型、仅含市场事件的
    `ExecutionMarketEventV3` 流，不依赖真实 Gate A。阶段 6 的 DPT/联合验收适配层位于
    sim-system 公共输入边界之前，先验证 Gate A 回执、唯一事件存储及双索引 manifest，再只
    组合 DPT 已公开的强类型读取器：事件时间路径由 `PlatformReplayCursor` 保持既有索引顺序
@@ -286,7 +329,8 @@ cancel_all_orders | order | orders | trades
    数量和所有权不能互写；账户订单进入盘口后仍保持账户身份。
 2. 唯一 maker 队列模型为 `L2_BOOK_DELTA_FIFO_ESTIMATE_V1`，证据类别为
    `PROJECT_ASSUMPTION`。账户订单排在其有效处理时点前已经存在于隐藏平台状态的同价数量
-   之后；未暂缓订单的该时点是 `platform_arrived_at`，进入 `itode` 暂缓的订单则是重新校验
+   之后；未暂缓订单的该时点是 `platform_arrived_at`，FOK/FAK 市价 BUY 进入 `itode` 暂缓后
+   则使用重新校验
    时点。后续外部新增按 DPT 的数据源事件时间投影推进并进入当时队尾。缺少平台回放所需源
    时间时明确失败或隔离；不得提供乐观、保守、比例或随机配置档选择。
 3. 对去除同一底层变化已应用数量后的外部旧数量 `E` 与新规范数量 `S`，唯一残差为
@@ -296,8 +340,9 @@ cancel_all_orders | order | orders | trades
    `best_bid_ask` 只更新或校验最优价格，不推进数量。公开成交与盘口变化没有权威共同
    因果 ID 时保留 `UNATTRIBUTED`，L2 推定结果标记 `DETERMINISTIC_INFERRED` 与
    `not_official_fifo=true`，不能冒充真实订单排位。
-5. 可立即成交 BUY 在有效处理时点完成适用准入；只有规则快照 `itode=true` 才进入 250ms
-   内部暂缓并在结束时重校验。未暂缓订单的有效处理时点为 `platform_arrived_at`，暂缓订单为
+5. FOK/FAK 市价 BUY 只有在规则快照 `itode=true` 时才进入 250ms 内部暂缓并在结束时完成
+   适用准入与重校验；GTC/GTD 限价 BUY 即使到达时可立即成交也不进入该暂缓。未暂缓订单的
+   有效处理时点为 `platform_arrived_at`，暂缓订单为
    重新校验时点；该时点大于或等于 `end_at` 时拒绝且不产生订单、资金预留或成交。通过准入
    后按价格优先从最优卖价逐档消费至限价/最差价格。GTC/GTD 剩余量挂单，FOK 全成或全不成，
    FAK 成交后终止，post-only 会立即成交时拒绝。
@@ -379,8 +424,8 @@ FOK/FAK 的固定 SDK `takerAmount` shares 等价值只作 base 审计投影；�
 
 ### 2.7 maker/taker 返佣与自动赎回
 
-1. maker 返佣只来自最终成功、实际以 maker 身份成交的本账户数量；每笔使用撮合时冻结的
-   `MarketFeeScheduleSnapshot`：
+1. maker 返佣只来自最终成功、实际以 maker 身份成交的本账户数量；每笔使用进程启动时共享
+   `PlatformRuleSnapshot` 中冻结的手续费表，其 `rebate_rate` 固定为 20%：
 
    ```text
    maker_fee_equivalent_pusd
@@ -393,17 +438,18 @@ FOK/FAK 的固定 SDK `takerAmount` shares 等价值只作 base 审计投影；�
    逐笔贡献只供审计和逐市场汇总；只有唯一
    `MakerRebateAccrualFinalized` 可以增加 maker 应收款。规则有效但异常输入终态使潜在
    合格成交永远无法闭合时才使用 `UNKNOWN_INCOMPLETE`；无效规则快照不得进入核心。
-   结果还必须区分 `CALCULATED`、`ZERO_NO_ELIGIBLE_MAKER_FILL`、
-   `ZERO_FEES_DISABLED_OR_NO_REBATE` 与 `UNSUPPORTED_RULE_VERSION`；费用关闭或零返佣先形成
-   明确零结果，费用启用且正返佣但 `taker_only=false` 才属于不支持规则版本。
+   首版结果只区分 `CALCULATED`、`ZERO_NO_ELIGIBLE_MAKER_FILL` 与
+   `UNKNOWN_INCOMPLETE`；费用关闭、零返佣、`taker_only=false` 或其他不受支持费表均在进程
+   规则初始化时拒绝，不能进入返佣核心制造不可达终态。
 2. taker 返佣只来自最终成功、实际收取正 taker 手续费的成交：
 
    ```text
    taker_rebate_accrual_pusd = actual_taker_fee_pusd × 0.08
    ```
 
-   每笔唯一 `TakerRebateAccrualApplied` 只增加 taker 应收款。首版固定 Silver 8%，不
-   累计或校验 wV，不查询等级、不实现动态等级或一次性奖金。
+   每笔唯一 `TakerRebateAccrualApplied` 只增加 taker 应收款。首版固定为 8%，不累计或校验
+   wV，不查询等级、不实现动态等级或一次性奖金；Silver 只说明当前比例来源，不形成运行时
+   等级状态。
 3. maker 与 taker 以“返佣种类 + 成交归属 UTC 日”分别维护未结日桶。D 日 taker 的正常
    现金可用时刻为 D+1 00:10 UTC，maker 为 D+1 00:45 UTC；只有该日全部潜在贡献在模拟
    平台内部闭合后才日结。普通训练截尾只保留未结应收款，不提前付款或制造未知终态。
@@ -468,11 +514,12 @@ FOK/FAK 的固定 SDK `takerAmount` shares 等价值只作 base 审计投影；�
 6. 内存、热市场、输入/请求/反馈队列、活动订单、内部事件、查询缓存、单会话索引、单运行
    产物，以及整个运行时/产物根的记录数量和字节分别具有实测硬上限。超限时停止新接入并
    明确失败，不静默丢弃、删除未到期证据或无界扩容。
-7. 每个正式运行至少绑定 `PlatformRuleSnapshot`、`RuleCoverageManifest`、
+7. 每个正式运行至少绑定进程共享的 `PlatformRuleSnapshot` 及其系列适用策略、
    `PlatformScenario`、公共事件合同/生产器、代码/构建、配置、随机种子和输入谱系，并生成
    `SimulationRunManifest`、仅追加请求/反馈证据、紧凑查询投影、生命周期/保留期报告、资源
    高水位和不变量报告。`SimulationRunManifest` 必须明确绑定规则快照、场景、随机种子、
-   请求/反馈合同、确定性脚本意图身份和原始反馈摘要；其内容身份与 SHA-256 供 DPT 候选
+   请求/反馈合同、代理时延配置档的 `profile_id/version/SHA-256`、采样算法版本与采样域、
+   确定性脚本意图身份和原始反馈摘要；其内容身份与 SHA-256 供 DPT 候选
    清单直接引用。首版 schema 固定为
    `SIMULATION_RUN_MANIFEST_SCHEMA_V1 = "simulation_run_manifest_v1"`；它是 sim-system 自有
    清单的首版，不继承 DPT 运行清单的版本号。阶段 6 使用真实输入时，它必须原样绑定实际
@@ -521,19 +568,27 @@ FOK/FAK 的固定 SDK `takerAmount` shares 等价值只作 base 审计投影；�
 3. 阶段 7 只消费实际归一化层、training Ledger、DPT Gate B 候选及其回执身份，不在本事项
    实现这些外部能力。联合训练闭环证据交还 DPT，供其完成全量验证和
    `TRAINING_DATASET_READY` 签发；本计划不能签发 Gate B。
-4. 正式爱尔兰订单请求与私有响应时延配置档当前仍为 `NOT_READY`。该配置档只决定
-   `platform_arrived_at`、`platform_responded_at`、`response_received_at` 及生命周期反馈的
-   `feedback_received_at`，不得替代或改写公开市场数据已记录的数据源事件时间、
-   `received_at_utc_ms` 或反馈的 `platform_event_at`。若用户选择 Gate B 前置方案，阶段 7
-   必须先取得正式 `profile_id/version/hash`；若选择 Gate B 后置、`model-train` 前方案，
-   阶段 7 只能绑定固定符合性配置档、`NOT_READY` 和后续 `sim-calibration` 门。两种方案
-   仍待用户决定，均不得提前宣称正式 `model-train` 或生产适用。
+4. 用户已决定在任务 1.2 实现前生成、验证并内容寻址密封首版项目代理时延配置档；不存在
+   Gate B 前后两种门位分支。配置档只决定请求出站、直接响应入站和生命周期私有反馈入站的
+   代理传输时间；`platform_responded_at` 仍是模拟平台实际完成该请求处理的逻辑时点，不由
+   传输配置档凭空生成。配置档不得替代或改写公开市场数据已记录的数据源事件时间、
+   `received_at_utc_ms` 或反馈的 `platform_event_at`，也不得宣称为爱尔兰订单私有链路实测、
+   纯网络延迟或平台处理延迟。真实配置字节、`profile_id/version/SHA-256` 和全部统计不变量
+   完成核验前状态为 `NOT_READY`；完成后状态为 `PROJECT_PROXY_PROFILE_READY`，且正式
+   `SimulationRunManifest` 与 DPT Gate B 候选必须绑定同一身份。未来 `sim-calibration` 只能
+   产生新的显式版本，不得热改或覆盖首版配置档，也不属于本事项实现范围。首版配置档现已
+   生成并独立复核，状态为 `PROJECT_PROXY_PROFILE_READY`：
+   `profile_id=btc_updown_5m_collector_observed_delay_20260803_v1`、`version=1`、文件
+   SHA-256 为 `98fd40f843275db8994a29cec1de6a72f95bbaa4309df9779c7ed1285cdff596`、
+   精确大小为 `280853` 字节；版本化路径以该文件 SHA-256 为目录名，不建立可变 `current` 别名。
 
 ### 2.10 非目标与禁止扩展
 
 - 不新增 SELL、改单、八方法之外的查询、通用后端 trait、市场插件或第二套操作词汇。
-- 不实现原始数据解析、第二套 DPT、NOE、Ledger、RewardContract、模型框架、HPO、晋级、
-  `sim-calibration`、paper/live 宿主或部署。
+- 不实现运行时原始数据解析、第二套 DPT、NOE、Ledger、RewardContract、模型框架、HPO、
+  晋级、`sim-calibration`、paper/live 宿主或部署。只有任务 1.2.1 的独立离线、固定输入、
+  一次性配置档构建工具可只读已核验清单及其 24 个成员；Rust 运行时和模拟器核心永不读取
+  `typed_raw`，该工具不得扩成通用校准服务或运行时路径。
 - 不实现 Liquidity Rewards、wV、动态等级、奖金、返佣插件或规则专用语言。
 - 除固定公开规则冷启动外，不增加任何真实网络、REST、签名、钱包、凭据或实盘回退。
 - 不复制完整事件带，不宣称真实 FIFO，不模拟账户订单对历史外部市场的反事实影响。
@@ -583,22 +638,38 @@ FOK/FAK 的固定 SDK `takerAmount` shares 等价值只作 base 审计投影；�
 
 ## 4. 阶段 1：规则冷启动、会话、时间和八方法入口
 
-- 任务 1.1：实现 `PlatformRuleHttpLoader` 与不可变规则快照
-  - 步骤 1.1.1：按 2.3 节实现有界 CLOB/Gamma 读取、窄 DTO、精确规则合并和原子密封。
-    -> 验证：一个完整真实形态正例、每类可达边界损坏的一个代表和真实事故回归；最终失败不
-    形成成功快照。
-  - 步骤 1.1.2：实现 `CURRENT_QUERY`、`HISTORICAL_AS_OF` 和同运行恢复三种入口。
-    -> 验证：历史与恢复路径不创建 HTTP 客户端，运行中不热刷新，快照外市场不被临时加入。
+- 任务 1.1：实现进程级规则初始化与共享不可变快照
+  - 步骤 1.1.1：按 2.3 节以一个参考市场实现有界 CLOB/Gamma 读取、窄 DTO、精确规则合并、
+    16 MiB 双边界和原子密封。
+    -> 验证：完整真实形态正例恰好请求参考市场三次；身份、费用关闭或 maker 比例冲突的代表
+    输入均在发布前失败，最终失败不形成成功快照。
+  - 步骤 1.1.2：实现进程 `CURRENT_QUERY`、`HISTORICAL_AS_OF` 和 `RECOVERY` 三种启动入口。
+    -> 验证：历史与恢复入口不创建 HTTP 客户端；共享不可变句柄保持同一对象、内容 SHA、
+    观测时点和规则值，后续市场不会触发请求、追加或热刷新。任务 1.2 再用真实会话工厂证明
+    每个会话只能接收该共享句柄。
 
 - 任务 1.2：实现隔离会话、逻辑时间和身份
-  - 步骤 1.2.1：绑定运行市场集合、规则、场景、公共合同、账户、调用方、随机种子、平台时间
-    与模型可见时间到 UTC 的映射。
-    -> 验证：跨会话、未来游标、错误版本和后端切换在改状态前拒绝；墙上时钟不决定业务结果。
-  - 步骤 1.2.2：实现平台回放游标、模型可见游标、请求/直接响应四个时间坐标、生命周期反馈
-    的 `platform_event_at` 与 `feedback_received_at`、请求幂等和查询截点。
-    -> 验证：物理调度改变不改变逻辑结果；变更重试不重复创建对象，查询重试保持原截点；
-    直接响应和生命周期反馈都只在各自交易侧接收时点后可见；先到时只暴露自身明确携带的
-    私有事实，不能连带读取尚未接收的公开消息、盘口或其他隐藏平台状态。
+  - 步骤 1.2.1：从固定 2026-08-03 清单机械生成全部消息的整数毫秒经验直方图，核验输入清单
+    与 24 个成员身份、样本计数、缺失/负值、最小值、最大值和五个 nearest-rank 分位数，随后
+    以 `profile_id/version/SHA-256` 内容寻址密封首版代理配置档。
+    -> 验证：配置档逐项重算得到 `39,618,963` 个样本、`9,666` 个严格升序非零频数及
+    `10/19/30/63/187ms` 五个分位数；运行时只读并校验密封配置档，不读取 `typed_raw`，也不
+    新建通用 `sim-calibration` 写入器或运行时生成路径。
+  - 步骤 1.2.2：使进程组合根只初始化一份共享规则快照和一份共享代理时延配置档，把相同
+    不可变句柄绑定到每个隔离会话；实现 DPT 平台前缀、公开可见游标、私有反馈序号和单调逻辑
+    输入水位，并让批量项最终处理时点集合在平台前缀推进前按方法类型与冻结 `itode` 规则密封。
+    -> 验证：跨会话、未来游标、错误版本、重复会话身份、后端切换和晚于已关闭水位到达的输入
+    在改状态前拒绝；平台前缀不跨过未密封请求或更早动作，同一有效处理毫秒保持 DPT 原顺序并
+    每次只释放一个稳定排序动作；私有事实按闭合接收时间前缀和稳定发射序号释放，公开与私有
+    可见水位独立，墙上时钟和物理到达顺序不决定业务结果。前缀闭合接口保持 crate 内不可由
+    模型调用；本任务用受信测试驱动器提供“下一条晚于 `t` 或 EOF”的闭桶前提，不预建 DPT
+    读取适配器。
+  - 步骤 1.2.3：实现请求/直接响应四个时间坐标、生命周期反馈的 `platform_event_at` 与
+    `feedback_received_at`、无状态双向经验采样、请求身份、变更幂等和查询平台状态修订号。
+    -> 验证：固定种子与稳定身份得到固定样本；物理重投复用原序列、样本、派生时间和查询截点，
+    同一身份不同规范载荷失败；新逻辑请求才取得新身份与截点，请求发送时点不倒退且不早于
+    所引用的公开或私有事实，变更幂等重试不重复创建对象；
+    直接响应和生命周期反馈都只在各自交易侧接收时点后可见，且 `itode` 不进入传输采样。
 
 - 任务 1.3：实现八方法模拟领域入口
   - 步骤 1.3.1：实现精确公开名字、模拟请求上下文和错误分层。
@@ -671,8 +742,8 @@ FOK/FAK 的固定 SDK `takerAmount` shares 等价值只作 base 审计投影；�
 - 任务 3.3：实现 maker/taker 返佣、日结和付款
   - 步骤 3.3.1：实现 maker 逐笔贡献、逐市场最终化和应收款，taker 实际手续费乘固定 8%
     应收款。
-    -> 验证：实际 maker/taker 分段、零合格、失败/补偿、两份不同历史 `feeSchedule` 和
-    规则不支持各用代表；无效规则快照在核心前拒绝。
+    -> 验证：实际 maker/taker 分段、零合格、失败/补偿，以及两个独立进程中均通过 V2
+    合法门的不同历史 `feeSchedule` 各用代表；无效或不受支持规则快照在核心前拒绝。
   - 步骤 3.3.2：实现隔离日桶、正常现金可用时刻、1 pUSD 门槛、四位向下截取、锁定余数和
     付款。
     -> 验证：低于、等于和高于门槛各一条代表，最终性延迟和普通截尾不提前付款，恢复不
@@ -746,8 +817,8 @@ FOK/FAK 的固定 SDK `takerAmount` shares 等价值只作 base 审计投影；�
     -> 验证：组件范围没有失败、过滤或未解释缺口。
   - 步骤 5.3.2：原子封存组件运行清单与 SHA-256。
     -> 验证：组件运行清单的内容身份和文件 SHA-256 直接作为 DPT 所消费的组件回执 ID/SHA，
-    不另建回执类型或重复清单载荷；证据只声明组件范围，不宣称真实管道、正式时延配置档、
-    训练、paper 或 live 生产适用。
+    不另建回执类型或重复清单载荷；证据只声明组件范围，不宣称真实管道，不把项目代理时延
+    配置档升级为私有链路实测，也不宣称训练、paper 或 live 生产适用。
 
 阶段 5 完成门：组件符合性证据完整且独立审查通过。它可以先于 DPT Gate A 完成，但不能
 替代阶段 6。
@@ -796,7 +867,8 @@ Observation manifest、实现身份、输入集合和能力范围；
     纵向回执 ID/SHA，不新增登记系统、重复回执载荷、第二份清单或人工批准门。
 
 阶段 6 完成门：Gate A、组件符合性和双方联合真实纵向均通过并完成独立阶段审查，才满足
-`SIM-AC-009`。本阶段不反向改变 Gate A，也不宣称训练闭环或正式时延配置档已经通过。
+`SIM-AC-009`。本阶段不反向改变 Gate A，也不宣称训练闭环或把项目代理时延配置档升级为
+爱尔兰私有链路实测。
 
 ## 10. 阶段 7：外部训练闭环联合验收和正式就绪边界
 
@@ -808,9 +880,10 @@ Observation manifest、实现身份、输入集合和能力范围；
   - 步骤 7.1.1：验证实际订单/非订单经济归一化、training Ledger 及只读投影、阶段 6 联合
     回执、`SimulationRunManifest` 和 DPT Gate B 候选的 ID/SHA。
     -> 验证：没有测试替身或本模块占位实现冒充外部能力；模拟原始证据仍由唯一归属方消费。
-  - 步骤 7.1.2：按用户后续决定核对正式时延配置档门位。
-    -> 验证：前置方案要求正式 `profile_id/version/hash`；后置方案绑定固定符合性配置档、
-    `NOT_READY` 和后续门。条件不满足时停止，不自行选择方案。
+  - 步骤 7.1.2：机械核对 `SimulationRunManifest` 与 DPT Gate B 候选绑定同一已验证首版项目
+    代理时延配置档的 `profile_id/version/SHA-256` 和采样算法版本。
+    -> 验证：配置档不是 `PROJECT_PROXY_PROFILE_READY`、身份失配或缺少绑定时停止；不得换用
+    旧配置档、临时固定值或未来 `sim-calibration` 产物补门。
 
 - 任务 7.2：执行同一候选的训练闭环轨迹
   - 步骤 7.2.1：以干净初始账户、固定随机种子和跨 UTC 日但不强制完整日的轨迹，驱动
@@ -823,13 +896,13 @@ Observation manifest、实现身份、输入集合和能力范围；
 
 - 任务 7.3：封存联合训练闭环证据并交付 DPT
   - 步骤 7.3.1：完成任务自审和独立阶段审查，修复后重复受影响联合测试。
-    -> 验证：候选、四类外部回执、阶段 6 回执及所选配置档分支身份一致。
+    -> 验证：候选、四类外部回执、阶段 6 回执及同一代理时延配置档身份一致。
   - 步骤 7.3.2：原子封存同一候选的阶段 7 联合证据并交付 DPT。
     -> 验证：该证据只供 DPT 完成后续全量验证与 Gate B 签发，不扩大为
     `TRAINING_DATASET_READY` 已签发、正式 `model-train`、paper/live、部署或真实资金授权。
 
-阶段 7 完成门：联合训练闭环证据通过并交付 DPT，满足 `SIM-AC-010` 的适用部分。正式时延
-配置档和 DPT Gate B 仍按各自归属计划关闭；本计划不签发其回执。
+阶段 7 完成门：联合训练闭环证据通过并交付 DPT，满足 `SIM-AC-010` 的适用部分。首版项目
+代理时延配置档必须已按本计划关闭，DPT Gate B 仍按其归属计划关闭；本计划不签发 Gate B 回执。
 
 ## 11. 需求验收映射
 
@@ -850,7 +923,13 @@ Observation manifest、实现身份、输入集合和能力范围；
 
 - 用户已于 2026-08-09 批准需求与本计划；当前执行 authority 为本计划，执行授权为
   `LOCAL_IMPLEMENTATION_ONLY`；
-- 当前游标为 `阶段 0 已完成 -> 等待用户另行授权阶段提交与推送`；任务 0.1 的实施根、权限和边界基线、
+- 当前游标为 `阶段 1 -> 任务 1.2 已完成；任务 1.3：实现八方法模拟领域入口（待开始）`；
+  任务 1.1 的进程级规则初始化、三种启动入口、共享不可变快照、16 MiB 双边界、原子密封、
+  聚焦测试、主代理自审和独立只读审查已经通过；任务 1.2 的代理时延配置档、运行时加载与
+  确定性采样、会话隔离、双水位、请求身份、重投、幂等和查询截点原语也已通过任务自审、
+  聚焦测试、全工作区回归和独立只读代码审查。当前完整差异尚未提交或推送，任务 1.3 未开始；
+  阶段 0 已在提交 `25a2260fae59f5135ae7010b3612522e8f031b0b` 完成提交与推送，提交基线
+  与 `origin/sim-system` 一致；任务 0.1 的实施根、权限和边界基线、
   任务 0.2 的公共合同、正式样本和最小异常证据、任务 0.3 的成熟依赖与临时技术试验，以及
   任务 0.4 的资源测量预登记均已通过任务自审与只读复核，正式实施根固定为
   `/home/chillchill/sim-system`；
@@ -858,8 +937,9 @@ Observation manifest、实现身份、输入集合和能力范围；
   四个变为五个；用户已批准把 `data-collect/docs/current/contracts.md` 最小同步为四个可执行
   行为补丁文件和一个注释修正文件。该冲突已经收口，未改变 SDK 运行语义或 data-collect
   需求与计划；
-- 阶段 0 全新独立审查结论为 `PASS`，严重、重要、次要问题均为 0；阶段 1 尚未开始。按阶段
-  关闭规则，必须先取得用户对当前阶段差异的提交与推送授权，完成该边界后才可进入阶段 1；
+- 阶段 0 全新独立审查结论为 `PASS`，严重、重要、次要问题均为 0；用户已明确授权阶段 0
+  提交与推送并同意进入阶段 1。任务 1.1 只建立规则边界和不可变共享句柄，没有预建任务
+  1.2、1.3 或阶段 2 行为；
 - 已有成功 DPT Gate A 外部前置，当前公共合同为 `GateAReceiptV3`、
   `CanonicalEventRecordV1`、`ExecutionMarketEventV3`、双索引 V2 和
   `MarketObservationCausalShellV3`；该外部前置只供未来阶段 6 机械核对，不能跳过阶段 0 至 5；
@@ -869,5 +949,10 @@ Observation manifest、实现身份、输入集合和能力范围；
   公开原语；该适配层在真实输入上不满足正确性或资源门时只阻断阶段 6，不反向阻断阶段 0 至 5；
 - 阶段 0 开始时尚不存在 `sim-system` crate、模拟器代码、专用 Cargo 依赖、配置或运行产物；
   阶段 0 只记录真实基线、冻结合同、复核工具和预登记资源口径，不预建后续阶段实现；
-- 正式时延配置档状态仍为 `NOT_READY`，门位仍待用户决定；
+- 首版项目代理时延配置档的方法、输入范围、抽样语义和 Gate B 前置位置已经用户批准；配置档
+  已在内容寻址路径生成并独立重算通过，当前状态为 `PROJECT_PROXY_PROFILE_READY`，身份为
+  `btc_updown_5m_collector_observed_delay_20260803_v1 / 1 /
+  98fd40f843275db8994a29cec1de6a72f95bbaa4309df9779c7ed1285cdff596`。任务 1.2 的 Rust
+  加载校验、确定性采样、会话与身份实现、聚焦测试、任务自审和独立只读代码审查已经完成；
+  不再存在门位待决定，也不得宣称为爱尔兰私有链路实测；
 - 当前授权不包含提交、推送、发布、部署、远端操作、钱包/凭据访问、真实下单或真实资金变化。

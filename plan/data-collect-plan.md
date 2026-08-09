@@ -33,7 +33,7 @@
 | 身份与市场判定 | 固定身份信息、E+3..E+8、终态仅一次、重启时失败即关闭 | `current/contracts.md` |
 | 运行 | 干净且已推送的提交在本地构建、固定路径和单元、远端不编译 | `current/operations.md` |
 | 跨模块顺序 | 当前后继为 `data-pipeline(training)` 的获批需求、规范计划和最小真实纵向链路；随后以黄金事件和真实管道事件验收 `sim-system`，再完成训练管道闭环；模拟盘和实盘适配器延期门保持不变 | `data-collect/docs/CURRENT.md`、主三件套 |
-| 低频平台规则边界 | `sim-system` 当前时点运行通过固定官方公开 HTTPS 窄加载器查询并冻结，历史运行只绑定适用的 `HISTORICAL_AS_OF` 快照；该模拟器例外不改变 `data-collect` 官方 Rust SDK 合同，当前 schema 不增规则专用列，原始证据 JSON 不删键，初始与动态 tick 证据都经 `data-pipeline` 进入规范事件链 | `current/contracts.md`、`current/known-limitations.md` |
+| 低频平台规则边界 | `sim-system` 进程启动时通过固定官方公开 HTTPS 窄加载器对一个参考市场同步一次并冻结，进程内全部会话共享；历史进程只绑定适用既有快照。该模拟器例外不改变 `data-collect` 官方 Rust SDK 合同，当前 schema 不增规则专用列，原始证据 JSON 不删键，初始与动态 tick 证据都经 `data-pipeline` 进入规范事件链 | `current/contracts.md`、`current/known-limitations.md` |
 
 ## 2. 当前业务与技术合同
 
@@ -62,8 +62,8 @@
 6. 市场固定身份信息在当前、下一、重启和判定流程中不可变。判定查询固定为 E+3 至 E+8；
    合格终态只关闭一次，耗尽不得伪造胜方。多重权威、固定身份或 schema 矛盾及终态胜方
    冲突失败即关闭；不属于当前角色或超过预算的迟到终态事件忽略。
-7. `sim-system` 的低频平台规则由其当前时点运行通过获批公开 HTTPS 窄加载器查询并冻结，
-   历史运行只绑定适用的 `HISTORICAL_AS_OF` 快照。采集原始证据键不删除；初始
+7. `sim-system` 的低频平台规则由其进程启动时通过获批公开 HTTPS 窄加载器对一个参考市场
+   同步一次并冻结，进程内全部会话共享；历史进程只绑定适用既有快照。采集原始证据键不删除；初始
    `orderPriceMinTickSize` 和动态 `tick_size_change` 都经 `data-pipeline` 进入事件链，
    不属于模拟器冷启动规则快照。
 8. 发布二进制文件只在本地从干净且已推送的提交构建并记录提交与 SHA-256；远端不编译、

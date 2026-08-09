@@ -1,0 +1,23 @@
+[package]
+name = "sim-system"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+contracts = { path = "../contracts" }
+polymarket_client_sdk_v2 = { version = "=0.7.0", default-features = false, features = ["clob"] }
+reqwest = { version = "=0.13.4", default-features = false, features = ["query", "rustls"] }
+rust_decimal = { version = "=1.42.1", default-features = false, features = ["std"] }
+rustix = { version = "=1.1.4", default-features = false, features = ["fs", "std"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = { version = "=1.0.150", features = ["raw_value"] }
+sha2 = "=0.10.9"
+tokio = { version = "=1.52.3", default-features = false, features = ["time"] }
+# Cargo 的版本约束忽略 SemVer 构建元数据；Cargo.lock 绑定实际的
+# 1.1.4+spec-1.1.0 包。
+toml = { version = "=1.1.4", default-features = false, features = ["parse", "serde", "std"] }
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+tokio = { version = "=1.52.3", default-features = false, features = ["io-util", "macros", "net", "rt", "test-util", "time"] }
