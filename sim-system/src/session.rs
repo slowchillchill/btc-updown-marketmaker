@@ -132,13 +132,26 @@ impl SimSession {
         self.state.take_private_facts_through(received_at_utc_ms)
     }
 
-    pub(crate) fn register_request(
+    pub(crate) fn register_and_schedule_request(
         &mut self,
         context: RequestContextV1,
         canonical_request_sha256: Sha256Hex,
-    ) -> Result<RegisteredRequestV1, SessionError> {
-        self.state
-            .register_request(&self.latency_profile, context, canonical_request_sha256)
+        actions: Vec<ParsedLogicalActionV1>,
+    ) -> Result<RegisteredLogicalScheduleV1, SessionError> {
+        let actions = actions
+            .into_iter()
+            .map(|action| LogicalActionPlanV1 {
+                action_identity: action.action_identity,
+                batch_item_ordinal: action.batch_item_ordinal,
+                processing_delay_ms: self.processing_delay_ms(action.method_timing),
+            })
+            .collect();
+        self.state.register_and_schedule_request(
+            &self.latency_profile,
+            context,
+            canonical_request_sha256,
+            actions,
+        )
     }
 
     pub(crate) fn complete_direct_response(
@@ -168,19 +181,8 @@ impl SimSession {
         )
     }
 
-    pub(crate) fn enqueue_logical_action(
-        &mut self,
-        action_identity: String,
-        global_request_id: String,
-        batch_item_ordinal: u16,
-        method_timing: ParsedMethodTimingV1,
-    ) -> Result<bool, SessionError> {
-        let request = self
-            .state
-            .requests
-            .get(&global_request_id)
-            .ok_or_else(|| SessionError::RequestNotFound(global_request_id.clone()))?;
-        let delay_ms = match method_timing {
+    fn processing_delay_ms(&self, method_timing: ParsedMethodTimingV1) -> u64 {
+        match method_timing {
             ParsedMethodTimingV1::Ordinary => 0,
             ParsedMethodTimingV1::FokFakMarketBuy
                 if self
@@ -196,24 +198,7 @@ impl SimSession {
                     .delay_ms
             }
             ParsedMethodTimingV1::FokFakMarketBuy => 0,
-        };
-        let key = LogicalActionKeyV1 {
-            effective_processing_at_utc_ms: checked_add_delay(
-                request.transit.platform_arrived_at_utc_ms,
-                delay_ms,
-            )?,
-            caller_sequence: request.context.caller_sequence,
-            batch_item_ordinal,
-        };
-        self.state
-            .enqueue_logical_action(action_identity, global_request_id, key)
-    }
-
-    pub(crate) fn seal_logical_actions(
-        &mut self,
-        global_request_id: &str,
-    ) -> Result<(), SessionError> {
-        self.state.seal_logical_actions(global_request_id)
+        }
     }
 
     pub(crate) fn complete_logical_item(
@@ -399,10 +384,30 @@ pub(crate) enum ParsedMethodTimingV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ParsedLogicalActionV1 {
+    pub action_identity: String,
+    pub batch_item_ordinal: u16,
+    pub method_timing: ParsedMethodTimingV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LogicalActionPlanV1 {
+    action_identity: String,
+    batch_item_ordinal: u16,
+    processing_delay_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueuedLogicalActionV1 {
     pub action_identity: String,
     pub global_request_id: String,
     pub key: LogicalActionKeyV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RegisteredLogicalScheduleV1 {
+    pub request: RegisteredRequestV1,
+    pub actions: Vec<QueuedLogicalActionV1>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -545,6 +550,26 @@ struct MutationRecord {
 struct QueryRecord {
     query_sha256: Sha256Hex,
     platform_state_revision: u64,
+}
+
+enum PreparedRequestRegistrationV1 {
+    New(Box<RequestRecord>),
+    PhysicalRetry(RequestTransitV1),
+}
+
+impl PreparedRequestRegistrationV1 {
+    fn registered_request(&self) -> RegisteredRequestV1 {
+        match self {
+            Self::New(record) => RegisteredRequestV1 {
+                disposition: RequestRegistrationDispositionV1::NewLogicalRequest,
+                transit: record.transit.clone(),
+            },
+            Self::PhysicalRetry(transit) => RegisteredRequestV1 {
+                disposition: RequestRegistrationDispositionV1::PhysicalRetry,
+                transit: transit.clone(),
+            },
+        }
+    }
 }
 
 struct SessionState {
@@ -761,6 +786,17 @@ impl SessionState {
         context: RequestContextV1,
         canonical_request_sha256: Sha256Hex,
     ) -> Result<RegisteredRequestV1, SessionError> {
+        let prepared =
+            self.prepare_request_registration(profile, context, canonical_request_sha256)?;
+        Ok(self.commit_prepared_request(prepared))
+    }
+
+    fn prepare_request_registration(
+        &self,
+        profile: &EmpiricalDelayProfile,
+        context: RequestContextV1,
+        canonical_request_sha256: Sha256Hex,
+    ) -> Result<PreparedRequestRegistrationV1, SessionError> {
         validate_request_context(&self.spec, &context)?;
         if !is_sha256_hex(&canonical_request_sha256.0) {
             return Err(SessionError::InvalidRequest("规范请求摘要非法"));
@@ -773,10 +809,9 @@ impl SessionState {
                     context.global_request_id,
                 ));
             }
-            return Ok(RegisteredRequestV1 {
-                disposition: RequestRegistrationDispositionV1::PhysicalRetry,
-                transit: existing.transit.clone(),
-            });
+            return Ok(PreparedRequestRegistrationV1::PhysicalRetry(
+                existing.transit.clone(),
+            ));
         }
         validate_model_visible_cursor(self, &context.model_visible_cursor)?;
         validate_request_visible_time(self, &context)?;
@@ -826,20 +861,172 @@ impl SessionState {
             inbound_delay_ms,
             response_received_at_utc_ms: None,
         };
-        self.last_caller_sequence = Some(context.caller_sequence);
-        self.last_request_sent_at_utc_ms = Some(context.request_sent_at_utc_ms);
-        self.requests.insert(
-            context.global_request_id.clone(),
+        Ok(PreparedRequestRegistrationV1::New(Box::new(
             RequestRecord {
                 context,
                 canonical_request_sha256,
-                transit: transit.clone(),
+                transit,
             },
-        );
-        Ok(RegisteredRequestV1 {
-            disposition: RequestRegistrationDispositionV1::NewLogicalRequest,
-            transit,
+        )))
+    }
+
+    fn commit_prepared_request(
+        &mut self,
+        prepared: PreparedRequestRegistrationV1,
+    ) -> RegisteredRequestV1 {
+        match prepared {
+            PreparedRequestRegistrationV1::New(record) => {
+                let record = *record;
+                let registered = RegisteredRequestV1 {
+                    disposition: RequestRegistrationDispositionV1::NewLogicalRequest,
+                    transit: record.transit.clone(),
+                };
+                self.last_caller_sequence = Some(record.context.caller_sequence);
+                self.last_request_sent_at_utc_ms = Some(record.context.request_sent_at_utc_ms);
+                self.requests
+                    .insert(record.context.global_request_id.clone(), record);
+                registered
+            }
+            PreparedRequestRegistrationV1::PhysicalRetry(transit) => RegisteredRequestV1 {
+                disposition: RequestRegistrationDispositionV1::PhysicalRetry,
+                transit,
+            },
+        }
+    }
+
+    fn register_and_schedule_request(
+        &mut self,
+        profile: &EmpiricalDelayProfile,
+        context: RequestContextV1,
+        canonical_request_sha256: Sha256Hex,
+        actions: Vec<LogicalActionPlanV1>,
+    ) -> Result<RegisteredLogicalScheduleV1, SessionError> {
+        let global_request_id = context.global_request_id.clone();
+        let caller_sequence = context.caller_sequence;
+        let prepared_request =
+            self.prepare_request_registration(profile, context, canonical_request_sha256)?;
+        let registered_request = prepared_request.registered_request();
+        let prepared_actions = self.prepare_logical_schedule(
+            &global_request_id,
+            caller_sequence,
+            &registered_request,
+            &actions,
+        )?;
+
+        let is_new = matches!(prepared_request, PreparedRequestRegistrationV1::New(_));
+        let committed_request = self.commit_prepared_request(prepared_request);
+        if is_new {
+            for action in &prepared_actions {
+                self.action_keys.insert(
+                    action.action_identity.clone(),
+                    (action.key, action.global_request_id.clone()),
+                );
+                self.pending_actions.insert(action.key, action.clone());
+            }
+            self.sealed_request_ids.insert(global_request_id);
+        }
+
+        Ok(RegisteredLogicalScheduleV1 {
+            request: committed_request,
+            actions: prepared_actions,
         })
+    }
+
+    fn prepare_logical_schedule(
+        &self,
+        global_request_id: &str,
+        caller_sequence: u64,
+        registered_request: &RegisteredRequestV1,
+        actions: &[LogicalActionPlanV1],
+    ) -> Result<Vec<QueuedLogicalActionV1>, SessionError> {
+        if actions.is_empty() {
+            return Err(SessionError::ActionScheduleEmpty);
+        }
+        if actions.iter().enumerate().any(|(expected, action)| {
+            usize::from(action.batch_item_ordinal) != expected || action.action_identity.is_empty()
+        }) {
+            return Err(SessionError::InvalidRequest(
+                "批量项序号必须从零开始且连续，动作身份不得为空",
+            ));
+        }
+        let mut identities = BTreeSet::new();
+        if actions
+            .iter()
+            .any(|action| !identities.insert(action.action_identity.as_str()))
+        {
+            return Err(SessionError::InvalidRequest("逻辑动作身份重复"));
+        }
+
+        let physical_retry =
+            registered_request.disposition == RequestRegistrationDispositionV1::PhysicalRetry;
+        let mut prepared = Vec::with_capacity(actions.len());
+        for action in actions {
+            let key = LogicalActionKeyV1 {
+                effective_processing_at_utc_ms: checked_add_delay(
+                    registered_request.transit.platform_arrived_at_utc_ms,
+                    action.processing_delay_ms,
+                )?,
+                caller_sequence,
+                batch_item_ordinal: action.batch_item_ordinal,
+            };
+            if let Some((existing_key, existing_request_id)) =
+                self.action_keys.get(&action.action_identity)
+            {
+                if physical_retry
+                    && *existing_key == key
+                    && existing_request_id == global_request_id
+                {
+                    prepared.push(QueuedLogicalActionV1 {
+                        action_identity: action.action_identity.clone(),
+                        global_request_id: global_request_id.to_owned(),
+                        key,
+                    });
+                    continue;
+                }
+                return Err(SessionError::ActionIdentityConflict(
+                    action.action_identity.clone(),
+                ));
+            }
+            if physical_retry {
+                return Err(SessionError::ActionIdentityConflict(
+                    action.action_identity.clone(),
+                ));
+            }
+            if self
+                .applicable_platform_prefix_closed_through()
+                .is_some_and(|closed| key.effective_processing_at_utc_ms < closed)
+            {
+                return Err(SessionError::RequestBehindPlatformPrefix);
+            }
+            if self
+                .closed_action_through_utc_ms
+                .is_some_and(|closed| key.effective_processing_at_utc_ms <= closed)
+            {
+                return Err(SessionError::ActionWatermarkClosed);
+            }
+            if self.pending_actions.contains_key(&key) {
+                return Err(SessionError::ActionIdentityConflict(
+                    action.action_identity.clone(),
+                ));
+            }
+            prepared.push(QueuedLogicalActionV1 {
+                action_identity: action.action_identity.clone(),
+                global_request_id: global_request_id.to_owned(),
+                key,
+            });
+        }
+
+        if physical_retry && !self.sealed_request_ids.contains(global_request_id) {
+            return Err(SessionError::ActionScheduleNotSealed(
+                global_request_id.to_owned(),
+            ));
+        }
+        if !physical_retry && self.sealed_request_ids.contains(global_request_id) {
+            return Err(SessionError::ActionScheduleSealed(
+                global_request_id.to_owned(),
+            ));
+        }
+        Ok(prepared)
     }
 
     fn complete_direct_response(

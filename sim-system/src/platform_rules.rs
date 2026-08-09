@@ -2116,15 +2116,15 @@ fn io_error(operation: &'static str, error: rustix::io::Errno) -> RuleSnapshotEr
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
     use super::*;
     use crate::latency_profile::load_embedded_proxy_latency_profile;
     use crate::session::{
-        ParsedMethodTimingV1, RequestContextV1, SIM_EXECUTION_CONTRACT_V1, SessionError,
-        SessionSpecV1, SimCallerRoleV1, SimProcessRoot,
+        ParsedLogicalActionV1, ParsedMethodTimingV1, RequestContextV1, SIM_EXECUTION_CONTRACT_V1,
+        SessionError, SessionSpecV1, SimCallerRoleV1, SimProcessRoot,
     };
     use contracts::EXECUTION_MARKET_EVENT_SCHEMA_V3;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2370,6 +2370,16 @@ mod tests {
         .expect("current query should seal a process snapshot")
     }
 
+    pub(crate) async fn successful_snapshot_for_sim_tests() -> Arc<SealedProcessRuleSnapshot> {
+        let server = ScriptedServer::start(successful_responses()).await;
+        let directory = tempfile::tempdir().expect("tempdir");
+        create_successful_snapshot(
+            &server,
+            directory.path().join("platform-rule-snapshot.json"),
+        )
+        .await
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn process_snapshot_queries_only_one_reference_and_is_shared_without_refresh() {
         let server = ScriptedServer::start(successful_responses()).await;
@@ -2482,7 +2492,7 @@ mod tests {
         ));
 
         let ordinary = first
-            .register_request(
+            .register_and_schedule_request(
                 RequestContextV1 {
                     execution_contract_version: SIM_EXECUTION_CONTRACT_V1.to_owned(),
                     session_id: "session-a".to_owned(),
@@ -2496,36 +2506,30 @@ mod tests {
                     model_visible_cursor: first.model_visible_cursor(),
                 },
                 Sha256Hex("dd".repeat(32)),
+                vec![ParsedLogicalActionV1 {
+                    action_identity: "ordinary-action".to_owned(),
+                    batch_item_ordinal: 0,
+                    method_timing: ParsedMethodTimingV1::Ordinary,
+                }],
             )
             .expect("ordinary request");
         first
-            .enqueue_logical_action(
-                "ordinary-action".to_owned(),
-                "ordinary-request".to_owned(),
-                0,
-                ParsedMethodTimingV1::Ordinary,
-            )
-            .expect("schedule ordinary action");
-        first
-            .seal_logical_actions("ordinary-request")
-            .expect("seal ordinary request");
-        first
-            .close_platform_prefix_through(ordinary.transit.platform_arrived_at_utc_ms, 1)
+            .close_platform_prefix_through(ordinary.request.transit.platform_arrived_at_utc_ms, 1)
             .expect("close ordinary prefix");
         let ordinary_action = first
-            .take_next_action_through(ordinary.transit.platform_arrived_at_utc_ms)
+            .take_next_action_through(ordinary.request.transit.platform_arrived_at_utc_ms)
             .expect("release ordinary action")
             .expect("ordinary action");
         assert_eq!(
             ordinary_action.key.effective_processing_at_utc_ms,
-            ordinary.transit.platform_arrived_at_utc_ms
+            ordinary.request.transit.platform_arrived_at_utc_ms
         );
         first
             .complete_logical_item("ordinary-action")
             .expect("complete ordinary action");
 
         let market = first
-            .register_request(
+            .register_and_schedule_request(
                 RequestContextV1 {
                     execution_contract_version: SIM_EXECUTION_CONTRACT_V1.to_owned(),
                     session_id: "session-a".to_owned(),
@@ -2539,20 +2543,15 @@ mod tests {
                     model_visible_cursor: first.model_visible_cursor(),
                 },
                 Sha256Hex("ee".repeat(32)),
+                vec![ParsedLogicalActionV1 {
+                    action_identity: "fok-market-action".to_owned(),
+                    batch_item_ordinal: 0,
+                    method_timing: ParsedMethodTimingV1::FokFakMarketBuy,
+                }],
             )
             .expect("FOK market request");
-        first
-            .enqueue_logical_action(
-                "fok-market-action".to_owned(),
-                "fok-market-request".to_owned(),
-                0,
-                ParsedMethodTimingV1::FokFakMarketBuy,
-            )
-            .expect("schedule FOK market action");
-        first
-            .seal_logical_actions("fok-market-request")
-            .expect("seal FOK market request");
         let held_until = market
+            .request
             .transit
             .platform_arrived_at_utc_ms
             .checked_add(250)
@@ -2562,7 +2561,7 @@ mod tests {
             .expect("close held prefix");
         assert!(
             first
-                .take_next_action_through(market.transit.platform_arrived_at_utc_ms)
+                .take_next_action_through(market.request.transit.platform_arrived_at_utc_ms)
                 .expect("before held time")
                 .is_none()
         );
