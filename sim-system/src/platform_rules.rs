@@ -2371,7 +2371,26 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn successful_snapshot_for_sim_tests() -> Arc<SealedProcessRuleSnapshot> {
-        let server = ScriptedServer::start(successful_responses()).await;
+        successful_snapshot_for_sim_tests_with_itode(true).await
+    }
+
+    pub(crate) async fn successful_snapshot_for_sim_tests_with_itode(
+        enabled: bool,
+    ) -> Arc<SealedProcessRuleSnapshot> {
+        let clob = if enabled {
+            CLOB_REAL.to_vec()
+        } else {
+            let text = std::str::from_utf8(CLOB_REAL).expect("CLOB test fixture is UTF-8");
+            let changed = text.replacen("\"itode\":true", "\"itode\":false", 1);
+            assert_ne!(changed, text, "test fixture must contain the itode field");
+            changed.into_bytes()
+        };
+        let server = ScriptedServer::start(vec![
+            ResponseSpec::json(200, clob),
+            ResponseSpec::json(200, GAMMA_OPEN_EMPTY),
+            ResponseSpec::json(200, GAMMA_CLOSED_REAL),
+        ])
+        .await;
         let directory = tempfile::tempdir().expect("tempdir");
         create_successful_snapshot(
             &server,
@@ -2444,15 +2463,22 @@ pub(crate) mod tests {
         );
 
         let profile = load_embedded_proxy_latency_profile().expect("proxy latency profile");
-        let mut root = SimProcessRoot::new(Arc::clone(&sealed), profile);
+        let scenario = crate::scenario::scenario_for_sim_tests();
+        let mut root = SimProcessRoot::new(Arc::clone(&sealed), profile, Arc::clone(&scenario));
         let mut first = root
             .create_session(SessionSpecV1 {
                 session_id: "session-a".to_owned(),
                 account_id: "account-a".to_owned(),
                 caller_role: SimCallerRoleV1::ModelTrain,
                 caller_instance_id: "model-a".to_owned(),
-                market_set_sha256: Sha256Hex("11".repeat(32)),
-                scenario_sha256: Sha256Hex("22".repeat(32)),
+                initial_account_state: crate::account::InitialAccountStateV1::try_new(
+                    Decimal::new(1_000, 0),
+                )
+                .expect("initial account"),
+                response_outbox_capacity: std::num::NonZeroUsize::new(2)
+                    .expect("positive test capacity"),
+                market_set_sha256: scenario.market_set_sha256().clone(),
+                scenario_sha256: scenario.scenario_sha256().clone(),
                 session_seed: Sha256Hex("33".repeat(32)),
                 execution_contract_version: SIM_EXECUTION_CONTRACT_V1.to_owned(),
                 market_event_schema_version: EXECUTION_MARKET_EVENT_SCHEMA_V3.to_owned(),
@@ -2464,8 +2490,14 @@ pub(crate) mod tests {
                 account_id: "account-b".to_owned(),
                 caller_role: SimCallerRoleV1::OfflineEvaluation,
                 caller_instance_id: "model-b".to_owned(),
-                market_set_sha256: Sha256Hex("11".repeat(32)),
-                scenario_sha256: Sha256Hex("22".repeat(32)),
+                initial_account_state: crate::account::InitialAccountStateV1::try_new(
+                    Decimal::new(1_000, 0),
+                )
+                .expect("initial account"),
+                response_outbox_capacity: std::num::NonZeroUsize::new(2)
+                    .expect("positive test capacity"),
+                market_set_sha256: scenario.market_set_sha256().clone(),
+                scenario_sha256: scenario.scenario_sha256().clone(),
                 session_seed: Sha256Hex("44".repeat(32)),
                 execution_contract_version: SIM_EXECUTION_CONTRACT_V1.to_owned(),
                 market_event_schema_version: EXECUTION_MARKET_EVENT_SCHEMA_V3.to_owned(),
@@ -2490,6 +2522,7 @@ pub(crate) mod tests {
             first.latency_profile(),
             second.latency_profile()
         ));
+        assert!(Arc::ptr_eq(first.scenario(), second.scenario()));
 
         let ordinary = first
             .register_and_schedule_request(
@@ -2589,6 +2622,28 @@ pub(crate) mod tests {
                 .next_visibility_index_position(),
             0
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn omitted_itode_is_the_official_false_encoding() {
+        let text = std::str::from_utf8(CLOB_REAL).expect("CLOB 测试夹具必须是 UTF-8");
+        let omitted = text.replacen("\"itode\":true,", "", 1);
+        assert_ne!(omitted, text, "测试夹具必须包含 itode 字段");
+
+        let server = ScriptedServer::start(vec![
+            ResponseSpec::json(200, omitted.into_bytes()),
+            ResponseSpec::json(200, GAMMA_OPEN_EMPTY),
+            ResponseSpec::json(200, GAMMA_CLOSED_REAL),
+        ])
+        .await;
+        let directory = tempfile::tempdir().expect("tempdir");
+        let target = directory.path().join("platform-rule-snapshot.json");
+
+        let sealed = create_successful_snapshot(&server, target.clone()).await;
+
+        assert_eq!(server.request_count(), 3);
+        assert!(target.exists());
+        assert!(!sealed.synchronized_rules().taker_order_delay_enabled);
     }
 
     async fn assert_rule_failure(clob: Vec<u8>, gamma_closed: Vec<u8>) {

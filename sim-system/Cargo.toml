@@ -6,6 +6,10 @@ publish = false
 
 [dependencies]
 contracts = { path = "../contracts" }
+data-pipeline-core = { path = "../data-pipeline/core" }
+num-bigint = "=0.4.8"
+num-integer = "=0.1.46"
+num-traits = "=0.2.19"
 polymarket_client_sdk_v2 = { version = "=0.7.0", default-features = false, features = ["clob"] }
 reqwest = { version = "=0.13.4", default-features = false, features = ["query", "rustls"] }
 rust_decimal = { version = "=1.42.1", default-features = false, features = ["std"] }

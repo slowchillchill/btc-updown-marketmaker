@@ -4213,6 +4213,10 @@ name = "sim-system"
 version = "0.1.0"
 dependencies = [
  "contracts",
+ "data-pipeline-core",
+ "num-bigint",
+ "num-integer",
+ "num-traits",
  "polymarket_client_sdk_v2",
  "reqwest",
  "rust_decimal",

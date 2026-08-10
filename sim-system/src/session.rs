@@ -1,11 +1,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use contracts::{EXECUTION_MARKET_EVENT_SCHEMA_V3, Sha256Hex};
 
+use crate::account::InitialAccountStateV1;
 use crate::latency_profile::{DelaySampleDomainV1, EmpiricalDelayProfile};
+use crate::market::{AccountBookOverlayStoreV1, MarketStateStoreV1};
+use crate::matching::{ExecutionStateV1, MatchingStateErrorV1};
 use crate::platform_rules::SealedProcessRuleSnapshot;
+use crate::scenario::PlatformScenarioV1;
 
 pub const SIM_EXECUTION_CONTRACT_V1: &str = "sim_execution_contract_v1";
 
@@ -22,6 +27,8 @@ pub struct SessionSpecV1 {
     pub account_id: String,
     pub caller_role: SimCallerRoleV1,
     pub caller_instance_id: String,
+    pub initial_account_state: InitialAccountStateV1,
+    pub response_outbox_capacity: NonZeroUsize,
     pub market_set_sha256: Sha256Hex,
     pub scenario_sha256: Sha256Hex,
     pub session_seed: Sha256Hex,
@@ -32,6 +39,7 @@ pub struct SessionSpecV1 {
 pub struct SimProcessRoot {
     rule_snapshot: Arc<SealedProcessRuleSnapshot>,
     latency_profile: Arc<EmpiricalDelayProfile>,
+    scenario: Arc<PlatformScenarioV1>,
     registered_session_ids: BTreeSet<String>,
 }
 
@@ -39,22 +47,44 @@ impl SimProcessRoot {
     pub fn new(
         rule_snapshot: Arc<SealedProcessRuleSnapshot>,
         latency_profile: Arc<EmpiricalDelayProfile>,
+        scenario: Arc<PlatformScenarioV1>,
     ) -> Self {
         Self {
             rule_snapshot,
             latency_profile,
+            scenario,
             registered_session_ids: BTreeSet::new(),
         }
     }
 
     pub fn create_session(&mut self, spec: SessionSpecV1) -> Result<SimSession, SessionError> {
         validate_session_spec(&spec)?;
-        if !self.registered_session_ids.insert(spec.session_id.clone()) {
+        if spec.market_set_sha256 != *self.scenario.market_set_sha256() {
+            return Err(SessionError::MarketSetIdentityMismatch);
+        }
+        if spec.scenario_sha256 != *self.scenario.scenario_sha256() {
+            return Err(SessionError::ScenarioIdentityMismatch);
+        }
+        if self.registered_session_ids.contains(&spec.session_id) {
             return Err(SessionError::DuplicateSessionId(spec.session_id));
         }
+        let hidden_platform_markets = match spec.caller_role {
+            SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation => {
+                Some(MarketStateStoreV1::new(&self.scenario))
+            }
+            SimCallerRoleV1::Paper => None,
+        };
+        let public_markets = MarketStateStoreV1::new(&self.scenario);
+        let execution_state = ExecutionStateV1::new(&self.scenario, &spec.initial_account_state)
+            .map_err(SessionError::from)?;
+        self.registered_session_ids.insert(spec.session_id.clone());
         Ok(SimSession {
             rule_snapshot: Arc::clone(&self.rule_snapshot),
             latency_profile: Arc::clone(&self.latency_profile),
+            scenario: Arc::clone(&self.scenario),
+            hidden_platform_markets,
+            public_markets,
+            execution_state,
             state: SessionState::new(spec),
         })
     }
@@ -64,9 +94,14 @@ impl SimProcessRoot {
     }
 }
 
+#[derive(Clone)]
 pub struct SimSession {
     rule_snapshot: Arc<SealedProcessRuleSnapshot>,
     latency_profile: Arc<EmpiricalDelayProfile>,
+    scenario: Arc<PlatformScenarioV1>,
+    hidden_platform_markets: Option<MarketStateStoreV1>,
+    public_markets: MarketStateStoreV1,
+    execution_state: ExecutionStateV1,
     state: SessionState,
 }
 
@@ -77,6 +112,10 @@ impl SimSession {
 
     pub fn latency_profile(&self) -> &Arc<EmpiricalDelayProfile> {
         &self.latency_profile
+    }
+
+    pub fn scenario(&self) -> &Arc<PlatformScenarioV1> {
+        &self.scenario
     }
 
     pub fn session_spec(&self) -> &SessionSpecV1 {
@@ -99,22 +138,110 @@ impl SimSession {
         self.state.model_visible_cursor()
     }
 
+    #[cfg(test)]
     pub(crate) fn close_platform_prefix_through(
         &mut self,
         source_event_at_utc_ms: i64,
         next_event_time_index_position: u64,
     ) -> Result<(), SessionError> {
-        self.state
-            .close_platform_prefix_through(source_event_at_utc_ms, next_event_time_index_position)
+        if self.hidden_platform_markets.is_none() {
+            return Err(SessionError::HiddenPlatformReplayForbidden);
+        }
+        self.validate_platform_prefix_closure(
+            source_event_at_utc_ms,
+            next_event_time_index_position,
+        )?;
+        self.commit_platform_prefix_closure(source_event_at_utc_ms, next_event_time_index_position);
+        Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn advance_public_visibility_through(
         &mut self,
         received_at_utc_ms: i64,
         next_visibility_index_position: u64,
     ) -> Result<(), SessionError> {
+        self.validate_public_visibility_closure(
+            received_at_utc_ms,
+            next_visibility_index_position,
+        )?;
+        self.commit_public_visibility_closure(received_at_utc_ms, next_visibility_index_position);
+        Ok(())
+    }
+
+    pub(crate) fn hidden_platform_markets(&self) -> Option<&MarketStateStoreV1> {
+        self.hidden_platform_markets.as_ref()
+    }
+
+    pub(crate) fn public_markets(&self) -> &MarketStateStoreV1 {
+        &self.public_markets
+    }
+
+    pub(crate) fn hidden_platform_markets_mut(&mut self) -> Option<&mut MarketStateStoreV1> {
+        self.hidden_platform_markets.as_mut()
+    }
+
+    pub(crate) fn public_markets_mut(&mut self) -> &mut MarketStateStoreV1 {
+        &mut self.public_markets
+    }
+
+    pub(crate) fn account_overlay(&self) -> &AccountBookOverlayStoreV1 {
+        self.execution_state.account_overlay()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn account_overlay_mut(&mut self) -> &mut AccountBookOverlayStoreV1 {
+        self.execution_state.account_overlay_mut()
+    }
+
+    pub(crate) fn execution_state(&self) -> &ExecutionStateV1 {
+        &self.execution_state
+    }
+
+    pub(crate) fn execution_state_mut(&mut self) -> &mut ExecutionStateV1 {
+        &mut self.execution_state
+    }
+
+    pub(crate) fn replace_execution_state(&mut self, state: ExecutionStateV1) {
+        self.execution_state = state;
+    }
+
+    pub(crate) fn validate_platform_prefix_closure(
+        &self,
+        source_event_at_utc_ms: i64,
+        next_event_time_index_position: u64,
+    ) -> Result<(), SessionError> {
+        self.state.validate_platform_prefix_closure(
+            source_event_at_utc_ms,
+            next_event_time_index_position,
+        )
+    }
+
+    pub(crate) fn commit_platform_prefix_closure(
+        &mut self,
+        source_event_at_utc_ms: i64,
+        next_event_time_index_position: u64,
+    ) {
         self.state
-            .advance_public_visibility_through(received_at_utc_ms, next_visibility_index_position)
+            .commit_platform_prefix_closure(source_event_at_utc_ms, next_event_time_index_position);
+    }
+
+    pub(crate) fn validate_public_visibility_closure(
+        &self,
+        received_at_utc_ms: i64,
+        next_visibility_index_position: u64,
+    ) -> Result<(), SessionError> {
+        self.state
+            .validate_public_visibility_closure(received_at_utc_ms, next_visibility_index_position)
+    }
+
+    pub(crate) fn commit_public_visibility_closure(
+        &mut self,
+        received_at_utc_ms: i64,
+        next_visibility_index_position: u64,
+    ) {
+        self.state
+            .commit_public_visibility_closure(received_at_utc_ms, next_visibility_index_position);
     }
 
     pub(crate) fn close_private_fact_schedule_through(
@@ -125,11 +252,34 @@ impl SimSession {
             .close_private_fact_schedule_through(received_at_utc_ms)
     }
 
-    pub(crate) fn take_private_facts_through(
+    pub(crate) fn private_fact_schedule_closed_through(&self) -> Option<i64> {
+        self.state.private_fact_schedule_closed_through_utc_ms
+    }
+
+    pub(crate) fn expect_direct_response(
         &mut self,
+        global_request_id: &str,
+    ) -> Result<(), SessionError> {
+        self.state.expect_direct_response(global_request_id)
+    }
+
+    pub(crate) fn next_private_emission_sequence(&self) -> Result<u64, SessionError> {
+        self.state.next_private_emission_sequence()
+    }
+
+    pub(crate) fn prepare_next_private_fact_through(
+        &self,
         received_at_utc_ms: i64,
-    ) -> Result<Vec<VisiblePrivateFactV1>, SessionError> {
-        self.state.take_private_facts_through(received_at_utc_ms)
+    ) -> Result<Option<VisiblePrivateFactV1>, SessionError> {
+        self.state
+            .prepare_next_private_fact_through(received_at_utc_ms)
+    }
+
+    pub(crate) fn confirm_prepared_private_fact(
+        &mut self,
+        candidate: &VisiblePrivateFactV1,
+    ) -> Result<(), SessionError> {
+        self.state.confirm_prepared_private_fact(candidate)
     }
 
     pub(crate) fn register_and_schedule_request(
@@ -216,11 +366,43 @@ impl SimSession {
             .take_next_action_through(effective_processing_at_utc_ms)
     }
 
+    pub(crate) fn validate_in_flight_action(
+        &self,
+        action: &QueuedLogicalActionV1,
+    ) -> Result<(), SessionError> {
+        self.state.validate_in_flight_action(action)
+    }
+
     pub(crate) fn advance_platform_state_revision(
         &mut self,
         next_revision: u64,
     ) -> Result<(), SessionError> {
         self.state.advance_platform_state_revision(next_revision)
+    }
+
+    pub(crate) fn platform_state_revision(&self) -> u64 {
+        self.state.platform_state_revision
+    }
+
+    pub(crate) fn advance_platform_state_revision_once(&mut self) -> Result<u64, SessionError> {
+        let next = self.prepare_next_platform_state_revision()?;
+        self.state.advance_platform_state_revision(next)?;
+        Ok(next)
+    }
+
+    pub(crate) fn prepare_next_platform_state_revision(&self) -> Result<u64, SessionError> {
+        self.state
+            .platform_state_revision
+            .checked_add(1)
+            .ok_or(SessionError::PlatformRevisionRegression)
+    }
+
+    pub(crate) fn commit_prepared_platform_state_revision(&mut self, next_revision: u64) {
+        debug_assert_eq!(
+            self.state.platform_state_revision.checked_add(1),
+            Some(next_revision)
+        );
+        self.state.platform_state_revision = next_revision;
     }
 
     pub(crate) fn resolve_mutation_idempotency(
@@ -247,7 +429,22 @@ impl SimSession {
         query_sha256: Sha256Hex,
     ) -> Result<QueryRevisionV1, SessionError> {
         self.state
-            .resolve_query_revision(global_request_id, action_identity, query_sha256)
+            .resolve_query_revision(global_request_id, action_identity, query_sha256, None)
+    }
+
+    pub(crate) fn resolve_query_revision_at(
+        &mut self,
+        global_request_id: &str,
+        action_identity: &str,
+        query_sha256: Sha256Hex,
+        frozen_revision: u64,
+    ) -> Result<QueryRevisionV1, SessionError> {
+        self.state.resolve_query_revision(
+            global_request_id,
+            action_identity,
+            query_sha256,
+            Some(frozen_revision),
+        )
     }
 }
 
@@ -432,6 +629,8 @@ pub struct QueryRevisionV1 {
 pub enum SessionError {
     InvalidSessionSpec(&'static str),
     DuplicateSessionId(String),
+    MarketSetIdentityMismatch,
+    ScenarioIdentityMismatch,
     CursorRegression(&'static str),
     HiddenPlatformReplayForbidden,
     FutureModelVisibleCursor,
@@ -450,8 +649,10 @@ pub enum SessionError {
     FeedbackIdentityConflict(String),
     PrivateFactScheduleClosed,
     PrivateFactScheduleNotClosed,
+    PrivateFactScheduleCrossesExpectedResponse(String),
     PrivateFactIdentityConflict(String),
     PrivateEmissionSequenceConflict(u64),
+    PrivateFactConfirmationConflict,
     PlatformPrefixNotClosed,
     PlatformPrefixCrossesUnsealedRequest,
     PlatformPrefixCrossesPendingAction,
@@ -464,6 +665,10 @@ pub enum SessionError {
     MutationIdentityConflict(String),
     QueryIdentityConflict(String),
     PlatformRevisionRegression,
+    ExecutionState(String),
+    ResponseOutboxFull,
+    ResponseBridgeClosed,
+    ResponseDeliveryIdentityConflict,
 }
 
 impl fmt::Display for SessionError {
@@ -471,6 +676,8 @@ impl fmt::Display for SessionError {
         match self {
             Self::InvalidSessionSpec(message) => write!(formatter, "会话规格非法：{message}"),
             Self::DuplicateSessionId(session_id) => write!(formatter, "会话身份重复：{session_id}"),
+            Self::MarketSetIdentityMismatch => write!(formatter, "会话市场集摘要与进程场景不匹配"),
+            Self::ScenarioIdentityMismatch => write!(formatter, "会话场景摘要与进程场景不匹配"),
             Self::CursorRegression(message) => write!(formatter, "游标倒退或不闭合：{message}"),
             Self::HiddenPlatformReplayForbidden => {
                 write!(formatter, "模拟盘会话不能推进隐藏平台事件时间前缀")
@@ -503,9 +710,15 @@ impl fmt::Display for SessionError {
             Self::PrivateFactScheduleNotClosed => {
                 write!(formatter, "私有事实计划尚未闭合到模型时点")
             }
+            Self::PrivateFactScheduleCrossesExpectedResponse(id) => {
+                write!(formatter, "私有事实计划水位跨过尚未形成的直接响应：{id}")
+            }
             Self::PrivateFactIdentityConflict(id) => write!(formatter, "私有事实身份冲突：{id}"),
             Self::PrivateEmissionSequenceConflict(sequence) => {
                 write!(formatter, "私有事实发射序号重复：{sequence}")
+            }
+            Self::PrivateFactConfirmationConflict => {
+                write!(formatter, "私有事实确认与当前连续队头不一致")
             }
             Self::PlatformPrefixNotClosed => write!(formatter, "平台事件前缀尚未闭合到动作时点"),
             Self::PlatformPrefixCrossesUnsealedRequest => {
@@ -527,17 +740,30 @@ impl fmt::Display for SessionError {
             Self::MutationIdentityConflict(id) => write!(formatter, "变更幂等身份冲突：{id}"),
             Self::QueryIdentityConflict(id) => write!(formatter, "查询身份冲突：{id}"),
             Self::PlatformRevisionRegression => write!(formatter, "平台状态修订号倒退"),
+            Self::ExecutionState(message) => write!(formatter, "会话执行状态非法：{message}"),
+            Self::ResponseOutboxFull => write!(formatter, "会话提交响应发件箱已满"),
+            Self::ResponseBridgeClosed => write!(formatter, "会话响应桥接器已关闭新逻辑入口"),
+            Self::ResponseDeliveryIdentityConflict => {
+                write!(formatter, "响应交付确认身份与连续队头冲突")
+            }
         }
     }
 }
 
 impl std::error::Error for SessionError {}
 
+impl From<MatchingStateErrorV1> for SessionError {
+    fn from(value: MatchingStateErrorV1) -> Self {
+        Self::ExecutionState(format!("{value:?}"))
+    }
+}
+
 #[derive(Clone)]
 struct RequestRecord {
     context: RequestContextV1,
     canonical_request_sha256: Sha256Hex,
     transit: RequestTransitV1,
+    response_transit: Option<RequestTransitV1>,
 }
 
 #[derive(Clone)]
@@ -572,6 +798,7 @@ impl PreparedRequestRegistrationV1 {
     }
 }
 
+#[derive(Clone)]
 struct SessionState {
     spec: SessionSpecV1,
     platform_prefix: PlatformPrefixCursorV1,
@@ -584,6 +811,7 @@ struct SessionState {
     lifecycle_feedback: BTreeMap<String, LifecycleFeedbackTimingV1>,
     private_fact_keys: BTreeMap<String, PrivateFactOrderKey>,
     pending_private_facts: BTreeMap<PrivateFactOrderKey, PrivateVisibilityEvidenceV1>,
+    expected_direct_response_request_ids: BTreeSet<String>,
     used_private_emission_sequences: BTreeSet<u64>,
     private_fact_schedule_closed_through_utc_ms: Option<i64>,
     private_visibility_closed_through_utc_ms: Option<i64>,
@@ -613,6 +841,7 @@ impl SessionState {
             lifecycle_feedback: BTreeMap::new(),
             private_fact_keys: BTreeMap::new(),
             pending_private_facts: BTreeMap::new(),
+            expected_direct_response_request_ids: BTreeSet::new(),
             used_private_emission_sequences: BTreeSet::new(),
             private_fact_schedule_closed_through_utc_ms: None,
             private_visibility_closed_through_utc_ms: None,
@@ -639,6 +868,19 @@ impl SessionState {
 
     fn close_platform_prefix_through(
         &mut self,
+        source_event_at_utc_ms: i64,
+        next_event_time_index_position: u64,
+    ) -> Result<(), SessionError> {
+        self.validate_platform_prefix_closure(
+            source_event_at_utc_ms,
+            next_event_time_index_position,
+        )?;
+        self.commit_platform_prefix_closure(source_event_at_utc_ms, next_event_time_index_position);
+        Ok(())
+    }
+
+    fn validate_platform_prefix_closure(
+        &self,
         source_event_at_utc_ms: i64,
         next_event_time_index_position: u64,
     ) -> Result<(), SessionError> {
@@ -671,13 +913,33 @@ impl SessionState {
         {
             return Err(SessionError::CursorRegression("平台事件时间前缀"));
         }
+        Ok(())
+    }
+
+    fn commit_platform_prefix_closure(
+        &mut self,
+        source_event_at_utc_ms: i64,
+        next_event_time_index_position: u64,
+    ) {
         self.platform_prefix.closed_through_source_event_at_utc_ms = Some(source_event_at_utc_ms);
         self.platform_prefix.next_event_time_index_position = next_event_time_index_position;
-        Ok(())
     }
 
     fn advance_public_visibility_through(
         &mut self,
+        received_at_utc_ms: i64,
+        next_visibility_index_position: u64,
+    ) -> Result<(), SessionError> {
+        self.validate_public_visibility_closure(
+            received_at_utc_ms,
+            next_visibility_index_position,
+        )?;
+        self.commit_public_visibility_closure(received_at_utc_ms, next_visibility_index_position);
+        Ok(())
+    }
+
+    fn validate_public_visibility_closure(
+        &self,
         received_at_utc_ms: i64,
         next_visibility_index_position: u64,
     ) -> Result<(), SessionError> {
@@ -710,9 +972,16 @@ impl SessionState {
         {
             return Err(SessionError::CursorRegression("公开可见前缀"));
         }
+        Ok(())
+    }
+
+    fn commit_public_visibility_closure(
+        &mut self,
+        received_at_utc_ms: i64,
+        next_visibility_index_position: u64,
+    ) {
         self.public_visibility.closed_through_received_at_utc_ms = Some(received_at_utc_ms);
         self.public_visibility.next_visibility_index_position = next_visibility_index_position;
-        Ok(())
     }
 
     fn close_private_fact_schedule_through(
@@ -728,14 +997,78 @@ impl SessionState {
         {
             return Err(SessionError::CursorRegression("私有事实计划水位"));
         }
+        if let Some(request_id) =
+            self.expected_direct_response_request_ids
+                .iter()
+                .find(|request_id| {
+                    self.requests
+                        .get(*request_id)
+                        .is_some_and(|record| record.response_transit.is_none())
+                        && self
+                            .expected_direct_response_received_at(request_id)
+                            .is_ok_and(|expected_at| expected_at <= received_at_utc_ms)
+                })
+        {
+            return Err(SessionError::PrivateFactScheduleCrossesExpectedResponse(
+                request_id.clone(),
+            ));
+        }
         self.private_fact_schedule_closed_through_utc_ms = Some(received_at_utc_ms);
         Ok(())
     }
 
-    fn take_private_facts_through(
-        &mut self,
+    fn expect_direct_response(&mut self, global_request_id: &str) -> Result<(), SessionError> {
+        if self
+            .expected_direct_response_request_ids
+            .contains(global_request_id)
+        {
+            return Ok(());
+        }
+        let expected_at = self.expected_direct_response_received_at(global_request_id)?;
+        if self
+            .private_fact_schedule_closed_through_utc_ms
+            .is_some_and(|closed| expected_at <= closed)
+        {
+            return Err(SessionError::PrivateFactScheduleCrossesExpectedResponse(
+                global_request_id.to_owned(),
+            ));
+        }
+        self.expected_direct_response_request_ids
+            .insert(global_request_id.to_owned());
+        Ok(())
+    }
+
+    fn expected_direct_response_received_at(
+        &self,
+        global_request_id: &str,
+    ) -> Result<i64, SessionError> {
+        let record = self
+            .requests
+            .get(global_request_id)
+            .ok_or_else(|| SessionError::RequestNotFound(global_request_id.to_owned()))?;
+        let responded_at = self
+            .action_keys
+            .values()
+            .filter(|(_, request_id)| request_id == global_request_id)
+            .map(|(key, _)| key.effective_processing_at_utc_ms)
+            .max()
+            .ok_or(SessionError::ActionScheduleEmpty)?;
+        checked_add_delay(responded_at, record.transit.inbound_delay_ms)
+    }
+
+    fn next_private_emission_sequence(&self) -> Result<u64, SessionError> {
+        self.used_private_emission_sequences
+            .last()
+            .copied()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(SessionError::CursorRegression("私有事实发射序号溢出"))
+    }
+
+    fn prepare_next_private_fact_through(
+        &self,
         received_at_utc_ms: i64,
-    ) -> Result<Vec<VisiblePrivateFactV1>, SessionError> {
+    ) -> Result<Option<VisiblePrivateFactV1>, SessionError> {
         if self
             .private_fact_schedule_closed_through_utc_ms
             .is_none_or(|closed| closed < received_at_utc_ms)
@@ -748,34 +1081,64 @@ impl SessionState {
         {
             return Err(SessionError::CursorRegression("私有事实可见水位"));
         }
-        let facts = self
-            .pending_private_facts
-            .iter()
-            .take_while(|(key, _)| key.received_at_utc_ms <= received_at_utc_ms)
-            .map(|(key, evidence)| (key.clone(), evidence.clone()))
-            .collect::<Vec<_>>();
-        let final_sequence = self
-            .private_feedback_sequence
-            .checked_add(facts.len() as u64)
-            .ok_or(SessionError::CursorRegression("私有反馈序号溢出"))?;
-        let mut visible = Vec::with_capacity(facts.len());
-        for (sequence_before, (key, evidence)) in
-            (self.private_feedback_sequence..final_sequence).zip(facts)
-        {
-            let next_sequence = sequence_before + 1;
-            self.pending_private_facts
-                .remove(&key)
-                .expect("collected private fact key must still exist");
-            visible.push(VisiblePrivateFactV1 {
-                evidence,
-                received_at_utc_ms: key.received_at_utc_ms,
-                private_emission_sequence: key.private_emission_sequence,
-                private_feedback_sequence: next_sequence,
-            });
-            self.private_fact_received_at_by_sequence
-                .push(key.received_at_utc_ms);
+        let Some((key, evidence)) = self.pending_private_facts.first_key_value() else {
+            return Ok(None);
+        };
+        if key.received_at_utc_ms > received_at_utc_ms {
+            return Ok(None);
         }
-        self.private_feedback_sequence = final_sequence;
+        let private_feedback_sequence = self
+            .private_feedback_sequence
+            .checked_add(1)
+            .ok_or(SessionError::CursorRegression("私有反馈序号溢出"))?;
+        Ok(Some(VisiblePrivateFactV1 {
+            evidence: evidence.clone(),
+            received_at_utc_ms: key.received_at_utc_ms,
+            private_emission_sequence: key.private_emission_sequence,
+            private_feedback_sequence,
+        }))
+    }
+
+    fn confirm_prepared_private_fact(
+        &mut self,
+        candidate: &VisiblePrivateFactV1,
+    ) -> Result<(), SessionError> {
+        let expected = self
+            .prepare_next_private_fact_through(candidate.received_at_utc_ms)?
+            .ok_or(SessionError::PrivateFactConfirmationConflict)?;
+        if &expected != candidate {
+            return Err(SessionError::PrivateFactConfirmationConflict);
+        }
+        let identity = candidate.evidence.identity();
+        let key = self
+            .private_fact_keys
+            .get(&identity)
+            .cloned()
+            .ok_or(SessionError::PrivateFactConfirmationConflict)?;
+        self.pending_private_facts
+            .remove(&key)
+            .ok_or(SessionError::PrivateFactConfirmationConflict)?;
+        self.private_feedback_sequence = candidate.private_feedback_sequence;
+        self.private_fact_received_at_by_sequence
+            .push(candidate.received_at_utc_ms);
+        self.private_visibility_closed_through_utc_ms = Some(
+            self.private_visibility_closed_through_utc_ms
+                .map_or(candidate.received_at_utc_ms, |closed| {
+                    closed.max(candidate.received_at_utc_ms)
+                }),
+        );
+        Ok(())
+    }
+
+    fn take_private_facts_through(
+        &mut self,
+        received_at_utc_ms: i64,
+    ) -> Result<Vec<VisiblePrivateFactV1>, SessionError> {
+        let mut visible = Vec::new();
+        while let Some(candidate) = self.prepare_next_private_fact_through(received_at_utc_ms)? {
+            self.confirm_prepared_private_fact(&candidate)?;
+            visible.push(candidate);
+        }
         self.private_visibility_closed_through_utc_ms = Some(received_at_utc_ms);
         Ok(visible)
     }
@@ -866,6 +1229,7 @@ impl SessionState {
                 context,
                 canonical_request_sha256,
                 transit,
+                response_transit: None,
             },
         )))
     }
@@ -1044,17 +1408,18 @@ impl SessionState {
             .requests
             .get(global_request_id)
             .ok_or_else(|| SessionError::RequestNotFound(global_request_id.to_owned()))?;
-        if let Some(existing) = record.transit.platform_responded_at_utc_ms {
-            if existing == platform_responded_at_utc_ms
-                && record.transit.private_emission_sequence == Some(private_emission_sequence)
+        if let Some(existing) = &record.response_transit {
+            if existing.platform_responded_at_utc_ms == Some(platform_responded_at_utc_ms)
+                && existing.private_emission_sequence == Some(private_emission_sequence)
             {
-                return Ok(record.transit.clone());
+                return Ok(existing.clone());
             }
             return Err(SessionError::RequestIdentityConflict(
                 global_request_id.to_owned(),
             ));
         }
-        if platform_responded_at_utc_ms < record.transit.platform_arrived_at_utc_ms {
+        let registration_transit = record.transit.clone();
+        if platform_responded_at_utc_ms < registration_transit.platform_arrived_at_utc_ms {
             return Err(SessionError::ResponseBeforeArrival);
         }
         let last_action_at = self
@@ -1071,7 +1436,7 @@ impl SessionState {
         }
         let response_received_at_utc_ms = checked_add_delay(
             platform_responded_at_utc_ms,
-            record.transit.inbound_delay_ms,
+            registration_transit.inbound_delay_ms,
         )?;
         let evidence = PrivateVisibilityEvidenceV1::DirectResponse {
             global_request_id: global_request_id.to_owned(),
@@ -1081,14 +1446,15 @@ impl SessionState {
             response_received_at_utc_ms,
             private_emission_sequence,
         )?;
-        let record = self
-            .requests
+        let mut response_transit = registration_transit;
+        response_transit.platform_responded_at_utc_ms = Some(platform_responded_at_utc_ms);
+        response_transit.private_emission_sequence = Some(private_emission_sequence);
+        response_transit.response_received_at_utc_ms = Some(response_received_at_utc_ms);
+        self.requests
             .get_mut(global_request_id)
-            .ok_or_else(|| SessionError::RequestNotFound(global_request_id.to_owned()))?;
-        record.transit.platform_responded_at_utc_ms = Some(platform_responded_at_utc_ms);
-        record.transit.private_emission_sequence = Some(private_emission_sequence);
-        record.transit.response_received_at_utc_ms = Some(response_received_at_utc_ms);
-        Ok(record.transit.clone())
+            .ok_or_else(|| SessionError::RequestNotFound(global_request_id.to_owned()))?
+            .response_transit = Some(response_transit.clone());
+        Ok(response_transit)
     }
 
     fn bind_lifecycle_feedback_timing(
@@ -1328,6 +1694,30 @@ impl SessionState {
         Ok(Some(action))
     }
 
+    fn validate_in_flight_action(
+        &self,
+        action: &QueuedLogicalActionV1,
+    ) -> Result<(), SessionError> {
+        if self.in_flight_action_identity.as_deref() != Some(&action.action_identity) {
+            return Err(SessionError::ActionNotLogicallyReleased(
+                action.action_identity.clone(),
+            ));
+        }
+        let Some((registered_key, registered_request_id)) =
+            self.action_keys.get(&action.action_identity)
+        else {
+            return Err(SessionError::ActionNotLogicallyReleased(
+                action.action_identity.clone(),
+            ));
+        };
+        if registered_key != &action.key || registered_request_id != &action.global_request_id {
+            return Err(SessionError::ActionIdentityConflict(
+                action.action_identity.clone(),
+            ));
+        }
+        Ok(())
+    }
+
     fn advance_platform_state_revision(&mut self, next_revision: u64) -> Result<(), SessionError> {
         if next_revision == self.platform_state_revision {
             return Ok(());
@@ -1433,6 +1823,7 @@ impl SessionState {
         global_request_id: &str,
         action_identity: &str,
         query_sha256: Sha256Hex,
+        frozen_revision: Option<u64>,
     ) -> Result<QueryRevisionV1, SessionError> {
         if !self.requests.contains_key(global_request_id) {
             return Err(SessionError::RequestNotFound(global_request_id.to_owned()));
@@ -1453,7 +1844,9 @@ impl SessionState {
             return Err(SessionError::InvalidRequest("查询摘要非法"));
         }
         if let Some(existing) = self.queries.get(global_request_id) {
-            if existing.query_sha256 != query_sha256 {
+            let revision_conflicts = frozen_revision
+                .is_some_and(|revision| revision != existing.platform_state_revision);
+            if existing.query_sha256 != query_sha256 || revision_conflicts {
                 return Err(SessionError::QueryIdentityConflict(
                     global_request_id.to_owned(),
                 ));
@@ -1463,6 +1856,15 @@ impl SessionState {
                 reused: true,
             });
         }
+        let selected_revision = match frozen_revision {
+            Some(revision) if revision <= self.platform_state_revision => revision,
+            Some(_) => {
+                return Err(SessionError::QueryIdentityConflict(
+                    global_request_id.to_owned(),
+                ));
+            }
+            None => self.platform_state_revision,
+        };
         if self.in_flight_action_identity.as_deref() != Some(action_identity) {
             return Err(SessionError::ActionNotLogicallyReleased(
                 action_identity.to_owned(),
@@ -1472,11 +1874,11 @@ impl SessionState {
             global_request_id.to_owned(),
             QueryRecord {
                 query_sha256,
-                platform_state_revision: self.platform_state_revision,
+                platform_state_revision: selected_revision,
             },
         );
         Ok(QueryRevisionV1 {
-            platform_state_revision: self.platform_state_revision,
+            platform_state_revision: selected_revision,
             reused: false,
         })
     }
@@ -1596,6 +1998,11 @@ mod tests {
             account_id: "account-a".to_owned(),
             caller_role: SimCallerRoleV1::ModelTrain,
             caller_instance_id: "caller-a".to_owned(),
+            initial_account_state: InitialAccountStateV1::try_new(rust_decimal::Decimal::new(
+                1_000, 0,
+            ))
+            .expect("initial account"),
+            response_outbox_capacity: NonZeroUsize::new(2).expect("positive test capacity"),
             market_set_sha256: sha("a"),
             scenario_sha256: sha("b"),
             session_seed: sha("c"),
@@ -2264,7 +2671,7 @@ mod tests {
             .register_request(&profile, request(&state, "query-2", 2, 1_000), sha("e"))
             .expect("query 2");
         assert_eq!(
-            state.resolve_query_revision("query-1", "query-action-1", sha("f")),
+            state.resolve_query_revision("query-1", "query-action-1", sha("f"), None),
             Err(SessionError::ActionNotLogicallyReleased(
                 "query-action-1".to_owned()
             ))
@@ -2309,7 +2716,7 @@ mod tests {
             .advance_platform_state_revision(7)
             .expect("revision 7");
         let first = state
-            .resolve_query_revision("query-1", "query-action-1", sha("f"))
+            .resolve_query_revision("query-1", "query-action-1", sha("f"), None)
             .expect("query cutoff");
         let created = state
             .resolve_mutation_idempotency(
@@ -2334,7 +2741,7 @@ mod tests {
             .advance_platform_state_revision(8)
             .expect("revision 8");
         let second = state
-            .resolve_query_revision("query-2", "query-action-2", sha("1"))
+            .resolve_query_revision("query-2", "query-action-2", sha("1"), None)
             .expect("new query cutoff");
         let existing = state
             .resolve_mutation_idempotency(
@@ -2351,14 +2758,14 @@ mod tests {
                 .expect("complete second query")
         );
         let retry = state
-            .resolve_query_revision("query-1", "query-action-1", sha("f"))
+            .resolve_query_revision("query-1", "query-action-1", sha("f"), None)
             .expect("query retry");
         assert_eq!(first.platform_state_revision, 7);
         assert_eq!(retry.platform_state_revision, 7);
         assert!(retry.reused);
         assert_eq!(second.platform_state_revision, 8);
         assert_eq!(
-            state.resolve_query_revision("query-1", "query-action-1", sha("0")),
+            state.resolve_query_revision("query-1", "query-action-1", sha("0"), None),
             Err(SessionError::QueryIdentityConflict("query-1".to_owned()))
         );
         assert_eq!(

@@ -56,11 +56,15 @@ Polymarket 当前依赖固定为
 `third_party/polymarket_client_sdk_v2-0.7.0-p1` 一个补丁。
 未经用户批准，不得改用 Polymarket 原始 REST、手动签名、自建 SDK 或影子实现。
 
-相对 crates.io `0.7.0`，`0.7.0-p1` 的生产 `src/` 共有五个差异文件：其中四个包含可执行
+相对 crates.io `0.7.0`，`0.7.0-p1` 的生产 `src/` 共有六个差异文件：其中五个包含可执行
 行为补丁，另一个只修正文档注释：
 
 - `clob/client.rs`：只把 `post_orders` 的批量语义注释修正为并行处理和逐项结果，明确单项
   失败不回滚成功项；此项不改变方法签名、方法体、请求、响应解析或任何运行行为。
+- `clob/order_builder.rs`：增加公共无状态的 Decimal BUY 价格校验与数量编码原语，保留限价单
+  的严格小数位、市场单先截断价格、价格范围、tick 对齐、中间数量截断和最终 6 位数量量化，
+  并由既有订单构造器复用同一路径。此项不增加 `Client`、网络、签名、钱包或提交能力；
+  `data-collect` 当前没有订单构造器或该原语调用点，现有采集调用行为和启用特性不变。
 
 - `clob/ws/types/response.rs`：保留 `book`、`price_change`、`tick_size_change`、
   `last_trade_price`、`best_bid_ask`、`new_market`、`market_resolved` 的当前
