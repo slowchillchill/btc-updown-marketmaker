@@ -16,11 +16,11 @@ use crate::execution::{
     BaseSubmissionMeasurementV1, InitialAccountStateV1, PlatformMarketV1, PlatformScenarioV1,
     PostOrderDirectResponseV1, PostOrderItemV1, PostOrderRequestV1, PostOrdersDirectResponseV1,
     PostOrdersRequestV1, QuoteBudgetSubmissionMeasurementV1, SimBuyOrderKindV1, SimBuyOrderV1,
-    SimCallerRoleV1, SimExecutionContractErrorV1, SimExecutionProcessV1, SimExecutionSessionV1,
+    SimCallerRoleV1, SimExecutionContractErrorV1, SimExecutionSessionV1,
     SubmissionDeliveryDispositionV1, SubmissionDriveDispositionV1, SubmissionEffectDispositionV1,
     SubmissionEvidenceUnknownReasonV1, SubmissionItemOutcomeV1, SubmissionMeasurementV1,
     SubmissionPlatformOrderStatusV1, SubmissionRejectedReasonV1, SubmissionResponseAcceptanceV1,
-    SubmissionResponseBridgeV1, SubmissionTerminalReasonV1,
+    SubmissionResponseBridgeV1, SubmissionTerminalReasonV1, execution_process_for_tests,
 };
 use crate::latency_profile::load_embedded_proxy_latency_profile;
 use crate::market::{
@@ -193,6 +193,15 @@ fn accepting_capture_bridge(
         |response| {
             SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
         },
+        |response| {
+            SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+        },
+        |feedback| {
+            SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
+        },
+        |feedback| {
+            SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
+        },
     )
 }
 
@@ -228,10 +237,19 @@ fn accepting_batch_capture_bridge(
         |response| {
             SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
         },
+        |response| {
+            SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+        },
+        |feedback| {
+            SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
+        },
+        |feedback| {
+            SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
+        },
     )
 }
 
-async fn ready_session(
+pub(crate) async fn ready_session(
     id: &str,
     available_pusd: Decimal,
     capacity: usize,
@@ -244,9 +262,8 @@ async fn ready_session(
     spec.initial_account_state =
         InitialAccountStateV1::try_new(available_pusd).expect("task23 initial account");
     spec.response_outbox_capacity = NonZeroUsize::new(capacity).expect("positive capacity");
-    let mut session = SimExecutionProcessV1::new(rules, profile, scenario)
-        .create_session(spec, bridge)
-        .expect("task23 session");
+    let mut session = execution_process_for_tests(rules, profile, scenario)
+        .create_active_session_for_tests(spec, bridge);
     let initial = [
         initial_snapshot_event("1", 0, "Up", 1_100, 1_200, 1, "10"),
         initial_snapshot_event("2", 1, "Down", 1_100, 1_200, 2, "12"),
@@ -272,9 +289,8 @@ async fn ready_long_session(
     spec.initial_account_state =
         InitialAccountStateV1::try_new(available_pusd).expect("task23 long initial account");
     spec.response_outbox_capacity = NonZeroUsize::new(1).expect("positive capacity");
-    let mut session = SimExecutionProcessV1::new(rules, Arc::clone(&profile), scenario)
-        .create_session(spec, bridge)
-        .expect("task23 long session");
+    let mut session = execution_process_for_tests(rules, Arc::clone(&profile), scenario)
+        .create_active_session_for_tests(spec, bridge);
     load_long_initial_market(&mut session, "0.00001", "0.6", "5");
     (session, profile)
 }
@@ -300,7 +316,7 @@ fn request_context(
     }
 }
 
-fn fak_request(
+pub(crate) fn fak_request(
     session: &SimExecutionSessionV1,
     request_id: &str,
     caller_sequence: u64,
@@ -438,7 +454,7 @@ fn post_orders_request(
     }
 }
 
-fn ask_transition(
+pub(crate) fn ask_transition(
     source_at: i64,
     received_at: i64,
     sequence: u64,
@@ -653,7 +669,7 @@ pub(crate) fn long_ask_transition(
     )
 }
 
-fn close_platform_at(session: &mut SimExecutionSessionV1, at: i64, position: u64) {
+pub(crate) fn close_platform_at(session: &mut SimExecutionSessionV1, at: i64, position: u64) {
     session
         .apply_closed_market_event_bucket(ClosedMarketEventBucketV1::hidden(
             at,
@@ -692,6 +708,7 @@ pub(crate) async fn session_with_one_pending_maker_depletion(
     String,
     ClosedMarketEventBucketV1,
     i64,
+    i64,
 ) {
     let captured = Arc::new(Mutex::new(Vec::new()));
     session_with_one_pending_maker_depletion_with_bridge(
@@ -714,6 +731,7 @@ pub(crate) async fn session_with_one_pending_maker_depletion_with_bridge(
     String,
     ClosedMarketEventBucketV1,
     i64,
+    i64,
 ) {
     let mut session = ready_session(id, decimal("10"), 1, bridge).await;
     let tick = tick_transition(1_101, 1_201, 3, "0.01", "0.00001");
@@ -730,17 +748,6 @@ pub(crate) async fn session_with_one_pending_maker_depletion_with_bridge(
         .expect("post-only GTC processing");
     let received_at = effective
         + i64::try_from(registration.receipt.transit.inbound_delay_ms).expect("delay fits i64");
-    session
-        .drive_direct_response_delivery_through(received_at)
-        .expect("post-only GTC response delivery");
-    let platform_order_id = {
-        let responses = captured.lock().expect("capture mutex");
-        let SubmissionItemOutcomeV1::Accepted(accepted) = &responses[0].item.outcome else {
-            panic!("post-only GTC must be accepted");
-        };
-        accepted.simulated_platform_order_id.clone()
-    };
-
     let first_addition = bid_transition(
         effective + 1,
         effective + hidden_receive_offset_ms + 1,
@@ -765,12 +772,29 @@ pub(crate) async fn session_with_one_pending_maker_depletion_with_bridge(
     session
         .apply_closed_market_event_bucket(first_depletion_bucket.clone())
         .expect("zero-quote maker depletion must remain pending");
+    assert_eq!(
+        session
+            .apply_closed_market_event_bucket(first_depletion_bucket.clone())
+            .expect("pending bucket physical retry before later logical work"),
+        MarketBucketApplyDispositionV1::PhysicalRetry
+    );
+    session
+        .drive_private_delivery_after_platform_through_for_tests(received_at)
+        .expect("post-only GTC response delivery");
+    let platform_order_id = {
+        let responses = captured.lock().expect("capture mutex");
+        let SubmissionItemOutcomeV1::Accepted(accepted) = &responses[0].item.outcome else {
+            panic!("post-only GTC must be accepted");
+        };
+        accepted.simulated_platform_order_id.clone()
+    };
     (
         session,
         platform_order_id,
         first_depletion_event_id,
         first_depletion_bucket,
         effective,
+        received_at,
     )
 }
 
@@ -964,7 +988,7 @@ async fn fak_uses_quote_budget_and_keeps_sdk_base_as_audit_only() {
             .expect("test delay fits i64");
     assert_eq!(
         session
-            .drive_direct_response_delivery_through(received_at)
+            .drive_private_delivery_after_platform_through_for_tests(received_at)
             .expect("FAK delivery"),
         SubmissionDeliveryDispositionV1::Delivered
     );
@@ -988,11 +1012,8 @@ async fn fak_uses_quote_budget_and_keeps_sdk_base_as_audit_only() {
         decimal("0.126")
     );
     assert_eq!(session.available_pusd(), decimal("6.874"));
-    assert_eq!(session.principal_encumbered_pusd(), decimal("3"));
-    assert_eq!(
-        session.immediate_taker_fee_encumbered_pusd(),
-        decimal("0.126")
-    );
+    assert_eq!(session.principal_encumbered_pusd(), Decimal::ZERO);
+    assert_eq!(session.immediate_taker_fee_encumbered_pusd(), Decimal::ZERO);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1025,7 +1046,7 @@ async fn partial_fak_is_matched_and_releases_only_the_unspent_quote() {
         + i64::try_from(registration.receipt.transit.inbound_delay_ms)
             .expect("test delay fits i64");
     session
-        .drive_direct_response_delivery_through(received_at)
+        .drive_private_delivery_after_platform_through_for_tests(received_at)
         .expect("partial FAK delivery");
 
     let responses = captured.lock().expect("capture mutex");
@@ -1054,11 +1075,8 @@ async fn partial_fak_is_matched_and_releases_only_the_unspent_quote() {
     );
     assert_eq!(session.simulated_order_count(), 1);
     assert_eq!(session.available_pusd(), decimal("7.916"));
-    assert_eq!(session.principal_encumbered_pusd(), decimal("2"));
-    assert_eq!(
-        session.immediate_taker_fee_encumbered_pusd(),
-        decimal("0.084")
-    );
+    assert_eq!(session.principal_encumbered_pusd(), Decimal::ZERO);
+    assert_eq!(session.immediate_taker_fee_encumbered_pusd(), Decimal::ZERO);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1086,7 +1104,7 @@ async fn exactly_filled_fok_is_accepted_and_matched() {
         + i64::try_from(registration.receipt.transit.inbound_delay_ms)
             .expect("test delay fits i64");
     session
-        .drive_direct_response_delivery_through(received_at)
+        .drive_private_delivery_after_platform_through_for_tests(received_at)
         .expect("full FOK delivery");
 
     let responses = captured.lock().expect("capture mutex");
@@ -1160,7 +1178,7 @@ async fn outbox_capacity_and_physical_retry_preserve_the_registration_receipt() 
         + i64::try_from(first_registration.receipt.transit.inbound_delay_ms)
             .expect("test delay fits i64");
     session
-        .drive_direct_response_delivery_through(received_at)
+        .drive_private_delivery_after_platform_through_for_tests(received_at)
         .expect("first delivery");
     let retry_after_confirmation = session.post_order(first).expect("retry after confirmation");
     assert_eq!(
@@ -1196,36 +1214,6 @@ async fn gtc_price_improvement_and_later_maker_fill_keep_one_quote_conservation_
     let received_at = effective
         + i64::try_from(registration.receipt.transit.inbound_delay_ms)
             .expect("test delay fits i64");
-    session
-        .drive_direct_response_delivery_through(received_at)
-        .expect("GTC delivery");
-
-    let responses = captured.lock().expect("capture mutex");
-    let response = responses.first().expect("one GTC response");
-    let measurement = base_measurement(response);
-    assert_eq!(measurement.accepted_base_quantity_shares, decimal("10"));
-    assert_eq!(measurement.matched_base_quantity_shares, decimal("7"));
-    assert_eq!(measurement.open_base_quantity_shares, decimal("3"));
-    assert_eq!(measurement.accepted_quote_amount_pusd, decimal("6"));
-    assert_eq!(measurement.matched_quote_amount_pusd, decimal("3.8"));
-    assert_eq!(
-        measurement.open_encumbered_quote_amount_pusd,
-        decimal("1.8")
-    );
-    assert_eq!(
-        measurement.released_price_improvement_quote_amount_pusd,
-        decimal("0.4")
-    );
-    assert_eq!(
-        measurement.immediate_taker_fee_encumbered_pusd,
-        decimal("0.1176")
-    );
-    let SubmissionItemOutcomeV1::Accepted(accepted) = &response.item.outcome else {
-        panic!("GTC must be accepted");
-    };
-    let platform_order_id = accepted.simulated_platform_order_id.clone();
-    drop(responses);
-
     let queued_behind_account = bid_transition(effective + 1, effective + 101, 4, "0.6", "0", "1");
     session
         .apply_closed_market_event_bucket(hidden_bucket(effective + 1, 4, &[queued_behind_account]))
@@ -1253,6 +1241,35 @@ async fn gtc_price_improvement_and_later_maker_fill_keep_one_quote_conservation_
         ),
         decimal("2")
     );
+    session
+        .drive_private_delivery_after_platform_through_for_tests(received_at)
+        .expect("GTC delivery");
+
+    let responses = captured.lock().expect("capture mutex");
+    let response = responses.first().expect("one GTC response");
+    let measurement = base_measurement(response);
+    assert_eq!(measurement.accepted_base_quantity_shares, decimal("10"));
+    assert_eq!(measurement.matched_base_quantity_shares, decimal("7"));
+    assert_eq!(measurement.open_base_quantity_shares, decimal("3"));
+    assert_eq!(measurement.accepted_quote_amount_pusd, decimal("6"));
+    assert_eq!(measurement.matched_quote_amount_pusd, decimal("3.8"));
+    assert_eq!(
+        measurement.open_encumbered_quote_amount_pusd,
+        decimal("1.8")
+    );
+    assert_eq!(
+        measurement.released_price_improvement_quote_amount_pusd,
+        decimal("0.4")
+    );
+    assert_eq!(
+        measurement.immediate_taker_fee_encumbered_pusd,
+        decimal("0.1176")
+    );
+    let SubmissionItemOutcomeV1::Accepted(accepted) = &response.item.outcome else {
+        panic!("GTC must be accepted");
+    };
+    let platform_order_id = accepted.simulated_platform_order_id.clone();
+    drop(responses);
     let order = session
         .simulated_order(&platform_order_id)
         .expect("GTC order state");
@@ -1270,8 +1287,14 @@ async fn gtc_price_improvement_and_later_maker_fill_keep_one_quote_conservation_
 
 #[tokio::test(flavor = "current_thread")]
 async fn zero_quote_maker_depletion_waits_and_then_forms_one_positive_quote_fill() {
-    let (mut session, platform_order_id, first_depletion_event_id, pending_bucket, effective) =
-        session_with_one_pending_maker_depletion("task23-pending-maker-depletion").await;
+    let (
+        mut session,
+        platform_order_id,
+        first_depletion_event_id,
+        _,
+        _effective,
+        response_received_at,
+    ) = session_with_one_pending_maker_depletion("task23-pending-maker-depletion").await;
     let pending = session
         .simulated_order(&platform_order_id)
         .expect("pending maker order state");
@@ -1296,7 +1319,6 @@ async fn zero_quote_maker_depletion_waits_and_then_forms_one_positive_quote_fill
     let first_evidence_sha256 =
         expected_pending_evidence_sha256(None, &platform_order_id, 0, &first_depletion_event_id, 1);
     assert_eq!(pending_evidence.sha256.0, first_evidence_sha256);
-    let pending_before_retry = pending.clone();
     assert_eq!(session.simulated_fill_count(&platform_order_id), 0);
     assert_eq!(session.principal_encumbered_pusd(), decimal("0.00005"));
     assert_eq!(
@@ -1308,32 +1330,24 @@ async fn zero_quote_maker_depletion_waits_and_then_forms_one_positive_quote_fill
         ),
         decimal("4.999999")
     );
-    assert_eq!(
-        session
-            .apply_closed_market_event_bucket(pending_bucket)
-            .expect("pending bucket physical retry"),
-        MarketBucketApplyDispositionV1::PhysicalRetry
-    );
-    assert_eq!(
-        session.simulated_order(&platform_order_id),
-        Some(&pending_before_retry)
-    );
-    assert_eq!(session.simulated_fill_count(&platform_order_id), 0);
-
+    let second_source_at = response_received_at + 1;
     let second_addition = bid_transition(
-        effective + 3,
-        effective + 103,
+        second_source_at,
+        second_source_at + 100,
         6,
         "0.00001",
         "0",
         "0.099999",
     );
     session
-        .apply_closed_market_event_bucket(hidden_bucket(effective + 3, 6, &[second_addition]))
+        .apply_closed_market_event_bucket(hidden_bucket(second_source_at, 6, &[second_addition]))
         .expect("additional external segment joins behind the account order");
+    session
+        .drive_private_delivery_after_platform_through_for_tests(second_source_at)
+        .expect("更晚市场变化前先交付已经可见的订单生命周期反馈");
     let second_depletion = bid_transition(
-        effective + 4,
-        effective + 104,
+        second_source_at + 1,
+        second_source_at + 101,
         7,
         "0.00001",
         "0.099999",
@@ -1341,7 +1355,11 @@ async fn zero_quote_maker_depletion_waits_and_then_forms_one_positive_quote_fill
     );
     let second_depletion_event_id = second_depletion.event_id.0.clone();
     session
-        .apply_closed_market_event_bucket(hidden_bucket(effective + 4, 7, &[second_depletion]))
+        .apply_closed_market_event_bucket(hidden_bucket(
+            second_source_at + 1,
+            7,
+            &[second_depletion],
+        ))
         .expect("cumulative positive-quote maker depletion must form one fill");
     let filled = session
         .simulated_order(&platform_order_id)
@@ -1420,7 +1438,7 @@ async fn zero_quote_maker_depletion_waits_and_then_forms_one_positive_quote_fill
 
 #[tokio::test(flavor = "current_thread")]
 async fn end_at_preserves_pending_maker_depletion_and_blocks_later_fill() {
-    let (mut session, platform_order_id, _, _, _) =
+    let (mut session, platform_order_id, _, _, _, _) =
         session_with_one_pending_maker_depletion("task23-pending-through-end").await;
     let pending_before_end = session
         .simulated_order(&platform_order_id)
@@ -1429,6 +1447,9 @@ async fn end_at_preserves_pending_maker_depletion_and_blocks_later_fill() {
     let available_before_end = session.available_pusd();
     let principal_before_end = session.principal_encumbered_pusd();
     let end_at = market().window.end_at_utc_ms;
+    session
+        .drive_private_delivery_after_platform_through_for_tests(end_at - 1)
+        .expect("市场结束前先交付已可见的既有生命周期反馈");
 
     let post_end_addition = bid_transition(end_at, end_at + 100, 6, "0.00001", "0", "0.099999");
     session
@@ -1486,16 +1507,6 @@ async fn gtd_deadline_without_market_event_terminalizes_pending_and_releases_onc
     let response_received_at = 150_000
         + i64::try_from(registration.receipt.transit.inbound_delay_ms)
             .expect("test delay fits i64");
-    session
-        .drive_direct_response_delivery_through(response_received_at)
-        .expect("deliver GTD submission response");
-    let platform_order_id = {
-        let responses = captured.lock().expect("capture mutex");
-        let SubmissionItemOutcomeV1::Accepted(accepted) = &responses[0].item.outcome else {
-            panic!("GTD must be accepted");
-        };
-        accepted.simulated_platform_order_id.clone()
-    };
     assert_eq!(session.next_order_deadline_at_utc_ms(), Some(391_000));
 
     let addition = long_bid_transition(150_001, 160_001, 3, "0", "0.000001");
@@ -1512,6 +1523,16 @@ async fn gtd_deadline_without_market_event_terminalizes_pending_and_releases_onc
             &[depletion],
         ))
         .expect("one micro becomes pending before GTD expiry");
+    session
+        .drive_private_delivery_after_platform_through_for_tests(response_received_at)
+        .expect("deliver GTD submission response");
+    let platform_order_id = {
+        let responses = captured.lock().expect("capture mutex");
+        let SubmissionItemOutcomeV1::Accepted(accepted) = &responses[0].item.outcome else {
+            panic!("GTD must be accepted");
+        };
+        accepted.simulated_platform_order_id.clone()
+    };
     let pending = session
         .simulated_order(&platform_order_id)
         .expect("pending GTD")
@@ -1573,8 +1594,8 @@ async fn gtd_deadline_without_market_event_terminalizes_pending_and_releases_onc
     assert_eq!(session.next_order_deadline_at_utc_ms(), None);
     assert_eq!(
         session.drive_next_execution_action_through(390_999),
-        Err(crate::execution::SubmissionProcessingErrorV1::Matching(
-            crate::matching::MatchingStateErrorV1::LogicalTimeRegression
+        Err(crate::execution::SubmissionProcessingErrorV1::Session(
+            crate::session::SessionError::ActionWatermarkClosed
         ))
     );
 
@@ -1628,7 +1649,7 @@ async fn gtd_after_end_releases_only_open_principal_and_preserves_taker_fee() {
         + i64::try_from(registration.receipt.transit.inbound_delay_ms)
             .expect("test delay fits i64");
     session
-        .drive_direct_response_delivery_through(response_received_at)
+        .drive_private_delivery_after_platform_through_for_tests(response_received_at)
         .expect("deliver partial GTD response");
     let (platform_order_id, open_quote) = {
         let responses = captured.lock().expect("capture mutex");
@@ -1651,9 +1672,12 @@ async fn gtd_after_end_releases_only_open_principal_and_preserves_taker_fee() {
     let available_before_expiry = session.available_pusd();
     let principal_before_expiry = session.principal_encumbered_pusd();
     let fee_before_expiry = session.immediate_taker_fee_encumbered_pusd();
-    assert!(fee_before_expiry > Decimal::ZERO);
+    assert_eq!(fee_before_expiry, Decimal::ZERO);
 
     let end_at = long_market().window.end_at_utc_ms;
+    session
+        .drive_private_delivery_after_platform_through_for_tests(end_at - 1)
+        .expect("市场结束前先交付已经可见的成交生命周期反馈");
     session
         .apply_closed_market_event_bucket(long_hidden_bucket_with_next_event_at(
             end_at,
@@ -1663,6 +1687,9 @@ async fn gtd_after_end_releases_only_open_principal_and_preserves_taker_fee() {
             &[],
         ))
         .expect("end_at closes matching without terminalizing GTD");
+    session
+        .drive_private_delivery_after_platform_through_for_tests(500_999)
+        .expect("到期前先交付市场结束形成的 maker 零应计反馈");
     let before_expiry = session
         .simulated_order(&platform_order_id)
         .expect("GTD remains active after end_at")
@@ -1737,7 +1764,7 @@ async fn gtd_expiry_equality_precedes_same_millisecond_maker_depletion() {
         + i64::try_from(registration.receipt.transit.inbound_delay_ms)
             .expect("test delay fits i64");
     session
-        .drive_direct_response_delivery_through(response_received_at)
+        .drive_private_delivery_after_platform_through_for_tests(response_received_at)
         .expect("deliver GTD submission response");
     let platform_order_id = {
         let responses = captured.lock().expect("capture mutex");
@@ -1746,6 +1773,12 @@ async fn gtd_expiry_equality_precedes_same_millisecond_maker_depletion() {
         };
         accepted.simulated_platform_order_id.clone()
     };
+    assert_eq!(
+        session
+            .drive_private_delivery_after_platform_through_for_tests(390_998)
+            .expect("drain accepted-order lifecycle feedback before autonomous GTD work"),
+        SubmissionDeliveryDispositionV1::Delivered
+    );
 
     let before_expiry_add = long_bid_transition(390_999, 400_999, 3, "0", "0.1");
     let before_expiry_reduce = long_bid_transition(390_999, 400_999, 4, "0.1", "0");
@@ -1841,7 +1874,7 @@ async fn limit_base_matching_respects_the_original_order_quote_envelope() {
     let received_at = effective
         + i64::try_from(registration.receipt.transit.inbound_delay_ms).expect("delay fits i64");
     session
-        .drive_direct_response_delivery_through(received_at)
+        .drive_private_delivery_after_platform_through_for_tests(received_at)
         .expect("limit response delivery");
     let responses = captured.lock().expect("capture mutex");
     let measurement = base_measurement(&responses[0]);
@@ -1932,7 +1965,7 @@ async fn funding_gate_rolls_back_matching_and_exact_principal_plus_fee_passes() 
         + i64::try_from(registration.receipt.transit.inbound_delay_ms)
             .expect("test delay fits i64");
     rejected
-        .drive_direct_response_delivery_through(received_at)
+        .drive_private_delivery_after_platform_through_for_tests(received_at)
         .expect("batch response");
     {
         let batches = rejected_batches.lock().expect("batch capture mutex");
@@ -2025,11 +2058,17 @@ async fn delayed_batch_processing_keeps_original_response_ordinals_and_one_deliv
     );
     assert!(batches.lock().expect("batch capture mutex").is_empty());
     assert_eq!(session.available_pusd(), decimal("2"));
+    assert_eq!(
+        session
+            .drive_private_delivery_after_platform_through_for_tests(delayed_at - 1)
+            .expect("deliver the ordinary item's lifecycle feedback before the delayed item"),
+        SubmissionDeliveryDispositionV1::Delivered
+    );
     close_platform_at(&mut session, delayed_at, 2);
     assert_eq!(
         session
             .drive_next_execution_action_through(delayed_at)
-            .expect("delayed item second"),
+            .expect("delayed item after visibility-slot release"),
         SubmissionDriveDispositionV1::ItemProcessed {
             request_completed: true
         }
@@ -2039,7 +2078,7 @@ async fn delayed_batch_processing_keeps_original_response_ordinals_and_one_deliv
         + i64::try_from(registration.receipt.transit.inbound_delay_ms)
             .expect("test delay fits i64");
     session
-        .drive_direct_response_delivery_through(received_at)
+        .drive_private_delivery_after_platform_through_for_tests(received_at)
         .expect("mixed batch delivery");
     let responses = batches.lock().expect("batch capture mutex");
     assert_eq!(responses.len(), 1);
@@ -2106,7 +2145,7 @@ async fn zero_fill_fok_and_fak_are_rejected_without_consuming_liquidity_or_funds
         + i64::try_from(registration.receipt.transit.inbound_delay_ms)
             .expect("test delay fits i64");
     session
-        .drive_direct_response_delivery_through(received_at)
+        .drive_private_delivery_after_platform_through_for_tests(received_at)
         .expect("FOK/FAK delivery");
     let responses = batches.lock().expect("batch capture mutex");
     assert_eq!(responses[0].items.len(), 3);
@@ -2185,11 +2224,30 @@ async fn zero_quote_external_residue_is_transparent_to_post_only_and_formal_matc
     session
         .drive_next_execution_action_through(effective)
         .expect("ordinary formal matching");
+    let remove_zero_quote_residue = long_ask_transition(
+        effective + 1,
+        effective + 101,
+        5,
+        "0.00001",
+        "0.000001",
+        "0",
+    );
+    assert_eq!(
+        session
+            .apply_closed_market_event_bucket(long_hidden_bucket(
+                effective + 1,
+                4,
+                5,
+                &[remove_zero_quote_residue],
+            ))
+            .expect("retained zero-quote residue remains available to DPT depletion"),
+        MarketBucketApplyDispositionV1::Applied
+    );
     let received_at = effective
         + i64::try_from(registration.receipt.transit.inbound_delay_ms)
             .expect("test delay fits i64");
     session
-        .drive_direct_response_delivery_through(received_at)
+        .drive_private_delivery_after_platform_through_for_tests(received_at)
         .expect("batch delivery");
 
     let responses = batches.lock().expect("batch capture mutex");
@@ -2221,25 +2279,6 @@ async fn zero_quote_external_residue_is_transparent_to_post_only_and_formal_matc
     let platform_order_id = ordinary.simulated_platform_order_id.clone();
     drop(responses);
 
-    let remove_zero_quote_residue = long_ask_transition(
-        effective + 1,
-        effective + 101,
-        5,
-        "0.00001",
-        "0.000001",
-        "0",
-    );
-    assert_eq!(
-        session
-            .apply_closed_market_event_bucket(long_hidden_bucket(
-                effective + 1,
-                4,
-                5,
-                &[remove_zero_quote_residue],
-            ))
-            .expect("retained zero-quote residue remains available to DPT depletion"),
-        MarketBucketApplyDispositionV1::Applied
-    );
     assert_eq!(session.simulated_fill_count(&platform_order_id), 1);
 }
 
@@ -2327,13 +2366,12 @@ async fn real_adjacent_trade_level_delta_and_suppressed_book_apply_queue_reducti
         InitialAccountStateV1::try_new(decimal("1000")).expect("真实样本初始账户");
     spec.response_outbox_capacity = NonZeroUsize::new(1).expect("positive capacity");
     let captured = Arc::new(Mutex::new(Vec::new()));
-    let mut session = SimExecutionProcessV1::new(
+    let mut session = execution_process_for_tests(
         Arc::clone(&rules),
         Arc::clone(&profile),
         Arc::clone(&scenario),
     )
-    .create_session(spec, accepting_capture_bridge(Arc::clone(&captured)))
-    .expect("真实样本会话");
+    .create_active_session_for_tests(spec, accepting_capture_bridge(Arc::clone(&captured)));
     let initial = [
         real_sample_initial_snapshot(&level_delta, down_asset.clone(), 1, "0.1", "0.89", "234.21"),
         real_sample_initial_snapshot(&level_delta, up_asset, 2, "0.4", "0.6", "1"),
@@ -2368,12 +2406,11 @@ async fn real_adjacent_trade_level_delta_and_suppressed_book_apply_queue_reducti
     probe_spec.initial_account_state =
         InitialAccountStateV1::try_new(decimal("1000")).expect("真实探针初始账户");
     probe_spec.response_outbox_capacity = NonZeroUsize::new(1).expect("positive capacity");
-    let mut probe = SimExecutionProcessV1::new(rules, profile, Arc::clone(&scenario))
-        .create_session(
+    let mut probe = execution_process_for_tests(rules, profile, Arc::clone(&scenario))
+        .create_active_session_for_tests(
             probe_spec,
             accepting_capture_bridge(Arc::clone(&probe_captured)),
-        )
-        .expect("真实 public_trade 队列探针会话");
+        );
     probe
         .apply_closed_market_event_bucket(ClosedMarketEventBucketV1::hidden(
             1_785_715_201_804,
@@ -2421,7 +2458,7 @@ async fn real_adjacent_trade_level_delta_and_suppressed_book_apply_queue_reducti
         + i64::try_from(probe_registration.receipt.transit.inbound_delay_ms)
             .expect("test delay fits i64");
     probe
-        .drive_direct_response_delivery_through(probe_received_at)
+        .drive_private_delivery_after_platform_through_for_tests(probe_received_at)
         .expect("真实 public_trade 队列探针响应");
     let probe_responses = probe_captured.lock().expect("探针响应锁");
     let probe_measurement = quote_measurement(&probe_responses[0]);
@@ -2530,7 +2567,7 @@ async fn real_adjacent_trade_level_delta_and_suppressed_book_apply_queue_reducti
         + i64::try_from(registration.receipt.transit.inbound_delay_ms)
             .expect("test delay fits i64");
     session
-        .drive_direct_response_delivery_through(received_at)
+        .drive_private_delivery_after_platform_through_for_tests(received_at)
         .expect("真实样本响应交付");
     let responses = captured.lock().expect("capture mutex");
     let measurement = quote_measurement(&responses[0]);
@@ -2605,10 +2642,10 @@ async fn mutation_idempotency_reuses_one_business_effect_across_logical_request_
         .max()
         .expect("two registrations");
     session
-        .drive_direct_response_delivery_through(delivery_through)
+        .drive_private_delivery_after_platform_through_for_tests(delivery_through)
         .expect("first idempotent response delivery");
     session
-        .drive_direct_response_delivery_through(delivery_through)
+        .drive_private_delivery_after_platform_through_for_tests(delivery_through)
         .expect("second idempotent response delivery");
 
     let responses = captured.lock().expect("capture mutex");
@@ -2757,10 +2794,10 @@ async fn mutation_idempotency_freezes_rejection_after_market_state_improves() {
         .max()
         .expect("two registrations");
     session
-        .drive_direct_response_delivery_through(delivery_through)
+        .drive_private_delivery_after_platform_through_for_tests(delivery_through)
         .expect("first rejection response delivery");
     session
-        .drive_direct_response_delivery_through(delivery_through)
+        .drive_private_delivery_after_platform_through_for_tests(delivery_through)
         .expect("second rejection response delivery");
 
     let responses = captured.lock().expect("capture mutex");
@@ -2899,10 +2936,10 @@ async fn mutation_idempotency_freezes_evidence_unknown_after_resync() {
         .max()
         .expect("two registrations");
     session
-        .drive_direct_response_delivery_through(delivery_through)
+        .drive_private_delivery_after_platform_through_for_tests(delivery_through)
         .expect("first evidence response delivery");
     session
-        .drive_direct_response_delivery_through(delivery_through)
+        .drive_private_delivery_after_platform_through_for_tests(delivery_through)
         .expect("second evidence response delivery");
 
     let responses = captured.lock().expect("capture mutex");
@@ -3009,6 +3046,9 @@ async fn batch_mutation_idempotency_reuses_interleaved_item_effects_in_original_
     action_times.sort_unstable();
     assert_eq!(action_times.len(), 4);
     for action_at in action_times {
+        session
+            .drive_private_delivery_after_platform_through_for_tests(action_at - 1)
+            .expect("release any older lifecycle feedback before the interleaved action");
         close_platform_at(&mut session, action_at, 2);
         session
             .drive_next_execution_action_through(action_at)
@@ -3030,10 +3070,10 @@ async fn batch_mutation_idempotency_reuses_interleaved_item_effects_in_original_
         .max()
         .expect("two registrations");
     session
-        .drive_direct_response_delivery_through(delivery_through)
+        .drive_private_delivery_after_platform_through_for_tests(delivery_through)
         .expect("first batch response delivery");
     session
-        .drive_direct_response_delivery_through(delivery_through)
+        .drive_private_delivery_after_platform_through_for_tests(delivery_through)
         .expect("second batch response delivery");
 
     let responses = captured.lock().expect("batch capture mutex");
@@ -3149,17 +3189,15 @@ async fn batch_mutation_idempotency_reuses_interleaved_item_effects_in_original_
     );
     assert_eq!(session.simulated_order_count(), 2);
     assert_eq!(session.available_pusd(), Decimal::ZERO);
-    assert_eq!(session.principal_encumbered_pusd(), decimal("5"));
-    assert_eq!(
-        session.immediate_taker_fee_encumbered_pusd(),
-        decimal("0.084")
-    );
+    assert_eq!(session.principal_encumbered_pusd(), decimal("2"));
+    assert_eq!(session.immediate_taker_fee_encumbered_pusd(), Decimal::ZERO);
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn full_retry_reuses_the_same_arc_before_advancing_past_an_unfinished_request() {
     let seen = Arc::new(Mutex::new(Vec::<Arc<PostOrderDirectResponseV1>>::new()));
     let bridge_seen = Arc::clone(&seen);
+    let mut lifecycle_attempts = 0;
     let bridge = SubmissionResponseBridgeV1::new(
         move |response| {
             let mut seen = bridge_seen.lock().expect("Full bridge mutex");
@@ -3191,6 +3229,20 @@ async fn full_retry_reuses_the_same_arc_before_advancing_past_an_unfinished_requ
         |response| {
             SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
         },
+        move |response| {
+            lifecycle_attempts += 1;
+            if lifecycle_attempts == 1 {
+                SubmissionResponseAcceptanceV1::Full
+            } else {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            }
+        },
+        |feedback| {
+            SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
+        },
+        |feedback| {
+            SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
+        },
     );
     let mut session = ready_session("task23-full-retry", decimal("10"), 2, bridge).await;
     let first_request = gtc_request(&session, "full-first", 1, 1_200, "0.4", "5", true);
@@ -3218,33 +3270,43 @@ async fn full_retry_reuses_the_same_arc_before_advancing_past_an_unfinished_requ
         .expect("first processing");
     assert_eq!(
         session
-            .drive_direct_response_delivery_through(first_received)
+            .drive_private_delivery_after_platform_through_for_tests(first_received)
             .expect("first delivery attempt"),
         SubmissionDeliveryDispositionV1::Full
     );
     assert_eq!(session.model_visible_cursor().private_feedback_sequence, 0);
-    let available_after_business = session.available_pusd();
 
     let second_received = second.item.effective_processing_at_utc_ms
         + i64::try_from(second.receipt.transit.inbound_delay_ms).expect("delay fits i64");
-    assert_eq!(
-        session
-            .drive_direct_response_delivery_through(second_received)
-            .expect("Full retry must precede the unfinished second response barrier"),
-        SubmissionDeliveryDispositionV1::Delivered
-    );
-    assert_eq!(session.model_visible_cursor().private_feedback_sequence, 1);
-    assert_eq!(session.available_pusd(), available_after_business);
-    let seen = seen.lock().expect("Full bridge mutex");
-    assert_eq!(seen.len(), 2);
-    assert!(Arc::ptr_eq(&seen[0], &seen[1]));
-    assert_eq!(seen[0].metadata, seen[1].metadata);
-    drop(seen);
-
     close_platform_at(&mut session, second.item.effective_processing_at_utc_ms, 2);
     session
         .drive_next_execution_action_through(second.item.effective_processing_at_utc_ms)
         .expect("previously registered second request remains processable");
+    let available_after_business = session.available_pusd();
+    assert_eq!(
+        session
+            .drive_private_delivery_after_platform_through_for_tests(second_received)
+            .expect("Full retry must precede the unfinished second response barrier"),
+        SubmissionDeliveryDispositionV1::Full
+    );
+    assert_eq!(session.model_visible_cursor().private_feedback_sequence, 1);
+    assert_eq!(
+        session
+            .drive_private_delivery_after_platform_through_for_tests(second_received)
+            .expect("direct response Full retry must preserve the same response"),
+        SubmissionDeliveryDispositionV1::Delivered
+    );
+    assert_eq!(session.model_visible_cursor().private_feedback_sequence, 4);
+    assert_eq!(session.available_pusd(), available_after_business);
+    let seen = seen.lock().expect("Full bridge mutex");
+    assert_eq!(seen.len(), 3);
+    assert!(Arc::ptr_eq(&seen[0], &seen[1]));
+    assert_eq!(seen[0].metadata, seen[1].metadata);
+    assert_eq!(seen[0].metadata.global_request_id, "full-first");
+    assert_eq!(seen[2].metadata.global_request_id, "full-second");
+    assert!(!Arc::ptr_eq(&seen[1], &seen[2]));
+    drop(seen);
+
     assert_eq!(session.available_pusd(), decimal("6"));
     let retry = session
         .post_order(second_request)
@@ -3281,6 +3343,21 @@ async fn wrong_confirmation_closes_only_new_ingress_and_keeps_existing_work() {
         |response| {
             SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
         },
+        |response| {
+            let mut wrong = response.metadata.delivery_confirmation();
+            wrong.payload_sha256 = Sha256Hex("0".repeat(64));
+            SubmissionResponseAcceptanceV1::Accepted(wrong)
+        },
+        |feedback| {
+            let mut wrong = feedback.metadata.delivery_confirmation();
+            wrong.payload_sha256 = Sha256Hex("0".repeat(64));
+            SubmissionResponseAcceptanceV1::Accepted(wrong)
+        },
+        |feedback| {
+            let mut wrong = feedback.metadata.delivery_confirmation();
+            wrong.payload_sha256 = Sha256Hex("0".repeat(64));
+            SubmissionResponseAcceptanceV1::Accepted(wrong)
+        },
     );
     let mut session = ready_session("task23-wrong-confirm", decimal("10"), 2, bridge).await;
     let first_request = gtc_request(&session, "wrong-first", 1, 1_200, "0.4", "5", true);
@@ -3303,10 +3380,14 @@ async fn wrong_confirmation_closes_only_new_ingress_and_keeps_existing_work() {
     session
         .drive_next_execution_action_through(first.item.effective_processing_at_utc_ms)
         .expect("first processing");
+    close_platform_at(&mut session, second.item.effective_processing_at_utc_ms, 2);
+    session
+        .drive_next_execution_action_through(second.item.effective_processing_at_utc_ms)
+        .expect("existing second request must process before the later private cutoff");
     let received_at = first.item.effective_processing_at_utc_ms
         + i64::try_from(first.receipt.transit.inbound_delay_ms).expect("delay fits i64");
     assert!(matches!(
-        session.drive_direct_response_delivery_through(received_at),
+        session.drive_private_delivery_after_platform_through_for_tests(received_at),
         Err(SimExecutionContractErrorV1::ResponseDeliveryIdentityConflict)
     ));
     assert_eq!(session.model_visible_cursor().private_feedback_sequence, 0);
@@ -3332,10 +3413,6 @@ async fn wrong_confirmation_closes_only_new_ingress_and_keeps_existing_work() {
         Err(SimExecutionContractErrorV1::ResponseBridgeClosed)
     ));
 
-    close_platform_at(&mut session, second.item.effective_processing_at_utc_ms, 2);
-    session
-        .drive_next_execution_action_through(second.item.effective_processing_at_utc_ms)
-        .expect("existing second request must still process");
     assert_eq!(session.available_pusd(), decimal("6"));
     assert_eq!(
         session
@@ -3350,6 +3427,9 @@ async fn wrong_confirmation_closes_only_new_ingress_and_keeps_existing_work() {
 #[tokio::test(flavor = "current_thread")]
 async fn disconnected_bridge_retains_the_response_and_registration_receipt() {
     let bridge = SubmissionResponseBridgeV1::new(
+        |_| SubmissionResponseAcceptanceV1::Disconnected,
+        |_| SubmissionResponseAcceptanceV1::Disconnected,
+        |_| SubmissionResponseAcceptanceV1::Disconnected,
         |_| SubmissionResponseAcceptanceV1::Disconnected,
         |_| SubmissionResponseAcceptanceV1::Disconnected,
         |_| SubmissionResponseAcceptanceV1::Disconnected,
@@ -3373,7 +3453,7 @@ async fn disconnected_bridge_retains_the_response_and_registration_receipt() {
         + i64::try_from(registration.receipt.transit.inbound_delay_ms).expect("delay fits i64");
     assert_eq!(
         session
-            .drive_direct_response_delivery_through(received_at)
+            .drive_private_delivery_after_platform_through_for_tests(received_at)
             .expect("disconnected delivery"),
         SubmissionDeliveryDispositionV1::Closed
     );
@@ -3410,7 +3490,7 @@ async fn private_schedule_cannot_cross_an_unformed_direct_response() {
     let received_at = effective
         + i64::try_from(registration.receipt.transit.inbound_delay_ms).expect("delay fits i64");
     assert!(matches!(
-        session.drive_direct_response_delivery_through(received_at),
+        session.drive_private_delivery_through(received_at),
         Err(SimExecutionContractErrorV1::PrivateFactScheduleCrossesExpectedResponse(id))
             if id == "private-barrier"
     ));
@@ -3422,7 +3502,7 @@ async fn private_schedule_cannot_cross_an_unformed_direct_response() {
         .expect("barrier failure must leave action processable");
     assert_eq!(
         session
-            .drive_direct_response_delivery_through(received_at)
+            .drive_private_delivery_after_platform_through_for_tests(received_at)
             .expect("delivery after response formation"),
         SubmissionDeliveryDispositionV1::Delivered
     );

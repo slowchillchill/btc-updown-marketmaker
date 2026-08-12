@@ -12,8 +12,9 @@ use data_pipeline_core::{decode_execution_market_event_v3, parse_canonical_decim
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
 
-use crate::matching::MatchingStateErrorV1;
-use crate::scenario::{PlatformMarketV1, PlatformScenarioV1};
+use crate::market_directory::SessionMarketDirectoryV1;
+use crate::matching::{AuthorizedMarketEventEffectsV1, MatchingStateErrorV1};
+use crate::scenario::PlatformMarketV1;
 use crate::session::{SessionError, SimCallerRoleV1, SimSession};
 
 const CLOSED_BUCKET_HASH_DOMAIN_V1: &[u8] = b"SIM_CLOSED_MARKET_EVENT_BUCKET_V1\0";
@@ -41,6 +42,24 @@ pub(crate) struct ClosedMarketEventBucketV1 {
 }
 
 impl ClosedMarketEventBucketV1 {
+    pub(crate) fn drives_execution_for(&self, caller_role: SimCallerRoleV1) -> bool {
+        matches!(
+            (caller_role, self.path),
+            (
+                SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation,
+                MarketEventPathV1::HiddenPlatform
+            ) | (SimCallerRoleV1::Paper, MarketEventPathV1::PublicVisibility)
+        )
+    }
+
+    pub(crate) fn bucket_at_utc_ms(&self) -> i64 {
+        self.bucket_at_utc_ms
+    }
+
+    pub(crate) fn lifecycle_work_identity(&self) -> String {
+        bucket_sha256(self).0
+    }
+
     pub(crate) fn hidden(
         bucket_at_utc_ms: i64,
         start_index_position: u64,
@@ -89,6 +108,7 @@ pub(crate) enum MarketEventErrorV1 {
     DuplicateEventId(String),
     EventOutsideBucket { index: usize },
     UnknownMarket(String),
+    MarketStateAlreadyExists(String),
     MarketIdentityConflict(String),
     UnknownAsset(String),
     InitialSnapshotAlreadyLoaded(String),
@@ -102,6 +122,7 @@ pub(crate) enum MarketEventErrorV1 {
     IncompleteInitialLoad(Vec<String>),
     ResolutionBeforeEnd,
     ResolutionAssetConflict,
+    ResolutionConflict(String),
     BucketIdentityConflict,
     BucketStartPositionConflict { expected: u64, actual: u64 },
     ExecutionState(String),
@@ -119,9 +140,14 @@ impl fmt::Display for MarketEventErrorV1 {
             Self::EventOutsideBucket { index } => {
                 write!(formatter, "市场事件桶第 {index} 项不属于声明的毫秒桶")
             }
-            Self::UnknownMarket(id) => write!(formatter, "市场事件不属于进程场景：{id}"),
-            Self::MarketIdentityConflict(id) => write!(formatter, "市场完整身份与场景冲突：{id}"),
-            Self::UnknownAsset(id) => write!(formatter, "市场事件资产不属于场景：{id}"),
+            Self::UnknownMarket(id) => write!(formatter, "市场事件不属于会话市场目录：{id}"),
+            Self::MarketStateAlreadyExists(id) => {
+                write!(formatter, "市场状态已经存在：{id}")
+            }
+            Self::MarketIdentityConflict(id) => {
+                write!(formatter, "市场完整身份与会话市场目录冲突：{id}")
+            }
+            Self::UnknownAsset(id) => write!(formatter, "市场事件资产不属于会话市场目录：{id}"),
             Self::InitialSnapshotAlreadyLoaded(id) => {
                 write!(formatter, "资产已经完成初始 L2 装载：{id}")
             }
@@ -151,6 +177,7 @@ impl fmt::Display for MarketEventErrorV1 {
             }
             Self::ResolutionBeforeEnd => write!(formatter, "合格市场判定早于市场 end_at"),
             Self::ResolutionAssetConflict => write!(formatter, "市场判定资产与场景冲突"),
+            Self::ResolutionConflict(id) => write!(formatter, "市场判定与已保留终态冲突：{id}"),
             Self::BucketIdentityConflict => write!(formatter, "同一闭合水位绑定了不同市场事件桶"),
             Self::BucketStartPositionConflict { expected, actual } => write!(
                 formatter,
@@ -172,7 +199,12 @@ impl From<SessionError> for MarketEventErrorV1 {
 
 impl From<MatchingStateErrorV1> for MarketEventErrorV1 {
     fn from(value: MatchingStateErrorV1) -> Self {
-        Self::ExecutionState(format!("{value:?}"))
+        match value {
+            MatchingStateErrorV1::ResolutionConflict(condition_id) => {
+                Self::ResolutionConflict(condition_id)
+            }
+            other => Self::ExecutionState(format!("{other:?}")),
+        }
     }
 }
 
@@ -199,11 +231,9 @@ pub(crate) struct MarketStateStoreV1 {
 }
 
 impl MarketStateStoreV1 {
-    pub(crate) fn new(scenario: &PlatformScenarioV1) -> Self {
-        let markets = scenario
-            .market_set()
+    pub(crate) fn new(directory: &SessionMarketDirectoryV1) -> Self {
+        let markets = directory
             .markets()
-            .iter()
             .map(|member| {
                 (
                     member.market().condition_id.0.clone(),
@@ -217,8 +247,33 @@ impl MarketStateStoreV1 {
         }
     }
 
+    pub(crate) fn insert_market(
+        &mut self,
+        market: &PlatformMarketV1,
+    ) -> Result<(), MarketEventErrorV1> {
+        let condition_id = &market.market().condition_id.0;
+        if self.markets.contains_key(condition_id) {
+            return Err(MarketEventErrorV1::MarketStateAlreadyExists(
+                condition_id.clone(),
+            ));
+        }
+        self.markets
+            .insert(condition_id.clone(), MarketStateV1::new(market));
+        Ok(())
+    }
+
     pub(crate) fn market(&self, condition_id: &str) -> Option<&MarketStateV1> {
         self.markets.get(condition_id)
+    }
+
+    fn mark_resolution_terminal_if_qualified(
+        &mut self,
+        condition_id: &str,
+        resolution: &MarketResolutionTerminalV3,
+    ) -> bool {
+        self.markets
+            .get_mut(condition_id)
+            .is_some_and(|market| market.mark_resolution_terminal_if_qualified(resolution))
     }
 
     fn advance_time_through(&mut self, closed_through_utc_ms: i64) {
@@ -359,6 +414,18 @@ impl MarketStateV1 {
         self.receive_only_resolution_event_id.as_ref()
     }
 
+    fn mark_resolution_terminal_if_qualified(
+        &mut self,
+        resolution: &MarketResolutionTerminalV3,
+    ) -> bool {
+        if self.qualified_resolution() == Some(resolution) {
+            self.lifecycle_phase = MarketLifecyclePhaseV1::ResolutionTerminal;
+            true
+        } else {
+            false
+        }
+    }
+
     fn initial_load_complete(&self) -> bool {
         self.assets.values().all(AssetMarketStateV1::is_initialized)
     }
@@ -476,8 +543,20 @@ impl MarketStateV1 {
                 if source_at < self.market.window.end_at_utc_ms {
                     return Err(MarketEventErrorV1::ResolutionBeforeEnd);
                 }
-                self.qualified_resolution = Some(terminal.clone());
-                self.lifecycle_phase = MarketLifecyclePhaseV1::ResolutionTerminal;
+                if self
+                    .qualified_resolution
+                    .as_ref()
+                    .is_some_and(|existing| existing != terminal)
+                {
+                    return Err(MarketEventErrorV1::ResolutionConflict(
+                        self.market.condition_id.0.clone(),
+                    ));
+                }
+                self.qualified_resolution
+                    .get_or_insert_with(|| terminal.clone());
+                if self.lifecycle_phase != MarketLifecyclePhaseV1::ResolutionTerminal {
+                    self.lifecycle_phase = MarketLifecyclePhaseV1::PostEndPendingResolution;
+                }
             }
         }
         Ok(())
@@ -708,11 +787,9 @@ pub(crate) struct AccountBookOverlayStoreV1 {
 }
 
 impl AccountBookOverlayStoreV1 {
-    pub(crate) fn new(scenario: &PlatformScenarioV1) -> Self {
-        let markets = scenario
-            .market_set()
+    pub(crate) fn new(directory: &SessionMarketDirectoryV1) -> Self {
+        let markets = directory
             .markets()
-            .iter()
             .map(|market| {
                 let assets = market
                     .assets()
@@ -723,6 +800,29 @@ impl AccountBookOverlayStoreV1 {
             })
             .collect();
         Self { markets }
+    }
+
+    pub(crate) fn insert_market(
+        &mut self,
+        market: &PlatformMarketV1,
+    ) -> Result<(), MatchingStateErrorV1> {
+        let condition_id = &market.market().condition_id.0;
+        if self.markets.contains_key(condition_id) {
+            return Err(MatchingStateErrorV1::MarketAlreadyInitialized(
+                condition_id.clone(),
+            ));
+        }
+        let assets = market
+            .assets()
+            .iter()
+            .map(|asset| (asset.token_id.0.clone(), AccountBookOverlayV1::default()))
+            .collect();
+        self.markets.insert(condition_id.clone(), assets);
+        Ok(())
+    }
+
+    pub(crate) fn contains_market(&self, condition_id: &str) -> bool {
+        self.markets.contains_key(condition_id)
     }
 
     pub(crate) fn quantity(
@@ -955,10 +1055,59 @@ fn bucket_sha256(bucket: &ClosedMarketEventBucketV1) -> Sha256Hex {
 }
 
 impl SimSession {
+    pub(crate) fn mark_redeemed_resolution_terminal(
+        &mut self,
+        condition_id: &str,
+        resolution: &MarketResolutionTerminalV3,
+    ) {
+        if let Some(hidden_platform_markets) = self.hidden_platform_markets_mut() {
+            hidden_platform_markets.mark_resolution_terminal_if_qualified(condition_id, resolution);
+        }
+        self.public_markets_mut()
+            .mark_resolution_terminal_if_qualified(condition_id, resolution);
+    }
+
+    pub(crate) fn last_applied_bucket_coordinates_match(
+        &self,
+        bucket: &ClosedMarketEventBucketV1,
+    ) -> bool {
+        let current_store = match bucket.path {
+            MarketEventPathV1::HiddenPlatform => {
+                let Some(store) = self.hidden_platform_markets() else {
+                    return false;
+                };
+                store
+            }
+            MarketEventPathV1::PublicVisibility => self.public_markets(),
+        };
+        current_store
+            .last_applied_bucket
+            .as_ref()
+            .is_some_and(|previous| {
+                previous.bucket_at_utc_ms == bucket.bucket_at_utc_ms
+                    && previous.next_index_position == bucket.next_index_position
+            })
+    }
+
+    #[cfg(test)]
     pub(crate) fn apply_closed_market_event_bucket(
         &mut self,
         bucket: ClosedMarketEventBucketV1,
     ) -> Result<MarketBucketApplyDispositionV1, MarketEventErrorV1> {
+        self.apply_closed_market_event_bucket_with_lifecycle_effects(bucket)
+            .map(|(disposition, _)| disposition)
+    }
+
+    pub(crate) fn apply_closed_market_event_bucket_with_lifecycle_effects(
+        &mut self,
+        bucket: ClosedMarketEventBucketV1,
+    ) -> Result<
+        (
+            MarketBucketApplyDispositionV1,
+            AuthorizedMarketEventEffectsV1,
+        ),
+        MarketEventErrorV1,
+    > {
         if bucket.path == MarketEventPathV1::HiddenPlatform
             && self.session_spec().caller_role == SimCallerRoleV1::Paper
         {
@@ -981,7 +1130,10 @@ impl SimSession {
                 if bucket.closure == MillisecondBucketClosureV1::EndOfInput {
                     current_store.validate_initial_load_complete(&BTreeMap::new())?;
                 }
-                return Ok(MarketBucketApplyDispositionV1::PhysicalRetry);
+                return Ok((
+                    MarketBucketApplyDispositionV1::PhysicalRetry,
+                    AuthorizedMarketEventEffectsV1::default(),
+                ));
             }
             return Err(MarketEventErrorV1::BucketIdentityConflict);
         }
@@ -1001,33 +1153,67 @@ impl SimSession {
             });
         }
 
-        let prepared = current_store.prepare_events(&events, bucket.path)?;
+        let mut prepared = current_store.prepare_events(&events, bucket.path)?;
         if bucket.closure == MillisecondBucketClosureV1::EndOfInput {
             current_store.validate_initial_load_complete(&prepared)?;
         }
-        let authorized_execution_path = match self.session_spec().caller_role {
-            SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation => {
-                bucket.path == MarketEventPathV1::HiddenPlatform
-            }
-            SimCallerRoleV1::Paper => bucket.path == MarketEventPathV1::PublicVisibility,
-        };
+        let qualified_resolution_event_ids = events
+            .iter()
+            .filter_map(|event| {
+                let ExecutionMarketEventPayloadV3::MarketResolutionTerminal(resolution) =
+                    &event.payload
+                else {
+                    return None;
+                };
+                let source_at_utc_ms = event.time.source_event_at_utc_ms?;
+                let market = prepared.get(&event.market.condition_id.0)?;
+                (source_at_utc_ms >= market.end_at_utc_ms()
+                    && market.qualified_resolution() == Some(resolution))
+                .then(|| event.event_id.0.clone())
+            })
+            .collect::<BTreeSet<_>>();
+        let authorized_execution_path =
+            bucket.drives_execution_for(self.session_spec().caller_role);
         let prepared_execution = if authorized_execution_path {
             let mut state = self.execution_state().clone();
-            state.apply_authorized_market_events(
-                self.scenario(),
+            let lifecycle_effects = state.apply_authorized_market_events(
+                self.market_directory(),
                 bucket.bucket_at_utc_ms,
                 &events,
+                self.finality_policy(),
+                &self
+                    .rule_snapshot()
+                    .snapshot()
+                    .project_account_rules
+                    .lifecycle_account_behavior
+                    .value,
+                &qualified_resolution_event_ids,
             )?;
             let query_projection_changed =
                 state.query_projection_changed_from(self.execution_state());
-            Some((state, query_projection_changed))
+            Some((state, query_projection_changed, lifecycle_effects))
         } else {
             None
         };
         let prepared_query_projection_revision = match &prepared_execution {
-            Some((_, true)) => Some(self.prepare_next_platform_state_revision()?),
-            Some((_, false)) | None => None,
+            Some((_, true, _)) => Some(self.prepare_next_platform_state_revision()?),
+            Some((_, false, _)) | None => None,
         };
+        let execution_with_current_bucket = prepared_execution
+            .as_ref()
+            .map(|(state, _, _)| state)
+            .unwrap_or_else(|| self.execution_state());
+        let mut observed_redeemed_resolutions = Vec::new();
+        for (condition_id, market) in &mut prepared {
+            let Some(resolution) =
+                execution_with_current_bucket.redeemed_market_resolution(condition_id)
+            else {
+                continue;
+            };
+            if market.mark_resolution_terminal_if_qualified(resolution) {
+                observed_redeemed_resolutions.push((condition_id.clone(), resolution.clone()));
+            }
+        }
         match bucket.path {
             MarketEventPathV1::HiddenPlatform => {
                 self.validate_platform_prefix_closure(
@@ -1058,12 +1244,19 @@ impl SimSession {
                 );
             }
         }
-        if let Some((state, _)) = prepared_execution {
+        let lifecycle_effects = if let Some((state, _, lifecycle_effects)) = prepared_execution {
             if let Some(next_revision) = prepared_query_projection_revision {
                 self.commit_prepared_platform_state_revision(next_revision);
             }
             self.replace_execution_state(state);
+            lifecycle_effects
+        } else {
+            AuthorizedMarketEventEffectsV1::default()
+        };
+        for (condition_id, resolution) in observed_redeemed_resolutions {
+            self.mark_redeemed_resolution_terminal(&condition_id, &resolution);
         }
-        Ok(MarketBucketApplyDispositionV1::Applied)
+        self.record_successful_market_input();
+        Ok((MarketBucketApplyDispositionV1::Applied, lifecycle_effects))
     }
 }

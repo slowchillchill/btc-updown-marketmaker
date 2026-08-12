@@ -1,32 +1,47 @@
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::num::NonZeroUsize;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use contracts::{EXECUTION_MARKET_EVENT_SCHEMA_V3, Sha256Hex};
+pub use contracts::SimCallerRoleV1;
+use contracts::{
+    ACCOUNT_OPENING_ANCHOR_SCHEMA_V1, AccountInstanceKeyV1, AccountOpeningAnchorV1,
+    EXECUTION_MARKET_EVENT_SCHEMA_V3, ExactDecimal, MARKET_ENROLLMENT_SCHEMA_V1,
+    MarketEnrollmentIdentityV1, MarketEnrollmentV1, PlatformAccountSnapshotV1,
+    PlatformOutcomeBalanceV1, PlatformSourceV1, Sha256Hex, TokenId,
+};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::account::InitialAccountStateV1;
+use crate::finality::TradeFinalityPolicyV1;
 use crate::latency_profile::{DelaySampleDomainV1, EmpiricalDelayProfile};
 use crate::market::{AccountBookOverlayStoreV1, MarketStateStoreV1};
+use crate::market_directory::{SessionMarketDirectoryErrorV1, SessionMarketDirectoryV1};
 use crate::matching::{ExecutionStateV1, MatchingStateErrorV1};
 use crate::platform_rules::SealedProcessRuleSnapshot;
-use crate::scenario::PlatformScenarioV1;
+use crate::scenario::{PlatformMarketV1, PlatformScenarioV1};
 
 pub const SIM_EXECUTION_CONTRACT_V1: &str = "sim_execution_contract_v1";
+pub const SESSION_SPEC_SCHEMA_V2: &str = "session_spec_v2";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SimCallerRoleV1 {
-    ModelTrain,
-    OfflineEvaluation,
-    Paper,
-}
+const SESSION_SPEC_HASH_DOMAIN_V2: &str = "SIM_SESSION_SPEC_SHA256_V2";
+const ACCOUNT_OPENING_ANCHOR_ID_DOMAIN_V1: &str = "SIM_ACCOUNT_OPENING_ANCHOR_ID_V1";
+const ACCOUNT_OPENING_ANCHOR_HASH_DOMAIN_V1: &str = "SIM_ACCOUNT_OPENING_ANCHOR_SHA256_V1";
+const MARKET_ENROLLMENT_ID_DOMAIN_V1: &str = "SIM_MARKET_ENROLLMENT_ID_V1";
+const MARKET_ENROLLMENT_HASH_DOMAIN_V1: &str = "SIM_MARKET_ENROLLMENT_SHA256_V1";
+const MARKET_ENROLLMENT_CHAIN_HASH_DOMAIN_V1: &str = "SIM_MARKET_ENROLLMENT_CHAIN_SHA256_V1";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SessionSpecV1 {
+pub struct SessionSpecV2 {
+    pub run_id: String,
     pub session_id: String,
     pub account_id: String,
     pub caller_role: SimCallerRoleV1,
     pub caller_instance_id: String,
+    pub creation_request_id: String,
+    pub response_bridge_binding_id: String,
     pub initial_account_state: InitialAccountStateV1,
     pub response_outbox_capacity: NonZeroUsize,
     pub market_set_sha256: Sha256Hex,
@@ -36,76 +51,518 @@ pub struct SessionSpecV1 {
     pub market_event_schema_version: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MarketEnrollmentRequestV1 {
+    pub enrollment_request_id: String,
+    pub market: PlatformMarketV1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionInitializationStateV1 {
+    PreparedLedgerInit,
+    Active,
+    InitializationFailedClosed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionInitializationSnapshotV1 {
+    pub state: SessionInitializationStateV1,
+    pub activation_id: Option<String>,
+    pub failure_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionCreationDispositionV2 {
+    NewPrepared,
+    ExistingPrepared,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionCreationControlResultV2 {
+    pub disposition: SessionCreationDispositionV2,
+    pub account_instance_key: AccountInstanceKeyV1,
+    pub opening_anchor: AccountOpeningAnchorV1,
+    pub session_spec_sha256: Sha256Hex,
+    pub initialization: SessionInitializationSnapshotV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActivateSessionRequestV1 {
+    pub session_id: String,
+    pub account_instance_key: AccountInstanceKeyV1,
+    pub opening_anchor_id: String,
+    pub opening_anchor_sha256: Sha256Hex,
+    pub activation_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FailSessionInitializationRequestV1 {
+    pub session_id: String,
+    pub account_instance_key: AccountInstanceKeyV1,
+    pub opening_anchor_id: String,
+    pub opening_anchor_sha256: Sha256Hex,
+    pub failure_id: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionInitializationControlDispositionV1 {
+    Activated,
+    ExistingActive,
+    FailedClosed,
+    ExistingFailedClosed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionInitializationControlResultV1 {
+    pub disposition: SessionInitializationControlDispositionV1,
+    pub snapshot: SessionInitializationSnapshotV1,
+}
+
+type SharedSessionInitializationV1 = Arc<Mutex<SessionInitializationSnapshotV1>>;
+
+#[derive(Clone)]
+struct SessionCreationRecordV2 {
+    spec: SessionSpecV2,
+    spec_sha256: Sha256Hex,
+    account_instance_key: AccountInstanceKeyV1,
+    opening_anchor: AccountOpeningAnchorV1,
+    initialization: SharedSessionInitializationV1,
+}
+
+#[derive(Clone)]
+struct CapitalIssuanceFenceV1 {
+    opening_anchor: AccountOpeningAnchorV1,
+    creation_request_id: String,
+    spec_sha256: Sha256Hex,
+}
+
+#[derive(Clone)]
+struct MarketEnrollmentStateV1 {
+    directory: SessionMarketDirectoryV1,
+    chain: Vec<MarketEnrollmentV1>,
+    records_by_request_id: BTreeMap<String, usize>,
+    business_input_started: bool,
+    paper_candidate_condition_ids: BTreeSet<String>,
+    paper_candidate_token_ids: BTreeSet<String>,
+}
+
+impl MarketEnrollmentStateV1 {
+    fn new(directory: SessionMarketDirectoryV1) -> Self {
+        Self {
+            directory,
+            chain: Vec::new(),
+            records_by_request_id: BTreeMap::new(),
+            business_input_started: false,
+            paper_candidate_condition_ids: BTreeSet::new(),
+            paper_candidate_token_ids: BTreeSet::new(),
+        }
+    }
+}
+
+pub(crate) struct PreparedSimSessionV2 {
+    pub session: SimSession,
+    pub control: SessionCreationControlResultV2,
+}
+
 pub struct SimProcessRoot {
+    run_id: Arc<str>,
+    finality_policy: Arc<TradeFinalityPolicyV1>,
     rule_snapshot: Arc<SealedProcessRuleSnapshot>,
     latency_profile: Arc<EmpiricalDelayProfile>,
     scenario: Arc<PlatformScenarioV1>,
-    registered_session_ids: BTreeSet<String>,
+    initial_market_directory: SessionMarketDirectoryV1,
+    session_creations: BTreeMap<String, SessionCreationRecordV2>,
+    account_issuance_fence: BTreeMap<AccountInstanceKeyV1, CapitalIssuanceFenceV1>,
+    creation_requests: BTreeMap<String, String>,
 }
 
 impl SimProcessRoot {
-    pub fn new(
+    pub fn try_new(
+        run_id: String,
+        finality_policy: Arc<TradeFinalityPolicyV1>,
         rule_snapshot: Arc<SealedProcessRuleSnapshot>,
         latency_profile: Arc<EmpiricalDelayProfile>,
         scenario: Arc<PlatformScenarioV1>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, SimProcessRootErrorV1> {
+        if run_id.is_empty() || run_id.trim() != run_id {
+            return Err(SimProcessRootErrorV1::InvalidRunId);
+        }
+        for (override_index, member) in finality_policy.failure_overrides().iter().enumerate() {
+            if member.selector().account_instance_key().run_id != run_id {
+                return Err(SimProcessRootErrorV1::FinalitySelectorRunMismatch { override_index });
+            }
+        }
+        let initial_market_directory = SessionMarketDirectoryV1::try_from_scenario(&scenario)
+            .map_err(|error| {
+                SimProcessRootErrorV1::InvalidInitialMarketDirectory(error.to_string())
+            })?;
+        Ok(Self {
+            run_id: Arc::from(run_id),
+            finality_policy,
             rule_snapshot,
             latency_profile,
             scenario,
-            registered_session_ids: BTreeSet::new(),
-        }
+            initial_market_directory,
+            session_creations: BTreeMap::new(),
+            account_issuance_fence: BTreeMap::new(),
+            creation_requests: BTreeMap::new(),
+        })
     }
 
-    pub fn create_session(&mut self, spec: SessionSpecV1) -> Result<SimSession, SessionError> {
-        validate_session_spec(&spec)?;
-        if spec.market_set_sha256 != *self.scenario.market_set_sha256() {
-            return Err(SessionError::MarketSetIdentityMismatch);
+    #[must_use]
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    #[must_use]
+    pub fn finality_policy(&self) -> &Arc<TradeFinalityPolicyV1> {
+        &self.finality_policy
+    }
+
+    pub fn create_session(
+        &mut self,
+        spec: SessionSpecV2,
+    ) -> Result<PreparedSimSessionV2, SessionError> {
+        let (account_instance_key, spec_sha256, opening_anchor) =
+            self.validated_creation_material(&spec)?;
+        if let Some(existing) = self.session_creations.get(&spec.session_id) {
+            if existing.spec == spec
+                && existing.spec_sha256 == spec_sha256
+                && existing.account_instance_key == account_instance_key
+                && existing.opening_anchor == opening_anchor
+            {
+                return Err(SessionError::SessionAlreadyCreatedRequiresRetry(
+                    spec.session_id,
+                ));
+            }
+            return Err(SessionError::SessionCreationIdentityConflict(
+                spec.session_id,
+            ));
         }
-        if spec.scenario_sha256 != *self.scenario.scenario_sha256() {
-            return Err(SessionError::ScenarioIdentityMismatch);
+        if self
+            .account_issuance_fence
+            .contains_key(&account_instance_key)
+        {
+            return Err(SessionError::AccountInstanceAlreadyReserved);
         }
-        if self.registered_session_ids.contains(&spec.session_id) {
-            return Err(SessionError::DuplicateSessionId(spec.session_id));
+        if self
+            .creation_requests
+            .contains_key(&spec.creation_request_id)
+        {
+            return Err(SessionError::CreationRequestConflict(
+                spec.creation_request_id,
+            ));
         }
+        let market_directory = self.initial_market_directory.clone();
         let hidden_platform_markets = match spec.caller_role {
             SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation => {
-                Some(MarketStateStoreV1::new(&self.scenario))
+                Some(MarketStateStoreV1::new(&market_directory))
             }
             SimCallerRoleV1::Paper => None,
         };
-        let public_markets = MarketStateStoreV1::new(&self.scenario);
-        let execution_state = ExecutionStateV1::new(&self.scenario, &spec.initial_account_state)
-            .map_err(SessionError::from)?;
-        self.registered_session_ids.insert(spec.session_id.clone());
-        Ok(SimSession {
+        let public_markets = MarketStateStoreV1::new(&market_directory);
+        let execution_state = ExecutionStateV1::new(
+            &market_directory,
+            &opening_anchor,
+            self.rule_snapshot.as_ref(),
+        )
+        .map_err(SessionError::from)?;
+        let initialization = Arc::new(Mutex::new(SessionInitializationSnapshotV1 {
+            state: SessionInitializationStateV1::PreparedLedgerInit,
+            activation_id: None,
+            failure_id: None,
+        }));
+        let control = SessionCreationControlResultV2 {
+            disposition: SessionCreationDispositionV2::NewPrepared,
+            account_instance_key: account_instance_key.clone(),
+            opening_anchor: opening_anchor.clone(),
+            session_spec_sha256: spec_sha256.clone(),
+            initialization: initialization_snapshot(&initialization)?,
+        };
+        let session = SimSession {
+            finality_policy: Arc::clone(&self.finality_policy),
             rule_snapshot: Arc::clone(&self.rule_snapshot),
             latency_profile: Arc::clone(&self.latency_profile),
             scenario: Arc::clone(&self.scenario),
             hidden_platform_markets,
             public_markets,
             execution_state,
-            state: SessionState::new(spec),
+            market_enrollment: Arc::new(MarketEnrollmentStateV1::new(market_directory)),
+            initialization: Arc::clone(&initialization),
+            state: SessionState::new(spec.clone()),
+        };
+        self.session_creations.insert(
+            spec.session_id.clone(),
+            SessionCreationRecordV2 {
+                spec: spec.clone(),
+                spec_sha256: spec_sha256.clone(),
+                account_instance_key: account_instance_key.clone(),
+                opening_anchor: opening_anchor.clone(),
+                initialization,
+            },
+        );
+        self.account_issuance_fence.insert(
+            account_instance_key,
+            CapitalIssuanceFenceV1 {
+                opening_anchor,
+                creation_request_id: spec.creation_request_id.clone(),
+                spec_sha256,
+            },
+        );
+        self.creation_requests
+            .insert(spec.creation_request_id, spec.session_id);
+        Ok(PreparedSimSessionV2 { session, control })
+    }
+
+    pub fn retry_create_session(
+        &self,
+        spec: &SessionSpecV2,
+    ) -> Result<SessionCreationControlResultV2, SessionError> {
+        let (account_instance_key, spec_sha256, opening_anchor) =
+            self.validated_creation_material(spec)?;
+        let record = self
+            .session_creations
+            .get(&spec.session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(spec.session_id.clone()))?;
+        if record.spec != *spec
+            || record.spec_sha256 != spec_sha256
+            || record.account_instance_key != account_instance_key
+            || record.opening_anchor != opening_anchor
+            || self.creation_requests.get(&spec.creation_request_id) != Some(&spec.session_id)
+        {
+            return Err(SessionError::SessionCreationIdentityConflict(
+                spec.session_id.clone(),
+            ));
+        }
+        let fence = self
+            .account_issuance_fence
+            .get(&account_instance_key)
+            .ok_or_else(|| {
+                SessionError::SessionCreationIdentityConflict(spec.session_id.clone())
+            })?;
+        if fence.opening_anchor != opening_anchor
+            || fence.creation_request_id != spec.creation_request_id
+            || fence.spec_sha256 != spec_sha256
+        {
+            return Err(SessionError::SessionCreationIdentityConflict(
+                spec.session_id.clone(),
+            ));
+        }
+        let initialization = initialization_snapshot(&record.initialization)?;
+        if initialization.state != SessionInitializationStateV1::PreparedLedgerInit {
+            return Err(SessionError::SessionCreationRetryNotPrepared);
+        }
+        Ok(SessionCreationControlResultV2 {
+            disposition: SessionCreationDispositionV2::ExistingPrepared,
+            account_instance_key,
+            opening_anchor,
+            session_spec_sha256: spec_sha256,
+            initialization,
         })
     }
 
+    pub fn activate_session(
+        &self,
+        request: ActivateSessionRequestV1,
+    ) -> Result<SessionInitializationControlResultV1, SessionError> {
+        validate_activation_request(&request)?;
+        let record = self.validated_control_record(
+            &request.session_id,
+            &request.account_instance_key,
+            &request.opening_anchor_id,
+            &request.opening_anchor_sha256,
+        )?;
+        let mut initialization = record
+            .initialization
+            .lock()
+            .map_err(|_| SessionError::InitializationStateUnavailable)?;
+        let disposition = match initialization.state {
+            SessionInitializationStateV1::PreparedLedgerInit => {
+                initialization.state = SessionInitializationStateV1::Active;
+                initialization.activation_id = Some(request.activation_id);
+                SessionInitializationControlDispositionV1::Activated
+            }
+            SessionInitializationStateV1::Active
+                if initialization.activation_id.as_deref()
+                    == Some(request.activation_id.as_str()) =>
+            {
+                SessionInitializationControlDispositionV1::ExistingActive
+            }
+            SessionInitializationStateV1::Active => {
+                return Err(SessionError::ActivationIdentityConflict);
+            }
+            SessionInitializationStateV1::InitializationFailedClosed => {
+                return Err(SessionError::InitializationFailedClosed);
+            }
+        };
+        Ok(SessionInitializationControlResultV1 {
+            disposition,
+            snapshot: initialization.clone(),
+        })
+    }
+
+    pub fn fail_session_initialization(
+        &self,
+        request: FailSessionInitializationRequestV1,
+    ) -> Result<SessionInitializationControlResultV1, SessionError> {
+        validate_failure_request(&request)?;
+        let record = self.validated_control_record(
+            &request.session_id,
+            &request.account_instance_key,
+            &request.opening_anchor_id,
+            &request.opening_anchor_sha256,
+        )?;
+        let mut initialization = record
+            .initialization
+            .lock()
+            .map_err(|_| SessionError::InitializationStateUnavailable)?;
+        let disposition = match initialization.state {
+            SessionInitializationStateV1::PreparedLedgerInit => {
+                initialization.state = SessionInitializationStateV1::InitializationFailedClosed;
+                initialization.failure_id = Some(request.failure_id);
+                SessionInitializationControlDispositionV1::FailedClosed
+            }
+            SessionInitializationStateV1::InitializationFailedClosed
+                if initialization.failure_id.as_deref() == Some(request.failure_id.as_str()) =>
+            {
+                SessionInitializationControlDispositionV1::ExistingFailedClosed
+            }
+            SessionInitializationStateV1::InitializationFailedClosed => {
+                return Err(SessionError::FailureIdentityConflict);
+            }
+            SessionInitializationStateV1::Active => {
+                return Err(SessionError::InitializationAlreadyActive);
+            }
+        };
+        Ok(SessionInitializationControlResultV1 {
+            disposition,
+            snapshot: initialization.clone(),
+        })
+    }
+
+    pub fn session_initialization(
+        &self,
+        opening_anchor: &AccountOpeningAnchorV1,
+    ) -> Result<SessionInitializationSnapshotV1, SessionError> {
+        validate_initialization_identity(
+            &opening_anchor.session_id,
+            &opening_anchor.account_instance_key,
+            &opening_anchor.anchor_id,
+            &opening_anchor.anchor_sha256,
+        )?;
+        let record = self.validated_control_record(
+            &opening_anchor.session_id,
+            &opening_anchor.account_instance_key,
+            &opening_anchor.anchor_id,
+            &opening_anchor.anchor_sha256,
+        )?;
+        if &record.opening_anchor != opening_anchor {
+            return Err(SessionError::InitializationControlIdentityConflict);
+        }
+        initialization_snapshot(&record.initialization)
+    }
+
+    fn validated_creation_material(
+        &self,
+        spec: &SessionSpecV2,
+    ) -> Result<(AccountInstanceKeyV1, Sha256Hex, AccountOpeningAnchorV1), SessionError> {
+        validate_session_spec(spec)?;
+        if spec.run_id != self.run_id.as_ref() {
+            return Err(SessionError::RunIdMismatch);
+        }
+        if spec.market_set_sha256 != *self.scenario.market_set_sha256() {
+            return Err(SessionError::MarketSetIdentityMismatch);
+        }
+        if spec.scenario_sha256 != *self.scenario.scenario_sha256() {
+            return Err(SessionError::ScenarioIdentityMismatch);
+        }
+        let account_instance_key = account_instance_key(spec);
+        let spec_sha256 = session_spec_sha256(spec)?;
+        let opening_anchor =
+            account_opening_anchor(spec, account_instance_key.clone(), &self.scenario)?;
+        Ok((account_instance_key, spec_sha256, opening_anchor))
+    }
+
+    fn validated_control_record(
+        &self,
+        session_id: &str,
+        account_instance_key: &AccountInstanceKeyV1,
+        opening_anchor_id: &str,
+        opening_anchor_sha256: &Sha256Hex,
+    ) -> Result<&SessionCreationRecordV2, SessionError> {
+        let record = self
+            .session_creations
+            .get(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(session_id.to_owned()))?;
+        if &record.account_instance_key != account_instance_key
+            || record.opening_anchor.anchor_id != opening_anchor_id
+            || &record.opening_anchor.anchor_sha256 != opening_anchor_sha256
+        {
+            return Err(SessionError::InitializationControlIdentityConflict);
+        }
+        let fence = self
+            .account_issuance_fence
+            .get(account_instance_key)
+            .ok_or(SessionError::InitializationControlIdentityConflict)?;
+        if fence.opening_anchor != record.opening_anchor
+            || fence.creation_request_id != record.spec.creation_request_id
+            || fence.spec_sha256 != record.spec_sha256
+        {
+            return Err(SessionError::InitializationControlIdentityConflict);
+        }
+        Ok(record)
+    }
+
+    pub(crate) fn enroll_market(
+        &self,
+        session: &mut SimSession,
+        request: MarketEnrollmentRequestV1,
+    ) -> Result<MarketEnrollmentV1, SessionError> {
+        let session_id = session.session_spec().session_id.clone();
+        let record = self
+            .session_creations
+            .get(&session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(session_id.clone()))?;
+        if record.spec != *session.session_spec()
+            || !Arc::ptr_eq(&record.initialization, &session.initialization)
+        {
+            return Err(SessionError::MarketEnrollmentSessionOwnershipConflict);
+        }
+        session.enroll_market(
+            request,
+            &record.account_instance_key,
+            &record.opening_anchor,
+        )
+    }
+
     pub fn registered_session_count(&self) -> usize {
-        self.registered_session_ids.len()
+        self.session_creations.len()
     }
 }
 
 #[derive(Clone)]
 pub struct SimSession {
+    finality_policy: Arc<TradeFinalityPolicyV1>,
     rule_snapshot: Arc<SealedProcessRuleSnapshot>,
     latency_profile: Arc<EmpiricalDelayProfile>,
     scenario: Arc<PlatformScenarioV1>,
     hidden_platform_markets: Option<MarketStateStoreV1>,
     public_markets: MarketStateStoreV1,
     execution_state: ExecutionStateV1,
+    market_enrollment: Arc<MarketEnrollmentStateV1>,
+    initialization: SharedSessionInitializationV1,
     state: SessionState,
 }
 
 impl SimSession {
+    pub fn run_id(&self) -> &str {
+        &self.state.spec.run_id
+    }
+
+    pub fn finality_policy(&self) -> &Arc<TradeFinalityPolicyV1> {
+        &self.finality_policy
+    }
+
     pub fn rule_snapshot(&self) -> &Arc<SealedProcessRuleSnapshot> {
         &self.rule_snapshot
     }
@@ -118,8 +575,181 @@ impl SimSession {
         &self.scenario
     }
 
-    pub fn session_spec(&self) -> &SessionSpecV1 {
+    pub fn session_spec(&self) -> &SessionSpecV2 {
         &self.state.spec
+    }
+
+    pub(crate) fn initialization_snapshot(
+        &self,
+    ) -> Result<SessionInitializationSnapshotV1, SessionError> {
+        initialization_snapshot(&self.initialization)
+    }
+
+    pub(crate) fn require_active(&self) -> Result<(), SessionError> {
+        let snapshot = self.initialization_snapshot()?;
+        if snapshot.state == SessionInitializationStateV1::Active {
+            Ok(())
+        } else {
+            Err(SessionError::SessionNotActive(snapshot.state))
+        }
+    }
+
+    pub(crate) fn market_directory(&self) -> &SessionMarketDirectoryV1 {
+        &self.market_enrollment.directory
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shares_market_enrollment_storage_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.market_enrollment, &other.market_enrollment)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn market_enrollment_storage_identity(&self) -> usize {
+        Arc::as_ptr(&self.market_enrollment) as usize
+    }
+
+    pub(crate) fn enroll_market(
+        &mut self,
+        request: MarketEnrollmentRequestV1,
+        account_instance_key: &AccountInstanceKeyV1,
+        opening_anchor: &AccountOpeningAnchorV1,
+    ) -> Result<MarketEnrollmentV1, SessionError> {
+        self.require_active()?;
+        if !is_stable_text(&request.enrollment_request_id) {
+            return Err(SessionError::InvalidMarketEnrollment(
+                "enrollment_request_id 为空或含首尾空白",
+            ));
+        }
+        if let Some(existing_index) = self
+            .market_enrollment
+            .records_by_request_id
+            .get(&request.enrollment_request_id)
+        {
+            let existing = &self.market_enrollment.chain[*existing_index];
+            if &existing.market == request.market.market()
+                && &existing.assets == request.market.assets()
+            {
+                return Ok(existing.clone());
+            }
+            return Err(SessionError::MarketEnrollmentRequestConflict(
+                request.enrollment_request_id,
+            ));
+        }
+        if matches!(
+            self.session_spec().caller_role,
+            SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation
+        ) && self.market_enrollment.business_input_started
+        {
+            return Err(SessionError::MarketEnrollmentFrozenAfterBusinessInput);
+        }
+
+        let condition_id = &request.market.market().condition_id.0;
+        if self
+            .market_enrollment
+            .paper_candidate_condition_ids
+            .contains(condition_id)
+        {
+            return Err(SessionError::MarketEnrollmentCandidateAlreadyUsed(
+                condition_id.clone(),
+            ));
+        }
+        if let Some(asset) = request.market.assets().iter().find(|asset| {
+            self.market_enrollment
+                .paper_candidate_token_ids
+                .contains(&asset.token_id.0)
+        }) {
+            return Err(SessionError::MarketEnrollmentCandidateAlreadyUsed(
+                asset.token_id.0.clone(),
+            ));
+        }
+
+        let enrollment = build_market_enrollment(
+            &request,
+            account_instance_key,
+            opening_anchor,
+            self.market_enrollment.chain.last(),
+        )?;
+        let mut working = self.clone();
+        let working_market_enrollment = Arc::make_mut(&mut working.market_enrollment);
+        working_market_enrollment
+            .directory
+            .try_insert(request.market.clone())
+            .map_err(SessionError::from)?;
+        working
+            .public_markets
+            .insert_market(&request.market)
+            .map_err(|error| SessionError::MarketEnrollmentState(error.to_string()))?;
+        if let Some(hidden) = working.hidden_platform_markets.as_mut() {
+            hidden
+                .insert_market(&request.market)
+                .map_err(|error| SessionError::MarketEnrollmentState(error.to_string()))?;
+        }
+        working
+            .execution_state
+            .insert_market(&request.market)
+            .map_err(SessionError::from)?;
+        let enrollment_index = working_market_enrollment.chain.len();
+        working_market_enrollment.chain.push(enrollment.clone());
+        working_market_enrollment
+            .records_by_request_id
+            .insert(request.enrollment_request_id, enrollment_index);
+        *self = working;
+        Ok(enrollment)
+    }
+
+    pub(crate) fn record_successful_business_request(
+        &mut self,
+        condition_ids: BTreeSet<String>,
+        token_ids: BTreeSet<String>,
+    ) {
+        match self.session_spec().caller_role {
+            SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation => {
+                if !self.market_enrollment.business_input_started {
+                    Arc::make_mut(&mut self.market_enrollment).business_input_started = true;
+                }
+            }
+            SimCallerRoleV1::Paper => {
+                let new_condition_ids = condition_ids
+                    .into_iter()
+                    .filter(|condition_id| {
+                        !self.market_enrollment.directory.contains(condition_id)
+                            && !self
+                                .market_enrollment
+                                .paper_candidate_condition_ids
+                                .contains(condition_id)
+                    })
+                    .collect::<BTreeSet<_>>();
+                let new_token_ids = token_ids
+                    .into_iter()
+                    .filter(|token_id| {
+                        !self.market_enrollment.directory.contains_token(token_id)
+                            && !self
+                                .market_enrollment
+                                .paper_candidate_token_ids
+                                .contains(token_id)
+                    })
+                    .collect::<BTreeSet<_>>();
+                if !new_condition_ids.is_empty() || !new_token_ids.is_empty() {
+                    let market_enrollment = Arc::make_mut(&mut self.market_enrollment);
+                    market_enrollment
+                        .paper_candidate_condition_ids
+                        .extend(new_condition_ids);
+                    market_enrollment
+                        .paper_candidate_token_ids
+                        .extend(new_token_ids);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn record_successful_market_input(&mut self) {
+        if matches!(
+            self.session_spec().caller_role,
+            SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation
+        ) && !self.market_enrollment.business_input_started
+        {
+            Arc::make_mut(&mut self.market_enrollment).business_input_started = true;
+        }
     }
 
     pub fn platform_prefix_cursor(&self) -> &PlatformPrefixCursorV1 {
@@ -256,6 +886,29 @@ impl SimSession {
         self.state.private_fact_schedule_closed_through_utc_ms
     }
 
+    #[cfg(test)]
+    pub(crate) fn logical_platform_driven_through(&self) -> Option<i64> {
+        self.state.closed_action_through_utc_ms
+    }
+
+    pub(crate) fn commit_logical_platform_driven_through(&mut self, logical_time_utc_ms: i64) {
+        self.state.closed_action_through_utc_ms = Some(
+            self.state
+                .closed_action_through_utc_ms
+                .map_or(logical_time_utc_ms, |current| {
+                    current.max(logical_time_utc_ms)
+                }),
+        );
+    }
+
+    pub(crate) fn next_private_fact_received_at_through(
+        &self,
+        received_at_utc_ms: i64,
+    ) -> Option<i64> {
+        self.state
+            .next_private_fact_received_at_through(received_at_utc_ms)
+    }
+
     pub(crate) fn expect_direct_response(
         &mut self,
         global_request_id: &str,
@@ -280,6 +933,17 @@ impl SimSession {
         candidate: &VisiblePrivateFactV1,
     ) -> Result<(), SessionError> {
         self.state.confirm_prepared_private_fact(candidate)
+    }
+
+    pub(crate) fn validate_prepared_private_fact(
+        &self,
+        candidate: &VisiblePrivateFactV1,
+    ) -> Result<(), SessionError> {
+        self.state.validate_prepared_private_fact(candidate)
+    }
+
+    pub(crate) fn commit_prevalidated_private_fact(&mut self, candidate: &VisiblePrivateFactV1) {
+        self.state.commit_prevalidated_private_fact(candidate);
     }
 
     pub(crate) fn register_and_schedule_request(
@@ -447,6 +1111,30 @@ impl SimSession {
         )
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SimProcessRootErrorV1 {
+    InvalidRunId,
+    FinalitySelectorRunMismatch { override_index: usize },
+    InvalidInitialMarketDirectory(String),
+}
+
+impl fmt::Display for SimProcessRootErrorV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidRunId => write!(formatter, "运行根 run_id 不能为空或带首尾空白"),
+            Self::FinalitySelectorRunMismatch { override_index } => write!(
+                formatter,
+                "第 {override_index} 个成交最终性覆盖不属于本运行根"
+            ),
+            Self::InvalidInitialMarketDirectory(message) => {
+                write!(formatter, "初始会话市场目录非法：{message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SimProcessRootErrorV1 {}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PlatformPrefixCursorV1 {
@@ -628,7 +1316,30 @@ pub struct QueryRevisionV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionError {
     InvalidSessionSpec(&'static str),
-    DuplicateSessionId(String),
+    SessionIdentitySerialization(String),
+    RunIdMismatch,
+    SessionAlreadyCreatedRequiresRetry(String),
+    AccountInstanceAlreadyReserved,
+    CreationRequestConflict(String),
+    SessionNotFound(String),
+    SessionCreationIdentityConflict(String),
+    SessionCreationRetryNotPrepared,
+    InvalidInitializationControl(&'static str),
+    InitializationStateUnavailable,
+    InitializationControlIdentityConflict,
+    ActivationIdentityConflict,
+    FailureIdentityConflict,
+    InitializationFailedClosed,
+    InitializationAlreadyActive,
+    SessionNotActive(SessionInitializationStateV1),
+    InvalidMarketEnrollment(&'static str),
+    MarketEnrollmentSessionOwnershipConflict,
+    MarketEnrollmentRequestConflict(String),
+    MarketEnrollmentFrozenAfterBusinessInput,
+    MarketEnrollmentCandidateAlreadyUsed(String),
+    MarketEnrollmentDirectory(String),
+    MarketEnrollmentState(String),
+    MarketEnrollmentSequenceOverflow,
     MarketSetIdentityMismatch,
     ScenarioIdentityMismatch,
     CursorRegression(&'static str),
@@ -650,6 +1361,8 @@ pub enum SessionError {
     PrivateFactScheduleClosed,
     PrivateFactScheduleNotClosed,
     PrivateFactScheduleCrossesExpectedResponse(String),
+    PrivateFactScheduleCrossesPendingAction(String),
+    PrivateFactScheduleCrossesPendingPlatformWork(String),
     PrivateFactIdentityConflict(String),
     PrivateEmissionSequenceConflict(u64),
     PrivateFactConfirmationConflict,
@@ -675,7 +1388,83 @@ impl fmt::Display for SessionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidSessionSpec(message) => write!(formatter, "会话规格非法：{message}"),
-            Self::DuplicateSessionId(session_id) => write!(formatter, "会话身份重复：{session_id}"),
+            Self::SessionIdentitySerialization(message) => {
+                write!(formatter, "会话身份规范序列化失败：{message}")
+            }
+            Self::RunIdMismatch => write!(formatter, "会话 run_id 与运行根不匹配"),
+            Self::SessionAlreadyCreatedRequiresRetry(session_id) => {
+                write!(
+                    formatter,
+                    "会话已经创建，必须使用无桥创建重试：{session_id}"
+                )
+            }
+            Self::AccountInstanceAlreadyReserved => {
+                write!(formatter, "账户实例键已经保留，不能再次签发初始资金")
+            }
+            Self::CreationRequestConflict(request_id) => {
+                write!(formatter, "开户请求身份已经绑定另一会话：{request_id}")
+            }
+            Self::SessionNotFound(session_id) => write!(formatter, "会话不存在：{session_id}"),
+            Self::SessionCreationIdentityConflict(session_id) => {
+                write!(
+                    formatter,
+                    "会话创建重试与原开户身份或载荷冲突：{session_id}"
+                )
+            }
+            Self::SessionCreationRetryNotPrepared => {
+                write!(formatter, "只有准备态会话可以返回 EXISTING_PREPARED")
+            }
+            Self::InvalidInitializationControl(message) => {
+                write!(formatter, "会话初始化控制请求非法：{message}")
+            }
+            Self::InitializationStateUnavailable => {
+                write!(formatter, "会话初始化状态不可用")
+            }
+            Self::InitializationControlIdentityConflict => {
+                write!(formatter, "会话初始化控制身份与开户锚点不匹配")
+            }
+            Self::ActivationIdentityConflict => {
+                write!(formatter, "激活身份与已经生效的激活结果冲突")
+            }
+            Self::FailureIdentityConflict => {
+                write!(formatter, "初始化失败身份或证据与原结果冲突")
+            }
+            Self::InitializationFailedClosed => {
+                write!(formatter, "会话初始化已经失败关闭，不能再激活")
+            }
+            Self::InitializationAlreadyActive => {
+                write!(formatter, "会话已经激活，不能再标记初始化失败")
+            }
+            Self::SessionNotActive(state) => {
+                write!(formatter, "会话尚未开放业务入口，当前初始化状态：{state:?}")
+            }
+            Self::InvalidMarketEnrollment(message) => {
+                write!(formatter, "市场登记控制请求非法：{message}")
+            }
+            Self::MarketEnrollmentSessionOwnershipConflict => {
+                write!(formatter, "市场登记会话句柄不属于当前运行根")
+            }
+            Self::MarketEnrollmentRequestConflict(request_id) => {
+                write!(formatter, "市场登记请求身份绑定不同市场：{request_id}")
+            }
+            Self::MarketEnrollmentFrozenAfterBusinessInput => {
+                write!(
+                    formatter,
+                    "训练或离线评估会话已经接纳业务输入，市场目录已冻结"
+                )
+            }
+            Self::MarketEnrollmentCandidateAlreadyUsed(identity) => {
+                write!(formatter, "候选市场身份已经被业务请求使用：{identity}")
+            }
+            Self::MarketEnrollmentDirectory(message) => {
+                write!(formatter, "市场登记目录冲突：{message}")
+            }
+            Self::MarketEnrollmentState(message) => {
+                write!(formatter, "市场登记状态扩展失败：{message}")
+            }
+            Self::MarketEnrollmentSequenceOverflow => {
+                write!(formatter, "市场登记链长度溢出")
+            }
             Self::MarketSetIdentityMismatch => write!(formatter, "会话市场集摘要与进程场景不匹配"),
             Self::ScenarioIdentityMismatch => write!(formatter, "会话场景摘要与进程场景不匹配"),
             Self::CursorRegression(message) => write!(formatter, "游标倒退或不闭合：{message}"),
@@ -712,6 +1501,15 @@ impl fmt::Display for SessionError {
             }
             Self::PrivateFactScheduleCrossesExpectedResponse(id) => {
                 write!(formatter, "私有事实计划水位跨过尚未形成的直接响应：{id}")
+            }
+            Self::PrivateFactScheduleCrossesPendingAction(id) => {
+                write!(formatter, "私有事实计划水位跨过尚未处理的逻辑动作：{id}")
+            }
+            Self::PrivateFactScheduleCrossesPendingPlatformWork(id) => {
+                write!(
+                    formatter,
+                    "私有事实计划水位跨过尚未处理的平台逻辑工作：{id}"
+                )
             }
             Self::PrivateFactIdentityConflict(id) => write!(formatter, "私有事实身份冲突：{id}"),
             Self::PrivateEmissionSequenceConflict(sequence) => {
@@ -758,6 +1556,12 @@ impl From<MatchingStateErrorV1> for SessionError {
     }
 }
 
+impl From<SessionMarketDirectoryErrorV1> for SessionError {
+    fn from(value: SessionMarketDirectoryErrorV1) -> Self {
+        Self::MarketEnrollmentDirectory(value.to_string())
+    }
+}
+
 #[derive(Clone)]
 struct RequestRecord {
     context: RequestContextV1,
@@ -800,7 +1604,7 @@ impl PreparedRequestRegistrationV1 {
 
 #[derive(Clone)]
 struct SessionState {
-    spec: SessionSpecV1,
+    spec: SessionSpecV2,
     platform_prefix: PlatformPrefixCursorV1,
     public_visibility: PublicVisibilityCursorV1,
     private_feedback_sequence: u64,
@@ -828,7 +1632,7 @@ struct SessionState {
 }
 
 impl SessionState {
-    fn new(spec: SessionSpecV1) -> Self {
+    fn new(spec: SessionSpecV2) -> Self {
         Self {
             spec,
             platform_prefix: PlatformPrefixCursorV1::default(),
@@ -1013,8 +1817,30 @@ impl SessionState {
                 request_id.clone(),
             ));
         }
+        if let Some((key, action)) = self.pending_actions.first_key_value()
+            && key.effective_processing_at_utc_ms <= received_at_utc_ms
+        {
+            return Err(SessionError::PrivateFactScheduleCrossesPendingAction(
+                action.global_request_id.clone(),
+            ));
+        }
+        if self
+            .closed_action_through_utc_ms
+            .is_none_or(|closed| closed < received_at_utc_ms)
+        {
+            return Err(SessionError::PrivateFactScheduleCrossesPendingPlatformWork(
+                format!("LOGICAL_PLATFORM:{received_at_utc_ms}"),
+            ));
+        }
         self.private_fact_schedule_closed_through_utc_ms = Some(received_at_utc_ms);
         Ok(())
+    }
+
+    fn next_private_fact_received_at_through(&self, received_at_utc_ms: i64) -> Option<i64> {
+        self.pending_private_facts
+            .first_key_value()
+            .map(|(key, _)| key.received_at_utc_ms)
+            .filter(|next| *next <= received_at_utc_ms)
     }
 
     fn expect_direct_response(&mut self, global_request_id: &str) -> Result<(), SessionError> {
@@ -1103,6 +1929,15 @@ impl SessionState {
         &mut self,
         candidate: &VisiblePrivateFactV1,
     ) -> Result<(), SessionError> {
+        self.validate_prepared_private_fact(candidate)?;
+        self.commit_prevalidated_private_fact(candidate);
+        Ok(())
+    }
+
+    fn validate_prepared_private_fact(
+        &self,
+        candidate: &VisiblePrivateFactV1,
+    ) -> Result<(), SessionError> {
         let expected = self
             .prepare_next_private_fact_through(candidate.received_at_utc_ms)?
             .ok_or(SessionError::PrivateFactConfirmationConflict)?;
@@ -1113,11 +1948,41 @@ impl SessionState {
         let key = self
             .private_fact_keys
             .get(&identity)
-            .cloned()
             .ok_or(SessionError::PrivateFactConfirmationConflict)?;
+        if self.pending_private_facts.get(key) != Some(&candidate.evidence) {
+            return Err(SessionError::PrivateFactConfirmationConflict);
+        }
+        if let PrivateVisibilityEvidenceV1::LifecycleFeedback { feedback_id } = &candidate.evidence
+        {
+            let timing = self
+                .lifecycle_feedback
+                .get(feedback_id)
+                .ok_or(SessionError::PrivateFactConfirmationConflict)?;
+            if timing.feedback_received_at_utc_ms != candidate.received_at_utc_ms
+                || timing.private_emission_sequence != candidate.private_emission_sequence
+            {
+                return Err(SessionError::PrivateFactConfirmationConflict);
+            }
+        }
+        Ok(())
+    }
+
+    fn commit_prevalidated_private_fact(&mut self, candidate: &VisiblePrivateFactV1) {
+        debug_assert!(self.validate_prepared_private_fact(candidate).is_ok());
+        let identity = candidate.evidence.identity();
+        let key = self
+            .private_fact_keys
+            .remove(&identity)
+            .expect("已验证私有事实必须保留身份键");
         self.pending_private_facts
             .remove(&key)
-            .ok_or(SessionError::PrivateFactConfirmationConflict)?;
+            .expect("已验证私有事实必须仍是统一队头");
+        if let PrivateVisibilityEvidenceV1::LifecycleFeedback { feedback_id } = &candidate.evidence
+        {
+            self.lifecycle_feedback
+                .remove(feedback_id)
+                .expect("已验证生命周期反馈必须仍保留时序绑定");
+        }
         self.private_feedback_sequence = candidate.private_feedback_sequence;
         self.private_fact_received_at_by_sequence
             .push(candidate.received_at_utc_ms);
@@ -1127,7 +1992,6 @@ impl SessionState {
                     closed.max(candidate.received_at_utc_ms)
                 }),
         );
-        Ok(())
     }
 
     fn take_private_facts_through(
@@ -1454,6 +2318,10 @@ impl SessionState {
             .get_mut(global_request_id)
             .ok_or_else(|| SessionError::RequestNotFound(global_request_id.to_owned()))?
             .response_transit = Some(response_transit.clone());
+        let removed = self
+            .expected_direct_response_request_ids
+            .remove(global_request_id);
+        debug_assert!(removed);
         Ok(response_transit)
     }
 
@@ -1674,9 +2542,11 @@ impl SessionState {
             .first_key_value()
             .map(|(key, action)| (*key, action.clone()))
         else {
+            self.closed_action_through_utc_ms = Some(effective_processing_at_utc_ms);
             return Ok(None);
         };
         if key.effective_processing_at_utc_ms > effective_processing_at_utc_ms {
+            self.closed_action_through_utc_ms = Some(effective_processing_at_utc_ms);
             return Ok(None);
         }
         if !self.sealed_request_ids.contains(&action.global_request_id) {
@@ -1884,10 +2754,370 @@ impl SessionState {
     }
 }
 
-fn validate_session_spec(spec: &SessionSpecV1) -> Result<(), SessionError> {
-    if spec.session_id.is_empty()
+#[derive(Serialize)]
+struct SessionSpecIdentityMaterialV2<'a> {
+    schema_version: &'static str,
+    run_id: &'a str,
+    session_id: &'a str,
+    account_id: &'a str,
+    caller_role: SimCallerRoleV1,
+    caller_instance_id: &'a str,
+    creation_request_id: &'a str,
+    response_bridge_binding_id: &'a str,
+    initial_account_state_sha256: &'a Sha256Hex,
+    response_outbox_capacity: u64,
+    market_set_sha256: &'a Sha256Hex,
+    scenario_sha256: &'a Sha256Hex,
+    session_seed: &'a Sha256Hex,
+    execution_contract_version: &'a str,
+    market_event_schema_version: &'a str,
+}
+
+#[derive(Serialize)]
+struct AccountOpeningAnchorIdentityMaterialV1<'a> {
+    schema_version: &'static str,
+    account_instance_key: &'a AccountInstanceKeyV1,
+    session_id: &'a str,
+    initial_scenario_sha256: &'a Sha256Hex,
+    initial_market_set_sha256: &'a Sha256Hex,
+    initial_account_state_sha256: &'a Sha256Hex,
+    initial_platform_account: &'a PlatformAccountSnapshotV1,
+}
+
+#[derive(Serialize)]
+struct AccountOpeningAnchorHashMaterialV1<'a> {
+    schema_version: &'static str,
+    anchor_id: &'a str,
+    account_instance_key: &'a AccountInstanceKeyV1,
+    session_id: &'a str,
+    initial_scenario_sha256: &'a Sha256Hex,
+    initial_market_set_sha256: &'a Sha256Hex,
+    initial_account_state_sha256: &'a Sha256Hex,
+    initial_platform_account: &'a PlatformAccountSnapshotV1,
+}
+
+#[derive(Serialize)]
+struct MarketEnrollmentIdMaterialV1<'a> {
+    schema_version: &'static str,
+    enrollment_request_id: &'a str,
+    account_instance_key: &'a AccountInstanceKeyV1,
+    opening_anchor_id: &'a str,
+    opening_anchor_sha256: &'a Sha256Hex,
+    previous_enrollment: Option<&'a MarketEnrollmentIdentityV1>,
+    market: &'a contracts::MarketIdentityV2,
+    assets: &'a [contracts::AssetIdentityV1; 2],
+    enrollment_chain_length: u64,
+}
+
+#[derive(Serialize)]
+struct MarketEnrollmentHashMaterialV1<'a> {
+    schema_version: &'static str,
+    enrollment_id: &'a str,
+    enrollment_request_id: &'a str,
+    account_instance_key: &'a AccountInstanceKeyV1,
+    opening_anchor_id: &'a str,
+    opening_anchor_sha256: &'a Sha256Hex,
+    previous_enrollment: Option<&'a MarketEnrollmentIdentityV1>,
+    market: &'a contracts::MarketIdentityV2,
+    assets: &'a [contracts::AssetIdentityV1; 2],
+    enrollment_chain_length: u64,
+}
+
+#[derive(Serialize)]
+struct MarketEnrollmentChainHashMaterialV1<'a> {
+    schema_version: &'static str,
+    account_instance_key: &'a AccountInstanceKeyV1,
+    opening_anchor_id: &'a str,
+    opening_anchor_sha256: &'a Sha256Hex,
+    previous_chain_sha256: Option<&'a Sha256Hex>,
+    new_chain_head: &'a MarketEnrollmentIdentityV1,
+    enrollment_chain_length: u64,
+}
+
+fn build_market_enrollment(
+    request: &MarketEnrollmentRequestV1,
+    account_instance_key: &AccountInstanceKeyV1,
+    opening_anchor: &AccountOpeningAnchorV1,
+    previous: Option<&MarketEnrollmentV1>,
+) -> Result<MarketEnrollmentV1, SessionError> {
+    let enrollment_chain_length = match previous {
+        Some(previous) => previous
+            .enrollment_chain_length
+            .checked_add(1)
+            .ok_or(SessionError::MarketEnrollmentSequenceOverflow)?,
+        None => 1,
+    };
+    let previous_enrollment = previous.map(|previous| MarketEnrollmentIdentityV1 {
+        enrollment_id: previous.enrollment_id.clone(),
+        enrollment_sha256: previous.enrollment_sha256.clone(),
+    });
+    let id_material = MarketEnrollmentIdMaterialV1 {
+        schema_version: MARKET_ENROLLMENT_SCHEMA_V1,
+        enrollment_request_id: &request.enrollment_request_id,
+        account_instance_key,
+        opening_anchor_id: &opening_anchor.anchor_id,
+        opening_anchor_sha256: &opening_anchor.anchor_sha256,
+        previous_enrollment: previous_enrollment.as_ref(),
+        market: request.market.market(),
+        assets: request.market.assets(),
+        enrollment_chain_length,
+    };
+    let enrollment_id = hash_json(MARKET_ENROLLMENT_ID_DOMAIN_V1, &id_material)?.0;
+    let hash_material = MarketEnrollmentHashMaterialV1 {
+        schema_version: MARKET_ENROLLMENT_SCHEMA_V1,
+        enrollment_id: &enrollment_id,
+        enrollment_request_id: &request.enrollment_request_id,
+        account_instance_key,
+        opening_anchor_id: &opening_anchor.anchor_id,
+        opening_anchor_sha256: &opening_anchor.anchor_sha256,
+        previous_enrollment: previous_enrollment.as_ref(),
+        market: request.market.market(),
+        assets: request.market.assets(),
+        enrollment_chain_length,
+    };
+    let enrollment_sha256 = hash_json(MARKET_ENROLLMENT_HASH_DOMAIN_V1, &hash_material)?;
+    let new_chain_head = MarketEnrollmentIdentityV1 {
+        enrollment_id: enrollment_id.clone(),
+        enrollment_sha256: enrollment_sha256.clone(),
+    };
+    let chain_material = MarketEnrollmentChainHashMaterialV1 {
+        schema_version: MARKET_ENROLLMENT_SCHEMA_V1,
+        account_instance_key,
+        opening_anchor_id: &opening_anchor.anchor_id,
+        opening_anchor_sha256: &opening_anchor.anchor_sha256,
+        previous_chain_sha256: previous.map(|previous| &previous.enrollment_chain_sha256),
+        new_chain_head: &new_chain_head,
+        enrollment_chain_length,
+    };
+    let enrollment_chain_sha256 =
+        hash_json(MARKET_ENROLLMENT_CHAIN_HASH_DOMAIN_V1, &chain_material)?;
+    Ok(MarketEnrollmentV1 {
+        schema_version: MARKET_ENROLLMENT_SCHEMA_V1.to_owned(),
+        enrollment_id,
+        enrollment_sha256,
+        enrollment_request_id: request.enrollment_request_id.clone(),
+        account_instance_key: account_instance_key.clone(),
+        opening_anchor_id: opening_anchor.anchor_id.clone(),
+        opening_anchor_sha256: opening_anchor.anchor_sha256.clone(),
+        previous_enrollment,
+        market: request.market.market().clone(),
+        assets: request.market.assets().clone(),
+        enrollment_chain_length,
+        enrollment_chain_sha256,
+    })
+}
+
+fn initialization_snapshot(
+    initialization: &SharedSessionInitializationV1,
+) -> Result<SessionInitializationSnapshotV1, SessionError> {
+    initialization
+        .lock()
+        .map(|snapshot| snapshot.clone())
+        .map_err(|_| SessionError::InitializationStateUnavailable)
+}
+
+fn validate_activation_request(request: &ActivateSessionRequestV1) -> Result<(), SessionError> {
+    validate_initialization_identity(
+        &request.session_id,
+        &request.account_instance_key,
+        &request.opening_anchor_id,
+        &request.opening_anchor_sha256,
+    )?;
+    if !is_stable_text(&request.activation_id) {
+        return Err(SessionError::InvalidInitializationControl(
+            "activation_id 为空或含首尾空白",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_failure_request(
+    request: &FailSessionInitializationRequestV1,
+) -> Result<(), SessionError> {
+    validate_initialization_identity(
+        &request.session_id,
+        &request.account_instance_key,
+        &request.opening_anchor_id,
+        &request.opening_anchor_sha256,
+    )?;
+    if !is_stable_text(&request.failure_id) {
+        return Err(SessionError::InvalidInitializationControl(
+            "failure_id 为空或含首尾空白",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_initialization_identity(
+    session_id: &str,
+    account_instance_key: &AccountInstanceKeyV1,
+    opening_anchor_id: &str,
+    opening_anchor_sha256: &Sha256Hex,
+) -> Result<(), SessionError> {
+    if !is_stable_text(session_id)
+        || !is_stable_text(&account_instance_key.run_id)
+        || !is_stable_text(&account_instance_key.caller_instance_id)
+        || !is_stable_text(&account_instance_key.account_id)
+        || !is_stable_text(opening_anchor_id)
+    {
+        return Err(SessionError::InvalidInitializationControl(
+            "开户身份字段为空或含首尾空白",
+        ));
+    }
+    if !is_sha256_hex(&opening_anchor_sha256.0) {
+        return Err(SessionError::InvalidInitializationControl(
+            "opening_anchor_sha256 非法",
+        ));
+    }
+    Ok(())
+}
+
+fn account_instance_key(spec: &SessionSpecV2) -> AccountInstanceKeyV1 {
+    AccountInstanceKeyV1 {
+        run_id: spec.run_id.clone(),
+        caller_role: spec.caller_role,
+        caller_instance_id: spec.caller_instance_id.clone(),
+        account_id: spec.account_id.clone(),
+        platform_source: PlatformSourceV1::Simulated,
+    }
+}
+
+fn session_spec_sha256(spec: &SessionSpecV2) -> Result<Sha256Hex, SessionError> {
+    let response_outbox_capacity = u64::try_from(spec.response_outbox_capacity.get())
+        .map_err(|_| SessionError::InvalidSessionSpec("响应发件箱容量超出 u64"))?;
+    let material = SessionSpecIdentityMaterialV2 {
+        schema_version: SESSION_SPEC_SCHEMA_V2,
+        run_id: &spec.run_id,
+        session_id: &spec.session_id,
+        account_id: &spec.account_id,
+        caller_role: spec.caller_role,
+        caller_instance_id: &spec.caller_instance_id,
+        creation_request_id: &spec.creation_request_id,
+        response_bridge_binding_id: &spec.response_bridge_binding_id,
+        initial_account_state_sha256: spec.initial_account_state.sha256(),
+        response_outbox_capacity,
+        market_set_sha256: &spec.market_set_sha256,
+        scenario_sha256: &spec.scenario_sha256,
+        session_seed: &spec.session_seed,
+        execution_contract_version: &spec.execution_contract_version,
+        market_event_schema_version: &spec.market_event_schema_version,
+    };
+    hash_json(SESSION_SPEC_HASH_DOMAIN_V2, &material)
+}
+
+fn account_opening_anchor(
+    spec: &SessionSpecV2,
+    account_instance_key: AccountInstanceKeyV1,
+    scenario: &PlatformScenarioV1,
+) -> Result<AccountOpeningAnchorV1, SessionError> {
+    let initial_platform_account = initial_platform_account(spec, scenario);
+    let identity_material = AccountOpeningAnchorIdentityMaterialV1 {
+        schema_version: ACCOUNT_OPENING_ANCHOR_SCHEMA_V1,
+        account_instance_key: &account_instance_key,
+        session_id: &spec.session_id,
+        initial_scenario_sha256: &spec.scenario_sha256,
+        initial_market_set_sha256: &spec.market_set_sha256,
+        initial_account_state_sha256: spec.initial_account_state.sha256(),
+        initial_platform_account: &initial_platform_account,
+    };
+    let anchor_id = hash_json(ACCOUNT_OPENING_ANCHOR_ID_DOMAIN_V1, &identity_material)?.0;
+    let hash_material = AccountOpeningAnchorHashMaterialV1 {
+        schema_version: ACCOUNT_OPENING_ANCHOR_SCHEMA_V1,
+        anchor_id: &anchor_id,
+        account_instance_key: &account_instance_key,
+        session_id: &spec.session_id,
+        initial_scenario_sha256: &spec.scenario_sha256,
+        initial_market_set_sha256: &spec.market_set_sha256,
+        initial_account_state_sha256: spec.initial_account_state.sha256(),
+        initial_platform_account: &initial_platform_account,
+    };
+    let anchor_sha256 = hash_json(ACCOUNT_OPENING_ANCHOR_HASH_DOMAIN_V1, &hash_material)?;
+    Ok(AccountOpeningAnchorV1 {
+        schema_version: ACCOUNT_OPENING_ANCHOR_SCHEMA_V1.to_owned(),
+        anchor_id,
+        anchor_sha256,
+        account_instance_key,
+        session_id: spec.session_id.clone(),
+        initial_scenario_sha256: spec.scenario_sha256.clone(),
+        initial_market_set_sha256: spec.market_set_sha256.clone(),
+        initial_account_state_sha256: spec.initial_account_state.sha256().clone(),
+        initial_platform_account,
+    })
+}
+
+fn initial_platform_account(
+    spec: &SessionSpecV2,
+    scenario: &PlatformScenarioV1,
+) -> PlatformAccountSnapshotV1 {
+    let mut outcome_tokens = BTreeMap::<String, TokenId>::new();
+    for market in scenario.market_set().markets() {
+        for asset in market.assets() {
+            outcome_tokens
+                .entry(asset.token_id.0.clone())
+                .or_insert_with(|| asset.token_id.clone());
+        }
+    }
+    let zero = exact_decimal(spec.initial_account_state.initial_encumbered_pusd());
+    let available = exact_decimal(spec.initial_account_state.available_pusd());
+    let mut outcome_tokens: Vec<_> = outcome_tokens.into_values().collect();
+    outcome_tokens.sort_by(|left, right| compare_token_ids(&left.0, &right.0));
+    PlatformAccountSnapshotV1 {
+        cash_pusd: available.clone(),
+        available_pusd: available,
+        principal_encumbrance_pusd: zero.clone(),
+        immediate_taker_fee_encumbrance_pusd: zero.clone(),
+        outcome_balances: outcome_tokens
+            .into_iter()
+            .map(|token_id| PlatformOutcomeBalanceV1 {
+                token_id,
+                balance_shares: exact_decimal(
+                    spec.initial_account_state.initial_outcome_balance_shares(),
+                ),
+            })
+            .collect(),
+        maker_rebate_receivable_pusd: exact_decimal(
+            spec.initial_account_state.initial_rebate_receivable_pusd(),
+        ),
+        taker_rebate_receivable_pusd: exact_decimal(
+            spec.initial_account_state.initial_rebate_receivable_pusd(),
+        ),
+        maker_rebate_locked_remainder_pusd: zero.clone(),
+        taker_rebate_locked_remainder_pusd: zero,
+    }
+}
+
+fn exact_decimal(value: rust_decimal::Decimal) -> ExactDecimal {
+    ExactDecimal(value.normalize().to_string())
+}
+
+fn compare_token_ids(left: &str, right: &str) -> Ordering {
+    left.len().cmp(&right.len()).then_with(|| left.cmp(right))
+}
+
+fn hash_json<T: Serialize>(domain: &str, value: &T) -> Result<Sha256Hex, SessionError> {
+    let bytes = serde_json::to_vec(value)
+        .map_err(|error| SessionError::SessionIdentitySerialization(error.to_string()))?;
+    let mut hash = Sha256::new();
+    hash.update((domain.len() as u64).to_be_bytes());
+    hash.update(domain.as_bytes());
+    hash.update((bytes.len() as u64).to_be_bytes());
+    hash.update(bytes);
+    Ok(Sha256Hex(format!("{:x}", hash.finalize())))
+}
+
+fn validate_session_spec(spec: &SessionSpecV2) -> Result<(), SessionError> {
+    if spec.run_id.is_empty()
+        || spec.session_id.is_empty()
         || spec.account_id.is_empty()
         || spec.caller_instance_id.is_empty()
+        || spec.creation_request_id.is_empty()
+        || spec.response_bridge_binding_id.is_empty()
+        || !is_stable_text(&spec.run_id)
+        || !is_stable_text(&spec.session_id)
+        || !is_stable_text(&spec.account_id)
+        || !is_stable_text(&spec.caller_instance_id)
+        || !is_stable_text(&spec.creation_request_id)
+        || !is_stable_text(&spec.response_bridge_binding_id)
     {
         return Err(SessionError::InvalidSessionSpec("身份字段为空"));
     }
@@ -1905,8 +3135,12 @@ fn validate_session_spec(spec: &SessionSpecV1) -> Result<(), SessionError> {
     Ok(())
 }
 
+fn is_stable_text(value: &str) -> bool {
+    !value.is_empty() && value.trim() == value
+}
+
 fn validate_request_context(
-    spec: &SessionSpecV1,
+    spec: &SessionSpecV2,
     context: &RequestContextV1,
 ) -> Result<(), SessionError> {
     if context.execution_contract_version != SIM_EXECUTION_CONTRACT_V1
@@ -1992,12 +3226,15 @@ mod tests {
         Sha256Hex(byte.repeat(64))
     }
 
-    fn spec() -> SessionSpecV1 {
-        SessionSpecV1 {
+    fn spec() -> SessionSpecV2 {
+        SessionSpecV2 {
+            run_id: "component-test-run".to_owned(),
             session_id: "session-a".to_owned(),
             account_id: "account-a".to_owned(),
             caller_role: SimCallerRoleV1::ModelTrain,
             caller_instance_id: "caller-a".to_owned(),
+            creation_request_id: "create-session-a".to_owned(),
+            response_bridge_binding_id: "bridge-session-a".to_owned(),
             initial_account_state: InitialAccountStateV1::try_new(rust_decimal::Decimal::new(
                 1_000, 0,
             ))
@@ -2024,6 +3261,45 @@ mod tests {
             request_sent_at_utc_ms: sent_at,
             model_visible_cursor: state.model_visible_cursor(),
         }
+    }
+
+    fn drive_idle_logical_platform_through(state: &mut SessionState, cutoff: i64) {
+        match state.spec.caller_role {
+            SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation => {
+                if state
+                    .platform_prefix
+                    .closed_through_source_event_at_utc_ms
+                    .is_none_or(|closed| closed < cutoff)
+                {
+                    state
+                        .close_platform_prefix_through(
+                            cutoff,
+                            state.platform_prefix.next_event_time_index_position,
+                        )
+                        .expect("close model-train platform input through private cutoff");
+                }
+            }
+            SimCallerRoleV1::Paper => {
+                if state
+                    .public_visibility
+                    .closed_through_received_at_utc_ms
+                    .is_none_or(|closed| closed < cutoff)
+                {
+                    state
+                        .advance_public_visibility_through(
+                            cutoff,
+                            state.public_visibility.next_visibility_index_position,
+                        )
+                        .expect("close paper platform input through private cutoff");
+                }
+            }
+        }
+        assert_eq!(
+            state
+                .take_next_action_through(cutoff)
+                .expect("drive logical platform work through private cutoff"),
+            None
+        );
     }
 
     #[test]
@@ -2066,6 +3342,9 @@ mod tests {
             .seal_logical_actions("request-1")
             .expect("seal request actions");
         state
+            .expect_direct_response("request-1")
+            .expect("track the still-unformed direct response");
+        state
             .close_platform_prefix_through(key.effective_processing_at_utc_ms, 1)
             .expect("close platform prefix");
         let action = state
@@ -2081,6 +3360,11 @@ mod tests {
         let completed = state
             .complete_direct_response("request-1", first.transit.platform_arrived_at_utc_ms + 5, 1)
             .expect("complete direct response");
+        assert!(
+            !state
+                .expected_direct_response_request_ids
+                .contains("request-1")
+        );
         let received_at = completed
             .response_received_at_utc_ms
             .expect("completed response received time");
@@ -2088,6 +3372,7 @@ mod tests {
             state.take_private_facts_through(received_at),
             Err(SessionError::PrivateFactScheduleNotClosed)
         );
+        drive_idle_logical_platform_through(&mut state, received_at - 1);
         state
             .close_private_fact_schedule_through(received_at - 1)
             .expect("close before response");
@@ -2097,6 +3382,7 @@ mod tests {
                 .expect("nothing visible before response")
                 .is_empty()
         );
+        drive_idle_logical_platform_through(&mut state, received_at);
         state
             .close_private_fact_schedule_through(received_at)
             .expect("close through response");
@@ -2203,12 +3489,236 @@ mod tests {
     }
 
     #[test]
+    fn no_action_closes_watermark_without_crossing_future_action() {
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let cutoff = 10_000;
+        let mut empty = SessionState::new(spec());
+        assert_eq!(
+            empty.take_next_action_through(cutoff),
+            Err(SessionError::PlatformPrefixNotClosed)
+        );
+        assert_eq!(empty.closed_action_through_utc_ms, None);
+        empty
+            .close_platform_prefix_through(cutoff, 1)
+            .expect("close empty action prefix");
+        assert_eq!(
+            empty
+                .take_next_action_through(cutoff)
+                .expect("empty schedule is closed through cutoff"),
+            None
+        );
+        assert_eq!(empty.closed_action_through_utc_ms, Some(cutoff));
+        assert_eq!(
+            empty.take_next_action_through(cutoff - 1),
+            Err(SessionError::ActionWatermarkClosed)
+        );
+        assert_eq!(empty.closed_action_through_utc_ms, Some(cutoff));
+
+        let mut state = SessionState::new(spec());
+        let first_sent_at = 1_000;
+        let first_outbound_delay = profile.sample_delay_ms(
+            state.spec.session_seed.0.as_bytes(),
+            "request-1",
+            DelaySampleDomainV1::RequestOutbound,
+        );
+        let late_outbound_delay = profile.sample_delay_ms(
+            state.spec.session_seed.0.as_bytes(),
+            "late-request",
+            DelaySampleDomainV1::RequestOutbound,
+        );
+        let first_arrived_at =
+            checked_add_delay(first_sent_at, first_outbound_delay).expect("first request arrival");
+        let late_outbound_delay =
+            i64::try_from(late_outbound_delay).expect("test outbound delay fits i64");
+        let cutoff = first_arrived_at + late_outbound_delay + 1;
+        let future_processing_delay =
+            u64::try_from(cutoff - first_arrived_at + 1).expect("future processing delay");
+        let first = state
+            .register_and_schedule_request(
+                &profile,
+                request(&state, "request-1", 1, first_sent_at),
+                sha("d"),
+                vec![LogicalActionPlanV1 {
+                    action_identity: "future-action".to_owned(),
+                    batch_item_ordinal: 0,
+                    processing_delay_ms: future_processing_delay,
+                }],
+            )
+            .expect("register one future action");
+        assert_eq!(
+            first.actions[0].key.effective_processing_at_utc_ms,
+            cutoff + 1
+        );
+        state
+            .close_platform_prefix_through(cutoff, 1)
+            .expect("close before future action");
+        assert_eq!(
+            state
+                .take_next_action_through(cutoff)
+                .expect("no action through cutoff"),
+            None
+        );
+        assert_eq!(state.closed_action_through_utc_ms, Some(cutoff));
+
+        let requests_before = state.requests.keys().cloned().collect::<Vec<_>>();
+        let action_keys_before = state.action_keys.clone();
+        let pending_actions_before = state.pending_actions.clone();
+        let sealed_requests_before = state.sealed_request_ids.clone();
+        let last_caller_sequence_before = state.last_caller_sequence;
+        let last_request_sent_at_before = state.last_request_sent_at_utc_ms;
+        let late_sent_at = cutoff - late_outbound_delay;
+        assert_eq!(
+            state.register_and_schedule_request(
+                &profile,
+                request(&state, "late-request", 2, late_sent_at),
+                sha("e"),
+                vec![LogicalActionPlanV1 {
+                    action_identity: "late-request-action".to_owned(),
+                    batch_item_ordinal: 0,
+                    processing_delay_ms: 0,
+                }],
+            ),
+            Err(SessionError::ActionWatermarkClosed)
+        );
+        assert_eq!(
+            state.requests.keys().cloned().collect::<Vec<_>>(),
+            requests_before
+        );
+        assert_eq!(state.action_keys, action_keys_before);
+        assert_eq!(state.pending_actions, pending_actions_before);
+        assert_eq!(state.sealed_request_ids, sealed_requests_before);
+        assert_eq!(state.last_caller_sequence, last_caller_sequence_before);
+        assert_eq!(
+            state.last_request_sent_at_utc_ms,
+            last_request_sent_at_before
+        );
+        assert_eq!(state.closed_action_through_utc_ms, Some(cutoff));
+
+        assert_eq!(
+            state.enqueue_logical_action(
+                "late-same-time-action".to_owned(),
+                "request-1".to_owned(),
+                LogicalActionKeyV1 {
+                    effective_processing_at_utc_ms: cutoff,
+                    caller_sequence: 1,
+                    batch_item_ordinal: 1,
+                },
+            ),
+            Err(SessionError::ActionWatermarkClosed)
+        );
+        assert_eq!(state.action_keys, action_keys_before);
+        assert_eq!(state.pending_actions, pending_actions_before);
+        assert_eq!(state.closed_action_through_utc_ms, Some(cutoff));
+
+        let future = state
+            .register_and_schedule_request(
+                &profile,
+                request(&state, "future-request", 2, cutoff + 100),
+                sha("f"),
+                vec![LogicalActionPlanV1 {
+                    action_identity: "future-request-action".to_owned(),
+                    batch_item_ordinal: 0,
+                    processing_delay_ms: 0,
+                }],
+            )
+            .expect("future request remains registrable");
+        assert!(future.actions[0].key.effective_processing_at_utc_ms > cutoff);
+        assert_eq!(state.closed_action_through_utc_ms, Some(cutoff));
+    }
+
+    #[test]
+    fn private_schedule_cannot_cross_an_unprocessed_action() {
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let mut state = SessionState::new(spec());
+        let scheduled = state
+            .register_and_schedule_request(
+                &profile,
+                request(&state, "pending-private-action", 1, 1_000),
+                sha("a"),
+                vec![LogicalActionPlanV1 {
+                    action_identity: "pending-private-action/item-0".to_owned(),
+                    batch_item_ordinal: 0,
+                    processing_delay_ms: 0,
+                }],
+            )
+            .expect("register pending action");
+        let effective = scheduled.actions[0].key.effective_processing_at_utc_ms;
+
+        assert_eq!(
+            state.close_private_fact_schedule_through(effective),
+            Err(SessionError::PrivateFactScheduleCrossesPendingAction(
+                "pending-private-action".to_owned()
+            ))
+        );
+        assert_eq!(state.private_fact_schedule_closed_through_utc_ms, None);
+    }
+
+    #[test]
+    fn private_schedule_requires_the_logical_platform_driver_through_the_same_cutoff() {
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let cutoff = 10_000;
+        let mut state = SessionState::new(spec());
+        state
+            .close_platform_prefix_through(cutoff, 1)
+            .expect("close platform input through cutoff");
+
+        assert_eq!(
+            state.close_private_fact_schedule_through(cutoff),
+            Err(SessionError::PrivateFactScheduleCrossesPendingPlatformWork(
+                format!("LOGICAL_PLATFORM:{cutoff}")
+            ))
+        );
+        assert_eq!(state.private_fact_schedule_closed_through_utc_ms, None);
+
+        assert_eq!(
+            state
+                .take_next_action_through(cutoff)
+                .expect("explicit no-action drive closes logical platform work"),
+            None
+        );
+        state
+            .close_private_fact_schedule_through(cutoff)
+            .expect("private schedule may close only after logical platform work");
+        assert_eq!(
+            state.private_fact_schedule_closed_through_utc_ms,
+            Some(cutoff)
+        );
+
+        let late_outbound_delay = profile.sample_delay_ms(
+            state.spec.session_seed.0.as_bytes(),
+            "late-after-platform-drive",
+            DelaySampleDomainV1::RequestOutbound,
+        );
+        let late_outbound_delay =
+            i64::try_from(late_outbound_delay).expect("test outbound delay fits i64");
+        assert_eq!(
+            state.register_and_schedule_request(
+                &profile,
+                request(
+                    &state,
+                    "late-after-platform-drive",
+                    1,
+                    cutoff - late_outbound_delay,
+                ),
+                sha("f"),
+                vec![LogicalActionPlanV1 {
+                    action_identity: "late-after-platform-drive/item-0".to_owned(),
+                    batch_item_ordinal: 0,
+                    processing_delay_ms: 0,
+                }],
+            ),
+            Err(SessionError::ActionWatermarkClosed)
+        );
+    }
+
+    #[test]
     fn public_and_private_visibility_watermarks_are_independent() {
         let profile = load_embedded_proxy_latency_profile().expect("profile");
         let mut state = SessionState::new(spec());
         let timing = state
             .bind_lifecycle_feedback_timing(&profile, "visible-feedback".to_owned(), 1_000, 1)
             .expect("feedback timing");
+        drive_idle_logical_platform_through(&mut state, timing.feedback_received_at_utc_ms);
         state
             .close_private_fact_schedule_through(timing.feedback_received_at_utc_ms)
             .expect("close feedback plan");
@@ -2315,6 +3825,7 @@ mod tests {
         let closed_through = first
             .feedback_received_at_utc_ms
             .max(second.feedback_received_at_utc_ms);
+        drive_idle_logical_platform_through(&mut state, closed_through);
         state
             .close_private_fact_schedule_through(closed_through)
             .expect("close private schedule");
@@ -2355,9 +3866,7 @@ mod tests {
         );
         assert_eq!(
             state.bind_lifecycle_feedback_timing(&profile, "feedback-1".to_owned(), 4_001, 2,),
-            Err(SessionError::FeedbackIdentityConflict(
-                "feedback-1".to_owned()
-            ))
+            Err(SessionError::PrivateEmissionSequenceConflict(2))
         );
         assert_eq!(
             state.bind_lifecycle_feedback_timing(
@@ -2387,6 +3896,7 @@ mod tests {
         let timing = state
             .bind_lifecycle_feedback_timing(&profile, "feedback-1".to_owned(), 2_000, 1)
             .expect("feedback timing");
+        drive_idle_logical_platform_through(&mut state, timing.feedback_received_at_utc_ms);
         state
             .close_private_fact_schedule_through(timing.feedback_received_at_utc_ms)
             .expect("close private facts");
@@ -2585,6 +4095,9 @@ mod tests {
         state
             .seal_logical_actions("batch")
             .expect("seal complete batch schedule");
+        state
+            .expect_direct_response("batch")
+            .expect("track the still-unformed batch response");
         state
             .close_platform_prefix_through(first_at, 1)
             .expect("close through first item");

@@ -14,16 +14,16 @@ use rust_decimal::Decimal;
 use crate::execution::{
     AuthorizedPlatformRevisionV1, InitialAccountStateV1, PlatformMarketV1, PlatformScenarioV1,
     PostOrderItemV1, PostOrderRequestV1, PostOrdersRequestV1, PreparedBuyOrderV1,
-    SimBuyOrderKindV1, SimBuyOrderV1, SimCallerRoleV1, SimExecutionProcessV1,
-    SimExecutionSessionV1, SubmissionAdmissionDecisionV1, SubmissionAdmissionRejectionV1,
-    SubmissionEvidenceUnknownV1, accepting_submission_response_bridge,
+    SimBuyOrderKindV1, SimBuyOrderV1, SimCallerRoleV1, SimExecutionSessionV1,
+    SubmissionAdmissionDecisionV1, SubmissionAdmissionRejectionV1, SubmissionEvidenceUnknownV1,
+    accepting_submission_response_bridge, execution_process_for_tests,
 };
 use crate::latency_profile::{
     DelaySampleDomainV1, EmpiricalDelayProfile, load_embedded_proxy_latency_profile,
 };
 use crate::market::{ClosedMarketEventBucketV1, MillisecondBucketClosureV1};
 use crate::platform_rules::tests::successful_snapshot_for_sim_tests_with_itode;
-use crate::session::{RequestContextV1, SIM_EXECUTION_CONTRACT_V1, SessionSpecV1};
+use crate::session::{RequestContextV1, SIM_EXECUTION_CONTRACT_V1, SessionSpecV2};
 
 const MARKET_START_AT_UTC_MS: i64 = 100_000;
 const MARKET_END_AT_UTC_MS: i64 = 500_000;
@@ -67,12 +67,15 @@ pub(crate) fn session_spec(
     scenario: &PlatformScenarioV1,
     role: SimCallerRoleV1,
     id: &str,
-) -> SessionSpecV1 {
-    SessionSpecV1 {
+) -> SessionSpecV2 {
+    SessionSpecV2 {
+        run_id: "component-test-run".to_owned(),
         session_id: id.to_owned(),
         account_id: format!("{id}-account"),
         caller_role: role,
         caller_instance_id: format!("{id}-caller"),
+        creation_request_id: format!("{id}-creation"),
+        response_bridge_binding_id: format!("{id}-bridge"),
         initial_account_state: InitialAccountStateV1::try_new(decimal("1000"))
             .expect("initial account"),
         response_outbox_capacity: std::num::NonZeroUsize::new(2).expect("positive test capacity"),
@@ -93,9 +96,8 @@ async fn execution_session(
     let profile = load_embedded_proxy_latency_profile().expect("profile");
     let scenario = scenario();
     let spec = session_spec(&scenario, role, id);
-    let session = SimExecutionProcessV1::new(rules, Arc::clone(&profile), scenario)
-        .create_session(spec, accepting_submission_response_bridge())
-        .expect("task 2.2 session");
+    let session = execution_process_for_tests(rules, Arc::clone(&profile), scenario)
+        .create_active_session_for_tests(spec, accepting_submission_response_bridge());
     (session, profile)
 }
 

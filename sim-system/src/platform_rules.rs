@@ -2124,7 +2124,7 @@ pub(crate) mod tests {
     use crate::latency_profile::load_embedded_proxy_latency_profile;
     use crate::session::{
         ParsedLogicalActionV1, ParsedMethodTimingV1, RequestContextV1, SIM_EXECUTION_CONTRACT_V1,
-        SessionError, SessionSpecV1, SimCallerRoleV1, SimProcessRoot,
+        SessionError, SessionSpecV2, SimCallerRoleV1, SimProcessRoot,
     };
     use contracts::EXECUTION_MARKET_EVENT_SCHEMA_V3;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2399,6 +2399,55 @@ pub(crate) mod tests {
         .await
     }
 
+    pub(crate) async fn historical_snapshot_for_sim_tests_with_fee_schedule(
+        rate: &str,
+        exponent: u32,
+    ) -> Arc<SealedProcessRuleSnapshot> {
+        let rate = rate.parse::<Decimal>().expect("测试手续费率必须是十进制");
+        let mut gamma_rate = rate;
+        gamma_rate.rescale(4);
+        let clob = std::str::from_utf8(CLOB_REAL).expect("CLOB test fixture is UTF-8");
+        let changed_clob = clob.replacen(
+            "\"fd\":{\"r\":0.07,\"e\":1,\"to\":true}",
+            &format!(
+                "\"fd\":{{\"r\":{},\"e\":{exponent},\"to\":true}}",
+                rate.normalize()
+            ),
+            1,
+        );
+        if rate != Decimal::new(7, 2) || exponent != 1 {
+            assert_ne!(changed_clob, clob, "CLOB 夹具必须包含手续费表");
+        }
+        let gamma = std::str::from_utf8(GAMMA_CLOSED_REAL).expect("Gamma test fixture is UTF-8");
+        let changed_gamma = gamma.replacen(
+            "\"feeSchedule\":{\"exponent\":\"1.0\",\"rate\":\"0.0700\",\"takerOnly\":true,\"rebateRate\":0.20}",
+            &format!(
+                "\"feeSchedule\":{{\"exponent\":\"{exponent}.0\",\"rate\":\"{gamma_rate}\",\"takerOnly\":true,\"rebateRate\":0.20}}"
+            ),
+            1,
+        );
+        if rate != Decimal::new(7, 2) || exponent != 1 {
+            assert_ne!(changed_gamma, gamma, "Gamma 夹具必须包含手续费表");
+        }
+        let server = ScriptedServer::start(vec![
+            ResponseSpec::json(200, changed_clob.into_bytes()),
+            ResponseSpec::json(200, GAMMA_OPEN_EMPTY),
+            ResponseSpec::json(200, changed_gamma.into_bytes()),
+        ])
+        .await;
+        let directory = tempfile::tempdir().expect("tempdir");
+        let target = directory.path().join("platform-rule-snapshot.json");
+        let current = create_successful_snapshot(&server, target.clone()).await;
+        let historical = load_historical_process_snapshot(HistoricalProcessSnapshotRequestV1 {
+            snapshot_path: target,
+            expected_file_sha256: current.file_sha256().clone(),
+            replay_causal_start_utc_ms: fixed_now_utc_ms().expect("fixed time"),
+        })
+        .expect("历史规则快照必须可重载");
+        assert_eq!(historical.access_mode(), SnapshotAccessMode::HistoricalAsOf);
+        historical
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn process_snapshot_queries_only_one_reference_and_is_shared_without_refresh() {
         let server = ScriptedServer::start(successful_responses()).await;
@@ -2464,13 +2513,23 @@ pub(crate) mod tests {
 
         let profile = load_embedded_proxy_latency_profile().expect("proxy latency profile");
         let scenario = crate::scenario::scenario_for_sim_tests();
-        let mut root = SimProcessRoot::new(Arc::clone(&sealed), profile, Arc::clone(&scenario));
+        let mut root = SimProcessRoot::try_new(
+            "platform-rules-test-run".to_owned(),
+            crate::finality::successful_policy_for_tests(),
+            Arc::clone(&sealed),
+            profile,
+            Arc::clone(&scenario),
+        )
+        .expect("test process root");
         let mut first = root
-            .create_session(SessionSpecV1 {
+            .create_session(SessionSpecV2 {
+                run_id: "platform-rules-test-run".to_owned(),
                 session_id: "session-a".to_owned(),
                 account_id: "account-a".to_owned(),
                 caller_role: SimCallerRoleV1::ModelTrain,
                 caller_instance_id: "model-a".to_owned(),
+                creation_request_id: "create-session-a".to_owned(),
+                response_bridge_binding_id: "bridge-session-a".to_owned(),
                 initial_account_state: crate::account::InitialAccountStateV1::try_new(
                     Decimal::new(1_000, 0),
                 )
@@ -2483,13 +2542,17 @@ pub(crate) mod tests {
                 execution_contract_version: SIM_EXECUTION_CONTRACT_V1.to_owned(),
                 market_event_schema_version: EXECUTION_MARKET_EVENT_SCHEMA_V3.to_owned(),
             })
-            .expect("first session");
+            .expect("first session")
+            .session;
         let second = root
-            .create_session(SessionSpecV1 {
+            .create_session(SessionSpecV2 {
+                run_id: "platform-rules-test-run".to_owned(),
                 session_id: "session-b".to_owned(),
                 account_id: "account-b".to_owned(),
                 caller_role: SimCallerRoleV1::OfflineEvaluation,
                 caller_instance_id: "model-b".to_owned(),
+                creation_request_id: "create-session-b".to_owned(),
+                response_bridge_binding_id: "bridge-session-b".to_owned(),
                 initial_account_state: crate::account::InitialAccountStateV1::try_new(
                     Decimal::new(1_000, 0),
                 )
@@ -2502,11 +2565,12 @@ pub(crate) mod tests {
                 execution_contract_version: SIM_EXECUTION_CONTRACT_V1.to_owned(),
                 market_event_schema_version: EXECUTION_MARKET_EVENT_SCHEMA_V3.to_owned(),
             })
-            .expect("second session");
+            .expect("second session")
+            .session;
         assert_eq!(root.registered_session_count(), 2);
         assert!(matches!(
             root.create_session(first.session_spec().clone()),
-            Err(SessionError::DuplicateSessionId(id)) if id == "session-a"
+            Err(SessionError::SessionAlreadyCreatedRequiresRetry(id)) if id == "session-a"
         ));
         assert_eq!(root.registered_session_count(), 2);
         let mut wrong_version = second.session_spec().clone();

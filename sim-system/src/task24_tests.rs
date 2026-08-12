@@ -13,11 +13,12 @@ use crate::execution::{
     OrdersDirectResponseV1, OrdersFilterV1, OrdersQueryResultV1, OrdersRequestV1,
     PostOrderDirectResponseV1, PostOrderItemV1, PostOrderRequestV1, PostOrdersDirectResponseV1,
     PostOrdersRequestV1, RequestRegistrationReceiptV1, SimBuyOrderKindV1, SimBuyOrderV1,
-    SimCallerRoleV1, SimExecutionContractErrorV1, SimExecutionProcessV1, SimExecutionSessionV1,
+    SimCallerRoleV1, SimExecutionContractErrorV1, SimExecutionSessionV1,
     SimulatedOrderKnownStatusV1, SubmissionDeliveryDispositionV1, SubmissionDriveDispositionV1,
     SubmissionItemOutcomeV1, SubmissionResponseAcceptanceV1, SubmissionResponseBridgeV1,
     TradeLiquidityRoleV1, TradesDirectResponseV1, TradesFilterV1, TradesQueryResultV1,
-    TradesRequestV1, accepting_submission_response_bridge, orders_projection_canonical_byte_len,
+    TradesRequestV1, accepting_submission_response_bridge, execution_process_for_tests,
+    orders_projection_canonical_byte_len,
 };
 use crate::latency_profile::{EmpiricalDelayProfile, load_embedded_proxy_latency_profile};
 use crate::platform_rules::tests::successful_snapshot_for_sim_tests;
@@ -114,6 +115,15 @@ impl Task24Captures {
                     .push(Arc::clone(&response));
                 SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
             },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |feedback| {
+                SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
+            },
+            |feedback| {
+                SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
+            },
         )
     }
 }
@@ -132,9 +142,8 @@ async fn ready_session_with_bridge(
     let scenario = scenario();
     let mut spec = session_spec(&scenario, SimCallerRoleV1::ModelTrain, id);
     spec.response_outbox_capacity = NonZeroUsize::new(capacity).expect("正响应槽容量");
-    let mut session = SimExecutionProcessV1::new(rules, profile, scenario)
-        .create_session(spec, bridge)
-        .expect("任务 2.4 会话");
+    let mut session = execution_process_for_tests(rules, profile, scenario)
+        .create_active_session_for_tests(spec, bridge);
     let initial = [
         initial_snapshot_event("1", 0, "Up", 1_100, 1_200, 1, "10"),
         initial_snapshot_event("2", 1, "Down", 1_100, 1_200, 2, "12"),
@@ -159,9 +168,8 @@ async fn ready_long_session_with_bridge(
     let scenario = long_scenario();
     let mut spec = long_session_spec(&scenario, SimCallerRoleV1::ModelTrain, id);
     spec.response_outbox_capacity = NonZeroUsize::new(capacity).expect("正响应槽容量");
-    let mut session = SimExecutionProcessV1::new(rules, Arc::clone(&profile), scenario)
-        .create_session(spec, bridge)
-        .expect("任务 2.4 长窗口会话");
+    let mut session = execution_process_for_tests(rules, Arc::clone(&profile), scenario)
+        .create_active_session_for_tests(spec, bridge);
     load_long_initial_market(&mut session, "0.00001", "0.6", "5");
     (session, profile)
 }
@@ -180,17 +188,13 @@ async fn ready_long_session_pair_with_bridges(
     let profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
     let scenario = long_scenario();
     let mut process =
-        SimExecutionProcessV1::new(rules, Arc::clone(&profile), Arc::clone(&scenario));
+        execution_process_for_tests(rules, Arc::clone(&profile), Arc::clone(&scenario));
     let mut first_spec = long_session_spec(&scenario, SimCallerRoleV1::ModelTrain, first_id);
     first_spec.response_outbox_capacity = NonZeroUsize::new(2).expect("正响应槽容量");
     let mut second_spec = long_session_spec(&scenario, SimCallerRoleV1::ModelTrain, second_id);
     second_spec.response_outbox_capacity = NonZeroUsize::new(2).expect("正响应槽容量");
-    let mut first = process
-        .create_session(first_spec, first_bridge)
-        .expect("同进程第一会话");
-    let mut second = process
-        .create_session(second_spec, second_bridge)
-        .expect("同进程第二会话");
+    let mut first = process.create_active_session_for_tests(first_spec, first_bridge);
+    let mut second = process.create_active_session_for_tests(second_spec, second_bridge);
     load_long_initial_market(&mut first, "0.00001", "0.6", "5");
     load_long_initial_market(&mut second, "0.00001", "0.6", "5");
     (first, second, profile)
@@ -279,7 +283,10 @@ fn drive_and_deliver(
         })
     );
     assert_eq!(
-        session.drive_direct_response_delivery_through(response_received_at(receipt, effective_at)),
+        session.drive_private_delivery_after_platform_through_for_tests(response_received_at(
+            receipt,
+            effective_at,
+        )),
         Ok(SubmissionDeliveryDispositionV1::Delivered)
     );
 }
@@ -328,7 +335,7 @@ fn post_long_batch(
     }
     let received_at = response_received_at(&registration.receipt, effective_at);
     assert_eq!(
-        session.drive_direct_response_delivery_through(received_at),
+        session.drive_private_delivery_after_platform_through_for_tests(received_at),
         Ok(SubmissionDeliveryDispositionV1::Delivered)
     );
     let responses = captures.post_orders.lock().expect("批量提交响应锁");
@@ -370,6 +377,9 @@ fn run_trades_query(
         })
         .expect("成交列表登记");
     let effective_at = registration.receipt.transit.platform_arrived_at_utc_ms;
+    session
+        .drive_private_delivery_after_platform_through_for_tests(effective_at - 1)
+        .expect("后续成交查询前先交付已经可见的私有事实");
     close_platform_at(session, effective_at);
     drive_and_deliver(session, effective_at, &registration.receipt);
     captures
@@ -412,7 +422,7 @@ fn assert_model_visible_query_hides_hidden_provenance(
 #[tokio::test(flavor = "current_thread")]
 async fn pending_maker_queries_hide_hidden_provenance_before_public_visibility() {
     let captures = Task24Captures::default();
-    let (mut session, platform_order_id, event_id, _, effective_at) =
+    let (mut session, platform_order_id, event_id, _, effective_at, _) =
         session_with_one_pending_maker_depletion_with_bridge(
             "task24-hidden-pending-query",
             Arc::clone(&captures.post_order),
@@ -446,6 +456,9 @@ async fn pending_maker_queries_hide_hidden_provenance_before_public_visibility()
         .transit
         .platform_arrived_at_utc_ms;
     assert!(order_at < effective_at + 100_001);
+    session
+        .drive_private_delivery_after_platform_through_for_tests(order_at - 1)
+        .expect("查询前先交付已可见的既有生命周期反馈");
     close_platform_at(&mut session, order_at);
     drive_and_deliver(&mut session, order_at, &order_registration.receipt);
 
@@ -506,7 +519,7 @@ async fn pending_maker_queries_hide_hidden_provenance_before_public_visibility()
 #[tokio::test(flavor = "current_thread")]
 async fn maker_trade_query_hides_hidden_depletion_provenance_before_public_visibility() {
     let captures = Task24Captures::default();
-    let (mut session, platform_order_id, first_event_id, _, effective_at) =
+    let (mut session, platform_order_id, first_event_id, _, effective_at, response_received_at) =
         session_with_one_pending_maker_depletion_with_bridge(
             "task24-hidden-maker-trade",
             Arc::clone(&captures.post_order),
@@ -514,20 +527,24 @@ async fn maker_trade_query_hides_hidden_depletion_provenance_before_public_visib
             100_000,
         )
         .await;
+    let second_source_at = response_received_at + 1;
     let addition = bid_transition(
-        effective_at + 3,
-        effective_at + 100_003,
+        second_source_at,
+        second_source_at + 100_000,
         6,
         "0.00001",
         "0",
         "0.099999",
     );
     session
-        .apply_closed_market_event_bucket(hidden_bucket(effective_at + 3, 6, &[addition]))
+        .apply_closed_market_event_bucket(hidden_bucket(second_source_at, 6, &[addition]))
         .expect("追加外部买方段");
+    session
+        .drive_private_delivery_after_platform_through_for_tests(second_source_at)
+        .expect("更晚成交前先交付已经可见的订单生命周期反馈");
     let depletion = bid_transition(
-        effective_at + 4,
-        effective_at + 100_004,
+        second_source_at + 1,
+        second_source_at + 100_001,
         7,
         "0.00001",
         "0.099999",
@@ -535,7 +552,7 @@ async fn maker_trade_query_hides_hidden_depletion_provenance_before_public_visib
     );
     let second_event_id = depletion.event_id.0.clone();
     session
-        .apply_closed_market_event_bucket(hidden_bucket(effective_at + 4, 7, &[depletion]))
+        .apply_closed_market_event_bucket(hidden_bucket(second_source_at + 1, 7, &[depletion]))
         .expect("形成 maker 推定成交");
     let internal_fill = session
         .simulated_fill(&platform_order_id)
@@ -556,6 +573,9 @@ async fn maker_trade_query_hides_hidden_depletion_provenance_before_public_visib
             .closed_through_received_at_utc_ms(),
         None
     );
+    session
+        .drive_private_delivery_after_platform_through_for_tests(effective_at + 999)
+        .expect("查询登记前按私有队头推进成交最终性与反馈");
 
     let registration = session
         .trades(TradesRequestV1 {
@@ -731,15 +751,16 @@ async fn query_and_submission_share_one_bounded_response_slot() {
     );
 
     let query_at = query.receipt.transit.platform_arrived_at_utc_ms;
+    let delivery_cutoff = response_received_at(&query.receipt, query_at);
     close_platform_at(&mut session, query_at);
     drive_and_deliver(&mut session, query_at, &query.receipt);
     assert!(matches!(
         captures.order.lock().expect("查询响应锁")[0].result,
         OrderQueryResultV1::NotFound
     ));
-
+    let retryable_post = gtc_request(&session, "shared-slot-post", 2, delivery_cutoff + 1);
     session
-        .post_order(post_request)
+        .post_order(retryable_post)
         .expect("确认释放统一响应槽后原提交上下文仍可登记");
 }
 
@@ -784,12 +805,12 @@ async fn cancel_and_order_query_use_the_same_private_delivery_chain_and_typed_ha
     let delivery_cutoff = response_received_at(&cancel.receipt, cancel_at)
         .max(response_received_at(&order.receipt, order_at));
     assert_eq!(
-        session.drive_direct_response_delivery_through(delivery_cutoff),
+        session.drive_private_delivery_after_platform_through_for_tests(delivery_cutoff),
         Ok(SubmissionDeliveryDispositionV1::Delivered)
     );
     assert_eq!(
-        session.drive_direct_response_delivery_through(delivery_cutoff),
-        Ok(SubmissionDeliveryDispositionV1::Delivered)
+        session.drive_private_delivery_after_platform_through_for_tests(delivery_cutoff),
+        Ok(SubmissionDeliveryDispositionV1::NoVisibleResponse)
     );
 
     let cancel_responses = captures.cancel_order.lock().expect("单撤响应锁");
@@ -940,7 +961,7 @@ async fn post_end_cancel_releases_open_principal_once_and_idempotent_reuse_is_re
 
 #[tokio::test(flavor = "current_thread")]
 async fn cancel_moves_pending_and_open_base_but_releases_only_open_quote() {
-    let (mut session, platform_order_id, _, _, effective) =
+    let (mut session, platform_order_id, _, _, effective, _) =
         session_with_one_pending_maker_depletion("task24-pending-cancel").await;
     let before = session
         .simulated_order(&platform_order_id)
@@ -949,6 +970,12 @@ async fn cancel_moves_pending_and_open_base_but_releases_only_open_quote() {
     assert_eq!(before.open_base_units, 4_999_999);
     assert_eq!(before.open_quote_units, 50);
     assert!(before.pending_maker_depletion_evidence.is_some());
+
+    assert_eq!(
+        session.drive_private_delivery_after_platform_through_for_tests(effective + 9_999),
+        Ok(SubmissionDeliveryDispositionV1::Delivered),
+        "确认初始订单的待交付生命周期反馈后才释放容量为后续撤单保留批次"
+    );
 
     let cancel = session
         .cancel_order(CancelOrderRequestV1 {
@@ -1035,15 +1062,11 @@ async fn cancel_preserves_partial_fill_and_taker_fee_while_releasing_only_open_p
         .simulated_order(&platform_order_id)
         .expect("部分成交订单状态")
         .clone();
-    let fill_before = session
-        .simulated_fill(&platform_order_id)
-        .expect("部分成交明细")
-        .clone();
     assert_eq!(before.matched_base_units, 5_000_000);
     assert_eq!(before.open_base_units, 5_000_000);
     assert_eq!(before.matched_quote_units, 3_000_000);
     assert_eq!(before.open_quote_units, 3_000_000);
-    assert!(before.immediate_taker_fee_encumbered_units > 0);
+    assert_eq!(before.immediate_taker_fee_encumbered_units, 0);
     let available_before = session.available_pusd();
     let principal_before = session.principal_encumbered_pusd();
 
@@ -1064,6 +1087,13 @@ async fn cancel_preserves_partial_fill_and_taker_fee_while_releasing_only_open_p
         })
         .expect("部分成交余量撤单登记");
     let cancel_at = cancel.item.effective_processing_at_utc_ms;
+    session
+        .drive_private_delivery_after_platform_through_for_tests(cancel_at - 1)
+        .expect("撤单动作前先交付已经可见的成交生命周期反馈");
+    let fill_before = session
+        .simulated_fill(&platform_order_id)
+        .expect("撤单前已闭合的部分成交明细")
+        .clone();
     close_platform_at(&mut session, cancel_at);
     drive_and_deliver(&mut session, cancel_at, &cancel.receipt);
 
@@ -1234,7 +1264,7 @@ async fn cancel_orders_deduplicates_targets_and_commits_mixed_results_once() {
     assert_eq!(session.available_pusd(), decimal("1000"));
     assert_eq!(session.principal_encumbered_pusd(), Decimal::ZERO);
     assert_eq!(
-        session.drive_direct_response_delivery_through(response_received_at(
+        session.drive_private_delivery_after_platform_through_for_tests(response_received_at(
             &registration.receipt,
             effective_at,
         )),
@@ -2005,7 +2035,7 @@ async fn trades_use_strict_discrete_millisecond_bounds_and_independent_retention
     };
     assert_eq!(session.simulated_fill_count(&platform_order_id), 2);
     let matched_at = post_at;
-    assert_eq!(session.query_projection_revision(), 1);
+    assert_eq!(session.query_projection_revision(), 2);
     session
         .advance_trade_history_retention_floor(matched_at)
         .expect("推进成交历史水位");
@@ -2154,6 +2184,7 @@ async fn trades_use_strict_discrete_millisecond_bounds_and_independent_retention
     };
     assert_eq!(out_of_retention.retained_from_utc_ms, Some(matched_at));
 
+    let revision_before_invalid_requests = session.query_projection_revision();
     assert!(matches!(
         session.trades(TradesRequestV1 {
             context: long_context_for_arrival(
@@ -2189,5 +2220,8 @@ async fn trades_use_strict_discrete_millisecond_bounds_and_independent_retention
         }),
         Err(SimExecutionContractErrorV1::InvalidRequest(_))
     ));
-    assert_eq!(session.query_projection_revision(), 1);
+    assert_eq!(
+        session.query_projection_revision(),
+        revision_before_invalid_requests
+    );
 }

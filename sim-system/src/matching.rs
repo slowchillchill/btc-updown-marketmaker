@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
+use std::sync::Arc;
 
 use contracts::{
     BookSide, ExecutionMarketEventPayloadV3, ExecutionMarketEventV3, InitialL2SnapshotV2,
-    LevelExecutionTransitionV3, QualityScopeV1, ResyncQuality, Sha256Hex,
+    LevelExecutionTransitionV3, MarketDataQuality, MarketResolutionTerminalV3,
+    PlatformAccountDeltaV1, PlatformOutcomeBalanceV1, QualityScopeV1, ResyncQuality, Sha256Hex,
 };
 use data_pipeline_core::parse_canonical_decimal;
 use num_bigint::{BigInt, BigUint};
@@ -13,14 +15,23 @@ use polymarket_client_sdk_v2::types::U256;
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
 
-use crate::account::InitialAccountStateV1;
+use crate::account::{
+    AutoRedeemAccountEffectV1, FillEconomicAmountsV1, PlatformAccountErrorV1,
+    PlatformAccountStateV1,
+};
+use crate::finality::{TradeFinalityPathV1, TradeFinalityPolicyV1, TradeFinalityStateV1};
 use crate::market::AccountBookOverlayStoreV1;
-use crate::scenario::PlatformScenarioV1;
+use crate::market_directory::SessionMarketDirectoryV1;
+use crate::platform_rules::{LifecycleAccountRuleV1, SealedProcessRuleSnapshot};
+use crate::rebate::{RebateKindV1, RebateSettlementActionV1, RebateStateErrorV1, RebateStateV1};
+use crate::scenario::PlatformMarketV1;
 
 const MICRO_SCALE: u32 = 6;
 const FEE_SCALE: u32 = 5;
 const EXTERNAL_SEGMENT_ID_DOMAIN_V1: &[u8] = b"SIM_L2_SYNTHETIC_MAKER_SEGMENT_V1\0";
 const PENDING_MAKER_DEPLETION_ID_DOMAIN_V1: &[u8] = b"SIM_PENDING_MAKER_DEPLETION_V1\0";
+const VENUE_DUST_ID_DOMAIN_V1: &[u8] = b"SIM_VENUE_DUST_TERMINAL_V1\0";
+const MARKET_RESOLUTION_ORDER_ID_DOMAIN_V1: &[u8] = b"SIM_MARKET_RESOLUTION_ORDER_V1\0";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MatchingMathErrorV1 {
@@ -46,19 +57,36 @@ impl std::error::Error for MatchingMathErrorV1 {}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum MatchingStateErrorV1 {
     Math(MatchingMathErrorV1),
+    Account(PlatformAccountErrorV1),
     Decode(String),
     UnknownMarket(String),
     UnknownAsset(String),
+    MarketAlreadyInitialized(String),
     InitialQueueAlreadyLoaded(String),
     QueuePredecessorConflict,
     QueueUnderflow,
     AccountOrderConflict(String),
+    Finality(String),
+    ResolutionConflict(String),
+    Rebate(String),
     LogicalTimeRegression,
+}
+
+impl From<PlatformAccountErrorV1> for MatchingStateErrorV1 {
+    fn from(value: PlatformAccountErrorV1) -> Self {
+        Self::Account(value)
+    }
 }
 
 impl From<MatchingMathErrorV1> for MatchingStateErrorV1 {
     fn from(value: MatchingMathErrorV1) -> Self {
         Self::Math(value)
+    }
+}
+
+impl From<RebateStateErrorV1> for MatchingStateErrorV1 {
+    fn from(value: RebateStateErrorV1) -> Self {
+        Self::Rebate(value.to_string())
     }
 }
 
@@ -76,6 +104,37 @@ pub(crate) struct MakerQueueDepletionV1 {
     pub platform_order_id: String,
     pub price_pusd_per_share: Decimal,
     pub base_units: u128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VenueDustQueueCandidateV1 {
+    platform_order_id: String,
+    price_pusd_per_share: Decimal,
+    remaining_base_units: u128,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct QueueEventEffectsV1 {
+    maker_depletions: Vec<MakerQueueDepletionV1>,
+    venue_dust_candidate: Option<VenueDustQueueCandidateV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VenueDustEffectV1 {
+    pub platform_order_id: String,
+    pub condition_id: String,
+    pub token_id: String,
+    pub closed_base_units: u128,
+    pub released_open_quote_units: u128,
+    pub account_delta: Arc<PlatformAccountDeltaV1>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AuthorizedMarketEventEffectsV1 {
+    pub trade_finality_effects: Vec<TradeFinalityLifecycleEffectsV1>,
+    pub venue_dust_effects: Vec<VenueDustEffectV1>,
+    pub market_resolution_order_effects: Vec<MarketResolutionOrderEffectV1>,
+    pub settlement_feedbacks: Vec<SettlementLifecycleEffectV1>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,11 +211,9 @@ pub(crate) struct ExecutionQueueStateV1 {
 }
 
 impl ExecutionQueueStateV1 {
-    pub(crate) fn new(scenario: &PlatformScenarioV1) -> Self {
-        let markets = scenario
-            .market_set()
+    pub(crate) fn new(directory: &SessionMarketDirectoryV1) -> Self {
+        let markets = directory
             .markets()
-            .iter()
             .map(|market| {
                 let assets = market
                     .assets()
@@ -169,33 +226,51 @@ impl ExecutionQueueStateV1 {
         Self { markets }
     }
 
-    pub(crate) fn apply_authorized_events(
+    pub(crate) fn insert_market(
         &mut self,
-        events: &[ExecutionMarketEventV3],
-    ) -> Result<Vec<MakerQueueDepletionV1>, MatchingStateErrorV1> {
-        let mut maker_depletions = Vec::new();
-        for event in events {
-            match &event.payload {
-                ExecutionMarketEventPayloadV3::InitialL2Snapshot(snapshot) => {
-                    self.load_initial_snapshot(event, snapshot)?;
-                }
-                ExecutionMarketEventPayloadV3::LevelExecutionTransition(transition) => {
-                    maker_depletions.extend(self.apply_level_transition(event, transition)?);
-                }
-                ExecutionMarketEventPayloadV3::QualityBoundary(boundary)
-                    if event.quality.resync == ResyncQuality::Required =>
-                {
-                    if let QualityScopeV1::Asset(asset) = &boundary.scope {
-                        self.clear_external_segments(
-                            &event.market.condition_id.0,
-                            &asset.token_id.0,
-                        )?;
-                    }
-                }
-                _ => {}
-            }
+        market: &PlatformMarketV1,
+    ) -> Result<(), MatchingStateErrorV1> {
+        let condition_id = &market.market().condition_id.0;
+        if self.markets.contains_key(condition_id) {
+            return Err(MatchingStateErrorV1::MarketAlreadyInitialized(
+                condition_id.clone(),
+            ));
         }
-        Ok(maker_depletions)
+        let assets = market
+            .assets()
+            .iter()
+            .map(|asset| (asset.token_id.0.clone(), AssetQueueV1::default()))
+            .collect();
+        self.markets.insert(condition_id.clone(), assets);
+        Ok(())
+    }
+
+    fn contains_market(&self, condition_id: &str) -> bool {
+        self.markets.contains_key(condition_id)
+    }
+
+    fn apply_authorized_event(
+        &mut self,
+        event: &ExecutionMarketEventV3,
+    ) -> Result<QueueEventEffectsV1, MatchingStateErrorV1> {
+        match &event.payload {
+            ExecutionMarketEventPayloadV3::InitialL2Snapshot(snapshot) => {
+                self.load_initial_snapshot(event, snapshot)?;
+                Ok(QueueEventEffectsV1::default())
+            }
+            ExecutionMarketEventPayloadV3::LevelExecutionTransition(transition) => {
+                self.apply_level_transition(event, transition)
+            }
+            ExecutionMarketEventPayloadV3::QualityBoundary(boundary)
+                if event.quality.resync == ResyncQuality::Required =>
+            {
+                if let QualityScopeV1::Asset(asset) = &boundary.scope {
+                    self.clear_external_segments(&event.market.condition_id.0, &asset.token_id.0)?;
+                }
+                Ok(QueueEventEffectsV1::default())
+            }
+            _ => Ok(QueueEventEffectsV1::default()),
+        }
     }
 
     pub(crate) fn insert_account_buy_order(
@@ -298,6 +373,32 @@ impl ExecutionQueueStateV1 {
             })
     }
 
+    fn venue_dust_candidate_for_order(
+        &self,
+        condition_id: &str,
+        token_id: &str,
+        price: Decimal,
+        platform_order_id: &str,
+    ) -> Option<VenueDustQueueCandidateV1> {
+        let queue = self.asset(condition_id, token_id).ok()?.bids.get(&price)?;
+        if queue.account_taker_depletion_debt_units != 0 || queue.segments.len() != 1 {
+            return None;
+        }
+        match queue.segments.front() {
+            Some(QueueSegmentV1::Account(account))
+                if account.platform_order_id == platform_order_id
+                    && account.remaining_base_units > 0 =>
+            {
+                Some(VenueDustQueueCandidateV1 {
+                    platform_order_id: account.platform_order_id.clone(),
+                    price_pusd_per_share: price,
+                    remaining_base_units: account.remaining_base_units,
+                })
+            }
+            Some(QueueSegmentV1::External(_)) | Some(QueueSegmentV1::Account(_)) | None => None,
+        }
+    }
+
     fn close_account_orders_for_market(
         &mut self,
         condition_id: &str,
@@ -375,7 +476,7 @@ impl ExecutionQueueStateV1 {
         &mut self,
         event: &ExecutionMarketEventV3,
         transition: &LevelExecutionTransitionV3,
-    ) -> Result<Vec<MakerQueueDepletionV1>, MatchingStateErrorV1> {
+    ) -> Result<QueueEventEffectsV1, MatchingStateErrorV1> {
         let price = parse_decimal(&transition.price_pusd_per_share.0)?;
         let before = micro_units_v1(parse_decimal(&transition.quantity_before_shares.0)?)?;
         let after = micro_units_v1(parse_decimal(&transition.quantity_after_shares.0)?)?;
@@ -397,10 +498,10 @@ impl ExecutionQueueStateV1 {
                 .or_default()
                 .segments
                 .push_back(QueueSegmentV1::External(segment));
-            return Ok(Vec::new());
+            return Ok(QueueEventEffectsV1::default());
         }
         if before == after {
-            return Ok(Vec::new());
+            return Ok(QueueEventEffectsV1::default());
         }
         let levels = asset.levels_mut(transition.side);
         let queue = levels
@@ -410,11 +511,36 @@ impl ExecutionQueueStateV1 {
         let debt_offset = remaining.min(queue.account_taker_depletion_debt_units);
         queue.account_taker_depletion_debt_units -= debt_offset;
         remaining -= debt_offset;
-        let fills = consume_queue_head(queue, &event.event_id.0, price, remaining)?;
+        if remaining == 0 {
+            if queue.segments.is_empty() && queue.account_taker_depletion_debt_units == 0 {
+                levels.remove(&price);
+            }
+            return Ok(QueueEventEffectsV1::default());
+        }
+        let maker_depletions = consume_queue_head(queue, &event.event_id.0, price, remaining)?;
+        let venue_dust_candidate = if queue.account_taker_depletion_debt_units == 0
+            && queue.segments.len() == 1
+        {
+            match queue.segments.front() {
+                Some(QueueSegmentV1::Account(account)) if account.remaining_base_units > 0 => {
+                    Some(VenueDustQueueCandidateV1 {
+                        platform_order_id: account.platform_order_id.clone(),
+                        price_pusd_per_share: price,
+                        remaining_base_units: account.remaining_base_units,
+                    })
+                }
+                Some(QueueSegmentV1::External(_)) | Some(QueueSegmentV1::Account(_)) | None => None,
+            }
+        } else {
+            None
+        };
         if queue.segments.is_empty() && queue.account_taker_depletion_debt_units == 0 {
             levels.remove(&price);
         }
-        Ok(fills)
+        Ok(QueueEventEffectsV1 {
+            maker_depletions,
+            venue_dust_candidate,
+        })
     }
 
     fn clear_external_segments(
@@ -588,6 +714,8 @@ pub(crate) enum SimOrderKindStateV1 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SimOrderTerminalReasonV1 {
     FakCompleted,
+    VenueDustTerminal,
+    MarketResolvedCanceled,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -595,6 +723,34 @@ pub(crate) struct CallerCancelStateEffectV1 {
     pub pending_base_units_before: u128,
     pub open_base_units_before: u128,
     pub released_open_quote_units: u128,
+    pub account_delta: Option<Arc<PlatformAccountDeltaV1>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GtdExpirationEffectV1 {
+    pub platform_order_id: String,
+    pub condition_id: String,
+    pub token_id: String,
+    pub expiration_identity: Sha256Hex,
+    pub pending_base_units_before: u128,
+    pub open_base_units_before: u128,
+    pub released_open_quote_units: u128,
+    pub account_delta: Option<Arc<PlatformAccountDeltaV1>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MarketResolutionOrderEffectV1 {
+    pub platform_order_id: String,
+    pub condition_id: String,
+    pub token_id: String,
+    pub canceled_base_units: u128,
+    pub released_open_quote_units: u128,
+    pub account_delta: Arc<PlatformAccountDeltaV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OrderCommitEffectsV1 {
+    pub account_deltas: Vec<Arc<PlatformAccountDeltaV1>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -615,6 +771,7 @@ pub(crate) struct SimOrderRecordV1 {
     pub platform_order_id: String,
     pub global_request_id: String,
     pub item_id: String,
+    pub item_idempotency_identity: String,
     pub condition_id: String,
     pub token_id: String,
     pub created_at_utc_ms: i64,
@@ -630,6 +787,14 @@ pub(crate) struct SimOrderRecordV1 {
     pub expired_released_quote_units: u128,
     pub expired_at_utc_ms: Option<i64>,
     pub gtd_expiration_identity: Option<Sha256Hex>,
+    pub venue_dust_closed_base_units: u128,
+    pub venue_dust_released_quote_units: u128,
+    pub venue_dust_at_utc_ms: Option<i64>,
+    pub venue_dust_identity: Option<Sha256Hex>,
+    pub market_resolved_canceled_base_units: u128,
+    pub market_resolved_released_quote_units: u128,
+    pub market_resolved_at_utc_ms: Option<i64>,
+    pub market_resolution_effect_identity: Option<Sha256Hex>,
     pub canceled_base_units: u128,
     pub canceled_released_quote_units: u128,
     pub canceled_at_utc_ms: Option<i64>,
@@ -665,39 +830,193 @@ pub(crate) struct SimFillRecordV1 {
     pub price_pusd_per_share: Decimal,
     pub base_units: u128,
     pub quote_units: u128,
+    pub immediate_taker_fee_units: u128,
+    pub(crate) finality_path: Option<TradeFinalityPathV1>,
+    pub(crate) finality_path_ordinal: Option<u32>,
+    pub(crate) finality_state: Option<TradeFinalityStateV1>,
+    pub(crate) economic_application_delta: Option<Arc<PlatformAccountDeltaV1>>,
+}
+
+impl SimFillRecordV1 {
+    pub(crate) fn finality_state(&self) -> Option<TradeFinalityStateV1> {
+        self.finality_state
+    }
+
+    pub(crate) fn economic_disposition(&self) -> TradeEconomicDispositionStateV1 {
+        match self.finality_state {
+            Some(TradeFinalityStateV1::Confirmed) => TradeEconomicDispositionStateV1::FinalSuccess,
+            Some(TradeFinalityStateV1::Failed) if self.economic_application_delta.is_some() => {
+                TradeEconomicDispositionStateV1::FinalFailureCompensated
+            }
+            Some(TradeFinalityStateV1::Failed) => {
+                TradeEconomicDispositionStateV1::FinalFailureUnapplied
+            }
+            Some(_) if self.economic_application_delta.is_some() => {
+                TradeEconomicDispositionStateV1::PendingApplied
+            }
+            Some(_) | None => TradeEconomicDispositionStateV1::PendingUnapplied,
+        }
+    }
+
+    pub(crate) fn economic_application_delta(&self) -> Option<&Arc<PlatformAccountDeltaV1>> {
+        self.economic_application_delta.as_ref()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TradeEconomicDispositionStateV1 {
+    PendingUnapplied,
+    PendingApplied,
+    FinalSuccess,
+    FinalFailureUnapplied,
+    FinalFailureCompensated,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TradeFinalityTransitionEffectV1 {
+    pub trade_id: String,
+    pub platform_order_id: String,
+    pub condition_id: String,
+    pub token_id: String,
+    pub platform_event_at_utc_ms: i64,
+    pub finality_state: TradeFinalityStateV1,
+    pub economic_disposition: TradeEconomicDispositionStateV1,
+    pub liquidity_role: SimLiquidityRoleV1,
+    pub base_units: u128,
+    pub quote_units: u128,
+    pub immediate_taker_fee_units: u128,
+    pub economic_application_delta: Option<Arc<PlatformAccountDeltaV1>>,
+    pub account_delta: Option<Arc<PlatformAccountDeltaV1>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SettlementLifecycleEffectV1 {
+    pub action: SettlementLifecycleActionV1,
+    pub account_delta: Option<Arc<PlatformAccountDeltaV1>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SettlementLifecycleActionV1 {
+    Rebate(RebateSettlementActionV1),
+    AutoRedeem(AutoRedeemSettlementActionV1),
+}
+
+impl SettlementLifecycleActionV1 {
+    pub(crate) fn reason_identity(&self) -> &str {
+        match self {
+            Self::Rebate(action) => action.reason_identity(),
+            Self::AutoRedeem(action) => &action.reason_identity,
+        }
+    }
+
+    pub(crate) fn platform_effective_at_utc_ms(&self) -> i64 {
+        match self {
+            Self::Rebate(action) => action.platform_effective_at_utc_ms(),
+            Self::AutoRedeem(action) => action.platform_effective_at_utc_ms,
+        }
+    }
+
+    pub(crate) fn redeemed_resolution(&self) -> Option<(&str, &MarketResolutionTerminalV3)> {
+        match self {
+            Self::AutoRedeem(action) => Some((&action.condition_id, &action.resolution)),
+            Self::Rebate(_) => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AutoRedeemSettlementActionV1 {
+    pub reason_identity: String,
+    pub condition_id: String,
+    pub resolution_event_id: String,
+    pub resolution_source_event_at_utc_ms: i64,
+    pub platform_effective_at_utc_ms: i64,
+    pub resolution: MarketResolutionTerminalV3,
+    pub redeemed_outcome_balances: Vec<PlatformOutcomeBalanceV1>,
+    pub redeemed_pusd: Decimal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TradeFinalityLifecycleEffectsV1 {
+    pub trade_feedback: TradeFinalityTransitionEffectV1,
+    pub settlement_feedbacks: Vec<SettlementLifecycleEffectV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ScheduledFinalityTransitionKeyV1 {
+    platform_event_at_utc_ms: i64,
+    fill_economic_delta_identity: String,
+    path_ordinal: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ExecutionStateV1 {
     queues: ExecutionQueueStateV1,
     account_overlay: AccountBookOverlayStoreV1,
-    available_pusd_units: u128,
-    principal_encumbered_pusd_units: u128,
-    immediate_taker_fee_encumbered_pusd_units: u128,
+    account: PlatformAccountStateV1,
     orders: BTreeMap<String, SimOrderRecordV1>,
     fills: BTreeMap<String, SimFillRecordV1>,
     matching_closed_markets: BTreeMap<String, i64>,
     gtd_deadlines: BTreeSet<(i64, String)>,
     gtd_advanced_through_utc_ms: Option<i64>,
+    scheduled_finality: BTreeSet<ScheduledFinalityTransitionKeyV1>,
+    finality_advanced_through_utc_ms: Option<i64>,
+    rebate: Arc<RebateStateV1>,
+    market_resolutions: Arc<BTreeMap<String, MarketResolutionObligationV1>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MarketResolutionObligationV1 {
+    resolution_event_id: String,
+    resolution_source_event_at_utc_ms: i64,
+    resolution: MarketResolutionTerminalV3,
+    pending_trade_ids: BTreeSet<String>,
+    redeemed_at_utc_ms: Option<i64>,
+    invalidated_by_quality_reason: Option<String>,
 }
 
 impl ExecutionStateV1 {
     pub(crate) fn new(
-        scenario: &PlatformScenarioV1,
-        initial_account: &InitialAccountStateV1,
+        directory: &SessionMarketDirectoryV1,
+        opening_anchor: &contracts::AccountOpeningAnchorV1,
+        rule_snapshot: &SealedProcessRuleSnapshot,
     ) -> Result<Self, MatchingStateErrorV1> {
         Ok(Self {
-            queues: ExecutionQueueStateV1::new(scenario),
-            account_overlay: AccountBookOverlayStoreV1::new(scenario),
-            available_pusd_units: micro_units_v1(initial_account.available_pusd())?,
-            principal_encumbered_pusd_units: 0,
-            immediate_taker_fee_encumbered_pusd_units: 0,
+            queues: ExecutionQueueStateV1::new(directory),
+            account_overlay: AccountBookOverlayStoreV1::new(directory),
+            account: PlatformAccountStateV1::try_from_opening_anchor(opening_anchor)?,
             orders: BTreeMap::new(),
             fills: BTreeMap::new(),
             matching_closed_markets: BTreeMap::new(),
             gtd_deadlines: BTreeSet::new(),
             gtd_advanced_through_utc_ms: None,
+            scheduled_finality: BTreeSet::new(),
+            finality_advanced_through_utc_ms: None,
+            rebate: Arc::new(RebateStateV1::new(directory, rule_snapshot)),
+            market_resolutions: Arc::new(BTreeMap::new()),
         })
+    }
+
+    pub(crate) fn insert_market(
+        &mut self,
+        market: &PlatformMarketV1,
+    ) -> Result<(), MatchingStateErrorV1> {
+        let condition_id = &market.market().condition_id.0;
+        if self.queues.contains_market(condition_id)
+            || self.account_overlay.contains_market(condition_id)
+        {
+            return Err(MatchingStateErrorV1::MarketAlreadyInitialized(
+                condition_id.clone(),
+            ));
+        }
+        self.queues.insert_market(market)?;
+        self.account_overlay.insert_market(market)?;
+        if !self.rebate_mut().insert_market(market) {
+            return Err(MatchingStateErrorV1::MarketAlreadyInitialized(
+                condition_id.clone(),
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn account_overlay(&self) -> &AccountBookOverlayStoreV1 {
@@ -710,25 +1029,30 @@ impl ExecutionStateV1 {
     }
 
     pub(crate) fn available_pusd(&self) -> Result<Decimal, MatchingStateErrorV1> {
-        Ok(decimal_from_micro_units_v1(self.available_pusd_units)?)
+        Ok(self.account.available_pusd())
     }
 
     pub(crate) fn available_pusd_units(&self) -> u128 {
-        self.available_pusd_units
+        self.account.available_pusd_units()
     }
 
     pub(crate) fn principal_encumbered_pusd(&self) -> Result<Decimal, MatchingStateErrorV1> {
-        Ok(decimal_from_micro_units_v1(
-            self.principal_encumbered_pusd_units,
-        )?)
+        Ok(self.account.principal_encumbrance_pusd())
     }
 
     pub(crate) fn immediate_taker_fee_encumbered_pusd(
         &self,
     ) -> Result<Decimal, MatchingStateErrorV1> {
-        Ok(decimal_from_micro_units_v1(
-            self.immediate_taker_fee_encumbered_pusd_units,
-        )?)
+        Ok(self.account.immediate_taker_fee_encumbrance_pusd())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn account(&self) -> &PlatformAccountStateV1 {
+        &self.account
+    }
+
+    pub(crate) fn account_instance_key(&self) -> &contracts::AccountInstanceKeyV1 {
+        self.account.account_instance_key()
     }
 
     pub(crate) fn order(&self, platform_order_id: &str) -> Option<&SimOrderRecordV1> {
@@ -759,6 +1083,537 @@ impl ExecutionStateV1 {
 
     pub(crate) fn query_projection_changed_from(&self, previous: &Self) -> bool {
         self.orders != previous.orders || self.fills != previous.fills
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cloned_state_shares_rebate_storage(&self) -> bool {
+        let cloned = self.clone();
+        Arc::ptr_eq(&self.rebate, &cloned.rebate)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cloned_state_shares_market_resolution_storage(&self) -> bool {
+        let cloned = self.clone();
+        Arc::ptr_eq(&self.market_resolutions, &cloned.market_resolutions)
+    }
+
+    pub(crate) fn initialize_fill_finality(
+        &mut self,
+        policy: &TradeFinalityPolicyV1,
+        trade_id: &str,
+    ) -> Result<TradeFinalityLifecycleEffectsV1, MatchingStateErrorV1> {
+        let fill = self
+            .fills
+            .get(trade_id)
+            .cloned()
+            .ok_or_else(|| MatchingStateErrorV1::Finality(format!("未知成交：{trade_id}")))?;
+        if fill.finality_path.is_some()
+            || fill.finality_path_ordinal.is_some()
+            || fill.finality_state.is_some()
+            || fill.economic_application_delta.is_some()
+        {
+            return Err(MatchingStateErrorV1::Finality(format!(
+                "成交最终性已经实例化：{trade_id}"
+            )));
+        }
+        let order = self.orders.get(&fill.platform_order_id).ok_or_else(|| {
+            MatchingStateErrorV1::AccountOrderConflict(fill.platform_order_id.clone())
+        })?;
+        let path = policy
+            .select_path_for_fill(
+                self.account_instance_key(),
+                &order.global_request_id,
+                &order.item_idempotency_identity,
+                &fill.trade_id,
+            )
+            .clone();
+        for step in path.steps() {
+            fill.matched_at_utc_ms
+                .checked_add(step.offset_ms())
+                .ok_or_else(|| MatchingStateErrorV1::Finality("最终性逻辑时点溢出".to_owned()))?;
+        }
+        match fill.liquidity_role {
+            SimLiquidityRoleV1::MakerInferred => self.rebate_mut().register_maker_fill(
+                &fill.trade_id,
+                &fill.condition_id,
+                fill.matched_at_utc_ms,
+                fill.base_units,
+                fill.price_pusd_per_share,
+            )?,
+            SimLiquidityRoleV1::Taker => {
+                self.rebate_mut().register_taker_fill(
+                    &fill.trade_id,
+                    &fill.condition_id,
+                    fill.matched_at_utc_ms,
+                    decimal_from_micro_units_v1(fill.immediate_taker_fee_units)?,
+                )?;
+            }
+        }
+        let trade_feedback =
+            self.apply_finality_transition(trade_id, path, 0, fill.matched_at_utc_ms, true)?;
+        let settlement_feedbacks = self.apply_terminal_settlement_actions(&trade_feedback)?;
+        Ok(TradeFinalityLifecycleEffectsV1 {
+            trade_feedback,
+            settlement_feedbacks,
+        })
+    }
+
+    pub(crate) fn next_scheduled_finality_at_utc_ms(&self) -> Option<i64> {
+        self.scheduled_finality
+            .first()
+            .map(|key| key.platform_event_at_utc_ms)
+    }
+
+    pub(crate) fn advance_finality_at(
+        &mut self,
+        platform_event_at_utc_ms: i64,
+    ) -> Result<Vec<TradeFinalityLifecycleEffectsV1>, MatchingStateErrorV1> {
+        if self
+            .finality_advanced_through_utc_ms
+            .is_some_and(|current| platform_event_at_utc_ms < current)
+        {
+            return Err(MatchingStateErrorV1::LogicalTimeRegression);
+        }
+        let Some(next_at) = self.next_scheduled_finality_at_utc_ms() else {
+            return Ok(Vec::new());
+        };
+        if next_at != platform_event_at_utc_ms {
+            return Err(MatchingStateErrorV1::Finality(format!(
+                "最终性驱动必须从最早时点 {next_at} 开始，实际为 {platform_event_at_utc_ms}"
+            )));
+        }
+        let keys = self
+            .scheduled_finality
+            .iter()
+            .take_while(|key| key.platform_event_at_utc_ms == platform_event_at_utc_ms)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut effects = Vec::with_capacity(keys.len());
+        for key in keys {
+            if !self.scheduled_finality.remove(&key) {
+                return Err(MatchingStateErrorV1::Finality(
+                    "已排定最终性转换丢失".to_owned(),
+                ));
+            }
+            let path = self
+                .fills
+                .get(&key.fill_economic_delta_identity)
+                .and_then(|fill| fill.finality_path.clone())
+                .ok_or_else(|| {
+                    MatchingStateErrorV1::Finality(format!(
+                        "已排定成交缺少最终性实例：{}",
+                        key.fill_economic_delta_identity
+                    ))
+                })?;
+            let trade_feedback = self.apply_finality_transition(
+                &key.fill_economic_delta_identity,
+                path,
+                key.path_ordinal,
+                key.platform_event_at_utc_ms,
+                false,
+            )?;
+            let settlement_feedbacks = self.apply_terminal_settlement_actions(&trade_feedback)?;
+            effects.push(TradeFinalityLifecycleEffectsV1 {
+                trade_feedback,
+                settlement_feedbacks,
+            });
+        }
+        self.finality_advanced_through_utc_ms = Some(platform_event_at_utc_ms);
+        Ok(effects)
+    }
+
+    pub(crate) fn next_rebate_clock_at_utc_ms(&self) -> Option<i64> {
+        self.rebate.next_clock_at_utc_ms()
+    }
+
+    pub(crate) fn advance_rebate_clock_at(
+        &mut self,
+        platform_event_at_utc_ms: i64,
+    ) -> Result<Vec<SettlementLifecycleEffectV1>, MatchingStateErrorV1> {
+        let actions = self.rebate_mut().advance_clock_at(platform_event_at_utc_ms);
+        let mut effects = Vec::new();
+        for action in actions {
+            let finalized_market = match &action {
+                RebateSettlementActionV1::MakerMarketFinalized(finalized) => {
+                    Some(finalized.condition_id.clone())
+                }
+                RebateSettlementActionV1::TakerAccrualApplied(_)
+                | RebateSettlementActionV1::DayFinalized(_)
+                | RebateSettlementActionV1::Paid(_) => None,
+            };
+            effects.extend(self.apply_rebate_actions(vec![action])?);
+            if let Some(condition_id) = finalized_market
+                && let Some(auto_redeem) =
+                    self.try_auto_redeem(&condition_id, platform_event_at_utc_ms)?
+            {
+                effects.push(auto_redeem);
+            }
+        }
+        Ok(effects)
+    }
+
+    fn apply_terminal_settlement_actions(
+        &mut self,
+        trade_feedback: &TradeFinalityTransitionEffectV1,
+    ) -> Result<Vec<SettlementLifecycleEffectV1>, MatchingStateErrorV1> {
+        let succeeded = match trade_feedback.finality_state {
+            TradeFinalityStateV1::Confirmed => true,
+            TradeFinalityStateV1::Failed => false,
+            TradeFinalityStateV1::MatchedNotBroadcasted
+            | TradeFinalityStateV1::Matched
+            | TradeFinalityStateV1::Retrying
+            | TradeFinalityStateV1::Mined => return Ok(Vec::new()),
+        };
+        let actions = self.rebate_mut().on_fill_terminal(
+            &trade_feedback.trade_id,
+            succeeded,
+            trade_feedback.platform_event_at_utc_ms,
+        );
+        let (pre_redeem, post_redeem): (Vec<_>, Vec<_>) = actions.into_iter().partition(|action| {
+            matches!(
+                action,
+                RebateSettlementActionV1::MakerMarketFinalized(_)
+                    | RebateSettlementActionV1::TakerAccrualApplied(_)
+            )
+        });
+        let mut effects = self.apply_rebate_actions(pre_redeem)?;
+        let pending_trade_exists = self
+            .market_resolutions
+            .get(&trade_feedback.condition_id)
+            .is_some_and(|obligation| {
+                obligation
+                    .pending_trade_ids
+                    .contains(&trade_feedback.trade_id)
+            });
+        if pending_trade_exists {
+            self.market_resolutions_mut()
+                .get_mut(&trade_feedback.condition_id)
+                .expect("待闭合成交所属市场判定义务必须仍存在")
+                .pending_trade_ids
+                .remove(&trade_feedback.trade_id);
+        }
+        if let Some(auto_redeem) = self.try_auto_redeem(
+            &trade_feedback.condition_id,
+            trade_feedback.platform_event_at_utc_ms,
+        )? {
+            effects.push(auto_redeem);
+        }
+        effects.extend(self.apply_rebate_actions(post_redeem)?);
+        Ok(effects)
+    }
+
+    fn try_auto_redeem(
+        &mut self,
+        condition_id: &str,
+        platform_effective_at_utc_ms: i64,
+    ) -> Result<Option<SettlementLifecycleEffectV1>, MatchingStateErrorV1> {
+        let Some(obligation) = self.market_resolutions.get(condition_id).cloned() else {
+            return Ok(None);
+        };
+        if obligation.redeemed_at_utc_ms.is_some()
+            || !obligation.pending_trade_ids.is_empty()
+            || self.rebate.market_result(condition_id).is_none()
+        {
+            return Ok(None);
+        }
+        if obligation.invalidated_by_quality_reason.is_some() {
+            return Err(MatchingStateErrorV1::ResolutionConflict(
+                condition_id.to_owned(),
+            ));
+        }
+        let reason_identity = format!(
+            "AUTO_REDEEM_V1:{}:{condition_id}:{}:{}",
+            condition_id.len(),
+            obligation.resolution_event_id.len(),
+            obligation.resolution_event_id,
+        );
+        let MarketResolutionTerminalV3::Resolved { payout_vector, .. } = &obligation.resolution;
+        let AutoRedeemAccountEffectV1 {
+            redeemed_outcome_balances,
+            redeemed_pusd,
+            account_delta,
+        } = self.account.apply_auto_redeem(
+            &reason_identity,
+            condition_id,
+            platform_effective_at_utc_ms,
+            payout_vector,
+        )?;
+        self.market_resolutions_mut()
+            .get_mut(condition_id)
+            .expect("自动赎回义务必须仍存在")
+            .redeemed_at_utc_ms = Some(platform_effective_at_utc_ms);
+        Ok(Some(SettlementLifecycleEffectV1 {
+            action: SettlementLifecycleActionV1::AutoRedeem(AutoRedeemSettlementActionV1 {
+                reason_identity,
+                condition_id: condition_id.to_owned(),
+                resolution_event_id: obligation.resolution_event_id,
+                resolution_source_event_at_utc_ms: obligation.resolution_source_event_at_utc_ms,
+                platform_effective_at_utc_ms,
+                resolution: obligation.resolution,
+                redeemed_outcome_balances,
+                redeemed_pusd,
+            }),
+            account_delta,
+        }))
+    }
+
+    fn apply_rebate_actions(
+        &mut self,
+        actions: Vec<RebateSettlementActionV1>,
+    ) -> Result<Vec<SettlementLifecycleEffectV1>, MatchingStateErrorV1> {
+        actions
+            .into_iter()
+            .map(|action| {
+                let account_delta = match &action {
+                    RebateSettlementActionV1::MakerMarketFinalized(value) => (value.accrual_pusd
+                        > Decimal::ZERO)
+                        .then(|| {
+                            self.account.apply_maker_rebate_accrual_finalized(
+                                &value.reason_identity,
+                                &value.condition_id,
+                                value.platform_effective_at_utc_ms,
+                                value.accrual_pusd,
+                            )
+                        })
+                        .transpose()?,
+                    RebateSettlementActionV1::TakerAccrualApplied(value) => {
+                        Some(self.account.apply_taker_rebate_accrual_applied(
+                            &value.reason_identity,
+                            &value.condition_id,
+                            value.platform_effective_at_utc_ms,
+                            value.accrual_pusd,
+                        )?)
+                    }
+                    RebateSettlementActionV1::DayFinalized(value) => match value.kind {
+                        RebateKindV1::Maker => self.account.apply_maker_rebate_day_finalized(
+                            &value.reason_identity,
+                            value.platform_effective_at_utc_ms,
+                            value.locked_remainder_pusd,
+                        )?,
+                        RebateKindV1::Taker => self.account.apply_taker_rebate_day_finalized(
+                            &value.reason_identity,
+                            value.platform_effective_at_utc_ms,
+                            value.locked_remainder_pusd,
+                        )?,
+                    },
+                    RebateSettlementActionV1::Paid(value) => Some(match value.kind {
+                        RebateKindV1::Maker => self.account.apply_maker_rebate_paid(
+                            &value.reason_identity,
+                            value.platform_effective_at_utc_ms,
+                            value.paid_pusd,
+                        )?,
+                        RebateKindV1::Taker => self.account.apply_taker_rebate_paid(
+                            &value.reason_identity,
+                            value.platform_effective_at_utc_ms,
+                            value.paid_pusd,
+                        )?,
+                    }),
+                };
+                Ok(SettlementLifecycleEffectV1 {
+                    action: SettlementLifecycleActionV1::Rebate(action),
+                    account_delta,
+                })
+            })
+            .collect()
+    }
+
+    fn rebate_mut(&mut self) -> &mut RebateStateV1 {
+        Arc::make_mut(&mut self.rebate)
+    }
+
+    fn market_resolutions_mut(&mut self) -> &mut BTreeMap<String, MarketResolutionObligationV1> {
+        Arc::make_mut(&mut self.market_resolutions)
+    }
+
+    fn apply_finality_transition(
+        &mut self,
+        trade_id: &str,
+        path: TradeFinalityPathV1,
+        path_ordinal: u32,
+        platform_event_at_utc_ms: i64,
+        initialize: bool,
+    ) -> Result<TradeFinalityTransitionEffectV1, MatchingStateErrorV1> {
+        let fill = self
+            .fills
+            .get(trade_id)
+            .cloned()
+            .ok_or_else(|| MatchingStateErrorV1::Finality(format!("未知成交：{trade_id}")))?;
+        if initialize {
+            if path_ordinal != 0 || fill.finality_path.is_some() {
+                return Err(MatchingStateErrorV1::Finality(
+                    "成交最终性初始化身份冲突".to_owned(),
+                ));
+            }
+        } else {
+            if fill.finality_path.as_ref() != Some(&path)
+                || fill
+                    .finality_path_ordinal
+                    .and_then(|current| current.checked_add(1))
+                    != Some(path_ordinal)
+            {
+                return Err(MatchingStateErrorV1::Finality(
+                    "成交最终性路径前驱冲突".to_owned(),
+                ));
+            }
+        }
+        let ordinal = usize::try_from(path_ordinal)
+            .map_err(|_| MatchingStateErrorV1::Finality("最终性 ordinal 越界".to_owned()))?;
+        let step = path
+            .steps()
+            .get(ordinal)
+            .ok_or_else(|| MatchingStateErrorV1::Finality("最终性 ordinal 越界".to_owned()))?;
+        let expected_at = fill
+            .matched_at_utc_ms
+            .checked_add(step.offset_ms())
+            .ok_or_else(|| MatchingStateErrorV1::Finality("最终性逻辑时点溢出".to_owned()))?;
+        if expected_at != platform_event_at_utc_ms {
+            return Err(MatchingStateErrorV1::Finality(
+                "最终性逻辑时点与路径偏移冲突".to_owned(),
+            ));
+        }
+        let economic_application = path.economic_application_ordinal() == Some(path_ordinal);
+        if economic_application && fill.economic_application_delta.is_some() {
+            return Err(MatchingStateErrorV1::Finality(
+                "成交经济变化重复应用".to_owned(),
+            ));
+        }
+        let failed = step.state() == TradeFinalityStateV1::Failed;
+        if economic_application && failed {
+            return Err(MatchingStateErrorV1::Finality(
+                "失败终态不能作为经济应用截点".to_owned(),
+            ));
+        }
+        let order_fee_before = self
+            .orders
+            .get(&fill.platform_order_id)
+            .ok_or_else(|| {
+                MatchingStateErrorV1::AccountOrderConflict(fill.platform_order_id.clone())
+            })?
+            .immediate_taker_fee_encumbered_units;
+        let releases_fee =
+            economic_application || (failed && fill.economic_application_delta.is_none());
+        if releases_fee && order_fee_before < fill.immediate_taker_fee_units {
+            return Err(MatchingStateErrorV1::Finality(
+                "成交手续费份额超过订单剩余手续费占用".to_owned(),
+            ));
+        }
+        let next_schedule = path
+            .steps()
+            .get(ordinal + 1)
+            .map(|next| {
+                let next_ordinal = path_ordinal.checked_add(1).ok_or_else(|| {
+                    MatchingStateErrorV1::Finality("最终性 ordinal 溢出".to_owned())
+                })?;
+                let next_at = fill
+                    .matched_at_utc_ms
+                    .checked_add(next.offset_ms())
+                    .ok_or_else(|| {
+                        MatchingStateErrorV1::Finality("最终性逻辑时点溢出".to_owned())
+                    })?;
+                Ok::<_, MatchingStateErrorV1>(ScheduledFinalityTransitionKeyV1 {
+                    platform_event_at_utc_ms: next_at,
+                    fill_economic_delta_identity: trade_id.to_owned(),
+                    path_ordinal: next_ordinal,
+                })
+            })
+            .transpose()?;
+        if next_schedule
+            .as_ref()
+            .is_some_and(|key| self.scheduled_finality.contains(key))
+        {
+            return Err(MatchingStateErrorV1::Finality(
+                "最终性后继重复排定".to_owned(),
+            ));
+        }
+
+        let reason_identity = if economic_application {
+            format!("FILL_FINALITY_ECONOMIC:{trade_id}:{path_ordinal}")
+        } else if failed && fill.economic_application_delta.is_some() {
+            format!("FILL_FINALITY_COMPENSATION:{trade_id}:{path_ordinal}")
+        } else if failed {
+            format!("FILL_FINALITY_UNAPPLIED_FAILURE:{trade_id}:{path_ordinal}")
+        } else {
+            format!("FILL_FINALITY_STATUS:{trade_id}:{path_ordinal}")
+        };
+        let economic_amounts = FillEconomicAmountsV1 {
+            base_units: fill.base_units,
+            quote_units: fill.quote_units,
+            immediate_taker_fee_units: fill.immediate_taker_fee_units,
+        };
+        let account_delta = if economic_application {
+            Some(self.account.apply_fill_finality_economic(
+                &reason_identity,
+                &fill.condition_id,
+                &fill.token_id,
+                platform_event_at_utc_ms,
+                economic_amounts,
+            )?)
+        } else if failed {
+            Some(if fill.economic_application_delta.is_some() {
+                self.account.apply_fill_finality_compensation(
+                    &reason_identity,
+                    &fill.condition_id,
+                    &fill.token_id,
+                    platform_event_at_utc_ms,
+                    economic_amounts,
+                )?
+            } else {
+                self.account.apply_fill_finality_unapplied_failure_release(
+                    &reason_identity,
+                    &fill.condition_id,
+                    platform_event_at_utc_ms,
+                    fill.quote_units,
+                    fill.immediate_taker_fee_units,
+                )?
+            })
+        } else {
+            None
+        };
+
+        if releases_fee && fill.immediate_taker_fee_units > 0 {
+            let order = self
+                .orders
+                .get_mut(&fill.platform_order_id)
+                .ok_or_else(|| {
+                    MatchingStateErrorV1::AccountOrderConflict(fill.platform_order_id.clone())
+                })?;
+            order.immediate_taker_fee_encumbered_units = order_fee_before
+                .checked_sub(fill.immediate_taker_fee_units)
+                .expect("手续费释放已在账户变化前校验");
+            order.last_updated_at_utc_ms = platform_event_at_utc_ms;
+        }
+        let updated = self
+            .fills
+            .get_mut(trade_id)
+            .expect("已验证成交必须仍在执行状态中");
+        if initialize {
+            updated.finality_path = Some(path.clone());
+        }
+        updated.finality_path_ordinal = Some(path_ordinal);
+        updated.finality_state = Some(step.state());
+        if economic_application {
+            updated.economic_application_delta = account_delta.clone();
+        }
+        if let Some(key) = next_schedule {
+            let inserted = self.scheduled_finality.insert(key);
+            debug_assert!(inserted);
+        }
+        let economic_disposition = updated.economic_disposition();
+        Ok(TradeFinalityTransitionEffectV1 {
+            trade_id: fill.trade_id,
+            platform_order_id: fill.platform_order_id,
+            condition_id: fill.condition_id,
+            token_id: fill.token_id,
+            platform_event_at_utc_ms,
+            finality_state: step.state(),
+            economic_disposition,
+            liquidity_role: fill.liquidity_role,
+            base_units: fill.base_units,
+            quote_units: fill.quote_units,
+            immediate_taker_fee_units: fill.immediate_taker_fee_units,
+            economic_application_delta: updated.economic_application_delta.clone(),
+            account_delta,
+        })
     }
 
     #[cfg(test)]
@@ -815,14 +1670,234 @@ impl ExecutionStateV1 {
         )
     }
 
+    pub(crate) fn apply_venue_dust_after_order_action(
+        &mut self,
+        platform_order_id: &str,
+        platform_event_at_utc_ms: i64,
+        lifecycle_account_rule: &LifecycleAccountRuleV1,
+    ) -> Result<Option<VenueDustEffectV1>, MatchingStateErrorV1> {
+        let order = self.orders.get(platform_order_id).ok_or_else(|| {
+            MatchingStateErrorV1::AccountOrderConflict(platform_order_id.to_owned())
+        })?;
+        let upper_exclusive_base_units = micro_units_v1(
+            lifecycle_account_rule
+                .venue_dust_upper_exclusive_shares
+                .value(),
+        )?;
+        if order.matched_base_units == 0
+            || order.pending_maker_depletion_base_units != 0
+            || order.open_base_units == 0
+            || order.open_base_units >= upper_exclusive_base_units
+        {
+            return Ok(None);
+        }
+        let Some(candidate) = self.queues.venue_dust_candidate_for_order(
+            &order.condition_id,
+            &order.token_id,
+            order.source_price_pusd_per_share,
+            platform_order_id,
+        ) else {
+            return Ok(None);
+        };
+        self.apply_venue_dust_terminal(
+            candidate,
+            platform_event_at_utc_ms,
+            &format!("ORDER_ACTION:{platform_order_id}"),
+            lifecycle_account_rule,
+        )
+    }
+
+    fn apply_qualified_market_resolution(
+        &mut self,
+        event: &ExecutionMarketEventV3,
+        platform_effective_at_utc_ms: i64,
+    ) -> Result<
+        (
+            Vec<MarketResolutionOrderEffectV1>,
+            Option<SettlementLifecycleEffectV1>,
+        ),
+        MatchingStateErrorV1,
+    > {
+        let ExecutionMarketEventPayloadV3::MarketResolutionTerminal(resolution) = &event.payload
+        else {
+            return Ok((Vec::new(), None));
+        };
+        let condition_id = event.market.condition_id.0.as_str();
+        let source_event_at_utc_ms = event.time.source_event_at_utc_ms.ok_or_else(|| {
+            MatchingStateErrorV1::Finality("合格市场判定缺少数据源时点".to_owned())
+        })?;
+        if let Some(existing) = self.market_resolutions.get(condition_id) {
+            if existing.resolution == *resolution {
+                return Ok((Vec::new(), None));
+            }
+            return Err(MatchingStateErrorV1::ResolutionConflict(
+                condition_id.to_owned(),
+            ));
+        }
+
+        if !self.matching_closed_markets.contains_key(condition_id) {
+            self.queues.close_account_orders_for_market(condition_id)?;
+            self.matching_closed_markets
+                .insert(condition_id.to_owned(), event.market.window.end_at_utc_ms);
+        }
+
+        let active_order_ids = self
+            .orders
+            .iter()
+            .filter(|(_, order)| {
+                order.condition_id == condition_id
+                    && (order.pending_maker_depletion_base_units > 0 || order.open_base_units > 0)
+            })
+            .map(|(platform_order_id, _)| platform_order_id.clone())
+            .collect::<Vec<_>>();
+        let pending_trade_ids = self
+            .fills
+            .values()
+            .filter(|fill| {
+                fill.condition_id == condition_id
+                    && !matches!(
+                        fill.finality_state,
+                        Some(TradeFinalityStateV1::Confirmed | TradeFinalityStateV1::Failed)
+                    )
+            })
+            .map(|fill| fill.trade_id.clone())
+            .collect::<BTreeSet<_>>();
+
+        let mut order_effects = Vec::with_capacity(active_order_ids.len());
+        for platform_order_id in active_order_ids {
+            order_effects.push(self.apply_market_resolution_order_terminal(
+                &platform_order_id,
+                &event.event_id.0,
+                platform_effective_at_utc_ms,
+            )?);
+        }
+        self.market_resolutions_mut().insert(
+            condition_id.to_owned(),
+            MarketResolutionObligationV1 {
+                resolution_event_id: event.event_id.0.clone(),
+                resolution_source_event_at_utc_ms: source_event_at_utc_ms,
+                resolution: resolution.clone(),
+                pending_trade_ids,
+                redeemed_at_utc_ms: None,
+                invalidated_by_quality_reason: None,
+            },
+        );
+        let auto_redeem = self.try_auto_redeem(condition_id, platform_effective_at_utc_ms)?;
+        Ok((order_effects, auto_redeem))
+    }
+
+    fn apply_market_resolution_order_terminal(
+        &mut self,
+        platform_order_id: &str,
+        resolution_event_id: &str,
+        platform_effective_at_utc_ms: i64,
+    ) -> Result<MarketResolutionOrderEffectV1, MatchingStateErrorV1> {
+        let snapshot = self.orders.get(platform_order_id).cloned().ok_or_else(|| {
+            MatchingStateErrorV1::AccountOrderConflict(platform_order_id.to_owned())
+        })?;
+        let active_base_units = snapshot
+            .pending_maker_depletion_base_units
+            .checked_add(snapshot.open_base_units)
+            .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+        let accepted_base_units = snapshot
+            .accepted_base_units
+            .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+        if active_base_units == 0
+            || snapshot.open_quote_units == 0
+            || !matches!(
+                snapshot.kind,
+                SimOrderKindStateV1::Gtc | SimOrderKindStateV1::Gtd { .. }
+            )
+            || snapshot.terminal_reason.is_some()
+            || snapshot.expired_base_units != 0
+            || snapshot.venue_dust_closed_base_units != 0
+            || snapshot.market_resolved_canceled_base_units != 0
+            || snapshot.canceled_base_units != 0
+            || accepted_base_units
+                != snapshot
+                    .matched_base_units
+                    .checked_add(active_base_units)
+                    .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?
+            || snapshot.accepted_quote_units
+                != snapshot
+                    .matched_quote_units
+                    .checked_add(snapshot.open_quote_units)
+                    .and_then(|value| value.checked_add(snapshot.released_quote_units))
+                    .and_then(|value| value.checked_add(snapshot.canceled_released_quote_units))
+                    .and_then(|value| value.checked_add(snapshot.expired_released_quote_units))
+                    .and_then(|value| value.checked_add(snapshot.venue_dust_released_quote_units))
+                    .and_then(|value| {
+                        value.checked_add(snapshot.market_resolved_released_quote_units)
+                    })
+                    .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?
+        {
+            return Err(MatchingStateErrorV1::QueuePredecessorConflict);
+        }
+        let effect_identity = market_resolution_order_identity(
+            resolution_event_id,
+            platform_order_id,
+            snapshot.pending_maker_depletion_base_units,
+            snapshot.open_base_units,
+            snapshot.open_quote_units,
+        );
+        let mut next_account = self.account.clone();
+        let account_delta = next_account.apply_market_resolution_encumbrance_release(
+            &effect_identity.0,
+            &snapshot.condition_id,
+            platform_effective_at_utc_ms,
+            decimal_from_micro_units_v1(snapshot.open_quote_units)?,
+        )?;
+        if snapshot.open_base_units > 0 {
+            self.account_overlay
+                .subtract_quantity(
+                    &snapshot.condition_id,
+                    &snapshot.token_id,
+                    BookSide::Bid,
+                    snapshot.source_price_pusd_per_share,
+                    decimal_from_micro_units_v1(snapshot.open_base_units)?,
+                )
+                .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+        }
+        if let SimOrderKindStateV1::Gtd { expires_at_utc_ms } = snapshot.kind {
+            self.gtd_deadlines
+                .remove(&(expires_at_utc_ms, platform_order_id.to_owned()));
+        }
+        let order = self
+            .orders
+            .get_mut(platform_order_id)
+            .expect("已验证订单仍存在");
+        order.market_resolved_canceled_base_units = active_base_units;
+        order.market_resolved_released_quote_units = snapshot.open_quote_units;
+        order.market_resolved_at_utc_ms = Some(platform_effective_at_utc_ms);
+        order.market_resolution_effect_identity = Some(effect_identity);
+        order.terminalized_pending_maker_depletion_evidence =
+            order.pending_maker_depletion_evidence.take();
+        order.pending_maker_depletion_base_units = 0;
+        order.open_base_units = 0;
+        order.open_quote_units = 0;
+        order.last_updated_at_utc_ms = platform_effective_at_utc_ms;
+        order.terminal_reason = Some(SimOrderTerminalReasonV1::MarketResolvedCanceled);
+        self.account = next_account;
+        Ok(MarketResolutionOrderEffectV1 {
+            platform_order_id: snapshot.platform_order_id,
+            condition_id: snapshot.condition_id,
+            token_id: snapshot.token_id,
+            canceled_base_units: active_base_units,
+            released_open_quote_units: snapshot.open_quote_units,
+            account_delta,
+        })
+    }
+
     pub(crate) fn apply_authorized_market_events(
         &mut self,
-        scenario: &PlatformScenarioV1,
+        directory: &SessionMarketDirectoryV1,
         bucket_at_utc_ms: i64,
         events: &[ExecutionMarketEventV3],
-    ) -> Result<(), MatchingStateErrorV1> {
-        self.advance_gtd_deadlines_through(bucket_at_utc_ms)?;
-        for market in scenario.market_set().markets() {
+        finality_policy: &TradeFinalityPolicyV1,
+        lifecycle_account_rule: &LifecycleAccountRuleV1,
+        qualified_resolution_event_ids: &BTreeSet<String>,
+    ) -> Result<AuthorizedMarketEventEffectsV1, MatchingStateErrorV1> {
+        for market in directory.markets() {
             let condition_id = &market.market().condition_id.0;
             let end_at = market.market().window.end_at_utc_ms;
             if bucket_at_utc_ms >= end_at
@@ -833,11 +1908,69 @@ impl ExecutionStateV1 {
                     .insert(condition_id.clone(), end_at);
             }
         }
-        let maker_depletions = self.queues.apply_authorized_events(events)?;
-        for depletion in maker_depletions {
-            self.apply_maker_queue_depletion(bucket_at_utc_ms, depletion)?;
+        let mut effects = AuthorizedMarketEventEffectsV1::default();
+        for event in events {
+            let should_invalidate_resolution =
+                if let ExecutionMarketEventPayloadV3::QualityBoundary(boundary) = &event.payload
+                    && matches!(boundary.scope, QualityScopeV1::Market)
+                    && boundary.current_quality == MarketDataQuality::Invalid
+                {
+                    self.market_resolutions
+                        .get(&event.market.condition_id.0)
+                        .is_some_and(|obligation| {
+                            obligation.redeemed_at_utc_ms.is_none()
+                                && obligation.invalidated_by_quality_reason.is_none()
+                        })
+                } else {
+                    false
+                };
+            if should_invalidate_resolution {
+                let ExecutionMarketEventPayloadV3::QualityBoundary(boundary) = &event.payload
+                else {
+                    unreachable!("市场判定隔离门只可能由质量边界触发")
+                };
+                self.market_resolutions_mut()
+                    .get_mut(&event.market.condition_id.0)
+                    .expect("待隔离市场判定义务必须仍存在")
+                    .invalidated_by_quality_reason = Some(boundary.reason_code.clone());
+            }
+            let queue_effects = self.queues.apply_authorized_event(event)?;
+            let mut event_fill_ids = Vec::new();
+            for depletion in queue_effects.maker_depletions {
+                if let Some(trade_id) =
+                    self.apply_maker_queue_depletion(bucket_at_utc_ms, depletion)?
+                {
+                    event_fill_ids.push(trade_id);
+                }
+            }
+            event_fill_ids.sort();
+            for trade_id in event_fill_ids {
+                effects
+                    .trade_finality_effects
+                    .push(self.initialize_fill_finality(finality_policy, &trade_id)?);
+            }
+            if let Some(candidate) = queue_effects.venue_dust_candidate
+                && let Some(effect) = self.apply_venue_dust_terminal(
+                    candidate,
+                    bucket_at_utc_ms,
+                    &format!("DPT_EVENT:{}", event.event_id.0),
+                    lifecycle_account_rule,
+                )?
+            {
+                effects.venue_dust_effects.push(effect);
+            }
+            if qualified_resolution_event_ids.contains(&event.event_id.0) {
+                let (order_effects, auto_redeem) =
+                    self.apply_qualified_market_resolution(event, bucket_at_utc_ms)?;
+                effects
+                    .market_resolution_order_effects
+                    .extend(order_effects);
+                if let Some(auto_redeem) = auto_redeem {
+                    effects.settlement_feedbacks.push(auto_redeem);
+                }
+            }
         }
-        Ok(())
+        Ok(effects)
     }
 
     pub(crate) fn next_gtd_deadline_at_utc_ms(&self) -> Option<i64> {
@@ -846,10 +1979,20 @@ impl ExecutionStateV1 {
             .map(|(expires_at_utc_ms, _)| *expires_at_utc_ms)
     }
 
+    pub(crate) fn redeemed_market_resolution(
+        &self,
+        condition_id: &str,
+    ) -> Option<&MarketResolutionTerminalV3> {
+        self.market_resolutions
+            .get(condition_id)
+            .filter(|obligation| obligation.redeemed_at_utc_ms.is_some())
+            .map(|obligation| &obligation.resolution)
+    }
+
     pub(crate) fn advance_gtd_deadlines_through(
         &mut self,
         logical_time_utc_ms: i64,
-    ) -> Result<(), MatchingStateErrorV1> {
+    ) -> Result<Vec<GtdExpirationEffectV1>, MatchingStateErrorV1> {
         if self
             .gtd_advanced_through_utc_ms
             .is_some_and(|current| logical_time_utc_ms < current)
@@ -862,6 +2005,7 @@ impl ExecutionStateV1 {
             .take_while(|(expires_at_utc_ms, _)| *expires_at_utc_ms <= logical_time_utc_ms)
             .cloned()
             .collect::<Vec<_>>();
+        let mut effects = Vec::new();
         for (expires_at_utc_ms, platform_order_id) in expiring {
             self.gtd_deadlines
                 .remove(&(expires_at_utc_ms, platform_order_id.clone()));
@@ -883,6 +2027,14 @@ impl ExecutionStateV1 {
                 || snapshot.expired_released_quote_units != 0
                 || snapshot.expired_at_utc_ms.is_some()
                 || snapshot.gtd_expiration_identity.is_some()
+                || snapshot.venue_dust_closed_base_units != 0
+                || snapshot.venue_dust_released_quote_units != 0
+                || snapshot.venue_dust_at_utc_ms.is_some()
+                || snapshot.venue_dust_identity.is_some()
+                || snapshot.market_resolved_canceled_base_units != 0
+                || snapshot.market_resolved_released_quote_units != 0
+                || snapshot.market_resolved_at_utc_ms.is_some()
+                || snapshot.market_resolution_effect_identity.is_some()
                 || snapshot.canceled_base_units != 0
                 || snapshot.canceled_released_quote_units != 0
                 || snapshot.canceled_at_utc_ms.is_some()
@@ -904,14 +2056,6 @@ impl ExecutionStateV1 {
             {
                 return Err(MatchingStateErrorV1::QueuePredecessorConflict);
             }
-            let next_available = self
-                .available_pusd_units
-                .checked_add(snapshot.open_quote_units)
-                .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-            let next_principal = self
-                .principal_encumbered_pusd_units
-                .checked_sub(snapshot.open_quote_units)
-                .ok_or(MatchingStateErrorV1::QueueUnderflow)?;
             let accepted_base = snapshot
                 .accepted_base_units
                 .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
@@ -919,6 +2063,10 @@ impl ExecutionStateV1 {
                 != snapshot
                     .matched_base_units
                     .checked_add(snapshot.expired_base_units)
+                    .and_then(|value| value.checked_add(snapshot.venue_dust_closed_base_units))
+                    .and_then(|value| {
+                        value.checked_add(snapshot.market_resolved_canceled_base_units)
+                    })
                     .and_then(|value| value.checked_add(snapshot.canceled_base_units))
                     .and_then(|value| value.checked_add(active_base_units))
                     .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?
@@ -928,11 +2076,33 @@ impl ExecutionStateV1 {
                         .checked_add(snapshot.released_quote_units)
                         .and_then(|value| value.checked_add(snapshot.canceled_released_quote_units))
                         .and_then(|value| value.checked_add(snapshot.expired_released_quote_units))
+                        .and_then(|value| {
+                            value.checked_add(snapshot.venue_dust_released_quote_units)
+                        })
+                        .and_then(|value| {
+                            value.checked_add(snapshot.market_resolved_released_quote_units)
+                        })
                         .and_then(|value| value.checked_add(snapshot.open_quote_units))
                         .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?
             {
                 return Err(MatchingStateErrorV1::QueuePredecessorConflict);
             }
+
+            let expiration_identity = gtd_expiration_identity(
+                &snapshot.platform_order_id,
+                expires_at_utc_ms,
+                snapshot.pending_maker_depletion_base_units,
+                snapshot.open_base_units,
+                snapshot.open_quote_units,
+                snapshot.pending_maker_depletion_evidence.as_ref(),
+            );
+            let mut next_account = self.account.clone();
+            let account_delta = next_account.apply_gtd_expiration_release(
+                &expiration_identity.0,
+                &snapshot.condition_id,
+                expires_at_utc_ms,
+                decimal_from_micro_units_v1(snapshot.open_quote_units)?,
+            )?;
 
             self.queues.remove_account_order(&platform_order_id);
             if snapshot.open_base_units > 0 {
@@ -953,24 +2123,26 @@ impl ExecutionStateV1 {
             order.expired_released_quote_units = order.open_quote_units;
             order.expired_at_utc_ms = Some(expires_at_utc_ms);
             order.last_updated_at_utc_ms = expires_at_utc_ms;
-            order.gtd_expiration_identity = Some(gtd_expiration_identity(
-                &order.platform_order_id,
-                expires_at_utc_ms,
-                order.pending_maker_depletion_base_units,
-                order.open_base_units,
-                order.open_quote_units,
-                order.pending_maker_depletion_evidence.as_ref(),
-            ));
+            order.gtd_expiration_identity = Some(expiration_identity.clone());
             order.terminalized_pending_maker_depletion_evidence =
                 order.pending_maker_depletion_evidence.take();
             order.pending_maker_depletion_base_units = 0;
             order.open_base_units = 0;
             order.open_quote_units = 0;
-            self.available_pusd_units = next_available;
-            self.principal_encumbered_pusd_units = next_principal;
+            self.account = next_account;
+            effects.push(GtdExpirationEffectV1 {
+                platform_order_id,
+                condition_id: snapshot.condition_id,
+                token_id: snapshot.token_id,
+                expiration_identity,
+                pending_base_units_before: snapshot.pending_maker_depletion_base_units,
+                open_base_units_before: snapshot.open_base_units,
+                released_open_quote_units: snapshot.open_quote_units,
+                account_delta,
+            });
         }
         self.gtd_advanced_through_utc_ms = Some(logical_time_utc_ms);
-        Ok(())
+        Ok(effects)
     }
 
     pub(crate) fn cancel_order_remainder(
@@ -1005,6 +2177,14 @@ impl ExecutionStateV1 {
             || snapshot.expired_released_quote_units != 0
             || snapshot.expired_at_utc_ms.is_some()
             || snapshot.gtd_expiration_identity.is_some()
+            || snapshot.venue_dust_closed_base_units != 0
+            || snapshot.venue_dust_released_quote_units != 0
+            || snapshot.venue_dust_at_utc_ms.is_some()
+            || snapshot.venue_dust_identity.is_some()
+            || snapshot.market_resolved_canceled_base_units != 0
+            || snapshot.market_resolved_released_quote_units != 0
+            || snapshot.market_resolved_at_utc_ms.is_some()
+            || snapshot.market_resolution_effect_identity.is_some()
             || snapshot
                 .terminalized_pending_maker_depletion_evidence
                 .is_some()
@@ -1017,6 +2197,8 @@ impl ExecutionStateV1 {
             .checked_add(snapshot.pending_maker_depletion_base_units)
             .and_then(|value| value.checked_add(snapshot.canceled_base_units))
             .and_then(|value| value.checked_add(snapshot.expired_base_units))
+            .and_then(|value| value.checked_add(snapshot.venue_dust_closed_base_units))
+            .and_then(|value| value.checked_add(snapshot.market_resolved_canceled_base_units))
             .and_then(|value| value.checked_add(snapshot.open_base_units))
             .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
         let quote_total = snapshot
@@ -1025,6 +2207,8 @@ impl ExecutionStateV1 {
             .and_then(|value| value.checked_add(snapshot.released_quote_units))
             .and_then(|value| value.checked_add(snapshot.canceled_released_quote_units))
             .and_then(|value| value.checked_add(snapshot.expired_released_quote_units))
+            .and_then(|value| value.checked_add(snapshot.venue_dust_released_quote_units))
+            .and_then(|value| value.checked_add(snapshot.market_resolved_released_quote_units))
             .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
         if accepted_base_units != base_total || snapshot.accepted_quote_units != quote_total {
             return Err(MatchingStateErrorV1::QueuePredecessorConflict);
@@ -1067,6 +2251,8 @@ impl ExecutionStateV1 {
             != snapshot
                 .matched_base_units
                 .checked_add(snapshot.expired_base_units)
+                .and_then(|value| value.checked_add(snapshot.venue_dust_closed_base_units))
+                .and_then(|value| value.checked_add(snapshot.market_resolved_canceled_base_units))
                 .and_then(|value| value.checked_add(next_canceled_base_units))
                 .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?
             || snapshot.accepted_quote_units
@@ -1074,19 +2260,22 @@ impl ExecutionStateV1 {
                     .matched_quote_units
                     .checked_add(snapshot.released_quote_units)
                     .and_then(|value| value.checked_add(snapshot.expired_released_quote_units))
+                    .and_then(|value| value.checked_add(snapshot.venue_dust_released_quote_units))
+                    .and_then(|value| {
+                        value.checked_add(snapshot.market_resolved_released_quote_units)
+                    })
                     .and_then(|value| value.checked_add(next_canceled_released_quote_units))
                     .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?
         {
             return Err(MatchingStateErrorV1::QueuePredecessorConflict);
         }
-        let next_available = self
-            .available_pusd_units
-            .checked_add(snapshot.open_quote_units)
-            .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-        let next_principal = self
-            .principal_encumbered_pusd_units
-            .checked_sub(snapshot.open_quote_units)
-            .ok_or(MatchingStateErrorV1::QueueUnderflow)?;
+        let mut next_account = self.account.clone();
+        let account_delta = next_account.apply_caller_cancel_release(
+            &caller_cancel_effect_identity.0,
+            &snapshot.condition_id,
+            canceled_at_utc_ms,
+            decimal_from_micro_units_v1(snapshot.open_quote_units)?,
+        )?;
 
         if snapshot.open_base_units > 0 {
             self.account_overlay
@@ -1119,13 +2308,13 @@ impl ExecutionStateV1 {
         order.pending_maker_depletion_base_units = 0;
         order.open_base_units = 0;
         order.open_quote_units = 0;
-        self.available_pusd_units = next_available;
-        self.principal_encumbered_pusd_units = next_principal;
+        self.account = next_account;
         Ok(CancelOrderStateDispositionV1::Canceled(
             CallerCancelStateEffectV1 {
                 pending_base_units_before: snapshot.pending_maker_depletion_base_units,
                 open_base_units_before: snapshot.open_base_units,
                 released_open_quote_units: snapshot.open_quote_units,
+                account_delta,
             },
         ))
     }
@@ -1134,8 +2323,9 @@ impl ExecutionStateV1 {
         &mut self,
         order: SimOrderRecordV1,
         fills: Vec<SimFillRecordV1>,
-    ) -> Result<(), MatchingStateErrorV1> {
+    ) -> Result<OrderCommitEffectsV1, MatchingStateErrorV1> {
         if order.platform_order_id.is_empty()
+            || order.item_idempotency_identity.is_empty()
             || self.orders.contains_key(&order.platform_order_id)
             || order.accepted_quote_units
                 != order
@@ -1144,6 +2334,8 @@ impl ExecutionStateV1 {
                     .and_then(|value| value.checked_add(order.released_quote_units))
                     .and_then(|value| value.checked_add(order.canceled_released_quote_units))
                     .and_then(|value| value.checked_add(order.expired_released_quote_units))
+                    .and_then(|value| value.checked_add(order.venue_dust_released_quote_units))
+                    .and_then(|value| value.checked_add(order.market_resolved_released_quote_units))
                     .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?
         {
             return Err(MatchingStateErrorV1::AccountOrderConflict(
@@ -1157,6 +2349,8 @@ impl ExecutionStateV1 {
                     .checked_add(order.pending_maker_depletion_base_units)
                     .and_then(|value| value.checked_add(order.canceled_base_units))
                     .and_then(|value| value.checked_add(order.expired_base_units))
+                    .and_then(|value| value.checked_add(order.venue_dust_closed_base_units))
+                    .and_then(|value| value.checked_add(order.market_resolved_canceled_base_units))
                     .and_then(|value| value.checked_add(order.open_base_units))
                     .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?
         {
@@ -1168,6 +2362,14 @@ impl ExecutionStateV1 {
             || order.expired_released_quote_units != 0
             || order.expired_at_utc_ms.is_some()
             || order.gtd_expiration_identity.is_some()
+            || order.venue_dust_closed_base_units != 0
+            || order.venue_dust_released_quote_units != 0
+            || order.venue_dust_at_utc_ms.is_some()
+            || order.venue_dust_identity.is_some()
+            || order.market_resolved_canceled_base_units != 0
+            || order.market_resolved_released_quote_units != 0
+            || order.market_resolved_at_utc_ms.is_some()
+            || order.market_resolution_effect_identity.is_some()
             || order.canceled_base_units != 0
             || order.canceled_released_quote_units != 0
             || order.canceled_at_utc_ms.is_some()
@@ -1207,11 +2409,23 @@ impl ExecutionStateV1 {
                 .checked_add(fill.quote_units)
                 .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)
         })?;
-        if fill_base != order.matched_base_units || fill_quote != order.matched_quote_units {
+        let fill_fee = fills.iter().try_fold(0_u128, |total, fill| {
+            total
+                .checked_add(fill.immediate_taker_fee_units)
+                .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)
+        })?;
+        if fill_base != order.matched_base_units
+            || fill_quote != order.matched_quote_units
+            || fill_fee != order.immediate_taker_fee_encumbered_units
+        {
             return Err(MatchingStateErrorV1::QueuePredecessorConflict);
         }
         if fills.iter().any(|fill| {
             fill.platform_order_id != order.platform_order_id
+                || fill.finality_path.is_some()
+                || fill.finality_path_ordinal.is_some()
+                || fill.finality_state.is_some()
+                || fill.economic_application_delta.is_some()
                 || self.fills.contains_key(&fill.trade_id)
         }) {
             return Err(MatchingStateErrorV1::AccountOrderConflict(
@@ -1222,28 +2436,36 @@ impl ExecutionStateV1 {
             .accepted_quote_units
             .checked_add(order.immediate_taker_fee_encumbered_units)
             .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-        if self.available_pusd_units < required {
+        if self.account.available_pusd_units() < required {
             return Err(MatchingStateErrorV1::QueueUnderflow);
         }
         let final_principal = order
             .matched_quote_units
             .checked_add(order.open_quote_units)
             .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-        let final_debit = final_principal
-            .checked_add(order.immediate_taker_fee_encumbered_units)
-            .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-        let next_available = self
-            .available_pusd_units
-            .checked_sub(final_debit)
-            .ok_or(MatchingStateErrorV1::QueueUnderflow)?;
-        let next_principal = self
-            .principal_encumbered_pusd_units
-            .checked_add(final_principal)
-            .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-        let next_fee = self
-            .immediate_taker_fee_encumbered_pusd_units
-            .checked_add(order.immediate_taker_fee_encumbered_units)
-            .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+        let accepted_principal = if matches!(order.kind, SimOrderKindStateV1::Fak) {
+            order.accepted_quote_units
+        } else {
+            final_principal
+        };
+        let mut next_account = self.account.clone();
+        let mut account_deltas = vec![next_account.apply_order_accepted(
+            &format!("order-accepted:{}", order.platform_order_id),
+            &order.condition_id,
+            order.created_at_utc_ms,
+            decimal_from_micro_units_v1(accepted_principal)?,
+            decimal_from_micro_units_v1(order.immediate_taker_fee_encumbered_units)?,
+        )?];
+        if matches!(order.kind, SimOrderKindStateV1::Fak)
+            && let Some(delta) = next_account.apply_fak_unspent_release(
+                &format!("fak-unspent:{}", order.platform_order_id),
+                &order.condition_id,
+                order.created_at_utc_ms,
+                decimal_from_micro_units_v1(order.released_quote_units)?,
+            )?
+        {
+            account_deltas.push(delta);
+        }
         if order.open_base_units > 0 {
             self.queues.insert_account_buy_order(
                 &order.condition_id,
@@ -1262,9 +2484,7 @@ impl ExecutionStateV1 {
                 )
                 .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
         }
-        self.available_pusd_units = next_available;
-        self.principal_encumbered_pusd_units = next_principal;
-        self.immediate_taker_fee_encumbered_pusd_units = next_fee;
+        self.account = next_account;
         for fill in fills {
             self.fills.insert(fill.trade_id.clone(), fill);
         }
@@ -1275,14 +2495,160 @@ impl ExecutionStateV1 {
                 .insert((expires_at_utc_ms, order.platform_order_id.clone()));
         }
         self.orders.insert(order.platform_order_id.clone(), order);
-        Ok(())
+        Ok(OrderCommitEffectsV1 { account_deltas })
+    }
+
+    fn apply_venue_dust_terminal(
+        &mut self,
+        candidate: VenueDustQueueCandidateV1,
+        platform_event_at_utc_ms: i64,
+        trigger_identity: &str,
+        lifecycle_account_rule: &LifecycleAccountRuleV1,
+    ) -> Result<Option<VenueDustEffectV1>, MatchingStateErrorV1> {
+        if !lifecycle_account_rule.venue_dust_requires_positive_fill {
+            return Err(MatchingStateErrorV1::QueuePredecessorConflict);
+        }
+        let upper_exclusive_base_units = micro_units_v1(
+            lifecycle_account_rule
+                .venue_dust_upper_exclusive_shares
+                .value(),
+        )?;
+        if upper_exclusive_base_units == 0 {
+            return Err(MatchingStateErrorV1::QueuePredecessorConflict);
+        }
+        let snapshot = self
+            .orders
+            .get(&candidate.platform_order_id)
+            .cloned()
+            .ok_or_else(|| {
+                MatchingStateErrorV1::AccountOrderConflict(candidate.platform_order_id.clone())
+            })?;
+        if candidate.price_pusd_per_share != snapshot.source_price_pusd_per_share
+            || candidate.remaining_base_units != snapshot.open_base_units
+            || self
+                .queues
+                .venue_dust_candidate_for_order(
+                    &snapshot.condition_id,
+                    &snapshot.token_id,
+                    snapshot.source_price_pusd_per_share,
+                    &candidate.platform_order_id,
+                )
+                .as_ref()
+                != Some(&candidate)
+        {
+            return Err(MatchingStateErrorV1::QueuePredecessorConflict);
+        }
+        if snapshot.matched_base_units == 0
+            || snapshot.pending_maker_depletion_base_units != 0
+            || snapshot.open_base_units == 0
+            || snapshot.open_base_units >= upper_exclusive_base_units
+        {
+            return Ok(None);
+        }
+        let accepted_base_units = snapshot
+            .accepted_base_units
+            .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+        if !matches!(
+            snapshot.kind,
+            SimOrderKindStateV1::Gtc | SimOrderKindStateV1::Gtd { .. }
+        ) || snapshot.expired_base_units != 0
+            || snapshot.expired_released_quote_units != 0
+            || snapshot.expired_at_utc_ms.is_some()
+            || snapshot.gtd_expiration_identity.is_some()
+            || snapshot.venue_dust_closed_base_units != 0
+            || snapshot.venue_dust_released_quote_units != 0
+            || snapshot.venue_dust_at_utc_ms.is_some()
+            || snapshot.venue_dust_identity.is_some()
+            || snapshot.market_resolved_canceled_base_units != 0
+            || snapshot.market_resolved_released_quote_units != 0
+            || snapshot.market_resolved_at_utc_ms.is_some()
+            || snapshot.market_resolution_effect_identity.is_some()
+            || snapshot.canceled_base_units != 0
+            || snapshot.canceled_released_quote_units != 0
+            || snapshot.canceled_at_utc_ms.is_some()
+            || snapshot.caller_cancel_effect_identity.is_some()
+            || snapshot.pending_maker_depletion_evidence.is_some()
+            || snapshot
+                .terminalized_pending_maker_depletion_evidence
+                .is_some()
+            || snapshot.terminal_reason.is_some()
+        {
+            return Err(MatchingStateErrorV1::QueuePredecessorConflict);
+        }
+        if accepted_base_units
+            != snapshot
+                .matched_base_units
+                .checked_add(snapshot.open_base_units)
+                .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?
+            || snapshot.accepted_quote_units
+                != snapshot
+                    .matched_quote_units
+                    .checked_add(snapshot.open_quote_units)
+                    .and_then(|value| value.checked_add(snapshot.released_quote_units))
+                    .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?
+        {
+            return Err(MatchingStateErrorV1::QueuePredecessorConflict);
+        }
+        let venue_dust_identity = venue_dust_identity(
+            trigger_identity,
+            &snapshot.platform_order_id,
+            snapshot.matched_base_units,
+            snapshot.open_base_units,
+            snapshot.open_quote_units,
+        );
+        let mut next_account = self.account.clone();
+        let account_delta = next_account.apply_venue_dust_release(
+            &venue_dust_identity.0,
+            &snapshot.condition_id,
+            platform_event_at_utc_ms,
+            decimal_from_micro_units_v1(snapshot.open_quote_units)?,
+        )?;
+
+        self.account_overlay
+            .subtract_quantity(
+                &snapshot.condition_id,
+                &snapshot.token_id,
+                BookSide::Bid,
+                snapshot.source_price_pusd_per_share,
+                decimal_from_micro_units_v1(snapshot.open_base_units)?,
+            )
+            .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+        self.queues
+            .remove_account_order(&snapshot.platform_order_id);
+        if let SimOrderKindStateV1::Gtd { expires_at_utc_ms } = snapshot.kind {
+            self.gtd_deadlines
+                .remove(&(expires_at_utc_ms, snapshot.platform_order_id.clone()));
+        }
+        let order = self
+            .orders
+            .get_mut(&snapshot.platform_order_id)
+            .ok_or_else(|| {
+                MatchingStateErrorV1::AccountOrderConflict(snapshot.platform_order_id.clone())
+            })?;
+        order.venue_dust_closed_base_units = snapshot.open_base_units;
+        order.venue_dust_released_quote_units = snapshot.open_quote_units;
+        order.venue_dust_at_utc_ms = Some(platform_event_at_utc_ms);
+        order.venue_dust_identity = Some(venue_dust_identity.clone());
+        order.open_base_units = 0;
+        order.open_quote_units = 0;
+        order.last_updated_at_utc_ms = platform_event_at_utc_ms;
+        order.terminal_reason = Some(SimOrderTerminalReasonV1::VenueDustTerminal);
+        self.account = next_account;
+        Ok(Some(VenueDustEffectV1 {
+            platform_order_id: snapshot.platform_order_id,
+            condition_id: snapshot.condition_id,
+            token_id: snapshot.token_id,
+            closed_base_units: snapshot.open_base_units,
+            released_open_quote_units: snapshot.open_quote_units,
+            account_delta,
+        }))
     }
 
     fn apply_maker_queue_depletion(
         &mut self,
         bucket_at_utc_ms: i64,
         depletion: MakerQueueDepletionV1,
-    ) -> Result<(), MatchingStateErrorV1> {
+    ) -> Result<Option<String>, MatchingStateErrorV1> {
         let order = self
             .orders
             .get_mut(&depletion.platform_order_id)
@@ -1298,9 +2664,18 @@ impl ExecutionStateV1 {
                 != order.pending_maker_depletion_evidence.is_none()
             || order.canceled_base_units != 0
             || order.expired_base_units != 0
+            || order.venue_dust_closed_base_units != 0
+            || order.venue_dust_released_quote_units != 0
+            || order.venue_dust_at_utc_ms.is_some()
+            || order.venue_dust_identity.is_some()
+            || order.market_resolved_canceled_base_units != 0
+            || order.market_resolved_released_quote_units != 0
+            || order.market_resolved_at_utc_ms.is_some()
+            || order.market_resolution_effect_identity.is_some()
             || order
                 .terminalized_pending_maker_depletion_evidence
                 .is_some()
+            || order.terminal_reason.is_some()
         {
             return Err(MatchingStateErrorV1::QueuePredecessorConflict);
         }
@@ -1393,7 +2768,7 @@ impl ExecutionStateV1 {
                 .checked_add(depletion.base_units)
                 .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
             order.pending_maker_depletion_evidence = Some(evidence);
-            return Ok(());
+            return Ok(None);
         }
 
         let next_matched_quote = order
@@ -1410,6 +2785,8 @@ impl ExecutionStateV1 {
                 .and_then(|value| value.checked_add(order.released_quote_units))
                 .and_then(|value| value.checked_add(order.canceled_released_quote_units))
                 .and_then(|value| value.checked_add(order.expired_released_quote_units))
+                .and_then(|value| value.checked_add(order.venue_dust_released_quote_units))
+                .and_then(|value| value.checked_add(order.market_resolved_released_quote_units))
                 .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?
         {
             return Err(MatchingStateErrorV1::QueuePredecessorConflict);
@@ -1432,7 +2809,7 @@ impl ExecutionStateV1 {
         self.fills.insert(
             trade_id.clone(),
             SimFillRecordV1 {
-                trade_id,
+                trade_id: trade_id.clone(),
                 platform_order_id: order.platform_order_id.clone(),
                 condition_id: order.condition_id.clone(),
                 token_id: order.token_id.clone(),
@@ -1443,9 +2820,14 @@ impl ExecutionStateV1 {
                 price_pusd_per_share: depletion.price_pusd_per_share,
                 base_units: maker_fill_base_units,
                 quote_units: quote_delta,
+                immediate_taker_fee_units: 0,
+                finality_path: None,
+                finality_path_ordinal: None,
+                finality_state: None,
+                economic_application_delta: None,
             },
         );
-        Ok(())
+        Ok(Some(trade_id))
     }
 }
 
@@ -1550,6 +2932,44 @@ fn pending_maker_depletion_evidence_sha256(
     hash.update((source_event_id.len() as u64).to_be_bytes());
     hash.update(source_event_id.as_bytes());
     hash.update(base_units.to_be_bytes());
+    Sha256Hex(format!("{:x}", hash.finalize()))
+}
+
+fn venue_dust_identity(
+    trigger_identity: &str,
+    platform_order_id: &str,
+    matched_base_units: u128,
+    open_base_units: u128,
+    open_quote_units: u128,
+) -> Sha256Hex {
+    let mut hash = Sha256::new();
+    hash.update(VENUE_DUST_ID_DOMAIN_V1);
+    for value in [trigger_identity, platform_order_id] {
+        hash.update((value.len() as u64).to_be_bytes());
+        hash.update(value.as_bytes());
+    }
+    hash.update(matched_base_units.to_be_bytes());
+    hash.update(open_base_units.to_be_bytes());
+    hash.update(open_quote_units.to_be_bytes());
+    Sha256Hex(format!("{:x}", hash.finalize()))
+}
+
+fn market_resolution_order_identity(
+    resolution_event_id: &str,
+    platform_order_id: &str,
+    pending_base_units: u128,
+    open_base_units: u128,
+    open_quote_units: u128,
+) -> Sha256Hex {
+    let mut hash = Sha256::new();
+    hash.update(MARKET_RESOLUTION_ORDER_ID_DOMAIN_V1);
+    for value in [resolution_event_id, platform_order_id] {
+        hash.update((value.len() as u64).to_be_bytes());
+        hash.update(value.as_bytes());
+    }
+    hash.update(pending_base_units.to_be_bytes());
+    hash.update(open_base_units.to_be_bytes());
+    hash.update(open_quote_units.to_be_bytes());
     Sha256Hex(format!("{:x}", hash.finalize()))
 }
 
@@ -2114,22 +3534,115 @@ pub(crate) fn taker_fee_pusd_v1(
 
     let mut total = ExactRatioV1::zero();
     for (base_units, price) in fills {
-        if *price <= Decimal::ZERO || *price >= Decimal::ONE {
-            return Err(MatchingMathErrorV1::InvalidPrice);
-        }
-        if *base_units == 0 {
-            continue;
-        }
-        let price = positive_decimal_ratio(*price)?;
-        let curve_numerator = &price.numerator * (&price.denominator - &price.numerator);
-        let curve_denominator = &price.denominator * &price.denominator;
-        let term = ExactRatioV1::new(
-            BigUint::from(*base_units) * &rate.numerator * curve_numerator.pow(exponent),
-            BigUint::from(1_000_000_u32) * &rate.denominator * curve_denominator.pow(exponent),
-        )?;
-        total = total.add(term)?;
+        total = total.add(exact_taker_fee_contribution_v1(
+            *base_units,
+            *price,
+            &rate,
+            exponent,
+        )?)?;
     }
     rounded_fee_decimal(total)
+}
+
+pub(crate) fn allocate_taker_fee_micro_units_v1(
+    fills: &[(&str, u128, Decimal)],
+    rate: Decimal,
+    exponent: u32,
+) -> Result<(u128, Vec<u128>), MatchingMathErrorV1> {
+    if rate.is_sign_negative() || exponent == 0 {
+        return Err(MatchingMathErrorV1::InvalidSegment);
+    }
+    let rate = nonnegative_decimal_ratio(rate)?;
+    let fee_inputs = fills
+        .iter()
+        .map(|(_, base_units, price)| (*base_units, *price))
+        .collect::<Vec<_>>();
+    if rate.numerator.is_zero() || fills.iter().all(|(_, base_units, _)| *base_units == 0) {
+        return Ok((0, vec![0; fills.len()]));
+    }
+    if fee_upper_bound_rounds_to_zero(&fee_inputs, &rate, exponent)? {
+        return Ok((0, vec![0; fills.len()]));
+    }
+
+    let fee_unit_scale = BigUint::from(10_u32.pow(FEE_SCALE));
+    let mut total = ExactRatioV1::zero();
+    let mut floor_units = Vec::with_capacity(fills.len());
+    let mut remainders = Vec::with_capacity(fills.len());
+    for (_, base_units, price) in fills {
+        let contribution = exact_taker_fee_contribution_v1(*base_units, *price, &rate, exponent)?;
+        let (floor, remainder) =
+            (&contribution.numerator * &fee_unit_scale).div_rem(&contribution.denominator);
+        floor_units.push(floor);
+        remainders.push((remainder, contribution.denominator.clone()));
+        total = total.add(contribution)?;
+    }
+
+    let rounded_total_units = rounded_fee_units_v1(&total);
+    let floor_total = floor_units
+        .iter()
+        .fold(BigUint::zero(), |sum, units| sum + units);
+    if rounded_total_units < floor_total {
+        return Err(MatchingMathErrorV1::InvalidSegment);
+    }
+    let remaining = (&rounded_total_units - floor_total)
+        .to_usize()
+        .ok_or(MatchingMathErrorV1::ArithmeticOverflow)?;
+    if remaining > fills.len() {
+        return Err(MatchingMathErrorV1::InvalidSegment);
+    }
+
+    let mut remainder_order = (0..fills.len()).collect::<Vec<_>>();
+    remainder_order.sort_by(|left, right| {
+        let (left_numerator, left_denominator) = &remainders[*left];
+        let (right_numerator, right_denominator) = &remainders[*right];
+        let left_cross = left_numerator * right_denominator;
+        let right_cross = right_numerator * left_denominator;
+        right_cross
+            .cmp(&left_cross)
+            .then_with(|| fills[*left].0.cmp(fills[*right].0))
+    });
+    for index in remainder_order.into_iter().take(remaining) {
+        floor_units[index] += BigUint::one();
+    }
+
+    let micro_units_per_fee_unit = 10_u128
+        .checked_pow(MICRO_SCALE - FEE_SCALE)
+        .ok_or(MatchingMathErrorV1::ArithmeticOverflow)?;
+    let total_micro_units = rounded_total_units
+        .to_u128()
+        .and_then(|units| units.checked_mul(micro_units_per_fee_unit))
+        .ok_or(MatchingMathErrorV1::ArithmeticOverflow)?;
+    let allocations = floor_units
+        .into_iter()
+        .map(|units| {
+            units
+                .to_u128()
+                .and_then(|units| units.checked_mul(micro_units_per_fee_unit))
+                .ok_or(MatchingMathErrorV1::ArithmeticOverflow)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((total_micro_units, allocations))
+}
+
+fn exact_taker_fee_contribution_v1(
+    base_units: u128,
+    price: Decimal,
+    rate: &ExactRatioV1,
+    exponent: u32,
+) -> Result<ExactRatioV1, MatchingMathErrorV1> {
+    if price <= Decimal::ZERO || price >= Decimal::ONE {
+        return Err(MatchingMathErrorV1::InvalidPrice);
+    }
+    if base_units == 0 {
+        return Ok(ExactRatioV1::zero());
+    }
+    let price = positive_decimal_ratio(price)?;
+    let curve_numerator = &price.numerator * (&price.denominator - &price.numerator);
+    let curve_denominator = &price.denominator * &price.denominator;
+    ExactRatioV1::new(
+        BigUint::from(base_units) * &rate.numerator * curve_numerator.pow(exponent),
+        BigUint::from(1_000_000_u32) * &rate.denominator * curve_denominator.pow(exponent),
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2235,15 +3748,20 @@ fn exact_less_than_power_of_two_shift(
     }
 }
 
-fn rounded_fee_decimal(total: ExactRatioV1) -> Result<Decimal, MatchingMathErrorV1> {
+fn rounded_fee_units_v1(total: &ExactRatioV1) -> BigUint {
     if total.numerator.is_zero() {
-        return Ok(Decimal::ZERO);
+        return BigUint::zero();
     }
-    let scaled = total.numerator * BigUint::from(10_u32.pow(FEE_SCALE));
+    let scaled = &total.numerator * BigUint::from(10_u32.pow(FEE_SCALE));
     let (mut rounded_units, remainder) = scaled.div_rem(&total.denominator);
     if (&remainder << 1_usize) >= total.denominator {
         rounded_units += BigUint::one();
     }
+    rounded_units
+}
+
+fn rounded_fee_decimal(total: ExactRatioV1) -> Result<Decimal, MatchingMathErrorV1> {
+    let rounded_units = rounded_fee_units_v1(&total);
     if rounded_units.is_zero() {
         return Ok(Decimal::ZERO);
     }
@@ -2273,6 +3791,69 @@ fn u128_from_u256(value: U256) -> Result<u128, MatchingMathErrorV1> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decimal(value: &str) -> Decimal {
+        value.parse().expect("测试十进制必须有效")
+    }
+
+    fn allocations_by_identity(
+        fills: &[(&str, u128, Decimal)],
+        allocations: &[u128],
+    ) -> BTreeMap<String, u128> {
+        fills
+            .iter()
+            .zip(allocations)
+            .map(|((identity, _, _), units)| ((*identity).to_owned(), *units))
+            .collect()
+    }
+
+    #[test]
+    fn taker_fee_allocation_uses_stable_identity_for_equal_exact_remainders() {
+        let fills = [
+            ("fill-z", 200, decimal("0.5")),
+            ("fill-a", 200, decimal("0.5")),
+        ];
+        let (total, allocations) = allocate_taker_fee_micro_units_v1(&fills, decimal("0.07"), 1)
+            .expect("相同余数手续费分配");
+        assert_eq!(total, 10);
+        assert_eq!(allocations, vec![0, 10]);
+
+        let reversed = [fills[1], fills[0]];
+        let (reversed_total, reversed_allocations) =
+            allocate_taker_fee_micro_units_v1(&reversed, decimal("0.07"), 1)
+                .expect("扰动后的相同余数手续费分配");
+        assert_eq!(reversed_total, total);
+        assert_eq!(
+            allocations_by_identity(&reversed, &reversed_allocations),
+            allocations_by_identity(&fills, &allocations),
+        );
+    }
+
+    #[test]
+    fn taker_fee_allocation_preserves_once_rounded_multi_price_total() {
+        let fills = [
+            ("fill-lower-remainder", 300, decimal("0.4")),
+            ("fill-higher-remainder", 300, decimal("0.5")),
+        ];
+        let (total, allocations) = allocate_taker_fee_micro_units_v1(&fills, decimal("0.07"), 1)
+            .expect("多价位手续费分配");
+        let order_total = taker_fee_pusd_v1(
+            &fills
+                .iter()
+                .map(|(_, base_units, price)| (*base_units, *price))
+                .collect::<Vec<_>>(),
+            decimal("0.07"),
+            1,
+        )
+        .expect("整单手续费");
+
+        assert_eq!(
+            total,
+            micro_units_v1(order_total).expect("整单手续费微单位")
+        );
+        assert_eq!(allocations, vec![0, 10]);
+        assert_eq!(allocations.iter().sum::<u128>(), total);
+    }
 
     #[test]
     fn gtd_expiration_identity_binds_terminalized_amounts_and_pending_evidence() {

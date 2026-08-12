@@ -16,7 +16,7 @@ use rust_decimal::Decimal;
 
 use crate::execution::{
     InitialAccountStateV1, PlatformMarketV1, PlatformScenarioV1, SimCallerRoleV1,
-    SimExecutionProcessV1, accepting_submission_response_bridge,
+    accepting_submission_response_bridge, execution_process_for_tests,
 };
 use crate::latency_profile::load_embedded_proxy_latency_profile;
 use crate::market::{
@@ -24,7 +24,7 @@ use crate::market::{
     MarketLifecyclePhaseV1, MillisecondBucketClosureV1,
 };
 use crate::platform_rules::tests::successful_snapshot_for_sim_tests;
-use crate::session::{SIM_EXECUTION_CONTRACT_V1, SessionSpecV1};
+use crate::session::{SIM_EXECUTION_CONTRACT_V1, SessionSpecV2};
 
 pub(crate) fn market() -> MarketIdentityV2 {
     MarketIdentityV2 {
@@ -57,12 +57,15 @@ pub(crate) fn session_spec(
     scenario: &PlatformScenarioV1,
     role: SimCallerRoleV1,
     id: &str,
-) -> SessionSpecV1 {
-    SessionSpecV1 {
+) -> SessionSpecV2 {
+    SessionSpecV2 {
+        run_id: "component-test-run".to_owned(),
         session_id: id.to_owned(),
         account_id: format!("{id}-account"),
         caller_role: role,
         caller_instance_id: format!("{id}-caller"),
+        creation_request_id: format!("{id}-creation"),
+        response_bridge_binding_id: format!("{id}-bridge"),
         initial_account_state: InitialAccountStateV1::try_new(
             "1000".parse().expect("initial account amount"),
         )
@@ -84,9 +87,8 @@ async fn execution_session(
     let profile = load_embedded_proxy_latency_profile().expect("profile");
     let scenario = scenario();
     let spec = session_spec(&scenario, role, id);
-    SimExecutionProcessV1::new(rules, profile, scenario)
-        .create_session(spec, accepting_submission_response_bridge())
-        .expect("task 2.1 session")
+    execution_process_for_tests(rules, profile, scenario)
+        .create_active_session_for_tests(spec, accepting_submission_response_bridge())
 }
 
 fn sha(byte: char) -> Sha256Hex {
@@ -257,7 +259,7 @@ async fn task21_process_rejects_session_hashes_not_bound_to_injected_scenario() 
     let rules = successful_snapshot_for_sim_tests().await;
     let profile = load_embedded_proxy_latency_profile().expect("profile");
     let scenario = scenario();
-    let mut process = SimExecutionProcessV1::new(rules, profile, Arc::clone(&scenario));
+    let mut process = execution_process_for_tests(rules, profile, Arc::clone(&scenario));
     let mut spec = session_spec(&scenario, SimCallerRoleV1::ModelTrain, "task21-session");
     spec.scenario_sha256 = contracts::Sha256Hex("4".repeat(64));
     assert!(
