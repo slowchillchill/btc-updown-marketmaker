@@ -29,7 +29,8 @@ pub enum TradeFinalitySelectorDomainV1 {
     Fill,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TradeFinalityStepV1 {
     state: TradeFinalityStateV1,
     offset_ms: i64,
@@ -47,7 +48,8 @@ impl TradeFinalityStepV1 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TradeFinalityPathV1 {
     steps: Vec<TradeFinalityStepV1>,
     economic_application_ordinal: Option<u32>,

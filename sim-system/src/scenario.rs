@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use contracts::{AssetIdentityV1, MarketIdentityV2, Sha256Hex};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const PLATFORM_SCENARIO_SCHEMA_V1: &str = "platform_scenario_v1";
@@ -44,7 +44,8 @@ impl fmt::Display for PlatformScenarioErrorV1 {
 
 impl std::error::Error for PlatformScenarioErrorV1 {}
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlatformMarketV1 {
     market: MarketIdentityV2,
     assets: [AssetIdentityV1; 2],

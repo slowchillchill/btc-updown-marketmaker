@@ -3,9 +3,11 @@ use std::fmt;
 use std::sync::Arc;
 
 use contracts::{
-    BookSide, ExecutionMarketEventPayloadV3, ExecutionMarketEventV3, InitialL2SnapshotV2,
-    LevelExecutionTransitionV3, MarketDataQuality, MarketResolutionTerminalV3,
-    PlatformAccountDeltaV1, PlatformOutcomeBalanceV1, QualityScopeV1, ResyncQuality, Sha256Hex,
+    BookSide, ExactDecimal, ExecutionMarketEventPayloadV3, ExecutionMarketEventV3,
+    InitialL2SnapshotV2, LevelExecutionTransitionV3, MarketDataQuality, MarketResolutionTerminalV3,
+    PlatformAccountBalanceDeltaV1, PlatformAccountDeltaReasonV1, PlatformAccountDeltaV1,
+    PlatformOutcomeBalanceDeltaV1, PlatformOutcomeBalanceV1, QualityScopeV1, ResyncQuality,
+    Sha256Hex, TokenId,
 };
 use data_pipeline_core::parse_canonical_decimal;
 use num_bigint::{BigInt, BigUint};
@@ -13,17 +15,22 @@ use num_integer::Integer;
 use num_traits::{One, ToPrimitive, Zero};
 use polymarket_client_sdk_v2::types::U256;
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::account::{
     AutoRedeemAccountEffectV1, FillEconomicAmountsV1, PlatformAccountErrorV1,
-    PlatformAccountStateV1,
+    PlatformAccountStateV1, validate_platform_account_delta_integrity,
 };
-use crate::finality::{TradeFinalityPathV1, TradeFinalityPolicyV1, TradeFinalityStateV1};
-use crate::market::AccountBookOverlayStoreV1;
+use crate::finality::{
+    TradeFinalityPathV1, TradeFinalityPolicyV1, TradeFinalitySelectorDomainV1, TradeFinalityStateV1,
+};
+use crate::market::{AccountBookOverlayStoreV1, MarketLifecyclePhaseV1};
 use crate::market_directory::SessionMarketDirectoryV1;
 use crate::platform_rules::{LifecycleAccountRuleV1, SealedProcessRuleSnapshot};
-use crate::rebate::{RebateKindV1, RebateSettlementActionV1, RebateStateErrorV1, RebateStateV1};
+use crate::rebate::{
+    RebateKindV1, RebateRecoveryFillV1, RebateSettlementActionV1, RebateStateErrorV1, RebateStateV1,
+};
 use crate::scenario::PlatformMarketV1;
 
 const MICRO_SCALE: u32 = 6;
@@ -70,6 +77,7 @@ pub(crate) enum MatchingStateErrorV1 {
     ResolutionConflict(String),
     Rebate(String),
     LogicalTimeRegression,
+    RestoredDirectoryMismatch(&'static str),
 }
 
 impl From<PlatformAccountErrorV1> for MatchingStateErrorV1 {
@@ -144,7 +152,7 @@ pub(crate) struct QueueMatchPlanV1 {
     pub used_quote_units: u128,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum QueueSegmentV1 {
     External(ExternalSyntheticMakerSegmentV1),
     Account(AccountOrderQueueSegmentV1),
@@ -162,7 +170,7 @@ impl QueueSegmentV1 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct ExternalSyntheticMakerSegmentV1 {
     segment_id: Sha256Hex,
     total_base_units: u128,
@@ -170,19 +178,19 @@ struct ExternalSyntheticMakerSegmentV1 {
     consumed_base_units: u128,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct AccountOrderQueueSegmentV1 {
     platform_order_id: String,
     remaining_base_units: u128,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct PriceQueueV1 {
     segments: VecDeque<QueueSegmentV1>,
     account_taker_depletion_debt_units: u128,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct AssetQueueV1 {
     bids: BTreeMap<Decimal, PriceQueueV1>,
     asks: BTreeMap<Decimal, PriceQueueV1>,
@@ -205,7 +213,7 @@ impl AssetQueueV1 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ExecutionQueueStateV1 {
     markets: BTreeMap<String, BTreeMap<String, AssetQueueV1>>,
 }
@@ -247,6 +255,38 @@ impl ExecutionQueueStateV1 {
 
     fn contains_market(&self, condition_id: &str) -> bool {
         self.markets.contains_key(condition_id)
+    }
+
+    fn has_exact_directory_shape(&self, directory: &SessionMarketDirectoryV1) -> bool {
+        self.markets.len() == directory.markets().len()
+            && directory.markets().all(|market| {
+                self.markets
+                    .get(&market.market().condition_id.0)
+                    .is_some_and(|assets| {
+                        assets.len() == market.assets().len()
+                            && market
+                                .assets()
+                                .iter()
+                                .all(|asset| assets.contains_key(&asset.token_id.0))
+                    })
+            })
+    }
+
+    fn release_market_matching_state_if_initialized(
+        &mut self,
+        condition_id: &str,
+    ) -> Result<bool, MatchingStateErrorV1> {
+        let initial_load_complete = self
+            .markets
+            .get(condition_id)
+            .ok_or_else(|| MatchingStateErrorV1::UnknownMarket(condition_id.to_owned()))?
+            .values()
+            .all(|asset| asset.initial_loaded);
+        if !initial_load_complete {
+            return Ok(false);
+        }
+        self.release_market_matching_state(condition_id)?;
+        Ok(true)
     }
 
     fn apply_authorized_event(
@@ -399,7 +439,7 @@ impl ExecutionQueueStateV1 {
         }
     }
 
-    fn close_account_orders_for_market(
+    fn release_market_matching_state(
         &mut self,
         condition_id: &str,
     ) -> Result<(), MatchingStateErrorV1> {
@@ -408,14 +448,8 @@ impl ExecutionQueueStateV1 {
             .get_mut(condition_id)
             .ok_or_else(|| MatchingStateErrorV1::UnknownMarket(condition_id.to_owned()))?;
         for asset in assets.values_mut() {
-            for levels in [&mut asset.bids, &mut asset.asks] {
-                levels.retain(|_, queue| {
-                    queue
-                        .segments
-                        .retain(|segment| matches!(segment, QueueSegmentV1::External(_)));
-                    !queue.segments.is_empty()
-                });
-            }
+            asset.bids.clear();
+            asset.asks.clear();
         }
         Ok(())
     }
@@ -703,7 +737,7 @@ impl ExecutionQueueStateV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum SimOrderKindStateV1 {
     Gtc,
     Gtd { expires_at_utc_ms: i64 },
@@ -711,7 +745,7 @@ pub(crate) enum SimOrderKindStateV1 {
     Fak,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum SimOrderTerminalReasonV1 {
     FakCompleted,
     VenueDustTerminal,
@@ -760,13 +794,13 @@ pub(crate) enum CancelOrderStateDispositionV1 {
     Canceled(CallerCancelStateEffectV1),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum SimLiquidityRoleV1 {
     Taker,
     MakerInferred,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SimOrderRecordV1 {
     pub platform_order_id: String,
     pub global_request_id: String,
@@ -809,7 +843,7 @@ pub(crate) struct SimOrderRecordV1 {
     pub terminal_reason: Option<SimOrderTerminalReasonV1>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct MakerDepletionEvidenceV1 {
     pub sha256: Sha256Hex,
     pub event_count: u64,
@@ -817,7 +851,7 @@ pub(crate) struct MakerDepletionEvidenceV1 {
     pub last_source_event_id: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SimFillRecordV1 {
     pub trade_id: String,
     pub platform_order_id: String,
@@ -942,14 +976,173 @@ pub(crate) struct TradeFinalityLifecycleEffectsV1 {
     pub settlement_feedbacks: Vec<SettlementLifecycleEffectV1>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 struct ScheduledFinalityTransitionKeyV1 {
     platform_event_at_utc_ms: i64,
     fill_economic_delta_identity: String,
     path_ordinal: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TerminalAccountDeltaReferenceV1 {
+    pub(crate) account_transition_seq: u64,
+    pub(crate) delta_id: String,
+    pub(crate) delta_sha256: Sha256Hex,
+}
+
+impl From<&PlatformAccountDeltaV1> for TerminalAccountDeltaReferenceV1 {
+    fn from(delta: &PlatformAccountDeltaV1) -> Self {
+        Self {
+            account_transition_seq: delta.account_transition_seq,
+            delta_id: delta.delta_id.clone(),
+            delta_sha256: delta.delta_sha256.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TerminalFillEvictionWitnessV1 {
+    pub(crate) rebate_fill: RebateRecoveryFillV1,
+    pub(crate) token_id: String,
+    pub(crate) quote_units: u128,
+    pub(crate) finality_selector_identity: Option<String>,
+    pub(crate) economic_application_delta: Option<TerminalAccountDeltaReferenceV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TerminalExecutionMarketEvictionV1 {
+    pub(crate) condition_id: String,
+    pub(crate) fills: BTreeMap<String, TerminalFillEvictionWitnessV1>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RecoveredTerminalFinalityV1 {
+    terminal_ordinal: u32,
+    terminal_at_utc_ms: i64,
+    economic_application_ordinal: Option<u32>,
+    economic_application_at_utc_ms: Option<i64>,
+}
+
+fn terminal_finality_selector_identity(
+    policy: &TradeFinalityPolicyV1,
+    order: &SimOrderRecordV1,
+) -> Option<String> {
+    match policy.override_selector_domain() {
+        Some(TradeFinalitySelectorDomainV1::Request) => Some(order.global_request_id.clone()),
+        Some(TradeFinalitySelectorDomainV1::BatchItem) => {
+            Some(order.item_idempotency_identity.clone())
+        }
+        Some(TradeFinalitySelectorDomainV1::Fill) | None => None,
+    }
+}
+
+fn recovered_terminal_finality(
+    account_instance_key: &contracts::AccountInstanceKeyV1,
+    policy: &TradeFinalityPolicyV1,
+    witness: &TerminalFillEvictionWitnessV1,
+) -> Result<RecoveredTerminalFinalityV1, MatchingStateErrorV1> {
+    let trade_id = witness.rebate_fill.trade_id.as_str();
+    let (global_request_id, item_idempotency_identity) = match policy.override_selector_domain() {
+        Some(TradeFinalitySelectorDomainV1::Request) => (
+            witness
+                .finality_selector_identity
+                .as_deref()
+                .ok_or_else(|| {
+                    MatchingStateErrorV1::Finality(format!(
+                        "驱逐成交缺少请求级最终性选择身份：{trade_id}"
+                    ))
+                })?,
+            "",
+        ),
+        Some(TradeFinalitySelectorDomainV1::BatchItem) => (
+            "",
+            witness
+                .finality_selector_identity
+                .as_deref()
+                .ok_or_else(|| {
+                    MatchingStateErrorV1::Finality(format!(
+                        "驱逐成交缺少批次项最终性选择身份：{trade_id}"
+                    ))
+                })?,
+        ),
+        Some(TradeFinalitySelectorDomainV1::Fill) | None => {
+            if witness.finality_selector_identity.is_some() {
+                return Err(MatchingStateErrorV1::Finality(format!(
+                    "驱逐成交含不适用的最终性选择身份：{trade_id}"
+                )));
+            }
+            ("", "")
+        }
+    };
+    let path = policy.select_path_for_fill(
+        account_instance_key,
+        global_request_id,
+        item_idempotency_identity,
+        trade_id,
+    );
+    let terminal_index = path.steps().len().checked_sub(1).ok_or_else(|| {
+        MatchingStateErrorV1::Finality(format!("驱逐成交最终性路径为空：{trade_id}"))
+    })?;
+    let terminal_ordinal = u32::try_from(terminal_index).map_err(|_| {
+        MatchingStateErrorV1::Finality(format!("驱逐成交最终性路径过长：{trade_id}"))
+    })?;
+    let terminal_step = &path.steps()[terminal_index];
+    let expected_terminal_state = match witness.rebate_fill.terminal_succeeded {
+        Some(true) => TradeFinalityStateV1::Confirmed,
+        Some(false) => TradeFinalityStateV1::Failed,
+        None => {
+            return Err(MatchingStateErrorV1::Finality(format!(
+                "驱逐成交缺少最终性终态：{trade_id}"
+            )));
+        }
+    };
+    if terminal_step.state() != expected_terminal_state {
+        return Err(MatchingStateErrorV1::Finality(format!(
+            "驱逐成交终态不等于已密封策略选择结果：{trade_id}"
+        )));
+    }
+    let terminal_at_utc_ms = witness
+        .rebate_fill
+        .matched_at_utc_ms
+        .checked_add(terminal_step.offset_ms())
+        .ok_or_else(|| {
+            MatchingStateErrorV1::Finality(format!("驱逐成交最终性时点溢出：{trade_id}"))
+        })?;
+    let economic_application_ordinal = path.economic_application_ordinal();
+    let economic_application_at_utc_ms = economic_application_ordinal
+        .map(|ordinal| {
+            let index = usize::try_from(ordinal).map_err(|_| {
+                MatchingStateErrorV1::Finality(format!("驱逐成交经济截点越界：{trade_id}"))
+            })?;
+            let step = path.steps().get(index).ok_or_else(|| {
+                MatchingStateErrorV1::Finality(format!("驱逐成交经济截点超出路径：{trade_id}"))
+            })?;
+            witness
+                .rebate_fill
+                .matched_at_utc_ms
+                .checked_add(step.offset_ms())
+                .ok_or_else(|| {
+                    MatchingStateErrorV1::Finality(format!("驱逐成交经济截点时点溢出：{trade_id}"))
+                })
+        })
+        .transpose()?;
+    if witness.economic_application_delta.is_some() != economic_application_ordinal.is_some() {
+        return Err(MatchingStateErrorV1::Finality(format!(
+            "驱逐成交经济变化与已密封策略截点不一致：{trade_id}"
+        )));
+    }
+    Ok(RecoveredTerminalFinalityV1 {
+        terminal_ordinal,
+        terminal_at_utc_ms,
+        economic_application_ordinal,
+        economic_application_at_utc_ms,
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ExecutionStateV1 {
     queues: ExecutionQueueStateV1,
     account_overlay: AccountBookOverlayStoreV1,
@@ -965,7 +1158,7 @@ pub(crate) struct ExecutionStateV1 {
     market_resolutions: Arc<BTreeMap<String, MarketResolutionObligationV1>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct MarketResolutionObligationV1 {
     resolution_event_id: String,
     resolution_source_event_at_utc_ms: i64,
@@ -1055,6 +1248,872 @@ impl ExecutionStateV1 {
         self.account.account_instance_key()
     }
 
+    pub(crate) fn validate_recovered(
+        &self,
+        directory: &SessionMarketDirectoryV1,
+        opening_anchor: &contracts::AccountOpeningAnchorV1,
+        rules: &SealedProcessRuleSnapshot,
+        finality_policy: &TradeFinalityPolicyV1,
+        logical_platform_driven_through: Option<i64>,
+        evicted_markets: &BTreeMap<String, TerminalExecutionMarketEvictionV1>,
+    ) -> Result<(), MatchingStateErrorV1> {
+        self.account.validate_restored_state(opening_anchor)?;
+        if !self.queues.has_exact_directory_shape(directory) {
+            return Err(MatchingStateErrorV1::RestoredDirectoryMismatch(
+                "撮合队列与会话目录不一致",
+            ));
+        }
+        if !self.account_overlay.has_exact_directory_shape(directory) {
+            return Err(MatchingStateErrorV1::RestoredDirectoryMismatch(
+                "账户盘口叠加层与会话目录不一致",
+            ));
+        }
+        let mut evicted_rebate_fills = BTreeMap::new();
+        for (condition_id, eviction) in evicted_markets {
+            if condition_id != &eviction.condition_id
+                || self
+                    .orders
+                    .values()
+                    .any(|order| order.condition_id == *condition_id)
+                || self
+                    .fills
+                    .values()
+                    .any(|fill| fill.condition_id == *condition_id)
+            {
+                return Err(MatchingStateErrorV1::Finality(format!(
+                    "恢复已驱逐市场仍含热订单、成交或身份冲突：{condition_id}"
+                )));
+            }
+            for (trade_id, witness) in &eviction.fills {
+                if trade_id != &witness.rebate_fill.trade_id
+                    || witness.rebate_fill.condition_id != *condition_id
+                    || witness.rebate_fill.terminal_succeeded.is_none()
+                    || evicted_rebate_fills
+                        .insert(trade_id.clone(), witness.rebate_fill.clone())
+                        .is_some()
+                {
+                    return Err(MatchingStateErrorV1::Finality(format!(
+                        "恢复已驱逐成交见证身份或终态冲突：{trade_id}"
+                    )));
+                }
+            }
+        }
+        if !self.rebate.has_consistent_recovery_state(
+            directory,
+            rules,
+            &self.fills,
+            &evicted_rebate_fills,
+            &evicted_markets.keys().cloned().collect(),
+        ) {
+            return Err(MatchingStateErrorV1::Rebate(
+                "恢复返佣目录、成交前驱、日桶或时钟集合不一致".to_owned(),
+            ));
+        }
+        self.validate_recovered_order_graph(directory)?;
+        let expected_gtd_deadlines = self
+            .orders
+            .values()
+            .filter_map(|order| match order.kind {
+                SimOrderKindStateV1::Gtd { expires_at_utc_ms }
+                    if order.pending_maker_depletion_base_units > 0
+                        || order.open_base_units > 0 =>
+                {
+                    Some((expires_at_utc_ms, order.platform_order_id.clone()))
+                }
+                SimOrderKindStateV1::Gtc
+                | SimOrderKindStateV1::Gtd { .. }
+                | SimOrderKindStateV1::Fok
+                | SimOrderKindStateV1::Fak => None,
+            })
+            .collect::<BTreeSet<_>>();
+        if self.gtd_deadlines != expected_gtd_deadlines {
+            return Err(MatchingStateErrorV1::Finality(
+                "恢复 GTD 到期前驱集合不完整或含额外成员".to_owned(),
+            ));
+        }
+        if self.gtd_advanced_through_utc_ms != logical_platform_driven_through {
+            return Err(MatchingStateErrorV1::Finality(
+                "恢复 GTD 驱动水位与会话统一逻辑驱动水位不一致".to_owned(),
+            ));
+        }
+        self.validate_recovered_finality_predecessors(directory, finality_policy, evicted_markets)?;
+        Ok(())
+    }
+
+    fn validate_recovered_order_graph(
+        &self,
+        directory: &SessionMarketDirectoryV1,
+    ) -> Result<(), MatchingStateErrorV1> {
+        let mut expected_overlay = AccountBookOverlayStoreV1::new(directory);
+        let mut expected_queued_orders = BTreeMap::new();
+        let mut fill_totals = BTreeMap::<String, (u128, u128)>::new();
+
+        for (trade_id, fill) in &self.fills {
+            if fill.base_units == 0
+                || fill.quote_units == 0
+                || fill.price_pusd_per_share <= Decimal::ZERO
+                || fill.price_pusd_per_share >= Decimal::ONE
+                || match fill.liquidity_role {
+                    SimLiquidityRoleV1::MakerInferred => {
+                        fill.immediate_taker_fee_units != 0
+                            || fill
+                                .maker_depletion_evidence
+                                .as_ref()
+                                .is_none_or(|evidence| {
+                                    fill.source_identity != evidence.sha256.0
+                                        || evidence.event_count == 0
+                                        || evidence.first_source_event_id.is_empty()
+                                        || evidence.last_source_event_id.is_empty()
+                                })
+                    }
+                    SimLiquidityRoleV1::Taker => fill.maker_depletion_evidence.is_some(),
+                }
+            {
+                return Err(recovered_order_graph_error(trade_id));
+            }
+            let totals = fill_totals
+                .entry(fill.platform_order_id.clone())
+                .or_default();
+            totals.0 = totals
+                .0
+                .checked_add(fill.base_units)
+                .ok_or_else(|| recovered_order_graph_error(trade_id))?;
+            totals.1 = totals
+                .1
+                .checked_add(fill.quote_units)
+                .ok_or_else(|| recovered_order_graph_error(trade_id))?;
+        }
+
+        for (platform_order_id, order) in &self.orders {
+            if platform_order_id != &order.platform_order_id
+                || order.global_request_id.is_empty()
+                || order.item_id.is_empty()
+                || order.item_idempotency_identity.is_empty()
+                || order.last_updated_at_utc_ms < order.created_at_utc_ms
+                || !directory.markets().any(|market| {
+                    market.market().condition_id.0 == order.condition_id
+                        && market
+                            .assets()
+                            .iter()
+                            .any(|asset| asset.token_id.0 == order.token_id)
+                })
+                || (order.pending_maker_depletion_base_units == 0)
+                    != order.pending_maker_depletion_evidence.is_none()
+            {
+                return Err(recovered_order_graph_error(platform_order_id));
+            }
+            let quote_total = order
+                .matched_quote_units
+                .checked_add(order.open_quote_units)
+                .and_then(|value| value.checked_add(order.released_quote_units))
+                .and_then(|value| value.checked_add(order.canceled_released_quote_units))
+                .and_then(|value| value.checked_add(order.expired_released_quote_units))
+                .and_then(|value| value.checked_add(order.venue_dust_released_quote_units))
+                .and_then(|value| value.checked_add(order.market_resolved_released_quote_units))
+                .ok_or_else(|| recovered_order_graph_error(platform_order_id))?;
+            if quote_total != order.accepted_quote_units {
+                return Err(recovered_order_graph_error(platform_order_id));
+            }
+            if let Some(accepted_base_units) = order.accepted_base_units {
+                let base_total = order
+                    .matched_base_units
+                    .checked_add(order.pending_maker_depletion_base_units)
+                    .and_then(|value| value.checked_add(order.open_base_units))
+                    .and_then(|value| value.checked_add(order.canceled_base_units))
+                    .and_then(|value| value.checked_add(order.expired_base_units))
+                    .and_then(|value| value.checked_add(order.venue_dust_closed_base_units))
+                    .and_then(|value| value.checked_add(order.market_resolved_canceled_base_units))
+                    .ok_or_else(|| recovered_order_graph_error(platform_order_id))?;
+                if base_total != accepted_base_units {
+                    return Err(recovered_order_graph_error(platform_order_id));
+                }
+            }
+            let (fill_base_units, fill_quote_units) =
+                fill_totals.remove(platform_order_id).unwrap_or_default();
+            if fill_base_units != order.matched_base_units
+                || fill_quote_units != order.matched_quote_units
+            {
+                return Err(recovered_order_graph_error(platform_order_id));
+            }
+            if order.open_base_units > 0 {
+                if !matches!(
+                    order.kind,
+                    SimOrderKindStateV1::Gtc | SimOrderKindStateV1::Gtd { .. }
+                ) || order.terminal_reason.is_some()
+                    || expected_overlay
+                        .add_quantity(
+                            &order.condition_id,
+                            &order.token_id,
+                            BookSide::Bid,
+                            order.source_price_pusd_per_share,
+                            decimal_from_micro_units_v1(order.open_base_units)?,
+                        )
+                        .is_none()
+                {
+                    return Err(recovered_order_graph_error(platform_order_id));
+                }
+                if !self
+                    .matching_closed_markets
+                    .contains_key(&order.condition_id)
+                    && expected_queued_orders
+                        .insert(
+                            platform_order_id.clone(),
+                            (
+                                order.condition_id.clone(),
+                                order.token_id.clone(),
+                                order.source_price_pusd_per_share,
+                                order.open_base_units,
+                            ),
+                        )
+                        .is_some()
+                {
+                    return Err(recovered_order_graph_error(platform_order_id));
+                }
+            }
+        }
+        if !fill_totals.is_empty() || self.account_overlay != expected_overlay {
+            return Err(recovered_order_graph_error("订单、成交与账户盘口叠加层"));
+        }
+
+        for (condition_id, closed_at_utc_ms) in &self.matching_closed_markets {
+            let Some(market) = directory
+                .markets()
+                .find(|market| market.market().condition_id.0 == *condition_id)
+            else {
+                return Err(recovered_order_graph_error(condition_id));
+            };
+            if *closed_at_utc_ms != market.market().window.end_at_utc_ms {
+                return Err(recovered_order_graph_error(condition_id));
+            }
+        }
+
+        let mut actual_queued_orders = BTreeMap::new();
+        for (condition_id, assets) in &self.queues.markets {
+            let matching_closed = self.matching_closed_markets.contains_key(condition_id);
+            for (token_id, asset) in assets {
+                if matching_closed && (!asset.bids.is_empty() || !asset.asks.is_empty()) {
+                    return Err(recovered_order_graph_error(condition_id));
+                }
+                for (side, levels) in [(BookSide::Bid, &asset.bids), (BookSide::Ask, &asset.asks)] {
+                    for (price, queue) in levels {
+                        for segment in &queue.segments {
+                            if let QueueSegmentV1::Account(account) = segment
+                                && (side != BookSide::Bid
+                                    || account.remaining_base_units == 0
+                                    || actual_queued_orders
+                                        .insert(
+                                            account.platform_order_id.clone(),
+                                            (
+                                                condition_id.clone(),
+                                                token_id.clone(),
+                                                *price,
+                                                account.remaining_base_units,
+                                            ),
+                                        )
+                                        .is_some())
+                            {
+                                return Err(recovered_order_graph_error(
+                                    &account.platform_order_id,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if actual_queued_orders != expected_queued_orders {
+            return Err(recovered_order_graph_error("活动订单与撮合队列"));
+        }
+        Ok(())
+    }
+
+    fn validate_recovered_finality_predecessors(
+        &self,
+        directory: &SessionMarketDirectoryV1,
+        finality_policy: &TradeFinalityPolicyV1,
+        evicted_markets: &BTreeMap<String, TerminalExecutionMarketEvictionV1>,
+    ) -> Result<(), MatchingStateErrorV1> {
+        let mut expected_scheduled = BTreeSet::new();
+        let mut expected_finality_advanced_through_utc_ms = None;
+        let mut expected_principal_encumbrance_units = self
+            .orders
+            .values()
+            .try_fold(0_u128, |total, order| {
+                total.checked_add(order.open_quote_units)
+            })
+            .ok_or_else(|| {
+                MatchingStateErrorV1::Finality("恢复订单开放本金占用合计溢出".to_owned())
+            })?;
+        let mut expected_fee_encumbrance_units = 0_u128;
+        let mut expected_order_fee_encumbrance = BTreeMap::<String, u128>::new();
+        for (trade_id, fill) in &self.fills {
+            if trade_id != &fill.trade_id {
+                return Err(MatchingStateErrorV1::Finality(
+                    "恢复成交映射键与正文身份不一致".to_owned(),
+                ));
+            }
+            let order = self.orders.get(&fill.platform_order_id).ok_or_else(|| {
+                MatchingStateErrorV1::Finality(format!("恢复成交缺少所属订单：{trade_id}"))
+            })?;
+            if fill.condition_id != order.condition_id
+                || fill.token_id != order.token_id
+                || !directory.contains(&fill.condition_id)
+            {
+                return Err(MatchingStateErrorV1::Finality(format!(
+                    "恢复成交所属市场、资产或订单不一致：{trade_id}"
+                )));
+            }
+            let path = fill.finality_path.as_ref().ok_or_else(|| {
+                MatchingStateErrorV1::Finality(format!("恢复成交缺少已冻结最终性路径：{trade_id}"))
+            })?;
+            let selected_path = finality_policy.select_path_for_fill(
+                self.account_instance_key(),
+                &order.global_request_id,
+                &order.item_idempotency_identity,
+                trade_id,
+            );
+            if path != selected_path {
+                return Err(MatchingStateErrorV1::Finality(format!(
+                    "恢复成交最终性路径不等于已密封策略选择结果：{trade_id}"
+                )));
+            }
+            let ordinal = fill.finality_path_ordinal.ok_or_else(|| {
+                MatchingStateErrorV1::Finality(format!("恢复成交缺少当前最终性序号：{trade_id}"))
+            })?;
+            let ordinal_index = usize::try_from(ordinal).map_err(|_| {
+                MatchingStateErrorV1::Finality(format!("恢复成交最终性序号越界：{trade_id}"))
+            })?;
+            let current_step = path.steps().get(ordinal_index).ok_or_else(|| {
+                MatchingStateErrorV1::Finality(format!("恢复成交最终性序号超出路径：{trade_id}"))
+            })?;
+            if fill.finality_state != Some(current_step.state()) {
+                return Err(MatchingStateErrorV1::Finality(format!(
+                    "恢复成交当前最终性状态与路径不一致：{trade_id}"
+                )));
+            }
+            if ordinal > 0 {
+                let current_at = fill
+                    .matched_at_utc_ms
+                    .checked_add(current_step.offset_ms())
+                    .ok_or_else(|| {
+                        MatchingStateErrorV1::Finality(format!(
+                            "恢复成交当前最终性时点溢出：{trade_id}"
+                        ))
+                    })?;
+                expected_finality_advanced_through_utc_ms = Some(
+                    expected_finality_advanced_through_utc_ms
+                        .map_or(current_at, |current: i64| current.max(current_at)),
+                );
+            }
+            let economic_application_reached = path
+                .economic_application_ordinal()
+                .is_some_and(|economic_ordinal| ordinal >= economic_ordinal);
+            self.validate_recovered_economic_application(fill, path, economic_application_reached)?;
+            let fee_released = economic_application_reached
+                || fill.finality_state == Some(TradeFinalityStateV1::Failed);
+            if !fee_released {
+                expected_principal_encumbrance_units = expected_principal_encumbrance_units
+                    .checked_add(fill.quote_units)
+                    .ok_or_else(|| {
+                        MatchingStateErrorV1::Finality(format!(
+                            "恢复成交本金占用合计溢出：{trade_id}"
+                        ))
+                    })?;
+                expected_fee_encumbrance_units = expected_fee_encumbrance_units
+                    .checked_add(fill.immediate_taker_fee_units)
+                    .ok_or_else(|| {
+                        MatchingStateErrorV1::Finality(format!(
+                            "恢复成交手续费占用合计溢出：{trade_id}"
+                        ))
+                    })?;
+                let order_fee = expected_order_fee_encumbrance
+                    .entry(fill.platform_order_id.clone())
+                    .or_default();
+                *order_fee = order_fee
+                    .checked_add(fill.immediate_taker_fee_units)
+                    .ok_or_else(|| {
+                        MatchingStateErrorV1::Finality(format!(
+                            "恢复订单手续费占用合计溢出：{}",
+                            fill.platform_order_id
+                        ))
+                    })?;
+            }
+            if let Some(next_step) = path.steps().get(ordinal_index + 1) {
+                let path_ordinal = ordinal.checked_add(1).ok_or_else(|| {
+                    MatchingStateErrorV1::Finality(format!(
+                        "恢复成交下一最终性序号溢出：{trade_id}"
+                    ))
+                })?;
+                let platform_event_at_utc_ms = fill
+                    .matched_at_utc_ms
+                    .checked_add(next_step.offset_ms())
+                    .ok_or_else(|| {
+                        MatchingStateErrorV1::Finality(format!(
+                            "恢复成交下一最终性时点溢出：{trade_id}"
+                        ))
+                    })?;
+                expected_scheduled.insert(ScheduledFinalityTransitionKeyV1 {
+                    platform_event_at_utc_ms,
+                    fill_economic_delta_identity: trade_id.clone(),
+                    path_ordinal,
+                });
+            }
+        }
+        for eviction in evicted_markets.values() {
+            for witness in eviction.fills.values() {
+                let finality = recovered_terminal_finality(
+                    self.account_instance_key(),
+                    finality_policy,
+                    witness,
+                )?;
+                if finality.terminal_ordinal > 0 {
+                    expected_finality_advanced_through_utc_ms = Some(
+                        expected_finality_advanced_through_utc_ms
+                            .map_or(finality.terminal_at_utc_ms, |current: i64| {
+                                current.max(finality.terminal_at_utc_ms)
+                            }),
+                    );
+                }
+            }
+        }
+        if self.scheduled_finality != expected_scheduled {
+            return Err(MatchingStateErrorV1::Finality(
+                "恢复成交的已排定最终性前驱集合不完整或含额外成员".to_owned(),
+            ));
+        }
+        if self.finality_advanced_through_utc_ms != expected_finality_advanced_through_utc_ms {
+            return Err(MatchingStateErrorV1::Finality(
+                "恢复成交最终性驱动水位与当前路径前缀不一致".to_owned(),
+            ));
+        }
+        for order in self.orders.values() {
+            if order.immediate_taker_fee_encumbered_units
+                != expected_order_fee_encumbrance
+                    .remove(&order.platform_order_id)
+                    .unwrap_or_default()
+            {
+                return Err(MatchingStateErrorV1::Finality(format!(
+                    "恢复订单手续费占用与未闭合成交不一致：{}",
+                    order.platform_order_id
+                )));
+            }
+        }
+        if !expected_order_fee_encumbrance.is_empty()
+            || micro_units_v1(self.account.principal_encumbrance_pusd())?
+                != expected_principal_encumbrance_units
+            || micro_units_v1(self.account.immediate_taker_fee_encumbrance_pusd())?
+                != expected_fee_encumbrance_units
+        {
+            return Err(MatchingStateErrorV1::Finality(
+                "恢复账户资金占用与订单、成交经济前驱不一致".to_owned(),
+            ));
+        }
+
+        for (condition_id, obligation) in self.market_resolutions.iter() {
+            if !directory.contains(condition_id) {
+                return Err(MatchingStateErrorV1::ResolutionConflict(
+                    condition_id.clone(),
+                ));
+            }
+            let expected_pending = self
+                .fills
+                .values()
+                .filter(|fill| {
+                    fill.condition_id == *condition_id
+                        && !matches!(
+                            fill.finality_state,
+                            Some(TradeFinalityStateV1::Confirmed | TradeFinalityStateV1::Failed)
+                        )
+                })
+                .map(|fill| fill.trade_id.clone())
+                .collect::<BTreeSet<_>>();
+            if obligation.pending_trade_ids != expected_pending
+                || (obligation.redeemed_at_utc_ms.is_some()
+                    && !obligation.pending_trade_ids.is_empty())
+            {
+                return Err(MatchingStateErrorV1::ResolutionConflict(
+                    condition_id.clone(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_recovered_economic_application(
+        &self,
+        fill: &SimFillRecordV1,
+        path: &TradeFinalityPathV1,
+        economic_application_reached: bool,
+    ) -> Result<(), MatchingStateErrorV1> {
+        let Some(economic_ordinal) = path.economic_application_ordinal() else {
+            if fill.economic_application_delta.is_some() {
+                return Err(MatchingStateErrorV1::Finality(format!(
+                    "恢复无经济应用截点的成交含经济变化：{}",
+                    fill.trade_id
+                )));
+            }
+            return Ok(());
+        };
+        if !economic_application_reached {
+            if fill.economic_application_delta.is_some() {
+                return Err(MatchingStateErrorV1::Finality(format!(
+                    "恢复成交在经济截点前已经含经济变化：{}",
+                    fill.trade_id
+                )));
+            }
+            return Ok(());
+        }
+        let delta = fill.economic_application_delta.as_deref().ok_or_else(|| {
+            MatchingStateErrorV1::Finality(format!(
+                "恢复成交越过经济截点但缺少经济变化：{}",
+                fill.trade_id
+            ))
+        })?;
+        validate_platform_account_delta_integrity(delta).map_err(|error| {
+            MatchingStateErrorV1::Finality(format!(
+                "恢复成交经济变化正文非法：{}：{error}",
+                fill.trade_id
+            ))
+        })?;
+        let economic_step = path
+            .steps()
+            .get(usize::try_from(economic_ordinal).map_err(|_| {
+                MatchingStateErrorV1::Finality(format!("恢复成交经济截点越界：{}", fill.trade_id))
+            })?)
+            .ok_or_else(|| {
+                MatchingStateErrorV1::Finality(format!(
+                    "恢复成交经济截点超出路径：{}",
+                    fill.trade_id
+                ))
+            })?;
+        let platform_effective_at_utc_ms = fill
+            .matched_at_utc_ms
+            .checked_add(economic_step.offset_ms())
+            .ok_or_else(|| {
+                MatchingStateErrorV1::Finality(format!(
+                    "恢复成交经济截点时点溢出：{}",
+                    fill.trade_id
+                ))
+            })?;
+        let total_quote_and_fee = fill
+            .quote_units
+            .checked_add(fill.immediate_taker_fee_units)
+            .ok_or_else(|| {
+                MatchingStateErrorV1::Finality(format!(
+                    "恢复成交经济变化金额溢出：{}",
+                    fill.trade_id
+                ))
+            })?;
+        let expected_balance_delta = PlatformAccountBalanceDeltaV1 {
+            cash_pusd_delta: exact_signed_micro_units_v1(negative_units(total_quote_and_fee)?)?,
+            available_pusd_delta: exact_signed_micro_units_v1(0)?,
+            principal_encumbrance_pusd_delta: exact_signed_micro_units_v1(negative_units(
+                fill.quote_units,
+            )?)?,
+            immediate_taker_fee_encumbrance_pusd_delta: exact_signed_micro_units_v1(
+                negative_units(fill.immediate_taker_fee_units)?,
+            )?,
+            outcome_balance_deltas: vec![PlatformOutcomeBalanceDeltaV1 {
+                token_id: TokenId(fill.token_id.clone()),
+                balance_shares_delta: exact_signed_micro_units_v1(
+                    i128::try_from(fill.base_units)
+                        .map_err(|_| MatchingMathErrorV1::ArithmeticOverflow)?,
+                )?,
+            }],
+            maker_rebate_receivable_pusd_delta: exact_signed_micro_units_v1(0)?,
+            taker_rebate_receivable_pusd_delta: exact_signed_micro_units_v1(0)?,
+            maker_rebate_locked_remainder_pusd_delta: exact_signed_micro_units_v1(0)?,
+            taker_rebate_locked_remainder_pusd_delta: exact_signed_micro_units_v1(0)?,
+        };
+        if delta.account_instance_key != *self.account_instance_key()
+            || delta.reason != PlatformAccountDeltaReasonV1::FillFinalityEconomicApplied
+            || delta.reason_identity
+                != format!(
+                    "FILL_FINALITY_ECONOMIC:{}:{economic_ordinal}",
+                    fill.trade_id
+                )
+            || delta.condition_id.as_ref().map(|value| value.0.as_str())
+                != Some(fill.condition_id.as_str())
+            || delta.platform_effective_at_utc_ms != platform_effective_at_utc_ms
+            || delta.balance_delta != expected_balance_delta
+        {
+            return Err(MatchingStateErrorV1::Finality(format!(
+                "恢复成交经济变化正文与已冻结截点不一致：{}",
+                fill.trade_id
+            )));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_recovered_account_delta_chain(
+        &self,
+        opening_anchor: &contracts::AccountOpeningAnchorV1,
+        deltas: &BTreeMap<u64, contracts::PlatformAccountDeltaV1>,
+        finality_policy: &TradeFinalityPolicyV1,
+        evicted_markets: &BTreeMap<String, TerminalExecutionMarketEvictionV1>,
+    ) -> Result<(), MatchingStateErrorV1> {
+        self.account
+            .validate_restored_delta_chain(opening_anchor, deltas)?;
+        let mut expected_economic_deltas = BTreeMap::new();
+        let mut expected_failure_delta_identities = BTreeSet::new();
+        for fill in self.fills.values() {
+            if let Some(delta) = fill.economic_application_delta.as_deref()
+                && (deltas.get(&delta.account_transition_seq) != Some(delta)
+                    || expected_economic_deltas
+                        .insert(delta.reason_identity.clone(), delta)
+                        .is_some())
+            {
+                return Err(MatchingStateErrorV1::Finality(format!(
+                    "恢复成交经济变化没有绑定同一持久账户变化正文：{}",
+                    fill.trade_id
+                )));
+            }
+            if fill.finality_state == Some(TradeFinalityStateV1::Failed) {
+                let ordinal = fill.finality_path_ordinal.ok_or_else(|| {
+                    MatchingStateErrorV1::Finality(format!(
+                        "恢复失败成交缺少当前最终性序号：{}",
+                        fill.trade_id
+                    ))
+                })?;
+                let compensated = fill.economic_application_delta.is_some();
+                let (reason, reason_identity) = if compensated {
+                    (
+                        PlatformAccountDeltaReasonV1::FillFinalityCompensationApplied,
+                        format!("FILL_FINALITY_COMPENSATION:{}:{ordinal}", fill.trade_id),
+                    )
+                } else {
+                    (
+                        PlatformAccountDeltaReasonV1::FillFinalityUnappliedFailureReleased,
+                        format!(
+                            "FILL_FINALITY_UNAPPLIED_FAILURE:{}:{ordinal}",
+                            fill.trade_id
+                        ),
+                    )
+                };
+                let mut candidates = deltas.values().filter(|delta| {
+                    delta.reason == reason && delta.reason_identity == reason_identity
+                });
+                let delta = candidates.next().ok_or_else(|| {
+                    MatchingStateErrorV1::Finality(format!(
+                        "恢复失败成交缺少补偿或释放账户变化：{}",
+                        fill.trade_id
+                    ))
+                })?;
+                if candidates.next().is_some()
+                    || delta.account_instance_key != *self.account_instance_key()
+                    || delta.condition_id.as_ref().map(|value| value.0.as_str())
+                        != Some(fill.condition_id.as_str())
+                    || delta.platform_effective_at_utc_ms != recovered_fill_current_step_at(fill)?
+                    || delta.balance_delta != expected_failure_balance_delta(fill, compensated)?
+                    || !expected_failure_delta_identities.insert(reason_identity)
+                {
+                    return Err(MatchingStateErrorV1::Finality(format!(
+                        "恢复失败成交补偿或释放正文与最终性路径不一致：{}",
+                        fill.trade_id
+                    )));
+                }
+            }
+        }
+        for eviction in evicted_markets.values() {
+            for witness in eviction.fills.values() {
+                let trade_id = witness.rebate_fill.trade_id.as_str();
+                let finality = recovered_terminal_finality(
+                    self.account_instance_key(),
+                    finality_policy,
+                    witness,
+                )?;
+                if let Some(reference) = &witness.economic_application_delta {
+                    let economic_ordinal =
+                        finality.economic_application_ordinal.ok_or_else(|| {
+                            MatchingStateErrorV1::Finality(format!(
+                                "驱逐成交经济变化缺少应用序号：{trade_id}"
+                            ))
+                        })?;
+                    let delta = deltas
+                        .get(&reference.account_transition_seq)
+                        .ok_or_else(|| {
+                            MatchingStateErrorV1::Finality(format!(
+                                "驱逐成交经济变化缺少账户正文：{trade_id}"
+                            ))
+                        })?;
+                    let expected_identity =
+                        format!("FILL_FINALITY_ECONOMIC:{trade_id}:{economic_ordinal}");
+                    if delta.delta_id != reference.delta_id
+                        || delta.delta_sha256 != reference.delta_sha256
+                        || delta.reason != PlatformAccountDeltaReasonV1::FillFinalityEconomicApplied
+                        || delta.reason_identity != expected_identity
+                        || delta.condition_id.as_ref().map(|value| value.0.as_str())
+                            != Some(eviction.condition_id.as_str())
+                        || Some(delta.platform_effective_at_utc_ms)
+                            != finality.economic_application_at_utc_ms
+                        || delta.balance_delta != expected_evicted_economic_balance_delta(witness)?
+                        || expected_economic_deltas
+                            .insert(delta.reason_identity.clone(), delta)
+                            .is_some()
+                    {
+                        return Err(MatchingStateErrorV1::Finality(format!(
+                            "驱逐成交经济变化见证不一致：{trade_id}"
+                        )));
+                    }
+                }
+                if witness.rebate_fill.terminal_succeeded == Some(false) {
+                    let compensated = witness.economic_application_delta.is_some();
+                    let (reason, reason_identity) = if compensated {
+                        (
+                            PlatformAccountDeltaReasonV1::FillFinalityCompensationApplied,
+                            format!(
+                                "FILL_FINALITY_COMPENSATION:{}:{}",
+                                trade_id, finality.terminal_ordinal
+                            ),
+                        )
+                    } else {
+                        (
+                            PlatformAccountDeltaReasonV1::FillFinalityUnappliedFailureReleased,
+                            format!(
+                                "FILL_FINALITY_UNAPPLIED_FAILURE:{}:{}",
+                                trade_id, finality.terminal_ordinal
+                            ),
+                        )
+                    };
+                    let mut candidates = deltas.values().filter(|delta| {
+                        delta.reason == reason && delta.reason_identity == reason_identity
+                    });
+                    let delta = candidates.next().ok_or_else(|| {
+                        MatchingStateErrorV1::Finality(format!(
+                            "驱逐失败成交缺少补偿或释放账户变化：{trade_id}"
+                        ))
+                    })?;
+                    if candidates.next().is_some()
+                        || delta.account_instance_key != *self.account_instance_key()
+                        || delta.condition_id.as_ref().map(|value| value.0.as_str())
+                            != Some(eviction.condition_id.as_str())
+                        || delta.platform_effective_at_utc_ms != finality.terminal_at_utc_ms
+                        || delta.balance_delta
+                            != expected_evicted_failure_balance_delta(witness, compensated)?
+                        || !expected_failure_delta_identities.insert(reason_identity)
+                    {
+                        return Err(MatchingStateErrorV1::Finality(format!(
+                            "驱逐失败成交补偿或释放见证不一致：{trade_id}"
+                        )));
+                    }
+                }
+            }
+        }
+        for delta in deltas.values() {
+            let expected = match delta.reason {
+                PlatformAccountDeltaReasonV1::FillFinalityEconomicApplied => {
+                    expected_economic_deltas
+                        .get(&delta.reason_identity)
+                        .is_some_and(|expected| **expected == *delta)
+                }
+                PlatformAccountDeltaReasonV1::FillFinalityUnappliedFailureReleased
+                | PlatformAccountDeltaReasonV1::FillFinalityCompensationApplied => {
+                    expected_failure_delta_identities.contains(&delta.reason_identity)
+                }
+                PlatformAccountDeltaReasonV1::OrderAcceptedEncumbranceApplied
+                | PlatformAccountDeltaReasonV1::FakUnspentEncumbranceReleased
+                | PlatformAccountDeltaReasonV1::CallerCancellationEncumbranceReleased
+                | PlatformAccountDeltaReasonV1::GtdExpirationEncumbranceReleased
+                | PlatformAccountDeltaReasonV1::VenueDustEncumbranceReleased
+                | PlatformAccountDeltaReasonV1::MarketResolutionEncumbranceReleased
+                | PlatformAccountDeltaReasonV1::MakerRebateAccrualFinalized
+                | PlatformAccountDeltaReasonV1::TakerRebateAccrualApplied
+                | PlatformAccountDeltaReasonV1::MakerRebateDayFinalized
+                | PlatformAccountDeltaReasonV1::TakerRebateDayFinalized
+                | PlatformAccountDeltaReasonV1::MakerRebatePaid
+                | PlatformAccountDeltaReasonV1::TakerRebatePaid
+                | PlatformAccountDeltaReasonV1::AutoRedeemApplied => true,
+            };
+            if !expected {
+                return Err(MatchingStateErrorV1::Finality(format!(
+                    "恢复账户变化含未由成交最终性图授权的变化：{}",
+                    delta.reason_identity
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_recovered_market_resolutions(
+        &self,
+        qualified: &BTreeMap<String, (MarketResolutionTerminalV3, MarketLifecyclePhaseV1)>,
+        lifecycle_phases: &BTreeMap<String, MarketLifecyclePhaseV1>,
+    ) -> Result<(), MatchingStateErrorV1> {
+        if lifecycle_phases.len() != self.queues.markets.len() {
+            return Err(MatchingStateErrorV1::ResolutionConflict(
+                "恢复市场生命周期相位与执行市场集合不一致".to_owned(),
+            ));
+        }
+        for condition_id in self.queues.markets.keys() {
+            let phase = lifecycle_phases
+                .get(condition_id)
+                .ok_or_else(|| MatchingStateErrorV1::ResolutionConflict(condition_id.clone()))?;
+            let matching_must_be_closed = matches!(
+                phase,
+                MarketLifecyclePhaseV1::PostEndPendingResolution
+                    | MarketLifecyclePhaseV1::ResolutionTerminal
+                    | MarketLifecyclePhaseV1::Evicted
+            );
+            if self.matching_closed_markets.contains_key(condition_id) != matching_must_be_closed
+                || (matches!(
+                    phase,
+                    MarketLifecyclePhaseV1::ResolutionTerminal | MarketLifecyclePhaseV1::Evicted
+                ) && (!qualified.contains_key(condition_id)
+                    || self
+                        .market_resolutions
+                        .get(condition_id)
+                        .is_none_or(|obligation| obligation.redeemed_at_utc_ms.is_none())))
+            {
+                return Err(MatchingStateErrorV1::ResolutionConflict(
+                    condition_id.clone(),
+                ));
+            }
+        }
+        for (condition_id, (resolution, phase)) in qualified {
+            if lifecycle_phases.get(condition_id) != Some(phase)
+                || !matches!(
+                    phase,
+                    MarketLifecyclePhaseV1::PostEndPendingResolution
+                        | MarketLifecyclePhaseV1::ResolutionTerminal
+                        | MarketLifecyclePhaseV1::Evicted
+                )
+            {
+                return Err(MatchingStateErrorV1::ResolutionConflict(
+                    condition_id.clone(),
+                ));
+            }
+            let Some(obligation) = self.market_resolutions.get(condition_id) else {
+                continue;
+            };
+            let redeemed = obligation.redeemed_at_utc_ms.is_some();
+            if obligation.resolution != *resolution
+                || !matches!(
+                    (redeemed, phase),
+                    (false, MarketLifecyclePhaseV1::PostEndPendingResolution)
+                        | (
+                            true,
+                            MarketLifecyclePhaseV1::ResolutionTerminal
+                                | MarketLifecyclePhaseV1::Evicted
+                        )
+                )
+            {
+                return Err(MatchingStateErrorV1::ResolutionConflict(
+                    condition_id.clone(),
+                ));
+            }
+        }
+        if self
+            .market_resolutions
+            .keys()
+            .any(|condition_id| !qualified.contains_key(condition_id))
+        {
+            return Err(MatchingStateErrorV1::ResolutionConflict(
+                "恢复执行结算义务缺少原始合格市场判定".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn order(&self, platform_order_id: &str) -> Option<&SimOrderRecordV1> {
         self.orders.get(platform_order_id)
     }
@@ -1081,14 +2140,227 @@ impl ExecutionStateV1 {
         self.fills.values()
     }
 
+    pub(crate) fn evict_terminal_market_hot_state(
+        &mut self,
+        condition_id: &str,
+        lifecycle_phase: MarketLifecyclePhaseV1,
+        finality_policy: &TradeFinalityPolicyV1,
+    ) -> Result<TerminalExecutionMarketEvictionV1, MatchingStateErrorV1> {
+        self.validate_terminal_market_economic_closure(condition_id, lifecycle_phase)?;
+        let fills = self
+            .fills
+            .iter()
+            .filter(|(_, fill)| fill.condition_id == condition_id)
+            .map(|(key, fill)| {
+                let order = self.orders.get(&fill.platform_order_id).ok_or_else(|| {
+                    MatchingStateErrorV1::Finality(format!(
+                        "终态成交缺少所属订单：{}",
+                        fill.trade_id
+                    ))
+                })?;
+                let finality_path = fill.finality_path.as_ref().ok_or_else(|| {
+                    MatchingStateErrorV1::Finality(format!(
+                        "终态成交缺少冻结最终性路径：{}",
+                        fill.trade_id
+                    ))
+                })?;
+                let finality_path_ordinal = fill.finality_path_ordinal.ok_or_else(|| {
+                    MatchingStateErrorV1::Finality(format!(
+                        "终态成交缺少最终性序号：{}",
+                        fill.trade_id
+                    ))
+                })?;
+                let selected_path = finality_policy.select_path_for_fill(
+                    self.account_instance_key(),
+                    &order.global_request_id,
+                    &order.item_idempotency_identity,
+                    &fill.trade_id,
+                );
+                let finality_path_ordinal_index =
+                    usize::try_from(finality_path_ordinal).map_err(|_| {
+                        MatchingStateErrorV1::Finality(format!(
+                            "终态成交最终性序号越界：{}",
+                            fill.trade_id
+                        ))
+                    })?;
+                if finality_path != selected_path
+                    || finality_path_ordinal_index.checked_add(1)
+                        != Some(finality_path.steps().len())
+                {
+                    return Err(MatchingStateErrorV1::Finality(format!(
+                        "终态成交最终性路径未闭合到已密封策略末项：{}",
+                        fill.trade_id
+                    )));
+                }
+                let terminal_succeeded = match fill.finality_state {
+                    Some(TradeFinalityStateV1::Confirmed) => Some(true),
+                    Some(TradeFinalityStateV1::Failed) => Some(false),
+                    _ => None,
+                };
+                let witness = TerminalFillEvictionWitnessV1 {
+                    rebate_fill: RebateRecoveryFillV1 {
+                        trade_id: fill.trade_id.clone(),
+                        condition_id: fill.condition_id.clone(),
+                        matched_at_utc_ms: fill.matched_at_utc_ms,
+                        base_units: fill.base_units,
+                        price_pusd_per_share: fill.price_pusd_per_share,
+                        immediate_taker_fee_units: fill.immediate_taker_fee_units,
+                        liquidity_role: fill.liquidity_role,
+                        terminal_succeeded,
+                    },
+                    token_id: fill.token_id.clone(),
+                    quote_units: fill.quote_units,
+                    finality_selector_identity: terminal_finality_selector_identity(
+                        finality_policy,
+                        order,
+                    ),
+                    economic_application_delta: fill
+                        .economic_application_delta
+                        .as_deref()
+                        .map(TerminalAccountDeltaReferenceV1::from),
+                };
+                Ok((key.clone(), witness))
+            })
+            .collect::<Result<BTreeMap<_, _>, MatchingStateErrorV1>>()?;
+        self.rebate_mut()
+            .evict_terminal_market_fill_state(condition_id)?;
+        self.orders
+            .retain(|_, order| order.condition_id != condition_id);
+        self.fills
+            .retain(|_, fill| fill.condition_id != condition_id);
+        Ok(TerminalExecutionMarketEvictionV1 {
+            condition_id: condition_id.to_owned(),
+            fills,
+        })
+    }
+
+    fn validate_terminal_market_economic_closure(
+        &self,
+        condition_id: &str,
+        lifecycle_phase: MarketLifecyclePhaseV1,
+    ) -> Result<(), MatchingStateErrorV1> {
+        if lifecycle_phase != MarketLifecyclePhaseV1::ResolutionTerminal {
+            return Err(MatchingStateErrorV1::Finality(format!(
+                "市场尚未进入 ResolutionTerminal：{condition_id}"
+            )));
+        }
+        if !self.matching_closed_markets.contains_key(condition_id) {
+            return Err(MatchingStateErrorV1::Finality(format!(
+                "市场撮合尚未关闭：{condition_id}"
+            )));
+        }
+        let queue_assets = self
+            .queues
+            .markets
+            .get(condition_id)
+            .ok_or_else(|| MatchingStateErrorV1::UnknownMarket(condition_id.to_owned()))?;
+        if queue_assets
+            .values()
+            .any(|asset| !asset.bids.is_empty() || !asset.asks.is_empty())
+            || self.account_overlay.market_is_empty(condition_id) != Some(true)
+        {
+            return Err(MatchingStateErrorV1::Finality(format!(
+                "市场撮合队列或账户叠加层仍含热状态：{condition_id}"
+            )));
+        }
+
+        let market_orders = self
+            .orders
+            .iter()
+            .filter(|(_, order)| order.condition_id == condition_id)
+            .collect::<BTreeMap<_, _>>();
+        let market_fills = self
+            .fills
+            .iter()
+            .filter(|(_, fill)| fill.condition_id == condition_id)
+            .collect::<BTreeMap<_, _>>();
+        if market_orders.iter().any(|(key, order)| {
+            *key != &order.platform_order_id
+                || order.pending_maker_depletion_base_units != 0
+                || order.open_base_units != 0
+                || order.open_quote_units != 0
+                || order.immediate_taker_fee_encumbered_units != 0
+        }) {
+            return Err(MatchingStateErrorV1::Finality(format!(
+                "市场订单仍有活动数量或经济占用：{condition_id}"
+            )));
+        }
+        if self
+            .gtd_deadlines
+            .iter()
+            .any(|(_, platform_order_id)| market_orders.contains_key(platform_order_id))
+        {
+            return Err(MatchingStateErrorV1::Finality(format!(
+                "市场仍有 GTD 到期前驱：{condition_id}"
+            )));
+        }
+        if market_fills.iter().any(|(key, fill)| {
+            *key != &fill.trade_id
+                || !market_orders.contains_key(&fill.platform_order_id)
+                || !matches!(
+                    fill.finality_state,
+                    Some(TradeFinalityStateV1::Confirmed | TradeFinalityStateV1::Failed)
+                )
+        }) || self
+            .scheduled_finality
+            .iter()
+            .any(|scheduled| market_fills.contains_key(&scheduled.fill_economic_delta_identity))
+        {
+            return Err(MatchingStateErrorV1::Finality(format!(
+                "市场成交尚未全部进入最终性终态：{condition_id}"
+            )));
+        }
+        let obligation = self.market_resolutions.get(condition_id).ok_or_else(|| {
+            MatchingStateErrorV1::Finality(format!("市场缺少判定义务：{condition_id}"))
+        })?;
+        if !obligation.pending_trade_ids.is_empty()
+            || obligation.redeemed_at_utc_ms.is_none()
+            || obligation.invalidated_by_quality_reason.is_some()
+        {
+            return Err(MatchingStateErrorV1::Finality(format!(
+                "市场判定义务尚未完成赎回：{condition_id}"
+            )));
+        }
+        Ok(())
+    }
+
     pub(crate) fn query_projection_changed_from(&self, previous: &Self) -> bool {
         self.orders != previous.orders || self.fills != previous.fills
+    }
+
+    #[cfg(test)]
+    pub(crate) fn market_matching_queue_footprint(
+        &self,
+        condition_id: &str,
+    ) -> Option<(usize, usize, u128)> {
+        self.queues.markets.get(condition_id).map(|assets| {
+            let mut level_count = 0_usize;
+            let mut segment_count = 0_usize;
+            let mut debt_base_units = 0_u128;
+            for asset in assets.values() {
+                for levels in [&asset.bids, &asset.asks] {
+                    level_count += levels.len();
+                    for queue in levels.values() {
+                        segment_count += queue.segments.len();
+                        debt_base_units = debt_base_units
+                            .checked_add(queue.account_taker_depletion_debt_units)
+                            .expect("测试撮合队列债务总量不得溢出");
+                    }
+                }
+            }
+            (level_count, segment_count, debt_base_units)
+        })
     }
 
     #[cfg(test)]
     pub(crate) fn cloned_state_shares_rebate_storage(&self) -> bool {
         let cloned = self.clone();
         Arc::ptr_eq(&self.rebate, &cloned.rebate)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_rebate_fill_state_count(&self) -> usize {
+        self.rebate.retained_fill_state_count()
     }
 
     #[cfg(test)]
@@ -1736,7 +3008,7 @@ impl ExecutionStateV1 {
         }
 
         if !self.matching_closed_markets.contains_key(condition_id) {
-            self.queues.close_account_orders_for_market(condition_id)?;
+            self.queues.release_market_matching_state(condition_id)?;
             self.matching_closed_markets
                 .insert(condition_id.to_owned(), event.market.window.end_at_utc_ms);
         }
@@ -1888,6 +3160,27 @@ impl ExecutionStateV1 {
         })
     }
 
+    pub(crate) fn release_initialized_matching_buffers_through(
+        &mut self,
+        directory: &SessionMarketDirectoryV1,
+        closed_through_utc_ms: i64,
+    ) -> Result<(), MatchingStateErrorV1> {
+        for market in directory.markets() {
+            let condition_id = &market.market().condition_id.0;
+            let end_at = market.market().window.end_at_utc_ms;
+            if closed_through_utc_ms >= end_at
+                && !self.matching_closed_markets.contains_key(condition_id)
+                && self
+                    .queues
+                    .release_market_matching_state_if_initialized(condition_id)?
+            {
+                self.matching_closed_markets
+                    .insert(condition_id.clone(), end_at);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn apply_authorized_market_events(
         &mut self,
         directory: &SessionMarketDirectoryV1,
@@ -1897,17 +3190,7 @@ impl ExecutionStateV1 {
         lifecycle_account_rule: &LifecycleAccountRuleV1,
         qualified_resolution_event_ids: &BTreeSet<String>,
     ) -> Result<AuthorizedMarketEventEffectsV1, MatchingStateErrorV1> {
-        for market in directory.markets() {
-            let condition_id = &market.market().condition_id.0;
-            let end_at = market.market().window.end_at_utc_ms;
-            if bucket_at_utc_ms >= end_at
-                && !self.matching_closed_markets.contains_key(condition_id)
-            {
-                self.queues.close_account_orders_for_market(condition_id)?;
-                self.matching_closed_markets
-                    .insert(condition_id.clone(), end_at);
-            }
-        }
+        self.release_initialized_matching_buffers_through(directory, bucket_at_utc_ms)?;
         let mut effects = AuthorizedMarketEventEffectsV1::default();
         for event in events {
             let should_invalidate_resolution =
@@ -1934,7 +3217,14 @@ impl ExecutionStateV1 {
                     .expect("待隔离市场判定义务必须仍存在")
                     .invalidated_by_quality_reason = Some(boundary.reason_code.clone());
             }
-            let queue_effects = self.queues.apply_authorized_event(event)?;
+            let queue_effects = if self
+                .matching_closed_markets
+                .contains_key(&event.market.condition_id.0)
+            {
+                QueueEventEffectsV1::default()
+            } else {
+                self.queues.apply_authorized_event(event)?
+            };
             let mut event_fill_ids = Vec::new();
             for depletion in queue_effects.maker_depletions {
                 if let Some(trade_id) =
@@ -1968,6 +3258,16 @@ impl ExecutionStateV1 {
                 if let Some(auto_redeem) = auto_redeem {
                     effects.settlement_feedbacks.push(auto_redeem);
                 }
+            }
+            let condition_id = &event.market.condition_id.0;
+            if bucket_at_utc_ms >= event.market.window.end_at_utc_ms
+                && !self.matching_closed_markets.contains_key(condition_id)
+                && self
+                    .queues
+                    .release_market_matching_state_if_initialized(condition_id)?
+            {
+                self.matching_closed_markets
+                    .insert(condition_id.clone(), event.market.window.end_at_utc_ms);
             }
         }
         Ok(effects)
@@ -3033,6 +4333,167 @@ fn parse_decimal(value: &str) -> Result<Decimal, MatchingStateErrorV1> {
     .map_err(|error| MatchingStateErrorV1::Decode(error.to_string()))
 }
 
+fn recovered_order_graph_error(identity: &str) -> MatchingStateErrorV1 {
+    MatchingStateErrorV1::AccountOrderConflict(format!("恢复订单经济图不守恒：{identity}"))
+}
+
+fn negative_units(value: u128) -> Result<i128, MatchingMathErrorV1> {
+    i128::try_from(value)
+        .map(|value| -value)
+        .map_err(|_| MatchingMathErrorV1::ArithmeticOverflow)
+}
+
+fn exact_signed_micro_units_v1(value: i128) -> Result<ExactDecimal, MatchingMathErrorV1> {
+    Decimal::try_from_i128_with_scale(value, MICRO_SCALE)
+        .map(|value| ExactDecimal(value.normalize().to_string()))
+        .map_err(|_| MatchingMathErrorV1::ArithmeticOverflow)
+}
+
+fn recovered_fill_current_step_at(fill: &SimFillRecordV1) -> Result<i64, MatchingStateErrorV1> {
+    let path = fill.finality_path.as_ref().ok_or_else(|| {
+        MatchingStateErrorV1::Finality(format!("恢复成交缺少最终性路径：{}", fill.trade_id))
+    })?;
+    let ordinal = fill.finality_path_ordinal.ok_or_else(|| {
+        MatchingStateErrorV1::Finality(format!("恢复成交缺少最终性序号：{}", fill.trade_id))
+    })?;
+    let step = usize::try_from(ordinal)
+        .ok()
+        .and_then(|ordinal| path.steps().get(ordinal))
+        .ok_or_else(|| {
+            MatchingStateErrorV1::Finality(format!("恢复成交最终性序号超出路径：{}", fill.trade_id))
+        })?;
+    fill.matched_at_utc_ms
+        .checked_add(step.offset_ms())
+        .ok_or_else(|| {
+            MatchingStateErrorV1::Finality(format!("恢复成交当前最终性时点溢出：{}", fill.trade_id))
+        })
+}
+
+fn expected_failure_balance_delta(
+    fill: &SimFillRecordV1,
+    compensated: bool,
+) -> Result<PlatformAccountBalanceDeltaV1, MatchingStateErrorV1> {
+    let total_quote_and_fee = fill
+        .quote_units
+        .checked_add(fill.immediate_taker_fee_units)
+        .ok_or(MatchingMathErrorV1::ArithmeticOverflow)?;
+    let positive_total =
+        i128::try_from(total_quote_and_fee).map_err(|_| MatchingMathErrorV1::ArithmeticOverflow)?;
+    let zero = || exact_signed_micro_units_v1(0);
+    if compensated {
+        Ok(PlatformAccountBalanceDeltaV1 {
+            cash_pusd_delta: exact_signed_micro_units_v1(positive_total)?,
+            available_pusd_delta: exact_signed_micro_units_v1(positive_total)?,
+            principal_encumbrance_pusd_delta: zero()?,
+            immediate_taker_fee_encumbrance_pusd_delta: zero()?,
+            outcome_balance_deltas: vec![PlatformOutcomeBalanceDeltaV1 {
+                token_id: TokenId(fill.token_id.clone()),
+                balance_shares_delta: exact_signed_micro_units_v1(negative_units(
+                    fill.base_units,
+                )?)?,
+            }],
+            maker_rebate_receivable_pusd_delta: zero()?,
+            taker_rebate_receivable_pusd_delta: zero()?,
+            maker_rebate_locked_remainder_pusd_delta: zero()?,
+            taker_rebate_locked_remainder_pusd_delta: zero()?,
+        })
+    } else {
+        Ok(PlatformAccountBalanceDeltaV1 {
+            cash_pusd_delta: zero()?,
+            available_pusd_delta: exact_signed_micro_units_v1(positive_total)?,
+            principal_encumbrance_pusd_delta: exact_signed_micro_units_v1(negative_units(
+                fill.quote_units,
+            )?)?,
+            immediate_taker_fee_encumbrance_pusd_delta: exact_signed_micro_units_v1(
+                negative_units(fill.immediate_taker_fee_units)?,
+            )?,
+            outcome_balance_deltas: Vec::new(),
+            maker_rebate_receivable_pusd_delta: zero()?,
+            taker_rebate_receivable_pusd_delta: zero()?,
+            maker_rebate_locked_remainder_pusd_delta: zero()?,
+            taker_rebate_locked_remainder_pusd_delta: zero()?,
+        })
+    }
+}
+
+fn expected_evicted_economic_balance_delta(
+    witness: &TerminalFillEvictionWitnessV1,
+) -> Result<PlatformAccountBalanceDeltaV1, MatchingStateErrorV1> {
+    let total_quote_and_fee = witness
+        .quote_units
+        .checked_add(witness.rebate_fill.immediate_taker_fee_units)
+        .ok_or(MatchingMathErrorV1::ArithmeticOverflow)?;
+    let zero = || exact_signed_micro_units_v1(0);
+    Ok(PlatformAccountBalanceDeltaV1 {
+        cash_pusd_delta: exact_signed_micro_units_v1(negative_units(total_quote_and_fee)?)?,
+        available_pusd_delta: zero()?,
+        principal_encumbrance_pusd_delta: exact_signed_micro_units_v1(negative_units(
+            witness.quote_units,
+        )?)?,
+        immediate_taker_fee_encumbrance_pusd_delta: exact_signed_micro_units_v1(negative_units(
+            witness.rebate_fill.immediate_taker_fee_units,
+        )?)?,
+        outcome_balance_deltas: vec![PlatformOutcomeBalanceDeltaV1 {
+            token_id: TokenId(witness.token_id.clone()),
+            balance_shares_delta: exact_signed_micro_units_v1(
+                i128::try_from(witness.rebate_fill.base_units)
+                    .map_err(|_| MatchingMathErrorV1::ArithmeticOverflow)?,
+            )?,
+        }],
+        maker_rebate_receivable_pusd_delta: zero()?,
+        taker_rebate_receivable_pusd_delta: zero()?,
+        maker_rebate_locked_remainder_pusd_delta: zero()?,
+        taker_rebate_locked_remainder_pusd_delta: zero()?,
+    })
+}
+
+fn expected_evicted_failure_balance_delta(
+    witness: &TerminalFillEvictionWitnessV1,
+    compensated: bool,
+) -> Result<PlatformAccountBalanceDeltaV1, MatchingStateErrorV1> {
+    let total_quote_and_fee = witness
+        .quote_units
+        .checked_add(witness.rebate_fill.immediate_taker_fee_units)
+        .ok_or(MatchingMathErrorV1::ArithmeticOverflow)?;
+    let positive_total =
+        i128::try_from(total_quote_and_fee).map_err(|_| MatchingMathErrorV1::ArithmeticOverflow)?;
+    let zero = || exact_signed_micro_units_v1(0);
+    if compensated {
+        Ok(PlatformAccountBalanceDeltaV1 {
+            cash_pusd_delta: exact_signed_micro_units_v1(positive_total)?,
+            available_pusd_delta: exact_signed_micro_units_v1(positive_total)?,
+            principal_encumbrance_pusd_delta: zero()?,
+            immediate_taker_fee_encumbrance_pusd_delta: zero()?,
+            outcome_balance_deltas: vec![PlatformOutcomeBalanceDeltaV1 {
+                token_id: TokenId(witness.token_id.clone()),
+                balance_shares_delta: exact_signed_micro_units_v1(negative_units(
+                    witness.rebate_fill.base_units,
+                )?)?,
+            }],
+            maker_rebate_receivable_pusd_delta: zero()?,
+            taker_rebate_receivable_pusd_delta: zero()?,
+            maker_rebate_locked_remainder_pusd_delta: zero()?,
+            taker_rebate_locked_remainder_pusd_delta: zero()?,
+        })
+    } else {
+        Ok(PlatformAccountBalanceDeltaV1 {
+            cash_pusd_delta: zero()?,
+            available_pusd_delta: exact_signed_micro_units_v1(positive_total)?,
+            principal_encumbrance_pusd_delta: exact_signed_micro_units_v1(negative_units(
+                witness.quote_units,
+            )?)?,
+            immediate_taker_fee_encumbrance_pusd_delta: exact_signed_micro_units_v1(
+                negative_units(witness.rebate_fill.immediate_taker_fee_units)?,
+            )?,
+            outcome_balance_deltas: Vec::new(),
+            maker_rebate_receivable_pusd_delta: zero()?,
+            taker_rebate_receivable_pusd_delta: zero()?,
+            maker_rebate_locked_remainder_pusd_delta: zero()?,
+            taker_rebate_locked_remainder_pusd_delta: zero()?,
+        })
+    }
+}
+
 pub(crate) fn micro_units_v1(value: Decimal) -> Result<u128, MatchingMathErrorV1> {
     if value.is_sign_negative() {
         return Err(MatchingMathErrorV1::NegativeAmount);
@@ -3792,6 +5253,867 @@ fn u128_from_u256(value: U256) -> Result<u128, MatchingMathErrorV1> {
 mod tests {
     use super::*;
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn execution_state_json_round_trip_preserves_every_field() {
+        use contracts::{
+            ACCOUNT_OPENING_ANCHOR_SCHEMA_V1, AccountInstanceKeyV1, AccountOpeningAnchorV1,
+            ExactDecimal, PlatformAccountSnapshotV1, SimCallerRoleV1, TokenId,
+        };
+
+        let scenario = crate::scenario::scenario_for_sim_tests();
+        let directory = SessionMarketDirectoryV1::try_from_scenario(&scenario).expect("测试目录");
+        let rules = crate::platform_rules::tests::successful_snapshot_for_sim_tests().await;
+        let opening_anchor = AccountOpeningAnchorV1 {
+            schema_version: ACCOUNT_OPENING_ANCHOR_SCHEMA_V1.to_owned(),
+            anchor_id: "round-trip-anchor".to_owned(),
+            anchor_sha256: Sha256Hex("a".repeat(64)),
+            account_instance_key: AccountInstanceKeyV1 {
+                run_id: "round-trip-run".to_owned(),
+                caller_role: SimCallerRoleV1::Paper,
+                caller_instance_id: "round-trip-caller".to_owned(),
+                account_id: "round-trip-account".to_owned(),
+                platform_source: contracts::PlatformSourceV1::Simulated,
+            },
+            session_id: "round-trip-session".to_owned(),
+            initial_scenario_sha256: Sha256Hex("b".repeat(64)),
+            initial_market_set_sha256: Sha256Hex("c".repeat(64)),
+            initial_account_state_sha256: Sha256Hex("d".repeat(64)),
+            initial_platform_account: PlatformAccountSnapshotV1 {
+                cash_pusd: ExactDecimal("10".to_owned()),
+                available_pusd: ExactDecimal("10".to_owned()),
+                principal_encumbrance_pusd: ExactDecimal("0".to_owned()),
+                immediate_taker_fee_encumbrance_pusd: ExactDecimal("0".to_owned()),
+                outcome_balances: vec![
+                    PlatformOutcomeBalanceV1 {
+                        token_id: TokenId("1".to_owned()),
+                        balance_shares: ExactDecimal("0".to_owned()),
+                    },
+                    PlatformOutcomeBalanceV1 {
+                        token_id: TokenId("2".to_owned()),
+                        balance_shares: ExactDecimal("0".to_owned()),
+                    },
+                ],
+                maker_rebate_receivable_pusd: ExactDecimal("0".to_owned()),
+                taker_rebate_receivable_pusd: ExactDecimal("0".to_owned()),
+                maker_rebate_locked_remainder_pusd: ExactDecimal("0".to_owned()),
+                taker_rebate_locked_remainder_pusd: ExactDecimal("0".to_owned()),
+            },
+        };
+        let mut state =
+            ExecutionStateV1::new(&directory, &opening_anchor, &rules).expect("测试执行状态");
+        let finality_policy = crate::finality::successful_policy_for_tests();
+        let condition_id = scenario.market_set().markets()[0]
+            .market()
+            .condition_id
+            .0
+            .clone();
+        state
+            .account
+            .apply_order_accepted(
+                "order-accepted:order-a",
+                &condition_id,
+                1_000,
+                decimal("0.4"),
+                Decimal::ZERO,
+            )
+            .expect("测试活动订单必须具有同一账户本金占用前驱");
+        state
+            .queues
+            .markets
+            .get_mut(&condition_id)
+            .expect("测试撮合市场")
+            .get_mut("1")
+            .expect("测试撮合资产")
+            .bids
+            .insert(
+                decimal("0.4"),
+                PriceQueueV1 {
+                    segments: VecDeque::from([
+                        QueueSegmentV1::External(ExternalSyntheticMakerSegmentV1 {
+                            segment_id: Sha256Hex("e".repeat(64)),
+                            total_base_units: 1_000_000,
+                            total_quote_units: 400_000,
+                            consumed_base_units: 250_000,
+                        }),
+                        QueueSegmentV1::Account(AccountOrderQueueSegmentV1 {
+                            platform_order_id: "order-a".to_owned(),
+                            remaining_base_units: 1_000_000,
+                        }),
+                    ]),
+                    account_taker_depletion_debt_units: 10,
+                },
+            );
+        state.account_overlay.set_quantity(
+            &condition_id,
+            "1",
+            BookSide::Bid,
+            decimal("0.4"),
+            Decimal::ONE,
+        );
+        state.gtd_deadlines = BTreeSet::from([(3_000, "order-a".to_owned())]);
+        state.gtd_advanced_through_utc_ms = Some(2_500);
+        state.orders.insert(
+            "order-a".to_owned(),
+            SimOrderRecordV1 {
+                platform_order_id: "order-a".to_owned(),
+                global_request_id: "request-a".to_owned(),
+                item_id: "item-a".to_owned(),
+                item_idempotency_identity: "item-idempotency-a".to_owned(),
+                condition_id,
+                token_id: "1".to_owned(),
+                created_at_utc_ms: 1_000,
+                last_updated_at_utc_ms: 1_100,
+                kind: SimOrderKindStateV1::Gtd {
+                    expires_at_utc_ms: 3_000,
+                },
+                source_price_pusd_per_share: decimal("0.4"),
+                accepted_base_units: Some(1_000_000),
+                matched_base_units: 0,
+                pending_maker_depletion_base_units: 0,
+                pending_maker_depletion_evidence: None,
+                open_base_units: 1_000_000,
+                expired_base_units: 0,
+                expired_released_quote_units: 0,
+                expired_at_utc_ms: None,
+                gtd_expiration_identity: None,
+                venue_dust_closed_base_units: 0,
+                venue_dust_released_quote_units: 0,
+                venue_dust_at_utc_ms: None,
+                venue_dust_identity: None,
+                market_resolved_canceled_base_units: 0,
+                market_resolved_released_quote_units: 0,
+                market_resolved_at_utc_ms: None,
+                market_resolution_effect_identity: None,
+                canceled_base_units: 0,
+                canceled_released_quote_units: 0,
+                canceled_at_utc_ms: None,
+                caller_cancel_effect_identity: None,
+                terminalized_pending_maker_depletion_evidence: None,
+                accepted_quote_units: 400_000,
+                matched_quote_units: 0,
+                open_quote_units: 400_000,
+                released_quote_units: 0,
+                sdk_taker_amount_audit_base_units: None,
+                immediate_taker_fee_encumbered_units: 0,
+                terminal_reason: None,
+            },
+        );
+
+        let encoded = serde_json::to_vec(&state).expect("执行状态 JSON 编码");
+        let decoded: ExecutionStateV1 =
+            serde_json::from_slice(&encoded).expect("执行状态 JSON 解码");
+
+        assert_eq!(decoded, state);
+        decoded
+            .validate_recovered(
+                &directory,
+                &opening_anchor,
+                rules.as_ref(),
+                finality_policy.as_ref(),
+                state.gtd_advanced_through_utc_ms,
+                &BTreeMap::new(),
+            )
+            .expect("往返执行状态必须重新绑定原目录与开户锚点");
+
+        let mut rebate_rule_tampered = serde_json::to_value(&state).expect("返佣规则篡改 JSON");
+        *rebate_rule_tampered
+            .pointer_mut("/rebate/taker_rebate_rate")
+            .expect("返佣缓存规则字段") =
+            serde_json::to_value(decimal("0.09")).expect("返佣规则十进制 JSON");
+        let rebate_rule_tampered: ExecutionStateV1 =
+            serde_json::from_value(rebate_rule_tampered).expect("返佣规则篡改仍可解码");
+        assert!(matches!(
+            rebate_rule_tampered.validate_recovered(
+                &directory,
+                &opening_anchor,
+                rules.as_ref(),
+                finality_policy.as_ref(),
+                state.gtd_advanced_through_utc_ms,
+                &BTreeMap::new(),
+            ),
+            Err(MatchingStateErrorV1::Rebate(_))
+        ));
+
+        let mut tampered = serde_json::to_value(&state).expect("执行状态 JSON 值");
+        let markets = tampered
+            .get_mut("queues")
+            .and_then(|queues| queues.get_mut("markets"))
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("撮合市场映射");
+        let extra = markets.values().next().expect("至少一个测试市场").clone();
+        markets.insert("extra-condition".to_owned(), extra);
+        let tampered: ExecutionStateV1 =
+            serde_json::from_value(tampered).expect("篡改执行状态仍可完成 JSON 解码");
+        assert!(matches!(
+            tampered.validate_recovered(
+                &directory,
+                &opening_anchor,
+                rules.as_ref(),
+                finality_policy.as_ref(),
+                state.gtd_advanced_through_utc_ms,
+                &BTreeMap::new(),
+            ),
+            Err(MatchingStateErrorV1::RestoredDirectoryMismatch(
+                "撮合队列与会话目录不一致"
+            ))
+        ));
+
+        let mut overlay_tampered = decoded.clone();
+        overlay_tampered.account_overlay.set_quantity(
+            &scenario.market_set().markets()[0].market().condition_id.0,
+            "1",
+            BookSide::Bid,
+            decimal("0.4"),
+            decimal("1.5"),
+        );
+        assert!(matches!(
+            overlay_tampered.validate_recovered(
+                &directory,
+                &opening_anchor,
+                rules.as_ref(),
+                finality_policy.as_ref(),
+                state.gtd_advanced_through_utc_ms,
+                &BTreeMap::new(),
+            ),
+            Err(MatchingStateErrorV1::AccountOrderConflict(_))
+        ));
+
+        let mut queue_tampered = decoded;
+        queue_tampered.queues.remove_account_order("order-a");
+        assert!(matches!(
+            queue_tampered.validate_recovered(
+                &directory,
+                &opening_anchor,
+                rules.as_ref(),
+                finality_policy.as_ref(),
+                state.gtd_advanced_through_utc_ms,
+                &BTreeMap::new(),
+            ),
+            Err(MatchingStateErrorV1::AccountOrderConflict(_))
+        ));
+    }
+
+    fn recovery_fill_account_instance_key() -> contracts::AccountInstanceKeyV1 {
+        contracts::AccountInstanceKeyV1 {
+            run_id: "recovery-fill-run".to_owned(),
+            caller_role: contracts::SimCallerRoleV1::ModelTrain,
+            caller_instance_id: "recovery-fill-caller".to_owned(),
+            account_id: "recovery-fill-account".to_owned(),
+            platform_source: contracts::PlatformSourceV1::Simulated,
+        }
+    }
+
+    async fn pending_taker_fill_recovery_fixture_with_policy(
+        finality_policy: Arc<TradeFinalityPolicyV1>,
+    ) -> (
+        ExecutionStateV1,
+        SessionMarketDirectoryV1,
+        contracts::AccountOpeningAnchorV1,
+        Arc<SealedProcessRuleSnapshot>,
+        Arc<TradeFinalityPolicyV1>,
+        Arc<PlatformAccountDeltaV1>,
+    ) {
+        use contracts::{
+            ACCOUNT_OPENING_ANCHOR_SCHEMA_V1, AccountOpeningAnchorV1, ExactDecimal,
+            PlatformAccountSnapshotV1,
+        };
+
+        let scenario = crate::scenario::scenario_for_sim_tests();
+        let directory =
+            SessionMarketDirectoryV1::try_from_scenario(&scenario).expect("恢复测试目录");
+        let rules = crate::platform_rules::tests::successful_snapshot_for_sim_tests().await;
+        let condition_id = scenario.market_set().markets()[0]
+            .market()
+            .condition_id
+            .0
+            .clone();
+        let outcome_balances = scenario.market_set().markets()[0]
+            .assets()
+            .iter()
+            .map(|asset| PlatformOutcomeBalanceV1 {
+                token_id: asset.token_id.clone(),
+                balance_shares: ExactDecimal("0".to_owned()),
+            })
+            .collect();
+        let opening_anchor = AccountOpeningAnchorV1 {
+            schema_version: ACCOUNT_OPENING_ANCHOR_SCHEMA_V1.to_owned(),
+            anchor_id: "recovery-fill-anchor".to_owned(),
+            anchor_sha256: Sha256Hex("1".repeat(64)),
+            account_instance_key: recovery_fill_account_instance_key(),
+            session_id: "recovery-fill-session".to_owned(),
+            initial_scenario_sha256: Sha256Hex("2".repeat(64)),
+            initial_market_set_sha256: Sha256Hex("3".repeat(64)),
+            initial_account_state_sha256: Sha256Hex("4".repeat(64)),
+            initial_platform_account: PlatformAccountSnapshotV1 {
+                cash_pusd: ExactDecimal("10".to_owned()),
+                available_pusd: ExactDecimal("10".to_owned()),
+                principal_encumbrance_pusd: ExactDecimal("0".to_owned()),
+                immediate_taker_fee_encumbrance_pusd: ExactDecimal("0".to_owned()),
+                outcome_balances,
+                maker_rebate_receivable_pusd: ExactDecimal("0".to_owned()),
+                taker_rebate_receivable_pusd: ExactDecimal("0".to_owned()),
+                maker_rebate_locked_remainder_pusd: ExactDecimal("0".to_owned()),
+                taker_rebate_locked_remainder_pusd: ExactDecimal("0".to_owned()),
+            },
+        };
+        let mut state =
+            ExecutionStateV1::new(&directory, &opening_anchor, &rules).expect("恢复测试执行状态");
+        let order = SimOrderRecordV1 {
+            platform_order_id: "recovery-fill-order".to_owned(),
+            global_request_id: "recovery-fill-request".to_owned(),
+            item_id: "recovery-fill-item".to_owned(),
+            item_idempotency_identity: "recovery-fill-item-idempotency".to_owned(),
+            condition_id: condition_id.clone(),
+            token_id: "1".to_owned(),
+            created_at_utc_ms: 1_000,
+            last_updated_at_utc_ms: 1_000,
+            kind: SimOrderKindStateV1::Fok,
+            source_price_pusd_per_share: decimal("0.4"),
+            accepted_base_units: None,
+            matched_base_units: 1_000_000,
+            pending_maker_depletion_base_units: 0,
+            pending_maker_depletion_evidence: None,
+            open_base_units: 0,
+            expired_base_units: 0,
+            expired_released_quote_units: 0,
+            expired_at_utc_ms: None,
+            gtd_expiration_identity: None,
+            venue_dust_closed_base_units: 0,
+            venue_dust_released_quote_units: 0,
+            venue_dust_at_utc_ms: None,
+            venue_dust_identity: None,
+            market_resolved_canceled_base_units: 0,
+            market_resolved_released_quote_units: 0,
+            market_resolved_at_utc_ms: None,
+            market_resolution_effect_identity: None,
+            canceled_base_units: 0,
+            canceled_released_quote_units: 0,
+            canceled_at_utc_ms: None,
+            caller_cancel_effect_identity: None,
+            terminalized_pending_maker_depletion_evidence: None,
+            accepted_quote_units: 400_000,
+            matched_quote_units: 400_000,
+            open_quote_units: 0,
+            released_quote_units: 0,
+            sdk_taker_amount_audit_base_units: Some(1_000_000),
+            immediate_taker_fee_encumbered_units: 10_000,
+            terminal_reason: None,
+        };
+        let fill = SimFillRecordV1 {
+            trade_id: "recovery-fill-trade".to_owned(),
+            platform_order_id: order.platform_order_id.clone(),
+            condition_id,
+            token_id: "1".to_owned(),
+            matched_at_utc_ms: 1_000,
+            liquidity_role: SimLiquidityRoleV1::Taker,
+            source_identity: "recovery-fill-source".to_owned(),
+            maker_depletion_evidence: None,
+            price_pusd_per_share: decimal("0.4"),
+            base_units: 1_000_000,
+            quote_units: 400_000,
+            immediate_taker_fee_units: 10_000,
+            finality_path: None,
+            finality_path_ordinal: None,
+            finality_state: None,
+            economic_application_delta: None,
+        };
+        let accepted_delta = state
+            .commit_new_order(order, vec![fill])
+            .expect("恢复测试订单提交")
+            .account_deltas
+            .into_iter()
+            .next()
+            .expect("恢复测试订单接受变化");
+        state
+            .initialize_fill_finality(finality_policy.as_ref(), "recovery-fill-trade")
+            .expect("恢复测试成交最终性初始化");
+        state
+            .validate_recovered(
+                &directory,
+                &opening_anchor,
+                rules.as_ref(),
+                finality_policy.as_ref(),
+                None,
+                &BTreeMap::new(),
+            )
+            .expect("真实业务入口形成的待闭合成交必须可恢复");
+        (
+            state,
+            directory,
+            opening_anchor,
+            rules,
+            finality_policy,
+            accepted_delta,
+        )
+    }
+
+    async fn pending_taker_fill_recovery_fixture() -> (
+        ExecutionStateV1,
+        SessionMarketDirectoryV1,
+        contracts::AccountOpeningAnchorV1,
+        Arc<SealedProcessRuleSnapshot>,
+        Arc<TradeFinalityPolicyV1>,
+        Arc<PlatformAccountDeltaV1>,
+    ) {
+        pending_taker_fill_recovery_fixture_with_policy(
+            crate::finality::successful_policy_for_tests(),
+        )
+        .await
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminal_market_hot_state_eviction_rejects_nonterminal_and_validates_compact_witness()
+    {
+        let foreign_request_id = "terminal-eviction-foreign-request";
+        let compact_finality_policy = crate::finality::policy_for_tests(
+            "terminal-eviction-request-selector-policy",
+            &[
+                (TradeFinalityStateV1::Matched, 0),
+                (TradeFinalityStateV1::Mined, 10),
+                (TradeFinalityStateV1::Confirmed, 20),
+            ],
+            1,
+            vec![(
+                crate::finality::TradeFinalitySelectorV1::Request {
+                    account_instance_key: recovery_fill_account_instance_key(),
+                    global_request_id: foreign_request_id.to_owned(),
+                },
+                vec![
+                    (TradeFinalityStateV1::Matched, 0),
+                    (TradeFinalityStateV1::Failed, 10),
+                ],
+                None,
+            )],
+        );
+        let (mut state, directory, opening_anchor, rules, finality_policy, accepted_delta) =
+            pending_taker_fill_recovery_fixture_with_policy(Arc::clone(&compact_finality_policy))
+                .await;
+        assert_eq!(finality_policy, compact_finality_policy);
+        let mut account_deltas = BTreeMap::from([(
+            accepted_delta.account_transition_seq,
+            accepted_delta.as_ref().clone(),
+        )]);
+        while let Some(next_at) = state.next_scheduled_finality_at_utc_ms() {
+            let effects = state
+                .advance_finality_at(next_at)
+                .expect("测试成交必须推进到最终性终态");
+            for effect in effects {
+                if let Some(delta) = effect.trade_feedback.account_delta {
+                    account_deltas.insert(delta.account_transition_seq, delta.as_ref().clone());
+                }
+                for settlement in effect.settlement_feedbacks {
+                    if let Some(delta) = settlement.account_delta {
+                        account_deltas.insert(delta.account_transition_seq, delta.as_ref().clone());
+                    }
+                }
+            }
+        }
+        let member = directory.markets().next().expect("测试目录至少一个市场");
+        let condition_id = member.market().condition_id.0.clone();
+        for settlement in state
+            .advance_rebate_clock_at(member.market().window.end_at_utc_ms)
+            .expect("测试市场结束时钟必须闭合返佣市场结果")
+        {
+            if let Some(delta) = settlement.account_delta {
+                account_deltas.insert(delta.account_transition_seq, delta.as_ref().clone());
+            }
+        }
+        let resolution = MarketResolutionTerminalV3::Resolved {
+            winning_asset_id: member.assets()[0].token_id.0.clone(),
+            winning_outcome: member.assets()[0].outcome.label.clone(),
+            payout_vector: member
+                .assets()
+                .iter()
+                .enumerate()
+                .map(|(index, asset)| contracts::PayoutEntryV1 {
+                    asset: asset.clone(),
+                    payout_pusd_per_share: ExactDecimal(if index == 0 {
+                        "1".to_owned()
+                    } else {
+                        "0".to_owned()
+                    }),
+                })
+                .collect(),
+            mapping_rule_version: "terminal-hot-state-test-v1".to_owned(),
+        };
+        let mut resolution_event = crate::task22_tests::sealed_event(
+            ExecutionMarketEventPayloadV3::MarketResolutionTerminal(resolution),
+            crate::task22_tests::orderbook_evidence(
+                member.market().window.end_at_utc_ms,
+                member.market().window.end_at_utc_ms,
+                1,
+            ),
+            crate::task21_tests::fresh_quality(),
+        );
+        resolution_event.market = member.market().clone();
+        resolution_event.event_id =
+            data_pipeline_core::derive_execution_market_event_v3_id(&resolution_event)
+                .expect("测试判定事件身份");
+        let (order_effects, auto_redeem) = state
+            .apply_qualified_market_resolution(
+                &resolution_event,
+                member.market().window.end_at_utc_ms,
+            )
+            .expect("测试判定必须通过真实入口闭合并自动赎回");
+        assert!(order_effects.is_empty());
+        if let Some(delta) = auto_redeem.and_then(|effect| effect.account_delta) {
+            account_deltas.insert(delta.account_transition_seq, delta.as_ref().clone());
+        }
+        let full_state = state.clone();
+
+        assert!(matches!(
+            state.evict_terminal_market_hot_state(
+                &condition_id,
+                MarketLifecyclePhaseV1::PostEndPendingResolution,
+                compact_finality_policy.as_ref(),
+            ),
+            Err(MatchingStateErrorV1::Finality(message))
+                if message.contains("ResolutionTerminal")
+        ));
+        assert_eq!(state, full_state, "拒绝路径不得部分删除热状态");
+
+        let hot_state = state
+            .evict_terminal_market_hot_state(
+                &condition_id,
+                MarketLifecyclePhaseV1::ResolutionTerminal,
+                compact_finality_policy.as_ref(),
+            )
+            .expect("经济闭合的终态市场可以驱逐订单与成交热状态");
+        assert_eq!(hot_state.fills.len(), 1);
+        assert_eq!(
+            hot_state
+                .fills
+                .get("recovery-fill-trade")
+                .and_then(|witness| witness.finality_selector_identity.as_deref()),
+            Some("recovery-fill-request"),
+            "紧凑见证必须保留真实订单的请求级最终性选择身份"
+        );
+        assert!(
+            state
+                .orders()
+                .all(|order| order.condition_id != condition_id)
+        );
+        assert!(state.fills().all(|fill| fill.condition_id != condition_id));
+        assert!(state.matching_closed_markets.contains_key(&condition_id));
+        assert!(state.market_resolutions.contains_key(&condition_id));
+        assert_eq!(state.retained_rebate_fill_state_count(), 0);
+        assert_eq!(
+            state.rebate.market_result(&condition_id),
+            full_state.rebate.market_result(&condition_id),
+            "驱逐只能删除逐成交返佣热态，不能改变市场返佣结果"
+        );
+        assert_eq!(
+            state.rebate.day_snapshot(RebateKindV1::Taker, 0),
+            full_state.rebate.day_snapshot(RebateKindV1::Taker, 0)
+        );
+        assert_eq!(
+            state.rebate.next_clock_at_utc_ms(),
+            full_state.rebate.next_clock_at_utc_ms()
+        );
+
+        let encoded = serde_json::to_vec(&hot_state).expect("终态市场紧凑驱逐见证编码");
+        let recovered_witness: TerminalExecutionMarketEvictionV1 =
+            serde_json::from_slice(&encoded).expect("终态市场紧凑驱逐见证解码");
+        assert_eq!(recovered_witness, hot_state);
+        state
+            .validate_recovered(
+                &directory,
+                &opening_anchor,
+                rules.as_ref(),
+                compact_finality_policy.as_ref(),
+                state.gtd_advanced_through_utc_ms,
+                &BTreeMap::from([(condition_id.clone(), recovered_witness.clone())]),
+            )
+            .expect("紧凑驱逐见证必须足以验证删除后的执行状态");
+        state
+            .validate_recovered_account_delta_chain(
+                &opening_anchor,
+                &account_deltas,
+                compact_finality_policy.as_ref(),
+                &BTreeMap::from([(condition_id.clone(), recovered_witness.clone())]),
+            )
+            .expect("紧凑驱逐见证必须绑定同一持久账户变化链");
+
+        let mut tampered_witness = recovered_witness.clone();
+        tampered_witness
+            .fills
+            .get_mut("recovery-fill-trade")
+            .expect("紧凑驱逐成交见证")
+            .finality_selector_identity = Some(foreign_request_id.to_owned());
+        assert!(matches!(
+            state.validate_recovered(
+                &directory,
+                &opening_anchor,
+                rules.as_ref(),
+                compact_finality_policy.as_ref(),
+                state.gtd_advanced_through_utc_ms,
+                &BTreeMap::from([(condition_id.clone(), tampered_witness)]),
+            ),
+            Err(MatchingStateErrorV1::Finality(message))
+                if message.contains("已密封策略选择结果")
+        ));
+
+        let mut tampered_delta = recovered_witness.clone();
+        tampered_delta
+            .fills
+            .get_mut("recovery-fill-trade")
+            .and_then(|witness| witness.economic_application_delta.as_mut())
+            .expect("成功紧凑成交必须保留经济变化引用")
+            .delta_id
+            .push_str("-tampered");
+        let tampered_delta_error = state
+            .validate_recovered_account_delta_chain(
+                &opening_anchor,
+                &account_deltas,
+                compact_finality_policy.as_ref(),
+                &BTreeMap::from([(condition_id.clone(), tampered_delta)]),
+            )
+            .expect_err("篡改紧凑经济变化引用必须拒绝恢复");
+        assert!(
+            matches!(tampered_delta_error, MatchingStateErrorV1::Finality(_)),
+            "紧凑经济变化引用必须由最终性恢复门拒绝，实际错误：{tampered_delta_error:?}"
+        );
+
+        let mut tampered_rebate = recovered_witness;
+        tampered_rebate
+            .fills
+            .get_mut("recovery-fill-trade")
+            .expect("成功紧凑成交返佣见证")
+            .rebate_fill
+            .immediate_taker_fee_units = 20_000;
+        assert!(matches!(
+            state.validate_recovered(
+                &directory,
+                &opening_anchor,
+                rules.as_ref(),
+                compact_finality_policy.as_ref(),
+                state.gtd_advanced_through_utc_ms,
+                &BTreeMap::from([(condition_id, tampered_rebate)]),
+            ),
+            Err(MatchingStateErrorV1::Rebate(message))
+                if message.contains("成交前驱")
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recovery_reselects_finality_path_and_rejects_coherent_foreign_path() {
+        let (mut state, directory, opening_anchor, rules, finality_policy, _) =
+            pending_taker_fill_recovery_fixture().await;
+        let foreign_policy = crate::finality::policy_for_tests(
+            "recovery-foreign-policy",
+            &[
+                (TradeFinalityStateV1::Matched, 0),
+                (TradeFinalityStateV1::Mined, 11),
+                (TradeFinalityStateV1::Confirmed, 22),
+            ],
+            1,
+            Vec::new(),
+        );
+        state
+            .fills
+            .get_mut("recovery-fill-trade")
+            .expect("恢复测试成交")
+            .finality_path = Some(foreign_policy.normal_path().clone());
+        state.scheduled_finality = BTreeSet::from([ScheduledFinalityTransitionKeyV1 {
+            platform_event_at_utc_ms: 1_011,
+            fill_economic_delta_identity: "recovery-fill-trade".to_owned(),
+            path_ordinal: 1,
+        }]);
+
+        assert!(matches!(
+            state.validate_recovered(
+                &directory,
+                &opening_anchor,
+                rules.as_ref(),
+                finality_policy.as_ref(),
+                None,
+                &BTreeMap::new(),
+            ),
+            Err(MatchingStateErrorV1::Finality(message))
+                if message.contains("已密封策略选择结果")
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recovery_rejects_valid_but_wrong_delta_at_economic_checkpoint() {
+        let (mut state, directory, opening_anchor, rules, finality_policy, accepted_delta) =
+            pending_taker_fill_recovery_fixture().await;
+        state.advance_finality_at(1_010).expect("推进到经济截点");
+        state
+            .fills
+            .get_mut("recovery-fill-trade")
+            .expect("恢复测试成交")
+            .economic_application_delta = Some(accepted_delta);
+
+        assert!(matches!(
+            state.validate_recovered(
+                &directory,
+                &opening_anchor,
+                rules.as_ref(),
+                finality_policy.as_ref(),
+                None,
+                &BTreeMap::new(),
+            ),
+            Err(MatchingStateErrorV1::Finality(message))
+                if message.contains("经济变化正文与已冻结截点")
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recovery_rejects_rebate_terminal_state_ahead_of_fill_finality() {
+        let (state, directory, opening_anchor, rules, finality_policy, _) =
+            pending_taker_fill_recovery_fixture().await;
+        let mut value = serde_json::to_value(&state).expect("恢复返佣篡改测试 JSON");
+        *value
+            .pointer_mut("/rebate/taker_fills/recovery-fill-trade/terminal_succeeded")
+            .expect("恢复返佣成交终态字段") = serde_json::Value::Bool(true);
+        let buckets = value
+            .pointer_mut("/rebate/day_buckets")
+            .and_then(serde_json::Value::as_array_mut)
+            .expect("恢复返佣日桶数组");
+        let taker_bucket = buckets
+            .iter_mut()
+            .find(|entry| {
+                entry
+                    .as_array()
+                    .and_then(|entry| entry.first())
+                    .and_then(serde_json::Value::as_str)
+                    == Some("Taker")
+            })
+            .and_then(serde_json::Value::as_array_mut)
+            .and_then(|entry| entry.get_mut(2))
+            .expect("恢复 taker 日桶");
+        *taker_bucket
+            .get_mut("pending_predecessors")
+            .expect("恢复 taker 日桶前驱") = serde_json::json!([]);
+        *taker_bucket
+            .get_mut("accrued_pusd")
+            .expect("恢复 taker 日桶应计") =
+            serde_json::to_value(decimal("0.0008")).expect("返佣应计 JSON");
+        let tampered: ExecutionStateV1 =
+            serde_json::from_value(value).expect("一致化篡改返佣状态仍可解码");
+
+        assert!(matches!(
+            tampered.validate_recovered(
+                &directory,
+                &opening_anchor,
+                rules.as_ref(),
+                finality_policy.as_ref(),
+                None,
+                &BTreeMap::new(),
+            ),
+            Err(MatchingStateErrorV1::Rebate(message))
+                if message.contains("成交前驱")
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recovery_rejects_raised_platform_and_finality_drive_watermarks() {
+        let (state, directory, opening_anchor, rules, finality_policy, _) =
+            pending_taker_fill_recovery_fixture().await;
+
+        let mut gtd_raised = state.clone();
+        gtd_raised.gtd_advanced_through_utc_ms = Some(9_999);
+        assert!(matches!(
+            gtd_raised.validate_recovered(
+                &directory,
+                &opening_anchor,
+                rules.as_ref(),
+                finality_policy.as_ref(),
+                None,
+                &BTreeMap::new(),
+            ),
+            Err(MatchingStateErrorV1::Finality(message))
+                if message.contains("统一逻辑驱动水位")
+        ));
+
+        let mut finality_raised = state;
+        finality_raised.finality_advanced_through_utc_ms = Some(9_999);
+        assert!(matches!(
+            finality_raised.validate_recovered(
+                &directory,
+                &opening_anchor,
+                rules.as_ref(),
+                finality_policy.as_ref(),
+                None,
+                &BTreeMap::new(),
+            ),
+            Err(MatchingStateErrorV1::Finality(message))
+                if message.contains("最终性驱动水位")
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recovery_rejects_post_end_phase_without_matching_close() {
+        let (state, directory, _, _, _, _) = pending_taker_fill_recovery_fixture().await;
+        let condition_id = directory
+            .markets()
+            .next()
+            .expect("恢复测试目录至少一个市场")
+            .market()
+            .condition_id
+            .0
+            .clone();
+        let lifecycle_phases = BTreeMap::from([(
+            condition_id.clone(),
+            MarketLifecyclePhaseV1::PostEndPendingResolution,
+        )]);
+
+        assert!(matches!(
+            state.validate_recovered_market_resolutions(&BTreeMap::new(), &lifecycle_phases),
+            Err(MatchingStateErrorV1::ResolutionConflict(actual))
+                if actual == condition_id
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recovery_allows_post_end_raw_resolution_without_execution_obligation() {
+        let (mut state, directory, _, _, _, _) = pending_taker_fill_recovery_fixture().await;
+        let mut lifecycle_phases = BTreeMap::new();
+        for market in directory.markets() {
+            let condition_id = market.market().condition_id.0.clone();
+            state
+                .queues
+                .release_market_matching_state(&condition_id)
+                .expect("恢复测试关闭撮合队列");
+            state
+                .matching_closed_markets
+                .insert(condition_id.clone(), market.market().window.end_at_utc_ms);
+            lifecycle_phases.insert(
+                condition_id,
+                MarketLifecyclePhaseV1::PostEndPendingResolution,
+            );
+        }
+        let market = directory.markets().next().expect("恢复测试至少一个市场");
+        let winning_asset = &market.assets()[0];
+        let resolution = MarketResolutionTerminalV3::Resolved {
+            winning_asset_id: winning_asset.token_id.0.clone(),
+            winning_outcome: winning_asset.outcome.label.clone(),
+            payout_vector: market
+                .assets()
+                .iter()
+                .enumerate()
+                .map(|(index, asset)| contracts::PayoutEntryV1 {
+                    asset: asset.clone(),
+                    payout_pusd_per_share: ExactDecimal(if index == 0 {
+                        "1".to_owned()
+                    } else {
+                        "0".to_owned()
+                    }),
+                })
+                .collect(),
+            mapping_rule_version: "recovery-raw-resolution-v1".to_owned(),
+        };
+        let qualified = BTreeMap::from([(
+            market.market().condition_id.0.clone(),
+            (resolution, MarketLifecyclePhaseV1::PostEndPendingResolution),
+        )]);
+
+        state
+            .validate_recovered_market_resolutions(&qualified, &lifecycle_phases)
+            .expect("PostEnd 的原始判定可能从未形成执行结算义务");
+    }
+
     fn decimal(value: &str) -> Decimal {
         value.parse().expect("测试十进制必须有效")
     }
@@ -3805,6 +6127,112 @@ mod tests {
             .zip(allocations)
             .map(|((identity, _, _), units)| ((*identity).to_owned(), *units))
             .collect()
+    }
+
+    #[test]
+    fn end_at_release_drops_all_market_price_levels_and_taker_debt() {
+        let mut bid = PriceQueueV1 {
+            segments: VecDeque::from([
+                QueueSegmentV1::External(ExternalSyntheticMakerSegmentV1 {
+                    segment_id: Sha256Hex("a".repeat(64)),
+                    total_base_units: 2_000_000,
+                    total_quote_units: 800_000,
+                    consumed_base_units: 100_000,
+                }),
+                QueueSegmentV1::Account(AccountOrderQueueSegmentV1 {
+                    platform_order_id: "account-order".to_owned(),
+                    remaining_base_units: 500_000,
+                }),
+            ]),
+            account_taker_depletion_debt_units: 123_456,
+        };
+        let ask = PriceQueueV1 {
+            segments: VecDeque::from([QueueSegmentV1::External(ExternalSyntheticMakerSegmentV1 {
+                segment_id: Sha256Hex("b".repeat(64)),
+                total_base_units: 1_000_000,
+                total_quote_units: 600_000,
+                consumed_base_units: 0,
+            })]),
+            account_taker_depletion_debt_units: 654_321,
+        };
+        bid.segments
+            .push_back(QueueSegmentV1::Account(AccountOrderQueueSegmentV1 {
+                platform_order_id: "second-account-order".to_owned(),
+                remaining_base_units: 250_000,
+            }));
+
+        let mut queues = ExecutionQueueStateV1 {
+            markets: BTreeMap::from([(
+                "condition-a".to_owned(),
+                BTreeMap::from([(
+                    "token-a".to_owned(),
+                    AssetQueueV1 {
+                        bids: BTreeMap::from([(decimal("0.4"), bid)]),
+                        asks: BTreeMap::from([(decimal("0.6"), ask)]),
+                        initial_loaded: true,
+                    },
+                )]),
+            )]),
+        };
+
+        queues
+            .release_market_matching_state("condition-a")
+            .expect("盘后释放已知市场撮合热状态");
+
+        let asset = &queues.markets["condition-a"]["token-a"];
+        assert!(asset.bids.is_empty());
+        assert!(asset.asks.is_empty());
+        assert!(asset.initial_loaded, "释放不得移除市场资产身份壳");
+    }
+
+    #[test]
+    fn end_at_release_waits_for_every_asset_initial_snapshot() {
+        let queued = PriceQueueV1 {
+            segments: VecDeque::from([QueueSegmentV1::External(ExternalSyntheticMakerSegmentV1 {
+                segment_id: Sha256Hex("c".repeat(64)),
+                total_base_units: 1_000_000,
+                total_quote_units: 400_000,
+                consumed_base_units: 0,
+            })]),
+            account_taker_depletion_debt_units: 0,
+        };
+        let mut queues = ExecutionQueueStateV1 {
+            markets: BTreeMap::from([(
+                "condition-a".to_owned(),
+                BTreeMap::from([
+                    (
+                        "token-a".to_owned(),
+                        AssetQueueV1 {
+                            bids: BTreeMap::from([(decimal("0.4"), queued)]),
+                            asks: BTreeMap::new(),
+                            initial_loaded: true,
+                        },
+                    ),
+                    ("token-b".to_owned(), AssetQueueV1::default()),
+                ]),
+            )]),
+        };
+
+        assert!(
+            !queues
+                .release_market_matching_state_if_initialized("condition-a")
+                .expect("盘后检查已知市场")
+        );
+        assert_eq!(queues.markets["condition-a"]["token-a"].bids.len(), 1);
+
+        queues
+            .markets
+            .get_mut("condition-a")
+            .expect("测试市场")
+            .get_mut("token-b")
+            .expect("测试资产")
+            .initial_loaded = true;
+        assert!(
+            queues
+                .release_market_matching_state_if_initialized("condition-a")
+                .expect("完整初始装载后释放")
+        );
+        assert!(queues.markets["condition-a"]["token-a"].bids.is_empty());
     }
 
     #[test]

@@ -11,20 +11,26 @@ use contracts::{
     MarketEnrollmentIdentityV1, MarketEnrollmentV1, PlatformAccountSnapshotV1,
     PlatformOutcomeBalanceV1, PlatformSourceV1, Sha256Hex, TokenId,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::account::InitialAccountStateV1;
+use crate::account::{InitialAccountStateV1, PlatformAccountStateV1};
 use crate::finality::TradeFinalityPolicyV1;
 use crate::latency_profile::{DelaySampleDomainV1, EmpiricalDelayProfile};
-use crate::market::{AccountBookOverlayStoreV1, MarketStateStoreV1};
+use crate::market::{
+    AccountBookOverlayStoreV1, DurableMarketBucketReferenceV1, MarketEventPathV1,
+    MarketLifecyclePhaseV1, MarketStateStoreV1, MillisecondBucketClosureV1,
+};
 use crate::market_directory::{SessionMarketDirectoryErrorV1, SessionMarketDirectoryV1};
-use crate::matching::{ExecutionStateV1, MatchingStateErrorV1};
+use crate::matching::{ExecutionStateV1, MatchingStateErrorV1, TerminalExecutionMarketEvictionV1};
 use crate::platform_rules::SealedProcessRuleSnapshot;
 use crate::scenario::{PlatformMarketV1, PlatformScenarioV1};
 
 pub const SIM_EXECUTION_CONTRACT_V1: &str = "sim_execution_contract_v1";
 pub const SESSION_SPEC_SCHEMA_V2: &str = "session_spec_v2";
+
+const SIM_PROCESS_ROOT_CHECKPOINT_SCHEMA_V1: &str = "sim_process_root_checkpoint_v1";
+const SIM_SESSION_CHECKPOINT_SCHEMA_V1: &str = "sim_session_checkpoint_v1";
 
 const SESSION_SPEC_HASH_DOMAIN_V2: &str = "SIM_SESSION_SPEC_SHA256_V2";
 const ACCOUNT_OPENING_ANCHOR_ID_DOMAIN_V1: &str = "SIM_ACCOUNT_OPENING_ANCHOR_ID_V1";
@@ -33,7 +39,8 @@ const MARKET_ENROLLMENT_ID_DOMAIN_V1: &str = "SIM_MARKET_ENROLLMENT_ID_V1";
 const MARKET_ENROLLMENT_HASH_DOMAIN_V1: &str = "SIM_MARKET_ENROLLMENT_SHA256_V1";
 const MARKET_ENROLLMENT_CHAIN_HASH_DOMAIN_V1: &str = "SIM_MARKET_ENROLLMENT_CHAIN_SHA256_V1";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionSpecV2 {
     pub run_id: String,
     pub session_id: String,
@@ -51,20 +58,23 @@ pub struct SessionSpecV2 {
     pub market_event_schema_version: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MarketEnrollmentRequestV1 {
     pub enrollment_request_id: String,
     pub market: PlatformMarketV1,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SessionInitializationStateV1 {
     PreparedLedgerInit,
     Active,
     InitializationFailedClosed,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionInitializationSnapshotV1 {
     pub state: SessionInitializationStateV1,
     pub activation_id: Option<String>,
@@ -86,7 +96,8 @@ pub struct SessionCreationControlResultV2 {
     pub initialization: SessionInitializationSnapshotV1,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActivateSessionRequestV1 {
     pub session_id: String,
     pub account_instance_key: AccountInstanceKeyV1,
@@ -95,7 +106,8 @@ pub struct ActivateSessionRequestV1 {
     pub activation_id: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FailSessionInitializationRequestV1 {
     pub session_id: String,
     pub account_instance_key: AccountInstanceKeyV1,
@@ -110,6 +122,13 @@ pub enum SessionInitializationControlDispositionV1 {
     ExistingActive,
     FailedClosed,
     ExistingFailedClosed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub(crate) enum InputPathSealOutcomeV1 {
+    Exhausted,
+    FailedMissingQualifiedMarketTerminal { condition_ids: Vec<String> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -129,14 +148,18 @@ struct SessionCreationRecordV2 {
     initialization: SharedSessionInitializationV1,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CapitalIssuanceFenceV1 {
+    session_id: String,
+    account_instance_key: AccountInstanceKeyV1,
     opening_anchor: AccountOpeningAnchorV1,
     creation_request_id: String,
     spec_sha256: Sha256Hex,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MarketEnrollmentStateV1 {
     directory: SessionMarketDirectoryV1,
     chain: Vec<MarketEnrollmentV1>,
@@ -144,6 +167,84 @@ struct MarketEnrollmentStateV1 {
     business_input_started: bool,
     paper_candidate_condition_ids: BTreeSet<String>,
     paper_candidate_token_ids: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionCreationCheckpointV2 {
+    spec: SessionSpecV2,
+    spec_sha256: Sha256Hex,
+    account_instance_key: AccountInstanceKeyV1,
+    opening_anchor: AccountOpeningAnchorV1,
+    initialization: SessionInitializationSnapshotV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SimProcessRootCheckpointV1 {
+    schema_version: String,
+    run_id: String,
+    rule_snapshot_file_sha256: Sha256Hex,
+    finality_policy_id: String,
+    finality_policy_content_sha256: Sha256Hex,
+    latency_profile_id: String,
+    latency_profile_version: u32,
+    latency_profile_file_sha256: Sha256Hex,
+    scenario_market_set_sha256: Sha256Hex,
+    scenario_sha256: Sha256Hex,
+    capital_issuance_fences: Vec<CapitalIssuanceFenceV1>,
+    session_creations: Vec<SessionCreationCheckpointV2>,
+}
+
+impl SimProcessRootCheckpointV1 {
+    pub(crate) fn capital_issuance_fence_audit(&self) -> Result<(u64, Sha256Hex), SessionError> {
+        let count = u64::try_from(self.capital_issuance_fences.len()).map_err(|_| {
+            SessionError::SessionIdentitySerialization("资本签发围栏数量超出 u64".to_owned())
+        })?;
+        let sha256 = hash_json(
+            "SIM_CAPITAL_ISSUANCE_FENCE_AUDIT_V1",
+            &self.capital_issuance_fences,
+        )?;
+        Ok((count, sha256))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SimSessionCheckpointV1 {
+    schema_version: String,
+    session_id: String,
+    hidden_platform_markets: Option<MarketStateStoreV1>,
+    public_markets: MarketStateStoreV1,
+    execution_state: ExecutionStateV1,
+    market_enrollment: MarketEnrollmentStateV1,
+    state: SessionStateCheckpointV1,
+}
+
+impl SimSessionCheckpointV1 {
+    pub(crate) fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub(crate) fn recovered_query_revisions(&self) -> BTreeMap<String, u64> {
+        self.state
+            .queries
+            .iter()
+            .map(|(request_id, record)| (request_id.clone(), record.platform_state_revision))
+            .collect()
+    }
+
+    pub(crate) fn platform_state_revision(&self) -> u64 {
+        self.state.platform_state_revision
+    }
+
+    pub(crate) fn logical_platform_driven_through(&self) -> Option<i64> {
+        self.state.closed_action_through_utc_ms
+    }
+
+    pub(crate) fn private_fact_schedule_closed_through(&self) -> Option<i64> {
+        self.state.private_fact_schedule_closed_through_utc_ms
+    }
 }
 
 impl MarketEnrollmentStateV1 {
@@ -164,6 +265,7 @@ pub(crate) struct PreparedSimSessionV2 {
     pub control: SessionCreationControlResultV2,
 }
 
+#[derive(Clone)]
 pub struct SimProcessRoot {
     run_id: Arc<str>,
     finality_policy: Arc<TradeFinalityPolicyV1>,
@@ -177,6 +279,38 @@ pub struct SimProcessRoot {
 }
 
 impl SimProcessRoot {
+    pub(crate) fn detached_clone(&self) -> Result<Self, SessionError> {
+        let session_creations = self
+            .session_creations
+            .iter()
+            .map(|(session_id, record)| {
+                Ok((
+                    session_id.clone(),
+                    SessionCreationRecordV2 {
+                        spec: record.spec.clone(),
+                        spec_sha256: record.spec_sha256.clone(),
+                        account_instance_key: record.account_instance_key.clone(),
+                        opening_anchor: record.opening_anchor.clone(),
+                        initialization: Arc::new(Mutex::new(initialization_snapshot(
+                            &record.initialization,
+                        )?)),
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, SessionError>>()?;
+        Ok(Self {
+            run_id: Arc::clone(&self.run_id),
+            finality_policy: Arc::clone(&self.finality_policy),
+            rule_snapshot: Arc::clone(&self.rule_snapshot),
+            latency_profile: Arc::clone(&self.latency_profile),
+            scenario: Arc::clone(&self.scenario),
+            initial_market_directory: self.initial_market_directory.clone(),
+            session_creations,
+            account_issuance_fence: self.account_issuance_fence.clone(),
+            creation_requests: self.creation_requests.clone(),
+        })
+    }
+
     pub fn try_new(
         run_id: String,
         finality_policy: Arc<TradeFinalityPolicyV1>,
@@ -219,10 +353,25 @@ impl SimProcessRoot {
         &self.finality_policy
     }
 
+    pub(crate) fn rule_snapshot(&self) -> &Arc<SealedProcessRuleSnapshot> {
+        &self.rule_snapshot
+    }
+
+    pub(crate) fn latency_profile(&self) -> &Arc<EmpiricalDelayProfile> {
+        &self.latency_profile
+    }
+
+    pub(crate) fn scenario(&self) -> &Arc<PlatformScenarioV1> {
+        &self.scenario
+    }
+
     pub fn create_session(
         &mut self,
         spec: SessionSpecV2,
     ) -> Result<PreparedSimSessionV2, SessionError> {
+        if self.is_session_retired(&spec.session_id) {
+            return Err(SessionError::SessionRetentionExpired(spec.session_id));
+        }
         let (account_instance_key, spec_sha256, opening_anchor) =
             self.validated_creation_material(&spec)?;
         if let Some(existing) = self.session_creations.get(&spec.session_id) {
@@ -287,6 +436,7 @@ impl SimProcessRoot {
             hidden_platform_markets,
             public_markets,
             execution_state,
+            terminal_projection_pending: BTreeSet::new(),
             market_enrollment: Arc::new(MarketEnrollmentStateV1::new(market_directory)),
             initialization: Arc::clone(&initialization),
             state: SessionState::new(spec.clone()),
@@ -302,8 +452,10 @@ impl SimProcessRoot {
             },
         );
         self.account_issuance_fence.insert(
-            account_instance_key,
+            account_instance_key.clone(),
             CapitalIssuanceFenceV1 {
+                session_id: spec.session_id.clone(),
+                account_instance_key,
                 opening_anchor,
                 creation_request_id: spec.creation_request_id.clone(),
                 spec_sha256,
@@ -318,6 +470,11 @@ impl SimProcessRoot {
         &self,
         spec: &SessionSpecV2,
     ) -> Result<SessionCreationControlResultV2, SessionError> {
+        if self.is_session_retired(&spec.session_id) {
+            return Err(SessionError::SessionRetentionExpired(
+                spec.session_id.clone(),
+            ));
+        }
         let (account_instance_key, spec_sha256, opening_anchor) =
             self.validated_creation_material(spec)?;
         let record = self
@@ -340,7 +497,9 @@ impl SimProcessRoot {
             .ok_or_else(|| {
                 SessionError::SessionCreationIdentityConflict(spec.session_id.clone())
             })?;
-        if fence.opening_anchor != opening_anchor
+        if fence.session_id != spec.session_id
+            || fence.account_instance_key != account_instance_key
+            || fence.opening_anchor != opening_anchor
             || fence.creation_request_id != spec.creation_request_id
             || fence.spec_sha256 != spec_sha256
         {
@@ -504,7 +663,9 @@ impl SimProcessRoot {
             .account_issuance_fence
             .get(account_instance_key)
             .ok_or(SessionError::InitializationControlIdentityConflict)?;
-        if fence.opening_anchor != record.opening_anchor
+        if fence.session_id != record.spec.session_id
+            || fence.account_instance_key != record.account_instance_key
+            || fence.opening_anchor != record.opening_anchor
             || fence.creation_request_id != record.spec.creation_request_id
             || fence.spec_sha256 != record.spec_sha256
         {
@@ -535,8 +696,427 @@ impl SimProcessRoot {
         )
     }
 
+    pub(crate) fn restore_session_from_checkpoint(
+        &self,
+        checkpoint: SimSessionCheckpointV1,
+    ) -> Result<SimSession, SessionCheckpointErrorV1> {
+        self.restore_session_from_checkpoint_with_evicted_markets(checkpoint, &BTreeMap::new())
+    }
+
+    pub(crate) fn restore_session_from_checkpoint_with_evicted_markets(
+        &self,
+        checkpoint: SimSessionCheckpointV1,
+        evicted_markets: &BTreeMap<String, TerminalExecutionMarketEvictionV1>,
+    ) -> Result<SimSession, SessionCheckpointErrorV1> {
+        if checkpoint.schema_version != SIM_SESSION_CHECKPOINT_SCHEMA_V1 {
+            return Err(SessionCheckpointErrorV1::UnsupportedSchema(
+                checkpoint.schema_version,
+            ));
+        }
+        let record = self
+            .session_creations
+            .get(&checkpoint.session_id)
+            .ok_or_else(|| {
+                SessionCheckpointErrorV1::SessionNotRegistered(checkpoint.session_id.clone())
+            })?;
+        validate_market_enrollment_checkpoint(
+            &self.initial_market_directory,
+            &checkpoint.market_enrollment,
+            &record.account_instance_key,
+            &record.opening_anchor,
+        )?;
+        match (
+            record.spec.caller_role,
+            checkpoint.hidden_platform_markets.is_some(),
+        ) {
+            (SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation, true)
+            | (SimCallerRoleV1::Paper, false) => {}
+            _ => {
+                return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                    "隐藏市场状态与会话角色不匹配".to_owned(),
+                ));
+            }
+        }
+        let expected_evicted_condition_ids = evicted_markets
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if checkpoint
+            .public_markets
+            .evicted_condition_ids()
+            .collect::<BTreeSet<_>>()
+            != expected_evicted_condition_ids
+            || checkpoint
+                .hidden_platform_markets
+                .as_ref()
+                .is_some_and(|markets| {
+                    markets.evicted_condition_ids().collect::<BTreeSet<_>>()
+                        != expected_evicted_condition_ids
+                })
+        {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "检查点公开或隐藏驱逐市场集合与仅追加驱逐事实不一致".to_owned(),
+            ));
+        }
+        checkpoint
+            .public_markets
+            .validate_recovered(&checkpoint.market_enrollment.directory)
+            .map_err(|error| SessionCheckpointErrorV1::InvalidSessionState(error.to_string()))?;
+        if let Some(hidden) = &checkpoint.hidden_platform_markets {
+            hidden
+                .validate_recovered(&checkpoint.market_enrollment.directory)
+                .map_err(|error| {
+                    SessionCheckpointErrorV1::InvalidSessionState(error.to_string())
+                })?;
+        }
+        checkpoint
+            .execution_state
+            .validate_recovered(
+                &checkpoint.market_enrollment.directory,
+                &record.opening_anchor,
+                self.rule_snapshot.as_ref(),
+                self.finality_policy.as_ref(),
+                checkpoint.state.closed_action_through_utc_ms,
+                evicted_markets,
+            )
+            .map_err(|error| {
+                SessionCheckpointErrorV1::InvalidExecutionState(format!("{error:?}"))
+            })?;
+        let authorized_markets = match record.spec.caller_role {
+            SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation => checkpoint
+                .hidden_platform_markets
+                .as_ref()
+                .expect("已核对训练或离线会话必须拥有隐藏市场状态"),
+            SimCallerRoleV1::Paper => &checkpoint.public_markets,
+        };
+        checkpoint
+            .execution_state
+            .validate_recovered_market_resolutions(
+                &authorized_markets.qualified_resolution_recovery_states(),
+                &authorized_markets.lifecycle_phase_recovery_states(),
+            )
+            .map_err(|error| {
+                SessionCheckpointErrorV1::InvalidExecutionState(format!("{error:?}"))
+            })?;
+
+        Ok(SimSession {
+            finality_policy: Arc::clone(&self.finality_policy),
+            rule_snapshot: Arc::clone(&self.rule_snapshot),
+            latency_profile: Arc::clone(&self.latency_profile),
+            scenario: Arc::clone(&self.scenario),
+            hidden_platform_markets: checkpoint.hidden_platform_markets,
+            public_markets: checkpoint.public_markets,
+            execution_state: checkpoint.execution_state,
+            terminal_projection_pending: BTreeSet::new(),
+            market_enrollment: Arc::new(checkpoint.market_enrollment),
+            initialization: Arc::clone(&record.initialization),
+            state: checkpoint.state.restore(record.spec.clone())?,
+        })
+    }
+
     pub fn registered_session_count(&self) -> usize {
         self.session_creations.len()
+    }
+
+    pub(crate) fn capital_issuance_fence_count(&self) -> usize {
+        self.account_issuance_fence.len()
+    }
+
+    pub(crate) fn is_session_retired(&self, session_id: &str) -> bool {
+        !self.session_creations.contains_key(session_id)
+            && self.capital_fence_for_session(session_id).is_some()
+    }
+
+    pub(crate) fn retire_session(&mut self, session_id: &str) -> Result<(), SessionError> {
+        if self.session_creations.remove(session_id).is_some()
+            || self.is_session_retired(session_id)
+        {
+            Ok(())
+        } else {
+            Err(SessionError::SessionNotFound(session_id.to_owned()))
+        }
+    }
+
+    pub(crate) fn opening_anchor_for_session(
+        &self,
+        session_id: &str,
+    ) -> Option<&AccountOpeningAnchorV1> {
+        self.session_creations
+            .get(session_id)
+            .map(|record| &record.opening_anchor)
+    }
+
+    pub(crate) fn validate_durable_session_creation(
+        &self,
+        spec: &SessionSpecV2,
+        opening_anchor: &AccountOpeningAnchorV1,
+        initialization: &SessionInitializationSnapshotV1,
+    ) -> bool {
+        self.session_creations
+            .get(&spec.session_id)
+            .is_some_and(|record| {
+                record.spec == *spec
+                    && record.opening_anchor == *opening_anchor
+                    && initialization.state == SessionInitializationStateV1::PreparedLedgerInit
+                    && initialization.activation_id.is_none()
+                    && initialization.failure_id.is_none()
+            })
+    }
+
+    pub(crate) fn validate_durable_capital_fence(
+        &self,
+        spec: &SessionSpecV2,
+        opening_anchor: &AccountOpeningAnchorV1,
+    ) -> bool {
+        let Ok((account_instance_key, spec_sha256, expected_opening_anchor)) =
+            self.validated_creation_material(spec)
+        else {
+            return false;
+        };
+        if expected_opening_anchor != *opening_anchor {
+            return false;
+        }
+        self.account_issuance_fence
+            .get(&account_instance_key)
+            .is_some_and(|fence| {
+                fence
+                    == &CapitalIssuanceFenceV1 {
+                        session_id: spec.session_id.clone(),
+                        account_instance_key,
+                        opening_anchor: opening_anchor.clone(),
+                        creation_request_id: spec.creation_request_id.clone(),
+                        spec_sha256,
+                    }
+            })
+    }
+
+    fn capital_fence_for_session(&self, session_id: &str) -> Option<&CapitalIssuanceFenceV1> {
+        self.account_issuance_fence
+            .values()
+            .find(|fence| fence.session_id == session_id)
+    }
+
+    fn validate_checkpoint_capital_fence(
+        &self,
+        fence: &CapitalIssuanceFenceV1,
+    ) -> Result<(), SessionCheckpointErrorV1> {
+        let identity_conflict =
+            || SessionCheckpointErrorV1::CreationIdentityConflict(fence.session_id.clone());
+        let anchor = &fence.opening_anchor;
+        if !is_stable_text(&fence.session_id)
+            || !is_stable_text(&fence.creation_request_id)
+            || !is_sha256_hex(&fence.spec_sha256.0)
+            || fence.account_instance_key.run_id != self.run_id.as_ref()
+            || !is_stable_text(&fence.account_instance_key.caller_instance_id)
+            || !is_stable_text(&fence.account_instance_key.account_id)
+            || fence.account_instance_key.platform_source != PlatformSourceV1::Simulated
+            || anchor.schema_version != ACCOUNT_OPENING_ANCHOR_SCHEMA_V1
+            || anchor.account_instance_key != fence.account_instance_key
+            || anchor.session_id != fence.session_id
+            || anchor.initial_scenario_sha256 != *self.scenario.scenario_sha256()
+            || anchor.initial_market_set_sha256 != *self.scenario.market_set_sha256()
+            || !is_sha256_hex(&anchor.anchor_id)
+            || !is_sha256_hex(&anchor.anchor_sha256.0)
+            || !is_sha256_hex(&anchor.initial_account_state_sha256.0)
+        {
+            return Err(identity_conflict());
+        }
+        PlatformAccountStateV1::try_from_opening_anchor(anchor).map_err(|_| identity_conflict())?;
+        let expected_anchor_id = hash_json(
+            ACCOUNT_OPENING_ANCHOR_ID_DOMAIN_V1,
+            &AccountOpeningAnchorIdentityMaterialV1 {
+                schema_version: ACCOUNT_OPENING_ANCHOR_SCHEMA_V1,
+                account_instance_key: &anchor.account_instance_key,
+                session_id: &anchor.session_id,
+                initial_scenario_sha256: &anchor.initial_scenario_sha256,
+                initial_market_set_sha256: &anchor.initial_market_set_sha256,
+                initial_account_state_sha256: &anchor.initial_account_state_sha256,
+                initial_platform_account: &anchor.initial_platform_account,
+            },
+        )
+        .map_err(|_| identity_conflict())?
+        .0;
+        if anchor.anchor_id != expected_anchor_id {
+            return Err(identity_conflict());
+        }
+        let expected_anchor_sha256 = hash_json(
+            ACCOUNT_OPENING_ANCHOR_HASH_DOMAIN_V1,
+            &AccountOpeningAnchorHashMaterialV1 {
+                schema_version: ACCOUNT_OPENING_ANCHOR_SCHEMA_V1,
+                anchor_id: &anchor.anchor_id,
+                account_instance_key: &anchor.account_instance_key,
+                session_id: &anchor.session_id,
+                initial_scenario_sha256: &anchor.initial_scenario_sha256,
+                initial_market_set_sha256: &anchor.initial_market_set_sha256,
+                initial_account_state_sha256: &anchor.initial_account_state_sha256,
+                initial_platform_account: &anchor.initial_platform_account,
+            },
+        )
+        .map_err(|_| identity_conflict())?;
+        if anchor.anchor_sha256 != expected_anchor_sha256 {
+            return Err(identity_conflict());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn current_initialization_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<SessionInitializationSnapshotV1, SessionError> {
+        let record = self
+            .session_creations
+            .get(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(session_id.to_owned()))?;
+        initialization_snapshot(&record.initialization)
+    }
+
+    pub(crate) fn checkpoint(
+        &self,
+    ) -> Result<SimProcessRootCheckpointV1, SessionCheckpointErrorV1> {
+        let capital_issuance_fences = self.account_issuance_fence.values().cloned().collect();
+        let session_creations = self
+            .session_creations
+            .values()
+            .map(|record| {
+                Ok(SessionCreationCheckpointV2 {
+                    spec: record.spec.clone(),
+                    spec_sha256: record.spec_sha256.clone(),
+                    account_instance_key: record.account_instance_key.clone(),
+                    opening_anchor: record.opening_anchor.clone(),
+                    initialization: initialization_snapshot(&record.initialization)?,
+                })
+            })
+            .collect::<Result<Vec<_>, SessionError>>()?;
+        Ok(SimProcessRootCheckpointV1 {
+            schema_version: SIM_PROCESS_ROOT_CHECKPOINT_SCHEMA_V1.to_owned(),
+            run_id: self.run_id.to_string(),
+            rule_snapshot_file_sha256: self.rule_snapshot.file_sha256().clone(),
+            finality_policy_id: self.finality_policy.policy_id().to_owned(),
+            finality_policy_content_sha256: self.finality_policy.content_sha256().clone(),
+            latency_profile_id: self.latency_profile.profile_id().to_owned(),
+            latency_profile_version: self.latency_profile.profile_version(),
+            latency_profile_file_sha256: self.latency_profile.file_sha256().clone(),
+            scenario_market_set_sha256: self.scenario.market_set_sha256().clone(),
+            scenario_sha256: self.scenario.scenario_sha256().clone(),
+            capital_issuance_fences,
+            session_creations,
+        })
+    }
+
+    pub(crate) fn restore_from_checkpoint(
+        checkpoint: SimProcessRootCheckpointV1,
+        finality_policy: Arc<TradeFinalityPolicyV1>,
+        rule_snapshot: Arc<SealedProcessRuleSnapshot>,
+        latency_profile: Arc<EmpiricalDelayProfile>,
+        scenario: Arc<PlatformScenarioV1>,
+    ) -> Result<Self, SessionCheckpointErrorV1> {
+        if checkpoint.schema_version != SIM_PROCESS_ROOT_CHECKPOINT_SCHEMA_V1 {
+            return Err(SessionCheckpointErrorV1::UnsupportedSchema(
+                checkpoint.schema_version,
+            ));
+        }
+        validate_dependency_identity(
+            "平台规则快照",
+            &checkpoint.rule_snapshot_file_sha256,
+            rule_snapshot.file_sha256(),
+        )?;
+        if checkpoint.finality_policy_id != finality_policy.policy_id()
+            || checkpoint.finality_policy_content_sha256 != *finality_policy.content_sha256()
+        {
+            return Err(SessionCheckpointErrorV1::DependencyIdentityConflict(
+                "成交最终性策略",
+            ));
+        }
+        if checkpoint.latency_profile_id != latency_profile.profile_id()
+            || checkpoint.latency_profile_version != latency_profile.profile_version()
+            || checkpoint.latency_profile_file_sha256 != *latency_profile.file_sha256()
+        {
+            return Err(SessionCheckpointErrorV1::DependencyIdentityConflict(
+                "代理时延配置档",
+            ));
+        }
+        if checkpoint.scenario_market_set_sha256 != *scenario.market_set_sha256()
+            || checkpoint.scenario_sha256 != *scenario.scenario_sha256()
+        {
+            return Err(SessionCheckpointErrorV1::DependencyIdentityConflict(
+                "平台场景",
+            ));
+        }
+
+        let mut root = Self::try_new(
+            checkpoint.run_id,
+            finality_policy,
+            rule_snapshot,
+            latency_profile,
+            scenario,
+        )?;
+        for fence in checkpoint.capital_issuance_fences {
+            root.validate_checkpoint_capital_fence(&fence)?;
+            if root
+                .account_issuance_fence
+                .contains_key(&fence.account_instance_key)
+                || root.capital_fence_for_session(&fence.session_id).is_some()
+                || root
+                    .creation_requests
+                    .contains_key(&fence.creation_request_id)
+            {
+                return Err(SessionCheckpointErrorV1::CreationIdentityConflict(
+                    fence.session_id,
+                ));
+            }
+            root.creation_requests
+                .insert(fence.creation_request_id.clone(), fence.session_id.clone());
+            root.account_issuance_fence
+                .insert(fence.account_instance_key.clone(), fence);
+        }
+        for creation in checkpoint.session_creations {
+            validate_checkpoint_initial_account_state(&creation.spec)?;
+            validate_initialization_snapshot(&creation.initialization)?;
+            let (account_instance_key, spec_sha256, opening_anchor) =
+                root.validated_creation_material(&creation.spec)?;
+            if creation.account_instance_key != account_instance_key
+                || creation.spec_sha256 != spec_sha256
+                || creation.opening_anchor != opening_anchor
+            {
+                return Err(SessionCheckpointErrorV1::CreationIdentityConflict(
+                    creation.spec.session_id,
+                ));
+            }
+            let expected_fence = CapitalIssuanceFenceV1 {
+                session_id: creation.spec.session_id.clone(),
+                account_instance_key: account_instance_key.clone(),
+                opening_anchor: opening_anchor.clone(),
+                creation_request_id: creation.spec.creation_request_id.clone(),
+                spec_sha256: spec_sha256.clone(),
+            };
+            if root
+                .session_creations
+                .contains_key(&creation.spec.session_id)
+                || root.account_issuance_fence.get(&account_instance_key) != Some(&expected_fence)
+                || root
+                    .creation_requests
+                    .get(&creation.spec.creation_request_id)
+                    != Some(&creation.spec.session_id)
+            {
+                return Err(SessionCheckpointErrorV1::CreationIdentityConflict(
+                    creation.spec.session_id,
+                ));
+            }
+
+            let session_id = creation.spec.session_id.clone();
+            let initialization = Arc::new(Mutex::new(creation.initialization));
+            root.session_creations.insert(
+                session_id,
+                SessionCreationRecordV2 {
+                    spec: creation.spec,
+                    spec_sha256: spec_sha256.clone(),
+                    account_instance_key: account_instance_key.clone(),
+                    opening_anchor: opening_anchor.clone(),
+                    initialization,
+                },
+            );
+        }
+        Ok(root)
     }
 }
 
@@ -549,6 +1129,7 @@ pub struct SimSession {
     hidden_platform_markets: Option<MarketStateStoreV1>,
     public_markets: MarketStateStoreV1,
     execution_state: ExecutionStateV1,
+    terminal_projection_pending: BTreeSet<String>,
     market_enrollment: Arc<MarketEnrollmentStateV1>,
     initialization: SharedSessionInitializationV1,
     state: SessionState,
@@ -579,6 +1160,18 @@ impl SimSession {
         &self.state.spec
     }
 
+    pub(crate) fn checkpoint(&self) -> SimSessionCheckpointV1 {
+        SimSessionCheckpointV1 {
+            schema_version: SIM_SESSION_CHECKPOINT_SCHEMA_V1.to_owned(),
+            session_id: self.state.spec.session_id.clone(),
+            hidden_platform_markets: self.hidden_platform_markets.clone(),
+            public_markets: self.public_markets.clone(),
+            execution_state: self.execution_state.clone(),
+            market_enrollment: self.market_enrollment.as_ref().clone(),
+            state: SessionStateCheckpointV1::from(&self.state),
+        }
+    }
+
     pub(crate) fn initialization_snapshot(
         &self,
     ) -> Result<SessionInitializationSnapshotV1, SessionError> {
@@ -596,6 +1189,102 @@ impl SimSession {
 
     pub(crate) fn market_directory(&self) -> &SessionMarketDirectoryV1 {
         &self.market_enrollment.directory
+    }
+
+    pub(crate) fn durable_market_enrollment_chain(&self) -> &[MarketEnrollmentV1] {
+        &self.market_enrollment.chain
+    }
+
+    pub(crate) fn resolution_terminal_condition_ids(&self) -> BTreeSet<String> {
+        let markets = match self.session_spec().caller_role {
+            SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation => self
+                .hidden_platform_markets
+                .as_ref()
+                .expect("训练或离线会话必须拥有隐藏市场状态"),
+            SimCallerRoleV1::Paper => &self.public_markets,
+        };
+        markets
+            .lifecycle_phase_recovery_states()
+            .into_iter()
+            .filter_map(|(condition_id, phase)| {
+                matches!(
+                    phase,
+                    MarketLifecyclePhaseV1::ResolutionTerminal | MarketLifecyclePhaseV1::Evicted
+                )
+                .then_some(condition_id)
+            })
+            .collect()
+    }
+
+    pub(crate) fn durable_bucket_state_matches(
+        &self,
+        path: MarketEventPathV1,
+        reference: Option<&DurableMarketBucketReferenceV1>,
+    ) -> bool {
+        let store = match path {
+            MarketEventPathV1::HiddenPlatform => match &self.hidden_platform_markets {
+                Some(store) => store,
+                None => return false,
+            },
+            MarketEventPathV1::PublicVisibility => &self.public_markets,
+        };
+        let Some(reference) = reference else {
+            let cursor_is_default = match path {
+                MarketEventPathV1::HiddenPlatform => {
+                    self.platform_prefix_cursor()
+                        .closed_through_source_event_at_utc_ms()
+                        .is_none()
+                        && self
+                            .platform_prefix_cursor()
+                            .next_event_time_index_position()
+                            == 0
+                }
+                MarketEventPathV1::PublicVisibility => {
+                    self.public_visibility_cursor()
+                        .closed_through_received_at_utc_ms()
+                        .is_none()
+                        && self
+                            .public_visibility_cursor()
+                            .next_visibility_index_position()
+                            == 0
+                }
+            };
+            return !store.has_last_applied_bucket()
+                && cursor_is_default
+                && self.input_path_seal(path).is_none();
+        };
+        if reference.path != path {
+            return false;
+        }
+        let seal_matches = match reference.closure {
+            MillisecondBucketClosureV1::EndOfInput => {
+                self.input_path_seal(path) == Some(&store.expected_input_seal_outcome())
+            }
+            MillisecondBucketClosureV1::NextEventAt(_) => self.input_path_seal(path).is_none(),
+        };
+        let cursor_matches = match path {
+            MarketEventPathV1::HiddenPlatform => {
+                self.platform_prefix_cursor()
+                    .next_event_time_index_position()
+                    == reference.next_index_position
+                    && self
+                        .platform_prefix_cursor()
+                        .closed_through_source_event_at_utc_ms()
+                        == Some(reference.bucket_at_utc_ms)
+            }
+            MarketEventPathV1::PublicVisibility => {
+                self.public_visibility_cursor()
+                    .next_visibility_index_position()
+                    == reference.next_index_position
+                    && self
+                        .public_visibility_cursor()
+                        .closed_through_received_at_utc_ms()
+                        == Some(reference.bucket_at_utc_ms)
+            }
+        };
+        seal_matches
+            && cursor_matches
+            && store.last_applied_bucket_matches_durable_reference(reference)
     }
 
     #[cfg(test)]
@@ -634,6 +1323,9 @@ impl SimSession {
             return Err(SessionError::MarketEnrollmentRequestConflict(
                 request.enrollment_request_id,
             ));
+        }
+        if self.state.has_any_input_seal() {
+            return Err(SessionError::MarketEnrollmentFrozenAfterInputExhausted);
         }
         if matches!(
             self.session_spec().caller_role,
@@ -752,6 +1444,40 @@ impl SimSession {
         }
     }
 
+    pub(crate) fn input_path_seal(
+        &self,
+        path: MarketEventPathV1,
+    ) -> Option<&InputPathSealOutcomeV1> {
+        self.state.input_path_seal(path)
+    }
+
+    pub(crate) fn is_quiescent_for_retention(&self) -> bool {
+        self.state.pending_actions.is_empty()
+            && self.state.expected_direct_response_request_ids.is_empty()
+            && self.state.pending_private_facts.is_empty()
+            && self.state.in_flight_action_identity.is_none()
+    }
+
+    pub(crate) fn commit_input_path_seal(
+        &mut self,
+        path: MarketEventPathV1,
+        outcome: InputPathSealOutcomeV1,
+    ) {
+        self.state.commit_input_path_seal(path, outcome);
+    }
+
+    pub(crate) fn failed_input_seal(&self) -> Option<(MarketEventPathV1, &InputPathSealOutcomeV1)> {
+        self.state.failed_input_seal()
+    }
+
+    pub(crate) fn require_input_not_failed(&self) -> Result<(), SessionError> {
+        if self.failed_input_seal().is_some() {
+            Err(SessionError::InputFailedSealed)
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn platform_prefix_cursor(&self) -> &PlatformPrefixCursorV1 {
         &self.state.platform_prefix
     }
@@ -834,6 +1560,21 @@ impl SimSession {
 
     pub(crate) fn replace_execution_state(&mut self, state: ExecutionStateV1) {
         self.execution_state = state;
+    }
+
+    pub(crate) fn record_terminal_projection_pending(&mut self, condition_id: &str) {
+        self.terminal_projection_pending
+            .insert(condition_id.to_owned());
+    }
+
+    pub(crate) fn pending_terminal_projection_condition_ids(&self) -> Vec<String> {
+        self.terminal_projection_pending.iter().cloned().collect()
+    }
+
+    pub(crate) fn commit_terminal_projections_prepared(&mut self, condition_ids: &[String]) {
+        for condition_id in condition_ids {
+            self.terminal_projection_pending.remove(condition_id);
+        }
     }
 
     pub(crate) fn validate_platform_prefix_closure(
@@ -966,6 +1707,252 @@ impl SimSession {
             canonical_request_sha256,
             actions,
         )
+    }
+
+    pub(crate) fn recovered_request_ids(&self) -> BTreeSet<String> {
+        self.state.requests.keys().cloned().collect()
+    }
+
+    pub(crate) fn recovered_pending_private_facts(
+        &self,
+    ) -> Vec<(PrivateVisibilityEvidenceV1, i64, u64)> {
+        self.state
+            .pending_private_facts
+            .iter()
+            .map(|(key, evidence)| {
+                (
+                    evidence.clone(),
+                    key.received_at_utc_ms,
+                    key.private_emission_sequence,
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn validate_recovered_private_history(
+        &self,
+        confirmed: &[(i64, u64)],
+    ) -> Result<(), SessionCheckpointErrorV1> {
+        if confirmed
+            .iter()
+            .map(|(received_at, _)| *received_at)
+            .ne(self
+                .state
+                .private_fact_received_at_by_sequence
+                .iter()
+                .copied())
+        {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "已确认私有事实接收时点与会话可见性前缀不一致".to_owned(),
+            ));
+        }
+        if confirmed.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "已确认私有事实没有保持统一队头顺序".to_owned(),
+            ));
+        }
+        let pending = self.recovered_pending_private_facts();
+        if confirmed.last().is_some_and(|last| {
+            pending
+                .first()
+                .is_some_and(|(_, received_at, emission)| *last >= (*received_at, *emission))
+        }) {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "已确认与待接收私有事实没有保持统一队头顺序".to_owned(),
+            ));
+        }
+        let mut emissions = confirmed
+            .iter()
+            .map(|(_, emission_sequence)| *emission_sequence)
+            .collect::<BTreeSet<_>>();
+        if emissions.len() != confirmed.len() {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "已确认私有事实包含重复发射序号".to_owned(),
+            ));
+        }
+        for (_, _, emission_sequence) in pending {
+            if !emissions.insert(emission_sequence) {
+                return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                    "已确认与待接收私有事实发射序号交叠".to_owned(),
+                ));
+            }
+        }
+        if emissions != self.state.used_private_emission_sequences {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "私有事实正文未精确覆盖已分配发射序号前缀".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn recovered_partially_processed_request_ids(&self) -> BTreeSet<String> {
+        self.state
+            .requests
+            .keys()
+            .filter(|request_id| {
+                let mut has_released = false;
+                let mut has_pending = false;
+                for (action_identity, (_, action_request_id)) in &self.state.action_keys {
+                    if action_request_id != *request_id {
+                        continue;
+                    }
+                    if self.state.released_action_ids.contains(action_identity) {
+                        has_released = true;
+                    } else {
+                        has_pending = true;
+                    }
+                }
+                has_released && has_pending
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn recovered_unformed_direct_response_request_ids(&self) -> BTreeSet<String> {
+        self.state
+            .requests
+            .iter()
+            .filter_map(|(request_id, record)| {
+                record
+                    .response_transit
+                    .is_none()
+                    .then_some(request_id.clone())
+            })
+            .collect()
+    }
+
+    pub(crate) fn recovered_query_revisions(&self) -> BTreeMap<String, u64> {
+        self.state
+            .queries
+            .iter()
+            .map(|(request_id, record)| (request_id.clone(), record.platform_state_revision))
+            .collect()
+    }
+
+    pub(crate) fn validate_recovered_action_results(
+        &self,
+        action_identities: &BTreeSet<String>,
+    ) -> Result<(), SessionCheckpointErrorV1> {
+        if self.state.released_action_ids != *action_identities {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "已释放动作集合与耐久动作结果不一致".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_recovered_mutation_records(
+        &self,
+        expected: &BTreeMap<String, (Sha256Hex, String)>,
+    ) -> Result<(), SessionCheckpointErrorV1> {
+        if self.state.mutations.len() != expected.len()
+            || self.state.mutations.iter().any(|(identity, record)| {
+                expected.get(identity)
+                    != Some(&(
+                        record.payload_sha256.clone(),
+                        record.effect_identity.clone(),
+                    ))
+            })
+        {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "变更幂等记录与已释放动作结果不一致".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_recovered_query_records(
+        &self,
+        expected: &BTreeMap<String, (Sha256Hex, u64)>,
+    ) -> Result<(), SessionCheckpointErrorV1> {
+        if self.state.queries.len() != expected.len()
+            || self.state.queries.iter().any(|(request_id, record)| {
+                expected.get(request_id)
+                    != Some(&(record.query_sha256.clone(), record.platform_state_revision))
+            })
+        {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "查询幂等记录与已释放动作结果不一致".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_recovered_paper_market_candidates(
+        &self,
+        expected_condition_ids: &BTreeSet<String>,
+        expected_token_ids: &BTreeSet<String>,
+    ) -> Result<(), SessionCheckpointErrorV1> {
+        if self.session_spec().caller_role != SimCallerRoleV1::Paper {
+            return Ok(());
+        }
+        if self.market_enrollment.business_input_started
+            || self.market_enrollment.paper_candidate_condition_ids != *expected_condition_ids
+            || self.market_enrollment.paper_candidate_token_ids != *expected_token_ids
+        {
+            return Err(SessionCheckpointErrorV1::InvalidMarketEnrollment(
+                "模拟盘市场候选集合与已登记请求正文不一致".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_recovered_request_binding(
+        &self,
+        global_request_id: &str,
+        context: &RequestContextV1,
+        canonical_request_sha256: &Sha256Hex,
+    ) -> Result<(), SessionCheckpointErrorV1> {
+        let record = self.state.requests.get(global_request_id).ok_or_else(|| {
+            SessionCheckpointErrorV1::InvalidSessionState(format!(
+                "执行层待处理请求不属于会话调度记录：{global_request_id}"
+            ))
+        })?;
+        if context.global_request_id != global_request_id
+            || record.context != *context
+            || record.canonical_request_sha256 != *canonical_request_sha256
+        {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(format!(
+                "执行层待处理请求与会话调度身份不符：{global_request_id}"
+            )));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_recovered_request_schedule(
+        &self,
+        global_request_id: &str,
+        transit: &RequestTransitV1,
+        actions: &[QueuedLogicalActionV1],
+    ) -> Result<(), SessionCheckpointErrorV1> {
+        let record = self.state.requests.get(global_request_id).ok_or_else(|| {
+            SessionCheckpointErrorV1::InvalidSessionState(format!(
+                "耐久请求证据不属于会话调度记录：{global_request_id}"
+            ))
+        })?;
+        if &record.transit != transit || actions.is_empty() {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(format!(
+                "耐久请求传输或动作集合与会话调度记录不一致：{global_request_id}"
+            )));
+        }
+        let mut expected_actions = self
+            .state
+            .action_keys
+            .iter()
+            .filter(|(_, (_, request_id))| request_id == global_request_id)
+            .map(|(identity, (key, request_id))| QueuedLogicalActionV1 {
+                action_identity: identity.clone(),
+                global_request_id: request_id.clone(),
+                key: *key,
+            })
+            .collect::<Vec<_>>();
+        expected_actions.sort_by_key(|action| action.key.batch_item_ordinal);
+        if expected_actions != actions {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(format!(
+                "耐久请求动作身份与会话调度记录不一致：{global_request_id}"
+            )));
+        }
+        Ok(())
     }
 
     pub(crate) fn complete_direct_response(
@@ -1136,7 +2123,73 @@ impl fmt::Display for SimProcessRootErrorV1 {
 
 impl std::error::Error for SimProcessRootErrorV1 {}
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SessionCheckpointErrorV1 {
+    UnsupportedSchema(String),
+    DependencyIdentityConflict(&'static str),
+    CreationIdentityConflict(String),
+    SessionNotRegistered(String),
+    InvalidInitialization(&'static str),
+    InvalidInitialAccountState,
+    InvalidMarketEnrollment(String),
+    InvalidSessionState(String),
+    InvalidExecutionState(String),
+    ProcessRoot(SimProcessRootErrorV1),
+    Session(SessionError),
+}
+
+impl fmt::Display for SessionCheckpointErrorV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedSchema(schema) => {
+                write!(formatter, "不支持的会话检查点版本：{schema}")
+            }
+            Self::DependencyIdentityConflict(dependency) => {
+                write!(formatter, "恢复所载入的{dependency}身份与检查点不匹配")
+            }
+            Self::CreationIdentityConflict(session_id) => {
+                write!(formatter, "恢复的会话创建身份不连续：{session_id}")
+            }
+            Self::SessionNotRegistered(session_id) => {
+                write!(formatter, "恢复的会话不属于当前运行根：{session_id}")
+            }
+            Self::InvalidInitialization(message) => {
+                write!(formatter, "恢复的会话初始化状态非法：{message}")
+            }
+            Self::InvalidInitialAccountState => {
+                write!(formatter, "恢复的初始账户状态与其既有身份不匹配")
+            }
+            Self::InvalidMarketEnrollment(message) => {
+                write!(formatter, "恢复的市场登记链非法：{message}")
+            }
+            Self::InvalidSessionState(message) => {
+                write!(formatter, "恢复的会话状态非法：{message}")
+            }
+            Self::InvalidExecutionState(message) => {
+                write!(formatter, "恢复的执行状态非法：{message}")
+            }
+            Self::ProcessRoot(error) => write!(formatter, "恢复运行根失败：{error}"),
+            Self::Session(error) => write!(formatter, "恢复会话失败：{error}"),
+        }
+    }
+}
+
+impl std::error::Error for SessionCheckpointErrorV1 {}
+
+impl From<SimProcessRootErrorV1> for SessionCheckpointErrorV1 {
+    fn from(value: SimProcessRootErrorV1) -> Self {
+        Self::ProcessRoot(value)
+    }
+}
+
+impl From<SessionError> for SessionCheckpointErrorV1 {
+    fn from(value: SessionError) -> Self {
+        Self::Session(value)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlatformPrefixCursorV1 {
     closed_through_source_event_at_utc_ms: Option<i64>,
     next_event_time_index_position: u64,
@@ -1152,7 +2205,8 @@ impl PlatformPrefixCursorV1 {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PublicVisibilityCursorV1 {
     closed_through_received_at_utc_ms: Option<i64>,
     next_visibility_index_position: u64,
@@ -1168,14 +2222,16 @@ impl PublicVisibilityCursorV1 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelVisibleCursorV1 {
     pub session_id: String,
     pub public_visibility: PublicVisibilityCursorV1,
     pub private_feedback_sequence: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RequestContextV1 {
     pub execution_contract_version: String,
     pub session_id: String,
@@ -1189,7 +2245,8 @@ pub struct RequestContextV1 {
     pub model_visible_cursor: ModelVisibleCursorV1,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RequestTransitV1 {
     pub request_sent_at_utc_ms: i64,
     pub outbound_delay_ms: u64,
@@ -1212,7 +2269,8 @@ pub struct RegisteredRequestV1 {
     pub transit: RequestTransitV1,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LifecycleFeedbackTimingV1 {
     pub feedback_id: String,
     pub platform_event_at_utc_ms: i64,
@@ -1221,7 +2279,8 @@ pub struct LifecycleFeedbackTimingV1 {
     pub feedback_received_at_utc_ms: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum PrivateVisibilityEvidenceV1 {
     DirectResponse { global_request_id: String },
     LifecycleFeedback { feedback_id: String },
@@ -1248,14 +2307,16 @@ pub struct VisiblePrivateFactV1 {
     pub private_feedback_sequence: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PrivateFactOrderKey {
     received_at_utc_ms: i64,
     private_emission_sequence: u64,
     identity: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LogicalActionKeyV1 {
     pub effective_processing_at_utc_ms: i64,
     pub caller_sequence: u64,
@@ -1282,7 +2343,8 @@ struct LogicalActionPlanV1 {
     processing_delay_ms: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QueuedLogicalActionV1 {
     pub action_identity: String,
     pub global_request_id: String,
@@ -1319,6 +2381,7 @@ pub enum SessionError {
     SessionIdentitySerialization(String),
     RunIdMismatch,
     SessionAlreadyCreatedRequiresRetry(String),
+    SessionRetentionExpired(String),
     AccountInstanceAlreadyReserved,
     CreationRequestConflict(String),
     SessionNotFound(String),
@@ -1336,6 +2399,7 @@ pub enum SessionError {
     MarketEnrollmentSessionOwnershipConflict,
     MarketEnrollmentRequestConflict(String),
     MarketEnrollmentFrozenAfterBusinessInput,
+    MarketEnrollmentFrozenAfterInputExhausted,
     MarketEnrollmentCandidateAlreadyUsed(String),
     MarketEnrollmentDirectory(String),
     MarketEnrollmentState(String),
@@ -1382,6 +2446,11 @@ pub enum SessionError {
     ResponseOutboxFull,
     ResponseBridgeClosed,
     ResponseDeliveryIdentityConflict,
+    InputFailedSealed,
+    RetentionBarrierNotSatisfied(&'static str),
+    RunArtifactInputsSealed,
+    Durability(String),
+    DurabilityRecoveryRequired(String),
 }
 
 impl fmt::Display for SessionError {
@@ -1397,6 +2466,9 @@ impl fmt::Display for SessionError {
                     formatter,
                     "会话已经创建，必须使用无桥创建重试：{session_id}"
                 )
+            }
+            Self::SessionRetentionExpired(session_id) => {
+                write!(formatter, "会话热状态保留期已经结束：{session_id}")
             }
             Self::AccountInstanceAlreadyReserved => {
                 write!(formatter, "账户实例键已经保留，不能再次签发初始资金")
@@ -1452,6 +2524,9 @@ impl fmt::Display for SessionError {
                     formatter,
                     "训练或离线评估会话已经接纳业务输入，市场目录已冻结"
                 )
+            }
+            Self::MarketEnrollmentFrozenAfterInputExhausted => {
+                write!(formatter, "输入路径已经耗尽，不能再追加市场")
             }
             Self::MarketEnrollmentCandidateAlreadyUsed(identity) => {
                 write!(formatter, "候选市场身份已经被业务请求使用：{identity}")
@@ -1544,6 +2619,20 @@ impl fmt::Display for SessionError {
             Self::ResponseDeliveryIdentityConflict => {
                 write!(formatter, "响应交付确认身份与连续队头冲突")
             }
+            Self::InputFailedSealed => write!(formatter, "模拟运行已经因输入终态缺失而失败封存"),
+            Self::RetentionBarrierNotSatisfied(message) => {
+                write!(formatter, "保留期删除屏障尚未满足：{message}")
+            }
+            Self::RunArtifactInputsSealed => {
+                write!(formatter, "运行产物输入已经封口，不能继续提交业务变化")
+            }
+            Self::Durability(message) => write!(formatter, "会话本地耐久提交失败：{message}"),
+            Self::DurabilityRecoveryRequired(message) => {
+                write!(
+                    formatter,
+                    "会话本地耐久结果不确定，必须重启恢复后裁决：{message}"
+                )
+            }
         }
     }
 }
@@ -1562,7 +2651,8 @@ impl From<SessionMarketDirectoryErrorV1> for SessionError {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RequestRecord {
     context: RequestContextV1,
     canonical_request_sha256: Sha256Hex,
@@ -1570,13 +2660,15 @@ struct RequestRecord {
     response_transit: Option<RequestTransitV1>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MutationRecord {
     payload_sha256: Sha256Hex,
     effect_identity: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct QueryRecord {
     query_sha256: Sha256Hex,
     platform_state_revision: u64,
@@ -1607,6 +2699,8 @@ struct SessionState {
     spec: SessionSpecV2,
     platform_prefix: PlatformPrefixCursorV1,
     public_visibility: PublicVisibilityCursorV1,
+    hidden_input_seal: Option<InputPathSealOutcomeV1>,
+    public_input_seal: Option<InputPathSealOutcomeV1>,
     private_feedback_sequence: u64,
     private_fact_received_at_by_sequence: Vec<i64>,
     last_caller_sequence: Option<u64>,
@@ -1631,12 +2725,484 @@ struct SessionState {
     platform_state_revision: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionStateCheckpointV1 {
+    platform_prefix: PlatformPrefixCursorV1,
+    public_visibility: PublicVisibilityCursorV1,
+    hidden_input_seal: Option<InputPathSealOutcomeV1>,
+    public_input_seal: Option<InputPathSealOutcomeV1>,
+    private_feedback_sequence: u64,
+    private_fact_received_at_by_sequence: Vec<i64>,
+    last_caller_sequence: Option<u64>,
+    last_request_sent_at_utc_ms: Option<i64>,
+    requests: BTreeMap<String, RequestRecord>,
+    lifecycle_feedback: BTreeMap<String, LifecycleFeedbackTimingV1>,
+    private_fact_keys: BTreeMap<String, PrivateFactOrderKey>,
+    pending_private_facts: Vec<(PrivateFactOrderKey, PrivateVisibilityEvidenceV1)>,
+    expected_direct_response_request_ids: BTreeSet<String>,
+    used_private_emission_sequences: BTreeSet<u64>,
+    private_fact_schedule_closed_through_utc_ms: Option<i64>,
+    private_visibility_closed_through_utc_ms: Option<i64>,
+    pending_actions: Vec<(LogicalActionKeyV1, QueuedLogicalActionV1)>,
+    action_keys: BTreeMap<String, (LogicalActionKeyV1, String)>,
+    sealed_request_ids: BTreeSet<String>,
+    released_action_ids: BTreeSet<String>,
+    released_request_ids: BTreeSet<String>,
+    closed_action_through_utc_ms: Option<i64>,
+    mutations: BTreeMap<String, MutationRecord>,
+    queries: BTreeMap<String, QueryRecord>,
+    platform_state_revision: u64,
+}
+
+impl From<&SessionState> for SessionStateCheckpointV1 {
+    fn from(state: &SessionState) -> Self {
+        Self {
+            platform_prefix: state.platform_prefix.clone(),
+            public_visibility: state.public_visibility.clone(),
+            hidden_input_seal: state.hidden_input_seal.clone(),
+            public_input_seal: state.public_input_seal.clone(),
+            private_feedback_sequence: state.private_feedback_sequence,
+            private_fact_received_at_by_sequence: state
+                .private_fact_received_at_by_sequence
+                .clone(),
+            last_caller_sequence: state.last_caller_sequence,
+            last_request_sent_at_utc_ms: state.last_request_sent_at_utc_ms,
+            requests: state.requests.clone(),
+            lifecycle_feedback: state.lifecycle_feedback.clone(),
+            private_fact_keys: state.private_fact_keys.clone(),
+            pending_private_facts: state
+                .pending_private_facts
+                .iter()
+                .map(|(key, evidence)| (key.clone(), evidence.clone()))
+                .collect(),
+            expected_direct_response_request_ids: state
+                .expected_direct_response_request_ids
+                .clone(),
+            used_private_emission_sequences: state.used_private_emission_sequences.clone(),
+            private_fact_schedule_closed_through_utc_ms: state
+                .private_fact_schedule_closed_through_utc_ms,
+            private_visibility_closed_through_utc_ms: state
+                .private_visibility_closed_through_utc_ms,
+            pending_actions: state
+                .pending_actions
+                .iter()
+                .map(|(key, action)| (*key, action.clone()))
+                .collect(),
+            action_keys: state.action_keys.clone(),
+            sealed_request_ids: state.sealed_request_ids.clone(),
+            released_action_ids: state.released_action_ids.clone(),
+            released_request_ids: state.released_request_ids.clone(),
+            closed_action_through_utc_ms: state.closed_action_through_utc_ms,
+            mutations: state.mutations.clone(),
+            queries: state.queries.clone(),
+            platform_state_revision: state.platform_state_revision,
+        }
+    }
+}
+
+impl SessionStateCheckpointV1 {
+    fn restore(self, spec: SessionSpecV2) -> Result<SessionState, SessionCheckpointErrorV1> {
+        if spec.caller_role == SimCallerRoleV1::Paper
+            && (self.hidden_input_seal.is_some()
+                || self
+                    .platform_prefix
+                    .closed_through_source_event_at_utc_ms()
+                    .is_some()
+                || self.platform_prefix.next_event_time_index_position() != 0)
+        {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "模拟盘检查点不得包含隐藏输入游标或封存结果".to_owned(),
+            ));
+        }
+        let confirmed_private_fact_count = usize::try_from(self.private_feedback_sequence)
+            .map_err(|_| {
+                SessionCheckpointErrorV1::InvalidSessionState(
+                    "私有反馈水位无法映射为接收时点数量".to_owned(),
+                )
+            })?;
+        if self.private_fact_received_at_by_sequence.len() != confirmed_private_fact_count {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "私有事实接收时点不是进程内确认水位的连续前缀".to_owned(),
+            ));
+        }
+        let used_private_emission_count = u64::try_from(self.used_private_emission_sequences.len())
+            .map_err(|_| {
+                SessionCheckpointErrorV1::InvalidSessionState(
+                    "私有事实发射序号集合超出 u64 边界".to_owned(),
+                )
+            })?;
+        if self
+            .used_private_emission_sequences
+            .iter()
+            .copied()
+            .ne(1..=used_private_emission_count)
+        {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "私有事实发射序号不是从 1 开始的连续前缀".to_owned(),
+            ));
+        }
+        let pending_private_fact_count = self.pending_private_facts.len();
+        let pending_private_facts = self
+            .pending_private_facts
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        if pending_private_facts.len() != pending_private_fact_count {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "待接收私有事实排序键重复".to_owned(),
+            ));
+        }
+        if self.private_fact_keys.len() != pending_private_facts.len()
+            || pending_private_facts.iter().any(|(key, evidence)| {
+                key.identity != evidence.identity()
+                    || self.private_fact_keys.get(&key.identity) != Some(key)
+            })
+        {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "私有事实身份索引与统一待接收队列不一致".to_owned(),
+            ));
+        }
+        let pending_lifecycle_timings = pending_private_facts
+            .iter()
+            .filter_map(|(key, evidence)| match evidence {
+                PrivateVisibilityEvidenceV1::LifecycleFeedback { feedback_id } => {
+                    Some((feedback_id, key))
+                }
+                PrivateVisibilityEvidenceV1::DirectResponse { .. } => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        if self.lifecycle_feedback.len() != pending_lifecycle_timings.len()
+            || self.lifecycle_feedback.iter().any(|(feedback_id, timing)| {
+                timing.feedback_id != *feedback_id
+                    || pending_lifecycle_timings
+                        .get(feedback_id)
+                        .is_none_or(|key| {
+                            key.received_at_utc_ms != timing.feedback_received_at_utc_ms
+                                || key.private_emission_sequence != timing.private_emission_sequence
+                        })
+            })
+        {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "生命周期反馈时序与统一待接收队列不一致".to_owned(),
+            ));
+        }
+        for (key, evidence) in &pending_private_facts {
+            if let PrivateVisibilityEvidenceV1::DirectResponse { global_request_id } = evidence {
+                let Some(transit) = self
+                    .requests
+                    .get(global_request_id)
+                    .and_then(|record| record.response_transit.as_ref())
+                else {
+                    return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                        "待接收直接响应缺少已形成的传输事实".to_owned(),
+                    ));
+                };
+                if transit.response_received_at_utc_ms != Some(key.received_at_utc_ms)
+                    || transit.private_emission_sequence != Some(key.private_emission_sequence)
+                {
+                    return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                        "待接收直接响应与传输时序不一致".to_owned(),
+                    ));
+                }
+            }
+        }
+        let total_emission_count = self
+            .private_feedback_sequence
+            .checked_add(u64::try_from(pending_private_facts.len()).map_err(|_| {
+                SessionCheckpointErrorV1::InvalidSessionState(
+                    "待接收私有事实数量超出 u64 边界".to_owned(),
+                )
+            })?)
+            .ok_or_else(|| {
+                SessionCheckpointErrorV1::InvalidSessionState("私有事实总序号溢出".to_owned())
+            })?;
+        if used_private_emission_count != total_emission_count {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "已确认与待接收私有事实未覆盖完整发射序号前缀".to_owned(),
+            ));
+        }
+        let max_confirmed_received_at = self
+            .private_fact_received_at_by_sequence
+            .iter()
+            .copied()
+            .max();
+        if max_confirmed_received_at.is_some_and(|received_at| {
+            self.private_visibility_closed_through_utc_ms
+                .is_none_or(|closed| closed < received_at)
+        }) || self
+            .private_visibility_closed_through_utc_ms
+            .is_some_and(|visible| {
+                self.private_fact_schedule_closed_through_utc_ms
+                    .is_none_or(|scheduled| visible > scheduled)
+            })
+            || self
+                .private_fact_schedule_closed_through_utc_ms
+                .is_some_and(|scheduled| {
+                    self.closed_action_through_utc_ms
+                        .is_none_or(|closed| scheduled > closed)
+                        || self
+                            .expected_direct_response_request_ids
+                            .iter()
+                            .any(|request_id| {
+                                let Some(record) = self.requests.get(request_id) else {
+                                    return true;
+                                };
+                                self.action_keys
+                                    .values()
+                                    .filter(|(_, action_request_id)| {
+                                        action_request_id == request_id
+                                    })
+                                    .map(|(key, _)| key.effective_processing_at_utc_ms)
+                                    .max()
+                                    .and_then(|responded_at| {
+                                        checked_add_delay(
+                                            responded_at,
+                                            record.transit.inbound_delay_ms,
+                                        )
+                                        .ok()
+                                    })
+                                    .is_some_and(|expected_at| expected_at <= scheduled)
+                            })
+                })
+        {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "私有事实计划、可见性与逻辑动作水位不一致".to_owned(),
+            ));
+        }
+        let pending_action_count = self.pending_actions.len();
+        let pending_actions = self.pending_actions.into_iter().collect::<BTreeMap<_, _>>();
+        if pending_actions.len() != pending_action_count {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "待处理逻辑动作排序键重复".to_owned(),
+            ));
+        }
+        if pending_actions.iter().any(|(key, action)| {
+            action.key != *key
+                || self.action_keys.get(&action.action_identity)
+                    != Some(&(*key, action.global_request_id.clone()))
+        }) {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "待处理逻辑动作正文与身份索引不一致".to_owned(),
+            ));
+        }
+        let pending_action_identities = pending_actions
+            .values()
+            .map(|action| action.action_identity.as_str())
+            .collect::<BTreeSet<_>>();
+        let earliest_pending_private_fact_at = pending_private_facts
+            .first_key_value()
+            .map(|(key, _)| key.received_at_utc_ms);
+        let earliest_pending_action_at = pending_actions
+            .first_key_value()
+            .map(|(key, _)| key.effective_processing_at_utc_ms);
+        if earliest_pending_private_fact_at.is_some_and(|pending_at| {
+            self.private_visibility_closed_through_utc_ms
+                .is_some_and(|visible| visible > pending_at)
+        }) || earliest_pending_action_at.is_some_and(|pending_at| {
+            self.private_fact_schedule_closed_through_utc_ms
+                .is_some_and(|scheduled| scheduled >= pending_at)
+        }) {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "私有事实水位越过待交付事实或待处理动作".to_owned(),
+            ));
+        }
+        if self
+            .action_keys
+            .iter()
+            .any(|(action_identity, (key, request_id))| {
+                self.requests
+                    .get(request_id)
+                    .is_none_or(|request| key.caller_sequence != request.context.caller_sequence)
+                    || (pending_action_identities.contains(action_identity.as_str())
+                        == self.released_action_ids.contains(action_identity))
+            })
+            || self
+                .released_action_ids
+                .iter()
+                .any(|identity| !self.action_keys.contains_key(identity))
+        {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "逻辑动作索引、待处理集合与已释放集合不一致".to_owned(),
+            ));
+        }
+        let request_ids = self.requests.keys().cloned().collect::<BTreeSet<_>>();
+        if self.sealed_request_ids != request_ids {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "恢复请求集合没有全部完成动作计划密封".to_owned(),
+            ));
+        }
+        let expected_direct_response_request_ids = self
+            .requests
+            .iter()
+            .filter_map(|(request_id, record)| {
+                record
+                    .response_transit
+                    .is_none()
+                    .then_some(request_id.clone())
+            })
+            .collect::<BTreeSet<_>>();
+        if self.expected_direct_response_request_ids != expected_direct_response_request_ids {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "待形成直接响应集合与请求传输状态不一致".to_owned(),
+            ));
+        }
+        let mut expected_released_request_ids = BTreeSet::new();
+        for (request_id, record) in &self.requests {
+            let mut actions = self
+                .action_keys
+                .iter()
+                .filter_map(|(identity, (key, action_request_id))| {
+                    (action_request_id == request_id).then_some((identity, key))
+                })
+                .collect::<Vec<_>>();
+            actions.sort_by_key(|(_, key)| key.batch_item_ordinal);
+            if actions.is_empty()
+                || actions
+                    .iter()
+                    .enumerate()
+                    .any(|(expected, (_, key))| usize::from(key.batch_item_ordinal) != expected)
+            {
+                return Err(SessionCheckpointErrorV1::InvalidSessionState(format!(
+                    "恢复请求动作序号不是从零开始的连续集合：{request_id}"
+                )));
+            }
+            let completed = actions
+                .iter()
+                .all(|(identity, _)| self.released_action_ids.contains(identity.as_str()));
+            if completed {
+                expected_released_request_ids.insert(request_id.clone());
+            }
+            if record.response_transit.is_some() != completed {
+                return Err(SessionCheckpointErrorV1::InvalidSessionState(format!(
+                    "请求完成状态与直接响应传输状态不一致：{request_id}"
+                )));
+            }
+            if record.transit.request_sent_at_utc_ms != record.context.request_sent_at_utc_ms
+                || checked_add_delay(
+                    record.transit.request_sent_at_utc_ms,
+                    record.transit.outbound_delay_ms,
+                )
+                .ok()
+                    != Some(record.transit.platform_arrived_at_utc_ms)
+            {
+                return Err(SessionCheckpointErrorV1::InvalidSessionState(format!(
+                    "请求登记传输时点与请求上下文不一致：{request_id}"
+                )));
+            }
+            if let Some(response) = &record.response_transit {
+                let (Some(responded_at), Some(emission_sequence), Some(received_at)) = (
+                    response.platform_responded_at_utc_ms,
+                    response.private_emission_sequence,
+                    response.response_received_at_utc_ms,
+                ) else {
+                    return Err(SessionCheckpointErrorV1::InvalidSessionState(format!(
+                        "已形成直接响应缺少完整传输时点：{request_id}"
+                    )));
+                };
+                let last_action_at = actions
+                    .iter()
+                    .map(|(_, key)| key.effective_processing_at_utc_ms)
+                    .max()
+                    .expect("已核对请求至少有一个动作");
+                if response.request_sent_at_utc_ms != record.transit.request_sent_at_utc_ms
+                    || response.outbound_delay_ms != record.transit.outbound_delay_ms
+                    || response.platform_arrived_at_utc_ms
+                        != record.transit.platform_arrived_at_utc_ms
+                    || response.inbound_delay_ms != record.transit.inbound_delay_ms
+                    || responded_at < last_action_at
+                    || emission_sequence == 0
+                    || checked_add_delay(responded_at, response.inbound_delay_ms).ok()
+                        != Some(received_at)
+                {
+                    return Err(SessionCheckpointErrorV1::InvalidSessionState(format!(
+                        "已形成直接响应传输链与请求动作不一致：{request_id}"
+                    )));
+                }
+            }
+        }
+        if self.released_request_ids != expected_released_request_ids {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "已释放请求集合与动作完成状态不一致".to_owned(),
+            ));
+        }
+        let expected_last_caller_sequence = self
+            .requests
+            .values()
+            .map(|record| record.context.caller_sequence)
+            .max();
+        let expected_last_request_sent_at = self
+            .requests
+            .values()
+            .map(|record| record.context.request_sent_at_utc_ms)
+            .max();
+        if self.last_caller_sequence != expected_last_caller_sequence
+            || self.last_request_sent_at_utc_ms != expected_last_request_sent_at
+        {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "请求单调水位与已登记请求集合不一致".to_owned(),
+            ));
+        }
+        let max_released_at = self
+            .released_action_ids
+            .iter()
+            .filter_map(|identity| self.action_keys.get(identity))
+            .map(|(key, _)| key.effective_processing_at_utc_ms)
+            .max();
+        let next_pending_at = pending_actions
+            .first_key_value()
+            .map(|(key, _)| key.effective_processing_at_utc_ms);
+        if max_released_at.is_some_and(|released_at| {
+            self.closed_action_through_utc_ms
+                .is_none_or(|closed| closed < released_at)
+        }) || next_pending_at.is_some_and(|pending_at| {
+            self.closed_action_through_utc_ms
+                .is_some_and(|closed| closed > pending_at)
+        }) {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "逻辑动作闭合水位与已释放或待处理动作不一致".to_owned(),
+            ));
+        }
+        Ok(SessionState {
+            spec,
+            platform_prefix: self.platform_prefix,
+            public_visibility: self.public_visibility,
+            hidden_input_seal: self.hidden_input_seal,
+            public_input_seal: self.public_input_seal,
+            private_feedback_sequence: self.private_feedback_sequence,
+            private_fact_received_at_by_sequence: self.private_fact_received_at_by_sequence,
+            last_caller_sequence: self.last_caller_sequence,
+            last_request_sent_at_utc_ms: self.last_request_sent_at_utc_ms,
+            requests: self.requests,
+            lifecycle_feedback: self.lifecycle_feedback,
+            private_fact_keys: self.private_fact_keys,
+            pending_private_facts,
+            expected_direct_response_request_ids: self.expected_direct_response_request_ids,
+            used_private_emission_sequences: self.used_private_emission_sequences,
+            private_fact_schedule_closed_through_utc_ms: self
+                .private_fact_schedule_closed_through_utc_ms,
+            private_visibility_closed_through_utc_ms: self.private_visibility_closed_through_utc_ms,
+            pending_actions,
+            action_keys: self.action_keys,
+            sealed_request_ids: self.sealed_request_ids,
+            released_action_ids: self.released_action_ids,
+            in_flight_action_identity: None,
+            released_request_ids: self.released_request_ids,
+            closed_action_through_utc_ms: self.closed_action_through_utc_ms,
+            mutations: self.mutations,
+            queries: self.queries,
+            platform_state_revision: self.platform_state_revision,
+        })
+    }
+}
+
 impl SessionState {
     fn new(spec: SessionSpecV2) -> Self {
         Self {
             spec,
             platform_prefix: PlatformPrefixCursorV1::default(),
             public_visibility: PublicVisibilityCursorV1::default(),
+            hidden_input_seal: None,
+            public_input_seal: None,
             private_feedback_sequence: 0,
             private_fact_received_at_by_sequence: Vec::new(),
             last_caller_sequence: None,
@@ -1668,6 +3234,44 @@ impl SessionState {
             public_visibility: self.public_visibility.clone(),
             private_feedback_sequence: self.private_feedback_sequence,
         }
+    }
+
+    fn input_path_seal(&self, path: MarketEventPathV1) -> Option<&InputPathSealOutcomeV1> {
+        match path {
+            MarketEventPathV1::HiddenPlatform => self.hidden_input_seal.as_ref(),
+            MarketEventPathV1::PublicVisibility => self.public_input_seal.as_ref(),
+        }
+    }
+
+    fn commit_input_path_seal(&mut self, path: MarketEventPathV1, outcome: InputPathSealOutcomeV1) {
+        let slot = match path {
+            MarketEventPathV1::HiddenPlatform => &mut self.hidden_input_seal,
+            MarketEventPathV1::PublicVisibility => &mut self.public_input_seal,
+        };
+        debug_assert!(slot.is_none());
+        *slot = Some(outcome);
+    }
+
+    fn failed_input_seal(&self) -> Option<(MarketEventPathV1, &InputPathSealOutcomeV1)> {
+        [
+            (MarketEventPathV1::HiddenPlatform, &self.hidden_input_seal),
+            (MarketEventPathV1::PublicVisibility, &self.public_input_seal),
+        ]
+        .into_iter()
+        .find_map(|(path, seal)| {
+            seal.as_ref()
+                .filter(|outcome| {
+                    matches!(
+                        outcome,
+                        InputPathSealOutcomeV1::FailedMissingQualifiedMarketTerminal { .. }
+                    )
+                })
+                .map(|outcome| (path, outcome))
+        })
+    }
+
+    fn has_any_input_seal(&self) -> bool {
+        self.hidden_input_seal.is_some() || self.public_input_seal.is_some()
     }
 
     fn close_platform_prefix_through(
@@ -2519,14 +4123,20 @@ impl SessionState {
             return Err(SessionError::ActionProcessingInProgress(identity.clone()));
         }
         let applicable_prefix_closed = match self.spec.caller_role {
-            SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation => self
-                .platform_prefix
-                .closed_through_source_event_at_utc_ms
-                .is_some_and(|closed| closed >= effective_processing_at_utc_ms),
-            SimCallerRoleV1::Paper => self
-                .public_visibility
-                .closed_through_received_at_utc_ms
-                .is_some_and(|closed| closed >= effective_processing_at_utc_ms),
+            SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation => {
+                self.hidden_input_seal.is_some()
+                    || self
+                        .platform_prefix
+                        .closed_through_source_event_at_utc_ms
+                        .is_some_and(|closed| closed >= effective_processing_at_utc_ms)
+            }
+            SimCallerRoleV1::Paper => {
+                self.public_input_seal.is_some()
+                    || self
+                        .public_visibility
+                        .closed_through_received_at_utc_ms
+                        .is_some_and(|closed| closed >= effective_processing_at_utc_ms)
+            }
         };
         if !applicable_prefix_closed {
             return Err(SessionError::PlatformPrefixNotClosed);
@@ -2907,6 +4517,163 @@ fn build_market_enrollment(
     })
 }
 
+pub(crate) fn validate_durable_market_enrollment_chain(
+    chain: &[MarketEnrollmentV1],
+    account_instance_key: &AccountInstanceKeyV1,
+    opening_anchor: &AccountOpeningAnchorV1,
+) -> Result<(), SessionCheckpointErrorV1> {
+    let mut previous = None;
+    for enrollment in chain {
+        if !is_stable_text(&enrollment.enrollment_request_id) {
+            return Err(SessionCheckpointErrorV1::InvalidMarketEnrollment(
+                "登记请求身份为空或含首尾空白".to_owned(),
+            ));
+        }
+        let market =
+            PlatformMarketV1::try_new(enrollment.market.clone(), enrollment.assets.clone())
+                .map_err(|error| {
+                    SessionCheckpointErrorV1::InvalidMarketEnrollment(error.to_string())
+                })?;
+        let request = MarketEnrollmentRequestV1 {
+            enrollment_request_id: enrollment.enrollment_request_id.clone(),
+            market,
+        };
+        let reconstructed =
+            build_market_enrollment(&request, account_instance_key, opening_anchor, previous)
+                .map_err(SessionCheckpointErrorV1::from)?;
+        if reconstructed != *enrollment {
+            return Err(SessionCheckpointErrorV1::InvalidMarketEnrollment(
+                "登记身份、前驱或链摘要不连续".to_owned(),
+            ));
+        }
+        previous = Some(enrollment);
+    }
+    Ok(())
+}
+
+fn validate_dependency_identity(
+    dependency: &'static str,
+    checkpoint: &Sha256Hex,
+    loaded: &Sha256Hex,
+) -> Result<(), SessionCheckpointErrorV1> {
+    if checkpoint == loaded {
+        Ok(())
+    } else {
+        Err(SessionCheckpointErrorV1::DependencyIdentityConflict(
+            dependency,
+        ))
+    }
+}
+
+fn validate_checkpoint_initial_account_state(
+    spec: &SessionSpecV2,
+) -> Result<(), SessionCheckpointErrorV1> {
+    let reconstructed = InitialAccountStateV1::try_new(spec.initial_account_state.available_pusd())
+        .map_err(|_| SessionCheckpointErrorV1::InvalidInitialAccountState)?;
+    if reconstructed == spec.initial_account_state {
+        Ok(())
+    } else {
+        Err(SessionCheckpointErrorV1::InvalidInitialAccountState)
+    }
+}
+
+fn validate_initialization_snapshot(
+    snapshot: &SessionInitializationSnapshotV1,
+) -> Result<(), SessionCheckpointErrorV1> {
+    let valid = match snapshot.state {
+        SessionInitializationStateV1::PreparedLedgerInit => {
+            snapshot.activation_id.is_none() && snapshot.failure_id.is_none()
+        }
+        SessionInitializationStateV1::Active => {
+            snapshot
+                .activation_id
+                .as_deref()
+                .is_some_and(is_stable_text)
+                && snapshot.failure_id.is_none()
+        }
+        SessionInitializationStateV1::InitializationFailedClosed => {
+            snapshot.activation_id.is_none()
+                && snapshot.failure_id.as_deref().is_some_and(is_stable_text)
+        }
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(SessionCheckpointErrorV1::InvalidInitialization(
+            "状态与激活或失败身份不一致",
+        ))
+    }
+}
+
+fn validate_market_enrollment_checkpoint(
+    initial_directory: &SessionMarketDirectoryV1,
+    checkpoint: &MarketEnrollmentStateV1,
+    account_instance_key: &AccountInstanceKeyV1,
+    opening_anchor: &AccountOpeningAnchorV1,
+) -> Result<(), SessionCheckpointErrorV1> {
+    let mut reconstructed_directory = initial_directory.clone();
+    let mut reconstructed_records = BTreeMap::new();
+    let mut previous = None;
+    for (index, enrollment) in checkpoint.chain.iter().enumerate() {
+        if !is_stable_text(&enrollment.enrollment_request_id) {
+            return Err(SessionCheckpointErrorV1::InvalidMarketEnrollment(
+                "登记请求身份为空或含首尾空白".to_owned(),
+            ));
+        }
+        let market =
+            PlatformMarketV1::try_new(enrollment.market.clone(), enrollment.assets.clone())
+                .map_err(|error| {
+                    SessionCheckpointErrorV1::InvalidMarketEnrollment(error.to_string())
+                })?;
+        let request = MarketEnrollmentRequestV1 {
+            enrollment_request_id: enrollment.enrollment_request_id.clone(),
+            market: market.clone(),
+        };
+        let reconstructed =
+            build_market_enrollment(&request, account_instance_key, opening_anchor, previous)?;
+        if reconstructed != *enrollment {
+            return Err(SessionCheckpointErrorV1::InvalidMarketEnrollment(
+                "登记身份、前驱或链摘要不连续".to_owned(),
+            ));
+        }
+        if reconstructed_records
+            .insert(enrollment.enrollment_request_id.clone(), index)
+            .is_some()
+        {
+            return Err(SessionCheckpointErrorV1::InvalidMarketEnrollment(
+                "登记请求身份重复".to_owned(),
+            ));
+        }
+        reconstructed_directory
+            .try_insert(market)
+            .map_err(|error| {
+                SessionCheckpointErrorV1::InvalidMarketEnrollment(error.to_string())
+            })?;
+        previous = Some(enrollment);
+    }
+    if checkpoint.directory != reconstructed_directory
+        || checkpoint.records_by_request_id != reconstructed_records
+    {
+        return Err(SessionCheckpointErrorV1::InvalidMarketEnrollment(
+            "目录或请求索引与登记链不一致".to_owned(),
+        ));
+    }
+    if checkpoint
+        .paper_candidate_condition_ids
+        .iter()
+        .any(|condition_id| checkpoint.directory.contains(condition_id))
+        || checkpoint
+            .paper_candidate_token_ids
+            .iter()
+            .any(|token_id| checkpoint.directory.contains_token(token_id))
+    {
+        return Err(SessionCheckpointErrorV1::InvalidMarketEnrollment(
+            "待登记候选已经存在于会话目录".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn initialization_snapshot(
     initialization: &SharedSessionInitializationV1,
 ) -> Result<SessionInitializationSnapshotV1, SessionError> {
@@ -3220,7 +4987,14 @@ fn is_sha256_hex(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::finality::successful_policy_for_tests;
     use crate::latency_profile::load_embedded_proxy_latency_profile;
+    use crate::platform_rules::tests::successful_snapshot_for_sim_tests;
+    use crate::scenario::scenario_for_sim_tests;
+    use contracts::{
+        AssetIdentityV1, ClobMarketId, ConditionId, MarketIdentityV2, MarketWindowV2,
+        OutcomeIdentityV1,
+    };
 
     fn sha(byte: &str) -> Sha256Hex {
         Sha256Hex(byte.repeat(64))
@@ -3246,6 +5020,356 @@ mod tests {
             execution_contract_version: SIM_EXECUTION_CONTRACT_V1.to_owned(),
             market_event_schema_version: EXECUTION_MARKET_EVENT_SCHEMA_V3.to_owned(),
         }
+    }
+
+    fn checkpoint_spec(scenario: &PlatformScenarioV1, suffix: &str) -> SessionSpecV2 {
+        let mut spec = spec();
+        spec.session_id = format!("session-{suffix}");
+        spec.account_id = format!("account-{suffix}");
+        spec.caller_instance_id = format!("caller-{suffix}");
+        spec.creation_request_id = format!("create-session-{suffix}");
+        spec.response_bridge_binding_id = format!("bridge-session-{suffix}");
+        spec.market_set_sha256 = scenario.market_set_sha256().clone();
+        spec.scenario_sha256 = scenario.scenario_sha256().clone();
+        spec.session_seed =
+            hash_json("SIM_SESSION_CHECKPOINT_TEST_SEED", &suffix).expect("测试会话种子身份");
+        spec
+    }
+
+    fn appended_market() -> PlatformMarketV1 {
+        PlatformMarketV1::try_new(
+            MarketIdentityV2 {
+                condition_id: ConditionId(format!("0x{}", "2".repeat(64))),
+                clob_market_id: ClobMarketId("456".to_owned()),
+                window: MarketWindowV2 {
+                    start_at_utc_ms: 2_000,
+                    end_at_utc_ms: 3_000,
+                },
+            },
+            [
+                AssetIdentityV1 {
+                    token_id: TokenId("3".to_owned()),
+                    outcome: OutcomeIdentityV1 {
+                        index: 0,
+                        label: "Up".to_owned(),
+                    },
+                },
+                AssetIdentityV1 {
+                    token_id: TokenId("4".to_owned()),
+                    outcome: OutcomeIdentityV1 {
+                        index: 1,
+                        label: "Down".to_owned(),
+                    },
+                },
+            ],
+        )
+        .expect("追加市场夹具")
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn process_and_session_checkpoints_round_trip_and_rebind_once() {
+        let finality_policy = successful_policy_for_tests();
+        let rule_snapshot = successful_snapshot_for_sim_tests().await;
+        let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
+        let scenario = scenario_for_sim_tests();
+        let mut root = SimProcessRoot::try_new(
+            "component-test-run".to_owned(),
+            Arc::clone(&finality_policy),
+            Arc::clone(&rule_snapshot),
+            Arc::clone(&latency_profile),
+            Arc::clone(&scenario),
+        )
+        .expect("运行根");
+        let first_spec = checkpoint_spec(&scenario, "first");
+        let first = root
+            .create_session(first_spec.clone())
+            .expect("首个准备态会话");
+        root.activate_session(ActivateSessionRequestV1 {
+            session_id: first_spec.session_id.clone(),
+            account_instance_key: first.control.account_instance_key.clone(),
+            opening_anchor_id: first.control.opening_anchor.anchor_id.clone(),
+            opening_anchor_sha256: first.control.opening_anchor.anchor_sha256.clone(),
+            activation_id: "activate-first".to_owned(),
+        })
+        .expect("激活首个会话");
+        let mut first_session = first.session;
+        root.enroll_market(
+            &mut first_session,
+            MarketEnrollmentRequestV1 {
+                enrollment_request_id: "enroll-appended-market".to_owned(),
+                market: appended_market(),
+            },
+        )
+        .expect("追加市场");
+        first_session
+            .register_and_schedule_request(
+                RequestContextV1 {
+                    execution_contract_version: SIM_EXECUTION_CONTRACT_V1.to_owned(),
+                    session_id: first_spec.session_id.clone(),
+                    account_id: first_spec.account_id.clone(),
+                    caller_role: first_spec.caller_role,
+                    caller_instance_id: first_spec.caller_instance_id.clone(),
+                    global_request_id: "pending-request".to_owned(),
+                    caller_correlation_id: None,
+                    caller_sequence: 1,
+                    request_sent_at_utc_ms: 500,
+                    model_visible_cursor: first_session.model_visible_cursor(),
+                },
+                hash_json("SIM_SESSION_CHECKPOINT_TEST_REQUEST", &"pending-request")
+                    .expect("测试请求身份"),
+                vec![ParsedLogicalActionV1 {
+                    action_identity: "pending-request/item-0".to_owned(),
+                    batch_item_ordinal: 0,
+                    method_timing: ParsedMethodTimingV1::Ordinary,
+                }],
+            )
+            .expect("保留待处理逻辑动作");
+        first_session
+            .expect_direct_response("pending-request")
+            .expect("保留待形成直接响应");
+        first_session
+            .bind_lifecycle_feedback_timing("pending-feedback".to_owned(), 700, 1)
+            .expect("保留待接收私有事实");
+
+        let second_spec = checkpoint_spec(&scenario, "second");
+        let second = root
+            .create_session(second_spec.clone())
+            .expect("第二个准备态会话");
+        root.fail_session_initialization(FailSessionInitializationRequestV1 {
+            session_id: second_spec.session_id.clone(),
+            account_instance_key: second.control.account_instance_key.clone(),
+            opening_anchor_id: second.control.opening_anchor.anchor_id.clone(),
+            opening_anchor_sha256: second.control.opening_anchor.anchor_sha256.clone(),
+            failure_id: "ledger-init-failed".to_owned(),
+        })
+        .expect("关闭第二个会话初始化");
+        let prepared_spec = checkpoint_spec(&scenario, "prepared");
+        let prepared = root
+            .create_session(prepared_spec)
+            .expect("保留第三个准备态会话");
+        let detached_root = root.detached_clone().expect("分离运行根副本");
+        detached_root
+            .activate_session(ActivateSessionRequestV1 {
+                session_id: prepared.control.opening_anchor.session_id.clone(),
+                account_instance_key: prepared.control.account_instance_key.clone(),
+                opening_anchor_id: prepared.control.opening_anchor.anchor_id.clone(),
+                opening_anchor_sha256: prepared.control.opening_anchor.anchor_sha256.clone(),
+                activation_id: "detached-preview-activation".to_owned(),
+            })
+            .expect("只激活分离副本");
+        assert_eq!(
+            root.session_initialization(&prepared.control.opening_anchor)
+                .expect("原运行根仍为准备态")
+                .state,
+            SessionInitializationStateV1::PreparedLedgerInit
+        );
+
+        let root_checkpoint: SimProcessRootCheckpointV1 = serde_json::from_slice(
+            &serde_json::to_vec(&root.checkpoint().expect("运行根检查点"))
+                .expect("编码运行根检查点"),
+        )
+        .expect("解码运行根检查点");
+        let session_checkpoint: SimSessionCheckpointV1 = serde_json::from_slice(
+            &serde_json::to_vec(&first_session.checkpoint()).expect("编码会话检查点"),
+        )
+        .expect("解码会话检查点");
+        let expected_session_checkpoint = session_checkpoint.clone();
+        let mut restored_root = SimProcessRoot::restore_from_checkpoint(
+            root_checkpoint,
+            Arc::clone(&finality_policy),
+            Arc::clone(&rule_snapshot),
+            Arc::clone(&latency_profile),
+            Arc::clone(&scenario),
+        )
+        .expect("恢复运行根");
+        let mut restored_session = restored_root
+            .restore_session_from_checkpoint(session_checkpoint)
+            .expect("恢复会话");
+
+        assert_eq!(restored_root.registered_session_count(), 3);
+        assert_eq!(
+            restored_session
+                .initialization_snapshot()
+                .expect("初始化状态"),
+            SessionInitializationSnapshotV1 {
+                state: SessionInitializationStateV1::Active,
+                activation_id: Some("activate-first".to_owned()),
+                failure_id: None,
+            }
+        );
+        assert_eq!(
+            restored_root
+                .session_initialization(&second.control.opening_anchor)
+                .expect("失败关闭状态"),
+            SessionInitializationSnapshotV1 {
+                state: SessionInitializationStateV1::InitializationFailedClosed,
+                activation_id: None,
+                failure_id: Some("ledger-init-failed".to_owned()),
+            }
+        );
+        assert_eq!(
+            restored_root
+                .session_initialization(&prepared.control.opening_anchor)
+                .expect("准备态状态"),
+            SessionInitializationSnapshotV1 {
+                state: SessionInitializationStateV1::PreparedLedgerInit,
+                activation_id: None,
+                failure_id: None,
+            }
+        );
+        assert_eq!(restored_session.market_directory().markets().len(), 2);
+        assert!(Arc::ptr_eq(
+            restored_session.finality_policy(),
+            &finality_policy
+        ));
+        assert!(Arc::ptr_eq(
+            restored_session.rule_snapshot(),
+            &rule_snapshot
+        ));
+        assert!(Arc::ptr_eq(
+            restored_session.latency_profile(),
+            &latency_profile
+        ));
+        assert!(Arc::ptr_eq(restored_session.scenario(), &scenario));
+        assert_eq!(restored_session.checkpoint(), expected_session_checkpoint);
+
+        let ownership_result = restored_root.enroll_market(
+            &mut restored_session,
+            MarketEnrollmentRequestV1 {
+                enrollment_request_id: "enroll-appended-market".to_owned(),
+                market: appended_market(),
+            },
+        );
+        assert!(ownership_result.is_ok(), "恢复会话必须共享运行根初始化 Arc");
+        assert_eq!(
+            restored_root.retry_create_session(&first_spec),
+            Err(SessionError::SessionCreationRetryNotPrepared)
+        );
+        assert_eq!(
+            restored_root.retry_create_session(&second_spec),
+            Err(SessionError::SessionCreationRetryNotPrepared)
+        );
+        let mut duplicate_capital_spec = first_spec;
+        duplicate_capital_spec.session_id = "session-third".to_owned();
+        duplicate_capital_spec.creation_request_id = "create-session-third".to_owned();
+        duplicate_capital_spec.response_bridge_binding_id = "bridge-session-third".to_owned();
+        assert!(matches!(
+            restored_root.create_session(duplicate_capital_spec),
+            Err(SessionError::AccountInstanceAlreadyReserved)
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retired_session_checkpoint_retains_capital_fence_only() {
+        let finality_policy = successful_policy_for_tests();
+        let rule_snapshot = successful_snapshot_for_sim_tests().await;
+        let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
+        let scenario = scenario_for_sim_tests();
+        let mut root = SimProcessRoot::try_new(
+            "component-test-run".to_owned(),
+            Arc::clone(&finality_policy),
+            Arc::clone(&rule_snapshot),
+            Arc::clone(&latency_profile),
+            Arc::clone(&scenario),
+        )
+        .expect("运行根");
+        let retired_spec = checkpoint_spec(&scenario, "retired");
+        let prepared = root
+            .create_session(retired_spec.clone())
+            .expect("创建待退休会话");
+        let opening_anchor = prepared.control.opening_anchor.clone();
+        root.activate_session(ActivateSessionRequestV1 {
+            session_id: retired_spec.session_id.clone(),
+            account_instance_key: prepared.control.account_instance_key.clone(),
+            opening_anchor_id: opening_anchor.anchor_id.clone(),
+            opening_anchor_sha256: opening_anchor.anchor_sha256.clone(),
+            activation_id: "activate-retired".to_owned(),
+        })
+        .expect("激活待退休会话");
+        assert_eq!(root.registered_session_count(), 1);
+        assert_eq!(root.capital_issuance_fence_count(), 1);
+        assert!(root.validate_durable_capital_fence(&retired_spec, &opening_anchor));
+
+        root.retire_session(&retired_spec.session_id)
+            .expect("退休会话热状态");
+        assert_eq!(root.registered_session_count(), 0);
+        assert_eq!(root.capital_issuance_fence_count(), 1);
+        assert!(root.is_session_retired(&retired_spec.session_id));
+        assert_eq!(
+            root.retry_create_session(&retired_spec),
+            Err(SessionError::SessionRetentionExpired(
+                retired_spec.session_id.clone()
+            ))
+        );
+
+        let checkpoint: SimProcessRootCheckpointV1 = serde_json::from_slice(
+            &serde_json::to_vec(&root.checkpoint().expect("运行根检查点"))
+                .expect("编码运行根检查点"),
+        )
+        .expect("解码运行根检查点");
+        assert!(checkpoint.session_creations.is_empty());
+        assert_eq!(checkpoint.capital_issuance_fences.len(), 1);
+        let mut restored = SimProcessRoot::restore_from_checkpoint(
+            checkpoint,
+            finality_policy,
+            rule_snapshot,
+            latency_profile,
+            scenario,
+        )
+        .expect("恢复退休会话资本围栏");
+        assert_eq!(restored.registered_session_count(), 0);
+        assert_eq!(restored.capital_issuance_fence_count(), 1);
+        assert!(restored.is_session_retired(&retired_spec.session_id));
+        assert!(restored.validate_durable_capital_fence(&retired_spec, &opening_anchor));
+        assert!(matches!(
+            restored.create_session(retired_spec.clone()),
+            Err(SessionError::SessionRetentionExpired(session_id))
+                if session_id == retired_spec.session_id
+        ));
+
+        let mut duplicate_capital_spec = retired_spec;
+        duplicate_capital_spec.session_id = "session-retired-replacement".to_owned();
+        duplicate_capital_spec.creation_request_id =
+            "create-session-retired-replacement".to_owned();
+        duplicate_capital_spec.response_bridge_binding_id =
+            "bridge-session-retired-replacement".to_owned();
+        assert!(matches!(
+            restored.create_session(duplicate_capital_spec),
+            Err(SessionError::AccountInstanceAlreadyReserved)
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn process_checkpoint_rejects_rebound_dependency_identity_conflict() {
+        let finality_policy = successful_policy_for_tests();
+        let rule_snapshot = successful_snapshot_for_sim_tests().await;
+        let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
+        let scenario = scenario_for_sim_tests();
+        let root = SimProcessRoot::try_new(
+            "component-test-run".to_owned(),
+            Arc::clone(&finality_policy),
+            Arc::clone(&rule_snapshot),
+            Arc::clone(&latency_profile),
+            Arc::clone(&scenario),
+        )
+        .expect("运行根");
+        let checkpoint = root.checkpoint().expect("运行根检查点");
+        let conflicting_scenario = Arc::new(
+            PlatformScenarioV1::try_new(vec![appended_market()]).expect("身份不同的合法场景"),
+        );
+
+        assert!(matches!(
+            SimProcessRoot::restore_from_checkpoint(
+                checkpoint,
+                finality_policy,
+                rule_snapshot,
+                latency_profile,
+                conflicting_scenario,
+            ),
+            Err(SessionCheckpointErrorV1::DependencyIdentityConflict(
+                "平台场景"
+            ))
+        ));
     }
 
     fn request(state: &SessionState, id: &str, sequence: u64, sent_at: i64) -> RequestContextV1 {

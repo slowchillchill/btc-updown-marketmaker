@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 use crate::scenario::{PlatformMarketV1, PlatformScenarioV1};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,7 +33,7 @@ impl fmt::Display for SessionMarketDirectoryErrorV1 {
 
 impl std::error::Error for SessionMarketDirectoryErrorV1 {}
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SessionMarketDirectoryV1 {
     markets: BTreeMap<String, PlatformMarketV1>,
 }

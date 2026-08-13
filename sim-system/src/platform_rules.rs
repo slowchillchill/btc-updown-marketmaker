@@ -97,6 +97,7 @@ pub enum SnapshotCreationModeV1 {
 pub struct SealedProcessRuleSnapshot {
     path: PathBuf,
     file_sha256: Sha256Hex,
+    file_bytes: Arc<[u8]>,
     access_mode: SnapshotAccessMode,
     snapshot: PlatformRuleSnapshotV2,
 }
@@ -110,6 +111,10 @@ impl SealedProcessRuleSnapshot {
     #[must_use]
     pub fn file_sha256(&self) -> &Sha256Hex {
         &self.file_sha256
+    }
+
+    pub(crate) fn file_bytes(&self) -> &[u8] {
+        &self.file_bytes
     }
 
     #[must_use]
@@ -955,11 +960,12 @@ async fn query_and_seal_current_process_snapshot_with(
     };
     snapshot.content_sha256 = compute_snapshot_content_sha256(&snapshot)?;
     validate_snapshot(&snapshot)?;
-    let (file_sha256, path) =
+    let (file_sha256, path, file_bytes) =
         seal_snapshot(&request.target_path, &snapshot, MAX_RULE_SNAPSHOT_BYTES)?;
     Ok(Arc::new(SealedProcessRuleSnapshot {
         path,
         file_sha256,
+        file_bytes: Arc::from(file_bytes),
         access_mode: SnapshotAccessMode::CurrentQuery,
         snapshot,
     }))
@@ -1852,7 +1858,7 @@ fn seal_snapshot(
     target_path: &Path,
     snapshot: &PlatformRuleSnapshotV2,
     max_snapshot_bytes: usize,
-) -> Result<(Sha256Hex, PathBuf), RuleSnapshotError> {
+) -> Result<(Sha256Hex, PathBuf, Vec<u8>), RuleSnapshotError> {
     let mut bytes = serde_json::to_vec_pretty(snapshot)
         .map_err(|error| RuleSnapshotError::SnapshotIntegrity(error.to_string()))?;
     bytes.push(b'\n');
@@ -1918,7 +1924,7 @@ fn seal_snapshot(
             message: error.to_string(),
         });
     }
-    Ok((sha256_hex(&bytes), target_path.to_path_buf()))
+    Ok((sha256_hex(&bytes), target_path.to_path_buf(), bytes))
 }
 
 fn read_and_validate_snapshot(
@@ -1978,6 +1984,7 @@ fn read_and_validate_snapshot(
     Ok(SealedProcessRuleSnapshot {
         path: path.to_path_buf(),
         file_sha256: actual_file_sha256,
+        file_bytes: Arc::from(bytes),
         access_mode,
         snapshot,
     })
@@ -2372,6 +2379,20 @@ pub(crate) mod tests {
 
     pub(crate) async fn successful_snapshot_for_sim_tests() -> Arc<SealedProcessRuleSnapshot> {
         successful_snapshot_for_sim_tests_with_itode(true).await
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn recovery_snapshot_for_sim_tests() -> Arc<SealedProcessRuleSnapshot> {
+        let server = ScriptedServer::start(successful_responses()).await;
+        let directory = tempfile::tempdir().expect("tempdir");
+        let target = directory.path().join("platform-rule-snapshot.json");
+        let current = create_successful_snapshot(&server, target.clone()).await;
+        recover_process_snapshot(RecoveryProcessSnapshotRequestV1 {
+            snapshot_path: target,
+            expected_file_sha256: current.file_sha256().clone(),
+            expected_implementation_identity: test_implementation_identity(),
+        })
+        .expect("测试恢复入口必须重新核对规则快照实现身份")
     }
 
     pub(crate) async fn successful_snapshot_for_sim_tests_with_itode(
@@ -2973,7 +2994,7 @@ pub(crate) mod tests {
         exact_bytes.push(b'\n');
         let exact_limit = exact_bytes.len();
         let exact_target = directory.path().join("exact-limit.json");
-        let (exact_sha, _) = seal_snapshot(&exact_target, sealed.snapshot(), exact_limit)
+        let (exact_sha, _, _) = seal_snapshot(&exact_target, sealed.snapshot(), exact_limit)
             .expect("the exact byte limit is inclusive");
         read_and_validate_snapshot(
             &exact_target,

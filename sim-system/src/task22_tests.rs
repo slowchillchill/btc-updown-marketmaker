@@ -208,7 +208,11 @@ fn initial_snapshot_event(
     )
 }
 
-fn initial_events(tick: &str, best_ask: &str, ask_quantity: &str) -> [ExecutionMarketEventV3; 2] {
+pub(crate) fn initial_events(
+    tick: &str,
+    best_ask: &str,
+    ask_quantity: &str,
+) -> [ExecutionMarketEventV3; 2] {
     [
         initial_snapshot_event(
             asset("1", 0, "Up"),

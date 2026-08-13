@@ -2,9 +2,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use rust_decimal::Decimal;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::finality::TradeFinalityStateV1;
 use crate::market_directory::SessionMarketDirectoryV1;
-use crate::matching::{MatchingMathErrorV1, taker_fee_pusd_v1};
+use crate::matching::{
+    MatchingMathErrorV1, SimFillRecordV1, SimLiquidityRoleV1, decimal_from_micro_units_v1,
+    taker_fee_pusd_v1,
+};
 use crate::platform_rules::SealedProcessRuleSnapshot;
 use crate::scenario::PlatformMarketV1;
 
@@ -13,19 +18,58 @@ const TAKER_PAYMENT_MINUTE_UTC: i64 = 10;
 const MAKER_PAYMENT_MINUTE_UTC: i64 = 45;
 const MILLIS_PER_MINUTE: i64 = 60_000;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) enum RebateKindV1 {
     Maker,
     Taker,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum MakerRebateMarketResultStatusV1 {
     Calculated,
     ZeroNoEligibleMakerFill,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RebateRecoveryFillV1 {
+    pub(crate) trade_id: String,
+    pub(crate) condition_id: String,
+    pub(crate) matched_at_utc_ms: i64,
+    pub(crate) base_units: u128,
+    pub(crate) price_pusd_per_share: Decimal,
+    pub(crate) immediate_taker_fee_units: u128,
+    pub(crate) liquidity_role: SimLiquidityRoleV1,
+    pub(crate) terminal_succeeded: Option<bool>,
+}
+
+impl RebateRecoveryFillV1 {
+    fn from_hot_fill(fill: &SimFillRecordV1) -> Self {
+        let terminal_succeeded = match fill.finality_state() {
+            Some(TradeFinalityStateV1::Confirmed) => Some(true),
+            Some(TradeFinalityStateV1::Failed) => Some(false),
+            Some(
+                TradeFinalityStateV1::MatchedNotBroadcasted
+                | TradeFinalityStateV1::Matched
+                | TradeFinalityStateV1::Retrying
+                | TradeFinalityStateV1::Mined,
+            )
+            | None => None,
+        };
+        Self {
+            trade_id: fill.trade_id.clone(),
+            condition_id: fill.condition_id.clone(),
+            matched_at_utc_ms: fill.matched_at_utc_ms,
+            base_units: fill.base_units,
+            price_pusd_per_share: fill.price_pusd_per_share,
+            immediate_taker_fee_units: fill.immediate_taker_fee_units,
+            liquidity_role: fill.liquidity_role,
+            terminal_succeeded,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct MakerRebateContributionV1 {
     pub(crate) trade_id: String,
     pub(crate) matched_at_utc_ms: i64,
@@ -111,6 +155,7 @@ impl RebateSettlementActionV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RebateStateErrorV1 {
     UnknownMarket(String),
+    MarketNotTerminal(String),
     DuplicateTrade(String),
     NegativeActualTakerFee,
     ArithmeticOverflow,
@@ -123,6 +168,9 @@ impl fmt::Display for RebateStateErrorV1 {
         match self {
             Self::UnknownMarket(condition_id) => {
                 write!(formatter, "返佣状态不存在市场：{condition_id}")
+            }
+            Self::MarketNotTerminal(condition_id) => {
+                write!(formatter, "返佣市场仍有未闭合逐成交前驱：{condition_id}")
             }
             Self::DuplicateTrade(trade_id) => write!(formatter, "返佣成交身份重复：{trade_id}"),
             Self::NegativeActualTakerFee => write!(formatter, "实际 taker 手续费不能为负数"),
@@ -141,13 +189,13 @@ impl From<MatchingMathErrorV1> for RebateStateErrorV1 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct MakerFillStateV1 {
     contribution: MakerRebateContributionV1,
     terminal_succeeded: Option<bool>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct MakerMarketStateV1 {
     end_at_utc_ms: i64,
     end_reached: bool,
@@ -155,7 +203,7 @@ struct MakerMarketStateV1 {
     result: Option<MakerRebateMarketResultStatusV1>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct TakerFillStateV1 {
     condition_id: String,
     matched_at_utc_ms: i64,
@@ -166,14 +214,14 @@ struct TakerFillStateV1 {
     terminal_succeeded: Option<bool>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct RebateDayFinalStateV1 {
     payable_pusd: Decimal,
     locked_remainder_pusd: Decimal,
     paid: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct RebateDayBucketV1 {
     maturity_at_utc_ms: i64,
     maturity_reached: bool,
@@ -183,7 +231,7 @@ struct RebateDayBucketV1 {
     final_state: Option<RebateDayFinalStateV1>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 enum RebateClockIdentityV1 {
     MarketEnd(String),
     Day(RebateKindV1, i64),
@@ -202,7 +250,7 @@ pub(crate) struct RebateDaySnapshotV1 {
     pub(crate) paid: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RebateStateV1 {
     fee_rate: Decimal,
     fee_exponent: u32,
@@ -211,8 +259,43 @@ pub(crate) struct RebateStateV1 {
     markets: BTreeMap<String, MakerMarketStateV1>,
     maker_trade_conditions: BTreeMap<String, String>,
     taker_fills: BTreeMap<String, TakerFillStateV1>,
+    #[serde(with = "rebate_day_buckets_serde")]
     day_buckets: BTreeMap<(RebateKindV1, i64), RebateDayBucketV1>,
     clocks: BTreeSet<(i64, RebateClockIdentityV1)>,
+}
+
+mod rebate_day_buckets_serde {
+    use super::*;
+
+    pub(super) fn serialize<S>(
+        value: &BTreeMap<(RebateKindV1, i64), RebateDayBucketV1>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        value
+            .iter()
+            .map(|((kind, day), bucket)| (*kind, *day, bucket))
+            .collect::<Vec<_>>()
+            .serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<BTreeMap<(RebateKindV1, i64), RebateDayBucketV1>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let entries = Vec::<(RebateKindV1, i64, RebateDayBucketV1)>::deserialize(deserializer)?;
+        let mut value = BTreeMap::new();
+        for (kind, day, bucket) in entries {
+            if value.insert((kind, day), bucket).is_some() {
+                return Err(serde::de::Error::custom("返佣日桶键重复"));
+            }
+        }
+        Ok(value)
+    }
 }
 
 impl RebateStateV1 {
@@ -262,6 +345,350 @@ impl RebateStateV1 {
             end_at_utc_ms,
             RebateClockIdentityV1::MarketEnd(condition_id),
         ));
+        true
+    }
+
+    pub(crate) fn evict_terminal_market_fill_state(
+        &mut self,
+        condition_id: &str,
+    ) -> Result<(), RebateStateErrorV1> {
+        let market = self
+            .markets
+            .get(condition_id)
+            .ok_or_else(|| RebateStateErrorV1::UnknownMarket(condition_id.to_owned()))?;
+        if !market.end_reached
+            || market.result.is_none()
+            || market
+                .fills
+                .values()
+                .any(|fill| fill.terminal_succeeded.is_none())
+            || self
+                .taker_fills
+                .values()
+                .any(|fill| fill.condition_id == condition_id && fill.terminal_succeeded.is_none())
+        {
+            return Err(RebateStateErrorV1::MarketNotTerminal(
+                condition_id.to_owned(),
+            ));
+        }
+        self.markets
+            .get_mut(condition_id)
+            .expect("市场存在性已在驱逐入口核验")
+            .fills
+            .clear();
+        self.maker_trade_conditions
+            .retain(|_, stored_condition_id| stored_condition_id != condition_id);
+        self.taker_fills
+            .retain(|_, fill| fill.condition_id != condition_id);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_fill_state_count(&self) -> usize {
+        self.markets
+            .values()
+            .map(|market| market.fills.len())
+            .sum::<usize>()
+            .checked_add(self.taker_fills.len())
+            .expect("测试返佣逐成交状态计数不得溢出")
+    }
+
+    pub(crate) fn has_consistent_recovery_state(
+        &self,
+        directory: &SessionMarketDirectoryV1,
+        rules: &SealedProcessRuleSnapshot,
+        fills: &BTreeMap<String, SimFillRecordV1>,
+        evicted_fills: &BTreeMap<String, RebateRecoveryFillV1>,
+        evicted_condition_ids: &BTreeSet<String>,
+    ) -> bool {
+        let synchronized = rules.synchronized_rules();
+        let project_rebate = &rules
+            .snapshot()
+            .project_account_rules
+            .rebate_settlement
+            .value;
+        if self.fee_rate != synchronized.fee_schedule.rate.value()
+            || self.fee_exponent != synchronized.fee_schedule.exponent
+            || self.maker_rebate_rate != synchronized.fee_schedule.rebate_rate.value()
+            || self.taker_rebate_rate != project_rebate.fixed_taker_rebate_rate.value()
+            || self.markets.len() != directory.markets().len()
+            || directory.markets().any(|market| {
+                self.markets
+                    .get(&market.market().condition_id.0)
+                    .is_none_or(|state| state.end_at_utc_ms != market.market().window.end_at_utc_ms)
+            })
+        {
+            return false;
+        }
+        let expected_clocks = self
+            .markets
+            .iter()
+            .filter(|(_, market)| !market.end_reached)
+            .map(|(condition_id, market)| {
+                (
+                    market.end_at_utc_ms,
+                    RebateClockIdentityV1::MarketEnd(condition_id.clone()),
+                )
+            })
+            .chain(
+                self.day_buckets
+                    .iter()
+                    .filter(|(_, bucket)| !bucket.maturity_reached)
+                    .map(|((kind, day), bucket)| {
+                        (
+                            bucket.maturity_at_utc_ms,
+                            RebateClockIdentityV1::Day(*kind, *day),
+                        )
+                    }),
+            )
+            .collect::<BTreeSet<_>>();
+        if self.clocks != expected_clocks {
+            return false;
+        }
+
+        let mut recovery_fills = fills
+            .iter()
+            .map(|(trade_id, fill)| (trade_id.clone(), RebateRecoveryFillV1::from_hot_fill(fill)))
+            .collect::<BTreeMap<_, _>>();
+        for (trade_id, fill) in evicted_fills {
+            if recovery_fills
+                .insert(trade_id.clone(), fill.clone())
+                .is_some()
+            {
+                return false;
+            }
+        }
+
+        let mut expected_maker_trade_conditions = BTreeMap::new();
+        let mut expected_taker_trade_ids = BTreeSet::new();
+        let mut evicted_maker_success = BTreeSet::new();
+        let mut expected_day_values =
+            BTreeMap::<(RebateKindV1, i64), (Decimal, Decimal, BTreeSet<String>)>::new();
+
+        for (trade_id, fill) in &recovery_fills {
+            let is_evicted = evicted_condition_ids.contains(&fill.condition_id);
+            if trade_id != &fill.trade_id
+                || is_evicted != evicted_fills.contains_key(trade_id)
+                || !self.markets.contains_key(&fill.condition_id)
+                || (is_evicted && fill.terminal_succeeded.is_none())
+            {
+                return false;
+            }
+            match fill.liquidity_role {
+                SimLiquidityRoleV1::MakerInferred => {
+                    let Ok(attribution_day_utc_ms) = utc_day_start(fill.matched_at_utc_ms) else {
+                        return false;
+                    };
+                    let Ok(fee_equivalent_pusd) = taker_fee_pusd_v1(
+                        &[(fill.base_units, fill.price_pusd_per_share)],
+                        self.fee_rate,
+                        self.fee_exponent,
+                    ) else {
+                        return false;
+                    };
+                    let Some(contribution_pusd) = fee_equivalent_pusd
+                        .checked_mul(self.maker_rebate_rate)
+                        .map(|value| value.normalize())
+                    else {
+                        return false;
+                    };
+                    if is_evicted {
+                        if self
+                            .markets
+                            .get(&fill.condition_id)
+                            .is_none_or(|market| market.fills.contains_key(trade_id))
+                            || self.maker_trade_conditions.contains_key(trade_id)
+                        {
+                            return false;
+                        }
+                        if fill.terminal_succeeded == Some(true) {
+                            evicted_maker_success.insert(fill.condition_id.clone());
+                        }
+                    } else {
+                        let Some(recovered) = self
+                            .markets
+                            .get(&fill.condition_id)
+                            .and_then(|market| market.fills.get(trade_id))
+                        else {
+                            return false;
+                        };
+                        if recovered.contribution.trade_id != fill.trade_id
+                            || recovered.contribution.matched_at_utc_ms != fill.matched_at_utc_ms
+                            || recovered.contribution.attribution_day_utc_ms
+                                != attribution_day_utc_ms
+                            || recovered.contribution.base_units != fill.base_units
+                            || recovered.contribution.price_pusd_per_share
+                                != fill.price_pusd_per_share
+                            || recovered.contribution.fee_equivalent_pusd != fee_equivalent_pusd
+                            || recovered.contribution.rebate_rate != self.maker_rebate_rate
+                            || recovered.contribution.contribution_pusd != contribution_pusd
+                            || recovered.terminal_succeeded != fill.terminal_succeeded
+                            || expected_maker_trade_conditions
+                                .insert(trade_id.clone(), fill.condition_id.clone())
+                                .is_some()
+                        {
+                            return false;
+                        }
+                    }
+                    let value = expected_day_values
+                        .entry((RebateKindV1::Maker, attribution_day_utc_ms))
+                        .or_insert((Decimal::ZERO, Decimal::ZERO, BTreeSet::new()));
+                    let Some(potential) = value
+                        .0
+                        .checked_add(contribution_pusd)
+                        .map(|value| value.normalize())
+                    else {
+                        return false;
+                    };
+                    value.0 = potential;
+                    let market_result = self
+                        .markets
+                        .get(&fill.condition_id)
+                        .and_then(|market| market.result);
+                    if market_result.is_none() {
+                        value.2.insert(trade_id.clone());
+                    } else if fill.terminal_succeeded == Some(true) {
+                        let Some(accrued) = value
+                            .1
+                            .checked_add(contribution_pusd)
+                            .map(|value| value.normalize())
+                        else {
+                            return false;
+                        };
+                        value.1 = accrued;
+                    }
+                }
+                SimLiquidityRoleV1::Taker if fill.immediate_taker_fee_units > 0 => {
+                    let Ok(attribution_day_utc_ms) = utc_day_start(fill.matched_at_utc_ms) else {
+                        return false;
+                    };
+                    let Ok(actual_taker_fee_pusd) =
+                        decimal_from_micro_units_v1(fill.immediate_taker_fee_units)
+                    else {
+                        return false;
+                    };
+                    let Some(accrual_pusd) = actual_taker_fee_pusd
+                        .checked_mul(self.taker_rebate_rate)
+                        .map(|value| value.normalize())
+                    else {
+                        return false;
+                    };
+                    if is_evicted {
+                        if self.taker_fills.contains_key(trade_id) {
+                            return false;
+                        }
+                    } else {
+                        let Some(recovered) = self.taker_fills.get(trade_id) else {
+                            return false;
+                        };
+                        if recovered.condition_id != fill.condition_id
+                            || recovered.matched_at_utc_ms != fill.matched_at_utc_ms
+                            || recovered.attribution_day_utc_ms != attribution_day_utc_ms
+                            || recovered.actual_taker_fee_pusd != actual_taker_fee_pusd
+                            || recovered.rebate_rate != self.taker_rebate_rate
+                            || recovered.accrual_pusd != accrual_pusd
+                            || recovered.terminal_succeeded != fill.terminal_succeeded
+                            || !expected_taker_trade_ids.insert(trade_id.clone())
+                        {
+                            return false;
+                        }
+                    }
+                    let value = expected_day_values
+                        .entry((RebateKindV1::Taker, attribution_day_utc_ms))
+                        .or_insert((Decimal::ZERO, Decimal::ZERO, BTreeSet::new()));
+                    let Some(potential) = value
+                        .0
+                        .checked_add(accrual_pusd)
+                        .map(|value| value.normalize())
+                    else {
+                        return false;
+                    };
+                    value.0 = potential;
+                    match fill.terminal_succeeded {
+                        Some(true) => {
+                            let Some(accrued) = value
+                                .1
+                                .checked_add(accrual_pusd)
+                                .map(|value| value.normalize())
+                            else {
+                                return false;
+                            };
+                            value.1 = accrued;
+                        }
+                        Some(false) => {}
+                        None => {
+                            value.2.insert(trade_id.clone());
+                        }
+                    }
+                }
+                SimLiquidityRoleV1::Taker => {
+                    if self.taker_fills.contains_key(trade_id)
+                        || self.maker_trade_conditions.contains_key(trade_id)
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        if self.maker_trade_conditions != expected_maker_trade_conditions
+            || self.taker_fills.len() != expected_taker_trade_ids.len()
+            || self
+                .taker_fills
+                .keys()
+                .any(|trade_id| !expected_taker_trade_ids.contains(trade_id))
+            || self
+                .markets
+                .values()
+                .map(|market| market.fills.len())
+                .sum::<usize>()
+                != expected_maker_trade_conditions.len()
+        {
+            return false;
+        }
+
+        for (condition_id, market) in &self.markets {
+            let valid = if evicted_condition_ids.contains(condition_id) {
+                market.end_reached
+                    && market.fills.is_empty()
+                    && market.result
+                        == Some(if evicted_maker_success.contains(condition_id) {
+                            MakerRebateMarketResultStatusV1::Calculated
+                        } else {
+                            MakerRebateMarketResultStatusV1::ZeroNoEligibleMakerFill
+                        })
+            } else {
+                market.result == ready_maker_market_result(market)
+            };
+            if !valid {
+                return false;
+            }
+        }
+
+        if self.day_buckets.len() != expected_day_values.len() {
+            return false;
+        }
+        for (key, (potential, accrued, pending)) in expected_day_values {
+            let Some(bucket) = self.day_buckets.get(&key) else {
+                return false;
+            };
+            let Ok(maturity_at_utc_ms) = rebate_maturity_at(key.0, key.1) else {
+                return false;
+            };
+            if bucket.maturity_at_utc_ms != maturity_at_utc_ms
+                || bucket.potential_accrual_pusd != potential
+                || bucket.accrued_pusd != accrued
+                || bucket.pending_predecessors != pending
+            {
+                return false;
+            }
+            let expected_final = (bucket.maturity_reached
+                && bucket.pending_predecessors.is_empty())
+            .then(|| finalized_day_state(accrued));
+            if bucket.final_state != expected_final {
+                return false;
+            }
+        }
         true
     }
 
@@ -586,12 +1013,7 @@ impl RebateStateV1 {
         let mut actions = Vec::new();
         for condition_id in affected_markets {
             let ready = self.markets.get(&condition_id).is_some_and(|market| {
-                market.end_reached
-                    && market.result.is_none()
-                    && market
-                        .fills
-                        .values()
-                        .all(|fill| fill.terminal_succeeded.is_some())
+                market.result.is_none() && ready_maker_market_result(market).is_some()
             });
             if ready {
                 let (action, days) =
@@ -679,11 +1101,12 @@ impl RebateStateV1 {
             .iter()
             .map(|(contribution, _)| contribution.attribution_day_utc_ms)
             .collect::<BTreeSet<_>>();
-        let status = if contributions.is_empty() {
-            MakerRebateMarketResultStatusV1::ZeroNoEligibleMakerFill
-        } else {
-            MakerRebateMarketResultStatusV1::Calculated
-        };
+        let status = ready_maker_market_result(
+            self.markets
+                .get(condition_id)
+                .expect("待最终化市场来自当前状态索引"),
+        )
+        .expect("待最终化市场必须已经闭合全部 maker 成交前驱");
         let accrual_pusd = contributions
             .iter()
             .fold(Decimal::ZERO, |total, contribution| {
@@ -736,24 +1159,11 @@ impl RebateStateV1 {
             .get_mut(&(kind, attribution_day_utc_ms))
             .expect("待日结桶来自当前状态索引");
         let accrued_pusd = bucket.accrued_pusd.normalize();
-        let payable_pusd = if accrued_pusd >= Decimal::ONE {
-            accrued_pusd.trunc_with_scale(4).normalize()
-        } else {
-            Decimal::ZERO
-        };
-        let locked_remainder_pusd = if payable_pusd > Decimal::ZERO {
-            accrued_pusd
-                .checked_sub(payable_pusd)
-                .expect("付款金额不超过非负日应计")
-                .normalize()
-        } else {
-            Decimal::ZERO
-        };
-        bucket.final_state = Some(RebateDayFinalStateV1 {
-            payable_pusd,
-            locked_remainder_pusd,
-            paid: false,
-        });
+        let mut final_state = finalized_day_state(accrued_pusd);
+        final_state.paid = false;
+        let payable_pusd = final_state.payable_pusd;
+        let locked_remainder_pusd = final_state.locked_remainder_pusd;
+        bucket.final_state = Some(final_state);
         RebateDayFinalizedActionV1 {
             reason_identity: day_finalization_reason(kind, attribution_day_utc_ms),
             kind,
@@ -763,6 +1173,48 @@ impl RebateStateV1 {
             payable_pusd,
             locked_remainder_pusd,
         }
+    }
+}
+
+fn ready_maker_market_result(
+    market: &MakerMarketStateV1,
+) -> Option<MakerRebateMarketResultStatusV1> {
+    (market.end_reached
+        && market
+            .fills
+            .values()
+            .all(|fill| fill.terminal_succeeded.is_some()))
+    .then(|| {
+        if market
+            .fills
+            .values()
+            .any(|fill| fill.terminal_succeeded == Some(true))
+        {
+            MakerRebateMarketResultStatusV1::Calculated
+        } else {
+            MakerRebateMarketResultStatusV1::ZeroNoEligibleMakerFill
+        }
+    })
+}
+
+fn finalized_day_state(accrued_pusd: Decimal) -> RebateDayFinalStateV1 {
+    let payable_pusd = if accrued_pusd >= Decimal::ONE {
+        accrued_pusd.trunc_with_scale(4).normalize()
+    } else {
+        Decimal::ZERO
+    };
+    let locked_remainder_pusd = if payable_pusd > Decimal::ZERO {
+        accrued_pusd
+            .checked_sub(payable_pusd)
+            .expect("付款金额不超过非负日应计")
+            .normalize()
+    } else {
+        Decimal::ZERO
+    };
+    RebateDayFinalStateV1 {
+        payable_pusd,
+        locked_remainder_pusd,
+        paid: payable_pusd > Decimal::ZERO,
     }
 }
 
@@ -871,6 +1323,21 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn rebate_state_json_round_trip_preserves_tuple_keyed_day_buckets() {
+        let member = market('1', 1_000, 2_000);
+        let condition_id = member.market().condition_id.0.clone();
+        let mut state = state(vec![member]).await;
+        state
+            .register_taker_fill("round-trip-trade", &condition_id, 1_500, decimal("2.5"))
+            .expect("注册往返测试成交");
+
+        let encoded = serde_json::to_vec(&state).expect("返佣状态 JSON 编码");
+        let decoded: RebateStateV1 = serde_json::from_slice(&encoded).expect("返佣状态 JSON 解码");
+
+        assert_eq!(decoded, state);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn maker_contribution_reuses_single_fill_fee_rounding_before_twenty_percent() {
         let member = market('1', 1_000, 2_000);
         let condition_id = member.market().condition_id.0.clone();
@@ -909,6 +1376,70 @@ mod tests {
             finalized.contributions[0].contribution_pusd,
             decimal("0.035")
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn maker_terminal_fill_compacts_but_still_rebuilds_recovery_aggregates() {
+        let member = market('1', 1_000, 2_000);
+        let condition_id = member.market().condition_id.0.clone();
+        let scenario = PlatformScenarioV1::try_new(vec![member]).expect("测试场景");
+        let directory = SessionMarketDirectoryV1::try_from_scenario(&scenario).expect("市场目录");
+        let rules = successful_snapshot_for_sim_tests().await;
+        let mut state = RebateStateV1::new(&directory, &rules);
+        state
+            .register_maker_fill(
+                "compact-maker-trade",
+                &condition_id,
+                1_500,
+                10_000_000,
+                decimal("0.5"),
+            )
+            .expect("注册待压缩 maker 成交");
+        assert!(
+            state
+                .on_fill_terminal("compact-maker-trade", true, 1_900)
+                .is_empty()
+        );
+        assert!(matches!(
+            state.advance_clock_at(2_000).as_slice(),
+            [RebateSettlementActionV1::MakerMarketFinalized(_)]
+        ));
+        let market_result = state.market_result(&condition_id);
+        let day = state.day_snapshot(RebateKindV1::Maker, 0);
+        state
+            .evict_terminal_market_fill_state(&condition_id)
+            .expect("终态 maker 逐成交返佣热态可压缩");
+        assert_eq!(state.retained_fill_state_count(), 0);
+        assert_eq!(state.market_result(&condition_id), market_result);
+        assert_eq!(state.day_snapshot(RebateKindV1::Maker, 0), day);
+
+        let evicted_fill = RebateRecoveryFillV1 {
+            trade_id: "compact-maker-trade".to_owned(),
+            condition_id: condition_id.clone(),
+            matched_at_utc_ms: 1_500,
+            base_units: 10_000_000,
+            price_pusd_per_share: decimal("0.5"),
+            immediate_taker_fee_units: 0,
+            liquidity_role: SimLiquidityRoleV1::MakerInferred,
+            terminal_succeeded: Some(true),
+        };
+        assert!(state.has_consistent_recovery_state(
+            &directory,
+            &rules,
+            &BTreeMap::new(),
+            &BTreeMap::from([("compact-maker-trade".to_owned(), evicted_fill.clone())]),
+            &BTreeSet::from([condition_id.clone()]),
+        ));
+
+        let mut tampered = evicted_fill;
+        tampered.price_pusd_per_share = decimal("0.6");
+        assert!(!state.has_consistent_recovery_state(
+            &directory,
+            &rules,
+            &BTreeMap::new(),
+            &BTreeMap::from([("compact-maker-trade".to_owned(), tampered)]),
+            &BTreeSet::from([condition_id]),
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]

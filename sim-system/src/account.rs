@@ -14,7 +14,7 @@ use contracts::{
 use data_pipeline_core::parse_canonical_decimal;
 use polymarket_client_sdk_v2::clob::types::Amount;
 use rust_decimal::Decimal;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const INITIAL_ACCOUNT_STATE_SCHEMA_V1: &str = "initial_account_state_v1";
@@ -25,7 +25,7 @@ const PLATFORM_ACCOUNT_DELTA_ID_DOMAIN_V1: &str = "SIM_PLATFORM_ACCOUNT_DELTA_ID
 const PLATFORM_ACCOUNT_DELTA_HASH_DOMAIN_V1: &str = "SIM_PLATFORM_ACCOUNT_DELTA_SHA256_V1";
 const MICRO_SCALE: u32 = 6;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InitialAccountStateV1 {
     available_pusd: Decimal,
     sha256: Sha256Hex,
@@ -102,7 +102,7 @@ impl fmt::Display for InitialAccountStateErrorV1 {
 
 impl std::error::Error for InitialAccountStateErrorV1 {}
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PlatformAccountStateV1 {
     account_instance_key: AccountInstanceKeyV1,
     opening_anchor_id: String,
@@ -150,6 +150,58 @@ pub(crate) struct AutoRedeemAccountEffectV1 {
 }
 
 impl PlatformAccountMovementV1 {
+    fn try_from_public_delta(
+        delta: &PlatformAccountBalanceDeltaV1,
+    ) -> Result<Self, PlatformAccountErrorV1> {
+        let mut outcome_balance_units_delta = BTreeMap::new();
+        for outcome in &delta.outcome_balance_deltas {
+            if !is_stable_text(&outcome.token_id.0)
+                || outcome_balance_units_delta
+                    .insert(
+                        outcome.token_id.0.clone(),
+                        parse_signed_micro_units(&outcome.balance_shares_delta, "outcome_balance")?,
+                    )
+                    .is_some()
+            {
+                return Err(PlatformAccountErrorV1::RestoredStateIntegrity(
+                    "账户变化量的结果代币身份为空或重复",
+                ));
+            }
+        }
+        Ok(Self {
+            cash_pusd_units_delta: parse_signed_micro_units(&delta.cash_pusd_delta, "cash_pusd")?,
+            available_pusd_units_delta: parse_signed_micro_units(
+                &delta.available_pusd_delta,
+                "available_pusd",
+            )?,
+            principal_encumbrance_pusd_units_delta: parse_signed_micro_units(
+                &delta.principal_encumbrance_pusd_delta,
+                "principal_encumbrance_pusd",
+            )?,
+            immediate_taker_fee_encumbrance_pusd_units_delta: parse_signed_micro_units(
+                &delta.immediate_taker_fee_encumbrance_pusd_delta,
+                "immediate_taker_fee_encumbrance_pusd",
+            )?,
+            outcome_balance_units_delta,
+            maker_rebate_receivable_pusd_delta: parse_signed_decimal(
+                &delta.maker_rebate_receivable_pusd_delta,
+                "maker_rebate_receivable_pusd",
+            )?,
+            taker_rebate_receivable_pusd_delta: parse_signed_decimal(
+                &delta.taker_rebate_receivable_pusd_delta,
+                "taker_rebate_receivable_pusd",
+            )?,
+            maker_rebate_locked_remainder_pusd_delta: parse_signed_decimal(
+                &delta.maker_rebate_locked_remainder_pusd_delta,
+                "maker_rebate_locked_remainder_pusd",
+            )?,
+            taker_rebate_locked_remainder_pusd_delta: parse_signed_decimal(
+                &delta.taker_rebate_locked_remainder_pusd_delta,
+                "taker_rebate_locked_remainder_pusd",
+            )?,
+        })
+    }
+
     fn pusd(
         available_pusd_units_delta: i128,
         principal_encumbrance_pusd_units_delta: i128,
@@ -292,6 +344,94 @@ struct PlatformAccountDeltaHashMaterialV1<'a> {
     account_summary_after_sha256: &'a Sha256Hex,
 }
 
+pub(crate) fn validate_platform_account_delta_integrity(
+    delta: &PlatformAccountDeltaV1,
+) -> Result<(), PlatformAccountErrorV1> {
+    if delta.schema_version != PLATFORM_ACCOUNT_DELTA_SCHEMA_V1
+        || delta.account_transition_seq == 0
+        || !is_stable_text(&delta.reason_identity)
+        || delta
+            .condition_id
+            .as_ref()
+            .is_some_and(|condition| !is_stable_text(&condition.0))
+        || !is_sha256_hex(&delta.account_summary_before_sha256.0)
+        || !is_sha256_hex(&delta.account_summary_after_sha256.0)
+        || !is_stable_text(&delta.account_instance_key.run_id)
+        || !is_stable_text(&delta.account_instance_key.caller_instance_id)
+        || !is_stable_text(&delta.account_instance_key.account_id)
+    {
+        return Err(PlatformAccountErrorV1::RestoredStateIntegrity(
+            "账户变化正文身份或版本非法",
+        ));
+    }
+    match &delta.predecessor {
+        PlatformAccountDeltaPredecessorV1::OpeningAnchor {
+            anchor_id,
+            anchor_sha256,
+        } if delta.account_transition_seq == 1
+            && is_stable_text(anchor_id)
+            && is_sha256_hex(&anchor_sha256.0) => {}
+        PlatformAccountDeltaPredecessorV1::AccountDelta {
+            delta_id,
+            delta_sha256,
+            account_transition_seq,
+        } if delta.account_transition_seq > 1
+            && account_transition_seq
+                .checked_add(1)
+                .is_some_and(|next| next == delta.account_transition_seq)
+            && is_stable_text(delta_id)
+            && is_sha256_hex(&delta_sha256.0) => {}
+        _ => {
+            return Err(PlatformAccountErrorV1::RestoredStateIntegrity(
+                "账户变化正文前驱非法",
+            ));
+        }
+    }
+
+    let expected_delta_id = hash_json(
+        PLATFORM_ACCOUNT_DELTA_ID_DOMAIN_V1,
+        &PlatformAccountDeltaIdMaterialV1 {
+            schema_version: PLATFORM_ACCOUNT_DELTA_SCHEMA_V1,
+            account_instance_key: &delta.account_instance_key,
+            account_transition_seq: delta.account_transition_seq,
+            predecessor: &delta.predecessor,
+            reason: delta.reason,
+            reason_identity: &delta.reason_identity,
+            condition_id: &delta.condition_id,
+            platform_effective_at_utc_ms: delta.platform_effective_at_utc_ms,
+        },
+    )?
+    .0;
+    if expected_delta_id != delta.delta_id {
+        return Err(PlatformAccountErrorV1::RestoredStateIntegrity(
+            "账户变化正文 ID 不匹配",
+        ));
+    }
+    let expected_delta_sha256 = hash_json(
+        PLATFORM_ACCOUNT_DELTA_HASH_DOMAIN_V1,
+        &PlatformAccountDeltaHashMaterialV1 {
+            schema_version: PLATFORM_ACCOUNT_DELTA_SCHEMA_V1,
+            delta_id: &delta.delta_id,
+            account_instance_key: &delta.account_instance_key,
+            account_transition_seq: delta.account_transition_seq,
+            predecessor: &delta.predecessor,
+            reason: delta.reason,
+            reason_identity: &delta.reason_identity,
+            condition_id: &delta.condition_id,
+            platform_effective_at_utc_ms: delta.platform_effective_at_utc_ms,
+            balance_delta: &delta.balance_delta,
+            account_summary_before_sha256: &delta.account_summary_before_sha256,
+            account_summary_after_sha256: &delta.account_summary_after_sha256,
+        },
+    )?;
+    if expected_delta_sha256 != delta.delta_sha256 {
+        return Err(PlatformAccountErrorV1::RestoredStateIntegrity(
+            "账户变化正文摘要不匹配",
+        ));
+    }
+    Ok(())
+}
+
 impl PlatformAccountStateV1 {
     pub(crate) fn account_instance_key(&self) -> &AccountInstanceKeyV1 {
         &self.account_instance_key
@@ -399,6 +539,230 @@ impl PlatformAccountStateV1 {
         })
     }
 
+    pub(crate) fn validate_restored_state(
+        &self,
+        opening_anchor: &AccountOpeningAnchorV1,
+    ) -> Result<(), PlatformAccountErrorV1> {
+        let initial = Self::try_from_opening_anchor(opening_anchor)?;
+        if self.account_instance_key != opening_anchor.account_instance_key
+            || self.opening_anchor_id != opening_anchor.anchor_id
+            || self.opening_anchor_sha256 != opening_anchor.anchor_sha256
+        {
+            return Err(PlatformAccountErrorV1::RestoredStateIntegrity(
+                "账户实例键或开户锚点不匹配",
+            ));
+        }
+        for (units, error) in [
+            (self.cash_pusd_units, "现金余额超出平台账户表示范围"),
+            (self.available_pusd_units, "可用余额超出平台账户表示范围"),
+            (
+                self.principal_encumbrance_pusd_units,
+                "本金占用超出平台账户表示范围",
+            ),
+            (
+                self.immediate_taker_fee_encumbrance_pusd_units,
+                "即时 taker 手续费占用超出平台账户表示范围",
+            ),
+        ] {
+            positive_i128(units)
+                .map_err(|_| PlatformAccountErrorV1::RestoredStateIntegrity(error))?;
+        }
+        let allocated_cash = self
+            .available_pusd_units
+            .checked_add(self.principal_encumbrance_pusd_units)
+            .and_then(|value| value.checked_add(self.immediate_taker_fee_encumbrance_pusd_units))
+            .ok_or(PlatformAccountErrorV1::RestoredStateIntegrity(
+                "现金分桶合计溢出",
+            ))?;
+        if self.cash_pusd_units != allocated_cash {
+            return Err(PlatformAccountErrorV1::RestoredStateIntegrity(
+                "现金不等于可用资金、本金占用与即时手续费占用之和",
+            ));
+        }
+        if self
+            .outcome_balance_units
+            .iter()
+            .any(|(token_id, units)| !is_stable_text(token_id) || positive_i128(*units).is_err())
+            || [
+                self.maker_rebate_receivable_pusd,
+                self.taker_rebate_receivable_pusd,
+                self.maker_rebate_locked_remainder_pusd,
+                self.taker_rebate_locked_remainder_pusd,
+            ]
+            .into_iter()
+            .any(|value| value.is_sign_negative())
+        {
+            return Err(PlatformAccountErrorV1::RestoredStateIntegrity(
+                "结果代币或返佣分桶非法",
+            ));
+        }
+
+        let outcome_balances_sha256 =
+            outcome_balances_sha256_from_units(&self.outcome_balance_units)?;
+        if outcome_balances_sha256 != self.outcome_balances_sha256 {
+            return Err(PlatformAccountErrorV1::RestoredStateIntegrity(
+                "结果代币余额摘要不匹配",
+            ));
+        }
+        let account_summary_sha256 = platform_account_summary_sha256(
+            &self.account_instance_key,
+            self.cash_pusd_units,
+            self.available_pusd_units,
+            self.principal_encumbrance_pusd_units,
+            self.immediate_taker_fee_encumbrance_pusd_units,
+            &outcome_balances_sha256,
+            self.maker_rebate_receivable_pusd,
+            self.taker_rebate_receivable_pusd,
+            self.maker_rebate_locked_remainder_pusd,
+            self.taker_rebate_locked_remainder_pusd,
+        )?;
+        if account_summary_sha256 != self.account_summary_sha256 {
+            return Err(PlatformAccountErrorV1::RestoredStateIntegrity(
+                "账户摘要不匹配",
+            ));
+        }
+
+        let Some(head) = self.delta_head.as_deref() else {
+            if self != &initial {
+                return Err(PlatformAccountErrorV1::RestoredStateIntegrity(
+                    "无账户变化头时状态不等于开户状态",
+                ));
+            }
+            return Ok(());
+        };
+        if head.schema_version != PLATFORM_ACCOUNT_DELTA_SCHEMA_V1
+            || head.account_instance_key != self.account_instance_key
+            || head.account_summary_after_sha256 != self.account_summary_sha256
+            || head
+                .account_transition_seq
+                .checked_add(1)
+                .is_none_or(|next| next != self.next_account_transition_seq)
+            || !is_stable_text(&head.reason_identity)
+            || head
+                .condition_id
+                .as_ref()
+                .is_some_and(|condition| !is_stable_text(&condition.0))
+        {
+            return Err(PlatformAccountErrorV1::RestoredStateIntegrity(
+                "账户变化头与当前状态不连续",
+            ));
+        }
+        match (&head.predecessor, head.account_transition_seq) {
+            (
+                PlatformAccountDeltaPredecessorV1::OpeningAnchor {
+                    anchor_id,
+                    anchor_sha256,
+                },
+                1,
+            ) if anchor_id == &self.opening_anchor_id
+                && anchor_sha256 == &self.opening_anchor_sha256
+                && head.account_summary_before_sha256 == initial.account_summary_sha256 => {}
+            (
+                PlatformAccountDeltaPredecessorV1::AccountDelta {
+                    delta_id,
+                    delta_sha256,
+                    account_transition_seq,
+                },
+                sequence,
+            ) if sequence > 1
+                && account_transition_seq
+                    .checked_add(1)
+                    .is_some_and(|next| next == sequence)
+                && is_stable_text(delta_id)
+                && is_sha256_hex(&delta_sha256.0)
+                && is_sha256_hex(&head.account_summary_before_sha256.0) => {}
+            _ => {
+                return Err(PlatformAccountErrorV1::RestoredStateIntegrity(
+                    "账户变化头前驱不连续",
+                ));
+            }
+        }
+
+        validate_platform_account_delta_integrity(head)
+    }
+
+    pub(crate) fn replay_restored_delta_chain(
+        opening_anchor: &AccountOpeningAnchorV1,
+        deltas: &BTreeMap<u64, PlatformAccountDeltaV1>,
+    ) -> Result<Self, PlatformAccountErrorV1> {
+        let final_sequence = u64::try_from(deltas.len()).map_err(|_| {
+            PlatformAccountErrorV1::RestoredStateIntegrity("持久账户变化正文数量超出序号表示范围")
+        })?;
+        let mut replayed = Self::try_from_opening_anchor(opening_anchor)?;
+        for sequence in 1..=final_sequence {
+            let delta =
+                deltas
+                    .get(&sequence)
+                    .ok_or(PlatformAccountErrorV1::RestoredStateIntegrity(
+                        "持久账户变化正文存在序号缺口",
+                    ))?;
+            if delta.account_summary_before_sha256 != replayed.account_summary_sha256 {
+                return Err(PlatformAccountErrorV1::RestoredStateIntegrity(
+                    "持久账户变化正文的重放前摘要不匹配",
+                ));
+            }
+            let movement = PlatformAccountMovementV1::try_from_public_delta(&delta.balance_delta)
+                .map_err(|_| {
+                PlatformAccountErrorV1::RestoredStateIntegrity("持久账户变化量非法")
+            })?;
+            let replayed_delta = replayed
+                .apply_transition(
+                    delta.reason,
+                    &delta.reason_identity,
+                    delta
+                        .condition_id
+                        .as_ref()
+                        .map(|condition| condition.0.as_str()),
+                    delta.platform_effective_at_utc_ms,
+                    movement,
+                )
+                .map_err(|_| {
+                    PlatformAccountErrorV1::RestoredStateIntegrity(
+                        "持久账户变化量不能从前一账户状态应用",
+                    )
+                })?;
+            let allocated_cash = replayed
+                .available_pusd_units
+                .checked_add(replayed.principal_encumbrance_pusd_units)
+                .and_then(|value| {
+                    value.checked_add(replayed.immediate_taker_fee_encumbrance_pusd_units)
+                })
+                .ok_or(PlatformAccountErrorV1::RestoredStateIntegrity(
+                    "重放账户现金分桶合计溢出",
+                ))?;
+            if replayed.cash_pusd_units != allocated_cash {
+                return Err(PlatformAccountErrorV1::RestoredStateIntegrity(
+                    "重放账户现金分桶不守恒",
+                ));
+            }
+            if delta.account_summary_after_sha256 != replayed.account_summary_sha256 {
+                return Err(PlatformAccountErrorV1::RestoredStateIntegrity(
+                    "持久账户变化正文的重放后摘要不匹配",
+                ));
+            }
+            if replayed_delta.as_ref() != delta {
+                return Err(PlatformAccountErrorV1::RestoredStateIntegrity(
+                    "持久账户变化正文不等于业务重放结果",
+                ));
+            }
+        }
+        Ok(replayed)
+    }
+
+    pub(crate) fn validate_restored_delta_chain(
+        &self,
+        opening_anchor: &AccountOpeningAnchorV1,
+        deltas: &BTreeMap<u64, PlatformAccountDeltaV1>,
+    ) -> Result<(), PlatformAccountErrorV1> {
+        let replayed = Self::replay_restored_delta_chain(opening_anchor, deltas)?;
+        if &replayed != self {
+            return Err(PlatformAccountErrorV1::RestoredStateIntegrity(
+                "持久账户变化链重放末态与当前账户状态不一致",
+            ));
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn snapshot(&self) -> PlatformAccountSnapshotV1 {
         let mut outcome_balances = self
@@ -446,7 +810,6 @@ impl PlatformAccountStateV1 {
         decimal_from_micro_units(self.immediate_taker_fee_encumbrance_pusd_units)
     }
 
-    #[cfg(test)]
     pub(crate) fn account_summary_sha256(&self) -> &Sha256Hex {
         &self.account_summary_sha256
     }
@@ -1191,6 +1554,7 @@ pub(crate) enum PlatformAccountErrorV1 {
     ArithmeticOverflow,
     SequenceOverflow,
     Serialization(String),
+    RestoredStateIntegrity(&'static str),
 }
 
 impl fmt::Display for PlatformAccountErrorV1 {
@@ -1206,6 +1570,9 @@ impl fmt::Display for PlatformAccountErrorV1 {
             Self::ArithmeticOverflow => write!(formatter, "平台账户金额运算溢出"),
             Self::SequenceOverflow => write!(formatter, "平台账户变化序号溢出"),
             Self::Serialization(message) => write!(formatter, "平台账户规范序列化失败：{message}"),
+            Self::RestoredStateIntegrity(message) => {
+                write!(formatter, "恢复平台账户状态非法：{message}")
+            }
         }
     }
 }
@@ -1304,6 +1671,30 @@ fn parse_nonnegative_decimal(
         return Err(PlatformAccountErrorV1::InvalidOpeningAnchor(field));
     }
     Ok(decimal)
+}
+
+fn parse_signed_decimal(
+    value: &ExactDecimal,
+    field: &'static str,
+) -> Result<Decimal, PlatformAccountErrorV1> {
+    parse_canonical_decimal(value, field).map_err(|_| PlatformAccountErrorV1::InvalidAmount(field))
+}
+
+fn parse_signed_micro_units(
+    value: &ExactDecimal,
+    field: &'static str,
+) -> Result<i128, PlatformAccountErrorV1> {
+    let normalized = parse_signed_decimal(value, field)?.normalize();
+    if normalized.scale() > MICRO_SCALE {
+        return Err(PlatformAccountErrorV1::InvalidAmount(field));
+    }
+    let units = normalized
+        .mantissa()
+        .checked_mul(10_i128.pow(MICRO_SCALE - normalized.scale()))
+        .ok_or(PlatformAccountErrorV1::ArithmeticOverflow)?;
+    Decimal::try_from_i128_with_scale(units, MICRO_SCALE)
+        .map_err(|_| PlatformAccountErrorV1::ArithmeticOverflow)?;
+    Ok(units)
 }
 
 fn decimal_to_micro_units(
@@ -1405,8 +1796,8 @@ fn is_sha256_hex(value: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn funded_account() -> PlatformAccountStateV1 {
-        PlatformAccountStateV1::try_from_opening_anchor(&AccountOpeningAnchorV1 {
+    fn funded_anchor() -> AccountOpeningAnchorV1 {
+        AccountOpeningAnchorV1 {
             schema_version: ACCOUNT_OPENING_ANCHOR_SCHEMA_V1.to_owned(),
             anchor_id: "anchor-a".to_owned(),
             anchor_sha256: Sha256Hex("a".repeat(64)),
@@ -1441,8 +1832,124 @@ mod tests {
                 maker_rebate_locked_remainder_pusd: ExactDecimal("0".to_owned()),
                 taker_rebate_locked_remainder_pusd: ExactDecimal("0".to_owned()),
             },
-        })
-        .expect("有效平台开户锚点")
+        }
+    }
+
+    fn funded_account() -> PlatformAccountStateV1 {
+        PlatformAccountStateV1::try_from_opening_anchor(&funded_anchor()).expect("有效平台开户锚点")
+    }
+
+    #[test]
+    fn restored_account_recomputes_existing_summaries_and_rejects_tampering() {
+        let anchor = funded_anchor();
+        let state = funded_account();
+        let encoded = serde_json::to_vec(&state).expect("账户状态 JSON 编码");
+        let decoded: PlatformAccountStateV1 =
+            serde_json::from_slice(&encoded).expect("账户状态 JSON 解码");
+        decoded
+            .validate_restored_state(&anchor)
+            .expect("未改变账户状态必须通过恢复校验");
+
+        let mut tampered = decoded;
+        tampered.available_pusd_units -= 1;
+        assert!(matches!(
+            tampered.validate_restored_state(&anchor),
+            Err(PlatformAccountErrorV1::RestoredStateIntegrity(
+                "现金不等于可用资金、本金占用与即时手续费占用之和"
+            ))
+        ));
+    }
+
+    #[test]
+    fn restored_account_validates_delta_head_predecessor_and_next_sequence() {
+        let anchor = funded_anchor();
+        let mut state = funded_account();
+        state
+            .apply_order_accepted(
+                "round-trip-order",
+                "condition-a",
+                1_000,
+                Decimal::ONE,
+                Decimal::ZERO,
+            )
+            .expect("生成首条账户变化");
+        let encoded = serde_json::to_vec(&state).expect("含变化头账户状态 JSON 编码");
+        let decoded: PlatformAccountStateV1 =
+            serde_json::from_slice(&encoded).expect("含变化头账户状态 JSON 解码");
+        decoded
+            .validate_restored_state(&anchor)
+            .expect("连续的账户变化头必须通过恢复校验");
+
+        let mut tampered = decoded;
+        tampered.next_account_transition_seq += 1;
+        assert!(matches!(
+            tampered.validate_restored_state(&anchor),
+            Err(PlatformAccountErrorV1::RestoredStateIntegrity(
+                "账户变化头与当前状态不连续"
+            ))
+        ));
+    }
+
+    #[test]
+    fn restored_delta_chain_replays_balance_movements_instead_of_trusting_self_reported_summaries()
+    {
+        let anchor = funded_anchor();
+        let mut state = funded_account();
+        let first = state
+            .apply_order_accepted(
+                "replay-order",
+                "condition-a",
+                1_000,
+                Decimal::ONE,
+                Decimal::ZERO,
+            )
+            .expect("生成首条账户变化");
+        let original = state
+            .apply_caller_cancel_release("replay-cancel", "condition-a", 2_000, Decimal::ONE)
+            .expect("释放首条账户变化的资金")
+            .expect("正数释放必须生成账户变化");
+        let mut deltas =
+            BTreeMap::from([(1, first.as_ref().clone()), (2, original.as_ref().clone())]);
+        let replayed = PlatformAccountStateV1::replay_restored_delta_chain(&anchor, &deltas)
+            .expect("真实账户变化链必须产生规范重放末态");
+        assert_eq!(replayed, state);
+        state
+            .validate_restored_delta_chain(&anchor, &deltas)
+            .expect("真实账户变化链必须能从开户锚点重放到当前状态");
+
+        let mut tampered = original.as_ref().clone();
+        tampered.balance_delta.available_pusd_delta = ExactDecimal("0.5".to_owned());
+        tampered.balance_delta.principal_encumbrance_pusd_delta = ExactDecimal("-0.5".to_owned());
+        tampered.delta_sha256 = hash_json(
+            PLATFORM_ACCOUNT_DELTA_HASH_DOMAIN_V1,
+            &PlatformAccountDeltaHashMaterialV1 {
+                schema_version: PLATFORM_ACCOUNT_DELTA_SCHEMA_V1,
+                delta_id: &tampered.delta_id,
+                account_instance_key: &tampered.account_instance_key,
+                account_transition_seq: tampered.account_transition_seq,
+                predecessor: &tampered.predecessor,
+                reason: tampered.reason,
+                reason_identity: &tampered.reason_identity,
+                condition_id: &tampered.condition_id,
+                platform_effective_at_utc_ms: tampered.platform_effective_at_utc_ms,
+                balance_delta: &tampered.balance_delta,
+                account_summary_before_sha256: &tampered.account_summary_before_sha256,
+                account_summary_after_sha256: &tampered.account_summary_after_sha256,
+            },
+        )
+        .expect("按篡改正文重算现有变化摘要");
+        state.delta_head = Some(Arc::new(tampered.clone()));
+        state
+            .validate_restored_state(&anchor)
+            .expect("现有状态与变化头摘要校验无法识别同步重签的虚假金额");
+
+        deltas.insert(2, tampered);
+        assert!(matches!(
+            PlatformAccountStateV1::replay_restored_delta_chain(&anchor, &deltas),
+            Err(PlatformAccountErrorV1::RestoredStateIntegrity(
+                "持久账户变化正文的重放后摘要不匹配"
+            ))
+        ));
     }
 
     fn assert_pusd_delta(

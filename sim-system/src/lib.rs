@@ -1,4 +1,5 @@
 mod account;
+pub mod artifacts;
 // 提交撮合与确认式交付驱动器在后续组合根接线前必须保持 crate-private，不能为消除告警扩成第九公开操作。
 #[allow(dead_code)]
 pub mod execution;
@@ -9,6 +10,7 @@ pub(crate) mod market;
 pub(crate) mod market_directory;
 #[allow(dead_code)]
 pub(crate) mod matching;
+pub(crate) mod persistence;
 pub mod platform_rules;
 pub(crate) mod rebate;
 mod scenario;
@@ -38,3 +40,7 @@ mod task33_tests;
 mod task34_tests;
 #[cfg(test)]
 mod task35_tests;
+#[cfg(test)]
+mod task41_tests;
+#[cfg(test)]
+mod task42_tests;
