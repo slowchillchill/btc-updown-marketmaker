@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use contracts::{AccountInstanceKeyV1, Sha256Hex};
 use serde::{Deserialize, Serialize};
 
+use crate::measurement::ComponentGoldenRunMeasurementV1;
 use crate::platform_rules::ImplementationIdentityV1;
+use crate::resource::{ResourceLimitReachedV1, SimulationResourceHighWaterV1};
 use crate::scenario::PlatformMarketV1;
 
 pub const SIMULATION_RUN_INTENT_BINDING_SCHEMA_V1: &str = "simulation_run_intent_binding_v1";
@@ -301,6 +303,9 @@ pub enum SimulationResourceObservationScopeV1 {
 #[serde(deny_unknown_fields)]
 pub struct SimulationResourceObservationV1 {
     pub measurement_scope: SimulationResourceObservationScopeV1,
+    pub resource_policy_id: String,
+    pub resource_policy_sha256: Sha256Hex,
+    pub resource_high_water: SimulationResourceHighWaterV1,
     pub evidence_file_count: u64,
     pub evidence_bytes: u64,
     pub session_count: u64,
@@ -334,6 +339,8 @@ pub struct SimulationRunAuditV1 {
     pub sessions: Vec<SimulationSessionAuditV1>,
     pub capital_issuance_fence_count: u64,
     pub capital_issuance_fence_sha256: Sha256Hex,
+    pub component_golden_measurement: Option<ComponentGoldenRunMeasurementV1>,
+    pub component_golden_measurement_sha256: Option<Sha256Hex>,
     pub resource_observation: SimulationResourceObservationV1,
     pub invariants: SimulationInvariantReportV1,
 }
@@ -350,6 +357,7 @@ pub struct SimulationRunManifestV1 {
     pub settlement_lifecycle_feedback_schema_version: String,
     pub run_intent_binding: SimulationRunIntentBindingV1,
     pub run_intent_content_sha256: Sha256Hex,
+    pub component_golden_measurement_sha256: Option<Sha256Hex>,
     pub evidence_prefix: SimulationEvidencePrefixV1,
     pub market_event_source_identity_sha256: Sha256Hex,
     pub rule_snapshot_file_sha256: Sha256Hex,
@@ -388,6 +396,7 @@ pub enum SimulationRunArtifactErrorV1 {
     RunNotPersistent,
     RunNotReady(&'static str),
     RunAlreadySealed,
+    ResourceLimitReached(ResourceLimitReachedV1),
     Durability(String),
     DurabilityRecoveryRequired(String),
     Integrity(String),
@@ -400,6 +409,11 @@ impl fmt::Display for SimulationRunArtifactErrorV1 {
             Self::RunNotPersistent => write!(formatter, "运行没有启用本地耐久根"),
             Self::RunNotReady(message) => write!(formatter, "运行尚未满足产物封存条件：{message}"),
             Self::RunAlreadySealed => write!(formatter, "运行产物输入已经封口"),
+            Self::ResourceLimitReached(limit) => write!(
+                formatter,
+                "运行产物资源硬上限已触发：{:?}/{:?}",
+                limit.scope, limit.kind
+            ),
             Self::Durability(message) => write!(formatter, "运行产物耐久操作失败：{message}"),
             Self::DurabilityRecoveryRequired(message) => {
                 write!(formatter, "运行产物耐久结果需要恢复裁决：{message}")

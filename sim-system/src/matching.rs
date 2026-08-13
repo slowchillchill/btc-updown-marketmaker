@@ -1169,6 +1169,100 @@ struct MarketResolutionObligationV1 {
 }
 
 impl ExecutionStateV1 {
+    pub(crate) fn resource_active_order_count(&self) -> usize {
+        self.orders
+            .values()
+            .filter(|order| {
+                order.open_base_units != 0 || order.pending_maker_depletion_base_units != 0
+            })
+            .count()
+    }
+
+    pub(crate) fn resource_internal_event_count(&self) -> usize {
+        self.gtd_deadlines
+            .len()
+            .saturating_add(self.scheduled_finality.len())
+            .saturating_add(
+                self.market_resolutions
+                    .values()
+                    .map(|obligation| obligation.pending_trade_ids.len())
+                    .sum::<usize>(),
+            )
+            .saturating_add(self.rebate.resource_record_count())
+    }
+
+    pub(crate) fn resource_index_count(&self) -> usize {
+        let queue_indexes = self
+            .queues
+            .markets
+            .values()
+            .flat_map(|assets| assets.values())
+            .map(|asset| {
+                asset
+                    .bids
+                    .values()
+                    .chain(asset.asks.values())
+                    .map(|queue| 1_usize.saturating_add(queue.segments.len()))
+                    .sum::<usize>()
+                    .saturating_add(asset.bids.len())
+                    .saturating_add(asset.asks.len())
+            })
+            .sum::<usize>();
+        self.orders
+            .len()
+            .saturating_add(self.fills.len())
+            .saturating_add(self.gtd_deadlines.len())
+            .saturating_add(self.scheduled_finality.len())
+            .saturating_add(self.matching_closed_markets.len())
+            .saturating_add(self.market_resolutions.len())
+            .saturating_add(self.rebate.resource_record_count())
+            .saturating_add(queue_indexes)
+    }
+
+    pub(crate) fn resource_order_and_fill_count(&self) -> usize {
+        self.orders.len().saturating_add(self.fills.len())
+    }
+
+    pub(crate) fn resource_active_order_encoded_bytes(&self) -> Result<u64, String> {
+        let active = self
+            .orders
+            .values()
+            .filter(|order| {
+                order.open_base_units != 0 || order.pending_maker_depletion_base_units != 0
+            })
+            .collect::<Vec<_>>();
+        let bytes = serde_json::to_vec(&active)
+            .map_err(|error| format!("活动订单资源计量序列化失败：{error}"))?;
+        u64::try_from(bytes.len()).map_err(|_| "活动订单资源字节超出 u64".to_owned())
+    }
+
+    pub(crate) fn resource_internal_event_encoded_bytes(&self) -> Result<u64, String> {
+        let bytes = serde_json::to_vec(&(
+            &self.gtd_deadlines,
+            &self.scheduled_finality,
+            &self.market_resolutions,
+            &self.rebate,
+        ))
+        .map_err(|error| format!("内部事件资源计量序列化失败：{error}"))?;
+        u64::try_from(bytes.len()).map_err(|_| "内部事件资源字节超出 u64".to_owned())
+    }
+
+    pub(crate) fn resource_index_encoded_bytes(&self) -> Result<u64, String> {
+        let bytes = serde_json::to_vec(&(
+            &self.queues,
+            &self.account_overlay,
+            &self.orders,
+            &self.fills,
+            &self.matching_closed_markets,
+            &self.gtd_deadlines,
+            &self.scheduled_finality,
+            &self.market_resolutions,
+            &self.rebate,
+        ))
+        .map_err(|error| format!("撮合索引资源计量序列化失败：{error}"))?;
+        u64::try_from(bytes.len()).map_err(|_| "撮合索引资源字节超出 u64".to_owned())
+    }
+
     pub(crate) fn new(
         directory: &SessionMarketDirectoryV1,
         opening_anchor: &contracts::AccountOpeningAnchorV1,

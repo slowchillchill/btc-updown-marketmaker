@@ -197,6 +197,14 @@ pub(crate) struct SimProcessRootCheckpointV1 {
 }
 
 impl SimProcessRootCheckpointV1 {
+    pub(crate) fn resource_capital_fence_count(&self) -> usize {
+        self.capital_issuance_fences.len()
+    }
+
+    pub(crate) fn resource_session_creation_count(&self) -> usize {
+        self.session_creations.len()
+    }
+
     pub(crate) fn capital_issuance_fence_audit(&self) -> Result<(u64, Sha256Hex), SessionError> {
         let count = u64::try_from(self.capital_issuance_fences.len()).map_err(|_| {
             SessionError::SessionIdentitySerialization("资本签发围栏数量超出 u64".to_owned())
@@ -245,6 +253,132 @@ impl SimSessionCheckpointV1 {
     pub(crate) fn private_fact_schedule_closed_through(&self) -> Option<i64> {
         self.state.private_fact_schedule_closed_through_utc_ms
     }
+
+    pub(crate) fn resource_core_counts(&self) -> SimSessionResourceCountsV1 {
+        let public_hot_markets = self.public_markets.resource_hot_market_count();
+        let hidden_hot_markets = self
+            .hidden_platform_markets
+            .as_ref()
+            .map_or(0, MarketStateStoreV1::resource_hot_market_count);
+        let market_indexes = self.public_markets.resource_index_count().saturating_add(
+            self.hidden_platform_markets
+                .as_ref()
+                .map_or(0, MarketStateStoreV1::resource_index_count),
+        );
+        let external_price_levels = self
+            .public_markets
+            .resource_external_price_level_count()
+            .saturating_add(
+                self.hidden_platform_markets
+                    .as_ref()
+                    .map_or(0, MarketStateStoreV1::resource_external_price_level_count),
+            );
+        SimSessionResourceCountsV1 {
+            hot_markets: public_hot_markets.saturating_add(hidden_hot_markets),
+            pending_requests: self.state.requests.len(),
+            pending_actions: self.state.pending_actions.len(),
+            pending_private_facts: self.state.pending_private_facts.len(),
+            active_orders: self.execution_state.resource_active_order_count(),
+            internal_events: self
+                .state
+                .pending_actions
+                .len()
+                .saturating_add(self.state.pending_private_facts.len())
+                .saturating_add(self.execution_state.resource_internal_event_count()),
+            indexes: market_indexes
+                .saturating_add(external_price_levels)
+                .saturating_add(self.execution_state.resource_index_count())
+                .saturating_add(self.state.requests.len())
+                .saturating_add(self.state.mutations.len())
+                .saturating_add(self.state.queries.len())
+                .saturating_add(self.state.lifecycle_feedback.len())
+                .saturating_add(self.market_enrollment.chain.len())
+                .saturating_add(self.market_enrollment.records_by_request_id.len()),
+            hot_order_and_fill_records: self.execution_state.resource_order_and_fill_count(),
+        }
+    }
+
+    pub(crate) fn resource_component_bytes(
+        &self,
+    ) -> Result<SimSessionResourceBytesV1, SessionError> {
+        let hot_markets =
+            encoded_resource_len(&(&self.public_markets, &self.hidden_platform_markets))?;
+        let pending_schedule = encoded_resource_len(&(
+            &self.state.pending_actions,
+            &self.state.pending_private_facts,
+        ))?;
+        let session_indexes = encoded_resource_len(&(
+            &self.state.requests,
+            &self.state.mutations,
+            &self.state.queries,
+            &self.state.lifecycle_feedback,
+            &self.market_enrollment,
+        ))?;
+        let market_indexes = self
+            .public_markets
+            .resource_index_encoded_bytes()
+            .and_then(|public| {
+                self.hidden_platform_markets
+                    .as_ref()
+                    .map_or(Ok(0), MarketStateStoreV1::resource_index_encoded_bytes)
+                    .and_then(|hidden| {
+                        public
+                            .checked_add(hidden)
+                            .ok_or_else(|| "市场索引资源字节溢出".to_owned())
+                    })
+            })
+            .map_err(SessionError::ExecutionState)?;
+        let execution_indexes = self
+            .execution_state
+            .resource_index_encoded_bytes()
+            .map_err(SessionError::ExecutionState)?;
+        Ok(SimSessionResourceBytesV1 {
+            hot_markets,
+            active_orders: self
+                .execution_state
+                .resource_active_order_encoded_bytes()
+                .map_err(SessionError::ExecutionState)?,
+            internal_events: pending_schedule
+                .checked_add(
+                    self.execution_state
+                        .resource_internal_event_encoded_bytes()
+                        .map_err(SessionError::ExecutionState)?,
+                )
+                .ok_or_else(|| SessionError::ExecutionState("内部事件资源字节溢出".to_owned()))?,
+            indexes: session_indexes
+                .checked_add(market_indexes)
+                .and_then(|value| value.checked_add(execution_indexes))
+                .ok_or_else(|| SessionError::ExecutionState("索引资源字节溢出".to_owned()))?,
+        })
+    }
+}
+
+fn encoded_resource_len<T: Serialize>(value: &T) -> Result<u64, SessionError> {
+    let bytes = serde_json::to_vec(value).map_err(|error| {
+        SessionError::ExecutionState(format!("会话资源计量序列化失败：{error}"))
+    })?;
+    u64::try_from(bytes.len())
+        .map_err(|_| SessionError::ExecutionState("会话资源字节超出 u64".to_owned()))
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SimSessionResourceCountsV1 {
+    pub(crate) hot_markets: usize,
+    pub(crate) pending_requests: usize,
+    pub(crate) pending_actions: usize,
+    pub(crate) pending_private_facts: usize,
+    pub(crate) active_orders: usize,
+    pub(crate) internal_events: usize,
+    pub(crate) indexes: usize,
+    pub(crate) hot_order_and_fill_records: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SimSessionResourceBytesV1 {
+    pub(crate) hot_markets: u64,
+    pub(crate) active_orders: u64,
+    pub(crate) internal_events: u64,
+    pub(crate) indexes: u64,
 }
 
 impl MarketEnrollmentStateV1 {
@@ -2448,6 +2582,7 @@ pub enum SessionError {
     ResponseDeliveryIdentityConflict,
     InputFailedSealed,
     RetentionBarrierNotSatisfied(&'static str),
+    ResourceLimitReached(crate::resource::ResourceLimitReachedV1),
     RunArtifactInputsSealed,
     Durability(String),
     DurabilityRecoveryRequired(String),
@@ -2623,6 +2758,7 @@ impl fmt::Display for SessionError {
             Self::RetentionBarrierNotSatisfied(message) => {
                 write!(formatter, "保留期删除屏障尚未满足：{message}")
             }
+            Self::ResourceLimitReached(limit) => write!(formatter, "{limit:?}"),
             Self::RunArtifactInputsSealed => {
                 write!(formatter, "运行产物输入已经封口，不能继续提交业务变化")
             }

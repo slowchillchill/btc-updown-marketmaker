@@ -42,12 +42,23 @@ use crate::matching::{
     allocate_taker_fee_micro_units_v1, cumulative_segment_quote_units_v1,
     decimal_from_micro_units_v1, micro_units_v1, stable_fill_id,
 };
+use crate::measurement::{ComponentGoldenLoadContractV1, ComponentGoldenRunMeasurementV1};
 use crate::persistence::{
-    DurableCommitFailureV1, ImmutableArtifactMemberV1, LocalDurabilityStoreV1, PersistenceErrorV1,
-    RecoveredDurabilityV1, RecoveredEvidenceV1,
+    DurableCommitFailureV1, DurableResourcePreviewV1, ImmutableArtifactMemberV1,
+    LocalDurabilityStoreV1, PersistenceErrorV1, RecoveredDurabilityV1, RecoveredEvidenceV1,
 };
 use crate::platform_rules::{SealedProcessRuleSnapshot, SnapshotAccessMode};
 use crate::rebate::{MakerRebateMarketResultStatusV1, RebateKindV1, RebateSettlementActionV1};
+use crate::resource::{
+    ResourceAdmissionStateV1, ResourceLimitKindV1, ResourceLimitReachedV1, ResourceLimitScopeV1,
+    ResourceQuantityV1, SimulationResourceHighWaterV1, SimulationResourcePolicyV1,
+    SimulationResourceUsageV1,
+};
+#[cfg(test)]
+use crate::resource::{
+    SimulationDurableResourceUsageV1, SimulationRunResourceUsageV1,
+    SimulationSessionResourceUsageV1,
+};
 pub use crate::scenario::{
     BTC_UPDOWN_5M_MARKET_FAMILY_V1, MARKET_SET_SCHEMA_V1, MarketSetV1, PLATFORM_SCENARIO_SCHEMA_V1,
     PlatformMarketV1, PlatformScenarioErrorV1, PlatformScenarioV1,
@@ -1382,9 +1393,16 @@ enum DurableTransactionFactV1 {
         run_id: String,
         market_event_source_identity_sha256: Sha256Hex,
         run_intent_binding: SimulationRunIntentBindingV1,
+        resource_policy: SimulationResourcePolicyV1,
+        resource_policy_sha256: Sha256Hex,
     },
     RunArtifactInputsSealed {
         run_id: String,
+    },
+    ComponentGoldenMeasurementRecorded {
+        run_id: String,
+        measurement: Box<ComponentGoldenRunMeasurementV1>,
+        measurement_sha256: Sha256Hex,
     },
     SessionCreated {
         session_spec: SessionSpecV2,
@@ -1448,6 +1466,10 @@ enum DurableTransactionFactV1 {
     SessionCleanRunCompleted {
         session_id: String,
     },
+    ResourceLimitReached {
+        session_id: Option<String>,
+        limit: ResourceLimitReachedV1,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1461,6 +1483,9 @@ struct DurableTransactionEvidenceV1 {
     account_deltas: Vec<PlatformAccountDeltaV1>,
     logical_action_results: Vec<DurableLogicalActionResultV1>,
     private_output_drafts: Vec<DurablePrivateOutputDraftV1>,
+    transient_input_session_id: Option<String>,
+    transient_input: ResourceQuantityV1,
+    resource_usage: Option<SimulationResourceUsageV1>,
 }
 
 impl DurableTransactionEvidenceV1 {
@@ -1474,13 +1499,17 @@ impl DurableTransactionEvidenceV1 {
             account_deltas: Vec::new(),
             logical_action_results: Vec::new(),
             private_output_drafts: Vec::new(),
+            transient_input_session_id: None,
+            transient_input: ResourceQuantityV1::default(),
+            resource_usage: None,
         }
     }
 
     fn session_id(&self) -> Option<&str> {
         match &self.fact {
             DurableTransactionFactV1::RunCreated { .. }
-            | DurableTransactionFactV1::RunArtifactInputsSealed { .. } => None,
+            | DurableTransactionFactV1::RunArtifactInputsSealed { .. }
+            | DurableTransactionFactV1::ComponentGoldenMeasurementRecorded { .. } => None,
             DurableTransactionFactV1::SessionCreated { session_spec, .. } => {
                 Some(&session_spec.session_id)
             }
@@ -1500,6 +1529,9 @@ impl DurableTransactionEvidenceV1 {
             | DurableTransactionFactV1::MarketHotStateEvicted { session_id, .. }
             | DurableTransactionFactV1::SessionRetentionExpired { session_id }
             | DurableTransactionFactV1::SessionCleanRunCompleted { session_id } => Some(session_id),
+            DurableTransactionFactV1::ResourceLimitReached { session_id, .. } => {
+                session_id.as_deref()
+            }
         }
     }
 }
@@ -1511,6 +1543,12 @@ struct DurableRunCheckpointV1 {
     execution_contract_version: String,
     market_event_source_identity_sha256: Sha256Hex,
     run_intent_binding: SimulationRunIntentBindingV1,
+    resource_policy: SimulationResourcePolicyV1,
+    resource_policy_sha256: Sha256Hex,
+    component_golden_measurement_sha256: Option<Sha256Hex>,
+    resource_high_water: SimulationResourceHighWaterV1,
+    run_resource_admission: ResourceAdmissionStateV1,
+    session_resource_admission: BTreeMap<String, ResourceAdmissionStateV1>,
     lifecycle: DurableRunLifecycleV1,
     process_root: SimProcessRootCheckpointV1,
     sessions: BTreeMap<String, ExecutionSessionCheckpointV1>,
@@ -1537,6 +1575,13 @@ struct DurableEvidenceProjectionV1 {
     run_id: Option<String>,
     market_event_source_identity_sha256: Option<Sha256Hex>,
     run_intent_binding: Option<SimulationRunIntentBindingV1>,
+    resource_policy: Option<SimulationResourcePolicyV1>,
+    resource_policy_sha256: Option<Sha256Hex>,
+    component_golden_measurement: Option<ComponentGoldenRunMeasurementV1>,
+    component_golden_measurement_sha256: Option<Sha256Hex>,
+    run_resource_admission: ResourceAdmissionStateV1,
+    session_resource_admission: BTreeMap<String, ResourceAdmissionStateV1>,
+    resource_high_water: SimulationResourceHighWaterV1,
     lifecycle: Option<DurableRunLifecycleV1>,
     session_creations: BTreeMap<
         String,
@@ -1724,8 +1769,10 @@ impl ArtifactEvidenceIndexV1 {
             }
             DurableTransactionFactV1::RunCreated { .. }
             | DurableTransactionFactV1::RunArtifactInputsSealed { .. }
+            | DurableTransactionFactV1::ComponentGoldenMeasurementRecorded { .. }
             | DurableTransactionFactV1::ExecutionAdvanced { .. }
             | DurableTransactionFactV1::IngressClosed { .. }
+            | DurableTransactionFactV1::ResourceLimitReached { .. }
             | DurableTransactionFactV1::RetentionPrepared { .. } => {}
         }
         if let Some(session_id) = evidence.body.session_id() {
@@ -1760,6 +1807,16 @@ fn validate_run_artifact_seal_readiness(
         &checkpoint.run_intent_binding,
         process_root.rule_snapshot().as_ref(),
     )?;
+    let component_measurement_required = checkpoint.run_intent_binding.workload_kind
+        == artifacts::SimulationWorkloadKindV1::ComponentGolden;
+    if component_measurement_required != evidence_projection.component_golden_measurement.is_some()
+        || evidence_projection.component_golden_measurement_sha256
+            != checkpoint.component_golden_measurement_sha256
+    {
+        return Err(artifacts::SimulationRunArtifactErrorV1::RunNotReady(
+            "COMPONENT_GOLDEN 运行缺少与最终检查点一致的封口前测量正文",
+        ));
+    }
     if evidence_projection.run_id.as_deref() != Some(process_root.run_id())
         || evidence_projection.session_creations.len()
             != process_root.capital_issuance_fence_count()
@@ -2473,6 +2530,7 @@ fn build_session_artifact_audit(
 fn prepare_run_artifact_bundle(
     process_root: &SimProcessRoot,
     recovered: &RecoveredDurabilityV1<DurableTransactionEvidenceV1, DurableRunCheckpointV1>,
+    resource_high_water: &SimulationResourceHighWaterV1,
 ) -> Result<PreparedRunArtifactBundleV1, artifacts::SimulationRunArtifactErrorV1> {
     let integrity = |message: String| artifacts::SimulationRunArtifactErrorV1::Integrity(message);
     let mut projection = DurableEvidenceProjectionV1::for_artifacts();
@@ -2534,6 +2592,32 @@ fn prepare_run_artifact_bundle(
             &projection,
             &index,
         )?);
+    }
+    if let Some(measurement) = projection.component_golden_measurement.as_ref() {
+        if measurement.trajectories.len() != sessions.len() {
+            return Err(integrity("组件黄金测量轨迹与运行会话数量不一致".to_owned()));
+        }
+        for trajectory in measurement.trajectories.values() {
+            let binding = &trajectory.runtime_binding;
+            let (spec, opening_anchor, _) = projection
+                .session_creations
+                .get(&binding.session_id)
+                .ok_or_else(|| {
+                integrity(format!(
+                    "组件黄金测量轨迹引用未知会话：{}",
+                    binding.session_id
+                ))
+            })?;
+            if binding.session_seed_sha256 != spec.session_seed
+                || binding.response_bridge_binding_id != spec.response_bridge_binding_id
+                || binding.account_instance_key != opening_anchor.account_instance_key
+            {
+                return Err(integrity(format!(
+                    "组件黄金测量轨迹与耐久会话身份不一致：{}",
+                    binding.session_id
+                )));
+            }
+        }
     }
     let (capital_issuance_fence_count, capital_issuance_fence_sha256) = recovered
         .checkpoint
@@ -2630,9 +2714,14 @@ fn prepare_run_artifact_bundle(
         sessions,
         capital_issuance_fence_count,
         capital_issuance_fence_sha256,
+        component_golden_measurement: projection.component_golden_measurement.clone(),
+        component_golden_measurement_sha256: projection.component_golden_measurement_sha256.clone(),
         resource_observation: artifacts::SimulationResourceObservationV1 {
             measurement_scope:
                 artifacts::SimulationResourceObservationScopeV1::DurableLogicalObservationsOnly,
+            resource_policy_id: recovered.checkpoint.resource_policy.policy_id.clone(),
+            resource_policy_sha256: recovered.checkpoint.resource_policy_sha256.clone(),
+            resource_high_water: resource_high_water.clone(),
             evidence_file_count: evidence_count,
             evidence_bytes,
             session_count: u64::try_from(projection.session_creations.len())
@@ -2756,6 +2845,10 @@ fn prepare_run_artifact_bundle(
             .to_owned(),
         run_intent_binding: recovered.checkpoint.run_intent_binding.clone(),
         run_intent_content_sha256: artifact_sha256(&intent_bytes),
+        component_golden_measurement_sha256: recovered
+            .checkpoint
+            .component_golden_measurement_sha256
+            .clone(),
         evidence_prefix: artifacts::SimulationEvidencePrefixV1 {
             run_root_relative_path: "evidence".to_owned(),
             through_commit_sequence: recovered.through_commit_sequence,
@@ -3065,7 +3158,19 @@ impl DurableEvidenceProjectionV1 {
         evidence: &DurableTransactionEvidenceV1,
     ) -> Result<(), SimExecutionPersistenceErrorV1> {
         let conflict = |message: String| SimExecutionPersistenceErrorV1::Session(message);
-        if self.lifecycle == Some(DurableRunLifecycleV1::ArtifactInputsSealed) {
+        let permitted_post_seal_resource_fact = matches!(
+            &evidence.fact,
+            DurableTransactionFactV1::ResourceLimitReached {
+                session_id: None,
+                limit: ResourceLimitReachedV1 {
+                    scope: ResourceLimitScopeV1::Durable,
+                    ..
+                },
+            }
+        );
+        if self.lifecycle == Some(DurableRunLifecycleV1::ArtifactInputsSealed)
+            && !permitted_post_seal_resource_fact
+        {
             return Err(conflict(
                 "运行产物输入封口事实之后仍出现耐久业务事实".to_owned(),
             ));
@@ -3087,6 +3192,10 @@ impl DurableEvidenceProjectionV1 {
             }
         } else if let Some(session_id) = &session_id
             && !self.session_creations.contains_key(session_id)
+            && !matches!(
+                evidence.fact,
+                DurableTransactionFactV1::ResourceLimitReached { .. }
+            )
         {
             return Err(conflict(format!(
                 "耐久会话事实缺少前置创建事实：{session_id}"
@@ -3158,6 +3267,8 @@ impl DurableEvidenceProjectionV1 {
                 run_id,
                 market_event_source_identity_sha256,
                 run_intent_binding,
+                resource_policy,
+                resource_policy_sha256,
             } => {
                 if self.run_id.replace(run_id.clone()).is_some() {
                     return Err(conflict("耐久证据包含多个运行创建事实".to_owned()));
@@ -3172,6 +3283,23 @@ impl DurableEvidenceProjectionV1 {
                 run_intent_binding
                     .validate()
                     .map_err(|error| conflict(error.to_string()))?;
+                let actual_resource_policy_sha256 = resource_policy
+                    .content_sha256()
+                    .map_err(|error| conflict(error.to_string()))?;
+                if &actual_resource_policy_sha256 != resource_policy_sha256
+                    || self
+                        .resource_policy
+                        .replace(resource_policy.clone())
+                        .is_some()
+                    || self
+                        .resource_policy_sha256
+                        .replace(resource_policy_sha256.clone())
+                        .is_some()
+                {
+                    return Err(conflict(
+                        "耐久运行资源策略正文、身份或唯一性冲突".to_owned(),
+                    ));
+                }
                 if self
                     .run_intent_binding
                     .replace(run_intent_binding.clone())
@@ -3195,6 +3323,60 @@ impl DurableEvidenceProjectionV1 {
                     ));
                 }
                 self.lifecycle = Some(DurableRunLifecycleV1::ArtifactInputsSealed);
+            }
+            DurableTransactionFactV1::ComponentGoldenMeasurementRecorded {
+                run_id,
+                measurement,
+                measurement_sha256,
+            } => {
+                let Some(run_intent_binding) = self.run_intent_binding.as_ref() else {
+                    return Err(conflict("组件黄金测量事实缺少运行意图前驱".to_owned()));
+                };
+                let expected_workload_sha256 = ComponentGoldenLoadContractV1::component_golden_v1()
+                    .content_sha256()
+                    .map_err(|error| conflict(error.to_string()))?;
+                let actual_measurement_sha256 = measurement
+                    .content_sha256()
+                    .map_err(|error| conflict(error.to_string()))?;
+                let component_sessions_completed = self.session_creations.len() == 2
+                    && self.completed_sessions.len() == 2
+                    && self
+                        .session_creations
+                        .iter()
+                        .all(|(session_id, (spec, _, _))| {
+                            spec.caller_role == SimCallerRoleV1::ModelTrain
+                                && self.completed_sessions.get(session_id)
+                                    == Some(&DurableSessionCompletionKindV1::CleanRunCompleted)
+                        });
+                if self.component_golden_measurement.is_some()
+                    || self.component_golden_measurement_sha256.is_some()
+                {
+                    return Err(conflict("组件黄金测量事实重复".to_owned()));
+                }
+                if self.run_id.as_ref() != Some(run_id)
+                    || !component_sessions_completed
+                    || measurement.run_id != *run_id
+                    || measurement.workload_contract_sha256 != expected_workload_sha256
+                    || run_intent_binding.workload_kind
+                        != artifacts::SimulationWorkloadKindV1::ComponentGolden
+                    || run_intent_binding.deterministic_script_contract
+                        != artifacts::SimulationDeterministicScriptContractV1::ComponentGoldenV1
+                    || measurement.environment.build.source_commit
+                        != run_intent_binding.implementation_identity.git_commit
+                    || measurement.environment.build.source_tree_sha256
+                        != run_intent_binding
+                            .implementation_identity
+                            .source_identity_sha256
+                    || measurement.environment.build.cargo_lock_sha256
+                        != run_intent_binding.implementation_identity.cargo_lock_sha256
+                    || actual_measurement_sha256 != *measurement_sha256
+                {
+                    return Err(conflict(
+                        "组件黄金测量正文、运行身份或唯一性冲突".to_owned(),
+                    ));
+                }
+                self.component_golden_measurement = Some(measurement.as_ref().clone());
+                self.component_golden_measurement_sha256 = Some(measurement_sha256.clone());
             }
             DurableTransactionFactV1::SessionCreated {
                 session_spec,
@@ -3531,6 +3713,7 @@ impl DurableEvidenceProjectionV1 {
                 {
                     return Err(conflict(format!("会话完成事实重复：{session_id}")));
                 }
+                self.session_resource_admission.remove(session_id);
             }
             DurableTransactionFactV1::SessionCleanRunCompleted { session_id } => {
                 let Some((spec, _, created_initialization)) =
@@ -3563,9 +3746,117 @@ impl DurableEvidenceProjectionV1 {
                 {
                     return Err(conflict(format!("会话完成事实重复：{session_id}")));
                 }
+                self.session_resource_admission.remove(session_id);
+            }
+            DurableTransactionFactV1::ResourceLimitReached { session_id, limit } => {
+                let Some(resource_policy) = self.resource_policy.as_ref() else {
+                    return Err(conflict("资源超限事实缺少运行资源策略".to_owned()));
+                };
+                if resource_policy
+                    .validate_limit_fact(limit)
+                    .map_err(|error| conflict(error.to_string()))
+                    .is_err()
+                {
+                    return Err(conflict("资源超限事实没有绑定运行资源策略".to_owned()));
+                }
+                match limit.scope {
+                    ResourceLimitScopeV1::Session => {
+                        let Some(session_id) = session_id else {
+                            return Err(conflict("会话资源超限事实缺少会话身份".to_owned()));
+                        };
+                        let admission = self
+                            .session_resource_admission
+                            .entry(session_id.clone())
+                            .or_default();
+                        if admission
+                            .blocking_limit()
+                            .is_some_and(|existing| existing.same_admission_barrier(limit))
+                        {
+                            return Err(conflict(format!("会话资源超限事实重复：{session_id}")));
+                        }
+                        admission.apply_limit(limit.clone());
+                    }
+                    ResourceLimitScopeV1::Run | ResourceLimitScopeV1::Durable => {
+                        if session_id.is_some() {
+                            return Err(conflict("运行资源超限事实身份冲突或重复".to_owned()));
+                        }
+                        if self
+                            .run_resource_admission
+                            .blocking_limit()
+                            .is_some_and(|existing| existing.same_admission_barrier(limit))
+                        {
+                            return Err(conflict("运行资源超限事实身份冲突或重复".to_owned()));
+                        }
+                        self.run_resource_admission.apply_limit(limit.clone());
+                    }
+                }
             }
             DurableTransactionFactV1::ExecutionAdvanced { .. } => {}
         }
+        let resource_usage = evidence
+            .resource_usage
+            .as_ref()
+            .ok_or_else(|| conflict("耐久事实缺少事务后资源使用量".to_owned()))?;
+        if evidence.transient_input != ResourceQuantityV1::default()
+            && evidence.transient_input_session_id.is_none()
+        {
+            return Err(conflict("耐久瞬时输入缺少所属会话身份".to_owned()));
+        }
+        if let (Some(fact_session_id), Some(transient_session_id)) = (
+            session_id.as_deref(),
+            evidence.transient_input_session_id.as_deref(),
+        ) && fact_session_id != transient_session_id
+        {
+            return Err(conflict("耐久事实会话与瞬时输入所属会话不一致".to_owned()));
+        }
+        let resource_policy = self
+            .resource_policy
+            .as_ref()
+            .ok_or_else(|| conflict("耐久资源使用量缺少运行资源策略".to_owned()))?;
+        if let DurableTransactionFactV1::ResourceLimitReached { limit, .. } = &evidence.fact {
+            if evidence.transient_input != ResourceQuantityV1::default() {
+                let attempted_input_is_bounded = match (limit.scope, limit.kind) {
+                    (
+                        ResourceLimitScopeV1::Session | ResourceLimitScopeV1::Run,
+                        ResourceLimitKindV1::InputQueue,
+                    ) => {
+                        evidence.transient_input.records <= limit.candidate.records
+                            && evidence.transient_input.bytes <= limit.candidate.bytes
+                    }
+                    _ => {
+                        evidence.transient_input.records
+                            <= resource_policy.session.input_queue.max_records
+                            && evidence.transient_input.bytes
+                                <= resource_policy.session.input_queue.max_bytes
+                            && evidence.transient_input.records
+                                <= resource_policy.run.input_queue.max_records
+                            && evidence.transient_input.bytes
+                                <= resource_policy.run.input_queue.max_bytes
+                    }
+                };
+                if !attempted_input_is_bounded {
+                    return Err(conflict("资源超限事实没有约束被拒绝的瞬时输入".to_owned()));
+                }
+            }
+        } else if resource_usage.session.input_queue.records < evidence.transient_input.records
+            || resource_usage.session.input_queue.bytes < evidence.transient_input.bytes
+            || resource_usage.run.input_queue.records < evidence.transient_input.records
+            || resource_usage.run.input_queue.bytes < evidence.transient_input.bytes
+        {
+            return Err(conflict(
+                "耐久资源使用量没有覆盖该事务的瞬时输入".to_owned(),
+            ));
+        }
+        let resource_validation = if matches!(
+            evidence.fact,
+            DurableTransactionFactV1::ResourceLimitReached { .. }
+        ) {
+            resource_policy.validate_failure_candidate(resource_usage)
+        } else {
+            resource_policy.validate_candidate(resource_usage)
+        };
+        resource_validation.map_err(|error| conflict(error.to_string()))?;
+        self.resource_high_water.observe(resource_usage);
         if let Some(session_id) = session_id {
             let target = self.account_deltas.entry(session_id.clone()).or_default();
             for delta in &evidence.account_deltas {
@@ -3666,21 +3957,244 @@ struct PersistentRunCoordinatorV1 {
     store: LocalDurabilityStoreV1,
     current: DurableRunCheckpointV1,
     recovery_required: Option<crate::persistence::PersistenceErrorV1>,
+    transient_input_by_session: BTreeMap<String, ResourceQuantityV1>,
 }
 
 type SharedPersistentRunV1 = Arc<Mutex<PersistentRunCoordinatorV1>>;
+
+fn encoded_resource_bytes<T: Serialize>(value: &T) -> Result<u64, SessionError> {
+    let bytes = serde_json::to_vec(value)
+        .map_err(|error| SessionError::Durability(format!("资源计量序列化失败：{error}")))?;
+    u64::try_from(bytes.len())
+        .map_err(|_| SessionError::Durability("资源计量字节超出 u64".to_owned()))
+}
+
+fn resource_quantity(records: usize, bytes: u64) -> Result<ResourceQuantityV1, SessionError> {
+    Ok(ResourceQuantityV1::new(
+        u64::try_from(records)
+            .map_err(|_| SessionError::Durability("资源记录数量超出 u64".to_owned()))?,
+        bytes,
+    ))
+}
+
+fn add_resource_quantity(
+    left: ResourceQuantityV1,
+    right: ResourceQuantityV1,
+) -> Result<ResourceQuantityV1, SessionError> {
+    Ok(ResourceQuantityV1::new(
+        left.records
+            .checked_add(right.records)
+            .ok_or_else(|| SessionError::Durability("资源记录数量溢出".to_owned()))?,
+        left.bytes
+            .checked_add(right.bytes)
+            .ok_or_else(|| SessionError::Durability("资源字节溢出".to_owned()))?,
+    ))
+}
+
+fn session_resource_usage(
+    checkpoint: &ExecutionSessionCheckpointV1,
+) -> Result<crate::resource::SimulationSessionResourceUsageV1, SessionError> {
+    let core = checkpoint.session.resource_core_counts();
+    let component_bytes = checkpoint.session.resource_component_bytes()?;
+    let checkpoint_bytes = encoded_resource_bytes(checkpoint)?;
+    let request_bytes = encoded_resource_bytes(&(
+        &checkpoint.pending_requests,
+        &checkpoint.mutation_payloads,
+        &checkpoint.submission_effect_records,
+        &checkpoint.cancel_effect_records,
+    ))?;
+    let feedback_bytes = encoded_resource_bytes(&(
+        &checkpoint.direct_response_outbox,
+        &checkpoint.lifecycle_outbox,
+        &checkpoint.compacted_confirmed_private_deliveries,
+        &checkpoint.confirmed_private_deliveries,
+    ))?;
+    let query_bytes = encoded_resource_bytes(&checkpoint.query_state)?;
+    let query_records = checkpoint
+        .query_state
+        .roots
+        .len()
+        .saturating_add(checkpoint.query_state.issued_cursors.len())
+        .saturating_add(checkpoint.query_state.continuation_by_request.len())
+        .saturating_add(checkpoint.query_state.terminal_projections.orders.len())
+        .saturating_add(checkpoint.query_state.terminal_projections.trades.len())
+        .saturating_add(
+            checkpoint
+                .query_state
+                .roots
+                .values()
+                .map(|root| match &root.rows {
+                    QueryRootRowsV1::Orders(rows) => rows.len(),
+                    QueryRootRowsV1::Trades(rows) => rows.len(),
+                })
+                .sum::<usize>(),
+        );
+    let feedback_records = checkpoint
+        .direct_response_outbox
+        .entries
+        .len()
+        .saturating_add(checkpoint.lifecycle_outbox.entries.len())
+        .saturating_add(checkpoint.lifecycle_outbox.batches.len())
+        .saturating_add(checkpoint.compacted_confirmed_private_deliveries.len())
+        .saturating_add(checkpoint.confirmed_private_deliveries.len());
+    let request_records = checkpoint
+        .pending_requests
+        .len()
+        .saturating_add(core.pending_actions)
+        .saturating_add(checkpoint.mutation_payloads.len());
+    let index_records = core
+        .indexes
+        .saturating_add(checkpoint.pending_requests.len())
+        .saturating_add(checkpoint.mutation_payloads.len())
+        .saturating_add(checkpoint.submission_effect_records.len())
+        .saturating_add(checkpoint.cancel_effect_records.len())
+        .saturating_add(query_records)
+        .saturating_add(feedback_records);
+    let in_memory_records = index_records
+        .saturating_add(core.hot_order_and_fill_records)
+        .saturating_add(core.internal_events);
+    Ok(crate::resource::SimulationSessionResourceUsageV1 {
+        in_memory_state: resource_quantity(in_memory_records, checkpoint_bytes)?,
+        hot_markets: resource_quantity(core.hot_markets, component_bytes.hot_markets)?,
+        input_queue: ResourceQuantityV1::default(),
+        request_queue: resource_quantity(request_records, request_bytes)?,
+        feedback_queue: resource_quantity(feedback_records, feedback_bytes)?,
+        active_orders: resource_quantity(core.active_orders, component_bytes.active_orders)?,
+        internal_events: resource_quantity(core.internal_events, component_bytes.internal_events)?,
+        query_cache: resource_quantity(query_records, query_bytes)?,
+        indexes: resource_quantity(index_records, component_bytes.indexes)?,
+    })
+}
+
+fn candidate_resource_usage(
+    checkpoint: &DurableRunCheckpointV1,
+    session_id: Option<&str>,
+    durable: DurableResourcePreviewV1,
+) -> Result<SimulationResourceUsageV1, SessionError> {
+    let session = match session_id.and_then(|id| checkpoint.sessions.get(id)) {
+        Some(checkpoint) => session_resource_usage(checkpoint)?,
+        None => {
+            let mut maximum = crate::resource::SimulationSessionResourceUsageV1::default();
+            for checkpoint in checkpoint.sessions.values() {
+                let usage = session_resource_usage(checkpoint)?;
+                maximum.in_memory_state.records = maximum
+                    .in_memory_state
+                    .records
+                    .max(usage.in_memory_state.records);
+                maximum.in_memory_state.bytes = maximum
+                    .in_memory_state
+                    .bytes
+                    .max(usage.in_memory_state.bytes);
+                for (target, source) in [
+                    (&mut maximum.hot_markets, usage.hot_markets),
+                    (&mut maximum.input_queue, usage.input_queue),
+                    (&mut maximum.request_queue, usage.request_queue),
+                    (&mut maximum.feedback_queue, usage.feedback_queue),
+                    (&mut maximum.active_orders, usage.active_orders),
+                    (&mut maximum.internal_events, usage.internal_events),
+                    (&mut maximum.query_cache, usage.query_cache),
+                    (&mut maximum.indexes, usage.indexes),
+                ] {
+                    target.records = target.records.max(source.records);
+                    target.bytes = target.bytes.max(source.bytes);
+                }
+            }
+            maximum
+        }
+    };
+    let mut run = crate::resource::SimulationRunResourceUsageV1::default();
+    for session_checkpoint in checkpoint.sessions.values() {
+        let usage = session_resource_usage(session_checkpoint)?;
+        run.in_memory_state = add_resource_quantity(run.in_memory_state, usage.in_memory_state)?;
+        run.hot_markets = add_resource_quantity(run.hot_markets, usage.hot_markets)?;
+        run.input_queue = add_resource_quantity(run.input_queue, usage.input_queue)?;
+        run.request_queue = add_resource_quantity(run.request_queue, usage.request_queue)?;
+        run.feedback_queue = add_resource_quantity(run.feedback_queue, usage.feedback_queue)?;
+        run.active_orders = add_resource_quantity(run.active_orders, usage.active_orders)?;
+        run.internal_events = add_resource_quantity(run.internal_events, usage.internal_events)?;
+        run.query_cache = add_resource_quantity(run.query_cache, usage.query_cache)?;
+        run.indexes = add_resource_quantity(run.indexes, usage.indexes)?;
+    }
+    let run_checkpoint_bytes = encoded_resource_bytes(checkpoint)?;
+    run.in_memory_state.bytes = run_checkpoint_bytes;
+    run.sessions = resource_quantity(
+        checkpoint.process_root.resource_session_creation_count(),
+        run_checkpoint_bytes,
+    )?;
+    run.capital_fence = resource_quantity(
+        checkpoint.process_root.resource_capital_fence_count(),
+        encoded_resource_bytes(&checkpoint.process_root)?,
+    )?;
+    Ok(SimulationResourceUsageV1 {
+        session,
+        run,
+        durable: crate::resource::SimulationDurableResourceUsageV1 {
+            evidence: ResourceQuantityV1::new(durable.evidence_file_count, durable.evidence_bytes),
+            checkpoints: ResourceQuantityV1::new(
+                durable.checkpoint_file_count,
+                durable.checkpoint_bytes,
+            ),
+            artifacts: ResourceQuantityV1::new(durable.artifact_file_count, durable.artifact_bytes),
+            runtime_root: ResourceQuantityV1::new(
+                durable.runtime_root_file_count,
+                durable.runtime_root_bytes,
+            ),
+        },
+    })
+}
 
 impl PersistentRunCoordinatorV1 {
     fn commit(
         &mut self,
         evidence: &DurableTransactionEvidenceV1,
-        candidate: DurableRunCheckpointV1,
+        mut candidate: DurableRunCheckpointV1,
     ) -> Result<(), SessionError> {
         self.require_business_writes_open()?;
         if candidate == self.current {
             return Ok(());
         }
-        if let Err(error) = self.store.commit_classified(evidence, &candidate) {
+        let mut evidence = evidence.clone();
+        self.validate_resource_identity(&candidate)?;
+        let session_admission_change_is_completion =
+            evidence.session_id().is_some_and(|session_id| {
+                let mut expected = self.current.session_resource_admission.clone();
+                expected.remove(session_id);
+                expected == candidate.session_resource_admission
+                    && matches!(
+                        evidence.fact,
+                        DurableTransactionFactV1::SessionRetentionExpired { .. }
+                            | DurableTransactionFactV1::SessionCleanRunCompleted { .. }
+                    )
+            });
+        let measurement_change_is_recording = matches!(
+            &evidence.fact,
+            DurableTransactionFactV1::ComponentGoldenMeasurementRecorded {
+                measurement_sha256,
+                ..
+            } if self.current.component_golden_measurement_sha256.is_none()
+                && candidate.component_golden_measurement_sha256.as_ref()
+                    == Some(measurement_sha256)
+        );
+        if candidate.resource_high_water != self.current.resource_high_water
+            || candidate.run_resource_admission != self.current.run_resource_admission
+            || (candidate.component_golden_measurement_sha256
+                != self.current.component_golden_measurement_sha256
+                && !measurement_change_is_recording)
+            || (candidate.session_resource_admission != self.current.session_resource_admission
+                && !session_admission_change_is_completion)
+        {
+            return Err(SessionError::Durability(
+                "普通耐久事务不能改写资源高水位或准入状态".to_owned(),
+            ));
+        }
+        let usage = self.observe_candidate_resources(&mut evidence, &mut candidate)?;
+        if let Err(error) = candidate.resource_policy.validate_candidate(&usage) {
+            let Some(limit) = error.limit_reached().cloned() else {
+                return Err(SessionError::Durability(error.to_string()));
+            };
+            return self.persist_resource_limit(evidence.session_id(), limit);
+        }
+        if let Err(error) = self.store.commit_classified(&evidence, &candidate) {
             if let DurableCommitFailureV1::RecoveryRequired(cause) = &error {
                 self.recovery_required = Some(cause.clone());
             }
@@ -3690,10 +4204,269 @@ impl PersistentRunCoordinatorV1 {
         Ok(())
     }
 
+    fn commit_new_ingress(
+        &mut self,
+        evidence: &DurableTransactionEvidenceV1,
+        candidate: DurableRunCheckpointV1,
+    ) -> Result<(), SessionError> {
+        if candidate == self.current {
+            return Ok(());
+        }
+        self.require_new_ingress_open(evidence.session_id())?;
+        self.commit(evidence, candidate)
+    }
+
+    fn validate_resource_identity(
+        &self,
+        candidate: &DurableRunCheckpointV1,
+    ) -> Result<(), SessionError> {
+        let actual_sha256 = candidate
+            .resource_policy
+            .content_sha256()
+            .map_err(|error| SessionError::Durability(error.to_string()))?;
+        if candidate.resource_policy != self.current.resource_policy
+            || candidate.resource_policy_sha256 != self.current.resource_policy_sha256
+            || actual_sha256 != candidate.resource_policy_sha256
+        {
+            return Err(SessionError::Durability(
+                "候选检查点改变了运行资源策略正文或身份".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn observe_candidate_resources(
+        &self,
+        evidence: &mut DurableTransactionEvidenceV1,
+        candidate: &mut DurableRunCheckpointV1,
+    ) -> Result<SimulationResourceUsageV1, SessionError> {
+        for _ in 0..16 {
+            let preview = self
+                .store
+                .preview_commit_resources(evidence, candidate)
+                .map_err(|error| SessionError::Durability(error.to_string()))?;
+            let resource_session_id = evidence
+                .transient_input_session_id
+                .as_deref()
+                .or_else(|| evidence.session_id());
+            let mut usage = candidate_resource_usage(candidate, resource_session_id, preview)?;
+            let session_transient = resource_session_id
+                .and_then(|session_id| self.transient_input_by_session.get(session_id))
+                .copied()
+                .unwrap_or_default();
+            if evidence.transient_input != session_transient {
+                return Err(SessionError::Durability(
+                    "耐久事实的瞬时输入计量与协调器预留不一致".to_owned(),
+                ));
+            }
+            let rejected_resource_attempt = matches!(
+                evidence.fact,
+                DurableTransactionFactV1::ResourceLimitReached { .. }
+            );
+            if !rejected_resource_attempt {
+                usage.session.input_queue.records = usage
+                    .session
+                    .input_queue
+                    .records
+                    .max(session_transient.records);
+                usage.session.input_queue.bytes =
+                    usage.session.input_queue.bytes.max(session_transient.bytes);
+            }
+            usage.run.input_queue = self
+                .transient_input_by_session
+                .iter()
+                .filter(|(session_id, _)| {
+                    !rejected_resource_attempt || Some(session_id.as_str()) != resource_session_id
+                })
+                .try_fold(ResourceQuantityV1::default(), |total, (_, quantity)| {
+                    add_resource_quantity(total, *quantity)
+                })?;
+            let before_high_water = candidate.resource_high_water.clone();
+            let before_usage = evidence.resource_usage.clone();
+            evidence.resource_usage = Some(usage.clone());
+            candidate.resource_high_water.observe(&usage);
+            if candidate.resource_high_water == before_high_water
+                && evidence.resource_usage == before_usage
+            {
+                return Ok(usage);
+            }
+        }
+        Err(SessionError::Durability(
+            "资源高水位与候选检查点字节没有收敛".to_owned(),
+        ))
+    }
+
+    fn reserve_transient_input(
+        &mut self,
+        session_id: &str,
+        quantity: ResourceQuantityV1,
+    ) -> Result<(), SessionError> {
+        self.require_bound_market_input_open(session_id, quantity)?;
+        if self.transient_input_by_session.contains_key(session_id) {
+            return Err(SessionError::Durability(format!(
+                "同一会话已经持有瞬时输入资源预留：{session_id}"
+            )));
+        }
+        self.transient_input_by_session
+            .insert(session_id.to_owned(), quantity);
+        let result = (|| {
+            let durable = self
+                .store
+                .current_resources()
+                .map_err(|error| SessionError::Durability(error.to_string()))?;
+            let mut usage = candidate_resource_usage(&self.current, Some(session_id), durable)?;
+            usage.session.input_queue = quantity;
+            usage.run.input_queue = self
+                .transient_input_by_session
+                .values()
+                .try_fold(ResourceQuantityV1::default(), |total, item| {
+                    add_resource_quantity(total, *item)
+                })?;
+            self.current
+                .resource_policy
+                .validate_candidate(&usage)
+                .map_err(|error| {
+                    error
+                        .limit_reached()
+                        .cloned()
+                        .map(SessionError::ResourceLimitReached)
+                        .unwrap_or_else(|| SessionError::Durability(error.to_string()))
+                })
+        })();
+        if let Err(SessionError::ResourceLimitReached(limit)) = result {
+            let persisted = self.persist_resource_limit(Some(session_id), limit);
+            self.transient_input_by_session.remove(session_id);
+            return persisted;
+        }
+        if result.is_err() {
+            self.transient_input_by_session.remove(session_id);
+        }
+        result
+    }
+
+    fn release_transient_input(&mut self, session_id: &str) -> Result<(), SessionError> {
+        if self.transient_input_by_session.remove(session_id).is_none() {
+            return Err(SessionError::Durability(format!(
+                "会话缺少瞬时输入资源预留：{session_id}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn persist_resource_limit(
+        &mut self,
+        attempted_session_id: Option<&str>,
+        limit: ResourceLimitReachedV1,
+    ) -> Result<(), SessionError> {
+        if let Some(existing) = match limit.scope {
+            ResourceLimitScopeV1::Session => attempted_session_id
+                .and_then(|session_id| self.current.session_resource_admission.get(session_id))
+                .and_then(ResourceAdmissionStateV1::blocking_limit),
+            ResourceLimitScopeV1::Run | ResourceLimitScopeV1::Durable => {
+                self.current.run_resource_admission.blocking_limit()
+            }
+        } && existing.same_admission_barrier(&limit)
+        {
+            return Err(SessionError::ResourceLimitReached(existing.clone()));
+        }
+        let fact_session_id = match limit.scope {
+            ResourceLimitScopeV1::Session => Some(
+                attempted_session_id
+                    .ok_or_else(|| SessionError::Durability("会话资源超限缺少会话身份".to_owned()))?
+                    .to_owned(),
+            ),
+            ResourceLimitScopeV1::Run | ResourceLimitScopeV1::Durable => None,
+        };
+        let mut candidate = self.current.clone();
+        match limit.scope {
+            ResourceLimitScopeV1::Session => candidate
+                .session_resource_admission
+                .entry(fact_session_id.clone().expect("已形成会话身份"))
+                .or_default()
+                .apply_limit(limit.clone()),
+            ResourceLimitScopeV1::Run | ResourceLimitScopeV1::Durable => {
+                candidate.run_resource_admission.apply_limit(limit.clone());
+            }
+        }
+        let mut evidence =
+            DurableTransactionEvidenceV1::new(DurableTransactionFactV1::ResourceLimitReached {
+                session_id: fact_session_id,
+                limit: limit.clone(),
+            });
+        evidence.transient_input_session_id = attempted_session_id.map(ToOwned::to_owned);
+        evidence.transient_input = attempted_session_id
+            .and_then(|session_id| self.transient_input_by_session.get(session_id))
+            .copied()
+            .unwrap_or_default();
+        let usage = match self.observe_candidate_resources(&mut evidence, &mut candidate) {
+            Ok(usage) => usage,
+            Err(error) => {
+                let cause = PersistenceErrorV1::Integrity(error.to_string());
+                self.recovery_required = Some(cause.clone());
+                return Err(SessionError::DurabilityRecoveryRequired(cause.to_string()));
+            }
+        };
+        if let Err(error) = candidate.resource_policy.validate_failure_candidate(&usage) {
+            let cause = PersistenceErrorV1::Integrity(error.to_string());
+            self.recovery_required = Some(cause.clone());
+            return Err(SessionError::DurabilityRecoveryRequired(cause.to_string()));
+        }
+        match self.store.commit_classified(&evidence, &candidate) {
+            Ok(_) => {
+                self.current = candidate;
+                Err(SessionError::ResourceLimitReached(limit))
+            }
+            Err(DurableCommitFailureV1::DefinitelyNotCommitted(error))
+            | Err(DurableCommitFailureV1::RecoveryRequired(error)) => {
+                self.recovery_required = Some(error.clone());
+                Err(SessionError::DurabilityRecoveryRequired(error.to_string()))
+            }
+        }
+    }
+
     fn require_business_writes_open(&self) -> Result<(), SessionError> {
         self.require_recovery_not_required()?;
         if self.current.lifecycle == DurableRunLifecycleV1::ArtifactInputsSealed {
             return Err(SessionError::RunArtifactInputsSealed);
+        }
+        Ok(())
+    }
+
+    fn require_new_ingress_open(&self, session_id: Option<&str>) -> Result<(), SessionError> {
+        self.require_business_writes_open()?;
+        if let Some(limit) = self.current.run_resource_admission.blocking_limit() {
+            return Err(SessionError::ResourceLimitReached(limit.clone()));
+        }
+        if let Some(limit) = session_id
+            .and_then(|session_id| self.current.session_resource_admission.get(session_id))
+            .and_then(ResourceAdmissionStateV1::blocking_limit)
+        {
+            return Err(SessionError::ResourceLimitReached(limit.clone()));
+        }
+        Ok(())
+    }
+
+    fn require_bound_market_input_open(
+        &self,
+        session_id: &str,
+        _quantity: ResourceQuantityV1,
+    ) -> Result<(), SessionError> {
+        self.require_business_writes_open()?;
+        for limit in [
+            self.current.run_resource_admission.blocking_limit(),
+            self.current
+                .session_resource_admission
+                .get(session_id)
+                .and_then(ResourceAdmissionStateV1::blocking_limit),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if limit.scope == ResourceLimitScopeV1::Durable
+                || limit.kind == ResourceLimitKindV1::InputQueue
+            {
+                return Err(SessionError::ResourceLimitReached(limit.clone()));
+            }
         }
         Ok(())
     }
@@ -3717,10 +4490,36 @@ impl PersistentRunCoordinatorV1 {
         }
         let mut candidate = self.current.clone();
         candidate.lifecycle = DurableRunLifecycleV1::ArtifactInputsSealed;
-        let evidence =
+        let mut evidence =
             DurableTransactionEvidenceV1::new(DurableTransactionFactV1::RunArtifactInputsSealed {
                 run_id: run_id.to_owned(),
             });
+        let usage = self
+            .observe_candidate_resources(&mut evidence, &mut candidate)
+            .map_err(|error| {
+                artifacts::SimulationRunArtifactErrorV1::Durability(error.to_string())
+            })?;
+        if let Err(error) = self.current.resource_policy.validate_candidate(&usage) {
+            let Some(limit) = error.limit_reached().cloned() else {
+                return Err(artifacts::SimulationRunArtifactErrorV1::Integrity(
+                    error.to_string(),
+                ));
+            };
+            return match self.persist_resource_limit(None, limit) {
+                Err(SessionError::ResourceLimitReached(persisted)) => {
+                    Err(artifacts::SimulationRunArtifactErrorV1::ResourceLimitReached(persisted))
+                }
+                Err(SessionError::DurabilityRecoveryRequired(message)) => Err(
+                    artifacts::SimulationRunArtifactErrorV1::DurabilityRecoveryRequired(message),
+                ),
+                Err(other) => Err(artifacts::SimulationRunArtifactErrorV1::Durability(
+                    other.to_string(),
+                )),
+                Ok(()) => Err(artifacts::SimulationRunArtifactErrorV1::Integrity(
+                    "资源超限事实提交意外返回成功".to_owned(),
+                )),
+            };
+        }
         match self.store.commit_classified(&evidence, &candidate) {
             Ok(_) => {
                 self.current = candidate;
@@ -3977,6 +4776,14 @@ pub struct SimExecutionProcessV1 {
     recovered_evicted_markets: DurableEvictedMarketsBySessionV1,
 }
 
+#[cfg(test)]
+pub(crate) struct SimulationResourceDiagnosticV1 {
+    pub(crate) sessions: BTreeMap<String, SimulationSessionResourceUsageV1>,
+    pub(crate) run: SimulationRunResourceUsageV1,
+    pub(crate) durable: SimulationDurableResourceUsageV1,
+    pub(crate) high_water: SimulationResourceHighWaterV1,
+}
+
 pub struct NewPreparedSessionV2 {
     pub control: SessionCreationControlResultV2,
     pub session: SimExecutionSessionV1,
@@ -4037,6 +4844,14 @@ fn recover_run_baseline(
     }
     validate_run_intent_binding_for_rules(&checkpoint.run_intent_binding, rule_snapshot.as_ref())
         .map_err(|error| SimExecutionPersistenceErrorV1::ProcessRoot(error.to_string()))?;
+    let actual_resource_policy_sha256 = checkpoint
+        .resource_policy
+        .content_sha256()
+        .map_err(|error| SimExecutionPersistenceErrorV1::Session(error.to_string()))?;
+    checkpoint
+        .resource_policy
+        .validate_candidate(&SimulationResourceUsageV1::default())
+        .map_err(|error| SimExecutionPersistenceErrorV1::Session(error.to_string()))?;
     if evidence_projection.run_intent_binding.as_ref() != Some(&checkpoint.run_intent_binding)
         || evidence_projection.lifecycle != Some(checkpoint.lifecycle)
         || !is_canonical_sha256_hex(&checkpoint.market_event_source_identity_sha256)
@@ -4044,10 +4859,47 @@ fn recover_run_baseline(
             .market_event_source_identity_sha256
             .as_ref()
             != Some(&checkpoint.market_event_source_identity_sha256)
+        || evidence_projection.resource_policy.as_ref() != Some(&checkpoint.resource_policy)
+        || evidence_projection.resource_policy_sha256.as_ref()
+            != Some(&checkpoint.resource_policy_sha256)
+        || evidence_projection.component_golden_measurement_sha256
+            != checkpoint.component_golden_measurement_sha256
+        || actual_resource_policy_sha256 != checkpoint.resource_policy_sha256
+        || evidence_projection.run_resource_admission != checkpoint.run_resource_admission
+        || evidence_projection.session_resource_admission != checkpoint.session_resource_admission
+        || evidence_projection.resource_high_water != checkpoint.resource_high_water
     {
         return Err(SimExecutionPersistenceErrorV1::Session(
-            "运行意图、生命周期或市场事件源事实与检查点不一致".to_owned(),
+            "运行意图、生命周期、市场事件源或资源事实与检查点不一致".to_owned(),
         ));
+    }
+    let current_resources = store.current_resources()?;
+    let current_usage = candidate_resource_usage(&checkpoint, None, current_resources)
+        .map_err(|error| SimExecutionPersistenceErrorV1::Session(error.to_string()))?;
+    checkpoint
+        .resource_policy
+        .validate_failure_candidate(&current_usage)
+        .map_err(|error| SimExecutionPersistenceErrorV1::Session(error.to_string()))?;
+    let mut checkpoint_scoped_usage = current_usage.clone();
+    checkpoint_scoped_usage.durable.runtime_root.records = checkpoint_scoped_usage
+        .durable
+        .runtime_root
+        .records
+        .saturating_sub(current_usage.durable.artifacts.records);
+    checkpoint_scoped_usage.durable.runtime_root.bytes = checkpoint_scoped_usage
+        .durable
+        .runtime_root
+        .bytes
+        .saturating_sub(current_usage.durable.artifacts.bytes);
+    checkpoint_scoped_usage.durable.artifacts = ResourceQuantityV1::default();
+    if !checkpoint
+        .resource_high_water
+        .covers(&checkpoint_scoped_usage)
+    {
+        return Err(SimExecutionPersistenceErrorV1::Session(format!(
+            "资源高水位没有覆盖恢复时的当前资源使用量：high_water={:?}, current={current_usage:?}",
+            checkpoint.resource_high_water
+        )));
     }
     let inner = SimProcessRoot::restore_from_checkpoint(
         checkpoint.process_root.clone(),
@@ -4105,7 +4957,66 @@ fn recover_run_baseline(
 }
 
 impl SimExecutionProcessV1 {
-    pub fn try_new(
+    #[cfg(test)]
+    pub(crate) fn resource_snapshot_for_tests(
+        &self,
+    ) -> Result<SimulationResourceDiagnosticV1, SessionError> {
+        let persistence = self.persistence.as_ref().ok_or_else(|| {
+            SessionError::Durability("运行没有本地耐久状态，不能读取资源诊断".to_owned())
+        })?;
+        let coordinator = persistence
+            .lock()
+            .map_err(|_| SessionError::Durability("耐久协调器锁不可用".to_owned()))?;
+        let durable = coordinator
+            .store
+            .current_resources()
+            .map_err(|error| SessionError::Durability(error.to_string()))?;
+        let mut sessions = BTreeMap::new();
+        for session_id in coordinator.current.sessions.keys() {
+            let usage =
+                candidate_resource_usage(&coordinator.current, Some(session_id.as_str()), durable)?;
+            sessions.insert(session_id.clone(), usage.session);
+        }
+        let shared = candidate_resource_usage(&coordinator.current, None, durable)?;
+        let mut high_water = coordinator.current.resource_high_water.clone();
+        high_water.observe(&shared);
+        Ok(SimulationResourceDiagnosticV1 {
+            sessions,
+            run: shared.run,
+            durable: shared.durable,
+            high_water,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resource_transaction_usages_for_tests(
+        &self,
+    ) -> Result<Vec<SimulationResourceUsageV1>, SessionError> {
+        let persistence = self.persistence.as_ref().ok_or_else(|| {
+            SessionError::Durability("运行没有本地耐久状态，不能读取事务资源证据".to_owned())
+        })?;
+        let coordinator = persistence
+            .lock()
+            .map_err(|_| SessionError::Durability("耐久协调器锁不可用".to_owned()))?;
+        let recovered = coordinator
+            .store
+            .recover::<DurableTransactionEvidenceV1, DurableRunCheckpointV1>()
+            .map_err(|error| SessionError::Durability(error.to_string()))?
+            .ok_or_else(|| SessionError::Durability("运行缺少已提交耐久前缀".to_owned()))?;
+        recovered
+            .evidence
+            .into_iter()
+            .map(|entry| {
+                entry
+                    .body
+                    .resource_usage
+                    .ok_or_else(|| SessionError::Durability("耐久事务缺少资源使用量".to_owned()))
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_new(
         run_id: String,
         finality_policy: Arc<TradeFinalityPolicyV1>,
         rule_snapshot: Arc<SealedProcessRuleSnapshot>,
@@ -4138,6 +5049,57 @@ impl SimExecutionProcessV1 {
         market_event_source_identity_sha256: Sha256Hex,
         persistence_root: PathBuf,
     ) -> Result<Self, SimExecutionPersistenceErrorV1> {
+        Self::try_new_with_local_persistence_and_resource_policy(
+            run_id,
+            finality_policy,
+            rule_snapshot,
+            latency_profile,
+            scenario,
+            run_intent_binding,
+            market_event_source_identity_sha256,
+            persistence_root,
+            SimulationResourcePolicyV1::component_golden_v1(),
+        )
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn try_new_with_local_persistence_and_resource_policy_for_tests(
+        run_id: String,
+        finality_policy: Arc<TradeFinalityPolicyV1>,
+        rule_snapshot: Arc<SealedProcessRuleSnapshot>,
+        latency_profile: Arc<EmpiricalDelayProfile>,
+        scenario: Arc<PlatformScenarioV1>,
+        run_intent_binding: SimulationRunIntentBindingV1,
+        market_event_source_identity_sha256: Sha256Hex,
+        persistence_root: PathBuf,
+        resource_policy: SimulationResourcePolicyV1,
+    ) -> Result<Self, SimExecutionPersistenceErrorV1> {
+        Self::try_new_with_local_persistence_and_resource_policy(
+            run_id,
+            finality_policy,
+            rule_snapshot,
+            latency_profile,
+            scenario,
+            run_intent_binding,
+            market_event_source_identity_sha256,
+            persistence_root,
+            resource_policy,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_new_with_local_persistence_and_resource_policy(
+        run_id: String,
+        finality_policy: Arc<TradeFinalityPolicyV1>,
+        rule_snapshot: Arc<SealedProcessRuleSnapshot>,
+        latency_profile: Arc<EmpiricalDelayProfile>,
+        scenario: Arc<PlatformScenarioV1>,
+        run_intent_binding: SimulationRunIntentBindingV1,
+        market_event_source_identity_sha256: Sha256Hex,
+        persistence_root: PathBuf,
+        resource_policy: SimulationResourcePolicyV1,
+    ) -> Result<Self, SimExecutionPersistenceErrorV1> {
         if rule_snapshot.access_mode() == SnapshotAccessMode::Recovery {
             return Err(SimExecutionPersistenceErrorV1::ProcessRoot(
                 "新的耐久运行不能使用 RECOVERY 规则快照".to_owned(),
@@ -4158,36 +5120,55 @@ impl SimExecutionProcessV1 {
             scenario,
         )
         .map_err(|error| SimExecutionPersistenceErrorV1::ProcessRoot(error.to_string()))?;
-        let mut store = LocalDurabilityStoreV1::try_new(persistence_root)?;
+        let store = LocalDurabilityStoreV1::try_new(persistence_root)?;
         if store.recover_json()?.is_some() {
             return Err(SimExecutionPersistenceErrorV1::Store(
                 "新运行的本地耐久目录已经包含 CURRENT".to_owned(),
             ));
         }
-        let checkpoint = DurableRunCheckpointV1 {
+        let resource_policy_sha256 = resource_policy
+            .content_sha256()
+            .map_err(|error| SimExecutionPersistenceErrorV1::ProcessRoot(error.to_string()))?;
+        let mut checkpoint = DurableRunCheckpointV1 {
             schema_version: DURABLE_RUN_CHECKPOINT_SCHEMA_V1.to_owned(),
             execution_contract_version: SIM_EXECUTION_CONTRACT_V1.to_owned(),
             market_event_source_identity_sha256: market_event_source_identity_sha256.clone(),
             run_intent_binding: run_intent_binding.clone(),
+            resource_policy: resource_policy.clone(),
+            resource_policy_sha256: resource_policy_sha256.clone(),
+            component_golden_measurement_sha256: None,
+            resource_high_water: SimulationResourceHighWaterV1::default(),
+            run_resource_admission: ResourceAdmissionStateV1::default(),
+            session_resource_admission: BTreeMap::new(),
             lifecycle: DurableRunLifecycleV1::Open,
             process_root: inner.checkpoint()?,
             sessions: BTreeMap::new(),
         };
-        store.commit(
-            &DurableTransactionEvidenceV1::new(DurableTransactionFactV1::RunCreated {
+        let mut evidence =
+            DurableTransactionEvidenceV1::new(DurableTransactionFactV1::RunCreated {
                 run_id: run_id.clone(),
                 market_event_source_identity_sha256,
                 run_intent_binding,
-            }),
-            &checkpoint,
-        )?;
+                resource_policy: resource_policy.clone(),
+                resource_policy_sha256,
+            });
+        let mut coordinator = PersistentRunCoordinatorV1 {
+            store,
+            current: checkpoint.clone(),
+            recovery_required: None,
+            transient_input_by_session: BTreeMap::new(),
+        };
+        let usage = coordinator
+            .observe_candidate_resources(&mut evidence, &mut checkpoint)
+            .map_err(|error| SimExecutionPersistenceErrorV1::ProcessRoot(error.to_string()))?;
+        resource_policy
+            .validate_candidate(&usage)
+            .map_err(|error| SimExecutionPersistenceErrorV1::ProcessRoot(error.to_string()))?;
+        coordinator.store.commit(&evidence, &checkpoint)?;
+        coordinator.current = checkpoint;
         Ok(Self {
             inner,
-            persistence: Some(Arc::new(Mutex::new(PersistentRunCoordinatorV1 {
-                store,
-                current: checkpoint,
-                recovery_required: None,
-            }))),
+            persistence: Some(Arc::new(Mutex::new(coordinator))),
             recoverable_session_ids: BTreeSet::new(),
             attached_recovered_session_ids: BTreeSet::new(),
             recovered_evicted_markets: BTreeMap::new(),
@@ -4430,6 +5411,7 @@ impl SimExecutionProcessV1 {
                 store,
                 current: checkpoint,
                 recovery_required: None,
+                transient_input_by_session: BTreeMap::new(),
             }))),
             recoverable_session_ids,
             attached_recovered_session_ids: BTreeSet::new(),
@@ -4472,6 +5454,7 @@ impl SimExecutionProcessV1 {
             store,
             current: checkpoint,
             recovery_required: None,
+            transient_input_by_session: BTreeMap::new(),
         };
         coordinator
             .seal_artifact_inputs(inner.run_id())
@@ -4560,6 +5543,86 @@ impl SimExecutionProcessV1 {
         self.inner.finality_policy()
     }
 
+    pub(crate) fn record_component_golden_measurement(
+        &mut self,
+        measurement: ComponentGoldenRunMeasurementV1,
+    ) -> Result<Sha256Hex, artifacts::SimulationRunArtifactErrorV1> {
+        measurement.validate().map_err(|error| {
+            artifacts::SimulationRunArtifactErrorV1::Integrity(error.to_string())
+        })?;
+        if measurement.run_id != self.inner.run_id() {
+            return Err(artifacts::SimulationRunArtifactErrorV1::Integrity(
+                "封口前测量正文与运行身份不一致".to_owned(),
+            ));
+        }
+        let measurement_sha256 = measurement.content_sha256().map_err(|error| {
+            artifacts::SimulationRunArtifactErrorV1::Integrity(error.to_string())
+        })?;
+        let persistence = self
+            .persistence
+            .as_ref()
+            .ok_or(artifacts::SimulationRunArtifactErrorV1::RunNotPersistent)?;
+        let mut coordinator = persistence.lock().map_err(|_| {
+            artifacts::SimulationRunArtifactErrorV1::Durability("耐久协调器锁不可用".to_owned())
+        })?;
+        coordinator
+            .require_business_writes_open()
+            .map_err(|error| {
+                artifacts::SimulationRunArtifactErrorV1::Durability(error.to_string())
+            })?;
+        if coordinator.current.run_intent_binding.workload_kind
+            != artifacts::SimulationWorkloadKindV1::ComponentGolden
+            || coordinator
+                .current
+                .run_intent_binding
+                .deterministic_script_contract
+                != artifacts::SimulationDeterministicScriptContractV1::ComponentGoldenV1
+        {
+            return Err(artifacts::SimulationRunArtifactErrorV1::Integrity(
+                "只有 COMPONENT_GOLDEN_V1 运行可以记录组件黄金测量正文".to_owned(),
+            ));
+        }
+        if let Some(existing) = coordinator
+            .current
+            .component_golden_measurement_sha256
+            .as_ref()
+        {
+            return if existing == &measurement_sha256 {
+                Ok(existing.clone())
+            } else {
+                Err(artifacts::SimulationRunArtifactErrorV1::Integrity(
+                    "同一运行已经绑定不同的组件黄金测量正文".to_owned(),
+                ))
+            };
+        }
+        if !coordinator.current.sessions.is_empty() {
+            return Err(artifacts::SimulationRunArtifactErrorV1::RunNotReady(
+                "组件黄金测量只能在两条轨迹完成后记录",
+            ));
+        }
+        let mut candidate = coordinator.current.clone();
+        candidate.component_golden_measurement_sha256 = Some(measurement_sha256.clone());
+        let evidence = DurableTransactionEvidenceV1::new(
+            DurableTransactionFactV1::ComponentGoldenMeasurementRecorded {
+                run_id: self.inner.run_id().to_owned(),
+                measurement: Box::new(measurement),
+                measurement_sha256: measurement_sha256.clone(),
+            },
+        );
+        match coordinator.commit(&evidence, candidate) {
+            Ok(()) => Ok(measurement_sha256),
+            Err(SessionError::ResourceLimitReached(limit)) => {
+                Err(artifacts::SimulationRunArtifactErrorV1::ResourceLimitReached(limit))
+            }
+            Err(SessionError::DurabilityRecoveryRequired(message)) => {
+                Err(artifacts::SimulationRunArtifactErrorV1::DurabilityRecoveryRequired(message))
+            }
+            Err(error) => Err(artifacts::SimulationRunArtifactErrorV1::Durability(
+                error.to_string(),
+            )),
+        }
+    }
+
     pub fn seal_run_artifacts(
         &mut self,
     ) -> Result<artifacts::SimulationRunArtifactReceiptV1, artifacts::SimulationRunArtifactErrorV1>
@@ -4631,7 +5694,113 @@ impl SimExecutionProcessV1 {
                 "封口后的磁盘检查点与耐久协调器基线不一致".to_owned(),
             ));
         }
-        let bundle = prepare_run_artifact_bundle(&self.inner, &recovered)?;
+        let existing_artifact_identity = coordinator
+            .store
+            .existing_artifact_bundle_identity()
+            .map_err(|error| {
+                artifacts::SimulationRunArtifactErrorV1::Durability(error.to_string())
+            })?;
+        let mut resource_high_water = coordinator.current.resource_high_water.clone();
+        let bundle = {
+            let mut converged = None;
+            for _ in 0..16 {
+                let candidate =
+                    prepare_run_artifact_bundle(&self.inner, &recovered, &resource_high_water)?;
+                if let Some(existing_identity) = existing_artifact_identity.as_ref()
+                    && &candidate.manifest_sha256 != existing_identity
+                {
+                    let preview = coordinator.store.current_resources().map_err(|error| {
+                        artifacts::SimulationRunArtifactErrorV1::Durability(error.to_string())
+                    })?;
+                    let usage = candidate_resource_usage(&coordinator.current, None, preview)
+                        .map_err(|error| {
+                            artifacts::SimulationRunArtifactErrorV1::Integrity(error.to_string())
+                        })?;
+                    let before = resource_high_water.clone();
+                    resource_high_water.observe(&usage);
+                    if resource_high_water == before {
+                        return Err(artifacts::SimulationRunArtifactErrorV1::Integrity(
+                            "既有运行产物身份不能由当前封口证据和资源高水位重算".to_owned(),
+                        ));
+                    }
+                    continue;
+                }
+                let preview = coordinator
+                    .store
+                    .preview_artifact_bundle_resources(
+                        &candidate.manifest_sha256,
+                        &candidate.members,
+                    )
+                    .map_err(|error| {
+                        artifacts::SimulationRunArtifactErrorV1::Durability(error.to_string())
+                    })?;
+                let usage = candidate_resource_usage(&coordinator.current, None, preview).map_err(
+                    |error| artifacts::SimulationRunArtifactErrorV1::Integrity(error.to_string()),
+                )?;
+                if let Err(error) = coordinator
+                    .current
+                    .resource_policy
+                    .validate_candidate(&usage)
+                {
+                    if let Some(limit) = error.limit_reached().cloned() {
+                        if let Some(candidate_identity) = coordinator
+                            .store
+                            .existing_artifact_candidate_identity()
+                            .map_err(|error| {
+                                artifacts::SimulationRunArtifactErrorV1::Durability(
+                                    error.to_string(),
+                                )
+                            })?
+                        {
+                            coordinator
+                                .store
+                                .remove_validated_artifact_candidate(
+                                    &candidate_identity,
+                                    &candidate.members,
+                                )
+                                .map_err(|error| {
+                                    artifacts::SimulationRunArtifactErrorV1::Durability(
+                                        error.to_string(),
+                                    )
+                                })?;
+                        }
+                        let persisted = coordinator.persist_resource_limit(None, limit);
+                        return match persisted {
+                            Err(SessionError::ResourceLimitReached(persisted)) => Err(
+                                artifacts::SimulationRunArtifactErrorV1::ResourceLimitReached(
+                                    persisted,
+                                ),
+                            ),
+                            Err(SessionError::DurabilityRecoveryRequired(message)) => Err(
+                                artifacts::SimulationRunArtifactErrorV1::DurabilityRecoveryRequired(
+                                    message,
+                                ),
+                            ),
+                            Err(error) => Err(artifacts::SimulationRunArtifactErrorV1::Durability(
+                                error.to_string(),
+                            )),
+                            Ok(()) => Err(artifacts::SimulationRunArtifactErrorV1::Integrity(
+                                "资源超限事实提交意外返回成功".to_owned(),
+                            )),
+                        };
+                    }
+                    return Err(artifacts::SimulationRunArtifactErrorV1::Integrity(
+                        error.to_string(),
+                    ));
+                }
+                let before = resource_high_water.clone();
+                resource_high_water.observe(&usage);
+                if resource_high_water == before {
+                    converged = Some(candidate);
+                    break;
+                }
+            }
+            converged.ok_or_else(|| {
+                artifacts::SimulationRunArtifactErrorV1::Integrity(
+                    "运行产物资源高水位与固定成员字节没有收敛".to_owned(),
+                )
+            })?
+        };
         let artifact_directory = coordinator
             .store
             .publish_immutable_artifact_bundle(&bundle.manifest_sha256, &bundle.members)
@@ -4655,7 +5824,7 @@ impl SimExecutionProcessV1 {
             persistence
                 .lock()
                 .map_err(|_| SessionError::Durability("耐久协调器锁不可用".to_owned()))?
-                .require_business_writes_open()?;
+                .require_new_ingress_open(Some(&spec.session_id))?;
             let mode_matches_role = match spec.caller_role {
                 SimCallerRoleV1::Paper => {
                     matches!(
@@ -4718,7 +5887,7 @@ impl SimExecutionProcessV1 {
                     opening_anchor: Box::new(control.opening_anchor.clone()),
                     initialization: control.initialization.clone(),
                 });
-            coordinator.commit(&evidence, checkpoint)?;
+            coordinator.commit_new_ingress(&evidence, checkpoint)?;
         }
         self.inner = candidate_root;
         Ok(NewPreparedSessionV2 {
@@ -4836,7 +6005,7 @@ impl SimExecutionProcessV1 {
         let mut candidate_checkpoint = session.durable_checkpoint();
         candidate_checkpoint.session = candidate_session.checkpoint();
         let session_id = session.session_spec().session_id.clone();
-        session.commit_durable_candidate(
+        session.commit_durable_candidate_new_ingress(
             candidate_checkpoint,
             DurableTransactionEvidenceV1::new(DurableTransactionFactV1::MarketEnrolled {
                 session_id,
@@ -5147,6 +6316,7 @@ impl SimExecutionProcessV1 {
                 "会话退休缺少当前耐久会话正文".to_owned(),
             ));
         }
+        candidate.session_resource_admission.remove(&session_id);
         let completion_fact = match completion_kind {
             DurableSessionCompletionKindV1::PaperRetentionExpired => {
                 DurableTransactionFactV1::SessionRetentionExpired {
@@ -6606,6 +7776,36 @@ impl SimExecutionSessionV1 {
             .require_business_writes_open()
     }
 
+    fn require_new_ingress_open(&self) -> Result<(), SessionError> {
+        let Some(persistence) = &self.persistence else {
+            return Ok(());
+        };
+        persistence
+            .lock()
+            .map_err(|_| SessionError::Durability("耐久协调器锁不可用".to_owned()))?
+            .require_new_ingress_open(Some(&self.session.session_spec().session_id))
+    }
+
+    fn reserve_transient_input(&self, quantity: ResourceQuantityV1) -> Result<(), SessionError> {
+        let Some(persistence) = &self.persistence else {
+            return Ok(());
+        };
+        persistence
+            .lock()
+            .map_err(|_| SessionError::Durability("耐久协调器锁不可用".to_owned()))?
+            .reserve_transient_input(&self.session.session_spec().session_id, quantity)
+    }
+
+    fn release_transient_input(&self) -> Result<(), SessionError> {
+        let Some(persistence) = &self.persistence else {
+            return Ok(());
+        };
+        persistence
+            .lock()
+            .map_err(|_| SessionError::Durability("耐久协调器锁不可用".to_owned()))?
+            .release_transient_input(&self.session.session_spec().session_id)
+    }
+
     fn runtime_state(&self) -> ExecutionSessionStateV1 {
         ExecutionSessionStateV1 {
             session: self.session.clone(),
@@ -6642,7 +7842,26 @@ impl SimExecutionSessionV1 {
         &self,
         expected: &ExecutionSessionCheckpointV1,
         candidate: ExecutionSessionCheckpointV1,
+        evidence: DurableTransactionEvidenceV1,
+    ) -> Result<(), SessionError> {
+        self.commit_durable_transition_inner(expected, candidate, evidence, false)
+    }
+
+    fn commit_durable_transition_new_ingress(
+        &self,
+        expected: &ExecutionSessionCheckpointV1,
+        candidate: ExecutionSessionCheckpointV1,
+        evidence: DurableTransactionEvidenceV1,
+    ) -> Result<(), SessionError> {
+        self.commit_durable_transition_inner(expected, candidate, evidence, true)
+    }
+
+    fn commit_durable_transition_inner(
+        &self,
+        expected: &ExecutionSessionCheckpointV1,
+        candidate: ExecutionSessionCheckpointV1,
         mut evidence: DurableTransactionEvidenceV1,
+        new_ingress: bool,
     ) -> Result<(), SessionError> {
         let Some(persistence) = &self.persistence else {
             return Ok(());
@@ -6659,6 +7878,9 @@ impl SimExecutionSessionV1 {
         }
         if candidate == *expected {
             return Ok(());
+        }
+        if new_ingress {
+            coordinator.require_new_ingress_open(Some(&session_id))?;
         }
         let before_deltas = account_deltas_in_checkpoint(expected)
             .map_err(|error| SessionError::Durability(error.to_string()))?;
@@ -6729,7 +7951,11 @@ impl SimExecutionSessionV1 {
             .flatten();
         let mut run_checkpoint = coordinator.current.clone();
         run_checkpoint.sessions.insert(session_id, candidate);
-        coordinator.commit(&evidence, run_checkpoint)
+        if new_ingress {
+            coordinator.commit_new_ingress(&evidence, run_checkpoint)
+        } else {
+            coordinator.commit(&evidence, run_checkpoint)
+        }
     }
 
     fn commit_durable_candidate(
@@ -6739,6 +7965,15 @@ impl SimExecutionSessionV1 {
     ) -> Result<(), SessionError> {
         let expected = self.durable_checkpoint();
         self.commit_durable_transition(&expected, candidate, evidence)
+    }
+
+    fn commit_durable_candidate_new_ingress(
+        &self,
+        candidate: ExecutionSessionCheckpointV1,
+        evidence: DurableTransactionEvidenceV1,
+    ) -> Result<(), SessionError> {
+        let expected = self.durable_checkpoint();
+        self.commit_durable_transition_new_ingress(&expected, candidate, evidence)
     }
 
     fn close_ingress_durably(&mut self) -> Result<(), SessionError> {
@@ -8549,6 +9784,35 @@ impl SimExecutionSessionV1 {
         &mut self,
         bucket: ClosedMarketEventBucketV1,
     ) -> Result<MarketBucketApplyDispositionV1, MarketEventErrorV1> {
+        let physical_retry = self.session.last_applied_bucket_identity_matches(&bucket);
+        let transient_input = if physical_retry {
+            ResourceQuantityV1::default()
+        } else {
+            bucket.resource_input_quantity()?
+        };
+        if !physical_retry {
+            self.reserve_transient_input(transient_input)
+                .map_err(MarketEventErrorV1::from)?;
+        }
+        let result = self.apply_closed_market_event_bucket_inner(bucket, transient_input);
+        if !physical_retry {
+            let release = self
+                .release_transient_input()
+                .map_err(MarketEventErrorV1::from);
+            if result.is_ok() {
+                release?;
+            } else {
+                let _ = release;
+            }
+        }
+        result
+    }
+
+    fn apply_closed_market_event_bucket_inner(
+        &mut self,
+        bucket: ClosedMarketEventBucketV1,
+        transient_input: ResourceQuantityV1,
+    ) -> Result<MarketBucketApplyDispositionV1, MarketEventErrorV1> {
         let expected_checkpoint = self.durable_checkpoint();
         let session_id = self.session.session_spec().session_id.clone();
         let bucket_reference = bucket.durable_reference();
@@ -8567,17 +9831,16 @@ impl SimExecutionSessionV1 {
             candidate_state.query_state = working_query_state;
             let candidate_checkpoint =
                 candidate_state.checkpoint(self.downstream_durable_confirmation.clone());
-            self.commit_durable_transition(
-                &expected_checkpoint,
-                candidate_checkpoint,
-                DurableTransactionEvidenceV1::new(
-                    DurableTransactionFactV1::PlatformBucketApplied {
-                        session_id: session_id.clone(),
-                        bucket: bucket_reference.clone(),
-                    },
-                ),
-            )
-            .map_err(MarketEventErrorV1::from)?;
+            let mut evidence = DurableTransactionEvidenceV1::new(
+                DurableTransactionFactV1::PlatformBucketApplied {
+                    session_id: session_id.clone(),
+                    bucket: bucket_reference.clone(),
+                },
+            );
+            evidence.transient_input_session_id = Some(session_id.clone());
+            evidence.transient_input = transient_input;
+            self.commit_durable_transition(&expected_checkpoint, candidate_checkpoint, evidence)
+                .map_err(MarketEventErrorV1::from)?;
             self.replace_runtime_state(candidate_state);
             return Ok(disposition);
         }
@@ -8594,17 +9857,16 @@ impl SimExecutionSessionV1 {
             candidate_state.session = working_session;
             let candidate_checkpoint =
                 candidate_state.checkpoint(self.downstream_durable_confirmation.clone());
-            self.commit_durable_transition(
-                &expected_checkpoint,
-                candidate_checkpoint,
-                DurableTransactionEvidenceV1::new(
-                    DurableTransactionFactV1::PlatformBucketApplied {
-                        session_id: session_id.clone(),
-                        bucket: bucket_reference.clone(),
-                    },
-                ),
-            )
-            .map_err(MarketEventErrorV1::from)?;
+            let mut evidence = DurableTransactionEvidenceV1::new(
+                DurableTransactionFactV1::PlatformBucketApplied {
+                    session_id: session_id.clone(),
+                    bucket: bucket_reference.clone(),
+                },
+            );
+            evidence.transient_input_session_id = Some(session_id.clone());
+            evidence.transient_input = transient_input;
+            self.commit_durable_transition(&expected_checkpoint, candidate_checkpoint, evidence)
+                .map_err(MarketEventErrorV1::from)?;
             self.replace_runtime_state(candidate_state);
             return Ok(disposition);
         }
@@ -8714,15 +9976,15 @@ impl SimExecutionSessionV1 {
         candidate_state.lifecycle_outbox = working_lifecycle_outbox;
         let candidate_checkpoint =
             candidate_state.checkpoint(self.downstream_durable_confirmation.clone());
-        self.commit_durable_transition(
-            &expected_checkpoint,
-            candidate_checkpoint,
+        let mut evidence =
             DurableTransactionEvidenceV1::new(DurableTransactionFactV1::PlatformBucketApplied {
-                session_id,
+                session_id: session_id.clone(),
                 bucket: bucket_reference,
-            }),
-        )
-        .map_err(MarketEventErrorV1::from)?;
+            });
+        evidence.transient_input_session_id = Some(session_id);
+        evidence.transient_input = transient_input;
+        self.commit_durable_transition(&expected_checkpoint, candidate_checkpoint, evidence)
+            .map_err(MarketEventErrorV1::from)?;
         self.replace_runtime_state(candidate_state);
         Ok(disposition)
     }
@@ -11232,6 +12494,9 @@ impl SimExecutionSessionV1 {
             Some(_) => true,
             None => false,
         };
+        if !physical_retry {
+            self.require_new_ingress_open()?;
+        }
         if let Some((idempotency_key, payload_sha256)) = mutation_binding(&request)
             && let Some(existing) = self.mutation_payloads.get(&idempotency_key)
             && existing != &payload_sha256
@@ -11309,9 +12574,7 @@ impl SimExecutionSessionV1 {
         };
         let candidate_checkpoint =
             candidate_state.checkpoint(self.downstream_durable_confirmation.clone());
-        self.commit_durable_transition(
-            &expected_checkpoint,
-            candidate_checkpoint,
+        let evidence =
             DurableTransactionEvidenceV1::new(DurableTransactionFactV1::RequestRegistered {
                 session_id: self.session.session_spec().session_id.clone(),
                 registration: DurableRequestRegistrationV1 {
@@ -11319,8 +12582,16 @@ impl SimExecutionSessionV1 {
                     transit: schedule.request.transit.clone(),
                     actions: schedule.actions.clone(),
                 },
-            }),
-        )?;
+            });
+        if physical_retry {
+            self.commit_durable_transition(&expected_checkpoint, candidate_checkpoint, evidence)?;
+        } else {
+            self.commit_durable_transition_new_ingress(
+                &expected_checkpoint,
+                candidate_checkpoint,
+                evidence,
+            )?;
+        }
         self.replace_runtime_state(candidate_state);
         Ok(schedule)
     }
@@ -15652,17 +16923,32 @@ mod tests {
     use crate::latency_profile::{DelaySampleDomainV1, load_embedded_proxy_latency_profile};
     use crate::platform_rules::tests::successful_snapshot_for_sim_tests;
 
+    fn resource_policy_for_tests() -> (SimulationResourcePolicyV1, Sha256Hex) {
+        let policy = SimulationResourcePolicyV1::component_golden_v1();
+        let sha256 = policy.content_sha256().expect("计算测试资源策略摘要");
+        (policy, sha256)
+    }
+
+    fn projection_evidence_for_tests(
+        fact: DurableTransactionFactV1,
+    ) -> DurableTransactionEvidenceV1 {
+        let mut evidence = DurableTransactionEvidenceV1::new(fact);
+        evidence.resource_usage = Some(SimulationResourceUsageV1::default());
+        evidence
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn durable_completion_facts_bind_role_and_cannot_certify_missing_run_closure() {
         let rules = successful_snapshot_for_sim_tests().await;
         let implementation_identity = rules.snapshot().provenance.implementation_identity.clone();
         let run_intent_binding = SimulationRunIntentBindingV1::try_new(
             implementation_identity,
-            SimulationWorkloadKindV1::ComponentGolden,
-            SimulationDeterministicScriptContractV1::ComponentGoldenV1,
+            SimulationWorkloadKindV1::RealVertical,
+            SimulationDeterministicScriptContractV1::RealVerticalV1,
         )
         .expect("构造组件测试运行意图");
         let source_identity = Sha256Hex("d".repeat(64));
+        let (resource_policy, resource_policy_sha256) = resource_policy_for_tests();
         let scenario = scenario_for_sim_tests();
         let mut process = SimExecutionProcessV1::try_new(
             "component-test-run".to_owned(),
@@ -15689,16 +16975,18 @@ mod tests {
 
         let mut projection = DurableEvidenceProjectionV1::for_artifacts();
         projection
-            .apply(&DurableTransactionEvidenceV1::new(
+            .apply(&projection_evidence_for_tests(
                 DurableTransactionFactV1::RunCreated {
                     run_id: process.run_id().to_owned(),
                     market_event_source_identity_sha256: source_identity.clone(),
                     run_intent_binding: run_intent_binding.clone(),
+                    resource_policy: resource_policy.clone(),
+                    resource_policy_sha256: resource_policy_sha256.clone(),
                 },
             ))
             .expect("投影运行创建事实");
         projection
-            .apply(&DurableTransactionEvidenceV1::new(
+            .apply(&projection_evidence_for_tests(
                 DurableTransactionFactV1::SessionCreated {
                     session_spec: spec.clone(),
                     opening_anchor: Box::new(prepared.control.opening_anchor.clone()),
@@ -15707,7 +16995,7 @@ mod tests {
             ))
             .expect("投影会话创建事实");
         projection
-            .apply(&DurableTransactionEvidenceV1::new(
+            .apply(&projection_evidence_for_tests(
                 DurableTransactionFactV1::SessionActivated {
                     request: activation,
                     result: activated.snapshot,
@@ -15716,7 +17004,7 @@ mod tests {
             .expect("投影会话激活事实");
         let mut role_mismatch = projection;
         assert!(matches!(
-            role_mismatch.apply(&DurableTransactionEvidenceV1::new(
+            role_mismatch.apply(&projection_evidence_for_tests(
                 DurableTransactionFactV1::SessionRetentionExpired {
                     session_id: spec.session_id.clone(),
                 },
@@ -15727,7 +17015,7 @@ mod tests {
 
         let mut incomplete = role_mismatch;
         incomplete
-            .apply(&DurableTransactionEvidenceV1::new(
+            .apply(&projection_evidence_for_tests(
                 DurableTransactionFactV1::SessionCleanRunCompleted {
                     session_id: spec.session_id.clone(),
                 },
@@ -15742,6 +17030,12 @@ mod tests {
             execution_contract_version: SIM_EXECUTION_CONTRACT_V1.to_owned(),
             market_event_source_identity_sha256: source_identity,
             run_intent_binding,
+            resource_policy,
+            resource_policy_sha256,
+            component_golden_measurement_sha256: None,
+            resource_high_water: SimulationResourceHighWaterV1::default(),
+            run_resource_admission: ResourceAdmissionStateV1::default(),
+            session_resource_admission: BTreeMap::new(),
             lifecycle: DurableRunLifecycleV1::Open,
             process_root: process.inner.checkpoint().expect("形成错误检查点"),
             sessions: BTreeMap::new(),
@@ -15759,11 +17053,12 @@ mod tests {
         let implementation_identity = rules.snapshot().provenance.implementation_identity.clone();
         let run_intent_binding = SimulationRunIntentBindingV1::try_new(
             implementation_identity,
-            SimulationWorkloadKindV1::ComponentGolden,
-            SimulationDeterministicScriptContractV1::ComponentGoldenV1,
+            SimulationWorkloadKindV1::RealVertical,
+            SimulationDeterministicScriptContractV1::RealVerticalV1,
         )
         .expect("构造组件测试运行意图");
         let source_identity = Sha256Hex("d".repeat(64));
+        let (resource_policy, resource_policy_sha256) = resource_policy_for_tests();
         let scenario = scenario_for_sim_tests();
         let mut process = SimExecutionProcessV1::try_new(
             "component-test-run".to_owned(),
@@ -15795,6 +17090,8 @@ mod tests {
                 run_id: process.run_id().to_owned(),
                 market_event_source_identity_sha256: source_identity.clone(),
                 run_intent_binding: run_intent_binding.clone(),
+                resource_policy: resource_policy.clone(),
+                resource_policy_sha256: resource_policy_sha256.clone(),
             },
             DurableTransactionFactV1::SessionCreated {
                 session_spec: spec.clone(),
@@ -15807,7 +17104,7 @@ mod tests {
             },
         ] {
             projection
-                .apply(&DurableTransactionEvidenceV1::new(fact))
+                .apply(&projection_evidence_for_tests(fact))
                 .expect("投影模拟盘前驱事实");
         }
         let session_id = spec.session_id.clone();
@@ -15848,7 +17145,7 @@ mod tests {
             .query_retention
             .insert(session_id.clone(), (2, Some(0), Some(0)));
         projection
-            .apply(&DurableTransactionEvidenceV1::new(
+            .apply(&projection_evidence_for_tests(
                 DurableTransactionFactV1::SessionRetentionExpired {
                     session_id: session_id.clone(),
                 },
@@ -15863,6 +17160,12 @@ mod tests {
             execution_contract_version: SIM_EXECUTION_CONTRACT_V1.to_owned(),
             market_event_source_identity_sha256: source_identity,
             run_intent_binding,
+            resource_policy,
+            resource_policy_sha256,
+            component_golden_measurement_sha256: None,
+            resource_high_water: SimulationResourceHighWaterV1::default(),
+            run_resource_admission: ResourceAdmissionStateV1::default(),
+            session_resource_admission: BTreeMap::new(),
             lifecycle: DurableRunLifecycleV1::Open,
             process_root: process.inner.checkpoint().expect("形成错误检查点"),
             sessions: BTreeMap::new(),
@@ -16256,6 +17559,27 @@ mod tests {
     fn durable_platform_bucket_projection_rejects_hidden_paper_and_conflicting_same_time_tail() {
         let session_id = "paper-durable-bucket".to_owned();
         let mut projection = DurableEvidenceProjectionV1::default();
+        let (resource_policy, resource_policy_sha256) = resource_policy_for_tests();
+        projection
+            .apply(&projection_evidence_for_tests(
+                DurableTransactionFactV1::RunCreated {
+                    run_id: "component-test-run".to_owned(),
+                    market_event_source_identity_sha256: Sha256Hex("2".repeat(64)),
+                    run_intent_binding: SimulationRunIntentBindingV1::try_new(
+                        crate::platform_rules::ImplementationIdentityV1 {
+                            git_commit: "1".repeat(40),
+                            source_identity_sha256: Sha256Hex("2".repeat(64)),
+                            cargo_lock_sha256: Sha256Hex("3".repeat(64)),
+                        },
+                        SimulationWorkloadKindV1::ComponentGolden,
+                        SimulationDeterministicScriptContractV1::ComponentGoldenV1,
+                    )
+                    .expect("构造测试运行意图"),
+                    resource_policy,
+                    resource_policy_sha256,
+                },
+            ))
+            .expect("先投影真实运行创建前缀");
         projection.session_creations.insert(
             session_id.clone(),
             (
@@ -16273,7 +17597,7 @@ mod tests {
             ),
         );
         let evidence = |bucket| {
-            DurableTransactionEvidenceV1::new(DurableTransactionFactV1::PlatformBucketApplied {
+            projection_evidence_for_tests(DurableTransactionFactV1::PlatformBucketApplied {
                 session_id: session_id.clone(),
                 bucket,
             })

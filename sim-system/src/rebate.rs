@@ -299,6 +299,27 @@ mod rebate_day_buckets_serde {
 }
 
 impl RebateStateV1 {
+    pub(crate) fn resource_record_count(&self) -> usize {
+        self.markets
+            .len()
+            .saturating_add(
+                self.markets
+                    .values()
+                    .map(|market| market.fills.len())
+                    .sum::<usize>(),
+            )
+            .saturating_add(self.maker_trade_conditions.len())
+            .saturating_add(self.taker_fills.len())
+            .saturating_add(self.day_buckets.len())
+            .saturating_add(
+                self.day_buckets
+                    .values()
+                    .map(|bucket| bucket.pending_predecessors.len())
+                    .sum::<usize>(),
+            )
+            .saturating_add(self.clocks.len())
+    }
+
     pub(crate) fn new(
         directory: &SessionMarketDirectoryV1,
         rules: &SealedProcessRuleSnapshot,

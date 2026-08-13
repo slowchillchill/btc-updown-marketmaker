@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 
 use crate::market_directory::SessionMarketDirectoryV1;
 use crate::matching::{AuthorizedMarketEventEffectsV1, MatchingStateErrorV1};
+use crate::resource::ResourceQuantityV1;
 use crate::scenario::PlatformMarketV1;
 use crate::session::{InputPathSealOutcomeV1, SessionError, SimCallerRoleV1, SimSession};
 
@@ -56,6 +57,23 @@ pub(crate) struct DurableMarketBucketReferenceV1 {
 }
 
 impl ClosedMarketEventBucketV1 {
+    pub(crate) fn resource_input_quantity(&self) -> Result<ResourceQuantityV1, MarketEventErrorV1> {
+        let records = u64::try_from(self.encoded_events.len())
+            .map_err(|_| SessionError::ExecutionState("输入桶事件数量超出 u64".to_owned()))?;
+        let bytes = self
+            .encoded_events
+            .iter()
+            .try_fold(0_u64, |total, encoded| {
+                let encoded = u64::try_from(encoded.len()).map_err(|_| {
+                    SessionError::ExecutionState("输入桶事件字节超出 u64".to_owned())
+                })?;
+                total
+                    .checked_add(encoded)
+                    .ok_or_else(|| SessionError::ExecutionState("输入桶事件总字节溢出".to_owned()))
+            })?;
+        Ok(ResourceQuantityV1::new(records, bytes))
+    }
+
     pub(crate) fn drives_execution_for(&self, caller_role: SimCallerRoleV1) -> bool {
         matches!(
             (caller_role, self.path),
@@ -260,6 +278,7 @@ struct AppliedBucketIdentityV1 {
     bucket_at_utc_ms: i64,
     start_index_position: u64,
     next_index_position: u64,
+    closure: MillisecondBucketClosureV1,
     sha256: Sha256Hex,
 }
 
@@ -470,6 +489,39 @@ pub(crate) struct MarketStateStoreV1 {
 }
 
 impl MarketStateStoreV1 {
+    pub(crate) fn resource_hot_market_count(&self) -> usize {
+        self.markets.len()
+    }
+
+    pub(crate) fn resource_index_count(&self) -> usize {
+        self.markets
+            .len()
+            .saturating_add(self.evicted_markets.len())
+            .saturating_add(usize::from(self.last_applied_bucket.is_some()))
+    }
+
+    pub(crate) fn resource_external_price_level_count(&self) -> usize {
+        self.markets
+            .values()
+            .flat_map(|market| market.assets.values())
+            .map(|asset| asset.external_book.bids.len() + asset.external_book.asks.len())
+            .sum()
+    }
+
+    pub(crate) fn resource_encoded_bytes(&self) -> Result<u64, String> {
+        let bytes = serde_json::to_vec(self)
+            .map_err(|error| format!("市场热状态资源计量序列化失败：{error}"))?;
+        u64::try_from(bytes.len()).map_err(|_| "市场热状态资源字节超出 u64".to_owned())
+    }
+
+    pub(crate) fn resource_index_encoded_bytes(&self) -> Result<u64, String> {
+        let market_ids = self.markets.keys().collect::<Vec<_>>();
+        let bytes =
+            serde_json::to_vec(&(market_ids, &self.evicted_markets, &self.last_applied_bucket))
+                .map_err(|error| format!("市场索引资源计量序列化失败：{error}"))?;
+        u64::try_from(bytes.len()).map_err(|_| "市场索引资源字节超出 u64".to_owned())
+    }
+
     pub(crate) fn lifecycle_phase_recovery_states(
         &self,
     ) -> BTreeMap<String, MarketLifecyclePhaseV1> {
@@ -849,7 +901,6 @@ impl MarketStateV1 {
         self.external_state_released
     }
 
-    #[cfg(test)]
     pub(crate) fn external_price_level_count(&self) -> usize {
         self.assets
             .values()
@@ -1582,6 +1633,7 @@ fn decode_bucket(
             bucket_at_utc_ms: bucket.bucket_at_utc_ms,
             start_index_position: bucket.start_index_position,
             next_index_position: bucket.next_index_position,
+            closure: bucket.closure,
             sha256,
         },
     ))
@@ -1718,6 +1770,28 @@ impl SimSession {
             })
     }
 
+    pub(crate) fn last_applied_bucket_identity_matches(
+        &self,
+        bucket: &ClosedMarketEventBucketV1,
+    ) -> bool {
+        let store = match bucket.path {
+            MarketEventPathV1::HiddenPlatform => {
+                let Some(store) = self.hidden_platform_markets() else {
+                    return false;
+                };
+                store
+            }
+            MarketEventPathV1::PublicVisibility => self.public_markets(),
+        };
+        store.last_applied_bucket.as_ref().is_some_and(|previous| {
+            previous.bucket_at_utc_ms == bucket.bucket_at_utc_ms
+                && previous.start_index_position == bucket.start_index_position
+                && previous.next_index_position == bucket.next_index_position
+                && previous.closure == bucket.closure
+                && previous.sha256 == bucket_sha256(bucket)
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn apply_closed_market_event_bucket(
         &mut self,
@@ -1766,23 +1840,37 @@ impl SimSession {
             && previous.bucket_at_utc_ms == identity.bucket_at_utc_ms
             && previous.next_index_position == identity.next_index_position
         {
-            if previous.start_index_position == identity.start_index_position
-                && previous.sha256 == identity.sha256
+            if previous.start_index_position != identity.start_index_position
+                || previous.sha256 != identity.sha256
             {
-                if bucket.closure == MillisecondBucketClosureV1::EndOfInput {
+                return Err(MarketEventErrorV1::BucketIdentityConflict);
+            }
+            match (previous.closure, identity.closure) {
+                (before, after) if before == after => {}
+                (
+                    MillisecondBucketClosureV1::NextEventAt(_),
+                    MillisecondBucketClosureV1::EndOfInput,
+                ) => {
                     current_store
                         .validate_initial_load_complete(&PreparedMarketEventsV1::default())?;
                     if self.input_path_seal(bucket.path).is_none() {
                         let outcome = current_store.expected_input_seal_outcome();
                         self.commit_input_path_seal(bucket.path, outcome);
                     }
+                    let store = match bucket.path {
+                        MarketEventPathV1::HiddenPlatform => self
+                            .hidden_platform_markets_mut()
+                            .expect("非模拟盘会话必须持有隐藏平台状态"),
+                        MarketEventPathV1::PublicVisibility => self.public_markets_mut(),
+                    };
+                    store.last_applied_bucket = Some(identity);
                 }
-                return Ok((
-                    MarketBucketApplyDispositionV1::PhysicalRetry,
-                    AuthorizedMarketEventEffectsV1::default(),
-                ));
+                _ => return Err(MarketEventErrorV1::BucketIdentityConflict),
             }
-            return Err(MarketEventErrorV1::BucketIdentityConflict);
+            return Ok((
+                MarketBucketApplyDispositionV1::PhysicalRetry,
+                AuthorizedMarketEventEffectsV1::default(),
+            ));
         }
 
         let expected_start = match bucket.path {
@@ -2038,6 +2126,7 @@ mod tests {
             bucket_at_utc_ms: 1_500,
             start_index_position: 2,
             next_index_position: 4,
+            closure: MillisecondBucketClosureV1::NextEventAt(1_600),
             sha256: Sha256Hex("a".repeat(64)),
         });
 

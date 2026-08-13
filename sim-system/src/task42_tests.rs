@@ -92,6 +92,9 @@ struct DurableEvidenceAuditWireV1 {
     account_deltas: Vec<Value>,
     logical_action_results: Vec<Value>,
     private_output_drafts: Vec<Value>,
+    transient_input_session_id: Option<String>,
+    transient_input: Value,
+    resource_usage: Value,
 }
 
 #[derive(Deserialize)]
@@ -561,8 +564,8 @@ impl RecoveryDependenciesV1 {
                 .provenance
                 .implementation_identity
                 .clone(),
-            SimulationWorkloadKindV1::ComponentGolden,
-            SimulationDeterministicScriptContractV1::ComponentGoldenV1,
+            SimulationWorkloadKindV1::RealVertical,
+            SimulationDeterministicScriptContractV1::RealVerticalV1,
         )
         .expect("构造测试运行意图绑定");
         SimExecutionProcessV1::try_new_with_local_persistence(
@@ -4637,6 +4640,9 @@ async fn task423_task431_retention_expiry_removes_session_and_seals_auditable_ar
             &durable_evidence.account_deltas,
             &durable_evidence.logical_action_results,
             &durable_evidence.private_output_drafts,
+            &durable_evidence.transient_input_session_id,
+            &durable_evidence.transient_input,
+            &durable_evidence.resource_usage,
         );
         if let Some(payload) = durable_evidence.fact.get("PLATFORM_BUCKET_APPLIED") {
             let applied: PlatformBucketAppliedAuditWireV1 =

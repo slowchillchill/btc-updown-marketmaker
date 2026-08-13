@@ -25,6 +25,18 @@ pub(crate) struct ImmutableArtifactMemberV1 {
     pub(crate) bytes: Vec<u8>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DurableResourcePreviewV1 {
+    pub(crate) evidence_file_count: u64,
+    pub(crate) evidence_bytes: u64,
+    pub(crate) checkpoint_file_count: u64,
+    pub(crate) checkpoint_bytes: u64,
+    pub(crate) artifact_file_count: u64,
+    pub(crate) artifact_bytes: u64,
+    pub(crate) runtime_root_file_count: u64,
+    pub(crate) runtime_root_bytes: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DurableCommitReceiptV1 {
     pub(crate) sequence: u64,
@@ -201,6 +213,307 @@ pub(crate) struct LocalDurabilityStoreV1 {
 }
 
 impl LocalDurabilityStoreV1 {
+    pub(crate) fn current_resources(&self) -> Result<DurableResourcePreviewV1, PersistenceErrorV1> {
+        let (runtime_root_file_count, runtime_root_bytes) =
+            directory_regular_file_usage(&self.root)?;
+        let (evidence_file_count, evidence_bytes) =
+            directory_regular_file_usage(&self.evidence_directory)?;
+        let (checkpoint_file_count, checkpoint_bytes) =
+            directory_regular_file_usage(&self.checkpoint_directory)?;
+        let artifacts = self.root.join(ARTIFACT_DIRECTORY_NAME);
+        let (artifact_file_count, artifact_bytes) = if artifacts.exists() {
+            directory_regular_file_usage(&artifacts)?
+        } else {
+            (0, 0)
+        };
+        Ok(DurableResourcePreviewV1 {
+            evidence_file_count,
+            evidence_bytes,
+            checkpoint_file_count,
+            checkpoint_bytes,
+            artifact_file_count,
+            artifact_bytes,
+            runtime_root_file_count,
+            runtime_root_bytes,
+        })
+    }
+
+    pub(crate) fn preview_commit_resources<Evidence, Checkpoint>(
+        &self,
+        evidence: &Evidence,
+        checkpoint: &Checkpoint,
+    ) -> Result<DurableResourcePreviewV1, PersistenceErrorV1>
+    where
+        Evidence: Serialize,
+        Checkpoint: Serialize,
+    {
+        let evidence_json = serde_json::to_vec(evidence)
+            .map_err(|error| json_error("预编码领域证据正文", error))?;
+        let checkpoint_json = serde_json::to_vec(checkpoint)
+            .map_err(|error| json_error("预编码检查点正文", error))?;
+        let domain_evidence = parse_raw_json(&evidence_json, "预验证领域证据正文")?;
+        let checkpoint = parse_raw_json(&checkpoint_json, "预验证检查点正文")?;
+        let previous_sequence = self
+            .current
+            .as_ref()
+            .map_or(0, |current| current.content.through_commit_sequence);
+        let sequence = previous_sequence
+            .checked_add(1)
+            .ok_or(PersistenceErrorV1::SequenceOverflow)?;
+        let envelope = EvidenceEnvelopeV1 {
+            schema_version: EVIDENCE_ENVELOPE_SCHEMA_V1.to_owned(),
+            sequence,
+            predecessor_evidence_sha256: self
+                .current
+                .as_ref()
+                .map(|current| current.content.evidence_head_sha256.clone()),
+            body: domain_evidence,
+        };
+        let next_evidence_bytes = serde_json::to_vec(&envelope)
+            .map_err(|error| json_error("预编码证据提交信封", error))?;
+        let evidence_sha256 = sha256(&next_evidence_bytes);
+        let content = CurrentCheckpointContentV1 {
+            schema_version: CURRENT_CHECKPOINT_SCHEMA_V1.to_owned(),
+            through_commit_sequence: sequence,
+            evidence_head_sha256: evidence_sha256,
+            checkpoint,
+        };
+        validate_checkpoint_content(&content)?;
+        let current = CurrentCheckpointFileV1 {
+            checkpoint_sha256: checkpoint_content_sha256(&content)?,
+            content,
+        };
+        let next_checkpoint_bytes = serde_json::to_vec(&current)
+            .map_err(|error| json_error("预编码不可变检查点", error))?;
+        let pointer = CurrentCheckpointPointerV1 {
+            schema_version: CURRENT_POINTER_SCHEMA_V1.to_owned(),
+            through_commit_sequence: sequence,
+            checkpoint_sha256: current.checkpoint_sha256.clone(),
+        };
+        let next_pointer_bytes = serde_json::to_vec(&pointer)
+            .map_err(|error| json_error("预编码 CURRENT 指针", error))?;
+
+        let root_candidates = inspect_known_orphan_candidates(
+            &self.root,
+            KnownOrphanCandidateKindV1::CurrentPointer,
+        )?;
+        let evidence_candidates = inspect_known_orphan_candidates(
+            &self.evidence_directory,
+            KnownOrphanCandidateKindV1::ImmutableJson,
+        )?;
+        let checkpoint_candidates = inspect_known_orphan_candidates(
+            &self.checkpoint_directory,
+            KnownOrphanCandidateKindV1::ImmutableJson,
+        )?;
+        let orphan_candidate_file_count = root_candidates
+            .file_count
+            .checked_add(evidence_candidates.file_count)
+            .and_then(|count| count.checked_add(checkpoint_candidates.file_count))
+            .ok_or_else(|| PersistenceErrorV1::Integrity("孤立候选文件数量溢出".to_owned()))?;
+        let orphan_candidate_bytes = root_candidates
+            .bytes
+            .checked_add(evidence_candidates.bytes)
+            .and_then(|bytes| bytes.checked_add(checkpoint_candidates.bytes))
+            .ok_or_else(|| PersistenceErrorV1::Integrity("孤立候选文件字节溢出".to_owned()))?;
+
+        let (root_file_count, root_bytes) = directory_regular_file_usage(&self.root)?;
+        let (evidence_file_count, evidence_bytes) =
+            directory_regular_file_usage(&self.evidence_directory)?;
+        let (checkpoint_file_count, checkpoint_bytes) =
+            directory_regular_file_usage(&self.checkpoint_directory)?;
+        let artifacts = self.root.join(ARTIFACT_DIRECTORY_NAME);
+        let (artifact_file_count, artifact_bytes) = if artifacts.exists() {
+            directory_regular_file_usage(&artifacts)?
+        } else {
+            (0, 0)
+        };
+        let candidate_file_count = 3_u64;
+        let candidate_bytes = u64::try_from(next_evidence_bytes.len())
+            .ok()
+            .and_then(|evidence| {
+                u64::try_from(next_checkpoint_bytes.len())
+                    .ok()
+                    .and_then(|checkpoint| evidence.checked_add(checkpoint))
+                    .and_then(|subtotal| {
+                        u64::try_from(next_pointer_bytes.len())
+                            .ok()
+                            .and_then(|pointer| subtotal.checked_add(pointer))
+                    })
+            })
+            .ok_or_else(|| PersistenceErrorV1::Integrity("候选耐久字节溢出".to_owned()))?;
+        Ok(DurableResourcePreviewV1 {
+            evidence_file_count: evidence_file_count
+                .checked_sub(evidence_candidates.file_count)
+                .ok_or_else(|| {
+                    PersistenceErrorV1::Integrity("证据孤立候选数量超出当前计量".to_owned())
+                })?
+                .checked_add(1)
+                .ok_or_else(|| PersistenceErrorV1::Integrity("证据文件数量溢出".to_owned()))?,
+            evidence_bytes: evidence_bytes
+                .checked_sub(evidence_candidates.bytes)
+                .ok_or_else(|| {
+                    PersistenceErrorV1::Integrity("证据孤立候选字节超出当前计量".to_owned())
+                })?
+                .checked_add(u64::try_from(next_evidence_bytes.len()).map_err(|_| {
+                    PersistenceErrorV1::Integrity("证据候选字节超出 u64".to_owned())
+                })?)
+                .ok_or_else(|| PersistenceErrorV1::Integrity("证据字节溢出".to_owned()))?,
+            checkpoint_file_count: checkpoint_file_count
+                .checked_sub(checkpoint_candidates.file_count)
+                .ok_or_else(|| {
+                    PersistenceErrorV1::Integrity("检查点孤立候选数量超出当前计量".to_owned())
+                })?
+                .checked_add(1)
+                .ok_or_else(|| PersistenceErrorV1::Integrity("检查点文件数量溢出".to_owned()))?,
+            checkpoint_bytes: checkpoint_bytes
+                .checked_sub(checkpoint_candidates.bytes)
+                .ok_or_else(|| {
+                    PersistenceErrorV1::Integrity("检查点孤立候选字节超出当前计量".to_owned())
+                })?
+                .checked_add(u64::try_from(next_checkpoint_bytes.len()).map_err(|_| {
+                    PersistenceErrorV1::Integrity("检查点候选字节超出 u64".to_owned())
+                })?)
+                .ok_or_else(|| PersistenceErrorV1::Integrity("检查点字节溢出".to_owned()))?,
+            artifact_file_count,
+            artifact_bytes,
+            runtime_root_file_count: root_file_count
+                .checked_sub(orphan_candidate_file_count)
+                .ok_or_else(|| {
+                    PersistenceErrorV1::Integrity("孤立候选数量超出运行根计量".to_owned())
+                })?
+                .checked_add(candidate_file_count)
+                .ok_or_else(|| PersistenceErrorV1::Integrity("运行根文件数量溢出".to_owned()))?,
+            runtime_root_bytes: root_bytes
+                .checked_sub(orphan_candidate_bytes)
+                .ok_or_else(|| {
+                    PersistenceErrorV1::Integrity("孤立候选字节超出运行根计量".to_owned())
+                })?
+                .checked_add(candidate_bytes)
+                .ok_or_else(|| PersistenceErrorV1::Integrity("运行根字节溢出".to_owned()))?,
+        })
+    }
+
+    pub(crate) fn preview_artifact_bundle_resources(
+        &self,
+        bundle_identity: &Sha256Hex,
+        members: &[ImmutableArtifactMemberV1],
+    ) -> Result<DurableResourcePreviewV1, PersistenceErrorV1> {
+        if validate_sha256_text(&bundle_identity.0).is_err() || members.is_empty() {
+            return Err(PersistenceErrorV1::Integrity(
+                "运行产物目录身份或成员集合非法".to_owned(),
+            ));
+        }
+        let mut expected_names = std::collections::BTreeSet::new();
+        let member_bytes = members.iter().try_fold(0_u64, |total, member| {
+            if member.file_name.is_empty()
+                || member.file_name.starts_with('.')
+                || member.file_name.contains('/')
+                || member.file_name.contains('\\')
+                || !expected_names.insert(member.file_name)
+            {
+                return Err(PersistenceErrorV1::Integrity(
+                    "运行产物成员文件名非法或重复".to_owned(),
+                ));
+            }
+            let bytes = u64::try_from(member.bytes.len()).map_err(|_| {
+                PersistenceErrorV1::Integrity("运行产物成员字节超出 u64".to_owned())
+            })?;
+            total
+                .checked_add(bytes)
+                .ok_or_else(|| PersistenceErrorV1::Integrity("运行产物字节溢出".to_owned()))
+        })?;
+        let member_count = u64::try_from(members.len())
+            .map_err(|_| PersistenceErrorV1::Integrity("运行产物成员数量超出 u64".to_owned()))?;
+        let artifacts = self.root.join(ARTIFACT_DIRECTORY_NAME);
+        let target = artifacts.join(&bundle_identity.0);
+        let artifact_entries = inspect_artifact_directory(&artifacts, bundle_identity)?;
+        if artifact_entries.target_exists {
+            verify_immutable_artifact_bundle(&target, members)?;
+        }
+        let candidate_usage = artifact_entries
+            .candidate_identity
+            .as_ref()
+            .map(|identity| {
+                validate_and_measure_artifact_candidate(
+                    &artifacts.join(format!(".{}.candidate", identity.0)),
+                    &expected_names,
+                )
+            })
+            .transpose()?;
+        let mut current = self.current_resources()?;
+        if let Some((candidate_file_count, candidate_bytes)) = candidate_usage
+            && (candidate_file_count > current.artifact_file_count
+                || candidate_bytes > current.artifact_bytes)
+        {
+            return Err(PersistenceErrorV1::Integrity(
+                "运行产物候选占用超出当前产物计量".to_owned(),
+            ));
+        }
+        let actual_artifact_file_count = current.artifact_file_count;
+        let actual_artifact_bytes = current.artifact_bytes;
+        let actual_runtime_root_file_count = current.runtime_root_file_count;
+        let actual_runtime_root_bytes = current.runtime_root_bytes;
+        let replacement_runtime_root_file_count = current
+            .runtime_root_file_count
+            .checked_sub(current.artifact_file_count)
+            .and_then(|count| count.checked_add(member_count))
+            .ok_or_else(|| PersistenceErrorV1::Integrity("运行根文件数量溢出".to_owned()))?;
+        let replacement_runtime_root_bytes = current
+            .runtime_root_bytes
+            .checked_sub(current.artifact_bytes)
+            .and_then(|bytes| bytes.checked_add(member_bytes))
+            .ok_or_else(|| PersistenceErrorV1::Integrity("运行根字节溢出".to_owned()))?;
+        // 候选目录会在正式发布前被清理并由完整包替换，因此不能把二者相加；
+        // 但候选已经真实占用过的峰值也不能因清理而绕过调用方的资源硬门。
+        current.artifact_file_count = actual_artifact_file_count.max(member_count);
+        current.artifact_bytes = actual_artifact_bytes.max(member_bytes);
+        current.runtime_root_file_count =
+            actual_runtime_root_file_count.max(replacement_runtime_root_file_count);
+        current.runtime_root_bytes = actual_runtime_root_bytes.max(replacement_runtime_root_bytes);
+        Ok(current)
+    }
+
+    pub(crate) fn existing_artifact_bundle_identity(
+        &self,
+    ) -> Result<Option<Sha256Hex>, PersistenceErrorV1> {
+        let artifacts = self.root.join(ARTIFACT_DIRECTORY_NAME);
+        Ok(inspect_artifact_identities(&artifacts)?.formal_identity)
+    }
+
+    pub(crate) fn existing_artifact_candidate_identity(
+        &self,
+    ) -> Result<Option<Sha256Hex>, PersistenceErrorV1> {
+        let artifacts = self.root.join(ARTIFACT_DIRECTORY_NAME);
+        Ok(inspect_artifact_identities(&artifacts)?.candidate_identity)
+    }
+
+    pub(crate) fn remove_validated_artifact_candidate(
+        &mut self,
+        bundle_identity: &Sha256Hex,
+        members: &[ImmutableArtifactMemberV1],
+    ) -> Result<bool, PersistenceErrorV1> {
+        if validate_sha256_text(&bundle_identity.0).is_err() || members.is_empty() {
+            return Err(PersistenceErrorV1::Integrity(
+                "运行产物目录身份或成员集合非法".to_owned(),
+            ));
+        }
+        let expected_names = artifact_member_names(members)?;
+        let artifacts = self.root.join(ARTIFACT_DIRECTORY_NAME);
+        let entries = inspect_artifact_directory(&artifacts, bundle_identity)?;
+        let Some(candidate_identity) = entries.candidate_identity else {
+            return Ok(false);
+        };
+        if &candidate_identity != bundle_identity {
+            return Err(PersistenceErrorV1::Integrity(
+                "运行产物候选身份与待清理包身份不一致".to_owned(),
+            ));
+        }
+        let candidate = artifacts.join(format!(".{}.candidate", candidate_identity.0));
+        remove_known_artifact_candidate(&candidate, &expected_names)?;
+        sync_directory(&artifacts, &artifacts)?;
+        Ok(true)
+    }
+
     pub(crate) fn try_new(root: PathBuf) -> Result<Self, PersistenceErrorV1> {
         Self::try_open(root, false)
     }
@@ -260,16 +573,28 @@ impl LocalDurabilityStoreV1 {
                 ));
             }
             if has_uncommitted_material {
-                remove_orphan_candidates(&root)?;
-                remove_orphan_candidates(&checkpoint_directory)?;
-                remove_orphan_candidates(&evidence_directory)?;
+                remove_orphan_candidates(&root, KnownOrphanCandidateKindV1::CurrentPointer)?;
+                remove_orphan_candidates(
+                    &checkpoint_directory,
+                    KnownOrphanCandidateKindV1::ImmutableJson,
+                )?;
+                remove_orphan_candidates(
+                    &evidence_directory,
+                    KnownOrphanCandidateKindV1::ImmutableJson,
+                )?;
                 remove_checkpoints_after(&checkpoint_directory, 0)?;
             }
         }
         if let Some(recovered) = &recovered {
-            remove_orphan_candidates(&root)?;
-            remove_orphan_candidates(&checkpoint_directory)?;
-            remove_orphan_candidates(&evidence_directory)?;
+            remove_orphan_candidates(&root, KnownOrphanCandidateKindV1::CurrentPointer)?;
+            remove_orphan_candidates(
+                &checkpoint_directory,
+                KnownOrphanCandidateKindV1::ImmutableJson,
+            )?;
+            remove_orphan_candidates(
+                &evidence_directory,
+                KnownOrphanCandidateKindV1::ImmutableJson,
+            )?;
             remove_checkpoints_after(
                 &checkpoint_directory,
                 recovered.current_file.content.through_commit_sequence,
@@ -443,22 +768,24 @@ impl LocalDurabilityStoreV1 {
         ensure_directory(&artifacts, "运行产物目录")?;
         sync_directory(&self.root, &artifacts)?;
         let target = artifacts.join(&bundle_identity.0);
-        if target
-            .try_exists()
-            .map_err(|error| io_error("检查运行产物目录", error))?
-        {
+        let artifact_entries = inspect_artifact_directory(&artifacts, bundle_identity)?;
+        let existing_candidate = artifact_entries
+            .candidate_identity
+            .as_ref()
+            .map(|identity| artifacts.join(format!(".{}.candidate", identity.0)));
+        if artifact_entries.target_exists {
             verify_immutable_artifact_bundle(&target, members)?;
+            if let Some(candidate) = &existing_candidate {
+                remove_known_artifact_candidate(candidate, &expected_names)?;
+            }
             sync_directory(&artifacts, &target)?;
             return Ok(target);
         }
 
-        let candidate = artifacts.join(format!(".{}.candidate", bundle_identity.0));
-        if candidate
-            .try_exists()
-            .map_err(|error| io_error("检查运行产物候选目录", error))?
-        {
-            remove_known_artifact_candidate(&candidate, &expected_names)?;
+        if let Some(candidate) = &existing_candidate {
+            remove_known_artifact_candidate(candidate, &expected_names)?;
         }
+        let candidate = artifacts.join(format!(".{}.candidate", bundle_identity.0));
         fs::create_dir(&candidate).map_err(|error| io_error("创建运行产物候选目录", error))?;
         for member in members {
             let path = candidate.join(member.file_name);
@@ -546,9 +873,15 @@ impl LocalDurabilityStoreV1 {
             .current
             .as_ref()
             .map_or(0, |current| current.content.through_commit_sequence);
-        remove_orphan_candidates(&self.root)?;
-        remove_orphan_candidates(&self.checkpoint_directory)?;
-        remove_orphan_candidates(&self.evidence_directory)?;
+        remove_orphan_candidates(&self.root, KnownOrphanCandidateKindV1::CurrentPointer)?;
+        remove_orphan_candidates(
+            &self.checkpoint_directory,
+            KnownOrphanCandidateKindV1::ImmutableJson,
+        )?;
+        remove_orphan_candidates(
+            &self.evidence_directory,
+            KnownOrphanCandidateKindV1::ImmutableJson,
+        )?;
         let sequence = previous_sequence
             .checked_add(1)
             .ok_or(PersistenceErrorV1::SequenceOverflow)?;
@@ -950,21 +1283,88 @@ fn remove_old_checkpoints(
     Ok(())
 }
 
-fn remove_orphan_candidates(directory: &Path) -> Result<(), PersistenceErrorV1> {
+#[derive(Clone, Copy)]
+enum KnownOrphanCandidateKindV1 {
+    CurrentPointer,
+    ImmutableJson,
+}
+
+struct KnownOrphanCandidatesV1 {
+    paths: Vec<PathBuf>,
+    file_count: u64,
+    bytes: u64,
+}
+
+fn inspect_known_orphan_candidates(
+    directory: &Path,
+    kind: KnownOrphanCandidateKindV1,
+) -> Result<KnownOrphanCandidatesV1, PersistenceErrorV1> {
     let entries = fs::read_dir(directory).map_err(|error| io_error("扫描候选文件", error))?;
-    let mut removed = false;
+    let mut candidates = KnownOrphanCandidatesV1 {
+        paths: Vec::new(),
+        file_count: 0,
+        bytes: 0,
+    };
     for entry in entries {
         let entry = entry.map_err(|error| io_error("读取候选目录项", error))?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| PersistenceErrorV1::Integrity("耐久目录项名称不是 UTF-8".to_owned()))?;
+        if !name.starts_with('.') || !name.ends_with(".candidate") {
             continue;
-        };
-        if name.starts_with('.') && name.ends_with(".candidate") {
-            fs::remove_file(entry.path()).map_err(|error| io_error("清理孤立候选文件", error))?;
-            removed = true;
         }
+        let immutable_name = match kind {
+            KnownOrphanCandidateKindV1::CurrentPointer => name
+                .strip_prefix(".CURRENT-")
+                .and_then(|name| name.strip_suffix(".candidate"))
+                .map(|name| format!("{name}.json")),
+            KnownOrphanCandidateKindV1::ImmutableJson => name
+                .strip_prefix('.')
+                .and_then(|name| name.strip_suffix(".candidate"))
+                .map(ToOwned::to_owned),
+        }
+        .ok_or_else(|| {
+            PersistenceErrorV1::Integrity(format!("耐久目录包含未知候选文件：{name}"))
+        })?;
+        parse_immutable_file_name(&immutable_name, "孤立候选").map_err(|_| {
+            PersistenceErrorV1::Integrity(format!("耐久目录包含未知候选文件：{name}"))
+        })?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| io_error("读取孤立候选文件类型", error))?;
+        if !file_type.is_file() {
+            return Err(PersistenceErrorV1::Integrity(format!(
+                "耐久目录候选不是普通文件：{name}"
+            )));
+        }
+        candidates.file_count = candidates
+            .file_count
+            .checked_add(1)
+            .ok_or_else(|| PersistenceErrorV1::Integrity("孤立候选文件数量溢出".to_owned()))?;
+        candidates.bytes = candidates
+            .bytes
+            .checked_add(
+                entry
+                    .metadata()
+                    .map_err(|error| io_error("读取孤立候选文件元数据", error))?
+                    .len(),
+            )
+            .ok_or_else(|| PersistenceErrorV1::Integrity("孤立候选文件字节溢出".to_owned()))?;
+        candidates.paths.push(entry.path());
     }
-    if removed {
+    Ok(candidates)
+}
+
+fn remove_orphan_candidates(
+    directory: &Path,
+    kind: KnownOrphanCandidateKindV1,
+) -> Result<(), PersistenceErrorV1> {
+    let candidates = inspect_known_orphan_candidates(directory, kind)?;
+    for path in &candidates.paths {
+        fs::remove_file(path).map_err(|error| io_error("清理孤立候选文件", error))?;
+    }
+    if !candidates.paths.is_empty() {
         sync_directory(directory, directory)?;
     }
     Ok(())
@@ -992,6 +1392,50 @@ fn replace_current(
 ) -> Result<(), PersistenceErrorV1> {
     rename_replace(candidate, current)?;
     sync_directory(root, current)
+}
+
+fn directory_regular_file_usage(path: &Path) -> Result<(u64, u64), PersistenceErrorV1> {
+    let mut file_count = 0_u64;
+    let mut byte_count = 0_u64;
+    for entry in fs::read_dir(path).map_err(|error| io_error("枚举资源计量目录", error))? {
+        let entry = entry.map_err(|error| io_error("读取资源计量目录项", error))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| io_error("读取资源计量目录项类型", error))?;
+        if file_type.is_symlink() {
+            return Err(PersistenceErrorV1::Integrity(format!(
+                "资源计量目录包含符号链接：{}",
+                entry.path().display()
+            )));
+        }
+        if file_type.is_dir() {
+            let (nested_files, nested_bytes) = directory_regular_file_usage(&entry.path())?;
+            file_count = file_count
+                .checked_add(nested_files)
+                .ok_or_else(|| PersistenceErrorV1::Integrity("资源文件数量溢出".to_owned()))?;
+            byte_count = byte_count
+                .checked_add(nested_bytes)
+                .ok_or_else(|| PersistenceErrorV1::Integrity("资源文件字节溢出".to_owned()))?;
+        } else if file_type.is_file() {
+            file_count = file_count
+                .checked_add(1)
+                .ok_or_else(|| PersistenceErrorV1::Integrity("资源文件数量溢出".to_owned()))?;
+            byte_count = byte_count
+                .checked_add(
+                    entry
+                        .metadata()
+                        .map_err(|error| io_error("读取资源计量文件元数据", error))?
+                        .len(),
+                )
+                .ok_or_else(|| PersistenceErrorV1::Integrity("资源文件字节溢出".to_owned()))?;
+        } else {
+            return Err(PersistenceErrorV1::Integrity(format!(
+                "资源计量目录包含非普通文件：{}",
+                entry.path().display()
+            )));
+        }
+    }
+    Ok((file_count, byte_count))
 }
 
 fn write_synced_candidate(path: &Path, bytes: &[u8]) -> Result<(), PersistenceErrorV1> {
@@ -1023,6 +1467,25 @@ fn write_synced_new_file(
             path: path.to_path_buf(),
             message: error.to_string(),
         })
+}
+
+fn artifact_member_names(
+    members: &[ImmutableArtifactMemberV1],
+) -> Result<std::collections::BTreeSet<&'static str>, PersistenceErrorV1> {
+    let mut expected_names = std::collections::BTreeSet::new();
+    for member in members {
+        if member.file_name.is_empty()
+            || member.file_name.starts_with('.')
+            || member.file_name.contains('/')
+            || member.file_name.contains('\\')
+            || !expected_names.insert(member.file_name)
+        {
+            return Err(PersistenceErrorV1::Integrity(
+                "运行产物成员文件名非法或重复".to_owned(),
+            ));
+        }
+    }
+    Ok(expected_names)
 }
 
 fn verify_immutable_artifact_bundle(
@@ -1069,11 +1532,141 @@ fn verify_immutable_artifact_bundle(
     Ok(())
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ArtifactDirectoryEntriesV1 {
+    target_exists: bool,
+    candidate_identity: Option<Sha256Hex>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ArtifactIdentitiesV1 {
+    formal_identity: Option<Sha256Hex>,
+    candidate_identity: Option<Sha256Hex>,
+}
+
+fn inspect_artifact_identities(
+    artifacts: &Path,
+) -> Result<ArtifactIdentitiesV1, PersistenceErrorV1> {
+    if !artifacts
+        .try_exists()
+        .map_err(|error| io_error("检查运行产物根目录", error))?
+    {
+        return Ok(ArtifactIdentitiesV1::default());
+    }
+    ensure_directory(artifacts, "运行产物目录")?;
+    let mut result = ArtifactIdentitiesV1::default();
+    for entry in fs::read_dir(artifacts).map_err(|error| io_error("扫描运行产物目录", error))?
+    {
+        let entry = entry.map_err(|error| io_error("读取运行产物目录项", error))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| io_error("读取运行产物目录项类型", error))?;
+        if !file_type.is_dir() {
+            return Err(PersistenceErrorV1::Integrity(
+                "运行产物根包含非目录项".to_owned(),
+            ));
+        }
+        let name = entry.file_name().into_string().map_err(|_| {
+            PersistenceErrorV1::Integrity("运行产物目录项名称不是 UTF-8".to_owned())
+        })?;
+        let (raw_identity, identity_slot) = match name
+            .strip_prefix('.')
+            .and_then(|name| name.strip_suffix(".candidate"))
+        {
+            Some(identity) => (identity, &mut result.candidate_identity),
+            None => (name.as_str(), &mut result.formal_identity),
+        };
+        validate_sha256_text(raw_identity)?;
+        if identity_slot
+            .replace(Sha256Hex(raw_identity.to_owned()))
+            .is_some()
+        {
+            return Err(PersistenceErrorV1::Integrity(
+                "运行产物根包含多个正式包或多个候选包".to_owned(),
+            ));
+        }
+    }
+    if let (Some(formal), Some(candidate)) = (&result.formal_identity, &result.candidate_identity)
+        && formal != candidate
+    {
+        return Err(PersistenceErrorV1::Integrity(
+            "运行产物根同时包含不同身份的正式包与候选包".to_owned(),
+        ));
+    }
+    Ok(result)
+}
+
+fn inspect_artifact_directory(
+    artifacts: &Path,
+    bundle_identity: &Sha256Hex,
+) -> Result<ArtifactDirectoryEntriesV1, PersistenceErrorV1> {
+    if !artifacts
+        .try_exists()
+        .map_err(|error| io_error("检查运行产物根目录", error))?
+    {
+        return Ok(ArtifactDirectoryEntriesV1::default());
+    }
+    ensure_directory(artifacts, "运行产物目录")?;
+    let mut result = ArtifactDirectoryEntriesV1::default();
+    for entry in fs::read_dir(artifacts).map_err(|error| io_error("扫描运行产物目录", error))?
+    {
+        let entry = entry.map_err(|error| io_error("读取运行产物目录项", error))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| io_error("读取运行产物目录项类型", error))?;
+        let name = entry.file_name().into_string().map_err(|_| {
+            PersistenceErrorV1::Integrity("运行产物目录项名称不是 UTF-8".to_owned())
+        })?;
+        if name == bundle_identity.0 {
+            if !file_type.is_dir() {
+                return Err(PersistenceErrorV1::Integrity(
+                    "同身份正式运行产物不是普通目录".to_owned(),
+                ));
+            }
+            result.target_exists = true;
+        } else if let Some(candidate_identity) = name
+            .strip_prefix('.')
+            .and_then(|name| name.strip_suffix(".candidate"))
+        {
+            if !file_type.is_dir() {
+                return Err(PersistenceErrorV1::Integrity(
+                    "运行产物候选不是普通目录".to_owned(),
+                ));
+            }
+            validate_sha256_text(candidate_identity)?;
+            if result
+                .candidate_identity
+                .replace(Sha256Hex(candidate_identity.to_owned()))
+                .is_some()
+            {
+                return Err(PersistenceErrorV1::Integrity(
+                    "运行产物根包含多个候选包".to_owned(),
+                ));
+            }
+        } else {
+            return Err(PersistenceErrorV1::Integrity(format!(
+                "运行产物根包含其他正式包或未知目录项：{name}"
+            )));
+        }
+    }
+    if result.target_exists
+        && result
+            .candidate_identity
+            .as_ref()
+            .is_some_and(|identity| identity != bundle_identity)
+    {
+        return Err(PersistenceErrorV1::Integrity(
+            "运行产物根同时包含目标正式包与不同身份候选包".to_owned(),
+        ));
+    }
+    Ok(result)
+}
+
 fn remove_known_artifact_candidate(
     candidate: &Path,
     expected_names: &std::collections::BTreeSet<&'static str>,
 ) -> Result<(), PersistenceErrorV1> {
-    ensure_directory(candidate, "运行产物候选目录")?;
+    validate_and_measure_artifact_candidate(candidate, expected_names)?;
     for entry in fs::read_dir(candidate).map_err(|error| io_error("扫描运行产物候选目录", error))?
     {
         let entry = entry.map_err(|error| io_error("读取运行产物候选目录项", error))?;
@@ -1091,6 +1684,42 @@ fn remove_known_artifact_candidate(
         fs::remove_file(entry.path()).map_err(|error| io_error("清理运行产物候选成员", error))?;
     }
     fs::remove_dir(candidate).map_err(|error| io_error("清理运行产物候选目录", error))
+}
+
+fn validate_and_measure_artifact_candidate(
+    candidate: &Path,
+    expected_names: &std::collections::BTreeSet<&'static str>,
+) -> Result<(u64, u64), PersistenceErrorV1> {
+    ensure_directory(candidate, "运行产物候选目录")?;
+    let mut file_count = 0_u64;
+    let mut byte_count = 0_u64;
+    for entry in fs::read_dir(candidate).map_err(|error| io_error("扫描运行产物候选目录", error))?
+    {
+        let entry = entry.map_err(|error| io_error("读取运行产物候选目录项", error))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| io_error("读取运行产物候选成员类型", error))?;
+        let name = entry.file_name().into_string().map_err(|_| {
+            PersistenceErrorV1::Integrity("运行产物候选文件名不是 UTF-8".to_owned())
+        })?;
+        if !file_type.is_file() || !expected_names.contains(name.as_str()) {
+            return Err(PersistenceErrorV1::Integrity(format!(
+                "运行产物候选目录包含未声明或非普通成员：{name}"
+            )));
+        }
+        file_count = file_count
+            .checked_add(1)
+            .ok_or_else(|| PersistenceErrorV1::Integrity("运行产物候选文件数量溢出".to_owned()))?;
+        byte_count = byte_count
+            .checked_add(
+                entry
+                    .metadata()
+                    .map_err(|error| io_error("读取运行产物候选成员元数据", error))?
+                    .len(),
+            )
+            .ok_or_else(|| PersistenceErrorV1::Integrity("运行产物候选字节溢出".to_owned()))?;
+    }
+    Ok((file_count, byte_count))
 }
 
 fn remove_candidate_if_present(path: &Path) -> Result<(), PersistenceErrorV1> {
@@ -1382,19 +2011,19 @@ mod tests {
 
     #[test]
     fn artifact_publish_retry_after_uncertain_rename_revalidates_the_same_bundle() {
-        let (_directory, mut store) = store();
+        let (_directory, mut published_store) = store();
         let members = [ImmutableArtifactMemberV1 {
             file_name: "simulation-run-manifest.json",
             bytes: br#"{"schema":"test"}"#.to_vec(),
         }];
         let identity = sha256(&members[0].bytes);
-        store.fail_after_artifact_bundle_rename_before_directory_sync_once();
+        published_store.fail_after_artifact_bundle_rename_before_directory_sync_once();
         assert!(matches!(
-            store.publish_immutable_artifact_bundle(&identity, &members),
+            published_store.publish_immutable_artifact_bundle(&identity, &members),
             Err(PersistenceErrorV1::DurabilityUncertain { .. })
         ));
 
-        let published = store
+        let published = published_store
             .publish_immutable_artifact_bundle(&identity, &members)
             .expect("重试必须重新验证既有正式目录并跨过父目录同步屏障");
         assert_eq!(
@@ -1404,16 +2033,335 @@ mod tests {
     }
 
     #[test]
+    fn artifact_resource_preview_is_one_bundle_across_retries_and_candidates() {
+        let (_directory, mut published_store) = store();
+        let first_members = [ImmutableArtifactMemberV1 {
+            file_name: "simulation-run-manifest.json",
+            bytes: br#"{"schema":"first"}"#.to_vec(),
+        }];
+        let first_identity = sha256(b"first-artifact-resource-preview");
+        let first_preview = published_store
+            .preview_artifact_bundle_resources(&first_identity, &first_members)
+            .expect("预览首次运行产物包");
+        published_store
+            .publish_immutable_artifact_bundle(&first_identity, &first_members)
+            .expect("发布首次运行产物包");
+        assert_eq!(
+            published_store
+                .preview_artifact_bundle_resources(&first_identity, &first_members)
+                .expect("重复预览已发布运行产物包"),
+            first_preview
+        );
+
+        let (_candidate_directory, store) = store();
+        let baseline = store.current_resources().expect("读取候选前资源基线");
+        let next_members = [
+            ImmutableArtifactMemberV1 {
+                file_name: "simulation-run-manifest.json",
+                bytes: br#"{"schema":"test"}"#.to_vec(),
+            },
+            ImmutableArtifactMemberV1 {
+                file_name: "summary.json",
+                bytes: br#"{"outcome":"completed"}"#.to_vec(),
+            },
+        ];
+        let next_identity = sha256(b"next-artifact-resource-preview");
+        let candidate = store
+            .root
+            .join(ARTIFACT_DIRECTORY_NAME)
+            .join(format!(".{}.candidate", next_identity.0));
+        fs::create_dir_all(&candidate).expect("创建同身份遗留候选目录");
+        fs::write(candidate.join(next_members[0].file_name), b"partial")
+            .expect("写入部分遗留候选成员");
+
+        let preview = store
+            .preview_artifact_bundle_resources(&next_identity, &next_members)
+            .expect("预览应替换遗留候选后再计入完整包");
+        let member_count = u64::try_from(next_members.len()).expect("成员数量可计量");
+        let member_bytes = next_members.iter().try_fold(0_u64, |total, member| {
+            total.checked_add(u64::try_from(member.bytes.len()).ok()?)
+        });
+        let member_bytes = member_bytes.expect("成员字节可计量");
+        assert_eq!(
+            preview.artifact_file_count,
+            baseline.artifact_file_count + member_count
+        );
+        assert_eq!(
+            preview.artifact_bytes,
+            baseline.artifact_bytes + member_bytes
+        );
+        assert_eq!(
+            preview.runtime_root_file_count,
+            baseline.runtime_root_file_count + member_count
+        );
+        assert_eq!(
+            preview.runtime_root_bytes,
+            baseline.runtime_root_bytes + member_bytes
+        );
+
+        fs::write(candidate.join("undeclared.json"), b"unexpected").expect("写入未声明候选成员");
+        assert!(matches!(
+            store.preview_artifact_bundle_resources(&next_identity, &next_members),
+            Err(PersistenceErrorV1::Integrity(message))
+                if message.contains("未声明或非普通成员")
+        ));
+    }
+
+    #[test]
+    fn partial_artifact_candidate_with_prior_identity_is_rebuilt_as_the_requested_bundle() {
+        let (_directory, mut store) = store();
+        let baseline = store.current_resources().expect("读取部分候选前资源基线");
+        let members = [
+            ImmutableArtifactMemberV1 {
+                file_name: "simulation-run-manifest.json",
+                bytes: br#"{"schema":"requested"}"#.to_vec(),
+            },
+            ImmutableArtifactMemberV1 {
+                file_name: "summary.json",
+                bytes: br#"{"outcome":"completed"}"#.to_vec(),
+            },
+        ];
+        let prior_identity = sha256(b"prior-partial-artifact-candidate");
+        let requested_identity = sha256(b"requested-artifact-bundle");
+        let artifacts = store.root.join(ARTIFACT_DIRECTORY_NAME);
+        let prior_candidate = artifacts.join(format!(".{}.candidate", prior_identity.0));
+        fs::create_dir_all(&prior_candidate).expect("创建旧身份部分候选目录");
+        fs::write(
+            prior_candidate.join(members[0].file_name),
+            &members[0].bytes,
+        )
+        .expect("写入旧身份部分合法成员");
+
+        assert_eq!(
+            store
+                .existing_artifact_bundle_identity()
+                .expect("候选目录不构成正式包身份"),
+            None
+        );
+        let preview = store
+            .preview_artifact_bundle_resources(&requested_identity, &members)
+            .expect("旧身份部分候选应按完整目标包预览");
+        let member_count = u64::try_from(members.len()).expect("成员数量可计量");
+        let member_bytes = members
+            .iter()
+            .try_fold(0_u64, |total, member| {
+                total.checked_add(u64::try_from(member.bytes.len()).ok()?)
+            })
+            .expect("成员字节可计量");
+        assert_eq!(
+            preview.artifact_file_count,
+            baseline.artifact_file_count + member_count
+        );
+        assert_eq!(
+            preview.artifact_bytes,
+            baseline.artifact_bytes + member_bytes
+        );
+
+        let non_regular_member = prior_candidate.join(members[1].file_name);
+        fs::create_dir(&non_regular_member).expect("构造旧身份候选的非普通成员");
+        assert!(matches!(
+            store.preview_artifact_bundle_resources(&requested_identity, &members),
+            Err(PersistenceErrorV1::Integrity(message))
+                if message.contains("未声明或非普通成员")
+        ));
+        fs::remove_dir(&non_regular_member).expect("清理候选非普通成员夹具");
+
+        assert!(
+            store
+                .remove_validated_artifact_candidate(&prior_identity, &members)
+                .expect("已验证部分候选必须可由资源失败路径安全清理")
+        );
+        assert!(!prior_candidate.exists());
+        assert!(
+            !store
+                .remove_validated_artifact_candidate(&requested_identity, &members)
+                .expect("候选清理重试必须幂等")
+        );
+
+        let published = store
+            .publish_immutable_artifact_bundle(&requested_identity, &members)
+            .expect("清理旧身份部分候选后应重建完整包");
+        assert_eq!(published, artifacts.join(&requested_identity.0));
+        assert!(!prior_candidate.exists());
+        verify_immutable_artifact_bundle(&published, &members).expect("重建后的正式包必须完整");
+        assert!(
+            !store
+                .remove_validated_artifact_candidate(&requested_identity, &members)
+                .expect("清理入口不得删除正式包")
+        );
+        verify_immutable_artifact_bundle(&published, &members).expect("正式包必须保持不变");
+
+        let unknown = artifacts.join(".unknown.candidate");
+        fs::write(&unknown, b"unknown").expect("写入未知产物目录项");
+        assert!(
+            store
+                .remove_validated_artifact_candidate(&requested_identity, &members)
+                .is_err()
+        );
+        assert!(unknown.exists(), "未知项必须保持原状");
+        verify_immutable_artifact_bundle(&published, &members).expect("未知项不得影响正式包");
+    }
+
+    #[test]
+    fn artifact_candidate_cleanup_rejects_a_different_bundle_identity_without_deletion() {
+        let (_directory, mut store) = store();
+        let members = [ImmutableArtifactMemberV1 {
+            file_name: "simulation-run-manifest.json",
+            bytes: br#"{"schema":"candidate-b"}"#.to_vec(),
+        }];
+        let requested_identity = sha256(b"requested-artifact-bundle-a");
+        let candidate_identity = sha256(b"uncommitted-artifact-candidate-b");
+        let candidate = store
+            .root
+            .join(ARTIFACT_DIRECTORY_NAME)
+            .join(format!(".{}.candidate", candidate_identity.0));
+        fs::create_dir_all(&candidate).expect("创建 B 身份候选目录");
+        fs::write(candidate.join(members[0].file_name), &members[0].bytes)
+            .expect("写入 B 身份候选成员");
+
+        assert_eq!(
+            store
+                .existing_artifact_bundle_identity()
+                .expect("候选身份不得冒充正式包身份"),
+            None
+        );
+        assert_eq!(
+            store
+                .existing_artifact_candidate_identity()
+                .expect("读取唯一 B 身份候选"),
+            Some(candidate_identity.clone())
+        );
+        assert!(matches!(
+            store.remove_validated_artifact_candidate(&requested_identity, &members),
+            Err(PersistenceErrorV1::Integrity(message))
+                if message.contains("候选身份与待清理包身份不一致")
+        ));
+        assert!(candidate.is_dir(), "请求 A 不得删除 B 身份候选目录");
+        assert_eq!(
+            fs::read(candidate.join(members[0].file_name)).expect("读取未删除的 B 候选成员"),
+            members[0].bytes
+        );
+
+        fs::create_dir(
+            store
+                .root
+                .join(ARTIFACT_DIRECTORY_NAME)
+                .join(&requested_identity.0),
+        )
+        .expect("创建不同 A 身份正式目录");
+        assert!(matches!(
+            store.existing_artifact_candidate_identity(),
+            Err(PersistenceErrorV1::Integrity(message))
+                if message.contains("不同身份的正式包与候选包")
+        ));
+        assert!(candidate.is_dir(), "正式身份冲突不得删除 B 身份候选目录");
+    }
+
+    #[test]
+    fn artifact_preview_preserves_larger_candidate_usage_for_the_hard_limit() {
+        let (_directory, store) = store();
+        let baseline = store.current_resources().expect("读取大候选前资源基线");
+        let members = [ImmutableArtifactMemberV1 {
+            file_name: "simulation-run-manifest.json",
+            bytes: b"{}".to_vec(),
+        }];
+        let prior_identity = sha256(b"oversized-prior-artifact-candidate");
+        let requested_identity = sha256(b"small-requested-artifact-bundle");
+        let candidate = store
+            .root
+            .join(ARTIFACT_DIRECTORY_NAME)
+            .join(format!(".{}.candidate", prior_identity.0));
+        fs::create_dir_all(&candidate).expect("创建大候选目录");
+        let oversized = vec![b'x'; 4_096];
+        fs::write(candidate.join(members[0].file_name), &oversized)
+            .expect("写入合法名称的大候选成员");
+
+        let preview = store
+            .preview_artifact_bundle_resources(&requested_identity, &members)
+            .expect("预览必须保留候选实际峰值");
+        assert_eq!(preview.artifact_file_count, 1);
+        assert_eq!(preview.artifact_bytes, 4_096);
+        assert_eq!(
+            preview.runtime_root_bytes,
+            baseline.runtime_root_bytes + 4_096
+        );
+
+        let mut policy = crate::resource::SimulationResourcePolicyV1::component_golden_v1();
+        policy.durable.artifacts.max_bytes = 4_095;
+        let mut usage = crate::resource::SimulationResourceUsageV1::default();
+        usage.durable.artifacts = crate::resource::ResourceQuantityV1::new(
+            preview.artifact_file_count,
+            preview.artifact_bytes,
+        );
+        usage.durable.runtime_root = crate::resource::ResourceQuantityV1::new(
+            preview.runtime_root_file_count,
+            preview.runtime_root_bytes,
+        );
+        let limit = policy
+            .validate_candidate(&usage)
+            .expect_err("候选实际峰值必须在允许清理前命中硬上限")
+            .limit_reached()
+            .expect("候选超限必须形成强类型事实")
+            .clone();
+        assert_eq!(limit.scope, crate::resource::ResourceLimitScopeV1::Durable);
+        assert_eq!(limit.kind, crate::resource::ResourceLimitKindV1::Artifacts);
+        assert_eq!(
+            limit.exceeded_dimension,
+            crate::resource::ResourceLimitDimensionV1::Bytes
+        );
+    }
+
+    #[test]
+    fn artifact_bundle_rejects_another_formal_identity_without_deleting_it() {
+        let (_directory, mut store) = store();
+        let first_members = [ImmutableArtifactMemberV1 {
+            file_name: "simulation-run-manifest.json",
+            bytes: br#"{"schema":"first"}"#.to_vec(),
+        }];
+        let first_identity = sha256(b"first-formal-artifact");
+        let first_target = store
+            .publish_immutable_artifact_bundle(&first_identity, &first_members)
+            .expect("发布首个正式运行产物包");
+        let second_members = [ImmutableArtifactMemberV1 {
+            file_name: "simulation-run-manifest.json",
+            bytes: br#"{"schema":"second"}"#.to_vec(),
+        }];
+        let second_identity = sha256(b"second-formal-artifact");
+
+        assert!(matches!(
+            store.preview_artifact_bundle_resources(&second_identity, &second_members),
+            Err(PersistenceErrorV1::Integrity(message))
+                if message.contains("其他正式包或未知目录项")
+        ));
+        assert!(matches!(
+            store.publish_immutable_artifact_bundle(&second_identity, &second_members),
+            Err(PersistenceErrorV1::Integrity(message))
+                if message.contains("其他正式包或未知目录项")
+        ));
+        assert_eq!(
+            fs::read(first_target.join(first_members[0].file_name)).expect("读取保留的首个正式包"),
+            first_members[0].bytes
+        );
+        assert!(
+            !store
+                .root
+                .join(ARTIFACT_DIRECTORY_NAME)
+                .join(&second_identity.0)
+                .exists()
+        );
+    }
+
+    #[test]
     fn artifact_publish_retry_rejects_tampered_or_symlinked_formal_target() {
-        let (directory, mut store) = store();
+        let (directory, mut published_store) = store();
         let members = [ImmutableArtifactMemberV1 {
             file_name: "simulation-run-manifest.json",
             bytes: br#"{"schema":"test"}"#.to_vec(),
         }];
         let identity = sha256(&members[0].bytes);
-        store.fail_after_artifact_bundle_rename_before_directory_sync_once();
+        published_store.fail_after_artifact_bundle_rename_before_directory_sync_once();
         assert!(matches!(
-            store.publish_immutable_artifact_bundle(&identity, &members),
+            published_store.publish_immutable_artifact_bundle(&identity, &members),
             Err(PersistenceErrorV1::DurabilityUncertain { .. })
         ));
         let formal_target = directory
@@ -1427,22 +2375,30 @@ mod tests {
         )
         .expect("篡改正式目标正文");
         assert!(matches!(
-            store.publish_immutable_artifact_bundle(&identity, &members),
+            published_store.publish_immutable_artifact_bundle(&identity, &members),
             Err(PersistenceErrorV1::Integrity(message))
                 if message.contains("正文冲突")
         ));
 
+        let (symlink_directory, mut symlink_store) = store();
         let symlink_identity = sha256(b"symlink-target");
-        let external = directory.path().join("external-artifact");
+        let external = symlink_directory.path().join("external-artifact");
         fs::create_dir(&external).expect("创建符号链接目标目录");
         fs::write(
             external.join("simulation-run-manifest.json"),
             &members[0].bytes,
         )
         .expect("写入符号链接目标正文");
+        fs::create_dir(
+            symlink_directory
+                .path()
+                .join("run")
+                .join(ARTIFACT_DIRECTORY_NAME),
+        )
+        .expect("创建运行产物根目录");
         std::os::unix::fs::symlink(
             &external,
-            directory
+            symlink_directory
                 .path()
                 .join("run")
                 .join(ARTIFACT_DIRECTORY_NAME)
@@ -1450,7 +2406,7 @@ mod tests {
         )
         .expect("构造正式目标符号链接");
         assert!(matches!(
-            store.publish_immutable_artifact_bundle(&symlink_identity, &members),
+            symlink_store.publish_immutable_artifact_bundle(&symlink_identity, &members),
             Err(PersistenceErrorV1::Integrity(message))
                 if message.contains("不是普通目录")
         ));
@@ -1652,6 +2608,46 @@ mod tests {
             .expect("最终 CURRENT 必须存在");
         assert_eq!(recovered.checkpoint, final_checkpoint);
         assert_eq!(recovered.evidence[2].body, final_evidence);
+    }
+
+    #[test]
+    fn commit_resource_preview_replaces_known_orphans_and_rejects_unknown_candidates() {
+        let (directory, mut store) = store();
+        let evidence = TestEvidenceV1 {
+            event: "create".to_owned(),
+            value: 1,
+        };
+        let checkpoint = TestCheckpointV1 {
+            state: "prepared".to_owned(),
+            applied: 1,
+        };
+        let baseline = store
+            .preview_commit_resources(&evidence, &checkpoint)
+            .expect("预览没有孤立候选的首次提交");
+        let evidence_json = serde_json::to_vec(&evidence).expect("编码待故障证据");
+        let checkpoint_json = serde_json::to_vec(&checkpoint).expect("编码待故障检查点");
+        assert_eq!(
+            store.commit_json_with_fault(
+                &evidence_json,
+                &checkpoint_json,
+                CommitFaultV1::BeforeCheckpointPublish,
+            ),
+            Err(PersistenceErrorV1::InjectedBeforeCheckpointPublish)
+        );
+        assert_eq!(
+            store
+                .preview_commit_resources(&evidence, &checkpoint)
+                .expect("重试预览应先扣除可清理的孤立候选"),
+            baseline
+        );
+
+        fs::write(directory.path().join("run/.unknown.candidate"), b"unknown")
+            .expect("写入未知候选文件");
+        assert!(matches!(
+            store.preview_commit_resources(&evidence, &checkpoint),
+            Err(PersistenceErrorV1::Integrity(message))
+                if message.contains("未知候选文件")
+        ));
     }
 
     #[test]

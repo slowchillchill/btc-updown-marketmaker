@@ -2424,6 +2424,19 @@ pub(crate) mod tests {
         rate: &str,
         exponent: u32,
     ) -> Arc<SealedProcessRuleSnapshot> {
+        historical_snapshot_for_sim_tests_with_fee_schedule_and_identity(
+            rate,
+            exponent,
+            test_implementation_identity(),
+        )
+        .await
+    }
+
+    pub(crate) async fn historical_snapshot_for_sim_tests_with_fee_schedule_and_identity(
+        rate: &str,
+        exponent: u32,
+        implementation_identity: ImplementationIdentityV1,
+    ) -> Arc<SealedProcessRuleSnapshot> {
         let rate = rate.parse::<Decimal>().expect("测试手续费率必须是十进制");
         let mut gamma_rate = rate;
         gamma_rate.rescale(4);
@@ -2458,7 +2471,18 @@ pub(crate) mod tests {
         .await;
         let directory = tempfile::tempdir().expect("tempdir");
         let target = directory.path().join("platform-rule-snapshot.json");
-        let current = create_successful_snapshot(&server, target.clone()).await;
+        let current = query_and_seal_current_process_snapshot_with(
+            CurrentProcessSnapshotRequestV1 {
+                reference_market: test_reference_market(),
+                target_path: target.clone(),
+                implementation_identity,
+            },
+            test_loader_options(&server),
+            PLATFORM_RULE_CONFIG_BYTES,
+            fixed_now_utc_ms,
+        )
+        .await
+        .expect("当前规则查询必须密封测试快照");
         let historical = load_historical_process_snapshot(HistoricalProcessSnapshotRequestV1 {
             snapshot_path: target,
             expected_file_sha256: current.file_sha256().clone(),

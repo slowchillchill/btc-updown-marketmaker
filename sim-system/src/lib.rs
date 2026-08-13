@@ -10,9 +10,11 @@ pub(crate) mod market;
 pub(crate) mod market_directory;
 #[allow(dead_code)]
 pub(crate) mod matching;
+pub mod measurement;
 pub(crate) mod persistence;
 pub mod platform_rules;
 pub(crate) mod rebate;
+pub mod resource;
 mod scenario;
 // 会话水位、动作释放和响应完成原语只供公共八方法背后的受信驱动器使用。
 #[allow(dead_code)]
@@ -44,3 +46,5 @@ mod task35_tests;
 mod task41_tests;
 #[cfg(test)]
 mod task42_tests;
+#[cfg(test)]
+mod task44_tests;

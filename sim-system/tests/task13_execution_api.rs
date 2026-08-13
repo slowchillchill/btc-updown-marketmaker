@@ -1,5 +1,8 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use contracts::Sha256Hex;
+use sim_system::artifacts::SimulationRunIntentBindingV1;
 use sim_system::execution::{
     AccountOpeningAnchorV1, ActivateSessionRequestV1, CancelAllOrdersRegistrationV1,
     CancelAllOrdersRequestV1, CancelOrderRegistrationV1, CancelOrderRequestV1,
@@ -18,22 +21,28 @@ use sim_system::finality::TradeFinalityPolicyV1;
 use sim_system::latency_profile::EmpiricalDelayProfile;
 use sim_system::platform_rules::SealedProcessRuleSnapshot;
 
-#[allow(dead_code)]
+#[allow(clippy::too_many_arguments, dead_code)]
 fn assert_process_factory(
     rules: Arc<SealedProcessRuleSnapshot>,
     latency_profile: Arc<EmpiricalDelayProfile>,
     scenario: Arc<PlatformScenarioV1>,
     finality_policy: Arc<TradeFinalityPolicyV1>,
+    run_intent_binding: SimulationRunIntentBindingV1,
+    market_event_source_identity_sha256: Sha256Hex,
+    persistence_root: PathBuf,
     session_spec: SessionSpecV2,
 ) -> Result<NewPreparedSessionV2, SimExecutionContractErrorV1> {
-    SimExecutionProcessV1::try_new(
+    SimExecutionProcessV1::try_new_with_local_persistence(
         "api-test-run".to_owned(),
         finality_policy,
         rules,
         latency_profile,
         scenario,
+        run_intent_binding,
+        market_event_source_identity_sha256,
+        persistence_root,
     )
-    .expect("typed process root")
+    .expect("typed durable process root")
     .create_session(
         session_spec,
         SubmissionResponseBridgeV1::new(
