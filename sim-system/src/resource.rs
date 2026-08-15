@@ -98,6 +98,7 @@ pub struct SimulationDurableResourcePolicyV1 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SimulationFailureEvidenceReserveV1 {
+    pub run_checkpoint_growth: ResourceQuantityV1,
     pub evidence: ResourceQuantityV1,
     pub checkpoints: ResourceQuantityV1,
     pub runtime_root: ResourceQuantityV1,
@@ -162,6 +163,7 @@ impl SimulationResourcePolicyV1 {
                     PREFREEZE_DURABLE_ROOT_MAX_BYTES_V1,
                 ),
                 failure_reserve: SimulationFailureEvidenceReserveV1 {
+                    run_checkpoint_growth: ResourceQuantityV1::new(1, 1 << 20),
                     evidence: ResourceQuantityV1::new(1, 1 << 20),
                     checkpoints: ResourceQuantityV1::new(1, 1 << 20),
                     runtime_root: ResourceQuantityV1::new(3, 2 << 20),
@@ -180,6 +182,29 @@ impl SimulationResourcePolicyV1 {
     ) -> Result<(), SimulationResourceErrorV1> {
         self.validate_identity()?;
         let mut admission = self.clone();
+        admission.run.in_memory_state.max_records = admission
+            .run
+            .in_memory_state
+            .max_records
+            .checked_sub(self.durable.failure_reserve.run_checkpoint_growth.records)
+            .ok_or_else(|| {
+                SimulationResourceErrorV1::Serialization(
+                    "运行检查点失败预留记录数量超过硬上限".to_owned(),
+                )
+            })?;
+        for limit in [
+            &mut admission.run.in_memory_state,
+            &mut admission.run.sessions,
+        ] {
+            limit.max_bytes = limit
+                .max_bytes
+                .checked_sub(self.durable.failure_reserve.run_checkpoint_growth.bytes)
+                .ok_or_else(|| {
+                    SimulationResourceErrorV1::Serialization(
+                        "运行检查点失败预留字节超过硬上限".to_owned(),
+                    )
+                })?;
+        }
         for (limit, reserve) in [
             (
                 &mut admission.durable.evidence,

@@ -94,7 +94,79 @@ struct DurableEvidenceAuditWireV1 {
     private_output_drafts: Vec<Value>,
     transient_input_session_id: Option<String>,
     transient_input: Value,
+    maintenance_steady_before_resource_usage: Option<Value>,
     resource_usage: Value,
+    maintenance_succeeded_steady_after_resource_usage: Option<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvidenceEnvelopeAuditWireV2 {
+    schema_version: String,
+    sequence: u64,
+    predecessor_evidence_sha256: Option<Sha256Hex>,
+    body: DurableLogicalEvidenceAuditWireV2,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableLogicalEvidenceAuditWireV2 {
+    schema_version: String,
+    fact: DurableTransactionFactAuditWireV2,
+    query_projection_revision: Option<u64>,
+    logical_platform_driven_through_utc_ms: Option<i64>,
+    private_fact_schedule_closed_through_utc_ms: Option<i64>,
+    account_deltas: Vec<Value>,
+    logical_action_results: Vec<Value>,
+    private_output_drafts: Vec<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum DurableTransactionFactAuditWireV2 {
+    IngressClosed(IngressClosedFactAuditWireV2),
+    RunArtifactInputsSealed(RunArtifactInputsSealedFactAuditWireV2),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IngressClosedFactAuditWireV2 {
+    session_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunArtifactInputsSealedFactAuditWireV2 {
+    run_id: String,
+}
+
+fn task421_transaction_record_sha256_v2(
+    sequence: u64,
+    predecessor: Option<&Sha256Hex>,
+    record_json: &[u8],
+) -> Sha256Hex {
+    let mut digest = Sha256::new();
+    digest.update(b"SIM_LOCAL_TRANSACTION_RECORD_V2");
+    digest.update(sequence.to_be_bytes());
+    match predecessor {
+        Some(predecessor) => {
+            digest.update([1]);
+            digest.update(
+                u64::try_from(predecessor.0.len())
+                    .expect("SQLite 记录前驱摘要长度适合 u64")
+                    .to_be_bytes(),
+            );
+            digest.update(predecessor.0.as_bytes());
+        }
+        None => digest.update([0]),
+    }
+    digest.update(
+        u64::try_from(record_json.len())
+            .expect("SQLite 记录正文字节数适合 u64")
+            .to_be_bytes(),
+    );
+    digest.update(record_json);
+    Sha256Hex(format!("{:x}", digest.finalize()))
 }
 
 #[derive(Deserialize)]
@@ -1338,6 +1410,229 @@ async fn persisted_query_fixture(
         dependencies,
         spec,
     }
+}
+
+/// 只独立消费真实 V2 导出的线格式，不证明生产运行已经满足产物封口就绪条件。
+#[test]
+fn task421_v2_final_evidence_wire_consumer_strictly_decodes_actual_export() {
+    let directory = tempfile::tempdir().expect("创建任务 4.2 V2 线格式临时目录");
+    let persistence_root = directory.path().join("v2-wire-fixture");
+    let receipt =
+        crate::execution::export_v2_evidence_wire_fixture_for_task42(persistence_root.clone())
+            .expect("用真实 V2 业务类型导出线格式夹具");
+
+    assert_eq!(receipt.relative_path, PathBuf::from("evidence-v2"));
+    assert_eq!(receipt.evidence_file_count, 2);
+
+    let connection = rusqlite::Connection::open_with_flags(
+        persistence_root.join("durability-v2.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("以只读方式打开 V2 SQLite 事务日志");
+    let mut statement = connection
+        .prepare(
+            "SELECT sequence, predecessor_sha256, record_sha256, record_json, encoded_bytes
+             FROM transaction_log ORDER BY sequence",
+        )
+        .expect("准备独立读取 V2 SQLite 事务记录");
+    let records = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })
+        .expect("独立查询 V2 SQLite 事务记录")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("独立读取全部 V2 SQLite 事务记录");
+    assert_eq!(records.len(), 2);
+    let mut expected_record_predecessor = None;
+    let mut record_sha256_by_sequence = BTreeMap::new();
+    for (index, (sequence, predecessor, record_sha256, record_json, encoded_bytes)) in
+        records.into_iter().enumerate()
+    {
+        let sequence = u64::try_from(sequence).expect("SQLite 事务序号必须非负");
+        assert_eq!(
+            sequence,
+            u64::try_from(index + 1).expect("SQLite 事务序号适合 u64")
+        );
+        let predecessor = predecessor.map(|value| {
+            assert_eq!(value.len(), 64);
+            assert!(
+                value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            );
+            Sha256Hex(value)
+        });
+        assert_eq!(
+            predecessor, expected_record_predecessor,
+            "SQLite 记录摘要必须形成连续的独立前驱链"
+        );
+        assert_eq!(record_sha256.len(), 64);
+        assert!(
+            record_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+        assert_eq!(
+            u64::try_from(encoded_bytes).expect("SQLite 编码字节数必须非负"),
+            u64::try_from(record_json.len()).expect("SQLite 记录正文字节数适合 u64")
+        );
+        let independently_computed_record_sha256 =
+            task421_transaction_record_sha256_v2(sequence, predecessor.as_ref(), &record_json);
+        assert_eq!(
+            independently_computed_record_sha256.0, record_sha256,
+            "SQLite record_sha256 必须绑定域、序号、前驱存在位/长度/正文及记录长度/正文"
+        );
+        assert!(
+            record_sha256_by_sequence
+                .insert(sequence, independently_computed_record_sha256.clone())
+                .is_none()
+        );
+        expected_record_predecessor = Some(independently_computed_record_sha256);
+    }
+
+    let evidence_root = persistence_root.join(&receipt.relative_path);
+    let mut entries = std::fs::read_dir(&evidence_root)
+        .expect("独立扫描 V2 最终证据目录")
+        .map(|entry| entry.expect("读取 V2 最终证据目录项"))
+        .collect::<Vec<_>>();
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    assert_eq!(
+        u64::try_from(entries.len()).expect("V2 最终证据文件数适合 u64"),
+        receipt.evidence_file_count
+    );
+
+    let mut expected_predecessor = None;
+    let mut actual_bytes = 0_u64;
+    for (index, entry) in entries.iter().enumerate() {
+        let file_type = entry.file_type().expect("读取 V2 最终证据成员类型");
+        assert!(file_type.is_file() && !file_type.is_symlink());
+        let expected_sequence = u64::try_from(index + 1).expect("V2 证据序号适合 u64");
+        let name = entry
+            .file_name()
+            .into_string()
+            .expect("V2 最终证据文件名必须是 UTF-8");
+        let bytes = std::fs::read(entry.path()).expect("独立读取 V2 最终证据文件");
+        let file_sha256 = Sha256Hex(format!("{:x}", Sha256::digest(&bytes)));
+        assert_eq!(
+            name,
+            format!("{expected_sequence:020}-{}.json", file_sha256.0),
+            "文件名必须同时绑定连续序号与实际文件 SHA-256"
+        );
+        assert_ne!(
+            &file_sha256,
+            record_sha256_by_sequence
+                .get(&expected_sequence)
+                .expect("每项最终证据必须对应同序 SQLite 记录"),
+            "最终 JSON 文件 SHA-256 不得复用同序 SQLite 逻辑记录 SHA-256"
+        );
+
+        let value: Value = serde_json::from_slice(&bytes).expect("独立读取 V2 最终证据 JSON");
+        let envelope_object = value.as_object().expect("V2 最终证据信封必须是对象");
+        assert_eq!(
+            envelope_object
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([
+                "body",
+                "predecessor_evidence_sha256",
+                "schema_version",
+                "sequence",
+            ])
+        );
+        let body_object = envelope_object
+            .get("body")
+            .and_then(Value::as_object)
+            .expect("V2 最终证据正文必须是对象");
+        assert_eq!(
+            body_object
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([
+                "account_deltas",
+                "fact",
+                "logical_action_results",
+                "logical_platform_driven_through_utc_ms",
+                "private_fact_schedule_closed_through_utc_ms",
+                "private_output_drafts",
+                "query_projection_revision",
+                "schema_version",
+            ])
+        );
+        for forbidden_field in [
+            "recovery_operation",
+            "transient_input_session_id",
+            "transient_input",
+            "maintenance_steady_before_resource_usage",
+            "resource_usage",
+            "maintenance_succeeded_steady_after_resource_usage",
+        ] {
+            assert!(!envelope_object.contains_key(forbidden_field));
+            assert!(!body_object.contains_key(forbidden_field));
+        }
+        let fact_object = body_object
+            .get("fact")
+            .and_then(Value::as_object)
+            .expect("V2 线格式夹具事实必须是对象");
+        let expected_fact_name = match expected_sequence {
+            1 => "INGRESS_CLOSED",
+            2 => "RUN_ARTIFACT_INPUTS_SEALED",
+            _ => panic!("V2 线格式夹具不得包含额外事实"),
+        };
+        assert_eq!(
+            fact_object
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([expected_fact_name])
+        );
+
+        let envelope: EvidenceEnvelopeAuditWireV2 =
+            serde_json::from_slice(&bytes).expect("独立严格解码 V2 最终证据信封和正文");
+        assert_eq!(envelope.schema_version, "sim_local_evidence_envelope_v2");
+        assert_eq!(envelope.sequence, expected_sequence);
+        assert_eq!(
+            envelope.predecessor_evidence_sha256, expected_predecessor,
+            "V2 最终证据第 {expected_sequence} 项必须引用前一项的实际文件 SHA-256"
+        );
+        assert_eq!(
+            envelope.body.schema_version,
+            "sim_durable_logical_transaction_evidence_v2"
+        );
+        match (expected_sequence, &envelope.body.fact) {
+            (1, DurableTransactionFactAuditWireV2::IngressClosed(fact)) => {
+                assert_eq!(fact.session_id, "task42-v2-evidence-wire-session")
+            }
+            (2, DurableTransactionFactAuditWireV2::RunArtifactInputsSealed(fact)) => {
+                assert_eq!(fact.run_id, "task42-v2-evidence-wire-fixture");
+            }
+            _ => panic!("V2 最终证据事实类型或顺序不符"),
+        }
+        assert_eq!(envelope.body.query_projection_revision, None);
+        assert_eq!(envelope.body.logical_platform_driven_through_utc_ms, None);
+        assert_eq!(
+            envelope.body.private_fact_schedule_closed_through_utc_ms,
+            None
+        );
+        assert!(envelope.body.account_deltas.is_empty());
+        assert!(envelope.body.logical_action_results.is_empty());
+        assert!(envelope.body.private_output_drafts.is_empty());
+
+        actual_bytes = actual_bytes
+            .checked_add(u64::try_from(bytes.len()).expect("V2 最终证据字节数适合 u64"))
+            .expect("V2 最终证据总字节数不溢出");
+        expected_predecessor = Some(file_sha256);
+    }
+
+    assert_eq!(receipt.evidence_bytes, actual_bytes);
+    assert_eq!(receipt.evidence_head_sha256, expected_predecessor);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -2685,6 +2980,66 @@ async fn task421_failure_before_checkpoint_publish_has_no_external_success_or_re
             .receipt
             .disposition,
         crate::session::RequestRegistrationDispositionV1::NewLogicalRequest
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn task421_retry_amax_baseline_excludes_uncommitted_candidate_files() {
+    let dependencies = RecoveryDependenciesV1::new(successful_policy_for_tests()).await;
+    let directory = tempfile::tempdir().expect("创建 Amax 孤立候选临时目录");
+    let captures = DirectCapturesV1::default();
+    let spec = paper_spec(&dependencies, "task421-amax-orphan-retry");
+    let mut process = dependencies
+        .new_process(directory.path().to_path_buf())
+        .expect("创建 Amax 孤立候选运行根");
+    let prepared = process
+        .create_session(
+            spec.clone(),
+            captures.bridge(OrderBridgeAcceptanceV1::Accepted),
+        )
+        .expect("创建 Amax 孤立候选会话");
+    let control = prepared.control;
+    let mut session = prepared.session;
+    process
+        .activate_session(activation_request(&spec, &control))
+        .expect("激活 Amax 孤立候选会话");
+    let before = process
+        .resource_snapshot_for_tests()
+        .expect("读取故障前规范稳态");
+    let request = query_request(
+        &session,
+        &dependencies.latency_profile,
+        "task421-amax-orphan-retry-query",
+    );
+
+    process.fail_next_durable_commit_before_publish_for_tests();
+    assert!(matches!(
+        session.order(request.clone()),
+        Err(SessionError::Durability(_))
+    ));
+    let raw_after_failure = process
+        .resource_snapshot_for_tests()
+        .expect("读取故障后含孤立候选的原始占用");
+    assert!(
+        raw_after_failure.durable.runtime_root.bytes > before.durable.runtime_root.bytes,
+        "故障注入必须真实留下可清理候选，测试才能推翻 raw-current 基线"
+    );
+
+    session
+        .order(request)
+        .expect("同一句柄重试必须清理孤立候选并提交");
+    let observations = process
+        .resource_transaction_observations_for_tests()
+        .expect("读取重试后的逐事务资源证据");
+    let retried = observations.last().expect("重试必须新增一项耐久事实");
+    assert_eq!(
+        retried.maintenance_steady_before.durable, before.durable,
+        "Amax 的提交前稳态必须排除 DefinitelyNotCommitted 留下的孤立候选"
+    );
+    assert!(
+        retried.during_commit_peak.durable.runtime_root.bytes
+            > retried.maintenance_steady_before.durable.runtime_root.bytes,
+        "重试事务增量必须包含完整新候选，而不是被旧孤立候选抵消"
     );
 }
 
@@ -4642,7 +4997,9 @@ async fn task423_task431_retention_expiry_removes_session_and_seals_auditable_ar
             &durable_evidence.private_output_drafts,
             &durable_evidence.transient_input_session_id,
             &durable_evidence.transient_input,
+            &durable_evidence.maintenance_steady_before_resource_usage,
             &durable_evidence.resource_usage,
+            &durable_evidence.maintenance_succeeded_steady_after_resource_usage,
         );
         if let Some(payload) = durable_evidence.fact.get("PLATFORM_BUCKET_APPLIED") {
             let applied: PlatformBucketAppliedAuditWireV1 =

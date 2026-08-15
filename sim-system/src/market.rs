@@ -43,6 +43,7 @@ pub(crate) struct ClosedMarketEventBucketV1 {
     next_index_position: u64,
     closure: MillisecondBucketClosureV1,
     encoded_events: Arc<[Vec<u8>]>,
+    bucket_sha256: Sha256Hex,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,7 +90,7 @@ impl ClosedMarketEventBucketV1 {
     }
 
     pub(crate) fn lifecycle_work_identity(&self) -> String {
-        bucket_sha256(self).0
+        self.bucket_sha256.0.clone()
     }
 
     pub(crate) fn durable_reference(&self) -> DurableMarketBucketReferenceV1 {
@@ -99,7 +100,7 @@ impl ClosedMarketEventBucketV1 {
             start_index_position: self.start_index_position,
             next_index_position: self.next_index_position,
             closure: self.closure,
-            bucket_sha256: bucket_sha256(self),
+            bucket_sha256: self.bucket_sha256.clone(),
         }
     }
 
@@ -117,14 +118,14 @@ impl ClosedMarketEventBucketV1 {
         closure: MillisecondBucketClosureV1,
         encoded_events: impl Into<Arc<[Vec<u8>]>>,
     ) -> Self {
-        Self {
-            path: MarketEventPathV1::HiddenPlatform,
+        Self::new(
+            MarketEventPathV1::HiddenPlatform,
             bucket_at_utc_ms,
             start_index_position,
             next_index_position,
             closure,
-            encoded_events: encoded_events.into(),
-        }
+            encoded_events.into(),
+        )
     }
 
     pub(crate) fn public(
@@ -134,13 +135,39 @@ impl ClosedMarketEventBucketV1 {
         closure: MillisecondBucketClosureV1,
         encoded_events: impl Into<Arc<[Vec<u8>]>>,
     ) -> Self {
-        Self {
-            path: MarketEventPathV1::PublicVisibility,
+        Self::new(
+            MarketEventPathV1::PublicVisibility,
             bucket_at_utc_ms,
             start_index_position,
             next_index_position,
             closure,
-            encoded_events: encoded_events.into(),
+            encoded_events.into(),
+        )
+    }
+
+    fn new(
+        path: MarketEventPathV1,
+        bucket_at_utc_ms: i64,
+        start_index_position: u64,
+        next_index_position: u64,
+        closure: MillisecondBucketClosureV1,
+        encoded_events: Arc<[Vec<u8>]>,
+    ) -> Self {
+        let bucket_sha256 = bucket_sha256_from_parts(
+            path,
+            bucket_at_utc_ms,
+            start_index_position,
+            next_index_position,
+            &encoded_events,
+        );
+        Self {
+            path,
+            bucket_at_utc_ms,
+            start_index_position,
+            next_index_position,
+            closure,
+            encoded_events,
+            bucket_sha256,
         }
     }
 }
@@ -274,7 +301,7 @@ pub(crate) enum MarketLifecyclePhaseV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct AppliedBucketIdentityV1 {
+pub(crate) struct AppliedBucketIdentityV1 {
     bucket_at_utc_ms: i64,
     start_index_position: u64,
     next_index_position: u64,
@@ -480,6 +507,36 @@ struct PreparedMarketEventsV1 {
     evicted_markets: BTreeMap<String, EvictedMarketMarkerV1>,
 }
 
+pub(crate) struct PreparedMarketResolutionTerminalDeltaV2 {
+    condition_id: String,
+    resolution: MarketResolutionTerminalV3,
+    mark_hot_market: bool,
+}
+
+impl PreparedMarketResolutionTerminalDeltaV2 {
+    pub(crate) fn condition_id(&self) -> &str {
+        &self.condition_id
+    }
+
+    pub(crate) fn has_state_change(&self) -> bool {
+        self.mark_hot_market
+    }
+
+    pub(crate) fn commit(self, store: &mut MarketStateStoreV1) {
+        if !self.mark_hot_market {
+            return;
+        }
+        let market = store
+            .markets
+            .get_mut(&self.condition_id)
+            .expect("已准备的判定终态市场必须仍位于热状态");
+        assert!(
+            market.mark_resolution_terminal_if_qualified(&self.resolution),
+            "已准备的判定终态正文必须仍与热市场合格判定一致"
+        );
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct MarketStateStoreV1 {
     markets: BTreeMap<String, MarketStateV1>,
@@ -540,6 +597,10 @@ impl MarketStateStoreV1 {
 
     pub(crate) fn has_last_applied_bucket(&self) -> bool {
         self.last_applied_bucket.is_some()
+    }
+
+    pub(crate) fn last_applied_bucket_identity(&self) -> Option<&AppliedBucketIdentityV1> {
+        self.last_applied_bucket.as_ref()
     }
 
     pub(crate) fn expected_input_seal_outcome(&self) -> InputPathSealOutcomeV1 {
@@ -705,12 +766,47 @@ impl MarketStateStoreV1 {
         condition_id: &str,
         resolution: &MarketResolutionTerminalV3,
     ) -> bool {
+        let prepared = match self.prepare_resolution_terminal_v2(condition_id, resolution) {
+            Ok(Some(prepared)) => prepared,
+            Ok(None) | Err(_) => return false,
+        };
+        prepared.commit(self);
+        true
+    }
+
+    pub(crate) fn prepare_resolution_terminal_v2(
+        &self,
+        condition_id: &str,
+        resolution: &MarketResolutionTerminalV3,
+    ) -> Result<Option<PreparedMarketResolutionTerminalDeltaV2>, MarketEventErrorV1> {
         if let Some(marker) = self.evicted_markets.get(condition_id) {
-            return marker.qualified_resolution == *resolution;
+            if marker.qualified_resolution != *resolution {
+                return Err(MarketEventErrorV1::ResolutionConflict(
+                    condition_id.to_owned(),
+                ));
+            }
+            return Ok(Some(PreparedMarketResolutionTerminalDeltaV2 {
+                condition_id: condition_id.to_owned(),
+                resolution: resolution.clone(),
+                mark_hot_market: false,
+            }));
         }
-        self.markets
-            .get_mut(condition_id)
-            .is_some_and(|market| market.mark_resolution_terminal_if_qualified(resolution))
+        let Some(market) = self.markets.get(condition_id) else {
+            return Ok(None);
+        };
+        let Some(qualified_resolution) = market.qualified_resolution() else {
+            return Ok(None);
+        };
+        if qualified_resolution != resolution {
+            return Err(MarketEventErrorV1::ResolutionConflict(
+                condition_id.to_owned(),
+            ));
+        }
+        Ok(Some(PreparedMarketResolutionTerminalDeltaV2 {
+            condition_id: condition_id.to_owned(),
+            resolution: resolution.clone(),
+            mark_hot_market: market.lifecycle_phase != MarketLifecyclePhaseV1::ResolutionTerminal,
+        }))
     }
 
     fn advance_time_through(&mut self, closed_through_utc_ms: i64) {
@@ -1358,15 +1454,49 @@ struct ExternalLevelV1 {
     causal_group_id: Option<Sha256Hex>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct AccountBookOverlayV1 {
     bids: BTreeMap<Decimal, Decimal>,
     asks: BTreeMap<Decimal, Decimal>,
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static ACCOUNT_BOOK_OVERLAY_CLONE_COUNT_FOR_TESTS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+impl Clone for AccountBookOverlayV1 {
+    fn clone(&self) -> Self {
+        #[cfg(test)]
+        ACCOUNT_BOOK_OVERLAY_CLONE_COUNT_FOR_TESTS.with(|count| count.set(count.get() + 1));
+        Self {
+            bids: self.bids.clone(),
+            asks: self.asks.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+fn reset_account_book_overlay_clone_count_for_tests() {
+    ACCOUNT_BOOK_OVERLAY_CLONE_COUNT_FOR_TESTS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn account_book_overlay_clone_count_for_tests() -> usize {
+    ACCOUNT_BOOK_OVERLAY_CLONE_COUNT_FOR_TESTS.with(std::cell::Cell::get)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct AccountBookOverlayStoreV1 {
     markets: BTreeMap<String, BTreeMap<String, AccountBookOverlayV1>>,
+}
+
+pub(crate) struct PreparedAccountBookOverlayLevelChangeV2<'a> {
+    overlay: &'a mut AccountBookOverlayV1,
+    side: BookSide,
+    price: Decimal,
+    candidate_quantity: Decimal,
 }
 
 impl AccountBookOverlayStoreV1 {
@@ -1456,6 +1586,23 @@ impl AccountBookOverlayStoreV1 {
             .and_then(|overlay| overlay.best_price(side))
     }
 
+    pub(crate) fn prepare_level_change_v2(
+        &mut self,
+        condition_id: &str,
+        token_id: &str,
+        side: BookSide,
+        price: Decimal,
+    ) -> Option<PreparedAccountBookOverlayLevelChangeV2<'_>> {
+        let overlay = self.markets.get_mut(condition_id)?.get_mut(token_id)?;
+        let candidate_quantity = overlay.quantity(side, price);
+        Some(PreparedAccountBookOverlayLevelChangeV2 {
+            overlay,
+            side,
+            price,
+            candidate_quantity,
+        })
+    }
+
     pub(crate) fn add_quantity(
         &mut self,
         condition_id: &str,
@@ -1465,7 +1612,8 @@ impl AccountBookOverlayStoreV1 {
         quantity: Decimal,
     ) -> Option<()> {
         let overlay = self.markets.get_mut(condition_id)?.get_mut(token_id)?;
-        let next = overlay.quantity(side, price).checked_add(quantity)?;
+        let next =
+            AccountBookOverlayV1::checked_add_quantity(overlay.quantity(side, price), quantity)?;
         overlay.set_quantity(side, price, next);
         Some(())
     }
@@ -1479,10 +1627,10 @@ impl AccountBookOverlayStoreV1 {
         quantity: Decimal,
     ) -> Option<()> {
         let overlay = self.markets.get_mut(condition_id)?.get_mut(token_id)?;
-        let next = overlay.quantity(side, price).checked_sub(quantity)?;
-        if next.is_sign_negative() {
-            return None;
-        }
+        let next = AccountBookOverlayV1::checked_subtract_quantity(
+            overlay.quantity(side, price),
+            quantity,
+        )?;
         overlay.set_quantity(side, price, next);
         Some(())
     }
@@ -1503,6 +1651,29 @@ impl AccountBookOverlayStoreV1 {
     }
 }
 
+impl PreparedAccountBookOverlayLevelChangeV2<'_> {
+    pub(crate) fn quantity(&self) -> Decimal {
+        self.candidate_quantity
+    }
+
+    pub(crate) fn add_quantity(&mut self, quantity: Decimal) -> Option<()> {
+        self.candidate_quantity =
+            AccountBookOverlayV1::checked_add_quantity(self.candidate_quantity, quantity)?;
+        Some(())
+    }
+
+    pub(crate) fn subtract_quantity(&mut self, quantity: Decimal) -> Option<()> {
+        self.candidate_quantity =
+            AccountBookOverlayV1::checked_subtract_quantity(self.candidate_quantity, quantity)?;
+        Some(())
+    }
+
+    pub(crate) fn commit(self) {
+        self.overlay
+            .set_quantity(self.side, self.price, self.candidate_quantity);
+    }
+}
+
 impl AccountBookOverlayV1 {
     fn levels(&self, side: BookSide) -> &BTreeMap<Decimal, Decimal> {
         match side {
@@ -1520,6 +1691,15 @@ impl AccountBookOverlayV1 {
 
     fn quantity(&self, side: BookSide, price: Decimal) -> Decimal {
         self.levels(side).get(&price).copied().unwrap_or_default()
+    }
+
+    fn checked_add_quantity(current: Decimal, quantity: Decimal) -> Option<Decimal> {
+        current.checked_add(quantity)
+    }
+
+    fn checked_subtract_quantity(current: Decimal, quantity: Decimal) -> Option<Decimal> {
+        let next = current.checked_sub(quantity)?;
+        (!next.is_sign_negative()).then_some(next)
     }
 
     fn best_price(&self, side: BookSide) -> Option<Decimal> {
@@ -1626,7 +1806,7 @@ fn decode_bucket(
         }
         events.push(event);
     }
-    let sha256 = bucket_sha256(bucket);
+    let sha256 = bucket.bucket_sha256.clone();
     Ok((
         events,
         AppliedBucketIdentityV1 {
@@ -1639,17 +1819,23 @@ fn decode_bucket(
     ))
 }
 
-fn bucket_sha256(bucket: &ClosedMarketEventBucketV1) -> Sha256Hex {
+fn bucket_sha256_from_parts(
+    path: MarketEventPathV1,
+    bucket_at_utc_ms: i64,
+    start_index_position: u64,
+    next_index_position: u64,
+    encoded_events: &[Vec<u8>],
+) -> Sha256Hex {
     let mut hash = Sha256::new();
     hash.update(CLOSED_BUCKET_HASH_DOMAIN_V1);
-    hash.update([match bucket.path {
+    hash.update([match path {
         MarketEventPathV1::HiddenPlatform => 0,
         MarketEventPathV1::PublicVisibility => 1,
     }]);
-    hash.update(bucket.bucket_at_utc_ms.to_be_bytes());
-    hash.update(bucket.start_index_position.to_be_bytes());
-    hash.update(bucket.next_index_position.to_be_bytes());
-    for bytes in bucket.encoded_events.iter() {
+    hash.update(bucket_at_utc_ms.to_be_bytes());
+    hash.update(start_index_position.to_be_bytes());
+    hash.update(next_index_position.to_be_bytes());
+    for bytes in encoded_events {
         hash.update((bytes.len() as u64).to_be_bytes());
         hash.update(bytes);
     }
@@ -1788,7 +1974,7 @@ impl SimSession {
                 && previous.start_index_position == bucket.start_index_position
                 && previous.next_index_position == bucket.next_index_position
                 && previous.closure == bucket.closure
-                && previous.sha256 == bucket_sha256(bucket)
+                && previous.sha256 == bucket.bucket_sha256
         })
     }
 
@@ -2025,11 +2211,283 @@ impl SimSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::finality::successful_policy_for_tests;
+    use crate::latency_profile::load_embedded_proxy_latency_profile;
+    use crate::platform_rules::tests::successful_snapshot_for_sim_tests;
     use crate::scenario::scenario_for_sim_tests;
+    use crate::session::SimProcessRoot;
     use crate::task21_tests::{
         asset, fresh_quality, hidden_bucket, initial_snapshot_event, orderbook_evidence,
-        sealed_event,
+        sealed_event, session_spec,
     };
+
+    fn account_overlay_store_for_tests() -> (AccountBookOverlayStoreV1, String, String) {
+        let scenario = scenario_for_sim_tests();
+        let directory = SessionMarketDirectoryV1::try_from_scenario(&scenario).expect("测试目录");
+        let market = scenario.market_set().markets().first().expect("测试市场");
+        (
+            AccountBookOverlayStoreV1::new(&directory),
+            market.market().condition_id.0.clone(),
+            market
+                .assets()
+                .first()
+                .expect("测试资产")
+                .token_id
+                .0
+                .clone(),
+        )
+    }
+
+    #[test]
+    fn account_book_overlay_level_change_reads_its_candidate_and_drop_keeps_live_state() {
+        let (mut store, condition_id, token_id) = account_overlay_store_for_tests();
+        let price = Decimal::new(45, 2);
+        store.set_quantity(
+            &condition_id,
+            &token_id,
+            BookSide::Bid,
+            price,
+            Decimal::new(10, 0),
+        );
+        let before = store.clone();
+
+        let mut prepared = store
+            .prepare_level_change_v2(&condition_id, &token_id, BookSide::Bid, price)
+            .expect("目标账户盘口必须存在");
+        assert_eq!(prepared.quantity(), Decimal::new(10, 0));
+        prepared
+            .add_quantity(Decimal::new(5, 0))
+            .expect("首次增加候选数量");
+        prepared
+            .subtract_quantity(Decimal::new(3, 0))
+            .expect("后续扣减必须读到候选数量");
+        prepared
+            .add_quantity(Decimal::new(2, 0))
+            .expect("再次增加必须读到同一候选数量");
+        assert_eq!(prepared.quantity(), Decimal::new(14, 0));
+        drop(prepared);
+
+        assert_eq!(store, before, "丢弃候选不得改动 live 账户盘口");
+    }
+
+    #[test]
+    fn account_book_overlay_level_change_commit_matches_the_v1_in_place_sequence() {
+        let (mut actual, condition_id, token_id) = account_overlay_store_for_tests();
+        let mut expected = actual.clone();
+        let bid_price = Decimal::new(40, 2);
+
+        for store in [&mut actual, &mut expected] {
+            store.set_quantity(
+                &condition_id,
+                &token_id,
+                BookSide::Bid,
+                bid_price,
+                Decimal::new(7, 0),
+            );
+        }
+        expected
+            .add_quantity(
+                &condition_id,
+                &token_id,
+                BookSide::Bid,
+                bid_price,
+                Decimal::new(5, 0),
+            )
+            .expect("V1 增加数量");
+        expected
+            .subtract_quantity(
+                &condition_id,
+                &token_id,
+                BookSide::Bid,
+                bid_price,
+                Decimal::new(12, 0),
+            )
+            .expect("V1 扣至零");
+        let mut prepared = actual
+            .prepare_level_change_v2(&condition_id, &token_id, BookSide::Bid, bid_price)
+            .expect("目标账户盘口必须存在");
+        prepared
+            .add_quantity(Decimal::new(5, 0))
+            .expect("V2 增加数量");
+        prepared
+            .subtract_quantity(Decimal::new(12, 0))
+            .expect("V2 扣至零");
+        prepared.commit();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn account_book_overlay_level_change_errors_and_unknown_target_write_nothing() {
+        let (mut store, condition_id, token_id) = account_overlay_store_for_tests();
+        let insufficient_price = Decimal::new(41, 2);
+        let overflow_price = Decimal::new(42, 2);
+        store.set_quantity(
+            &condition_id,
+            &token_id,
+            BookSide::Bid,
+            insufficient_price,
+            Decimal::new(2, 0),
+        );
+        store.set_quantity(
+            &condition_id,
+            &token_id,
+            BookSide::Ask,
+            overflow_price,
+            Decimal::MAX,
+        );
+        let before = store.clone();
+
+        assert!(
+            store
+                .prepare_level_change_v2(
+                    "unknown-condition",
+                    &token_id,
+                    BookSide::Bid,
+                    insufficient_price,
+                )
+                .is_none()
+        );
+        let mut insufficient = store
+            .prepare_level_change_v2(&condition_id, &token_id, BookSide::Bid, insufficient_price)
+            .expect("目标账户盘口必须存在");
+        assert_eq!(insufficient.subtract_quantity(Decimal::new(3, 0)), None);
+        assert_eq!(insufficient.quantity(), Decimal::new(2, 0));
+        drop(insufficient);
+
+        let mut overflow = store
+            .prepare_level_change_v2(&condition_id, &token_id, BookSide::Ask, overflow_price)
+            .expect("目标账户盘口必须存在");
+        assert_eq!(overflow.add_quantity(Decimal::ONE), None);
+        assert_eq!(overflow.quantity(), Decimal::MAX);
+        drop(overflow);
+
+        assert_eq!(store, before);
+    }
+
+    #[test]
+    fn account_book_overlay_level_change_ignores_512_unrelated_targets() {
+        reset_account_book_overlay_clone_count_for_tests();
+        let mut markets = BTreeMap::new();
+        for index in 0_i64..512 {
+            let mut overlay = AccountBookOverlayV1::default();
+            overlay.set_quantity(
+                BookSide::Bid,
+                Decimal::new(index + 1, 3),
+                Decimal::new(index + 1, 0),
+            );
+            markets.insert(
+                format!("unrelated-condition-{index:03}"),
+                BTreeMap::from([(format!("unrelated-token-{index:03}"), overlay)]),
+            );
+        }
+        markets.insert(
+            "target-condition".to_owned(),
+            BTreeMap::from([("target-token".to_owned(), AccountBookOverlayV1::default())]),
+        );
+        let mut actual = AccountBookOverlayStoreV1 { markets };
+        let mut expected = actual.clone();
+        assert_eq!(account_book_overlay_clone_count_for_tests(), 513);
+        reset_account_book_overlay_clone_count_for_tests();
+        let bid_price = Decimal::new(45, 2);
+
+        {
+            let mut prepared = actual
+                .prepare_level_change_v2(
+                    "target-condition",
+                    "target-token",
+                    BookSide::Bid,
+                    bid_price,
+                )
+                .expect("目标账户盘口必须存在");
+            prepared
+                .add_quantity(Decimal::new(4, 0))
+                .expect("增加目标 bid");
+            prepared
+                .add_quantity(Decimal::new(3, 0))
+                .expect("同一目标 bid 继续增加");
+            prepared
+                .subtract_quantity(Decimal::new(2, 0))
+                .expect("同一目标 bid 继续扣减");
+            assert_eq!(account_book_overlay_clone_count_for_tests(), 0);
+        }
+        assert_eq!(actual, expected, "丢弃候选不得触及任何 live 目标");
+        assert_eq!(account_book_overlay_clone_count_for_tests(), 0);
+
+        let mut prepared = actual
+            .prepare_level_change_v2("target-condition", "target-token", BookSide::Bid, bid_price)
+            .expect("目标账户盘口必须存在");
+        prepared
+            .add_quantity(Decimal::new(4, 0))
+            .expect("增加目标 bid");
+        prepared
+            .add_quantity(Decimal::new(3, 0))
+            .expect("同一目标 bid 继续增加");
+        prepared
+            .subtract_quantity(Decimal::new(2, 0))
+            .expect("同一目标 bid 继续扣减");
+        assert_eq!(account_book_overlay_clone_count_for_tests(), 0);
+        prepared.commit();
+        assert_eq!(account_book_overlay_clone_count_for_tests(), 0);
+
+        expected
+            .add_quantity(
+                "target-condition",
+                "target-token",
+                BookSide::Bid,
+                bid_price,
+                Decimal::new(5, 0),
+            )
+            .expect("V1 目标 bid");
+        assert_eq!(actual, expected, "512 个无关目标及其价格不得被触及");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn public_bucket_recovery_anchor_is_absent_then_matches_the_applied_bucket() {
+        let scenario = scenario_for_sim_tests();
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("测试延迟配置");
+        let mut root = SimProcessRoot::try_new(
+            "component-test-run".to_owned(),
+            successful_policy_for_tests(),
+            rules,
+            profile,
+            Arc::clone(&scenario),
+        )
+        .expect("测试进程根");
+        let mut session = root
+            .create_session(session_spec(
+                &scenario,
+                SimCallerRoleV1::Paper,
+                "public-bucket-recovery-anchor",
+            ))
+            .expect("测试模拟盘会话")
+            .session;
+
+        assert_eq!(
+            session.public_markets().last_applied_bucket_identity(),
+            None
+        );
+
+        let bucket = ClosedMarketEventBucketV1::public(
+            900,
+            0,
+            0,
+            MillisecondBucketClosureV1::NextEventAt(901),
+            Vec::new(),
+        );
+        let (_, expected) = decode_bucket(&bucket).expect("公开桶必须可解码");
+        assert_eq!(
+            session
+                .apply_closed_market_event_bucket(bucket)
+                .expect("公开桶必须成功应用"),
+            MarketBucketApplyDispositionV1::Applied
+        );
+        assert_eq!(
+            session.public_markets().last_applied_bucket_identity(),
+            Some(&expected)
+        );
+    }
 
     fn prepare_canonical_hidden_events(
         store: &MarketStateStoreV1,
@@ -2099,6 +2557,95 @@ mod tests {
             )
         );
         resolution
+    }
+
+    #[test]
+    fn prepared_resolution_terminal_delta_is_sparse_atomic_and_conflict_aware() {
+        let scenario = scenario_for_sim_tests();
+        let directory = SessionMarketDirectoryV1::try_from_scenario(&scenario).expect("测试目录");
+        let member = scenario.market_set().markets().first().expect("测试市场");
+        let condition_id = member.market().condition_id.0.clone();
+        let resolution = resolved_terminal(member, 0);
+        let conflicting_resolution = resolved_terminal(member, 1);
+        let mut store = MarketStateStoreV1::new(&directory);
+
+        assert!(
+            store
+                .prepare_resolution_terminal_v2(&condition_id, &resolution)
+                .expect("尚无合格判定不应报错")
+                .is_none(),
+            "None 必须明确表示该 store 路径不适用"
+        );
+
+        let initial = [
+            initial_snapshot_event("1", 0, "Up", 1_100, 1_200, 1, "10"),
+            initial_snapshot_event("2", 1, "Down", 1_100, 1_200, 2, "10"),
+        ];
+        let (prepared, identity) =
+            prepare_canonical_hidden_events(&store, 1_100, 2, &initial).expect("规范初始事件桶");
+        store.commit_prepared_events(prepared, 1_100, identity);
+        let terminal = sealed_event(
+            ExecutionMarketEventPayloadV3::MarketResolutionTerminal(resolution.clone()),
+            orderbook_evidence(2_001, 2_100, 3),
+            fresh_quality(),
+        );
+        let (prepared, identity) = prepare_canonical_hidden_events(&store, 2_001, 3, &[terminal])
+            .expect("规范合格判定事件桶");
+        store.commit_prepared_events(prepared, 2_001, identity);
+        assert_eq!(
+            store
+                .market(&condition_id)
+                .map(MarketStateV1::lifecycle_phase),
+            Some(MarketLifecyclePhaseV1::PostEndPendingResolution)
+        );
+        let baseline = store.clone();
+
+        {
+            let prepared = store
+                .prepare_resolution_terminal_v2(&condition_id, &resolution)
+                .expect("合格正文必须可准备")
+                .expect("合格正文必须适用于热市场");
+            assert!(prepared.has_state_change());
+            assert_eq!(prepared.condition_id(), condition_id);
+        }
+        assert_eq!(store, baseline, "drop 必须保持 live store 零变化");
+
+        store
+            .prepare_resolution_terminal_v2(&condition_id, &resolution)
+            .expect("重新准备合格终态")
+            .expect("热市场路径必须适用")
+            .commit(&mut store);
+        assert_eq!(
+            store
+                .market(&condition_id)
+                .map(MarketStateV1::lifecycle_phase),
+            Some(MarketLifecyclePhaseV1::ResolutionTerminal)
+        );
+        let terminal = store.clone();
+        let repeated = store
+            .prepare_resolution_terminal_v2(&condition_id, &resolution)
+            .expect("精确终态重复必须幂等")
+            .expect("精确重复仍是适用路径");
+        assert!(!repeated.has_state_change());
+        repeated.commit(&mut store);
+        assert_eq!(store, terminal);
+
+        assert!(matches!(
+            store.prepare_resolution_terminal_v2(&condition_id, &conflicting_resolution),
+            Err(MarketEventErrorV1::ResolutionConflict(actual)) if actual == condition_id
+        ));
+        assert_eq!(store, terminal, "冲突准备不得改变 live store");
+
+        store
+            .evict_terminal_market(&condition_id)
+            .expect("终态市场必须可正式驱逐");
+        let evicted = store
+            .prepare_resolution_terminal_v2(&condition_id, &resolution)
+            .expect("驱逐标记中的精确正文必须适用")
+            .expect("驱逐路径必须返回 token");
+        assert!(!evicted.has_state_change());
+        evicted.commit(&mut store);
+        assert!(store.is_evicted(&condition_id));
     }
 
     #[test]

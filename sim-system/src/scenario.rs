@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 pub const PLATFORM_SCENARIO_SCHEMA_V1: &str = "platform_scenario_v1";
 pub const MARKET_SET_SCHEMA_V1: &str = "market_set_v1";
 pub const BTC_UPDOWN_5M_MARKET_FAMILY_V1: &str = "BTC_UPDOWN_5M";
+pub(crate) const PLATFORM_MARKET_TEXT_MAX_BYTES_V1: usize = 256;
 
 const MARKET_SET_HASH_DOMAIN_V1: &str = "SIM_MARKET_SET_SHA256_V1";
 const PLATFORM_SCENARIO_HASH_DOMAIN_V1: &str = "SIM_PLATFORM_SCENARIO_SHA256_V1";
@@ -68,6 +69,25 @@ impl PlatformMarketV1 {
             return Err(PlatformScenarioErrorV1::DuplicateOutcomeIndex);
         }
         Ok(Self { market, assets })
+    }
+
+    pub(crate) fn validate_for_admission(&self) -> Result<(), PlatformScenarioErrorV1> {
+        validate_market(&self.market)?;
+        for asset in &self.assets {
+            validate_asset(asset)?;
+        }
+        if self.assets[0].token_id == self.assets[1].token_id {
+            return Err(PlatformScenarioErrorV1::DuplicateAssetIdentity);
+        }
+        if self.assets[0].outcome.index == self.assets[1].outcome.index {
+            return Err(PlatformScenarioErrorV1::DuplicateOutcomeIndex);
+        }
+        if compare_token_ids(&self.assets[0].token_id.0, &self.assets[1].token_id.0)
+            == Ordering::Greater
+        {
+            return Err(PlatformScenarioErrorV1::InvalidAssetIdentity);
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -198,7 +218,9 @@ fn validate_market(market: &MarketIdentityV2) -> Result<(), PlatformScenarioErro
     {
         return Err(PlatformScenarioErrorV1::InvalidConditionId);
     }
-    if !is_unsigned_decimal_id(&market.clob_market_id.0) {
+    if market.clob_market_id.0.len() > PLATFORM_MARKET_TEXT_MAX_BYTES_V1
+        || !is_unsigned_decimal_id(&market.clob_market_id.0)
+    {
         return Err(PlatformScenarioErrorV1::InvalidClobMarketId);
     }
     if market.window.start_at_utc_ms >= market.window.end_at_utc_ms {
@@ -208,7 +230,11 @@ fn validate_market(market: &MarketIdentityV2) -> Result<(), PlatformScenarioErro
 }
 
 fn validate_asset(asset: &AssetIdentityV1) -> Result<(), PlatformScenarioErrorV1> {
-    if !is_unsigned_decimal_id(&asset.token_id.0) || asset.outcome.label.is_empty() {
+    if asset.token_id.0.len() > PLATFORM_MARKET_TEXT_MAX_BYTES_V1
+        || asset.outcome.label.len() > PLATFORM_MARKET_TEXT_MAX_BYTES_V1
+        || !is_unsigned_decimal_id(&asset.token_id.0)
+        || asset.outcome.label.is_empty()
+    {
         return Err(PlatformScenarioErrorV1::InvalidAssetIdentity);
     }
     Ok(())
@@ -256,4 +282,114 @@ pub(crate) fn scenario_for_sim_tests() -> std::sync::Arc<PlatformScenarioV1> {
     ];
     let member = PlatformMarketV1::try_new(market, assets).expect("test platform market");
     std::sync::Arc::new(PlatformScenarioV1::try_new(vec![member]).expect("test platform scenario"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use contracts::{
+        AssetIdentityV1, ClobMarketId, ConditionId, MarketWindowV2, OutcomeIdentityV1, TokenId,
+    };
+
+    fn market_with_fields(
+        clob_market_id: String,
+        first_token_id: String,
+        first_label: String,
+    ) -> Result<PlatformMarketV1, PlatformScenarioErrorV1> {
+        PlatformMarketV1::try_new(
+            MarketIdentityV2 {
+                condition_id: ConditionId(format!("0x{}", "1".repeat(64))),
+                clob_market_id: ClobMarketId(clob_market_id),
+                window: MarketWindowV2 {
+                    start_at_utc_ms: 1_000,
+                    end_at_utc_ms: 2_000,
+                },
+            },
+            [
+                AssetIdentityV1 {
+                    token_id: TokenId(first_token_id),
+                    outcome: OutcomeIdentityV1 {
+                        index: 0,
+                        label: first_label,
+                    },
+                },
+                AssetIdentityV1 {
+                    token_id: TokenId("2".to_owned()),
+                    outcome: OutcomeIdentityV1 {
+                        index: 1,
+                        label: "Down".to_owned(),
+                    },
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn platform_market_text_fields_are_bounded_at_256_utf8_bytes() {
+        assert_eq!(PLATFORM_MARKET_TEXT_MAX_BYTES_V1, 256);
+        let at_limit = "1".repeat(PLATFORM_MARKET_TEXT_MAX_BYTES_V1);
+        let market = market_with_fields(at_limit.clone(), at_limit.clone(), at_limit.clone())
+            .expect("三个市场文本字段恰好达到 256 字节时应被接受");
+        assert_eq!(
+            market.market().clob_market_id.0.len(),
+            PLATFORM_MARKET_TEXT_MAX_BYTES_V1
+        );
+        assert_eq!(
+            market.assets()[1].token_id.0.len(),
+            PLATFORM_MARKET_TEXT_MAX_BYTES_V1
+        );
+        assert_eq!(
+            market.assets()[1].outcome.label.len(),
+            PLATFORM_MARKET_TEXT_MAX_BYTES_V1
+        );
+
+        let over_limit = "1".repeat(PLATFORM_MARKET_TEXT_MAX_BYTES_V1 + 1);
+        assert_eq!(
+            market_with_fields(over_limit.clone(), "1".to_owned(), "Up".to_owned()),
+            Err(PlatformScenarioErrorV1::InvalidClobMarketId)
+        );
+        assert_eq!(
+            market_with_fields("1".to_owned(), over_limit.clone(), "Up".to_owned()),
+            Err(PlatformScenarioErrorV1::InvalidAssetIdentity)
+        );
+        assert_eq!(
+            market_with_fields("1".to_owned(), "1".to_owned(), over_limit),
+            Err(PlatformScenarioErrorV1::InvalidAssetIdentity)
+        );
+
+        let utf8_at_limit = format!("{}a", "界".repeat(85));
+        assert_eq!(utf8_at_limit.len(), PLATFORM_MARKET_TEXT_MAX_BYTES_V1);
+        market_with_fields("1".to_owned(), "1".to_owned(), utf8_at_limit)
+            .expect("多字节标签恰好达到 256 个 UTF-8 字节时应被接受");
+        let utf8_over_limit = "界".repeat(86);
+        assert_eq!(utf8_over_limit.len(), 258);
+        assert_eq!(
+            market_with_fields("1".to_owned(), "1".to_owned(), utf8_over_limit),
+            Err(PlatformScenarioErrorV1::InvalidAssetIdentity)
+        );
+    }
+
+    #[test]
+    fn admission_rejects_deserialized_noncanonical_asset_order() {
+        let canonical = market_with_fields("1".to_owned(), "10".to_owned(), "Up".to_owned())
+            .expect("规范市场应成功构造");
+        assert_eq!(canonical.assets()[0].token_id.0, "2");
+        assert_eq!(canonical.assets()[1].token_id.0, "10");
+        canonical
+            .validate_for_admission()
+            .expect("构造器产生的规范顺序应通过准入");
+
+        let mut encoded = serde_json::to_value(&canonical).expect("市场应能序列化");
+        encoded["assets"]
+            .as_array_mut()
+            .expect("资产字段应为数组")
+            .reverse();
+        let unchecked: PlatformMarketV1 =
+            serde_json::from_value(encoded).expect("Serde 只负责结构反序列化");
+
+        assert_eq!(
+            unchecked.validate_for_admission(),
+            Err(PlatformScenarioErrorV1::InvalidAssetIdentity)
+        );
+    }
 }

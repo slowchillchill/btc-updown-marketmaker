@@ -42,17 +42,23 @@ use crate::matching::{
     allocate_taker_fee_micro_units_v1, cumulative_segment_quote_units_v1,
     decimal_from_micro_units_v1, micro_units_v1, stable_fill_id,
 };
+#[cfg(test)]
+use crate::matching::{
+    execution_state_clone_count_for_tests, reset_execution_state_clone_count_for_tests,
+};
 use crate::measurement::{ComponentGoldenLoadContractV1, ComponentGoldenRunMeasurementV1};
 use crate::persistence::{
-    DurableCommitFailureV1, DurableResourcePreviewV1, ImmutableArtifactMemberV1,
-    LocalDurabilityStoreV1, PersistenceErrorV1, RecoveredDurabilityV1, RecoveredEvidenceV1,
+    DurabilityProfileV2, DurableCommitFailureV1, DurableResourcePreviewV1,
+    FINAL_EVIDENCE_DIRECTORY_NAME_V2, FinalEvidenceExportReceiptV2, ImmutableArtifactMemberV1,
+    LocalDurabilityStoreV1, LocalTransactionLogStoreV2, PersistenceErrorV1, RecoveredDurabilityV1,
+    RecoveredEvidenceV1, TransactionLogIdentityV2, encode_transaction_record_v2,
 };
 use crate::platform_rules::{SealedProcessRuleSnapshot, SnapshotAccessMode};
 use crate::rebate::{MakerRebateMarketResultStatusV1, RebateKindV1, RebateSettlementActionV1};
 use crate::resource::{
-    ResourceAdmissionStateV1, ResourceLimitKindV1, ResourceLimitReachedV1, ResourceLimitScopeV1,
-    ResourceQuantityV1, SimulationResourceHighWaterV1, SimulationResourcePolicyV1,
-    SimulationResourceUsageV1,
+    ResourceAdmissionStateV1, ResourceLimitDimensionV1, ResourceLimitKindV1,
+    ResourceLimitReachedV1, ResourceLimitScopeV1, ResourceQuantityV1,
+    SimulationResourceHighWaterV1, SimulationResourcePolicyV1, SimulationResourceUsageV1,
 };
 #[cfg(test)]
 use crate::resource::{
@@ -73,20 +79,73 @@ pub use crate::session::{
 };
 use crate::session::{
     InputPathSealOutcomeV1, MutationResolutionDispositionV1, ParsedLogicalActionV1,
-    ParsedMethodTimingV1, PlatformPrefixCursorV1, PreparedSimSessionV2, PublicVisibilityCursorV1,
-    QueuedLogicalActionV1, RegisteredLogicalScheduleV1, SessionCheckpointErrorV1, SessionError,
+    ParsedMethodTimingV1, PlatformPrefixCursorV1, PreparedBusinessMarketUseV1,
+    PreparedPrivateFactSliceV2, PreparedRequestScheduleV1, PreparedSimSessionV2,
+    PublicVisibilityCursorV1, QueuedLogicalActionV1, RegisteredLogicalScheduleV1,
+    SESSION_ID_MAX_BYTES_V1, STABLE_ID_MAX_BYTES_V1, SessionCheckpointErrorV1, SessionError,
     SimProcessRoot, SimProcessRootCheckpointV1, SimSession, SimSessionCheckpointV1,
-    validate_durable_market_enrollment_chain,
+    session_id_is_valid_v1, validate_activation_request, validate_durable_market_enrollment_chain,
+    validate_failure_request, validate_market_enrollment_request, validate_session_spec,
 };
 
 const POST_ORDERS_MAX_ITEMS: usize = 15;
 const CANCEL_ORDERS_MAX_ITEMS: usize = 1_000;
+const FAILURE_ADMISSION_MAP_SEPARATOR_PADDING_BYTES_V1: u64 = 1;
+const FAILURE_SEQUENCE_JSON_PADDING_BYTES_V1: u64 = 19;
 pub const SIM_QUERY_PAGE_SIZE_V1: usize = 100;
 const SIM_QUERY_PAGE_POLICY_V1: &str = "PROJECT_QUERY_PAGE_100_V1";
 const CANONICAL_REQUEST_HASH_DOMAIN: &str = "SIM_EXECUTION_CANONICAL_REQUEST_V1";
 const MUTATION_PAYLOAD_HASH_DOMAIN: &str = "SIM_EXECUTION_MUTATION_PAYLOAD_V1";
 const DURABLE_RUN_CHECKPOINT_SCHEMA_V1: &str = "sim_durable_run_checkpoint_v1";
 const DURABLE_TRANSACTION_EVIDENCE_SCHEMA_V1: &str = "sim_durable_transaction_evidence_v1";
+const DURABLE_LOGICAL_TRANSACTION_EVIDENCE_SCHEMA_V2: &str =
+    "sim_durable_logical_transaction_evidence_v2";
+const RECOVERABLE_PAPER_APPLICATION_CHECKPOINT_SCHEMA_V2: &str =
+    "sim_recoverable_paper_application_checkpoint_v2";
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RequestRegistrationPreparationCountsV2 {
+    runtime_state_calls: u64,
+    canonical_request_sha256_calls: u64,
+    mutation_binding_calls: u64,
+    evidence_construction_calls: u64,
+}
+
+#[cfg(test)]
+thread_local! {
+    static REQUEST_REGISTRATION_PREPARATION_COUNTS_V2:
+        std::cell::Cell<RequestRegistrationPreparationCountsV2> =
+        const { std::cell::Cell::new(RequestRegistrationPreparationCountsV2 {
+            runtime_state_calls: 0,
+            canonical_request_sha256_calls: 0,
+            mutation_binding_calls: 0,
+            evidence_construction_calls: 0,
+        }) };
+}
+
+#[cfg(test)]
+fn reset_request_registration_preparation_counts_v2() {
+    REQUEST_REGISTRATION_PREPARATION_COUNTS_V2.with(|counts| {
+        counts.set(RequestRegistrationPreparationCountsV2::default());
+    });
+}
+
+#[cfg(test)]
+fn request_registration_preparation_counts_v2() -> RequestRegistrationPreparationCountsV2 {
+    REQUEST_REGISTRATION_PREPARATION_COUNTS_V2.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn update_request_registration_preparation_counts_v2(
+    update: impl FnOnce(&mut RequestRegistrationPreparationCountsV2),
+) {
+    REQUEST_REGISTRATION_PREPARATION_COUNTS_V2.with(|stored| {
+        let mut counts = stored.get();
+        update(&mut counts);
+        stored.set(counts);
+    });
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SimBuyOrderKindV1 {
@@ -1304,6 +1363,18 @@ struct DurableRequestRegistrationV1 {
     actions: Vec<QueuedLogicalActionV1>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum DurableRecoveryOperationV2 {
+    ApplicationCheckpointBoundary,
+    RegisterRequest,
+    ApplyClosedMarketEventBucket,
+    DriveExecutionThrough { effective_processing_at_utc_ms: i64 },
+    AdvancePrivateFactThrough { received_at_utc_ms: i64 },
+    AdvanceDownstreamDurability,
+    CloseIngress,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DurableLogicalActionResultV1 {
@@ -1384,6 +1455,37 @@ impl DurablePrivateOutputDraftV1 {
             Self::Lifecycle { draft } => draft.session_id(),
         }
     }
+
+    fn order_recovery_binding_is_consistent(
+        &self,
+        expected_session_id: &str,
+        expected_account_instance_key: &AccountInstanceKeyV1,
+        expected_execution: Option<&ExecutionStateV1>,
+    ) -> bool {
+        match self {
+            Self::Lifecycle {
+                draft: LifecycleFeedbackDraftV1::Order(draft),
+            } => draft.recovery_binding_is_consistent(
+                expected_session_id,
+                expected_account_instance_key,
+                expected_execution,
+            ),
+            Self::Direct { .. }
+            | Self::Lifecycle {
+                draft: LifecycleFeedbackDraftV1::Trade(_) | LifecycleFeedbackDraftV1::Settlement(_),
+            } => true,
+        }
+    }
+
+    fn visit_account_deltas(
+        &self,
+        visitor: &mut impl FnMut(&PlatformAccountDeltaV1) -> Result<(), SessionCheckpointErrorV1>,
+    ) -> Result<(), SessionCheckpointErrorV1> {
+        match self {
+            Self::Direct { .. } => Ok(()),
+            Self::Lifecycle { draft } => draft.visit_account_deltas(visitor),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1436,6 +1538,10 @@ enum DurableTransactionFactV1 {
         session_id: String,
         delivery: SealedPrivateDeliveryV1,
     },
+    PrivateOutputCommitted {
+        session_id: String,
+        delivery: SealedPrivateDeliveryV1,
+    },
     PrivateOutputConfirmed {
         session_id: String,
         confirmation: ResponseDeliveryConfirmationV1,
@@ -1469,6 +1575,7 @@ enum DurableTransactionFactV1 {
     ResourceLimitReached {
         session_id: Option<String>,
         limit: ResourceLimitReachedV1,
+        triggering_session_limit: Option<ResourceLimitReachedV1>,
     },
 }
 
@@ -1485,7 +1592,9 @@ struct DurableTransactionEvidenceV1 {
     private_output_drafts: Vec<DurablePrivateOutputDraftV1>,
     transient_input_session_id: Option<String>,
     transient_input: ResourceQuantityV1,
+    maintenance_steady_before_resource_usage: Option<SimulationResourceUsageV1>,
     resource_usage: Option<SimulationResourceUsageV1>,
+    maintenance_succeeded_steady_after_resource_usage: Option<SimulationResourceUsageV1>,
 }
 
 impl DurableTransactionEvidenceV1 {
@@ -1501,7 +1610,9 @@ impl DurableTransactionEvidenceV1 {
             private_output_drafts: Vec::new(),
             transient_input_session_id: None,
             transient_input: ResourceQuantityV1::default(),
+            maintenance_steady_before_resource_usage: None,
             resource_usage: None,
+            maintenance_succeeded_steady_after_resource_usage: None,
         }
     }
 
@@ -1522,6 +1633,7 @@ impl DurableTransactionEvidenceV1 {
             | DurableTransactionFactV1::PlatformBucketApplied { session_id, .. }
             | DurableTransactionFactV1::ExecutionAdvanced { session_id, .. }
             | DurableTransactionFactV1::PrivateOutputPrepared { session_id, .. }
+            | DurableTransactionFactV1::PrivateOutputCommitted { session_id, .. }
             | DurableTransactionFactV1::PrivateOutputConfirmed { session_id, .. }
             | DurableTransactionFactV1::IngressClosed { session_id, .. }
             | DurableTransactionFactV1::DownstreamDurabilityAdvanced { session_id, .. }
@@ -1538,6 +1650,47 @@ impl DurableTransactionEvidenceV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct DurableLogicalTransactionEvidenceV2 {
+    schema_version: String,
+    fact: DurableTransactionFactV1,
+    query_projection_revision: Option<u64>,
+    logical_platform_driven_through_utc_ms: Option<i64>,
+    private_fact_schedule_closed_through_utc_ms: Option<i64>,
+    account_deltas: Vec<PlatformAccountDeltaV1>,
+    logical_action_results: Vec<DurableLogicalActionResultV1>,
+    private_output_drafts: Vec<DurablePrivateOutputDraftV1>,
+}
+
+impl DurableLogicalTransactionEvidenceV2 {
+    fn new(fact: DurableTransactionFactV1) -> Self {
+        Self {
+            schema_version: DURABLE_LOGICAL_TRANSACTION_EVIDENCE_SCHEMA_V2.to_owned(),
+            fact,
+            query_projection_revision: None,
+            logical_platform_driven_through_utc_ms: None,
+            private_fact_schedule_closed_through_utc_ms: None,
+            account_deltas: Vec::new(),
+            logical_action_results: Vec::new(),
+            private_output_drafts: Vec::new(),
+        }
+    }
+
+    fn into_v1(self) -> DurableTransactionEvidenceV1 {
+        let mut evidence = DurableTransactionEvidenceV1::new(self.fact);
+        evidence.query_projection_revision = self.query_projection_revision;
+        evidence.logical_platform_driven_through_utc_ms =
+            self.logical_platform_driven_through_utc_ms;
+        evidence.private_fact_schedule_closed_through_utc_ms =
+            self.private_fact_schedule_closed_through_utc_ms;
+        evidence.account_deltas = self.account_deltas;
+        evidence.logical_action_results = self.logical_action_results;
+        evidence.private_output_drafts = self.private_output_drafts;
+        evidence
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DurableRunCheckpointV1 {
     schema_version: String,
     execution_contract_version: String,
@@ -1548,10 +1701,43 @@ struct DurableRunCheckpointV1 {
     component_golden_measurement_sha256: Option<Sha256Hex>,
     resource_high_water: SimulationResourceHighWaterV1,
     run_resource_admission: ResourceAdmissionStateV1,
+    run_resource_triggering_session_limit: Option<RunResourceTriggerV1>,
     session_resource_admission: BTreeMap<String, ResourceAdmissionStateV1>,
     lifecycle: DurableRunLifecycleV1,
     process_root: SimProcessRootCheckpointV1,
     sessions: BTreeMap<String, ExecutionSessionCheckpointV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunResourceTriggerV1 {
+    session_id: String,
+    limit: ResourceLimitReachedV1,
+}
+
+fn bound_input_blocking_limit_v1<'a>(
+    run_admission: &'a ResourceAdmissionStateV1,
+    run_trigger: Option<&'a RunResourceTriggerV1>,
+    session_admissions: &'a BTreeMap<String, ResourceAdmissionStateV1>,
+    session_id: &str,
+) -> Option<&'a ResourceLimitReachedV1> {
+    if let Some(limit) = run_admission.blocking_limit()
+        && (limit.scope == ResourceLimitScopeV1::Durable
+            || limit.kind == ResourceLimitKindV1::InputQueue
+            || run_trigger.is_some_and(|trigger| {
+                trigger.session_id == session_id
+                    && trigger.limit.kind == ResourceLimitKindV1::InputQueue
+            }))
+    {
+        return Some(limit);
+    }
+    session_admissions
+        .get(session_id)
+        .and_then(ResourceAdmissionStateV1::blocking_limit)
+        .filter(|limit| {
+            limit.scope == ResourceLimitScopeV1::Durable
+                || limit.kind == ResourceLimitKindV1::InputQueue
+        })
 }
 
 type DurableEvictedMarketStateV1 = (
@@ -1562,6 +1748,32 @@ type DurableEvictedMarketStateV1 = (
 
 type DurableEvictedMarketsBySessionV1 =
     BTreeMap<String, BTreeMap<String, DurableEvictedMarketStateV1>>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoverablePaperApplicationCheckpointV2 {
+    schema_version: String,
+    run_checkpoint: DurableRunCheckpointV1,
+    evicted_markets: DurableEvictedMarketsBySessionV1,
+}
+
+impl RecoverablePaperApplicationCheckpointV2 {
+    fn validate(&self) -> Result<(), PersistenceErrorV1> {
+        if self.schema_version != RECOVERABLE_PAPER_APPLICATION_CHECKPOINT_SCHEMA_V2 {
+            return Err(PersistenceErrorV1::Integrity(format!(
+                "不支持的 RecoverablePaper 应用检查点版本：{}",
+                self.schema_version
+            )));
+        }
+        if self.run_checkpoint.schema_version != DURABLE_RUN_CHECKPOINT_SCHEMA_V1 {
+            return Err(PersistenceErrorV1::Integrity(format!(
+                "RecoverablePaper 应用检查点包含不支持的运行检查点版本：{}",
+                self.run_checkpoint.schema_version
+            )));
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DurableSessionCompletionKindV1 {
@@ -1580,6 +1792,7 @@ struct DurableEvidenceProjectionV1 {
     component_golden_measurement: Option<ComponentGoldenRunMeasurementV1>,
     component_golden_measurement_sha256: Option<Sha256Hex>,
     run_resource_admission: ResourceAdmissionStateV1,
+    run_resource_triggering_session_limit: Option<RunResourceTriggerV1>,
     session_resource_admission: BTreeMap<String, ResourceAdmissionStateV1>,
     resource_high_water: SimulationResourceHighWaterV1,
     lifecycle: Option<DurableRunLifecycleV1>,
@@ -1615,6 +1828,7 @@ struct DurableEvidenceProjectionV1 {
 
 #[derive(Default)]
 struct ArtifactEvidenceIndexV1 {
+    market_bucket_count: u64,
     session_created: BTreeMap<String, SimulationEvidenceReferenceV1>,
     initialization_terminal: BTreeMap<String, SimulationEvidenceReferenceV1>,
     enrollments: BTreeMap<String, Vec<(MarketEnrollmentV1, SimulationEvidenceReferenceV1)>>,
@@ -1701,6 +1915,10 @@ impl ArtifactEvidenceIndexV1 {
                 );
             }
             DurableTransactionFactV1::PlatformBucketApplied { session_id, bucket } => {
+                self.market_bucket_count =
+                    self.market_bucket_count.checked_add(1).ok_or_else(|| {
+                        SimExecutionPersistenceErrorV1::Session("市场桶数量溢出".to_owned())
+                    })?;
                 self.buckets
                     .entry(session_id.clone())
                     .or_default()
@@ -1718,6 +1936,26 @@ impl ArtifactEvidenceIndexV1 {
                         (delivery.clone(), reference.clone()),
                     );
             }
+            DurableTransactionFactV1::PrivateOutputCommitted {
+                session_id,
+                delivery,
+            } => {
+                let confirmation = delivery.confirmation();
+                self.prepared_outputs
+                    .entry(session_id.clone())
+                    .or_default()
+                    .insert(
+                        confirmation.private_feedback_sequence,
+                        (delivery.clone(), reference.clone()),
+                    );
+                self.confirmed_outputs
+                    .entry(session_id.clone())
+                    .or_default()
+                    .insert(
+                        confirmation.private_feedback_sequence,
+                        (confirmation, reference.clone()),
+                    );
+            }
             DurableTransactionFactV1::PrivateOutputConfirmed {
                 session_id,
                 confirmation,
@@ -1731,13 +1969,22 @@ impl ArtifactEvidenceIndexV1 {
                     );
             }
             DurableTransactionFactV1::DownstreamDurabilityAdvanced { session_id, proof } => {
-                self.downstream_durable
+                let downstream = self
+                    .downstream_durable
                     .entry(session_id.clone())
-                    .or_default()
-                    .insert(
-                        proof.durable_through.private_feedback_sequence,
-                        (proof.clone(), reference.clone()),
-                    );
+                    .or_default();
+                let previous = downstream
+                    .last_key_value()
+                    .map_or(0, |(sequence, _)| *sequence);
+                let through = proof.durable_through.private_feedback_sequence;
+                if through <= previous {
+                    return Err(SimExecutionPersistenceErrorV1::Session(format!(
+                        "下游耐久证据引用没有向前推进：{session_id}"
+                    )));
+                }
+                for sequence in previous + 1..=through {
+                    downstream.insert(sequence, (proof.clone(), reference.clone()));
+                }
             }
             DurableTransactionFactV1::MarketHotStateEvicted {
                 session_id,
@@ -1796,6 +2043,200 @@ impl ArtifactEvidenceIndexV1 {
         }
         Ok(())
     }
+
+    fn apply_logical_v2(
+        &mut self,
+        sequence: u64,
+        file_sha256: Sha256Hex,
+        evidence: &DurableLogicalTransactionEvidenceV2,
+    ) -> Result<(), SimExecutionPersistenceErrorV1> {
+        if evidence.schema_version != DURABLE_LOGICAL_TRANSACTION_EVIDENCE_SCHEMA_V2 {
+            return Err(SimExecutionPersistenceErrorV1::UnsupportedCheckpoint(
+                evidence.schema_version.clone(),
+            ));
+        }
+        self.apply(&RecoveredEvidenceV1 {
+            sequence,
+            content_sha256: file_sha256,
+            envelope_byte_length: 0,
+            body: evidence.clone().into_v1(),
+        })
+    }
+}
+
+#[derive(Default)]
+struct RunArtifactEvidenceAccumulatorV2 {
+    projection: DurableEvidenceProjectionV1,
+    index: ArtifactEvidenceIndexV1,
+    evidence_count: u64,
+    evidence_bytes: u64,
+    evidence_head_sha256: Option<Sha256Hex>,
+}
+
+impl RunArtifactEvidenceAccumulatorV2 {
+    fn new() -> Self {
+        Self {
+            projection: DurableEvidenceProjectionV1::for_artifacts(),
+            ..Self::default()
+        }
+    }
+
+    fn apply_logical_evidence(
+        &mut self,
+        sequence: u64,
+        file_sha256: Sha256Hex,
+        envelope_byte_length: u64,
+        evidence: &DurableLogicalTransactionEvidenceV2,
+    ) -> Result<(), SimExecutionPersistenceErrorV1> {
+        let expected_sequence = self
+            .evidence_count
+            .checked_add(1)
+            .ok_or_else(|| SimExecutionPersistenceErrorV1::Session("V2 证据数量溢出".to_owned()))?;
+        if sequence != expected_sequence || file_sha256.0.is_empty() {
+            return Err(SimExecutionPersistenceErrorV1::Session(format!(
+                "V2 证据前缀序号或文件 SHA-256 非法：期望 {expected_sequence}，实际 {sequence}"
+            )));
+        }
+        let evidence_bytes = self
+            .evidence_bytes
+            .checked_add(envelope_byte_length)
+            .ok_or_else(|| {
+                SimExecutionPersistenceErrorV1::Session("V2 证据字节数溢出".to_owned())
+            })?;
+        self.projection.apply_logical_v2(evidence)?;
+        self.index
+            .apply_logical_v2(sequence, file_sha256.clone(), evidence)?;
+        self.evidence_count = expected_sequence;
+        self.evidence_bytes = evidence_bytes;
+        self.evidence_head_sha256 = Some(file_sha256);
+        Ok(())
+    }
+
+    fn finish(
+        self,
+        process_root: &SimProcessRoot,
+        checkpoint: &DurableRunCheckpointV1,
+        through_commit_sequence: u64,
+        evidence_run_root_relative_path: &str,
+        resource_high_water: &SimulationResourceHighWaterV1,
+    ) -> Result<PreparedRunArtifactBundleV1, artifacts::SimulationRunArtifactErrorV1> {
+        let evidence_head_sha256 = self
+            .evidence_head_sha256
+            .unwrap_or_else(|| Sha256Hex(String::new()));
+        prepare_run_artifact_bundle_from_projection(
+            process_root,
+            checkpoint,
+            through_commit_sequence,
+            self.evidence_count,
+            self.evidence_bytes,
+            &evidence_head_sha256,
+            evidence_run_root_relative_path,
+            &self.projection,
+            &self.index,
+            resource_high_water,
+        )
+    }
+}
+
+fn export_and_prepare_run_artifact_bundle_v2(
+    store: &LocalTransactionLogStoreV2,
+    process_root: &SimProcessRoot,
+    checkpoint: &DurableRunCheckpointV1,
+    through_commit_sequence: u64,
+    resource_high_water: &SimulationResourceHighWaterV1,
+) -> Result<
+    (PreparedRunArtifactBundleV1, FinalEvidenceExportReceiptV2),
+    SimExecutionPersistenceErrorV1,
+> {
+    if through_commit_sequence == 0 {
+        return Err(SimExecutionPersistenceErrorV1::Store(
+            "V2 最终证据前缀不能为空".to_owned(),
+        ));
+    }
+    let mut accumulator = Some(RunArtifactEvidenceAccumulatorV2::new());
+    let mut prepared_bundle = None;
+    let receipt = store.export_final_evidence_v2::<
+        DurableLogicalTransactionEvidenceV2,
+        DurableRecoveryOperationV2,
+        DurableRunCheckpointV1,
+        _,
+    >(
+        through_commit_sequence,
+        checkpoint,
+        |sequence, file_sha256, envelope_byte_length, evidence| {
+            let current = accumulator.as_mut().ok_or_else(|| {
+                PersistenceErrorV1::Integrity(
+                    "V2 最终证据导出在完整前缀后仍返回额外成员".to_owned(),
+                )
+            })?;
+            current
+                .apply_logical_evidence(
+                    sequence,
+                    file_sha256.clone(),
+                    envelope_byte_length,
+                    evidence,
+                )
+                .map_err(|error| PersistenceErrorV1::Integrity(error.to_string()))?;
+            if sequence == through_commit_sequence {
+                let complete = accumulator.take().ok_or_else(|| {
+                    PersistenceErrorV1::Integrity("V2 最终证据累加器已提前结束".to_owned())
+                })?;
+                prepared_bundle = Some(
+                    complete
+                        .finish(
+                            process_root,
+                            checkpoint,
+                            through_commit_sequence,
+                            FINAL_EVIDENCE_DIRECTORY_NAME_V2,
+                            resource_high_water,
+                        )
+                        .map_err(|error| PersistenceErrorV1::Integrity(error.to_string()))?,
+                );
+            }
+            Ok(())
+        },
+    )?;
+    let prepared_bundle =
+        prepared_bundle.expect("非空且完整的 V2 导出成功时已经在候选发布前形成运行产物");
+    Ok((prepared_bundle, receipt))
+}
+
+#[cfg(test)]
+pub(crate) fn export_v2_evidence_wire_fixture_for_task42(
+    root: PathBuf,
+) -> Result<FinalEvidenceExportReceiptV2, SimExecutionPersistenceErrorV1> {
+    let run_id = "task42-v2-evidence-wire-fixture".to_owned();
+    let mut store = LocalTransactionLogStoreV2::create_new(
+        root,
+        crate::persistence::TransactionLogIdentityV2::new(
+            run_id.clone(),
+            crate::persistence::DurabilityProfileV2::RecoverablePaper,
+        ),
+    )?;
+    let ingress_closed =
+        DurableLogicalTransactionEvidenceV2::new(DurableTransactionFactV1::IngressClosed {
+            session_id: "task42-v2-evidence-wire-session".to_owned(),
+        });
+    store.append_transaction(
+        &ingress_closed,
+        &DurableRecoveryOperationV2::ApplicationCheckpointBoundary,
+    )?;
+    let artifact_inputs_sealed = DurableLogicalTransactionEvidenceV2::new(
+        DurableTransactionFactV1::RunArtifactInputsSealed { run_id },
+    );
+    let record = store.append_transaction(
+        &artifact_inputs_sealed,
+        &DurableRecoveryOperationV2::ApplicationCheckpointBoundary,
+    )?;
+    let checkpoint = "task42-v2-evidence-wire-checkpoint".to_owned();
+    store.publish_application_checkpoint(record.sequence, &checkpoint)?;
+    let receipt = store.export_final_evidence_v2::<
+        DurableLogicalTransactionEvidenceV2,
+        DurableRecoveryOperationV2,
+        String,
+        _,
+    >(record.sequence, &checkpoint, |_, _, _, _| Ok(()))?;
+    Ok(receipt)
 }
 
 fn validate_run_artifact_seal_readiness(
@@ -2313,8 +2754,13 @@ fn build_session_artifact_audit(
             confirmed.get(&sequence).expect("已核对确认输出连续前缀");
         let (proof, downstream_evidence) =
             downstream.get(&sequence).expect("已核对下游证明连续前缀");
+        let proof_through = proof.durable_through.private_feedback_sequence;
+        let proof_target = confirmed
+            .get(&proof_through)
+            .map(|(confirmation, _)| confirmation);
         if delivery.confirmation() != *confirmation
-            || proof.durable_through != *confirmation
+            || proof_through < sequence
+            || proof_target != Some(&proof.durable_through)
             || delivery
                 .recompute_payload_sha256()
                 .map_err(|error| integrity(error.to_string()))?
@@ -2549,27 +2995,8 @@ fn prepare_run_artifact_bundle(
             .apply(evidence)
             .map_err(|error| integrity(error.to_string()))?;
     }
-    if recovered.checkpoint.lifecycle != DurableRunLifecycleV1::ArtifactInputsSealed
-        || projection.lifecycle != Some(DurableRunLifecycleV1::ArtifactInputsSealed)
-        || projection.run_intent_binding.as_ref() != Some(&recovered.checkpoint.run_intent_binding)
-        || projection.market_event_source_identity_sha256.as_ref()
-            != Some(&recovered.checkpoint.market_event_source_identity_sha256)
-    {
-        return Err(integrity(
-            "运行封口、意图或市场事件源事实与最终检查点不一致".to_owned(),
-        ));
-    }
-    validate_run_artifact_seal_readiness(process_root, &recovered.checkpoint, &projection)?;
     let evidence_count = u64::try_from(recovered.evidence.len())
         .map_err(|_| integrity("证据数量超出 u64".to_owned()))?;
-    if evidence_count != recovered.through_commit_sequence
-        || recovered
-            .evidence
-            .last()
-            .is_none_or(|evidence| evidence.content_sha256.0.is_empty())
-    {
-        return Err(integrity("证据前缀序号或链头非法".to_owned()));
-    }
     let evidence_bytes = recovered
         .evidence
         .iter()
@@ -2581,9 +3008,51 @@ fn prepare_run_artifact_bundle(
     let evidence_head_sha256 = recovered
         .evidence
         .last()
-        .expect("运行创建和封口至少产生两条证据")
-        .content_sha256
-        .clone();
+        .map(|evidence| evidence.content_sha256.clone())
+        .unwrap_or_else(|| Sha256Hex(String::new()));
+
+    prepare_run_artifact_bundle_from_projection(
+        process_root,
+        &recovered.checkpoint,
+        recovered.through_commit_sequence,
+        evidence_count,
+        evidence_bytes,
+        &evidence_head_sha256,
+        "evidence",
+        &projection,
+        &index,
+        resource_high_water,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_run_artifact_bundle_from_projection(
+    process_root: &SimProcessRoot,
+    checkpoint: &DurableRunCheckpointV1,
+    through_commit_sequence: u64,
+    evidence_count: u64,
+    evidence_bytes: u64,
+    evidence_head_sha256: &Sha256Hex,
+    evidence_run_root_relative_path: &str,
+    projection: &DurableEvidenceProjectionV1,
+    index: &ArtifactEvidenceIndexV1,
+    resource_high_water: &SimulationResourceHighWaterV1,
+) -> Result<PreparedRunArtifactBundleV1, artifacts::SimulationRunArtifactErrorV1> {
+    let integrity = |message: String| artifacts::SimulationRunArtifactErrorV1::Integrity(message);
+    if checkpoint.lifecycle != DurableRunLifecycleV1::ArtifactInputsSealed
+        || projection.lifecycle != Some(DurableRunLifecycleV1::ArtifactInputsSealed)
+        || projection.run_intent_binding.as_ref() != Some(&checkpoint.run_intent_binding)
+        || projection.market_event_source_identity_sha256.as_ref()
+            != Some(&checkpoint.market_event_source_identity_sha256)
+    {
+        return Err(integrity(
+            "运行封口、意图或市场事件源事实与最终检查点不一致".to_owned(),
+        ));
+    }
+    validate_run_artifact_seal_readiness(process_root, checkpoint, projection)?;
+    if evidence_count != through_commit_sequence || evidence_head_sha256.0.is_empty() {
+        return Err(integrity("证据前缀序号或链头非法".to_owned()));
+    }
 
     let mut sessions = Vec::with_capacity(projection.session_creations.len());
     for session_id in projection.session_creations.keys() {
@@ -2619,8 +3088,7 @@ fn prepare_run_artifact_bundle(
             }
         }
     }
-    let (capital_issuance_fence_count, capital_issuance_fence_sha256) = recovered
-        .checkpoint
+    let (capital_issuance_fence_count, capital_issuance_fence_sha256) = checkpoint
         .process_root
         .capital_issuance_fence_audit()
         .map_err(|error| integrity(error.to_string()))?;
@@ -2671,17 +3139,7 @@ fn prepare_run_artifact_bundle(
                     )
                     .ok_or_else(|| integrity("私有输出数量溢出".to_owned()))
             })?;
-    let market_bucket_count = recovered
-        .evidence
-        .iter()
-        .try_fold(0_u64, |total, evidence| {
-            total
-                .checked_add(u64::from(matches!(
-                    evidence.body.fact,
-                    DurableTransactionFactV1::PlatformBucketApplied { .. }
-                )))
-                .ok_or_else(|| integrity("市场桶数量溢出".to_owned()))
-        })?;
+    let market_bucket_count = index.market_bucket_count;
     let maximum_account_transition_seq = projection
         .account_deltas
         .values()
@@ -2710,7 +3168,7 @@ fn prepare_run_artifact_bundle(
     let audit = artifacts::SimulationRunAuditV1 {
         schema_version: artifacts::SIMULATION_RUN_AUDIT_SCHEMA_V1.to_owned(),
         run_id: process_root.run_id().to_owned(),
-        through_commit_sequence: recovered.through_commit_sequence,
+        through_commit_sequence,
         sessions,
         capital_issuance_fence_count,
         capital_issuance_fence_sha256,
@@ -2719,8 +3177,8 @@ fn prepare_run_artifact_bundle(
         resource_observation: artifacts::SimulationResourceObservationV1 {
             measurement_scope:
                 artifacts::SimulationResourceObservationScopeV1::DurableLogicalObservationsOnly,
-            resource_policy_id: recovered.checkpoint.resource_policy.policy_id.clone(),
-            resource_policy_sha256: recovered.checkpoint.resource_policy_sha256.clone(),
+            resource_policy_id: checkpoint.resource_policy.policy_id.clone(),
+            resource_policy_sha256: checkpoint.resource_policy_sha256.clone(),
             resource_high_water: resource_high_water.clone(),
             evidence_file_count: evidence_count,
             evidence_bytes,
@@ -2832,8 +3290,7 @@ fn prepare_run_artifact_bundle(
         },
     ];
     artifact_members.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-    let intent_bytes =
-        artifact_json_bytes(&recovered.checkpoint.run_intent_binding, "运行意图绑定")?;
+    let intent_bytes = artifact_json_bytes(&checkpoint.run_intent_binding, "运行意图绑定")?;
     let manifest = artifacts::SimulationRunManifestV1 {
         schema_version: artifacts::SIMULATION_RUN_MANIFEST_SCHEMA_V1.to_owned(),
         run_id: process_root.run_id().to_owned(),
@@ -2843,23 +3300,17 @@ fn prepare_run_artifact_bundle(
         trade_lifecycle_feedback_schema_version: TRADE_LIFECYCLE_FEEDBACK_SCHEMA_V1.to_owned(),
         settlement_lifecycle_feedback_schema_version: SETTLEMENT_LIFECYCLE_FEEDBACK_SCHEMA_V1
             .to_owned(),
-        run_intent_binding: recovered.checkpoint.run_intent_binding.clone(),
+        run_intent_binding: checkpoint.run_intent_binding.clone(),
         run_intent_content_sha256: artifact_sha256(&intent_bytes),
-        component_golden_measurement_sha256: recovered
-            .checkpoint
-            .component_golden_measurement_sha256
-            .clone(),
+        component_golden_measurement_sha256: checkpoint.component_golden_measurement_sha256.clone(),
         evidence_prefix: artifacts::SimulationEvidencePrefixV1 {
-            run_root_relative_path: "evidence".to_owned(),
-            through_commit_sequence: recovered.through_commit_sequence,
+            run_root_relative_path: evidence_run_root_relative_path.to_owned(),
+            through_commit_sequence,
             evidence_count,
             evidence_bytes,
             evidence_head_sha256: evidence_head_sha256.clone(),
         },
-        market_event_source_identity_sha256: recovered
-            .checkpoint
-            .market_event_source_identity_sha256
-            .clone(),
+        market_event_source_identity_sha256: checkpoint.market_event_source_identity_sha256.clone(),
         rule_snapshot_file_sha256: process_root.rule_snapshot().file_sha256().clone(),
         scenario_sha256: scenario.scenario_sha256().clone(),
         scenario_market_set_sha256: scenario.market_set_sha256().clone(),
@@ -2907,8 +3358,8 @@ fn prepare_run_artifact_bundle(
     ];
     Ok(PreparedRunArtifactBundleV1 {
         manifest_sha256,
-        through_commit_sequence: recovered.through_commit_sequence,
-        evidence_head_sha256,
+        through_commit_sequence,
+        evidence_head_sha256: evidence_head_sha256.clone(),
         members,
     })
 }
@@ -3092,7 +3543,7 @@ fn seal_durable_private_output_draft(
             };
             let sealed = match draft {
                 LifecycleFeedbackDraftV1::Order(draft) => SealedLifecycleFeedbackV1::Order(
-                    seal_order_lifecycle_feedback(draft, &candidate).map_err(error)?,
+                    seal_order_lifecycle_feedback(draft, &candidate, None).map_err(error)?,
                 ),
                 LifecycleFeedbackDraftV1::Trade(draft) => SealedLifecycleFeedbackV1::Trade(
                     seal_trade_lifecycle_feedback(draft, &candidate).map_err(error)?,
@@ -3153,11 +3604,49 @@ impl DurableEvidenceProjectionV1 {
         self.evicted_markets.remove(session_id);
     }
 
+    fn new_ingress_blocking_limit(&self, session_id: &str) -> Option<&ResourceLimitReachedV1> {
+        self.run_resource_admission.blocking_limit().or_else(|| {
+            self.session_resource_admission
+                .get(session_id)
+                .and_then(ResourceAdmissionStateV1::blocking_limit)
+        })
+    }
+
+    fn bound_input_blocking_limit(&self, session_id: &str) -> Option<&ResourceLimitReachedV1> {
+        bound_input_blocking_limit_v1(
+            &self.run_resource_admission,
+            self.run_resource_triggering_session_limit.as_ref(),
+            &self.session_resource_admission,
+            session_id,
+        )
+    }
+
     fn apply(
         &mut self,
         evidence: &DurableTransactionEvidenceV1,
     ) -> Result<(), SimExecutionPersistenceErrorV1> {
+        self.apply_inner(evidence, true)
+    }
+
+    fn apply_logical_v2(
+        &mut self,
+        evidence: &DurableLogicalTransactionEvidenceV2,
+    ) -> Result<(), SimExecutionPersistenceErrorV1> {
+        if evidence.schema_version != DURABLE_LOGICAL_TRANSACTION_EVIDENCE_SCHEMA_V2 {
+            return Err(SimExecutionPersistenceErrorV1::UnsupportedCheckpoint(
+                evidence.schema_version.clone(),
+            ));
+        }
+        self.apply_inner(&evidence.clone().into_v1(), false)
+    }
+
+    fn apply_inner(
+        &mut self,
+        evidence: &DurableTransactionEvidenceV1,
+        validate_resource_envelope: bool,
+    ) -> Result<(), SimExecutionPersistenceErrorV1> {
         let conflict = |message: String| SimExecutionPersistenceErrorV1::Session(message);
+        let run_admission_was_closed = self.run_resource_admission.blocking_limit().is_some();
         let permitted_post_seal_resource_fact = matches!(
             &evidence.fact,
             DurableTransactionFactV1::ResourceLimitReached {
@@ -3166,6 +3655,7 @@ impl DurableEvidenceProjectionV1 {
                     scope: ResourceLimitScopeV1::Durable,
                     ..
                 },
+                triggering_session_limit: None,
             }
         );
         if self.lifecycle == Some(DurableRunLifecycleV1::ArtifactInputsSealed)
@@ -3176,6 +3666,41 @@ impl DurableEvidenceProjectionV1 {
             ));
         }
         let session_id = evidence.session_id().map(ToOwned::to_owned);
+        for candidate_session_id in [
+            session_id.as_deref(),
+            evidence.transient_input_session_id.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !session_id_is_valid_v1(candidate_session_id) {
+                return Err(conflict("耐久事实包含非法或超长 session_id".to_owned()));
+            }
+        }
+        if evidence.transient_input != ResourceQuantityV1::default()
+            && evidence
+                .transient_input_session_id
+                .as_ref()
+                .is_none_or(|session_id| !self.session_creations.contains_key(session_id))
+        {
+            return Err(conflict("非零耐久瞬时输入没有引用已创建会话".to_owned()));
+        }
+        if matches!(
+            evidence.fact,
+            DurableTransactionFactV1::ResourceLimitReached { .. }
+        ) && (evidence.query_projection_revision.is_some()
+            || evidence.logical_platform_driven_through_utc_ms.is_some()
+            || evidence
+                .private_fact_schedule_closed_through_utc_ms
+                .is_some()
+            || !evidence.account_deltas.is_empty()
+            || !evidence.logical_action_results.is_empty()
+            || !evidence.private_output_drafts.is_empty())
+        {
+            return Err(conflict(
+                "资源超限事实不得携带业务状态、水位、账户变化或输出副作用".to_owned(),
+            ));
+        }
         if let Some(session_id) = &session_id
             && self.completed_sessions.contains_key(session_id)
         {
@@ -3200,6 +3725,24 @@ impl DurableEvidenceProjectionV1 {
             return Err(conflict(format!(
                 "耐久会话事实缺少前置创建事实：{session_id}"
             )));
+        }
+        match &evidence.fact {
+            DurableTransactionFactV1::MarketEnrolled { session_id, .. }
+            | DurableTransactionFactV1::RequestRegistered { session_id, .. }
+                if self.new_ingress_blocking_limit(session_id).is_some() =>
+            {
+                return Err(conflict(format!(
+                    "资源屏障关闭后仍出现新的耐久接入事实：{session_id}"
+                )));
+            }
+            DurableTransactionFactV1::PlatformBucketApplied { session_id, .. }
+                if self.bound_input_blocking_limit(session_id).is_some() =>
+            {
+                return Err(conflict(format!(
+                    "输入队列或共享耐久屏障之后仍出现耐久平台桶事实：{session_id}"
+                )));
+            }
+            _ => {}
         }
         match (&session_id, evidence.query_projection_revision) {
             (Some(session_id), Some(revision)) => {
@@ -3383,6 +3926,18 @@ impl DurableEvidenceProjectionV1 {
                 opening_anchor,
                 initialization,
             } => {
+                if self.run_resource_admission.blocking_limit().is_some()
+                    || self
+                        .session_resource_admission
+                        .get(&session_spec.session_id)
+                        .and_then(ResourceAdmissionStateV1::blocking_limit)
+                        .is_some()
+                {
+                    return Err(conflict(format!(
+                        "会话创建事实出现在同身份资源拒绝墓碑之后：{}",
+                        session_spec.session_id
+                    )));
+                }
                 if self
                     .session_creations
                     .insert(
@@ -3520,8 +4075,19 @@ impl DurableEvidenceProjectionV1 {
                 session_id,
                 delivery,
             } => {
+                let (_, opening_anchor, _) = self
+                    .session_creations
+                    .get(session_id)
+                    .expect("上方已核对耐久会话事实拥有创建前驱");
                 let confirmation = delivery.confirmation();
                 if confirmation.session_id != *session_id
+                    || delivery
+                        .validate_order_lifecycle_recovery_binding(
+                            session_id,
+                            &opening_anchor.account_instance_key,
+                            None,
+                        )
+                        .is_err()
                     || self
                         .prepared_outputs
                         .entry(session_id.clone())
@@ -3531,6 +4097,42 @@ impl DurableEvidenceProjectionV1 {
                 {
                     return Err(conflict(format!(
                         "耐久待交付输出事实重复或身份冲突：{}",
+                        confirmation.delivery_id
+                    )));
+                }
+            }
+            DurableTransactionFactV1::PrivateOutputCommitted {
+                session_id,
+                delivery,
+            } => {
+                let (_, opening_anchor, _) = self
+                    .session_creations
+                    .get(session_id)
+                    .expect("上方已核对耐久会话事实拥有创建前驱");
+                let confirmation = delivery.confirmation();
+                if confirmation.session_id != *session_id
+                    || delivery
+                        .validate_order_lifecycle_recovery_binding(
+                            session_id,
+                            &opening_anchor.account_instance_key,
+                            None,
+                        )
+                        .is_err()
+                    || self
+                        .prepared_outputs
+                        .entry(session_id.clone())
+                        .or_default()
+                        .insert(confirmation.private_feedback_sequence, delivery.clone())
+                        .is_some()
+                    || self
+                        .confirmed_outputs
+                        .entry(session_id.clone())
+                        .or_default()
+                        .insert(confirmation.private_feedback_sequence, confirmation.clone())
+                        .is_some()
+                {
+                    return Err(conflict(format!(
+                        "V2 本地耐久输出事实重复或身份冲突：{}",
                         confirmation.delivery_id
                     )));
                 }
@@ -3575,15 +4177,25 @@ impl DurableEvidenceProjectionV1 {
                     .get(session_id)
                     .and_then(|proofs| proofs.last_key_value().map(|(sequence, _)| *sequence))
                     .unwrap_or(0);
-                if sequence != previous + 1 {
+                if sequence <= previous
+                    || (previous + 1..=sequence).any(|covered| {
+                        self.confirmed_outputs
+                            .get(session_id)
+                            .and_then(|confirmations| confirmations.get(&covered))
+                            .is_none()
+                    })
+                {
                     return Err(conflict(format!(
-                        "下游耐久证明没有逐项连续推进：{session_id}"
+                        "下游耐久证明没有覆盖连续确认前缀：{session_id}"
                     )));
                 }
-                self.downstream_durable
+                let downstream = self
+                    .downstream_durable
                     .entry(session_id.clone())
-                    .or_default()
-                    .insert(sequence, proof.clone());
+                    .or_default();
+                for covered in previous + 1..=sequence {
+                    downstream.insert(covered, proof.clone());
+                }
             }
             DurableTransactionFactV1::IngressClosed { session_id, .. } => {
                 if !self.closed_ingress_sessions.insert(session_id.clone()) {
@@ -3748,7 +4360,16 @@ impl DurableEvidenceProjectionV1 {
                 }
                 self.session_resource_admission.remove(session_id);
             }
-            DurableTransactionFactV1::ResourceLimitReached { session_id, limit } => {
+            DurableTransactionFactV1::ResourceLimitReached {
+                session_id,
+                limit,
+                triggering_session_limit,
+            } => {
+                if self.run_resource_admission.blocking_limit().is_some() {
+                    return Err(conflict(
+                        "运行资源屏障之后仍出现第二份资源超限事实".to_owned(),
+                    ));
+                }
                 let Some(resource_policy) = self.resource_policy.as_ref() else {
                     return Err(conflict("资源超限事实缺少运行资源策略".to_owned()));
                 };
@@ -3759,8 +4380,17 @@ impl DurableEvidenceProjectionV1 {
                 {
                     return Err(conflict("资源超限事实没有绑定运行资源策略".to_owned()));
                 }
-                match limit.scope {
-                    ResourceLimitScopeV1::Session => {
+                if let Some(triggering_session_limit) = triggering_session_limit
+                    && resource_policy
+                        .validate_limit_fact(triggering_session_limit)
+                        .is_err()
+                {
+                    return Err(conflict(
+                        "资源超限组合事实的局部触发原因没有绑定运行资源策略".to_owned(),
+                    ));
+                }
+                match (limit.scope, triggering_session_limit) {
+                    (ResourceLimitScopeV1::Session, None) => {
                         let Some(session_id) = session_id else {
                             return Err(conflict("会话资源超限事实缺少会话身份".to_owned()));
                         };
@@ -3768,95 +4398,162 @@ impl DurableEvidenceProjectionV1 {
                             .session_resource_admission
                             .entry(session_id.clone())
                             .or_default();
-                        if admission
-                            .blocking_limit()
-                            .is_some_and(|existing| existing.same_admission_barrier(limit))
-                        {
+                        if admission.blocking_limit().is_some() {
                             return Err(conflict(format!("会话资源超限事实重复：{session_id}")));
                         }
                         admission.apply_limit(limit.clone());
                     }
-                    ResourceLimitScopeV1::Run | ResourceLimitScopeV1::Durable => {
+                    (ResourceLimitScopeV1::Run | ResourceLimitScopeV1::Durable, None) => {
                         if session_id.is_some() {
                             return Err(conflict("运行资源超限事实身份冲突或重复".to_owned()));
                         }
-                        if self
-                            .run_resource_admission
-                            .blocking_limit()
-                            .is_some_and(|existing| existing.same_admission_barrier(limit))
-                        {
+                        if self.run_resource_admission.blocking_limit().is_some() {
                             return Err(conflict("运行资源超限事实身份冲突或重复".to_owned()));
                         }
                         self.run_resource_admission.apply_limit(limit.clone());
+                        self.run_resource_triggering_session_limit = None;
+                    }
+                    (
+                        ResourceLimitScopeV1::Run | ResourceLimitScopeV1::Durable,
+                        Some(triggering_session_limit),
+                    ) if triggering_session_limit.scope == ResourceLimitScopeV1::Session => {
+                        let Some(session_id) = session_id else {
+                            return Err(conflict("资源超限组合事实缺少触发会话身份".to_owned()));
+                        };
+                        if self.run_resource_admission.blocking_limit().is_some() {
+                            return Err(conflict("运行资源超限组合事实重复".to_owned()));
+                        }
+                        if self
+                            .session_resource_admission
+                            .get(session_id)
+                            .and_then(ResourceAdmissionStateV1::blocking_limit)
+                            .is_some()
+                        {
+                            return Err(conflict(format!(
+                                "资源超限组合事实的会话目标重复：{session_id}"
+                            )));
+                        }
+                        self.run_resource_admission.apply_limit(limit.clone());
+                        self.run_resource_triggering_session_limit = Some(RunResourceTriggerV1 {
+                            session_id: session_id.clone(),
+                            limit: triggering_session_limit.clone(),
+                        });
+                    }
+                    _ => {
+                        return Err(conflict(
+                            "资源超限事实的主屏障、局部触发原因或会话身份组合非法".to_owned(),
+                        ));
                     }
                 }
             }
             DurableTransactionFactV1::ExecutionAdvanced { .. } => {}
         }
-        let resource_usage = evidence
-            .resource_usage
-            .as_ref()
-            .ok_or_else(|| conflict("耐久事实缺少事务后资源使用量".to_owned()))?;
-        if evidence.transient_input != ResourceQuantityV1::default()
-            && evidence.transient_input_session_id.is_none()
-        {
-            return Err(conflict("耐久瞬时输入缺少所属会话身份".to_owned()));
-        }
-        if let (Some(fact_session_id), Some(transient_session_id)) = (
-            session_id.as_deref(),
-            evidence.transient_input_session_id.as_deref(),
-        ) && fact_session_id != transient_session_id
-        {
-            return Err(conflict("耐久事实会话与瞬时输入所属会话不一致".to_owned()));
-        }
-        let resource_policy = self
-            .resource_policy
-            .as_ref()
-            .ok_or_else(|| conflict("耐久资源使用量缺少运行资源策略".to_owned()))?;
-        if let DurableTransactionFactV1::ResourceLimitReached { limit, .. } = &evidence.fact {
-            if evidence.transient_input != ResourceQuantityV1::default() {
-                let attempted_input_is_bounded = match (limit.scope, limit.kind) {
-                    (
-                        ResourceLimitScopeV1::Session | ResourceLimitScopeV1::Run,
-                        ResourceLimitKindV1::InputQueue,
-                    ) => {
-                        evidence.transient_input.records <= limit.candidate.records
-                            && evidence.transient_input.bytes <= limit.candidate.bytes
-                    }
-                    _ => {
-                        evidence.transient_input.records
-                            <= resource_policy.session.input_queue.max_records
-                            && evidence.transient_input.bytes
-                                <= resource_policy.session.input_queue.max_bytes
-                            && evidence.transient_input.records
-                                <= resource_policy.run.input_queue.max_records
-                            && evidence.transient_input.bytes
-                                <= resource_policy.run.input_queue.max_bytes
-                    }
-                };
-                if !attempted_input_is_bounded {
-                    return Err(conflict("资源超限事实没有约束被拒绝的瞬时输入".to_owned()));
-                }
+        if validate_resource_envelope {
+            let maintenance_steady_before = evidence
+                .maintenance_steady_before_resource_usage
+                .as_ref()
+                .ok_or_else(|| conflict("耐久事实缺少事务提交前维护稳态资源使用量".to_owned()))?;
+            let resource_usage = evidence
+                .resource_usage
+                .as_ref()
+                .ok_or_else(|| conflict("耐久事实缺少事务提交期间峰值资源使用量".to_owned()))?;
+            let maintenance_succeeded_steady_after = evidence
+                .maintenance_succeeded_steady_after_resource_usage
+                .as_ref()
+                .ok_or_else(|| conflict("耐久事实缺少事务维护成功后稳态资源使用量".to_owned()))?;
+            if evidence.transient_input != ResourceQuantityV1::default()
+                && evidence.transient_input_session_id.is_none()
+            {
+                return Err(conflict("耐久瞬时输入缺少所属会话身份".to_owned()));
             }
-        } else if resource_usage.session.input_queue.records < evidence.transient_input.records
-            || resource_usage.session.input_queue.bytes < evidence.transient_input.bytes
-            || resource_usage.run.input_queue.records < evidence.transient_input.records
-            || resource_usage.run.input_queue.bytes < evidence.transient_input.bytes
+            if let (Some(fact_session_id), Some(transient_session_id)) = (
+                session_id.as_deref(),
+                evidence.transient_input_session_id.as_deref(),
+            ) && fact_session_id != transient_session_id
+            {
+                return Err(conflict("耐久事实会话与瞬时输入所属会话不一致".to_owned()));
+            }
+            let resource_policy = self
+                .resource_policy
+                .as_ref()
+                .ok_or_else(|| conflict("耐久资源使用量缺少运行资源策略".to_owned()))?;
+            let validate_steady = |usage: &SimulationResourceUsageV1, run_closed: bool| {
+                if run_closed {
+                    resource_policy.validate_failure_candidate(usage)
+                } else {
+                    resource_policy.validate_candidate(usage)
+                }
+                .map_err(|error| conflict(error.to_string()))
+            };
+            validate_steady(maintenance_steady_before, run_admission_was_closed)?;
+            validate_steady(
+                maintenance_succeeded_steady_after,
+                self.run_resource_admission.blocking_limit().is_some(),
+            )?;
+            if let DurableTransactionFactV1::ResourceLimitReached {
+                limit,
+                triggering_session_limit,
+                ..
+            } = &evidence.fact
+            {
+                if evidence.transient_input != ResourceQuantityV1::default() {
+                    let input_limit = triggering_session_limit
+                        .as_ref()
+                        .filter(|trigger| {
+                            trigger.kind == ResourceLimitKindV1::InputQueue
+                                && trigger.scope == ResourceLimitScopeV1::Session
+                        })
+                        .or_else(|| {
+                            (limit.kind == ResourceLimitKindV1::InputQueue
+                                && matches!(
+                                    limit.scope,
+                                    ResourceLimitScopeV1::Session | ResourceLimitScopeV1::Run
+                                ))
+                            .then_some(limit)
+                        });
+                    let attempted_input_is_bounded = match input_limit {
+                        Some(input_limit) => {
+                            evidence.transient_input.records <= input_limit.candidate.records
+                                && evidence.transient_input.bytes <= input_limit.candidate.bytes
+                        }
+                        None => {
+                            evidence.transient_input.records
+                                <= resource_policy.session.input_queue.max_records
+                                && evidence.transient_input.bytes
+                                    <= resource_policy.session.input_queue.max_bytes
+                                && evidence.transient_input.records
+                                    <= resource_policy.run.input_queue.max_records
+                                && evidence.transient_input.bytes
+                                    <= resource_policy.run.input_queue.max_bytes
+                        }
+                    };
+                    if !attempted_input_is_bounded {
+                        return Err(conflict("资源超限事实没有约束被拒绝的瞬时输入".to_owned()));
+                    }
+                }
+            } else if resource_usage.session.input_queue.records < evidence.transient_input.records
+                || resource_usage.session.input_queue.bytes < evidence.transient_input.bytes
+                || resource_usage.run.input_queue.records < evidence.transient_input.records
+                || resource_usage.run.input_queue.bytes < evidence.transient_input.bytes
+            {
+                return Err(conflict(
+                    "耐久资源使用量没有覆盖该事务的瞬时输入".to_owned(),
+                ));
+            }
+            resource_policy
+                .validate_failure_candidate(resource_usage)
+                .map_err(|error| conflict(error.to_string()))?;
+            self.resource_high_water.observe(resource_usage);
+        } else if evidence.transient_input_session_id.is_some()
+            || evidence.transient_input != ResourceQuantityV1::default()
+            || evidence.maintenance_steady_before_resource_usage.is_some()
+            || evidence.resource_usage.is_some()
+            || evidence
+                .maintenance_succeeded_steady_after_resource_usage
+                .is_some()
         {
-            return Err(conflict(
-                "耐久资源使用量没有覆盖该事务的瞬时输入".to_owned(),
-            ));
+            return Err(conflict("V2 逻辑证据混入了旧资源提交包装".to_owned()));
         }
-        let resource_validation = if matches!(
-            evidence.fact,
-            DurableTransactionFactV1::ResourceLimitReached { .. }
-        ) {
-            resource_policy.validate_failure_candidate(resource_usage)
-        } else {
-            resource_policy.validate_candidate(resource_usage)
-        };
-        resource_validation.map_err(|error| conflict(error.to_string()))?;
-        self.resource_high_water.observe(resource_usage);
         if let Some(session_id) = session_id {
             let target = self.account_deltas.entry(session_id.clone()).or_default();
             for delta in &evidence.account_deltas {
@@ -3916,8 +4613,20 @@ impl DurableEvidenceProjectionV1 {
                 .private_output_drafts
                 .entry(session_id.clone())
                 .or_default();
+            let expected_account_instance_key = self
+                .session_creations
+                .get(&session_id)
+                .map(|(_, opening_anchor, _)| &opening_anchor.account_instance_key);
             for draft in &evidence.private_output_drafts {
-                if draft.session_id() != session_id {
+                if draft.session_id() != session_id
+                    || expected_account_instance_key.is_none_or(|account_instance_key| {
+                        !draft.order_recovery_binding_is_consistent(
+                            &session_id,
+                            account_instance_key,
+                            None,
+                        )
+                    })
+                {
                     return Err(conflict(format!(
                         "耐久私有输出草稿会话身份冲突：{}",
                         draft.delivery_id()
@@ -3958,6 +4667,10 @@ struct PersistentRunCoordinatorV1 {
     current: DurableRunCheckpointV1,
     recovery_required: Option<crate::persistence::PersistenceErrorV1>,
     transient_input_by_session: BTreeMap<String, ResourceQuantityV1>,
+    #[cfg(test)]
+    maintenance_steady_high_water: SimulationResourceHighWaterV1,
+    #[cfg(test)]
+    failure_reserve_high_water: crate::resource::SimulationFailureEvidenceReserveV1,
 }
 
 type SharedPersistentRunV1 = Arc<Mutex<PersistentRunCoordinatorV1>>;
@@ -3988,6 +4701,192 @@ fn add_resource_quantity(
         left.bytes
             .checked_add(right.bytes)
             .ok_or_else(|| SessionError::Durability("资源字节溢出".to_owned()))?,
+    ))
+}
+
+fn maximum_failure_probe_session_id_v1(checkpoint: &DurableRunCheckpointV1) -> String {
+    for ordinal in 0_u64.. {
+        let prefix = format!("failure-reserve-{ordinal}-");
+        let candidate = format!(
+            "{prefix}{}",
+            "x".repeat(SESSION_ID_MAX_BYTES_V1 - prefix.len())
+        );
+        if !checkpoint.sessions.contains_key(&candidate)
+            && !checkpoint
+                .session_resource_admission
+                .contains_key(&candidate)
+        {
+            debug_assert!(session_id_is_valid_v1(&candidate));
+            return candidate;
+        }
+    }
+    unreachable!("u64 身份空间必须能提供失败证据探针会话身份")
+}
+
+fn maximum_resource_usage_shape_v1() -> SimulationResourceUsageV1 {
+    let quantity = ResourceQuantityV1::new(u64::MAX, u64::MAX);
+    SimulationResourceUsageV1 {
+        session: crate::resource::SimulationSessionResourceUsageV1 {
+            in_memory_state: quantity,
+            hot_markets: quantity,
+            input_queue: quantity,
+            request_queue: quantity,
+            feedback_queue: quantity,
+            active_orders: quantity,
+            internal_events: quantity,
+            query_cache: quantity,
+            indexes: quantity,
+        },
+        run: crate::resource::SimulationRunResourceUsageV1 {
+            in_memory_state: quantity,
+            sessions: quantity,
+            hot_markets: quantity,
+            input_queue: quantity,
+            request_queue: quantity,
+            feedback_queue: quantity,
+            active_orders: quantity,
+            internal_events: quantity,
+            query_cache: quantity,
+            indexes: quantity,
+            capital_fence: quantity,
+        },
+        durable: crate::resource::SimulationDurableResourceUsageV1 {
+            evidence: quantity,
+            checkpoints: quantity,
+            artifacts: quantity,
+            runtime_root: quantity,
+        },
+    }
+}
+
+fn maximum_failure_probes_v1(
+    checkpoint: &DurableRunCheckpointV1,
+) -> Vec<(DurableTransactionEvidenceV1, DurableRunCheckpointV1)> {
+    let session_id = maximum_failure_probe_session_id_v1(checkpoint);
+    let triggering_session_limit = ResourceLimitReachedV1 {
+        policy_id: checkpoint.resource_policy.policy_id.clone(),
+        scope: ResourceLimitScopeV1::Session,
+        kind: ResourceLimitKindV1::InMemoryState,
+        exceeded_dimension: ResourceLimitDimensionV1::Records,
+        candidate: ResourceQuantityV1::new(u64::MAX, u64::MAX),
+        limit: crate::resource::ResourceLimitV1::new(u64::MAX - 1, u64::MAX - 1),
+    };
+    let limit = ResourceLimitReachedV1 {
+        policy_id: checkpoint.resource_policy.policy_id.clone(),
+        scope: ResourceLimitScopeV1::Durable,
+        kind: ResourceLimitKindV1::RuntimeRoot,
+        exceeded_dimension: ResourceLimitDimensionV1::Records,
+        candidate: ResourceQuantityV1::new(u64::MAX, u64::MAX),
+        limit: crate::resource::ResourceLimitV1::new(u64::MAX - 1, u64::MAX - 1),
+    };
+    let maximum_usage = maximum_resource_usage_shape_v1();
+
+    let mut local_candidate = checkpoint.clone();
+    let mut local_admission = ResourceAdmissionStateV1::default();
+    local_admission.apply_limit(triggering_session_limit.clone());
+    local_candidate
+        .session_resource_admission
+        .insert(session_id.clone(), local_admission);
+    local_candidate.resource_high_water.observe(&maximum_usage);
+    let mut local_evidence =
+        DurableTransactionEvidenceV1::new(DurableTransactionFactV1::ResourceLimitReached {
+            session_id: Some(session_id.clone()),
+            limit: triggering_session_limit.clone(),
+            triggering_session_limit: None,
+        });
+    local_evidence.transient_input_session_id = Some(session_id.clone());
+    local_evidence.transient_input = ResourceQuantityV1::new(u64::MAX, u64::MAX);
+    local_evidence.maintenance_steady_before_resource_usage = Some(maximum_usage.clone());
+    local_evidence.resource_usage = Some(maximum_usage.clone());
+    local_evidence.maintenance_succeeded_steady_after_resource_usage = Some(maximum_usage.clone());
+
+    let mut combined_candidate = checkpoint.clone();
+    combined_candidate
+        .run_resource_admission
+        .apply_limit(limit.clone());
+    combined_candidate.run_resource_triggering_session_limit = Some(RunResourceTriggerV1 {
+        session_id: session_id.clone(),
+        limit: triggering_session_limit.clone(),
+    });
+    combined_candidate
+        .resource_high_water
+        .observe(&maximum_usage);
+    let mut combined_evidence =
+        DurableTransactionEvidenceV1::new(DurableTransactionFactV1::ResourceLimitReached {
+            session_id: Some(session_id.clone()),
+            limit,
+            triggering_session_limit: Some(triggering_session_limit),
+        });
+    combined_evidence.transient_input_session_id = Some(session_id);
+    combined_evidence.transient_input = ResourceQuantityV1::new(u64::MAX, u64::MAX);
+    combined_evidence.maintenance_steady_before_resource_usage = Some(maximum_usage.clone());
+    combined_evidence.resource_usage = Some(maximum_usage.clone());
+    combined_evidence.maintenance_succeeded_steady_after_resource_usage = Some(maximum_usage);
+
+    vec![
+        (local_evidence, local_candidate),
+        (combined_evidence, combined_candidate),
+    ]
+}
+
+fn apply_maximum_failure_serialization_padding_v1(
+    usage: &mut SimulationResourceUsageV1,
+) -> Result<(), String> {
+    for quantity in [&mut usage.run.in_memory_state, &mut usage.run.sessions] {
+        quantity.bytes = quantity
+            .bytes
+            .checked_add(FAILURE_ADMISSION_MAP_SEPARATOR_PADDING_BYTES_V1)
+            .ok_or_else(|| "最大失败事实运行检查点填充字节溢出".to_owned())?;
+    }
+    usage.durable.evidence.bytes = usage
+        .durable
+        .evidence
+        .bytes
+        .checked_add(FAILURE_SEQUENCE_JSON_PADDING_BYTES_V1)
+        .ok_or_else(|| "最大失败事实证据序号填充字节溢出".to_owned())?;
+    usage.durable.checkpoints.bytes = usage
+        .durable
+        .checkpoints
+        .bytes
+        .checked_add(
+            FAILURE_SEQUENCE_JSON_PADDING_BYTES_V1
+                + FAILURE_ADMISSION_MAP_SEPARATOR_PADDING_BYTES_V1,
+        )
+        .ok_or_else(|| "最大失败事实检查点填充字节溢出".to_owned())?;
+    usage.durable.runtime_root.bytes = usage
+        .durable
+        .runtime_root
+        .bytes
+        .checked_add(
+            FAILURE_SEQUENCE_JSON_PADDING_BYTES_V1 * 3
+                + FAILURE_ADMISSION_MAP_SEPARATOR_PADDING_BYTES_V1,
+        )
+        .ok_or_else(|| "最大失败事实运行根填充字节溢出".to_owned())?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn zero_failure_reserve_v1() -> crate::resource::SimulationFailureEvidenceReserveV1 {
+    crate::resource::SimulationFailureEvidenceReserveV1 {
+        run_checkpoint_growth: ResourceQuantityV1::default(),
+        evidence: ResourceQuantityV1::default(),
+        checkpoints: ResourceQuantityV1::default(),
+        runtime_root: ResourceQuantityV1::default(),
+    }
+}
+
+#[cfg(test)]
+fn positive_quantity_delta_v1(
+    peak: ResourceQuantityV1,
+    steady: ResourceQuantityV1,
+) -> Result<ResourceQuantityV1, SessionError> {
+    Ok(ResourceQuantityV1::new(
+        peak.records.checked_sub(steady.records).ok_or_else(|| {
+            SessionError::Durability("下一失败峰值的记录数低于提交后稳态".to_owned())
+        })?,
+        peak.bytes.checked_sub(steady.bytes).ok_or_else(|| {
+            SessionError::Durability("下一失败峰值的字节数低于提交后稳态".to_owned())
+        })?,
     ))
 }
 
@@ -4071,8 +4970,13 @@ fn candidate_resource_usage(
     session_id: Option<&str>,
     durable: DurableResourcePreviewV1,
 ) -> Result<SimulationResourceUsageV1, SessionError> {
-    let session = match session_id.and_then(|id| checkpoint.sessions.get(id)) {
-        Some(checkpoint) => session_resource_usage(checkpoint)?,
+    let session = match session_id {
+        Some(id) => checkpoint
+            .sessions
+            .get(id)
+            .map(session_resource_usage)
+            .transpose()?
+            .unwrap_or_default(),
         None => {
             let mut maximum = crate::resource::SimulationSessionResourceUsageV1::default();
             for checkpoint in checkpoint.sessions.values() {
@@ -4116,6 +5020,19 @@ fn candidate_resource_usage(
         run.indexes = add_resource_quantity(run.indexes, usage.indexes)?;
     }
     let run_checkpoint_bytes = encoded_resource_bytes(checkpoint)?;
+    run.in_memory_state.records = run
+        .in_memory_state
+        .records
+        .checked_add(
+            u64::try_from(checkpoint.session_resource_admission.len())
+                .map_err(|_| SessionError::Durability("会话准入目标数量超出 u64".to_owned()))?,
+        )
+        .and_then(|records| {
+            records.checked_add(u64::from(
+                checkpoint.run_resource_admission.blocking_limit().is_some(),
+            ))
+        })
+        .ok_or_else(|| SessionError::Durability("运行内存记录数量溢出".to_owned()))?;
     run.in_memory_state.bytes = run_checkpoint_bytes;
     run.sessions = resource_quantity(
         checkpoint.process_root.resource_session_creation_count(),
@@ -4177,6 +5094,8 @@ impl PersistentRunCoordinatorV1 {
         );
         if candidate.resource_high_water != self.current.resource_high_water
             || candidate.run_resource_admission != self.current.run_resource_admission
+            || candidate.run_resource_triggering_session_limit
+                != self.current.run_resource_triggering_session_limit
             || (candidate.component_golden_measurement_sha256
                 != self.current.component_golden_measurement_sha256
                 && !measurement_change_is_recording)
@@ -4188,11 +5107,63 @@ impl PersistentRunCoordinatorV1 {
             ));
         }
         let usage = self.observe_candidate_resources(&mut evidence, &mut candidate)?;
-        if let Err(error) = candidate.resource_policy.validate_candidate(&usage) {
-            let Some(limit) = error.limit_reached().cloned() else {
+        let run_admission_is_closed = self
+            .current
+            .run_resource_admission
+            .blocking_limit()
+            .is_some();
+        if let Err(error) = candidate.resource_policy.validate_failure_candidate(&usage) {
+            if run_admission_is_closed {
+                if error.limit_reached().is_some() {
+                    let existing = self
+                        .current
+                        .run_resource_admission
+                        .blocking_limit()
+                        .expect("运行准入已关闭时必须保留唯一运行屏障")
+                        .clone();
+                    return Err(SessionError::ResourceLimitReached(existing));
+                }
                 return Err(SessionError::Durability(error.to_string()));
+            }
+            let adjusted = candidate
+                .resource_policy
+                .validate_candidate(&usage)
+                .expect_err("超过硬上限的候选必然超过普通准入上限");
+            let Some(limit) = adjusted.limit_reached().cloned() else {
+                return Err(SessionError::Durability(adjusted.to_string()));
             };
             return self.persist_resource_limit(evidence.session_id(), limit);
+        }
+        if !run_admission_is_closed {
+            let previews = self
+                .store
+                .preview_commit_resource_states(&evidence, &candidate)
+                .map_err(|error| SessionError::Durability(error.to_string()))?;
+            let steady_usage = self.candidate_usage_for_evidence(
+                &evidence,
+                &candidate,
+                previews.maintenance_succeeded_steady,
+            )?;
+            if let Err(error) = candidate.resource_policy.validate_candidate(&steady_usage) {
+                let Some(limit) = error.limit_reached().cloned() else {
+                    return Err(SessionError::Durability(error.to_string()));
+                };
+                return self.persist_resource_limit(evidence.session_id(), limit);
+            }
+            let _failure_peak =
+                match self.validate_next_failure_after_candidate(&evidence, &candidate) {
+                    Ok(usage) => usage,
+                    Err(SessionError::ResourceLimitReached(limit)) => {
+                        return self.persist_resource_limit(evidence.session_id(), limit);
+                    }
+                    Err(error) => {
+                        return Err(SessionError::Durability(format!(
+                            "资源策略无法续租下一份最大形态失败事实槽：{error}"
+                        )));
+                    }
+                };
+            #[cfg(test)]
+            self.observe_failure_reserve_for_tests(&steady_usage, &_failure_peak)?;
         }
         if let Err(error) = self.store.commit_classified(&evidence, &candidate) {
             if let DurableCommitFailureV1::RecoveryRequired(cause) = &error {
@@ -4201,7 +5172,7 @@ impl PersistentRunCoordinatorV1 {
             return Err(session_durable_commit_error(error));
         }
         self.current = candidate;
-        Ok(())
+        self.validate_postcommit_resources(evidence.transient_input_session_id.as_deref())
     }
 
     fn commit_new_ingress(
@@ -4240,53 +5211,50 @@ impl PersistentRunCoordinatorV1 {
         evidence: &mut DurableTransactionEvidenceV1,
         candidate: &mut DurableRunCheckpointV1,
     ) -> Result<SimulationResourceUsageV1, SessionError> {
+        let resource_session_id = evidence
+            .transient_input_session_id
+            .clone()
+            .or_else(|| evidence.session_id().map(ToOwned::to_owned));
         for _ in 0..16 {
-            let preview = self
+            let previews = self
                 .store
-                .preview_commit_resources(evidence, candidate)
+                .preview_commit_resource_states(evidence, candidate)
                 .map_err(|error| SessionError::Durability(error.to_string()))?;
-            let resource_session_id = evidence
-                .transient_input_session_id
-                .as_deref()
-                .or_else(|| evidence.session_id());
-            let mut usage = candidate_resource_usage(candidate, resource_session_id, preview)?;
-            let session_transient = resource_session_id
-                .and_then(|session_id| self.transient_input_by_session.get(session_id))
-                .copied()
-                .unwrap_or_default();
-            if evidence.transient_input != session_transient {
-                return Err(SessionError::Durability(
-                    "耐久事实的瞬时输入计量与协调器预留不一致".to_owned(),
-                ));
-            }
-            let rejected_resource_attempt = matches!(
-                evidence.fact,
-                DurableTransactionFactV1::ResourceLimitReached { .. }
-            );
-            if !rejected_resource_attempt {
-                usage.session.input_queue.records = usage
-                    .session
-                    .input_queue
-                    .records
-                    .max(session_transient.records);
-                usage.session.input_queue.bytes =
-                    usage.session.input_queue.bytes.max(session_transient.bytes);
-            }
-            usage.run.input_queue = self
-                .transient_input_by_session
-                .iter()
-                .filter(|(session_id, _)| {
-                    !rejected_resource_attempt || Some(session_id.as_str()) != resource_session_id
-                })
-                .try_fold(ResourceQuantityV1::default(), |total, (_, quantity)| {
-                    add_resource_quantity(total, *quantity)
-                })?;
+            let maintenance_steady_before = self.maintenance_steady_usage(
+                &self.current,
+                previews.maintenance_ready_before,
+                resource_session_id.as_deref(),
+                evidence.transient_input_session_id.as_deref(),
+            )?;
+            let usage = self.candidate_usage_for_evidence(
+                evidence,
+                candidate,
+                previews.during_commit_peak,
+            )?;
+            let maintenance_succeeded_steady_after = self.maintenance_steady_usage(
+                candidate,
+                previews.maintenance_succeeded_steady,
+                resource_session_id.as_deref(),
+                evidence.transient_input_session_id.as_deref(),
+            )?;
             let before_high_water = candidate.resource_high_water.clone();
+            let before_maintenance_steady_before =
+                evidence.maintenance_steady_before_resource_usage.clone();
             let before_usage = evidence.resource_usage.clone();
+            let before_maintenance_succeeded_steady_after = evidence
+                .maintenance_succeeded_steady_after_resource_usage
+                .clone();
+            evidence.maintenance_steady_before_resource_usage = Some(maintenance_steady_before);
             evidence.resource_usage = Some(usage.clone());
+            evidence.maintenance_succeeded_steady_after_resource_usage =
+                Some(maintenance_succeeded_steady_after);
             candidate.resource_high_water.observe(&usage);
             if candidate.resource_high_water == before_high_water
+                && evidence.maintenance_steady_before_resource_usage
+                    == before_maintenance_steady_before
                 && evidence.resource_usage == before_usage
+                && evidence.maintenance_succeeded_steady_after_resource_usage
+                    == before_maintenance_succeeded_steady_after
             {
                 return Ok(usage);
             }
@@ -4294,6 +5262,346 @@ impl PersistentRunCoordinatorV1 {
         Err(SessionError::Durability(
             "资源高水位与候选检查点字节没有收敛".to_owned(),
         ))
+    }
+
+    fn maintenance_steady_usage(
+        &self,
+        checkpoint: &DurableRunCheckpointV1,
+        durable: DurableResourcePreviewV1,
+        resource_session_id: Option<&str>,
+        excluded_transient_session_id: Option<&str>,
+    ) -> Result<SimulationResourceUsageV1, SessionError> {
+        let mut usage = candidate_resource_usage(checkpoint, resource_session_id, durable)?;
+        usage.session.input_queue = match resource_session_id {
+            Some(session_id) if Some(session_id) != excluded_transient_session_id => self
+                .transient_input_by_session
+                .get(session_id)
+                .copied()
+                .unwrap_or_default(),
+            Some(_) => ResourceQuantityV1::default(),
+            None => self
+                .transient_input_by_session
+                .iter()
+                .filter(|(session_id, _)| {
+                    Some(session_id.as_str()) != excluded_transient_session_id
+                })
+                .fold(
+                    ResourceQuantityV1::default(),
+                    |mut maximum, (_, quantity)| {
+                        maximum.records = maximum.records.max(quantity.records);
+                        maximum.bytes = maximum.bytes.max(quantity.bytes);
+                        maximum
+                    },
+                ),
+        };
+        usage.run.input_queue = self
+            .transient_input_by_session
+            .iter()
+            .filter(|(session_id, _)| Some(session_id.as_str()) != excluded_transient_session_id)
+            .try_fold(ResourceQuantityV1::default(), |total, (_, quantity)| {
+                add_resource_quantity(total, *quantity)
+            })?;
+        Ok(usage)
+    }
+
+    fn candidate_usage_for_evidence(
+        &self,
+        evidence: &DurableTransactionEvidenceV1,
+        candidate: &DurableRunCheckpointV1,
+        durable: DurableResourcePreviewV1,
+    ) -> Result<SimulationResourceUsageV1, SessionError> {
+        let resource_session_id = evidence
+            .transient_input_session_id
+            .as_deref()
+            .or_else(|| evidence.session_id());
+        let mut usage = candidate_resource_usage(candidate, resource_session_id, durable)?;
+        let session_transient = resource_session_id
+            .and_then(|session_id| self.transient_input_by_session.get(session_id))
+            .copied()
+            .unwrap_or_default();
+        if evidence.transient_input != session_transient {
+            return Err(SessionError::Durability(
+                "耐久事实的瞬时输入计量与协调器预留不一致".to_owned(),
+            ));
+        }
+        let rejected_resource_attempt = matches!(
+            evidence.fact,
+            DurableTransactionFactV1::ResourceLimitReached { .. }
+        );
+        if !rejected_resource_attempt {
+            usage.session.input_queue.records = usage
+                .session
+                .input_queue
+                .records
+                .max(session_transient.records);
+            usage.session.input_queue.bytes =
+                usage.session.input_queue.bytes.max(session_transient.bytes);
+        }
+        usage.run.input_queue = self
+            .transient_input_by_session
+            .iter()
+            .filter(|(session_id, _)| {
+                !rejected_resource_attempt || Some(session_id.as_str()) != resource_session_id
+            })
+            .try_fold(ResourceQuantityV1::default(), |total, (_, quantity)| {
+                add_resource_quantity(total, *quantity)
+            })?;
+        Ok(usage)
+    }
+
+    fn validate_next_failure_after_candidate(
+        &self,
+        evidence: &DurableTransactionEvidenceV1,
+        candidate: &DurableRunCheckpointV1,
+    ) -> Result<SimulationResourceUsageV1, SessionError> {
+        let mut maximum = SimulationResourceHighWaterV1::default();
+        for (failure_evidence, failure_candidate) in maximum_failure_probes_v1(candidate) {
+            let (_, failure_peak) = self
+                .store
+                .preview_consecutive_commit_resources(
+                    evidence,
+                    candidate,
+                    &failure_evidence,
+                    &failure_candidate,
+                )
+                .map_err(|error| SessionError::Durability(error.to_string()))?;
+            let usage = self.candidate_usage_for_failure_probe(
+                &failure_candidate,
+                failure_peak,
+                evidence.transient_input_session_id.as_deref(),
+            )?;
+            if let Err(hard_error) = candidate.resource_policy.validate_failure_candidate(&usage) {
+                let adjusted_error = candidate
+                    .resource_policy
+                    .validate_candidate(&usage)
+                    .expect_err("超过失败硬上限的续租候选必然超过普通准入上限");
+                let Some(limit) = adjusted_error.limit_reached().cloned() else {
+                    return Err(SessionError::Durability(format!(
+                        "最大失败事实槽续租没有形成资源上限事实：hard={hard_error}; adjusted={adjusted_error}"
+                    )));
+                };
+                if !matches!(
+                    limit.scope,
+                    ResourceLimitScopeV1::Run | ResourceLimitScopeV1::Durable
+                ) {
+                    return Err(SessionError::Durability(format!(
+                        "最大失败事实槽续租意外命中局部资源上限：{limit:?}"
+                    )));
+                }
+                return Err(SessionError::ResourceLimitReached(limit));
+            }
+            maximum.observe(&usage);
+        }
+        Ok(maximum.observed)
+    }
+
+    fn candidate_usage_for_failure_probe(
+        &self,
+        candidate: &DurableRunCheckpointV1,
+        durable: DurableResourcePreviewV1,
+        excluded_transient_session_id: Option<&str>,
+    ) -> Result<SimulationResourceUsageV1, SessionError> {
+        let mut usage = candidate_resource_usage(candidate, None, durable)?;
+        usage.session.input_queue = self
+            .transient_input_by_session
+            .iter()
+            .filter(|(session_id, _)| Some(session_id.as_str()) != excluded_transient_session_id)
+            .fold(
+                ResourceQuantityV1::default(),
+                |mut maximum, (_, quantity)| {
+                    maximum.records = maximum.records.max(quantity.records);
+                    maximum.bytes = maximum.bytes.max(quantity.bytes);
+                    maximum
+                },
+            );
+        usage.run.input_queue = self
+            .transient_input_by_session
+            .iter()
+            .filter(|(session_id, _)| Some(session_id.as_str()) != excluded_transient_session_id)
+            .try_fold(ResourceQuantityV1::default(), |total, (_, quantity)| {
+                add_resource_quantity(total, *quantity)
+            })?;
+        apply_maximum_failure_serialization_padding_v1(&mut usage)
+            .map_err(SessionError::Durability)?;
+        Ok(usage)
+    }
+
+    fn validate_current_failure_reserve(
+        &self,
+        excluded_transient_session_id: Option<&str>,
+    ) -> Result<SimulationResourceUsageV1, SessionError> {
+        let mut maximum = SimulationResourceHighWaterV1::default();
+        for (failure_evidence, failure_candidate) in maximum_failure_probes_v1(&self.current) {
+            let failure_peak = self
+                .store
+                .preview_commit_resources(&failure_evidence, &failure_candidate)
+                .map_err(|error| SessionError::Durability(error.to_string()))?;
+            let usage = self.candidate_usage_for_failure_probe(
+                &failure_candidate,
+                failure_peak,
+                excluded_transient_session_id,
+            )?;
+            self.current
+                .resource_policy
+                .validate_failure_candidate(&usage)
+                .map_err(|error| {
+                    error
+                        .limit_reached()
+                        .cloned()
+                        .map(SessionError::ResourceLimitReached)
+                        .unwrap_or_else(|| SessionError::Durability(error.to_string()))
+                })?;
+            maximum.observe(&usage);
+        }
+        Ok(maximum.observed)
+    }
+
+    #[cfg(test)]
+    fn observe_failure_reserve_for_tests(
+        &mut self,
+        steady: &SimulationResourceUsageV1,
+        failure_peak: &SimulationResourceUsageV1,
+    ) -> Result<(), SessionError> {
+        self.maintenance_steady_high_water.observe(steady);
+        let run_checkpoint_growth = positive_quantity_delta_v1(
+            failure_peak.run.in_memory_state,
+            steady.run.in_memory_state,
+        )?;
+        let run_sessions_growth =
+            positive_quantity_delta_v1(failure_peak.run.sessions, steady.run.sessions)?;
+        if run_checkpoint_growth.records != 1
+            || run_sessions_growth.records != 0
+            || run_checkpoint_growth.bytes != run_sessions_growth.bytes
+        {
+            return Err(SessionError::Durability(
+                "最大失败事实必须增加一个准入目标，并以相同字节增量扩展两路运行检查点计量"
+                    .to_owned(),
+            ));
+        }
+        let sample = crate::resource::SimulationFailureEvidenceReserveV1 {
+            run_checkpoint_growth,
+            evidence: positive_quantity_delta_v1(
+                failure_peak.durable.evidence,
+                steady.durable.evidence,
+            )?,
+            checkpoints: positive_quantity_delta_v1(
+                failure_peak.durable.checkpoints,
+                steady.durable.checkpoints,
+            )?,
+            runtime_root: positive_quantity_delta_v1(
+                failure_peak.durable.runtime_root,
+                steady.durable.runtime_root,
+            )?,
+        };
+        for (target, source) in [
+            (
+                &mut self.failure_reserve_high_water.run_checkpoint_growth,
+                sample.run_checkpoint_growth,
+            ),
+            (
+                &mut self.failure_reserve_high_water.evidence,
+                sample.evidence,
+            ),
+            (
+                &mut self.failure_reserve_high_water.checkpoints,
+                sample.checkpoints,
+            ),
+            (
+                &mut self.failure_reserve_high_water.runtime_root,
+                sample.runtime_root,
+            ),
+        ] {
+            target.records = target.records.max(source.records);
+            target.bytes = target.bytes.max(source.bytes);
+        }
+        Ok(())
+    }
+
+    fn validate_postcommit_resources(
+        &mut self,
+        excluded_transient_session_id: Option<&str>,
+    ) -> Result<(), SessionError> {
+        let durable = self
+            .store
+            .current_resources()
+            .map_err(|error| SessionError::Durability(error.to_string()))?;
+        let usage = candidate_resource_usage(&self.current, None, durable)?;
+        let validation = if self
+            .current
+            .run_resource_admission
+            .blocking_limit()
+            .is_some()
+        {
+            self.current
+                .resource_policy
+                .validate_failure_candidate(&usage)
+        } else {
+            self.current.resource_policy.validate_candidate(&usage)
+        };
+        let result = validation
+            .map_err(|error| SessionError::Durability(error.to_string()))
+            .and_then(|()| {
+                if self
+                    .current
+                    .run_resource_admission
+                    .blocking_limit()
+                    .is_none()
+                {
+                    let _failure_peak =
+                        self.validate_current_failure_reserve(excluded_transient_session_id)?;
+                    #[cfg(test)]
+                    self.observe_failure_reserve_for_tests(&usage, &_failure_peak)?;
+                    Ok(())
+                } else {
+                    Ok(())
+                }
+            });
+        if let Err(error) = result {
+            let cause = PersistenceErrorV1::Integrity(format!(
+                "耐久提交后的实际资源破坏失败证据预留不变量：{error}"
+            ));
+            self.recovery_required = Some(cause.clone());
+            return Err(SessionError::DurabilityRecoveryRequired(cause.to_string()));
+        }
+        Ok(())
+    }
+
+    fn validate_published_artifact_resources(
+        &mut self,
+        artifact_high_water: &SimulationResourceHighWaterV1,
+    ) -> Result<(), SessionError> {
+        let durable = self
+            .store
+            .current_resources()
+            .map_err(|error| SessionError::Durability(error.to_string()))?;
+        let usage = candidate_resource_usage(&self.current, None, durable)?;
+        let validation = if self
+            .current
+            .run_resource_admission
+            .blocking_limit()
+            .is_some()
+        {
+            self.current
+                .resource_policy
+                .validate_failure_candidate(&usage)
+        } else {
+            self.current.resource_policy.validate_candidate(&usage)
+        };
+        if let Err(error) = validation {
+            let cause = PersistenceErrorV1::Integrity(format!(
+                "正式运行产物发布后的实际资源超过已验证上限：{error}"
+            ));
+            self.recovery_required = Some(cause.clone());
+            return Err(SessionError::DurabilityRecoveryRequired(cause.to_string()));
+        }
+        if !artifact_high_water.covers(&usage) {
+            let cause = PersistenceErrorV1::Integrity(
+                "正式运行产物发布后的实际资源没有被封口固定点高水位覆盖".to_owned(),
+            );
+            self.recovery_required = Some(cause.clone());
+            return Err(SessionError::DurabilityRecoveryRequired(cause.to_string()));
+        }
+        Ok(())
     }
 
     fn reserve_transient_input(
@@ -4322,16 +5630,25 @@ impl PersistentRunCoordinatorV1 {
                 .try_fold(ResourceQuantityV1::default(), |total, item| {
                     add_resource_quantity(total, *item)
                 })?;
-            self.current
-                .resource_policy
-                .validate_candidate(&usage)
-                .map_err(|error| {
-                    error
-                        .limit_reached()
-                        .cloned()
-                        .map(SessionError::ResourceLimitReached)
-                        .unwrap_or_else(|| SessionError::Durability(error.to_string()))
-                })
+            let validation = if self
+                .current
+                .run_resource_admission
+                .blocking_limit()
+                .is_some()
+            {
+                self.current
+                    .resource_policy
+                    .validate_failure_candidate(&usage)
+            } else {
+                self.current.resource_policy.validate_candidate(&usage)
+            };
+            validation.map_err(|error| {
+                error
+                    .limit_reached()
+                    .cloned()
+                    .map(SessionError::ResourceLimitReached)
+                    .unwrap_or_else(|| SessionError::Durability(error.to_string()))
+            })
         })();
         if let Err(SessionError::ResourceLimitReached(limit)) = result {
             let persisted = self.persist_resource_limit(Some(session_id), limit);
@@ -4358,16 +5675,28 @@ impl PersistentRunCoordinatorV1 {
         attempted_session_id: Option<&str>,
         limit: ResourceLimitReachedV1,
     ) -> Result<(), SessionError> {
-        if let Some(existing) = match limit.scope {
-            ResourceLimitScopeV1::Session => attempted_session_id
-                .and_then(|session_id| self.current.session_resource_admission.get(session_id))
-                .and_then(ResourceAdmissionStateV1::blocking_limit),
-            ResourceLimitScopeV1::Run | ResourceLimitScopeV1::Durable => {
-                self.current.run_resource_admission.blocking_limit()
+        match limit.scope {
+            ResourceLimitScopeV1::Session => {
+                if let Some(existing) = self.current.run_resource_admission.blocking_limit() {
+                    return Err(SessionError::ResourceLimitReached(existing.clone()));
+                }
+                let session_id = attempted_session_id.ok_or_else(|| {
+                    SessionError::Durability("会话资源超限缺少会话身份".to_owned())
+                })?;
+                if let Some(existing) = self
+                    .current
+                    .session_resource_admission
+                    .get(session_id)
+                    .and_then(ResourceAdmissionStateV1::blocking_limit)
+                {
+                    return Err(SessionError::ResourceLimitReached(existing.clone()));
+                }
             }
-        } && existing.same_admission_barrier(&limit)
-        {
-            return Err(SessionError::ResourceLimitReached(existing.clone()));
+            ResourceLimitScopeV1::Run | ResourceLimitScopeV1::Durable => {
+                if let Some(existing) = self.current.run_resource_admission.blocking_limit() {
+                    return Err(SessionError::ResourceLimitReached(existing.clone()));
+                }
+            }
         }
         let fact_session_id = match limit.scope {
             ResourceLimitScopeV1::Session => Some(
@@ -4392,6 +5721,7 @@ impl PersistentRunCoordinatorV1 {
             DurableTransactionEvidenceV1::new(DurableTransactionFactV1::ResourceLimitReached {
                 session_id: fact_session_id,
                 limit: limit.clone(),
+                triggering_session_limit: None,
             });
         evidence.transient_input_session_id = attempted_session_id.map(ToOwned::to_owned);
         evidence.transient_input = attempted_session_id
@@ -4411,10 +5741,140 @@ impl PersistentRunCoordinatorV1 {
             self.recovery_required = Some(cause.clone());
             return Err(SessionError::DurabilityRecoveryRequired(cause.to_string()));
         }
+        if limit.scope == ResourceLimitScopeV1::Session {
+            let previews = self
+                .store
+                .preview_commit_resource_states(&evidence, &candidate)
+                .map_err(|error| SessionError::Durability(error.to_string()))?;
+            let steady_usage = self.candidate_usage_for_evidence(
+                &evidence,
+                &candidate,
+                previews.maintenance_succeeded_steady,
+            )?;
+            if let Err(error) = candidate.resource_policy.validate_candidate(&steady_usage) {
+                let Some(shared) = error.limit_reached().cloned() else {
+                    return Err(SessionError::Durability(error.to_string()));
+                };
+                if shared.scope == ResourceLimitScopeV1::Session {
+                    return Err(SessionError::Durability(
+                        "局部失败事实的提交后稳态仍命中会话上限".to_owned(),
+                    ));
+                }
+                let session_id = attempted_session_id.ok_or_else(|| {
+                    SessionError::Durability("资源超限组合事实缺少触发会话身份".to_owned())
+                })?;
+                return self.persist_combined_resource_limit(session_id, limit, shared);
+            }
+            let _failure_peak =
+                match self.validate_next_failure_after_candidate(&evidence, &candidate) {
+                    Ok(usage) => usage,
+                    Err(SessionError::ResourceLimitReached(shared)) => {
+                        let session_id = attempted_session_id.ok_or_else(|| {
+                            SessionError::Durability("资源超限组合事实缺少触发会话身份".to_owned())
+                        })?;
+                        return self.persist_combined_resource_limit(session_id, limit, shared);
+                    }
+                    Err(error) => {
+                        return Err(SessionError::Durability(format!(
+                            "局部失败事实无法续租下一份最大形态失败事实槽：{error}"
+                        )));
+                    }
+                };
+            #[cfg(test)]
+            self.observe_failure_reserve_for_tests(&steady_usage, &_failure_peak)?;
+        }
         match self.store.commit_classified(&evidence, &candidate) {
             Ok(_) => {
                 self.current = candidate;
-                Err(SessionError::ResourceLimitReached(limit))
+                match self.validate_postcommit_resources(attempted_session_id) {
+                    Ok(()) => Err(SessionError::ResourceLimitReached(limit)),
+                    Err(error) => Err(error),
+                }
+            }
+            Err(DurableCommitFailureV1::DefinitelyNotCommitted(error))
+            | Err(DurableCommitFailureV1::RecoveryRequired(error)) => {
+                self.recovery_required = Some(error.clone());
+                Err(SessionError::DurabilityRecoveryRequired(error.to_string()))
+            }
+        }
+    }
+
+    fn persist_combined_resource_limit(
+        &mut self,
+        attempted_session_id: &str,
+        triggering_session_limit: ResourceLimitReachedV1,
+        shared_limit: ResourceLimitReachedV1,
+    ) -> Result<(), SessionError> {
+        if triggering_session_limit.scope != ResourceLimitScopeV1::Session
+            || !matches!(
+                shared_limit.scope,
+                ResourceLimitScopeV1::Run | ResourceLimitScopeV1::Durable
+            )
+            || self
+                .current
+                .run_resource_admission
+                .blocking_limit()
+                .is_some()
+            || self
+                .current
+                .session_resource_admission
+                .get(attempted_session_id)
+                .and_then(ResourceAdmissionStateV1::blocking_limit)
+                .is_some()
+        {
+            return Err(SessionError::Durability(
+                "资源超限组合事实的作用域或准入前驱非法".to_owned(),
+            ));
+        }
+        self.current
+            .resource_policy
+            .validate_limit_fact(&triggering_session_limit)
+            .and_then(|()| {
+                self.current
+                    .resource_policy
+                    .validate_limit_fact(&shared_limit)
+            })
+            .map_err(|error| SessionError::Durability(error.to_string()))?;
+        let mut candidate = self.current.clone();
+        candidate
+            .run_resource_admission
+            .apply_limit(shared_limit.clone());
+        candidate.run_resource_triggering_session_limit = Some(RunResourceTriggerV1 {
+            session_id: attempted_session_id.to_owned(),
+            limit: triggering_session_limit.clone(),
+        });
+        let mut evidence =
+            DurableTransactionEvidenceV1::new(DurableTransactionFactV1::ResourceLimitReached {
+                session_id: Some(attempted_session_id.to_owned()),
+                limit: shared_limit.clone(),
+                triggering_session_limit: Some(triggering_session_limit),
+            });
+        evidence.transient_input_session_id = Some(attempted_session_id.to_owned());
+        evidence.transient_input = self
+            .transient_input_by_session
+            .get(attempted_session_id)
+            .copied()
+            .unwrap_or_default();
+        let usage = match self.observe_candidate_resources(&mut evidence, &mut candidate) {
+            Ok(usage) => usage,
+            Err(error) => {
+                let cause = PersistenceErrorV1::Integrity(error.to_string());
+                self.recovery_required = Some(cause.clone());
+                return Err(SessionError::DurabilityRecoveryRequired(cause.to_string()));
+            }
+        };
+        if let Err(error) = candidate.resource_policy.validate_failure_candidate(&usage) {
+            let cause = PersistenceErrorV1::Integrity(error.to_string());
+            self.recovery_required = Some(cause.clone());
+            return Err(SessionError::DurabilityRecoveryRequired(cause.to_string()));
+        }
+        match self.store.commit_classified(&evidence, &candidate) {
+            Ok(_) => {
+                self.current = candidate;
+                match self.validate_postcommit_resources(Some(attempted_session_id)) {
+                    Ok(()) => Err(SessionError::ResourceLimitReached(shared_limit)),
+                    Err(error) => Err(error),
+                }
             }
             Err(DurableCommitFailureV1::DefinitelyNotCommitted(error))
             | Err(DurableCommitFailureV1::RecoveryRequired(error)) => {
@@ -4452,21 +5912,13 @@ impl PersistentRunCoordinatorV1 {
         _quantity: ResourceQuantityV1,
     ) -> Result<(), SessionError> {
         self.require_business_writes_open()?;
-        for limit in [
-            self.current.run_resource_admission.blocking_limit(),
-            self.current
-                .session_resource_admission
-                .get(session_id)
-                .and_then(ResourceAdmissionStateV1::blocking_limit),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if limit.scope == ResourceLimitScopeV1::Durable
-                || limit.kind == ResourceLimitKindV1::InputQueue
-            {
-                return Err(SessionError::ResourceLimitReached(limit.clone()));
-            }
+        if let Some(limit) = bound_input_blocking_limit_v1(
+            &self.current.run_resource_admission,
+            self.current.run_resource_triggering_session_limit.as_ref(),
+            &self.current.session_resource_admission,
+            session_id,
+        ) {
+            return Err(SessionError::ResourceLimitReached(limit.clone()));
         }
         Ok(())
     }
@@ -4490,52 +5942,21 @@ impl PersistentRunCoordinatorV1 {
         }
         let mut candidate = self.current.clone();
         candidate.lifecycle = DurableRunLifecycleV1::ArtifactInputsSealed;
-        let mut evidence =
+        let evidence =
             DurableTransactionEvidenceV1::new(DurableTransactionFactV1::RunArtifactInputsSealed {
                 run_id: run_id.to_owned(),
             });
-        let usage = self
-            .observe_candidate_resources(&mut evidence, &mut candidate)
-            .map_err(|error| {
-                artifacts::SimulationRunArtifactErrorV1::Durability(error.to_string())
-            })?;
-        if let Err(error) = self.current.resource_policy.validate_candidate(&usage) {
-            let Some(limit) = error.limit_reached().cloned() else {
-                return Err(artifacts::SimulationRunArtifactErrorV1::Integrity(
-                    error.to_string(),
-                ));
-            };
-            return match self.persist_resource_limit(None, limit) {
-                Err(SessionError::ResourceLimitReached(persisted)) => {
-                    Err(artifacts::SimulationRunArtifactErrorV1::ResourceLimitReached(persisted))
-                }
-                Err(SessionError::DurabilityRecoveryRequired(message)) => Err(
-                    artifacts::SimulationRunArtifactErrorV1::DurabilityRecoveryRequired(message),
-                ),
-                Err(other) => Err(artifacts::SimulationRunArtifactErrorV1::Durability(
-                    other.to_string(),
-                )),
-                Ok(()) => Err(artifacts::SimulationRunArtifactErrorV1::Integrity(
-                    "资源超限事实提交意外返回成功".to_owned(),
-                )),
-            };
-        }
-        match self.store.commit_classified(&evidence, &candidate) {
-            Ok(_) => {
-                self.current = candidate;
-                Ok(())
+        match self.commit(&evidence, candidate) {
+            Ok(()) => Ok(()),
+            Err(SessionError::ResourceLimitReached(limit)) => {
+                Err(artifacts::SimulationRunArtifactErrorV1::ResourceLimitReached(limit))
             }
-            Err(DurableCommitFailureV1::DefinitelyNotCommitted(error)) => Err(
-                artifacts::SimulationRunArtifactErrorV1::Durability(error.to_string()),
-            ),
-            Err(DurableCommitFailureV1::RecoveryRequired(error)) => {
-                self.recovery_required = Some(error.clone());
-                Err(
-                    artifacts::SimulationRunArtifactErrorV1::DurabilityRecoveryRequired(
-                        error.to_string(),
-                    ),
-                )
+            Err(SessionError::DurabilityRecoveryRequired(message)) => {
+                Err(artifacts::SimulationRunArtifactErrorV1::DurabilityRecoveryRequired(message))
             }
+            Err(error) => Err(artifacts::SimulationRunArtifactErrorV1::Durability(
+                error.to_string(),
+            )),
         }
     }
 }
@@ -4707,6 +6128,13 @@ fn validate_paper_market_event_recovery_anchor(
     reference: &DurableMarketBucketReferenceV1,
     reader: &mut PaperMarketEventRecoveryReaderV1,
 ) -> Result<(), SimExecutionPersistenceErrorV1> {
+    read_validated_paper_market_event_bucket(reference, reader).map(|_| ())
+}
+
+fn read_validated_paper_market_event_bucket(
+    reference: &DurableMarketBucketReferenceV1,
+    reader: &mut PaperMarketEventRecoveryReaderV1,
+) -> Result<ClosedMarketEventBucketV1, SimExecutionPersistenceErrorV1> {
     if reference.path != MarketEventPathV1::PublicVisibility {
         return Err(SimExecutionPersistenceErrorV1::MarketEventSource(
             "模拟盘恢复读取端口只允许公开可见路径".to_owned(),
@@ -4730,19 +6158,20 @@ fn validate_paper_market_event_recovery_anchor(
         reference.next_index_position,
         closure,
         read.encoded_events,
-    )
-    .validated_durable_reference_for_recovery()
-    .map_err(|error| {
-        SimExecutionPersistenceErrorV1::MarketEventSource(format!(
-            "最后公开闭桶正文无法通过规范入口：{error}"
-        ))
-    })?;
-    if actual != *reference {
+    );
+    let actual_reference = actual
+        .validated_durable_reference_for_recovery()
+        .map_err(|error| {
+            SimExecutionPersistenceErrorV1::MarketEventSource(format!(
+                "最后公开闭桶正文无法通过规范入口：{error}"
+            ))
+        })?;
+    if actual_reference != *reference {
         return Err(SimExecutionPersistenceErrorV1::MarketEventSource(
             "最后公开闭桶的坐标、正文身份或闭合见证与耐久引用不一致".to_owned(),
         ));
     }
-    Ok(())
+    Ok(actual)
 }
 
 /// 阶段 3 运行根只接受显式 `run_id`、已密封最终性策略与 `SessionSpecV2`。
@@ -4782,6 +6211,14 @@ pub(crate) struct SimulationResourceDiagnosticV1 {
     pub(crate) run: SimulationRunResourceUsageV1,
     pub(crate) durable: SimulationDurableResourceUsageV1,
     pub(crate) high_water: SimulationResourceHighWaterV1,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ResourceTransactionObservationV1 {
+    pub(crate) maintenance_steady_before: SimulationResourceUsageV1,
+    pub(crate) during_commit_peak: SimulationResourceUsageV1,
+    pub(crate) maintenance_succeeded_steady_after: SimulationResourceUsageV1,
 }
 
 pub struct NewPreparedSessionV2 {
@@ -4866,6 +6303,8 @@ fn recover_run_baseline(
             != checkpoint.component_golden_measurement_sha256
         || actual_resource_policy_sha256 != checkpoint.resource_policy_sha256
         || evidence_projection.run_resource_admission != checkpoint.run_resource_admission
+        || evidence_projection.run_resource_triggering_session_limit
+            != checkpoint.run_resource_triggering_session_limit
         || evidence_projection.session_resource_admission != checkpoint.session_resource_admission
         || evidence_projection.resource_high_water != checkpoint.resource_high_water
     {
@@ -4876,10 +6315,37 @@ fn recover_run_baseline(
     let current_resources = store.current_resources()?;
     let current_usage = candidate_resource_usage(&checkpoint, None, current_resources)
         .map_err(|error| SimExecutionPersistenceErrorV1::Session(error.to_string()))?;
-    checkpoint
-        .resource_policy
-        .validate_failure_candidate(&current_usage)
-        .map_err(|error| SimExecutionPersistenceErrorV1::Session(error.to_string()))?;
+    let published_terminal_artifact = checkpoint.lifecycle
+        == DurableRunLifecycleV1::ArtifactInputsSealed
+        && store.existing_artifact_bundle_identity()?.is_some();
+    if checkpoint.run_resource_admission.blocking_limit().is_some() {
+        checkpoint
+            .resource_policy
+            .validate_failure_candidate(&current_usage)
+            .map_err(|error| SimExecutionPersistenceErrorV1::Session(error.to_string()))?;
+    } else {
+        checkpoint
+            .resource_policy
+            .validate_candidate(&current_usage)
+            .map_err(|error| SimExecutionPersistenceErrorV1::Session(error.to_string()))?;
+        if !published_terminal_artifact {
+            for (failure_evidence, failure_candidate) in maximum_failure_probes_v1(&checkpoint) {
+                let failure_peak = store
+                    .preview_commit_resources(&failure_evidence, &failure_candidate)
+                    .map_err(|error| SimExecutionPersistenceErrorV1::Store(error.to_string()))?;
+                let mut failure_usage =
+                    candidate_resource_usage(&failure_candidate, None, failure_peak).map_err(
+                        |error| SimExecutionPersistenceErrorV1::Session(error.to_string()),
+                    )?;
+                apply_maximum_failure_serialization_padding_v1(&mut failure_usage)
+                    .map_err(SimExecutionPersistenceErrorV1::Session)?;
+                checkpoint
+                    .resource_policy
+                    .validate_failure_candidate(&failure_usage)
+                    .map_err(|error| SimExecutionPersistenceErrorV1::Session(error.to_string()))?;
+            }
+        }
+    }
     let mut checkpoint_scoped_usage = current_usage.clone();
     checkpoint_scoped_usage.durable.runtime_root.records = checkpoint_scoped_usage
         .durable
@@ -4989,9 +6455,9 @@ impl SimExecutionProcessV1 {
     }
 
     #[cfg(test)]
-    pub(crate) fn resource_transaction_usages_for_tests(
+    pub(crate) fn resource_transaction_observations_for_tests(
         &self,
-    ) -> Result<Vec<SimulationResourceUsageV1>, SessionError> {
+    ) -> Result<Vec<ResourceTransactionObservationV1>, SessionError> {
         let persistence = self.persistence.as_ref().ok_or_else(|| {
             SessionError::Durability("运行没有本地耐久状态，不能读取事务资源证据".to_owned())
         })?;
@@ -5007,12 +6473,51 @@ impl SimExecutionProcessV1 {
             .evidence
             .into_iter()
             .map(|entry| {
-                entry
-                    .body
-                    .resource_usage
-                    .ok_or_else(|| SessionError::Durability("耐久事务缺少资源使用量".to_owned()))
+                Ok(ResourceTransactionObservationV1 {
+                    maintenance_steady_before: entry
+                        .body
+                        .maintenance_steady_before_resource_usage
+                        .ok_or_else(|| {
+                            SessionError::Durability(
+                                "耐久事务缺少提交前维护稳态资源使用量".to_owned(),
+                            )
+                        })?,
+                    during_commit_peak: entry.body.resource_usage.ok_or_else(|| {
+                        SessionError::Durability("耐久事务缺少提交期间峰值资源使用量".to_owned())
+                    })?,
+                    maintenance_succeeded_steady_after: entry
+                        .body
+                        .maintenance_succeeded_steady_after_resource_usage
+                        .ok_or_else(|| {
+                            SessionError::Durability(
+                                "耐久事务缺少维护成功后稳态资源使用量".to_owned(),
+                            )
+                        })?,
+                })
             })
             .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn failure_reserve_observation_for_tests(
+        &self,
+    ) -> Result<
+        (
+            SimulationResourceHighWaterV1,
+            crate::resource::SimulationFailureEvidenceReserveV1,
+        ),
+        SessionError,
+    > {
+        let persistence = self.persistence.as_ref().ok_or_else(|| {
+            SessionError::Durability("运行没有本地耐久状态，不能读取失败证据预留观测".to_owned())
+        })?;
+        let coordinator = persistence
+            .lock()
+            .map_err(|_| SessionError::Durability("耐久协调器锁不可用".to_owned()))?;
+        Ok((
+            coordinator.maintenance_steady_high_water.clone(),
+            coordinator.failure_reserve_high_water,
+        ))
     }
 
     #[cfg(test)]
@@ -5139,6 +6644,7 @@ impl SimExecutionProcessV1 {
             component_golden_measurement_sha256: None,
             resource_high_water: SimulationResourceHighWaterV1::default(),
             run_resource_admission: ResourceAdmissionStateV1::default(),
+            run_resource_triggering_session_limit: None,
             session_resource_admission: BTreeMap::new(),
             lifecycle: DurableRunLifecycleV1::Open,
             process_root: inner.checkpoint()?,
@@ -5157,15 +6663,43 @@ impl SimExecutionProcessV1 {
             current: checkpoint.clone(),
             recovery_required: None,
             transient_input_by_session: BTreeMap::new(),
+            #[cfg(test)]
+            maintenance_steady_high_water: SimulationResourceHighWaterV1::default(),
+            #[cfg(test)]
+            failure_reserve_high_water: zero_failure_reserve_v1(),
         };
         let usage = coordinator
             .observe_candidate_resources(&mut evidence, &mut checkpoint)
             .map_err(|error| SimExecutionPersistenceErrorV1::ProcessRoot(error.to_string()))?;
         resource_policy
-            .validate_candidate(&usage)
+            .validate_failure_candidate(&usage)
+            .map_err(|error| SimExecutionPersistenceErrorV1::ProcessRoot(error.to_string()))?;
+        let previews = coordinator
+            .store
+            .preview_commit_resource_states(&evidence, &checkpoint)
+            .map_err(|error| SimExecutionPersistenceErrorV1::Store(error.to_string()))?;
+        let steady_usage = coordinator
+            .candidate_usage_for_evidence(
+                &evidence,
+                &checkpoint,
+                previews.maintenance_succeeded_steady,
+            )
+            .map_err(|error| SimExecutionPersistenceErrorV1::ProcessRoot(error.to_string()))?;
+        resource_policy
+            .validate_candidate(&steady_usage)
+            .map_err(|error| SimExecutionPersistenceErrorV1::ProcessRoot(error.to_string()))?;
+        let _failure_peak = coordinator
+            .validate_next_failure_after_candidate(&evidence, &checkpoint)
+            .map_err(|error| SimExecutionPersistenceErrorV1::ProcessRoot(error.to_string()))?;
+        #[cfg(test)]
+        coordinator
+            .observe_failure_reserve_for_tests(&steady_usage, &_failure_peak)
             .map_err(|error| SimExecutionPersistenceErrorV1::ProcessRoot(error.to_string()))?;
         coordinator.store.commit(&evidence, &checkpoint)?;
         coordinator.current = checkpoint;
+        coordinator
+            .validate_postcommit_resources(None)
+            .map_err(|error| SimExecutionPersistenceErrorV1::ProcessRoot(error.to_string()))?;
         Ok(Self {
             inner,
             persistence: Some(Arc::new(Mutex::new(coordinator))),
@@ -5412,6 +6946,10 @@ impl SimExecutionProcessV1 {
                 current: checkpoint,
                 recovery_required: None,
                 transient_input_by_session: BTreeMap::new(),
+                #[cfg(test)]
+                maintenance_steady_high_water: SimulationResourceHighWaterV1::default(),
+                #[cfg(test)]
+                failure_reserve_high_water: zero_failure_reserve_v1(),
             }))),
             recoverable_session_ids,
             attached_recovered_session_ids: BTreeSet::new(),
@@ -5455,6 +6993,10 @@ impl SimExecutionProcessV1 {
             current: checkpoint,
             recovery_required: None,
             transient_input_by_session: BTreeMap::new(),
+            #[cfg(test)]
+            maintenance_steady_high_water: SimulationResourceHighWaterV1::default(),
+            #[cfg(test)]
+            failure_reserve_high_water: zero_failure_reserve_v1(),
         };
         coordinator
             .seal_artifact_inputs(inner.run_id())
@@ -5737,11 +7279,23 @@ impl SimExecutionProcessV1 {
                 let usage = candidate_resource_usage(&coordinator.current, None, preview).map_err(
                     |error| artifacts::SimulationRunArtifactErrorV1::Integrity(error.to_string()),
                 )?;
-                if let Err(error) = coordinator
+                let run_admission_is_closed = coordinator
                     .current
-                    .resource_policy
-                    .validate_candidate(&usage)
-                {
+                    .run_resource_admission
+                    .blocking_limit()
+                    .is_some();
+                let validation = if run_admission_is_closed {
+                    coordinator
+                        .current
+                        .resource_policy
+                        .validate_failure_candidate(&usage)
+                } else {
+                    coordinator
+                        .current
+                        .resource_policy
+                        .validate_candidate(&usage)
+                };
+                if let Err(error) = validation {
                     if let Some(limit) = error.limit_reached().cloned() {
                         if let Some(candidate_identity) = coordinator
                             .store
@@ -5763,6 +7317,19 @@ impl SimExecutionProcessV1 {
                                         error.to_string(),
                                     )
                                 })?;
+                        }
+                        if run_admission_is_closed {
+                            let existing = coordinator
+                                .current
+                                .run_resource_admission
+                                .blocking_limit()
+                                .expect("已核对运行准入关闭")
+                                .clone();
+                            return Err(
+                                artifacts::SimulationRunArtifactErrorV1::ResourceLimitReached(
+                                    existing,
+                                ),
+                            );
                         }
                         let persisted = coordinator.persist_resource_limit(None, limit);
                         return match persisted {
@@ -5807,6 +7374,14 @@ impl SimExecutionProcessV1 {
             .map_err(|error| {
                 artifacts::SimulationRunArtifactErrorV1::Durability(error.to_string())
             })?;
+        coordinator
+            .validate_published_artifact_resources(&resource_high_water)
+            .map_err(|error| match error {
+                SessionError::DurabilityRecoveryRequired(message) => {
+                    artifacts::SimulationRunArtifactErrorV1::DurabilityRecoveryRequired(message)
+                }
+                other => artifacts::SimulationRunArtifactErrorV1::Durability(other.to_string()),
+            })?;
         Ok(artifacts::SimulationRunArtifactReceiptV1 {
             manifest_sha256: bundle.manifest_sha256,
             artifact_directory,
@@ -5820,6 +7395,7 @@ impl SimExecutionProcessV1 {
         spec: SessionSpecV2,
         response_bridge: SubmissionResponseBridgeV1,
     ) -> Result<NewPreparedSessionV2, SimExecutionContractErrorV1> {
+        validate_session_spec(&spec)?;
         if let Some(persistence) = &self.persistence {
             persistence
                 .lock()
@@ -5858,6 +7434,8 @@ impl SimExecutionProcessV1 {
             compacted_confirmed_private_deliveries: BTreeMap::new(),
             confirmed_private_deliveries: BTreeMap::new(),
             accepting_new_ingress: true,
+            #[cfg(test)]
+            query_source_diagnostics: Vec::new(),
         };
         if let Some(persistence) = &self.persistence {
             let mut coordinator = persistence
@@ -5905,13 +7483,41 @@ impl SimExecutionProcessV1 {
         &self,
         spec: &SessionSpecV2,
     ) -> Result<SessionCreationControlResultV2, SimExecutionContractErrorV1> {
-        self.inner.retry_create_session(spec)
+        match self.inner.retry_create_session(spec) {
+            Ok(control) => Ok(control),
+            Err(error @ SessionError::SessionNotFound(_)) => {
+                let Some(persistence) = &self.persistence else {
+                    return Err(error);
+                };
+                let coordinator = persistence
+                    .lock()
+                    .map_err(|_| SessionError::Durability("耐久协调器锁不可用".to_owned()))?;
+                coordinator.require_recovery_not_required()?;
+                if let Some(limit) = coordinator
+                    .current
+                    .run_resource_admission
+                    .blocking_limit()
+                    .or_else(|| {
+                        coordinator
+                            .current
+                            .session_resource_admission
+                            .get(&spec.session_id)
+                            .and_then(ResourceAdmissionStateV1::blocking_limit)
+                    })
+                {
+                    return Err(SessionError::ResourceLimitReached(limit.clone()));
+                }
+                Err(error)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub fn activate_session(
         &mut self,
         request: ActivateSessionRequestV1,
     ) -> Result<SessionInitializationControlResultV1, SimExecutionContractErrorV1> {
+        validate_activation_request(&request)?;
         if self.persistence.is_none() {
             return self.inner.activate_session(request);
         }
@@ -5950,6 +7556,7 @@ impl SimExecutionProcessV1 {
         &mut self,
         request: FailSessionInitializationRequestV1,
     ) -> Result<SessionInitializationControlResultV1, SimExecutionContractErrorV1> {
+        validate_failure_request(&request)?;
         if self.persistence.is_none() {
             return self.inner.fail_session_initialization(request);
         }
@@ -5998,6 +7605,7 @@ impl SimExecutionProcessV1 {
         session: &mut SimExecutionSessionV1,
         request: MarketEnrollmentRequestV1,
     ) -> Result<MarketEnrollmentV1, SimExecutionContractErrorV1> {
+        validate_market_enrollment_request(&request)?;
         let mut candidate_session = session.session.clone();
         let result = self
             .inner
@@ -6541,6 +8149,8 @@ pub struct SimExecutionSessionV1 {
     compacted_confirmed_private_deliveries: BTreeMap<u64, CompactedConfirmedPrivateDeliveryV1>,
     confirmed_private_deliveries: BTreeMap<u64, SealedPrivateDeliveryV1>,
     accepting_new_ingress: bool,
+    #[cfg(test)]
+    query_source_diagnostics: Vec<TaskQuerySourceDiagnosticV1>,
     response_bridge: SubmissionResponseBridgeV1,
     persistence: Option<SharedPersistentRunV1>,
     downstream_durable_confirmation: Option<ResponseDeliveryConfirmationV1>,
@@ -6560,6 +8170,264 @@ struct ExecutionSessionStateV1 {
     compacted_confirmed_private_deliveries: BTreeMap<u64, CompactedConfirmedPrivateDeliveryV1>,
     confirmed_private_deliveries: BTreeMap<u64, SealedPrivateDeliveryV1>,
     accepting_new_ingress: bool,
+    #[cfg(test)]
+    query_source_diagnostics: Vec<TaskQuerySourceDiagnosticV1>,
+}
+
+struct PreparedRequestRegistrationTransitionV2 {
+    candidate_state: ExecutionSessionStateV1,
+    schedule: RegisteredLogicalScheduleV1,
+    evidence: Option<DurableLogicalTransactionEvidenceV2>,
+}
+
+struct PreparedRequestRegistrationDeltaV2 {
+    request_id: String,
+    request: PendingDomainRequestV1,
+    mutation: Option<(String, Sha256Hex)>,
+    query_continuation: PreparedQueryContinuationV1,
+    direct_response_reservation: PreparedDirectResponseReservationV1,
+    request_schedule: PreparedRequestScheduleV1,
+    business_market_use: PreparedBusinessMarketUseV1,
+    evidence: DurableLogicalTransactionEvidenceV2,
+    recovery_operation: DurableRecoveryOperationV2,
+}
+
+struct CommittedRequestRegistrationDeltaV2 {
+    schedule: RegisteredLogicalScheduleV1,
+    evidence: DurableLogicalTransactionEvidenceV2,
+    recovery_operation: DurableRecoveryOperationV2,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PrivateDeliveryCapacityKindV2 {
+    Direct,
+    Lifecycle { batch_id: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PrivateDeliveryCapacityLeaseV2 {
+    confirmation: ResponseDeliveryConfirmationV1,
+    kind: PrivateDeliveryCapacityKindV2,
+}
+
+impl PrivateDeliveryCapacityLeaseV2 {
+    fn matches_delivery(&self, delivery: &SealedPrivateDeliveryV1) -> bool {
+        self.confirmation == delivery.confirmation()
+            && matches!(
+                (&self.kind, delivery),
+                (
+                    PrivateDeliveryCapacityKindV2::Direct,
+                    SealedPrivateDeliveryV1::Direct(_)
+                ) | (
+                    PrivateDeliveryCapacityKindV2::Lifecycle { .. },
+                    SealedPrivateDeliveryV1::Lifecycle(_)
+                )
+            )
+    }
+
+    fn occupies_lifecycle_capacity(&self, outbox: &LogicalLifecycleOutboxV1) -> bool {
+        match &self.kind {
+            PrivateDeliveryCapacityKindV2::Direct => false,
+            PrivateDeliveryCapacityKindV2::Lifecycle { batch_id } => {
+                !outbox.batches.contains_key(batch_id)
+            }
+        }
+    }
+}
+
+struct RecoverablePaperCoordinatorV2 {
+    store: LocalTransactionLogStoreV2,
+    bound_session_spec: SessionSpecV2,
+    private_delivery_capacity_lease: Option<PrivateDeliveryCapacityLeaseV2>,
+    last_sequence: u64,
+    transaction_head_sha256: Option<Sha256Hex>,
+    logical_log_bytes: u64,
+    recovery_required: bool,
+    #[cfg(test)]
+    encoded_transaction_count_for_tests: u64,
+    #[cfg(test)]
+    append_attempt_count_for_tests: u64,
+    #[cfg(test)]
+    append_success_count_for_tests: u64,
+}
+
+struct PreparedPlatformBucketTransitionV2 {
+    candidate_state: ExecutionSessionStateV1,
+    disposition: MarketBucketApplyDispositionV1,
+    evidence: Option<DurableLogicalTransactionEvidenceV2>,
+}
+
+struct PreparedExecutionTransitionV2 {
+    candidate_state: ExecutionSessionStateV1,
+    disposition: SubmissionDriveDispositionV1,
+    evidence: Option<DurableLogicalTransactionEvidenceV2>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScheduledExecutionDriveDispositionV2 {
+    ActionDue,
+    NoStateChange,
+    Advanced,
+}
+
+enum PreparedScheduledExecutionDriveV2<'a> {
+    ActionDue(PreparedExecutionDrivePrefixV2<'a>),
+    NoStateChange,
+    Committable(CommittableScheduledExecutionDriveV2<'a>),
+}
+
+struct PreparedExecutionDrivePrefixV2<'a> {
+    session_id: String,
+    account_instance_key: AccountInstanceKeyV1,
+    scheduled: crate::session::PreparedScheduledSessionDriveV2<'a>,
+    lifecycle_feedbacks: Vec<((i64, u8, u64), ScheduledLifecycleFeedbackV1)>,
+    terminal_projection_condition_ids: BTreeSet<String>,
+    before_query_projection_revision: u64,
+    before_logical_platform_through_utc_ms: Option<i64>,
+    before_private_schedule_through_utc_ms: Option<i64>,
+    execution_state_changed: bool,
+    query_projection_changed: bool,
+}
+
+impl PreparedExecutionDrivePrefixV2<'_> {
+    fn current_action(&self) -> Option<QueuedLogicalActionV1> {
+        self.scheduled.current_action()
+    }
+
+    #[cfg(test)]
+    fn execution_candidate(&self) -> &crate::matching::PreparedExecutionDriveDeltaV2<'_> {
+        self.scheduled.execution_candidate()
+    }
+}
+
+struct MaterializedExecutionDrivePrefixV2<'a> {
+    session_id: String,
+    scheduled: crate::session::PreparedScheduledSessionDriveV2<'a>,
+    query: PreparedQueryStateDeltaV2<'a>,
+    lifecycle: PreparedLifecycleOutboxDeltaV2<'a>,
+    terminal_projection_condition_ids: BTreeSet<String>,
+    before_query_projection_revision: u64,
+    before_logical_platform_through_utc_ms: Option<i64>,
+    before_private_schedule_through_utc_ms: Option<i64>,
+    after_query_projection_revision: u64,
+    actual_cutoff_utc_ms: i64,
+    new_private_output_drafts: Vec<DurablePrivateOutputDraftV1>,
+    scheduled_state_changed: bool,
+}
+
+struct PreparedQueryExecutionDriveV2<'a> {
+    scheduled: crate::session::PreparedScheduledSessionDriveV2<'a>,
+    query: PreparedQueryStateDeltaV2<'a>,
+    direct: PreparedDirectResponseEntryDeltaV2<'a>,
+    lifecycle: PreparedLifecycleOutboxDeltaV2<'a>,
+    terminal_projection_condition_ids: BTreeSet<String>,
+    evidence: DurableLogicalTransactionEvidenceV2,
+    recovery_operation: DurableRecoveryOperationV2,
+    disposition: SubmissionDriveDispositionV1,
+}
+
+struct CommittableQueryExecutionDriveV2<'a> {
+    session: crate::session::CommittableScheduledSessionDriveV2<'a>,
+    query: CommittableQueryStateDeltaV2<'a>,
+    direct: PreparedDirectResponseEntryDeltaV2<'a>,
+    lifecycle: PreparedLifecycleOutboxDeltaV2<'a>,
+    evidence: DurableLogicalTransactionEvidenceV2,
+    recovery_operation: DurableRecoveryOperationV2,
+    disposition: SubmissionDriveDispositionV1,
+}
+
+impl<'a> PreparedQueryExecutionDriveV2<'a> {
+    fn into_committable(
+        self,
+    ) -> Result<CommittableQueryExecutionDriveV2<'a>, SubmissionProcessingErrorV1> {
+        let Self {
+            scheduled,
+            query,
+            direct,
+            lifecycle,
+            terminal_projection_condition_ids,
+            evidence,
+            recovery_operation,
+            disposition,
+        } = self;
+        let query = query.into_committable()?;
+        let session = scheduled
+            .into_committable(terminal_projection_condition_ids)
+            .map_err(submission_processing_error_from_market_event_v2)?;
+        Ok(CommittableQueryExecutionDriveV2 {
+            session,
+            query,
+            direct,
+            lifecycle,
+            evidence,
+            recovery_operation,
+            disposition,
+        })
+    }
+}
+
+impl CommittableQueryExecutionDriveV2<'_> {
+    fn commit(self) {
+        self.lifecycle.commit();
+        self.query.commit();
+        self.direct.commit();
+        self.session.commit();
+    }
+}
+
+struct CommittableScheduledExecutionDriveV2<'a> {
+    session: crate::session::CommittableScheduledSessionDriveV2<'a>,
+    query: CommittableQueryStateDeltaV2<'a>,
+    lifecycle: PreparedLifecycleOutboxDeltaV2<'a>,
+    evidence: DurableLogicalTransactionEvidenceV2,
+    recovery_operation: DurableRecoveryOperationV2,
+}
+
+impl CommittableScheduledExecutionDriveV2<'_> {
+    fn commit(self) {
+        self.lifecycle.commit();
+        self.query.commit();
+        self.session.commit();
+    }
+}
+
+struct PreparedPrivateFactDeltaV2 {
+    session_slice: PreparedPrivateFactSliceV2,
+    delivery: Option<SealedPrivateDeliveryV1>,
+    evidence: Option<DurableLogicalTransactionEvidenceV2>,
+    recovery_operation: DurableRecoveryOperationV2,
+}
+
+struct CommittedPrivateFactDeltaV2 {
+    outcome: PreparedPrivateFactOutcomeV2,
+    capacity_lease: Option<PrivateDeliveryCapacityLeaseV2>,
+    evidence: Option<DurableLogicalTransactionEvidenceV2>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PreparedPrivateFactOutcomeV2 {
+    NoStateChange,
+    AdvancedWithoutOutput,
+    Output(SealedPrivateDeliveryV1),
+}
+
+struct PreparedPrivateFactTransitionV2 {
+    candidate_state: ExecutionSessionStateV1,
+    outcome: PreparedPrivateFactOutcomeV2,
+    evidence: Option<DurableLogicalTransactionEvidenceV2>,
+}
+
+struct PreparedDownstreamDurabilityDeltaV2 {
+    compacted_deliveries: Vec<(u64, CompactedConfirmedPrivateDeliveryV1)>,
+    downstream_durable_confirmation: ResponseDeliveryConfirmationV1,
+    evidence: DurableLogicalTransactionEvidenceV2,
+    recovery_operation: DurableRecoveryOperationV2,
+}
+
+struct PreparedDownstreamDurabilityTransitionV2 {
+    candidate_state: ExecutionSessionStateV1,
+    downstream_durable_confirmation: ResponseDeliveryConfirmationV1,
+    evidence: DurableLogicalTransactionEvidenceV2,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -6627,6 +8495,8 @@ impl ExecutionSessionStateV1 {
                 .compacted_confirmed_private_deliveries,
             confirmed_private_deliveries: checkpoint.confirmed_private_deliveries,
             accepting_new_ingress: checkpoint.accepting_new_ingress,
+            #[cfg(test)]
+            query_source_diagnostics: Vec::new(),
         };
         let pending_request_ids = state
             .pending_requests
@@ -6862,6 +8732,11 @@ fn validate_recovered_private_output_closure(
             .copied()
             .expect("已核对生命周期反馈集合");
         if entry.draft.feedback_id() != feedback_id
+            || !entry.draft.order_recovery_binding_is_consistent(
+                &state.session.session_spec().session_id,
+                state.session.execution_state().account_instance_key(),
+                Some(state.session.execution_state()),
+            )
             || entry.draft.timing().feedback_received_at_utc_ms != received_at
             || entry.draft.timing().private_emission_sequence != emission_sequence
             || !state.lifecycle_outbox.batches.contains_key(&entry.batch_id)
@@ -6892,7 +8767,12 @@ fn validate_recovered_private_output_closure(
             };
             let expected = match &entry.draft {
                 LifecycleFeedbackDraftV1::Order(draft) => SealedLifecycleFeedbackV1::Order(
-                    seal_order_lifecycle_feedback(draft, &candidate).map_err(|error| {
+                    seal_order_lifecycle_feedback(
+                        draft,
+                        &candidate,
+                        Some(state.session.execution_state()),
+                    )
+                    .map_err(|error| {
                         SessionCheckpointErrorV1::InvalidSessionState(format!(
                             "待接收订单反馈无法按草稿重新密封：{error}"
                         ))
@@ -6925,6 +8805,11 @@ fn validate_recovered_private_output_closure(
                     "待接收生命周期反馈密封正文与统一私有队列不一致：{feedback_id}"
                 )));
             }
+            delivery.validate_order_lifecycle_recovery_binding(
+                &state.session.session_spec().session_id,
+                state.session.execution_state().account_instance_key(),
+                Some(state.session.execution_state()),
+            )?;
             delivery.validate_account_deltas()?;
         }
     }
@@ -7694,6 +9579,8 @@ fn validate_confirmed_private_deliveries(
     downstream_durable_confirmation: Option<&ResponseDeliveryConfirmationV1>,
 ) -> Result<(), SessionCheckpointErrorV1> {
     let process_confirmed_through = state.session.private_feedback_sequence();
+    let downstream_durable_through = downstream_durable_confirmation
+        .map_or(0, |confirmation| confirmation.private_feedback_sequence);
     let mut confirmed_private_history = Vec::new();
     let expected_count = usize::try_from(process_confirmed_through).map_err(|_| {
         SessionCheckpointErrorV1::InvalidSessionState(
@@ -7718,6 +9605,13 @@ fn validate_confirmed_private_deliveries(
                 "已确认私有载荷序号必须恰在完整或裁剪前缀之一：{sequence}"
             )));
         }
+        if (sequence <= downstream_durable_through && compacted.is_none())
+            || (sequence > downstream_durable_through && full.is_none())
+        {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(format!(
+                "已确认私有载荷未按下游耐久水位分隔完整与裁剪正文：{sequence}"
+            )));
+        }
         let confirmation = compacted
             .map(|delivery| delivery.confirmation.clone())
             .or_else(|| full.map(SealedPrivateDeliveryV1::confirmation))
@@ -7730,6 +9624,11 @@ fn validate_confirmed_private_deliveries(
             )));
         }
         if let Some(delivery) = full {
+            delivery.validate_order_lifecycle_recovery_binding(
+                &state.session.session_spec().session_id,
+                state.session.execution_state().account_instance_key(),
+                Some(state.session.execution_state()),
+            )?;
             let recomputed_payload_sha256 = delivery.recompute_payload_sha256()?;
             if confirmation.payload_sha256 != recomputed_payload_sha256 {
                 return Err(SessionCheckpointErrorV1::InvalidSessionState(format!(
@@ -7763,6 +9662,1159 @@ fn validate_confirmed_private_deliveries(
         ));
     }
     Ok(())
+}
+
+fn request_registration_is_physical_retry(
+    session: &SimSession,
+    pending_requests: &BTreeMap<String, PendingDomainRequestV1>,
+    request: &PendingDomainRequestV1,
+) -> Result<bool, SimExecutionContractErrorV1> {
+    session.require_active()?;
+    let request_id = &request.context().global_request_id;
+    match pending_requests.get(request_id) {
+        Some(existing) if existing != request => Err(
+            SimExecutionContractErrorV1::RequestIdentityConflict(request_id.clone()),
+        ),
+        Some(_) => Ok(true),
+        None => Ok(false),
+    }
+}
+
+fn assign_request_action_identities(
+    request: &PendingDomainRequestV1,
+    actions: &mut [ParsedLogicalActionV1],
+) {
+    let request_id = &request.context().global_request_id;
+    for action in actions {
+        action.action_identity = format!(
+            "{}:{}:{}",
+            request.method_tag(),
+            request_id,
+            action.batch_item_ordinal
+        );
+    }
+}
+
+fn request_registration_canonical_request_sha256_v2(request: &PendingDomainRequestV1) -> Sha256Hex {
+    #[cfg(test)]
+    update_request_registration_preparation_counts_v2(|counts| {
+        counts.canonical_request_sha256_calls += 1;
+    });
+    canonical_request_sha256(request)
+}
+
+fn request_registration_mutation_binding_v2(
+    request: &PendingDomainRequestV1,
+) -> Option<(String, Sha256Hex)> {
+    #[cfg(test)]
+    update_request_registration_preparation_counts_v2(|counts| {
+        counts.mutation_binding_calls += 1;
+    });
+    mutation_binding(request)
+}
+
+fn request_registration_evidence_v2(
+    session_id: String,
+    request: PendingDomainRequestV1,
+    schedule: &RegisteredLogicalScheduleV1,
+) -> DurableLogicalTransactionEvidenceV2 {
+    #[cfg(test)]
+    update_request_registration_preparation_counts_v2(|counts| {
+        counts.evidence_construction_calls += 1;
+    });
+    DurableLogicalTransactionEvidenceV2::new(DurableTransactionFactV1::RequestRegistered {
+        session_id,
+        registration: DurableRequestRegistrationV1 {
+            request,
+            transit: schedule.request.transit.clone(),
+            actions: schedule.actions.clone(),
+        },
+    })
+}
+
+fn prepare_physical_request_retry_schedule(
+    session: &SimSession,
+    request: &PendingDomainRequestV1,
+    mut actions: Vec<ParsedLogicalActionV1>,
+) -> Result<PreparedRequestScheduleV1, SimExecutionContractErrorV1> {
+    assign_request_action_identities(request, &mut actions);
+    let prepared = session.prepare_registered_request_retry_schedule(request.context(), actions)?;
+    if prepared.schedule().request.disposition != RequestRegistrationDispositionV1::PhysicalRetry {
+        return Err(SimExecutionContractErrorV1::RequestIdentityConflict(
+            request.context().global_request_id.clone(),
+        ));
+    }
+    Ok(prepared)
+}
+
+fn prepare_request_registration_delta_v2(
+    session: &SimSession,
+    pending_requests: &BTreeMap<String, PendingDomainRequestV1>,
+    mutation_payloads: &BTreeMap<String, Sha256Hex>,
+    query_state: &QueryStateV1,
+    direct_response_outbox: &LogicalDirectResponseOutboxV1,
+    occupied_direct_capacity_leases: usize,
+    accepting_new_ingress: bool,
+    request: PendingDomainRequestV1,
+    mut actions: Vec<ParsedLogicalActionV1>,
+) -> Result<PreparedRequestRegistrationDeltaV2, SimExecutionContractErrorV1> {
+    if request_registration_is_physical_retry(session, pending_requests, &request)? {
+        return Err(SimExecutionContractErrorV1::RequestIdentityConflict(
+            request.context().global_request_id.clone(),
+        ));
+    }
+    session.require_input_not_failed()?;
+    if !accepting_new_ingress {
+        return Err(SimExecutionContractErrorV1::ResponseBridgeClosed);
+    }
+
+    let context = request.context().clone();
+    let request_id = context.global_request_id.clone();
+    let mutation = request_registration_mutation_binding_v2(&request);
+    if let Some((idempotency_key, payload_sha256)) = mutation.as_ref()
+        && let Some(existing) = mutation_payloads.get(idempotency_key)
+        && existing != payload_sha256
+    {
+        return Err(SimExecutionContractErrorV1::MutationIdentityConflict(
+            idempotency_key.clone(),
+        ));
+    }
+
+    assign_request_action_identities(&request, &mut actions);
+    let query_continuation = query_state.prepare_continuation_for_request(&request_id, &request)?;
+    let direct_response_reservation = direct_response_outbox
+        .prepare_reservation_with_occupied_capacity_leases(
+            &context.session_id,
+            &request_id,
+            request.direct_response_method(),
+            actions.len(),
+            occupied_direct_capacity_leases,
+        )?;
+    let canonical_request_sha256 = request_registration_canonical_request_sha256_v2(&request);
+    let request_schedule =
+        session.prepare_request_schedule(context, canonical_request_sha256, actions)?;
+    if request_schedule.schedule().request.disposition
+        != RequestRegistrationDispositionV1::NewLogicalRequest
+    {
+        return Err(SimExecutionContractErrorV1::RequestIdentityConflict(
+            request_id,
+        ));
+    }
+    let (candidate_condition_ids, candidate_token_ids) = request.candidate_market_use();
+    let business_market_use = session
+        .prepare_successful_business_market_use(candidate_condition_ids, candidate_token_ids);
+    let evidence = request_registration_evidence_v2(
+        session.session_spec().session_id.clone(),
+        request.clone(),
+        request_schedule.schedule(),
+    );
+    Ok(PreparedRequestRegistrationDeltaV2 {
+        request_id,
+        request,
+        mutation,
+        query_continuation,
+        direct_response_reservation,
+        request_schedule,
+        business_market_use,
+        evidence,
+        recovery_operation: DurableRecoveryOperationV2::RegisterRequest,
+    })
+}
+
+fn commit_prevalidated_request_registration_delta_v2(
+    session: &mut SimSession,
+    pending_requests: &mut BTreeMap<String, PendingDomainRequestV1>,
+    mutation_payloads: &mut BTreeMap<String, Sha256Hex>,
+    query_state: &mut QueryStateV1,
+    direct_response_outbox: &mut LogicalDirectResponseOutboxV1,
+    prepared: PreparedRequestRegistrationDeltaV2,
+) -> CommittedRequestRegistrationDeltaV2 {
+    let PreparedRequestRegistrationDeltaV2 {
+        request_id,
+        request,
+        mutation,
+        query_continuation,
+        direct_response_reservation,
+        request_schedule,
+        business_market_use,
+        evidence,
+        recovery_operation,
+    } = prepared;
+    query_state.commit_prevalidated_continuation(query_continuation);
+    direct_response_outbox.commit_prevalidated_reservation(direct_response_reservation);
+    let schedule = session.commit_prevalidated_request_schedule(request_schedule);
+    session.commit_prevalidated_successful_business_market_use(business_market_use);
+    let replaced_request = pending_requests.insert(request_id, request);
+    debug_assert!(replaced_request.is_none());
+    if let Some((idempotency_key, payload_sha256)) = mutation {
+        match mutation_payloads.entry(idempotency_key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(payload_sha256);
+            }
+            std::collections::btree_map::Entry::Occupied(entry) => {
+                debug_assert_eq!(entry.get(), &payload_sha256);
+            }
+        }
+    }
+    CommittedRequestRegistrationDeltaV2 {
+        schedule,
+        evidence,
+        recovery_operation,
+    }
+}
+
+impl RecoverablePaperCoordinatorV2 {
+    fn create_new(
+        root: PathBuf,
+        session: &SimExecutionSessionV1,
+        application_checkpoint: &RecoverablePaperApplicationCheckpointV2,
+    ) -> Result<Self, PersistenceErrorV1> {
+        application_checkpoint.validate()?;
+        let session_spec = session.session_spec();
+        if application_checkpoint.run_checkpoint.process_root.run_id() != session_spec.run_id {
+            return Err(PersistenceErrorV1::Integrity(format!(
+                "RecoverablePaper 应用检查点运行身份与目标会话不匹配：session_id={}",
+                session_spec.session_id
+            )));
+        }
+        let checkpoint_session = application_checkpoint
+            .run_checkpoint
+            .sessions
+            .get(&session_spec.session_id)
+            .ok_or_else(|| {
+                PersistenceErrorV1::Integrity(format!(
+                    "RecoverablePaper 应用检查点不包含目标会话：session_id={}",
+                    session_spec.session_id
+                ))
+            })?;
+        if checkpoint_session != &session.durable_checkpoint() {
+            return Err(PersistenceErrorV1::Integrity(format!(
+                "RecoverablePaper 应用检查点与目标会话状态不一致：session_id={}",
+                session_spec.session_id
+            )));
+        }
+        let run_id = session_spec.run_id.clone();
+        let bound_session_spec = session_spec.clone();
+        let mut store = LocalTransactionLogStoreV2::create_new(
+            root,
+            TransactionLogIdentityV2::new(run_id, DurabilityProfileV2::RecoverablePaper),
+        )?;
+        store.publish_application_checkpoint(0, application_checkpoint)?;
+        let logical_log_bytes = store.logical_log_bytes()?;
+        if logical_log_bytes != 0 {
+            return Err(PersistenceErrorV1::Integrity(
+                "新 RecoverablePaper 事务日志的逻辑字节不是零".to_owned(),
+            ));
+        }
+        Ok(Self {
+            store,
+            bound_session_spec,
+            private_delivery_capacity_lease: None,
+            last_sequence: 0,
+            transaction_head_sha256: None,
+            logical_log_bytes,
+            recovery_required: false,
+            #[cfg(test)]
+            encoded_transaction_count_for_tests: 0,
+            #[cfg(test)]
+            append_attempt_count_for_tests: 0,
+            #[cfg(test)]
+            append_success_count_for_tests: 0,
+        })
+    }
+
+    fn require_ready(&self) -> Result<(), SessionError> {
+        if self.recovery_required {
+            return Err(SessionError::DurabilityRecoveryRequired(
+                "RecoverablePaper V2 协调器必须先从事务日志恢复".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn require_bound_session(&self, session: &SimExecutionSessionV1) -> Result<(), SessionError> {
+        let identity = self.store.identity();
+        let session_spec = session.session_spec();
+        if identity.durability_profile != DurabilityProfileV2::RecoverablePaper
+            || identity.run_id != session_spec.run_id
+            || self.bound_session_spec != *session_spec
+        {
+            return Err(SessionError::Durability(format!(
+                "RecoverablePaper V2 协调器与目标会话身份不匹配：session_id={}",
+                session_spec.session_id
+            )));
+        }
+        Ok(())
+    }
+
+    fn occupied_direct_capacity_leases(&self) -> usize {
+        usize::from(matches!(
+            self.private_delivery_capacity_lease.as_ref(),
+            Some(&PrivateDeliveryCapacityLeaseV2 {
+                kind: PrivateDeliveryCapacityKindV2::Direct,
+                ..
+            })
+        ))
+    }
+
+    fn occupied_lifecycle_capacity_leases(
+        &self,
+        lifecycle_outbox: &LogicalLifecycleOutboxV1,
+    ) -> usize {
+        usize::from(
+            self.private_delivery_capacity_lease
+                .as_ref()
+                .is_some_and(|lease| lease.occupies_lifecycle_capacity(lifecycle_outbox)),
+        )
+    }
+
+    fn append_logical_transaction(
+        &mut self,
+        evidence: &DurableLogicalTransactionEvidenceV2,
+        recovery_operation: &DurableRecoveryOperationV2,
+    ) -> Result<(), SessionError> {
+        self.require_ready()?;
+        let encoded = encode_transaction_record_v2(evidence, recovery_operation)
+            .map_err(|error| SessionError::Durability(error.to_string()))?;
+        #[cfg(test)]
+        {
+            self.encoded_transaction_count_for_tests += 1;
+        }
+        let encoded_bytes = encoded.encoded_bytes();
+        let expected_sequence = self.last_sequence.checked_add(1).ok_or_else(|| {
+            SessionError::Durability(PersistenceErrorV1::SequenceOverflow.to_string())
+        })?;
+        let expected_logical_log_bytes = self
+            .logical_log_bytes
+            .checked_add(encoded_bytes)
+            .ok_or_else(|| {
+                SessionError::Durability("RecoverablePaper V2 逻辑日志字节溢出".to_owned())
+            })?;
+        i64::try_from(expected_sequence).map_err(|_| {
+            SessionError::Durability("RecoverablePaper V2 下一事务序号超出 SQLite i64".to_owned())
+        })?;
+        i64::try_from(expected_logical_log_bytes).map_err(|_| {
+            SessionError::Durability("RecoverablePaper V2 逻辑日志字节超出 SQLite i64".to_owned())
+        })?;
+
+        #[cfg(test)]
+        {
+            self.append_attempt_count_for_tests += 1;
+        }
+        let receipt = match self.store.append_encoded_transaction(encoded) {
+            Ok(receipt) => receipt,
+            Err(error @ PersistenceErrorV1::DurabilityUncertain { .. }) => {
+                self.recovery_required = true;
+                return Err(SessionError::DurabilityRecoveryRequired(error.to_string()));
+            }
+            Err(error) => return Err(SessionError::Durability(error.to_string())),
+        };
+        #[cfg(test)]
+        {
+            self.append_success_count_for_tests += 1;
+        }
+        if receipt.sequence != expected_sequence
+            || receipt.encoded_bytes != encoded_bytes
+            || !is_canonical_sha256_hex(&receipt.record_sha256)
+            || self
+                .transaction_head_sha256
+                .as_ref()
+                .is_some_and(|previous| previous == &receipt.record_sha256)
+        {
+            self.recovery_required = true;
+            return Err(SessionError::DurabilityRecoveryRequired(format!(
+                "RecoverablePaper V2 逻辑事务提交回执与预期游标不一致：expected_sequence={expected_sequence}, actual_sequence={}, expected_bytes={encoded_bytes}, actual_bytes={}",
+                receipt.sequence, receipt.encoded_bytes
+            )));
+        }
+        self.last_sequence = receipt.sequence;
+        self.transaction_head_sha256 = Some(receipt.record_sha256);
+        self.logical_log_bytes = expected_logical_log_bytes;
+        Ok(())
+    }
+
+    fn register_request(
+        &mut self,
+        session: &mut SimExecutionSessionV1,
+        request: PendingDomainRequestV1,
+        actions: Vec<ParsedLogicalActionV1>,
+    ) -> Result<RegisteredLogicalScheduleV1, SessionError> {
+        self.require_ready()?;
+        self.require_bound_session(session)?;
+        if session.persistence.is_some() {
+            return Err(SessionError::Durability(
+                "内部 RecoverablePaper V2 请求协调器禁止与 V1 持久协调器双写".to_owned(),
+            ));
+        }
+        validate_request_context_identity_bounds(request.context())?;
+        if request_registration_is_physical_retry(
+            &session.session,
+            &session.pending_requests,
+            &request,
+        )? {
+            let prepared =
+                prepare_physical_request_retry_schedule(&session.session, &request, actions)?;
+            return Ok(session
+                .session
+                .commit_prevalidated_request_schedule(prepared));
+        }
+        let prepared = prepare_request_registration_delta_v2(
+            &session.session,
+            &session.pending_requests,
+            &session.mutation_payloads,
+            &session.query_state,
+            &session.direct_response_outbox,
+            self.occupied_direct_capacity_leases(),
+            session.accepting_new_ingress,
+            request,
+            actions,
+        )?;
+        self.append_logical_transaction(&prepared.evidence, &prepared.recovery_operation)?;
+        let committed = commit_prevalidated_request_registration_delta_v2(
+            &mut session.session,
+            &mut session.pending_requests,
+            &mut session.mutation_payloads,
+            &mut session.query_state,
+            &mut session.direct_response_outbox,
+            prepared,
+        );
+        debug_assert_eq!(
+            committed.recovery_operation,
+            DurableRecoveryOperationV2::RegisterRequest
+        );
+        Ok(committed.schedule)
+    }
+
+    fn drive_scheduled_execution_through(
+        &mut self,
+        session: &mut SimExecutionSessionV1,
+        requested_cutoff_utc_ms: i64,
+    ) -> Result<ScheduledExecutionDriveDispositionV2, MarketEventErrorV1> {
+        self.require_ready()?;
+        self.require_bound_session(session)?;
+        if session.persistence.is_some() {
+            return Err(SessionError::Durability(
+                "内部 RecoverablePaper V2 scheduled-only 协调器禁止与 V1 持久协调器双写".to_owned(),
+            )
+            .into());
+        }
+        let occupied_lifecycle_capacity_leases =
+            self.occupied_lifecycle_capacity_leases(&session.lifecycle_outbox);
+        match prepare_scheduled_execution_drive_v2(
+            session,
+            requested_cutoff_utc_ms,
+            occupied_lifecycle_capacity_leases,
+        )? {
+            PreparedScheduledExecutionDriveV2::ActionDue(prefix) => {
+                drop(prefix);
+                Ok(ScheduledExecutionDriveDispositionV2::ActionDue)
+            }
+            PreparedScheduledExecutionDriveV2::NoStateChange => {
+                Ok(ScheduledExecutionDriveDispositionV2::NoStateChange)
+            }
+            PreparedScheduledExecutionDriveV2::Committable(prepared) => {
+                self.append_logical_transaction(&prepared.evidence, &prepared.recovery_operation)?;
+                prepared.commit();
+                Ok(ScheduledExecutionDriveDispositionV2::Advanced)
+            }
+        }
+    }
+
+    fn close_ingress(&mut self, session: &mut SimExecutionSessionV1) -> Result<(), SessionError> {
+        self.require_ready()?;
+        self.require_bound_session(session)?;
+        if session.persistence.is_some() {
+            return Err(SessionError::Durability(
+                "内部 RecoverablePaper V2 入口关闭禁止与 V1 持久协调器双写".to_owned(),
+            ));
+        }
+        if !session.accepting_new_ingress {
+            return Ok(());
+        }
+        let evidence =
+            DurableLogicalTransactionEvidenceV2::new(DurableTransactionFactV1::IngressClosed {
+                session_id: session.session_spec().session_id.clone(),
+            });
+        self.append_logical_transaction(&evidence, &DurableRecoveryOperationV2::CloseIngress)?;
+        session.accepting_new_ingress = false;
+        Ok(())
+    }
+
+    fn close_ingress_after_terminal_bridge_failure(
+        &mut self,
+        session: &mut SimExecutionSessionV1,
+    ) -> Result<(), SessionError> {
+        if let Err(error) = self.close_ingress(session) {
+            session.accepting_new_ingress = false;
+            self.recovery_required = true;
+            return Err(SessionError::DurabilityRecoveryRequired(format!(
+                "RecoverablePaper V2 致命桥结果后关闭入口失败，必须先恢复：{error}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn clear_matching_private_delivery_capacity_lease(
+        &mut self,
+        delivery: &SealedPrivateDeliveryV1,
+    ) {
+        if self
+            .private_delivery_capacity_lease
+            .as_ref()
+            .is_some_and(|lease| lease.matches_delivery(delivery))
+        {
+            self.private_delivery_capacity_lease = None;
+        }
+    }
+
+    fn dispatch_committed_private_delivery(
+        &mut self,
+        session: &mut SimExecutionSessionV1,
+        delivery: &SealedPrivateDeliveryV1,
+    ) -> Result<SubmissionDeliveryDispositionV1, SimExecutionContractErrorV1> {
+        let expected_confirmation = delivery.confirmation();
+        match delivery.dispatch(&mut session.response_bridge) {
+            SubmissionResponseAcceptanceV1::Accepted(actual) if actual == expected_confirmation => {
+                session.bridge_replayed_through_private_feedback_sequence =
+                    expected_confirmation.private_feedback_sequence;
+                self.clear_matching_private_delivery_capacity_lease(delivery);
+                Ok(SubmissionDeliveryDispositionV1::Delivered)
+            }
+            SubmissionResponseAcceptanceV1::Accepted(_) => {
+                self.close_ingress_after_terminal_bridge_failure(session)?;
+                Err(SessionError::ResponseDeliveryIdentityConflict)
+            }
+            SubmissionResponseAcceptanceV1::Full => Ok(SubmissionDeliveryDispositionV1::Full),
+            SubmissionResponseAcceptanceV1::Disconnected => {
+                self.close_ingress_after_terminal_bridge_failure(session)?;
+                Ok(SubmissionDeliveryDispositionV1::Closed)
+            }
+        }
+    }
+
+    fn drive_next_private_delivery_through(
+        &mut self,
+        session: &mut SimExecutionSessionV1,
+        received_at_utc_ms: i64,
+    ) -> Result<SubmissionDeliveryDispositionV1, SimExecutionContractErrorV1> {
+        self.require_ready()?;
+        self.require_bound_session(session)?;
+        if session.persistence.is_some() {
+            return Err(SessionError::Durability(
+                "内部 RecoverablePaper V2 私有交付协调器禁止与 V1 持久协调器双写".to_owned(),
+            ));
+        }
+
+        let process_confirmed_through = session.session.private_feedback_sequence();
+        if session.bridge_replayed_through_private_feedback_sequence < process_confirmed_through {
+            let next_sequence = session
+                .bridge_replayed_through_private_feedback_sequence
+                .checked_add(1)
+                .ok_or(SessionError::PrivateEmissionSequenceConflict(u64::MAX))?;
+            let delivery = session
+                .confirmed_private_deliveries
+                .get(&next_sequence)
+                .cloned()
+                .ok_or_else(|| {
+                    SessionError::Durability(format!(
+                        "RecoverablePaper V2 重投缺少完整私有载荷序号 {next_sequence}"
+                    ))
+                })?;
+            return self.dispatch_committed_private_delivery(session, &delivery);
+        }
+        if self.private_delivery_capacity_lease.is_some() {
+            return Err(SessionError::Durability(
+                "RecoverablePaper V2 私有交付租约与桥水位不一致".to_owned(),
+            ));
+        }
+
+        let prepared = prepare_private_fact_delta_v2(
+            &session.session,
+            &session.direct_response_outbox,
+            &session.lifecycle_outbox,
+            &session.confirmed_private_deliveries,
+            received_at_utc_ms,
+        )?;
+        let Some(evidence) = prepared.evidence.as_ref() else {
+            return Ok(SubmissionDeliveryDispositionV1::NoVisibleResponse);
+        };
+        self.append_logical_transaction(evidence, &prepared.recovery_operation)?;
+        let committed = commit_prevalidated_private_fact_delta_v2(
+            &mut session.session,
+            &mut session.direct_response_outbox,
+            &mut session.lifecycle_outbox,
+            &mut session.confirmed_private_deliveries,
+            prepared,
+        );
+        if let Some(lease) = committed.capacity_lease {
+            debug_assert!(self.private_delivery_capacity_lease.is_none());
+            self.private_delivery_capacity_lease = Some(lease);
+        }
+        match committed.outcome {
+            PreparedPrivateFactOutcomeV2::NoStateChange => {
+                unreachable!("无变化私有事实不得进入本地提交")
+            }
+            PreparedPrivateFactOutcomeV2::AdvancedWithoutOutput => {
+                Ok(SubmissionDeliveryDispositionV1::NoVisibleResponse)
+            }
+            PreparedPrivateFactOutcomeV2::Output(delivery) => {
+                self.dispatch_committed_private_delivery(session, &delivery)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn append_request_then_simulate_crash_for_tests(
+        &mut self,
+        session: &SimExecutionSessionV1,
+        request: PendingDomainRequestV1,
+        actions: Vec<ParsedLogicalActionV1>,
+    ) -> Result<(), SessionError> {
+        self.require_ready()?;
+        self.require_bound_session(session)?;
+        if session.persistence.is_some() {
+            return Err(SessionError::Durability(
+                "内部 RecoverablePaper V2 请求协调器禁止与 V1 持久协调器双写".to_owned(),
+            ));
+        }
+        validate_request_context_identity_bounds(request.context())?;
+        if request_registration_is_physical_retry(
+            &session.session,
+            &session.pending_requests,
+            &request,
+        )? {
+            return Err(SessionError::RequestIdentityConflict(
+                request.context().global_request_id.clone(),
+            ));
+        }
+        let prepared = prepare_request_registration_delta_v2(
+            &session.session,
+            &session.pending_requests,
+            &session.mutation_payloads,
+            &session.query_state,
+            &session.direct_response_outbox,
+            self.occupied_direct_capacity_leases(),
+            session.accepting_new_ingress,
+            request,
+            actions,
+        )?;
+        self.append_logical_transaction(&prepared.evidence, &prepared.recovery_operation)
+    }
+
+    fn advance_downstream_durability(
+        &mut self,
+        session: &mut SimExecutionSessionV1,
+        proof: DownstreamDurabilityProofV1,
+    ) -> Result<(), SessionError> {
+        self.require_ready()?;
+        self.require_bound_session(session)?;
+        if session.persistence.is_some() {
+            return Err(SessionError::Durability(
+                "内部 RecoverablePaper V2 协调器禁止与 V1 持久协调器双写".to_owned(),
+            ));
+        }
+        if proof.durable_through.private_feedback_sequence
+            > session.bridge_replayed_through_private_feedback_sequence
+        {
+            return Err(SessionError::ResponseDeliveryIdentityConflict);
+        }
+        let Some(prepared) = prepare_downstream_durability_delta_v2(
+            &session.session,
+            &session.compacted_confirmed_private_deliveries,
+            &session.confirmed_private_deliveries,
+            session.downstream_durable_confirmation.as_ref(),
+            proof,
+        )?
+        else {
+            return Ok(());
+        };
+        if self
+            .private_delivery_capacity_lease
+            .as_ref()
+            .is_some_and(|lease| {
+                prepared
+                    .compacted_deliveries
+                    .iter()
+                    .any(|(_, compacted)| compacted.confirmation == lease.confirmation)
+            })
+        {
+            return Err(SessionError::Durability(
+                "RecoverablePaper V2 下游证明覆盖了尚未由桥接纳并释放容量的私有输出".to_owned(),
+            ));
+        }
+        self.append_logical_transaction(&prepared.evidence, &prepared.recovery_operation)?;
+        commit_prevalidated_downstream_durability_delta_v2(
+            &mut session.compacted_confirmed_private_deliveries,
+            &mut session.confirmed_private_deliveries,
+            &mut session.downstream_durable_confirmation,
+            prepared,
+        );
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn cursor_for_tests(&self) -> (u64, Option<Sha256Hex>, u64, bool) {
+        (
+            self.last_sequence,
+            self.transaction_head_sha256.clone(),
+            self.logical_log_bytes,
+            self.recovery_required,
+        )
+    }
+}
+
+fn prepare_request_registration_transition(
+    mut state: ExecutionSessionStateV1,
+    request: PendingDomainRequestV1,
+    actions: Vec<ParsedLogicalActionV1>,
+    physical_retry: bool,
+) -> Result<PreparedRequestRegistrationTransitionV2, SimExecutionContractErrorV1> {
+    if physical_retry {
+        if !request_registration_is_physical_retry(
+            &state.session,
+            &state.pending_requests,
+            &request,
+        )? {
+            return Err(SimExecutionContractErrorV1::RequestNotFound(
+                request.context().global_request_id.clone(),
+            ));
+        }
+        let request_schedule =
+            prepare_physical_request_retry_schedule(&state.session, &request, actions)?;
+        let schedule = state
+            .session
+            .commit_prevalidated_request_schedule(request_schedule);
+        return Ok(PreparedRequestRegistrationTransitionV2 {
+            candidate_state: state,
+            schedule,
+            evidence: None,
+        });
+    }
+
+    let prepared = prepare_request_registration_delta_v2(
+        &state.session,
+        &state.pending_requests,
+        &state.mutation_payloads,
+        &state.query_state,
+        &state.direct_response_outbox,
+        0,
+        state.accepting_new_ingress,
+        request,
+        actions,
+    )?;
+    let committed = commit_prevalidated_request_registration_delta_v2(
+        &mut state.session,
+        &mut state.pending_requests,
+        &mut state.mutation_payloads,
+        &mut state.query_state,
+        &mut state.direct_response_outbox,
+        prepared,
+    );
+    debug_assert_eq!(
+        committed.recovery_operation,
+        DurableRecoveryOperationV2::RegisterRequest
+    );
+    Ok(PreparedRequestRegistrationTransitionV2 {
+        candidate_state: state,
+        schedule: committed.schedule,
+        evidence: Some(committed.evidence),
+    })
+}
+
+fn parsed_actions_for_recovered_request_registration(
+    registration: &DurableRequestRegistrationV1,
+) -> Result<Vec<ParsedLogicalActionV1>, SessionCheckpointErrorV1> {
+    let request = &registration.request;
+    let request_id = &request.context().global_request_id;
+    if registration.actions.len() != request.action_count() {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "V2 请求登记动作数量与请求方法不符".to_owned(),
+        ));
+    }
+    registration
+        .actions
+        .iter()
+        .enumerate()
+        .map(|(ordinal, action)| {
+            let batch_item_ordinal = u16::try_from(ordinal).map_err(|_| {
+                SessionCheckpointErrorV1::InvalidSessionState(
+                    "V2 请求登记动作序号无法表示".to_owned(),
+                )
+            })?;
+            let expected_identity = format!(
+                "{}:{}:{batch_item_ordinal}",
+                request.method_tag(),
+                request_id
+            );
+            if action.action_identity != expected_identity
+                || action.global_request_id != *request_id
+                || action.key.caller_sequence != request.context().caller_sequence
+                || action.key.batch_item_ordinal != batch_item_ordinal
+            {
+                return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                    "V2 请求登记动作身份与请求正文不符".to_owned(),
+                ));
+            }
+            let method_timing = match request {
+                PendingDomainRequestV1::PostOrder(request) => {
+                    request.item.order.kind.method_timing()
+                }
+                PendingDomainRequestV1::PostOrders(request) => request
+                    .items
+                    .get(ordinal)
+                    .ok_or_else(|| {
+                        SessionCheckpointErrorV1::InvalidSessionState(
+                            "V2 批量请求登记动作缺少对应项".to_owned(),
+                        )
+                    })?
+                    .order
+                    .kind
+                    .method_timing(),
+                PendingDomainRequestV1::CancelOrder(_)
+                | PendingDomainRequestV1::CancelOrders(_)
+                | PendingDomainRequestV1::CancelAllOrders(_)
+                | PendingDomainRequestV1::Order(_)
+                | PendingDomainRequestV1::Orders(_)
+                | PendingDomainRequestV1::Trades(_) => ParsedMethodTimingV1::Ordinary,
+            };
+            Ok(ParsedLogicalActionV1 {
+                action_identity: action.action_identity.clone(),
+                batch_item_ordinal,
+                method_timing,
+            })
+        })
+        .collect()
+}
+
+fn replay_request_registration_operation_v2(
+    state: ExecutionSessionStateV1,
+    evidence: &DurableLogicalTransactionEvidenceV2,
+    operation: DurableRecoveryOperationV2,
+) -> Result<ExecutionSessionStateV1, SessionCheckpointErrorV1> {
+    if operation != DurableRecoveryOperationV2::RegisterRequest {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "V2 请求登记恢复操作种类不符".to_owned(),
+        ));
+    }
+    let DurableTransactionFactV1::RequestRegistered {
+        session_id,
+        registration,
+    } = &evidence.fact
+    else {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "V2 请求登记恢复操作与事实种类不符".to_owned(),
+        ));
+    };
+    if session_id != &registration.request.context().session_id
+        || session_id != &state.session.session_spec().session_id
+    {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "V2 请求登记事实会话身份不符".to_owned(),
+        ));
+    }
+    validate_request_context_identity_bounds(registration.request.context()).map_err(|error| {
+        SessionCheckpointErrorV1::InvalidSessionState(format!("V2 请求登记上下文无效：{error}"))
+    })?;
+    validate_pending_domain_request(&registration.request).map_err(|error| {
+        SessionCheckpointErrorV1::InvalidSessionState(format!("V2 请求登记正文无效：{error}"))
+    })?;
+    let physical_retry = request_registration_is_physical_retry(
+        &state.session,
+        &state.pending_requests,
+        &registration.request,
+    )
+    .map_err(|error| {
+        SessionCheckpointErrorV1::InvalidSessionState(format!("V2 请求登记前置状态无效：{error}"))
+    })?;
+    if physical_retry {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "V2 请求登记尾日志重复应用".to_owned(),
+        ));
+    }
+    let actions = parsed_actions_for_recovered_request_registration(registration)?;
+    let prepared = prepare_request_registration_transition(
+        state,
+        registration.request.clone(),
+        actions,
+        false,
+    )
+    .map_err(|error| {
+        SessionCheckpointErrorV1::InvalidSessionState(format!("V2 请求登记尾日志无法重放：{error}"))
+    })?;
+    let Some(recomputed_evidence) = prepared.evidence else {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "V2 请求登记尾日志重复应用".to_owned(),
+        ));
+    };
+    if recomputed_evidence != *evidence {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "V2 请求登记尾日志与重算候选不一致".to_owned(),
+        ));
+    }
+    Ok(prepared.candidate_state)
+}
+
+fn replay_platform_bucket_operation_v2(
+    state: ExecutionSessionStateV1,
+    evidence: &DurableLogicalTransactionEvidenceV2,
+    operation: DurableRecoveryOperationV2,
+    reader: &mut PaperMarketEventRecoveryReaderV1,
+) -> Result<ExecutionSessionStateV1, SimExecutionPersistenceErrorV1> {
+    if operation != DurableRecoveryOperationV2::ApplyClosedMarketEventBucket {
+        return Err(SimExecutionPersistenceErrorV1::Session(
+            "V2 平台闭桶恢复操作种类不符".to_owned(),
+        ));
+    }
+    let DurableTransactionFactV1::PlatformBucketApplied { session_id, bucket } = &evidence.fact
+    else {
+        return Err(SimExecutionPersistenceErrorV1::Session(
+            "V2 平台闭桶恢复操作与事实种类不符".to_owned(),
+        ));
+    };
+    if session_id != &state.session.session_spec().session_id {
+        return Err(SimExecutionPersistenceErrorV1::Session(
+            "V2 平台闭桶事实会话身份不符".to_owned(),
+        ));
+    }
+    if state
+        .session
+        .durable_bucket_state_matches(bucket.path, Some(bucket))
+    {
+        return Err(SimExecutionPersistenceErrorV1::Session(
+            "V2 平台闭桶尾日志重复应用".to_owned(),
+        ));
+    }
+    let closed_bucket = read_validated_paper_market_event_bucket(bucket, reader)?;
+    let prepared =
+        prepare_platform_bucket_transition_v2(state, closed_bucket).map_err(|error| {
+            SimExecutionPersistenceErrorV1::Session(format!("V2 平台闭桶尾日志无法重放：{error}"))
+        })?;
+    let Some(recomputed_evidence) = prepared.evidence else {
+        return Err(SimExecutionPersistenceErrorV1::Session(
+            "V2 平台闭桶尾日志重复应用".to_owned(),
+        ));
+    };
+    if recomputed_evidence != *evidence {
+        return Err(SimExecutionPersistenceErrorV1::Session(
+            "V2 平台闭桶尾日志与重算候选不一致".to_owned(),
+        ));
+    }
+    Ok(prepared.candidate_state)
+}
+
+fn replay_execution_operation_v2(
+    mut state: ExecutionSessionStateV1,
+    evidence: &DurableLogicalTransactionEvidenceV2,
+    operation: DurableRecoveryOperationV2,
+) -> Result<ExecutionSessionStateV1, SessionCheckpointErrorV1> {
+    let DurableRecoveryOperationV2::DriveExecutionThrough {
+        effective_processing_at_utc_ms,
+    } = operation
+    else {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "V2 执行推进恢复操作种类不符".to_owned(),
+        ));
+    };
+    let DurableTransactionFactV1::ExecutionAdvanced { session_id } = &evidence.fact else {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "V2 执行推进恢复操作与事实种类不符".to_owned(),
+        ));
+    };
+    if session_id != &state.session.session_spec().session_id {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "V2 执行推进事实会话身份不符".to_owned(),
+        ));
+    }
+    if !evidence.logical_action_results.is_empty() {
+        let prepared = prepare_execution_transition_v2(state, effective_processing_at_utc_ms)
+            .map_err(|error| {
+                SessionCheckpointErrorV1::InvalidSessionState(format!(
+                    "V2 动作执行推进尾日志无法重放：{error:?}"
+                ))
+            })?;
+        let Some(recomputed_evidence) = prepared.evidence else {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "V2 动作执行推进尾日志重复应用".to_owned(),
+            ));
+        };
+        if recomputed_evidence != *evidence {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "V2 动作执行推进尾日志与重算候选不一致".to_owned(),
+            ));
+        }
+        return Ok(prepared.candidate_state);
+    }
+
+    let prepared = prepare_scheduled_execution_drive_fields_v2(
+        &mut state.session,
+        &mut state.query_state,
+        &mut state.lifecycle_outbox,
+        effective_processing_at_utc_ms,
+        0,
+    )
+    .map_err(|error| {
+        SessionCheckpointErrorV1::InvalidSessionState(format!(
+            "V2 scheduled-only 执行推进尾日志无法重放：{error}"
+        ))
+    })?;
+    let prepared = match prepared {
+        PreparedScheduledExecutionDriveV2::ActionDue(prefix) => {
+            drop(prefix);
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "V2 scheduled-only 执行推进尾日志遇到待处理动作".to_owned(),
+            ));
+        }
+        PreparedScheduledExecutionDriveV2::NoStateChange => {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "V2 scheduled-only 执行推进尾日志重复应用".to_owned(),
+            ));
+        }
+        PreparedScheduledExecutionDriveV2::Committable(prepared) => prepared,
+    };
+    if prepared.evidence != *evidence {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "V2 scheduled-only 执行推进尾日志与重算候选不一致".to_owned(),
+        ));
+    }
+    prepared.commit();
+    Ok(state)
+}
+
+fn replay_private_fact_operation_v2(
+    state: ExecutionSessionStateV1,
+    evidence: &DurableLogicalTransactionEvidenceV2,
+    operation: DurableRecoveryOperationV2,
+) -> Result<ExecutionSessionStateV1, SessionCheckpointErrorV1> {
+    let DurableRecoveryOperationV2::AdvancePrivateFactThrough { received_at_utc_ms } = operation
+    else {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "V2 私有事实恢复操作种类不符".to_owned(),
+        ));
+    };
+    let expected_session_id = match &evidence.fact {
+        DurableTransactionFactV1::ExecutionAdvanced { session_id }
+        | DurableTransactionFactV1::PrivateOutputCommitted { session_id, .. } => session_id,
+        _ => {
+            return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                "V2 私有事实恢复操作与事实种类不符".to_owned(),
+            ));
+        }
+    };
+    if expected_session_id != &state.session.session_spec().session_id {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "V2 私有事实会话身份不符".to_owned(),
+        ));
+    }
+    let prepared =
+        prepare_private_fact_transition_v2(state, received_at_utc_ms).map_err(|error| {
+            SessionCheckpointErrorV1::InvalidSessionState(format!(
+                "V2 私有事实尾日志无法重放：{error}"
+            ))
+        })?;
+    let Some(recomputed_evidence) = prepared.evidence else {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "V2 私有事实尾日志未产生状态变化".to_owned(),
+        ));
+    };
+    let outcome_matches_fact = matches!(
+        (&prepared.outcome, &evidence.fact),
+        (
+            PreparedPrivateFactOutcomeV2::AdvancedWithoutOutput,
+            DurableTransactionFactV1::ExecutionAdvanced { .. }
+        ) | (
+            PreparedPrivateFactOutcomeV2::Output(_),
+            DurableTransactionFactV1::PrivateOutputCommitted { .. }
+        )
+    );
+    if !outcome_matches_fact || recomputed_evidence != *evidence {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "V2 私有事实尾日志与重算候选不一致".to_owned(),
+        ));
+    }
+    Ok(prepared.candidate_state)
+}
+
+fn replay_downstream_durability_operation_v2(
+    state: ExecutionSessionStateV1,
+    current_durable_confirmation: Option<&ResponseDeliveryConfirmationV1>,
+    evidence: &DurableLogicalTransactionEvidenceV2,
+    operation: DurableRecoveryOperationV2,
+) -> Result<(ExecutionSessionStateV1, ResponseDeliveryConfirmationV1), SessionCheckpointErrorV1> {
+    if operation != DurableRecoveryOperationV2::AdvanceDownstreamDurability {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "V2 下游耐久恢复操作种类不符".to_owned(),
+        ));
+    }
+    let DurableTransactionFactV1::DownstreamDurabilityAdvanced { session_id, proof } =
+        &evidence.fact
+    else {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "V2 下游耐久恢复操作与事实种类不符".to_owned(),
+        ));
+    };
+    if session_id != &state.session.session_spec().session_id {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "V2 下游耐久事实会话身份不符".to_owned(),
+        ));
+    }
+    let prepared = prepare_downstream_durability_transition_v2(
+        state,
+        current_durable_confirmation,
+        proof.clone(),
+    )
+    .map_err(|error| {
+        SessionCheckpointErrorV1::InvalidSessionState(format!("V2 下游耐久尾日志无法重放：{error}"))
+    })?
+    .ok_or_else(|| {
+        SessionCheckpointErrorV1::InvalidSessionState("V2 下游耐久尾日志重复应用".to_owned())
+    })?;
+    if prepared.evidence != *evidence {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "V2 下游耐久尾日志与重算候选不一致".to_owned(),
+        ));
+    }
+    Ok((
+        prepared.candidate_state,
+        prepared.downstream_durable_confirmation,
+    ))
+}
+
+fn replay_close_ingress_operation_v2(
+    mut state: ExecutionSessionStateV1,
+    evidence: &DurableLogicalTransactionEvidenceV2,
+    operation: DurableRecoveryOperationV2,
+) -> Result<ExecutionSessionStateV1, SessionCheckpointErrorV1> {
+    if operation != DurableRecoveryOperationV2::CloseIngress {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "V2 入口关闭恢复操作种类不符".to_owned(),
+        ));
+    }
+    let DurableTransactionFactV1::IngressClosed { session_id } = &evidence.fact else {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "V2 入口关闭恢复操作与事实种类不符".to_owned(),
+        ));
+    };
+    if session_id != &state.session.session_spec().session_id {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "V2 入口关闭事实会话身份不符".to_owned(),
+        ));
+    }
+    if !state.accepting_new_ingress {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "V2 入口关闭尾日志重复应用".to_owned(),
+        ));
+    }
+    let recomputed =
+        DurableLogicalTransactionEvidenceV2::new(DurableTransactionFactV1::IngressClosed {
+            session_id: session_id.clone(),
+        });
+    if recomputed != *evidence {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "V2 入口关闭尾日志与重算候选不一致".to_owned(),
+        ));
+    }
+    state.accepting_new_ingress = false;
+    Ok(state)
 }
 
 impl SimExecutionSessionV1 {
@@ -7807,6 +10859,10 @@ impl SimExecutionSessionV1 {
     }
 
     fn runtime_state(&self) -> ExecutionSessionStateV1 {
+        #[cfg(test)]
+        update_request_registration_preparation_counts_v2(|counts| {
+            counts.runtime_state_calls += 1;
+        });
         ExecutionSessionStateV1 {
             session: self.session.clone(),
             pending_requests: self.pending_requests.clone(),
@@ -7821,6 +10877,8 @@ impl SimExecutionSessionV1 {
                 .clone(),
             confirmed_private_deliveries: self.confirmed_private_deliveries.clone(),
             accepting_new_ingress: self.accepting_new_ingress,
+            #[cfg(test)]
+            query_source_diagnostics: self.query_source_diagnostics.clone(),
         }
     }
 
@@ -7836,6 +10894,10 @@ impl SimExecutionSessionV1 {
         self.compacted_confirmed_private_deliveries = state.compacted_confirmed_private_deliveries;
         self.confirmed_private_deliveries = state.confirmed_private_deliveries;
         self.accepting_new_ingress = state.accepting_new_ingress;
+        #[cfg(test)]
+        {
+            self.query_source_diagnostics = state.query_source_diagnostics;
+        }
     }
 
     fn commit_durable_transition(
@@ -8086,6 +11148,8 @@ impl SimExecutionSessionV1 {
             compacted_confirmed_private_deliveries: state.compacted_confirmed_private_deliveries,
             confirmed_private_deliveries: state.confirmed_private_deliveries,
             accepting_new_ingress: state.accepting_new_ingress,
+            #[cfg(test)]
+            query_source_diagnostics: state.query_source_diagnostics,
             response_bridge,
             persistence,
             bridge_replayed_through_private_feedback_sequence: downstream_durable_confirmation
@@ -8110,8 +11174,56 @@ impl SimExecutionSessionV1 {
                 .clone(),
             confirmed_private_deliveries: self.confirmed_private_deliveries.clone(),
             accepting_new_ingress: self.accepting_new_ingress,
+            #[cfg(test)]
+            query_source_diagnostics: self.query_source_diagnostics.clone(),
         }
         .checkpoint(self.downstream_durable_confirmation.clone())
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TaskQueryMethodV1 {
+    Order,
+    Orders,
+    Trades,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TaskQueryProjectionSourceV1 {
+    HotState,
+    RetainedProjection,
+    Mixed,
+    NoRows,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TaskQuerySourceDiagnosticV1 {
+    pub(crate) global_request_id: String,
+    pub(crate) method: TaskQueryMethodV1,
+    pub(crate) source: TaskQueryProjectionSourceV1,
+    pub(crate) pages: u64,
+    pub(crate) return_rows: u64,
+}
+
+#[cfg(test)]
+type TaskQuerySourceDiagnosticMaybeV1 = TaskQuerySourceDiagnosticV1;
+
+#[cfg(not(test))]
+struct TaskQuerySourceDiagnosticMaybeV1;
+
+#[cfg(test)]
+fn task_query_projection_source_v1(
+    used_hot_state: bool,
+    used_retained_projection: bool,
+) -> TaskQueryProjectionSourceV1 {
+    match (used_hot_state, used_retained_projection) {
+        (true, false) => TaskQueryProjectionSourceV1::HotState,
+        (false, true) => TaskQueryProjectionSourceV1::RetainedProjection,
+        (true, true) => TaskQueryProjectionSourceV1::Mixed,
+        (false, false) => TaskQueryProjectionSourceV1::NoRows,
     }
 }
 
@@ -8280,10 +11392,576 @@ struct QueryStateV1 {
     terminal_projections: Arc<TerminalQueryProjectionsV1>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct PreparedQueryContinuationV1 {
+    global_request_id: String,
+    binding_to_insert: Option<IssuedCursorV1>,
+}
+
+struct ComputedNewQueryPageV1 {
+    next_root_sequence: u64,
+    root_identity: Sha256Hex,
+    page_end: usize,
+    root_metadata_to_insert: Option<ComputedQueryRootMetadataV1>,
+    cursor_to_insert: Option<(String, IssuedCursorV1)>,
+}
+
+struct ComputedQueryRootMetadataV1 {
+    root_sequence: u64,
+    root_identity: Sha256Hex,
+    method: ListQueryMethodV1,
+    filter_sha256: Sha256Hex,
+    query_projection_revision: u64,
+    retention_floor_at_issue: u64,
+    projection_sha256: Sha256Hex,
+}
+
+enum ComputedQueryContinuationV1 {
+    OutOfRetention(QueryOutOfRetentionV1),
+    Page {
+        root_identity: Sha256Hex,
+        query_projection_revision: u64,
+        rows: QueryRootRowsV1,
+        page_start: usize,
+        page_end: usize,
+        cursor_to_insert: Option<(String, IssuedCursorV1)>,
+    },
+}
+
+struct PreparedQueryStateDeltaV2<'a> {
+    query_state: &'a mut QueryStateV1,
+    terminal_order_inserts: BTreeMap<String, OrderProjectionV1>,
+    terminal_trade_inserts: BTreeMap<String, TradeProjectionV1>,
+    next_root_sequence: Option<u64>,
+    root_to_insert: Option<QueryRootV1>,
+    cursor_to_insert: Option<(String, IssuedCursorV1)>,
+    preparation_failed: bool,
+    page_prepared: bool,
+}
+
+struct CommittableQueryStateDeltaV2<'a> {
+    prepared: PreparedQueryStateDeltaV2<'a>,
+}
+
+impl CommittableQueryStateDeltaV2<'_> {
+    fn commit(self) {
+        let PreparedQueryStateDeltaV2 {
+            query_state,
+            terminal_order_inserts,
+            terminal_trade_inserts,
+            next_root_sequence,
+            root_to_insert,
+            cursor_to_insert,
+            preparation_failed,
+            page_prepared: _,
+        } = self.prepared;
+        debug_assert!(!preparation_failed);
+        if !terminal_order_inserts.is_empty() || !terminal_trade_inserts.is_empty() {
+            let terminal_projections = Arc::get_mut(&mut query_state.terminal_projections)
+                .expect("查询终态投影独占所有权已经在 SQLite 提交前验证");
+            for (key, projection) in terminal_order_inserts {
+                let replaced = terminal_projections.orders.insert(key, projection);
+                debug_assert!(replaced.is_none());
+            }
+            for (key, projection) in terminal_trade_inserts {
+                let replaced = terminal_projections.trades.insert(key, projection);
+                debug_assert!(replaced.is_none());
+            }
+        }
+        if let Some(next_root_sequence) = next_root_sequence {
+            query_state.next_root_sequence = next_root_sequence;
+        }
+        if let Some(root) = root_to_insert {
+            let root_sequence = root.root_sequence;
+            let replaced = query_state.roots.insert(root_sequence, root);
+            debug_assert!(replaced.is_none());
+        }
+        if let Some((token, binding)) = cursor_to_insert {
+            let replaced = query_state.issued_cursors.insert(token, binding);
+            debug_assert!(replaced.is_none());
+        }
+    }
+}
+
+impl<'a> PreparedQueryStateDeltaV2<'a> {
+    fn preparation_failed_error() -> SimExecutionContractErrorV1 {
+        SimExecutionContractErrorV1::ExecutionState(
+            "查询状态准备已经失败，必须丢弃当前准备结果".to_owned(),
+        )
+    }
+
+    fn require_preparation_open(&self) -> Result<(), SimExecutionContractErrorV1> {
+        if self.preparation_failed {
+            Err(Self::preparation_failed_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn require_page_unprepared(&self) -> Result<(), SimExecutionContractErrorV1> {
+        if self.page_prepared {
+            Err(SimExecutionContractErrorV1::ExecutionState(
+                "同一查询状态准备守卫已经准备分页".to_owned(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn into_committable(
+        self,
+    ) -> Result<CommittableQueryStateDeltaV2<'a>, SimExecutionContractErrorV1> {
+        if self.preparation_failed {
+            return Err(Self::preparation_failed_error());
+        }
+        Ok(CommittableQueryStateDeltaV2 { prepared: self })
+    }
+
+    fn prepare_terminal_inserts(
+        &mut self,
+        orders: Vec<OrderProjectionV1>,
+        trades: Vec<TradeProjectionV1>,
+    ) -> Result<(), SimExecutionContractErrorV1> {
+        self.require_preparation_open()?;
+        let result = self.prepare_terminal_inserts_inner(orders, trades);
+        if result.is_err() {
+            self.preparation_failed = true;
+        }
+        result
+    }
+
+    fn prepare_terminal_inserts_inner(
+        &mut self,
+        orders: Vec<OrderProjectionV1>,
+        trades: Vec<TradeProjectionV1>,
+    ) -> Result<(), SimExecutionContractErrorV1> {
+        let mut order_inserts = BTreeMap::new();
+        for projection in orders {
+            if !self
+                .query_state
+                .terminal_order_is_retained(projection.last_updated_at_utc_ms)
+            {
+                continue;
+            }
+            let key = projection.platform_order_id.clone();
+            match order_inserts
+                .get(&key)
+                .or_else(|| self.terminal_order_inserts.get(&key))
+                .or_else(|| self.query_state.terminal_projections.orders.get(&key))
+            {
+                Some(existing) if existing != &projection => {
+                    return Err(SimExecutionContractErrorV1::QueryIdentityConflict(format!(
+                        "compact-order:{key}"
+                    )));
+                }
+                Some(_) => {}
+                None => {
+                    order_inserts.insert(key, projection);
+                }
+            }
+        }
+
+        let mut trade_inserts = BTreeMap::new();
+        for projection in trades {
+            if !self
+                .query_state
+                .trade_is_retained(projection.matched_at_utc_ms)
+            {
+                continue;
+            }
+            let key = projection.simulated_trade_id.clone();
+            match trade_inserts
+                .get(&key)
+                .or_else(|| self.terminal_trade_inserts.get(&key))
+                .or_else(|| self.query_state.terminal_projections.trades.get(&key))
+            {
+                Some(existing) if existing != &projection => {
+                    return Err(SimExecutionContractErrorV1::QueryIdentityConflict(format!(
+                        "compact-trade:{key}"
+                    )));
+                }
+                Some(_) => {}
+                None => {
+                    trade_inserts.insert(key, projection);
+                }
+            }
+        }
+
+        if (!order_inserts.is_empty() || !trade_inserts.is_empty())
+            && Arc::get_mut(&mut self.query_state.terminal_projections).is_none()
+        {
+            return Err(SimExecutionContractErrorV1::ExecutionState(
+                "准备查询终态投影新增键时缺少独占 Arc 所有权".to_owned(),
+            ));
+        }
+        self.terminal_order_inserts.extend(order_inserts);
+        self.terminal_trade_inserts.extend(trade_inserts);
+        Ok(())
+    }
+
+    fn retained_terminal_order(&self, platform_order_id: &str) -> Option<&OrderProjectionV1> {
+        let retained_from_utc_ms = self.query_state.order_history_retained_from_utc_ms;
+        self.terminal_order_inserts
+            .get(platform_order_id)
+            .or_else(|| {
+                self.query_state
+                    .terminal_projections
+                    .orders
+                    .get(platform_order_id)
+            })
+            .filter(|order| {
+                retained_from_utc_ms.is_none_or(|floor| order.last_updated_at_utc_ms >= floor)
+            })
+    }
+
+    fn hot_order_is_query_visible(
+        &self,
+        order: &SimOrderRecordV1,
+    ) -> Result<bool, MatchingMathErrorV1> {
+        self.query_state.hot_order_is_query_visible(order)
+    }
+
+    fn order_history_retained_from_utc_ms(&self) -> Option<i64> {
+        self.query_state.order_history_retained_from_utc_ms
+    }
+
+    fn trade_history_retained_from_utc_ms(&self) -> Option<i64> {
+        self.query_state.trade_history_retained_from_utc_ms
+    }
+
+    fn trade_is_retained(&self, matched_at_utc_ms: i64) -> bool {
+        self.query_state.trade_is_retained(matched_at_utc_ms)
+    }
+
+    fn earliest_retained_root_sequence(&self) -> u64 {
+        self.query_state.earliest_retained_root_sequence
+    }
+
+    fn continuation_query_projection_revision(
+        &mut self,
+        global_request_id: &str,
+        method: ListQueryMethodV1,
+    ) -> Result<u64, SimExecutionContractErrorV1> {
+        self.require_preparation_open()?;
+        let result = self
+            .query_state
+            .continuation(global_request_id, method)
+            .map(|binding| binding.query_projection_revision);
+        if result.is_err() {
+            self.preparation_failed = true;
+        }
+        result
+    }
+
+    fn retained_terminal_trade(&self, simulated_trade_id: &str) -> Option<&TradeProjectionV1> {
+        let retained_from_utc_ms = self.query_state.trade_history_retained_from_utc_ms;
+        self.terminal_trade_inserts
+            .get(simulated_trade_id)
+            .or_else(|| {
+                self.query_state
+                    .terminal_projections
+                    .trades
+                    .get(simulated_trade_id)
+            })
+            .filter(|trade| {
+                retained_from_utc_ms.is_none_or(|floor| trade.matched_at_utc_ms >= floor)
+            })
+    }
+
+    fn retained_terminal_trades(&self) -> impl Iterator<Item = &TradeProjectionV1> {
+        let retained_from_utc_ms = self.query_state.trade_history_retained_from_utc_ms;
+        self.terminal_trade_inserts
+            .values()
+            .chain(self.query_state.terminal_projections.trades.values())
+            .filter(move |trade| {
+                retained_from_utc_ms.is_none_or(|floor| trade.matched_at_utc_ms >= floor)
+            })
+    }
+
+    fn prepare_new_query_page_delta_v2(
+        &mut self,
+        computed: ComputedNewQueryPageV1,
+        root_rows: Option<QueryRootRowsV1>,
+    ) -> Result<(Sha256Hex, usize, Option<OpaquePageCursorV1>), SimExecutionContractErrorV1> {
+        debug_assert!(!self.page_prepared);
+        debug_assert!(self.next_root_sequence.is_none());
+        debug_assert!(self.root_to_insert.is_none());
+        debug_assert!(self.cursor_to_insert.is_none());
+        let ComputedNewQueryPageV1 {
+            next_root_sequence,
+            root_identity,
+            page_end,
+            root_metadata_to_insert,
+            cursor_to_insert,
+        } = computed;
+        let root_to_insert =
+            QueryStateV1::materialize_computed_query_root(root_metadata_to_insert, root_rows);
+        if let Some(root) = &root_to_insert
+            && self.query_state.roots.contains_key(&root.root_sequence)
+        {
+            return Err(SimExecutionContractErrorV1::QueryIdentityConflict(format!(
+                "query-root:{}",
+                root.root_sequence
+            )));
+        }
+        if let Some((token, _)) = &cursor_to_insert
+            && self.query_state.issued_cursors.contains_key(token)
+        {
+            return Err(SimExecutionContractErrorV1::QueryIdentityConflict(format!(
+                "query-cursor:{token}"
+            )));
+        }
+        let next_cursor = cursor_to_insert
+            .as_ref()
+            .map(|(token, _)| OpaquePageCursorV1(token.clone()));
+        self.next_root_sequence = Some(next_root_sequence);
+        self.root_to_insert = root_to_insert;
+        self.cursor_to_insert = cursor_to_insert;
+        self.page_prepared = true;
+        Ok((root_identity, page_end, next_cursor))
+    }
+
+    fn prepare_new_orders_page(
+        &mut self,
+        spec: &SessionSpecV2,
+        filter_sha256: Sha256Hex,
+        query_projection_revision: u64,
+        rows: Vec<OrderProjectionV1>,
+    ) -> Result<OrdersPageV1, SimExecutionContractErrorV1> {
+        self.require_preparation_open()?;
+        let result = self.prepare_new_orders_page_inner(
+            spec,
+            filter_sha256,
+            query_projection_revision,
+            rows,
+        );
+        if result.is_err() {
+            self.preparation_failed = true;
+        }
+        result
+    }
+
+    fn prepare_new_orders_page_inner(
+        &mut self,
+        spec: &SessionSpecV2,
+        filter_sha256: Sha256Hex,
+        query_projection_revision: u64,
+        rows: Vec<OrderProjectionV1>,
+    ) -> Result<OrdersPageV1, SimExecutionContractErrorV1> {
+        self.require_page_unprepared()?;
+        let (computed, items, root_rows) = self.query_state.compute_new_orders_page_components(
+            spec,
+            filter_sha256,
+            query_projection_revision,
+            rows,
+        )?;
+        let (root_identity, _, next_cursor) =
+            self.prepare_new_query_page_delta_v2(computed, root_rows)?;
+        Ok(OrdersPageV1 {
+            root_identity: root_identity.0,
+            query_projection_revision,
+            items,
+            next_cursor,
+        })
+    }
+
+    fn prepare_new_trades_page(
+        &mut self,
+        spec: &SessionSpecV2,
+        filter_sha256: Sha256Hex,
+        query_projection_revision: u64,
+        rows: Vec<TradeProjectionV1>,
+    ) -> Result<TradesPageV1, SimExecutionContractErrorV1> {
+        self.require_preparation_open()?;
+        let result = self.prepare_new_trades_page_inner(
+            spec,
+            filter_sha256,
+            query_projection_revision,
+            rows,
+        );
+        if result.is_err() {
+            self.preparation_failed = true;
+        }
+        result
+    }
+
+    fn prepare_new_trades_page_inner(
+        &mut self,
+        spec: &SessionSpecV2,
+        filter_sha256: Sha256Hex,
+        query_projection_revision: u64,
+        rows: Vec<TradeProjectionV1>,
+    ) -> Result<TradesPageV1, SimExecutionContractErrorV1> {
+        self.require_page_unprepared()?;
+        let (computed, items, root_rows) = self.query_state.compute_new_trades_page_components(
+            spec,
+            filter_sha256,
+            query_projection_revision,
+            rows,
+        )?;
+        let (root_identity, _, next_cursor) =
+            self.prepare_new_query_page_delta_v2(computed, root_rows)?;
+        Ok(TradesPageV1 {
+            root_identity: root_identity.0,
+            query_projection_revision,
+            items,
+            next_cursor,
+        })
+    }
+
+    fn prepare_continuation_delta_v2(
+        &mut self,
+        cursor_to_insert: Option<(String, IssuedCursorV1)>,
+    ) -> Result<Option<OpaquePageCursorV1>, SimExecutionContractErrorV1> {
+        debug_assert!(!self.page_prepared);
+        debug_assert!(self.cursor_to_insert.is_none());
+        let (cursor_to_insert, next_cursor) = match cursor_to_insert {
+            Some((token, binding)) => match self.query_state.issued_cursors.get(&token) {
+                Some(existing) if existing == &binding => (None, Some(OpaquePageCursorV1(token))),
+                Some(_) => {
+                    return Err(SimExecutionContractErrorV1::QueryIdentityConflict(format!(
+                        "query-cursor:{token}"
+                    )));
+                }
+                None => {
+                    let next_cursor = Some(OpaquePageCursorV1(token.clone()));
+                    (Some((token, binding)), next_cursor)
+                }
+            },
+            None => (None, None),
+        };
+        self.cursor_to_insert = cursor_to_insert;
+        self.page_prepared = true;
+        Ok(next_cursor)
+    }
+
+    fn prepare_continue_orders(
+        &mut self,
+        global_request_id: &str,
+    ) -> Result<OrdersQueryResultV1, SimExecutionContractErrorV1> {
+        self.require_preparation_open()?;
+        let result = self.prepare_continue_orders_inner(global_request_id);
+        if result.is_err() {
+            self.preparation_failed = true;
+        }
+        result
+    }
+
+    fn prepare_continue_orders_inner(
+        &mut self,
+        global_request_id: &str,
+    ) -> Result<OrdersQueryResultV1, SimExecutionContractErrorV1> {
+        self.require_page_unprepared()?;
+        match self
+            .query_state
+            .compute_query_continuation(global_request_id, ListQueryMethodV1::Orders)?
+        {
+            ComputedQueryContinuationV1::OutOfRetention(out_of_retention) => {
+                self.page_prepared = true;
+                Ok(OrdersQueryResultV1::OutOfRetention(out_of_retention))
+            }
+            ComputedQueryContinuationV1::Page {
+                root_identity,
+                query_projection_revision,
+                rows,
+                page_start,
+                page_end,
+                cursor_to_insert,
+            } => {
+                let QueryRootRowsV1::Orders(rows) = rows else {
+                    unreachable!("订单续页共同计算已检查根正文类型")
+                };
+                let items = rows[page_start..page_end].to_vec();
+                let next_cursor = self.prepare_continuation_delta_v2(cursor_to_insert)?;
+                Ok(OrdersQueryResultV1::Page(OrdersPageV1 {
+                    root_identity: root_identity.0,
+                    query_projection_revision,
+                    items,
+                    next_cursor,
+                }))
+            }
+        }
+    }
+
+    fn prepare_continue_trades(
+        &mut self,
+        global_request_id: &str,
+    ) -> Result<TradesQueryResultV1, SimExecutionContractErrorV1> {
+        self.require_preparation_open()?;
+        let result = self.prepare_continue_trades_inner(global_request_id);
+        if result.is_err() {
+            self.preparation_failed = true;
+        }
+        result
+    }
+
+    fn prepare_continue_trades_inner(
+        &mut self,
+        global_request_id: &str,
+    ) -> Result<TradesQueryResultV1, SimExecutionContractErrorV1> {
+        self.require_page_unprepared()?;
+        match self
+            .query_state
+            .compute_query_continuation(global_request_id, ListQueryMethodV1::Trades)?
+        {
+            ComputedQueryContinuationV1::OutOfRetention(out_of_retention) => {
+                self.page_prepared = true;
+                Ok(TradesQueryResultV1::OutOfRetention(out_of_retention))
+            }
+            ComputedQueryContinuationV1::Page {
+                root_identity,
+                query_projection_revision,
+                rows,
+                page_start,
+                page_end,
+                cursor_to_insert,
+            } => {
+                let QueryRootRowsV1::Trades(rows) = rows else {
+                    unreachable!("成交续页共同计算已检查根正文类型")
+                };
+                let items = rows[page_start..page_end].to_vec();
+                let next_cursor = self.prepare_continuation_delta_v2(cursor_to_insert)?;
+                Ok(TradesQueryResultV1::Page(TradesPageV1 {
+                    root_identity: root_identity.0,
+                    query_projection_revision,
+                    items,
+                    next_cursor,
+                }))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct TerminalQueryProjectionsV1 {
     orders: BTreeMap<String, OrderProjectionV1>,
     trades: BTreeMap<String, TradeProjectionV1>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TERMINAL_QUERY_PROJECTIONS_CLONE_COUNT_FOR_TESTS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+impl Clone for TerminalQueryProjectionsV1 {
+    fn clone(&self) -> Self {
+        #[cfg(test)]
+        TERMINAL_QUERY_PROJECTIONS_CLONE_COUNT_FOR_TESTS.with(|count| count.set(count.get() + 1));
+        Self {
+            orders: self.orders.clone(),
+            trades: self.trades.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+fn reset_terminal_query_projections_clone_count_for_tests() {
+    TERMINAL_QUERY_PROJECTIONS_CLONE_COUNT_FOR_TESTS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn terminal_query_projections_clone_count_for_tests() -> usize {
+    TERMINAL_QUERY_PROJECTIONS_CLONE_COUNT_FOR_TESTS.with(std::cell::Cell::get)
 }
 
 impl QueryStateV1 {
@@ -8297,6 +11975,19 @@ impl QueryStateV1 {
             order_history_retained_from_utc_ms: None,
             trade_history_retained_from_utc_ms: None,
             terminal_projections: Arc::new(TerminalQueryProjectionsV1::default()),
+        }
+    }
+
+    fn prepare_delta_v2(&mut self) -> PreparedQueryStateDeltaV2<'_> {
+        PreparedQueryStateDeltaV2 {
+            query_state: self,
+            terminal_order_inserts: BTreeMap::new(),
+            terminal_trade_inserts: BTreeMap::new(),
+            next_root_sequence: None,
+            root_to_insert: None,
+            cursor_to_insert: None,
+            preparation_failed: false,
+            page_prepared: false,
         }
     }
 
@@ -9331,6 +13022,16 @@ impl QueryStateV1 {
         global_request_id: &str,
         request: &PendingDomainRequestV1,
     ) -> Result<(), SimExecutionContractErrorV1> {
+        let prepared = self.prepare_continuation_for_request(global_request_id, request)?;
+        self.commit_prevalidated_continuation(prepared);
+        Ok(())
+    }
+
+    fn prepare_continuation_for_request(
+        &self,
+        global_request_id: &str,
+        request: &PendingDomainRequestV1,
+    ) -> Result<PreparedQueryContinuationV1, SimExecutionContractErrorV1> {
         let prepared = match request {
             PendingDomainRequestV1::Orders(request) => request
                 .cursor
@@ -9356,19 +13057,33 @@ impl QueryStateV1 {
                 .transpose()?,
             _ => None,
         };
-        if let Some(prepared) = prepared {
+        let binding_to_insert = if let Some(prepared) = prepared {
             if let Some(existing) = self.continuation_by_request.get(global_request_id) {
                 if existing != &prepared {
                     return Err(SimExecutionContractErrorV1::QueryIdentityConflict(
                         global_request_id.to_owned(),
                     ));
                 }
+                None
             } else {
-                self.continuation_by_request
-                    .insert(global_request_id.to_owned(), prepared);
+                Some(prepared)
             }
+        } else {
+            None
+        };
+        Ok(PreparedQueryContinuationV1 {
+            global_request_id: global_request_id.to_owned(),
+            binding_to_insert,
+        })
+    }
+
+    fn commit_prevalidated_continuation(&mut self, prepared: PreparedQueryContinuationV1) {
+        if let Some(binding) = prepared.binding_to_insert {
+            let replaced = self
+                .continuation_by_request
+                .insert(prepared.global_request_id, binding);
+            debug_assert!(replaced.is_none());
         }
-        Ok(())
     }
 
     fn validate_cursor(
@@ -9388,6 +13103,171 @@ impl QueryStateV1 {
         Ok(binding.clone())
     }
 
+    fn compute_new_query_page(
+        &self,
+        spec: &SessionSpecV2,
+        method: ListQueryMethodV1,
+        filter_sha256: Sha256Hex,
+        query_projection_revision: u64,
+        projection_sha256: Sha256Hex,
+        row_count: usize,
+    ) -> Result<ComputedNewQueryPageV1, SimExecutionContractErrorV1> {
+        let root_sequence = self.next_root_sequence;
+        let next_root_sequence = root_sequence
+            .checked_add(1)
+            .ok_or(SimExecutionContractErrorV1::PlatformRevisionRegression)?;
+        let retention_floor_at_issue = self.earliest_retained_root_sequence;
+        let root_identity = query_root_identity(
+            spec,
+            method,
+            &filter_sha256,
+            query_projection_revision,
+            retention_floor_at_issue,
+            root_sequence,
+            &projection_sha256,
+        );
+        let (root_metadata_to_insert, cursor_to_insert) = if row_count > SIM_QUERY_PAGE_SIZE_V1 {
+            let root_metadata = ComputedQueryRootMetadataV1 {
+                root_sequence,
+                root_identity: root_identity.clone(),
+                method,
+                filter_sha256: filter_sha256.clone(),
+                query_projection_revision,
+                retention_floor_at_issue,
+                projection_sha256,
+            };
+            let binding = IssuedCursorV1 {
+                root_sequence,
+                root_identity: root_identity.clone(),
+                method,
+                filter_sha256,
+                query_projection_revision,
+                retention_floor_at_issue,
+                next_index: SIM_QUERY_PAGE_SIZE_V1,
+            };
+            let token = cursor_token(&binding);
+            (Some(root_metadata), Some((token, binding)))
+        } else {
+            (None, None)
+        };
+        Ok(ComputedNewQueryPageV1 {
+            next_root_sequence,
+            root_identity,
+            page_end: row_count.min(SIM_QUERY_PAGE_SIZE_V1),
+            root_metadata_to_insert,
+            cursor_to_insert,
+        })
+    }
+
+    fn materialize_computed_query_root(
+        root_metadata: Option<ComputedQueryRootMetadataV1>,
+        rows: Option<QueryRootRowsV1>,
+    ) -> Option<QueryRootV1> {
+        match (root_metadata, rows) {
+            (Some(metadata), Some(rows)) => Some(QueryRootV1 {
+                root_sequence: metadata.root_sequence,
+                root_identity: metadata.root_identity,
+                method: metadata.method,
+                filter_sha256: metadata.filter_sha256,
+                query_projection_revision: metadata.query_projection_revision,
+                retention_floor_at_issue: metadata.retention_floor_at_issue,
+                projection_sha256: metadata.projection_sha256,
+                rows,
+            }),
+            (None, None) => None,
+            _ => unreachable!("查询根元数据与长页正文必须同时存在"),
+        }
+    }
+
+    fn apply_new_query_page_v1(
+        &mut self,
+        computed: ComputedNewQueryPageV1,
+        root_rows: Option<QueryRootRowsV1>,
+    ) -> (Sha256Hex, usize, Option<OpaquePageCursorV1>) {
+        let ComputedNewQueryPageV1 {
+            next_root_sequence,
+            root_identity,
+            page_end,
+            root_metadata_to_insert,
+            cursor_to_insert,
+        } = computed;
+        let root_to_insert =
+            Self::materialize_computed_query_root(root_metadata_to_insert, root_rows);
+        self.next_root_sequence = next_root_sequence;
+        if let Some(root) = root_to_insert {
+            self.roots.insert(root.root_sequence, root);
+        }
+        let next_cursor = cursor_to_insert.map(|(token, binding)| {
+            self.issued_cursors.insert(token.clone(), binding);
+            OpaquePageCursorV1(token)
+        });
+        (root_identity, page_end, next_cursor)
+    }
+
+    fn compute_new_orders_page_components(
+        &self,
+        spec: &SessionSpecV2,
+        filter_sha256: Sha256Hex,
+        query_projection_revision: u64,
+        rows: Vec<OrderProjectionV1>,
+    ) -> Result<
+        (
+            ComputedNewQueryPageV1,
+            Vec<OrderProjectionV1>,
+            Option<QueryRootRowsV1>,
+        ),
+        SimExecutionContractErrorV1,
+    > {
+        let projection_sha256 = orders_projection_sha256(&rows);
+        let computed = self.compute_new_query_page(
+            spec,
+            ListQueryMethodV1::Orders,
+            filter_sha256,
+            query_projection_revision,
+            projection_sha256,
+            rows.len(),
+        )?;
+        if rows.len() > SIM_QUERY_PAGE_SIZE_V1 {
+            let rows: Arc<[OrderProjectionV1]> = Arc::from(rows);
+            let items = rows[..computed.page_end].to_vec();
+            Ok((computed, items, Some(QueryRootRowsV1::Orders(rows))))
+        } else {
+            Ok((computed, rows, None))
+        }
+    }
+
+    fn compute_new_trades_page_components(
+        &self,
+        spec: &SessionSpecV2,
+        filter_sha256: Sha256Hex,
+        query_projection_revision: u64,
+        rows: Vec<TradeProjectionV1>,
+    ) -> Result<
+        (
+            ComputedNewQueryPageV1,
+            Vec<TradeProjectionV1>,
+            Option<QueryRootRowsV1>,
+        ),
+        SimExecutionContractErrorV1,
+    > {
+        let projection_sha256 = trades_projection_sha256(&rows);
+        let computed = self.compute_new_query_page(
+            spec,
+            ListQueryMethodV1::Trades,
+            filter_sha256,
+            query_projection_revision,
+            projection_sha256,
+            rows.len(),
+        )?;
+        if rows.len() > SIM_QUERY_PAGE_SIZE_V1 {
+            let rows: Arc<[TradeProjectionV1]> = Arc::from(rows);
+            let items = rows[..computed.page_end].to_vec();
+            Ok((computed, items, Some(QueryRootRowsV1::Trades(rows))))
+        } else {
+            Ok((computed, rows, None))
+        }
+    }
+
     fn new_orders_page(
         &mut self,
         spec: &SessionSpecV2,
@@ -9395,46 +13275,36 @@ impl QueryStateV1 {
         query_projection_revision: u64,
         rows: Vec<OrderProjectionV1>,
     ) -> Result<OrdersPageV1, SimExecutionContractErrorV1> {
-        let projection_sha256 = orders_projection_sha256(&rows);
-        let retention_floor_at_issue = self.earliest_retained_root_sequence;
-        let (root_sequence, root_identity) = self.next_root_identity(
+        let (computed, items, root_rows) = self.compute_new_orders_page_components(
             spec,
-            ListQueryMethodV1::Orders,
-            &filter_sha256,
+            filter_sha256,
             query_projection_revision,
-            retention_floor_at_issue,
-            &projection_sha256,
+            rows,
         )?;
-        let next_cursor = if rows.len() > SIM_QUERY_PAGE_SIZE_V1 {
-            let root = QueryRootV1 {
-                root_sequence,
-                root_identity: root_identity.clone(),
-                method: ListQueryMethodV1::Orders,
-                filter_sha256: filter_sha256.clone(),
-                query_projection_revision,
-                retention_floor_at_issue,
-                projection_sha256,
-                rows: QueryRootRowsV1::Orders(Arc::from(rows.clone())),
-            };
-            self.roots.insert(root_sequence, root);
-            Some(self.issue_cursor(IssuedCursorV1 {
-                root_sequence,
-                root_identity: root_identity.clone(),
-                method: ListQueryMethodV1::Orders,
-                filter_sha256,
-                query_projection_revision,
-                retention_floor_at_issue,
-                next_index: SIM_QUERY_PAGE_SIZE_V1,
-            }))
-        } else {
-            None
-        };
+        let (root_identity, _, next_cursor) = self.apply_new_query_page_v1(computed, root_rows);
         Ok(OrdersPageV1 {
             root_identity: root_identity.0,
             query_projection_revision,
-            items: rows.into_iter().take(SIM_QUERY_PAGE_SIZE_V1).collect(),
+            items,
             next_cursor,
         })
+    }
+
+    fn prepare_new_orders_page_v2(
+        &mut self,
+        spec: &SessionSpecV2,
+        filter_sha256: Sha256Hex,
+        query_projection_revision: u64,
+        rows: Vec<OrderProjectionV1>,
+    ) -> Result<(PreparedQueryStateDeltaV2<'_>, OrdersPageV1), SimExecutionContractErrorV1> {
+        let mut prepared = self.prepare_delta_v2();
+        let page = prepared.prepare_new_orders_page(
+            spec,
+            filter_sha256,
+            query_projection_revision,
+            rows,
+        )?;
+        Ok((prepared, page))
     }
 
     fn new_trades_page(
@@ -9444,45 +13314,107 @@ impl QueryStateV1 {
         query_projection_revision: u64,
         rows: Vec<TradeProjectionV1>,
     ) -> Result<TradesPageV1, SimExecutionContractErrorV1> {
-        let projection_sha256 = trades_projection_sha256(&rows);
-        let retention_floor_at_issue = self.earliest_retained_root_sequence;
-        let (root_sequence, root_identity) = self.next_root_identity(
+        let (computed, items, root_rows) = self.compute_new_trades_page_components(
             spec,
-            ListQueryMethodV1::Trades,
-            &filter_sha256,
+            filter_sha256,
             query_projection_revision,
-            retention_floor_at_issue,
-            &projection_sha256,
+            rows,
         )?;
-        let next_cursor = if rows.len() > SIM_QUERY_PAGE_SIZE_V1 {
-            let root = QueryRootV1 {
-                root_sequence,
-                root_identity: root_identity.clone(),
-                method: ListQueryMethodV1::Trades,
-                filter_sha256: filter_sha256.clone(),
-                query_projection_revision,
-                retention_floor_at_issue,
-                projection_sha256,
-                rows: QueryRootRowsV1::Trades(Arc::from(rows.clone())),
-            };
-            self.roots.insert(root_sequence, root);
-            Some(self.issue_cursor(IssuedCursorV1 {
-                root_sequence,
-                root_identity: root_identity.clone(),
-                method: ListQueryMethodV1::Trades,
-                filter_sha256,
-                query_projection_revision,
-                retention_floor_at_issue,
-                next_index: SIM_QUERY_PAGE_SIZE_V1,
-            }))
-        } else {
-            None
-        };
+        let (root_identity, _, next_cursor) = self.apply_new_query_page_v1(computed, root_rows);
         Ok(TradesPageV1 {
             root_identity: root_identity.0,
             query_projection_revision,
-            items: rows.into_iter().take(SIM_QUERY_PAGE_SIZE_V1).collect(),
+            items,
             next_cursor,
+        })
+    }
+
+    fn prepare_new_trades_page_v2(
+        &mut self,
+        spec: &SessionSpecV2,
+        filter_sha256: Sha256Hex,
+        query_projection_revision: u64,
+        rows: Vec<TradeProjectionV1>,
+    ) -> Result<(PreparedQueryStateDeltaV2<'_>, TradesPageV1), SimExecutionContractErrorV1> {
+        let mut prepared = self.prepare_delta_v2();
+        let page = prepared.prepare_new_trades_page(
+            spec,
+            filter_sha256,
+            query_projection_revision,
+            rows,
+        )?;
+        Ok((prepared, page))
+    }
+
+    fn compute_query_continuation(
+        &self,
+        global_request_id: &str,
+        method: ListQueryMethodV1,
+    ) -> Result<ComputedQueryContinuationV1, SimExecutionContractErrorV1> {
+        let binding = self.continuation(global_request_id, method)?;
+        if binding.root_sequence < self.earliest_retained_root_sequence {
+            return self
+                .root_out_of_retention(binding.root_sequence)
+                .map(ComputedQueryContinuationV1::OutOfRetention);
+        }
+        let Some(root) = self.roots.get(&binding.root_sequence) else {
+            return self
+                .root_out_of_retention(binding.root_sequence)
+                .map(ComputedQueryContinuationV1::OutOfRetention);
+        };
+        if root.root_identity != binding.root_identity
+            || root.method != binding.method
+            || root.filter_sha256 != binding.filter_sha256
+            || root.query_projection_revision != binding.query_projection_revision
+            || root.retention_floor_at_issue != binding.retention_floor_at_issue
+        {
+            return Err(SimExecutionContractErrorV1::QueryIdentityConflict(
+                global_request_id.to_owned(),
+            ));
+        }
+        let row_count = match (&method, &root.rows) {
+            (ListQueryMethodV1::Orders, QueryRootRowsV1::Orders(rows)) => rows.len(),
+            (ListQueryMethodV1::Trades, QueryRootRowsV1::Trades(rows)) => rows.len(),
+            _ => {
+                return Err(SimExecutionContractErrorV1::QueryIdentityConflict(
+                    global_request_id.to_owned(),
+                ));
+            }
+        };
+        let page_start = binding.next_index;
+        let page_end = page_start
+            .saturating_add(SIM_QUERY_PAGE_SIZE_V1)
+            .min(row_count);
+        if page_start > page_end {
+            return Err(SimExecutionContractErrorV1::QueryIdentityConflict(
+                global_request_id.to_owned(),
+            ));
+        }
+        let cursor_to_insert = (page_end < row_count).then(|| {
+            let next_binding = IssuedCursorV1 {
+                next_index: page_end,
+                ..binding.clone()
+            };
+            let token = cursor_token(&next_binding);
+            (token, next_binding)
+        });
+        Ok(ComputedQueryContinuationV1::Page {
+            root_identity: binding.root_identity,
+            query_projection_revision: binding.query_projection_revision,
+            rows: root.rows.clone(),
+            page_start,
+            page_end,
+            cursor_to_insert,
+        })
+    }
+
+    fn apply_continuation_cursor_v1(
+        &mut self,
+        cursor_to_insert: Option<(String, IssuedCursorV1)>,
+    ) -> Option<OpaquePageCursorV1> {
+        cursor_to_insert.map(|(token, binding)| {
+            self.issued_cursors.insert(token.clone(), binding);
+            OpaquePageCursorV1(token)
         })
     }
 
@@ -9490,108 +13422,86 @@ impl QueryStateV1 {
         &mut self,
         global_request_id: &str,
     ) -> Result<OrdersQueryResultV1, SimExecutionContractErrorV1> {
-        let binding = self.continuation(global_request_id, ListQueryMethodV1::Orders)?;
-        if binding.root_sequence < self.earliest_retained_root_sequence {
-            return self
-                .root_out_of_retention(binding.root_sequence)
-                .map(OrdersQueryResultV1::OutOfRetention);
-        }
-        let Some(root) = self.roots.get(&binding.root_sequence) else {
-            return self
-                .root_out_of_retention(binding.root_sequence)
-                .map(OrdersQueryResultV1::OutOfRetention);
+        let computed =
+            self.compute_query_continuation(global_request_id, ListQueryMethodV1::Orders)?;
+        let ComputedQueryContinuationV1::Page {
+            root_identity,
+            query_projection_revision,
+            rows,
+            page_start,
+            page_end,
+            cursor_to_insert,
+        } = computed
+        else {
+            let ComputedQueryContinuationV1::OutOfRetention(out_of_retention) = computed else {
+                unreachable!("查询续页计算结果形状固定")
+            };
+            return Ok(OrdersQueryResultV1::OutOfRetention(out_of_retention));
         };
-        if root.root_identity != binding.root_identity
-            || root.method != binding.method
-            || root.filter_sha256 != binding.filter_sha256
-            || root.query_projection_revision != binding.query_projection_revision
-            || root.retention_floor_at_issue != binding.retention_floor_at_issue
-        {
-            return Err(SimExecutionContractErrorV1::QueryIdentityConflict(
-                global_request_id.to_owned(),
-            ));
-        }
-        let QueryRootRowsV1::Orders(rows) = &root.rows else {
-            return Err(SimExecutionContractErrorV1::QueryIdentityConflict(
-                global_request_id.to_owned(),
-            ));
+        let QueryRootRowsV1::Orders(rows) = rows else {
+            unreachable!("订单续页共同计算已检查根正文类型")
         };
-        let end = binding
-            .next_index
-            .saturating_add(SIM_QUERY_PAGE_SIZE_V1)
-            .min(rows.len());
-        let items = rows
-            .get(binding.next_index..end)
-            .ok_or(SimExecutionContractErrorV1::QueryIdentityConflict(
-                global_request_id.to_owned(),
-            ))?
-            .to_vec();
-        let next_cursor = (end < rows.len()).then(|| {
-            self.issue_cursor(IssuedCursorV1 {
-                next_index: end,
-                ..binding.clone()
-            })
-        });
+        let items = rows[page_start..page_end].to_vec();
+        let next_cursor = self.apply_continuation_cursor_v1(cursor_to_insert);
         Ok(OrdersQueryResultV1::Page(OrdersPageV1 {
-            root_identity: binding.root_identity.0,
-            query_projection_revision: binding.query_projection_revision,
+            root_identity: root_identity.0,
+            query_projection_revision,
             items,
             next_cursor,
         }))
+    }
+
+    fn prepare_continue_orders_v2(
+        &mut self,
+        global_request_id: &str,
+    ) -> Result<(PreparedQueryStateDeltaV2<'_>, OrdersQueryResultV1), SimExecutionContractErrorV1>
+    {
+        let mut prepared = self.prepare_delta_v2();
+        let result = prepared.prepare_continue_orders(global_request_id)?;
+        Ok((prepared, result))
     }
 
     fn continue_trades(
         &mut self,
         global_request_id: &str,
     ) -> Result<TradesQueryResultV1, SimExecutionContractErrorV1> {
-        let binding = self.continuation(global_request_id, ListQueryMethodV1::Trades)?;
-        if binding.root_sequence < self.earliest_retained_root_sequence {
-            return self
-                .root_out_of_retention(binding.root_sequence)
-                .map(TradesQueryResultV1::OutOfRetention);
-        }
-        let Some(root) = self.roots.get(&binding.root_sequence) else {
-            return self
-                .root_out_of_retention(binding.root_sequence)
-                .map(TradesQueryResultV1::OutOfRetention);
+        let computed =
+            self.compute_query_continuation(global_request_id, ListQueryMethodV1::Trades)?;
+        let ComputedQueryContinuationV1::Page {
+            root_identity,
+            query_projection_revision,
+            rows,
+            page_start,
+            page_end,
+            cursor_to_insert,
+        } = computed
+        else {
+            let ComputedQueryContinuationV1::OutOfRetention(out_of_retention) = computed else {
+                unreachable!("查询续页计算结果形状固定")
+            };
+            return Ok(TradesQueryResultV1::OutOfRetention(out_of_retention));
         };
-        if root.root_identity != binding.root_identity
-            || root.method != binding.method
-            || root.filter_sha256 != binding.filter_sha256
-            || root.query_projection_revision != binding.query_projection_revision
-            || root.retention_floor_at_issue != binding.retention_floor_at_issue
-        {
-            return Err(SimExecutionContractErrorV1::QueryIdentityConflict(
-                global_request_id.to_owned(),
-            ));
-        }
-        let QueryRootRowsV1::Trades(rows) = &root.rows else {
-            return Err(SimExecutionContractErrorV1::QueryIdentityConflict(
-                global_request_id.to_owned(),
-            ));
+        let QueryRootRowsV1::Trades(rows) = rows else {
+            unreachable!("成交续页共同计算已检查根正文类型")
         };
-        let end = binding
-            .next_index
-            .saturating_add(SIM_QUERY_PAGE_SIZE_V1)
-            .min(rows.len());
-        let items = rows
-            .get(binding.next_index..end)
-            .ok_or(SimExecutionContractErrorV1::QueryIdentityConflict(
-                global_request_id.to_owned(),
-            ))?
-            .to_vec();
-        let next_cursor = (end < rows.len()).then(|| {
-            self.issue_cursor(IssuedCursorV1 {
-                next_index: end,
-                ..binding.clone()
-            })
-        });
+        let items = rows[page_start..page_end].to_vec();
+        let next_cursor = self.apply_continuation_cursor_v1(cursor_to_insert);
         Ok(TradesQueryResultV1::Page(TradesPageV1 {
-            root_identity: binding.root_identity.0,
-            query_projection_revision: binding.query_projection_revision,
+            root_identity: root_identity.0,
+            query_projection_revision,
             items,
             next_cursor,
         }))
+    }
+
+    fn prepare_continue_trades_v2(
+        &mut self,
+        global_request_id: &str,
+    ) -> Result<(PreparedQueryStateDeltaV2<'_>, TradesQueryResultV1), SimExecutionContractErrorV1>
+    {
+        let mut prepared = self.prepare_delta_v2();
+        let result = prepared.prepare_continue_trades(global_request_id)?;
+        Ok((prepared, result))
     }
 
     fn continuation(
@@ -9628,34 +13538,6 @@ impl QueryStateV1 {
             requested_root_sequence: Some(requested_root_sequence),
             earliest_retained_root_sequence: self.earliest_retained_root_sequence,
         })
-    }
-
-    fn next_root_identity(
-        &mut self,
-        spec: &SessionSpecV2,
-        method: ListQueryMethodV1,
-        filter_sha256: &Sha256Hex,
-        query_projection_revision: u64,
-        retention_floor_at_issue: u64,
-        projection_sha256: &Sha256Hex,
-    ) -> Result<(u64, Sha256Hex), SimExecutionContractErrorV1> {
-        let root_sequence = self.next_root_sequence;
-        self.next_root_sequence = self
-            .next_root_sequence
-            .checked_add(1)
-            .ok_or(SimExecutionContractErrorV1::PlatformRevisionRegression)?;
-        Ok((
-            root_sequence,
-            query_root_identity(
-                spec,
-                method,
-                filter_sha256,
-                query_projection_revision,
-                retention_floor_at_issue,
-                root_sequence,
-                projection_sha256,
-            ),
-        ))
     }
 
     fn issue_cursor(&mut self, binding: IssuedCursorV1) -> OpaquePageCursorV1 {
@@ -9768,6 +13650,826 @@ fn cursor_token(binding: &IssuedCursorV1) -> String {
     hash.finish().0
 }
 
+fn logical_transaction_evidence_v2(
+    fact: DurableTransactionFactV1,
+    before_query_projection_revision: u64,
+    before_logical_platform_through_utc_ms: Option<i64>,
+    before_private_schedule_through_utc_ms: Option<i64>,
+    candidate_state: &ExecutionSessionStateV1,
+    logical_action_results: Vec<DurableLogicalActionResultV1>,
+    new_private_output_drafts: Vec<DurablePrivateOutputDraftV1>,
+) -> Result<DurableLogicalTransactionEvidenceV2, SessionError> {
+    logical_transaction_evidence_from_after_values_v2(
+        fact,
+        before_query_projection_revision,
+        before_logical_platform_through_utc_ms,
+        before_private_schedule_through_utc_ms,
+        candidate_state.session.platform_state_revision(),
+        candidate_state.session.logical_platform_driven_through(),
+        candidate_state
+            .session
+            .private_fact_schedule_closed_through(),
+        logical_action_results,
+        new_private_output_drafts,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn logical_transaction_evidence_from_after_values_v2(
+    fact: DurableTransactionFactV1,
+    before_query_projection_revision: u64,
+    before_logical_platform_through_utc_ms: Option<i64>,
+    before_private_schedule_through_utc_ms: Option<i64>,
+    after_query_projection_revision: u64,
+    after_logical_platform_through_utc_ms: Option<i64>,
+    after_private_schedule_through_utc_ms: Option<i64>,
+    logical_action_results: Vec<DurableLogicalActionResultV1>,
+    new_private_output_drafts: Vec<DurablePrivateOutputDraftV1>,
+) -> Result<DurableLogicalTransactionEvidenceV2, SessionError> {
+    let mut account_deltas = BTreeMap::new();
+    for draft in &new_private_output_drafts {
+        draft
+            .visit_account_deltas(&mut |delta| {
+                if let Some(existing) =
+                    account_deltas.insert(delta.account_transition_seq, delta.clone())
+                    && existing != *delta
+                {
+                    return Err(SessionCheckpointErrorV1::InvalidSessionState(format!(
+                        "账户变化序号 {} 对应多个正文",
+                        delta.account_transition_seq
+                    )));
+                }
+                Ok(())
+            })
+            .map_err(|error| SessionError::Durability(error.to_string()))?;
+    }
+    let mut action_results = BTreeMap::new();
+    for result in logical_action_results {
+        if action_results
+            .insert(result.action_identity.clone(), result)
+            .is_some()
+        {
+            return Err(SessionError::ActionIdentityConflict(
+                "V2 逻辑事务包含重复动作结果".to_owned(),
+            ));
+        }
+    }
+    let mut private_output_drafts = BTreeMap::new();
+    for draft in new_private_output_drafts {
+        let delivery_id = draft.delivery_id().to_owned();
+        if private_output_drafts.insert(delivery_id, draft).is_some() {
+            return Err(SessionError::ResponseDeliveryIdentityConflict.into());
+        }
+    }
+
+    let mut evidence = DurableLogicalTransactionEvidenceV2::new(fact);
+    evidence.account_deltas = account_deltas.into_values().collect();
+    evidence.logical_action_results = action_results.into_values().collect();
+    evidence.private_output_drafts = private_output_drafts.into_values().collect();
+    evidence.query_projection_revision = (after_query_projection_revision
+        != before_query_projection_revision)
+        .then_some(after_query_projection_revision);
+    evidence.logical_platform_driven_through_utc_ms = (after_logical_platform_through_utc_ms
+        != before_logical_platform_through_utc_ms)
+        .then_some(after_logical_platform_through_utc_ms)
+        .flatten();
+    evidence.private_fact_schedule_closed_through_utc_ms = (after_private_schedule_through_utc_ms
+        != before_private_schedule_through_utc_ms)
+        .then_some(after_private_schedule_through_utc_ms)
+        .flatten();
+    Ok(evidence)
+}
+
+fn platform_bucket_evidence_v2(
+    session_id: String,
+    bucket: DurableMarketBucketReferenceV1,
+    before_query_projection_revision: u64,
+    before_logical_platform_through_utc_ms: Option<i64>,
+    before_private_schedule_through_utc_ms: Option<i64>,
+    candidate_state: &ExecutionSessionStateV1,
+    new_private_output_drafts: Vec<DurablePrivateOutputDraftV1>,
+) -> Result<DurableLogicalTransactionEvidenceV2, MarketEventErrorV1> {
+    Ok(logical_transaction_evidence_v2(
+        DurableTransactionFactV1::PlatformBucketApplied { session_id, bucket },
+        before_query_projection_revision,
+        before_logical_platform_through_utc_ms,
+        before_private_schedule_through_utc_ms,
+        candidate_state,
+        Vec::new(),
+        new_private_output_drafts,
+    )?)
+}
+
+fn prepare_platform_bucket_transition_v2(
+    mut state: ExecutionSessionStateV1,
+    bucket: ClosedMarketEventBucketV1,
+) -> Result<PreparedPlatformBucketTransitionV2, MarketEventErrorV1> {
+    let session_id = state.session.session_spec().session_id.clone();
+    if state.session.last_applied_bucket_identity_matches(&bucket) {
+        let (disposition, feedbacks) = state
+            .session
+            .apply_closed_market_event_bucket_with_lifecycle_effects(bucket)?;
+        debug_assert_eq!(disposition, MarketBucketApplyDispositionV1::PhysicalRetry);
+        debug_assert!(feedbacks.trade_finality_effects.is_empty());
+        debug_assert!(feedbacks.venue_dust_effects.is_empty());
+        debug_assert!(feedbacks.market_resolution_order_effects.is_empty());
+        debug_assert!(feedbacks.settlement_feedbacks.is_empty());
+        return Ok(PreparedPlatformBucketTransitionV2 {
+            candidate_state: state,
+            disposition,
+            evidence: None,
+        });
+    }
+    let bucket_reference = bucket.durable_reference();
+    let before_query_projection_revision = state.session.platform_state_revision();
+    let before_logical_platform_through_utc_ms = state.session.logical_platform_driven_through();
+    let before_private_schedule_through_utc_ms =
+        state.session.private_fact_schedule_closed_through();
+    if !bucket.drives_execution_for(state.session.session_spec().caller_role) {
+        let (disposition, feedbacks) = state
+            .session
+            .apply_closed_market_event_bucket_with_lifecycle_effects(bucket)?;
+        debug_assert!(feedbacks.trade_finality_effects.is_empty());
+        debug_assert!(feedbacks.venue_dust_effects.is_empty());
+        debug_assert!(feedbacks.market_resolution_order_effects.is_empty());
+        debug_assert!(feedbacks.settlement_feedbacks.is_empty());
+        prepare_pending_terminal_state(&mut state.session, &mut state.query_state)?;
+        let evidence = platform_bucket_evidence_v2(
+            session_id,
+            bucket_reference,
+            before_query_projection_revision,
+            before_logical_platform_through_utc_ms,
+            before_private_schedule_through_utc_ms,
+            &state,
+            Vec::new(),
+        )?;
+        return Ok(PreparedPlatformBucketTransitionV2 {
+            candidate_state: state,
+            disposition,
+            evidence: Some(evidence),
+        });
+    }
+
+    if state.session.last_applied_bucket_coordinates_match(&bucket) {
+        let (disposition, feedbacks) = state
+            .session
+            .apply_closed_market_event_bucket_with_lifecycle_effects(bucket)?;
+        debug_assert!(feedbacks.trade_finality_effects.is_empty());
+        debug_assert!(feedbacks.venue_dust_effects.is_empty());
+        debug_assert!(feedbacks.market_resolution_order_effects.is_empty());
+        debug_assert!(feedbacks.settlement_feedbacks.is_empty());
+        let evidence = platform_bucket_evidence_v2(
+            session_id,
+            bucket_reference,
+            before_query_projection_revision,
+            before_logical_platform_through_utc_ms,
+            before_private_schedule_through_utc_ms,
+            &state,
+            Vec::new(),
+        )?;
+        return Ok(PreparedPlatformBucketTransitionV2 {
+            candidate_state: state,
+            disposition,
+            evidence: Some(evidence),
+        });
+    }
+
+    let bucket_at_utc_ms = bucket.bucket_at_utc_ms();
+    let bucket_work_identity = bucket.lifecycle_work_identity();
+    let failed_input_seal = state.session.preview_failed_input_seal(&bucket)?;
+    let (query_projection_changed, mut new_private_output_drafts) = if failed_input_seal.is_some() {
+        (false, Vec::new())
+    } else {
+        drive_scheduled_platform_work_through(
+            &mut state.session,
+            &mut state.lifecycle_outbox,
+            bucket_at_utc_ms,
+            None,
+        )
+        .map_err(|error| match error {
+            LogicalPlatformDriveErrorV1::Session(error) => MarketEventErrorV1::from(error),
+            LogicalPlatformDriveErrorV1::Matching(error) => MarketEventErrorV1::from(error),
+        })?
+    };
+    if query_projection_changed {
+        state.session.advance_platform_state_revision_once()?;
+    }
+    let (disposition, lifecycle_effects) = state
+        .session
+        .apply_closed_market_event_bucket_with_lifecycle_effects(bucket)?;
+    if disposition == MarketBucketApplyDispositionV1::Applied && failed_input_seal.is_none() {
+        state
+            .session
+            .commit_logical_platform_driven_through(bucket_at_utc_ms);
+    }
+    if !lifecycle_effects.trade_finality_effects.is_empty()
+        || !lifecycle_effects.venue_dust_effects.is_empty()
+        || !lifecycle_effects.market_resolution_order_effects.is_empty()
+        || !lifecycle_effects.settlement_feedbacks.is_empty()
+    {
+        let reservation = state.lifecycle_outbox.reserve_platform_work(
+            &format!("DPT:{bucket_work_identity}"),
+            None,
+            bucket_at_utc_ms,
+        )?;
+        new_private_output_drafts.extend(record_initial_finality_lifecycle_feedbacks(
+            &mut state.session,
+            &mut state.lifecycle_outbox,
+            Some(&reservation),
+            lifecycle_effects.trade_finality_effects,
+        )?);
+        let dust_feedbacks = lifecycle_effects
+            .venue_dust_effects
+            .into_iter()
+            .map(|effect| OrderLifecycleFeedbackSeedV1 {
+                platform_order_id: effect.platform_order_id,
+                condition_id: effect.condition_id,
+                token_id: effect.token_id,
+                event_kind: OrderLifecycleEventKindV1::VenueDustTerminal,
+                order_status: simulated_order_status("VENUE_DUST_TERMINAL"),
+                venue_dust_closed_base_units: effect.closed_base_units,
+                venue_dust_released_quote_units: effect.released_open_quote_units,
+                market_resolved_canceled_base_units: 0,
+                market_resolved_released_quote_units: 0,
+                account_delta: effect.account_delta,
+            })
+            .chain(
+                lifecycle_effects
+                    .market_resolution_order_effects
+                    .into_iter()
+                    .map(|effect| OrderLifecycleFeedbackSeedV1 {
+                        platform_order_id: effect.platform_order_id,
+                        condition_id: effect.condition_id,
+                        token_id: effect.token_id,
+                        event_kind: OrderLifecycleEventKindV1::MarketResolvedCanceled,
+                        order_status: simulated_order_status(
+                            "ORDER_STATUS_CANCELED_MARKET_RESOLVED",
+                        ),
+                        venue_dust_closed_base_units: 0,
+                        venue_dust_released_quote_units: 0,
+                        market_resolved_canceled_base_units: effect.canceled_base_units,
+                        market_resolved_released_quote_units: effect.released_open_quote_units,
+                        account_delta: effect.account_delta,
+                    }),
+            )
+            .collect();
+        new_private_output_drafts.extend(record_order_lifecycle_feedbacks_in_batch(
+            &mut state.session,
+            &mut state.lifecycle_outbox,
+            &reservation,
+            dust_feedbacks,
+        )?);
+        let settlement_feedbacks = lifecycle_effects
+            .settlement_feedbacks
+            .into_iter()
+            .map(settlement_lifecycle_feedback_seed)
+            .collect::<Result<Vec<_>, _>>()?;
+        new_private_output_drafts.extend(record_settlement_lifecycle_feedbacks_in_batch(
+            &mut state.session,
+            &mut state.lifecycle_outbox,
+            &reservation,
+            settlement_feedbacks,
+        )?);
+        state
+            .lifecycle_outbox
+            .complete_platform_work(&reservation)?;
+    }
+    prepare_pending_terminal_state(&mut state.session, &mut state.query_state)?;
+    let evidence = platform_bucket_evidence_v2(
+        session_id,
+        bucket_reference,
+        before_query_projection_revision,
+        before_logical_platform_through_utc_ms,
+        before_private_schedule_through_utc_ms,
+        &state,
+        new_private_output_drafts,
+    )?;
+    Ok(PreparedPlatformBucketTransitionV2 {
+        candidate_state: state,
+        disposition,
+        evidence: Some(evidence),
+    })
+}
+
+fn prepare_execution_transition_v2(
+    mut state: ExecutionSessionStateV1,
+    effective_processing_at_utc_ms: i64,
+) -> Result<PreparedExecutionTransitionV2, SubmissionProcessingErrorV1> {
+    state.session.require_input_not_failed()?;
+    let session_id = state.session.session_spec().session_id.clone();
+    let before_query_projection_revision = state.session.platform_state_revision();
+    let before_logical_platform_through_utc_ms = state.session.logical_platform_driven_through();
+    let before_private_schedule_through_utc_ms =
+        state.session.private_fact_schedule_closed_through();
+    let mut logical_action_results = Vec::new();
+    let mut new_private_output_drafts = Vec::new();
+
+    let Some(mut action) = state
+        .session
+        .take_next_action_through(effective_processing_at_utc_ms)?
+    else {
+        let (query_projection_changed, scheduled_drafts) = drive_scheduled_platform_work_through(
+            &mut state.session,
+            &mut state.lifecycle_outbox,
+            effective_processing_at_utc_ms,
+            None,
+        )?;
+        new_private_output_drafts.extend(scheduled_drafts);
+        if query_projection_changed {
+            state.session.advance_platform_state_revision_once()?;
+        }
+        prepare_pending_terminal_state(&mut state.session, &mut state.query_state)?;
+        let evidence = logical_transaction_evidence_v2(
+            DurableTransactionFactV1::ExecutionAdvanced { session_id },
+            before_query_projection_revision,
+            before_logical_platform_through_utc_ms,
+            before_private_schedule_through_utc_ms,
+            &state,
+            logical_action_results,
+            new_private_output_drafts,
+        )?;
+        let changed = evidence.query_projection_revision.is_some()
+            || evidence.logical_platform_driven_through_utc_ms.is_some()
+            || evidence
+                .private_fact_schedule_closed_through_utc_ms
+                .is_some()
+            || !evidence.account_deltas.is_empty()
+            || !evidence.logical_action_results.is_empty()
+            || !evidence.private_output_drafts.is_empty();
+        return Ok(PreparedExecutionTransitionV2 {
+            candidate_state: state,
+            disposition: SubmissionDriveDispositionV1::NoAction,
+            evidence: changed.then_some(evidence),
+        });
+    };
+
+    let request = state
+        .pending_requests
+        .get(&action.global_request_id)
+        .cloned()
+        .ok_or(SubmissionProcessingErrorV1::InternalInvariant(
+            "逻辑动作对应的领域请求丢失",
+        ))?;
+    let lifecycle_request_reservation = mutation_binding(&request)
+        .is_some()
+        .then(|| {
+            state.lifecycle_outbox.reserve_request(
+                &action.global_request_id,
+                action.key.effective_processing_at_utc_ms,
+            )
+        })
+        .transpose()?;
+    let (scheduled_projection_changed, scheduled_drafts) = drive_scheduled_platform_work_through(
+        &mut state.session,
+        &mut state.lifecycle_outbox,
+        action.key.effective_processing_at_utc_ms,
+        Some(&action.global_request_id),
+    )?;
+    new_private_output_drafts.extend(scheduled_drafts);
+    prepare_pending_terminal_state(&mut state.session, &mut state.query_state)?;
+    let query_action = matches!(
+        request,
+        PendingDomainRequestV1::Order(_)
+            | PendingDomainRequestV1::Orders(_)
+            | PendingDomainRequestV1::Trades(_)
+    );
+    if query_action && scheduled_projection_changed {
+        state.session.advance_platform_state_revision_once()?;
+    }
+
+    let drain_cancel_batch = matches!(request, PendingDomainRequestV1::CancelOrders(_));
+    let request_id = action.global_request_id.clone();
+    let action_at = action.key.effective_processing_at_utc_ms;
+    let caller_sequence = action.key.caller_sequence;
+    let mut execution_projection_changed = scheduled_projection_changed;
+    let mut request_completed;
+    loop {
+        let (part, order_feedbacks, trade_feedbacks, action_projection_changed) = match &request {
+            PendingDomainRequestV1::PostOrder(_) | PendingDomainRequestV1::PostOrders(_) => {
+                SimExecutionSessionV1::process_post_action(
+                    &mut state.session,
+                    &action,
+                    &request,
+                    &mut state.submission_effect_records,
+                )?
+            }
+            PendingDomainRequestV1::CancelOrder(_)
+            | PendingDomainRequestV1::CancelOrders(_)
+            | PendingDomainRequestV1::CancelAllOrders(_) => {
+                let (part, feedbacks, projection_changed) =
+                    SimExecutionSessionV1::process_cancel_action(
+                        &mut state.session,
+                        &state.query_state,
+                        &action,
+                        &request,
+                        &mut state.cancel_effect_records,
+                    )?;
+                (part, feedbacks, Vec::new(), projection_changed)
+            }
+            PendingDomainRequestV1::Order(_)
+            | PendingDomainRequestV1::Orders(_)
+            | PendingDomainRequestV1::Trades(_) => {
+                let (part, query_source_diagnostic) = SimExecutionSessionV1::process_query_action(
+                    &mut state.session,
+                    &mut state.query_state,
+                    &action,
+                    &request,
+                )?;
+                #[cfg(test)]
+                state.query_source_diagnostics.push(query_source_diagnostic);
+                #[cfg(not(test))]
+                let _ = query_source_diagnostic;
+                (part, Vec::new(), Vec::new(), false)
+            }
+        };
+        execution_projection_changed |= action_projection_changed;
+        let query_revision = state.session.query_revision_for_request(&request_id);
+        logical_action_results.push(
+            durable_logical_action_result(
+                &request_id,
+                &request,
+                usize::from(action.key.batch_item_ordinal),
+                query_revision,
+                &part,
+            )
+            .map_err(|error| SessionError::Durability(error.to_string()))?,
+        );
+        new_private_output_drafts.extend(record_order_lifecycle_feedbacks(
+            &mut state.session,
+            &mut state.lifecycle_outbox,
+            lifecycle_request_reservation.as_ref(),
+            order_feedbacks,
+        )?);
+        new_private_output_drafts.extend(record_initial_finality_lifecycle_feedbacks(
+            &mut state.session,
+            &mut state.lifecycle_outbox,
+            lifecycle_request_reservation.as_ref(),
+            trade_feedbacks,
+        )?);
+        state
+            .direct_response_outbox
+            .record_part(&request_id, part)?;
+        request_completed = state
+            .session
+            .complete_logical_item(&action.action_identity)?;
+        if !drain_cancel_batch || request_completed {
+            break;
+        }
+        let expected_ordinal = action.key.batch_item_ordinal.checked_add(1).ok_or(
+            SubmissionProcessingErrorV1::InternalInvariant("批撤动作序号溢出"),
+        )?;
+        let next_action = state.session.take_next_action_through(action_at)?.ok_or(
+            SubmissionProcessingErrorV1::InternalInvariant("批撤请求尚未完成但后续动作缺失"),
+        )?;
+        if next_action.global_request_id != request_id
+            || next_action.key.effective_processing_at_utc_ms != action_at
+            || next_action.key.caller_sequence != caller_sequence
+            || next_action.key.batch_item_ordinal != expected_ordinal
+        {
+            return Err(SubmissionProcessingErrorV1::InternalInvariant(
+                "批撤动作不是同一请求的连续唯一目标",
+            ));
+        }
+        action = next_action;
+    }
+    if !query_action && execution_projection_changed {
+        state.session.advance_platform_state_revision_once()?;
+    }
+    if request_completed {
+        if let Some(reservation) = &lifecycle_request_reservation {
+            state
+                .lifecycle_outbox
+                .complete_request(&request_id, reservation)?;
+        }
+        let platform_responded_at_utc_ms = state
+            .direct_response_outbox
+            .platform_responded_at(&request_id)
+            .ok_or(SubmissionProcessingErrorV1::InternalInvariant(
+                "直接响应缺少平台响应时点",
+            ))?;
+        let private_emission_sequence = state.session.next_private_emission_sequence()?;
+        let transit = state.session.complete_direct_response(
+            &request_id,
+            platform_responded_at_utc_ms,
+            private_emission_sequence,
+        )?;
+        if let Some(draft) = state.direct_response_outbox.complete_draft(
+            &request_id,
+            request.context().clone(),
+            &transit,
+            state.session.rule_snapshot().file_sha256().clone(),
+            state.session.scenario().scenario_sha256().clone(),
+            fee_rule_identity(&state.session),
+        )? {
+            new_private_output_drafts.push(draft);
+        }
+    }
+    let evidence = logical_transaction_evidence_v2(
+        DurableTransactionFactV1::ExecutionAdvanced { session_id },
+        before_query_projection_revision,
+        before_logical_platform_through_utc_ms,
+        before_private_schedule_through_utc_ms,
+        &state,
+        logical_action_results,
+        new_private_output_drafts,
+    )?;
+    Ok(PreparedExecutionTransitionV2 {
+        candidate_state: state,
+        disposition: SubmissionDriveDispositionV1::ItemProcessed { request_completed },
+        evidence: Some(evidence),
+    })
+}
+
+fn prepare_private_fact_delta_v2(
+    session: &SimSession,
+    direct_response_outbox: &LogicalDirectResponseOutboxV1,
+    lifecycle_outbox: &LogicalLifecycleOutboxV1,
+    confirmed_private_deliveries: &BTreeMap<u64, SealedPrivateDeliveryV1>,
+    received_at_utc_ms: i64,
+) -> Result<PreparedPrivateFactDeltaV2, SimExecutionContractErrorV1> {
+    let session_id = session.session_spec().session_id.clone();
+    let session_slice = session.prepare_private_fact_slice_v2(received_at_utc_ms)?;
+    let delivery = match session_slice.candidate() {
+        None => None,
+        Some(candidate) => match &candidate.evidence {
+            crate::session::PrivateVisibilityEvidenceV1::DirectResponse { global_request_id } => {
+                if confirmed_private_deliveries.contains_key(&candidate.private_feedback_sequence) {
+                    return Err(SessionError::PrivateEmissionSequenceConflict(
+                        candidate.private_feedback_sequence,
+                    ));
+                }
+                direct_response_outbox.validate_remove_confirmed(global_request_id)?;
+                let sealed = if let Some(sealed) = direct_response_outbox.sealed(global_request_id)
+                {
+                    sealed.clone()
+                } else {
+                    let draft =
+                        direct_response_outbox
+                            .draft(global_request_id)
+                            .ok_or_else(|| {
+                                SimExecutionContractErrorV1::RequestNotFound(
+                                    global_request_id.clone(),
+                                )
+                            })?;
+                    seal_direct_response(draft, candidate)?
+                };
+                Some(SealedPrivateDeliveryV1::Direct(sealed))
+            }
+            crate::session::PrivateVisibilityEvidenceV1::LifecycleFeedback { feedback_id } => {
+                if confirmed_private_deliveries.contains_key(&candidate.private_feedback_sequence) {
+                    return Err(SessionError::PrivateEmissionSequenceConflict(
+                        candidate.private_feedback_sequence,
+                    ));
+                }
+                lifecycle_outbox.validate_remove_confirmed(feedback_id)?;
+                let sealed = if let Some(sealed) = lifecycle_outbox.sealed(feedback_id) {
+                    sealed.clone()
+                } else {
+                    let draft = lifecycle_outbox.draft(feedback_id).ok_or_else(|| {
+                        SimExecutionContractErrorV1::FeedbackIdentityConflict(feedback_id.clone())
+                    })?;
+                    match draft {
+                        LifecycleFeedbackDraftV1::Order(draft) => {
+                            SealedLifecycleFeedbackV1::Order(seal_order_lifecycle_feedback(
+                                draft,
+                                candidate,
+                                Some(session.execution_state()),
+                            )?)
+                        }
+                        LifecycleFeedbackDraftV1::Trade(draft) => SealedLifecycleFeedbackV1::Trade(
+                            seal_trade_lifecycle_feedback(draft, candidate)?,
+                        ),
+                        LifecycleFeedbackDraftV1::Settlement(draft) => {
+                            SealedLifecycleFeedbackV1::Settlement(
+                                seal_settlement_lifecycle_feedback(draft, candidate)?,
+                            )
+                        }
+                    }
+                };
+                Some(SealedPrivateDeliveryV1::Lifecycle(sealed))
+            }
+        },
+    };
+    if let (Some(candidate), Some(delivery)) = (session_slice.candidate(), delivery.as_ref()) {
+        let confirmation = delivery.confirmation();
+        if confirmation.session_id != session_id
+            || confirmation.private_feedback_sequence != candidate.private_feedback_sequence
+        {
+            return Err(SimExecutionContractErrorV1::ResponseDeliveryIdentityConflict);
+        }
+    }
+    let fact = delivery
+        .as_ref()
+        .map(
+            |delivery| DurableTransactionFactV1::PrivateOutputCommitted {
+                session_id: session_id.clone(),
+                delivery: delivery.clone(),
+            },
+        )
+        .or_else(|| {
+            session_slice
+                .schedule_advanced()
+                .then_some(DurableTransactionFactV1::ExecutionAdvanced { session_id })
+        });
+    let evidence = fact.map(|fact| {
+        let mut evidence = DurableLogicalTransactionEvidenceV2::new(fact);
+        evidence.private_fact_schedule_closed_through_utc_ms = session_slice
+            .schedule_advanced()
+            .then_some(session_slice.close_through_utc_ms());
+        evidence
+    });
+    Ok(PreparedPrivateFactDeltaV2 {
+        session_slice,
+        delivery,
+        evidence,
+        recovery_operation: DurableRecoveryOperationV2::AdvancePrivateFactThrough {
+            received_at_utc_ms,
+        },
+    })
+}
+
+fn commit_prevalidated_private_fact_delta_v2(
+    session: &mut SimSession,
+    direct_response_outbox: &mut LogicalDirectResponseOutboxV1,
+    lifecycle_outbox: &mut LogicalLifecycleOutboxV1,
+    confirmed_private_deliveries: &mut BTreeMap<u64, SealedPrivateDeliveryV1>,
+    prepared: PreparedPrivateFactDeltaV2,
+) -> CommittedPrivateFactDeltaV2 {
+    let PreparedPrivateFactDeltaV2 {
+        session_slice,
+        delivery,
+        evidence,
+        recovery_operation: _,
+    } = prepared;
+    let committed_candidate = session.commit_prevalidated_private_fact_slice_v2(session_slice);
+    let (outcome, capacity_lease) = match (committed_candidate, delivery) {
+        (None, None) if evidence.is_none() => (PreparedPrivateFactOutcomeV2::NoStateChange, None),
+        (None, None) => (PreparedPrivateFactOutcomeV2::AdvancedWithoutOutput, None),
+        (Some(candidate), Some(delivery)) => {
+            let confirmation = delivery.confirmation();
+            let kind = match &candidate.evidence {
+                crate::session::PrivateVisibilityEvidenceV1::DirectResponse {
+                    global_request_id,
+                } => {
+                    direct_response_outbox.remove_prevalidated_confirmed(global_request_id);
+                    Some(PrivateDeliveryCapacityKindV2::Direct)
+                }
+                crate::session::PrivateVisibilityEvidenceV1::LifecycleFeedback { feedback_id } => {
+                    let batch_id = lifecycle_outbox
+                        .entries
+                        .get(feedback_id)
+                        .expect("已验证生命周期反馈必须仍在发件箱中")
+                        .batch_id
+                        .clone();
+                    lifecycle_outbox.remove_prevalidated_confirmed(feedback_id);
+                    Some(PrivateDeliveryCapacityKindV2::Lifecycle { batch_id })
+                }
+            };
+            let replaced = confirmed_private_deliveries
+                .insert(confirmation.private_feedback_sequence, delivery.clone());
+            debug_assert!(replaced.is_none());
+            (
+                PreparedPrivateFactOutcomeV2::Output(delivery),
+                kind.map(|kind| PrivateDeliveryCapacityLeaseV2 { confirmation, kind }),
+            )
+        }
+        _ => unreachable!("已验证私有事实切片的候选与密封载荷必须同时存在"),
+    };
+    CommittedPrivateFactDeltaV2 {
+        outcome,
+        capacity_lease,
+        evidence,
+    }
+}
+
+fn prepare_private_fact_transition_v2(
+    mut state: ExecutionSessionStateV1,
+    received_at_utc_ms: i64,
+) -> Result<PreparedPrivateFactTransitionV2, SimExecutionContractErrorV1> {
+    let prepared = prepare_private_fact_delta_v2(
+        &state.session,
+        &state.direct_response_outbox,
+        &state.lifecycle_outbox,
+        &state.confirmed_private_deliveries,
+        received_at_utc_ms,
+    )?;
+    let committed = commit_prevalidated_private_fact_delta_v2(
+        &mut state.session,
+        &mut state.direct_response_outbox,
+        &mut state.lifecycle_outbox,
+        &mut state.confirmed_private_deliveries,
+        prepared,
+    );
+    Ok(PreparedPrivateFactTransitionV2 {
+        candidate_state: state,
+        outcome: committed.outcome,
+        evidence: committed.evidence,
+    })
+}
+
+fn prepare_downstream_durability_delta_v2(
+    session: &SimSession,
+    compacted_confirmed_private_deliveries: &BTreeMap<u64, CompactedConfirmedPrivateDeliveryV1>,
+    confirmed_private_deliveries: &BTreeMap<u64, SealedPrivateDeliveryV1>,
+    current_durable_confirmation: Option<&ResponseDeliveryConfirmationV1>,
+    proof: DownstreamDurabilityProofV1,
+) -> Result<Option<PreparedDownstreamDurabilityDeltaV2>, SimExecutionContractErrorV1> {
+    if proof.account_instance_key != *session.execution_state().account_instance_key() {
+        return Err(SimExecutionContractErrorV1::ResponseDeliveryIdentityConflict);
+    }
+    if current_durable_confirmation == Some(&proof.durable_through) {
+        return Ok(None);
+    }
+    let current_sequence = current_durable_confirmation
+        .map_or(0, |confirmation| confirmation.private_feedback_sequence);
+    let target_sequence = proof.durable_through.private_feedback_sequence;
+    if target_sequence <= current_sequence
+        || target_sequence > session.private_feedback_sequence()
+        || confirmed_private_deliveries
+            .get(&target_sequence)
+            .is_none_or(|delivery| delivery.confirmation() != proof.durable_through)
+    {
+        return Err(SimExecutionContractErrorV1::ResponseDeliveryIdentityConflict);
+    }
+    let mut compacted_deliveries = Vec::new();
+    for sequence in current_sequence + 1..=target_sequence {
+        if compacted_confirmed_private_deliveries.contains_key(&sequence) {
+            return Err(SessionError::ResponseDeliveryIdentityConflict.into());
+        }
+        let delivery = confirmed_private_deliveries
+            .get(&sequence)
+            .ok_or(SessionError::ResponseDeliveryIdentityConflict)?;
+        let compacted = CompactedConfirmedPrivateDeliveryV1::try_from_delivery(delivery)
+            .map_err(|error| SessionError::Durability(error.to_string()))?;
+        compacted_deliveries.push((sequence, compacted));
+    }
+    let evidence = DurableLogicalTransactionEvidenceV2::new(
+        DurableTransactionFactV1::DownstreamDurabilityAdvanced {
+            session_id: session.session_spec().session_id.clone(),
+            proof: proof.clone(),
+        },
+    );
+    Ok(Some(PreparedDownstreamDurabilityDeltaV2 {
+        compacted_deliveries,
+        downstream_durable_confirmation: proof.durable_through,
+        evidence,
+        recovery_operation: DurableRecoveryOperationV2::AdvanceDownstreamDurability,
+    }))
+}
+
+fn commit_prevalidated_downstream_durability_delta_v2(
+    compacted_confirmed_private_deliveries: &mut BTreeMap<u64, CompactedConfirmedPrivateDeliveryV1>,
+    confirmed_private_deliveries: &mut BTreeMap<u64, SealedPrivateDeliveryV1>,
+    downstream_durable_confirmation: &mut Option<ResponseDeliveryConfirmationV1>,
+    prepared: PreparedDownstreamDurabilityDeltaV2,
+) {
+    let PreparedDownstreamDurabilityDeltaV2 {
+        compacted_deliveries,
+        downstream_durable_confirmation: confirmation,
+        evidence: _,
+        recovery_operation: _,
+    } = prepared;
+    for (sequence, compacted) in compacted_deliveries {
+        let removed = confirmed_private_deliveries.remove(&sequence);
+        debug_assert!(removed.is_some());
+        let replaced = compacted_confirmed_private_deliveries.insert(sequence, compacted);
+        debug_assert!(replaced.is_none());
+    }
+    *downstream_durable_confirmation = Some(confirmation);
+}
+
+fn prepare_downstream_durability_transition_v2(
+    mut state: ExecutionSessionStateV1,
+    current_durable_confirmation: Option<&ResponseDeliveryConfirmationV1>,
+    proof: DownstreamDurabilityProofV1,
+) -> Result<Option<PreparedDownstreamDurabilityTransitionV2>, SimExecutionContractErrorV1> {
+    let Some(prepared) = prepare_downstream_durability_delta_v2(
+        &state.session,
+        &state.compacted_confirmed_private_deliveries,
+        &state.confirmed_private_deliveries,
+        current_durable_confirmation,
+        proof,
+    )?
+    else {
+        return Ok(None);
+    };
+    let evidence = prepared.evidence.clone();
+    let confirmation = prepared.downstream_durable_confirmation.clone();
+    let mut committed_confirmation = current_durable_confirmation.cloned();
+    commit_prevalidated_downstream_durability_delta_v2(
+        &mut state.compacted_confirmed_private_deliveries,
+        &mut state.confirmed_private_deliveries,
+        &mut committed_confirmation,
+        prepared,
+    );
+    debug_assert_eq!(committed_confirmation.as_ref(), Some(&confirmation));
+    Ok(Some(PreparedDownstreamDurabilityTransitionV2 {
+        candidate_state: state,
+        downstream_durable_confirmation: confirmation,
+        evidence,
+    }))
+}
+
 impl SimExecutionSessionV1 {
     #[must_use]
     pub fn session_spec(&self) -> &SessionSpecV2 {
@@ -9815,178 +14517,19 @@ impl SimExecutionSessionV1 {
     ) -> Result<MarketBucketApplyDispositionV1, MarketEventErrorV1> {
         let expected_checkpoint = self.durable_checkpoint();
         let session_id = self.session.session_spec().session_id.clone();
-        let bucket_reference = bucket.durable_reference();
-        if !bucket.drives_execution_for(self.session.session_spec().caller_role) {
-            let mut working_session = self.session.clone();
-            let mut working_query_state = self.query_state.clone();
-            let (disposition, feedbacks) =
-                working_session.apply_closed_market_event_bucket_with_lifecycle_effects(bucket)?;
-            debug_assert!(feedbacks.trade_finality_effects.is_empty());
-            debug_assert!(feedbacks.venue_dust_effects.is_empty());
-            debug_assert!(feedbacks.market_resolution_order_effects.is_empty());
-            debug_assert!(feedbacks.settlement_feedbacks.is_empty());
-            prepare_pending_terminal_state(&mut working_session, &mut working_query_state)?;
-            let mut candidate_state = self.runtime_state();
-            candidate_state.session = working_session;
-            candidate_state.query_state = working_query_state;
-            let candidate_checkpoint =
-                candidate_state.checkpoint(self.downstream_durable_confirmation.clone());
-            let mut evidence = DurableTransactionEvidenceV1::new(
-                DurableTransactionFactV1::PlatformBucketApplied {
-                    session_id: session_id.clone(),
-                    bucket: bucket_reference.clone(),
-                },
-            );
-            evidence.transient_input_session_id = Some(session_id.clone());
+        let prepared = prepare_platform_bucket_transition_v2(self.runtime_state(), bucket)?;
+        if let Some(logical_evidence) = prepared.evidence {
+            let candidate_checkpoint = prepared
+                .candidate_state
+                .checkpoint(self.downstream_durable_confirmation.clone());
+            let mut evidence = logical_evidence.into_v1();
+            evidence.transient_input_session_id = Some(session_id);
             evidence.transient_input = transient_input;
             self.commit_durable_transition(&expected_checkpoint, candidate_checkpoint, evidence)
                 .map_err(MarketEventErrorV1::from)?;
-            self.replace_runtime_state(candidate_state);
-            return Ok(disposition);
         }
-
-        if self.session.last_applied_bucket_coordinates_match(&bucket) {
-            let mut working_session = self.session.clone();
-            let (disposition, feedbacks) =
-                working_session.apply_closed_market_event_bucket_with_lifecycle_effects(bucket)?;
-            debug_assert!(feedbacks.trade_finality_effects.is_empty());
-            debug_assert!(feedbacks.venue_dust_effects.is_empty());
-            debug_assert!(feedbacks.market_resolution_order_effects.is_empty());
-            debug_assert!(feedbacks.settlement_feedbacks.is_empty());
-            let mut candidate_state = self.runtime_state();
-            candidate_state.session = working_session;
-            let candidate_checkpoint =
-                candidate_state.checkpoint(self.downstream_durable_confirmation.clone());
-            let mut evidence = DurableTransactionEvidenceV1::new(
-                DurableTransactionFactV1::PlatformBucketApplied {
-                    session_id: session_id.clone(),
-                    bucket: bucket_reference.clone(),
-                },
-            );
-            evidence.transient_input_session_id = Some(session_id.clone());
-            evidence.transient_input = transient_input;
-            self.commit_durable_transition(&expected_checkpoint, candidate_checkpoint, evidence)
-                .map_err(MarketEventErrorV1::from)?;
-            self.replace_runtime_state(candidate_state);
-            return Ok(disposition);
-        }
-
-        let bucket_at_utc_ms = bucket.bucket_at_utc_ms();
-        let bucket_work_identity = bucket.lifecycle_work_identity();
-        let mut working_session = self.session.clone();
-        let mut working_query_state = self.query_state.clone();
-        let mut working_lifecycle_outbox = self.lifecycle_outbox.clone();
-        let failed_input_seal = working_session.preview_failed_input_seal(&bucket)?;
-        let query_projection_changed = if failed_input_seal.is_some() {
-            false
-        } else {
-            drive_scheduled_platform_work_through(
-                &mut working_session,
-                &mut working_lifecycle_outbox,
-                bucket_at_utc_ms,
-                None,
-            )
-            .map_err(|error| match error {
-                LogicalPlatformDriveErrorV1::Session(error) => MarketEventErrorV1::from(error),
-                LogicalPlatformDriveErrorV1::Matching(error) => MarketEventErrorV1::from(error),
-            })?
-        };
-        if query_projection_changed {
-            working_session.advance_platform_state_revision_once()?;
-        }
-        let (disposition, lifecycle_effects) =
-            working_session.apply_closed_market_event_bucket_with_lifecycle_effects(bucket)?;
-        if disposition == MarketBucketApplyDispositionV1::Applied && failed_input_seal.is_none() {
-            working_session.commit_logical_platform_driven_through(bucket_at_utc_ms);
-        }
-        if !lifecycle_effects.trade_finality_effects.is_empty()
-            || !lifecycle_effects.venue_dust_effects.is_empty()
-            || !lifecycle_effects.market_resolution_order_effects.is_empty()
-            || !lifecycle_effects.settlement_feedbacks.is_empty()
-        {
-            let reservation = working_lifecycle_outbox.reserve_platform_work(
-                &format!("DPT:{bucket_work_identity}"),
-                None,
-                bucket_at_utc_ms,
-            )?;
-            record_initial_finality_lifecycle_feedbacks(
-                &mut working_session,
-                &mut working_lifecycle_outbox,
-                Some(&reservation),
-                lifecycle_effects.trade_finality_effects,
-            )?;
-            let dust_feedbacks = lifecycle_effects
-                .venue_dust_effects
-                .into_iter()
-                .map(|effect| OrderLifecycleFeedbackSeedV1 {
-                    platform_order_id: effect.platform_order_id,
-                    condition_id: effect.condition_id,
-                    token_id: effect.token_id,
-                    event_kind: OrderLifecycleEventKindV1::VenueDustTerminal,
-                    order_status: simulated_order_status("VENUE_DUST_TERMINAL"),
-                    venue_dust_closed_base_units: effect.closed_base_units,
-                    venue_dust_released_quote_units: effect.released_open_quote_units,
-                    market_resolved_canceled_base_units: 0,
-                    market_resolved_released_quote_units: 0,
-                    account_delta: effect.account_delta,
-                })
-                .chain(
-                    lifecycle_effects
-                        .market_resolution_order_effects
-                        .into_iter()
-                        .map(|effect| OrderLifecycleFeedbackSeedV1 {
-                            platform_order_id: effect.platform_order_id,
-                            condition_id: effect.condition_id,
-                            token_id: effect.token_id,
-                            event_kind: OrderLifecycleEventKindV1::MarketResolvedCanceled,
-                            order_status: simulated_order_status(
-                                "ORDER_STATUS_CANCELED_MARKET_RESOLVED",
-                            ),
-                            venue_dust_closed_base_units: 0,
-                            venue_dust_released_quote_units: 0,
-                            market_resolved_canceled_base_units: effect.canceled_base_units,
-                            market_resolved_released_quote_units: effect.released_open_quote_units,
-                            account_delta: effect.account_delta,
-                        }),
-                )
-                .collect();
-            record_order_lifecycle_feedbacks_in_batch(
-                &mut working_session,
-                &mut working_lifecycle_outbox,
-                &reservation,
-                dust_feedbacks,
-            )?;
-            let settlement_feedbacks = lifecycle_effects
-                .settlement_feedbacks
-                .into_iter()
-                .map(settlement_lifecycle_feedback_seed)
-                .collect::<Result<Vec<_>, _>>()?;
-            record_settlement_lifecycle_feedbacks_in_batch(
-                &mut working_session,
-                &mut working_lifecycle_outbox,
-                &reservation,
-                settlement_feedbacks,
-            )?;
-            working_lifecycle_outbox.complete_platform_work(&reservation)?;
-        }
-        prepare_pending_terminal_state(&mut working_session, &mut working_query_state)?;
-        let mut candidate_state = self.runtime_state();
-        candidate_state.session = working_session;
-        candidate_state.query_state = working_query_state;
-        candidate_state.lifecycle_outbox = working_lifecycle_outbox;
-        let candidate_checkpoint =
-            candidate_state.checkpoint(self.downstream_durable_confirmation.clone());
-        let mut evidence =
-            DurableTransactionEvidenceV1::new(DurableTransactionFactV1::PlatformBucketApplied {
-                session_id: session_id.clone(),
-                bucket: bucket_reference,
-            });
-        evidence.transient_input_session_id = Some(session_id);
-        evidence.transient_input = transient_input;
-        self.commit_durable_transition(&expected_checkpoint, candidate_checkpoint, evidence)
-            .map_err(MarketEventErrorV1::from)?;
-        self.replace_runtime_state(candidate_state);
-        Ok(disposition)
+        self.replace_runtime_state(prepared.candidate_state);
+        Ok(prepared.disposition)
     }
 
     #[allow(dead_code)]
@@ -10053,16 +14596,22 @@ impl SimExecutionSessionV1 {
         &self,
         action: &QueuedLogicalActionV1,
     ) -> Result<SubmissionAdmissionDecisionV1, SubmissionPreparationErrorV1> {
-        self.prepare_submission_against(&self.session, action)
+        let request = self
+            .pending_requests
+            .get(&action.global_request_id)
+            .ok_or_else(|| {
+                SubmissionPreparationErrorV1::RequestNotFound(action.global_request_id.clone())
+            })?;
+        Self::prepare_submission_against(&self.session, action, request)
     }
 
     fn prepare_submission_against(
-        &self,
         session: &SimSession,
         action: &QueuedLogicalActionV1,
+        request: &PendingDomainRequestV1,
     ) -> Result<SubmissionAdmissionDecisionV1, SubmissionPreparationErrorV1> {
         session.validate_in_flight_action(action)?;
-        let item = self.post_item_for_action(action)?;
+        let item = Self::post_item_for_action(request, action)?;
         let effective_at = action.key.effective_processing_at_utc_ms;
         let condition_id = item.order.condition_id.0.as_str();
         let token_id = item.order.token_id.0.as_str();
@@ -10187,7 +14736,7 @@ impl SimExecutionSessionV1 {
                     return Ok(rejected(rejection));
                 }
                 let Some(expires_at_utc_ms) =
-                    self.normalized_gtd_expiration(session, *expires_at_utc_ms, effective_at)?
+                    Self::normalized_gtd_expiration(session, *expires_at_utc_ms, effective_at)?
                 else {
                     return Ok(rejected(
                         SubmissionAdmissionRejectionV1::GtdExpirationTooSoon,
@@ -10258,16 +14807,10 @@ impl SimExecutionSessionV1 {
         )))
     }
 
-    fn post_item_for_action(
-        &self,
+    fn post_item_for_action<'a>(
+        request: &'a PendingDomainRequestV1,
         action: &QueuedLogicalActionV1,
-    ) -> Result<&PostOrderItemV1, SubmissionPreparationErrorV1> {
-        let request = self
-            .pending_requests
-            .get(&action.global_request_id)
-            .ok_or_else(|| {
-                SubmissionPreparationErrorV1::RequestNotFound(action.global_request_id.clone())
-            })?;
+    ) -> Result<&'a PostOrderItemV1, SubmissionPreparationErrorV1> {
         let expected_identity = format!(
             "{}:{}:{}",
             request.method_tag(),
@@ -10336,7 +14879,6 @@ impl SimExecutionSessionV1 {
     }
 
     fn normalized_gtd_expiration(
-        &self,
         session: &SimSession,
         expires_at_utc_ms: i64,
         effective_processing_at_utc_ms: i64,
@@ -10483,6 +15025,11 @@ impl SimExecutionSessionV1 {
     #[cfg(test)]
     pub(crate) fn logical_platform_driven_through_for_tests(&self) -> Option<i64> {
         self.session.logical_platform_driven_through()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn query_source_diagnostics_for_tests(&self) -> &[TaskQuerySourceDiagnosticV1] {
+        &self.query_source_diagnostics
     }
 
     #[cfg(test)]
@@ -10847,232 +15394,62 @@ impl SimExecutionSessionV1 {
         &mut self,
         effective_processing_at_utc_ms: i64,
     ) -> Result<SubmissionDriveDispositionV1, SubmissionProcessingErrorV1> {
-        let before_state = self.runtime_state();
         let expected_checkpoint = self.durable_checkpoint();
-        let mut result =
-            self.drive_next_execution_action_through_working(effective_processing_at_utc_ms);
-        if matches!(
-            result,
-            Err(SubmissionProcessingErrorV1::Preparation(_)
-                | SubmissionProcessingErrorV1::Matching(_)
-                | SubmissionProcessingErrorV1::Math(_)
-                | SubmissionProcessingErrorV1::InternalInvariant(_))
-        ) || matches!(
-            &result,
-            Err(SubmissionProcessingErrorV1::Session(error))
-                if fatal_session_processing_error(error)
-        ) {
-            self.accepting_new_ingress = false;
-        }
-        let candidate_checkpoint = self.durable_checkpoint();
-        let evidence_fact = if before_state.accepting_new_ingress && !self.accepting_new_ingress {
-            DurableTransactionFactV1::IngressClosed {
-                session_id: self.session.session_spec().session_id.clone(),
-            }
-        } else {
-            DurableTransactionFactV1::ExecutionAdvanced {
-                session_id: self.session.session_spec().session_id.clone(),
-            }
-        };
-        if let Err(error) = self.commit_durable_transition(
-            &expected_checkpoint,
-            candidate_checkpoint,
-            DurableTransactionEvidenceV1::new(evidence_fact),
-        ) {
-            self.replace_runtime_state(before_state);
-            result = Err(SubmissionProcessingErrorV1::Session(error));
-        }
-        result
-    }
-
-    fn drive_next_execution_action_through_working(
-        &mut self,
-        effective_processing_at_utc_ms: i64,
-    ) -> Result<SubmissionDriveDispositionV1, SubmissionProcessingErrorV1> {
-        self.session.require_input_not_failed()?;
-        let mut working_session = self.session.clone();
-        let mut working_query_state = self.query_state.clone();
-        let mut working_lifecycle_outbox = self.lifecycle_outbox.clone();
-        let original_execution = working_session.execution_state().clone();
-        let Some(mut action) =
-            working_session.take_next_action_through(effective_processing_at_utc_ms)?
-        else {
-            let query_projection_changed = drive_scheduled_platform_work_through(
-                &mut working_session,
-                &mut working_lifecycle_outbox,
-                effective_processing_at_utc_ms,
-                None,
-            )?;
-            if query_projection_changed {
-                working_session.advance_platform_state_revision_once()?;
-            }
-            prepare_pending_terminal_state(&mut working_session, &mut working_query_state)?;
-            self.session = working_session;
-            self.query_state = working_query_state;
-            self.lifecycle_outbox = working_lifecycle_outbox;
-            return Ok(SubmissionDriveDispositionV1::NoAction);
-        };
-        let request = self
-            .pending_requests
-            .get(&action.global_request_id)
-            .cloned()
-            .ok_or(SubmissionProcessingErrorV1::InternalInvariant(
-                "逻辑动作对应的领域请求丢失",
-            ))?;
-        let lifecycle_request_reservation = mutation_binding(&request)
-            .is_some()
-            .then(|| {
-                working_lifecycle_outbox.reserve_request(
-                    &action.global_request_id,
-                    action.key.effective_processing_at_utc_ms,
-                )
-            })
-            .transpose()?;
-        drive_scheduled_platform_work_through(
-            &mut working_session,
-            &mut working_lifecycle_outbox,
-            action.key.effective_processing_at_utc_ms,
-            Some(&action.global_request_id),
-        )?;
-        prepare_pending_terminal_state(&mut working_session, &mut working_query_state)?;
-        let query_action = matches!(
-            request,
-            PendingDomainRequestV1::Order(_)
-                | PendingDomainRequestV1::Orders(_)
-                | PendingDomainRequestV1::Trades(_)
-        );
-        if query_action
-            && working_session
-                .execution_state()
-                .query_projection_changed_from(&original_execution)
+        match prepare_execution_transition_v2(self.runtime_state(), effective_processing_at_utc_ms)
         {
-            working_session.advance_platform_state_revision_once()?;
-        }
-
-        let mut working_submission_effect_records = self.submission_effect_records.clone();
-        let mut working_cancel_effect_records = self.cancel_effect_records.clone();
-        let mut working_outbox = self.direct_response_outbox.clone();
-        let drain_cancel_batch = matches!(request, PendingDomainRequestV1::CancelOrders(_));
-        let request_id = action.global_request_id.clone();
-        let action_at = action.key.effective_processing_at_utc_ms;
-        let caller_sequence = action.key.caller_sequence;
-        let mut request_completed;
-        loop {
-            let (part, order_feedbacks, trade_feedbacks) = match &request {
-                PendingDomainRequestV1::PostOrder(_) | PendingDomainRequestV1::PostOrders(_) => {
-                    self.process_post_action(
-                        &mut working_session,
-                        &action,
-                        &request,
-                        &mut working_submission_effect_records,
-                    )?
-                }
-                PendingDomainRequestV1::CancelOrder(_)
-                | PendingDomainRequestV1::CancelOrders(_)
-                | PendingDomainRequestV1::CancelAllOrders(_) => {
-                    let (part, feedbacks) = self.process_cancel_action(
-                        &mut working_session,
-                        &action,
-                        &request,
-                        &mut working_cancel_effect_records,
+            Ok(prepared) => {
+                if let Some(logical_evidence) = prepared.evidence {
+                    let candidate_checkpoint = prepared
+                        .candidate_state
+                        .checkpoint(self.downstream_durable_confirmation.clone());
+                    self.commit_durable_transition(
+                        &expected_checkpoint,
+                        candidate_checkpoint,
+                        logical_evidence.into_v1(),
                     )?;
-                    (part, feedbacks, Vec::new())
                 }
-                PendingDomainRequestV1::Order(_)
-                | PendingDomainRequestV1::Orders(_)
-                | PendingDomainRequestV1::Trades(_) => {
-                    let part = self.process_query_action(
-                        &mut working_session,
-                        &mut working_query_state,
-                        &action,
-                        &request,
-                    )?;
-                    (part, Vec::new(), Vec::new())
+                self.replace_runtime_state(prepared.candidate_state);
+                Ok(prepared.disposition)
+            }
+            Err(error) => {
+                let fatal = matches!(
+                    error,
+                    SubmissionProcessingErrorV1::Preparation(_)
+                        | SubmissionProcessingErrorV1::Matching(_)
+                        | SubmissionProcessingErrorV1::Math(_)
+                        | SubmissionProcessingErrorV1::InternalInvariant(_)
+                ) || matches!(
+                    &error,
+                    SubmissionProcessingErrorV1::Session(error)
+                        if fatal_session_processing_error(error)
+                );
+                let was_accepting_new_ingress = self.accepting_new_ingress;
+                if fatal {
+                    self.accepting_new_ingress = false;
                 }
-            };
-            record_order_lifecycle_feedbacks(
-                &mut working_session,
-                &mut working_lifecycle_outbox,
-                lifecycle_request_reservation.as_ref(),
-                order_feedbacks,
-            )?;
-            record_initial_finality_lifecycle_feedbacks(
-                &mut working_session,
-                &mut working_lifecycle_outbox,
-                lifecycle_request_reservation.as_ref(),
-                trade_feedbacks,
-            )?;
-            working_outbox.record_part(&request_id, part)?;
-            request_completed = working_session.complete_logical_item(&action.action_identity)?;
-            if !drain_cancel_batch || request_completed {
-                break;
+                let evidence_fact = if was_accepting_new_ingress && !self.accepting_new_ingress {
+                    DurableTransactionFactV1::IngressClosed {
+                        session_id: self.session.session_spec().session_id.clone(),
+                    }
+                } else {
+                    DurableTransactionFactV1::ExecutionAdvanced {
+                        session_id: self.session.session_spec().session_id.clone(),
+                    }
+                };
+                if let Err(commit_error) = self.commit_durable_transition(
+                    &expected_checkpoint,
+                    self.durable_checkpoint(),
+                    DurableTransactionEvidenceV1::new(evidence_fact),
+                ) {
+                    self.accepting_new_ingress = was_accepting_new_ingress;
+                    return Err(SubmissionProcessingErrorV1::Session(commit_error));
+                }
+                Err(error)
             }
-            let expected_ordinal = action.key.batch_item_ordinal.checked_add(1).ok_or(
-                SubmissionProcessingErrorV1::InternalInvariant("批撤动作序号溢出"),
-            )?;
-            let next_action = working_session.take_next_action_through(action_at)?.ok_or(
-                SubmissionProcessingErrorV1::InternalInvariant("批撤请求尚未完成但后续动作缺失"),
-            )?;
-            if next_action.global_request_id != request_id
-                || next_action.key.effective_processing_at_utc_ms != action_at
-                || next_action.key.caller_sequence != caller_sequence
-                || next_action.key.batch_item_ordinal != expected_ordinal
-            {
-                return Err(SubmissionProcessingErrorV1::InternalInvariant(
-                    "批撤动作不是同一请求的连续唯一目标",
-                ));
-            }
-            action = next_action;
         }
-        if !query_action
-            && working_session
-                .execution_state()
-                .query_projection_changed_from(&original_execution)
-        {
-            working_session.advance_platform_state_revision_once()?;
-        }
-        if request_completed {
-            if let Some(reservation) = &lifecycle_request_reservation {
-                working_lifecycle_outbox.complete_request(&request_id, reservation)?;
-            }
-            let platform_responded_at_utc_ms =
-                working_outbox.platform_responded_at(&request_id).ok_or(
-                    SubmissionProcessingErrorV1::InternalInvariant("直接响应缺少平台响应时点"),
-                )?;
-            let private_emission_sequence = working_session.next_private_emission_sequence()?;
-            let transit = working_session.complete_direct_response(
-                &request_id,
-                platform_responded_at_utc_ms,
-                private_emission_sequence,
-            )?;
-            let context = self
-                .pending_requests
-                .get(&request_id)
-                .ok_or(SubmissionProcessingErrorV1::InternalInvariant(
-                    "领域请求在响应密封前丢失",
-                ))?
-                .context()
-                .clone();
-            working_outbox.complete_draft(
-                &request_id,
-                context,
-                &transit,
-                working_session.rule_snapshot().file_sha256().clone(),
-                working_session.scenario().scenario_sha256().clone(),
-                fee_rule_identity(&working_session),
-            )?;
-        }
-        self.session = working_session;
-        self.submission_effect_records = working_submission_effect_records;
-        self.cancel_effect_records = working_cancel_effect_records;
-        self.query_state = working_query_state;
-        self.direct_response_outbox = working_outbox;
-        self.lifecycle_outbox = working_lifecycle_outbox;
-        Ok(SubmissionDriveDispositionV1::ItemProcessed { request_completed })
     }
 
     fn process_post_action(
-        &self,
         working_session: &mut SimSession,
         action: &QueuedLogicalActionV1,
         request: &PendingDomainRequestV1,
@@ -11082,10 +15459,11 @@ impl SimExecutionSessionV1 {
             DirectResponsePartV1,
             Vec<OrderLifecycleFeedbackSeedV1>,
             Vec<TradeFinalityLifecycleEffectsV1>,
+            bool,
         ),
         SubmissionProcessingErrorV1,
     > {
-        let item = self.post_item_for_action(action)?.clone();
+        let item = Self::post_item_for_action(request, action)?.clone();
         let (idempotency_key, payload_sha256) = mutation_binding(request).ok_or(
             SubmissionProcessingErrorV1::InternalInvariant("提交动作缺少变更幂等绑定"),
         )?;
@@ -11123,16 +15501,17 @@ impl SimExecutionSessionV1 {
                 Vec::new(),
             ),
             MutationResolutionDispositionV1::NewEffect => {
-                let decision = self.prepare_submission_against(working_session, action)?;
+                let decision = Self::prepare_submission_against(working_session, action, request)?;
                 let (outcome, prepared_execution, order_feedbacks, trade_feedbacks) = match decision
                 {
-                    SubmissionAdmissionDecisionV1::Prepared(prepared) => self
-                        .process_prepared_submission(
+                    SubmissionAdmissionDecisionV1::Prepared(prepared) => {
+                        Self::process_prepared_submission(
                             working_session,
                             &prepared,
                             &resolution.effect_identity,
                             &item_idempotency_identity,
-                        )?,
+                        )?
+                    }
                     SubmissionAdmissionDecisionV1::RejectedNoEffect(reason) => (
                         SubmissionItemOutcomeV1::RejectedNoEffect(map_submission_rejection(reason)),
                         None,
@@ -11169,6 +15548,7 @@ impl SimExecutionSessionV1 {
                 )
             }
         };
+        let execution_changed = prepared_execution.is_some();
         if let Some(execution) = prepared_execution {
             working_session.replace_execution_state(execution);
         }
@@ -11186,17 +15566,22 @@ impl SimExecutionSessionV1 {
             }),
             order_feedbacks,
             trade_feedbacks,
+            execution_changed,
         ))
     }
 
     fn process_cancel_action(
-        &self,
         working_session: &mut SimSession,
+        working_query_state: &QueryStateV1,
         action: &QueuedLogicalActionV1,
         request: &PendingDomainRequestV1,
         working_effect_records: &mut BTreeMap<String, CancelEffectRecordV1>,
     ) -> Result<
-        (DirectResponsePartV1, Vec<OrderLifecycleFeedbackSeedV1>),
+        (
+            DirectResponsePartV1,
+            Vec<OrderLifecycleFeedbackSeedV1>,
+            bool,
+        ),
         SubmissionProcessingErrorV1,
     > {
         validate_action_mapping(request, action)?;
@@ -11214,6 +15599,7 @@ impl SimExecutionSessionV1 {
             payload_sha256,
             root_effect_identity,
         )?;
+        let is_new_effect = resolution.disposition == MutationResolutionDispositionV1::NewEffect;
         let formed_at = action.key.effective_processing_at_utc_ms;
 
         match request {
@@ -11243,7 +15629,7 @@ impl SimExecutionSessionV1 {
                             let order = execution.order(&target_group.platform_order_id).cloned();
                             let hot_order_visible = order
                                 .as_ref()
-                                .map(|order| self.query_state.hot_order_is_query_visible(order))
+                                .map(|order| working_query_state.hot_order_is_query_visible(order))
                                 .transpose()?
                                 .unwrap_or(false);
                             let disposition = if hot_order_visible {
@@ -11252,8 +15638,7 @@ impl SimExecutionSessionV1 {
                                     formed_at,
                                     &Sha256Hex(target_effect_identity.clone()),
                                 )?
-                            } else if self
-                                .query_state
+                            } else if working_query_state
                                 .retained_terminal_order(&target_group.platform_order_id)
                                 .is_some()
                             {
@@ -11309,6 +15694,11 @@ impl SimExecutionSessionV1 {
                     } else {
                         CancelEffectDispositionV1::ExistingEffect
                     };
+                let execution_changed = is_new_effect
+                    && record
+                        .targets
+                        .iter()
+                        .any(|target| matches!(target.outcome, CancelTargetOutcomeV1::Canceled(_)));
                 Ok((
                     DirectResponsePartV1::CancelTarget(CancelTargetResponseV1 {
                         platform_order_id: target.platform_order_id.clone(),
@@ -11321,6 +15711,7 @@ impl SimExecutionSessionV1 {
                         outcome: target.outcome.clone(),
                     }),
                     feedbacks,
+                    execution_changed,
                 ))
             }
             PendingDomainRequestV1::CancelAllOrders(_) => {
@@ -11397,6 +15788,11 @@ impl SimExecutionSessionV1 {
                     } else {
                         CancelEffectDispositionV1::ExistingEffect
                     };
+                let execution_changed = is_new_effect
+                    && record
+                        .targets
+                        .iter()
+                        .any(|target| matches!(target.outcome, CancelTargetOutcomeV1::Canceled(_)));
                 let targets = record
                     .targets
                     .iter()
@@ -11424,6 +15820,7 @@ impl SimExecutionSessionV1 {
                         targets,
                     },
                     feedbacks,
+                    execution_changed,
                 ))
             }
             _ => Err(SubmissionProcessingErrorV1::InternalInvariant(
@@ -11433,12 +15830,12 @@ impl SimExecutionSessionV1 {
     }
 
     fn process_query_action(
-        &self,
         working_session: &mut SimSession,
         working_query_state: &mut QueryStateV1,
         action: &QueuedLogicalActionV1,
         request: &PendingDomainRequestV1,
-    ) -> Result<DirectResponsePartV1, SubmissionProcessingErrorV1> {
+    ) -> Result<(DirectResponsePartV1, TaskQuerySourceDiagnosticMaybeV1), SubmissionProcessingErrorV1>
+    {
         validate_action_mapping(request, action)?;
         let query_sha256 = canonical_request_sha256(request);
         let effective_processing_at_utc_ms = action.key.effective_processing_at_utc_ms;
@@ -11458,12 +15855,26 @@ impl SimExecutionSessionV1 {
                     }
                     Some(_) | None => None,
                 };
+                #[cfg(test)]
+                let mut query_source = TaskQueryProjectionSourceV1::NoRows;
                 let result = match hot_order {
-                    Some(order) => OrderQueryResultV1::Found(Box::new(project_order(order)?)),
+                    Some(order) => {
+                        #[cfg(test)]
+                        {
+                            query_source = TaskQueryProjectionSourceV1::HotState;
+                        }
+                        OrderQueryResultV1::Found(Box::new(project_order(order)?))
+                    }
                     None => match working_query_state
                         .retained_terminal_order(&request.platform_order_id)
                     {
-                        Some(order) => OrderQueryResultV1::Found(Box::new(order.clone())),
+                        Some(order) => {
+                            #[cfg(test)]
+                            {
+                                query_source = TaskQueryProjectionSourceV1::RetainedProjection;
+                            }
+                            OrderQueryResultV1::Found(Box::new(order.clone()))
+                        }
                         None => match working_query_state.order_history_retained_from_utc_ms {
                             Some(retained_from_utc_ms) => {
                                 OrderQueryResultV1::OutOfRetention(QueryOutOfRetentionV1 {
@@ -11478,10 +15889,25 @@ impl SimExecutionSessionV1 {
                         },
                     },
                 };
-                Ok(DirectResponsePartV1::Order {
-                    effective_processing_at_utc_ms,
-                    result,
-                })
+                #[cfg(test)]
+                let return_rows = u64::from(matches!(&result, OrderQueryResultV1::Found(_)));
+                #[cfg(test)]
+                let diagnostic = TaskQuerySourceDiagnosticV1 {
+                    global_request_id: action.global_request_id.clone(),
+                    method: TaskQueryMethodV1::Order,
+                    source: query_source,
+                    pages: 0,
+                    return_rows,
+                };
+                #[cfg(not(test))]
+                let diagnostic = TaskQuerySourceDiagnosticMaybeV1;
+                Ok((
+                    DirectResponsePartV1::Order {
+                        effective_processing_at_utc_ms,
+                        result,
+                    },
+                    diagnostic,
+                ))
             }
             PendingDomainRequestV1::Orders(request) => {
                 let result = if request.cursor.is_some() {
@@ -11534,12 +15960,40 @@ impl SimExecutionSessionV1 {
                         rows,
                     )?)
                 };
-                Ok(DirectResponsePartV1::Orders {
-                    effective_processing_at_utc_ms,
-                    result,
-                })
+                #[cfg(test)]
+                let (source, pages, return_rows) = match &result {
+                    OrdersQueryResultV1::Page(page) => (
+                        TaskQueryProjectionSourceV1::HotState,
+                        1,
+                        u64::try_from(page.items.len()).expect("订单查询返回行数适合 u64"),
+                    ),
+                    OrdersQueryResultV1::OutOfRetention(_) => {
+                        (TaskQueryProjectionSourceV1::NoRows, 0, 0)
+                    }
+                };
+                #[cfg(test)]
+                let diagnostic = TaskQuerySourceDiagnosticV1 {
+                    global_request_id: action.global_request_id.clone(),
+                    method: TaskQueryMethodV1::Orders,
+                    source,
+                    pages,
+                    return_rows,
+                };
+                #[cfg(not(test))]
+                let diagnostic = TaskQuerySourceDiagnosticMaybeV1;
+                Ok((
+                    DirectResponsePartV1::Orders {
+                        effective_processing_at_utc_ms,
+                        result,
+                    },
+                    diagnostic,
+                ))
             }
             PendingDomainRequestV1::Trades(request) => {
+                #[cfg(test)]
+                let mut query_used_hot_state = false;
+                #[cfg(test)]
+                let mut query_used_retained_projection = false;
                 let result = if request.cursor.is_some() {
                     let binding = working_query_state
                         .continuation(&action.global_request_id, ListQueryMethodV1::Trades)?;
@@ -11619,6 +16073,10 @@ impl SimExecutionSessionV1 {
                                 let projection = project_trade(fill)?;
                                 rows_by_id
                                     .insert(projection.simulated_trade_id.clone(), projection);
+                                #[cfg(test)]
+                                {
+                                    query_used_hot_state = true;
+                                }
                             }
                             for trade in working_query_state
                                 .terminal_projections
@@ -11651,9 +16109,16 @@ impl SimExecutionSessionV1 {
                                             .is_none_or(|before| trade.matched_at_utc_ms < before)
                                 })
                             {
+                                #[cfg(test)]
+                                let newly_adopted =
+                                    !rows_by_id.contains_key(&trade.simulated_trade_id);
                                 rows_by_id
                                     .entry(trade.simulated_trade_id.clone())
                                     .or_insert_with(|| trade.clone());
+                                #[cfg(test)]
+                                if newly_adopted {
+                                    query_used_retained_projection = true;
+                                }
                             }
                         }
                         let mut rows = rows_by_id.into_values().collect::<Vec<_>>();
@@ -11669,10 +16134,37 @@ impl SimExecutionSessionV1 {
                         )?)
                     }
                 };
-                Ok(DirectResponsePartV1::Trades {
-                    effective_processing_at_utc_ms,
-                    result,
-                })
+                #[cfg(test)]
+                let (source, pages, return_rows) = match &result {
+                    TradesQueryResultV1::Page(page) => (
+                        task_query_projection_source_v1(
+                            query_used_hot_state,
+                            query_used_retained_projection,
+                        ),
+                        1,
+                        u64::try_from(page.items.len()).expect("成交查询返回行数适合 u64"),
+                    ),
+                    TradesQueryResultV1::OutOfRetention(_) => {
+                        (TaskQueryProjectionSourceV1::NoRows, 0, 0)
+                    }
+                };
+                #[cfg(test)]
+                let diagnostic = TaskQuerySourceDiagnosticV1 {
+                    global_request_id: action.global_request_id.clone(),
+                    method: TaskQueryMethodV1::Trades,
+                    source,
+                    pages,
+                    return_rows,
+                };
+                #[cfg(not(test))]
+                let diagnostic = TaskQuerySourceDiagnosticMaybeV1;
+                Ok((
+                    DirectResponsePartV1::Trades {
+                        effective_processing_at_utc_ms,
+                        result,
+                    },
+                    diagnostic,
+                ))
             }
             _ => Err(SubmissionProcessingErrorV1::InternalInvariant(
                 "非查询请求进入查询处理器",
@@ -11681,7 +16173,6 @@ impl SimExecutionSessionV1 {
     }
 
     fn process_prepared_submission(
-        &self,
         session: &SimSession,
         prepared: &PreparedSubmissionV1,
         effect_identity: &str,
@@ -12203,9 +16694,13 @@ impl SimExecutionSessionV1 {
                         SimExecutionContractErrorV1::FeedbackIdentityConflict(feedback_id.clone())
                     })?;
                     let feedback = match draft {
-                        LifecycleFeedbackDraftV1::Order(draft) => SealedLifecycleFeedbackV1::Order(
-                            seal_order_lifecycle_feedback(draft, &candidate)?,
-                        ),
+                        LifecycleFeedbackDraftV1::Order(draft) => {
+                            SealedLifecycleFeedbackV1::Order(seal_order_lifecycle_feedback(
+                                draft,
+                                &candidate,
+                                Some(self.session.execution_state()),
+                            )?)
+                        }
                         LifecycleFeedbackDraftV1::Trade(draft) => SealedLifecycleFeedbackV1::Trade(
                             seal_trade_lifecycle_feedback(draft, &candidate)?,
                         ),
@@ -12478,122 +16973,65 @@ impl SimExecutionSessionV1 {
     fn register(
         &mut self,
         request: PendingDomainRequestV1,
-        mut actions: Vec<ParsedLogicalActionV1>,
+        actions: Vec<ParsedLogicalActionV1>,
     ) -> Result<RegisteredLogicalScheduleV1, SimExecutionContractErrorV1> {
         self.require_durable_business_writes_open()?;
-        let expected_checkpoint = self.durable_checkpoint();
-        self.session.require_active()?;
-        let context = request.context().clone();
-        let request_id = context.global_request_id.clone();
-        let physical_retry = match self.pending_requests.get(&request_id) {
-            Some(existing) if existing != &request => {
-                return Err(SimExecutionContractErrorV1::RequestIdentityConflict(
-                    request_id,
-                ));
-            }
-            Some(_) => true,
-            None => false,
-        };
-        if !physical_retry {
-            self.require_new_ingress_open()?;
-        }
-        if let Some((idempotency_key, payload_sha256)) = mutation_binding(&request)
-            && let Some(existing) = self.mutation_payloads.get(&idempotency_key)
-            && existing != &payload_sha256
-        {
-            return Err(SimExecutionContractErrorV1::MutationIdentityConflict(
-                idempotency_key,
-            ));
-        }
-        if !physical_retry {
-            self.session.require_input_not_failed()?;
-        }
-        if !physical_retry && !self.accepting_new_ingress {
-            return Err(SimExecutionContractErrorV1::ResponseBridgeClosed);
-        }
-
-        for action in &mut actions {
-            action.action_identity = format!(
-                "{}:{}:{}",
-                request.method_tag(),
-                request_id,
-                action.batch_item_ordinal
-            );
-        }
-        let canonical_request_sha256 = canonical_request_sha256(&request);
-        let response_method = request.direct_response_method();
-        let response_part_count = actions.len();
-        let mut working_session = self.session.clone();
-        let mut working_outbox = self.direct_response_outbox.clone();
-        let mut working_query_state = self.query_state.clone();
-        if !physical_retry {
-            working_query_state.bind_continuation_for_request(&request_id, &request)?;
-            working_outbox.reserve(
-                &context.session_id,
-                &request_id,
-                response_method,
-                response_part_count,
-            )?;
-        }
-        let schedule = working_session.register_and_schedule_request(
-            context,
-            canonical_request_sha256,
-            actions,
+        validate_request_context_identity_bounds(request.context())?;
+        let physical_retry = request_registration_is_physical_retry(
+            &self.session,
+            &self.pending_requests,
+            &request,
         )?;
-        if !physical_retry {
-            working_session.expect_direct_response(&request_id)?;
-            let (candidate_condition_ids, candidate_token_ids) = request.candidate_market_use();
-            working_session
-                .record_successful_business_request(candidate_condition_ids, candidate_token_ids);
+        if physical_retry {
+            let prepared =
+                prepare_physical_request_retry_schedule(&self.session, &request, actions)?;
+            return Ok(self.session.commit_prevalidated_request_schedule(prepared));
         }
 
-        let mut working_pending_requests = self.pending_requests.clone();
-        working_pending_requests
-            .entry(request_id.clone())
-            .or_insert(request.clone());
-        let mut working_mutation_payloads = self.mutation_payloads.clone();
-        if let Some((idempotency_key, payload_sha256)) = mutation_binding(&request) {
-            working_mutation_payloads
-                .entry(idempotency_key)
-                .or_insert(payload_sha256);
-        }
-        let candidate_state = ExecutionSessionStateV1 {
-            session: working_session,
-            pending_requests: working_pending_requests,
-            mutation_payloads: working_mutation_payloads,
-            submission_effect_records: self.submission_effect_records.clone(),
-            cancel_effect_records: self.cancel_effect_records.clone(),
-            query_state: working_query_state,
-            direct_response_outbox: working_outbox,
-            lifecycle_outbox: self.lifecycle_outbox.clone(),
-            compacted_confirmed_private_deliveries: self
-                .compacted_confirmed_private_deliveries
-                .clone(),
-            confirmed_private_deliveries: self.confirmed_private_deliveries.clone(),
-            accepting_new_ingress: self.accepting_new_ingress,
-        };
-        let candidate_checkpoint =
-            candidate_state.checkpoint(self.downstream_durable_confirmation.clone());
-        let evidence =
-            DurableTransactionEvidenceV1::new(DurableTransactionFactV1::RequestRegistered {
-                session_id: self.session.session_spec().session_id.clone(),
-                registration: DurableRequestRegistrationV1 {
-                    request: request.clone(),
-                    transit: schedule.request.transit.clone(),
-                    actions: schedule.actions.clone(),
-                },
-            });
-        if physical_retry {
-            self.commit_durable_transition(&expected_checkpoint, candidate_checkpoint, evidence)?;
-        } else {
-            self.commit_durable_transition_new_ingress(
-                &expected_checkpoint,
-                candidate_checkpoint,
-                evidence,
+        self.require_new_ingress_open()?;
+        if self.persistence.is_none() {
+            let prepared = prepare_request_registration_delta_v2(
+                &self.session,
+                &self.pending_requests,
+                &self.mutation_payloads,
+                &self.query_state,
+                &self.direct_response_outbox,
+                0,
+                self.accepting_new_ingress,
+                request,
+                actions,
             )?;
+            let committed = commit_prevalidated_request_registration_delta_v2(
+                &mut self.session,
+                &mut self.pending_requests,
+                &mut self.mutation_payloads,
+                &mut self.query_state,
+                &mut self.direct_response_outbox,
+                prepared,
+            );
+            debug_assert_eq!(
+                committed.recovery_operation,
+                DurableRecoveryOperationV2::RegisterRequest
+            );
+            return Ok(committed.schedule);
         }
-        self.replace_runtime_state(candidate_state);
-        Ok(schedule)
+
+        let expected_checkpoint = self.durable_checkpoint();
+        let prepared =
+            prepare_request_registration_transition(self.runtime_state(), request, actions, false)?;
+        let logical_evidence = prepared
+            .evidence
+            .expect("新请求兼容候选必须形成 V2 逻辑证据");
+        let candidate_checkpoint = prepared
+            .candidate_state
+            .checkpoint(self.downstream_durable_confirmation.clone());
+        self.commit_durable_transition_new_ingress(
+            &expected_checkpoint,
+            candidate_checkpoint,
+            logical_evidence.into_v1(),
+        )?;
+        self.replace_runtime_state(prepared.candidate_state);
+        Ok(prepared.schedule)
     }
 }
 
@@ -13221,12 +17659,920 @@ impl ScheduledLifecycleFeedbackV1 {
     }
 }
 
+fn record_prepared_order_lifecycle_feedback_v2(
+    session_id: &str,
+    session: &mut crate::session::PreparedScheduledSessionDriveV2<'_>,
+    outbox: &mut PreparedLifecycleOutboxDeltaV2<'_>,
+    reservation: &LifecycleBatchReservationV1,
+    feedback: OrderLifecycleFeedbackSeedV1,
+) -> Result<Option<DurablePrivateOutputDraftV1>, SessionError> {
+    let feedback_id = order_lifecycle_feedback_id_v2(
+        session_id,
+        &feedback.platform_order_id,
+        feedback.event_kind,
+    );
+    let timing = session.prepare_next_lifecycle_feedback_timing(
+        feedback_id.clone(),
+        feedback.account_delta.platform_effective_at_utc_ms,
+    )?;
+    let delivery_id = order_lifecycle_delivery_id_v1(session_id, &feedback_id);
+    outbox.record_for_batch(
+        reservation,
+        LifecycleFeedbackDraftV1::Order(OrderLifecycleFeedbackDraftV1 {
+            feedback_id,
+            delivery_id,
+            account_instance_key: feedback.account_delta.account_instance_key.clone(),
+            session_id: session_id.to_owned(),
+            timing,
+            platform_order_id: feedback.platform_order_id,
+            condition_id: ConditionId(feedback.condition_id),
+            token_id: TokenId(feedback.token_id),
+            event_kind: feedback.event_kind,
+            order_status: feedback.order_status,
+            venue_dust_closed_base_units: feedback.venue_dust_closed_base_units,
+            venue_dust_released_quote_units: feedback.venue_dust_released_quote_units,
+            market_resolved_canceled_base_units: feedback.market_resolved_canceled_base_units,
+            market_resolved_released_quote_units: feedback.market_resolved_released_quote_units,
+            account_delta: feedback.account_delta,
+        }),
+    )
+}
+
+fn record_prepared_trade_lifecycle_feedback_v2(
+    session_id: &str,
+    account_instance_key: &AccountInstanceKeyV1,
+    session: &mut crate::session::PreparedScheduledSessionDriveV2<'_>,
+    outbox: &mut PreparedLifecycleOutboxDeltaV2<'_>,
+    reservation: &LifecycleBatchReservationV1,
+    feedback: TradeFinalityTransitionEffectV1,
+) -> Result<Option<DurablePrivateOutputDraftV1>, SessionError> {
+    let mut feedback_id_hash = CanonicalHasher::new("SIM_TRADE_LIFECYCLE_FEEDBACK_ID_V1");
+    feedback_id_hash.text(&feedback.trade_id);
+    feedback_id_hash.text(trade_finality_state_identity(feedback.finality_state));
+    feedback_id_hash.i64(feedback.platform_event_at_utc_ms);
+    let feedback_id = feedback_id_hash.finish().0;
+    let timing = session.prepare_next_lifecycle_feedback_timing(
+        feedback_id.clone(),
+        feedback.platform_event_at_utc_ms,
+    )?;
+    let mut delivery_id_hash = CanonicalHasher::new("SIM_TRADE_LIFECYCLE_DELIVERY_ID_V1");
+    delivery_id_hash.text(session_id);
+    delivery_id_hash.text(&feedback_id);
+    let delivery_id = delivery_id_hash.finish().0;
+    outbox.record_for_batch(
+        reservation,
+        LifecycleFeedbackDraftV1::Trade(TradeLifecycleFeedbackDraftV1 {
+            feedback_id,
+            delivery_id,
+            account_instance_key: account_instance_key.clone(),
+            session_id: session_id.to_owned(),
+            timing,
+            simulated_trade_id: feedback.trade_id,
+            platform_order_id: feedback.platform_order_id,
+            condition_id: ConditionId(feedback.condition_id),
+            token_id: TokenId(feedback.token_id),
+            status: simulated_trade_status(trade_finality_state_identity(feedback.finality_state)),
+            economic_disposition: project_trade_economic_disposition(feedback.economic_disposition),
+            liquidity_role: match feedback.liquidity_role {
+                SimLiquidityRoleV1::Taker => TradeLiquidityRoleV1::Taker,
+                SimLiquidityRoleV1::MakerInferred => TradeLiquidityRoleV1::MakerInferred,
+            },
+            base_units: feedback.base_units,
+            quote_units: feedback.quote_units,
+            immediate_taker_fee_units: feedback.immediate_taker_fee_units,
+            economic_application_delta: feedback
+                .economic_application_delta
+                .as_deref()
+                .map(AccountDeltaReferenceV1::from),
+            account_delta: feedback.account_delta,
+        }),
+    )
+}
+
+fn record_prepared_settlement_lifecycle_feedback_v2(
+    session_id: &str,
+    account_instance_key: &AccountInstanceKeyV1,
+    session: &mut crate::session::PreparedScheduledSessionDriveV2<'_>,
+    outbox: &mut PreparedLifecycleOutboxDeltaV2<'_>,
+    reservation: &LifecycleBatchReservationV1,
+    feedback: SettlementLifecycleFeedbackSeedV1,
+) -> Result<Option<DurablePrivateOutputDraftV1>, SessionError> {
+    let mut feedback_id_hash = CanonicalHasher::new("SIM_SETTLEMENT_LIFECYCLE_FEEDBACK_ID_V1");
+    feedback_id_hash.text(&feedback.settlement_identity);
+    feedback_id_hash.i64(feedback.platform_event_at_utc_ms);
+    let feedback_id = feedback_id_hash.finish().0;
+    let timing = session.prepare_next_lifecycle_feedback_timing(
+        feedback_id.clone(),
+        feedback.platform_event_at_utc_ms,
+    )?;
+    let mut delivery_id_hash = CanonicalHasher::new("SIM_SETTLEMENT_LIFECYCLE_DELIVERY_ID_V1");
+    delivery_id_hash.text(session_id);
+    delivery_id_hash.text(&feedback_id);
+    let delivery_id = delivery_id_hash.finish().0;
+    outbox.record_for_batch(
+        reservation,
+        LifecycleFeedbackDraftV1::Settlement(SettlementLifecycleFeedbackDraftV1 {
+            feedback_id,
+            delivery_id,
+            account_instance_key: account_instance_key.clone(),
+            session_id: session_id.to_owned(),
+            timing,
+            settlement_identity: feedback.settlement_identity,
+            event: feedback.event,
+        }),
+    )
+}
+
+fn submission_processing_error_from_market_event_v2(
+    error: MarketEventErrorV1,
+) -> SubmissionProcessingErrorV1 {
+    match error {
+        MarketEventErrorV1::Session(error) => SubmissionProcessingErrorV1::Session(error),
+        other => {
+            SubmissionProcessingErrorV1::Session(SessionError::ExecutionState(other.to_string()))
+        }
+    }
+}
+
+fn prepare_order_execution_drive_v2<'a>(
+    execution_session: &'a mut SimExecutionSessionV1,
+    requested_cutoff_utc_ms: i64,
+    occupied_lifecycle_capacity_leases: usize,
+) -> Result<PreparedQueryExecutionDriveV2<'a>, SubmissionProcessingErrorV1> {
+    let SimExecutionSessionV1 {
+        session,
+        pending_requests,
+        query_state,
+        direct_response_outbox,
+        lifecycle_outbox,
+        ..
+    } = execution_session;
+    let rule_snapshot_sha256 = session.rule_snapshot().file_sha256().clone();
+    let scenario_sha256 = session.scenario().scenario_sha256().clone();
+    let fee_rule = fee_rule_identity(session);
+    let prefix = prepare_execution_drive_prefix_v2(session, requested_cutoff_utc_ms)
+        .map_err(submission_processing_error_from_market_event_v2)?;
+    let action = prefix
+        .current_action()
+        .ok_or(SubmissionProcessingErrorV1::InternalInvariant(
+            "Order 执行准备缺少到期逻辑动作",
+        ))?;
+    let request = pending_requests
+        .get(&action.global_request_id)
+        .cloned()
+        .ok_or(SubmissionProcessingErrorV1::InternalInvariant(
+            "Order 执行准备缺少领域请求",
+        ))?;
+    validate_action_mapping(&request, &action)?;
+    let PendingDomainRequestV1::Order(order_request) = &request else {
+        return Err(SubmissionProcessingErrorV1::InternalInvariant(
+            "非 Order 请求进入 Order 执行准备",
+        ));
+    };
+
+    let lifecycle = lifecycle_outbox.prepare_lifecycle_delta_v2();
+    let mut materialized = materialize_execution_drive_prefix_v2(
+        prefix,
+        query_state,
+        lifecycle,
+        Some(&action.global_request_id),
+        occupied_lifecycle_capacity_leases,
+    )
+    .map_err(submission_processing_error_from_market_event_v2)?;
+
+    let query_sha256 = canonical_request_sha256(&request);
+    materialized.scheduled.prepare_query_revision(
+        &action.global_request_id,
+        &action.action_identity,
+        query_sha256,
+    )?;
+    let hot_order = match materialized
+        .scheduled
+        .execution_candidate()
+        .candidate_order(&order_request.platform_order_id)
+    {
+        Some(order) if materialized.query.hot_order_is_query_visible(order)? => Some(order),
+        Some(_) | None => None,
+    };
+    let result = match hot_order {
+        Some(order) => OrderQueryResultV1::Found(Box::new(project_order(order)?)),
+        None => match materialized
+            .query
+            .retained_terminal_order(&order_request.platform_order_id)
+        {
+            Some(order) => OrderQueryResultV1::Found(Box::new(order.clone())),
+            None => match materialized.query.order_history_retained_from_utc_ms() {
+                Some(retained_from_utc_ms) => {
+                    OrderQueryResultV1::OutOfRetention(QueryOutOfRetentionV1 {
+                        scope: QueryRetentionScopeV1::OrderHistory,
+                        retained_from_utc_ms: Some(retained_from_utc_ms),
+                        requested_root_sequence: None,
+                        earliest_retained_root_sequence: materialized
+                            .query
+                            .earliest_retained_root_sequence(),
+                    })
+                }
+                None => OrderQueryResultV1::NotFound,
+            },
+        },
+    };
+    let part = DirectResponsePartV1::Order {
+        effective_processing_at_utc_ms: action.key.effective_processing_at_utc_ms,
+        result,
+    };
+    finish_materialized_query_action_v2(
+        materialized,
+        direct_response_outbox,
+        action,
+        request,
+        part,
+        rule_snapshot_sha256,
+        scenario_sha256,
+        fee_rule,
+    )
+}
+
+fn prepare_list_query_execution_drive_v2<'a>(
+    execution_session: &'a mut SimExecutionSessionV1,
+    requested_cutoff_utc_ms: i64,
+    occupied_lifecycle_capacity_leases: usize,
+) -> Result<PreparedQueryExecutionDriveV2<'a>, SubmissionProcessingErrorV1> {
+    let SimExecutionSessionV1 {
+        session,
+        pending_requests,
+        query_state,
+        direct_response_outbox,
+        lifecycle_outbox,
+        ..
+    } = execution_session;
+    let session_spec = session.session_spec().clone();
+    let rule_snapshot_sha256 = session.rule_snapshot().file_sha256().clone();
+    let scenario_sha256 = session.scenario().scenario_sha256().clone();
+    let fee_rule = fee_rule_identity(session);
+    let prefix = prepare_execution_drive_prefix_v2(session, requested_cutoff_utc_ms)
+        .map_err(submission_processing_error_from_market_event_v2)?;
+    let action = prefix
+        .current_action()
+        .ok_or(SubmissionProcessingErrorV1::InternalInvariant(
+            "列表查询执行准备缺少到期逻辑动作",
+        ))?;
+    let request = pending_requests
+        .get(&action.global_request_id)
+        .cloned()
+        .ok_or(SubmissionProcessingErrorV1::InternalInvariant(
+            "列表查询执行准备缺少领域请求",
+        ))?;
+    validate_action_mapping(&request, &action)?;
+    if !matches!(
+        &request,
+        PendingDomainRequestV1::Orders(_) | PendingDomainRequestV1::Trades(_)
+    ) {
+        return Err(SubmissionProcessingErrorV1::InternalInvariant(
+            "非列表查询请求进入列表查询执行准备",
+        ));
+    }
+
+    let lifecycle = lifecycle_outbox.prepare_lifecycle_delta_v2();
+    let mut materialized = materialize_execution_drive_prefix_v2(
+        prefix,
+        query_state,
+        lifecycle,
+        Some(&action.global_request_id),
+        occupied_lifecycle_capacity_leases,
+    )
+    .map_err(submission_processing_error_from_market_event_v2)?;
+    let query_sha256 = canonical_request_sha256(&request);
+    let effective_processing_at_utc_ms = action.key.effective_processing_at_utc_ms;
+
+    let part = match &request {
+        PendingDomainRequestV1::Orders(request) => {
+            let result = if request.cursor.is_some() {
+                let frozen_revision = materialized.query.continuation_query_projection_revision(
+                    &action.global_request_id,
+                    ListQueryMethodV1::Orders,
+                )?;
+                materialized.scheduled.prepare_query_revision_at(
+                    &action.global_request_id,
+                    &action.action_identity,
+                    query_sha256,
+                    frozen_revision,
+                )?;
+                materialized
+                    .query
+                    .prepare_continue_orders(&action.global_request_id)?
+            } else {
+                let revision = materialized.scheduled.prepare_query_revision(
+                    &action.global_request_id,
+                    &action.action_identity,
+                    query_sha256,
+                )?;
+                let mut rows = materialized
+                    .scheduled
+                    .execution_candidate()
+                    .candidate_orders()
+                    .map(|order| {
+                        let active = order
+                            .pending_maker_depletion_base_units
+                            .checked_add(order.open_base_units)
+                            .ok_or(MatchingMathErrorV1::ArithmeticOverflow)?;
+                        if active == 0
+                            || !request
+                                .filter
+                                .condition_id
+                                .as_ref()
+                                .is_none_or(|id| id.0 == order.condition_id)
+                            || !request
+                                .filter
+                                .token_id
+                                .as_ref()
+                                .is_none_or(|id| id.0 == order.token_id)
+                        {
+                            return Ok(None);
+                        }
+                        project_order(order).map(Some)
+                    })
+                    .collect::<Result<Vec<_>, MatchingMathErrorV1>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
+                rows.sort_by(|left, right| {
+                    (left.created_at_utc_ms, left.platform_order_id.as_str())
+                        .cmp(&(right.created_at_utc_ms, right.platform_order_id.as_str()))
+                });
+                OrdersQueryResultV1::Page(materialized.query.prepare_new_orders_page(
+                    &session_spec,
+                    orders_filter_sha256(&request.filter),
+                    revision.platform_state_revision,
+                    rows,
+                )?)
+            };
+            DirectResponsePartV1::Orders {
+                effective_processing_at_utc_ms,
+                result,
+            }
+        }
+        PendingDomainRequestV1::Trades(request) => {
+            let result = if request.cursor.is_some() {
+                let frozen_revision = materialized.query.continuation_query_projection_revision(
+                    &action.global_request_id,
+                    ListQueryMethodV1::Trades,
+                )?;
+                materialized.scheduled.prepare_query_revision_at(
+                    &action.global_request_id,
+                    &action.action_identity,
+                    query_sha256,
+                    frozen_revision,
+                )?;
+                materialized
+                    .query
+                    .prepare_continue_trades(&action.global_request_id)?
+            } else {
+                let revision = materialized.scheduled.prepare_query_revision(
+                    &action.global_request_id,
+                    &action.action_identity,
+                    query_sha256,
+                )?;
+                let normalized_interval = strict_millisecond_interval(&request.filter);
+                let empty_interval = normalized_interval.is_none();
+                let retained_exact_trade = request.filter.trade_id.as_ref().is_some_and(|id| {
+                    materialized
+                        .scheduled
+                        .execution_candidate()
+                        .candidate_fills()
+                        .any(|fill| {
+                            &fill.trade_id == id
+                                && materialized.query.trade_is_retained(fill.matched_at_utc_ms)
+                        })
+                        || materialized.query.retained_terminal_trade(id).is_some()
+                });
+                if !empty_interval
+                    && !retained_exact_trade
+                    && materialized
+                        .query
+                        .trade_history_retained_from_utc_ms()
+                        .is_some_and(|floor| {
+                            normalized_interval
+                                .is_some_and(|(first_inclusive, _)| first_inclusive < floor)
+                        })
+                {
+                    TradesQueryResultV1::OutOfRetention(QueryOutOfRetentionV1 {
+                        scope: QueryRetentionScopeV1::TradeHistory,
+                        retained_from_utc_ms: materialized
+                            .query
+                            .trade_history_retained_from_utc_ms(),
+                        requested_root_sequence: None,
+                        earliest_retained_root_sequence: materialized
+                            .query
+                            .earliest_retained_root_sequence(),
+                    })
+                } else {
+                    let mut rows_by_id = BTreeMap::new();
+                    if !empty_interval {
+                        for fill in materialized
+                            .scheduled
+                            .execution_candidate()
+                            .candidate_fills()
+                            .filter(|fill| {
+                                materialized.query.trade_is_retained(fill.matched_at_utc_ms)
+                                    && request
+                                        .filter
+                                        .trade_id
+                                        .as_ref()
+                                        .is_none_or(|id| id == &fill.trade_id)
+                                    && request
+                                        .filter
+                                        .condition_id
+                                        .as_ref()
+                                        .is_none_or(|id| id.0 == fill.condition_id)
+                                    && request
+                                        .filter
+                                        .token_id
+                                        .as_ref()
+                                        .is_none_or(|id| id.0 == fill.token_id)
+                                    && request
+                                        .filter
+                                        .after_utc_ms
+                                        .is_none_or(|after| after < fill.matched_at_utc_ms)
+                                    && request
+                                        .filter
+                                        .before_utc_ms
+                                        .is_none_or(|before| fill.matched_at_utc_ms < before)
+                            })
+                        {
+                            let projection = project_trade(fill)?;
+                            rows_by_id.insert(projection.simulated_trade_id.clone(), projection);
+                        }
+                        for trade in materialized
+                            .query
+                            .retained_terminal_trades()
+                            .filter(|trade| {
+                                request
+                                    .filter
+                                    .trade_id
+                                    .as_ref()
+                                    .is_none_or(|id| id == &trade.simulated_trade_id)
+                                    && request
+                                        .filter
+                                        .condition_id
+                                        .as_ref()
+                                        .is_none_or(|id| id == &trade.condition_id)
+                                    && request
+                                        .filter
+                                        .token_id
+                                        .as_ref()
+                                        .is_none_or(|id| id == &trade.token_id)
+                                    && request
+                                        .filter
+                                        .after_utc_ms
+                                        .is_none_or(|after| after < trade.matched_at_utc_ms)
+                                    && request
+                                        .filter
+                                        .before_utc_ms
+                                        .is_none_or(|before| trade.matched_at_utc_ms < before)
+                            })
+                        {
+                            rows_by_id
+                                .entry(trade.simulated_trade_id.clone())
+                                .or_insert_with(|| trade.clone());
+                        }
+                    }
+                    let mut rows = rows_by_id.into_values().collect::<Vec<_>>();
+                    rows.sort_by(|left, right| {
+                        (left.matched_at_utc_ms, left.simulated_trade_id.as_str())
+                            .cmp(&(right.matched_at_utc_ms, right.simulated_trade_id.as_str()))
+                    });
+                    TradesQueryResultV1::Page(materialized.query.prepare_new_trades_page(
+                        &session_spec,
+                        trades_filter_sha256(&request.filter),
+                        revision.platform_state_revision,
+                        rows,
+                    )?)
+                }
+            };
+            DirectResponsePartV1::Trades {
+                effective_processing_at_utc_ms,
+                result,
+            }
+        }
+        _ => unreachable!("列表查询方法已经在准备前验证"),
+    };
+
+    finish_materialized_query_action_v2(
+        materialized,
+        direct_response_outbox,
+        action,
+        request,
+        part,
+        rule_snapshot_sha256,
+        scenario_sha256,
+        fee_rule,
+    )
+}
+
+fn finish_materialized_query_action_v2<'a>(
+    materialized: MaterializedExecutionDrivePrefixV2<'a>,
+    direct_response_outbox: &'a mut LogicalDirectResponseOutboxV1,
+    action: QueuedLogicalActionV1,
+    request: PendingDomainRequestV1,
+    part: DirectResponsePartV1,
+    rule_snapshot_sha256: Sha256Hex,
+    scenario_sha256: Sha256Hex,
+    fee_rule: SubmissionFeeRuleIdentityV1,
+) -> Result<PreparedQueryExecutionDriveV2<'a>, SubmissionProcessingErrorV1> {
+    let MaterializedExecutionDrivePrefixV2 {
+        session_id,
+        mut scheduled,
+        query,
+        lifecycle,
+        terminal_projection_condition_ids,
+        before_query_projection_revision,
+        before_logical_platform_through_utc_ms,
+        before_private_schedule_through_utc_ms,
+        after_query_projection_revision,
+        actual_cutoff_utc_ms,
+        mut new_private_output_drafts,
+        scheduled_state_changed: _,
+    } = materialized;
+    let query_revision = scheduled.query_revision_for_request(&action.global_request_id);
+    let logical_action_result = durable_logical_action_result(
+        &action.global_request_id,
+        &request,
+        usize::from(action.key.batch_item_ordinal),
+        query_revision,
+        &part,
+    )
+    .map_err(|error| SessionError::Durability(error.to_string()))?;
+
+    let mut direct = direct_response_outbox.prepare_entry_delta_v2(&action.global_request_id)?;
+    direct.record_part(part)?;
+    scheduled.finish_current_action(&action.action_identity)?;
+    if !scheduled.request_completed() {
+        return Err(SubmissionProcessingErrorV1::InternalInvariant(
+            "单项查询请求完成动作后仍未完成",
+        ));
+    }
+    let platform_responded_at_utc_ms =
+        direct
+            .platform_responded_at()
+            .ok_or(SubmissionProcessingErrorV1::InternalInvariant(
+                "查询直接响应缺少平台响应时点",
+            ))?;
+    let private_emission_sequence = scheduled.next_private_emission_sequence()?;
+    let transit = scheduled.prepare_complete_direct_response(
+        &action.global_request_id,
+        platform_responded_at_utc_ms,
+        private_emission_sequence,
+    )?;
+    if let Some(draft) = direct.complete_draft(
+        request.context().clone(),
+        &transit,
+        rule_snapshot_sha256,
+        scenario_sha256,
+        fee_rule,
+    )? {
+        new_private_output_drafts.push(draft);
+    }
+
+    let evidence = logical_transaction_evidence_from_after_values_v2(
+        DurableTransactionFactV1::ExecutionAdvanced { session_id },
+        before_query_projection_revision,
+        before_logical_platform_through_utc_ms,
+        before_private_schedule_through_utc_ms,
+        after_query_projection_revision,
+        Some(actual_cutoff_utc_ms),
+        before_private_schedule_through_utc_ms,
+        vec![logical_action_result],
+        new_private_output_drafts,
+    )?;
+    Ok(PreparedQueryExecutionDriveV2 {
+        scheduled,
+        query,
+        direct,
+        lifecycle,
+        terminal_projection_condition_ids,
+        evidence,
+        recovery_operation: DurableRecoveryOperationV2::DriveExecutionThrough {
+            effective_processing_at_utc_ms: actual_cutoff_utc_ms,
+        },
+        disposition: SubmissionDriveDispositionV1::ItemProcessed {
+            request_completed: true,
+        },
+    })
+}
+
+fn prepare_scheduled_execution_drive_v2<'a>(
+    session: &'a mut SimExecutionSessionV1,
+    requested_cutoff_utc_ms: i64,
+    occupied_lifecycle_capacity_leases: usize,
+) -> Result<PreparedScheduledExecutionDriveV2<'a>, MarketEventErrorV1> {
+    let SimExecutionSessionV1 {
+        session,
+        query_state,
+        lifecycle_outbox,
+        ..
+    } = session;
+    prepare_scheduled_execution_drive_fields_v2(
+        session,
+        query_state,
+        lifecycle_outbox,
+        requested_cutoff_utc_ms,
+        occupied_lifecycle_capacity_leases,
+    )
+}
+
+fn prepare_scheduled_execution_drive_fields_v2<'a>(
+    session: &'a mut SimSession,
+    query_state: &'a mut QueryStateV1,
+    lifecycle_outbox: &'a mut LogicalLifecycleOutboxV1,
+    requested_cutoff_utc_ms: i64,
+    occupied_lifecycle_capacity_leases: usize,
+) -> Result<PreparedScheduledExecutionDriveV2<'a>, MarketEventErrorV1> {
+    let prefix = prepare_execution_drive_prefix_v2(session, requested_cutoff_utc_ms)?;
+    if prefix.current_action().is_some() {
+        return Ok(PreparedScheduledExecutionDriveV2::ActionDue(prefix));
+    }
+    let lifecycle = lifecycle_outbox.prepare_lifecycle_delta_v2();
+    let materialized = materialize_execution_drive_prefix_v2(
+        prefix,
+        query_state,
+        lifecycle,
+        None,
+        occupied_lifecycle_capacity_leases,
+    )?;
+    finish_no_action_scheduled_execution_drive_v2(materialized)
+}
+
+fn prepare_execution_drive_prefix_v2(
+    session: &mut SimSession,
+    requested_cutoff_utc_ms: i64,
+) -> Result<PreparedExecutionDrivePrefixV2<'_>, MarketEventErrorV1> {
+    session.require_input_not_failed()?;
+    let session_id = session.session_spec().session_id.clone();
+    let before_query_projection_revision = session.platform_state_revision();
+    let before_logical_platform_through_utc_ms = session.logical_platform_driven_through();
+    let before_private_schedule_through_utc_ms = session.private_fact_schedule_closed_through();
+    let account_instance_key = session.execution_state().account_instance_key().clone();
+    let scheduled = session.prepare_scheduled_session_drive_v2(requested_cutoff_utc_ms, false)?;
+    let execution_state_changed = scheduled.execution_candidate().has_state_change();
+    let query_projection_changed = scheduled.execution_candidate().query_projection_changed();
+    let terminal_projection_condition_ids = scheduled.terminal_projection_condition_ids().clone();
+
+    let mut stable_ordinal = 0_u64;
+    let mut lifecycle_feedbacks = Vec::new();
+    for effect in scheduled.execution_candidate().gtd_expiration_effects() {
+        if let Some(account_delta) = effect.account_delta.clone() {
+            lifecycle_feedbacks.push((
+                (
+                    account_delta.platform_effective_at_utc_ms,
+                    0_u8,
+                    stable_ordinal,
+                ),
+                ScheduledLifecycleFeedbackV1::Order(OrderLifecycleFeedbackSeedV1 {
+                    platform_order_id: effect.platform_order_id.clone(),
+                    condition_id: effect.condition_id.clone(),
+                    token_id: effect.token_id.clone(),
+                    event_kind: OrderLifecycleEventKindV1::GtdExpired,
+                    order_status: simulated_order_status("EXPIRED"),
+                    venue_dust_closed_base_units: 0,
+                    venue_dust_released_quote_units: 0,
+                    market_resolved_canceled_base_units: 0,
+                    market_resolved_released_quote_units: 0,
+                    account_delta,
+                }),
+            ));
+            stable_ordinal = stable_ordinal
+                .checked_add(1)
+                .ok_or(SessionError::ResponseDeliveryIdentityConflict)?;
+        }
+    }
+    for lifecycle in scheduled.execution_candidate().scheduled_finality_effects() {
+        lifecycle_feedbacks.push((
+            (
+                lifecycle.trade_feedback.platform_event_at_utc_ms,
+                1_u8,
+                stable_ordinal,
+            ),
+            ScheduledLifecycleFeedbackV1::Trade(lifecycle.trade_feedback.clone()),
+        ));
+        stable_ordinal = stable_ordinal
+            .checked_add(1)
+            .ok_or(SessionError::ResponseDeliveryIdentityConflict)?;
+        for effect in &lifecycle.settlement_feedbacks {
+            let feedback = settlement_lifecycle_feedback_seed(effect.clone())?;
+            lifecycle_feedbacks.push((
+                (feedback.platform_event_at_utc_ms, 1_u8, stable_ordinal),
+                ScheduledLifecycleFeedbackV1::Settlement(feedback),
+            ));
+            stable_ordinal = stable_ordinal
+                .checked_add(1)
+                .ok_or(SessionError::ResponseDeliveryIdentityConflict)?;
+        }
+    }
+    for effect in scheduled.execution_candidate().rebate_clock_effects() {
+        let feedback = settlement_lifecycle_feedback_seed(effect.clone())?;
+        lifecycle_feedbacks.push((
+            (feedback.platform_event_at_utc_ms, 2_u8, stable_ordinal),
+            ScheduledLifecycleFeedbackV1::Settlement(feedback),
+        ));
+        stable_ordinal = stable_ordinal
+            .checked_add(1)
+            .ok_or(SessionError::ResponseDeliveryIdentityConflict)?;
+    }
+    lifecycle_feedbacks.sort_by_key(|(key, _)| *key);
+
+    Ok(PreparedExecutionDrivePrefixV2 {
+        session_id,
+        account_instance_key,
+        scheduled,
+        lifecycle_feedbacks,
+        terminal_projection_condition_ids,
+        before_query_projection_revision,
+        before_logical_platform_through_utc_ms,
+        before_private_schedule_through_utc_ms,
+        execution_state_changed,
+        query_projection_changed,
+    })
+}
+
+fn materialize_execution_drive_prefix_v2<'a>(
+    prefix: PreparedExecutionDrivePrefixV2<'a>,
+    query_state: &'a mut QueryStateV1,
+    mut lifecycle: PreparedLifecycleOutboxDeltaV2<'a>,
+    preferred_global_request_id: Option<&str>,
+    occupied_lifecycle_capacity_leases: usize,
+) -> Result<MaterializedExecutionDrivePrefixV2<'a>, MarketEventErrorV1> {
+    let PreparedExecutionDrivePrefixV2 {
+        session_id,
+        account_instance_key,
+        mut scheduled,
+        lifecycle_feedbacks,
+        terminal_projection_condition_ids,
+        before_query_projection_revision,
+        before_logical_platform_through_utc_ms,
+        before_private_schedule_through_utc_ms,
+        execution_state_changed,
+        query_projection_changed,
+    } = prefix;
+    let actual_cutoff_utc_ms = scheduled.actual_cutoff_utc_ms();
+    let first_due_at_utc_ms = scheduled.first_due_at_utc_ms();
+    let after_query_projection_revision = if query_projection_changed {
+        scheduled.advance_platform_state_revision_once()?
+    } else {
+        before_query_projection_revision
+    };
+
+    let mut query = query_state.prepare_delta_v2();
+    for condition_id in &terminal_projection_condition_ids {
+        let orders = scheduled
+            .execution_candidate()
+            .candidate_orders_for_condition(condition_id)
+            .map(project_order)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| MarketEventErrorV1::ExecutionState(format!("{error:?}")))?;
+        let trades = scheduled
+            .execution_candidate()
+            .candidate_fills_for_condition(condition_id)
+            .map(project_trade)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| MarketEventErrorV1::ExecutionState(format!("{error:?}")))?;
+        query.prepare_terminal_inserts(orders, trades)?;
+    }
+
+    let reservation = if lifecycle_feedbacks.is_empty() {
+        None
+    } else {
+        let latest_feedback_at_utc_ms = lifecycle_feedbacks
+            .iter()
+            .map(|(_, feedback)| feedback.platform_effective_at_utc_ms())
+            .max()
+            .expect("非空生命周期反馈必须包含最晚时点");
+        Some(lifecycle.reserve_platform_work(
+            &format!(
+                "SCHEDULED:{}:{latest_feedback_at_utc_ms}:{actual_cutoff_utc_ms}",
+                first_due_at_utc_ms.expect("生命周期反馈必须来自已排定平台工作")
+            ),
+            preferred_global_request_id,
+            latest_feedback_at_utc_ms,
+            occupied_lifecycle_capacity_leases,
+        )?)
+    };
+    let mut new_private_output_drafts = Vec::new();
+    if let Some(reservation) = reservation.as_ref() {
+        for (_, feedback) in lifecycle_feedbacks {
+            let draft = match feedback {
+                ScheduledLifecycleFeedbackV1::Order(feedback) => {
+                    record_prepared_order_lifecycle_feedback_v2(
+                        &session_id,
+                        &mut scheduled,
+                        &mut lifecycle,
+                        reservation,
+                        feedback,
+                    )?
+                }
+                ScheduledLifecycleFeedbackV1::Trade(feedback) => {
+                    record_prepared_trade_lifecycle_feedback_v2(
+                        &session_id,
+                        &account_instance_key,
+                        &mut scheduled,
+                        &mut lifecycle,
+                        reservation,
+                        feedback,
+                    )?
+                }
+                ScheduledLifecycleFeedbackV1::Settlement(feedback) => {
+                    record_prepared_settlement_lifecycle_feedback_v2(
+                        &session_id,
+                        &account_instance_key,
+                        &mut scheduled,
+                        &mut lifecycle,
+                        reservation,
+                        feedback,
+                    )?
+                }
+            };
+            new_private_output_drafts.extend(draft);
+        }
+        lifecycle.complete_platform_work(reservation)?;
+    }
+
+    let state_changed = execution_state_changed
+        || before_logical_platform_through_utc_ms != Some(actual_cutoff_utc_ms)
+        || after_query_projection_revision != before_query_projection_revision
+        || !terminal_projection_condition_ids.is_empty()
+        || !new_private_output_drafts.is_empty();
+    Ok(MaterializedExecutionDrivePrefixV2 {
+        session_id,
+        scheduled,
+        query,
+        lifecycle,
+        terminal_projection_condition_ids,
+        before_query_projection_revision,
+        before_logical_platform_through_utc_ms,
+        before_private_schedule_through_utc_ms,
+        after_query_projection_revision,
+        actual_cutoff_utc_ms,
+        new_private_output_drafts,
+        scheduled_state_changed: state_changed,
+    })
+}
+
+fn finish_no_action_scheduled_execution_drive_v2<'a>(
+    materialized: MaterializedExecutionDrivePrefixV2<'a>,
+) -> Result<PreparedScheduledExecutionDriveV2<'a>, MarketEventErrorV1> {
+    let MaterializedExecutionDrivePrefixV2 {
+        session_id,
+        scheduled,
+        query,
+        lifecycle,
+        terminal_projection_condition_ids,
+        before_query_projection_revision,
+        before_logical_platform_through_utc_ms,
+        before_private_schedule_through_utc_ms,
+        after_query_projection_revision,
+        actual_cutoff_utc_ms,
+        new_private_output_drafts,
+        scheduled_state_changed,
+    } = materialized;
+    if let Some(action) = scheduled.current_action() {
+        return Err(SessionError::ActionNotLogicallyReleased(action.action_identity).into());
+    }
+    if !scheduled_state_changed {
+        return Ok(PreparedScheduledExecutionDriveV2::NoStateChange);
+    }
+    let evidence = logical_transaction_evidence_from_after_values_v2(
+        DurableTransactionFactV1::ExecutionAdvanced {
+            session_id: session_id.clone(),
+        },
+        before_query_projection_revision,
+        before_logical_platform_through_utc_ms,
+        before_private_schedule_through_utc_ms,
+        after_query_projection_revision,
+        Some(actual_cutoff_utc_ms),
+        before_private_schedule_through_utc_ms,
+        Vec::new(),
+        new_private_output_drafts,
+    )?;
+    let query = query.into_committable()?;
+    let session = scheduled.into_committable(terminal_projection_condition_ids)?;
+    Ok(PreparedScheduledExecutionDriveV2::Committable(
+        CommittableScheduledExecutionDriveV2 {
+            session,
+            query,
+            lifecycle,
+            evidence,
+            recovery_operation: DurableRecoveryOperationV2::DriveExecutionThrough {
+                effective_processing_at_utc_ms: actual_cutoff_utc_ms,
+            },
+        },
+    ))
+}
+
 fn drive_scheduled_platform_work_through(
     session: &mut SimSession,
     outbox: &mut LogicalLifecycleOutboxV1,
     logical_time_utc_ms: i64,
     preferred_global_request_id: Option<&str>,
-) -> Result<bool, LogicalPlatformDriveErrorV1> {
+) -> Result<(bool, Vec<DurablePrivateOutputDraftV1>), LogicalPlatformDriveErrorV1> {
     let mut execution = session.execution_state().clone();
     let mut first_due_at = None;
     let mut lifecycle_feedbacks = Vec::new();
@@ -13323,32 +18669,37 @@ fn drive_scheduled_platform_work_through(
             )
         })
         .transpose()?;
+    let mut new_private_output_drafts = Vec::new();
     if let Some(reservation) = reservation.as_ref() {
         for feedback in lifecycle_feedbacks {
             match feedback {
                 ScheduledLifecycleFeedbackV1::Order(feedback) => {
-                    record_order_lifecycle_feedbacks_in_batch(
+                    new_private_output_drafts.extend(record_order_lifecycle_feedbacks_in_batch(
                         session,
                         outbox,
                         reservation,
                         vec![feedback],
-                    )?;
+                    )?);
                 }
                 ScheduledLifecycleFeedbackV1::Trade(feedback) => {
-                    record_trade_lifecycle_feedback_in_batch(
+                    if let Some(draft) = record_trade_lifecycle_feedback_in_batch(
                         session,
                         outbox,
                         reservation,
                         feedback,
-                    )?;
+                    )? {
+                        new_private_output_drafts.push(draft);
+                    }
                 }
                 ScheduledLifecycleFeedbackV1::Settlement(feedback) => {
-                    record_settlement_lifecycle_feedbacks_in_batch(
-                        session,
-                        outbox,
-                        reservation,
-                        vec![feedback],
-                    )?;
+                    new_private_output_drafts.extend(
+                        record_settlement_lifecycle_feedbacks_in_batch(
+                            session,
+                            outbox,
+                            reservation,
+                            vec![feedback],
+                        )?,
+                    );
                 }
             }
         }
@@ -13362,7 +18713,7 @@ fn drive_scheduled_platform_work_through(
     if let Some(reservation) = reservation {
         outbox.complete_platform_work(&reservation)?;
     }
-    Ok(query_projection_changed)
+    Ok((query_projection_changed, new_private_output_drafts))
 }
 
 fn prepare_pending_terminal_state(
@@ -13377,9 +18728,9 @@ fn record_order_lifecycle_feedbacks(
     outbox: &mut LogicalLifecycleOutboxV1,
     reservation: Option<&LifecycleBatchReservationV1>,
     feedbacks: Vec<OrderLifecycleFeedbackSeedV1>,
-) -> Result<(), SessionError> {
+) -> Result<Vec<DurablePrivateOutputDraftV1>, SessionError> {
     if feedbacks.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let reservation = reservation.ok_or(SessionError::ResponseDeliveryIdentityConflict)?;
     record_order_lifecycle_feedbacks_in_batch(session, outbox, reservation, feedbacks)
@@ -13390,23 +18741,23 @@ fn record_order_lifecycle_feedbacks_in_batch(
     outbox: &mut LogicalLifecycleOutboxV1,
     reservation: &LifecycleBatchReservationV1,
     feedbacks: Vec<OrderLifecycleFeedbackSeedV1>,
-) -> Result<(), SessionError> {
+) -> Result<Vec<DurablePrivateOutputDraftV1>, SessionError> {
+    let mut durable_drafts = Vec::new();
     for feedback in feedbacks {
-        let mut feedback_id_hash = CanonicalHasher::new("SIM_ORDER_LIFECYCLE_FEEDBACK_ID_V1");
-        feedback_id_hash.text(&feedback.account_delta.delta_id);
-        feedback_id_hash.text(order_lifecycle_event_identity(feedback.event_kind));
-        let feedback_id = feedback_id_hash.finish().0;
+        let feedback_id = order_lifecycle_feedback_id_v2(
+            &session.session_spec().session_id,
+            &feedback.platform_order_id,
+            feedback.event_kind,
+        );
         let private_emission_sequence = session.next_private_emission_sequence()?;
         let timing = session.bind_lifecycle_feedback_timing(
             feedback_id.clone(),
             feedback.account_delta.platform_effective_at_utc_ms,
             private_emission_sequence,
         )?;
-        let mut delivery_id_hash = CanonicalHasher::new("SIM_ORDER_LIFECYCLE_DELIVERY_ID_V1");
-        delivery_id_hash.text(&session.session_spec().session_id);
-        delivery_id_hash.text(&feedback_id);
-        let delivery_id = delivery_id_hash.finish().0;
-        outbox.record_for_batch(
+        let delivery_id =
+            order_lifecycle_delivery_id_v1(&session.session_spec().session_id, &feedback_id);
+        if let Some(draft) = outbox.record_for_batch(
             reservation,
             LifecycleFeedbackDraftV1::Order(OrderLifecycleFeedbackDraftV1 {
                 feedback_id,
@@ -13425,9 +18776,11 @@ fn record_order_lifecycle_feedbacks_in_batch(
                 market_resolved_released_quote_units: feedback.market_resolved_released_quote_units,
                 account_delta: feedback.account_delta,
             }),
-        )?;
+        )? {
+            durable_drafts.push(draft);
+        }
     }
-    Ok(())
+    Ok(durable_drafts)
 }
 
 fn record_initial_finality_lifecycle_feedbacks(
@@ -13435,31 +18788,34 @@ fn record_initial_finality_lifecycle_feedbacks(
     outbox: &mut LogicalLifecycleOutboxV1,
     reservation: Option<&LifecycleBatchReservationV1>,
     effects: Vec<TradeFinalityLifecycleEffectsV1>,
-) -> Result<(), SessionError> {
+) -> Result<Vec<DurablePrivateOutputDraftV1>, SessionError> {
     if effects.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let reservation = reservation.ok_or(SessionError::ResponseDeliveryIdentityConflict)?;
+    let mut durable_drafts = Vec::new();
     for effect in effects {
-        record_trade_lifecycle_feedback_in_batch(
+        if let Some(draft) = record_trade_lifecycle_feedback_in_batch(
             session,
             outbox,
             reservation,
             effect.trade_feedback,
-        )?;
+        )? {
+            durable_drafts.push(draft);
+        }
         let settlement_feedbacks = effect
             .settlement_feedbacks
             .into_iter()
             .map(settlement_lifecycle_feedback_seed)
             .collect::<Result<Vec<_>, _>>()?;
-        record_settlement_lifecycle_feedbacks_in_batch(
+        durable_drafts.extend(record_settlement_lifecycle_feedbacks_in_batch(
             session,
             outbox,
             reservation,
             settlement_feedbacks,
-        )?;
+        )?);
     }
-    Ok(())
+    Ok(durable_drafts)
 }
 
 fn settlement_lifecycle_feedback_seed(
@@ -13572,7 +18928,7 @@ fn record_trade_lifecycle_feedback_in_batch(
     outbox: &mut LogicalLifecycleOutboxV1,
     reservation: &LifecycleBatchReservationV1,
     feedback: TradeFinalityTransitionEffectV1,
-) -> Result<(), SessionError> {
+) -> Result<Option<DurablePrivateOutputDraftV1>, SessionError> {
     let account_instance_key = session.execution_state().account_instance_key().clone();
     let mut feedback_id_hash = CanonicalHasher::new("SIM_TRADE_LIFECYCLE_FEEDBACK_ID_V1");
     feedback_id_hash.text(&feedback.trade_id);
@@ -13616,8 +18972,7 @@ fn record_trade_lifecycle_feedback_in_batch(
                 .map(AccountDeltaReferenceV1::from),
             account_delta: feedback.account_delta,
         }),
-    )?;
-    Ok(())
+    )
 }
 
 fn record_settlement_lifecycle_feedbacks_in_batch(
@@ -13625,7 +18980,8 @@ fn record_settlement_lifecycle_feedbacks_in_batch(
     outbox: &mut LogicalLifecycleOutboxV1,
     reservation: &LifecycleBatchReservationV1,
     feedbacks: Vec<SettlementLifecycleFeedbackSeedV1>,
-) -> Result<(), SessionError> {
+) -> Result<Vec<DurablePrivateOutputDraftV1>, SessionError> {
+    let mut durable_drafts = Vec::new();
     for feedback in feedbacks {
         let mut feedback_id_hash = CanonicalHasher::new("SIM_SETTLEMENT_LIFECYCLE_FEEDBACK_ID_V1");
         feedback_id_hash.text(&feedback.settlement_identity);
@@ -13641,7 +18997,7 @@ fn record_settlement_lifecycle_feedbacks_in_batch(
         delivery_id_hash.text(&session.session_spec().session_id);
         delivery_id_hash.text(&feedback_id);
         let delivery_id = delivery_id_hash.finish().0;
-        outbox.record_for_batch(
+        if let Some(draft) = outbox.record_for_batch(
             reservation,
             LifecycleFeedbackDraftV1::Settlement(SettlementLifecycleFeedbackDraftV1 {
                 feedback_id,
@@ -13652,9 +19008,11 @@ fn record_settlement_lifecycle_feedbacks_in_batch(
                 settlement_identity: feedback.settlement_identity,
                 event: feedback.event,
             }),
-        )?;
+        )? {
+            durable_drafts.push(draft);
+        }
     }
-    Ok(())
+    Ok(durable_drafts)
 }
 
 fn order_lifecycle_event_identity(event: OrderLifecycleEventKindV1) -> &'static str {
@@ -13668,16 +19026,390 @@ fn order_lifecycle_event_identity(event: OrderLifecycleEventKindV1) -> &'static 
     }
 }
 
+fn order_lifecycle_feedback_id_v2(
+    session_id: &str,
+    platform_order_id: &str,
+    event_kind: OrderLifecycleEventKindV1,
+) -> String {
+    let mut hash = CanonicalHasher::new("SIM_ORDER_LIFECYCLE_FEEDBACK_ID_V2");
+    hash.text(session_id);
+    hash.text(platform_order_id);
+    hash.text(order_lifecycle_event_identity(event_kind));
+    hash.finish().0
+}
+
+fn order_lifecycle_delivery_id_v1(session_id: &str, feedback_id: &str) -> String {
+    let mut hash = CanonicalHasher::new("SIM_ORDER_LIFECYCLE_DELIVERY_ID_V1");
+    hash.text(session_id);
+    hash.text(feedback_id);
+    hash.finish().0
+}
+
+impl OrderLifecycleFeedbackDraftV1 {
+    fn identity_is_consistent(&self) -> bool {
+        let expected_feedback_id = order_lifecycle_feedback_id_v2(
+            &self.session_id,
+            &self.platform_order_id,
+            self.event_kind,
+        );
+        self.feedback_id == expected_feedback_id
+            && self.timing.feedback_id == expected_feedback_id
+            && self.delivery_id
+                == order_lifecycle_delivery_id_v1(&self.session_id, &expected_feedback_id)
+    }
+
+    fn recovery_binding_is_consistent(
+        &self,
+        expected_session_id: &str,
+        expected_account_instance_key: &AccountInstanceKeyV1,
+        expected_execution: Option<&ExecutionStateV1>,
+    ) -> bool {
+        self.identity_is_consistent()
+            && order_lifecycle_account_delta_binding_is_consistent(
+                &self.session_id,
+                &self.account_instance_key,
+                self.timing.platform_event_at_utc_ms,
+                &self.condition_id,
+                self.event_kind,
+                self.account_delta.as_ref(),
+                (expected_session_id, expected_account_instance_key),
+            )
+            && expected_execution
+                .is_none_or(|execution| self.order_graph_binding_is_consistent(execution))
+    }
+
+    fn order_graph_binding_is_consistent(&self, execution: &ExecutionStateV1) -> bool {
+        let Some(order) = execution.order(&self.platform_order_id) else {
+            return false;
+        };
+        if self.condition_id.0 != order.condition_id || self.token_id.0 != order.token_id {
+            return false;
+        }
+        let all_terminal_quantities_are_zero = self.venue_dust_closed_base_units == 0
+            && self.venue_dust_released_quote_units == 0
+            && self.market_resolved_canceled_base_units == 0
+            && self.market_resolved_released_quote_units == 0;
+        let accepted_fee_and_status = if self.event_kind == OrderLifecycleEventKindV1::OrderAccepted
+        {
+            let mut fee_units = 0_u128;
+            let mut initially_matched_base_units = 0_u128;
+            for fill in execution.fills_for_order(&self.platform_order_id) {
+                let Some(next_fee_units) = fee_units.checked_add(fill.immediate_taker_fee_units)
+                else {
+                    return false;
+                };
+                fee_units = next_fee_units;
+                if fill.matched_at_utc_ms == order.created_at_utc_ms
+                    && fill.liquidity_role == SimLiquidityRoleV1::Taker
+                {
+                    let Some(next_matched_base_units) =
+                        initially_matched_base_units.checked_add(fill.base_units)
+                    else {
+                        return false;
+                    };
+                    initially_matched_base_units = next_matched_base_units;
+                }
+            }
+            let status = match order.kind {
+                SimOrderKindStateV1::Fok | SimOrderKindStateV1::Fak => {
+                    simulated_order_status("MATCHED")
+                }
+                SimOrderKindStateV1::Gtc | SimOrderKindStateV1::Gtd { .. } => {
+                    let Some(accepted_base_units) = order.accepted_base_units else {
+                        return false;
+                    };
+                    let Some(initial_open_base_units) =
+                        accepted_base_units.checked_sub(initially_matched_base_units)
+                    else {
+                        return false;
+                    };
+                    if initial_open_base_units > 0 {
+                        simulated_order_status("LIVE")
+                    } else {
+                        simulated_order_status("MATCHED")
+                    }
+                }
+            };
+            Some((fee_units, status))
+        } else {
+            None
+        };
+        let expected_principal_units = match self.event_kind {
+            OrderLifecycleEventKindV1::OrderAccepted => {
+                let released_at_acceptance = if matches!(order.kind, SimOrderKindStateV1::Fak) {
+                    0
+                } else {
+                    order.released_quote_units
+                };
+                let Some(value) = order
+                    .accepted_quote_units
+                    .checked_sub(released_at_acceptance)
+                else {
+                    return false;
+                };
+                Some(value)
+            }
+            OrderLifecycleEventKindV1::FakUnspentReleased => Some(order.released_quote_units),
+            OrderLifecycleEventKindV1::VenueDustTerminal => {
+                Some(order.venue_dust_released_quote_units)
+            }
+            OrderLifecycleEventKindV1::MarketResolvedCanceled => {
+                Some(order.market_resolved_released_quote_units)
+            }
+            OrderLifecycleEventKindV1::CallerCanceled => Some(order.canceled_released_quote_units),
+            OrderLifecycleEventKindV1::GtdExpired => Some(order.expired_released_quote_units),
+        };
+        if expected_principal_units.is_none_or(|units| {
+            !order_lifecycle_balance_delta_is_consistent(
+                self.event_kind,
+                units,
+                accepted_fee_and_status
+                    .as_ref()
+                    .map_or(0, |(fee_units, _)| *fee_units),
+                &self.account_delta.balance_delta,
+            )
+        }) {
+            return false;
+        }
+        match self.event_kind {
+            OrderLifecycleEventKindV1::OrderAccepted => {
+                self.account_delta.reason_identity
+                    == format!("order-accepted:{}", self.platform_order_id)
+                    && self.timing.platform_event_at_utc_ms == order.created_at_utc_ms
+                    && accepted_fee_and_status
+                        .as_ref()
+                        .is_some_and(|(_, status)| self.order_status == *status)
+                    && all_terminal_quantities_are_zero
+            }
+            OrderLifecycleEventKindV1::FakUnspentReleased => {
+                matches!(order.kind, SimOrderKindStateV1::Fak)
+                    && order.released_quote_units > 0
+                    && self.account_delta.reason_identity
+                        == format!("fak-unspent:{}", self.platform_order_id)
+                    && self.timing.platform_event_at_utc_ms == order.created_at_utc_ms
+                    && self.order_status == simulated_order_status("MATCHED")
+                    && all_terminal_quantities_are_zero
+            }
+            OrderLifecycleEventKindV1::VenueDustTerminal => {
+                order
+                    .venue_dust_identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.0 == self.account_delta.reason_identity)
+                    && order.venue_dust_at_utc_ms == Some(self.timing.platform_event_at_utc_ms)
+                    && self.order_status == simulated_order_status("VENUE_DUST_TERMINAL")
+                    && self.venue_dust_closed_base_units == order.venue_dust_closed_base_units
+                    && self.venue_dust_released_quote_units == order.venue_dust_released_quote_units
+                    && self.market_resolved_canceled_base_units == 0
+                    && self.market_resolved_released_quote_units == 0
+            }
+            OrderLifecycleEventKindV1::MarketResolvedCanceled => {
+                order
+                    .market_resolution_effect_identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.0 == self.account_delta.reason_identity)
+                    && order.market_resolved_at_utc_ms == Some(self.timing.platform_event_at_utc_ms)
+                    && self.order_status
+                        == simulated_order_status("ORDER_STATUS_CANCELED_MARKET_RESOLVED")
+                    && self.venue_dust_closed_base_units == 0
+                    && self.venue_dust_released_quote_units == 0
+                    && self.market_resolved_canceled_base_units
+                        == order.market_resolved_canceled_base_units
+                    && self.market_resolved_released_quote_units
+                        == order.market_resolved_released_quote_units
+            }
+            OrderLifecycleEventKindV1::CallerCanceled => {
+                order
+                    .caller_cancel_effect_identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.0 == self.account_delta.reason_identity)
+                    && order.canceled_at_utc_ms == Some(self.timing.platform_event_at_utc_ms)
+                    && self.order_status == simulated_order_status("CANCELED")
+                    && all_terminal_quantities_are_zero
+            }
+            OrderLifecycleEventKindV1::GtdExpired => {
+                matches!(order.kind, SimOrderKindStateV1::Gtd { .. })
+                    && order
+                        .gtd_expiration_identity
+                        .as_ref()
+                        .is_some_and(|identity| identity.0 == self.account_delta.reason_identity)
+                    && order.expired_at_utc_ms == Some(self.timing.platform_event_at_utc_ms)
+                    && self.order_status == simulated_order_status("EXPIRED")
+                    && all_terminal_quantities_are_zero
+            }
+        }
+    }
+}
+
+fn order_lifecycle_balance_delta_is_consistent(
+    event_kind: OrderLifecycleEventKindV1,
+    principal_units: u128,
+    immediate_taker_fee_units: u128,
+    balance_delta: &contracts::PlatformAccountBalanceDeltaV1,
+) -> bool {
+    let Ok(principal_units) = i128::try_from(principal_units) else {
+        return false;
+    };
+    let Ok(immediate_taker_fee_units) = i128::try_from(immediate_taker_fee_units) else {
+        return false;
+    };
+    let signed_decimal = |units: i128| {
+        contracts::ExactDecimal(
+            Decimal::from_i128_with_scale(units, 6)
+                .normalize()
+                .to_string(),
+        )
+    };
+    let zero = signed_decimal(0);
+    let (available, principal, fee) = match event_kind {
+        OrderLifecycleEventKindV1::OrderAccepted => {
+            let Some(total) = principal_units.checked_add(immediate_taker_fee_units) else {
+                return false;
+            };
+            (-total, principal_units, immediate_taker_fee_units)
+        }
+        OrderLifecycleEventKindV1::FakUnspentReleased
+        | OrderLifecycleEventKindV1::VenueDustTerminal
+        | OrderLifecycleEventKindV1::MarketResolvedCanceled
+        | OrderLifecycleEventKindV1::CallerCanceled
+        | OrderLifecycleEventKindV1::GtdExpired => (principal_units, -principal_units, 0),
+    };
+    balance_delta.cash_pusd_delta == zero
+        && balance_delta.available_pusd_delta == signed_decimal(available)
+        && balance_delta.principal_encumbrance_pusd_delta == signed_decimal(principal)
+        && balance_delta.immediate_taker_fee_encumbrance_pusd_delta == signed_decimal(fee)
+        && balance_delta.outcome_balance_deltas.is_empty()
+        && balance_delta.maker_rebate_receivable_pusd_delta == zero
+        && balance_delta.taker_rebate_receivable_pusd_delta == zero
+        && balance_delta.maker_rebate_locked_remainder_pusd_delta == zero
+        && balance_delta.taker_rebate_locked_remainder_pusd_delta == zero
+}
+
+fn order_lifecycle_account_delta_reason(
+    event_kind: OrderLifecycleEventKindV1,
+) -> contracts::PlatformAccountDeltaReasonV1 {
+    match event_kind {
+        OrderLifecycleEventKindV1::OrderAccepted => {
+            contracts::PlatformAccountDeltaReasonV1::OrderAcceptedEncumbranceApplied
+        }
+        OrderLifecycleEventKindV1::FakUnspentReleased => {
+            contracts::PlatformAccountDeltaReasonV1::FakUnspentEncumbranceReleased
+        }
+        OrderLifecycleEventKindV1::VenueDustTerminal => {
+            contracts::PlatformAccountDeltaReasonV1::VenueDustEncumbranceReleased
+        }
+        OrderLifecycleEventKindV1::MarketResolvedCanceled => {
+            contracts::PlatformAccountDeltaReasonV1::MarketResolutionEncumbranceReleased
+        }
+        OrderLifecycleEventKindV1::CallerCanceled => {
+            contracts::PlatformAccountDeltaReasonV1::CallerCancellationEncumbranceReleased
+        }
+        OrderLifecycleEventKindV1::GtdExpired => {
+            contracts::PlatformAccountDeltaReasonV1::GtdExpirationEncumbranceReleased
+        }
+    }
+}
+
+fn order_lifecycle_account_delta_binding_is_consistent(
+    session_id: &str,
+    account_instance_key: &AccountInstanceKeyV1,
+    platform_event_at_utc_ms: i64,
+    condition_id: &ConditionId,
+    event_kind: OrderLifecycleEventKindV1,
+    account_delta: &PlatformAccountDeltaV1,
+    expected: (&str, &AccountInstanceKeyV1),
+) -> bool {
+    let (expected_session_id, expected_account_instance_key) = expected;
+    session_id == expected_session_id
+        && account_instance_key == expected_account_instance_key
+        && account_delta.account_instance_key == *expected_account_instance_key
+        && account_delta.account_instance_key == *account_instance_key
+        && account_delta.reason == order_lifecycle_account_delta_reason(event_kind)
+        && account_delta.condition_id.as_ref() == Some(condition_id)
+        && account_delta.platform_effective_at_utc_ms == platform_event_at_utc_ms
+}
+
+fn validate_recovered_order_lifecycle_feedback_binding(
+    feedback: &OrderLifecycleFeedbackV1,
+    expected_session_id: &str,
+    expected_account_instance_key: &AccountInstanceKeyV1,
+    expected_execution: Option<&ExecutionStateV1>,
+) -> Result<(), SessionCheckpointErrorV1> {
+    let feedback_id = order_lifecycle_feedback_id_v2(
+        &feedback.metadata.session_id,
+        &feedback.platform_order_id,
+        feedback.event_kind,
+    );
+    let graph_binding_is_consistent = if let Some(execution) = expected_execution {
+        let mut timing = recovered_lifecycle_timing(
+            feedback.metadata.platform_event_at_utc_ms,
+            feedback.metadata.feedback_received_at_utc_ms,
+            feedback.metadata.private_emission_sequence,
+        );
+        timing.feedback_id = feedback_id.clone();
+        let draft = OrderLifecycleFeedbackDraftV1 {
+            feedback_id: feedback_id.clone(),
+            delivery_id: feedback.metadata.delivery_id.clone(),
+            account_instance_key: feedback.metadata.account_instance_key.clone(),
+            session_id: feedback.metadata.session_id.clone(),
+            timing,
+            platform_order_id: feedback.platform_order_id.clone(),
+            condition_id: feedback.condition_id.clone(),
+            token_id: feedback.token_id.clone(),
+            event_kind: feedback.event_kind,
+            order_status: feedback.order_status.clone(),
+            venue_dust_closed_base_units: recovered_micro_units(
+                feedback.venue_dust_closed_base_quantity_shares,
+            )?,
+            venue_dust_released_quote_units: recovered_micro_units(
+                feedback.venue_dust_released_quote_amount_pusd,
+            )?,
+            market_resolved_canceled_base_units: recovered_micro_units(
+                feedback.market_resolved_canceled_base_quantity_shares,
+            )?,
+            market_resolved_released_quote_units: recovered_micro_units(
+                feedback.market_resolved_released_quote_amount_pusd,
+            )?,
+            account_delta: Arc::new(feedback.account_delta.clone()),
+        };
+        draft.order_graph_binding_is_consistent(execution)
+    } else {
+        true
+    };
+    if feedback.metadata.delivery_id
+        != order_lifecycle_delivery_id_v1(&feedback.metadata.session_id, &feedback_id)
+        || !order_lifecycle_account_delta_binding_is_consistent(
+            &feedback.metadata.session_id,
+            &feedback.metadata.account_instance_key,
+            feedback.metadata.platform_event_at_utc_ms,
+            &feedback.condition_id,
+            feedback.event_kind,
+            &feedback.account_delta,
+            (expected_session_id, expected_account_instance_key),
+        )
+        || !graph_binding_is_consistent
+    {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "已确认订单生命周期反馈与会话、账户变化或稳定身份不一致".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn seal_order_lifecycle_feedback(
     draft: &OrderLifecycleFeedbackDraftV1,
     candidate: &crate::session::VisiblePrivateFactV1,
+    expected_execution: Option<&ExecutionStateV1>,
 ) -> Result<Arc<OrderLifecycleFeedbackV1>, SimExecutionContractErrorV1> {
     let crate::session::PrivateVisibilityEvidenceV1::LifecycleFeedback { feedback_id } =
         &candidate.evidence
     else {
         return Err(SimExecutionContractErrorV1::ResponseDeliveryIdentityConflict);
     };
-    if feedback_id != &draft.feedback_id
+    if !draft.recovery_binding_is_consistent(
+        &draft.session_id,
+        &draft.account_instance_key,
+        expected_execution,
+    ) || feedback_id != &draft.feedback_id
         || candidate.received_at_utc_ms != draft.timing.feedback_received_at_utc_ms
         || candidate.private_emission_sequence != draft.timing.private_emission_sequence
     {
@@ -14102,16 +19834,28 @@ fn recompute_order_lifecycle_payload_sha256(
         ORDER_LIFECYCLE_FEEDBACK_SCHEMA_V1,
         &metadata.evidence_source,
     )?;
+    let feedback_id = order_lifecycle_feedback_id_v2(
+        &metadata.session_id,
+        &feedback.platform_order_id,
+        feedback.event_kind,
+    );
+    if metadata.delivery_id != order_lifecycle_delivery_id_v1(&metadata.session_id, &feedback_id) {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "已确认订单生命周期反馈的稳定逻辑身份不符".to_owned(),
+        ));
+    }
+    let mut timing = recovered_lifecycle_timing(
+        metadata.platform_event_at_utc_ms,
+        metadata.feedback_received_at_utc_ms,
+        metadata.private_emission_sequence,
+    );
+    timing.feedback_id = feedback_id.clone();
     let draft = OrderLifecycleFeedbackDraftV1 {
-        feedback_id: String::new(),
+        feedback_id,
         delivery_id: metadata.delivery_id.clone(),
         account_instance_key: metadata.account_instance_key.clone(),
         session_id: metadata.session_id.clone(),
-        timing: recovered_lifecycle_timing(
-            metadata.platform_event_at_utc_ms,
-            metadata.feedback_received_at_utc_ms,
-            metadata.private_emission_sequence,
-        ),
+        timing,
         platform_order_id: feedback.platform_order_id.clone(),
         condition_id: feedback.condition_id.clone(),
         token_id: feedback.token_id.clone(),
@@ -15427,6 +21171,27 @@ impl SealedPrivateDeliveryV1 {
         }
     }
 
+    fn validate_order_lifecycle_recovery_binding(
+        &self,
+        expected_session_id: &str,
+        expected_account_instance_key: &AccountInstanceKeyV1,
+        expected_execution: Option<&ExecutionStateV1>,
+    ) -> Result<(), SessionCheckpointErrorV1> {
+        match self {
+            Self::Lifecycle(SealedLifecycleFeedbackV1::Order(feedback)) => {
+                validate_recovered_order_lifecycle_feedback_binding(
+                    feedback,
+                    expected_session_id,
+                    expected_account_instance_key,
+                    expected_execution,
+                )
+            }
+            Self::Direct(_)
+            | Self::Lifecycle(SealedLifecycleFeedbackV1::Trade(_))
+            | Self::Lifecycle(SealedLifecycleFeedbackV1::Settlement(_)) => Ok(()),
+        }
+    }
+
     fn validate_account_deltas(&self) -> Result<(), SessionCheckpointErrorV1> {
         let validate = |delta: &PlatformAccountDeltaV1| {
             validate_platform_account_delta_integrity(delta).map_err(|error| {
@@ -15594,10 +21359,142 @@ struct DirectResponseOutboxEntryV1 {
     sealed: Option<SealedDirectResponseV1>,
 }
 
+impl DirectResponseOutboxEntryV1 {
+    fn record_part(
+        &mut self,
+        global_request_id: &str,
+        part: DirectResponsePartV1,
+    ) -> Result<(), SimExecutionContractErrorV1> {
+        if !part.method_compatible(self.method) {
+            return Err(SimExecutionContractErrorV1::ActionIdentityConflict(
+                format!("{global_request_id}:method"),
+            ));
+        }
+        let ordinal = part.ordinal();
+        let slot = self.parts.get_mut(ordinal).ok_or_else(|| {
+            SimExecutionContractErrorV1::ActionIdentityConflict(format!(
+                "{global_request_id}:{ordinal}"
+            ))
+        })?;
+        if let Some(existing) = slot {
+            if existing == &part {
+                return Ok(());
+            }
+            return Err(SimExecutionContractErrorV1::ActionIdentityConflict(
+                format!("{global_request_id}:{ordinal}"),
+            ));
+        }
+        self.platform_responded_at_utc_ms = Some(
+            self.platform_responded_at_utc_ms
+                .map_or(part.effective_processing_at_utc_ms(), |at| {
+                    at.max(part.effective_processing_at_utc_ms())
+                }),
+        );
+        *slot = Some(part);
+        Ok(())
+    }
+
+    fn complete_draft(
+        &mut self,
+        context: RequestContextV1,
+        transit: &RequestTransitV1,
+        rule_snapshot_sha256: Sha256Hex,
+        scenario_sha256: Sha256Hex,
+        fee_rule: SubmissionFeeRuleIdentityV1,
+    ) -> Result<Option<DurablePrivateOutputDraftV1>, SimExecutionContractErrorV1> {
+        if self.draft.is_some() {
+            return Ok(None);
+        }
+        let platform_responded_at_utc_ms = transit
+            .platform_responded_at_utc_ms
+            .ok_or(SimExecutionContractErrorV1::ResponseBeforeLogicalCompletion)?;
+        let response_received_at_utc_ms = transit
+            .response_received_at_utc_ms
+            .ok_or(SimExecutionContractErrorV1::ResponseBeforeLogicalCompletion)?;
+        let private_emission_sequence = transit
+            .private_emission_sequence
+            .ok_or(SimExecutionContractErrorV1::ResponseBeforeLogicalCompletion)?;
+        if self.platform_responded_at_utc_ms != Some(platform_responded_at_utc_ms)
+            || self.parts.iter().any(Option::is_none)
+        {
+            return Err(SimExecutionContractErrorV1::ResponseBeforeLogicalCompletion);
+        }
+        let parts = self
+            .parts
+            .iter()
+            .cloned()
+            .map(|part| part.expect("all response part slots were checked above"))
+            .collect();
+        let draft = DirectResponseDraftV1 {
+            method: self.method,
+            delivery_id: self.delivery_id.clone(),
+            context,
+            platform_responded_at_utc_ms,
+            response_received_at_utc_ms,
+            private_emission_sequence,
+            rule_snapshot_sha256,
+            scenario_sha256,
+            fee_rule,
+            parts,
+        };
+        self.draft = Some(draft.clone());
+        Ok(Some(DurablePrivateOutputDraftV1::Direct { draft }))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct LogicalDirectResponseOutboxV1 {
     capacity: usize,
     entries: BTreeMap<String, DirectResponseOutboxEntryV1>,
+}
+
+struct PreparedDirectResponseReservationV1 {
+    global_request_id: String,
+    entry_to_insert: Option<DirectResponseOutboxEntryV1>,
+}
+
+struct PreparedDirectResponseEntryDeltaV2<'a> {
+    outbox: &'a mut LogicalDirectResponseOutboxV1,
+    global_request_id: String,
+    candidate_entry: DirectResponseOutboxEntryV1,
+}
+
+impl PreparedDirectResponseEntryDeltaV2<'_> {
+    fn platform_responded_at(&self) -> Option<i64> {
+        self.candidate_entry.platform_responded_at_utc_ms
+    }
+
+    fn record_part(
+        &mut self,
+        part: DirectResponsePartV1,
+    ) -> Result<(), SimExecutionContractErrorV1> {
+        self.candidate_entry
+            .record_part(&self.global_request_id, part)
+    }
+
+    fn complete_draft(
+        &mut self,
+        context: RequestContextV1,
+        transit: &RequestTransitV1,
+        rule_snapshot_sha256: Sha256Hex,
+        scenario_sha256: Sha256Hex,
+        fee_rule: SubmissionFeeRuleIdentityV1,
+    ) -> Result<Option<DurablePrivateOutputDraftV1>, SimExecutionContractErrorV1> {
+        self.candidate_entry.complete_draft(
+            context,
+            transit,
+            rule_snapshot_sha256,
+            scenario_sha256,
+            fee_rule,
+        )
+    }
+
+    fn commit(self) {
+        self.outbox
+            .entries
+            .insert(self.global_request_id, self.candidate_entry)
+            .expect("独占准备期间目标直接响应条目必须仍在载荷池中");
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -15745,6 +21642,22 @@ impl LifecycleFeedbackDraftV1 {
         }
     }
 
+    fn order_recovery_binding_is_consistent(
+        &self,
+        expected_session_id: &str,
+        expected_account_instance_key: &AccountInstanceKeyV1,
+        expected_execution: Option<&ExecutionStateV1>,
+    ) -> bool {
+        match self {
+            Self::Order(draft) => draft.recovery_binding_is_consistent(
+                expected_session_id,
+                expected_account_instance_key,
+                expected_execution,
+            ),
+            Self::Trade(_) | Self::Settlement(_) => true,
+        }
+    }
+
     fn visit_account_deltas(
         &self,
         visitor: &mut impl FnMut(&PlatformAccountDeltaV1) -> Result<(), SessionCheckpointErrorV1>,
@@ -15846,12 +21759,732 @@ struct LifecycleBatchReservationV1 {
     work_id: String,
 }
 
+enum PreparedLifecycleBatchReservationChangeV1 {
+    None,
+    CreateBatch,
+    AddWorkToExistingBatch,
+}
+
+struct PreparedLifecycleBatchReservationV1 {
+    reservation: LifecycleBatchReservationV1,
+    change: PreparedLifecycleBatchReservationChangeV1,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct LogicalLifecycleOutboxV1 {
     capacity: usize,
     batches: BTreeMap<String, LifecycleBatchV1>,
     entries: BTreeMap<String, LifecycleOutboxEntryV1>,
     work_batch_ids: BTreeMap<String, String>,
+}
+
+#[derive(Default)]
+struct PreparedLiveLifecycleBatchPatchV2 {
+    added_open_work_ids: BTreeSet<String>,
+    removed_open_work_ids: BTreeSet<String>,
+    added_feedback_ids: BTreeSet<String>,
+    feedback_received_at_count_increments: BTreeMap<i64, usize>,
+}
+
+enum PreparedLifecycleBatchChangeV2 {
+    Live(PreparedLiveLifecycleBatchPatchV2),
+    New(LifecycleBatchV1),
+    Removed,
+}
+
+struct PreparedLifecycleOutboxDeltaV2<'a> {
+    outbox: &'a mut LogicalLifecycleOutboxV1,
+    batch_changes: BTreeMap<String, PreparedLifecycleBatchChangeV2>,
+    work_batch_id_changes: BTreeMap<String, Option<String>>,
+    entry_inserts: BTreeMap<String, LifecycleOutboxEntryV1>,
+}
+
+impl PreparedLifecycleOutboxDeltaV2<'_> {
+    fn candidate_batch_exists(&self, batch_id: &str) -> bool {
+        match self.batch_changes.get(batch_id) {
+            Some(PreparedLifecycleBatchChangeV2::Removed) => false,
+            Some(
+                PreparedLifecycleBatchChangeV2::Live(_) | PreparedLifecycleBatchChangeV2::New(_),
+            ) => true,
+            None => self.outbox.batches.contains_key(batch_id),
+        }
+    }
+
+    fn candidate_batch_contains_open_work(&self, batch_id: &str, work_id: &str) -> bool {
+        match self.batch_changes.get(batch_id) {
+            Some(PreparedLifecycleBatchChangeV2::New(batch)) => {
+                batch.open_work_ids.contains(work_id)
+            }
+            Some(PreparedLifecycleBatchChangeV2::Live(patch)) => {
+                patch.added_open_work_ids.contains(work_id)
+                    || (!patch.removed_open_work_ids.contains(work_id)
+                        && self
+                            .outbox
+                            .batches
+                            .get(batch_id)
+                            .is_some_and(|batch| batch.open_work_ids.contains(work_id)))
+            }
+            Some(PreparedLifecycleBatchChangeV2::Removed) => false,
+            None => self
+                .outbox
+                .batches
+                .get(batch_id)
+                .is_some_and(|batch| batch.open_work_ids.contains(work_id)),
+        }
+    }
+
+    fn candidate_batch_contains_feedback(&self, batch_id: &str, feedback_id: &str) -> bool {
+        match self.batch_changes.get(batch_id) {
+            Some(PreparedLifecycleBatchChangeV2::New(batch)) => {
+                batch.feedback_ids.contains(feedback_id)
+            }
+            Some(PreparedLifecycleBatchChangeV2::Live(patch)) => {
+                patch.added_feedback_ids.contains(feedback_id)
+                    || self
+                        .outbox
+                        .batches
+                        .get(batch_id)
+                        .is_some_and(|batch| batch.feedback_ids.contains(feedback_id))
+            }
+            Some(PreparedLifecycleBatchChangeV2::Removed) => false,
+            None => self
+                .outbox
+                .batches
+                .get(batch_id)
+                .is_some_and(|batch| batch.feedback_ids.contains(feedback_id)),
+        }
+    }
+
+    fn candidate_feedback_received_at_count(
+        &self,
+        batch_id: &str,
+        received_at: i64,
+    ) -> Result<usize, SessionError> {
+        match self.batch_changes.get(batch_id) {
+            Some(PreparedLifecycleBatchChangeV2::New(batch)) => Ok(batch
+                .feedback_received_at_counts
+                .get(&received_at)
+                .copied()
+                .unwrap_or(0)),
+            Some(PreparedLifecycleBatchChangeV2::Live(patch)) => {
+                let live = self
+                    .outbox
+                    .batches
+                    .get(batch_id)
+                    .and_then(|batch| batch.feedback_received_at_counts.get(&received_at).copied())
+                    .unwrap_or(0);
+                let increment = patch
+                    .feedback_received_at_count_increments
+                    .get(&received_at)
+                    .copied()
+                    .unwrap_or(0);
+                live.checked_add(increment)
+                    .ok_or(SessionError::ResponseDeliveryIdentityConflict)
+            }
+            Some(PreparedLifecycleBatchChangeV2::Removed) => Err(SessionError::RequestNotFound(
+                format!("lifecycle batch:{batch_id}"),
+            )),
+            None => self
+                .outbox
+                .batches
+                .get(batch_id)
+                .map(|batch| {
+                    batch
+                        .feedback_received_at_counts
+                        .get(&received_at)
+                        .copied()
+                        .unwrap_or(0)
+                })
+                .ok_or_else(|| {
+                    SessionError::RequestNotFound(format!("lifecycle batch:{batch_id}"))
+                }),
+        }
+    }
+
+    fn candidate_earliest_feedback_received_at(
+        &self,
+        batch_id: &str,
+    ) -> Result<Option<i64>, SessionError> {
+        match self.batch_changes.get(batch_id) {
+            Some(PreparedLifecycleBatchChangeV2::New(batch)) => {
+                LogicalLifecycleOutboxV1::earliest_feedback_received_at_for_batch(batch)
+            }
+            Some(PreparedLifecycleBatchChangeV2::Live(patch)) => {
+                let live = self.outbox.batches.get(batch_id).ok_or_else(|| {
+                    SessionError::RequestNotFound(format!("lifecycle batch:{batch_id}"))
+                })?;
+                let feedback_ids_are_empty =
+                    live.feedback_ids.is_empty() && patch.added_feedback_ids.is_empty();
+                let received_at_counts_are_empty = live.feedback_received_at_counts.is_empty()
+                    && patch.feedback_received_at_count_increments.is_empty();
+                if feedback_ids_are_empty != received_at_counts_are_empty {
+                    return Err(SessionError::ResponseDeliveryIdentityConflict);
+                }
+                Ok(
+                    match (
+                        live.feedback_received_at_counts.first_key_value(),
+                        patch
+                            .feedback_received_at_count_increments
+                            .first_key_value(),
+                    ) {
+                        (Some((live_received_at, _)), Some((added_received_at, _))) => {
+                            Some((*live_received_at).min(*added_received_at))
+                        }
+                        (Some((received_at, _)), None) | (None, Some((received_at, _))) => {
+                            Some(*received_at)
+                        }
+                        (None, None) => None,
+                    },
+                )
+            }
+            Some(PreparedLifecycleBatchChangeV2::Removed) => Err(SessionError::RequestNotFound(
+                format!("lifecycle batch:{batch_id}"),
+            )),
+            None => self
+                .outbox
+                .batches
+                .get(batch_id)
+                .ok_or_else(|| SessionError::RequestNotFound(format!("lifecycle batch:{batch_id}")))
+                .and_then(LogicalLifecycleOutboxV1::earliest_feedback_received_at_for_batch),
+        }
+    }
+
+    fn candidate_batch_has_request_work(&self, batch_id: &str) -> bool {
+        match self.batch_changes.get(batch_id) {
+            Some(PreparedLifecycleBatchChangeV2::New(batch)) => batch
+                .open_work_ids
+                .iter()
+                .any(|work_id| work_id.starts_with("REQUEST:")),
+            Some(PreparedLifecycleBatchChangeV2::Live(patch)) => {
+                patch
+                    .added_open_work_ids
+                    .iter()
+                    .any(|work_id| work_id.starts_with("REQUEST:"))
+                    || self.outbox.batches.get(batch_id).is_some_and(|batch| {
+                        batch.open_work_ids.iter().any(|work_id| {
+                            !patch.removed_open_work_ids.contains(work_id)
+                                && work_id.starts_with("REQUEST:")
+                        })
+                    })
+            }
+            Some(PreparedLifecycleBatchChangeV2::Removed) => false,
+            None => self.outbox.batches.get(batch_id).is_some_and(|batch| {
+                batch
+                    .open_work_ids
+                    .iter()
+                    .any(|work_id| work_id.starts_with("REQUEST:"))
+            }),
+        }
+    }
+
+    fn candidate_reusable_batch_threshold(
+        &self,
+        batch_id: &str,
+        platform_effective_at_utc_ms: i64,
+    ) -> Result<Option<i64>, SessionError> {
+        Ok(
+            match self.candidate_earliest_feedback_received_at(batch_id)? {
+                Some(received_at) if platform_effective_at_utc_ms <= received_at => {
+                    Some(received_at)
+                }
+                Some(_) => None,
+                None if self.candidate_batch_has_request_work(batch_id) => Some(i64::MAX),
+                None => None,
+            },
+        )
+    }
+
+    fn candidate_batch_is_empty(&self, batch_id: &str) -> Result<bool, SessionError> {
+        match self.batch_changes.get(batch_id) {
+            Some(PreparedLifecycleBatchChangeV2::New(batch)) => Ok(batch.open_work_ids.is_empty()
+                && batch.feedback_ids.is_empty()
+                && batch.feedback_received_at_counts.is_empty()),
+            Some(PreparedLifecycleBatchChangeV2::Live(patch)) => {
+                let live = self.outbox.batches.get(batch_id).ok_or_else(|| {
+                    SessionError::RequestNotFound(format!("lifecycle batch:{batch_id}"))
+                })?;
+                let open_work_is_empty = patch.added_open_work_ids.is_empty()
+                    && patch.removed_open_work_ids.len() == live.open_work_ids.len();
+                Ok(open_work_is_empty
+                    && live.feedback_ids.is_empty()
+                    && patch.added_feedback_ids.is_empty()
+                    && live.feedback_received_at_counts.is_empty()
+                    && patch.feedback_received_at_count_increments.is_empty())
+            }
+            Some(PreparedLifecycleBatchChangeV2::Removed) => Ok(true),
+            None => self
+                .outbox
+                .batches
+                .get(batch_id)
+                .map(|batch| {
+                    batch.open_work_ids.is_empty()
+                        && batch.feedback_ids.is_empty()
+                        && batch.feedback_received_at_counts.is_empty()
+                })
+                .ok_or_else(|| {
+                    SessionError::RequestNotFound(format!("lifecycle batch:{batch_id}"))
+                }),
+        }
+    }
+
+    fn candidate_work_batch_id(&self, work_id: &str) -> Option<&str> {
+        match self.work_batch_id_changes.get(work_id) {
+            Some(candidate) => candidate.as_deref(),
+            None => self.outbox.work_batch_ids.get(work_id).map(String::as_str),
+        }
+    }
+
+    fn candidate_entry(&self, feedback_id: &str) -> Option<&LifecycleOutboxEntryV1> {
+        self.entry_inserts
+            .get(feedback_id)
+            .or_else(|| self.outbox.entries.get(feedback_id))
+    }
+
+    fn candidate_batch_count(&self) -> usize {
+        let removed_live_batches = self
+            .batch_changes
+            .iter()
+            .filter(|(batch_id, change)| {
+                matches!(change, PreparedLifecycleBatchChangeV2::Removed)
+                    && self.outbox.batches.contains_key(*batch_id)
+            })
+            .count();
+        let inserted_virtual_batches = self
+            .batch_changes
+            .iter()
+            .filter(|(batch_id, change)| {
+                matches!(change, PreparedLifecycleBatchChangeV2::New(_))
+                    && !self.outbox.batches.contains_key(*batch_id)
+            })
+            .count();
+        self.outbox
+            .batches
+            .len()
+            .saturating_sub(removed_live_batches)
+            .saturating_add(inserted_virtual_batches)
+    }
+
+    fn reserve_request(
+        &mut self,
+        global_request_id: &str,
+        platform_effective_at_utc_ms: i64,
+        occupied_capacity_leases: usize,
+    ) -> Result<LifecycleBatchReservationV1, SessionError> {
+        let work_id = LogicalLifecycleOutboxV1::request_batch_id(global_request_id);
+        if let Some(batch_id) = self.candidate_work_batch_id(&work_id).map(str::to_owned) {
+            if !self.candidate_batch_exists(&batch_id) {
+                return Err(SessionError::RequestNotFound(format!(
+                    "lifecycle batch:{batch_id}"
+                )));
+            }
+            if !self.candidate_batch_contains_open_work(&batch_id, &work_id) {
+                return Err(SessionError::ResponseDeliveryIdentityConflict);
+            }
+            if self
+                .candidate_earliest_feedback_received_at(&batch_id)?
+                .is_some_and(|received_at| platform_effective_at_utc_ms > received_at)
+            {
+                return Err(SessionError::ResponseOutboxFull);
+            }
+            return Ok(LifecycleBatchReservationV1 { batch_id, work_id });
+        }
+        self.reserve_visibility_work(
+            work_id,
+            platform_effective_at_utc_ms,
+            occupied_capacity_leases,
+        )
+    }
+
+    fn reserve_platform_work(
+        &mut self,
+        causal_identity: &str,
+        preferred_global_request_id: Option<&str>,
+        platform_effective_at_utc_ms: i64,
+        occupied_capacity_leases: usize,
+    ) -> Result<LifecycleBatchReservationV1, SessionError> {
+        let work_id = format!("PLATFORM:{causal_identity}");
+        if self.candidate_work_batch_id(&work_id).is_some() {
+            return Err(SessionError::ResponseDeliveryIdentityConflict);
+        }
+        if let Some(global_request_id) = preferred_global_request_id {
+            let request_work_id = LogicalLifecycleOutboxV1::request_batch_id(global_request_id);
+            if let Some(batch_id) = self
+                .candidate_work_batch_id(&request_work_id)
+                .map(str::to_owned)
+            {
+                if !self.candidate_batch_exists(&batch_id) {
+                    return Err(SessionError::RequestNotFound(format!(
+                        "lifecycle batch:{batch_id}"
+                    )));
+                }
+                if !self.candidate_batch_contains_open_work(&batch_id, &request_work_id) {
+                    return Err(SessionError::ResponseDeliveryIdentityConflict);
+                }
+                if self
+                    .candidate_earliest_feedback_received_at(&batch_id)?
+                    .is_some_and(|received_at| platform_effective_at_utc_ms > received_at)
+                {
+                    return Err(SessionError::ResponseOutboxFull);
+                }
+                return self.add_work_to_batch(batch_id, work_id);
+            }
+        }
+        self.reserve_visibility_work(
+            work_id,
+            platform_effective_at_utc_ms,
+            occupied_capacity_leases,
+        )
+    }
+
+    fn reserve_visibility_work(
+        &mut self,
+        work_id: String,
+        platform_effective_at_utc_ms: i64,
+        occupied_capacity_leases: usize,
+    ) -> Result<LifecycleBatchReservationV1, SessionError> {
+        if self.candidate_work_batch_id(&work_id).is_some() || self.candidate_batch_exists(&work_id)
+        {
+            return Err(SessionError::ResponseDeliveryIdentityConflict);
+        }
+        if let Some(batch_id) = self.select_reusable_batch(platform_effective_at_utc_ms)? {
+            return self.add_work_to_batch(batch_id, work_id);
+        }
+        if self
+            .candidate_batch_count()
+            .saturating_add(occupied_capacity_leases)
+            >= self.outbox.capacity
+        {
+            return Err(SessionError::ResponseOutboxFull);
+        }
+        let batch_id = work_id.clone();
+        self.batch_changes.insert(
+            batch_id.clone(),
+            PreparedLifecycleBatchChangeV2::New(LifecycleBatchV1 {
+                open_work_ids: BTreeSet::from([work_id.clone()]),
+                feedback_ids: BTreeSet::new(),
+                feedback_received_at_counts: BTreeMap::new(),
+            }),
+        );
+        self.work_batch_id_changes
+            .insert(work_id.clone(), Some(batch_id.clone()));
+        Ok(LifecycleBatchReservationV1 { batch_id, work_id })
+    }
+
+    fn select_reusable_batch(
+        &self,
+        platform_effective_at_utc_ms: i64,
+    ) -> Result<Option<String>, SessionError> {
+        let mut reusable = None::<(i64, String)>;
+        for batch_id in self.outbox.batches.keys() {
+            if self.candidate_batch_exists(batch_id)
+                && let Some(threshold) =
+                    self.candidate_reusable_batch_threshold(batch_id, platform_effective_at_utc_ms)?
+            {
+                let candidate = (threshold, batch_id.clone());
+                if reusable.as_ref().is_none_or(|current| candidate < *current) {
+                    reusable = Some(candidate);
+                }
+            }
+        }
+        for (batch_id, change) in &self.batch_changes {
+            if !self.outbox.batches.contains_key(batch_id)
+                && matches!(change, PreparedLifecycleBatchChangeV2::New(_))
+                && let Some(threshold) =
+                    self.candidate_reusable_batch_threshold(batch_id, platform_effective_at_utc_ms)?
+            {
+                let candidate = (threshold, batch_id.clone());
+                if reusable.as_ref().is_none_or(|current| candidate < *current) {
+                    reusable = Some(candidate);
+                }
+            }
+        }
+        Ok(reusable.map(|(_, batch_id)| batch_id))
+    }
+
+    fn add_work_to_batch(
+        &mut self,
+        batch_id: String,
+        work_id: String,
+    ) -> Result<LifecycleBatchReservationV1, SessionError> {
+        if !self.candidate_batch_exists(&batch_id) {
+            return Err(SessionError::RequestNotFound(format!(
+                "lifecycle batch:{batch_id}"
+            )));
+        }
+        if self.candidate_work_batch_id(&work_id).is_some()
+            || self.candidate_batch_contains_open_work(&batch_id, &work_id)
+        {
+            return Err(SessionError::ResponseDeliveryIdentityConflict);
+        }
+        let live_contains_work = self
+            .outbox
+            .batches
+            .get(&batch_id)
+            .is_some_and(|batch| batch.open_work_ids.contains(&work_id));
+        match self.batch_changes.entry(batch_id.clone()) {
+            std::collections::btree_map::Entry::Occupied(mut entry) => match entry.get_mut() {
+                PreparedLifecycleBatchChangeV2::New(batch) => {
+                    debug_assert!(batch.open_work_ids.insert(work_id.clone()));
+                }
+                PreparedLifecycleBatchChangeV2::Live(patch) => {
+                    if live_contains_work {
+                        debug_assert!(patch.removed_open_work_ids.remove(&work_id));
+                    } else {
+                        debug_assert!(patch.added_open_work_ids.insert(work_id.clone()));
+                    }
+                }
+                PreparedLifecycleBatchChangeV2::Removed => {
+                    unreachable!("removed lifecycle batch was excluded from candidate selection")
+                }
+            },
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                debug_assert!(!live_contains_work);
+                entry.insert(PreparedLifecycleBatchChangeV2::Live(
+                    PreparedLiveLifecycleBatchPatchV2 {
+                        added_open_work_ids: BTreeSet::from([work_id.clone()]),
+                        ..PreparedLiveLifecycleBatchPatchV2::default()
+                    },
+                ));
+            }
+        }
+        self.work_batch_id_changes
+            .insert(work_id.clone(), Some(batch_id.clone()));
+        Ok(LifecycleBatchReservationV1 { batch_id, work_id })
+    }
+
+    fn record_for_batch(
+        &mut self,
+        reservation: &LifecycleBatchReservationV1,
+        draft: LifecycleFeedbackDraftV1,
+    ) -> Result<Option<DurablePrivateOutputDraftV1>, SessionError> {
+        if !self.candidate_batch_exists(&reservation.batch_id) {
+            return Err(SessionError::RequestNotFound(format!(
+                "lifecycle batch:{}",
+                reservation.batch_id
+            )));
+        }
+        if !self.candidate_batch_contains_open_work(&reservation.batch_id, &reservation.work_id) {
+            return Err(SessionError::ResponseDeliveryIdentityConflict);
+        }
+        let feedback_id = draft.feedback_id().to_owned();
+        if let Some(existing) = self.candidate_entry(&feedback_id) {
+            if existing.batch_id == reservation.batch_id && existing.draft == draft {
+                return Ok(None);
+            }
+            return Err(SessionError::FeedbackIdentityConflict(feedback_id));
+        }
+        if self.candidate_batch_contains_feedback(&reservation.batch_id, &feedback_id) {
+            return Err(SessionError::ResponseDeliveryIdentityConflict);
+        }
+        let received_at = draft.timing().feedback_received_at_utc_ms;
+        let next_received_at_count = self
+            .candidate_feedback_received_at_count(&reservation.batch_id, received_at)?
+            .checked_add(1)
+            .ok_or(SessionError::ResponseDeliveryIdentityConflict)?;
+        let durable_draft = DurablePrivateOutputDraftV1::Lifecycle {
+            draft: draft.clone(),
+        };
+        match self.batch_changes.entry(reservation.batch_id.clone()) {
+            std::collections::btree_map::Entry::Occupied(mut entry) => match entry.get_mut() {
+                PreparedLifecycleBatchChangeV2::New(batch) => {
+                    debug_assert!(batch.feedback_ids.insert(feedback_id.clone()));
+                    batch
+                        .feedback_received_at_counts
+                        .insert(received_at, next_received_at_count);
+                }
+                PreparedLifecycleBatchChangeV2::Live(patch) => {
+                    debug_assert!(patch.added_feedback_ids.insert(feedback_id.clone()));
+                    let increment = patch
+                        .feedback_received_at_count_increments
+                        .entry(received_at)
+                        .or_insert(0);
+                    *increment = increment
+                        .checked_add(1)
+                        .expect("已准备的接收时点计数增量必须可表示");
+                }
+                PreparedLifecycleBatchChangeV2::Removed => {
+                    unreachable!("removed lifecycle batch cannot accept feedback")
+                }
+            },
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(PreparedLifecycleBatchChangeV2::Live(
+                    PreparedLiveLifecycleBatchPatchV2 {
+                        added_feedback_ids: BTreeSet::from([feedback_id.clone()]),
+                        feedback_received_at_count_increments: BTreeMap::from([(received_at, 1)]),
+                        ..PreparedLiveLifecycleBatchPatchV2::default()
+                    },
+                ));
+            }
+        }
+        self.entry_inserts.insert(
+            feedback_id,
+            LifecycleOutboxEntryV1 {
+                batch_id: reservation.batch_id.clone(),
+                draft,
+                sealed: None,
+            },
+        );
+        Ok(Some(durable_draft))
+    }
+
+    fn complete_platform_work(
+        &mut self,
+        reservation: &LifecycleBatchReservationV1,
+    ) -> Result<(), SessionError> {
+        self.complete_work(reservation)
+    }
+
+    fn complete_request(
+        &mut self,
+        global_request_id: &str,
+        reservation: &LifecycleBatchReservationV1,
+    ) -> Result<(), SessionError> {
+        let work_id = LogicalLifecycleOutboxV1::request_batch_id(global_request_id);
+        if self.candidate_work_batch_id(&work_id) != Some(reservation.batch_id.as_str())
+            || reservation.work_id != work_id
+        {
+            return Err(SessionError::ResponseDeliveryIdentityConflict);
+        }
+        self.complete_work(reservation)
+    }
+
+    fn complete_work(
+        &mut self,
+        reservation: &LifecycleBatchReservationV1,
+    ) -> Result<(), SessionError> {
+        if self.candidate_work_batch_id(&reservation.work_id) != Some(reservation.batch_id.as_str())
+        {
+            return Err(SessionError::ResponseDeliveryIdentityConflict);
+        }
+        if !self.candidate_batch_exists(&reservation.batch_id) {
+            return Err(SessionError::RequestNotFound(format!(
+                "lifecycle batch:{}",
+                reservation.batch_id
+            )));
+        }
+        if !self.candidate_batch_contains_open_work(&reservation.batch_id, &reservation.work_id) {
+            return Err(SessionError::ResponseDeliveryIdentityConflict);
+        }
+        let live_contains_work = self
+            .outbox
+            .batches
+            .get(&reservation.batch_id)
+            .is_some_and(|batch| batch.open_work_ids.contains(&reservation.work_id));
+        match self.batch_changes.entry(reservation.batch_id.clone()) {
+            std::collections::btree_map::Entry::Occupied(mut entry) => match entry.get_mut() {
+                PreparedLifecycleBatchChangeV2::New(batch) => {
+                    debug_assert!(batch.open_work_ids.remove(&reservation.work_id));
+                }
+                PreparedLifecycleBatchChangeV2::Live(patch) => {
+                    if patch.added_open_work_ids.remove(&reservation.work_id) {
+                        debug_assert!(!live_contains_work);
+                    } else {
+                        debug_assert!(live_contains_work);
+                        debug_assert!(
+                            patch
+                                .removed_open_work_ids
+                                .insert(reservation.work_id.clone())
+                        );
+                    }
+                }
+                PreparedLifecycleBatchChangeV2::Removed => {
+                    unreachable!("removed lifecycle batch cannot complete work")
+                }
+            },
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                debug_assert!(live_contains_work);
+                entry.insert(PreparedLifecycleBatchChangeV2::Live(
+                    PreparedLiveLifecycleBatchPatchV2 {
+                        removed_open_work_ids: BTreeSet::from([reservation.work_id.clone()]),
+                        ..PreparedLiveLifecycleBatchPatchV2::default()
+                    },
+                ));
+            }
+        }
+        self.work_batch_id_changes
+            .insert(reservation.work_id.clone(), None);
+        if self.candidate_batch_is_empty(&reservation.batch_id)? {
+            if self.outbox.batches.contains_key(&reservation.batch_id) {
+                self.batch_changes.insert(
+                    reservation.batch_id.clone(),
+                    PreparedLifecycleBatchChangeV2::Removed,
+                );
+            } else {
+                self.batch_changes.remove(&reservation.batch_id);
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn live_batch_patch_item_counts_for_tests(
+        &self,
+        batch_id: &str,
+    ) -> Option<(usize, usize, usize, usize)> {
+        let PreparedLifecycleBatchChangeV2::Live(patch) = self.batch_changes.get(batch_id)? else {
+            return None;
+        };
+        Some((
+            patch.added_open_work_ids.len(),
+            patch.removed_open_work_ids.len(),
+            patch.added_feedback_ids.len(),
+            patch.feedback_received_at_count_increments.len(),
+        ))
+    }
+
+    fn commit(self) {
+        let Self {
+            outbox,
+            batch_changes,
+            work_batch_id_changes,
+            entry_inserts,
+        } = self;
+        for (batch_id, change) in batch_changes {
+            match change {
+                PreparedLifecycleBatchChangeV2::New(batch) => {
+                    outbox.batches.insert(batch_id, batch);
+                }
+                PreparedLifecycleBatchChangeV2::Removed => {
+                    outbox.batches.remove(&batch_id);
+                }
+                PreparedLifecycleBatchChangeV2::Live(patch) => {
+                    let batch = outbox
+                        .batches
+                        .get_mut(&batch_id)
+                        .expect("已准备的 live 生命周期批次必须仍存在");
+                    for work_id in patch.removed_open_work_ids {
+                        debug_assert!(batch.open_work_ids.remove(&work_id));
+                    }
+                    for work_id in patch.added_open_work_ids {
+                        debug_assert!(batch.open_work_ids.insert(work_id));
+                    }
+                    for feedback_id in patch.added_feedback_ids {
+                        debug_assert!(batch.feedback_ids.insert(feedback_id));
+                    }
+                    for (received_at, increment) in patch.feedback_received_at_count_increments {
+                        let count = batch
+                            .feedback_received_at_counts
+                            .entry(received_at)
+                            .or_insert(0);
+                        *count = count
+                            .checked_add(increment)
+                            .expect("已准备的反馈接收时点计数必须可表示");
+                    }
+                }
+            }
+        }
+        for (work_id, candidate_batch_id) in work_batch_id_changes {
+            if let Some(batch_id) = candidate_batch_id {
+                outbox.work_batch_ids.insert(work_id, batch_id);
+            } else {
+                outbox.work_batch_ids.remove(&work_id);
+            }
+        }
+        for (feedback_id, entry) in entry_inserts {
+            let previous = outbox.entries.insert(feedback_id, entry);
+            debug_assert!(previous.is_none());
+        }
+    }
 }
 
 impl LogicalLifecycleOutboxV1 {
@@ -15864,6 +22497,15 @@ impl LogicalLifecycleOutboxV1 {
         }
     }
 
+    fn prepare_lifecycle_delta_v2(&mut self) -> PreparedLifecycleOutboxDeltaV2<'_> {
+        PreparedLifecycleOutboxDeltaV2 {
+            outbox: self,
+            batch_changes: BTreeMap::new(),
+            work_batch_id_changes: BTreeMap::new(),
+            entry_inserts: BTreeMap::new(),
+        }
+    }
+
     fn request_batch_id(global_request_id: &str) -> String {
         format!("REQUEST:{global_request_id}")
     }
@@ -15873,6 +22515,16 @@ impl LogicalLifecycleOutboxV1 {
         global_request_id: &str,
         platform_effective_at_utc_ms: i64,
     ) -> Result<LifecycleBatchReservationV1, SessionError> {
+        let prepared = self
+            .prepare_request_reservation_inner(global_request_id, platform_effective_at_utc_ms)?;
+        Ok(self.commit_prevalidated_reservation(prepared))
+    }
+
+    fn prepare_request_reservation_inner(
+        &self,
+        global_request_id: &str,
+        platform_effective_at_utc_ms: i64,
+    ) -> Result<PreparedLifecycleBatchReservationV1, SessionError> {
         let work_id = Self::request_batch_id(global_request_id);
         if let Some(batch_id) = self.work_batch_ids.get(&work_id).cloned() {
             let batch = self.batches.get(&batch_id).ok_or_else(|| {
@@ -15887,9 +22539,12 @@ impl LogicalLifecycleOutboxV1 {
             {
                 return Err(SessionError::ResponseOutboxFull);
             }
-            return Ok(LifecycleBatchReservationV1 { batch_id, work_id });
+            return Ok(PreparedLifecycleBatchReservationV1 {
+                reservation: LifecycleBatchReservationV1 { batch_id, work_id },
+                change: PreparedLifecycleBatchReservationChangeV1::None,
+            });
         }
-        self.reserve_visibility_work(work_id, platform_effective_at_utc_ms)
+        self.prepare_visibility_work_reservation(work_id, platform_effective_at_utc_ms)
     }
 
     fn reserve_platform_work(
@@ -15898,6 +22553,20 @@ impl LogicalLifecycleOutboxV1 {
         preferred_global_request_id: Option<&str>,
         platform_effective_at_utc_ms: i64,
     ) -> Result<LifecycleBatchReservationV1, SessionError> {
+        let prepared = self.prepare_platform_work_reservation_inner(
+            causal_identity,
+            preferred_global_request_id,
+            platform_effective_at_utc_ms,
+        )?;
+        Ok(self.commit_prevalidated_reservation(prepared))
+    }
+
+    fn prepare_platform_work_reservation_inner(
+        &self,
+        causal_identity: &str,
+        preferred_global_request_id: Option<&str>,
+        platform_effective_at_utc_ms: i64,
+    ) -> Result<PreparedLifecycleBatchReservationV1, SessionError> {
         let work_id = format!("PLATFORM:{causal_identity}");
         if self.work_batch_ids.contains_key(&work_id) {
             return Err(SessionError::ResponseDeliveryIdentityConflict);
@@ -15917,81 +22586,100 @@ impl LogicalLifecycleOutboxV1 {
                 {
                     return Err(SessionError::ResponseOutboxFull);
                 }
-                let batch = self.batches.get_mut(&batch_id).ok_or_else(|| {
-                    SessionError::RequestNotFound(format!("lifecycle batch:{batch_id}"))
-                })?;
-                if !batch.open_work_ids.insert(work_id.clone()) {
-                    return Err(SessionError::ResponseDeliveryIdentityConflict);
-                }
-                self.work_batch_ids
-                    .insert(work_id.clone(), batch_id.clone());
-                return Ok(LifecycleBatchReservationV1 { batch_id, work_id });
+                return Ok(PreparedLifecycleBatchReservationV1 {
+                    reservation: LifecycleBatchReservationV1 { batch_id, work_id },
+                    change: PreparedLifecycleBatchReservationChangeV1::AddWorkToExistingBatch,
+                });
             }
         }
-        self.reserve_visibility_work(work_id, platform_effective_at_utc_ms)
+        self.prepare_visibility_work_reservation(work_id, platform_effective_at_utc_ms)
     }
 
-    fn reserve_visibility_work(
-        &mut self,
+    fn prepare_visibility_work_reservation(
+        &self,
         work_id: String,
         platform_effective_at_utc_ms: i64,
-    ) -> Result<LifecycleBatchReservationV1, SessionError> {
+    ) -> Result<PreparedLifecycleBatchReservationV1, SessionError> {
         if self.work_batch_ids.contains_key(&work_id) || self.batches.contains_key(&work_id) {
             return Err(SessionError::ResponseDeliveryIdentityConflict);
         }
-        if self.batches.len() < self.capacity {
+        let can_create_batch = self.batches.len() < self.capacity;
+        if can_create_batch {
             let batch_id = work_id.clone();
-            self.batches.insert(
-                batch_id.clone(),
-                LifecycleBatchV1 {
-                    open_work_ids: BTreeSet::from([work_id.clone()]),
-                    feedback_ids: BTreeSet::new(),
-                    feedback_received_at_counts: BTreeMap::new(),
-                },
-            );
-            self.work_batch_ids
-                .insert(work_id.clone(), batch_id.clone());
-            return Ok(LifecycleBatchReservationV1 { batch_id, work_id });
+            return Ok(PreparedLifecycleBatchReservationV1 {
+                reservation: LifecycleBatchReservationV1 { batch_id, work_id },
+                change: PreparedLifecycleBatchReservationChangeV1::CreateBatch,
+            });
         }
 
         let mut reusable = None;
         for (batch_id, batch) in &self.batches {
-            let threshold = match self.earliest_feedback_received_at(batch)? {
-                Some(received_at) if platform_effective_at_utc_ms <= received_at => received_at,
-                Some(_) => continue,
-                None if batch
-                    .open_work_ids
-                    .iter()
-                    .any(|work_id| work_id.starts_with("REQUEST:")) =>
-                {
-                    i64::MAX
-                }
-                None => continue,
+            let Some(threshold) =
+                Self::reusable_batch_threshold(batch, platform_effective_at_utc_ms)?
+            else {
+                continue;
             };
             let candidate = (threshold, batch_id.clone());
             if reusable.as_ref().is_none_or(|current| candidate < *current) {
                 reusable = Some(candidate);
             }
         }
-        let Some((_, batch_id)) = reusable else {
-            return Err(SessionError::ResponseOutboxFull);
-        };
-        let inserted = self
-            .batches
-            .get_mut(&batch_id)
-            .ok_or(SessionError::ResponseDeliveryIdentityConflict)?
-            .open_work_ids
-            .insert(work_id.clone());
-        if !inserted {
-            return Err(SessionError::ResponseDeliveryIdentityConflict);
+        if let Some((_, batch_id)) = reusable {
+            return Ok(PreparedLifecycleBatchReservationV1 {
+                reservation: LifecycleBatchReservationV1 { batch_id, work_id },
+                change: PreparedLifecycleBatchReservationChangeV1::AddWorkToExistingBatch,
+            });
         }
-        self.work_batch_ids
-            .insert(work_id.clone(), batch_id.clone());
-        Ok(LifecycleBatchReservationV1 { batch_id, work_id })
+        Err(SessionError::ResponseOutboxFull)
+    }
+
+    fn commit_prevalidated_reservation(
+        &mut self,
+        prepared: PreparedLifecycleBatchReservationV1,
+    ) -> LifecycleBatchReservationV1 {
+        let reservation = prepared.reservation;
+        match prepared.change {
+            PreparedLifecycleBatchReservationChangeV1::None => {}
+            PreparedLifecycleBatchReservationChangeV1::CreateBatch => {
+                let previous = self.batches.insert(
+                    reservation.batch_id.clone(),
+                    LifecycleBatchV1 {
+                        open_work_ids: BTreeSet::from([reservation.work_id.clone()]),
+                        feedback_ids: BTreeSet::new(),
+                        feedback_received_at_counts: BTreeMap::new(),
+                    },
+                );
+                debug_assert!(previous.is_none());
+                let previous = self
+                    .work_batch_ids
+                    .insert(reservation.work_id.clone(), reservation.batch_id.clone());
+                debug_assert!(previous.is_none());
+            }
+            PreparedLifecycleBatchReservationChangeV1::AddWorkToExistingBatch => {
+                let inserted = self
+                    .batches
+                    .get_mut(&reservation.batch_id)
+                    .expect("已准备生命周期批次必须仍存在")
+                    .open_work_ids
+                    .insert(reservation.work_id.clone());
+                debug_assert!(inserted);
+                let previous = self
+                    .work_batch_ids
+                    .insert(reservation.work_id.clone(), reservation.batch_id.clone());
+                debug_assert!(previous.is_none());
+            }
+        }
+        reservation
     }
 
     fn earliest_feedback_received_at(
         &self,
+        batch: &LifecycleBatchV1,
+    ) -> Result<Option<i64>, SessionError> {
+        Self::earliest_feedback_received_at_for_batch(batch)
+    }
+
+    fn earliest_feedback_received_at_for_batch(
         batch: &LifecycleBatchV1,
     ) -> Result<Option<i64>, SessionError> {
         if batch.feedback_ids.is_empty() != batch.feedback_received_at_counts.is_empty() {
@@ -16003,11 +22691,33 @@ impl LogicalLifecycleOutboxV1 {
             .map(|(received_at, _)| *received_at))
     }
 
+    fn reusable_batch_threshold(
+        batch: &LifecycleBatchV1,
+        platform_effective_at_utc_ms: i64,
+    ) -> Result<Option<i64>, SessionError> {
+        Ok(
+            match Self::earliest_feedback_received_at_for_batch(batch)? {
+                Some(received_at) if platform_effective_at_utc_ms <= received_at => {
+                    Some(received_at)
+                }
+                Some(_) => None,
+                None if batch
+                    .open_work_ids
+                    .iter()
+                    .any(|work_id| work_id.starts_with("REQUEST:")) =>
+                {
+                    Some(i64::MAX)
+                }
+                None => None,
+            },
+        )
+    }
+
     fn record_for_batch(
         &mut self,
         reservation: &LifecycleBatchReservationV1,
         draft: LifecycleFeedbackDraftV1,
-    ) -> Result<(), SessionError> {
+    ) -> Result<Option<DurablePrivateOutputDraftV1>, SessionError> {
         let batch = self.batches.get_mut(&reservation.batch_id).ok_or_else(|| {
             SessionError::RequestNotFound(format!("lifecycle batch:{}", reservation.batch_id))
         })?;
@@ -16017,7 +22727,7 @@ impl LogicalLifecycleOutboxV1 {
         let feedback_id = draft.feedback_id().to_owned();
         if let Some(existing) = self.entries.get(&feedback_id) {
             if existing.batch_id == reservation.batch_id && existing.draft == draft {
-                return Ok(());
+                return Ok(None);
             }
             return Err(SessionError::FeedbackIdentityConflict(feedback_id));
         }
@@ -16036,6 +22746,9 @@ impl LogicalLifecycleOutboxV1 {
         batch
             .feedback_received_at_counts
             .insert(received_at, next_received_at_count);
+        let durable_draft = DurablePrivateOutputDraftV1::Lifecycle {
+            draft: draft.clone(),
+        };
         self.entries.insert(
             feedback_id,
             LifecycleOutboxEntryV1 {
@@ -16044,7 +22757,7 @@ impl LogicalLifecycleOutboxV1 {
                 sealed: None,
             },
         );
-        Ok(())
+        Ok(Some(durable_draft))
     }
 
     fn complete_platform_work(
@@ -16202,30 +22915,87 @@ impl LogicalDirectResponseOutboxV1 {
         method: DirectResponseMethodV1,
         item_count: usize,
     ) -> Result<(), SimExecutionContractErrorV1> {
+        let prepared =
+            self.prepare_reservation(session_id, global_request_id, method, item_count)?;
+        self.commit_prevalidated_reservation(prepared);
+        Ok(())
+    }
+
+    fn prepare_reservation(
+        &self,
+        session_id: &str,
+        global_request_id: &str,
+        method: DirectResponseMethodV1,
+        item_count: usize,
+    ) -> Result<PreparedDirectResponseReservationV1, SimExecutionContractErrorV1> {
+        self.prepare_reservation_with_occupied_capacity_leases(
+            session_id,
+            global_request_id,
+            method,
+            item_count,
+            0,
+        )
+    }
+
+    fn prepare_reservation_with_occupied_capacity_leases(
+        &self,
+        session_id: &str,
+        global_request_id: &str,
+        method: DirectResponseMethodV1,
+        item_count: usize,
+        occupied_capacity_leases: usize,
+    ) -> Result<PreparedDirectResponseReservationV1, SimExecutionContractErrorV1> {
         if let Some(existing) = self.entries.get(global_request_id) {
             if existing.method == method && existing.parts.len() == item_count {
-                return Ok(());
+                return Ok(PreparedDirectResponseReservationV1 {
+                    global_request_id: global_request_id.to_owned(),
+                    entry_to_insert: None,
+                });
             }
             return Err(SimExecutionContractErrorV1::RequestIdentityConflict(
                 global_request_id.to_owned(),
             ));
         }
-        if self.entries.len() >= self.capacity {
+        if self.entries.len().saturating_add(occupied_capacity_leases) >= self.capacity {
             return Err(SimExecutionContractErrorV1::ResponseOutboxFull);
         }
         let delivery_id = Self::delivery_id(session_id, global_request_id, method);
-        self.entries.insert(
-            global_request_id.to_owned(),
-            DirectResponseOutboxEntryV1 {
+        Ok(PreparedDirectResponseReservationV1 {
+            global_request_id: global_request_id.to_owned(),
+            entry_to_insert: Some(DirectResponseOutboxEntryV1 {
                 method,
                 delivery_id,
                 parts: vec![None; item_count],
                 platform_responded_at_utc_ms: None,
                 draft: None,
                 sealed: None,
-            },
-        );
-        Ok(())
+            }),
+        })
+    }
+
+    fn commit_prevalidated_reservation(&mut self, prepared: PreparedDirectResponseReservationV1) {
+        if let Some(entry) = prepared.entry_to_insert {
+            let replaced = self.entries.insert(prepared.global_request_id, entry);
+            debug_assert!(replaced.is_none());
+        }
+    }
+
+    fn prepare_entry_delta_v2(
+        &mut self,
+        global_request_id: &str,
+    ) -> Result<PreparedDirectResponseEntryDeltaV2<'_>, SimExecutionContractErrorV1> {
+        let candidate_entry = self
+            .entries
+            .get(global_request_id)
+            .cloned()
+            .ok_or_else(|| {
+                SimExecutionContractErrorV1::RequestNotFound(global_request_id.to_owned())
+            })?;
+        Ok(PreparedDirectResponseEntryDeltaV2 {
+            outbox: self,
+            global_request_id: global_request_id.to_owned(),
+            candidate_entry,
+        })
     }
 
     fn record_part(
@@ -16233,37 +23003,12 @@ impl LogicalDirectResponseOutboxV1 {
         global_request_id: &str,
         part: DirectResponsePartV1,
     ) -> Result<(), SimExecutionContractErrorV1> {
-        let entry = self.entries.get_mut(global_request_id).ok_or_else(|| {
-            SimExecutionContractErrorV1::RequestNotFound(global_request_id.to_owned())
-        })?;
-        if !part.method_compatible(entry.method) {
-            return Err(SimExecutionContractErrorV1::ActionIdentityConflict(
-                format!("{global_request_id}:method"),
-            ));
-        }
-        let ordinal = part.ordinal();
-        let slot = entry.parts.get_mut(ordinal).ok_or_else(|| {
-            SimExecutionContractErrorV1::ActionIdentityConflict(format!(
-                "{global_request_id}:{ordinal}"
-            ))
-        })?;
-        if let Some(existing) = slot {
-            if existing == &part {
-                return Ok(());
-            }
-            return Err(SimExecutionContractErrorV1::ActionIdentityConflict(
-                format!("{global_request_id}:{ordinal}"),
-            ));
-        }
-        entry.platform_responded_at_utc_ms = Some(
-            entry
-                .platform_responded_at_utc_ms
-                .map_or(part.effective_processing_at_utc_ms(), |at| {
-                    at.max(part.effective_processing_at_utc_ms())
-                }),
-        );
-        *slot = Some(part);
-        Ok(())
+        self.entries
+            .get_mut(global_request_id)
+            .ok_or_else(|| {
+                SimExecutionContractErrorV1::RequestNotFound(global_request_id.to_owned())
+            })?
+            .record_part(global_request_id, part)
     }
 
     fn complete_draft(
@@ -16274,46 +23019,19 @@ impl LogicalDirectResponseOutboxV1 {
         rule_snapshot_sha256: Sha256Hex,
         scenario_sha256: Sha256Hex,
         fee_rule: SubmissionFeeRuleIdentityV1,
-    ) -> Result<(), SimExecutionContractErrorV1> {
-        let entry = self.entries.get_mut(global_request_id).ok_or_else(|| {
-            SimExecutionContractErrorV1::RequestNotFound(global_request_id.to_owned())
-        })?;
-        if entry.draft.is_some() {
-            return Ok(());
-        }
-        let platform_responded_at_utc_ms = transit
-            .platform_responded_at_utc_ms
-            .ok_or(SimExecutionContractErrorV1::ResponseBeforeLogicalCompletion)?;
-        let response_received_at_utc_ms = transit
-            .response_received_at_utc_ms
-            .ok_or(SimExecutionContractErrorV1::ResponseBeforeLogicalCompletion)?;
-        let private_emission_sequence = transit
-            .private_emission_sequence
-            .ok_or(SimExecutionContractErrorV1::ResponseBeforeLogicalCompletion)?;
-        if entry.platform_responded_at_utc_ms != Some(platform_responded_at_utc_ms)
-            || entry.parts.iter().any(Option::is_none)
-        {
-            return Err(SimExecutionContractErrorV1::ResponseBeforeLogicalCompletion);
-        }
-        let parts = entry
-            .parts
-            .iter()
-            .cloned()
-            .map(|part| part.expect("all response part slots were checked above"))
-            .collect();
-        entry.draft = Some(DirectResponseDraftV1 {
-            method: entry.method,
-            delivery_id: entry.delivery_id.clone(),
-            context,
-            platform_responded_at_utc_ms,
-            response_received_at_utc_ms,
-            private_emission_sequence,
-            rule_snapshot_sha256,
-            scenario_sha256,
-            fee_rule,
-            parts,
-        });
-        Ok(())
+    ) -> Result<Option<DurablePrivateOutputDraftV1>, SimExecutionContractErrorV1> {
+        self.entries
+            .get_mut(global_request_id)
+            .ok_or_else(|| {
+                SimExecutionContractErrorV1::RequestNotFound(global_request_id.to_owned())
+            })?
+            .complete_draft(
+                context,
+                transit,
+                rule_snapshot_sha256,
+                scenario_sha256,
+                fee_rule,
+            )
     }
 
     fn draft(&self, global_request_id: &str) -> Option<&DirectResponseDraftV1> {
@@ -16507,6 +23225,84 @@ fn validate_idempotency_key(key: &str) -> Result<(), SimExecutionContractErrorV1
     validate_nonempty(key, "变更幂等键为空")
 }
 
+fn validate_request_context_identity_bounds(
+    context: &RequestContextV1,
+) -> Result<(), SimExecutionContractErrorV1> {
+    if context.execution_contract_version != SIM_EXECUTION_CONTRACT_V1 {
+        return Err(SimExecutionContractErrorV1::InvalidRequest(
+            "请求合同版本不匹配",
+        ));
+    }
+    for (value, message) in [
+        (context.session_id.as_str(), "请求会话身份为空"),
+        (context.account_id.as_str(), "请求账户身份为空"),
+        (
+            context.caller_instance_id.as_str(),
+            "请求调用方实例身份为空",
+        ),
+        (context.global_request_id.as_str(), "全局请求身份为空"),
+        (
+            context.model_visible_cursor.session_id.as_str(),
+            "模型可见游标会话身份为空",
+        ),
+    ] {
+        validate_nonempty(value, message)?;
+    }
+    validate_optional_identity(
+        context.caller_correlation_id.as_deref(),
+        "调用方关联身份为空",
+    )
+}
+
+fn validate_pending_domain_request(
+    request: &PendingDomainRequestV1,
+) -> Result<(), SimExecutionContractErrorV1> {
+    match request {
+        PendingDomainRequestV1::PostOrder(request) => {
+            validate_idempotency_key(&request.idempotency_key)?;
+            validate_post_item(&request.item)
+        }
+        PendingDomainRequestV1::PostOrders(request) => {
+            validate_idempotency_key(&request.idempotency_key)?;
+            validate_batch_len(
+                request.items.len(),
+                POST_ORDERS_MAX_ITEMS,
+                "批量提交项数必须为 1 至 15",
+            )?;
+            validate_unique_item_ids(request.items.iter().map(|item| item.item_id.as_str()))?;
+            for item in &request.items {
+                validate_post_item(item)?;
+            }
+            Ok(())
+        }
+        PendingDomainRequestV1::CancelOrder(request) => {
+            validate_idempotency_key(&request.idempotency_key)?;
+            validate_cancel_item(&request.item)
+        }
+        PendingDomainRequestV1::CancelOrders(request) => {
+            validate_idempotency_key(&request.idempotency_key)?;
+            validate_batch_len(
+                request.items.len(),
+                CANCEL_ORDERS_MAX_ITEMS,
+                "批量撤单项数必须为 1 至 1000",
+            )?;
+            validate_unique_item_ids(request.items.iter().map(|item| item.item_id.as_str()))?;
+            for item in &request.items {
+                validate_cancel_item(item)?;
+            }
+            Ok(())
+        }
+        PendingDomainRequestV1::CancelAllOrders(request) => {
+            validate_idempotency_key(&request.idempotency_key)
+        }
+        PendingDomainRequestV1::Order(request) => {
+            validate_platform_order_id(&request.platform_order_id)
+        }
+        PendingDomainRequestV1::Orders(request) => validate_orders_request(request),
+        PendingDomainRequestV1::Trades(request) => validate_trades_request(request),
+    }
+}
+
 fn validate_post_item(item: &PostOrderItemV1) -> Result<(), SimExecutionContractErrorV1> {
     validate_nonempty(&item.item_id, "提交稳定项身份为空")?;
     validate_nonempty(&item.order.condition_id.0, "提交市场身份为空")?;
@@ -16654,8 +23450,8 @@ fn validate_optional_identity(
     value: Option<&str>,
     message: &'static str,
 ) -> Result<(), SimExecutionContractErrorV1> {
-    if value.is_some_and(str::is_empty) {
-        return Err(SimExecutionContractErrorV1::InvalidRequest(message));
+    if let Some(value) = value {
+        validate_nonempty(value, message)?;
     }
     Ok(())
 }
@@ -16666,6 +23462,11 @@ fn validate_nonempty(
 ) -> Result<(), SimExecutionContractErrorV1> {
     if value.is_empty() {
         return Err(SimExecutionContractErrorV1::InvalidRequest(message));
+    }
+    if value.len() > STABLE_ID_MAX_BYTES_V1 {
+        return Err(SimExecutionContractErrorV1::InvalidRequest(
+            "稳定身份字段超过 256 字节上限",
+        ));
     }
     Ok(())
 }
@@ -16919,8 +23720,10 @@ mod tests {
         SimulationDeterministicScriptContractV1, SimulationRunArtifactErrorV1,
         SimulationWorkloadKindV1,
     };
-    use crate::finality::successful_policy_for_tests;
-    use crate::latency_profile::{DelaySampleDomainV1, load_embedded_proxy_latency_profile};
+    use crate::finality::{policy_for_tests, successful_policy_for_tests};
+    use crate::latency_profile::{
+        DelaySampleDomainV1, EmpiricalDelayProfile, load_embedded_proxy_latency_profile,
+    };
     use crate::platform_rules::tests::successful_snapshot_for_sim_tests;
 
     fn resource_policy_for_tests() -> (SimulationResourcePolicyV1, Sha256Hex) {
@@ -16933,8 +23736,97 @@ mod tests {
         fact: DurableTransactionFactV1,
     ) -> DurableTransactionEvidenceV1 {
         let mut evidence = DurableTransactionEvidenceV1::new(fact);
+        evidence.maintenance_steady_before_resource_usage =
+            Some(SimulationResourceUsageV1::default());
         evidence.resource_usage = Some(SimulationResourceUsageV1::default());
+        evidence.maintenance_succeeded_steady_after_resource_usage =
+            Some(SimulationResourceUsageV1::default());
         evidence
+    }
+
+    #[test]
+    fn run_artifact_v2_accumulator_uses_file_sha_and_rejects_sequence_gaps() {
+        let spec = session_spec();
+        let session_id = spec.session_id.clone();
+        let seed_projection = |accumulator: &mut RunArtifactEvidenceAccumulatorV2| {
+            accumulator.projection.session_creations.insert(
+                session_id.clone(),
+                (
+                    spec.clone(),
+                    funded_opening_anchor_for_projection_test(&session_id),
+                    SessionInitializationSnapshotV1 {
+                        state: SessionInitializationStateV1::Active,
+                        activation_id: Some("artifact-v2-activation".to_owned()),
+                        failure_id: None,
+                    },
+                ),
+            );
+        };
+        let first = DurableLogicalTransactionEvidenceV2::new(
+            DurableTransactionFactV1::PlatformBucketApplied {
+                session_id: session_id.clone(),
+                bucket: DurableMarketBucketReferenceV1 {
+                    path: MarketEventPathV1::PublicVisibility,
+                    bucket_at_utc_ms: 10,
+                    start_index_position: 0,
+                    next_index_position: 1,
+                    closure: MillisecondBucketClosureV1::NextEventAt(20),
+                    bucket_sha256: Sha256Hex("a".repeat(64)),
+                },
+            },
+        );
+        let second = DurableLogicalTransactionEvidenceV2::new(
+            DurableTransactionFactV1::PlatformBucketApplied {
+                session_id: session_id.clone(),
+                bucket: DurableMarketBucketReferenceV1 {
+                    path: MarketEventPathV1::PublicVisibility,
+                    bucket_at_utc_ms: 20,
+                    start_index_position: 1,
+                    next_index_position: 2,
+                    closure: MillisecondBucketClosureV1::EndOfInput,
+                    bucket_sha256: Sha256Hex("b".repeat(64)),
+                },
+            },
+        );
+        let first_file_sha256 = Sha256Hex("1".repeat(64));
+        let second_file_sha256 = Sha256Hex("2".repeat(64));
+        let pseudo_record_sha256 = Sha256Hex("3".repeat(64));
+        let mut accumulator = RunArtifactEvidenceAccumulatorV2::new();
+        seed_projection(&mut accumulator);
+        accumulator
+            .apply_logical_evidence(1, first_file_sha256, 101, &first)
+            .expect("V2 累加器接受首条文件证据");
+        accumulator
+            .apply_logical_evidence(2, second_file_sha256.clone(), 202, &second)
+            .expect("V2 累加器接受连续的第二条文件证据");
+
+        let final_reference =
+            &accumulator.index.buckets[&session_id][&MarketEventPathV1::PublicVisibility].1;
+        assert_eq!(final_reference.sequence, 2);
+        assert_eq!(final_reference.file_sha256, second_file_sha256);
+        assert_ne!(final_reference.file_sha256, pseudo_record_sha256);
+        assert_eq!(accumulator.evidence_count, 2);
+        assert_eq!(accumulator.evidence_bytes, 303);
+        assert_eq!(accumulator.evidence_head_sha256, Some(second_file_sha256));
+
+        let mut discontinuous = RunArtifactEvidenceAccumulatorV2::new();
+        seed_projection(&mut discontinuous);
+        discontinuous
+            .apply_logical_evidence(1, Sha256Hex("4".repeat(64)), 11, &first)
+            .expect("间断测试先接受首条证据");
+        assert!(
+            discontinuous
+                .apply_logical_evidence(3, Sha256Hex("5".repeat(64)), 13, &second)
+                .is_err()
+        );
+        assert_eq!(discontinuous.evidence_count, 1);
+        assert_eq!(discontinuous.evidence_bytes, 11);
+        assert_eq!(
+            discontinuous.index.buckets[&session_id][&MarketEventPathV1::PublicVisibility]
+                .1
+                .sequence,
+            1
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -17035,6 +23927,7 @@ mod tests {
             component_golden_measurement_sha256: None,
             resource_high_water: SimulationResourceHighWaterV1::default(),
             run_resource_admission: ResourceAdmissionStateV1::default(),
+            run_resource_triggering_session_limit: None,
             session_resource_admission: BTreeMap::new(),
             lifecycle: DurableRunLifecycleV1::Open,
             process_root: process.inner.checkpoint().expect("形成错误检查点"),
@@ -17045,6 +23938,46 @@ mod tests {
             Err(SimulationRunArtifactErrorV1::Integrity(message))
                 if message.contains("输入路径")
         ));
+
+        let directory = tempfile::tempdir().expect("创建 V2 未封口导出临时目录");
+        let root = directory.path().join("run");
+        let mut store = crate::persistence::LocalTransactionLogStoreV2::create_new(
+            root.clone(),
+            crate::persistence::TransactionLogIdentityV2::new(
+                process.run_id().to_owned(),
+                crate::persistence::DurabilityProfileV2::RecoverablePaper,
+            ),
+        )
+        .expect("创建 V2 未封口导出事务日志");
+        let run_created =
+            DurableLogicalTransactionEvidenceV2::new(DurableTransactionFactV1::RunCreated {
+                run_id: process.run_id().to_owned(),
+                market_event_source_identity_sha256: checkpoint
+                    .market_event_source_identity_sha256
+                    .clone(),
+                run_intent_binding: checkpoint.run_intent_binding.clone(),
+                resource_policy: checkpoint.resource_policy.clone(),
+                resource_policy_sha256: checkpoint.resource_policy_sha256.clone(),
+            });
+        store
+            .append_transaction(
+                &run_created,
+                &DurableRecoveryOperationV2::ApplicationCheckpointBoundary,
+            )
+            .expect("追加 V2 未封口运行事实");
+        store
+            .publish_application_checkpoint(1, &checkpoint)
+            .expect("发布覆盖 V2 未封口日志的应用检查点");
+        let export = export_and_prepare_run_artifact_bundle_v2(
+            &store,
+            &process.inner,
+            &checkpoint,
+            1,
+            &SimulationResourceHighWaterV1::default(),
+        );
+        assert!(export.is_err());
+        assert!(!root.join(FINAL_EVIDENCE_DIRECTORY_NAME_V2).exists());
+        assert!(!root.join(".evidence-v2.candidate").exists());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -17165,6 +24098,7 @@ mod tests {
             component_golden_measurement_sha256: None,
             resource_high_water: SimulationResourceHighWaterV1::default(),
             run_resource_admission: ResourceAdmissionStateV1::default(),
+            run_resource_triggering_session_limit: None,
             session_resource_admission: BTreeMap::new(),
             lifecycle: DurableRunLifecycleV1::Open,
             process_root: process.inner.checkpoint().expect("形成错误检查点"),
@@ -17408,6 +24342,1219 @@ mod tests {
             trades_baseline,
             hash_non_submission_response(&changed_trade, 1)
         );
+    }
+
+    fn direct_response_test_context(global_request_id: &str) -> RequestContextV1 {
+        RequestContextV1 {
+            execution_contract_version: SIM_EXECUTION_CONTRACT_V1.to_owned(),
+            session_id: "direct-response-session".to_owned(),
+            account_id: "direct-response-account".to_owned(),
+            caller_role: SimCallerRoleV1::Paper,
+            caller_instance_id: "direct-response-caller".to_owned(),
+            global_request_id: global_request_id.to_owned(),
+            caller_correlation_id: None,
+            caller_sequence: 1,
+            request_sent_at_utc_ms: 10,
+            model_visible_cursor: ModelVisibleCursorV1 {
+                session_id: "direct-response-session".to_owned(),
+                public_visibility: Default::default(),
+                private_feedback_sequence: 0,
+            },
+        }
+    }
+
+    fn direct_response_test_transit(platform_responded_at_utc_ms: i64) -> RequestTransitV1 {
+        RequestTransitV1 {
+            request_sent_at_utc_ms: 10,
+            outbound_delay_ms: 5,
+            platform_arrived_at_utc_ms: 15,
+            platform_responded_at_utc_ms: Some(platform_responded_at_utc_ms),
+            private_emission_sequence: Some(1),
+            inbound_delay_ms: 5,
+            response_received_at_utc_ms: Some(platform_responded_at_utc_ms + 5),
+        }
+    }
+
+    fn direct_response_test_fee_rule() -> SubmissionFeeRuleIdentityV1 {
+        SubmissionFeeRuleIdentityV1 {
+            formula_version: "fee-v1".to_owned(),
+            aggregation_version: SUBMISSION_FEE_AGGREGATION_V1.to_owned(),
+            precision_decimal_places: 5,
+            minimum_nonzero_fee_pusd: Decimal::new(1, 5),
+            builder_fee_pusd: Decimal::ZERO,
+        }
+    }
+
+    fn direct_response_submission_part(
+        item_id: &str,
+        batch_item_ordinal: u16,
+        effective_processing_at_utc_ms: i64,
+    ) -> DirectResponsePartV1 {
+        DirectResponsePartV1::Submission(SubmissionResponseItemV1 {
+            item_id: item_id.to_owned(),
+            batch_item_ordinal,
+            condition_id: ConditionId("condition-direct-response".to_owned()),
+            token_id: TokenId("token-direct-response".to_owned()),
+            effective_processing_at_utc_ms,
+            submission_effect_identity: format!("effect-{item_id}"),
+            submission_effect_formed_at_utc_ms: effective_processing_at_utc_ms,
+            submission_effect_disposition: SubmissionEffectDispositionV1::NewEffect,
+            outcome: SubmissionItemOutcomeV1::RejectedNoEffect(
+                SubmissionRejectedReasonV1::EndAtReached,
+            ),
+        })
+    }
+
+    #[test]
+    fn direct_response_entry_delta_prepares_without_touching_unrelated_entries() {
+        let mut outbox = LogicalDirectResponseOutboxV1::new(
+            std::num::NonZeroUsize::new(256).expect("测试容量非零"),
+        );
+        for index in 0..128 {
+            outbox
+                .reserve(
+                    "direct-response-session",
+                    &format!("unrelated-{index:03}"),
+                    DirectResponseMethodV1::Order,
+                    1,
+                )
+                .expect("预留无关直接响应");
+        }
+        let target = "target-entry";
+        outbox
+            .reserve(
+                "direct-response-session",
+                target,
+                DirectResponseMethodV1::Order,
+                1,
+            )
+            .expect("预留目标直接响应");
+        let baseline = outbox.clone();
+
+        let mut prepared = outbox
+            .prepare_entry_delta_v2(target)
+            .expect("只准备目标直接响应条目");
+        prepared
+            .record_part(DirectResponsePartV1::Order {
+                effective_processing_at_utc_ms: 20,
+                result: OrderQueryResultV1::NotFound,
+            })
+            .expect("在准备条目中记录结果");
+        drop(prepared);
+        assert_eq!(outbox, baseline, "准备阶段不得修改正式载荷池");
+
+        let mut prepared = outbox
+            .prepare_entry_delta_v2(target)
+            .expect("重新准备目标直接响应条目");
+        prepared
+            .record_part(DirectResponsePartV1::Order {
+                effective_processing_at_utc_ms: 20,
+                result: OrderQueryResultV1::NotFound,
+            })
+            .expect("在待提交条目中记录结果");
+        prepared.commit();
+        assert_ne!(outbox.entries[target], baseline.entries[target]);
+        for (request_id, entry) in &baseline.entries {
+            if request_id != target {
+                assert_eq!(outbox.entries.get(request_id), Some(entry));
+            }
+        }
+    }
+
+    #[test]
+    fn direct_response_entry_delta_rejects_invalid_changes_before_commit() {
+        let mut outbox = LogicalDirectResponseOutboxV1::new(
+            std::num::NonZeroUsize::new(4).expect("测试容量非零"),
+        );
+        let target = "invalid-entry";
+        outbox
+            .reserve(
+                "direct-response-session",
+                target,
+                DirectResponseMethodV1::PostOrders,
+                2,
+            )
+            .expect("预留批量直接响应");
+        let baseline = outbox.clone();
+
+        let mut wrong_method = outbox
+            .prepare_entry_delta_v2(target)
+            .expect("准备错方法测试条目");
+        assert!(matches!(
+            wrong_method.record_part(DirectResponsePartV1::Order {
+                effective_processing_at_utc_ms: 20,
+                result: OrderQueryResultV1::NotFound,
+            }),
+            Err(SimExecutionContractErrorV1::ActionIdentityConflict(identity))
+                if identity == "invalid-entry:method"
+        ));
+        drop(wrong_method);
+        assert_eq!(outbox, baseline);
+
+        let mut conflicting_ordinal = outbox
+            .prepare_entry_delta_v2(target)
+            .expect("准备序号冲突测试条目");
+        conflicting_ordinal
+            .record_part(direct_response_submission_part("item-0", 0, 20))
+            .expect("先占用批量序号零");
+        assert!(matches!(
+            conflicting_ordinal.record_part(direct_response_submission_part(
+                "conflicting-item-0",
+                0,
+                21,
+            )),
+            Err(SimExecutionContractErrorV1::ActionIdentityConflict(identity))
+                if identity == "invalid-entry:0"
+        ));
+        drop(conflicting_ordinal);
+        assert_eq!(outbox, baseline);
+
+        let mut incomplete = outbox
+            .prepare_entry_delta_v2(target)
+            .expect("准备未齐项完成测试条目");
+        incomplete
+            .record_part(direct_response_submission_part("item-0", 0, 20))
+            .expect("记录第一项");
+        assert!(matches!(
+            incomplete.complete_draft(
+                direct_response_test_context(target),
+                &direct_response_test_transit(20),
+                Sha256Hex("a".repeat(64)),
+                Sha256Hex("b".repeat(64)),
+                direct_response_test_fee_rule(),
+            ),
+            Err(SimExecutionContractErrorV1::ResponseBeforeLogicalCompletion)
+        ));
+        drop(incomplete);
+        assert_eq!(outbox, baseline);
+    }
+
+    #[test]
+    fn direct_response_entry_delta_combines_parts_and_completion_once_and_matches_v1() {
+        let mut baseline = LogicalDirectResponseOutboxV1::new(
+            std::num::NonZeroUsize::new(2).expect("测试容量非零"),
+        );
+        let target = "combined-entry";
+        baseline
+            .reserve(
+                "direct-response-session",
+                target,
+                DirectResponseMethodV1::PostOrders,
+                2,
+            )
+            .expect("预留批量直接响应");
+        let first = direct_response_submission_part("item-0", 0, 20);
+        let second = direct_response_submission_part("item-1", 1, 25);
+        let context = direct_response_test_context(target);
+        let transit = direct_response_test_transit(25);
+        let rule_sha = Sha256Hex("a".repeat(64));
+        let scenario_sha = Sha256Hex("b".repeat(64));
+        let fee_rule = direct_response_test_fee_rule();
+
+        let mut prepared_outbox = baseline.clone();
+        let mut prepared = prepared_outbox
+            .prepare_entry_delta_v2(target)
+            .expect("准备组合直接响应条目");
+        prepared.record_part(first.clone()).expect("记录第一项");
+        prepared.record_part(second.clone()).expect("记录第二项");
+        let formed = prepared
+            .complete_draft(
+                context.clone(),
+                &transit,
+                rule_sha.clone(),
+                scenario_sha.clone(),
+                fee_rule.clone(),
+            )
+            .expect("齐项后形成草稿")
+            .expect("首次完成必须形成草稿");
+        assert_eq!(
+            prepared
+                .complete_draft(
+                    context.clone(),
+                    &transit,
+                    rule_sha.clone(),
+                    scenario_sha.clone(),
+                    fee_rule.clone()
+                )
+                .expect("重复完成保持幂等"),
+            None
+        );
+        prepared.commit();
+
+        let mut legacy = baseline;
+        legacy.record_part(target, first).expect("V1 记录第一项");
+        legacy.record_part(target, second).expect("V1 记录第二项");
+        let legacy_formed = legacy
+            .complete_draft(target, context, &transit, rule_sha, scenario_sha, fee_rule)
+            .expect("V1 完成草稿")
+            .expect("V1 首次完成必须形成草稿");
+        assert_eq!(formed, legacy_formed);
+        assert_eq!(prepared_outbox, legacy);
+        assert_eq!(
+            prepared_outbox.entries[target].draft.as_ref().map(|_| 1),
+            Some(1)
+        );
+    }
+
+    fn query_order_projection_for_v2_tests(index: usize) -> OrderProjectionV1 {
+        OrderProjectionV1 {
+            platform_order_id: format!("query-order-{index:04}"),
+            global_request_id: "query-request".to_owned(),
+            item_id: format!("query-item-{index:04}"),
+            condition_id: ConditionId("query-condition".to_owned()),
+            token_id: TokenId("query-token".to_owned()),
+            created_at_utc_ms: i64::try_from(index).expect("测试序号适合 i64"),
+            last_updated_at_utc_ms: i64::try_from(index).expect("测试序号适合 i64"),
+            kind: OrderKindProjectionV1::Gtc,
+            expires_at_utc_ms: None,
+            source_price_pusd_per_share: Decimal::new(4, 1),
+            status: simulated_order_status("LIVE"),
+            accepted_base_quantity_shares: Some(Decimal::ONE),
+            matched_base_quantity_shares: Decimal::ZERO,
+            pending_maker_depletion_base_quantity_shares: Decimal::ZERO,
+            open_base_quantity_shares: Decimal::ONE,
+            venue_dust_closed_base_quantity_shares: Decimal::ZERO,
+            market_resolved_canceled_base_quantity_shares: Decimal::ZERO,
+            canceled_base_quantity_shares: Decimal::ZERO,
+            expired_base_quantity_shares: Decimal::ZERO,
+            accepted_quote_amount_pusd: Decimal::new(4, 1),
+            matched_quote_amount_pusd: Decimal::ZERO,
+            open_encumbered_quote_amount_pusd: Decimal::new(4, 1),
+            venue_dust_released_quote_amount_pusd: Decimal::ZERO,
+            market_resolved_released_quote_amount_pusd: Decimal::ZERO,
+            released_price_improvement_quote_amount_pusd: Decimal::ZERO,
+            canceled_released_quote_amount_pusd: Decimal::ZERO,
+            expired_released_quote_amount_pusd: Decimal::ZERO,
+            immediate_taker_fee_encumbered_pusd: Decimal::ZERO,
+        }
+    }
+
+    fn query_trade_projection_for_v2_tests(index: usize) -> TradeProjectionV1 {
+        TradeProjectionV1 {
+            simulated_trade_id: format!("query-trade-{index:04}"),
+            platform_order_id: format!("query-order-{index:04}"),
+            condition_id: ConditionId("query-condition".to_owned()),
+            token_id: TokenId("query-token".to_owned()),
+            matched_at_utc_ms: i64::try_from(index).expect("测试序号适合 i64"),
+            status: simulated_trade_status("MATCHED"),
+            liquidity_role: TradeLiquidityRoleV1::Taker,
+            source_price_pusd_per_share: Decimal::new(4, 1),
+            base_quantity_shares: Decimal::ONE,
+            quote_amount_pusd: Decimal::new(4, 1),
+            immediate_taker_fee_pusd: Decimal::ZERO,
+            economic_disposition: TradeEconomicDispositionV1::PendingUnapplied,
+        }
+    }
+
+    #[test]
+    fn query_v2_terminal_error_is_sticky_and_blocks_commit_of_earlier_staged_rows() {
+        let spec = session_spec();
+        let terminal_order = query_order_projection_for_v2_tests(9_000);
+        let mut conflicting_order = terminal_order.clone();
+        conflicting_order.last_updated_at_utc_ms += 1;
+        let mut query_state = QueryStateV1::new();
+        let terminal_pointer = Arc::as_ptr(&query_state.terminal_projections);
+        let mut prepared = query_state.prepare_delta_v2();
+        prepared
+            .prepare_terminal_inserts(vec![terminal_order], Vec::new())
+            .expect("先准备合法终态订单");
+        assert!(matches!(
+            prepared.prepare_terminal_inserts(vec![conflicting_order], Vec::new()),
+            Err(SimExecutionContractErrorV1::QueryIdentityConflict(_))
+        ));
+        assert!(matches!(
+            prepared.prepare_new_orders_page(
+                &spec,
+                orders_filter_sha256(&OrdersFilterV1::default()),
+                7,
+                Vec::new(),
+            ),
+            Err(SimExecutionContractErrorV1::ExecutionState(message))
+                if message.contains("准备已经失败")
+        ));
+        assert!(matches!(
+            prepared.into_committable(),
+            Err(SimExecutionContractErrorV1::ExecutionState(message))
+                if message.contains("准备已经失败")
+        ));
+        assert_eq!(
+            Arc::as_ptr(&query_state.terminal_projections),
+            terminal_pointer
+        );
+        assert!(query_state.terminal_projections.orders.is_empty());
+        assert_eq!(query_state.next_root_sequence, 1);
+        assert!(query_state.roots.is_empty());
+        assert!(query_state.issued_cursors.is_empty());
+    }
+
+    #[test]
+    fn query_v2_second_real_page_is_sticky_and_cannot_erase_the_first_page_cursor() {
+        let spec = session_spec();
+        let existing_rows = (0..=SIM_QUERY_PAGE_SIZE_V1)
+            .map(query_trade_projection_for_v2_tests)
+            .collect::<Vec<_>>();
+        let mut query_state = QueryStateV1::new();
+        let existing_page = query_state
+            .new_trades_page(
+                &spec,
+                trades_filter_sha256(&TradesFilterV1::default()),
+                7,
+                existing_rows,
+            )
+            .expect("先形成真实既有成交根");
+        let existing_cursor = existing_page.next_cursor.expect("既有根必须有末页游标");
+        query_state.continuation_by_request.insert(
+            "existing-last-page".to_owned(),
+            query_state.issued_cursors[existing_cursor.as_str()].clone(),
+        );
+        let before = query_state.clone();
+        let second_rows = (SIM_QUERY_PAGE_SIZE_V1 + 1..=(SIM_QUERY_PAGE_SIZE_V1 * 2 + 1))
+            .map(query_trade_projection_for_v2_tests)
+            .collect::<Vec<_>>();
+        let mut prepared = query_state.prepare_delta_v2();
+        let staged_page = prepared
+            .prepare_new_trades_page(
+                &spec,
+                trades_filter_sha256(&TradesFilterV1::default()),
+                8,
+                second_rows,
+            )
+            .expect("先准备新的长成交首页");
+        assert!(staged_page.next_cursor.is_some());
+        assert!(matches!(
+            prepared.prepare_continue_trades("existing-last-page"),
+            Err(SimExecutionContractErrorV1::ExecutionState(message))
+                if message.contains("已经准备分页")
+        ));
+        assert!(prepared.into_committable().is_err());
+        assert_eq!(query_state, before, "第二次分页错误后不得提交首次根或游标");
+    }
+
+    #[test]
+    fn query_v2_list_composer_reads_frozen_revision_and_trade_retention_without_writing() {
+        let spec = session_spec();
+        let rows = (0..=SIM_QUERY_PAGE_SIZE_V1)
+            .map(query_order_projection_for_v2_tests)
+            .collect::<Vec<_>>();
+        let mut query_state = QueryStateV1::new();
+        let page = query_state
+            .new_orders_page(
+                &spec,
+                orders_filter_sha256(&OrdersFilterV1::default()),
+                7,
+                rows,
+            )
+            .expect("正式形成带续页游标的订单根");
+        let cursor = page.next_cursor.expect("长订单根必须形成续页游标");
+        let request_id = "query-v2-list-composer-continuation";
+        query_state
+            .bind_continuation_for_request(
+                request_id,
+                &PendingDomainRequestV1::Orders(OrdersRequestV1 {
+                    context: direct_response_test_context(request_id),
+                    filter: OrdersFilterV1::default(),
+                    cursor: Some(cursor),
+                }),
+            )
+            .expect("正式绑定既有订单根续页");
+        query_state
+            .advance_root_retention_floor(query_state.next_root_sequence)
+            .expect("正式推进查询根保留水位");
+        query_state.prune_query_roots_before_retention_floor();
+        query_state
+            .advance_trade_history_retention_floor(50)
+            .expect("正式推进成交历史保留水位");
+        let before = query_state.clone();
+
+        {
+            let mut prepared = query_state.prepare_delta_v2();
+            assert_eq!(
+                prepared
+                    .continuation_query_projection_revision(request_id, ListQueryMethodV1::Orders)
+                    .expect("读取既有根冻结修订号"),
+                7
+            );
+            assert_eq!(prepared.trade_history_retained_from_utc_ms(), Some(50));
+            assert!(!prepared.trade_is_retained(49));
+            assert!(prepared.trade_is_retained(50));
+            assert!(matches!(
+                prepared.prepare_continue_orders(request_id),
+                Ok(OrdersQueryResultV1::OutOfRetention(QueryOutOfRetentionV1 {
+                    scope: QueryRetentionScopeV1::RootSnapshot,
+                    requested_root_sequence: Some(1),
+                    earliest_retained_root_sequence: 2,
+                    ..
+                }))
+            ));
+        }
+        assert_eq!(query_state, before, "只读查询不得改写根、游标或保留水位");
+
+        let mut prepared = query_state.prepare_delta_v2();
+        assert!(matches!(
+            prepared.continuation_query_projection_revision(
+                "missing-query-continuation",
+                ListQueryMethodV1::Orders,
+            ),
+            Err(SimExecutionContractErrorV1::QueryIdentityConflict(_))
+        ));
+        assert!(matches!(
+            prepared.into_committable(),
+            Err(SimExecutionContractErrorV1::ExecutionState(message))
+                if message.contains("准备已经失败")
+        ));
+        assert_eq!(query_state, before, "续页身份错误后不得提交任何查询变化");
+    }
+
+    #[test]
+    fn query_v2_first_page_error_makes_terminal_entry_and_commit_unavailable() {
+        let spec = session_spec();
+        let terminal_order = query_order_projection_for_v2_tests(9_000);
+        let mut query_state = QueryStateV1::new();
+        query_state.next_root_sequence = u64::MAX;
+        let mut prepared = query_state.prepare_delta_v2();
+        assert!(matches!(
+            prepared.prepare_new_orders_page(
+                &spec,
+                orders_filter_sha256(&OrdersFilterV1::default()),
+                7,
+                Vec::new(),
+            ),
+            Err(SimExecutionContractErrorV1::PlatformRevisionRegression)
+        ));
+        assert!(matches!(
+            prepared.prepare_terminal_inserts(vec![terminal_order], Vec::new()),
+            Err(SimExecutionContractErrorV1::ExecutionState(message))
+                if message.contains("准备已经失败")
+        ));
+        assert!(prepared.into_committable().is_err());
+        assert_eq!(query_state.next_root_sequence, u64::MAX);
+        assert!(query_state.terminal_projections.orders.is_empty());
+        assert!(query_state.roots.is_empty());
+        assert!(query_state.issued_cursors.is_empty());
+    }
+
+    #[test]
+    fn query_v2_terminal_overlay_reads_prepared_rows_and_drop_keeps_live_state_unchanged() {
+        let spec = session_spec();
+        let terminal_order = query_order_projection_for_v2_tests(9_000);
+        let terminal_trade = query_trade_projection_for_v2_tests(9_000);
+        let hot_order = query_order_projection_for_v2_tests(8_000);
+        let mut orders_state = QueryStateV1::new();
+        let terminal_pointer = Arc::as_ptr(&orders_state.terminal_projections);
+        let terminal_before = orders_state.terminal_projections.as_ref().clone();
+        let sequence_before = orders_state.next_root_sequence;
+        let roots_before = orders_state.roots.clone();
+        let cursors_before = orders_state.issued_cursors.clone();
+        {
+            let mut prepared = orders_state.prepare_delta_v2();
+            prepared
+                .prepare_terminal_inserts(
+                    vec![terminal_order.clone()],
+                    vec![terminal_trade.clone()],
+                )
+                .expect("准备终态订单与成交覆盖层");
+            assert_eq!(
+                prepared.retained_terminal_order(&terminal_order.platform_order_id),
+                Some(&terminal_order)
+            );
+            assert_eq!(
+                prepared.retained_terminal_trade(&terminal_trade.simulated_trade_id),
+                Some(&terminal_trade)
+            );
+            assert_eq!(
+                prepared
+                    .retained_terminal_trades()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                vec![terminal_trade]
+            );
+            let page = prepared
+                .prepare_new_orders_page(
+                    &spec,
+                    orders_filter_sha256(&OrdersFilterV1::default()),
+                    7,
+                    vec![hot_order.clone()],
+                )
+                .expect("订单列表仍只使用调用方提供的活动热态行");
+            assert_eq!(page.items, vec![hot_order]);
+            assert!(page.next_cursor.is_none());
+            drop(prepared);
+        }
+        assert_eq!(
+            Arc::as_ptr(&orders_state.terminal_projections),
+            terminal_pointer
+        );
+        assert_eq!(orders_state.terminal_projections.as_ref(), &terminal_before);
+        assert_eq!(orders_state.next_root_sequence, sequence_before);
+        assert_eq!(orders_state.roots, roots_before);
+        assert_eq!(orders_state.issued_cursors, cursors_before);
+
+        let long_trades = (0..=SIM_QUERY_PAGE_SIZE_V1)
+            .map(query_trade_projection_for_v2_tests)
+            .collect::<Vec<_>>();
+        let mut trades_state = QueryStateV1::new();
+        let terminal_pointer = Arc::as_ptr(&trades_state.terminal_projections);
+        let terminal_before = trades_state.terminal_projections.as_ref().clone();
+        {
+            let mut prepared = trades_state.prepare_delta_v2();
+            prepared
+                .prepare_terminal_inserts(Vec::new(), long_trades)
+                .expect("准备长成交覆盖层");
+            let mut rows = prepared
+                .retained_terminal_trades()
+                .cloned()
+                .collect::<Vec<_>>();
+            rows.sort_by(|left, right| {
+                (left.matched_at_utc_ms, left.simulated_trade_id.as_str())
+                    .cmp(&(right.matched_at_utc_ms, right.simulated_trade_id.as_str()))
+            });
+            let page = prepared
+                .prepare_new_trades_page(
+                    &spec,
+                    trades_filter_sha256(&TradesFilterV1::default()),
+                    8,
+                    rows,
+                )
+                .expect("同一守卫准备长成交页");
+            assert_eq!(page.items.len(), SIM_QUERY_PAGE_SIZE_V1);
+            assert!(page.next_cursor.is_some());
+            drop(prepared);
+        }
+        assert_eq!(
+            Arc::as_ptr(&trades_state.terminal_projections),
+            terminal_pointer
+        );
+        assert_eq!(trades_state.terminal_projections.as_ref(), &terminal_before);
+        assert_eq!(trades_state.next_root_sequence, 1);
+        assert!(trades_state.roots.is_empty());
+        assert!(trades_state.issued_cursors.is_empty());
+    }
+
+    #[test]
+    fn query_v2_terminal_overlay_rejects_conflict_and_shared_new_insert_before_staging() {
+        let existing_order = query_order_projection_for_v2_tests(1);
+        let mut conflicting_order = existing_order.clone();
+        conflicting_order.last_updated_at_utc_ms += 1;
+        let untouched_order = query_order_projection_for_v2_tests(2);
+        let mut conflict_state = QueryStateV1::new();
+        Arc::get_mut(&mut conflict_state.terminal_projections)
+            .expect("测试查询投影必须独占")
+            .orders
+            .insert(
+                existing_order.platform_order_id.clone(),
+                existing_order.clone(),
+            );
+        let terminal_before = conflict_state.terminal_projections.as_ref().clone();
+        {
+            let mut prepared = conflict_state.prepare_delta_v2();
+            assert!(matches!(
+                prepared.prepare_terminal_inserts(
+                    vec![untouched_order.clone(), conflicting_order],
+                    Vec::new(),
+                ),
+                Err(SimExecutionContractErrorV1::QueryIdentityConflict(_))
+            ));
+            assert_eq!(
+                prepared.retained_terminal_order(&untouched_order.platform_order_id),
+                None,
+                "全量预验证失败前不得暂存更早的合法键"
+            );
+        }
+        assert_eq!(
+            conflict_state.terminal_projections.as_ref(),
+            &terminal_before
+        );
+
+        let mut shared_new_state = QueryStateV1::new();
+        let shared_new = Arc::clone(&shared_new_state.terminal_projections);
+        let shared_new_pointer = Arc::as_ptr(&shared_new_state.terminal_projections);
+        {
+            let mut prepared = shared_new_state.prepare_delta_v2();
+            assert!(matches!(
+                prepared.prepare_terminal_inserts(vec![untouched_order.clone()], Vec::new()),
+                Err(SimExecutionContractErrorV1::ExecutionState(message))
+                    if message.contains("独占")
+            ));
+            assert_eq!(
+                prepared.retained_terminal_order(&untouched_order.platform_order_id),
+                None
+            );
+        }
+        assert_eq!(
+            Arc::as_ptr(&shared_new_state.terminal_projections),
+            shared_new_pointer
+        );
+        assert!(shared_new_state.terminal_projections.orders.is_empty());
+        drop(shared_new);
+
+        let existing_trade = query_trade_projection_for_v2_tests(1);
+        let mut shared_repeat_state = QueryStateV1::new();
+        let terminal_projections =
+            Arc::get_mut(&mut shared_repeat_state.terminal_projections).expect("测试投影必须独占");
+        terminal_projections.orders.insert(
+            existing_order.platform_order_id.clone(),
+            existing_order.clone(),
+        );
+        terminal_projections.trades.insert(
+            existing_trade.simulated_trade_id.clone(),
+            existing_trade.clone(),
+        );
+        let shared_repeat = Arc::clone(&shared_repeat_state.terminal_projections);
+        let shared_repeat_pointer = Arc::as_ptr(&shared_repeat_state.terminal_projections);
+        reset_terminal_query_projections_clone_count_for_tests();
+        let mut prepared = shared_repeat_state.prepare_delta_v2();
+        prepared
+            .prepare_terminal_inserts(vec![existing_order], vec![existing_trade])
+            .expect("共享 Arc 上的精确重复不需要写入");
+        prepared
+            .into_committable()
+            .expect("精确重复准备必须可提交")
+            .commit();
+        assert_eq!(
+            Arc::as_ptr(&shared_repeat_state.terminal_projections),
+            shared_repeat_pointer
+        );
+        assert_eq!(
+            Arc::strong_count(&shared_repeat_state.terminal_projections),
+            2
+        );
+        assert_eq!(terminal_query_projections_clone_count_for_tests(), 0);
+        drop(shared_repeat);
+    }
+
+    #[test]
+    fn query_v2_terminal_overlay_unique_commit_inserts_only_touched_keys_and_page_state() {
+        let spec = session_spec();
+        let unrelated_order = query_order_projection_for_v2_tests(9_999);
+        let terminal_order = query_order_projection_for_v2_tests(9_000);
+        let terminal_trades = (0..=SIM_QUERY_PAGE_SIZE_V1)
+            .map(query_trade_projection_for_v2_tests)
+            .collect::<Vec<_>>();
+        let mut query_state = QueryStateV1::new();
+        Arc::get_mut(&mut query_state.terminal_projections)
+            .expect("测试查询投影必须独占")
+            .orders
+            .insert(
+                unrelated_order.platform_order_id.clone(),
+                unrelated_order.clone(),
+            );
+        reset_terminal_query_projections_clone_count_for_tests();
+        let baseline_clone = query_state.terminal_projections.as_ref().clone();
+        assert_eq!(terminal_query_projections_clone_count_for_tests(), 1);
+        drop(baseline_clone);
+        reset_terminal_query_projections_clone_count_for_tests();
+        let terminal_pointer = Arc::as_ptr(&query_state.terminal_projections);
+        let page;
+        {
+            let mut prepared = query_state.prepare_delta_v2();
+            prepared
+                .prepare_terminal_inserts(vec![terminal_order.clone()], terminal_trades.clone())
+                .expect("独占查询投影准备触及键");
+            let mut rows = prepared
+                .retained_terminal_trades()
+                .cloned()
+                .collect::<Vec<_>>();
+            rows.sort_by(|left, right| {
+                (left.matched_at_utc_ms, left.simulated_trade_id.as_str())
+                    .cmp(&(right.matched_at_utc_ms, right.simulated_trade_id.as_str()))
+            });
+            page = prepared
+                .prepare_new_trades_page(
+                    &spec,
+                    trades_filter_sha256(&TradesFilterV1::default()),
+                    9,
+                    rows,
+                )
+                .expect("准备触及键长成交页");
+            prepared
+                .into_committable()
+                .expect("终态覆盖层与长页准备必须可提交")
+                .commit();
+        }
+        assert_eq!(
+            Arc::as_ptr(&query_state.terminal_projections),
+            terminal_pointer,
+            "提交不得通过 Arc::make_mut 克隆完整终态投影"
+        );
+        assert_eq!(
+            query_state
+                .terminal_projections
+                .orders
+                .get(&unrelated_order.platform_order_id),
+            Some(&unrelated_order)
+        );
+        assert_eq!(
+            query_state
+                .terminal_projections
+                .orders
+                .get(&terminal_order.platform_order_id),
+            Some(&terminal_order)
+        );
+        for trade in &terminal_trades {
+            assert_eq!(
+                query_state
+                    .terminal_projections
+                    .trades
+                    .get(&trade.simulated_trade_id),
+                Some(trade)
+            );
+        }
+        assert_eq!(query_state.terminal_projections.orders.len(), 2);
+        assert_eq!(
+            query_state.terminal_projections.trades.len(),
+            SIM_QUERY_PAGE_SIZE_V1 + 1
+        );
+        assert_eq!(query_state.next_root_sequence, 2);
+        assert_eq!(query_state.roots.len(), 1);
+        assert_eq!(query_state.issued_cursors.len(), 1);
+        assert_eq!(page.items.len(), SIM_QUERY_PAGE_SIZE_V1);
+        assert!(page.next_cursor.is_some());
+        assert_eq!(terminal_query_projections_clone_count_for_tests(), 0);
+    }
+
+    #[test]
+    fn query_v2_initial_pages_prepare_without_mutation_and_commit_only_expected_keys() {
+        let spec = session_spec();
+        let mut short = QueryStateV1::new();
+        let short_before = short.clone();
+        let short_rows = vec![query_order_projection_for_v2_tests(0)];
+        {
+            let (prepared, page) = short
+                .prepare_new_orders_page_v2(
+                    &spec,
+                    orders_filter_sha256(&OrdersFilterV1::default()),
+                    7,
+                    short_rows.clone(),
+                )
+                .expect("准备短订单页");
+            assert_eq!(page.items, short_rows);
+            assert!(page.next_cursor.is_none());
+            drop(prepared);
+        }
+        assert_eq!(short, short_before, "丢弃准备结果不得修改查询状态");
+        let (prepared, page) = short
+            .prepare_new_orders_page_v2(
+                &spec,
+                orders_filter_sha256(&OrdersFilterV1::default()),
+                7,
+                vec![query_order_projection_for_v2_tests(0)],
+            )
+            .expect("再次准备短订单页");
+        assert!(page.next_cursor.is_none());
+        prepared
+            .into_committable()
+            .expect("短订单页准备必须可提交")
+            .commit();
+        assert_eq!(short.next_root_sequence, 2);
+        assert!(short.roots.is_empty());
+        assert!(short.issued_cursors.is_empty());
+
+        let mut long = QueryStateV1::new();
+        let long_rows = (0..=SIM_QUERY_PAGE_SIZE_V1)
+            .map(query_trade_projection_for_v2_tests)
+            .collect::<Vec<_>>();
+        let (prepared, page) = long
+            .prepare_new_trades_page_v2(
+                &spec,
+                trades_filter_sha256(&TradesFilterV1::default()),
+                9,
+                long_rows,
+            )
+            .expect("准备长成交页");
+        assert_eq!(page.items.len(), SIM_QUERY_PAGE_SIZE_V1);
+        assert!(page.next_cursor.is_some());
+        prepared
+            .into_committable()
+            .expect("长成交页准备必须可提交")
+            .commit();
+        assert_eq!(long.next_root_sequence, 2);
+        assert_eq!(long.roots.len(), 1);
+        assert_eq!(long.issued_cursors.len(), 1);
+        assert_eq!(
+            match &long.roots[&1].rows {
+                QueryRootRowsV1::Trades(rows) => rows.len(),
+                QueryRootRowsV1::Orders(_) => unreachable!("测试根必须是成交根"),
+            },
+            SIM_QUERY_PAGE_SIZE_V1 + 1
+        );
+    }
+
+    #[test]
+    fn query_v2_initial_and_continuation_pages_match_v1_terminal_state() {
+        let spec = session_spec();
+        let order_rows = (0..=(SIM_QUERY_PAGE_SIZE_V1 * 2))
+            .map(query_order_projection_for_v2_tests)
+            .collect::<Vec<_>>();
+        let mut v1_orders = QueryStateV1::new();
+        let mut v2_orders = QueryStateV1::new();
+        let v1_first = v1_orders
+            .new_orders_page(
+                &spec,
+                orders_filter_sha256(&OrdersFilterV1::default()),
+                17,
+                order_rows.clone(),
+            )
+            .expect("V1 订单首页");
+        let (prepared, v2_first) = v2_orders
+            .prepare_new_orders_page_v2(
+                &spec,
+                orders_filter_sha256(&OrdersFilterV1::default()),
+                17,
+                order_rows,
+            )
+            .expect("V2 订单首页");
+        prepared
+            .into_committable()
+            .expect("V2 订单首页必须可提交")
+            .commit();
+        assert_eq!(v2_first, v1_first);
+        assert_eq!(v2_orders, v1_orders);
+        let cursor = v1_first.next_cursor.expect("订单首页应有续页游标");
+        let binding = v1_orders.issued_cursors[cursor.as_str()].clone();
+        v1_orders
+            .continuation_by_request
+            .insert("equivalent-orders".to_owned(), binding.clone());
+        v2_orders
+            .continuation_by_request
+            .insert("equivalent-orders".to_owned(), binding);
+        let v1_next = v1_orders
+            .continue_orders("equivalent-orders")
+            .expect("V1 订单续页");
+        let (prepared, v2_next) = v2_orders
+            .prepare_continue_orders_v2("equivalent-orders")
+            .expect("V2 订单续页");
+        prepared
+            .into_committable()
+            .expect("V2 订单续页必须可提交")
+            .commit();
+        assert_eq!(v2_next, v1_next);
+        assert_eq!(v2_orders, v1_orders);
+
+        let trade_rows = (0..=SIM_QUERY_PAGE_SIZE_V1)
+            .map(query_trade_projection_for_v2_tests)
+            .collect::<Vec<_>>();
+        let mut v1_trades = QueryStateV1::new();
+        let mut v2_trades = QueryStateV1::new();
+        let v1_first = v1_trades
+            .new_trades_page(
+                &spec,
+                trades_filter_sha256(&TradesFilterV1::default()),
+                18,
+                trade_rows.clone(),
+            )
+            .expect("V1 成交首页");
+        let (prepared, v2_first) = v2_trades
+            .prepare_new_trades_page_v2(
+                &spec,
+                trades_filter_sha256(&TradesFilterV1::default()),
+                18,
+                trade_rows,
+            )
+            .expect("V2 成交首页");
+        prepared
+            .into_committable()
+            .expect("V2 成交首页必须可提交")
+            .commit();
+        assert_eq!(v2_first, v1_first);
+        assert_eq!(v2_trades, v1_trades);
+        let cursor = v1_first.next_cursor.expect("成交首页应有续页游标");
+        let binding = v1_trades.issued_cursors[cursor.as_str()].clone();
+        v1_trades
+            .continuation_by_request
+            .insert("equivalent-trades".to_owned(), binding.clone());
+        v2_trades
+            .continuation_by_request
+            .insert("equivalent-trades".to_owned(), binding);
+        let v1_next = v1_trades
+            .continue_trades("equivalent-trades")
+            .expect("V1 成交续页");
+        let (prepared, v2_next) = v2_trades
+            .prepare_continue_trades_v2("equivalent-trades")
+            .expect("V2 成交续页");
+        prepared
+            .into_committable()
+            .expect("V2 成交续页必须可提交")
+            .commit();
+        assert_eq!(v2_next, v1_next);
+        assert_eq!(v2_trades, v1_trades);
+    }
+
+    #[test]
+    fn query_v2_continuations_insert_only_middle_cursor_and_leave_last_page_unchanged() {
+        let spec = session_spec();
+        let mut orders = QueryStateV1::new();
+        let rows = (0..=(SIM_QUERY_PAGE_SIZE_V1 * 2))
+            .map(query_order_projection_for_v2_tests)
+            .collect::<Vec<_>>();
+        let (prepared, first_page) = orders
+            .prepare_new_orders_page_v2(
+                &spec,
+                orders_filter_sha256(&OrdersFilterV1::default()),
+                11,
+                rows,
+            )
+            .expect("准备订单首页");
+        prepared
+            .into_committable()
+            .expect("订单首页准备必须可提交")
+            .commit();
+        let first_cursor = first_page.next_cursor.expect("订单首页应有续页游标");
+        orders.continuation_by_request.insert(
+            "orders-middle".to_owned(),
+            orders.issued_cursors[first_cursor.as_str()].clone(),
+        );
+        let middle_binding = IssuedCursorV1 {
+            next_index: SIM_QUERY_PAGE_SIZE_V1 * 2,
+            ..orders.issued_cursors[first_cursor.as_str()].clone()
+        };
+        let middle_token = cursor_token(&middle_binding);
+        orders.issued_cursors.insert(
+            middle_token.clone(),
+            IssuedCursorV1 {
+                next_index: middle_binding.next_index + 1,
+                ..middle_binding
+            },
+        );
+        let before_conflict = orders.clone();
+        assert!(orders.prepare_continue_orders_v2("orders-middle").is_err());
+        assert_eq!(orders, before_conflict, "续页游标冲突不得修改查询状态");
+        orders.issued_cursors.remove(&middle_token);
+        let before_middle = orders.clone();
+        {
+            let (prepared, result) = orders
+                .prepare_continue_orders_v2("orders-middle")
+                .expect("准备订单中间页");
+            let OrdersQueryResultV1::Page(page) = result else {
+                unreachable!("测试中间页仍在保留期内")
+            };
+            assert_eq!(page.items.len(), SIM_QUERY_PAGE_SIZE_V1);
+            assert!(page.next_cursor.is_some());
+            drop(prepared);
+        }
+        assert_eq!(orders, before_middle, "丢弃中间页准备不得签发游标");
+        let (prepared, result) = orders
+            .prepare_continue_orders_v2("orders-middle")
+            .expect("再次准备订单中间页");
+        let OrdersQueryResultV1::Page(middle_page) = result else {
+            unreachable!("测试中间页仍在保留期内")
+        };
+        let last_cursor = middle_page.next_cursor.expect("中间页应有末页游标");
+        prepared
+            .into_committable()
+            .expect("订单中间页准备必须可提交")
+            .commit();
+        assert_eq!(orders.next_root_sequence, before_middle.next_root_sequence);
+        assert_eq!(orders.roots, before_middle.roots);
+        assert_eq!(
+            orders.issued_cursors.len(),
+            before_middle.issued_cursors.len() + 1
+        );
+
+        orders.continuation_by_request.insert(
+            "orders-last".to_owned(),
+            orders.issued_cursors[last_cursor.as_str()].clone(),
+        );
+        let before_last = orders.clone();
+        let (prepared, result) = orders
+            .prepare_continue_orders_v2("orders-last")
+            .expect("准备订单末页");
+        let OrdersQueryResultV1::Page(last_page) = result else {
+            unreachable!("测试末页仍在保留期内")
+        };
+        assert_eq!(last_page.items.len(), 1);
+        assert!(last_page.next_cursor.is_none());
+        prepared
+            .into_committable()
+            .expect("订单末页准备必须可提交")
+            .commit();
+        assert_eq!(orders, before_last, "订单末页提交不得产生查询状态写入");
+
+        let mut trades = QueryStateV1::new();
+        let rows = (0..=SIM_QUERY_PAGE_SIZE_V1)
+            .map(query_trade_projection_for_v2_tests)
+            .collect::<Vec<_>>();
+        let (prepared, first_page) = trades
+            .prepare_new_trades_page_v2(
+                &spec,
+                trades_filter_sha256(&TradesFilterV1::default()),
+                12,
+                rows,
+            )
+            .expect("准备成交首页");
+        prepared
+            .into_committable()
+            .expect("成交首页准备必须可提交")
+            .commit();
+        let first_cursor = first_page.next_cursor.expect("成交首页应有续页游标");
+        trades.continuation_by_request.insert(
+            "trades-last".to_owned(),
+            trades.issued_cursors[first_cursor.as_str()].clone(),
+        );
+        let before_last = trades.clone();
+        let (prepared, result) = trades
+            .prepare_continue_trades_v2("trades-last")
+            .expect("准备成交末页");
+        let TradesQueryResultV1::Page(last_page) = result else {
+            unreachable!("测试成交末页仍在保留期内")
+        };
+        assert_eq!(last_page.items.len(), 1);
+        assert!(last_page.next_cursor.is_none());
+        prepared
+            .into_committable()
+            .expect("成交末页准备必须可提交")
+            .commit();
+        assert_eq!(trades, before_last, "成交末页提交不得产生查询状态写入");
+    }
+
+    #[test]
+    fn query_v2_prepare_rejects_conflicts_without_mutating_live_state() {
+        let spec = session_spec();
+        let filter = orders_filter_sha256(&OrdersFilterV1::default());
+        let long_rows = (0..=SIM_QUERY_PAGE_SIZE_V1)
+            .map(query_order_projection_for_v2_tests)
+            .collect::<Vec<_>>();
+
+        let mut exhausted = QueryStateV1::new();
+        exhausted.next_root_sequence = u64::MAX;
+        let before = exhausted.clone();
+        assert!(
+            exhausted
+                .prepare_new_orders_page_v2(&spec, filter.clone(), 7, Vec::new())
+                .is_err()
+        );
+        assert_eq!(exhausted, before);
+
+        let mut reference = QueryStateV1::new();
+        let (prepared, page) = reference
+            .prepare_new_orders_page_v2(&spec, filter.clone(), 7, long_rows.clone())
+            .expect("形成参考游标");
+        prepared
+            .into_committable()
+            .expect("参考游标准备必须可提交")
+            .commit();
+        let token = page.next_cursor.expect("参考长页必须签发游标");
+        let mut conflict = QueryStateV1::new();
+        let mut conflicting_binding = reference.issued_cursors[token.as_str()].clone();
+        conflicting_binding.next_index += 1;
+        conflict
+            .issued_cursors
+            .insert(token.as_str().to_owned(), conflicting_binding);
+        let before = conflict.clone();
+        assert!(
+            conflict
+                .prepare_new_orders_page_v2(&spec, filter.clone(), 7, long_rows)
+                .is_err()
+        );
+        assert_eq!(conflict, before);
+
+        let missing_binding = IssuedCursorV1 {
+            root_sequence: 1,
+            root_identity: Sha256Hex("a".repeat(64)),
+            method: ListQueryMethodV1::Orders,
+            filter_sha256: filter.clone(),
+            query_projection_revision: 7,
+            retention_floor_at_issue: 1,
+            next_index: SIM_QUERY_PAGE_SIZE_V1,
+        };
+        let mut missing = QueryStateV1::new();
+        missing
+            .continuation_by_request
+            .insert("missing-root".to_owned(), missing_binding.clone());
+        let before = missing.clone();
+        assert!(missing.prepare_continue_orders_v2("missing-root").is_err());
+        assert_eq!(missing, before);
+
+        let mut expired = QueryStateV1::new();
+        expired.earliest_retained_root_sequence = 2;
+        expired.next_root_sequence = 2;
+        expired
+            .continuation_by_request
+            .insert("expired-root".to_owned(), missing_binding);
+        let before = expired.clone();
+        let (prepared, result) = expired
+            .prepare_continue_orders_v2("expired-root")
+            .expect("旧根按既有语义形成保留期外结果");
+        assert!(matches!(result, OrdersQueryResultV1::OutOfRetention(_)));
+        prepared
+            .into_committable()
+            .expect("保留期外结果准备必须可提交")
+            .commit();
+        assert_eq!(expired, before, "保留期外结果不得修改查询状态");
+
+        let mut retention_mismatch = reference;
+        let mismatched_binding = retention_mismatch.issued_cursors[token.as_str()].clone();
+        let binding = retention_mismatch
+            .continuation_by_request
+            .entry("retention-mismatch".to_owned())
+            .or_insert(mismatched_binding);
+        binding.retention_floor_at_issue += 1;
+        let before = retention_mismatch.clone();
+        assert!(
+            retention_mismatch
+                .prepare_continue_orders_v2("retention-mismatch")
+                .is_err()
+        );
+        assert_eq!(retention_mismatch, before);
+    }
+
+    #[test]
+    fn query_v2_prepare_with_large_unrelated_maps_touches_only_the_new_keys() {
+        let spec = session_spec();
+        let mut query_state = QueryStateV1::new();
+        query_state.next_root_sequence = 2_000;
+        for sequence in 1..=1_024 {
+            query_state.roots.insert(
+                sequence,
+                QueryRootV1 {
+                    root_sequence: sequence,
+                    root_identity: Sha256Hex(format!("{sequence:064x}")),
+                    method: ListQueryMethodV1::Orders,
+                    filter_sha256: Sha256Hex("1".repeat(64)),
+                    query_projection_revision: sequence,
+                    retention_floor_at_issue: 1,
+                    projection_sha256: Sha256Hex("2".repeat(64)),
+                    rows: QueryRootRowsV1::Orders(Arc::from(Vec::new())),
+                },
+            );
+            query_state.issued_cursors.insert(
+                format!("unrelated-cursor-{sequence}"),
+                IssuedCursorV1 {
+                    root_sequence: sequence,
+                    root_identity: Sha256Hex(format!("{sequence:064x}")),
+                    method: ListQueryMethodV1::Orders,
+                    filter_sha256: Sha256Hex("1".repeat(64)),
+                    query_projection_revision: sequence,
+                    retention_floor_at_issue: 1,
+                    next_index: SIM_QUERY_PAGE_SIZE_V1,
+                },
+            );
+        }
+        let roots_before = query_state.roots.clone();
+        let cursors_before = query_state.issued_cursors.clone();
+        let rows = (0..=SIM_QUERY_PAGE_SIZE_V1)
+            .map(query_order_projection_for_v2_tests)
+            .collect::<Vec<_>>();
+        let (prepared, _) = query_state
+            .prepare_new_orders_page_v2(
+                &spec,
+                orders_filter_sha256(&OrdersFilterV1::default()),
+                13,
+                rows,
+            )
+            .expect("大批无关键下准备目标页");
+        prepared
+            .into_committable()
+            .expect("大批无关键下目标页准备必须可提交")
+            .commit();
+        for (key, value) in roots_before {
+            assert_eq!(query_state.roots.get(&key), Some(&value));
+        }
+        for (key, value) in cursors_before {
+            assert_eq!(query_state.issued_cursors.get(&key), Some(&value));
+        }
+        assert_eq!(query_state.roots.len(), 1_025);
+        assert_eq!(query_state.issued_cursors.len(), 1_025);
+        assert_eq!(query_state.next_root_sequence, 2_001);
     }
 
     #[test]
@@ -17654,6 +25801,339 @@ mod tests {
         );
     }
 
+    #[test]
+    fn durable_projection_replays_resource_admission_gates_without_blocking_safe_drain() {
+        let projection_with_barrier = |kind: ResourceLimitKindV1| {
+            let mut projection = DurableEvidenceProjectionV1::default();
+            let (resource_policy, resource_policy_sha256) = resource_policy_for_tests();
+            projection
+                .apply(&projection_evidence_for_tests(
+                    DurableTransactionFactV1::RunCreated {
+                        run_id: "component-test-run".to_owned(),
+                        market_event_source_identity_sha256: Sha256Hex("2".repeat(64)),
+                        run_intent_binding: SimulationRunIntentBindingV1::try_new(
+                            crate::platform_rules::ImplementationIdentityV1 {
+                                git_commit: "1".repeat(40),
+                                source_identity_sha256: Sha256Hex("2".repeat(64)),
+                                cargo_lock_sha256: Sha256Hex("3".repeat(64)),
+                            },
+                            SimulationWorkloadKindV1::ComponentGolden,
+                            SimulationDeterministicScriptContractV1::ComponentGoldenV1,
+                        )
+                        .expect("构造测试运行意图"),
+                        resource_policy: resource_policy.clone(),
+                        resource_policy_sha256,
+                    },
+                ))
+                .expect("投影运行创建事实");
+            let spec = session_spec();
+            projection.session_creations.insert(
+                spec.session_id.clone(),
+                (
+                    spec.clone(),
+                    funded_opening_anchor_for_projection_test(&spec.session_id),
+                    SessionInitializationSnapshotV1 {
+                        state: SessionInitializationStateV1::Active,
+                        activation_id: Some("projection-activation".to_owned()),
+                        failure_id: None,
+                    },
+                ),
+            );
+            let hard_limit = match kind {
+                ResourceLimitKindV1::InputQueue => resource_policy.session.input_queue,
+                ResourceLimitKindV1::RequestQueue => resource_policy.session.request_queue,
+                _ => unreachable!("测试只覆盖两种会话屏障"),
+            };
+            let limit = ResourceLimitReachedV1 {
+                policy_id: resource_policy.policy_id.clone(),
+                scope: ResourceLimitScopeV1::Session,
+                kind,
+                exceeded_dimension: ResourceLimitDimensionV1::Records,
+                candidate: ResourceQuantityV1::new(hard_limit.max_records + 1, 0),
+                limit: hard_limit,
+            };
+            let mut limit_evidence =
+                projection_evidence_for_tests(DurableTransactionFactV1::ResourceLimitReached {
+                    session_id: Some(spec.session_id.clone()),
+                    limit: limit.clone(),
+                    triggering_session_limit: None,
+                });
+            if kind == ResourceLimitKindV1::InputQueue {
+                limit_evidence.transient_input_session_id = Some(spec.session_id.clone());
+                limit_evidence.transient_input = limit.candidate;
+            }
+            projection
+                .apply(&limit_evidence)
+                .expect("投影合法会话资源屏障");
+            (projection, spec)
+        };
+
+        let (mut non_input_projection, spec) =
+            projection_with_barrier(ResourceLimitKindV1::RequestQueue);
+        let request_context = RequestContextV1 {
+            execution_contract_version: SIM_EXECUTION_CONTRACT_V1.to_owned(),
+            session_id: spec.session_id.clone(),
+            account_id: spec.account_id.clone(),
+            caller_role: spec.caller_role,
+            caller_instance_id: spec.caller_instance_id.clone(),
+            global_request_id: "projection-request".to_owned(),
+            caller_correlation_id: None,
+            caller_sequence: 1,
+            request_sent_at_utc_ms: 1,
+            model_visible_cursor: ModelVisibleCursorV1 {
+                session_id: spec.session_id.clone(),
+                public_visibility: Default::default(),
+                private_feedback_sequence: 0,
+            },
+        };
+        let new_ingress =
+            projection_evidence_for_tests(DurableTransactionFactV1::RequestRegistered {
+                session_id: spec.session_id.clone(),
+                registration: DurableRequestRegistrationV1 {
+                    request: PendingDomainRequestV1::Order(OrderRequestV1 {
+                        context: request_context,
+                        platform_order_id: "projection-order".to_owned(),
+                    }),
+                    transit: RequestTransitV1 {
+                        request_sent_at_utc_ms: 1,
+                        outbound_delay_ms: 0,
+                        platform_arrived_at_utc_ms: 1,
+                        platform_responded_at_utc_ms: None,
+                        private_emission_sequence: None,
+                        inbound_delay_ms: 0,
+                        response_received_at_utc_ms: None,
+                    },
+                    actions: vec![QueuedLogicalActionV1 {
+                        action_identity: "projection-action".to_owned(),
+                        global_request_id: "projection-request".to_owned(),
+                        key: crate::session::LogicalActionKeyV1 {
+                            effective_processing_at_utc_ms: 1,
+                            caller_sequence: 1,
+                            batch_item_ordinal: 0,
+                        },
+                    }],
+                },
+            });
+        assert!(matches!(
+            non_input_projection.apply(&new_ingress),
+            Err(SimExecutionPersistenceErrorV1::Session(message))
+                if message.contains("资源屏障关闭后")
+        ));
+        let bound_bucket =
+            projection_evidence_for_tests(DurableTransactionFactV1::PlatformBucketApplied {
+                session_id: spec.session_id.clone(),
+                bucket: DurableMarketBucketReferenceV1 {
+                    path: MarketEventPathV1::HiddenPlatform,
+                    bucket_at_utc_ms: 10,
+                    start_index_position: 0,
+                    next_index_position: 0,
+                    closure: MillisecondBucketClosureV1::EndOfInput,
+                    bucket_sha256: Sha256Hex("a".repeat(64)),
+                },
+            });
+        non_input_projection
+            .apply(&bound_bucket)
+            .expect("非输入队列局部屏障仍允许既有绑定输入排空");
+
+        let resource_policy = non_input_projection
+            .resource_policy
+            .as_ref()
+            .expect("投影包含资源策略")
+            .clone();
+        let run_hard_limit = resource_policy.run.request_queue;
+        non_input_projection
+            .apply(&projection_evidence_for_tests(
+                DurableTransactionFactV1::ResourceLimitReached {
+                    session_id: None,
+                    limit: ResourceLimitReachedV1 {
+                        policy_id: resource_policy.policy_id.clone(),
+                        scope: ResourceLimitScopeV1::Run,
+                        kind: ResourceLimitKindV1::RequestQueue,
+                        exceeded_dimension: ResourceLimitDimensionV1::Records,
+                        candidate: ResourceQuantityV1::new(run_hard_limit.max_records + 1, 0),
+                        limit: run_hard_limit,
+                    },
+                    triggering_session_limit: None,
+                },
+            ))
+            .expect("局部屏障之后仍可原子追加首个共享屏障");
+        let second_limit =
+            projection_evidence_for_tests(DurableTransactionFactV1::ResourceLimitReached {
+                session_id: Some(spec.session_id.clone()),
+                limit: ResourceLimitReachedV1 {
+                    policy_id: resource_policy.policy_id,
+                    scope: ResourceLimitScopeV1::Session,
+                    kind: ResourceLimitKindV1::RequestQueue,
+                    exceeded_dimension: ResourceLimitDimensionV1::Records,
+                    candidate: ResourceQuantityV1::new(
+                        resource_policy.session.request_queue.max_records + 1,
+                        0,
+                    ),
+                    limit: resource_policy.session.request_queue,
+                },
+                triggering_session_limit: None,
+            });
+        assert!(matches!(
+            non_input_projection.apply(&second_limit),
+            Err(SimExecutionPersistenceErrorV1::Session(message))
+                if message.contains("第二份资源超限事实")
+        ));
+
+        let (mut input_projection, input_spec) =
+            projection_with_barrier(ResourceLimitKindV1::InputQueue);
+        let blocked_bucket =
+            projection_evidence_for_tests(DurableTransactionFactV1::PlatformBucketApplied {
+                session_id: input_spec.session_id,
+                bucket: DurableMarketBucketReferenceV1 {
+                    path: MarketEventPathV1::HiddenPlatform,
+                    bucket_at_utc_ms: 10,
+                    start_index_position: 0,
+                    next_index_position: 0,
+                    closure: MillisecondBucketClosureV1::EndOfInput,
+                    bucket_sha256: Sha256Hex("b".repeat(64)),
+                },
+            });
+        assert!(matches!(
+            input_projection.apply(&blocked_bucket),
+            Err(SimExecutionPersistenceErrorV1::Session(message))
+                if message.contains("屏障之后仍出现耐久平台桶事实")
+        ));
+    }
+
+    #[test]
+    fn combined_resource_barrier_preserves_the_triggering_input_gap_without_side_effects() {
+        let projection_with_session = || {
+            let mut projection = DurableEvidenceProjectionV1::default();
+            let (resource_policy, resource_policy_sha256) = resource_policy_for_tests();
+            projection
+                .apply(&projection_evidence_for_tests(
+                    DurableTransactionFactV1::RunCreated {
+                        run_id: "combined-resource-run".to_owned(),
+                        market_event_source_identity_sha256: Sha256Hex("2".repeat(64)),
+                        run_intent_binding: SimulationRunIntentBindingV1::try_new(
+                            crate::platform_rules::ImplementationIdentityV1 {
+                                git_commit: "1".repeat(40),
+                                source_identity_sha256: Sha256Hex("2".repeat(64)),
+                                cargo_lock_sha256: Sha256Hex("3".repeat(64)),
+                            },
+                            SimulationWorkloadKindV1::ComponentGolden,
+                            SimulationDeterministicScriptContractV1::ComponentGoldenV1,
+                        )
+                        .expect("构造组合资源测试运行意图"),
+                        resource_policy: resource_policy.clone(),
+                        resource_policy_sha256,
+                    },
+                ))
+                .expect("投影组合资源测试运行创建事实");
+            let spec = session_spec();
+            projection.session_creations.insert(
+                spec.session_id.clone(),
+                (
+                    spec.clone(),
+                    funded_opening_anchor_for_projection_test(&spec.session_id),
+                    SessionInitializationSnapshotV1 {
+                        state: SessionInitializationStateV1::Active,
+                        activation_id: Some("combined-resource-activation".to_owned()),
+                        failure_id: None,
+                    },
+                ),
+            );
+            (projection, spec, resource_policy)
+        };
+        let combined_evidence =
+            |spec: &SessionSpecV2,
+             policy: &SimulationResourcePolicyV1,
+             trigger_kind: ResourceLimitKindV1| {
+                let trigger_limit = match trigger_kind {
+                    ResourceLimitKindV1::InputQueue => policy.session.input_queue,
+                    ResourceLimitKindV1::RequestQueue => policy.session.request_queue,
+                    _ => unreachable!("测试只覆盖输入和请求触发原因"),
+                };
+                let triggering_session_limit = ResourceLimitReachedV1 {
+                    policy_id: policy.policy_id.clone(),
+                    scope: ResourceLimitScopeV1::Session,
+                    kind: trigger_kind,
+                    exceeded_dimension: ResourceLimitDimensionV1::Records,
+                    candidate: ResourceQuantityV1::new(trigger_limit.max_records + 1, 0),
+                    limit: trigger_limit,
+                };
+                let adjusted_run_limit = crate::resource::ResourceLimitV1::new(
+                    policy.run.in_memory_state.max_records
+                        - policy.durable.failure_reserve.run_checkpoint_growth.records,
+                    policy.run.in_memory_state.max_bytes
+                        - policy.durable.failure_reserve.run_checkpoint_growth.bytes,
+                );
+                let primary = ResourceLimitReachedV1 {
+                    policy_id: policy.policy_id.clone(),
+                    scope: ResourceLimitScopeV1::Run,
+                    kind: ResourceLimitKindV1::InMemoryState,
+                    exceeded_dimension: ResourceLimitDimensionV1::Records,
+                    candidate: ResourceQuantityV1::new(adjusted_run_limit.max_records + 1, 0),
+                    limit: adjusted_run_limit,
+                };
+                let mut evidence =
+                    projection_evidence_for_tests(DurableTransactionFactV1::ResourceLimitReached {
+                        session_id: Some(spec.session_id.clone()),
+                        limit: primary.clone(),
+                        triggering_session_limit: Some(triggering_session_limit.clone()),
+                    });
+                if trigger_kind == ResourceLimitKindV1::InputQueue {
+                    evidence.transient_input_session_id = Some(spec.session_id.clone());
+                    evidence.transient_input = triggering_session_limit.candidate;
+                }
+                (evidence, primary)
+            };
+        let bucket_for = |session_id: String| {
+            projection_evidence_for_tests(DurableTransactionFactV1::PlatformBucketApplied {
+                session_id,
+                bucket: DurableMarketBucketReferenceV1 {
+                    path: MarketEventPathV1::HiddenPlatform,
+                    bucket_at_utc_ms: 10,
+                    start_index_position: 0,
+                    next_index_position: 0,
+                    closure: MillisecondBucketClosureV1::EndOfInput,
+                    bucket_sha256: Sha256Hex("a".repeat(64)),
+                },
+            })
+        };
+
+        let (mut input_projection, input_spec, input_policy) = projection_with_session();
+        let (input_combo, input_primary) =
+            combined_evidence(&input_spec, &input_policy, ResourceLimitKindV1::InputQueue);
+        let mut side_effecting = input_combo.clone();
+        side_effecting.query_projection_revision = Some(1);
+        assert!(matches!(
+            input_projection.apply(&side_effecting),
+            Err(SimExecutionPersistenceErrorV1::Session(message))
+                if message.contains("不得携带业务状态")
+        ));
+        input_projection
+            .apply(&input_combo)
+            .expect("组合资源事实必须原子保存主屏障与局部触发原因");
+        assert_eq!(
+            input_projection.bound_input_blocking_limit(&input_spec.session_id),
+            Some(&input_primary)
+        );
+        assert!(matches!(
+            input_projection.apply(&bucket_for(input_spec.session_id)),
+            Err(SimExecutionPersistenceErrorV1::Session(message))
+                if message.contains("屏障之后仍出现耐久平台桶事实")
+        ));
+
+        let (mut request_projection, request_spec, request_policy) = projection_with_session();
+        let (request_combo, _) = combined_evidence(
+            &request_spec,
+            &request_policy,
+            ResourceLimitKindV1::RequestQueue,
+        );
+        request_projection
+            .apply(&request_combo)
+            .expect("非输入局部原因仍可形成组合共享屏障");
+        request_projection
+            .apply(&bucket_for(request_spec.session_id))
+            .expect("非输入局部触发原因不得阻断既有绑定输入排空");
+    }
+
     fn funded_opening_anchor_for_projection_test(session_id: &str) -> AccountOpeningAnchorV1 {
         AccountOpeningAnchorV1 {
             schema_version: "sim_account_opening_anchor_v1".to_owned(),
@@ -17715,6 +26195,376 @@ mod tests {
                 && batch.feedback_ids.is_empty()
                 && batch.feedback_received_at_counts.is_empty()
         }));
+    }
+
+    #[test]
+    fn lifecycle_reservation_counts_an_unaccepted_lease_only_for_a_new_batch() {
+        let mut outbox = LogicalLifecycleOutboxV1::new(
+            std::num::NonZeroUsize::new(1).expect("positive capacity"),
+        );
+        let before = outbox.clone();
+        let mut prepared = outbox.prepare_lifecycle_delta_v2();
+        assert!(matches!(
+            prepared.reserve_request("blocked-new-request", 200, 1),
+            Err(SessionError::ResponseOutboxFull)
+        ));
+        drop(prepared);
+        assert_eq!(outbox, before);
+
+        let mut prepared = outbox.prepare_lifecycle_delta_v2();
+        let request = prepared
+            .reserve_request("existing-request", 200, 0)
+            .expect("free capacity permits the first request batch");
+        let platform = prepared
+            .reserve_platform_work("GTD:200", Some("existing-request"), 200, 1)
+            .expect("the lease must not block reuse of an existing request batch");
+        assert_eq!(platform.batch_id, request.batch_id);
+        prepared.commit();
+        assert_eq!(outbox.batches.len(), 1);
+
+        let mut base = LogicalLifecycleOutboxV1::new(
+            std::num::NonZeroUsize::new(2).expect("positive capacity"),
+        );
+        let existing = base
+            .reserve_request("reusable-request", 300)
+            .expect("create the existing V1 request batch");
+        let mut online = base.clone();
+        let mut online_prepared = online.prepare_lifecycle_delta_v2();
+        let online_reservation = online_prepared
+            .reserve_platform_work("rebate:300", None, 300, 1)
+            .expect("online V2 reservation reuses the compatible batch");
+        online_prepared.commit();
+        let mut replay = base.clone();
+        let mut replay_prepared = replay.prepare_lifecycle_delta_v2();
+        let replay_reservation = replay_prepared
+            .reserve_platform_work("rebate:300", None, 300, 0)
+            .expect("V2 replay chooses the same compatible batch without the runtime lease");
+        replay_prepared.commit();
+        assert_eq!(online_reservation, replay_reservation);
+        assert_eq!(online_reservation.batch_id, existing.batch_id);
+        assert_eq!(online, replay);
+
+        let mut legacy = base;
+        let legacy_reservation = legacy
+            .reserve_platform_work("rebate:300", None, 300)
+            .expect("the V1 path retains its existing create-first behavior");
+        assert_ne!(legacy_reservation.batch_id, existing.batch_id);
+        assert_eq!(legacy.batches.len(), 2);
+    }
+
+    fn lifecycle_delta_trade_draft_for_tests(
+        feedback_id: &str,
+        feedback_received_at_utc_ms: i64,
+    ) -> LifecycleFeedbackDraftV1 {
+        LifecycleFeedbackDraftV1::Trade(TradeLifecycleFeedbackDraftV1 {
+            feedback_id: feedback_id.to_owned(),
+            delivery_id: format!("delivery:{feedback_id}"),
+            account_instance_key: AccountInstanceKeyV1 {
+                run_id: "lifecycle-delta-run".to_owned(),
+                caller_role: SimCallerRoleV1::Paper,
+                caller_instance_id: "lifecycle-delta-caller".to_owned(),
+                account_id: "lifecycle-delta-account".to_owned(),
+                platform_source: PlatformSourceV1::Simulated,
+            },
+            session_id: "lifecycle-delta-session".to_owned(),
+            timing: crate::session::LifecycleFeedbackTimingV1 {
+                feedback_id: feedback_id.to_owned(),
+                platform_event_at_utc_ms: feedback_received_at_utc_ms,
+                private_emission_sequence: 1,
+                inbound_delay_ms: 0,
+                feedback_received_at_utc_ms,
+            },
+            simulated_trade_id: format!("trade:{feedback_id}"),
+            platform_order_id: "lifecycle-delta-order".to_owned(),
+            condition_id: ConditionId("lifecycle-delta-condition".to_owned()),
+            token_id: TokenId("lifecycle-delta-token".to_owned()),
+            status: simulated_trade_status("MATCHED"),
+            economic_disposition: TradeEconomicDispositionV1::FinalSuccess,
+            liquidity_role: TradeLiquidityRoleV1::Taker,
+            base_units: 1,
+            quote_units: 1,
+            immediate_taker_fee_units: 0,
+            economic_application_delta: None,
+            account_delta: None,
+        })
+    }
+
+    #[test]
+    fn lifecycle_delta_reads_through_a_virtual_request_batch_before_commit() {
+        let mut outbox = LogicalLifecycleOutboxV1::new(
+            std::num::NonZeroUsize::new(1).expect("positive capacity"),
+        );
+        let before = outbox.clone();
+        {
+            let mut prepared = outbox.prepare_lifecycle_delta_v2();
+            let request = prepared
+                .reserve_request("virtual-request", 200, 0)
+                .expect("准备请求批次");
+            let platform = prepared
+                .reserve_platform_work("GTD:200", Some("virtual-request"), 200, 0)
+                .expect("同一覆盖层必须读穿未提交请求批次");
+            assert_eq!(platform.batch_id, request.batch_id);
+            drop(prepared);
+        }
+        assert_eq!(outbox, before, "丢弃覆盖层不得写入 live 发件箱");
+
+        let mut prepared = outbox.prepare_lifecycle_delta_v2();
+        let request = prepared
+            .reserve_request("virtual-request", 200, 0)
+            .expect("再次准备请求批次");
+        let platform = prepared
+            .reserve_platform_work("GTD:200", Some("virtual-request"), 200, 0)
+            .expect("再次复用未提交请求批次");
+        assert_eq!(platform.batch_id, request.batch_id);
+        prepared.commit();
+        assert_eq!(outbox.batches.len(), 1);
+        assert_eq!(outbox.work_batch_ids.len(), 2);
+        assert_eq!(
+            outbox.batches[&request.batch_id].open_work_ids,
+            BTreeSet::from([request.work_id, platform.work_id])
+        );
+    }
+
+    #[test]
+    fn lifecycle_delta_live_feedback_patch_touches_only_the_new_keys() {
+        const EXISTING_FEEDBACK_COUNT: usize = 1_024;
+
+        let mut outbox = LogicalLifecycleOutboxV1::new(
+            std::num::NonZeroUsize::new(1).expect("positive capacity"),
+        );
+        let request = outbox
+            .reserve_request("large-live-batch", 100)
+            .expect("建立 live 批次");
+        for index in 0..EXISTING_FEEDBACK_COUNT {
+            let received_at = i64::try_from(index).expect("测试索引可表示") + 1_000;
+            outbox
+                .record_for_batch(
+                    &request,
+                    lifecycle_delta_trade_draft_for_tests(
+                        &format!("existing-feedback-{index}"),
+                        received_at,
+                    ),
+                )
+                .expect("填充既有反馈")
+                .expect("每个既有反馈只记录一次");
+        }
+
+        let mut prepared = outbox.prepare_lifecycle_delta_v2();
+        prepared
+            .record_for_batch(
+                &request,
+                lifecycle_delta_trade_draft_for_tests("new-feedback", 10_000),
+            )
+            .expect("追加一个反馈")
+            .expect("新反馈形成耐久草稿");
+
+        assert_eq!(
+            prepared.live_batch_patch_item_counts_for_tests(&request.batch_id),
+            Some((0, 0, 1, 1)),
+            "第 N 个反馈只应触及新 feedback_id 与新接收时点键"
+        );
+        drop(prepared);
+        assert_eq!(outbox.entries.len(), EXISTING_FEEDBACK_COUNT);
+    }
+
+    #[test]
+    fn lifecycle_delta_virtual_batch_create_then_complete_without_feedback_commits_nothing() {
+        let mut outbox = LogicalLifecycleOutboxV1::new(
+            std::num::NonZeroUsize::new(1).expect("positive capacity"),
+        );
+        let before = outbox.clone();
+        let mut prepared = outbox.prepare_lifecycle_delta_v2();
+        let request = prepared
+            .reserve_request("virtual-empty", 100, 0)
+            .expect("建立虚拟批次");
+        prepared
+            .complete_request("virtual-empty", &request)
+            .expect("完成虚拟批次最后工作");
+        prepared.commit();
+
+        assert_eq!(outbox, before);
+    }
+
+    #[test]
+    fn lifecycle_delta_removes_live_batch_after_its_last_work_completes_without_feedback() {
+        let mut outbox = LogicalLifecycleOutboxV1::new(
+            std::num::NonZeroUsize::new(1).expect("positive capacity"),
+        );
+        let request = outbox
+            .reserve_request("live-empty", 100)
+            .expect("建立 live 批次");
+
+        let mut prepared = outbox.prepare_lifecycle_delta_v2();
+        prepared
+            .complete_request("live-empty", &request)
+            .expect("完成 live 批次最后工作");
+        prepared.commit();
+
+        assert!(outbox.batches.is_empty());
+        assert!(outbox.work_batch_ids.is_empty());
+        assert!(outbox.entries.is_empty());
+    }
+
+    #[test]
+    fn lifecycle_delta_counts_two_feedbacks_at_the_same_received_time() {
+        let mut outbox = LogicalLifecycleOutboxV1::new(
+            std::num::NonZeroUsize::new(1).expect("positive capacity"),
+        );
+        let request = outbox
+            .reserve_request("same-time-feedback", 100)
+            .expect("建立 live 反馈批次");
+        let mut prepared = outbox.prepare_lifecycle_delta_v2();
+        for feedback_id in ["same-time-a", "same-time-b"] {
+            prepared
+                .record_for_batch(
+                    &request,
+                    lifecycle_delta_trade_draft_for_tests(feedback_id, 200),
+                )
+                .expect("记录同接收时点反馈")
+                .expect("不同反馈均形成耐久草稿");
+        }
+        prepared.commit();
+
+        let batch = &outbox.batches[&request.batch_id];
+        assert_eq!(batch.feedback_ids.len(), 2);
+        assert_eq!(
+            batch.feedback_received_at_counts,
+            BTreeMap::from([(200, 2)])
+        );
+        assert_eq!(outbox.entries.len(), 2);
+    }
+
+    #[test]
+    fn lifecycle_delta_conflicting_feedback_drop_keeps_the_live_outbox_unchanged() {
+        let mut outbox = LogicalLifecycleOutboxV1::new(
+            std::num::NonZeroUsize::new(1).expect("positive capacity"),
+        );
+        let before = outbox.clone();
+        let mut prepared = outbox.prepare_lifecycle_delta_v2();
+        let request = prepared
+            .reserve_request("conflicting-feedback", 100, 0)
+            .expect("建立虚拟批次");
+        prepared
+            .record_for_batch(
+                &request,
+                lifecycle_delta_trade_draft_for_tests("same-feedback-id", 200),
+            )
+            .expect("准备第一份正文")
+            .expect("第一份正文形成耐久草稿");
+        assert!(matches!(
+            prepared.record_for_batch(
+                &request,
+                lifecycle_delta_trade_draft_for_tests("same-feedback-id", 201),
+            ),
+            Err(SessionError::FeedbackIdentityConflict(feedback_id))
+                if feedback_id == "same-feedback-id"
+        ));
+        drop(prepared);
+
+        assert_eq!(outbox, before);
+    }
+
+    #[test]
+    fn lifecycle_delta_feedback_and_completion_use_the_candidate_indexes() {
+        let mut outbox = LogicalLifecycleOutboxV1::new(
+            std::num::NonZeroUsize::new(1).expect("positive capacity"),
+        );
+        let mut prepared = outbox.prepare_lifecycle_delta_v2();
+        let request = prepared
+            .reserve_request("feedback-request", 100, 0)
+            .expect("准备请求工作");
+        let platform = prepared
+            .reserve_platform_work("feedback-platform", Some("feedback-request"), 100, 0)
+            .expect("准备平台工作");
+        let draft = lifecycle_delta_trade_draft_for_tests("feedback-a", 200);
+        assert!(
+            prepared
+                .record_for_batch(&platform, draft.clone())
+                .expect("首次记录候选反馈")
+                .is_some()
+        );
+        assert_eq!(
+            prepared
+                .record_for_batch(&platform, draft)
+                .expect("相同正文重复记录保持幂等"),
+            None
+        );
+        prepared
+            .complete_platform_work(&platform)
+            .expect("完成候选平台工作");
+        assert!(matches!(
+            prepared.record_for_batch(
+                &platform,
+                lifecycle_delta_trade_draft_for_tests("feedback-after-complete", 200),
+            ),
+            Err(SessionError::ResponseDeliveryIdentityConflict)
+        ));
+        assert!(matches!(
+            prepared.reserve_platform_work("late-platform", Some("feedback-request"), 201, 0,),
+            Err(SessionError::ResponseOutboxFull)
+        ));
+        prepared
+            .complete_request("feedback-request", &request)
+            .expect("完成候选请求工作");
+        prepared.commit();
+
+        assert_eq!(outbox.batches.len(), 1);
+        assert_eq!(outbox.entries.len(), 1);
+        assert!(outbox.work_batch_ids.is_empty());
+        assert!(!outbox.work_batch_ids.contains_key(&platform.work_id));
+        let batch = &outbox.batches[&request.batch_id];
+        assert!(batch.open_work_ids.is_empty());
+        assert_eq!(
+            batch.feedback_ids,
+            BTreeSet::from(["feedback-a".to_owned()])
+        );
+        assert_eq!(
+            batch.feedback_received_at_counts,
+            BTreeMap::from([(200, 1)])
+        );
+    }
+
+    #[test]
+    fn lifecycle_delta_capacity_lease_applies_only_when_a_new_batch_is_required() {
+        let mut blocked = LogicalLifecycleOutboxV1::new(
+            std::num::NonZeroUsize::new(1).expect("positive capacity"),
+        );
+        let before = blocked.clone();
+        let mut prepared = blocked.prepare_lifecycle_delta_v2();
+        assert!(matches!(
+            prepared.reserve_request("blocked-by-lease", 300, 1),
+            Err(SessionError::ResponseOutboxFull)
+        ));
+        drop(prepared);
+        assert_eq!(blocked, before);
+
+        let mut existing = LogicalLifecycleOutboxV1::new(
+            std::num::NonZeroUsize::new(1).expect("positive capacity"),
+        );
+        let request = existing
+            .reserve_request("existing-compatible", 300)
+            .expect("建立 live 兼容批次");
+        let mut prepared = existing.prepare_lifecycle_delta_v2();
+        let platform = prepared
+            .reserve_platform_work("reuse-live", None, 300, 1)
+            .expect("容量 lease 不得阻止复用 live 批次");
+        assert_eq!(platform.batch_id, request.batch_id);
+        prepared.commit();
+        assert_eq!(existing.batches.len(), 1);
+
+        let mut virtual_outbox = LogicalLifecycleOutboxV1::new(
+            std::num::NonZeroUsize::new(1).expect("positive capacity"),
+        );
+        let mut prepared = virtual_outbox.prepare_lifecycle_delta_v2();
+        let request = prepared
+            .reserve_request("virtual-compatible", 300, 0)
+            .expect("准备虚拟请求批次");
+        let platform = prepared
+            .reserve_platform_work("reuse-virtual", None, 300, 1)
+            .expect("容量 lease 不得阻止复用虚拟批次");
+        assert_eq!(platform.batch_id, request.batch_id);
+        prepared.commit();
+        assert_eq!(virtual_outbox.batches.len(), 1);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -18020,9 +26870,13 @@ mod tests {
             "future-mutation-after-gtd",
         );
         spec.response_outbox_capacity = std::num::NonZeroUsize::new(1).expect("positive capacity");
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
         let mut session =
-            execution_process_for_tests(rules, Arc::clone(&profile), Arc::clone(&scenario))
-                .create_active_session_for_tests(spec, accepting_submission_response_bridge());
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
         load_initial_market(&mut session, "0.00001", "0.6", "5");
 
         let gtd = session
@@ -18573,14 +27427,19 @@ mod tests {
             .expect("older mutation occupies the only slot with feedback");
         assert!(deadline < old_feedback_at);
         let later_bucket_at = old_feedback_at + 1;
+        let later_bucket = long_hidden_bucket(later_bucket_at, position, position, &[]);
+        let prepared =
+            prepare_platform_bucket_transition_v2(session.runtime_state(), later_bucket.clone())
+                .expect("准备越过 GTD 截止时点的闭桶候选");
+        let evidence = prepared
+            .evidence
+            .as_ref()
+            .expect("闭桶必须形成 V2 逻辑证据");
+        assert_eq!(evidence.private_output_drafts.len(), 1);
+        assert_eq!(evidence.account_deltas.len(), 1);
 
         assert_eq!(
-            session.apply_closed_market_event_bucket(long_hidden_bucket(
-                later_bucket_at,
-                position,
-                position,
-                &[],
-            )),
+            session.apply_closed_market_event_bucket(later_bucket),
             Ok(MarketBucketApplyDispositionV1::Applied)
         );
         assert_eq!(session.next_order_deadline_at_utc_ms(), None);
@@ -18703,6 +27562,486 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn order_lifecycle_sampling_identity_is_logical_and_recovery_recomputable() {
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            scenario as long_scenario, session_spec as long_session_spec,
+        };
+
+        struct OrderFeedbackFixtureV1 {
+            rules: Arc<SealedProcessRuleSnapshot>,
+            profile: Arc<EmpiricalDelayProfile>,
+            scenario: Arc<PlatformScenarioV1>,
+        }
+
+        fn execute_one_order(
+            run_id: &str,
+            idempotency_key: &str,
+            limit_price_pusd_per_share: Decimal,
+            size_shares: Decimal,
+            post_only: bool,
+            fixture: &OrderFeedbackFixtureV1,
+        ) -> (
+            SimExecutionSessionV1,
+            AccountOpeningAnchorV1,
+            SessionInitializationSnapshotV1,
+        ) {
+            let mut spec = long_session_spec(
+                fixture.scenario.as_ref(),
+                SimCallerRoleV1::ModelTrain,
+                "stable-order-feedback-session",
+            );
+            spec.run_id = run_id.to_owned();
+            let mut process = SimExecutionProcessV1::try_new(
+                run_id.to_owned(),
+                successful_policy_for_tests(),
+                Arc::clone(&fixture.rules),
+                Arc::clone(&fixture.profile),
+                Arc::clone(&fixture.scenario),
+            )
+            .expect("构造带独立运行身份的进程");
+            let prepared = process
+                .create_session(spec, accepting_submission_response_bridge())
+                .expect("创建带独立运行身份的会话");
+            let opening_anchor = prepared.control.opening_anchor.clone();
+            let activated = process
+                .activate_session(ActivateSessionRequestV1 {
+                    session_id: prepared.session.session_spec().session_id.clone(),
+                    account_instance_key: prepared.control.account_instance_key.clone(),
+                    opening_anchor_id: opening_anchor.anchor_id.clone(),
+                    opening_anchor_sha256: opening_anchor.anchor_sha256.clone(),
+                    activation_id: format!(
+                        "stable-order-feedback-activation:{}",
+                        opening_anchor.anchor_id
+                    ),
+                })
+                .expect("激活带独立运行身份的会话");
+            let mut session = prepared.session;
+            load_initial_market(&mut session, "0.00001", "0.6", "5");
+            let registration = session
+                .post_order(PostOrderRequestV1 {
+                    context: context_for_arrival(
+                        &session,
+                        &fixture.profile,
+                        "stable-order-feedback-request",
+                        1,
+                        150_000,
+                    ),
+                    idempotency_key: idempotency_key.to_owned(),
+                    item: PostOrderItemV1 {
+                        item_id: "stable-order-feedback-item".to_owned(),
+                        order: SimBuyOrderV1 {
+                            condition_id: long_market().condition_id,
+                            token_id: long_asset("1", 0, "Up").token_id,
+                            kind: SimBuyOrderKindV1::GtcLimit {
+                                limit_price_pusd_per_share,
+                                size_shares,
+                                post_only,
+                            },
+                        },
+                    },
+                })
+                .expect("注册稳定订单反馈测试请求");
+            let effective_at = registration.item.effective_processing_at_utc_ms;
+            let position = session.platform_event_index_position();
+            session
+                .session
+                .close_platform_prefix_through(effective_at, position)
+                .expect("闭合订单处理时点的平台前缀");
+            assert_eq!(
+                session.drive_next_execution_action_through(effective_at),
+                Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                    request_completed: true,
+                })
+            );
+            (session, opening_anchor, activated.snapshot)
+        }
+
+        fn only_order_feedback(session: &SimExecutionSessionV1) -> OrderLifecycleFeedbackDraftV1 {
+            let drafts = session
+                .lifecycle_outbox
+                .entries
+                .values()
+                .filter_map(|entry| match &entry.draft {
+                    LifecycleFeedbackDraftV1::Order(draft) => Some(draft.clone()),
+                    LifecycleFeedbackDraftV1::Trade(_)
+                    | LifecycleFeedbackDraftV1::Settlement(_) => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(drafts.len(), 1, "GTC 接受只形成一条订单生命周期反馈");
+            drafts.into_iter().next().expect("唯一订单生命周期反馈")
+        }
+
+        fn projection_with_session(
+            session: &SimExecutionSessionV1,
+            opening_anchor: &AccountOpeningAnchorV1,
+            initialization: &SessionInitializationSnapshotV1,
+        ) -> DurableEvidenceProjectionV1 {
+            let spec = session.session.session_spec().clone();
+            let (resource_policy, resource_policy_sha256) = resource_policy_for_tests();
+            DurableEvidenceProjectionV1 {
+                run_id: Some(spec.run_id.clone()),
+                resource_policy: Some(resource_policy),
+                resource_policy_sha256: Some(resource_policy_sha256),
+                lifecycle: Some(DurableRunLifecycleV1::Open),
+                session_creations: BTreeMap::from([(
+                    spec.session_id.clone(),
+                    (spec, opening_anchor.clone(), initialization.clone()),
+                )]),
+                ..DurableEvidenceProjectionV1::default()
+            }
+        }
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载代理时延配置档");
+        let scenario = long_scenario();
+        let fixture = OrderFeedbackFixtureV1 {
+            rules,
+            profile,
+            scenario,
+        };
+        let (first, first_opening_anchor, first_initialization) = execute_one_order(
+            "stable-feedback-run-a",
+            "stable-order-feedback-idempotency",
+            Decimal::new(1, 1),
+            Decimal::new(5, 0),
+            true,
+            &fixture,
+        );
+        let (second, _, _) = execute_one_order(
+            "stable-feedback-run-b",
+            "stable-order-feedback-idempotency",
+            Decimal::new(1, 1),
+            Decimal::new(5, 0),
+            true,
+            &fixture,
+        );
+        let first_feedback = only_order_feedback(&first);
+        let second_feedback = only_order_feedback(&second);
+
+        assert_ne!(
+            first_feedback.account_delta.delta_id, second_feedback.account_delta.delta_id,
+            "账户变化证据身份必须继续绑定各自 run_id"
+        );
+        assert_eq!(
+            first_feedback.account_delta.reason_identity,
+            second_feedback.account_delta.reason_identity
+        );
+        assert_eq!(
+            first_feedback.account_delta.account_transition_seq,
+            second_feedback.account_delta.account_transition_seq
+        );
+        assert_eq!(
+            first_feedback.platform_order_id,
+            second_feedback.platform_order_id
+        );
+        assert_eq!(first_feedback.feedback_id, second_feedback.feedback_id);
+        assert_eq!(first_feedback.delivery_id, second_feedback.delivery_id);
+        assert_eq!(first_feedback.timing, second_feedback.timing);
+
+        let (changed_order, _, _) = execute_one_order(
+            "stable-feedback-run-c",
+            "changed-stable-order-feedback-idempotency",
+            Decimal::new(1, 1),
+            Decimal::new(5, 0),
+            true,
+            &fixture,
+        );
+        let changed_order_feedback = only_order_feedback(&changed_order);
+        assert_ne!(
+            first_feedback.platform_order_id,
+            changed_order_feedback.platform_order_id
+        );
+        assert_ne!(
+            first_feedback.feedback_id,
+            changed_order_feedback.feedback_id
+        );
+        assert_ne!(
+            first_feedback.feedback_id,
+            order_lifecycle_feedback_id_v2(
+                &first_feedback.session_id,
+                &first_feedback.platform_order_id,
+                OrderLifecycleEventKindV1::CallerCanceled,
+            ),
+            "同一订单的不同生命周期事件必须具有不同采样身份"
+        );
+
+        let mut tampered_draft_account = first.runtime_state();
+        validate_recovered_private_output_closure(&tampered_draft_account)
+            .expect("未篡改订单反馈草稿可通过恢复边界校验");
+        let draft = tampered_draft_account
+            .lifecycle_outbox
+            .entries
+            .values_mut()
+            .find_map(|entry| match &mut entry.draft {
+                LifecycleFeedbackDraftV1::Order(draft) => Some(draft),
+                LifecycleFeedbackDraftV1::Trade(_) | LifecycleFeedbackDraftV1::Settlement(_) => {
+                    None
+                }
+            })
+            .expect("恢复测试存在订单反馈草稿");
+        draft.account_instance_key.account_id = "tampered-account".to_owned();
+        assert!(matches!(
+            validate_recovered_private_output_closure(&tampered_draft_account),
+            Err(SessionCheckpointErrorV1::InvalidSessionState(message))
+                if message.contains("待接收生命周期反馈草稿")
+        ));
+
+        let (mut confirmed, confirmed_opening_anchor, confirmed_initialization) = execute_one_order(
+            "stable-feedback-confirmed-run",
+            "stable-order-feedback-confirmed-idempotency",
+            Decimal::new(1, 1),
+            Decimal::new(5, 0),
+            true,
+            &fixture,
+        );
+        assert_eq!(
+            confirmed.drive_private_delivery_after_platform_through_for_tests(1_000_000),
+            Ok(SubmissionDeliveryDispositionV1::Delivered)
+        );
+        let confirmed_state = confirmed.runtime_state();
+        validate_confirmed_private_deliveries(&confirmed_state, None)
+            .expect("未篡改完整已确认正文可通过恢复边界校验");
+
+        let mut tampered_confirmed_account = confirmed_state.clone();
+        let feedback = tampered_confirmed_account
+            .confirmed_private_deliveries
+            .values_mut()
+            .find_map(|delivery| match delivery {
+                SealedPrivateDeliveryV1::Lifecycle(SealedLifecycleFeedbackV1::Order(feedback)) => {
+                    Some(Arc::make_mut(feedback))
+                }
+                SealedPrivateDeliveryV1::Direct(_)
+                | SealedPrivateDeliveryV1::Lifecycle(SealedLifecycleFeedbackV1::Trade(_))
+                | SealedPrivateDeliveryV1::Lifecycle(SealedLifecycleFeedbackV1::Settlement(_)) => {
+                    None
+                }
+            })
+            .expect("已确认载荷存在订单生命周期反馈");
+        feedback.metadata.account_instance_key.account_id = "tampered-account".to_owned();
+        feedback.metadata.payload_sha256 =
+            recompute_order_lifecycle_payload_sha256(feedback).expect("重算篡改后正文摘要");
+        assert!(matches!(
+            validate_confirmed_private_deliveries(&tampered_confirmed_account, None),
+            Err(SessionCheckpointErrorV1::InvalidSessionState(message))
+                if message.contains("已确认订单生命周期反馈")
+        ));
+
+        let mut tampered_confirmed_event = confirmed_state;
+        let feedback = tampered_confirmed_event
+            .confirmed_private_deliveries
+            .values_mut()
+            .find_map(|delivery| match delivery {
+                SealedPrivateDeliveryV1::Lifecycle(SealedLifecycleFeedbackV1::Order(feedback)) => {
+                    Some(Arc::make_mut(feedback))
+                }
+                SealedPrivateDeliveryV1::Direct(_)
+                | SealedPrivateDeliveryV1::Lifecycle(SealedLifecycleFeedbackV1::Trade(_))
+                | SealedPrivateDeliveryV1::Lifecycle(SealedLifecycleFeedbackV1::Settlement(_)) => {
+                    None
+                }
+            })
+            .expect("已确认载荷存在订单生命周期反馈");
+        feedback.event_kind = OrderLifecycleEventKindV1::CallerCanceled;
+        let feedback_id = order_lifecycle_feedback_id_v2(
+            &feedback.metadata.session_id,
+            &feedback.platform_order_id,
+            feedback.event_kind,
+        );
+        feedback.metadata.delivery_id =
+            order_lifecycle_delivery_id_v1(&feedback.metadata.session_id, &feedback_id);
+        feedback.metadata.payload_sha256 =
+            recompute_order_lifecycle_payload_sha256(feedback).expect("重算篡改后正文摘要");
+        assert!(matches!(
+            validate_confirmed_private_deliveries(&tampered_confirmed_event, None),
+            Err(SessionCheckpointErrorV1::InvalidSessionState(message))
+                if message.contains("已确认订单生命周期反馈")
+        ));
+
+        let mut self_consistent_wrong_event = first_feedback.clone();
+        self_consistent_wrong_event.event_kind = OrderLifecycleEventKindV1::CallerCanceled;
+        self_consistent_wrong_event.order_status = simulated_order_status("CANCELED");
+        let delta = Arc::make_mut(&mut self_consistent_wrong_event.account_delta);
+        delta.reason =
+            contracts::PlatformAccountDeltaReasonV1::CallerCancellationEncumbranceReleased;
+        delta.reason_identity = "forged-caller-cancel".to_owned();
+        delta.balance_delta.available_pusd_delta = contracts::ExactDecimal("0.5".to_owned());
+        delta.balance_delta.principal_encumbrance_pusd_delta =
+            contracts::ExactDecimal("-0.5".to_owned());
+        delta
+            .balance_delta
+            .immediate_taker_fee_encumbrance_pusd_delta = contracts::ExactDecimal("0".to_owned());
+        self_consistent_wrong_event.feedback_id = order_lifecycle_feedback_id_v2(
+            &self_consistent_wrong_event.session_id,
+            &self_consistent_wrong_event.platform_order_id,
+            self_consistent_wrong_event.event_kind,
+        );
+        self_consistent_wrong_event.delivery_id = order_lifecycle_delivery_id_v1(
+            &self_consistent_wrong_event.session_id,
+            &self_consistent_wrong_event.feedback_id,
+        );
+        self_consistent_wrong_event.timing.feedback_id =
+            self_consistent_wrong_event.feedback_id.clone();
+        assert!(self_consistent_wrong_event.recovery_binding_is_consistent(
+            &self_consistent_wrong_event.session_id,
+            &self_consistent_wrong_event.account_instance_key,
+            None,
+        ));
+        assert!(!self_consistent_wrong_event.recovery_binding_is_consistent(
+            &self_consistent_wrong_event.session_id,
+            &self_consistent_wrong_event.account_instance_key,
+            Some(first.session.execution_state()),
+        ));
+        let forged_candidate = crate::session::VisiblePrivateFactV1 {
+            evidence: crate::session::PrivateVisibilityEvidenceV1::LifecycleFeedback {
+                feedback_id: self_consistent_wrong_event.feedback_id.clone(),
+            },
+            received_at_utc_ms: self_consistent_wrong_event
+                .timing
+                .feedback_received_at_utc_ms,
+            private_emission_sequence: self_consistent_wrong_event.timing.private_emission_sequence,
+            private_feedback_sequence: 1,
+        };
+        seal_order_lifecycle_feedback(&self_consistent_wrong_event, &forged_candidate, None)
+            .expect("隔离耐久投影只验证订单反馈与账户变化自洽");
+        assert!(matches!(
+            seal_order_lifecycle_feedback(
+                &self_consistent_wrong_event,
+                &forged_candidate,
+                Some(first.session.execution_state()),
+            ),
+            Err(SimExecutionContractErrorV1::ResponseDeliveryIdentityConflict)
+        ));
+
+        let mut tampered_balance = first_feedback.clone();
+        Arc::make_mut(&mut tampered_balance.account_delta)
+            .balance_delta
+            .available_pusd_delta = contracts::ExactDecimal("0".to_owned());
+        assert!(tampered_balance.recovery_binding_is_consistent(
+            &tampered_balance.session_id,
+            &tampered_balance.account_instance_key,
+            None,
+        ));
+        assert!(!tampered_balance.recovery_binding_is_consistent(
+            &tampered_balance.session_id,
+            &tampered_balance.account_instance_key,
+            Some(first.session.execution_state()),
+        ));
+        let mut tampered_balance_state = first.runtime_state();
+        let draft = tampered_balance_state
+            .lifecycle_outbox
+            .entries
+            .values_mut()
+            .find_map(|entry| match &mut entry.draft {
+                LifecycleFeedbackDraftV1::Order(draft) => Some(draft),
+                LifecycleFeedbackDraftV1::Trade(_) | LifecycleFeedbackDraftV1::Settlement(_) => {
+                    None
+                }
+            })
+            .expect("恢复测试存在订单反馈草稿");
+        Arc::make_mut(&mut draft.account_delta)
+            .balance_delta
+            .available_pusd_delta = contracts::ExactDecimal("0".to_owned());
+        assert!(matches!(
+            validate_recovered_private_output_closure(&tampered_balance_state),
+            Err(SessionCheckpointErrorV1::InvalidSessionState(message))
+                if message.contains("待接收生命周期反馈草稿")
+        ));
+
+        let (mut finalized_fee, _, _) = execute_one_order(
+            "stable-feedback-finalized-fee-run",
+            "stable-order-feedback-finalized-fee-idempotency",
+            Decimal::new(6, 1),
+            Decimal::new(5, 0),
+            false,
+            &fixture,
+        );
+        let finalized_accepted_feedback = only_order_feedback(&finalized_fee);
+        assert_ne!(
+            finalized_accepted_feedback
+                .account_delta
+                .balance_delta
+                .immediate_taker_fee_encumbrance_pusd_delta
+                .0,
+            "0",
+            "测试订单必须先形成非零接受手续费占用"
+        );
+        let finality_at = finalized_accepted_feedback
+            .timing
+            .platform_event_at_utc_ms
+            .checked_add(10)
+            .expect("最终性时点不溢出");
+        let position = finalized_fee.platform_event_index_position();
+        finalized_fee
+            .session
+            .close_platform_prefix_through(finality_at, position)
+            .expect("闭合手续费经济应用时点的平台前缀");
+        assert_eq!(
+            finalized_fee.drive_next_execution_action_through(finality_at),
+            Ok(SubmissionDriveDispositionV1::NoAction)
+        );
+        assert_eq!(
+            finalized_fee
+                .session
+                .execution_state()
+                .order(&finalized_accepted_feedback.platform_order_id)
+                .expect("最终性后仍保留订单记录")
+                .immediate_taker_fee_encumbered_units,
+            0,
+            "经济应用后订单只保留当前剩余手续费"
+        );
+        validate_recovered_private_output_closure(&finalized_fee.runtime_state())
+            .expect("恢复必须从不可变成交记录重建历史接受手续费");
+
+        let mut tampered_durable_draft = first_feedback.clone();
+        tampered_durable_draft.account_instance_key.account_id = "tampered-account".to_owned();
+        let mut draft_evidence =
+            projection_evidence_for_tests(DurableTransactionFactV1::ExecutionAdvanced {
+                session_id: first.session.session_spec().session_id.clone(),
+            });
+        draft_evidence.query_projection_revision = Some(0);
+        draft_evidence.private_output_drafts = vec![DurablePrivateOutputDraftV1::Lifecycle {
+            draft: LifecycleFeedbackDraftV1::Order(tampered_durable_draft),
+        }];
+        let draft_error =
+            projection_with_session(&first, &first_opening_anchor, &first_initialization)
+                .apply(&draft_evidence)
+                .expect_err("篡改耐久订单反馈草稿必须被拒绝");
+        assert!(matches!(
+            draft_error,
+            SimExecutionPersistenceErrorV1::Session(message)
+                if message.contains("耐久私有输出草稿会话身份冲突")
+        ));
+
+        let tampered_delivery = tampered_confirmed_account
+            .confirmed_private_deliveries
+            .values()
+            .find(|delivery| {
+                matches!(
+                    delivery,
+                    SealedPrivateDeliveryV1::Lifecycle(SealedLifecycleFeedbackV1::Order(_))
+                )
+            })
+            .cloned()
+            .expect("存在已篡改完整订单反馈");
+        assert!(matches!(
+            projection_with_session(
+                &confirmed,
+                &confirmed_opening_anchor,
+                &confirmed_initialization,
+            )
+            .apply(&projection_evidence_for_tests(
+                DurableTransactionFactV1::PrivateOutputPrepared {
+                    session_id: confirmed.session.session_spec().session_id.clone(),
+                    delivery: tampered_delivery,
+                },
+            )),
+            Err(SimExecutionPersistenceErrorV1::Session(message))
+                if message.contains("耐久待交付输出事实")
+        ));
+    }
+
     fn context(
         session: &SimExecutionSessionV1,
         request_id: &str,
@@ -18788,6 +28127,2184 @@ mod tests {
         let mut process = execution_process_for_tests(rules, profile, scenario_for_sim_tests());
         process
             .create_active_session_for_tests(session_spec(), accepting_submission_response_bridge())
+    }
+
+    fn counting_submission_response_bridge(
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> SubmissionResponseBridgeV1 {
+        let post_order_calls = Arc::clone(&calls);
+        SubmissionResponseBridgeV1::new(
+            move |response| {
+                post_order_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |feedback| {
+                SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
+            },
+            |feedback| {
+                SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
+            },
+            |feedback| {
+                SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
+            },
+        )
+    }
+
+    fn full_once_order_submission_response_bridge(
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> SubmissionResponseBridgeV1 {
+        let order_calls = Arc::clone(&calls);
+        SubmissionResponseBridgeV1::new(
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            move |response| {
+                if order_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    SubmissionResponseAcceptanceV1::Full
+                } else {
+                    SubmissionResponseAcceptanceV1::Accepted(
+                        response.metadata.delivery_confirmation(),
+                    )
+                }
+            },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |feedback| {
+                SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
+            },
+            |feedback| {
+                SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
+            },
+            |feedback| {
+                SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
+            },
+        )
+    }
+
+    fn full_then_disconnected_order_submission_response_bridge(
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> SubmissionResponseBridgeV1 {
+        let order_calls = Arc::clone(&calls);
+        SubmissionResponseBridgeV1::new(
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            move |_| {
+                if order_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    SubmissionResponseAcceptanceV1::Full
+                } else {
+                    SubmissionResponseAcceptanceV1::Disconnected
+                }
+            },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |feedback| {
+                SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
+            },
+            |feedback| {
+                SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
+            },
+            |feedback| {
+                SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
+            },
+        )
+    }
+
+    fn full_once_order_lifecycle_submission_response_bridge(
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> SubmissionResponseBridgeV1 {
+        let order_lifecycle_calls = Arc::clone(&calls);
+        SubmissionResponseBridgeV1::new(
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            |response| {
+                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
+            },
+            move |feedback| {
+                if order_lifecycle_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    SubmissionResponseAcceptanceV1::Full
+                } else {
+                    SubmissionResponseAcceptanceV1::Accepted(
+                        feedback.metadata.delivery_confirmation(),
+                    )
+                }
+            },
+            |feedback| {
+                SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
+            },
+            |feedback| {
+                SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
+            },
+        )
+    }
+
+    struct PaperScheduledLifecycleLeaseFixture {
+        rules: Arc<SealedProcessRuleSnapshot>,
+        profile: Arc<EmpiricalDelayProfile>,
+        process: SimExecutionProcessV1,
+        session: SimExecutionSessionV1,
+        next_visibility_position: u64,
+        gtd_deadline: i64,
+    }
+
+    async fn paper_capacity_one_session_with_pending_gtd(
+        session_id: &str,
+    ) -> PaperScheduledLifecycleLeaseFixture {
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            scenario as long_scenario, session_spec as long_session_spec,
+        };
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载 Paper V2 时延配置");
+        let scenario = long_scenario();
+        let mut spec = long_session_spec(&scenario, SimCallerRoleV1::Paper, session_id);
+        spec.response_outbox_capacity = std::num::NonZeroUsize::new(1).expect("正容量");
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
+        let registration = session
+            .post_order(PostOrderRequestV1 {
+                context: context_for_arrival(
+                    &session,
+                    &profile,
+                    "paper-v2-lifecycle-lease-gtd-source",
+                    1,
+                    150_000,
+                ),
+                idempotency_key: "paper-v2-lifecycle-lease-gtd-idempotency".to_owned(),
+                item: PostOrderItemV1 {
+                    item_id: "paper-v2-lifecycle-lease-gtd-item".to_owned(),
+                    order: SimBuyOrderV1 {
+                        condition_id: long_market().condition_id,
+                        token_id: long_asset("1", 0, "Up").token_id,
+                        kind: SimBuyOrderKindV1::GtdLimit {
+                            limit_price_pusd_per_share: Decimal::new(1, 5),
+                            size_shares: Decimal::new(5, 0),
+                            post_only: true,
+                            expires_at_utc_ms: 391_999,
+                        },
+                    },
+                },
+            })
+            .expect("登记生命周期租约测试的 GTD 源订单");
+        let effective_at = registration.item.effective_processing_at_utc_ms;
+        session
+            .session
+            .advance_public_visibility_through(effective_at, next_visibility_position)
+            .expect("闭合生命周期租约 GTD 接纳时点");
+        assert_eq!(
+            session.drive_next_execution_action_through(effective_at),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        let gtd_deadline = session
+            .next_order_deadline_at_utc_ms()
+            .expect("生命周期租约测试必须形成 GTD 到期任务");
+        let initial_delivery_cutoff = 200_000;
+        session
+            .session
+            .advance_public_visibility_through(initial_delivery_cutoff, next_visibility_position)
+            .expect("闭合 GTD 初始私有输出时点");
+        assert_eq!(
+            session.drive_next_execution_action_through(initial_delivery_cutoff),
+            Ok(SubmissionDriveDispositionV1::NoAction)
+        );
+        assert_eq!(
+            session.drive_private_delivery_through(initial_delivery_cutoff),
+            Ok(SubmissionDeliveryDispositionV1::Delivered)
+        );
+        assert_eq!(
+            session.drive_private_delivery_through(initial_delivery_cutoff),
+            Ok(SubmissionDeliveryDispositionV1::NoVisibleResponse)
+        );
+        assert!(session.direct_response_outbox.entries.is_empty());
+        assert!(session.lifecycle_outbox.entries.is_empty());
+        assert!(session.lifecycle_outbox.batches.is_empty());
+
+        PaperScheduledLifecycleLeaseFixture {
+            rules,
+            profile,
+            process,
+            session,
+            next_visibility_position,
+            gtd_deadline,
+        }
+    }
+
+    fn register_lifecycle_lease_batch(
+        session: &mut SimExecutionSessionV1,
+        profile: &EmpiricalDelayProfile,
+        desired_arrival_at_utc_ms: i64,
+        second_item_id: &str,
+        second_order_kind: SimBuyOrderKindV1,
+    ) -> PostOrdersRegistrationV1 {
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, market as long_market,
+        };
+
+        session
+            .post_orders(PostOrdersRequestV1 {
+                context: context_for_arrival(
+                    session,
+                    profile,
+                    "paper-v2-private-lifecycle-later-release-source",
+                    2,
+                    desired_arrival_at_utc_ms,
+                ),
+                idempotency_key: "paper-v2-private-lifecycle-later-release-idempotency".to_owned(),
+                items: vec![
+                    PostOrderItemV1 {
+                        item_id: "paper-v2-private-lifecycle-feedback-item".to_owned(),
+                        order: SimBuyOrderV1 {
+                            condition_id: long_market().condition_id.clone(),
+                            token_id: long_asset("1", 0, "Up").token_id,
+                            kind: SimBuyOrderKindV1::GtcLimit {
+                                limit_price_pusd_per_share: Decimal::new(4, 1),
+                                size_shares: Decimal::new(5, 0),
+                                post_only: true,
+                            },
+                        },
+                    },
+                    PostOrderItemV1 {
+                        item_id: second_item_id.to_owned(),
+                        order: SimBuyOrderV1 {
+                            condition_id: long_market().condition_id,
+                            token_id: long_asset("1", 0, "Up").token_id,
+                            kind: second_order_kind,
+                        },
+                    },
+                ],
+            })
+            .expect("登记先形成生命周期反馈、后无效果拒绝的混合批次")
+    }
+
+    fn pending_lifecycle_feedback_received_at(session: &SimExecutionSessionV1) -> i64 {
+        session
+            .session
+            .recovered_pending_private_facts()
+            .iter()
+            .find_map(|(evidence, received_at, _)| {
+                matches!(
+                    evidence,
+                    crate::session::PrivateVisibilityEvidenceV1::LifecycleFeedback { .. }
+                )
+                .then_some(*received_at)
+            })
+            .expect("首项必须形成一个生命周期反馈")
+    }
+
+    fn recoverable_paper_application_checkpoint_v2_for_tests(
+        process: &SimExecutionProcessV1,
+        session: &SimExecutionSessionV1,
+        rules: &SealedProcessRuleSnapshot,
+    ) -> RecoverablePaperApplicationCheckpointV2 {
+        let run_intent_binding = SimulationRunIntentBindingV1::try_new(
+            rules.snapshot().provenance.implementation_identity.clone(),
+            SimulationWorkloadKindV1::RealVertical,
+            SimulationDeterministicScriptContractV1::RealVerticalV1,
+        )
+        .expect("构造请求协调器运行意图");
+        let (resource_policy, resource_policy_sha256) = resource_policy_for_tests();
+        RecoverablePaperApplicationCheckpointV2 {
+            schema_version: RECOVERABLE_PAPER_APPLICATION_CHECKPOINT_SCHEMA_V2.to_owned(),
+            run_checkpoint: DurableRunCheckpointV1 {
+                schema_version: DURABLE_RUN_CHECKPOINT_SCHEMA_V1.to_owned(),
+                execution_contract_version: SIM_EXECUTION_CONTRACT_V1.to_owned(),
+                market_event_source_identity_sha256: Sha256Hex("d".repeat(64)),
+                run_intent_binding,
+                resource_policy,
+                resource_policy_sha256,
+                component_golden_measurement_sha256: None,
+                resource_high_water: SimulationResourceHighWaterV1::default(),
+                run_resource_admission: ResourceAdmissionStateV1::default(),
+                run_resource_triggering_session_limit: None,
+                session_resource_admission: BTreeMap::new(),
+                lifecycle: DurableRunLifecycleV1::Open,
+                process_root: process
+                    .inner
+                    .checkpoint()
+                    .expect("形成请求协调器进程检查点"),
+                sessions: BTreeMap::from([(
+                    session.session_spec().session_id.clone(),
+                    session.durable_checkpoint(),
+                )]),
+            },
+            evicted_markets: BTreeMap::new(),
+        }
+    }
+
+    fn restore_recoverable_paper_application_session_for_tests(
+        process: &SimExecutionProcessV1,
+        mut checkpoint: RecoverablePaperApplicationCheckpointV2,
+        session_id: &str,
+    ) -> ExecutionSessionStateV1 {
+        checkpoint
+            .validate()
+            .expect("RecoverablePaper 正式应用检查点必须有效");
+        let session_checkpoint = checkpoint
+            .run_checkpoint
+            .sessions
+            .remove(session_id)
+            .expect("RecoverablePaper 应用检查点必须包含目标会话");
+        let evicted = checkpoint
+            .evicted_markets
+            .remove(session_id)
+            .unwrap_or_default();
+        let (state, downstream) =
+            ExecutionSessionStateV1::restore(&process.inner, session_checkpoint, &evicted)
+                .expect("恢复 RecoverablePaper 应用检查点会话");
+        assert_eq!(downstream, None);
+        state
+    }
+
+    fn coordinator_post_order_request(
+        session: &SimExecutionSessionV1,
+        request_id: &str,
+    ) -> PostOrderRequestV1 {
+        PostOrderRequestV1 {
+            context: context(session, request_id, 1, 2_500),
+            idempotency_key: format!("{request_id}-idempotency"),
+            item: gtc_item(&format!("{request_id}-item"), 50),
+        }
+    }
+
+    fn coordinator_post_order_actions(request: &PostOrderRequestV1) -> Vec<ParsedLogicalActionV1> {
+        vec![method_action(
+            &request.item.item_id,
+            0,
+            request.item.order.kind.method_timing(),
+        )]
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recoverable_paper_v2_coordinator_rejects_valid_but_unbound_session_identity() {
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let scenario = scenario_for_sim_tests();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let mut first_spec = session_spec();
+        first_spec.caller_role = SimCallerRoleV1::Paper;
+        let first_session = process.create_active_session_for_tests(
+            first_spec.clone(),
+            accepting_submission_response_bridge(),
+        );
+        let mut second_spec = first_spec;
+        second_spec.session_id = "session-task13-other".to_owned();
+        second_spec.account_id = "account-task13-other".to_owned();
+        second_spec.caller_instance_id = "caller-task13-other".to_owned();
+        second_spec.creation_request_id = "create-session-task13-other".to_owned();
+        second_spec.response_bridge_binding_id = "bridge-session-task13-other".to_owned();
+        second_spec.session_seed = sha("e");
+        let mut second_session = process
+            .create_active_session_for_tests(second_spec, accepting_submission_response_bridge());
+        let checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
+            &process,
+            &first_session,
+            rules.as_ref(),
+        );
+        let directory = tempfile::tempdir().expect("创建请求协调器身份错配临时目录");
+
+        assert!(matches!(
+            RecoverablePaperCoordinatorV2::create_new(
+                directory.path().join("paper-request-mismatched-create"),
+                &second_session,
+                &checkpoint,
+            ),
+            Err(PersistenceErrorV1::Integrity(message))
+                if message.contains(&second_session.session_spec().session_id)
+        ));
+
+        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
+            directory.path().join("paper-request-bound-create"),
+            &first_session,
+            &checkpoint,
+        )
+        .expect("为首个会话创建已绑定请求协调器");
+        let request = coordinator_post_order_request(&second_session, "coordinator-unbound");
+        let actions = coordinator_post_order_actions(&request);
+        let before_state = second_session.durable_checkpoint();
+        let before_cursor = coordinator.cursor_for_tests();
+        assert!(matches!(
+            coordinator.register_request(
+                &mut second_session,
+                PendingDomainRequestV1::PostOrder(request),
+                actions,
+            ),
+            Err(SessionError::Durability(message))
+                if message.contains(&second_session.session_spec().session_id)
+        ));
+        assert_eq!(second_session.durable_checkpoint(), before_state);
+        assert_eq!(coordinator.cursor_for_tests(), before_cursor);
+        assert_eq!(coordinator.encoded_transaction_count_for_tests, 0);
+        assert_eq!(coordinator.append_attempt_count_for_tests, 0);
+
+        let mut same_named_process = execution_process_for_tests(rules, profile, scenario);
+        let mut same_named_spec = first_session.session_spec().clone();
+        same_named_spec.account_id = "account-task13-same-name-other-root".to_owned();
+        same_named_spec.caller_instance_id = "caller-task13-same-name-other-root".to_owned();
+        same_named_spec.creation_request_id = "create-task13-same-name-other-root".to_owned();
+        same_named_spec.response_bridge_binding_id =
+            "bridge-task13-same-name-other-root".to_owned();
+        same_named_spec.session_seed = sha("f");
+        let mut same_named_session = same_named_process.create_active_session_for_tests(
+            same_named_spec,
+            accepting_submission_response_bridge(),
+        );
+        let before_state = same_named_session.durable_checkpoint();
+        let before_cursor = coordinator.cursor_for_tests();
+        assert!(matches!(
+            coordinator.close_ingress(&mut same_named_session),
+            Err(SessionError::Durability(message))
+                if message.contains(&same_named_session.session_spec().session_id)
+        ));
+        assert_eq!(same_named_session.durable_checkpoint(), before_state);
+        assert_eq!(coordinator.cursor_for_tests(), before_cursor);
+        assert_eq!(coordinator.encoded_transaction_count_for_tests, 0);
+        assert_eq!(coordinator.append_attempt_count_for_tests, 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recoverable_paper_v2_request_insert_failure_keeps_memory_cursor_log_and_bridge_unchanged()
+     {
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let scenario = scenario_for_sim_tests();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let mut spec = session_spec();
+        spec.caller_role = SimCallerRoleV1::Paper;
+        let bridge_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut session = process.create_active_session_for_tests(
+            spec,
+            counting_submission_response_bridge(Arc::clone(&bridge_calls)),
+        );
+        let checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
+            &process,
+            &session,
+            rules.as_ref(),
+        );
+        let directory = tempfile::tempdir().expect("创建请求协调器临时目录");
+        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
+            directory.path().join("paper-request-coordinator"),
+            &session,
+            &checkpoint,
+        )
+        .expect("创建请求协调器");
+        let request = coordinator_post_order_request(&session, "coordinator-insert-failure");
+        let actions = coordinator_post_order_actions(&request);
+        let before_state = session.durable_checkpoint();
+        let before_cursor = coordinator.cursor_for_tests();
+        coordinator
+            .store
+            .install_transaction_log_insert_failure_for_tests()
+            .expect("安装事务记录失败触发器");
+
+        assert!(matches!(
+            coordinator.register_request(
+                &mut session,
+                PendingDomainRequestV1::PostOrder(request.clone()),
+                actions.clone(),
+            ),
+            Err(SessionError::Durability(message)) if message.contains("SQLite")
+        ));
+        assert_eq!(session.durable_checkpoint(), before_state);
+        assert_eq!(coordinator.cursor_for_tests(), before_cursor);
+        assert!(!coordinator.recovery_required);
+        assert_eq!(
+            coordinator
+                .store
+                .logical_log_bytes()
+                .expect("读取失败后日志字节"),
+            0
+        );
+        let failed_recovery = coordinator
+            .store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("读取失败后的正式日志");
+        assert!(failed_recovery.tail.is_empty());
+        assert_eq!(bridge_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        coordinator
+            .store
+            .remove_transaction_log_insert_failure_for_tests()
+            .expect("移除事务记录失败触发器");
+        let registered = coordinator
+            .register_request(
+                &mut session,
+                PendingDomainRequestV1::PostOrder(request),
+                actions,
+            )
+            .expect("解除失败后登记同一请求");
+        assert_eq!(
+            registered.request.disposition,
+            RequestRegistrationDispositionV1::NewLogicalRequest
+        );
+        assert_eq!(coordinator.last_sequence, 1);
+        assert!(coordinator.transaction_head_sha256.is_some());
+        assert!(coordinator.logical_log_bytes > 0);
+        assert!(!coordinator.recovery_required);
+        assert_eq!(coordinator.encoded_transaction_count_for_tests, 2);
+        assert_eq!(coordinator.append_attempt_count_for_tests, 2);
+        assert_eq!(coordinator.append_success_count_for_tests, 1);
+        let recovered = coordinator
+            .store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("读取成功后的正式日志");
+        assert_eq!(recovered.tail.len(), 1);
+        assert_eq!(bridge_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recoverable_paper_v2_close_ingress_is_atomic_recoverable_and_idempotent() {
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let scenario = scenario_for_sim_tests();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let mut spec = session_spec();
+        spec.caller_role = SimCallerRoleV1::Paper;
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let session_id = session.session_spec().session_id.clone();
+        let checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
+            &process,
+            &session,
+            rules.as_ref(),
+        );
+        let directory = tempfile::tempdir().expect("创建入口关闭协调器临时目录");
+        let root = directory.path().join("paper-close-ingress-coordinator");
+        let mut coordinator =
+            RecoverablePaperCoordinatorV2::create_new(root.clone(), &session, &checkpoint)
+                .expect("创建入口关闭协调器");
+        let initial_state = session.durable_checkpoint();
+        let initial_cursor = coordinator.cursor_for_tests();
+        coordinator
+            .store
+            .install_transaction_log_insert_failure_for_tests()
+            .expect("安装入口关闭事务失败触发器");
+
+        assert!(matches!(
+            coordinator.close_ingress(&mut session),
+            Err(SessionError::Durability(message)) if message.contains("SQLite")
+        ));
+        assert_eq!(session.durable_checkpoint(), initial_state);
+        assert_eq!(coordinator.cursor_for_tests(), initial_cursor);
+        assert!(session.accepting_new_ingress);
+        assert_eq!(
+            coordinator
+                .store
+                .logical_log_bytes()
+                .expect("读取入口关闭失败后的日志字节"),
+            0
+        );
+        assert!(coordinator
+            .store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("读取入口关闭失败后的事务日志")
+            .tail
+            .is_empty());
+
+        coordinator
+            .store
+            .remove_transaction_log_insert_failure_for_tests()
+            .expect("移除入口关闭事务失败触发器");
+        coordinator
+            .close_ingress(&mut session)
+            .expect("一次耐久关闭入口");
+        assert!(!session.accepting_new_ingress);
+        assert_eq!(coordinator.last_sequence, 1);
+        assert_eq!(coordinator.append_success_count_for_tests, 1);
+        let closed_state = session.durable_checkpoint();
+        let closed_cursor = coordinator.cursor_for_tests();
+        let encoded_count = coordinator.encoded_transaction_count_for_tests;
+        let append_count = coordinator.append_attempt_count_for_tests;
+        coordinator
+            .close_ingress(&mut session)
+            .expect("重复关闭入口零写成功");
+        assert_eq!(session.durable_checkpoint(), closed_state);
+        assert_eq!(coordinator.cursor_for_tests(), closed_cursor);
+        assert_eq!(
+            coordinator.encoded_transaction_count_for_tests,
+            encoded_count
+        );
+        assert_eq!(coordinator.append_attempt_count_for_tests, append_count);
+        drop(coordinator);
+
+        let store = LocalTransactionLogStoreV2::open_recovery(root).expect("重开入口关闭事务日志");
+        let recovered = store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("恢复入口关闭事务日志");
+        assert_eq!(recovered.tail.len(), 1);
+        let recovered_checkpoint = recovered.checkpoint.expect("必须有入口关闭前应用检查点");
+        let mut wrapper = recovered_checkpoint.checkpoint;
+        let session_checkpoint = wrapper
+            .run_checkpoint
+            .sessions
+            .remove(&session_id)
+            .expect("应用检查点必须包含目标会话");
+        let evicted = wrapper
+            .evicted_markets
+            .remove(&session_id)
+            .unwrap_or_default();
+        let (mut replayed, downstream) =
+            ExecutionSessionStateV1::restore(&process.inner, session_checkpoint, &evicted)
+                .expect("恢复入口关闭前会话");
+        assert_eq!(downstream, None);
+        for entry in recovered.tail {
+            replayed = replay_close_ingress_operation_v2(
+                replayed,
+                &entry.evidence,
+                entry.recovery_operation,
+            )
+            .expect("重放入口关闭事务");
+        }
+        assert!(!replayed.accepting_new_ingress);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recoverable_paper_v2_request_commit_then_crash_recovers_from_formal_wrapper_and_tail()
+    {
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let scenario = scenario_for_sim_tests();
+        let finality_policy = successful_policy_for_tests();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let mut spec = session_spec();
+        spec.caller_role = SimCallerRoleV1::Paper;
+        let session_id = spec.session_id.clone();
+        let bridge_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let session = process.create_active_session_for_tests(
+            spec.clone(),
+            counting_submission_response_bridge(Arc::clone(&bridge_calls)),
+        );
+        let initial_state = session.durable_checkpoint();
+        let checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
+            &process,
+            &session,
+            rules.as_ref(),
+        );
+        let directory = tempfile::tempdir().expect("创建请求崩溃恢复临时目录");
+        let root = directory.path().join("paper-request-crash");
+        let mut coordinator =
+            RecoverablePaperCoordinatorV2::create_new(root.clone(), &session, &checkpoint)
+                .expect("创建请求协调器");
+        let request = coordinator_post_order_request(&session, "coordinator-crash");
+        let actions = coordinator_post_order_actions(&request);
+
+        let mut baseline_process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let mut baseline_session = baseline_process
+            .create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        baseline_session
+            .post_order(request.clone())
+            .expect("独立非持久业务基准登记");
+        let expected_state = baseline_session.durable_checkpoint();
+
+        coordinator
+            .append_request_then_simulate_crash_for_tests(
+                &session,
+                PendingDomainRequestV1::PostOrder(request),
+                actions,
+            )
+            .expect("SQLite 提交成功后模拟崩溃");
+        assert_eq!(session.durable_checkpoint(), initial_state);
+        assert_eq!(coordinator.last_sequence, 1);
+        assert_eq!(bridge_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        drop(session);
+        drop(process);
+        drop(coordinator);
+
+        let store =
+            LocalTransactionLogStoreV2::open_recovery(root).expect("崩溃后打开正式请求日志");
+        let recovered = store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("从正式 wrapper 恢复请求日志");
+        let recovered_checkpoint = recovered.checkpoint.expect("必须存在正式应用检查点");
+        assert_eq!(recovered_checkpoint.through_sequence, 0);
+        assert_eq!(recovered.tail.len(), 1);
+        let mut wrapper = recovered_checkpoint.checkpoint;
+        wrapper.validate().expect("正式应用检查点 wrapper 必须有效");
+        let restored_inner = SimProcessRoot::restore_from_checkpoint(
+            wrapper.run_checkpoint.process_root.clone(),
+            finality_policy,
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        )
+        .expect("恢复全新进程根");
+        let restored_process = SimExecutionProcessV1 {
+            inner: restored_inner,
+            persistence: None,
+            recoverable_session_ids: BTreeSet::new(),
+            attached_recovered_session_ids: BTreeSet::new(),
+            recovered_evicted_markets: wrapper.evicted_markets.clone(),
+        };
+        let session_checkpoint = wrapper
+            .run_checkpoint
+            .sessions
+            .remove(&session_id)
+            .expect("正式 wrapper 包含目标会话");
+        let evicted = wrapper
+            .evicted_markets
+            .remove(&session_id)
+            .unwrap_or_default();
+        let (mut replayed, downstream) =
+            ExecutionSessionStateV1::restore(&restored_process.inner, session_checkpoint, &evicted)
+                .expect("从正式 wrapper 恢复会话基线");
+        assert_eq!(downstream, None);
+        for entry in recovered.tail {
+            replayed = replay_request_registration_operation_v2(
+                replayed,
+                &entry.evidence,
+                entry.recovery_operation,
+            )
+            .expect("重放已提交请求尾日志");
+        }
+        let restored_session = SimExecutionSessionV1::from_recovered_state(
+            replayed,
+            accepting_submission_response_bridge(),
+            None,
+            None,
+        );
+        assert_eq!(restored_session.durable_checkpoint(), expected_state);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recoverable_paper_v2_durable_request_retry_skips_encode_append_state_and_bridge() {
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let scenario = scenario_for_sim_tests();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let mut spec = session_spec();
+        spec.caller_role = SimCallerRoleV1::Paper;
+        let bridge_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut session = process.create_active_session_for_tests(
+            spec,
+            counting_submission_response_bridge(Arc::clone(&bridge_calls)),
+        );
+        let checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
+            &process,
+            &session,
+            rules.as_ref(),
+        );
+        let directory = tempfile::tempdir().expect("创建请求重试临时目录");
+        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
+            directory.path().join("paper-request-retry"),
+            &session,
+            &checkpoint,
+        )
+        .expect("创建请求协调器");
+        let request = coordinator_post_order_request(&session, "coordinator-retry");
+        let actions = coordinator_post_order_actions(&request);
+        let first = coordinator
+            .register_request(
+                &mut session,
+                PendingDomainRequestV1::PostOrder(request.clone()),
+                actions.clone(),
+            )
+            .expect("首次耐久登记");
+        let before_state = session.durable_checkpoint();
+        let before_cursor = coordinator.cursor_for_tests();
+        let before_encode_count = coordinator.encoded_transaction_count_for_tests;
+        let before_append_count = coordinator.append_attempt_count_for_tests;
+        reset_request_registration_preparation_counts_v2();
+
+        let retry = coordinator
+            .register_request(
+                &mut session,
+                PendingDomainRequestV1::PostOrder(request),
+                actions,
+            )
+            .expect("已耐久请求物理重投");
+        assert_eq!(
+            retry.request.disposition,
+            RequestRegistrationDispositionV1::PhysicalRetry
+        );
+        assert_eq!(retry.request.transit, first.request.transit);
+        assert_eq!(retry.actions, first.actions);
+        assert_eq!(
+            request_registration_preparation_counts_v2(),
+            RequestRegistrationPreparationCountsV2::default()
+        );
+        assert_eq!(
+            coordinator.encoded_transaction_count_for_tests,
+            before_encode_count
+        );
+        assert_eq!(
+            coordinator.append_attempt_count_for_tests,
+            before_append_count
+        );
+        assert_eq!(coordinator.cursor_for_tests(), before_cursor);
+        assert_eq!(session.durable_checkpoint(), before_state);
+        assert_eq!(bridge_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let recovered = coordinator
+            .store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("读取物理重投后的日志");
+        assert_eq!(recovered.tail.len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recoverable_paper_v2_direct_full_holds_typed_capacity_until_matching_retry() {
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let scenario = scenario_for_sim_tests();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let mut spec = session_spec();
+        spec.caller_role = SimCallerRoleV1::Paper;
+        spec.response_outbox_capacity =
+            std::num::NonZeroUsize::new(1).expect("positive test capacity");
+        let bridge_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let source_request = OrderRequestV1 {
+            context: context(&session, "paper-v2-private-direct-source", 1, 20_000),
+            platform_order_id: "a".repeat(64),
+        };
+        let registration = session
+            .order(source_request.clone())
+            .expect("登记仅产生 Direct 的缺失订单查询");
+        let effective_at = registration.receipt.transit.platform_arrived_at_utc_ms;
+        session
+            .session
+            .advance_public_visibility_through(effective_at, 0)
+            .expect("闭合查询处理时点");
+        assert_eq!(
+            session.drive_next_execution_action_through(effective_at),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        let private_received_at = session
+            .session
+            .recovered_pending_private_facts()
+            .iter()
+            .find_map(|(evidence, received_at, _)| {
+                matches!(
+                    evidence,
+                    crate::session::PrivateVisibilityEvidenceV1::DirectResponse { .. }
+                )
+                .then_some(*received_at)
+            })
+            .expect("缺失订单查询形成一个 Direct 私有事实");
+        session
+            .session
+            .advance_public_visibility_through(private_received_at, 0)
+            .expect("闭合 Direct 接收时点");
+        assert_eq!(
+            session.drive_next_execution_action_through(private_received_at),
+            Ok(SubmissionDriveDispositionV1::NoAction)
+        );
+        while !matches!(
+            session.session.recovered_pending_private_facts().first(),
+            Some((
+                crate::session::PrivateVisibilityEvidenceV1::DirectResponse { .. },
+                _,
+                _
+            ))
+        ) {
+            assert_eq!(
+                session.drive_next_private_delivery_through(private_received_at),
+                Ok(SubmissionDeliveryDispositionV1::Delivered)
+            );
+        }
+        session.response_bridge =
+            full_once_order_submission_response_bridge(Arc::clone(&bridge_calls));
+        let bridge_before_direct = session.bridge_replayed_through_private_feedback_sequence;
+        let direct_sequence = bridge_before_direct + 1;
+
+        let checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
+            &process,
+            &session,
+            rules.as_ref(),
+        );
+        let directory = tempfile::tempdir().expect("创建 Direct 私有切片临时目录");
+        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
+            directory.path().join("paper-private-direct"),
+            &session,
+            &checkpoint,
+        )
+        .expect("创建 Direct 私有切片协调器");
+        let before_failure_state = session.durable_checkpoint();
+        let before_failure_cursor = coordinator.cursor_for_tests();
+        coordinator
+            .store
+            .install_transaction_log_insert_failure_for_tests()
+            .expect("安装私有切片 INSERT 失败触发器");
+        assert!(matches!(
+            coordinator.drive_next_private_delivery_through(
+                &mut session,
+                private_received_at,
+            ),
+            Err(SessionError::Durability(message)) if message.contains("SQLite")
+        ));
+        assert_eq!(bridge_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(session.durable_checkpoint(), before_failure_state);
+        assert_eq!(coordinator.cursor_for_tests(), before_failure_cursor);
+        assert!(coordinator.private_delivery_capacity_lease.is_none());
+        let recovered_after_failure = coordinator
+            .store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("读取私有切片 INSERT 失败后的日志");
+        assert!(recovered_after_failure.tail.is_empty());
+        coordinator
+            .store
+            .remove_transaction_log_insert_failure_for_tests()
+            .expect("移除私有切片 INSERT 失败触发器");
+
+        let before_full_sequence = coordinator.last_sequence;
+        assert_eq!(
+            coordinator.drive_next_private_delivery_through(&mut session, private_received_at,),
+            Ok(SubmissionDeliveryDispositionV1::Full)
+        );
+        assert_eq!(coordinator.last_sequence, before_full_sequence + 1);
+        assert_eq!(bridge_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            session.bridge_replayed_through_private_feedback_sequence,
+            bridge_before_direct
+        );
+        let committed_delivery = session
+            .confirmed_private_deliveries
+            .get(&direct_sequence)
+            .expect("Full 前已耐久提交完整 Direct")
+            .clone();
+        assert_eq!(
+            coordinator.private_delivery_capacity_lease.as_ref(),
+            Some(&PrivateDeliveryCapacityLeaseV2 {
+                confirmation: committed_delivery.confirmation(),
+                kind: PrivateDeliveryCapacityKindV2::Direct,
+            }),
+        );
+        let recovered_after_full = coordinator
+            .store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("读取 Full 后的私有输出日志");
+        assert_eq!(recovered_after_full.tail.len(), 1);
+        assert!(matches!(
+            recovered_after_full.tail[0].evidence.fact,
+            DurableTransactionFactV1::PrivateOutputCommitted { .. }
+        ));
+
+        let before_retry_cursor = coordinator.cursor_for_tests();
+        let before_retry_encode = coordinator.encoded_transaction_count_for_tests;
+        let before_retry_append_attempt = coordinator.append_attempt_count_for_tests;
+        let before_retry_append_success = coordinator.append_success_count_for_tests;
+        let retry = coordinator
+            .register_request(
+                &mut session,
+                PendingDomainRequestV1::Order(source_request.clone()),
+                vec![method_action("order", 0, ParsedMethodTimingV1::Ordinary)],
+            )
+            .expect("已有请求物理重投不重新占用 Direct 容量");
+        assert_eq!(
+            retry.request.disposition,
+            RequestRegistrationDispositionV1::PhysicalRetry
+        );
+        assert_eq!(coordinator.cursor_for_tests(), before_retry_cursor);
+        assert_eq!(
+            coordinator.encoded_transaction_count_for_tests,
+            before_retry_encode
+        );
+        assert_eq!(
+            coordinator.append_attempt_count_for_tests,
+            before_retry_append_attempt
+        );
+        assert_eq!(
+            coordinator.append_success_count_for_tests,
+            before_retry_append_success
+        );
+
+        let new_request = OrderRequestV1 {
+            context: context(
+                &session,
+                "paper-v2-private-direct-capacity",
+                2,
+                private_received_at + 1,
+            ),
+            platform_order_id: "b".repeat(64),
+        };
+        assert!(matches!(
+            coordinator.register_request(
+                &mut session,
+                PendingDomainRequestV1::Order(new_request.clone()),
+                vec![method_action("order", 0, ParsedMethodTimingV1::Ordinary)],
+            ),
+            Err(SessionError::ResponseOutboxFull)
+        ));
+        assert_eq!(coordinator.cursor_for_tests(), before_retry_cursor);
+        assert_eq!(
+            coordinator.encoded_transaction_count_for_tests,
+            before_retry_encode
+        );
+        assert_eq!(
+            coordinator.append_attempt_count_for_tests,
+            before_retry_append_attempt
+        );
+        assert_eq!(
+            coordinator.append_success_count_for_tests,
+            before_retry_append_success
+        );
+
+        let forged_proof = DownstreamDurabilityProofV1 {
+            account_instance_key: session
+                .session
+                .execution_state()
+                .account_instance_key()
+                .clone(),
+            durable_through: committed_delivery.confirmation(),
+        };
+        assert!(matches!(
+            coordinator.advance_downstream_durability(&mut session, forged_proof),
+            Err(SessionError::ResponseDeliveryIdentityConflict)
+        ));
+        assert_eq!(coordinator.cursor_for_tests(), before_retry_cursor);
+        assert_eq!(
+            coordinator.encoded_transaction_count_for_tests,
+            before_retry_encode
+        );
+        assert_eq!(
+            coordinator.append_attempt_count_for_tests,
+            before_retry_append_attempt
+        );
+        assert_eq!(
+            coordinator.append_success_count_for_tests,
+            before_retry_append_success
+        );
+
+        assert_eq!(
+            coordinator.drive_next_private_delivery_through(&mut session, private_received_at,),
+            Ok(SubmissionDeliveryDispositionV1::Delivered)
+        );
+        assert_eq!(coordinator.cursor_for_tests(), before_retry_cursor);
+        assert_eq!(
+            coordinator.encoded_transaction_count_for_tests,
+            before_retry_encode
+        );
+        assert_eq!(
+            coordinator.append_attempt_count_for_tests,
+            before_retry_append_attempt
+        );
+        assert_eq!(
+            coordinator.append_success_count_for_tests,
+            before_retry_append_success
+        );
+        assert_eq!(bridge_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            session.bridge_replayed_through_private_feedback_sequence,
+            direct_sequence
+        );
+        assert!(coordinator.private_delivery_capacity_lease.is_none());
+
+        let registered = coordinator
+            .register_request(
+                &mut session,
+                PendingDomainRequestV1::Order(new_request),
+                vec![method_action("order", 0, ParsedMethodTimingV1::Ordinary)],
+            )
+            .expect("匹配 Accepted 清租约后恢复一个 Direct 容量槽");
+        assert_eq!(
+            registered.request.disposition,
+            RequestRegistrationDispositionV1::NewLogicalRequest
+        );
+        assert_eq!(coordinator.last_sequence, before_full_sequence + 2);
+
+        let second_effective_at = registered.request.transit.platform_arrived_at_utc_ms;
+        session
+            .session
+            .advance_public_visibility_through(second_effective_at, 0)
+            .expect("闭合第二个 Direct 查询处理时点");
+        assert_eq!(
+            session.drive_next_execution_action_through(second_effective_at),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        let second_private_received_at = session
+            .session
+            .recovered_pending_private_facts()
+            .iter()
+            .find_map(|(evidence, received_at, _)| {
+                matches!(
+                    evidence,
+                    crate::session::PrivateVisibilityEvidenceV1::DirectResponse {
+                        global_request_id
+                    } if global_request_id == "paper-v2-private-direct-capacity"
+                )
+                .then_some(*received_at)
+            })
+            .expect("第二个缺失订单查询形成 Direct 私有事实");
+        session
+            .session
+            .advance_public_visibility_through(second_private_received_at, 0)
+            .expect("闭合第二个 Direct 接收时点");
+        assert_eq!(
+            session.drive_next_execution_action_through(second_private_received_at),
+            Ok(SubmissionDriveDispositionV1::NoAction)
+        );
+        let terminal_bridge_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        session.response_bridge = full_then_disconnected_order_submission_response_bridge(
+            Arc::clone(&terminal_bridge_calls),
+        );
+        assert_eq!(
+            coordinator
+                .drive_next_private_delivery_through(&mut session, second_private_received_at),
+            Ok(SubmissionDeliveryDispositionV1::Full)
+        );
+        let before_failed_close_cursor = coordinator.cursor_for_tests();
+        let before_failed_close_lease = coordinator
+            .private_delivery_capacity_lease
+            .clone()
+            .expect("第二个 Full 保留 Direct 容量租约");
+        let before_failed_close_bridge_watermark =
+            session.bridge_replayed_through_private_feedback_sequence;
+        coordinator
+            .store
+            .install_transaction_log_insert_failure_for_tests()
+            .expect("安装致命桥结果后的关门 INSERT 失败触发器");
+        assert!(matches!(
+            coordinator
+                .drive_next_private_delivery_through(&mut session, second_private_received_at),
+            Err(SessionError::DurabilityRecoveryRequired(message))
+                if message.contains("关闭入口") && message.contains("SQLite")
+        ));
+        assert!(!session.accepting_new_ingress);
+        assert!(coordinator.recovery_required);
+        assert_eq!(
+            coordinator.cursor_for_tests().0,
+            before_failed_close_cursor.0
+        );
+        assert_eq!(
+            coordinator.transaction_head_sha256,
+            before_failed_close_cursor.1
+        );
+        assert_eq!(coordinator.logical_log_bytes, before_failed_close_cursor.2);
+        assert_eq!(
+            coordinator.private_delivery_capacity_lease,
+            Some(before_failed_close_lease)
+        );
+        assert_eq!(
+            session.bridge_replayed_through_private_feedback_sequence,
+            before_failed_close_bridge_watermark
+        );
+        assert_eq!(
+            terminal_bridge_calls.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        coordinator
+            .store
+            .remove_transaction_log_insert_failure_for_tests()
+            .expect("移除致命桥结果后的关门 INSERT 失败触发器");
+        let before_recovery_gate_state = session.durable_checkpoint();
+        let before_recovery_gate_encode = coordinator.encoded_transaction_count_for_tests;
+        let before_recovery_gate_append = coordinator.append_attempt_count_for_tests;
+        let after_terminal_failure_context = context(
+            &session,
+            "paper-v2-private-after-terminal-bridge-failure",
+            3,
+            second_private_received_at + 1,
+        );
+        assert!(matches!(
+            coordinator.register_request(
+                &mut session,
+                PendingDomainRequestV1::Order(OrderRequestV1 {
+                    context: after_terminal_failure_context,
+                    platform_order_id: "c".repeat(64),
+                }),
+                vec![method_action("order", 0, ParsedMethodTimingV1::Ordinary)],
+            ),
+            Err(SessionError::DurabilityRecoveryRequired(_))
+        ));
+        assert_eq!(session.durable_checkpoint(), before_recovery_gate_state);
+        assert_eq!(
+            coordinator.encoded_transaction_count_for_tests,
+            before_recovery_gate_encode
+        );
+        assert_eq!(
+            coordinator.append_attempt_count_for_tests,
+            before_recovery_gate_append
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recoverable_paper_v2_private_no_output_writes_once_per_new_cutoff() {
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let scenario = scenario_for_sim_tests();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let mut spec = session_spec();
+        spec.caller_role = SimCallerRoleV1::Paper;
+        let bridge_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut session = process.create_active_session_for_tests(
+            spec,
+            counting_submission_response_bridge(Arc::clone(&bridge_calls)),
+        );
+        session
+            .session
+            .advance_public_visibility_through(0, 0)
+            .expect("闭合空 Paper 初始公开时点");
+        assert_eq!(
+            session.drive_next_execution_action_through(0),
+            Ok(SubmissionDriveDispositionV1::NoAction)
+        );
+        assert_eq!(
+            session.drive_private_delivery_through(0),
+            Ok(SubmissionDeliveryDispositionV1::NoVisibleResponse)
+        );
+        bridge_calls.store(0, std::sync::atomic::Ordering::SeqCst);
+        let cutoff = 1;
+        session
+            .session
+            .advance_public_visibility_through(cutoff, 0)
+            .expect("闭合空 Paper 公开时点");
+        assert_eq!(
+            session.drive_next_execution_action_through(cutoff),
+            Ok(SubmissionDriveDispositionV1::NoAction)
+        );
+        let checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
+            &process,
+            &session,
+            rules.as_ref(),
+        );
+        let directory = tempfile::tempdir().expect("创建空私有切片临时目录");
+        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
+            directory.path().join("paper-private-no-output"),
+            &session,
+            &checkpoint,
+        )
+        .expect("创建空私有切片协调器");
+
+        assert_eq!(
+            coordinator.drive_next_private_delivery_through(&mut session, cutoff),
+            Ok(SubmissionDeliveryDispositionV1::NoVisibleResponse)
+        );
+        let after_first = coordinator.cursor_for_tests();
+        let after_first_state = session.durable_checkpoint();
+        assert_eq!(after_first.0, 1);
+        assert_eq!(coordinator.encoded_transaction_count_for_tests, 1);
+        assert_eq!(coordinator.append_success_count_for_tests, 1);
+        assert_eq!(bridge_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let recovered_after_first = coordinator
+            .store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("读取首次无输出推进日志");
+        assert_eq!(recovered_after_first.tail.len(), 1);
+        assert!(matches!(
+            recovered_after_first.tail[0].evidence.fact,
+            DurableTransactionFactV1::ExecutionAdvanced { .. }
+        ));
+        assert_eq!(
+            recovered_after_first.tail[0].recovery_operation,
+            DurableRecoveryOperationV2::AdvancePrivateFactThrough {
+                received_at_utc_ms: cutoff,
+            }
+        );
+        assert_eq!(
+            coordinator.drive_next_private_delivery_through(&mut session, cutoff),
+            Ok(SubmissionDeliveryDispositionV1::NoVisibleResponse)
+        );
+        assert_eq!(coordinator.cursor_for_tests(), after_first);
+        assert_eq!(coordinator.encoded_transaction_count_for_tests, 1);
+        assert_eq!(coordinator.append_attempt_count_for_tests, 1);
+        assert_eq!(coordinator.append_success_count_for_tests, 1);
+        assert_eq!(bridge_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(session.durable_checkpoint(), after_first_state);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recoverable_paper_v2_lifecycle_lease_only_releases_the_last_same_batch_entry() {
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            scenario as long_scenario, session_spec as long_session_spec,
+        };
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载 Paper V2 时延配置");
+        let scenario = long_scenario();
+        let mut spec = long_session_spec(
+            &scenario,
+            SimCallerRoleV1::Paper,
+            "paper-v2-private-lifecycle-lease",
+        );
+        spec.response_outbox_capacity = std::num::NonZeroUsize::new(1).expect("正容量");
+        let mut session =
+            execution_process_for_tests(rules, Arc::clone(&profile), Arc::clone(&scenario))
+                .create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
+        let registration = session
+            .post_orders(PostOrdersRequestV1 {
+                context: context_for_arrival(
+                    &session,
+                    &profile,
+                    "paper-v2-private-lifecycle-source",
+                    1,
+                    150_000,
+                ),
+                idempotency_key: "paper-v2-private-lifecycle-idempotency".to_owned(),
+                items: (0..2)
+                    .map(|ordinal| PostOrderItemV1 {
+                        item_id: format!("paper-v2-private-lifecycle-item-{ordinal}"),
+                        order: SimBuyOrderV1 {
+                            condition_id: long_market().condition_id.clone(),
+                            token_id: long_asset("1", 0, "Up").token_id,
+                            kind: SimBuyOrderKindV1::GtcLimit {
+                                limit_price_pusd_per_share: Decimal::new(4, 1),
+                                size_shares: Decimal::new(5, 0),
+                                post_only: true,
+                            },
+                        },
+                    })
+                    .collect(),
+            })
+            .expect("登记两个真实 Paper GTC 请求项");
+        let effective_at = registration.items[0].effective_processing_at_utc_ms;
+        assert!(
+            registration
+                .items
+                .iter()
+                .all(|item| item.effective_processing_at_utc_ms == effective_at)
+        );
+        session
+            .apply_closed_market_event_bucket(ClosedMarketEventBucketV1::public(
+                effective_at,
+                next_visibility_position,
+                next_visibility_position,
+                MillisecondBucketClosureV1::NextEventAt(effective_at + 1),
+                Vec::new(),
+            ))
+            .expect("闭合两个 GTC 的公开前缀");
+        assert_eq!(
+            session.drive_next_execution_action_through(effective_at),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: false,
+            })
+        );
+        assert_eq!(
+            session.drive_next_execution_action_through(effective_at),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        assert_eq!(session.lifecycle_outbox.entries.len(), 2);
+        assert_eq!(session.lifecycle_outbox.batches.len(), 1);
+        let cutoff = session
+            .session
+            .recovered_pending_private_facts()
+            .iter()
+            .map(|(_, received_at_utc_ms, _)| *received_at_utc_ms)
+            .max()
+            .expect("两个 GTC 必须形成私有事实");
+        session.prepare_private_delivery_through_for_tests(cutoff);
+
+        let mut committed_lifecycle = 0;
+        while !session.lifecycle_outbox.entries.is_empty() {
+            let prepared = prepare_private_fact_delta_v2(
+                &session.session,
+                &session.direct_response_outbox,
+                &session.lifecycle_outbox,
+                &session.confirmed_private_deliveries,
+                cutoff,
+            )
+            .expect("准备真实生命周期私有事实切片");
+            assert!(prepared.evidence.is_some());
+            let committed = commit_prevalidated_private_fact_delta_v2(
+                &mut session.session,
+                &mut session.direct_response_outbox,
+                &mut session.lifecycle_outbox,
+                &mut session.confirmed_private_deliveries,
+                prepared,
+            );
+            if let PreparedPrivateFactOutcomeV2::Output(
+                delivery @ SealedPrivateDeliveryV1::Lifecycle(_),
+            ) = committed.outcome
+            {
+                committed_lifecycle += 1;
+                if committed_lifecycle == 1 {
+                    let lease = committed
+                        .capacity_lease
+                        .expect("非末项生命周期反馈也必须保留原批次身份");
+                    assert!(matches!(
+                        lease.kind,
+                        PrivateDeliveryCapacityKindV2::Lifecycle { .. }
+                    ));
+                    assert!(!lease.occupies_lifecycle_capacity(&session.lifecycle_outbox));
+                    assert_eq!(session.lifecycle_outbox.batches.len(), 1);
+                } else {
+                    assert_eq!(committed_lifecycle, 2);
+                    assert!(session.lifecycle_outbox.batches.is_empty());
+                    let lease = committed
+                        .capacity_lease
+                        .expect("末项生命周期反馈必须保留已释放容量");
+                    assert_eq!(lease.confirmation, delivery.confirmation());
+                    assert!(matches!(
+                        lease.kind,
+                        PrivateDeliveryCapacityKindV2::Lifecycle { .. }
+                    ));
+                    assert!(lease.occupies_lifecycle_capacity(&session.lifecycle_outbox));
+                }
+            }
+        }
+        assert_eq!(committed_lifecycle, 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recoverable_paper_v2_lifecycle_lease_follows_a_later_empty_batch_release() {
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            scenario as long_scenario, session_spec as long_session_spec,
+        };
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载 Paper V2 时延配置");
+        let scenario = long_scenario();
+        let mut spec = long_session_spec(
+            &scenario,
+            SimCallerRoleV1::Paper,
+            "paper-v2-private-lifecycle-later-release",
+        );
+        spec.response_outbox_capacity = std::num::NonZeroUsize::new(1).expect("正容量");
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let position = load_initial_market(&mut session, "0.00001", "0.6", "5");
+        let registration = session
+            .post_orders(PostOrdersRequestV1 {
+                context: context_for_arrival(
+                    &session,
+                    &profile,
+                    "paper-v2-private-lifecycle-later-release-source",
+                    1,
+                    150_000,
+                ),
+                idempotency_key: "paper-v2-private-lifecycle-later-release-idempotency".to_owned(),
+                items: vec![
+                    PostOrderItemV1 {
+                        item_id: "paper-v2-private-lifecycle-feedback-item".to_owned(),
+                        order: SimBuyOrderV1 {
+                            condition_id: long_market().condition_id.clone(),
+                            token_id: long_asset("1", 0, "Up").token_id,
+                            kind: SimBuyOrderKindV1::GtcLimit {
+                                limit_price_pusd_per_share: Decimal::new(4, 1),
+                                size_shares: Decimal::new(5, 0),
+                                post_only: true,
+                            },
+                        },
+                    },
+                    PostOrderItemV1 {
+                        item_id: "paper-v2-private-lifecycle-no-feedback-item".to_owned(),
+                        order: SimBuyOrderV1 {
+                            condition_id: long_market().condition_id,
+                            token_id: long_asset("1", 0, "Up").token_id,
+                            kind: SimBuyOrderKindV1::FokMarket {
+                                spend_pusd: Decimal::ONE,
+                                worst_price_pusd_per_share: Decimal::new(1, 1),
+                            },
+                        },
+                    },
+                ],
+            })
+            .expect("登记先形成生命周期反馈、后无效果拒绝的混合批次");
+        let first_at = registration.items[0].effective_processing_at_utc_ms;
+        let second_at = registration.items[1].effective_processing_at_utc_ms;
+        assert!(second_at > first_at);
+        session
+            .session
+            .advance_public_visibility_through(first_at, position)
+            .expect("闭合首项公开时点");
+        assert_eq!(
+            session.drive_next_execution_action_through(first_at),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: false,
+            })
+        );
+        assert_eq!(session.lifecycle_outbox.entries.len(), 1);
+        assert_eq!(session.lifecycle_outbox.batches.len(), 1);
+        let feedback_at = session
+            .session
+            .recovered_pending_private_facts()
+            .iter()
+            .find_map(|(evidence, received_at, _)| {
+                matches!(
+                    evidence,
+                    crate::session::PrivateVisibilityEvidenceV1::LifecycleFeedback { .. }
+                )
+                .then_some(*received_at)
+            })
+            .expect("首项形成一个生命周期反馈");
+        assert!(feedback_at < second_at);
+        session
+            .session
+            .advance_public_visibility_through(feedback_at, position)
+            .expect("闭合首项反馈可见时点");
+        assert_eq!(
+            session.drive_next_execution_action_through(feedback_at),
+            Ok(SubmissionDriveDispositionV1::NoAction)
+        );
+        let bridge_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        session.response_bridge =
+            full_once_order_lifecycle_submission_response_bridge(Arc::clone(&bridge_calls));
+        let checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
+            &process,
+            &session,
+            rules.as_ref(),
+        );
+        let directory = tempfile::tempdir().expect("创建生命周期延迟释放临时目录");
+        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
+            directory
+                .path()
+                .join("paper-private-lifecycle-later-release"),
+            &session,
+            &checkpoint,
+        )
+        .expect("创建生命周期延迟释放协调器");
+        assert_eq!(
+            coordinator.drive_next_private_delivery_through(&mut session, feedback_at),
+            Ok(SubmissionDeliveryDispositionV1::Full)
+        );
+        assert_eq!(coordinator.last_sequence, 1);
+        assert_eq!(coordinator.encoded_transaction_count_for_tests, 1);
+        assert_eq!(coordinator.append_success_count_for_tests, 1);
+        assert_eq!(bridge_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let lease = coordinator
+            .private_delivery_capacity_lease
+            .as_ref()
+            .expect("Full 必须在协调器保留生命周期批次身份");
+        assert!(!lease.occupies_lifecycle_capacity(&session.lifecycle_outbox));
+        assert_eq!(session.lifecycle_outbox.batches.len(), 1);
+        let recovered_after_full = coordinator
+            .store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("读取生命周期 Full 后日志");
+        assert_eq!(recovered_after_full.tail.len(), 1);
+        assert!(matches!(
+            recovered_after_full.tail[0].evidence.fact,
+            DurableTransactionFactV1::PrivateOutputCommitted { .. }
+        ));
+
+        session
+            .session
+            .advance_public_visibility_through(second_at, position)
+            .expect("闭合后项公开时点");
+        assert_eq!(
+            session.drive_next_execution_action_through(second_at),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        assert!(session.lifecycle_outbox.entries.is_empty());
+        assert!(session.lifecycle_outbox.batches.is_empty());
+        assert!(
+            coordinator
+                .private_delivery_capacity_lease
+                .as_ref()
+                .expect("批次删除前租约仍必须存在")
+                .occupies_lifecycle_capacity(&session.lifecycle_outbox)
+        );
+        let before_retry_cursor = coordinator.cursor_for_tests();
+        let before_retry_encode = coordinator.encoded_transaction_count_for_tests;
+        let before_retry_append = coordinator.append_attempt_count_for_tests;
+        assert_eq!(
+            coordinator.drive_next_private_delivery_through(&mut session, feedback_at),
+            Ok(SubmissionDeliveryDispositionV1::Delivered)
+        );
+        assert_eq!(coordinator.cursor_for_tests(), before_retry_cursor);
+        assert_eq!(
+            coordinator.encoded_transaction_count_for_tests,
+            before_retry_encode
+        );
+        assert_eq!(
+            coordinator.append_attempt_count_for_tests,
+            before_retry_append
+        );
+        assert_eq!(bridge_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(coordinator.private_delivery_capacity_lease.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recoverable_paper_v2_scheduled_gtd_rejects_occupied_lifecycle_lease_before_encoding() {
+        let PaperScheduledLifecycleLeaseFixture {
+            rules,
+            profile,
+            process,
+            mut session,
+            next_visibility_position,
+            gtd_deadline,
+        } = paper_capacity_one_session_with_pending_gtd(
+            "paper-v2-scheduled-occupied-lifecycle-lease",
+        )
+        .await;
+        let registration = register_lifecycle_lease_batch(
+            &mut session,
+            &profile,
+            250_000,
+            "paper-v2-private-lifecycle-ordinary-no-feedback-item",
+            SimBuyOrderKindV1::GtcLimit {
+                limit_price_pusd_per_share: Decimal::new(6, 1),
+                size_shares: Decimal::new(5, 0),
+                post_only: true,
+            },
+        );
+        let first_at = registration.items[0].effective_processing_at_utc_ms;
+        let second_at = registration.items[1].effective_processing_at_utc_ms;
+        assert_eq!(second_at, first_at);
+        assert!(second_at < gtd_deadline);
+        session
+            .session
+            .advance_public_visibility_through(first_at, next_visibility_position)
+            .expect("闭合占用租约首项公开时点");
+        assert_eq!(
+            session.drive_next_execution_action_through(first_at),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: false,
+            })
+        );
+        let lifecycle_feedback_at = pending_lifecycle_feedback_received_at(&session);
+        let lifecycle_feedback_ids_after_first = session
+            .lifecycle_outbox
+            .entries
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            session.drive_next_execution_action_through(second_at),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        assert_eq!(session.lifecycle_outbox.entries.len(), 1);
+        assert_eq!(session.lifecycle_outbox.batches.len(), 1);
+        assert_eq!(
+            session
+                .lifecycle_outbox
+                .entries
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            lifecycle_feedback_ids_after_first
+        );
+        assert!(session.lifecycle_outbox.batches.values().all(|batch| {
+            batch.open_work_ids.is_empty()
+                && batch.feedback_ids == lifecycle_feedback_ids_after_first
+        }));
+        assert_eq!(session.direct_response_outbox.entries.len(), 1);
+        let private_cutoff = gtd_deadline - 1;
+        assert!(lifecycle_feedback_at < private_cutoff);
+        session
+            .session
+            .advance_public_visibility_through(private_cutoff, next_visibility_position)
+            .expect("闭合占用租约私有输出截止时点");
+        assert_eq!(
+            session.drive_next_execution_action_through(private_cutoff),
+            Ok(SubmissionDriveDispositionV1::NoAction)
+        );
+        session
+            .session
+            .advance_public_visibility_through(gtd_deadline, next_visibility_position)
+            .expect("在协调器检查点前闭合 GTD 到期公开前缀");
+
+        let bridge_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        session.response_bridge =
+            full_once_order_lifecycle_submission_response_bridge(Arc::clone(&bridge_calls));
+        let checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
+            &process,
+            &session,
+            rules.as_ref(),
+        );
+        let session_id = session.session_spec().session_id.clone();
+        let directory = tempfile::tempdir().expect("创建占用生命周期租约临时目录");
+        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
+            directory
+                .path()
+                .join("paper-scheduled-occupied-lifecycle-lease"),
+            &session,
+            &checkpoint,
+        )
+        .expect("创建占用生命周期租约协调器");
+        let mut delivered_before_full = 0;
+        loop {
+            match coordinator
+                .drive_next_private_delivery_through(&mut session, private_cutoff)
+                .expect("占用生命周期租约私有推进")
+            {
+                SubmissionDeliveryDispositionV1::Delivered => {
+                    delivered_before_full += 1;
+                    assert!(delivered_before_full <= 1);
+                }
+                SubmissionDeliveryDispositionV1::Full => break,
+                disposition => panic!("生命周期 Full 前出现意外私有推进结果：{disposition:?}"),
+            }
+        }
+        assert_eq!(bridge_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(session.lifecycle_outbox.entries.is_empty());
+        assert!(session.lifecycle_outbox.batches.is_empty());
+        assert!(matches!(
+            coordinator.private_delivery_capacity_lease.as_ref(),
+            Some(PrivateDeliveryCapacityLeaseV2 {
+                kind: PrivateDeliveryCapacityKindV2::Lifecycle { .. },
+                ..
+            })
+        ));
+        assert_eq!(
+            coordinator.occupied_lifecycle_capacity_leases(&session.lifecycle_outbox),
+            1
+        );
+
+        let recovered_before_capacity = coordinator
+            .store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("读取占用生命周期租约日志");
+        assert!(!recovered_before_capacity.tail.is_empty());
+        assert!(recovered_before_capacity.tail.iter().all(|entry| matches!(
+            entry.evidence.fact,
+            DurableTransactionFactV1::PrivateOutputCommitted { .. }
+        )));
+        let mut replayed_before_capacity = restore_recoverable_paper_application_session_for_tests(
+            &process,
+            recovered_before_capacity
+                .checkpoint
+                .as_ref()
+                .expect("占用生命周期租约日志必须有正式应用检查点")
+                .checkpoint
+                .clone(),
+            &session_id,
+        );
+        for entry in &recovered_before_capacity.tail {
+            replayed_before_capacity = replay_private_fact_operation_v2(
+                replayed_before_capacity,
+                &entry.evidence,
+                entry.recovery_operation,
+            )
+            .expect("顺序重放占用生命周期租约私有尾日志");
+        }
+        assert_eq!(
+            replayed_before_capacity.checkpoint(None),
+            session.durable_checkpoint()
+        );
+
+        let before_capacity_state = session.durable_checkpoint();
+        let before_capacity_cursor = coordinator.cursor_for_tests();
+        let before_capacity_counts = (
+            coordinator.encoded_transaction_count_for_tests,
+            coordinator.append_attempt_count_for_tests,
+            coordinator.append_success_count_for_tests,
+        );
+        let before_capacity_tail = recovered_before_capacity.tail;
+        reset_execution_state_clone_count_for_tests();
+        assert_eq!(
+            coordinator.drive_scheduled_execution_through(&mut session, gtd_deadline),
+            Err(MarketEventErrorV1::Session(
+                SessionError::ResponseOutboxFull
+            ))
+        );
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(session.durable_checkpoint(), before_capacity_state);
+        assert_eq!(session.next_order_deadline_at_utc_ms(), Some(gtd_deadline));
+        assert_eq!(coordinator.cursor_for_tests(), before_capacity_cursor);
+        assert_eq!(
+            (
+                coordinator.encoded_transaction_count_for_tests,
+                coordinator.append_attempt_count_for_tests,
+                coordinator.append_success_count_for_tests,
+            ),
+            before_capacity_counts
+        );
+        assert_eq!(
+            coordinator
+                .store
+                .recover::<
+                    DurableLogicalTransactionEvidenceV2,
+                    DurableRecoveryOperationV2,
+                    RecoverablePaperApplicationCheckpointV2,
+                >()
+                .expect("读取生命周期容量拒绝后日志")
+                .tail,
+            before_capacity_tail
+        );
+        assert_eq!(
+            coordinator.occupied_lifecycle_capacity_leases(&session.lifecycle_outbox),
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recoverable_paper_v2_scheduled_gtd_reuses_full_lease_batch_and_replays() {
+        let PaperScheduledLifecycleLeaseFixture {
+            rules,
+            profile,
+            process,
+            mut session,
+            next_visibility_position,
+            gtd_deadline,
+        } = paper_capacity_one_session_with_pending_gtd("paper-v2-private-lifecycle-later-release")
+            .await;
+        let first_arrival = gtd_deadline - 249;
+        let registration = register_lifecycle_lease_batch(
+            &mut session,
+            &profile,
+            first_arrival,
+            "paper-v2-private-lifecycle-no-feedback-item",
+            SimBuyOrderKindV1::FokMarket {
+                spend_pusd: Decimal::ONE,
+                worst_price_pusd_per_share: Decimal::new(1, 1),
+            },
+        );
+        let first_at = registration.items[0].effective_processing_at_utc_ms;
+        let second_at = registration.items[1].effective_processing_at_utc_ms;
+        assert_eq!(first_at, first_arrival);
+        assert_eq!(second_at, gtd_deadline + 1);
+        session
+            .session
+            .advance_public_visibility_through(first_at, next_visibility_position)
+            .expect("闭合可复用租约首项公开时点");
+        assert_eq!(
+            session.drive_next_execution_action_through(first_at),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: false,
+            })
+        );
+        let lifecycle_feedback_at = pending_lifecycle_feedback_received_at(&session);
+        assert!(lifecycle_feedback_at < gtd_deadline);
+        assert!(gtd_deadline < second_at);
+        session
+            .session
+            .advance_public_visibility_through(lifecycle_feedback_at, next_visibility_position)
+            .expect("闭合可复用租约反馈时点");
+        assert_eq!(
+            session.drive_next_execution_action_through(lifecycle_feedback_at),
+            Ok(SubmissionDriveDispositionV1::NoAction)
+        );
+        session
+            .session
+            .advance_public_visibility_through(gtd_deadline, next_visibility_position)
+            .expect("在协调器检查点前闭合可复用租约 GTD 前缀");
+        let request_work_id = LogicalLifecycleOutboxV1::request_batch_id(
+            "paper-v2-private-lifecycle-later-release-source",
+        );
+        let request_batch_id = session
+            .lifecycle_outbox
+            .work_batch_ids
+            .get(&request_work_id)
+            .expect("首项必须启动请求生命周期批次")
+            .clone();
+        assert!(
+            session
+                .lifecycle_outbox
+                .batches
+                .get(&request_batch_id)
+                .is_some_and(|batch| {
+                    batch.open_work_ids == BTreeSet::from([request_work_id.clone()])
+                        && batch.feedback_ids.len() == 1
+                })
+        );
+        assert_eq!(session.direct_response_outbox.entries.len(), 1);
+
+        let bridge_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        session.response_bridge =
+            full_once_order_lifecycle_submission_response_bridge(Arc::clone(&bridge_calls));
+        let checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
+            &process,
+            &session,
+            rules.as_ref(),
+        );
+        let session_id = session.session_spec().session_id.clone();
+        let directory = tempfile::tempdir().expect("创建可复用生命周期租约临时目录");
+        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
+            directory
+                .path()
+                .join("paper-scheduled-reusable-lifecycle-lease"),
+            &session,
+            &checkpoint,
+        )
+        .expect("创建可复用生命周期租约协调器");
+        assert_eq!(
+            coordinator.drive_next_private_delivery_through(&mut session, lifecycle_feedback_at),
+            Ok(SubmissionDeliveryDispositionV1::Full)
+        );
+        assert_eq!(bridge_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(matches!(
+            coordinator.private_delivery_capacity_lease.as_ref(),
+            Some(PrivateDeliveryCapacityLeaseV2 {
+                kind: PrivateDeliveryCapacityKindV2::Lifecycle { batch_id },
+                ..
+            }) if batch_id == &request_batch_id
+        ));
+        assert_eq!(
+            coordinator.occupied_lifecycle_capacity_leases(&session.lifecycle_outbox),
+            0
+        );
+        assert!(session.lifecycle_outbox.entries.is_empty());
+        assert!(
+            session
+                .lifecycle_outbox
+                .batches
+                .get(&request_batch_id)
+                .is_some_and(|batch| {
+                    batch.open_work_ids == BTreeSet::from([request_work_id.clone()])
+                        && batch.feedback_ids.is_empty()
+                        && batch.feedback_received_at_counts.is_empty()
+                })
+        );
+        let direct_outbox_before_scheduled = session.direct_response_outbox.clone();
+
+        let before_scheduled_counts = (
+            coordinator.encoded_transaction_count_for_tests,
+            coordinator.append_attempt_count_for_tests,
+            coordinator.append_success_count_for_tests,
+        );
+        reset_execution_state_clone_count_for_tests();
+        assert_eq!(
+            coordinator.drive_scheduled_execution_through(&mut session, gtd_deadline),
+            Ok(ScheduledExecutionDriveDispositionV2::Advanced)
+        );
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(session.next_order_deadline_at_utc_ms(), None);
+        assert_eq!(
+            session.direct_response_outbox,
+            direct_outbox_before_scheduled
+        );
+        assert_eq!(
+            (
+                coordinator.encoded_transaction_count_for_tests,
+                coordinator.append_attempt_count_for_tests,
+                coordinator.append_success_count_for_tests,
+            ),
+            (
+                before_scheduled_counts.0 + 1,
+                before_scheduled_counts.1 + 1,
+                before_scheduled_counts.2 + 1,
+            )
+        );
+        assert_eq!(
+            coordinator.occupied_lifecycle_capacity_leases(&session.lifecycle_outbox),
+            0
+        );
+
+        let online_checkpoint = session.durable_checkpoint();
+        let recovered = coordinator
+            .store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("读取可复用生命周期租约日志");
+        assert_eq!(recovered.tail.len(), 2);
+        let private_entry = recovered.tail[0].clone();
+        let scheduled_entry = recovered.tail[1].clone();
+        assert!(matches!(
+            private_entry.evidence.fact,
+            DurableTransactionFactV1::PrivateOutputCommitted { .. }
+        ));
+        assert!(matches!(
+            scheduled_entry.evidence.fact,
+            DurableTransactionFactV1::ExecutionAdvanced { .. }
+        ));
+        assert!(scheduled_entry.evidence.logical_action_results.is_empty());
+        let scheduled_feedback_id = match scheduled_entry.evidence.private_output_drafts.as_slice()
+        {
+            [
+                DurablePrivateOutputDraftV1::Lifecycle {
+                    draft: LifecycleFeedbackDraftV1::Order(draft),
+                },
+            ] if draft.event_kind == OrderLifecycleEventKindV1::GtdExpired => {
+                draft.feedback_id.clone()
+            }
+            drafts => panic!("scheduled GTD 必须形成唯一到期生命周期草稿：{drafts:#?}"),
+        };
+        assert_eq!(
+            session.lifecycle_outbox.entries[&scheduled_feedback_id].batch_id,
+            request_batch_id
+        );
+
+        let mut replayed = restore_recoverable_paper_application_session_for_tests(
+            &process,
+            recovered
+                .checkpoint
+                .expect("可复用生命周期租约日志必须有正式应用检查点")
+                .checkpoint,
+            &session_id,
+        );
+        replayed = replay_private_fact_operation_v2(
+            replayed,
+            &private_entry.evidence,
+            private_entry.recovery_operation,
+        )
+        .expect("重放可复用生命周期 Full 私有尾日志");
+        assert!(replayed.lifecycle_outbox.entries.is_empty());
+        assert!(
+            replayed
+                .lifecycle_outbox
+                .batches
+                .contains_key(&request_batch_id)
+        );
+        reset_execution_state_clone_count_for_tests();
+        replayed = replay_execution_operation_v2(
+            replayed,
+            &scheduled_entry.evidence,
+            scheduled_entry.recovery_operation,
+        )
+        .expect("以 occupancy=0 重放可复用 scheduled GTD 尾日志");
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(replayed.checkpoint(None), online_checkpoint);
+        assert_eq!(
+            replayed.lifecycle_outbox.entries[&scheduled_feedback_id].batch_id,
+            request_batch_id
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -18895,9 +30412,16 @@ mod tests {
             item: gtc_item("retry-item", 50),
         };
         let first = session.post_order(request.clone()).expect("first");
+        let before_pending_retry = session.durable_checkpoint();
+        reset_request_registration_preparation_counts_v2();
         let pending_retry = session
             .post_order(request.clone())
             .expect("pending physical retry");
+        assert_eq!(
+            request_registration_preparation_counts_v2(),
+            RequestRegistrationPreparationCountsV2::default()
+        );
+        assert_eq!(session.durable_checkpoint(), before_pending_retry);
 
         assert_eq!(
             first.receipt.disposition,
@@ -18942,6 +30466,4699 @@ mod tests {
                 .expect("no duplicate action")
                 .is_none()
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_registration_prepare_does_not_clone_growing_shared_roots() {
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let scenario = scenario_for_sim_tests();
+        let mut process = execution_process_for_tests(rules, profile, scenario);
+        let mut spec = session_spec();
+        spec.caller_role = SimCallerRoleV1::Paper;
+        spec.response_outbox_capacity =
+            std::num::NonZeroUsize::new(512).expect("positive test capacity");
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        for ordinal in 1..=256_u64 {
+            session
+                .order(OrderRequestV1 {
+                    context: context(
+                        &session,
+                        &format!("request-delta-history-{ordinal}"),
+                        ordinal,
+                        2_000 + i64::try_from(ordinal).expect("history ordinal fits i64"),
+                    ),
+                    platform_order_id: format!("{ordinal:064x}"),
+                })
+                .expect("build request history");
+        }
+        let market_enrollment_count = session.session.market_enrollment_storage_strong_count();
+        let terminal_projection_count =
+            Arc::strong_count(&session.query_state.terminal_projections);
+        let request = PendingDomainRequestV1::Order(OrderRequestV1 {
+            context: context(&session, "request-delta-new", 257, 2_257),
+            platform_order_id: "d".repeat(64),
+        });
+        reset_request_registration_preparation_counts_v2();
+        let _prepared = prepare_request_registration_delta_v2(
+            &session.session,
+            &session.pending_requests,
+            &session.mutation_payloads,
+            &session.query_state,
+            &session.direct_response_outbox,
+            0,
+            session.accepting_new_ingress,
+            request,
+            vec![method_action(
+                "request-delta-new",
+                0,
+                ParsedMethodTimingV1::Ordinary,
+            )],
+        )
+        .expect("prepare request registration");
+
+        assert_eq!(
+            session.session.market_enrollment_storage_strong_count(),
+            market_enrollment_count
+        );
+        assert_eq!(
+            Arc::strong_count(&session.query_state.terminal_projections),
+            terminal_projection_count
+        );
+        assert_eq!(
+            request_registration_preparation_counts_v2(),
+            RequestRegistrationPreparationCountsV2 {
+                runtime_state_calls: 0,
+                canonical_request_sha256_calls: 1,
+                mutation_binding_calls: 1,
+                evidence_construction_calls: 1,
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paper_v2_request_tail_matches_public_registration_and_physical_retry() {
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let scenario = scenario_for_sim_tests();
+        let mut process = execution_process_for_tests(rules, profile, scenario);
+        let mut spec = session_spec();
+        spec.caller_role = SimCallerRoleV1::Paper;
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let baseline_state = session.runtime_state();
+        let baseline_checkpoint = baseline_state.checkpoint(None);
+        let request = PostOrdersRequestV1 {
+            context: context(&session, "paper-v2-register", 1, 2_500),
+            idempotency_key: "paper-v2-register".to_owned(),
+            items: vec![gtc_item("paper-v2-ordinary", 50), fok_item("paper-v2-fok")],
+        };
+        let domain_request = PendingDomainRequestV1::PostOrders(request.clone());
+        let actions = request
+            .items
+            .iter()
+            .enumerate()
+            .map(|(ordinal, item)| {
+                method_action(
+                    &item.item_id,
+                    u16::try_from(ordinal).expect("测试批量序号适合 u16"),
+                    item.order.kind.method_timing(),
+                )
+            })
+            .collect();
+        let physical_retry = request_registration_is_physical_retry(
+            &baseline_state.session,
+            &baseline_state.pending_requests,
+            &domain_request,
+        )
+        .expect("新请求身份分类");
+        assert!(!physical_retry);
+        let prepared = prepare_request_registration_transition(
+            baseline_state.clone(),
+            domain_request,
+            actions,
+            physical_retry,
+        )
+        .expect("准备请求登记候选");
+        let prepared_evidence = prepared
+            .evidence
+            .as_ref()
+            .expect("新请求必须形成 V2 逻辑证据");
+        assert_eq!(session.durable_checkpoint(), baseline_checkpoint);
+        let online_registration = session
+            .post_orders(request.clone())
+            .expect("公开入口登记同一请求");
+        assert_eq!(
+            online_registration.receipt.disposition,
+            RequestRegistrationDispositionV1::NewLogicalRequest
+        );
+        let online_checkpoint = session.durable_checkpoint();
+
+        let directory = tempfile::tempdir().expect("创建 Paper V2 请求日志临时目录");
+        let root = directory.path().join("paper-request-tail");
+        let mut store = crate::persistence::LocalTransactionLogStoreV2::create_new(
+            root.clone(),
+            crate::persistence::TransactionLogIdentityV2::new(
+                session.session_spec().run_id.clone(),
+                crate::persistence::DurabilityProfileV2::RecoverablePaper,
+            ),
+        )
+        .expect("创建 Paper V2 请求日志");
+        store
+            .publish_application_checkpoint(0, &baseline_checkpoint)
+            .expect("发布零水位基线检查点");
+        let before_commit = store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                ExecutionSessionCheckpointV1,
+            >()
+            .expect("提交前恢复基线");
+        assert!(before_commit.tail.is_empty());
+        assert_eq!(
+            before_commit
+                .checkpoint
+                .expect("存在零水位基线检查点")
+                .checkpoint,
+            baseline_checkpoint
+        );
+
+        store
+            .append_transaction(
+                prepared_evidence,
+                &DurableRecoveryOperationV2::RegisterRequest,
+            )
+            .expect("一次提交请求日志");
+        let retry_request = PendingDomainRequestV1::PostOrders(request.clone());
+        let retry_actions = request
+            .items
+            .iter()
+            .enumerate()
+            .map(|(ordinal, item)| {
+                method_action(
+                    &item.item_id,
+                    u16::try_from(ordinal).expect("测试批量序号适合 u16"),
+                    item.order.kind.method_timing(),
+                )
+            })
+            .collect();
+        let physical_retry = request_registration_is_physical_retry(
+            &prepared.candidate_state.session,
+            &prepared.candidate_state.pending_requests,
+            &retry_request,
+        )
+        .expect("已登记请求必须识别为物理重投");
+        assert!(physical_retry);
+        let before_retry_checkpoint = prepared.candidate_state.checkpoint(None);
+        reset_request_registration_preparation_counts_v2();
+        let retry_prepared = prepare_request_registration_transition(
+            prepared.candidate_state.clone(),
+            retry_request,
+            retry_actions,
+            physical_retry,
+        )
+        .expect("准备物理重投候选");
+        assert!(retry_prepared.evidence.is_none());
+        assert_eq!(
+            request_registration_preparation_counts_v2(),
+            RequestRegistrationPreparationCountsV2::default()
+        );
+        assert_eq!(
+            retry_prepared.candidate_state.checkpoint(None),
+            before_retry_checkpoint
+        );
+        if let Some(evidence) = retry_prepared.evidence.as_ref() {
+            store
+                .append_transaction(evidence, &DurableRecoveryOperationV2::RegisterRequest)
+                .expect("物理重投若错误形成证据则会追加日志");
+        }
+        let after_retry = store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                ExecutionSessionCheckpointV1,
+            >()
+            .expect("检查物理重投后的日志");
+        assert_eq!(after_retry.tail.len(), 1);
+        assert_eq!(session.durable_checkpoint(), online_checkpoint);
+        drop(store);
+
+        let store = crate::persistence::LocalTransactionLogStoreV2::open_recovery(root)
+            .expect("重开 Paper V2 请求日志");
+        let recovered = store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                ExecutionSessionCheckpointV1,
+            >()
+            .expect("恢复 Paper V2 请求日志");
+        let recovered_checkpoint = recovered.checkpoint.expect("Paper V2 恢复必须有基线检查点");
+        assert_eq!(recovered_checkpoint.through_sequence, 0);
+        let (restored_baseline, downstream) = ExecutionSessionStateV1::restore(
+            &process.inner,
+            recovered_checkpoint.checkpoint,
+            &BTreeMap::new(),
+        )
+        .expect("恢复请求日志基线状态");
+        assert_eq!(downstream, None);
+        assert_eq!(recovered.tail.len(), 1);
+        let entry = &recovered.tail[0];
+        let replayed = replay_request_registration_operation_v2(
+            restored_baseline,
+            &entry.evidence,
+            entry.recovery_operation,
+        )
+        .expect("重放请求登记尾日志");
+        assert_eq!(replayed.checkpoint(None), online_checkpoint);
+        assert!(matches!(
+            replay_request_registration_operation_v2(
+                replayed.clone(),
+                &entry.evidence,
+                entry.recovery_operation,
+            ),
+            Err(SessionCheckpointErrorV1::InvalidSessionState(message))
+                if message.contains("重复")
+        ));
+
+        session.replace_runtime_state(replayed);
+        let before_retry = session.durable_checkpoint();
+        let retry = session.post_orders(request).expect("恢复后的物理重投");
+        assert_eq!(
+            retry.receipt.disposition,
+            RequestRegistrationDispositionV1::PhysicalRetry
+        );
+        assert_eq!(session.durable_checkpoint(), before_retry);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paper_v2_request_tail_rejects_unreachable_request_and_schedule_mismatch() {
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let scenario = scenario_for_sim_tests();
+        let mut process = execution_process_for_tests(rules, profile, scenario);
+        let mut spec = session_spec();
+        spec.caller_role = SimCallerRoleV1::Paper;
+        let session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let baseline_state = session.runtime_state();
+        let baseline_checkpoint = baseline_state.checkpoint(None);
+        let request = PostOrdersRequestV1 {
+            context: context(&session, "paper-v2-boundary", 1, 2_500),
+            idempotency_key: "paper-v2-boundary".to_owned(),
+            items: vec![gtc_item("paper-v2-boundary-item", 50)],
+        };
+        let actions = vec![method_action(
+            "paper-v2-boundary-item",
+            0,
+            ParsedMethodTimingV1::Ordinary,
+        )];
+        let prepared = prepare_request_registration_transition(
+            baseline_state.clone(),
+            PendingDomainRequestV1::PostOrders(request),
+            actions,
+            false,
+        )
+        .expect("准备合法请求登记事实");
+
+        let evidence = prepared.evidence.expect("新请求必须形成 V2 逻辑证据");
+        let mut mismatched_schedule = evidence.clone();
+        let DurableTransactionFactV1::RequestRegistered { registration, .. } =
+            &mut mismatched_schedule.fact
+        else {
+            panic!("请求准备结果必须形成请求登记事实");
+        };
+        registration.actions[0].key.effective_processing_at_utc_ms += 1;
+
+        let mut invalid_request = evidence;
+        let DurableTransactionFactV1::RequestRegistered { registration, .. } =
+            &mut invalid_request.fact
+        else {
+            panic!("请求准备结果必须形成请求登记事实");
+        };
+        let PendingDomainRequestV1::PostOrders(request) = &mut registration.request else {
+            panic!("测试事实必须承载批量提交请求");
+        };
+        let SimBuyOrderKindV1::GtcLimit {
+            limit_price_pusd_per_share,
+            ..
+        } = &mut request.items[0].order.kind
+        else {
+            panic!("测试请求必须承载 GTC 订单");
+        };
+        *limit_price_pusd_per_share = Decimal::NEGATIVE_ONE;
+
+        let directory = tempfile::tempdir().expect("创建 Paper V2 边界临时目录");
+        let root = directory.path().join("paper-request-boundary");
+        let mut store = crate::persistence::LocalTransactionLogStoreV2::create_new(
+            root.clone(),
+            crate::persistence::TransactionLogIdentityV2::new(
+                session.session_spec().run_id.clone(),
+                crate::persistence::DurabilityProfileV2::RecoverablePaper,
+            ),
+        )
+        .expect("创建 Paper V2 请求边界日志");
+        store
+            .publish_application_checkpoint(0, &baseline_checkpoint)
+            .expect("发布零水位基线检查点");
+        store
+            .append_transaction(
+                &mismatched_schedule,
+                &DurableRecoveryOperationV2::RegisterRequest,
+            )
+            .expect("写入调度时点损坏事实");
+        store
+            .append_transaction(
+                &invalid_request,
+                &DurableRecoveryOperationV2::RegisterRequest,
+            )
+            .expect("写入领域正文无效事实");
+        drop(store);
+
+        let store = crate::persistence::LocalTransactionLogStoreV2::open_recovery(root)
+            .expect("重开 Paper V2 请求边界日志");
+        let recovered = store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                ExecutionSessionCheckpointV1,
+            >()
+            .expect("读取 Paper V2 请求边界日志");
+        assert_eq!(recovered.tail.len(), 2);
+        assert!(matches!(
+            replay_request_registration_operation_v2(
+                baseline_state.clone(),
+                &recovered.tail[0].evidence,
+                recovered.tail[0].recovery_operation,
+            ),
+            Err(SessionCheckpointErrorV1::InvalidSessionState(message))
+                if message.contains("与重算候选不一致")
+        ));
+        assert!(matches!(
+            replay_request_registration_operation_v2(
+                baseline_state,
+                &recovered.tail[1].evidence,
+                recovered.tail[1].recovery_operation,
+            ),
+            Err(SessionCheckpointErrorV1::InvalidSessionState(message))
+                if message.contains("订单金额、份额和价格必须为正数")
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paper_v2_ingress_closed_tail_recovers_the_closed_gate() {
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let scenario = scenario_for_sim_tests();
+        let mut process = execution_process_for_tests(rules, profile, scenario);
+        let mut spec = session_spec();
+        spec.caller_role = SimCallerRoleV1::Paper;
+        let session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let baseline_state = session.runtime_state();
+        let baseline_checkpoint = baseline_state.checkpoint(None);
+        assert!(baseline_state.accepting_new_ingress);
+        let evidence =
+            DurableLogicalTransactionEvidenceV2::new(DurableTransactionFactV1::IngressClosed {
+                session_id: session.session_spec().session_id.clone(),
+            });
+
+        let directory = tempfile::tempdir().expect("创建 Paper V2 入口关闭临时目录");
+        let root = directory.path().join("paper-ingress-closed-tail");
+        let mut store = crate::persistence::LocalTransactionLogStoreV2::create_new(
+            root.clone(),
+            crate::persistence::TransactionLogIdentityV2::new(
+                session.session_spec().run_id.clone(),
+                crate::persistence::DurabilityProfileV2::RecoverablePaper,
+            ),
+        )
+        .expect("创建 Paper V2 入口关闭日志");
+        store
+            .publish_application_checkpoint(0, &baseline_checkpoint)
+            .expect("发布入口关闭前应用检查点");
+        store
+            .append_transaction(&evidence, &DurableRecoveryOperationV2::CloseIngress)
+            .expect("一次提交入口关闭事实");
+        drop(store);
+
+        let store = crate::persistence::LocalTransactionLogStoreV2::open_recovery(root)
+            .expect("重开 Paper V2 入口关闭日志");
+        let recovered = store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                ExecutionSessionCheckpointV1,
+            >()
+            .expect("恢复 Paper V2 入口关闭日志");
+        let checkpoint = recovered.checkpoint.expect("入口关闭恢复必须有基线检查点");
+        let (restored, downstream) = ExecutionSessionStateV1::restore(
+            &process.inner,
+            checkpoint.checkpoint,
+            &BTreeMap::new(),
+        )
+        .expect("恢复入口关闭前基线");
+        assert_eq!(downstream, None);
+        assert_eq!(recovered.tail.len(), 1);
+        let entry = &recovered.tail[0];
+        let replayed =
+            replay_close_ingress_operation_v2(restored, &entry.evidence, entry.recovery_operation)
+                .expect("重放入口关闭事实");
+        assert!(!replayed.accepting_new_ingress);
+        assert!(matches!(
+            replay_close_ingress_operation_v2(
+                replayed,
+                &entry.evidence,
+                entry.recovery_operation,
+            ),
+            Err(SessionCheckpointErrorV1::InvalidSessionState(message))
+                if message.contains("重复")
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paper_v2_platform_bucket_tail_rereads_body_and_matches_online_candidate() {
+        use crate::task22_tests::{
+            initial_events, scenario as long_scenario, session_spec as long_session_spec,
+        };
+        use data_pipeline_core::encode_execution_market_event_v3;
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let scenario = long_scenario();
+        let mut process = execution_process_for_tests(rules, profile, Arc::clone(&scenario));
+        let spec = long_session_spec(&scenario, SimCallerRoleV1::Paper, "paper-v2-bucket");
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let baseline_state = session.runtime_state();
+        let baseline_checkpoint = baseline_state.checkpoint(None);
+        let encoded_events = initial_events("0.00001", "0.6", "5")
+            .iter()
+            .map(|event| encode_execution_market_event_v3(event).expect("编码初始盘口事件"))
+            .collect::<Vec<_>>();
+        let closure = MillisecondBucketClosureV1::NextEventAt(120_001);
+        let bucket =
+            ClosedMarketEventBucketV1::public(120_000, 0, 2, closure, encoded_events.clone());
+        let bucket_reference = bucket.durable_reference();
+        let prepared =
+            prepare_platform_bucket_transition_v2(baseline_state.clone(), bucket.clone())
+                .expect("准备 Paper V2 公开闭桶候选");
+        let prepared_evidence = prepared
+            .evidence
+            .as_ref()
+            .expect("新闭桶必须形成 V2 逻辑证据");
+        assert_eq!(prepared_evidence.query_projection_revision, None);
+        assert_eq!(
+            prepared_evidence.logical_platform_driven_through_utc_ms,
+            Some(120_000)
+        );
+        assert_eq!(
+            prepared_evidence.private_fact_schedule_closed_through_utc_ms,
+            None
+        );
+        assert!(prepared_evidence.account_deltas.is_empty());
+        assert!(prepared_evidence.logical_action_results.is_empty());
+        assert!(prepared_evidence.private_output_drafts.is_empty());
+        let evidence_json = serde_json::to_string(prepared_evidence).expect("编码 V2 逻辑证据");
+        for legacy_field in [
+            "transient_input_session_id",
+            "transient_input",
+            "maintenance_steady_before_resource_usage",
+            "resource_usage",
+            "maintenance_succeeded_steady_after_resource_usage",
+        ] {
+            assert!(!evidence_json.contains(legacy_field));
+        }
+        assert_eq!(session.durable_checkpoint(), baseline_checkpoint);
+        assert_eq!(
+            session.apply_closed_market_event_bucket(bucket.clone()),
+            Ok(MarketBucketApplyDispositionV1::Applied)
+        );
+        let online_checkpoint = session.durable_checkpoint();
+
+        let directory = tempfile::tempdir().expect("创建 Paper V2 闭桶临时目录");
+        let root = directory.path().join("paper-bucket-tail");
+        let mut store = crate::persistence::LocalTransactionLogStoreV2::create_new(
+            root.clone(),
+            crate::persistence::TransactionLogIdentityV2::new(
+                session.session_spec().run_id.clone(),
+                crate::persistence::DurabilityProfileV2::RecoverablePaper,
+            ),
+        )
+        .expect("创建 Paper V2 闭桶日志");
+        store
+            .publish_application_checkpoint(0, &baseline_checkpoint)
+            .expect("发布零水位基线检查点");
+        store
+            .append_transaction(
+                prepared_evidence,
+                &DurableRecoveryOperationV2::ApplyClosedMarketEventBucket,
+            )
+            .expect("一次提交闭桶日志");
+        let retry_prepared =
+            prepare_platform_bucket_transition_v2(prepared.candidate_state.clone(), bucket.clone())
+                .expect("准备同一闭桶物理重投候选");
+        assert_eq!(
+            retry_prepared.disposition,
+            MarketBucketApplyDispositionV1::PhysicalRetry
+        );
+        assert!(retry_prepared.evidence.is_none());
+        if let Some(evidence) = retry_prepared.evidence.as_ref() {
+            store
+                .append_transaction(
+                    evidence,
+                    &DurableRecoveryOperationV2::ApplyClosedMarketEventBucket,
+                )
+                .expect("物理重投若错误形成证据则会追加日志");
+        }
+        let after_retry = store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                ExecutionSessionCheckpointV1,
+            >()
+            .expect("检查闭桶物理重投后的日志");
+        assert_eq!(after_retry.tail.len(), 1);
+
+        let closure_upgrade = ClosedMarketEventBucketV1::public(
+            120_000,
+            0,
+            2,
+            MillisecondBucketClosureV1::EndOfInput,
+            encoded_events.clone(),
+        );
+        let upgrade_prepared = prepare_platform_bucket_transition_v2(
+            prepared.candidate_state.clone(),
+            closure_upgrade,
+        )
+        .expect("相同正文的输入终止升级仍是业务变化");
+        assert!(upgrade_prepared.evidence.is_some());
+        drop(store);
+
+        let store = crate::persistence::LocalTransactionLogStoreV2::open_recovery(root)
+            .expect("重开 Paper V2 闭桶日志");
+        let recovered = store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                ExecutionSessionCheckpointV1,
+            >()
+            .expect("恢复 Paper V2 闭桶日志");
+        let recovered_checkpoint = recovered.checkpoint.expect("闭桶恢复必须有基线检查点");
+        let (restored_baseline, downstream) = ExecutionSessionStateV1::restore(
+            &process.inner,
+            recovered_checkpoint.checkpoint,
+            &BTreeMap::new(),
+        )
+        .expect("恢复闭桶日志基线状态");
+        assert_eq!(downstream, None);
+        assert_eq!(recovered.tail.len(), 1);
+
+        let expected_read = PaperMarketEventRecoveryReadRequestV1 {
+            bucket_at_utc_ms: bucket_reference.bucket_at_utc_ms,
+            start_visibility_index_position: bucket_reference.start_index_position,
+            next_visibility_index_position: bucket_reference.next_index_position,
+        };
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let recorded_reads = Arc::clone(&reads);
+        let reader_events = encoded_events;
+        let expected_read_for_reader = expected_read.clone();
+        let mut reader =
+            PaperMarketEventRecoveryReaderV1::try_new(Sha256Hex("a".repeat(64)), move |request| {
+                recorded_reads
+                    .lock()
+                    .map_err(|_| {
+                        PaperMarketEventRecoveryReadErrorV1::SourceUnavailable(
+                            "测试读取记录锁不可用".to_owned(),
+                        )
+                    })?
+                    .push(request.clone());
+                if request != expected_read_for_reader {
+                    return Err(PaperMarketEventRecoveryReadErrorV1::RangeUnavailable(
+                        "测试读取坐标不符".to_owned(),
+                    ));
+                }
+                Ok(PaperMarketEventRecoveryReadV1 {
+                    encoded_events: reader_events.clone(),
+                    next_event_at_utc_ms: Some(120_001),
+                })
+            })
+            .expect("构造 Paper V2 黄金读取器");
+        let entry = &recovered.tail[0];
+        let replayed = replay_platform_bucket_operation_v2(
+            restored_baseline,
+            &entry.evidence,
+            entry.recovery_operation,
+            &mut reader,
+        )
+        .expect("重放 Paper V2 公开闭桶");
+        assert_eq!(replayed.checkpoint(None), online_checkpoint);
+        assert!(
+            replayed
+                .session
+                .public_markets()
+                .market(&crate::task22_tests::market().condition_id.0)
+                .is_some()
+        );
+        assert_eq!(
+            reads.lock().expect("读取测试请求").as_slice(),
+            &[expected_read]
+        );
+        assert!(matches!(
+            replay_platform_bucket_operation_v2(
+                replayed,
+                &entry.evidence,
+                entry.recovery_operation,
+                &mut reader,
+            ),
+            Err(SimExecutionPersistenceErrorV1::Session(message))
+                if message.contains("重复")
+        ));
+        assert_eq!(reads.lock().expect("读取测试请求").len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paper_v2_execution_tail_replays_the_public_transaction_exactly() {
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            scenario as long_scenario, session_spec as long_session_spec,
+        };
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载 Paper V2 时延配置");
+        let scenario = long_scenario();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let spec = long_session_spec(&scenario, SimCallerRoleV1::Paper, "paper-v2-execution");
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
+        let registration = session
+            .post_order(PostOrderRequestV1 {
+                context: context_for_arrival(
+                    &session,
+                    &profile,
+                    "paper-v2-execution-request",
+                    1,
+                    150_000,
+                ),
+                idempotency_key: "paper-v2-execution-idempotency".to_owned(),
+                item: PostOrderItemV1 {
+                    item_id: "paper-v2-execution-item".to_owned(),
+                    order: SimBuyOrderV1 {
+                        condition_id: long_market().condition_id,
+                        token_id: long_asset("1", 0, "Up").token_id,
+                        kind: SimBuyOrderKindV1::GtcLimit {
+                            limit_price_pusd_per_share: Decimal::new(50, 2),
+                            size_shares: Decimal::new(5, 0),
+                            post_only: false,
+                        },
+                    },
+                },
+            })
+            .expect("登记待执行 Paper GTC 请求");
+        let effective_at = registration.item.effective_processing_at_utc_ms;
+        session
+            .apply_closed_market_event_bucket(ClosedMarketEventBucketV1::public(
+                effective_at,
+                next_visibility_position,
+                next_visibility_position,
+                MillisecondBucketClosureV1::NextEventAt(effective_at + 1),
+                Vec::new(),
+            ))
+            .expect("闭合待执行请求的平台可见前缀");
+        let baseline_state = session.runtime_state();
+        let baseline_checkpoint = baseline_state.checkpoint(None);
+        let prepared = prepare_execution_transition_v2(baseline_state.clone(), effective_at)
+            .expect("准备 Paper V2 执行推进候选");
+        assert_eq!(
+            prepared.disposition,
+            SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            }
+        );
+        let execution_evidence = prepared
+            .evidence
+            .as_ref()
+            .expect("已处理动作必须形成 V2 逻辑证据");
+        assert_eq!(execution_evidence.logical_action_results.len(), 1);
+        assert_eq!(
+            execution_evidence.private_output_drafts.len(),
+            2,
+            "prepared drafts: {:#?}",
+            execution_evidence.private_output_drafts,
+        );
+        assert_eq!(execution_evidence.account_deltas.len(), 1);
+        assert!(
+            execution_evidence
+                .private_output_drafts
+                .iter()
+                .any(|draft| { matches!(draft, DurablePrivateOutputDraftV1::Direct { .. }) })
+        );
+        assert!(
+            execution_evidence
+                .private_output_drafts
+                .iter()
+                .any(|draft| {
+                    matches!(
+                        draft,
+                        DurablePrivateOutputDraftV1::Lifecycle {
+                            draft: LifecycleFeedbackDraftV1::Order(_),
+                        }
+                    )
+                })
+        );
+
+        assert_eq!(
+            session.drive_next_execution_action_through(effective_at),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        let online_checkpoint = session.durable_checkpoint();
+        assert_eq!(prepared.candidate_state.checkpoint(None), online_checkpoint);
+
+        let directory = tempfile::tempdir().expect("创建 Paper V2 执行日志临时目录");
+        let root = directory.path().join("paper-execution-tail");
+        let mut store = crate::persistence::LocalTransactionLogStoreV2::create_new(
+            root.clone(),
+            crate::persistence::TransactionLogIdentityV2::new(
+                session.session_spec().run_id.clone(),
+                crate::persistence::DurabilityProfileV2::RecoverablePaper,
+            ),
+        )
+        .expect("创建 Paper V2 执行日志");
+        store
+            .publish_application_checkpoint(0, &baseline_checkpoint)
+            .expect("发布执行前应用检查点");
+        store
+            .append_transaction(
+                execution_evidence,
+                &DurableRecoveryOperationV2::DriveExecutionThrough {
+                    effective_processing_at_utc_ms: effective_at,
+                },
+            )
+            .expect("一次提交 Paper V2 执行事务");
+        let no_change = prepare_execution_transition_v2(session.runtime_state(), effective_at)
+            .expect("准备相同水位的无变化执行候选");
+        assert_eq!(
+            no_change.disposition,
+            SubmissionDriveDispositionV1::NoAction
+        );
+        assert!(no_change.evidence.is_none());
+        if let Some(evidence) = no_change.evidence.as_ref() {
+            store
+                .append_transaction(
+                    evidence,
+                    &DurableRecoveryOperationV2::DriveExecutionThrough {
+                        effective_processing_at_utc_ms: effective_at,
+                    },
+                )
+                .expect("无变化执行若错误形成证据则会追加日志");
+        }
+        let after_no_change = store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                ExecutionSessionCheckpointV1,
+            >()
+            .expect("检查无变化执行后的日志");
+        assert_eq!(after_no_change.tail.len(), 1);
+        let before_no_change = session.durable_checkpoint();
+        assert_eq!(
+            session.drive_next_execution_action_through(effective_at),
+            Ok(SubmissionDriveDispositionV1::NoAction)
+        );
+        assert_eq!(session.durable_checkpoint(), before_no_change);
+        drop(store);
+
+        let store = crate::persistence::LocalTransactionLogStoreV2::open_recovery(root)
+            .expect("重开 Paper V2 执行日志");
+        let recovered = store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                ExecutionSessionCheckpointV1,
+            >()
+            .expect("恢复 Paper V2 执行日志");
+        let recovered_checkpoint = recovered.checkpoint.expect("执行恢复必须有基线检查点");
+        let (restored_baseline, downstream) = ExecutionSessionStateV1::restore(
+            &process.inner,
+            recovered_checkpoint.checkpoint,
+            &BTreeMap::new(),
+        )
+        .expect("恢复 Paper V2 执行基线");
+        assert_eq!(downstream, None);
+        assert_eq!(recovered.tail.len(), 1);
+        let entry = &recovered.tail[0];
+        let replayed = replay_execution_operation_v2(
+            restored_baseline.clone(),
+            &entry.evidence,
+            entry.recovery_operation,
+        )
+        .expect("重放 Paper V2 执行尾日志");
+        assert_eq!(replayed.checkpoint(None), online_checkpoint);
+        let mismatched_time = replay_execution_operation_v2(
+            restored_baseline,
+            &entry.evidence,
+            DurableRecoveryOperationV2::DriveExecutionThrough {
+                effective_processing_at_utc_ms: effective_at - 1,
+            },
+        );
+        match mismatched_time {
+            Err(SessionCheckpointErrorV1::InvalidSessionState(message)) => {
+                assert!(
+                    message.contains("无法重放") && message.contains("ActionWatermarkClosed"),
+                    "wrong-time error: {message}",
+                );
+            }
+            Ok(_) => panic!("错误执行时点不得重放成功"),
+            Err(error) => panic!("错误执行时点返回意外错误：{error}"),
+        }
+        let mut mismatched_evidence = entry.evidence.clone();
+        mismatched_evidence.logical_action_results[0].query_projection_revision = Some(u64::MAX);
+        assert!(matches!(
+            replay_execution_operation_v2(
+                baseline_state,
+                &mismatched_evidence,
+                entry.recovery_operation,
+            ),
+            Err(SessionCheckpointErrorV1::InvalidSessionState(message))
+                if message.contains("与重算候选不一致")
+        ));
+
+        let first_private_received_at = session
+            .session
+            .recovered_pending_private_facts()
+            .first()
+            .map(|(_, received_at, _)| *received_at)
+            .expect("执行结果必须形成待交付私有事实");
+        session
+            .apply_closed_market_event_bucket(ClosedMarketEventBucketV1::public(
+                first_private_received_at,
+                next_visibility_position,
+                next_visibility_position,
+                MillisecondBucketClosureV1::NextEventAt(first_private_received_at + 1),
+                Vec::new(),
+            ))
+            .expect("闭合首个私有事实之前的平台可见前缀");
+        let private_baseline = session.runtime_state();
+        let private_baseline_checkpoint = private_baseline.checkpoint(None);
+        let source_private_fact = private_baseline
+            .session
+            .recovered_pending_private_facts()
+            .first()
+            .map(|(evidence, _, _)| evidence.clone())
+            .expect("平台定时工作后仍必须保留待交付私有事实");
+        let private_received_at = private_baseline
+            .session
+            .recovered_pending_private_facts()
+            .first()
+            .map(|(_, received_at, _)| *received_at)
+            .expect("读取首个私有事实时点");
+        let prepared_private =
+            prepare_private_fact_transition_v2(private_baseline.clone(), private_received_at)
+                .expect("准备 Paper V2 私有事实候选");
+        let prepared_delivery = match &prepared_private.outcome {
+            PreparedPrivateFactOutcomeV2::Output(delivery) => delivery,
+            outcome => panic!("首个私有事实必须形成输出，实际为 {outcome:?}"),
+        };
+        let private_evidence = prepared_private
+            .evidence
+            .as_ref()
+            .expect("私有输出必须形成一条 V2 逻辑证据");
+        assert!(matches!(
+            private_evidence.fact,
+            DurableTransactionFactV1::PrivateOutputCommitted { .. }
+        ));
+        assert_eq!(
+            prepared_private
+                .candidate_state
+                .session
+                .private_feedback_sequence(),
+            private_baseline.session.private_feedback_sequence() + 1
+        );
+        assert_eq!(
+            prepared_private
+                .candidate_state
+                .confirmed_private_deliveries
+                .len(),
+            private_baseline.confirmed_private_deliveries.len() + 1
+        );
+        match source_private_fact {
+            crate::session::PrivateVisibilityEvidenceV1::DirectResponse { global_request_id } => {
+                assert!(
+                    !prepared_private
+                        .candidate_state
+                        .direct_response_outbox
+                        .entries
+                        .contains_key(&global_request_id)
+                )
+            }
+            crate::session::PrivateVisibilityEvidenceV1::LifecycleFeedback { feedback_id } => {
+                assert!(
+                    !prepared_private
+                        .candidate_state
+                        .lifecycle_outbox
+                        .entries
+                        .contains_key(&feedback_id)
+                );
+            }
+        }
+        assert_eq!(
+            session.drive_next_private_delivery_through(private_received_at),
+            Ok(SubmissionDeliveryDispositionV1::Delivered)
+        );
+        let online_private_checkpoint = session.durable_checkpoint();
+        assert_eq!(
+            prepared_private.candidate_state.checkpoint(None),
+            online_private_checkpoint
+        );
+
+        let private_root = directory.path().join("paper-private-tail");
+        let mut private_store = crate::persistence::LocalTransactionLogStoreV2::create_new(
+            private_root.clone(),
+            crate::persistence::TransactionLogIdentityV2::new(
+                session.session_spec().run_id.clone(),
+                crate::persistence::DurabilityProfileV2::RecoverablePaper,
+            ),
+        )
+        .expect("创建 Paper V2 私有输出日志");
+        private_store
+            .publish_application_checkpoint(0, &private_baseline_checkpoint)
+            .expect("发布私有输出前应用检查点");
+        private_store
+            .append_transaction(
+                private_evidence,
+                &DurableRecoveryOperationV2::AdvancePrivateFactThrough {
+                    received_at_utc_ms: private_received_at,
+                },
+            )
+            .expect("私有输出在桥调用前只提交一条 Paper V2 事务");
+        drop(private_store);
+
+        let private_store =
+            crate::persistence::LocalTransactionLogStoreV2::open_recovery(private_root)
+                .expect("重开 Paper V2 私有输出日志");
+        let recovered_private = private_store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                ExecutionSessionCheckpointV1,
+            >()
+            .expect("恢复 Paper V2 私有输出日志");
+        assert_eq!(recovered_private.tail.len(), 1);
+        let private_entry = &recovered_private.tail[0];
+        assert!(matches!(
+            private_entry.evidence.fact,
+            DurableTransactionFactV1::PrivateOutputCommitted { .. }
+        ));
+        assert!(!recovered_private.tail.iter().any(|entry| matches!(
+            entry.evidence.fact,
+            DurableTransactionFactV1::PrivateOutputConfirmed { .. }
+        )));
+        let recovered_private_checkpoint = recovered_private
+            .checkpoint
+            .expect("私有输出恢复必须有基线检查点");
+        let (restored_private_baseline, downstream) = ExecutionSessionStateV1::restore(
+            &process.inner,
+            recovered_private_checkpoint.checkpoint,
+            &BTreeMap::new(),
+        )
+        .expect("恢复 Paper V2 私有输出基线");
+        assert_eq!(downstream, None);
+        let replayed_private = replay_private_fact_operation_v2(
+            restored_private_baseline.clone(),
+            &private_entry.evidence,
+            private_entry.recovery_operation,
+        )
+        .expect("重放 Paper V2 私有输出尾日志");
+        assert_eq!(replayed_private.checkpoint(None), online_private_checkpoint);
+        assert_eq!(
+            replayed_private
+                .confirmed_private_deliveries
+                .get(&prepared_delivery.confirmation().private_feedback_sequence),
+            Some(prepared_delivery)
+        );
+        assert!(matches!(
+            replay_private_fact_operation_v2(
+                restored_private_baseline,
+                &private_entry.evidence,
+                DurableRecoveryOperationV2::AdvancePrivateFactThrough {
+                    received_at_utc_ms: private_received_at - 1,
+                },
+            ),
+            Err(SessionCheckpointErrorV1::InvalidSessionState(_))
+        ));
+
+        let second_private_received_at = session
+            .session
+            .recovered_pending_private_facts()
+            .first()
+            .map(|(_, received_at, _)| *received_at)
+            .expect("代表路径必须形成第二个连续私有事实");
+        session
+            .apply_closed_market_event_bucket(ClosedMarketEventBucketV1::public(
+                second_private_received_at,
+                next_visibility_position,
+                next_visibility_position,
+                MillisecondBucketClosureV1::NextEventAt(second_private_received_at + 1),
+                Vec::new(),
+            ))
+            .expect("闭合第二个私有事实之前的平台可见前缀");
+        let downstream_baseline = session.runtime_state();
+        let downstream_baseline_checkpoint = downstream_baseline.checkpoint(None);
+        let second_private_received_at = downstream_baseline
+            .session
+            .recovered_pending_private_facts()
+            .first()
+            .map(|(_, received_at, _)| *received_at)
+            .expect("平台定时工作后仍必须保留第二个私有事实");
+        let prepared_second_private = prepare_private_fact_transition_v2(
+            downstream_baseline.clone(),
+            second_private_received_at,
+        )
+        .expect("准备第二个 Paper V2 私有事实候选");
+        let second_delivery = match &prepared_second_private.outcome {
+            PreparedPrivateFactOutcomeV2::Output(delivery) => delivery,
+            outcome => panic!("第二个私有事实必须形成输出，实际为 {outcome:?}"),
+        };
+        assert_eq!(second_delivery.confirmation().private_feedback_sequence, 2);
+        let second_private_evidence = prepared_second_private
+            .evidence
+            .as_ref()
+            .expect("第二个私有输出必须形成一条 V2 逻辑证据");
+        assert_eq!(
+            session.drive_next_private_delivery_through(second_private_received_at),
+            Ok(SubmissionDeliveryDispositionV1::Delivered)
+        );
+        let online_second_private_checkpoint = session.durable_checkpoint();
+        assert_eq!(
+            prepared_second_private.candidate_state.checkpoint(None),
+            online_second_private_checkpoint
+        );
+        let downstream_proof = DownstreamDurabilityProofV1 {
+            account_instance_key: prepared_second_private
+                .candidate_state
+                .session
+                .execution_state()
+                .account_instance_key()
+                .clone(),
+            durable_through: second_delivery.confirmation(),
+        };
+        let prepared_downstream = prepare_downstream_durability_transition_v2(
+            prepared_second_private.candidate_state.clone(),
+            None,
+            downstream_proof.clone(),
+        )
+        .expect("准备 Paper V2 批量下游耐久候选")
+        .expect("0 到 2 必须形成一次水位推进");
+        assert_eq!(
+            prepared_downstream
+                .candidate_state
+                .compacted_confirmed_private_deliveries
+                .len(),
+            2
+        );
+        assert!(
+            prepared_downstream
+                .candidate_state
+                .confirmed_private_deliveries
+                .is_empty()
+        );
+
+        let downstream_root = directory.path().join("paper-downstream-tail");
+        let mut downstream_store = crate::persistence::LocalTransactionLogStoreV2::create_new(
+            downstream_root.clone(),
+            crate::persistence::TransactionLogIdentityV2::new(
+                session.session_spec().run_id.clone(),
+                crate::persistence::DurabilityProfileV2::RecoverablePaper,
+            ),
+        )
+        .expect("创建 Paper V2 下游水位日志");
+        downstream_store
+            .publish_application_checkpoint(0, &downstream_baseline_checkpoint)
+            .expect("发布第二个私有输出前应用检查点");
+        downstream_store
+            .append_transaction(
+                second_private_evidence,
+                &DurableRecoveryOperationV2::AdvancePrivateFactThrough {
+                    received_at_utc_ms: second_private_received_at,
+                },
+            )
+            .expect("第二个私有输出只提交一条 Paper V2 事务");
+        downstream_store
+            .append_transaction(
+                &prepared_downstream.evidence,
+                &DurableRecoveryOperationV2::AdvanceDownstreamDurability,
+            )
+            .expect("两个连续输出只提交一条 Paper V2 下游水位事务");
+        drop(downstream_store);
+
+        let downstream_store =
+            crate::persistence::LocalTransactionLogStoreV2::open_recovery(downstream_root)
+                .expect("重开 Paper V2 下游水位日志");
+        let recovered_downstream = downstream_store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                ExecutionSessionCheckpointV1,
+            >()
+            .expect("恢复 Paper V2 下游水位日志");
+        assert_eq!(recovered_downstream.tail.len(), 2);
+        assert_eq!(
+            recovered_downstream
+                .tail
+                .iter()
+                .filter(|entry| matches!(
+                    entry.evidence.fact,
+                    DurableTransactionFactV1::DownstreamDurabilityAdvanced { .. }
+                ))
+                .count(),
+            1
+        );
+        let recovered_downstream_checkpoint = recovered_downstream
+            .checkpoint
+            .expect("下游水位恢复必须有基线检查点");
+        let (restored_downstream_baseline, downstream) = ExecutionSessionStateV1::restore(
+            &process.inner,
+            recovered_downstream_checkpoint.checkpoint,
+            &BTreeMap::new(),
+        )
+        .expect("恢复 Paper V2 下游水位基线");
+        assert_eq!(downstream, None);
+        let replayed_second_private = replay_private_fact_operation_v2(
+            restored_downstream_baseline,
+            &recovered_downstream.tail[0].evidence,
+            recovered_downstream.tail[0].recovery_operation,
+        )
+        .expect("重放第二个 Paper V2 私有输出尾日志");
+        assert_eq!(
+            replayed_second_private.checkpoint(None),
+            online_second_private_checkpoint
+        );
+        let (replayed_downstream, replayed_confirmation) =
+            replay_downstream_durability_operation_v2(
+                replayed_second_private,
+                None,
+                &recovered_downstream.tail[1].evidence,
+                recovered_downstream.tail[1].recovery_operation,
+            )
+            .expect("一次重放两个连续私有输出的下游耐久水位");
+        assert_eq!(
+            replayed_confirmation,
+            prepared_downstream.downstream_durable_confirmation
+        );
+        assert_eq!(
+            replayed_downstream.checkpoint(Some(replayed_confirmation.clone())),
+            prepared_downstream
+                .candidate_state
+                .checkpoint(Some(replayed_confirmation.clone()))
+        );
+        validate_confirmed_private_deliveries(&replayed_downstream, Some(&replayed_confirmation))
+            .expect("批量推进后的完整与裁剪正文必须按水位分区");
+
+        let session_id = session.session_spec().session_id.clone();
+        let opening_anchor = process
+            .inner
+            .opening_anchor_for_session(&session_id)
+            .expect("V2 投影测试必须保留开户锚点")
+            .clone();
+        let initialization = session
+            .session
+            .initialization_snapshot()
+            .expect("V2 投影测试必须保留活动初始化终态");
+        let mut projection = DurableEvidenceProjectionV1 {
+            session_creations: BTreeMap::from([(
+                session_id.clone(),
+                (
+                    session.session_spec().clone(),
+                    opening_anchor,
+                    initialization,
+                ),
+            )]),
+            ..DurableEvidenceProjectionV1::default()
+        };
+        for evidence in [
+            execution_evidence,
+            private_evidence,
+            second_private_evidence,
+            &prepared_downstream.evidence,
+        ] {
+            projection
+                .apply_logical_v2(evidence)
+                .expect("V2 单次本地提交输出与批量下游水位必须形成连续投影");
+        }
+        validate_durable_output_projection(
+            &session_id,
+            &prepared_downstream.candidate_state,
+            Some(&replayed_confirmation),
+            projection.prepared_outputs.get(&session_id),
+            projection.confirmed_outputs.get(&session_id),
+            projection.private_output_drafts.get(&session_id),
+            projection.downstream_durable.get(&session_id),
+        )
+        .expect("V2 单次输出事实与批量下游水位必须闭合检查点投影");
+
+        let mut index = ArtifactEvidenceIndexV1::default();
+        for (sequence, evidence) in [
+            execution_evidence,
+            private_evidence,
+            second_private_evidence,
+            &prepared_downstream.evidence,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            index
+                .apply_logical_v2(
+                    u64::try_from(sequence + 1).expect("测试证据序号适合 u64"),
+                    Sha256Hex(format!("{:064x}", sequence + 1)),
+                    evidence,
+                )
+                .expect("V2 产物索引必须接受单次输出事实与批量下游水位");
+        }
+        let indexed_prepared = index
+            .prepared_outputs
+            .get(&session_id)
+            .expect("V2 产物索引必须保留两项完整输出");
+        let indexed_confirmed = index
+            .confirmed_outputs
+            .get(&session_id)
+            .expect("V2 本地提交事实必须同时形成确认索引");
+        let indexed_downstream = index
+            .downstream_durable
+            .get(&session_id)
+            .expect("V2 批量下游事实必须覆盖完整前缀");
+        assert_eq!(indexed_prepared.len(), 2);
+        assert_eq!(indexed_confirmed.len(), 2);
+        assert_eq!(indexed_downstream.len(), 2);
+        assert_eq!(indexed_prepared[&1].1, indexed_confirmed[&1].1);
+        assert_eq!(indexed_prepared[&2].1, indexed_confirmed[&2].1);
+        assert_eq!(indexed_downstream[&1].1, indexed_downstream[&2].1);
+
+        let mut missing_middle = prepared_second_private.candidate_state.clone();
+        missing_middle.confirmed_private_deliveries.remove(&1);
+        assert!(matches!(
+            prepare_downstream_durability_transition_v2(
+                missing_middle,
+                None,
+                downstream_proof.clone(),
+            ),
+            Err(SessionError::ResponseDeliveryIdentityConflict)
+        ));
+        let mut wrong_target = downstream_proof.clone();
+        wrong_target
+            .durable_through
+            .delivery_id
+            .push_str("-tampered");
+        assert!(matches!(
+            prepare_downstream_durability_transition_v2(
+                prepared_second_private.candidate_state,
+                None,
+                wrong_target,
+            ),
+            Err(SimExecutionContractErrorV1::ResponseDeliveryIdentityConflict)
+        ));
+
+        let coordinator_checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
+            &process,
+            &session,
+            rules.as_ref(),
+        );
+        let coordinator_root = directory.path().join("paper-downstream-coordinator");
+        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
+            coordinator_root.clone(),
+            &session,
+            &coordinator_checkpoint,
+        )
+        .expect("为两项真实输出创建 RecoverablePaper V2 协调器");
+        let before_coordinator_state = session.durable_checkpoint();
+        let before_coordinator_cursor = coordinator.cursor_for_tests();
+        let before_bridge_watermark = session.bridge_replayed_through_private_feedback_sequence;
+        reset_request_registration_preparation_counts_v2();
+        coordinator
+            .store
+            .install_transaction_log_insert_failure_for_tests()
+            .expect("安装下游耐久事务记录失败触发器");
+
+        assert!(matches!(
+            coordinator.advance_downstream_durability(&mut session, downstream_proof.clone()),
+            Err(SessionError::Durability(message)) if message.contains("SQLite")
+        ));
+        assert_eq!(session.durable_checkpoint(), before_coordinator_state);
+        assert_eq!(
+            session.bridge_replayed_through_private_feedback_sequence,
+            before_bridge_watermark
+        );
+        assert_eq!(coordinator.cursor_for_tests(), before_coordinator_cursor);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(coordinator.encoded_transaction_count_for_tests, 1);
+        assert_eq!(coordinator.append_attempt_count_for_tests, 1);
+        assert_eq!(coordinator.append_success_count_for_tests, 0);
+        assert!(coordinator
+            .store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("读取失败后的下游耐久日志")
+            .tail
+            .is_empty());
+
+        coordinator
+            .store
+            .remove_transaction_log_insert_failure_for_tests()
+            .expect("移除下游耐久事务记录失败触发器");
+        coordinator
+            .advance_downstream_durability(&mut session, downstream_proof.clone())
+            .expect("解除失败后一次推进 0 到 2");
+        let after_coordinator_state = session.durable_checkpoint();
+        assert_eq!(
+            after_coordinator_state,
+            prepared_downstream
+                .candidate_state
+                .checkpoint(Some(downstream_proof.durable_through.clone()))
+        );
+        assert_eq!(
+            session.bridge_replayed_through_private_feedback_sequence,
+            downstream_proof.durable_through.private_feedback_sequence
+        );
+        assert_eq!(session.compacted_confirmed_private_deliveries.len(), 2);
+        assert!(session.confirmed_private_deliveries.is_empty());
+        assert_eq!(
+            session.downstream_durable_confirmation.as_ref(),
+            Some(&downstream_proof.durable_through)
+        );
+        assert_eq!(coordinator.last_sequence, 1);
+        assert_eq!(coordinator.encoded_transaction_count_for_tests, 2);
+        assert_eq!(coordinator.append_attempt_count_for_tests, 2);
+        assert_eq!(coordinator.append_success_count_for_tests, 1);
+        assert_eq!(
+            coordinator
+                .store
+                .recover::<
+                    DurableLogicalTransactionEvidenceV2,
+                    DurableRecoveryOperationV2,
+                    RecoverablePaperApplicationCheckpointV2,
+                >()
+                .expect("读取成功后的下游耐久日志")
+                .tail
+                .len(),
+            1
+        );
+
+        let before_retry_state = session.durable_checkpoint();
+        let before_retry_cursor = coordinator.cursor_for_tests();
+        let before_retry_bridge = session.bridge_replayed_through_private_feedback_sequence;
+        let before_retry_counts = (
+            coordinator.encoded_transaction_count_for_tests,
+            coordinator.append_attempt_count_for_tests,
+            coordinator.append_success_count_for_tests,
+        );
+        coordinator
+            .advance_downstream_durability(&mut session, downstream_proof.clone())
+            .expect("相同下游耐久证明必须是零写重试");
+        assert_eq!(session.durable_checkpoint(), before_retry_state);
+        assert_eq!(
+            session.bridge_replayed_through_private_feedback_sequence,
+            before_retry_bridge
+        );
+        assert_eq!(coordinator.cursor_for_tests(), before_retry_cursor);
+        assert_eq!(
+            (
+                coordinator.encoded_transaction_count_for_tests,
+                coordinator.append_attempt_count_for_tests,
+                coordinator.append_success_count_for_tests,
+            ),
+            before_retry_counts
+        );
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paper_v2_scheduled_action_due_prefix_preserves_same_cutoff_gtd_without_materializing()
+    {
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            scenario as long_scenario, session_spec as long_session_spec,
+        };
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载 Paper V2 时延配置");
+        let scenario = long_scenario();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let spec = long_session_spec(
+            &scenario,
+            SimCallerRoleV1::Paper,
+            "paper-v2-scheduled-action-due-prefix",
+        );
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
+
+        let gtd = session
+            .post_order(PostOrderRequestV1 {
+                context: context_for_arrival(
+                    &session,
+                    &profile,
+                    "paper-v2-scheduled-action-due-prefix-gtd",
+                    1,
+                    150_000,
+                ),
+                idempotency_key: "paper-v2-scheduled-action-due-prefix-gtd-key".to_owned(),
+                item: PostOrderItemV1 {
+                    item_id: "paper-v2-scheduled-action-due-prefix-gtd-item".to_owned(),
+                    order: SimBuyOrderV1 {
+                        condition_id: long_market().condition_id.clone(),
+                        token_id: long_asset("1", 0, "Up").token_id,
+                        kind: SimBuyOrderKindV1::GtdLimit {
+                            limit_price_pusd_per_share: Decimal::new(1, 5),
+                            size_shares: Decimal::new(5, 0),
+                            post_only: true,
+                            expires_at_utc_ms: 391_999,
+                        },
+                    },
+                },
+            })
+            .expect("登记已有 GTD");
+        let gtd_acceptance_at_utc_ms = gtd.item.effective_processing_at_utc_ms;
+        session
+            .session
+            .advance_public_visibility_through(gtd_acceptance_at_utc_ms, next_visibility_position)
+            .expect("闭合已有 GTD 接纳时点的公开前缀");
+        assert_eq!(
+            session.drive_next_execution_action_through(gtd_acceptance_at_utc_ms),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        let collision_at_utc_ms = session
+            .next_order_deadline_at_utc_ms()
+            .expect("已有 GTD 必须形成到期时点");
+
+        let colliding_request_id = "paper-v2-scheduled-action-due-prefix-order";
+        let colliding_item_id = "paper-v2-scheduled-action-due-prefix-order-item";
+        let colliding = session
+            .post_order(PostOrderRequestV1 {
+                context: context_for_arrival(
+                    &session,
+                    &profile,
+                    colliding_request_id,
+                    2,
+                    collision_at_utc_ms,
+                ),
+                idempotency_key: "paper-v2-scheduled-action-due-prefix-order-key".to_owned(),
+                item: PostOrderItemV1 {
+                    item_id: colliding_item_id.to_owned(),
+                    order: SimBuyOrderV1 {
+                        condition_id: long_market().condition_id,
+                        token_id: long_asset("1", 0, "Up").token_id,
+                        kind: SimBuyOrderKindV1::GtcLimit {
+                            limit_price_pusd_per_share: Decimal::new(1, 5),
+                            size_shares: Decimal::new(5, 0),
+                            post_only: true,
+                        },
+                    },
+                },
+            })
+            .expect("登记与 GTD 同刻的 Order 动作");
+        assert_eq!(
+            colliding.item.effective_processing_at_utc_ms,
+            collision_at_utc_ms
+        );
+        session
+            .session
+            .advance_public_visibility_through(collision_at_utc_ms, next_visibility_position)
+            .expect("闭合同刻 GTD 与 Order 动作的公开前缀");
+
+        let before_session = session.session.checkpoint();
+        let before_query = session.query_state.clone();
+        let before_lifecycle = session.lifecycle_outbox.clone();
+        reset_execution_state_clone_count_for_tests();
+        let prefix =
+            match prepare_scheduled_execution_drive_v2(&mut session, collision_at_utc_ms, 0)
+                .expect("准备同刻 GTD 与 Order 动作前缀")
+            {
+                PreparedScheduledExecutionDriveV2::ActionDue(prefix) => prefix,
+                PreparedScheduledExecutionDriveV2::NoStateChange => {
+                    panic!("同刻 Order 动作不得返回 NoStateChange")
+                }
+                PreparedScheduledExecutionDriveV2::Committable(_) => {
+                    panic!("同刻 Order 动作不得提前物化 scheduled-only 事务")
+                }
+            };
+        assert_eq!(
+            prefix.current_action(),
+            Some(QueuedLogicalActionV1 {
+                action_identity: format!("post_order:{colliding_request_id}:0"),
+                global_request_id: colliding_request_id.to_owned(),
+                key: crate::session::LogicalActionKeyV1 {
+                    effective_processing_at_utc_ms: collision_at_utc_ms,
+                    caller_sequence: 2,
+                    batch_item_ordinal: 0,
+                },
+            })
+        );
+        let gtd_effects = prefix
+            .execution_candidate()
+            .gtd_expiration_effects()
+            .iter()
+            .collect::<Vec<_>>();
+        assert_eq!(gtd_effects.len(), 1);
+        assert_eq!(
+            gtd_effects[0]
+                .account_delta
+                .as_ref()
+                .expect("GTD 到期必须释放占用")
+                .platform_effective_at_utc_ms,
+            collision_at_utc_ms
+        );
+        assert_eq!(prefix.lifecycle_feedbacks.len(), 1);
+        assert_eq!(prefix.lifecycle_feedbacks[0].0, (collision_at_utc_ms, 0, 0));
+        assert!(matches!(
+            &prefix.lifecycle_feedbacks[0].1,
+            ScheduledLifecycleFeedbackV1::Order(OrderLifecycleFeedbackSeedV1 {
+                event_kind: OrderLifecycleEventKindV1::GtdExpired,
+                ..
+            })
+        ));
+        drop(prefix);
+
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(session.session.checkpoint(), before_session);
+        assert_eq!(session.query_state, before_query);
+        assert_eq!(session.lifecycle_outbox, before_lifecycle);
+        assert_eq!(
+            session.next_order_deadline_at_utc_ms(),
+            Some(collision_at_utc_ms)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paper_v2_order_action_reads_same_cutoff_gtd_after_image_atomically() {
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            scenario as long_scenario, session_spec as long_session_spec,
+        };
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载 Paper V2 时延配置");
+        let scenario = long_scenario();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let spec = long_session_spec(
+            &scenario,
+            SimCallerRoleV1::Paper,
+            "paper-v2-order-same-cutoff-gtd",
+        );
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
+
+        let gtd_request_id = "paper-v2-order-same-cutoff-gtd-request";
+        let gtd = session
+            .post_order(PostOrderRequestV1 {
+                context: context_for_arrival(&session, &profile, gtd_request_id, 1, 150_000),
+                idempotency_key: "paper-v2-order-same-cutoff-gtd-key".to_owned(),
+                item: PostOrderItemV1 {
+                    item_id: "paper-v2-order-same-cutoff-gtd-item".to_owned(),
+                    order: SimBuyOrderV1 {
+                        condition_id: long_market().condition_id,
+                        token_id: long_asset("1", 0, "Up").token_id,
+                        kind: SimBuyOrderKindV1::GtdLimit {
+                            limit_price_pusd_per_share: Decimal::new(1, 5),
+                            size_shares: Decimal::new(5, 0),
+                            post_only: true,
+                            expires_at_utc_ms: 391_999,
+                        },
+                    },
+                },
+            })
+            .expect("登记既有 GTD");
+        let gtd_acceptance_at_utc_ms = gtd.item.effective_processing_at_utc_ms;
+        session
+            .session
+            .advance_public_visibility_through(gtd_acceptance_at_utc_ms, next_visibility_position)
+            .expect("闭合既有 GTD 接纳时点的公开前缀");
+        assert_eq!(
+            session.drive_next_execution_action_through(gtd_acceptance_at_utc_ms),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        let gtd_platform_order_id = session
+            .session
+            .execution_state()
+            .orders()
+            .find(|order| order.global_request_id == gtd_request_id)
+            .expect("既有 GTD 必须形成热订单")
+            .platform_order_id
+            .clone();
+        let collision_at_utc_ms = session
+            .next_order_deadline_at_utc_ms()
+            .expect("既有 GTD 必须形成到期时点");
+
+        let query_request_id = "paper-v2-order-same-cutoff-query";
+        let query = session
+            .order(OrderRequestV1 {
+                context: context_for_arrival(
+                    &session,
+                    &profile,
+                    query_request_id,
+                    2,
+                    collision_at_utc_ms,
+                ),
+                platform_order_id: gtd_platform_order_id.clone(),
+            })
+            .expect("登记与 GTD 同刻的真实 Order 点查询");
+        assert_eq!(
+            query.receipt.transit.platform_arrived_at_utc_ms,
+            collision_at_utc_ms
+        );
+        session
+            .session
+            .advance_public_visibility_through(collision_at_utc_ms, next_visibility_position)
+            .expect("闭合同刻 GTD 与 Order 查询的公开前缀");
+
+        let before_session = session.session.checkpoint();
+        let before_pending_requests = session.pending_requests.clone();
+        let before_query = session.query_state.clone();
+        let before_direct = session.direct_response_outbox.clone();
+        let before_lifecycle = session.lifecycle_outbox.clone();
+        let before_revision = session.query_projection_revision();
+        let before_query_shape = (
+            session.query_state.next_root_sequence,
+            session.query_state.earliest_retained_root_sequence,
+            session.query_state.roots.clone(),
+            session.query_state.issued_cursors.clone(),
+            session.query_state.continuation_by_request.clone(),
+        );
+        let request_work_id = LogicalLifecycleOutboxV1::request_batch_id(query_request_id);
+
+        reset_execution_state_clone_count_for_tests();
+        let prepared = prepare_order_execution_drive_v2(&mut session, collision_at_utc_ms, 0)
+            .expect("准备同刻 GTD after-image Order 查询");
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            prepared.disposition,
+            SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            }
+        );
+        assert_eq!(prepared.evidence.logical_action_results.len(), 1);
+        let action_result = &prepared.evidence.logical_action_results[0];
+        let expected_part = action_result.part.clone();
+        assert_eq!(
+            action_result.query_projection_revision,
+            Some(before_revision + 1)
+        );
+        let DirectResponsePartV1::Order {
+            effective_processing_at_utc_ms,
+            result: OrderQueryResultV1::Found(order),
+        } = &action_result.part
+        else {
+            panic!("Order 查询必须返回同刻 GTD expired after-image")
+        };
+        assert_eq!(*effective_processing_at_utc_ms, collision_at_utc_ms);
+        assert_eq!(order.platform_order_id, gtd_platform_order_id);
+        assert_eq!(
+            order.status.known,
+            Some(SimulatedOrderKnownStatusV1::Expired)
+        );
+        assert_eq!(order.open_base_quantity_shares, Decimal::ZERO);
+        assert_eq!(order.expired_base_quantity_shares, Decimal::new(5, 0));
+        assert_eq!(prepared.query.next_root_sequence, None);
+        assert!(prepared.query.root_to_insert.is_none());
+        assert!(prepared.query.cursor_to_insert.is_none());
+        assert!(!prepared.query.page_prepared);
+        assert!(
+            prepared
+                .query
+                .retained_terminal_order(&gtd_platform_order_id)
+                .is_none(),
+            "同刻 GTD 仍由 matching candidate 提供，不应伪造终态保留投影"
+        );
+        assert_eq!(
+            prepared.direct.platform_responded_at(),
+            Some(collision_at_utc_ms)
+        );
+        assert_eq!(
+            prepared.lifecycle.candidate_work_batch_id(&request_work_id),
+            None
+        );
+        let mut scheduled_private_emission_sequence = None;
+        let mut direct_private_emission_sequence = None;
+        for draft in &prepared.evidence.private_output_drafts {
+            match draft {
+                DurablePrivateOutputDraftV1::Lifecycle { draft }
+                    if matches!(
+                        draft,
+                        LifecycleFeedbackDraftV1::Order(OrderLifecycleFeedbackDraftV1 {
+                            event_kind: OrderLifecycleEventKindV1::GtdExpired,
+                            ..
+                        })
+                    ) =>
+                {
+                    scheduled_private_emission_sequence =
+                        Some(draft.timing().private_emission_sequence);
+                }
+                DurablePrivateOutputDraftV1::Direct { draft }
+                    if draft.context.global_request_id == query_request_id =>
+                {
+                    direct_private_emission_sequence = Some(draft.private_emission_sequence);
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            scheduled_private_emission_sequence.expect("必须形成 GTD scheduled 私有输出")
+                < direct_private_emission_sequence.expect("必须形成 Order direct 私有输出")
+        );
+        let first_evidence = prepared.evidence.clone();
+        drop(prepared);
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(session.session.checkpoint(), before_session);
+        assert_eq!(session.pending_requests, before_pending_requests);
+        assert_eq!(session.query_state, before_query);
+        assert_eq!(session.direct_response_outbox, before_direct);
+        assert_eq!(session.lifecycle_outbox, before_lifecycle);
+
+        reset_execution_state_clone_count_for_tests();
+        let prepared = prepare_order_execution_drive_v2(&mut session, collision_at_utc_ms, 0)
+            .expect("重新准备同刻 GTD after-image Order 查询");
+        assert_eq!(prepared.evidence, first_evidence);
+        prepared
+            .into_committable()
+            .expect("完整 Order 查询准备必须可提交")
+            .commit();
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(session.query_projection_revision(), before_revision + 1);
+        assert_eq!(
+            session.session.logical_platform_driven_through(),
+            Some(collision_at_utc_ms)
+        );
+        assert_eq!(session.next_order_deadline_at_utc_ms(), None);
+        assert_eq!(
+            session.session.query_revision_for_request(query_request_id),
+            Some(before_revision + 1)
+        );
+        assert!(
+            !session
+                .session
+                .recovered_unformed_direct_response_request_ids()
+                .contains(query_request_id)
+        );
+        let committed_order = session
+            .session
+            .execution_state()
+            .order(&gtd_platform_order_id)
+            .expect("提交后保留 GTD 终态订单");
+        assert_eq!(committed_order.expired_at_utc_ms, Some(collision_at_utc_ms));
+        assert_eq!(committed_order.open_base_units, 0);
+        assert_eq!(committed_order.expired_base_units, 5_000_000);
+        assert!(
+            session
+                .query_state
+                .retained_terminal_order(&gtd_platform_order_id)
+                .is_none(),
+            "未发生市场终态压缩时不得新增 GTD 保留投影"
+        );
+        assert_eq!(
+            (
+                session.query_state.next_root_sequence,
+                session.query_state.earliest_retained_root_sequence,
+                session.query_state.roots.clone(),
+                session.query_state.issued_cursors.clone(),
+                session.query_state.continuation_by_request.clone(),
+            ),
+            before_query_shape
+        );
+        assert!(
+            !session
+                .lifecycle_outbox
+                .work_batch_ids
+                .contains_key(&request_work_id)
+        );
+        let direct_draft = session
+            .direct_response_outbox
+            .draft(query_request_id)
+            .expect("提交后保留 Order direct 草稿");
+        assert_eq!(direct_draft.method, DirectResponseMethodV1::Order);
+        assert_eq!(direct_draft.parts, vec![expected_part]);
+        let gtd_lifecycle = session
+            .lifecycle_outbox
+            .entries
+            .values()
+            .find_map(|entry| match &entry.draft {
+                LifecycleFeedbackDraftV1::Order(draft)
+                    if draft.platform_order_id == gtd_platform_order_id
+                        && draft.event_kind == OrderLifecycleEventKindV1::GtdExpired =>
+                {
+                    Some(draft)
+                }
+                _ => None,
+            })
+            .expect("提交后保留 GTD 到期生命周期草稿");
+        assert!(
+            gtd_lifecycle.timing.private_emission_sequence < direct_draft.private_emission_sequence
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paper_v2_orders_first_page_reads_same_cutoff_gtd_after_image_atomically() {
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            scenario as long_scenario, session_spec as long_session_spec,
+        };
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载 Paper V2 时延配置");
+        let scenario = long_scenario();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let spec = long_session_spec(
+            &scenario,
+            SimCallerRoleV1::Paper,
+            "paper-v2-orders-same-cutoff-gtd",
+        );
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
+        let gtd_request_id = "paper-v2-orders-same-cutoff-gtd-request";
+        let gtd = session
+            .post_order(PostOrderRequestV1 {
+                context: context_for_arrival(&session, &profile, gtd_request_id, 1, 150_000),
+                idempotency_key: "paper-v2-orders-same-cutoff-gtd-key".to_owned(),
+                item: PostOrderItemV1 {
+                    item_id: "paper-v2-orders-same-cutoff-gtd-item".to_owned(),
+                    order: SimBuyOrderV1 {
+                        condition_id: long_market().condition_id,
+                        token_id: long_asset("1", 0, "Up").token_id,
+                        kind: SimBuyOrderKindV1::GtdLimit {
+                            limit_price_pusd_per_share: Decimal::new(1, 5),
+                            size_shares: Decimal::new(5, 0),
+                            post_only: true,
+                            expires_at_utc_ms: 391_999,
+                        },
+                    },
+                },
+            })
+            .expect("登记既有 GTD");
+        let gtd_acceptance_at_utc_ms = gtd.item.effective_processing_at_utc_ms;
+        session
+            .session
+            .advance_public_visibility_through(gtd_acceptance_at_utc_ms, next_visibility_position)
+            .expect("闭合既有 GTD 接纳时点的公开前缀");
+        assert_eq!(
+            session.drive_next_execution_action_through(gtd_acceptance_at_utc_ms),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        let collision_at_utc_ms = session
+            .next_order_deadline_at_utc_ms()
+            .expect("既有 GTD 必须形成到期时点");
+        let query_request_id = "paper-v2-orders-same-cutoff-query";
+        let registration = session
+            .orders(OrdersRequestV1 {
+                context: context_for_arrival(
+                    &session,
+                    &profile,
+                    query_request_id,
+                    2,
+                    collision_at_utc_ms,
+                ),
+                filter: OrdersFilterV1::default(),
+                cursor: None,
+            })
+            .expect("登记与 GTD 同刻的真实 Orders 首页查询");
+        assert_eq!(
+            registration.receipt.transit.platform_arrived_at_utc_ms,
+            collision_at_utc_ms
+        );
+        session
+            .session
+            .advance_public_visibility_through(collision_at_utc_ms, next_visibility_position)
+            .expect("闭合同刻 GTD 与 Orders 查询的公开前缀");
+
+        let before_session = session.session.checkpoint();
+        let before_query = session.query_state.clone();
+        let before_direct = session.direct_response_outbox.clone();
+        let before_lifecycle = session.lifecycle_outbox.clone();
+        let before_revision = session.query_projection_revision();
+        let before_root_sequence = session.query_state.next_root_sequence;
+        reset_execution_state_clone_count_for_tests();
+        let prepared = prepare_list_query_execution_drive_v2(&mut session, collision_at_utc_ms, 0)
+            .expect("准备同刻 GTD after-image Orders 首页查询");
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        let action_result = &prepared.evidence.logical_action_results[0];
+        assert_eq!(
+            action_result.query_projection_revision,
+            Some(before_revision + 1)
+        );
+        let DirectResponsePartV1::Orders {
+            result: OrdersQueryResultV1::Page(page),
+            ..
+        } = &action_result.part
+        else {
+            panic!("Orders 查询必须形成首页")
+        };
+        assert!(page.items.is_empty(), "同刻到期订单不得残留在活动订单首页");
+        assert_eq!(page.query_projection_revision, before_revision + 1);
+        assert!(page.next_cursor.is_none());
+        assert_eq!(
+            prepared.query.next_root_sequence,
+            before_root_sequence.checked_add(1)
+        );
+        assert!(prepared.query.root_to_insert.is_none());
+        assert!(prepared.query.cursor_to_insert.is_none());
+        assert!(prepared.query.page_prepared);
+        let first_evidence = prepared.evidence.clone();
+        drop(prepared);
+        assert_eq!(session.session.checkpoint(), before_session);
+        assert_eq!(session.query_state, before_query);
+        assert_eq!(session.direct_response_outbox, before_direct);
+        assert_eq!(session.lifecycle_outbox, before_lifecycle);
+
+        reset_execution_state_clone_count_for_tests();
+        let prepared = prepare_list_query_execution_drive_v2(&mut session, collision_at_utc_ms, 0)
+            .expect("重新准备同刻 GTD after-image Orders 首页查询");
+        assert_eq!(prepared.evidence, first_evidence);
+        prepared
+            .into_committable()
+            .expect("完整 Orders 首页准备必须可提交")
+            .commit();
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(session.query_projection_revision(), before_revision + 1);
+        assert_eq!(
+            session.query_state.next_root_sequence,
+            before_root_sequence + 1
+        );
+        assert!(session.query_state.roots.is_empty());
+        assert!(session.query_state.issued_cursors.is_empty());
+        assert_eq!(
+            session.session.query_revision_for_request(query_request_id),
+            Some(before_revision + 1)
+        );
+        assert_eq!(
+            session
+                .direct_response_outbox
+                .draft(query_request_id)
+                .expect("提交后保留 Orders direct 草稿")
+                .method,
+            DirectResponseMethodV1::Orders
+        );
+        assert!(
+            !session.lifecycle_outbox.work_batch_ids.contains_key(
+                &LogicalLifecycleOutboxV1::request_batch_id(query_request_id)
+            ),
+            "查询请求不得预留 REQUEST 生命周期工作"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paper_v2_trades_first_page_reads_same_cutoff_finality_after_image_atomically() {
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            scenario as long_scenario, session_spec as long_session_spec,
+        };
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载 Paper V2 时延配置");
+        let scenario = long_scenario();
+        let policy = policy_for_tests(
+            "paper-v2-trades-same-cutoff-finality-policy",
+            &[
+                (TradeFinalityStateV1::Matched, 0),
+                (TradeFinalityStateV1::Mined, 100_000),
+                (TradeFinalityStateV1::Confirmed, 400_000),
+            ],
+            2,
+            Vec::new(),
+        );
+        let mut process = SimExecutionProcessV1::try_new(
+            "component-test-run".to_owned(),
+            policy,
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        )
+        .expect("创建 Trades after-image Paper 进程");
+        let spec = long_session_spec(
+            &scenario,
+            SimCallerRoleV1::Paper,
+            "paper-v2-trades-same-cutoff-finality",
+        );
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
+        let registration = session
+            .post_order(PostOrderRequestV1 {
+                context: context_for_arrival(
+                    &session,
+                    &profile,
+                    "paper-v2-trades-same-cutoff-fill",
+                    1,
+                    150_000,
+                ),
+                idempotency_key: "paper-v2-trades-same-cutoff-fill-key".to_owned(),
+                item: PostOrderItemV1 {
+                    item_id: "paper-v2-trades-same-cutoff-fill-item".to_owned(),
+                    order: SimBuyOrderV1 {
+                        condition_id: long_market().condition_id,
+                        token_id: long_asset("1", 0, "Up").token_id,
+                        kind: SimBuyOrderKindV1::FakMarket {
+                            spend_pusd: Decimal::new(3, 0),
+                            worst_price_pusd_per_share: Decimal::new(6, 1),
+                        },
+                    },
+                },
+            })
+            .expect("登记形成真实成交的 FAK");
+        let matched_at_utc_ms = registration.item.effective_processing_at_utc_ms;
+        session
+            .session
+            .advance_public_visibility_through(matched_at_utc_ms, next_visibility_position)
+            .expect("闭合真实成交时点公开前缀");
+        assert_eq!(
+            session.drive_next_execution_action_through(matched_at_utc_ms),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        let fill = session
+            .session
+            .execution_state()
+            .fills()
+            .next()
+            .expect("真实 FAK 必须形成成交")
+            .clone();
+        assert_eq!(fill.finality_state(), Some(TradeFinalityStateV1::Matched));
+        let finality_at_utc_ms = session
+            .session
+            .execution_state()
+            .next_scheduled_finality_at_utc_ms()
+            .expect("成交必须排定 Mined 转换");
+        let private_delivery_cutoff = session
+            .session
+            .recovered_pending_private_facts()
+            .iter()
+            .map(|(_, received_at_utc_ms, _)| *received_at_utc_ms)
+            .max()
+            .expect("真实 FAK 必须形成直接响应或生命周期私有事实");
+        assert!(private_delivery_cutoff < finality_at_utc_ms);
+        assert_eq!(
+            session
+                .drive_private_delivery_after_platform_through_for_tests(private_delivery_cutoff),
+            Ok(SubmissionDeliveryDispositionV1::Delivered)
+        );
+        session
+            .advance_trade_history_retention_floor(fill.matched_at_utc_ms)
+            .expect("正式推进成交历史保留水位到精确成交时点");
+        let query_request_id = "paper-v2-trades-same-cutoff-query";
+        let query = session
+            .trades(TradesRequestV1 {
+                context: context_for_arrival(
+                    &session,
+                    &profile,
+                    query_request_id,
+                    2,
+                    finality_at_utc_ms,
+                ),
+                filter: TradesFilterV1 {
+                    trade_id: Some(fill.trade_id.clone()),
+                    ..TradesFilterV1::default()
+                },
+                cursor: None,
+            })
+            .expect("登记与 Mined 同刻的真实 Trades 首页查询");
+        assert_eq!(
+            query.receipt.transit.platform_arrived_at_utc_ms,
+            finality_at_utc_ms
+        );
+        session
+            .session
+            .advance_public_visibility_through(finality_at_utc_ms, next_visibility_position)
+            .expect("闭合同刻 finality 与 Trades 查询的公开前缀");
+
+        let before_session = session.session.checkpoint();
+        let before_query = session.query_state.clone();
+        let before_direct = session.direct_response_outbox.clone();
+        let before_lifecycle = session.lifecycle_outbox.clone();
+        let before_revision = session.query_projection_revision();
+        reset_execution_state_clone_count_for_tests();
+        let prepared = prepare_list_query_execution_drive_v2(&mut session, finality_at_utc_ms, 0)
+            .expect("准备同刻 Mined after-image Trades 首页查询");
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        let action_result = &prepared.evidence.logical_action_results[0];
+        assert_eq!(
+            action_result.query_projection_revision,
+            Some(before_revision + 1)
+        );
+        let DirectResponsePartV1::Trades {
+            result: TradesQueryResultV1::Page(page),
+            ..
+        } = &action_result.part
+        else {
+            panic!("Trades 查询必须形成首页")
+        };
+        assert_eq!(page.query_projection_revision, before_revision + 1);
+        let [trade] = page.items.as_slice() else {
+            panic!("精确成交查询必须返回唯一成交")
+        };
+        assert_eq!(trade.simulated_trade_id, fill.trade_id);
+        assert_eq!(trade.status.known, Some(SimulatedTradeKnownStatusV1::Mined));
+        let first_evidence = prepared.evidence.clone();
+        drop(prepared);
+        assert_eq!(session.session.checkpoint(), before_session);
+        assert_eq!(session.query_state, before_query);
+        assert_eq!(session.direct_response_outbox, before_direct);
+        assert_eq!(session.lifecycle_outbox, before_lifecycle);
+        assert_eq!(
+            session
+                .session
+                .execution_state()
+                .fills()
+                .find(|candidate| candidate.trade_id == fill.trade_id)
+                .and_then(|candidate| candidate.finality_state()),
+            Some(TradeFinalityStateV1::Matched)
+        );
+
+        reset_execution_state_clone_count_for_tests();
+        let prepared = prepare_list_query_execution_drive_v2(&mut session, finality_at_utc_ms, 0)
+            .expect("重新准备同刻 Mined after-image Trades 首页查询");
+        assert_eq!(prepared.evidence, first_evidence);
+        prepared
+            .into_committable()
+            .expect("完整 Trades 首页准备必须可提交")
+            .commit();
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            session
+                .session
+                .execution_state()
+                .fills()
+                .find(|candidate| candidate.trade_id == fill.trade_id)
+                .and_then(|candidate| candidate.finality_state()),
+            Some(TradeFinalityStateV1::Mined)
+        );
+        assert_eq!(
+            session.session.query_revision_for_request(query_request_id),
+            Some(before_revision + 1)
+        );
+        assert_eq!(
+            session
+                .direct_response_outbox
+                .draft(query_request_id)
+                .expect("提交后保留 Trades direct 草稿")
+                .method,
+            DirectResponseMethodV1::Trades
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paper_v2_orders_continuation_keeps_root_revision_across_same_cutoff_gtd() {
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            scenario as long_scenario, session_spec as long_session_spec,
+        };
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载 Paper V2 时延配置");
+        let scenario = long_scenario();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let mut spec = long_session_spec(
+            &scenario,
+            SimCallerRoleV1::Paper,
+            "paper-v2-orders-continuation-frozen-revision",
+        );
+        spec.response_outbox_capacity =
+            std::num::NonZeroUsize::new(16).expect("测试生命周期批次容量为正");
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
+        let gtd_expires_at_utc_ms = 10_000_999;
+        let order_count = SIM_QUERY_PAGE_SIZE_V1 + 1;
+        let mut post_actions = Vec::with_capacity(order_count);
+        for batch_index in 0..order_count.div_ceil(15) {
+            let first = batch_index * 15;
+            let last = (first + 15).min(order_count);
+            let items = (first..last)
+                .map(|index| PostOrderItemV1 {
+                    item_id: format!("paper-v2-orders-root-item-{index:03}"),
+                    order: SimBuyOrderV1 {
+                        condition_id: long_market().condition_id.clone(),
+                        token_id: long_asset("1", 0, "Up").token_id,
+                        kind: if index == 0 {
+                            SimBuyOrderKindV1::GtdLimit {
+                                limit_price_pusd_per_share: Decimal::new(1, 5),
+                                size_shares: Decimal::new(5, 0),
+                                post_only: true,
+                                expires_at_utc_ms: gtd_expires_at_utc_ms,
+                            }
+                        } else {
+                            SimBuyOrderKindV1::GtcLimit {
+                                limit_price_pusd_per_share: Decimal::new(1, 5),
+                                size_shares: Decimal::new(5, 0),
+                                post_only: true,
+                            }
+                        },
+                    },
+                })
+                .collect::<Vec<_>>();
+            let request_id = format!("paper-v2-orders-root-posts-{batch_index}");
+            let registration = session
+                .post_orders(PostOrdersRequestV1 {
+                    context: context_for_arrival(
+                        &session,
+                        &profile,
+                        &request_id,
+                        u64::try_from(batch_index + 1).expect("测试批次序号适合 u64"),
+                        150_000 + i64::try_from(batch_index).expect("测试批次适合 i64") * 1_000,
+                    ),
+                    idempotency_key: format!("{request_id}-key"),
+                    items,
+                })
+                .expect("登记形成真实长订单根的 PostOrders 分批");
+            let batch_len = registration.items.len();
+            post_actions.extend(
+                registration
+                    .items
+                    .iter()
+                    .enumerate()
+                    .map(|(item_index, item)| {
+                        (
+                            item.effective_processing_at_utc_ms,
+                            item_index + 1 == batch_len,
+                        )
+                    }),
+            );
+        }
+        post_actions.sort_by_key(|(effective_at_utc_ms, _)| *effective_at_utc_ms);
+        let mut closed_through = None;
+        for (effective_at_utc_ms, request_completed) in post_actions {
+            if closed_through != Some(effective_at_utc_ms) {
+                session
+                    .session
+                    .advance_public_visibility_through(
+                        effective_at_utc_ms,
+                        next_visibility_position,
+                    )
+                    .expect("逐时点闭合 PostOrders 接纳公开前缀");
+                closed_through = Some(effective_at_utc_ms);
+            }
+            assert_eq!(
+                session.drive_next_execution_action_through(effective_at_utc_ms),
+                Ok(SubmissionDriveDispositionV1::ItemProcessed { request_completed })
+            );
+        }
+        assert_eq!(
+            session.session.execution_state().orders().count(),
+            SIM_QUERY_PAGE_SIZE_V1 + 1
+        );
+        let gtd_deadline_at_utc_ms = session
+            .next_order_deadline_at_utc_ms()
+            .expect("正式 GTD 必须形成未来到期任务");
+
+        let first_private_cutoff = session
+            .session
+            .recovered_pending_private_facts()
+            .iter()
+            .map(|(_, received_at_utc_ms, _)| *received_at_utc_ms)
+            .max()
+            .expect("PostOrders 必须形成私有事实");
+        assert!(first_private_cutoff < 5_000_000);
+        assert_eq!(
+            session.drive_private_delivery_after_platform_through_for_tests(first_private_cutoff),
+            Ok(SubmissionDeliveryDispositionV1::Delivered)
+        );
+
+        let initial_query_id = "paper-v2-orders-root-query";
+        let initial = session
+            .orders(OrdersRequestV1 {
+                context: context_for_arrival(&session, &profile, initial_query_id, 8, 5_000_000),
+                filter: OrdersFilterV1::default(),
+                cursor: None,
+            })
+            .expect("登记真实 Orders 长首页");
+        let initial_query_at_utc_ms = initial.receipt.transit.platform_arrived_at_utc_ms;
+        session
+            .session
+            .advance_public_visibility_through(initial_query_at_utc_ms, next_visibility_position)
+            .expect("闭合 Orders 长首页公开前缀");
+        assert_eq!(
+            session.drive_next_execution_action_through(initial_query_at_utc_ms),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        let initial_draft = session
+            .direct_response_outbox
+            .draft(initial_query_id)
+            .expect("真实 Orders 长首页必须形成直接响应");
+        let [
+            DirectResponsePartV1::Orders {
+                result: OrdersQueryResultV1::Page(initial_page),
+                ..
+            },
+        ] = initial_draft.parts.as_slice()
+        else {
+            panic!("真实 Orders 长首页响应形状不一致")
+        };
+        let cursor = initial_page
+            .next_cursor
+            .clone()
+            .expect("101 个活动订单必须形成续页游标");
+        let root_revision = initial_page.query_projection_revision;
+        let root_sequence = session.query_state.issued_cursors[cursor.as_str()].root_sequence;
+        let QueryRootRowsV1::Orders(root_rows) = &session.query_state.roots[&root_sequence].rows
+        else {
+            panic!("Orders 游标必须指向订单根")
+        };
+        let expected_continuation_items = root_rows[SIM_QUERY_PAGE_SIZE_V1..].to_vec();
+        assert_eq!(expected_continuation_items.len(), 1);
+
+        let second_private_cutoff = session
+            .session
+            .recovered_pending_private_facts()
+            .iter()
+            .map(|(_, received_at_utc_ms, _)| *received_at_utc_ms)
+            .max()
+            .expect("Orders 长首页必须形成直接响应私有事实");
+        assert!(second_private_cutoff < gtd_deadline_at_utc_ms);
+        assert_eq!(
+            session.drive_private_delivery_after_platform_through_for_tests(second_private_cutoff),
+            Ok(SubmissionDeliveryDispositionV1::Delivered)
+        );
+
+        let continuation_id = "paper-v2-orders-root-continuation";
+        let continuation = session
+            .orders(OrdersRequestV1 {
+                context: context_for_arrival(
+                    &session,
+                    &profile,
+                    continuation_id,
+                    9,
+                    gtd_deadline_at_utc_ms,
+                ),
+                filter: OrdersFilterV1::default(),
+                cursor: Some(cursor),
+            })
+            .expect("登记与 GTD 同刻的真实 Orders 续页");
+        assert_eq!(
+            continuation.receipt.transit.platform_arrived_at_utc_ms,
+            gtd_deadline_at_utc_ms
+        );
+        session
+            .session
+            .advance_public_visibility_through(gtd_deadline_at_utc_ms, next_visibility_position)
+            .expect("闭合同刻 GTD 与 Orders 续页公开前缀");
+        let before_session = session.session.checkpoint();
+        let before_query = session.query_state.clone();
+        let current_revision = session.query_projection_revision();
+        assert_eq!(current_revision, root_revision);
+
+        reset_execution_state_clone_count_for_tests();
+        let prepared =
+            prepare_list_query_execution_drive_v2(&mut session, gtd_deadline_at_utc_ms, 0)
+                .expect("准备同刻 GTD 后的 Orders 冻结根续页");
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            prepared.evidence.query_projection_revision,
+            Some(root_revision + 1)
+        );
+        let action_result = &prepared.evidence.logical_action_results[0];
+        assert_eq!(action_result.query_projection_revision, Some(root_revision));
+        let DirectResponsePartV1::Orders {
+            result: OrdersQueryResultV1::Page(page),
+            ..
+        } = &action_result.part
+        else {
+            panic!("Orders 续页必须返回既有根正文")
+        };
+        assert_eq!(page.query_projection_revision, root_revision);
+        assert_eq!(page.items, expected_continuation_items);
+        assert!(page.next_cursor.is_none());
+        let first_evidence = prepared.evidence.clone();
+        drop(prepared);
+        assert_eq!(session.session.checkpoint(), before_session);
+        assert_eq!(session.query_state, before_query);
+
+        reset_execution_state_clone_count_for_tests();
+        let prepared =
+            prepare_list_query_execution_drive_v2(&mut session, gtd_deadline_at_utc_ms, 0)
+                .expect("重新准备同刻 GTD 后的 Orders 冻结根续页");
+        assert_eq!(prepared.evidence, first_evidence);
+        prepared
+            .into_committable()
+            .expect("完整 Orders 续页准备必须可提交")
+            .commit();
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(session.query_projection_revision(), root_revision + 1);
+        assert_eq!(
+            session.session.query_revision_for_request(continuation_id),
+            Some(root_revision)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paper_v2_scheduled_gtd_no_action_tail_replays_revision_and_release() {
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            scenario as long_scenario, session_spec as long_session_spec,
+        };
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载 Paper V2 时延配置");
+        let scenario = long_scenario();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let spec = long_session_spec(&scenario, SimCallerRoleV1::Paper, "paper-v2-gtd-no-action");
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
+        let registration = session
+            .post_order(PostOrderRequestV1 {
+                context: context_for_arrival(
+                    &session,
+                    &profile,
+                    "paper-v2-gtd-no-action-request",
+                    1,
+                    150_000,
+                ),
+                idempotency_key: "paper-v2-gtd-no-action-idempotency".to_owned(),
+                item: PostOrderItemV1 {
+                    item_id: "paper-v2-gtd-no-action-item".to_owned(),
+                    order: SimBuyOrderV1 {
+                        condition_id: long_market().condition_id,
+                        token_id: long_asset("1", 0, "Up").token_id,
+                        kind: SimBuyOrderKindV1::GtdLimit {
+                            limit_price_pusd_per_share: Decimal::new(1, 5),
+                            size_shares: Decimal::new(5, 0),
+                            post_only: true,
+                            expires_at_utc_ms: 391_999,
+                        },
+                    },
+                },
+            })
+            .expect("登记 Paper GTD 请求");
+        let effective_at = registration.item.effective_processing_at_utc_ms;
+        session
+            .session
+            .advance_public_visibility_through(effective_at, next_visibility_position)
+            .expect("闭合 GTD 接纳时点的公开前缀");
+
+        let directory = tempfile::tempdir().expect("创建 Paper V2 GTD 协调器目录");
+        let action_due_checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
+            &process,
+            &session,
+            rules.as_ref(),
+        );
+        let mut action_due_coordinator = RecoverablePaperCoordinatorV2::create_new(
+            directory.path().join("paper-gtd-action-due"),
+            &session,
+            &action_due_checkpoint,
+        )
+        .expect("创建 Paper V2 GTD ActionDue 协调器");
+        let action_due_state = session.durable_checkpoint();
+        let action_due_cursor = action_due_coordinator.cursor_for_tests();
+        reset_request_registration_preparation_counts_v2();
+        reset_execution_state_clone_count_for_tests();
+        assert_eq!(
+            action_due_coordinator.drive_scheduled_execution_through(&mut session, effective_at),
+            Ok(ScheduledExecutionDriveDispositionV2::ActionDue)
+        );
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(session.durable_checkpoint(), action_due_state);
+        assert_eq!(action_due_coordinator.cursor_for_tests(), action_due_cursor);
+        assert_eq!(
+            (
+                action_due_coordinator.encoded_transaction_count_for_tests,
+                action_due_coordinator.append_attempt_count_for_tests,
+                action_due_coordinator.append_success_count_for_tests,
+            ),
+            (0, 0, 0)
+        );
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert!(
+            action_due_coordinator
+                .store
+                .recover::<
+                    DurableLogicalTransactionEvidenceV2,
+                    DurableRecoveryOperationV2,
+                    RecoverablePaperApplicationCheckpointV2,
+                >()
+                .expect("读取 ActionDue 后日志")
+                .tail
+                .is_empty()
+        );
+        drop(action_due_coordinator);
+
+        assert_eq!(
+            session.drive_next_execution_action_through(effective_at),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        let gtd_deadline = session
+            .next_order_deadline_at_utc_ms()
+            .expect("GTD 必须形成到期任务");
+        session
+            .session
+            .advance_public_visibility_through(gtd_deadline, next_visibility_position)
+            .expect("闭合 GTD 到期时点的公开前缀");
+        let session_id = session.session_spec().session_id.clone();
+        let baseline_checkpoint = session.durable_checkpoint();
+        let baseline_session_checkpoint = session.session.checkpoint();
+        let baseline_query_state = session.query_state.clone();
+        let baseline_lifecycle_outbox = session.lifecycle_outbox.clone();
+        let baseline_bridge = session.bridge_replayed_through_private_feedback_sequence;
+        let before_revision = session.query_projection_revision();
+        let coordinator_checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
+            &process,
+            &session,
+            rules.as_ref(),
+        );
+        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
+            directory.path().join("paper-gtd-scheduled-only"),
+            &session,
+            &coordinator_checkpoint,
+        )
+        .expect("创建 Paper V2 GTD scheduled-only 协调器");
+        let baseline_cursor = coordinator.cursor_for_tests();
+        coordinator
+            .store
+            .install_transaction_log_insert_failure_for_tests()
+            .expect("安装 GTD scheduled-only SQLite INSERT 失败触发器");
+        reset_request_registration_preparation_counts_v2();
+        reset_execution_state_clone_count_for_tests();
+        assert!(matches!(
+            coordinator.drive_scheduled_execution_through(&mut session, gtd_deadline),
+            Err(MarketEventErrorV1::Session(SessionError::Durability(message)))
+                if message.contains("SQLite")
+        ));
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(session.durable_checkpoint(), baseline_checkpoint);
+        assert_eq!(session.session.checkpoint(), baseline_session_checkpoint);
+        assert_eq!(session.query_state, baseline_query_state);
+        assert_eq!(session.lifecycle_outbox, baseline_lifecycle_outbox);
+        assert_eq!(session.query_projection_revision(), before_revision);
+        assert_eq!(session.next_order_deadline_at_utc_ms(), Some(gtd_deadline));
+        assert_eq!(
+            session.bridge_replayed_through_private_feedback_sequence,
+            baseline_bridge
+        );
+        assert_eq!(coordinator.cursor_for_tests(), baseline_cursor);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(
+            (
+                coordinator.encoded_transaction_count_for_tests,
+                coordinator.append_attempt_count_for_tests,
+                coordinator.append_success_count_for_tests,
+            ),
+            (1, 1, 0)
+        );
+        assert!(
+            coordinator
+                .store
+                .recover::<
+                    DurableLogicalTransactionEvidenceV2,
+                    DurableRecoveryOperationV2,
+                    RecoverablePaperApplicationCheckpointV2,
+                >()
+                .expect("读取 GTD INSERT 失败后的日志")
+                .tail
+                .is_empty()
+        );
+
+        coordinator
+            .store
+            .remove_transaction_log_insert_failure_for_tests()
+            .expect("移除 GTD scheduled-only SQLite INSERT 失败触发器");
+        reset_execution_state_clone_count_for_tests();
+        assert_eq!(
+            coordinator.drive_scheduled_execution_through(&mut session, gtd_deadline),
+            Ok(ScheduledExecutionDriveDispositionV2::Advanced)
+        );
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        let online_checkpoint = session.durable_checkpoint();
+        assert_eq!(session.next_order_deadline_at_utc_ms(), None);
+        assert_eq!(session.query_projection_revision(), before_revision + 1);
+        assert_eq!(
+            (
+                coordinator.encoded_transaction_count_for_tests,
+                coordinator.append_attempt_count_for_tests,
+                coordinator.append_success_count_for_tests,
+            ),
+            (2, 2, 1)
+        );
+
+        let recovered = coordinator
+            .store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("恢复 coordinator Paper V2 GTD 日志");
+        assert_eq!(recovered.tail.len(), 1);
+        let tail = &recovered.tail[0];
+        assert_eq!(
+            tail.recovery_operation,
+            DurableRecoveryOperationV2::DriveExecutionThrough {
+                effective_processing_at_utc_ms: gtd_deadline,
+            }
+        );
+        assert!(matches!(
+            &tail.evidence.fact,
+            DurableTransactionFactV1::ExecutionAdvanced { session_id: actual }
+                if actual == &session_id
+        ));
+        assert!(tail.evidence.logical_action_results.is_empty());
+        assert_eq!(tail.evidence.private_output_drafts.len(), 1);
+        let DurablePrivateOutputDraftV1::Lifecycle {
+            draft: LifecycleFeedbackDraftV1::Order(gtd_draft),
+        } = &tail.evidence.private_output_drafts[0]
+        else {
+            panic!("GTD scheduled-only 尾日志必须包含订单生命周期草稿");
+        };
+        assert_eq!(gtd_draft.event_kind, OrderLifecycleEventKindV1::GtdExpired);
+        assert_eq!(
+            gtd_draft.account_delta.reason,
+            contracts::PlatformAccountDeltaReasonV1::GtdExpirationEncumbranceReleased
+        );
+        assert_eq!(tail.evidence.account_deltas.len(), 1);
+        assert_eq!(tail.evidence.account_deltas[0], *gtd_draft.account_delta);
+        assert_eq!(
+            tail.evidence.query_projection_revision,
+            Some(before_revision + 1)
+        );
+        assert_eq!(
+            tail.evidence.logical_platform_driven_through_utc_ms,
+            Some(gtd_deadline)
+        );
+        assert_eq!(
+            tail.evidence.private_fact_schedule_closed_through_utc_ms,
+            None
+        );
+
+        let replay_error_live_checkpoint = session.durable_checkpoint();
+        let replay_error_cursor = coordinator.cursor_for_tests();
+        let restore_application_session =
+            |mut checkpoint: RecoverablePaperApplicationCheckpointV2| {
+                checkpoint
+                    .validate()
+                    .expect("scheduled replay 反例应用检查点必须有效");
+                let session_checkpoint = checkpoint
+                    .run_checkpoint
+                    .sessions
+                    .remove(&session_id)
+                    .expect("scheduled replay 反例检查点必须包含目标会话");
+                let evicted = checkpoint
+                    .evicted_markets
+                    .remove(&session_id)
+                    .unwrap_or_default();
+                let (state, downstream) =
+                    ExecutionSessionStateV1::restore(&process.inner, session_checkpoint, &evicted)
+                        .expect("恢复 scheduled replay 反例基线");
+                assert_eq!(downstream, None);
+                state
+            };
+
+        let action_due_replay_state = restore_application_session(action_due_checkpoint.clone());
+        reset_execution_state_clone_count_for_tests();
+        let action_due_replay_error = match replay_execution_operation_v2(
+            action_due_replay_state,
+            &tail.evidence,
+            DurableRecoveryOperationV2::DriveExecutionThrough {
+                effective_processing_at_utc_ms: effective_at,
+            },
+        ) {
+            Ok(_) => panic!("scheduled replay ActionDue 不得形成候选状态"),
+            Err(error) => error,
+        };
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert!(
+            matches!(
+                &action_due_replay_error,
+                SessionCheckpointErrorV1::InvalidSessionState(message)
+                    if message.contains("遇到待处理动作")
+            ),
+            "unexpected ActionDue replay error: {action_due_replay_error:?}"
+        );
+        assert_eq!(session.durable_checkpoint(), replay_error_live_checkpoint);
+        assert_eq!(coordinator.cursor_for_tests(), replay_error_cursor);
+
+        let (duplicate_replay_state, duplicate_replay_downstream) =
+            ExecutionSessionStateV1::restore(
+                &process.inner,
+                online_checkpoint.clone(),
+                &BTreeMap::new(),
+            )
+            .expect("恢复已经应用 GTD 尾日志的状态");
+        assert_eq!(duplicate_replay_downstream, None);
+        reset_execution_state_clone_count_for_tests();
+        let duplicate_replay_error = match replay_execution_operation_v2(
+            duplicate_replay_state,
+            &tail.evidence,
+            tail.recovery_operation,
+        ) {
+            Ok(_) => panic!("scheduled replay 相同尾日志不得重复应用"),
+            Err(error) => error,
+        };
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert!(matches!(
+            duplicate_replay_error,
+            SessionCheckpointErrorV1::InvalidSessionState(message)
+                if message.contains("重复应用")
+        ));
+        assert_eq!(session.durable_checkpoint(), replay_error_live_checkpoint);
+        assert_eq!(coordinator.cursor_for_tests(), replay_error_cursor);
+
+        let replay_baseline_checkpoint = recovered
+            .checkpoint
+            .as_ref()
+            .expect("GTD 日志必须保留应用检查点")
+            .checkpoint
+            .clone();
+        let tampered_replay_state = restore_application_session(replay_baseline_checkpoint);
+        let mut tampered_evidence = tail.evidence.clone();
+        tampered_evidence.query_projection_revision = tail
+            .evidence
+            .query_projection_revision
+            .map(|revision| revision.checked_add(1).expect("篡改查询修订号不得溢出"));
+        assert_ne!(tampered_evidence, tail.evidence);
+        reset_execution_state_clone_count_for_tests();
+        let tampered_replay_error = match replay_execution_operation_v2(
+            tampered_replay_state,
+            &tampered_evidence,
+            tail.recovery_operation,
+        ) {
+            Ok(_) => panic!("scheduled replay 篡改证据不得形成候选状态"),
+            Err(error) => error,
+        };
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert!(matches!(
+            tampered_replay_error,
+            SessionCheckpointErrorV1::InvalidSessionState(message)
+                if message.contains("与重算候选不一致")
+        ));
+        assert_eq!(session.durable_checkpoint(), replay_error_live_checkpoint);
+        assert_eq!(coordinator.cursor_for_tests(), replay_error_cursor);
+
+        let before_retry_state = session.durable_checkpoint();
+        let before_retry_cursor = coordinator.cursor_for_tests();
+        let before_retry_counts = (
+            coordinator.encoded_transaction_count_for_tests,
+            coordinator.append_attempt_count_for_tests,
+            coordinator.append_success_count_for_tests,
+        );
+        reset_request_registration_preparation_counts_v2();
+        reset_execution_state_clone_count_for_tests();
+        assert_eq!(
+            coordinator.drive_scheduled_execution_through(&mut session, gtd_deadline),
+            Ok(ScheduledExecutionDriveDispositionV2::NoStateChange)
+        );
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(session.durable_checkpoint(), before_retry_state);
+        assert_eq!(coordinator.cursor_for_tests(), before_retry_cursor);
+        assert_eq!(
+            (
+                coordinator.encoded_transaction_count_for_tests,
+                coordinator.append_attempt_count_for_tests,
+                coordinator.append_success_count_for_tests,
+            ),
+            before_retry_counts
+        );
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(
+            coordinator
+                .store
+                .recover::<
+                    DurableLogicalTransactionEvidenceV2,
+                    DurableRecoveryOperationV2,
+                    RecoverablePaperApplicationCheckpointV2,
+                >()
+                .expect("读取 GTD 同 cutoff 重试后的日志")
+                .tail
+                .len(),
+            1
+        );
+
+        let mut recovered_checkpoint = recovered
+            .checkpoint
+            .expect("GTD 恢复必须有正式应用检查点")
+            .checkpoint;
+        recovered_checkpoint
+            .validate()
+            .expect("GTD 正式应用检查点必须有效");
+        let session_checkpoint = recovered_checkpoint
+            .run_checkpoint
+            .sessions
+            .remove(&session_id)
+            .expect("GTD 正式应用检查点必须包含目标会话");
+        let evicted = recovered_checkpoint
+            .evicted_markets
+            .remove(&session_id)
+            .unwrap_or_default();
+        let (restored_baseline, downstream) =
+            ExecutionSessionStateV1::restore(&process.inner, session_checkpoint, &evicted)
+                .expect("恢复 Paper V2 GTD 基线");
+        assert_eq!(downstream, None);
+        reset_execution_state_clone_count_for_tests();
+        let replayed = replay_execution_operation_v2(
+            restored_baseline,
+            &tail.evidence,
+            tail.recovery_operation,
+        )
+        .expect("重放 Paper V2 GTD 到期尾日志");
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(replayed.checkpoint(None), online_checkpoint);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recoverable_paper_v2_empty_taker_maturity_still_logs_execution_state_change() {
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            scenario as long_scenario, session_spec as long_session_spec,
+        };
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载返佣成熟测试时延配置");
+        let scenario = long_scenario();
+        let policy = policy_for_tests(
+            "paper-v2-empty-taker-maturity-policy",
+            &[
+                (TradeFinalityStateV1::Matched, 0),
+                (TradeFinalityStateV1::Mined, 10),
+                (TradeFinalityStateV1::Confirmed, 90_000_000),
+            ],
+            1,
+            Vec::new(),
+        );
+        let mut process = SimExecutionProcessV1::try_new(
+            "component-test-run".to_owned(),
+            policy,
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        )
+        .expect("创建延迟终态 Paper 进程");
+        let mut spec = long_session_spec(
+            &scenario,
+            SimCallerRoleV1::Paper,
+            "paper-v2-empty-taker-maturity",
+        );
+        spec.response_outbox_capacity =
+            std::num::NonZeroUsize::new(16).expect("返佣成熟夹具容量为正");
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
+        let registration = session
+            .post_order(PostOrderRequestV1 {
+                context: context_for_arrival(
+                    &session,
+                    &profile,
+                    "paper-v2-empty-taker-maturity-request",
+                    1,
+                    150_000,
+                ),
+                idempotency_key: "paper-v2-empty-taker-maturity-idempotency".to_owned(),
+                item: PostOrderItemV1 {
+                    item_id: "paper-v2-empty-taker-maturity-item".to_owned(),
+                    order: SimBuyOrderV1 {
+                        condition_id: long_market().condition_id,
+                        token_id: long_asset("1", 0, "Up").token_id,
+                        kind: SimBuyOrderKindV1::FakMarket {
+                            spend_pusd: Decimal::new(3, 0),
+                            worst_price_pusd_per_share: Decimal::new(6, 1),
+                        },
+                    },
+                },
+            })
+            .expect("登记正手续费 taker FAK");
+        let matched_at_utc_ms = registration.item.effective_processing_at_utc_ms;
+        session
+            .session
+            .advance_public_visibility_through(matched_at_utc_ms, next_visibility_position)
+            .expect("闭合 taker 成交时点公开前缀");
+        assert_eq!(
+            session.drive_next_execution_action_through(matched_at_utc_ms),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        let fill = session
+            .session
+            .execution_state()
+            .fills()
+            .next()
+            .expect("正式 FAK 必须形成成交");
+        assert_eq!(fill.liquidity_role, SimLiquidityRoleV1::Taker);
+        assert!(fill.immediate_taker_fee_units > 0);
+
+        let market_end_at_utc_ms = long_market().window.end_at_utc_ms;
+        session
+            .session
+            .advance_public_visibility_through(market_end_at_utc_ms, next_visibility_position)
+            .expect("闭合市场结束与 Mined 时点公开前缀");
+        assert_eq!(
+            session.drive_next_execution_action_through(market_end_at_utc_ms),
+            Ok(SubmissionDriveDispositionV1::NoAction)
+        );
+        let maturity_at_utc_ms = session
+            .next_rebate_clock_at_utc_ms_for_tests()
+            .expect("正手续费 taker 必须形成成熟时钟");
+        assert!(maturity_at_utc_ms > market_end_at_utc_ms);
+        assert!(
+            session
+                .session
+                .execution_state()
+                .next_scheduled_finality_at_utc_ms()
+                .is_some_and(|terminal_at| terminal_at > maturity_at_utc_ms)
+        );
+
+        session
+            .session
+            .advance_public_visibility_through(maturity_at_utc_ms, next_visibility_position)
+            .expect("闭合返佣成熟时点公开前缀");
+        session
+            .session
+            .prepare_execution_action_slice_v2(maturity_at_utc_ms, false)
+            .expect("正式准备无动作逻辑水位切片")
+            .into_committable()
+            .expect("无动作逻辑水位切片必须可提交")
+            .commit();
+        let before_gtd_only_clock = session.next_rebate_clock_at_utc_ms_for_tests();
+        let before_gtd_only_execution = serde_json::to_value(session.session.execution_state())
+            .expect("序列化 GTD-only 空推进前执行正文");
+        let mut gtd_only = session.session.execution_state().clone();
+        let gtd_only_effects = gtd_only
+            .advance_gtd_deadlines_through(maturity_at_utc_ms)
+            .expect("正式 GTD-only 兼容入口必须推进至相同成熟 cutoff");
+        assert!(gtd_only_effects.is_empty());
+        session.session.replace_execution_state(gtd_only);
+        let after_gtd_only_execution = serde_json::to_value(session.session.execution_state())
+            .expect("序列化 GTD-only 空推进后执行正文");
+        for field in ["account", "orders", "fills", "rebate"] {
+            assert_eq!(
+                after_gtd_only_execution.get(field),
+                before_gtd_only_execution.get(field),
+                "GTD-only 空推进不得改变 {field} 正文"
+            );
+        }
+        assert_eq!(
+            session.next_rebate_clock_at_utc_ms_for_tests(),
+            before_gtd_only_clock
+        );
+        assert_eq!(before_gtd_only_clock, Some(maturity_at_utc_ms));
+        assert_eq!(
+            session.logical_platform_driven_through_for_tests(),
+            Some(maturity_at_utc_ms)
+        );
+        reset_execution_state_clone_count_for_tests();
+        {
+            let prepared = session
+                .session
+                .prepare_scheduled_session_drive_v2(maturity_at_utc_ms, false)
+                .expect("准备零输出返佣成熟候选");
+            assert!(prepared.current_action().is_none());
+            assert!(prepared.execution_candidate().has_state_change());
+            assert!(
+                prepared
+                    .execution_candidate()
+                    .rebate_clock_effects()
+                    .is_empty()
+            );
+        }
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+
+        let before_account = session.session.execution_state().account().clone();
+        let before_query_revision = session.query_projection_revision();
+        let before_lifecycle_outbox = session.lifecycle_outbox.clone();
+        let before_logical_watermark = session.logical_platform_driven_through_for_tests();
+        let checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
+            &process,
+            &session,
+            rules.as_ref(),
+        );
+        let mut restore_probe = checkpoint.clone();
+        restore_probe
+            .validate()
+            .expect("零输出返佣成熟正式应用检查点必须有效");
+        let session_id = session.session_spec().session_id.clone();
+        let restore_probe_session = restore_probe
+            .run_checkpoint
+            .sessions
+            .remove(&session_id)
+            .expect("零输出返佣成熟恢复探针必须包含目标会话");
+        let restore_probe_evicted = restore_probe
+            .evicted_markets
+            .remove(&session_id)
+            .unwrap_or_default();
+        let (restored_probe, restored_probe_downstream) = ExecutionSessionStateV1::restore(
+            &process.inner,
+            restore_probe_session,
+            &restore_probe_evicted,
+        )
+        .expect("尾日志应用前正式恢复零输出返佣成熟检查点");
+        assert_eq!(restored_probe_downstream, None);
+        assert_eq!(
+            restored_probe.checkpoint(None),
+            session.durable_checkpoint()
+        );
+        drop(restored_probe);
+        let directory = tempfile::tempdir().expect("创建零输出返佣成熟日志目录");
+        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
+            directory.path().join("paper-empty-taker-maturity"),
+            &session,
+            &checkpoint,
+        )
+        .expect("创建零输出返佣成熟协调器");
+        drop(checkpoint);
+        reset_request_registration_preparation_counts_v2();
+        reset_execution_state_clone_count_for_tests();
+
+        assert_eq!(
+            coordinator.drive_scheduled_execution_through(&mut session, maturity_at_utc_ms),
+            Ok(ScheduledExecutionDriveDispositionV2::Advanced)
+        );
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(session.session.execution_state().account(), &before_account);
+        assert_eq!(session.query_projection_revision(), before_query_revision);
+        assert_eq!(session.lifecycle_outbox, before_lifecycle_outbox);
+        assert_eq!(
+            session.logical_platform_driven_through_for_tests(),
+            before_logical_watermark
+        );
+        assert_ne!(
+            session.next_rebate_clock_at_utc_ms_for_tests(),
+            Some(maturity_at_utc_ms)
+        );
+        let online_checkpoint = session.durable_checkpoint();
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(
+            (
+                coordinator.encoded_transaction_count_for_tests,
+                coordinator.append_attempt_count_for_tests,
+                coordinator.append_success_count_for_tests,
+            ),
+            (1, 1, 1)
+        );
+        let recovered = coordinator
+            .store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("读取零输出返佣成熟日志");
+        assert!(recovered.checkpoint.is_some());
+        assert_eq!(recovered.tail.len(), 1);
+        let evidence = &recovered.tail[0].evidence;
+        assert!(matches!(
+            evidence.fact,
+            DurableTransactionFactV1::ExecutionAdvanced { .. }
+        ));
+        assert!(evidence.account_deltas.is_empty());
+        assert!(evidence.logical_action_results.is_empty());
+        assert!(evidence.private_output_drafts.is_empty());
+        assert_eq!(evidence.query_projection_revision, None);
+        assert_eq!(evidence.logical_platform_driven_through_utc_ms, None);
+        assert_eq!(evidence.private_fact_schedule_closed_through_utc_ms, None);
+
+        let before_retry_state = session.durable_checkpoint();
+        let before_retry_cursor = coordinator.cursor_for_tests();
+        let before_retry_counts = (
+            coordinator.encoded_transaction_count_for_tests,
+            coordinator.append_attempt_count_for_tests,
+            coordinator.append_success_count_for_tests,
+        );
+        reset_request_registration_preparation_counts_v2();
+        reset_execution_state_clone_count_for_tests();
+        assert_eq!(
+            coordinator.drive_scheduled_execution_through(&mut session, maturity_at_utc_ms),
+            Ok(ScheduledExecutionDriveDispositionV2::NoStateChange)
+        );
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(session.durable_checkpoint(), before_retry_state);
+        assert_eq!(coordinator.cursor_for_tests(), before_retry_cursor);
+        assert_eq!(
+            (
+                coordinator.encoded_transaction_count_for_tests,
+                coordinator.append_attempt_count_for_tests,
+                coordinator.append_success_count_for_tests,
+            ),
+            before_retry_counts
+        );
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(
+            coordinator
+                .store
+                .recover::<
+                    DurableLogicalTransactionEvidenceV2,
+                    DurableRecoveryOperationV2,
+                    RecoverablePaperApplicationCheckpointV2,
+                >()
+                .expect("读取零输出返佣成熟同 cutoff 重试日志")
+                .tail
+                .len(),
+            1
+        );
+
+        let tail_evidence = recovered.tail[0].evidence.clone();
+        let tail_operation = recovered.tail[0].recovery_operation;
+        let mut recovered_checkpoint = recovered
+            .checkpoint
+            .expect("零输出返佣成熟必须有正式应用检查点")
+            .checkpoint;
+        recovered_checkpoint
+            .validate()
+            .expect("零输出返佣成熟正式应用检查点必须有效");
+        let session_checkpoint = recovered_checkpoint
+            .run_checkpoint
+            .sessions
+            .remove(&session_id)
+            .expect("零输出返佣成熟应用检查点包含目标会话");
+        let evicted = recovered_checkpoint
+            .evicted_markets
+            .remove(&session_id)
+            .unwrap_or_default();
+        let (restored_baseline, downstream) =
+            ExecutionSessionStateV1::restore(&process.inner, session_checkpoint, &evicted)
+                .expect("恢复零输出返佣成熟基线");
+        assert_eq!(downstream, None);
+        reset_request_registration_preparation_counts_v2();
+        reset_execution_state_clone_count_for_tests();
+        let replayed =
+            replay_execution_operation_v2(restored_baseline, &tail_evidence, tail_operation)
+                .expect("用共享 sparse core 重放零输出返佣成熟尾日志");
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(replayed.checkpoint(None), online_checkpoint);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recoverable_paper_v2_scheduled_terminal_auto_redeem_is_one_atomic_log_and_replays() {
+        use crate::task21_tests::fresh_quality;
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            orderbook_evidence, scenario as long_scenario, sealed_event,
+            session_spec as long_session_spec,
+        };
+        use data_pipeline_core::encode_execution_market_event_v3;
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载 AutoRedeem 测试时延配置");
+        let scenario = long_scenario();
+        let policy = policy_for_tests(
+            "paper-v2-scheduled-auto-redeem-policy",
+            &[
+                (TradeFinalityStateV1::Matched, 0),
+                (TradeFinalityStateV1::Mined, 10),
+                (TradeFinalityStateV1::Confirmed, 400_000),
+            ],
+            2,
+            Vec::new(),
+        );
+        let mut process = SimExecutionProcessV1::try_new(
+            "component-test-run".to_owned(),
+            policy,
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        )
+        .expect("创建 AutoRedeem Paper 进程");
+        let mut spec = long_session_spec(
+            &scenario,
+            SimCallerRoleV1::Paper,
+            "paper-v2-scheduled-auto-redeem",
+        );
+        spec.response_outbox_capacity =
+            std::num::NonZeroUsize::new(16).expect("AutoRedeem 测试容量为正");
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        assert!(session.session.hidden_platform_markets().is_none());
+        let initial_next_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
+        let registration = session
+            .post_order(PostOrderRequestV1 {
+                context: context_for_arrival(
+                    &session,
+                    &profile,
+                    "paper-v2-scheduled-auto-redeem-request",
+                    1,
+                    150_000,
+                ),
+                idempotency_key: "paper-v2-scheduled-auto-redeem-idempotency".to_owned(),
+                item: PostOrderItemV1 {
+                    item_id: "paper-v2-scheduled-auto-redeem-item".to_owned(),
+                    order: SimBuyOrderV1 {
+                        condition_id: long_market().condition_id.clone(),
+                        token_id: long_asset("1", 0, "Up").token_id,
+                        kind: SimBuyOrderKindV1::FakMarket {
+                            spend_pusd: Decimal::new(3, 0),
+                            worst_price_pusd_per_share: Decimal::new(6, 1),
+                        },
+                    },
+                },
+            })
+            .expect("登记 AutoRedeem 正手续费 taker FAK");
+        let matched_at_utc_ms = registration.item.effective_processing_at_utc_ms;
+        session
+            .session
+            .advance_public_visibility_through(matched_at_utc_ms, initial_next_position)
+            .expect("闭合 AutoRedeem 成交时点公开前缀");
+        assert_eq!(
+            session.drive_next_execution_action_through(matched_at_utc_ms),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        let fill = session
+            .session
+            .execution_state()
+            .fills()
+            .next()
+            .expect("正式 FAK 必须形成唯一成交")
+            .clone();
+        assert_eq!(fill.liquidity_role, SimLiquidityRoleV1::Taker);
+        assert!(fill.immediate_taker_fee_units > 0);
+        let platform_order_id = fill.platform_order_id.clone();
+        let trade_id = fill.trade_id.clone();
+        let condition_id = fill.condition_id.clone();
+
+        let resolution_at_utc_ms = long_market()
+            .window
+            .end_at_utc_ms
+            .checked_add(1)
+            .expect("判定时点不得溢出");
+        let resolution = MarketResolutionTerminalV3::Resolved {
+            winning_asset_id: long_asset("1", 0, "Up").token_id.0,
+            winning_outcome: "Up".to_owned(),
+            payout_vector: vec![
+                contracts::PayoutEntryV1 {
+                    asset: long_asset("1", 0, "Up"),
+                    payout_pusd_per_share: contracts::ExactDecimal("1".to_owned()),
+                },
+                contracts::PayoutEntryV1 {
+                    asset: long_asset("2", 1, "Down"),
+                    payout_pusd_per_share: contracts::ExactDecimal("0".to_owned()),
+                },
+            ],
+            mapping_rule_version: "paper-v2-scheduled-auto-redeem-resolution-v1".to_owned(),
+        };
+        let resolution_event = sealed_event(
+            contracts::ExecutionMarketEventPayloadV3::MarketResolutionTerminal(resolution.clone()),
+            orderbook_evidence(resolution_at_utc_ms, resolution_at_utc_ms, 3),
+            fresh_quality(),
+        );
+        let encoded_resolution = encode_execution_market_event_v3(&resolution_event)
+            .expect("编码 AutoRedeem 正式判定事件");
+        assert_eq!(
+            session.apply_closed_market_event_bucket(ClosedMarketEventBucketV1::public(
+                resolution_at_utc_ms,
+                initial_next_position,
+                initial_next_position + 1,
+                MillisecondBucketClosureV1::NextEventAt(resolution_at_utc_ms + 1),
+                vec![encoded_resolution],
+            )),
+            Ok(MarketBucketApplyDispositionV1::Applied)
+        );
+        assert_eq!(
+            session
+                .simulated_fill(&platform_order_id)
+                .expect("判定后 pending 成交仍存在")
+                .finality_state(),
+            Some(TradeFinalityStateV1::Mined)
+        );
+        assert_eq!(
+            session
+                .platform_market_state(&condition_id)
+                .expect("判定后公开市场仍存在")
+                .lifecycle_phase(),
+            MarketLifecyclePhaseV1::PostEndPendingResolution
+        );
+        assert!(session.query_state.terminal_projections.orders.is_empty());
+        assert!(session.query_state.terminal_projections.trades.is_empty());
+
+        let terminal_at_utc_ms = session
+            .session
+            .execution_state()
+            .next_scheduled_finality_at_utc_ms()
+            .expect("Mined 成交必须保留 Confirmed 终态任务");
+        assert!(terminal_at_utc_ms > resolution_at_utc_ms);
+        let terminal_next_position = initial_next_position + 1;
+        session
+            .session
+            .advance_public_visibility_through(terminal_at_utc_ms, terminal_next_position)
+            .expect("闭合 AutoRedeem 终态公开前缀");
+
+        let candidate_drop_baseline = serde_json::to_vec(&session.durable_checkpoint())
+            .expect("序列化 AutoRedeem 候选 drop 基线");
+        {
+            let prepared = session
+                .session
+                .prepare_scheduled_session_drive_v2(terminal_at_utc_ms, false)
+                .expect("准备终态 AutoRedeem session token");
+            assert!(prepared.current_action().is_none());
+            assert_eq!(prepared.actual_cutoff_utc_ms(), terminal_at_utc_ms);
+            assert_eq!(prepared.first_due_at_utc_ms(), Some(terminal_at_utc_ms));
+            assert_eq!(
+                prepared.terminal_projection_condition_ids(),
+                &BTreeSet::from([condition_id.clone()])
+            );
+            let [terminal] = prepared.execution_candidate().scheduled_finality_effects() else {
+                panic!("唯一成交必须形成唯一终态生命周期")
+            };
+            assert_eq!(terminal.trade_feedback.trade_id, trade_id);
+            assert_eq!(
+                terminal.trade_feedback.finality_state,
+                TradeFinalityStateV1::Confirmed
+            );
+            assert!(matches!(
+                terminal.settlement_feedbacks.as_slice(),
+                [
+                    SettlementLifecycleEffectV1 {
+                        action: SettlementLifecycleActionV1::Rebate(
+                            RebateSettlementActionV1::TakerAccrualApplied(_)
+                        ),
+                        ..
+                    },
+                    SettlementLifecycleEffectV1 {
+                        action: SettlementLifecycleActionV1::AutoRedeem(_),
+                        ..
+                    }
+                ]
+            ));
+        }
+        assert_eq!(
+            serde_json::to_vec(&session.durable_checkpoint())
+                .expect("序列化 AutoRedeem 候选 drop 后状态"),
+            candidate_drop_baseline
+        );
+
+        let before_revision = session.query_projection_revision();
+        let before_pending = session.session.pending_terminal_projection_condition_ids();
+        let before_query_pointer = Arc::as_ptr(&session.query_state.terminal_projections);
+        let before_failure_bytes = serde_json::to_vec(&session.durable_checkpoint())
+            .expect("序列化 AutoRedeem SQLite 失败基线");
+        let application_checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
+            &process,
+            &session,
+            rules.as_ref(),
+        );
+        let mut restore_probe = application_checkpoint.clone();
+        restore_probe
+            .validate()
+            .expect("AutoRedeem terminal 前应用检查点必须有效");
+        let session_id = session.session_spec().session_id.clone();
+        let restore_probe_session = restore_probe
+            .run_checkpoint
+            .sessions
+            .remove(&session_id)
+            .expect("AutoRedeem 恢复探针必须包含目标会话");
+        let restore_probe_evicted = restore_probe
+            .evicted_markets
+            .remove(&session_id)
+            .unwrap_or_default();
+        let (restored_probe, restored_probe_downstream) = ExecutionSessionStateV1::restore(
+            &process.inner,
+            restore_probe_session,
+            &restore_probe_evicted,
+        )
+        .expect("正式恢复 AutoRedeem terminal 前应用检查点");
+        assert_eq!(restored_probe_downstream, None);
+        assert_eq!(
+            restored_probe.checkpoint(None),
+            session.durable_checkpoint()
+        );
+        drop(restored_probe);
+
+        let directory = tempfile::tempdir().expect("创建 AutoRedeem coordinator 日志目录");
+        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
+            directory.path().join("paper-v2-scheduled-auto-redeem"),
+            &session,
+            &application_checkpoint,
+        )
+        .expect("创建 AutoRedeem coordinator");
+        drop(application_checkpoint);
+        assert_eq!(
+            Arc::strong_count(&session.query_state.terminal_projections),
+            1
+        );
+        let before_failure_cursor = coordinator.cursor_for_tests();
+        coordinator
+            .store
+            .install_transaction_log_insert_failure_for_tests()
+            .expect("安装 AutoRedeem SQLite INSERT 失败触发器");
+        reset_request_registration_preparation_counts_v2();
+        reset_execution_state_clone_count_for_tests();
+        reset_terminal_query_projections_clone_count_for_tests();
+        assert!(matches!(
+            coordinator.drive_scheduled_execution_through(&mut session, terminal_at_utc_ms),
+            Err(MarketEventErrorV1::Session(SessionError::Durability(message)))
+                if message.contains("SQLite")
+        ));
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(terminal_query_projections_clone_count_for_tests(), 0);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(
+            serde_json::to_vec(&session.durable_checkpoint())
+                .expect("序列化 AutoRedeem SQLite 失败后状态"),
+            before_failure_bytes
+        );
+        assert_eq!(
+            session.session.pending_terminal_projection_condition_ids(),
+            before_pending
+        );
+        assert_eq!(
+            Arc::as_ptr(&session.query_state.terminal_projections),
+            before_query_pointer
+        );
+        assert_eq!(
+            session
+                .platform_market_state(&condition_id)
+                .expect("SQLite 失败后公开市场仍存在")
+                .lifecycle_phase(),
+            MarketLifecyclePhaseV1::PostEndPendingResolution
+        );
+        assert_eq!(
+            session
+                .simulated_fill(&platform_order_id)
+                .expect("SQLite 失败后成交仍存在")
+                .finality_state(),
+            Some(TradeFinalityStateV1::Mined)
+        );
+        assert_eq!(session.query_projection_revision(), before_revision);
+        assert_eq!(coordinator.cursor_for_tests(), before_failure_cursor);
+        assert_eq!(
+            (
+                coordinator.encoded_transaction_count_for_tests,
+                coordinator.append_attempt_count_for_tests,
+                coordinator.append_success_count_for_tests,
+            ),
+            (1, 1, 0)
+        );
+        assert!(
+            coordinator
+                .store
+                .recover::<
+                    DurableLogicalTransactionEvidenceV2,
+                    DurableRecoveryOperationV2,
+                    RecoverablePaperApplicationCheckpointV2,
+                >()
+                .expect("读取 AutoRedeem INSERT 失败日志")
+                .tail
+                .is_empty()
+        );
+
+        coordinator
+            .store
+            .remove_transaction_log_insert_failure_for_tests()
+            .expect("移除 AutoRedeem SQLite INSERT 失败触发器");
+        reset_request_registration_preparation_counts_v2();
+        reset_execution_state_clone_count_for_tests();
+        reset_terminal_query_projections_clone_count_for_tests();
+        assert_eq!(
+            coordinator.drive_scheduled_execution_through(&mut session, terminal_at_utc_ms),
+            Ok(ScheduledExecutionDriveDispositionV2::Advanced)
+        );
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(terminal_query_projections_clone_count_for_tests(), 0);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(
+            (
+                coordinator.encoded_transaction_count_for_tests,
+                coordinator.append_attempt_count_for_tests,
+                coordinator.append_success_count_for_tests,
+            ),
+            (2, 2, 1)
+        );
+        assert_eq!(
+            session
+                .simulated_fill(&platform_order_id)
+                .expect("AutoRedeem 成功后成交仍存在")
+                .finality_state(),
+            Some(TradeFinalityStateV1::Confirmed)
+        );
+        assert_eq!(
+            session
+                .platform_market_state(&condition_id)
+                .expect("AutoRedeem 成功后公开市场仍存在")
+                .lifecycle_phase(),
+            MarketLifecyclePhaseV1::ResolutionTerminal
+        );
+        assert_eq!(session.query_projection_revision(), before_revision + 1);
+        assert!(
+            session
+                .session
+                .pending_terminal_projection_condition_ids()
+                .is_empty()
+        );
+        assert_eq!(
+            Arc::as_ptr(&session.query_state.terminal_projections),
+            before_query_pointer
+        );
+        let terminal_order = session
+            .query_state
+            .terminal_projections
+            .orders
+            .get(&platform_order_id)
+            .expect("query 必须提交终态订单 after-image");
+        let terminal_trade = session
+            .query_state
+            .terminal_projections
+            .trades
+            .get(&trade_id)
+            .expect("query 必须提交终态成交 after-image");
+        assert_eq!(
+            terminal_order,
+            &project_order(
+                session
+                    .session
+                    .execution_state()
+                    .order(&platform_order_id)
+                    .expect("matching 必须保留终态订单")
+            )
+            .expect("投影终态订单")
+        );
+        assert_eq!(
+            terminal_trade,
+            &project_trade(
+                session
+                    .session
+                    .execution_state()
+                    .fills()
+                    .find(|fill| fill.trade_id == trade_id)
+                    .expect("matching 必须保留终态成交")
+            )
+            .expect("投影终态成交")
+        );
+        assert_eq!(
+            terminal_trade.status.known,
+            Some(SimulatedTradeKnownStatusV1::Confirmed)
+        );
+
+        let online_checkpoint = session.durable_checkpoint();
+        let recovered = coordinator
+            .store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("恢复 AutoRedeem coordinator 日志");
+        assert_eq!(recovered.tail.len(), 1);
+        let tail = &recovered.tail[0];
+        assert_eq!(
+            tail.recovery_operation,
+            DurableRecoveryOperationV2::DriveExecutionThrough {
+                effective_processing_at_utc_ms: terminal_at_utc_ms,
+            }
+        );
+        assert!(matches!(
+            &tail.evidence.fact,
+            DurableTransactionFactV1::ExecutionAdvanced { session_id: actual }
+                if actual == &session_id
+        ));
+        assert!(tail.evidence.logical_action_results.is_empty());
+        assert_eq!(
+            tail.evidence.query_projection_revision,
+            Some(before_revision + 1)
+        );
+        assert_eq!(
+            tail.evidence.logical_platform_driven_through_utc_ms,
+            Some(terminal_at_utc_ms)
+        );
+        assert_eq!(tail.evidence.account_deltas.len(), 3);
+        assert_eq!(
+            tail.evidence
+                .account_deltas
+                .iter()
+                .map(|delta| delta.reason)
+                .collect::<Vec<_>>(),
+            vec![
+                contracts::PlatformAccountDeltaReasonV1::FillFinalityEconomicApplied,
+                contracts::PlatformAccountDeltaReasonV1::TakerRebateAccrualApplied,
+                contracts::PlatformAccountDeltaReasonV1::AutoRedeemApplied,
+            ]
+        );
+        for predecessor_pair in tail.evidence.account_deltas.windows(2) {
+            let [previous, current] = predecessor_pair else {
+                unreachable!()
+            };
+            assert_eq!(
+                current.account_transition_seq,
+                previous.account_transition_seq + 1
+            );
+            assert_eq!(
+                current.predecessor,
+                contracts::PlatformAccountDeltaPredecessorV1::AccountDelta {
+                    delta_id: previous.delta_id.clone(),
+                    delta_sha256: previous.delta_sha256.clone(),
+                    account_transition_seq: previous.account_transition_seq,
+                }
+            );
+        }
+
+        let mut causal_drafts = tail
+            .evidence
+            .private_output_drafts
+            .iter()
+            .map(|draft| {
+                let DurablePrivateOutputDraftV1::Lifecycle { draft } = draft else {
+                    panic!("AutoRedeem scheduled 事务只能形成生命周期草稿")
+                };
+                (draft.timing().private_emission_sequence, draft)
+            })
+            .collect::<Vec<_>>();
+        causal_drafts.sort_by_key(|(sequence, _)| *sequence);
+        assert_eq!(causal_drafts.len(), 3);
+        assert!(
+            causal_drafts
+                .windows(2)
+                .all(|pair| pair[1].0 == pair[0].0 + 1)
+        );
+        assert!(matches!(
+            causal_drafts.as_slice(),
+            [
+                (
+                    _,
+                    LifecycleFeedbackDraftV1::Trade(TradeLifecycleFeedbackDraftV1 {
+                        status: SimulatedTradeStatusV1 {
+                            known: Some(SimulatedTradeKnownStatusV1::Confirmed),
+                            ..
+                        },
+                        ..
+                    })
+                ),
+                (
+                    _,
+                    LifecycleFeedbackDraftV1::Settlement(SettlementLifecycleFeedbackDraftV1 {
+                        event: SettlementLifecycleEventDraftV1::TakerRebateAccrualApplied { .. },
+                        ..
+                    })
+                ),
+                (
+                    _,
+                    LifecycleFeedbackDraftV1::Settlement(SettlementLifecycleFeedbackDraftV1 {
+                        event: SettlementLifecycleEventDraftV1::AutoRedeemApplied { .. },
+                        ..
+                    })
+                )
+            ]
+        ));
+        assert!(
+            causal_drafts.iter().all(|(_, draft)| {
+                draft.timing().platform_event_at_utc_ms == terminal_at_utc_ms
+            })
+        );
+
+        let before_retry_bytes = serde_json::to_vec(&session.durable_checkpoint())
+            .expect("序列化 AutoRedeem 同 cutoff 重试基线");
+        let before_retry_cursor = coordinator.cursor_for_tests();
+        let before_retry_counts = (
+            coordinator.encoded_transaction_count_for_tests,
+            coordinator.append_attempt_count_for_tests,
+            coordinator.append_success_count_for_tests,
+        );
+        reset_request_registration_preparation_counts_v2();
+        reset_execution_state_clone_count_for_tests();
+        reset_terminal_query_projections_clone_count_for_tests();
+        assert_eq!(
+            coordinator.drive_scheduled_execution_through(&mut session, terminal_at_utc_ms),
+            Ok(ScheduledExecutionDriveDispositionV2::NoStateChange)
+        );
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(terminal_query_projections_clone_count_for_tests(), 0);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(
+            serde_json::to_vec(&session.durable_checkpoint())
+                .expect("序列化 AutoRedeem 同 cutoff 重试后状态"),
+            before_retry_bytes
+        );
+        assert_eq!(coordinator.cursor_for_tests(), before_retry_cursor);
+        assert_eq!(
+            (
+                coordinator.encoded_transaction_count_for_tests,
+                coordinator.append_attempt_count_for_tests,
+                coordinator.append_success_count_for_tests,
+            ),
+            before_retry_counts
+        );
+        assert_eq!(
+            coordinator
+                .store
+                .recover::<
+                    DurableLogicalTransactionEvidenceV2,
+                    DurableRecoveryOperationV2,
+                    RecoverablePaperApplicationCheckpointV2,
+                >()
+                .expect("读取 AutoRedeem 同 cutoff 重试日志")
+                .tail
+                .len(),
+            1
+        );
+
+        let mut recovered_checkpoint = recovered
+            .checkpoint
+            .expect("AutoRedeem 恢复必须有正式应用检查点")
+            .checkpoint;
+        recovered_checkpoint
+            .validate()
+            .expect("AutoRedeem 正式应用检查点必须有效");
+        let session_checkpoint = recovered_checkpoint
+            .run_checkpoint
+            .sessions
+            .remove(&session_id)
+            .expect("AutoRedeem 正式应用检查点必须包含目标会话");
+        let evicted = recovered_checkpoint
+            .evicted_markets
+            .remove(&session_id)
+            .unwrap_or_default();
+        let (restored_baseline, downstream) =
+            ExecutionSessionStateV1::restore(&process.inner, session_checkpoint, &evicted)
+                .expect("恢复 AutoRedeem terminal 前基线");
+        assert_eq!(downstream, None);
+        reset_request_registration_preparation_counts_v2();
+        reset_execution_state_clone_count_for_tests();
+        reset_terminal_query_projections_clone_count_for_tests();
+        let replayed = replay_execution_operation_v2(
+            restored_baseline,
+            &tail.evidence,
+            tail.recovery_operation,
+        )
+        .expect("用 shared sparse core 重放 AutoRedeem 尾日志");
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(terminal_query_projections_clone_count_for_tests(), 0);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(replayed.checkpoint(None), online_checkpoint);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recoverable_paper_v2_scheduled_collision_orders_gtd_finality_and_rebate_by_emission_sequence()
+     {
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            scenario as long_scenario, session_spec as long_session_spec,
+        };
+
+        const MATCHED_AT_UTC_MS: i64 = 150_250;
+        const COLLISION_AT_UTC_MS: i64 = 87_000_000;
+        const LATER_GTD_AT_UTC_MS: i64 = COLLISION_AT_UTC_MS + 1_000;
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile =
+            load_embedded_proxy_latency_profile().expect("加载 scheduled 碰撞测试时延配置");
+        let scenario = long_scenario();
+        let policy = policy_for_tests(
+            "paper-v2-scheduled-collision-policy",
+            &[
+                (TradeFinalityStateV1::Matched, 0),
+                (TradeFinalityStateV1::Mined, 10),
+                (
+                    TradeFinalityStateV1::Confirmed,
+                    COLLISION_AT_UTC_MS - MATCHED_AT_UTC_MS,
+                ),
+            ],
+            2,
+            Vec::new(),
+        );
+        let mut process = SimExecutionProcessV1::try_new(
+            "component-test-run".to_owned(),
+            policy,
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        )
+        .expect("创建 scheduled 碰撞 Paper 进程");
+        let mut spec = long_session_spec(
+            &scenario,
+            SimCallerRoleV1::Paper,
+            "paper-v2-scheduled-collision",
+        );
+        spec.response_outbox_capacity =
+            std::num::NonZeroUsize::new(16).expect("scheduled 碰撞测试容量为正");
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "1000");
+
+        let fak = session
+            .post_order(PostOrderRequestV1 {
+                context: context_for_arrival(
+                    &session,
+                    &profile,
+                    "paper-v2-scheduled-collision-fak",
+                    1,
+                    150_000,
+                ),
+                idempotency_key: "paper-v2-scheduled-collision-fak-idempotency".to_owned(),
+                item: PostOrderItemV1 {
+                    item_id: "paper-v2-scheduled-collision-fak-item".to_owned(),
+                    order: SimBuyOrderV1 {
+                        condition_id: long_market().condition_id.clone(),
+                        token_id: long_asset("1", 0, "Up").token_id,
+                        kind: SimBuyOrderKindV1::FakMarket {
+                            spend_pusd: Decimal::new(600, 0),
+                            worst_price_pusd_per_share: Decimal::new(6, 1),
+                        },
+                    },
+                },
+            })
+            .expect("登记 scheduled 碰撞正手续费 FAK");
+        assert_eq!(fak.item.effective_processing_at_utc_ms, MATCHED_AT_UTC_MS);
+        assert_eq!(
+            session.apply_closed_market_event_bucket(ClosedMarketEventBucketV1::public(
+                MATCHED_AT_UTC_MS,
+                next_visibility_position,
+                next_visibility_position,
+                MillisecondBucketClosureV1::NextEventAt(MATCHED_AT_UTC_MS + 1),
+                Vec::new(),
+            )),
+            Ok(MarketBucketApplyDispositionV1::Applied)
+        );
+        assert_eq!(
+            session.drive_next_execution_action_through(MATCHED_AT_UTC_MS),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        let fill = session
+            .session
+            .execution_state()
+            .fills()
+            .next()
+            .expect("scheduled 碰撞 FAK 必须形成唯一成交")
+            .clone();
+        assert_eq!(fill.matched_at_utc_ms, MATCHED_AT_UTC_MS);
+        assert_eq!(fill.liquidity_role, SimLiquidityRoleV1::Taker);
+        assert_eq!(fill.base_units, 1_000_000_000);
+        assert_eq!(fill.quote_units, 600_000_000);
+        assert!(fill.immediate_taker_fee_units > 0);
+        let platform_order_id = fill.platform_order_id.clone();
+
+        let gtd_arrival_at_utc_ms = 200_000;
+        let gtds = session
+            .post_orders(PostOrdersRequestV1 {
+                context: context_for_arrival(
+                    &session,
+                    &profile,
+                    "paper-v2-scheduled-collision-gtds",
+                    2,
+                    gtd_arrival_at_utc_ms,
+                ),
+                idempotency_key: "paper-v2-scheduled-collision-gtds-idempotency".to_owned(),
+                items: [
+                    (
+                        "paper-v2-scheduled-collision-gtd-at-t",
+                        COLLISION_AT_UTC_MS + 999,
+                    ),
+                    (
+                        "paper-v2-scheduled-collision-gtd-after-t",
+                        LATER_GTD_AT_UTC_MS + 999,
+                    ),
+                ]
+                .into_iter()
+                .map(|(item_id, expires_at_utc_ms)| PostOrderItemV1 {
+                    item_id: item_id.to_owned(),
+                    order: SimBuyOrderV1 {
+                        condition_id: long_market().condition_id.clone(),
+                        token_id: long_asset("1", 0, "Up").token_id,
+                        kind: SimBuyOrderKindV1::GtdLimit {
+                            limit_price_pusd_per_share: Decimal::new(4, 1),
+                            size_shares: Decimal::new(5, 0),
+                            post_only: true,
+                            expires_at_utc_ms,
+                        },
+                    },
+                })
+                .collect(),
+            })
+            .expect("登记两个未成交 scheduled 碰撞 GTD");
+        assert!(
+            gtds.items
+                .iter()
+                .all(|item| item.effective_processing_at_utc_ms == gtd_arrival_at_utc_ms)
+        );
+        assert_eq!(
+            session.apply_closed_market_event_bucket(ClosedMarketEventBucketV1::public(
+                gtd_arrival_at_utc_ms,
+                next_visibility_position,
+                next_visibility_position,
+                MillisecondBucketClosureV1::NextEventAt(gtd_arrival_at_utc_ms + 1),
+                Vec::new(),
+            )),
+            Ok(MarketBucketApplyDispositionV1::Applied)
+        );
+        assert_eq!(
+            session.drive_next_execution_action_through(gtd_arrival_at_utc_ms),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: false,
+            })
+        );
+        assert_eq!(
+            session.drive_next_execution_action_through(gtd_arrival_at_utc_ms),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        assert_eq!(
+            session.next_order_deadline_at_utc_ms(),
+            Some(COLLISION_AT_UTC_MS)
+        );
+
+        let market_end_at_utc_ms = long_market().window.end_at_utc_ms;
+        assert_eq!(market_end_at_utc_ms, 500_000);
+        assert_eq!(
+            session.apply_closed_market_event_bucket(ClosedMarketEventBucketV1::public(
+                market_end_at_utc_ms,
+                next_visibility_position,
+                next_visibility_position,
+                MillisecondBucketClosureV1::NextEventAt(market_end_at_utc_ms + 1),
+                Vec::new(),
+            )),
+            Ok(MarketBucketApplyDispositionV1::Applied)
+        );
+        assert_eq!(
+            session
+                .simulated_fill(&platform_order_id)
+                .expect("市场结束后 scheduled 碰撞成交仍存在")
+                .finality_state(),
+            Some(TradeFinalityStateV1::Mined)
+        );
+        assert_eq!(
+            session
+                .session
+                .execution_state()
+                .next_scheduled_finality_at_utc_ms(),
+            Some(COLLISION_AT_UTC_MS)
+        );
+        let private_cleanup_at_utc_ms = session
+            .session
+            .recovered_pending_private_facts()
+            .iter()
+            .map(|(_, received_at_utc_ms, _)| *received_at_utc_ms)
+            .max()
+            .expect("scheduled 碰撞必须有 coordinator 前私有输出");
+        assert!(private_cleanup_at_utc_ms < COLLISION_AT_UTC_MS);
+        session.prepare_private_delivery_through_for_tests(private_cleanup_at_utc_ms);
+        let mut delivered_before_checkpoint = 0;
+        loop {
+            match session
+                .drive_private_delivery_through(private_cleanup_at_utc_ms)
+                .expect("清理 scheduled 碰撞 coordinator 前私有输出")
+            {
+                SubmissionDeliveryDispositionV1::Delivered => {
+                    delivered_before_checkpoint += 1;
+                }
+                SubmissionDeliveryDispositionV1::NoVisibleResponse => break,
+                disposition => panic!("scheduled 碰撞接受桥返回意外结果：{disposition:?}"),
+            }
+        }
+        assert!(delivered_before_checkpoint > 0);
+        assert!(session.direct_response_outbox.entries.is_empty());
+        assert!(session.lifecycle_outbox.entries.is_empty());
+        assert!(session.lifecycle_outbox.batches.is_empty());
+        assert!(session.lifecycle_outbox.work_batch_ids.is_empty());
+        session
+            .session
+            .advance_public_visibility_through(LATER_GTD_AT_UTC_MS, next_visibility_position)
+            .expect("闭合 scheduled 碰撞完整公开前缀");
+
+        let before_account_transition_seq = session
+            .session
+            .execution_state()
+            .account()
+            .next_account_transition_seq();
+        let before_account_summary_sha256 = session
+            .session
+            .execution_state()
+            .account()
+            .account_summary_sha256()
+            .clone();
+        let before_private_emission_sequence = session
+            .session
+            .next_private_emission_sequence()
+            .expect("取得 scheduled 碰撞首个私有发射序号");
+        let application_checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
+            &process,
+            &session,
+            rules.as_ref(),
+        );
+        let session_id = session.session_spec().session_id.clone();
+        let restored_probe = restore_recoverable_paper_application_session_for_tests(
+            &process,
+            application_checkpoint.clone(),
+            &session_id,
+        );
+        assert_eq!(
+            restored_probe.checkpoint(None),
+            session.durable_checkpoint()
+        );
+        drop(restored_probe);
+
+        let directory = tempfile::tempdir().expect("创建 scheduled 碰撞 coordinator 日志目录");
+        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
+            directory.path().join("paper-v2-scheduled-collision"),
+            &session,
+            &application_checkpoint,
+        )
+        .expect("创建 scheduled 碰撞 coordinator");
+        drop(application_checkpoint);
+
+        let before_failure_bytes = serde_json::to_vec(&session.durable_checkpoint())
+            .expect("序列化 scheduled 碰撞 SQLite 失败基线");
+        let before_failure_cursor = coordinator.cursor_for_tests();
+        coordinator
+            .store
+            .install_transaction_log_insert_failure_for_tests()
+            .expect("安装 scheduled 碰撞 SQLite INSERT 失败触发器");
+        reset_request_registration_preparation_counts_v2();
+        reset_execution_state_clone_count_for_tests();
+        let insert_failure =
+            coordinator.drive_scheduled_execution_through(&mut session, LATER_GTD_AT_UTC_MS);
+        assert!(
+            matches!(
+                &insert_failure,
+                Err(MarketEventErrorV1::Session(SessionError::Durability(message)))
+                    if message.contains("SQLite")
+            ),
+            "scheduled 碰撞 INSERT 失败返回意外结果：{insert_failure:?}"
+        );
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(
+            serde_json::to_vec(&session.durable_checkpoint())
+                .expect("序列化 scheduled 碰撞 SQLite 失败后状态"),
+            before_failure_bytes
+        );
+        assert_eq!(coordinator.cursor_for_tests(), before_failure_cursor);
+        assert_eq!(
+            (
+                coordinator.encoded_transaction_count_for_tests,
+                coordinator.append_attempt_count_for_tests,
+                coordinator.append_success_count_for_tests,
+            ),
+            (1, 1, 0)
+        );
+        assert!(
+            coordinator
+                .store
+                .recover::<
+                    DurableLogicalTransactionEvidenceV2,
+                    DurableRecoveryOperationV2,
+                    RecoverablePaperApplicationCheckpointV2,
+                >()
+                .expect("读取 scheduled 碰撞 INSERT 失败日志")
+                .tail
+                .is_empty()
+        );
+
+        coordinator
+            .store
+            .remove_transaction_log_insert_failure_for_tests()
+            .expect("移除 scheduled 碰撞 SQLite INSERT 失败触发器");
+        reset_request_registration_preparation_counts_v2();
+        reset_execution_state_clone_count_for_tests();
+        assert_eq!(
+            coordinator.drive_scheduled_execution_through(&mut session, LATER_GTD_AT_UTC_MS),
+            Ok(ScheduledExecutionDriveDispositionV2::Advanced)
+        );
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(
+            (
+                coordinator.encoded_transaction_count_for_tests,
+                coordinator.append_attempt_count_for_tests,
+                coordinator.append_success_count_for_tests,
+            ),
+            (2, 2, 1)
+        );
+        assert_eq!(session.next_order_deadline_at_utc_ms(), None);
+        assert_eq!(
+            session
+                .simulated_fill(&platform_order_id)
+                .expect("scheduled 碰撞成功后成交仍存在")
+                .finality_state(),
+            Some(TradeFinalityStateV1::Confirmed)
+        );
+
+        let online_checkpoint = session.durable_checkpoint();
+        let recovered = coordinator
+            .store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("恢复 scheduled 碰撞 coordinator 日志");
+        assert_eq!(recovered.tail.len(), 1);
+        let tail = recovered.tail[0].clone();
+        assert_eq!(
+            tail.recovery_operation,
+            DurableRecoveryOperationV2::DriveExecutionThrough {
+                effective_processing_at_utc_ms: LATER_GTD_AT_UTC_MS,
+            }
+        );
+        assert!(matches!(
+            &tail.evidence.fact,
+            DurableTransactionFactV1::ExecutionAdvanced { session_id: actual }
+                if actual == &session_id
+        ));
+        assert!(tail.evidence.logical_action_results.is_empty());
+
+        let mut causal_drafts = tail
+            .evidence
+            .private_output_drafts
+            .iter()
+            .map(|durable| {
+                let DurablePrivateOutputDraftV1::Lifecycle { draft } = durable else {
+                    panic!("scheduled 碰撞事务只能形成生命周期草稿")
+                };
+                let kind = match draft {
+                    LifecycleFeedbackDraftV1::Order(OrderLifecycleFeedbackDraftV1 {
+                        event_kind: OrderLifecycleEventKindV1::GtdExpired,
+                        ..
+                    }) => "GTD",
+                    LifecycleFeedbackDraftV1::Trade(TradeLifecycleFeedbackDraftV1 {
+                        status:
+                            SimulatedTradeStatusV1 {
+                                known: Some(SimulatedTradeKnownStatusV1::Confirmed),
+                                ..
+                            },
+                        ..
+                    }) => "CONFIRMED",
+                    LifecycleFeedbackDraftV1::Settlement(SettlementLifecycleFeedbackDraftV1 {
+                        event: SettlementLifecycleEventDraftV1::TakerRebateAccrualApplied { .. },
+                        ..
+                    }) => "TAKER_ACCRUAL",
+                    LifecycleFeedbackDraftV1::Settlement(SettlementLifecycleFeedbackDraftV1 {
+                        event:
+                            SettlementLifecycleEventDraftV1::TakerRebateDayFinalized {
+                                account_delta,
+                                ..
+                            },
+                        ..
+                    }) => {
+                        assert!(
+                            account_delta.is_none(),
+                            "整数可付款返佣的 DayFinalized 草稿不得复用账户变化"
+                        );
+                        "TAKER_DAY_FINALIZED"
+                    }
+                    LifecycleFeedbackDraftV1::Settlement(SettlementLifecycleFeedbackDraftV1 {
+                        event: SettlementLifecycleEventDraftV1::TakerRebatePaid { .. },
+                        ..
+                    }) => "TAKER_PAID",
+                    other => panic!("scheduled 碰撞出现意外生命周期草稿：{other:#?}"),
+                };
+                (
+                    draft.timing().private_emission_sequence,
+                    draft.timing().platform_event_at_utc_ms,
+                    kind,
+                )
+            })
+            .collect::<Vec<_>>();
+        causal_drafts.sort_by_key(|(sequence, _, _)| *sequence);
+        assert_eq!(causal_drafts.len(), 6);
+        assert_eq!(
+            causal_drafts[0].0, before_private_emission_sequence,
+            "scheduled 碰撞私有发射序号必须紧接检查点"
+        );
+        assert!(
+            causal_drafts
+                .windows(2)
+                .all(|pair| pair[1].0 == pair[0].0 + 1),
+            "scheduled 碰撞私有发射序号必须连续"
+        );
+        assert_eq!(
+            (causal_drafts[1].1, causal_drafts[1].2),
+            (COLLISION_AT_UTC_MS, "CONFIRMED"),
+            "第二项必须是同刻 Confirmed，不能是稍后的 GTD"
+        );
+        assert_eq!(
+            causal_drafts
+                .iter()
+                .map(|(_, at, kind)| (*at, *kind))
+                .collect::<Vec<_>>(),
+            vec![
+                (COLLISION_AT_UTC_MS, "GTD"),
+                (COLLISION_AT_UTC_MS, "CONFIRMED"),
+                (COLLISION_AT_UTC_MS, "TAKER_ACCRUAL"),
+                (COLLISION_AT_UTC_MS, "TAKER_DAY_FINALIZED"),
+                (COLLISION_AT_UTC_MS, "TAKER_PAID"),
+                (LATER_GTD_AT_UTC_MS, "GTD"),
+            ]
+        );
+
+        assert_eq!(
+            tail.evidence
+                .account_deltas
+                .iter()
+                .map(|delta| (delta.platform_effective_at_utc_ms, delta.reason))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    COLLISION_AT_UTC_MS,
+                    contracts::PlatformAccountDeltaReasonV1::GtdExpirationEncumbranceReleased,
+                ),
+                (
+                    COLLISION_AT_UTC_MS,
+                    contracts::PlatformAccountDeltaReasonV1::FillFinalityEconomicApplied,
+                ),
+                (
+                    COLLISION_AT_UTC_MS,
+                    contracts::PlatformAccountDeltaReasonV1::TakerRebateAccrualApplied,
+                ),
+                (
+                    COLLISION_AT_UTC_MS,
+                    contracts::PlatformAccountDeltaReasonV1::TakerRebatePaid,
+                ),
+                (
+                    LATER_GTD_AT_UTC_MS,
+                    contracts::PlatformAccountDeltaReasonV1::GtdExpirationEncumbranceReleased,
+                ),
+            ]
+        );
+        assert_eq!(tail.evidence.account_deltas.len(), 5);
+        assert_eq!(
+            tail.evidence.account_deltas[0].account_transition_seq,
+            before_account_transition_seq
+        );
+        assert_eq!(
+            tail.evidence.account_deltas[0].account_summary_before_sha256,
+            before_account_summary_sha256
+        );
+        for pair in tail.evidence.account_deltas.windows(2) {
+            let [previous, current] = pair else {
+                unreachable!()
+            };
+            assert_eq!(
+                current.account_transition_seq,
+                previous.account_transition_seq + 1
+            );
+            assert_eq!(
+                current.predecessor,
+                contracts::PlatformAccountDeltaPredecessorV1::AccountDelta {
+                    delta_id: previous.delta_id.clone(),
+                    delta_sha256: previous.delta_sha256.clone(),
+                    account_transition_seq: previous.account_transition_seq,
+                }
+            );
+            assert_eq!(
+                current.account_summary_before_sha256,
+                previous.account_summary_after_sha256
+            );
+        }
+        assert_eq!(
+            tail.evidence
+                .account_deltas
+                .last()
+                .expect("scheduled 碰撞必须有末项账户变化")
+                .account_summary_after_sha256,
+            *session
+                .session
+                .execution_state()
+                .account()
+                .account_summary_sha256()
+        );
+
+        let before_retry_bytes = serde_json::to_vec(&session.durable_checkpoint())
+            .expect("序列化 scheduled 碰撞同 cutoff 重试基线");
+        let before_retry_cursor = coordinator.cursor_for_tests();
+        let before_retry_counts = (
+            coordinator.encoded_transaction_count_for_tests,
+            coordinator.append_attempt_count_for_tests,
+            coordinator.append_success_count_for_tests,
+        );
+        reset_request_registration_preparation_counts_v2();
+        reset_execution_state_clone_count_for_tests();
+        assert_eq!(
+            coordinator.drive_scheduled_execution_through(&mut session, LATER_GTD_AT_UTC_MS),
+            Ok(ScheduledExecutionDriveDispositionV2::NoStateChange)
+        );
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(
+            serde_json::to_vec(&session.durable_checkpoint())
+                .expect("序列化 scheduled 碰撞同 cutoff 重试后状态"),
+            before_retry_bytes
+        );
+        assert_eq!(coordinator.cursor_for_tests(), before_retry_cursor);
+        assert_eq!(
+            (
+                coordinator.encoded_transaction_count_for_tests,
+                coordinator.append_attempt_count_for_tests,
+                coordinator.append_success_count_for_tests,
+            ),
+            before_retry_counts
+        );
+        assert_eq!(
+            coordinator
+                .store
+                .recover::<
+                    DurableLogicalTransactionEvidenceV2,
+                    DurableRecoveryOperationV2,
+                    RecoverablePaperApplicationCheckpointV2,
+                >()
+                .expect("读取 scheduled 碰撞同 cutoff 重试日志")
+                .tail
+                .len(),
+            1
+        );
+
+        let restored_baseline = restore_recoverable_paper_application_session_for_tests(
+            &process,
+            recovered
+                .checkpoint
+                .expect("scheduled 碰撞恢复必须有正式应用检查点")
+                .checkpoint,
+            &session_id,
+        );
+        reset_request_registration_preparation_counts_v2();
+        reset_execution_state_clone_count_for_tests();
+        let replayed = replay_execution_operation_v2(
+            restored_baseline,
+            &tail.evidence,
+            tail.recovery_operation,
+        )
+        .expect("用 shared sparse core 重放 scheduled 碰撞尾日志");
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(replayed.checkpoint(None), online_checkpoint);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paper_v2_cancel_orders_tail_replays_two_live_targets_exactly() {
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            scenario as long_scenario, session_spec as long_session_spec,
+        };
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载 Paper V2 时延配置");
+        let scenario = long_scenario();
+        let mut process =
+            execution_process_for_tests(rules, Arc::clone(&profile), Arc::clone(&scenario));
+        let spec = long_session_spec(&scenario, SimCallerRoleV1::Paper, "paper-v2-cancel-orders");
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
+        let post_registration = session
+            .post_orders(PostOrdersRequestV1 {
+                context: context_for_arrival(
+                    &session,
+                    &profile,
+                    "paper-v2-cancel-orders-source",
+                    1,
+                    150_000,
+                ),
+                idempotency_key: "paper-v2-cancel-orders-source-idempotency".to_owned(),
+                items: (0..2)
+                    .map(|ordinal| PostOrderItemV1 {
+                        item_id: format!("paper-v2-cancel-orders-source-{ordinal}"),
+                        order: SimBuyOrderV1 {
+                            condition_id: long_market().condition_id.clone(),
+                            token_id: long_asset("1", 0, "Up").token_id,
+                            kind: SimBuyOrderKindV1::GtcLimit {
+                                limit_price_pusd_per_share: Decimal::new(4, 1),
+                                size_shares: Decimal::new(5, 0),
+                                post_only: true,
+                            },
+                        },
+                    })
+                    .collect(),
+            })
+            .expect("登记两个 Paper GTC 请求项");
+        let post_at = post_registration.items[0].effective_processing_at_utc_ms;
+        assert!(
+            post_registration
+                .items
+                .iter()
+                .all(|item| item.effective_processing_at_utc_ms == post_at)
+        );
+        session
+            .apply_closed_market_event_bucket(ClosedMarketEventBucketV1::public(
+                post_at,
+                next_visibility_position,
+                next_visibility_position,
+                MillisecondBucketClosureV1::NextEventAt(post_at + 1),
+                Vec::new(),
+            ))
+            .expect("闭合两个 GTC 的公开前缀");
+        assert_eq!(
+            session.drive_next_execution_action_through(post_at),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: false,
+            })
+        );
+        assert_eq!(
+            session.drive_next_execution_action_through(post_at),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        let order_ids = session
+            .session
+            .execution_state()
+            .active_order_ids()
+            .expect("读取两个活动订单");
+        assert_eq!(order_ids.len(), 2);
+        assert_eq!(session.query_projection_revision(), 2);
+        assert_eq!(session.available_pusd(), Decimal::new(996, 0));
+        assert_eq!(session.principal_encumbered_pusd(), Decimal::new(4, 0));
+        let private_delivery_through = session
+            .session
+            .recovered_pending_private_facts()
+            .iter()
+            .map(|(_, received_at_utc_ms, _)| *received_at_utc_ms)
+            .max()
+            .expect("提交订单必须形成私有输出");
+        assert_eq!(
+            session
+                .drive_private_delivery_after_platform_through_for_tests(private_delivery_through,),
+            Ok(SubmissionDeliveryDispositionV1::Delivered)
+        );
+
+        let cancel_arrival = private_delivery_through + 10_000;
+        let cancel_registration = session
+            .cancel_orders(CancelOrdersRequestV1 {
+                context: context_for_arrival(
+                    &session,
+                    &profile,
+                    "paper-v2-cancel-orders-request",
+                    2,
+                    cancel_arrival,
+                ),
+                idempotency_key: "paper-v2-cancel-orders-idempotency".to_owned(),
+                items: order_ids
+                    .iter()
+                    .enumerate()
+                    .map(|(ordinal, platform_order_id)| CancelOrderItemV1 {
+                        item_id: format!("paper-v2-cancel-orders-item-{ordinal}"),
+                        platform_order_id: platform_order_id.clone(),
+                    })
+                    .collect(),
+            })
+            .expect("登记两个真实目标的 Paper 批撤");
+        assert_eq!(cancel_registration.receipt.scheduled_action_count, 2);
+        let cancel_at = cancel_registration.items[0].effective_processing_at_utc_ms;
+        assert!(
+            cancel_registration
+                .items
+                .iter()
+                .all(|item| item.effective_processing_at_utc_ms == cancel_at)
+        );
+        session
+            .apply_closed_market_event_bucket(ClosedMarketEventBucketV1::public(
+                cancel_at,
+                next_visibility_position,
+                next_visibility_position,
+                MillisecondBucketClosureV1::NextEventAt(cancel_at + 1),
+                Vec::new(),
+            ))
+            .expect("闭合批撤公开前缀");
+        let baseline_state = session.runtime_state();
+        let baseline_checkpoint = baseline_state.checkpoint(None);
+        let prepared = prepare_execution_transition_v2(baseline_state.clone(), cancel_at)
+            .expect("准备 Paper V2 批撤候选");
+        assert_eq!(
+            prepared.disposition,
+            SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            }
+        );
+        let prepared_evidence = prepared
+            .evidence
+            .as_ref()
+            .expect("批撤必须形成 V2 逻辑证据");
+        assert_eq!(prepared_evidence.logical_action_results.len(), 2);
+        let mut action_ordinals = prepared_evidence
+            .logical_action_results
+            .iter()
+            .map(|result| result.batch_item_ordinal)
+            .collect::<Vec<_>>();
+        action_ordinals.sort_unstable();
+        assert_eq!(action_ordinals, vec![0, 1]);
+        assert_eq!(prepared_evidence.private_output_drafts.len(), 3);
+        assert_eq!(
+            prepared_evidence
+                .private_output_drafts
+                .iter()
+                .filter(|draft| matches!(
+                    draft,
+                    DurablePrivateOutputDraftV1::Lifecycle {
+                        draft: LifecycleFeedbackDraftV1::Order(order),
+                    } if order.event_kind == OrderLifecycleEventKindV1::CallerCanceled
+                ))
+                .count(),
+            2
+        );
+        assert_eq!(
+            prepared_evidence
+                .private_output_drafts
+                .iter()
+                .filter(|draft| matches!(
+                    draft,
+                    DurablePrivateOutputDraftV1::Direct { draft }
+                        if draft.method == DirectResponseMethodV1::CancelOrders
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(prepared_evidence.account_deltas.len(), 2);
+        assert_eq!(prepared_evidence.query_projection_revision, Some(3));
+        assert_eq!(
+            prepared
+                .candidate_state
+                .session
+                .execution_state()
+                .available_pusd()
+                .expect("候选可用余额适合 Decimal"),
+            Decimal::new(1_000, 0)
+        );
+        assert_eq!(
+            prepared
+                .candidate_state
+                .session
+                .execution_state()
+                .principal_encumbered_pusd()
+                .expect("候选占用余额适合 Decimal"),
+            Decimal::ZERO
+        );
+
+        assert_eq!(
+            session.drive_next_execution_action_through(cancel_at),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        let online_checkpoint = session.durable_checkpoint();
+        assert_eq!(prepared.candidate_state.checkpoint(None), online_checkpoint);
+        assert_eq!(session.available_pusd(), Decimal::new(1_000, 0));
+        assert_eq!(session.principal_encumbered_pusd(), Decimal::ZERO);
+
+        let directory = tempfile::tempdir().expect("创建 Paper V2 批撤日志临时目录");
+        let root = directory.path().join("paper-cancel-orders-tail");
+        let mut store = crate::persistence::LocalTransactionLogStoreV2::create_new(
+            root.clone(),
+            crate::persistence::TransactionLogIdentityV2::new(
+                session.session_spec().run_id.clone(),
+                crate::persistence::DurabilityProfileV2::RecoverablePaper,
+            ),
+        )
+        .expect("创建 Paper V2 批撤日志");
+        store
+            .publish_application_checkpoint(0, &baseline_checkpoint)
+            .expect("发布批撤前应用检查点");
+        store
+            .append_transaction(
+                prepared_evidence,
+                &DurableRecoveryOperationV2::DriveExecutionThrough {
+                    effective_processing_at_utc_ms: cancel_at,
+                },
+            )
+            .expect("一次提交 Paper V2 批撤事务");
+        drop(store);
+
+        let store = crate::persistence::LocalTransactionLogStoreV2::open_recovery(root)
+            .expect("重开 Paper V2 批撤日志");
+        let recovered = store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                ExecutionSessionCheckpointV1,
+            >()
+            .expect("恢复 Paper V2 批撤日志");
+        assert_eq!(recovered.tail.len(), 1);
+        let recovered_checkpoint = recovered.checkpoint.expect("批撤恢复必须有基线检查点");
+        let (restored_baseline, downstream) = ExecutionSessionStateV1::restore(
+            &process.inner,
+            recovered_checkpoint.checkpoint,
+            &BTreeMap::new(),
+        )
+        .expect("恢复 Paper V2 批撤基线");
+        assert_eq!(downstream, None);
+        let replayed = replay_execution_operation_v2(
+            restored_baseline,
+            &recovered.tail[0].evidence,
+            recovered.tail[0].recovery_operation,
+        )
+        .expect("重放 Paper V2 批撤尾日志");
+        assert_eq!(replayed.checkpoint(None), online_checkpoint);
     }
 
     #[tokio::test(flavor = "current_thread")]

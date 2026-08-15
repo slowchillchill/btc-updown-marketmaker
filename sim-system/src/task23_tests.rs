@@ -1773,11 +1773,37 @@ async fn gtd_expiry_equality_precedes_same_millisecond_maker_depletion() {
         };
         accepted.simulated_platform_order_id.clone()
     };
+    let order_before_lifecycle_delivery = session
+        .simulated_order(&platform_order_id)
+        .expect("accepted GTD order")
+        .clone();
+    let account_before_lifecycle_delivery = (
+        session.available_pusd(),
+        session.principal_encumbered_pusd(),
+        session.immediate_taker_fee_encumbered_pusd(),
+    );
+    session
+        .drive_private_delivery_after_platform_through_for_tests(390_998)
+        .expect("accepted-order lifecycle feedback must be delivered before autonomous GTD work");
+    let delivery_diagnostics = session.task41_diagnostics_for_tests(&long_market().condition_id.0);
+    assert_eq!(delivery_diagnostics.pending_lifecycle_feedback_count, 0);
     assert_eq!(
-        session
-            .drive_private_delivery_after_platform_through_for_tests(390_998)
-            .expect("drain accepted-order lifecycle feedback before autonomous GTD work"),
-        SubmissionDeliveryDispositionV1::Delivered
+        delivery_diagnostics
+            .confirmed_lifecycle_feedback_confirmations
+            .len(),
+        1
+    );
+    assert_eq!(
+        session.simulated_order(&platform_order_id),
+        Some(&order_before_lifecycle_delivery)
+    );
+    assert_eq!(
+        (
+            session.available_pusd(),
+            session.principal_encumbered_pusd(),
+            session.immediate_taker_fee_encumbered_pusd(),
+        ),
+        account_before_lifecycle_delivery
     );
 
     let before_expiry_add = long_bid_transition(390_999, 400_999, 3, "0", "0.1");

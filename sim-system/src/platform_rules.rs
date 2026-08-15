@@ -2437,6 +2437,39 @@ pub(crate) mod tests {
         exponent: u32,
         implementation_identity: ImplementationIdentityV1,
     ) -> Arc<SealedProcessRuleSnapshot> {
+        historical_snapshot_for_sim_tests_with_fee_schedule_and_identity_at(
+            rate,
+            exponent,
+            implementation_identity,
+            fixed_now_utc_ms,
+        )
+        .await
+    }
+
+    pub(crate) async fn historical_snapshot_for_task44_with_fee_schedule_and_identity(
+        rate: &str,
+        exponent: u32,
+        implementation_identity: ImplementationIdentityV1,
+    ) -> Arc<SealedProcessRuleSnapshot> {
+        fn task44_rules_observed_at_utc_ms() -> Result<i64, RuleSnapshotError> {
+            Ok(90_000)
+        }
+
+        historical_snapshot_for_sim_tests_with_fee_schedule_and_identity_at(
+            rate,
+            exponent,
+            implementation_identity,
+            task44_rules_observed_at_utc_ms,
+        )
+        .await
+    }
+
+    async fn historical_snapshot_for_sim_tests_with_fee_schedule_and_identity_at(
+        rate: &str,
+        exponent: u32,
+        implementation_identity: ImplementationIdentityV1,
+        now_utc_ms: fn() -> Result<i64, RuleSnapshotError>,
+    ) -> Arc<SealedProcessRuleSnapshot> {
         let rate = rate.parse::<Decimal>().expect("测试手续费率必须是十进制");
         let mut gamma_rate = rate;
         gamma_rate.rescale(4);
@@ -2479,14 +2512,14 @@ pub(crate) mod tests {
             },
             test_loader_options(&server),
             PLATFORM_RULE_CONFIG_BYTES,
-            fixed_now_utc_ms,
+            now_utc_ms,
         )
         .await
         .expect("当前规则查询必须密封测试快照");
         let historical = load_historical_process_snapshot(HistoricalProcessSnapshotRequestV1 {
             snapshot_path: target,
             expected_file_sha256: current.file_sha256().clone(),
-            replay_causal_start_utc_ms: fixed_now_utc_ms().expect("fixed time"),
+            replay_causal_start_utc_ms: now_utc_ms().expect("fixed time"),
         })
         .expect("历史规则快照必须可重载");
         assert_eq!(historical.access_mode(), SnapshotAccessMode::HistoricalAsOf);

@@ -8,8 +8,8 @@ pub use contracts::SimCallerRoleV1;
 use contracts::{
     ACCOUNT_OPENING_ANCHOR_SCHEMA_V1, AccountInstanceKeyV1, AccountOpeningAnchorV1,
     EXECUTION_MARKET_EVENT_SCHEMA_V3, ExactDecimal, MARKET_ENROLLMENT_SCHEMA_V1,
-    MarketEnrollmentIdentityV1, MarketEnrollmentV1, PlatformAccountSnapshotV1,
-    PlatformOutcomeBalanceV1, PlatformSourceV1, Sha256Hex, TokenId,
+    MarketEnrollmentIdentityV1, MarketEnrollmentV1, MarketResolutionTerminalV3,
+    PlatformAccountSnapshotV1, PlatformOutcomeBalanceV1, PlatformSourceV1, Sha256Hex, TokenId,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -18,16 +18,30 @@ use crate::account::{InitialAccountStateV1, PlatformAccountStateV1};
 use crate::finality::TradeFinalityPolicyV1;
 use crate::latency_profile::{DelaySampleDomainV1, EmpiricalDelayProfile};
 use crate::market::{
-    AccountBookOverlayStoreV1, DurableMarketBucketReferenceV1, MarketEventPathV1,
-    MarketLifecyclePhaseV1, MarketStateStoreV1, MillisecondBucketClosureV1,
+    AccountBookOverlayStoreV1, DurableMarketBucketReferenceV1, MarketEventErrorV1,
+    MarketEventPathV1, MarketLifecyclePhaseV1, MarketStateStoreV1, MillisecondBucketClosureV1,
+    PreparedMarketResolutionTerminalDeltaV2,
 };
 use crate::market_directory::{SessionMarketDirectoryErrorV1, SessionMarketDirectoryV1};
-use crate::matching::{ExecutionStateV1, MatchingStateErrorV1, TerminalExecutionMarketEvictionV1};
+use crate::matching::{
+    CancelOrderStateDispositionV1, CommittableExecutionDriveDeltaV2, ExecutionStateV1,
+    MatchingStateErrorV1, PreparedExecutionDriveDeltaV2, TerminalExecutionMarketEvictionV1,
+};
 use crate::platform_rules::SealedProcessRuleSnapshot;
 use crate::scenario::{PlatformMarketV1, PlatformScenarioV1};
 
 pub const SIM_EXECUTION_CONTRACT_V1: &str = "sim_execution_contract_v1";
 pub const SESSION_SPEC_SCHEMA_V2: &str = "session_spec_v2";
+pub(crate) const STABLE_ID_MAX_BYTES_V1: usize = 256;
+pub(crate) const SESSION_ID_MAX_BYTES_V1: usize = STABLE_ID_MAX_BYTES_V1;
+
+pub(crate) fn session_id_is_valid_v1(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= SESSION_ID_MAX_BYTES_V1
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
 
 const SIM_PROCESS_ROOT_CHECKPOINT_SCHEMA_V1: &str = "sim_process_root_checkpoint_v1";
 const SIM_SESSION_CHECKPOINT_SCHEMA_V1: &str = "sim_session_checkpoint_v1";
@@ -197,6 +211,10 @@ pub(crate) struct SimProcessRootCheckpointV1 {
 }
 
 impl SimProcessRootCheckpointV1 {
+    pub(crate) fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
     pub(crate) fn resource_capital_fence_count(&self) -> usize {
         self.capital_issuance_fences.len()
     }
@@ -452,7 +470,7 @@ impl SimProcessRoot {
         latency_profile: Arc<EmpiricalDelayProfile>,
         scenario: Arc<PlatformScenarioV1>,
     ) -> Result<Self, SimProcessRootErrorV1> {
-        if run_id.is_empty() || run_id.trim() != run_id {
+        if !is_stable_text(&run_id) {
             return Err(SimProcessRootErrorV1::InvalidRunId);
         }
         for (override_index, member) in finality_policy.failure_overrides().iter().enumerate() {
@@ -1431,6 +1449,11 @@ impl SimSession {
         Arc::as_ptr(&self.market_enrollment) as usize
     }
 
+    #[cfg(test)]
+    pub(crate) fn market_enrollment_storage_strong_count(&self) -> usize {
+        Arc::strong_count(&self.market_enrollment)
+    }
+
     pub(crate) fn enroll_market(
         &mut self,
         request: MarketEnrollmentRequestV1,
@@ -1438,11 +1461,7 @@ impl SimSession {
         opening_anchor: &AccountOpeningAnchorV1,
     ) -> Result<MarketEnrollmentV1, SessionError> {
         self.require_active()?;
-        if !is_stable_text(&request.enrollment_request_id) {
-            return Err(SessionError::InvalidMarketEnrollment(
-                "enrollment_request_id 为空或含首尾空白",
-            ));
-        }
+        validate_market_enrollment_request(&request)?;
         if let Some(existing_index) = self
             .market_enrollment
             .records_by_request_id
@@ -1528,14 +1547,25 @@ impl SimSession {
         condition_ids: BTreeSet<String>,
         token_ids: BTreeSet<String>,
     ) {
+        let prepared = self.prepare_successful_business_market_use(condition_ids, token_ids);
+        self.commit_prevalidated_successful_business_market_use(prepared);
+    }
+
+    pub(crate) fn prepare_successful_business_market_use(
+        &self,
+        condition_ids: BTreeSet<String>,
+        token_ids: BTreeSet<String>,
+    ) -> PreparedBusinessMarketUseV1 {
         match self.session_spec().caller_role {
             SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation => {
-                if !self.market_enrollment.business_input_started {
-                    Arc::make_mut(&mut self.market_enrollment).business_input_started = true;
+                PreparedBusinessMarketUseV1 {
+                    mark_business_input_started: !self.market_enrollment.business_input_started,
+                    paper_candidate_condition_ids: BTreeSet::new(),
+                    paper_candidate_token_ids: BTreeSet::new(),
                 }
             }
             SimCallerRoleV1::Paper => {
-                let new_condition_ids = condition_ids
+                let paper_candidate_condition_ids = condition_ids
                     .into_iter()
                     .filter(|condition_id| {
                         !self.market_enrollment.directory.contains(condition_id)
@@ -1545,7 +1575,7 @@ impl SimSession {
                                 .contains(condition_id)
                     })
                     .collect::<BTreeSet<_>>();
-                let new_token_ids = token_ids
+                let paper_candidate_token_ids = token_ids
                     .into_iter()
                     .filter(|token_id| {
                         !self.market_enrollment.directory.contains_token(token_id)
@@ -1555,17 +1585,35 @@ impl SimSession {
                                 .contains(token_id)
                     })
                     .collect::<BTreeSet<_>>();
-                if !new_condition_ids.is_empty() || !new_token_ids.is_empty() {
-                    let market_enrollment = Arc::make_mut(&mut self.market_enrollment);
-                    market_enrollment
-                        .paper_candidate_condition_ids
-                        .extend(new_condition_ids);
-                    market_enrollment
-                        .paper_candidate_token_ids
-                        .extend(new_token_ids);
+                PreparedBusinessMarketUseV1 {
+                    mark_business_input_started: false,
+                    paper_candidate_condition_ids,
+                    paper_candidate_token_ids,
                 }
             }
         }
+    }
+
+    pub(crate) fn commit_prevalidated_successful_business_market_use(
+        &mut self,
+        prepared: PreparedBusinessMarketUseV1,
+    ) {
+        if !prepared.mark_business_input_started
+            && prepared.paper_candidate_condition_ids.is_empty()
+            && prepared.paper_candidate_token_ids.is_empty()
+        {
+            return;
+        }
+        let market_enrollment = Arc::make_mut(&mut self.market_enrollment);
+        if prepared.mark_business_input_started {
+            market_enrollment.business_input_started = true;
+        }
+        market_enrollment
+            .paper_candidate_condition_ids
+            .extend(prepared.paper_candidate_condition_ids);
+        market_enrollment
+            .paper_candidate_token_ids
+            .extend(prepared.paper_candidate_token_ids);
     }
 
     pub(crate) fn record_successful_market_input(&mut self) {
@@ -1761,7 +1809,6 @@ impl SimSession {
         self.state.private_fact_schedule_closed_through_utc_ms
     }
 
-    #[cfg(test)]
     pub(crate) fn logical_platform_driven_through(&self) -> Option<i64> {
         self.state.closed_action_through_utc_ms
     }
@@ -1803,6 +1850,21 @@ impl SimSession {
             .prepare_next_private_fact_through(received_at_utc_ms)
     }
 
+    pub(crate) fn prepare_private_fact_slice_v2(
+        &self,
+        received_at_utc_ms: i64,
+    ) -> Result<PreparedPrivateFactSliceV2, SessionError> {
+        self.state.prepare_private_fact_slice_v2(received_at_utc_ms)
+    }
+
+    pub(crate) fn commit_prevalidated_private_fact_slice_v2(
+        &mut self,
+        prepared: PreparedPrivateFactSliceV2,
+    ) -> Option<VisiblePrivateFactV1> {
+        self.state
+            .commit_prevalidated_private_fact_slice_v2(prepared)
+    }
+
     pub(crate) fn confirm_prepared_private_fact(
         &mut self,
         candidate: &VisiblePrivateFactV1,
@@ -1827,6 +1889,16 @@ impl SimSession {
         canonical_request_sha256: Sha256Hex,
         actions: Vec<ParsedLogicalActionV1>,
     ) -> Result<RegisteredLogicalScheduleV1, SessionError> {
+        let prepared = self.prepare_request_schedule(context, canonical_request_sha256, actions)?;
+        Ok(self.commit_prevalidated_request_schedule(prepared))
+    }
+
+    pub(crate) fn prepare_request_schedule(
+        &self,
+        context: RequestContextV1,
+        canonical_request_sha256: Sha256Hex,
+        actions: Vec<ParsedLogicalActionV1>,
+    ) -> Result<PreparedRequestScheduleV1, SessionError> {
         let actions = actions
             .into_iter()
             .map(|action| LogicalActionPlanV1 {
@@ -1835,12 +1907,36 @@ impl SimSession {
                 processing_delay_ms: self.processing_delay_ms(action.method_timing),
             })
             .collect();
-        self.state.register_and_schedule_request(
+        self.state.prepare_request_schedule(
             &self.latency_profile,
             context,
             canonical_request_sha256,
             actions,
         )
+    }
+
+    pub(crate) fn prepare_registered_request_retry_schedule(
+        &self,
+        context: &RequestContextV1,
+        actions: Vec<ParsedLogicalActionV1>,
+    ) -> Result<PreparedRequestScheduleV1, SessionError> {
+        let actions = actions
+            .into_iter()
+            .map(|action| LogicalActionPlanV1 {
+                action_identity: action.action_identity,
+                batch_item_ordinal: action.batch_item_ordinal,
+                processing_delay_ms: self.processing_delay_ms(action.method_timing),
+            })
+            .collect();
+        self.state
+            .prepare_registered_request_retry_schedule(context, actions)
+    }
+
+    pub(crate) fn commit_prevalidated_request_schedule(
+        &mut self,
+        prepared: PreparedRequestScheduleV1,
+    ) -> RegisteredLogicalScheduleV1 {
+        self.state.commit_prevalidated_request_schedule(prepared)
     }
 
     pub(crate) fn recovered_request_ids(&self) -> BTreeSet<String> {
@@ -1961,6 +2057,13 @@ impl SimSession {
             .iter()
             .map(|(request_id, record)| (request_id.clone(), record.platform_state_revision))
             .collect()
+    }
+
+    pub(crate) fn query_revision_for_request(&self, request_id: &str) -> Option<u64> {
+        self.state
+            .queries
+            .get(request_id)
+            .map(|record| record.platform_state_revision)
     }
 
     pub(crate) fn validate_recovered_action_results(
@@ -2143,6 +2246,113 @@ impl SimSession {
         self.state.complete_logical_item(action_identity)
     }
 
+    pub(crate) fn prepare_execution_action_slice_v2(
+        &mut self,
+        effective_processing_at_utc_ms: i64,
+        complete_same_request_at_same_time: bool,
+    ) -> Result<PreparedExecutionActionSliceV2<'_>, SessionError> {
+        let SimSession {
+            latency_profile,
+            state,
+            ..
+        } = self;
+        let latency_profile = Arc::as_ref(latency_profile);
+        state.prepare_execution_action_slice_v2(
+            latency_profile,
+            effective_processing_at_utc_ms,
+            complete_same_request_at_same_time,
+        )
+    }
+
+    pub(crate) fn prepare_scheduled_session_drive_v2(
+        &mut self,
+        requested_cutoff_utc_ms: i64,
+        complete_same_request_at_same_time: bool,
+    ) -> Result<PreparedScheduledSessionDriveV2<'_>, MarketEventErrorV1> {
+        let SimSession {
+            latency_profile,
+            hidden_platform_markets,
+            public_markets,
+            execution_state,
+            terminal_projection_pending,
+            state,
+            ..
+        } = self;
+        let action = state.prepare_execution_action_slice_v2(
+            Arc::as_ref(latency_profile),
+            requested_cutoff_utc_ms,
+            complete_same_request_at_same_time,
+        )?;
+        let actual_cutoff_utc_ms = action.logical_platform_driven_through_utc_ms();
+        let first_due_at_utc_ms = [
+            execution_state.next_gtd_deadline_at_utc_ms(),
+            execution_state.next_scheduled_finality_at_utc_ms(),
+            execution_state.next_rebate_clock_at_utc_ms(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|at_utc_ms| *at_utc_ms <= actual_cutoff_utc_ms)
+        .min();
+        let execution = execution_state.prepare_execution_drive_delta_v2(actual_cutoff_utc_ms)?;
+
+        let mut redeemed_resolutions = BTreeMap::<String, MarketResolutionTerminalV3>::new();
+        for effect in execution
+            .scheduled_finality_effects()
+            .iter()
+            .flat_map(|lifecycle| lifecycle.settlement_feedbacks.iter())
+            .chain(execution.rebate_clock_effects().iter())
+        {
+            let Some((condition_id, resolution)) = effect.action.redeemed_resolution() else {
+                continue;
+            };
+            if let Some(existing) = redeemed_resolutions.get(condition_id) {
+                if existing != resolution {
+                    return Err(MarketEventErrorV1::ResolutionConflict(
+                        condition_id.to_owned(),
+                    ));
+                }
+            } else {
+                redeemed_resolutions.insert(condition_id.to_owned(), resolution.clone());
+            }
+        }
+
+        let hidden_platform_markets = hidden_platform_markets.as_mut();
+        let mut hidden_terminal_deltas = Vec::new();
+        let mut public_terminal_deltas = Vec::new();
+        let mut newly_redeemed_condition_ids = BTreeSet::new();
+        for (condition_id, resolution) in redeemed_resolutions {
+            let (hidden_delta, public_delta) = prepare_redeemed_resolution_terminal_paths_v2(
+                hidden_platform_markets.as_deref(),
+                public_markets,
+                &condition_id,
+                &resolution,
+            )?;
+            if let Some(delta) = hidden_delta {
+                hidden_terminal_deltas.push(delta);
+            }
+            if let Some(delta) = public_delta {
+                public_terminal_deltas.push(delta);
+            }
+            newly_redeemed_condition_ids.insert(condition_id);
+        }
+
+        let mut terminal_projection_condition_ids = terminal_projection_pending.clone();
+        terminal_projection_condition_ids.extend(newly_redeemed_condition_ids.iter().cloned());
+        Ok(PreparedScheduledSessionDriveV2 {
+            action,
+            execution,
+            hidden_platform_markets,
+            public_markets,
+            hidden_terminal_deltas,
+            public_terminal_deltas,
+            terminal_projection_pending,
+            newly_redeemed_condition_ids,
+            terminal_projection_condition_ids,
+            actual_cutoff_utc_ms,
+            first_due_at_utc_ms,
+        })
+    }
+
     pub(crate) fn take_next_action_through(
         &mut self,
         effective_processing_at_utc_ms: i64,
@@ -2243,7 +2453,10 @@ pub enum SimProcessRootErrorV1 {
 impl fmt::Display for SimProcessRootErrorV1 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidRunId => write!(formatter, "运行根 run_id 不能为空或带首尾空白"),
+            Self::InvalidRunId => write!(
+                formatter,
+                "运行根 run_id 不能为空、超过 256 字节或带首尾空白"
+            ),
             Self::FinalitySelectorRunMismatch { override_index } => write!(
                 formatter,
                 "第 {override_index} 个成交最终性覆盖不属于本运行根"
@@ -2441,6 +2654,28 @@ pub struct VisiblePrivateFactV1 {
     pub private_feedback_sequence: u64,
 }
 
+pub(crate) struct PreparedPrivateFactSliceV2 {
+    session_id: String,
+    schedule_closed_through_before_utc_ms: Option<i64>,
+    close_through_utc_ms: i64,
+    schedule_advanced: bool,
+    candidate: Option<VisiblePrivateFactV1>,
+}
+
+impl PreparedPrivateFactSliceV2 {
+    pub(crate) fn close_through_utc_ms(&self) -> i64 {
+        self.close_through_utc_ms
+    }
+
+    pub(crate) fn schedule_advanced(&self) -> bool {
+        self.schedule_advanced
+    }
+
+    pub(crate) fn candidate(&self) -> Option<&VisiblePrivateFactV1> {
+        self.candidate.as_ref()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PrivateFactOrderKey {
@@ -2485,10 +2720,966 @@ pub struct QueuedLogicalActionV1 {
     pub key: LogicalActionKeyV1,
 }
 
+struct PreparedPrivateFactRegistrationV2 {
+    key: PrivateFactOrderKey,
+    evidence: PrivateVisibilityEvidenceV1,
+}
+
+struct PreparedDirectResponseCompletionV2 {
+    global_request_id: String,
+    response_transit: RequestTransitV1,
+}
+
+pub(crate) struct PreparedExecutionActionSliceV2<'a> {
+    state: &'a mut SessionState,
+    latency_profile: &'a EmpiricalDelayProfile,
+    closed_action_through_before_utc_ms: Option<i64>,
+    closed_action_through_after_utc_ms: i64,
+    actions: Vec<QueuedLogicalActionV1>,
+    next_action_index: usize,
+    completed_request_id: Option<String>,
+    platform_state_revision_before: u64,
+    platform_state_revision_after: u64,
+    prepared_mutations: Vec<(String, MutationRecord)>,
+    prepared_queries: Vec<(String, QueryRecord)>,
+    prepared_lifecycle_feedback: Vec<(String, LifecycleFeedbackTimingV1)>,
+    prepared_private_facts: Vec<PreparedPrivateFactRegistrationV2>,
+    prepared_used_private_emission_sequences: Vec<u64>,
+    prepared_direct_response: Option<PreparedDirectResponseCompletionV2>,
+    preparation_failed: bool,
+}
+
+pub(crate) struct CommittableExecutionActionSliceV2<'a> {
+    prepared: PreparedExecutionActionSliceV2<'a>,
+}
+
+pub(crate) struct PreparedScheduledSessionDriveV2<'a> {
+    action: PreparedExecutionActionSliceV2<'a>,
+    execution: PreparedExecutionDriveDeltaV2<'a>,
+    hidden_platform_markets: Option<&'a mut MarketStateStoreV1>,
+    public_markets: &'a mut MarketStateStoreV1,
+    hidden_terminal_deltas: Vec<PreparedMarketResolutionTerminalDeltaV2>,
+    public_terminal_deltas: Vec<PreparedMarketResolutionTerminalDeltaV2>,
+    terminal_projection_pending: &'a mut BTreeSet<String>,
+    newly_redeemed_condition_ids: BTreeSet<String>,
+    terminal_projection_condition_ids: BTreeSet<String>,
+    actual_cutoff_utc_ms: i64,
+    first_due_at_utc_ms: Option<i64>,
+}
+
+pub(crate) struct CommittableScheduledSessionDriveV2<'a> {
+    action: CommittableExecutionActionSliceV2<'a>,
+    execution: CommittableExecutionDriveDeltaV2<'a>,
+    hidden_platform_markets: Option<&'a mut MarketStateStoreV1>,
+    public_markets: &'a mut MarketStateStoreV1,
+    hidden_terminal_deltas: Vec<PreparedMarketResolutionTerminalDeltaV2>,
+    public_terminal_deltas: Vec<PreparedMarketResolutionTerminalDeltaV2>,
+    terminal_projection_pending: &'a mut BTreeSet<String>,
+    newly_redeemed_condition_ids: BTreeSet<String>,
+    terminal_projection_condition_ids: BTreeSet<String>,
+}
+
+fn prepare_redeemed_resolution_terminal_paths_v2(
+    hidden_platform_markets: Option<&MarketStateStoreV1>,
+    public_markets: &MarketStateStoreV1,
+    condition_id: &str,
+    resolution: &MarketResolutionTerminalV3,
+) -> Result<
+    (
+        Option<PreparedMarketResolutionTerminalDeltaV2>,
+        Option<PreparedMarketResolutionTerminalDeltaV2>,
+    ),
+    MarketEventErrorV1,
+> {
+    let hidden_delta = hidden_platform_markets
+        .map(|store| store.prepare_resolution_terminal_v2(condition_id, resolution))
+        .transpose()?
+        .flatten();
+    let public_delta = public_markets.prepare_resolution_terminal_v2(condition_id, resolution)?;
+    if hidden_delta.is_none() && public_delta.is_none() {
+        return Err(MarketEventErrorV1::ResolutionConflict(
+            condition_id.to_owned(),
+        ));
+    }
+    Ok((hidden_delta, public_delta))
+}
+
+impl PreparedScheduledSessionDriveV2<'_> {
+    pub(crate) fn current_action(&self) -> Option<QueuedLogicalActionV1> {
+        self.action.current_action()
+    }
+
+    pub(crate) fn request_completed(&self) -> bool {
+        self.action.request_completed()
+    }
+
+    pub(crate) fn finish_current_action(
+        &mut self,
+        action_identity: &str,
+    ) -> Result<(), SessionError> {
+        self.action.finish_current_action(action_identity)
+    }
+
+    pub(crate) fn actual_cutoff_utc_ms(&self) -> i64 {
+        self.actual_cutoff_utc_ms
+    }
+
+    pub(crate) fn first_due_at_utc_ms(&self) -> Option<i64> {
+        self.first_due_at_utc_ms
+    }
+
+    pub(crate) fn execution_candidate(&self) -> &PreparedExecutionDriveDeltaV2<'_> {
+        &self.execution
+    }
+
+    pub(crate) fn terminal_projection_condition_ids(&self) -> &BTreeSet<String> {
+        &self.terminal_projection_condition_ids
+    }
+
+    pub(crate) fn advance_platform_state_revision_once(&mut self) -> Result<u64, SessionError> {
+        self.action.advance_platform_state_revision_once()
+    }
+
+    pub(crate) fn prepare_query_revision(
+        &mut self,
+        global_request_id: &str,
+        action_identity: &str,
+        query_sha256: Sha256Hex,
+    ) -> Result<QueryRevisionV1, SessionError> {
+        self.action
+            .prepare_query_revision(global_request_id, action_identity, query_sha256)
+    }
+
+    pub(crate) fn prepare_query_revision_at(
+        &mut self,
+        global_request_id: &str,
+        action_identity: &str,
+        query_sha256: Sha256Hex,
+        frozen_revision: u64,
+    ) -> Result<QueryRevisionV1, SessionError> {
+        self.action.prepare_query_revision_at(
+            global_request_id,
+            action_identity,
+            query_sha256,
+            frozen_revision,
+        )
+    }
+
+    pub(crate) fn prepare_mutation_resolution(
+        &mut self,
+        global_request_id: &str,
+        action_identity: &str,
+        idempotency_key: String,
+        payload_sha256: Sha256Hex,
+        effect_identity: String,
+    ) -> Result<MutationResolutionV1, SessionError> {
+        self.action.prepare_mutation_resolution(
+            global_request_id,
+            action_identity,
+            idempotency_key,
+            payload_sha256,
+            effect_identity,
+        )
+    }
+
+    pub(crate) fn query_revision_for_request(&self, request_id: &str) -> Option<u64> {
+        self.action.query_revision_for_request(request_id)
+    }
+
+    pub(crate) fn next_private_emission_sequence(&mut self) -> Result<u64, SessionError> {
+        self.action.next_private_emission_sequence()
+    }
+
+    pub(crate) fn prepare_complete_direct_response(
+        &mut self,
+        global_request_id: &str,
+        platform_responded_at_utc_ms: i64,
+        private_emission_sequence: u64,
+    ) -> Result<RequestTransitV1, SessionError> {
+        self.action.prepare_complete_direct_response(
+            global_request_id,
+            platform_responded_at_utc_ms,
+            private_emission_sequence,
+        )
+    }
+
+    pub(crate) fn prepare_next_lifecycle_feedback_timing(
+        &mut self,
+        feedback_id: String,
+        platform_event_at_utc_ms: i64,
+    ) -> Result<LifecycleFeedbackTimingV1, SessionError> {
+        let private_emission_sequence = self.action.next_private_emission_sequence()?;
+        self.action.prepare_lifecycle_feedback_timing(
+            feedback_id,
+            platform_event_at_utc_ms,
+            private_emission_sequence,
+        )
+    }
+}
+
+impl<'a> PreparedScheduledSessionDriveV2<'a> {
+    pub(crate) fn prepare_caller_cancel_remainder(
+        self,
+        platform_order_id: &str,
+        canceled_at_utc_ms: i64,
+        caller_cancel_effect_identity: &Sha256Hex,
+    ) -> Result<(Self, CancelOrderStateDispositionV1), MatchingStateErrorV1> {
+        let Self {
+            action,
+            execution,
+            hidden_platform_markets,
+            public_markets,
+            hidden_terminal_deltas,
+            public_terminal_deltas,
+            terminal_projection_pending,
+            newly_redeemed_condition_ids,
+            terminal_projection_condition_ids,
+            actual_cutoff_utc_ms,
+            first_due_at_utc_ms,
+        } = self;
+        let (execution, disposition) = execution.prepare_caller_cancel_remainder(
+            platform_order_id,
+            canceled_at_utc_ms,
+            caller_cancel_effect_identity,
+        )?;
+        Ok((
+            Self {
+                action,
+                execution,
+                hidden_platform_markets,
+                public_markets,
+                hidden_terminal_deltas,
+                public_terminal_deltas,
+                terminal_projection_pending,
+                newly_redeemed_condition_ids,
+                terminal_projection_condition_ids,
+                actual_cutoff_utc_ms,
+                first_due_at_utc_ms,
+            },
+            disposition,
+        ))
+    }
+
+    pub(crate) fn into_committable(
+        self,
+        prepared_condition_ids: BTreeSet<String>,
+    ) -> Result<CommittableScheduledSessionDriveV2<'a>, MarketEventErrorV1> {
+        if prepared_condition_ids != self.terminal_projection_condition_ids {
+            return Err(SessionError::QueryIdentityConflict(
+                "scheduled-terminal-projection-condition-set".to_owned(),
+            )
+            .into());
+        }
+        let Self {
+            action,
+            execution,
+            hidden_platform_markets,
+            public_markets,
+            hidden_terminal_deltas,
+            public_terminal_deltas,
+            terminal_projection_pending,
+            newly_redeemed_condition_ids,
+            terminal_projection_condition_ids,
+            ..
+        } = self;
+        let action = action.into_committable()?;
+        let execution = execution.into_committable()?;
+        Ok(CommittableScheduledSessionDriveV2 {
+            action,
+            execution,
+            hidden_platform_markets,
+            public_markets,
+            hidden_terminal_deltas,
+            public_terminal_deltas,
+            terminal_projection_pending,
+            newly_redeemed_condition_ids,
+            terminal_projection_condition_ids,
+        })
+    }
+}
+
+impl CommittableScheduledSessionDriveV2<'_> {
+    pub(crate) fn commit(self) {
+        let Self {
+            action,
+            execution,
+            mut hidden_platform_markets,
+            public_markets,
+            hidden_terminal_deltas,
+            public_terminal_deltas,
+            terminal_projection_pending,
+            newly_redeemed_condition_ids,
+            terminal_projection_condition_ids,
+        } = self;
+        execution.commit();
+        if let Some(store) = hidden_platform_markets.as_deref_mut() {
+            for delta in hidden_terminal_deltas {
+                delta.commit(store);
+            }
+        } else {
+            debug_assert!(hidden_terminal_deltas.is_empty());
+        }
+        for delta in public_terminal_deltas {
+            delta.commit(public_markets);
+        }
+        terminal_projection_pending.extend(newly_redeemed_condition_ids);
+        for condition_id in terminal_projection_condition_ids {
+            terminal_projection_pending.remove(&condition_id);
+        }
+        action.commit();
+    }
+}
+
+impl CommittableExecutionActionSliceV2<'_> {
+    pub(crate) fn commit(self) {
+        self.prepared.commit_prevalidated();
+    }
+}
+
+impl<'a> PreparedExecutionActionSliceV2<'a> {
+    fn preparation_failed_error() -> SessionError {
+        SessionError::ExecutionState("执行动作准备已经失败，必须丢弃当前准备结果".to_owned())
+    }
+
+    fn require_preparation_open(&self) -> Result<(), SessionError> {
+        if self.preparation_failed {
+            Err(Self::preparation_failed_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn record_preparation_failure(&mut self, error: SessionError) -> SessionError {
+        self.preparation_failed = true;
+        error
+    }
+
+    pub(crate) fn current_action(&self) -> Option<QueuedLogicalActionV1> {
+        self.actions.get(self.next_action_index).cloned()
+    }
+
+    pub(crate) fn request_completed(&self) -> bool {
+        self.completed_request_id.is_some() && self.next_action_index == self.actions.len()
+    }
+
+    pub(crate) fn logical_platform_driven_through_utc_ms(&self) -> i64 {
+        self.closed_action_through_after_utc_ms
+    }
+
+    pub(crate) fn has_state_change(&self) -> bool {
+        !self.actions.is_empty()
+            || self.closed_action_through_before_utc_ms
+                != Some(self.closed_action_through_after_utc_ms)
+            || self.platform_state_revision_before != self.platform_state_revision_after
+            || !self.prepared_mutations.is_empty()
+            || !self.prepared_queries.is_empty()
+            || !self.prepared_lifecycle_feedback.is_empty()
+            || !self.prepared_private_facts.is_empty()
+            || self.prepared_direct_response.is_some()
+    }
+
+    pub(crate) fn platform_state_revision(&self) -> u64 {
+        self.platform_state_revision_after
+    }
+
+    pub(crate) fn advance_platform_state_revision_once(&mut self) -> Result<u64, SessionError> {
+        self.require_preparation_open()?;
+        let Some(next) = self.platform_state_revision_after.checked_add(1) else {
+            return Err(self.record_preparation_failure(SessionError::PlatformRevisionRegression));
+        };
+        self.platform_state_revision_after = next;
+        Ok(next)
+    }
+
+    pub(crate) fn finish_current_action(
+        &mut self,
+        action_identity: &str,
+    ) -> Result<(), SessionError> {
+        self.require_preparation_open()?;
+        let Some(current) = self.actions.get(self.next_action_index) else {
+            return Err(
+                self.record_preparation_failure(SessionError::ActionNotLogicallyReleased(
+                    action_identity.to_owned(),
+                )),
+            );
+        };
+        if current.action_identity != action_identity {
+            return Err(
+                self.record_preparation_failure(SessionError::ActionNotLogicallyReleased(
+                    action_identity.to_owned(),
+                )),
+            );
+        }
+        self.next_action_index += 1;
+        Ok(())
+    }
+
+    pub(crate) fn into_committable(
+        self,
+    ) -> Result<CommittableExecutionActionSliceV2<'a>, SessionError> {
+        if self.preparation_failed {
+            return Err(Self::preparation_failed_error());
+        }
+        if let Some(unfinished) = self.actions.get(self.next_action_index) {
+            return Err(SessionError::ActionNotLogicallyReleased(
+                unfinished.action_identity.clone(),
+            ));
+        }
+        Ok(CommittableExecutionActionSliceV2 { prepared: self })
+    }
+
+    pub(crate) fn prepare_mutation_resolution(
+        &mut self,
+        global_request_id: &str,
+        action_identity: &str,
+        idempotency_key: String,
+        payload_sha256: Sha256Hex,
+        effect_identity: String,
+    ) -> Result<MutationResolutionV1, SessionError> {
+        self.require_preparation_open()?;
+        let result = self.prepare_mutation_resolution_inner(
+            global_request_id,
+            action_identity,
+            idempotency_key,
+            payload_sha256,
+            effect_identity,
+        );
+        if result.is_err() {
+            self.preparation_failed = true;
+        }
+        result
+    }
+
+    fn prepare_mutation_resolution_inner(
+        &mut self,
+        global_request_id: &str,
+        action_identity: &str,
+        idempotency_key: String,
+        payload_sha256: Sha256Hex,
+        effect_identity: String,
+    ) -> Result<MutationResolutionV1, SessionError> {
+        self.validate_current_action(global_request_id, action_identity)?;
+        if idempotency_key.is_empty()
+            || effect_identity.is_empty()
+            || !is_sha256_hex(&payload_sha256.0)
+        {
+            return Err(SessionError::InvalidRequest("变更幂等绑定非法"));
+        }
+        let existing = self
+            .prepared_mutations
+            .iter()
+            .find(|(identity, _)| identity == &idempotency_key)
+            .map(|(_, record)| record)
+            .or_else(|| self.state.mutations.get(&idempotency_key));
+        if let Some(existing) = existing {
+            if existing.payload_sha256 != payload_sha256 {
+                return Err(SessionError::MutationIdentityConflict(idempotency_key));
+            }
+            return Ok(MutationResolutionV1 {
+                disposition: MutationResolutionDispositionV1::ExistingEffect,
+                effect_identity: existing.effect_identity.clone(),
+            });
+        }
+        self.prepared_mutations.push((
+            idempotency_key,
+            MutationRecord {
+                payload_sha256,
+                effect_identity: effect_identity.clone(),
+            },
+        ));
+        Ok(MutationResolutionV1 {
+            disposition: MutationResolutionDispositionV1::NewEffect,
+            effect_identity,
+        })
+    }
+
+    pub(crate) fn prepare_query_revision(
+        &mut self,
+        global_request_id: &str,
+        action_identity: &str,
+        query_sha256: Sha256Hex,
+    ) -> Result<QueryRevisionV1, SessionError> {
+        self.prepare_query_revision_checked(global_request_id, action_identity, query_sha256, None)
+    }
+
+    pub(crate) fn prepare_query_revision_at(
+        &mut self,
+        global_request_id: &str,
+        action_identity: &str,
+        query_sha256: Sha256Hex,
+        frozen_revision: u64,
+    ) -> Result<QueryRevisionV1, SessionError> {
+        self.prepare_query_revision_checked(
+            global_request_id,
+            action_identity,
+            query_sha256,
+            Some(frozen_revision),
+        )
+    }
+
+    fn prepare_query_revision_checked(
+        &mut self,
+        global_request_id: &str,
+        action_identity: &str,
+        query_sha256: Sha256Hex,
+        frozen_revision: Option<u64>,
+    ) -> Result<QueryRevisionV1, SessionError> {
+        self.require_preparation_open()?;
+        let result = self.prepare_query_revision_unchecked(
+            global_request_id,
+            action_identity,
+            query_sha256,
+            frozen_revision,
+        );
+        if result.is_err() {
+            self.preparation_failed = true;
+        }
+        result
+    }
+
+    pub(crate) fn query_revision_for_request(&self, request_id: &str) -> Option<u64> {
+        self.prepared_queries
+            .iter()
+            .find(|(prepared_request_id, _)| prepared_request_id == request_id)
+            .map(|(_, record)| record.platform_state_revision)
+            .or_else(|| {
+                self.state
+                    .queries
+                    .get(request_id)
+                    .map(|record| record.platform_state_revision)
+            })
+    }
+
+    pub(crate) fn next_private_emission_sequence(&mut self) -> Result<u64, SessionError> {
+        self.require_preparation_open()?;
+        let result = self.next_private_emission_sequence_unchecked();
+        if result.is_err() {
+            self.preparation_failed = true;
+        }
+        result
+    }
+
+    fn next_private_emission_sequence_unchecked(&self) -> Result<u64, SessionError> {
+        self.prepared_used_private_emission_sequences
+            .iter()
+            .copied()
+            .chain(self.state.used_private_emission_sequences.last().copied())
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(SessionError::CursorRegression("私有事实发射序号溢出"))
+    }
+
+    pub(crate) fn prepare_lifecycle_feedback_timing(
+        &mut self,
+        feedback_id: String,
+        platform_event_at_utc_ms: i64,
+        private_emission_sequence: u64,
+    ) -> Result<LifecycleFeedbackTimingV1, SessionError> {
+        self.require_preparation_open()?;
+        let result = self.prepare_lifecycle_feedback_timing_inner(
+            feedback_id,
+            platform_event_at_utc_ms,
+            private_emission_sequence,
+        );
+        if result.is_err() {
+            self.preparation_failed = true;
+        }
+        result
+    }
+
+    fn prepare_lifecycle_feedback_timing_inner(
+        &mut self,
+        feedback_id: String,
+        platform_event_at_utc_ms: i64,
+        private_emission_sequence: u64,
+    ) -> Result<LifecycleFeedbackTimingV1, SessionError> {
+        if feedback_id.is_empty() {
+            return Err(SessionError::InvalidRequest("反馈身份为空"));
+        }
+        let existing = self
+            .prepared_lifecycle_feedback
+            .iter()
+            .find(|(identity, _)| identity == &feedback_id)
+            .map(|(_, timing)| timing)
+            .or_else(|| self.state.lifecycle_feedback.get(&feedback_id));
+        if let Some(existing) = existing {
+            if existing.platform_event_at_utc_ms == platform_event_at_utc_ms
+                && existing.private_emission_sequence == private_emission_sequence
+            {
+                return Ok(existing.clone());
+            }
+            return Err(SessionError::FeedbackIdentityConflict(feedback_id));
+        }
+        let inbound_delay_ms = self.latency_profile.sample_delay_ms(
+            self.state.spec.session_seed.0.as_bytes(),
+            &feedback_id,
+            DelaySampleDomainV1::LifecycleFeedbackInbound,
+        );
+        let feedback_received_at_utc_ms =
+            checked_add_delay(platform_event_at_utc_ms, inbound_delay_ms)?;
+        let timing = LifecycleFeedbackTimingV1 {
+            feedback_id: feedback_id.clone(),
+            platform_event_at_utc_ms,
+            private_emission_sequence,
+            inbound_delay_ms,
+            feedback_received_at_utc_ms,
+        };
+        self.prepare_private_fact_registration(
+            PrivateVisibilityEvidenceV1::LifecycleFeedback {
+                feedback_id: feedback_id.clone(),
+            },
+            feedback_received_at_utc_ms,
+            private_emission_sequence,
+        )?;
+        self.prepared_lifecycle_feedback
+            .push((feedback_id, timing.clone()));
+        Ok(timing)
+    }
+
+    pub(crate) fn prepare_complete_direct_response(
+        &mut self,
+        global_request_id: &str,
+        platform_responded_at_utc_ms: i64,
+        private_emission_sequence: u64,
+    ) -> Result<RequestTransitV1, SessionError> {
+        self.require_preparation_open()?;
+        let result = self.prepare_complete_direct_response_inner(
+            global_request_id,
+            platform_responded_at_utc_ms,
+            private_emission_sequence,
+        );
+        if result.is_err() {
+            self.preparation_failed = true;
+        }
+        result
+    }
+
+    fn prepare_complete_direct_response_inner(
+        &mut self,
+        global_request_id: &str,
+        platform_responded_at_utc_ms: i64,
+        private_emission_sequence: u64,
+    ) -> Result<RequestTransitV1, SessionError> {
+        let prepared_request_completed = self.completed_request_id.as_deref()
+            == Some(global_request_id)
+            && self.next_action_index == self.actions.len();
+        if !self.state.released_request_ids.contains(global_request_id)
+            && !prepared_request_completed
+        {
+            return Err(SessionError::RequestNotLogicallyReleased(
+                global_request_id.to_owned(),
+            ));
+        }
+        let record = self
+            .state
+            .requests
+            .get(global_request_id)
+            .ok_or_else(|| SessionError::RequestNotFound(global_request_id.to_owned()))?;
+        if let Some(existing) = &record.response_transit {
+            if existing.platform_responded_at_utc_ms == Some(platform_responded_at_utc_ms)
+                && existing.private_emission_sequence == Some(private_emission_sequence)
+            {
+                return Ok(existing.clone());
+            }
+            return Err(SessionError::RequestIdentityConflict(
+                global_request_id.to_owned(),
+            ));
+        }
+        if let Some(existing) = &self.prepared_direct_response {
+            if existing.global_request_id == global_request_id
+                && existing.response_transit.platform_responded_at_utc_ms
+                    == Some(platform_responded_at_utc_ms)
+                && existing.response_transit.private_emission_sequence
+                    == Some(private_emission_sequence)
+            {
+                return Ok(existing.response_transit.clone());
+            }
+            return Err(SessionError::RequestIdentityConflict(
+                global_request_id.to_owned(),
+            ));
+        }
+        let registration_transit = record.transit.clone();
+        if platform_responded_at_utc_ms < registration_transit.platform_arrived_at_utc_ms {
+            return Err(SessionError::ResponseBeforeArrival);
+        }
+        let last_action_at = self
+            .state
+            .action_keys
+            .values()
+            .filter(|(_, request_id)| request_id == global_request_id)
+            .map(|(key, _)| key.effective_processing_at_utc_ms)
+            .max()
+            .ok_or_else(|| {
+                SessionError::RequestNotLogicallyReleased(global_request_id.to_owned())
+            })?;
+        if platform_responded_at_utc_ms < last_action_at {
+            return Err(SessionError::ResponseBeforeLogicalCompletion);
+        }
+        let response_received_at_utc_ms = checked_add_delay(
+            platform_responded_at_utc_ms,
+            registration_transit.inbound_delay_ms,
+        )?;
+        self.prepare_private_fact_registration(
+            PrivateVisibilityEvidenceV1::DirectResponse {
+                global_request_id: global_request_id.to_owned(),
+            },
+            response_received_at_utc_ms,
+            private_emission_sequence,
+        )?;
+        let mut response_transit = registration_transit;
+        response_transit.platform_responded_at_utc_ms = Some(platform_responded_at_utc_ms);
+        response_transit.private_emission_sequence = Some(private_emission_sequence);
+        response_transit.response_received_at_utc_ms = Some(response_received_at_utc_ms);
+        self.prepared_direct_response = Some(PreparedDirectResponseCompletionV2 {
+            global_request_id: global_request_id.to_owned(),
+            response_transit: response_transit.clone(),
+        });
+        Ok(response_transit)
+    }
+
+    fn commit_prevalidated(self) {
+        let PreparedExecutionActionSliceV2 {
+            state,
+            latency_profile: _,
+            closed_action_through_before_utc_ms: _,
+            closed_action_through_after_utc_ms,
+            actions,
+            next_action_index,
+            completed_request_id,
+            platform_state_revision_before,
+            platform_state_revision_after,
+            prepared_mutations,
+            prepared_queries,
+            prepared_lifecycle_feedback,
+            prepared_private_facts,
+            prepared_used_private_emission_sequences,
+            prepared_direct_response,
+            preparation_failed,
+        } = self;
+        debug_assert!(!preparation_failed);
+        debug_assert_eq!(next_action_index, actions.len());
+        for action in actions {
+            state.pending_actions.remove(&action.key);
+            state.released_action_ids.insert(action.action_identity);
+        }
+        if let Some(global_request_id) = completed_request_id {
+            state.released_request_ids.insert(global_request_id);
+        }
+        state.closed_action_through_utc_ms = Some(closed_action_through_after_utc_ms);
+        debug_assert_eq!(
+            state.platform_state_revision,
+            platform_state_revision_before
+        );
+        state.platform_state_revision = platform_state_revision_after;
+        for (identity, record) in prepared_mutations {
+            debug_assert!(state.mutations.insert(identity, record).is_none());
+        }
+        for (request_id, record) in prepared_queries {
+            debug_assert!(state.queries.insert(request_id, record).is_none());
+        }
+        for (feedback_id, timing) in prepared_lifecycle_feedback {
+            debug_assert!(
+                state
+                    .lifecycle_feedback
+                    .insert(feedback_id, timing)
+                    .is_none()
+            );
+        }
+        for registration in prepared_private_facts {
+            let identity = registration.key.identity.clone();
+            debug_assert!(
+                state
+                    .private_fact_keys
+                    .insert(identity, registration.key.clone())
+                    .is_none()
+            );
+            debug_assert!(
+                state
+                    .pending_private_facts
+                    .insert(registration.key, registration.evidence)
+                    .is_none()
+            );
+        }
+        for sequence in prepared_used_private_emission_sequences {
+            debug_assert!(state.used_private_emission_sequences.insert(sequence));
+        }
+        if let Some(prepared_response) = prepared_direct_response {
+            let request = state
+                .requests
+                .get_mut(&prepared_response.global_request_id)
+                .expect("已准备的直接响应必须仍属于当前会话");
+            debug_assert!(request.response_transit.is_none());
+            request.response_transit = Some(prepared_response.response_transit);
+            let removed = state
+                .expected_direct_response_request_ids
+                .remove(&prepared_response.global_request_id);
+            debug_assert!(removed);
+        }
+    }
+
+    fn prepare_query_revision_unchecked(
+        &mut self,
+        global_request_id: &str,
+        action_identity: &str,
+        query_sha256: Sha256Hex,
+        frozen_revision: Option<u64>,
+    ) -> Result<QueryRevisionV1, SessionError> {
+        self.validate_current_action(global_request_id, action_identity)?;
+        if !is_sha256_hex(&query_sha256.0) {
+            return Err(SessionError::InvalidRequest("查询摘要非法"));
+        }
+        let existing = self
+            .prepared_queries
+            .iter()
+            .find(|(request_id, _)| request_id == global_request_id)
+            .map(|(_, record)| record)
+            .or_else(|| self.state.queries.get(global_request_id));
+        if let Some(existing) = existing {
+            let revision_conflicts = frozen_revision
+                .is_some_and(|revision| revision != existing.platform_state_revision);
+            if existing.query_sha256 != query_sha256 || revision_conflicts {
+                return Err(SessionError::QueryIdentityConflict(
+                    global_request_id.to_owned(),
+                ));
+            }
+            return Ok(QueryRevisionV1 {
+                platform_state_revision: existing.platform_state_revision,
+                reused: true,
+            });
+        }
+        let selected_revision = match frozen_revision {
+            Some(revision) if revision <= self.platform_state_revision_after => revision,
+            Some(_) => {
+                return Err(SessionError::QueryIdentityConflict(
+                    global_request_id.to_owned(),
+                ));
+            }
+            None => self.platform_state_revision_after,
+        };
+        self.prepared_queries.push((
+            global_request_id.to_owned(),
+            QueryRecord {
+                query_sha256,
+                platform_state_revision: selected_revision,
+            },
+        ));
+        Ok(QueryRevisionV1 {
+            platform_state_revision: selected_revision,
+            reused: false,
+        })
+    }
+
+    fn validate_current_action(
+        &self,
+        global_request_id: &str,
+        action_identity: &str,
+    ) -> Result<(), SessionError> {
+        if !self.state.requests.contains_key(global_request_id) {
+            return Err(SessionError::RequestNotFound(global_request_id.to_owned()));
+        }
+        let current = self
+            .actions
+            .get(self.next_action_index)
+            .ok_or_else(|| SessionError::ActionNotLogicallyReleased(action_identity.to_owned()))?;
+        if current.action_identity != action_identity
+            || current.global_request_id != global_request_id
+        {
+            return Err(SessionError::ActionNotLogicallyReleased(
+                action_identity.to_owned(),
+            ));
+        }
+        let action_request_id = self
+            .state
+            .action_keys
+            .get(action_identity)
+            .map(|(_, request_id)| request_id)
+            .ok_or_else(|| SessionError::ActionNotLogicallyReleased(action_identity.to_owned()))?;
+        if action_request_id != global_request_id {
+            return Err(SessionError::ActionNotLogicallyReleased(
+                action_identity.to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn prepare_private_fact_registration(
+        &mut self,
+        evidence: PrivateVisibilityEvidenceV1,
+        received_at_utc_ms: i64,
+        private_emission_sequence: u64,
+    ) -> Result<(), SessionError> {
+        if self
+            .state
+            .private_fact_schedule_closed_through_utc_ms
+            .is_some_and(|closed| received_at_utc_ms <= closed)
+        {
+            return Err(SessionError::PrivateFactScheduleClosed);
+        }
+        let identity = evidence.identity();
+        let key = PrivateFactOrderKey {
+            received_at_utc_ms,
+            private_emission_sequence,
+            identity: identity.clone(),
+        };
+        if let Some(existing) = self
+            .prepared_private_facts
+            .iter()
+            .find(|registration| registration.key.identity == identity)
+            .map(|registration| &registration.key)
+            .or_else(|| self.state.private_fact_keys.get(&identity))
+        {
+            if existing == &key {
+                return Ok(());
+            }
+            return Err(SessionError::PrivateFactIdentityConflict(identity));
+        }
+        if self.next_private_emission_sequence()? != private_emission_sequence {
+            return Err(SessionError::PrivateEmissionSequenceConflict(
+                private_emission_sequence,
+            ));
+        }
+        if self
+            .prepared_used_private_emission_sequences
+            .contains(&private_emission_sequence)
+            || self
+                .state
+                .used_private_emission_sequences
+                .contains(&private_emission_sequence)
+        {
+            return Err(SessionError::PrivateEmissionSequenceConflict(
+                private_emission_sequence,
+            ));
+        }
+        self.prepared_used_private_emission_sequences
+            .push(private_emission_sequence);
+        self.prepared_private_facts
+            .push(PreparedPrivateFactRegistrationV2 { key, evidence });
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RegisteredLogicalScheduleV1 {
     pub request: RegisteredRequestV1,
     pub actions: Vec<QueuedLogicalActionV1>,
+}
+
+pub(crate) struct PreparedRequestScheduleV1 {
+    request_registration: PreparedRequestRegistrationV1,
+    schedule: RegisteredLogicalScheduleV1,
+}
+
+impl PreparedRequestScheduleV1 {
+    pub(crate) fn schedule(&self) -> &RegisteredLogicalScheduleV1 {
+        &self.schedule
+    }
+}
+
+pub(crate) struct PreparedBusinessMarketUseV1 {
+    mark_business_input_started: bool,
+    paper_candidate_condition_ids: BTreeSet<String>,
+    paper_candidate_token_ids: BTreeSet<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3532,6 +4723,15 @@ impl SessionState {
         &mut self,
         received_at_utc_ms: i64,
     ) -> Result<(), SessionError> {
+        self.validate_private_fact_schedule_closure(received_at_utc_ms)?;
+        self.private_fact_schedule_closed_through_utc_ms = Some(received_at_utc_ms);
+        Ok(())
+    }
+
+    fn validate_private_fact_schedule_closure(
+        &self,
+        received_at_utc_ms: i64,
+    ) -> Result<(), SessionError> {
         if self.private_fact_schedule_closed_through_utc_ms == Some(received_at_utc_ms) {
             return Ok(());
         }
@@ -3572,7 +4772,6 @@ impl SessionState {
                 format!("LOGICAL_PLATFORM:{received_at_utc_ms}"),
             ));
         }
-        self.private_fact_schedule_closed_through_utc_ms = Some(received_at_utc_ms);
         Ok(())
     }
 
@@ -3635,10 +4834,18 @@ impl SessionState {
         &self,
         received_at_utc_ms: i64,
     ) -> Result<Option<VisiblePrivateFactV1>, SessionError> {
-        if self
-            .private_fact_schedule_closed_through_utc_ms
-            .is_none_or(|closed| closed < received_at_utc_ms)
-        {
+        self.prepare_next_private_fact_through_with_schedule(
+            received_at_utc_ms,
+            self.private_fact_schedule_closed_through_utc_ms,
+        )
+    }
+
+    fn prepare_next_private_fact_through_with_schedule(
+        &self,
+        received_at_utc_ms: i64,
+        schedule_closed_through_utc_ms: Option<i64>,
+    ) -> Result<Option<VisiblePrivateFactV1>, SessionError> {
+        if schedule_closed_through_utc_ms.is_none_or(|closed| closed < received_at_utc_ms) {
             return Err(SessionError::PrivateFactScheduleNotClosed);
         }
         if self
@@ -3665,6 +4872,46 @@ impl SessionState {
         }))
     }
 
+    fn prepare_private_fact_slice_v2(
+        &self,
+        received_at_utc_ms: i64,
+    ) -> Result<PreparedPrivateFactSliceV2, SessionError> {
+        let schedule_closed_through_before_utc_ms =
+            self.private_fact_schedule_closed_through_utc_ms;
+        if schedule_closed_through_before_utc_ms.is_some_and(|closed| received_at_utc_ms < closed) {
+            self.validate_private_fact_schedule_closure(received_at_utc_ms)?;
+        }
+        let next_private_at = self.next_private_fact_received_at_through(received_at_utc_ms);
+        let close_through_utc_ms = match (schedule_closed_through_before_utc_ms, next_private_at) {
+            (Some(closed), Some(next)) if next <= closed => closed,
+            (Some(_), Some(next)) => next,
+            (Some(closed), None) if closed >= received_at_utc_ms => closed,
+            (_, Some(next)) => next,
+            _ => received_at_utc_ms,
+        };
+        let schedule_advanced = schedule_closed_through_before_utc_ms != Some(close_through_utc_ms);
+        if schedule_advanced {
+            self.validate_private_fact_schedule_closure(close_through_utc_ms)?;
+        }
+        let candidate = self.prepare_next_private_fact_through_with_schedule(
+            close_through_utc_ms,
+            Some(close_through_utc_ms),
+        )?;
+        if let Some(candidate) = &candidate {
+            self.validate_prepared_private_fact_with_schedule(
+                candidate,
+                Some(close_through_utc_ms),
+            )?;
+        }
+        Ok(PreparedPrivateFactSliceV2 {
+            session_id: self.spec.session_id.clone(),
+            schedule_closed_through_before_utc_ms,
+            close_through_utc_ms,
+            schedule_advanced,
+            candidate,
+        })
+    }
+
     fn confirm_prepared_private_fact(
         &mut self,
         candidate: &VisiblePrivateFactV1,
@@ -3678,8 +4925,22 @@ impl SessionState {
         &self,
         candidate: &VisiblePrivateFactV1,
     ) -> Result<(), SessionError> {
+        self.validate_prepared_private_fact_with_schedule(
+            candidate,
+            self.private_fact_schedule_closed_through_utc_ms,
+        )
+    }
+
+    fn validate_prepared_private_fact_with_schedule(
+        &self,
+        candidate: &VisiblePrivateFactV1,
+        schedule_closed_through_utc_ms: Option<i64>,
+    ) -> Result<(), SessionError> {
         let expected = self
-            .prepare_next_private_fact_through(candidate.received_at_utc_ms)?
+            .prepare_next_private_fact_through_with_schedule(
+                candidate.received_at_utc_ms,
+                schedule_closed_through_utc_ms,
+            )?
             .ok_or(SessionError::PrivateFactConfirmationConflict)?;
         if &expected != candidate {
             return Err(SessionError::PrivateFactConfirmationConflict);
@@ -3705,6 +4966,42 @@ impl SessionState {
             }
         }
         Ok(())
+    }
+
+    fn commit_prevalidated_private_fact_slice_v2(
+        &mut self,
+        prepared: PreparedPrivateFactSliceV2,
+    ) -> Option<VisiblePrivateFactV1> {
+        let PreparedPrivateFactSliceV2 {
+            session_id,
+            schedule_closed_through_before_utc_ms,
+            close_through_utc_ms,
+            schedule_advanced,
+            candidate,
+        } = prepared;
+        debug_assert_eq!(self.spec.session_id, session_id);
+        debug_assert_eq!(
+            self.private_fact_schedule_closed_through_utc_ms,
+            schedule_closed_through_before_utc_ms
+        );
+        if schedule_advanced {
+            debug_assert!(
+                self.validate_private_fact_schedule_closure(close_through_utc_ms)
+                    .is_ok()
+            );
+            self.private_fact_schedule_closed_through_utc_ms = Some(close_through_utc_ms);
+        } else {
+            debug_assert_eq!(
+                self.private_fact_schedule_closed_through_utc_ms,
+                Some(close_through_utc_ms)
+            );
+        }
+        if let Some(candidate) = candidate {
+            self.commit_prevalidated_private_fact(&candidate);
+            Some(candidate)
+        } else {
+            None
+        }
     }
 
     fn commit_prevalidated_private_fact(&mut self, candidate: &VisiblePrivateFactV1) {
@@ -3869,10 +5166,60 @@ impl SessionState {
         canonical_request_sha256: Sha256Hex,
         actions: Vec<LogicalActionPlanV1>,
     ) -> Result<RegisteredLogicalScheduleV1, SessionError> {
+        let prepared =
+            self.prepare_request_schedule(profile, context, canonical_request_sha256, actions)?;
+        Ok(self.commit_prevalidated_request_schedule(prepared))
+    }
+
+    fn prepare_request_schedule(
+        &self,
+        profile: &EmpiricalDelayProfile,
+        context: RequestContextV1,
+        canonical_request_sha256: Sha256Hex,
+        actions: Vec<LogicalActionPlanV1>,
+    ) -> Result<PreparedRequestScheduleV1, SessionError> {
         let global_request_id = context.global_request_id.clone();
         let caller_sequence = context.caller_sequence;
         let prepared_request =
             self.prepare_request_registration(profile, context, canonical_request_sha256)?;
+        self.prepare_request_schedule_from_registration(
+            global_request_id,
+            caller_sequence,
+            prepared_request,
+            actions,
+        )
+    }
+
+    fn prepare_registered_request_retry_schedule(
+        &self,
+        context: &RequestContextV1,
+        actions: Vec<LogicalActionPlanV1>,
+    ) -> Result<PreparedRequestScheduleV1, SessionError> {
+        validate_request_context(&self.spec, context)?;
+        let existing = self
+            .requests
+            .get(&context.global_request_id)
+            .ok_or_else(|| SessionError::RequestNotFound(context.global_request_id.clone()))?;
+        if existing.context != *context {
+            return Err(SessionError::RequestIdentityConflict(
+                context.global_request_id.clone(),
+            ));
+        }
+        self.prepare_request_schedule_from_registration(
+            context.global_request_id.clone(),
+            context.caller_sequence,
+            PreparedRequestRegistrationV1::PhysicalRetry(existing.transit.clone()),
+            actions,
+        )
+    }
+
+    fn prepare_request_schedule_from_registration(
+        &self,
+        global_request_id: String,
+        caller_sequence: u64,
+        prepared_request: PreparedRequestRegistrationV1,
+        actions: Vec<LogicalActionPlanV1>,
+    ) -> Result<PreparedRequestScheduleV1, SessionError> {
         let registered_request = prepared_request.registered_request();
         let prepared_actions = self.prepare_logical_schedule(
             &global_request_id,
@@ -3881,23 +5228,76 @@ impl SessionState {
             &actions,
         )?;
 
-        let is_new = matches!(prepared_request, PreparedRequestRegistrationV1::New(_));
-        let committed_request = self.commit_prepared_request(prepared_request);
+        if matches!(prepared_request, PreparedRequestRegistrationV1::New(_)) {
+            self.validate_direct_response_expectation(
+                &global_request_id,
+                &registered_request.transit,
+                &prepared_actions,
+            )?;
+        }
+
+        Ok(PreparedRequestScheduleV1 {
+            request_registration: prepared_request,
+            schedule: RegisteredLogicalScheduleV1 {
+                request: registered_request,
+                actions: prepared_actions,
+            },
+        })
+    }
+
+    fn validate_direct_response_expectation(
+        &self,
+        global_request_id: &str,
+        transit: &RequestTransitV1,
+        actions: &[QueuedLogicalActionV1],
+    ) -> Result<(), SessionError> {
+        let responded_at_utc_ms = actions
+            .iter()
+            .map(|action| action.key.effective_processing_at_utc_ms)
+            .max()
+            .ok_or(SessionError::ActionScheduleEmpty)?;
+        let expected_at_utc_ms = checked_add_delay(responded_at_utc_ms, transit.inbound_delay_ms)?;
+        if self
+            .private_fact_schedule_closed_through_utc_ms
+            .is_some_and(|closed| expected_at_utc_ms <= closed)
+        {
+            return Err(SessionError::PrivateFactScheduleCrossesExpectedResponse(
+                global_request_id.to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn commit_prevalidated_request_schedule(
+        &mut self,
+        prepared: PreparedRequestScheduleV1,
+    ) -> RegisteredLogicalScheduleV1 {
+        let PreparedRequestScheduleV1 {
+            request_registration,
+            schedule,
+        } = prepared;
+        let is_new = matches!(request_registration, PreparedRequestRegistrationV1::New(_));
+        let committed_request = self.commit_prepared_request(request_registration);
+        debug_assert_eq!(committed_request, schedule.request);
+        let global_request_id = schedule
+            .actions
+            .first()
+            .expect("prevalidated request schedule is non-empty")
+            .global_request_id
+            .clone();
         if is_new {
-            for action in &prepared_actions {
+            for action in &schedule.actions {
                 self.action_keys.insert(
                     action.action_identity.clone(),
                     (action.key, action.global_request_id.clone()),
                 );
                 self.pending_actions.insert(action.key, action.clone());
             }
-            self.sealed_request_ids.insert(global_request_id);
+            self.sealed_request_ids.insert(global_request_id.clone());
+            self.expected_direct_response_request_ids
+                .insert(global_request_id);
         }
-
-        Ok(RegisteredLogicalScheduleV1 {
-            request: committed_request,
-            actions: prepared_actions,
-        })
+        schedule
     }
 
     fn prepare_logical_schedule(
@@ -4227,6 +5627,184 @@ impl SessionState {
         }
         self.sealed_request_ids.insert(global_request_id.to_owned());
         Ok(())
+    }
+
+    fn prepare_execution_action_slice_v2<'a>(
+        &'a mut self,
+        latency_profile: &'a EmpiricalDelayProfile,
+        effective_processing_at_utc_ms: i64,
+        complete_same_request_at_same_time: bool,
+    ) -> Result<PreparedExecutionActionSliceV2<'a>, SessionError> {
+        if let Some(identity) = &self.in_flight_action_identity {
+            return Err(SessionError::ActionProcessingInProgress(identity.clone()));
+        }
+        let applicable_prefix_closed = match self.spec.caller_role {
+            SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation => {
+                self.hidden_input_seal.is_some()
+                    || self
+                        .platform_prefix
+                        .closed_through_source_event_at_utc_ms
+                        .is_some_and(|closed| closed >= effective_processing_at_utc_ms)
+            }
+            SimCallerRoleV1::Paper => {
+                self.public_input_seal.is_some()
+                    || self
+                        .public_visibility
+                        .closed_through_received_at_utc_ms
+                        .is_some_and(|closed| closed >= effective_processing_at_utc_ms)
+            }
+        };
+        if !applicable_prefix_closed {
+            return Err(SessionError::PlatformPrefixNotClosed);
+        }
+        if self
+            .closed_action_through_utc_ms
+            .is_some_and(|closed| effective_processing_at_utc_ms < closed)
+        {
+            return Err(SessionError::ActionWatermarkClosed);
+        }
+
+        let closed_action_through_before_utc_ms = self.closed_action_through_utc_ms;
+        let platform_state_revision = self.platform_state_revision;
+        let Some(first_action) = self
+            .pending_actions
+            .first_key_value()
+            .map(|(_, action)| action.clone())
+        else {
+            return Ok(PreparedExecutionActionSliceV2 {
+                state: self,
+                latency_profile,
+                closed_action_through_before_utc_ms,
+                closed_action_through_after_utc_ms: effective_processing_at_utc_ms,
+                actions: Vec::new(),
+                next_action_index: 0,
+                completed_request_id: None,
+                platform_state_revision_before: platform_state_revision,
+                platform_state_revision_after: platform_state_revision,
+                prepared_mutations: Vec::new(),
+                prepared_queries: Vec::new(),
+                prepared_lifecycle_feedback: Vec::new(),
+                prepared_private_facts: Vec::new(),
+                prepared_used_private_emission_sequences: Vec::new(),
+                prepared_direct_response: None,
+                preparation_failed: false,
+            });
+        };
+        if first_action.key.effective_processing_at_utc_ms > effective_processing_at_utc_ms {
+            return Ok(PreparedExecutionActionSliceV2 {
+                state: self,
+                latency_profile,
+                closed_action_through_before_utc_ms,
+                closed_action_through_after_utc_ms: effective_processing_at_utc_ms,
+                actions: Vec::new(),
+                next_action_index: 0,
+                completed_request_id: None,
+                platform_state_revision_before: platform_state_revision,
+                platform_state_revision_after: platform_state_revision,
+                prepared_mutations: Vec::new(),
+                prepared_queries: Vec::new(),
+                prepared_lifecycle_feedback: Vec::new(),
+                prepared_private_facts: Vec::new(),
+                prepared_used_private_emission_sequences: Vec::new(),
+                prepared_direct_response: None,
+                preparation_failed: false,
+            });
+        }
+
+        let actions = if complete_same_request_at_same_time {
+            let actions = self
+                .pending_actions
+                .values()
+                .filter(|action| action.global_request_id == first_action.global_request_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            if actions.is_empty()
+                || !self
+                    .pending_actions
+                    .values()
+                    .take(actions.len())
+                    .eq(actions.iter())
+                || actions.iter().enumerate().any(|(offset, action)| {
+                    let Ok(offset) = u16::try_from(offset) else {
+                        return true;
+                    };
+                    action.key.effective_processing_at_utc_ms
+                        != first_action.key.effective_processing_at_utc_ms
+                        || action.key.caller_sequence != first_action.key.caller_sequence
+                        || first_action.key.batch_item_ordinal.checked_add(offset)
+                            != Some(action.key.batch_item_ordinal)
+                })
+            {
+                return Err(SessionError::InvalidRequest(
+                    "同请求全批动作必须同刻、同调用方序列且序号连续",
+                ));
+            }
+            actions
+        } else {
+            vec![first_action]
+        };
+
+        for action in &actions {
+            if !self.sealed_request_ids.contains(&action.global_request_id) {
+                return Err(SessionError::ActionScheduleNotSealed(
+                    action.global_request_id.clone(),
+                ));
+            }
+            if !self.requests.contains_key(&action.global_request_id)
+                || self.pending_actions.get(&action.key) != Some(action)
+                || self.released_action_ids.contains(&action.action_identity)
+                || self
+                    .action_keys
+                    .get(&action.action_identity)
+                    .is_none_or(|(key, request_id)| {
+                        key != &action.key || request_id != &action.global_request_id
+                    })
+            {
+                return Err(SessionError::ActionIdentityConflict(
+                    action.action_identity.clone(),
+                ));
+            }
+        }
+
+        let global_request_id = actions
+            .first()
+            .expect("due execution action slice is non-empty")
+            .global_request_id
+            .clone();
+        let request_pending_action_count = self
+            .pending_actions
+            .values()
+            .filter(|action| action.global_request_id == global_request_id)
+            .count();
+        let completed_request_id =
+            (request_pending_action_count == actions.len()).then_some(global_request_id);
+        if completed_request_id
+            .as_ref()
+            .is_some_and(|request_id| self.released_request_ids.contains(request_id))
+        {
+            return Err(SessionError::RequestIdentityConflict(
+                completed_request_id.expect("checked completed request identity"),
+            ));
+        }
+
+        Ok(PreparedExecutionActionSliceV2 {
+            state: self,
+            latency_profile,
+            closed_action_through_before_utc_ms,
+            closed_action_through_after_utc_ms: actions[0].key.effective_processing_at_utc_ms,
+            actions,
+            next_action_index: 0,
+            completed_request_id,
+            platform_state_revision_before: platform_state_revision,
+            platform_state_revision_after: platform_state_revision,
+            prepared_mutations: Vec::new(),
+            prepared_queries: Vec::new(),
+            prepared_lifecycle_feedback: Vec::new(),
+            prepared_private_facts: Vec::new(),
+            prepared_used_private_emission_sequences: Vec::new(),
+            prepared_direct_response: None,
+            preparation_failed: false,
+        })
     }
 
     fn complete_logical_item(&mut self, action_identity: &str) -> Result<bool, SessionError> {
@@ -4819,7 +6397,9 @@ fn initialization_snapshot(
         .map_err(|_| SessionError::InitializationStateUnavailable)
 }
 
-fn validate_activation_request(request: &ActivateSessionRequestV1) -> Result<(), SessionError> {
+pub(crate) fn validate_activation_request(
+    request: &ActivateSessionRequestV1,
+) -> Result<(), SessionError> {
     validate_initialization_identity(
         &request.session_id,
         &request.account_instance_key,
@@ -4828,13 +6408,13 @@ fn validate_activation_request(request: &ActivateSessionRequestV1) -> Result<(),
     )?;
     if !is_stable_text(&request.activation_id) {
         return Err(SessionError::InvalidInitializationControl(
-            "activation_id 为空或含首尾空白",
+            "activation_id 为空、超过 256 字节或含首尾空白",
         ));
     }
     Ok(())
 }
 
-fn validate_failure_request(
+pub(crate) fn validate_failure_request(
     request: &FailSessionInitializationRequestV1,
 ) -> Result<(), SessionError> {
     validate_initialization_identity(
@@ -4845,10 +6425,24 @@ fn validate_failure_request(
     )?;
     if !is_stable_text(&request.failure_id) {
         return Err(SessionError::InvalidInitializationControl(
-            "failure_id 为空或含首尾空白",
+            "failure_id 为空、超过 256 字节或含首尾空白",
         ));
     }
     Ok(())
+}
+
+pub(crate) fn validate_market_enrollment_request(
+    request: &MarketEnrollmentRequestV1,
+) -> Result<(), SessionError> {
+    if !is_stable_text(&request.enrollment_request_id) {
+        return Err(SessionError::InvalidMarketEnrollment(
+            "enrollment_request_id 为空、超过 256 字节或含首尾空白",
+        ));
+    }
+    request
+        .market
+        .validate_for_admission()
+        .map_err(|_| SessionError::InvalidMarketEnrollment("市场身份或结果身份非法"))
 }
 
 fn validate_initialization_identity(
@@ -4864,7 +6458,7 @@ fn validate_initialization_identity(
         || !is_stable_text(opening_anchor_id)
     {
         return Err(SessionError::InvalidInitializationControl(
-            "开户身份字段为空或含首尾空白",
+            "开户身份字段为空、超过 256 字节或含首尾空白",
         ));
     }
     if !is_sha256_hex(&opening_anchor_sha256.0) {
@@ -5008,7 +6602,27 @@ fn hash_json<T: Serialize>(domain: &str, value: &T) -> Result<Sha256Hex, Session
     Ok(Sha256Hex(format!("{:x}", hash.finalize())))
 }
 
-fn validate_session_spec(spec: &SessionSpecV2) -> Result<(), SessionError> {
+pub(crate) fn validate_session_spec(spec: &SessionSpecV2) -> Result<(), SessionError> {
+    if spec.session_id.len() > SESSION_ID_MAX_BYTES_V1 {
+        return Err(SessionError::InvalidSessionSpec(
+            "session_id 超过 256 字节上限",
+        ));
+    }
+    if [
+        spec.run_id.as_str(),
+        spec.session_id.as_str(),
+        spec.account_id.as_str(),
+        spec.caller_instance_id.as_str(),
+        spec.creation_request_id.as_str(),
+        spec.response_bridge_binding_id.as_str(),
+    ]
+    .into_iter()
+    .any(|value| value.len() > STABLE_ID_MAX_BYTES_V1)
+    {
+        return Err(SessionError::InvalidSessionSpec(
+            "稳定身份字段超过 256 字节上限",
+        ));
+    }
     if spec.run_id.is_empty()
         || spec.session_id.is_empty()
         || spec.account_id.is_empty()
@@ -5023,6 +6637,11 @@ fn validate_session_spec(spec: &SessionSpecV2) -> Result<(), SessionError> {
         || !is_stable_text(&spec.response_bridge_binding_id)
     {
         return Err(SessionError::InvalidSessionSpec("身份字段为空"));
+    }
+    if !session_id_is_valid_v1(&spec.session_id) {
+        return Err(SessionError::InvalidSessionSpec(
+            "session_id 只能包含 ASCII 字母、数字、连字符或下划线",
+        ));
     }
     if spec.execution_contract_version != SIM_EXECUTION_CONTRACT_V1
         || spec.market_event_schema_version != EXECUTION_MARKET_EVENT_SCHEMA_V3
@@ -5039,7 +6658,7 @@ fn validate_session_spec(spec: &SessionSpecV2) -> Result<(), SessionError> {
 }
 
 fn is_stable_text(value: &str) -> bool {
-    !value.is_empty() && value.trim() == value
+    !value.is_empty() && value.len() <= STABLE_ID_MAX_BYTES_V1 && value.trim() == value
 }
 
 fn validate_request_context(
@@ -5052,7 +6671,11 @@ fn validate_request_context(
         || context.account_id != spec.account_id
         || context.caller_role != spec.caller_role
         || context.caller_instance_id != spec.caller_instance_id
-        || context.global_request_id.is_empty()
+        || !is_stable_text(&context.global_request_id)
+        || context
+            .caller_correlation_id
+            .as_deref()
+            .is_some_and(|identity| !is_stable_text(identity))
     {
         return Err(SessionError::InvalidRequest("合同或调用方身份不匹配"));
     }
@@ -5125,12 +6748,18 @@ mod tests {
     use super::*;
     use crate::finality::successful_policy_for_tests;
     use crate::latency_profile::load_embedded_proxy_latency_profile;
+    use crate::market::{ClosedMarketEventBucketV1, MarketBucketApplyDispositionV1};
     use crate::platform_rules::tests::successful_snapshot_for_sim_tests;
     use crate::scenario::scenario_for_sim_tests;
-    use contracts::{
-        AssetIdentityV1, ClobMarketId, ConditionId, MarketIdentityV2, MarketWindowV2,
-        OutcomeIdentityV1,
+    use crate::task21_tests::{
+        asset, fresh_quality, hidden_bucket, initial_snapshot_event, orderbook_evidence,
+        sealed_event,
     };
+    use contracts::{
+        AssetIdentityV1, ClobMarketId, ConditionId, ExecutionMarketEventPayloadV3,
+        ExecutionMarketEventV3, MarketIdentityV2, MarketWindowV2, OutcomeIdentityV1, PayoutEntryV1,
+    };
+    use data_pipeline_core::encode_execution_market_event_v3;
 
     fn sha(byte: &str) -> Sha256Hex {
         Sha256Hex(byte.repeat(64))
@@ -5170,6 +6799,250 @@ mod tests {
         spec.session_seed =
             hash_json("SIM_SESSION_CHECKPOINT_TEST_SEED", &suffix).expect("测试会话种子身份");
         spec
+    }
+
+    async fn private_fact_slice_test_session(suffix: &str) -> SimSession {
+        let finality_policy = successful_policy_for_tests();
+        let rule_snapshot = successful_snapshot_for_sim_tests().await;
+        let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
+        let scenario = scenario_for_sim_tests();
+        let mut root = SimProcessRoot::try_new(
+            "component-test-run".to_owned(),
+            finality_policy,
+            rule_snapshot,
+            latency_profile,
+            Arc::clone(&scenario),
+        )
+        .expect("运行根");
+        root.create_session(checkpoint_spec(&scenario, suffix))
+            .expect("私有事实切片测试会话")
+            .session
+    }
+
+    fn public_market_bucket_for_session_test(
+        at_utc_ms: i64,
+        next_position: u64,
+        events: &[ExecutionMarketEventV3],
+    ) -> ClosedMarketEventBucketV1 {
+        let event_count = u64::try_from(events.len()).expect("测试事件数量");
+        ClosedMarketEventBucketV1::public(
+            at_utc_ms,
+            next_position
+                .checked_sub(event_count)
+                .expect("测试桶索引覆盖全部事件"),
+            next_position,
+            MillisecondBucketClosureV1::NextEventAt(at_utc_ms + 1),
+            events
+                .iter()
+                .map(|event| encode_execution_market_event_v3(event).expect("规范市场事件编码"))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn resolution_event_for_session_test(
+        winning_outcome_index: u32,
+        source_at_utc_ms: i64,
+        received_at_utc_ms: i64,
+        sequence: u64,
+    ) -> (ExecutionMarketEventV3, MarketResolutionTerminalV3) {
+        let (winning_asset_id, winning_outcome) = match winning_outcome_index {
+            0 => ("1", "Up"),
+            1 => ("2", "Down"),
+            _ => panic!("测试结果索引必须属于二元市场"),
+        };
+        let resolution = MarketResolutionTerminalV3::Resolved {
+            winning_asset_id: winning_asset_id.to_owned(),
+            winning_outcome: winning_outcome.to_owned(),
+            payout_vector: vec![
+                PayoutEntryV1 {
+                    asset: asset("1", 0, "Up"),
+                    payout_pusd_per_share: ExactDecimal(
+                        (winning_outcome_index == 0)
+                            .then_some("1")
+                            .unwrap_or("0")
+                            .to_owned(),
+                    ),
+                },
+                PayoutEntryV1 {
+                    asset: asset("2", 1, "Down"),
+                    payout_pusd_per_share: ExactDecimal(
+                        (winning_outcome_index == 1)
+                            .then_some("1")
+                            .unwrap_or("0")
+                            .to_owned(),
+                    ),
+                },
+            ],
+            mapping_rule_version: "scheduled-session-drive-resolution-v1".to_owned(),
+        };
+        let event = sealed_event(
+            ExecutionMarketEventPayloadV3::MarketResolutionTerminal(resolution.clone()),
+            orderbook_evidence(source_at_utc_ms, received_at_utc_ms, sequence),
+            fresh_quality(),
+        );
+        (event, resolution)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn process_root_run_id_matches_session_stable_identity_byte_limit() {
+        let finality_policy = successful_policy_for_tests();
+        let rule_snapshot = successful_snapshot_for_sim_tests().await;
+        let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
+        let scenario = scenario_for_sim_tests();
+
+        let at_limit = "a".repeat(STABLE_ID_MAX_BYTES_V1);
+        assert_eq!(at_limit.len(), 256);
+        SimProcessRoot::try_new(
+            at_limit,
+            Arc::clone(&finality_policy),
+            Arc::clone(&rule_snapshot),
+            Arc::clone(&latency_profile),
+            Arc::clone(&scenario),
+        )
+        .expect("恰好达到 256 个 UTF-8 字节的 run_id 应被接受");
+
+        let over_limit = "a".repeat(STABLE_ID_MAX_BYTES_V1 + 1);
+        assert_eq!(over_limit.len(), 257);
+        let error = SimProcessRoot::try_new(
+            over_limit,
+            finality_policy,
+            rule_snapshot,
+            latency_profile,
+            scenario,
+        )
+        .err()
+        .expect("257 个 UTF-8 字节的 run_id 应被拒绝");
+        assert_eq!(error, SimProcessRootErrorV1::InvalidRunId);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_id_is_bounded_safe_ascii_at_creation_boundary() {
+        let finality_policy = successful_policy_for_tests();
+        let rule_snapshot = successful_snapshot_for_sim_tests().await;
+        let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
+        let scenario = scenario_for_sim_tests();
+        let mut root = SimProcessRoot::try_new(
+            "component-test-run".to_owned(),
+            Arc::clone(&finality_policy),
+            Arc::clone(&rule_snapshot),
+            Arc::clone(&latency_profile),
+            Arc::clone(&scenario),
+        )
+        .expect("运行根");
+
+        let at_limit_session_id = "a".repeat(SESSION_ID_MAX_BYTES_V1);
+        assert_eq!(SESSION_ID_MAX_BYTES_V1, 256);
+        assert_eq!(at_limit_session_id.len(), SESSION_ID_MAX_BYTES_V1);
+        let mut at_limit = checkpoint_spec(&scenario, "session-id-limit");
+        at_limit.session_id = at_limit_session_id.clone();
+        root.create_session(at_limit)
+            .expect("恰好达到 ASCII 字节上限的 session_id 应被接受");
+
+        let mut over_limit = checkpoint_spec(&scenario, "session-id-over-limit");
+        over_limit.session_id = format!("{at_limit_session_id}b");
+        assert_eq!(over_limit.session_id.len(), SESSION_ID_MAX_BYTES_V1 + 1);
+        let error = root
+            .create_session(over_limit)
+            .err()
+            .expect("超出 ASCII 字节上限的 session_id 应被拒绝");
+        assert_eq!(
+            error,
+            SessionError::InvalidSessionSpec("session_id 超过 256 字节上限")
+        );
+
+        let mut escaped_control = checkpoint_spec(&scenario, "session-id-control");
+        escaped_control.session_id = format!("{}\0", "a".repeat(SESSION_ID_MAX_BYTES_V1 - 1));
+        assert_eq!(escaped_control.session_id.len(), SESSION_ID_MAX_BYTES_V1);
+        let error = root
+            .create_session(escaped_control)
+            .err()
+            .expect("会触发 JSON 转义膨胀的 session_id 控制字符应被拒绝");
+        assert_eq!(
+            error,
+            SessionError::InvalidSessionSpec(
+                "session_id 只能包含 ASCII 字母、数字、连字符或下划线"
+            )
+        );
+    }
+
+    #[test]
+    fn initialization_and_enrollment_validators_bound_request_identity_before_copy() {
+        let account_instance_key = AccountInstanceKeyV1 {
+            run_id: "component-test-run".to_owned(),
+            caller_role: SimCallerRoleV1::ModelTrain,
+            caller_instance_id: "caller-a".to_owned(),
+            account_id: "account-a".to_owned(),
+            platform_source: PlatformSourceV1::Simulated,
+        };
+        let at_limit = "a".repeat(STABLE_ID_MAX_BYTES_V1);
+        let over_limit = "a".repeat(STABLE_ID_MAX_BYTES_V1 + 1);
+
+        let mut activation = ActivateSessionRequestV1 {
+            session_id: "session-a".to_owned(),
+            account_instance_key: account_instance_key.clone(),
+            opening_anchor_id: "opening-anchor-a".to_owned(),
+            opening_anchor_sha256: sha("a"),
+            activation_id: at_limit.clone(),
+        };
+        validate_activation_request(&activation)
+            .expect("activation_id 恰好达到 256 字节时应被接受");
+        activation.activation_id = over_limit.clone();
+        assert_eq!(
+            validate_activation_request(&activation),
+            Err(SessionError::InvalidInitializationControl(
+                "activation_id 为空、超过 256 字节或含首尾空白"
+            ))
+        );
+
+        let mut failure = FailSessionInitializationRequestV1 {
+            session_id: "session-a".to_owned(),
+            account_instance_key,
+            opening_anchor_id: "opening-anchor-a".to_owned(),
+            opening_anchor_sha256: sha("a"),
+            failure_id: at_limit.clone(),
+        };
+        validate_failure_request(&failure).expect("failure_id 恰好达到 256 字节时应被接受");
+        failure.failure_id = over_limit.clone();
+        assert_eq!(
+            validate_failure_request(&failure),
+            Err(SessionError::InvalidInitializationControl(
+                "failure_id 为空、超过 256 字节或含首尾空白"
+            ))
+        );
+
+        let market = appended_market();
+        let mut enrollment = MarketEnrollmentRequestV1 {
+            enrollment_request_id: at_limit,
+            market,
+        };
+        validate_market_enrollment_request(&enrollment)
+            .expect("enrollment_request_id 恰好达到 256 字节时应被接受");
+        enrollment.enrollment_request_id = over_limit;
+        assert_eq!(
+            validate_market_enrollment_request(&enrollment),
+            Err(SessionError::InvalidMarketEnrollment(
+                "enrollment_request_id 为空、超过 256 字节或含首尾空白"
+            ))
+        );
+    }
+
+    #[test]
+    fn enrollment_validator_rejects_unchecked_oversized_market_text() {
+        let request = MarketEnrollmentRequestV1 {
+            enrollment_request_id: "enroll-appended-market".to_owned(),
+            market: appended_market(),
+        };
+        let mut encoded = serde_json::to_value(request).expect("编码市场登记请求");
+        encoded["market"]["assets"][0]["outcome"]["label"] =
+            serde_json::Value::String("a".repeat(STABLE_ID_MAX_BYTES_V1 + 1));
+        let unchecked: MarketEnrollmentRequestV1 =
+            serde_json::from_value(encoded).expect("反序列化未经过构造器的市场登记请求");
+        assert_eq!(
+            validate_market_enrollment_request(&unchecked),
+            Err(SessionError::InvalidMarketEnrollment(
+                "市场身份或结果身份非法"
+            ))
+        );
     }
 
     fn appended_market() -> PlatformMarketV1 {
@@ -5658,6 +7531,93 @@ mod tests {
     }
 
     #[test]
+    fn request_schedule_prepare_is_read_only_and_retry_uses_stored_request() {
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let mut state = SessionState::new(spec());
+        let context = request(&state, "prepared-request", 1, 1_000);
+        let actions = vec![LogicalActionPlanV1 {
+            action_identity: "prepared-request/item-0".to_owned(),
+            batch_item_ordinal: 0,
+            processing_delay_ms: 0,
+        }];
+
+        let prepared = state
+            .prepare_request_schedule(&profile, context.clone(), sha("d"), actions.clone())
+            .expect("prevalidate new request schedule");
+        assert_eq!(
+            prepared.schedule().request.disposition,
+            RequestRegistrationDispositionV1::NewLogicalRequest
+        );
+        assert!(state.requests.is_empty());
+        assert!(state.pending_actions.is_empty());
+        assert!(state.expected_direct_response_request_ids.is_empty());
+
+        let first = state.commit_prevalidated_request_schedule(prepared);
+        assert_eq!(first.actions.len(), 1);
+        assert!(state.requests.contains_key("prepared-request"));
+        assert_eq!(state.pending_actions.len(), 1);
+        assert!(
+            state
+                .expected_direct_response_request_ids
+                .contains("prepared-request")
+        );
+
+        let retry = state
+            .prepare_registered_request_retry_schedule(&context, actions)
+            .expect("rebuild retry schedule from stored request and transit");
+        assert_eq!(
+            retry.schedule().request.disposition,
+            RequestRegistrationDispositionV1::PhysicalRetry
+        );
+        assert_eq!(retry.schedule().request.transit, first.request.transit);
+        assert_eq!(retry.schedule().actions, first.actions);
+
+        let retry = state.commit_prevalidated_request_schedule(retry);
+        assert_eq!(retry.actions, first.actions);
+        assert_eq!(state.requests.len(), 1);
+        assert_eq!(state.pending_actions.len(), 1);
+        assert_eq!(state.expected_direct_response_request_ids.len(), 1);
+    }
+
+    #[test]
+    fn request_schedule_prepare_checks_direct_response_time_before_mutation() {
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let state = SessionState::new(spec());
+        let request_id = "response-time-overflow";
+        let outbound_delay_ms = profile.sample_delay_ms(
+            state.spec.session_seed.0.as_bytes(),
+            request_id,
+            DelaySampleDomainV1::RequestOutbound,
+        );
+        let inbound_delay_ms = profile.sample_delay_ms(
+            state.spec.session_seed.0.as_bytes(),
+            request_id,
+            DelaySampleDomainV1::DirectResponseInbound,
+        );
+        assert!(inbound_delay_ms > 0);
+        let sent_at_utc_ms =
+            i64::MAX - i64::try_from(outbound_delay_ms).expect("test outbound delay fits i64");
+
+        let error = state
+            .prepare_request_schedule(
+                &profile,
+                request(&state, request_id, 1, sent_at_utc_ms),
+                sha("d"),
+                vec![LogicalActionPlanV1 {
+                    action_identity: format!("{request_id}/item-0"),
+                    batch_item_ordinal: 0,
+                    processing_delay_ms: 0,
+                }],
+            )
+            .err()
+            .expect("direct response time overflow must fail during prepare");
+        assert_eq!(error, SessionError::TimeOverflow);
+        assert!(state.requests.is_empty());
+        assert!(state.pending_actions.is_empty());
+        assert!(state.expected_direct_response_request_ids.is_empty());
+    }
+
+    #[test]
     fn complete_platform_prefix_precedes_stably_sorted_actions() {
         let profile = load_embedded_proxy_latency_profile().expect("profile");
         let mut state = SessionState::new(spec());
@@ -5746,6 +7706,1282 @@ mod tests {
             ),
             Err(SessionError::ActionWatermarkClosed)
         );
+    }
+
+    #[test]
+    fn execution_action_slice_full_session_commit_matches_v1() {
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let mut state = SessionState::new(spec());
+        let registered = state
+            .register_request(
+                &profile,
+                request(&state, "prepared-action", 1, 1_000),
+                sha("d"),
+            )
+            .expect("register prepared action request");
+        let effective = registered.transit.platform_arrived_at_utc_ms;
+        state
+            .enqueue_logical_action(
+                "prepared-action/item-0".to_owned(),
+                "prepared-action".to_owned(),
+                LogicalActionKeyV1 {
+                    effective_processing_at_utc_ms: effective,
+                    caller_sequence: 1,
+                    batch_item_ordinal: 0,
+                },
+            )
+            .expect("queue prepared action");
+        state
+            .seal_logical_actions("prepared-action")
+            .expect("seal prepared action request");
+        state
+            .expect_direct_response("prepared-action")
+            .expect("expect prepared direct response");
+        state
+            .close_platform_prefix_through(effective, 1)
+            .expect("close prepared action prefix");
+
+        let before = SessionStateCheckpointV1::from(&state);
+        let mut existing = state.clone();
+        let prepared = state
+            .prepare_execution_action_slice_v2(&profile, effective, false)
+            .expect("prepare one execution action");
+        assert_eq!(
+            prepared
+                .current_action()
+                .map(|action| action.action_identity),
+            Some("prepared-action/item-0".to_owned())
+        );
+        assert!(!prepared.request_completed());
+        assert!(prepared.has_state_change());
+        assert_eq!(prepared.logical_platform_driven_through_utc_ms(), effective);
+        let prepared_action = prepared.current_action().expect("owned prepared action");
+        drop(prepared);
+        assert_eq!(SessionStateCheckpointV1::from(&state), before);
+        assert_eq!(state.in_flight_action_identity, None);
+
+        let action = existing
+            .take_next_action_through(effective)
+            .expect("take existing action")
+            .expect("existing action");
+        assert_eq!(action, prepared_action);
+        let existing_revision = existing
+            .platform_state_revision
+            .checked_add(1)
+            .expect("existing platform revision");
+        existing
+            .advance_platform_state_revision(existing_revision)
+            .expect("advance existing platform revision");
+        let existing_mutation = existing
+            .resolve_mutation_idempotency(
+                "prepared-action",
+                &action.action_identity,
+                "prepared-mutation".to_owned(),
+                sha("e"),
+                "prepared-effect".to_owned(),
+            )
+            .expect("resolve existing mutation");
+        let existing_query = existing
+            .resolve_query_revision("prepared-action", &action.action_identity, sha("f"), None)
+            .expect("resolve existing query");
+        let existing_lifecycle_sequence = existing
+            .next_private_emission_sequence()
+            .expect("existing lifecycle sequence");
+        let existing_lifecycle = existing
+            .bind_lifecycle_feedback_timing(
+                &profile,
+                "prepared-lifecycle".to_owned(),
+                effective + 1,
+                existing_lifecycle_sequence,
+            )
+            .expect("bind existing lifecycle timing");
+        assert!(
+            existing
+                .complete_logical_item(&action.action_identity)
+                .expect("complete existing action")
+        );
+        let existing_response_sequence = existing
+            .next_private_emission_sequence()
+            .expect("existing direct response sequence");
+        let existing_response = existing
+            .complete_direct_response("prepared-action", effective + 5, existing_response_sequence)
+            .expect("complete existing direct response");
+
+        let mut prepared = state
+            .prepare_execution_action_slice_v2(&profile, effective, false)
+            .expect("reprepare one execution action");
+        let action = prepared
+            .current_action()
+            .expect("prepared action for full commit");
+        let prepared_revision = prepared
+            .advance_platform_state_revision_once()
+            .expect("advance prepared platform revision");
+        assert_eq!(prepared_revision, existing_revision);
+        let prepared_mutation = prepared
+            .prepare_mutation_resolution(
+                "prepared-action",
+                &action.action_identity,
+                "prepared-mutation".to_owned(),
+                sha("e"),
+                "prepared-effect".to_owned(),
+            )
+            .expect("prepare mutation resolution");
+        let prepared_query = prepared
+            .prepare_query_revision("prepared-action", &action.action_identity, sha("f"))
+            .expect("prepare query revision");
+        assert_eq!(
+            prepared.query_revision_for_request("prepared-action"),
+            Some(prepared_revision)
+        );
+        let prepared_lifecycle_sequence = prepared
+            .next_private_emission_sequence()
+            .expect("prepared lifecycle sequence");
+        let prepared_lifecycle = prepared
+            .prepare_lifecycle_feedback_timing(
+                "prepared-lifecycle".to_owned(),
+                effective + 1,
+                prepared_lifecycle_sequence,
+            )
+            .expect("prepare lifecycle timing");
+        prepared
+            .finish_current_action(&action.action_identity)
+            .expect("finish prepared action before direct response");
+        assert!(prepared.request_completed());
+        let prepared_response_sequence = prepared
+            .next_private_emission_sequence()
+            .expect("prepared direct response sequence");
+        assert!(prepared_lifecycle_sequence < prepared_response_sequence);
+        let prepared_response = prepared
+            .prepare_complete_direct_response(
+                "prepared-action",
+                effective + 5,
+                prepared_response_sequence,
+            )
+            .expect("prepare direct response");
+        assert_eq!(prepared_mutation, existing_mutation);
+        assert_eq!(prepared_query, existing_query);
+        assert_eq!(prepared_lifecycle, existing_lifecycle);
+        assert_eq!(prepared_response, existing_response);
+        prepared
+            .into_committable()
+            .expect("all prepared actions are finished")
+            .commit();
+        assert_eq!(
+            SessionStateCheckpointV1::from(&state),
+            SessionStateCheckpointV1::from(&existing)
+        );
+        assert_eq!(state.in_flight_action_identity, None);
+    }
+
+    #[test]
+    fn execution_action_slice_drains_one_same_time_request_as_one_prepared_batch() {
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let mut state = SessionState::new(spec());
+        let registered = state
+            .register_request(
+                &profile,
+                request(&state, "prepared-cancel-batch", 1, 1_000),
+                sha("d"),
+            )
+            .expect("register prepared cancel batch");
+        let effective = registered.transit.platform_arrived_at_utc_ms;
+        for ordinal in 0..3_u16 {
+            state
+                .enqueue_logical_action(
+                    format!("prepared-cancel-batch/item-{ordinal}"),
+                    "prepared-cancel-batch".to_owned(),
+                    LogicalActionKeyV1 {
+                        effective_processing_at_utc_ms: effective,
+                        caller_sequence: 1,
+                        batch_item_ordinal: ordinal,
+                    },
+                )
+                .expect("queue prepared cancel batch item");
+        }
+        state
+            .seal_logical_actions("prepared-cancel-batch")
+            .expect("seal prepared cancel batch");
+        state
+            .close_platform_prefix_through(effective, 1)
+            .expect("close prepared cancel batch prefix");
+
+        let before = SessionStateCheckpointV1::from(&state);
+        let mut existing = state.clone();
+        let mut prepared = state
+            .prepare_execution_action_slice_v2(&profile, effective, true)
+            .expect("prepare complete same-time cancel batch");
+        let mut prepared_ordinals = Vec::new();
+        while let Some(action) = prepared.current_action() {
+            prepared_ordinals.push(action.key.batch_item_ordinal);
+            prepared
+                .finish_current_action(&action.action_identity)
+                .expect("finish prepared cancel batch item in order");
+        }
+        assert_eq!(prepared_ordinals, vec![0, 1, 2]);
+        assert!(prepared.request_completed());
+        drop(prepared);
+        assert_eq!(SessionStateCheckpointV1::from(&state), before);
+        assert_eq!(state.in_flight_action_identity, None);
+
+        loop {
+            let action = existing
+                .take_next_action_through(effective)
+                .expect("take existing cancel batch item")
+                .expect("existing cancel batch item");
+            let completed = existing
+                .complete_logical_item(&action.action_identity)
+                .expect("complete existing cancel batch item");
+            if completed {
+                break;
+            }
+        }
+        let mut prepared = state
+            .prepare_execution_action_slice_v2(&profile, effective, true)
+            .expect("reprepare complete same-time cancel batch");
+        while let Some(action) = prepared.current_action() {
+            prepared
+                .finish_current_action(&action.action_identity)
+                .expect("finish re-prepared cancel batch item in order");
+        }
+        prepared
+            .into_committable()
+            .expect("complete cancel batch is committable")
+            .commit();
+        assert_eq!(
+            SessionStateCheckpointV1::from(&state),
+            SessionStateCheckpointV1::from(&existing)
+        );
+        assert_eq!(state.in_flight_action_identity, None);
+    }
+
+    #[test]
+    fn execution_action_slice_cancel_batch_reads_its_prepared_mutation() {
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let mut state = SessionState::new(spec());
+        let registered = state
+            .register_request(
+                &profile,
+                request(&state, "prepared-cancel-mutation", 1, 1_000),
+                sha("d"),
+            )
+            .expect("register cancel mutation batch");
+        let effective = registered.transit.platform_arrived_at_utc_ms;
+        for ordinal in 0..2_u16 {
+            state
+                .enqueue_logical_action(
+                    format!("prepared-cancel-mutation/item-{ordinal}"),
+                    "prepared-cancel-mutation".to_owned(),
+                    LogicalActionKeyV1 {
+                        effective_processing_at_utc_ms: effective,
+                        caller_sequence: 1,
+                        batch_item_ordinal: ordinal,
+                    },
+                )
+                .expect("queue cancel mutation item");
+        }
+        state
+            .seal_logical_actions("prepared-cancel-mutation")
+            .expect("seal cancel mutation batch");
+        state
+            .close_platform_prefix_through(effective, 1)
+            .expect("close cancel mutation prefix");
+
+        let mut prepared = state
+            .prepare_execution_action_slice_v2(&profile, effective, true)
+            .expect("prepare cancel mutation batch");
+        let first = prepared
+            .current_action()
+            .expect("first cancel mutation action");
+        let first_resolution = prepared
+            .prepare_mutation_resolution(
+                "prepared-cancel-mutation",
+                &first.action_identity,
+                "shared-cancel-mutation".to_owned(),
+                sha("e"),
+                "first-effect".to_owned(),
+            )
+            .expect("first mutation is new");
+        prepared
+            .finish_current_action(&first.action_identity)
+            .expect("finish first cancel mutation action");
+        let second = prepared
+            .current_action()
+            .expect("second cancel mutation action");
+        let second_resolution = prepared
+            .prepare_mutation_resolution(
+                "prepared-cancel-mutation",
+                &second.action_identity,
+                "shared-cancel-mutation".to_owned(),
+                sha("e"),
+                "ignored-second-effect".to_owned(),
+            )
+            .expect("second mutation reuses prepared first mutation");
+        prepared
+            .finish_current_action(&second.action_identity)
+            .expect("finish second cancel mutation action");
+        assert_eq!(
+            first_resolution.disposition,
+            MutationResolutionDispositionV1::NewEffect
+        );
+        assert_eq!(
+            second_resolution.disposition,
+            MutationResolutionDispositionV1::ExistingEffect
+        );
+        assert_eq!(second_resolution.effect_identity, "first-effect");
+        prepared
+            .into_committable()
+            .expect("ordered cancel mutation batch is committable")
+            .commit();
+
+        assert_eq!(state.mutations.len(), 1);
+        assert_eq!(
+            state
+                .mutations
+                .get("shared-cancel-mutation")
+                .map(|record| record.effect_identity.as_str()),
+            Some("first-effect")
+        );
+        assert!(
+            state
+                .released_request_ids
+                .contains("prepared-cancel-mutation")
+        );
+        assert_eq!(state.in_flight_action_identity, None);
+    }
+
+    #[test]
+    fn execution_action_slice_rejects_reverse_cancel_item_before_state_change() {
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let mut state = SessionState::new(spec());
+        let registered = state
+            .register_request(
+                &profile,
+                request(&state, "prepared-reverse-cancel", 1, 1_000),
+                sha("d"),
+            )
+            .expect("register reverse cancel batch");
+        let effective = registered.transit.platform_arrived_at_utc_ms;
+        for ordinal in 0..2_u16 {
+            state
+                .enqueue_logical_action(
+                    format!("prepared-reverse-cancel/item-{ordinal}"),
+                    "prepared-reverse-cancel".to_owned(),
+                    LogicalActionKeyV1 {
+                        effective_processing_at_utc_ms: effective,
+                        caller_sequence: 1,
+                        batch_item_ordinal: ordinal,
+                    },
+                )
+                .expect("queue reverse cancel item");
+        }
+        state
+            .seal_logical_actions("prepared-reverse-cancel")
+            .expect("seal reverse cancel batch");
+        state
+            .close_platform_prefix_through(effective, 1)
+            .expect("close reverse cancel prefix");
+        let before = SessionStateCheckpointV1::from(&state);
+
+        let mut prepared = state
+            .prepare_execution_action_slice_v2(&profile, effective, true)
+            .expect("prepare reverse cancel batch");
+        let second_identity = "prepared-reverse-cancel/item-1";
+        assert_eq!(
+            prepared.prepare_mutation_resolution(
+                "prepared-reverse-cancel",
+                second_identity,
+                "reverse-cancel-mutation".to_owned(),
+                sha("e"),
+                "reverse-effect".to_owned(),
+            ),
+            Err(SessionError::ActionNotLogicallyReleased(
+                second_identity.to_owned()
+            ))
+        );
+        let preparation_failed =
+            SessionError::ExecutionState("执行动作准备已经失败，必须丢弃当前准备结果".to_owned());
+        assert_eq!(
+            prepared.finish_current_action(second_identity),
+            Err(preparation_failed.clone())
+        );
+        let first = prepared
+            .current_action()
+            .expect("first cancel action remains current");
+        assert_eq!(
+            prepared.prepare_mutation_resolution(
+                "prepared-reverse-cancel",
+                &first.action_identity,
+                "correct-after-reverse".to_owned(),
+                sha("e"),
+                "correct-effect".to_owned(),
+            ),
+            Err(preparation_failed.clone())
+        );
+        assert_eq!(
+            prepared.finish_current_action(&first.action_identity),
+            Err(preparation_failed.clone())
+        );
+        assert_eq!(prepared.into_committable().err(), Some(preparation_failed));
+        assert_eq!(SessionStateCheckpointV1::from(&state), before);
+
+        let mut reverse_finish = state
+            .prepare_execution_action_slice_v2(&profile, effective, true)
+            .expect("reprepare cancel batch for reverse finish");
+        assert_eq!(
+            reverse_finish.finish_current_action(second_identity),
+            Err(SessionError::ActionNotLogicallyReleased(
+                second_identity.to_owned()
+            ))
+        );
+        let first = reverse_finish
+            .current_action()
+            .expect("reverse finish keeps first action current");
+        let preparation_failed =
+            SessionError::ExecutionState("执行动作准备已经失败，必须丢弃当前准备结果".to_owned());
+        assert_eq!(
+            reverse_finish.finish_current_action(&first.action_identity),
+            Err(preparation_failed.clone())
+        );
+        assert_eq!(
+            reverse_finish.into_committable().err(),
+            Some(preparation_failed)
+        );
+        assert_eq!(SessionStateCheckpointV1::from(&state), before);
+
+        let mut missing = state
+            .prepare_execution_action_slice_v2(&profile, effective, true)
+            .expect("reprepare cancel batch for missing-item check");
+        let first = missing.current_action().expect("first missing-item action");
+        missing
+            .finish_current_action(&first.action_identity)
+            .expect("finish only the first action without prior error");
+        assert_eq!(
+            missing.into_committable().err(),
+            Some(SessionError::ActionNotLogicallyReleased(
+                second_identity.to_owned()
+            ))
+        );
+        assert_eq!(SessionStateCheckpointV1::from(&state), before);
+        assert_eq!(state.in_flight_action_identity, None);
+    }
+
+    #[test]
+    fn execution_action_slice_drop_or_later_prepare_error_keeps_state_unchanged() {
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let mut state = SessionState::new(spec());
+        let registered = state
+            .register_request(
+                &profile,
+                request(&state, "prepared-rollback", 1, 1_000),
+                sha("d"),
+            )
+            .expect("register prepared rollback request");
+        let effective = registered.transit.platform_arrived_at_utc_ms;
+        state
+            .enqueue_logical_action(
+                "prepared-rollback/item-0".to_owned(),
+                "prepared-rollback".to_owned(),
+                LogicalActionKeyV1 {
+                    effective_processing_at_utc_ms: effective,
+                    caller_sequence: 1,
+                    batch_item_ordinal: 0,
+                },
+            )
+            .expect("queue prepared rollback action");
+        state
+            .seal_logical_actions("prepared-rollback")
+            .expect("seal prepared rollback request");
+        state
+            .close_platform_prefix_through(effective, 1)
+            .expect("close prepared rollback prefix");
+        let before = SessionStateCheckpointV1::from(&state);
+
+        let mut dropped = state
+            .prepare_execution_action_slice_v2(&profile, effective, false)
+            .expect("prepare dropped overlay");
+        let action = dropped.current_action().expect("dropped overlay action");
+        dropped
+            .prepare_mutation_resolution(
+                "prepared-rollback",
+                &action.action_identity,
+                "dropped-mutation".to_owned(),
+                sha("e"),
+                "dropped-effect".to_owned(),
+            )
+            .expect("prepare mutation before drop");
+        drop(dropped);
+        assert_eq!(SessionStateCheckpointV1::from(&state), before);
+
+        let mut failed = state
+            .prepare_execution_action_slice_v2(&profile, effective, false)
+            .expect("prepare failing overlay");
+        let action = failed.current_action().expect("failing overlay action");
+        failed
+            .prepare_mutation_resolution(
+                "prepared-rollback",
+                &action.action_identity,
+                "failed-mutation".to_owned(),
+                sha("e"),
+                "failed-effect".to_owned(),
+            )
+            .expect("prepare mutation before later error");
+        let revision = failed
+            .advance_platform_state_revision_once()
+            .expect("prepare virtual platform revision");
+        assert_eq!(failed.platform_state_revision(), revision);
+        assert_eq!(
+            failed.prepare_query_revision_at(
+                "prepared-rollback",
+                &action.action_identity,
+                sha("f"),
+                revision + 1,
+            ),
+            Err(SessionError::QueryIdentityConflict(
+                "prepared-rollback".to_owned()
+            ))
+        );
+        let preparation_failed =
+            SessionError::ExecutionState("执行动作准备已经失败，必须丢弃当前准备结果".to_owned());
+        assert_eq!(
+            failed.finish_current_action(&action.action_identity),
+            Err(preparation_failed.clone())
+        );
+        assert_eq!(failed.into_committable().err(), Some(preparation_failed));
+        assert_eq!(SessionStateCheckpointV1::from(&state), before);
+        assert_eq!(state.in_flight_action_identity, None);
+    }
+
+    #[test]
+    fn execution_action_slice_private_emission_sequence_is_contiguous_and_drop_is_read_only() {
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let cutoff = 10_000;
+        let mut state = SessionState::new(spec());
+        state
+            .close_platform_prefix_through(cutoff, 1)
+            .expect("close empty prefix for private reservations");
+        let before = SessionStateCheckpointV1::from(&state);
+        let preparation_failed =
+            SessionError::ExecutionState("执行动作准备已经失败，必须丢弃当前准备结果".to_owned());
+
+        for invalid in [0, 2, u64::MAX] {
+            let mut prepared = state
+                .prepare_execution_action_slice_v2(&profile, cutoff, false)
+                .expect("prepare invalid private reservation overlay");
+            assert_eq!(
+                prepared.prepare_lifecycle_feedback_timing(
+                    format!("invalid-sequence-{invalid}"),
+                    1_000,
+                    invalid,
+                ),
+                Err(SessionError::PrivateEmissionSequenceConflict(invalid))
+            );
+            assert_eq!(
+                prepared.next_private_emission_sequence(),
+                Err(preparation_failed.clone())
+            );
+            assert_eq!(
+                prepared.into_committable().err(),
+                Some(preparation_failed.clone())
+            );
+            assert_eq!(SessionStateCheckpointV1::from(&state), before);
+        }
+        let mut prepared = state
+            .prepare_execution_action_slice_v2(&profile, cutoff, false)
+            .expect("prepare repeated private reservation overlay");
+        let first = prepared
+            .prepare_lifecycle_feedback_timing("repeated-feedback".to_owned(), 1_000, 1)
+            .expect("prepare the next continuous emission sequence");
+        assert_eq!(
+            prepared.prepare_lifecycle_feedback_timing("repeated-feedback".to_owned(), 1_000, 1,),
+            Ok(first)
+        );
+        assert_eq!(
+            prepared.prepare_lifecycle_feedback_timing("repeated-feedback".to_owned(), 1_000, 2,),
+            Err(SessionError::FeedbackIdentityConflict(
+                "repeated-feedback".to_owned()
+            ))
+        );
+        assert_eq!(prepared.into_committable().err(), Some(preparation_failed));
+        assert_eq!(SessionStateCheckpointV1::from(&state), before);
+        assert_eq!(state.in_flight_action_identity, None);
+    }
+
+    #[test]
+    fn execution_action_slice_no_action_prepares_and_commits_only_the_watermark() {
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let cutoff = 10_000;
+        let mut state = SessionState::new(spec());
+        state
+            .close_platform_prefix_through(cutoff, 1)
+            .expect("close empty execution prefix");
+        let before = SessionStateCheckpointV1::from(&state);
+        let prepared = state
+            .prepare_execution_action_slice_v2(&profile, cutoff, false)
+            .expect("prepare empty action slice");
+        assert!(prepared.current_action().is_none());
+        assert!(!prepared.request_completed());
+        assert!(prepared.has_state_change());
+        assert_eq!(prepared.logical_platform_driven_through_utc_ms(), cutoff);
+        drop(prepared);
+        assert_eq!(SessionStateCheckpointV1::from(&state), before);
+
+        state
+            .prepare_execution_action_slice_v2(&profile, cutoff, false)
+            .expect("reprepare empty action slice")
+            .into_committable()
+            .expect("empty action slice is immediately committable")
+            .commit();
+        assert_eq!(state.closed_action_through_utc_ms, Some(cutoff));
+        let same_cutoff = state
+            .prepare_execution_action_slice_v2(&profile, cutoff, false)
+            .expect("prepare same empty cutoff");
+        assert!(!same_cutoff.has_state_change());
+        same_cutoff
+            .into_committable()
+            .expect("same empty cutoff is immediately committable")
+            .commit();
+        assert_eq!(state.closed_action_through_utc_ms, Some(cutoff));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn scheduled_session_drive_resolution_paths_distinguish_absent_from_conflicting_evidence()
+    {
+        let mut session = private_fact_slice_test_session("scheduled-drive-resolution-paths").await;
+        let condition_id = session
+            .scenario()
+            .market_set()
+            .markets()
+            .first()
+            .expect("session drive 判定路径测试市场")
+            .market()
+            .condition_id
+            .0
+            .clone();
+        let initial = [
+            initial_snapshot_event("1", 0, "Up", 1_100, 1_200, 1, "10"),
+            initial_snapshot_event("2", 1, "Down", 1_100, 1_200, 2, "10"),
+        ];
+        assert_eq!(
+            session.apply_closed_market_event_bucket(hidden_bucket(1_100, 2, &initial)),
+            Ok(MarketBucketApplyDispositionV1::Applied)
+        );
+        assert_eq!(
+            session.apply_closed_market_event_bucket(public_market_bucket_for_session_test(
+                1_200, 2, &initial,
+            )),
+            Ok(MarketBucketApplyDispositionV1::Applied)
+        );
+
+        let (hidden_resolution_event, resolution) =
+            resolution_event_for_session_test(0, 2_001, 2_100, 3);
+        assert_eq!(
+            session.apply_closed_market_event_bucket(hidden_bucket(
+                2_001,
+                3,
+                &[hidden_resolution_event],
+            )),
+            Ok(MarketBucketApplyDispositionV1::Applied)
+        );
+        let before_absent_path_prepare = session.checkpoint();
+        let pending_before_absent_path_prepare =
+            session.pending_terminal_projection_condition_ids();
+        let (hidden_delta, public_delta) = prepare_redeemed_resolution_terminal_paths_v2(
+            session.hidden_platform_markets(),
+            session.public_markets(),
+            &condition_id,
+            &resolution,
+        )
+        .expect("授权 hidden 精确、public 尚无判定时至少一路适用");
+        assert!(hidden_delta.is_some());
+        assert!(public_delta.is_none());
+        drop((hidden_delta, public_delta));
+        assert_eq!(session.checkpoint(), before_absent_path_prepare);
+        assert_eq!(
+            session.pending_terminal_projection_condition_ids(),
+            pending_before_absent_path_prepare
+        );
+
+        let (public_conflict_event, _) = resolution_event_for_session_test(1, 2_002, 2_101, 3);
+        assert_eq!(
+            session.apply_closed_market_event_bucket(public_market_bucket_for_session_test(
+                2_101,
+                3,
+                &[public_conflict_event],
+            )),
+            Ok(MarketBucketApplyDispositionV1::Applied)
+        );
+        let before_conflict = session.checkpoint();
+        let pending_before_conflict = session.pending_terminal_projection_condition_ids();
+        let conflict = match prepare_redeemed_resolution_terminal_paths_v2(
+            session.hidden_platform_markets(),
+            session.public_markets(),
+            &condition_id,
+            &resolution,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("任一路已有相反合格判定正文时必须严格失败"),
+        };
+        assert!(matches!(
+            conflict,
+            MarketEventErrorV1::ResolutionConflict(actual) if actual == condition_id
+        ));
+        assert_eq!(session.checkpoint(), before_conflict);
+        assert_eq!(
+            session.pending_terminal_projection_condition_ids(),
+            pending_before_conflict
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn scheduled_session_drive_splits_fields_uses_actual_cutoff_and_clears_exact_pending_union()
+     {
+        let cutoff = 1_500;
+        let mut idle = private_fact_slice_test_session("scheduled-drive-idle").await;
+        idle.close_platform_prefix_through(cutoff, 1)
+            .expect("闭合无动作 session drive 平台前缀");
+        let idle_before = idle.checkpoint();
+        let idle_pending_before = idle.pending_terminal_projection_condition_ids();
+        {
+            let prepared = idle
+                .prepare_scheduled_session_drive_v2(cutoff, false)
+                .expect("准备无动作 session drive");
+            assert!(prepared.current_action().is_none());
+            assert_eq!(prepared.actual_cutoff_utc_ms(), cutoff);
+            assert_eq!(prepared.first_due_at_utc_ms(), None);
+            assert!(prepared.execution_candidate().has_state_change());
+            assert!(prepared.terminal_projection_condition_ids().is_empty());
+        }
+        assert_eq!(idle.checkpoint(), idle_before);
+        assert_eq!(
+            idle.pending_terminal_projection_condition_ids(),
+            idle_pending_before
+        );
+
+        let condition_id = idle
+            .scenario()
+            .market_set()
+            .markets()
+            .first()
+            .expect("session drive 测试市场")
+            .market()
+            .condition_id
+            .0
+            .clone();
+        idle.record_terminal_projection_pending(&condition_id);
+        let pending_before = idle.checkpoint();
+        let pending_ids_before = idle.pending_terminal_projection_condition_ids();
+        let wrong_set_error = match idle
+            .prepare_scheduled_session_drive_v2(cutoff, false)
+            .expect("准备已有终态投影 pending union")
+            .into_committable(BTreeSet::new())
+        {
+            Err(error) => error,
+            Ok(_) => panic!("查询准备集合缺项必须在提交前拒绝"),
+        };
+        assert!(matches!(
+            wrong_set_error,
+            MarketEventErrorV1::Session(SessionError::QueryIdentityConflict(identity))
+                if identity == "scheduled-terminal-projection-condition-set"
+        ));
+        assert_eq!(idle.checkpoint(), pending_before);
+        assert_eq!(
+            idle.pending_terminal_projection_condition_ids(),
+            pending_ids_before
+        );
+
+        let prepared_ids = BTreeSet::from([condition_id]);
+        idle.prepare_scheduled_session_drive_v2(cutoff, false)
+            .expect("重新准备精确终态投影 pending union")
+            .into_committable(prepared_ids)
+            .expect("精确准备集合必须可提交")
+            .commit();
+        assert!(idle.pending_terminal_projection_condition_ids().is_empty());
+        assert_eq!(idle.logical_platform_driven_through(), Some(cutoff));
+
+        let mut with_action = private_fact_slice_test_session("scheduled-drive-action").await;
+        let context = request(&with_action.state, "scheduled-drive-action", 1, 1_000);
+        let schedule = with_action
+            .register_and_schedule_request(
+                context,
+                sha("d"),
+                vec![ParsedLogicalActionV1 {
+                    action_identity: "scheduled-drive-action/item-0".to_owned(),
+                    batch_item_ordinal: 0,
+                    method_timing: ParsedMethodTimingV1::Ordinary,
+                }],
+            )
+            .expect("正式登记 scheduled session drive 动作");
+        let action_at = schedule.actions[0].key.effective_processing_at_utc_ms;
+        let requested_cutoff = action_at;
+        with_action
+            .close_platform_prefix_through(requested_cutoff, 1)
+            .expect("闭合有动作 session drive 平台前缀");
+        let expected_first_due = [
+            with_action.execution_state().next_gtd_deadline_at_utc_ms(),
+            with_action
+                .execution_state()
+                .next_scheduled_finality_at_utc_ms(),
+            with_action.execution_state().next_rebate_clock_at_utc_ms(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|at| *at <= action_at)
+        .min();
+        let action_before = with_action.checkpoint();
+        let action_pending_before = with_action.pending_terminal_projection_condition_ids();
+        {
+            let prepared = with_action
+                .prepare_scheduled_session_drive_v2(requested_cutoff, false)
+                .expect("准备有动作 session drive");
+            assert_eq!(
+                prepared
+                    .current_action()
+                    .map(|action| action.action_identity),
+                Some("scheduled-drive-action/item-0".to_owned())
+            );
+            assert_eq!(prepared.actual_cutoff_utc_ms(), action_at);
+            assert_eq!(prepared.first_due_at_utc_ms(), expected_first_due);
+        }
+        assert_eq!(with_action.checkpoint(), action_before);
+        assert_eq!(
+            with_action.pending_terminal_projection_condition_ids(),
+            action_pending_before
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn scheduled_session_drive_order_action_forwarding_is_read_only_and_sticky() {
+        let mut source = private_fact_slice_test_session("scheduled-drive-order-action").await;
+        let request_id = "scheduled-drive-order-action";
+        let action_identity = "scheduled-drive-order-action/item-0";
+        let context = request(&source.state, request_id, 1, 1_000);
+        let schedule = source
+            .register_and_schedule_request(
+                context,
+                sha("d"),
+                vec![ParsedLogicalActionV1 {
+                    action_identity: action_identity.to_owned(),
+                    batch_item_ordinal: 0,
+                    method_timing: ParsedMethodTimingV1::Ordinary,
+                }],
+            )
+            .expect("正式登记单项 Order 查询动作");
+        let action_at = schedule.actions[0].key.effective_processing_at_utc_ms;
+        source
+            .close_platform_prefix_through(action_at, 1)
+            .expect("闭合 Order 查询动作的平台前缀");
+        let source_checkpoint = source.checkpoint();
+        let source_pending = source.pending_terminal_projection_condition_ids();
+
+        let mut successful = source.clone();
+        let successful_before = successful.checkpoint();
+        let successful_pending_before = successful.pending_terminal_projection_condition_ids();
+        let mut prepared = successful
+            .prepare_scheduled_session_drive_v2(action_at, false)
+            .expect("准备含单项 Order 查询动作的 scheduled candidate");
+        let action = prepared.current_action().expect("存在单项 Order 查询动作");
+        assert_eq!(action.action_identity, action_identity);
+        assert!(prepared.execution_candidate().has_state_change());
+        let scheduled_revision = prepared
+            .advance_platform_state_revision_once()
+            .expect("scheduled candidate 先推进平台修订号");
+        let frozen_revision = scheduled_revision
+            .checked_sub(1)
+            .expect("scheduled candidate 必须真实推进平台修订号");
+        let query = prepared
+            .prepare_query_revision_at(request_id, action_identity, sha("e"), frozen_revision)
+            .expect("在 scheduled candidate 后绑定既有查询根冻结修订号");
+        assert_eq!(query.platform_state_revision, frozen_revision);
+        assert_eq!(
+            prepared.query_revision_for_request(request_id),
+            Some(frozen_revision)
+        );
+        prepared
+            .finish_current_action(action_identity)
+            .expect("按序完成单项 Order 查询动作");
+        assert!(prepared.request_completed());
+        let private_emission_sequence = prepared
+            .next_private_emission_sequence()
+            .expect("分配直接响应私有发射序号");
+        let response_transit = prepared
+            .prepare_complete_direct_response(request_id, action_at, private_emission_sequence)
+            .expect("完成单项 Order 查询直接响应传输");
+        assert_eq!(
+            response_transit.platform_responded_at_utc_ms,
+            Some(action_at)
+        );
+        assert_eq!(
+            response_transit.private_emission_sequence,
+            Some(private_emission_sequence)
+        );
+        assert!(response_transit.response_received_at_utc_ms.is_some());
+        let prepared_condition_ids = prepared.terminal_projection_condition_ids().clone();
+        let committable = prepared
+            .into_committable(prepared_condition_ids)
+            .expect("完整 Order 查询准备可进入只含 void commit 的形态");
+        drop(committable);
+        assert_eq!(successful.checkpoint(), successful_before);
+        assert_eq!(
+            successful.pending_terminal_projection_condition_ids(),
+            successful_pending_before
+        );
+
+        let preparation_failed =
+            SessionError::ExecutionState("执行动作准备已经失败，必须丢弃当前准备结果".to_owned());
+        let mut failed = source.clone();
+        let failed_before = failed.checkpoint();
+        let failed_pending_before = failed.pending_terminal_projection_condition_ids();
+        let mut prepared = failed
+            .prepare_scheduled_session_drive_v2(action_at, false)
+            .expect("重新准备 sticky 失败路径");
+        let prepared_condition_ids = prepared.terminal_projection_condition_ids().clone();
+        assert!(matches!(
+            prepared.prepare_query_revision_at(
+                request_id,
+                "wrong-order-action",
+                sha("e"),
+                scheduled_revision,
+            ),
+            Err(SessionError::ActionNotLogicallyReleased(identity))
+                if identity == "wrong-order-action"
+        ));
+        assert_eq!(prepared.query_revision_for_request(request_id), None);
+        assert!(!prepared.request_completed());
+        assert_eq!(
+            prepared.finish_current_action(action_identity),
+            Err(preparation_failed.clone())
+        );
+        assert_eq!(
+            prepared.next_private_emission_sequence(),
+            Err(preparation_failed.clone())
+        );
+        assert_eq!(
+            prepared.prepare_complete_direct_response(request_id, action_at, 1),
+            Err(preparation_failed.clone())
+        );
+        assert!(matches!(
+            prepared.into_committable(prepared_condition_ids),
+            Err(MarketEventErrorV1::Session(error)) if error == preparation_failed
+        ));
+        assert_eq!(failed.checkpoint(), failed_before);
+        assert_eq!(
+            failed.pending_terminal_projection_condition_ids(),
+            failed_pending_before
+        );
+        assert_eq!(source.checkpoint(), source_checkpoint);
+        assert_eq!(
+            source.pending_terminal_projection_condition_ids(),
+            source_pending
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn scheduled_session_drive_caller_cancel_forwarding_consumes_and_preserves_candidate() {
+        let mut session = private_fact_slice_test_session("scheduled-drive-caller-cancel").await;
+        let request_id = "scheduled-drive-caller-cancel";
+        let action_identity = "scheduled-drive-caller-cancel/item-0";
+        let context = request(&session.state, request_id, 1, 1_000);
+        let schedule = session
+            .register_and_schedule_request(
+                context,
+                sha("d"),
+                vec![ParsedLogicalActionV1 {
+                    action_identity: action_identity.to_owned(),
+                    batch_item_ordinal: 0,
+                    method_timing: ParsedMethodTimingV1::Ordinary,
+                }],
+            )
+            .expect("正式登记单项 caller-cancel 动作");
+        let action_at = schedule.actions[0].key.effective_processing_at_utc_ms;
+        session
+            .close_platform_prefix_through(action_at, 1)
+            .expect("闭合 caller-cancel 动作的平台前缀");
+        let before = session.checkpoint();
+        let pending_before = session.pending_terminal_projection_condition_ids();
+
+        let prepared = session
+            .prepare_scheduled_session_drive_v2(action_at, false)
+            .expect("准备含 caller-cancel 动作的 scheduled candidate");
+        let (prepared, disposition) = prepared
+            .prepare_caller_cancel_remainder("missing-order", action_at, &sha("e"))
+            .expect("NotFound caller-cancel 仍应返回可继续组合的消费式 guard");
+        assert_eq!(
+            disposition,
+            crate::matching::CancelOrderStateDispositionV1::NotFound
+        );
+        assert!(
+            prepared
+                .execution_candidate()
+                .candidate_order("missing-order")
+                .is_none()
+        );
+        drop(prepared);
+
+        assert_eq!(session.checkpoint(), before);
+        assert_eq!(
+            session.pending_terminal_projection_condition_ids(),
+            pending_before
+        );
+
+        let mut prepared = session
+            .prepare_scheduled_session_drive_v2(action_at, false)
+            .expect("重新准备 caller-cancel mutation sticky 路径");
+        let resolution = prepared
+            .prepare_mutation_resolution(
+                request_id,
+                action_identity,
+                "cancel-idempotency".to_owned(),
+                sha("e"),
+                "cancel-effect".to_owned(),
+            )
+            .expect("首次撤单幂等身份形成新 effect");
+        assert_eq!(
+            resolution.disposition,
+            MutationResolutionDispositionV1::NewEffect
+        );
+        assert_eq!(resolution.effect_identity, "cancel-effect");
+        assert_eq!(
+            prepared.prepare_mutation_resolution(
+                request_id,
+                action_identity,
+                "cancel-idempotency".to_owned(),
+                sha("f"),
+                "conflicting-effect".to_owned(),
+            ),
+            Err(SessionError::MutationIdentityConflict(
+                "cancel-idempotency".to_owned()
+            ))
+        );
+        let preparation_failed =
+            SessionError::ExecutionState("执行动作准备已经失败，必须丢弃当前准备结果".to_owned());
+        assert_eq!(
+            prepared.finish_current_action(action_identity),
+            Err(preparation_failed.clone())
+        );
+        let prepared_condition_ids = prepared.terminal_projection_condition_ids().clone();
+        assert!(matches!(
+            prepared.into_committable(prepared_condition_ids),
+            Err(MarketEventErrorV1::Session(error)) if error == preparation_failed
+        ));
+        assert_eq!(session.checkpoint(), before);
+        assert_eq!(
+            session.pending_terminal_projection_condition_ids(),
+            pending_before
+        );
+    }
+
+    #[test]
+    fn execution_action_slice_future_action_advances_watermark_and_preserves_the_action() {
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let mut state = SessionState::new(spec());
+        let registered = state
+            .register_request(
+                &profile,
+                request(&state, "prepared-future-action", 1, 1_000),
+                sha("d"),
+            )
+            .expect("register future action request");
+        let cutoff = registered.transit.platform_arrived_at_utc_ms + 50;
+        let future_at = cutoff + 50;
+        let future_key = LogicalActionKeyV1 {
+            effective_processing_at_utc_ms: future_at,
+            caller_sequence: 1,
+            batch_item_ordinal: 0,
+        };
+        state
+            .enqueue_logical_action(
+                "prepared-future-action/item-0".to_owned(),
+                "prepared-future-action".to_owned(),
+                future_key,
+            )
+            .expect("queue future action");
+        state
+            .seal_logical_actions("prepared-future-action")
+            .expect("seal future action request");
+        state
+            .close_platform_prefix_through(cutoff, 1)
+            .expect("close prefix before future action");
+
+        let before = SessionStateCheckpointV1::from(&state);
+        let mut existing = state.clone();
+        let prepared = state
+            .prepare_execution_action_slice_v2(&profile, cutoff, false)
+            .expect("prepare future action cutoff");
+        assert!(prepared.current_action().is_none());
+        assert!(prepared.has_state_change());
+        assert_eq!(prepared.logical_platform_driven_through_utc_ms(), cutoff);
+        drop(prepared);
+        assert_eq!(SessionStateCheckpointV1::from(&state), before);
+        assert_eq!(
+            state
+                .pending_actions
+                .get(&future_key)
+                .map(|action| action.action_identity.as_str()),
+            Some("prepared-future-action/item-0")
+        );
+
+        assert_eq!(
+            existing
+                .take_next_action_through(cutoff)
+                .expect("old path advances before future action"),
+            None
+        );
+        state
+            .prepare_execution_action_slice_v2(&profile, cutoff, false)
+            .expect("reprepare future action cutoff")
+            .into_committable()
+            .expect("future action cutoff is immediately committable")
+            .commit();
+        assert_eq!(
+            SessionStateCheckpointV1::from(&state),
+            SessionStateCheckpointV1::from(&existing)
+        );
+        assert!(state.pending_actions.contains_key(&future_key));
+    }
+
+    #[test]
+    fn execution_action_slice_single_mode_leaves_the_rest_of_one_request_pending() {
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let mut state = SessionState::new(spec());
+        let registered = state
+            .register_request(
+                &profile,
+                request(&state, "prepared-multi-action", 1, 1_000),
+                sha("d"),
+            )
+            .expect("register multi-action request");
+        let effective = registered.transit.platform_arrived_at_utc_ms;
+        for ordinal in 0..2_u16 {
+            state
+                .enqueue_logical_action(
+                    format!("prepared-multi-action/item-{ordinal}"),
+                    "prepared-multi-action".to_owned(),
+                    LogicalActionKeyV1 {
+                        effective_processing_at_utc_ms: effective,
+                        caller_sequence: 1,
+                        batch_item_ordinal: ordinal,
+                    },
+                )
+                .expect("queue multi-action item");
+        }
+        state
+            .seal_logical_actions("prepared-multi-action")
+            .expect("seal multi-action request");
+        state
+            .close_platform_prefix_through(effective, 1)
+            .expect("close multi-action prefix");
+
+        let before = SessionStateCheckpointV1::from(&state);
+        let mut existing = state.clone();
+        let prepared = state
+            .prepare_execution_action_slice_v2(&profile, effective, false)
+            .expect("prepare only the first action");
+        assert_eq!(
+            prepared
+                .current_action()
+                .map(|action| action.key.batch_item_ordinal),
+            Some(0)
+        );
+        assert!(!prepared.request_completed());
+        drop(prepared);
+        assert_eq!(SessionStateCheckpointV1::from(&state), before);
+
+        let existing_action = existing
+            .take_next_action_through(effective)
+            .expect("take old first action")
+            .expect("old first action");
+        assert!(
+            !existing
+                .complete_logical_item(&existing_action.action_identity)
+                .expect("old first action leaves request pending")
+        );
+        let mut prepared = state
+            .prepare_execution_action_slice_v2(&profile, effective, false)
+            .expect("reprepare only the first action");
+        let action = prepared.current_action().expect("first prepared action");
+        prepared
+            .finish_current_action(&action.action_identity)
+            .expect("finish first prepared action");
+        prepared
+            .into_committable()
+            .expect("single selected action is committable")
+            .commit();
+        assert_eq!(
+            SessionStateCheckpointV1::from(&state),
+            SessionStateCheckpointV1::from(&existing)
+        );
+        assert_eq!(state.pending_actions.len(), 1);
+        assert!(!state.released_request_ids.contains("prepared-multi-action"));
+    }
+
+    #[test]
+    fn execution_action_slice_prefix_watermark_and_cross_time_failures_are_read_only() {
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let mut state = SessionState::new(spec());
+        let registered = state
+            .register_request(
+                &profile,
+                request(&state, "prepared-cross-time", 1, 1_000),
+                sha("d"),
+            )
+            .expect("register cross-time request");
+        let first_at = registered.transit.platform_arrived_at_utc_ms;
+        let second_at = first_at + 1;
+        for (ordinal, effective_processing_at_utc_ms) in [(0_u16, first_at), (1, second_at)] {
+            state
+                .enqueue_logical_action(
+                    format!("prepared-cross-time/item-{ordinal}"),
+                    "prepared-cross-time".to_owned(),
+                    LogicalActionKeyV1 {
+                        effective_processing_at_utc_ms,
+                        caller_sequence: 1,
+                        batch_item_ordinal: ordinal,
+                    },
+                )
+                .expect("queue cross-time action");
+        }
+        state
+            .seal_logical_actions("prepared-cross-time")
+            .expect("seal cross-time request");
+
+        let before_prefix = SessionStateCheckpointV1::from(&state);
+        assert!(matches!(
+            state.prepare_execution_action_slice_v2(&profile, first_at, false),
+            Err(SessionError::PlatformPrefixNotClosed)
+        ));
+        assert_eq!(SessionStateCheckpointV1::from(&state), before_prefix);
+        assert_eq!(state.in_flight_action_identity, None);
+
+        state
+            .close_platform_prefix_through(first_at, 1)
+            .expect("close cross-time prefix");
+        let before_batch = SessionStateCheckpointV1::from(&state);
+        assert!(matches!(
+            state.prepare_execution_action_slice_v2(&profile, first_at, true),
+            Err(SessionError::InvalidRequest(_))
+        ));
+        assert_eq!(SessionStateCheckpointV1::from(&state), before_batch);
+        assert_eq!(state.in_flight_action_identity, None);
+
+        let single = state
+            .prepare_execution_action_slice_v2(&profile, first_at, false)
+            .expect("prepare first cross-time item");
+        let mut single = single;
+        let action = single.current_action().expect("first cross-time item");
+        single
+            .finish_current_action(&action.action_identity)
+            .expect("finish first cross-time item");
+        single
+            .into_committable()
+            .expect("finished cross-time item is committable")
+            .commit();
+        let before_regression = SessionStateCheckpointV1::from(&state);
+        assert!(matches!(
+            state.prepare_execution_action_slice_v2(&profile, first_at - 1, false),
+            Err(SessionError::ActionWatermarkClosed)
+        ));
+        assert_eq!(SessionStateCheckpointV1::from(&state), before_regression);
+        assert_eq!(state.in_flight_action_identity, None);
     }
 
     #[test]
@@ -5969,6 +9205,103 @@ mod tests {
             ),
             Err(SessionError::ActionWatermarkClosed)
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn private_fact_slice_prepare_is_read_only() {
+        let mut session = private_fact_slice_test_session("private-slice-read-only").await;
+        let timing = session
+            .bind_lifecycle_feedback_timing("private-slice-feedback".to_owned(), 10_000, 1)
+            .expect("登记私有事实");
+        let cutoff = timing
+            .feedback_received_at_utc_ms
+            .checked_add(100)
+            .expect("测试截止点");
+        session.commit_logical_platform_driven_through(cutoff);
+        session
+            .close_private_fact_schedule_through(timing.feedback_received_at_utc_ms - 1)
+            .expect("建立既有计划水位");
+        let before = session.checkpoint();
+
+        let prepared = session
+            .prepare_private_fact_slice_v2(cutoff)
+            .expect("借用式准备私有事实切片");
+
+        assert_eq!(
+            prepared.close_through_utc_ms(),
+            timing.feedback_received_at_utc_ms
+        );
+        assert!(prepared.schedule_advanced());
+        assert!(matches!(
+            prepared.candidate().map(|candidate| &candidate.evidence),
+            Some(PrivateVisibilityEvidenceV1::LifecycleFeedback { feedback_id })
+                if feedback_id == "private-slice-feedback"
+        ));
+        assert_eq!(session.checkpoint(), before);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn private_fact_slice_commit_matches_existing_online_sequence() {
+        let mut source = private_fact_slice_test_session("private-slice-equivalence").await;
+        let timing = source
+            .bind_lifecycle_feedback_timing("private-slice-equivalent".to_owned(), 20_000, 1)
+            .expect("登记私有事实");
+        let cutoff = timing
+            .feedback_received_at_utc_ms
+            .checked_add(100)
+            .expect("测试截止点");
+        source.commit_logical_platform_driven_through(cutoff);
+        source
+            .close_private_fact_schedule_through(timing.feedback_received_at_utc_ms - 1)
+            .expect("建立既有计划水位");
+        let mut existing_online = source.clone();
+        let mut sliced = source;
+
+        existing_online
+            .close_private_fact_schedule_through(timing.feedback_received_at_utc_ms)
+            .expect("旧在线顺序提交计划水位");
+        let existing_candidate = existing_online
+            .prepare_next_private_fact_through(timing.feedback_received_at_utc_ms)
+            .expect("旧在线顺序准备候选")
+            .expect("存在候选");
+        existing_online
+            .validate_prepared_private_fact(&existing_candidate)
+            .expect("旧在线顺序验证候选");
+        existing_online.commit_prevalidated_private_fact(&existing_candidate);
+
+        let prepared = sliced
+            .prepare_private_fact_slice_v2(cutoff)
+            .expect("准备切片");
+        let committed = sliced
+            .commit_prevalidated_private_fact_slice_v2(prepared)
+            .expect("切片提交应消费候选");
+
+        assert_eq!(committed, existing_candidate);
+        assert_eq!(sliced.checkpoint(), existing_online.checkpoint());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn private_fact_slice_same_cutoff_has_no_change() {
+        let mut session = private_fact_slice_test_session("private-slice-same-cutoff").await;
+        let cutoff = 30_000;
+        session.commit_logical_platform_driven_through(cutoff);
+        session
+            .close_private_fact_schedule_through(cutoff)
+            .expect("建立计划水位");
+        let before = session.checkpoint();
+
+        let prepared = session
+            .prepare_private_fact_slice_v2(cutoff)
+            .expect("相同截止点准备");
+        assert_eq!(prepared.close_through_utc_ms(), cutoff);
+        assert!(!prepared.schedule_advanced());
+        assert!(prepared.candidate().is_none());
+        assert!(
+            session
+                .commit_prevalidated_private_fact_slice_v2(prepared)
+                .is_none()
+        );
+        assert_eq!(session.checkpoint(), before);
     }
 
     #[test]

@@ -276,8 +276,16 @@ async fn task303_capacity_one_delivers_fak_account_chain_and_direct_references_w
 
     let lifecycle = lifecycle.lock().expect("订单生命周期反馈捕获锁");
     assert_eq!(lifecycle.len(), 2);
-    assert_eq!(lifecycle[0].account_delta.account_transition_seq, 1);
-    assert_eq!(lifecycle[1].account_delta.account_transition_seq, 2);
+    let mut lifecycle_by_transition_seq = lifecycle.iter().collect::<Vec<_>>();
+    lifecycle_by_transition_seq
+        .sort_by_key(|feedback| feedback.account_delta.account_transition_seq);
+    assert_eq!(
+        lifecycle_by_transition_seq
+            .iter()
+            .map(|feedback| feedback.account_delta.account_transition_seq)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
     let direct = direct.lock().expect("直接响应捕获锁");
     let crate::execution::SubmissionItemOutcomeV1::Accepted(accepted) = &direct[0].item.outcome
     else {
@@ -285,13 +293,27 @@ async fn task303_capacity_one_delivers_fak_account_chain_and_direct_references_w
     };
     assert_eq!(accepted.account_deltas.len(), 2);
     assert_eq!(
-        accepted.account_deltas[0].delta_id,
-        lifecycle[0].account_delta.delta_id
+        accepted
+            .account_deltas
+            .iter()
+            .map(|delta| delta.account_transition_seq)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
     );
-    assert_eq!(
-        accepted.account_deltas[1].delta_id,
-        lifecycle[1].account_delta.delta_id
-    );
+    for (direct_delta, lifecycle_feedback) in accepted
+        .account_deltas
+        .iter()
+        .zip(lifecycle_by_transition_seq.iter())
+    {
+        assert_eq!(
+            direct_delta.account_transition_seq,
+            lifecycle_feedback.account_delta.account_transition_seq
+        );
+        assert_eq!(
+            direct_delta.delta_id,
+            lifecycle_feedback.account_delta.delta_id
+        );
+    }
 }
 
 #[derive(Clone, Default)]

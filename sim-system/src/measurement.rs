@@ -3,6 +3,7 @@ use std::fmt;
 
 use contracts::{AccountInstanceKeyV1, PlatformSourceV1, Sha256Hex, SimCallerRoleV1};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::resource::{
     COMPONENT_GOLDEN_RESOURCE_POLICY_ID_V1, ResourceLimitV1, ResourceQuantityV1,
@@ -18,8 +19,12 @@ pub const COMPONENT_GOLDEN_LOAD_ID_V1: &str = "COMPONENT_GOLDEN_V1";
 pub const COMPONENT_GOLDEN_MEASUREMENT_REPORT_SCHEMA_V1: &str =
     "component_golden_measurement_report_v1";
 pub const COMPONENT_GOLDEN_RUN_MEASUREMENT_SCHEMA_V1: &str = "component_golden_run_measurement_v1";
+pub const INDEPENDENT_FAILURE_RESERVE_PROBE_SCHEMA_V1: &str =
+    "component_golden_independent_failure_reserve_probe_v1";
 pub const TRAJECTORY_LOGICAL_SUMMARY_SCHEMA_V1: &str =
     "component_golden_trajectory_logical_summary_v1";
+pub const TRIAL_LIFECYCLE_TAIL_EVIDENCE_SCHEMA_V1: &str =
+    "component_golden_trial_lifecycle_tail_evidence_v1";
 
 const COMPONENT_GOLDEN_LOAD_HASH_DOMAIN_V1: &str = "sim-system/component-golden-load/v1";
 const TRAJECTORY_LOGICAL_SUMMARY_HASH_DOMAIN_V1: &str =
@@ -125,13 +130,41 @@ impl ComponentGoldenTrialIdV1 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+const fn component_trial_selector_label(trial_id: ComponentGoldenTrialIdV1) -> &'static str {
+    match trial_id {
+        ComponentGoldenTrialIdV1::S1 => "S1",
+        ComponentGoldenTrialIdV1::P1 => "P1",
+        ComponentGoldenTrialIdV1::P2 => "P2",
+        ComponentGoldenTrialIdV1::S2 => "S2",
+        ComponentGoldenTrialIdV1::S3 => "S3",
+        ComponentGoldenTrialIdV1::P3 => "P3",
+    }
+}
+
+const fn verification_trial_selector_label(
+    verification_id: FrozenBudgetVerificationTrialIdV1,
+) -> &'static str {
+    match verification_id {
+        FrozenBudgetVerificationTrialIdV1::Serial => "VERIFY_SERIAL",
+        FrozenBudgetVerificationTrialIdV1::Parallel => "VERIFY_PARALLEL",
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ComponentGoldenIdentityIsolationV1 {
     pub trajectory_identity_is_distinct: bool,
     pub seed_is_distinct: bool,
     pub bridge_identity_is_distinct: bool,
     pub account_identity_is_distinct: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComponentGoldenEventKindCountsV1 {
+    pub initial_l2_snapshot: u64,
+    pub level_execution_transition: u64,
+    pub market_resolution_terminal: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,6 +175,7 @@ pub struct ComponentGoldenEventLoadV1 {
     pub markets_overlap: bool,
     pub unique_normative_events_per_market: u16,
     pub unique_event_ids: u16,
+    pub unique_event_kinds: ComponentGoldenEventKindCountsV1,
     pub hidden_and_public_paths_per_trajectory: u16,
     pub total_path_deliveries: u16,
     pub max_same_logical_time_burst: u16,
@@ -221,6 +255,11 @@ impl ComponentGoldenLoadContractV1 {
                 markets_overlap: true,
                 unique_normative_events_per_market: 5,
                 unique_event_ids: 10,
+                unique_event_kinds: ComponentGoldenEventKindCountsV1 {
+                    initial_l2_snapshot: 4,
+                    level_execution_transition: 4,
+                    market_resolution_terminal: 2,
+                },
                 hidden_and_public_paths_per_trajectory: 2,
                 total_path_deliveries: 40,
                 max_same_logical_time_burst: 2,
@@ -526,6 +565,344 @@ impl CgroupV2ResourceSnapshotV1 {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum MeasurementBuildGroupV1 {
+    B1,
+    B2,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SystemdServiceLifecycleResultV1 {
+    pub result: String,
+    pub exec_main_status: i32,
+    pub memory_peak_bytes: u64,
+    pub memory_swap_peak_bytes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrialLifecycleTailEvidenceV1 {
+    pub schema_version: String,
+    pub build_group: MeasurementBuildGroupV1,
+    pub suite_measurement_root_sha256: Sha256Hex,
+    pub fixed_context_file_sha256: Sha256Hex,
+    pub measurement_run_identity: MeasurementRunIdentityV1,
+    pub selector_label: String,
+    pub run_id: String,
+    pub build: MeasurementBuildIdentityV1,
+    pub release_binary_sha256: Sha256Hex,
+    pub systemd_unit: String,
+    pub systemd_invocation_id: String,
+    pub systemd_control_group: String,
+    pub cgroup_path_sha256: Sha256Hex,
+    pub main_pid: u32,
+    pub main_trial_json_sha256: Sha256Hex,
+    pub main_trial_json_bytes: u64,
+    pub final_process: ProcfsProcessResourceSnapshotV1,
+    pub final_cgroup_v2: CgroupV2ResourceSnapshotV1,
+    pub systemd: SystemdServiceLifecycleResultV1,
+}
+
+impl TrialLifecycleTailEvidenceV1 {
+    pub fn validate(&self) -> Result<(), SimulationMeasurementErrorV1> {
+        if self.schema_version != TRIAL_LIFECYCLE_TAIL_EVIDENCE_SCHEMA_V1
+            || self.selector_label.trim().is_empty()
+            || self.run_id.trim().is_empty()
+            || self.systemd_unit.trim().is_empty()
+            || !self.systemd_unit.ends_with(".service")
+            || !self.systemd_control_group.starts_with('/')
+            || self.main_pid == 0
+            || self.main_trial_json_bytes == 0
+        {
+            return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                "完整试次生命周期尾部证据信封的版本、身份、systemd 或主试次字节非法".to_owned(),
+            ));
+        }
+        for (value, field) in [
+            (&self.suite_measurement_root_sha256, "lifecycle.suite_root"),
+            (&self.fixed_context_file_sha256, "lifecycle.fixed_context"),
+            (&self.release_binary_sha256, "lifecycle.release_binary"),
+            (&self.cgroup_path_sha256, "lifecycle.cgroup_path"),
+            (&self.main_trial_json_sha256, "lifecycle.main_trial_json"),
+        ] {
+            validate_sha256(value, field)?;
+        }
+        if self.systemd_invocation_id.len() != 32
+            || !self
+                .systemd_invocation_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                "完整试次生命周期尾部证据缺少合法 systemd InvocationID".to_owned(),
+            ));
+        }
+        self.build.validate()?;
+        if self.release_binary_sha256 != self.build.release_binary_sha256 {
+            return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                "完整试次生命周期尾部证据的发布二进制与构建身份不一致".to_owned(),
+            ));
+        }
+        let absolute_cgroup = format!(
+            "/sys/fs/cgroup/{}",
+            self.systemd_control_group.trim_start_matches('/')
+        );
+        if self.cgroup_path_sha256 != raw_sha256(absolute_cgroup.as_bytes()) {
+            return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                "完整试次生命周期尾部证据的 ControlGroup 与 cgroup 路径摘要不一致".to_owned(),
+            ));
+        }
+        self.final_process.validate()?;
+        self.final_cgroup_v2.validate()?;
+        if self.main_pid != self.final_process.pid {
+            return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                "完整试次生命周期尾部证据的 MainPID 与 /proc 身份不一致".to_owned(),
+            ));
+        }
+        if self.systemd.result != "success" || self.systemd.exec_main_status != 0 {
+            return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                "完整试次生命周期尾部证据要求 systemd Result=success 且 ExecMainStatus=0"
+                    .to_owned(),
+            ));
+        }
+        let cgroup_memory_peak = self.final_cgroup_v2.memory_peak_bytes.ok_or_else(|| {
+            SimulationMeasurementErrorV1::ReportMismatch(
+                "完整试次生命周期尾部证据缺少 cgroup memory.peak".to_owned(),
+            )
+        })?;
+        let cgroup_swap_peak = self.final_cgroup_v2.memory_swap_peak_bytes.ok_or_else(|| {
+            SimulationMeasurementErrorV1::ReportMismatch(
+                "完整试次生命周期尾部证据缺少 cgroup memory.swap.peak".to_owned(),
+            )
+        })?;
+        if self.systemd.memory_peak_bytes < cgroup_memory_peak
+            || self.systemd.memory_swap_peak_bytes < cgroup_swap_peak
+        {
+            return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                "systemd 终态峰值不得小于进程存活时直接读取的 cgroup 尾部峰值".to_owned(),
+            ));
+        }
+        let CgroupMemoryLimitV1::Bytes {
+            bytes: memory_max_bytes,
+        } = self.final_cgroup_v2.memory_limit
+        else {
+            return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                "完整试次生命周期尾部证据要求有限 memory.max".to_owned(),
+            ));
+        };
+        let CgroupMemoryLimitV1::Bytes {
+            bytes: swap_max_bytes,
+        } = self.final_cgroup_v2.memory_swap_limit
+        else {
+            return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                "完整试次生命周期尾部证据要求有限 memory.swap.max".to_owned(),
+            ));
+        };
+        if self.systemd.memory_peak_bytes > memory_max_bytes
+            || self.systemd.memory_swap_peak_bytes > swap_max_bytes
+        {
+            return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                "systemd 终态峰值超过试次 cgroup 硬门".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn process_resident_peak_bytes(&self) -> u64 {
+        self.final_process.vm_hwm_bytes
+    }
+
+    fn process_swap_peak_bytes(&self) -> u64 {
+        self.final_process
+            .vm_swap_bytes
+            .max(self.final_cgroup_v2.memory_swap_peak_bytes.unwrap_or(0))
+            .max(self.systemd.memory_swap_peak_bytes)
+    }
+
+    fn process_or_cgroup_memory_peak_bytes(&self) -> Result<u64, SimulationMeasurementErrorV1> {
+        self.validate()?;
+        let proc_peak = self
+            .final_process
+            .vm_hwm_bytes
+            .checked_add(self.final_process.vm_swap_bytes)
+            .ok_or(SimulationMeasurementErrorV1::ArithmeticOverflow(
+                "lifecycle_proc_memory_peak",
+            ))?;
+        let cgroup_peak = self
+            .final_cgroup_v2
+            .memory_peak_bytes
+            .expect("完整生命周期证据已验证 memory.peak")
+            .checked_add(
+                self.final_cgroup_v2
+                    .memory_swap_peak_bytes
+                    .expect("完整生命周期证据已验证 memory.swap.peak"),
+            )
+            .ok_or(SimulationMeasurementErrorV1::ArithmeticOverflow(
+                "lifecycle_cgroup_memory_peak",
+            ))?;
+        let systemd_peak = self
+            .systemd
+            .memory_peak_bytes
+            .checked_add(self.systemd.memory_swap_peak_bytes)
+            .ok_or(SimulationMeasurementErrorV1::ArithmeticOverflow(
+                "lifecycle_systemd_memory_peak",
+            ))?;
+        Ok(proc_peak.max(cgroup_peak).max(systemd_peak))
+    }
+}
+
+pub struct TrialLifecycleTailBindingV1<'a> {
+    pub build_group: MeasurementBuildGroupV1,
+    pub measurement_run_identity: MeasurementRunIdentityV1,
+    pub selector_label: &'a str,
+    pub run_id: &'a str,
+    pub environment: &'a MeasurementEnvironmentIdentityV1,
+    pub runtime_hard_guards: MeasurementRuntimeHardGuardsV1,
+    pub last_resource_snapshot: &'a MeasuredResourceSnapshotV1,
+    pub fixed_context_file_sha256: &'a Sha256Hex,
+    pub main_trial_json_sha256: &'a Sha256Hex,
+    pub main_trial_json_bytes: u64,
+}
+
+pub fn validate_lifecycle_tail_binding_v1(
+    evidence: &TrialLifecycleTailEvidenceV1,
+    expected: &TrialLifecycleTailBindingV1<'_>,
+) -> Result<(), SimulationMeasurementErrorV1> {
+    evidence.validate()?;
+    if evidence.build_group != expected.build_group
+        || evidence.measurement_run_identity != expected.measurement_run_identity
+        || evidence.selector_label != expected.selector_label
+        || evidence.run_id != expected.run_id
+        || evidence.build != expected.environment.build
+        || evidence.suite_measurement_root_sha256
+            != expected.environment.filesystem.measurement_root_sha256
+        || evidence.cgroup_path_sha256 != expected.environment.cgroup_path_sha256
+        || &evidence.fixed_context_file_sha256 != expected.fixed_context_file_sha256
+        || &evidence.main_trial_json_sha256 != expected.main_trial_json_sha256
+        || evidence.main_trial_json_bytes != expected.main_trial_json_bytes
+    {
+        return Err(SimulationMeasurementErrorV1::ReportMismatch(
+            "完整试次生命周期尾部证据未绑定预期套件、selector、run_id、构建、cgroup、固定上下文或主试次 JSON"
+                .to_owned(),
+        ));
+    }
+    let CgroupMemoryLimitV1::Bytes {
+        bytes: memory_max_bytes,
+    } = evidence.final_cgroup_v2.memory_limit
+    else {
+        return Err(SimulationMeasurementErrorV1::ReportMismatch(
+            "生命周期尾部 cgroup memory.max 必须有限".to_owned(),
+        ));
+    };
+    let CgroupMemoryLimitV1::Bytes {
+        bytes: memory_swap_max_bytes,
+    } = evidence.final_cgroup_v2.memory_swap_limit
+    else {
+        return Err(SimulationMeasurementErrorV1::ReportMismatch(
+            "生命周期尾部 cgroup memory.swap.max 必须有限".to_owned(),
+        ));
+    };
+    let CgroupPidsLimitV1::Count {
+        count: pids_max_count,
+    } = evidence.final_cgroup_v2.pids_limit
+    else {
+        return Err(SimulationMeasurementErrorV1::ReportMismatch(
+            "生命周期尾部 cgroup pids.max 必须有限".to_owned(),
+        ));
+    };
+    if memory_max_bytes != expected.runtime_hard_guards.cgroup_memory_max_bytes
+        || memory_swap_max_bytes != expected.runtime_hard_guards.cgroup_memory_swap_max_bytes
+        || pids_max_count != expected.runtime_hard_guards.cgroup_pids_max_count
+        || evidence.final_process.file_descriptor_soft_limit
+            != expected.runtime_hard_guards.file_descriptor_soft_limit
+        || evidence.final_process.file_descriptor_hard_limit
+            != expected.runtime_hard_guards.file_descriptor_hard_limit
+    {
+        return Err(SimulationMeasurementErrorV1::ReportMismatch(
+            "完整试次生命周期尾部证据的硬门与试次运行硬门不一致".to_owned(),
+        ));
+    }
+    validate_lifecycle_tail_follows_snapshot_v1(evidence, expected.last_resource_snapshot)?;
+    Ok(())
+}
+
+fn validate_lifecycle_tail_follows_snapshot_v1(
+    evidence: &TrialLifecycleTailEvidenceV1,
+    previous: &MeasuredResourceSnapshotV1,
+) -> Result<(), SimulationMeasurementErrorV1> {
+    previous.validate()?;
+    let current_proc = &evidence.final_process;
+    let previous_proc = &previous.procfs;
+    let proc_counters_are_monotonic = current_proc.vm_hwm_bytes >= previous_proc.vm_hwm_bytes
+        && current_proc.user_cpu_ticks >= previous_proc.user_cpu_ticks
+        && current_proc.system_cpu_ticks >= previous_proc.system_cpu_ticks
+        && current_proc.io.rchar_bytes >= previous_proc.io.rchar_bytes
+        && current_proc.io.wchar_bytes >= previous_proc.io.wchar_bytes
+        && current_proc.io.read_syscalls >= previous_proc.io.read_syscalls
+        && current_proc.io.write_syscalls >= previous_proc.io.write_syscalls
+        && current_proc.io.storage_read_bytes >= previous_proc.io.storage_read_bytes
+        && current_proc.io.storage_write_bytes >= previous_proc.io.storage_write_bytes
+        && current_proc.io.cancelled_write_bytes >= previous_proc.io.cancelled_write_bytes;
+    let current_cgroup = &evidence.final_cgroup_v2;
+    let previous_cgroup = &previous.cgroup_v2;
+    let cgroup_events_are_monotonic = current_cgroup.memory_events.low
+        >= previous_cgroup.memory_events.low
+        && current_cgroup.memory_events.high >= previous_cgroup.memory_events.high
+        && current_cgroup.memory_events.max >= previous_cgroup.memory_events.max
+        && current_cgroup.memory_events.oom >= previous_cgroup.memory_events.oom
+        && current_cgroup.memory_events.oom_kill >= previous_cgroup.memory_events.oom_kill
+        && current_cgroup.memory_events.oom_group_kill
+            >= previous_cgroup.memory_events.oom_group_kill;
+    let peaks_are_monotonic = current_cgroup
+        .memory_peak_bytes
+        .zip(previous_cgroup.memory_peak_bytes)
+        .is_some_and(|(current, before)| current >= before)
+        && current_cgroup
+            .memory_swap_peak_bytes
+            .zip(previous_cgroup.memory_swap_peak_bytes)
+            .is_some_and(|(current, before)| current >= before);
+    if current_proc.pid != previous_proc.pid
+        || current_proc.process_start_time_ticks != previous_proc.process_start_time_ticks
+        || current_proc.file_descriptor_soft_limit != previous_proc.file_descriptor_soft_limit
+        || current_proc.file_descriptor_hard_limit != previous_proc.file_descriptor_hard_limit
+        || current_cgroup.memory_limit != previous_cgroup.memory_limit
+        || current_cgroup.memory_swap_limit != previous_cgroup.memory_swap_limit
+        || current_cgroup.pids_limit != previous_cgroup.pids_limit
+        || current_cgroup.cpu_usage_usec < previous_cgroup.cpu_usage_usec
+        || !proc_counters_are_monotonic
+        || !cgroup_events_are_monotonic
+        || !peaks_are_monotonic
+    {
+        return Err(SimulationMeasurementErrorV1::ReportMismatch(
+            "完整生命周期尾部的 /proc 或 cgroup 累计计数、峰值、硬门或进程身份早于最后一个进程内样本"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn lifecycle_process_peaks_v1(
+    evidence: &[TrialLifecycleTailEvidenceV1],
+) -> Result<(u64, u64, u64), SimulationMeasurementErrorV1> {
+    if evidence.is_empty() {
+        return Err(SimulationMeasurementErrorV1::ReportMismatch(
+            "完整试次生命周期尾部证据不能为空".to_owned(),
+        ));
+    }
+    let mut resident = 0_u64;
+    let mut swap = 0_u64;
+    let mut combined = 0_u64;
+    for item in evidence {
+        item.validate()?;
+        resident = resident.max(item.process_resident_peak_bytes());
+        swap = swap.max(item.process_swap_peak_bytes());
+        combined = combined.max(item.process_or_cgroup_memory_peak_bytes()?);
+    }
+    Ok((resident, swap, combined))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InternalResourceSnapshotV1 {
@@ -818,7 +1195,31 @@ impl TrajectoryLogicalComponentV1 {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ComponentGoldenQueryMethodBreakdownV1 {
+    pub calls: u64,
+    pub pages: u64,
+    pub return_rows: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComponentGoldenQueryMethodsV1 {
+    pub order: ComponentGoldenQueryMethodBreakdownV1,
+    pub orders: ComponentGoldenQueryMethodBreakdownV1,
+    pub trades: ComponentGoldenQueryMethodBreakdownV1,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComponentGoldenQuerySourceBreakdownV1 {
+    pub hot_state: ComponentGoldenQueryMethodsV1,
+    pub retained_projection: ComponentGoldenQueryMethodsV1,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ThroughputBreakdownV1 {
+    pub event_kind_path_deliveries: ComponentGoldenEventKindCountsV1,
     pub request_batch_items: u64,
     pub unique_fills: u64,
     pub affected_orders: u64,
@@ -828,17 +1229,91 @@ pub struct ThroughputBreakdownV1 {
     pub query_calls: u64,
     pub query_pages: u64,
     pub query_return_rows: u64,
+    pub query_sources: ComponentGoldenQuerySourceBreakdownV1,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThroughputRatesPerSecondMilliV1 {
+    pub event_path_deliveries: u64,
+    pub request_calls: u64,
+    pub request_batch_items: u64,
+    pub unique_fills: u64,
+    pub query_calls: u64,
+    pub query_pages: u64,
+    pub query_return_rows: u64,
+}
+
+impl ThroughputRatesPerSecondMilliV1 {
+    pub fn from_counts(
+        completed_path_deliveries: u16,
+        completed_top_level_calls: u16,
+        breakdown: ThroughputBreakdownV1,
+        elapsed_ns: u64,
+    ) -> Result<Self, SimulationMeasurementErrorV1> {
+        Ok(Self {
+            event_path_deliveries: throughput_per_second_milli(
+                u64::from(completed_path_deliveries),
+                elapsed_ns,
+            )?,
+            request_calls: throughput_per_second_milli(
+                u64::from(completed_top_level_calls),
+                elapsed_ns,
+            )?,
+            request_batch_items: throughput_per_second_milli(
+                breakdown.request_batch_items,
+                elapsed_ns,
+            )?,
+            unique_fills: throughput_per_second_milli(breakdown.unique_fills, elapsed_ns)?,
+            query_calls: throughput_per_second_milli(breakdown.query_calls, elapsed_ns)?,
+            query_pages: throughput_per_second_milli(breakdown.query_pages, elapsed_ns)?,
+            query_return_rows: throughput_per_second_milli(
+                breakdown.query_return_rows,
+                elapsed_ns,
+            )?,
+        })
+    }
 }
 
 impl ThroughputBreakdownV1 {
-    fn checked_add(self, other: Self) -> Result<Self, SimulationMeasurementErrorV1> {
+    pub(crate) fn checked_add(self, other: Self) -> Result<Self, SimulationMeasurementErrorV1> {
         let add = |left: u64, right: u64| {
             left.checked_add(right)
                 .ok_or(SimulationMeasurementErrorV1::ArithmeticOverflow(
                     "throughput_breakdown",
                 ))
         };
+        let add_method = |left: ComponentGoldenQueryMethodBreakdownV1,
+                          right: ComponentGoldenQueryMethodBreakdownV1| {
+            Ok::<_, SimulationMeasurementErrorV1>(ComponentGoldenQueryMethodBreakdownV1 {
+                calls: add(left.calls, right.calls)?,
+                pages: add(left.pages, right.pages)?,
+                return_rows: add(left.return_rows, right.return_rows)?,
+            })
+        };
+        let add_methods = |left: ComponentGoldenQueryMethodsV1,
+                           right: ComponentGoldenQueryMethodsV1| {
+            Ok::<_, SimulationMeasurementErrorV1>(ComponentGoldenQueryMethodsV1 {
+                order: add_method(left.order, right.order)?,
+                orders: add_method(left.orders, right.orders)?,
+                trades: add_method(left.trades, right.trades)?,
+            })
+        };
         Ok(Self {
+            event_kind_path_deliveries: ComponentGoldenEventKindCountsV1 {
+                initial_l2_snapshot: add(
+                    self.event_kind_path_deliveries.initial_l2_snapshot,
+                    other.event_kind_path_deliveries.initial_l2_snapshot,
+                )?,
+                level_execution_transition: add(
+                    self.event_kind_path_deliveries.level_execution_transition,
+                    other.event_kind_path_deliveries.level_execution_transition,
+                )?,
+                market_resolution_terminal: add(
+                    self.event_kind_path_deliveries.market_resolution_terminal,
+                    other.event_kind_path_deliveries.market_resolution_terminal,
+                )?,
+            },
             request_batch_items: add(self.request_batch_items, other.request_batch_items)?,
             unique_fills: add(self.unique_fills, other.unique_fills)?,
             affected_orders: add(self.affected_orders, other.affected_orders)?,
@@ -848,6 +1323,16 @@ impl ThroughputBreakdownV1 {
             query_calls: add(self.query_calls, other.query_calls)?,
             query_pages: add(self.query_pages, other.query_pages)?,
             query_return_rows: add(self.query_return_rows, other.query_return_rows)?,
+            query_sources: ComponentGoldenQuerySourceBreakdownV1 {
+                hot_state: add_methods(
+                    self.query_sources.hot_state,
+                    other.query_sources.hot_state,
+                )?,
+                retained_projection: add_methods(
+                    self.query_sources.retained_projection,
+                    other.query_sources.retained_projection,
+                )?,
+            },
         })
     }
 }
@@ -859,13 +1344,19 @@ pub struct TrajectoryThroughputV1 {
     pub completed_top_level_calls: u16,
     pub breakdown: ThroughputBreakdownV1,
     pub elapsed_ns: u64,
-    pub completed_work_items_per_second_milli: u64,
+    pub rates_per_second_milli: ThroughputRatesPerSecondMilliV1,
 }
 
 impl TrajectoryThroughputV1 {
     fn validate(&self) -> Result<(), SimulationMeasurementErrorV1> {
         if self.completed_path_deliveries != 20
             || self.completed_top_level_calls != 19
+            || self.breakdown.event_kind_path_deliveries
+                != (ComponentGoldenEventKindCountsV1 {
+                    initial_l2_snapshot: 8,
+                    level_execution_transition: 8,
+                    market_resolution_terminal: 4,
+                })
             || self.breakdown.request_batch_items != 106
             || self.breakdown.unique_fills == 0
             || self.breakdown.affected_orders == 0
@@ -873,13 +1364,51 @@ impl TrajectoryThroughputV1 {
             || self.breakdown.trade_feedback == 0
             || self.breakdown.settlement_feedback == 0
             || self.breakdown.query_calls != 6
-            || self.breakdown.query_pages < 2
-            || self.breakdown.query_return_rows < 102
+            || self.breakdown.query_pages != 4
+            || self.breakdown.query_return_rows != 213
+            || self.breakdown.query_sources
+                != (ComponentGoldenQuerySourceBreakdownV1 {
+                    hot_state: ComponentGoldenQueryMethodsV1 {
+                        order: ComponentGoldenQueryMethodBreakdownV1 {
+                            calls: 2,
+                            pages: 0,
+                            return_rows: 2,
+                        },
+                        orders: ComponentGoldenQueryMethodBreakdownV1 {
+                            calls: 2,
+                            pages: 2,
+                            return_rows: 102,
+                        },
+                        trades: ComponentGoldenQueryMethodBreakdownV1 {
+                            calls: 2,
+                            pages: 2,
+                            return_rows: 109,
+                        },
+                    },
+                    retained_projection: ComponentGoldenQueryMethodsV1 {
+                        order: ComponentGoldenQueryMethodBreakdownV1 {
+                            calls: 0,
+                            pages: 0,
+                            return_rows: 0,
+                        },
+                        orders: ComponentGoldenQueryMethodBreakdownV1 {
+                            calls: 0,
+                            pages: 0,
+                            return_rows: 0,
+                        },
+                        trades: ComponentGoldenQueryMethodBreakdownV1 {
+                            calls: 0,
+                            pages: 0,
+                            return_rows: 0,
+                        },
+                    },
+                })
             || self.elapsed_ns == 0
-            || self.completed_work_items_per_second_milli
-                != throughput_per_second_milli(
-                    u64::from(self.completed_path_deliveries)
-                        + u64::from(self.completed_top_level_calls),
+            || self.rates_per_second_milli
+                != ThroughputRatesPerSecondMilliV1::from_counts(
+                    self.completed_path_deliveries,
+                    self.completed_top_level_calls,
+                    self.breakdown,
                     self.elapsed_ns,
                 )?
         {
@@ -898,31 +1427,37 @@ pub struct TrialThroughputV1 {
     pub completed_top_level_calls: u16,
     pub breakdown: ThroughputBreakdownV1,
     pub elapsed_ns: u64,
-    pub completed_work_items_per_second_milli: u64,
+    pub rates_per_second_milli: ThroughputRatesPerSecondMilliV1,
 }
 
 impl TrialThroughputV1 {
     fn validate(&self) -> Result<(), SimulationMeasurementErrorV1> {
-        let completed =
-            u64::from(self.completed_path_deliveries) + u64::from(self.completed_top_level_calls);
         if self.completed_path_deliveries > 40 || self.completed_top_level_calls > 38 {
             return Err(SimulationMeasurementErrorV1::ReportMismatch(
                 "试次总吞吐计数超过 COMPONENT_GOLDEN_V1".to_owned(),
             ));
         }
-        let expected_rate = if self.elapsed_ns == 0 {
-            if completed != 0 {
+        let expected_rates = if self.elapsed_ns == 0 {
+            if self.completed_path_deliveries != 0
+                || self.completed_top_level_calls != 0
+                || self.breakdown != ThroughputBreakdownV1::default()
+            {
                 return Err(SimulationMeasurementErrorV1::ReportMismatch(
                     "非空试次吞吐必须记录 elapsed_ns".to_owned(),
                 ));
             }
-            0
+            ThroughputRatesPerSecondMilliV1::default()
         } else {
-            throughput_per_second_milli(completed, self.elapsed_ns)?
+            ThroughputRatesPerSecondMilliV1::from_counts(
+                self.completed_path_deliveries,
+                self.completed_top_level_calls,
+                self.breakdown,
+                self.elapsed_ns,
+            )?
         };
-        if self.completed_work_items_per_second_milli != expected_rate {
+        if self.rates_per_second_milli != expected_rates {
             return Err(SimulationMeasurementErrorV1::ReportMismatch(
-                "试次总吞吐派生速率不能由原始计数与 elapsed_ns 重算".to_owned(),
+                "试次分栏吞吐速率不能由各自原始计数与 elapsed_ns 重算".to_owned(),
             ));
         }
         Ok(())
@@ -1040,6 +1575,25 @@ impl TrajectoryTrialResultV1 {
         for samples in self.latency.values() {
             samples.validate()?;
         }
+        if self.latency[&MeasurementLatencyKindV1::RequestResponse]
+            .samples_ns
+            .len()
+            != 13
+            || self.latency[&MeasurementLatencyKindV1::QueryResponse]
+                .samples_ns
+                .len()
+                != 6
+        {
+            return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                "逐轨迹请求响应与查询响应延迟必须分别覆盖 13 与 6 个固定调用".to_owned(),
+            ));
+        }
+        let trajectory_end_to_end = &self.latency[&MeasurementLatencyKindV1::TrialEndToEnd];
+        if trajectory_end_to_end.samples_ns != [self.throughput.elapsed_ns] {
+            return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                "逐轨迹端到端延迟必须精确等于该轨迹自身的墙钟时长".to_owned(),
+            ));
+        }
         let expected_cycles = LOGICAL_ROLLING_CYCLE_IDS_V1.into_iter().collect::<Vec<_>>();
         let actual_cycles = self.rolling_cycles.keys().copied().collect::<Vec<_>>();
         if actual_cycles != expected_cycles {
@@ -1053,6 +1607,11 @@ impl TrajectoryTrialResultV1 {
             if cycle.logical_completion_ns < previous_completion {
                 return Err(SimulationMeasurementErrorV1::ReportMismatch(
                     "第二个逻辑滚动周期不得先于第一个完成".to_owned(),
+                ));
+            }
+            if cycle.logical_completion_ns > self.throughput.elapsed_ns {
+                return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                    "逻辑滚动周期完成时间不得晚于所属轨迹墙钟结束".to_owned(),
                 ));
             }
             previous_completion = cycle.logical_completion_ns;
@@ -1173,7 +1732,55 @@ impl ComponentGoldenRunMeasurementV1 {
                 ));
             }
         }
+        self.validate_latency_and_elapsed_bindings()?;
         validate_trajectory_identity_isolation(&self.trajectories)
+    }
+
+    fn validate_latency_and_elapsed_bindings(&self) -> Result<(), SimulationMeasurementErrorV1> {
+        for kind in MEASUREMENT_LATENCY_KINDS_V1 {
+            let expected_samples = if kind == MeasurementLatencyKindV1::TrialEndToEnd {
+                vec![self.throughput.elapsed_ns]
+            } else {
+                self.trajectories
+                    .values()
+                    .flat_map(|trajectory| trajectory.latency[&kind].samples_ns.iter().copied())
+                    .collect::<Vec<_>>()
+            };
+            let expected = RawLatencySamplesNsV1::from_samples(expected_samples)?;
+            if self.latency[&kind] != expected {
+                return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                    "封口前试次延迟必须从 A、B 轨迹原始样本与整试次墙钟精确重算".to_owned(),
+                ));
+            }
+        }
+
+        let mut trajectory_elapsed_sum = 0_u64;
+        for result in self.trajectories.values() {
+            if result.throughput.elapsed_ns > self.throughput.elapsed_ns {
+                return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                    "逐轨迹墙钟不得大于整试次墙钟".to_owned(),
+                ));
+            }
+            trajectory_elapsed_sum = trajectory_elapsed_sum
+                .checked_add(result.throughput.elapsed_ns)
+                .ok_or(SimulationMeasurementErrorV1::ArithmeticOverflow(
+                    "trajectory_elapsed_sum",
+                ))?;
+        }
+        let mode = match self.measurement_run_identity {
+            MeasurementRunIdentityV1::ComponentTrial(trial_id) => trial_id.mode(),
+            MeasurementRunIdentityV1::FrozenBudgetVerification(verification_id) => {
+                verification_id.mode()
+            }
+        };
+        if mode == ComponentGoldenMeasurementModeV1::Serial
+            && trajectory_elapsed_sum > self.throughput.elapsed_ns
+        {
+            return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                "串行 A、B 轨迹墙钟之和不得大于整试次墙钟".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn content_sha256(&self) -> Result<Sha256Hex, SimulationMeasurementErrorV1> {
@@ -1215,12 +1822,120 @@ impl SimulationRunArtifactReceiptBindingV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct FailureReserveObservationV1 {
+    pub maintenance_steady_high_water: SimulationResourceHighWaterV1,
+    pub one_failure_reserve: SimulationFailureEvidenceReserveV1,
+}
+
+impl FailureReserveObservationV1 {
+    pub fn validate(&self) -> Result<(), SimulationMeasurementErrorV1> {
+        validate_one_failure_reserve_v1(self.one_failure_reserve)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IndependentFailureReserveProbeV1 {
+    pub schema_version: String,
+    pub suite_measurement_root_sha256: Sha256Hex,
+    pub fixed_context_file_sha256: Sha256Hex,
+    pub build: MeasurementBuildIdentityV1,
+    pub input_stream_sha256: Sha256Hex,
+    pub market_event_source_identity_sha256: Sha256Hex,
+    pub runner_sha256: Sha256Hex,
+    pub rule_snapshot_file_sha256: Sha256Hex,
+    pub rule_snapshot_content_sha256: Sha256Hex,
+    pub semantic_rules_sha256: Sha256Hex,
+    pub resource_policy_id: String,
+    pub b1_resource_policy: SimulationResourcePolicyV1,
+    pub b1_resource_policy_sha256: Sha256Hex,
+    pub probe_resource_policy: SimulationResourcePolicyV1,
+    pub probe_resource_policy_sha256: Sha256Hex,
+    pub run_id: String,
+    pub workload_kind: String,
+    pub deterministic_script_contract: String,
+    pub observation: FailureReserveObservationV1,
+}
+
+impl IndependentFailureReserveProbeV1 {
+    pub fn validate(&self) -> Result<(), SimulationMeasurementErrorV1> {
+        if self.schema_version != INDEPENDENT_FAILURE_RESERVE_PROBE_SCHEMA_V1 {
+            return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                "独立失败续租探针 schema_version 非法".to_owned(),
+            ));
+        }
+        for (value, label) in [
+            (
+                &self.suite_measurement_root_sha256,
+                "probe.measurement_root",
+            ),
+            (&self.fixed_context_file_sha256, "probe.fixed_context"),
+            (&self.input_stream_sha256, "probe.input_stream"),
+            (
+                &self.market_event_source_identity_sha256,
+                "probe.market_event_source",
+            ),
+            (&self.runner_sha256, "probe.runner"),
+            (&self.rule_snapshot_file_sha256, "probe.rule_file"),
+            (&self.rule_snapshot_content_sha256, "probe.rule_content"),
+            (&self.semantic_rules_sha256, "probe.rule_semantics"),
+            (&self.b1_resource_policy_sha256, "probe.b1_resource_policy"),
+            (&self.probe_resource_policy_sha256, "probe.resource_policy"),
+        ] {
+            validate_sha256(value, label)?;
+        }
+        self.build.validate()?;
+        if self.resource_policy_id != COMPONENT_GOLDEN_RESOURCE_POLICY_ID_V1
+            || self.run_id.trim().is_empty()
+            || self.workload_kind != "COMPONENT_GOLDEN"
+            || self.deterministic_script_contract != "COMPONENT_GOLDEN_V1"
+        {
+            return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                "独立失败续租探针未绑定 COMPONENT_GOLDEN_V1 构建、策略或运行身份".to_owned(),
+            ));
+        }
+        if self.b1_resource_policy.policy_id != self.resource_policy_id
+            || self.b1_resource_policy.content_sha256().map_err(|error| {
+                SimulationMeasurementErrorV1::ReportMismatch(format!(
+                    "重算失败探针 B1 基础策略身份失败：{error}"
+                ))
+            })? != self.b1_resource_policy_sha256
+            || self.probe_resource_policy.policy_id != self.resource_policy_id
+            || self
+                .probe_resource_policy
+                .content_sha256()
+                .map_err(|error| {
+                    SimulationMeasurementErrorV1::ReportMismatch(format!(
+                        "重算失败探针执行策略身份失败：{error}"
+                    ))
+                })?
+                != self.probe_resource_policy_sha256
+        {
+            return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                "独立失败续租探针的策略正文与身份不一致".to_owned(),
+            ));
+        }
+        let mut expected_probe_policy = self.b1_resource_policy.clone();
+        expected_probe_policy.run.input_queue =
+            ResourceLimitV1::new(1, expected_probe_policy.run.input_queue.max_bytes);
+        if self.probe_resource_policy != expected_probe_policy {
+            return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                "独立失败续租探针未精确使用 B1 基础策略的固定 InputQueue 变体".to_owned(),
+            ));
+        }
+        self.observation.validate()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SealedRunResourceEvidenceV1 {
     pub audit_file_sha256: Sha256Hex,
     pub run_artifact_receipt: SimulationRunArtifactReceiptBindingV1,
     pub resource_policy_id: String,
     pub resource_policy_sha256: Sha256Hex,
     pub high_water: SimulationResourceHighWaterV1,
+    pub failure_reserve_observation: FailureReserveObservationV1,
     pub durable_transaction_resource_increments: Vec<ResourceTransactionIncrementV1>,
     pub artifact_publication_increment: BTreeMap<ResourceBudgetPathV1, ResourceQuantityV1>,
     pub postseal_resource_snapshot: MeasuredResourceSnapshotV1,
@@ -1239,6 +1954,7 @@ impl SealedRunResourceEvidenceV1 {
             &self.resource_policy_sha256,
             "sealed.resource_policy_sha256",
         )?;
+        self.failure_reserve_observation.validate()?;
         if self.durable_transaction_resource_increments.is_empty() {
             return Err(SimulationMeasurementErrorV1::ReportMismatch(
                 "封口后资源证据缺少完整逐事务增量".to_owned(),
@@ -1793,6 +2509,14 @@ pub const RESOURCE_BUDGET_PATHS_V1: [ResourceBudgetPathV1; 24] = [
     ResourceBudgetPathV1::DurableRuntimeRoot,
 ];
 
+const FAILURE_RESERVE_BUDGET_PATHS_V1: [ResourceBudgetPathV1; 5] = [
+    ResourceBudgetPathV1::RunInMemoryState,
+    ResourceBudgetPathV1::RunSessions,
+    ResourceBudgetPathV1::DurableEvidence,
+    ResourceBudgetPathV1::DurableCheckpoints,
+    ResourceBudgetPathV1::DurableRuntimeRoot,
+];
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceTransactionIncrementV1 {
@@ -1901,6 +2625,98 @@ pub fn derive_resource_budget_observations_v1(
     Ok(observations)
 }
 
+fn observe_failure_reserve_observation_max(
+    target: &mut FailureReserveObservationV1,
+    candidate: &FailureReserveObservationV1,
+) -> Result<(), SimulationMeasurementErrorV1> {
+    candidate.validate()?;
+    target
+        .maintenance_steady_high_water
+        .observe(&candidate.maintenance_steady_high_water.observed);
+    for (target, candidate) in [
+        (
+            &mut target.one_failure_reserve.run_checkpoint_growth,
+            candidate.one_failure_reserve.run_checkpoint_growth,
+        ),
+        (
+            &mut target.one_failure_reserve.evidence,
+            candidate.one_failure_reserve.evidence,
+        ),
+        (
+            &mut target.one_failure_reserve.checkpoints,
+            candidate.one_failure_reserve.checkpoints,
+        ),
+        (
+            &mut target.one_failure_reserve.runtime_root,
+            candidate.one_failure_reserve.runtime_root,
+        ),
+    ] {
+        observe_quantity_max(target, candidate);
+    }
+    Ok(())
+}
+
+pub fn derive_failure_reserve_observation_v1(
+    trials: &BTreeMap<ComponentGoldenTrialIdV1, ComponentGoldenTrialReportV1>,
+    independent_probe: &FailureReserveObservationV1,
+) -> Result<FailureReserveObservationV1, SimulationMeasurementErrorV1> {
+    independent_probe.validate()?;
+    let expected_trials = COMPONENT_GOLDEN_TRIAL_ORDER_V1
+        .into_iter()
+        .collect::<Vec<_>>();
+    let actual_trials = trials.keys().copied().collect::<Vec<_>>();
+    if actual_trials != expected_trials {
+        return Err(SimulationMeasurementErrorV1::ReportMismatch(
+            "失败预留观测必须恰好绑定六个预登记 B1 试次".to_owned(),
+        ));
+    }
+
+    let mut combined = independent_probe.clone();
+    for trial_id in COMPONENT_GOLDEN_TRIAL_ORDER_V1 {
+        let trial = &trials[&trial_id];
+        if trial.trial_id != trial_id {
+            return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                "失败预留观测试次映射键与正文 trial_id 不一致".to_owned(),
+            ));
+        }
+        trial.validate_integrity()?;
+        trial.validate_succeeded()?;
+        let sealed = trial.sealed_resource_evidence.as_ref().ok_or_else(|| {
+            SimulationMeasurementErrorV1::ReportMismatch(
+                "成功 B1 试次缺少封口失败预留观测".to_owned(),
+            )
+        })?;
+        observe_failure_reserve_observation_max(
+            &mut combined,
+            &sealed.failure_reserve_observation,
+        )?;
+    }
+    combined.validate()?;
+    Ok(combined)
+}
+
+fn validate_one_failure_reserve_v1(
+    reserve: SimulationFailureEvidenceReserveV1,
+) -> Result<(), SimulationMeasurementErrorV1> {
+    if reserve.run_checkpoint_growth.records != 1 || reserve.run_checkpoint_growth.bytes == 0 {
+        return Err(SimulationMeasurementErrorV1::BudgetMismatch(
+            "单份失败事实的运行检查点增长必须为一条局部墓碑记录和正字节".to_owned(),
+        ));
+    }
+    for (name, quantity, expected_records) in [
+        ("evidence", reserve.evidence, 1),
+        ("checkpoints", reserve.checkpoints, 1),
+        ("runtime_root", reserve.runtime_root, 3),
+    ] {
+        if quantity.records != expected_records || quantity.bytes == 0 {
+            return Err(SimulationMeasurementErrorV1::BudgetMismatch(format!(
+                "单份失败事实的 {name} 必须为 {expected_records} 条记录和正字节"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FrozenResourceBudgetsV1 {
@@ -1923,32 +2739,13 @@ impl FrozenResourceBudgetsV1 {
                 "冻结字节上限必须按 4 KiB、进程内存上限必须按 64 MiB 对齐".to_owned(),
             ));
         }
-        for (name, reserve, path) in [
-            (
-                "evidence",
-                self.failure_reserve.evidence,
-                ResourceBudgetPathV1::DurableEvidence,
-            ),
-            (
-                "checkpoints",
-                self.failure_reserve.checkpoints,
-                ResourceBudgetPathV1::DurableCheckpoints,
-            ),
-            (
-                "runtime_root",
-                self.failure_reserve.runtime_root,
-                ResourceBudgetPathV1::DurableRuntimeRoot,
-            ),
-        ] {
+        validate_one_failure_reserve_v1(self.failure_reserve)?;
+        for path in FAILURE_RESERVE_BUDGET_PATHS_V1 {
+            let reserve = failure_reserve_for_path(self.failure_reserve, path);
             let limit = self.limit(path)?;
-            if reserve.records == 0 || reserve.bytes == 0 {
-                return Err(SimulationMeasurementErrorV1::BudgetMismatch(format!(
-                    "失败证据保留 {name} 的实测记录和字节增量必须均大于零"
-                )));
-            }
             if reserve.records > limit.max_records || reserve.bytes > limit.max_bytes {
                 return Err(SimulationMeasurementErrorV1::BudgetMismatch(format!(
-                    "失败证据保留 {name} 的实测增量超过对应硬上限"
+                    "单份失败事实的 {path:?} 增量超过对应硬上限"
                 )));
             }
         }
@@ -2011,31 +2808,104 @@ impl FrozenResourceBudgetsV1 {
     }
 }
 
+fn failure_reserve_for_path(
+    reserve: SimulationFailureEvidenceReserveV1,
+    path: ResourceBudgetPathV1,
+) -> ResourceQuantityV1 {
+    match path {
+        ResourceBudgetPathV1::RunInMemoryState => reserve.run_checkpoint_growth,
+        ResourceBudgetPathV1::RunSessions => {
+            ResourceQuantityV1::new(0, reserve.run_checkpoint_growth.bytes)
+        }
+        ResourceBudgetPathV1::DurableEvidence => reserve.evidence,
+        ResourceBudgetPathV1::DurableCheckpoints => reserve.checkpoints,
+        ResourceBudgetPathV1::DurableRuntimeRoot => reserve.runtime_root,
+        _ => ResourceQuantityV1::default(),
+    }
+}
+
+fn derive_frozen_resource_limits_v1(
+    observations: &BTreeMap<ResourceBudgetPathV1, ResourceBudgetObservationV1>,
+) -> Result<BTreeMap<ResourceBudgetPathV1, ResourceLimitV1>, SimulationMeasurementErrorV1> {
+    validate_budget_paths(observations, "资源预算观测")?;
+    observations
+        .iter()
+        .map(|(path, observation)| {
+            let max_records = padded_peak(
+                observation.peak.records,
+                observation.max_single_transaction_increment.records,
+            )?;
+            let raw_bytes = padded_peak(
+                observation.peak.bytes,
+                observation.max_single_transaction_increment.bytes,
+            )?;
+            Ok((
+                *path,
+                ResourceLimitV1::new(max_records, round_up(raw_bytes, FOUR_KIB)?),
+            ))
+        })
+        .collect()
+}
+
+fn validate_failure_reserve_fit_v1(
+    observations: &BTreeMap<ResourceBudgetPathV1, ResourceBudgetObservationV1>,
+    maintenance_steady_high_water: &SimulationResourceHighWaterV1,
+    failure_reserve: SimulationFailureEvidenceReserveV1,
+    limits: &BTreeMap<ResourceBudgetPathV1, ResourceLimitV1>,
+) -> Result<(), SimulationMeasurementErrorV1> {
+    validate_one_failure_reserve_v1(failure_reserve)?;
+    let steady_by_path = usage_by_budget_path(&maintenance_steady_high_water.observed);
+    for path in FAILURE_RESERVE_BUDGET_PATHS_V1 {
+        let steady = steady_by_path[&path];
+        let peak = observations[&path].peak;
+        let limit = limits[&path];
+        if steady.records > peak.records || steady.bytes > peak.bytes {
+            return Err(SimulationMeasurementErrorV1::BudgetMismatch(format!(
+                "失败续租的维护稳态 {path:?} 超过六试次观测 Pmax"
+            )));
+        }
+        if steady.records > limit.max_records || steady.bytes > limit.max_bytes {
+            return Err(SimulationMeasurementErrorV1::BudgetMismatch(format!(
+                "失败续租的维护稳态 {path:?} 超过冻结硬上限"
+            )));
+        }
+        let reserve = failure_reserve_for_path(failure_reserve, path);
+        if steady
+            .records
+            .checked_add(reserve.records)
+            .is_none_or(|required| required > limit.max_records)
+            || steady
+                .bytes
+                .checked_add(reserve.bytes)
+                .is_none_or(|required| required > limit.max_bytes)
+        {
+            return Err(SimulationMeasurementErrorV1::BudgetMismatch(format!(
+                "冻结公式在 {path:?} 未给维护稳态后的单份完整失败事实留下足够余量"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub fn freeze_resource_budgets_v1(
     observations: &BTreeMap<ResourceBudgetPathV1, ResourceBudgetObservationV1>,
     process_memory_peak_bytes: u64,
+    maintenance_steady_high_water: &SimulationResourceHighWaterV1,
     failure_reserve: SimulationFailureEvidenceReserveV1,
 ) -> Result<FrozenResourceBudgetsV1, SimulationMeasurementErrorV1> {
-    validate_budget_paths(observations, "资源预算观测")?;
     if process_memory_peak_bytes == 0 {
         return Err(SimulationMeasurementErrorV1::BudgetMismatch(
             "进程内存峰值必须大于零".to_owned(),
         ));
     }
 
-    let mut limits = BTreeMap::new();
-    for (path, observation) in observations {
-        let max_records = padded_peak(
-            observation.peak.records,
-            observation.max_single_transaction_increment.records,
-        )?;
-        let raw_bytes = padded_peak(
-            observation.peak.bytes,
-            observation.max_single_transaction_increment.bytes,
-        )?;
-        let max_bytes = round_up(raw_bytes, FOUR_KIB)?;
-        limits.insert(*path, ResourceLimitV1::new(max_records, max_bytes));
-    }
+    let limits = derive_frozen_resource_limits_v1(observations)?;
+    validate_failure_reserve_fit_v1(
+        observations,
+        maintenance_steady_high_water,
+        failure_reserve,
+        &limits,
+    )?;
     let frozen = FrozenResourceBudgetsV1 {
         limits,
         process_memory_max_bytes: round_up(process_memory_peak_bytes, SIXTY_FOUR_MIB)?,
@@ -2226,6 +3096,7 @@ impl FrozenBudgetVerificationTrialV1 {
             )
         })?;
         validate_high_water_within_frozen_budgets(&sealed.high_water, frozen_budgets)?;
+        validate_verification_failure_reserve_observation_v1(sealed, frozen_budgets)?;
         for snapshot in &self.resource_snapshots {
             validate_process_snapshot_within_frozen_budgets(snapshot, frozen_budgets)?;
         }
@@ -2242,11 +3113,16 @@ pub struct ComponentGoldenMeasurementReportV1 {
     pub environment: MeasurementEnvironmentIdentityV1,
     pub runtime_hard_guards: MeasurementRuntimeHardGuardsV1,
     pub trials: BTreeMap<ComponentGoldenTrialIdV1, ComponentGoldenTrialReportV1>,
+    pub independent_failure_reserve_probe: Option<IndependentFailureReserveProbeV1>,
     pub budget_observations: BTreeMap<ResourceBudgetPathV1, ResourceBudgetObservationV1>,
     pub process_resident_peak_bytes: u64,
     pub process_swap_peak_bytes: u64,
     pub process_memory_peak_bytes: u64,
     pub frozen_budgets: FrozenResourceBudgetsV1,
+    pub b1_lifecycle_tail_evidence:
+        BTreeMap<ComponentGoldenTrialIdV1, TrialLifecycleTailEvidenceV1>,
+    pub b2_lifecycle_tail_evidence:
+        BTreeMap<FrozenBudgetVerificationTrialIdV1, TrialLifecycleTailEvidenceV1>,
     pub frozen_budget_verification_trials:
         BTreeMap<FrozenBudgetVerificationTrialIdV1, FrozenBudgetVerificationTrialV1>,
 }
@@ -2267,6 +3143,19 @@ impl ComponentGoldenMeasurementReportV1 {
         }
         self.environment.validate()?;
         self.runtime_hard_guards.validate()?;
+        if let Some(probe) = &self.independent_failure_reserve_probe {
+            probe.validate()?;
+            if probe.suite_measurement_root_sha256
+                != self.environment.filesystem.measurement_root_sha256
+                || probe.build != self.environment.build
+                || probe.input_stream_sha256 != self.environment.input_stream_sha256
+                || probe.runner_sha256 != self.environment.runner_sha256
+            {
+                return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                    "独立失败续租探针不属于报告的同一 B1 套件固定上下文".to_owned(),
+                ));
+            }
+        }
         let expected_trials = COMPONENT_GOLDEN_TRIAL_ORDER_V1
             .into_iter()
             .collect::<Vec<_>>();
@@ -2276,11 +3165,19 @@ impl ComponentGoldenMeasurementReportV1 {
                 "测量报告必须保留 S1,P1,P2,S2,S3,P3 六个试次".to_owned(),
             ));
         }
+        let actual_b1_lifecycle = self
+            .b1_lifecycle_tail_evidence
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        if actual_b1_lifecycle != expected_trials {
+            return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                "测量报告必须为六个 B1 试次各保留一份完整生命周期尾部证据".to_owned(),
+            ));
+        }
 
-        let mut observed_process_resident_peak = 0_u64;
-        let mut observed_process_swap_peak = 0_u64;
-        let mut observed_process_memory_peak = 0_u64;
         let mut initial_policy_binding: Option<(&str, &Sha256Hex)> = None;
+        let mut b1_fixed_context_file_sha256: Option<&Sha256Hex> = None;
         for (trial_id, trial) in &self.trials {
             if trial.trial_id != *trial_id {
                 return Err(SimulationMeasurementErrorV1::ReportMismatch(
@@ -2288,17 +3185,68 @@ impl ComponentGoldenMeasurementReportV1 {
                 ));
             }
             trial.validate_integrity()?;
-            if let Some(preseal) = &trial.preseal_measurement
-                && (preseal.workload_contract_sha256 != self.workload_contract_sha256
+            let lifecycle = &self.b1_lifecycle_tail_evidence[trial_id];
+            if let Some(preseal) = &trial.preseal_measurement {
+                if preseal.workload_contract_sha256 != self.workload_contract_sha256
                     || !preseal
                         .environment
                         .has_same_fixed_context_as(&self.environment)
-                    || preseal.runtime_hard_guards != self.runtime_hard_guards)
+                    || preseal.runtime_hard_guards != self.runtime_hard_guards
+                {
+                    return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                        "试次封口前测量正文未绑定报告的负载、固定环境上下文或初测运行硬门"
+                            .to_owned(),
+                    ));
+                }
+                validate_lifecycle_tail_binding_v1(
+                    lifecycle,
+                    &TrialLifecycleTailBindingV1 {
+                        build_group: MeasurementBuildGroupV1::B1,
+                        measurement_run_identity: MeasurementRunIdentityV1::ComponentTrial(
+                            *trial_id,
+                        ),
+                        selector_label: component_trial_selector_label(*trial_id),
+                        run_id: &preseal.run_id,
+                        environment: &preseal.environment,
+                        runtime_hard_guards: preseal.runtime_hard_guards,
+                        last_resource_snapshot: &trial
+                            .sealed_resource_evidence
+                            .as_ref()
+                            .expect("成功 B1 试次已验证封口后资源证据")
+                            .postseal_resource_snapshot,
+                        fixed_context_file_sha256: &lifecycle.fixed_context_file_sha256,
+                        main_trial_json_sha256: &lifecycle.main_trial_json_sha256,
+                        main_trial_json_bytes: lifecycle.main_trial_json_bytes,
+                    },
+                )?;
+                let first_process = &preseal.resource_snapshots[0].procfs;
+                if lifecycle.final_process.pid != first_process.pid
+                    || lifecycle.final_process.process_start_time_ticks
+                        != first_process.process_start_time_ticks
+                {
+                    return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                        "B1 生命周期尾部 /proc 身份未延续同一正式试次进程".to_owned(),
+                    ));
+                }
+            } else {
+                lifecycle.validate()?;
+                if lifecycle.build_group != MeasurementBuildGroupV1::B1
+                    || lifecycle.measurement_run_identity
+                        != MeasurementRunIdentityV1::ComponentTrial(*trial_id)
+                {
+                    return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                        "失败 B1 试次保留的生命周期证据身份非法".to_owned(),
+                    ));
+                }
+            }
+            if b1_fixed_context_file_sha256
+                .is_some_and(|expected| expected != &lifecycle.fixed_context_file_sha256)
             {
                 return Err(SimulationMeasurementErrorV1::ReportMismatch(
-                    "试次封口前测量正文未绑定报告的负载、固定环境上下文或初测运行硬门".to_owned(),
+                    "六个 B1 生命周期尾部证据必须绑定同一固定上下文文件".to_owned(),
                 ));
             }
+            b1_fixed_context_file_sha256.get_or_insert(&lifecycle.fixed_context_file_sha256);
             for result in trial.trajectories.values() {
                 if result.logical_summary_input.workload_contract_sha256
                     != self.workload_contract_sha256
@@ -2310,12 +3258,6 @@ impl ComponentGoldenMeasurementReportV1 {
             }
             for snapshot in &trial.resource_snapshots {
                 self.runtime_hard_guards.validate_snapshot(snapshot)?;
-                observed_process_resident_peak =
-                    observed_process_resident_peak.max(snapshot.procfs.vm_hwm_bytes);
-                observed_process_swap_peak =
-                    observed_process_swap_peak.max(snapshot.procfs.vm_swap_bytes);
-                observed_process_memory_peak = observed_process_memory_peak
-                    .max(snapshot_process_or_cgroup_memory_peak_bytes(snapshot)?);
             }
             if let Some(sealed) = &trial.sealed_resource_evidence {
                 let current = (
@@ -2328,21 +3270,34 @@ impl ComponentGoldenMeasurementReportV1 {
                     ));
                 }
                 initial_policy_binding.get_or_insert(current);
-                let snapshot = &sealed.postseal_resource_snapshot;
-                observed_process_resident_peak =
-                    observed_process_resident_peak.max(snapshot.procfs.vm_hwm_bytes);
-                observed_process_swap_peak =
-                    observed_process_swap_peak.max(snapshot.procfs.vm_swap_bytes);
-                observed_process_memory_peak = observed_process_memory_peak
-                    .max(snapshot_process_or_cgroup_memory_peak_bytes(snapshot)?);
             }
         }
+        let b1_lifecycle = self
+            .b1_lifecycle_tail_evidence
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let (
+            observed_process_resident_peak,
+            observed_process_swap_peak,
+            observed_process_memory_peak,
+        ) = lifecycle_process_peaks_v1(&b1_lifecycle)?;
         if self.process_resident_peak_bytes != observed_process_resident_peak
             || self.process_swap_peak_bytes != observed_process_swap_peak
             || self.process_memory_peak_bytes != observed_process_memory_peak
         {
             return Err(SimulationMeasurementErrorV1::BudgetMismatch(
-                "进程常驻、交换和合计峰值不能由六试次封口前后 /proc 与 cgroup 样本重算".to_owned(),
+                "进程常驻、交换和合计峰值不能由六试次完整生命周期尾部证据重算".to_owned(),
+            ));
+        }
+        if let (Some(probe), Some((policy_id, policy_sha256))) = (
+            &self.independent_failure_reserve_probe,
+            initial_policy_binding,
+        ) && (probe.resource_policy_id != policy_id
+            || &probe.b1_resource_policy_sha256 != policy_sha256)
+        {
+            return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                "独立失败续租探针未绑定六个 B1 试次的同一预冻结资源策略".to_owned(),
             ));
         }
         let expected_observations = derive_resource_budget_observations_v1(&self.trials)?;
@@ -2351,14 +3306,15 @@ impl ComponentGoldenMeasurementReportV1 {
                 "报告的 Pmax/Amax 不能由六试次内部高水位与逐事务增量样本重算".to_owned(),
             ));
         }
-        let expected_budgets = freeze_resource_budgets_v1(
-            &expected_observations,
-            observed_process_memory_peak,
-            self.frozen_budgets.failure_reserve,
-        )?;
-        if self.frozen_budgets != expected_budgets {
+        let expected_limits = derive_frozen_resource_limits_v1(&expected_observations)?;
+        let expected_process_memory_max_bytes =
+            round_up(observed_process_memory_peak, SIXTY_FOUR_MIB)?;
+        self.frozen_budgets.validate()?;
+        if self.frozen_budgets.limits != expected_limits
+            || self.frozen_budgets.process_memory_max_bytes != expected_process_memory_max_bytes
+        {
             return Err(SimulationMeasurementErrorV1::BudgetMismatch(
-                "冻结预算不能由 Pmax 与 Amax 重算".to_owned(),
+                "二十四路硬上限或进程内存上限不能由冻结的 Pmax/Amax 公式重算".to_owned(),
             ));
         }
         let frozen_budgets_sha256 = self.frozen_budgets.content_sha256()?;
@@ -2384,6 +3340,19 @@ impl ComponentGoldenMeasurementReportV1 {
                 "报告必须保留冻结后的串行与并行验证试次".to_owned(),
             ));
         }
+        let actual_b2_lifecycle = self
+            .b2_lifecycle_tail_evidence
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        if actual_b2_lifecycle != expected_verifications {
+            return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                "报告必须为两次 B2 复核各保留一份完整生命周期尾部证据".to_owned(),
+            ));
+        }
+        for lifecycle in self.b2_lifecycle_tail_evidence.values() {
+            lifecycle.validate()?;
+        }
         let expected_verification_guards = MeasurementRuntimeHardGuardsV1 {
             cgroup_memory_max_bytes: self.frozen_budgets.process_memory_max_bytes,
             cgroup_memory_swap_max_bytes: 0,
@@ -2393,6 +3362,7 @@ impl ComponentGoldenMeasurementReportV1 {
         };
         let mut verification_environment: Option<&MeasurementEnvironmentIdentityV1> = None;
         let mut verification_policy_binding: Option<(&str, &Sha256Hex)> = None;
+        let mut b2_fixed_context_file_sha256: Option<&Sha256Hex> = None;
         for (verification_id, verification) in &self.frozen_budget_verification_trials {
             if verification.verification_id != *verification_id {
                 return Err(SimulationMeasurementErrorV1::ReportMismatch(
@@ -2420,6 +3390,45 @@ impl ComponentGoldenMeasurementReportV1 {
                     ));
                 }
                 verification_environment.get_or_insert(&preseal.environment);
+                let lifecycle = &self.b2_lifecycle_tail_evidence[verification_id];
+                validate_lifecycle_tail_binding_v1(
+                    lifecycle,
+                    &TrialLifecycleTailBindingV1 {
+                        build_group: MeasurementBuildGroupV1::B2,
+                        measurement_run_identity:
+                            MeasurementRunIdentityV1::FrozenBudgetVerification(*verification_id),
+                        selector_label: verification_trial_selector_label(*verification_id),
+                        run_id: &preseal.run_id,
+                        environment: &preseal.environment,
+                        runtime_hard_guards: preseal.runtime_hard_guards,
+                        last_resource_snapshot: &verification
+                            .sealed_resource_evidence
+                            .as_ref()
+                            .expect("成功 B2 复核已验证封口后资源证据")
+                            .postseal_resource_snapshot,
+                        fixed_context_file_sha256: &lifecycle.fixed_context_file_sha256,
+                        main_trial_json_sha256: &lifecycle.main_trial_json_sha256,
+                        main_trial_json_bytes: lifecycle.main_trial_json_bytes,
+                    },
+                )?;
+                let first_process = &preseal.resource_snapshots[0].procfs;
+                if lifecycle.final_process.pid != first_process.pid
+                    || lifecycle.final_process.process_start_time_ticks
+                        != first_process.process_start_time_ticks
+                {
+                    return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                        "B2 生命周期尾部 /proc 身份未延续同一正式试次进程".to_owned(),
+                    ));
+                }
+                if b2_fixed_context_file_sha256
+                    .is_some_and(|expected| expected != &lifecycle.fixed_context_file_sha256)
+                {
+                    return Err(SimulationMeasurementErrorV1::ReportMismatch(
+                        "两次 B2 生命周期尾部证据必须绑定同一固定上下文文件".to_owned(),
+                    ));
+                }
+                b2_fixed_context_file_sha256.get_or_insert(&lifecycle.fixed_context_file_sha256);
+                validate_lifecycle_within_frozen_budgets_v1(lifecycle, &self.frozen_budgets)?;
             }
             if let Some(sealed) = &verification.sealed_resource_evidence {
                 if sealed.resource_policy_id != COMPONENT_GOLDEN_RESOURCE_POLICY_ID_V1
@@ -2482,6 +3491,27 @@ impl ComponentGoldenMeasurementReportV1 {
                     }
                 }
             }
+        }
+        let independent_probe =
+            self.independent_failure_reserve_probe
+                .as_ref()
+                .ok_or_else(|| {
+                    SimulationMeasurementErrorV1::ReportMismatch(
+                        "完整测量报告缺少独立真实失败续租探针观测".to_owned(),
+                    )
+                })?;
+        let expected_failure_observation =
+            derive_failure_reserve_observation_v1(&self.trials, &independent_probe.observation)?;
+        let expected_budgets = freeze_resource_budgets_v1(
+            &self.budget_observations,
+            self.process_memory_peak_bytes,
+            &expected_failure_observation.maintenance_steady_high_water,
+            expected_failure_observation.one_failure_reserve,
+        )?;
+        if self.frozen_budgets != expected_budgets {
+            return Err(SimulationMeasurementErrorV1::BudgetMismatch(
+                "冻结预算未绑定六个成功 B1 试次与独立失败探针逐维最大观测".to_owned(),
+            ));
         }
         let frozen_budgets_sha256 = self.frozen_budgets.content_sha256()?;
         for verification in self.frozen_budget_verification_trials.values() {
@@ -2632,7 +3662,7 @@ fn throughput_per_second_milli(
     }
     let numerator = u128::from(completed_work_items) * 1_000_000_000_000_u128;
     u64::try_from(numerator / u128::from(elapsed_ns)).map_err(|_| {
-        SimulationMeasurementErrorV1::ArithmeticOverflow("completed_work_items_per_second_milli")
+        SimulationMeasurementErrorV1::ArithmeticOverflow("throughput_per_second_milli")
     })
 }
 
@@ -2713,6 +3743,59 @@ fn validate_high_water_within_frozen_budgets(
     Ok(())
 }
 
+fn validate_verification_failure_reserve_observation_v1(
+    sealed: &SealedRunResourceEvidenceV1,
+    frozen_budgets: &FrozenResourceBudgetsV1,
+) -> Result<(), SimulationMeasurementErrorV1> {
+    sealed.failure_reserve_observation.validate()?;
+    let steady = usage_by_budget_path(
+        &sealed
+            .failure_reserve_observation
+            .maintenance_steady_high_water
+            .observed,
+    );
+    let observed_high_water = usage_by_budget_path(&sealed.high_water.observed);
+    for path in FAILURE_RESERVE_BUDGET_PATHS_V1 {
+        let actual_reserve =
+            failure_reserve_for_path(sealed.failure_reserve_observation.one_failure_reserve, path);
+        let frozen_reserve = failure_reserve_for_path(frozen_budgets.failure_reserve, path);
+        if actual_reserve.records > frozen_reserve.records
+            || actual_reserve.bytes > frozen_reserve.bytes
+        {
+            return Err(SimulationMeasurementErrorV1::BudgetMismatch(format!(
+                "冻结后验证的单份失败事实 {path:?} 超过 B1 冻结预留"
+            )));
+        }
+        let steady = steady[&path];
+        let observed = observed_high_water[&path];
+        let limit = frozen_budgets.limits[&path];
+        if steady.records > observed.records || steady.bytes > observed.bytes {
+            return Err(SimulationMeasurementErrorV1::BudgetMismatch(format!(
+                "冻结后验证的维护稳态 {path:?} 未被该试次封口高水位覆盖"
+            )));
+        }
+        if steady.records > limit.max_records || steady.bytes > limit.max_bytes {
+            return Err(SimulationMeasurementErrorV1::BudgetMismatch(format!(
+                "冻结后验证的维护稳态 {path:?} 超过冻结硬上限"
+            )));
+        }
+        if steady
+            .records
+            .checked_add(frozen_reserve.records)
+            .is_none_or(|required| required > limit.max_records)
+            || steady
+                .bytes
+                .checked_add(frozen_reserve.bytes)
+                .is_none_or(|required| required > limit.max_bytes)
+        {
+            return Err(SimulationMeasurementErrorV1::BudgetMismatch(format!(
+                "冻结后验证的维护稳态 {path:?} 未给冻结单份失败事实留下足够余量"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_process_snapshot_within_frozen_budgets(
     snapshot: &MeasuredResourceSnapshotV1,
     frozen_budgets: &FrozenResourceBudgetsV1,
@@ -2721,6 +3804,45 @@ fn validate_process_snapshot_within_frozen_budgets(
     if process_memory_bytes > frozen_budgets.process_memory_max_bytes {
         return Err(SimulationMeasurementErrorV1::BudgetMismatch(
             "冻结后验证试次越过进程或 cgroup 内存上限".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_lifecycle_within_frozen_budgets_v1(
+    evidence: &TrialLifecycleTailEvidenceV1,
+    frozen_budgets: &FrozenResourceBudgetsV1,
+) -> Result<(), SimulationMeasurementErrorV1> {
+    evidence.validate()?;
+    if evidence.process_or_cgroup_memory_peak_bytes()? > frozen_budgets.process_memory_max_bytes
+        || evidence.final_process.vm_swap_bytes != 0
+        || evidence.final_cgroup_v2.memory_swap_current_bytes != 0
+        || evidence.final_cgroup_v2.memory_swap_peak_bytes != Some(0)
+        || evidence.systemd.memory_swap_peak_bytes != 0
+    {
+        return Err(SimulationMeasurementErrorV1::BudgetMismatch(
+            "冻结后复核的完整生命周期峰值必须不越冻结内存、且全生命周期交换空间为零".to_owned(),
+        ));
+    }
+    let CgroupMemoryLimitV1::Bytes {
+        bytes: memory_max_bytes,
+    } = evidence.final_cgroup_v2.memory_limit
+    else {
+        return Err(SimulationMeasurementErrorV1::BudgetMismatch(
+            "冻结后复核生命周期缺少有限 memory.max".to_owned(),
+        ));
+    };
+    let CgroupMemoryLimitV1::Bytes {
+        bytes: memory_swap_max_bytes,
+    } = evidence.final_cgroup_v2.memory_swap_limit
+    else {
+        return Err(SimulationMeasurementErrorV1::BudgetMismatch(
+            "冻结后复核生命周期缺少有限 memory.swap.max".to_owned(),
+        ));
+    };
+    if memory_max_bytes != frozen_budgets.process_memory_max_bytes || memory_swap_max_bytes != 0 {
+        return Err(SimulationMeasurementErrorV1::BudgetMismatch(
+            "冻结后复核生命周期 cgroup 硬门未精确使用冻结内存与零交换".to_owned(),
         ));
     }
     Ok(())
@@ -2891,6 +4013,10 @@ fn measurement_hash<T: Serialize>(
         .map_err(|error| SimulationMeasurementErrorV1::Serialization(error.to_string()))
 }
 
+fn raw_sha256(bytes: &[u8]) -> Sha256Hex {
+    Sha256Hex(format!("{:x}", Sha256::digest(bytes)))
+}
+
 fn validate_sha256(
     value: &Sha256Hex,
     field: &'static str,
@@ -2918,9 +4044,63 @@ mod tests {
 
     fn measured_failure_reserve() -> SimulationFailureEvidenceReserveV1 {
         SimulationFailureEvidenceReserveV1 {
+            run_checkpoint_growth: ResourceQuantityV1::new(1, 1),
             evidence: ResourceQuantityV1::new(1, 1),
             checkpoints: ResourceQuantityV1::new(1, 1),
-            runtime_root: ResourceQuantityV1::new(1, 1),
+            runtime_root: ResourceQuantityV1::new(3, 3),
+        }
+    }
+
+    fn measured_maintenance_steady_high_water() -> SimulationResourceHighWaterV1 {
+        let mut high_water = SimulationResourceHighWaterV1::default();
+        high_water.observed.run.in_memory_state = ResourceQuantityV1::new(4, 3);
+        high_water.observed.run.sessions = ResourceQuantityV1::new(4, 3);
+        high_water.observed.durable.evidence = ResourceQuantityV1::new(3, 3);
+        high_water.observed.durable.checkpoints = ResourceQuantityV1::new(3, 3);
+        high_water.observed.durable.runtime_root = ResourceQuantityV1::new(5, 5);
+        high_water
+    }
+
+    fn measured_failure_reserve_observation() -> FailureReserveObservationV1 {
+        FailureReserveObservationV1 {
+            maintenance_steady_high_water: measured_maintenance_steady_high_water(),
+            one_failure_reserve: measured_failure_reserve(),
+        }
+    }
+
+    fn independent_failure_reserve_probe(
+        environment: &MeasurementEnvironmentIdentityV1,
+    ) -> IndependentFailureReserveProbeV1 {
+        IndependentFailureReserveProbeV1 {
+            schema_version: INDEPENDENT_FAILURE_RESERVE_PROBE_SCHEMA_V1.to_owned(),
+            suite_measurement_root_sha256: environment.filesystem.measurement_root_sha256.clone(),
+            fixed_context_file_sha256: sha('d'),
+            build: environment.build.clone(),
+            input_stream_sha256: environment.input_stream_sha256.clone(),
+            market_event_source_identity_sha256: sha('3'),
+            runner_sha256: environment.runner_sha256.clone(),
+            rule_snapshot_file_sha256: sha('e'),
+            rule_snapshot_content_sha256: sha('1'),
+            semantic_rules_sha256: sha('2'),
+            resource_policy_id: COMPONENT_GOLDEN_RESOURCE_POLICY_ID_V1.to_owned(),
+            b1_resource_policy: SimulationResourcePolicyV1::component_golden_v1(),
+            b1_resource_policy_sha256: SimulationResourcePolicyV1::component_golden_v1()
+                .content_sha256()
+                .unwrap(),
+            probe_resource_policy: {
+                let mut policy = SimulationResourcePolicyV1::component_golden_v1();
+                policy.run.input_queue = ResourceLimitV1::new(1, policy.run.input_queue.max_bytes);
+                policy
+            },
+            probe_resource_policy_sha256: {
+                let mut policy = SimulationResourcePolicyV1::component_golden_v1();
+                policy.run.input_queue = ResourceLimitV1::new(1, policy.run.input_queue.max_bytes);
+                policy.content_sha256().unwrap()
+            },
+            run_id: "component-golden-independent-failure-probe".to_owned(),
+            workload_kind: "COMPONENT_GOLDEN".to_owned(),
+            deterministic_script_contract: "COMPONENT_GOLDEN_V1".to_owned(),
+            observation: measured_failure_reserve_observation(),
         }
     }
 
@@ -3024,7 +4204,9 @@ mod tests {
 
     fn measurement_environment_for_ordinal(ordinal: usize) -> MeasurementEnvironmentIdentityV1 {
         let mut environment = measurement_environment();
-        environment.cgroup_path_sha256 = sha(char::from_digit(ordinal as u32, 16).unwrap());
+        environment.cgroup_path_sha256 = raw_sha256(
+            format!("/sys/fs/cgroup/user.slice/component-golden-test-{ordinal}.service").as_bytes(),
+        );
         environment.filesystem.available_bytes_before -= ordinal as u64;
         environment
     }
@@ -3124,8 +4306,11 @@ mod tests {
             audit_file_sha256: sha(char::from_digit(ordinal as u32, 16).unwrap()),
             run_artifact_receipt: receipt.clone(),
             resource_policy_id: COMPONENT_GOLDEN_RESOURCE_POLICY_ID_V1.to_owned(),
-            resource_policy_sha256: sha('f'),
+            resource_policy_sha256: SimulationResourcePolicyV1::component_golden_v1()
+                .content_sha256()
+                .unwrap(),
             high_water: sealed_high_water(),
+            failure_reserve_observation: measured_failure_reserve_observation(),
             durable_transaction_resource_increments,
             artifact_publication_increment,
             postseal_resource_snapshot,
@@ -3178,6 +4363,117 @@ mod tests {
         }
     }
 
+    fn trajectory_throughput_breakdown() -> ThroughputBreakdownV1 {
+        ThroughputBreakdownV1 {
+            event_kind_path_deliveries: ComponentGoldenEventKindCountsV1 {
+                initial_l2_snapshot: 8,
+                level_execution_transition: 8,
+                market_resolution_terminal: 4,
+            },
+            request_batch_items: 106,
+            unique_fills: 1,
+            affected_orders: 1,
+            order_feedback: 1,
+            trade_feedback: 1,
+            settlement_feedback: 1,
+            query_calls: 6,
+            query_pages: 4,
+            query_return_rows: 213,
+            query_sources: ComponentGoldenQuerySourceBreakdownV1 {
+                hot_state: ComponentGoldenQueryMethodsV1 {
+                    order: ComponentGoldenQueryMethodBreakdownV1 {
+                        calls: 2,
+                        pages: 0,
+                        return_rows: 2,
+                    },
+                    orders: ComponentGoldenQueryMethodBreakdownV1 {
+                        calls: 2,
+                        pages: 2,
+                        return_rows: 102,
+                    },
+                    trades: ComponentGoldenQueryMethodBreakdownV1 {
+                        calls: 2,
+                        pages: 2,
+                        return_rows: 109,
+                    },
+                },
+                retained_projection: ComponentGoldenQueryMethodsV1::default(),
+            },
+        }
+    }
+
+    fn trial_throughput_breakdown() -> ThroughputBreakdownV1 {
+        trajectory_throughput_breakdown()
+            .checked_add(trajectory_throughput_breakdown())
+            .unwrap()
+    }
+
+    fn lifecycle_tail_evidence(
+        build_group: MeasurementBuildGroupV1,
+        identity: MeasurementRunIdentityV1,
+        selector_label: &str,
+        measurement: &ComponentGoldenRunMeasurementV1,
+        ordinal: usize,
+    ) -> TrialLifecycleTailEvidenceV1 {
+        let systemd_control_group = format!("/user.slice/component-golden-test-{ordinal}.service");
+        let mut final_process = measurement
+            .resource_snapshots
+            .last()
+            .unwrap()
+            .procfs
+            .clone();
+        final_process.user_cpu_ticks += 1;
+        final_process.system_cpu_ticks += 1;
+        final_process.io.rchar_bytes += 1;
+        final_process.io.wchar_bytes += 1;
+        final_process.io.read_syscalls += 1;
+        final_process.io.write_syscalls += 1;
+        let mut final_cgroup_v2 = measurement
+            .resource_snapshots
+            .last()
+            .unwrap()
+            .cgroup_v2
+            .clone();
+        final_cgroup_v2.cpu_usage_usec += 1;
+        let memory_peak_bytes = final_cgroup_v2.memory_peak_bytes.unwrap();
+        let memory_swap_peak_bytes = final_cgroup_v2.memory_swap_peak_bytes.unwrap();
+        TrialLifecycleTailEvidenceV1 {
+            schema_version: TRIAL_LIFECYCLE_TAIL_EVIDENCE_SCHEMA_V1.to_owned(),
+            build_group,
+            suite_measurement_root_sha256: measurement
+                .environment
+                .filesystem
+                .measurement_root_sha256
+                .clone(),
+            fixed_context_file_sha256: match build_group {
+                MeasurementBuildGroupV1::B1 => sha('d'),
+                MeasurementBuildGroupV1::B2 => sha('e'),
+            },
+            measurement_run_identity: identity,
+            selector_label: selector_label.to_owned(),
+            run_id: measurement.run_id.clone(),
+            build: measurement.environment.build.clone(),
+            release_binary_sha256: measurement.environment.build.release_binary_sha256.clone(),
+            systemd_unit: format!("component-golden-test-{ordinal}.service"),
+            systemd_invocation_id: format!("{ordinal:032x}"),
+            systemd_control_group: systemd_control_group.clone(),
+            cgroup_path_sha256: raw_sha256(
+                format!("/sys/fs/cgroup{systemd_control_group}").as_bytes(),
+            ),
+            main_pid: final_process.pid,
+            main_trial_json_sha256: sha(char::from_digit((ordinal + 1) as u32, 16).unwrap()),
+            main_trial_json_bytes: 1_000 + ordinal as u64,
+            final_process,
+            final_cgroup_v2,
+            systemd: SystemdServiceLifecycleResultV1 {
+                result: "success".to_owned(),
+                exec_main_status: 0,
+                memory_peak_bytes,
+                memory_swap_peak_bytes,
+            },
+        }
+    }
+
     fn complete_report() -> ComponentGoldenMeasurementReportV1 {
         let workload_contract = ComponentGoldenLoadContractV1::component_golden_v1();
         let workload_contract_sha256 = workload_contract.content_sha256().unwrap();
@@ -3188,85 +4484,109 @@ mod tests {
             .enumerate()
             .map(|(trial_ordinal, trial_id)| {
                 let trial_environment = measurement_environment_for_ordinal(trial_ordinal);
-                let trajectories =
-                    COMPONENT_GOLDEN_TRAJECTORIES_V1
-                        .into_iter()
-                        .map(|trajectory| {
-                            let logical_summary_input =
-                                logical_summary(trajectory, &workload_contract_sha256);
-                            let logical_summary_sha256 =
-                                logical_summary_input.content_sha256().unwrap();
-                            (
-                                trajectory,
-                                TrajectoryTrialResultV1 {
-                                    runtime_binding: runtime_binding(
-                                        &component_trial_run_id(trial_id),
-                                        trajectory,
-                                    ),
-                                    logical_summary_input,
-                                    logical_summary_sha256,
-                                    throughput: TrajectoryThroughputV1 {
-                                        completed_path_deliveries: 20,
-                                        completed_top_level_calls: 19,
-                                        breakdown: ThroughputBreakdownV1 {
-                                            request_batch_items: 106,
-                                            unique_fills: 1,
-                                            affected_orders: 1,
-                                            order_feedback: 1,
-                                            trade_feedback: 1,
-                                            settlement_feedback: 1,
-                                            query_calls: 6,
-                                            query_pages: 2,
-                                            query_return_rows: 102,
-                                        },
-                                        elapsed_ns: 1_000,
-                                        completed_work_items_per_second_milli:
-                                            throughput_per_second_milli(39, 1_000).unwrap(),
-                                    },
-                                    latency: MEASUREMENT_LATENCY_KINDS_V1
-                                        .into_iter()
-                                        .map(|kind| {
-                                            (
-                                                kind,
-                                                RawLatencySamplesNsV1::from_samples(vec![1, 2, 3])
-                                                    .unwrap(),
-                                            )
-                                        })
-                                        .collect(),
-                                    rolling_cycles: BTreeMap::from([
-                                        (
-                                            LogicalRollingCycleIdV1::FirstMarket,
-                                            LogicalRollingCycleV1 {
-                                                cycle_id: LogicalRollingCycleIdV1::FirstMarket,
-                                                hot_snapshot_index: 0,
-                                                compact_snapshot_index: 1,
-                                                expired_snapshot_index: 2,
-                                                logical_completion_ns: 1,
-                                                hot_state_high_water: ResourceQuantityV1::new(1, 1),
-                                                compact_projection_high_water:
-                                                    ResourceQuantityV1::new(1, 1),
-                                                expired_deleted: ResourceQuantityV1::new(1, 1),
-                                            },
-                                        ),
-                                        (
-                                            LogicalRollingCycleIdV1::SecondMarket,
-                                            LogicalRollingCycleV1 {
-                                                cycle_id: LogicalRollingCycleIdV1::SecondMarket,
-                                                hot_snapshot_index: 0,
-                                                compact_snapshot_index: 1,
-                                                expired_snapshot_index: 2,
-                                                logical_completion_ns: 2,
-                                                hot_state_high_water: ResourceQuantityV1::new(1, 1),
-                                                compact_projection_high_water:
-                                                    ResourceQuantityV1::new(1, 1),
-                                                expired_deleted: ResourceQuantityV1::new(1, 1),
-                                            },
-                                        ),
-                                    ]),
+                let trajectories = COMPONENT_GOLDEN_TRAJECTORIES_V1
+                    .into_iter()
+                    .map(|trajectory| {
+                        let logical_summary_input =
+                            logical_summary(trajectory, &workload_contract_sha256);
+                        let logical_summary_sha256 =
+                            logical_summary_input.content_sha256().unwrap();
+                        (
+                            trajectory,
+                            TrajectoryTrialResultV1 {
+                                runtime_binding: runtime_binding(
+                                    &component_trial_run_id(trial_id),
+                                    trajectory,
+                                ),
+                                logical_summary_input,
+                                logical_summary_sha256,
+                                throughput: TrajectoryThroughputV1 {
+                                    completed_path_deliveries: 20,
+                                    completed_top_level_calls: 19,
+                                    breakdown: trajectory_throughput_breakdown(),
+                                    elapsed_ns: 1_000,
+                                    rates_per_second_milli:
+                                        ThroughputRatesPerSecondMilliV1::from_counts(
+                                            20,
+                                            19,
+                                            trajectory_throughput_breakdown(),
+                                            1_000,
+                                        )
+                                        .unwrap(),
                                 },
-                            )
-                        })
-                        .collect::<BTreeMap<_, _>>();
+                                latency: MEASUREMENT_LATENCY_KINDS_V1
+                                    .into_iter()
+                                    .map(|kind| {
+                                        let samples = match kind {
+                                            MeasurementLatencyKindV1::RequestResponse => {
+                                                (1..=13).collect()
+                                            }
+                                            MeasurementLatencyKindV1::QueryResponse => {
+                                                (1..=6).collect()
+                                            }
+                                            MeasurementLatencyKindV1::TrialEndToEnd => vec![1_000],
+                                            _ => vec![1, 2, 3],
+                                        };
+                                        (
+                                            kind,
+                                            RawLatencySamplesNsV1::from_samples(samples).unwrap(),
+                                        )
+                                    })
+                                    .collect(),
+                                rolling_cycles: BTreeMap::from([
+                                    (
+                                        LogicalRollingCycleIdV1::FirstMarket,
+                                        LogicalRollingCycleV1 {
+                                            cycle_id: LogicalRollingCycleIdV1::FirstMarket,
+                                            hot_snapshot_index: 0,
+                                            compact_snapshot_index: 1,
+                                            expired_snapshot_index: 2,
+                                            logical_completion_ns: 1,
+                                            hot_state_high_water: ResourceQuantityV1::new(1, 1),
+                                            compact_projection_high_water: ResourceQuantityV1::new(
+                                                1, 1,
+                                            ),
+                                            expired_deleted: ResourceQuantityV1::new(1, 1),
+                                        },
+                                    ),
+                                    (
+                                        LogicalRollingCycleIdV1::SecondMarket,
+                                        LogicalRollingCycleV1 {
+                                            cycle_id: LogicalRollingCycleIdV1::SecondMarket,
+                                            hot_snapshot_index: 0,
+                                            compact_snapshot_index: 1,
+                                            expired_snapshot_index: 2,
+                                            logical_completion_ns: 2,
+                                            hot_state_high_water: ResourceQuantityV1::new(1, 1),
+                                            compact_projection_high_water: ResourceQuantityV1::new(
+                                                1, 1,
+                                            ),
+                                            expired_deleted: ResourceQuantityV1::new(1, 1),
+                                        },
+                                    ),
+                                ]),
+                            },
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                let trial_elapsed_ns = match trial_id.mode() {
+                    ComponentGoldenMeasurementModeV1::Serial => 2_000,
+                    ComponentGoldenMeasurementModeV1::Parallel => 1_000,
+                };
+                let preseal_latency = MEASUREMENT_LATENCY_KINDS_V1
+                    .into_iter()
+                    .map(|kind| {
+                        let samples = if kind == MeasurementLatencyKindV1::TrialEndToEnd {
+                            vec![trial_elapsed_ns]
+                        } else {
+                            trajectories
+                                .values()
+                                .flat_map(|result| result.latency[&kind].samples_ns.iter().copied())
+                                .collect::<Vec<_>>()
+                        };
+                        (kind, RawLatencySamplesNsV1::from_samples(samples).unwrap())
+                    })
+                    .collect::<BTreeMap<_, _>>();
                 let session_usage = SimulationSessionResourceUsageV1::default();
                 let internal = InternalResourceSnapshotV1 {
                     trajectory_sessions: COMPONENT_GOLDEN_TRAJECTORIES_V1
@@ -3289,32 +4609,17 @@ mod tests {
                     throughput: TrialThroughputV1 {
                         completed_path_deliveries: 40,
                         completed_top_level_calls: 38,
-                        breakdown: ThroughputBreakdownV1 {
-                            request_batch_items: 212,
-                            unique_fills: 2,
-                            affected_orders: 2,
-                            order_feedback: 2,
-                            trade_feedback: 2,
-                            settlement_feedback: 2,
-                            query_calls: 12,
-                            query_pages: 4,
-                            query_return_rows: 204,
-                        },
-                        elapsed_ns: 1_000,
-                        completed_work_items_per_second_milli: throughput_per_second_milli(
-                            78, 1_000,
+                        breakdown: trial_throughput_breakdown(),
+                        elapsed_ns: trial_elapsed_ns,
+                        rates_per_second_milli: ThroughputRatesPerSecondMilliV1::from_counts(
+                            40,
+                            38,
+                            trial_throughput_breakdown(),
+                            trial_elapsed_ns,
                         )
                         .unwrap(),
                     },
-                    latency: MEASUREMENT_LATENCY_KINDS_V1
-                        .into_iter()
-                        .map(|kind| {
-                            (
-                                kind,
-                                RawLatencySamplesNsV1::from_samples(vec![1, 2, 3]).unwrap(),
-                            )
-                        })
-                        .collect(),
+                    latency: preseal_latency,
                     resource_snapshots: {
                         let first = MeasuredResourceSnapshotV1 {
                             sample_index: 0,
@@ -3435,11 +4740,39 @@ mod tests {
                 (trial_id, trial)
             })
             .collect::<BTreeMap<_, _>>();
+        let b1_lifecycle_tail_evidence = trials
+            .iter()
+            .enumerate()
+            .map(|(ordinal, (trial_id, trial))| {
+                let measurement = trial.preseal_measurement.as_ref().unwrap();
+                (
+                    *trial_id,
+                    lifecycle_tail_evidence(
+                        MeasurementBuildGroupV1::B1,
+                        MeasurementRunIdentityV1::ComponentTrial(*trial_id),
+                        component_trial_selector_label(*trial_id),
+                        measurement,
+                        ordinal,
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         let budget_observations = derive_resource_budget_observations_v1(&trials).unwrap();
+        let independent_failure_reserve_probe =
+            Some(independent_failure_reserve_probe(&environment));
+        let failure_observation = derive_failure_reserve_observation_v1(
+            &trials,
+            &independent_failure_reserve_probe
+                .as_ref()
+                .unwrap()
+                .observation,
+        )
+        .unwrap();
         let frozen_budgets = freeze_resource_budgets_v1(
             &budget_observations,
             SIXTY_FOUR_MIB,
-            measured_failure_reserve(),
+            &failure_observation.maintenance_steady_high_water,
+            failure_observation.one_failure_reserve,
         )
         .unwrap();
         let frozen_budgets_sha256 = frozen_budgets.content_sha256().unwrap();
@@ -3477,6 +4810,20 @@ mod tests {
                     file_descriptor_soft_limit: runtime_hard_guards.file_descriptor_soft_limit,
                     file_descriptor_hard_limit: runtime_hard_guards.file_descriptor_hard_limit,
                 };
+                let verification_preseal_latency = MEASUREMENT_LATENCY_KINDS_V1
+                    .into_iter()
+                    .map(|kind| {
+                        let samples = if kind == MeasurementLatencyKindV1::TrialEndToEnd {
+                            vec![source.throughput.elapsed_ns]
+                        } else {
+                            verification_trajectories
+                                .values()
+                                .flat_map(|result| result.latency[&kind].samples_ns.iter().copied())
+                                .collect::<Vec<_>>()
+                        };
+                        (kind, RawLatencySamplesNsV1::from_samples(samples).unwrap())
+                    })
+                    .collect::<BTreeMap<_, _>>();
                 let mut verification = FrozenBudgetVerificationTrialV1 {
                     verification_id,
                     mode: verification_id.mode(),
@@ -3489,7 +4836,7 @@ mod tests {
                     sealed_resource_evidence: None,
                     outcome: MeasurementTrialOutcomeV1::Succeeded,
                     throughput: source.throughput.clone(),
-                    latency: source.latency.clone(),
+                    latency: verification_preseal_latency,
                     resource_snapshots: verification_snapshots,
                     trajectories: verification_trajectories,
                 };
@@ -3537,7 +4884,24 @@ mod tests {
                     nearest_rank_latency_ns_v1(&checkpoint_or_seal.samples_ns).unwrap();
                 (verification_id, verification)
             })
-            .collect();
+            .collect::<BTreeMap<_, _>>();
+        let b2_lifecycle_tail_evidence = frozen_budget_verification_trials
+            .iter()
+            .enumerate()
+            .map(|(verification_ordinal, (verification_id, verification))| {
+                let measurement = verification.preseal_measurement.as_ref().unwrap();
+                (
+                    *verification_id,
+                    lifecycle_tail_evidence(
+                        MeasurementBuildGroupV1::B2,
+                        MeasurementRunIdentityV1::FrozenBudgetVerification(*verification_id),
+                        verification_trial_selector_label(*verification_id),
+                        measurement,
+                        6 + verification_ordinal,
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         ComponentGoldenMeasurementReportV1 {
             schema_version: COMPONENT_GOLDEN_MEASUREMENT_REPORT_SCHEMA_V1.to_owned(),
             workload_contract,
@@ -3545,11 +4909,14 @@ mod tests {
             environment,
             runtime_hard_guards,
             trials,
+            independent_failure_reserve_probe,
             budget_observations,
             process_resident_peak_bytes: SIXTY_FOUR_MIB,
             process_swap_peak_bytes: 0,
             process_memory_peak_bytes: SIXTY_FOUR_MIB,
             frozen_budgets,
+            b1_lifecycle_tail_evidence,
+            b2_lifecycle_tail_evidence,
             frozen_budget_verification_trials,
         }
     }
@@ -3560,6 +4927,14 @@ mod tests {
         contract.validate().unwrap();
         assert_eq!(contract.trajectory_count, 2);
         assert_eq!(contract.events.unique_event_ids, 10);
+        assert_eq!(
+            contract.events.unique_event_kinds,
+            ComponentGoldenEventKindCountsV1 {
+                initial_l2_snapshot: 4,
+                level_execution_transition: 4,
+                market_resolution_terminal: 2,
+            }
+        );
         assert_eq!(contract.events.total_path_deliveries, 40);
         assert_eq!(contract.calls_per_trajectory.top_level_calls, 19);
         assert_eq!(
@@ -3576,6 +4951,13 @@ mod tests {
             contract.content_sha256().unwrap(),
             contract.content_sha256().unwrap()
         );
+    }
+
+    #[test]
+    fn component_golden_contract_rejects_changed_event_kind_counts() {
+        let mut contract = ComponentGoldenLoadContractV1::component_golden_v1();
+        contract.events.unique_event_kinds.initial_l2_snapshot += 1;
+        assert!(contract.validate().is_err());
     }
 
     #[test]
@@ -3619,8 +5001,13 @@ mod tests {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let frozen =
-            freeze_resource_budgets_v1(&observations, 1, measured_failure_reserve()).unwrap();
+        let frozen = freeze_resource_budgets_v1(
+            &observations,
+            1,
+            &measured_maintenance_steady_high_water(),
+            measured_failure_reserve(),
+        )
+        .unwrap();
         let representative = frozen
             .limits
             .get(&ResourceBudgetPathV1::SessionInMemoryState)
@@ -3632,6 +5019,127 @@ mod tests {
 
         let transaction_dominates = padded_peak(100, 50).unwrap();
         assert_eq!(transaction_dominates, 150);
+    }
+
+    #[test]
+    fn failure_reserve_fit_uses_maintenance_steady_without_changing_hard_limits() {
+        let observations = RESOURCE_BUDGET_PATHS_V1
+            .into_iter()
+            .map(|path| {
+                (
+                    path,
+                    ResourceBudgetObservationV1 {
+                        peak: ResourceQuantityV1::new(8, 2 * FOUR_KIB),
+                        max_single_transaction_increment: ResourceQuantityV1::new(1, 1),
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut steady = SimulationResourceHighWaterV1::default();
+        steady.observed.run.in_memory_state = ResourceQuantityV1::new(8, FOUR_KIB);
+        steady.observed.run.sessions = ResourceQuantityV1::new(8, FOUR_KIB);
+        steady.observed.durable.evidence = ResourceQuantityV1::new(7, FOUR_KIB);
+        steady.observed.durable.checkpoints = ResourceQuantityV1::new(7, FOUR_KIB);
+        steady.observed.durable.runtime_root = ResourceQuantityV1::new(7, FOUR_KIB);
+        let mut reserve = measured_failure_reserve();
+        reserve.run_checkpoint_growth.bytes = FOUR_KIB + 1;
+        reserve.evidence.bytes = FOUR_KIB + 1;
+        reserve.checkpoints.bytes = FOUR_KIB + 1;
+        reserve.runtime_root.bytes = FOUR_KIB + 1;
+        assert_eq!(
+            failure_reserve_for_path(reserve, ResourceBudgetPathV1::RunInMemoryState),
+            reserve.run_checkpoint_growth
+        );
+        assert_eq!(
+            failure_reserve_for_path(reserve, ResourceBudgetPathV1::RunSessions),
+            ResourceQuantityV1::new(0, reserve.run_checkpoint_growth.bytes)
+        );
+
+        let frozen = freeze_resource_budgets_v1(&observations, 1, &steady, reserve).unwrap();
+        let steady_by_path = usage_by_budget_path(&steady.observed);
+        for path in FAILURE_RESERVE_BUDGET_PATHS_V1 {
+            let limit = frozen.limits[&path];
+            let path_reserve = failure_reserve_for_path(reserve, path);
+            assert_eq!(limit, ResourceLimitV1::new(10, 3 * FOUR_KIB));
+            assert!(
+                observations[&path].peak.bytes + path_reserve.bytes > limit.max_bytes,
+                "用 Pmax 代替维护稳态会错误拒绝 {path:?}"
+            );
+            assert!(steady_by_path[&path].bytes + path_reserve.bytes <= limit.max_bytes);
+        }
+
+        let same_formula = freeze_resource_budgets_v1(
+            &observations,
+            1,
+            &SimulationResourceHighWaterV1::default(),
+            measured_failure_reserve(),
+        )
+        .unwrap();
+        assert_eq!(frozen.limits, same_formula.limits);
+        assert_eq!(
+            frozen.process_memory_max_bytes,
+            same_formula.process_memory_max_bytes
+        );
+    }
+
+    #[test]
+    fn failure_reserve_fit_uses_full_checkpoint_growth_not_amax() {
+        let observations = RESOURCE_BUDGET_PATHS_V1
+            .into_iter()
+            .map(|path| {
+                (
+                    path,
+                    ResourceBudgetObservationV1 {
+                        peak: ResourceQuantityV1::new(8, 2 * FOUR_KIB),
+                        max_single_transaction_increment: ResourceQuantityV1::new(1, 1),
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut steady = SimulationResourceHighWaterV1::default();
+        steady.observed.run.in_memory_state = ResourceQuantityV1::new(8, 2 * FOUR_KIB);
+        steady.observed.run.sessions = ResourceQuantityV1::new(8, 2 * FOUR_KIB);
+        let mut reserve = measured_failure_reserve();
+        reserve.run_checkpoint_growth.bytes = FOUR_KIB + 1;
+        let hard = derive_frozen_resource_limits_v1(&observations).unwrap()
+            [&ResourceBudgetPathV1::RunInMemoryState];
+        assert!(
+            steady.observed.run.in_memory_state.bytes
+                + observations[&ResourceBudgetPathV1::RunInMemoryState]
+                    .max_single_transaction_increment
+                    .bytes
+                <= hard.max_bytes,
+            "把 Amax 冒充完整检查点会错误接受该候选"
+        );
+        assert!(
+            steady.observed.run.in_memory_state.bytes + reserve.run_checkpoint_growth.bytes
+                > hard.max_bytes
+        );
+        assert!(freeze_resource_budgets_v1(&observations, 1, &steady, reserve).is_err());
+    }
+
+    #[test]
+    fn one_failure_reserve_requires_the_measured_record_shape() {
+        let mut invalid = Vec::new();
+        let mut run_records = measured_failure_reserve_observation();
+        run_records
+            .one_failure_reserve
+            .run_checkpoint_growth
+            .records = 0;
+        invalid.push(run_records);
+        let mut evidence_records = measured_failure_reserve_observation();
+        evidence_records.one_failure_reserve.evidence.records = 2;
+        invalid.push(evidence_records);
+        let mut checkpoint_records = measured_failure_reserve_observation();
+        checkpoint_records.one_failure_reserve.checkpoints.records = 2;
+        invalid.push(checkpoint_records);
+        let mut root_records = measured_failure_reserve_observation();
+        root_records.one_failure_reserve.runtime_root.records = 2;
+        invalid.push(root_records);
+
+        for observation in invalid {
+            assert!(observation.validate().is_err());
+        }
     }
 
     #[test]
@@ -3768,11 +5276,12 @@ mod tests {
             .collect::<BTreeMap<_, _>>();
         let mut zero = measured_failure_reserve();
         zero.evidence.records = 0;
-        assert!(freeze_resource_budgets_v1(&observations, 1, zero).is_err());
+        let steady = SimulationResourceHighWaterV1::default();
+        assert!(freeze_resource_budgets_v1(&observations, 1, &steady, zero).is_err());
 
         let mut over_limit = measured_failure_reserve();
         over_limit.runtime_root.bytes = 2 * FOUR_KIB + 1;
-        assert!(freeze_resource_budgets_v1(&observations, 1, over_limit).is_err());
+        assert!(freeze_resource_budgets_v1(&observations, 1, &steady, over_limit).is_err());
     }
 
     #[test]
@@ -3808,7 +5317,7 @@ mod tests {
             environment: report.environment.clone(),
             runtime_hard_guards: report.runtime_hard_guards,
             throughput: trial.throughput.clone(),
-            latency: trial.latency.clone(),
+            latency: trial.preseal_measurement.as_ref().unwrap().latency.clone(),
             resource_snapshots: trial.resource_snapshots.clone(),
             transaction_resource_increments: trial.transaction_resource_increments.clone(),
             trajectories: trial.trajectories.clone(),
@@ -3902,6 +5411,272 @@ mod tests {
         trial.preseal_measurement.as_mut().unwrap().trajectories = trial.trajectories.clone();
         divergent.validate_integrity().unwrap();
         assert!(divergent.validate_complete().is_err());
+    }
+
+    #[test]
+    fn trajectory_end_to_end_latency_must_use_its_own_elapsed_time() {
+        let mut report = complete_report();
+        let trial = report
+            .trials
+            .get_mut(&ComponentGoldenTrialIdV1::S1)
+            .unwrap();
+        trial.throughput.elapsed_ns = 3_000;
+        trial.throughput.rates_per_second_milli = ThroughputRatesPerSecondMilliV1::from_counts(
+            trial.throughput.completed_path_deliveries,
+            trial.throughput.completed_top_level_calls,
+            trial.throughput.breakdown,
+            trial.throughput.elapsed_ns,
+        )
+        .unwrap();
+        let result = trial
+            .trajectories
+            .get_mut(&ComponentGoldenTrajectoryV1::B)
+            .unwrap();
+        result.latency.insert(
+            MeasurementLatencyKindV1::TrialEndToEnd,
+            RawLatencySamplesNsV1::from_samples(vec![trial.throughput.elapsed_ns]).unwrap(),
+        );
+        assert!(
+            result.validate(ComponentGoldenTrajectoryV1::B).is_err(),
+            "逐轨迹校验必须独立拒绝把整试次耗时伪装成轨迹 B 的端到端耗时"
+        );
+        let preseal = trial.preseal_measurement.as_mut().unwrap();
+        preseal.throughput = trial.throughput.clone();
+        preseal.trajectories = trial.trajectories.clone();
+
+        assert!(report.validate_integrity().is_err());
+    }
+
+    #[test]
+    fn throughput_rates_must_match_each_pre_registered_counter() {
+        let mut report = complete_report();
+        let trial = report
+            .trials
+            .get_mut(&ComponentGoldenTrialIdV1::P1)
+            .unwrap();
+        trial
+            .trajectories
+            .get_mut(&ComponentGoldenTrajectoryV1::A)
+            .unwrap()
+            .throughput
+            .rates_per_second_milli
+            .unique_fills += 1;
+        trial.preseal_measurement.as_mut().unwrap().trajectories = trial.trajectories.clone();
+
+        assert!(report.validate_integrity().is_err());
+    }
+
+    #[test]
+    fn preseal_latency_and_elapsed_must_be_recomputed_from_both_trajectories() {
+        let mut report = complete_report();
+        let trial = report
+            .trials
+            .get_mut(&ComponentGoldenTrialIdV1::S1)
+            .unwrap();
+        let preseal = trial.preseal_measurement.as_mut().unwrap();
+        let event_application = preseal
+            .latency
+            .get_mut(&MeasurementLatencyKindV1::EventApplication)
+            .unwrap();
+        event_application.samples_ns.push(4);
+        event_application.nearest_rank =
+            nearest_rank_latency_ns_v1(&event_application.samples_ns).unwrap();
+        trial.latency = preseal.latency.clone();
+        let seal_latency = trial
+            .sealed_resource_evidence
+            .as_ref()
+            .unwrap()
+            .seal_latency_ns;
+        let checkpoint_or_seal = trial
+            .latency
+            .get_mut(&MeasurementLatencyKindV1::CheckpointOrSeal)
+            .unwrap();
+        checkpoint_or_seal.samples_ns.push(seal_latency);
+        checkpoint_or_seal.nearest_rank =
+            nearest_rank_latency_ns_v1(&checkpoint_or_seal.samples_ns).unwrap();
+
+        assert!(report.validate_integrity().is_err());
+
+        let mut serial_overlap = complete_report();
+        let trial = serial_overlap
+            .trials
+            .get_mut(&ComponentGoldenTrialIdV1::S1)
+            .unwrap();
+        trial.throughput.elapsed_ns = 1_500;
+        trial.throughput.rates_per_second_milli = ThroughputRatesPerSecondMilliV1::from_counts(
+            trial.throughput.completed_path_deliveries,
+            trial.throughput.completed_top_level_calls,
+            trial.throughput.breakdown,
+            trial.throughput.elapsed_ns,
+        )
+        .unwrap();
+        let trial_end_to_end = RawLatencySamplesNsV1::from_samples(vec![1_500]).unwrap();
+        trial.latency.insert(
+            MeasurementLatencyKindV1::TrialEndToEnd,
+            trial_end_to_end.clone(),
+        );
+        let preseal = trial.preseal_measurement.as_mut().unwrap();
+        preseal.throughput = trial.throughput.clone();
+        preseal
+            .latency
+            .insert(MeasurementLatencyKindV1::TrialEndToEnd, trial_end_to_end);
+
+        assert!(serial_overlap.validate_integrity().is_err());
+
+        let mut late_retention = complete_report();
+        let trial = late_retention
+            .trials
+            .get_mut(&ComponentGoldenTrialIdV1::P1)
+            .unwrap();
+        let trajectory = trial
+            .trajectories
+            .get_mut(&ComponentGoldenTrajectoryV1::A)
+            .unwrap();
+        trajectory
+            .rolling_cycles
+            .get_mut(&LogicalRollingCycleIdV1::SecondMarket)
+            .unwrap()
+            .logical_completion_ns = trajectory.throughput.elapsed_ns + 1;
+        trial.preseal_measurement.as_mut().unwrap().trajectories = trial.trajectories.clone();
+
+        assert!(late_retention.validate_integrity().is_err());
+
+        let mut missing_trajectory_latency = complete_report();
+        let trial = missing_trajectory_latency
+            .trials
+            .get_mut(&ComponentGoldenTrialIdV1::P2)
+            .unwrap();
+        trial
+            .trajectories
+            .get_mut(&ComponentGoldenTrajectoryV1::B)
+            .unwrap()
+            .latency
+            .remove(&MeasurementLatencyKindV1::RequestResponse);
+        trial.preseal_measurement.as_mut().unwrap().trajectories = trial.trajectories.clone();
+
+        assert!(missing_trajectory_latency.validate_integrity().is_err());
+    }
+
+    #[test]
+    fn complete_report_recomputes_every_b1_and_independent_failure_observation() {
+        for trial_id in COMPONENT_GOLDEN_TRIAL_ORDER_V1 {
+            let mut report = complete_report();
+            report
+                .trials
+                .get_mut(&trial_id)
+                .unwrap()
+                .sealed_resource_evidence
+                .as_mut()
+                .unwrap()
+                .failure_reserve_observation
+                .one_failure_reserve
+                .evidence
+                .bytes += 1;
+            report.validate_integrity().unwrap();
+            assert!(
+                report.validate_complete().is_err(),
+                "完整门必须重算 {trial_id:?} 的封口失败预留观测"
+            );
+        }
+
+        let mut changed_probe = complete_report();
+        changed_probe
+            .independent_failure_reserve_probe
+            .as_mut()
+            .unwrap()
+            .observation
+            .one_failure_reserve
+            .checkpoints
+            .bytes += 1;
+        changed_probe.validate_integrity().unwrap();
+        assert!(changed_probe.validate_complete().is_err());
+
+        let mut foreign_suite_probe = complete_report();
+        foreign_suite_probe
+            .independent_failure_reserve_probe
+            .as_mut()
+            .unwrap()
+            .suite_measurement_root_sha256 = sha('0');
+        assert!(
+            foreign_suite_probe.validate_integrity().is_err(),
+            "整个失败探针信封从另一套次替换进来必须被拒绝"
+        );
+
+        let mut unregistered_probe_policy = complete_report();
+        let probe = unregistered_probe_policy
+            .independent_failure_reserve_probe
+            .as_mut()
+            .unwrap();
+        probe.probe_resource_policy.run.input_queue.max_records = 2;
+        probe.probe_resource_policy_sha256 = probe.probe_resource_policy.content_sha256().unwrap();
+        assert!(
+            unregistered_probe_policy.validate_integrity().is_err(),
+            "即使重算策略 SHA，非固定探针变体也必须被拒绝"
+        );
+
+        let mut steady_above_pmax = complete_report();
+        steady_above_pmax
+            .independent_failure_reserve_probe
+            .as_mut()
+            .unwrap()
+            .observation
+            .maintenance_steady_high_water
+            .observed
+            .durable
+            .evidence
+            .bytes = sealed_high_water().observed.durable.evidence.bytes + 1;
+        steady_above_pmax.validate_integrity().unwrap();
+        assert!(steady_above_pmax.validate_complete().is_err());
+
+        let mut missing_probe = complete_report();
+        missing_probe.independent_failure_reserve_probe = None;
+        missing_probe.validate_integrity().unwrap();
+        assert!(missing_probe.validate_complete().is_err());
+    }
+
+    #[test]
+    fn frozen_verification_rechecks_actual_failure_delta_and_steady_slack() {
+        let mut oversized_delta = complete_report();
+        oversized_delta
+            .frozen_budget_verification_trials
+            .get_mut(&FrozenBudgetVerificationTrialIdV1::Serial)
+            .unwrap()
+            .sealed_resource_evidence
+            .as_mut()
+            .unwrap()
+            .failure_reserve_observation
+            .one_failure_reserve
+            .evidence
+            .bytes += 1;
+        oversized_delta.validate_integrity().unwrap();
+        assert!(oversized_delta.validate_complete().is_err());
+
+        let mut missing_slack = complete_report();
+        let sealed = missing_slack
+            .frozen_budget_verification_trials
+            .get_mut(&FrozenBudgetVerificationTrialIdV1::Parallel)
+            .unwrap()
+            .sealed_resource_evidence
+            .as_mut()
+            .unwrap();
+        sealed
+            .failure_reserve_observation
+            .maintenance_steady_high_water
+            .observed
+            .durable
+            .evidence
+            .bytes = FOUR_KIB;
+        sealed.high_water.observed.durable.evidence.bytes = FOUR_KIB;
+        sealed
+            .postseal_resource_snapshot
+            .internal
+            .high_water
+            .observed
+            .durable
+            .evidence
+            .bytes = FOUR_KIB;
+        missing_slack.validate_integrity().unwrap();
+        assert!(missing_slack.validate_complete().is_err());
     }
 
     #[test]
@@ -4055,6 +5830,36 @@ mod tests {
         trial.throughput.breakdown.unique_fills += 1;
         trial.preseal_measurement.as_mut().unwrap().throughput = trial.throughput.clone();
         assert!(report.validate_integrity().is_err());
+    }
+
+    #[test]
+    fn trajectory_throughput_rejects_changed_event_kind_or_query_source() {
+        let report = complete_report();
+        let throughput = &report.trials[&ComponentGoldenTrialIdV1::S1].trajectories
+            [&ComponentGoldenTrajectoryV1::A]
+            .throughput;
+
+        let mut changed_event_kind = throughput.clone();
+        changed_event_kind
+            .breakdown
+            .event_kind_path_deliveries
+            .initial_l2_snapshot += 1;
+        assert!(changed_event_kind.validate().is_err());
+
+        let mut changed_query_source = throughput.clone();
+        changed_query_source
+            .breakdown
+            .query_sources
+            .hot_state
+            .trades
+            .return_rows -= 1;
+        changed_query_source
+            .breakdown
+            .query_sources
+            .retained_projection
+            .trades
+            .return_rows += 1;
+        assert!(changed_query_source.validate().is_err());
     }
 
     #[test]
@@ -4268,7 +6073,7 @@ mod tests {
             completed_top_level_calls: 0,
             breakdown: ThroughputBreakdownV1::default(),
             elapsed_ns: 0,
-            completed_work_items_per_second_milli: 0,
+            rates_per_second_milli: ThroughputRatesPerSecondMilliV1::default(),
         };
         setup_failure.latency.clear();
         setup_failure.resource_snapshots.clear();
@@ -4347,8 +6152,7 @@ mod tests {
             .unwrap()
             .environment
             .cgroup_path_sha256 = s1_environment.cgroup_path_sha256;
-        reused_cgroup.validate_integrity().unwrap();
-        assert!(reused_cgroup.validate_complete().is_err());
+        assert!(reused_cgroup.validate_integrity().is_err());
 
         let s1_process = report.trials[&ComponentGoldenTrialIdV1::S1].resource_snapshots[0]
             .procfs
@@ -4370,14 +6174,13 @@ mod tests {
             .postseal_resource_snapshot;
         postseal.procfs.pid = s1_process.pid;
         postseal.procfs.process_start_time_ticks = s1_process.process_start_time_ticks;
-        reused_process.validate_integrity().unwrap();
-        assert!(reused_process.validate_complete().is_err());
+        assert!(reused_process.validate_integrity().is_err());
     }
 
     #[test]
     fn verification_uses_final_build_and_exact_frozen_memory_guards() {
         let mut report = complete_report();
-        for verification in report.frozen_budget_verification_trials.values_mut() {
+        for (verification_id, verification) in &mut report.frozen_budget_verification_trials {
             let environment = &mut verification
                 .preseal_measurement
                 .as_mut()
@@ -4386,6 +6189,12 @@ mod tests {
             environment.build.release_binary_sha256 = sha('9');
             environment.build.source_tree_sha256 = sha('8');
             environment.build.source_commit = "b".repeat(40);
+            let lifecycle = report
+                .b2_lifecycle_tail_evidence
+                .get_mut(verification_id)
+                .unwrap();
+            lifecycle.build = environment.build.clone();
+            lifecycle.release_binary_sha256 = environment.build.release_binary_sha256.clone();
         }
         report.validate_complete().unwrap();
 
@@ -4552,7 +6361,7 @@ mod tests {
                 (
                     path,
                     ResourceBudgetObservationV1 {
-                        peak: ResourceQuantityV1::new(1, 1),
+                        peak: ResourceQuantityV1::new(4, 1),
                         max_single_transaction_increment: ResourceQuantityV1::new(1, 1),
                     },
                 )
@@ -4561,6 +6370,7 @@ mod tests {
         let frozen = freeze_resource_budgets_v1(
             &observations,
             129 * 1024 * 1024,
+            &SimulationResourceHighWaterV1::default(),
             measured_failure_reserve(),
         )
         .unwrap();
@@ -4577,6 +6387,173 @@ mod tests {
         let mut too_low = frozen;
         too_low.process_memory_max_bytes = 128 * 1024 * 1024;
         assert!(validate_process_snapshot_within_frozen_budgets(&snapshot, &too_low).is_err());
+    }
+
+    #[test]
+    fn lifecycle_tail_peak_closes_main_json_serialization_gap_before_freeze() {
+        let report = complete_report();
+        let failure_observation = derive_failure_reserve_observation_v1(
+            &report.trials,
+            &report
+                .independent_failure_reserve_probe
+                .as_ref()
+                .unwrap()
+                .observation,
+        )
+        .unwrap();
+        let old_sample_only = freeze_resource_budgets_v1(
+            &report.budget_observations,
+            258_867_200,
+            &failure_observation.maintenance_steady_high_water,
+            failure_observation.one_failure_reserve,
+        )
+        .unwrap();
+        assert_eq!(old_sample_only.process_memory_max_bytes, 268_435_456);
+
+        let mut tail = report.b1_lifecycle_tail_evidence[&ComponentGoldenTrialIdV1::S1].clone();
+        tail.final_process.vm_hwm_bytes = 258_867_200;
+        tail.final_cgroup_v2.memory_peak_bytes = Some(331_120_640);
+        tail.final_cgroup_v2.memory_limit = CgroupMemoryLimitV1::Bytes {
+            bytes: 512 * 1024 * 1024,
+        };
+        tail.systemd.memory_peak_bytes = 331_120_640;
+        let (_, _, lifecycle_peak) = lifecycle_process_peaks_v1(&[tail]).unwrap();
+        assert_eq!(lifecycle_peak, 331_120_640);
+        let frozen = freeze_resource_budgets_v1(
+            &report.budget_observations,
+            lifecycle_peak,
+            &failure_observation.maintenance_steady_high_water,
+            failure_observation.one_failure_reserve,
+        )
+        .unwrap();
+        assert_eq!(frozen.process_memory_max_bytes, 335_544_320);
+    }
+
+    #[test]
+    fn lifecycle_tail_binding_rejects_missing_or_mismatched_external_evidence() {
+        let mut report = complete_report();
+        let trial_id = ComponentGoldenTrialIdV1::S1;
+        let measurement = report.trials[&trial_id]
+            .preseal_measurement
+            .as_ref()
+            .unwrap()
+            .clone();
+        let evidence = report.b1_lifecycle_tail_evidence[&trial_id].clone();
+        validate_lifecycle_tail_binding_v1(
+            &evidence,
+            &TrialLifecycleTailBindingV1 {
+                build_group: MeasurementBuildGroupV1::B1,
+                measurement_run_identity: MeasurementRunIdentityV1::ComponentTrial(trial_id),
+                selector_label: "S1",
+                run_id: &measurement.run_id,
+                environment: &measurement.environment,
+                runtime_hard_guards: measurement.runtime_hard_guards,
+                last_resource_snapshot: &report.trials[&trial_id]
+                    .sealed_resource_evidence
+                    .as_ref()
+                    .unwrap()
+                    .postseal_resource_snapshot,
+                fixed_context_file_sha256: &evidence.fixed_context_file_sha256,
+                main_trial_json_sha256: &evidence.main_trial_json_sha256,
+                main_trial_json_bytes: evidence.main_trial_json_bytes,
+            },
+        )
+        .unwrap();
+
+        let mut stale_tail = evidence.clone();
+        stale_tail.final_process.user_cpu_ticks = measurement
+            .resource_snapshots
+            .last()
+            .unwrap()
+            .procfs
+            .user_cpu_ticks;
+        stale_tail.validate().unwrap();
+        assert!(
+            validate_lifecycle_tail_binding_v1(
+                &stale_tail,
+                &TrialLifecycleTailBindingV1 {
+                    build_group: MeasurementBuildGroupV1::B1,
+                    measurement_run_identity: MeasurementRunIdentityV1::ComponentTrial(trial_id),
+                    selector_label: "S1",
+                    run_id: &measurement.run_id,
+                    environment: &measurement.environment,
+                    runtime_hard_guards: measurement.runtime_hard_guards,
+                    last_resource_snapshot: &report.trials[&trial_id]
+                        .sealed_resource_evidence
+                        .as_ref()
+                        .unwrap()
+                        .postseal_resource_snapshot,
+                    fixed_context_file_sha256: &stale_tail.fixed_context_file_sha256,
+                    main_trial_json_sha256: &stale_tail.main_trial_json_sha256,
+                    main_trial_json_bytes: stale_tail.main_trial_json_bytes,
+                },
+            )
+            .is_err()
+        );
+
+        assert!(
+            validate_lifecycle_tail_binding_v1(
+                &evidence,
+                &TrialLifecycleTailBindingV1 {
+                    build_group: MeasurementBuildGroupV1::B1,
+                    measurement_run_identity: MeasurementRunIdentityV1::ComponentTrial(trial_id),
+                    selector_label: "S1",
+                    run_id: &measurement.run_id,
+                    environment: &measurement.environment,
+                    runtime_hard_guards: measurement.runtime_hard_guards,
+                    last_resource_snapshot: &report.trials[&trial_id]
+                        .sealed_resource_evidence
+                        .as_ref()
+                        .unwrap()
+                        .postseal_resource_snapshot,
+                    fixed_context_file_sha256: &evidence.fixed_context_file_sha256,
+                    main_trial_json_sha256: &sha('f'),
+                    main_trial_json_bytes: evidence.main_trial_json_bytes,
+                },
+            )
+            .is_err()
+        );
+
+        let mut wrong_cgroup = evidence.clone();
+        wrong_cgroup.systemd_control_group.push_str("-wrong");
+        assert!(wrong_cgroup.validate().is_err());
+
+        let mut wrong_build = evidence.clone();
+        wrong_build.build.source_tree_sha256 = sha('f');
+        assert!(
+            validate_lifecycle_tail_binding_v1(
+                &wrong_build,
+                &TrialLifecycleTailBindingV1 {
+                    build_group: MeasurementBuildGroupV1::B1,
+                    measurement_run_identity: MeasurementRunIdentityV1::ComponentTrial(trial_id),
+                    selector_label: "S1",
+                    run_id: &measurement.run_id,
+                    environment: &measurement.environment,
+                    runtime_hard_guards: measurement.runtime_hard_guards,
+                    last_resource_snapshot: &report.trials[&trial_id]
+                        .sealed_resource_evidence
+                        .as_ref()
+                        .unwrap()
+                        .postseal_resource_snapshot,
+                    fixed_context_file_sha256: &wrong_build.fixed_context_file_sha256,
+                    main_trial_json_sha256: &wrong_build.main_trial_json_sha256,
+                    main_trial_json_bytes: wrong_build.main_trial_json_bytes,
+                },
+            )
+            .is_err()
+        );
+
+        let mut nonzero_event = evidence.clone();
+        nonzero_event.final_cgroup_v2.memory_events.max = 1;
+        assert!(nonzero_event.validate().is_err());
+
+        let mut failed_systemd = evidence;
+        failed_systemd.systemd.result = "exit-code".to_owned();
+        failed_systemd.systemd.exec_main_status = 1;
+        assert!(failed_systemd.validate().is_err());
+
+        report.b1_lifecycle_tail_evidence.remove(&trial_id);
+        assert!(report.validate_integrity().is_err());
     }
 
     #[test]

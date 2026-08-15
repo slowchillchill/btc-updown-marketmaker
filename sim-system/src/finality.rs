@@ -9,6 +9,7 @@ pub const TRADE_FINALITY_POLICY_SCHEMA_V1: &str = "trade_finality_policy_v1";
 
 const TRADE_FINALITY_POLICY_HASH_DOMAIN_V1: &[u8] =
     b"SIM_TRADE_FINALITY_POLICY_CONTENT_SHA256_V1\0";
+const TRADE_FINALITY_POLICY_ID_MAX_BYTES_V1: usize = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -166,7 +167,7 @@ impl TradeFinalityPolicyV1 {
                 actual: wire.schema_version,
             });
         }
-        validate_stable_text(&wire.policy_id)
+        validate_bounded_policy_id(&wire.policy_id)
             .map_err(|_| TradeFinalityPolicyErrorV1::InvalidPolicyId)?;
         validate_sha256(&wire.content_sha256)?;
 
@@ -694,6 +695,15 @@ fn validate_stable_text(value: &str) -> Result<(), ()> {
     }
 }
 
+fn validate_bounded_policy_id(value: &str) -> Result<(), ()> {
+    validate_stable_text(value)?;
+    if value.len() <= TRADE_FINALITY_POLICY_ID_MAX_BYTES_V1 {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
 fn validate_sha256(value: &Sha256Hex) -> Result<(), TradeFinalityPolicyErrorV1> {
     if value.0.len() == 64
         && value
@@ -1080,6 +1090,42 @@ mod tests {
             TradeFinalityPolicyV1::decode_and_seal(&missing_field),
             Err(TradeFinalityPolicyErrorV1::Json(_))
         ));
+    }
+
+    #[test]
+    fn policy_id_is_bounded_by_utf8_bytes_before_sealing() {
+        let encoded = encode_policy(normal_success(), Vec::new());
+        let mut wire: TradeFinalityPolicyWireV1 =
+            serde_json::from_slice(&encoded).expect("policy wire");
+
+        wire.policy_id = "a".repeat(256);
+        let content = TradeFinalityPolicyHashContentV1 {
+            schema_version: &wire.schema_version,
+            policy_id: &wire.policy_id,
+            normal_path: &wire.normal_path,
+            failure_overrides: &wire.failure_overrides,
+        };
+        wire.content_sha256 =
+            hash_canonical_content(&serde_json::to_vec(&content).expect("256-byte policy content"));
+        let at_limit = serde_json::to_vec(&wire).expect("256-byte policy wire");
+        TradeFinalityPolicyV1::decode_and_seal(&at_limit)
+            .expect("恰好达到 256 个 UTF-8 字节的 policy_id 应被接受");
+
+        wire.policy_id.push('a');
+        assert_eq!(wire.policy_id.len(), 257);
+        let content = TradeFinalityPolicyHashContentV1 {
+            schema_version: &wire.schema_version,
+            policy_id: &wire.policy_id,
+            normal_path: &wire.normal_path,
+            failure_overrides: &wire.failure_overrides,
+        };
+        wire.content_sha256 =
+            hash_canonical_content(&serde_json::to_vec(&content).expect("257-byte policy content"));
+        let over_limit = serde_json::to_vec(&wire).expect("257-byte policy wire");
+        assert_eq!(
+            TradeFinalityPolicyV1::decode_and_seal(&over_limit),
+            Err(TradeFinalityPolicyErrorV1::InvalidPolicyId)
+        );
     }
 
     #[test]
