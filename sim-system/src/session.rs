@@ -8680,6 +8680,7 @@ mod tests {
         let mut session = private_fact_slice_test_session("scheduled-drive-caller-cancel").await;
         let request_id = "scheduled-drive-caller-cancel";
         let action_identity = "scheduled-drive-caller-cancel/item-0";
+        let platform_order_id = "scheduled-drive-caller-cancel-order";
         let context = request(&session.state, request_id, 1, 1_000);
         let schedule = session
             .register_and_schedule_request(
@@ -8693,39 +8694,74 @@ mod tests {
             )
             .expect("正式登记单项 caller-cancel 动作");
         let action_at = schedule.actions[0].key.effective_processing_at_utc_ms;
+        let condition_id = session.scenario().market_set().markets()[0]
+            .market()
+            .condition_id
+            .0
+            .clone();
+        let token_id = session.scenario().market_set().markets()[0].assets()[0]
+            .token_id
+            .0
+            .clone();
+        session
+            .execution_state_mut()
+            .commit_new_order(
+                crate::matching::SimOrderRecordV1 {
+                    platform_order_id: platform_order_id.to_owned(),
+                    global_request_id: "scheduled-drive-caller-cancel-source".to_owned(),
+                    item_id: "scheduled-drive-caller-cancel-source-item".to_owned(),
+                    item_idempotency_identity: "scheduled-drive-caller-cancel-source-idempotency"
+                        .to_owned(),
+                    condition_id,
+                    token_id,
+                    created_at_utc_ms: action_at - 1,
+                    last_updated_at_utc_ms: action_at - 1,
+                    kind: crate::matching::SimOrderKindStateV1::Gtd {
+                        expires_at_utc_ms: action_at + 10_000,
+                    },
+                    source_price_pusd_per_share: rust_decimal::Decimal::new(4, 1),
+                    accepted_base_units: Some(1_000_000),
+                    matched_base_units: 0,
+                    pending_maker_depletion_base_units: 0,
+                    pending_maker_depletion_evidence: None,
+                    open_base_units: 1_000_000,
+                    expired_base_units: 0,
+                    expired_released_quote_units: 0,
+                    expired_at_utc_ms: None,
+                    gtd_expiration_identity: None,
+                    venue_dust_closed_base_units: 0,
+                    venue_dust_released_quote_units: 0,
+                    venue_dust_at_utc_ms: None,
+                    venue_dust_identity: None,
+                    market_resolved_canceled_base_units: 0,
+                    market_resolved_released_quote_units: 0,
+                    market_resolved_at_utc_ms: None,
+                    market_resolution_effect_identity: None,
+                    canceled_base_units: 0,
+                    canceled_released_quote_units: 0,
+                    canceled_at_utc_ms: None,
+                    caller_cancel_effect_identity: None,
+                    terminalized_pending_maker_depletion_evidence: None,
+                    accepted_quote_units: 400_000,
+                    matched_quote_units: 0,
+                    open_quote_units: 400_000,
+                    released_quote_units: 0,
+                    sdk_taker_amount_audit_base_units: None,
+                    immediate_taker_fee_encumbered_units: 0,
+                    terminal_reason: None,
+                },
+                Vec::new(),
+            )
+            .expect("建立可区分真实转发的活动 GTD 订单");
         session
             .close_platform_prefix_through(action_at, 1)
             .expect("闭合 caller-cancel 动作的平台前缀");
         let before = session.checkpoint();
         let pending_before = session.pending_terminal_projection_condition_ids();
 
-        let prepared = session
-            .prepare_scheduled_session_drive_v2(action_at, false)
-            .expect("准备含 caller-cancel 动作的 scheduled candidate");
-        let (prepared, disposition) = prepared
-            .prepare_caller_cancel_remainder("missing-order", action_at, &sha("e"))
-            .expect("NotFound caller-cancel 仍应返回可继续组合的消费式 guard");
-        assert_eq!(
-            disposition,
-            crate::matching::CancelOrderStateDispositionV1::NotFound
-        );
-        assert!(
-            prepared
-                .execution_candidate()
-                .candidate_order("missing-order")
-                .is_none()
-        );
-        drop(prepared);
-
-        assert_eq!(session.checkpoint(), before);
-        assert_eq!(
-            session.pending_terminal_projection_condition_ids(),
-            pending_before
-        );
-
         let mut prepared = session
             .prepare_scheduled_session_drive_v2(action_at, false)
-            .expect("重新准备 caller-cancel mutation sticky 路径");
+            .expect("准备含 caller-cancel 动作的 scheduled candidate");
         let resolution = prepared
             .prepare_mutation_resolution(
                 request_id,
@@ -8740,6 +8776,21 @@ mod tests {
             MutationResolutionDispositionV1::NewEffect
         );
         assert_eq!(resolution.effect_identity, "cancel-effect");
+        let (prepared, disposition) = prepared
+            .prepare_caller_cancel_remainder(platform_order_id, action_at, &sha("e"))
+            .expect("活动 caller-cancel 必须转发到底层候选");
+        let crate::matching::CancelOrderStateDispositionV1::Canceled(effect) = disposition else {
+            panic!("活动 caller-cancel 不得被包装层降级为无效果")
+        };
+        assert_eq!(effect.open_base_units_before, 1_000_000);
+        let candidate = prepared
+            .execution_candidate()
+            .candidate_order(platform_order_id)
+            .expect("撤单候选保留目标订单 after-image");
+        assert_eq!(candidate.open_base_units, 0);
+        assert_eq!(candidate.canceled_base_units, 1_000_000);
+        assert_eq!(candidate.caller_cancel_effect_identity, Some(sha("e")));
+        let mut prepared = prepared;
         assert_eq!(
             prepared.prepare_mutation_resolution(
                 request_id,
@@ -8767,6 +8818,64 @@ mod tests {
         assert_eq!(
             session.pending_terminal_projection_condition_ids(),
             pending_before
+        );
+
+        let mut prepared = session
+            .prepare_scheduled_session_drive_v2(action_at, false)
+            .expect("重新准备 caller-cancel 成功共同提交路径");
+        prepared
+            .prepare_mutation_resolution(
+                request_id,
+                action_identity,
+                "cancel-idempotency".to_owned(),
+                sha("e"),
+                "cancel-effect".to_owned(),
+            )
+            .expect("重新准备撤单 mutation");
+        let (mut prepared, disposition) = prepared
+            .prepare_caller_cancel_remainder(platform_order_id, action_at, &sha("e"))
+            .expect("重新准备活动 caller-cancel");
+        assert!(matches!(
+            disposition,
+            crate::matching::CancelOrderStateDispositionV1::Canceled(_)
+        ));
+        prepared
+            .finish_current_action(action_identity)
+            .expect("完成 caller-cancel 动作");
+        assert!(prepared.request_completed());
+        let prepared_condition_ids = prepared.terminal_projection_condition_ids().clone();
+        prepared
+            .into_committable(prepared_condition_ids)
+            .expect("mutation 与 caller-cancel 候选必须共同可提交")
+            .commit();
+
+        let committed = session
+            .execution_state()
+            .order(platform_order_id)
+            .expect("提交后保留撤单终态订单");
+        assert_eq!(committed.open_base_units, 0);
+        assert_eq!(committed.canceled_base_units, 1_000_000);
+        assert_eq!(committed.caller_cancel_effect_identity, Some(sha("e")));
+        assert_eq!(
+            session.execution_state().next_gtd_deadline_at_utc_ms(),
+            None
+        );
+        assert_eq!(
+            session.account_overlay().quantity(
+                &committed.condition_id,
+                &committed.token_id,
+                contracts::BookSide::Bid,
+                committed.source_price_pusd_per_share,
+            ),
+            rust_decimal::Decimal::ZERO
+        );
+        assert_eq!(
+            session
+                .state
+                .mutations
+                .get("cancel-idempotency")
+                .map(|record| record.effect_identity.as_str()),
+            Some("cancel-effect")
         );
     }
 

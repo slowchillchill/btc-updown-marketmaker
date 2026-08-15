@@ -2864,3 +2864,39 @@
   没有冻结数值性能门。生产 V2 总切换、闭桶 DPT 稀疏事务、其余 mutation composer、`CleanRun`、
   Task 4.3 重验、任务 4.2.1 完成门和阶段独立审查仍未完成；没有发布、部署、远端服务、凭据、钱包
   或真实资金操作。
+
+## 2026-08-16：RecoverablePaper V2 撤单形成单日志内部切片
+
+- 重启后先完成会话层调用方撤单薄叶的独立只读复审。首轮复审发现原测试只有不存在订单，
+  无法区分错误的恒定 `NotFound` 转发；增强后的测试改用真实活动 GTD 订单，在同一准备切片中形成
+  变更幂等记录与撤单，验证 `Canceled` 后像，并在撤单候选形成后注入变更幂等冲突，证明粘滞失败
+  会阻断 `finish_current_action` 与 `into_committable`，完整检查点保持不变。重备共同提交后，订单终态、
+  GTD 到期任务、账户叠加层和变更幂等记录同时生效。最终独立裁决为
+  `Critical 0 / Important 0 / Minor 0`。
+- 撤单效果正文新增只保存一个根效果的稀疏准备增量。候选优先读取待插入根效果；同一准备切片第二次
+  写根效果会形成粘滞失败；丢弃候选不写实时映射表，提交只插入该根效果且不触碰无关记录。
+  `CancelOrder`、`CancelOrders` 和 `CancelAllOrders` 共用一个撤单组合器：REQUEST 生命周期
+  预留先于同刻 GTD、最终性和返佣反馈物化；`CancelOrders` 在一个不可分割动作切片内完成全部唯一
+  目标并只形成一个根效果；`CancelAllOrders` 只在首次 `NewEffect` 时从排定后像冻结
+  并排序目标，后续幂等复用不扫描或撤销后来订单。原请求的全部批撤响应依据根效果的首次请求身份
+  保持 `NewEffect`，跨请求复用才是 `ExistingEffect`。
+- 对抗审查发现早期实现会在每个批撤动作中重新构造全部目标分组并复制完整根效果，合法上限会退化为
+  O(n²)。实现随后改为循环前一次分组、按目标序号常数时间借用目标，并只复制当前响应必需正文；
+  复核确认循环内动作映射也只是常数时间检查。稀疏增量另补同一准备切片二次根效果写入的区分性反例。
+- 内部 `RecoverablePaperCoordinatorV2` 同时接入三种撤单：所有可失败的 `into_committable` 检查先于
+  SQLite 追加，单次成功追加后只执行无失败内存提交。真实 SQLite INSERT 故障证明失败后完整
+  检查点、撤单根效果数量、协调器游标和实际尾日志都不变；解除故障后一次请求只追加一条事务。
+  回放使用同一字段级稀疏核心，重算完整证据并精确相等后才提交；三种撤单共同路由，非撤单仍留在
+  原回放分支。在线与回放均没有调用 `runtime_state()` 或复制 `ExecutionStateV1`。
+- 最终验证为：`execution::tests` 80/80、`session::tests` 40/40、任务 2.4 17/17；
+  `cargo check -p sim-system --all-targets --locked --offline`、`cargo fmt --all -- --check` 和
+  `git diff --check` 均通过。全工作区普通回归按固定命令通过，并明确跳过
+  `four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second`；该具名测试
+  不记为通过。组合器与协调器/回放两路最终独立只读裁决均为
+  `Critical 0 / Important 0 / Minor 0`。
+- 本条只完成内部 RecoverablePaper V2 撤单在线与回放切片。公开
+  `drive_next_execution_action_through` 和旧 `process_cancel_action` 仍存在，正式生产驱动尚未切换，
+  旧整态路径不得宣称退役。闭桶 DPT 稀疏事务、其余变更请求组合器、`CleanRun`、任务 4.3
+  重验、旧任务 4.4 正式资源长套件、数值性能门、任务 4.2.1 完成门和阶段独立审查仍未完成；当前
+  游标继续为 `阶段 4 -> 任务 4.2 -> 步骤 4.2.1`。本次没有提交、推送、发布、部署、远端、凭据、
+  钱包或真实资金操作。

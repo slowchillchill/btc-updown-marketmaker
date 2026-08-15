@@ -8326,6 +8326,72 @@ struct PreparedQueryExecutionDriveV2<'a> {
     disposition: SubmissionDriveDispositionV1,
 }
 
+struct PreparedCancelExecutionDriveV2<'a> {
+    scheduled: crate::session::PreparedScheduledSessionDriveV2<'a>,
+    query: PreparedQueryStateDeltaV2<'a>,
+    cancel_effects: PreparedCancelEffectRecordsDeltaV2<'a>,
+    direct: PreparedDirectResponseEntryDeltaV2<'a>,
+    lifecycle: PreparedLifecycleOutboxDeltaV2<'a>,
+    terminal_projection_condition_ids: BTreeSet<String>,
+    evidence: DurableLogicalTransactionEvidenceV2,
+    recovery_operation: DurableRecoveryOperationV2,
+    disposition: SubmissionDriveDispositionV1,
+}
+
+struct CommittableCancelExecutionDriveV2<'a> {
+    session: crate::session::CommittableScheduledSessionDriveV2<'a>,
+    query: CommittableQueryStateDeltaV2<'a>,
+    cancel_effects: CommittableCancelEffectRecordsDeltaV2<'a>,
+    direct: PreparedDirectResponseEntryDeltaV2<'a>,
+    lifecycle: PreparedLifecycleOutboxDeltaV2<'a>,
+    evidence: DurableLogicalTransactionEvidenceV2,
+    recovery_operation: DurableRecoveryOperationV2,
+    disposition: SubmissionDriveDispositionV1,
+}
+
+impl<'a> PreparedCancelExecutionDriveV2<'a> {
+    fn into_committable(
+        self,
+    ) -> Result<CommittableCancelExecutionDriveV2<'a>, SubmissionProcessingErrorV1> {
+        let Self {
+            scheduled,
+            query,
+            cancel_effects,
+            direct,
+            lifecycle,
+            terminal_projection_condition_ids,
+            evidence,
+            recovery_operation,
+            disposition,
+        } = self;
+        let query = query.into_committable()?;
+        let cancel_effects = cancel_effects.into_committable()?;
+        let session = scheduled
+            .into_committable(terminal_projection_condition_ids)
+            .map_err(submission_processing_error_from_market_event_v2)?;
+        Ok(CommittableCancelExecutionDriveV2 {
+            session,
+            query,
+            cancel_effects,
+            direct,
+            lifecycle,
+            evidence,
+            recovery_operation,
+            disposition,
+        })
+    }
+}
+
+impl CommittableCancelExecutionDriveV2<'_> {
+    fn commit(self) {
+        self.lifecycle.commit();
+        self.query.commit();
+        self.cancel_effects.commit();
+        self.direct.commit();
+        self.session.commit();
+    }
+}
+
 struct CommittableQueryExecutionDriveV2<'a> {
     session: crate::session::CommittableScheduledSessionDriveV2<'a>,
     query: CommittableQueryStateDeltaV2<'a>,
@@ -10120,6 +10186,33 @@ impl RecoverablePaperCoordinatorV2 {
         }
     }
 
+    fn drive_cancel_execution_through(
+        &mut self,
+        session: &mut SimExecutionSessionV1,
+        requested_cutoff_utc_ms: i64,
+    ) -> Result<SubmissionDriveDispositionV1, SubmissionProcessingErrorV1> {
+        self.require_ready()?;
+        self.require_bound_session(session)?;
+        if session.persistence.is_some() {
+            return Err(SessionError::Durability(
+                "内部 RecoverablePaper V2 撤单协调器禁止与 V1 持久协调器双写".to_owned(),
+            )
+            .into());
+        }
+        let occupied_lifecycle_capacity_leases =
+            self.occupied_lifecycle_capacity_leases(&session.lifecycle_outbox);
+        let prepared = prepare_cancel_execution_drive_v2(
+            session,
+            requested_cutoff_utc_ms,
+            occupied_lifecycle_capacity_leases,
+        )?
+        .into_committable()?;
+        let disposition = prepared.disposition;
+        self.append_logical_transaction(&prepared.evidence, &prepared.recovery_operation)?;
+        prepared.commit();
+        Ok(disposition)
+    }
+
     fn close_ingress(&mut self, session: &mut SimExecutionSessionV1) -> Result<(), SessionError> {
         self.require_ready()?;
         self.require_bound_session(session)?;
@@ -10626,6 +10719,43 @@ fn replay_execution_operation_v2(
         ));
     }
     if !evidence.logical_action_results.is_empty() {
+        let cancel_request_is_due = evidence
+            .logical_action_results
+            .first()
+            .and_then(|result| state.pending_requests.get(&result.global_request_id))
+            .is_some_and(|request| {
+                matches!(
+                    request,
+                    PendingDomainRequestV1::CancelOrder(_)
+                        | PendingDomainRequestV1::CancelOrders(_)
+                        | PendingDomainRequestV1::CancelAllOrders(_)
+                )
+            });
+        if cancel_request_is_due {
+            let prepared = prepare_cancel_execution_drive_fields_v2(
+                &mut state.session,
+                &state.pending_requests,
+                &mut state.cancel_effect_records,
+                &mut state.query_state,
+                &mut state.direct_response_outbox,
+                &mut state.lifecycle_outbox,
+                effective_processing_at_utc_ms,
+                0,
+            )
+            .and_then(PreparedCancelExecutionDriveV2::into_committable)
+            .map_err(|error| {
+                SessionCheckpointErrorV1::InvalidSessionState(format!(
+                    "V2 撤单动作执行推进尾日志无法重放：{error:?}"
+                ))
+            })?;
+            if prepared.evidence != *evidence {
+                return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                    "V2 撤单动作执行推进尾日志与重算候选不一致".to_owned(),
+                ));
+            }
+            prepared.commit();
+            return Ok(state);
+        }
         let prepared = prepare_execution_transition_v2(state, effective_processing_at_utc_ms)
             .map_err(|error| {
                 SessionCheckpointErrorV1::InvalidSessionState(format!(
@@ -11327,6 +11457,83 @@ struct CancelEffectRecordV1 {
     originating_global_request_id: String,
     formed_at_utc_ms: i64,
     targets: Vec<CancelTargetEffectV1>,
+}
+
+struct PreparedCancelEffectRecordsDeltaV2<'a> {
+    records: &'a mut BTreeMap<String, CancelEffectRecordV1>,
+    root_effect_identity: String,
+    record_to_insert: Option<CancelEffectRecordV1>,
+    preparation_failed: bool,
+}
+
+struct CommittableCancelEffectRecordsDeltaV2<'a> {
+    prepared: PreparedCancelEffectRecordsDeltaV2<'a>,
+}
+
+impl<'a> PreparedCancelEffectRecordsDeltaV2<'a> {
+    fn prepare(
+        records: &'a mut BTreeMap<String, CancelEffectRecordV1>,
+        root_effect_identity: String,
+    ) -> Self {
+        Self {
+            records,
+            root_effect_identity,
+            record_to_insert: None,
+            preparation_failed: false,
+        }
+    }
+
+    fn candidate_record(&self) -> Option<&CancelEffectRecordV1> {
+        self.record_to_insert
+            .as_ref()
+            .or_else(|| self.records.get(&self.root_effect_identity))
+    }
+
+    fn prepare_new_record(
+        &mut self,
+        record: CancelEffectRecordV1,
+    ) -> Result<(), SubmissionProcessingErrorV1> {
+        if self.preparation_failed {
+            return Err(SubmissionProcessingErrorV1::InternalInvariant(
+                "撤单幂等效果准备已经失败",
+            ));
+        }
+        if self.record_to_insert.is_some() || self.records.contains_key(&self.root_effect_identity)
+        {
+            self.preparation_failed = true;
+            return Err(SubmissionProcessingErrorV1::InternalInvariant(
+                "新撤单幂等效果已存在终局结果",
+            ));
+        }
+        self.record_to_insert = Some(record);
+        Ok(())
+    }
+
+    fn into_committable(
+        self,
+    ) -> Result<CommittableCancelEffectRecordsDeltaV2<'a>, SubmissionProcessingErrorV1> {
+        if self.preparation_failed {
+            return Err(SubmissionProcessingErrorV1::InternalInvariant(
+                "撤单幂等效果准备已经失败",
+            ));
+        }
+        Ok(CommittableCancelEffectRecordsDeltaV2 { prepared: self })
+    }
+}
+
+impl CommittableCancelEffectRecordsDeltaV2<'_> {
+    fn commit(self) {
+        let PreparedCancelEffectRecordsDeltaV2 {
+            records,
+            root_effect_identity,
+            record_to_insert,
+            preparation_failed,
+        } = self.prepared;
+        debug_assert!(!preparation_failed);
+        if let Some(record) = record_to_insert {
+            debug_assert!(records.insert(root_effect_identity, record).is_none());
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -17794,6 +18001,453 @@ fn submission_processing_error_from_market_event_v2(
     }
 }
 
+fn prepare_new_cancel_effect_record_v2<'a>(
+    mut scheduled: crate::session::PreparedScheduledSessionDriveV2<'a>,
+    query: &PreparedQueryStateDeltaV2<'_>,
+    request: &PendingDomainRequestV1,
+    cancel_groups: Option<&[CancelTargetInputGroupV1]>,
+    root_effect_identity: &str,
+    originating_global_request_id: &str,
+    formed_at_utc_ms: i64,
+) -> Result<
+    (
+        crate::session::PreparedScheduledSessionDriveV2<'a>,
+        CancelEffectRecordV1,
+        Vec<OrderLifecycleFeedbackSeedV1>,
+    ),
+    SubmissionProcessingErrorV1,
+> {
+    let mut targets = Vec::new();
+    let mut feedbacks = Vec::new();
+    match request {
+        PendingDomainRequestV1::CancelOrder(_) | PendingDomainRequestV1::CancelOrders(_) => {
+            let groups = cancel_groups.ok_or(SubmissionProcessingErrorV1::InternalInvariant(
+                "逐目标撤单缺少预计算目标分组",
+            ))?;
+            targets.reserve(groups.len());
+            for group in groups {
+                let target_effect_identity = cancel_target_effect_identity(
+                    root_effect_identity,
+                    &group.platform_order_id,
+                    u64::from(group.unique_target_ordinal),
+                );
+                let order = scheduled
+                    .execution_candidate()
+                    .candidate_order(&group.platform_order_id)
+                    .cloned();
+                let hot_order_visible = order
+                    .as_ref()
+                    .map(|order| query.hot_order_is_query_visible(order))
+                    .transpose()?
+                    .unwrap_or(false);
+                let disposition = if hot_order_visible {
+                    let (next, disposition) = scheduled.prepare_caller_cancel_remainder(
+                        &group.platform_order_id,
+                        formed_at_utc_ms,
+                        &Sha256Hex(target_effect_identity.clone()),
+                    )?;
+                    scheduled = next;
+                    disposition
+                } else if query
+                    .retained_terminal_order(&group.platform_order_id)
+                    .is_some()
+                {
+                    CancelOrderStateDispositionV1::NoCancellableRemainder
+                } else {
+                    CancelOrderStateDispositionV1::NotFound
+                };
+                let (outcome, feedback) = cancel_target_outcome(disposition, order.as_ref())?;
+                feedbacks.extend(feedback);
+                targets.push(CancelTargetEffectV1 {
+                    platform_order_id: group.platform_order_id.clone(),
+                    effect_identity: target_effect_identity,
+                    outcome,
+                });
+            }
+        }
+        PendingDomainRequestV1::CancelAllOrders(_) => {
+            let mut target_ids = Vec::new();
+            for order in scheduled.execution_candidate().candidate_orders() {
+                let active_base_units = order
+                    .pending_maker_depletion_base_units
+                    .checked_add(order.open_base_units)
+                    .ok_or(MatchingMathErrorV1::ArithmeticOverflow)?;
+                if active_base_units > 0 {
+                    target_ids.push(order.platform_order_id.clone());
+                }
+            }
+            target_ids.sort();
+            targets.reserve(target_ids.len());
+            for (ordinal, platform_order_id) in target_ids.into_iter().enumerate() {
+                let ordinal = u64::try_from(ordinal).map_err(|_| {
+                    SubmissionProcessingErrorV1::InternalInvariant("全撤活动目标序号超出 u64 边界")
+                })?;
+                let effect_identity = cancel_target_effect_identity(
+                    root_effect_identity,
+                    &platform_order_id,
+                    ordinal,
+                );
+                let order = scheduled
+                    .execution_candidate()
+                    .candidate_order(&platform_order_id)
+                    .cloned();
+                let (next, disposition) = scheduled.prepare_caller_cancel_remainder(
+                    &platform_order_id,
+                    formed_at_utc_ms,
+                    &Sha256Hex(effect_identity.clone()),
+                )?;
+                scheduled = next;
+                let (outcome, feedback) = cancel_target_outcome(disposition, order.as_ref())?;
+                if !matches!(outcome, CancelTargetOutcomeV1::Canceled(_)) {
+                    return Err(SubmissionProcessingErrorV1::InternalInvariant(
+                        "全撤冻结活动目标在同一候选中失去可撤余量",
+                    ));
+                }
+                feedbacks.extend(feedback);
+                targets.push(CancelTargetEffectV1 {
+                    platform_order_id,
+                    effect_identity,
+                    outcome,
+                });
+            }
+        }
+        _ => {
+            return Err(SubmissionProcessingErrorV1::InternalInvariant(
+                "非撤单请求进入撤单效果准备",
+            ));
+        }
+    }
+    Ok((
+        scheduled,
+        CancelEffectRecordV1 {
+            originating_global_request_id: originating_global_request_id.to_owned(),
+            formed_at_utc_ms,
+            targets,
+        },
+        feedbacks,
+    ))
+}
+
+fn cancel_direct_response_part_v2(
+    request: &PendingDomainRequestV1,
+    action: &QueuedLogicalActionV1,
+    cancel_groups: Option<&[CancelTargetInputGroupV1]>,
+    record: &CancelEffectRecordV1,
+) -> Result<DirectResponsePartV1, SubmissionProcessingErrorV1> {
+    let effect_disposition = if record.originating_global_request_id == action.global_request_id {
+        CancelEffectDispositionV1::NewEffect
+    } else {
+        CancelEffectDispositionV1::ExistingEffect
+    };
+    match request {
+        PendingDomainRequestV1::CancelOrder(_) | PendingDomainRequestV1::CancelOrders(_) => {
+            let groups = cancel_groups.ok_or(SubmissionProcessingErrorV1::InternalInvariant(
+                "逐目标撤单缺少预计算目标分组",
+            ))?;
+            if record.targets.len() != groups.len() {
+                return Err(SubmissionProcessingErrorV1::InternalInvariant(
+                    "撤单幂等效果目标数量冲突",
+                ));
+            }
+            let group = groups
+                .get(usize::from(action.key.batch_item_ordinal))
+                .filter(|group| group.unique_target_ordinal == action.key.batch_item_ordinal)
+                .ok_or(SubmissionProcessingErrorV1::InternalInvariant(
+                    "撤单动作没有对应唯一目标",
+                ))?;
+            let target = record
+                .targets
+                .get(usize::from(group.unique_target_ordinal))
+                .ok_or(SubmissionProcessingErrorV1::InternalInvariant(
+                    "撤单幂等效果缺少目标结果",
+                ))?;
+            if target.platform_order_id != group.platform_order_id {
+                return Err(SubmissionProcessingErrorV1::InternalInvariant(
+                    "撤单幂等效果目标冲突",
+                ));
+            }
+            Ok(DirectResponsePartV1::CancelTarget(CancelTargetResponseV1 {
+                platform_order_id: target.platform_order_id.clone(),
+                target_ordinal: u64::from(group.unique_target_ordinal),
+                input_item_refs: group.input_item_refs.clone(),
+                effective_processing_at_utc_ms: action.key.effective_processing_at_utc_ms,
+                cancel_effect_identity: target.effect_identity.clone(),
+                cancel_effect_formed_at_utc_ms: record.formed_at_utc_ms,
+                cancel_effect_disposition: effect_disposition,
+                outcome: target.outcome.clone(),
+            }))
+        }
+        PendingDomainRequestV1::CancelAllOrders(_) => {
+            let targets = record
+                .targets
+                .iter()
+                .enumerate()
+                .map(|(ordinal, target)| {
+                    Ok(CancelTargetResponseV1 {
+                        platform_order_id: target.platform_order_id.clone(),
+                        target_ordinal: u64::try_from(ordinal).map_err(|_| {
+                            SubmissionProcessingErrorV1::InternalInvariant(
+                                "全撤响应目标序号超出 u64 边界",
+                            )
+                        })?,
+                        input_item_refs: Vec::new(),
+                        effective_processing_at_utc_ms: action.key.effective_processing_at_utc_ms,
+                        cancel_effect_identity: target.effect_identity.clone(),
+                        cancel_effect_formed_at_utc_ms: record.formed_at_utc_ms,
+                        cancel_effect_disposition: effect_disposition,
+                        outcome: target.outcome.clone(),
+                    })
+                })
+                .collect::<Result<Vec<_>, SubmissionProcessingErrorV1>>()?;
+            Ok(DirectResponsePartV1::CancelAll {
+                effective_processing_at_utc_ms: action.key.effective_processing_at_utc_ms,
+                targets,
+            })
+        }
+        _ => Err(SubmissionProcessingErrorV1::InternalInvariant(
+            "非撤单请求进入撤单直接响应准备",
+        )),
+    }
+}
+
+fn prepare_cancel_execution_drive_v2<'a>(
+    execution_session: &'a mut SimExecutionSessionV1,
+    requested_cutoff_utc_ms: i64,
+    occupied_lifecycle_capacity_leases: usize,
+) -> Result<PreparedCancelExecutionDriveV2<'a>, SubmissionProcessingErrorV1> {
+    let SimExecutionSessionV1 {
+        session,
+        pending_requests,
+        cancel_effect_records,
+        query_state,
+        direct_response_outbox,
+        lifecycle_outbox,
+        ..
+    } = execution_session;
+    prepare_cancel_execution_drive_fields_v2(
+        session,
+        pending_requests,
+        cancel_effect_records,
+        query_state,
+        direct_response_outbox,
+        lifecycle_outbox,
+        requested_cutoff_utc_ms,
+        occupied_lifecycle_capacity_leases,
+    )
+}
+
+fn prepare_cancel_execution_drive_fields_v2<'a>(
+    session: &'a mut SimSession,
+    pending_requests: &BTreeMap<String, PendingDomainRequestV1>,
+    cancel_effect_records: &'a mut BTreeMap<String, CancelEffectRecordV1>,
+    query_state: &'a mut QueryStateV1,
+    direct_response_outbox: &'a mut LogicalDirectResponseOutboxV1,
+    lifecycle_outbox: &'a mut LogicalLifecycleOutboxV1,
+    requested_cutoff_utc_ms: i64,
+    occupied_lifecycle_capacity_leases: usize,
+) -> Result<PreparedCancelExecutionDriveV2<'a>, SubmissionProcessingErrorV1> {
+    let rule_snapshot_sha256 = session.rule_snapshot().file_sha256().clone();
+    let scenario_sha256 = session.scenario().scenario_sha256().clone();
+    let fee_rule = fee_rule_identity(session);
+    let session_spec = session.session_spec().clone();
+    let prefix = prepare_execution_drive_prefix_v2(session, requested_cutoff_utc_ms, true)
+        .map_err(submission_processing_error_from_market_event_v2)?;
+    let first_action =
+        prefix
+            .current_action()
+            .ok_or(SubmissionProcessingErrorV1::InternalInvariant(
+                "撤单执行准备缺少到期逻辑动作",
+            ))?;
+    let request = pending_requests
+        .get(&first_action.global_request_id)
+        .cloned()
+        .ok_or(SubmissionProcessingErrorV1::InternalInvariant(
+            "撤单执行准备缺少领域请求",
+        ))?;
+    validate_action_mapping(&request, &first_action)?;
+    if !matches!(
+        request,
+        PendingDomainRequestV1::CancelOrder(_)
+            | PendingDomainRequestV1::CancelOrders(_)
+            | PendingDomainRequestV1::CancelAllOrders(_)
+    ) {
+        return Err(SubmissionProcessingErrorV1::InternalInvariant(
+            "非撤单请求进入撤单执行准备",
+        ));
+    }
+    let (idempotency_key, payload_sha256) = mutation_binding(&request).ok_or(
+        SubmissionProcessingErrorV1::InternalInvariant("撤单动作缺少变更幂等绑定"),
+    )?;
+    let request_idempotency_identity =
+        cancel_request_idempotency_identity(&session_spec, &idempotency_key);
+    let root_effect_identity =
+        cancel_item_effect_identity(&request_idempotency_identity, &payload_sha256);
+    let cancel_groups = match &request {
+        PendingDomainRequestV1::CancelOrder(_) | PendingDomainRequestV1::CancelOrders(_) => {
+            Some(cancel_target_groups(&request)?)
+        }
+        PendingDomainRequestV1::CancelAllOrders(_) => None,
+        _ => unreachable!("撤单请求种类已经在准备前验证"),
+    };
+
+    let mut lifecycle = lifecycle_outbox.prepare_lifecycle_delta_v2();
+    let request_reservation = lifecycle.reserve_request(
+        &first_action.global_request_id,
+        first_action.key.effective_processing_at_utc_ms,
+        occupied_lifecycle_capacity_leases,
+    )?;
+    let materialized = materialize_execution_drive_prefix_v2(
+        prefix,
+        query_state,
+        lifecycle,
+        Some(&first_action.global_request_id),
+        occupied_lifecycle_capacity_leases,
+    )
+    .map_err(submission_processing_error_from_market_event_v2)?;
+    let MaterializedExecutionDrivePrefixV2 {
+        session_id,
+        mut scheduled,
+        query,
+        mut lifecycle,
+        terminal_projection_condition_ids,
+        before_query_projection_revision,
+        before_logical_platform_through_utc_ms,
+        before_private_schedule_through_utc_ms,
+        mut after_query_projection_revision,
+        actual_cutoff_utc_ms,
+        mut new_private_output_drafts,
+        scheduled_state_changed: _,
+    } = materialized;
+    let mut cancel_effects = PreparedCancelEffectRecordsDeltaV2::prepare(
+        cancel_effect_records,
+        root_effect_identity.clone(),
+    );
+    let mut direct =
+        direct_response_outbox.prepare_entry_delta_v2(&first_action.global_request_id)?;
+    let mut logical_action_results = Vec::new();
+    let mut cancellation_projection_changed = false;
+
+    while let Some(action) = scheduled.current_action() {
+        validate_action_mapping(&request, &action)?;
+        let resolution = scheduled.prepare_mutation_resolution(
+            &action.global_request_id,
+            &action.action_identity,
+            request_idempotency_identity.clone(),
+            payload_sha256.clone(),
+            root_effect_identity.clone(),
+        )?;
+        let new_effect = resolution.disposition == MutationResolutionDispositionV1::NewEffect;
+        let mut caller_cancel_feedbacks = Vec::new();
+        if new_effect {
+            let (next, record, feedbacks) = prepare_new_cancel_effect_record_v2(
+                scheduled,
+                &query,
+                &request,
+                cancel_groups.as_deref(),
+                &resolution.effect_identity,
+                &action.global_request_id,
+                action.key.effective_processing_at_utc_ms,
+            )?;
+            scheduled = next;
+            cancellation_projection_changed = record
+                .targets
+                .iter()
+                .any(|target| matches!(target.outcome, CancelTargetOutcomeV1::Canceled(_)));
+            cancel_effects.prepare_new_record(record)?;
+            caller_cancel_feedbacks = feedbacks;
+        }
+        let part = cancel_direct_response_part_v2(
+            &request,
+            &action,
+            cancel_groups.as_deref(),
+            cancel_effects.candidate_record().ok_or(
+                SubmissionProcessingErrorV1::InternalInvariant("既有撤单幂等效果缺少终局结果"),
+            )?,
+        )?;
+        logical_action_results.push(
+            durable_logical_action_result(
+                &action.global_request_id,
+                &request,
+                usize::from(action.key.batch_item_ordinal),
+                scheduled.query_revision_for_request(&action.global_request_id),
+                &part,
+            )
+            .map_err(|error| SessionError::Durability(error.to_string()))?,
+        );
+        for feedback in caller_cancel_feedbacks {
+            if let Some(draft) = record_prepared_order_lifecycle_feedback_v2(
+                &session_id,
+                &mut scheduled,
+                &mut lifecycle,
+                &request_reservation,
+                feedback,
+            )? {
+                new_private_output_drafts.push(draft);
+            }
+        }
+        direct.record_part(part)?;
+        scheduled.finish_current_action(&action.action_identity)?;
+    }
+    if !scheduled.request_completed() {
+        return Err(SubmissionProcessingErrorV1::InternalInvariant(
+            "撤单 composer 未完成同请求全部动作",
+        ));
+    }
+    if cancellation_projection_changed
+        && after_query_projection_revision == before_query_projection_revision
+    {
+        after_query_projection_revision = scheduled.advance_platform_state_revision_once()?;
+    }
+    lifecycle.complete_request(&first_action.global_request_id, &request_reservation)?;
+    let platform_responded_at_utc_ms =
+        direct
+            .platform_responded_at()
+            .ok_or(SubmissionProcessingErrorV1::InternalInvariant(
+                "撤单直接响应缺少平台响应时点",
+            ))?;
+    let private_emission_sequence = scheduled.next_private_emission_sequence()?;
+    let transit = scheduled.prepare_complete_direct_response(
+        &first_action.global_request_id,
+        platform_responded_at_utc_ms,
+        private_emission_sequence,
+    )?;
+    if let Some(draft) = direct.complete_draft(
+        request.context().clone(),
+        &transit,
+        rule_snapshot_sha256,
+        scenario_sha256,
+        fee_rule,
+    )? {
+        new_private_output_drafts.push(draft);
+    }
+    let evidence = logical_transaction_evidence_from_after_values_v2(
+        DurableTransactionFactV1::ExecutionAdvanced { session_id },
+        before_query_projection_revision,
+        before_logical_platform_through_utc_ms,
+        before_private_schedule_through_utc_ms,
+        after_query_projection_revision,
+        Some(actual_cutoff_utc_ms),
+        before_private_schedule_through_utc_ms,
+        logical_action_results,
+        new_private_output_drafts,
+    )?;
+    Ok(PreparedCancelExecutionDriveV2 {
+        scheduled,
+        query,
+        cancel_effects,
+        direct,
+        lifecycle,
+        terminal_projection_condition_ids,
+        evidence,
+        recovery_operation: DurableRecoveryOperationV2::DriveExecutionThrough {
+            effective_processing_at_utc_ms: actual_cutoff_utc_ms,
+        },
+        disposition: SubmissionDriveDispositionV1::ItemProcessed {
+            request_completed: true,
+        },
+    })
+}
+
 fn prepare_order_execution_drive_v2<'a>(
     execution_session: &'a mut SimExecutionSessionV1,
     requested_cutoff_utc_ms: i64,
@@ -17810,7 +18464,7 @@ fn prepare_order_execution_drive_v2<'a>(
     let rule_snapshot_sha256 = session.rule_snapshot().file_sha256().clone();
     let scenario_sha256 = session.scenario().scenario_sha256().clone();
     let fee_rule = fee_rule_identity(session);
-    let prefix = prepare_execution_drive_prefix_v2(session, requested_cutoff_utc_ms)
+    let prefix = prepare_execution_drive_prefix_v2(session, requested_cutoff_utc_ms, false)
         .map_err(submission_processing_error_from_market_event_v2)?;
     let action = prefix
         .current_action()
@@ -17909,7 +18563,7 @@ fn prepare_list_query_execution_drive_v2<'a>(
     let rule_snapshot_sha256 = session.rule_snapshot().file_sha256().clone();
     let scenario_sha256 = session.scenario().scenario_sha256().clone();
     let fee_rule = fee_rule_identity(session);
-    let prefix = prepare_execution_drive_prefix_v2(session, requested_cutoff_utc_ms)
+    let prefix = prepare_execution_drive_prefix_v2(session, requested_cutoff_utc_ms, false)
         .map_err(submission_processing_error_from_market_event_v2)?;
     let action = prefix
         .current_action()
@@ -18287,7 +18941,7 @@ fn prepare_scheduled_execution_drive_fields_v2<'a>(
     requested_cutoff_utc_ms: i64,
     occupied_lifecycle_capacity_leases: usize,
 ) -> Result<PreparedScheduledExecutionDriveV2<'a>, MarketEventErrorV1> {
-    let prefix = prepare_execution_drive_prefix_v2(session, requested_cutoff_utc_ms)?;
+    let prefix = prepare_execution_drive_prefix_v2(session, requested_cutoff_utc_ms, false)?;
     if prefix.current_action().is_some() {
         return Ok(PreparedScheduledExecutionDriveV2::ActionDue(prefix));
     }
@@ -18305,6 +18959,7 @@ fn prepare_scheduled_execution_drive_fields_v2<'a>(
 fn prepare_execution_drive_prefix_v2(
     session: &mut SimSession,
     requested_cutoff_utc_ms: i64,
+    complete_same_request_at_same_time: bool,
 ) -> Result<PreparedExecutionDrivePrefixV2<'_>, MarketEventErrorV1> {
     session.require_input_not_failed()?;
     let session_id = session.session_spec().session_id.clone();
@@ -18312,7 +18967,10 @@ fn prepare_execution_drive_prefix_v2(
     let before_logical_platform_through_utc_ms = session.logical_platform_driven_through();
     let before_private_schedule_through_utc_ms = session.private_fact_schedule_closed_through();
     let account_instance_key = session.execution_state().account_instance_key().clone();
-    let scheduled = session.prepare_scheduled_session_drive_v2(requested_cutoff_utc_ms, false)?;
+    let scheduled = session.prepare_scheduled_session_drive_v2(
+        requested_cutoff_utc_ms,
+        complete_same_request_at_same_time,
+    )?;
     let execution_state_changed = scheduled.execution_candidate().has_state_change();
     let query_projection_changed = scheduled.execution_candidate().query_projection_changed();
     let terminal_projection_condition_ids = scheduled.terminal_projection_condition_ids().clone();
@@ -24593,6 +25251,669 @@ mod tests {
         assert_eq!(
             prepared_outbox.entries[target].draft.as_ref().map(|_| 1),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn cancel_effect_records_v2_prepares_only_one_root_and_commits_only_the_staged_insert() {
+        let unrelated_identity = "unrelated-cancel-root".to_owned();
+        let root_effect_identity = "prepared-cancel-root".to_owned();
+        let unrelated_record = CancelEffectRecordV1 {
+            originating_global_request_id: "unrelated-request".to_owned(),
+            formed_at_utc_ms: 10,
+            targets: Vec::new(),
+        };
+        let prepared_record = CancelEffectRecordV1 {
+            originating_global_request_id: "prepared-request".to_owned(),
+            formed_at_utc_ms: 20,
+            targets: Vec::new(),
+        };
+        let mut records = BTreeMap::from([(unrelated_identity.clone(), unrelated_record.clone())]);
+        let before = records.clone();
+
+        {
+            let mut prepared = PreparedCancelEffectRecordsDeltaV2::prepare(
+                &mut records,
+                root_effect_identity.clone(),
+            );
+            assert_eq!(prepared.candidate_record(), None);
+            prepared
+                .prepare_new_record(prepared_record.clone())
+                .expect("准备唯一撤单 root effect");
+            assert_eq!(prepared.candidate_record(), Some(&prepared_record));
+            assert!(matches!(
+                prepared.prepare_new_record(CancelEffectRecordV1 {
+                    originating_global_request_id: "same-guard-conflict".to_owned(),
+                    formed_at_utc_ms: 21,
+                    targets: Vec::new(),
+                }),
+                Err(SubmissionProcessingErrorV1::InternalInvariant(_))
+            ));
+            assert!(prepared.into_committable().is_err());
+        }
+        assert_eq!(records, before, "丢弃准备守卫不得提前写入 root effect");
+
+        let mut prepared =
+            PreparedCancelEffectRecordsDeltaV2::prepare(&mut records, root_effect_identity.clone());
+        prepared
+            .prepare_new_record(prepared_record.clone())
+            .expect("准备唯一新 root effect");
+        prepared
+            .into_committable()
+            .expect("唯一新 root effect 必须可提交")
+            .commit();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records.get(&unrelated_identity), Some(&unrelated_record));
+        assert_eq!(records.get(&root_effect_identity), Some(&prepared_record));
+
+        let before_conflict = records.clone();
+        let mut conflicting =
+            PreparedCancelEffectRecordsDeltaV2::prepare(&mut records, root_effect_identity.clone());
+        assert!(matches!(
+            conflicting.prepare_new_record(CancelEffectRecordV1 {
+                originating_global_request_id: "conflicting-request".to_owned(),
+                formed_at_utc_ms: 30,
+                targets: Vec::new(),
+            }),
+            Err(SubmissionProcessingErrorV1::InternalInvariant(_))
+        ));
+        assert!(conflicting.into_committable().is_err());
+        assert_eq!(records, before_conflict, "冲突后不得覆盖既有 root effect");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancel_orders_v2_composer_is_one_root_one_transaction_and_request_first() {
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            scenario as long_scenario, session_spec as long_session_spec,
+        };
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载撤单 composer 时延配置");
+        let scenario = long_scenario();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let spec = long_session_spec(
+            &scenario,
+            SimCallerRoleV1::Paper,
+            "cancel-orders-v2-composer",
+        );
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
+        let source_request_id = "cancel-orders-v2-composer-source";
+        let gtd_expires_at_utc_ms = 600_999;
+        let source = session
+            .post_orders(PostOrdersRequestV1 {
+                context: context_for_arrival(&session, &profile, source_request_id, 1, 150_000),
+                idempotency_key: "cancel-orders-v2-composer-source-idempotency".to_owned(),
+                items: vec![
+                    PostOrderItemV1 {
+                        item_id: "cancel-orders-v2-composer-target-a".to_owned(),
+                        order: SimBuyOrderV1 {
+                            condition_id: long_market().condition_id.clone(),
+                            token_id: long_asset("1", 0, "Up").token_id,
+                            kind: SimBuyOrderKindV1::GtcLimit {
+                                limit_price_pusd_per_share: Decimal::new(4, 1),
+                                size_shares: Decimal::new(5, 0),
+                                post_only: true,
+                            },
+                        },
+                    },
+                    PostOrderItemV1 {
+                        item_id: "cancel-orders-v2-composer-target-b".to_owned(),
+                        order: SimBuyOrderV1 {
+                            condition_id: long_market().condition_id.clone(),
+                            token_id: long_asset("1", 0, "Up").token_id,
+                            kind: SimBuyOrderKindV1::GtcLimit {
+                                limit_price_pusd_per_share: Decimal::new(4, 1),
+                                size_shares: Decimal::new(5, 0),
+                                post_only: true,
+                            },
+                        },
+                    },
+                    PostOrderItemV1 {
+                        item_id: "cancel-orders-v2-composer-scheduled-gtd".to_owned(),
+                        order: SimBuyOrderV1 {
+                            condition_id: long_market().condition_id,
+                            token_id: long_asset("1", 0, "Up").token_id,
+                            kind: SimBuyOrderKindV1::GtdLimit {
+                                limit_price_pusd_per_share: Decimal::new(4, 1),
+                                size_shares: Decimal::new(5, 0),
+                                post_only: true,
+                                expires_at_utc_ms: gtd_expires_at_utc_ms,
+                            },
+                        },
+                    },
+                ],
+            })
+            .expect("登记两个撤单目标与一个同刻 GTD 来源订单");
+        let source_at = source.items[0].effective_processing_at_utc_ms;
+        assert!(
+            source
+                .items
+                .iter()
+                .all(|item| item.effective_processing_at_utc_ms == source_at)
+        );
+        session
+            .session
+            .advance_public_visibility_through(source_at, next_visibility_position)
+            .expect("闭合来源订单公开前缀");
+        for request_completed in [false, false, true] {
+            assert_eq!(
+                session.drive_next_execution_action_through(source_at),
+                Ok(SubmissionDriveDispositionV1::ItemProcessed { request_completed })
+            );
+        }
+        let mut target_ids = session
+            .session
+            .execution_state()
+            .orders()
+            .filter(|order| {
+                order.global_request_id == source_request_id
+                    && order.item_id != "cancel-orders-v2-composer-scheduled-gtd"
+            })
+            .map(|order| order.platform_order_id.clone())
+            .collect::<Vec<_>>();
+        target_ids.sort();
+        assert_eq!(target_ids.len(), 2);
+        let gtd_order_id = session
+            .session
+            .execution_state()
+            .orders()
+            .find(|order| order.item_id == "cancel-orders-v2-composer-scheduled-gtd")
+            .expect("来源 GTD 必须形成活动订单")
+            .platform_order_id
+            .clone();
+        let gtd_deadline_at_utc_ms = session
+            .next_order_deadline_at_utc_ms()
+            .expect("来源 GTD 必须形成到期时点");
+        assert_eq!(gtd_deadline_at_utc_ms, 600_000);
+
+        let source_private_through = session
+            .session
+            .recovered_pending_private_facts()
+            .iter()
+            .map(|(_, received_at_utc_ms, _)| *received_at_utc_ms)
+            .max()
+            .expect("来源订单必须形成私有输出");
+        assert!(source_private_through < gtd_deadline_at_utc_ms);
+        assert_eq!(
+            session.drive_private_delivery_after_platform_through_for_tests(source_private_through),
+            Ok(SubmissionDeliveryDispositionV1::Delivered)
+        );
+
+        let cancel_request_id = "cancel-orders-v2-composer-request";
+        let cancel = session
+            .cancel_orders(CancelOrdersRequestV1 {
+                context: context_for_arrival(
+                    &session,
+                    &profile,
+                    cancel_request_id,
+                    2,
+                    gtd_deadline_at_utc_ms,
+                ),
+                idempotency_key: "cancel-orders-v2-composer-idempotency".to_owned(),
+                items: vec![
+                    CancelOrderItemV1 {
+                        item_id: "cancel-orders-v2-composer-cancel-a".to_owned(),
+                        platform_order_id: target_ids[0].clone(),
+                    },
+                    CancelOrderItemV1 {
+                        item_id: "cancel-orders-v2-composer-cancel-a-duplicate".to_owned(),
+                        platform_order_id: target_ids[0].clone(),
+                    },
+                    CancelOrderItemV1 {
+                        item_id: "cancel-orders-v2-composer-cancel-b".to_owned(),
+                        platform_order_id: target_ids[1].clone(),
+                    },
+                ],
+            })
+            .expect("登记与 GTD 同刻的两目标批撤");
+        assert_eq!(cancel.receipt.scheduled_action_count, 2);
+        assert!(
+            cancel
+                .items
+                .iter()
+                .all(|item| item.effective_processing_at_utc_ms == gtd_deadline_at_utc_ms)
+        );
+        session
+            .session
+            .advance_public_visibility_through(gtd_deadline_at_utc_ms, next_visibility_position)
+            .expect("闭合批撤与 GTD 同刻公开前缀");
+
+        let before = session.durable_checkpoint();
+        let before_revision = session.query_projection_revision();
+        let before_cancel_effect_count = session.cancel_effect_records.len();
+        let request_batch_id = LogicalLifecycleOutboxV1::request_batch_id(cancel_request_id);
+        reset_execution_state_clone_count_for_tests();
+        let prepared = prepare_cancel_execution_drive_v2(&mut session, gtd_deadline_at_utc_ms, 0)
+            .expect("准备统一撤单 composer");
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            prepared.disposition,
+            SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            }
+        );
+        assert_eq!(prepared.evidence.logical_action_results.len(), 2);
+        assert_eq!(
+            prepared
+                .evidence
+                .logical_action_results
+                .iter()
+                .map(|result| result.batch_item_ordinal)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert!(
+            prepared
+                .evidence
+                .logical_action_results
+                .iter()
+                .all(|result| {
+                    matches!(
+                        &result.part,
+                        DirectResponsePartV1::CancelTarget(CancelTargetResponseV1 {
+                            cancel_effect_disposition: CancelEffectDispositionV1::NewEffect,
+                            ..
+                        })
+                    )
+                })
+        );
+        let root_record = prepared
+            .cancel_effects
+            .candidate_record()
+            .expect("批撤必须暂存唯一 root effect");
+        assert_eq!(root_record.originating_global_request_id, cancel_request_id);
+        assert_eq!(root_record.targets.len(), 2);
+        assert_eq!(
+            root_record
+                .targets
+                .iter()
+                .map(|target| target.platform_order_id.as_str())
+                .collect::<Vec<_>>(),
+            target_ids.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            prepared.lifecycle.entry_inserts.len(),
+            4,
+            "已排定 rebate、同刻 GTD 与两个 caller-cancel 各形成一个生命周期反馈"
+        );
+        assert!(
+            prepared
+                .lifecycle
+                .entry_inserts
+                .values()
+                .all(|entry| entry.batch_id == request_batch_id)
+        );
+        let mut lifecycle_sequences = Vec::new();
+        let mut direct_sequence = None;
+        for draft in &prepared.evidence.private_output_drafts {
+            match draft {
+                DurablePrivateOutputDraftV1::Lifecycle { draft } => {
+                    lifecycle_sequences.push((
+                        draft.timing().private_emission_sequence,
+                        match draft {
+                            LifecycleFeedbackDraftV1::Order(order)
+                                if order.event_kind == OrderLifecycleEventKindV1::GtdExpired =>
+                            {
+                                "GTD"
+                            }
+                            LifecycleFeedbackDraftV1::Order(order)
+                                if order.event_kind
+                                    == OrderLifecycleEventKindV1::CallerCanceled =>
+                            {
+                                "CANCEL"
+                            }
+                            LifecycleFeedbackDraftV1::Settlement(_) => "REBATE",
+                            other => panic!("撤单 composer 出现意外生命周期草稿：{other:#?}"),
+                        },
+                    ));
+                }
+                DurablePrivateOutputDraftV1::Direct { draft }
+                    if draft.context.global_request_id == cancel_request_id =>
+                {
+                    direct_sequence = Some(draft.private_emission_sequence);
+                }
+                _ => {}
+            }
+        }
+        lifecycle_sequences.sort_by_key(|(sequence, _)| *sequence);
+        assert_eq!(
+            lifecycle_sequences
+                .iter()
+                .map(|(_, kind)| *kind)
+                .collect::<Vec<_>>(),
+            vec!["REBATE", "GTD", "CANCEL", "CANCEL"]
+        );
+        assert!(
+            lifecycle_sequences.last().expect("存在生命周期序列").0
+                < direct_sequence.expect("撤单 composer 必须形成直接响应")
+        );
+        assert_eq!(
+            prepared
+                .evidence
+                .account_deltas
+                .iter()
+                .map(|delta| delta.reason)
+                .collect::<Vec<_>>(),
+            vec![
+                contracts::PlatformAccountDeltaReasonV1::GtdExpirationEncumbranceReleased,
+                contracts::PlatformAccountDeltaReasonV1::CallerCancellationEncumbranceReleased,
+                contracts::PlatformAccountDeltaReasonV1::CallerCancellationEncumbranceReleased,
+            ]
+        );
+        let first_evidence = prepared.evidence.clone();
+        drop(prepared);
+        assert_eq!(session.durable_checkpoint(), before);
+        assert_eq!(
+            session.cancel_effect_records.len(),
+            before_cancel_effect_count
+        );
+        drop(before);
+
+        reset_execution_state_clone_count_for_tests();
+        let prepared = prepare_cancel_execution_drive_v2(&mut session, gtd_deadline_at_utc_ms, 0)
+            .expect("重新准备统一撤单 composer");
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(prepared.evidence, first_evidence);
+        prepared
+            .into_committable()
+            .expect("完整批撤 composer 必须可提交")
+            .commit();
+        assert_eq!(
+            session.cancel_effect_records.len(),
+            before_cancel_effect_count + 1
+        );
+        assert_eq!(session.query_projection_revision(), before_revision + 1);
+        assert_eq!(
+            session
+                .session
+                .execution_state()
+                .order(&gtd_order_id)
+                .expect("GTD 终态仍可查询")
+                .expired_base_units,
+            5_000_000
+        );
+        for platform_order_id in target_ids {
+            let order = session
+                .session
+                .execution_state()
+                .order(&platform_order_id)
+                .expect("撤单终态仍可查询");
+            assert_eq!(order.open_base_units, 0);
+            assert_eq!(order.canceled_base_units, 5_000_000);
+        }
+        let direct = session
+            .direct_response_outbox
+            .draft(cancel_request_id)
+            .expect("批撤提交后保留直接响应草稿");
+        assert_eq!(direct.method, DirectResponseMethodV1::CancelOrders);
+        assert_eq!(direct.parts.len(), 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancel_all_v2_existing_effect_keeps_first_target_freeze() {
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            scenario as long_scenario, session_spec as long_session_spec,
+        };
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载全撤 composer 时延配置");
+        let scenario = long_scenario();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let spec = long_session_spec(
+            &scenario,
+            SimCallerRoleV1::Paper,
+            "cancel-all-v2-target-freeze",
+        );
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
+
+        let source_request_id = "cancel-all-v2-target-freeze-source";
+        let source = session
+            .post_orders(PostOrdersRequestV1 {
+                context: context_for_arrival(&session, &profile, source_request_id, 1, 150_000),
+                idempotency_key: "cancel-all-v2-target-freeze-source-idempotency".to_owned(),
+                items: ["a", "b"]
+                    .into_iter()
+                    .map(|suffix| PostOrderItemV1 {
+                        item_id: format!("cancel-all-v2-target-freeze-{suffix}"),
+                        order: SimBuyOrderV1 {
+                            condition_id: long_market().condition_id.clone(),
+                            token_id: long_asset("1", 0, "Up").token_id,
+                            kind: SimBuyOrderKindV1::GtcLimit {
+                                limit_price_pusd_per_share: Decimal::new(4, 1),
+                                size_shares: Decimal::new(5, 0),
+                                post_only: true,
+                            },
+                        },
+                    })
+                    .collect(),
+            })
+            .expect("登记首次全撤的两个来源订单");
+        let source_at = source.items[0].effective_processing_at_utc_ms;
+        assert!(
+            source
+                .items
+                .iter()
+                .all(|item| item.effective_processing_at_utc_ms == source_at)
+        );
+        session
+            .session
+            .advance_public_visibility_through(source_at, next_visibility_position)
+            .expect("闭合首次全撤来源订单公开前缀");
+        for request_completed in [false, true] {
+            assert_eq!(
+                session.drive_next_execution_action_through(source_at),
+                Ok(SubmissionDriveDispositionV1::ItemProcessed { request_completed })
+            );
+        }
+        let source_private_through = session
+            .session
+            .recovered_pending_private_facts()
+            .iter()
+            .map(|(_, received_at_utc_ms, _)| *received_at_utc_ms)
+            .max()
+            .expect("来源订单必须形成私有输出");
+        assert_eq!(
+            session.drive_private_delivery_after_platform_through_for_tests(source_private_through),
+            Ok(SubmissionDeliveryDispositionV1::Delivered)
+        );
+
+        let idempotency_key = "cancel-all-v2-target-freeze-idempotency";
+        let first_request_id = "cancel-all-v2-target-freeze-first";
+        session
+            .cancel_all_orders(CancelAllOrdersRequestV1 {
+                context: context_for_arrival(&session, &profile, first_request_id, 2, 250_000),
+                idempotency_key: idempotency_key.to_owned(),
+            })
+            .expect("登记首次全撤");
+        session
+            .session
+            .advance_public_visibility_through(250_000, next_visibility_position)
+            .expect("闭合首次全撤公开前缀");
+        let prepared = prepare_cancel_execution_drive_v2(&mut session, 250_000, 0)
+            .expect("准备首次全撤 composer");
+        let first_target_ids = prepared
+            .cancel_effects
+            .candidate_record()
+            .expect("首次全撤必须暂存 root effect")
+            .targets
+            .iter()
+            .map(|target| target.platform_order_id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(first_target_ids.len(), 2);
+        assert!(first_target_ids.windows(2).all(|pair| pair[0] < pair[1]));
+        let [first_result] = prepared.evidence.logical_action_results.as_slice() else {
+            panic!("首次全撤必须形成唯一逻辑动作结果");
+        };
+        let DirectResponsePartV1::CancelAll { targets, .. } = &first_result.part else {
+            panic!("首次全撤必须形成 CancelAll 结果");
+        };
+        assert_eq!(targets.len(), 2);
+        assert!(targets.iter().all(|target| {
+            target.cancel_effect_disposition == CancelEffectDispositionV1::NewEffect
+                && matches!(target.outcome, CancelTargetOutcomeV1::Canceled(_))
+        }));
+        prepared
+            .into_committable()
+            .expect("首次全撤 composer 必须可提交")
+            .commit();
+        assert_eq!(session.cancel_effect_records.len(), 1);
+        let first_private_through = session
+            .session
+            .recovered_pending_private_facts()
+            .iter()
+            .map(|(_, received_at_utc_ms, _)| *received_at_utc_ms)
+            .max()
+            .expect("首次全撤必须形成私有输出");
+        assert_eq!(
+            session.drive_private_delivery_after_platform_through_for_tests(first_private_through),
+            Ok(SubmissionDeliveryDispositionV1::Delivered)
+        );
+
+        let later_request_id = "cancel-all-v2-target-freeze-later-order";
+        let later = session
+            .post_order(PostOrderRequestV1 {
+                context: context_for_arrival(&session, &profile, later_request_id, 3, 350_000),
+                idempotency_key: "cancel-all-v2-target-freeze-later-idempotency".to_owned(),
+                item: PostOrderItemV1 {
+                    item_id: "cancel-all-v2-target-freeze-later-item".to_owned(),
+                    order: SimBuyOrderV1 {
+                        condition_id: long_market().condition_id,
+                        token_id: long_asset("1", 0, "Up").token_id,
+                        kind: SimBuyOrderKindV1::GtcLimit {
+                            limit_price_pusd_per_share: Decimal::new(4, 1),
+                            size_shares: Decimal::new(5, 0),
+                            post_only: true,
+                        },
+                    },
+                },
+            })
+            .expect("首次全撤后登记新订单");
+        let later_at = later.item.effective_processing_at_utc_ms;
+        session
+            .session
+            .advance_public_visibility_through(later_at, next_visibility_position)
+            .expect("闭合首次全撤后新订单公开前缀");
+        assert_eq!(
+            session.drive_next_execution_action_through(later_at),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        let later_order_id = session
+            .session
+            .execution_state()
+            .orders()
+            .find(|order| order.global_request_id == later_request_id)
+            .expect("首次全撤后必须形成新活动订单")
+            .platform_order_id
+            .clone();
+        let later_private_through = session
+            .session
+            .recovered_pending_private_facts()
+            .iter()
+            .map(|(_, received_at_utc_ms, _)| *received_at_utc_ms)
+            .max()
+            .expect("新订单必须形成私有输出");
+        assert_eq!(
+            session.drive_private_delivery_after_platform_through_for_tests(later_private_through),
+            Ok(SubmissionDeliveryDispositionV1::Delivered)
+        );
+
+        let retry_request_id = "cancel-all-v2-target-freeze-retry";
+        session
+            .cancel_all_orders(CancelAllOrdersRequestV1 {
+                context: context_for_arrival(&session, &profile, retry_request_id, 4, 450_000),
+                idempotency_key: idempotency_key.to_owned(),
+            })
+            .expect("以新逻辑请求复用首次全撤幂等键");
+        session
+            .session
+            .advance_public_visibility_through(450_000, next_visibility_position)
+            .expect("闭合全撤幂等复用公开前缀");
+        let before_revision = session.query_projection_revision();
+        let before_effect_count = session.cancel_effect_records.len();
+        let prepared = prepare_cancel_execution_drive_v2(&mut session, 450_000, 0)
+            .expect("准备既有全撤效果 composer");
+        assert!(prepared.cancel_effects.record_to_insert.is_none());
+        assert_eq!(
+            prepared
+                .cancel_effects
+                .candidate_record()
+                .expect("既有全撤效果必须保留首次 root record")
+                .targets
+                .iter()
+                .map(|target| target.platform_order_id.clone())
+                .collect::<Vec<_>>(),
+            first_target_ids
+        );
+        assert!(prepared.lifecycle.entry_inserts.is_empty());
+        let [retry_result] = prepared.evidence.logical_action_results.as_slice() else {
+            panic!("既有全撤效果必须形成唯一逻辑动作结果");
+        };
+        let DirectResponsePartV1::CancelAll { targets, .. } = &retry_result.part else {
+            panic!("既有全撤效果必须形成 CancelAll 结果");
+        };
+        assert_eq!(
+            targets
+                .iter()
+                .map(|target| target.platform_order_id.clone())
+                .collect::<Vec<_>>(),
+            first_target_ids
+        );
+        assert!(targets.iter().all(|target| {
+            target.cancel_effect_disposition == CancelEffectDispositionV1::ExistingEffect
+                && matches!(target.outcome, CancelTargetOutcomeV1::Canceled(_))
+        }));
+        assert_eq!(
+            prepared
+                .evidence
+                .private_output_drafts
+                .iter()
+                .filter(|draft| matches!(draft, DurablePrivateOutputDraftV1::Lifecycle { .. }))
+                .count(),
+            0,
+            "既有全撤效果不得为首次目标或后来订单重复形成生命周期反馈"
+        );
+        prepared
+            .into_committable()
+            .expect("既有全撤效果 composer 必须可提交")
+            .commit();
+        assert_eq!(session.cancel_effect_records.len(), before_effect_count);
+        assert_eq!(session.query_projection_revision(), before_revision);
+        let later_order = session
+            .session
+            .execution_state()
+            .order(&later_order_id)
+            .expect("后来订单仍必须可查询");
+        assert_eq!(later_order.open_base_units, 5_000_000);
+        assert_eq!(later_order.canceled_base_units, 0);
+        let retry_draft = session
+            .direct_response_outbox
+            .draft(retry_request_id)
+            .expect("既有全撤效果必须形成直接响应草稿");
+        let [DirectResponsePartV1::CancelAll { targets, .. }] = retry_draft.parts.as_slice() else {
+            panic!("既有全撤直接响应必须只有一个 CancelAll 结果");
+        };
+        assert_eq!(
+            targets
+                .iter()
+                .map(|target| target.platform_order_id.clone())
+                .collect::<Vec<_>>(),
+            first_target_ids
         );
     }
 
@@ -33135,7 +34456,7 @@ mod tests {
             >()
             .expect("恢复 coordinator Paper V2 GTD 日志");
         assert_eq!(recovered.tail.len(), 1);
-        let tail = &recovered.tail[0];
+        let tail = recovered.tail[0].clone();
         assert_eq!(
             tail.recovery_operation,
             DurableRecoveryOperationV2::DriveExecutionThrough {
@@ -34911,8 +36232,11 @@ mod tests {
         let rules = successful_snapshot_for_sim_tests().await;
         let profile = load_embedded_proxy_latency_profile().expect("加载 Paper V2 时延配置");
         let scenario = long_scenario();
-        let mut process =
-            execution_process_for_tests(rules, Arc::clone(&profile), Arc::clone(&scenario));
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
         let spec = long_session_spec(&scenario, SimCallerRoleV1::Paper, "paper-v2-cancel-orders");
         let mut session =
             process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
@@ -35031,31 +36355,100 @@ mod tests {
                 Vec::new(),
             ))
             .expect("闭合批撤公开前缀");
-        let baseline_state = session.runtime_state();
-        let baseline_checkpoint = baseline_state.checkpoint(None);
-        let prepared = prepare_execution_transition_v2(baseline_state.clone(), cancel_at)
-            .expect("准备 Paper V2 批撤候选");
-        assert_eq!(
-            prepared.disposition,
-            SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: true,
-            }
+        let application_checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
+            &process,
+            &session,
+            rules.as_ref(),
         );
-        let prepared_evidence = prepared
-            .evidence
-            .as_ref()
-            .expect("批撤必须形成 V2 逻辑证据");
-        assert_eq!(prepared_evidence.logical_action_results.len(), 2);
-        let mut action_ordinals = prepared_evidence
-            .logical_action_results
-            .iter()
-            .map(|result| result.batch_item_ordinal)
-            .collect::<Vec<_>>();
-        action_ordinals.sort_unstable();
-        assert_eq!(action_ordinals, vec![0, 1]);
-        assert_eq!(prepared_evidence.private_output_drafts.len(), 3);
+        let directory = tempfile::tempdir().expect("创建 Paper V2 批撤协调器临时目录");
+        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
+            directory.path().join("paper-cancel-orders-tail"),
+            &session,
+            &application_checkpoint,
+        )
+        .expect("创建 Paper V2 批撤协调器");
+        let before_failure_state = session.durable_checkpoint();
+        let before_failure_cursor = coordinator.cursor_for_tests();
+        let before_cancel_effect_count = session.cancel_effect_records.len();
+        coordinator
+            .store
+            .install_transaction_log_insert_failure_for_tests()
+            .expect("安装 Paper V2 批撤 INSERT 失败触发器");
+        reset_execution_state_clone_count_for_tests();
+        reset_request_registration_preparation_counts_v2();
+        assert!(matches!(
+            coordinator.drive_cancel_execution_through(&mut session, cancel_at),
+            Err(SubmissionProcessingErrorV1::Session(SessionError::Durability(message)))
+                if message.contains("SQLite")
+        ));
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
         assert_eq!(
-            prepared_evidence
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(session.durable_checkpoint(), before_failure_state);
+        assert_eq!(
+            session.cancel_effect_records.len(),
+            before_cancel_effect_count
+        );
+        assert_eq!(coordinator.cursor_for_tests(), before_failure_cursor);
+        assert_eq!(coordinator.encoded_transaction_count_for_tests, 1);
+        assert_eq!(coordinator.append_attempt_count_for_tests, 1);
+        assert_eq!(coordinator.append_success_count_for_tests, 0);
+        let failed_recovery = coordinator
+            .store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("INSERT 失败后读取 Paper V2 批撤日志");
+        assert!(failed_recovery.tail.is_empty());
+        drop(before_failure_state);
+        coordinator
+            .store
+            .remove_transaction_log_insert_failure_for_tests()
+            .expect("移除 Paper V2 批撤 INSERT 失败触发器");
+
+        reset_execution_state_clone_count_for_tests();
+        reset_request_registration_preparation_counts_v2();
+        assert_eq!(
+            coordinator.drive_cancel_execution_through(&mut session, cancel_at),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(coordinator.cursor_for_tests().0, 1);
+        assert_eq!(coordinator.encoded_transaction_count_for_tests, 2);
+        assert_eq!(coordinator.append_attempt_count_for_tests, 2);
+        assert_eq!(coordinator.append_success_count_for_tests, 1);
+        assert_eq!(
+            session.cancel_effect_records.len(),
+            before_cancel_effect_count + 1
+        );
+        assert_eq!(session.available_pusd(), Decimal::new(1_000, 0));
+        assert_eq!(session.principal_encumbered_pusd(), Decimal::ZERO);
+        let online_checkpoint = session.durable_checkpoint();
+
+        let recovered = coordinator
+            .store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("恢复 Paper V2 批撤协调器日志");
+        assert_eq!(recovered.tail.len(), 1);
+        let tail = &recovered.tail[0];
+        assert_eq!(tail.evidence.logical_action_results.len(), 2);
+        assert_eq!(tail.evidence.private_output_drafts.len(), 3);
+        assert_eq!(
+            tail.evidence
                 .private_output_drafts
                 .iter()
                 .filter(|draft| matches!(
@@ -35068,7 +36461,7 @@ mod tests {
             2
         );
         assert_eq!(
-            prepared_evidence
+            tail.evidence
                 .private_output_drafts
                 .iter()
                 .filter(|draft| matches!(
@@ -35079,85 +36472,30 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(prepared_evidence.account_deltas.len(), 2);
-        assert_eq!(prepared_evidence.query_projection_revision, Some(3));
-        assert_eq!(
-            prepared
-                .candidate_state
-                .session
-                .execution_state()
-                .available_pusd()
-                .expect("候选可用余额适合 Decimal"),
-            Decimal::new(1_000, 0)
+        assert_eq!(tail.evidence.account_deltas.len(), 2);
+        assert_eq!(tail.evidence.query_projection_revision, Some(3));
+        let session_id = session.session_spec().session_id.clone();
+        let restored_baseline = restore_recoverable_paper_application_session_for_tests(
+            &process,
+            recovered
+                .checkpoint
+                .expect("批撤恢复必须有正式应用检查点")
+                .checkpoint,
+            &session_id,
         );
-        assert_eq!(
-            prepared
-                .candidate_state
-                .session
-                .execution_state()
-                .principal_encumbered_pusd()
-                .expect("候选占用余额适合 Decimal"),
-            Decimal::ZERO
-        );
-
-        assert_eq!(
-            session.drive_next_execution_action_through(cancel_at),
-            Ok(SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: true,
-            })
-        );
-        let online_checkpoint = session.durable_checkpoint();
-        assert_eq!(prepared.candidate_state.checkpoint(None), online_checkpoint);
-        assert_eq!(session.available_pusd(), Decimal::new(1_000, 0));
-        assert_eq!(session.principal_encumbered_pusd(), Decimal::ZERO);
-
-        let directory = tempfile::tempdir().expect("创建 Paper V2 批撤日志临时目录");
-        let root = directory.path().join("paper-cancel-orders-tail");
-        let mut store = crate::persistence::LocalTransactionLogStoreV2::create_new(
-            root.clone(),
-            crate::persistence::TransactionLogIdentityV2::new(
-                session.session_spec().run_id.clone(),
-                crate::persistence::DurabilityProfileV2::RecoverablePaper,
-            ),
-        )
-        .expect("创建 Paper V2 批撤日志");
-        store
-            .publish_application_checkpoint(0, &baseline_checkpoint)
-            .expect("发布批撤前应用检查点");
-        store
-            .append_transaction(
-                prepared_evidence,
-                &DurableRecoveryOperationV2::DriveExecutionThrough {
-                    effective_processing_at_utc_ms: cancel_at,
-                },
-            )
-            .expect("一次提交 Paper V2 批撤事务");
-        drop(store);
-
-        let store = crate::persistence::LocalTransactionLogStoreV2::open_recovery(root)
-            .expect("重开 Paper V2 批撤日志");
-        let recovered = store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                ExecutionSessionCheckpointV1,
-            >()
-            .expect("恢复 Paper V2 批撤日志");
-        assert_eq!(recovered.tail.len(), 1);
-        let recovered_checkpoint = recovered.checkpoint.expect("批撤恢复必须有基线检查点");
-        let (restored_baseline, downstream) = ExecutionSessionStateV1::restore(
-            &process.inner,
-            recovered_checkpoint.checkpoint,
-            &BTreeMap::new(),
-        )
-        .expect("恢复 Paper V2 批撤基线");
-        assert_eq!(downstream, None);
+        reset_execution_state_clone_count_for_tests();
+        reset_request_registration_preparation_counts_v2();
         let replayed = replay_execution_operation_v2(
             restored_baseline,
-            &recovered.tail[0].evidence,
-            recovered.tail[0].recovery_operation,
+            &tail.evidence,
+            tail.recovery_operation,
         )
-        .expect("重放 Paper V2 批撤尾日志");
+        .expect("用同一稀疏撤单核心重放 Paper V2 批撤尾日志");
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
         assert_eq!(replayed.checkpoint(None), online_checkpoint);
     }
 
