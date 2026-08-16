@@ -34,9 +34,10 @@ use crate::market::{
     MillisecondBucketClosureV1,
 };
 use crate::matching::{
-    CancelOrderStateDispositionV1, ExecutionStateV1, MatchingMathErrorV1, MatchingStateErrorV1,
-    QueueMatchPlanV1, SettlementLifecycleActionV1, SettlementLifecycleEffectV1, SimFillRecordV1,
-    SimLiquidityRoleV1, SimOrderKindStateV1, SimOrderRecordV1, SimOrderTerminalReasonV1,
+    AuthorizedMarketLifecycleEffectV2, CancelOrderStateDispositionV1, ExecutionStateV1,
+    MatchingMathErrorV1, MatchingStateErrorV1, PreparedExecutionDriveDeltaV2, QueueMatchPlanV1,
+    SettlementLifecycleActionV1, SettlementLifecycleEffectV1, SimFillRecordV1, SimLiquidityRoleV1,
+    SimOrderKindStateV1, SimOrderRecordV1, SimOrderTerminalReasonV1,
     TerminalExecutionMarketEvictionV1, TradeEconomicDispositionStateV1,
     TradeFinalityLifecycleEffectsV1, TradeFinalityTransitionEffectV1,
     allocate_taker_fee_micro_units_v1, cumulative_segment_quote_units_v1,
@@ -78,14 +79,15 @@ pub use crate::session::{
     SessionInitializationStateV1, SessionSpecV2, SimCallerRoleV1, SimProcessRootErrorV1,
 };
 use crate::session::{
-    InputPathSealOutcomeV1, MutationResolutionDispositionV1, ParsedLogicalActionV1,
-    ParsedMethodTimingV1, PlatformPrefixCursorV1, PreparedBusinessMarketUseV1,
-    PreparedPrivateFactSliceV2, PreparedRequestScheduleV1, PreparedSimSessionV2,
-    PublicVisibilityCursorV1, QueuedLogicalActionV1, RegisteredLogicalScheduleV1,
-    SESSION_ID_MAX_BYTES_V1, STABLE_ID_MAX_BYTES_V1, SessionCheckpointErrorV1, SessionError,
-    SimProcessRoot, SimProcessRootCheckpointV1, SimSession, SimSessionCheckpointV1,
-    session_id_is_valid_v1, validate_activation_request, validate_durable_market_enrollment_chain,
-    validate_failure_request, validate_market_enrollment_request, validate_session_spec,
+    InputPathSealOutcomeV1, LifecycleFeedbackTimingV1, MutationResolutionDispositionV1,
+    ParsedLogicalActionV1, ParsedMethodTimingV1, PlatformPrefixCursorV1,
+    PreparedBusinessMarketUseV1, PreparedPrivateFactSliceV2, PreparedRequestScheduleV1,
+    PreparedSimSessionV2, PublicVisibilityCursorV1, QueuedLogicalActionV1,
+    RegisteredLogicalScheduleV1, SESSION_ID_MAX_BYTES_V1, STABLE_ID_MAX_BYTES_V1,
+    SessionCheckpointErrorV1, SessionError, SimProcessRoot, SimProcessRootCheckpointV1, SimSession,
+    SimSessionCheckpointV1, session_id_is_valid_v1, validate_activation_request,
+    validate_durable_market_enrollment_chain, validate_failure_request,
+    validate_market_enrollment_request, validate_session_spec,
 };
 
 const POST_ORDERS_MAX_ITEMS: usize = 15;
@@ -4895,7 +4897,13 @@ fn session_resource_usage(
 ) -> Result<crate::resource::SimulationSessionResourceUsageV1, SessionError> {
     let core = checkpoint.session.resource_core_counts();
     let component_bytes = checkpoint.session.resource_component_bytes()?;
-    let checkpoint_bytes = encoded_resource_bytes(checkpoint)?;
+    let checkpoint_bytes = encoded_resource_bytes(checkpoint)?
+        .checked_add(
+            checkpoint
+                .session
+                .resource_runtime_request_counter_bytes()?,
+        )
+        .ok_or_else(|| SessionError::Durability("会话内存状态资源字节溢出".to_owned()))?;
     let request_bytes = encoded_resource_bytes(&(
         &checkpoint.pending_requests,
         &checkpoint.mutation_payloads,
@@ -5019,7 +5027,22 @@ fn candidate_resource_usage(
         run.query_cache = add_resource_quantity(run.query_cache, usage.query_cache)?;
         run.indexes = add_resource_quantity(run.indexes, usage.indexes)?;
     }
-    let run_checkpoint_bytes = encoded_resource_bytes(checkpoint)?;
+    let runtime_request_counter_bytes =
+        checkpoint
+            .sessions
+            .values()
+            .try_fold(0_u64, |total, session_checkpoint| {
+                total
+                    .checked_add(
+                        session_checkpoint
+                            .session
+                            .resource_runtime_request_counter_bytes()?,
+                    )
+                    .ok_or_else(|| SessionError::Durability("运行请求计数资源字节溢出".to_owned()))
+            })?;
+    let run_checkpoint_bytes = encoded_resource_bytes(checkpoint)?
+        .checked_add(runtime_request_counter_bytes)
+        .ok_or_else(|| SessionError::Durability("运行内存状态资源字节溢出".to_owned()))?;
     run.in_memory_state.records = run
         .in_memory_state
         .records
@@ -8257,6 +8280,154 @@ struct PreparedPlatformBucketTransitionV2 {
     evidence: Option<DurableLogicalTransactionEvidenceV2>,
 }
 
+enum PreparedExecutingClosedBucketDriveAttemptV2<'a> {
+    Applied(PreparedExecutingClosedBucketDriveV2<'a>),
+    FailedInputSeal(InputPathSealOutcomeV1),
+}
+
+struct PreparedExecutingClosedBucketDriveV2<'a> {
+    session: crate::session::PreparedClosedBucketSessionDriveV2<'a>,
+    query: PreparedQueryStateDeltaV2<'a>,
+    lifecycle: PreparedLifecycleOutboxDeltaV2<'a>,
+    terminal_projection_condition_ids: BTreeSet<String>,
+    evidence: DurableLogicalTransactionEvidenceV2,
+    recovery_operation: DurableRecoveryOperationV2,
+}
+
+struct CommittableExecutingClosedBucketDriveV2<'a> {
+    session: crate::session::CommittableClosedBucketSessionDriveV2<'a>,
+    query: CommittableQueryStateDeltaV2<'a>,
+    lifecycle: PreparedLifecycleOutboxDeltaV2<'a>,
+    evidence: DurableLogicalTransactionEvidenceV2,
+    recovery_operation: DurableRecoveryOperationV2,
+}
+
+struct PreparedMarketOnlyClosedBucketDriveV2<'a> {
+    session: crate::session::PreparedMarketOnlyClosedBucketSessionDriveV2<'a>,
+    query: PreparedQueryStateDeltaV2<'a>,
+    terminal_projection_condition_ids: BTreeSet<String>,
+    evidence: DurableLogicalTransactionEvidenceV2,
+    recovery_operation: DurableRecoveryOperationV2,
+}
+
+struct CommittableMarketOnlyClosedBucketDriveV2<'a> {
+    session: crate::session::CommittableMarketOnlyClosedBucketSessionDriveV2<'a>,
+    query: CommittableQueryStateDeltaV2<'a>,
+    evidence: DurableLogicalTransactionEvidenceV2,
+    recovery_operation: DurableRecoveryOperationV2,
+}
+
+struct PreparedClosedBucketClosureUpgradeDriveV2<'a> {
+    session: crate::session::PreparedClosedBucketClosureUpgradeSessionV2<'a>,
+    query: PreparedQueryStateDeltaV2<'a>,
+    terminal_projection_condition_ids: BTreeSet<String>,
+    evidence: DurableLogicalTransactionEvidenceV2,
+    recovery_operation: DurableRecoveryOperationV2,
+}
+
+struct CommittableClosedBucketClosureUpgradeDriveV2<'a> {
+    session: crate::session::CommittableClosedBucketClosureUpgradeSessionV2<'a>,
+    query: CommittableQueryStateDeltaV2<'a>,
+    evidence: DurableLogicalTransactionEvidenceV2,
+    recovery_operation: DurableRecoveryOperationV2,
+}
+
+impl<'a> PreparedExecutingClosedBucketDriveV2<'a> {
+    fn into_committable(
+        self,
+    ) -> Result<CommittableExecutingClosedBucketDriveV2<'a>, MarketEventErrorV1> {
+        let Self {
+            session,
+            query,
+            lifecycle,
+            terminal_projection_condition_ids,
+            evidence,
+            recovery_operation,
+        } = self;
+        let query = query
+            .into_committable()
+            .map_err(|error| MarketEventErrorV1::ExecutionState(error.to_string()))?;
+        let session = session.into_committable(terminal_projection_condition_ids)?;
+        Ok(CommittableExecutingClosedBucketDriveV2 {
+            session,
+            query,
+            lifecycle,
+            evidence,
+            recovery_operation,
+        })
+    }
+}
+
+impl CommittableExecutingClosedBucketDriveV2<'_> {
+    fn commit(self) {
+        self.lifecycle.commit();
+        self.query.commit();
+        self.session.commit();
+    }
+}
+
+impl<'a> PreparedMarketOnlyClosedBucketDriveV2<'a> {
+    fn into_committable(
+        self,
+    ) -> Result<CommittableMarketOnlyClosedBucketDriveV2<'a>, MarketEventErrorV1> {
+        let Self {
+            session,
+            query,
+            terminal_projection_condition_ids,
+            evidence,
+            recovery_operation,
+        } = self;
+        let query = query
+            .into_committable()
+            .map_err(|error| MarketEventErrorV1::ExecutionState(error.to_string()))?;
+        let session = session.into_committable(terminal_projection_condition_ids)?;
+        Ok(CommittableMarketOnlyClosedBucketDriveV2 {
+            session,
+            query,
+            evidence,
+            recovery_operation,
+        })
+    }
+}
+
+impl CommittableMarketOnlyClosedBucketDriveV2<'_> {
+    fn commit(self) {
+        self.query.commit();
+        self.session.commit();
+    }
+}
+
+impl<'a> PreparedClosedBucketClosureUpgradeDriveV2<'a> {
+    fn into_committable(
+        self,
+    ) -> Result<CommittableClosedBucketClosureUpgradeDriveV2<'a>, MarketEventErrorV1> {
+        let Self {
+            session,
+            query,
+            terminal_projection_condition_ids,
+            evidence,
+            recovery_operation,
+        } = self;
+        let query = query
+            .into_committable()
+            .map_err(|error| MarketEventErrorV1::ExecutionState(error.to_string()))?;
+        let session = session.into_committable(terminal_projection_condition_ids)?;
+        Ok(CommittableClosedBucketClosureUpgradeDriveV2 {
+            session,
+            query,
+            evidence,
+            recovery_operation,
+        })
+    }
+}
+
+impl CommittableClosedBucketClosureUpgradeDriveV2<'_> {
+    fn commit(self) {
+        self.query.commit();
+        self.session.commit();
+    }
+}
+
 struct PreparedExecutionTransitionV2 {
     candidate_state: ExecutionSessionStateV1,
     disposition: SubmissionDriveDispositionV1,
@@ -8338,6 +8509,18 @@ struct PreparedCancelExecutionDriveV2<'a> {
     disposition: SubmissionDriveDispositionV1,
 }
 
+struct PreparedPostExecutionDriveV2<'a> {
+    scheduled: crate::session::PreparedScheduledSessionDriveV2<'a>,
+    query: PreparedQueryStateDeltaV2<'a>,
+    submission_effect: PreparedSubmissionEffectRecordDeltaV2<'a>,
+    direct: PreparedDirectResponseEntryDeltaV2<'a>,
+    lifecycle: PreparedLifecycleOutboxDeltaV2<'a>,
+    terminal_projection_condition_ids: BTreeSet<String>,
+    evidence: DurableLogicalTransactionEvidenceV2,
+    recovery_operation: DurableRecoveryOperationV2,
+    disposition: SubmissionDriveDispositionV1,
+}
+
 struct CommittableCancelExecutionDriveV2<'a> {
     session: crate::session::CommittableScheduledSessionDriveV2<'a>,
     query: CommittableQueryStateDeltaV2<'a>,
@@ -8347,6 +8530,60 @@ struct CommittableCancelExecutionDriveV2<'a> {
     evidence: DurableLogicalTransactionEvidenceV2,
     recovery_operation: DurableRecoveryOperationV2,
     disposition: SubmissionDriveDispositionV1,
+}
+
+struct CommittablePostExecutionDriveV2<'a> {
+    session: crate::session::CommittableScheduledSessionDriveV2<'a>,
+    query: CommittableQueryStateDeltaV2<'a>,
+    submission_effect: CommittableSubmissionEffectRecordDeltaV2<'a>,
+    direct: PreparedDirectResponseEntryDeltaV2<'a>,
+    lifecycle: PreparedLifecycleOutboxDeltaV2<'a>,
+    evidence: DurableLogicalTransactionEvidenceV2,
+    recovery_operation: DurableRecoveryOperationV2,
+    disposition: SubmissionDriveDispositionV1,
+}
+
+impl<'a> PreparedPostExecutionDriveV2<'a> {
+    fn into_committable(
+        self,
+    ) -> Result<CommittablePostExecutionDriveV2<'a>, SubmissionProcessingErrorV1> {
+        let Self {
+            scheduled,
+            query,
+            submission_effect,
+            direct,
+            lifecycle,
+            terminal_projection_condition_ids,
+            evidence,
+            recovery_operation,
+            disposition,
+        } = self;
+        let query = query.into_committable()?;
+        let submission_effect = submission_effect.into_committable()?;
+        let session = scheduled
+            .into_committable(terminal_projection_condition_ids)
+            .map_err(submission_processing_error_from_market_event_v2)?;
+        Ok(CommittablePostExecutionDriveV2 {
+            session,
+            query,
+            submission_effect,
+            direct,
+            lifecycle,
+            evidence,
+            recovery_operation,
+            disposition,
+        })
+    }
+}
+
+impl CommittablePostExecutionDriveV2<'_> {
+    fn commit(self) {
+        self.lifecycle.commit();
+        self.query.commit();
+        self.submission_effect.commit();
+        self.direct.commit();
+        self.session.commit();
+    }
 }
 
 impl<'a> PreparedCancelExecutionDriveV2<'a> {
@@ -8524,7 +8761,7 @@ impl ExecutionSessionStateV1 {
             mutation_payloads: self.mutation_payloads.clone(),
             submission_effect_records: self.submission_effect_records.clone(),
             cancel_effect_records: self.cancel_effect_records.clone(),
-            query_state: self.query_state.clone(),
+            query_state: self.query_state.detached_clone(),
             direct_response_outbox: self.direct_response_outbox.clone(),
             lifecycle_outbox: self.lifecycle_outbox.clone(),
             compacted_confirmed_private_deliveries: self
@@ -10186,6 +10423,79 @@ impl RecoverablePaperCoordinatorV2 {
         }
     }
 
+    fn apply_closed_market_event_bucket_v2(
+        &mut self,
+        session: &mut SimExecutionSessionV1,
+        bucket: &ClosedMarketEventBucketV1,
+    ) -> Result<MarketBucketApplyDispositionV1, MarketEventErrorV1> {
+        self.require_ready()?;
+        self.require_bound_session(session)?;
+        if session.persistence.is_some() {
+            return Err(SessionError::Durability(
+                "内部 RecoverablePaper V2 闭桶协调器禁止与 V1 持久协调器双写".to_owned(),
+            )
+            .into());
+        }
+        bucket.validated_durable_reference_for_recovery()?;
+        if session.session.last_applied_bucket_identity_matches(bucket) {
+            return Ok(MarketBucketApplyDispositionV1::PhysicalRetry);
+        }
+        if session
+            .session
+            .last_applied_bucket_coordinates_match(bucket)
+        {
+            let prepared = prepare_closed_bucket_closure_upgrade_drive_fields_v2(
+                &mut session.session,
+                &mut session.query_state,
+                bucket,
+            )?
+            .into_committable()?;
+            self.append_logical_transaction(&prepared.evidence, &prepared.recovery_operation)?;
+            prepared.commit();
+            return Ok(MarketBucketApplyDispositionV1::PhysicalRetry);
+        }
+        if !bucket.drives_execution_for(session.session_spec().caller_role) {
+            let prepared = prepare_market_only_closed_bucket_drive_fields_v2(
+                &mut session.session,
+                &mut session.query_state,
+                bucket,
+                None,
+            )?
+            .into_committable()?;
+            self.append_logical_transaction(&prepared.evidence, &prepared.recovery_operation)?;
+            prepared.commit();
+            return Ok(MarketBucketApplyDispositionV1::Applied);
+        }
+
+        let occupied_lifecycle_capacity_leases =
+            self.occupied_lifecycle_capacity_leases(&session.lifecycle_outbox);
+        match prepare_executing_closed_bucket_drive_fields_v2(
+            &mut session.session,
+            &mut session.query_state,
+            &mut session.lifecycle_outbox,
+            bucket,
+            occupied_lifecycle_capacity_leases,
+        )? {
+            PreparedExecutingClosedBucketDriveAttemptV2::Applied(prepared) => {
+                let prepared = prepared.into_committable()?;
+                self.append_logical_transaction(&prepared.evidence, &prepared.recovery_operation)?;
+                prepared.commit();
+            }
+            PreparedExecutingClosedBucketDriveAttemptV2::FailedInputSeal(outcome) => {
+                let prepared = prepare_market_only_closed_bucket_drive_fields_v2(
+                    &mut session.session,
+                    &mut session.query_state,
+                    bucket,
+                    Some(outcome),
+                )?
+                .into_committable()?;
+                self.append_logical_transaction(&prepared.evidence, &prepared.recovery_operation)?;
+                prepared.commit();
+            }
+        }
+        Ok(MarketBucketApplyDispositionV1::Applied)
+    }
+
     fn drive_cancel_execution_through(
         &mut self,
         session: &mut SimExecutionSessionV1,
@@ -10202,6 +10512,33 @@ impl RecoverablePaperCoordinatorV2 {
         let occupied_lifecycle_capacity_leases =
             self.occupied_lifecycle_capacity_leases(&session.lifecycle_outbox);
         let prepared = prepare_cancel_execution_drive_v2(
+            session,
+            requested_cutoff_utc_ms,
+            occupied_lifecycle_capacity_leases,
+        )?
+        .into_committable()?;
+        let disposition = prepared.disposition;
+        self.append_logical_transaction(&prepared.evidence, &prepared.recovery_operation)?;
+        prepared.commit();
+        Ok(disposition)
+    }
+
+    fn drive_post_execution_through(
+        &mut self,
+        session: &mut SimExecutionSessionV1,
+        requested_cutoff_utc_ms: i64,
+    ) -> Result<SubmissionDriveDispositionV1, SubmissionProcessingErrorV1> {
+        self.require_ready()?;
+        self.require_bound_session(session)?;
+        if session.persistence.is_some() {
+            return Err(SessionError::Durability(
+                "内部 RecoverablePaper V2 Post 协调器禁止与 V1 持久协调器双写".to_owned(),
+            )
+            .into());
+        }
+        let occupied_lifecycle_capacity_leases =
+            self.occupied_lifecycle_capacity_leases(&session.lifecycle_outbox);
+        let prepared = prepare_post_execution_drive_v2(
             session,
             requested_cutoff_utc_ms,
             occupied_lifecycle_capacity_leases,
@@ -10687,7 +11024,7 @@ fn replay_request_registration_operation_v2(
 }
 
 fn replay_platform_bucket_operation_v2(
-    state: ExecutionSessionStateV1,
+    mut state: ExecutionSessionStateV1,
     evidence: &DurableLogicalTransactionEvidenceV2,
     operation: DurableRecoveryOperationV2,
     reader: &mut PaperMarketEventRecoveryReaderV1,
@@ -10717,21 +11054,118 @@ fn replay_platform_bucket_operation_v2(
         ));
     }
     let closed_bucket = read_validated_paper_market_event_bucket(bucket, reader)?;
-    let prepared =
-        prepare_platform_bucket_transition_v2(state, closed_bucket).map_err(|error| {
-            SimExecutionPersistenceErrorV1::Session(format!("V2 平台闭桶尾日志无法重放：{error}"))
+    if state
+        .session
+        .last_applied_bucket_coordinates_match(&closed_bucket)
+    {
+        let prepared = prepare_closed_bucket_closure_upgrade_drive_fields_v2(
+            &mut state.session,
+            &mut state.query_state,
+            &closed_bucket,
+        )
+        .and_then(PreparedClosedBucketClosureUpgradeDriveV2::into_committable)
+        .map_err(|error| {
+            SimExecutionPersistenceErrorV1::Session(format!(
+                "V2 闭桶封口升级稀疏尾日志无法重放：{error}"
+            ))
         })?;
-    let Some(recomputed_evidence) = prepared.evidence else {
-        return Err(SimExecutionPersistenceErrorV1::Session(
-            "V2 平台闭桶尾日志重复应用".to_owned(),
-        ));
-    };
-    if recomputed_evidence != *evidence {
-        return Err(SimExecutionPersistenceErrorV1::Session(
-            "V2 平台闭桶尾日志与重算候选不一致".to_owned(),
-        ));
+        if prepared.recovery_operation != operation {
+            return Err(SimExecutionPersistenceErrorV1::Session(
+                "V2 闭桶封口升级恢复操作与重算候选不符".to_owned(),
+            ));
+        }
+        if prepared.evidence != *evidence {
+            return Err(SimExecutionPersistenceErrorV1::Session(
+                "V2 闭桶封口升级尾日志与重算候选不一致".to_owned(),
+            ));
+        }
+        prepared.commit();
+        return Ok(state);
     }
-    Ok(prepared.candidate_state)
+
+    if !closed_bucket.drives_execution_for(state.session.session_spec().caller_role) {
+        let prepared = prepare_market_only_closed_bucket_drive_fields_v2(
+            &mut state.session,
+            &mut state.query_state,
+            &closed_bucket,
+            None,
+        )
+        .and_then(PreparedMarketOnlyClosedBucketDriveV2::into_committable)
+        .map_err(|error| {
+            SimExecutionPersistenceErrorV1::Session(format!(
+                "V2 非执行闭桶稀疏尾日志无法重放：{error}"
+            ))
+        })?;
+        if prepared.recovery_operation != operation {
+            return Err(SimExecutionPersistenceErrorV1::Session(
+                "V2 非执行闭桶稀疏恢复操作与重算候选不符".to_owned(),
+            ));
+        }
+        if prepared.evidence != *evidence {
+            return Err(SimExecutionPersistenceErrorV1::Session(
+                "V2 非执行闭桶稀疏尾日志与重算候选不一致".to_owned(),
+            ));
+        }
+        prepared.commit();
+        return Ok(state);
+    }
+
+    match prepare_executing_closed_bucket_drive_fields_v2(
+        &mut state.session,
+        &mut state.query_state,
+        &mut state.lifecycle_outbox,
+        &closed_bucket,
+        0,
+    )
+    .map_err(|error| {
+        SimExecutionPersistenceErrorV1::Session(format!("V2 执行闭桶稀疏尾日志无法重放：{error}"))
+    })? {
+        PreparedExecutingClosedBucketDriveAttemptV2::Applied(prepared) => {
+            let prepared = prepared.into_committable().map_err(|error| {
+                SimExecutionPersistenceErrorV1::Session(format!(
+                    "V2 执行闭桶稀疏尾日志无法转为提交：{error}"
+                ))
+            })?;
+            if prepared.recovery_operation != operation {
+                return Err(SimExecutionPersistenceErrorV1::Session(
+                    "V2 执行闭桶稀疏恢复操作与重算候选不符".to_owned(),
+                ));
+            }
+            if prepared.evidence != *evidence {
+                return Err(SimExecutionPersistenceErrorV1::Session(
+                    "V2 执行闭桶稀疏尾日志与重算候选不一致".to_owned(),
+                ));
+            }
+            prepared.commit();
+            return Ok(state);
+        }
+        PreparedExecutingClosedBucketDriveAttemptV2::FailedInputSeal(outcome) => {
+            let prepared = prepare_market_only_closed_bucket_drive_fields_v2(
+                &mut state.session,
+                &mut state.query_state,
+                &closed_bucket,
+                Some(outcome),
+            )
+            .and_then(PreparedMarketOnlyClosedBucketDriveV2::into_committable)
+            .map_err(|error| {
+                SimExecutionPersistenceErrorV1::Session(format!(
+                    "V2 执行闭桶失败封口稀疏尾日志无法重放：{error}"
+                ))
+            })?;
+            if prepared.recovery_operation != operation {
+                return Err(SimExecutionPersistenceErrorV1::Session(
+                    "V2 执行闭桶失败封口恢复操作与重算候选不符".to_owned(),
+                ));
+            }
+            if prepared.evidence != *evidence {
+                return Err(SimExecutionPersistenceErrorV1::Session(
+                    "V2 执行闭桶失败封口尾日志与重算候选不一致".to_owned(),
+                ));
+            }
+            prepared.commit();
+            return Ok(state);
+        }
+    }
 }
 
 fn replay_execution_operation_v2(
@@ -10839,33 +11273,34 @@ fn replay_execution_operation_v2(
             return Ok(state);
         }
         Some(DirectResponseMethodV1::PostOrder | DirectResponseMethodV1::PostOrders) => {
-            let prepared = prepare_execution_transition_v2(state, effective_processing_at_utc_ms)
-                .map_err(|error| {
+            let prepared = prepare_post_execution_drive_fields_v2(
+                &mut state.session,
+                &state.pending_requests,
+                &mut state.submission_effect_records,
+                &mut state.query_state,
+                &mut state.direct_response_outbox,
+                &mut state.lifecycle_outbox,
+                effective_processing_at_utc_ms,
+                0,
+            )
+            .and_then(PreparedPostExecutionDriveV2::into_committable)
+            .map_err(|error| {
                 SessionCheckpointErrorV1::InvalidSessionState(format!(
-                    "V2 动作执行推进尾日志无法重放：{error:?}"
+                    "V2 Post 动作执行推进尾日志无法重放：{error:?}"
                 ))
             })?;
-            if prepared
-                .candidate_state
-                .session
-                .logical_platform_driven_through()
-                != Some(effective_processing_at_utc_ms)
-            {
+            if prepared.recovery_operation != expected_recovery_operation {
                 return Err(SessionCheckpointErrorV1::InvalidSessionState(
-                    "V2 动作执行推进恢复操作时点与重算候选不符".to_owned(),
+                    "V2 Post 动作执行推进恢复操作时点与重算候选不符".to_owned(),
                 ));
             }
-            let Some(recomputed_evidence) = prepared.evidence else {
+            if prepared.evidence != *evidence {
                 return Err(SessionCheckpointErrorV1::InvalidSessionState(
-                    "V2 动作执行推进尾日志重复应用".to_owned(),
-                ));
-            };
-            if recomputed_evidence != *evidence {
-                return Err(SessionCheckpointErrorV1::InvalidSessionState(
-                    "V2 动作执行推进尾日志与重算候选不一致".to_owned(),
+                    "V2 Post 动作执行推进尾日志与重算候选不一致".to_owned(),
                 ));
             }
-            return Ok(prepared.candidate_state);
+            prepared.commit();
+            return Ok(state);
         }
         None => {}
     }
@@ -11488,6 +11923,82 @@ pub(crate) struct Task41DiagnosticsV1 {
 struct SubmissionEffectRecordV1 {
     outcome: SubmissionItemOutcomeV1,
     formed_at_utc_ms: i64,
+}
+
+struct PreparedSubmissionEffectRecordDeltaV2<'a> {
+    records: &'a mut BTreeMap<String, SubmissionEffectRecordV1>,
+    effect_identity: String,
+    record_to_insert: Option<SubmissionEffectRecordV1>,
+    preparation_failed: bool,
+}
+
+struct CommittableSubmissionEffectRecordDeltaV2<'a> {
+    prepared: PreparedSubmissionEffectRecordDeltaV2<'a>,
+}
+
+impl<'a> PreparedSubmissionEffectRecordDeltaV2<'a> {
+    fn prepare(
+        records: &'a mut BTreeMap<String, SubmissionEffectRecordV1>,
+        effect_identity: String,
+    ) -> Self {
+        Self {
+            records,
+            effect_identity,
+            record_to_insert: None,
+            preparation_failed: false,
+        }
+    }
+
+    fn candidate_record(&self) -> Option<&SubmissionEffectRecordV1> {
+        self.record_to_insert
+            .as_ref()
+            .or_else(|| self.records.get(&self.effect_identity))
+    }
+
+    fn prepare_new_record(
+        &mut self,
+        record: SubmissionEffectRecordV1,
+    ) -> Result<(), SubmissionProcessingErrorV1> {
+        if self.preparation_failed {
+            return Err(SubmissionProcessingErrorV1::InternalInvariant(
+                "提交幂等效果准备已经失败",
+            ));
+        }
+        if self.record_to_insert.is_some() || self.records.contains_key(&self.effect_identity) {
+            self.preparation_failed = true;
+            return Err(SubmissionProcessingErrorV1::InternalInvariant(
+                "新提交幂等效果已存在终局结果",
+            ));
+        }
+        self.record_to_insert = Some(record);
+        Ok(())
+    }
+
+    fn into_committable(
+        self,
+    ) -> Result<CommittableSubmissionEffectRecordDeltaV2<'a>, SubmissionProcessingErrorV1> {
+        if self.preparation_failed {
+            return Err(SubmissionProcessingErrorV1::InternalInvariant(
+                "提交幂等效果准备已经失败",
+            ));
+        }
+        Ok(CommittableSubmissionEffectRecordDeltaV2 { prepared: self })
+    }
+}
+
+impl CommittableSubmissionEffectRecordDeltaV2<'_> {
+    fn commit(self) {
+        let PreparedSubmissionEffectRecordDeltaV2 {
+            records,
+            effect_identity,
+            record_to_insert,
+            preparation_failed,
+        } = self.prepared;
+        debug_assert!(!preparation_failed);
+        if let Some(record) = record_to_insert {
+            debug_assert!(records.insert(effect_identity, record).is_none());
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -12283,6 +12794,12 @@ impl QueryStateV1 {
             trade_history_retained_from_utc_ms: None,
             terminal_projections: Arc::new(TerminalQueryProjectionsV1::default()),
         }
+    }
+
+    fn detached_clone(&self) -> Self {
+        let mut detached = self.clone();
+        detached.terminal_projections = Arc::new(self.terminal_projections.as_ref().clone());
+        detached
     }
 
     fn prepare_delta_v2(&mut self) -> PreparedQueryStateDeltaV2<'_> {
@@ -14919,6 +15436,19 @@ impl SimExecutionSessionV1 {
     ) -> Result<SubmissionAdmissionDecisionV1, SubmissionPreparationErrorV1> {
         session.validate_in_flight_action(action)?;
         let item = Self::post_item_for_action(request, action)?;
+        let candidate_best_ask = session
+            .execution_state()
+            .best_executable_ask(&item.order.condition_id.0, &item.order.token_id.0);
+        Self::prepare_submission_against_candidate(session, action, request, candidate_best_ask)
+    }
+
+    fn prepare_submission_against_candidate(
+        session: &SimSession,
+        action: &QueuedLogicalActionV1,
+        request: &PendingDomainRequestV1,
+        candidate_best_ask: Option<Decimal>,
+    ) -> Result<SubmissionAdmissionDecisionV1, SubmissionPreparationErrorV1> {
+        let item = Self::post_item_for_action(request, action)?;
         let effective_at = action.key.effective_processing_at_utc_ms;
         let condition_id = item.order.condition_id.0.as_str();
         let token_id = item.order.token_id.0.as_str();
@@ -14987,9 +15517,7 @@ impl SimExecutionSessionV1 {
                     ));
                 };
                 if let Some(rejection) = Self::limit_buy_rejection(
-                    session,
-                    condition_id,
-                    token_id,
+                    candidate_best_ask,
                     *post_only,
                     &encoding,
                     minimum_shares,
@@ -15025,9 +15553,7 @@ impl SimExecutionSessionV1 {
                     ));
                 };
                 if let Some(rejection) = Self::limit_buy_rejection(
-                    session,
-                    condition_id,
-                    token_id,
+                    candidate_best_ask,
                     *post_only,
                     &encoding,
                     minimum_shares,
@@ -15153,9 +15679,7 @@ impl SimExecutionSessionV1 {
     }
 
     fn limit_buy_rejection(
-        session: &SimSession,
-        condition_id: &str,
-        token_id: &str,
+        candidate_best_ask: Option<Decimal>,
         post_only: bool,
         encoding: &BuyOrderEncoding,
         minimum_shares: Decimal,
@@ -15164,8 +15688,7 @@ impl SimExecutionSessionV1 {
         if encoding.taker_amount < minimum_shares {
             return Some(SubmissionAdmissionRejectionV1::BelowMinimumShares);
         }
-        let marketable = Self::platform_best_ask_price_for(session, condition_id, token_id)
-            .is_some_and(|best_ask| best_ask <= encoding.price);
+        let marketable = candidate_best_ask.is_some_and(|best_ask| best_ask <= encoding.price);
         if post_only && marketable {
             return Some(SubmissionAdmissionRejectionV1::PostOnlyWouldTake);
         }
@@ -15173,16 +15696,6 @@ impl SimExecutionSessionV1 {
             return Some(SubmissionAdmissionRejectionV1::BelowMarketableLimitBuyMinimumPrincipal);
         }
         None
-    }
-
-    fn platform_best_ask_price_for(
-        session: &SimSession,
-        condition_id: &str,
-        token_id: &str,
-    ) -> Option<Decimal> {
-        session
-            .execution_state()
-            .best_executable_ask(condition_id, token_id)
     }
 
     fn normalized_gtd_expiration(
@@ -17813,7 +18326,14 @@ fn allocate_immediate_taker_fee(
     session: &SimSession,
     fills: &mut [SimFillRecordV1],
 ) -> Result<u128, SubmissionProcessingErrorV1> {
-    let rules = session.rule_snapshot().synchronized_rules();
+    allocate_immediate_taker_fee_against_rules(session.rule_snapshot(), fills)
+}
+
+fn allocate_immediate_taker_fee_against_rules(
+    rule_snapshot: &SealedProcessRuleSnapshot,
+    fills: &mut [SimFillRecordV1],
+) -> Result<u128, SubmissionProcessingErrorV1> {
+    let rules = rule_snapshot.synchronized_rules();
     if !rules.fees_enabled || fills.is_empty() {
         return Ok(0);
     }
@@ -17877,6 +18397,371 @@ fn taker_fill_records(
         )?;
     }
     Ok(records)
+}
+
+enum PreparedSubmissionOrderV2 {
+    Rejected(SubmissionRejectedReasonV1),
+    Ready(SimOrderRecordV1),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn submission_order_record_v2(
+    prepared: &PreparedSubmissionV1,
+    platform_order_id: String,
+    item_idempotency_identity: &str,
+    kind: SimOrderKindStateV1,
+    source_price_pusd_per_share: Decimal,
+    accepted_base_units: Option<u128>,
+    matched_base_units: u128,
+    open_base_units: u128,
+    accepted_quote_units: u128,
+    matched_quote_units: u128,
+    open_quote_units: u128,
+    released_quote_units: u128,
+    sdk_taker_amount_audit_base_units: Option<u128>,
+    terminal_reason: Option<SimOrderTerminalReasonV1>,
+) -> SimOrderRecordV1 {
+    SimOrderRecordV1 {
+        platform_order_id,
+        global_request_id: prepared.global_request_id.clone(),
+        item_id: prepared.item_id.clone(),
+        item_idempotency_identity: item_idempotency_identity.to_owned(),
+        condition_id: prepared.condition_id.0.clone(),
+        token_id: prepared.token_id.0.clone(),
+        created_at_utc_ms: prepared.effective_processing_at_utc_ms,
+        last_updated_at_utc_ms: prepared.effective_processing_at_utc_ms,
+        kind,
+        source_price_pusd_per_share,
+        accepted_base_units,
+        matched_base_units,
+        pending_maker_depletion_base_units: 0,
+        pending_maker_depletion_evidence: None,
+        open_base_units,
+        expired_base_units: 0,
+        expired_released_quote_units: 0,
+        expired_at_utc_ms: None,
+        gtd_expiration_identity: None,
+        venue_dust_closed_base_units: 0,
+        venue_dust_released_quote_units: 0,
+        venue_dust_at_utc_ms: None,
+        venue_dust_identity: None,
+        market_resolved_canceled_base_units: 0,
+        market_resolved_released_quote_units: 0,
+        market_resolved_at_utc_ms: None,
+        market_resolution_effect_identity: None,
+        canceled_base_units: 0,
+        canceled_released_quote_units: 0,
+        canceled_at_utc_ms: None,
+        caller_cancel_effect_identity: None,
+        terminalized_pending_maker_depletion_evidence: None,
+        accepted_quote_units,
+        matched_quote_units,
+        open_quote_units,
+        released_quote_units,
+        sdk_taker_amount_audit_base_units,
+        immediate_taker_fee_encumbered_units: 0,
+        terminal_reason,
+    }
+}
+
+fn prepare_submission_order_from_match_v2(
+    prepared: &PreparedSubmissionV1,
+    platform_order_id: String,
+    item_idempotency_identity: &str,
+    plan: &QueueMatchPlanV1,
+) -> Result<PreparedSubmissionOrderV2, SubmissionProcessingErrorV1> {
+    match &prepared.order {
+        PreparedBuyOrderV1::GtcLimit {
+            limit_price_pusd_per_share,
+            maker_amount_pusd,
+            taker_amount_shares,
+            ..
+        }
+        | PreparedBuyOrderV1::GtdLimit {
+            limit_price_pusd_per_share,
+            maker_amount_pusd,
+            taker_amount_shares,
+            ..
+        } => {
+            let accepted_base_units = micro_units_v1(*taker_amount_shares)?;
+            let accepted_quote_units = micro_units_v1(*maker_amount_pusd)?;
+            let allocated_quote_units = cumulative_segment_quote_units_v1(
+                accepted_base_units,
+                accepted_quote_units,
+                plan.matched_base_units,
+            )?;
+            let open_base_units = accepted_base_units
+                .checked_sub(plan.matched_base_units)
+                .ok_or(SubmissionProcessingErrorV1::InternalInvariant(
+                    "限价成交 base 超出接受数量",
+                ))?;
+            let open_quote_units = accepted_quote_units
+                .checked_sub(allocated_quote_units)
+                .ok_or(SubmissionProcessingErrorV1::InternalInvariant(
+                    "限价开放 quote 超出接受本金",
+                ))?;
+            let released_quote_units = allocated_quote_units
+                .checked_sub(plan.used_quote_units)
+                .ok_or(SubmissionProcessingErrorV1::InternalInvariant(
+                    "限价价格改善 quote 超出接受本金",
+                ))?;
+            let kind = match prepared.order {
+                PreparedBuyOrderV1::GtcLimit { .. } => SimOrderKindStateV1::Gtc,
+                PreparedBuyOrderV1::GtdLimit {
+                    expires_at_utc_ms, ..
+                } => SimOrderKindStateV1::Gtd { expires_at_utc_ms },
+                PreparedBuyOrderV1::FokMarket { .. } | PreparedBuyOrderV1::FakMarket { .. } => {
+                    unreachable!("限价分支已匹配")
+                }
+            };
+            Ok(PreparedSubmissionOrderV2::Ready(
+                submission_order_record_v2(
+                    prepared,
+                    platform_order_id,
+                    item_idempotency_identity,
+                    kind,
+                    *limit_price_pusd_per_share,
+                    Some(accepted_base_units),
+                    plan.matched_base_units,
+                    open_base_units,
+                    accepted_quote_units,
+                    plan.used_quote_units,
+                    open_quote_units,
+                    released_quote_units,
+                    None,
+                    None,
+                ),
+            ))
+        }
+        PreparedBuyOrderV1::FokMarket {
+            worst_price_pusd_per_share,
+            maker_amount_pusd,
+            taker_amount_shares,
+        }
+        | PreparedBuyOrderV1::FakMarket {
+            worst_price_pusd_per_share,
+            maker_amount_pusd,
+            taker_amount_shares,
+        } => {
+            let accepted_quote_units = micro_units_v1(*maker_amount_pusd)?;
+            let fok = matches!(&prepared.order, PreparedBuyOrderV1::FokMarket { .. });
+            if fok && plan.used_quote_units != accepted_quote_units {
+                return Ok(PreparedSubmissionOrderV2::Rejected(
+                    SubmissionRejectedReasonV1::FokNotFullyFilled,
+                ));
+            }
+            if !fok && plan.fills.is_empty() {
+                return Ok(PreparedSubmissionOrderV2::Rejected(
+                    SubmissionRejectedReasonV1::FakNoMatch,
+                ));
+            }
+            Ok(PreparedSubmissionOrderV2::Ready(
+                submission_order_record_v2(
+                    prepared,
+                    platform_order_id,
+                    item_idempotency_identity,
+                    if fok {
+                        SimOrderKindStateV1::Fok
+                    } else {
+                        SimOrderKindStateV1::Fak
+                    },
+                    *worst_price_pusd_per_share,
+                    None,
+                    plan.matched_base_units,
+                    0,
+                    accepted_quote_units,
+                    plan.used_quote_units,
+                    0,
+                    accepted_quote_units
+                        .checked_sub(plan.used_quote_units)
+                        .ok_or(SubmissionProcessingErrorV1::InternalInvariant(
+                            "市价 BUY 消耗 quote 超出预算",
+                        ))?,
+                    Some(micro_units_v1(*taker_amount_shares)?),
+                    (!fok).then_some(SimOrderTerminalReasonV1::FakCompleted),
+                ),
+            ))
+        }
+    }
+}
+
+struct PreparedSubmissionExecutionDeltaResultV2 {
+    outcome: SubmissionItemOutcomeV1,
+    order_feedbacks: Vec<OrderLifecycleFeedbackSeedV1>,
+    trade_feedbacks: Vec<TradeFinalityLifecycleEffectsV1>,
+    execution_changed: bool,
+}
+
+fn prepare_submission_execution_delta_v2<'a>(
+    execution: PreparedExecutionDriveDeltaV2<'a>,
+    session_spec: &SessionSpecV2,
+    rule_snapshot: &SealedProcessRuleSnapshot,
+    finality_policy: &TradeFinalityPolicyV1,
+    prepared: &PreparedSubmissionV1,
+    effect_identity: &str,
+    item_idempotency_identity: &str,
+) -> Result<
+    (
+        PreparedExecutionDriveDeltaV2<'a>,
+        PreparedSubmissionExecutionDeltaResultV2,
+    ),
+    SubmissionProcessingErrorV1,
+> {
+    let platform_order_id = stable_order_id(session_spec, effect_identity);
+    let builder = match &prepared.order {
+        PreparedBuyOrderV1::GtcLimit {
+            limit_price_pusd_per_share,
+            maker_amount_pusd,
+            taker_amount_shares,
+            ..
+        }
+        | PreparedBuyOrderV1::GtdLimit {
+            limit_price_pusd_per_share,
+            maker_amount_pusd,
+            taker_amount_shares,
+            ..
+        } => execution.prepare_new_order_taker_buy_by_base_v2(
+            &prepared.condition_id.0,
+            &prepared.token_id.0,
+            *limit_price_pusd_per_share,
+            micro_units_v1(*taker_amount_shares)?,
+            micro_units_v1(*maker_amount_pusd)?,
+        )?,
+        PreparedBuyOrderV1::FokMarket {
+            worst_price_pusd_per_share,
+            maker_amount_pusd,
+            ..
+        }
+        | PreparedBuyOrderV1::FakMarket {
+            worst_price_pusd_per_share,
+            maker_amount_pusd,
+            ..
+        } => execution.prepare_new_order_taker_buy_by_quote_v2(
+            &prepared.condition_id.0,
+            &prepared.token_id.0,
+            *worst_price_pusd_per_share,
+            micro_units_v1(*maker_amount_pusd)?,
+        )?,
+    };
+    let plan = builder.plan().clone();
+    let mut order = match prepare_submission_order_from_match_v2(
+        prepared,
+        platform_order_id.clone(),
+        item_idempotency_identity,
+        &plan,
+    )? {
+        PreparedSubmissionOrderV2::Rejected(reason) => {
+            return Ok((
+                builder.into_execution_drive(),
+                PreparedSubmissionExecutionDeltaResultV2 {
+                    outcome: SubmissionItemOutcomeV1::RejectedNoEffect(reason),
+                    order_feedbacks: Vec::new(),
+                    trade_feedbacks: Vec::new(),
+                    execution_changed: false,
+                },
+            ));
+        }
+        PreparedSubmissionOrderV2::Ready(order) => order,
+    };
+    let mut fill_records = taker_fill_records(
+        &platform_order_id,
+        &prepared.condition_id.0,
+        &prepared.token_id.0,
+        prepared.effective_processing_at_utc_ms,
+        &plan,
+    )?;
+    let fee_units = allocate_immediate_taker_fee_against_rules(rule_snapshot, &mut fill_records)?;
+    order.immediate_taker_fee_encumbered_units = fee_units;
+    let required_units = order.accepted_quote_units.checked_add(fee_units).ok_or(
+        SubmissionProcessingErrorV1::InternalInvariant("订单本金与手续费之和溢出"),
+    )?;
+    if builder.candidate_available_pusd_units() < required_units {
+        return Ok((
+            builder.into_execution_drive(),
+            PreparedSubmissionExecutionDeltaResultV2 {
+                outcome: SubmissionItemOutcomeV1::RejectedNoEffect(
+                    SubmissionRejectedReasonV1::InsufficientAvailablePusd,
+                ),
+                order_feedbacks: Vec::new(),
+                trade_feedbacks: Vec::new(),
+                execution_changed: false,
+            },
+        ));
+    }
+    let accepted_order_status = if order.open_base_units > 0 {
+        simulated_order_status("LIVE")
+    } else {
+        simulated_order_status("MATCHED")
+    };
+    let lifecycle_account_rule = &rule_snapshot
+        .snapshot()
+        .project_account_rules
+        .lifecycle_account_behavior
+        .value;
+    let (execution, effects) =
+        builder.finish_new_order(order, fill_records, finality_policy, lifecycle_account_rule)?;
+    let mut account_delta_references = effects
+        .order_commit_effects()
+        .account_deltas
+        .iter()
+        .map(|delta| AccountDeltaReferenceV1::from(delta.as_ref()))
+        .collect::<Vec<_>>();
+    if let Some(effect) = effects.venue_dust_effect() {
+        account_delta_references.push(AccountDeltaReferenceV1::from(effect.account_delta.as_ref()));
+    }
+    let mut order_feedbacks = effects
+        .order_commit_effects()
+        .account_deltas
+        .iter()
+        .map(|delta| OrderLifecycleFeedbackSeedV1 {
+            platform_order_id: effects.order().platform_order_id.clone(),
+            condition_id: effects.order().condition_id.clone(),
+            token_id: effects.order().token_id.clone(),
+            event_kind: match delta.reason {
+                contracts::PlatformAccountDeltaReasonV1::OrderAcceptedEncumbranceApplied => {
+                    OrderLifecycleEventKindV1::OrderAccepted
+                }
+                contracts::PlatformAccountDeltaReasonV1::FakUnspentEncumbranceReleased => {
+                    OrderLifecycleEventKindV1::FakUnspentReleased
+                }
+                _ => unreachable!("订单提交只能形成接受或 FAK 未花释放变化"),
+            },
+            order_status: accepted_order_status.clone(),
+            venue_dust_closed_base_units: 0,
+            venue_dust_released_quote_units: 0,
+            market_resolved_canceled_base_units: 0,
+            market_resolved_released_quote_units: 0,
+            account_delta: Arc::clone(delta),
+        })
+        .collect::<Vec<_>>();
+    if let Some(effect) = effects.venue_dust_effect() {
+        order_feedbacks.push(OrderLifecycleFeedbackSeedV1 {
+            platform_order_id: effect.platform_order_id.clone(),
+            condition_id: effect.condition_id.clone(),
+            token_id: effect.token_id.clone(),
+            event_kind: OrderLifecycleEventKindV1::VenueDustTerminal,
+            order_status: simulated_order_status("VENUE_DUST_TERMINAL"),
+            venue_dust_closed_base_units: effect.closed_base_units,
+            venue_dust_released_quote_units: effect.released_open_quote_units,
+            market_resolved_canceled_base_units: 0,
+            market_resolved_released_quote_units: 0,
+            account_delta: Arc::clone(&effect.account_delta),
+        });
+    }
+    let outcome = SubmissionItemOutcomeV1::Accepted(Box::new(accepted_submission_item(
+        effects.order(),
+        effects.fills(),
+        account_delta_references,
+    )?));
+    Ok((
+        execution,
+        PreparedSubmissionExecutionDeltaResultV2 {
+            outcome,
+            order_feedbacks,
+            trade_feedbacks: effects.trade_finality_effects().to_vec(),
+            execution_changed: true,
+        },
+    ))
 }
 
 fn accepted_submission_item(
@@ -18005,9 +18890,37 @@ impl ScheduledLifecycleFeedbackV1 {
     }
 }
 
-fn record_prepared_order_lifecycle_feedback_v2(
+trait PreparedLifecycleTimingSessionV2 {
+    fn prepare_next_lifecycle_feedback_timing_v2(
+        &mut self,
+        feedback_id: String,
+        platform_event_at_utc_ms: i64,
+    ) -> Result<LifecycleFeedbackTimingV1, SessionError>;
+}
+
+impl PreparedLifecycleTimingSessionV2 for crate::session::PreparedScheduledSessionDriveV2<'_> {
+    fn prepare_next_lifecycle_feedback_timing_v2(
+        &mut self,
+        feedback_id: String,
+        platform_event_at_utc_ms: i64,
+    ) -> Result<LifecycleFeedbackTimingV1, SessionError> {
+        self.prepare_next_lifecycle_feedback_timing(feedback_id, platform_event_at_utc_ms)
+    }
+}
+
+impl PreparedLifecycleTimingSessionV2 for crate::session::PreparedClosedBucketSessionDriveV2<'_> {
+    fn prepare_next_lifecycle_feedback_timing_v2(
+        &mut self,
+        feedback_id: String,
+        platform_event_at_utc_ms: i64,
+    ) -> Result<LifecycleFeedbackTimingV1, SessionError> {
+        self.prepare_next_lifecycle_feedback_timing(feedback_id, platform_event_at_utc_ms)
+    }
+}
+
+fn record_prepared_order_lifecycle_feedback_v2<S: PreparedLifecycleTimingSessionV2>(
     session_id: &str,
-    session: &mut crate::session::PreparedScheduledSessionDriveV2<'_>,
+    session: &mut S,
     outbox: &mut PreparedLifecycleOutboxDeltaV2<'_>,
     reservation: &LifecycleBatchReservationV1,
     feedback: OrderLifecycleFeedbackSeedV1,
@@ -18017,7 +18930,7 @@ fn record_prepared_order_lifecycle_feedback_v2(
         &feedback.platform_order_id,
         feedback.event_kind,
     );
-    let timing = session.prepare_next_lifecycle_feedback_timing(
+    let timing = session.prepare_next_lifecycle_feedback_timing_v2(
         feedback_id.clone(),
         feedback.account_delta.platform_effective_at_utc_ms,
     )?;
@@ -18044,10 +18957,10 @@ fn record_prepared_order_lifecycle_feedback_v2(
     )
 }
 
-fn record_prepared_trade_lifecycle_feedback_v2(
+fn record_prepared_trade_lifecycle_feedback_v2<S: PreparedLifecycleTimingSessionV2>(
     session_id: &str,
     account_instance_key: &AccountInstanceKeyV1,
-    session: &mut crate::session::PreparedScheduledSessionDriveV2<'_>,
+    session: &mut S,
     outbox: &mut PreparedLifecycleOutboxDeltaV2<'_>,
     reservation: &LifecycleBatchReservationV1,
     feedback: TradeFinalityTransitionEffectV1,
@@ -18057,7 +18970,7 @@ fn record_prepared_trade_lifecycle_feedback_v2(
     feedback_id_hash.text(trade_finality_state_identity(feedback.finality_state));
     feedback_id_hash.i64(feedback.platform_event_at_utc_ms);
     let feedback_id = feedback_id_hash.finish().0;
-    let timing = session.prepare_next_lifecycle_feedback_timing(
+    let timing = session.prepare_next_lifecycle_feedback_timing_v2(
         feedback_id.clone(),
         feedback.platform_event_at_utc_ms,
     )?;
@@ -18095,10 +19008,10 @@ fn record_prepared_trade_lifecycle_feedback_v2(
     )
 }
 
-fn record_prepared_settlement_lifecycle_feedback_v2(
+fn record_prepared_settlement_lifecycle_feedback_v2<S: PreparedLifecycleTimingSessionV2>(
     session_id: &str,
     account_instance_key: &AccountInstanceKeyV1,
-    session: &mut crate::session::PreparedScheduledSessionDriveV2<'_>,
+    session: &mut S,
     outbox: &mut PreparedLifecycleOutboxDeltaV2<'_>,
     reservation: &LifecycleBatchReservationV1,
     feedback: SettlementLifecycleFeedbackSeedV1,
@@ -18107,7 +19020,7 @@ fn record_prepared_settlement_lifecycle_feedback_v2(
     feedback_id_hash.text(&feedback.settlement_identity);
     feedback_id_hash.i64(feedback.platform_event_at_utc_ms);
     let feedback_id = feedback_id_hash.finish().0;
-    let timing = session.prepare_next_lifecycle_feedback_timing(
+    let timing = session.prepare_next_lifecycle_feedback_timing_v2(
         feedback_id.clone(),
         feedback.platform_event_at_utc_ms,
     )?;
@@ -18127,6 +19040,47 @@ fn record_prepared_settlement_lifecycle_feedback_v2(
             event: feedback.event,
         }),
     )
+}
+
+fn record_prepared_lifecycle_feedback_v2<S: PreparedLifecycleTimingSessionV2>(
+    session_id: &str,
+    account_instance_key: &AccountInstanceKeyV1,
+    session: &mut S,
+    outbox: &mut PreparedLifecycleOutboxDeltaV2<'_>,
+    reservation: &LifecycleBatchReservationV1,
+    feedback: ScheduledLifecycleFeedbackV1,
+) -> Result<Option<DurablePrivateOutputDraftV1>, MarketEventErrorV1> {
+    Ok(match feedback {
+        ScheduledLifecycleFeedbackV1::Order(feedback) => {
+            record_prepared_order_lifecycle_feedback_v2(
+                session_id,
+                session,
+                outbox,
+                reservation,
+                feedback,
+            )?
+        }
+        ScheduledLifecycleFeedbackV1::Trade(feedback) => {
+            record_prepared_trade_lifecycle_feedback_v2(
+                session_id,
+                account_instance_key,
+                session,
+                outbox,
+                reservation,
+                feedback,
+            )?
+        }
+        ScheduledLifecycleFeedbackV1::Settlement(feedback) => {
+            record_prepared_settlement_lifecycle_feedback_v2(
+                session_id,
+                account_instance_key,
+                session,
+                outbox,
+                reservation,
+                feedback,
+            )?
+        }
+    })
 }
 
 fn submission_processing_error_from_market_event_v2(
@@ -18584,6 +19538,296 @@ fn prepare_cancel_execution_drive_fields_v2<'a>(
         disposition: SubmissionDriveDispositionV1::ItemProcessed {
             request_completed: true,
         },
+    })
+}
+
+fn prepare_post_execution_drive_v2<'a>(
+    execution_session: &'a mut SimExecutionSessionV1,
+    requested_cutoff_utc_ms: i64,
+    occupied_lifecycle_capacity_leases: usize,
+) -> Result<PreparedPostExecutionDriveV2<'a>, SubmissionProcessingErrorV1> {
+    let SimExecutionSessionV1 {
+        session,
+        pending_requests,
+        submission_effect_records,
+        query_state,
+        direct_response_outbox,
+        lifecycle_outbox,
+        ..
+    } = execution_session;
+    prepare_post_execution_drive_fields_v2(
+        session,
+        pending_requests,
+        submission_effect_records,
+        query_state,
+        direct_response_outbox,
+        lifecycle_outbox,
+        requested_cutoff_utc_ms,
+        occupied_lifecycle_capacity_leases,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_post_execution_drive_fields_v2<'a>(
+    session: &'a mut SimSession,
+    pending_requests: &BTreeMap<String, PendingDomainRequestV1>,
+    submission_effect_records: &'a mut BTreeMap<String, SubmissionEffectRecordV1>,
+    query_state: &'a mut QueryStateV1,
+    direct_response_outbox: &'a mut LogicalDirectResponseOutboxV1,
+    lifecycle_outbox: &'a mut LogicalLifecycleOutboxV1,
+    requested_cutoff_utc_ms: i64,
+    occupied_lifecycle_capacity_leases: usize,
+) -> Result<PreparedPostExecutionDriveV2<'a>, SubmissionProcessingErrorV1> {
+    let session_spec = session.session_spec().clone();
+    let account_instance_key = session.execution_state().account_instance_key().clone();
+    let rule_snapshot = Arc::clone(session.rule_snapshot());
+    let finality_policy = Arc::clone(session.finality_policy());
+    let rule_snapshot_sha256 = rule_snapshot.file_sha256().clone();
+    let scenario_sha256 = session.scenario().scenario_sha256().clone();
+    let fee_rule = fee_rule_identity(session);
+    let peeked_action = session
+        .first_pending_action_through(requested_cutoff_utc_ms)
+        .ok_or(SubmissionProcessingErrorV1::InternalInvariant(
+            "Post 执行准备缺少到期逻辑动作",
+        ))?;
+    let request = pending_requests
+        .get(&peeked_action.global_request_id)
+        .cloned()
+        .ok_or(SubmissionProcessingErrorV1::InternalInvariant(
+            "Post 执行准备缺少领域请求",
+        ))?;
+    validate_action_mapping(&request, &peeked_action)?;
+    if !matches!(
+        request,
+        PendingDomainRequestV1::PostOrder(_) | PendingDomainRequestV1::PostOrders(_)
+    ) {
+        return Err(SubmissionProcessingErrorV1::InternalInvariant(
+            "非 Post 请求进入 Post 执行准备",
+        ));
+    }
+    let item = SimExecutionSessionV1::post_item_for_action(&request, &peeked_action)?.clone();
+    let candidate_best_ask = session
+        .execution_state()
+        .best_executable_ask(&item.order.condition_id.0, &item.order.token_id.0);
+    let admission = SimExecutionSessionV1::prepare_submission_against_candidate(
+        session,
+        &peeked_action,
+        &request,
+        candidate_best_ask,
+    );
+
+    let prefix = prepare_execution_drive_prefix_v2(session, requested_cutoff_utc_ms, false)
+        .map_err(submission_processing_error_from_market_event_v2)?;
+    let action = prefix
+        .current_action()
+        .ok_or(SubmissionProcessingErrorV1::InternalInvariant(
+            "Post 执行准备缺少到期逻辑动作",
+        ))?;
+    if action != peeked_action {
+        return Err(SubmissionProcessingErrorV1::InternalInvariant(
+            "Post 执行准备的队首动作发生变化",
+        ));
+    }
+    let (idempotency_key, payload_sha256) = mutation_binding(&request).ok_or(
+        SubmissionProcessingErrorV1::InternalInvariant("Post 动作缺少变更幂等绑定"),
+    )?;
+    let item_idempotency_identity = submission_item_idempotency_identity(
+        &session_spec,
+        &idempotency_key,
+        action.key.batch_item_ordinal,
+    );
+    let effect_identity =
+        submission_item_effect_identity(&item_idempotency_identity, &payload_sha256);
+
+    let mut lifecycle = lifecycle_outbox.prepare_lifecycle_delta_v2();
+    let request_reservation = lifecycle.reserve_request(
+        &action.global_request_id,
+        action.key.effective_processing_at_utc_ms,
+        occupied_lifecycle_capacity_leases,
+    )?;
+    let materialized = materialize_execution_drive_prefix_v2(
+        prefix,
+        query_state,
+        lifecycle,
+        Some(&action.global_request_id),
+        occupied_lifecycle_capacity_leases,
+    )
+    .map_err(submission_processing_error_from_market_event_v2)?;
+    let MaterializedExecutionDrivePrefixV2 {
+        session_id,
+        mut scheduled,
+        query,
+        mut lifecycle,
+        terminal_projection_condition_ids,
+        before_query_projection_revision,
+        before_logical_platform_through_utc_ms,
+        before_private_schedule_through_utc_ms,
+        mut after_query_projection_revision,
+        actual_cutoff_utc_ms,
+        mut new_private_output_drafts,
+        scheduled_state_changed: _,
+    } = materialized;
+    let resolution = scheduled.prepare_mutation_resolution(
+        &action.global_request_id,
+        &action.action_identity,
+        item_idempotency_identity.clone(),
+        payload_sha256,
+        effect_identity.clone(),
+    )?;
+    let mut submission_effect =
+        PreparedSubmissionEffectRecordDeltaV2::prepare(submission_effect_records, effect_identity);
+    let mut order_feedbacks = Vec::new();
+    let mut trade_feedbacks = Vec::new();
+    let mut execution_changed = false;
+    let effect_disposition = match resolution.disposition {
+        MutationResolutionDispositionV1::ExistingEffect => {
+            SubmissionEffectDispositionV1::ExistingEffect
+        }
+        MutationResolutionDispositionV1::NewEffect => {
+            let outcome = match admission? {
+                SubmissionAdmissionDecisionV1::Prepared(prepared) => {
+                    let (next_scheduled, result) =
+                        scheduled.map_execution_candidate(|execution| {
+                            prepare_submission_execution_delta_v2(
+                                execution,
+                                &session_spec,
+                                rule_snapshot.as_ref(),
+                                finality_policy.as_ref(),
+                                &prepared,
+                                &resolution.effect_identity,
+                                &item_idempotency_identity,
+                            )
+                        })?;
+                    scheduled = next_scheduled;
+                    order_feedbacks = result.order_feedbacks;
+                    trade_feedbacks = result.trade_feedbacks;
+                    execution_changed = result.execution_changed;
+                    result.outcome
+                }
+                SubmissionAdmissionDecisionV1::RejectedNoEffect(reason) => {
+                    SubmissionItemOutcomeV1::RejectedNoEffect(map_submission_rejection(reason))
+                }
+                SubmissionAdmissionDecisionV1::EvidenceUnknownNoEffect(reason) => {
+                    SubmissionItemOutcomeV1::EvidenceUnknownNoEffect(map_submission_evidence(
+                        reason,
+                    ))
+                }
+            };
+            submission_effect.prepare_new_record(SubmissionEffectRecordV1 {
+                outcome,
+                formed_at_utc_ms: action.key.effective_processing_at_utc_ms,
+            })?;
+            SubmissionEffectDispositionV1::NewEffect
+        }
+    };
+    let effect_record = submission_effect.candidate_record().ok_or(
+        SubmissionProcessingErrorV1::InternalInvariant("既有提交幂等效果缺少终局结果"),
+    )?;
+    let part = DirectResponsePartV1::Submission(SubmissionResponseItemV1 {
+        item_id: item.item_id,
+        batch_item_ordinal: action.key.batch_item_ordinal,
+        condition_id: item.order.condition_id,
+        token_id: item.order.token_id,
+        effective_processing_at_utc_ms: action.key.effective_processing_at_utc_ms,
+        submission_effect_identity: resolution.effect_identity,
+        submission_effect_formed_at_utc_ms: effect_record.formed_at_utc_ms,
+        submission_effect_disposition: effect_disposition,
+        outcome: effect_record.outcome.clone(),
+    });
+    if execution_changed && after_query_projection_revision == before_query_projection_revision {
+        after_query_projection_revision = scheduled.advance_platform_state_revision_once()?;
+    }
+    let logical_action_result = durable_logical_action_result(
+        &action.global_request_id,
+        &request,
+        usize::from(action.key.batch_item_ordinal),
+        scheduled.query_revision_for_request(&action.global_request_id),
+        &part,
+    )
+    .map_err(|error| SessionError::Durability(error.to_string()))?;
+    for feedback in order_feedbacks {
+        if let Some(draft) = record_prepared_order_lifecycle_feedback_v2(
+            &session_id,
+            &mut scheduled,
+            &mut lifecycle,
+            &request_reservation,
+            feedback,
+        )? {
+            new_private_output_drafts.push(draft);
+        }
+    }
+    for feedbacks in trade_feedbacks {
+        if let Some(draft) = record_prepared_trade_lifecycle_feedback_v2(
+            &session_id,
+            &account_instance_key,
+            &mut scheduled,
+            &mut lifecycle,
+            &request_reservation,
+            feedbacks.trade_feedback,
+        )? {
+            new_private_output_drafts.push(draft);
+        }
+        for settlement in feedbacks.settlement_feedbacks {
+            if let Some(draft) = record_prepared_settlement_lifecycle_feedback_v2(
+                &session_id,
+                &account_instance_key,
+                &mut scheduled,
+                &mut lifecycle,
+                &request_reservation,
+                settlement_lifecycle_feedback_seed(settlement)?,
+            )? {
+                new_private_output_drafts.push(draft);
+            }
+        }
+    }
+    let mut direct = direct_response_outbox.prepare_entry_delta_v2(&action.global_request_id)?;
+    direct.record_part(part)?;
+    scheduled.finish_current_action(&action.action_identity)?;
+    let request_completed = scheduled.request_completed();
+    if request_completed {
+        lifecycle.complete_request(&action.global_request_id, &request_reservation)?;
+        let platform_responded_at_utc_ms = direct.platform_responded_at().ok_or(
+            SubmissionProcessingErrorV1::InternalInvariant("Post 直接响应缺少平台响应时点"),
+        )?;
+        let private_emission_sequence = scheduled.next_private_emission_sequence()?;
+        let transit = scheduled.prepare_complete_direct_response(
+            &action.global_request_id,
+            platform_responded_at_utc_ms,
+            private_emission_sequence,
+        )?;
+        if let Some(draft) = direct.complete_draft(
+            request.context().clone(),
+            &transit,
+            rule_snapshot_sha256,
+            scenario_sha256,
+            fee_rule,
+        )? {
+            new_private_output_drafts.push(draft);
+        }
+    }
+    let evidence = logical_transaction_evidence_from_after_values_v2(
+        DurableTransactionFactV1::ExecutionAdvanced { session_id },
+        before_query_projection_revision,
+        before_logical_platform_through_utc_ms,
+        before_private_schedule_through_utc_ms,
+        after_query_projection_revision,
+        Some(actual_cutoff_utc_ms),
+        before_private_schedule_through_utc_ms,
+        vec![logical_action_result],
+        new_private_output_drafts,
+    )?;
+    Ok(PreparedPostExecutionDriveV2 {
+        scheduled,
+        query,
+        submission_effect,
+        direct,
+        lifecycle,
+        terminal_projection_condition_ids,
+        evidence,
+        recovery_operation: DurableRecoveryOperationV2::DriveExecutionThrough {
+            effective_processing_at_utc_ms: actual_cutoff_utc_ms,
+        },
+        disposition: SubmissionDriveDispositionV1::ItemProcessed { request_completed },
     })
 }
 
@@ -19169,28 +20413,12 @@ fn prepare_scheduled_execution_drive_fields_v2<'a>(
     finish_no_action_scheduled_execution_drive_v2(materialized)
 }
 
-fn prepare_execution_drive_prefix_v2(
-    session: &mut SimSession,
-    requested_cutoff_utc_ms: i64,
-    complete_same_request_at_same_time: bool,
-) -> Result<PreparedExecutionDrivePrefixV2<'_>, MarketEventErrorV1> {
-    session.require_input_not_failed()?;
-    let session_id = session.session_spec().session_id.clone();
-    let before_query_projection_revision = session.platform_state_revision();
-    let before_logical_platform_through_utc_ms = session.logical_platform_driven_through();
-    let before_private_schedule_through_utc_ms = session.private_fact_schedule_closed_through();
-    let account_instance_key = session.execution_state().account_instance_key().clone();
-    let scheduled = session.prepare_scheduled_session_drive_v2(
-        requested_cutoff_utc_ms,
-        complete_same_request_at_same_time,
-    )?;
-    let execution_state_changed = scheduled.execution_candidate().has_state_change();
-    let query_projection_changed = scheduled.execution_candidate().query_projection_changed();
-    let terminal_projection_condition_ids = scheduled.terminal_projection_condition_ids().clone();
-
+fn scheduled_lifecycle_feedbacks_v2(
+    execution: &crate::matching::PreparedExecutionDriveDeltaV2<'_>,
+) -> Result<Vec<((i64, u8, u64), ScheduledLifecycleFeedbackV1)>, MarketEventErrorV1> {
     let mut stable_ordinal = 0_u64;
     let mut lifecycle_feedbacks = Vec::new();
-    for effect in scheduled.execution_candidate().gtd_expiration_effects() {
+    for effect in execution.gtd_expiration_effects() {
         if let Some(account_delta) = effect.account_delta.clone() {
             lifecycle_feedbacks.push((
                 (
@@ -19216,7 +20444,7 @@ fn prepare_execution_drive_prefix_v2(
                 .ok_or(SessionError::ResponseDeliveryIdentityConflict)?;
         }
     }
-    for lifecycle in scheduled.execution_candidate().scheduled_finality_effects() {
+    for lifecycle in execution.scheduled_finality_effects() {
         lifecycle_feedbacks.push((
             (
                 lifecycle.trade_feedback.platform_event_at_utc_ms,
@@ -19239,7 +20467,7 @@ fn prepare_execution_drive_prefix_v2(
                 .ok_or(SessionError::ResponseDeliveryIdentityConflict)?;
         }
     }
-    for effect in scheduled.execution_candidate().rebate_clock_effects() {
+    for effect in execution.rebate_clock_effects() {
         let feedback = settlement_lifecycle_feedback_seed(effect.clone())?;
         lifecycle_feedbacks.push((
             (feedback.platform_event_at_utc_ms, 2_u8, stable_ordinal),
@@ -19250,6 +20478,341 @@ fn prepare_execution_drive_prefix_v2(
             .ok_or(SessionError::ResponseDeliveryIdentityConflict)?;
     }
     lifecycle_feedbacks.sort_by_key(|(key, _)| *key);
+    Ok(lifecycle_feedbacks)
+}
+
+fn prepare_executing_closed_bucket_drive_fields_v2<'a>(
+    session: &'a mut SimSession,
+    query_state: &'a mut QueryStateV1,
+    lifecycle_outbox: &'a mut LogicalLifecycleOutboxV1,
+    bucket: &ClosedMarketEventBucketV1,
+    occupied_lifecycle_capacity_leases: usize,
+) -> Result<PreparedExecutingClosedBucketDriveAttemptV2<'a>, MarketEventErrorV1> {
+    let session_id = session.session_spec().session_id.clone();
+    let account_instance_key = session.execution_state().account_instance_key().clone();
+    let before_query_projection_revision = session.platform_state_revision();
+    let before_logical_platform_through_utc_ms = session.logical_platform_driven_through();
+    let before_private_schedule_through_utc_ms = session.private_fact_schedule_closed_through();
+    let bucket_reference = bucket.durable_reference();
+    let bucket_work_identity = bucket.lifecycle_work_identity();
+    let prepared = session.prepare_executing_closed_bucket_session_drive_v2(bucket)?;
+    let crate::session::PreparedClosedBucketSessionDriveAttemptV2::Applied(mut session) = prepared
+    else {
+        let crate::session::PreparedClosedBucketSessionDriveAttemptV2::FailedInputSeal(outcome) =
+            prepared
+        else {
+            unreachable!("闭桶会话准备结果形状固定")
+        };
+        return Ok(PreparedExecutingClosedBucketDriveAttemptV2::FailedInputSeal(outcome));
+    };
+
+    let actual_cutoff_utc_ms = session.actual_cutoff_utc_ms();
+    let first_due_at_utc_ms = session.first_due_at_utc_ms();
+    let query_projection_changed = session.execution_candidate().query_projection_changed();
+    let terminal_projection_condition_ids = session.terminal_projection_condition_ids().clone();
+    let scheduled_feedbacks = scheduled_lifecycle_feedbacks_v2(session.execution_candidate())?;
+    let ordered_dpt_effects = session.dpt_effects().ordered_lifecycle_effects.clone();
+    let after_query_projection_revision = if query_projection_changed {
+        session.advance_platform_state_revision_once()?
+    } else {
+        before_query_projection_revision
+    };
+
+    let mut query = query_state.prepare_delta_v2();
+    if !terminal_projection_condition_ids.is_empty() {
+        let orders = session
+            .execution_candidate()
+            .candidate_orders()
+            .filter(|order| terminal_projection_condition_ids.contains(&order.condition_id))
+            .map(project_order)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| MarketEventErrorV1::ExecutionState(format!("{error:?}")))?;
+        let trades = session
+            .execution_candidate()
+            .candidate_fills()
+            .filter(|fill| terminal_projection_condition_ids.contains(&fill.condition_id))
+            .map(project_trade)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| MarketEventErrorV1::ExecutionState(format!("{error:?}")))?;
+        query.prepare_terminal_inserts(orders, trades)?;
+    }
+
+    let mut lifecycle = lifecycle_outbox.prepare_lifecycle_delta_v2();
+    let mut new_private_output_drafts = Vec::new();
+    if !scheduled_feedbacks.is_empty() {
+        let latest_feedback_at_utc_ms = scheduled_feedbacks
+            .iter()
+            .map(|(_, feedback)| feedback.platform_effective_at_utc_ms())
+            .max()
+            .expect("非空生命周期反馈必须包含最晚时点");
+        let reservation = lifecycle.reserve_platform_work(
+            &format!(
+                "SCHEDULED:{}:{latest_feedback_at_utc_ms}:{actual_cutoff_utc_ms}",
+                first_due_at_utc_ms.expect("生命周期反馈必须来自已排定平台工作")
+            ),
+            None,
+            latest_feedback_at_utc_ms,
+            occupied_lifecycle_capacity_leases,
+        )?;
+        for (_, feedback) in scheduled_feedbacks {
+            new_private_output_drafts.extend(record_prepared_lifecycle_feedback_v2(
+                &session_id,
+                &account_instance_key,
+                &mut session,
+                &mut lifecycle,
+                &reservation,
+                feedback,
+            )?);
+        }
+        lifecycle.complete_platform_work(&reservation)?;
+    }
+
+    if !ordered_dpt_effects.is_empty() {
+        let reservation = lifecycle.reserve_platform_work(
+            &format!("DPT:{bucket_work_identity}"),
+            None,
+            actual_cutoff_utc_ms,
+            occupied_lifecycle_capacity_leases,
+        )?;
+        for effect in ordered_dpt_effects {
+            match effect {
+                AuthorizedMarketLifecycleEffectV2::TradeFinality(effect) => {
+                    new_private_output_drafts.extend(record_prepared_lifecycle_feedback_v2(
+                        &session_id,
+                        &account_instance_key,
+                        &mut session,
+                        &mut lifecycle,
+                        &reservation,
+                        ScheduledLifecycleFeedbackV1::Trade(effect.trade_feedback),
+                    )?);
+                    for settlement in effect.settlement_feedbacks {
+                        new_private_output_drafts.extend(record_prepared_lifecycle_feedback_v2(
+                            &session_id,
+                            &account_instance_key,
+                            &mut session,
+                            &mut lifecycle,
+                            &reservation,
+                            ScheduledLifecycleFeedbackV1::Settlement(
+                                settlement_lifecycle_feedback_seed(settlement)?,
+                            ),
+                        )?);
+                    }
+                }
+                AuthorizedMarketLifecycleEffectV2::VenueDust(effect) => {
+                    new_private_output_drafts.extend(record_prepared_lifecycle_feedback_v2(
+                        &session_id,
+                        &account_instance_key,
+                        &mut session,
+                        &mut lifecycle,
+                        &reservation,
+                        ScheduledLifecycleFeedbackV1::Order(OrderLifecycleFeedbackSeedV1 {
+                            platform_order_id: effect.platform_order_id,
+                            condition_id: effect.condition_id,
+                            token_id: effect.token_id,
+                            event_kind: OrderLifecycleEventKindV1::VenueDustTerminal,
+                            order_status: simulated_order_status("VENUE_DUST_TERMINAL"),
+                            venue_dust_closed_base_units: effect.closed_base_units,
+                            venue_dust_released_quote_units: effect.released_open_quote_units,
+                            market_resolved_canceled_base_units: 0,
+                            market_resolved_released_quote_units: 0,
+                            account_delta: effect.account_delta,
+                        }),
+                    )?);
+                }
+                AuthorizedMarketLifecycleEffectV2::MarketResolutionOrder(effect) => {
+                    new_private_output_drafts.extend(record_prepared_lifecycle_feedback_v2(
+                        &session_id,
+                        &account_instance_key,
+                        &mut session,
+                        &mut lifecycle,
+                        &reservation,
+                        ScheduledLifecycleFeedbackV1::Order(OrderLifecycleFeedbackSeedV1 {
+                            platform_order_id: effect.platform_order_id,
+                            condition_id: effect.condition_id,
+                            token_id: effect.token_id,
+                            event_kind: OrderLifecycleEventKindV1::MarketResolvedCanceled,
+                            order_status: simulated_order_status(
+                                "ORDER_STATUS_CANCELED_MARKET_RESOLVED",
+                            ),
+                            venue_dust_closed_base_units: 0,
+                            venue_dust_released_quote_units: 0,
+                            market_resolved_canceled_base_units: effect.canceled_base_units,
+                            market_resolved_released_quote_units: effect.released_open_quote_units,
+                            account_delta: effect.account_delta,
+                        }),
+                    )?);
+                }
+                AuthorizedMarketLifecycleEffectV2::Settlement(effect) => {
+                    new_private_output_drafts.extend(record_prepared_lifecycle_feedback_v2(
+                        &session_id,
+                        &account_instance_key,
+                        &mut session,
+                        &mut lifecycle,
+                        &reservation,
+                        ScheduledLifecycleFeedbackV1::Settlement(
+                            settlement_lifecycle_feedback_seed(effect)?,
+                        ),
+                    )?);
+                }
+            }
+        }
+        lifecycle.complete_platform_work(&reservation)?;
+    }
+
+    let evidence = logical_transaction_evidence_from_after_values_v2(
+        DurableTransactionFactV1::PlatformBucketApplied {
+            session_id: session_id.clone(),
+            bucket: bucket_reference,
+        },
+        before_query_projection_revision,
+        before_logical_platform_through_utc_ms,
+        before_private_schedule_through_utc_ms,
+        after_query_projection_revision,
+        Some(actual_cutoff_utc_ms),
+        before_private_schedule_through_utc_ms,
+        Vec::new(),
+        new_private_output_drafts,
+    )?;
+    Ok(PreparedExecutingClosedBucketDriveAttemptV2::Applied(
+        PreparedExecutingClosedBucketDriveV2 {
+            session,
+            query,
+            lifecycle,
+            terminal_projection_condition_ids,
+            evidence,
+            recovery_operation: DurableRecoveryOperationV2::ApplyClosedMarketEventBucket,
+        },
+    ))
+}
+
+fn prepare_market_only_closed_bucket_drive_fields_v2<'a>(
+    session: &'a mut SimSession,
+    query_state: &'a mut QueryStateV1,
+    bucket: &ClosedMarketEventBucketV1,
+    failed_input_seal: Option<InputPathSealOutcomeV1>,
+) -> Result<PreparedMarketOnlyClosedBucketDriveV2<'a>, MarketEventErrorV1> {
+    let session_id = session.session_spec().session_id.clone();
+    let before_query_projection_revision = session.platform_state_revision();
+    let before_logical_platform_through_utc_ms = session.logical_platform_driven_through();
+    let before_private_schedule_through_utc_ms = session.private_fact_schedule_closed_through();
+    let bucket_reference = bucket.durable_reference();
+    let session =
+        session.prepare_market_only_closed_bucket_session_drive_v2(bucket, failed_input_seal)?;
+    let terminal_projection_condition_ids = session.terminal_projection_condition_ids().clone();
+    let mut query = query_state.prepare_delta_v2();
+    if !terminal_projection_condition_ids.is_empty() {
+        let orders = session
+            .execution_candidate()
+            .candidate_orders()
+            .filter(|order| terminal_projection_condition_ids.contains(&order.condition_id))
+            .map(project_order)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| MarketEventErrorV1::ExecutionState(format!("{error:?}")))?;
+        let trades = session
+            .execution_candidate()
+            .candidate_fills()
+            .filter(|fill| terminal_projection_condition_ids.contains(&fill.condition_id))
+            .map(project_trade)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| MarketEventErrorV1::ExecutionState(format!("{error:?}")))?;
+        query.prepare_terminal_inserts(orders, trades)?;
+    }
+    let evidence = logical_transaction_evidence_from_after_values_v2(
+        DurableTransactionFactV1::PlatformBucketApplied {
+            session_id,
+            bucket: bucket_reference,
+        },
+        before_query_projection_revision,
+        before_logical_platform_through_utc_ms,
+        before_private_schedule_through_utc_ms,
+        before_query_projection_revision,
+        before_logical_platform_through_utc_ms,
+        before_private_schedule_through_utc_ms,
+        Vec::new(),
+        Vec::new(),
+    )?;
+    Ok(PreparedMarketOnlyClosedBucketDriveV2 {
+        session,
+        query,
+        terminal_projection_condition_ids,
+        evidence,
+        recovery_operation: DurableRecoveryOperationV2::ApplyClosedMarketEventBucket,
+    })
+}
+
+fn prepare_closed_bucket_closure_upgrade_drive_fields_v2<'a>(
+    session: &'a mut SimSession,
+    query_state: &'a mut QueryStateV1,
+    bucket: &ClosedMarketEventBucketV1,
+) -> Result<PreparedClosedBucketClosureUpgradeDriveV2<'a>, MarketEventErrorV1> {
+    let session_id = session.session_spec().session_id.clone();
+    let before_query_projection_revision = session.platform_state_revision();
+    let before_logical_platform_through_utc_ms = session.logical_platform_driven_through();
+    let before_private_schedule_through_utc_ms = session.private_fact_schedule_closed_through();
+    let bucket_reference = bucket.durable_reference();
+    let session = session.prepare_closed_bucket_closure_upgrade_session_v2(bucket)?;
+    let terminal_projection_condition_ids = session.terminal_projection_condition_ids().clone();
+    let mut query = query_state.prepare_delta_v2();
+    if !terminal_projection_condition_ids.is_empty() {
+        let orders = session
+            .execution_candidate()
+            .candidate_orders()
+            .filter(|order| terminal_projection_condition_ids.contains(&order.condition_id))
+            .map(project_order)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| MarketEventErrorV1::ExecutionState(format!("{error:?}")))?;
+        let trades = session
+            .execution_candidate()
+            .candidate_fills()
+            .filter(|fill| terminal_projection_condition_ids.contains(&fill.condition_id))
+            .map(project_trade)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| MarketEventErrorV1::ExecutionState(format!("{error:?}")))?;
+        query.prepare_terminal_inserts(orders, trades)?;
+    }
+    let evidence = logical_transaction_evidence_from_after_values_v2(
+        DurableTransactionFactV1::PlatformBucketApplied {
+            session_id,
+            bucket: bucket_reference,
+        },
+        before_query_projection_revision,
+        before_logical_platform_through_utc_ms,
+        before_private_schedule_through_utc_ms,
+        before_query_projection_revision,
+        before_logical_platform_through_utc_ms,
+        before_private_schedule_through_utc_ms,
+        Vec::new(),
+        Vec::new(),
+    )?;
+    Ok(PreparedClosedBucketClosureUpgradeDriveV2 {
+        session,
+        query,
+        terminal_projection_condition_ids,
+        evidence,
+        recovery_operation: DurableRecoveryOperationV2::ApplyClosedMarketEventBucket,
+    })
+}
+
+fn prepare_execution_drive_prefix_v2(
+    session: &mut SimSession,
+    requested_cutoff_utc_ms: i64,
+    complete_same_request_at_same_time: bool,
+) -> Result<PreparedExecutionDrivePrefixV2<'_>, MarketEventErrorV1> {
+    session.require_input_not_failed()?;
+    let session_id = session.session_spec().session_id.clone();
+    let before_query_projection_revision = session.platform_state_revision();
+    let before_logical_platform_through_utc_ms = session.logical_platform_driven_through();
+    let before_private_schedule_through_utc_ms = session.private_fact_schedule_closed_through();
+    let account_instance_key = session.execution_state().account_instance_key().clone();
+    let scheduled = session.prepare_scheduled_session_drive_v2(
+        requested_cutoff_utc_ms,
+        complete_same_request_at_same_time,
+    )?;
+    let execution_state_changed = scheduled.execution_candidate().has_state_change();
+    let query_projection_changed = scheduled.execution_candidate().query_projection_changed();
+    let terminal_projection_condition_ids = scheduled.terminal_projection_condition_ids().clone();
+
+    let lifecycle_feedbacks = scheduled_lifecycle_feedbacks_v2(scheduled.execution_candidate())?;
 
     Ok(PreparedExecutionDrivePrefixV2 {
         session_id,
@@ -24605,6 +26168,64 @@ mod tests {
         (policy, sha256)
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn runtime_pending_action_counter_bytes_enter_session_and_run_memory_usage() {
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let scenario = scenario_for_sim_tests();
+        let mut process = SimExecutionProcessV1::try_new(
+            "component-test-run".to_owned(),
+            successful_policy_for_tests(),
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        )
+        .expect("create resource-counted process");
+        let mut session = process.create_active_session_for_tests(
+            session_spec(),
+            accepting_submission_response_bridge(),
+        );
+        session
+            .order(OrderRequestV1 {
+                context: context(&session, "resource-counted-order-query", 1, 1_000),
+                platform_order_id: "f".repeat(64),
+            })
+            .expect("register resource-counted query");
+
+        let session_checkpoint = session.durable_checkpoint();
+        let runtime_counter_bytes = session_checkpoint
+            .session
+            .resource_runtime_request_counter_bytes()
+            .expect("measure runtime request counters");
+        assert_eq!(runtime_counter_bytes, 8);
+        let session_usage =
+            session_resource_usage(&session_checkpoint).expect("measure resource-counted session");
+        assert_eq!(
+            session_usage.in_memory_state.bytes,
+            encoded_resource_bytes(&session_checkpoint).expect("encode resource-counted session")
+                + runtime_counter_bytes
+        );
+
+        let application_checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
+            &process,
+            &session,
+            rules.as_ref(),
+        );
+        let run_checkpoint = &application_checkpoint.run_checkpoint;
+        let usage = candidate_resource_usage(
+            run_checkpoint,
+            Some(session.session_spec().session_id.as_str()),
+            DurableResourcePreviewV1::default(),
+        )
+        .expect("measure resource-counted run");
+        let expected_run_bytes = encoded_resource_bytes(run_checkpoint)
+            .expect("encode resource-counted run")
+            + runtime_counter_bytes;
+        assert_eq!(usage.session.in_memory_state, session_usage.in_memory_state);
+        assert_eq!(usage.run.in_memory_state.bytes, expected_run_bytes);
+        assert_eq!(usage.run.sessions.bytes, expected_run_bytes);
+    }
+
     fn projection_evidence_for_tests(
         fact: DurableTransactionFactV1,
     ) -> DurableTransactionEvidenceV1 {
@@ -25534,6 +27155,864 @@ mod tests {
         ));
         assert!(conflicting.into_committable().is_err());
         assert_eq!(records, before_conflict, "冲突后不得覆盖既有 root effect");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_v2_composer_prepares_one_sparse_item_and_drop_is_read_only() {
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            scenario as long_scenario, session_spec as long_session_spec,
+        };
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载 Post composer 时延配置");
+        let scenario = long_scenario();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let spec = long_session_spec(&scenario, SimCallerRoleV1::Paper, "post-v2-composer");
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
+        let request_id = "post-v2-composer-request";
+        let registration = session
+            .post_order(PostOrderRequestV1 {
+                context: context_for_arrival(&session, &profile, request_id, 1, 150_000),
+                idempotency_key: "post-v2-composer-idempotency".to_owned(),
+                item: PostOrderItemV1 {
+                    item_id: "post-v2-composer-item".to_owned(),
+                    order: SimBuyOrderV1 {
+                        condition_id: long_market().condition_id,
+                        token_id: long_asset("1", 0, "Up").token_id,
+                        kind: SimBuyOrderKindV1::GtcLimit {
+                            limit_price_pusd_per_share: Decimal::new(4, 1),
+                            size_shares: Decimal::new(5, 0),
+                            post_only: true,
+                        },
+                    },
+                },
+            })
+            .expect("登记 Post composer 订单");
+        let effective_at = registration.item.effective_processing_at_utc_ms;
+        session
+            .session
+            .advance_public_visibility_through(effective_at, next_visibility_position)
+            .expect("闭合 Post composer 公开前缀");
+
+        let before = session.durable_checkpoint();
+        reset_execution_state_clone_count_for_tests();
+        let prepared = prepare_post_execution_drive_v2(&mut session, effective_at, 0)
+            .expect("准备 Post 稀疏 composer");
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            prepared.disposition,
+            SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            }
+        );
+        let [result] = prepared.evidence.logical_action_results.as_slice() else {
+            panic!("Post 稀疏 composer 每条事务必须只形成一个动作结果");
+        };
+        assert_eq!(result.batch_item_ordinal, 0);
+        assert!(matches!(
+            &result.part,
+            DirectResponsePartV1::Submission(SubmissionResponseItemV1 {
+                submission_effect_disposition: SubmissionEffectDispositionV1::NewEffect,
+                outcome: SubmissionItemOutcomeV1::Accepted(_),
+                ..
+            })
+        ));
+        assert_eq!(
+            prepared
+                .scheduled
+                .execution_candidate()
+                .candidate_orders()
+                .count(),
+            1,
+            "Post after-image 全量枚举必须包含新订单"
+        );
+        assert_eq!(
+            prepared
+                .scheduled
+                .execution_candidate()
+                .candidate_orders_for_condition(&long_market().condition_id.0)
+                .count(),
+            1,
+            "Post after-image 按市场枚举必须包含新订单"
+        );
+        let first_evidence = prepared.evidence.clone();
+        drop(prepared);
+        assert_eq!(session.durable_checkpoint(), before);
+
+        reset_execution_state_clone_count_for_tests();
+        let prepared = prepare_post_execution_drive_v2(&mut session, effective_at, 0)
+            .expect("重新准备 Post 稀疏 composer");
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(prepared.evidence, first_evidence);
+        prepared
+            .into_committable()
+            .expect("Post 稀疏 composer 必须可提交")
+            .commit();
+        assert_eq!(session.submission_effect_records.len(), 1);
+        assert_eq!(
+            session
+                .direct_response_outbox
+                .draft(request_id)
+                .expect("Post 提交后必须形成直接响应草稿")
+                .parts
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_v2_consumes_same_cutoff_gtd_release_after_image_without_full_state_clone() {
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            scenario as long_scenario, session_spec as long_session_spec,
+        };
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载 Post GTD 时延配置");
+        let scenario = long_scenario();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let spec = long_session_spec(&scenario, SimCallerRoleV1::Paper, "post-v2-same-cutoff-gtd");
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
+
+        let source_request_id = "post-v2-same-cutoff-gtd-source";
+        let source = session
+            .post_order(PostOrderRequestV1 {
+                context: context_for_arrival(&session, &profile, source_request_id, 1, 150_000),
+                idempotency_key: "post-v2-same-cutoff-gtd-source-key".to_owned(),
+                item: PostOrderItemV1 {
+                    item_id: "post-v2-same-cutoff-gtd-source-item".to_owned(),
+                    order: SimBuyOrderV1 {
+                        condition_id: long_market().condition_id,
+                        token_id: long_asset("1", 0, "Up").token_id,
+                        kind: SimBuyOrderKindV1::GtdLimit {
+                            limit_price_pusd_per_share: Decimal::new(4, 1),
+                            size_shares: Decimal::new(2_400, 0),
+                            post_only: true,
+                            expires_at_utc_ms: 391_999,
+                        },
+                    },
+                },
+            })
+            .expect("登记占用大部分资金的 GTD 来源订单");
+        let source_at = source.item.effective_processing_at_utc_ms;
+        session
+            .session
+            .advance_public_visibility_through(source_at, next_visibility_position)
+            .expect("闭合 GTD 来源订单公开前缀");
+        assert_eq!(
+            session.drive_next_execution_action_through(source_at),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        assert_eq!(session.available_pusd(), Decimal::new(40, 0));
+        assert_eq!(session.principal_encumbered_pusd(), Decimal::new(960, 0));
+        let source_order_id = session
+            .session
+            .execution_state()
+            .orders()
+            .find(|order| order.global_request_id == source_request_id)
+            .expect("GTD 来源订单必须存在")
+            .platform_order_id
+            .clone();
+        let collision_at = session
+            .next_order_deadline_at_utc_ms()
+            .expect("GTD 来源订单必须形成到期任务");
+        assert_eq!(collision_at, 391_000);
+
+        let post_request_id = "post-v2-same-cutoff-gtd-new";
+        let registration = session
+            .post_order(PostOrderRequestV1 {
+                context: context_for_arrival(&session, &profile, post_request_id, 2, collision_at),
+                idempotency_key: "post-v2-same-cutoff-gtd-new-key".to_owned(),
+                item: PostOrderItemV1 {
+                    item_id: "post-v2-same-cutoff-gtd-new-item".to_owned(),
+                    order: SimBuyOrderV1 {
+                        condition_id: long_market().condition_id,
+                        token_id: long_asset("1", 0, "Up").token_id,
+                        kind: SimBuyOrderKindV1::GtcLimit {
+                            limit_price_pusd_per_share: Decimal::new(4, 1),
+                            size_shares: Decimal::new(200, 0),
+                            post_only: true,
+                        },
+                    },
+                },
+            })
+            .expect("登记与 GTD 到期同刻的新订单");
+        assert_eq!(
+            registration.item.effective_processing_at_utc_ms,
+            collision_at
+        );
+        session
+            .session
+            .advance_public_visibility_through(collision_at, next_visibility_position)
+            .expect("闭合同刻 GTD 与 Post 公开前缀");
+
+        let before = session.durable_checkpoint();
+        let before_revision = session.query_projection_revision();
+        reset_execution_state_clone_count_for_tests();
+        let prepared = prepare_post_execution_drive_v2(&mut session, collision_at, 0)
+            .expect("准备读取同刻 GTD after-image 的 Post");
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            prepared.disposition,
+            SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            }
+        );
+        let [result] = prepared.evidence.logical_action_results.as_slice() else {
+            panic!("同刻 GTD Post 事务必须只形成一个动作结果");
+        };
+        assert!(matches!(
+            &result.part,
+            DirectResponsePartV1::Submission(SubmissionResponseItemV1 {
+                submission_effect_disposition: SubmissionEffectDispositionV1::NewEffect,
+                outcome: SubmissionItemOutcomeV1::Accepted(_),
+                ..
+            })
+        ));
+        assert_eq!(
+            prepared
+                .evidence
+                .account_deltas
+                .iter()
+                .map(|delta| delta.reason)
+                .collect::<Vec<_>>(),
+            vec![
+                contracts::PlatformAccountDeltaReasonV1::GtdExpirationEncumbranceReleased,
+                contracts::PlatformAccountDeltaReasonV1::OrderAcceptedEncumbranceApplied,
+            ]
+        );
+        assert_eq!(
+            prepared.evidence.query_projection_revision,
+            Some(before_revision + 1),
+            "同刻 scheduled 与 Post 都改变投影时只推进一次修订号"
+        );
+        let mut lifecycle_sequences = Vec::new();
+        let mut direct_sequence = None;
+        for draft in &prepared.evidence.private_output_drafts {
+            match draft {
+                DurablePrivateOutputDraftV1::Lifecycle { draft } => {
+                    lifecycle_sequences.push((
+                        draft.timing().private_emission_sequence,
+                        match draft {
+                            LifecycleFeedbackDraftV1::Order(order)
+                                if order.event_kind == OrderLifecycleEventKindV1::GtdExpired =>
+                            {
+                                "GTD"
+                            }
+                            LifecycleFeedbackDraftV1::Order(order)
+                                if order.event_kind == OrderLifecycleEventKindV1::OrderAccepted =>
+                            {
+                                "POST"
+                            }
+                            other => panic!("同刻 GTD Post 出现意外生命周期草稿：{other:#?}"),
+                        },
+                    ));
+                }
+                DurablePrivateOutputDraftV1::Direct { draft }
+                    if draft.context.global_request_id == post_request_id =>
+                {
+                    direct_sequence = Some(draft.private_emission_sequence);
+                }
+                _ => {}
+            }
+        }
+        lifecycle_sequences.sort_by_key(|(sequence, _)| *sequence);
+        assert_eq!(
+            lifecycle_sequences
+                .iter()
+                .map(|(_, kind)| *kind)
+                .collect::<Vec<_>>(),
+            vec!["GTD", "POST"]
+        );
+        assert!(
+            lifecycle_sequences.last().expect("必须形成生命周期草稿").0
+                < direct_sequence.expect("必须形成 Post 直接响应草稿")
+        );
+        let first_evidence = prepared.evidence.clone();
+        drop(prepared);
+        assert_eq!(session.durable_checkpoint(), before);
+        assert_eq!(session.available_pusd(), Decimal::new(40, 0));
+
+        reset_execution_state_clone_count_for_tests();
+        let prepared = prepare_post_execution_drive_v2(&mut session, collision_at, 0)
+            .expect("重新准备读取同刻 GTD after-image 的 Post");
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(prepared.evidence, first_evidence);
+        prepared
+            .into_committable()
+            .expect("同刻 GTD Post 候选必须可提交")
+            .commit();
+        assert_eq!(session.query_projection_revision(), before_revision + 1);
+        assert_eq!(session.available_pusd(), Decimal::new(920, 0));
+        assert_eq!(session.principal_encumbered_pusd(), Decimal::new(80, 0));
+        let source_order = session
+            .session
+            .execution_state()
+            .order(&source_order_id)
+            .expect("GTD 来源终态仍可查询");
+        assert_eq!(source_order.open_base_units, 0);
+        assert_eq!(source_order.expired_base_units, 2_400_000_000);
+        let new_order = session
+            .session
+            .execution_state()
+            .orders()
+            .find(|order| order.global_request_id == post_request_id)
+            .expect("同刻新订单必须读取释放后的资金并被接受");
+        assert_eq!(new_order.open_base_units, 200_000_000);
+        assert_eq!(session.next_order_deadline_at_utc_ms(), None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_orders_v2_processes_mixed_itode_items_by_time_and_completes_direct_last() {
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            scenario as long_scenario, session_spec as long_session_spec,
+        };
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载 PostOrders 时延配置");
+        let scenario = long_scenario();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let mut spec = long_session_spec(
+            &scenario,
+            SimCallerRoleV1::Paper,
+            "post-orders-v2-one-item-per-transaction",
+        );
+        spec.response_outbox_capacity =
+            std::num::NonZeroUsize::new(1).expect("PostOrders 测试容量必须为正");
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
+        let request_id = "post-orders-v2-one-item-per-transaction-request";
+        let registration = session
+            .post_orders(PostOrdersRequestV1 {
+                context: context_for_arrival(&session, &profile, request_id, 1, 150_000),
+                idempotency_key: "post-orders-v2-one-item-per-transaction-key".to_owned(),
+                items: vec![
+                    PostOrderItemV1 {
+                        item_id: "post-orders-v2-delayed-fak-ordinal-0".to_owned(),
+                        order: SimBuyOrderV1 {
+                            condition_id: long_market().condition_id.clone(),
+                            token_id: long_asset("1", 0, "Up").token_id.clone(),
+                            kind: SimBuyOrderKindV1::FakMarket {
+                                spend_pusd: Decimal::new(3, 0),
+                                worst_price_pusd_per_share: Decimal::new(6, 1),
+                            },
+                        },
+                    },
+                    PostOrderItemV1 {
+                        item_id: "post-orders-v2-ordinary-gtc-ordinal-1".to_owned(),
+                        order: SimBuyOrderV1 {
+                            condition_id: long_market().condition_id.clone(),
+                            token_id: long_asset("1", 0, "Up").token_id,
+                            kind: SimBuyOrderKindV1::GtcLimit {
+                                limit_price_pusd_per_share: Decimal::new(4, 1),
+                                size_shares: Decimal::new(5, 0),
+                                post_only: true,
+                            },
+                        },
+                    },
+                ],
+            })
+            .expect("登记两项 PostOrders");
+        let delayed_at = registration.items[0].effective_processing_at_utc_ms;
+        let ordinary_at = registration.items[1].effective_processing_at_utc_ms;
+        assert_eq!(delayed_at - ordinary_at, 250);
+        session
+            .session
+            .advance_public_visibility_through(ordinary_at, next_visibility_position)
+            .expect("闭合 PostOrders 普通项公开前缀");
+
+        reset_execution_state_clone_count_for_tests();
+        let first = prepare_post_execution_drive_v2(&mut session, ordinary_at, 0)
+            .expect("先准备较早到期的 PostOrders ordinal 1 普通项");
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            first.disposition,
+            SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: false,
+            }
+        );
+        let [first_result] = first.evidence.logical_action_results.as_slice() else {
+            panic!("PostOrders 第一条事务必须只包含第一项");
+        };
+        assert_eq!(first_result.batch_item_ordinal, 1);
+        assert!(
+            first
+                .evidence
+                .private_output_drafts
+                .iter()
+                .all(|draft| !matches!(draft, DurablePrivateOutputDraftV1::Direct { .. })),
+            "PostOrders 中间项不得提前形成直接响应"
+        );
+        first
+            .into_committable()
+            .expect("PostOrders 第一项必须可提交")
+            .commit();
+        assert_eq!(session.submission_effect_records.len(), 1);
+        assert!(session.direct_response_outbox.draft(request_id).is_none());
+        assert_eq!(
+            session
+                .direct_response_outbox
+                .entries
+                .get(request_id)
+                .expect("PostOrders 直接响应预留必须存在")
+                .parts
+                .iter()
+                .map(Option::is_some)
+                .collect::<Vec<_>>(),
+            vec![false, true]
+        );
+        assert_eq!(
+            session
+                .session
+                .first_pending_action_through(delayed_at)
+                .expect("PostOrders 延迟 ordinal 0 仍必须待处理")
+                .key
+                .batch_item_ordinal,
+            0
+        );
+        assert_eq!(session.lifecycle_outbox.batches.len(), 1);
+        session
+            .session
+            .advance_public_visibility_through(delayed_at, next_visibility_position)
+            .expect("闭合 PostOrders 延迟项公开前缀");
+
+        let first_feedback_at = session
+            .session
+            .next_private_fact_received_at_through(delayed_at)
+            .expect("普通项生命周期反馈必须在 itode 延迟结束前到达");
+        assert!(first_feedback_at < delayed_at);
+        let before_blocked_second = session.durable_checkpoint();
+        reset_execution_state_clone_count_for_tests();
+        assert!(matches!(
+            prepare_post_execution_drive_v2(&mut session, delayed_at, 0),
+            Err(SubmissionProcessingErrorV1::Session(
+                SessionError::ResponseOutboxFull
+            ))
+        ));
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(session.durable_checkpoint(), before_blocked_second);
+        drop(before_blocked_second);
+        session.prepare_private_delivery_through_for_tests(first_feedback_at);
+        assert_eq!(
+            session.drive_private_delivery_through(first_feedback_at),
+            Ok(SubmissionDeliveryDispositionV1::Delivered)
+        );
+        assert_eq!(session.lifecycle_outbox.batches.len(), 1);
+
+        reset_execution_state_clone_count_for_tests();
+        let second = prepare_post_execution_drive_v2(&mut session, delayed_at, 0)
+            .expect("后准备延迟到期的 PostOrders ordinal 0 FAK 项");
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            second.disposition,
+            SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            }
+        );
+        let [second_result] = second.evidence.logical_action_results.as_slice() else {
+            panic!("PostOrders 第二条事务必须只包含第二项");
+        };
+        assert_eq!(second_result.batch_item_ordinal, 0);
+        let Some((DurablePrivateOutputDraftV1::Direct { draft }, lifecycle_drafts)) =
+            second.evidence.private_output_drafts.split_last()
+        else {
+            panic!("PostOrders 最终项必须以唯一直接响应草稿收口");
+        };
+        assert!(!lifecycle_drafts.is_empty());
+        assert!(
+            lifecycle_drafts
+                .iter()
+                .all(|draft| matches!(draft, DurablePrivateOutputDraftV1::Lifecycle { .. }))
+        );
+        assert_eq!(draft.method, DirectResponseMethodV1::PostOrders);
+        assert_eq!(
+            draft
+                .parts
+                .iter()
+                .map(DirectResponsePartV1::ordinal)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        second
+            .into_committable()
+            .expect("PostOrders 第二项必须可提交")
+            .commit();
+        assert_eq!(session.submission_effect_records.len(), 2);
+        assert_eq!(session.session.execution_state().orders().count(), 2);
+        assert_eq!(session.session.execution_state().fills().count(), 1);
+        assert_eq!(session.lifecycle_outbox.batches.len(), 1);
+        let direct = session
+            .direct_response_outbox
+            .draft(request_id)
+            .expect("PostOrders 最终项必须完成直接响应");
+        assert_eq!(direct.method, DirectResponseMethodV1::PostOrders);
+        assert_eq!(
+            direct
+                .parts
+                .iter()
+                .map(DirectResponsePartV1::ordinal)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_v2_existing_effect_reuses_first_outcome_without_business_reexecution() {
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            scenario as long_scenario, session_spec as long_session_spec,
+        };
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载 Post 幂等时延配置");
+        let scenario = long_scenario();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let spec = long_session_spec(&scenario, SimCallerRoleV1::Paper, "post-v2-existing-effect");
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
+        let idempotency_key = "post-v2-existing-effect-key";
+        let item = PostOrderItemV1 {
+            item_id: "post-v2-existing-effect-item".to_owned(),
+            order: SimBuyOrderV1 {
+                condition_id: long_market().condition_id,
+                token_id: long_asset("1", 0, "Up").token_id,
+                kind: SimBuyOrderKindV1::GtcLimit {
+                    limit_price_pusd_per_share: Decimal::new(4, 1),
+                    size_shares: Decimal::new(5, 0),
+                    post_only: true,
+                },
+            },
+        };
+
+        let first_request_id = "post-v2-existing-effect-first";
+        let first_registration = session
+            .post_order(PostOrderRequestV1 {
+                context: context_for_arrival(&session, &profile, first_request_id, 1, 150_000),
+                idempotency_key: idempotency_key.to_owned(),
+                item: item.clone(),
+            })
+            .expect("登记首次 Post 幂等效果");
+        let first_at = first_registration.item.effective_processing_at_utc_ms;
+        session
+            .session
+            .advance_public_visibility_through(first_at, next_visibility_position)
+            .expect("闭合首次 Post 幂等效果公开前缀");
+        let first = prepare_post_execution_drive_v2(&mut session, first_at, 0)
+            .expect("准备首次 Post 幂等效果");
+        let [first_result] = first.evidence.logical_action_results.as_slice() else {
+            panic!("首次 Post 幂等效果必须形成唯一动作结果");
+        };
+        let DirectResponsePartV1::Submission(first_part) = &first_result.part else {
+            panic!("首次 Post 幂等效果必须形成提交结果");
+        };
+        assert_eq!(
+            first_part.submission_effect_disposition,
+            SubmissionEffectDispositionV1::NewEffect
+        );
+        let first_part = first_part.clone();
+        first
+            .into_committable()
+            .expect("首次 Post 幂等效果必须可提交")
+            .commit();
+
+        let business_before = (
+            session.session.execution_state().orders().count(),
+            session.session.execution_state().fills().count(),
+            session.available_pusd(),
+            session.principal_encumbered_pusd(),
+            session.query_projection_revision(),
+            session.submission_effect_records.len(),
+        );
+        let retry_request_id = "post-v2-existing-effect-retry";
+        let retry_registration = session
+            .post_order(PostOrderRequestV1 {
+                context: context_for_arrival(&session, &profile, retry_request_id, 2, 250_000),
+                idempotency_key: idempotency_key.to_owned(),
+                item,
+            })
+            .expect("以新逻辑请求复用 Post 幂等效果");
+        let retry_at = retry_registration.item.effective_processing_at_utc_ms;
+        session
+            .session
+            .advance_public_visibility_through(retry_at, next_visibility_position)
+            .expect("闭合 Post 幂等复用公开前缀");
+
+        reset_execution_state_clone_count_for_tests();
+        let retry = prepare_post_execution_drive_v2(&mut session, retry_at, 0)
+            .expect("准备既有 Post 幂等效果");
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        let [retry_result] = retry.evidence.logical_action_results.as_slice() else {
+            panic!("既有 Post 幂等效果必须形成唯一动作结果");
+        };
+        let DirectResponsePartV1::Submission(retry_part) = &retry_result.part else {
+            panic!("既有 Post 幂等效果必须形成提交结果");
+        };
+        assert_eq!(
+            retry_part.submission_effect_disposition,
+            SubmissionEffectDispositionV1::ExistingEffect
+        );
+        assert_eq!(
+            retry_part.submission_effect_identity,
+            first_part.submission_effect_identity
+        );
+        assert_eq!(
+            retry_part.submission_effect_formed_at_utc_ms,
+            first_part.submission_effect_formed_at_utc_ms
+        );
+        assert_eq!(retry_part.outcome, first_part.outcome);
+        assert_eq!(retry_part.effective_processing_at_utc_ms, retry_at);
+        assert!(retry.evidence.account_deltas.is_empty());
+        assert!(
+            retry
+                .evidence
+                .private_output_drafts
+                .iter()
+                .all(|draft| !matches!(draft, DurablePrivateOutputDraftV1::Lifecycle { .. })),
+            "既有 Post 幂等效果不得重复形成业务生命周期反馈"
+        );
+        retry
+            .into_committable()
+            .expect("既有 Post 幂等效果必须可提交")
+            .commit();
+        assert_eq!(
+            (
+                session.session.execution_state().orders().count(),
+                session.session.execution_state().fills().count(),
+                session.available_pusd(),
+                session.principal_encumbered_pusd(),
+                session.query_projection_revision(),
+                session.submission_effect_records.len(),
+            ),
+            business_before
+        );
+        assert_eq!(
+            session
+                .direct_response_outbox
+                .draft(retry_request_id)
+                .expect("Post 幂等复用仍应形成当前请求直接响应")
+                .method,
+            DirectResponseMethodV1::PostOrder
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_v2_fak_taker_match_equals_the_legacy_business_candidate_exactly() {
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            scenario as long_scenario, session_spec as long_session_spec,
+        };
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载 Post FAK 时延配置");
+        let scenario = long_scenario();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let spec = long_session_spec(
+            &scenario,
+            SimCallerRoleV1::Paper,
+            "post-v2-fak-legacy-golden",
+        );
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
+        let request_id = "post-v2-fak-legacy-golden-request";
+        let registration = session
+            .post_order(PostOrderRequestV1 {
+                context: context_for_arrival(&session, &profile, request_id, 1, 150_000),
+                idempotency_key: "post-v2-fak-legacy-golden-key".to_owned(),
+                item: PostOrderItemV1 {
+                    item_id: "post-v2-fak-legacy-golden-item".to_owned(),
+                    order: SimBuyOrderV1 {
+                        condition_id: long_market().condition_id,
+                        token_id: long_asset("1", 0, "Up").token_id,
+                        kind: SimBuyOrderKindV1::FakMarket {
+                            spend_pusd: Decimal::new(3, 0),
+                            worst_price_pusd_per_share: Decimal::new(6, 1),
+                        },
+                    },
+                },
+            })
+            .expect("登记 Post FAK 黄金对照请求");
+        let effective_at = registration.item.effective_processing_at_utc_ms;
+        session
+            .session
+            .advance_public_visibility_through(effective_at, next_visibility_position)
+            .expect("闭合 Post FAK 黄金对照公开前缀");
+
+        let legacy = prepare_execution_transition_v2(session.runtime_state(), effective_at)
+            .expect("准备既有整态 Post FAK 黄金候选");
+        assert_eq!(
+            legacy.disposition,
+            SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            }
+        );
+        let legacy_evidence = legacy.evidence.expect("既有 Post FAK 必须形成逻辑证据");
+        let legacy_checkpoint = legacy.candidate_state.checkpoint(None);
+
+        reset_execution_state_clone_count_for_tests();
+        let sparse = prepare_post_execution_drive_v2(&mut session, effective_at, 0)
+            .expect("准备稀疏 Post FAK 黄金候选");
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(sparse.disposition, legacy.disposition);
+        assert_eq!(sparse.evidence, legacy_evidence);
+        let [result] = sparse.evidence.logical_action_results.as_slice() else {
+            panic!("Post FAK 黄金候选必须形成唯一动作结果");
+        };
+        assert!(matches!(
+            &result.part,
+            DirectResponsePartV1::Submission(SubmissionResponseItemV1 {
+                outcome: SubmissionItemOutcomeV1::Accepted(accepted),
+                ..
+            }) if accepted.fills.len() == 1
+                && accepted.terminal_reason == Some(SubmissionTerminalReasonV1::FakCompleted)
+        ));
+        assert_eq!(
+            sparse
+                .scheduled
+                .execution_candidate()
+                .candidate_fills()
+                .count(),
+            1,
+            "Post after-image 全量枚举必须包含新成交"
+        );
+        assert_eq!(
+            sparse
+                .scheduled
+                .execution_candidate()
+                .candidate_fills_for_condition(&long_market().condition_id.0)
+                .count(),
+            1,
+            "Post after-image 按市场枚举必须包含新成交"
+        );
+        assert!(
+            sparse
+                .evidence
+                .private_output_drafts
+                .iter()
+                .any(|draft| matches!(
+                    draft,
+                    DurablePrivateOutputDraftV1::Lifecycle {
+                        draft: LifecycleFeedbackDraftV1::Trade(_),
+                    }
+                )),
+            "FAK taker 成交必须原子形成初始最终性反馈"
+        );
+        sparse
+            .into_committable()
+            .expect("稀疏 Post FAK 黄金候选必须可提交")
+            .commit();
+        assert_eq!(session.durable_checkpoint(), legacy_checkpoint);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recoverable_paper_v2_post_taker_commits_while_application_checkpoint_is_retained() {
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            scenario as long_scenario, session_spec as long_session_spec,
+        };
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载 Paper V2 Post 时延配置");
+        let scenario = long_scenario();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let spec = long_session_spec(
+            &scenario,
+            SimCallerRoleV1::Paper,
+            "paper-v2-post-retained-checkpoint",
+        );
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
+        let request_id = "paper-v2-post-retained-checkpoint-request";
+        let registration = session
+            .post_order(PostOrderRequestV1 {
+                context: context_for_arrival(&session, &profile, request_id, 1, 150_000),
+                idempotency_key: "paper-v2-post-retained-checkpoint-key".to_owned(),
+                item: PostOrderItemV1 {
+                    item_id: "paper-v2-post-retained-checkpoint-item".to_owned(),
+                    order: SimBuyOrderV1 {
+                        condition_id: long_market().condition_id,
+                        token_id: long_asset("1", 0, "Up").token_id,
+                        kind: SimBuyOrderKindV1::FakMarket {
+                            spend_pusd: Decimal::new(3, 0),
+                            worst_price_pusd_per_share: Decimal::new(6, 1),
+                        },
+                    },
+                },
+            })
+            .expect("登记保留应用检查点的 Paper V2 Post");
+        let effective_at = registration.item.effective_processing_at_utc_ms;
+        session
+            .session
+            .advance_public_visibility_through(effective_at, next_visibility_position)
+            .expect("闭合保留应用检查点的 Paper V2 Post 公开前缀");
+
+        let application_checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
+            &process,
+            &session,
+            rules.as_ref(),
+        );
+        let retained_session_checkpoint = application_checkpoint
+            .run_checkpoint
+            .sessions
+            .get(session.session_spec().session_id.as_str())
+            .expect("应用检查点必须保留目标会话");
+        let directory = tempfile::tempdir().expect("创建保留应用检查点的 Paper V2 Post 临时目录");
+        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
+            directory.path().join("paper-post-retained-checkpoint"),
+            &session,
+            &application_checkpoint,
+        )
+        .expect("创建保留应用检查点的 Paper V2 Post 协调器");
+
+        assert_eq!(
+            coordinator.drive_post_execution_through(&mut session, effective_at),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        assert_eq!(coordinator.cursor_for_tests().0, 1);
+        assert_eq!(session.session.execution_state().orders().count(), 1);
+        assert_eq!(session.session.execution_state().fills().count(), 1);
+        assert!(session.immediate_taker_fee_encumbered_pusd() > Decimal::ZERO);
+        assert_eq!(
+            retained_session_checkpoint.session.session_id(),
+            session.session_spec().session_id
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -36706,6 +39185,1382 @@ mod tests {
             tail.recovery_operation,
         )
         .expect("用同一稀疏撤单核心重放 Paper V2 批撤尾日志");
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(replayed.checkpoint(None), online_checkpoint);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recoverable_paper_v2_post_orders_second_insert_failure_preserves_first_item_and_replays_sparse()
+     {
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            scenario as long_scenario, session_spec as long_session_spec,
+        };
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载 Paper V2 Post 时延配置");
+        let scenario = long_scenario();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let spec = long_session_spec(
+            &scenario,
+            SimCallerRoleV1::Paper,
+            "paper-v2-post-orders-sparse-replay",
+        );
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
+        let request_id = "paper-v2-post-orders-sparse-replay-request";
+        let registration = session
+            .post_orders(PostOrdersRequestV1 {
+                context: context_for_arrival(&session, &profile, request_id, 1, 150_000),
+                idempotency_key: "paper-v2-post-orders-sparse-replay-key".to_owned(),
+                items: ["a", "b"]
+                    .into_iter()
+                    .map(|suffix| PostOrderItemV1 {
+                        item_id: format!("paper-v2-post-orders-sparse-replay-{suffix}"),
+                        order: SimBuyOrderV1 {
+                            condition_id: long_market().condition_id.clone(),
+                            token_id: long_asset("1", 0, "Up").token_id,
+                            kind: SimBuyOrderKindV1::GtcLimit {
+                                limit_price_pusd_per_share: Decimal::new(4, 1),
+                                size_shares: Decimal::new(5, 0),
+                                post_only: true,
+                            },
+                        },
+                    })
+                    .collect(),
+            })
+            .expect("登记 Paper V2 两项 PostOrders");
+        let post_at = registration.items[0].effective_processing_at_utc_ms;
+        assert!(
+            registration
+                .items
+                .iter()
+                .all(|item| item.effective_processing_at_utc_ms == post_at)
+        );
+        session
+            .session
+            .advance_public_visibility_through(post_at, next_visibility_position)
+            .expect("闭合 Paper V2 PostOrders 公开前缀");
+
+        let application_checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
+            &process,
+            &session,
+            rules.as_ref(),
+        );
+        let directory = tempfile::tempdir().expect("创建 Paper V2 Post 协调器临时目录");
+        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
+            directory.path().join("paper-post-orders-sparse-replay"),
+            &session,
+            &application_checkpoint,
+        )
+        .expect("创建 Paper V2 Post 协调器");
+
+        reset_execution_state_clone_count_for_tests();
+        reset_request_registration_preparation_counts_v2();
+        assert_eq!(
+            coordinator.drive_post_execution_through(&mut session, post_at),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: false,
+            })
+        );
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(coordinator.cursor_for_tests().0, 1);
+        assert_eq!(
+            (
+                coordinator.encoded_transaction_count_for_tests,
+                coordinator.append_attempt_count_for_tests,
+                coordinator.append_success_count_for_tests,
+            ),
+            (1, 1, 1)
+        );
+        assert_eq!(session.submission_effect_records.len(), 1);
+        assert_eq!(session.session.execution_state().orders().count(), 1);
+        assert!(session.direct_response_outbox.draft(request_id).is_none());
+        let recovered_after_first = coordinator
+            .store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("读取 Paper V2 Post 第一项日志");
+        assert_eq!(recovered_after_first.tail.len(), 1);
+        let first_evidence = &recovered_after_first.tail[0].evidence;
+        let [first_result] = first_evidence.logical_action_results.as_slice() else {
+            panic!("Paper V2 Post 第一条日志必须只含第一项");
+        };
+        assert_eq!(first_result.batch_item_ordinal, 0);
+        assert!(matches!(
+            first_evidence.private_output_drafts.as_slice(),
+            [DurablePrivateOutputDraftV1::Lifecycle {
+                draft: LifecycleFeedbackDraftV1::Order(order),
+            }] if order.event_kind == OrderLifecycleEventKindV1::OrderAccepted
+        ));
+        assert_eq!(first_evidence.account_deltas.len(), 1);
+
+        let after_first_state = session.durable_checkpoint();
+        let after_first_cursor = coordinator.cursor_for_tests();
+        let after_first_log_bytes = coordinator.logical_log_bytes;
+        let pending_second = session
+            .session
+            .first_pending_action_through(post_at)
+            .expect("Paper V2 Post 第二项必须仍待处理");
+        assert_eq!(pending_second.key.batch_item_ordinal, 1);
+        coordinator
+            .store
+            .install_transaction_log_insert_failure_for_tests()
+            .expect("安装 Paper V2 Post 第二项 SQLite INSERT 失败触发器");
+        reset_execution_state_clone_count_for_tests();
+        reset_request_registration_preparation_counts_v2();
+        assert!(matches!(
+            coordinator.drive_post_execution_through(&mut session, post_at),
+            Err(SubmissionProcessingErrorV1::Session(SessionError::Durability(message)))
+                if message.contains("SQLite")
+        ));
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(session.durable_checkpoint(), after_first_state);
+        assert_eq!(session.submission_effect_records.len(), 1);
+        assert_eq!(session.session.execution_state().orders().count(), 1);
+        assert_eq!(
+            session.session.first_pending_action_through(post_at),
+            Some(pending_second)
+        );
+        assert_eq!(coordinator.cursor_for_tests(), after_first_cursor);
+        assert_eq!(coordinator.logical_log_bytes, after_first_log_bytes);
+        assert!(!coordinator.recovery_required);
+        assert_eq!(
+            (
+                coordinator.encoded_transaction_count_for_tests,
+                coordinator.append_attempt_count_for_tests,
+                coordinator.append_success_count_for_tests,
+            ),
+            (2, 2, 1)
+        );
+        let recovered_after_failure = coordinator
+            .store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("读取 Paper V2 Post 第二项 INSERT 失败日志");
+        assert_eq!(
+            recovered_after_failure.tail, recovered_after_first.tail,
+            "第二项 INSERT 失败不得改变已耐久的第一项日志"
+        );
+
+        coordinator
+            .store
+            .remove_transaction_log_insert_failure_for_tests()
+            .expect("移除 Paper V2 Post 第二项 SQLite INSERT 失败触发器");
+        reset_execution_state_clone_count_for_tests();
+        reset_request_registration_preparation_counts_v2();
+        assert_eq!(
+            coordinator.drive_post_execution_through(&mut session, post_at),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(coordinator.cursor_for_tests().0, 2);
+        assert_eq!(
+            (
+                coordinator.encoded_transaction_count_for_tests,
+                coordinator.append_attempt_count_for_tests,
+                coordinator.append_success_count_for_tests,
+            ),
+            (3, 3, 2)
+        );
+        assert_eq!(session.submission_effect_records.len(), 2);
+        assert_eq!(session.session.execution_state().orders().count(), 2);
+        assert_eq!(session.available_pusd(), Decimal::new(996, 0));
+        assert_eq!(session.principal_encumbered_pusd(), Decimal::new(4, 0));
+        let direct = session
+            .direct_response_outbox
+            .draft(request_id)
+            .expect("Paper V2 Post 第二项必须完成批量直接响应");
+        assert_eq!(direct.method, DirectResponseMethodV1::PostOrders);
+        assert_eq!(
+            direct
+                .parts
+                .iter()
+                .map(DirectResponsePartV1::ordinal)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        let online_checkpoint = session.durable_checkpoint();
+
+        let recovered = coordinator
+            .store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("恢复 Paper V2 Post 两项日志");
+        assert_eq!(recovered.tail.len(), 2);
+        assert_eq!(
+            recovered
+                .tail
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        let mut effect_identities = Vec::new();
+        for (entry, expected_ordinal) in recovered.tail.iter().zip([0, 1]) {
+            assert_eq!(
+                entry.recovery_operation,
+                DurableRecoveryOperationV2::DriveExecutionThrough {
+                    effective_processing_at_utc_ms: post_at,
+                }
+            );
+            let [result] = entry.evidence.logical_action_results.as_slice() else {
+                panic!("Paper V2 Post 每条日志必须只含一个动作结果");
+            };
+            assert_eq!(result.batch_item_ordinal, expected_ordinal);
+            let DirectResponsePartV1::Submission(item) = &result.part else {
+                panic!("Paper V2 Post 日志必须形成提交结果");
+            };
+            assert_eq!(item.batch_item_ordinal, expected_ordinal);
+            assert_eq!(
+                item.submission_effect_formed_at_utc_ms, post_at,
+                "同刻逐项事务必须保存各自真实 effect 形成时点"
+            );
+            assert_eq!(
+                item.submission_effect_disposition,
+                SubmissionEffectDispositionV1::NewEffect
+            );
+            assert!(matches!(item.outcome, SubmissionItemOutcomeV1::Accepted(_)));
+            effect_identities.push(item.submission_effect_identity.clone());
+        }
+        assert_ne!(effect_identities[0], effect_identities[1]);
+        assert!(
+            recovered.tail[0]
+                .evidence
+                .private_output_drafts
+                .iter()
+                .all(|draft| !matches!(draft, DurablePrivateOutputDraftV1::Direct { .. }))
+        );
+        let second_private_output_drafts = &recovered.tail[1].evidence.private_output_drafts;
+        assert_eq!(second_private_output_drafts.len(), 2);
+        let lifecycle_sequence = second_private_output_drafts
+            .iter()
+            .find_map(|draft| match draft {
+                DurablePrivateOutputDraftV1::Lifecycle {
+                    draft: LifecycleFeedbackDraftV1::Order(order),
+                } if order.event_kind == OrderLifecycleEventKindV1::OrderAccepted => {
+                    Some(order.timing.private_emission_sequence)
+                }
+                _ => None,
+            })
+            .expect("Paper V2 Post 第二项必须形成订单接纳生命周期草稿");
+        let direct_sequence = second_private_output_drafts
+            .iter()
+            .find_map(|draft| match draft {
+                DurablePrivateOutputDraftV1::Direct { draft }
+                    if draft.method == DirectResponseMethodV1::PostOrders
+                        && draft.parts.len() == 2 =>
+                {
+                    Some(draft.private_emission_sequence)
+                }
+                _ => None,
+            })
+            .expect("Paper V2 Post 第二项必须形成完整批量直接响应草稿");
+        assert!(lifecycle_sequence < direct_sequence);
+
+        let session_id = session.session_spec().session_id.clone();
+        let mut replayed = restore_recoverable_paper_application_session_for_tests(
+            &process,
+            recovered
+                .checkpoint
+                .expect("Paper V2 Post 恢复必须包含应用检查点")
+                .checkpoint,
+            &session_id,
+        );
+        reset_execution_state_clone_count_for_tests();
+        reset_request_registration_preparation_counts_v2();
+        for (index, entry) in recovered.tail.into_iter().enumerate() {
+            replayed =
+                replay_execution_operation_v2(replayed, &entry.evidence, entry.recovery_operation)
+                    .expect("用共享 Post 稀疏核心重放 Paper V2 Post 尾日志");
+            assert_eq!(execution_state_clone_count_for_tests(), 0);
+            if index == 0 {
+                assert_eq!(replayed.checkpoint(None), after_first_state);
+                reset_execution_state_clone_count_for_tests();
+            }
+        }
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(replayed.checkpoint(None), online_checkpoint);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn closed_bucket_sparse_execution_interleaves_redeem_before_invalid_and_keeps_same_time_action()
+     {
+        use crate::task21_tests::fresh_quality;
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            orderbook_evidence, scenario as long_scenario, sealed_event,
+            session_spec as long_session_spec,
+        };
+        use data_pipeline_core::encode_execution_market_event_v3;
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载闭桶稀疏测试时延配置");
+        let scenario = long_scenario();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let mut spec = long_session_spec(
+            &scenario,
+            SimCallerRoleV1::Paper,
+            "closed-bucket-sparse-interleave",
+        );
+        spec.response_outbox_capacity = std::num::NonZeroUsize::new(8).expect("正容量");
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
+        let end_at_utc_ms = long_market().window.end_at_utc_ms;
+        let max_delay_ms =
+            i64::try_from(profile.statistics().max_delay_ms).expect("代理时延上限适合 i64");
+        let bucket_at_utc_ms = end_at_utc_ms
+            .checked_add(max_delay_ms)
+            .and_then(|at| at.checked_add(1))
+            .expect("闭桶稀疏测试时点不得溢出");
+        assert_eq!(
+            session.apply_closed_market_event_bucket(ClosedMarketEventBucketV1::public(
+                end_at_utc_ms,
+                next_visibility_position,
+                next_visibility_position,
+                MillisecondBucketClosureV1::NextEventAt(bucket_at_utc_ms),
+                Vec::new(),
+            )),
+            Ok(MarketBucketApplyDispositionV1::Applied)
+        );
+
+        let registration = session
+            .order(OrderRequestV1 {
+                context: context_for_arrival(
+                    &session,
+                    &profile,
+                    "closed-bucket-sparse-same-time-query",
+                    1,
+                    bucket_at_utc_ms,
+                ),
+                platform_order_id: "a".repeat(64),
+            })
+            .expect("登记同刻查询动作");
+        assert_eq!(
+            registration.receipt.transit.platform_arrived_at_utc_ms,
+            bucket_at_utc_ms
+        );
+        let pending_action = session
+            .session
+            .first_pending_action_through(bucket_at_utc_ms)
+            .expect("同刻查询动作必须已排定");
+
+        let condition_id = long_market().condition_id.0.clone();
+        let resolution = MarketResolutionTerminalV3::Resolved {
+            winning_asset_id: long_asset("1", 0, "Up").token_id.0,
+            winning_outcome: "Up".to_owned(),
+            payout_vector: vec![
+                contracts::PayoutEntryV1 {
+                    asset: long_asset("1", 0, "Up"),
+                    payout_pusd_per_share: contracts::ExactDecimal("1".to_owned()),
+                },
+                contracts::PayoutEntryV1 {
+                    asset: long_asset("2", 1, "Down"),
+                    payout_pusd_per_share: contracts::ExactDecimal("0".to_owned()),
+                },
+            ],
+            mapping_rule_version: "closed-bucket-sparse-interleave-v1".to_owned(),
+        };
+        let resolution_event = sealed_event(
+            contracts::ExecutionMarketEventPayloadV3::MarketResolutionTerminal(resolution.clone()),
+            orderbook_evidence(bucket_at_utc_ms, bucket_at_utc_ms, 3),
+            fresh_quality(),
+        );
+        let invalid_event = sealed_event(
+            contracts::ExecutionMarketEventPayloadV3::QualityBoundary(
+                contracts::QualityBoundaryV2 {
+                    scope: contracts::QualityScopeV1::Market,
+                    previous_quality: contracts::MarketDataQuality::Fresh,
+                    current_quality: contracts::MarketDataQuality::Invalid,
+                    reason_code: "CLOSED_BUCKET_REDEEMED_THEN_INVALID".to_owned(),
+                },
+            ),
+            orderbook_evidence(bucket_at_utc_ms, bucket_at_utc_ms, 4),
+            contracts::EventQualityV2 {
+                availability: contracts::MarketDataQuality::Invalid,
+                resync: contracts::ResyncQuality::NotRequired,
+            },
+        );
+        let encoded_events = vec![
+            encode_execution_market_event_v3(&resolution_event).expect("编码闭桶稀疏判定事件"),
+            encode_execution_market_event_v3(&invalid_event).expect("编码闭桶稀疏质量事件"),
+        ];
+        let bucket = ClosedMarketEventBucketV1::public(
+            bucket_at_utc_ms,
+            next_visibility_position,
+            next_visibility_position + 2,
+            MillisecondBucketClosureV1::NextEventAt(bucket_at_utc_ms + 1),
+            encoded_events.clone(),
+        );
+        let baseline = session.durable_checkpoint();
+        let application_checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
+            &process,
+            &session,
+            rules.as_ref(),
+        );
+        let directory = tempfile::tempdir().expect("创建闭桶稀疏协调器临时目录");
+        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
+            directory.path().join("closed-bucket-sparse-interleave"),
+            &session,
+            &application_checkpoint,
+        )
+        .expect("创建闭桶稀疏协调器");
+
+        reset_execution_state_clone_count_for_tests();
+        {
+            let PreparedExecutingClosedBucketDriveAttemptV2::Applied(prepared) =
+                prepare_executing_closed_bucket_drive_fields_v2(
+                    &mut session.session,
+                    &mut session.query_state,
+                    &mut session.lifecycle_outbox,
+                    &bucket,
+                    0,
+                )
+                .expect("准备逐事件交错闭桶候选")
+            else {
+                panic!("非 EOF 闭桶不得形成失败封口候选");
+            };
+            let [settlement] = prepared
+                .session
+                .dpt_effects()
+                .settlement_feedbacks
+                .as_slice()
+            else {
+                panic!("零持仓合格判定必须形成唯一 AutoRedeem");
+            };
+            assert_eq!(
+                settlement.action.redeemed_resolution(),
+                Some((condition_id.as_str(), &resolution))
+            );
+            assert_eq!(
+                prepared
+                    .session
+                    .execution_candidate()
+                    .candidate_redeemed_market_resolution(&condition_id),
+                Some(&resolution)
+            );
+            assert_eq!(
+                prepared.session.terminal_projection_condition_ids(),
+                &BTreeSet::from([condition_id.clone()])
+            );
+            assert_eq!(
+                prepared.evidence.logical_platform_driven_through_utc_ms,
+                Some(bucket_at_utc_ms)
+            );
+            assert_eq!(prepared.evidence.private_output_drafts.len(), 1);
+            assert!(matches!(
+                prepared.evidence.private_output_drafts.as_slice(),
+                [DurablePrivateOutputDraftV1::Lifecycle {
+                    draft: LifecycleFeedbackDraftV1::Settlement(_),
+                }]
+            ));
+        }
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(session.durable_checkpoint(), baseline);
+
+        coordinator
+            .store
+            .install_transaction_log_insert_failure_for_tests()
+            .expect("安装闭桶稀疏 INSERT 失败触发器");
+        reset_execution_state_clone_count_for_tests();
+        reset_request_registration_preparation_counts_v2();
+        assert!(matches!(
+            coordinator.apply_closed_market_event_bucket_v2(&mut session, &bucket),
+            Err(MarketEventErrorV1::Session(SessionError::Durability(message)))
+                if message.contains("SQLite")
+        ));
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(session.durable_checkpoint(), baseline);
+        assert_eq!(coordinator.cursor_for_tests().0, 0);
+        assert_eq!(coordinator.encoded_transaction_count_for_tests, 1);
+        assert_eq!(coordinator.append_attempt_count_for_tests, 1);
+        assert_eq!(coordinator.append_success_count_for_tests, 0);
+        assert!(
+            coordinator
+                .store
+                .recover::<
+                    DurableLogicalTransactionEvidenceV2,
+                    DurableRecoveryOperationV2,
+                    RecoverablePaperApplicationCheckpointV2,
+                >()
+                .expect("INSERT 失败后读取闭桶稀疏日志")
+                .tail
+                .is_empty()
+        );
+        coordinator
+            .store
+            .remove_transaction_log_insert_failure_for_tests()
+            .expect("移除闭桶稀疏 INSERT 失败触发器");
+
+        reset_execution_state_clone_count_for_tests();
+        reset_request_registration_preparation_counts_v2();
+        assert_eq!(
+            coordinator.apply_closed_market_event_bucket_v2(&mut session, &bucket),
+            Ok(MarketBucketApplyDispositionV1::Applied)
+        );
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(coordinator.cursor_for_tests().0, 1);
+        let online_checkpoint = session.durable_checkpoint();
+        assert_eq!(
+            session
+                .platform_market_state(&condition_id)
+                .map(MarketStateV1::lifecycle_phase),
+            Some(MarketLifecyclePhaseV1::ResolutionTerminal)
+        );
+        assert_eq!(
+            session
+                .platform_market_state(&condition_id)
+                .map(MarketStateV1::market_quality),
+            Some(contracts::MarketDataQuality::Invalid)
+        );
+        assert_eq!(
+            session
+                .session
+                .execution_state()
+                .redeemed_market_resolution(&condition_id),
+            Some(&resolution)
+        );
+        assert_eq!(
+            session
+                .session
+                .first_pending_action_through(bucket_at_utc_ms),
+            Some(pending_action)
+        );
+
+        let recovered = coordinator
+            .store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("恢复闭桶稀疏日志");
+        assert_eq!(recovered.tail.len(), 1);
+        let entry = &recovered.tail[0];
+        assert_eq!(
+            entry.recovery_operation,
+            DurableRecoveryOperationV2::ApplyClosedMarketEventBucket
+        );
+        let expected_read = PaperMarketEventRecoveryReadRequestV1 {
+            bucket_at_utc_ms,
+            start_visibility_index_position: next_visibility_position,
+            next_visibility_index_position: next_visibility_position + 2,
+        };
+        let expected_read_for_reader = expected_read.clone();
+        let mut reader =
+            PaperMarketEventRecoveryReaderV1::try_new(Sha256Hex("e".repeat(64)), move |request| {
+                if request != expected_read_for_reader {
+                    return Err(PaperMarketEventRecoveryReadErrorV1::RangeUnavailable(
+                        "闭桶稀疏恢复读取坐标不符".to_owned(),
+                    ));
+                }
+                Ok(PaperMarketEventRecoveryReadV1 {
+                    encoded_events: encoded_events.clone(),
+                    next_event_at_utc_ms: Some(bucket_at_utc_ms + 1),
+                })
+            })
+            .expect("构造闭桶稀疏恢复读取器");
+        let mut replayed = restore_recoverable_paper_application_session_for_tests(
+            &process,
+            recovered
+                .checkpoint
+                .expect("闭桶稀疏恢复必须包含应用检查点")
+                .checkpoint,
+            &session.session_spec().session_id,
+        );
+        reset_execution_state_clone_count_for_tests();
+        reset_request_registration_preparation_counts_v2();
+        replayed = replay_platform_bucket_operation_v2(
+            replayed,
+            &entry.evidence,
+            entry.recovery_operation,
+            &mut reader,
+        )
+        .expect("用闭桶稀疏核心重放尾日志");
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(replayed.checkpoint(None), online_checkpoint);
+        assert_eq!(
+            session.drive_next_execution_action_through(bucket_at_utc_ms),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn closed_bucket_sparse_execution_orders_scheduled_before_dpt_and_advances_revision_once()
+    {
+        use crate::task21_tests::fresh_quality;
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            orderbook_evidence, scenario as long_scenario, sealed_event,
+            session_spec as long_session_spec,
+        };
+        use data_pipeline_core::encode_execution_market_event_v3;
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载闭桶顺序测试时延配置");
+        let scenario = long_scenario();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let mut spec = long_session_spec(
+            &scenario,
+            SimCallerRoleV1::Paper,
+            "closed-bucket-sparse-scheduled-before-dpt",
+        );
+        spec.response_outbox_capacity = std::num::NonZeroUsize::new(16).expect("正容量");
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
+
+        let source_request_id = "closed-bucket-sparse-scheduled-before-dpt-source";
+        let source = session
+            .post_orders(PostOrdersRequestV1 {
+                context: context_for_arrival(&session, &profile, source_request_id, 1, 150_000),
+                idempotency_key: "closed-bucket-sparse-scheduled-before-dpt-source-key".to_owned(),
+                items: vec![
+                    PostOrderItemV1 {
+                        item_id: "closed-bucket-sparse-scheduled-before-dpt-gtd".to_owned(),
+                        order: SimBuyOrderV1 {
+                            condition_id: long_market().condition_id.clone(),
+                            token_id: long_asset("1", 0, "Up").token_id,
+                            kind: SimBuyOrderKindV1::GtdLimit {
+                                limit_price_pusd_per_share: Decimal::new(4, 1),
+                                size_shares: Decimal::new(5, 0),
+                                post_only: true,
+                                expires_at_utc_ms: 600_999,
+                            },
+                        },
+                    },
+                    PostOrderItemV1 {
+                        item_id: "closed-bucket-sparse-scheduled-before-dpt-gtc".to_owned(),
+                        order: SimBuyOrderV1 {
+                            condition_id: long_market().condition_id.clone(),
+                            token_id: long_asset("1", 0, "Up").token_id,
+                            kind: SimBuyOrderKindV1::GtcLimit {
+                                limit_price_pusd_per_share: Decimal::new(4, 1),
+                                size_shares: Decimal::new(5, 0),
+                                post_only: true,
+                            },
+                        },
+                    },
+                ],
+            })
+            .expect("登记闭桶顺序来源订单");
+        let source_at_utc_ms = source.items[0].effective_processing_at_utc_ms;
+        assert!(
+            source
+                .items
+                .iter()
+                .all(|item| item.effective_processing_at_utc_ms == source_at_utc_ms)
+        );
+        session
+            .session
+            .advance_public_visibility_through(source_at_utc_ms, next_visibility_position)
+            .expect("闭合来源订单公开前缀");
+        for request_completed in [false, true] {
+            assert_eq!(
+                session.drive_next_execution_action_through(source_at_utc_ms),
+                Ok(SubmissionDriveDispositionV1::ItemProcessed { request_completed })
+            );
+        }
+        let gtd_order_id = session
+            .session
+            .execution_state()
+            .orders()
+            .find(|order| order.item_id == "closed-bucket-sparse-scheduled-before-dpt-gtd")
+            .expect("GTD 来源订单必须存在")
+            .platform_order_id
+            .clone();
+        let gtc_order_id = session
+            .session
+            .execution_state()
+            .orders()
+            .find(|order| order.item_id == "closed-bucket-sparse-scheduled-before-dpt-gtc")
+            .expect("GTC 来源订单必须存在")
+            .platform_order_id
+            .clone();
+        let bucket_at_utc_ms = session
+            .next_order_deadline_at_utc_ms()
+            .expect("GTD 来源订单必须形成到期任务");
+        assert_eq!(bucket_at_utc_ms, 600_000);
+
+        let market_end_at_utc_ms = long_market().window.end_at_utc_ms;
+        assert_eq!(
+            session.apply_closed_market_event_bucket(ClosedMarketEventBucketV1::public(
+                market_end_at_utc_ms,
+                next_visibility_position,
+                next_visibility_position,
+                MillisecondBucketClosureV1::NextEventAt(bucket_at_utc_ms),
+                Vec::new(),
+            )),
+            Ok(MarketBucketApplyDispositionV1::Applied)
+        );
+
+        let query = session
+            .order(OrderRequestV1 {
+                context: context_for_arrival(
+                    &session,
+                    &profile,
+                    "closed-bucket-sparse-scheduled-before-dpt-query",
+                    2,
+                    bucket_at_utc_ms,
+                ),
+                platform_order_id: gtc_order_id.clone(),
+            })
+            .expect("登记与闭桶同刻的订单查询");
+        assert_eq!(
+            query.receipt.transit.platform_arrived_at_utc_ms,
+            bucket_at_utc_ms
+        );
+        let pending_action = session
+            .session
+            .first_pending_action_through(bucket_at_utc_ms)
+            .expect("同刻查询动作必须已排定");
+
+        let resolution = MarketResolutionTerminalV3::Resolved {
+            winning_asset_id: long_asset("1", 0, "Up").token_id.0,
+            winning_outcome: "Up".to_owned(),
+            payout_vector: vec![
+                contracts::PayoutEntryV1 {
+                    asset: long_asset("1", 0, "Up"),
+                    payout_pusd_per_share: contracts::ExactDecimal("1".to_owned()),
+                },
+                contracts::PayoutEntryV1 {
+                    asset: long_asset("2", 1, "Down"),
+                    payout_pusd_per_share: contracts::ExactDecimal("0".to_owned()),
+                },
+            ],
+            mapping_rule_version: "closed-bucket-sparse-scheduled-before-dpt-v1".to_owned(),
+        };
+        let resolution_event = sealed_event(
+            contracts::ExecutionMarketEventPayloadV3::MarketResolutionTerminal(resolution),
+            orderbook_evidence(bucket_at_utc_ms, bucket_at_utc_ms, 3),
+            fresh_quality(),
+        );
+        let bucket = ClosedMarketEventBucketV1::public(
+            bucket_at_utc_ms,
+            next_visibility_position,
+            next_visibility_position + 1,
+            MillisecondBucketClosureV1::NextEventAt(bucket_at_utc_ms + 1),
+            vec![
+                encode_execution_market_event_v3(&resolution_event).expect("编码闭桶顺序判定事件"),
+            ],
+        );
+        let baseline = session.durable_checkpoint();
+        let revision_before = session.query_projection_revision();
+
+        reset_execution_state_clone_count_for_tests();
+        let PreparedExecutingClosedBucketDriveAttemptV2::Applied(prepared) =
+            prepare_executing_closed_bucket_drive_fields_v2(
+                &mut session.session,
+                &mut session.query_state,
+                &mut session.lifecycle_outbox,
+                &bucket,
+                0,
+            )
+            .expect("准备 scheduled 先于 DPT 的闭桶候选")
+        else {
+            panic!("非 EOF 闭桶不得形成失败封口候选");
+        };
+        assert!(prepared.evidence.logical_action_results.is_empty());
+        assert_eq!(
+            prepared.evidence.query_projection_revision,
+            Some(revision_before + 1),
+            "scheduled 与 DPT 都改变查询投影时只能推进一次修订号"
+        );
+        assert_eq!(
+            prepared
+                .evidence
+                .account_deltas
+                .iter()
+                .map(|delta| delta.reason)
+                .collect::<Vec<_>>(),
+            vec![
+                contracts::PlatformAccountDeltaReasonV1::GtdExpirationEncumbranceReleased,
+                contracts::PlatformAccountDeltaReasonV1::MarketResolutionEncumbranceReleased,
+            ]
+        );
+        let mut lifecycle = prepared
+            .evidence
+            .private_output_drafts
+            .iter()
+            .map(|draft| {
+                let DurablePrivateOutputDraftV1::Lifecycle { draft } = draft else {
+                    panic!("同刻查询不得在闭桶事务内形成直接响应")
+                };
+                let kind = match draft {
+                    LifecycleFeedbackDraftV1::Order(order)
+                        if order.event_kind == OrderLifecycleEventKindV1::GtdExpired
+                            && order.platform_order_id == gtd_order_id =>
+                    {
+                        "GTD"
+                    }
+                    LifecycleFeedbackDraftV1::Order(order)
+                        if order.event_kind
+                            == OrderLifecycleEventKindV1::MarketResolvedCanceled
+                            && order.platform_order_id == gtc_order_id =>
+                    {
+                        "RESOLUTION"
+                    }
+                    LifecycleFeedbackDraftV1::Settlement(SettlementLifecycleFeedbackDraftV1 {
+                        event: SettlementLifecycleEventDraftV1::AutoRedeemApplied { .. },
+                        ..
+                    }) => "REDEEM",
+                    other => panic!("闭桶顺序测试出现意外生命周期草稿：{other:#?}"),
+                };
+                (
+                    draft.timing().private_emission_sequence,
+                    draft.timing().platform_event_at_utc_ms,
+                    kind,
+                )
+            })
+            .collect::<Vec<_>>();
+        lifecycle.sort_by_key(|(sequence, _, _)| *sequence);
+        assert_eq!(
+            lifecycle
+                .iter()
+                .map(|(_, at, kind)| (*at, *kind))
+                .collect::<Vec<_>>(),
+            vec![
+                (bucket_at_utc_ms, "GTD"),
+                (bucket_at_utc_ms, "RESOLUTION"),
+                (bucket_at_utc_ms, "REDEEM"),
+            ],
+            "同刻闭桶必须先完成 scheduled，再按 DPT 原序形成反馈"
+        );
+        assert!(
+            lifecycle.windows(2).all(|pair| pair[1].0 == pair[0].0 + 1),
+            "同刻闭桶私有发射序号必须连续"
+        );
+        let evidence = prepared.evidence.clone();
+        drop(prepared);
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(session.durable_checkpoint(), baseline);
+        assert_eq!(session.query_projection_revision(), revision_before);
+        assert_eq!(
+            session.next_order_deadline_at_utc_ms(),
+            Some(bucket_at_utc_ms)
+        );
+        assert_eq!(
+            session
+                .session
+                .first_pending_action_through(bucket_at_utc_ms),
+            Some(pending_action.clone())
+        );
+
+        let PreparedExecutingClosedBucketDriveAttemptV2::Applied(prepared) =
+            prepare_executing_closed_bucket_drive_fields_v2(
+                &mut session.session,
+                &mut session.query_state,
+                &mut session.lifecycle_outbox,
+                &bucket,
+                0,
+            )
+            .expect("重新准备 scheduled 先于 DPT 的闭桶候选")
+        else {
+            panic!("重新准备非 EOF 闭桶不得形成失败封口候选");
+        };
+        assert_eq!(prepared.evidence, evidence);
+        prepared
+            .into_committable()
+            .expect("scheduled 先于 DPT 的闭桶候选必须可提交")
+            .commit();
+        assert_eq!(session.query_projection_revision(), revision_before + 1);
+        assert_eq!(session.next_order_deadline_at_utc_ms(), None);
+        assert_eq!(
+            session
+                .session
+                .execution_state()
+                .order(&gtd_order_id)
+                .expect("GTD 终态仍可查询")
+                .expired_at_utc_ms,
+            Some(bucket_at_utc_ms)
+        );
+        assert_eq!(
+            session
+                .session
+                .execution_state()
+                .order(&gtc_order_id)
+                .expect("GTC 判定终态仍可查询")
+                .market_resolved_at_utc_ms,
+            Some(bucket_at_utc_ms)
+        );
+        assert_eq!(
+            session
+                .session
+                .first_pending_action_through(bucket_at_utc_ms),
+            Some(pending_action)
+        );
+        assert_eq!(
+            session.drive_next_execution_action_through(bucket_at_utc_ms),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        assert_eq!(session.query_projection_revision(), revision_before + 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn closed_bucket_sparse_failed_eof_skips_due_gtd_and_replays_exactly() {
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            scenario as long_scenario, session_spec as long_session_spec,
+        };
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载失败封口测试时延配置");
+        let scenario = long_scenario();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let mut spec = long_session_spec(
+            &scenario,
+            SimCallerRoleV1::Paper,
+            "closed-bucket-sparse-failed-eof",
+        );
+        spec.response_outbox_capacity = std::num::NonZeroUsize::new(8).expect("正容量");
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
+        let registration = session
+            .post_order(PostOrderRequestV1 {
+                context: context_for_arrival(
+                    &session,
+                    &profile,
+                    "closed-bucket-sparse-failed-eof-gtd",
+                    1,
+                    150_000,
+                ),
+                idempotency_key: "closed-bucket-sparse-failed-eof-gtd-key".to_owned(),
+                item: PostOrderItemV1 {
+                    item_id: "closed-bucket-sparse-failed-eof-gtd-item".to_owned(),
+                    order: SimBuyOrderV1 {
+                        condition_id: long_market().condition_id,
+                        token_id: long_asset("1", 0, "Up").token_id,
+                        kind: SimBuyOrderKindV1::GtdLimit {
+                            limit_price_pusd_per_share: Decimal::new(1, 5),
+                            size_shares: Decimal::new(5, 0),
+                            post_only: true,
+                            expires_at_utc_ms: 391_999,
+                        },
+                    },
+                },
+            })
+            .expect("登记失败封口前 GTD");
+        let accepted_at_utc_ms = registration.item.effective_processing_at_utc_ms;
+        session
+            .session
+            .advance_public_visibility_through(accepted_at_utc_ms, next_visibility_position)
+            .expect("闭合 GTD 接纳时点公开前缀");
+        assert_eq!(
+            session.drive_next_execution_action_through(accepted_at_utc_ms),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        let gtd_deadline_at_utc_ms = session
+            .next_order_deadline_at_utc_ms()
+            .expect("失败封口前必须存在 GTD 到期任务");
+        let platform_order_id = session
+            .session
+            .execution_state()
+            .orders()
+            .next()
+            .expect("失败封口前必须存在 GTD 订单")
+            .platform_order_id
+            .clone();
+        let bucket = ClosedMarketEventBucketV1::public(
+            gtd_deadline_at_utc_ms,
+            next_visibility_position,
+            next_visibility_position,
+            MillisecondBucketClosureV1::EndOfInput,
+            Vec::new(),
+        );
+        let baseline = session.durable_checkpoint();
+        let execution_before =
+            serde_json::to_vec(session.session.execution_state()).expect("编码失败封口前 matching");
+        let revision_before = session.query_projection_revision();
+        let logical_before = session.session.logical_platform_driven_through();
+        let lifecycle_before = session.lifecycle_outbox.clone();
+        let query_before = session.query_state.clone();
+        let application_checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
+            &process,
+            &session,
+            rules.as_ref(),
+        );
+        let directory = tempfile::tempdir().expect("创建失败封口日志目录");
+        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
+            directory.path().join("closed-bucket-sparse-failed-eof"),
+            &session,
+            &application_checkpoint,
+        )
+        .expect("创建失败封口协调器");
+
+        reset_execution_state_clone_count_for_tests();
+        reset_request_registration_preparation_counts_v2();
+        assert_eq!(
+            coordinator.apply_closed_market_event_bucket_v2(&mut session, &bucket),
+            Ok(MarketBucketApplyDispositionV1::Applied)
+        );
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert!(matches!(
+            session.session.failed_input_seal(),
+            Some((
+                MarketEventPathV1::PublicVisibility,
+                InputPathSealOutcomeV1::FailedMissingQualifiedMarketTerminal { .. }
+            ))
+        ));
+        assert_eq!(
+            serde_json::to_vec(session.session.execution_state()).expect("编码失败封口后 matching"),
+            execution_before
+        );
+        assert_eq!(
+            session.next_order_deadline_at_utc_ms(),
+            Some(gtd_deadline_at_utc_ms)
+        );
+        assert!(
+            session
+                .session
+                .execution_state()
+                .order(&platform_order_id)
+                .expect("失败封口后 GTD 订单仍存在")
+                .expired_at_utc_ms
+                .is_none()
+        );
+        assert_eq!(session.query_projection_revision(), revision_before);
+        assert_eq!(
+            session.session.logical_platform_driven_through(),
+            logical_before
+        );
+        assert_eq!(session.lifecycle_outbox, lifecycle_before);
+        assert_eq!(session.query_state, query_before);
+        let online_checkpoint = session.durable_checkpoint();
+        assert_ne!(online_checkpoint, baseline);
+
+        let recovered = coordinator
+            .store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("恢复失败封口事务日志");
+        assert_eq!(recovered.tail.len(), 1);
+        let entry = &recovered.tail[0];
+        assert!(entry.evidence.logical_action_results.is_empty());
+        assert!(entry.evidence.private_output_drafts.is_empty());
+        assert_eq!(entry.evidence.query_projection_revision, None);
+        assert_eq!(entry.evidence.logical_platform_driven_through_utc_ms, None);
+        let expected_read = PaperMarketEventRecoveryReadRequestV1 {
+            bucket_at_utc_ms: gtd_deadline_at_utc_ms,
+            start_visibility_index_position: next_visibility_position,
+            next_visibility_index_position: next_visibility_position,
+        };
+        let mut reader =
+            PaperMarketEventRecoveryReaderV1::try_new(Sha256Hex("f".repeat(64)), move |request| {
+                if request != expected_read {
+                    return Err(PaperMarketEventRecoveryReadErrorV1::RangeUnavailable(
+                        "失败封口恢复读取坐标不符".to_owned(),
+                    ));
+                }
+                Ok(PaperMarketEventRecoveryReadV1 {
+                    encoded_events: Vec::new(),
+                    next_event_at_utc_ms: None,
+                })
+            })
+            .expect("构造失败封口恢复读取器");
+        let restored = restore_recoverable_paper_application_session_for_tests(
+            &process,
+            recovered
+                .checkpoint
+                .expect("失败封口恢复必须包含应用检查点")
+                .checkpoint,
+            &session.session_spec().session_id,
+        );
+        reset_execution_state_clone_count_for_tests();
+        reset_request_registration_preparation_counts_v2();
+        let replayed = replay_platform_bucket_operation_v2(
+            restored,
+            &entry.evidence,
+            entry.recovery_operation,
+            &mut reader,
+        )
+        .expect("稀疏重放失败封口事务");
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(replayed.checkpoint(None), online_checkpoint);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn closed_bucket_sparse_non_execution_public_terminalizes_redeemed_market_and_replays() {
+        use crate::task21_tests::fresh_quality;
+        use crate::task22_tests::{
+            asset as long_asset, initial_events, market as long_market, orderbook_evidence,
+            scenario as long_scenario, sealed_event, session_spec as long_session_spec,
+        };
+        use data_pipeline_core::encode_execution_market_event_v3;
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载非执行闭桶时延配置");
+        let scenario = long_scenario();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let spec = long_session_spec(
+            &scenario,
+            SimCallerRoleV1::ModelTrain,
+            "closed-bucket-sparse-non-execution",
+        );
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+        let hidden_initial_at_utc_ms = 110_000;
+        let public_initial_at_utc_ms = 120_000;
+        let encoded_initial = initial_events("0.00001", "0.6", "5")
+            .iter()
+            .map(|event| encode_execution_market_event_v3(event).expect("编码初始市场事件"))
+            .collect::<Vec<_>>();
+        let resolution_at_utc_ms = long_market()
+            .window
+            .end_at_utc_ms
+            .checked_add(1)
+            .expect("非执行判定时点不得溢出");
+        assert_eq!(
+            session.apply_closed_market_event_bucket(ClosedMarketEventBucketV1::hidden(
+                hidden_initial_at_utc_ms,
+                0,
+                2,
+                MillisecondBucketClosureV1::NextEventAt(resolution_at_utc_ms),
+                encoded_initial.clone(),
+            )),
+            Ok(MarketBucketApplyDispositionV1::Applied)
+        );
+        assert_eq!(
+            session.apply_closed_market_event_bucket(ClosedMarketEventBucketV1::public(
+                public_initial_at_utc_ms,
+                0,
+                2,
+                MillisecondBucketClosureV1::NextEventAt(resolution_at_utc_ms),
+                encoded_initial,
+            )),
+            Ok(MarketBucketApplyDispositionV1::Applied)
+        );
+
+        let condition_id = long_market().condition_id.0.clone();
+        let resolution = MarketResolutionTerminalV3::Resolved {
+            winning_asset_id: long_asset("1", 0, "Up").token_id.0,
+            winning_outcome: "Up".to_owned(),
+            payout_vector: vec![
+                contracts::PayoutEntryV1 {
+                    asset: long_asset("1", 0, "Up"),
+                    payout_pusd_per_share: contracts::ExactDecimal("1".to_owned()),
+                },
+                contracts::PayoutEntryV1 {
+                    asset: long_asset("2", 1, "Down"),
+                    payout_pusd_per_share: contracts::ExactDecimal("0".to_owned()),
+                },
+            ],
+            mapping_rule_version: "closed-bucket-sparse-non-execution-v1".to_owned(),
+        };
+        let resolution_event = sealed_event(
+            contracts::ExecutionMarketEventPayloadV3::MarketResolutionTerminal(resolution.clone()),
+            orderbook_evidence(resolution_at_utc_ms, resolution_at_utc_ms, 3),
+            fresh_quality(),
+        );
+        let encoded_resolution =
+            encode_execution_market_event_v3(&resolution_event).expect("编码非执行判定事件");
+        assert_eq!(
+            session.apply_closed_market_event_bucket(ClosedMarketEventBucketV1::hidden(
+                resolution_at_utc_ms,
+                2,
+                3,
+                MillisecondBucketClosureV1::NextEventAt(resolution_at_utc_ms + 1),
+                vec![encoded_resolution.clone()],
+            )),
+            Ok(MarketBucketApplyDispositionV1::Applied)
+        );
+        assert_eq!(
+            session
+                .session
+                .execution_state()
+                .redeemed_market_resolution(&condition_id),
+            Some(&resolution)
+        );
+        assert_eq!(
+            session
+                .session
+                .hidden_platform_markets()
+                .and_then(|store| store.market(&condition_id))
+                .map(MarketStateV1::lifecycle_phase),
+            Some(MarketLifecyclePhaseV1::ResolutionTerminal)
+        );
+        assert_ne!(
+            session
+                .public_market_state(&condition_id)
+                .map(MarketStateV1::lifecycle_phase),
+            Some(MarketLifecyclePhaseV1::ResolutionTerminal)
+        );
+
+        let public_bucket = ClosedMarketEventBucketV1::public(
+            resolution_at_utc_ms,
+            2,
+            3,
+            MillisecondBucketClosureV1::NextEventAt(resolution_at_utc_ms + 1),
+            vec![encoded_resolution.clone()],
+        );
+        let baseline = session.durable_checkpoint();
+        let baseline_state = session.runtime_state();
+        let execution_before =
+            serde_json::to_vec(session.session.execution_state()).expect("编码非执行 matching");
+        let revision_before = session.query_projection_revision();
+        let logical_before = session.session.logical_platform_driven_through();
+        let lifecycle_before = session.lifecycle_outbox.clone();
+
+        reset_execution_state_clone_count_for_tests();
+        let prepared = prepare_market_only_closed_bucket_drive_fields_v2(
+            &mut session.session,
+            &mut session.query_state,
+            &public_bucket,
+            None,
+        )
+        .expect("准备非执行公开闭桶");
+        assert_eq!(prepared.evidence.query_projection_revision, None);
+        assert_eq!(
+            prepared.evidence.logical_platform_driven_through_utc_ms,
+            None
+        );
+        assert!(prepared.evidence.private_output_drafts.is_empty());
+        let evidence = prepared.evidence.clone();
+        let recovery_operation = prepared.recovery_operation;
+        drop(prepared);
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(session.durable_checkpoint(), baseline);
+
+        reset_execution_state_clone_count_for_tests();
+        prepare_market_only_closed_bucket_drive_fields_v2(
+            &mut session.session,
+            &mut session.query_state,
+            &public_bucket,
+            None,
+        )
+        .expect("重新准备非执行公开闭桶")
+        .into_committable()
+        .expect("非执行公开闭桶必须可提交")
+        .commit();
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            session
+                .public_market_state(&condition_id)
+                .map(MarketStateV1::lifecycle_phase),
+            Some(MarketLifecyclePhaseV1::ResolutionTerminal)
+        );
+        assert_eq!(
+            serde_json::to_vec(session.session.execution_state())
+                .expect("编码非执行提交后 matching"),
+            execution_before
+        );
+        assert_eq!(session.query_projection_revision(), revision_before);
+        assert_eq!(
+            session.session.logical_platform_driven_through(),
+            logical_before
+        );
+        assert_eq!(session.lifecycle_outbox, lifecycle_before);
+        let online_checkpoint = session.durable_checkpoint();
+
+        let expected_read = PaperMarketEventRecoveryReadRequestV1 {
+            bucket_at_utc_ms: resolution_at_utc_ms,
+            start_visibility_index_position: 2,
+            next_visibility_index_position: 3,
+        };
+        let mut reader =
+            PaperMarketEventRecoveryReaderV1::try_new(Sha256Hex("1".repeat(64)), move |request| {
+                if request != expected_read {
+                    return Err(PaperMarketEventRecoveryReadErrorV1::RangeUnavailable(
+                        "非执行闭桶恢复读取坐标不符".to_owned(),
+                    ));
+                }
+                Ok(PaperMarketEventRecoveryReadV1 {
+                    encoded_events: vec![encoded_resolution.clone()],
+                    next_event_at_utc_ms: Some(resolution_at_utc_ms + 1),
+                })
+            })
+            .expect("构造非执行闭桶恢复读取器");
+        reset_execution_state_clone_count_for_tests();
+        reset_request_registration_preparation_counts_v2();
+        let replayed = replay_platform_bucket_operation_v2(
+            baseline_state,
+            &evidence,
+            recovery_operation,
+            &mut reader,
+        )
+        .expect("稀疏重放非执行闭桶");
         assert_eq!(execution_state_clone_count_for_tests(), 0);
         assert_eq!(
             request_registration_preparation_counts_v2().runtime_state_calls,

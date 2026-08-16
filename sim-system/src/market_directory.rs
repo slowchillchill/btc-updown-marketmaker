@@ -89,7 +89,6 @@ impl SessionMarketDirectoryV1 {
         Ok(())
     }
 
-    #[cfg(test)]
     pub(crate) fn market(&self, condition_id: &str) -> Option<&PlatformMarketV1> {
         self.markets.get(condition_id)
     }

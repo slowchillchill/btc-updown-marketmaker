@@ -18,14 +18,17 @@ use crate::account::{InitialAccountStateV1, PlatformAccountStateV1};
 use crate::finality::TradeFinalityPolicyV1;
 use crate::latency_profile::{DelaySampleDomainV1, EmpiricalDelayProfile};
 use crate::market::{
-    AccountBookOverlayStoreV1, DurableMarketBucketReferenceV1, MarketEventErrorV1,
-    MarketEventPathV1, MarketLifecyclePhaseV1, MarketStateStoreV1, MillisecondBucketClosureV1,
-    PreparedMarketResolutionTerminalDeltaV2,
+    AccountBookOverlayStoreV1, ClosedMarketEventBucketV1, DurableMarketBucketReferenceV1,
+    MarketEventErrorV1, MarketEventPathV1, MarketLifecyclePhaseV1, MarketStateStoreV1,
+    MillisecondBucketClosureV1, PreparedMarketResolutionTerminalDeltaV2,
+    PreparedMarketStoreBucketDeltaV2, PreparedMarketStoreBucketStepV2,
+    PreparedMarketStoreClosureUpgradeV2,
 };
 use crate::market_directory::{SessionMarketDirectoryErrorV1, SessionMarketDirectoryV1};
 use crate::matching::{
-    CancelOrderStateDispositionV1, CommittableExecutionDriveDeltaV2, ExecutionStateV1,
-    MatchingStateErrorV1, PreparedExecutionDriveDeltaV2, TerminalExecutionMarketEvictionV1,
+    AuthorizedMarketEventEffectsV1, CancelOrderStateDispositionV1,
+    CommittableExecutionDriveDeltaV2, ExecutionStateV1, MatchingStateErrorV1,
+    PreparedExecutionDriveDeltaV2, TerminalExecutionMarketEvictionV1,
 };
 use crate::platform_rules::SealedProcessRuleSnapshot;
 use crate::scenario::{PlatformMarketV1, PlatformScenarioV1};
@@ -52,6 +55,33 @@ const ACCOUNT_OPENING_ANCHOR_HASH_DOMAIN_V1: &str = "SIM_ACCOUNT_OPENING_ANCHOR_
 const MARKET_ENROLLMENT_ID_DOMAIN_V1: &str = "SIM_MARKET_ENROLLMENT_ID_V1";
 const MARKET_ENROLLMENT_HASH_DOMAIN_V1: &str = "SIM_MARKET_ENROLLMENT_SHA256_V1";
 const MARKET_ENROLLMENT_CHAIN_HASH_DOMAIN_V1: &str = "SIM_MARKET_ENROLLMENT_CHAIN_SHA256_V1";
+const REQUEST_PENDING_ACTION_COUNTER_BYTES_V1: u64 = 8;
+
+#[cfg(test)]
+std::thread_local! {
+    static PENDING_ACTION_ENTRY_VISIT_COUNT_FOR_TESTS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+#[cfg(test)]
+fn record_pending_action_entry_visit_for_tests() {
+    PENDING_ACTION_ENTRY_VISIT_COUNT_FOR_TESTS.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn record_pending_action_entry_visit_for_tests() {}
+
+#[cfg(test)]
+fn reset_pending_action_entry_visits_for_tests() {
+    PENDING_ACTION_ENTRY_VISIT_COUNT_FOR_TESTS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn pending_action_entry_visits_for_tests() -> usize {
+    PENDING_ACTION_ENTRY_VISIT_COUNT_FOR_TESTS.with(std::cell::Cell::get)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -350,6 +380,7 @@ impl SimSessionCheckpointV1 {
             .execution_state
             .resource_index_encoded_bytes()
             .map_err(SessionError::ExecutionState)?;
+        let runtime_request_counters = self.resource_runtime_request_counter_bytes()?;
         Ok(SimSessionResourceBytesV1 {
             hot_markets,
             active_orders: self
@@ -364,10 +395,18 @@ impl SimSessionCheckpointV1 {
                 )
                 .ok_or_else(|| SessionError::ExecutionState("内部事件资源字节溢出".to_owned()))?,
             indexes: session_indexes
-                .checked_add(market_indexes)
+                .checked_add(runtime_request_counters)
+                .and_then(|value| value.checked_add(market_indexes))
                 .and_then(|value| value.checked_add(execution_indexes))
                 .ok_or_else(|| SessionError::ExecutionState("索引资源字节溢出".to_owned()))?,
         })
+    }
+
+    pub(crate) fn resource_runtime_request_counter_bytes(&self) -> Result<u64, SessionError> {
+        u64::try_from(self.state.requests.len())
+            .ok()
+            .and_then(|count| count.checked_mul(REQUEST_PENDING_ACTION_COUNTER_BYTES_V1))
+            .ok_or_else(|| SessionError::ExecutionState("请求待处理动作计数字节溢出".to_owned()))
     }
 }
 
@@ -1318,7 +1357,7 @@ impl SimSession {
             session_id: self.state.spec.session_id.clone(),
             hidden_platform_markets: self.hidden_platform_markets.clone(),
             public_markets: self.public_markets.clone(),
-            execution_state: self.execution_state.clone(),
+            execution_state: self.execution_state.detached_clone(),
             market_enrollment: self.market_enrollment.as_ref().clone(),
             state: SessionStateCheckpointV1::from(&self.state),
         }
@@ -2361,6 +2400,467 @@ impl SimSession {
         })
     }
 
+    pub(crate) fn prepare_executing_closed_bucket_session_drive_v2(
+        &mut self,
+        bucket: &ClosedMarketEventBucketV1,
+    ) -> Result<PreparedClosedBucketSessionDriveAttemptV2<'_>, MarketEventErrorV1> {
+        let reference = bucket.durable_reference();
+        let caller_role = self.session_spec().caller_role;
+        if !bucket.drives_execution_for(caller_role) {
+            if reference.path == MarketEventPathV1::HiddenPlatform
+                && caller_role == SimCallerRoleV1::Paper
+            {
+                return Err(SessionError::HiddenPlatformReplayForbidden.into());
+            }
+            return Err(SessionError::ExecutionState(
+                "执行闭桶稀疏准备只能处理当前角色的执行路径".to_owned(),
+            )
+            .into());
+        }
+        if self.failed_input_seal().is_some() || self.input_path_seal(reference.path).is_some() {
+            return Err(MarketEventErrorV1::InputPathAlreadySealed);
+        }
+        if self.last_applied_bucket_coordinates_match(bucket) {
+            return Err(MarketEventErrorV1::BucketIdentityConflict);
+        }
+        let expected_start = match reference.path {
+            MarketEventPathV1::HiddenPlatform => self
+                .platform_prefix_cursor()
+                .next_event_time_index_position(),
+            MarketEventPathV1::PublicVisibility => self
+                .public_visibility_cursor()
+                .next_visibility_index_position(),
+        };
+        if reference.start_index_position != expected_start {
+            return Err(MarketEventErrorV1::BucketStartPositionConflict {
+                expected: expected_start,
+                actual: reference.start_index_position,
+            });
+        }
+
+        let lifecycle_account_rule = self
+            .rule_snapshot
+            .snapshot()
+            .project_account_rules
+            .lifecycle_account_behavior
+            .value
+            .clone();
+        let SimSession {
+            finality_policy,
+            latency_profile,
+            hidden_platform_markets,
+            public_markets,
+            execution_state,
+            terminal_projection_pending,
+            market_enrollment,
+            state,
+            ..
+        } = self;
+        let action = state.prepare_closed_bucket_actionless_slice_v2(
+            Arc::as_ref(latency_profile),
+            reference.path,
+            reference.bucket_at_utc_ms,
+            reference.next_index_position,
+            None,
+        )?;
+        let first_due_at_utc_ms = [
+            execution_state.next_gtd_deadline_at_utc_ms(),
+            execution_state.next_scheduled_finality_at_utc_ms(),
+            execution_state.next_rebate_clock_at_utc_ms(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|at_utc_ms| *at_utc_ms <= reference.bucket_at_utc_ms)
+        .min();
+        let mut execution =
+            execution_state.prepare_execution_drive_delta_v2(reference.bucket_at_utc_ms)?;
+        let directory = &market_enrollment.directory;
+        let hidden_platform_markets = hidden_platform_markets.as_mut();
+        let selected_store = match reference.path {
+            MarketEventPathV1::HiddenPlatform => hidden_platform_markets
+                .as_deref()
+                .expect("隐藏执行闭桶必须持有隐藏市场状态"),
+            MarketEventPathV1::PublicVisibility => &*public_markets,
+        };
+        let mut selected_bucket = selected_store.begin_bucket_delta_v2(bucket)?;
+        let mut hidden_terminal_deltas = Vec::new();
+        let mut public_terminal_deltas = Vec::new();
+        let mut newly_redeemed_condition_ids = BTreeSet::new();
+
+        let mut scheduled_redeemed_resolutions = BTreeMap::new();
+        for effect in execution
+            .scheduled_finality_effects()
+            .iter()
+            .flat_map(|lifecycle| lifecycle.settlement_feedbacks.iter())
+            .chain(execution.rebate_clock_effects().iter())
+        {
+            let Some((condition_id, resolution)) = effect.action.redeemed_resolution() else {
+                continue;
+            };
+            if let Some(existing) = scheduled_redeemed_resolutions.get(condition_id) {
+                if existing != resolution {
+                    return Err(MarketEventErrorV1::ResolutionConflict(
+                        condition_id.to_owned(),
+                    ));
+                }
+                continue;
+            }
+            scheduled_redeemed_resolutions.insert(condition_id.to_owned(), resolution.clone());
+        }
+        for (condition_id, resolution) in scheduled_redeemed_resolutions {
+            let (next, _) = selected_bucket.stage_redeemed_resolution_terminal(
+                selected_store,
+                &condition_id,
+                &resolution,
+            )?;
+            selected_bucket = next;
+            let (hidden_delta, public_delta) = prepare_other_redeemed_resolution_terminal_path_v2(
+                reference.path,
+                hidden_platform_markets.as_deref(),
+                public_markets,
+                &condition_id,
+                &resolution,
+            )?;
+            if let Some(delta) = hidden_delta {
+                hidden_terminal_deltas.push(delta);
+            }
+            if let Some(delta) = public_delta {
+                public_terminal_deltas.push(delta);
+            }
+            newly_redeemed_condition_ids.insert(condition_id);
+        }
+
+        execution = execution
+            .prepare_authorized_market_bucket_start_v2(directory, reference.bucket_at_utc_ms)?;
+        let mut dpt_effects = AuthorizedMarketEventEffectsV1::default();
+        let selected_bucket = loop {
+            match selected_bucket.advance(selected_store)? {
+                PreparedMarketStoreBucketStepV2::Authorized(staged_event) => {
+                    let condition_id = staged_event.event().market.condition_id.0.clone();
+                    let (next_execution, event_effects) = execution
+                        .prepare_authorized_market_event_v2(
+                            directory,
+                            reference.bucket_at_utc_ms,
+                            staged_event.event(),
+                            Arc::as_ref(finality_policy),
+                            &lifecycle_account_rule,
+                            staged_event.qualified_resolution(),
+                        )?;
+                    execution = next_execution;
+                    let mut event_redeemed_resolutions = BTreeMap::new();
+                    for effect in event_effects
+                        .trade_finality_effects
+                        .iter()
+                        .flat_map(|lifecycle| lifecycle.settlement_feedbacks.iter())
+                        .chain(event_effects.settlement_feedbacks.iter())
+                    {
+                        let Some((redeemed_condition_id, resolution)) =
+                            effect.action.redeemed_resolution()
+                        else {
+                            continue;
+                        };
+                        if let Some(existing) =
+                            event_redeemed_resolutions.get(redeemed_condition_id)
+                        {
+                            if existing != resolution {
+                                return Err(MarketEventErrorV1::ResolutionConflict(
+                                    redeemed_condition_id.to_owned(),
+                                ));
+                            }
+                        } else {
+                            event_redeemed_resolutions
+                                .insert(redeemed_condition_id.to_owned(), resolution.clone());
+                        }
+                    }
+                    dpt_effects.append(event_effects);
+                    selected_bucket = staged_event.complete();
+                    for (redeemed_condition_id, resolution) in event_redeemed_resolutions {
+                        debug_assert_eq!(redeemed_condition_id, condition_id);
+                        let candidate_resolution = execution
+                            .candidate_redeemed_market_resolution(&redeemed_condition_id)
+                            .ok_or_else(|| {
+                                MarketEventErrorV1::ResolutionConflict(
+                                    redeemed_condition_id.clone(),
+                                )
+                            })?;
+                        if candidate_resolution != &resolution {
+                            return Err(MarketEventErrorV1::ResolutionConflict(
+                                redeemed_condition_id,
+                            ));
+                        }
+                        let (next, _) = selected_bucket.stage_redeemed_resolution_terminal(
+                            selected_store,
+                            &condition_id,
+                            &resolution,
+                        )?;
+                        selected_bucket = next;
+                        if newly_redeemed_condition_ids.insert(condition_id.clone()) {
+                            let (hidden_delta, public_delta) =
+                                prepare_other_redeemed_resolution_terminal_path_v2(
+                                    reference.path,
+                                    hidden_platform_markets.as_deref(),
+                                    public_markets,
+                                    &condition_id,
+                                    &resolution,
+                                )?;
+                            if let Some(delta) = hidden_delta {
+                                hidden_terminal_deltas.push(delta);
+                            }
+                            if let Some(delta) = public_delta {
+                                public_terminal_deltas.push(delta);
+                            }
+                        }
+                    }
+                }
+                PreparedMarketStoreBucketStepV2::EvictedNoExecution(next) => {
+                    selected_bucket = next;
+                }
+                PreparedMarketStoreBucketStepV2::Complete(prepared) => break prepared,
+            }
+        };
+
+        let mut action = action;
+        if reference.closure == MillisecondBucketClosureV1::EndOfInput {
+            selected_bucket.validate_initial_load_complete(selected_store)?;
+            let outcome = selected_bucket.input_seal_outcome(selected_store);
+            if matches!(
+                outcome,
+                InputPathSealOutcomeV1::FailedMissingQualifiedMarketTerminal { .. }
+            ) {
+                return Ok(PreparedClosedBucketSessionDriveAttemptV2::FailedInputSeal(
+                    outcome,
+                ));
+            }
+            action.stage_closed_bucket_input_seal(outcome);
+        }
+        let mut terminal_projection_condition_ids = terminal_projection_pending.clone();
+        terminal_projection_condition_ids.extend(newly_redeemed_condition_ids.iter().cloned());
+        let mark_business_input_started = matches!(
+            caller_role,
+            SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation
+        ) && !market_enrollment.business_input_started;
+        Ok(PreparedClosedBucketSessionDriveAttemptV2::Applied(
+            PreparedClosedBucketSessionDriveV2 {
+                action,
+                execution,
+                hidden_platform_markets,
+                public_markets,
+                selected_path: reference.path,
+                selected_bucket,
+                hidden_terminal_deltas,
+                public_terminal_deltas,
+                terminal_projection_pending,
+                market_enrollment,
+                mark_business_input_started,
+                newly_redeemed_condition_ids,
+                terminal_projection_condition_ids,
+                dpt_effects,
+                actual_cutoff_utc_ms: reference.bucket_at_utc_ms,
+                first_due_at_utc_ms,
+            },
+        ))
+    }
+
+    pub(crate) fn prepare_market_only_closed_bucket_session_drive_v2(
+        &mut self,
+        bucket: &ClosedMarketEventBucketV1,
+        failed_input_seal: Option<InputPathSealOutcomeV1>,
+    ) -> Result<PreparedMarketOnlyClosedBucketSessionDriveV2<'_>, MarketEventErrorV1> {
+        let reference = bucket.durable_reference();
+        let caller_role = self.session_spec().caller_role;
+        let drives_execution = bucket.drives_execution_for(caller_role);
+        if drives_execution != failed_input_seal.is_some() {
+            return Err(SessionError::ExecutionState(
+                "市场专用闭桶准备的执行角色与失败封口模式不一致".to_owned(),
+            )
+            .into());
+        }
+        if reference.path == MarketEventPathV1::HiddenPlatform
+            && caller_role == SimCallerRoleV1::Paper
+        {
+            return Err(SessionError::HiddenPlatformReplayForbidden.into());
+        }
+        if self.failed_input_seal().is_some() || self.input_path_seal(reference.path).is_some() {
+            return Err(MarketEventErrorV1::InputPathAlreadySealed);
+        }
+        if self.last_applied_bucket_coordinates_match(bucket) {
+            return Err(MarketEventErrorV1::BucketIdentityConflict);
+        }
+
+        let SimSession {
+            hidden_platform_markets,
+            public_markets,
+            execution_state,
+            terminal_projection_pending,
+            market_enrollment,
+            state,
+            ..
+        } = self;
+        let directory = &market_enrollment.directory;
+        let mut execution =
+            PreparedExecutionDriveDeltaV2::prepare_without_scheduled_progress_v2(execution_state);
+        if failed_input_seal.is_some() {
+            execution = execution
+                .prepare_authorized_market_bucket_start_v2(directory, reference.bucket_at_utc_ms)?;
+        }
+        let hidden_platform_markets = hidden_platform_markets.as_mut();
+        let selected_store = match reference.path {
+            MarketEventPathV1::HiddenPlatform => hidden_platform_markets
+                .as_deref()
+                .expect("隐藏市场专用闭桶必须持有隐藏市场状态"),
+            MarketEventPathV1::PublicVisibility => &*public_markets,
+        };
+        let mut selected_bucket = selected_store.begin_bucket_delta_v2(bucket)?;
+        let mut hidden_terminal_deltas = Vec::new();
+        let mut public_terminal_deltas = Vec::new();
+        let mut newly_terminal_condition_ids = BTreeSet::new();
+        let selected_bucket = loop {
+            match selected_bucket.advance(selected_store)? {
+                PreparedMarketStoreBucketStepV2::Authorized(staged_event) => {
+                    let condition_id = staged_event.event().market.condition_id.0.clone();
+                    let qualified_resolution = staged_event.qualified_resolution();
+                    selected_bucket = staged_event.complete();
+                    if failed_input_seal.is_none()
+                        && qualified_resolution
+                        && let Some(resolution) = execution
+                            .candidate_redeemed_market_resolution(&condition_id)
+                            .cloned()
+                    {
+                        let (next, changed) = selected_bucket.stage_redeemed_resolution_terminal(
+                            selected_store,
+                            &condition_id,
+                            &resolution,
+                        )?;
+                        selected_bucket = next;
+                        if changed && newly_terminal_condition_ids.insert(condition_id.clone()) {
+                            let (hidden_delta, public_delta) =
+                                prepare_other_redeemed_resolution_terminal_path_v2(
+                                    reference.path,
+                                    hidden_platform_markets.as_deref(),
+                                    public_markets,
+                                    &condition_id,
+                                    &resolution,
+                                )?;
+                            if let Some(delta) = hidden_delta {
+                                hidden_terminal_deltas.push(delta);
+                            }
+                            if let Some(delta) = public_delta {
+                                public_terminal_deltas.push(delta);
+                            }
+                        }
+                    }
+                }
+                PreparedMarketStoreBucketStepV2::EvictedNoExecution(next) => {
+                    selected_bucket = next;
+                }
+                PreparedMarketStoreBucketStepV2::Complete(prepared) => break prepared,
+            }
+        };
+
+        let input_seal_after = if reference.closure == MillisecondBucketClosureV1::EndOfInput {
+            selected_bucket.validate_initial_load_complete(selected_store)?;
+            let outcome = selected_bucket.input_seal_outcome(selected_store);
+            if failed_input_seal
+                .as_ref()
+                .is_some_and(|expected| expected != &outcome)
+            {
+                return Err(SessionError::ExecutionState(
+                    "执行闭桶失败封口与市场专用重备结果不一致".to_owned(),
+                )
+                .into());
+            }
+            Some(outcome)
+        } else {
+            if failed_input_seal.is_some() {
+                return Err(SessionError::ExecutionState(
+                    "非输入终止闭桶不得准备失败封口事务".to_owned(),
+                )
+                .into());
+            }
+            None
+        };
+        let metadata = state.prepare_closed_bucket_metadata_delta_v2(
+            reference.path,
+            reference.bucket_at_utc_ms,
+            reference.next_index_position,
+            input_seal_after,
+        )?;
+        let mut terminal_projection_condition_ids = terminal_projection_pending.clone();
+        terminal_projection_condition_ids.extend(newly_terminal_condition_ids.iter().cloned());
+        let mark_business_input_started = matches!(
+            caller_role,
+            SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation
+        ) && !market_enrollment.business_input_started;
+        Ok(PreparedMarketOnlyClosedBucketSessionDriveV2 {
+            metadata,
+            execution,
+            hidden_platform_markets,
+            public_markets,
+            selected_path: reference.path,
+            selected_bucket,
+            hidden_terminal_deltas,
+            public_terminal_deltas,
+            terminal_projection_pending,
+            market_enrollment,
+            mark_business_input_started,
+            newly_terminal_condition_ids,
+            terminal_projection_condition_ids,
+        })
+    }
+
+    pub(crate) fn prepare_closed_bucket_closure_upgrade_session_v2(
+        &mut self,
+        bucket: &ClosedMarketEventBucketV1,
+    ) -> Result<PreparedClosedBucketClosureUpgradeSessionV2<'_>, MarketEventErrorV1> {
+        let reference = bucket.durable_reference();
+        let caller_role = self.session_spec().caller_role;
+        if reference.path == MarketEventPathV1::HiddenPlatform
+            && caller_role == SimCallerRoleV1::Paper
+        {
+            return Err(SessionError::HiddenPlatformReplayForbidden.into());
+        }
+        if self.last_applied_bucket_identity_matches(bucket)
+            || !self.last_applied_bucket_coordinates_match(bucket)
+        {
+            return Err(MarketEventErrorV1::BucketIdentityConflict);
+        }
+        let drives_execution = bucket.drives_execution_for(caller_role);
+        let SimSession {
+            hidden_platform_markets,
+            public_markets,
+            execution_state,
+            terminal_projection_pending,
+            state,
+            ..
+        } = self;
+        let execution =
+            PreparedExecutionDriveDeltaV2::prepare_without_scheduled_progress_v2(execution_state);
+        let hidden_platform_markets = hidden_platform_markets.as_mut();
+        let selected_store = match reference.path {
+            MarketEventPathV1::HiddenPlatform => hidden_platform_markets
+                .as_deref()
+                .expect("隐藏闭桶封口升级必须持有隐藏市场状态"),
+            MarketEventPathV1::PublicVisibility => &*public_markets,
+        };
+        let (selected_upgrade, outcome) = selected_store.prepare_closure_upgrade_v2(bucket)?;
+        let metadata = state.prepare_closed_bucket_seal_upgrade_delta_v2(reference.path, outcome);
+        let terminal_projection_condition_ids = if drives_execution {
+            BTreeSet::new()
+        } else {
+            terminal_projection_pending.clone()
+        };
+        Ok(PreparedClosedBucketClosureUpgradeSessionV2 {
+            metadata,
+            execution,
+            hidden_platform_markets,
+            public_markets,
+            selected_path: reference.path,
+            selected_upgrade,
+            terminal_projection_pending,
+            terminal_projection_condition_ids,
+        })
+    }
+
     pub(crate) fn take_next_action_through(
         &mut self,
         effective_processing_at_utc_ms: i64,
@@ -2738,6 +3238,13 @@ struct PreparedDirectResponseCompletionV2 {
     response_transit: RequestTransitV1,
 }
 
+struct PreparedClosedBucketStateV2 {
+    path: MarketEventPathV1,
+    bucket_at_utc_ms: i64,
+    next_index_position: u64,
+    input_seal_after: Option<InputPathSealOutcomeV1>,
+}
+
 pub(crate) struct PreparedExecutionActionSliceV2<'a> {
     state: &'a mut SessionState,
     latency_profile: &'a EmpiricalDelayProfile,
@@ -2746,6 +3253,7 @@ pub(crate) struct PreparedExecutionActionSliceV2<'a> {
     actions: Vec<QueuedLogicalActionV1>,
     next_action_index: usize,
     completed_request_id: Option<String>,
+    prepared_request_pending_action_count: Option<(String, u64)>,
     platform_state_revision_before: u64,
     platform_state_revision_after: u64,
     prepared_mutations: Vec<(String, MutationRecord)>,
@@ -2754,11 +3262,23 @@ pub(crate) struct PreparedExecutionActionSliceV2<'a> {
     prepared_private_facts: Vec<PreparedPrivateFactRegistrationV2>,
     prepared_used_private_emission_sequences: Vec<u64>,
     prepared_direct_response: Option<PreparedDirectResponseCompletionV2>,
+    prepared_closed_bucket: Option<PreparedClosedBucketStateV2>,
     preparation_failed: bool,
 }
 
 pub(crate) struct CommittableExecutionActionSliceV2<'a> {
     prepared: PreparedExecutionActionSliceV2<'a>,
+}
+
+struct PreparedClosedBucketMetadataDeltaV2<'a> {
+    state: &'a mut SessionState,
+    path: MarketEventPathV1,
+    cursor_after: Option<(i64, u64)>,
+    input_seal_after: Option<InputPathSealOutcomeV1>,
+}
+
+struct CommittableClosedBucketMetadataDeltaV2<'a> {
+    prepared: PreparedClosedBucketMetadataDeltaV2<'a>,
 }
 
 pub(crate) struct PreparedScheduledSessionDriveV2<'a> {
@@ -2787,6 +3307,100 @@ pub(crate) struct CommittableScheduledSessionDriveV2<'a> {
     terminal_projection_condition_ids: BTreeSet<String>,
 }
 
+pub(crate) enum PreparedClosedBucketSessionDriveAttemptV2<'a> {
+    Applied(PreparedClosedBucketSessionDriveV2<'a>),
+    FailedInputSeal(InputPathSealOutcomeV1),
+}
+
+pub(crate) struct PreparedClosedBucketSessionDriveV2<'a> {
+    action: PreparedExecutionActionSliceV2<'a>,
+    execution: PreparedExecutionDriveDeltaV2<'a>,
+    hidden_platform_markets: Option<&'a mut MarketStateStoreV1>,
+    public_markets: &'a mut MarketStateStoreV1,
+    selected_path: MarketEventPathV1,
+    selected_bucket: PreparedMarketStoreBucketDeltaV2,
+    hidden_terminal_deltas: Vec<PreparedMarketResolutionTerminalDeltaV2>,
+    public_terminal_deltas: Vec<PreparedMarketResolutionTerminalDeltaV2>,
+    terminal_projection_pending: &'a mut BTreeSet<String>,
+    market_enrollment: &'a mut Arc<MarketEnrollmentStateV1>,
+    mark_business_input_started: bool,
+    newly_redeemed_condition_ids: BTreeSet<String>,
+    terminal_projection_condition_ids: BTreeSet<String>,
+    dpt_effects: AuthorizedMarketEventEffectsV1,
+    actual_cutoff_utc_ms: i64,
+    first_due_at_utc_ms: Option<i64>,
+}
+
+pub(crate) struct CommittableClosedBucketSessionDriveV2<'a> {
+    action: CommittableExecutionActionSliceV2<'a>,
+    execution: CommittableExecutionDriveDeltaV2<'a>,
+    hidden_platform_markets: Option<&'a mut MarketStateStoreV1>,
+    public_markets: &'a mut MarketStateStoreV1,
+    selected_path: MarketEventPathV1,
+    selected_bucket: PreparedMarketStoreBucketDeltaV2,
+    hidden_terminal_deltas: Vec<PreparedMarketResolutionTerminalDeltaV2>,
+    public_terminal_deltas: Vec<PreparedMarketResolutionTerminalDeltaV2>,
+    terminal_projection_pending: &'a mut BTreeSet<String>,
+    market_enrollment: &'a mut Arc<MarketEnrollmentStateV1>,
+    mark_business_input_started: bool,
+    newly_redeemed_condition_ids: BTreeSet<String>,
+    terminal_projection_condition_ids: BTreeSet<String>,
+}
+
+pub(crate) struct PreparedMarketOnlyClosedBucketSessionDriveV2<'a> {
+    metadata: PreparedClosedBucketMetadataDeltaV2<'a>,
+    execution: PreparedExecutionDriveDeltaV2<'a>,
+    hidden_platform_markets: Option<&'a mut MarketStateStoreV1>,
+    public_markets: &'a mut MarketStateStoreV1,
+    selected_path: MarketEventPathV1,
+    selected_bucket: PreparedMarketStoreBucketDeltaV2,
+    hidden_terminal_deltas: Vec<PreparedMarketResolutionTerminalDeltaV2>,
+    public_terminal_deltas: Vec<PreparedMarketResolutionTerminalDeltaV2>,
+    terminal_projection_pending: &'a mut BTreeSet<String>,
+    market_enrollment: &'a mut Arc<MarketEnrollmentStateV1>,
+    mark_business_input_started: bool,
+    newly_terminal_condition_ids: BTreeSet<String>,
+    terminal_projection_condition_ids: BTreeSet<String>,
+}
+
+pub(crate) struct CommittableMarketOnlyClosedBucketSessionDriveV2<'a> {
+    metadata: CommittableClosedBucketMetadataDeltaV2<'a>,
+    execution: CommittableExecutionDriveDeltaV2<'a>,
+    hidden_platform_markets: Option<&'a mut MarketStateStoreV1>,
+    public_markets: &'a mut MarketStateStoreV1,
+    selected_path: MarketEventPathV1,
+    selected_bucket: PreparedMarketStoreBucketDeltaV2,
+    hidden_terminal_deltas: Vec<PreparedMarketResolutionTerminalDeltaV2>,
+    public_terminal_deltas: Vec<PreparedMarketResolutionTerminalDeltaV2>,
+    terminal_projection_pending: &'a mut BTreeSet<String>,
+    market_enrollment: &'a mut Arc<MarketEnrollmentStateV1>,
+    mark_business_input_started: bool,
+    newly_terminal_condition_ids: BTreeSet<String>,
+    terminal_projection_condition_ids: BTreeSet<String>,
+}
+
+pub(crate) struct PreparedClosedBucketClosureUpgradeSessionV2<'a> {
+    metadata: PreparedClosedBucketMetadataDeltaV2<'a>,
+    execution: PreparedExecutionDriveDeltaV2<'a>,
+    hidden_platform_markets: Option<&'a mut MarketStateStoreV1>,
+    public_markets: &'a mut MarketStateStoreV1,
+    selected_path: MarketEventPathV1,
+    selected_upgrade: PreparedMarketStoreClosureUpgradeV2,
+    terminal_projection_pending: &'a mut BTreeSet<String>,
+    terminal_projection_condition_ids: BTreeSet<String>,
+}
+
+pub(crate) struct CommittableClosedBucketClosureUpgradeSessionV2<'a> {
+    metadata: CommittableClosedBucketMetadataDeltaV2<'a>,
+    execution: CommittableExecutionDriveDeltaV2<'a>,
+    hidden_platform_markets: Option<&'a mut MarketStateStoreV1>,
+    public_markets: &'a mut MarketStateStoreV1,
+    selected_path: MarketEventPathV1,
+    selected_upgrade: PreparedMarketStoreClosureUpgradeV2,
+    terminal_projection_pending: &'a mut BTreeSet<String>,
+    terminal_projection_condition_ids: BTreeSet<String>,
+}
+
 fn prepare_redeemed_resolution_terminal_paths_v2(
     hidden_platform_markets: Option<&MarketStateStoreV1>,
     public_markets: &MarketStateStoreV1,
@@ -2810,6 +3424,34 @@ fn prepare_redeemed_resolution_terminal_paths_v2(
         ));
     }
     Ok((hidden_delta, public_delta))
+}
+
+fn prepare_other_redeemed_resolution_terminal_path_v2(
+    selected_path: MarketEventPathV1,
+    hidden_platform_markets: Option<&MarketStateStoreV1>,
+    public_markets: &MarketStateStoreV1,
+    condition_id: &str,
+    resolution: &MarketResolutionTerminalV3,
+) -> Result<
+    (
+        Option<PreparedMarketResolutionTerminalDeltaV2>,
+        Option<PreparedMarketResolutionTerminalDeltaV2>,
+    ),
+    MarketEventErrorV1,
+> {
+    match selected_path {
+        MarketEventPathV1::HiddenPlatform => Ok((
+            None,
+            public_markets.prepare_resolution_terminal_v2(condition_id, resolution)?,
+        )),
+        MarketEventPathV1::PublicVisibility => Ok((
+            hidden_platform_markets
+                .map(|store| store.prepare_resolution_terminal_v2(condition_id, resolution))
+                .transpose()?
+                .flatten(),
+            None,
+        )),
+    }
 }
 
 impl PreparedScheduledSessionDriveV2<'_> {
@@ -2926,6 +3568,44 @@ impl PreparedScheduledSessionDriveV2<'_> {
 }
 
 impl<'a> PreparedScheduledSessionDriveV2<'a> {
+    pub(crate) fn map_execution_candidate<T, E>(
+        self,
+        prepare: impl FnOnce(
+            PreparedExecutionDriveDeltaV2<'a>,
+        ) -> Result<(PreparedExecutionDriveDeltaV2<'a>, T), E>,
+    ) -> Result<(Self, T), E> {
+        let Self {
+            action,
+            execution,
+            hidden_platform_markets,
+            public_markets,
+            hidden_terminal_deltas,
+            public_terminal_deltas,
+            terminal_projection_pending,
+            newly_redeemed_condition_ids,
+            terminal_projection_condition_ids,
+            actual_cutoff_utc_ms,
+            first_due_at_utc_ms,
+        } = self;
+        let (execution, value) = prepare(execution)?;
+        Ok((
+            Self {
+                action,
+                execution,
+                hidden_platform_markets,
+                public_markets,
+                hidden_terminal_deltas,
+                public_terminal_deltas,
+                terminal_projection_pending,
+                newly_redeemed_condition_ids,
+                terminal_projection_condition_ids,
+                actual_cutoff_utc_ms,
+                first_due_at_utc_ms,
+            },
+            value,
+        ))
+    }
+
     pub(crate) fn prepare_caller_cancel_remainder(
         self,
         platform_order_id: &str,
@@ -3038,6 +3718,350 @@ impl CommittableScheduledSessionDriveV2<'_> {
     }
 }
 
+impl PreparedClosedBucketSessionDriveV2<'_> {
+    pub(crate) fn execution_candidate(&self) -> &PreparedExecutionDriveDeltaV2<'_> {
+        &self.execution
+    }
+
+    pub(crate) fn terminal_projection_condition_ids(&self) -> &BTreeSet<String> {
+        &self.terminal_projection_condition_ids
+    }
+
+    pub(crate) fn dpt_effects(&self) -> &AuthorizedMarketEventEffectsV1 {
+        &self.dpt_effects
+    }
+
+    pub(crate) fn actual_cutoff_utc_ms(&self) -> i64 {
+        self.actual_cutoff_utc_ms
+    }
+
+    pub(crate) fn first_due_at_utc_ms(&self) -> Option<i64> {
+        self.first_due_at_utc_ms
+    }
+
+    pub(crate) fn advance_platform_state_revision_once(&mut self) -> Result<u64, SessionError> {
+        self.action.advance_platform_state_revision_once()
+    }
+
+    pub(crate) fn prepare_next_lifecycle_feedback_timing(
+        &mut self,
+        feedback_id: String,
+        platform_event_at_utc_ms: i64,
+    ) -> Result<LifecycleFeedbackTimingV1, SessionError> {
+        let private_emission_sequence = self.action.next_private_emission_sequence()?;
+        self.action.prepare_lifecycle_feedback_timing(
+            feedback_id,
+            platform_event_at_utc_ms,
+            private_emission_sequence,
+        )
+    }
+}
+
+impl<'a> PreparedClosedBucketSessionDriveV2<'a> {
+    pub(crate) fn into_committable(
+        self,
+        prepared_condition_ids: BTreeSet<String>,
+    ) -> Result<CommittableClosedBucketSessionDriveV2<'a>, MarketEventErrorV1> {
+        if prepared_condition_ids != self.terminal_projection_condition_ids {
+            return Err(SessionError::QueryIdentityConflict(
+                "closed-bucket-terminal-projection-condition-set".to_owned(),
+            )
+            .into());
+        }
+        let Self {
+            action,
+            execution,
+            hidden_platform_markets,
+            public_markets,
+            selected_path,
+            selected_bucket,
+            hidden_terminal_deltas,
+            public_terminal_deltas,
+            terminal_projection_pending,
+            market_enrollment,
+            mark_business_input_started,
+            newly_redeemed_condition_ids,
+            terminal_projection_condition_ids,
+            dpt_effects: _,
+            actual_cutoff_utc_ms: _,
+            first_due_at_utc_ms: _,
+        } = self;
+        let action = action.into_committable()?;
+        let execution = execution.into_committable()?;
+        Ok(CommittableClosedBucketSessionDriveV2 {
+            action,
+            execution,
+            hidden_platform_markets,
+            public_markets,
+            selected_path,
+            selected_bucket,
+            hidden_terminal_deltas,
+            public_terminal_deltas,
+            terminal_projection_pending,
+            market_enrollment,
+            mark_business_input_started,
+            newly_redeemed_condition_ids,
+            terminal_projection_condition_ids,
+        })
+    }
+}
+
+impl CommittableClosedBucketSessionDriveV2<'_> {
+    pub(crate) fn commit(self) {
+        let Self {
+            action,
+            execution,
+            mut hidden_platform_markets,
+            public_markets,
+            selected_path,
+            selected_bucket,
+            hidden_terminal_deltas,
+            public_terminal_deltas,
+            terminal_projection_pending,
+            market_enrollment,
+            mark_business_input_started,
+            newly_redeemed_condition_ids,
+            terminal_projection_condition_ids,
+        } = self;
+        execution.commit();
+        match selected_path {
+            MarketEventPathV1::HiddenPlatform => selected_bucket.commit_prevalidated(
+                hidden_platform_markets
+                    .as_deref_mut()
+                    .expect("隐藏执行闭桶必须持有隐藏市场状态"),
+            ),
+            MarketEventPathV1::PublicVisibility => {
+                selected_bucket.commit_prevalidated(public_markets)
+            }
+        }
+        if let Some(store) = hidden_platform_markets.as_deref_mut() {
+            for delta in hidden_terminal_deltas {
+                delta.commit(store);
+            }
+        } else {
+            debug_assert!(hidden_terminal_deltas.is_empty());
+        }
+        for delta in public_terminal_deltas {
+            delta.commit(public_markets);
+        }
+        terminal_projection_pending.extend(newly_redeemed_condition_ids);
+        for condition_id in terminal_projection_condition_ids {
+            terminal_projection_pending.remove(&condition_id);
+        }
+        if mark_business_input_started {
+            Arc::make_mut(market_enrollment).business_input_started = true;
+        }
+        action.commit();
+    }
+}
+
+impl PreparedMarketOnlyClosedBucketSessionDriveV2<'_> {
+    pub(crate) fn execution_candidate(&self) -> &PreparedExecutionDriveDeltaV2<'_> {
+        &self.execution
+    }
+
+    pub(crate) fn terminal_projection_condition_ids(&self) -> &BTreeSet<String> {
+        &self.terminal_projection_condition_ids
+    }
+}
+
+impl<'a> PreparedMarketOnlyClosedBucketSessionDriveV2<'a> {
+    pub(crate) fn into_committable(
+        self,
+        prepared_condition_ids: BTreeSet<String>,
+    ) -> Result<CommittableMarketOnlyClosedBucketSessionDriveV2<'a>, MarketEventErrorV1> {
+        if prepared_condition_ids != self.terminal_projection_condition_ids {
+            return Err(SessionError::QueryIdentityConflict(
+                "market-only-closed-bucket-terminal-projection-condition-set".to_owned(),
+            )
+            .into());
+        }
+        let Self {
+            metadata,
+            execution,
+            hidden_platform_markets,
+            public_markets,
+            selected_path,
+            selected_bucket,
+            hidden_terminal_deltas,
+            public_terminal_deltas,
+            terminal_projection_pending,
+            market_enrollment,
+            mark_business_input_started,
+            newly_terminal_condition_ids,
+            terminal_projection_condition_ids,
+        } = self;
+        Ok(CommittableMarketOnlyClosedBucketSessionDriveV2 {
+            metadata: metadata.into_committable(),
+            execution: execution.into_committable()?,
+            hidden_platform_markets,
+            public_markets,
+            selected_path,
+            selected_bucket,
+            hidden_terminal_deltas,
+            public_terminal_deltas,
+            terminal_projection_pending,
+            market_enrollment,
+            mark_business_input_started,
+            newly_terminal_condition_ids,
+            terminal_projection_condition_ids,
+        })
+    }
+}
+
+impl CommittableMarketOnlyClosedBucketSessionDriveV2<'_> {
+    pub(crate) fn commit(self) {
+        let Self {
+            metadata,
+            execution,
+            mut hidden_platform_markets,
+            public_markets,
+            selected_path,
+            selected_bucket,
+            hidden_terminal_deltas,
+            public_terminal_deltas,
+            terminal_projection_pending,
+            market_enrollment,
+            mark_business_input_started,
+            newly_terminal_condition_ids,
+            terminal_projection_condition_ids,
+        } = self;
+        execution.commit();
+        match selected_path {
+            MarketEventPathV1::HiddenPlatform => selected_bucket.commit_prevalidated(
+                hidden_platform_markets
+                    .as_deref_mut()
+                    .expect("隐藏市场专用闭桶必须持有隐藏市场状态"),
+            ),
+            MarketEventPathV1::PublicVisibility => {
+                selected_bucket.commit_prevalidated(public_markets)
+            }
+        }
+        if let Some(store) = hidden_platform_markets.as_deref_mut() {
+            for delta in hidden_terminal_deltas {
+                delta.commit(store);
+            }
+        } else {
+            debug_assert!(hidden_terminal_deltas.is_empty());
+        }
+        for delta in public_terminal_deltas {
+            delta.commit(public_markets);
+        }
+        terminal_projection_pending.extend(newly_terminal_condition_ids);
+        for condition_id in terminal_projection_condition_ids {
+            terminal_projection_pending.remove(&condition_id);
+        }
+        if mark_business_input_started {
+            Arc::make_mut(market_enrollment).business_input_started = true;
+        }
+        metadata.commit();
+    }
+}
+
+impl PreparedClosedBucketClosureUpgradeSessionV2<'_> {
+    pub(crate) fn execution_candidate(&self) -> &PreparedExecutionDriveDeltaV2<'_> {
+        &self.execution
+    }
+
+    pub(crate) fn terminal_projection_condition_ids(&self) -> &BTreeSet<String> {
+        &self.terminal_projection_condition_ids
+    }
+}
+
+impl<'a> PreparedClosedBucketClosureUpgradeSessionV2<'a> {
+    pub(crate) fn into_committable(
+        self,
+        prepared_condition_ids: BTreeSet<String>,
+    ) -> Result<CommittableClosedBucketClosureUpgradeSessionV2<'a>, MarketEventErrorV1> {
+        if prepared_condition_ids != self.terminal_projection_condition_ids {
+            return Err(SessionError::QueryIdentityConflict(
+                "closed-bucket-upgrade-terminal-projection-condition-set".to_owned(),
+            )
+            .into());
+        }
+        let Self {
+            metadata,
+            execution,
+            hidden_platform_markets,
+            public_markets,
+            selected_path,
+            selected_upgrade,
+            terminal_projection_pending,
+            terminal_projection_condition_ids,
+        } = self;
+        Ok(CommittableClosedBucketClosureUpgradeSessionV2 {
+            metadata: metadata.into_committable(),
+            execution: execution.into_committable()?,
+            hidden_platform_markets,
+            public_markets,
+            selected_path,
+            selected_upgrade,
+            terminal_projection_pending,
+            terminal_projection_condition_ids,
+        })
+    }
+}
+
+impl CommittableClosedBucketClosureUpgradeSessionV2<'_> {
+    pub(crate) fn commit(self) {
+        let Self {
+            metadata,
+            execution,
+            mut hidden_platform_markets,
+            public_markets,
+            selected_path,
+            selected_upgrade,
+            terminal_projection_pending,
+            terminal_projection_condition_ids,
+        } = self;
+        execution.commit();
+        match selected_path {
+            MarketEventPathV1::HiddenPlatform => selected_upgrade.commit_prevalidated(
+                hidden_platform_markets
+                    .as_deref_mut()
+                    .expect("隐藏闭桶封口升级必须持有隐藏市场状态"),
+            ),
+            MarketEventPathV1::PublicVisibility => {
+                selected_upgrade.commit_prevalidated(public_markets)
+            }
+        }
+        for condition_id in terminal_projection_condition_ids {
+            terminal_projection_pending.remove(&condition_id);
+        }
+        metadata.commit();
+    }
+}
+
+impl<'a> PreparedClosedBucketMetadataDeltaV2<'a> {
+    fn into_committable(self) -> CommittableClosedBucketMetadataDeltaV2<'a> {
+        CommittableClosedBucketMetadataDeltaV2 { prepared: self }
+    }
+}
+
+impl CommittableClosedBucketMetadataDeltaV2<'_> {
+    fn commit(self) {
+        let PreparedClosedBucketMetadataDeltaV2 {
+            state,
+            path,
+            cursor_after,
+            input_seal_after,
+        } = self.prepared;
+        if let Some((bucket_at_utc_ms, next_index_position)) = cursor_after {
+            match path {
+                MarketEventPathV1::HiddenPlatform => {
+                    state.commit_platform_prefix_closure(bucket_at_utc_ms, next_index_position)
+                }
+                MarketEventPathV1::PublicVisibility => {
+                    state.commit_public_visibility_closure(bucket_at_utc_ms, next_index_position)
+                }
+            }
+        }
+        if let Some(outcome) = input_seal_after {
+            state.commit_input_path_seal(path, outcome);
+        }
+    }
+}
+
 impl CommittableExecutionActionSliceV2<'_> {
     pub(crate) fn commit(self) {
         self.prepared.commit_prevalidated();
@@ -3084,6 +4108,16 @@ impl<'a> PreparedExecutionActionSliceV2<'a> {
             || !self.prepared_lifecycle_feedback.is_empty()
             || !self.prepared_private_facts.is_empty()
             || self.prepared_direct_response.is_some()
+            || self.prepared_closed_bucket.is_some()
+    }
+
+    fn stage_closed_bucket_input_seal(&mut self, outcome: InputPathSealOutcomeV1) {
+        let prepared_bucket = self
+            .prepared_closed_bucket
+            .as_mut()
+            .expect("只有闭桶无动作切片可以准备输入封口");
+        debug_assert!(prepared_bucket.input_seal_after.is_none());
+        prepared_bucket.input_seal_after = Some(outcome);
     }
 
     pub(crate) fn platform_state_revision(&self) -> u64 {
@@ -3459,6 +4493,7 @@ impl<'a> PreparedExecutionActionSliceV2<'a> {
             actions,
             next_action_index,
             completed_request_id,
+            prepared_request_pending_action_count,
             platform_state_revision_before,
             platform_state_revision_after,
             prepared_mutations,
@@ -3467,6 +4502,7 @@ impl<'a> PreparedExecutionActionSliceV2<'a> {
             prepared_private_facts,
             prepared_used_private_emission_sequences,
             prepared_direct_response,
+            prepared_closed_bucket,
             preparation_failed,
         } = self;
         debug_assert!(!preparation_failed);
@@ -3475,10 +4511,34 @@ impl<'a> PreparedExecutionActionSliceV2<'a> {
             state.pending_actions.remove(&action.key);
             state.released_action_ids.insert(action.action_identity);
         }
+        if let Some((global_request_id, remaining_pending_action_count)) =
+            prepared_request_pending_action_count
+        {
+            let request = state
+                .requests
+                .get_mut(&global_request_id)
+                .expect("已核对执行动作所属请求存在");
+            request.remaining_pending_action_count = remaining_pending_action_count;
+        }
         if let Some(global_request_id) = completed_request_id {
             state.released_request_ids.insert(global_request_id);
         }
         state.closed_action_through_utc_ms = Some(closed_action_through_after_utc_ms);
+        if let Some(prepared_bucket) = prepared_closed_bucket {
+            match prepared_bucket.path {
+                MarketEventPathV1::HiddenPlatform => state.commit_platform_prefix_closure(
+                    prepared_bucket.bucket_at_utc_ms,
+                    prepared_bucket.next_index_position,
+                ),
+                MarketEventPathV1::PublicVisibility => state.commit_public_visibility_closure(
+                    prepared_bucket.bucket_at_utc_ms,
+                    prepared_bucket.next_index_position,
+                ),
+            }
+            if let Some(outcome) = prepared_bucket.input_seal_after {
+                state.commit_input_path_seal(prepared_bucket.path, outcome);
+            }
+        }
         debug_assert_eq!(
             state.platform_state_revision,
             platform_state_revision_before
@@ -3997,6 +5057,8 @@ struct RequestRecord {
     canonical_request_sha256: Sha256Hex,
     transit: RequestTransitV1,
     response_transit: Option<RequestTransitV1>,
+    #[serde(skip)]
+    remaining_pending_action_count: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -4107,7 +5169,15 @@ impl From<&SessionState> for SessionStateCheckpointV1 {
                 .clone(),
             last_caller_sequence: state.last_caller_sequence,
             last_request_sent_at_utc_ms: state.last_request_sent_at_utc_ms,
-            requests: state.requests.clone(),
+            requests: state
+                .requests
+                .iter()
+                .map(|(request_id, record)| {
+                    let mut record = record.clone();
+                    record.remaining_pending_action_count = 0;
+                    (request_id.clone(), record)
+                })
+                .collect(),
             lifecycle_feedback: state.lifecycle_feedback.clone(),
             private_fact_keys: state.private_fact_keys.clone(),
             pending_private_facts: state
@@ -4141,7 +5211,7 @@ impl From<&SessionState> for SessionStateCheckpointV1 {
 }
 
 impl SessionStateCheckpointV1 {
-    fn restore(self, spec: SessionSpecV2) -> Result<SessionState, SessionCheckpointErrorV1> {
+    fn restore(mut self, spec: SessionSpecV2) -> Result<SessionState, SessionCheckpointErrorV1> {
         if spec.caller_role == SimCallerRoleV1::Paper
             && (self.hidden_input_seal.is_some()
                 || self
@@ -4323,6 +5393,28 @@ impl SessionStateCheckpointV1 {
             return Err(SessionCheckpointErrorV1::InvalidSessionState(
                 "待处理逻辑动作正文与身份索引不一致".to_owned(),
             ));
+        }
+        for record in self.requests.values_mut() {
+            record.remaining_pending_action_count = 0;
+        }
+        for action in pending_actions.values() {
+            let record = self
+                .requests
+                .get_mut(&action.global_request_id)
+                .ok_or_else(|| {
+                    SessionCheckpointErrorV1::InvalidSessionState(format!(
+                        "待处理逻辑动作引用未登记请求：{}",
+                        action.global_request_id
+                    ))
+                })?;
+            record.remaining_pending_action_count = record
+                .remaining_pending_action_count
+                .checked_add(1)
+                .ok_or_else(|| {
+                    SessionCheckpointErrorV1::InvalidSessionState(
+                        "请求待处理逻辑动作计数溢出".to_owned(),
+                    )
+                })?;
         }
         let pending_action_identities = pending_actions
             .values()
@@ -4535,6 +5627,17 @@ impl SessionStateCheckpointV1 {
 }
 
 impl SessionState {
+    #[cfg(test)]
+    fn pending_action_count_for_request_for_tests(&self, global_request_id: &str) -> usize {
+        self.requests
+            .get(global_request_id)
+            .map(|record| {
+                usize::try_from(record.remaining_pending_action_count)
+                    .expect("测试请求待处理动作计数适合 usize")
+            })
+            .unwrap_or(0)
+    }
+
     fn new(spec: SessionSpecV2) -> Self {
         Self {
             spec,
@@ -5143,6 +6246,7 @@ impl SessionState {
                 canonical_request_sha256,
                 transit,
                 response_transit: None,
+                remaining_pending_action_count: 0,
             },
         )))
     }
@@ -5229,7 +6333,7 @@ impl SessionState {
         &self,
         global_request_id: String,
         caller_sequence: u64,
-        prepared_request: PreparedRequestRegistrationV1,
+        mut prepared_request: PreparedRequestRegistrationV1,
         actions: Vec<LogicalActionPlanV1>,
     ) -> Result<PreparedRequestScheduleV1, SessionError> {
         let registered_request = prepared_request.registered_request();
@@ -5240,12 +6344,14 @@ impl SessionState {
             &actions,
         )?;
 
-        if matches!(prepared_request, PreparedRequestRegistrationV1::New(_)) {
+        if let PreparedRequestRegistrationV1::New(record) = &mut prepared_request {
             self.validate_direct_response_expectation(
                 &global_request_id,
                 &registered_request.transit,
                 &prepared_actions,
             )?;
+            record.remaining_pending_action_count = u64::try_from(prepared_actions.len())
+                .expect("连续 u16 批量项序号保证待处理动作数量适合 u64");
         }
 
         Ok(PreparedRequestScheduleV1 {
@@ -5599,6 +6705,14 @@ impl SessionState {
         if self.pending_actions.contains_key(&key) {
             return Err(SessionError::ActionIdentityConflict(action_identity));
         }
+        let remaining_pending_action_count = request
+            .remaining_pending_action_count
+            .checked_add(1)
+            .expect("受 u16 批量项序号约束的待处理动作计数不会溢出");
+        self.requests
+            .get_mut(&global_request_id)
+            .expect("已核对逻辑动作所属请求存在")
+            .remaining_pending_action_count = remaining_pending_action_count;
         self.action_keys
             .insert(action_identity.clone(), (key, global_request_id.clone()));
         self.pending_actions.insert(
@@ -5639,6 +6753,100 @@ impl SessionState {
         }
         self.sealed_request_ids.insert(global_request_id.to_owned());
         Ok(())
+    }
+
+    fn prepare_closed_bucket_actionless_slice_v2<'a>(
+        &'a mut self,
+        latency_profile: &'a EmpiricalDelayProfile,
+        path: MarketEventPathV1,
+        bucket_at_utc_ms: i64,
+        next_index_position: u64,
+        input_seal_after: Option<InputPathSealOutcomeV1>,
+    ) -> Result<PreparedExecutionActionSliceV2<'a>, SessionError> {
+        if let Some(identity) = &self.in_flight_action_identity {
+            return Err(SessionError::ActionProcessingInProgress(identity.clone()));
+        }
+        match path {
+            MarketEventPathV1::HiddenPlatform => {
+                self.validate_platform_prefix_closure(bucket_at_utc_ms, next_index_position)?;
+            }
+            MarketEventPathV1::PublicVisibility => {
+                self.validate_public_visibility_closure(bucket_at_utc_ms, next_index_position)?;
+            }
+        }
+        if self
+            .closed_action_through_utc_ms
+            .is_some_and(|closed| bucket_at_utc_ms < closed)
+        {
+            return Err(SessionError::ActionWatermarkClosed);
+        }
+        let closed_action_through_before_utc_ms = self.closed_action_through_utc_ms;
+        let platform_state_revision = self.platform_state_revision;
+        Ok(PreparedExecutionActionSliceV2 {
+            state: self,
+            latency_profile,
+            closed_action_through_before_utc_ms,
+            closed_action_through_after_utc_ms: bucket_at_utc_ms,
+            actions: Vec::new(),
+            next_action_index: 0,
+            completed_request_id: None,
+            prepared_request_pending_action_count: None,
+            platform_state_revision_before: platform_state_revision,
+            platform_state_revision_after: platform_state_revision,
+            prepared_mutations: Vec::new(),
+            prepared_queries: Vec::new(),
+            prepared_lifecycle_feedback: Vec::new(),
+            prepared_private_facts: Vec::new(),
+            prepared_used_private_emission_sequences: Vec::new(),
+            prepared_direct_response: None,
+            prepared_closed_bucket: Some(PreparedClosedBucketStateV2 {
+                path,
+                bucket_at_utc_ms,
+                next_index_position,
+                input_seal_after,
+            }),
+            preparation_failed: false,
+        })
+    }
+
+    fn prepare_closed_bucket_metadata_delta_v2(
+        &mut self,
+        path: MarketEventPathV1,
+        bucket_at_utc_ms: i64,
+        next_index_position: u64,
+        input_seal_after: Option<InputPathSealOutcomeV1>,
+    ) -> Result<PreparedClosedBucketMetadataDeltaV2<'_>, SessionError> {
+        match path {
+            MarketEventPathV1::HiddenPlatform => {
+                self.validate_platform_prefix_closure(bucket_at_utc_ms, next_index_position)?;
+            }
+            MarketEventPathV1::PublicVisibility => {
+                self.validate_public_visibility_closure(bucket_at_utc_ms, next_index_position)?;
+            }
+        }
+        Ok(PreparedClosedBucketMetadataDeltaV2 {
+            state: self,
+            path,
+            cursor_after: Some((bucket_at_utc_ms, next_index_position)),
+            input_seal_after,
+        })
+    }
+
+    fn prepare_closed_bucket_seal_upgrade_delta_v2(
+        &mut self,
+        path: MarketEventPathV1,
+        input_seal_after: InputPathSealOutcomeV1,
+    ) -> PreparedClosedBucketMetadataDeltaV2<'_> {
+        let input_seal_after = self
+            .input_path_seal(path)
+            .is_none()
+            .then_some(input_seal_after);
+        PreparedClosedBucketMetadataDeltaV2 {
+            state: self,
+            path,
+            cursor_after: None,
+            input_seal_after,
+        }
     }
 
     fn prepare_execution_action_slice_v2<'a>(
@@ -5691,6 +6899,7 @@ impl SessionState {
                 actions: Vec::new(),
                 next_action_index: 0,
                 completed_request_id: None,
+                prepared_request_pending_action_count: None,
                 platform_state_revision_before: platform_state_revision,
                 platform_state_revision_after: platform_state_revision,
                 prepared_mutations: Vec::new(),
@@ -5699,6 +6908,7 @@ impl SessionState {
                 prepared_private_facts: Vec::new(),
                 prepared_used_private_emission_sequences: Vec::new(),
                 prepared_direct_response: None,
+                prepared_closed_bucket: None,
                 preparation_failed: false,
             });
         };
@@ -5711,6 +6921,7 @@ impl SessionState {
                 actions: Vec::new(),
                 next_action_index: 0,
                 completed_request_id: None,
+                prepared_request_pending_action_count: None,
                 platform_state_revision_before: platform_state_revision,
                 platform_state_revision_after: platform_state_revision,
                 prepared_mutations: Vec::new(),
@@ -5719,29 +6930,36 @@ impl SessionState {
                 prepared_private_facts: Vec::new(),
                 prepared_used_private_emission_sequences: Vec::new(),
                 prepared_direct_response: None,
+                prepared_closed_bucket: None,
                 preparation_failed: false,
             });
         }
 
         let actions = if complete_same_request_at_same_time {
+            let Some(request) = self.requests.get(&first_action.global_request_id) else {
+                return Err(SessionError::ActionIdentityConflict(
+                    first_action.action_identity,
+                ));
+            };
+            let request_pending_action_count =
+                usize::try_from(request.remaining_pending_action_count)
+                    .expect("运行时请求待处理动作计数来自当前内存映射");
             let actions = self
                 .pending_actions
                 .values()
-                .filter(|action| action.global_request_id == first_action.global_request_id)
+                .take(request_pending_action_count)
+                .inspect(|_| record_pending_action_entry_visit_for_tests())
                 .cloned()
                 .collect::<Vec<_>>();
             if actions.is_empty()
-                || !self
-                    .pending_actions
-                    .values()
-                    .take(actions.len())
-                    .eq(actions.iter())
+                || actions.len() != request_pending_action_count
                 || actions.iter().enumerate().any(|(offset, action)| {
                     let Ok(offset) = u16::try_from(offset) else {
                         return true;
                     };
-                    action.key.effective_processing_at_utc_ms
-                        != first_action.key.effective_processing_at_utc_ms
+                    action.global_request_id != first_action.global_request_id
+                        || action.key.effective_processing_at_utc_ms
+                            != first_action.key.effective_processing_at_utc_ms
                         || action.key.caller_sequence != first_action.key.caller_sequence
                         || first_action.key.batch_item_ordinal.checked_add(offset)
                             != Some(action.key.batch_item_ordinal)
@@ -5784,12 +7002,17 @@ impl SessionState {
             .global_request_id
             .clone();
         let request_pending_action_count = self
-            .pending_actions
-            .values()
-            .filter(|action| action.global_request_id == global_request_id)
-            .count();
+            .requests
+            .get(&global_request_id)
+            .expect("已核对执行动作所属请求存在")
+            .remaining_pending_action_count;
+        let prepared_action_count =
+            u64::try_from(actions.len()).expect("当前执行动作切片数量适合 u64");
+        let remaining_pending_action_count = request_pending_action_count
+            .checked_sub(prepared_action_count)
+            .expect("当前执行动作切片不得超过请求待处理动作计数");
         let completed_request_id =
-            (request_pending_action_count == actions.len()).then_some(global_request_id);
+            (remaining_pending_action_count == 0).then_some(global_request_id.clone());
         if completed_request_id
             .as_ref()
             .is_some_and(|request_id| self.released_request_ids.contains(request_id))
@@ -5807,6 +7030,10 @@ impl SessionState {
             actions,
             next_action_index: 0,
             completed_request_id,
+            prepared_request_pending_action_count: Some((
+                global_request_id,
+                remaining_pending_action_count,
+            )),
             platform_state_revision_before: platform_state_revision,
             platform_state_revision_after: platform_state_revision,
             prepared_mutations: Vec::new(),
@@ -5815,6 +7042,7 @@ impl SessionState {
             prepared_private_facts: Vec::new(),
             prepared_used_private_emission_sequences: Vec::new(),
             prepared_direct_response: None,
+            prepared_closed_bucket: None,
             preparation_failed: false,
         })
     }
@@ -5831,10 +7059,12 @@ impl SessionState {
             .cloned()
             .ok_or_else(|| SessionError::ActionNotLogicallyReleased(action_identity.to_owned()))?;
         self.in_flight_action_identity = None;
-        let request_completed = !self
-            .pending_actions
-            .values()
-            .any(|action| action.global_request_id == global_request_id);
+        let request_completed = self
+            .requests
+            .get(&global_request_id)
+            .expect("已释放逻辑动作所属请求必须存在")
+            .remaining_pending_action_count
+            == 0;
         if request_completed {
             self.released_request_ids.insert(global_request_id);
         }
@@ -5903,6 +7133,14 @@ impl SessionState {
         self.pending_actions
             .remove(&key)
             .expect("selected pending action key must still exist");
+        let request = self
+            .requests
+            .get_mut(&action.global_request_id)
+            .expect("已密封逻辑动作所属请求必须存在");
+        request.remaining_pending_action_count = request
+            .remaining_pending_action_count
+            .checked_sub(1)
+            .expect("待释放逻辑动作必须计入请求待处理动作计数");
         self.released_action_ids
             .insert(action.action_identity.clone());
         self.in_flight_action_identity = Some(action.action_identity.clone());
@@ -7557,11 +8795,13 @@ mod tests {
         let profile = load_embedded_proxy_latency_profile().expect("profile");
         let mut state = SessionState::new(spec());
         let context = request(&state, "prepared-request", 1, 1_000);
-        let actions = vec![LogicalActionPlanV1 {
-            action_identity: "prepared-request/item-0".to_owned(),
-            batch_item_ordinal: 0,
-            processing_delay_ms: 0,
-        }];
+        let actions = (0..2_u16)
+            .map(|ordinal| LogicalActionPlanV1 {
+                action_identity: format!("prepared-request/item-{ordinal}"),
+                batch_item_ordinal: ordinal,
+                processing_delay_ms: 0,
+            })
+            .collect::<Vec<_>>();
 
         let prepared = state
             .prepare_request_schedule(&profile, context.clone(), sha("d"), actions.clone())
@@ -7575,9 +8815,13 @@ mod tests {
         assert!(state.expected_direct_response_request_ids.is_empty());
 
         let first = state.commit_prevalidated_request_schedule(prepared);
-        assert_eq!(first.actions.len(), 1);
+        assert_eq!(first.actions.len(), 2);
         assert!(state.requests.contains_key("prepared-request"));
-        assert_eq!(state.pending_actions.len(), 1);
+        assert_eq!(state.pending_actions.len(), 2);
+        assert_eq!(
+            state.pending_action_count_for_request_for_tests("prepared-request"),
+            2
+        );
         assert!(
             state
                 .expected_direct_response_request_ids
@@ -7597,7 +8841,11 @@ mod tests {
         let retry = state.commit_prevalidated_request_schedule(retry);
         assert_eq!(retry.actions, first.actions);
         assert_eq!(state.requests.len(), 1);
-        assert_eq!(state.pending_actions.len(), 1);
+        assert_eq!(state.pending_actions.len(), 2);
+        assert_eq!(
+            state.pending_action_count_for_request_for_tests("prepared-request"),
+            2
+        );
         assert_eq!(state.expected_direct_response_request_ids.len(), 1);
     }
 
@@ -7637,6 +8885,101 @@ mod tests {
         assert!(state.requests.is_empty());
         assert!(state.pending_actions.is_empty());
         assert!(state.expected_direct_response_request_ids.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runtime_pending_action_counter_bytes_are_counted_without_a_new_index_record() {
+        let mut session = private_fact_slice_test_session("pending-action-resource").await;
+        let profile = Arc::clone(&session.latency_profile);
+        let before = session.checkpoint();
+        let before_core = before.resource_core_counts();
+        let before_components = before
+            .resource_component_bytes()
+            .expect("measure baseline session components");
+        let before_wire_indexes = encoded_resource_len(&(
+            &before.state.requests,
+            &before.state.mutations,
+            &before.state.queries,
+            &before.state.lifecycle_feedback,
+            &before.market_enrollment,
+        ))
+        .expect("measure baseline wire indexes");
+        assert_eq!(before.resource_runtime_request_counter_bytes(), Ok(0));
+
+        let scheduled = session
+            .state
+            .register_and_schedule_request(
+                profile.as_ref(),
+                request(&session.state, "resource-counted-request", 1, 1_000),
+                sha("d"),
+                (0..2_u16)
+                    .map(|ordinal| LogicalActionPlanV1 {
+                        action_identity: format!("resource-counted-request/item-{ordinal}"),
+                        batch_item_ordinal: ordinal,
+                        processing_delay_ms: 0,
+                    })
+                    .collect(),
+            )
+            .expect("register resource-counted request");
+        let after = session.checkpoint();
+        let after_core = after.resource_core_counts();
+        let after_components = after
+            .resource_component_bytes()
+            .expect("measure session components with request counter");
+        let after_wire_indexes = encoded_resource_len(&(
+            &after.state.requests,
+            &after.state.mutations,
+            &after.state.queries,
+            &after.state.lifecycle_feedback,
+            &after.market_enrollment,
+        ))
+        .expect("measure wire indexes with request");
+        assert_eq!(after_core.indexes, before_core.indexes + 1);
+        assert_eq!(
+            after.resource_runtime_request_counter_bytes(),
+            Ok(REQUEST_PENDING_ACTION_COUNTER_BYTES_V1)
+        );
+        assert_eq!(
+            after_components
+                .indexes
+                .checked_sub(before_components.indexes)
+                .expect("index bytes grow after request registration"),
+            after_wire_indexes
+                .checked_sub(before_wire_indexes)
+                .expect("wire index bytes grow after request registration")
+                + REQUEST_PENDING_ACTION_COUNTER_BYTES_V1
+        );
+
+        let effective = scheduled.actions[0].key.effective_processing_at_utc_ms;
+        session
+            .state
+            .close_platform_prefix_through(effective, 1)
+            .expect("close resource-counted request prefix");
+        for expected_ordinal in 0..2_u16 {
+            let action = session
+                .state
+                .take_next_action_through(effective)
+                .expect("take resource-counted action")
+                .expect("resource-counted action");
+            assert_eq!(action.key.batch_item_ordinal, expected_ordinal);
+            session
+                .state
+                .complete_logical_item(&action.action_identity)
+                .expect("complete resource-counted action");
+        }
+        assert_eq!(
+            session
+                .state
+                .pending_action_count_for_request_for_tests("resource-counted-request"),
+            0
+        );
+        assert_eq!(
+            session
+                .checkpoint()
+                .resource_runtime_request_counter_bytes(),
+            Ok(REQUEST_PENDING_ACTION_COUNTER_BYTES_V1),
+            "completed request retains its embedded runtime counter storage"
+        );
     }
 
     #[test]
@@ -7728,6 +9071,116 @@ mod tests {
             ),
             Err(SessionError::ActionWatermarkClosed)
         );
+    }
+
+    #[test]
+    fn prepared_closed_bucket_actionless_slice_allows_same_time_action_and_rejects_earlier_action()
+    {
+        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let mut state = SessionState::new(spec());
+        let registered = state
+            .register_request(&profile, request(&state, "same-time", 1, 1_000), sha("c"))
+            .expect("登记同刻动作请求");
+        let bucket_at_utc_ms = registered.transit.platform_arrived_at_utc_ms;
+        state
+            .enqueue_logical_action(
+                "same-time/item-0".to_owned(),
+                "same-time".to_owned(),
+                LogicalActionKeyV1 {
+                    effective_processing_at_utc_ms: bucket_at_utc_ms,
+                    caller_sequence: 1,
+                    batch_item_ordinal: 0,
+                },
+            )
+            .expect("登记同刻动作");
+        state
+            .seal_logical_actions("same-time")
+            .expect("封口同刻动作请求");
+        state
+            .expect_direct_response("same-time")
+            .expect("登记直接响应");
+        let before = SessionStateCheckpointV1::from(&state);
+
+        let prepared = state
+            .prepare_closed_bucket_actionless_slice_v2(
+                &profile,
+                MarketEventPathV1::HiddenPlatform,
+                bucket_at_utc_ms,
+                1,
+                None,
+            )
+            .expect("闭桶必须允许同刻动作留待后续事务");
+        assert!(prepared.current_action().is_none());
+        assert_eq!(
+            prepared.logical_platform_driven_through_utc_ms(),
+            bucket_at_utc_ms
+        );
+        drop(prepared);
+        assert_eq!(SessionStateCheckpointV1::from(&state), before);
+
+        state
+            .prepare_closed_bucket_actionless_slice_v2(
+                &profile,
+                MarketEventPathV1::HiddenPlatform,
+                bucket_at_utc_ms,
+                1,
+                None,
+            )
+            .expect("重新准备同刻闭桶")
+            .into_committable()
+            .expect("闭桶状态切片必须可提交")
+            .commit();
+        assert_eq!(
+            state
+                .platform_prefix
+                .closed_through_source_event_at_utc_ms(),
+            Some(bucket_at_utc_ms)
+        );
+        assert_eq!(state.closed_action_through_utc_ms, Some(bucket_at_utc_ms));
+        assert_eq!(state.pending_actions.len(), 1);
+        assert_eq!(
+            state
+                .prepare_execution_action_slice_v2(&profile, bucket_at_utc_ms, false)
+                .expect("同刻动作必须在闭桶提交后可达")
+                .current_action()
+                .map(|action| action.action_identity),
+            Some("same-time/item-0".to_owned())
+        );
+
+        let mut earlier = SessionState::new(spec());
+        let registered = earlier
+            .register_request(&profile, request(&earlier, "earlier", 1, 1_000), sha("d"))
+            .expect("登记更早动作请求");
+        let action_at_utc_ms = registered.transit.platform_arrived_at_utc_ms;
+        earlier
+            .enqueue_logical_action(
+                "earlier/item-0".to_owned(),
+                "earlier".to_owned(),
+                LogicalActionKeyV1 {
+                    effective_processing_at_utc_ms: action_at_utc_ms,
+                    caller_sequence: 1,
+                    batch_item_ordinal: 0,
+                },
+            )
+            .expect("登记更早动作");
+        earlier
+            .seal_logical_actions("earlier")
+            .expect("封口更早动作请求");
+        earlier
+            .expect_direct_response("earlier")
+            .expect("登记更早请求直接响应");
+        let before = SessionStateCheckpointV1::from(&earlier);
+        assert!(matches!(
+            earlier.prepare_closed_bucket_actionless_slice_v2(
+                &profile,
+                MarketEventPathV1::HiddenPlatform,
+                action_at_utc_ms + 1,
+                1,
+                None,
+            ),
+            Err(SessionError::PlatformPrefixCrossesPendingAction)
+        ));
+        assert_eq!(SessionStateCheckpointV1::from(&earlier), before);
     }
 
     #[test]
@@ -7896,84 +9349,163 @@ mod tests {
     }
 
     #[test]
-    fn execution_action_slice_drains_one_same_time_request_as_one_prepared_batch() {
+    fn execution_action_slice_bounds_same_request_work_and_rebuilds_runtime_counts() {
         let profile = load_embedded_proxy_latency_profile().expect("profile");
         let mut state = SessionState::new(spec());
-        let registered = state
+        let target = state
             .register_request(
                 &profile,
-                request(&state, "prepared-cancel-batch", 1, 1_000),
+                request(&state, "bounded-target", 1, 1_000),
                 sha("d"),
             )
-            .expect("register prepared cancel batch");
-        let effective = registered.transit.platform_arrived_at_utc_ms;
+            .expect("register bounded target");
+        let target_effective = target.transit.platform_arrived_at_utc_ms;
         for ordinal in 0..3_u16 {
             state
                 .enqueue_logical_action(
-                    format!("prepared-cancel-batch/item-{ordinal}"),
-                    "prepared-cancel-batch".to_owned(),
+                    format!("bounded-target/item-{ordinal}"),
+                    "bounded-target".to_owned(),
                     LogicalActionKeyV1 {
-                        effective_processing_at_utc_ms: effective,
+                        effective_processing_at_utc_ms: target_effective,
                         caller_sequence: 1,
                         batch_item_ordinal: ordinal,
                     },
                 )
-                .expect("queue prepared cancel batch item");
+                .expect("queue bounded target item");
         }
         state
-            .seal_logical_actions("prepared-cancel-batch")
-            .expect("seal prepared cancel batch");
+            .seal_logical_actions("bounded-target")
+            .expect("seal bounded target");
         state
-            .close_platform_prefix_through(effective, 1)
-            .expect("close prepared cancel batch prefix");
+            .expect_direct_response("bounded-target")
+            .expect("track bounded target direct response");
+
+        let unrelated_id = "unrelated";
+        let unrelated = state
+            .register_request(&profile, request(&state, unrelated_id, 2, 2_000), sha("e"))
+            .expect("register unrelated request");
+        let unrelated_effective = unrelated
+            .transit
+            .platform_arrived_at_utc_ms
+            .max(target_effective + 1);
+        for ordinal in 0..128_u16 {
+            state
+                .enqueue_logical_action(
+                    format!("{unrelated_id}/item-{ordinal}"),
+                    unrelated_id.to_owned(),
+                    LogicalActionKeyV1 {
+                        effective_processing_at_utc_ms: unrelated_effective,
+                        caller_sequence: 2,
+                        batch_item_ordinal: ordinal,
+                    },
+                )
+                .expect("queue unrelated action");
+        }
+        state
+            .seal_logical_actions(unrelated_id)
+            .expect("seal unrelated request");
+        state
+            .expect_direct_response(unrelated_id)
+            .expect("track unrelated direct response");
+        state
+            .close_platform_prefix_through(target_effective, 1)
+            .expect("close bounded target prefix");
+        assert_eq!(
+            state.pending_action_count_for_request_for_tests("bounded-target"),
+            3
+        );
+        assert_eq!(
+            state.pending_action_count_for_request_for_tests(unrelated_id),
+            128
+        );
 
         let before = SessionStateCheckpointV1::from(&state);
-        let mut existing = state.clone();
-        let mut prepared = state
-            .prepare_execution_action_slice_v2(&profile, effective, true)
-            .expect("prepare complete same-time cancel batch");
-        let mut prepared_ordinals = Vec::new();
-        while let Some(action) = prepared.current_action() {
-            prepared_ordinals.push(action.key.batch_item_ordinal);
-            prepared
-                .finish_current_action(&action.action_identity)
-                .expect("finish prepared cancel batch item in order");
-        }
-        assert_eq!(prepared_ordinals, vec![0, 1, 2]);
-        assert!(prepared.request_completed());
-        drop(prepared);
-        assert_eq!(SessionStateCheckpointV1::from(&state), before);
-        assert_eq!(state.in_flight_action_identity, None);
-
-        loop {
-            let action = existing
-                .take_next_action_through(effective)
-                .expect("take existing cancel batch item")
-                .expect("existing cancel batch item");
-            let completed = existing
+        let encoded = serde_json::to_vec(&before).expect("encode V1 session state checkpoint");
+        assert!(!String::from_utf8_lossy(&encoded).contains("remaining_pending_action_count"));
+        let decoded: SessionStateCheckpointV1 =
+            serde_json::from_slice(&encoded).expect("decode unchanged V1 session state checkpoint");
+        assert_eq!(decoded, before);
+        let mut legacy = decoded
+            .restore(spec())
+            .expect("restore runtime pending-action counters once");
+        assert_eq!(
+            legacy.pending_action_count_for_request_for_tests("bounded-target"),
+            3
+        );
+        assert_eq!(
+            legacy.pending_action_count_for_request_for_tests(unrelated_id),
+            128
+        );
+        reset_pending_action_entry_visits_for_tests();
+        for expected_ordinal in 0..3_u16 {
+            let action = legacy
+                .take_next_action_through(target_effective)
+                .expect("take bounded legacy action")
+                .expect("bounded legacy action");
+            assert_eq!(action.key.batch_item_ordinal, expected_ordinal);
+            assert_eq!(
+                legacy.pending_action_count_for_request_for_tests("bounded-target"),
+                usize::from(2 - expected_ordinal)
+            );
+            let completed = legacy
                 .complete_logical_item(&action.action_identity)
-                .expect("complete existing cancel batch item");
-            if completed {
-                break;
-            }
+                .expect("complete bounded legacy action");
+            assert_eq!(completed, expected_ordinal == 2);
         }
+        assert_eq!(pending_action_entry_visits_for_tests(), 0);
+        assert_eq!(
+            legacy.pending_action_count_for_request_for_tests("bounded-target"),
+            0
+        );
+        assert_eq!(
+            legacy.pending_action_count_for_request_for_tests(unrelated_id),
+            128
+        );
+
+        reset_pending_action_entry_visits_for_tests();
+        let mut dropped = state
+            .prepare_execution_action_slice_v2(&profile, target_effective, true)
+            .expect("prepare bounded target batch");
+        while let Some(action) = dropped.current_action() {
+            dropped
+                .finish_current_action(&action.action_identity)
+                .expect("finish dropped bounded target item");
+        }
+        assert!(dropped.request_completed());
+        drop(dropped);
+        assert!((3..=6).contains(&pending_action_entry_visits_for_tests()));
+        assert_eq!(
+            state.pending_action_count_for_request_for_tests("bounded-target"),
+            3
+        );
+        assert_eq!(SessionStateCheckpointV1::from(&state), before);
+
+        reset_pending_action_entry_visits_for_tests();
         let mut prepared = state
-            .prepare_execution_action_slice_v2(&profile, effective, true)
-            .expect("reprepare complete same-time cancel batch");
+            .prepare_execution_action_slice_v2(&profile, target_effective, true)
+            .expect("reprepare bounded target batch");
         while let Some(action) = prepared.current_action() {
             prepared
                 .finish_current_action(&action.action_identity)
-                .expect("finish re-prepared cancel batch item in order");
+                .expect("finish committed bounded target item");
         }
         prepared
             .into_committable()
-            .expect("complete cancel batch is committable")
+            .expect("bounded target batch is committable")
             .commit();
+        assert!((3..=6).contains(&pending_action_entry_visits_for_tests()));
+        assert_eq!(
+            state.pending_action_count_for_request_for_tests("bounded-target"),
+            0
+        );
+        assert_eq!(
+            state.pending_action_count_for_request_for_tests(unrelated_id),
+            128
+        );
         assert_eq!(
             SessionStateCheckpointV1::from(&state),
-            SessionStateCheckpointV1::from(&existing)
+            SessionStateCheckpointV1::from(&legacy)
         );
-        assert_eq!(state.in_flight_action_identity, None);
     }
 
     #[test]

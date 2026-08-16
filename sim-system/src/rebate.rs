@@ -408,6 +408,8 @@ fn rebate_maker_status_fill_entry_visit_count_for_tests() -> usize {
 #[derive(Default)]
 #[cfg_attr(test, derive(Clone, Debug, PartialEq, Eq))]
 pub(crate) struct RebateStatePatchV2 {
+    maker_fills: BTreeMap<String, (String, MakerFillStateV1)>,
+    maker_day_buckets: BTreeMap<i64, PreparedTakerRebateDayBucketPatchV2>,
     taker_fills: BTreeMap<String, TakerFillStateV1>,
     day_buckets: BTreeMap<i64, PreparedTakerRebateDayBucketPatchV2>,
     maker_terminal_after: BTreeMap<String, bool>,
@@ -475,7 +477,94 @@ pub(crate) struct CommittableRebateStateDeltaV2<'a> {
 }
 
 impl RebateStatePatchV2 {
-    fn stage_taker_fill(
+    pub(crate) fn stage_maker_fill(
+        &mut self,
+        state: &RebateStateV1,
+        trade_id: &str,
+        condition_id: &str,
+        matched_at_utc_ms: i64,
+        base_units: u128,
+        price_pusd_per_share: Decimal,
+    ) -> Result<(), RebateStateErrorV1> {
+        if !state.markets.contains_key(condition_id) {
+            return Err(RebateStateErrorV1::UnknownMarket(condition_id.to_owned()));
+        }
+        state.ensure_new_trade(trade_id)?;
+        if self.maker_fills.contains_key(trade_id) || self.taker_fills.contains_key(trade_id) {
+            return Err(RebateStateErrorV1::DuplicateTrade(trade_id.to_owned()));
+        }
+
+        let attribution_day_utc_ms = utc_day_start(matched_at_utc_ms)?;
+        let fee_equivalent_pusd = taker_fee_pusd_v1(
+            &[(base_units, price_pusd_per_share)],
+            state.fee_rate,
+            state.fee_exponent,
+        )?;
+        let contribution_pusd = fee_equivalent_pusd
+            .checked_mul(state.maker_rebate_rate)
+            .ok_or(RebateStateErrorV1::ArithmeticOverflow)?
+            .normalize();
+        let maturity_at_utc_ms = rebate_maturity_at(RebateKindV1::Maker, attribution_day_utc_ms)?;
+        let potential_accrual_pusd = self
+            .maker_day_buckets
+            .get(&attribution_day_utc_ms)
+            .map(|day| day.potential_accrual_pusd)
+            .or_else(|| {
+                state
+                    .day_buckets
+                    .get(&(RebateKindV1::Maker, attribution_day_utc_ms))
+                    .map(|day| day.potential_accrual_pusd)
+            })
+            .map_or(Ok(contribution_pusd), |potential| {
+                potential
+                    .checked_add(contribution_pusd)
+                    .ok_or(RebateStateErrorV1::ArithmeticOverflow)
+            })?
+            .normalize();
+        let creates_day_bucket = !state
+            .day_buckets
+            .contains_key(&(RebateKindV1::Maker, attribution_day_utc_ms));
+        let day = self
+            .maker_day_buckets
+            .entry(attribution_day_utc_ms)
+            .or_insert_with(|| PreparedTakerRebateDayBucketPatchV2 {
+                maturity_at_utc_ms,
+                potential_accrual_pusd: Decimal::ZERO,
+                pending_predecessors_to_insert: BTreeSet::new(),
+                creates_day_bucket,
+            });
+        if creates_day_bucket {
+            self.clock_insertions.insert((
+                maturity_at_utc_ms,
+                RebateClockIdentityV1::Day(RebateKindV1::Maker, attribution_day_utc_ms),
+            ));
+        }
+        day.potential_accrual_pusd = potential_accrual_pusd;
+        day.pending_predecessors_to_insert
+            .insert(trade_id.to_owned());
+        self.maker_fills.insert(
+            trade_id.to_owned(),
+            (
+                condition_id.to_owned(),
+                MakerFillStateV1 {
+                    contribution: MakerRebateContributionV1 {
+                        trade_id: trade_id.to_owned(),
+                        matched_at_utc_ms,
+                        attribution_day_utc_ms,
+                        base_units,
+                        price_pusd_per_share,
+                        fee_equivalent_pusd,
+                        rebate_rate: state.maker_rebate_rate,
+                        contribution_pusd,
+                    },
+                    terminal_succeeded: None,
+                },
+            ),
+        );
+        Ok(())
+    }
+
+    pub(crate) fn stage_taker_fill(
         &mut self,
         state: &RebateStateV1,
         trade_id: &str,
@@ -1125,7 +1214,9 @@ impl RebateStatePatchV2 {
     }
 
     pub(crate) fn has_state_change(&self) -> bool {
-        !self.taker_fills.is_empty()
+        !self.maker_fills.is_empty()
+            || !self.maker_day_buckets.is_empty()
+            || !self.taker_fills.is_empty()
             || !self.day_buckets.is_empty()
             || !self.maker_terminal_after.is_empty()
             || !self.taker_terminal_after.is_empty()
@@ -1141,6 +1232,31 @@ impl RebateStatePatchV2 {
     }
 
     pub(crate) fn commit_prevalidated(self, state: &mut RebateStateV1) {
+        for (attribution_day_utc_ms, day_patch) in self.maker_day_buckets {
+            let key = (RebateKindV1::Maker, attribution_day_utc_ms);
+            if day_patch.creates_day_bucket {
+                state.day_buckets.insert(
+                    key,
+                    RebateDayBucketV1 {
+                        maturity_at_utc_ms: day_patch.maturity_at_utc_ms,
+                        maturity_reached: false,
+                        pending_predecessors: day_patch.pending_predecessors_to_insert,
+                        potential_accrual_pusd: day_patch.potential_accrual_pusd,
+                        accrued_pusd: Decimal::ZERO,
+                        final_state: None,
+                    },
+                );
+            } else {
+                let bucket = state
+                    .day_buckets
+                    .get_mut(&key)
+                    .expect("独占准备期间既有 maker 返佣日桶必须仍然存在");
+                bucket.potential_accrual_pusd = day_patch.potential_accrual_pusd;
+                bucket
+                    .pending_predecessors
+                    .extend(day_patch.pending_predecessors_to_insert);
+            }
+        }
         for (attribution_day_utc_ms, day_patch) in self.day_buckets {
             let key = (RebateKindV1::Taker, attribution_day_utc_ms);
             if day_patch.creates_day_bucket {
@@ -1168,6 +1284,15 @@ impl RebateStatePatchV2 {
         }
         for (trade_id, fill) in self.taker_fills {
             state.taker_fills.insert(trade_id, fill);
+        }
+        for (trade_id, (condition_id, fill)) in self.maker_fills {
+            state
+                .markets
+                .get_mut(&condition_id)
+                .expect("独占准备期间 maker 成交市场必须仍然存在")
+                .fills
+                .insert(trade_id.clone(), fill);
+            state.maker_trade_conditions.insert(trade_id, condition_id);
         }
         for (trade_id, succeeded) in self.maker_terminal_after {
             let condition_id = state
@@ -1803,58 +1928,18 @@ impl RebateStateV1 {
         base_units: u128,
         price_pusd_per_share: Decimal,
     ) -> Result<(), RebateStateErrorV1> {
-        if !self.markets.contains_key(condition_id) {
-            return Err(RebateStateErrorV1::UnknownMarket(condition_id.to_owned()));
-        }
-        self.ensure_new_trade(trade_id)?;
-
-        let attribution_day_utc_ms = utc_day_start(matched_at_utc_ms)?;
-        let fee_equivalent_pusd = taker_fee_pusd_v1(
-            &[(base_units, price_pusd_per_share)],
-            self.fee_rate,
-            self.fee_exponent,
-        )?;
-        let contribution_pusd = fee_equivalent_pusd
-            .checked_mul(self.maker_rebate_rate)
-            .ok_or(RebateStateErrorV1::ArithmeticOverflow)?
-            .normalize();
-        self.ensure_potential_total(
-            RebateKindV1::Maker,
-            attribution_day_utc_ms,
-            contribution_pusd,
-        )?;
-
-        let contribution = MakerRebateContributionV1 {
-            trade_id: trade_id.to_owned(),
+        let mut patch = RebateStatePatchV2::default();
+        patch.stage_maker_fill(
+            self,
+            trade_id,
+            condition_id,
             matched_at_utc_ms,
-            attribution_day_utc_ms,
             base_units,
             price_pusd_per_share,
-            fee_equivalent_pusd,
-            rebate_rate: self.maker_rebate_rate,
-            contribution_pusd,
-        };
-        self.markets
-            .get_mut(condition_id)
-            .expect("市场存在性已在注册入口核验")
-            .fills
-            .insert(
-                trade_id.to_owned(),
-                MakerFillStateV1 {
-                    contribution,
-                    terminal_succeeded: None,
-                },
-            );
-        self.maker_trade_conditions
-            .insert(trade_id.to_owned(), condition_id.to_owned());
-        self.day_buckets
-            .get_mut(&(RebateKindV1::Maker, attribution_day_utc_ms))
-            .expect("注册前已建立 maker 归属日桶")
-            .pending_predecessors
-            .insert(trade_id.to_owned());
+        )?;
+        patch.commit_prevalidated(self);
         Ok(())
     }
-
     pub(crate) fn register_taker_fill(
         &mut self,
         trade_id: &str,
@@ -1902,7 +1987,7 @@ impl RebateStateV1 {
             return Ok(None);
         }
         self.ensure_new_trade(trade_id)?;
-        if patch.taker_fills.contains_key(trade_id) {
+        if patch.maker_fills.contains_key(trade_id) || patch.taker_fills.contains_key(trade_id) {
             return Err(RebateStateErrorV1::DuplicateTrade(trade_id.to_owned()));
         }
 
@@ -2019,45 +2104,6 @@ impl RebateStateV1 {
         {
             return Err(RebateStateErrorV1::DuplicateTrade(trade_id.to_owned()));
         }
-        Ok(())
-    }
-
-    fn ensure_potential_total(
-        &mut self,
-        kind: RebateKindV1,
-        attribution_day_utc_ms: i64,
-        contribution_pusd: Decimal,
-    ) -> Result<(), RebateStateErrorV1> {
-        let maturity_at_utc_ms = rebate_maturity_at(kind, attribution_day_utc_ms)?;
-        let key = (kind, attribution_day_utc_ms);
-        let next_potential_accrual_pusd = self
-            .day_buckets
-            .get(&key)
-            .map_or(Ok(contribution_pusd), |bucket| {
-                bucket
-                    .potential_accrual_pusd
-                    .checked_add(contribution_pusd)
-                    .ok_or(RebateStateErrorV1::ArithmeticOverflow)
-            })?
-            .normalize();
-        if !self.day_buckets.contains_key(&key) {
-            self.clocks.insert((
-                maturity_at_utc_ms,
-                RebateClockIdentityV1::Day(kind, attribution_day_utc_ms),
-            ));
-        }
-        let bucket = self
-            .day_buckets
-            .entry(key)
-            .or_insert_with(|| RebateDayBucketV1 {
-                maturity_at_utc_ms,
-                maturity_reached: false,
-                pending_predecessors: BTreeSet::new(),
-                potential_accrual_pusd: Decimal::ZERO,
-                accrued_pusd: Decimal::ZERO,
-                final_state: None,
-            });
-        bucket.potential_accrual_pusd = next_potential_accrual_pusd;
         Ok(())
     }
 

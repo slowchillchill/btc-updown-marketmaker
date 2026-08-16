@@ -505,12 +505,217 @@ impl EvictedMarketMarkerV1 {
 struct PreparedMarketEventsV1 {
     hot_markets: BTreeMap<String, MarketStateV1>,
     evicted_markets: BTreeMap<String, EvictedMarketMarkerV1>,
+    qualified_resolution_event_ids: BTreeSet<String>,
+}
+
+impl PreparedMarketEventsV1 {
+    pub(crate) fn qualified_resolution_event_ids(&self) -> &BTreeSet<String> {
+        &self.qualified_resolution_event_ids
+    }
+
+    fn candidate_market<'a>(
+        &'a self,
+        store: &'a MarketStateStoreV1,
+        condition_id: &str,
+    ) -> Option<&'a MarketStateV1> {
+        self.hot_markets
+            .get(condition_id)
+            .or_else(|| store.market(condition_id))
+    }
+}
+
+pub(crate) struct PreparedMarketStoreBucketBuilderV2 {
+    prepared: PreparedMarketEventsV1,
+    authorized_events: Vec<ExecutionMarketEventV3>,
+    remaining_events: std::vec::IntoIter<ExecutionMarketEventV3>,
+    path: MarketEventPathV1,
+    bucket_at_utc_ms: i64,
+    identity: AppliedBucketIdentityV1,
+}
+
+pub(crate) enum PreparedMarketStoreBucketStepV2 {
+    Authorized(PreparedAuthorizedMarketEventV2),
+    EvictedNoExecution(PreparedMarketStoreBucketBuilderV2),
+    Complete(PreparedMarketStoreBucketDeltaV2),
+}
+
+pub(crate) struct PreparedAuthorizedMarketEventV2 {
+    builder: PreparedMarketStoreBucketBuilderV2,
+    event: ExecutionMarketEventV3,
+    qualified_resolution: bool,
+}
+
+impl PreparedAuthorizedMarketEventV2 {
+    pub(crate) fn event(&self) -> &ExecutionMarketEventV3 {
+        &self.event
+    }
+
+    pub(crate) fn qualified_resolution(&self) -> bool {
+        self.qualified_resolution
+    }
+
+    pub(crate) fn complete(mut self) -> PreparedMarketStoreBucketBuilderV2 {
+        self.builder.authorized_events.push(self.event);
+        self.builder
+    }
+}
+
+impl PreparedMarketStoreBucketBuilderV2 {
+    pub(crate) fn advance(
+        mut self,
+        store: &MarketStateStoreV1,
+    ) -> Result<PreparedMarketStoreBucketStepV2, MarketEventErrorV1> {
+        let Some(event) = self.remaining_events.next() else {
+            self.prepared = store.finish_prepared_events(self.prepared, self.bucket_at_utc_ms);
+            return Ok(PreparedMarketStoreBucketStepV2::Complete(
+                PreparedMarketStoreBucketDeltaV2 {
+                    prepared: self.prepared,
+                    authorized_events: self.authorized_events,
+                    identity: self.identity,
+                },
+            ));
+        };
+        let authorized = !store.is_evicted(event.market.condition_id.0.as_str());
+        self.prepared =
+            store.prepare_event(self.prepared, &event, self.path, self.bucket_at_utc_ms)?;
+        if !authorized {
+            return Ok(PreparedMarketStoreBucketStepV2::EvictedNoExecution(self));
+        }
+        let qualified_resolution = self
+            .prepared
+            .qualified_resolution_event_ids
+            .contains(&event.event_id.0);
+        Ok(PreparedMarketStoreBucketStepV2::Authorized(
+            PreparedAuthorizedMarketEventV2 {
+                builder: self,
+                event,
+                qualified_resolution,
+            },
+        ))
+    }
+
+    pub(crate) fn candidate_market<'a>(
+        &'a self,
+        store: &'a MarketStateStoreV1,
+        condition_id: &str,
+    ) -> Option<&'a MarketStateV1> {
+        self.prepared.candidate_market(store, condition_id)
+    }
+
+    pub(crate) fn stage_redeemed_resolution_terminal(
+        mut self,
+        store: &MarketStateStoreV1,
+        condition_id: &str,
+        resolution: &MarketResolutionTerminalV3,
+    ) -> Result<(Self, bool), MarketEventErrorV1> {
+        if let Some(marker) = self
+            .prepared
+            .evicted_markets
+            .get(condition_id)
+            .or_else(|| store.evicted_markets.get(condition_id))
+        {
+            if marker.qualified_resolution != *resolution {
+                return Err(MarketEventErrorV1::ResolutionConflict(
+                    condition_id.to_owned(),
+                ));
+            }
+            return Ok((self, false));
+        }
+        let Some(candidate) = self
+            .prepared
+            .hot_markets
+            .get(condition_id)
+            .or_else(|| store.markets.get(condition_id))
+        else {
+            return Ok((self, false));
+        };
+        let Some(qualified_resolution) = candidate.qualified_resolution.as_ref() else {
+            return Ok((self, false));
+        };
+        if qualified_resolution != resolution {
+            return Err(MarketEventErrorV1::ResolutionConflict(
+                condition_id.to_owned(),
+            ));
+        }
+        if candidate.lifecycle_phase == MarketLifecyclePhaseV1::ResolutionTerminal
+            || candidate.market_quality != MarketDataQuality::Fresh
+        {
+            return Ok((self, false));
+        }
+        if !self.prepared.hot_markets.contains_key(condition_id) {
+            let Some(market) = store.markets.get(condition_id) else {
+                return Ok((self, false));
+            };
+            self.prepared
+                .hot_markets
+                .insert(condition_id.to_owned(), market.clone());
+        }
+        let market = self
+            .prepared
+            .hot_markets
+            .get_mut(condition_id)
+            .expect("已准备的赎回市场候选必须存在");
+        assert!(
+            market.mark_resolution_terminal_if_qualified(resolution),
+            "已核对的候选判定终态必须可写入"
+        );
+        Ok((self, true))
+    }
+}
+
+pub(crate) struct PreparedMarketStoreBucketDeltaV2 {
+    prepared: PreparedMarketEventsV1,
+    authorized_events: Vec<ExecutionMarketEventV3>,
+    identity: AppliedBucketIdentityV1,
+}
+
+impl PreparedMarketStoreBucketDeltaV2 {
+    pub(crate) fn authorized_events(&self) -> &[ExecutionMarketEventV3] {
+        &self.authorized_events
+    }
+
+    pub(crate) fn qualified_resolution_event_ids(&self) -> &BTreeSet<String> {
+        self.prepared.qualified_resolution_event_ids()
+    }
+
+    pub(crate) fn candidate_market<'a>(
+        &'a self,
+        store: &'a MarketStateStoreV1,
+        condition_id: &str,
+    ) -> Option<&'a MarketStateV1> {
+        self.prepared.candidate_market(store, condition_id)
+    }
+
+    pub(crate) fn validate_initial_load_complete(
+        &self,
+        store: &MarketStateStoreV1,
+    ) -> Result<(), MarketEventErrorV1> {
+        store.validate_initial_load_complete(&self.prepared)
+    }
+
+    pub(crate) fn input_seal_outcome(&self, store: &MarketStateStoreV1) -> InputPathSealOutcomeV1 {
+        store.input_seal_outcome(&self.prepared)
+    }
+
+    pub(crate) fn commit_prevalidated(self, store: &mut MarketStateStoreV1) {
+        store.commit_prepared_events(self.prepared, self.identity);
+    }
 }
 
 pub(crate) struct PreparedMarketResolutionTerminalDeltaV2 {
     condition_id: String,
     resolution: MarketResolutionTerminalV3,
     mark_hot_market: bool,
+}
+
+pub(crate) struct PreparedMarketStoreClosureUpgradeV2 {
+    identity: AppliedBucketIdentityV1,
+}
+
+impl PreparedMarketStoreClosureUpgradeV2 {
+    pub(crate) fn commit_prevalidated(self, store: &mut MarketStateStoreV1) {
+        store.last_applied_bucket = Some(self.identity);
+    }
 }
 
 impl PreparedMarketResolutionTerminalDeltaV2 {
@@ -634,6 +839,72 @@ impl MarketStateStoreV1 {
             evicted_markets: BTreeMap::new(),
             last_applied_bucket: None,
         }
+    }
+
+    pub(crate) fn prepare_bucket_delta_v2(
+        &self,
+        bucket: &ClosedMarketEventBucketV1,
+    ) -> Result<PreparedMarketStoreBucketDeltaV2, MarketEventErrorV1> {
+        let mut prepared = self.begin_bucket_delta_v2(bucket)?;
+        loop {
+            match prepared.advance(self)? {
+                PreparedMarketStoreBucketStepV2::Authorized(event) => {
+                    prepared = event.complete();
+                }
+                PreparedMarketStoreBucketStepV2::EvictedNoExecution(next) => {
+                    prepared = next;
+                }
+                PreparedMarketStoreBucketStepV2::Complete(committable) => {
+                    return Ok(committable);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn begin_bucket_delta_v2(
+        &self,
+        bucket: &ClosedMarketEventBucketV1,
+    ) -> Result<PreparedMarketStoreBucketBuilderV2, MarketEventErrorV1> {
+        let (events, identity) = decode_bucket(bucket)?;
+        Ok(PreparedMarketStoreBucketBuilderV2 {
+            prepared: PreparedMarketEventsV1::default(),
+            authorized_events: Vec::new(),
+            remaining_events: events.into_iter(),
+            path: bucket.path,
+            bucket_at_utc_ms: bucket.bucket_at_utc_ms,
+            identity,
+        })
+    }
+
+    pub(crate) fn prepare_closure_upgrade_v2(
+        &self,
+        bucket: &ClosedMarketEventBucketV1,
+    ) -> Result<(PreparedMarketStoreClosureUpgradeV2, InputPathSealOutcomeV1), MarketEventErrorV1>
+    {
+        let (_, identity) = decode_bucket(bucket)?;
+        let previous = self
+            .last_applied_bucket
+            .as_ref()
+            .ok_or(MarketEventErrorV1::BucketIdentityConflict)?;
+        if previous.bucket_at_utc_ms != identity.bucket_at_utc_ms
+            || previous.start_index_position != identity.start_index_position
+            || previous.next_index_position != identity.next_index_position
+            || previous.sha256 != identity.sha256
+            || !matches!(
+                (previous.closure, identity.closure),
+                (
+                    MillisecondBucketClosureV1::NextEventAt(_),
+                    MillisecondBucketClosureV1::EndOfInput
+                )
+            )
+        {
+            return Err(MarketEventErrorV1::BucketIdentityConflict);
+        }
+        self.validate_initial_load_complete(&PreparedMarketEventsV1::default())?;
+        Ok((
+            PreparedMarketStoreClosureUpgradeV2 { identity },
+            self.expected_input_seal_outcome(),
+        ))
     }
 
     pub(crate) fn insert_market(
@@ -794,13 +1065,18 @@ impl MarketStateStoreV1 {
         let Some(market) = self.markets.get(condition_id) else {
             return Ok(None);
         };
-        let Some(qualified_resolution) = market.qualified_resolution() else {
+        let Some(qualified_resolution) = market.qualified_resolution.as_ref() else {
             return Ok(None);
         };
         if qualified_resolution != resolution {
             return Err(MarketEventErrorV1::ResolutionConflict(
                 condition_id.to_owned(),
             ));
+        }
+        if market.lifecycle_phase != MarketLifecyclePhaseV1::ResolutionTerminal
+            && market.market_quality != MarketDataQuality::Fresh
+        {
+            return Ok(None);
         }
         Ok(Some(PreparedMarketResolutionTerminalDeltaV2 {
             condition_id: condition_id.to_owned(),
@@ -823,43 +1099,85 @@ impl MarketStateStoreV1 {
     ) -> Result<PreparedMarketEventsV1, MarketEventErrorV1> {
         let mut prepared = PreparedMarketEventsV1::default();
         for event in events {
-            let condition_id = event.market.condition_id.0.as_str();
-            if let Some(marker) = self.evicted_markets.get(condition_id) {
-                if !prepared.evicted_markets.contains_key(condition_id) {
-                    prepared
-                        .evicted_markets
-                        .insert(condition_id.to_owned(), marker.clone());
-                }
+            prepared = self.prepare_event(prepared, event, path, bucket_at_utc_ms)?;
+        }
+        Ok(self.finish_prepared_events(prepared, bucket_at_utc_ms))
+    }
+
+    fn prepare_event(
+        &self,
+        mut prepared: PreparedMarketEventsV1,
+        event: &ExecutionMarketEventV3,
+        path: MarketEventPathV1,
+        bucket_at_utc_ms: i64,
+    ) -> Result<PreparedMarketEventsV1, MarketEventErrorV1> {
+        let condition_id = event.market.condition_id.0.as_str();
+        if let Some(marker) = self.evicted_markets.get(condition_id) {
+            if !prepared.evicted_markets.contains_key(condition_id) {
                 prepared
                     .evicted_markets
-                    .get_mut(condition_id)
-                    .expect("affected evicted market was inserted above")
-                    .apply_no_effect_event(event)?;
-                continue;
+                    .insert(condition_id.to_owned(), marker.clone());
             }
-            if !prepared.hot_markets.contains_key(condition_id) {
-                let current = self
-                    .markets
-                    .get(condition_id)
-                    .ok_or_else(|| MarketEventErrorV1::UnknownMarket(condition_id.to_owned()))?;
-                prepared
-                    .hot_markets
-                    .insert(condition_id.to_owned(), current.clone());
-            }
-            let market = prepared
-                .hot_markets
+            prepared
+                .evicted_markets
                 .get_mut(condition_id)
-                .expect("affected market was inserted above");
-            market.advance_time_through(bucket_at_utc_ms);
-            market.apply_event(event, path)?;
+                .expect("affected evicted market was inserted above")
+                .apply_no_effect_event(event)?;
+            return Ok(prepared);
+        }
+        if !prepared.hot_markets.contains_key(condition_id) {
+            let current = self
+                .markets
+                .get(condition_id)
+                .ok_or_else(|| MarketEventErrorV1::UnknownMarket(condition_id.to_owned()))?;
+            prepared
+                .hot_markets
+                .insert(condition_id.to_owned(), current.clone());
+        }
+        let market = prepared
+            .hot_markets
+            .get_mut(condition_id)
+            .expect("affected market was inserted above");
+        market.advance_time_through(bucket_at_utc_ms);
+        market.apply_event(event, path)?;
+        if let ExecutionMarketEventPayloadV3::MarketResolutionTerminal(resolution) = &event.payload
+            && event
+                .time
+                .source_event_at_utc_ms
+                .is_some_and(|source_at_utc_ms| source_at_utc_ms >= market.end_at_utc_ms())
+            && market.qualified_resolution() == Some(resolution)
+        {
+            prepared
+                .qualified_resolution_event_ids
+                .insert(event.event_id.0.clone());
         }
         Ok(prepared)
+    }
+
+    fn finish_prepared_events(
+        &self,
+        mut prepared: PreparedMarketEventsV1,
+        bucket_at_utc_ms: i64,
+    ) -> PreparedMarketEventsV1 {
+        for market in prepared.hot_markets.values_mut() {
+            market.advance_time_through(bucket_at_utc_ms);
+        }
+        for (condition_id, market) in &self.markets {
+            if prepared.hot_markets.contains_key(condition_id)
+                || !market.time_advance_changes_state_through(bucket_at_utc_ms)
+            {
+                continue;
+            }
+            let mut candidate = market.clone();
+            candidate.advance_time_through(bucket_at_utc_ms);
+            prepared.hot_markets.insert(condition_id.clone(), candidate);
+        }
+        prepared
     }
 
     fn commit_prepared_events(
         &mut self,
         prepared: PreparedMarketEventsV1,
-        bucket_at_utc_ms: i64,
         identity: AppliedBucketIdentityV1,
     ) {
         for (condition_id, market) in prepared.hot_markets {
@@ -868,7 +1186,6 @@ impl MarketStateStoreV1 {
         for (condition_id, marker) in prepared.evicted_markets {
             self.evicted_markets.insert(condition_id, marker);
         }
-        self.advance_time_through(bucket_at_utc_ms);
         self.last_applied_bucket = Some(identity);
     }
 
@@ -1040,6 +1357,14 @@ impl MarketStateV1 {
             }
             self.release_external_state();
         }
+    }
+
+    fn time_advance_changes_state_through(&self, closed_through_utc_ms: i64) -> bool {
+        closed_through_utc_ms >= self.market.window.end_at_utc_ms
+            && self.lifecycle_phase != MarketLifecyclePhaseV1::Preloading
+            && self.initial_load_complete()
+            && (self.lifecycle_phase == MarketLifecyclePhaseV1::Active
+                || !self.external_state_released)
     }
 
     fn release_external_state(&mut self) {
@@ -2086,21 +2411,7 @@ impl SimSession {
             .filter(|event| !current_store.is_evicted(event.market.condition_id.0.as_str()))
             .cloned()
             .collect::<Vec<_>>();
-        let qualified_resolution_event_ids = authorized_events
-            .iter()
-            .filter_map(|event| {
-                let ExecutionMarketEventPayloadV3::MarketResolutionTerminal(resolution) =
-                    &event.payload
-                else {
-                    return None;
-                };
-                let source_at_utc_ms = event.time.source_event_at_utc_ms?;
-                let market = prepared.hot_markets.get(&event.market.condition_id.0)?;
-                (source_at_utc_ms >= market.end_at_utc_ms()
-                    && market.qualified_resolution() == Some(resolution))
-                .then(|| event.event_id.0.clone())
-            })
-            .collect::<BTreeSet<_>>();
+        let qualified_resolution_event_ids = prepared.qualified_resolution_event_ids.clone();
         let prepared_input_failed = prepared_input_seal.as_ref().is_some_and(|outcome| {
             matches!(
                 outcome,
@@ -2166,7 +2477,7 @@ impl SimSession {
                 )?;
                 self.hidden_platform_markets_mut()
                     .expect("非模拟盘会话必须持有隐藏平台状态")
-                    .commit_prepared_events(prepared, bucket.bucket_at_utc_ms, identity);
+                    .commit_prepared_events(prepared, identity);
                 self.commit_platform_prefix_closure(
                     bucket.bucket_at_utc_ms,
                     bucket.next_index_position,
@@ -2177,11 +2488,8 @@ impl SimSession {
                     bucket.bucket_at_utc_ms,
                     bucket.next_index_position,
                 )?;
-                self.public_markets_mut().commit_prepared_events(
-                    prepared,
-                    bucket.bucket_at_utc_ms,
-                    identity,
-                );
+                self.public_markets_mut()
+                    .commit_prepared_events(prepared, identity);
                 self.commit_public_visibility_closure(
                     bucket.bucket_at_utc_ms,
                     bucket.next_index_position,
@@ -2539,7 +2847,7 @@ mod tests {
         ];
         let (prepared, identity) =
             prepare_canonical_hidden_events(store, 1_100, 2, &initial).expect("规范初始事件桶");
-        store.commit_prepared_events(prepared, 1_100, identity);
+        store.commit_prepared_events(prepared, identity);
 
         let resolution = resolved_terminal(member, 0);
         let terminal = sealed_event(
@@ -2549,7 +2857,7 @@ mod tests {
         );
         let (prepared, identity) =
             prepare_canonical_hidden_events(store, 2_001, 3, &[terminal]).expect("规范终态事件桶");
-        store.commit_prepared_events(prepared, 2_001, identity);
+        store.commit_prepared_events(prepared, identity);
         assert!(
             store.mark_resolution_terminal_if_qualified(
                 &member.market().condition_id.0,
@@ -2583,7 +2891,7 @@ mod tests {
         ];
         let (prepared, identity) =
             prepare_canonical_hidden_events(&store, 1_100, 2, &initial).expect("规范初始事件桶");
-        store.commit_prepared_events(prepared, 1_100, identity);
+        store.commit_prepared_events(prepared, identity);
         let terminal = sealed_event(
             ExecutionMarketEventPayloadV3::MarketResolutionTerminal(resolution.clone()),
             orderbook_evidence(2_001, 2_100, 3),
@@ -2591,7 +2899,7 @@ mod tests {
         );
         let (prepared, identity) = prepare_canonical_hidden_events(&store, 2_001, 3, &[terminal])
             .expect("规范合格判定事件桶");
-        store.commit_prepared_events(prepared, 2_001, identity);
+        store.commit_prepared_events(prepared, identity);
         assert_eq!(
             store
                 .market(&condition_id)
@@ -2646,6 +2954,248 @@ mod tests {
         assert!(!evicted.has_state_change());
         evicted.commit(&mut store);
         assert!(store.is_evicted(&condition_id));
+    }
+
+    #[test]
+    fn prepared_market_events_freeze_resolution_qualification_in_event_order() {
+        let scenario = scenario_for_sim_tests();
+        let directory = SessionMarketDirectoryV1::try_from_scenario(&scenario).expect("测试目录");
+        let member = scenario.market_set().markets().first().expect("测试市场");
+        let condition_id = member.market().condition_id.0.clone();
+        let resolution = resolved_terminal(member, 0);
+        let mut store = MarketStateStoreV1::new(&directory);
+        let initial = [
+            initial_snapshot_event("1", 0, "Up", 1_100, 1_200, 1, "10"),
+            initial_snapshot_event("2", 1, "Down", 1_100, 1_200, 2, "10"),
+        ];
+        let (prepared, identity) =
+            prepare_canonical_hidden_events(&store, 1_100, 2, &initial).expect("规范初始事件桶");
+        store.commit_prepared_events(prepared, identity);
+        let baseline = serde_json::to_vec(&store).expect("准备前市场状态编码");
+
+        let resolution_event = sealed_event(
+            ExecutionMarketEventPayloadV3::MarketResolutionTerminal(resolution),
+            orderbook_evidence(2_001, 2_100, 3),
+            fresh_quality(),
+        );
+        let invalid_event = sealed_event(
+            ExecutionMarketEventPayloadV3::QualityBoundary(contracts::QualityBoundaryV2 {
+                scope: QualityScopeV1::Market,
+                previous_quality: MarketDataQuality::Fresh,
+                current_quality: MarketDataQuality::Invalid,
+                reason_code: "TEST_RESOLUTION_THEN_INVALID".to_owned(),
+            }),
+            orderbook_evidence(2_001, 2_100, 4),
+            contracts::EventQualityV2 {
+                availability: MarketDataQuality::Invalid,
+                resync: ResyncQuality::NotRequired,
+            },
+        );
+        let bucket = hidden_bucket(2_001, 4, &[resolution_event.clone(), invalid_event.clone()]);
+        let (_, expected_identity) = decode_bucket(&bucket).expect("规范测试桶");
+        let mut expected = store.clone();
+        {
+            let market = expected.markets.get_mut(&condition_id).expect("黄金市场");
+            for event in [&resolution_event, &invalid_event] {
+                market.advance_time_through(2_001);
+                market
+                    .apply_event(event, MarketEventPathV1::HiddenPlatform)
+                    .expect("逐事件黄金应用");
+            }
+        }
+        expected.advance_time_through(2_001);
+        expected.last_applied_bucket = Some(expected_identity);
+        let prepared = store
+            .prepare_bucket_delta_v2(&bucket)
+            .expect("判定后质量失效必须按桶内原序准备");
+
+        assert_eq!(
+            prepared
+                .qualified_resolution_event_ids()
+                .iter()
+                .collect::<Vec<_>>(),
+            [&resolution_event.event_id.0],
+            "判定资格必须冻结在该事件的候选后像，不能由桶末质量回推"
+        );
+        assert_eq!(
+            prepared
+                .authorized_events()
+                .iter()
+                .map(|event| &event.event_id)
+                .collect::<Vec<_>>(),
+            [&resolution_event.event_id, &invalid_event.event_id],
+            "执行授权事件必须保持解码后的桶内原序"
+        );
+        let candidate = prepared
+            .candidate_market(&store, &condition_id)
+            .expect("候选市场");
+        assert_eq!(candidate.market_quality(), MarketDataQuality::Invalid);
+        assert!(candidate.qualified_resolution().is_none());
+        assert_eq!(
+            serde_json::to_vec(&store).expect("丢弃后市场状态编码"),
+            baseline,
+            "准备与丢弃不得写入实时市场状态"
+        );
+
+        prepared.commit_prevalidated(&mut store);
+        assert_eq!(store, expected, "稀疏提交必须等于逐事件黄金状态");
+    }
+
+    #[test]
+    fn prepared_market_bucket_exposes_time_advance_before_commit() {
+        let scenario = scenario_for_sim_tests();
+        let directory = SessionMarketDirectoryV1::try_from_scenario(&scenario).expect("测试目录");
+        let member = scenario.market_set().markets().first().expect("测试市场");
+        let condition_id = member.market().condition_id.0.clone();
+        let mut store = MarketStateStoreV1::new(&directory);
+        let initial = [
+            initial_snapshot_event("1", 0, "Up", 1_100, 1_200, 1, "10"),
+            initial_snapshot_event("2", 1, "Down", 1_100, 1_200, 2, "10"),
+        ];
+        let (prepared, identity) =
+            prepare_canonical_hidden_events(&store, 1_100, 2, &initial).expect("规范初始事件桶");
+        store.commit_prepared_events(prepared, identity);
+        let baseline = store.clone();
+        let end_at_utc_ms = member.market().window.end_at_utc_ms;
+        let bucket = ClosedMarketEventBucketV1::hidden(
+            end_at_utc_ms,
+            2,
+            2,
+            MillisecondBucketClosureV1::NextEventAt(end_at_utc_ms + 1),
+            Vec::new(),
+        );
+        let prepared = store
+            .prepare_bucket_delta_v2(&bucket)
+            .expect("空闭桶仍须准备时间推进后像");
+
+        let candidate = prepared
+            .candidate_market(&store, &condition_id)
+            .expect("候选市场");
+        assert_eq!(
+            candidate.lifecycle_phase(),
+            MarketLifecyclePhaseV1::PostEndPendingResolution
+        );
+        assert!(candidate.external_state_released());
+        assert_eq!(store, baseline, "准备与丢弃不得写入实时市场状态");
+
+        let mut expected = baseline.clone();
+        let (_, identity) = decode_bucket(&bucket).expect("规范空闭桶");
+        expected.advance_time_through(end_at_utc_ms);
+        expected.last_applied_bucket = Some(identity);
+        prepared.commit_prevalidated(&mut store);
+        assert_eq!(store, expected, "提交只安装准备期冻结的时间后像");
+    }
+
+    #[test]
+    fn prepared_market_bucket_interleaves_redeemed_terminal_before_later_event() {
+        let scenario = scenario_for_sim_tests();
+        let directory = SessionMarketDirectoryV1::try_from_scenario(&scenario).expect("测试目录");
+        let member = scenario.market_set().markets().first().expect("测试市场");
+        let condition_id = member.market().condition_id.0.clone();
+        let resolution = resolved_terminal(member, 0);
+        let mut store = MarketStateStoreV1::new(&directory);
+        let initial = [
+            initial_snapshot_event("1", 0, "Up", 1_100, 1_200, 1, "10"),
+            initial_snapshot_event("2", 1, "Down", 1_100, 1_200, 2, "10"),
+        ];
+        let (prepared, identity) =
+            prepare_canonical_hidden_events(&store, 1_100, 2, &initial).expect("规范初始事件桶");
+        store.commit_prepared_events(prepared, identity);
+        let baseline = store.clone();
+        let resolution_event = sealed_event(
+            ExecutionMarketEventPayloadV3::MarketResolutionTerminal(resolution.clone()),
+            orderbook_evidence(2_001, 2_100, 3),
+            fresh_quality(),
+        );
+        let invalid_event = sealed_event(
+            ExecutionMarketEventPayloadV3::QualityBoundary(contracts::QualityBoundaryV2 {
+                scope: QualityScopeV1::Market,
+                previous_quality: MarketDataQuality::Fresh,
+                current_quality: MarketDataQuality::Invalid,
+                reason_code: "TEST_REDEEMED_THEN_INVALID".to_owned(),
+            }),
+            orderbook_evidence(2_001, 2_100, 4),
+            contracts::EventQualityV2 {
+                availability: MarketDataQuality::Invalid,
+                resync: ResyncQuality::NotRequired,
+            },
+        );
+        let bucket = hidden_bucket(2_001, 4, &[resolution_event, invalid_event]);
+        let prepared = store
+            .begin_bucket_delta_v2(&bucket)
+            .expect("开始逐事件市场候选");
+        let PreparedMarketStoreBucketStepV2::Authorized(event) =
+            prepared.advance(&store).expect("应用判定事件")
+        else {
+            panic!("首项必须是执行路径判定事件");
+        };
+        assert!(event.qualified_resolution());
+        assert!(matches!(
+            &event.event().payload,
+            ExecutionMarketEventPayloadV3::MarketResolutionTerminal(_)
+        ));
+        let mut prepared = event.complete();
+        let (next_prepared, changed) = prepared
+            .stage_redeemed_resolution_terminal(&store, &condition_id, &resolution)
+            .expect("同项赎回必须写入市场候选终态");
+        assert!(changed, "首次同项赎回必须改变市场候选");
+        prepared = next_prepared;
+        assert_eq!(
+            prepared
+                .candidate_market(&store, &condition_id)
+                .map(MarketStateV1::lifecycle_phase),
+            Some(MarketLifecyclePhaseV1::ResolutionTerminal)
+        );
+        let PreparedMarketStoreBucketStepV2::Authorized(event) = prepared
+            .advance(&store)
+            .expect("终态后质量事件必须按原序应用")
+        else {
+            panic!("第二项必须是执行路径质量事件");
+        };
+        assert!(!event.qualified_resolution());
+        let prepared = event.complete();
+        let PreparedMarketStoreBucketStepV2::Complete(prepared) =
+            prepared.advance(&store).expect("闭合完整市场桶候选")
+        else {
+            panic!("两项事件后必须形成完整市场桶候选");
+        };
+        let candidate = prepared
+            .candidate_market(&store, &condition_id)
+            .expect("终态候选市场");
+        assert_eq!(
+            candidate.lifecycle_phase(),
+            MarketLifecyclePhaseV1::ResolutionTerminal
+        );
+        assert_eq!(candidate.market_quality(), MarketDataQuality::Invalid);
+        assert_eq!(store, baseline, "准备与丢弃不得写入实时市场状态");
+
+        prepared.commit_prevalidated(&mut store);
+        assert_eq!(
+            store
+                .market(&condition_id)
+                .map(MarketStateV1::lifecycle_phase),
+            Some(MarketLifecyclePhaseV1::ResolutionTerminal)
+        );
+
+        let mut conflicting_resolution = resolution.clone();
+        let MarketResolutionTerminalV3::Resolved {
+            mapping_rule_version,
+            ..
+        } = &mut conflicting_resolution;
+        *mapping_rule_version = "conflicting-terminal-after-invalid-v1".to_owned();
+        let follow_up = hidden_bucket(2_002, 4, &[]);
+        let prepared = store
+            .begin_bucket_delta_v2(&follow_up)
+            .expect("开始终态后续空桶候选");
+        assert!(matches!(
+            prepared.stage_redeemed_resolution_terminal(
+                &store,
+                &condition_id,
+                &conflicting_resolution,
+            ),
+            Err(MarketEventErrorV1::ResolutionConflict(conflict))
+                if conflict == condition_id
+        ));
     }
 
     #[test]
@@ -2839,7 +3389,7 @@ mod tests {
             [&condition_id]
         );
         let expected_identity = identity.clone();
-        store.commit_prepared_events(prepared, 2_100, identity);
+        store.commit_prepared_events(prepared, identity);
 
         assert!(store.market(&condition_id).is_none());
         assert_eq!(
@@ -2900,7 +3450,7 @@ mod tests {
                     std::slice::from_ref(&event),
                 )
                 .expect("合法终态后 tick 链必须在驱逐前后同样推进");
-                store.commit_prepared_events(prepared, at_utc_ms, identity);
+                store.commit_prepared_events(prepared, identity);
             }
         }
 

@@ -156,6 +156,30 @@ pub(crate) struct AuthorizedMarketEventEffectsV1 {
     pub venue_dust_effects: Vec<VenueDustEffectV1>,
     pub market_resolution_order_effects: Vec<MarketResolutionOrderEffectV1>,
     pub settlement_feedbacks: Vec<SettlementLifecycleEffectV1>,
+    pub ordered_lifecycle_effects: Vec<AuthorizedMarketLifecycleEffectV2>,
+}
+
+impl AuthorizedMarketEventEffectsV1 {
+    pub(crate) fn append(&mut self, mut other: Self) {
+        self.trade_finality_effects
+            .append(&mut other.trade_finality_effects);
+        self.venue_dust_effects
+            .append(&mut other.venue_dust_effects);
+        self.market_resolution_order_effects
+            .append(&mut other.market_resolution_order_effects);
+        self.settlement_feedbacks
+            .append(&mut other.settlement_feedbacks);
+        self.ordered_lifecycle_effects
+            .append(&mut other.ordered_lifecycle_effects);
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AuthorizedMarketLifecycleEffectV2 {
+    TradeFinality(TradeFinalityLifecycleEffectsV1),
+    VenueDust(VenueDustEffectV1),
+    MarketResolutionOrder(MarketResolutionOrderEffectV1),
+    Settlement(SettlementLifecycleEffectV1),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -293,6 +317,19 @@ fn asset_queue_clone_count_for_tests() -> usize {
 }
 
 impl AssetQueueV1 {
+    fn best_executable_ask(&self) -> Option<Decimal> {
+        self.asks
+            .iter()
+            .find(|(_, queue)| {
+                queue.segments.iter().any(|segment| {
+                    matches!(segment, QueueSegmentV1::External(external)
+                        if external.total_quote_units > 0
+                            && external.consumed_base_units < external.total_base_units)
+                })
+            })
+            .map(|(price, _)| *price)
+    }
+
     fn levels(&self, side: BookSide) -> &BTreeMap<Decimal, PriceQueueV1> {
         match side {
             BookSide::Bid => &self.bids,
@@ -772,16 +809,7 @@ impl ExecutionQueueStateV1 {
     ) -> Option<Decimal> {
         self.asset(condition_id, token_id)
             .ok()?
-            .asks
-            .iter()
-            .find(|(_, queue)| {
-                queue.segments.iter().any(|segment| {
-                    matches!(segment, QueueSegmentV1::External(external)
-                        if external.total_quote_units > 0
-                            && external.consumed_base_units < external.total_base_units)
-                })
-            })
-            .map(|(price, _)| *price)
+            .best_executable_ask()
     }
 
     pub(crate) fn remaining_account_order_base_units(
@@ -1474,6 +1502,15 @@ impl Clone for ExecutionStateV1 {
     }
 }
 
+impl ExecutionStateV1 {
+    pub(crate) fn detached_clone(&self) -> Self {
+        let mut detached = self.clone();
+        detached.rebate = Arc::new(self.rebate.as_ref().clone());
+        detached.market_resolutions = Arc::new(self.market_resolutions.as_ref().clone());
+        detached
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn reset_execution_state_clone_count_for_tests() {
     EXECUTION_STATE_CLONE_COUNT_FOR_TESTS.with(|count| count.set(0));
@@ -1525,6 +1562,7 @@ struct ExecutionTouchedBidLevelKeyV2 {
 struct PreparedGtdExpirationPatchV2 {
     last_consumed_live_deadline: Option<(i64, String)>,
     deadline_removals: BTreeSet<(i64, String)>,
+    deadline_insertions: BTreeSet<(i64, String)>,
     bid_queue_after_values: BTreeMap<ExecutionTouchedBidLevelKeyV2, Option<PriceQueueV1>>,
     overlay_after_values: BTreeMap<ExecutionTouchedBidLevelKeyV2, Decimal>,
     gtd_advanced_through_utc_ms: Option<i64>,
@@ -1547,24 +1585,30 @@ struct PreparedScheduledFinalityPatchV2 {
 #[derive(Default)]
 #[cfg_attr(test, derive(Clone, Debug, PartialEq, Eq))]
 struct PreparedMarketResolutionPatchV2 {
+    obligation_insertions: BTreeMap<String, MarketResolutionObligationV1>,
     pending_trade_removals: BTreeMap<String, BTreeSet<String>>,
     redeemed_at_after: BTreeMap<String, i64>,
+    invalidated_by_quality_after: BTreeMap<String, String>,
 }
 
 pub(crate) struct PreparedExecutionDriveDeltaV2<'a> {
     live: &'a mut ExecutionStateV1,
     gtd: PreparedGtdExpirationPatchV2,
     finality: PreparedScheduledFinalityPatchV2,
+    asset_replacements: BTreeMap<(String, String), AssetQueueV1>,
     order_replacements: BTreeMap<String, SimOrderRecordV1>,
     candidate_account: Option<PlatformAccountStateV1>,
+    matching_closed_market_insertions: BTreeMap<String, i64>,
 }
 
 pub(crate) struct CommittableExecutionDriveDeltaV2<'a> {
     live: &'a mut ExecutionStateV1,
     gtd: PreparedGtdExpirationPatchV2,
     finality: PreparedScheduledFinalityPatchV2,
+    asset_replacements: BTreeMap<(String, String), AssetQueueV1>,
     order_replacements: BTreeMap<String, SimOrderRecordV1>,
     candidate_account: Option<PlatformAccountStateV1>,
+    matching_closed_market_insertions: BTreeMap<String, i64>,
 }
 
 impl PreparedGtdExpirationPatchV2 {
@@ -1596,6 +1640,7 @@ impl PreparedGtdExpirationPatchV2 {
         Self {
             last_consumed_live_deadline: None,
             deadline_removals: BTreeSet::new(),
+            deadline_insertions: BTreeSet::new(),
             bid_queue_after_values: BTreeMap::new(),
             overlay_after_values: BTreeMap::new(),
             gtd_advanced_through_utc_ms: live.gtd_advanced_through_utc_ms,
@@ -1835,6 +1880,7 @@ impl PreparedGtdExpirationPatchV2 {
 
     fn has_state_change(&self, live: &ExecutionStateV1) -> bool {
         !self.deadline_removals.is_empty()
+            || !self.deadline_insertions.is_empty()
             || !self.bid_queue_after_values.is_empty()
             || !self.overlay_after_values.is_empty()
             || self.gtd_advanced_through_utc_ms != live.gtd_advanced_through_utc_ms
@@ -1844,6 +1890,7 @@ impl PreparedGtdExpirationPatchV2 {
         for deadline in self.deadline_removals {
             live.gtd_deadlines.remove(&deadline);
         }
+        live.gtd_deadlines.extend(self.deadline_insertions);
         for (key, after) in self.bid_queue_after_values {
             let levels = &mut live
                 .queues
@@ -1870,13 +1917,61 @@ impl PreparedGtdExpirationPatchV2 {
 }
 
 impl PreparedMarketResolutionPatchV2 {
+    fn candidate_obligation<'a>(
+        &'a self,
+        live: &'a BTreeMap<String, MarketResolutionObligationV1>,
+        condition_id: &str,
+    ) -> Option<&'a MarketResolutionObligationV1> {
+        self.obligation_insertions
+            .get(condition_id)
+            .or_else(|| live.get(condition_id))
+    }
+
+    fn stage_obligation_insertion(
+        &mut self,
+        live: &BTreeMap<String, MarketResolutionObligationV1>,
+        condition_id: &str,
+        obligation: MarketResolutionObligationV1,
+    ) -> Result<bool, MatchingStateErrorV1> {
+        if let Some(existing) = self.candidate_obligation(live, condition_id) {
+            if existing.resolution == obligation.resolution {
+                return Ok(false);
+            }
+            return Err(MatchingStateErrorV1::ResolutionConflict(
+                condition_id.to_owned(),
+            ));
+        }
+        self.obligation_insertions
+            .insert(condition_id.to_owned(), obligation);
+        Ok(true)
+    }
+
+    fn stage_quality_invalidation(
+        &mut self,
+        live: &BTreeMap<String, MarketResolutionObligationV1>,
+        condition_id: &str,
+        reason_code: &str,
+    ) {
+        let Some(obligation) = self.candidate_obligation(live, condition_id) else {
+            return;
+        };
+        if obligation.redeemed_at_utc_ms.is_none()
+            && !self.redeemed_at_after.contains_key(condition_id)
+            && obligation.invalidated_by_quality_reason.is_none()
+            && !self.invalidated_by_quality_after.contains_key(condition_id)
+        {
+            self.invalidated_by_quality_after
+                .insert(condition_id.to_owned(), reason_code.to_owned());
+        }
+    }
+
     fn stage_pending_trade_removal(
         &mut self,
         live: &BTreeMap<String, MarketResolutionObligationV1>,
         condition_id: &str,
         trade_id: &str,
     ) {
-        let Some(obligation) = live.get(condition_id) else {
+        let Some(obligation) = self.candidate_obligation(live, condition_id) else {
             return;
         };
         if obligation.pending_trade_ids.contains(trade_id) {
@@ -1913,7 +2008,7 @@ impl PreparedMarketResolutionPatchV2 {
         condition_id: &str,
         platform_effective_at_utc_ms: i64,
     ) -> Result<Option<SettlementLifecycleEffectV1>, MatchingStateErrorV1> {
-        let Some(obligation) = live.get(condition_id) else {
+        let Some(obligation) = self.candidate_obligation(live, condition_id) else {
             return Ok(None);
         };
         if self.redeemed_at_after.contains_key(condition_id)
@@ -1925,7 +2020,9 @@ impl PreparedMarketResolutionPatchV2 {
         {
             return Ok(None);
         }
-        if obligation.invalidated_by_quality_reason.is_some() {
+        if obligation.invalidated_by_quality_reason.is_some()
+            || self.invalidated_by_quality_after.contains_key(condition_id)
+        {
             return Err(MatchingStateErrorV1::ResolutionConflict(
                 condition_id.to_owned(),
             ));
@@ -1942,18 +2039,24 @@ impl PreparedMarketResolutionPatchV2 {
     }
 
     fn has_state_change(&self) -> bool {
-        !self.pending_trade_removals.is_empty() || !self.redeemed_at_after.is_empty()
+        !self.obligation_insertions.is_empty()
+            || !self.pending_trade_removals.is_empty()
+            || !self.redeemed_at_after.is_empty()
+            || !self.invalidated_by_quality_after.is_empty()
     }
 
     fn changed_condition_id(&self) -> Option<&str> {
-        self.pending_trade_removals
+        self.obligation_insertions
             .keys()
+            .chain(self.pending_trade_removals.keys())
             .chain(self.redeemed_at_after.keys())
+            .chain(self.invalidated_by_quality_after.keys())
             .next()
             .map(String::as_str)
     }
 
     fn commit_prevalidated(self, live: &mut BTreeMap<String, MarketResolutionObligationV1>) {
+        live.extend(self.obligation_insertions);
         for (condition_id, removals) in self.pending_trade_removals {
             let obligation = live
                 .get_mut(&condition_id)
@@ -1969,6 +2072,11 @@ impl PreparedMarketResolutionPatchV2 {
             live.get_mut(&condition_id)
                 .expect("判定赎回 after-image 只指向已验证义务")
                 .redeemed_at_utc_ms = Some(redeemed_at_utc_ms);
+        }
+        for (condition_id, reason_code) in self.invalidated_by_quality_after {
+            live.get_mut(&condition_id)
+                .expect("判定质量隔离 after-image 只指向已验证义务")
+                .invalidated_by_quality_reason = Some(reason_code);
         }
     }
 }
@@ -2327,9 +2435,15 @@ impl<'a> PreparedExecutionDriveDeltaV2<'a> {
             live,
             gtd,
             finality,
+            asset_replacements: BTreeMap::new(),
             order_replacements: BTreeMap::new(),
             candidate_account: None,
+            matching_closed_market_insertions: BTreeMap::new(),
         }
+    }
+
+    pub(crate) fn prepare_without_scheduled_progress_v2(live: &'a mut ExecutionStateV1) -> Self {
+        Self::prepare_without_scheduled_progress(live)
     }
 
     fn prepare(
@@ -2413,11 +2527,30 @@ impl<'a> PreparedExecutionDriveDeltaV2<'a> {
         &self.finality.rebate_clock_effects
     }
 
+    pub(crate) fn candidate_redeemed_market_resolution(
+        &self,
+        condition_id: &str,
+    ) -> Option<&MarketResolutionTerminalV3> {
+        let obligation = self
+            .finality
+            .resolution
+            .candidate_obligation(self.live.market_resolutions.as_ref(), condition_id)?;
+        (obligation.redeemed_at_utc_ms.is_some()
+            || self
+                .finality
+                .resolution
+                .redeemed_at_after
+                .contains_key(condition_id))
+        .then_some(&obligation.resolution)
+    }
+
     pub(crate) fn has_state_change(&self) -> bool {
         self.gtd.has_state_change(self.live)
             || self.finality.has_state_change(self.live)
+            || !self.asset_replacements.is_empty()
             || !self.order_replacements.is_empty()
             || self.candidate_account.is_some()
+            || !self.matching_closed_market_insertions.is_empty()
     }
 
     pub(crate) fn candidate_account(&self) -> &PlatformAccountStateV1 {
@@ -2440,19 +2573,38 @@ impl<'a> PreparedExecutionDriveDeltaV2<'a> {
     }
 
     pub(crate) fn candidate_orders(&self) -> impl Iterator<Item = &SimOrderRecordV1> {
-        self.live.orders.iter().map(|(platform_order_id, live)| {
-            self.order_replacements
-                .get(platform_order_id)
-                .unwrap_or(live)
+        let mut live = self.live.orders.iter().peekable();
+        let mut replacements = self.order_replacements.iter().peekable();
+        std::iter::from_fn(move || match (live.peek(), replacements.peek()) {
+            (Some((live_id, _)), Some((replacement_id, _))) => match live_id.cmp(replacement_id) {
+                std::cmp::Ordering::Less => live.next().map(|(_, order)| order),
+                std::cmp::Ordering::Equal => {
+                    live.next();
+                    replacements.next().map(|(_, order)| order)
+                }
+                std::cmp::Ordering::Greater => replacements.next().map(|(_, order)| order),
+            },
+            (Some(_), None) => live.next().map(|(_, order)| order),
+            (None, Some(_)) => replacements.next().map(|(_, order)| order),
+            (None, None) => None,
         })
     }
 
     pub(crate) fn candidate_fills(&self) -> impl Iterator<Item = &SimFillRecordV1> {
-        self.live.fills.iter().map(|(trade_id, live)| {
-            self.finality
-                .fill_replacements
-                .get(trade_id)
-                .unwrap_or(live)
+        let mut live = self.live.fills.iter().peekable();
+        let mut replacements = self.finality.fill_replacements.iter().peekable();
+        std::iter::from_fn(move || match (live.peek(), replacements.peek()) {
+            (Some((live_id, _)), Some((replacement_id, _))) => match live_id.cmp(replacement_id) {
+                std::cmp::Ordering::Less => live.next().map(|(_, fill)| fill),
+                std::cmp::Ordering::Equal => {
+                    live.next();
+                    replacements.next().map(|(_, fill)| fill)
+                }
+                std::cmp::Ordering::Greater => replacements.next().map(|(_, fill)| fill),
+            },
+            (Some(_), None) => live.next().map(|(_, fill)| fill),
+            (None, Some(_)) => replacements.next().map(|(_, fill)| fill),
+            (None, None) => None,
         })
     }
 
@@ -2460,24 +2612,620 @@ impl<'a> PreparedExecutionDriveDeltaV2<'a> {
         &'b self,
         condition_id: &'b str,
     ) -> impl Iterator<Item = &'b SimOrderRecordV1> + 'b {
-        self.live.orders.iter().filter_map(move |(order_id, live)| {
-            (live.condition_id == condition_id)
-                .then(|| self.order_replacements.get(order_id).unwrap_or(live))
-        })
+        self.candidate_orders()
+            .filter(move |candidate| candidate.condition_id == condition_id)
     }
 
     pub(crate) fn candidate_fills_for_condition<'b>(
         &'b self,
         condition_id: &'b str,
     ) -> impl Iterator<Item = &'b SimFillRecordV1> + 'b {
-        self.live.fills.iter().filter_map(move |(trade_id, live)| {
-            (live.condition_id == condition_id).then(|| {
-                self.finality
-                    .fill_replacements
-                    .get(trade_id)
-                    .unwrap_or(live)
-            })
+        self.candidate_fills()
+            .filter(move |candidate| candidate.condition_id == condition_id)
+    }
+
+    fn candidate_matching_closed(&self, condition_id: &str) -> bool {
+        self.matching_closed_market_insertions
+            .contains_key(condition_id)
+            || self.live.matching_closed_markets.contains_key(condition_id)
+    }
+
+    fn take_candidate_asset(
+        &mut self,
+        condition_id: &str,
+        token_id: &str,
+    ) -> Result<AssetQueueV1, MatchingStateErrorV1> {
+        let asset_key = (condition_id.to_owned(), token_id.to_owned());
+        if let Some(asset) = self.asset_replacements.remove(&asset_key) {
+            return Ok(asset);
+        }
+        let mut asset = self.live.queues.asset(condition_id, token_id)?.clone();
+        for (key, after) in &self.gtd.bid_queue_after_values {
+            if key.condition_id == condition_id && key.token_id == token_id {
+                if let Some(queue) = after {
+                    asset.bids.insert(key.price_pusd_per_share, queue.clone());
+                } else {
+                    asset.bids.remove(&key.price_pusd_per_share);
+                }
+            }
+        }
+        Ok(asset)
+    }
+
+    fn stage_queue_event(
+        &mut self,
+        event: &ExecutionMarketEventV3,
+    ) -> Result<QueueEventEffectsV1, MatchingStateErrorV1> {
+        if self.candidate_matching_closed(&event.market.condition_id.0) {
+            return Ok(QueueEventEffectsV1::default());
+        }
+        let token_id = match &event.payload {
+            ExecutionMarketEventPayloadV3::InitialL2Snapshot(snapshot) => {
+                &snapshot.asset.token_id.0
+            }
+            ExecutionMarketEventPayloadV3::LevelExecutionTransition(transition) => {
+                &transition.asset.token_id.0
+            }
+            ExecutionMarketEventPayloadV3::QualityBoundary(boundary)
+                if event.quality.resync == ResyncQuality::Required =>
+            {
+                let QualityScopeV1::Asset(asset) = &boundary.scope else {
+                    return Ok(QueueEventEffectsV1::default());
+                };
+                &asset.token_id.0
+            }
+            ExecutionMarketEventPayloadV3::QualityBoundary(_)
+            | ExecutionMarketEventPayloadV3::MarketLifecycleTransition(_)
+            | ExecutionMarketEventPayloadV3::MarketTradingState(_)
+            | ExecutionMarketEventPayloadV3::BestBidAsk(_)
+            | ExecutionMarketEventPayloadV3::TickSizeChange(_)
+            | ExecutionMarketEventPayloadV3::PublicTrade(_)
+            | ExecutionMarketEventPayloadV3::MarketResolutionTerminal(_) => {
+                return Ok(QueueEventEffectsV1::default());
+            }
+        };
+        let condition_id = &event.market.condition_id.0;
+        let candidate_asset = self.take_candidate_asset(condition_id, token_id)?;
+        let mut queues = ExecutionQueueStateV1 {
+            markets: BTreeMap::from([(
+                condition_id.clone(),
+                BTreeMap::from([(token_id.clone(), candidate_asset)]),
+            )]),
+        };
+        let effects = queues.apply_authorized_event(event)?;
+        let candidate_asset = queues
+            .markets
+            .remove(condition_id)
+            .and_then(|mut assets| assets.remove(token_id))
+            .expect("DPT 稀疏队列候选必须保留目标资产");
+        self.asset_replacements
+            .insert((condition_id.clone(), token_id.clone()), candidate_asset);
+        Ok(effects)
+    }
+
+    fn stage_release_initialized_market(
+        &mut self,
+        market: &PlatformMarketV1,
+    ) -> Result<(), MatchingStateErrorV1> {
+        let condition_id = &market.market().condition_id.0;
+        if self.candidate_matching_closed(condition_id) {
+            return Ok(());
+        }
+        let fully_initialized = market.assets().iter().all(|asset| {
+            self.asset_replacements
+                .get(&(condition_id.clone(), asset.token_id.0.clone()))
+                .or_else(|| {
+                    self.live
+                        .queues
+                        .markets
+                        .get(condition_id)
+                        .and_then(|assets| assets.get(&asset.token_id.0))
+                })
+                .is_some_and(|asset| asset.initial_loaded)
+        });
+        if !fully_initialized {
+            return Ok(());
+        }
+        for asset in market.assets() {
+            let mut candidate = self.take_candidate_asset(condition_id, &asset.token_id.0)?;
+            candidate.bids.clear();
+            candidate.asks.clear();
+            self.asset_replacements
+                .insert((condition_id.clone(), asset.token_id.0.clone()), candidate);
+        }
+        self.matching_closed_market_insertions
+            .insert(condition_id.clone(), market.market().window.end_at_utc_ms);
+        Ok(())
+    }
+
+    fn stage_force_release_market(
+        &mut self,
+        market: &PlatformMarketV1,
+    ) -> Result<(), MatchingStateErrorV1> {
+        let condition_id = &market.market().condition_id.0;
+        if self.candidate_matching_closed(condition_id) {
+            return Ok(());
+        }
+        for asset in market.assets() {
+            let mut candidate = self.take_candidate_asset(condition_id, &asset.token_id.0)?;
+            candidate.bids.clear();
+            candidate.asks.clear();
+            self.asset_replacements
+                .insert((condition_id.clone(), asset.token_id.0.clone()), candidate);
+        }
+        self.matching_closed_market_insertions
+            .insert(condition_id.clone(), market.market().window.end_at_utc_ms);
+        Ok(())
+    }
+
+    fn stage_maker_queue_depletion(
+        &mut self,
+        bucket_at_utc_ms: i64,
+        depletion: &MakerQueueDepletionV1,
+    ) -> Result<Option<String>, MatchingStateErrorV1> {
+        let snapshot = self
+            .candidate_order(&depletion.platform_order_id)
+            .cloned()
+            .ok_or_else(|| {
+                MatchingStateErrorV1::AccountOrderConflict(depletion.platform_order_id.clone())
+            })?;
+        let PreparedMakerQueueDepletionCoreV2 {
+            order,
+            fill,
+            completed_gtd_deadline,
+        } = prepare_maker_queue_depletion_core_v2(snapshot, bucket_at_utc_ms, depletion)?;
+        if fill
+            .as_ref()
+            .is_some_and(|fill| self.candidate_fill(&fill.trade_id).is_some())
+        {
+            return Err(MatchingStateErrorV1::AccountOrderConflict(
+                fill.expect("重复检查已证明存在成交").trade_id,
+            ));
+        }
+        let level_key = ExecutionTouchedBidLevelKeyV2 {
+            condition_id: order.condition_id.clone(),
+            token_id: order.token_id.clone(),
+            price_pusd_per_share: order.source_price_pusd_per_share,
+        };
+        let current = self
+            .gtd
+            .overlay_after_values
+            .get(&level_key)
+            .copied()
+            .unwrap_or_else(|| {
+                self.live.account_overlay.quantity(
+                    &level_key.condition_id,
+                    &level_key.token_id,
+                    BookSide::Bid,
+                    level_key.price_pusd_per_share,
+                )
+            });
+        let next = current
+            .checked_sub(decimal_from_micro_units_v1(depletion.base_units)?)
+            .filter(|value| !value.is_sign_negative())
+            .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+        self.gtd.overlay_after_values.insert(level_key, next);
+        if let Some(deadline) = completed_gtd_deadline {
+            self.gtd.deadline_removals.insert(deadline);
+        }
+        self.order_replacements
+            .insert(order.platform_order_id.clone(), order);
+        let Some(fill) = fill else {
+            return Ok(None);
+        };
+        let trade_id = fill.trade_id.clone();
+        self.finality
+            .fill_replacements
+            .insert(trade_id.clone(), fill);
+        Ok(Some(trade_id))
+    }
+
+    fn stage_maker_fill_finality(
+        &mut self,
+        finality_policy: &TradeFinalityPolicyV1,
+        trade_id: &str,
+    ) -> Result<TradeFinalityLifecycleEffectsV1, MatchingStateErrorV1> {
+        let mut fill = self
+            .candidate_fill(trade_id)
+            .cloned()
+            .ok_or_else(|| MatchingStateErrorV1::Finality(format!("未知成交：{trade_id}")))?;
+        let mut order = self
+            .candidate_order(&fill.platform_order_id)
+            .cloned()
+            .ok_or_else(|| {
+                MatchingStateErrorV1::AccountOrderConflict(fill.platform_order_id.clone())
+            })?;
+        let path = prepare_initial_finality_path_v2(
+            self.candidate_account().account_instance_key(),
+            finality_policy,
+            &order,
+            &fill,
+        )?;
+        self.finality.rebate.stage_maker_fill(
+            self.live.rebate.as_ref(),
+            &fill.trade_id,
+            &fill.condition_id,
+            fill.matched_at_utc_ms,
+            fill.base_units,
+            fill.price_pusd_per_share,
+        )?;
+        if self.candidate_account.is_none() {
+            self.candidate_account = Some(self.live.account.clone());
+        }
+        let matched_at_utc_ms = fill.matched_at_utc_ms;
+        let trade_feedback = apply_finality_transition_components_v2(
+            self.candidate_account
+                .as_mut()
+                .expect("maker 最终性初始化必须已有候选账户"),
+            &mut order,
+            &mut fill,
+            &self.live.scheduled_finality,
+            &mut self.finality.schedule_insertions,
+            path,
+            0,
+            matched_at_utc_ms,
+            true,
+        )?;
+        self.order_replacements
+            .insert(order.platform_order_id.clone(), order);
+        self.finality
+            .fill_replacements
+            .insert(fill.trade_id.clone(), fill);
+        Ok(TradeFinalityLifecycleEffectsV1 {
+            trade_feedback,
+            settlement_feedbacks: Vec::new(),
         })
+    }
+
+    fn stage_venue_dust_terminal(
+        &mut self,
+        candidate: &VenueDustQueueCandidateV1,
+        platform_event_at_utc_ms: i64,
+        trigger_identity: &str,
+        lifecycle_account_rule: &LifecycleAccountRuleV1,
+    ) -> Result<Option<VenueDustEffectV1>, MatchingStateErrorV1> {
+        let snapshot = self
+            .candidate_order(&candidate.platform_order_id)
+            .cloned()
+            .ok_or_else(|| {
+                MatchingStateErrorV1::AccountOrderConflict(candidate.platform_order_id.clone())
+            })?;
+        let mut candidate_asset =
+            self.take_candidate_asset(&snapshot.condition_id, &snapshot.token_id)?;
+        if candidate.price_pusd_per_share != snapshot.source_price_pusd_per_share
+            || candidate.remaining_base_units != snapshot.open_base_units
+            || candidate_asset
+                .venue_dust_candidate_for_order(
+                    snapshot.source_price_pusd_per_share,
+                    &candidate.platform_order_id,
+                )
+                .as_ref()
+                != Some(candidate)
+        {
+            return Err(MatchingStateErrorV1::QueuePredecessorConflict);
+        }
+        let PreparedVenueDustCoreV2 {
+            candidate_account,
+            order,
+            effect,
+        } = prepare_venue_dust_core_v2(
+            self.candidate_account().clone(),
+            snapshot,
+            candidate,
+            platform_event_at_utc_ms,
+            trigger_identity,
+            venue_dust_upper_exclusive_base_units_v2(lifecycle_account_rule)?,
+        )?;
+        let Some(effect) = effect else {
+            self.asset_replacements.insert(
+                (order.condition_id.clone(), order.token_id.clone()),
+                candidate_asset,
+            );
+            return Ok(None);
+        };
+        candidate_asset.remove_account_order(&candidate.platform_order_id);
+        self.asset_replacements.insert(
+            (order.condition_id.clone(), order.token_id.clone()),
+            candidate_asset,
+        );
+        let level_key = ExecutionTouchedBidLevelKeyV2 {
+            condition_id: order.condition_id.clone(),
+            token_id: order.token_id.clone(),
+            price_pusd_per_share: order.source_price_pusd_per_share,
+        };
+        let current = self
+            .gtd
+            .overlay_after_values
+            .get(&level_key)
+            .copied()
+            .unwrap_or_else(|| {
+                self.live.account_overlay.quantity(
+                    &level_key.condition_id,
+                    &level_key.token_id,
+                    BookSide::Bid,
+                    level_key.price_pusd_per_share,
+                )
+            });
+        let next = current
+            .checked_sub(decimal_from_micro_units_v1(effect.closed_base_units)?)
+            .filter(|value| !value.is_sign_negative())
+            .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+        self.gtd.overlay_after_values.insert(level_key, next);
+        if let SimOrderKindStateV1::Gtd { expires_at_utc_ms } = order.kind {
+            self.gtd
+                .deadline_removals
+                .insert((expires_at_utc_ms, order.platform_order_id.clone()));
+        }
+        self.order_replacements
+            .insert(order.platform_order_id.clone(), order);
+        self.candidate_account = Some(candidate_account);
+        Ok(Some(effect))
+    }
+
+    fn stage_market_resolution_order_terminal(
+        &mut self,
+        platform_order_id: &str,
+        resolution_event_id: &str,
+        platform_effective_at_utc_ms: i64,
+    ) -> Result<MarketResolutionOrderEffectV1, MatchingStateErrorV1> {
+        let snapshot = self
+            .candidate_order(platform_order_id)
+            .cloned()
+            .ok_or_else(|| {
+                MatchingStateErrorV1::AccountOrderConflict(platform_order_id.to_owned())
+            })?;
+        let open_base_units = snapshot.open_base_units;
+        let source_price_pusd_per_share = snapshot.source_price_pusd_per_share;
+        let kind = snapshot.kind;
+        let PreparedMarketResolutionOrderCoreV2 {
+            candidate_account,
+            order,
+            effect,
+        } = prepare_market_resolution_order_core_v2(
+            self.candidate_account().clone(),
+            snapshot,
+            resolution_event_id,
+            platform_effective_at_utc_ms,
+        )?;
+        if open_base_units > 0 {
+            let level_key = ExecutionTouchedBidLevelKeyV2 {
+                condition_id: order.condition_id.clone(),
+                token_id: order.token_id.clone(),
+                price_pusd_per_share: source_price_pusd_per_share,
+            };
+            let current = self
+                .gtd
+                .overlay_after_values
+                .get(&level_key)
+                .copied()
+                .unwrap_or_else(|| {
+                    self.live.account_overlay.quantity(
+                        &level_key.condition_id,
+                        &level_key.token_id,
+                        BookSide::Bid,
+                        level_key.price_pusd_per_share,
+                    )
+                });
+            let next = current
+                .checked_sub(decimal_from_micro_units_v1(open_base_units)?)
+                .filter(|value| !value.is_sign_negative())
+                .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+            self.gtd.overlay_after_values.insert(level_key, next);
+        }
+        if let SimOrderKindStateV1::Gtd { expires_at_utc_ms } = kind {
+            self.gtd
+                .deadline_removals
+                .insert((expires_at_utc_ms, platform_order_id.to_owned()));
+        }
+        self.order_replacements
+            .insert(order.platform_order_id.clone(), order);
+        self.candidate_account = Some(candidate_account);
+        Ok(effect)
+    }
+
+    fn stage_qualified_market_resolution(
+        &mut self,
+        directory: &SessionMarketDirectoryV1,
+        event: &ExecutionMarketEventV3,
+        platform_effective_at_utc_ms: i64,
+    ) -> Result<
+        (
+            Vec<MarketResolutionOrderEffectV1>,
+            Option<SettlementLifecycleEffectV1>,
+        ),
+        MatchingStateErrorV1,
+    > {
+        let ExecutionMarketEventPayloadV3::MarketResolutionTerminal(resolution) = &event.payload
+        else {
+            return Ok((Vec::new(), None));
+        };
+        let condition_id = event.market.condition_id.0.as_str();
+        let source_event_at_utc_ms = event.time.source_event_at_utc_ms.ok_or_else(|| {
+            MatchingStateErrorV1::Finality("合格市场判定缺少数据源时点".to_owned())
+        })?;
+        if let Some(existing) = self
+            .finality
+            .resolution
+            .candidate_obligation(self.live.market_resolutions.as_ref(), condition_id)
+        {
+            if existing.resolution == *resolution {
+                return Ok((Vec::new(), None));
+            }
+            return Err(MatchingStateErrorV1::ResolutionConflict(
+                condition_id.to_owned(),
+            ));
+        }
+        let market = directory
+            .market(condition_id)
+            .ok_or_else(|| MatchingStateErrorV1::UnknownMarket(condition_id.to_owned()))?;
+        self.stage_force_release_market(market)?;
+        let active_order_ids = self
+            .candidate_orders_for_condition(condition_id)
+            .filter(|order| {
+                order.pending_maker_depletion_base_units > 0 || order.open_base_units > 0
+            })
+            .map(|order| order.platform_order_id.clone())
+            .collect::<Vec<_>>();
+        let pending_trade_ids = self
+            .candidate_fills_for_condition(condition_id)
+            .filter(|fill| {
+                !matches!(
+                    fill.finality_state,
+                    Some(TradeFinalityStateV1::Confirmed | TradeFinalityStateV1::Failed)
+                )
+            })
+            .map(|fill| fill.trade_id.clone())
+            .collect::<BTreeSet<_>>();
+        let mut order_effects = Vec::with_capacity(active_order_ids.len());
+        for platform_order_id in active_order_ids {
+            order_effects.push(self.stage_market_resolution_order_terminal(
+                &platform_order_id,
+                &event.event_id.0,
+                platform_effective_at_utc_ms,
+            )?);
+        }
+        let inserted = self.finality.resolution.stage_obligation_insertion(
+            self.live.market_resolutions.as_ref(),
+            condition_id,
+            MarketResolutionObligationV1 {
+                resolution_event_id: event.event_id.0.clone(),
+                resolution_source_event_at_utc_ms: source_event_at_utc_ms,
+                resolution: resolution.clone(),
+                pending_trade_ids,
+                redeemed_at_utc_ms: None,
+                invalidated_by_quality_reason: None,
+            },
+        )?;
+        debug_assert!(inserted);
+        if self.candidate_account.is_none() {
+            self.candidate_account = Some(self.live.account.clone());
+        }
+        let auto_redeem = self.finality.resolution.stage_auto_redeem(
+            self.live.market_resolutions.as_ref(),
+            self.live.rebate.as_ref(),
+            &self.finality.rebate,
+            self.candidate_account
+                .as_mut()
+                .expect("合格判定自动赎回必须已有候选账户"),
+            condition_id,
+            platform_effective_at_utc_ms,
+        )?;
+        Ok((order_effects, auto_redeem))
+    }
+
+    pub(crate) fn prepare_authorized_market_events_v2(
+        self,
+        directory: &SessionMarketDirectoryV1,
+        bucket_at_utc_ms: i64,
+        events: &[ExecutionMarketEventV3],
+        finality_policy: &TradeFinalityPolicyV1,
+        lifecycle_account_rule: &LifecycleAccountRuleV1,
+        qualified_resolution_event_ids: &BTreeSet<String>,
+    ) -> Result<(Self, AuthorizedMarketEventEffectsV1), MatchingStateErrorV1> {
+        let mut prepared =
+            self.prepare_authorized_market_bucket_start_v2(directory, bucket_at_utc_ms)?;
+        let mut effects = AuthorizedMarketEventEffectsV1::default();
+        for event in events {
+            let (next, event_effects) = prepared.prepare_authorized_market_event_v2(
+                directory,
+                bucket_at_utc_ms,
+                event,
+                finality_policy,
+                lifecycle_account_rule,
+                qualified_resolution_event_ids.contains(&event.event_id.0),
+            )?;
+            prepared = next;
+            effects.append(event_effects);
+        }
+        Ok((prepared, effects))
+    }
+
+    pub(crate) fn prepare_authorized_market_bucket_start_v2(
+        mut self,
+        directory: &SessionMarketDirectoryV1,
+        bucket_at_utc_ms: i64,
+    ) -> Result<Self, MatchingStateErrorV1> {
+        for market in directory.markets() {
+            if bucket_at_utc_ms >= market.market().window.end_at_utc_ms {
+                self.stage_release_initialized_market(market)?;
+            }
+        }
+        Ok(self)
+    }
+
+    pub(crate) fn prepare_authorized_market_event_v2(
+        mut self,
+        directory: &SessionMarketDirectoryV1,
+        bucket_at_utc_ms: i64,
+        event: &ExecutionMarketEventV3,
+        finality_policy: &TradeFinalityPolicyV1,
+        lifecycle_account_rule: &LifecycleAccountRuleV1,
+        qualified_resolution: bool,
+    ) -> Result<(Self, AuthorizedMarketEventEffectsV1), MatchingStateErrorV1> {
+        let mut effects = AuthorizedMarketEventEffectsV1::default();
+        if let ExecutionMarketEventPayloadV3::QualityBoundary(boundary) = &event.payload
+            && matches!(boundary.scope, QualityScopeV1::Market)
+            && boundary.current_quality == MarketDataQuality::Invalid
+        {
+            self.finality.resolution.stage_quality_invalidation(
+                self.live.market_resolutions.as_ref(),
+                &event.market.condition_id.0,
+                &boundary.reason_code,
+            );
+        }
+        let queue_effects = self.stage_queue_event(event)?;
+        let mut event_fill_ids = Vec::new();
+        for depletion in &queue_effects.maker_depletions {
+            if let Some(trade_id) = self.stage_maker_queue_depletion(bucket_at_utc_ms, depletion)? {
+                event_fill_ids.push(trade_id);
+            }
+        }
+        event_fill_ids.sort();
+        for trade_id in event_fill_ids {
+            let effect = self.stage_maker_fill_finality(finality_policy, &trade_id)?;
+            effects.trade_finality_effects.push(effect.clone());
+            effects
+                .ordered_lifecycle_effects
+                .push(AuthorizedMarketLifecycleEffectV2::TradeFinality(effect));
+        }
+        if let Some(candidate) = queue_effects.venue_dust_candidate
+            && let Some(effect) = self.stage_venue_dust_terminal(
+                &candidate,
+                bucket_at_utc_ms,
+                &format!("DPT_EVENT:{}", event.event_id.0),
+                lifecycle_account_rule,
+            )?
+        {
+            effects.venue_dust_effects.push(effect.clone());
+            effects
+                .ordered_lifecycle_effects
+                .push(AuthorizedMarketLifecycleEffectV2::VenueDust(effect));
+        }
+        if qualified_resolution {
+            let (order_effects, auto_redeem) =
+                self.stage_qualified_market_resolution(directory, event, bucket_at_utc_ms)?;
+            for effect in order_effects {
+                effects.market_resolution_order_effects.push(effect.clone());
+                effects.ordered_lifecycle_effects.push(
+                    AuthorizedMarketLifecycleEffectV2::MarketResolutionOrder(effect),
+                );
+            }
+            if let Some(auto_redeem) = auto_redeem {
+                effects.settlement_feedbacks.push(auto_redeem.clone());
+                effects
+                    .ordered_lifecycle_effects
+                    .push(AuthorizedMarketLifecycleEffectV2::Settlement(auto_redeem));
+            }
+        }
+        if bucket_at_utc_ms >= event.market.window.end_at_utc_ms {
+            let market = directory
+                .market(&event.market.condition_id.0)
+                .ok_or_else(|| {
+                    MatchingStateErrorV1::UnknownMarket(event.market.condition_id.0.clone())
+                })?;
+            self.stage_release_initialized_market(market)?;
+        }
+        Ok((self, effects))
     }
 
     pub(crate) fn prepare_caller_cancel_remainder(
@@ -2767,8 +3515,10 @@ impl<'a> PreparedExecutionDriveDeltaV2<'a> {
             live: self.live,
             gtd: self.gtd,
             finality: self.finality,
+            asset_replacements: self.asset_replacements,
             order_replacements: self.order_replacements,
             candidate_account: self.candidate_account,
+            matching_closed_market_insertions: self.matching_closed_market_insertions,
         })
     }
 }
@@ -2779,10 +3529,18 @@ impl CommittableExecutionDriveDeltaV2<'_> {
             live,
             gtd,
             finality,
+            asset_replacements,
             order_replacements,
             candidate_account,
+            matching_closed_market_insertions,
         } = self;
         gtd.commit_prevalidated(live);
+        for ((condition_id, token_id), asset) in asset_replacements {
+            *live
+                .queues
+                .asset_mut(&condition_id, &token_id)
+                .expect("独占准备期间新订单目标资产必须仍然存在") = asset;
+        }
         finality.commit_prevalidated(live);
         for (platform_order_id, order) in order_replacements {
             live.orders.insert(platform_order_id, order);
@@ -2790,6 +3548,430 @@ impl CommittableExecutionDriveDeltaV2<'_> {
         if let Some(account) = candidate_account {
             live.account = account;
         }
+        live.matching_closed_markets
+            .extend(matching_closed_market_insertions);
+    }
+}
+
+pub(crate) struct PreparedExecutionDriveNewOrderBuilderV2<'a> {
+    execution: PreparedExecutionDriveDeltaV2<'a>,
+    condition_id: String,
+    token_id: String,
+    maximum_price: Decimal,
+    target: TakerTargetV1,
+    candidate_asset: AssetQueueV1,
+    plan: QueueMatchPlanV1,
+}
+
+pub(crate) struct PreparedNewOrderExecutionEffectsV2 {
+    order: SimOrderRecordV1,
+    fills: Vec<SimFillRecordV1>,
+    order_commit_effects: OrderCommitEffectsV1,
+    trade_finality_effects: Vec<TradeFinalityLifecycleEffectsV1>,
+    venue_dust_effect: Option<VenueDustEffectV1>,
+}
+
+impl PreparedNewOrderExecutionEffectsV2 {
+    pub(crate) fn order(&self) -> &SimOrderRecordV1 {
+        &self.order
+    }
+
+    pub(crate) fn fills(&self) -> &[SimFillRecordV1] {
+        &self.fills
+    }
+
+    pub(crate) fn order_commit_effects(&self) -> &OrderCommitEffectsV1 {
+        &self.order_commit_effects
+    }
+
+    pub(crate) fn trade_finality_effects(&self) -> &[TradeFinalityLifecycleEffectsV1] {
+        &self.trade_finality_effects
+    }
+
+    pub(crate) fn venue_dust_effect(&self) -> Option<&VenueDustEffectV1> {
+        self.venue_dust_effect.as_ref()
+    }
+}
+
+impl<'a> PreparedExecutionDriveDeltaV2<'a> {
+    pub(crate) fn prepare_new_order_taker_buy_by_quote_v2(
+        self,
+        condition_id: &str,
+        token_id: &str,
+        worst_price: Decimal,
+        quote_budget_units: u128,
+    ) -> Result<PreparedExecutionDriveNewOrderBuilderV2<'a>, MatchingStateErrorV1> {
+        self.prepare_new_order_taker_buy_v2(
+            condition_id,
+            token_id,
+            worst_price,
+            TakerTargetV1::Quote(quote_budget_units),
+        )
+    }
+
+    pub(crate) fn prepare_new_order_taker_buy_by_base_v2(
+        self,
+        condition_id: &str,
+        token_id: &str,
+        limit_price: Decimal,
+        base_target_units: u128,
+        quote_budget_units: u128,
+    ) -> Result<PreparedExecutionDriveNewOrderBuilderV2<'a>, MatchingStateErrorV1> {
+        self.prepare_new_order_taker_buy_v2(
+            condition_id,
+            token_id,
+            limit_price,
+            TakerTargetV1::LimitBase {
+                total_base_units: base_target_units,
+                total_quote_units: quote_budget_units,
+            },
+        )
+    }
+
+    fn prepare_new_order_taker_buy_v2(
+        mut self,
+        condition_id: &str,
+        token_id: &str,
+        maximum_price: Decimal,
+        target: TakerTargetV1,
+    ) -> Result<PreparedExecutionDriveNewOrderBuilderV2<'a>, MatchingStateErrorV1> {
+        let asset_key = (condition_id.to_owned(), token_id.to_owned());
+        let mut candidate_asset = match self.asset_replacements.remove(&asset_key) {
+            Some(asset) => asset,
+            None => {
+                let mut asset = self.live.queues.asset(condition_id, token_id)?.clone();
+                for (key, after) in &self.gtd.bid_queue_after_values {
+                    if key.condition_id == condition_id && key.token_id == token_id {
+                        if let Some(queue) = after {
+                            asset.bids.insert(key.price_pusd_per_share, queue.clone());
+                        } else {
+                            asset.bids.remove(&key.price_pusd_per_share);
+                        }
+                    }
+                }
+                asset
+            }
+        };
+        let plan = candidate_asset.match_taker_buy(maximum_price, target)?;
+        Ok(PreparedExecutionDriveNewOrderBuilderV2 {
+            execution: self,
+            condition_id: condition_id.to_owned(),
+            token_id: token_id.to_owned(),
+            maximum_price,
+            target,
+            candidate_asset,
+            plan,
+        })
+    }
+}
+
+impl<'a> PreparedExecutionDriveNewOrderBuilderV2<'a> {
+    pub(crate) fn plan(&self) -> &QueueMatchPlanV1 {
+        &self.plan
+    }
+
+    pub(crate) fn candidate_available_pusd_units(&self) -> u128 {
+        self.execution.candidate_account().available_pusd_units()
+    }
+
+    pub(crate) fn into_execution_drive(self) -> PreparedExecutionDriveDeltaV2<'a> {
+        self.execution
+    }
+
+    pub(crate) fn finish_new_order(
+        self,
+        order: SimOrderRecordV1,
+        fills: Vec<SimFillRecordV1>,
+        finality_policy: &TradeFinalityPolicyV1,
+        lifecycle_account_rule: &LifecycleAccountRuleV1,
+    ) -> Result<
+        (
+            PreparedExecutionDriveDeltaV2<'a>,
+            PreparedNewOrderExecutionEffectsV2,
+        ),
+        MatchingStateErrorV1,
+    > {
+        let Self {
+            mut execution,
+            condition_id,
+            token_id,
+            maximum_price,
+            target,
+            mut candidate_asset,
+            plan,
+        } = self;
+        if order.condition_id != condition_id
+            || order.token_id != token_id
+            || order.source_price_pusd_per_share != maximum_price
+            || !matches!(
+                (target, order.kind),
+                (
+                    TakerTargetV1::Quote(_),
+                    SimOrderKindStateV1::Fok | SimOrderKindStateV1::Fak
+                ) | (
+                    TakerTargetV1::LimitBase { .. },
+                    SimOrderKindStateV1::Gtc | SimOrderKindStateV1::Gtd { .. }
+                )
+            )
+            || (matches!(order.kind, SimOrderKindStateV1::Fok)
+                && !target.complete(plan.matched_base_units, plan.used_quote_units))
+            || (matches!(order.kind, SimOrderKindStateV1::Fak) && plan.fills.is_empty())
+            || (matches!(
+                order.kind,
+                SimOrderKindStateV1::Fok | SimOrderKindStateV1::Fak
+            ) && (order.open_base_units != 0 || order.open_quote_units != 0))
+        {
+            return Err(MatchingStateErrorV1::QueuePredecessorConflict);
+        }
+        match target {
+            TakerTargetV1::Quote(quote_units)
+                if order.accepted_base_units.is_none()
+                    && order.accepted_quote_units == quote_units => {}
+            TakerTargetV1::LimitBase {
+                total_base_units,
+                total_quote_units,
+            } if order.accepted_base_units == Some(total_base_units)
+                && order.accepted_quote_units == total_quote_units =>
+            {
+                let allocated_quote_units = cumulative_segment_quote_units_v1(
+                    total_base_units,
+                    total_quote_units,
+                    plan.matched_base_units,
+                )?;
+                let expected_open_base_units = total_base_units
+                    .checked_sub(plan.matched_base_units)
+                    .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+                let expected_open_quote_units = total_quote_units
+                    .checked_sub(allocated_quote_units)
+                    .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+                let expected_released_quote_units = allocated_quote_units
+                    .checked_sub(plan.used_quote_units)
+                    .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+                if order.matched_base_units != plan.matched_base_units
+                    || order.matched_quote_units != plan.used_quote_units
+                    || order.open_base_units != expected_open_base_units
+                    || order.open_quote_units != expected_open_quote_units
+                    || order.released_quote_units != expected_released_quote_units
+                {
+                    return Err(MatchingStateErrorV1::QueuePredecessorConflict);
+                }
+            }
+            TakerTargetV1::Quote(_) | TakerTargetV1::LimitBase { .. } => {
+                return Err(MatchingStateErrorV1::QueuePredecessorConflict);
+            }
+        }
+        if fills.len() != plan.fills.len()
+            || fills.iter().zip(&plan.fills).any(|(fill, slice)| {
+                fill.condition_id != condition_id
+                    || fill.token_id != token_id
+                    || fill.liquidity_role != SimLiquidityRoleV1::Taker
+                    || fill.source_identity != slice.segment_id.0
+                    || fill.maker_depletion_evidence.is_some()
+                    || fill.price_pusd_per_share != slice.price_pusd_per_share
+                    || fill.base_units != slice.base_units
+                    || fill.quote_units != slice.quote_units
+            })
+            || execution
+                .candidate_order(&order.platform_order_id)
+                .is_some()
+            || fills
+                .iter()
+                .any(|fill| execution.candidate_fill(&fill.trade_id).is_some())
+        {
+            return Err(MatchingStateErrorV1::QueuePredecessorConflict);
+        }
+
+        let PreparedNewOrderCoreV2 {
+            mut candidate_account,
+            mut order,
+            fills: mut candidate_fills,
+            effects: order_commit_effects,
+        } = prepare_new_order_core_v2(
+            execution.candidate_account(),
+            &execution.live.orders,
+            &execution.live.fills,
+            order,
+            fills,
+        )?;
+
+        if order.open_base_units > 0 {
+            if execution
+                .live
+                .queues
+                .contains_account_order(&order.platform_order_id)
+            {
+                return Err(MatchingStateErrorV1::AccountOrderConflict(
+                    order.platform_order_id,
+                ));
+            }
+            candidate_asset.insert_account_buy_remainder(
+                order.source_price_pusd_per_share,
+                order.platform_order_id.clone(),
+                order.open_base_units,
+            )?;
+            let level_key = ExecutionTouchedBidLevelKeyV2 {
+                condition_id: order.condition_id.clone(),
+                token_id: order.token_id.clone(),
+                price_pusd_per_share: order.source_price_pusd_per_share,
+            };
+            let current = execution
+                .gtd
+                .overlay_after_values
+                .get(&level_key)
+                .copied()
+                .unwrap_or_else(|| {
+                    execution.live.account_overlay.quantity(
+                        &level_key.condition_id,
+                        &level_key.token_id,
+                        BookSide::Bid,
+                        level_key.price_pusd_per_share,
+                    )
+                });
+            let next = current
+                .checked_add(decimal_from_micro_units_v1(order.open_base_units)?)
+                .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+            execution.gtd.overlay_after_values.insert(level_key, next);
+        }
+
+        let mut gtd_deadline_to_insert = match order.kind {
+            SimOrderKindStateV1::Gtd { expires_at_utc_ms } if order.open_base_units > 0 => {
+                let key = (expires_at_utc_ms, order.platform_order_id.clone());
+                let live_candidate_contains = execution.live.gtd_deadlines.contains(&key)
+                    && !execution.gtd.deadline_removals.contains(&key);
+                if live_candidate_contains || execution.gtd.deadline_insertions.contains(&key) {
+                    return Err(MatchingStateErrorV1::QueuePredecessorConflict);
+                }
+                Some(key)
+            }
+            SimOrderKindStateV1::Gtc
+            | SimOrderKindStateV1::Gtd { .. }
+            | SimOrderKindStateV1::Fok
+            | SimOrderKindStateV1::Fak => None,
+        };
+
+        let mut fill_indexes = (0..candidate_fills.len()).collect::<Vec<_>>();
+        fill_indexes.sort_by(|left, right| {
+            candidate_fills[*left]
+                .trade_id
+                .cmp(&candidate_fills[*right].trade_id)
+        });
+        let mut finality_paths = Vec::with_capacity(fill_indexes.len());
+        for index in &fill_indexes {
+            finality_paths.push(prepare_initial_finality_path_v2(
+                candidate_account.account_instance_key(),
+                finality_policy,
+                &order,
+                &candidate_fills[*index],
+            )?);
+        }
+        for index in &fill_indexes {
+            let fill = &candidate_fills[*index];
+            if fill.immediate_taker_fee_units > 0 {
+                execution.finality.rebate.stage_taker_fill(
+                    execution.live.rebate.as_ref(),
+                    &fill.trade_id,
+                    &fill.condition_id,
+                    fill.matched_at_utc_ms,
+                    decimal_from_micro_units_v1(fill.immediate_taker_fee_units)?,
+                )?;
+            }
+        }
+
+        let mut trade_finality_effects = Vec::with_capacity(fill_indexes.len());
+        for (index, path) in fill_indexes.into_iter().zip(finality_paths) {
+            let platform_event_at_utc_ms = candidate_fills[index].matched_at_utc_ms;
+            let trade_feedback = apply_finality_transition_components_v2(
+                &mut candidate_account,
+                &mut order,
+                &mut candidate_fills[index],
+                &execution.live.scheduled_finality,
+                &mut execution.finality.schedule_insertions,
+                path,
+                0,
+                platform_event_at_utc_ms,
+                true,
+            )?;
+            trade_finality_effects.push(TradeFinalityLifecycleEffectsV1 {
+                trade_feedback,
+                settlement_feedbacks: Vec::new(),
+            });
+        }
+
+        let venue_dust_effect = if order.open_base_units > 0 {
+            if let Some(candidate) = candidate_asset.venue_dust_candidate_for_order(
+                order.source_price_pusd_per_share,
+                &order.platform_order_id,
+            ) {
+                let upper_exclusive_base_units =
+                    venue_dust_upper_exclusive_base_units_v2(lifecycle_account_rule)?;
+                let order_action_at_utc_ms = order.created_at_utc_ms;
+                let prepared_dust = prepare_venue_dust_core_v2(
+                    candidate_account,
+                    order,
+                    &candidate,
+                    order_action_at_utc_ms,
+                    &format!("ORDER_ACTION:{}", candidate.platform_order_id),
+                    upper_exclusive_base_units,
+                )?;
+                candidate_account = prepared_dust.candidate_account;
+                order = prepared_dust.order;
+                if let Some(effect) = prepared_dust.effect {
+                    candidate_asset.remove_account_order(&candidate.platform_order_id);
+                    let level_key = ExecutionTouchedBidLevelKeyV2 {
+                        condition_id: effect.condition_id.clone(),
+                        token_id: effect.token_id.clone(),
+                        price_pusd_per_share: candidate.price_pusd_per_share,
+                    };
+                    let current = execution
+                        .gtd
+                        .overlay_after_values
+                        .get(&level_key)
+                        .copied()
+                        .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+                    let next = current
+                        .checked_sub(decimal_from_micro_units_v1(effect.closed_base_units)?)
+                        .filter(|value| !value.is_sign_negative())
+                        .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+                    execution.gtd.overlay_after_values.insert(level_key, next);
+                    gtd_deadline_to_insert = None;
+                    Some(effect)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(deadline) = gtd_deadline_to_insert {
+            execution.gtd.deadline_insertions.insert(deadline);
+        }
+        execution
+            .asset_replacements
+            .insert((condition_id, token_id), candidate_asset);
+        for fill in &candidate_fills {
+            execution
+                .finality
+                .fill_replacements
+                .insert(fill.trade_id.clone(), fill.clone());
+        }
+        execution
+            .order_replacements
+            .insert(order.platform_order_id.clone(), order.clone());
+        execution.candidate_account = Some(candidate_account);
+
+        Ok((
+            execution,
+            PreparedNewOrderExecutionEffectsV2 {
+                order,
+                fills: candidate_fills,
+                order_commit_effects,
+                trade_finality_effects,
+                venue_dust_effect,
+            },
+        ))
     }
 }
 
@@ -3221,6 +4403,93 @@ struct PreparedVenueDustCoreV2 {
     candidate_account: PlatformAccountStateV1,
     order: SimOrderRecordV1,
     effect: Option<VenueDustEffectV1>,
+}
+
+struct PreparedMarketResolutionOrderCoreV2 {
+    candidate_account: PlatformAccountStateV1,
+    order: SimOrderRecordV1,
+    effect: MarketResolutionOrderEffectV1,
+}
+
+fn prepare_market_resolution_order_core_v2(
+    mut candidate_account: PlatformAccountStateV1,
+    mut order: SimOrderRecordV1,
+    resolution_event_id: &str,
+    platform_effective_at_utc_ms: i64,
+) -> Result<PreparedMarketResolutionOrderCoreV2, MatchingStateErrorV1> {
+    let active_base_units = order
+        .pending_maker_depletion_base_units
+        .checked_add(order.open_base_units)
+        .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+    let accepted_base_units = order
+        .accepted_base_units
+        .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+    if active_base_units == 0
+        || order.open_quote_units == 0
+        || !matches!(
+            order.kind,
+            SimOrderKindStateV1::Gtc | SimOrderKindStateV1::Gtd { .. }
+        )
+        || order.terminal_reason.is_some()
+        || order.expired_base_units != 0
+        || order.venue_dust_closed_base_units != 0
+        || order.market_resolved_canceled_base_units != 0
+        || order.canceled_base_units != 0
+        || accepted_base_units
+            != order
+                .matched_base_units
+                .checked_add(active_base_units)
+                .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?
+        || order.accepted_quote_units
+            != order
+                .matched_quote_units
+                .checked_add(order.open_quote_units)
+                .and_then(|value| value.checked_add(order.released_quote_units))
+                .and_then(|value| value.checked_add(order.canceled_released_quote_units))
+                .and_then(|value| value.checked_add(order.expired_released_quote_units))
+                .and_then(|value| value.checked_add(order.venue_dust_released_quote_units))
+                .and_then(|value| value.checked_add(order.market_resolved_released_quote_units))
+                .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?
+    {
+        return Err(MatchingStateErrorV1::QueuePredecessorConflict);
+    }
+    let effect_identity = market_resolution_order_identity(
+        resolution_event_id,
+        &order.platform_order_id,
+        order.pending_maker_depletion_base_units,
+        order.open_base_units,
+        order.open_quote_units,
+    );
+    let account_delta = candidate_account.apply_market_resolution_encumbrance_release(
+        &effect_identity.0,
+        &order.condition_id,
+        platform_effective_at_utc_ms,
+        decimal_from_micro_units_v1(order.open_quote_units)?,
+    )?;
+    let effect = MarketResolutionOrderEffectV1 {
+        platform_order_id: order.platform_order_id.clone(),
+        condition_id: order.condition_id.clone(),
+        token_id: order.token_id.clone(),
+        canceled_base_units: active_base_units,
+        released_open_quote_units: order.open_quote_units,
+        account_delta,
+    };
+    order.market_resolved_canceled_base_units = active_base_units;
+    order.market_resolved_released_quote_units = order.open_quote_units;
+    order.market_resolved_at_utc_ms = Some(platform_effective_at_utc_ms);
+    order.market_resolution_effect_identity = Some(effect_identity);
+    order.terminalized_pending_maker_depletion_evidence =
+        order.pending_maker_depletion_evidence.take();
+    order.pending_maker_depletion_base_units = 0;
+    order.open_base_units = 0;
+    order.open_quote_units = 0;
+    order.last_updated_at_utc_ms = platform_effective_at_utc_ms;
+    order.terminal_reason = Some(SimOrderTerminalReasonV1::MarketResolvedCanceled);
+    Ok(PreparedMarketResolutionOrderCoreV2 {
+        candidate_account,
+        order,
+        effect,
+    })
 }
 
 fn venue_dust_upper_exclusive_base_units_v2(
@@ -5660,99 +6929,37 @@ impl ExecutionStateV1 {
         let snapshot = self.orders.get(platform_order_id).cloned().ok_or_else(|| {
             MatchingStateErrorV1::AccountOrderConflict(platform_order_id.to_owned())
         })?;
-        let active_base_units = snapshot
-            .pending_maker_depletion_base_units
-            .checked_add(snapshot.open_base_units)
-            .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-        let accepted_base_units = snapshot
-            .accepted_base_units
-            .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-        if active_base_units == 0
-            || snapshot.open_quote_units == 0
-            || !matches!(
-                snapshot.kind,
-                SimOrderKindStateV1::Gtc | SimOrderKindStateV1::Gtd { .. }
-            )
-            || snapshot.terminal_reason.is_some()
-            || snapshot.expired_base_units != 0
-            || snapshot.venue_dust_closed_base_units != 0
-            || snapshot.market_resolved_canceled_base_units != 0
-            || snapshot.canceled_base_units != 0
-            || accepted_base_units
-                != snapshot
-                    .matched_base_units
-                    .checked_add(active_base_units)
-                    .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?
-            || snapshot.accepted_quote_units
-                != snapshot
-                    .matched_quote_units
-                    .checked_add(snapshot.open_quote_units)
-                    .and_then(|value| value.checked_add(snapshot.released_quote_units))
-                    .and_then(|value| value.checked_add(snapshot.canceled_released_quote_units))
-                    .and_then(|value| value.checked_add(snapshot.expired_released_quote_units))
-                    .and_then(|value| value.checked_add(snapshot.venue_dust_released_quote_units))
-                    .and_then(|value| {
-                        value.checked_add(snapshot.market_resolved_released_quote_units)
-                    })
-                    .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?
-        {
-            return Err(MatchingStateErrorV1::QueuePredecessorConflict);
-        }
-        let effect_identity = market_resolution_order_identity(
+        let open_base_units = snapshot.open_base_units;
+        let kind = snapshot.kind;
+        let PreparedMarketResolutionOrderCoreV2 {
+            candidate_account,
+            order,
+            effect,
+        } = prepare_market_resolution_order_core_v2(
+            self.account.clone(),
+            snapshot,
             resolution_event_id,
-            platform_order_id,
-            snapshot.pending_maker_depletion_base_units,
-            snapshot.open_base_units,
-            snapshot.open_quote_units,
-        );
-        let mut next_account = self.account.clone();
-        let account_delta = next_account.apply_market_resolution_encumbrance_release(
-            &effect_identity.0,
-            &snapshot.condition_id,
             platform_effective_at_utc_ms,
-            decimal_from_micro_units_v1(snapshot.open_quote_units)?,
         )?;
-        if snapshot.open_base_units > 0 {
+        if open_base_units > 0 {
             self.account_overlay
                 .subtract_quantity(
-                    &snapshot.condition_id,
-                    &snapshot.token_id,
+                    &order.condition_id,
+                    &order.token_id,
                     BookSide::Bid,
-                    snapshot.source_price_pusd_per_share,
-                    decimal_from_micro_units_v1(snapshot.open_base_units)?,
+                    order.source_price_pusd_per_share,
+                    decimal_from_micro_units_v1(open_base_units)?,
                 )
                 .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
         }
-        if let SimOrderKindStateV1::Gtd { expires_at_utc_ms } = snapshot.kind {
+        if let SimOrderKindStateV1::Gtd { expires_at_utc_ms } = kind {
             self.gtd_deadlines
                 .remove(&(expires_at_utc_ms, platform_order_id.to_owned()));
         }
-        let order = self
-            .orders
-            .get_mut(platform_order_id)
-            .expect("已验证订单仍存在");
-        order.market_resolved_canceled_base_units = active_base_units;
-        order.market_resolved_released_quote_units = snapshot.open_quote_units;
-        order.market_resolved_at_utc_ms = Some(platform_effective_at_utc_ms);
-        order.market_resolution_effect_identity = Some(effect_identity);
-        order.terminalized_pending_maker_depletion_evidence =
-            order.pending_maker_depletion_evidence.take();
-        order.pending_maker_depletion_base_units = 0;
-        order.open_base_units = 0;
-        order.open_quote_units = 0;
-        order.last_updated_at_utc_ms = platform_effective_at_utc_ms;
-        order.terminal_reason = Some(SimOrderTerminalReasonV1::MarketResolvedCanceled);
-        self.account = next_account;
-        Ok(MarketResolutionOrderEffectV1 {
-            platform_order_id: snapshot.platform_order_id,
-            condition_id: snapshot.condition_id,
-            token_id: snapshot.token_id,
-            canceled_base_units: active_base_units,
-            released_open_quote_units: snapshot.open_quote_units,
-            account_delta,
-        })
+        self.orders.insert(order.platform_order_id.clone(), order);
+        self.account = candidate_account;
+        Ok(effect)
     }
-
     pub(crate) fn release_initialized_matching_buffers_through(
         &mut self,
         directory: &SessionMarketDirectoryV1,
@@ -5828,9 +7035,11 @@ impl ExecutionStateV1 {
             }
             event_fill_ids.sort();
             for trade_id in event_fill_ids {
+                let effect = self.initialize_fill_finality(finality_policy, &trade_id)?;
+                effects.trade_finality_effects.push(effect.clone());
                 effects
-                    .trade_finality_effects
-                    .push(self.initialize_fill_finality(finality_policy, &trade_id)?);
+                    .ordered_lifecycle_effects
+                    .push(AuthorizedMarketLifecycleEffectV2::TradeFinality(effect));
             }
             if let Some(candidate) = queue_effects.venue_dust_candidate
                 && let Some(effect) = self.apply_venue_dust_terminal(
@@ -5840,16 +7049,25 @@ impl ExecutionStateV1 {
                     lifecycle_account_rule,
                 )?
             {
-                effects.venue_dust_effects.push(effect);
+                effects.venue_dust_effects.push(effect.clone());
+                effects
+                    .ordered_lifecycle_effects
+                    .push(AuthorizedMarketLifecycleEffectV2::VenueDust(effect));
             }
             if qualified_resolution_event_ids.contains(&event.event_id.0) {
                 let (order_effects, auto_redeem) =
                     self.apply_qualified_market_resolution(event, bucket_at_utc_ms)?;
-                effects
-                    .market_resolution_order_effects
-                    .extend(order_effects);
+                for effect in order_effects {
+                    effects.market_resolution_order_effects.push(effect.clone());
+                    effects.ordered_lifecycle_effects.push(
+                        AuthorizedMarketLifecycleEffectV2::MarketResolutionOrder(effect),
+                    );
+                }
                 if let Some(auto_redeem) = auto_redeem {
-                    effects.settlement_feedbacks.push(auto_redeem);
+                    effects.settlement_feedbacks.push(auto_redeem.clone());
+                    effects
+                        .ordered_lifecycle_effects
+                        .push(AuthorizedMarketLifecycleEffectV2::Settlement(auto_redeem));
                 }
             }
             let condition_id = &event.market.condition_id.0;
@@ -6040,108 +7258,25 @@ impl ExecutionStateV1 {
         bucket_at_utc_ms: i64,
         depletion: MakerQueueDepletionV1,
     ) -> Result<Option<String>, MatchingStateErrorV1> {
-        let order = self
+        let snapshot = self
             .orders
-            .get_mut(&depletion.platform_order_id)
+            .get(&depletion.platform_order_id)
+            .cloned()
             .ok_or_else(|| {
                 MatchingStateErrorV1::AccountOrderConflict(depletion.platform_order_id.clone())
             })?;
-        if !matches!(
-            order.kind,
-            SimOrderKindStateV1::Gtc | SimOrderKindStateV1::Gtd { .. }
-        ) || depletion.price_pusd_per_share != order.source_price_pusd_per_share
-            || depletion.base_units > order.open_base_units
-            || (order.pending_maker_depletion_base_units == 0)
-                != order.pending_maker_depletion_evidence.is_none()
-            || order.canceled_base_units != 0
-            || order.expired_base_units != 0
-            || order.venue_dust_closed_base_units != 0
-            || order.venue_dust_released_quote_units != 0
-            || order.venue_dust_at_utc_ms.is_some()
-            || order.venue_dust_identity.is_some()
-            || order.market_resolved_canceled_base_units != 0
-            || order.market_resolved_released_quote_units != 0
-            || order.market_resolved_at_utc_ms.is_some()
-            || order.market_resolution_effect_identity.is_some()
-            || order
-                .terminalized_pending_maker_depletion_evidence
-                .is_some()
-            || order.terminal_reason.is_some()
+        let PreparedMakerQueueDepletionCoreV2 {
+            order,
+            fill,
+            completed_gtd_deadline,
+        } = prepare_maker_queue_depletion_core_v2(snapshot, bucket_at_utc_ms, &depletion)?;
+        if let Some(fill) = &fill
+            && self.fills.contains_key(&fill.trade_id)
         {
-            return Err(MatchingStateErrorV1::QueuePredecessorConflict);
+            return Err(MatchingStateErrorV1::AccountOrderConflict(
+                fill.trade_id.clone(),
+            ));
         }
-        let accepted_base = order
-            .accepted_base_units
-            .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-        let pending_end_before = order
-            .matched_base_units
-            .checked_add(order.pending_maker_depletion_base_units)
-            .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-        let maker_fill_base_units = order
-            .pending_maker_depletion_base_units
-            .checked_add(depletion.base_units)
-            .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-        let pending_end_after = pending_end_before
-            .checked_add(depletion.base_units)
-            .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-        if accepted_base
-            != pending_end_before
-                .checked_add(order.open_base_units)
-                .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?
-        {
-            return Err(MatchingStateErrorV1::QueuePredecessorConflict);
-        }
-        let allocated_quote_before = cumulative_segment_quote_units_v1(
-            accepted_base,
-            order.accepted_quote_units,
-            order.matched_base_units,
-        )?;
-        let allocated_quote_at_pending_end = cumulative_segment_quote_units_v1(
-            accepted_base,
-            order.accepted_quote_units,
-            pending_end_before,
-        )?;
-        if allocated_quote_at_pending_end != allocated_quote_before {
-            return Err(MatchingStateErrorV1::QueuePredecessorConflict);
-        }
-        let allocated_quote_after = cumulative_segment_quote_units_v1(
-            accepted_base,
-            order.accepted_quote_units,
-            pending_end_after,
-        )?;
-        let quote_delta = allocated_quote_after
-            .checked_sub(allocated_quote_before)
-            .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-        let next_open_base = order
-            .open_base_units
-            .checked_sub(depletion.base_units)
-            .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-        let evidence_sha256 = pending_maker_depletion_evidence_sha256(
-            order
-                .pending_maker_depletion_evidence
-                .as_ref()
-                .map(|evidence| &evidence.sha256),
-            &order.platform_order_id,
-            order.matched_base_units,
-            &depletion.source_event_id,
-            depletion.base_units,
-        );
-        let evidence_event_count = match &order.pending_maker_depletion_evidence {
-            Some(evidence) => evidence
-                .event_count
-                .checked_add(1)
-                .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?,
-            None => 1,
-        };
-        let evidence = MakerDepletionEvidenceV1 {
-            sha256: evidence_sha256,
-            event_count: evidence_event_count,
-            first_source_event_id: order.pending_maker_depletion_evidence.as_ref().map_or_else(
-                || depletion.source_event_id.clone(),
-                |evidence| evidence.first_source_event_id.clone(),
-            ),
-            last_source_event_id: depletion.source_event_id.clone(),
-        };
         self.account_overlay
             .subtract_quantity(
                 &order.condition_id,
@@ -6151,87 +7286,204 @@ impl ExecutionStateV1 {
                 decimal_from_micro_units_v1(depletion.base_units)?,
             )
             .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-        order.open_base_units = next_open_base;
-        order.last_updated_at_utc_ms = bucket_at_utc_ms;
-        if quote_delta == 0 {
-            order.pending_maker_depletion_base_units = order
-                .pending_maker_depletion_base_units
-                .checked_add(depletion.base_units)
-                .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-            order.pending_maker_depletion_evidence = Some(evidence);
-            return Ok(None);
+        let trade_id = fill.as_ref().map(|fill| fill.trade_id.clone());
+        if let Some(fill) = fill {
+            self.fills.insert(fill.trade_id.clone(), fill);
         }
-
-        let next_matched_quote = order
-            .matched_quote_units
-            .checked_add(quote_delta)
-            .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-        let next_open_quote = order
-            .open_quote_units
-            .checked_sub(quote_delta)
-            .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-        if order.accepted_quote_units
-            != next_matched_quote
-                .checked_add(next_open_quote)
-                .and_then(|value| value.checked_add(order.released_quote_units))
-                .and_then(|value| value.checked_add(order.canceled_released_quote_units))
-                .and_then(|value| value.checked_add(order.expired_released_quote_units))
-                .and_then(|value| value.checked_add(order.venue_dust_released_quote_units))
-                .and_then(|value| value.checked_add(order.market_resolved_released_quote_units))
-                .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?
-        {
-            return Err(MatchingStateErrorV1::QueuePredecessorConflict);
-        }
-        let source_identity = evidence.sha256.0.clone();
-        let trade_id = stable_fill_id(
-            "MAKER_INFERRED",
-            &order.platform_order_id,
-            &source_identity,
-            order.matched_base_units,
-        );
-        if self.fills.contains_key(&trade_id) {
-            return Err(MatchingStateErrorV1::AccountOrderConflict(trade_id));
-        }
-        order.matched_base_units = pending_end_after;
-        order.pending_maker_depletion_base_units = 0;
-        order.pending_maker_depletion_evidence = None;
-        order.matched_quote_units = next_matched_quote;
-        order.open_quote_units = next_open_quote;
-        let completed_gtd_deadline = match order.kind {
-            SimOrderKindStateV1::Gtd { expires_at_utc_ms } if next_open_base == 0 => {
-                Some((expires_at_utc_ms, order.platform_order_id.clone()))
-            }
-            SimOrderKindStateV1::Gtc
-            | SimOrderKindStateV1::Gtd { .. }
-            | SimOrderKindStateV1::Fok
-            | SimOrderKindStateV1::Fak => None,
-        };
-        self.fills.insert(
-            trade_id.clone(),
-            SimFillRecordV1 {
-                trade_id: trade_id.clone(),
-                platform_order_id: order.platform_order_id.clone(),
-                condition_id: order.condition_id.clone(),
-                token_id: order.token_id.clone(),
-                matched_at_utc_ms: bucket_at_utc_ms,
-                liquidity_role: SimLiquidityRoleV1::MakerInferred,
-                source_identity,
-                maker_depletion_evidence: Some(evidence),
-                price_pusd_per_share: depletion.price_pusd_per_share,
-                base_units: maker_fill_base_units,
-                quote_units: quote_delta,
-                immediate_taker_fee_units: 0,
-                finality_path: None,
-                finality_path_ordinal: None,
-                finality_state: None,
-                economic_application_delta: None,
-            },
-        );
         if let Some(deadline) = completed_gtd_deadline {
             self.gtd_deadlines.remove(&deadline);
         }
-        Ok(Some(trade_id))
+        self.orders.insert(order.platform_order_id.clone(), order);
+        Ok(trade_id)
     }
+}
+
+struct PreparedMakerQueueDepletionCoreV2 {
+    order: SimOrderRecordV1,
+    fill: Option<SimFillRecordV1>,
+    completed_gtd_deadline: Option<(i64, String)>,
+}
+
+fn prepare_maker_queue_depletion_core_v2(
+    mut order: SimOrderRecordV1,
+    bucket_at_utc_ms: i64,
+    depletion: &MakerQueueDepletionV1,
+) -> Result<PreparedMakerQueueDepletionCoreV2, MatchingStateErrorV1> {
+    if !matches!(
+        order.kind,
+        SimOrderKindStateV1::Gtc | SimOrderKindStateV1::Gtd { .. }
+    ) || depletion.price_pusd_per_share != order.source_price_pusd_per_share
+        || depletion.base_units > order.open_base_units
+        || (order.pending_maker_depletion_base_units == 0)
+            != order.pending_maker_depletion_evidence.is_none()
+        || order.canceled_base_units != 0
+        || order.expired_base_units != 0
+        || order.venue_dust_closed_base_units != 0
+        || order.venue_dust_released_quote_units != 0
+        || order.venue_dust_at_utc_ms.is_some()
+        || order.venue_dust_identity.is_some()
+        || order.market_resolved_canceled_base_units != 0
+        || order.market_resolved_released_quote_units != 0
+        || order.market_resolved_at_utc_ms.is_some()
+        || order.market_resolution_effect_identity.is_some()
+        || order
+            .terminalized_pending_maker_depletion_evidence
+            .is_some()
+        || order.terminal_reason.is_some()
+    {
+        return Err(MatchingStateErrorV1::QueuePredecessorConflict);
+    }
+    let accepted_base = order
+        .accepted_base_units
+        .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+    let pending_end_before = order
+        .matched_base_units
+        .checked_add(order.pending_maker_depletion_base_units)
+        .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+    let maker_fill_base_units = order
+        .pending_maker_depletion_base_units
+        .checked_add(depletion.base_units)
+        .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+    let pending_end_after = pending_end_before
+        .checked_add(depletion.base_units)
+        .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+    if accepted_base
+        != pending_end_before
+            .checked_add(order.open_base_units)
+            .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?
+    {
+        return Err(MatchingStateErrorV1::QueuePredecessorConflict);
+    }
+    let allocated_quote_before = cumulative_segment_quote_units_v1(
+        accepted_base,
+        order.accepted_quote_units,
+        order.matched_base_units,
+    )?;
+    let allocated_quote_at_pending_end = cumulative_segment_quote_units_v1(
+        accepted_base,
+        order.accepted_quote_units,
+        pending_end_before,
+    )?;
+    if allocated_quote_at_pending_end != allocated_quote_before {
+        return Err(MatchingStateErrorV1::QueuePredecessorConflict);
+    }
+    let allocated_quote_after = cumulative_segment_quote_units_v1(
+        accepted_base,
+        order.accepted_quote_units,
+        pending_end_after,
+    )?;
+    let quote_delta = allocated_quote_after
+        .checked_sub(allocated_quote_before)
+        .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+    let next_open_base = order
+        .open_base_units
+        .checked_sub(depletion.base_units)
+        .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+    let evidence_sha256 = pending_maker_depletion_evidence_sha256(
+        order
+            .pending_maker_depletion_evidence
+            .as_ref()
+            .map(|evidence| &evidence.sha256),
+        &order.platform_order_id,
+        order.matched_base_units,
+        &depletion.source_event_id,
+        depletion.base_units,
+    );
+    let evidence_event_count = match &order.pending_maker_depletion_evidence {
+        Some(evidence) => evidence
+            .event_count
+            .checked_add(1)
+            .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?,
+        None => 1,
+    };
+    let evidence = MakerDepletionEvidenceV1 {
+        sha256: evidence_sha256,
+        event_count: evidence_event_count,
+        first_source_event_id: order.pending_maker_depletion_evidence.as_ref().map_or_else(
+            || depletion.source_event_id.clone(),
+            |evidence| evidence.first_source_event_id.clone(),
+        ),
+        last_source_event_id: depletion.source_event_id.clone(),
+    };
+    order.open_base_units = next_open_base;
+    order.last_updated_at_utc_ms = bucket_at_utc_ms;
+    if quote_delta == 0 {
+        order.pending_maker_depletion_base_units = order
+            .pending_maker_depletion_base_units
+            .checked_add(depletion.base_units)
+            .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+        order.pending_maker_depletion_evidence = Some(evidence);
+        return Ok(PreparedMakerQueueDepletionCoreV2 {
+            order,
+            fill: None,
+            completed_gtd_deadline: None,
+        });
+    }
+
+    let next_matched_quote = order
+        .matched_quote_units
+        .checked_add(quote_delta)
+        .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+    let next_open_quote = order
+        .open_quote_units
+        .checked_sub(quote_delta)
+        .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
+    if order.accepted_quote_units
+        != next_matched_quote
+            .checked_add(next_open_quote)
+            .and_then(|value| value.checked_add(order.released_quote_units))
+            .and_then(|value| value.checked_add(order.canceled_released_quote_units))
+            .and_then(|value| value.checked_add(order.expired_released_quote_units))
+            .and_then(|value| value.checked_add(order.venue_dust_released_quote_units))
+            .and_then(|value| value.checked_add(order.market_resolved_released_quote_units))
+            .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?
+    {
+        return Err(MatchingStateErrorV1::QueuePredecessorConflict);
+    }
+    let source_identity = evidence.sha256.0.clone();
+    let trade_id = stable_fill_id(
+        "MAKER_INFERRED",
+        &order.platform_order_id,
+        &source_identity,
+        order.matched_base_units,
+    );
+    order.matched_base_units = pending_end_after;
+    order.pending_maker_depletion_base_units = 0;
+    order.pending_maker_depletion_evidence = None;
+    order.matched_quote_units = next_matched_quote;
+    order.open_quote_units = next_open_quote;
+    let completed_gtd_deadline = match order.kind {
+        SimOrderKindStateV1::Gtd { expires_at_utc_ms } if next_open_base == 0 => {
+            Some((expires_at_utc_ms, order.platform_order_id.clone()))
+        }
+        SimOrderKindStateV1::Gtc
+        | SimOrderKindStateV1::Gtd { .. }
+        | SimOrderKindStateV1::Fok
+        | SimOrderKindStateV1::Fak => None,
+    };
+    let fill = SimFillRecordV1 {
+        trade_id,
+        platform_order_id: order.platform_order_id.clone(),
+        condition_id: order.condition_id.clone(),
+        token_id: order.token_id.clone(),
+        matched_at_utc_ms: bucket_at_utc_ms,
+        liquidity_role: SimLiquidityRoleV1::MakerInferred,
+        source_identity,
+        maker_depletion_evidence: Some(evidence),
+        price_pusd_per_share: depletion.price_pusd_per_share,
+        base_units: maker_fill_base_units,
+        quote_units: quote_delta,
+        immediate_taker_fee_units: 0,
+        finality_path: None,
+        finality_path_ordinal: None,
+        finality_state: None,
+        economic_application_delta: None,
+    };
+    Ok(PreparedMakerQueueDepletionCoreV2 {
+        order,
+        fill: Some(fill),
+        completed_gtd_deadline,
+    })
 }
 
 pub(crate) fn stable_fill_id(
@@ -8964,27 +10216,84 @@ mod tests {
         reset_execution_state_clone_count_for_tests();
 
         {
-            let prepared = state
+            let mut prepared = state
                 .prepare_execution_drive_delta_v2(2_500)
                 .expect("准备全局候选迭代器真实最终性 after-image");
+            let mut inserted_order = prepared
+                .candidate_orders()
+                .next()
+                .expect("候选订单夹具必须非空")
+                .clone();
+            inserted_order.platform_order_id = "!prepared-inserted-order".to_owned();
+            let inserted_order_id = inserted_order.platform_order_id.clone();
+            let inserted_order_condition_id = inserted_order.condition_id.clone();
+            assert!(
+                prepared
+                    .order_replacements
+                    .insert(inserted_order_id.clone(), inserted_order)
+                    .is_none()
+            );
+            let mut inserted_fill = prepared
+                .candidate_fills()
+                .next()
+                .expect("候选成交夹具必须非空")
+                .clone();
+            inserted_fill.trade_id = "!prepared-inserted-fill".to_owned();
+            let inserted_trade_id = inserted_fill.trade_id.clone();
+            let inserted_fill_condition_id = inserted_fill.condition_id.clone();
+            assert!(
+                prepared
+                    .finality
+                    .fill_replacements
+                    .insert(inserted_trade_id.clone(), inserted_fill)
+                    .is_none()
+            );
             let candidate_orders = prepared.candidate_orders().collect::<Vec<_>>();
             let candidate_fills = prepared.candidate_fills().collect::<Vec<_>>();
 
-            assert_eq!(candidate_orders.len(), live_order_ids.len());
+            let mut expected_order_ids = live_order_ids.clone();
+            expected_order_ids.push(inserted_order_id.clone());
+            expected_order_ids.sort();
+            assert_eq!(candidate_orders.len(), expected_order_ids.len());
             assert_eq!(
                 candidate_orders
                     .iter()
                     .map(|order| order.platform_order_id.clone())
                     .collect::<Vec<_>>(),
-                live_order_ids
+                expected_order_ids
             );
-            assert_eq!(candidate_fills.len(), live_trade_ids.len());
+            let mut expected_trade_ids = live_trade_ids.clone();
+            expected_trade_ids.push(inserted_trade_id.clone());
+            expected_trade_ids.sort();
+            assert_eq!(candidate_fills.len(), expected_trade_ids.len());
             assert_eq!(
                 candidate_fills
                     .iter()
                     .map(|fill| fill.trade_id.clone())
                     .collect::<Vec<_>>(),
-                live_trade_ids
+                expected_trade_ids
+            );
+            assert_eq!(
+                prepared
+                    .candidate_orders_for_condition(&inserted_order_condition_id)
+                    .map(|order| order.platform_order_id.clone())
+                    .collect::<Vec<_>>(),
+                candidate_orders
+                    .iter()
+                    .filter(|order| order.condition_id == inserted_order_condition_id)
+                    .map(|order| order.platform_order_id.clone())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                prepared
+                    .candidate_fills_for_condition(&inserted_fill_condition_id)
+                    .map(|fill| fill.trade_id.clone())
+                    .collect::<Vec<_>>(),
+                candidate_fills
+                    .iter()
+                    .filter(|fill| fill.condition_id == inserted_fill_condition_id)
+                    .map(|fill| fill.trade_id.clone())
+                    .collect::<Vec<_>>()
             );
             for order in candidate_orders {
                 let replacement = prepared
@@ -10834,6 +12143,678 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn prepared_execution_drive_consumes_dpt_maker_depletion_and_drop_is_read_only() {
+        let (mut state, rules, condition_id, token_id) = new_order_delta_state_fixture(0).await;
+        let directory =
+            SessionMarketDirectoryV1::try_from_scenario(&crate::scenario::scenario_for_sim_tests())
+                .expect("DPT 稀疏候选测试目录");
+        let platform_order_id = insert_open_gtd_order_for_drive_delta(
+            &mut state,
+            "dpt-sparse-maker",
+            &condition_id,
+            &token_id,
+            decimal("0.4"),
+            1_000_000,
+            400_000,
+            1_900,
+        );
+        let addition = crate::task23_tests::bid_transition(1_100, 1_200, 1, "0.4", "0", "1");
+        state
+            .apply_authorized_market_events(
+                &directory,
+                1_100,
+                &[addition],
+                &crate::finality::successful_policy_for_tests(),
+                &rules
+                    .snapshot()
+                    .project_account_rules
+                    .lifecycle_account_behavior
+                    .value,
+                &BTreeSet::new(),
+            )
+            .expect("DPT 稀疏候选测试先形成账户 maker 后方外部段");
+        let depletion = crate::task23_tests::bid_transition(1_101, 1_201, 2, "0.4", "1", "0");
+        let finality_policy = crate::finality::successful_policy_for_tests();
+        let lifecycle_rule = &rules
+            .snapshot()
+            .project_account_rules
+            .lifecycle_account_behavior
+            .value;
+
+        let mut expected = state.detached_clone();
+        expected
+            .prepare_execution_drive_delta_v2(1_101)
+            .expect("准备 DPT 黄金 scheduled 前缀")
+            .into_committable()
+            .expect("DPT 黄金 scheduled 前缀必须可提交")
+            .commit();
+        let expected_effects = expected
+            .apply_authorized_market_events(
+                &directory,
+                1_101,
+                std::slice::from_ref(&depletion),
+                &finality_policy,
+                lifecycle_rule,
+                &BTreeSet::new(),
+            )
+            .expect("形成既有 DPT 黄金终态");
+        assert_eq!(expected_effects.trade_finality_effects.len(), 1);
+        let baseline = serde_json::to_vec(&state).expect("序列化 DPT 稀疏候选基线");
+
+        reset_execution_state_clone_count_for_tests();
+        let (prepared, effects) = state
+            .prepare_execution_drive_delta_v2(1_101)
+            .expect("准备 DPT 稀疏 scheduled 前缀")
+            .prepare_authorized_market_events_v2(
+                &directory,
+                1_101,
+                std::slice::from_ref(&depletion),
+                &finality_policy,
+                lifecycle_rule,
+                &BTreeSet::new(),
+            )
+            .expect("DPT 稀疏候选必须消费真实 maker 减量");
+        assert_eq!(effects, expected_effects);
+        assert_eq!(prepared.candidate_fills().count(), 1);
+        assert_eq!(
+            prepared
+                .candidate_order(&platform_order_id)
+                .expect("DPT 稀疏候选必须保留 maker 订单")
+                .open_base_units,
+            0
+        );
+        drop(prepared);
+        assert_eq!(
+            serde_json::to_vec(&state).expect("序列化丢弃后的 DPT 实时状态"),
+            baseline
+        );
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+
+        let (prepared, effects) = state
+            .prepare_execution_drive_delta_v2(1_101)
+            .expect("重新准备 DPT 稀疏 scheduled 前缀")
+            .prepare_authorized_market_events_v2(
+                &directory,
+                1_101,
+                &[depletion],
+                &finality_policy,
+                lifecycle_rule,
+                &BTreeSet::new(),
+            )
+            .expect("重新准备 DPT 稀疏 maker 减量");
+        assert_eq!(effects, expected_effects);
+        prepared
+            .into_committable()
+            .expect("DPT 稀疏候选必须可提交")
+            .commit();
+        assert_eq!(state, expected);
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn prepared_execution_drive_resolution_uses_scheduled_after_image_and_drops_atomically() {
+        let (mut state, rules, condition_id, token_id) = new_order_delta_state_fixture(0).await;
+        let directory =
+            SessionMarketDirectoryV1::try_from_scenario(&crate::scenario::scenario_for_sim_tests())
+                .expect("DPT 判定稀疏候选测试目录");
+        let member = directory
+            .market(&condition_id)
+            .expect("DPT 判定稀疏候选目标市场");
+        let bucket_at_utc_ms = member.market().window.end_at_utc_ms;
+        let platform_order_id = insert_open_gtd_order_for_drive_delta(
+            &mut state,
+            "dpt-sparse-resolution",
+            &condition_id,
+            &token_id,
+            decimal("0.4"),
+            1_000_000,
+            400_000,
+            bucket_at_utc_ms + 1_000,
+        );
+        let resolution = MarketResolutionTerminalV3::Resolved {
+            winning_asset_id: member.assets()[0].token_id.0.clone(),
+            winning_outcome: member.assets()[0].outcome.label.clone(),
+            payout_vector: member
+                .assets()
+                .iter()
+                .enumerate()
+                .map(|(index, asset)| contracts::PayoutEntryV1 {
+                    asset: asset.clone(),
+                    payout_pusd_per_share: ExactDecimal(if index == 0 {
+                        "1".to_owned()
+                    } else {
+                        "0".to_owned()
+                    }),
+                })
+                .collect(),
+            mapping_rule_version: "dpt-sparse-resolution-v1".to_owned(),
+        };
+        let mut event = crate::task22_tests::sealed_event(
+            ExecutionMarketEventPayloadV3::MarketResolutionTerminal(resolution),
+            crate::task22_tests::orderbook_evidence(bucket_at_utc_ms, bucket_at_utc_ms, 1),
+            crate::task21_tests::fresh_quality(),
+        );
+        event.market = member.market().clone();
+        event.event_id = data_pipeline_core::derive_execution_market_event_v3_id(&event)
+            .expect("DPT 判定稀疏候选事件身份");
+        let qualified = BTreeSet::from([event.event_id.0.clone()]);
+        let finality_policy = crate::finality::successful_policy_for_tests();
+        let lifecycle_rule = &rules
+            .snapshot()
+            .project_account_rules
+            .lifecycle_account_behavior
+            .value;
+
+        let mut expected = state.detached_clone();
+        expected
+            .prepare_execution_drive_delta_v2(bucket_at_utc_ms)
+            .expect("准备 DPT 判定黄金 scheduled 前缀")
+            .into_committable()
+            .expect("DPT 判定黄金 scheduled 前缀必须可提交")
+            .commit();
+        let expected_effects = expected
+            .apply_authorized_market_events(
+                &directory,
+                bucket_at_utc_ms,
+                std::slice::from_ref(&event),
+                &finality_policy,
+                lifecycle_rule,
+                &qualified,
+            )
+            .expect("形成既有 DPT 判定黄金终态");
+        assert_eq!(expected_effects.market_resolution_order_effects.len(), 1);
+        assert_eq!(expected_effects.settlement_feedbacks.len(), 1);
+        let baseline = serde_json::to_vec(&state).expect("序列化 DPT 判定稀疏候选基线");
+
+        reset_execution_state_clone_count_for_tests();
+        let (prepared, effects) = state
+            .prepare_execution_drive_delta_v2(bucket_at_utc_ms)
+            .expect("准备 DPT 判定稀疏 scheduled 前缀")
+            .prepare_authorized_market_events_v2(
+                &directory,
+                bucket_at_utc_ms,
+                std::slice::from_ref(&event),
+                &finality_policy,
+                lifecycle_rule,
+                &qualified,
+            )
+            .expect("DPT 判定稀疏候选必须消费合格判定");
+        assert_eq!(effects, expected_effects);
+        assert_eq!(
+            prepared
+                .candidate_order(&platform_order_id)
+                .expect("DPT 判定稀疏候选必须保留终态订单")
+                .terminal_reason,
+            Some(SimOrderTerminalReasonV1::MarketResolvedCanceled)
+        );
+        drop(prepared);
+        assert_eq!(
+            serde_json::to_vec(&state).expect("序列化丢弃后的 DPT 判定实时状态"),
+            baseline
+        );
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+
+        let (prepared, effects) = state
+            .prepare_execution_drive_delta_v2(bucket_at_utc_ms)
+            .expect("重新准备 DPT 判定稀疏 scheduled 前缀")
+            .prepare_authorized_market_events_v2(
+                &directory,
+                bucket_at_utc_ms,
+                &[event],
+                &finality_policy,
+                lifecycle_rule,
+                &qualified,
+            )
+            .expect("重新准备 DPT 判定稀疏候选");
+        assert_eq!(effects, expected_effects);
+        prepared
+            .into_committable()
+            .expect("DPT 判定稀疏候选必须在写日志前完成唯一所有权预检")
+            .commit();
+        assert_eq!(state, expected);
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn prepared_execution_drive_dpt_venue_dust_matches_legacy_and_drops_atomically() {
+        let (mut state, rules, condition_id, token_id) = new_order_delta_state_fixture(0).await;
+        let directory =
+            SessionMarketDirectoryV1::try_from_scenario(&crate::scenario::scenario_for_sim_tests())
+                .expect("DPT dust 稀疏候选测试目录");
+        let addition = crate::task23_tests::bid_transition(1_100, 1_200, 1, "0.4", "0", "10");
+        state
+            .apply_authorized_market_events(
+                &directory,
+                1_100,
+                &[addition],
+                &crate::finality::successful_policy_for_tests(),
+                &rules
+                    .snapshot()
+                    .project_account_rules
+                    .lifecycle_account_behavior
+                    .value,
+                &BTreeSet::new(),
+            )
+            .expect("DPT dust 测试先形成账户订单前方外部段");
+        let plan = QueueMatchPlanV1 {
+            fills: vec![TakerFillSliceV1 {
+                segment_id: Sha256Hex("e".repeat(64)),
+                price_pusd_per_share: decimal("0.3"),
+                base_units: 4_999_000,
+                quote_units: 1_499_700,
+            }],
+            matched_base_units: 4_999_000,
+            used_quote_units: 1_499_700,
+        };
+        let (order, fills) = new_order_delta_records(
+            "dpt-sparse-dust",
+            &condition_id,
+            &token_id,
+            SimOrderKindStateV1::Gtc,
+            decimal("0.4"),
+            Some(5_000_000),
+            1_500_100,
+            &plan,
+            &[0],
+        );
+        let platform_order_id = order.platform_order_id.clone();
+        state
+            .commit_new_order(order, fills)
+            .expect("建立 DPT dust 稀疏候选部分成交订单");
+        let depletion = crate::task23_tests::bid_transition(1_101, 1_201, 2, "0.4", "10", "0");
+        let finality_policy = crate::finality::successful_policy_for_tests();
+        let lifecycle_rule = &rules
+            .snapshot()
+            .project_account_rules
+            .lifecycle_account_behavior
+            .value;
+
+        let mut expected = state.detached_clone();
+        expected
+            .prepare_execution_drive_delta_v2(1_101)
+            .expect("准备 DPT dust 黄金 scheduled 前缀")
+            .into_committable()
+            .expect("DPT dust 黄金 scheduled 前缀必须可提交")
+            .commit();
+        let expected_effects = expected
+            .apply_authorized_market_events(
+                &directory,
+                1_101,
+                std::slice::from_ref(&depletion),
+                &finality_policy,
+                lifecycle_rule,
+                &BTreeSet::new(),
+            )
+            .expect("形成既有 DPT dust 黄金终态");
+        assert_eq!(expected_effects.venue_dust_effects.len(), 1);
+        assert!(expected_effects.trade_finality_effects.is_empty());
+        let baseline = serde_json::to_vec(&state).expect("序列化 DPT dust 稀疏候选基线");
+
+        reset_execution_state_clone_count_for_tests();
+        let (prepared, effects) = state
+            .prepare_execution_drive_delta_v2(1_101)
+            .expect("准备 DPT dust 稀疏 scheduled 前缀")
+            .prepare_authorized_market_events_v2(
+                &directory,
+                1_101,
+                std::slice::from_ref(&depletion),
+                &finality_policy,
+                lifecycle_rule,
+                &BTreeSet::new(),
+            )
+            .expect("DPT dust 稀疏候选必须形成终态");
+        assert_eq!(effects, expected_effects);
+        assert_eq!(
+            prepared
+                .candidate_order(&platform_order_id)
+                .expect("DPT dust 稀疏候选必须保留订单")
+                .terminal_reason,
+            Some(SimOrderTerminalReasonV1::VenueDustTerminal)
+        );
+        drop(prepared);
+        assert_eq!(
+            serde_json::to_vec(&state).expect("序列化丢弃后的 DPT dust 实时状态"),
+            baseline
+        );
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+
+        let (prepared, effects) = state
+            .prepare_execution_drive_delta_v2(1_101)
+            .expect("重新准备 DPT dust 稀疏 scheduled 前缀")
+            .prepare_authorized_market_events_v2(
+                &directory,
+                1_101,
+                &[depletion],
+                &finality_policy,
+                lifecycle_rule,
+                &BTreeSet::new(),
+            )
+            .expect("重新准备 DPT dust 稀疏候选");
+        assert_eq!(effects, expected_effects);
+        prepared
+            .into_committable()
+            .expect("DPT dust 稀疏候选必须可提交")
+            .commit();
+        assert_eq!(state, expected);
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn prepared_execution_drive_keeps_resolution_quality_order_and_late_conflict_is_atomic() {
+        let (mut state, rules, condition_id, token_id) = new_order_delta_state_fixture(0).await;
+        let directory =
+            SessionMarketDirectoryV1::try_from_scenario(&crate::scenario::scenario_for_sim_tests())
+                .expect("DPT 原序稀疏候选测试目录");
+        let member = directory
+            .market(&condition_id)
+            .expect("DPT 原序稀疏候选目标市场");
+        let bucket_at_utc_ms = member.market().window.end_at_utc_ms;
+        let policy = crate::finality::policy_for_tests(
+            "dpt-resolution-quality-order-policy",
+            &[
+                (TradeFinalityStateV1::Matched, 0),
+                (TradeFinalityStateV1::Mined, 10),
+                (TradeFinalityStateV1::Confirmed, 5_000),
+            ],
+            1,
+            Vec::new(),
+        );
+        let plan = QueueMatchPlanV1 {
+            fills: vec![TakerFillSliceV1 {
+                segment_id: Sha256Hex("9".repeat(64)),
+                price_pusd_per_share: decimal("0.4"),
+                base_units: 1_000_000,
+                quote_units: 400_000,
+            }],
+            matched_base_units: 1_000_000,
+            used_quote_units: 400_000,
+        };
+        let (order, fills) = new_order_delta_records(
+            "dpt-resolution-quality-order",
+            &condition_id,
+            &token_id,
+            SimOrderKindStateV1::Fok,
+            decimal("0.4"),
+            Some(1_000_000),
+            400_000,
+            &plan,
+            &[0],
+        );
+        let trade_id = fills[0].trade_id.clone();
+        state
+            .commit_new_order(order, fills)
+            .expect("建立 DPT 原序待最终性成交");
+        state
+            .initialize_fill_finality(&policy, &trade_id)
+            .expect("初始化 DPT 原序待最终性成交");
+
+        let resolution = MarketResolutionTerminalV3::Resolved {
+            winning_asset_id: member.assets()[0].token_id.0.clone(),
+            winning_outcome: member.assets()[0].outcome.label.clone(),
+            payout_vector: member
+                .assets()
+                .iter()
+                .enumerate()
+                .map(|(index, asset)| contracts::PayoutEntryV1 {
+                    asset: asset.clone(),
+                    payout_pusd_per_share: ExactDecimal(if index == 0 {
+                        "1".to_owned()
+                    } else {
+                        "0".to_owned()
+                    }),
+                })
+                .collect(),
+            mapping_rule_version: "dpt-resolution-quality-order-v1".to_owned(),
+        };
+        let mut resolution_event = crate::task22_tests::sealed_event(
+            ExecutionMarketEventPayloadV3::MarketResolutionTerminal(resolution),
+            crate::task22_tests::orderbook_evidence(bucket_at_utc_ms, bucket_at_utc_ms, 1),
+            crate::task21_tests::fresh_quality(),
+        );
+        resolution_event.market = member.market().clone();
+        resolution_event.event_id =
+            data_pipeline_core::derive_execution_market_event_v3_id(&resolution_event)
+                .expect("DPT 原序判定事件身份");
+        let mut quality_event = crate::task22_tests::sealed_event(
+            ExecutionMarketEventPayloadV3::QualityBoundary(contracts::QualityBoundaryV2 {
+                scope: QualityScopeV1::Market,
+                previous_quality: MarketDataQuality::Fresh,
+                current_quality: MarketDataQuality::Invalid,
+                reason_code: "DPT_RESOLUTION_THEN_INVALID".to_owned(),
+            }),
+            crate::task22_tests::orderbook_evidence(bucket_at_utc_ms, bucket_at_utc_ms, 2),
+            contracts::EventQualityV2 {
+                availability: MarketDataQuality::Invalid,
+                resync: ResyncQuality::NotRequired,
+            },
+        );
+        quality_event.market = member.market().clone();
+        quality_event.event_id =
+            data_pipeline_core::derive_execution_market_event_v3_id(&quality_event)
+                .expect("DPT 原序质量事件身份");
+        let qualified = BTreeSet::from([resolution_event.event_id.0.clone()]);
+        let lifecycle_rule = &rules
+            .snapshot()
+            .project_account_rules
+            .lifecycle_account_behavior
+            .value;
+        let baseline = serde_json::to_vec(&state).expect("序列化 DPT 原序候选基线");
+
+        let mut conflicting_resolution = resolution_event.clone();
+        let ExecutionMarketEventPayloadV3::MarketResolutionTerminal(
+            MarketResolutionTerminalV3::Resolved {
+                mapping_rule_version,
+                ..
+            },
+        ) = &mut conflicting_resolution.payload
+        else {
+            panic!("DPT 原序冲突夹具必须是 resolved 判定");
+        };
+        *mapping_rule_version = "dpt-resolution-quality-conflict-v1".to_owned();
+        conflicting_resolution.event_id =
+            data_pipeline_core::derive_execution_market_event_v3_id(&conflicting_resolution)
+                .expect("DPT 原序冲突判定事件身份");
+        let conflicting_qualified = BTreeSet::from([
+            resolution_event.event_id.0.clone(),
+            conflicting_resolution.event_id.0.clone(),
+        ]);
+        reset_execution_state_clone_count_for_tests();
+        let error = match state
+            .prepare_execution_drive_delta_v2(bucket_at_utc_ms)
+            .expect("准备 DPT 原序后项冲突 scheduled 前缀")
+            .prepare_authorized_market_events_v2(
+                &directory,
+                bucket_at_utc_ms,
+                &[resolution_event.clone(), conflicting_resolution],
+                &policy,
+                lifecycle_rule,
+                &conflicting_qualified,
+            ) {
+            Err(error) => error,
+            Ok(_) => panic!("DPT 后项判定冲突必须消费并丢弃整个候选"),
+        };
+        assert_eq!(
+            error,
+            MatchingStateErrorV1::ResolutionConflict(condition_id.clone())
+        );
+        assert_eq!(
+            serde_json::to_vec(&state).expect("序列化 DPT 原序后项冲突实时状态"),
+            baseline
+        );
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+
+        let events = [resolution_event, quality_event];
+        let mut expected = state.detached_clone();
+        expected
+            .prepare_execution_drive_delta_v2(bucket_at_utc_ms)
+            .expect("准备 DPT 原序黄金 scheduled 前缀")
+            .into_committable()
+            .expect("DPT 原序黄金 scheduled 前缀必须可提交")
+            .commit();
+        let expected_effects = expected
+            .apply_authorized_market_events(
+                &directory,
+                bucket_at_utc_ms,
+                &events,
+                &policy,
+                lifecycle_rule,
+                &qualified,
+            )
+            .expect("形成 resolution 后 quality 的既有 DPT 黄金终态");
+        assert_eq!(
+            expected
+                .market_resolutions
+                .get(&condition_id)
+                .and_then(|obligation| obligation.invalidated_by_quality_reason.as_deref()),
+            Some("DPT_RESOLUTION_THEN_INVALID")
+        );
+
+        reset_execution_state_clone_count_for_tests();
+        let (prepared, effects) = state
+            .prepare_execution_drive_delta_v2(bucket_at_utc_ms)
+            .expect("准备 DPT resolution 后 quality 稀疏 scheduled 前缀")
+            .prepare_authorized_market_events_v2(
+                &directory,
+                bucket_at_utc_ms,
+                &events,
+                &policy,
+                lifecycle_rule,
+                &qualified,
+            )
+            .expect("DPT 稀疏候选必须保持 resolution 后 quality 原序");
+        assert_eq!(effects, expected_effects);
+        drop(prepared);
+        assert_eq!(
+            serde_json::to_vec(&state).expect("序列化丢弃后的 DPT 原序实时状态"),
+            baseline
+        );
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+
+        let (prepared, effects) = state
+            .prepare_execution_drive_delta_v2(bucket_at_utc_ms)
+            .expect("重新准备 DPT 原序稀疏 scheduled 前缀")
+            .prepare_authorized_market_events_v2(
+                &directory,
+                bucket_at_utc_ms,
+                &events,
+                &policy,
+                lifecycle_rule,
+                &qualified,
+            )
+            .expect("重新准备 DPT 原序稀疏候选");
+        assert_eq!(effects, expected_effects);
+        prepared
+            .into_committable()
+            .expect("DPT 原序稀疏候选必须可提交")
+            .commit();
+        assert_eq!(state, expected);
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn prepared_execution_drive_chains_zero_quote_dpt_events_in_input_order() {
+        let (mut state, rules, condition_id, token_id) = new_order_delta_state_fixture(0).await;
+        let directory =
+            SessionMarketDirectoryV1::try_from_scenario(&crate::scenario::scenario_for_sim_tests())
+                .expect("DPT 零对价串联测试目录");
+        let platform_order_id = insert_open_gtd_order_for_drive_delta(
+            &mut state,
+            "dpt-zero-quote-chain",
+            &condition_id,
+            &token_id,
+            decimal("0.00001"),
+            5_000_000,
+            50,
+            5_000,
+        );
+        let events = [
+            crate::task23_tests::bid_transition(1_100, 1_200, 1, "0.00001", "0", "0.000001"),
+            crate::task23_tests::bid_transition(1_101, 1_201, 2, "0.00001", "0.000001", "0"),
+            crate::task23_tests::bid_transition(1_102, 1_202, 3, "0.00001", "0", "0.099999"),
+            crate::task23_tests::bid_transition(1_103, 1_203, 4, "0.00001", "0.099999", "0"),
+        ];
+        let finality_policy = crate::finality::successful_policy_for_tests();
+        let lifecycle_rule = &rules
+            .snapshot()
+            .project_account_rules
+            .lifecycle_account_behavior
+            .value;
+        let mut expected = state.detached_clone();
+        expected
+            .prepare_execution_drive_delta_v2(1_103)
+            .expect("准备 DPT 零对价串联黄金 scheduled 前缀")
+            .into_committable()
+            .expect("DPT 零对价串联黄金 scheduled 前缀必须可提交")
+            .commit();
+        let expected_effects = expected
+            .apply_authorized_market_events(
+                &directory,
+                1_103,
+                &events,
+                &finality_policy,
+                lifecycle_rule,
+                &BTreeSet::new(),
+            )
+            .expect("形成 DPT 零对价串联黄金终态");
+        assert_eq!(expected_effects.trade_finality_effects.len(), 1);
+        let expected_order = expected
+            .orders
+            .get(&platform_order_id)
+            .expect("DPT 零对价串联黄金订单");
+        assert_eq!(expected_order.matched_base_units, 100_000);
+        assert_eq!(expected_order.matched_quote_units, 1);
+        assert_eq!(expected_order.pending_maker_depletion_base_units, 0);
+        let baseline = serde_json::to_vec(&state).expect("序列化 DPT 零对价串联基线");
+
+        reset_execution_state_clone_count_for_tests();
+        let (prepared, effects) = state
+            .prepare_execution_drive_delta_v2(1_103)
+            .expect("准备 DPT 零对价串联稀疏 scheduled 前缀")
+            .prepare_authorized_market_events_v2(
+                &directory,
+                1_103,
+                &events,
+                &finality_policy,
+                lifecycle_rule,
+                &BTreeSet::new(),
+            )
+            .expect("DPT 稀疏候选必须按输入原序累计零对价减量");
+        assert_eq!(effects, expected_effects);
+        assert_eq!(
+            prepared
+                .candidate_order(&platform_order_id)
+                .expect("DPT 零对价串联稀疏候选订单"),
+            expected_order
+        );
+        drop(prepared);
+        assert_eq!(
+            serde_json::to_vec(&state).expect("序列化丢弃后的 DPT 零对价串联状态"),
+            baseline
+        );
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+
+        let (prepared, effects) = state
+            .prepare_execution_drive_delta_v2(1_103)
+            .expect("重新准备 DPT 零对价串联 scheduled 前缀")
+            .prepare_authorized_market_events_v2(
+                &directory,
+                1_103,
+                &events,
+                &finality_policy,
+                lifecycle_rule,
+                &BTreeSet::new(),
+            )
+            .expect("重新准备 DPT 零对价串联候选");
+        assert_eq!(effects, expected_effects);
+        prepared
+            .into_committable()
+            .expect("DPT 零对价串联候选必须可提交")
+            .commit();
+        assert_eq!(state, expected);
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn prepared_new_order_v2_fok_partial_drop_then_fak_sees_full_liquidity() {
         let (mut state, rules, condition_id, token_id) = new_order_delta_state_fixture(0).await;
         let baseline = state.clone();
@@ -11330,6 +13311,12 @@ mod tests {
             }
             let rebate_records_before = state.rebate.resource_record_count();
             let mut legacy = state.clone();
+            legacy
+                .prepare_execution_drive_delta_v2(0)
+                .expect("旧 V1 黄金路径必须先推进相同 scheduled 水位")
+                .into_committable()
+                .expect("空 scheduled 水位候选必须可提交")
+                .commit();
             let (legacy_plan, accepted_base_units, accepted_quote_units) = match case.target {
                 Target::Quote(accepted_quote_units) => (
                     legacy
@@ -11407,8 +13394,11 @@ mod tests {
             reset_asset_queue_clone_count_for_tests();
             reset_execution_state_clone_count_for_tests();
             let rebate_pointer_before = Arc::as_ptr(&state.rebate);
+            let execution = state
+                .prepare_execution_drive_delta_v2(0)
+                .expect("准备新 execution-drive 订单候选前缀");
             let builder = match case.target {
-                Target::Quote(accepted_quote_units) => state
+                Target::Quote(accepted_quote_units) => execution
                     .prepare_new_order_taker_buy_by_quote_v2(
                         &condition_id,
                         &token_id,
@@ -11419,7 +13409,7 @@ mod tests {
                 Target::Base {
                     accepted_base_units,
                     accepted_quote_units,
-                } => state
+                } => execution
                     .prepare_new_order_taker_buy_by_base_v2(
                         &condition_id,
                         &token_id,
@@ -11443,14 +13433,17 @@ mod tests {
                 &plan,
                 &fee_units,
             );
-            let prepared = builder
+            let (prepared, effects) = builder
                 .finish_new_order(order, fills, &policy, lifecycle_rule)
-                .expect("V2 完成新订单候选");
-            assert_eq!(prepared.order_commit_effects(), &legacy_order_effects);
-            assert_eq!(prepared.trade_finality_effects(), &legacy_trade_effects);
-            assert_eq!(prepared.venue_dust_effect(), legacy_dust.as_ref());
-            assert_eq!(prepared.venue_dust_effect().is_some(), case.expect_dust);
-            prepared.into_committable().commit();
+                .expect("execution-drive V2 完成新订单候选");
+            assert_eq!(effects.order_commit_effects(), &legacy_order_effects);
+            assert_eq!(effects.trade_finality_effects(), &legacy_trade_effects);
+            assert_eq!(effects.venue_dust_effect(), legacy_dust.as_ref());
+            assert_eq!(effects.venue_dust_effect().is_some(), case.expect_dust);
+            prepared
+                .into_committable()
+                .expect("execution-drive V2 新订单候选必须可提交")
+                .commit();
 
             assert_eq!(state, legacy, "{} V2 与旧 V1 终态", case.label);
             assert_eq!(
