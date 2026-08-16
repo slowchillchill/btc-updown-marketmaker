@@ -2246,6 +2246,14 @@ impl SimSession {
         self.state.complete_logical_item(action_identity)
     }
 
+    pub(crate) fn first_pending_action_through(
+        &self,
+        effective_processing_at_utc_ms: i64,
+    ) -> Option<QueuedLogicalActionV1> {
+        self.state
+            .first_pending_action_through(effective_processing_at_utc_ms)
+    }
+
     pub(crate) fn prepare_execution_action_slice_v2(
         &mut self,
         effective_processing_at_utc_ms: i64,
@@ -3403,16 +3411,20 @@ impl<'a> PreparedExecutionActionSliceV2<'a> {
         if platform_responded_at_utc_ms < registration_transit.platform_arrived_at_utc_ms {
             return Err(SessionError::ResponseBeforeArrival);
         }
-        let last_action_at = self
-            .state
-            .action_keys
-            .values()
-            .filter(|(_, request_id)| request_id == global_request_id)
-            .map(|(key, _)| key.effective_processing_at_utc_ms)
-            .max()
-            .ok_or_else(|| {
-                SessionError::RequestNotLogicallyReleased(global_request_id.to_owned())
-            })?;
+        let last_action_at = if prepared_request_completed {
+            self.actions
+                .last()
+                .filter(|action| action.global_request_id == global_request_id)
+                .map(|action| action.key.effective_processing_at_utc_ms)
+        } else {
+            self.state
+                .action_keys
+                .values()
+                .filter(|(_, request_id)| request_id == global_request_id)
+                .map(|(key, _)| key.effective_processing_at_utc_ms)
+                .max()
+        }
+        .ok_or_else(|| SessionError::RequestNotLogicallyReleased(global_request_id.to_owned()))?;
         if platform_responded_at_utc_ms < last_action_at {
             return Err(SessionError::ResponseBeforeLogicalCompletion);
         }
@@ -5827,6 +5839,16 @@ impl SessionState {
             self.released_request_ids.insert(global_request_id);
         }
         Ok(request_completed)
+    }
+
+    fn first_pending_action_through(
+        &self,
+        effective_processing_at_utc_ms: i64,
+    ) -> Option<QueuedLogicalActionV1> {
+        self.pending_actions
+            .first_key_value()
+            .filter(|(key, _)| key.effective_processing_at_utc_ms <= effective_processing_at_utc_ms)
+            .map(|(_, action)| action.clone())
     }
 
     fn take_next_action_through(
@@ -9052,6 +9074,9 @@ mod tests {
         state
             .seal_logical_actions("prepared-cross-time")
             .expect("seal cross-time request");
+        state
+            .expect_direct_response("prepared-cross-time")
+            .expect("track cross-time direct response");
 
         let before_prefix = SessionStateCheckpointV1::from(&state);
         assert!(matches!(
@@ -9091,6 +9116,37 @@ mod tests {
         ));
         assert_eq!(SessionStateCheckpointV1::from(&state), before_regression);
         assert_eq!(state.in_flight_action_identity, None);
+
+        state
+            .close_platform_prefix_through(second_at, 2)
+            .expect("close through final cross-time action");
+        let before_response = SessionStateCheckpointV1::from(&state);
+        let mut premature = state
+            .prepare_execution_action_slice_v2(&profile, second_at, false)
+            .expect("prepare final cross-time action for premature response");
+        let final_action = premature.current_action().expect("final cross-time action");
+        premature
+            .finish_current_action(&final_action.action_identity)
+            .expect("finish final cross-time action before response validation");
+        assert_eq!(
+            premature.prepare_complete_direct_response("prepared-cross-time", second_at - 1, 1),
+            Err(SessionError::ResponseBeforeLogicalCompletion)
+        );
+        drop(premature);
+        assert_eq!(SessionStateCheckpointV1::from(&state), before_response);
+
+        let mut completed = state
+            .prepare_execution_action_slice_v2(&profile, second_at, false)
+            .expect("reprepare final cross-time action");
+        let final_action = completed.current_action().expect("final cross-time action");
+        completed
+            .finish_current_action(&final_action.action_identity)
+            .expect("finish final cross-time action");
+        completed
+            .prepare_complete_direct_response("prepared-cross-time", second_at, 1)
+            .expect("response at final action time succeeds");
+        drop(completed);
+        assert_eq!(SessionStateCheckpointV1::from(&state), before_response);
     }
 
     #[test]

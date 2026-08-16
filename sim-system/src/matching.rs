@@ -4861,6 +4861,10 @@ impl ExecutionStateV1 {
         Ok(ids)
     }
 
+    pub(crate) fn fill(&self, trade_id: &str) -> Option<&SimFillRecordV1> {
+        self.fills.get(trade_id)
+    }
+
     pub(crate) fn fills(&self) -> impl Iterator<Item = &SimFillRecordV1> {
         self.fills.values()
     }

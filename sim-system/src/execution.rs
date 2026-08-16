@@ -10213,6 +10213,45 @@ impl RecoverablePaperCoordinatorV2 {
         Ok(disposition)
     }
 
+    fn drive_query_execution_through(
+        &mut self,
+        session: &mut SimExecutionSessionV1,
+        requested_cutoff_utc_ms: i64,
+    ) -> Result<SubmissionDriveDispositionV1, SubmissionProcessingErrorV1> {
+        self.require_ready()?;
+        self.require_bound_session(session)?;
+        if session.persistence.is_some() {
+            return Err(SessionError::Durability(
+                "内部 RecoverablePaper V2 查询协调器禁止与 V1 持久协调器双写".to_owned(),
+            )
+            .into());
+        }
+        let occupied_lifecycle_capacity_leases =
+            self.occupied_lifecycle_capacity_leases(&session.lifecycle_outbox);
+        let SimExecutionSessionV1 {
+            session,
+            pending_requests,
+            query_state,
+            direct_response_outbox,
+            lifecycle_outbox,
+            ..
+        } = session;
+        let prepared = prepare_query_execution_drive_fields_v2(
+            session,
+            pending_requests,
+            query_state,
+            direct_response_outbox,
+            lifecycle_outbox,
+            requested_cutoff_utc_ms,
+            occupied_lifecycle_capacity_leases,
+        )?
+        .into_committable()?;
+        let disposition = prepared.disposition;
+        self.append_logical_transaction(&prepared.evidence, &prepared.recovery_operation)?;
+        prepared.commit();
+        Ok(disposition)
+    }
+
     fn close_ingress(&mut self, session: &mut SimExecutionSessionV1) -> Result<(), SessionError> {
         self.require_ready()?;
         self.require_bound_session(session)?;
@@ -10718,20 +10757,25 @@ fn replay_execution_operation_v2(
             "V2 执行推进事实会话身份不符".to_owned(),
         ));
     }
-    if !evidence.logical_action_results.is_empty() {
-        let cancel_request_is_due = evidence
-            .logical_action_results
-            .first()
-            .and_then(|result| state.pending_requests.get(&result.global_request_id))
-            .is_some_and(|request| {
-                matches!(
-                    request,
-                    PendingDomainRequestV1::CancelOrder(_)
-                        | PendingDomainRequestV1::CancelOrders(_)
-                        | PendingDomainRequestV1::CancelAllOrders(_)
-                )
-            });
-        if cancel_request_is_due {
+    let expected_recovery_operation = DurableRecoveryOperationV2::DriveExecutionThrough {
+        effective_processing_at_utc_ms,
+    };
+    let due_method = state
+        .session
+        .first_pending_action_through(effective_processing_at_utc_ms)
+        .and_then(|action| state.pending_requests.get(&action.global_request_id))
+        .map(PendingDomainRequestV1::direct_response_method);
+    if due_method.is_some() && evidence.logical_action_results.is_empty() {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "V2 scheduled-only 执行推进尾日志遇到待处理动作".to_owned(),
+        ));
+    }
+    match due_method {
+        Some(
+            DirectResponseMethodV1::CancelOrder
+            | DirectResponseMethodV1::CancelOrders
+            | DirectResponseMethodV1::CancelAllOrders,
+        ) => {
             let prepared = prepare_cancel_execution_drive_fields_v2(
                 &mut state.session,
                 &state.pending_requests,
@@ -10748,6 +10792,11 @@ fn replay_execution_operation_v2(
                     "V2 撤单动作执行推进尾日志无法重放：{error:?}"
                 ))
             })?;
+            if prepared.recovery_operation != expected_recovery_operation {
+                return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                    "V2 撤单动作执行推进恢复操作时点与重算候选不符".to_owned(),
+                ));
+            }
             if prepared.evidence != *evidence {
                 return Err(SessionCheckpointErrorV1::InvalidSessionState(
                     "V2 撤单动作执行推进尾日志与重算候选不一致".to_owned(),
@@ -10756,23 +10805,69 @@ fn replay_execution_operation_v2(
             prepared.commit();
             return Ok(state);
         }
-        let prepared = prepare_execution_transition_v2(state, effective_processing_at_utc_ms)
+        Some(
+            DirectResponseMethodV1::Order
+            | DirectResponseMethodV1::Orders
+            | DirectResponseMethodV1::Trades,
+        ) => {
+            let prepared = prepare_query_execution_drive_fields_v2(
+                &mut state.session,
+                &state.pending_requests,
+                &mut state.query_state,
+                &mut state.direct_response_outbox,
+                &mut state.lifecycle_outbox,
+                effective_processing_at_utc_ms,
+                0,
+            )
+            .and_then(PreparedQueryExecutionDriveV2::into_committable)
             .map_err(|error| {
+                SessionCheckpointErrorV1::InvalidSessionState(format!(
+                    "V2 查询动作执行推进尾日志无法重放：{error:?}"
+                ))
+            })?;
+            if prepared.recovery_operation != expected_recovery_operation {
+                return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                    "V2 查询动作执行推进恢复操作时点与重算候选不符".to_owned(),
+                ));
+            }
+            if prepared.evidence != *evidence {
+                return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                    "V2 查询动作执行推进尾日志与重算候选不一致".to_owned(),
+                ));
+            }
+            prepared.commit();
+            return Ok(state);
+        }
+        Some(DirectResponseMethodV1::PostOrder | DirectResponseMethodV1::PostOrders) => {
+            let prepared = prepare_execution_transition_v2(state, effective_processing_at_utc_ms)
+                .map_err(|error| {
                 SessionCheckpointErrorV1::InvalidSessionState(format!(
                     "V2 动作执行推进尾日志无法重放：{error:?}"
                 ))
             })?;
-        let Some(recomputed_evidence) = prepared.evidence else {
-            return Err(SessionCheckpointErrorV1::InvalidSessionState(
-                "V2 动作执行推进尾日志重复应用".to_owned(),
-            ));
-        };
-        if recomputed_evidence != *evidence {
-            return Err(SessionCheckpointErrorV1::InvalidSessionState(
-                "V2 动作执行推进尾日志与重算候选不一致".to_owned(),
-            ));
+            if prepared
+                .candidate_state
+                .session
+                .logical_platform_driven_through()
+                != Some(effective_processing_at_utc_ms)
+            {
+                return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                    "V2 动作执行推进恢复操作时点与重算候选不符".to_owned(),
+                ));
+            }
+            let Some(recomputed_evidence) = prepared.evidence else {
+                return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                    "V2 动作执行推进尾日志重复应用".to_owned(),
+                ));
+            };
+            if recomputed_evidence != *evidence {
+                return Err(SessionCheckpointErrorV1::InvalidSessionState(
+                    "V2 动作执行推进尾日志与重算候选不一致".to_owned(),
+                ));
+            }
+            return Ok(prepared.candidate_state);
         }
-        return Ok(prepared.candidate_state);
+        None => {}
     }
 
     let prepared = prepare_scheduled_execution_drive_fields_v2(
@@ -10801,6 +10896,11 @@ fn replay_execution_operation_v2(
         }
         PreparedScheduledExecutionDriveV2::Committable(prepared) => prepared,
     };
+    if prepared.recovery_operation != expected_recovery_operation {
+        return Err(SessionCheckpointErrorV1::InvalidSessionState(
+            "V2 scheduled-only 执行推进恢复操作时点与重算候选不符".to_owned(),
+        ));
+    }
     if prepared.evidence != *evidence {
         return Err(SessionCheckpointErrorV1::InvalidSessionState(
             "V2 scheduled-only 执行推进尾日志与重算候选不一致".to_owned(),
@@ -16220,16 +16320,19 @@ impl SimExecutionSessionV1 {
                     let normalized_interval = strict_millisecond_interval(&request.filter);
                     let empty_interval = normalized_interval.is_none();
                     let retained_exact_trade = request.filter.trade_id.as_ref().is_some_and(|id| {
-                        working_session.execution_state().fills().any(|fill| {
-                            &fill.trade_id == id
-                                && working_query_state.trade_is_retained(fill.matched_at_utc_ms)
-                        }) || working_query_state
-                            .terminal_projections
-                            .trades
-                            .get(id)
-                            .is_some_and(|trade| {
-                                working_query_state.trade_is_retained(trade.matched_at_utc_ms)
+                        working_session
+                            .execution_state()
+                            .fill(id)
+                            .is_some_and(|fill| {
+                                working_query_state.trade_is_retained(fill.matched_at_utc_ms)
                             })
+                            || working_query_state
+                                .terminal_projections
+                                .trades
+                                .get(id)
+                                .is_some_and(|trade| {
+                                    working_query_state.trade_is_retained(trade.matched_at_utc_ms)
+                                })
                     });
                     if !empty_interval
                         && !retained_exact_trade
@@ -16251,32 +16354,7 @@ impl SimExecutionSessionV1 {
                     } else {
                         let mut rows_by_id = BTreeMap::new();
                         if !empty_interval {
-                            for fill in working_session.execution_state().fills().filter(|fill| {
-                                working_query_state.trade_is_retained(fill.matched_at_utc_ms)
-                                    && request
-                                        .filter
-                                        .trade_id
-                                        .as_ref()
-                                        .is_none_or(|id| id == &fill.trade_id)
-                                    && request
-                                        .filter
-                                        .condition_id
-                                        .as_ref()
-                                        .is_none_or(|id| id.0 == fill.condition_id)
-                                    && request
-                                        .filter
-                                        .token_id
-                                        .as_ref()
-                                        .is_none_or(|id| id.0 == fill.token_id)
-                                    && request
-                                        .filter
-                                        .after_utc_ms
-                                        .is_none_or(|after| after < fill.matched_at_utc_ms)
-                                    && request
-                                        .filter
-                                        .before_utc_ms
-                                        .is_none_or(|before| fill.matched_at_utc_ms < before)
-                            }) {
+                            let mut record_hot_fill = |fill: &SimFillRecordV1| {
                                 let projection = project_trade(fill)?;
                                 rows_by_id
                                     .insert(projection.simulated_trade_id.clone(), projection);
@@ -16284,38 +16362,33 @@ impl SimExecutionSessionV1 {
                                 {
                                     query_used_hot_state = true;
                                 }
+                                Ok::<(), MatchingMathErrorV1>(())
+                            };
+                            if let Some(trade_id) = &request.filter.trade_id {
+                                if let Some(fill) = working_session
+                                    .execution_state()
+                                    .fill(trade_id)
+                                    .filter(|fill| {
+                                        working_query_state
+                                            .trade_is_retained(fill.matched_at_utc_ms)
+                                            && fill_matches_trades_filter(fill, &request.filter)
+                                    })
+                                {
+                                    record_hot_fill(fill)?;
+                                }
+                            } else {
+                                for fill in
+                                    working_session.execution_state().fills().filter(|fill| {
+                                        working_query_state
+                                            .trade_is_retained(fill.matched_at_utc_ms)
+                                            && fill_matches_trades_filter(fill, &request.filter)
+                                    })
+                                {
+                                    record_hot_fill(fill)?;
+                                }
                             }
-                            for trade in working_query_state
-                                .terminal_projections
-                                .trades
-                                .values()
-                                .filter(|trade| {
-                                    working_query_state.trade_is_retained(trade.matched_at_utc_ms)
-                                        && request
-                                            .filter
-                                            .trade_id
-                                            .as_ref()
-                                            .is_none_or(|id| id == &trade.simulated_trade_id)
-                                        && request
-                                            .filter
-                                            .condition_id
-                                            .as_ref()
-                                            .is_none_or(|id| id == &trade.condition_id)
-                                        && request
-                                            .filter
-                                            .token_id
-                                            .as_ref()
-                                            .is_none_or(|id| id == &trade.token_id)
-                                        && request
-                                            .filter
-                                            .after_utc_ms
-                                            .is_none_or(|after| after < trade.matched_at_utc_ms)
-                                        && request
-                                            .filter
-                                            .before_utc_ms
-                                            .is_none_or(|before| trade.matched_at_utc_ms < before)
-                                })
-                            {
+                            let retained_trades = &working_query_state.terminal_projections.trades;
+                            let mut record_terminal_trade = |trade: &TradeProjectionV1| {
                                 #[cfg(test)]
                                 let newly_adopted =
                                     !rows_by_id.contains_key(&trade.simulated_trade_id);
@@ -16325,6 +16398,27 @@ impl SimExecutionSessionV1 {
                                 #[cfg(test)]
                                 if newly_adopted {
                                     query_used_retained_projection = true;
+                                }
+                            };
+                            if let Some(trade_id) = &request.filter.trade_id {
+                                if let Some(trade) = retained_trades.get(trade_id).filter(|trade| {
+                                    working_query_state.trade_is_retained(trade.matched_at_utc_ms)
+                                        && trade_projection_matches_trades_filter(
+                                            trade,
+                                            &request.filter,
+                                        )
+                                }) {
+                                    record_terminal_trade(trade);
+                                }
+                            } else {
+                                for trade in retained_trades.values().filter(|trade| {
+                                    working_query_state.trade_is_retained(trade.matched_at_utc_ms)
+                                        && trade_projection_matches_trades_filter(
+                                            trade,
+                                            &request.filter,
+                                        )
+                                }) {
+                                    record_terminal_trade(trade);
                                 }
                             }
                         }
@@ -17505,6 +17599,51 @@ fn strict_millisecond_interval(filter: &TradesFilterV1) -> Option<(i64, i64)> {
     (first_inclusive <= last_inclusive).then_some((first_inclusive, last_inclusive))
 }
 
+fn fill_matches_trades_filter(fill: &SimFillRecordV1, filter: &TradesFilterV1) -> bool {
+    filter
+        .trade_id
+        .as_ref()
+        .is_none_or(|id| id == &fill.trade_id)
+        && filter
+            .condition_id
+            .as_ref()
+            .is_none_or(|id| id.0 == fill.condition_id)
+        && filter
+            .token_id
+            .as_ref()
+            .is_none_or(|id| id.0 == fill.token_id)
+        && filter
+            .after_utc_ms
+            .is_none_or(|after| after < fill.matched_at_utc_ms)
+        && filter
+            .before_utc_ms
+            .is_none_or(|before| fill.matched_at_utc_ms < before)
+}
+
+fn trade_projection_matches_trades_filter(
+    trade: &TradeProjectionV1,
+    filter: &TradesFilterV1,
+) -> bool {
+    filter
+        .trade_id
+        .as_ref()
+        .is_none_or(|id| id == &trade.simulated_trade_id)
+        && filter
+            .condition_id
+            .as_ref()
+            .is_none_or(|id| id == &trade.condition_id)
+        && filter
+            .token_id
+            .as_ref()
+            .is_none_or(|id| id == &trade.token_id)
+        && filter
+            .after_utc_ms
+            .is_none_or(|after| after < trade.matched_at_utc_ms)
+        && filter
+            .before_utc_ms
+            .is_none_or(|before| trade.matched_at_utc_ms < before)
+}
+
 fn map_submission_rejection(value: SubmissionAdmissionRejectionV1) -> SubmissionRejectedReasonV1 {
     match value {
         SubmissionAdmissionRejectionV1::EndAtReached => SubmissionRejectedReasonV1::EndAtReached,
@@ -18448,6 +18587,50 @@ fn prepare_cancel_execution_drive_fields_v2<'a>(
     })
 }
 
+fn prepare_query_execution_drive_fields_v2<'a>(
+    session: &'a mut SimSession,
+    pending_requests: &BTreeMap<String, PendingDomainRequestV1>,
+    query_state: &'a mut QueryStateV1,
+    direct_response_outbox: &'a mut LogicalDirectResponseOutboxV1,
+    lifecycle_outbox: &'a mut LogicalLifecycleOutboxV1,
+    requested_cutoff_utc_ms: i64,
+    occupied_lifecycle_capacity_leases: usize,
+) -> Result<PreparedQueryExecutionDriveV2<'a>, SubmissionProcessingErrorV1> {
+    let action = session
+        .first_pending_action_through(requested_cutoff_utc_ms)
+        .ok_or(SubmissionProcessingErrorV1::InternalInvariant(
+            "查询执行准备缺少到期逻辑动作",
+        ))?;
+    match pending_requests.get(&action.global_request_id) {
+        Some(PendingDomainRequestV1::Order(_)) => prepare_order_execution_drive_fields_v2(
+            session,
+            pending_requests,
+            query_state,
+            direct_response_outbox,
+            lifecycle_outbox,
+            requested_cutoff_utc_ms,
+            occupied_lifecycle_capacity_leases,
+        ),
+        Some(PendingDomainRequestV1::Orders(_) | PendingDomainRequestV1::Trades(_)) => {
+            prepare_list_query_execution_drive_fields_v2(
+                session,
+                pending_requests,
+                query_state,
+                direct_response_outbox,
+                lifecycle_outbox,
+                requested_cutoff_utc_ms,
+                occupied_lifecycle_capacity_leases,
+            )
+        }
+        Some(_) => Err(SubmissionProcessingErrorV1::InternalInvariant(
+            "非查询请求进入查询执行准备",
+        )),
+        None => Err(SubmissionProcessingErrorV1::InternalInvariant(
+            "查询执行准备缺少领域请求",
+        )),
+    }
+}
+
 fn prepare_order_execution_drive_v2<'a>(
     execution_session: &'a mut SimExecutionSessionV1,
     requested_cutoff_utc_ms: i64,
@@ -18461,6 +18644,26 @@ fn prepare_order_execution_drive_v2<'a>(
         lifecycle_outbox,
         ..
     } = execution_session;
+    prepare_order_execution_drive_fields_v2(
+        session,
+        pending_requests,
+        query_state,
+        direct_response_outbox,
+        lifecycle_outbox,
+        requested_cutoff_utc_ms,
+        occupied_lifecycle_capacity_leases,
+    )
+}
+
+fn prepare_order_execution_drive_fields_v2<'a>(
+    session: &'a mut SimSession,
+    pending_requests: &BTreeMap<String, PendingDomainRequestV1>,
+    query_state: &'a mut QueryStateV1,
+    direct_response_outbox: &'a mut LogicalDirectResponseOutboxV1,
+    lifecycle_outbox: &'a mut LogicalLifecycleOutboxV1,
+    requested_cutoff_utc_ms: i64,
+    occupied_lifecycle_capacity_leases: usize,
+) -> Result<PreparedQueryExecutionDriveV2<'a>, SubmissionProcessingErrorV1> {
     let rule_snapshot_sha256 = session.rule_snapshot().file_sha256().clone();
     let scenario_sha256 = session.scenario().scenario_sha256().clone();
     let fee_rule = fee_rule_identity(session);
@@ -18559,6 +18762,26 @@ fn prepare_list_query_execution_drive_v2<'a>(
         lifecycle_outbox,
         ..
     } = execution_session;
+    prepare_list_query_execution_drive_fields_v2(
+        session,
+        pending_requests,
+        query_state,
+        direct_response_outbox,
+        lifecycle_outbox,
+        requested_cutoff_utc_ms,
+        occupied_lifecycle_capacity_leases,
+    )
+}
+
+fn prepare_list_query_execution_drive_fields_v2<'a>(
+    session: &'a mut SimSession,
+    pending_requests: &BTreeMap<String, PendingDomainRequestV1>,
+    query_state: &'a mut QueryStateV1,
+    direct_response_outbox: &'a mut LogicalDirectResponseOutboxV1,
+    lifecycle_outbox: &'a mut LogicalLifecycleOutboxV1,
+    requested_cutoff_utc_ms: i64,
+    occupied_lifecycle_capacity_leases: usize,
+) -> Result<PreparedQueryExecutionDriveV2<'a>, SubmissionProcessingErrorV1> {
     let session_spec = session.session_spec().clone();
     let rule_snapshot_sha256 = session.rule_snapshot().file_sha256().clone();
     let scenario_sha256 = session.scenario().scenario_sha256().clone();
@@ -18692,10 +18915,9 @@ fn prepare_list_query_execution_drive_v2<'a>(
                     materialized
                         .scheduled
                         .execution_candidate()
-                        .candidate_fills()
-                        .any(|fill| {
-                            &fill.trade_id == id
-                                && materialized.query.trade_is_retained(fill.matched_at_utc_ms)
+                        .candidate_fill(id)
+                        .is_some_and(|fill| {
+                            materialized.query.trade_is_retained(fill.matched_at_utc_ms)
                         })
                         || materialized.query.retained_terminal_trade(id).is_some()
                 });
@@ -18722,72 +18944,63 @@ fn prepare_list_query_execution_drive_v2<'a>(
                 } else {
                     let mut rows_by_id = BTreeMap::new();
                     if !empty_interval {
-                        for fill in materialized
-                            .scheduled
-                            .execution_candidate()
-                            .candidate_fills()
-                            .filter(|fill| {
-                                materialized.query.trade_is_retained(fill.matched_at_utc_ms)
-                                    && request
-                                        .filter
-                                        .trade_id
-                                        .as_ref()
-                                        .is_none_or(|id| id == &fill.trade_id)
-                                    && request
-                                        .filter
-                                        .condition_id
-                                        .as_ref()
-                                        .is_none_or(|id| id.0 == fill.condition_id)
-                                    && request
-                                        .filter
-                                        .token_id
-                                        .as_ref()
-                                        .is_none_or(|id| id.0 == fill.token_id)
-                                    && request
-                                        .filter
-                                        .after_utc_ms
-                                        .is_none_or(|after| after < fill.matched_at_utc_ms)
-                                    && request
-                                        .filter
-                                        .before_utc_ms
-                                        .is_none_or(|before| fill.matched_at_utc_ms < before)
-                            })
-                        {
-                            let projection = project_trade(fill)?;
-                            rows_by_id.insert(projection.simulated_trade_id.clone(), projection);
+                        if let Some(trade_id) = &request.filter.trade_id {
+                            if let Some(fill) = materialized
+                                .scheduled
+                                .execution_candidate()
+                                .candidate_fill(trade_id)
+                                .filter(|fill| {
+                                    materialized.query.trade_is_retained(fill.matched_at_utc_ms)
+                                        && fill_matches_trades_filter(fill, &request.filter)
+                                })
+                            {
+                                let projection = project_trade(fill)?;
+                                rows_by_id
+                                    .insert(projection.simulated_trade_id.clone(), projection);
+                            }
+                        } else {
+                            for fill in materialized
+                                .scheduled
+                                .execution_candidate()
+                                .candidate_fills()
+                                .filter(|fill| {
+                                    materialized.query.trade_is_retained(fill.matched_at_utc_ms)
+                                        && fill_matches_trades_filter(fill, &request.filter)
+                                })
+                            {
+                                let projection = project_trade(fill)?;
+                                rows_by_id
+                                    .insert(projection.simulated_trade_id.clone(), projection);
+                            }
                         }
-                        for trade in materialized
-                            .query
-                            .retained_terminal_trades()
-                            .filter(|trade| {
-                                request
-                                    .filter
-                                    .trade_id
-                                    .as_ref()
-                                    .is_none_or(|id| id == &trade.simulated_trade_id)
-                                    && request
-                                        .filter
-                                        .condition_id
-                                        .as_ref()
-                                        .is_none_or(|id| id == &trade.condition_id)
-                                    && request
-                                        .filter
-                                        .token_id
-                                        .as_ref()
-                                        .is_none_or(|id| id == &trade.token_id)
-                                    && request
-                                        .filter
-                                        .after_utc_ms
-                                        .is_none_or(|after| after < trade.matched_at_utc_ms)
-                                    && request
-                                        .filter
-                                        .before_utc_ms
-                                        .is_none_or(|before| trade.matched_at_utc_ms < before)
-                            })
-                        {
-                            rows_by_id
-                                .entry(trade.simulated_trade_id.clone())
-                                .or_insert_with(|| trade.clone());
+                        if let Some(trade_id) = &request.filter.trade_id {
+                            if let Some(trade) = materialized
+                                .query
+                                .retained_terminal_trade(trade_id)
+                                .filter(|trade| {
+                                    trade_projection_matches_trades_filter(trade, &request.filter)
+                                })
+                            {
+                                rows_by_id
+                                    .entry(trade.simulated_trade_id.clone())
+                                    .or_insert_with(|| trade.clone());
+                            }
+                        } else {
+                            for trade in
+                                materialized
+                                    .query
+                                    .retained_terminal_trades()
+                                    .filter(|trade| {
+                                        trade_projection_matches_trades_filter(
+                                            trade,
+                                            &request.filter,
+                                        )
+                                    })
+                            {
+                                rows_by_id
+                                    .entry(trade.simulated_trade_id.clone())
+                                    .or_insert_with(|| trade.clone());
+                            }
                         }
                     }
                     let mut rows = rows_by_id.into_values().collect::<Vec<_>>();
@@ -19080,16 +19293,18 @@ fn materialize_execution_drive_prefix_v2<'a>(
     };
 
     let mut query = query_state.prepare_delta_v2();
-    for condition_id in &terminal_projection_condition_ids {
+    if !terminal_projection_condition_ids.is_empty() {
         let orders = scheduled
             .execution_candidate()
-            .candidate_orders_for_condition(condition_id)
+            .candidate_orders()
+            .filter(|order| terminal_projection_condition_ids.contains(&order.condition_id))
             .map(project_order)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| MarketEventErrorV1::ExecutionState(format!("{error:?}")))?;
         let trades = scheduled
             .execution_candidate()
-            .candidate_fills_for_condition(condition_id)
+            .candidate_fills()
+            .filter(|fill| terminal_projection_condition_ids.contains(&fill.condition_id))
             .map(project_trade)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| MarketEventErrorV1::ExecutionState(format!("{error:?}")))?;
@@ -32631,7 +32846,7 @@ mod tests {
         match mismatched_time {
             Err(SessionCheckpointErrorV1::InvalidSessionState(message)) => {
                 assert!(
-                    message.contains("无法重放") && message.contains("ActionWatermarkClosed"),
+                    message.contains("无法重放") && message.contains("动作时点已经被逻辑水位关闭"),
                     "wrong-time error: {message}",
                 );
             }
@@ -36491,6 +36706,412 @@ mod tests {
             tail.recovery_operation,
         )
         .expect("用同一稀疏撤单核心重放 Paper V2 批撤尾日志");
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(replayed.checkpoint(None), online_checkpoint);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recoverable_paper_v2_three_query_actions_are_atomic_one_log_each_and_replay_exactly() {
+        use crate::task21_tests::fresh_quality;
+        use crate::task22_tests::{
+            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
+            orderbook_evidence, scenario as long_scenario, sealed_event,
+            session_spec as long_session_spec,
+        };
+        use data_pipeline_core::encode_execution_market_event_v3;
+
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载 Paper V2 时延配置");
+        let scenario = long_scenario();
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let mut spec = long_session_spec(
+            &scenario,
+            SimCallerRoleV1::Paper,
+            "paper-v2-three-query-actions",
+        );
+        spec.response_outbox_capacity = std::num::NonZeroUsize::new(8).expect("正容量");
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+
+        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
+        let resolution_at_utc_ms = long_market()
+            .window
+            .end_at_utc_ms
+            .checked_add(1)
+            .expect("判定时点不得溢出");
+        let resolution = MarketResolutionTerminalV3::Resolved {
+            winning_asset_id: long_asset("1", 0, "Up").token_id.0,
+            winning_outcome: "Up".to_owned(),
+            payout_vector: vec![
+                contracts::PayoutEntryV1 {
+                    asset: long_asset("1", 0, "Up"),
+                    payout_pusd_per_share: contracts::ExactDecimal("1".to_owned()),
+                },
+                contracts::PayoutEntryV1 {
+                    asset: long_asset("2", 1, "Down"),
+                    payout_pusd_per_share: contracts::ExactDecimal("0".to_owned()),
+                },
+            ],
+            mapping_rule_version: "paper-v2-query-eof-resolution-v1".to_owned(),
+        };
+        let resolution_event = sealed_event(
+            contracts::ExecutionMarketEventPayloadV3::MarketResolutionTerminal(resolution),
+            orderbook_evidence(resolution_at_utc_ms, resolution_at_utc_ms, 3),
+            fresh_quality(),
+        );
+        let encoded_resolution = encode_execution_market_event_v3(&resolution_event)
+            .expect("编码 Paper V2 查询 EOF 判定事件");
+        assert_eq!(
+            session.apply_closed_market_event_bucket(ClosedMarketEventBucketV1::public(
+                resolution_at_utc_ms,
+                next_visibility_position,
+                next_visibility_position + 1,
+                MillisecondBucketClosureV1::EndOfInput,
+                vec![encoded_resolution],
+            )),
+            Ok(MarketBucketApplyDispositionV1::Applied)
+        );
+        assert_eq!(
+            session
+                .session
+                .input_path_seal(MarketEventPathV1::PublicVisibility),
+            Some(&InputPathSealOutcomeV1::Exhausted)
+        );
+        let max_delay_ms =
+            i64::try_from(profile.statistics().max_delay_ms).expect("代理时延上限适合 i64");
+        let query_at_utc_ms = resolution_at_utc_ms
+            .checked_add(max_delay_ms)
+            .and_then(|at| at.checked_add(1))
+            .expect("查询时点不得溢出");
+
+        let mut query_contexts = [
+            context_for_arrival(&session, &profile, "paper-v2-query-a", 0, query_at_utc_ms),
+            context_for_arrival(&session, &profile, "paper-v2-query-b", 0, query_at_utc_ms),
+            context_for_arrival(&session, &profile, "paper-v2-query-c", 0, query_at_utc_ms),
+        ];
+        query_contexts.sort_by_key(|context| context.request_sent_at_utc_ms);
+        for (offset, context) in query_contexts.iter_mut().enumerate() {
+            context.caller_sequence = u64::try_from(offset + 1).expect("三项查询序号适合 u64");
+        }
+        let [order_context, orders_context, trades_context] = query_contexts;
+
+        let order_registration = session
+            .order(OrderRequestV1 {
+                context: order_context,
+                platform_order_id: "a".repeat(64),
+            })
+            .expect("登记缺失 Order 查询");
+        let orders_registration = session
+            .orders(OrdersRequestV1 {
+                context: orders_context,
+                filter: OrdersFilterV1::default(),
+                cursor: None,
+            })
+            .expect("登记空 Orders 首页查询");
+        let trades_registration = session
+            .trades(TradesRequestV1 {
+                context: trades_context,
+                filter: TradesFilterV1::default(),
+                cursor: None,
+            })
+            .expect("登记空 Trades 首页查询");
+        let order_at = order_registration
+            .receipt
+            .transit
+            .platform_arrived_at_utc_ms;
+        let orders_at = orders_registration
+            .receipt
+            .transit
+            .platform_arrived_at_utc_ms;
+        let trades_at = trades_registration
+            .receipt
+            .transit
+            .platform_arrived_at_utc_ms;
+        assert_eq!(
+            (order_at, orders_at, trades_at),
+            (query_at_utc_ms, query_at_utc_ms, query_at_utc_ms)
+        );
+        assert_eq!(session.query_state.next_root_sequence, 1);
+
+        let application_checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
+            &process,
+            &session,
+            rules.as_ref(),
+        );
+        let directory = tempfile::tempdir().expect("创建 Paper V2 查询协调器临时目录");
+        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
+            directory.path().join("paper-three-query-actions"),
+            &session,
+            &application_checkpoint,
+        )
+        .expect("创建 Paper V2 查询协调器");
+
+        let before_failure_state = session.durable_checkpoint();
+        let before_failure_cursor = coordinator.cursor_for_tests();
+        let before_failure_action = session
+            .session
+            .first_pending_action_through(order_at)
+            .expect("Order 查询必须是首个到期动作");
+        coordinator
+            .store
+            .install_transaction_log_insert_failure_for_tests()
+            .expect("安装 Paper V2 查询 INSERT 失败触发器");
+        reset_execution_state_clone_count_for_tests();
+        reset_request_registration_preparation_counts_v2();
+        assert!(matches!(
+            coordinator.drive_query_execution_through(&mut session, order_at),
+            Err(SubmissionProcessingErrorV1::Session(SessionError::Durability(message)))
+                if message.contains("SQLite")
+        ));
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(session.durable_checkpoint(), before_failure_state);
+        assert_eq!(coordinator.cursor_for_tests(), before_failure_cursor);
+        assert_eq!(coordinator.encoded_transaction_count_for_tests, 1);
+        assert_eq!(coordinator.append_attempt_count_for_tests, 1);
+        assert_eq!(coordinator.append_success_count_for_tests, 0);
+        assert_eq!(coordinator.logical_log_bytes, 0);
+        assert!(!coordinator.recovery_required);
+        assert_eq!(
+            session.session.first_pending_action_through(order_at),
+            Some(before_failure_action)
+        );
+        assert!(
+            coordinator
+                .store
+                .recover::<
+                    DurableLogicalTransactionEvidenceV2,
+                    DurableRecoveryOperationV2,
+                    RecoverablePaperApplicationCheckpointV2,
+                >()
+                .expect("INSERT 失败后读取 Paper V2 查询日志")
+                .tail
+                .is_empty()
+        );
+        coordinator
+            .store
+            .remove_transaction_log_insert_failure_for_tests()
+            .expect("移除 Paper V2 查询 INSERT 失败触发器");
+
+        reset_execution_state_clone_count_for_tests();
+        reset_request_registration_preparation_counts_v2();
+        assert_eq!(
+            coordinator.drive_query_execution_through(&mut session, order_at),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        assert_eq!(session.query_state.next_root_sequence, 1);
+        let recovered_after_order = coordinator
+            .store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("读取 Order 查询日志");
+        assert_eq!(recovered_after_order.tail.len(), 1);
+        let order_evidence = &recovered_after_order.tail[0].evidence;
+        assert_eq!(order_evidence.logical_action_results.len(), 1);
+        assert!(matches!(
+            order_evidence.logical_action_results[0].part,
+            DirectResponsePartV1::Order {
+                result: OrderQueryResultV1::NotFound,
+                ..
+            }
+        ));
+        assert!(matches!(
+            order_evidence.private_output_drafts.as_slice(),
+            [DurablePrivateOutputDraftV1::Direct { draft }]
+                if draft.method == DirectResponseMethodV1::Order
+        ));
+        assert!(order_evidence.account_deltas.is_empty());
+
+        assert_eq!(
+            coordinator.drive_query_execution_through(&mut session, orders_at),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        assert_eq!(session.query_state.next_root_sequence, 2);
+        assert!(session.query_state.roots.is_empty());
+        assert!(session.query_state.issued_cursors.is_empty());
+        let recovered_after_orders = coordinator
+            .store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("读取 Orders 查询日志");
+        assert_eq!(recovered_after_orders.tail.len(), 2);
+        let orders_evidence = &recovered_after_orders.tail[1].evidence;
+        assert_eq!(orders_evidence.logical_action_results.len(), 1);
+        assert!(matches!(
+            &orders_evidence.logical_action_results[0].part,
+            DirectResponsePartV1::Orders {
+                result: OrdersQueryResultV1::Page(OrdersPageV1 {
+                    items,
+                    next_cursor: None,
+                    ..
+                }),
+                ..
+            } if items.is_empty()
+        ));
+        assert!(matches!(
+            orders_evidence.private_output_drafts.as_slice(),
+            [DurablePrivateOutputDraftV1::Direct { draft }]
+                if draft.method == DirectResponseMethodV1::Orders
+        ));
+        assert!(orders_evidence.account_deltas.is_empty());
+
+        assert_eq!(
+            coordinator.drive_query_execution_through(&mut session, trades_at),
+            Ok(SubmissionDriveDispositionV1::ItemProcessed {
+                request_completed: true,
+            })
+        );
+        assert_eq!(session.query_state.next_root_sequence, 3);
+        assert!(session.query_state.roots.is_empty());
+        assert!(session.query_state.issued_cursors.is_empty());
+        assert_eq!(execution_state_clone_count_for_tests(), 0);
+        assert_eq!(
+            request_registration_preparation_counts_v2().runtime_state_calls,
+            0
+        );
+        assert_eq!(coordinator.cursor_for_tests().0, 3);
+        assert_eq!(coordinator.encoded_transaction_count_for_tests, 4);
+        assert_eq!(coordinator.append_attempt_count_for_tests, 4);
+        assert_eq!(coordinator.append_success_count_for_tests, 3);
+        let online_checkpoint = session.durable_checkpoint();
+
+        let recovered = coordinator
+            .store
+            .recover::<
+                DurableLogicalTransactionEvidenceV2,
+                DurableRecoveryOperationV2,
+                RecoverablePaperApplicationCheckpointV2,
+            >()
+            .expect("恢复 Paper V2 三查询日志");
+        let recovered_checkpoint = recovered
+            .checkpoint
+            .expect("三查询恢复必须有正式应用检查点");
+        assert_eq!(recovered_checkpoint.through_sequence, 0);
+        assert_eq!(recovered.tail.len(), 3);
+        assert_eq!(
+            recovered
+                .tail
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            recovered
+                .tail
+                .iter()
+                .map(
+                    |entry| match &entry.evidence.logical_action_results[0].part {
+                        DirectResponsePartV1::Order {
+                            result: OrderQueryResultV1::NotFound,
+                            ..
+                        } => DirectResponseMethodV1::Order,
+                        DirectResponsePartV1::Orders {
+                            result:
+                                OrdersQueryResultV1::Page(OrdersPageV1 {
+                                    items,
+                                    next_cursor: None,
+                                    ..
+                                }),
+                            ..
+                        } if items.is_empty() => DirectResponseMethodV1::Orders,
+                        DirectResponsePartV1::Trades {
+                            result:
+                                TradesQueryResultV1::Page(TradesPageV1 {
+                                    items,
+                                    next_cursor: None,
+                                    ..
+                                }),
+                            ..
+                        } if items.is_empty() => DirectResponseMethodV1::Trades,
+                        part => panic!("三查询日志包含错误响应种类：{part:?}"),
+                    }
+                )
+                .collect::<Vec<_>>(),
+            vec![
+                DirectResponseMethodV1::Order,
+                DirectResponseMethodV1::Orders,
+                DirectResponseMethodV1::Trades,
+            ]
+        );
+        for (entry, expected_method) in recovered.tail.iter().zip([
+            DirectResponseMethodV1::Order,
+            DirectResponseMethodV1::Orders,
+            DirectResponseMethodV1::Trades,
+        ]) {
+            assert_eq!(entry.evidence.logical_action_results.len(), 1);
+            assert!(matches!(
+                entry.evidence.private_output_drafts.as_slice(),
+                [DurablePrivateOutputDraftV1::Direct { draft }]
+                    if draft.method == expected_method
+            ));
+        }
+        assert!(
+            recovered
+                .tail
+                .iter()
+                .all(|entry| entry.evidence.account_deltas.is_empty())
+        );
+
+        let session_id = session.session_spec().session_id.clone();
+        let application_checkpoint = recovered_checkpoint.checkpoint;
+        let later_time_baseline = restore_recoverable_paper_application_session_for_tests(
+            &process,
+            application_checkpoint.clone(),
+            &session_id,
+        );
+        let later_time = replay_execution_operation_v2(
+            later_time_baseline,
+            &recovered.tail[0].evidence,
+            DurableRecoveryOperationV2::DriveExecutionThrough {
+                effective_processing_at_utc_ms: order_at + 1,
+            },
+        );
+        let later_time_error = match later_time {
+            Ok(_) => panic!("较晚执行时点不得重放成功"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(
+                &later_time_error,
+                SessionCheckpointErrorV1::InvalidSessionState(message)
+                    if message.contains("恢复操作时点与重算候选不符")
+            ),
+            "later-time error: {later_time_error}",
+        );
+        let mut replayed = restore_recoverable_paper_application_session_for_tests(
+            &process,
+            application_checkpoint,
+            &session_id,
+        );
+        reset_execution_state_clone_count_for_tests();
+        reset_request_registration_preparation_counts_v2();
+        for entry in recovered.tail {
+            replayed =
+                replay_execution_operation_v2(replayed, &entry.evidence, entry.recovery_operation)
+                    .expect("用共享查询稀疏核心重放 Paper V2 查询尾日志");
+        }
         assert_eq!(execution_state_clone_count_for_tests(), 0);
         assert_eq!(
             request_registration_preparation_counts_v2().runtime_state_calls,
