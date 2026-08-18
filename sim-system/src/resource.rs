@@ -9,9 +9,7 @@ pub const COMPONENT_GOLDEN_RESOURCE_POLICY_ID_V1: &str = "component_golden_resou
 pub const SIMULATION_RESOURCE_POLICY_HASH_DOMAIN_V1: &str =
     "sim-system/simulation-resource-policy/v1";
 
-// These deliberately generous values are pre-freeze placeholders. Task 4.4's
-// owner must replace them with the measured COMPONENT_GOLDEN limits before the
-// task is accepted; they are not production capacity claims.
+// 这些宽松值只维持任务 4.4 前仍在线的公开 V1 兼容路径，不是当前资源方案或生产容量声明。
 const PREFREEZE_SESSION_MAX_RECORDS_V1: u64 = 1_000_000;
 const PREFREEZE_SESSION_MAX_BYTES_V1: u64 = 1 << 30;
 const PREFREEZE_RUN_MAX_RECORDS_V1: u64 = 4_000_000;
@@ -36,6 +34,62 @@ impl ResourceQuantityV1 {
     fn observe_max(&mut self, candidate: Self) {
         self.records = self.records.max(candidate.records);
         self.bytes = self.bytes.max(candidate.bytes);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BusinessResourceDeltaV2 {
+    pub(crate) added_records: u64,
+    pub(crate) removed_records: u64,
+    pub(crate) added_bytes: u64,
+    pub(crate) removed_bytes: u64,
+}
+
+impl BusinessResourceDeltaV2 {
+    pub(crate) fn add_record(&mut self, owned_bytes: u64) {
+        self.added_records += 1;
+        self.added_bytes += owned_bytes;
+    }
+
+    pub(crate) fn remove_record(&mut self, owned_bytes: u64) {
+        self.removed_records += 1;
+        self.removed_bytes += owned_bytes;
+    }
+
+    pub(crate) fn add_records(&mut self, records: u64) {
+        self.added_records += records;
+    }
+
+    pub(crate) fn remove_records(&mut self, records: u64) {
+        self.removed_records += records;
+    }
+
+    pub(crate) fn replace_bytes(&mut self, previous: u64, next: u64) {
+        if next >= previous {
+            self.added_bytes += next - previous;
+        } else {
+            self.removed_bytes += previous - next;
+        }
+    }
+
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.added_records += other.added_records;
+        self.removed_records += other.removed_records;
+        self.added_bytes += other.added_bytes;
+        self.removed_bytes += other.removed_bytes;
+    }
+
+    pub(crate) fn apply_to(self, current: ResourceQuantityV1) -> Option<ResourceQuantityV1> {
+        Some(ResourceQuantityV1::new(
+            current
+                .records
+                .checked_add(self.added_records)?
+                .checked_sub(self.removed_records)?,
+            current
+                .bytes
+                .checked_add(self.added_bytes)?
+                .checked_sub(self.removed_bytes)?,
+        ))
     }
 }
 

@@ -294,8 +294,9 @@ changelog 与 Git 中。
    生命周期、规范事件及生成 `DecisionBootstrapEvent`、`DecisionWakeEvent` 所需证据。
 8. DPT 只绑定公共账户轨迹身份、开户锚点身份、精确数据范围、模型决策范围截止和经济成熟或
    删失证据，不创建开户锚点，不计算账户资金耗尽，也不产生 Gymnasium 的 `terminated`、
-   `truncated` 或 `reset`。隔离账户轨迹可以并行消费同一份不可变市场事件页，但各自保持独立
-   sim 会话、Ledger 投影和状态；同一市场时间带的反事实副本不增加独立市场历史样本量。
+   `truncated` 或 `reset`。隔离账户轨迹可以并行消费同一份不可变市场事件页，但每条轨迹各自保持
+   一个独立 sim 运行根、该根唯一会话、Ledger 投影和状态；同一市场时间带的反事实副本不增加独立
+   市场历史样本量。
 
 ### 2.6 完成门、产物、资源与失败语义
 
@@ -814,7 +815,11 @@ changelog 与 Git 中。
     Gate A 已公开强类型读取器。事件时间路径使用 `PlatformReplayCursor` 保持索引顺序并过滤
     参考事件；模型可见路径使用 `VisibilityIndexCursor` 保持索引顺序，并以有界索引页和
     `ExecutionMarketEventCursor` 解析同一唯一事件存储中的市场事件。适配层只输出两条
-    `ExecutionMarketEventV3` 流，不修改 Gate A 核心或把新代码身份伪装成既有回执覆盖范围。
+    `ExecutionMarketEventV3` 流，不修改 Gate A 核心或把新代码身份伪装成既有回执覆盖范围。两条
+    既有索引路径必须同时保留逐记录原逻辑位置和全局闭合边界；多个独立 sim 运行根可以共享同一
+    强类型事件页。根特定稀疏正文和必要 `PlatformPrefixAdvanceV2` 由 `sim-system` 受信输入驱动器
+    按各根冻结市场范围及已有定时义务形成，空前缀不是第三条 DPT 事件流、Gate A 新事件类型或
+    第二份事件带。Paper 不在本适配层按根目录预筛公开桶。
     -> 验证：适配层不直接读 Parquet、不重排、不从一个索引重建另一个索引、不复制完整事件带；
     实现身份、页上限、完整性和实际扫描资源绑定联合清单。现有公开原语不能同时满足正确性和
     资源硬上限时，本阶段停止并交由 DPT 公共读取合同决策，不把缺口推给模拟器核心。
@@ -867,7 +872,7 @@ training Ledger/只读投影的当前归属、状态和公共合同只从
 - 任务 4.1：核对外部归一化反馈与 `LedgerProjectionV1` 读取合同
   - 步骤 4.1.1：消费并校验归属计划定义的公共 `LedgerProjectionV1` 版本、实例身份和成功回执。
     -> 验证：跨实例、倒退序号、摘要不符、缺初始状态、缺任一外部回执 ID/SHA 和写权限
-    全部失败；`SimulationRunManifest` 未绑定 sim-system 归属计划已验证的首版项目代理时延
+    全部失败；`SimulationRunManifestV2` 未绑定 sim-system 归属计划已验证的首版项目代理时延
     配置档身份，或配置档状态、身份不合格时不默认放行。
   - 步骤 4.1.2：对齐模拟原始反馈、规范事件和 Ledger 经济事实。
     -> 验证：使用冻结的确定性脚本意图时，订单、成交、手续费、返佣、赎回和付款均只
@@ -917,9 +922,10 @@ training Ledger/只读投影的当前归属、状态和公共合同只从
   - 步骤 4.6.2：在同一文件系统临时目录生成完整清单和待验收训练数据集。
     -> 验证：清单引用同一输入谱系的门 A 回执，并绑定数据根、日期下限、精确日期/范围、
     `input_set_identity`、支持 schema、输入、核心、Observation、Ledger、标签、
-    `training_split_manifest_id/hash`、归一化身份、四类外部回执 ID/SHA、本次
-    `SimulationRunManifest` ID/SHA 和其已绑定的项目代理时延配置档状态/身份。模拟运行清单
-    传递绑定规则快照、场景、随机种子、请求/反馈合同、确定性脚本意图身份和原始反馈摘要，
+    `training_split_manifest_id/hash`、归一化身份、四类外部回执 ID/SHA，以及本次每条账户轨迹的
+    `SimulationRunManifestV2` ID/SHA 规范集合和各自已绑定的项目代理时延配置档状态/身份。每份模拟
+    运行清单只对应一个运行根、一个会话和一条账户轨迹，并传递绑定规则快照、场景、随机种子、
+    请求/反馈合同、确定性脚本意图身份和原始反馈摘要，
     DPT 不重复这些字段；训练数据集清单另绑定逐轨迹公共身份、开户锚点身份、集合、精确范围、
     模型决策范围截止和成熟/删失摘要，不复制 Ledger 内部字段，也不签发训练回合终止或重置。
     门 A 的切分字段必须为 `N/A`。此时尚不签发
@@ -961,7 +967,7 @@ training Ledger/只读投影的当前归属、状态和公共合同只从
     `TRAINING_DATASET_READY`。
     -> 验证：最终回执机械绑定 `input_set_identity`、实际切分身份、四类外部回执 ID/SHA、
     同一候选的 sim 阶段 7 联合训练闭环证据 ID/SHA、阶段 4 候选及最终训练数据集清单
-    ID/SHA，以及同一候选 `SimulationRunManifest` 已绑定的项目代理时延配置档状态/身份；
+    ID/SHA，以及同一候选逐轨迹 `SimulationRunManifestV2` 规范集合已绑定的项目代理时延配置档状态/身份；
     只有回执签发后正式 `model-train`
     入口才接受；若门 B 改变规范事件 ID、任一时间投影、字段语义或
     `pipeline_core_identity`，旧门 A 回执先失效并重新生成、复核。
@@ -1071,7 +1077,8 @@ Git 历史中，不形成当前兼容路径。
 实现和成功回执。外部归一化实现的事项归属仍须由用户决定。首版订单请求与私有反馈项目代理
 时延配置档由 sim-system 归属计划在任务
 1.2 密封，并必须在门 B 前由
-同一 `SimulationRunManifest` 绑定；该位置已经确定，不再保留门 B 前后两种分支。配置档不
+每条轨迹各自的 `SimulationRunManifestV2` 绑定，并由训练数据集清单聚合该规范集合；该位置已经确定，
+不再保留门 B 前后两种分支。配置档不
 阻断门 A、不替代公开数据已经记录的双时间坐标，也不得升级为私有链路实测。CLOB
 最小订单数量、完整 `feeSchedule` 与 `itode` 归 `sim-system` 进程启动时一次形成的共享规则
 快照，不是门 A 缺口。

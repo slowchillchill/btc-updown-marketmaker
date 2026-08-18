@@ -227,10 +227,10 @@ struct TakerFillStateV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct RebateDayFinalStateV1 {
-    payable_pusd: Decimal,
-    locked_remainder_pusd: Decimal,
-    paid: bool,
+pub(crate) struct RebateDayFinalStateV1 {
+    pub(crate) payable_pusd: Decimal,
+    pub(crate) locked_remainder_pusd: Decimal,
+    pub(crate) paid: bool,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -494,16 +494,17 @@ impl RebateStatePatchV2 {
             return Err(RebateStateErrorV1::DuplicateTrade(trade_id.to_owned()));
         }
 
-        let attribution_day_utc_ms = utc_day_start(matched_at_utc_ms)?;
-        let fee_equivalent_pusd = taker_fee_pusd_v1(
-            &[(base_units, price_pusd_per_share)],
+        let contribution = maker_rebate_contribution_v1(
+            trade_id,
+            matched_at_utc_ms,
+            base_units,
+            price_pusd_per_share,
             state.fee_rate,
             state.fee_exponent,
+            state.maker_rebate_rate,
         )?;
-        let contribution_pusd = fee_equivalent_pusd
-            .checked_mul(state.maker_rebate_rate)
-            .ok_or(RebateStateErrorV1::ArithmeticOverflow)?
-            .normalize();
+        let attribution_day_utc_ms = contribution.attribution_day_utc_ms;
+        let contribution_pusd = contribution.contribution_pusd;
         let maturity_at_utc_ms = rebate_maturity_at(RebateKindV1::Maker, attribution_day_utc_ms)?;
         let potential_accrual_pusd = self
             .maker_day_buckets
@@ -547,16 +548,7 @@ impl RebateStatePatchV2 {
             (
                 condition_id.to_owned(),
                 MakerFillStateV1 {
-                    contribution: MakerRebateContributionV1 {
-                        trade_id: trade_id.to_owned(),
-                        matched_at_utc_ms,
-                        attribution_day_utc_ms,
-                        base_units,
-                        price_pusd_per_share,
-                        fee_equivalent_pusd,
-                        rebate_rate: state.maker_rebate_rate,
-                        contribution_pusd,
-                    },
+                    contribution,
                     terminal_succeeded: None,
                 },
             ),
@@ -2156,7 +2148,38 @@ fn ready_maker_market_result_at_end(
     })
 }
 
-fn finalized_day_state(accrued_pusd: Decimal) -> RebateDayFinalStateV1 {
+pub(crate) fn maker_rebate_contribution_v1(
+    trade_id: &str,
+    matched_at_utc_ms: i64,
+    base_units: u128,
+    price_pusd_per_share: Decimal,
+    fee_rate: Decimal,
+    fee_exponent: u32,
+    maker_rebate_rate: Decimal,
+) -> Result<MakerRebateContributionV1, RebateStateErrorV1> {
+    let attribution_day_utc_ms = utc_day_start(matched_at_utc_ms)?;
+    let fee_equivalent_pusd = taker_fee_pusd_v1(
+        &[(base_units, price_pusd_per_share)],
+        fee_rate,
+        fee_exponent,
+    )?;
+    let contribution_pusd = fee_equivalent_pusd
+        .checked_mul(maker_rebate_rate)
+        .ok_or(RebateStateErrorV1::ArithmeticOverflow)?
+        .normalize();
+    Ok(MakerRebateContributionV1 {
+        trade_id: trade_id.to_owned(),
+        matched_at_utc_ms,
+        attribution_day_utc_ms,
+        base_units,
+        price_pusd_per_share,
+        fee_equivalent_pusd,
+        rebate_rate: maker_rebate_rate,
+        contribution_pusd,
+    })
+}
+
+pub(crate) fn finalized_day_state(accrued_pusd: Decimal) -> RebateDayFinalStateV1 {
     let payable_pusd = if accrued_pusd >= Decimal::ONE {
         accrued_pusd.trunc_with_scale(4).normalize()
     } else {
@@ -2177,14 +2200,14 @@ fn finalized_day_state(accrued_pusd: Decimal) -> RebateDayFinalStateV1 {
     }
 }
 
-fn utc_day_start(timestamp_utc_ms: i64) -> Result<i64, RebateStateErrorV1> {
+pub(crate) fn utc_day_start(timestamp_utc_ms: i64) -> Result<i64, RebateStateErrorV1> {
     timestamp_utc_ms
         .div_euclid(UTC_DAY_MILLIS)
         .checked_mul(UTC_DAY_MILLIS)
         .ok_or(RebateStateErrorV1::TimeOverflow)
 }
 
-fn rebate_maturity_at(
+pub(crate) fn rebate_maturity_at(
     kind: RebateKindV1,
     attribution_day_utc_ms: i64,
 ) -> Result<i64, RebateStateErrorV1> {

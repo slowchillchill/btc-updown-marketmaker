@@ -33,6 +33,10 @@ use crate::market::{
     MarketEventErrorV1, MarketEventPathV1, MarketLifecyclePhaseV1, MarketStateV1,
     MillisecondBucketClosureV1,
 };
+#[cfg(test)]
+use crate::market::{
+    closed_bucket_decode_count_for_tests, reset_closed_bucket_decode_count_for_tests,
+};
 use crate::matching::{
     AuthorizedMarketLifecycleEffectV2, CancelOrderStateDispositionV1, ExecutionStateV1,
     MatchingMathErrorV1, MatchingStateErrorV1, PreparedExecutionDriveDeltaV2, QueueMatchPlanV1,
@@ -49,10 +53,8 @@ use crate::matching::{
 };
 use crate::measurement::{ComponentGoldenLoadContractV1, ComponentGoldenRunMeasurementV1};
 use crate::persistence::{
-    DurabilityProfileV2, DurableCommitFailureV1, DurableResourcePreviewV1,
-    FINAL_EVIDENCE_DIRECTORY_NAME_V2, FinalEvidenceExportReceiptV2, ImmutableArtifactMemberV1,
-    LocalDurabilityStoreV1, LocalTransactionLogStoreV2, PersistenceErrorV1, RecoveredDurabilityV1,
-    RecoveredEvidenceV1, TransactionLogIdentityV2, encode_transaction_record_v2,
+    DurableCommitFailureV1, DurableResourcePreviewV1, ImmutableArtifactMemberV1,
+    LocalDurabilityStoreV1, PersistenceErrorV1, RecoveredDurabilityV1, RecoveredEvidenceV1,
 };
 use crate::platform_rules::{SealedProcessRuleSnapshot, SnapshotAccessMode};
 use crate::rebate::{MakerRebateMarketResultStatusV1, RebateKindV1, RebateSettlementActionV1};
@@ -102,9 +104,6 @@ const DURABLE_RUN_CHECKPOINT_SCHEMA_V1: &str = "sim_durable_run_checkpoint_v1";
 const DURABLE_TRANSACTION_EVIDENCE_SCHEMA_V1: &str = "sim_durable_transaction_evidence_v1";
 const DURABLE_LOGICAL_TRANSACTION_EVIDENCE_SCHEMA_V2: &str =
     "sim_durable_logical_transaction_evidence_v2";
-const RECOVERABLE_PAPER_APPLICATION_CHECKPOINT_SCHEMA_V2: &str =
-    "sim_recoverable_paper_application_checkpoint_v2";
-
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct RequestRegistrationPreparationCountsV2 {
@@ -112,6 +111,13 @@ struct RequestRegistrationPreparationCountsV2 {
     canonical_request_sha256_calls: u64,
     mutation_binding_calls: u64,
     evidence_construction_calls: u64,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct FullCheckpointSerializationCountsV1 {
+    session_checkpoint_calls: u64,
+    run_checkpoint_calls: u64,
 }
 
 #[cfg(test)]
@@ -123,6 +129,12 @@ thread_local! {
             canonical_request_sha256_calls: 0,
             mutation_binding_calls: 0,
             evidence_construction_calls: 0,
+        }) };
+    static FULL_CHECKPOINT_SERIALIZATION_COUNTS_V1:
+        std::cell::Cell<FullCheckpointSerializationCountsV1> =
+        const { std::cell::Cell::new(FullCheckpointSerializationCountsV1 {
+            session_checkpoint_calls: 0,
+            run_checkpoint_calls: 0,
         }) };
 }
 
@@ -136,6 +148,29 @@ fn reset_request_registration_preparation_counts_v2() {
 #[cfg(test)]
 fn request_registration_preparation_counts_v2() -> RequestRegistrationPreparationCountsV2 {
     REQUEST_REGISTRATION_PREPARATION_COUNTS_V2.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn reset_full_checkpoint_serialization_counts_v1() {
+    FULL_CHECKPOINT_SERIALIZATION_COUNTS_V1.with(|counts| {
+        counts.set(FullCheckpointSerializationCountsV1::default());
+    });
+}
+
+#[cfg(test)]
+fn full_checkpoint_serialization_counts_v1() -> FullCheckpointSerializationCountsV1 {
+    FULL_CHECKPOINT_SERIALIZATION_COUNTS_V1.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn update_full_checkpoint_serialization_counts_v1(
+    update: impl FnOnce(&mut FullCheckpointSerializationCountsV1),
+) {
+    FULL_CHECKPOINT_SERIALIZATION_COUNTS_V1.with(|stored| {
+        let mut counts = stored.get();
+        update(&mut counts);
+        stored.set(counts);
+    });
 }
 
 #[cfg(test)]
@@ -1365,18 +1400,6 @@ struct DurableRequestRegistrationV1 {
     actions: Vec<QueuedLogicalActionV1>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-enum DurableRecoveryOperationV2 {
-    ApplicationCheckpointBoundary,
-    RegisterRequest,
-    ApplyClosedMarketEventBucket,
-    DriveExecutionThrough { effective_processing_at_utc_ms: i64 },
-    AdvancePrivateFactThrough { received_at_utc_ms: i64 },
-    AdvanceDownstreamDurability,
-    CloseIngress,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DurableLogicalActionResultV1 {
@@ -1751,32 +1774,6 @@ type DurableEvictedMarketStateV1 = (
 type DurableEvictedMarketsBySessionV1 =
     BTreeMap<String, BTreeMap<String, DurableEvictedMarketStateV1>>;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RecoverablePaperApplicationCheckpointV2 {
-    schema_version: String,
-    run_checkpoint: DurableRunCheckpointV1,
-    evicted_markets: DurableEvictedMarketsBySessionV1,
-}
-
-impl RecoverablePaperApplicationCheckpointV2 {
-    fn validate(&self) -> Result<(), PersistenceErrorV1> {
-        if self.schema_version != RECOVERABLE_PAPER_APPLICATION_CHECKPOINT_SCHEMA_V2 {
-            return Err(PersistenceErrorV1::Integrity(format!(
-                "不支持的 RecoverablePaper 应用检查点版本：{}",
-                self.schema_version
-            )));
-        }
-        if self.run_checkpoint.schema_version != DURABLE_RUN_CHECKPOINT_SCHEMA_V1 {
-            return Err(PersistenceErrorV1::Integrity(format!(
-                "RecoverablePaper 应用检查点包含不支持的运行检查点版本：{}",
-                self.run_checkpoint.schema_version
-            )));
-        }
-        Ok(())
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DurableSessionCompletionKindV1 {
     PaperRetentionExpired,
@@ -2045,200 +2042,6 @@ impl ArtifactEvidenceIndexV1 {
         }
         Ok(())
     }
-
-    fn apply_logical_v2(
-        &mut self,
-        sequence: u64,
-        file_sha256: Sha256Hex,
-        evidence: &DurableLogicalTransactionEvidenceV2,
-    ) -> Result<(), SimExecutionPersistenceErrorV1> {
-        if evidence.schema_version != DURABLE_LOGICAL_TRANSACTION_EVIDENCE_SCHEMA_V2 {
-            return Err(SimExecutionPersistenceErrorV1::UnsupportedCheckpoint(
-                evidence.schema_version.clone(),
-            ));
-        }
-        self.apply(&RecoveredEvidenceV1 {
-            sequence,
-            content_sha256: file_sha256,
-            envelope_byte_length: 0,
-            body: evidence.clone().into_v1(),
-        })
-    }
-}
-
-#[derive(Default)]
-struct RunArtifactEvidenceAccumulatorV2 {
-    projection: DurableEvidenceProjectionV1,
-    index: ArtifactEvidenceIndexV1,
-    evidence_count: u64,
-    evidence_bytes: u64,
-    evidence_head_sha256: Option<Sha256Hex>,
-}
-
-impl RunArtifactEvidenceAccumulatorV2 {
-    fn new() -> Self {
-        Self {
-            projection: DurableEvidenceProjectionV1::for_artifacts(),
-            ..Self::default()
-        }
-    }
-
-    fn apply_logical_evidence(
-        &mut self,
-        sequence: u64,
-        file_sha256: Sha256Hex,
-        envelope_byte_length: u64,
-        evidence: &DurableLogicalTransactionEvidenceV2,
-    ) -> Result<(), SimExecutionPersistenceErrorV1> {
-        let expected_sequence = self
-            .evidence_count
-            .checked_add(1)
-            .ok_or_else(|| SimExecutionPersistenceErrorV1::Session("V2 证据数量溢出".to_owned()))?;
-        if sequence != expected_sequence || file_sha256.0.is_empty() {
-            return Err(SimExecutionPersistenceErrorV1::Session(format!(
-                "V2 证据前缀序号或文件 SHA-256 非法：期望 {expected_sequence}，实际 {sequence}"
-            )));
-        }
-        let evidence_bytes = self
-            .evidence_bytes
-            .checked_add(envelope_byte_length)
-            .ok_or_else(|| {
-                SimExecutionPersistenceErrorV1::Session("V2 证据字节数溢出".to_owned())
-            })?;
-        self.projection.apply_logical_v2(evidence)?;
-        self.index
-            .apply_logical_v2(sequence, file_sha256.clone(), evidence)?;
-        self.evidence_count = expected_sequence;
-        self.evidence_bytes = evidence_bytes;
-        self.evidence_head_sha256 = Some(file_sha256);
-        Ok(())
-    }
-
-    fn finish(
-        self,
-        process_root: &SimProcessRoot,
-        checkpoint: &DurableRunCheckpointV1,
-        through_commit_sequence: u64,
-        evidence_run_root_relative_path: &str,
-        resource_high_water: &SimulationResourceHighWaterV1,
-    ) -> Result<PreparedRunArtifactBundleV1, artifacts::SimulationRunArtifactErrorV1> {
-        let evidence_head_sha256 = self
-            .evidence_head_sha256
-            .unwrap_or_else(|| Sha256Hex(String::new()));
-        prepare_run_artifact_bundle_from_projection(
-            process_root,
-            checkpoint,
-            through_commit_sequence,
-            self.evidence_count,
-            self.evidence_bytes,
-            &evidence_head_sha256,
-            evidence_run_root_relative_path,
-            &self.projection,
-            &self.index,
-            resource_high_water,
-        )
-    }
-}
-
-fn export_and_prepare_run_artifact_bundle_v2(
-    store: &LocalTransactionLogStoreV2,
-    process_root: &SimProcessRoot,
-    checkpoint: &DurableRunCheckpointV1,
-    through_commit_sequence: u64,
-    resource_high_water: &SimulationResourceHighWaterV1,
-) -> Result<
-    (PreparedRunArtifactBundleV1, FinalEvidenceExportReceiptV2),
-    SimExecutionPersistenceErrorV1,
-> {
-    if through_commit_sequence == 0 {
-        return Err(SimExecutionPersistenceErrorV1::Store(
-            "V2 最终证据前缀不能为空".to_owned(),
-        ));
-    }
-    let mut accumulator = Some(RunArtifactEvidenceAccumulatorV2::new());
-    let mut prepared_bundle = None;
-    let receipt = store.export_final_evidence_v2::<
-        DurableLogicalTransactionEvidenceV2,
-        DurableRecoveryOperationV2,
-        DurableRunCheckpointV1,
-        _,
-    >(
-        through_commit_sequence,
-        checkpoint,
-        |sequence, file_sha256, envelope_byte_length, evidence| {
-            let current = accumulator.as_mut().ok_or_else(|| {
-                PersistenceErrorV1::Integrity(
-                    "V2 最终证据导出在完整前缀后仍返回额外成员".to_owned(),
-                )
-            })?;
-            current
-                .apply_logical_evidence(
-                    sequence,
-                    file_sha256.clone(),
-                    envelope_byte_length,
-                    evidence,
-                )
-                .map_err(|error| PersistenceErrorV1::Integrity(error.to_string()))?;
-            if sequence == through_commit_sequence {
-                let complete = accumulator.take().ok_or_else(|| {
-                    PersistenceErrorV1::Integrity("V2 最终证据累加器已提前结束".to_owned())
-                })?;
-                prepared_bundle = Some(
-                    complete
-                        .finish(
-                            process_root,
-                            checkpoint,
-                            through_commit_sequence,
-                            FINAL_EVIDENCE_DIRECTORY_NAME_V2,
-                            resource_high_water,
-                        )
-                        .map_err(|error| PersistenceErrorV1::Integrity(error.to_string()))?,
-                );
-            }
-            Ok(())
-        },
-    )?;
-    let prepared_bundle =
-        prepared_bundle.expect("非空且完整的 V2 导出成功时已经在候选发布前形成运行产物");
-    Ok((prepared_bundle, receipt))
-}
-
-#[cfg(test)]
-pub(crate) fn export_v2_evidence_wire_fixture_for_task42(
-    root: PathBuf,
-) -> Result<FinalEvidenceExportReceiptV2, SimExecutionPersistenceErrorV1> {
-    let run_id = "task42-v2-evidence-wire-fixture".to_owned();
-    let mut store = LocalTransactionLogStoreV2::create_new(
-        root,
-        crate::persistence::TransactionLogIdentityV2::new(
-            run_id.clone(),
-            crate::persistence::DurabilityProfileV2::RecoverablePaper,
-        ),
-    )?;
-    let ingress_closed =
-        DurableLogicalTransactionEvidenceV2::new(DurableTransactionFactV1::IngressClosed {
-            session_id: "task42-v2-evidence-wire-session".to_owned(),
-        });
-    store.append_transaction(
-        &ingress_closed,
-        &DurableRecoveryOperationV2::ApplicationCheckpointBoundary,
-    )?;
-    let artifact_inputs_sealed = DurableLogicalTransactionEvidenceV2::new(
-        DurableTransactionFactV1::RunArtifactInputsSealed { run_id },
-    );
-    let record = store.append_transaction(
-        &artifact_inputs_sealed,
-        &DurableRecoveryOperationV2::ApplicationCheckpointBoundary,
-    )?;
-    let checkpoint = "task42-v2-evidence-wire-checkpoint".to_owned();
-    store.publish_application_checkpoint(record.sequence, &checkpoint)?;
-    let receipt = store.export_final_evidence_v2::<
-        DurableLogicalTransactionEvidenceV2,
-        DurableRecoveryOperationV2,
-        String,
-        _,
-    >(record.sequence, &checkpoint, |_, _, _, _| Ok(()))?;
-    Ok(receipt)
 }
 
 fn validate_run_artifact_seal_readiness(
@@ -3630,18 +3433,6 @@ impl DurableEvidenceProjectionV1 {
         self.apply_inner(evidence, true)
     }
 
-    fn apply_logical_v2(
-        &mut self,
-        evidence: &DurableLogicalTransactionEvidenceV2,
-    ) -> Result<(), SimExecutionPersistenceErrorV1> {
-        if evidence.schema_version != DURABLE_LOGICAL_TRANSACTION_EVIDENCE_SCHEMA_V2 {
-            return Err(SimExecutionPersistenceErrorV1::UnsupportedCheckpoint(
-                evidence.schema_version.clone(),
-            ));
-        }
-        self.apply_inner(&evidence.clone().into_v1(), false)
-    }
-
     fn apply_inner(
         &mut self,
         evidence: &DurableTransactionEvidenceV1,
@@ -4897,6 +4688,10 @@ fn session_resource_usage(
 ) -> Result<crate::resource::SimulationSessionResourceUsageV1, SessionError> {
     let core = checkpoint.session.resource_core_counts();
     let component_bytes = checkpoint.session.resource_component_bytes()?;
+    #[cfg(test)]
+    update_full_checkpoint_serialization_counts_v1(|counts| {
+        counts.session_checkpoint_calls += 1;
+    });
     let checkpoint_bytes = encoded_resource_bytes(checkpoint)?
         .checked_add(
             checkpoint
@@ -5040,6 +4835,10 @@ fn candidate_resource_usage(
                     )
                     .ok_or_else(|| SessionError::Durability("运行请求计数资源字节溢出".to_owned()))
             })?;
+    #[cfg(test)]
+    update_full_checkpoint_serialization_counts_v1(|counts| {
+        counts.run_checkpoint_calls += 1;
+    });
     let run_checkpoint_bytes = encoded_resource_bytes(checkpoint)?
         .checked_add(runtime_request_counter_bytes)
         .ok_or_else(|| SessionError::Durability("运行内存状态资源字节溢出".to_owned()))?;
@@ -8212,13 +8011,11 @@ struct PreparedRequestRegistrationDeltaV2 {
     request_schedule: PreparedRequestScheduleV1,
     business_market_use: PreparedBusinessMarketUseV1,
     evidence: DurableLogicalTransactionEvidenceV2,
-    recovery_operation: DurableRecoveryOperationV2,
 }
 
 struct CommittedRequestRegistrationDeltaV2 {
     schedule: RegisteredLogicalScheduleV1,
     evidence: DurableLogicalTransactionEvidenceV2,
-    recovery_operation: DurableRecoveryOperationV2,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -8258,22 +8055,6 @@ impl PrivateDeliveryCapacityLeaseV2 {
     }
 }
 
-struct RecoverablePaperCoordinatorV2 {
-    store: LocalTransactionLogStoreV2,
-    bound_session_spec: SessionSpecV2,
-    private_delivery_capacity_lease: Option<PrivateDeliveryCapacityLeaseV2>,
-    last_sequence: u64,
-    transaction_head_sha256: Option<Sha256Hex>,
-    logical_log_bytes: u64,
-    recovery_required: bool,
-    #[cfg(test)]
-    encoded_transaction_count_for_tests: u64,
-    #[cfg(test)]
-    append_attempt_count_for_tests: u64,
-    #[cfg(test)]
-    append_success_count_for_tests: u64,
-}
-
 struct PreparedPlatformBucketTransitionV2 {
     candidate_state: ExecutionSessionStateV1,
     disposition: MarketBucketApplyDispositionV1,
@@ -8291,7 +8072,6 @@ struct PreparedExecutingClosedBucketDriveV2<'a> {
     lifecycle: PreparedLifecycleOutboxDeltaV2<'a>,
     terminal_projection_condition_ids: BTreeSet<String>,
     evidence: DurableLogicalTransactionEvidenceV2,
-    recovery_operation: DurableRecoveryOperationV2,
 }
 
 struct CommittableExecutingClosedBucketDriveV2<'a> {
@@ -8299,7 +8079,6 @@ struct CommittableExecutingClosedBucketDriveV2<'a> {
     query: CommittableQueryStateDeltaV2<'a>,
     lifecycle: PreparedLifecycleOutboxDeltaV2<'a>,
     evidence: DurableLogicalTransactionEvidenceV2,
-    recovery_operation: DurableRecoveryOperationV2,
 }
 
 struct PreparedMarketOnlyClosedBucketDriveV2<'a> {
@@ -8307,14 +8086,12 @@ struct PreparedMarketOnlyClosedBucketDriveV2<'a> {
     query: PreparedQueryStateDeltaV2<'a>,
     terminal_projection_condition_ids: BTreeSet<String>,
     evidence: DurableLogicalTransactionEvidenceV2,
-    recovery_operation: DurableRecoveryOperationV2,
 }
 
 struct CommittableMarketOnlyClosedBucketDriveV2<'a> {
     session: crate::session::CommittableMarketOnlyClosedBucketSessionDriveV2<'a>,
     query: CommittableQueryStateDeltaV2<'a>,
     evidence: DurableLogicalTransactionEvidenceV2,
-    recovery_operation: DurableRecoveryOperationV2,
 }
 
 struct PreparedClosedBucketClosureUpgradeDriveV2<'a> {
@@ -8322,14 +8099,12 @@ struct PreparedClosedBucketClosureUpgradeDriveV2<'a> {
     query: PreparedQueryStateDeltaV2<'a>,
     terminal_projection_condition_ids: BTreeSet<String>,
     evidence: DurableLogicalTransactionEvidenceV2,
-    recovery_operation: DurableRecoveryOperationV2,
 }
 
 struct CommittableClosedBucketClosureUpgradeDriveV2<'a> {
     session: crate::session::CommittableClosedBucketClosureUpgradeSessionV2<'a>,
     query: CommittableQueryStateDeltaV2<'a>,
     evidence: DurableLogicalTransactionEvidenceV2,
-    recovery_operation: DurableRecoveryOperationV2,
 }
 
 impl<'a> PreparedExecutingClosedBucketDriveV2<'a> {
@@ -8342,7 +8117,6 @@ impl<'a> PreparedExecutingClosedBucketDriveV2<'a> {
             lifecycle,
             terminal_projection_condition_ids,
             evidence,
-            recovery_operation,
         } = self;
         let query = query
             .into_committable()
@@ -8353,7 +8127,6 @@ impl<'a> PreparedExecutingClosedBucketDriveV2<'a> {
             query,
             lifecycle,
             evidence,
-            recovery_operation,
         })
     }
 }
@@ -8375,7 +8148,6 @@ impl<'a> PreparedMarketOnlyClosedBucketDriveV2<'a> {
             query,
             terminal_projection_condition_ids,
             evidence,
-            recovery_operation,
         } = self;
         let query = query
             .into_committable()
@@ -8385,7 +8157,6 @@ impl<'a> PreparedMarketOnlyClosedBucketDriveV2<'a> {
             session,
             query,
             evidence,
-            recovery_operation,
         })
     }
 }
@@ -8406,7 +8177,6 @@ impl<'a> PreparedClosedBucketClosureUpgradeDriveV2<'a> {
             query,
             terminal_projection_condition_ids,
             evidence,
-            recovery_operation,
         } = self;
         let query = query
             .into_committable()
@@ -8416,7 +8186,6 @@ impl<'a> PreparedClosedBucketClosureUpgradeDriveV2<'a> {
             session,
             query,
             evidence,
-            recovery_operation,
         })
     }
 }
@@ -8493,7 +8262,6 @@ struct PreparedQueryExecutionDriveV2<'a> {
     lifecycle: PreparedLifecycleOutboxDeltaV2<'a>,
     terminal_projection_condition_ids: BTreeSet<String>,
     evidence: DurableLogicalTransactionEvidenceV2,
-    recovery_operation: DurableRecoveryOperationV2,
     disposition: SubmissionDriveDispositionV1,
 }
 
@@ -8505,7 +8273,6 @@ struct PreparedCancelExecutionDriveV2<'a> {
     lifecycle: PreparedLifecycleOutboxDeltaV2<'a>,
     terminal_projection_condition_ids: BTreeSet<String>,
     evidence: DurableLogicalTransactionEvidenceV2,
-    recovery_operation: DurableRecoveryOperationV2,
     disposition: SubmissionDriveDispositionV1,
 }
 
@@ -8517,7 +8284,6 @@ struct PreparedPostExecutionDriveV2<'a> {
     lifecycle: PreparedLifecycleOutboxDeltaV2<'a>,
     terminal_projection_condition_ids: BTreeSet<String>,
     evidence: DurableLogicalTransactionEvidenceV2,
-    recovery_operation: DurableRecoveryOperationV2,
     disposition: SubmissionDriveDispositionV1,
 }
 
@@ -8528,7 +8294,6 @@ struct CommittableCancelExecutionDriveV2<'a> {
     direct: PreparedDirectResponseEntryDeltaV2<'a>,
     lifecycle: PreparedLifecycleOutboxDeltaV2<'a>,
     evidence: DurableLogicalTransactionEvidenceV2,
-    recovery_operation: DurableRecoveryOperationV2,
     disposition: SubmissionDriveDispositionV1,
 }
 
@@ -8539,7 +8304,6 @@ struct CommittablePostExecutionDriveV2<'a> {
     direct: PreparedDirectResponseEntryDeltaV2<'a>,
     lifecycle: PreparedLifecycleOutboxDeltaV2<'a>,
     evidence: DurableLogicalTransactionEvidenceV2,
-    recovery_operation: DurableRecoveryOperationV2,
     disposition: SubmissionDriveDispositionV1,
 }
 
@@ -8555,7 +8319,6 @@ impl<'a> PreparedPostExecutionDriveV2<'a> {
             lifecycle,
             terminal_projection_condition_ids,
             evidence,
-            recovery_operation,
             disposition,
         } = self;
         let query = query.into_committable()?;
@@ -8570,7 +8333,6 @@ impl<'a> PreparedPostExecutionDriveV2<'a> {
             direct,
             lifecycle,
             evidence,
-            recovery_operation,
             disposition,
         })
     }
@@ -8598,7 +8360,6 @@ impl<'a> PreparedCancelExecutionDriveV2<'a> {
             lifecycle,
             terminal_projection_condition_ids,
             evidence,
-            recovery_operation,
             disposition,
         } = self;
         let query = query.into_committable()?;
@@ -8613,7 +8374,6 @@ impl<'a> PreparedCancelExecutionDriveV2<'a> {
             direct,
             lifecycle,
             evidence,
-            recovery_operation,
             disposition,
         })
     }
@@ -8635,7 +8395,6 @@ struct CommittableQueryExecutionDriveV2<'a> {
     direct: PreparedDirectResponseEntryDeltaV2<'a>,
     lifecycle: PreparedLifecycleOutboxDeltaV2<'a>,
     evidence: DurableLogicalTransactionEvidenceV2,
-    recovery_operation: DurableRecoveryOperationV2,
     disposition: SubmissionDriveDispositionV1,
 }
 
@@ -8650,7 +8409,6 @@ impl<'a> PreparedQueryExecutionDriveV2<'a> {
             lifecycle,
             terminal_projection_condition_ids,
             evidence,
-            recovery_operation,
             disposition,
         } = self;
         let query = query.into_committable()?;
@@ -8663,7 +8421,6 @@ impl<'a> PreparedQueryExecutionDriveV2<'a> {
             direct,
             lifecycle,
             evidence,
-            recovery_operation,
             disposition,
         })
     }
@@ -8683,7 +8440,6 @@ struct CommittableScheduledExecutionDriveV2<'a> {
     query: CommittableQueryStateDeltaV2<'a>,
     lifecycle: PreparedLifecycleOutboxDeltaV2<'a>,
     evidence: DurableLogicalTransactionEvidenceV2,
-    recovery_operation: DurableRecoveryOperationV2,
 }
 
 impl CommittableScheduledExecutionDriveV2<'_> {
@@ -8698,7 +8454,6 @@ struct PreparedPrivateFactDeltaV2 {
     session_slice: PreparedPrivateFactSliceV2,
     delivery: Option<SealedPrivateDeliveryV1>,
     evidence: Option<DurableLogicalTransactionEvidenceV2>,
-    recovery_operation: DurableRecoveryOperationV2,
 }
 
 struct CommittedPrivateFactDeltaV2 {
@@ -8724,7 +8479,6 @@ struct PreparedDownstreamDurabilityDeltaV2 {
     compacted_deliveries: Vec<(u64, CompactedConfirmedPrivateDeliveryV1)>,
     downstream_durable_confirmation: ResponseDeliveryConfirmationV1,
     evidence: DurableLogicalTransactionEvidenceV2,
-    recovery_operation: DurableRecoveryOperationV2,
 }
 
 struct PreparedDownstreamDurabilityTransitionV2 {
@@ -10120,7 +9874,6 @@ fn prepare_request_registration_delta_v2(
         request_schedule,
         business_market_use,
         evidence,
-        recovery_operation: DurableRecoveryOperationV2::RegisterRequest,
     })
 }
 
@@ -10141,7 +9894,6 @@ fn commit_prevalidated_request_registration_delta_v2(
         request_schedule,
         business_market_use,
         evidence,
-        recovery_operation,
     } = prepared;
     query_state.commit_prevalidated_continuation(query_continuation);
     direct_response_outbox.commit_prevalidated_reservation(direct_response_reservation);
@@ -10159,677 +9911,7 @@ fn commit_prevalidated_request_registration_delta_v2(
             }
         }
     }
-    CommittedRequestRegistrationDeltaV2 {
-        schedule,
-        evidence,
-        recovery_operation,
-    }
-}
-
-impl RecoverablePaperCoordinatorV2 {
-    fn create_new(
-        root: PathBuf,
-        session: &SimExecutionSessionV1,
-        application_checkpoint: &RecoverablePaperApplicationCheckpointV2,
-    ) -> Result<Self, PersistenceErrorV1> {
-        application_checkpoint.validate()?;
-        let session_spec = session.session_spec();
-        if application_checkpoint.run_checkpoint.process_root.run_id() != session_spec.run_id {
-            return Err(PersistenceErrorV1::Integrity(format!(
-                "RecoverablePaper 应用检查点运行身份与目标会话不匹配：session_id={}",
-                session_spec.session_id
-            )));
-        }
-        let checkpoint_session = application_checkpoint
-            .run_checkpoint
-            .sessions
-            .get(&session_spec.session_id)
-            .ok_or_else(|| {
-                PersistenceErrorV1::Integrity(format!(
-                    "RecoverablePaper 应用检查点不包含目标会话：session_id={}",
-                    session_spec.session_id
-                ))
-            })?;
-        if checkpoint_session != &session.durable_checkpoint() {
-            return Err(PersistenceErrorV1::Integrity(format!(
-                "RecoverablePaper 应用检查点与目标会话状态不一致：session_id={}",
-                session_spec.session_id
-            )));
-        }
-        let run_id = session_spec.run_id.clone();
-        let bound_session_spec = session_spec.clone();
-        let mut store = LocalTransactionLogStoreV2::create_new(
-            root,
-            TransactionLogIdentityV2::new(run_id, DurabilityProfileV2::RecoverablePaper),
-        )?;
-        store.publish_application_checkpoint(0, application_checkpoint)?;
-        let logical_log_bytes = store.logical_log_bytes()?;
-        if logical_log_bytes != 0 {
-            return Err(PersistenceErrorV1::Integrity(
-                "新 RecoverablePaper 事务日志的逻辑字节不是零".to_owned(),
-            ));
-        }
-        Ok(Self {
-            store,
-            bound_session_spec,
-            private_delivery_capacity_lease: None,
-            last_sequence: 0,
-            transaction_head_sha256: None,
-            logical_log_bytes,
-            recovery_required: false,
-            #[cfg(test)]
-            encoded_transaction_count_for_tests: 0,
-            #[cfg(test)]
-            append_attempt_count_for_tests: 0,
-            #[cfg(test)]
-            append_success_count_for_tests: 0,
-        })
-    }
-
-    fn require_ready(&self) -> Result<(), SessionError> {
-        if self.recovery_required {
-            return Err(SessionError::DurabilityRecoveryRequired(
-                "RecoverablePaper V2 协调器必须先从事务日志恢复".to_owned(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn require_bound_session(&self, session: &SimExecutionSessionV1) -> Result<(), SessionError> {
-        let identity = self.store.identity();
-        let session_spec = session.session_spec();
-        if identity.durability_profile != DurabilityProfileV2::RecoverablePaper
-            || identity.run_id != session_spec.run_id
-            || self.bound_session_spec != *session_spec
-        {
-            return Err(SessionError::Durability(format!(
-                "RecoverablePaper V2 协调器与目标会话身份不匹配：session_id={}",
-                session_spec.session_id
-            )));
-        }
-        Ok(())
-    }
-
-    fn occupied_direct_capacity_leases(&self) -> usize {
-        usize::from(matches!(
-            self.private_delivery_capacity_lease.as_ref(),
-            Some(&PrivateDeliveryCapacityLeaseV2 {
-                kind: PrivateDeliveryCapacityKindV2::Direct,
-                ..
-            })
-        ))
-    }
-
-    fn occupied_lifecycle_capacity_leases(
-        &self,
-        lifecycle_outbox: &LogicalLifecycleOutboxV1,
-    ) -> usize {
-        usize::from(
-            self.private_delivery_capacity_lease
-                .as_ref()
-                .is_some_and(|lease| lease.occupies_lifecycle_capacity(lifecycle_outbox)),
-        )
-    }
-
-    fn append_logical_transaction(
-        &mut self,
-        evidence: &DurableLogicalTransactionEvidenceV2,
-        recovery_operation: &DurableRecoveryOperationV2,
-    ) -> Result<(), SessionError> {
-        self.require_ready()?;
-        let encoded = encode_transaction_record_v2(evidence, recovery_operation)
-            .map_err(|error| SessionError::Durability(error.to_string()))?;
-        #[cfg(test)]
-        {
-            self.encoded_transaction_count_for_tests += 1;
-        }
-        let encoded_bytes = encoded.encoded_bytes();
-        let expected_sequence = self.last_sequence.checked_add(1).ok_or_else(|| {
-            SessionError::Durability(PersistenceErrorV1::SequenceOverflow.to_string())
-        })?;
-        let expected_logical_log_bytes = self
-            .logical_log_bytes
-            .checked_add(encoded_bytes)
-            .ok_or_else(|| {
-                SessionError::Durability("RecoverablePaper V2 逻辑日志字节溢出".to_owned())
-            })?;
-        i64::try_from(expected_sequence).map_err(|_| {
-            SessionError::Durability("RecoverablePaper V2 下一事务序号超出 SQLite i64".to_owned())
-        })?;
-        i64::try_from(expected_logical_log_bytes).map_err(|_| {
-            SessionError::Durability("RecoverablePaper V2 逻辑日志字节超出 SQLite i64".to_owned())
-        })?;
-
-        #[cfg(test)]
-        {
-            self.append_attempt_count_for_tests += 1;
-        }
-        let receipt = match self.store.append_encoded_transaction(encoded) {
-            Ok(receipt) => receipt,
-            Err(error @ PersistenceErrorV1::DurabilityUncertain { .. }) => {
-                self.recovery_required = true;
-                return Err(SessionError::DurabilityRecoveryRequired(error.to_string()));
-            }
-            Err(error) => return Err(SessionError::Durability(error.to_string())),
-        };
-        #[cfg(test)]
-        {
-            self.append_success_count_for_tests += 1;
-        }
-        if receipt.sequence != expected_sequence
-            || receipt.encoded_bytes != encoded_bytes
-            || !is_canonical_sha256_hex(&receipt.record_sha256)
-            || self
-                .transaction_head_sha256
-                .as_ref()
-                .is_some_and(|previous| previous == &receipt.record_sha256)
-        {
-            self.recovery_required = true;
-            return Err(SessionError::DurabilityRecoveryRequired(format!(
-                "RecoverablePaper V2 逻辑事务提交回执与预期游标不一致：expected_sequence={expected_sequence}, actual_sequence={}, expected_bytes={encoded_bytes}, actual_bytes={}",
-                receipt.sequence, receipt.encoded_bytes
-            )));
-        }
-        self.last_sequence = receipt.sequence;
-        self.transaction_head_sha256 = Some(receipt.record_sha256);
-        self.logical_log_bytes = expected_logical_log_bytes;
-        Ok(())
-    }
-
-    fn register_request(
-        &mut self,
-        session: &mut SimExecutionSessionV1,
-        request: PendingDomainRequestV1,
-        actions: Vec<ParsedLogicalActionV1>,
-    ) -> Result<RegisteredLogicalScheduleV1, SessionError> {
-        self.require_ready()?;
-        self.require_bound_session(session)?;
-        if session.persistence.is_some() {
-            return Err(SessionError::Durability(
-                "内部 RecoverablePaper V2 请求协调器禁止与 V1 持久协调器双写".to_owned(),
-            ));
-        }
-        validate_request_context_identity_bounds(request.context())?;
-        if request_registration_is_physical_retry(
-            &session.session,
-            &session.pending_requests,
-            &request,
-        )? {
-            let prepared =
-                prepare_physical_request_retry_schedule(&session.session, &request, actions)?;
-            return Ok(session
-                .session
-                .commit_prevalidated_request_schedule(prepared));
-        }
-        let prepared = prepare_request_registration_delta_v2(
-            &session.session,
-            &session.pending_requests,
-            &session.mutation_payloads,
-            &session.query_state,
-            &session.direct_response_outbox,
-            self.occupied_direct_capacity_leases(),
-            session.accepting_new_ingress,
-            request,
-            actions,
-        )?;
-        self.append_logical_transaction(&prepared.evidence, &prepared.recovery_operation)?;
-        let committed = commit_prevalidated_request_registration_delta_v2(
-            &mut session.session,
-            &mut session.pending_requests,
-            &mut session.mutation_payloads,
-            &mut session.query_state,
-            &mut session.direct_response_outbox,
-            prepared,
-        );
-        debug_assert_eq!(
-            committed.recovery_operation,
-            DurableRecoveryOperationV2::RegisterRequest
-        );
-        Ok(committed.schedule)
-    }
-
-    fn drive_scheduled_execution_through(
-        &mut self,
-        session: &mut SimExecutionSessionV1,
-        requested_cutoff_utc_ms: i64,
-    ) -> Result<ScheduledExecutionDriveDispositionV2, MarketEventErrorV1> {
-        self.require_ready()?;
-        self.require_bound_session(session)?;
-        if session.persistence.is_some() {
-            return Err(SessionError::Durability(
-                "内部 RecoverablePaper V2 scheduled-only 协调器禁止与 V1 持久协调器双写".to_owned(),
-            )
-            .into());
-        }
-        let occupied_lifecycle_capacity_leases =
-            self.occupied_lifecycle_capacity_leases(&session.lifecycle_outbox);
-        match prepare_scheduled_execution_drive_v2(
-            session,
-            requested_cutoff_utc_ms,
-            occupied_lifecycle_capacity_leases,
-        )? {
-            PreparedScheduledExecutionDriveV2::ActionDue(prefix) => {
-                drop(prefix);
-                Ok(ScheduledExecutionDriveDispositionV2::ActionDue)
-            }
-            PreparedScheduledExecutionDriveV2::NoStateChange => {
-                Ok(ScheduledExecutionDriveDispositionV2::NoStateChange)
-            }
-            PreparedScheduledExecutionDriveV2::Committable(prepared) => {
-                self.append_logical_transaction(&prepared.evidence, &prepared.recovery_operation)?;
-                prepared.commit();
-                Ok(ScheduledExecutionDriveDispositionV2::Advanced)
-            }
-        }
-    }
-
-    fn apply_closed_market_event_bucket_v2(
-        &mut self,
-        session: &mut SimExecutionSessionV1,
-        bucket: &ClosedMarketEventBucketV1,
-    ) -> Result<MarketBucketApplyDispositionV1, MarketEventErrorV1> {
-        self.require_ready()?;
-        self.require_bound_session(session)?;
-        if session.persistence.is_some() {
-            return Err(SessionError::Durability(
-                "内部 RecoverablePaper V2 闭桶协调器禁止与 V1 持久协调器双写".to_owned(),
-            )
-            .into());
-        }
-        bucket.validated_durable_reference_for_recovery()?;
-        if session.session.last_applied_bucket_identity_matches(bucket) {
-            return Ok(MarketBucketApplyDispositionV1::PhysicalRetry);
-        }
-        if session
-            .session
-            .last_applied_bucket_coordinates_match(bucket)
-        {
-            let prepared = prepare_closed_bucket_closure_upgrade_drive_fields_v2(
-                &mut session.session,
-                &mut session.query_state,
-                bucket,
-            )?
-            .into_committable()?;
-            self.append_logical_transaction(&prepared.evidence, &prepared.recovery_operation)?;
-            prepared.commit();
-            return Ok(MarketBucketApplyDispositionV1::PhysicalRetry);
-        }
-        if !bucket.drives_execution_for(session.session_spec().caller_role) {
-            let prepared = prepare_market_only_closed_bucket_drive_fields_v2(
-                &mut session.session,
-                &mut session.query_state,
-                bucket,
-                None,
-            )?
-            .into_committable()?;
-            self.append_logical_transaction(&prepared.evidence, &prepared.recovery_operation)?;
-            prepared.commit();
-            return Ok(MarketBucketApplyDispositionV1::Applied);
-        }
-
-        let occupied_lifecycle_capacity_leases =
-            self.occupied_lifecycle_capacity_leases(&session.lifecycle_outbox);
-        match prepare_executing_closed_bucket_drive_fields_v2(
-            &mut session.session,
-            &mut session.query_state,
-            &mut session.lifecycle_outbox,
-            bucket,
-            occupied_lifecycle_capacity_leases,
-        )? {
-            PreparedExecutingClosedBucketDriveAttemptV2::Applied(prepared) => {
-                let prepared = prepared.into_committable()?;
-                self.append_logical_transaction(&prepared.evidence, &prepared.recovery_operation)?;
-                prepared.commit();
-            }
-            PreparedExecutingClosedBucketDriveAttemptV2::FailedInputSeal(outcome) => {
-                let prepared = prepare_market_only_closed_bucket_drive_fields_v2(
-                    &mut session.session,
-                    &mut session.query_state,
-                    bucket,
-                    Some(outcome),
-                )?
-                .into_committable()?;
-                self.append_logical_transaction(&prepared.evidence, &prepared.recovery_operation)?;
-                prepared.commit();
-            }
-        }
-        Ok(MarketBucketApplyDispositionV1::Applied)
-    }
-
-    fn drive_cancel_execution_through(
-        &mut self,
-        session: &mut SimExecutionSessionV1,
-        requested_cutoff_utc_ms: i64,
-    ) -> Result<SubmissionDriveDispositionV1, SubmissionProcessingErrorV1> {
-        self.require_ready()?;
-        self.require_bound_session(session)?;
-        if session.persistence.is_some() {
-            return Err(SessionError::Durability(
-                "内部 RecoverablePaper V2 撤单协调器禁止与 V1 持久协调器双写".to_owned(),
-            )
-            .into());
-        }
-        let occupied_lifecycle_capacity_leases =
-            self.occupied_lifecycle_capacity_leases(&session.lifecycle_outbox);
-        let prepared = prepare_cancel_execution_drive_v2(
-            session,
-            requested_cutoff_utc_ms,
-            occupied_lifecycle_capacity_leases,
-        )?
-        .into_committable()?;
-        let disposition = prepared.disposition;
-        self.append_logical_transaction(&prepared.evidence, &prepared.recovery_operation)?;
-        prepared.commit();
-        Ok(disposition)
-    }
-
-    fn drive_post_execution_through(
-        &mut self,
-        session: &mut SimExecutionSessionV1,
-        requested_cutoff_utc_ms: i64,
-    ) -> Result<SubmissionDriveDispositionV1, SubmissionProcessingErrorV1> {
-        self.require_ready()?;
-        self.require_bound_session(session)?;
-        if session.persistence.is_some() {
-            return Err(SessionError::Durability(
-                "内部 RecoverablePaper V2 Post 协调器禁止与 V1 持久协调器双写".to_owned(),
-            )
-            .into());
-        }
-        let occupied_lifecycle_capacity_leases =
-            self.occupied_lifecycle_capacity_leases(&session.lifecycle_outbox);
-        let prepared = prepare_post_execution_drive_v2(
-            session,
-            requested_cutoff_utc_ms,
-            occupied_lifecycle_capacity_leases,
-        )?
-        .into_committable()?;
-        let disposition = prepared.disposition;
-        self.append_logical_transaction(&prepared.evidence, &prepared.recovery_operation)?;
-        prepared.commit();
-        Ok(disposition)
-    }
-
-    fn drive_query_execution_through(
-        &mut self,
-        session: &mut SimExecutionSessionV1,
-        requested_cutoff_utc_ms: i64,
-    ) -> Result<SubmissionDriveDispositionV1, SubmissionProcessingErrorV1> {
-        self.require_ready()?;
-        self.require_bound_session(session)?;
-        if session.persistence.is_some() {
-            return Err(SessionError::Durability(
-                "内部 RecoverablePaper V2 查询协调器禁止与 V1 持久协调器双写".to_owned(),
-            )
-            .into());
-        }
-        let occupied_lifecycle_capacity_leases =
-            self.occupied_lifecycle_capacity_leases(&session.lifecycle_outbox);
-        let SimExecutionSessionV1 {
-            session,
-            pending_requests,
-            query_state,
-            direct_response_outbox,
-            lifecycle_outbox,
-            ..
-        } = session;
-        let prepared = prepare_query_execution_drive_fields_v2(
-            session,
-            pending_requests,
-            query_state,
-            direct_response_outbox,
-            lifecycle_outbox,
-            requested_cutoff_utc_ms,
-            occupied_lifecycle_capacity_leases,
-        )?
-        .into_committable()?;
-        let disposition = prepared.disposition;
-        self.append_logical_transaction(&prepared.evidence, &prepared.recovery_operation)?;
-        prepared.commit();
-        Ok(disposition)
-    }
-
-    fn close_ingress(&mut self, session: &mut SimExecutionSessionV1) -> Result<(), SessionError> {
-        self.require_ready()?;
-        self.require_bound_session(session)?;
-        if session.persistence.is_some() {
-            return Err(SessionError::Durability(
-                "内部 RecoverablePaper V2 入口关闭禁止与 V1 持久协调器双写".to_owned(),
-            ));
-        }
-        if !session.accepting_new_ingress {
-            return Ok(());
-        }
-        let evidence =
-            DurableLogicalTransactionEvidenceV2::new(DurableTransactionFactV1::IngressClosed {
-                session_id: session.session_spec().session_id.clone(),
-            });
-        self.append_logical_transaction(&evidence, &DurableRecoveryOperationV2::CloseIngress)?;
-        session.accepting_new_ingress = false;
-        Ok(())
-    }
-
-    fn close_ingress_after_terminal_bridge_failure(
-        &mut self,
-        session: &mut SimExecutionSessionV1,
-    ) -> Result<(), SessionError> {
-        if let Err(error) = self.close_ingress(session) {
-            session.accepting_new_ingress = false;
-            self.recovery_required = true;
-            return Err(SessionError::DurabilityRecoveryRequired(format!(
-                "RecoverablePaper V2 致命桥结果后关闭入口失败，必须先恢复：{error}"
-            )));
-        }
-        Ok(())
-    }
-
-    fn clear_matching_private_delivery_capacity_lease(
-        &mut self,
-        delivery: &SealedPrivateDeliveryV1,
-    ) {
-        if self
-            .private_delivery_capacity_lease
-            .as_ref()
-            .is_some_and(|lease| lease.matches_delivery(delivery))
-        {
-            self.private_delivery_capacity_lease = None;
-        }
-    }
-
-    fn dispatch_committed_private_delivery(
-        &mut self,
-        session: &mut SimExecutionSessionV1,
-        delivery: &SealedPrivateDeliveryV1,
-    ) -> Result<SubmissionDeliveryDispositionV1, SimExecutionContractErrorV1> {
-        let expected_confirmation = delivery.confirmation();
-        match delivery.dispatch(&mut session.response_bridge) {
-            SubmissionResponseAcceptanceV1::Accepted(actual) if actual == expected_confirmation => {
-                session.bridge_replayed_through_private_feedback_sequence =
-                    expected_confirmation.private_feedback_sequence;
-                self.clear_matching_private_delivery_capacity_lease(delivery);
-                Ok(SubmissionDeliveryDispositionV1::Delivered)
-            }
-            SubmissionResponseAcceptanceV1::Accepted(_) => {
-                self.close_ingress_after_terminal_bridge_failure(session)?;
-                Err(SessionError::ResponseDeliveryIdentityConflict)
-            }
-            SubmissionResponseAcceptanceV1::Full => Ok(SubmissionDeliveryDispositionV1::Full),
-            SubmissionResponseAcceptanceV1::Disconnected => {
-                self.close_ingress_after_terminal_bridge_failure(session)?;
-                Ok(SubmissionDeliveryDispositionV1::Closed)
-            }
-        }
-    }
-
-    fn drive_next_private_delivery_through(
-        &mut self,
-        session: &mut SimExecutionSessionV1,
-        received_at_utc_ms: i64,
-    ) -> Result<SubmissionDeliveryDispositionV1, SimExecutionContractErrorV1> {
-        self.require_ready()?;
-        self.require_bound_session(session)?;
-        if session.persistence.is_some() {
-            return Err(SessionError::Durability(
-                "内部 RecoverablePaper V2 私有交付协调器禁止与 V1 持久协调器双写".to_owned(),
-            ));
-        }
-
-        let process_confirmed_through = session.session.private_feedback_sequence();
-        if session.bridge_replayed_through_private_feedback_sequence < process_confirmed_through {
-            let next_sequence = session
-                .bridge_replayed_through_private_feedback_sequence
-                .checked_add(1)
-                .ok_or(SessionError::PrivateEmissionSequenceConflict(u64::MAX))?;
-            let delivery = session
-                .confirmed_private_deliveries
-                .get(&next_sequence)
-                .cloned()
-                .ok_or_else(|| {
-                    SessionError::Durability(format!(
-                        "RecoverablePaper V2 重投缺少完整私有载荷序号 {next_sequence}"
-                    ))
-                })?;
-            return self.dispatch_committed_private_delivery(session, &delivery);
-        }
-        if self.private_delivery_capacity_lease.is_some() {
-            return Err(SessionError::Durability(
-                "RecoverablePaper V2 私有交付租约与桥水位不一致".to_owned(),
-            ));
-        }
-
-        let prepared = prepare_private_fact_delta_v2(
-            &session.session,
-            &session.direct_response_outbox,
-            &session.lifecycle_outbox,
-            &session.confirmed_private_deliveries,
-            received_at_utc_ms,
-        )?;
-        let Some(evidence) = prepared.evidence.as_ref() else {
-            return Ok(SubmissionDeliveryDispositionV1::NoVisibleResponse);
-        };
-        self.append_logical_transaction(evidence, &prepared.recovery_operation)?;
-        let committed = commit_prevalidated_private_fact_delta_v2(
-            &mut session.session,
-            &mut session.direct_response_outbox,
-            &mut session.lifecycle_outbox,
-            &mut session.confirmed_private_deliveries,
-            prepared,
-        );
-        if let Some(lease) = committed.capacity_lease {
-            debug_assert!(self.private_delivery_capacity_lease.is_none());
-            self.private_delivery_capacity_lease = Some(lease);
-        }
-        match committed.outcome {
-            PreparedPrivateFactOutcomeV2::NoStateChange => {
-                unreachable!("无变化私有事实不得进入本地提交")
-            }
-            PreparedPrivateFactOutcomeV2::AdvancedWithoutOutput => {
-                Ok(SubmissionDeliveryDispositionV1::NoVisibleResponse)
-            }
-            PreparedPrivateFactOutcomeV2::Output(delivery) => {
-                self.dispatch_committed_private_delivery(session, &delivery)
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn append_request_then_simulate_crash_for_tests(
-        &mut self,
-        session: &SimExecutionSessionV1,
-        request: PendingDomainRequestV1,
-        actions: Vec<ParsedLogicalActionV1>,
-    ) -> Result<(), SessionError> {
-        self.require_ready()?;
-        self.require_bound_session(session)?;
-        if session.persistence.is_some() {
-            return Err(SessionError::Durability(
-                "内部 RecoverablePaper V2 请求协调器禁止与 V1 持久协调器双写".to_owned(),
-            ));
-        }
-        validate_request_context_identity_bounds(request.context())?;
-        if request_registration_is_physical_retry(
-            &session.session,
-            &session.pending_requests,
-            &request,
-        )? {
-            return Err(SessionError::RequestIdentityConflict(
-                request.context().global_request_id.clone(),
-            ));
-        }
-        let prepared = prepare_request_registration_delta_v2(
-            &session.session,
-            &session.pending_requests,
-            &session.mutation_payloads,
-            &session.query_state,
-            &session.direct_response_outbox,
-            self.occupied_direct_capacity_leases(),
-            session.accepting_new_ingress,
-            request,
-            actions,
-        )?;
-        self.append_logical_transaction(&prepared.evidence, &prepared.recovery_operation)
-    }
-
-    fn advance_downstream_durability(
-        &mut self,
-        session: &mut SimExecutionSessionV1,
-        proof: DownstreamDurabilityProofV1,
-    ) -> Result<(), SessionError> {
-        self.require_ready()?;
-        self.require_bound_session(session)?;
-        if session.persistence.is_some() {
-            return Err(SessionError::Durability(
-                "内部 RecoverablePaper V2 协调器禁止与 V1 持久协调器双写".to_owned(),
-            ));
-        }
-        if proof.durable_through.private_feedback_sequence
-            > session.bridge_replayed_through_private_feedback_sequence
-        {
-            return Err(SessionError::ResponseDeliveryIdentityConflict);
-        }
-        let Some(prepared) = prepare_downstream_durability_delta_v2(
-            &session.session,
-            &session.compacted_confirmed_private_deliveries,
-            &session.confirmed_private_deliveries,
-            session.downstream_durable_confirmation.as_ref(),
-            proof,
-        )?
-        else {
-            return Ok(());
-        };
-        if self
-            .private_delivery_capacity_lease
-            .as_ref()
-            .is_some_and(|lease| {
-                prepared
-                    .compacted_deliveries
-                    .iter()
-                    .any(|(_, compacted)| compacted.confirmation == lease.confirmation)
-            })
-        {
-            return Err(SessionError::Durability(
-                "RecoverablePaper V2 下游证明覆盖了尚未由桥接纳并释放容量的私有输出".to_owned(),
-            ));
-        }
-        self.append_logical_transaction(&prepared.evidence, &prepared.recovery_operation)?;
-        commit_prevalidated_downstream_durability_delta_v2(
-            &mut session.compacted_confirmed_private_deliveries,
-            &mut session.confirmed_private_deliveries,
-            &mut session.downstream_durable_confirmation,
-            prepared,
-        );
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn cursor_for_tests(&self) -> (u64, Option<Sha256Hex>, u64, bool) {
-        (
-            self.last_sequence,
-            self.transaction_head_sha256.clone(),
-            self.logical_log_bytes,
-            self.recovery_required,
-        )
-    }
+    CommittedRequestRegistrationDeltaV2 { schedule, evidence }
 }
 
 fn prepare_request_registration_transition(
@@ -10879,607 +9961,11 @@ fn prepare_request_registration_transition(
         &mut state.direct_response_outbox,
         prepared,
     );
-    debug_assert_eq!(
-        committed.recovery_operation,
-        DurableRecoveryOperationV2::RegisterRequest
-    );
     Ok(PreparedRequestRegistrationTransitionV2 {
         candidate_state: state,
         schedule: committed.schedule,
         evidence: Some(committed.evidence),
     })
-}
-
-fn parsed_actions_for_recovered_request_registration(
-    registration: &DurableRequestRegistrationV1,
-) -> Result<Vec<ParsedLogicalActionV1>, SessionCheckpointErrorV1> {
-    let request = &registration.request;
-    let request_id = &request.context().global_request_id;
-    if registration.actions.len() != request.action_count() {
-        return Err(SessionCheckpointErrorV1::InvalidSessionState(
-            "V2 请求登记动作数量与请求方法不符".to_owned(),
-        ));
-    }
-    registration
-        .actions
-        .iter()
-        .enumerate()
-        .map(|(ordinal, action)| {
-            let batch_item_ordinal = u16::try_from(ordinal).map_err(|_| {
-                SessionCheckpointErrorV1::InvalidSessionState(
-                    "V2 请求登记动作序号无法表示".to_owned(),
-                )
-            })?;
-            let expected_identity = format!(
-                "{}:{}:{batch_item_ordinal}",
-                request.method_tag(),
-                request_id
-            );
-            if action.action_identity != expected_identity
-                || action.global_request_id != *request_id
-                || action.key.caller_sequence != request.context().caller_sequence
-                || action.key.batch_item_ordinal != batch_item_ordinal
-            {
-                return Err(SessionCheckpointErrorV1::InvalidSessionState(
-                    "V2 请求登记动作身份与请求正文不符".to_owned(),
-                ));
-            }
-            let method_timing = match request {
-                PendingDomainRequestV1::PostOrder(request) => {
-                    request.item.order.kind.method_timing()
-                }
-                PendingDomainRequestV1::PostOrders(request) => request
-                    .items
-                    .get(ordinal)
-                    .ok_or_else(|| {
-                        SessionCheckpointErrorV1::InvalidSessionState(
-                            "V2 批量请求登记动作缺少对应项".to_owned(),
-                        )
-                    })?
-                    .order
-                    .kind
-                    .method_timing(),
-                PendingDomainRequestV1::CancelOrder(_)
-                | PendingDomainRequestV1::CancelOrders(_)
-                | PendingDomainRequestV1::CancelAllOrders(_)
-                | PendingDomainRequestV1::Order(_)
-                | PendingDomainRequestV1::Orders(_)
-                | PendingDomainRequestV1::Trades(_) => ParsedMethodTimingV1::Ordinary,
-            };
-            Ok(ParsedLogicalActionV1 {
-                action_identity: action.action_identity.clone(),
-                batch_item_ordinal,
-                method_timing,
-            })
-        })
-        .collect()
-}
-
-fn replay_request_registration_operation_v2(
-    state: ExecutionSessionStateV1,
-    evidence: &DurableLogicalTransactionEvidenceV2,
-    operation: DurableRecoveryOperationV2,
-) -> Result<ExecutionSessionStateV1, SessionCheckpointErrorV1> {
-    if operation != DurableRecoveryOperationV2::RegisterRequest {
-        return Err(SessionCheckpointErrorV1::InvalidSessionState(
-            "V2 请求登记恢复操作种类不符".to_owned(),
-        ));
-    }
-    let DurableTransactionFactV1::RequestRegistered {
-        session_id,
-        registration,
-    } = &evidence.fact
-    else {
-        return Err(SessionCheckpointErrorV1::InvalidSessionState(
-            "V2 请求登记恢复操作与事实种类不符".to_owned(),
-        ));
-    };
-    if session_id != &registration.request.context().session_id
-        || session_id != &state.session.session_spec().session_id
-    {
-        return Err(SessionCheckpointErrorV1::InvalidSessionState(
-            "V2 请求登记事实会话身份不符".to_owned(),
-        ));
-    }
-    validate_request_context_identity_bounds(registration.request.context()).map_err(|error| {
-        SessionCheckpointErrorV1::InvalidSessionState(format!("V2 请求登记上下文无效：{error}"))
-    })?;
-    validate_pending_domain_request(&registration.request).map_err(|error| {
-        SessionCheckpointErrorV1::InvalidSessionState(format!("V2 请求登记正文无效：{error}"))
-    })?;
-    let physical_retry = request_registration_is_physical_retry(
-        &state.session,
-        &state.pending_requests,
-        &registration.request,
-    )
-    .map_err(|error| {
-        SessionCheckpointErrorV1::InvalidSessionState(format!("V2 请求登记前置状态无效：{error}"))
-    })?;
-    if physical_retry {
-        return Err(SessionCheckpointErrorV1::InvalidSessionState(
-            "V2 请求登记尾日志重复应用".to_owned(),
-        ));
-    }
-    let actions = parsed_actions_for_recovered_request_registration(registration)?;
-    let prepared = prepare_request_registration_transition(
-        state,
-        registration.request.clone(),
-        actions,
-        false,
-    )
-    .map_err(|error| {
-        SessionCheckpointErrorV1::InvalidSessionState(format!("V2 请求登记尾日志无法重放：{error}"))
-    })?;
-    let Some(recomputed_evidence) = prepared.evidence else {
-        return Err(SessionCheckpointErrorV1::InvalidSessionState(
-            "V2 请求登记尾日志重复应用".to_owned(),
-        ));
-    };
-    if recomputed_evidence != *evidence {
-        return Err(SessionCheckpointErrorV1::InvalidSessionState(
-            "V2 请求登记尾日志与重算候选不一致".to_owned(),
-        ));
-    }
-    Ok(prepared.candidate_state)
-}
-
-fn replay_platform_bucket_operation_v2(
-    mut state: ExecutionSessionStateV1,
-    evidence: &DurableLogicalTransactionEvidenceV2,
-    operation: DurableRecoveryOperationV2,
-    reader: &mut PaperMarketEventRecoveryReaderV1,
-) -> Result<ExecutionSessionStateV1, SimExecutionPersistenceErrorV1> {
-    if operation != DurableRecoveryOperationV2::ApplyClosedMarketEventBucket {
-        return Err(SimExecutionPersistenceErrorV1::Session(
-            "V2 平台闭桶恢复操作种类不符".to_owned(),
-        ));
-    }
-    let DurableTransactionFactV1::PlatformBucketApplied { session_id, bucket } = &evidence.fact
-    else {
-        return Err(SimExecutionPersistenceErrorV1::Session(
-            "V2 平台闭桶恢复操作与事实种类不符".to_owned(),
-        ));
-    };
-    if session_id != &state.session.session_spec().session_id {
-        return Err(SimExecutionPersistenceErrorV1::Session(
-            "V2 平台闭桶事实会话身份不符".to_owned(),
-        ));
-    }
-    if state
-        .session
-        .durable_bucket_state_matches(bucket.path, Some(bucket))
-    {
-        return Err(SimExecutionPersistenceErrorV1::Session(
-            "V2 平台闭桶尾日志重复应用".to_owned(),
-        ));
-    }
-    let closed_bucket = read_validated_paper_market_event_bucket(bucket, reader)?;
-    if state
-        .session
-        .last_applied_bucket_coordinates_match(&closed_bucket)
-    {
-        let prepared = prepare_closed_bucket_closure_upgrade_drive_fields_v2(
-            &mut state.session,
-            &mut state.query_state,
-            &closed_bucket,
-        )
-        .and_then(PreparedClosedBucketClosureUpgradeDriveV2::into_committable)
-        .map_err(|error| {
-            SimExecutionPersistenceErrorV1::Session(format!(
-                "V2 闭桶封口升级稀疏尾日志无法重放：{error}"
-            ))
-        })?;
-        if prepared.recovery_operation != operation {
-            return Err(SimExecutionPersistenceErrorV1::Session(
-                "V2 闭桶封口升级恢复操作与重算候选不符".to_owned(),
-            ));
-        }
-        if prepared.evidence != *evidence {
-            return Err(SimExecutionPersistenceErrorV1::Session(
-                "V2 闭桶封口升级尾日志与重算候选不一致".to_owned(),
-            ));
-        }
-        prepared.commit();
-        return Ok(state);
-    }
-
-    if !closed_bucket.drives_execution_for(state.session.session_spec().caller_role) {
-        let prepared = prepare_market_only_closed_bucket_drive_fields_v2(
-            &mut state.session,
-            &mut state.query_state,
-            &closed_bucket,
-            None,
-        )
-        .and_then(PreparedMarketOnlyClosedBucketDriveV2::into_committable)
-        .map_err(|error| {
-            SimExecutionPersistenceErrorV1::Session(format!(
-                "V2 非执行闭桶稀疏尾日志无法重放：{error}"
-            ))
-        })?;
-        if prepared.recovery_operation != operation {
-            return Err(SimExecutionPersistenceErrorV1::Session(
-                "V2 非执行闭桶稀疏恢复操作与重算候选不符".to_owned(),
-            ));
-        }
-        if prepared.evidence != *evidence {
-            return Err(SimExecutionPersistenceErrorV1::Session(
-                "V2 非执行闭桶稀疏尾日志与重算候选不一致".to_owned(),
-            ));
-        }
-        prepared.commit();
-        return Ok(state);
-    }
-
-    match prepare_executing_closed_bucket_drive_fields_v2(
-        &mut state.session,
-        &mut state.query_state,
-        &mut state.lifecycle_outbox,
-        &closed_bucket,
-        0,
-    )
-    .map_err(|error| {
-        SimExecutionPersistenceErrorV1::Session(format!("V2 执行闭桶稀疏尾日志无法重放：{error}"))
-    })? {
-        PreparedExecutingClosedBucketDriveAttemptV2::Applied(prepared) => {
-            let prepared = prepared.into_committable().map_err(|error| {
-                SimExecutionPersistenceErrorV1::Session(format!(
-                    "V2 执行闭桶稀疏尾日志无法转为提交：{error}"
-                ))
-            })?;
-            if prepared.recovery_operation != operation {
-                return Err(SimExecutionPersistenceErrorV1::Session(
-                    "V2 执行闭桶稀疏恢复操作与重算候选不符".to_owned(),
-                ));
-            }
-            if prepared.evidence != *evidence {
-                return Err(SimExecutionPersistenceErrorV1::Session(
-                    "V2 执行闭桶稀疏尾日志与重算候选不一致".to_owned(),
-                ));
-            }
-            prepared.commit();
-            return Ok(state);
-        }
-        PreparedExecutingClosedBucketDriveAttemptV2::FailedInputSeal(outcome) => {
-            let prepared = prepare_market_only_closed_bucket_drive_fields_v2(
-                &mut state.session,
-                &mut state.query_state,
-                &closed_bucket,
-                Some(outcome),
-            )
-            .and_then(PreparedMarketOnlyClosedBucketDriveV2::into_committable)
-            .map_err(|error| {
-                SimExecutionPersistenceErrorV1::Session(format!(
-                    "V2 执行闭桶失败封口稀疏尾日志无法重放：{error}"
-                ))
-            })?;
-            if prepared.recovery_operation != operation {
-                return Err(SimExecutionPersistenceErrorV1::Session(
-                    "V2 执行闭桶失败封口恢复操作与重算候选不符".to_owned(),
-                ));
-            }
-            if prepared.evidence != *evidence {
-                return Err(SimExecutionPersistenceErrorV1::Session(
-                    "V2 执行闭桶失败封口尾日志与重算候选不一致".to_owned(),
-                ));
-            }
-            prepared.commit();
-            return Ok(state);
-        }
-    }
-}
-
-fn replay_execution_operation_v2(
-    mut state: ExecutionSessionStateV1,
-    evidence: &DurableLogicalTransactionEvidenceV2,
-    operation: DurableRecoveryOperationV2,
-) -> Result<ExecutionSessionStateV1, SessionCheckpointErrorV1> {
-    let DurableRecoveryOperationV2::DriveExecutionThrough {
-        effective_processing_at_utc_ms,
-    } = operation
-    else {
-        return Err(SessionCheckpointErrorV1::InvalidSessionState(
-            "V2 执行推进恢复操作种类不符".to_owned(),
-        ));
-    };
-    let DurableTransactionFactV1::ExecutionAdvanced { session_id } = &evidence.fact else {
-        return Err(SessionCheckpointErrorV1::InvalidSessionState(
-            "V2 执行推进恢复操作与事实种类不符".to_owned(),
-        ));
-    };
-    if session_id != &state.session.session_spec().session_id {
-        return Err(SessionCheckpointErrorV1::InvalidSessionState(
-            "V2 执行推进事实会话身份不符".to_owned(),
-        ));
-    }
-    let expected_recovery_operation = DurableRecoveryOperationV2::DriveExecutionThrough {
-        effective_processing_at_utc_ms,
-    };
-    let due_method = state
-        .session
-        .first_pending_action_through(effective_processing_at_utc_ms)
-        .and_then(|action| state.pending_requests.get(&action.global_request_id))
-        .map(PendingDomainRequestV1::direct_response_method);
-    if due_method.is_some() && evidence.logical_action_results.is_empty() {
-        return Err(SessionCheckpointErrorV1::InvalidSessionState(
-            "V2 scheduled-only 执行推进尾日志遇到待处理动作".to_owned(),
-        ));
-    }
-    match due_method {
-        Some(
-            DirectResponseMethodV1::CancelOrder
-            | DirectResponseMethodV1::CancelOrders
-            | DirectResponseMethodV1::CancelAllOrders,
-        ) => {
-            let prepared = prepare_cancel_execution_drive_fields_v2(
-                &mut state.session,
-                &state.pending_requests,
-                &mut state.cancel_effect_records,
-                &mut state.query_state,
-                &mut state.direct_response_outbox,
-                &mut state.lifecycle_outbox,
-                effective_processing_at_utc_ms,
-                0,
-            )
-            .and_then(PreparedCancelExecutionDriveV2::into_committable)
-            .map_err(|error| {
-                SessionCheckpointErrorV1::InvalidSessionState(format!(
-                    "V2 撤单动作执行推进尾日志无法重放：{error:?}"
-                ))
-            })?;
-            if prepared.recovery_operation != expected_recovery_operation {
-                return Err(SessionCheckpointErrorV1::InvalidSessionState(
-                    "V2 撤单动作执行推进恢复操作时点与重算候选不符".to_owned(),
-                ));
-            }
-            if prepared.evidence != *evidence {
-                return Err(SessionCheckpointErrorV1::InvalidSessionState(
-                    "V2 撤单动作执行推进尾日志与重算候选不一致".to_owned(),
-                ));
-            }
-            prepared.commit();
-            return Ok(state);
-        }
-        Some(
-            DirectResponseMethodV1::Order
-            | DirectResponseMethodV1::Orders
-            | DirectResponseMethodV1::Trades,
-        ) => {
-            let prepared = prepare_query_execution_drive_fields_v2(
-                &mut state.session,
-                &state.pending_requests,
-                &mut state.query_state,
-                &mut state.direct_response_outbox,
-                &mut state.lifecycle_outbox,
-                effective_processing_at_utc_ms,
-                0,
-            )
-            .and_then(PreparedQueryExecutionDriveV2::into_committable)
-            .map_err(|error| {
-                SessionCheckpointErrorV1::InvalidSessionState(format!(
-                    "V2 查询动作执行推进尾日志无法重放：{error:?}"
-                ))
-            })?;
-            if prepared.recovery_operation != expected_recovery_operation {
-                return Err(SessionCheckpointErrorV1::InvalidSessionState(
-                    "V2 查询动作执行推进恢复操作时点与重算候选不符".to_owned(),
-                ));
-            }
-            if prepared.evidence != *evidence {
-                return Err(SessionCheckpointErrorV1::InvalidSessionState(
-                    "V2 查询动作执行推进尾日志与重算候选不一致".to_owned(),
-                ));
-            }
-            prepared.commit();
-            return Ok(state);
-        }
-        Some(DirectResponseMethodV1::PostOrder | DirectResponseMethodV1::PostOrders) => {
-            let prepared = prepare_post_execution_drive_fields_v2(
-                &mut state.session,
-                &state.pending_requests,
-                &mut state.submission_effect_records,
-                &mut state.query_state,
-                &mut state.direct_response_outbox,
-                &mut state.lifecycle_outbox,
-                effective_processing_at_utc_ms,
-                0,
-            )
-            .and_then(PreparedPostExecutionDriveV2::into_committable)
-            .map_err(|error| {
-                SessionCheckpointErrorV1::InvalidSessionState(format!(
-                    "V2 Post 动作执行推进尾日志无法重放：{error:?}"
-                ))
-            })?;
-            if prepared.recovery_operation != expected_recovery_operation {
-                return Err(SessionCheckpointErrorV1::InvalidSessionState(
-                    "V2 Post 动作执行推进恢复操作时点与重算候选不符".to_owned(),
-                ));
-            }
-            if prepared.evidence != *evidence {
-                return Err(SessionCheckpointErrorV1::InvalidSessionState(
-                    "V2 Post 动作执行推进尾日志与重算候选不一致".to_owned(),
-                ));
-            }
-            prepared.commit();
-            return Ok(state);
-        }
-        None => {}
-    }
-
-    let prepared = prepare_scheduled_execution_drive_fields_v2(
-        &mut state.session,
-        &mut state.query_state,
-        &mut state.lifecycle_outbox,
-        effective_processing_at_utc_ms,
-        0,
-    )
-    .map_err(|error| {
-        SessionCheckpointErrorV1::InvalidSessionState(format!(
-            "V2 scheduled-only 执行推进尾日志无法重放：{error}"
-        ))
-    })?;
-    let prepared = match prepared {
-        PreparedScheduledExecutionDriveV2::ActionDue(prefix) => {
-            drop(prefix);
-            return Err(SessionCheckpointErrorV1::InvalidSessionState(
-                "V2 scheduled-only 执行推进尾日志遇到待处理动作".to_owned(),
-            ));
-        }
-        PreparedScheduledExecutionDriveV2::NoStateChange => {
-            return Err(SessionCheckpointErrorV1::InvalidSessionState(
-                "V2 scheduled-only 执行推进尾日志重复应用".to_owned(),
-            ));
-        }
-        PreparedScheduledExecutionDriveV2::Committable(prepared) => prepared,
-    };
-    if prepared.recovery_operation != expected_recovery_operation {
-        return Err(SessionCheckpointErrorV1::InvalidSessionState(
-            "V2 scheduled-only 执行推进恢复操作时点与重算候选不符".to_owned(),
-        ));
-    }
-    if prepared.evidence != *evidence {
-        return Err(SessionCheckpointErrorV1::InvalidSessionState(
-            "V2 scheduled-only 执行推进尾日志与重算候选不一致".to_owned(),
-        ));
-    }
-    prepared.commit();
-    Ok(state)
-}
-
-fn replay_private_fact_operation_v2(
-    state: ExecutionSessionStateV1,
-    evidence: &DurableLogicalTransactionEvidenceV2,
-    operation: DurableRecoveryOperationV2,
-) -> Result<ExecutionSessionStateV1, SessionCheckpointErrorV1> {
-    let DurableRecoveryOperationV2::AdvancePrivateFactThrough { received_at_utc_ms } = operation
-    else {
-        return Err(SessionCheckpointErrorV1::InvalidSessionState(
-            "V2 私有事实恢复操作种类不符".to_owned(),
-        ));
-    };
-    let expected_session_id = match &evidence.fact {
-        DurableTransactionFactV1::ExecutionAdvanced { session_id }
-        | DurableTransactionFactV1::PrivateOutputCommitted { session_id, .. } => session_id,
-        _ => {
-            return Err(SessionCheckpointErrorV1::InvalidSessionState(
-                "V2 私有事实恢复操作与事实种类不符".to_owned(),
-            ));
-        }
-    };
-    if expected_session_id != &state.session.session_spec().session_id {
-        return Err(SessionCheckpointErrorV1::InvalidSessionState(
-            "V2 私有事实会话身份不符".to_owned(),
-        ));
-    }
-    let prepared =
-        prepare_private_fact_transition_v2(state, received_at_utc_ms).map_err(|error| {
-            SessionCheckpointErrorV1::InvalidSessionState(format!(
-                "V2 私有事实尾日志无法重放：{error}"
-            ))
-        })?;
-    let Some(recomputed_evidence) = prepared.evidence else {
-        return Err(SessionCheckpointErrorV1::InvalidSessionState(
-            "V2 私有事实尾日志未产生状态变化".to_owned(),
-        ));
-    };
-    let outcome_matches_fact = matches!(
-        (&prepared.outcome, &evidence.fact),
-        (
-            PreparedPrivateFactOutcomeV2::AdvancedWithoutOutput,
-            DurableTransactionFactV1::ExecutionAdvanced { .. }
-        ) | (
-            PreparedPrivateFactOutcomeV2::Output(_),
-            DurableTransactionFactV1::PrivateOutputCommitted { .. }
-        )
-    );
-    if !outcome_matches_fact || recomputed_evidence != *evidence {
-        return Err(SessionCheckpointErrorV1::InvalidSessionState(
-            "V2 私有事实尾日志与重算候选不一致".to_owned(),
-        ));
-    }
-    Ok(prepared.candidate_state)
-}
-
-fn replay_downstream_durability_operation_v2(
-    state: ExecutionSessionStateV1,
-    current_durable_confirmation: Option<&ResponseDeliveryConfirmationV1>,
-    evidence: &DurableLogicalTransactionEvidenceV2,
-    operation: DurableRecoveryOperationV2,
-) -> Result<(ExecutionSessionStateV1, ResponseDeliveryConfirmationV1), SessionCheckpointErrorV1> {
-    if operation != DurableRecoveryOperationV2::AdvanceDownstreamDurability {
-        return Err(SessionCheckpointErrorV1::InvalidSessionState(
-            "V2 下游耐久恢复操作种类不符".to_owned(),
-        ));
-    }
-    let DurableTransactionFactV1::DownstreamDurabilityAdvanced { session_id, proof } =
-        &evidence.fact
-    else {
-        return Err(SessionCheckpointErrorV1::InvalidSessionState(
-            "V2 下游耐久恢复操作与事实种类不符".to_owned(),
-        ));
-    };
-    if session_id != &state.session.session_spec().session_id {
-        return Err(SessionCheckpointErrorV1::InvalidSessionState(
-            "V2 下游耐久事实会话身份不符".to_owned(),
-        ));
-    }
-    let prepared = prepare_downstream_durability_transition_v2(
-        state,
-        current_durable_confirmation,
-        proof.clone(),
-    )
-    .map_err(|error| {
-        SessionCheckpointErrorV1::InvalidSessionState(format!("V2 下游耐久尾日志无法重放：{error}"))
-    })?
-    .ok_or_else(|| {
-        SessionCheckpointErrorV1::InvalidSessionState("V2 下游耐久尾日志重复应用".to_owned())
-    })?;
-    if prepared.evidence != *evidence {
-        return Err(SessionCheckpointErrorV1::InvalidSessionState(
-            "V2 下游耐久尾日志与重算候选不一致".to_owned(),
-        ));
-    }
-    Ok((
-        prepared.candidate_state,
-        prepared.downstream_durable_confirmation,
-    ))
-}
-
-fn replay_close_ingress_operation_v2(
-    mut state: ExecutionSessionStateV1,
-    evidence: &DurableLogicalTransactionEvidenceV2,
-    operation: DurableRecoveryOperationV2,
-) -> Result<ExecutionSessionStateV1, SessionCheckpointErrorV1> {
-    if operation != DurableRecoveryOperationV2::CloseIngress {
-        return Err(SessionCheckpointErrorV1::InvalidSessionState(
-            "V2 入口关闭恢复操作种类不符".to_owned(),
-        ));
-    }
-    let DurableTransactionFactV1::IngressClosed { session_id } = &evidence.fact else {
-        return Err(SessionCheckpointErrorV1::InvalidSessionState(
-            "V2 入口关闭恢复操作与事实种类不符".to_owned(),
-        ));
-    };
-    if session_id != &state.session.session_spec().session_id {
-        return Err(SessionCheckpointErrorV1::InvalidSessionState(
-            "V2 入口关闭事实会话身份不符".to_owned(),
-        ));
-    }
-    if !state.accepting_new_ingress {
-        return Err(SessionCheckpointErrorV1::InvalidSessionState(
-            "V2 入口关闭尾日志重复应用".to_owned(),
-        ));
-    }
-    let recomputed =
-        DurableLogicalTransactionEvidenceV2::new(DurableTransactionFactV1::IngressClosed {
-            session_id: session_id.clone(),
-        });
-    if recomputed != *evidence {
-        return Err(SessionCheckpointErrorV1::InvalidSessionState(
-            "V2 入口关闭尾日志与重算候选不一致".to_owned(),
-        ));
-    }
-    state.accepting_new_ingress = false;
-    Ok(state)
 }
 
 impl SimExecutionSessionV1 {
@@ -12275,7 +10761,7 @@ impl CommittableQueryStateDeltaV2<'_> {
         debug_assert!(!preparation_failed);
         if !terminal_order_inserts.is_empty() || !terminal_trade_inserts.is_empty() {
             let terminal_projections = Arc::get_mut(&mut query_state.terminal_projections)
-                .expect("查询终态投影独占所有权已经在 SQLite 提交前验证");
+                .expect("查询终态投影独占所有权已经在提交前验证");
             for (key, projection) in terminal_order_inserts {
                 let replaced = terminal_projections.orders.insert(key, projection);
                 debug_assert!(replaced.is_none());
@@ -15106,9 +13592,6 @@ fn prepare_private_fact_delta_v2(
         session_slice,
         delivery,
         evidence,
-        recovery_operation: DurableRecoveryOperationV2::AdvancePrivateFactThrough {
-            received_at_utc_ms,
-        },
     })
 }
 
@@ -15123,7 +13606,6 @@ fn commit_prevalidated_private_fact_delta_v2(
         session_slice,
         delivery,
         evidence,
-        recovery_operation: _,
     } = prepared;
     let committed_candidate = session.commit_prevalidated_private_fact_slice_v2(session_slice);
     let (outcome, capacity_lease) = match (committed_candidate, delivery) {
@@ -15237,7 +13719,6 @@ fn prepare_downstream_durability_delta_v2(
         compacted_deliveries,
         downstream_durable_confirmation: proof.durable_through,
         evidence,
-        recovery_operation: DurableRecoveryOperationV2::AdvanceDownstreamDurability,
     }))
 }
 
@@ -15251,7 +13732,6 @@ fn commit_prevalidated_downstream_durability_delta_v2(
         compacted_deliveries,
         downstream_durable_confirmation: confirmation,
         evidence: _,
-        recovery_operation: _,
     } = prepared;
     for (sequence, compacted) in compacted_deliveries {
         let removed = confirmed_private_deliveries.remove(&sequence);
@@ -15703,34 +14183,19 @@ impl SimExecutionSessionV1 {
         expires_at_utc_ms: i64,
         effective_processing_at_utc_ms: i64,
     ) -> Result<Option<i64>, SubmissionPreparationErrorV1> {
-        let encoded_expires_sec = expires_at_utc_ms.div_euclid(1_000);
-        let processing_sec = effective_processing_at_utc_ms
-            .div_euclid(1_000)
-            .checked_add(i64::from(
-                effective_processing_at_utc_ms.rem_euclid(1_000) != 0,
-            ))
-            .ok_or(SubmissionPreparationErrorV1::TimeOverflow)?;
         let timing = &session
             .rule_snapshot()
             .snapshot()
             .documented_platform_rules
             .gtd_timing
             .value;
-        let lead = timing
-            .minimum_lead_seconds
-            .checked_add(timing.safety_offset_seconds)
-            .and_then(|value| i64::try_from(value).ok())
-            .ok_or(SubmissionPreparationErrorV1::TimeOverflow)?;
-        let minimum_expires_sec = processing_sec
-            .checked_add(lead)
-            .ok_or(SubmissionPreparationErrorV1::TimeOverflow)?;
-        if encoded_expires_sec < minimum_expires_sec {
-            return Ok(None);
-        }
-        encoded_expires_sec
-            .checked_mul(1_000)
-            .map(Some)
-            .ok_or(SubmissionPreparationErrorV1::TimeOverflow)
+        normalize_gtd_expiration(
+            expires_at_utc_ms,
+            effective_processing_at_utc_ms,
+            timing.minimum_lead_seconds,
+            timing.safety_offset_seconds,
+        )
+        .map_err(|()| SubmissionPreparationErrorV1::TimeOverflow)
     }
 
     fn authorized_platform_revision_for(session: &SimSession) -> AuthorizedPlatformRevisionV1 {
@@ -17823,10 +16288,6 @@ impl SimExecutionSessionV1 {
                 &mut self.direct_response_outbox,
                 prepared,
             );
-            debug_assert_eq!(
-                committed.recovery_operation,
-                DurableRecoveryOperationV2::RegisterRequest
-            );
             return Ok(committed.schedule);
         }
 
@@ -18100,7 +16561,7 @@ fn simulated_trade_status(raw: &str) -> SimulatedTradeStatusV1 {
     }
 }
 
-fn strict_millisecond_interval(filter: &TradesFilterV1) -> Option<(i64, i64)> {
+pub(crate) fn strict_millisecond_interval(filter: &TradesFilterV1) -> Option<(i64, i64)> {
     let first_inclusive = match filter.after_utc_ms {
         Some(after) => after.checked_add(1)?,
         None => 0,
@@ -19532,9 +17993,6 @@ fn prepare_cancel_execution_drive_fields_v2<'a>(
         lifecycle,
         terminal_projection_condition_ids,
         evidence,
-        recovery_operation: DurableRecoveryOperationV2::DriveExecutionThrough {
-            effective_processing_at_utc_ms: actual_cutoff_utc_ms,
-        },
         disposition: SubmissionDriveDispositionV1::ItemProcessed {
             request_completed: true,
         },
@@ -19824,9 +18282,6 @@ fn prepare_post_execution_drive_fields_v2<'a>(
         lifecycle,
         terminal_projection_condition_ids,
         evidence,
-        recovery_operation: DurableRecoveryOperationV2::DriveExecutionThrough {
-            effective_processing_at_utc_ms: actual_cutoff_utc_ms,
-        },
         disposition: SubmissionDriveDispositionV1::ItemProcessed { request_completed },
     })
 }
@@ -20362,9 +18817,6 @@ fn finish_materialized_query_action_v2<'a>(
         lifecycle,
         terminal_projection_condition_ids,
         evidence,
-        recovery_operation: DurableRecoveryOperationV2::DriveExecutionThrough {
-            effective_processing_at_utc_ms: actual_cutoff_utc_ms,
-        },
         disposition: SubmissionDriveDispositionV1::ItemProcessed {
             request_completed: true,
         },
@@ -20680,7 +19132,6 @@ fn prepare_executing_closed_bucket_drive_fields_v2<'a>(
             lifecycle,
             terminal_projection_condition_ids,
             evidence,
-            recovery_operation: DurableRecoveryOperationV2::ApplyClosedMarketEventBucket,
         },
     ))
 }
@@ -20736,7 +19187,6 @@ fn prepare_market_only_closed_bucket_drive_fields_v2<'a>(
         query,
         terminal_projection_condition_ids,
         evidence,
-        recovery_operation: DurableRecoveryOperationV2::ApplyClosedMarketEventBucket,
     })
 }
 
@@ -20789,7 +19239,6 @@ fn prepare_closed_bucket_closure_upgrade_drive_fields_v2<'a>(
         query,
         terminal_projection_condition_ids,
         evidence,
-        recovery_operation: DurableRecoveryOperationV2::ApplyClosedMarketEventBucket,
     })
 }
 
@@ -20996,9 +19445,6 @@ fn finish_no_action_scheduled_execution_drive_v2<'a>(
             query,
             lifecycle,
             evidence,
-            recovery_operation: DurableRecoveryOperationV2::DriveExecutionThrough {
-                effective_processing_at_utc_ms: actual_cutoff_utc_ms,
-            },
         },
     ))
 }
@@ -23406,7 +21852,7 @@ fn rejected(rejection: SubmissionAdmissionRejectionV1) -> SubmissionAdmissionDec
     SubmissionAdmissionDecisionV1::RejectedNoEffect(rejection)
 }
 
-fn limit_buy_encoding(
+pub(crate) fn limit_buy_encoding(
     price: Decimal,
     size: Decimal,
     minimum_tick_size: Decimal,
@@ -23414,12 +21860,36 @@ fn limit_buy_encoding(
     encode_limit_buy_order(price, size, minimum_tick_size).ok()
 }
 
-fn market_buy_encoding(
+pub(crate) fn market_buy_encoding(
     price: Decimal,
     spend: Decimal,
     minimum_tick_size: Decimal,
 ) -> Option<BuyOrderEncoding> {
     encode_market_buy_order(price, spend, minimum_tick_size).ok()
+}
+
+pub(crate) fn normalize_gtd_expiration(
+    expires_at_utc_ms: i64,
+    effective_processing_at_utc_ms: i64,
+    minimum_lead_seconds: u64,
+    safety_offset_seconds: u64,
+) -> Result<Option<i64>, ()> {
+    let encoded_expires_sec = expires_at_utc_ms.div_euclid(1_000);
+    let processing_sec = effective_processing_at_utc_ms
+        .div_euclid(1_000)
+        .checked_add(i64::from(
+            effective_processing_at_utc_ms.rem_euclid(1_000) != 0,
+        ))
+        .ok_or(())?;
+    let lead = minimum_lead_seconds
+        .checked_add(safety_offset_seconds)
+        .and_then(|value| i64::try_from(value).ok())
+        .ok_or(())?;
+    let minimum_expires_sec = processing_sec.checked_add(lead).ok_or(())?;
+    if encoded_expires_sec < minimum_expires_sec {
+        return Ok(None);
+    }
+    encoded_expires_sec.checked_mul(1_000).map(Some).ok_or(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -26168,6 +24638,39 @@ mod tests {
         (policy, sha256)
     }
 
+    fn durable_run_checkpoint_for_tests(
+        process: &SimExecutionProcessV1,
+        session: &SimExecutionSessionV1,
+        rules: &SealedProcessRuleSnapshot,
+    ) -> DurableRunCheckpointV1 {
+        let run_intent_binding = SimulationRunIntentBindingV1::try_new(
+            rules.snapshot().provenance.implementation_identity.clone(),
+            SimulationWorkloadKindV1::RealVertical,
+            SimulationDeterministicScriptContractV1::RealVerticalV1,
+        )
+        .expect("构造测试运行意图");
+        let (resource_policy, resource_policy_sha256) = resource_policy_for_tests();
+        DurableRunCheckpointV1 {
+            schema_version: DURABLE_RUN_CHECKPOINT_SCHEMA_V1.to_owned(),
+            execution_contract_version: SIM_EXECUTION_CONTRACT_V1.to_owned(),
+            market_event_source_identity_sha256: Sha256Hex("d".repeat(64)),
+            run_intent_binding,
+            resource_policy,
+            resource_policy_sha256,
+            component_golden_measurement_sha256: None,
+            resource_high_water: SimulationResourceHighWaterV1::default(),
+            run_resource_admission: ResourceAdmissionStateV1::default(),
+            run_resource_triggering_session_limit: None,
+            session_resource_admission: BTreeMap::new(),
+            lifecycle: DurableRunLifecycleV1::Open,
+            process_root: process.inner.checkpoint().expect("形成测试进程检查点"),
+            sessions: BTreeMap::from([(
+                session.session_spec().session_id.clone(),
+                session.durable_checkpoint(),
+            )]),
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn runtime_pending_action_counter_bytes_enter_session_and_run_memory_usage() {
         let rules = successful_snapshot_for_sim_tests().await;
@@ -26206,19 +24709,14 @@ mod tests {
                 + runtime_counter_bytes
         );
 
-        let application_checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
-            &process,
-            &session,
-            rules.as_ref(),
-        );
-        let run_checkpoint = &application_checkpoint.run_checkpoint;
+        let run_checkpoint = durable_run_checkpoint_for_tests(&process, &session, rules.as_ref());
         let usage = candidate_resource_usage(
-            run_checkpoint,
+            &run_checkpoint,
             Some(session.session_spec().session_id.as_str()),
             DurableResourcePreviewV1::default(),
         )
         .expect("measure resource-counted run");
-        let expected_run_bytes = encoded_resource_bytes(run_checkpoint)
+        let expected_run_bytes = encoded_resource_bytes(&run_checkpoint)
             .expect("encode resource-counted run")
             + runtime_counter_bytes;
         assert_eq!(usage.session.in_memory_state, session_usage.in_memory_state);
@@ -26236,91 +24734,6 @@ mod tests {
         evidence.maintenance_succeeded_steady_after_resource_usage =
             Some(SimulationResourceUsageV1::default());
         evidence
-    }
-
-    #[test]
-    fn run_artifact_v2_accumulator_uses_file_sha_and_rejects_sequence_gaps() {
-        let spec = session_spec();
-        let session_id = spec.session_id.clone();
-        let seed_projection = |accumulator: &mut RunArtifactEvidenceAccumulatorV2| {
-            accumulator.projection.session_creations.insert(
-                session_id.clone(),
-                (
-                    spec.clone(),
-                    funded_opening_anchor_for_projection_test(&session_id),
-                    SessionInitializationSnapshotV1 {
-                        state: SessionInitializationStateV1::Active,
-                        activation_id: Some("artifact-v2-activation".to_owned()),
-                        failure_id: None,
-                    },
-                ),
-            );
-        };
-        let first = DurableLogicalTransactionEvidenceV2::new(
-            DurableTransactionFactV1::PlatformBucketApplied {
-                session_id: session_id.clone(),
-                bucket: DurableMarketBucketReferenceV1 {
-                    path: MarketEventPathV1::PublicVisibility,
-                    bucket_at_utc_ms: 10,
-                    start_index_position: 0,
-                    next_index_position: 1,
-                    closure: MillisecondBucketClosureV1::NextEventAt(20),
-                    bucket_sha256: Sha256Hex("a".repeat(64)),
-                },
-            },
-        );
-        let second = DurableLogicalTransactionEvidenceV2::new(
-            DurableTransactionFactV1::PlatformBucketApplied {
-                session_id: session_id.clone(),
-                bucket: DurableMarketBucketReferenceV1 {
-                    path: MarketEventPathV1::PublicVisibility,
-                    bucket_at_utc_ms: 20,
-                    start_index_position: 1,
-                    next_index_position: 2,
-                    closure: MillisecondBucketClosureV1::EndOfInput,
-                    bucket_sha256: Sha256Hex("b".repeat(64)),
-                },
-            },
-        );
-        let first_file_sha256 = Sha256Hex("1".repeat(64));
-        let second_file_sha256 = Sha256Hex("2".repeat(64));
-        let pseudo_record_sha256 = Sha256Hex("3".repeat(64));
-        let mut accumulator = RunArtifactEvidenceAccumulatorV2::new();
-        seed_projection(&mut accumulator);
-        accumulator
-            .apply_logical_evidence(1, first_file_sha256, 101, &first)
-            .expect("V2 累加器接受首条文件证据");
-        accumulator
-            .apply_logical_evidence(2, second_file_sha256.clone(), 202, &second)
-            .expect("V2 累加器接受连续的第二条文件证据");
-
-        let final_reference =
-            &accumulator.index.buckets[&session_id][&MarketEventPathV1::PublicVisibility].1;
-        assert_eq!(final_reference.sequence, 2);
-        assert_eq!(final_reference.file_sha256, second_file_sha256);
-        assert_ne!(final_reference.file_sha256, pseudo_record_sha256);
-        assert_eq!(accumulator.evidence_count, 2);
-        assert_eq!(accumulator.evidence_bytes, 303);
-        assert_eq!(accumulator.evidence_head_sha256, Some(second_file_sha256));
-
-        let mut discontinuous = RunArtifactEvidenceAccumulatorV2::new();
-        seed_projection(&mut discontinuous);
-        discontinuous
-            .apply_logical_evidence(1, Sha256Hex("4".repeat(64)), 11, &first)
-            .expect("间断测试先接受首条证据");
-        assert!(
-            discontinuous
-                .apply_logical_evidence(3, Sha256Hex("5".repeat(64)), 13, &second)
-                .is_err()
-        );
-        assert_eq!(discontinuous.evidence_count, 1);
-        assert_eq!(discontinuous.evidence_bytes, 11);
-        assert_eq!(
-            discontinuous.index.buckets[&session_id][&MarketEventPathV1::PublicVisibility]
-                .1
-                .sequence,
-            1
-        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -26432,46 +24845,6 @@ mod tests {
             Err(SimulationRunArtifactErrorV1::Integrity(message))
                 if message.contains("输入路径")
         ));
-
-        let directory = tempfile::tempdir().expect("创建 V2 未封口导出临时目录");
-        let root = directory.path().join("run");
-        let mut store = crate::persistence::LocalTransactionLogStoreV2::create_new(
-            root.clone(),
-            crate::persistence::TransactionLogIdentityV2::new(
-                process.run_id().to_owned(),
-                crate::persistence::DurabilityProfileV2::RecoverablePaper,
-            ),
-        )
-        .expect("创建 V2 未封口导出事务日志");
-        let run_created =
-            DurableLogicalTransactionEvidenceV2::new(DurableTransactionFactV1::RunCreated {
-                run_id: process.run_id().to_owned(),
-                market_event_source_identity_sha256: checkpoint
-                    .market_event_source_identity_sha256
-                    .clone(),
-                run_intent_binding: checkpoint.run_intent_binding.clone(),
-                resource_policy: checkpoint.resource_policy.clone(),
-                resource_policy_sha256: checkpoint.resource_policy_sha256.clone(),
-            });
-        store
-            .append_transaction(
-                &run_created,
-                &DurableRecoveryOperationV2::ApplicationCheckpointBoundary,
-            )
-            .expect("追加 V2 未封口运行事实");
-        store
-            .publish_application_checkpoint(1, &checkpoint)
-            .expect("发布覆盖 V2 未封口日志的应用检查点");
-        let export = export_and_prepare_run_artifact_bundle_v2(
-            &store,
-            &process.inner,
-            &checkpoint,
-            1,
-            &SimulationResourceHighWaterV1::default(),
-        );
-        assert!(export.is_err());
-        assert!(!root.join(FINAL_EVIDENCE_DIRECTORY_NAME_V2).exists());
-        assert!(!root.join(".evidence-v2.candidate").exists());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -27932,87 +26305,6 @@ mod tests {
             .expect("稀疏 Post FAK 黄金候选必须可提交")
             .commit();
         assert_eq!(session.durable_checkpoint(), legacy_checkpoint);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn recoverable_paper_v2_post_taker_commits_while_application_checkpoint_is_retained() {
-        use crate::task22_tests::{
-            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
-            scenario as long_scenario, session_spec as long_session_spec,
-        };
-
-        let rules = successful_snapshot_for_sim_tests().await;
-        let profile = load_embedded_proxy_latency_profile().expect("加载 Paper V2 Post 时延配置");
-        let scenario = long_scenario();
-        let mut process = execution_process_for_tests(
-            Arc::clone(&rules),
-            Arc::clone(&profile),
-            Arc::clone(&scenario),
-        );
-        let spec = long_session_spec(
-            &scenario,
-            SimCallerRoleV1::Paper,
-            "paper-v2-post-retained-checkpoint",
-        );
-        let mut session =
-            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
-        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
-        let request_id = "paper-v2-post-retained-checkpoint-request";
-        let registration = session
-            .post_order(PostOrderRequestV1 {
-                context: context_for_arrival(&session, &profile, request_id, 1, 150_000),
-                idempotency_key: "paper-v2-post-retained-checkpoint-key".to_owned(),
-                item: PostOrderItemV1 {
-                    item_id: "paper-v2-post-retained-checkpoint-item".to_owned(),
-                    order: SimBuyOrderV1 {
-                        condition_id: long_market().condition_id,
-                        token_id: long_asset("1", 0, "Up").token_id,
-                        kind: SimBuyOrderKindV1::FakMarket {
-                            spend_pusd: Decimal::new(3, 0),
-                            worst_price_pusd_per_share: Decimal::new(6, 1),
-                        },
-                    },
-                },
-            })
-            .expect("登记保留应用检查点的 Paper V2 Post");
-        let effective_at = registration.item.effective_processing_at_utc_ms;
-        session
-            .session
-            .advance_public_visibility_through(effective_at, next_visibility_position)
-            .expect("闭合保留应用检查点的 Paper V2 Post 公开前缀");
-
-        let application_checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
-            &process,
-            &session,
-            rules.as_ref(),
-        );
-        let retained_session_checkpoint = application_checkpoint
-            .run_checkpoint
-            .sessions
-            .get(session.session_spec().session_id.as_str())
-            .expect("应用检查点必须保留目标会话");
-        let directory = tempfile::tempdir().expect("创建保留应用检查点的 Paper V2 Post 临时目录");
-        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
-            directory.path().join("paper-post-retained-checkpoint"),
-            &session,
-            &application_checkpoint,
-        )
-        .expect("创建保留应用检查点的 Paper V2 Post 协调器");
-
-        assert_eq!(
-            coordinator.drive_post_execution_through(&mut session, effective_at),
-            Ok(SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: true,
-            })
-        );
-        assert_eq!(coordinator.cursor_for_tests().0, 1);
-        assert_eq!(session.session.execution_state().orders().count(), 1);
-        assert_eq!(session.session.execution_state().fills().count(), 1);
-        assert!(session.immediate_taker_fee_encumbered_pusd() > Decimal::ZERO);
-        assert_eq!(
-            retained_session_checkpoint.session.session_id(),
-            session.session_spec().session_id
-        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -32144,1431 +30436,6 @@ mod tests {
             .create_active_session_for_tests(session_spec(), accepting_submission_response_bridge())
     }
 
-    fn counting_submission_response_bridge(
-        calls: Arc<std::sync::atomic::AtomicUsize>,
-    ) -> SubmissionResponseBridgeV1 {
-        let post_order_calls = Arc::clone(&calls);
-        SubmissionResponseBridgeV1::new(
-            move |response| {
-                post_order_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |feedback| {
-                SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
-            },
-            |feedback| {
-                SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
-            },
-            |feedback| {
-                SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
-            },
-        )
-    }
-
-    fn full_once_order_submission_response_bridge(
-        calls: Arc<std::sync::atomic::AtomicUsize>,
-    ) -> SubmissionResponseBridgeV1 {
-        let order_calls = Arc::clone(&calls);
-        SubmissionResponseBridgeV1::new(
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            move |response| {
-                if order_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-                    SubmissionResponseAcceptanceV1::Full
-                } else {
-                    SubmissionResponseAcceptanceV1::Accepted(
-                        response.metadata.delivery_confirmation(),
-                    )
-                }
-            },
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |feedback| {
-                SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
-            },
-            |feedback| {
-                SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
-            },
-            |feedback| {
-                SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
-            },
-        )
-    }
-
-    fn full_then_disconnected_order_submission_response_bridge(
-        calls: Arc<std::sync::atomic::AtomicUsize>,
-    ) -> SubmissionResponseBridgeV1 {
-        let order_calls = Arc::clone(&calls);
-        SubmissionResponseBridgeV1::new(
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            move |_| {
-                if order_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-                    SubmissionResponseAcceptanceV1::Full
-                } else {
-                    SubmissionResponseAcceptanceV1::Disconnected
-                }
-            },
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |feedback| {
-                SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
-            },
-            |feedback| {
-                SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
-            },
-            |feedback| {
-                SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
-            },
-        )
-    }
-
-    fn full_once_order_lifecycle_submission_response_bridge(
-        calls: Arc<std::sync::atomic::AtomicUsize>,
-    ) -> SubmissionResponseBridgeV1 {
-        let order_lifecycle_calls = Arc::clone(&calls);
-        SubmissionResponseBridgeV1::new(
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            |response| {
-                SubmissionResponseAcceptanceV1::Accepted(response.metadata.delivery_confirmation())
-            },
-            move |feedback| {
-                if order_lifecycle_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-                    SubmissionResponseAcceptanceV1::Full
-                } else {
-                    SubmissionResponseAcceptanceV1::Accepted(
-                        feedback.metadata.delivery_confirmation(),
-                    )
-                }
-            },
-            |feedback| {
-                SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
-            },
-            |feedback| {
-                SubmissionResponseAcceptanceV1::Accepted(feedback.metadata.delivery_confirmation())
-            },
-        )
-    }
-
-    struct PaperScheduledLifecycleLeaseFixture {
-        rules: Arc<SealedProcessRuleSnapshot>,
-        profile: Arc<EmpiricalDelayProfile>,
-        process: SimExecutionProcessV1,
-        session: SimExecutionSessionV1,
-        next_visibility_position: u64,
-        gtd_deadline: i64,
-    }
-
-    async fn paper_capacity_one_session_with_pending_gtd(
-        session_id: &str,
-    ) -> PaperScheduledLifecycleLeaseFixture {
-        use crate::task22_tests::{
-            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
-            scenario as long_scenario, session_spec as long_session_spec,
-        };
-
-        let rules = successful_snapshot_for_sim_tests().await;
-        let profile = load_embedded_proxy_latency_profile().expect("加载 Paper V2 时延配置");
-        let scenario = long_scenario();
-        let mut spec = long_session_spec(&scenario, SimCallerRoleV1::Paper, session_id);
-        spec.response_outbox_capacity = std::num::NonZeroUsize::new(1).expect("正容量");
-        let mut process = execution_process_for_tests(
-            Arc::clone(&rules),
-            Arc::clone(&profile),
-            Arc::clone(&scenario),
-        );
-        let mut session =
-            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
-        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
-        let registration = session
-            .post_order(PostOrderRequestV1 {
-                context: context_for_arrival(
-                    &session,
-                    &profile,
-                    "paper-v2-lifecycle-lease-gtd-source",
-                    1,
-                    150_000,
-                ),
-                idempotency_key: "paper-v2-lifecycle-lease-gtd-idempotency".to_owned(),
-                item: PostOrderItemV1 {
-                    item_id: "paper-v2-lifecycle-lease-gtd-item".to_owned(),
-                    order: SimBuyOrderV1 {
-                        condition_id: long_market().condition_id,
-                        token_id: long_asset("1", 0, "Up").token_id,
-                        kind: SimBuyOrderKindV1::GtdLimit {
-                            limit_price_pusd_per_share: Decimal::new(1, 5),
-                            size_shares: Decimal::new(5, 0),
-                            post_only: true,
-                            expires_at_utc_ms: 391_999,
-                        },
-                    },
-                },
-            })
-            .expect("登记生命周期租约测试的 GTD 源订单");
-        let effective_at = registration.item.effective_processing_at_utc_ms;
-        session
-            .session
-            .advance_public_visibility_through(effective_at, next_visibility_position)
-            .expect("闭合生命周期租约 GTD 接纳时点");
-        assert_eq!(
-            session.drive_next_execution_action_through(effective_at),
-            Ok(SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: true,
-            })
-        );
-        let gtd_deadline = session
-            .next_order_deadline_at_utc_ms()
-            .expect("生命周期租约测试必须形成 GTD 到期任务");
-        let initial_delivery_cutoff = 200_000;
-        session
-            .session
-            .advance_public_visibility_through(initial_delivery_cutoff, next_visibility_position)
-            .expect("闭合 GTD 初始私有输出时点");
-        assert_eq!(
-            session.drive_next_execution_action_through(initial_delivery_cutoff),
-            Ok(SubmissionDriveDispositionV1::NoAction)
-        );
-        assert_eq!(
-            session.drive_private_delivery_through(initial_delivery_cutoff),
-            Ok(SubmissionDeliveryDispositionV1::Delivered)
-        );
-        assert_eq!(
-            session.drive_private_delivery_through(initial_delivery_cutoff),
-            Ok(SubmissionDeliveryDispositionV1::NoVisibleResponse)
-        );
-        assert!(session.direct_response_outbox.entries.is_empty());
-        assert!(session.lifecycle_outbox.entries.is_empty());
-        assert!(session.lifecycle_outbox.batches.is_empty());
-
-        PaperScheduledLifecycleLeaseFixture {
-            rules,
-            profile,
-            process,
-            session,
-            next_visibility_position,
-            gtd_deadline,
-        }
-    }
-
-    fn register_lifecycle_lease_batch(
-        session: &mut SimExecutionSessionV1,
-        profile: &EmpiricalDelayProfile,
-        desired_arrival_at_utc_ms: i64,
-        second_item_id: &str,
-        second_order_kind: SimBuyOrderKindV1,
-    ) -> PostOrdersRegistrationV1 {
-        use crate::task22_tests::{
-            asset as long_asset, context_for_arrival, market as long_market,
-        };
-
-        session
-            .post_orders(PostOrdersRequestV1 {
-                context: context_for_arrival(
-                    session,
-                    profile,
-                    "paper-v2-private-lifecycle-later-release-source",
-                    2,
-                    desired_arrival_at_utc_ms,
-                ),
-                idempotency_key: "paper-v2-private-lifecycle-later-release-idempotency".to_owned(),
-                items: vec![
-                    PostOrderItemV1 {
-                        item_id: "paper-v2-private-lifecycle-feedback-item".to_owned(),
-                        order: SimBuyOrderV1 {
-                            condition_id: long_market().condition_id.clone(),
-                            token_id: long_asset("1", 0, "Up").token_id,
-                            kind: SimBuyOrderKindV1::GtcLimit {
-                                limit_price_pusd_per_share: Decimal::new(4, 1),
-                                size_shares: Decimal::new(5, 0),
-                                post_only: true,
-                            },
-                        },
-                    },
-                    PostOrderItemV1 {
-                        item_id: second_item_id.to_owned(),
-                        order: SimBuyOrderV1 {
-                            condition_id: long_market().condition_id,
-                            token_id: long_asset("1", 0, "Up").token_id,
-                            kind: second_order_kind,
-                        },
-                    },
-                ],
-            })
-            .expect("登记先形成生命周期反馈、后无效果拒绝的混合批次")
-    }
-
-    fn pending_lifecycle_feedback_received_at(session: &SimExecutionSessionV1) -> i64 {
-        session
-            .session
-            .recovered_pending_private_facts()
-            .iter()
-            .find_map(|(evidence, received_at, _)| {
-                matches!(
-                    evidence,
-                    crate::session::PrivateVisibilityEvidenceV1::LifecycleFeedback { .. }
-                )
-                .then_some(*received_at)
-            })
-            .expect("首项必须形成一个生命周期反馈")
-    }
-
-    fn recoverable_paper_application_checkpoint_v2_for_tests(
-        process: &SimExecutionProcessV1,
-        session: &SimExecutionSessionV1,
-        rules: &SealedProcessRuleSnapshot,
-    ) -> RecoverablePaperApplicationCheckpointV2 {
-        let run_intent_binding = SimulationRunIntentBindingV1::try_new(
-            rules.snapshot().provenance.implementation_identity.clone(),
-            SimulationWorkloadKindV1::RealVertical,
-            SimulationDeterministicScriptContractV1::RealVerticalV1,
-        )
-        .expect("构造请求协调器运行意图");
-        let (resource_policy, resource_policy_sha256) = resource_policy_for_tests();
-        RecoverablePaperApplicationCheckpointV2 {
-            schema_version: RECOVERABLE_PAPER_APPLICATION_CHECKPOINT_SCHEMA_V2.to_owned(),
-            run_checkpoint: DurableRunCheckpointV1 {
-                schema_version: DURABLE_RUN_CHECKPOINT_SCHEMA_V1.to_owned(),
-                execution_contract_version: SIM_EXECUTION_CONTRACT_V1.to_owned(),
-                market_event_source_identity_sha256: Sha256Hex("d".repeat(64)),
-                run_intent_binding,
-                resource_policy,
-                resource_policy_sha256,
-                component_golden_measurement_sha256: None,
-                resource_high_water: SimulationResourceHighWaterV1::default(),
-                run_resource_admission: ResourceAdmissionStateV1::default(),
-                run_resource_triggering_session_limit: None,
-                session_resource_admission: BTreeMap::new(),
-                lifecycle: DurableRunLifecycleV1::Open,
-                process_root: process
-                    .inner
-                    .checkpoint()
-                    .expect("形成请求协调器进程检查点"),
-                sessions: BTreeMap::from([(
-                    session.session_spec().session_id.clone(),
-                    session.durable_checkpoint(),
-                )]),
-            },
-            evicted_markets: BTreeMap::new(),
-        }
-    }
-
-    fn restore_recoverable_paper_application_session_for_tests(
-        process: &SimExecutionProcessV1,
-        mut checkpoint: RecoverablePaperApplicationCheckpointV2,
-        session_id: &str,
-    ) -> ExecutionSessionStateV1 {
-        checkpoint
-            .validate()
-            .expect("RecoverablePaper 正式应用检查点必须有效");
-        let session_checkpoint = checkpoint
-            .run_checkpoint
-            .sessions
-            .remove(session_id)
-            .expect("RecoverablePaper 应用检查点必须包含目标会话");
-        let evicted = checkpoint
-            .evicted_markets
-            .remove(session_id)
-            .unwrap_or_default();
-        let (state, downstream) =
-            ExecutionSessionStateV1::restore(&process.inner, session_checkpoint, &evicted)
-                .expect("恢复 RecoverablePaper 应用检查点会话");
-        assert_eq!(downstream, None);
-        state
-    }
-
-    fn coordinator_post_order_request(
-        session: &SimExecutionSessionV1,
-        request_id: &str,
-    ) -> PostOrderRequestV1 {
-        PostOrderRequestV1 {
-            context: context(session, request_id, 1, 2_500),
-            idempotency_key: format!("{request_id}-idempotency"),
-            item: gtc_item(&format!("{request_id}-item"), 50),
-        }
-    }
-
-    fn coordinator_post_order_actions(request: &PostOrderRequestV1) -> Vec<ParsedLogicalActionV1> {
-        vec![method_action(
-            &request.item.item_id,
-            0,
-            request.item.order.kind.method_timing(),
-        )]
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn recoverable_paper_v2_coordinator_rejects_valid_but_unbound_session_identity() {
-        let rules = successful_snapshot_for_sim_tests().await;
-        let profile = load_embedded_proxy_latency_profile().expect("profile");
-        let scenario = scenario_for_sim_tests();
-        let mut process = execution_process_for_tests(
-            Arc::clone(&rules),
-            Arc::clone(&profile),
-            Arc::clone(&scenario),
-        );
-        let mut first_spec = session_spec();
-        first_spec.caller_role = SimCallerRoleV1::Paper;
-        let first_session = process.create_active_session_for_tests(
-            first_spec.clone(),
-            accepting_submission_response_bridge(),
-        );
-        let mut second_spec = first_spec;
-        second_spec.session_id = "session-task13-other".to_owned();
-        second_spec.account_id = "account-task13-other".to_owned();
-        second_spec.caller_instance_id = "caller-task13-other".to_owned();
-        second_spec.creation_request_id = "create-session-task13-other".to_owned();
-        second_spec.response_bridge_binding_id = "bridge-session-task13-other".to_owned();
-        second_spec.session_seed = sha("e");
-        let mut second_session = process
-            .create_active_session_for_tests(second_spec, accepting_submission_response_bridge());
-        let checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
-            &process,
-            &first_session,
-            rules.as_ref(),
-        );
-        let directory = tempfile::tempdir().expect("创建请求协调器身份错配临时目录");
-
-        assert!(matches!(
-            RecoverablePaperCoordinatorV2::create_new(
-                directory.path().join("paper-request-mismatched-create"),
-                &second_session,
-                &checkpoint,
-            ),
-            Err(PersistenceErrorV1::Integrity(message))
-                if message.contains(&second_session.session_spec().session_id)
-        ));
-
-        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
-            directory.path().join("paper-request-bound-create"),
-            &first_session,
-            &checkpoint,
-        )
-        .expect("为首个会话创建已绑定请求协调器");
-        let request = coordinator_post_order_request(&second_session, "coordinator-unbound");
-        let actions = coordinator_post_order_actions(&request);
-        let before_state = second_session.durable_checkpoint();
-        let before_cursor = coordinator.cursor_for_tests();
-        assert!(matches!(
-            coordinator.register_request(
-                &mut second_session,
-                PendingDomainRequestV1::PostOrder(request),
-                actions,
-            ),
-            Err(SessionError::Durability(message))
-                if message.contains(&second_session.session_spec().session_id)
-        ));
-        assert_eq!(second_session.durable_checkpoint(), before_state);
-        assert_eq!(coordinator.cursor_for_tests(), before_cursor);
-        assert_eq!(coordinator.encoded_transaction_count_for_tests, 0);
-        assert_eq!(coordinator.append_attempt_count_for_tests, 0);
-
-        let mut same_named_process = execution_process_for_tests(rules, profile, scenario);
-        let mut same_named_spec = first_session.session_spec().clone();
-        same_named_spec.account_id = "account-task13-same-name-other-root".to_owned();
-        same_named_spec.caller_instance_id = "caller-task13-same-name-other-root".to_owned();
-        same_named_spec.creation_request_id = "create-task13-same-name-other-root".to_owned();
-        same_named_spec.response_bridge_binding_id =
-            "bridge-task13-same-name-other-root".to_owned();
-        same_named_spec.session_seed = sha("f");
-        let mut same_named_session = same_named_process.create_active_session_for_tests(
-            same_named_spec,
-            accepting_submission_response_bridge(),
-        );
-        let before_state = same_named_session.durable_checkpoint();
-        let before_cursor = coordinator.cursor_for_tests();
-        assert!(matches!(
-            coordinator.close_ingress(&mut same_named_session),
-            Err(SessionError::Durability(message))
-                if message.contains(&same_named_session.session_spec().session_id)
-        ));
-        assert_eq!(same_named_session.durable_checkpoint(), before_state);
-        assert_eq!(coordinator.cursor_for_tests(), before_cursor);
-        assert_eq!(coordinator.encoded_transaction_count_for_tests, 0);
-        assert_eq!(coordinator.append_attempt_count_for_tests, 0);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn recoverable_paper_v2_request_insert_failure_keeps_memory_cursor_log_and_bridge_unchanged()
-     {
-        let rules = successful_snapshot_for_sim_tests().await;
-        let profile = load_embedded_proxy_latency_profile().expect("profile");
-        let scenario = scenario_for_sim_tests();
-        let mut process = execution_process_for_tests(
-            Arc::clone(&rules),
-            Arc::clone(&profile),
-            Arc::clone(&scenario),
-        );
-        let mut spec = session_spec();
-        spec.caller_role = SimCallerRoleV1::Paper;
-        let bridge_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mut session = process.create_active_session_for_tests(
-            spec,
-            counting_submission_response_bridge(Arc::clone(&bridge_calls)),
-        );
-        let checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
-            &process,
-            &session,
-            rules.as_ref(),
-        );
-        let directory = tempfile::tempdir().expect("创建请求协调器临时目录");
-        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
-            directory.path().join("paper-request-coordinator"),
-            &session,
-            &checkpoint,
-        )
-        .expect("创建请求协调器");
-        let request = coordinator_post_order_request(&session, "coordinator-insert-failure");
-        let actions = coordinator_post_order_actions(&request);
-        let before_state = session.durable_checkpoint();
-        let before_cursor = coordinator.cursor_for_tests();
-        coordinator
-            .store
-            .install_transaction_log_insert_failure_for_tests()
-            .expect("安装事务记录失败触发器");
-
-        assert!(matches!(
-            coordinator.register_request(
-                &mut session,
-                PendingDomainRequestV1::PostOrder(request.clone()),
-                actions.clone(),
-            ),
-            Err(SessionError::Durability(message)) if message.contains("SQLite")
-        ));
-        assert_eq!(session.durable_checkpoint(), before_state);
-        assert_eq!(coordinator.cursor_for_tests(), before_cursor);
-        assert!(!coordinator.recovery_required);
-        assert_eq!(
-            coordinator
-                .store
-                .logical_log_bytes()
-                .expect("读取失败后日志字节"),
-            0
-        );
-        let failed_recovery = coordinator
-            .store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("读取失败后的正式日志");
-        assert!(failed_recovery.tail.is_empty());
-        assert_eq!(bridge_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
-
-        coordinator
-            .store
-            .remove_transaction_log_insert_failure_for_tests()
-            .expect("移除事务记录失败触发器");
-        let registered = coordinator
-            .register_request(
-                &mut session,
-                PendingDomainRequestV1::PostOrder(request),
-                actions,
-            )
-            .expect("解除失败后登记同一请求");
-        assert_eq!(
-            registered.request.disposition,
-            RequestRegistrationDispositionV1::NewLogicalRequest
-        );
-        assert_eq!(coordinator.last_sequence, 1);
-        assert!(coordinator.transaction_head_sha256.is_some());
-        assert!(coordinator.logical_log_bytes > 0);
-        assert!(!coordinator.recovery_required);
-        assert_eq!(coordinator.encoded_transaction_count_for_tests, 2);
-        assert_eq!(coordinator.append_attempt_count_for_tests, 2);
-        assert_eq!(coordinator.append_success_count_for_tests, 1);
-        let recovered = coordinator
-            .store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("读取成功后的正式日志");
-        assert_eq!(recovered.tail.len(), 1);
-        assert_eq!(bridge_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn recoverable_paper_v2_close_ingress_is_atomic_recoverable_and_idempotent() {
-        let rules = successful_snapshot_for_sim_tests().await;
-        let profile = load_embedded_proxy_latency_profile().expect("profile");
-        let scenario = scenario_for_sim_tests();
-        let mut process = execution_process_for_tests(
-            Arc::clone(&rules),
-            Arc::clone(&profile),
-            Arc::clone(&scenario),
-        );
-        let mut spec = session_spec();
-        spec.caller_role = SimCallerRoleV1::Paper;
-        let mut session =
-            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
-        let session_id = session.session_spec().session_id.clone();
-        let checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
-            &process,
-            &session,
-            rules.as_ref(),
-        );
-        let directory = tempfile::tempdir().expect("创建入口关闭协调器临时目录");
-        let root = directory.path().join("paper-close-ingress-coordinator");
-        let mut coordinator =
-            RecoverablePaperCoordinatorV2::create_new(root.clone(), &session, &checkpoint)
-                .expect("创建入口关闭协调器");
-        let initial_state = session.durable_checkpoint();
-        let initial_cursor = coordinator.cursor_for_tests();
-        coordinator
-            .store
-            .install_transaction_log_insert_failure_for_tests()
-            .expect("安装入口关闭事务失败触发器");
-
-        assert!(matches!(
-            coordinator.close_ingress(&mut session),
-            Err(SessionError::Durability(message)) if message.contains("SQLite")
-        ));
-        assert_eq!(session.durable_checkpoint(), initial_state);
-        assert_eq!(coordinator.cursor_for_tests(), initial_cursor);
-        assert!(session.accepting_new_ingress);
-        assert_eq!(
-            coordinator
-                .store
-                .logical_log_bytes()
-                .expect("读取入口关闭失败后的日志字节"),
-            0
-        );
-        assert!(coordinator
-            .store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("读取入口关闭失败后的事务日志")
-            .tail
-            .is_empty());
-
-        coordinator
-            .store
-            .remove_transaction_log_insert_failure_for_tests()
-            .expect("移除入口关闭事务失败触发器");
-        coordinator
-            .close_ingress(&mut session)
-            .expect("一次耐久关闭入口");
-        assert!(!session.accepting_new_ingress);
-        assert_eq!(coordinator.last_sequence, 1);
-        assert_eq!(coordinator.append_success_count_for_tests, 1);
-        let closed_state = session.durable_checkpoint();
-        let closed_cursor = coordinator.cursor_for_tests();
-        let encoded_count = coordinator.encoded_transaction_count_for_tests;
-        let append_count = coordinator.append_attempt_count_for_tests;
-        coordinator
-            .close_ingress(&mut session)
-            .expect("重复关闭入口零写成功");
-        assert_eq!(session.durable_checkpoint(), closed_state);
-        assert_eq!(coordinator.cursor_for_tests(), closed_cursor);
-        assert_eq!(
-            coordinator.encoded_transaction_count_for_tests,
-            encoded_count
-        );
-        assert_eq!(coordinator.append_attempt_count_for_tests, append_count);
-        drop(coordinator);
-
-        let store = LocalTransactionLogStoreV2::open_recovery(root).expect("重开入口关闭事务日志");
-        let recovered = store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("恢复入口关闭事务日志");
-        assert_eq!(recovered.tail.len(), 1);
-        let recovered_checkpoint = recovered.checkpoint.expect("必须有入口关闭前应用检查点");
-        let mut wrapper = recovered_checkpoint.checkpoint;
-        let session_checkpoint = wrapper
-            .run_checkpoint
-            .sessions
-            .remove(&session_id)
-            .expect("应用检查点必须包含目标会话");
-        let evicted = wrapper
-            .evicted_markets
-            .remove(&session_id)
-            .unwrap_or_default();
-        let (mut replayed, downstream) =
-            ExecutionSessionStateV1::restore(&process.inner, session_checkpoint, &evicted)
-                .expect("恢复入口关闭前会话");
-        assert_eq!(downstream, None);
-        for entry in recovered.tail {
-            replayed = replay_close_ingress_operation_v2(
-                replayed,
-                &entry.evidence,
-                entry.recovery_operation,
-            )
-            .expect("重放入口关闭事务");
-        }
-        assert!(!replayed.accepting_new_ingress);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn recoverable_paper_v2_request_commit_then_crash_recovers_from_formal_wrapper_and_tail()
-    {
-        let rules = successful_snapshot_for_sim_tests().await;
-        let profile = load_embedded_proxy_latency_profile().expect("profile");
-        let scenario = scenario_for_sim_tests();
-        let finality_policy = successful_policy_for_tests();
-        let mut process = execution_process_for_tests(
-            Arc::clone(&rules),
-            Arc::clone(&profile),
-            Arc::clone(&scenario),
-        );
-        let mut spec = session_spec();
-        spec.caller_role = SimCallerRoleV1::Paper;
-        let session_id = spec.session_id.clone();
-        let bridge_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let session = process.create_active_session_for_tests(
-            spec.clone(),
-            counting_submission_response_bridge(Arc::clone(&bridge_calls)),
-        );
-        let initial_state = session.durable_checkpoint();
-        let checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
-            &process,
-            &session,
-            rules.as_ref(),
-        );
-        let directory = tempfile::tempdir().expect("创建请求崩溃恢复临时目录");
-        let root = directory.path().join("paper-request-crash");
-        let mut coordinator =
-            RecoverablePaperCoordinatorV2::create_new(root.clone(), &session, &checkpoint)
-                .expect("创建请求协调器");
-        let request = coordinator_post_order_request(&session, "coordinator-crash");
-        let actions = coordinator_post_order_actions(&request);
-
-        let mut baseline_process = execution_process_for_tests(
-            Arc::clone(&rules),
-            Arc::clone(&profile),
-            Arc::clone(&scenario),
-        );
-        let mut baseline_session = baseline_process
-            .create_active_session_for_tests(spec, accepting_submission_response_bridge());
-        baseline_session
-            .post_order(request.clone())
-            .expect("独立非持久业务基准登记");
-        let expected_state = baseline_session.durable_checkpoint();
-
-        coordinator
-            .append_request_then_simulate_crash_for_tests(
-                &session,
-                PendingDomainRequestV1::PostOrder(request),
-                actions,
-            )
-            .expect("SQLite 提交成功后模拟崩溃");
-        assert_eq!(session.durable_checkpoint(), initial_state);
-        assert_eq!(coordinator.last_sequence, 1);
-        assert_eq!(bridge_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
-        drop(session);
-        drop(process);
-        drop(coordinator);
-
-        let store =
-            LocalTransactionLogStoreV2::open_recovery(root).expect("崩溃后打开正式请求日志");
-        let recovered = store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("从正式 wrapper 恢复请求日志");
-        let recovered_checkpoint = recovered.checkpoint.expect("必须存在正式应用检查点");
-        assert_eq!(recovered_checkpoint.through_sequence, 0);
-        assert_eq!(recovered.tail.len(), 1);
-        let mut wrapper = recovered_checkpoint.checkpoint;
-        wrapper.validate().expect("正式应用检查点 wrapper 必须有效");
-        let restored_inner = SimProcessRoot::restore_from_checkpoint(
-            wrapper.run_checkpoint.process_root.clone(),
-            finality_policy,
-            Arc::clone(&rules),
-            Arc::clone(&profile),
-            Arc::clone(&scenario),
-        )
-        .expect("恢复全新进程根");
-        let restored_process = SimExecutionProcessV1 {
-            inner: restored_inner,
-            persistence: None,
-            recoverable_session_ids: BTreeSet::new(),
-            attached_recovered_session_ids: BTreeSet::new(),
-            recovered_evicted_markets: wrapper.evicted_markets.clone(),
-        };
-        let session_checkpoint = wrapper
-            .run_checkpoint
-            .sessions
-            .remove(&session_id)
-            .expect("正式 wrapper 包含目标会话");
-        let evicted = wrapper
-            .evicted_markets
-            .remove(&session_id)
-            .unwrap_or_default();
-        let (mut replayed, downstream) =
-            ExecutionSessionStateV1::restore(&restored_process.inner, session_checkpoint, &evicted)
-                .expect("从正式 wrapper 恢复会话基线");
-        assert_eq!(downstream, None);
-        for entry in recovered.tail {
-            replayed = replay_request_registration_operation_v2(
-                replayed,
-                &entry.evidence,
-                entry.recovery_operation,
-            )
-            .expect("重放已提交请求尾日志");
-        }
-        let restored_session = SimExecutionSessionV1::from_recovered_state(
-            replayed,
-            accepting_submission_response_bridge(),
-            None,
-            None,
-        );
-        assert_eq!(restored_session.durable_checkpoint(), expected_state);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn recoverable_paper_v2_durable_request_retry_skips_encode_append_state_and_bridge() {
-        let rules = successful_snapshot_for_sim_tests().await;
-        let profile = load_embedded_proxy_latency_profile().expect("profile");
-        let scenario = scenario_for_sim_tests();
-        let mut process = execution_process_for_tests(
-            Arc::clone(&rules),
-            Arc::clone(&profile),
-            Arc::clone(&scenario),
-        );
-        let mut spec = session_spec();
-        spec.caller_role = SimCallerRoleV1::Paper;
-        let bridge_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mut session = process.create_active_session_for_tests(
-            spec,
-            counting_submission_response_bridge(Arc::clone(&bridge_calls)),
-        );
-        let checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
-            &process,
-            &session,
-            rules.as_ref(),
-        );
-        let directory = tempfile::tempdir().expect("创建请求重试临时目录");
-        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
-            directory.path().join("paper-request-retry"),
-            &session,
-            &checkpoint,
-        )
-        .expect("创建请求协调器");
-        let request = coordinator_post_order_request(&session, "coordinator-retry");
-        let actions = coordinator_post_order_actions(&request);
-        let first = coordinator
-            .register_request(
-                &mut session,
-                PendingDomainRequestV1::PostOrder(request.clone()),
-                actions.clone(),
-            )
-            .expect("首次耐久登记");
-        let before_state = session.durable_checkpoint();
-        let before_cursor = coordinator.cursor_for_tests();
-        let before_encode_count = coordinator.encoded_transaction_count_for_tests;
-        let before_append_count = coordinator.append_attempt_count_for_tests;
-        reset_request_registration_preparation_counts_v2();
-
-        let retry = coordinator
-            .register_request(
-                &mut session,
-                PendingDomainRequestV1::PostOrder(request),
-                actions,
-            )
-            .expect("已耐久请求物理重投");
-        assert_eq!(
-            retry.request.disposition,
-            RequestRegistrationDispositionV1::PhysicalRetry
-        );
-        assert_eq!(retry.request.transit, first.request.transit);
-        assert_eq!(retry.actions, first.actions);
-        assert_eq!(
-            request_registration_preparation_counts_v2(),
-            RequestRegistrationPreparationCountsV2::default()
-        );
-        assert_eq!(
-            coordinator.encoded_transaction_count_for_tests,
-            before_encode_count
-        );
-        assert_eq!(
-            coordinator.append_attempt_count_for_tests,
-            before_append_count
-        );
-        assert_eq!(coordinator.cursor_for_tests(), before_cursor);
-        assert_eq!(session.durable_checkpoint(), before_state);
-        assert_eq!(bridge_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
-        let recovered = coordinator
-            .store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("读取物理重投后的日志");
-        assert_eq!(recovered.tail.len(), 1);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn recoverable_paper_v2_direct_full_holds_typed_capacity_until_matching_retry() {
-        let rules = successful_snapshot_for_sim_tests().await;
-        let profile = load_embedded_proxy_latency_profile().expect("profile");
-        let scenario = scenario_for_sim_tests();
-        let mut process = execution_process_for_tests(
-            Arc::clone(&rules),
-            Arc::clone(&profile),
-            Arc::clone(&scenario),
-        );
-        let mut spec = session_spec();
-        spec.caller_role = SimCallerRoleV1::Paper;
-        spec.response_outbox_capacity =
-            std::num::NonZeroUsize::new(1).expect("positive test capacity");
-        let bridge_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mut session =
-            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
-        let source_request = OrderRequestV1 {
-            context: context(&session, "paper-v2-private-direct-source", 1, 20_000),
-            platform_order_id: "a".repeat(64),
-        };
-        let registration = session
-            .order(source_request.clone())
-            .expect("登记仅产生 Direct 的缺失订单查询");
-        let effective_at = registration.receipt.transit.platform_arrived_at_utc_ms;
-        session
-            .session
-            .advance_public_visibility_through(effective_at, 0)
-            .expect("闭合查询处理时点");
-        assert_eq!(
-            session.drive_next_execution_action_through(effective_at),
-            Ok(SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: true,
-            })
-        );
-        let private_received_at = session
-            .session
-            .recovered_pending_private_facts()
-            .iter()
-            .find_map(|(evidence, received_at, _)| {
-                matches!(
-                    evidence,
-                    crate::session::PrivateVisibilityEvidenceV1::DirectResponse { .. }
-                )
-                .then_some(*received_at)
-            })
-            .expect("缺失订单查询形成一个 Direct 私有事实");
-        session
-            .session
-            .advance_public_visibility_through(private_received_at, 0)
-            .expect("闭合 Direct 接收时点");
-        assert_eq!(
-            session.drive_next_execution_action_through(private_received_at),
-            Ok(SubmissionDriveDispositionV1::NoAction)
-        );
-        while !matches!(
-            session.session.recovered_pending_private_facts().first(),
-            Some((
-                crate::session::PrivateVisibilityEvidenceV1::DirectResponse { .. },
-                _,
-                _
-            ))
-        ) {
-            assert_eq!(
-                session.drive_next_private_delivery_through(private_received_at),
-                Ok(SubmissionDeliveryDispositionV1::Delivered)
-            );
-        }
-        session.response_bridge =
-            full_once_order_submission_response_bridge(Arc::clone(&bridge_calls));
-        let bridge_before_direct = session.bridge_replayed_through_private_feedback_sequence;
-        let direct_sequence = bridge_before_direct + 1;
-
-        let checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
-            &process,
-            &session,
-            rules.as_ref(),
-        );
-        let directory = tempfile::tempdir().expect("创建 Direct 私有切片临时目录");
-        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
-            directory.path().join("paper-private-direct"),
-            &session,
-            &checkpoint,
-        )
-        .expect("创建 Direct 私有切片协调器");
-        let before_failure_state = session.durable_checkpoint();
-        let before_failure_cursor = coordinator.cursor_for_tests();
-        coordinator
-            .store
-            .install_transaction_log_insert_failure_for_tests()
-            .expect("安装私有切片 INSERT 失败触发器");
-        assert!(matches!(
-            coordinator.drive_next_private_delivery_through(
-                &mut session,
-                private_received_at,
-            ),
-            Err(SessionError::Durability(message)) if message.contains("SQLite")
-        ));
-        assert_eq!(bridge_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
-        assert_eq!(session.durable_checkpoint(), before_failure_state);
-        assert_eq!(coordinator.cursor_for_tests(), before_failure_cursor);
-        assert!(coordinator.private_delivery_capacity_lease.is_none());
-        let recovered_after_failure = coordinator
-            .store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("读取私有切片 INSERT 失败后的日志");
-        assert!(recovered_after_failure.tail.is_empty());
-        coordinator
-            .store
-            .remove_transaction_log_insert_failure_for_tests()
-            .expect("移除私有切片 INSERT 失败触发器");
-
-        let before_full_sequence = coordinator.last_sequence;
-        assert_eq!(
-            coordinator.drive_next_private_delivery_through(&mut session, private_received_at,),
-            Ok(SubmissionDeliveryDispositionV1::Full)
-        );
-        assert_eq!(coordinator.last_sequence, before_full_sequence + 1);
-        assert_eq!(bridge_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert_eq!(
-            session.bridge_replayed_through_private_feedback_sequence,
-            bridge_before_direct
-        );
-        let committed_delivery = session
-            .confirmed_private_deliveries
-            .get(&direct_sequence)
-            .expect("Full 前已耐久提交完整 Direct")
-            .clone();
-        assert_eq!(
-            coordinator.private_delivery_capacity_lease.as_ref(),
-            Some(&PrivateDeliveryCapacityLeaseV2 {
-                confirmation: committed_delivery.confirmation(),
-                kind: PrivateDeliveryCapacityKindV2::Direct,
-            }),
-        );
-        let recovered_after_full = coordinator
-            .store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("读取 Full 后的私有输出日志");
-        assert_eq!(recovered_after_full.tail.len(), 1);
-        assert!(matches!(
-            recovered_after_full.tail[0].evidence.fact,
-            DurableTransactionFactV1::PrivateOutputCommitted { .. }
-        ));
-
-        let before_retry_cursor = coordinator.cursor_for_tests();
-        let before_retry_encode = coordinator.encoded_transaction_count_for_tests;
-        let before_retry_append_attempt = coordinator.append_attempt_count_for_tests;
-        let before_retry_append_success = coordinator.append_success_count_for_tests;
-        let retry = coordinator
-            .register_request(
-                &mut session,
-                PendingDomainRequestV1::Order(source_request.clone()),
-                vec![method_action("order", 0, ParsedMethodTimingV1::Ordinary)],
-            )
-            .expect("已有请求物理重投不重新占用 Direct 容量");
-        assert_eq!(
-            retry.request.disposition,
-            RequestRegistrationDispositionV1::PhysicalRetry
-        );
-        assert_eq!(coordinator.cursor_for_tests(), before_retry_cursor);
-        assert_eq!(
-            coordinator.encoded_transaction_count_for_tests,
-            before_retry_encode
-        );
-        assert_eq!(
-            coordinator.append_attempt_count_for_tests,
-            before_retry_append_attempt
-        );
-        assert_eq!(
-            coordinator.append_success_count_for_tests,
-            before_retry_append_success
-        );
-
-        let new_request = OrderRequestV1 {
-            context: context(
-                &session,
-                "paper-v2-private-direct-capacity",
-                2,
-                private_received_at + 1,
-            ),
-            platform_order_id: "b".repeat(64),
-        };
-        assert!(matches!(
-            coordinator.register_request(
-                &mut session,
-                PendingDomainRequestV1::Order(new_request.clone()),
-                vec![method_action("order", 0, ParsedMethodTimingV1::Ordinary)],
-            ),
-            Err(SessionError::ResponseOutboxFull)
-        ));
-        assert_eq!(coordinator.cursor_for_tests(), before_retry_cursor);
-        assert_eq!(
-            coordinator.encoded_transaction_count_for_tests,
-            before_retry_encode
-        );
-        assert_eq!(
-            coordinator.append_attempt_count_for_tests,
-            before_retry_append_attempt
-        );
-        assert_eq!(
-            coordinator.append_success_count_for_tests,
-            before_retry_append_success
-        );
-
-        let forged_proof = DownstreamDurabilityProofV1 {
-            account_instance_key: session
-                .session
-                .execution_state()
-                .account_instance_key()
-                .clone(),
-            durable_through: committed_delivery.confirmation(),
-        };
-        assert!(matches!(
-            coordinator.advance_downstream_durability(&mut session, forged_proof),
-            Err(SessionError::ResponseDeliveryIdentityConflict)
-        ));
-        assert_eq!(coordinator.cursor_for_tests(), before_retry_cursor);
-        assert_eq!(
-            coordinator.encoded_transaction_count_for_tests,
-            before_retry_encode
-        );
-        assert_eq!(
-            coordinator.append_attempt_count_for_tests,
-            before_retry_append_attempt
-        );
-        assert_eq!(
-            coordinator.append_success_count_for_tests,
-            before_retry_append_success
-        );
-
-        assert_eq!(
-            coordinator.drive_next_private_delivery_through(&mut session, private_received_at,),
-            Ok(SubmissionDeliveryDispositionV1::Delivered)
-        );
-        assert_eq!(coordinator.cursor_for_tests(), before_retry_cursor);
-        assert_eq!(
-            coordinator.encoded_transaction_count_for_tests,
-            before_retry_encode
-        );
-        assert_eq!(
-            coordinator.append_attempt_count_for_tests,
-            before_retry_append_attempt
-        );
-        assert_eq!(
-            coordinator.append_success_count_for_tests,
-            before_retry_append_success
-        );
-        assert_eq!(bridge_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
-        assert_eq!(
-            session.bridge_replayed_through_private_feedback_sequence,
-            direct_sequence
-        );
-        assert!(coordinator.private_delivery_capacity_lease.is_none());
-
-        let registered = coordinator
-            .register_request(
-                &mut session,
-                PendingDomainRequestV1::Order(new_request),
-                vec![method_action("order", 0, ParsedMethodTimingV1::Ordinary)],
-            )
-            .expect("匹配 Accepted 清租约后恢复一个 Direct 容量槽");
-        assert_eq!(
-            registered.request.disposition,
-            RequestRegistrationDispositionV1::NewLogicalRequest
-        );
-        assert_eq!(coordinator.last_sequence, before_full_sequence + 2);
-
-        let second_effective_at = registered.request.transit.platform_arrived_at_utc_ms;
-        session
-            .session
-            .advance_public_visibility_through(second_effective_at, 0)
-            .expect("闭合第二个 Direct 查询处理时点");
-        assert_eq!(
-            session.drive_next_execution_action_through(second_effective_at),
-            Ok(SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: true,
-            })
-        );
-        let second_private_received_at = session
-            .session
-            .recovered_pending_private_facts()
-            .iter()
-            .find_map(|(evidence, received_at, _)| {
-                matches!(
-                    evidence,
-                    crate::session::PrivateVisibilityEvidenceV1::DirectResponse {
-                        global_request_id
-                    } if global_request_id == "paper-v2-private-direct-capacity"
-                )
-                .then_some(*received_at)
-            })
-            .expect("第二个缺失订单查询形成 Direct 私有事实");
-        session
-            .session
-            .advance_public_visibility_through(second_private_received_at, 0)
-            .expect("闭合第二个 Direct 接收时点");
-        assert_eq!(
-            session.drive_next_execution_action_through(second_private_received_at),
-            Ok(SubmissionDriveDispositionV1::NoAction)
-        );
-        let terminal_bridge_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        session.response_bridge = full_then_disconnected_order_submission_response_bridge(
-            Arc::clone(&terminal_bridge_calls),
-        );
-        assert_eq!(
-            coordinator
-                .drive_next_private_delivery_through(&mut session, second_private_received_at),
-            Ok(SubmissionDeliveryDispositionV1::Full)
-        );
-        let before_failed_close_cursor = coordinator.cursor_for_tests();
-        let before_failed_close_lease = coordinator
-            .private_delivery_capacity_lease
-            .clone()
-            .expect("第二个 Full 保留 Direct 容量租约");
-        let before_failed_close_bridge_watermark =
-            session.bridge_replayed_through_private_feedback_sequence;
-        coordinator
-            .store
-            .install_transaction_log_insert_failure_for_tests()
-            .expect("安装致命桥结果后的关门 INSERT 失败触发器");
-        assert!(matches!(
-            coordinator
-                .drive_next_private_delivery_through(&mut session, second_private_received_at),
-            Err(SessionError::DurabilityRecoveryRequired(message))
-                if message.contains("关闭入口") && message.contains("SQLite")
-        ));
-        assert!(!session.accepting_new_ingress);
-        assert!(coordinator.recovery_required);
-        assert_eq!(
-            coordinator.cursor_for_tests().0,
-            before_failed_close_cursor.0
-        );
-        assert_eq!(
-            coordinator.transaction_head_sha256,
-            before_failed_close_cursor.1
-        );
-        assert_eq!(coordinator.logical_log_bytes, before_failed_close_cursor.2);
-        assert_eq!(
-            coordinator.private_delivery_capacity_lease,
-            Some(before_failed_close_lease)
-        );
-        assert_eq!(
-            session.bridge_replayed_through_private_feedback_sequence,
-            before_failed_close_bridge_watermark
-        );
-        assert_eq!(
-            terminal_bridge_calls.load(std::sync::atomic::Ordering::SeqCst),
-            2
-        );
-        coordinator
-            .store
-            .remove_transaction_log_insert_failure_for_tests()
-            .expect("移除致命桥结果后的关门 INSERT 失败触发器");
-        let before_recovery_gate_state = session.durable_checkpoint();
-        let before_recovery_gate_encode = coordinator.encoded_transaction_count_for_tests;
-        let before_recovery_gate_append = coordinator.append_attempt_count_for_tests;
-        let after_terminal_failure_context = context(
-            &session,
-            "paper-v2-private-after-terminal-bridge-failure",
-            3,
-            second_private_received_at + 1,
-        );
-        assert!(matches!(
-            coordinator.register_request(
-                &mut session,
-                PendingDomainRequestV1::Order(OrderRequestV1 {
-                    context: after_terminal_failure_context,
-                    platform_order_id: "c".repeat(64),
-                }),
-                vec![method_action("order", 0, ParsedMethodTimingV1::Ordinary)],
-            ),
-            Err(SessionError::DurabilityRecoveryRequired(_))
-        ));
-        assert_eq!(session.durable_checkpoint(), before_recovery_gate_state);
-        assert_eq!(
-            coordinator.encoded_transaction_count_for_tests,
-            before_recovery_gate_encode
-        );
-        assert_eq!(
-            coordinator.append_attempt_count_for_tests,
-            before_recovery_gate_append
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn recoverable_paper_v2_private_no_output_writes_once_per_new_cutoff() {
-        let rules = successful_snapshot_for_sim_tests().await;
-        let profile = load_embedded_proxy_latency_profile().expect("profile");
-        let scenario = scenario_for_sim_tests();
-        let mut process = execution_process_for_tests(
-            Arc::clone(&rules),
-            Arc::clone(&profile),
-            Arc::clone(&scenario),
-        );
-        let mut spec = session_spec();
-        spec.caller_role = SimCallerRoleV1::Paper;
-        let bridge_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mut session = process.create_active_session_for_tests(
-            spec,
-            counting_submission_response_bridge(Arc::clone(&bridge_calls)),
-        );
-        session
-            .session
-            .advance_public_visibility_through(0, 0)
-            .expect("闭合空 Paper 初始公开时点");
-        assert_eq!(
-            session.drive_next_execution_action_through(0),
-            Ok(SubmissionDriveDispositionV1::NoAction)
-        );
-        assert_eq!(
-            session.drive_private_delivery_through(0),
-            Ok(SubmissionDeliveryDispositionV1::NoVisibleResponse)
-        );
-        bridge_calls.store(0, std::sync::atomic::Ordering::SeqCst);
-        let cutoff = 1;
-        session
-            .session
-            .advance_public_visibility_through(cutoff, 0)
-            .expect("闭合空 Paper 公开时点");
-        assert_eq!(
-            session.drive_next_execution_action_through(cutoff),
-            Ok(SubmissionDriveDispositionV1::NoAction)
-        );
-        let checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
-            &process,
-            &session,
-            rules.as_ref(),
-        );
-        let directory = tempfile::tempdir().expect("创建空私有切片临时目录");
-        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
-            directory.path().join("paper-private-no-output"),
-            &session,
-            &checkpoint,
-        )
-        .expect("创建空私有切片协调器");
-
-        assert_eq!(
-            coordinator.drive_next_private_delivery_through(&mut session, cutoff),
-            Ok(SubmissionDeliveryDispositionV1::NoVisibleResponse)
-        );
-        let after_first = coordinator.cursor_for_tests();
-        let after_first_state = session.durable_checkpoint();
-        assert_eq!(after_first.0, 1);
-        assert_eq!(coordinator.encoded_transaction_count_for_tests, 1);
-        assert_eq!(coordinator.append_success_count_for_tests, 1);
-        assert_eq!(bridge_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
-        let recovered_after_first = coordinator
-            .store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("读取首次无输出推进日志");
-        assert_eq!(recovered_after_first.tail.len(), 1);
-        assert!(matches!(
-            recovered_after_first.tail[0].evidence.fact,
-            DurableTransactionFactV1::ExecutionAdvanced { .. }
-        ));
-        assert_eq!(
-            recovered_after_first.tail[0].recovery_operation,
-            DurableRecoveryOperationV2::AdvancePrivateFactThrough {
-                received_at_utc_ms: cutoff,
-            }
-        );
-        assert_eq!(
-            coordinator.drive_next_private_delivery_through(&mut session, cutoff),
-            Ok(SubmissionDeliveryDispositionV1::NoVisibleResponse)
-        );
-        assert_eq!(coordinator.cursor_for_tests(), after_first);
-        assert_eq!(coordinator.encoded_transaction_count_for_tests, 1);
-        assert_eq!(coordinator.append_attempt_count_for_tests, 1);
-        assert_eq!(coordinator.append_success_count_for_tests, 1);
-        assert_eq!(bridge_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
-        assert_eq!(session.durable_checkpoint(), after_first_state);
-    }
-
     #[tokio::test(flavor = "current_thread")]
     async fn recoverable_paper_v2_lifecycle_lease_only_releases_the_last_same_batch_entry() {
         use crate::task22_tests::{
@@ -33703,623 +30570,6 @@ mod tests {
             }
         }
         assert_eq!(committed_lifecycle, 2);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn recoverable_paper_v2_lifecycle_lease_follows_a_later_empty_batch_release() {
-        use crate::task22_tests::{
-            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
-            scenario as long_scenario, session_spec as long_session_spec,
-        };
-
-        let rules = successful_snapshot_for_sim_tests().await;
-        let profile = load_embedded_proxy_latency_profile().expect("加载 Paper V2 时延配置");
-        let scenario = long_scenario();
-        let mut spec = long_session_spec(
-            &scenario,
-            SimCallerRoleV1::Paper,
-            "paper-v2-private-lifecycle-later-release",
-        );
-        spec.response_outbox_capacity = std::num::NonZeroUsize::new(1).expect("正容量");
-        let mut process = execution_process_for_tests(
-            Arc::clone(&rules),
-            Arc::clone(&profile),
-            Arc::clone(&scenario),
-        );
-        let mut session =
-            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
-        let position = load_initial_market(&mut session, "0.00001", "0.6", "5");
-        let registration = session
-            .post_orders(PostOrdersRequestV1 {
-                context: context_for_arrival(
-                    &session,
-                    &profile,
-                    "paper-v2-private-lifecycle-later-release-source",
-                    1,
-                    150_000,
-                ),
-                idempotency_key: "paper-v2-private-lifecycle-later-release-idempotency".to_owned(),
-                items: vec![
-                    PostOrderItemV1 {
-                        item_id: "paper-v2-private-lifecycle-feedback-item".to_owned(),
-                        order: SimBuyOrderV1 {
-                            condition_id: long_market().condition_id.clone(),
-                            token_id: long_asset("1", 0, "Up").token_id,
-                            kind: SimBuyOrderKindV1::GtcLimit {
-                                limit_price_pusd_per_share: Decimal::new(4, 1),
-                                size_shares: Decimal::new(5, 0),
-                                post_only: true,
-                            },
-                        },
-                    },
-                    PostOrderItemV1 {
-                        item_id: "paper-v2-private-lifecycle-no-feedback-item".to_owned(),
-                        order: SimBuyOrderV1 {
-                            condition_id: long_market().condition_id,
-                            token_id: long_asset("1", 0, "Up").token_id,
-                            kind: SimBuyOrderKindV1::FokMarket {
-                                spend_pusd: Decimal::ONE,
-                                worst_price_pusd_per_share: Decimal::new(1, 1),
-                            },
-                        },
-                    },
-                ],
-            })
-            .expect("登记先形成生命周期反馈、后无效果拒绝的混合批次");
-        let first_at = registration.items[0].effective_processing_at_utc_ms;
-        let second_at = registration.items[1].effective_processing_at_utc_ms;
-        assert!(second_at > first_at);
-        session
-            .session
-            .advance_public_visibility_through(first_at, position)
-            .expect("闭合首项公开时点");
-        assert_eq!(
-            session.drive_next_execution_action_through(first_at),
-            Ok(SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: false,
-            })
-        );
-        assert_eq!(session.lifecycle_outbox.entries.len(), 1);
-        assert_eq!(session.lifecycle_outbox.batches.len(), 1);
-        let feedback_at = session
-            .session
-            .recovered_pending_private_facts()
-            .iter()
-            .find_map(|(evidence, received_at, _)| {
-                matches!(
-                    evidence,
-                    crate::session::PrivateVisibilityEvidenceV1::LifecycleFeedback { .. }
-                )
-                .then_some(*received_at)
-            })
-            .expect("首项形成一个生命周期反馈");
-        assert!(feedback_at < second_at);
-        session
-            .session
-            .advance_public_visibility_through(feedback_at, position)
-            .expect("闭合首项反馈可见时点");
-        assert_eq!(
-            session.drive_next_execution_action_through(feedback_at),
-            Ok(SubmissionDriveDispositionV1::NoAction)
-        );
-        let bridge_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        session.response_bridge =
-            full_once_order_lifecycle_submission_response_bridge(Arc::clone(&bridge_calls));
-        let checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
-            &process,
-            &session,
-            rules.as_ref(),
-        );
-        let directory = tempfile::tempdir().expect("创建生命周期延迟释放临时目录");
-        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
-            directory
-                .path()
-                .join("paper-private-lifecycle-later-release"),
-            &session,
-            &checkpoint,
-        )
-        .expect("创建生命周期延迟释放协调器");
-        assert_eq!(
-            coordinator.drive_next_private_delivery_through(&mut session, feedback_at),
-            Ok(SubmissionDeliveryDispositionV1::Full)
-        );
-        assert_eq!(coordinator.last_sequence, 1);
-        assert_eq!(coordinator.encoded_transaction_count_for_tests, 1);
-        assert_eq!(coordinator.append_success_count_for_tests, 1);
-        assert_eq!(bridge_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-        let lease = coordinator
-            .private_delivery_capacity_lease
-            .as_ref()
-            .expect("Full 必须在协调器保留生命周期批次身份");
-        assert!(!lease.occupies_lifecycle_capacity(&session.lifecycle_outbox));
-        assert_eq!(session.lifecycle_outbox.batches.len(), 1);
-        let recovered_after_full = coordinator
-            .store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("读取生命周期 Full 后日志");
-        assert_eq!(recovered_after_full.tail.len(), 1);
-        assert!(matches!(
-            recovered_after_full.tail[0].evidence.fact,
-            DurableTransactionFactV1::PrivateOutputCommitted { .. }
-        ));
-
-        session
-            .session
-            .advance_public_visibility_through(second_at, position)
-            .expect("闭合后项公开时点");
-        assert_eq!(
-            session.drive_next_execution_action_through(second_at),
-            Ok(SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: true,
-            })
-        );
-        assert!(session.lifecycle_outbox.entries.is_empty());
-        assert!(session.lifecycle_outbox.batches.is_empty());
-        assert!(
-            coordinator
-                .private_delivery_capacity_lease
-                .as_ref()
-                .expect("批次删除前租约仍必须存在")
-                .occupies_lifecycle_capacity(&session.lifecycle_outbox)
-        );
-        let before_retry_cursor = coordinator.cursor_for_tests();
-        let before_retry_encode = coordinator.encoded_transaction_count_for_tests;
-        let before_retry_append = coordinator.append_attempt_count_for_tests;
-        assert_eq!(
-            coordinator.drive_next_private_delivery_through(&mut session, feedback_at),
-            Ok(SubmissionDeliveryDispositionV1::Delivered)
-        );
-        assert_eq!(coordinator.cursor_for_tests(), before_retry_cursor);
-        assert_eq!(
-            coordinator.encoded_transaction_count_for_tests,
-            before_retry_encode
-        );
-        assert_eq!(
-            coordinator.append_attempt_count_for_tests,
-            before_retry_append
-        );
-        assert_eq!(bridge_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
-        assert!(coordinator.private_delivery_capacity_lease.is_none());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn recoverable_paper_v2_scheduled_gtd_rejects_occupied_lifecycle_lease_before_encoding() {
-        let PaperScheduledLifecycleLeaseFixture {
-            rules,
-            profile,
-            process,
-            mut session,
-            next_visibility_position,
-            gtd_deadline,
-        } = paper_capacity_one_session_with_pending_gtd(
-            "paper-v2-scheduled-occupied-lifecycle-lease",
-        )
-        .await;
-        let registration = register_lifecycle_lease_batch(
-            &mut session,
-            &profile,
-            250_000,
-            "paper-v2-private-lifecycle-ordinary-no-feedback-item",
-            SimBuyOrderKindV1::GtcLimit {
-                limit_price_pusd_per_share: Decimal::new(6, 1),
-                size_shares: Decimal::new(5, 0),
-                post_only: true,
-            },
-        );
-        let first_at = registration.items[0].effective_processing_at_utc_ms;
-        let second_at = registration.items[1].effective_processing_at_utc_ms;
-        assert_eq!(second_at, first_at);
-        assert!(second_at < gtd_deadline);
-        session
-            .session
-            .advance_public_visibility_through(first_at, next_visibility_position)
-            .expect("闭合占用租约首项公开时点");
-        assert_eq!(
-            session.drive_next_execution_action_through(first_at),
-            Ok(SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: false,
-            })
-        );
-        let lifecycle_feedback_at = pending_lifecycle_feedback_received_at(&session);
-        let lifecycle_feedback_ids_after_first = session
-            .lifecycle_outbox
-            .entries
-            .keys()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            session.drive_next_execution_action_through(second_at),
-            Ok(SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: true,
-            })
-        );
-        assert_eq!(session.lifecycle_outbox.entries.len(), 1);
-        assert_eq!(session.lifecycle_outbox.batches.len(), 1);
-        assert_eq!(
-            session
-                .lifecycle_outbox
-                .entries
-                .keys()
-                .cloned()
-                .collect::<BTreeSet<_>>(),
-            lifecycle_feedback_ids_after_first
-        );
-        assert!(session.lifecycle_outbox.batches.values().all(|batch| {
-            batch.open_work_ids.is_empty()
-                && batch.feedback_ids == lifecycle_feedback_ids_after_first
-        }));
-        assert_eq!(session.direct_response_outbox.entries.len(), 1);
-        let private_cutoff = gtd_deadline - 1;
-        assert!(lifecycle_feedback_at < private_cutoff);
-        session
-            .session
-            .advance_public_visibility_through(private_cutoff, next_visibility_position)
-            .expect("闭合占用租约私有输出截止时点");
-        assert_eq!(
-            session.drive_next_execution_action_through(private_cutoff),
-            Ok(SubmissionDriveDispositionV1::NoAction)
-        );
-        session
-            .session
-            .advance_public_visibility_through(gtd_deadline, next_visibility_position)
-            .expect("在协调器检查点前闭合 GTD 到期公开前缀");
-
-        let bridge_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        session.response_bridge =
-            full_once_order_lifecycle_submission_response_bridge(Arc::clone(&bridge_calls));
-        let checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
-            &process,
-            &session,
-            rules.as_ref(),
-        );
-        let session_id = session.session_spec().session_id.clone();
-        let directory = tempfile::tempdir().expect("创建占用生命周期租约临时目录");
-        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
-            directory
-                .path()
-                .join("paper-scheduled-occupied-lifecycle-lease"),
-            &session,
-            &checkpoint,
-        )
-        .expect("创建占用生命周期租约协调器");
-        let mut delivered_before_full = 0;
-        loop {
-            match coordinator
-                .drive_next_private_delivery_through(&mut session, private_cutoff)
-                .expect("占用生命周期租约私有推进")
-            {
-                SubmissionDeliveryDispositionV1::Delivered => {
-                    delivered_before_full += 1;
-                    assert!(delivered_before_full <= 1);
-                }
-                SubmissionDeliveryDispositionV1::Full => break,
-                disposition => panic!("生命周期 Full 前出现意外私有推进结果：{disposition:?}"),
-            }
-        }
-        assert_eq!(bridge_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert!(session.lifecycle_outbox.entries.is_empty());
-        assert!(session.lifecycle_outbox.batches.is_empty());
-        assert!(matches!(
-            coordinator.private_delivery_capacity_lease.as_ref(),
-            Some(PrivateDeliveryCapacityLeaseV2 {
-                kind: PrivateDeliveryCapacityKindV2::Lifecycle { .. },
-                ..
-            })
-        ));
-        assert_eq!(
-            coordinator.occupied_lifecycle_capacity_leases(&session.lifecycle_outbox),
-            1
-        );
-
-        let recovered_before_capacity = coordinator
-            .store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("读取占用生命周期租约日志");
-        assert!(!recovered_before_capacity.tail.is_empty());
-        assert!(recovered_before_capacity.tail.iter().all(|entry| matches!(
-            entry.evidence.fact,
-            DurableTransactionFactV1::PrivateOutputCommitted { .. }
-        )));
-        let mut replayed_before_capacity = restore_recoverable_paper_application_session_for_tests(
-            &process,
-            recovered_before_capacity
-                .checkpoint
-                .as_ref()
-                .expect("占用生命周期租约日志必须有正式应用检查点")
-                .checkpoint
-                .clone(),
-            &session_id,
-        );
-        for entry in &recovered_before_capacity.tail {
-            replayed_before_capacity = replay_private_fact_operation_v2(
-                replayed_before_capacity,
-                &entry.evidence,
-                entry.recovery_operation,
-            )
-            .expect("顺序重放占用生命周期租约私有尾日志");
-        }
-        assert_eq!(
-            replayed_before_capacity.checkpoint(None),
-            session.durable_checkpoint()
-        );
-
-        let before_capacity_state = session.durable_checkpoint();
-        let before_capacity_cursor = coordinator.cursor_for_tests();
-        let before_capacity_counts = (
-            coordinator.encoded_transaction_count_for_tests,
-            coordinator.append_attempt_count_for_tests,
-            coordinator.append_success_count_for_tests,
-        );
-        let before_capacity_tail = recovered_before_capacity.tail;
-        reset_execution_state_clone_count_for_tests();
-        assert_eq!(
-            coordinator.drive_scheduled_execution_through(&mut session, gtd_deadline),
-            Err(MarketEventErrorV1::Session(
-                SessionError::ResponseOutboxFull
-            ))
-        );
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(session.durable_checkpoint(), before_capacity_state);
-        assert_eq!(session.next_order_deadline_at_utc_ms(), Some(gtd_deadline));
-        assert_eq!(coordinator.cursor_for_tests(), before_capacity_cursor);
-        assert_eq!(
-            (
-                coordinator.encoded_transaction_count_for_tests,
-                coordinator.append_attempt_count_for_tests,
-                coordinator.append_success_count_for_tests,
-            ),
-            before_capacity_counts
-        );
-        assert_eq!(
-            coordinator
-                .store
-                .recover::<
-                    DurableLogicalTransactionEvidenceV2,
-                    DurableRecoveryOperationV2,
-                    RecoverablePaperApplicationCheckpointV2,
-                >()
-                .expect("读取生命周期容量拒绝后日志")
-                .tail,
-            before_capacity_tail
-        );
-        assert_eq!(
-            coordinator.occupied_lifecycle_capacity_leases(&session.lifecycle_outbox),
-            1
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn recoverable_paper_v2_scheduled_gtd_reuses_full_lease_batch_and_replays() {
-        let PaperScheduledLifecycleLeaseFixture {
-            rules,
-            profile,
-            process,
-            mut session,
-            next_visibility_position,
-            gtd_deadline,
-        } = paper_capacity_one_session_with_pending_gtd("paper-v2-private-lifecycle-later-release")
-            .await;
-        let first_arrival = gtd_deadline - 249;
-        let registration = register_lifecycle_lease_batch(
-            &mut session,
-            &profile,
-            first_arrival,
-            "paper-v2-private-lifecycle-no-feedback-item",
-            SimBuyOrderKindV1::FokMarket {
-                spend_pusd: Decimal::ONE,
-                worst_price_pusd_per_share: Decimal::new(1, 1),
-            },
-        );
-        let first_at = registration.items[0].effective_processing_at_utc_ms;
-        let second_at = registration.items[1].effective_processing_at_utc_ms;
-        assert_eq!(first_at, first_arrival);
-        assert_eq!(second_at, gtd_deadline + 1);
-        session
-            .session
-            .advance_public_visibility_through(first_at, next_visibility_position)
-            .expect("闭合可复用租约首项公开时点");
-        assert_eq!(
-            session.drive_next_execution_action_through(first_at),
-            Ok(SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: false,
-            })
-        );
-        let lifecycle_feedback_at = pending_lifecycle_feedback_received_at(&session);
-        assert!(lifecycle_feedback_at < gtd_deadline);
-        assert!(gtd_deadline < second_at);
-        session
-            .session
-            .advance_public_visibility_through(lifecycle_feedback_at, next_visibility_position)
-            .expect("闭合可复用租约反馈时点");
-        assert_eq!(
-            session.drive_next_execution_action_through(lifecycle_feedback_at),
-            Ok(SubmissionDriveDispositionV1::NoAction)
-        );
-        session
-            .session
-            .advance_public_visibility_through(gtd_deadline, next_visibility_position)
-            .expect("在协调器检查点前闭合可复用租约 GTD 前缀");
-        let request_work_id = LogicalLifecycleOutboxV1::request_batch_id(
-            "paper-v2-private-lifecycle-later-release-source",
-        );
-        let request_batch_id = session
-            .lifecycle_outbox
-            .work_batch_ids
-            .get(&request_work_id)
-            .expect("首项必须启动请求生命周期批次")
-            .clone();
-        assert!(
-            session
-                .lifecycle_outbox
-                .batches
-                .get(&request_batch_id)
-                .is_some_and(|batch| {
-                    batch.open_work_ids == BTreeSet::from([request_work_id.clone()])
-                        && batch.feedback_ids.len() == 1
-                })
-        );
-        assert_eq!(session.direct_response_outbox.entries.len(), 1);
-
-        let bridge_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        session.response_bridge =
-            full_once_order_lifecycle_submission_response_bridge(Arc::clone(&bridge_calls));
-        let checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
-            &process,
-            &session,
-            rules.as_ref(),
-        );
-        let session_id = session.session_spec().session_id.clone();
-        let directory = tempfile::tempdir().expect("创建可复用生命周期租约临时目录");
-        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
-            directory
-                .path()
-                .join("paper-scheduled-reusable-lifecycle-lease"),
-            &session,
-            &checkpoint,
-        )
-        .expect("创建可复用生命周期租约协调器");
-        assert_eq!(
-            coordinator.drive_next_private_delivery_through(&mut session, lifecycle_feedback_at),
-            Ok(SubmissionDeliveryDispositionV1::Full)
-        );
-        assert_eq!(bridge_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert!(matches!(
-            coordinator.private_delivery_capacity_lease.as_ref(),
-            Some(PrivateDeliveryCapacityLeaseV2 {
-                kind: PrivateDeliveryCapacityKindV2::Lifecycle { batch_id },
-                ..
-            }) if batch_id == &request_batch_id
-        ));
-        assert_eq!(
-            coordinator.occupied_lifecycle_capacity_leases(&session.lifecycle_outbox),
-            0
-        );
-        assert!(session.lifecycle_outbox.entries.is_empty());
-        assert!(
-            session
-                .lifecycle_outbox
-                .batches
-                .get(&request_batch_id)
-                .is_some_and(|batch| {
-                    batch.open_work_ids == BTreeSet::from([request_work_id.clone()])
-                        && batch.feedback_ids.is_empty()
-                        && batch.feedback_received_at_counts.is_empty()
-                })
-        );
-        let direct_outbox_before_scheduled = session.direct_response_outbox.clone();
-
-        let before_scheduled_counts = (
-            coordinator.encoded_transaction_count_for_tests,
-            coordinator.append_attempt_count_for_tests,
-            coordinator.append_success_count_for_tests,
-        );
-        reset_execution_state_clone_count_for_tests();
-        assert_eq!(
-            coordinator.drive_scheduled_execution_through(&mut session, gtd_deadline),
-            Ok(ScheduledExecutionDriveDispositionV2::Advanced)
-        );
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(session.next_order_deadline_at_utc_ms(), None);
-        assert_eq!(
-            session.direct_response_outbox,
-            direct_outbox_before_scheduled
-        );
-        assert_eq!(
-            (
-                coordinator.encoded_transaction_count_for_tests,
-                coordinator.append_attempt_count_for_tests,
-                coordinator.append_success_count_for_tests,
-            ),
-            (
-                before_scheduled_counts.0 + 1,
-                before_scheduled_counts.1 + 1,
-                before_scheduled_counts.2 + 1,
-            )
-        );
-        assert_eq!(
-            coordinator.occupied_lifecycle_capacity_leases(&session.lifecycle_outbox),
-            0
-        );
-
-        let online_checkpoint = session.durable_checkpoint();
-        let recovered = coordinator
-            .store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("读取可复用生命周期租约日志");
-        assert_eq!(recovered.tail.len(), 2);
-        let private_entry = recovered.tail[0].clone();
-        let scheduled_entry = recovered.tail[1].clone();
-        assert!(matches!(
-            private_entry.evidence.fact,
-            DurableTransactionFactV1::PrivateOutputCommitted { .. }
-        ));
-        assert!(matches!(
-            scheduled_entry.evidence.fact,
-            DurableTransactionFactV1::ExecutionAdvanced { .. }
-        ));
-        assert!(scheduled_entry.evidence.logical_action_results.is_empty());
-        let scheduled_feedback_id = match scheduled_entry.evidence.private_output_drafts.as_slice()
-        {
-            [
-                DurablePrivateOutputDraftV1::Lifecycle {
-                    draft: LifecycleFeedbackDraftV1::Order(draft),
-                },
-            ] if draft.event_kind == OrderLifecycleEventKindV1::GtdExpired => {
-                draft.feedback_id.clone()
-            }
-            drafts => panic!("scheduled GTD 必须形成唯一到期生命周期草稿：{drafts:#?}"),
-        };
-        assert_eq!(
-            session.lifecycle_outbox.entries[&scheduled_feedback_id].batch_id,
-            request_batch_id
-        );
-
-        let mut replayed = restore_recoverable_paper_application_session_for_tests(
-            &process,
-            recovered
-                .checkpoint
-                .expect("可复用生命周期租约日志必须有正式应用检查点")
-                .checkpoint,
-            &session_id,
-        );
-        replayed = replay_private_fact_operation_v2(
-            replayed,
-            &private_entry.evidence,
-            private_entry.recovery_operation,
-        )
-        .expect("重放可复用生命周期 Full 私有尾日志");
-        assert!(replayed.lifecycle_outbox.entries.is_empty());
-        assert!(
-            replayed
-                .lifecycle_outbox
-                .batches
-                .contains_key(&request_batch_id)
-        );
-        reset_execution_state_clone_count_for_tests();
-        replayed = replay_execution_operation_v2(
-            replayed,
-            &scheduled_entry.evidence,
-            scheduled_entry.recovery_operation,
-        )
-        .expect("以 occupancy=0 重放可复用 scheduled GTD 尾日志");
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(replayed.checkpoint(None), online_checkpoint);
-        assert_eq!(
-            replayed.lifecycle_outbox.entries[&scheduled_feedback_id].batch_id,
-            request_batch_id
-        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -34553,1350 +30803,56 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn paper_v2_request_tail_matches_public_registration_and_physical_retry() {
+    #[ignore = "阶段 4 任务 4.1 红灯：任务 4.3 删除热路径对象摘要与完整检查点序列化后启用"]
+    async fn task412_red_hot_request_has_no_object_hash_or_full_checkpoint_serialization() {
         let rules = successful_snapshot_for_sim_tests().await;
-        let profile = load_embedded_proxy_latency_profile().expect("profile");
+        let profile = load_embedded_proxy_latency_profile().expect("加载任务 4.1 红灯时延配置");
         let scenario = scenario_for_sim_tests();
-        let mut process = execution_process_for_tests(rules, profile, scenario);
-        let mut spec = session_spec();
-        spec.caller_role = SimCallerRoleV1::Paper;
-        let mut session =
-            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
-        let baseline_state = session.runtime_state();
-        let baseline_checkpoint = baseline_state.checkpoint(None);
-        let request = PostOrdersRequestV1 {
-            context: context(&session, "paper-v2-register", 1, 2_500),
-            idempotency_key: "paper-v2-register".to_owned(),
-            items: vec![gtc_item("paper-v2-ordinary", 50), fok_item("paper-v2-fok")],
-        };
-        let domain_request = PendingDomainRequestV1::PostOrders(request.clone());
-        let actions = request
-            .items
-            .iter()
-            .enumerate()
-            .map(|(ordinal, item)| {
-                method_action(
-                    &item.item_id,
-                    u16::try_from(ordinal).expect("测试批量序号适合 u16"),
-                    item.order.kind.method_timing(),
-                )
-            })
-            .collect();
-        let physical_retry = request_registration_is_physical_retry(
-            &baseline_state.session,
-            &baseline_state.pending_requests,
-            &domain_request,
+        let run_id = "task412-red-hot-request";
+        let run_intent_binding = SimulationRunIntentBindingV1::try_new(
+            rules.snapshot().provenance.implementation_identity.clone(),
+            SimulationWorkloadKindV1::RealVertical,
+            SimulationDeterministicScriptContractV1::RealVerticalV1,
         )
-        .expect("新请求身份分类");
-        assert!(!physical_retry);
-        let prepared = prepare_request_registration_transition(
-            baseline_state.clone(),
-            domain_request,
-            actions,
-            physical_retry,
-        )
-        .expect("准备请求登记候选");
-        let prepared_evidence = prepared
-            .evidence
-            .as_ref()
-            .expect("新请求必须形成 V2 逻辑证据");
-        assert_eq!(session.durable_checkpoint(), baseline_checkpoint);
-        let online_registration = session
-            .post_orders(request.clone())
-            .expect("公开入口登记同一请求");
-        assert_eq!(
-            online_registration.receipt.disposition,
-            RequestRegistrationDispositionV1::NewLogicalRequest
-        );
-        let online_checkpoint = session.durable_checkpoint();
-
-        let directory = tempfile::tempdir().expect("创建 Paper V2 请求日志临时目录");
-        let root = directory.path().join("paper-request-tail");
-        let mut store = crate::persistence::LocalTransactionLogStoreV2::create_new(
-            root.clone(),
-            crate::persistence::TransactionLogIdentityV2::new(
-                session.session_spec().run_id.clone(),
-                crate::persistence::DurabilityProfileV2::RecoverablePaper,
-            ),
-        )
-        .expect("创建 Paper V2 请求日志");
-        store
-            .publish_application_checkpoint(0, &baseline_checkpoint)
-            .expect("发布零水位基线检查点");
-        let before_commit = store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                ExecutionSessionCheckpointV1,
-            >()
-            .expect("提交前恢复基线");
-        assert!(before_commit.tail.is_empty());
-        assert_eq!(
-            before_commit
-                .checkpoint
-                .expect("存在零水位基线检查点")
-                .checkpoint,
-            baseline_checkpoint
-        );
-
-        store
-            .append_transaction(
-                prepared_evidence,
-                &DurableRecoveryOperationV2::RegisterRequest,
-            )
-            .expect("一次提交请求日志");
-        let retry_request = PendingDomainRequestV1::PostOrders(request.clone());
-        let retry_actions = request
-            .items
-            .iter()
-            .enumerate()
-            .map(|(ordinal, item)| {
-                method_action(
-                    &item.item_id,
-                    u16::try_from(ordinal).expect("测试批量序号适合 u16"),
-                    item.order.kind.method_timing(),
-                )
-            })
-            .collect();
-        let physical_retry = request_registration_is_physical_retry(
-            &prepared.candidate_state.session,
-            &prepared.candidate_state.pending_requests,
-            &retry_request,
-        )
-        .expect("已登记请求必须识别为物理重投");
-        assert!(physical_retry);
-        let before_retry_checkpoint = prepared.candidate_state.checkpoint(None);
-        reset_request_registration_preparation_counts_v2();
-        let retry_prepared = prepare_request_registration_transition(
-            prepared.candidate_state.clone(),
-            retry_request,
-            retry_actions,
-            physical_retry,
-        )
-        .expect("准备物理重投候选");
-        assert!(retry_prepared.evidence.is_none());
-        assert_eq!(
-            request_registration_preparation_counts_v2(),
-            RequestRegistrationPreparationCountsV2::default()
-        );
-        assert_eq!(
-            retry_prepared.candidate_state.checkpoint(None),
-            before_retry_checkpoint
-        );
-        if let Some(evidence) = retry_prepared.evidence.as_ref() {
-            store
-                .append_transaction(evidence, &DurableRecoveryOperationV2::RegisterRequest)
-                .expect("物理重投若错误形成证据则会追加日志");
-        }
-        let after_retry = store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                ExecutionSessionCheckpointV1,
-            >()
-            .expect("检查物理重投后的日志");
-        assert_eq!(after_retry.tail.len(), 1);
-        assert_eq!(session.durable_checkpoint(), online_checkpoint);
-        drop(store);
-
-        let store = crate::persistence::LocalTransactionLogStoreV2::open_recovery(root)
-            .expect("重开 Paper V2 请求日志");
-        let recovered = store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                ExecutionSessionCheckpointV1,
-            >()
-            .expect("恢复 Paper V2 请求日志");
-        let recovered_checkpoint = recovered.checkpoint.expect("Paper V2 恢复必须有基线检查点");
-        assert_eq!(recovered_checkpoint.through_sequence, 0);
-        let (restored_baseline, downstream) = ExecutionSessionStateV1::restore(
-            &process.inner,
-            recovered_checkpoint.checkpoint,
-            &BTreeMap::new(),
-        )
-        .expect("恢复请求日志基线状态");
-        assert_eq!(downstream, None);
-        assert_eq!(recovered.tail.len(), 1);
-        let entry = &recovered.tail[0];
-        let replayed = replay_request_registration_operation_v2(
-            restored_baseline,
-            &entry.evidence,
-            entry.recovery_operation,
-        )
-        .expect("重放请求登记尾日志");
-        assert_eq!(replayed.checkpoint(None), online_checkpoint);
-        assert!(matches!(
-            replay_request_registration_operation_v2(
-                replayed.clone(),
-                &entry.evidence,
-                entry.recovery_operation,
-            ),
-            Err(SessionCheckpointErrorV1::InvalidSessionState(message))
-                if message.contains("重复")
-        ));
-
-        session.replace_runtime_state(replayed);
-        let before_retry = session.durable_checkpoint();
-        let retry = session.post_orders(request).expect("恢复后的物理重投");
-        assert_eq!(
-            retry.receipt.disposition,
-            RequestRegistrationDispositionV1::PhysicalRetry
-        );
-        assert_eq!(session.durable_checkpoint(), before_retry);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn paper_v2_request_tail_rejects_unreachable_request_and_schedule_mismatch() {
-        let rules = successful_snapshot_for_sim_tests().await;
-        let profile = load_embedded_proxy_latency_profile().expect("profile");
-        let scenario = scenario_for_sim_tests();
-        let mut process = execution_process_for_tests(rules, profile, scenario);
-        let mut spec = session_spec();
-        spec.caller_role = SimCallerRoleV1::Paper;
-        let session =
-            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
-        let baseline_state = session.runtime_state();
-        let baseline_checkpoint = baseline_state.checkpoint(None);
-        let request = PostOrdersRequestV1 {
-            context: context(&session, "paper-v2-boundary", 1, 2_500),
-            idempotency_key: "paper-v2-boundary".to_owned(),
-            items: vec![gtc_item("paper-v2-boundary-item", 50)],
-        };
-        let actions = vec![method_action(
-            "paper-v2-boundary-item",
-            0,
-            ParsedMethodTimingV1::Ordinary,
-        )];
-        let prepared = prepare_request_registration_transition(
-            baseline_state.clone(),
-            PendingDomainRequestV1::PostOrders(request),
-            actions,
-            false,
-        )
-        .expect("准备合法请求登记事实");
-
-        let evidence = prepared.evidence.expect("新请求必须形成 V2 逻辑证据");
-        let mut mismatched_schedule = evidence.clone();
-        let DurableTransactionFactV1::RequestRegistered { registration, .. } =
-            &mut mismatched_schedule.fact
-        else {
-            panic!("请求准备结果必须形成请求登记事实");
-        };
-        registration.actions[0].key.effective_processing_at_utc_ms += 1;
-
-        let mut invalid_request = evidence;
-        let DurableTransactionFactV1::RequestRegistered { registration, .. } =
-            &mut invalid_request.fact
-        else {
-            panic!("请求准备结果必须形成请求登记事实");
-        };
-        let PendingDomainRequestV1::PostOrders(request) = &mut registration.request else {
-            panic!("测试事实必须承载批量提交请求");
-        };
-        let SimBuyOrderKindV1::GtcLimit {
-            limit_price_pusd_per_share,
-            ..
-        } = &mut request.items[0].order.kind
-        else {
-            panic!("测试请求必须承载 GTC 订单");
-        };
-        *limit_price_pusd_per_share = Decimal::NEGATIVE_ONE;
-
-        let directory = tempfile::tempdir().expect("创建 Paper V2 边界临时目录");
-        let root = directory.path().join("paper-request-boundary");
-        let mut store = crate::persistence::LocalTransactionLogStoreV2::create_new(
-            root.clone(),
-            crate::persistence::TransactionLogIdentityV2::new(
-                session.session_spec().run_id.clone(),
-                crate::persistence::DurabilityProfileV2::RecoverablePaper,
-            ),
-        )
-        .expect("创建 Paper V2 请求边界日志");
-        store
-            .publish_application_checkpoint(0, &baseline_checkpoint)
-            .expect("发布零水位基线检查点");
-        store
-            .append_transaction(
-                &mismatched_schedule,
-                &DurableRecoveryOperationV2::RegisterRequest,
-            )
-            .expect("写入调度时点损坏事实");
-        store
-            .append_transaction(
-                &invalid_request,
-                &DurableRecoveryOperationV2::RegisterRequest,
-            )
-            .expect("写入领域正文无效事实");
-        drop(store);
-
-        let store = crate::persistence::LocalTransactionLogStoreV2::open_recovery(root)
-            .expect("重开 Paper V2 请求边界日志");
-        let recovered = store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                ExecutionSessionCheckpointV1,
-            >()
-            .expect("读取 Paper V2 请求边界日志");
-        assert_eq!(recovered.tail.len(), 2);
-        assert!(matches!(
-            replay_request_registration_operation_v2(
-                baseline_state.clone(),
-                &recovered.tail[0].evidence,
-                recovered.tail[0].recovery_operation,
-            ),
-            Err(SessionCheckpointErrorV1::InvalidSessionState(message))
-                if message.contains("与重算候选不一致")
-        ));
-        assert!(matches!(
-            replay_request_registration_operation_v2(
-                baseline_state,
-                &recovered.tail[1].evidence,
-                recovered.tail[1].recovery_operation,
-            ),
-            Err(SessionCheckpointErrorV1::InvalidSessionState(message))
-                if message.contains("订单金额、份额和价格必须为正数")
-        ));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn paper_v2_ingress_closed_tail_recovers_the_closed_gate() {
-        let rules = successful_snapshot_for_sim_tests().await;
-        let profile = load_embedded_proxy_latency_profile().expect("profile");
-        let scenario = scenario_for_sim_tests();
-        let mut process = execution_process_for_tests(rules, profile, scenario);
-        let mut spec = session_spec();
-        spec.caller_role = SimCallerRoleV1::Paper;
-        let session =
-            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
-        let baseline_state = session.runtime_state();
-        let baseline_checkpoint = baseline_state.checkpoint(None);
-        assert!(baseline_state.accepting_new_ingress);
-        let evidence =
-            DurableLogicalTransactionEvidenceV2::new(DurableTransactionFactV1::IngressClosed {
-                session_id: session.session_spec().session_id.clone(),
-            });
-
-        let directory = tempfile::tempdir().expect("创建 Paper V2 入口关闭临时目录");
-        let root = directory.path().join("paper-ingress-closed-tail");
-        let mut store = crate::persistence::LocalTransactionLogStoreV2::create_new(
-            root.clone(),
-            crate::persistence::TransactionLogIdentityV2::new(
-                session.session_spec().run_id.clone(),
-                crate::persistence::DurabilityProfileV2::RecoverablePaper,
-            ),
-        )
-        .expect("创建 Paper V2 入口关闭日志");
-        store
-            .publish_application_checkpoint(0, &baseline_checkpoint)
-            .expect("发布入口关闭前应用检查点");
-        store
-            .append_transaction(&evidence, &DurableRecoveryOperationV2::CloseIngress)
-            .expect("一次提交入口关闭事实");
-        drop(store);
-
-        let store = crate::persistence::LocalTransactionLogStoreV2::open_recovery(root)
-            .expect("重开 Paper V2 入口关闭日志");
-        let recovered = store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                ExecutionSessionCheckpointV1,
-            >()
-            .expect("恢复 Paper V2 入口关闭日志");
-        let checkpoint = recovered.checkpoint.expect("入口关闭恢复必须有基线检查点");
-        let (restored, downstream) = ExecutionSessionStateV1::restore(
-            &process.inner,
-            checkpoint.checkpoint,
-            &BTreeMap::new(),
-        )
-        .expect("恢复入口关闭前基线");
-        assert_eq!(downstream, None);
-        assert_eq!(recovered.tail.len(), 1);
-        let entry = &recovered.tail[0];
-        let replayed =
-            replay_close_ingress_operation_v2(restored, &entry.evidence, entry.recovery_operation)
-                .expect("重放入口关闭事实");
-        assert!(!replayed.accepting_new_ingress);
-        assert!(matches!(
-            replay_close_ingress_operation_v2(
-                replayed,
-                &entry.evidence,
-                entry.recovery_operation,
-            ),
-            Err(SessionCheckpointErrorV1::InvalidSessionState(message))
-                if message.contains("重复")
-        ));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn paper_v2_platform_bucket_tail_rereads_body_and_matches_online_candidate() {
-        use crate::task22_tests::{
-            initial_events, scenario as long_scenario, session_spec as long_session_spec,
-        };
-        use data_pipeline_core::encode_execution_market_event_v3;
-
-        let rules = successful_snapshot_for_sim_tests().await;
-        let profile = load_embedded_proxy_latency_profile().expect("profile");
-        let scenario = long_scenario();
-        let mut process = execution_process_for_tests(rules, profile, Arc::clone(&scenario));
-        let spec = long_session_spec(&scenario, SimCallerRoleV1::Paper, "paper-v2-bucket");
-        let mut session =
-            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
-        let baseline_state = session.runtime_state();
-        let baseline_checkpoint = baseline_state.checkpoint(None);
-        let encoded_events = initial_events("0.00001", "0.6", "5")
-            .iter()
-            .map(|event| encode_execution_market_event_v3(event).expect("编码初始盘口事件"))
-            .collect::<Vec<_>>();
-        let closure = MillisecondBucketClosureV1::NextEventAt(120_001);
-        let bucket =
-            ClosedMarketEventBucketV1::public(120_000, 0, 2, closure, encoded_events.clone());
-        let bucket_reference = bucket.durable_reference();
-        let prepared =
-            prepare_platform_bucket_transition_v2(baseline_state.clone(), bucket.clone())
-                .expect("准备 Paper V2 公开闭桶候选");
-        let prepared_evidence = prepared
-            .evidence
-            .as_ref()
-            .expect("新闭桶必须形成 V2 逻辑证据");
-        assert_eq!(prepared_evidence.query_projection_revision, None);
-        assert_eq!(
-            prepared_evidence.logical_platform_driven_through_utc_ms,
-            Some(120_000)
-        );
-        assert_eq!(
-            prepared_evidence.private_fact_schedule_closed_through_utc_ms,
-            None
-        );
-        assert!(prepared_evidence.account_deltas.is_empty());
-        assert!(prepared_evidence.logical_action_results.is_empty());
-        assert!(prepared_evidence.private_output_drafts.is_empty());
-        let evidence_json = serde_json::to_string(prepared_evidence).expect("编码 V2 逻辑证据");
-        for legacy_field in [
-            "transient_input_session_id",
-            "transient_input",
-            "maintenance_steady_before_resource_usage",
-            "resource_usage",
-            "maintenance_succeeded_steady_after_resource_usage",
-        ] {
-            assert!(!evidence_json.contains(legacy_field));
-        }
-        assert_eq!(session.durable_checkpoint(), baseline_checkpoint);
-        assert_eq!(
-            session.apply_closed_market_event_bucket(bucket.clone()),
-            Ok(MarketBucketApplyDispositionV1::Applied)
-        );
-        let online_checkpoint = session.durable_checkpoint();
-
-        let directory = tempfile::tempdir().expect("创建 Paper V2 闭桶临时目录");
-        let root = directory.path().join("paper-bucket-tail");
-        let mut store = crate::persistence::LocalTransactionLogStoreV2::create_new(
-            root.clone(),
-            crate::persistence::TransactionLogIdentityV2::new(
-                session.session_spec().run_id.clone(),
-                crate::persistence::DurabilityProfileV2::RecoverablePaper,
-            ),
-        )
-        .expect("创建 Paper V2 闭桶日志");
-        store
-            .publish_application_checkpoint(0, &baseline_checkpoint)
-            .expect("发布零水位基线检查点");
-        store
-            .append_transaction(
-                prepared_evidence,
-                &DurableRecoveryOperationV2::ApplyClosedMarketEventBucket,
-            )
-            .expect("一次提交闭桶日志");
-        let retry_prepared =
-            prepare_platform_bucket_transition_v2(prepared.candidate_state.clone(), bucket.clone())
-                .expect("准备同一闭桶物理重投候选");
-        assert_eq!(
-            retry_prepared.disposition,
-            MarketBucketApplyDispositionV1::PhysicalRetry
-        );
-        assert!(retry_prepared.evidence.is_none());
-        if let Some(evidence) = retry_prepared.evidence.as_ref() {
-            store
-                .append_transaction(
-                    evidence,
-                    &DurableRecoveryOperationV2::ApplyClosedMarketEventBucket,
-                )
-                .expect("物理重投若错误形成证据则会追加日志");
-        }
-        let after_retry = store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                ExecutionSessionCheckpointV1,
-            >()
-            .expect("检查闭桶物理重投后的日志");
-        assert_eq!(after_retry.tail.len(), 1);
-
-        let closure_upgrade = ClosedMarketEventBucketV1::public(
-            120_000,
-            0,
-            2,
-            MillisecondBucketClosureV1::EndOfInput,
-            encoded_events.clone(),
-        );
-        let upgrade_prepared = prepare_platform_bucket_transition_v2(
-            prepared.candidate_state.clone(),
-            closure_upgrade,
-        )
-        .expect("相同正文的输入终止升级仍是业务变化");
-        assert!(upgrade_prepared.evidence.is_some());
-        drop(store);
-
-        let store = crate::persistence::LocalTransactionLogStoreV2::open_recovery(root)
-            .expect("重开 Paper V2 闭桶日志");
-        let recovered = store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                ExecutionSessionCheckpointV1,
-            >()
-            .expect("恢复 Paper V2 闭桶日志");
-        let recovered_checkpoint = recovered.checkpoint.expect("闭桶恢复必须有基线检查点");
-        let (restored_baseline, downstream) = ExecutionSessionStateV1::restore(
-            &process.inner,
-            recovered_checkpoint.checkpoint,
-            &BTreeMap::new(),
-        )
-        .expect("恢复闭桶日志基线状态");
-        assert_eq!(downstream, None);
-        assert_eq!(recovered.tail.len(), 1);
-
-        let expected_read = PaperMarketEventRecoveryReadRequestV1 {
-            bucket_at_utc_ms: bucket_reference.bucket_at_utc_ms,
-            start_visibility_index_position: bucket_reference.start_index_position,
-            next_visibility_index_position: bucket_reference.next_index_position,
-        };
-        let reads = Arc::new(Mutex::new(Vec::new()));
-        let recorded_reads = Arc::clone(&reads);
-        let reader_events = encoded_events;
-        let expected_read_for_reader = expected_read.clone();
-        let mut reader =
-            PaperMarketEventRecoveryReaderV1::try_new(Sha256Hex("a".repeat(64)), move |request| {
-                recorded_reads
-                    .lock()
-                    .map_err(|_| {
-                        PaperMarketEventRecoveryReadErrorV1::SourceUnavailable(
-                            "测试读取记录锁不可用".to_owned(),
-                        )
-                    })?
-                    .push(request.clone());
-                if request != expected_read_for_reader {
-                    return Err(PaperMarketEventRecoveryReadErrorV1::RangeUnavailable(
-                        "测试读取坐标不符".to_owned(),
-                    ));
-                }
-                Ok(PaperMarketEventRecoveryReadV1 {
-                    encoded_events: reader_events.clone(),
-                    next_event_at_utc_ms: Some(120_001),
-                })
-            })
-            .expect("构造 Paper V2 黄金读取器");
-        let entry = &recovered.tail[0];
-        let replayed = replay_platform_bucket_operation_v2(
-            restored_baseline,
-            &entry.evidence,
-            entry.recovery_operation,
-            &mut reader,
-        )
-        .expect("重放 Paper V2 公开闭桶");
-        assert_eq!(replayed.checkpoint(None), online_checkpoint);
-        assert!(
-            replayed
-                .session
-                .public_markets()
-                .market(&crate::task22_tests::market().condition_id.0)
-                .is_some()
-        );
-        assert_eq!(
-            reads.lock().expect("读取测试请求").as_slice(),
-            &[expected_read]
-        );
-        assert!(matches!(
-            replay_platform_bucket_operation_v2(
-                replayed,
-                &entry.evidence,
-                entry.recovery_operation,
-                &mut reader,
-            ),
-            Err(SimExecutionPersistenceErrorV1::Session(message))
-                if message.contains("重复")
-        ));
-        assert_eq!(reads.lock().expect("读取测试请求").len(), 1);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn paper_v2_execution_tail_replays_the_public_transaction_exactly() {
-        use crate::task22_tests::{
-            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
-            scenario as long_scenario, session_spec as long_session_spec,
-        };
-
-        let rules = successful_snapshot_for_sim_tests().await;
-        let profile = load_embedded_proxy_latency_profile().expect("加载 Paper V2 时延配置");
-        let scenario = long_scenario();
-        let mut process = execution_process_for_tests(
-            Arc::clone(&rules),
+        .expect("构造任务 4.1 红灯运行意图");
+        let directory = tempfile::tempdir().expect("创建任务 4.1 红灯持久目录");
+        let mut process = SimExecutionProcessV1::try_new_with_local_persistence(
+            run_id.to_owned(),
+            successful_policy_for_tests(),
+            rules,
             Arc::clone(&profile),
             Arc::clone(&scenario),
-        );
-        let spec = long_session_spec(&scenario, SimCallerRoleV1::Paper, "paper-v2-execution");
+            run_intent_binding,
+            sha("f"),
+            directory.path().join("run"),
+        )
+        .expect("创建任务 4.1 红灯持久运行");
+        let mut spec = session_spec();
+        spec.run_id = run_id.to_owned();
+        spec.caller_role = SimCallerRoleV1::Paper;
         let mut session =
             process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
-        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
-        let registration = session
-            .post_order(PostOrderRequestV1 {
-                context: context_for_arrival(
-                    &session,
-                    &profile,
-                    "paper-v2-execution-request",
-                    1,
-                    150_000,
-                ),
-                idempotency_key: "paper-v2-execution-idempotency".to_owned(),
-                item: PostOrderItemV1 {
-                    item_id: "paper-v2-execution-item".to_owned(),
-                    order: SimBuyOrderV1 {
-                        condition_id: long_market().condition_id,
-                        token_id: long_asset("1", 0, "Up").token_id,
-                        kind: SimBuyOrderKindV1::GtcLimit {
-                            limit_price_pusd_per_share: Decimal::new(50, 2),
-                            size_shares: Decimal::new(5, 0),
-                            post_only: false,
-                        },
-                    },
-                },
-            })
-            .expect("登记待执行 Paper GTC 请求");
-        let effective_at = registration.item.effective_processing_at_utc_ms;
-        session
-            .apply_closed_market_event_bucket(ClosedMarketEventBucketV1::public(
-                effective_at,
-                next_visibility_position,
-                next_visibility_position,
-                MillisecondBucketClosureV1::NextEventAt(effective_at + 1),
-                Vec::new(),
-            ))
-            .expect("闭合待执行请求的平台可见前缀");
-        let baseline_state = session.runtime_state();
-        let baseline_checkpoint = baseline_state.checkpoint(None);
-        let prepared = prepare_execution_transition_v2(baseline_state.clone(), effective_at)
-            .expect("准备 Paper V2 执行推进候选");
-        assert_eq!(
-            prepared.disposition,
-            SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: true,
-            }
-        );
-        let execution_evidence = prepared
-            .evidence
-            .as_ref()
-            .expect("已处理动作必须形成 V2 逻辑证据");
-        assert_eq!(execution_evidence.logical_action_results.len(), 1);
-        assert_eq!(
-            execution_evidence.private_output_drafts.len(),
-            2,
-            "prepared drafts: {:#?}",
-            execution_evidence.private_output_drafts,
-        );
-        assert_eq!(execution_evidence.account_deltas.len(), 1);
-        assert!(
-            execution_evidence
-                .private_output_drafts
-                .iter()
-                .any(|draft| { matches!(draft, DurablePrivateOutputDraftV1::Direct { .. }) })
-        );
-        assert!(
-            execution_evidence
-                .private_output_drafts
-                .iter()
-                .any(|draft| {
-                    matches!(
-                        draft,
-                        DurablePrivateOutputDraftV1::Lifecycle {
-                            draft: LifecycleFeedbackDraftV1::Order(_),
-                        }
-                    )
-                })
-        );
 
-        assert_eq!(
-            session.drive_next_execution_action_through(effective_at),
-            Ok(SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: true,
-            })
-        );
-        let online_checkpoint = session.durable_checkpoint();
-        assert_eq!(prepared.candidate_state.checkpoint(None), online_checkpoint);
-
-        let directory = tempfile::tempdir().expect("创建 Paper V2 执行日志临时目录");
-        let root = directory.path().join("paper-execution-tail");
-        let mut store = crate::persistence::LocalTransactionLogStoreV2::create_new(
-            root.clone(),
-            crate::persistence::TransactionLogIdentityV2::new(
-                session.session_spec().run_id.clone(),
-                crate::persistence::DurabilityProfileV2::RecoverablePaper,
-            ),
-        )
-        .expect("创建 Paper V2 执行日志");
-        store
-            .publish_application_checkpoint(0, &baseline_checkpoint)
-            .expect("发布执行前应用检查点");
-        store
-            .append_transaction(
-                execution_evidence,
-                &DurableRecoveryOperationV2::DriveExecutionThrough {
-                    effective_processing_at_utc_ms: effective_at,
-                },
-            )
-            .expect("一次提交 Paper V2 执行事务");
-        let no_change = prepare_execution_transition_v2(session.runtime_state(), effective_at)
-            .expect("准备相同水位的无变化执行候选");
-        assert_eq!(
-            no_change.disposition,
-            SubmissionDriveDispositionV1::NoAction
-        );
-        assert!(no_change.evidence.is_none());
-        if let Some(evidence) = no_change.evidence.as_ref() {
-            store
-                .append_transaction(
-                    evidence,
-                    &DurableRecoveryOperationV2::DriveExecutionThrough {
-                        effective_processing_at_utc_ms: effective_at,
-                    },
-                )
-                .expect("无变化执行若错误形成证据则会追加日志");
-        }
-        let after_no_change = store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                ExecutionSessionCheckpointV1,
-            >()
-            .expect("检查无变化执行后的日志");
-        assert_eq!(after_no_change.tail.len(), 1);
-        let before_no_change = session.durable_checkpoint();
-        assert_eq!(
-            session.drive_next_execution_action_through(effective_at),
-            Ok(SubmissionDriveDispositionV1::NoAction)
-        );
-        assert_eq!(session.durable_checkpoint(), before_no_change);
-        drop(store);
-
-        let store = crate::persistence::LocalTransactionLogStoreV2::open_recovery(root)
-            .expect("重开 Paper V2 执行日志");
-        let recovered = store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                ExecutionSessionCheckpointV1,
-            >()
-            .expect("恢复 Paper V2 执行日志");
-        let recovered_checkpoint = recovered.checkpoint.expect("执行恢复必须有基线检查点");
-        let (restored_baseline, downstream) = ExecutionSessionStateV1::restore(
-            &process.inner,
-            recovered_checkpoint.checkpoint,
-            &BTreeMap::new(),
-        )
-        .expect("恢复 Paper V2 执行基线");
-        assert_eq!(downstream, None);
-        assert_eq!(recovered.tail.len(), 1);
-        let entry = &recovered.tail[0];
-        let replayed = replay_execution_operation_v2(
-            restored_baseline.clone(),
-            &entry.evidence,
-            entry.recovery_operation,
-        )
-        .expect("重放 Paper V2 执行尾日志");
-        assert_eq!(replayed.checkpoint(None), online_checkpoint);
-        let mismatched_time = replay_execution_operation_v2(
-            restored_baseline,
-            &entry.evidence,
-            DurableRecoveryOperationV2::DriveExecutionThrough {
-                effective_processing_at_utc_ms: effective_at - 1,
-            },
-        );
-        match mismatched_time {
-            Err(SessionCheckpointErrorV1::InvalidSessionState(message)) => {
-                assert!(
-                    message.contains("无法重放") && message.contains("动作时点已经被逻辑水位关闭"),
-                    "wrong-time error: {message}",
-                );
-            }
-            Ok(_) => panic!("错误执行时点不得重放成功"),
-            Err(error) => panic!("错误执行时点返回意外错误：{error}"),
-        }
-        let mut mismatched_evidence = entry.evidence.clone();
-        mismatched_evidence.logical_action_results[0].query_projection_revision = Some(u64::MAX);
-        assert!(matches!(
-            replay_execution_operation_v2(
-                baseline_state,
-                &mismatched_evidence,
-                entry.recovery_operation,
-            ),
-            Err(SessionCheckpointErrorV1::InvalidSessionState(message))
-                if message.contains("与重算候选不一致")
-        ));
-
-        let first_private_received_at = session
-            .session
-            .recovered_pending_private_facts()
-            .first()
-            .map(|(_, received_at, _)| *received_at)
-            .expect("执行结果必须形成待交付私有事实");
-        session
-            .apply_closed_market_event_bucket(ClosedMarketEventBucketV1::public(
-                first_private_received_at,
-                next_visibility_position,
-                next_visibility_position,
-                MillisecondBucketClosureV1::NextEventAt(first_private_received_at + 1),
-                Vec::new(),
-            ))
-            .expect("闭合首个私有事实之前的平台可见前缀");
-        let private_baseline = session.runtime_state();
-        let private_baseline_checkpoint = private_baseline.checkpoint(None);
-        let source_private_fact = private_baseline
-            .session
-            .recovered_pending_private_facts()
-            .first()
-            .map(|(evidence, _, _)| evidence.clone())
-            .expect("平台定时工作后仍必须保留待交付私有事实");
-        let private_received_at = private_baseline
-            .session
-            .recovered_pending_private_facts()
-            .first()
-            .map(|(_, received_at, _)| *received_at)
-            .expect("读取首个私有事实时点");
-        let prepared_private =
-            prepare_private_fact_transition_v2(private_baseline.clone(), private_received_at)
-                .expect("准备 Paper V2 私有事实候选");
-        let prepared_delivery = match &prepared_private.outcome {
-            PreparedPrivateFactOutcomeV2::Output(delivery) => delivery,
-            outcome => panic!("首个私有事实必须形成输出，实际为 {outcome:?}"),
-        };
-        let private_evidence = prepared_private
-            .evidence
-            .as_ref()
-            .expect("私有输出必须形成一条 V2 逻辑证据");
-        assert!(matches!(
-            private_evidence.fact,
-            DurableTransactionFactV1::PrivateOutputCommitted { .. }
-        ));
-        assert_eq!(
-            prepared_private
-                .candidate_state
-                .session
-                .private_feedback_sequence(),
-            private_baseline.session.private_feedback_sequence() + 1
-        );
-        assert_eq!(
-            prepared_private
-                .candidate_state
-                .confirmed_private_deliveries
-                .len(),
-            private_baseline.confirmed_private_deliveries.len() + 1
-        );
-        match source_private_fact {
-            crate::session::PrivateVisibilityEvidenceV1::DirectResponse { global_request_id } => {
-                assert!(
-                    !prepared_private
-                        .candidate_state
-                        .direct_response_outbox
-                        .entries
-                        .contains_key(&global_request_id)
-                )
-            }
-            crate::session::PrivateVisibilityEvidenceV1::LifecycleFeedback { feedback_id } => {
-                assert!(
-                    !prepared_private
-                        .candidate_state
-                        .lifecycle_outbox
-                        .entries
-                        .contains_key(&feedback_id)
-                );
-            }
-        }
-        assert_eq!(
-            session.drive_next_private_delivery_through(private_received_at),
-            Ok(SubmissionDeliveryDispositionV1::Delivered)
-        );
-        let online_private_checkpoint = session.durable_checkpoint();
-        assert_eq!(
-            prepared_private.candidate_state.checkpoint(None),
-            online_private_checkpoint
-        );
-
-        let private_root = directory.path().join("paper-private-tail");
-        let mut private_store = crate::persistence::LocalTransactionLogStoreV2::create_new(
-            private_root.clone(),
-            crate::persistence::TransactionLogIdentityV2::new(
-                session.session_spec().run_id.clone(),
-                crate::persistence::DurabilityProfileV2::RecoverablePaper,
-            ),
-        )
-        .expect("创建 Paper V2 私有输出日志");
-        private_store
-            .publish_application_checkpoint(0, &private_baseline_checkpoint)
-            .expect("发布私有输出前应用检查点");
-        private_store
-            .append_transaction(
-                private_evidence,
-                &DurableRecoveryOperationV2::AdvancePrivateFactThrough {
-                    received_at_utc_ms: private_received_at,
-                },
-            )
-            .expect("私有输出在桥调用前只提交一条 Paper V2 事务");
-        drop(private_store);
-
-        let private_store =
-            crate::persistence::LocalTransactionLogStoreV2::open_recovery(private_root)
-                .expect("重开 Paper V2 私有输出日志");
-        let recovered_private = private_store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                ExecutionSessionCheckpointV1,
-            >()
-            .expect("恢复 Paper V2 私有输出日志");
-        assert_eq!(recovered_private.tail.len(), 1);
-        let private_entry = &recovered_private.tail[0];
-        assert!(matches!(
-            private_entry.evidence.fact,
-            DurableTransactionFactV1::PrivateOutputCommitted { .. }
-        ));
-        assert!(!recovered_private.tail.iter().any(|entry| matches!(
-            entry.evidence.fact,
-            DurableTransactionFactV1::PrivateOutputConfirmed { .. }
-        )));
-        let recovered_private_checkpoint = recovered_private
-            .checkpoint
-            .expect("私有输出恢复必须有基线检查点");
-        let (restored_private_baseline, downstream) = ExecutionSessionStateV1::restore(
-            &process.inner,
-            recovered_private_checkpoint.checkpoint,
-            &BTreeMap::new(),
-        )
-        .expect("恢复 Paper V2 私有输出基线");
-        assert_eq!(downstream, None);
-        let replayed_private = replay_private_fact_operation_v2(
-            restored_private_baseline.clone(),
-            &private_entry.evidence,
-            private_entry.recovery_operation,
-        )
-        .expect("重放 Paper V2 私有输出尾日志");
-        assert_eq!(replayed_private.checkpoint(None), online_private_checkpoint);
-        assert_eq!(
-            replayed_private
-                .confirmed_private_deliveries
-                .get(&prepared_delivery.confirmation().private_feedback_sequence),
-            Some(prepared_delivery)
-        );
-        assert!(matches!(
-            replay_private_fact_operation_v2(
-                restored_private_baseline,
-                &private_entry.evidence,
-                DurableRecoveryOperationV2::AdvancePrivateFactThrough {
-                    received_at_utc_ms: private_received_at - 1,
-                },
-            ),
-            Err(SessionCheckpointErrorV1::InvalidSessionState(_))
-        ));
-
-        let second_private_received_at = session
-            .session
-            .recovered_pending_private_facts()
-            .first()
-            .map(|(_, received_at, _)| *received_at)
-            .expect("代表路径必须形成第二个连续私有事实");
-        session
-            .apply_closed_market_event_bucket(ClosedMarketEventBucketV1::public(
-                second_private_received_at,
-                next_visibility_position,
-                next_visibility_position,
-                MillisecondBucketClosureV1::NextEventAt(second_private_received_at + 1),
-                Vec::new(),
-            ))
-            .expect("闭合第二个私有事实之前的平台可见前缀");
-        let downstream_baseline = session.runtime_state();
-        let downstream_baseline_checkpoint = downstream_baseline.checkpoint(None);
-        let second_private_received_at = downstream_baseline
-            .session
-            .recovered_pending_private_facts()
-            .first()
-            .map(|(_, received_at, _)| *received_at)
-            .expect("平台定时工作后仍必须保留第二个私有事实");
-        let prepared_second_private = prepare_private_fact_transition_v2(
-            downstream_baseline.clone(),
-            second_private_received_at,
-        )
-        .expect("准备第二个 Paper V2 私有事实候选");
-        let second_delivery = match &prepared_second_private.outcome {
-            PreparedPrivateFactOutcomeV2::Output(delivery) => delivery,
-            outcome => panic!("第二个私有事实必须形成输出，实际为 {outcome:?}"),
-        };
-        assert_eq!(second_delivery.confirmation().private_feedback_sequence, 2);
-        let second_private_evidence = prepared_second_private
-            .evidence
-            .as_ref()
-            .expect("第二个私有输出必须形成一条 V2 逻辑证据");
-        assert_eq!(
-            session.drive_next_private_delivery_through(second_private_received_at),
-            Ok(SubmissionDeliveryDispositionV1::Delivered)
-        );
-        let online_second_private_checkpoint = session.durable_checkpoint();
-        assert_eq!(
-            prepared_second_private.candidate_state.checkpoint(None),
-            online_second_private_checkpoint
-        );
-        let downstream_proof = DownstreamDurabilityProofV1 {
-            account_instance_key: prepared_second_private
-                .candidate_state
-                .session
-                .execution_state()
-                .account_instance_key()
-                .clone(),
-            durable_through: second_delivery.confirmation(),
-        };
-        let prepared_downstream = prepare_downstream_durability_transition_v2(
-            prepared_second_private.candidate_state.clone(),
-            None,
-            downstream_proof.clone(),
-        )
-        .expect("准备 Paper V2 批量下游耐久候选")
-        .expect("0 到 2 必须形成一次水位推进");
-        assert_eq!(
-            prepared_downstream
-                .candidate_state
-                .compacted_confirmed_private_deliveries
-                .len(),
-            2
-        );
-        assert!(
-            prepared_downstream
-                .candidate_state
-                .confirmed_private_deliveries
-                .is_empty()
-        );
-
-        let downstream_root = directory.path().join("paper-downstream-tail");
-        let mut downstream_store = crate::persistence::LocalTransactionLogStoreV2::create_new(
-            downstream_root.clone(),
-            crate::persistence::TransactionLogIdentityV2::new(
-                session.session_spec().run_id.clone(),
-                crate::persistence::DurabilityProfileV2::RecoverablePaper,
-            ),
-        )
-        .expect("创建 Paper V2 下游水位日志");
-        downstream_store
-            .publish_application_checkpoint(0, &downstream_baseline_checkpoint)
-            .expect("发布第二个私有输出前应用检查点");
-        downstream_store
-            .append_transaction(
-                second_private_evidence,
-                &DurableRecoveryOperationV2::AdvancePrivateFactThrough {
-                    received_at_utc_ms: second_private_received_at,
-                },
-            )
-            .expect("第二个私有输出只提交一条 Paper V2 事务");
-        downstream_store
-            .append_transaction(
-                &prepared_downstream.evidence,
-                &DurableRecoveryOperationV2::AdvanceDownstreamDurability,
-            )
-            .expect("两个连续输出只提交一条 Paper V2 下游水位事务");
-        drop(downstream_store);
-
-        let downstream_store =
-            crate::persistence::LocalTransactionLogStoreV2::open_recovery(downstream_root)
-                .expect("重开 Paper V2 下游水位日志");
-        let recovered_downstream = downstream_store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                ExecutionSessionCheckpointV1,
-            >()
-            .expect("恢复 Paper V2 下游水位日志");
-        assert_eq!(recovered_downstream.tail.len(), 2);
-        assert_eq!(
-            recovered_downstream
-                .tail
-                .iter()
-                .filter(|entry| matches!(
-                    entry.evidence.fact,
-                    DurableTransactionFactV1::DownstreamDurabilityAdvanced { .. }
-                ))
-                .count(),
-            1
-        );
-        let recovered_downstream_checkpoint = recovered_downstream
-            .checkpoint
-            .expect("下游水位恢复必须有基线检查点");
-        let (restored_downstream_baseline, downstream) = ExecutionSessionStateV1::restore(
-            &process.inner,
-            recovered_downstream_checkpoint.checkpoint,
-            &BTreeMap::new(),
-        )
-        .expect("恢复 Paper V2 下游水位基线");
-        assert_eq!(downstream, None);
-        let replayed_second_private = replay_private_fact_operation_v2(
-            restored_downstream_baseline,
-            &recovered_downstream.tail[0].evidence,
-            recovered_downstream.tail[0].recovery_operation,
-        )
-        .expect("重放第二个 Paper V2 私有输出尾日志");
-        assert_eq!(
-            replayed_second_private.checkpoint(None),
-            online_second_private_checkpoint
-        );
-        let (replayed_downstream, replayed_confirmation) =
-            replay_downstream_durability_operation_v2(
-                replayed_second_private,
-                None,
-                &recovered_downstream.tail[1].evidence,
-                recovered_downstream.tail[1].recovery_operation,
-            )
-            .expect("一次重放两个连续私有输出的下游耐久水位");
-        assert_eq!(
-            replayed_confirmation,
-            prepared_downstream.downstream_durable_confirmation
-        );
-        assert_eq!(
-            replayed_downstream.checkpoint(Some(replayed_confirmation.clone())),
-            prepared_downstream
-                .candidate_state
-                .checkpoint(Some(replayed_confirmation.clone()))
-        );
-        validate_confirmed_private_deliveries(&replayed_downstream, Some(&replayed_confirmation))
-            .expect("批量推进后的完整与裁剪正文必须按水位分区");
-
-        let session_id = session.session_spec().session_id.clone();
-        let opening_anchor = process
-            .inner
-            .opening_anchor_for_session(&session_id)
-            .expect("V2 投影测试必须保留开户锚点")
-            .clone();
-        let initialization = session
-            .session
-            .initialization_snapshot()
-            .expect("V2 投影测试必须保留活动初始化终态");
-        let mut projection = DurableEvidenceProjectionV1 {
-            session_creations: BTreeMap::from([(
-                session_id.clone(),
-                (
-                    session.session_spec().clone(),
-                    opening_anchor,
-                    initialization,
-                ),
-            )]),
-            ..DurableEvidenceProjectionV1::default()
-        };
-        for evidence in [
-            execution_evidence,
-            private_evidence,
-            second_private_evidence,
-            &prepared_downstream.evidence,
-        ] {
-            projection
-                .apply_logical_v2(evidence)
-                .expect("V2 单次本地提交输出与批量下游水位必须形成连续投影");
-        }
-        validate_durable_output_projection(
-            &session_id,
-            &prepared_downstream.candidate_state,
-            Some(&replayed_confirmation),
-            projection.prepared_outputs.get(&session_id),
-            projection.confirmed_outputs.get(&session_id),
-            projection.private_output_drafts.get(&session_id),
-            projection.downstream_durable.get(&session_id),
-        )
-        .expect("V2 单次输出事实与批量下游水位必须闭合检查点投影");
-
-        let mut index = ArtifactEvidenceIndexV1::default();
-        for (sequence, evidence) in [
-            execution_evidence,
-            private_evidence,
-            second_private_evidence,
-            &prepared_downstream.evidence,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            index
-                .apply_logical_v2(
-                    u64::try_from(sequence + 1).expect("测试证据序号适合 u64"),
-                    Sha256Hex(format!("{:064x}", sequence + 1)),
-                    evidence,
-                )
-                .expect("V2 产物索引必须接受单次输出事实与批量下游水位");
-        }
-        let indexed_prepared = index
-            .prepared_outputs
-            .get(&session_id)
-            .expect("V2 产物索引必须保留两项完整输出");
-        let indexed_confirmed = index
-            .confirmed_outputs
-            .get(&session_id)
-            .expect("V2 本地提交事实必须同时形成确认索引");
-        let indexed_downstream = index
-            .downstream_durable
-            .get(&session_id)
-            .expect("V2 批量下游事实必须覆盖完整前缀");
-        assert_eq!(indexed_prepared.len(), 2);
-        assert_eq!(indexed_confirmed.len(), 2);
-        assert_eq!(indexed_downstream.len(), 2);
-        assert_eq!(indexed_prepared[&1].1, indexed_confirmed[&1].1);
-        assert_eq!(indexed_prepared[&2].1, indexed_confirmed[&2].1);
-        assert_eq!(indexed_downstream[&1].1, indexed_downstream[&2].1);
-
-        let mut missing_middle = prepared_second_private.candidate_state.clone();
-        missing_middle.confirmed_private_deliveries.remove(&1);
-        assert!(matches!(
-            prepare_downstream_durability_transition_v2(
-                missing_middle,
-                None,
-                downstream_proof.clone(),
-            ),
-            Err(SessionError::ResponseDeliveryIdentityConflict)
-        ));
-        let mut wrong_target = downstream_proof.clone();
-        wrong_target
-            .durable_through
-            .delivery_id
-            .push_str("-tampered");
-        assert!(matches!(
-            prepare_downstream_durability_transition_v2(
-                prepared_second_private.candidate_state,
-                None,
-                wrong_target,
-            ),
-            Err(SimExecutionContractErrorV1::ResponseDeliveryIdentityConflict)
-        ));
-
-        let coordinator_checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
-            &process,
-            &session,
-            rules.as_ref(),
-        );
-        let coordinator_root = directory.path().join("paper-downstream-coordinator");
-        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
-            coordinator_root.clone(),
-            &session,
-            &coordinator_checkpoint,
-        )
-        .expect("为两项真实输出创建 RecoverablePaper V2 协调器");
-        let before_coordinator_state = session.durable_checkpoint();
-        let before_coordinator_cursor = coordinator.cursor_for_tests();
-        let before_bridge_watermark = session.bridge_replayed_through_private_feedback_sequence;
         reset_request_registration_preparation_counts_v2();
-        coordinator
-            .store
-            .install_transaction_log_insert_failure_for_tests()
-            .expect("安装下游耐久事务记录失败触发器");
+        reset_full_checkpoint_serialization_counts_v1();
+        session
+            .order(OrderRequestV1 {
+                context: context(&session, "task412-red-hot-request-query", 1, 2_000),
+                platform_order_id: "f".repeat(64),
+            })
+            .expect("登记任务 4.1 红灯查询");
 
-        assert!(matches!(
-            coordinator.advance_downstream_durability(&mut session, downstream_proof.clone()),
-            Err(SessionError::Durability(message)) if message.contains("SQLite")
-        ));
-        assert_eq!(session.durable_checkpoint(), before_coordinator_state);
-        assert_eq!(
-            session.bridge_replayed_through_private_feedback_sequence,
-            before_bridge_watermark
-        );
-        assert_eq!(coordinator.cursor_for_tests(), before_coordinator_cursor);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(coordinator.encoded_transaction_count_for_tests, 1);
-        assert_eq!(coordinator.append_attempt_count_for_tests, 1);
-        assert_eq!(coordinator.append_success_count_for_tests, 0);
-        assert!(coordinator
-            .store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("读取失败后的下游耐久日志")
-            .tail
-            .is_empty());
-
-        coordinator
-            .store
-            .remove_transaction_log_insert_failure_for_tests()
-            .expect("移除下游耐久事务记录失败触发器");
-        coordinator
-            .advance_downstream_durability(&mut session, downstream_proof.clone())
-            .expect("解除失败后一次推进 0 到 2");
-        let after_coordinator_state = session.durable_checkpoint();
-        assert_eq!(
-            after_coordinator_state,
-            prepared_downstream
-                .candidate_state
-                .checkpoint(Some(downstream_proof.durable_through.clone()))
-        );
-        assert_eq!(
-            session.bridge_replayed_through_private_feedback_sequence,
-            downstream_proof.durable_through.private_feedback_sequence
-        );
-        assert_eq!(session.compacted_confirmed_private_deliveries.len(), 2);
-        assert!(session.confirmed_private_deliveries.is_empty());
-        assert_eq!(
-            session.downstream_durable_confirmation.as_ref(),
-            Some(&downstream_proof.durable_through)
-        );
-        assert_eq!(coordinator.last_sequence, 1);
-        assert_eq!(coordinator.encoded_transaction_count_for_tests, 2);
-        assert_eq!(coordinator.append_attempt_count_for_tests, 2);
-        assert_eq!(coordinator.append_success_count_for_tests, 1);
-        assert_eq!(
-            coordinator
-                .store
-                .recover::<
-                    DurableLogicalTransactionEvidenceV2,
-                    DurableRecoveryOperationV2,
-                    RecoverablePaperApplicationCheckpointV2,
-                >()
-                .expect("读取成功后的下游耐久日志")
-                .tail
-                .len(),
-            1
-        );
-
-        let before_retry_state = session.durable_checkpoint();
-        let before_retry_cursor = coordinator.cursor_for_tests();
-        let before_retry_bridge = session.bridge_replayed_through_private_feedback_sequence;
-        let before_retry_counts = (
-            coordinator.encoded_transaction_count_for_tests,
-            coordinator.append_attempt_count_for_tests,
-            coordinator.append_success_count_for_tests,
-        );
-        coordinator
-            .advance_downstream_durability(&mut session, downstream_proof.clone())
-            .expect("相同下游耐久证明必须是零写重试");
-        assert_eq!(session.durable_checkpoint(), before_retry_state);
-        assert_eq!(
-            session.bridge_replayed_through_private_feedback_sequence,
-            before_retry_bridge
-        );
-        assert_eq!(coordinator.cursor_for_tests(), before_retry_cursor);
+        let request = request_registration_preparation_counts_v2();
+        let checkpoint = full_checkpoint_serialization_counts_v1();
         assert_eq!(
             (
-                coordinator.encoded_transaction_count_for_tests,
-                coordinator.append_attempt_count_for_tests,
-                coordinator.append_success_count_for_tests,
+                request.canonical_request_sha256_calls,
+                request.mutation_binding_calls,
+                checkpoint.session_checkpoint_calls,
+                checkpoint.run_checkpoint_calls,
             ),
-            before_retry_counts
-        );
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
+            (0, 0, 0, 0),
+            "普通业务输入不得生成逐对象摘要或序列化完整会话/运行检查点"
         );
     }
 
@@ -36941,2582 +31897,37 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn paper_v2_scheduled_gtd_no_action_tail_replays_revision_and_release() {
-        use crate::task22_tests::{
-            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
-            scenario as long_scenario, session_spec as long_session_spec,
-        };
-
+    async fn task422_closed_bucket_is_decoded_once_after_obsolete_path_removal() {
         let rules = successful_snapshot_for_sim_tests().await;
-        let profile = load_embedded_proxy_latency_profile().expect("加载 Paper V2 时延配置");
-        let scenario = long_scenario();
+        let profile = load_embedded_proxy_latency_profile().expect("加载任务 4.1 闭桶红灯时延配置");
+        let scenario = scenario_for_sim_tests();
         let mut process = execution_process_for_tests(
             Arc::clone(&rules),
             Arc::clone(&profile),
             Arc::clone(&scenario),
         );
-        let spec = long_session_spec(&scenario, SimCallerRoleV1::Paper, "paper-v2-gtd-no-action");
+        let mut spec = session_spec();
+        spec.caller_role = SimCallerRoleV1::Paper;
         let mut session =
             process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
-        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
-        let registration = session
-            .post_order(PostOrderRequestV1 {
-                context: context_for_arrival(
-                    &session,
-                    &profile,
-                    "paper-v2-gtd-no-action-request",
-                    1,
-                    150_000,
-                ),
-                idempotency_key: "paper-v2-gtd-no-action-idempotency".to_owned(),
-                item: PostOrderItemV1 {
-                    item_id: "paper-v2-gtd-no-action-item".to_owned(),
-                    order: SimBuyOrderV1 {
-                        condition_id: long_market().condition_id,
-                        token_id: long_asset("1", 0, "Up").token_id,
-                        kind: SimBuyOrderKindV1::GtdLimit {
-                            limit_price_pusd_per_share: Decimal::new(1, 5),
-                            size_shares: Decimal::new(5, 0),
-                            post_only: true,
-                            expires_at_utc_ms: 391_999,
-                        },
-                    },
-                },
-            })
-            .expect("登记 Paper GTD 请求");
-        let effective_at = registration.item.effective_processing_at_utc_ms;
-        session
-            .session
-            .advance_public_visibility_through(effective_at, next_visibility_position)
-            .expect("闭合 GTD 接纳时点的公开前缀");
-
-        let directory = tempfile::tempdir().expect("创建 Paper V2 GTD 协调器目录");
-        let action_due_checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
-            &process,
-            &session,
-            rules.as_ref(),
-        );
-        let mut action_due_coordinator = RecoverablePaperCoordinatorV2::create_new(
-            directory.path().join("paper-gtd-action-due"),
-            &session,
-            &action_due_checkpoint,
-        )
-        .expect("创建 Paper V2 GTD ActionDue 协调器");
-        let action_due_state = session.durable_checkpoint();
-        let action_due_cursor = action_due_coordinator.cursor_for_tests();
-        reset_request_registration_preparation_counts_v2();
-        reset_execution_state_clone_count_for_tests();
-        assert_eq!(
-            action_due_coordinator.drive_scheduled_execution_through(&mut session, effective_at),
-            Ok(ScheduledExecutionDriveDispositionV2::ActionDue)
-        );
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(session.durable_checkpoint(), action_due_state);
-        assert_eq!(action_due_coordinator.cursor_for_tests(), action_due_cursor);
-        assert_eq!(
-            (
-                action_due_coordinator.encoded_transaction_count_for_tests,
-                action_due_coordinator.append_attempt_count_for_tests,
-                action_due_coordinator.append_success_count_for_tests,
-            ),
-            (0, 0, 0)
-        );
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert!(
-            action_due_coordinator
-                .store
-                .recover::<
-                    DurableLogicalTransactionEvidenceV2,
-                    DurableRecoveryOperationV2,
-                    RecoverablePaperApplicationCheckpointV2,
-                >()
-                .expect("读取 ActionDue 后日志")
-                .tail
-                .is_empty()
-        );
-        drop(action_due_coordinator);
-
-        assert_eq!(
-            session.drive_next_execution_action_through(effective_at),
-            Ok(SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: true,
-            })
-        );
-        let gtd_deadline = session
-            .next_order_deadline_at_utc_ms()
-            .expect("GTD 必须形成到期任务");
-        session
-            .session
-            .advance_public_visibility_through(gtd_deadline, next_visibility_position)
-            .expect("闭合 GTD 到期时点的公开前缀");
-        let session_id = session.session_spec().session_id.clone();
-        let baseline_checkpoint = session.durable_checkpoint();
-        let baseline_session_checkpoint = session.session.checkpoint();
-        let baseline_query_state = session.query_state.clone();
-        let baseline_lifecycle_outbox = session.lifecycle_outbox.clone();
-        let baseline_bridge = session.bridge_replayed_through_private_feedback_sequence;
-        let before_revision = session.query_projection_revision();
-        let coordinator_checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
-            &process,
-            &session,
-            rules.as_ref(),
-        );
-        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
-            directory.path().join("paper-gtd-scheduled-only"),
-            &session,
-            &coordinator_checkpoint,
-        )
-        .expect("创建 Paper V2 GTD scheduled-only 协调器");
-        let baseline_cursor = coordinator.cursor_for_tests();
-        coordinator
-            .store
-            .install_transaction_log_insert_failure_for_tests()
-            .expect("安装 GTD scheduled-only SQLite INSERT 失败触发器");
-        reset_request_registration_preparation_counts_v2();
-        reset_execution_state_clone_count_for_tests();
-        assert!(matches!(
-            coordinator.drive_scheduled_execution_through(&mut session, gtd_deadline),
-            Err(MarketEventErrorV1::Session(SessionError::Durability(message)))
-                if message.contains("SQLite")
-        ));
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(session.durable_checkpoint(), baseline_checkpoint);
-        assert_eq!(session.session.checkpoint(), baseline_session_checkpoint);
-        assert_eq!(session.query_state, baseline_query_state);
-        assert_eq!(session.lifecycle_outbox, baseline_lifecycle_outbox);
-        assert_eq!(session.query_projection_revision(), before_revision);
-        assert_eq!(session.next_order_deadline_at_utc_ms(), Some(gtd_deadline));
-        assert_eq!(
-            session.bridge_replayed_through_private_feedback_sequence,
-            baseline_bridge
-        );
-        assert_eq!(coordinator.cursor_for_tests(), baseline_cursor);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(
-            (
-                coordinator.encoded_transaction_count_for_tests,
-                coordinator.append_attempt_count_for_tests,
-                coordinator.append_success_count_for_tests,
-            ),
-            (1, 1, 0)
-        );
-        assert!(
-            coordinator
-                .store
-                .recover::<
-                    DurableLogicalTransactionEvidenceV2,
-                    DurableRecoveryOperationV2,
-                    RecoverablePaperApplicationCheckpointV2,
-                >()
-                .expect("读取 GTD INSERT 失败后的日志")
-                .tail
-                .is_empty()
+        let bucket = ClosedMarketEventBucketV1::public(
+            1_000,
+            0,
+            0,
+            MillisecondBucketClosureV1::NextEventAt(1_001),
+            Vec::new(),
         );
 
-        coordinator
-            .store
-            .remove_transaction_log_insert_failure_for_tests()
-            .expect("移除 GTD scheduled-only SQLite INSERT 失败触发器");
-        reset_execution_state_clone_count_for_tests();
+        reset_closed_bucket_decode_count_for_tests();
         assert_eq!(
-            coordinator.drive_scheduled_execution_through(&mut session, gtd_deadline),
-            Ok(ScheduledExecutionDriveDispositionV2::Advanced)
-        );
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        let online_checkpoint = session.durable_checkpoint();
-        assert_eq!(session.next_order_deadline_at_utc_ms(), None);
-        assert_eq!(session.query_projection_revision(), before_revision + 1);
-        assert_eq!(
-            (
-                coordinator.encoded_transaction_count_for_tests,
-                coordinator.append_attempt_count_for_tests,
-                coordinator.append_success_count_for_tests,
-            ),
-            (2, 2, 1)
-        );
-
-        let recovered = coordinator
-            .store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("恢复 coordinator Paper V2 GTD 日志");
-        assert_eq!(recovered.tail.len(), 1);
-        let tail = recovered.tail[0].clone();
-        assert_eq!(
-            tail.recovery_operation,
-            DurableRecoveryOperationV2::DriveExecutionThrough {
-                effective_processing_at_utc_ms: gtd_deadline,
-            }
-        );
-        assert!(matches!(
-            &tail.evidence.fact,
-            DurableTransactionFactV1::ExecutionAdvanced { session_id: actual }
-                if actual == &session_id
-        ));
-        assert!(tail.evidence.logical_action_results.is_empty());
-        assert_eq!(tail.evidence.private_output_drafts.len(), 1);
-        let DurablePrivateOutputDraftV1::Lifecycle {
-            draft: LifecycleFeedbackDraftV1::Order(gtd_draft),
-        } = &tail.evidence.private_output_drafts[0]
-        else {
-            panic!("GTD scheduled-only 尾日志必须包含订单生命周期草稿");
-        };
-        assert_eq!(gtd_draft.event_kind, OrderLifecycleEventKindV1::GtdExpired);
-        assert_eq!(
-            gtd_draft.account_delta.reason,
-            contracts::PlatformAccountDeltaReasonV1::GtdExpirationEncumbranceReleased
-        );
-        assert_eq!(tail.evidence.account_deltas.len(), 1);
-        assert_eq!(tail.evidence.account_deltas[0], *gtd_draft.account_delta);
-        assert_eq!(
-            tail.evidence.query_projection_revision,
-            Some(before_revision + 1)
+            session.apply_closed_market_event_bucket(bucket),
+            Ok(MarketBucketApplyDispositionV1::Applied)
         );
         assert_eq!(
-            tail.evidence.logical_platform_driven_through_utc_ms,
-            Some(gtd_deadline)
-        );
-        assert_eq!(
-            tail.evidence.private_fact_schedule_closed_through_utc_ms,
-            None
-        );
-
-        let replay_error_live_checkpoint = session.durable_checkpoint();
-        let replay_error_cursor = coordinator.cursor_for_tests();
-        let restore_application_session =
-            |mut checkpoint: RecoverablePaperApplicationCheckpointV2| {
-                checkpoint
-                    .validate()
-                    .expect("scheduled replay 反例应用检查点必须有效");
-                let session_checkpoint = checkpoint
-                    .run_checkpoint
-                    .sessions
-                    .remove(&session_id)
-                    .expect("scheduled replay 反例检查点必须包含目标会话");
-                let evicted = checkpoint
-                    .evicted_markets
-                    .remove(&session_id)
-                    .unwrap_or_default();
-                let (state, downstream) =
-                    ExecutionSessionStateV1::restore(&process.inner, session_checkpoint, &evicted)
-                        .expect("恢复 scheduled replay 反例基线");
-                assert_eq!(downstream, None);
-                state
-            };
-
-        let action_due_replay_state = restore_application_session(action_due_checkpoint.clone());
-        reset_execution_state_clone_count_for_tests();
-        let action_due_replay_error = match replay_execution_operation_v2(
-            action_due_replay_state,
-            &tail.evidence,
-            DurableRecoveryOperationV2::DriveExecutionThrough {
-                effective_processing_at_utc_ms: effective_at,
-            },
-        ) {
-            Ok(_) => panic!("scheduled replay ActionDue 不得形成候选状态"),
-            Err(error) => error,
-        };
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert!(
-            matches!(
-                &action_due_replay_error,
-                SessionCheckpointErrorV1::InvalidSessionState(message)
-                    if message.contains("遇到待处理动作")
-            ),
-            "unexpected ActionDue replay error: {action_due_replay_error:?}"
-        );
-        assert_eq!(session.durable_checkpoint(), replay_error_live_checkpoint);
-        assert_eq!(coordinator.cursor_for_tests(), replay_error_cursor);
-
-        let (duplicate_replay_state, duplicate_replay_downstream) =
-            ExecutionSessionStateV1::restore(
-                &process.inner,
-                online_checkpoint.clone(),
-                &BTreeMap::new(),
-            )
-            .expect("恢复已经应用 GTD 尾日志的状态");
-        assert_eq!(duplicate_replay_downstream, None);
-        reset_execution_state_clone_count_for_tests();
-        let duplicate_replay_error = match replay_execution_operation_v2(
-            duplicate_replay_state,
-            &tail.evidence,
-            tail.recovery_operation,
-        ) {
-            Ok(_) => panic!("scheduled replay 相同尾日志不得重复应用"),
-            Err(error) => error,
-        };
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert!(matches!(
-            duplicate_replay_error,
-            SessionCheckpointErrorV1::InvalidSessionState(message)
-                if message.contains("重复应用")
-        ));
-        assert_eq!(session.durable_checkpoint(), replay_error_live_checkpoint);
-        assert_eq!(coordinator.cursor_for_tests(), replay_error_cursor);
-
-        let replay_baseline_checkpoint = recovered
-            .checkpoint
-            .as_ref()
-            .expect("GTD 日志必须保留应用检查点")
-            .checkpoint
-            .clone();
-        let tampered_replay_state = restore_application_session(replay_baseline_checkpoint);
-        let mut tampered_evidence = tail.evidence.clone();
-        tampered_evidence.query_projection_revision = tail
-            .evidence
-            .query_projection_revision
-            .map(|revision| revision.checked_add(1).expect("篡改查询修订号不得溢出"));
-        assert_ne!(tampered_evidence, tail.evidence);
-        reset_execution_state_clone_count_for_tests();
-        let tampered_replay_error = match replay_execution_operation_v2(
-            tampered_replay_state,
-            &tampered_evidence,
-            tail.recovery_operation,
-        ) {
-            Ok(_) => panic!("scheduled replay 篡改证据不得形成候选状态"),
-            Err(error) => error,
-        };
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert!(matches!(
-            tampered_replay_error,
-            SessionCheckpointErrorV1::InvalidSessionState(message)
-                if message.contains("与重算候选不一致")
-        ));
-        assert_eq!(session.durable_checkpoint(), replay_error_live_checkpoint);
-        assert_eq!(coordinator.cursor_for_tests(), replay_error_cursor);
-
-        let before_retry_state = session.durable_checkpoint();
-        let before_retry_cursor = coordinator.cursor_for_tests();
-        let before_retry_counts = (
-            coordinator.encoded_transaction_count_for_tests,
-            coordinator.append_attempt_count_for_tests,
-            coordinator.append_success_count_for_tests,
-        );
-        reset_request_registration_preparation_counts_v2();
-        reset_execution_state_clone_count_for_tests();
-        assert_eq!(
-            coordinator.drive_scheduled_execution_through(&mut session, gtd_deadline),
-            Ok(ScheduledExecutionDriveDispositionV2::NoStateChange)
-        );
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(session.durable_checkpoint(), before_retry_state);
-        assert_eq!(coordinator.cursor_for_tests(), before_retry_cursor);
-        assert_eq!(
-            (
-                coordinator.encoded_transaction_count_for_tests,
-                coordinator.append_attempt_count_for_tests,
-                coordinator.append_success_count_for_tests,
-            ),
-            before_retry_counts
-        );
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(
-            coordinator
-                .store
-                .recover::<
-                    DurableLogicalTransactionEvidenceV2,
-                    DurableRecoveryOperationV2,
-                    RecoverablePaperApplicationCheckpointV2,
-                >()
-                .expect("读取 GTD 同 cutoff 重试后的日志")
-                .tail
-                .len(),
-            1
-        );
-
-        let mut recovered_checkpoint = recovered
-            .checkpoint
-            .expect("GTD 恢复必须有正式应用检查点")
-            .checkpoint;
-        recovered_checkpoint
-            .validate()
-            .expect("GTD 正式应用检查点必须有效");
-        let session_checkpoint = recovered_checkpoint
-            .run_checkpoint
-            .sessions
-            .remove(&session_id)
-            .expect("GTD 正式应用检查点必须包含目标会话");
-        let evicted = recovered_checkpoint
-            .evicted_markets
-            .remove(&session_id)
-            .unwrap_or_default();
-        let (restored_baseline, downstream) =
-            ExecutionSessionStateV1::restore(&process.inner, session_checkpoint, &evicted)
-                .expect("恢复 Paper V2 GTD 基线");
-        assert_eq!(downstream, None);
-        reset_execution_state_clone_count_for_tests();
-        let replayed = replay_execution_operation_v2(
-            restored_baseline,
-            &tail.evidence,
-            tail.recovery_operation,
-        )
-        .expect("重放 Paper V2 GTD 到期尾日志");
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(replayed.checkpoint(None), online_checkpoint);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn recoverable_paper_v2_empty_taker_maturity_still_logs_execution_state_change() {
-        use crate::task22_tests::{
-            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
-            scenario as long_scenario, session_spec as long_session_spec,
-        };
-
-        let rules = successful_snapshot_for_sim_tests().await;
-        let profile = load_embedded_proxy_latency_profile().expect("加载返佣成熟测试时延配置");
-        let scenario = long_scenario();
-        let policy = policy_for_tests(
-            "paper-v2-empty-taker-maturity-policy",
-            &[
-                (TradeFinalityStateV1::Matched, 0),
-                (TradeFinalityStateV1::Mined, 10),
-                (TradeFinalityStateV1::Confirmed, 90_000_000),
-            ],
+            closed_bucket_decode_count_for_tests(),
             1,
-            Vec::new(),
+            "同一个已受理闭桶不得先为耐久引用解码、随后又为业务应用解码"
         );
-        let mut process = SimExecutionProcessV1::try_new(
-            "component-test-run".to_owned(),
-            policy,
-            Arc::clone(&rules),
-            Arc::clone(&profile),
-            Arc::clone(&scenario),
-        )
-        .expect("创建延迟终态 Paper 进程");
-        let mut spec = long_session_spec(
-            &scenario,
-            SimCallerRoleV1::Paper,
-            "paper-v2-empty-taker-maturity",
-        );
-        spec.response_outbox_capacity =
-            std::num::NonZeroUsize::new(16).expect("返佣成熟夹具容量为正");
-        let mut session =
-            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
-        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
-        let registration = session
-            .post_order(PostOrderRequestV1 {
-                context: context_for_arrival(
-                    &session,
-                    &profile,
-                    "paper-v2-empty-taker-maturity-request",
-                    1,
-                    150_000,
-                ),
-                idempotency_key: "paper-v2-empty-taker-maturity-idempotency".to_owned(),
-                item: PostOrderItemV1 {
-                    item_id: "paper-v2-empty-taker-maturity-item".to_owned(),
-                    order: SimBuyOrderV1 {
-                        condition_id: long_market().condition_id,
-                        token_id: long_asset("1", 0, "Up").token_id,
-                        kind: SimBuyOrderKindV1::FakMarket {
-                            spend_pusd: Decimal::new(3, 0),
-                            worst_price_pusd_per_share: Decimal::new(6, 1),
-                        },
-                    },
-                },
-            })
-            .expect("登记正手续费 taker FAK");
-        let matched_at_utc_ms = registration.item.effective_processing_at_utc_ms;
-        session
-            .session
-            .advance_public_visibility_through(matched_at_utc_ms, next_visibility_position)
-            .expect("闭合 taker 成交时点公开前缀");
-        assert_eq!(
-            session.drive_next_execution_action_through(matched_at_utc_ms),
-            Ok(SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: true,
-            })
-        );
-        let fill = session
-            .session
-            .execution_state()
-            .fills()
-            .next()
-            .expect("正式 FAK 必须形成成交");
-        assert_eq!(fill.liquidity_role, SimLiquidityRoleV1::Taker);
-        assert!(fill.immediate_taker_fee_units > 0);
-
-        let market_end_at_utc_ms = long_market().window.end_at_utc_ms;
-        session
-            .session
-            .advance_public_visibility_through(market_end_at_utc_ms, next_visibility_position)
-            .expect("闭合市场结束与 Mined 时点公开前缀");
-        assert_eq!(
-            session.drive_next_execution_action_through(market_end_at_utc_ms),
-            Ok(SubmissionDriveDispositionV1::NoAction)
-        );
-        let maturity_at_utc_ms = session
-            .next_rebate_clock_at_utc_ms_for_tests()
-            .expect("正手续费 taker 必须形成成熟时钟");
-        assert!(maturity_at_utc_ms > market_end_at_utc_ms);
-        assert!(
-            session
-                .session
-                .execution_state()
-                .next_scheduled_finality_at_utc_ms()
-                .is_some_and(|terminal_at| terminal_at > maturity_at_utc_ms)
-        );
-
-        session
-            .session
-            .advance_public_visibility_through(maturity_at_utc_ms, next_visibility_position)
-            .expect("闭合返佣成熟时点公开前缀");
-        session
-            .session
-            .prepare_execution_action_slice_v2(maturity_at_utc_ms, false)
-            .expect("正式准备无动作逻辑水位切片")
-            .into_committable()
-            .expect("无动作逻辑水位切片必须可提交")
-            .commit();
-        let before_gtd_only_clock = session.next_rebate_clock_at_utc_ms_for_tests();
-        let before_gtd_only_execution = serde_json::to_value(session.session.execution_state())
-            .expect("序列化 GTD-only 空推进前执行正文");
-        let mut gtd_only = session.session.execution_state().clone();
-        let gtd_only_effects = gtd_only
-            .advance_gtd_deadlines_through(maturity_at_utc_ms)
-            .expect("正式 GTD-only 兼容入口必须推进至相同成熟 cutoff");
-        assert!(gtd_only_effects.is_empty());
-        session.session.replace_execution_state(gtd_only);
-        let after_gtd_only_execution = serde_json::to_value(session.session.execution_state())
-            .expect("序列化 GTD-only 空推进后执行正文");
-        for field in ["account", "orders", "fills", "rebate"] {
-            assert_eq!(
-                after_gtd_only_execution.get(field),
-                before_gtd_only_execution.get(field),
-                "GTD-only 空推进不得改变 {field} 正文"
-            );
-        }
-        assert_eq!(
-            session.next_rebate_clock_at_utc_ms_for_tests(),
-            before_gtd_only_clock
-        );
-        assert_eq!(before_gtd_only_clock, Some(maturity_at_utc_ms));
-        assert_eq!(
-            session.logical_platform_driven_through_for_tests(),
-            Some(maturity_at_utc_ms)
-        );
-        reset_execution_state_clone_count_for_tests();
-        {
-            let prepared = session
-                .session
-                .prepare_scheduled_session_drive_v2(maturity_at_utc_ms, false)
-                .expect("准备零输出返佣成熟候选");
-            assert!(prepared.current_action().is_none());
-            assert!(prepared.execution_candidate().has_state_change());
-            assert!(
-                prepared
-                    .execution_candidate()
-                    .rebate_clock_effects()
-                    .is_empty()
-            );
-        }
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-
-        let before_account = session.session.execution_state().account().clone();
-        let before_query_revision = session.query_projection_revision();
-        let before_lifecycle_outbox = session.lifecycle_outbox.clone();
-        let before_logical_watermark = session.logical_platform_driven_through_for_tests();
-        let checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
-            &process,
-            &session,
-            rules.as_ref(),
-        );
-        let mut restore_probe = checkpoint.clone();
-        restore_probe
-            .validate()
-            .expect("零输出返佣成熟正式应用检查点必须有效");
-        let session_id = session.session_spec().session_id.clone();
-        let restore_probe_session = restore_probe
-            .run_checkpoint
-            .sessions
-            .remove(&session_id)
-            .expect("零输出返佣成熟恢复探针必须包含目标会话");
-        let restore_probe_evicted = restore_probe
-            .evicted_markets
-            .remove(&session_id)
-            .unwrap_or_default();
-        let (restored_probe, restored_probe_downstream) = ExecutionSessionStateV1::restore(
-            &process.inner,
-            restore_probe_session,
-            &restore_probe_evicted,
-        )
-        .expect("尾日志应用前正式恢复零输出返佣成熟检查点");
-        assert_eq!(restored_probe_downstream, None);
-        assert_eq!(
-            restored_probe.checkpoint(None),
-            session.durable_checkpoint()
-        );
-        drop(restored_probe);
-        let directory = tempfile::tempdir().expect("创建零输出返佣成熟日志目录");
-        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
-            directory.path().join("paper-empty-taker-maturity"),
-            &session,
-            &checkpoint,
-        )
-        .expect("创建零输出返佣成熟协调器");
-        drop(checkpoint);
-        reset_request_registration_preparation_counts_v2();
-        reset_execution_state_clone_count_for_tests();
-
-        assert_eq!(
-            coordinator.drive_scheduled_execution_through(&mut session, maturity_at_utc_ms),
-            Ok(ScheduledExecutionDriveDispositionV2::Advanced)
-        );
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(session.session.execution_state().account(), &before_account);
-        assert_eq!(session.query_projection_revision(), before_query_revision);
-        assert_eq!(session.lifecycle_outbox, before_lifecycle_outbox);
-        assert_eq!(
-            session.logical_platform_driven_through_for_tests(),
-            before_logical_watermark
-        );
-        assert_ne!(
-            session.next_rebate_clock_at_utc_ms_for_tests(),
-            Some(maturity_at_utc_ms)
-        );
-        let online_checkpoint = session.durable_checkpoint();
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(
-            (
-                coordinator.encoded_transaction_count_for_tests,
-                coordinator.append_attempt_count_for_tests,
-                coordinator.append_success_count_for_tests,
-            ),
-            (1, 1, 1)
-        );
-        let recovered = coordinator
-            .store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("读取零输出返佣成熟日志");
-        assert!(recovered.checkpoint.is_some());
-        assert_eq!(recovered.tail.len(), 1);
-        let evidence = &recovered.tail[0].evidence;
-        assert!(matches!(
-            evidence.fact,
-            DurableTransactionFactV1::ExecutionAdvanced { .. }
-        ));
-        assert!(evidence.account_deltas.is_empty());
-        assert!(evidence.logical_action_results.is_empty());
-        assert!(evidence.private_output_drafts.is_empty());
-        assert_eq!(evidence.query_projection_revision, None);
-        assert_eq!(evidence.logical_platform_driven_through_utc_ms, None);
-        assert_eq!(evidence.private_fact_schedule_closed_through_utc_ms, None);
-
-        let before_retry_state = session.durable_checkpoint();
-        let before_retry_cursor = coordinator.cursor_for_tests();
-        let before_retry_counts = (
-            coordinator.encoded_transaction_count_for_tests,
-            coordinator.append_attempt_count_for_tests,
-            coordinator.append_success_count_for_tests,
-        );
-        reset_request_registration_preparation_counts_v2();
-        reset_execution_state_clone_count_for_tests();
-        assert_eq!(
-            coordinator.drive_scheduled_execution_through(&mut session, maturity_at_utc_ms),
-            Ok(ScheduledExecutionDriveDispositionV2::NoStateChange)
-        );
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(session.durable_checkpoint(), before_retry_state);
-        assert_eq!(coordinator.cursor_for_tests(), before_retry_cursor);
-        assert_eq!(
-            (
-                coordinator.encoded_transaction_count_for_tests,
-                coordinator.append_attempt_count_for_tests,
-                coordinator.append_success_count_for_tests,
-            ),
-            before_retry_counts
-        );
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(
-            coordinator
-                .store
-                .recover::<
-                    DurableLogicalTransactionEvidenceV2,
-                    DurableRecoveryOperationV2,
-                    RecoverablePaperApplicationCheckpointV2,
-                >()
-                .expect("读取零输出返佣成熟同 cutoff 重试日志")
-                .tail
-                .len(),
-            1
-        );
-
-        let tail_evidence = recovered.tail[0].evidence.clone();
-        let tail_operation = recovered.tail[0].recovery_operation;
-        let mut recovered_checkpoint = recovered
-            .checkpoint
-            .expect("零输出返佣成熟必须有正式应用检查点")
-            .checkpoint;
-        recovered_checkpoint
-            .validate()
-            .expect("零输出返佣成熟正式应用检查点必须有效");
-        let session_checkpoint = recovered_checkpoint
-            .run_checkpoint
-            .sessions
-            .remove(&session_id)
-            .expect("零输出返佣成熟应用检查点包含目标会话");
-        let evicted = recovered_checkpoint
-            .evicted_markets
-            .remove(&session_id)
-            .unwrap_or_default();
-        let (restored_baseline, downstream) =
-            ExecutionSessionStateV1::restore(&process.inner, session_checkpoint, &evicted)
-                .expect("恢复零输出返佣成熟基线");
-        assert_eq!(downstream, None);
-        reset_request_registration_preparation_counts_v2();
-        reset_execution_state_clone_count_for_tests();
-        let replayed =
-            replay_execution_operation_v2(restored_baseline, &tail_evidence, tail_operation)
-                .expect("用共享 sparse core 重放零输出返佣成熟尾日志");
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(replayed.checkpoint(None), online_checkpoint);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn recoverable_paper_v2_scheduled_terminal_auto_redeem_is_one_atomic_log_and_replays() {
-        use crate::task21_tests::fresh_quality;
-        use crate::task22_tests::{
-            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
-            orderbook_evidence, scenario as long_scenario, sealed_event,
-            session_spec as long_session_spec,
-        };
-        use data_pipeline_core::encode_execution_market_event_v3;
-
-        let rules = successful_snapshot_for_sim_tests().await;
-        let profile = load_embedded_proxy_latency_profile().expect("加载 AutoRedeem 测试时延配置");
-        let scenario = long_scenario();
-        let policy = policy_for_tests(
-            "paper-v2-scheduled-auto-redeem-policy",
-            &[
-                (TradeFinalityStateV1::Matched, 0),
-                (TradeFinalityStateV1::Mined, 10),
-                (TradeFinalityStateV1::Confirmed, 400_000),
-            ],
-            2,
-            Vec::new(),
-        );
-        let mut process = SimExecutionProcessV1::try_new(
-            "component-test-run".to_owned(),
-            policy,
-            Arc::clone(&rules),
-            Arc::clone(&profile),
-            Arc::clone(&scenario),
-        )
-        .expect("创建 AutoRedeem Paper 进程");
-        let mut spec = long_session_spec(
-            &scenario,
-            SimCallerRoleV1::Paper,
-            "paper-v2-scheduled-auto-redeem",
-        );
-        spec.response_outbox_capacity =
-            std::num::NonZeroUsize::new(16).expect("AutoRedeem 测试容量为正");
-        let mut session =
-            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
-        assert!(session.session.hidden_platform_markets().is_none());
-        let initial_next_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
-        let registration = session
-            .post_order(PostOrderRequestV1 {
-                context: context_for_arrival(
-                    &session,
-                    &profile,
-                    "paper-v2-scheduled-auto-redeem-request",
-                    1,
-                    150_000,
-                ),
-                idempotency_key: "paper-v2-scheduled-auto-redeem-idempotency".to_owned(),
-                item: PostOrderItemV1 {
-                    item_id: "paper-v2-scheduled-auto-redeem-item".to_owned(),
-                    order: SimBuyOrderV1 {
-                        condition_id: long_market().condition_id.clone(),
-                        token_id: long_asset("1", 0, "Up").token_id,
-                        kind: SimBuyOrderKindV1::FakMarket {
-                            spend_pusd: Decimal::new(3, 0),
-                            worst_price_pusd_per_share: Decimal::new(6, 1),
-                        },
-                    },
-                },
-            })
-            .expect("登记 AutoRedeem 正手续费 taker FAK");
-        let matched_at_utc_ms = registration.item.effective_processing_at_utc_ms;
-        session
-            .session
-            .advance_public_visibility_through(matched_at_utc_ms, initial_next_position)
-            .expect("闭合 AutoRedeem 成交时点公开前缀");
-        assert_eq!(
-            session.drive_next_execution_action_through(matched_at_utc_ms),
-            Ok(SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: true,
-            })
-        );
-        let fill = session
-            .session
-            .execution_state()
-            .fills()
-            .next()
-            .expect("正式 FAK 必须形成唯一成交")
-            .clone();
-        assert_eq!(fill.liquidity_role, SimLiquidityRoleV1::Taker);
-        assert!(fill.immediate_taker_fee_units > 0);
-        let platform_order_id = fill.platform_order_id.clone();
-        let trade_id = fill.trade_id.clone();
-        let condition_id = fill.condition_id.clone();
-
-        let resolution_at_utc_ms = long_market()
-            .window
-            .end_at_utc_ms
-            .checked_add(1)
-            .expect("判定时点不得溢出");
-        let resolution = MarketResolutionTerminalV3::Resolved {
-            winning_asset_id: long_asset("1", 0, "Up").token_id.0,
-            winning_outcome: "Up".to_owned(),
-            payout_vector: vec![
-                contracts::PayoutEntryV1 {
-                    asset: long_asset("1", 0, "Up"),
-                    payout_pusd_per_share: contracts::ExactDecimal("1".to_owned()),
-                },
-                contracts::PayoutEntryV1 {
-                    asset: long_asset("2", 1, "Down"),
-                    payout_pusd_per_share: contracts::ExactDecimal("0".to_owned()),
-                },
-            ],
-            mapping_rule_version: "paper-v2-scheduled-auto-redeem-resolution-v1".to_owned(),
-        };
-        let resolution_event = sealed_event(
-            contracts::ExecutionMarketEventPayloadV3::MarketResolutionTerminal(resolution.clone()),
-            orderbook_evidence(resolution_at_utc_ms, resolution_at_utc_ms, 3),
-            fresh_quality(),
-        );
-        let encoded_resolution = encode_execution_market_event_v3(&resolution_event)
-            .expect("编码 AutoRedeem 正式判定事件");
-        assert_eq!(
-            session.apply_closed_market_event_bucket(ClosedMarketEventBucketV1::public(
-                resolution_at_utc_ms,
-                initial_next_position,
-                initial_next_position + 1,
-                MillisecondBucketClosureV1::NextEventAt(resolution_at_utc_ms + 1),
-                vec![encoded_resolution],
-            )),
-            Ok(MarketBucketApplyDispositionV1::Applied)
-        );
-        assert_eq!(
-            session
-                .simulated_fill(&platform_order_id)
-                .expect("判定后 pending 成交仍存在")
-                .finality_state(),
-            Some(TradeFinalityStateV1::Mined)
-        );
-        assert_eq!(
-            session
-                .platform_market_state(&condition_id)
-                .expect("判定后公开市场仍存在")
-                .lifecycle_phase(),
-            MarketLifecyclePhaseV1::PostEndPendingResolution
-        );
-        assert!(session.query_state.terminal_projections.orders.is_empty());
-        assert!(session.query_state.terminal_projections.trades.is_empty());
-
-        let terminal_at_utc_ms = session
-            .session
-            .execution_state()
-            .next_scheduled_finality_at_utc_ms()
-            .expect("Mined 成交必须保留 Confirmed 终态任务");
-        assert!(terminal_at_utc_ms > resolution_at_utc_ms);
-        let terminal_next_position = initial_next_position + 1;
-        session
-            .session
-            .advance_public_visibility_through(terminal_at_utc_ms, terminal_next_position)
-            .expect("闭合 AutoRedeem 终态公开前缀");
-
-        let candidate_drop_baseline = serde_json::to_vec(&session.durable_checkpoint())
-            .expect("序列化 AutoRedeem 候选 drop 基线");
-        {
-            let prepared = session
-                .session
-                .prepare_scheduled_session_drive_v2(terminal_at_utc_ms, false)
-                .expect("准备终态 AutoRedeem session token");
-            assert!(prepared.current_action().is_none());
-            assert_eq!(prepared.actual_cutoff_utc_ms(), terminal_at_utc_ms);
-            assert_eq!(prepared.first_due_at_utc_ms(), Some(terminal_at_utc_ms));
-            assert_eq!(
-                prepared.terminal_projection_condition_ids(),
-                &BTreeSet::from([condition_id.clone()])
-            );
-            let [terminal] = prepared.execution_candidate().scheduled_finality_effects() else {
-                panic!("唯一成交必须形成唯一终态生命周期")
-            };
-            assert_eq!(terminal.trade_feedback.trade_id, trade_id);
-            assert_eq!(
-                terminal.trade_feedback.finality_state,
-                TradeFinalityStateV1::Confirmed
-            );
-            assert!(matches!(
-                terminal.settlement_feedbacks.as_slice(),
-                [
-                    SettlementLifecycleEffectV1 {
-                        action: SettlementLifecycleActionV1::Rebate(
-                            RebateSettlementActionV1::TakerAccrualApplied(_)
-                        ),
-                        ..
-                    },
-                    SettlementLifecycleEffectV1 {
-                        action: SettlementLifecycleActionV1::AutoRedeem(_),
-                        ..
-                    }
-                ]
-            ));
-        }
-        assert_eq!(
-            serde_json::to_vec(&session.durable_checkpoint())
-                .expect("序列化 AutoRedeem 候选 drop 后状态"),
-            candidate_drop_baseline
-        );
-
-        let before_revision = session.query_projection_revision();
-        let before_pending = session.session.pending_terminal_projection_condition_ids();
-        let before_query_pointer = Arc::as_ptr(&session.query_state.terminal_projections);
-        let before_failure_bytes = serde_json::to_vec(&session.durable_checkpoint())
-            .expect("序列化 AutoRedeem SQLite 失败基线");
-        let application_checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
-            &process,
-            &session,
-            rules.as_ref(),
-        );
-        let mut restore_probe = application_checkpoint.clone();
-        restore_probe
-            .validate()
-            .expect("AutoRedeem terminal 前应用检查点必须有效");
-        let session_id = session.session_spec().session_id.clone();
-        let restore_probe_session = restore_probe
-            .run_checkpoint
-            .sessions
-            .remove(&session_id)
-            .expect("AutoRedeem 恢复探针必须包含目标会话");
-        let restore_probe_evicted = restore_probe
-            .evicted_markets
-            .remove(&session_id)
-            .unwrap_or_default();
-        let (restored_probe, restored_probe_downstream) = ExecutionSessionStateV1::restore(
-            &process.inner,
-            restore_probe_session,
-            &restore_probe_evicted,
-        )
-        .expect("正式恢复 AutoRedeem terminal 前应用检查点");
-        assert_eq!(restored_probe_downstream, None);
-        assert_eq!(
-            restored_probe.checkpoint(None),
-            session.durable_checkpoint()
-        );
-        drop(restored_probe);
-
-        let directory = tempfile::tempdir().expect("创建 AutoRedeem coordinator 日志目录");
-        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
-            directory.path().join("paper-v2-scheduled-auto-redeem"),
-            &session,
-            &application_checkpoint,
-        )
-        .expect("创建 AutoRedeem coordinator");
-        drop(application_checkpoint);
-        assert_eq!(
-            Arc::strong_count(&session.query_state.terminal_projections),
-            1
-        );
-        let before_failure_cursor = coordinator.cursor_for_tests();
-        coordinator
-            .store
-            .install_transaction_log_insert_failure_for_tests()
-            .expect("安装 AutoRedeem SQLite INSERT 失败触发器");
-        reset_request_registration_preparation_counts_v2();
-        reset_execution_state_clone_count_for_tests();
-        reset_terminal_query_projections_clone_count_for_tests();
-        assert!(matches!(
-            coordinator.drive_scheduled_execution_through(&mut session, terminal_at_utc_ms),
-            Err(MarketEventErrorV1::Session(SessionError::Durability(message)))
-                if message.contains("SQLite")
-        ));
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(terminal_query_projections_clone_count_for_tests(), 0);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(
-            serde_json::to_vec(&session.durable_checkpoint())
-                .expect("序列化 AutoRedeem SQLite 失败后状态"),
-            before_failure_bytes
-        );
-        assert_eq!(
-            session.session.pending_terminal_projection_condition_ids(),
-            before_pending
-        );
-        assert_eq!(
-            Arc::as_ptr(&session.query_state.terminal_projections),
-            before_query_pointer
-        );
-        assert_eq!(
-            session
-                .platform_market_state(&condition_id)
-                .expect("SQLite 失败后公开市场仍存在")
-                .lifecycle_phase(),
-            MarketLifecyclePhaseV1::PostEndPendingResolution
-        );
-        assert_eq!(
-            session
-                .simulated_fill(&platform_order_id)
-                .expect("SQLite 失败后成交仍存在")
-                .finality_state(),
-            Some(TradeFinalityStateV1::Mined)
-        );
-        assert_eq!(session.query_projection_revision(), before_revision);
-        assert_eq!(coordinator.cursor_for_tests(), before_failure_cursor);
-        assert_eq!(
-            (
-                coordinator.encoded_transaction_count_for_tests,
-                coordinator.append_attempt_count_for_tests,
-                coordinator.append_success_count_for_tests,
-            ),
-            (1, 1, 0)
-        );
-        assert!(
-            coordinator
-                .store
-                .recover::<
-                    DurableLogicalTransactionEvidenceV2,
-                    DurableRecoveryOperationV2,
-                    RecoverablePaperApplicationCheckpointV2,
-                >()
-                .expect("读取 AutoRedeem INSERT 失败日志")
-                .tail
-                .is_empty()
-        );
-
-        coordinator
-            .store
-            .remove_transaction_log_insert_failure_for_tests()
-            .expect("移除 AutoRedeem SQLite INSERT 失败触发器");
-        reset_request_registration_preparation_counts_v2();
-        reset_execution_state_clone_count_for_tests();
-        reset_terminal_query_projections_clone_count_for_tests();
-        assert_eq!(
-            coordinator.drive_scheduled_execution_through(&mut session, terminal_at_utc_ms),
-            Ok(ScheduledExecutionDriveDispositionV2::Advanced)
-        );
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(terminal_query_projections_clone_count_for_tests(), 0);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(
-            (
-                coordinator.encoded_transaction_count_for_tests,
-                coordinator.append_attempt_count_for_tests,
-                coordinator.append_success_count_for_tests,
-            ),
-            (2, 2, 1)
-        );
-        assert_eq!(
-            session
-                .simulated_fill(&platform_order_id)
-                .expect("AutoRedeem 成功后成交仍存在")
-                .finality_state(),
-            Some(TradeFinalityStateV1::Confirmed)
-        );
-        assert_eq!(
-            session
-                .platform_market_state(&condition_id)
-                .expect("AutoRedeem 成功后公开市场仍存在")
-                .lifecycle_phase(),
-            MarketLifecyclePhaseV1::ResolutionTerminal
-        );
-        assert_eq!(session.query_projection_revision(), before_revision + 1);
-        assert!(
-            session
-                .session
-                .pending_terminal_projection_condition_ids()
-                .is_empty()
-        );
-        assert_eq!(
-            Arc::as_ptr(&session.query_state.terminal_projections),
-            before_query_pointer
-        );
-        let terminal_order = session
-            .query_state
-            .terminal_projections
-            .orders
-            .get(&platform_order_id)
-            .expect("query 必须提交终态订单 after-image");
-        let terminal_trade = session
-            .query_state
-            .terminal_projections
-            .trades
-            .get(&trade_id)
-            .expect("query 必须提交终态成交 after-image");
-        assert_eq!(
-            terminal_order,
-            &project_order(
-                session
-                    .session
-                    .execution_state()
-                    .order(&platform_order_id)
-                    .expect("matching 必须保留终态订单")
-            )
-            .expect("投影终态订单")
-        );
-        assert_eq!(
-            terminal_trade,
-            &project_trade(
-                session
-                    .session
-                    .execution_state()
-                    .fills()
-                    .find(|fill| fill.trade_id == trade_id)
-                    .expect("matching 必须保留终态成交")
-            )
-            .expect("投影终态成交")
-        );
-        assert_eq!(
-            terminal_trade.status.known,
-            Some(SimulatedTradeKnownStatusV1::Confirmed)
-        );
-
-        let online_checkpoint = session.durable_checkpoint();
-        let recovered = coordinator
-            .store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("恢复 AutoRedeem coordinator 日志");
-        assert_eq!(recovered.tail.len(), 1);
-        let tail = &recovered.tail[0];
-        assert_eq!(
-            tail.recovery_operation,
-            DurableRecoveryOperationV2::DriveExecutionThrough {
-                effective_processing_at_utc_ms: terminal_at_utc_ms,
-            }
-        );
-        assert!(matches!(
-            &tail.evidence.fact,
-            DurableTransactionFactV1::ExecutionAdvanced { session_id: actual }
-                if actual == &session_id
-        ));
-        assert!(tail.evidence.logical_action_results.is_empty());
-        assert_eq!(
-            tail.evidence.query_projection_revision,
-            Some(before_revision + 1)
-        );
-        assert_eq!(
-            tail.evidence.logical_platform_driven_through_utc_ms,
-            Some(terminal_at_utc_ms)
-        );
-        assert_eq!(tail.evidence.account_deltas.len(), 3);
-        assert_eq!(
-            tail.evidence
-                .account_deltas
-                .iter()
-                .map(|delta| delta.reason)
-                .collect::<Vec<_>>(),
-            vec![
-                contracts::PlatformAccountDeltaReasonV1::FillFinalityEconomicApplied,
-                contracts::PlatformAccountDeltaReasonV1::TakerRebateAccrualApplied,
-                contracts::PlatformAccountDeltaReasonV1::AutoRedeemApplied,
-            ]
-        );
-        for predecessor_pair in tail.evidence.account_deltas.windows(2) {
-            let [previous, current] = predecessor_pair else {
-                unreachable!()
-            };
-            assert_eq!(
-                current.account_transition_seq,
-                previous.account_transition_seq + 1
-            );
-            assert_eq!(
-                current.predecessor,
-                contracts::PlatformAccountDeltaPredecessorV1::AccountDelta {
-                    delta_id: previous.delta_id.clone(),
-                    delta_sha256: previous.delta_sha256.clone(),
-                    account_transition_seq: previous.account_transition_seq,
-                }
-            );
-        }
-
-        let mut causal_drafts = tail
-            .evidence
-            .private_output_drafts
-            .iter()
-            .map(|draft| {
-                let DurablePrivateOutputDraftV1::Lifecycle { draft } = draft else {
-                    panic!("AutoRedeem scheduled 事务只能形成生命周期草稿")
-                };
-                (draft.timing().private_emission_sequence, draft)
-            })
-            .collect::<Vec<_>>();
-        causal_drafts.sort_by_key(|(sequence, _)| *sequence);
-        assert_eq!(causal_drafts.len(), 3);
-        assert!(
-            causal_drafts
-                .windows(2)
-                .all(|pair| pair[1].0 == pair[0].0 + 1)
-        );
-        assert!(matches!(
-            causal_drafts.as_slice(),
-            [
-                (
-                    _,
-                    LifecycleFeedbackDraftV1::Trade(TradeLifecycleFeedbackDraftV1 {
-                        status: SimulatedTradeStatusV1 {
-                            known: Some(SimulatedTradeKnownStatusV1::Confirmed),
-                            ..
-                        },
-                        ..
-                    })
-                ),
-                (
-                    _,
-                    LifecycleFeedbackDraftV1::Settlement(SettlementLifecycleFeedbackDraftV1 {
-                        event: SettlementLifecycleEventDraftV1::TakerRebateAccrualApplied { .. },
-                        ..
-                    })
-                ),
-                (
-                    _,
-                    LifecycleFeedbackDraftV1::Settlement(SettlementLifecycleFeedbackDraftV1 {
-                        event: SettlementLifecycleEventDraftV1::AutoRedeemApplied { .. },
-                        ..
-                    })
-                )
-            ]
-        ));
-        assert!(
-            causal_drafts.iter().all(|(_, draft)| {
-                draft.timing().platform_event_at_utc_ms == terminal_at_utc_ms
-            })
-        );
-
-        let before_retry_bytes = serde_json::to_vec(&session.durable_checkpoint())
-            .expect("序列化 AutoRedeem 同 cutoff 重试基线");
-        let before_retry_cursor = coordinator.cursor_for_tests();
-        let before_retry_counts = (
-            coordinator.encoded_transaction_count_for_tests,
-            coordinator.append_attempt_count_for_tests,
-            coordinator.append_success_count_for_tests,
-        );
-        reset_request_registration_preparation_counts_v2();
-        reset_execution_state_clone_count_for_tests();
-        reset_terminal_query_projections_clone_count_for_tests();
-        assert_eq!(
-            coordinator.drive_scheduled_execution_through(&mut session, terminal_at_utc_ms),
-            Ok(ScheduledExecutionDriveDispositionV2::NoStateChange)
-        );
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(terminal_query_projections_clone_count_for_tests(), 0);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(
-            serde_json::to_vec(&session.durable_checkpoint())
-                .expect("序列化 AutoRedeem 同 cutoff 重试后状态"),
-            before_retry_bytes
-        );
-        assert_eq!(coordinator.cursor_for_tests(), before_retry_cursor);
-        assert_eq!(
-            (
-                coordinator.encoded_transaction_count_for_tests,
-                coordinator.append_attempt_count_for_tests,
-                coordinator.append_success_count_for_tests,
-            ),
-            before_retry_counts
-        );
-        assert_eq!(
-            coordinator
-                .store
-                .recover::<
-                    DurableLogicalTransactionEvidenceV2,
-                    DurableRecoveryOperationV2,
-                    RecoverablePaperApplicationCheckpointV2,
-                >()
-                .expect("读取 AutoRedeem 同 cutoff 重试日志")
-                .tail
-                .len(),
-            1
-        );
-
-        let mut recovered_checkpoint = recovered
-            .checkpoint
-            .expect("AutoRedeem 恢复必须有正式应用检查点")
-            .checkpoint;
-        recovered_checkpoint
-            .validate()
-            .expect("AutoRedeem 正式应用检查点必须有效");
-        let session_checkpoint = recovered_checkpoint
-            .run_checkpoint
-            .sessions
-            .remove(&session_id)
-            .expect("AutoRedeem 正式应用检查点必须包含目标会话");
-        let evicted = recovered_checkpoint
-            .evicted_markets
-            .remove(&session_id)
-            .unwrap_or_default();
-        let (restored_baseline, downstream) =
-            ExecutionSessionStateV1::restore(&process.inner, session_checkpoint, &evicted)
-                .expect("恢复 AutoRedeem terminal 前基线");
-        assert_eq!(downstream, None);
-        reset_request_registration_preparation_counts_v2();
-        reset_execution_state_clone_count_for_tests();
-        reset_terminal_query_projections_clone_count_for_tests();
-        let replayed = replay_execution_operation_v2(
-            restored_baseline,
-            &tail.evidence,
-            tail.recovery_operation,
-        )
-        .expect("用 shared sparse core 重放 AutoRedeem 尾日志");
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(terminal_query_projections_clone_count_for_tests(), 0);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(replayed.checkpoint(None), online_checkpoint);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn recoverable_paper_v2_scheduled_collision_orders_gtd_finality_and_rebate_by_emission_sequence()
-     {
-        use crate::task22_tests::{
-            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
-            scenario as long_scenario, session_spec as long_session_spec,
-        };
-
-        const MATCHED_AT_UTC_MS: i64 = 150_250;
-        const COLLISION_AT_UTC_MS: i64 = 87_000_000;
-        const LATER_GTD_AT_UTC_MS: i64 = COLLISION_AT_UTC_MS + 1_000;
-
-        let rules = successful_snapshot_for_sim_tests().await;
-        let profile =
-            load_embedded_proxy_latency_profile().expect("加载 scheduled 碰撞测试时延配置");
-        let scenario = long_scenario();
-        let policy = policy_for_tests(
-            "paper-v2-scheduled-collision-policy",
-            &[
-                (TradeFinalityStateV1::Matched, 0),
-                (TradeFinalityStateV1::Mined, 10),
-                (
-                    TradeFinalityStateV1::Confirmed,
-                    COLLISION_AT_UTC_MS - MATCHED_AT_UTC_MS,
-                ),
-            ],
-            2,
-            Vec::new(),
-        );
-        let mut process = SimExecutionProcessV1::try_new(
-            "component-test-run".to_owned(),
-            policy,
-            Arc::clone(&rules),
-            Arc::clone(&profile),
-            Arc::clone(&scenario),
-        )
-        .expect("创建 scheduled 碰撞 Paper 进程");
-        let mut spec = long_session_spec(
-            &scenario,
-            SimCallerRoleV1::Paper,
-            "paper-v2-scheduled-collision",
-        );
-        spec.response_outbox_capacity =
-            std::num::NonZeroUsize::new(16).expect("scheduled 碰撞测试容量为正");
-        let mut session =
-            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
-        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "1000");
-
-        let fak = session
-            .post_order(PostOrderRequestV1 {
-                context: context_for_arrival(
-                    &session,
-                    &profile,
-                    "paper-v2-scheduled-collision-fak",
-                    1,
-                    150_000,
-                ),
-                idempotency_key: "paper-v2-scheduled-collision-fak-idempotency".to_owned(),
-                item: PostOrderItemV1 {
-                    item_id: "paper-v2-scheduled-collision-fak-item".to_owned(),
-                    order: SimBuyOrderV1 {
-                        condition_id: long_market().condition_id.clone(),
-                        token_id: long_asset("1", 0, "Up").token_id,
-                        kind: SimBuyOrderKindV1::FakMarket {
-                            spend_pusd: Decimal::new(600, 0),
-                            worst_price_pusd_per_share: Decimal::new(6, 1),
-                        },
-                    },
-                },
-            })
-            .expect("登记 scheduled 碰撞正手续费 FAK");
-        assert_eq!(fak.item.effective_processing_at_utc_ms, MATCHED_AT_UTC_MS);
-        assert_eq!(
-            session.apply_closed_market_event_bucket(ClosedMarketEventBucketV1::public(
-                MATCHED_AT_UTC_MS,
-                next_visibility_position,
-                next_visibility_position,
-                MillisecondBucketClosureV1::NextEventAt(MATCHED_AT_UTC_MS + 1),
-                Vec::new(),
-            )),
-            Ok(MarketBucketApplyDispositionV1::Applied)
-        );
-        assert_eq!(
-            session.drive_next_execution_action_through(MATCHED_AT_UTC_MS),
-            Ok(SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: true,
-            })
-        );
-        let fill = session
-            .session
-            .execution_state()
-            .fills()
-            .next()
-            .expect("scheduled 碰撞 FAK 必须形成唯一成交")
-            .clone();
-        assert_eq!(fill.matched_at_utc_ms, MATCHED_AT_UTC_MS);
-        assert_eq!(fill.liquidity_role, SimLiquidityRoleV1::Taker);
-        assert_eq!(fill.base_units, 1_000_000_000);
-        assert_eq!(fill.quote_units, 600_000_000);
-        assert!(fill.immediate_taker_fee_units > 0);
-        let platform_order_id = fill.platform_order_id.clone();
-
-        let gtd_arrival_at_utc_ms = 200_000;
-        let gtds = session
-            .post_orders(PostOrdersRequestV1 {
-                context: context_for_arrival(
-                    &session,
-                    &profile,
-                    "paper-v2-scheduled-collision-gtds",
-                    2,
-                    gtd_arrival_at_utc_ms,
-                ),
-                idempotency_key: "paper-v2-scheduled-collision-gtds-idempotency".to_owned(),
-                items: [
-                    (
-                        "paper-v2-scheduled-collision-gtd-at-t",
-                        COLLISION_AT_UTC_MS + 999,
-                    ),
-                    (
-                        "paper-v2-scheduled-collision-gtd-after-t",
-                        LATER_GTD_AT_UTC_MS + 999,
-                    ),
-                ]
-                .into_iter()
-                .map(|(item_id, expires_at_utc_ms)| PostOrderItemV1 {
-                    item_id: item_id.to_owned(),
-                    order: SimBuyOrderV1 {
-                        condition_id: long_market().condition_id.clone(),
-                        token_id: long_asset("1", 0, "Up").token_id,
-                        kind: SimBuyOrderKindV1::GtdLimit {
-                            limit_price_pusd_per_share: Decimal::new(4, 1),
-                            size_shares: Decimal::new(5, 0),
-                            post_only: true,
-                            expires_at_utc_ms,
-                        },
-                    },
-                })
-                .collect(),
-            })
-            .expect("登记两个未成交 scheduled 碰撞 GTD");
-        assert!(
-            gtds.items
-                .iter()
-                .all(|item| item.effective_processing_at_utc_ms == gtd_arrival_at_utc_ms)
-        );
-        assert_eq!(
-            session.apply_closed_market_event_bucket(ClosedMarketEventBucketV1::public(
-                gtd_arrival_at_utc_ms,
-                next_visibility_position,
-                next_visibility_position,
-                MillisecondBucketClosureV1::NextEventAt(gtd_arrival_at_utc_ms + 1),
-                Vec::new(),
-            )),
-            Ok(MarketBucketApplyDispositionV1::Applied)
-        );
-        assert_eq!(
-            session.drive_next_execution_action_through(gtd_arrival_at_utc_ms),
-            Ok(SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: false,
-            })
-        );
-        assert_eq!(
-            session.drive_next_execution_action_through(gtd_arrival_at_utc_ms),
-            Ok(SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: true,
-            })
-        );
-        assert_eq!(
-            session.next_order_deadline_at_utc_ms(),
-            Some(COLLISION_AT_UTC_MS)
-        );
-
-        let market_end_at_utc_ms = long_market().window.end_at_utc_ms;
-        assert_eq!(market_end_at_utc_ms, 500_000);
-        assert_eq!(
-            session.apply_closed_market_event_bucket(ClosedMarketEventBucketV1::public(
-                market_end_at_utc_ms,
-                next_visibility_position,
-                next_visibility_position,
-                MillisecondBucketClosureV1::NextEventAt(market_end_at_utc_ms + 1),
-                Vec::new(),
-            )),
-            Ok(MarketBucketApplyDispositionV1::Applied)
-        );
-        assert_eq!(
-            session
-                .simulated_fill(&platform_order_id)
-                .expect("市场结束后 scheduled 碰撞成交仍存在")
-                .finality_state(),
-            Some(TradeFinalityStateV1::Mined)
-        );
-        assert_eq!(
-            session
-                .session
-                .execution_state()
-                .next_scheduled_finality_at_utc_ms(),
-            Some(COLLISION_AT_UTC_MS)
-        );
-        let private_cleanup_at_utc_ms = session
-            .session
-            .recovered_pending_private_facts()
-            .iter()
-            .map(|(_, received_at_utc_ms, _)| *received_at_utc_ms)
-            .max()
-            .expect("scheduled 碰撞必须有 coordinator 前私有输出");
-        assert!(private_cleanup_at_utc_ms < COLLISION_AT_UTC_MS);
-        session.prepare_private_delivery_through_for_tests(private_cleanup_at_utc_ms);
-        let mut delivered_before_checkpoint = 0;
-        loop {
-            match session
-                .drive_private_delivery_through(private_cleanup_at_utc_ms)
-                .expect("清理 scheduled 碰撞 coordinator 前私有输出")
-            {
-                SubmissionDeliveryDispositionV1::Delivered => {
-                    delivered_before_checkpoint += 1;
-                }
-                SubmissionDeliveryDispositionV1::NoVisibleResponse => break,
-                disposition => panic!("scheduled 碰撞接受桥返回意外结果：{disposition:?}"),
-            }
-        }
-        assert!(delivered_before_checkpoint > 0);
-        assert!(session.direct_response_outbox.entries.is_empty());
-        assert!(session.lifecycle_outbox.entries.is_empty());
-        assert!(session.lifecycle_outbox.batches.is_empty());
-        assert!(session.lifecycle_outbox.work_batch_ids.is_empty());
-        session
-            .session
-            .advance_public_visibility_through(LATER_GTD_AT_UTC_MS, next_visibility_position)
-            .expect("闭合 scheduled 碰撞完整公开前缀");
-
-        let before_account_transition_seq = session
-            .session
-            .execution_state()
-            .account()
-            .next_account_transition_seq();
-        let before_account_summary_sha256 = session
-            .session
-            .execution_state()
-            .account()
-            .account_summary_sha256()
-            .clone();
-        let before_private_emission_sequence = session
-            .session
-            .next_private_emission_sequence()
-            .expect("取得 scheduled 碰撞首个私有发射序号");
-        let application_checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
-            &process,
-            &session,
-            rules.as_ref(),
-        );
-        let session_id = session.session_spec().session_id.clone();
-        let restored_probe = restore_recoverable_paper_application_session_for_tests(
-            &process,
-            application_checkpoint.clone(),
-            &session_id,
-        );
-        assert_eq!(
-            restored_probe.checkpoint(None),
-            session.durable_checkpoint()
-        );
-        drop(restored_probe);
-
-        let directory = tempfile::tempdir().expect("创建 scheduled 碰撞 coordinator 日志目录");
-        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
-            directory.path().join("paper-v2-scheduled-collision"),
-            &session,
-            &application_checkpoint,
-        )
-        .expect("创建 scheduled 碰撞 coordinator");
-        drop(application_checkpoint);
-
-        let before_failure_bytes = serde_json::to_vec(&session.durable_checkpoint())
-            .expect("序列化 scheduled 碰撞 SQLite 失败基线");
-        let before_failure_cursor = coordinator.cursor_for_tests();
-        coordinator
-            .store
-            .install_transaction_log_insert_failure_for_tests()
-            .expect("安装 scheduled 碰撞 SQLite INSERT 失败触发器");
-        reset_request_registration_preparation_counts_v2();
-        reset_execution_state_clone_count_for_tests();
-        let insert_failure =
-            coordinator.drive_scheduled_execution_through(&mut session, LATER_GTD_AT_UTC_MS);
-        assert!(
-            matches!(
-                &insert_failure,
-                Err(MarketEventErrorV1::Session(SessionError::Durability(message)))
-                    if message.contains("SQLite")
-            ),
-            "scheduled 碰撞 INSERT 失败返回意外结果：{insert_failure:?}"
-        );
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(
-            serde_json::to_vec(&session.durable_checkpoint())
-                .expect("序列化 scheduled 碰撞 SQLite 失败后状态"),
-            before_failure_bytes
-        );
-        assert_eq!(coordinator.cursor_for_tests(), before_failure_cursor);
-        assert_eq!(
-            (
-                coordinator.encoded_transaction_count_for_tests,
-                coordinator.append_attempt_count_for_tests,
-                coordinator.append_success_count_for_tests,
-            ),
-            (1, 1, 0)
-        );
-        assert!(
-            coordinator
-                .store
-                .recover::<
-                    DurableLogicalTransactionEvidenceV2,
-                    DurableRecoveryOperationV2,
-                    RecoverablePaperApplicationCheckpointV2,
-                >()
-                .expect("读取 scheduled 碰撞 INSERT 失败日志")
-                .tail
-                .is_empty()
-        );
-
-        coordinator
-            .store
-            .remove_transaction_log_insert_failure_for_tests()
-            .expect("移除 scheduled 碰撞 SQLite INSERT 失败触发器");
-        reset_request_registration_preparation_counts_v2();
-        reset_execution_state_clone_count_for_tests();
-        assert_eq!(
-            coordinator.drive_scheduled_execution_through(&mut session, LATER_GTD_AT_UTC_MS),
-            Ok(ScheduledExecutionDriveDispositionV2::Advanced)
-        );
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(
-            (
-                coordinator.encoded_transaction_count_for_tests,
-                coordinator.append_attempt_count_for_tests,
-                coordinator.append_success_count_for_tests,
-            ),
-            (2, 2, 1)
-        );
-        assert_eq!(session.next_order_deadline_at_utc_ms(), None);
-        assert_eq!(
-            session
-                .simulated_fill(&platform_order_id)
-                .expect("scheduled 碰撞成功后成交仍存在")
-                .finality_state(),
-            Some(TradeFinalityStateV1::Confirmed)
-        );
-
-        let online_checkpoint = session.durable_checkpoint();
-        let recovered = coordinator
-            .store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("恢复 scheduled 碰撞 coordinator 日志");
-        assert_eq!(recovered.tail.len(), 1);
-        let tail = recovered.tail[0].clone();
-        assert_eq!(
-            tail.recovery_operation,
-            DurableRecoveryOperationV2::DriveExecutionThrough {
-                effective_processing_at_utc_ms: LATER_GTD_AT_UTC_MS,
-            }
-        );
-        assert!(matches!(
-            &tail.evidence.fact,
-            DurableTransactionFactV1::ExecutionAdvanced { session_id: actual }
-                if actual == &session_id
-        ));
-        assert!(tail.evidence.logical_action_results.is_empty());
-
-        let mut causal_drafts = tail
-            .evidence
-            .private_output_drafts
-            .iter()
-            .map(|durable| {
-                let DurablePrivateOutputDraftV1::Lifecycle { draft } = durable else {
-                    panic!("scheduled 碰撞事务只能形成生命周期草稿")
-                };
-                let kind = match draft {
-                    LifecycleFeedbackDraftV1::Order(OrderLifecycleFeedbackDraftV1 {
-                        event_kind: OrderLifecycleEventKindV1::GtdExpired,
-                        ..
-                    }) => "GTD",
-                    LifecycleFeedbackDraftV1::Trade(TradeLifecycleFeedbackDraftV1 {
-                        status:
-                            SimulatedTradeStatusV1 {
-                                known: Some(SimulatedTradeKnownStatusV1::Confirmed),
-                                ..
-                            },
-                        ..
-                    }) => "CONFIRMED",
-                    LifecycleFeedbackDraftV1::Settlement(SettlementLifecycleFeedbackDraftV1 {
-                        event: SettlementLifecycleEventDraftV1::TakerRebateAccrualApplied { .. },
-                        ..
-                    }) => "TAKER_ACCRUAL",
-                    LifecycleFeedbackDraftV1::Settlement(SettlementLifecycleFeedbackDraftV1 {
-                        event:
-                            SettlementLifecycleEventDraftV1::TakerRebateDayFinalized {
-                                account_delta,
-                                ..
-                            },
-                        ..
-                    }) => {
-                        assert!(
-                            account_delta.is_none(),
-                            "整数可付款返佣的 DayFinalized 草稿不得复用账户变化"
-                        );
-                        "TAKER_DAY_FINALIZED"
-                    }
-                    LifecycleFeedbackDraftV1::Settlement(SettlementLifecycleFeedbackDraftV1 {
-                        event: SettlementLifecycleEventDraftV1::TakerRebatePaid { .. },
-                        ..
-                    }) => "TAKER_PAID",
-                    other => panic!("scheduled 碰撞出现意外生命周期草稿：{other:#?}"),
-                };
-                (
-                    draft.timing().private_emission_sequence,
-                    draft.timing().platform_event_at_utc_ms,
-                    kind,
-                )
-            })
-            .collect::<Vec<_>>();
-        causal_drafts.sort_by_key(|(sequence, _, _)| *sequence);
-        assert_eq!(causal_drafts.len(), 6);
-        assert_eq!(
-            causal_drafts[0].0, before_private_emission_sequence,
-            "scheduled 碰撞私有发射序号必须紧接检查点"
-        );
-        assert!(
-            causal_drafts
-                .windows(2)
-                .all(|pair| pair[1].0 == pair[0].0 + 1),
-            "scheduled 碰撞私有发射序号必须连续"
-        );
-        assert_eq!(
-            (causal_drafts[1].1, causal_drafts[1].2),
-            (COLLISION_AT_UTC_MS, "CONFIRMED"),
-            "第二项必须是同刻 Confirmed，不能是稍后的 GTD"
-        );
-        assert_eq!(
-            causal_drafts
-                .iter()
-                .map(|(_, at, kind)| (*at, *kind))
-                .collect::<Vec<_>>(),
-            vec![
-                (COLLISION_AT_UTC_MS, "GTD"),
-                (COLLISION_AT_UTC_MS, "CONFIRMED"),
-                (COLLISION_AT_UTC_MS, "TAKER_ACCRUAL"),
-                (COLLISION_AT_UTC_MS, "TAKER_DAY_FINALIZED"),
-                (COLLISION_AT_UTC_MS, "TAKER_PAID"),
-                (LATER_GTD_AT_UTC_MS, "GTD"),
-            ]
-        );
-
-        assert_eq!(
-            tail.evidence
-                .account_deltas
-                .iter()
-                .map(|delta| (delta.platform_effective_at_utc_ms, delta.reason))
-                .collect::<Vec<_>>(),
-            vec![
-                (
-                    COLLISION_AT_UTC_MS,
-                    contracts::PlatformAccountDeltaReasonV1::GtdExpirationEncumbranceReleased,
-                ),
-                (
-                    COLLISION_AT_UTC_MS,
-                    contracts::PlatformAccountDeltaReasonV1::FillFinalityEconomicApplied,
-                ),
-                (
-                    COLLISION_AT_UTC_MS,
-                    contracts::PlatformAccountDeltaReasonV1::TakerRebateAccrualApplied,
-                ),
-                (
-                    COLLISION_AT_UTC_MS,
-                    contracts::PlatformAccountDeltaReasonV1::TakerRebatePaid,
-                ),
-                (
-                    LATER_GTD_AT_UTC_MS,
-                    contracts::PlatformAccountDeltaReasonV1::GtdExpirationEncumbranceReleased,
-                ),
-            ]
-        );
-        assert_eq!(tail.evidence.account_deltas.len(), 5);
-        assert_eq!(
-            tail.evidence.account_deltas[0].account_transition_seq,
-            before_account_transition_seq
-        );
-        assert_eq!(
-            tail.evidence.account_deltas[0].account_summary_before_sha256,
-            before_account_summary_sha256
-        );
-        for pair in tail.evidence.account_deltas.windows(2) {
-            let [previous, current] = pair else {
-                unreachable!()
-            };
-            assert_eq!(
-                current.account_transition_seq,
-                previous.account_transition_seq + 1
-            );
-            assert_eq!(
-                current.predecessor,
-                contracts::PlatformAccountDeltaPredecessorV1::AccountDelta {
-                    delta_id: previous.delta_id.clone(),
-                    delta_sha256: previous.delta_sha256.clone(),
-                    account_transition_seq: previous.account_transition_seq,
-                }
-            );
-            assert_eq!(
-                current.account_summary_before_sha256,
-                previous.account_summary_after_sha256
-            );
-        }
-        assert_eq!(
-            tail.evidence
-                .account_deltas
-                .last()
-                .expect("scheduled 碰撞必须有末项账户变化")
-                .account_summary_after_sha256,
-            *session
-                .session
-                .execution_state()
-                .account()
-                .account_summary_sha256()
-        );
-
-        let before_retry_bytes = serde_json::to_vec(&session.durable_checkpoint())
-            .expect("序列化 scheduled 碰撞同 cutoff 重试基线");
-        let before_retry_cursor = coordinator.cursor_for_tests();
-        let before_retry_counts = (
-            coordinator.encoded_transaction_count_for_tests,
-            coordinator.append_attempt_count_for_tests,
-            coordinator.append_success_count_for_tests,
-        );
-        reset_request_registration_preparation_counts_v2();
-        reset_execution_state_clone_count_for_tests();
-        assert_eq!(
-            coordinator.drive_scheduled_execution_through(&mut session, LATER_GTD_AT_UTC_MS),
-            Ok(ScheduledExecutionDriveDispositionV2::NoStateChange)
-        );
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(
-            serde_json::to_vec(&session.durable_checkpoint())
-                .expect("序列化 scheduled 碰撞同 cutoff 重试后状态"),
-            before_retry_bytes
-        );
-        assert_eq!(coordinator.cursor_for_tests(), before_retry_cursor);
-        assert_eq!(
-            (
-                coordinator.encoded_transaction_count_for_tests,
-                coordinator.append_attempt_count_for_tests,
-                coordinator.append_success_count_for_tests,
-            ),
-            before_retry_counts
-        );
-        assert_eq!(
-            coordinator
-                .store
-                .recover::<
-                    DurableLogicalTransactionEvidenceV2,
-                    DurableRecoveryOperationV2,
-                    RecoverablePaperApplicationCheckpointV2,
-                >()
-                .expect("读取 scheduled 碰撞同 cutoff 重试日志")
-                .tail
-                .len(),
-            1
-        );
-
-        let restored_baseline = restore_recoverable_paper_application_session_for_tests(
-            &process,
-            recovered
-                .checkpoint
-                .expect("scheduled 碰撞恢复必须有正式应用检查点")
-                .checkpoint,
-            &session_id,
-        );
-        reset_request_registration_preparation_counts_v2();
-        reset_execution_state_clone_count_for_tests();
-        let replayed = replay_execution_operation_v2(
-            restored_baseline,
-            &tail.evidence,
-            tail.recovery_operation,
-        )
-        .expect("用 shared sparse core 重放 scheduled 碰撞尾日志");
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(replayed.checkpoint(None), online_checkpoint);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn paper_v2_cancel_orders_tail_replays_two_live_targets_exactly() {
-        use crate::task22_tests::{
-            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
-            scenario as long_scenario, session_spec as long_session_spec,
-        };
-
-        let rules = successful_snapshot_for_sim_tests().await;
-        let profile = load_embedded_proxy_latency_profile().expect("加载 Paper V2 时延配置");
-        let scenario = long_scenario();
-        let mut process = execution_process_for_tests(
-            Arc::clone(&rules),
-            Arc::clone(&profile),
-            Arc::clone(&scenario),
-        );
-        let spec = long_session_spec(&scenario, SimCallerRoleV1::Paper, "paper-v2-cancel-orders");
-        let mut session =
-            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
-        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
-        let post_registration = session
-            .post_orders(PostOrdersRequestV1 {
-                context: context_for_arrival(
-                    &session,
-                    &profile,
-                    "paper-v2-cancel-orders-source",
-                    1,
-                    150_000,
-                ),
-                idempotency_key: "paper-v2-cancel-orders-source-idempotency".to_owned(),
-                items: (0..2)
-                    .map(|ordinal| PostOrderItemV1 {
-                        item_id: format!("paper-v2-cancel-orders-source-{ordinal}"),
-                        order: SimBuyOrderV1 {
-                            condition_id: long_market().condition_id.clone(),
-                            token_id: long_asset("1", 0, "Up").token_id,
-                            kind: SimBuyOrderKindV1::GtcLimit {
-                                limit_price_pusd_per_share: Decimal::new(4, 1),
-                                size_shares: Decimal::new(5, 0),
-                                post_only: true,
-                            },
-                        },
-                    })
-                    .collect(),
-            })
-            .expect("登记两个 Paper GTC 请求项");
-        let post_at = post_registration.items[0].effective_processing_at_utc_ms;
-        assert!(
-            post_registration
-                .items
-                .iter()
-                .all(|item| item.effective_processing_at_utc_ms == post_at)
-        );
-        session
-            .apply_closed_market_event_bucket(ClosedMarketEventBucketV1::public(
-                post_at,
-                next_visibility_position,
-                next_visibility_position,
-                MillisecondBucketClosureV1::NextEventAt(post_at + 1),
-                Vec::new(),
-            ))
-            .expect("闭合两个 GTC 的公开前缀");
-        assert_eq!(
-            session.drive_next_execution_action_through(post_at),
-            Ok(SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: false,
-            })
-        );
-        assert_eq!(
-            session.drive_next_execution_action_through(post_at),
-            Ok(SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: true,
-            })
-        );
-        let order_ids = session
-            .session
-            .execution_state()
-            .active_order_ids()
-            .expect("读取两个活动订单");
-        assert_eq!(order_ids.len(), 2);
-        assert_eq!(session.query_projection_revision(), 2);
-        assert_eq!(session.available_pusd(), Decimal::new(996, 0));
-        assert_eq!(session.principal_encumbered_pusd(), Decimal::new(4, 0));
-        let private_delivery_through = session
-            .session
-            .recovered_pending_private_facts()
-            .iter()
-            .map(|(_, received_at_utc_ms, _)| *received_at_utc_ms)
-            .max()
-            .expect("提交订单必须形成私有输出");
-        assert_eq!(
-            session
-                .drive_private_delivery_after_platform_through_for_tests(private_delivery_through,),
-            Ok(SubmissionDeliveryDispositionV1::Delivered)
-        );
-
-        let cancel_arrival = private_delivery_through + 10_000;
-        let cancel_registration = session
-            .cancel_orders(CancelOrdersRequestV1 {
-                context: context_for_arrival(
-                    &session,
-                    &profile,
-                    "paper-v2-cancel-orders-request",
-                    2,
-                    cancel_arrival,
-                ),
-                idempotency_key: "paper-v2-cancel-orders-idempotency".to_owned(),
-                items: order_ids
-                    .iter()
-                    .enumerate()
-                    .map(|(ordinal, platform_order_id)| CancelOrderItemV1 {
-                        item_id: format!("paper-v2-cancel-orders-item-{ordinal}"),
-                        platform_order_id: platform_order_id.clone(),
-                    })
-                    .collect(),
-            })
-            .expect("登记两个真实目标的 Paper 批撤");
-        assert_eq!(cancel_registration.receipt.scheduled_action_count, 2);
-        let cancel_at = cancel_registration.items[0].effective_processing_at_utc_ms;
-        assert!(
-            cancel_registration
-                .items
-                .iter()
-                .all(|item| item.effective_processing_at_utc_ms == cancel_at)
-        );
-        session
-            .apply_closed_market_event_bucket(ClosedMarketEventBucketV1::public(
-                cancel_at,
-                next_visibility_position,
-                next_visibility_position,
-                MillisecondBucketClosureV1::NextEventAt(cancel_at + 1),
-                Vec::new(),
-            ))
-            .expect("闭合批撤公开前缀");
-        let application_checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
-            &process,
-            &session,
-            rules.as_ref(),
-        );
-        let directory = tempfile::tempdir().expect("创建 Paper V2 批撤协调器临时目录");
-        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
-            directory.path().join("paper-cancel-orders-tail"),
-            &session,
-            &application_checkpoint,
-        )
-        .expect("创建 Paper V2 批撤协调器");
-        let before_failure_state = session.durable_checkpoint();
-        let before_failure_cursor = coordinator.cursor_for_tests();
-        let before_cancel_effect_count = session.cancel_effect_records.len();
-        coordinator
-            .store
-            .install_transaction_log_insert_failure_for_tests()
-            .expect("安装 Paper V2 批撤 INSERT 失败触发器");
-        reset_execution_state_clone_count_for_tests();
-        reset_request_registration_preparation_counts_v2();
-        assert!(matches!(
-            coordinator.drive_cancel_execution_through(&mut session, cancel_at),
-            Err(SubmissionProcessingErrorV1::Session(SessionError::Durability(message)))
-                if message.contains("SQLite")
-        ));
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(session.durable_checkpoint(), before_failure_state);
-        assert_eq!(
-            session.cancel_effect_records.len(),
-            before_cancel_effect_count
-        );
-        assert_eq!(coordinator.cursor_for_tests(), before_failure_cursor);
-        assert_eq!(coordinator.encoded_transaction_count_for_tests, 1);
-        assert_eq!(coordinator.append_attempt_count_for_tests, 1);
-        assert_eq!(coordinator.append_success_count_for_tests, 0);
-        let failed_recovery = coordinator
-            .store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("INSERT 失败后读取 Paper V2 批撤日志");
-        assert!(failed_recovery.tail.is_empty());
-        drop(before_failure_state);
-        coordinator
-            .store
-            .remove_transaction_log_insert_failure_for_tests()
-            .expect("移除 Paper V2 批撤 INSERT 失败触发器");
-
-        reset_execution_state_clone_count_for_tests();
-        reset_request_registration_preparation_counts_v2();
-        assert_eq!(
-            coordinator.drive_cancel_execution_through(&mut session, cancel_at),
-            Ok(SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: true,
-            })
-        );
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(coordinator.cursor_for_tests().0, 1);
-        assert_eq!(coordinator.encoded_transaction_count_for_tests, 2);
-        assert_eq!(coordinator.append_attempt_count_for_tests, 2);
-        assert_eq!(coordinator.append_success_count_for_tests, 1);
-        assert_eq!(
-            session.cancel_effect_records.len(),
-            before_cancel_effect_count + 1
-        );
-        assert_eq!(session.available_pusd(), Decimal::new(1_000, 0));
-        assert_eq!(session.principal_encumbered_pusd(), Decimal::ZERO);
-        let online_checkpoint = session.durable_checkpoint();
-
-        let recovered = coordinator
-            .store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("恢复 Paper V2 批撤协调器日志");
-        assert_eq!(recovered.tail.len(), 1);
-        let tail = &recovered.tail[0];
-        assert_eq!(tail.evidence.logical_action_results.len(), 2);
-        assert_eq!(tail.evidence.private_output_drafts.len(), 3);
-        assert_eq!(
-            tail.evidence
-                .private_output_drafts
-                .iter()
-                .filter(|draft| matches!(
-                    draft,
-                    DurablePrivateOutputDraftV1::Lifecycle {
-                        draft: LifecycleFeedbackDraftV1::Order(order),
-                    } if order.event_kind == OrderLifecycleEventKindV1::CallerCanceled
-                ))
-                .count(),
-            2
-        );
-        assert_eq!(
-            tail.evidence
-                .private_output_drafts
-                .iter()
-                .filter(|draft| matches!(
-                    draft,
-                    DurablePrivateOutputDraftV1::Direct { draft }
-                        if draft.method == DirectResponseMethodV1::CancelOrders
-                ))
-                .count(),
-            1
-        );
-        assert_eq!(tail.evidence.account_deltas.len(), 2);
-        assert_eq!(tail.evidence.query_projection_revision, Some(3));
-        let session_id = session.session_spec().session_id.clone();
-        let restored_baseline = restore_recoverable_paper_application_session_for_tests(
-            &process,
-            recovered
-                .checkpoint
-                .expect("批撤恢复必须有正式应用检查点")
-                .checkpoint,
-            &session_id,
-        );
-        reset_execution_state_clone_count_for_tests();
-        reset_request_registration_preparation_counts_v2();
-        let replayed = replay_execution_operation_v2(
-            restored_baseline,
-            &tail.evidence,
-            tail.recovery_operation,
-        )
-        .expect("用同一稀疏撤单核心重放 Paper V2 批撤尾日志");
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(replayed.checkpoint(None), online_checkpoint);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn recoverable_paper_v2_post_orders_second_insert_failure_preserves_first_item_and_replays_sparse()
-     {
-        use crate::task22_tests::{
-            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
-            scenario as long_scenario, session_spec as long_session_spec,
-        };
-
-        let rules = successful_snapshot_for_sim_tests().await;
-        let profile = load_embedded_proxy_latency_profile().expect("加载 Paper V2 Post 时延配置");
-        let scenario = long_scenario();
-        let mut process = execution_process_for_tests(
-            Arc::clone(&rules),
-            Arc::clone(&profile),
-            Arc::clone(&scenario),
-        );
-        let spec = long_session_spec(
-            &scenario,
-            SimCallerRoleV1::Paper,
-            "paper-v2-post-orders-sparse-replay",
-        );
-        let mut session =
-            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
-        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
-        let request_id = "paper-v2-post-orders-sparse-replay-request";
-        let registration = session
-            .post_orders(PostOrdersRequestV1 {
-                context: context_for_arrival(&session, &profile, request_id, 1, 150_000),
-                idempotency_key: "paper-v2-post-orders-sparse-replay-key".to_owned(),
-                items: ["a", "b"]
-                    .into_iter()
-                    .map(|suffix| PostOrderItemV1 {
-                        item_id: format!("paper-v2-post-orders-sparse-replay-{suffix}"),
-                        order: SimBuyOrderV1 {
-                            condition_id: long_market().condition_id.clone(),
-                            token_id: long_asset("1", 0, "Up").token_id,
-                            kind: SimBuyOrderKindV1::GtcLimit {
-                                limit_price_pusd_per_share: Decimal::new(4, 1),
-                                size_shares: Decimal::new(5, 0),
-                                post_only: true,
-                            },
-                        },
-                    })
-                    .collect(),
-            })
-            .expect("登记 Paper V2 两项 PostOrders");
-        let post_at = registration.items[0].effective_processing_at_utc_ms;
-        assert!(
-            registration
-                .items
-                .iter()
-                .all(|item| item.effective_processing_at_utc_ms == post_at)
-        );
-        session
-            .session
-            .advance_public_visibility_through(post_at, next_visibility_position)
-            .expect("闭合 Paper V2 PostOrders 公开前缀");
-
-        let application_checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
-            &process,
-            &session,
-            rules.as_ref(),
-        );
-        let directory = tempfile::tempdir().expect("创建 Paper V2 Post 协调器临时目录");
-        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
-            directory.path().join("paper-post-orders-sparse-replay"),
-            &session,
-            &application_checkpoint,
-        )
-        .expect("创建 Paper V2 Post 协调器");
-
-        reset_execution_state_clone_count_for_tests();
-        reset_request_registration_preparation_counts_v2();
-        assert_eq!(
-            coordinator.drive_post_execution_through(&mut session, post_at),
-            Ok(SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: false,
-            })
-        );
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(coordinator.cursor_for_tests().0, 1);
-        assert_eq!(
-            (
-                coordinator.encoded_transaction_count_for_tests,
-                coordinator.append_attempt_count_for_tests,
-                coordinator.append_success_count_for_tests,
-            ),
-            (1, 1, 1)
-        );
-        assert_eq!(session.submission_effect_records.len(), 1);
-        assert_eq!(session.session.execution_state().orders().count(), 1);
-        assert!(session.direct_response_outbox.draft(request_id).is_none());
-        let recovered_after_first = coordinator
-            .store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("读取 Paper V2 Post 第一项日志");
-        assert_eq!(recovered_after_first.tail.len(), 1);
-        let first_evidence = &recovered_after_first.tail[0].evidence;
-        let [first_result] = first_evidence.logical_action_results.as_slice() else {
-            panic!("Paper V2 Post 第一条日志必须只含第一项");
-        };
-        assert_eq!(first_result.batch_item_ordinal, 0);
-        assert!(matches!(
-            first_evidence.private_output_drafts.as_slice(),
-            [DurablePrivateOutputDraftV1::Lifecycle {
-                draft: LifecycleFeedbackDraftV1::Order(order),
-            }] if order.event_kind == OrderLifecycleEventKindV1::OrderAccepted
-        ));
-        assert_eq!(first_evidence.account_deltas.len(), 1);
-
-        let after_first_state = session.durable_checkpoint();
-        let after_first_cursor = coordinator.cursor_for_tests();
-        let after_first_log_bytes = coordinator.logical_log_bytes;
-        let pending_second = session
-            .session
-            .first_pending_action_through(post_at)
-            .expect("Paper V2 Post 第二项必须仍待处理");
-        assert_eq!(pending_second.key.batch_item_ordinal, 1);
-        coordinator
-            .store
-            .install_transaction_log_insert_failure_for_tests()
-            .expect("安装 Paper V2 Post 第二项 SQLite INSERT 失败触发器");
-        reset_execution_state_clone_count_for_tests();
-        reset_request_registration_preparation_counts_v2();
-        assert!(matches!(
-            coordinator.drive_post_execution_through(&mut session, post_at),
-            Err(SubmissionProcessingErrorV1::Session(SessionError::Durability(message)))
-                if message.contains("SQLite")
-        ));
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(session.durable_checkpoint(), after_first_state);
-        assert_eq!(session.submission_effect_records.len(), 1);
-        assert_eq!(session.session.execution_state().orders().count(), 1);
-        assert_eq!(
-            session.session.first_pending_action_through(post_at),
-            Some(pending_second)
-        );
-        assert_eq!(coordinator.cursor_for_tests(), after_first_cursor);
-        assert_eq!(coordinator.logical_log_bytes, after_first_log_bytes);
-        assert!(!coordinator.recovery_required);
-        assert_eq!(
-            (
-                coordinator.encoded_transaction_count_for_tests,
-                coordinator.append_attempt_count_for_tests,
-                coordinator.append_success_count_for_tests,
-            ),
-            (2, 2, 1)
-        );
-        let recovered_after_failure = coordinator
-            .store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("读取 Paper V2 Post 第二项 INSERT 失败日志");
-        assert_eq!(
-            recovered_after_failure.tail, recovered_after_first.tail,
-            "第二项 INSERT 失败不得改变已耐久的第一项日志"
-        );
-
-        coordinator
-            .store
-            .remove_transaction_log_insert_failure_for_tests()
-            .expect("移除 Paper V2 Post 第二项 SQLite INSERT 失败触发器");
-        reset_execution_state_clone_count_for_tests();
-        reset_request_registration_preparation_counts_v2();
-        assert_eq!(
-            coordinator.drive_post_execution_through(&mut session, post_at),
-            Ok(SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: true,
-            })
-        );
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(coordinator.cursor_for_tests().0, 2);
-        assert_eq!(
-            (
-                coordinator.encoded_transaction_count_for_tests,
-                coordinator.append_attempt_count_for_tests,
-                coordinator.append_success_count_for_tests,
-            ),
-            (3, 3, 2)
-        );
-        assert_eq!(session.submission_effect_records.len(), 2);
-        assert_eq!(session.session.execution_state().orders().count(), 2);
-        assert_eq!(session.available_pusd(), Decimal::new(996, 0));
-        assert_eq!(session.principal_encumbered_pusd(), Decimal::new(4, 0));
-        let direct = session
-            .direct_response_outbox
-            .draft(request_id)
-            .expect("Paper V2 Post 第二项必须完成批量直接响应");
-        assert_eq!(direct.method, DirectResponseMethodV1::PostOrders);
-        assert_eq!(
-            direct
-                .parts
-                .iter()
-                .map(DirectResponsePartV1::ordinal)
-                .collect::<Vec<_>>(),
-            vec![0, 1]
-        );
-        let online_checkpoint = session.durable_checkpoint();
-
-        let recovered = coordinator
-            .store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("恢复 Paper V2 Post 两项日志");
-        assert_eq!(recovered.tail.len(), 2);
-        assert_eq!(
-            recovered
-                .tail
-                .iter()
-                .map(|entry| entry.sequence)
-                .collect::<Vec<_>>(),
-            vec![1, 2]
-        );
-        let mut effect_identities = Vec::new();
-        for (entry, expected_ordinal) in recovered.tail.iter().zip([0, 1]) {
-            assert_eq!(
-                entry.recovery_operation,
-                DurableRecoveryOperationV2::DriveExecutionThrough {
-                    effective_processing_at_utc_ms: post_at,
-                }
-            );
-            let [result] = entry.evidence.logical_action_results.as_slice() else {
-                panic!("Paper V2 Post 每条日志必须只含一个动作结果");
-            };
-            assert_eq!(result.batch_item_ordinal, expected_ordinal);
-            let DirectResponsePartV1::Submission(item) = &result.part else {
-                panic!("Paper V2 Post 日志必须形成提交结果");
-            };
-            assert_eq!(item.batch_item_ordinal, expected_ordinal);
-            assert_eq!(
-                item.submission_effect_formed_at_utc_ms, post_at,
-                "同刻逐项事务必须保存各自真实 effect 形成时点"
-            );
-            assert_eq!(
-                item.submission_effect_disposition,
-                SubmissionEffectDispositionV1::NewEffect
-            );
-            assert!(matches!(item.outcome, SubmissionItemOutcomeV1::Accepted(_)));
-            effect_identities.push(item.submission_effect_identity.clone());
-        }
-        assert_ne!(effect_identities[0], effect_identities[1]);
-        assert!(
-            recovered.tail[0]
-                .evidence
-                .private_output_drafts
-                .iter()
-                .all(|draft| !matches!(draft, DurablePrivateOutputDraftV1::Direct { .. }))
-        );
-        let second_private_output_drafts = &recovered.tail[1].evidence.private_output_drafts;
-        assert_eq!(second_private_output_drafts.len(), 2);
-        let lifecycle_sequence = second_private_output_drafts
-            .iter()
-            .find_map(|draft| match draft {
-                DurablePrivateOutputDraftV1::Lifecycle {
-                    draft: LifecycleFeedbackDraftV1::Order(order),
-                } if order.event_kind == OrderLifecycleEventKindV1::OrderAccepted => {
-                    Some(order.timing.private_emission_sequence)
-                }
-                _ => None,
-            })
-            .expect("Paper V2 Post 第二项必须形成订单接纳生命周期草稿");
-        let direct_sequence = second_private_output_drafts
-            .iter()
-            .find_map(|draft| match draft {
-                DurablePrivateOutputDraftV1::Direct { draft }
-                    if draft.method == DirectResponseMethodV1::PostOrders
-                        && draft.parts.len() == 2 =>
-                {
-                    Some(draft.private_emission_sequence)
-                }
-                _ => None,
-            })
-            .expect("Paper V2 Post 第二项必须形成完整批量直接响应草稿");
-        assert!(lifecycle_sequence < direct_sequence);
-
-        let session_id = session.session_spec().session_id.clone();
-        let mut replayed = restore_recoverable_paper_application_session_for_tests(
-            &process,
-            recovered
-                .checkpoint
-                .expect("Paper V2 Post 恢复必须包含应用检查点")
-                .checkpoint,
-            &session_id,
-        );
-        reset_execution_state_clone_count_for_tests();
-        reset_request_registration_preparation_counts_v2();
-        for (index, entry) in recovered.tail.into_iter().enumerate() {
-            replayed =
-                replay_execution_operation_v2(replayed, &entry.evidence, entry.recovery_operation)
-                    .expect("用共享 Post 稀疏核心重放 Paper V2 Post 尾日志");
-            assert_eq!(execution_state_clone_count_for_tests(), 0);
-            if index == 0 {
-                assert_eq!(replayed.checkpoint(None), after_first_state);
-                reset_execution_state_clone_count_for_tests();
-            }
-        }
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(replayed.checkpoint(None), online_checkpoint);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -39634,19 +32045,6 @@ mod tests {
             encoded_events.clone(),
         );
         let baseline = session.durable_checkpoint();
-        let application_checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
-            &process,
-            &session,
-            rules.as_ref(),
-        );
-        let directory = tempfile::tempdir().expect("创建闭桶稀疏协调器临时目录");
-        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
-            directory.path().join("closed-bucket-sparse-interleave"),
-            &session,
-            &application_checkpoint,
-        )
-        .expect("创建闭桶稀疏协调器");
-
         reset_execution_state_clone_count_for_tests();
         {
             let PreparedExecutingClosedBucketDriveAttemptV2::Applied(prepared) =
@@ -39699,57 +32097,22 @@ mod tests {
         assert_eq!(execution_state_clone_count_for_tests(), 0);
         assert_eq!(session.durable_checkpoint(), baseline);
 
-        coordinator
-            .store
-            .install_transaction_log_insert_failure_for_tests()
-            .expect("安装闭桶稀疏 INSERT 失败触发器");
-        reset_execution_state_clone_count_for_tests();
-        reset_request_registration_preparation_counts_v2();
-        assert!(matches!(
-            coordinator.apply_closed_market_event_bucket_v2(&mut session, &bucket),
-            Err(MarketEventErrorV1::Session(SessionError::Durability(message)))
-                if message.contains("SQLite")
-        ));
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(session.durable_checkpoint(), baseline);
-        assert_eq!(coordinator.cursor_for_tests().0, 0);
-        assert_eq!(coordinator.encoded_transaction_count_for_tests, 1);
-        assert_eq!(coordinator.append_attempt_count_for_tests, 1);
-        assert_eq!(coordinator.append_success_count_for_tests, 0);
-        assert!(
-            coordinator
-                .store
-                .recover::<
-                    DurableLogicalTransactionEvidenceV2,
-                    DurableRecoveryOperationV2,
-                    RecoverablePaperApplicationCheckpointV2,
-                >()
-                .expect("INSERT 失败后读取闭桶稀疏日志")
-                .tail
-                .is_empty()
-        );
-        coordinator
-            .store
-            .remove_transaction_log_insert_failure_for_tests()
-            .expect("移除闭桶稀疏 INSERT 失败触发器");
-
-        reset_execution_state_clone_count_for_tests();
-        reset_request_registration_preparation_counts_v2();
-        assert_eq!(
-            coordinator.apply_closed_market_event_bucket_v2(&mut session, &bucket),
-            Ok(MarketBucketApplyDispositionV1::Applied)
-        );
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(coordinator.cursor_for_tests().0, 1);
-        let online_checkpoint = session.durable_checkpoint();
+        let PreparedExecutingClosedBucketDriveAttemptV2::Applied(prepared) =
+            prepare_executing_closed_bucket_drive_fields_v2(
+                &mut session.session,
+                &mut session.query_state,
+                &mut session.lifecycle_outbox,
+                &bucket,
+                0,
+            )
+            .expect("重新准备逐事件交错闭桶候选")
+        else {
+            panic!("非 EOF 闭桶不得形成失败封口候选");
+        };
+        prepared
+            .into_committable()
+            .expect("逐事件交错闭桶候选必须可提交")
+            .commit();
         assert_eq!(
             session
                 .platform_market_state(&condition_id)
@@ -39776,62 +32139,6 @@ mod tests {
             Some(pending_action)
         );
 
-        let recovered = coordinator
-            .store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("恢复闭桶稀疏日志");
-        assert_eq!(recovered.tail.len(), 1);
-        let entry = &recovered.tail[0];
-        assert_eq!(
-            entry.recovery_operation,
-            DurableRecoveryOperationV2::ApplyClosedMarketEventBucket
-        );
-        let expected_read = PaperMarketEventRecoveryReadRequestV1 {
-            bucket_at_utc_ms,
-            start_visibility_index_position: next_visibility_position,
-            next_visibility_index_position: next_visibility_position + 2,
-        };
-        let expected_read_for_reader = expected_read.clone();
-        let mut reader =
-            PaperMarketEventRecoveryReaderV1::try_new(Sha256Hex("e".repeat(64)), move |request| {
-                if request != expected_read_for_reader {
-                    return Err(PaperMarketEventRecoveryReadErrorV1::RangeUnavailable(
-                        "闭桶稀疏恢复读取坐标不符".to_owned(),
-                    ));
-                }
-                Ok(PaperMarketEventRecoveryReadV1 {
-                    encoded_events: encoded_events.clone(),
-                    next_event_at_utc_ms: Some(bucket_at_utc_ms + 1),
-                })
-            })
-            .expect("构造闭桶稀疏恢复读取器");
-        let mut replayed = restore_recoverable_paper_application_session_for_tests(
-            &process,
-            recovered
-                .checkpoint
-                .expect("闭桶稀疏恢复必须包含应用检查点")
-                .checkpoint,
-            &session.session_spec().session_id,
-        );
-        reset_execution_state_clone_count_for_tests();
-        reset_request_registration_preparation_counts_v2();
-        replayed = replay_platform_bucket_operation_v2(
-            replayed,
-            &entry.evidence,
-            entry.recovery_operation,
-            &mut reader,
-        )
-        .expect("用闭桶稀疏核心重放尾日志");
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(replayed.checkpoint(None), online_checkpoint);
         assert_eq!(
             session.drive_next_execution_action_through(bucket_at_utc_ms),
             Ok(SubmissionDriveDispositionV1::ItemProcessed {
@@ -39990,7 +32297,7 @@ mod tests {
             mapping_rule_version: "closed-bucket-sparse-scheduled-before-dpt-v1".to_owned(),
         };
         let resolution_event = sealed_event(
-            contracts::ExecutionMarketEventPayloadV3::MarketResolutionTerminal(resolution),
+            contracts::ExecutionMarketEventPayloadV3::MarketResolutionTerminal(resolution.clone()),
             orderbook_evidence(bucket_at_utc_ms, bucket_at_utc_ms, 3),
             fresh_quality(),
         );
@@ -40158,7 +32465,168 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn closed_bucket_sparse_failed_eof_skips_due_gtd_and_replays_exactly() {
+    async fn task422_failed_multi_market_eof_has_no_partial_public_terminal() {
+        use crate::task21_tests::fresh_quality;
+        use crate::task22_tests::{
+            asset as long_asset, initial_events, market as long_market, orderbook_evidence,
+            sealed_event, session_spec as long_session_spec,
+        };
+        use data_pipeline_core::{
+            derive_execution_market_event_v3_id, encode_execution_market_event_v3,
+        };
+
+        let market_a_identity = long_market();
+        let mut market_b_identity = market_a_identity.clone();
+        market_b_identity.condition_id = ConditionId(format!("0x{}", "2".repeat(64)));
+        market_b_identity.clob_market_id = contracts::ClobMarketId("456".to_owned());
+        let market_a = PlatformMarketV1::try_new(
+            market_a_identity.clone(),
+            [long_asset("2", 1, "Down"), long_asset("1", 0, "Up")],
+        )
+        .expect("构造任务 4.1 红灯市场 A");
+        let market_b = PlatformMarketV1::try_new(
+            market_b_identity.clone(),
+            [long_asset("4", 1, "Down"), long_asset("3", 0, "Up")],
+        )
+        .expect("构造任务 4.1 红灯市场 B");
+        let scenario = Arc::new(
+            PlatformScenarioV1::try_new(vec![market_a, market_b])
+                .expect("构造任务 4.1 双市场红灯场景"),
+        );
+        let rules = successful_snapshot_for_sim_tests().await;
+        let profile = load_embedded_proxy_latency_profile().expect("加载任务 4.1 EOF 红灯时延配置");
+        let mut process = execution_process_for_tests(
+            Arc::clone(&rules),
+            Arc::clone(&profile),
+            Arc::clone(&scenario),
+        );
+        let mut spec = long_session_spec(
+            &scenario,
+            SimCallerRoleV1::ModelTrain,
+            "task412-red-failed-multi-market-eof",
+        );
+        spec.response_outbox_capacity = std::num::NonZeroUsize::new(8).expect("正容量");
+        let mut session =
+            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
+
+        let mut events = initial_events("0.00001", "0.6", "5").to_vec();
+        let mut market_b_events = initial_events("0.00001", "0.6", "5").to_vec();
+        for event in &mut market_b_events {
+            event.market = market_b_identity.clone();
+            let contracts::ExecutionMarketEventPayloadV3::InitialL2Snapshot(snapshot) =
+                &mut event.payload
+            else {
+                panic!("任务 4.1 双市场初始事件必须是 L2 快照");
+            };
+            snapshot.asset = match snapshot.asset.outcome.index {
+                0 => long_asset("3", 0, "Up"),
+                1 => long_asset("4", 1, "Down"),
+                _ => unreachable!("二元市场只有两个结果"),
+            };
+            event.event_id = derive_execution_market_event_v3_id(event)
+                .expect("重算任务 4.1 市场 B 初始事件身份");
+        }
+        events.extend(market_b_events);
+        let encoded_initial = events
+            .iter()
+            .map(|event| {
+                encode_execution_market_event_v3(event).expect("编码任务 4.1 双市场初始事件")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            session.apply_closed_market_event_bucket(ClosedMarketEventBucketV1::hidden(
+                110_000,
+                0,
+                4,
+                MillisecondBucketClosureV1::NextEventAt(
+                    market_a_identity.window.end_at_utc_ms + 1,
+                ),
+                encoded_initial.clone(),
+            )),
+            Ok(MarketBucketApplyDispositionV1::Applied)
+        );
+        assert_eq!(
+            session.apply_closed_market_event_bucket(ClosedMarketEventBucketV1::public(
+                120_000,
+                0,
+                4,
+                MillisecondBucketClosureV1::NextEventAt(
+                    market_a_identity.window.end_at_utc_ms + 1,
+                ),
+                encoded_initial,
+            )),
+            Ok(MarketBucketApplyDispositionV1::Applied)
+        );
+
+        let resolution_at_utc_ms = market_a_identity.window.end_at_utc_ms + 1;
+        let resolution = MarketResolutionTerminalV3::Resolved {
+            winning_asset_id: long_asset("1", 0, "Up").token_id.0,
+            winning_outcome: "Up".to_owned(),
+            payout_vector: vec![
+                contracts::PayoutEntryV1 {
+                    asset: long_asset("1", 0, "Up"),
+                    payout_pusd_per_share: contracts::ExactDecimal("1".to_owned()),
+                },
+                contracts::PayoutEntryV1 {
+                    asset: long_asset("2", 1, "Down"),
+                    payout_pusd_per_share: contracts::ExactDecimal("0".to_owned()),
+                },
+            ],
+            mapping_rule_version: "task412-red-multi-market-eof-v1".to_owned(),
+        };
+        let resolution_event = sealed_event(
+            contracts::ExecutionMarketEventPayloadV3::MarketResolutionTerminal(resolution.clone()),
+            orderbook_evidence(resolution_at_utc_ms, resolution_at_utc_ms, 5),
+            fresh_quality(),
+        );
+        let encoded_resolution = encode_execution_market_event_v3(&resolution_event)
+            .expect("编码任务 4.1 市场 A 判定事件");
+        assert_eq!(
+            session.apply_closed_market_event_bucket(ClosedMarketEventBucketV1::hidden(
+                resolution_at_utc_ms,
+                4,
+                5,
+                MillisecondBucketClosureV1::NextEventAt(resolution_at_utc_ms + 1),
+                vec![encoded_resolution.clone()],
+            )),
+            Ok(MarketBucketApplyDispositionV1::Applied)
+        );
+        assert_eq!(
+            session
+                .session
+                .execution_state()
+                .redeemed_market_resolution(&market_a_identity.condition_id.0),
+            Some(&resolution)
+        );
+        let eof_bucket = ClosedMarketEventBucketV1::public(
+            resolution_at_utc_ms,
+            4,
+            5,
+            MillisecondBucketClosureV1::EndOfInput,
+            vec![encoded_resolution],
+        );
+        assert_eq!(
+            session.apply_closed_market_event_bucket(eof_bucket),
+            Ok(MarketBucketApplyDispositionV1::Applied)
+        );
+        assert!(matches!(
+            session.session.failed_input_seal(),
+            Some((
+                MarketEventPathV1::PublicVisibility,
+                InputPathSealOutcomeV1::FailedMissingQualifiedMarketTerminal { condition_ids }
+            )) if condition_ids == &vec![market_b_identity.condition_id.0.clone()]
+        ));
+        assert_eq!(
+            session
+                .public_market_state(&market_a_identity.condition_id.0)
+                .map(MarketStateV1::lifecycle_phase),
+            Some(MarketLifecyclePhaseV1::PostEndPendingResolution),
+            "整体 EOF 失败不得提交市场 A 的部分公共判定终态"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn closed_bucket_sparse_failed_eof_skips_due_gtd_and_keeps_business_state_consistent() {
         use crate::task22_tests::{
             asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
             scenario as long_scenario, session_spec as long_session_spec,
@@ -40242,30 +32710,28 @@ mod tests {
         let logical_before = session.session.logical_platform_driven_through();
         let lifecycle_before = session.lifecycle_outbox.clone();
         let query_before = session.query_state.clone();
-        let application_checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
-            &process,
-            &session,
-            rules.as_ref(),
-        );
-        let directory = tempfile::tempdir().expect("创建失败封口日志目录");
-        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
-            directory.path().join("closed-bucket-sparse-failed-eof"),
-            &session,
-            &application_checkpoint,
+        let PreparedExecutingClosedBucketDriveAttemptV2::FailedInputSeal(outcome) =
+            prepare_executing_closed_bucket_drive_fields_v2(
+                &mut session.session,
+                &mut session.query_state,
+                &mut session.lifecycle_outbox,
+                &bucket,
+                0,
+            )
+            .expect("准备失败封口闭桶候选")
+        else {
+            panic!("缺少合格市场终态的 EOF 必须形成失败封口候选");
+        };
+        prepare_market_only_closed_bucket_drive_fields_v2(
+            &mut session.session,
+            &mut session.query_state,
+            &bucket,
+            Some(outcome),
         )
-        .expect("创建失败封口协调器");
-
-        reset_execution_state_clone_count_for_tests();
-        reset_request_registration_preparation_counts_v2();
-        assert_eq!(
-            coordinator.apply_closed_market_event_bucket_v2(&mut session, &bucket),
-            Ok(MarketBucketApplyDispositionV1::Applied)
-        );
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
+        .expect("准备失败封口市场候选")
+        .into_committable()
+        .expect("失败封口市场候选必须可提交")
+        .commit();
         assert!(matches!(
             session.session.failed_input_seal(),
             Some((
@@ -40297,68 +32763,11 @@ mod tests {
         );
         assert_eq!(session.lifecycle_outbox, lifecycle_before);
         assert_eq!(session.query_state, query_before);
-        let online_checkpoint = session.durable_checkpoint();
-        assert_ne!(online_checkpoint, baseline);
-
-        let recovered = coordinator
-            .store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("恢复失败封口事务日志");
-        assert_eq!(recovered.tail.len(), 1);
-        let entry = &recovered.tail[0];
-        assert!(entry.evidence.logical_action_results.is_empty());
-        assert!(entry.evidence.private_output_drafts.is_empty());
-        assert_eq!(entry.evidence.query_projection_revision, None);
-        assert_eq!(entry.evidence.logical_platform_driven_through_utc_ms, None);
-        let expected_read = PaperMarketEventRecoveryReadRequestV1 {
-            bucket_at_utc_ms: gtd_deadline_at_utc_ms,
-            start_visibility_index_position: next_visibility_position,
-            next_visibility_index_position: next_visibility_position,
-        };
-        let mut reader =
-            PaperMarketEventRecoveryReaderV1::try_new(Sha256Hex("f".repeat(64)), move |request| {
-                if request != expected_read {
-                    return Err(PaperMarketEventRecoveryReadErrorV1::RangeUnavailable(
-                        "失败封口恢复读取坐标不符".to_owned(),
-                    ));
-                }
-                Ok(PaperMarketEventRecoveryReadV1 {
-                    encoded_events: Vec::new(),
-                    next_event_at_utc_ms: None,
-                })
-            })
-            .expect("构造失败封口恢复读取器");
-        let restored = restore_recoverable_paper_application_session_for_tests(
-            &process,
-            recovered
-                .checkpoint
-                .expect("失败封口恢复必须包含应用检查点")
-                .checkpoint,
-            &session.session_spec().session_id,
-        );
-        reset_execution_state_clone_count_for_tests();
-        reset_request_registration_preparation_counts_v2();
-        let replayed = replay_platform_bucket_operation_v2(
-            restored,
-            &entry.evidence,
-            entry.recovery_operation,
-            &mut reader,
-        )
-        .expect("稀疏重放失败封口事务");
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(replayed.checkpoint(None), online_checkpoint);
+        assert_ne!(session.durable_checkpoint(), baseline);
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn closed_bucket_sparse_non_execution_public_terminalizes_redeemed_market_and_replays() {
+    async fn closed_bucket_sparse_non_execution_public_terminalizes_without_execution_effects() {
         use crate::task21_tests::fresh_quality;
         use crate::task22_tests::{
             asset as long_asset, initial_events, market as long_market, orderbook_evidence,
@@ -40476,7 +32885,6 @@ mod tests {
             vec![encoded_resolution.clone()],
         );
         let baseline = session.durable_checkpoint();
-        let baseline_state = session.runtime_state();
         let execution_before =
             serde_json::to_vec(session.session.execution_state()).expect("编码非执行 matching");
         let revision_before = session.query_projection_revision();
@@ -40497,8 +32905,6 @@ mod tests {
             None
         );
         assert!(prepared.evidence.private_output_drafts.is_empty());
-        let evidence = prepared.evidence.clone();
-        let recovery_operation = prepared.recovery_operation;
         drop(prepared);
         assert_eq!(execution_state_clone_count_for_tests(), 0);
         assert_eq!(session.durable_checkpoint(), baseline);
@@ -40532,447 +32938,6 @@ mod tests {
             logical_before
         );
         assert_eq!(session.lifecycle_outbox, lifecycle_before);
-        let online_checkpoint = session.durable_checkpoint();
-
-        let expected_read = PaperMarketEventRecoveryReadRequestV1 {
-            bucket_at_utc_ms: resolution_at_utc_ms,
-            start_visibility_index_position: 2,
-            next_visibility_index_position: 3,
-        };
-        let mut reader =
-            PaperMarketEventRecoveryReaderV1::try_new(Sha256Hex("1".repeat(64)), move |request| {
-                if request != expected_read {
-                    return Err(PaperMarketEventRecoveryReadErrorV1::RangeUnavailable(
-                        "非执行闭桶恢复读取坐标不符".to_owned(),
-                    ));
-                }
-                Ok(PaperMarketEventRecoveryReadV1 {
-                    encoded_events: vec![encoded_resolution.clone()],
-                    next_event_at_utc_ms: Some(resolution_at_utc_ms + 1),
-                })
-            })
-            .expect("构造非执行闭桶恢复读取器");
-        reset_execution_state_clone_count_for_tests();
-        reset_request_registration_preparation_counts_v2();
-        let replayed = replay_platform_bucket_operation_v2(
-            baseline_state,
-            &evidence,
-            recovery_operation,
-            &mut reader,
-        )
-        .expect("稀疏重放非执行闭桶");
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(replayed.checkpoint(None), online_checkpoint);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn recoverable_paper_v2_three_query_actions_are_atomic_one_log_each_and_replay_exactly() {
-        use crate::task21_tests::fresh_quality;
-        use crate::task22_tests::{
-            asset as long_asset, context_for_arrival, load_initial_market, market as long_market,
-            orderbook_evidence, scenario as long_scenario, sealed_event,
-            session_spec as long_session_spec,
-        };
-        use data_pipeline_core::encode_execution_market_event_v3;
-
-        let rules = successful_snapshot_for_sim_tests().await;
-        let profile = load_embedded_proxy_latency_profile().expect("加载 Paper V2 时延配置");
-        let scenario = long_scenario();
-        let mut process = execution_process_for_tests(
-            Arc::clone(&rules),
-            Arc::clone(&profile),
-            Arc::clone(&scenario),
-        );
-        let mut spec = long_session_spec(
-            &scenario,
-            SimCallerRoleV1::Paper,
-            "paper-v2-three-query-actions",
-        );
-        spec.response_outbox_capacity = std::num::NonZeroUsize::new(8).expect("正容量");
-        let mut session =
-            process.create_active_session_for_tests(spec, accepting_submission_response_bridge());
-
-        let next_visibility_position = load_initial_market(&mut session, "0.00001", "0.6", "5");
-        let resolution_at_utc_ms = long_market()
-            .window
-            .end_at_utc_ms
-            .checked_add(1)
-            .expect("判定时点不得溢出");
-        let resolution = MarketResolutionTerminalV3::Resolved {
-            winning_asset_id: long_asset("1", 0, "Up").token_id.0,
-            winning_outcome: "Up".to_owned(),
-            payout_vector: vec![
-                contracts::PayoutEntryV1 {
-                    asset: long_asset("1", 0, "Up"),
-                    payout_pusd_per_share: contracts::ExactDecimal("1".to_owned()),
-                },
-                contracts::PayoutEntryV1 {
-                    asset: long_asset("2", 1, "Down"),
-                    payout_pusd_per_share: contracts::ExactDecimal("0".to_owned()),
-                },
-            ],
-            mapping_rule_version: "paper-v2-query-eof-resolution-v1".to_owned(),
-        };
-        let resolution_event = sealed_event(
-            contracts::ExecutionMarketEventPayloadV3::MarketResolutionTerminal(resolution),
-            orderbook_evidence(resolution_at_utc_ms, resolution_at_utc_ms, 3),
-            fresh_quality(),
-        );
-        let encoded_resolution = encode_execution_market_event_v3(&resolution_event)
-            .expect("编码 Paper V2 查询 EOF 判定事件");
-        assert_eq!(
-            session.apply_closed_market_event_bucket(ClosedMarketEventBucketV1::public(
-                resolution_at_utc_ms,
-                next_visibility_position,
-                next_visibility_position + 1,
-                MillisecondBucketClosureV1::EndOfInput,
-                vec![encoded_resolution],
-            )),
-            Ok(MarketBucketApplyDispositionV1::Applied)
-        );
-        assert_eq!(
-            session
-                .session
-                .input_path_seal(MarketEventPathV1::PublicVisibility),
-            Some(&InputPathSealOutcomeV1::Exhausted)
-        );
-        let max_delay_ms =
-            i64::try_from(profile.statistics().max_delay_ms).expect("代理时延上限适合 i64");
-        let query_at_utc_ms = resolution_at_utc_ms
-            .checked_add(max_delay_ms)
-            .and_then(|at| at.checked_add(1))
-            .expect("查询时点不得溢出");
-
-        let mut query_contexts = [
-            context_for_arrival(&session, &profile, "paper-v2-query-a", 0, query_at_utc_ms),
-            context_for_arrival(&session, &profile, "paper-v2-query-b", 0, query_at_utc_ms),
-            context_for_arrival(&session, &profile, "paper-v2-query-c", 0, query_at_utc_ms),
-        ];
-        query_contexts.sort_by_key(|context| context.request_sent_at_utc_ms);
-        for (offset, context) in query_contexts.iter_mut().enumerate() {
-            context.caller_sequence = u64::try_from(offset + 1).expect("三项查询序号适合 u64");
-        }
-        let [order_context, orders_context, trades_context] = query_contexts;
-
-        let order_registration = session
-            .order(OrderRequestV1 {
-                context: order_context,
-                platform_order_id: "a".repeat(64),
-            })
-            .expect("登记缺失 Order 查询");
-        let orders_registration = session
-            .orders(OrdersRequestV1 {
-                context: orders_context,
-                filter: OrdersFilterV1::default(),
-                cursor: None,
-            })
-            .expect("登记空 Orders 首页查询");
-        let trades_registration = session
-            .trades(TradesRequestV1 {
-                context: trades_context,
-                filter: TradesFilterV1::default(),
-                cursor: None,
-            })
-            .expect("登记空 Trades 首页查询");
-        let order_at = order_registration
-            .receipt
-            .transit
-            .platform_arrived_at_utc_ms;
-        let orders_at = orders_registration
-            .receipt
-            .transit
-            .platform_arrived_at_utc_ms;
-        let trades_at = trades_registration
-            .receipt
-            .transit
-            .platform_arrived_at_utc_ms;
-        assert_eq!(
-            (order_at, orders_at, trades_at),
-            (query_at_utc_ms, query_at_utc_ms, query_at_utc_ms)
-        );
-        assert_eq!(session.query_state.next_root_sequence, 1);
-
-        let application_checkpoint = recoverable_paper_application_checkpoint_v2_for_tests(
-            &process,
-            &session,
-            rules.as_ref(),
-        );
-        let directory = tempfile::tempdir().expect("创建 Paper V2 查询协调器临时目录");
-        let mut coordinator = RecoverablePaperCoordinatorV2::create_new(
-            directory.path().join("paper-three-query-actions"),
-            &session,
-            &application_checkpoint,
-        )
-        .expect("创建 Paper V2 查询协调器");
-
-        let before_failure_state = session.durable_checkpoint();
-        let before_failure_cursor = coordinator.cursor_for_tests();
-        let before_failure_action = session
-            .session
-            .first_pending_action_through(order_at)
-            .expect("Order 查询必须是首个到期动作");
-        coordinator
-            .store
-            .install_transaction_log_insert_failure_for_tests()
-            .expect("安装 Paper V2 查询 INSERT 失败触发器");
-        reset_execution_state_clone_count_for_tests();
-        reset_request_registration_preparation_counts_v2();
-        assert!(matches!(
-            coordinator.drive_query_execution_through(&mut session, order_at),
-            Err(SubmissionProcessingErrorV1::Session(SessionError::Durability(message)))
-                if message.contains("SQLite")
-        ));
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(session.durable_checkpoint(), before_failure_state);
-        assert_eq!(coordinator.cursor_for_tests(), before_failure_cursor);
-        assert_eq!(coordinator.encoded_transaction_count_for_tests, 1);
-        assert_eq!(coordinator.append_attempt_count_for_tests, 1);
-        assert_eq!(coordinator.append_success_count_for_tests, 0);
-        assert_eq!(coordinator.logical_log_bytes, 0);
-        assert!(!coordinator.recovery_required);
-        assert_eq!(
-            session.session.first_pending_action_through(order_at),
-            Some(before_failure_action)
-        );
-        assert!(
-            coordinator
-                .store
-                .recover::<
-                    DurableLogicalTransactionEvidenceV2,
-                    DurableRecoveryOperationV2,
-                    RecoverablePaperApplicationCheckpointV2,
-                >()
-                .expect("INSERT 失败后读取 Paper V2 查询日志")
-                .tail
-                .is_empty()
-        );
-        coordinator
-            .store
-            .remove_transaction_log_insert_failure_for_tests()
-            .expect("移除 Paper V2 查询 INSERT 失败触发器");
-
-        reset_execution_state_clone_count_for_tests();
-        reset_request_registration_preparation_counts_v2();
-        assert_eq!(
-            coordinator.drive_query_execution_through(&mut session, order_at),
-            Ok(SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: true,
-            })
-        );
-        assert_eq!(session.query_state.next_root_sequence, 1);
-        let recovered_after_order = coordinator
-            .store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("读取 Order 查询日志");
-        assert_eq!(recovered_after_order.tail.len(), 1);
-        let order_evidence = &recovered_after_order.tail[0].evidence;
-        assert_eq!(order_evidence.logical_action_results.len(), 1);
-        assert!(matches!(
-            order_evidence.logical_action_results[0].part,
-            DirectResponsePartV1::Order {
-                result: OrderQueryResultV1::NotFound,
-                ..
-            }
-        ));
-        assert!(matches!(
-            order_evidence.private_output_drafts.as_slice(),
-            [DurablePrivateOutputDraftV1::Direct { draft }]
-                if draft.method == DirectResponseMethodV1::Order
-        ));
-        assert!(order_evidence.account_deltas.is_empty());
-
-        assert_eq!(
-            coordinator.drive_query_execution_through(&mut session, orders_at),
-            Ok(SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: true,
-            })
-        );
-        assert_eq!(session.query_state.next_root_sequence, 2);
-        assert!(session.query_state.roots.is_empty());
-        assert!(session.query_state.issued_cursors.is_empty());
-        let recovered_after_orders = coordinator
-            .store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("读取 Orders 查询日志");
-        assert_eq!(recovered_after_orders.tail.len(), 2);
-        let orders_evidence = &recovered_after_orders.tail[1].evidence;
-        assert_eq!(orders_evidence.logical_action_results.len(), 1);
-        assert!(matches!(
-            &orders_evidence.logical_action_results[0].part,
-            DirectResponsePartV1::Orders {
-                result: OrdersQueryResultV1::Page(OrdersPageV1 {
-                    items,
-                    next_cursor: None,
-                    ..
-                }),
-                ..
-            } if items.is_empty()
-        ));
-        assert!(matches!(
-            orders_evidence.private_output_drafts.as_slice(),
-            [DurablePrivateOutputDraftV1::Direct { draft }]
-                if draft.method == DirectResponseMethodV1::Orders
-        ));
-        assert!(orders_evidence.account_deltas.is_empty());
-
-        assert_eq!(
-            coordinator.drive_query_execution_through(&mut session, trades_at),
-            Ok(SubmissionDriveDispositionV1::ItemProcessed {
-                request_completed: true,
-            })
-        );
-        assert_eq!(session.query_state.next_root_sequence, 3);
-        assert!(session.query_state.roots.is_empty());
-        assert!(session.query_state.issued_cursors.is_empty());
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(coordinator.cursor_for_tests().0, 3);
-        assert_eq!(coordinator.encoded_transaction_count_for_tests, 4);
-        assert_eq!(coordinator.append_attempt_count_for_tests, 4);
-        assert_eq!(coordinator.append_success_count_for_tests, 3);
-        let online_checkpoint = session.durable_checkpoint();
-
-        let recovered = coordinator
-            .store
-            .recover::<
-                DurableLogicalTransactionEvidenceV2,
-                DurableRecoveryOperationV2,
-                RecoverablePaperApplicationCheckpointV2,
-            >()
-            .expect("恢复 Paper V2 三查询日志");
-        let recovered_checkpoint = recovered
-            .checkpoint
-            .expect("三查询恢复必须有正式应用检查点");
-        assert_eq!(recovered_checkpoint.through_sequence, 0);
-        assert_eq!(recovered.tail.len(), 3);
-        assert_eq!(
-            recovered
-                .tail
-                .iter()
-                .map(|entry| entry.sequence)
-                .collect::<Vec<_>>(),
-            vec![1, 2, 3]
-        );
-        assert_eq!(
-            recovered
-                .tail
-                .iter()
-                .map(
-                    |entry| match &entry.evidence.logical_action_results[0].part {
-                        DirectResponsePartV1::Order {
-                            result: OrderQueryResultV1::NotFound,
-                            ..
-                        } => DirectResponseMethodV1::Order,
-                        DirectResponsePartV1::Orders {
-                            result:
-                                OrdersQueryResultV1::Page(OrdersPageV1 {
-                                    items,
-                                    next_cursor: None,
-                                    ..
-                                }),
-                            ..
-                        } if items.is_empty() => DirectResponseMethodV1::Orders,
-                        DirectResponsePartV1::Trades {
-                            result:
-                                TradesQueryResultV1::Page(TradesPageV1 {
-                                    items,
-                                    next_cursor: None,
-                                    ..
-                                }),
-                            ..
-                        } if items.is_empty() => DirectResponseMethodV1::Trades,
-                        part => panic!("三查询日志包含错误响应种类：{part:?}"),
-                    }
-                )
-                .collect::<Vec<_>>(),
-            vec![
-                DirectResponseMethodV1::Order,
-                DirectResponseMethodV1::Orders,
-                DirectResponseMethodV1::Trades,
-            ]
-        );
-        for (entry, expected_method) in recovered.tail.iter().zip([
-            DirectResponseMethodV1::Order,
-            DirectResponseMethodV1::Orders,
-            DirectResponseMethodV1::Trades,
-        ]) {
-            assert_eq!(entry.evidence.logical_action_results.len(), 1);
-            assert!(matches!(
-                entry.evidence.private_output_drafts.as_slice(),
-                [DurablePrivateOutputDraftV1::Direct { draft }]
-                    if draft.method == expected_method
-            ));
-        }
-        assert!(
-            recovered
-                .tail
-                .iter()
-                .all(|entry| entry.evidence.account_deltas.is_empty())
-        );
-
-        let session_id = session.session_spec().session_id.clone();
-        let application_checkpoint = recovered_checkpoint.checkpoint;
-        let later_time_baseline = restore_recoverable_paper_application_session_for_tests(
-            &process,
-            application_checkpoint.clone(),
-            &session_id,
-        );
-        let later_time = replay_execution_operation_v2(
-            later_time_baseline,
-            &recovered.tail[0].evidence,
-            DurableRecoveryOperationV2::DriveExecutionThrough {
-                effective_processing_at_utc_ms: order_at + 1,
-            },
-        );
-        let later_time_error = match later_time {
-            Ok(_) => panic!("较晚执行时点不得重放成功"),
-            Err(error) => error,
-        };
-        assert!(
-            matches!(
-                &later_time_error,
-                SessionCheckpointErrorV1::InvalidSessionState(message)
-                    if message.contains("恢复操作时点与重算候选不符")
-            ),
-            "later-time error: {later_time_error}",
-        );
-        let mut replayed = restore_recoverable_paper_application_session_for_tests(
-            &process,
-            application_checkpoint,
-            &session_id,
-        );
-        reset_execution_state_clone_count_for_tests();
-        reset_request_registration_preparation_counts_v2();
-        for entry in recovered.tail {
-            replayed =
-                replay_execution_operation_v2(replayed, &entry.evidence, entry.recovery_operation)
-                    .expect("用共享查询稀疏核心重放 Paper V2 查询尾日志");
-        }
-        assert_eq!(execution_state_clone_count_for_tests(), 0);
-        assert_eq!(
-            request_registration_preparation_counts_v2().runtime_state_calls,
-            0
-        );
-        assert_eq!(replayed.checkpoint(None), online_checkpoint);
     }
 
     #[tokio::test(flavor = "current_thread")]

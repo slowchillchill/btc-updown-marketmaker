@@ -6,6 +6,9 @@ use contracts::{AssetIdentityV1, MarketIdentityV2, Sha256Hex};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::artifacts::SimulationScenarioArtifactV1;
+use crate::market_directory::{SessionMarketDirectoryErrorV1, SessionMarketDirectoryV1};
+
 pub const PLATFORM_SCENARIO_SCHEMA_V1: &str = "platform_scenario_v1";
 pub const MARKET_SET_SCHEMA_V1: &str = "market_set_v1";
 pub const BTC_UPDOWN_5M_MARKET_FAMILY_V1: &str = "BTC_UPDOWN_5M";
@@ -44,6 +47,76 @@ impl fmt::Display for PlatformScenarioErrorV1 {
 }
 
 impl std::error::Error for PlatformScenarioErrorV1 {}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PlatformScenarioFileErrorV1 {
+    Json(String),
+    InvalidSchema,
+    Scenario(PlatformScenarioErrorV1),
+    MarketDirectory(SessionMarketDirectoryErrorV1),
+}
+
+impl fmt::Display for PlatformScenarioFileErrorV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Json(message) => write!(formatter, "场景文件 JSON 非法：{message}"),
+            Self::InvalidSchema => write!(formatter, "场景文件 schema 不匹配"),
+            Self::Scenario(error) => write!(formatter, "场景文件业务内容非法：{error}"),
+            Self::MarketDirectory(error) => write!(formatter, "场景文件市场目录非法：{error}"),
+        }
+    }
+}
+
+impl std::error::Error for PlatformScenarioFileErrorV1 {}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SealedPlatformScenarioV1 {
+    file_sha256: Sha256Hex,
+    scenario: PlatformScenarioV1,
+    initial_market_directory: SessionMarketDirectoryV1,
+}
+
+impl SealedPlatformScenarioV1 {
+    pub(crate) fn decode_and_seal(bytes: &[u8]) -> Result<Self, PlatformScenarioFileErrorV1> {
+        let artifact: SimulationScenarioArtifactV1 = serde_json::from_slice(bytes)
+            .map_err(|error| PlatformScenarioFileErrorV1::Json(error.to_string()))?;
+        let SimulationScenarioArtifactV1 {
+            schema_version,
+            scenario_sha256: _,
+            market_set_sha256: _,
+            markets,
+        } = artifact;
+        if schema_version != PLATFORM_SCENARIO_SCHEMA_V1 {
+            return Err(PlatformScenarioFileErrorV1::InvalidSchema);
+        }
+        for market in &markets {
+            market
+                .validate_for_admission()
+                .map_err(PlatformScenarioFileErrorV1::Scenario)?;
+        }
+        let scenario =
+            PlatformScenarioV1::try_new(markets).map_err(PlatformScenarioFileErrorV1::Scenario)?;
+        let initial_market_directory = SessionMarketDirectoryV1::try_from_scenario(&scenario)
+            .map_err(PlatformScenarioFileErrorV1::MarketDirectory)?;
+        Ok(Self {
+            file_sha256: sha256_file_bytes(bytes),
+            scenario,
+            initial_market_directory,
+        })
+    }
+
+    pub(crate) fn file_sha256(&self) -> &Sha256Hex {
+        &self.file_sha256
+    }
+
+    pub(crate) fn scenario(&self) -> &PlatformScenarioV1 {
+        &self.scenario
+    }
+
+    pub(crate) fn initial_market_directory(&self) -> &SessionMarketDirectoryV1 {
+        &self.initial_market_directory
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -205,6 +278,16 @@ fn hash_json<T: Serialize>(domain: &str, value: &T) -> Result<Sha256Hex, Platfor
     Ok(Sha256Hex(encoded))
 }
 
+fn sha256_file_bytes(bytes: &[u8]) -> Sha256Hex {
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        use fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("写入 String 不会失败");
+    }
+    Sha256Hex(encoded)
+}
+
 fn validate_market(market: &MarketIdentityV2) -> Result<(), PlatformScenarioErrorV1> {
     let condition = market
         .condition_id
@@ -324,6 +407,98 @@ mod tests {
         )
     }
 
+    fn market(
+        condition_digit: char,
+        clob_market_id: &str,
+        first_token_id: &str,
+        second_token_id: &str,
+    ) -> PlatformMarketV1 {
+        PlatformMarketV1::try_new(
+            MarketIdentityV2 {
+                condition_id: ConditionId(format!("0x{}", condition_digit.to_string().repeat(64))),
+                clob_market_id: ClobMarketId(clob_market_id.to_owned()),
+                window: MarketWindowV2 {
+                    start_at_utc_ms: 1_000,
+                    end_at_utc_ms: 2_000,
+                },
+            },
+            [
+                AssetIdentityV1 {
+                    token_id: TokenId(first_token_id.to_owned()),
+                    outcome: OutcomeIdentityV1 {
+                        index: 0,
+                        label: "Up".to_owned(),
+                    },
+                },
+                AssetIdentityV1 {
+                    token_id: TokenId(second_token_id.to_owned()),
+                    outcome: OutcomeIdentityV1 {
+                        index: 1,
+                        label: "Down".to_owned(),
+                    },
+                },
+            ],
+        )
+        .expect("构造测试市场")
+    }
+
+    #[test]
+    fn sealed_scenario_uses_file_bytes_without_trusting_legacy_object_digests() {
+        let scenario = scenario_for_sim_tests();
+        let artifact = |scenario_sha256: Sha256Hex, market_set_sha256: Sha256Hex| {
+            serde_json::to_vec(&SimulationScenarioArtifactV1 {
+                schema_version: PLATFORM_SCENARIO_SCHEMA_V1.to_owned(),
+                scenario_sha256,
+                market_set_sha256,
+                markets: scenario.market_set().markets().to_vec(),
+            })
+            .expect("编码场景文件")
+        };
+        let first_bytes = artifact(Sha256Hex("a".repeat(64)), Sha256Hex("b".repeat(64)));
+        let second_bytes = artifact(Sha256Hex("c".repeat(64)), Sha256Hex("d".repeat(64)));
+
+        let first =
+            SealedPlatformScenarioV1::decode_and_seal(&first_bytes).expect("解码第一份场景文件");
+        let second =
+            SealedPlatformScenarioV1::decode_and_seal(&second_bytes).expect("解码第二份场景文件");
+
+        assert_eq!(first.scenario(), second.scenario());
+        assert_ne!(first.file_sha256(), second.file_sha256());
+        assert_eq!(first.file_sha256(), &sha256_file_bytes(&first_bytes));
+    }
+
+    #[test]
+    fn sealed_scenario_builds_the_initial_directory_once_and_rejects_cross_market_token_reuse() {
+        let artifact_bytes = |markets| {
+            serde_json::to_vec(&SimulationScenarioArtifactV1 {
+                schema_version: PLATFORM_SCENARIO_SCHEMA_V1.to_owned(),
+                scenario_sha256: Sha256Hex("a".repeat(64)),
+                market_set_sha256: Sha256Hex("b".repeat(64)),
+                markets,
+            })
+            .expect("编码场景文件")
+        };
+        let valid_bytes = artifact_bytes(vec![
+            market('1', "101", "201", "202"),
+            market('2', "102", "203", "204"),
+        ]);
+        let sealed = SealedPlatformScenarioV1::decode_and_seal(&valid_bytes)
+            .expect("冷加载时形成初始市场目录");
+        assert_eq!(sealed.initial_market_directory().markets().len(), 2);
+
+        let duplicate_token_bytes = artifact_bytes(vec![
+            market('1', "101", "201", "202"),
+            market('2', "102", "202", "204"),
+        ]);
+        assert_eq!(
+            SealedPlatformScenarioV1::decode_and_seal(&duplicate_token_bytes)
+                .expect_err("冷加载必须拒绝跨市场复用 token"),
+            PlatformScenarioFileErrorV1::MarketDirectory(SessionMarketDirectoryErrorV1::Token(
+                "202".to_owned()
+            ))
+        );
+    }
+
     #[test]
     fn platform_market_text_fields_are_bounded_at_256_utf8_bytes() {
         assert_eq!(PLATFORM_MARKET_TEXT_MAX_BYTES_V1, 256);
@@ -370,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn admission_rejects_deserialized_noncanonical_asset_order() {
+    fn sealed_scenario_rejects_deserialized_noncanonical_asset_order() {
         let canonical = market_with_fields("1".to_owned(), "10".to_owned(), "Up".to_owned())
             .expect("规范市场应成功构造");
         assert_eq!(canonical.assets()[0].token_id.0, "2");
@@ -386,10 +561,18 @@ mod tests {
             .reverse();
         let unchecked: PlatformMarketV1 =
             serde_json::from_value(encoded).expect("Serde 只负责结构反序列化");
+        let bytes = serde_json::to_vec(&SimulationScenarioArtifactV1 {
+            schema_version: PLATFORM_SCENARIO_SCHEMA_V1.to_owned(),
+            scenario_sha256: Sha256Hex("a".repeat(64)),
+            market_set_sha256: Sha256Hex("b".repeat(64)),
+            markets: vec![unchecked],
+        })
+        .expect("编码损坏边界样本");
 
         assert_eq!(
-            unchecked.validate_for_admission(),
-            Err(PlatformScenarioErrorV1::InvalidAssetIdentity)
+            SealedPlatformScenarioV1::decode_and_seal(&bytes)
+                .expect_err("冷加载必须拒绝非规范资产顺序"),
+            PlatformScenarioFileErrorV1::Scenario(PlatformScenarioErrorV1::InvalidAssetIdentity)
         );
     }
 }

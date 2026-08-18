@@ -21,6 +21,7 @@ use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
 
 pub const PLATFORM_RULE_SNAPSHOT_SCHEMA_V2: &str = "platform_rule_snapshot_v2";
+pub(crate) const PLATFORM_RULE_SNAPSHOT_SCHEMA_V3: &str = "platform_rule_snapshot_v3";
 const PLATFORM_RULE_CONFIG_SCHEMA_V1: &str = "platform_rules_config_v1";
 const PLATFORM_RULE_CONFIG_PATH: &str = "sim-system/config/platform-rules-v1.toml";
 const PLATFORM_RULE_CONFIG_BYTES: &[u8] = include_bytes!("../config/platform-rules-v1.toml");
@@ -129,6 +130,41 @@ impl SealedProcessRuleSnapshot {
 
     #[must_use]
     pub fn synchronized_rules(&self) -> &SynchronizedPlatformRulesV1 {
+        &self.snapshot.synchronized_platform_rules
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SealedProcessRuleSnapshotV3 {
+    path: PathBuf,
+    file_sha256: Sha256Hex,
+    access_mode: SnapshotAccessMode,
+    snapshot: PlatformRuleSnapshotV3,
+}
+
+impl SealedProcessRuleSnapshotV3 {
+    #[must_use]
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    #[must_use]
+    pub(crate) fn file_sha256(&self) -> &Sha256Hex {
+        &self.file_sha256
+    }
+
+    #[must_use]
+    pub(crate) fn access_mode(&self) -> SnapshotAccessMode {
+        self.access_mode
+    }
+
+    #[must_use]
+    pub(crate) fn snapshot(&self) -> &PlatformRuleSnapshotV3 {
+        &self.snapshot
+    }
+
+    #[must_use]
+    pub(crate) fn synchronized_rules(&self) -> &SynchronizedPlatformRulesV1 {
         &self.snapshot.synchronized_platform_rules
     }
 }
@@ -365,11 +401,37 @@ pub struct HttpRequestEvidenceV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct HttpAttemptEvidenceV2 {
+    pub(crate) attempt: u8,
+    pub(crate) started_at_utc_ms: i64,
+    pub(crate) completed_at_utc_ms: i64,
+    pub(crate) status_code: Option<u16>,
+    pub(crate) response_bytes: Option<u64>,
+    pub(crate) transport_error_kind: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct HttpRequestEvidenceV2 {
+    pub(crate) endpoint_kind: HttpEndpointKindV1,
+    pub(crate) method: String,
+    pub(crate) request_url: String,
+    pub(crate) condition_id: ConditionId,
+    pub(crate) closed: Option<bool>,
+    pub(crate) attempts: Vec<HttpAttemptEvidenceV2>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StaticConfigEvidenceV1 {
     pub path: String,
     pub schema_version: String,
     pub raw_sha256: Sha256Hex,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct StaticConfigEvidenceV2 {
+    pub(crate) path: String,
+    pub(crate) schema_version: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -416,6 +478,30 @@ pub struct PlatformRuleSnapshotV2 {
     pub provenance: PlatformRuleProvenanceV2,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PlatformRuleProvenanceV3 {
+    pub(crate) created_via: SnapshotCreationModeV1,
+    pub(crate) query_started_at_utc_ms: i64,
+    pub(crate) query_completed_at_utc_ms: i64,
+    pub(crate) rules_observed_at_utc_ms: i64,
+    pub(crate) reference_market: ReferenceMarketSpecV1,
+    pub(crate) reference_observation_evidence: RuleEvidenceV1,
+    pub(crate) application_policy: EvidenceBackedRuleV1<BtcUpdownProcessRulePolicyV1>,
+    pub(crate) http_requests: Vec<HttpRequestEvidenceV2>,
+    pub(crate) static_config: StaticConfigEvidenceV2,
+    pub(crate) implementation_identity: ImplementationIdentityV1,
+    pub(crate) dependencies: Vec<DependencyIdentityV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PlatformRuleSnapshotV3 {
+    pub(crate) schema_version: String,
+    pub(crate) synchronized_platform_rules: SynchronizedPlatformRulesV1,
+    pub(crate) documented_platform_rules: DocumentedPlatformRulesV1,
+    pub(crate) project_account_rules: ProjectAccountRulesV1,
+    pub(crate) provenance: PlatformRuleProvenanceV3,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum RuleSnapshotError {
     InvalidReferenceMarket(String),
@@ -439,6 +525,10 @@ pub enum RuleSnapshotError {
     ResponseDecode {
         url: String,
         raw_sha256: Sha256Hex,
+        message: String,
+    },
+    ResponseDecodeWithoutDigest {
+        url: String,
         message: String,
     },
     InvalidRules(String),
@@ -491,6 +581,9 @@ impl fmt::Display for RuleSnapshotError {
                 "response decode failed for {url} at {}: {message}",
                 raw_sha256.0
             ),
+            Self::ResponseDecodeWithoutDigest { url, message } => {
+                write!(formatter, "response decode failed for {url}: {message}")
+            }
             Self::InvalidRules(message) => write!(formatter, "invalid platform rules: {message}"),
             Self::InitializationTimeout => {
                 write!(formatter, "process rule initialization timed out")
@@ -615,11 +708,17 @@ struct GammaKeysetWire {
     markets: Vec<GammaMarketWire>,
 }
 
+#[derive(Clone, Copy)]
+enum RawResponseDigestMode {
+    LegacyV2,
+    OmitV3,
+}
+
 #[derive(Debug)]
-struct HashedResponse {
+struct LoadedResponse {
     url: String,
     bytes: Vec<u8>,
-    sha256: Sha256Hex,
+    sha256: Option<Sha256Hex>,
     evidence: HttpRequestEvidenceV1,
 }
 
@@ -677,6 +776,7 @@ impl PlatformRuleHttpLoader {
     async fn load(
         &self,
         reference: &ReferenceMarketSpecV1,
+        digest_mode: RawResponseDigestMode,
     ) -> Result<LoadedHttpRules, RuleSnapshotError> {
         let clob_url = format!(
             "{}/{}",
@@ -688,9 +788,10 @@ impl PlatformRuleHttpLoader {
                 clob_url,
                 reference.condition_id.clone(),
                 None,
+                digest_mode,
             )
             .await?;
-        let clob: ClobMarketWire = decode_hashed_response(&clob_response)?;
+        let clob: ClobMarketWire = decode_loaded_response(&clob_response)?;
         let mut requests = vec![clob_response.evidence];
 
         let mut gamma = Vec::new();
@@ -707,9 +808,10 @@ impl PlatformRuleHttpLoader {
                     url.to_string(),
                     reference.condition_id.clone(),
                     Some(closed),
+                    digest_mode,
                 )
                 .await?;
-            let parsed: GammaKeysetWire = decode_hashed_response(&response)?;
+            let parsed: GammaKeysetWire = decode_loaded_response(&response)?;
             for market in &parsed.markets {
                 if market.closed != closed {
                     return Err(RuleSnapshotError::InvalidRules(format!(
@@ -735,7 +837,8 @@ impl PlatformRuleHttpLoader {
         url: String,
         condition_id: ConditionId,
         closed: Option<bool>,
-    ) -> Result<HashedResponse, RuleSnapshotError> {
+        digest_mode: RawResponseDigestMode,
+    ) -> Result<LoadedResponse, RuleSnapshotError> {
         let mut attempts = Vec::new();
         for attempt in 1..=2 {
             let started_at_utc_ms = (self.now_utc_ms)()?;
@@ -783,18 +886,21 @@ impl PlatformRuleHttpLoader {
                             }
                         };
                     let completed_at_utc_ms = (self.now_utc_ms)()?;
-                    let raw_sha256 = sha256_hex(&body);
+                    let raw_sha256 = match digest_mode {
+                        RawResponseDigestMode::LegacyV2 => Some(raw_response_sha256(&body)),
+                        RawResponseDigestMode::OmitV3 => None,
+                    };
                     attempts.push(HttpAttemptEvidenceV1 {
                         attempt,
                         started_at_utc_ms,
                         completed_at_utc_ms,
                         status_code: Some(status.as_u16()),
                         response_bytes: Some(body.len() as u64),
-                        raw_response_sha256: Some(raw_sha256.clone()),
+                        raw_response_sha256: raw_sha256.clone(),
                         transport_error_kind: None,
                     });
                     if status == StatusCode::OK {
-                        return Ok(HashedResponse {
+                        return Ok(LoadedResponse {
                             url: url.clone(),
                             bytes: body,
                             sha256: raw_sha256,
@@ -866,6 +972,19 @@ pub async fn query_and_seal_current_process_snapshot(
     .await
 }
 
+#[allow(dead_code)]
+pub(crate) async fn query_and_seal_current_process_snapshot_v3(
+    request: CurrentProcessSnapshotRequestV1,
+) -> Result<Arc<SealedProcessRuleSnapshotV3>, RuleSnapshotError> {
+    query_and_seal_current_process_snapshot_v3_with(
+        request,
+        LoaderOptions::production(),
+        PLATFORM_RULE_CONFIG_BYTES,
+        system_now_utc_ms,
+    )
+    .await
+}
+
 pub fn load_historical_process_snapshot(
     request: HistoricalProcessSnapshotRequestV1,
 ) -> Result<Arc<SealedProcessRuleSnapshot>, RuleSnapshotError> {
@@ -908,41 +1027,29 @@ async fn query_and_seal_current_process_snapshot_with(
     config_bytes: &[u8],
     now_utc_ms: fn() -> Result<i64, RuleSnapshotError>,
 ) -> Result<Arc<SealedProcessRuleSnapshot>, RuleSnapshotError> {
-    let reference_market = canonical_reference_market(request.reference_market)?;
-    validate_implementation_identity(&request.implementation_identity)?;
-    let config = parse_and_validate_config(config_bytes)?;
-    reject_existing_target_before_query(&request.target_path)?;
-
-    let query_started_at_utc_ms = now_utc_ms()?;
-    let loader = PlatformRuleHttpLoader::new(options.clone(), now_utc_ms)?;
-    let loaded = tokio::time::timeout(
-        options.initialization_timeout,
-        loader.load(&reference_market),
+    let material = load_current_rule_material(
+        &request,
+        options,
+        config_bytes,
+        now_utc_ms,
+        RawResponseDigestMode::LegacyV2,
     )
-    .await
-    .map_err(|_| RuleSnapshotError::InitializationTimeout)??;
-    let query_completed_at_utc_ms = now_utc_ms()?;
-    let synchronized_platform_rules = merge_and_validate_reference_rules(
-        &reference_market,
-        loaded.clob,
-        loaded.gamma,
-        &config.project_account_rules,
-    )?;
+    .await?;
     let provenance = PlatformRuleProvenanceV2 {
         created_via: SnapshotCreationModeV1::CurrentQuery,
-        query_started_at_utc_ms,
-        query_completed_at_utc_ms,
-        rules_observed_at_utc_ms: query_completed_at_utc_ms,
-        reference_market,
+        query_started_at_utc_ms: material.query_started_at_utc_ms,
+        query_completed_at_utc_ms: material.query_completed_at_utc_ms,
+        rules_observed_at_utc_ms: material.query_completed_at_utc_ms,
+        reference_market: material.reference_market,
         reference_observation_evidence: reference_observation_evidence(),
         application_policy: process_rule_application_policy(),
-        http_requests: loaded.requests,
+        http_requests: material.http_requests,
         static_config: StaticConfigEvidenceV1 {
             path: PLATFORM_RULE_CONFIG_PATH.to_owned(),
-            schema_version: config.schema_version,
+            schema_version: material.config.schema_version,
             raw_sha256: sha256_hex(config_bytes),
         },
-        implementation_identity: request.implementation_identity,
+        implementation_identity: material.implementation_identity,
         dependencies: direct_dependency_identities(),
         reference_validation: ReferenceValidationV1 {
             exact_reference_identity: true,
@@ -953,9 +1060,9 @@ async fn query_and_seal_current_process_snapshot_with(
     let mut snapshot = PlatformRuleSnapshotV2 {
         schema_version: PLATFORM_RULE_SNAPSHOT_SCHEMA_V2.to_owned(),
         content_sha256: Sha256Hex(String::new()),
-        synchronized_platform_rules,
-        documented_platform_rules: config.documented_platform_rules,
-        project_account_rules: config.project_account_rules,
+        synchronized_platform_rules: material.synchronized_platform_rules,
+        documented_platform_rules: material.config.documented_platform_rules,
+        project_account_rules: material.config.project_account_rules,
         provenance,
     };
     snapshot.content_sha256 = compute_snapshot_content_sha256(&snapshot)?;
@@ -969,6 +1076,125 @@ async fn query_and_seal_current_process_snapshot_with(
         access_mode: SnapshotAccessMode::CurrentQuery,
         snapshot,
     }))
+}
+
+async fn query_and_seal_current_process_snapshot_v3_with(
+    request: CurrentProcessSnapshotRequestV1,
+    options: LoaderOptions,
+    config_bytes: &[u8],
+    now_utc_ms: fn() -> Result<i64, RuleSnapshotError>,
+) -> Result<Arc<SealedProcessRuleSnapshotV3>, RuleSnapshotError> {
+    let material = load_current_rule_material(
+        &request,
+        options,
+        config_bytes,
+        now_utc_ms,
+        RawResponseDigestMode::OmitV3,
+    )
+    .await?;
+    let snapshot = PlatformRuleSnapshotV3 {
+        schema_version: PLATFORM_RULE_SNAPSHOT_SCHEMA_V3.to_owned(),
+        synchronized_platform_rules: material.synchronized_platform_rules,
+        documented_platform_rules: material.config.documented_platform_rules,
+        project_account_rules: material.config.project_account_rules,
+        provenance: PlatformRuleProvenanceV3 {
+            created_via: SnapshotCreationModeV1::CurrentQuery,
+            query_started_at_utc_ms: material.query_started_at_utc_ms,
+            query_completed_at_utc_ms: material.query_completed_at_utc_ms,
+            rules_observed_at_utc_ms: material.query_completed_at_utc_ms,
+            reference_market: material.reference_market,
+            reference_observation_evidence: reference_observation_evidence(),
+            application_policy: process_rule_application_policy(),
+            http_requests: material
+                .http_requests
+                .into_iter()
+                .map(http_request_evidence_v2)
+                .collect(),
+            static_config: StaticConfigEvidenceV2 {
+                path: PLATFORM_RULE_CONFIG_PATH.to_owned(),
+                schema_version: material.config.schema_version,
+            },
+            implementation_identity: material.implementation_identity,
+            dependencies: direct_dependency_identities(),
+        },
+    };
+    let (file_sha256, path, _) =
+        seal_snapshot(&request.target_path, &snapshot, MAX_RULE_SNAPSHOT_BYTES)?;
+    Ok(Arc::new(SealedProcessRuleSnapshotV3 {
+        path,
+        file_sha256,
+        access_mode: SnapshotAccessMode::CurrentQuery,
+        snapshot,
+    }))
+}
+
+struct LoadedCurrentRuleMaterial {
+    reference_market: ReferenceMarketSpecV1,
+    query_started_at_utc_ms: i64,
+    query_completed_at_utc_ms: i64,
+    synchronized_platform_rules: SynchronizedPlatformRulesV1,
+    config: PlatformRulesConfigV1,
+    http_requests: Vec<HttpRequestEvidenceV1>,
+    implementation_identity: ImplementationIdentityV1,
+}
+
+async fn load_current_rule_material(
+    request: &CurrentProcessSnapshotRequestV1,
+    options: LoaderOptions,
+    config_bytes: &[u8],
+    now_utc_ms: fn() -> Result<i64, RuleSnapshotError>,
+    digest_mode: RawResponseDigestMode,
+) -> Result<LoadedCurrentRuleMaterial, RuleSnapshotError> {
+    let reference_market = canonical_reference_market(request.reference_market.clone())?;
+    validate_implementation_identity(&request.implementation_identity)?;
+    let config = parse_and_validate_config(config_bytes)?;
+    reject_existing_target_before_query(&request.target_path)?;
+    let query_started_at_utc_ms = now_utc_ms()?;
+    let loader = PlatformRuleHttpLoader::new(options.clone(), now_utc_ms)?;
+    let loaded = tokio::time::timeout(
+        options.initialization_timeout,
+        loader.load(&reference_market, digest_mode),
+    )
+    .await
+    .map_err(|_| RuleSnapshotError::InitializationTimeout)??;
+    let query_completed_at_utc_ms = now_utc_ms()?;
+    let synchronized_platform_rules = merge_and_validate_reference_rules(
+        &reference_market,
+        loaded.clob,
+        loaded.gamma,
+        &config.project_account_rules,
+    )?;
+    Ok(LoadedCurrentRuleMaterial {
+        reference_market,
+        query_started_at_utc_ms,
+        query_completed_at_utc_ms,
+        synchronized_platform_rules,
+        config,
+        http_requests: loaded.requests,
+        implementation_identity: request.implementation_identity.clone(),
+    })
+}
+
+fn http_request_evidence_v2(request: HttpRequestEvidenceV1) -> HttpRequestEvidenceV2 {
+    HttpRequestEvidenceV2 {
+        endpoint_kind: request.endpoint_kind,
+        method: request.method,
+        request_url: request.request_url,
+        condition_id: request.condition_id,
+        closed: request.closed,
+        attempts: request
+            .attempts
+            .into_iter()
+            .map(|attempt| HttpAttemptEvidenceV2 {
+                attempt: attempt.attempt,
+                started_at_utc_ms: attempt.started_at_utc_ms,
+                completed_at_utc_ms: attempt.completed_at_utc_ms,
+                status_code: attempt.status_code,
+                response_bytes: attempt.response_bytes,
+                transport_error_kind: attempt.transport_error_kind,
+            })
+            .collect(),
+    }
 }
 
 fn build_gamma_request_url(
@@ -1028,14 +1254,20 @@ async fn read_bounded_body(
     Ok(bytes)
 }
 
-fn decode_hashed_response<T>(response: &HashedResponse) -> Result<T, RuleSnapshotError>
+fn decode_loaded_response<T>(response: &LoadedResponse) -> Result<T, RuleSnapshotError>
 where
     T: for<'de> Deserialize<'de>,
 {
-    serde_json::from_slice(&response.bytes).map_err(|error| RuleSnapshotError::ResponseDecode {
-        url: response.url.clone(),
-        raw_sha256: response.sha256.clone(),
-        message: error.to_string(),
+    serde_json::from_slice(&response.bytes).map_err(|error| match &response.sha256 {
+        Some(raw_sha256) => RuleSnapshotError::ResponseDecode {
+            url: response.url.clone(),
+            raw_sha256: raw_sha256.clone(),
+            message: error.to_string(),
+        },
+        None => RuleSnapshotError::ResponseDecodeWithoutDigest {
+            url: response.url.clone(),
+            message: error.to_string(),
+        },
     })
 }
 
@@ -1854,11 +2086,14 @@ fn reject_existing_target_before_query(target_path: &Path) -> Result<(), RuleSna
     }
 }
 
-fn seal_snapshot(
+fn seal_snapshot<T>(
     target_path: &Path,
-    snapshot: &PlatformRuleSnapshotV2,
+    snapshot: &T,
     max_snapshot_bytes: usize,
-) -> Result<(Sha256Hex, PathBuf, Vec<u8>), RuleSnapshotError> {
+) -> Result<(Sha256Hex, PathBuf, Vec<u8>), RuleSnapshotError>
+where
+    T: Serialize,
+{
     let mut bytes = serde_json::to_vec_pretty(snapshot)
         .map_err(|error| RuleSnapshotError::SnapshotIntegrity(error.to_string()))?;
     bytes.push(b'\n');
@@ -2051,7 +2286,41 @@ fn decimal_to_u32(value: &Decimal, name: &str) -> Result<u32, RuleSnapshotError>
 }
 
 fn sha256_hex(bytes: &[u8]) -> Sha256Hex {
+    #[cfg(test)]
+    SHA256_HEX_COUNT.with(|count| count.set(count.get() + 1));
     Sha256Hex(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn raw_response_sha256(bytes: &[u8]) -> Sha256Hex {
+    #[cfg(test)]
+    RAW_RESPONSE_DIGEST_COUNT.with(|count| count.set(count.get() + 1));
+    sha256_hex(bytes)
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static RAW_RESPONSE_DIGEST_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SHA256_HEX_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_raw_response_digest_count() {
+    RAW_RESPONSE_DIGEST_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn reset_sha256_hex_count() {
+    SHA256_HEX_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn raw_response_digest_count() -> usize {
+    RAW_RESPONSE_DIGEST_COUNT.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn sha256_hex_count() -> usize {
+    SHA256_HEX_COUNT.with(std::cell::Cell::get)
 }
 
 fn sha256_serialized<T: Serialize + ?Sized>(value: &T) -> Result<Sha256Hex, RuleSnapshotError> {
@@ -2377,8 +2646,32 @@ pub(crate) mod tests {
         .expect("current query should seal a process snapshot")
     }
 
+    async fn create_successful_snapshot_v3(
+        server: &ScriptedServer,
+        path: PathBuf,
+    ) -> Arc<SealedProcessRuleSnapshotV3> {
+        query_and_seal_current_process_snapshot_v3_with(
+            current_request(path),
+            test_loader_options(server),
+            PLATFORM_RULE_CONFIG_BYTES,
+            fixed_now_utc_ms,
+        )
+        .await
+        .expect("当前查询必须密封 V3 进程规则快照")
+    }
+
     pub(crate) async fn successful_snapshot_for_sim_tests() -> Arc<SealedProcessRuleSnapshot> {
         successful_snapshot_for_sim_tests_with_itode(true).await
+    }
+
+    pub(crate) async fn successful_snapshot_v3_for_sim_tests() -> Arc<SealedProcessRuleSnapshotV3> {
+        let server = ScriptedServer::start(successful_responses()).await;
+        let directory = tempfile::tempdir().expect("创建 V3 规则测试目录");
+        create_successful_snapshot_v3(
+            &server,
+            directory.path().join("platform-rule-snapshot-v3.json"),
+        )
+        .await
     }
 
     #[allow(dead_code)]
@@ -2442,24 +2735,6 @@ pub(crate) mod tests {
             exponent,
             implementation_identity,
             fixed_now_utc_ms,
-        )
-        .await
-    }
-
-    pub(crate) async fn historical_snapshot_for_task44_with_fee_schedule_and_identity(
-        rate: &str,
-        exponent: u32,
-        implementation_identity: ImplementationIdentityV1,
-    ) -> Arc<SealedProcessRuleSnapshot> {
-        fn task44_rules_observed_at_utc_ms() -> Result<i64, RuleSnapshotError> {
-            Ok(90_000)
-        }
-
-        historical_snapshot_for_sim_tests_with_fee_schedule_and_identity_at(
-            rate,
-            exponent,
-            implementation_identity,
-            task44_rules_observed_at_utc_ms,
         )
         .await
     }
@@ -2764,6 +3039,86 @@ pub(crate) mod tests {
                 .next_visibility_index_position(),
             0
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn v3_seals_one_file_identity_without_object_or_response_digests() {
+        reset_raw_response_digest_count();
+        reset_sha256_hex_count();
+        let server = ScriptedServer::start(successful_responses()).await;
+        let directory = tempfile::tempdir().expect("创建 V3 规则测试目录");
+        let target = directory.path().join("platform-rule-snapshot-v3.json");
+        let sealed = create_successful_snapshot_v3(&server, target.clone()).await;
+
+        assert_eq!(server.request_count(), 3);
+        assert_eq!(raw_response_digest_count(), 0);
+        assert_eq!(sha256_hex_count(), 1);
+        assert_eq!(sealed.path(), target);
+        assert_eq!(sealed.access_mode(), SnapshotAccessMode::CurrentQuery);
+        assert_eq!(
+            sealed.snapshot().schema_version,
+            PLATFORM_RULE_SNAPSHOT_SCHEMA_V3
+        );
+        let rules = sealed.synchronized_rules();
+        assert_eq!(rules.minimum_order_size_shares.value(), Decimal::from(5));
+        assert!(rules.taker_order_delay_enabled);
+        assert!(rules.fees_enabled);
+        assert_eq!(rules.fee_schedule.rate.value(), Decimal::new(7, 2));
+        assert_eq!(rules.fee_schedule.exponent, 1);
+        assert!(rules.fee_schedule.taker_only);
+        assert_eq!(rules.fee_schedule.rebate_rate.value(), Decimal::new(2, 1));
+
+        let bytes = std::fs::read(&target).expect("读取 V3 规则文件");
+        assert_eq!(sealed.file_sha256(), &sha256_hex(&bytes));
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("解码 V3 测试 JSON");
+        let root = value.as_object().expect("V3 根对象");
+        assert!(!root.contains_key("content_sha256"));
+        let provenance = root["provenance"].as_object().expect("V3 来源对象");
+        assert!(!provenance.contains_key("reference_validation"));
+        let static_config = provenance["static_config"]
+            .as_object()
+            .expect("V3 静态配置来源");
+        assert!(!static_config.contains_key("raw_sha256"));
+        for request in provenance["http_requests"]
+            .as_array()
+            .expect("V3 HTTP 请求来源")
+        {
+            for attempt in request["attempts"].as_array().expect("V3 HTTP 尝试") {
+                assert!(
+                    !attempt
+                        .as_object()
+                        .expect("V3 HTTP 尝试对象")
+                        .contains_key("raw_response_sha256")
+                );
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn v3_malformed_complete_response_fails_without_computing_a_response_digest() {
+        reset_raw_response_digest_count();
+        reset_sha256_hex_count();
+        let server =
+            ScriptedServer::start(vec![ResponseSpec::json(200, b"{\"t\":[".to_vec())]).await;
+        let directory = tempfile::tempdir().expect("创建 V3 失败测试目录");
+        let target = directory.path().join("platform-rule-snapshot-v3.json");
+        let error = query_and_seal_current_process_snapshot_v3_with(
+            current_request(target.clone()),
+            test_loader_options(&server),
+            PLATFORM_RULE_CONFIG_BYTES,
+            fixed_now_utc_ms,
+        )
+        .await
+        .expect_err("不完整语义的完整响应必须在强类型解码边界失败");
+
+        assert!(matches!(
+            error,
+            RuleSnapshotError::ResponseDecodeWithoutDigest { .. }
+        ));
+        assert_eq!(server.request_count(), 1);
+        assert_eq!(raw_response_digest_count(), 0);
+        assert_eq!(sha256_hex_count(), 0);
+        assert!(!target.exists());
     }
 
     #[tokio::test(flavor = "current_thread")]
