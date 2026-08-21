@@ -16,14 +16,10 @@
 ## 开发环境与部署拓扑
 
 - 当前本地开发、文档落盘、代码编写与本地构建仓库：`/home/chillchill/btc-updown-marketmaker`
-- 用户已于 2026-08-04 对事项 `DATA-PIPELINE-TRAINING-20260803` 作出窄范围路径覆盖：
-  该事项后续开发、文档落盘、代码编写、本地构建和验收只在当前工作树
-  `/home/chillchill/sim-system` 进行，不得切换到 `/home/chillchill/btc-updown-marketmaker`。
-  本条不改变其他事项、远端目录或部署拓扑；若要再次改变该事项工作树，必须由用户明确决定。
-- 用户已于 2026-08-09 对事项 `SIM-SYSTEM-20260731` 作出窄范围路径覆盖：该事项的文档、
-  代码、本地构建、测试和验收只在当前工作树 `/home/chillchill/sim-system` 进行，不得切换到
-  `/home/chillchill/btc-updown-marketmaker` 实施。本条不改变其他事项、远端目录或部署拓扑；
-  若要再次改变该事项工作树，必须由用户明确决定。
+- 用户已于 2026-08-21 取消 `DATA-PIPELINE-TRAINING-20260803` 与 `SIM-SYSTEM-20260731`
+  只能在 `/home/chillchill/sim-system` 实施的旧工作树限制。后续 DPT 与 sim-system 任务统一从
+  `/home/chillchill/btc-updown-marketmaker` 的最新 `main` 创建 `issue-<编号>-<slug>` 分支；旧
+  `/home/chillchill/sim-system` 工作树不再拥有后续执行权威。
 - 用户已于 2026-08-07 对事项 `DATA-COLLECT-EXTERNAL-DISK-GUARD-20260807` 作出窄范围路径
   覆盖：该事项的文档、后续获批代码、本地构建和验收只在工作树
   `/home/chillchill/data-collect-external-disk-guard` 进行，并以合并 PR #3 后的
