@@ -220,6 +220,7 @@ pub(crate) enum MarketEventErrorV1 {
     UnexpectedLevelBasis(String),
     CausalGroupConflict(String),
     IncompleteInitialLoad(Vec<String>),
+    MissingQualifiedMarketTerminal(Vec<String>),
     ResolutionBeforeEnd,
     ResolutionAssetConflict,
     ResolutionConflict(String),
@@ -277,6 +278,11 @@ impl fmt::Display for MarketEventErrorV1 {
                     markets.join(",")
                 )
             }
+            Self::MissingQualifiedMarketTerminal(markets) => write!(
+                formatter,
+                "输入结束时市场仍缺少合格终态：{}",
+                markets.join(",")
+            ),
             Self::ResolutionBeforeEnd => write!(formatter, "合格市场判定早于市场 end_at"),
             Self::ResolutionAssetConflict => write!(formatter, "市场判定资产与场景冲突"),
             Self::ResolutionConflict(id) => write!(formatter, "市场判定与已保留终态冲突：{id}"),
@@ -1040,6 +1046,52 @@ impl MarketStateStoreV2 {
             )
     }
 
+    pub(crate) fn advance_time(
+        &mut self,
+        directory: &crate::market_directory::SessionMarketDirectoryV1,
+        platform_effective_at_utc_ms: i64,
+    ) -> Result<BusinessResourceDeltaV2, MarketEventErrorV1> {
+        let mut resources = BusinessResourceDeltaV2::default();
+        for admitted in directory.markets() {
+            let condition_id = &admitted.market().condition_id.0;
+            let market = self
+                .markets
+                .get_mut(condition_id)
+                .ok_or_else(|| MarketEventErrorV1::UnknownMarket(condition_id.clone()))?;
+            resources.merge(market.advance_time(
+                platform_effective_at_utc_ms,
+                admitted.market().window.end_at_utc_ms,
+            ));
+        }
+        Ok(resources)
+    }
+
+    pub(crate) fn validate_input_complete(&self) -> Result<(), MarketEventErrorV1> {
+        let incomplete = self
+            .markets
+            .iter()
+            .filter(|(_, market)| !market.assets.values().all(|asset| asset.initialized))
+            .map(|(condition_id, _)| condition_id.clone())
+            .collect::<Vec<_>>();
+        if !incomplete.is_empty() {
+            return Err(MarketEventErrorV1::IncompleteInitialLoad(incomplete));
+        }
+        let missing_terminal = self
+            .markets
+            .iter()
+            .filter(|(_, market)| {
+                market.lifecycle_phase != MarketLifecyclePhaseV1::ResolutionTerminal
+            })
+            .map(|(condition_id, _)| condition_id.clone())
+            .collect::<Vec<_>>();
+        if !missing_terminal.is_empty() {
+            return Err(MarketEventErrorV1::MissingQualifiedMarketTerminal(
+                missing_terminal,
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn mark_resolution_terminal_if_qualified(
         &mut self,
         condition_id: &str,
@@ -1135,15 +1187,7 @@ impl MarketStateV2 {
     ) -> Result<MarketStateApplicationV2, MarketEventErrorV1> {
         let mut resources = BusinessResourceDeltaV2::default();
         let mut resolution_invalidation_reason = None;
-        if platform_effective_at_utc_ms >= end_at_utc_ms
-            && self.lifecycle_phase == MarketLifecyclePhaseV1::Active
-        {
-            self.lifecycle_phase = MarketLifecyclePhaseV1::PostEndPendingResolution;
-            for asset in self.assets.values_mut() {
-                resources.remove_records(asset.external_book.level_count() as u64);
-                asset.external_book.clear();
-            }
-        }
+        resources.merge(self.advance_time(platform_effective_at_utc_ms, end_at_utc_ms));
         match normalized {
             NormalizedMarketEventV2::InitialL2Snapshot { .. }
             | NormalizedMarketEventV2::LevelExecutionTransition { .. }
@@ -1332,6 +1376,20 @@ impl MarketStateV2 {
                 }
             }
         }
+        resources.merge(self.advance_time(platform_effective_at_utc_ms, end_at_utc_ms));
+        Ok(MarketStateApplicationV2 {
+            resources,
+            qualified_resolution: self.qualified_resolution(),
+            resolution_invalidation_reason,
+        })
+    }
+
+    fn advance_time(
+        &mut self,
+        platform_effective_at_utc_ms: i64,
+        end_at_utc_ms: i64,
+    ) -> BusinessResourceDeltaV2 {
+        let mut resources = BusinessResourceDeltaV2::default();
         if platform_effective_at_utc_ms >= end_at_utc_ms
             && self.lifecycle_phase == MarketLifecyclePhaseV1::Active
         {
@@ -1341,11 +1399,7 @@ impl MarketStateV2 {
                 asset.external_book.clear();
             }
         }
-        Ok(MarketStateApplicationV2 {
-            resources,
-            qualified_resolution: self.qualified_resolution(),
-            resolution_invalidation_reason,
-        })
+        resources
     }
 
     fn qualified_resolution(&self) -> Option<QualifiedMarketResolutionV2> {

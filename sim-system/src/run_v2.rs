@@ -1,15 +1,20 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 
 use contracts::{
-    AccountInstanceKeyV1, AccountOpeningFactV2, CancelInputItemRefV2, CancelNotCanceledReasonV2,
-    CancelTargetOutcomeV2, CancelTargetResponseV2, ExecutionMarketEventPayloadV3,
-    ExecutionMarketEventV3, MarketEnrollmentV2, OrderProjectionV2, OrderQueryResultV2,
-    OrdersPageV2, OrdersQueryResultV2, PlatformSourceV1, QueryCursorV2, QueryOutOfRetentionV2,
-    Sha256Hex, SimCallerRoleV1, SimulatedOrderKnownStatusV2, SubmissionEvidenceUnknownReasonV2,
+    AccountInstanceKeyV1, AccountOpeningFactV2, CancelAllOrdersDirectResponseV2,
+    CancelInputItemRefV2, CancelNotCanceledReasonV2, CancelOrderDirectResponseV2,
+    CancelOrdersDirectResponseV2, CancelTargetOutcomeV2, CancelTargetResponseV2,
+    DirectResponseMetadataV2, ExecutionMarketEventPayloadV3, ExecutionMarketEventV3,
+    ExecutionMethodV2, MarketEnrollmentV2, OrderDirectResponseV2, OrderLifecycleFeedbackV2,
+    OrderProjectionV2, OrderQueryResultV2, OrdersDirectResponseV2, OrdersPageV2,
+    OrdersQueryResultV2, PlatformSourceV1, PostOrderDirectResponseV2, PostOrdersDirectResponseV2,
+    QueryCursorV2, QueryOutOfRetentionV2, SettlementLifecycleFeedbackV2, Sha256Hex,
+    SimCallerRoleV1, SimulatedOrderKnownStatusV2, SubmissionEvidenceUnknownReasonV2,
     SubmissionItemOutcomeV2, SubmissionRejectedReasonV2, SubmissionResponseItemV2,
-    TradeProjectionV2, TradesPageV2, TradesQueryResultV2,
+    TradeLifecycleFeedbackV2, TradeProjectionV2, TradesDirectResponseV2, TradesPageV2,
+    TradesQueryResultV2,
 };
 
 use crate::account::{PlatformAccountError, PlatformAccountStateV2};
@@ -36,7 +41,8 @@ use crate::matching::{
 use crate::platform_rules::{PlatformRuleSnapshotV3, SealedProcessRuleSnapshotV3};
 use crate::resource::{BusinessResourceDeltaV2, ResourceQuantityV1};
 use crate::runtime_v2::{
-    BusinessInputV2, BusinessRequestV2, RunOpenedV2, SessionSpecV3, TrustedDecisionCutoffV2,
+    AcceptedClosedMarketBucketV2, BusinessInputV2, BusinessRequestV2, PlatformPrefixAdvanceV2,
+    RunOpenedV2, SessionSpecV3, TrustedDecisionCutoffV2,
 };
 use crate::scenario::{PlatformMarketV1, SealedPlatformScenarioV1};
 use crate::session::MarketEnrollmentRequestV1;
@@ -186,16 +192,73 @@ enum DirectResponsePayloadDraftV2 {
 
 #[derive(Debug, PartialEq, Eq)]
 struct DirectResponseDraftV2 {
+    global_request_id: String,
+    caller_correlation_id: Option<String>,
+    method: MutationMethodV2,
     platform_responded_at_utc_ms: i64,
     response_received_at_utc_ms: i64,
     payload: DirectResponsePayloadDraftV2,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct MutationActionTransitionEffectsV2 {
+enum StoredDirectResponseV2 {
+    Draft(DirectResponseDraftV2),
+    Final(BusinessDirectResponseV2),
+}
+
+#[cfg(test)]
+impl std::ops::Deref for StoredDirectResponseV2 {
+    type Target = DirectResponseDraftV2;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Draft(response) => response,
+            Self::Final(_) => panic!("最终直接响应不再暴露内部草稿"),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum BusinessDirectResponseV2 {
+    PostOrder(PostOrderDirectResponseV2),
+    PostOrders(PostOrdersDirectResponseV2),
+    CancelOrder(CancelOrderDirectResponseV2),
+    CancelOrders(CancelOrdersDirectResponseV2),
+    CancelAllOrders(CancelAllOrdersDirectResponseV2),
+    Order(OrderDirectResponseV2),
+    Orders(OrdersDirectResponseV2),
+    Trades(TradesDirectResponseV2),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct BusinessProjectionBatchV2 {
+    pub(crate) run_id: String,
+    pub(crate) projection_batch_sequence: u64,
+    pub(crate) account_opening: Option<Arc<AccountOpeningFactV2>>,
+    pub(crate) market_enrollment: Option<MarketEnrollmentV2>,
+    direct_responses: Vec<Arc<StoredDirectResponseV2>>,
+    pub(crate) order_lifecycle: Vec<OrderLifecycleFeedbackV2>,
+    pub(crate) trade_lifecycle: Vec<TradeLifecycleFeedbackV2>,
+    pub(crate) settlement_lifecycle: Vec<SettlementLifecycleFeedbackV2>,
+}
+
+pub(crate) trait BusinessProjectionPortV2 {
+    fn try_accept(&mut self, batch: Arc<BusinessProjectionBatchV2>) -> bool;
+
+    fn durable_through(&self, run_id: &str) -> u64;
+}
+
+struct PendingProjectionBatchV2 {
+    batch: Arc<BusinessProjectionBatchV2>,
+    resources: ResourceQuantityV1,
+    accepted: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct MutationActionTransitionEffectsV2 {
     business: MutationActionBusinessEffectV2,
     lifecycle: Vec<LifecycleFeedbackEffectV2>,
-    completed_response: Option<Arc<DirectResponseDraftV2>>,
+    completed_response: Option<Arc<StoredDirectResponseV2>>,
 }
 
 #[derive(Debug)]
@@ -211,7 +274,7 @@ struct MutationRequestRecordV2 {
     post_results: Vec<Arc<PostOrderItemBusinessEffectV2>>,
     cancel_results: Vec<Arc<CancelTargetBusinessEffectV2>>,
     query_result: Option<Arc<QueryActionBusinessEffectV2>>,
-    completed_response: Option<Arc<DirectResponseDraftV2>>,
+    completed_response: Option<Arc<StoredDirectResponseV2>>,
 }
 
 #[derive(Debug, Default)]
@@ -375,7 +438,7 @@ fn trades_page_from_root_v2(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct MutationRequestReceiptV2 {
+pub(crate) struct MutationRequestReceiptV2 {
     input_sequence: u64,
     platform_arrived_at_utc_ms: i64,
     scheduled_action_count: u64,
@@ -383,6 +446,14 @@ struct MutationRequestReceiptV2 {
 
 type PostOrderItemBusinessEffectV2 = SubmissionResponseItemV2;
 type PostOrderItemOutcomeV2 = SubmissionItemOutcomeV2;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct LogicalPathFrontierV2 {
+    closed_through_utc_ms: Option<i64>,
+    next_index_position: u64,
+    next_event_at_utc_ms: Option<i64>,
+    sealed: bool,
+}
 
 #[derive(Debug)]
 struct UniqueSessionStateV2 {
@@ -397,6 +468,10 @@ struct UniqueSessionStateV2 {
     market_enrollment: MarketEnrollmentStateV2,
     mutation_requests: MutationRequestStateV2,
     query_state: QueryStateV2,
+    next_private_feedback_sequence: u64,
+    next_projection_batch_sequence: u64,
+    hidden_platform_frontier: LogicalPathFrontierV2,
+    public_visibility_frontier: LogicalPathFrontierV2,
 }
 
 #[derive(Debug, Default)]
@@ -409,7 +484,7 @@ struct MarketEnrollmentStateV2 {
 }
 
 #[derive(Debug)]
-struct BusinessReducerStateV2 {
+pub(crate) struct BusinessReducerStateV2 {
     session: Option<UniqueSessionStateV2>,
     business_resources: ResourceQuantityV1,
 }
@@ -417,6 +492,12 @@ struct BusinessReducerStateV2 {
 #[derive(Debug, Default, PartialEq, Eq)]
 struct SessionMarketEventEffectsV2 {
     execution: Vec<ExecutionMarketEventEffectsV2>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct LogicalDriveOutputV2 {
+    lifecycle: Vec<LifecycleFeedbackEffectV2>,
+    mutations: Vec<MutationActionTransitionEffectsV2>,
 }
 
 enum MarketEventSliceReductionErrorV2 {
@@ -525,6 +606,10 @@ impl UniqueSessionStateV2 {
             market_enrollment,
             mutation_requests,
             query_state,
+            next_private_feedback_sequence,
+            next_projection_batch_sequence,
+            hidden_platform_frontier,
+            public_visibility_frontier,
         } = self;
         let (execution_state, result) = apply(execution_state)?;
         Ok((
@@ -540,6 +625,10 @@ impl UniqueSessionStateV2 {
                 market_enrollment,
                 mutation_requests,
                 query_state,
+                next_private_feedback_sequence,
+                next_projection_batch_sequence,
+                hidden_platform_frontier,
+                public_visibility_frontier,
             },
             result,
         ))
@@ -567,7 +656,7 @@ impl UniqueSessionStateV2 {
     }
 }
 
-enum BusinessReducerInputV2<'a> {
+pub(crate) enum BusinessReducerInputV2<'a> {
     CreateSession(&'a SessionSpecV3),
     ActivateSession(&'a str),
     FailSessionInitialization(&'a str),
@@ -584,17 +673,345 @@ enum BusinessReducerInputV2<'a> {
         rules: &'a PlatformRuleSnapshotV3,
         finality_policy: &'a TradeFinalityPolicyV2,
     },
+    PlatformPrefixAdvance {
+        advance: PlatformPrefixAdvanceV2,
+        rules: &'a PlatformRuleSnapshotV3,
+        finality_policy: &'a TradeFinalityPolicyV2,
+    },
+    ClosedMarketBucket {
+        bucket: AcceptedClosedMarketBucketV2,
+        rules: &'a PlatformRuleSnapshotV3,
+        finality_policy: &'a TradeFinalityPolicyV2,
+    },
 }
 
-enum BusinessReducerOutputV2 {
+pub(crate) enum BusinessReducerOutputV2 {
     CreateSession(CreateSessionControlResultV2),
     SessionInitialization(SessionInitializationControlResultV2),
     MarketEnrollment(MarketEnrollmentV2),
     RequestRegistration(MutationRequestReceiptV2),
     MutationAction(Option<MutationActionTransitionEffectsV2>),
+    LogicalDrive(LogicalDriveOutputV2),
 }
 
-enum BusinessReductionErrorV2 {
+fn execution_method_v2(method: MutationMethodV2) -> ExecutionMethodV2 {
+    match method {
+        MutationMethodV2::PostOrder => ExecutionMethodV2::PostOrder,
+        MutationMethodV2::PostOrders => ExecutionMethodV2::PostOrders,
+        MutationMethodV2::CancelOrder => ExecutionMethodV2::CancelOrder,
+        MutationMethodV2::CancelOrders => ExecutionMethodV2::CancelOrders,
+        MutationMethodV2::CancelAllOrders => ExecutionMethodV2::CancelAllOrders,
+        MutationMethodV2::Order => ExecutionMethodV2::Order,
+        MutationMethodV2::Orders => ExecutionMethodV2::Orders,
+        MutationMethodV2::Trades => ExecutionMethodV2::Trades,
+    }
+}
+
+fn finalize_direct_response_v2(
+    response: &DirectResponseDraftV2,
+    private_feedback_sequence: u64,
+) -> BusinessDirectResponseV2 {
+    let metadata = DirectResponseMetadataV2 {
+        global_request_id: response.global_request_id.clone(),
+        caller_correlation_id: response.caller_correlation_id.clone(),
+        method: execution_method_v2(response.method),
+        platform_responded_at_utc_ms: response.platform_responded_at_utc_ms,
+        response_received_at_utc_ms: response.response_received_at_utc_ms,
+        private_feedback_sequence,
+    };
+    match &response.payload {
+        DirectResponsePayloadDraftV2::PostOrder(item) => {
+            BusinessDirectResponseV2::PostOrder(PostOrderDirectResponseV2 {
+                metadata,
+                item: item.as_ref().clone(),
+            })
+        }
+        DirectResponsePayloadDraftV2::PostOrders(items) => {
+            BusinessDirectResponseV2::PostOrders(PostOrdersDirectResponseV2 {
+                metadata,
+                items: items.iter().map(|item| item.as_ref().clone()).collect(),
+            })
+        }
+        DirectResponsePayloadDraftV2::CancelOrder(target) => {
+            BusinessDirectResponseV2::CancelOrder(CancelOrderDirectResponseV2 {
+                metadata,
+                target: target.as_ref().clone(),
+            })
+        }
+        DirectResponsePayloadDraftV2::CancelOrders(targets) => {
+            BusinessDirectResponseV2::CancelOrders(CancelOrdersDirectResponseV2 {
+                metadata,
+                targets: targets
+                    .iter()
+                    .map(|target| target.as_ref().clone())
+                    .collect(),
+            })
+        }
+        DirectResponsePayloadDraftV2::CancelAllOrders(targets) => {
+            BusinessDirectResponseV2::CancelAllOrders(CancelAllOrdersDirectResponseV2 {
+                metadata,
+                targets: targets
+                    .iter()
+                    .map(|target| target.as_ref().clone())
+                    .collect(),
+            })
+        }
+        DirectResponsePayloadDraftV2::Order(result) => {
+            let QueryActionResultV2::Order(result) = &result.result else {
+                unreachable!("Order 响应草稿只携带单订单查询结果")
+            };
+            BusinessDirectResponseV2::Order(OrderDirectResponseV2 {
+                metadata,
+                result: result.clone(),
+            })
+        }
+        DirectResponsePayloadDraftV2::Orders(result) => {
+            let QueryActionResultV2::Orders(result) = &result.result else {
+                unreachable!("Orders 响应草稿只携带订单列表查询结果")
+            };
+            BusinessDirectResponseV2::Orders(OrdersDirectResponseV2 {
+                metadata,
+                result: result.clone(),
+            })
+        }
+        DirectResponsePayloadDraftV2::Trades(result) => {
+            let QueryActionResultV2::Trades(result) = &result.result else {
+                unreachable!("Trades 响应草稿只携带成交列表查询结果")
+            };
+            BusinessDirectResponseV2::Trades(TradesDirectResponseV2 {
+                metadata,
+                result: result.clone(),
+            })
+        }
+    }
+}
+
+fn finalize_lifecycle_feedback_v2(
+    effect: LifecycleFeedbackEffectV2,
+    account_instance_key: &AccountInstanceKeyV1,
+    session_seed: &Sha256Hex,
+    latency_profile: &EmpiricalDelayProfile,
+    private_feedback_sequence: u64,
+) -> Result<FinalizedLifecycleFeedbackV2, SimRunActorErrorV2> {
+    let platform_event_at_utc_ms = match &effect {
+        LifecycleFeedbackEffectV2::Order(effect) => effect.platform_event_at_utc_ms,
+        LifecycleFeedbackEffectV2::Trade(effect) => effect.platform_event_at_utc_ms,
+        LifecycleFeedbackEffectV2::Settlement(effect) => effect.platform_event_at_utc_ms,
+    };
+    let stable_sequence = private_feedback_sequence.to_string();
+    let delay_ms = latency_profile.sample_delay_ms(
+        session_seed.0.as_bytes(),
+        &stable_sequence,
+        DelaySampleDomainV1::LifecycleFeedbackInbound,
+    );
+    let metadata = contracts::LifecycleFeedbackMetadataV2 {
+        account_instance_key: account_instance_key.clone(),
+        platform_event_at_utc_ms,
+        feedback_received_at_utc_ms: checked_add_delay_v2(platform_event_at_utc_ms, delay_ms)?,
+        private_feedback_sequence,
+    };
+    Ok(match effect {
+        LifecycleFeedbackEffectV2::Order(effect) => {
+            FinalizedLifecycleFeedbackV2::Order(OrderLifecycleFeedbackV2 {
+                metadata,
+                platform_order_id: effect.platform_order_id,
+                condition_id: effect.condition_id,
+                token_id: effect.token_id,
+                event: effect.event,
+            })
+        }
+        LifecycleFeedbackEffectV2::Trade(effect) => {
+            FinalizedLifecycleFeedbackV2::Trade(TradeLifecycleFeedbackV2 {
+                metadata,
+                trade_id: effect.trade_id,
+                platform_order_id: effect.platform_order_id,
+                condition_id: effect.condition_id,
+                token_id: effect.token_id,
+                status: effect.status,
+                economic_disposition: effect.economic_disposition,
+                liquidity_role: effect.liquidity_role,
+                source_price_pusd_per_share: effect.source_price_pusd_per_share,
+                base_quantity_shares: effect.base_quantity_shares,
+                quote_amount_pusd: effect.quote_amount_pusd,
+                immediate_taker_fee_pusd: effect.immediate_taker_fee_pusd,
+                economic_application_account_transition_seq: effect
+                    .economic_application_account_transition_seq,
+                account_delta: effect.account_delta,
+            })
+        }
+        LifecycleFeedbackEffectV2::Settlement(effect) => {
+            FinalizedLifecycleFeedbackV2::Settlement(SettlementLifecycleFeedbackV2 {
+                metadata,
+                event: effect.event,
+            })
+        }
+    })
+}
+
+enum FinalizedLifecycleFeedbackV2 {
+    Order(OrderLifecycleFeedbackV2),
+    Trade(TradeLifecycleFeedbackV2),
+    Settlement(SettlementLifecycleFeedbackV2),
+}
+
+enum ProjectionDraftV2 {
+    Lifecycle(LifecycleFeedbackEffectV2),
+    Direct(Arc<StoredDirectResponseV2>),
+}
+
+pub(crate) enum CommittedBusinessOutputV2 {
+    CreateSession(CreateSessionControlResultV2),
+    SessionInitialization(SessionInitializationControlResultV2),
+    MarketEnrollment(MarketEnrollmentV2),
+    RequestRegistration(MutationRequestReceiptV2),
+    Driven,
+}
+
+fn finalize_projection_batch_v2(
+    run_id: &str,
+    mut state: BusinessReducerStateV2,
+    output: BusinessReducerOutputV2,
+    latency_profile: &EmpiricalDelayProfile,
+) -> Result<
+    (
+        BusinessReducerStateV2,
+        CommittedBusinessOutputV2,
+        Option<BusinessProjectionBatchV2>,
+    ),
+    SimRunActorErrorV2,
+> {
+    let mut account_opening = None;
+    let mut market_enrollment = None;
+    let mut drafts = Vec::new();
+    let committed = match output {
+        BusinessReducerOutputV2::CreateSession(result) => {
+            account_opening = Some(Arc::clone(&result.opening_fact));
+            CommittedBusinessOutputV2::CreateSession(result)
+        }
+        BusinessReducerOutputV2::MarketEnrollment(result) => {
+            market_enrollment = Some(result.clone());
+            CommittedBusinessOutputV2::MarketEnrollment(result)
+        }
+        BusinessReducerOutputV2::MutationAction(Some(effect)) => {
+            drafts.extend(
+                effect
+                    .lifecycle
+                    .into_iter()
+                    .map(ProjectionDraftV2::Lifecycle),
+            );
+            if let Some(response) = effect.completed_response {
+                drafts.push(ProjectionDraftV2::Direct(response));
+            }
+            CommittedBusinessOutputV2::Driven
+        }
+        BusinessReducerOutputV2::LogicalDrive(output) => {
+            drafts.extend(
+                output
+                    .lifecycle
+                    .into_iter()
+                    .map(ProjectionDraftV2::Lifecycle),
+            );
+            for mutation in output.mutations {
+                drafts.extend(
+                    mutation
+                        .lifecycle
+                        .into_iter()
+                        .map(ProjectionDraftV2::Lifecycle),
+                );
+                if let Some(response) = mutation.completed_response {
+                    drafts.push(ProjectionDraftV2::Direct(response));
+                }
+            }
+            CommittedBusinessOutputV2::Driven
+        }
+        BusinessReducerOutputV2::SessionInitialization(result) => {
+            CommittedBusinessOutputV2::SessionInitialization(result)
+        }
+        BusinessReducerOutputV2::RequestRegistration(result) => {
+            CommittedBusinessOutputV2::RequestRegistration(result)
+        }
+        BusinessReducerOutputV2::MutationAction(None) => CommittedBusinessOutputV2::Driven,
+    };
+    if account_opening.is_none() && market_enrollment.is_none() && drafts.is_empty() {
+        return Ok((state, committed, None));
+    }
+    let session = state
+        .session
+        .as_mut()
+        .expect("形成业务投影时唯一会话必须存在");
+    let projection_batch_sequence = session.next_projection_batch_sequence;
+    session.next_projection_batch_sequence = projection_batch_sequence
+        .checked_add(1)
+        .expect("有界投影批次序号不得溢出");
+    let mut next_private_feedback_sequence = session.next_private_feedback_sequence;
+    let mut direct_responses = Vec::new();
+    let mut order_lifecycle = Vec::new();
+    let mut trade_lifecycle = Vec::new();
+    let mut settlement_lifecycle = Vec::new();
+    for draft in drafts {
+        match draft {
+            ProjectionDraftV2::Lifecycle(effect) => {
+                let finalized = finalize_lifecycle_feedback_v2(
+                    effect,
+                    &session.opening_fact.account_instance_key,
+                    &session.session_seed,
+                    latency_profile,
+                    next_private_feedback_sequence,
+                )?;
+                match finalized {
+                    FinalizedLifecycleFeedbackV2::Order(feedback) => {
+                        order_lifecycle.push(feedback);
+                    }
+                    FinalizedLifecycleFeedbackV2::Trade(feedback) => {
+                        trade_lifecycle.push(feedback);
+                    }
+                    FinalizedLifecycleFeedbackV2::Settlement(feedback) => {
+                        settlement_lifecycle.push(feedback);
+                    }
+                }
+            }
+            ProjectionDraftV2::Direct(response) => {
+                let StoredDirectResponseV2::Draft(response_draft) = response.as_ref() else {
+                    unreachable!("单次归约只会产生尚未投影的直接响应草稿")
+                };
+                let global_request_id = response_draft.global_request_id.clone();
+                let response = Arc::new(StoredDirectResponseV2::Final(
+                    finalize_direct_response_v2(response_draft, next_private_feedback_sequence),
+                ));
+                session
+                    .mutation_requests
+                    .requests_by_id
+                    .get_mut(&global_request_id)
+                    .expect("直接响应对应的请求必须仍由唯一会话持有")
+                    .completed_response = Some(Arc::clone(&response));
+                direct_responses.push(response);
+            }
+        }
+        next_private_feedback_sequence = next_private_feedback_sequence
+            .checked_add(1)
+            .expect("有界私有反馈序号不得溢出");
+    }
+    session.next_private_feedback_sequence = next_private_feedback_sequence;
+    #[cfg(test)]
+    record_projection_batch_construction_for_tests();
+    Ok((
+        state,
+        committed,
+        Some(BusinessProjectionBatchV2 {
+            run_id: run_id.to_owned(),
+            projection_batch_sequence,
+            account_opening,
+            market_enrollment,
+            direct_responses,
+            order_lifecycle,
+            trade_lifecycle,
+            settlement_lifecycle,
+        }),
+    ))
+}
+
+#[derive(Debug)]
+pub(crate) enum BusinessReductionErrorV2 {
     Unaccepted {
         state: BusinessReducerStateV2,
         error: SimRunActorErrorV2,
@@ -602,8 +1019,561 @@ enum BusinessReductionErrorV2 {
     Fatal(SimRunActorErrorV2),
 }
 
-type BusinessReductionResultV2 =
+pub(crate) type BusinessReductionResultV2 =
     Result<(BusinessReducerStateV2, BusinessReducerOutputV2), BusinessReductionErrorV2>;
+
+pub(crate) struct BusinessGroupCommitV2 {
+    pub(crate) outputs: Vec<CommittedBusinessOutputV2>,
+    pub(crate) unaccepted: Option<SimRunActorErrorV2>,
+}
+
+fn reduce_actor_input_v2(
+    opened: &RunOpenedV2,
+    initial_market_directory: &SessionMarketDirectoryV1,
+    state: BusinessReducerStateV2,
+    input: &BusinessInputV2,
+    input_sequence: u64,
+    latency_profile: &EmpiricalDelayProfile,
+    rules: &PlatformRuleSnapshotV3,
+    finality_policy: &TradeFinalityPolicyV2,
+) -> BusinessReductionResultV2 {
+    match input {
+        BusinessInputV2::CreateSession(spec) => reduce_business_input_v2(
+            opened,
+            initial_market_directory,
+            state,
+            BusinessReducerInputV2::CreateSession(spec),
+        ),
+        BusinessInputV2::ActivateSession { activation_id } => reduce_business_input_v2(
+            opened,
+            initial_market_directory,
+            state,
+            BusinessReducerInputV2::ActivateSession(activation_id),
+        ),
+        BusinessInputV2::FailSessionInitialization { failure_id } => reduce_business_input_v2(
+            opened,
+            initial_market_directory,
+            state,
+            BusinessReducerInputV2::FailSessionInitialization(failure_id),
+        ),
+        BusinessInputV2::EnrollMarket(request) => reduce_business_input_v2(
+            opened,
+            initial_market_directory,
+            state,
+            BusinessReducerInputV2::EnrollMarket(request),
+        ),
+        BusinessInputV2::Request { cutoff, request } => reduce_business_input_v2(
+            opened,
+            initial_market_directory,
+            state,
+            BusinessReducerInputV2::RegisterNewRequest {
+                cutoff,
+                request,
+                input_sequence,
+                latency_profile,
+                rules,
+            },
+        ),
+        BusinessInputV2::PlatformPrefixAdvance(advance) => drive_business_input_at_v2(
+            state,
+            BusinessReducerInputV2::PlatformPrefixAdvance {
+                advance: *advance,
+                rules,
+                finality_policy,
+            },
+        ),
+        BusinessInputV2::ClosedMarketBucket(bucket) => drive_business_input_at_v2(
+            state,
+            BusinessReducerInputV2::ClosedMarketBucket {
+                bucket: bucket.clone(),
+                rules,
+                finality_policy,
+            },
+        ),
+    }
+}
+
+fn projection_resource_quantity_v2(batch: &BusinessProjectionBatchV2) -> ResourceQuantityV1 {
+    let records = 1_u64
+        + u64::from(batch.account_opening.is_some())
+        + u64::from(batch.market_enrollment.is_some())
+        + batch.direct_responses.len() as u64
+        + batch.order_lifecycle.len() as u64
+        + batch.trade_lifecycle.len() as u64
+        + batch.settlement_lifecycle.len() as u64;
+    let bytes = batch.run_id.len() as u64
+        + batch.market_enrollment.as_ref().map_or(0, |enrollment| {
+            enrollment.enrollment_request_id.len() as u64
+                + enrollment.market.condition_id.0.len() as u64
+                + enrollment.market.clob_market_id.0.len() as u64
+                + enrollment
+                    .assets
+                    .iter()
+                    .map(|asset| (asset.token_id.0.len() + asset.outcome.label.len()) as u64)
+                    .sum::<u64>()
+        })
+        + batch
+            .direct_responses
+            .iter()
+            .map(|response| match response.as_ref() {
+                StoredDirectResponseV2::Final(response) => direct_response_owned_bytes_v2(response),
+                StoredDirectResponseV2::Draft(_) => {
+                    unreachable!("待交付投影批次只能持有最终直接响应")
+                }
+            })
+            .sum::<u64>()
+        + batch
+            .order_lifecycle
+            .iter()
+            .map(order_lifecycle_owned_bytes_v2)
+            .sum::<u64>()
+        + batch
+            .trade_lifecycle
+            .iter()
+            .map(trade_lifecycle_owned_bytes_v2)
+            .sum::<u64>()
+        + batch
+            .settlement_lifecycle
+            .iter()
+            .map(settlement_lifecycle_owned_bytes_v2)
+            .sum::<u64>();
+    ResourceQuantityV1::new(records, bytes)
+}
+
+fn account_key_owned_bytes_v2(key: &AccountInstanceKeyV1) -> u64 {
+    (key.run_id.len() + key.caller_instance_id.len() + key.account_id.len()) as u64
+}
+
+fn account_delta_owned_bytes_v2(delta: &contracts::PlatformAccountDeltaV2) -> u64 {
+    let reason = match &delta.reason {
+        contracts::PlatformAccountDeltaReasonV2::OrderAcceptedEncumbranceApplied {
+            platform_order_id,
+        }
+        | contracts::PlatformAccountDeltaReasonV2::FakUnspentEncumbranceReleased {
+            platform_order_id,
+        }
+        | contracts::PlatformAccountDeltaReasonV2::CallerCancellationEncumbranceReleased {
+            platform_order_id,
+        }
+        | contracts::PlatformAccountDeltaReasonV2::GtdExpirationEncumbranceReleased {
+            platform_order_id,
+            ..
+        }
+        | contracts::PlatformAccountDeltaReasonV2::VenueDustEncumbranceReleased {
+            platform_order_id,
+        } => platform_order_id.len() as u64,
+        contracts::PlatformAccountDeltaReasonV2::MarketResolutionEncumbranceReleased {
+            resolution_event_id,
+            platform_order_id,
+        } => (resolution_event_id.len() + platform_order_id.len()) as u64,
+        contracts::PlatformAccountDeltaReasonV2::FillFinalityEconomicApplied {
+            trade_id, ..
+        }
+        | contracts::PlatformAccountDeltaReasonV2::FillFinalityUnappliedFailureReleased {
+            trade_id,
+            ..
+        }
+        | contracts::PlatformAccountDeltaReasonV2::FillFinalityCompensationApplied {
+            trade_id,
+            ..
+        }
+        | contracts::PlatformAccountDeltaReasonV2::TakerRebateAccrualApplied { trade_id } => {
+            trade_id.len() as u64
+        }
+        contracts::PlatformAccountDeltaReasonV2::AutoRedeemApplied {
+            resolution_event_id,
+        } => resolution_event_id.len() as u64,
+        contracts::PlatformAccountDeltaReasonV2::MakerRebateAccrualFinalized
+        | contracts::PlatformAccountDeltaReasonV2::MakerRebateDayFinalized { .. }
+        | contracts::PlatformAccountDeltaReasonV2::TakerRebateDayFinalized { .. }
+        | contracts::PlatformAccountDeltaReasonV2::MakerRebatePaid { .. }
+        | contracts::PlatformAccountDeltaReasonV2::TakerRebatePaid { .. } => 0,
+    };
+    let balance = &delta.balance_delta;
+    account_key_owned_bytes_v2(&delta.account_instance_key)
+        + reason
+        + delta
+            .condition_id
+            .as_ref()
+            .map_or(0, |condition_id| condition_id.0.len() as u64)
+        + [
+            &balance.cash_pusd_delta.0,
+            &balance.available_pusd_delta.0,
+            &balance.principal_encumbrance_pusd_delta.0,
+            &balance.immediate_taker_fee_encumbrance_pusd_delta.0,
+            &balance.maker_rebate_receivable_pusd_delta.0,
+            &balance.taker_rebate_receivable_pusd_delta.0,
+            &balance.maker_rebate_locked_remainder_pusd_delta.0,
+            &balance.taker_rebate_locked_remainder_pusd_delta.0,
+        ]
+        .into_iter()
+        .map(|value| value.len() as u64)
+        .sum::<u64>()
+        + balance
+            .outcome_balance_deltas
+            .iter()
+            .map(|outcome| (outcome.token_id.0.len() + outcome.balance_shares_delta.0.len()) as u64)
+            .sum::<u64>()
+}
+
+fn direct_metadata_owned_bytes_v2(metadata: &DirectResponseMetadataV2) -> u64 {
+    (metadata.global_request_id.len()
+        + metadata
+            .caller_correlation_id
+            .as_ref()
+            .map_or(0, String::len)) as u64
+}
+
+fn submission_item_owned_bytes_v2(item: &SubmissionResponseItemV2) -> u64 {
+    let outcome = match &item.outcome {
+        SubmissionItemOutcomeV2::Accepted(accepted) => {
+            accepted.platform_order_id.len() as u64
+                + accepted.platform_order_status.raw.len() as u64
+                + accepted
+                    .fills
+                    .iter()
+                    .map(|fill| {
+                        (fill.trade_id.len()
+                            + fill.source_price_pusd_per_share.0.len()
+                            + fill.base_quantity_shares.0.len()
+                            + fill.quote_amount_pusd.0.len()) as u64
+                    })
+                    .sum::<u64>()
+                + match &accepted.measurement {
+                    contracts::SubmissionMeasurementV2::Base {
+                        accepted_base_quantity_shares,
+                        matched_base_quantity_shares,
+                        open_base_quantity_shares,
+                        venue_dust_closed_base_quantity_shares,
+                        order_type_terminated_base_quantity_shares,
+                        accepted_quote_amount_pusd,
+                        matched_quote_amount_pusd,
+                        open_encumbered_quote_amount_pusd,
+                        venue_dust_released_quote_amount_pusd,
+                        released_price_improvement_quote_amount_pusd,
+                        immediate_taker_fee_encumbered_pusd,
+                    } => [
+                        accepted_base_quantity_shares,
+                        matched_base_quantity_shares,
+                        open_base_quantity_shares,
+                        venue_dust_closed_base_quantity_shares,
+                        order_type_terminated_base_quantity_shares,
+                        accepted_quote_amount_pusd,
+                        matched_quote_amount_pusd,
+                        open_encumbered_quote_amount_pusd,
+                        venue_dust_released_quote_amount_pusd,
+                        released_price_improvement_quote_amount_pusd,
+                        immediate_taker_fee_encumbered_pusd,
+                    ]
+                    .into_iter()
+                    .map(|value| value.0.len() as u64)
+                    .sum::<u64>(),
+                    contracts::SubmissionMeasurementV2::QuoteBudget {
+                        accepted_quote_budget_pusd,
+                        used_quote_amount_pusd,
+                        released_or_unspent_quote_amount_pusd,
+                        actual_matched_base_quantity_shares,
+                        sdk_taker_amount_audit_base_quantity_shares,
+                        immediate_taker_fee_encumbered_pusd,
+                    } => [
+                        accepted_quote_budget_pusd,
+                        used_quote_amount_pusd,
+                        released_or_unspent_quote_amount_pusd,
+                        actual_matched_base_quantity_shares,
+                        sdk_taker_amount_audit_base_quantity_shares,
+                        immediate_taker_fee_encumbered_pusd,
+                    ]
+                    .into_iter()
+                    .map(|value| value.0.len() as u64)
+                    .sum::<u64>(),
+                }
+        }
+        SubmissionItemOutcomeV2::RejectedNoEffect(_)
+        | SubmissionItemOutcomeV2::EvidenceUnknownNoEffect(_) => 0,
+    };
+    (item.item_id.len() + item.condition_id.0.len() + item.token_id.0.len()) as u64 + outcome
+}
+
+fn cancel_target_owned_bytes_v2(target: &CancelTargetResponseV2) -> u64 {
+    let outcome = match &target.outcome {
+        CancelTargetOutcomeV2::Canceled(measurement) => {
+            (measurement.canceled_base_quantity_shares.0.len()
+                + measurement.released_quote_amount_pusd.0.len()) as u64
+        }
+        CancelTargetOutcomeV2::NotCanceledNoEffect(_)
+        | CancelTargetOutcomeV2::EvidenceUnknownNoEffect => 0,
+    };
+    target.platform_order_id.len() as u64
+        + target
+            .input_item_refs
+            .iter()
+            .map(|item| item.item_id.len() as u64)
+            .sum::<u64>()
+        + outcome
+}
+
+fn order_result_owned_bytes_v2(result: &OrderQueryResultV2) -> u64 {
+    match result {
+        OrderQueryResultV2::Found(order) => order_projection_owned_bytes_v2(order),
+        OrderQueryResultV2::NotFound | OrderQueryResultV2::OutOfRetention(_) => 0,
+    }
+}
+
+fn orders_result_owned_bytes_v2(result: &OrdersQueryResultV2) -> u64 {
+    match result {
+        OrdersQueryResultV2::Page(page) => {
+            page.items.iter().map(order_projection_owned_bytes_v2).sum()
+        }
+        OrdersQueryResultV2::InvalidCursor | OrdersQueryResultV2::OutOfRetention(_) => 0,
+    }
+}
+
+fn trades_result_owned_bytes_v2(result: &TradesQueryResultV2) -> u64 {
+    match result {
+        TradesQueryResultV2::Page(page) => {
+            page.items.iter().map(trade_projection_owned_bytes_v2).sum()
+        }
+        TradesQueryResultV2::InvalidCursor | TradesQueryResultV2::OutOfRetention(_) => 0,
+    }
+}
+
+fn direct_response_owned_bytes_v2(response: &BusinessDirectResponseV2) -> u64 {
+    match response {
+        BusinessDirectResponseV2::PostOrder(response) => {
+            direct_metadata_owned_bytes_v2(&response.metadata)
+                + submission_item_owned_bytes_v2(&response.item)
+        }
+        BusinessDirectResponseV2::PostOrders(response) => {
+            direct_metadata_owned_bytes_v2(&response.metadata)
+                + response
+                    .items
+                    .iter()
+                    .map(submission_item_owned_bytes_v2)
+                    .sum::<u64>()
+        }
+        BusinessDirectResponseV2::CancelOrder(response) => {
+            direct_metadata_owned_bytes_v2(&response.metadata)
+                + cancel_target_owned_bytes_v2(&response.target)
+        }
+        BusinessDirectResponseV2::CancelOrders(response) => {
+            direct_metadata_owned_bytes_v2(&response.metadata)
+                + response
+                    .targets
+                    .iter()
+                    .map(cancel_target_owned_bytes_v2)
+                    .sum::<u64>()
+        }
+        BusinessDirectResponseV2::CancelAllOrders(response) => {
+            direct_metadata_owned_bytes_v2(&response.metadata)
+                + response
+                    .targets
+                    .iter()
+                    .map(cancel_target_owned_bytes_v2)
+                    .sum::<u64>()
+        }
+        BusinessDirectResponseV2::Order(response) => {
+            direct_metadata_owned_bytes_v2(&response.metadata)
+                + order_result_owned_bytes_v2(&response.result)
+        }
+        BusinessDirectResponseV2::Orders(response) => {
+            direct_metadata_owned_bytes_v2(&response.metadata)
+                + orders_result_owned_bytes_v2(&response.result)
+        }
+        BusinessDirectResponseV2::Trades(response) => {
+            direct_metadata_owned_bytes_v2(&response.metadata)
+                + trades_result_owned_bytes_v2(&response.result)
+        }
+    }
+}
+
+fn lifecycle_metadata_owned_bytes_v2(metadata: &contracts::LifecycleFeedbackMetadataV2) -> u64 {
+    account_key_owned_bytes_v2(&metadata.account_instance_key)
+}
+
+fn optional_account_delta_owned_bytes_v2(delta: Option<&contracts::PlatformAccountDeltaV2>) -> u64 {
+    delta.map_or(0, account_delta_owned_bytes_v2)
+}
+
+fn order_lifecycle_owned_bytes_v2(feedback: &OrderLifecycleFeedbackV2) -> u64 {
+    let event = match &feedback.event {
+        contracts::OrderLifecycleEventV2::OrderAccepted {
+            status,
+            account_delta,
+        } => status.raw.len() as u64 + account_delta_owned_bytes_v2(account_delta),
+        contracts::OrderLifecycleEventV2::FakUnspentReleased {
+            released_quote_amount_pusd,
+            account_delta,
+        } => {
+            released_quote_amount_pusd.0.len() as u64 + account_delta_owned_bytes_v2(account_delta)
+        }
+        contracts::OrderLifecycleEventV2::VenueDustTerminal {
+            closed_base_quantity_shares,
+            released_quote_amount_pusd,
+            account_delta,
+        } => {
+            (closed_base_quantity_shares.0.len() + released_quote_amount_pusd.0.len()) as u64
+                + optional_account_delta_owned_bytes_v2(account_delta.as_ref())
+        }
+        contracts::OrderLifecycleEventV2::MarketResolvedCanceled {
+            resolution_event_id,
+            canceled_base_quantity_shares,
+            released_quote_amount_pusd,
+            account_delta,
+        } => {
+            (resolution_event_id.len()
+                + canceled_base_quantity_shares.0.len()
+                + released_quote_amount_pusd.0.len()) as u64
+                + optional_account_delta_owned_bytes_v2(account_delta.as_ref())
+        }
+        contracts::OrderLifecycleEventV2::CallerCanceled {
+            canceled_base_quantity_shares,
+            released_quote_amount_pusd,
+            account_delta,
+        } => {
+            (canceled_base_quantity_shares.0.len() + released_quote_amount_pusd.0.len()) as u64
+                + optional_account_delta_owned_bytes_v2(account_delta.as_ref())
+        }
+        contracts::OrderLifecycleEventV2::GtdExpired {
+            expired_base_quantity_shares,
+            released_quote_amount_pusd,
+            account_delta,
+            ..
+        } => {
+            (expired_base_quantity_shares.0.len() + released_quote_amount_pusd.0.len()) as u64
+                + optional_account_delta_owned_bytes_v2(account_delta.as_ref())
+        }
+    };
+    lifecycle_metadata_owned_bytes_v2(&feedback.metadata)
+        + (feedback.platform_order_id.len()
+            + feedback.condition_id.0.len()
+            + feedback.token_id.0.len()) as u64
+        + event
+}
+
+fn trade_lifecycle_owned_bytes_v2(feedback: &TradeLifecycleFeedbackV2) -> u64 {
+    lifecycle_metadata_owned_bytes_v2(&feedback.metadata)
+        + (feedback.trade_id.len()
+            + feedback.platform_order_id.len()
+            + feedback.condition_id.0.len()
+            + feedback.token_id.0.len()
+            + feedback.status.raw.len()
+            + feedback.source_price_pusd_per_share.0.len()
+            + feedback.base_quantity_shares.0.len()
+            + feedback.quote_amount_pusd.0.len()
+            + feedback.immediate_taker_fee_pusd.0.len()) as u64
+        + optional_account_delta_owned_bytes_v2(feedback.account_delta.as_ref())
+}
+
+fn settlement_lifecycle_owned_bytes_v2(feedback: &SettlementLifecycleFeedbackV2) -> u64 {
+    use contracts::SettlementLifecycleEventV2 as Event;
+
+    let event = match &feedback.event {
+        Event::MakerRebateAccrualFinalized {
+            condition_id,
+            contributions,
+            accrual_pusd,
+            account_delta,
+            ..
+        } => {
+            condition_id.0.len() as u64
+                + accrual_pusd.0.len() as u64
+                + contributions
+                    .iter()
+                    .map(|contribution| {
+                        (contribution.trade_id.len()
+                            + contribution.base_quantity_shares.0.len()
+                            + contribution.price_pusd_per_share.0.len()
+                            + contribution.maker_fee_equivalent_pusd.0.len()
+                            + contribution.rebate_rate.0.len()
+                            + contribution.rebate_contribution_pusd.0.len())
+                            as u64
+                    })
+                    .sum::<u64>()
+                + optional_account_delta_owned_bytes_v2(account_delta.as_ref())
+        }
+        Event::TakerRebateAccrualApplied {
+            trade_id,
+            condition_id,
+            actual_taker_fee_pusd,
+            rebate_rate,
+            accrual_pusd,
+            account_delta,
+            ..
+        } => {
+            (trade_id.len()
+                + condition_id.0.len()
+                + actual_taker_fee_pusd.0.len()
+                + rebate_rate.0.len()
+                + accrual_pusd.0.len()) as u64
+                + account_delta_owned_bytes_v2(account_delta)
+        }
+        Event::MakerRebateDayFinalized {
+            accrual_pusd,
+            payable_pusd,
+            locked_remainder_pusd,
+            account_delta,
+            ..
+        }
+        | Event::TakerRebateDayFinalized {
+            accrual_pusd,
+            payable_pusd,
+            locked_remainder_pusd,
+            account_delta,
+            ..
+        } => {
+            (accrual_pusd.0.len() + payable_pusd.0.len() + locked_remainder_pusd.0.len()) as u64
+                + optional_account_delta_owned_bytes_v2(account_delta.as_ref())
+        }
+        Event::MakerRebatePaid {
+            paid_pusd,
+            account_delta,
+            ..
+        }
+        | Event::TakerRebatePaid {
+            paid_pusd,
+            account_delta,
+            ..
+        } => paid_pusd.0.len() as u64 + account_delta_owned_bytes_v2(account_delta),
+        Event::AutoRedeemApplied {
+            condition_id,
+            resolution_event_id,
+            resolution,
+            redeemed_outcome_balances,
+            redeemed_pusd,
+            account_delta,
+            ..
+        } => {
+            let contracts::MarketResolutionTerminalV3::Resolved {
+                winning_asset_id,
+                winning_outcome,
+                payout_vector,
+                mapping_rule_version,
+            } = resolution;
+            (condition_id.0.len()
+                + resolution_event_id.len()
+                + winning_asset_id.len()
+                + winning_outcome.len()
+                + mapping_rule_version.len()
+                + redeemed_pusd.0.len()) as u64
+                + payout_vector
+                    .iter()
+                    .map(|entry| {
+                        (entry.asset.token_id.0.len()
+                            + entry.asset.outcome.label.len()
+                            + entry.payout_pusd_per_share.0.len()) as u64
+                    })
+                    .sum::<u64>()
+                + redeemed_outcome_balances
+                    .iter()
+                    .map(|balance| {
+                        (balance.token_id.0.len() + balance.balance_shares.0.len()) as u64
+                    })
+                    .sum::<u64>()
+                + optional_account_delta_owned_bytes_v2(account_delta.as_ref())
+        }
+    };
+    lifecycle_metadata_owned_bytes_v2(&feedback.metadata) + event
+}
 
 pub(crate) struct SimRunActorV2 {
     opened: RunOpenedV2,
@@ -613,6 +1583,9 @@ pub(crate) struct SimRunActorV2 {
     _latency_profile: Arc<EmpiricalDelayProfile>,
     log: Option<SimEventLogV2>,
     state: Option<BusinessReducerStateV2>,
+    projection_port: Box<dyn BusinessProjectionPortV2>,
+    pending_projections: VecDeque<PendingProjectionBatchV2>,
+    pending_projection_resources: ResourceQuantityV1,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -641,6 +1614,7 @@ pub(crate) enum SimRunActorErrorV2 {
     Matching(MatchingStateErrorV1),
     Account(PlatformAccountError),
     Log(SimEventLogErrorV2),
+    ProjectionBackpressured,
 }
 
 impl std::fmt::Display for SimRunActorErrorV2 {
@@ -687,6 +1661,9 @@ impl std::fmt::Display for SimRunActorErrorV2 {
             Self::Matching(error) => write!(formatter, "执行状态失败：{error:?}"),
             Self::Account(error) => write!(formatter, "平台账户初始化失败：{error}"),
             Self::Log(error) => write!(formatter, "单一事件日志失败：{error}"),
+            Self::ProjectionBackpressured => {
+                write!(formatter, "唯一投影接收端口暂时不能接纳当前批次")
+            }
         }
     }
 }
@@ -701,6 +1678,7 @@ impl SimRunActorV2 {
         finality_policy: Arc<TradeFinalityPolicyV2>,
         scenario: Arc<SealedPlatformScenarioV1>,
         latency_profile: Arc<EmpiricalDelayProfile>,
+        projection_port: Box<dyn BusinessProjectionPortV2>,
         max_group_bytes: usize,
     ) -> Result<Self, SimRunActorErrorV2> {
         if !is_stable_text(&opened.run_id) {
@@ -731,6 +1709,9 @@ impl SimRunActorV2 {
                 session: None,
                 business_resources: ResourceQuantityV1::default(),
             }),
+            projection_port,
+            pending_projections: VecDeque::new(),
+            pending_projection_resources: ResourceQuantityV1::default(),
         })
     }
 
@@ -748,26 +1729,13 @@ impl SimRunActorV2 {
             }
         }
 
-        let state = self.take_state()?;
-        let (state, output) = match reduce_business_input_v2(
-            &self.opened,
-            self.scenario.initial_market_directory(),
-            state,
-            BusinessReducerInputV2::CreateSession(&spec),
-        ) {
-            Ok(reduced) => reduced,
-            Err(BusinessReductionErrorV2::Unaccepted { state, error }) => {
-                self.state = Some(state);
-                return Err(error);
-            }
-            Err(BusinessReductionErrorV2::Fatal(error)) => return Err(error),
-        };
-        let BusinessReducerOutputV2::CreateSession(result) = output else {
+        let mut committed = self.commit_group(vec![BusinessInputV2::CreateSession(spec)])?;
+        if let Some(error) = committed.unaccepted {
+            return Err(error);
+        }
+        let Some(CommittedBusinessOutputV2::CreateSession(result)) = committed.outputs.pop() else {
             unreachable!("CreateSession 归约只能返回创建结果")
         };
-        let input = BusinessInputV2::CreateSession(spec);
-        self.append_input(&input)?;
-        self.state = Some(state);
         Ok(result)
     }
 
@@ -789,26 +1757,16 @@ impl SimRunActorV2 {
             }
         }
 
-        let state = self.take_state()?;
-        let (state, output) = match reduce_business_input_v2(
-            &self.opened,
-            self.scenario.initial_market_directory(),
-            state,
-            BusinessReducerInputV2::ActivateSession(&activation_id),
-        ) {
-            Ok(reduced) => reduced,
-            Err(BusinessReductionErrorV2::Unaccepted { state, error }) => {
-                self.state = Some(state);
-                return Err(error);
-            }
-            Err(BusinessReductionErrorV2::Fatal(error)) => return Err(error),
-        };
-        let BusinessReducerOutputV2::SessionInitialization(result) = output else {
+        let mut committed =
+            self.commit_group(vec![BusinessInputV2::ActivateSession { activation_id }])?;
+        if let Some(error) = committed.unaccepted {
+            return Err(error);
+        }
+        let Some(CommittedBusinessOutputV2::SessionInitialization(result)) =
+            committed.outputs.pop()
+        else {
             unreachable!("ActivateSession 归约只能返回初始化结果")
         };
-        let input = BusinessInputV2::ActivateSession { activation_id };
-        self.append_input(&input)?;
-        self.state = Some(state);
         Ok(result)
     }
 
@@ -830,26 +1788,18 @@ impl SimRunActorV2 {
             }
         }
 
-        let state = self.take_state()?;
-        let (state, output) = match reduce_business_input_v2(
-            &self.opened,
-            self.scenario.initial_market_directory(),
-            state,
-            BusinessReducerInputV2::FailSessionInitialization(&failure_id),
-        ) {
-            Ok(reduced) => reduced,
-            Err(BusinessReductionErrorV2::Unaccepted { state, error }) => {
-                self.state = Some(state);
-                return Err(error);
-            }
-            Err(BusinessReductionErrorV2::Fatal(error)) => return Err(error),
-        };
-        let BusinessReducerOutputV2::SessionInitialization(result) = output else {
+        let mut committed =
+            self.commit_group(vec![BusinessInputV2::FailSessionInitialization {
+                failure_id,
+            }])?;
+        if let Some(error) = committed.unaccepted {
+            return Err(error);
+        }
+        let Some(CommittedBusinessOutputV2::SessionInitialization(result)) =
+            committed.outputs.pop()
+        else {
             unreachable!("FailSessionInitialization 归约只能返回初始化结果")
         };
-        let input = BusinessInputV2::FailSessionInitialization { failure_id };
-        self.append_input(&input)?;
-        self.state = Some(state);
         Ok(result)
     }
 
@@ -866,27 +1816,194 @@ impl SimRunActorV2 {
             return Ok(existing.clone());
         }
 
-        let state = self.take_state()?;
-        let (state, output) = match reduce_business_input_v2(
-            &self.opened,
-            self.scenario.initial_market_directory(),
-            state,
-            BusinessReducerInputV2::EnrollMarket(&request),
-        ) {
-            Ok(reduced) => reduced,
-            Err(BusinessReductionErrorV2::Unaccepted { state, error }) => {
-                self.state = Some(state);
-                return Err(error);
-            }
-            Err(BusinessReductionErrorV2::Fatal(error)) => return Err(error),
-        };
-        let BusinessReducerOutputV2::MarketEnrollment(result) = output else {
+        let mut committed = self.commit_group(vec![BusinessInputV2::EnrollMarket(request)])?;
+        if let Some(error) = committed.unaccepted {
+            return Err(error);
+        }
+        let Some(CommittedBusinessOutputV2::MarketEnrollment(result)) = committed.outputs.pop()
+        else {
             unreachable!("EnrollMarket 归约只能返回市场登记结果")
         };
-        let input = BusinessInputV2::EnrollMarket(request);
-        self.append_input(&input)?;
-        self.state = Some(state);
         Ok(result)
+    }
+
+    pub(crate) fn register_request(
+        &mut self,
+        cutoff: TrustedDecisionCutoffV2,
+        request: BusinessRequestV2,
+    ) -> Result<MutationRequestReceiptV2, SimRunActorErrorV2> {
+        if let Some(existing) = existing_mutation_request_receipt_v2(
+            self.state.as_ref().ok_or(SimRunActorErrorV2::Closed)?,
+            &request.context().global_request_id,
+        ) {
+            return Ok(existing);
+        }
+        let mut committed =
+            self.commit_group(vec![BusinessInputV2::Request { cutoff, request }])?;
+        if let Some(error) = committed.unaccepted {
+            return Err(error);
+        }
+        let Some(CommittedBusinessOutputV2::RequestRegistration(result)) = committed.outputs.pop()
+        else {
+            unreachable!("Request 归约只能返回首次接收回执")
+        };
+        Ok(result)
+    }
+
+    pub(crate) fn drive_platform_prefix(
+        &mut self,
+        advance: PlatformPrefixAdvanceV2,
+    ) -> Result<(), SimRunActorErrorV2> {
+        let mut committed =
+            self.commit_group(vec![BusinessInputV2::PlatformPrefixAdvance(advance)])?;
+        if let Some(error) = committed.unaccepted {
+            return Err(error);
+        }
+        let Some(CommittedBusinessOutputV2::Driven) = committed.outputs.pop() else {
+            unreachable!("平台前缀归约只能返回驱动完成")
+        };
+        Ok(())
+    }
+
+    pub(crate) fn drive_closed_market_bucket(
+        &mut self,
+        bucket: AcceptedClosedMarketBucketV2,
+    ) -> Result<(), SimRunActorErrorV2> {
+        let mut committed = self.commit_group(vec![BusinessInputV2::ClosedMarketBucket(bucket)])?;
+        if let Some(error) = committed.unaccepted {
+            return Err(error);
+        }
+        let Some(CommittedBusinessOutputV2::Driven) = committed.outputs.pop() else {
+            unreachable!("已封口市场桶归约只能返回驱动完成")
+        };
+        Ok(())
+    }
+
+    pub(crate) fn commit_group(
+        &mut self,
+        inputs: Vec<BusinessInputV2>,
+    ) -> Result<BusinessGroupCommitV2, SimRunActorErrorV2> {
+        self.deliver_pending_projections();
+        if self
+            .pending_projections
+            .iter()
+            .any(|pending| !pending.accepted)
+        {
+            return Err(SimRunActorErrorV2::ProjectionBackpressured);
+        }
+        let start_sequence = self
+            .log
+            .as_ref()
+            .ok_or(SimRunActorErrorV2::Closed)?
+            .next_input_sequence();
+        let mut state = self.take_state()?;
+        let mut outputs = Vec::with_capacity(inputs.len());
+        let mut projections = Vec::new();
+        let mut unaccepted = None;
+        for (index, input) in inputs.iter().enumerate() {
+            let input_sequence = start_sequence
+                .checked_add(index as u64)
+                .expect("有界输入组序号不得溢出");
+            let reduced = reduce_actor_input_v2(
+                &self.opened,
+                self.scenario.initial_market_directory(),
+                state,
+                input,
+                input_sequence,
+                &self._latency_profile,
+                self._rule_snapshot.snapshot(),
+                &self._finality_policy,
+            );
+            let (next_state, output) = match reduced {
+                Ok(result) => result,
+                Err(BusinessReductionErrorV2::Unaccepted {
+                    state: returned,
+                    error,
+                }) => {
+                    state = returned;
+                    unaccepted = Some(error);
+                    break;
+                }
+                Err(BusinessReductionErrorV2::Fatal(error)) => return Err(error),
+            };
+            let (next_state, output, projection) = finalize_projection_batch_v2(
+                &self.opened.run_id,
+                next_state,
+                output,
+                &self._latency_profile,
+            )?;
+            state = next_state;
+            outputs.push(output);
+            if let Some(projection) = projection {
+                projections.push(projection);
+            }
+        }
+        if outputs.is_empty() {
+            self.state = Some(state);
+            return Ok(BusinessGroupCommitV2 {
+                outputs,
+                unaccepted,
+            });
+        }
+        let accepted_len = outputs.len();
+        let log = self.log.take().ok_or(SimRunActorErrorV2::Closed)?;
+        let (log, _) = log
+            .append_group(&inputs[..accepted_len])
+            .map_err(SimRunActorErrorV2::Log)?;
+        self.log = Some(log);
+        self.state = Some(state);
+        #[cfg(test)]
+        record_group_state_install_for_tests();
+        for projection in projections {
+            let resources = projection_resource_quantity_v2(&projection);
+            self.pending_projection_resources =
+                add_resource_quantity_v2(self.pending_projection_resources, resources);
+            self.pending_projections
+                .push_back(PendingProjectionBatchV2 {
+                    batch: Arc::new(projection),
+                    resources,
+                    accepted: false,
+                });
+        }
+        self.deliver_pending_projections();
+        Ok(BusinessGroupCommitV2 {
+            outputs,
+            unaccepted,
+        })
+    }
+
+    fn deliver_pending_projections(&mut self) {
+        let durable_through = self.projection_port.durable_through(&self.opened.run_id);
+        while self.pending_projections.front().is_some_and(|pending| {
+            pending.accepted && pending.batch.projection_batch_sequence <= durable_through
+        }) {
+            let pending = self
+                .pending_projections
+                .pop_front()
+                .expect("已确认投影前缀存在");
+            self.pending_projection_resources.records -= pending.resources.records;
+            self.pending_projection_resources.bytes -= pending.resources.bytes;
+        }
+        for pending in &mut self.pending_projections {
+            if pending.accepted {
+                continue;
+            }
+            if !self.projection_port.try_accept(Arc::clone(&pending.batch)) {
+                break;
+            }
+            pending.accepted = true;
+        }
+        let durable_through = self.projection_port.durable_through(&self.opened.run_id);
+        while self.pending_projections.front().is_some_and(|pending| {
+            pending.accepted && pending.batch.projection_batch_sequence <= durable_through
+        }) {
+            let pending = self
+                .pending_projections
+                .pop_front()
+                .expect("已确认投影前缀存在");
+            self.pending_projection_resources.records -= pending.resources.records;
+            self.pending_projection_resources.bytes -= pending.resources.bytes;
+        }
     }
 
     fn take_state(&mut self) -> Result<BusinessReducerStateV2, SimRunActorErrorV2> {
@@ -894,15 +2011,6 @@ impl SimRunActorV2 {
             return Err(SimRunActorErrorV2::Closed);
         }
         self.state.take().ok_or(SimRunActorErrorV2::Closed)
-    }
-
-    fn append_input(&mut self, input: &BusinessInputV2) -> Result<(), SimRunActorErrorV2> {
-        let log = self.log.take().ok_or(SimRunActorErrorV2::Closed)?;
-        let (log, _) = log
-            .append_group(std::slice::from_ref(input))
-            .map_err(SimRunActorErrorV2::Log)?;
-        self.log = Some(log);
-        Ok(())
     }
 
     #[cfg(test)]
@@ -1199,6 +2307,7 @@ fn existing_mutation_request_receipt_v2(
     })
 }
 
+#[allow(clippy::result_large_err)]
 fn register_new_request_v2(
     mut state: BusinessReducerStateV2,
     cutoff: &TrustedDecisionCutoffV2,
@@ -2371,8 +3480,9 @@ fn apply_trades_query_action_v2(
 }
 
 fn seal_completed_response_v2(
+    global_request_id: &str,
     request: &mut MutationRequestRecordV2,
-) -> Result<Arc<DirectResponseDraftV2>, SimRunActorErrorV2> {
+) -> Result<Arc<StoredDirectResponseV2>, SimRunActorErrorV2> {
     debug_assert_eq!(request.remaining_action_count, 0);
     debug_assert!(request.completed_response.is_none());
     request
@@ -2472,15 +3582,19 @@ fn seal_completed_response_v2(
     };
     let response_received_at_utc_ms =
         checked_add_delay_v2(platform_responded_at_utc_ms, request.inbound_delay_ms)?;
-    let response = Arc::new(DirectResponseDraftV2 {
+    let response = Arc::new(StoredDirectResponseV2::Draft(DirectResponseDraftV2 {
+        global_request_id: global_request_id.to_owned(),
+        caller_correlation_id: request.caller_correlation_id.clone(),
+        method: request.method,
         platform_responded_at_utc_ms,
         response_received_at_utc_ms,
         payload,
-    });
+    }));
     request.completed_response = Some(Arc::clone(&response));
     Ok(response)
 }
 
+#[allow(clippy::result_large_err)]
 fn advance_next_mutation_action_at_v2(
     mut state: BusinessReducerStateV2,
     platform_effective_at_utc_ms: i64,
@@ -2701,17 +3815,18 @@ fn advance_next_mutation_action_at_v2(
         }
     }
     let completed_response = if request.remaining_action_count == 0 {
-        Some(seal_completed_response_v2(request).map_err(BusinessReductionErrorV2::Fatal)?)
+        Some(
+            seal_completed_response_v2(&global_request_id, request)
+                .map_err(BusinessReductionErrorV2::Fatal)?,
+        )
     } else {
         None
     };
-    state.business_resources = resources
-        .apply_to(state.business_resources)
-        .ok_or_else(|| {
-            BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(
-                MatchingStateErrorV1::QueuePredecessorConflict,
-            ))
-        })?;
+    state.business_resources = resources.apply_to(state.business_resources).ok_or({
+        BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(
+            MatchingStateErrorV1::QueuePredecessorConflict,
+        ))
+    })?;
     state.session = Some(session);
     Ok((
         state,
@@ -2730,6 +3845,343 @@ fn unaccepted_business_input_v2(
     BusinessReductionErrorV2::Unaccepted { state, error }
 }
 
+#[allow(clippy::result_large_err)]
+pub(crate) fn drive_business_input_at_v2(
+    mut state: BusinessReducerStateV2,
+    input: BusinessReducerInputV2<'_>,
+) -> BusinessReductionResultV2 {
+    #[cfg(test)]
+    record_reducer_call_for_tests();
+    let (
+        path,
+        logical_at_utc_ms,
+        next_index_position,
+        start_index_position,
+        bucket,
+        rules,
+        finality_policy,
+    ) = match input {
+        BusinessReducerInputV2::PlatformPrefixAdvance {
+            advance,
+            rules,
+            finality_policy,
+        } => (
+            advance.path,
+            advance.closed_through_utc_ms,
+            advance.next_index_position,
+            None,
+            None,
+            rules,
+            finality_policy,
+        ),
+        BusinessReducerInputV2::ClosedMarketBucket {
+            bucket,
+            rules,
+            finality_policy,
+        } => {
+            let reference = &bucket.reference;
+            (
+                reference.path,
+                reference.bucket_at_utc_ms,
+                reference.next_index_position,
+                Some(reference.start_index_position),
+                Some(bucket),
+                rules,
+                finality_policy,
+            )
+        }
+        _ => {
+            return Err(BusinessReductionErrorV2::Fatal(
+                SimRunActorErrorV2::MarketEvent(MarketEventErrorV1::InvalidBucket(
+                    "逻辑驱动器只消费平台前缀或已封口市场桶",
+                )),
+            ));
+        }
+    };
+    let (caller_role, frontier, first_due) = {
+        let Some(session) = state.session.as_ref() else {
+            return Err(unaccepted_business_input_v2(
+                state,
+                SimRunActorErrorV2::SessionNotCreated,
+            ));
+        };
+        if !matches!(
+            session.initialization,
+            SessionInitializationV2::Active { .. }
+        ) {
+            return Err(unaccepted_business_input_v2(
+                state,
+                SimRunActorErrorV2::SessionNotActive,
+            ));
+        }
+        let frontier = match path {
+            MarketEventPathV1::HiddenPlatform => session.hidden_platform_frontier,
+            MarketEventPathV1::PublicVisibility => session.public_visibility_frontier,
+        };
+        let first_due = [
+            session.execution_state.next_gtd_deadline_at_utc_ms(),
+            session.execution_state.next_scheduled_finality_at_utc_ms(),
+            session.execution_state.next_rebate_clock_at_utc_ms(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        (
+            session.opening_fact.account_instance_key.caller_role,
+            frontier,
+            first_due,
+        )
+    };
+    if path == MarketEventPathV1::HiddenPlatform && caller_role == SimCallerRoleV1::Paper {
+        return Err(unaccepted_business_input_v2(
+            state,
+            SimRunActorErrorV2::HiddenPlatformReplayForbidden,
+        ));
+    }
+    let drives_execution = market_path_drives_execution_for(caller_role, path);
+    let common_invalid = frontier.sealed
+        || frontier
+            .closed_through_utc_ms
+            .is_some_and(|closed| logical_at_utc_ms <= closed)
+        || next_index_position < frontier.next_index_position;
+    let payload_invalid = if let Some(bucket) = &bucket {
+        start_index_position.is_some_and(|start| start < frontier.next_index_position)
+            || next_index_position < bucket.reference.start_index_position
+            || frontier
+                .next_event_at_utc_ms
+                .is_some_and(|expected| logical_at_utc_ms != expected)
+            || matches!(bucket.reference.closure, crate::market::MillisecondBucketClosureV1::NextEventAt(next_at) if next_at <= logical_at_utc_ms)
+    } else {
+        !drives_execution
+            || first_due != Some(logical_at_utc_ms)
+            || frontier
+                .next_event_at_utc_ms
+                .is_some_and(|next_at| logical_at_utc_ms >= next_at)
+    };
+    if common_invalid || payload_invalid {
+        let error = if bucket.is_none()
+            && (!drives_execution || first_due != Some(logical_at_utc_ms))
+        {
+            MarketEventErrorV1::InvalidBucket("无正文前缀只在当前执行路径确有最早到期义务时受理")
+        } else {
+            MarketEventErrorV1::BucketIdentityConflict
+        };
+        return Err(unaccepted_business_input_v2(
+            state,
+            SimRunActorErrorV2::MarketEvent(error),
+        ));
+    }
+
+    let mut output = LogicalDriveOutputV2::default();
+    if drives_execution {
+        while state
+            .session
+            .as_ref()
+            .and_then(|session| session.execution_state.next_gtd_deadline_at_utc_ms())
+            == Some(logical_at_utc_ms)
+        {
+            let session = state.session.take().expect("逻辑驱动已确认唯一会话");
+            let (session, effects) = session
+                .map_execution_state(|execution| {
+                    execution.advance_next_gtd_deadline_at(logical_at_utc_ms)
+                })
+                .map_err(|error| {
+                    BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(error))
+                })?;
+            state.business_resources =
+                effects
+                    .resources
+                    .apply_to(state.business_resources)
+                    .ok_or({
+                        BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(
+                            MatchingStateErrorV1::QueuePredecessorConflict,
+                        ))
+                    })?;
+            output
+                .lifecycle
+                .extend(effects.into_lifecycle_feedback().map_err(|error| {
+                    BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(error))
+                })?);
+            state.session = Some(session);
+        }
+        while state
+            .session
+            .as_ref()
+            .and_then(|session| session.execution_state.next_scheduled_finality_at_utc_ms())
+            == Some(logical_at_utc_ms)
+        {
+            let session = state.session.take().expect("逻辑驱动已确认唯一会话");
+            let (mut session, effects) = session
+                .map_execution_state(|execution| {
+                    execution.advance_next_scheduled_finality_at(
+                        logical_at_utc_ms,
+                        finality_policy,
+                        rules,
+                    )
+                })
+                .map_err(|error| {
+                    BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(error))
+                })?;
+            state.business_resources =
+                effects
+                    .resources
+                    .apply_to(state.business_resources)
+                    .ok_or({
+                        BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(
+                            MatchingStateErrorV1::QueuePredecessorConflict,
+                        ))
+                    })?;
+            if effects.transition.is_some() {
+                session.query_state.advance_revision();
+            }
+            output
+                .lifecycle
+                .extend(effects.into_lifecycle_feedback().map_err(|error| {
+                    BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(error))
+                })?);
+            state.session = Some(session);
+        }
+        while state
+            .session
+            .as_ref()
+            .and_then(|session| session.execution_state.next_rebate_clock_at_utc_ms())
+            == Some(logical_at_utc_ms)
+        {
+            let session = state.session.take().expect("逻辑驱动已确认唯一会话");
+            let (session, effects) = session
+                .map_execution_state(|execution| {
+                    execution.advance_next_rebate_clock_at(logical_at_utc_ms)
+                })
+                .map_err(|error| {
+                    BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(error))
+                })?;
+            state.business_resources =
+                effects
+                    .resources
+                    .apply_to(state.business_resources)
+                    .ok_or({
+                        BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(
+                            MatchingStateErrorV1::QueuePredecessorConflict,
+                        ))
+                    })?;
+            output
+                .lifecycle
+                .extend(effects.into_lifecycle_feedback().map_err(|error| {
+                    BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(error))
+                })?);
+            state.session = Some(session);
+        }
+    }
+    {
+        let session = state.session.as_mut().expect("逻辑驱动已确认唯一会话");
+        let mut resources = match path {
+            MarketEventPathV1::HiddenPlatform => session
+                .hidden_platform_markets
+                .as_mut()
+                .expect("隐藏执行路径必须持有隐藏市场状态")
+                .advance_time(&session.market_directory, logical_at_utc_ms),
+            MarketEventPathV1::PublicVisibility => session
+                .public_markets
+                .advance_time(&session.market_directory, logical_at_utc_ms),
+        }
+        .map_err(|error| BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::MarketEvent(error)))?;
+        if drives_execution {
+            let execution = session
+                .execution_state
+                .advance_market_time(&session.market_directory, logical_at_utc_ms)
+                .map_err(|error| {
+                    BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(error))
+                })?;
+            resources.merge(execution.resources);
+        }
+        state.business_resources = resources.apply_to(state.business_resources).ok_or({
+            BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(
+                MatchingStateErrorV1::QueuePredecessorConflict,
+            ))
+        })?;
+    }
+    if let Some(bucket) = &bucket {
+        let (next, effects) = reduce_market_event_slice_v2(
+            state,
+            path,
+            logical_at_utc_ms,
+            bucket.events.as_ref(),
+            rules,
+            finality_policy,
+        )
+        .map_err(|error| match error {
+            MarketEventSliceReductionErrorV2::Unaccepted { state, error } => {
+                BusinessReductionErrorV2::Unaccepted { state, error }
+            }
+            MarketEventSliceReductionErrorV2::Fatal(error) => {
+                BusinessReductionErrorV2::Fatal(error)
+            }
+        })?;
+        state = next;
+        for execution in effects.execution {
+            output
+                .lifecycle
+                .extend(execution.into_lifecycle_feedback().map_err(|error| {
+                    BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(error))
+                })?);
+        }
+        if bucket.reference.closure == crate::market::MillisecondBucketClosureV1::EndOfInput {
+            let session = state.session.as_ref().expect("闭桶归约后唯一会话存在");
+            let role_markets = match path {
+                MarketEventPathV1::HiddenPlatform => session
+                    .hidden_platform_markets
+                    .as_ref()
+                    .expect("隐藏路径只属于训练或离线评估会话"),
+                MarketEventPathV1::PublicVisibility => &session.public_markets,
+            };
+            role_markets.validate_input_complete().map_err(|error| {
+                BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::MarketEvent(error))
+            })?;
+        }
+    }
+    if drives_execution {
+        while state.session.as_ref().and_then(|session| {
+            session
+                .mutation_requests
+                .pending_actions
+                .first_key_value()
+                .map(|(key, _)| key.effective_processing_at_utc_ms)
+        }) == Some(logical_at_utc_ms)
+        {
+            let (next, effect) = advance_next_mutation_action_at_v2(
+                state,
+                logical_at_utc_ms,
+                rules,
+                finality_policy,
+            )?;
+            state = next;
+            if let Some(effect) = effect {
+                output.mutations.push(effect);
+            }
+        }
+    }
+    let session = state.session.as_mut().expect("逻辑驱动已确认唯一会话");
+    let frontier = match path {
+        MarketEventPathV1::HiddenPlatform => &mut session.hidden_platform_frontier,
+        MarketEventPathV1::PublicVisibility => &mut session.public_visibility_frontier,
+    };
+    frontier.closed_through_utc_ms = Some(logical_at_utc_ms);
+    frontier.next_index_position = next_index_position;
+    if let Some(bucket) = bucket {
+        match bucket.reference.closure {
+            crate::market::MillisecondBucketClosureV1::NextEventAt(next_at) => {
+                frontier.next_event_at_utc_ms = Some(next_at);
+            }
+            crate::market::MillisecondBucketClosureV1::EndOfInput => {
+                frontier.next_event_at_utc_ms = None;
+                frontier.sealed = true;
+            }
+        }
+    }
+    Ok((state, BusinessReducerOutputV2::LogicalDrive(output)))
+}
+
+#[allow(clippy::result_large_err)]
 fn reduce_business_input_v2(
     opened: &RunOpenedV2,
     initial_market_directory: &SessionMarketDirectoryV1,
@@ -2795,6 +4247,10 @@ fn reduce_business_input_v2(
                 market_enrollment: MarketEnrollmentStateV2::default(),
                 mutation_requests: MutationRequestStateV2::default(),
                 query_state: QueryStateV2::default(),
+                next_private_feedback_sequence: 1,
+                next_projection_batch_sequence: 1,
+                hidden_platform_frontier: LogicalPathFrontierV2::default(),
+                public_visibility_frontier: LogicalPathFrontierV2::default(),
             });
             state.business_resources = business_resources;
             BusinessReducerOutputV2::CreateSession(CreateSessionControlResultV2 {
@@ -2915,10 +4371,15 @@ fn reduce_business_input_v2(
             state = reduced;
             BusinessReducerOutputV2::MutationAction(effect)
         }
+        logical @ (BusinessReducerInputV2::PlatformPrefixAdvance { .. }
+        | BusinessReducerInputV2::ClosedMarketBucket { .. }) => {
+            return drive_business_input_at_v2(state, logical);
+        }
     };
     Ok((state, output))
 }
 
+#[allow(clippy::result_large_err)]
 fn reduce_market_event_slice_v2(
     mut state: BusinessReducerStateV2,
     path: MarketEventPathV1,
@@ -3059,13 +4520,11 @@ fn reduce_market_event_slice_v2(
             );
         }
     }
-    state.business_resources = resources
-        .apply_to(state.business_resources)
-        .ok_or_else(|| {
-            MarketEventSliceReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(
-                MatchingStateErrorV1::QueuePredecessorConflict,
-            ))
-        })?;
+    state.business_resources = resources.apply_to(state.business_resources).ok_or({
+        MarketEventSliceReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(
+            MatchingStateErrorV1::QueuePredecessorConflict,
+        ))
+    })?;
     session.market_enrollment.business_input_started = true;
     if query_projection_changed {
         session.query_state.advance_revision();
@@ -3138,6 +4597,8 @@ fn validate_event_membership_v2(
 #[cfg(test)]
 thread_local! {
     static REDUCER_CALL_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static PROJECTION_BATCH_CONSTRUCTION_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static GROUP_STATE_INSTALL_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -3153,6 +4614,32 @@ fn reset_reducer_call_count_for_tests() {
 #[cfg(test)]
 fn reducer_call_count_for_tests() -> u64 {
     REDUCER_CALL_COUNT.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn record_projection_batch_construction_for_tests() {
+    PROJECTION_BATCH_CONSTRUCTION_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+}
+
+#[cfg(test)]
+fn record_group_state_install_for_tests() {
+    GROUP_STATE_INSTALL_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+}
+
+#[cfg(test)]
+fn reset_group_commit_counts_for_tests() {
+    reset_reducer_call_count_for_tests();
+    PROJECTION_BATCH_CONSTRUCTION_COUNT.with(|count| count.set(0));
+    GROUP_STATE_INSTALL_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn group_commit_counts_for_tests() -> (u64, u64, u64) {
+    (
+        reducer_call_count_for_tests(),
+        PROJECTION_BATCH_CONSTRUCTION_COUNT.with(std::cell::Cell::get),
+        GROUP_STATE_INSTALL_COUNT.with(std::cell::Cell::get),
+    )
 }
 
 fn validate_session_spec(
@@ -3274,6 +4761,9 @@ fn add_resource_quantity_v2(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use contracts::{
         AssetIdentityV1, BookSide, ClobMarketId, ConditionId, ExactDecimal, InitialAccountStateV2,
         LevelExecutionBasis, LevelExecutionTransitionV3, MarketIdentityV2, MarketWindowV2,
@@ -3300,6 +4790,52 @@ mod tests {
 
     const MAX_GROUP_BYTES: usize = 64 * 1024;
 
+    #[derive(Default)]
+    struct AcceptingProjectionPortV2 {
+        durable_through: u64,
+    }
+
+    impl BusinessProjectionPortV2 for AcceptingProjectionPortV2 {
+        fn try_accept(&mut self, batch: Arc<BusinessProjectionBatchV2>) -> bool {
+            self.durable_through = batch.projection_batch_sequence;
+            true
+        }
+
+        fn durable_through(&self, _run_id: &str) -> u64 {
+            self.durable_through
+        }
+    }
+
+    fn accepting_projection_port() -> Box<dyn BusinessProjectionPortV2> {
+        Box::<AcceptingProjectionPortV2>::default()
+    }
+
+    #[derive(Default)]
+    struct ControllableProjectionPortStateV2 {
+        accept_limit: usize,
+        durable_through: u64,
+        accepted: Vec<Arc<BusinessProjectionBatchV2>>,
+    }
+
+    struct ControllableProjectionPortV2 {
+        state: Rc<RefCell<ControllableProjectionPortStateV2>>,
+    }
+
+    impl BusinessProjectionPortV2 for ControllableProjectionPortV2 {
+        fn try_accept(&mut self, batch: Arc<BusinessProjectionBatchV2>) -> bool {
+            let mut state = self.state.borrow_mut();
+            if state.accepted.len() >= state.accept_limit {
+                return false;
+            }
+            state.accepted.push(batch);
+            true
+        }
+
+        fn durable_through(&self, _run_id: &str) -> u64 {
+            self.state.borrow().durable_through
+        }
+    }
+
     fn sha(byte: char) -> Sha256Hex {
         Sha256Hex(std::iter::repeat_n(byte, 64).collect())
     }
@@ -3314,6 +4850,24 @@ mod tests {
         };
         let bytes = serde_json::to_vec(&artifact).expect("编码场景文件测试夹具");
         Arc::new(SealedPlatformScenarioV1::decode_and_seal(&bytes).expect("解码并密封场景文件"))
+    }
+
+    fn sealed_scenario_for_markets(
+        markets: Vec<PlatformMarketV1>,
+    ) -> Arc<SealedPlatformScenarioV1> {
+        let scenario = crate::scenario::PlatformScenarioV1::try_new(markets)
+            .expect("构造多市场逻辑驱动测试场景");
+        let artifact = SimulationScenarioArtifactV1 {
+            schema_version: PLATFORM_SCENARIO_SCHEMA_V1.to_owned(),
+            scenario_sha256: scenario.scenario_sha256().clone(),
+            market_set_sha256: scenario.market_set_sha256().clone(),
+            markets: scenario.market_set().markets().to_vec(),
+        };
+        let bytes = serde_json::to_vec(&artifact).expect("编码多市场逻辑驱动测试场景");
+        Arc::new(
+            SealedPlatformScenarioV1::decode_and_seal(&bytes)
+                .expect("解码并密封多市场逻辑驱动测试场景"),
+        )
     }
 
     fn opened(
@@ -3390,6 +4944,43 @@ mod tests {
         .expect("构造追加市场测试正文")
     }
 
+    fn market_with_window(
+        condition_digit: char,
+        clob_market_id: &str,
+        first_token_id: &str,
+        second_token_id: &str,
+        start_at_utc_ms: i64,
+        end_at_utc_ms: i64,
+    ) -> PlatformMarketV1 {
+        PlatformMarketV1::try_new(
+            MarketIdentityV2 {
+                condition_id: ConditionId(format!("0x{}", condition_digit.to_string().repeat(64))),
+                clob_market_id: ClobMarketId(clob_market_id.to_owned()),
+                window: MarketWindowV2 {
+                    start_at_utc_ms,
+                    end_at_utc_ms,
+                },
+            },
+            [
+                AssetIdentityV1 {
+                    token_id: TokenId(first_token_id.to_owned()),
+                    outcome: OutcomeIdentityV1 {
+                        index: 0,
+                        label: "Up".to_owned(),
+                    },
+                },
+                AssetIdentityV1 {
+                    token_id: TokenId(second_token_id.to_owned()),
+                    outcome: OutcomeIdentityV1 {
+                        index: 1,
+                        label: "Down".to_owned(),
+                    },
+                },
+            ],
+        )
+        .expect("构造带窗口的逻辑驱动测试市场")
+    }
+
     async fn active_market_actor(
         role: SimCallerRoleV1,
         run_id: &str,
@@ -3424,6 +5015,7 @@ mod tests {
             finality_policy,
             scenario,
             latency_profile,
+            accepting_projection_port(),
             MAX_GROUP_BYTES,
         )
         .expect("创建市场事件测试运行根");
@@ -3435,6 +5027,42 @@ mod tests {
         actor
             .activate_session(format!("activate-{run_id}"))
             .expect("激活市场事件测试会话");
+        (directory, actor)
+    }
+
+    async fn active_market_actor_with_scenario_and_policy(
+        run_id: &str,
+        scenario: Arc<SealedPlatformScenarioV1>,
+        finality_policy: Arc<TradeFinalityPolicyV2>,
+    ) -> (tempfile::TempDir, SimRunActorV2) {
+        let directory = tempfile::tempdir().expect("创建同刻逻辑驱动测试目录");
+        let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
+        let rule_snapshot = successful_snapshot_v3_for_sim_tests().await;
+        let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
+        let run_opened = opened(
+            run_id,
+            &rule_snapshot,
+            &finality_policy,
+            &scenario,
+            &latency_profile,
+        );
+        let mut actor = SimRunActorV2::create_new(
+            &path,
+            run_opened,
+            rule_snapshot,
+            finality_policy,
+            scenario,
+            latency_profile,
+            accepting_projection_port(),
+            MAX_GROUP_BYTES,
+        )
+        .expect("创建同刻逻辑驱动测试运行根");
+        actor
+            .create_session(spec(run_id, &format!("create-{run_id}")))
+            .expect("创建同刻逻辑驱动测试会话");
+        actor
+            .activate_session(format!("activate-{run_id}"))
+            .expect("激活同刻逻辑驱动测试会话");
         (directory, actor)
     }
 
@@ -3514,6 +5142,98 @@ mod tests {
             .expect("从真实边界解码追加市场事件")
     }
 
+    fn decoded_initial_events_for_market(
+        market: &PlatformMarketV1,
+        source_at_utc_ms: i64,
+        received_at_utc_ms: i64,
+        first_sequence: u64,
+    ) -> Vec<ExecutionMarketEventV3> {
+        decoded_initial_events_for_market_with_quantity(
+            market,
+            source_at_utc_ms,
+            received_at_utc_ms,
+            first_sequence,
+            "2",
+        )
+    }
+
+    fn decoded_initial_events_for_market_with_quantity(
+        market: &PlatformMarketV1,
+        source_at_utc_ms: i64,
+        received_at_utc_ms: i64,
+        first_sequence: u64,
+        quantity: &str,
+    ) -> Vec<ExecutionMarketEventV3> {
+        market
+            .assets()
+            .iter()
+            .enumerate()
+            .map(|(index, asset)| {
+                let mut event = crate::task21_tests::initial_snapshot_event(
+                    &asset.token_id.0,
+                    asset.outcome.index,
+                    &asset.outcome.label,
+                    source_at_utc_ms,
+                    received_at_utc_ms,
+                    first_sequence + u64::try_from(index).expect("测试资产序号可表示"),
+                    quantity,
+                );
+                event.market = market.market().clone();
+                let ExecutionMarketEventPayloadV3::InitialL2Snapshot(snapshot) = &mut event.payload
+                else {
+                    unreachable!("初始市场事件测试夹具必须是初始 L2")
+                };
+                snapshot.asset = asset.clone();
+                event.event_id = data_pipeline_core::derive_execution_market_event_v3_id(&event)
+                    .expect("重建双市场初始事件身份");
+                let bytes = data_pipeline_core::encode_execution_market_event_v3(&event)
+                    .expect("编码双市场初始事件");
+                data_pipeline_core::decode_execution_market_event_v3(&bytes)
+                    .expect("从真实边界解码双市场初始事件")
+            })
+            .collect()
+    }
+
+    fn decoded_resolution_event_for_market(
+        market: &PlatformMarketV1,
+        source_at_utc_ms: i64,
+        received_at_utc_ms: i64,
+        sequence: u64,
+    ) -> ExecutionMarketEventV3 {
+        let winning_asset = &market.assets()[0];
+        let mut event = crate::task21_tests::sealed_event(
+            ExecutionMarketEventPayloadV3::MarketResolutionTerminal(
+                contracts::MarketResolutionTerminalV3::Resolved {
+                    winning_asset_id: winning_asset.token_id.0.clone(),
+                    winning_outcome: winning_asset.outcome.label.clone(),
+                    payout_vector: market
+                        .assets()
+                        .iter()
+                        .enumerate()
+                        .map(|(index, asset)| contracts::PayoutEntryV1 {
+                            asset: asset.clone(),
+                            payout_pusd_per_share: ExactDecimal(if index == 0 {
+                                "1".to_owned()
+                            } else {
+                                "0".to_owned()
+                            }),
+                        })
+                        .collect(),
+                    mapping_rule_version: "run-v2-eof-resolution-v1".to_owned(),
+                },
+            ),
+            crate::task21_tests::orderbook_evidence(source_at_utc_ms, received_at_utc_ms, sequence),
+            crate::task21_tests::fresh_quality(),
+        );
+        event.market = market.market().clone();
+        event.event_id = data_pipeline_core::derive_execution_market_event_v3_id(&event)
+            .expect("重建双市场判定事件身份");
+        let bytes = data_pipeline_core::encode_execution_market_event_v3(&event)
+            .expect("编码双市场判定事件");
+        data_pipeline_core::decode_execution_market_event_v3(&bytes)
+            .expect("从真实边界解码双市场判定事件")
+    }
+
     fn decoded_level_market_event(
         source_at_utc_ms: i64,
         received_at_utc_ms: i64,
@@ -3589,6 +5309,40 @@ mod tests {
             .expect("从真实边界解码 maker 档位市场事件")
     }
 
+    fn decoded_maker_level_event_for_market(
+        market: &PlatformMarketV1,
+        price: &str,
+        before: &str,
+        after: &str,
+        source_at_utc_ms: i64,
+        received_at_utc_ms: i64,
+        sequence: u64,
+    ) -> ExecutionMarketEventV3 {
+        let mut event = decoded_maker_level_event(
+            BookSide::Bid,
+            price,
+            before,
+            after,
+            source_at_utc_ms,
+            received_at_utc_ms,
+            sequence,
+        );
+        event.market = market.market().clone();
+        let ExecutionMarketEventPayloadV3::LevelExecutionTransition(transition) =
+            &mut event.payload
+        else {
+            unreachable!("maker 档位测试夹具必须是档位执行转换")
+        };
+        transition.market = market.market().clone();
+        transition.asset = market.assets()[0].clone();
+        event.event_id = data_pipeline_core::derive_execution_market_event_v3_id(&event)
+            .expect("重建多市场 maker 档位事件身份");
+        let bytes = data_pipeline_core::encode_execution_market_event_v3(&event)
+            .expect("编码多市场 maker 档位事件");
+        data_pipeline_core::decode_execution_market_event_v3(&bytes)
+            .expect("从真实边界解码多市场 maker 档位事件")
+    }
+
     fn decoded_resolution_market_event(
         source_at_utc_ms: i64,
         received_at_utc_ms: i64,
@@ -3648,6 +5402,10 @@ mod tests {
             market_enrollment,
             mutation_requests,
             mut query_state,
+            next_private_feedback_sequence,
+            next_projection_batch_sequence,
+            hidden_platform_frontier,
+            public_visibility_frontier,
         } = state.session.take().expect("BUY 候选必须拥有唯一会话");
         let (execution_state, disposition) = execution_state
             .apply_buy_order(input, rules, finality_policy)
@@ -3672,6 +5430,10 @@ mod tests {
             market_enrollment,
             mutation_requests,
             query_state,
+            next_private_feedback_sequence,
+            next_projection_batch_sequence,
+            hidden_platform_frontier,
+            public_visibility_frontier,
         });
         (state, accepted)
     }
@@ -3695,6 +5457,10 @@ mod tests {
             market_enrollment,
             mutation_requests,
             query_state,
+            next_private_feedback_sequence,
+            next_projection_batch_sequence,
+            hidden_platform_frontier,
+            public_visibility_frontier,
         } = state.session.take().expect("返佣时钟候选必须拥有唯一会话");
         let (execution_state, effects) = execution_state
             .advance_next_rebate_clock_at(platform_effective_at_utc_ms)
@@ -3715,6 +5481,10 @@ mod tests {
             market_enrollment,
             mutation_requests,
             query_state,
+            next_private_feedback_sequence,
+            next_projection_batch_sequence,
+            hidden_platform_frontier,
+            public_visibility_frontier,
         });
         (state, effects)
     }
@@ -3740,6 +5510,10 @@ mod tests {
             market_enrollment,
             mutation_requests,
             mut query_state,
+            next_private_feedback_sequence,
+            next_projection_batch_sequence,
+            hidden_platform_frontier,
+            public_visibility_frontier,
         } = state.session.take().expect("最终性候选必须拥有唯一会话");
         let (execution_state, effects) = execution_state
             .advance_next_scheduled_finality_at(platform_event_at_utc_ms, finality_policy, rules)
@@ -3763,6 +5537,10 @@ mod tests {
             market_enrollment,
             mutation_requests,
             query_state,
+            next_private_feedback_sequence,
+            next_projection_batch_sequence,
+            hidden_platform_frontier,
+            public_visibility_frontier,
         });
         (state, effects)
     }
@@ -3896,6 +5674,1001 @@ mod tests {
                 panic!("逻辑动作候选失败：{error}")
             }
         }
+    }
+
+    async fn assert_necessary_prefix_reduces_once_without_body_and_sparse_gap_emits_nothing() {
+        let (_directory, mut actor) =
+            active_market_actor(SimCallerRoleV1::ModelTrain, "run-prefix-driver-v2").await;
+        let initial = decoded_initial_market_events("10");
+        let condition_id = initial[0].market.condition_id.clone();
+        let state = actor.state.take().expect("必要前缀测试初始状态");
+        let (state, _) = drive_business_input_at_v2(
+            state,
+            BusinessReducerInputV2::ClosedMarketBucket {
+                bucket: AcceptedClosedMarketBucketV2 {
+                    reference: crate::runtime_v2::DurableMarketBucketReferenceV2 {
+                        path: MarketEventPathV1::HiddenPlatform,
+                        bucket_at_utc_ms: 1_100,
+                        start_index_position: 0,
+                        next_index_position: 2,
+                        closure: crate::market::MillisecondBucketClosureV1::NextEventAt(2_000),
+                    },
+                    events: Arc::from(initial),
+                },
+                rules: actor._rule_snapshot.snapshot(),
+                finality_policy: actor._finality_policy.as_ref(),
+            },
+        )
+        .expect("必要前缀测试初始正文桶必须成功");
+        let (state, accepted) = apply_buy_to_candidate(
+            state,
+            BuyOrderActionV2 {
+                global_request_id: "prefix-gtd-request".to_owned(),
+                batch_item_ordinal: 0,
+                item_id: "prefix-gtd-item".to_owned(),
+                condition_id,
+                token_id: TokenId("1".to_owned()),
+                effective_processing_at_utc_ms: 1_200,
+                terms: BuyOrderTermsV2::Gtd {
+                    limit_price_pusd_per_share: "0.3".parse().expect("GTD 测试价格"),
+                    accepted_base_units: 1_000_000,
+                    accepted_quote_units: 300_000,
+                    post_only: false,
+                    expires_at_utc_ms: Some(2_000),
+                },
+            },
+            actor._rule_snapshot.snapshot(),
+            actor._finality_policy.as_ref(),
+        );
+        assert_eq!(accepted.platform_order_id, "sim-1");
+
+        let frontier_before_same_time_prefix = state
+            .session
+            .as_ref()
+            .expect("同刻前缀反例前会话存在")
+            .hidden_platform_frontier;
+        let error = match drive_business_input_at_v2(
+            state,
+            BusinessReducerInputV2::PlatformPrefixAdvance {
+                advance: PlatformPrefixAdvanceV2 {
+                    path: MarketEventPathV1::HiddenPlatform,
+                    closed_through_utc_ms: 2_000,
+                    next_index_position: 2,
+                },
+                rules: actor._rule_snapshot.snapshot(),
+                finality_policy: actor._finality_policy.as_ref(),
+            },
+        ) {
+            Ok(_) => panic!("已知 NextEventAt(t) 时同刻空前缀必须拒绝"),
+            Err(error) => error,
+        };
+        let BusinessReductionErrorV2::Unaccepted { state, .. } = error else {
+            panic!("同刻空前缀必须是零安装的未受理输入")
+        };
+        assert_eq!(
+            state
+                .session
+                .as_ref()
+                .expect("同刻前缀拒绝后会话存在")
+                .hidden_platform_frontier,
+            frontier_before_same_time_prefix
+        );
+
+        reset_reducer_call_count_for_tests();
+        let (state, output) = drive_business_input_at_v2(
+            state,
+            BusinessReducerInputV2::ClosedMarketBucket {
+                bucket: AcceptedClosedMarketBucketV2 {
+                    reference: crate::runtime_v2::DurableMarketBucketReferenceV2 {
+                        path: MarketEventPathV1::HiddenPlatform,
+                        bucket_at_utc_ms: 2_000,
+                        start_index_position: 2,
+                        next_index_position: 3,
+                        closure: crate::market::MillisecondBucketClosureV1::NextEventAt(3_000),
+                    },
+                    events: Arc::from(vec![decoded_level_market_event(
+                        2_000, 2_010, 3, "2", "1.5",
+                    )]),
+                },
+                rules: actor._rule_snapshot.snapshot(),
+                finality_policy: actor._finality_policy.as_ref(),
+            },
+        )
+        .expect("拒绝同刻空前缀后已知 t 正文必须仍可受理");
+        assert_eq!(reducer_call_count_for_tests(), 1);
+        let BusinessReducerOutputV2::LogicalDrive(output) = output else {
+            panic!("必要前缀必须返回逻辑驱动效果")
+        };
+        assert!(matches!(
+            output.lifecycle.as_slice(),
+            [
+                LifecycleFeedbackEffectV2::Order(_),
+                LifecycleFeedbackEffectV2::Settlement(_)
+            ]
+        ));
+        assert!(output.mutations.is_empty());
+
+        let frontier_before = state
+            .session
+            .as_ref()
+            .expect("必要前缀后会话存在")
+            .hidden_platform_frontier;
+        let error = match drive_business_input_at_v2(
+            state,
+            BusinessReducerInputV2::PlatformPrefixAdvance {
+                advance: PlatformPrefixAdvanceV2 {
+                    path: MarketEventPathV1::HiddenPlatform,
+                    closed_through_utc_ms: 2_500,
+                    next_index_position: 9,
+                },
+                rules: actor._rule_snapshot.snapshot(),
+                finality_policy: actor._finality_policy.as_ref(),
+            },
+        ) {
+            Ok(_) => panic!("普通稀疏缺口不得制造无正文业务输入"),
+            Err(error) => error,
+        };
+        let BusinessReductionErrorV2::Unaccepted { state, .. } = error else {
+            panic!("普通稀疏缺口必须是零生效的未受理输入")
+        };
+        assert_eq!(
+            state
+                .session
+                .as_ref()
+                .expect("稀疏缺口拒绝后会话仍存在")
+                .hidden_platform_frontier,
+            frontier_before
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn necessary_prefix_reduces_once_without_body_and_sparse_gap_emits_nothing() {
+        assert_necessary_prefix_reduces_once_without_body_and_sparse_gap_emits_nothing().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn logical_driver_keeps_non_execution_public_visibility_separate() {
+        let run_id = "run-public-visibility-isolation-v2";
+        let request_id = "public-visibility-gtd";
+        let mutation_request_id = "public-visibility-mutation";
+        let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
+        let session_seed = sha('8');
+        let outbound_delay = |request_id: &str| {
+            i64::try_from(latency_profile.sample_delay_ms(
+                session_seed.0.as_bytes(),
+                request_id,
+                DelaySampleDomainV1::RequestOutbound,
+            ))
+            .expect("路径隔离测试出站时延可表示")
+        };
+        let decision_at = 10_000;
+        let processing_at = decision_at + outbound_delay(request_id);
+        let target_at = (processing_at.div_euclid(1_000)
+            + i64::from(processing_at.rem_euclid(1_000) != 0)
+            + 240)
+            * 1_000;
+
+        let replay_market = market_with_window('d', "123", "1", "2", 0, target_at + 300_000);
+        let scenario = sealed_scenario_for_markets(vec![replay_market]);
+        let (_directory, mut actor) = active_market_actor_with_scenario_and_policy(
+            run_id,
+            scenario,
+            successful_policy_v2_for_tests(),
+        )
+        .await;
+        let market = actor
+            .scenario
+            .initial_market_directory()
+            .markets()
+            .next()
+            .expect("路径隔离测试初始市场存在")
+            .clone();
+        let initial_events =
+            decoded_initial_events_for_market_with_quantity(&market, 1_100, target_at, 1, "2");
+        let state = actor.state.take().expect("路径隔离测试初始状态");
+        let (state, _) = drive_business_input_at_v2(
+            state,
+            BusinessReducerInputV2::ClosedMarketBucket {
+                bucket: AcceptedClosedMarketBucketV2 {
+                    reference: crate::runtime_v2::DurableMarketBucketReferenceV2 {
+                        path: MarketEventPathV1::HiddenPlatform,
+                        bucket_at_utc_ms: 1_100,
+                        start_index_position: 0,
+                        next_index_position: 2,
+                        closure: crate::market::MillisecondBucketClosureV1::NextEventAt(target_at),
+                    },
+                    events: Arc::from(initial_events.clone()),
+                },
+                rules: actor._rule_snapshot.snapshot(),
+                finality_policy: actor._finality_policy.as_ref(),
+            },
+        )
+        .expect("路径隔离测试隐藏初始正文必须成功");
+        let request = BusinessRequestV2::PostOrder(PostOrderRequestV2 {
+            context: RequestContextV2 {
+                global_request_id: request_id.to_owned(),
+                caller_correlation_id: None,
+            },
+            item: post_item(
+                "public-visibility-gtd-item",
+                &market.market().condition_id,
+                &market.assets()[0].token_id,
+                SimBuyOrderKindV1::GtdLimit {
+                    limit_price_pusd_per_share: "0.2".parse().expect("路径隔离 GTD 价格"),
+                    size_shares: "5".parse().expect("路径隔离 GTD 数量"),
+                    post_only: false,
+                    expires_at_utc_ms: target_at + 999,
+                },
+            ),
+        });
+        let (state, receipt) = register_request_candidate(
+            &actor.opened,
+            actor.scenario.initial_market_directory(),
+            state,
+            &request_cutoff(decision_at),
+            &request,
+            1,
+            actor._latency_profile.as_ref(),
+            actor._rule_snapshot.snapshot(),
+        );
+        let (state, mutation) = advance_mutation_candidate(
+            &actor.opened,
+            actor.scenario.initial_market_directory(),
+            state,
+            receipt.platform_arrived_at_utc_ms,
+            actor._rule_snapshot.snapshot(),
+            actor._finality_policy.as_ref(),
+        );
+        let Some(MutationActionBusinessEffectV2::Post(effect)) = mutation else {
+            panic!("路径隔离 GTD 必须形成提交效果")
+        };
+        assert!(
+            matches!(effect.outcome, PostOrderItemOutcomeV2::Accepted(_)),
+            "路径隔离 GTD 必须被接受，实际结果：{:?}",
+            effect.outcome
+        );
+        let mutation_request = BusinessRequestV2::PostOrder(PostOrderRequestV2 {
+            context: RequestContextV2 {
+                global_request_id: mutation_request_id.to_owned(),
+                caller_correlation_id: None,
+            },
+            item: post_item(
+                "public-visibility-mutation-item",
+                &market.market().condition_id,
+                &market.assets()[0].token_id,
+                SimBuyOrderKindV1::GtcLimit {
+                    limit_price_pusd_per_share: "0.1".parse().expect("路径隔离 mutation 价格"),
+                    size_shares: "5".parse().expect("路径隔离 mutation 数量"),
+                    post_only: false,
+                },
+            ),
+        });
+        let mutation_decision_at = target_at - outbound_delay(mutation_request_id);
+        let (state, mutation_receipt) = register_request_candidate(
+            &actor.opened,
+            actor.scenario.initial_market_directory(),
+            state,
+            &request_cutoff(mutation_decision_at),
+            &mutation_request,
+            2,
+            actor._latency_profile.as_ref(),
+            actor._rule_snapshot.snapshot(),
+        );
+        assert_eq!(mutation_receipt.platform_arrived_at_utc_ms, target_at);
+        let session = state.session.as_ref().expect("路径隔离 GTD 后会话存在");
+        assert!(
+            session
+                .execution_state
+                .has_gtd_deadline_for_tests(target_at, "sim-1")
+        );
+        let account_sequence_before = session.execution_state.next_account_transition_seq();
+        let query_revision_before = session.query_state.current_revision;
+        let pending_actions_before = session.mutation_requests.pending_actions.len();
+
+        let (state, public_output) = drive_business_input_at_v2(
+            state,
+            BusinessReducerInputV2::ClosedMarketBucket {
+                bucket: AcceptedClosedMarketBucketV2 {
+                    reference: crate::runtime_v2::DurableMarketBucketReferenceV2 {
+                        path: MarketEventPathV1::PublicVisibility,
+                        bucket_at_utc_ms: target_at,
+                        start_index_position: 0,
+                        next_index_position: 2,
+                        closure: crate::market::MillisecondBucketClosureV1::NextEventAt(
+                            target_at + 1_000,
+                        ),
+                    },
+                    events: Arc::from(initial_events),
+                },
+                rules: actor._rule_snapshot.snapshot(),
+                finality_policy: actor._finality_policy.as_ref(),
+            },
+        )
+        .expect("训练公开可见正文必须由完整 driver 成功受理");
+        let BusinessReducerOutputV2::LogicalDrive(public_output) = public_output else {
+            panic!("公开可见正文必须返回逻辑驱动效果")
+        };
+        assert!(public_output.lifecycle.is_empty());
+        assert!(public_output.mutations.is_empty());
+        let session = state.session.as_ref().expect("公开可见正文后会话存在");
+        let price = "0.4".parse().expect("路径隔离公开盘口价格");
+        assert_eq!(
+            session.public_markets.external_quantity_for_tests(
+                &market.market().condition_id.0,
+                &market.assets()[0].token_id.0,
+                BookSide::Bid,
+                price,
+            ),
+            Some("2".parse().expect("路径隔离公开盘口数量"))
+        );
+        assert_eq!(
+            session.public_visibility_frontier.closed_through_utc_ms,
+            Some(target_at)
+        );
+        assert!(
+            session
+                .execution_state
+                .has_gtd_deadline_for_tests(target_at, "sim-1")
+        );
+        assert_eq!(
+            session.execution_state.next_account_transition_seq(),
+            account_sequence_before
+        );
+        assert_eq!(session.query_state.current_revision, query_revision_before);
+        assert_eq!(
+            session.mutation_requests.pending_actions.len(),
+            pending_actions_before
+        );
+
+        let (state, hidden_output) = drive_business_input_at_v2(
+            state,
+            BusinessReducerInputV2::ClosedMarketBucket {
+                bucket: AcceptedClosedMarketBucketV2 {
+                    reference: crate::runtime_v2::DurableMarketBucketReferenceV2 {
+                        path: MarketEventPathV1::HiddenPlatform,
+                        bucket_at_utc_ms: target_at,
+                        start_index_position: 2,
+                        next_index_position: 3,
+                        closure: crate::market::MillisecondBucketClosureV1::NextEventAt(
+                            target_at + 1_000,
+                        ),
+                    },
+                    events: Arc::from(vec![decoded_maker_level_event_for_market(
+                        &market,
+                        "0.4",
+                        "2",
+                        "1.5",
+                        target_at,
+                        target_at + 10,
+                        3,
+                    )]),
+                },
+                rules: actor._rule_snapshot.snapshot(),
+                finality_policy: actor._finality_policy.as_ref(),
+            },
+        )
+        .expect("同一训练角色隐藏正文仍必须驱动执行");
+        let BusinessReducerOutputV2::LogicalDrive(hidden_output) = hidden_output else {
+            panic!("隐藏正文必须返回逻辑驱动效果")
+        };
+        assert!(hidden_output.lifecycle.iter().any(|effect| matches!(
+            effect,
+            LifecycleFeedbackEffectV2::Order(order)
+                if matches!(order.event, contracts::OrderLifecycleEventV2::GtdExpired { .. })
+        )));
+        assert_eq!(hidden_output.mutations.len(), 1);
+        assert!(
+            !state
+                .session
+                .as_ref()
+                .expect("隐藏正文后会话存在")
+                .execution_state
+                .has_gtd_deadline_for_tests(target_at, "sim-1")
+        );
+
+        let (_paper_directory, mut paper) =
+            active_market_actor(SimCallerRoleV1::Paper, "run-paper-public-driver-v2").await;
+        let paper_events = decoded_initial_market_events("2");
+        let paper_condition_id = paper_events[0].market.condition_id.0.clone();
+        let paper_state = paper.state.take().expect("Paper 公开正文前状态");
+        let (paper_state, _) = drive_business_input_at_v2(
+            paper_state,
+            BusinessReducerInputV2::ClosedMarketBucket {
+                bucket: AcceptedClosedMarketBucketV2 {
+                    reference: crate::runtime_v2::DurableMarketBucketReferenceV2 {
+                        path: MarketEventPathV1::PublicVisibility,
+                        bucket_at_utc_ms: 1_110,
+                        start_index_position: 0,
+                        next_index_position: 2,
+                        closure: crate::market::MillisecondBucketClosureV1::NextEventAt(2_000),
+                    },
+                    events: Arc::from(paper_events),
+                },
+                rules: paper._rule_snapshot.snapshot(),
+                finality_policy: paper._finality_policy.as_ref(),
+            },
+        )
+        .expect("Paper 公开正文仍必须由完整 driver 驱动执行");
+        assert_eq!(
+            paper_state
+                .session
+                .as_ref()
+                .expect("Paper 公开正文后会话存在")
+                .execution_state
+                .external_queue_base_units_for_tests(
+                    &paper_condition_id,
+                    "1",
+                    BookSide::Bid,
+                    price,
+                ),
+            2_000_000
+        );
+    }
+
+    async fn prepared_dual_market_eof_candidate(
+        run_id: &str,
+    ) -> (SimRunActorV2, BusinessReducerStateV2, Vec<PlatformMarketV1>) {
+        let (_directory, mut actor) =
+            active_market_actor(SimCallerRoleV1::ModelTrain, run_id).await;
+        let initial_market = actor
+            .scenario
+            .initial_market_directory()
+            .markets()
+            .next()
+            .expect("双市场 EOF 测试初始市场存在")
+            .clone();
+        let added_market = market('e', "456", "301", "302");
+        actor
+            .enroll_market(MarketEnrollmentRequestV1 {
+                enrollment_request_id: format!("enroll-{run_id}"),
+                market: added_market.clone(),
+            })
+            .expect("双市场 EOF 测试登记第二市场");
+        let mut initial_events =
+            decoded_initial_events_for_market(&initial_market, 1_100, 1_110, 1);
+        initial_events.extend(decoded_initial_events_for_market(
+            &added_market,
+            1_100,
+            1_110,
+            3,
+        ));
+        let state = actor.state.take().expect("双市场 EOF 初始闭桶前状态");
+        let (state, _) = drive_business_input_at_v2(
+            state,
+            BusinessReducerInputV2::ClosedMarketBucket {
+                bucket: AcceptedClosedMarketBucketV2 {
+                    reference: crate::runtime_v2::DurableMarketBucketReferenceV2 {
+                        path: MarketEventPathV1::HiddenPlatform,
+                        bucket_at_utc_ms: 1_100,
+                        start_index_position: 0,
+                        next_index_position: 4,
+                        closure: crate::market::MillisecondBucketClosureV1::NextEventAt(4_000),
+                    },
+                    events: Arc::from(initial_events),
+                },
+                rules: actor._rule_snapshot.snapshot(),
+                finality_policy: actor._finality_policy.as_ref(),
+            },
+        )
+        .expect("双市场初始正文桶必须整体成功");
+        let (state, _) = drive_business_input_at_v2(
+            state,
+            BusinessReducerInputV2::PlatformPrefixAdvance {
+                advance: PlatformPrefixAdvanceV2 {
+                    path: MarketEventPathV1::HiddenPlatform,
+                    closed_through_utc_ms: 2_000,
+                    next_index_position: 4,
+                },
+                rules: actor._rule_snapshot.snapshot(),
+                finality_policy: actor._finality_policy.as_ref(),
+            },
+        )
+        .expect("初始市场 end_at 必要前缀必须成功");
+        let (state, _) = drive_business_input_at_v2(
+            state,
+            BusinessReducerInputV2::PlatformPrefixAdvance {
+                advance: PlatformPrefixAdvanceV2 {
+                    path: MarketEventPathV1::HiddenPlatform,
+                    closed_through_utc_ms: 3_000,
+                    next_index_position: 4,
+                },
+                rules: actor._rule_snapshot.snapshot(),
+                finality_policy: actor._finality_policy.as_ref(),
+            },
+        )
+        .expect("追加市场 end_at 必要前缀必须成功");
+        (actor, state, vec![initial_market, added_market])
+    }
+
+    async fn assert_multi_market_eof_is_whole_bucket_zero_or_full_effect() {
+        let (failed_actor, failed_state, failed_markets) =
+            prepared_dual_market_eof_candidate("run-eof-failed-v2").await;
+        let failed_events = Arc::from(vec![decoded_resolution_event_for_market(
+            &failed_markets[0],
+            4_000,
+            4_100,
+            5,
+        )]);
+        let failed = drive_business_input_at_v2(
+            failed_state,
+            BusinessReducerInputV2::ClosedMarketBucket {
+                bucket: AcceptedClosedMarketBucketV2 {
+                    reference: crate::runtime_v2::DurableMarketBucketReferenceV2 {
+                        path: MarketEventPathV1::HiddenPlatform,
+                        bucket_at_utc_ms: 4_000,
+                        start_index_position: 4,
+                        next_index_position: 5,
+                        closure: crate::market::MillisecondBucketClosureV1::EndOfInput,
+                    },
+                    events: Arc::clone(&failed_events),
+                },
+                rules: failed_actor._rule_snapshot.snapshot(),
+                finality_policy: failed_actor._finality_policy.as_ref(),
+            },
+        );
+        assert!(matches!(
+            failed,
+            Err(BusinessReductionErrorV2::Fatal(
+                SimRunActorErrorV2::MarketEvent(
+                    MarketEventErrorV1::MissingQualifiedMarketTerminal(_)
+                )
+            ))
+        ));
+        assert_eq!(Arc::strong_count(&failed_events), 1);
+
+        let (success_actor, success_state, success_markets) =
+            prepared_dual_market_eof_candidate("run-eof-success-v2").await;
+        let events = Arc::from(vec![
+            decoded_resolution_event_for_market(&success_markets[0], 4_000, 4_100, 5),
+            decoded_resolution_event_for_market(&success_markets[1], 4_000, 4_100, 6),
+        ]);
+        let (state, output) = drive_business_input_at_v2(
+            success_state,
+            BusinessReducerInputV2::ClosedMarketBucket {
+                bucket: AcceptedClosedMarketBucketV2 {
+                    reference: crate::runtime_v2::DurableMarketBucketReferenceV2 {
+                        path: MarketEventPathV1::HiddenPlatform,
+                        bucket_at_utc_ms: 4_000,
+                        start_index_position: 4,
+                        next_index_position: 6,
+                        closure: crate::market::MillisecondBucketClosureV1::EndOfInput,
+                    },
+                    events,
+                },
+                rules: success_actor._rule_snapshot.snapshot(),
+                finality_policy: success_actor._finality_policy.as_ref(),
+            },
+        )
+        .expect("完整双市场 EOF 必须整体成功");
+        let BusinessReducerOutputV2::LogicalDrive(output) = output else {
+            panic!("双市场 EOF 必须返回逻辑驱动效果")
+        };
+        assert_eq!(output.lifecycle.len(), 2);
+        let session = state.session.as_ref().expect("双市场 EOF 后会话存在");
+        assert!(session.hidden_platform_frontier.sealed);
+        for market in success_markets {
+            assert_eq!(
+                session
+                    .hidden_platform_markets
+                    .as_ref()
+                    .expect("训练会话拥有隐藏市场状态")
+                    .lifecycle_phase_for_tests(&market.market().condition_id.0),
+                Some(crate::market::MarketLifecyclePhaseV1::ResolutionTerminal)
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn multi_market_eof_is_whole_bucket_zero_or_full_effect() {
+        assert_multi_market_eof_is_whole_bucket_zero_or_full_effect().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn logical_driver_drains_five_same_time_classes_in_fixed_order() {
+        let run_id = "run-five-way-collision-v2";
+        let gtd_request_id = "five-way-gtd";
+        let fok_request_id = "five-way-prior-fok";
+        let maker_request_id = "five-way-dpt-maker";
+        let mutation_request_id = "five-way-mutation";
+        let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
+        let session_seed = sha('8');
+        let outbound_delay = |request_id: &str| {
+            i64::try_from(latency_profile.sample_delay_ms(
+                session_seed.0.as_bytes(),
+                request_id,
+                DelaySampleDomainV1::RequestOutbound,
+            ))
+            .expect("同刻测试出站时延可表示")
+        };
+        let gtd_decision_at = 10_000;
+        let gtd_processing_at = gtd_decision_at + outbound_delay(gtd_request_id);
+        let target_at = (gtd_processing_at.div_euclid(1_000)
+            + i64::from(gtd_processing_at.rem_euclid(1_000) != 0)
+            + 240)
+            * 1_000;
+        let fok_effective_at = 20_000;
+        let finality_offset = target_at - fok_effective_at;
+        let finality_policy = Arc::new(
+            TradeFinalityPolicyV2::decode_and_seal(
+                format!(
+                    "{{\"schema_version\":\"trade_finality_policy_v2\",\"normal_path\":{{\"steps\":[{{\"state\":\"MATCHED\",\"offset_ms\":0}},{{\"state\":\"MINED\",\"offset_ms\":{}}},{{\"state\":\"CONFIRMED\",\"offset_ms\":{finality_offset}}}],\"economic_application_ordinal\":1}},\"failure_overrides\":[]}}",
+                    finality_offset - 1,
+                )
+                .as_bytes(),
+            )
+            .expect("同刻测试最终性策略必须合法"),
+        );
+        let previous_market = market_with_window('d', "455", "201", "202", 0, target_at);
+        let collision_market = market_with_window('e', "456", "301", "302", 0, target_at + 300_000);
+        let scenario =
+            sealed_scenario_for_markets(vec![previous_market.clone(), collision_market.clone()]);
+        let (_directory, mut actor) = active_market_actor_with_scenario_and_policy(
+            run_id,
+            scenario,
+            Arc::clone(&finality_policy),
+        )
+        .await;
+        let mut initial_events = decoded_initial_events_for_market_with_quantity(
+            &previous_market,
+            1_100,
+            1_110,
+            1,
+            "10",
+        );
+        initial_events.extend(decoded_initial_events_for_market_with_quantity(
+            &collision_market,
+            1_100,
+            1_110,
+            3,
+            "10",
+        ));
+        let state = actor.state.take().expect("同刻碰撞初始状态");
+        let (mut state, _) = drive_business_input_at_v2(
+            state,
+            BusinessReducerInputV2::ClosedMarketBucket {
+                bucket: AcceptedClosedMarketBucketV2 {
+                    reference: crate::runtime_v2::DurableMarketBucketReferenceV2 {
+                        path: MarketEventPathV1::HiddenPlatform,
+                        bucket_at_utc_ms: 1_100,
+                        start_index_position: 0,
+                        next_index_position: 4,
+                        closure: crate::market::MillisecondBucketClosureV1::NextEventAt(target_at),
+                    },
+                    events: Arc::from(initial_events),
+                },
+                rules: actor._rule_snapshot.snapshot(),
+                finality_policy: actor._finality_policy.as_ref(),
+            },
+        )
+        .expect("同刻碰撞初始正文桶必须成功");
+
+        let register_post_at = |state,
+                                request_id: &str,
+                                item_id: &str,
+                                kind: SimBuyOrderKindV1,
+                                input_sequence: u64,
+                                desired_arrival_at: i64| {
+            let request = BusinessRequestV2::PostOrder(PostOrderRequestV2 {
+                context: RequestContextV2 {
+                    global_request_id: request_id.to_owned(),
+                    caller_correlation_id: None,
+                },
+                item: post_item(
+                    item_id,
+                    &collision_market.market().condition_id,
+                    &collision_market.assets()[0].token_id,
+                    kind,
+                ),
+            });
+            let decision_at = desired_arrival_at - outbound_delay(request_id);
+            let (state, receipt) = register_request_candidate(
+                &actor.opened,
+                actor.scenario.initial_market_directory(),
+                state,
+                &request_cutoff(decision_at),
+                &request,
+                input_sequence,
+                actor._latency_profile.as_ref(),
+                actor._rule_snapshot.snapshot(),
+            );
+            assert_eq!(receipt.platform_arrived_at_utc_ms, desired_arrival_at);
+            (state, receipt)
+        };
+
+        let taker_delay = i64::try_from(
+            actor
+                ._rule_snapshot
+                .snapshot()
+                .documented_platform_rules
+                .taker_delay
+                .value
+                .delay_ms,
+        )
+        .expect("同刻测试 taker 延迟可表示");
+        let (next, fok_receipt) = register_post_at(
+            state,
+            fok_request_id,
+            "five-way-prior-fok-item",
+            SimBuyOrderKindV1::FokMarket {
+                spend_pusd: "3".parse().expect("同刻 FOK 预算"),
+                worst_price_pusd_per_share: "0.6".parse().expect("同刻 FOK 最差价"),
+            },
+            10,
+            fok_effective_at - taker_delay,
+        );
+        let (next, fok_transition) = advance_mutation_candidate_with_outputs(
+            &actor.opened,
+            actor.scenario.initial_market_directory(),
+            next,
+            fok_effective_at,
+            actor._rule_snapshot.snapshot(),
+            actor._finality_policy.as_ref(),
+        );
+        state = next;
+        assert_eq!(fok_receipt.scheduled_action_count, 1);
+        let Some(fok_transition) = fok_transition else {
+            panic!("先前 FOK 必须形成真实 mutation 效果")
+        };
+        let MutationActionBusinessEffectV2::Post(fok_effect) = fok_transition.business else {
+            panic!("先前 FOK mutation 必须是提交效果")
+        };
+        assert!(
+            matches!(fok_effect.outcome, PostOrderItemOutcomeV2::Accepted(_)),
+            "先前 FOK 必须成交，实际结果：{:?}",
+            fok_effect.outcome
+        );
+        assert_eq!(
+            state
+                .session
+                .as_ref()
+                .expect("先前 FOK 后会话存在")
+                .execution_state
+                .next_scheduled_finality_at_utc_ms(),
+            Some(target_at - 1)
+        );
+        let (next, mined) = advance_finality_to_candidate(
+            state,
+            target_at - 1,
+            actor._rule_snapshot.snapshot(),
+            actor._finality_policy.as_ref(),
+        );
+        state = next;
+        assert!(matches!(
+            mined.transition.as_ref(),
+            Some(transition)
+                if transition.trade_finality.finality_state
+                    == crate::finality::TradeFinalityStateV1::Mined
+        ));
+        assert_eq!(
+            state
+                .session
+                .as_ref()
+                .expect("MINED 后会话存在")
+                .execution_state
+                .next_scheduled_finality_at_utc_ms(),
+            Some(target_at)
+        );
+
+        let (next, maker_receipt) = register_post_at(
+            state,
+            maker_request_id,
+            "five-way-dpt-maker-item",
+            SimBuyOrderKindV1::GtcLimit {
+                limit_price_pusd_per_share: "0.3".parse().expect("同刻 maker 价格"),
+                size_shares: "5".parse().expect("同刻 maker 数量"),
+                post_only: false,
+            },
+            11,
+            30_000,
+        );
+        let (next, maker_effect) = advance_mutation_candidate(
+            &actor.opened,
+            actor.scenario.initial_market_directory(),
+            next,
+            maker_receipt.platform_arrived_at_utc_ms,
+            actor._rule_snapshot.snapshot(),
+            actor._finality_policy.as_ref(),
+        );
+        state = next;
+        assert!(matches!(
+            maker_effect,
+            Some(MutationActionBusinessEffectV2::Post(effect))
+                if matches!(effect.outcome, PostOrderItemOutcomeV2::Accepted(_))
+        ));
+
+        let (next, gtd_receipt) = register_post_at(
+            state,
+            gtd_request_id,
+            "five-way-gtd-item",
+            SimBuyOrderKindV1::GtdLimit {
+                limit_price_pusd_per_share: "0.2".parse().expect("同刻 GTD 价格"),
+                size_shares: "5".parse().expect("同刻 GTD 数量"),
+                post_only: false,
+                expires_at_utc_ms: target_at + 999,
+            },
+            12,
+            gtd_processing_at,
+        );
+        let (next, gtd_effect) = advance_mutation_candidate(
+            &actor.opened,
+            actor.scenario.initial_market_directory(),
+            next,
+            gtd_receipt.platform_arrived_at_utc_ms,
+            actor._rule_snapshot.snapshot(),
+            actor._finality_policy.as_ref(),
+        );
+        state = next;
+        assert!(matches!(
+            gtd_effect,
+            Some(MutationActionBusinessEffectV2::Post(effect))
+                if matches!(effect.outcome, PostOrderItemOutcomeV2::Accepted(_))
+        ));
+        assert!(
+            state
+                .session
+                .as_ref()
+                .expect("GTD 准备后会话存在")
+                .execution_state
+                .has_gtd_deadline_for_tests(target_at, "sim-3")
+        );
+
+        let (state, mutation_receipt) = register_post_at(
+            state,
+            mutation_request_id,
+            "five-way-mutation-item",
+            SimBuyOrderKindV1::GtcLimit {
+                limit_price_pusd_per_share: "0.1".parse().expect("同刻 mutation 价格"),
+                size_shares: "5".parse().expect("同刻 mutation 数量"),
+                post_only: false,
+            },
+            13,
+            target_at,
+        );
+        assert_eq!(mutation_receipt.platform_arrived_at_utc_ms, target_at);
+
+        let dpt_events: Arc<[ExecutionMarketEventV3]> = Arc::from(vec![
+            decoded_maker_level_event_for_market(
+                &collision_market,
+                "0.3",
+                "0",
+                "5",
+                target_at,
+                target_at + 10,
+                5,
+            ),
+            decoded_maker_level_event_for_market(
+                &collision_market,
+                "0.3",
+                "5",
+                "0",
+                target_at,
+                target_at + 11,
+                6,
+            ),
+        ]);
+        let (state, output) = drive_business_input_at_v2(
+            state,
+            BusinessReducerInputV2::ClosedMarketBucket {
+                bucket: AcceptedClosedMarketBucketV2 {
+                    reference: crate::runtime_v2::DurableMarketBucketReferenceV2 {
+                        path: MarketEventPathV1::HiddenPlatform,
+                        bucket_at_utc_ms: target_at,
+                        start_index_position: 4,
+                        next_index_position: 6,
+                        closure: crate::market::MillisecondBucketClosureV1::NextEventAt(
+                            target_at + 1_000,
+                        ),
+                    },
+                    events: Arc::clone(&dpt_events),
+                },
+                rules: actor._rule_snapshot.snapshot(),
+                finality_policy: actor._finality_policy.as_ref(),
+            },
+        )
+        .expect("五类同刻正文必须由一个逻辑循环排空");
+        assert_eq!(Arc::strong_count(&dpt_events), 1);
+        let BusinessReducerOutputV2::LogicalDrive(output) = output else {
+            panic!("五类同刻正文必须返回逻辑驱动效果")
+        };
+        let [
+            LifecycleFeedbackEffectV2::Order(gtd),
+            LifecycleFeedbackEffectV2::Trade(finality),
+            LifecycleFeedbackEffectV2::Settlement(taker_accrual),
+            LifecycleFeedbackEffectV2::Settlement(maker_market),
+            LifecycleFeedbackEffectV2::Trade(dpt),
+        ] = output.lifecycle.as_slice()
+        else {
+            panic!("五类同刻必须按 GTD、最终性及因果返佣、成熟返佣、DPT 排空")
+        };
+        let contracts::OrderLifecycleEventV2::GtdExpired {
+            account_delta: Some(gtd_delta),
+            ..
+        } = &gtd.event
+        else {
+            panic!("首个同刻效果必须是带释放账户变化的 GTD 到期")
+        };
+        assert_eq!(gtd.platform_event_at_utc_ms, target_at);
+        assert_eq!(finality.platform_event_at_utc_ms, target_at);
+        assert_eq!(
+            finality.status.known,
+            Some(contracts::SimulatedTradeKnownStatusV2::Confirmed)
+        );
+        assert!(finality.account_delta.is_none());
+        let contracts::SettlementLifecycleEventV2::TakerRebateAccrualApplied {
+            account_delta: taker_delta,
+            ..
+        } = &taker_accrual.event
+        else {
+            panic!("最终性必须先原位排空 taker 返佣应计")
+        };
+        assert!(matches!(
+            &maker_market.event,
+            contracts::SettlementLifecycleEventV2::MakerRebateAccrualFinalized {
+                condition_id,
+                status: contracts::MakerRebateAccrualStatusV2::ZeroNoEligibleMakerFill,
+                ..
+            } if condition_id == &previous_market.market().condition_id
+        ));
+        assert_eq!(dpt.platform_event_at_utc_ms, target_at);
+        assert_eq!(
+            dpt.liquidity_role,
+            contracts::TradeLiquidityRoleV2::MakerInferred
+        );
+        assert!(
+            dpt.account_delta.is_none(),
+            "DPT maker 成交等待后续最终性应用经济变化"
+        );
+        assert_eq!(
+            [
+                gtd_delta.account_transition_seq,
+                taker_delta.account_transition_seq,
+            ],
+            [
+                gtd_delta.account_transition_seq,
+                gtd_delta.account_transition_seq + 1,
+            ],
+            "实际账户序号必须证明 GTD 先于最终性解锁的因果返佣"
+        );
+        let [mutation] = output.mutations.as_slice() else {
+            panic!("DPT 后必须只处理同刻登记的唯一订单 mutation")
+        };
+        let MutationActionBusinessEffectV2::Post(mutation_effect) = &mutation.business else {
+            panic!("同刻最后一个稳定身份必须是订单 mutation")
+        };
+        assert!(matches!(
+            mutation_effect.outcome,
+            PostOrderItemOutcomeV2::Accepted(_)
+        ));
+        let [LifecycleFeedbackEffectV2::Order(mutation_order)] = mutation.lifecycle.as_slice()
+        else {
+            panic!("同刻订单 mutation 必须形成唯一订单接受效果")
+        };
+        let contracts::OrderLifecycleEventV2::OrderAccepted {
+            account_delta: mutation_delta,
+            ..
+        } = &mutation_order.event
+        else {
+            panic!("同刻 mutation 必须是订单接受")
+        };
+        assert_eq!(mutation_order.platform_event_at_utc_ms, target_at);
+        assert_eq!(
+            mutation_delta.account_transition_seq,
+            taker_delta.account_transition_seq + 1,
+            "mutation 的账户序号必须证明它晚于同刻因果返佣和 DPT 稳定身份"
+        );
+        let session = state.session.as_ref().expect("五类同刻后会话存在");
+        assert_eq!(
+            session.execution_state.next_account_transition_seq(),
+            mutation_delta.account_transition_seq + 1
+        );
+        assert!(
+            session
+                .mutation_requests
+                .requests_by_id
+                .get(mutation_request_id)
+                .and_then(|request| request.completed_response.as_ref())
+                .is_some()
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -7549,6 +10322,7 @@ mod tests {
             Arc::clone(&finality_policy),
             Arc::clone(&scenario),
             Arc::clone(&latency_profile),
+            accepting_projection_port(),
             MAX_GROUP_BYTES,
         )
         .expect("创建唯一运行根演员");
@@ -7606,6 +10380,7 @@ mod tests {
             Arc::clone(&finality_policy),
             Arc::clone(&scenario),
             Arc::clone(&latency_profile),
+            accepting_projection_port(),
             MAX_GROUP_BYTES,
         )
         .expect("创建失败关闭测试根");
@@ -7658,6 +10433,7 @@ mod tests {
                 Arc::clone(&finality_policy),
                 Arc::clone(&scenario),
                 Arc::clone(&latency_profile),
+                accepting_projection_port(),
                 MAX_GROUP_BYTES,
             )
             .expect("创建角色测试运行根");
@@ -8806,6 +11582,7 @@ mod tests {
             Arc::clone(&finality_policy),
             Arc::clone(&scenario),
             Arc::clone(&latency_profile),
+            accepting_projection_port(),
             MAX_GROUP_BYTES,
         )
         .expect("创建市场登记运行根");
@@ -8926,6 +11703,7 @@ mod tests {
             finality_policy,
             scenario,
             latency_profile,
+            accepting_projection_port(),
             MAX_GROUP_BYTES,
         )
         .expect("创建 Paper 市场登记运行根");
@@ -8990,6 +11768,7 @@ mod tests {
             finality_policy,
             scenario,
             latency_profile,
+            accepting_projection_port(),
             MAX_GROUP_BYTES,
         )
         .expect("创建登记失败测试根");
@@ -9073,6 +11852,7 @@ mod tests {
             finality_policy,
             scenario,
             latency_profile,
+            accepting_projection_port(),
             MAX_GROUP_BYTES,
         )
         .expect("创建登记日志失败测试根");
@@ -9143,6 +11923,7 @@ mod tests {
             Arc::clone(&finality_policy),
             Arc::clone(&scenario),
             Arc::clone(&latency_profile),
+            accepting_projection_port(),
             MAX_GROUP_BYTES,
         )
         .expect("创建待故障演员");
@@ -9159,15 +11940,25 @@ mod tests {
             Arc::clone(&finality_policy),
             Arc::clone(&scenario),
             Arc::clone(&latency_profile),
+            accepting_projection_port(),
             MAX_GROUP_BYTES,
         )
         .expect("创建独立演员");
 
+        reset_group_commit_counts_for_tests();
+        crate::event_log::reset_group_append_counts_for_tests();
         failed.inject_log_write_failure_for_tests();
         assert!(matches!(
-            failed.create_session(spec("run-failed-v2", "failed-create")),
+            failed.commit_group(vec![
+                BusinessInputV2::CreateSession(spec("run-failed-v2", "failed-create")),
+                BusinessInputV2::ActivateSession {
+                    activation_id: "failed-activate".to_owned(),
+                },
+            ]),
             Err(SimRunActorErrorV2::Log(_))
         ));
+        assert_eq!(group_commit_counts_for_tests(), (2, 1, 0));
+        assert_eq!(crate::event_log::group_append_counts_for_tests(), (1, 2));
         assert_eq!(
             failed
                 .create_session(spec("run-failed-v2", "failed-retry"))
@@ -9208,17 +11999,29 @@ mod tests {
             Arc::clone(&finality_policy),
             Arc::clone(&scenario),
             Arc::clone(&latency_profile),
+            accepting_projection_port(),
             MAX_GROUP_BYTES,
         )
         .expect("创建 Paper 演员");
 
-        reset_reducer_call_count_for_tests();
+        reset_group_commit_counts_for_tests();
+        crate::event_log::reset_event_log_counts_for_tests();
+        crate::event_log::reset_group_append_counts_for_tests();
         actor.inject_log_sync_failure_for_tests();
         assert!(matches!(
-            actor.create_session(spec("run-sync-unknown-v2", "create-sync-unknown")),
+            actor.commit_group(vec![
+                BusinessInputV2::CreateSession(spec("run-sync-unknown-v2", "create-sync-unknown",)),
+                BusinessInputV2::ActivateSession {
+                    activation_id: "activate-sync-unknown".to_owned(),
+                },
+            ]),
             Err(SimRunActorErrorV2::Log(_))
         ));
-        assert_eq!(reducer_call_count_for_tests(), 1);
+        assert_eq!(group_commit_counts_for_tests(), (2, 1, 0));
+        assert_eq!(crate::event_log::group_append_counts_for_tests(), (1, 2));
+        assert_eq!(crate::event_log::event_log_counts_for_tests(), (1, 0));
+        assert_eq!(crate::event_log::sync_attempt_count_for_tests(), 1);
+        assert!(actor.pending_projections.is_empty());
         assert_eq!(
             actor
                 .create_session(spec("run-sync-unknown-v2", "create-sync-unknown"))
@@ -9231,16 +12034,420 @@ mod tests {
             SimEventLogRecoveryV2::open(&path, MAX_GROUP_BYTES).expect("打开结果未知日志");
         let (recovery, group) = recovery.next_group().expect("读取完整日志组");
         let group = group.expect("同步报错前完整写入的组仍由恢复裁决");
-        assert_eq!(group.len(), 1);
+        assert_eq!(group.len(), 2);
         assert!(matches!(
             &group[0],
             LoggedBusinessInputV2::CreateSession(spec)
                 if spec.creation_request_id == "create-sync-unknown"
         ));
+        assert!(matches!(
+            &group[1],
+            LoggedBusinessInputV2::ActivateSession { activation_id }
+                if activation_id == "activate-sync-unknown"
+        ));
         let (recovery, end) = recovery.next_group().expect("读取日志末尾");
         assert!(end.is_none());
         let resumed = recovery.resume_paper().expect("从完整组后续写");
-        assert_eq!(resumed.next_input_sequence(), 2);
+        assert_eq!(resumed.next_input_sequence(), 3);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paper_group_commits_once_and_projection_backpressure_preserves_the_suffix() {
+        let directory = tempfile::tempdir().expect("创建投影组测试目录");
+        let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
+        let rule_snapshot = successful_snapshot_v3_for_sim_tests().await;
+        let finality_policy = successful_policy_v2_for_tests();
+        let scenario = sealed_scenario();
+        let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
+        let port_state = Rc::new(RefCell::new(ControllableProjectionPortStateV2 {
+            accept_limit: usize::MAX,
+            ..ControllableProjectionPortStateV2::default()
+        }));
+        let mut run_opened = opened(
+            "run-projection-group-v2",
+            &rule_snapshot,
+            &finality_policy,
+            &scenario,
+            &latency_profile,
+        );
+        run_opened.durability_role = RunDurabilityRoleV2::RecoverablePaper;
+        let mut actor = SimRunActorV2::create_new(
+            &path,
+            run_opened,
+            rule_snapshot,
+            finality_policy,
+            scenario,
+            latency_profile,
+            Box::new(ControllableProjectionPortV2 {
+                state: Rc::clone(&port_state),
+            }),
+            MAX_GROUP_BYTES,
+        )
+        .expect("创建投影组演员");
+        let mut session_spec = spec("run-projection-group-v2", "create-projection-group");
+        session_spec.caller_role = SimCallerRoleV1::Paper;
+        actor.create_session(session_spec).expect("创建投影组会话");
+        actor
+            .activate_session("activate-projection-group".to_owned())
+            .expect("激活投影组会话");
+        port_state.borrow_mut().durable_through = 1;
+        actor.deliver_pending_projections();
+        assert!(actor.pending_projections.is_empty());
+
+        let already_accepted = port_state.borrow().accepted.len();
+        port_state.borrow_mut().accept_limit = already_accepted + 1;
+        reset_group_commit_counts_for_tests();
+        crate::event_log::reset_event_log_counts_for_tests();
+        crate::event_log::reset_group_append_counts_for_tests();
+        let committed = actor
+            .commit_group(vec![
+                BusinessInputV2::EnrollMarket(MarketEnrollmentRequestV1 {
+                    enrollment_request_id: "projection-enroll-2".to_owned(),
+                    market: market('2', "456", "3", "4"),
+                }),
+                BusinessInputV2::EnrollMarket(MarketEnrollmentRequestV1 {
+                    enrollment_request_id: "projection-enroll-3".to_owned(),
+                    market: market('3', "789", "5", "6"),
+                }),
+            ])
+            .expect("两个登记输入必须形成一个耐久组");
+        assert!(committed.unaccepted.is_none());
+        assert_eq!(committed.outputs.len(), 2);
+        assert_eq!(group_commit_counts_for_tests(), (2, 2, 1));
+        assert_eq!(crate::event_log::group_append_counts_for_tests(), (1, 2));
+        assert_eq!(crate::event_log::event_log_counts_for_tests(), (1, 1));
+        assert_eq!(actor.pending_projections.len(), 2);
+        assert!(actor.pending_projections[0].accepted);
+        assert!(!actor.pending_projections[1].accepted);
+        assert_ne!(
+            actor.pending_projection_resources,
+            ResourceQuantityV1::default()
+        );
+
+        assert_eq!(
+            actor.enroll_market(MarketEnrollmentRequestV1 {
+                enrollment_request_id: "projection-enroll-blocked".to_owned(),
+                market: market('4', "987", "7", "8"),
+            }),
+            Err(SimRunActorErrorV2::ProjectionBackpressured)
+        );
+        assert_eq!(group_commit_counts_for_tests(), (2, 2, 1));
+
+        port_state.borrow_mut().accept_limit = usize::MAX;
+        actor.deliver_pending_projections();
+        actor.deliver_pending_projections();
+        assert_eq!(port_state.borrow().accepted.len(), already_accepted + 2);
+        assert!(
+            actor
+                .pending_projections
+                .iter()
+                .all(|pending| pending.accepted)
+        );
+        assert_eq!(group_commit_counts_for_tests(), (2, 2, 1));
+
+        port_state.borrow_mut().durable_through = 3;
+        actor.deliver_pending_projections();
+        assert!(actor.pending_projections.is_empty());
+        assert_eq!(
+            actor.pending_projection_resources,
+            ResourceQuantityV1::default()
+        );
+        assert_eq!(group_commit_counts_for_tests(), (2, 2, 1));
+
+        let input_sequence_before_prefix = actor.next_input_sequence_for_tests().expect("活动日志");
+        reset_group_commit_counts_for_tests();
+        crate::event_log::reset_group_append_counts_for_tests();
+        let prefix = actor
+            .commit_group(vec![
+                BusinessInputV2::EnrollMarket(MarketEnrollmentRequestV1 {
+                    enrollment_request_id: "projection-prefix-enroll-4".to_owned(),
+                    market: market('4', "987", "7", "8"),
+                }),
+                BusinessInputV2::EnrollMarket(MarketEnrollmentRequestV1 {
+                    enrollment_request_id: "projection-rejected-enroll-5".to_owned(),
+                    market: market('5', "654", "7", "10"),
+                }),
+            ])
+            .expect("非致命未受理错误必须提交此前成功前缀");
+        assert_eq!(prefix.outputs.len(), 1);
+        assert!(matches!(
+            prefix.unaccepted,
+            Some(SimRunActorErrorV2::MarketEnrollmentDirectory(_))
+        ));
+        assert_eq!(group_commit_counts_for_tests(), (2, 1, 1));
+        assert_eq!(crate::event_log::group_append_counts_for_tests(), (1, 1));
+        assert_eq!(
+            actor.next_input_sequence_for_tests(),
+            Some(input_sequence_before_prefix + 1)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paper_request_and_bucket_form_one_projection_with_continuous_private_sequences() {
+        let directory = tempfile::tempdir().expect("创建请求投影测试目录");
+        let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
+        let rule_snapshot = successful_snapshot_v3_for_sim_tests().await;
+        let finality_policy = successful_policy_v2_for_tests();
+        let scenario = sealed_scenario();
+        let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
+        let port_state = Rc::new(RefCell::new(ControllableProjectionPortStateV2 {
+            accept_limit: usize::MAX,
+            ..ControllableProjectionPortStateV2::default()
+        }));
+        let mut run_opened = opened(
+            "run-request-projection-v2",
+            &rule_snapshot,
+            &finality_policy,
+            &scenario,
+            &latency_profile,
+        );
+        run_opened.durability_role = RunDurabilityRoleV2::RecoverablePaper;
+        let mut actor = SimRunActorV2::create_new(
+            &path,
+            run_opened,
+            rule_snapshot,
+            finality_policy,
+            scenario,
+            Arc::clone(&latency_profile),
+            Box::new(ControllableProjectionPortV2 {
+                state: Rc::clone(&port_state),
+            }),
+            MAX_GROUP_BYTES,
+        )
+        .expect("创建请求投影演员");
+        let mut session_spec = spec("run-request-projection-v2", "create-request-projection");
+        session_spec.caller_role = SimCallerRoleV1::Paper;
+        actor
+            .create_session(session_spec)
+            .expect("创建请求投影会话");
+        actor
+            .activate_session("activate-request-projection".to_owned())
+            .expect("激活请求投影会话");
+        port_state.borrow_mut().durable_through = 1;
+        actor.deliver_pending_projections();
+
+        let request_id = "projection-post-order";
+        let target_arrival_at_utc_ms = 1_100;
+        let session_seed = actor
+            .state
+            .as_ref()
+            .and_then(|state| state.session.as_ref())
+            .expect("请求投影会话存在")
+            .session_seed
+            .clone();
+        let outbound_delay_ms = latency_profile.sample_delay_ms(
+            session_seed.0.as_bytes(),
+            request_id,
+            DelaySampleDomainV1::RequestOutbound,
+        );
+        let cutoff_at_utc_ms = target_arrival_at_utc_ms
+            - i64::try_from(outbound_delay_ms).expect("测试出站时延可表示");
+        let initial_events = decoded_initial_market_events("10");
+        reset_group_commit_counts_for_tests();
+        crate::event_log::reset_event_log_counts_for_tests();
+        crate::event_log::reset_group_append_counts_for_tests();
+        let committed = actor
+            .commit_group(vec![
+                BusinessInputV2::Request {
+                    cutoff: request_cutoff(cutoff_at_utc_ms),
+                    request: BusinessRequestV2::PostOrder(PostOrderRequestV2 {
+                        context: RequestContextV2 {
+                            global_request_id: request_id.to_owned(),
+                            caller_correlation_id: Some("projection-correlation".to_owned()),
+                        },
+                        item: post_item(
+                            "projection-post-item",
+                            &ConditionId(format!("0x{}", "1".repeat(64))),
+                            &TokenId("1".to_owned()),
+                            SimBuyOrderKindV1::GtcLimit {
+                                limit_price_pusd_per_share: "0.1".parse().expect("测试价格"),
+                                size_shares: "20".parse().expect("测试数量"),
+                                post_only: true,
+                            },
+                        ),
+                    }),
+                },
+                BusinessInputV2::ClosedMarketBucket(AcceptedClosedMarketBucketV2 {
+                    reference: crate::runtime_v2::DurableMarketBucketReferenceV2 {
+                        path: MarketEventPathV1::PublicVisibility,
+                        bucket_at_utc_ms: target_arrival_at_utc_ms,
+                        start_index_position: 0,
+                        next_index_position: initial_events.len() as u64,
+                        closure: crate::market::MillisecondBucketClosureV1::NextEventAt(1_200),
+                    },
+                    events: Arc::from(initial_events),
+                }),
+            ])
+            .expect("请求与同刻桶必须形成一个耐久组");
+        assert!(committed.unaccepted.is_none());
+        assert_eq!(committed.outputs.len(), 2);
+        assert_eq!(group_commit_counts_for_tests(), (2, 1, 1));
+        assert_eq!(crate::event_log::group_append_counts_for_tests(), (1, 2));
+        assert_eq!(crate::event_log::event_log_counts_for_tests(), (1, 1));
+
+        actor
+            .register_request(
+                request_cutoff(cutoff_at_utc_ms + 10_000),
+                BusinessRequestV2::PostOrder(PostOrderRequestV2 {
+                    context: RequestContextV2 {
+                        global_request_id: request_id.to_owned(),
+                        caller_correlation_id: Some("later-body-is-ignored".to_owned()),
+                    },
+                    item: post_item(
+                        "later-item-is-ignored",
+                        &ConditionId(format!("0x{}", "1".repeat(64))),
+                        &TokenId("1".to_owned()),
+                        SimBuyOrderKindV1::GtcLimit {
+                            limit_price_pusd_per_share: "0.2".parse().expect("重投测试价格"),
+                            size_shares: "10".parse().expect("重投测试数量"),
+                            post_only: false,
+                        },
+                    ),
+                }),
+            )
+            .expect("物理重投必须直接返回首次接收回执");
+        assert_eq!(group_commit_counts_for_tests(), (2, 1, 1));
+        assert_eq!(crate::event_log::group_append_counts_for_tests(), (1, 2));
+        assert_eq!(crate::event_log::event_log_counts_for_tests(), (1, 1));
+
+        let port = port_state.borrow();
+        let batch = port.accepted.last().expect("请求投影批次已被接纳");
+        assert_eq!(batch.projection_batch_sequence, 2);
+        assert_eq!(
+            batch.order_lifecycle.len(),
+            1,
+            "投影正文：{:?}",
+            batch.direct_responses
+        );
+        assert!(batch.trade_lifecycle.is_empty());
+        assert!(batch.settlement_lifecycle.is_empty());
+        assert_eq!(batch.direct_responses.len(), 1);
+        assert_eq!(
+            batch.order_lifecycle[0].metadata.private_feedback_sequence,
+            1
+        );
+        let StoredDirectResponseV2::Final(BusinessDirectResponseV2::PostOrder(response)) =
+            batch.direct_responses[0].as_ref()
+        else {
+            panic!("请求投影必须形成 PostOrder 方法特定响应")
+        };
+        assert_eq!(response.metadata.private_feedback_sequence, 2);
+        assert_eq!(response.metadata.global_request_id, request_id);
+        assert_eq!(response.item.item_id, "projection-post-item");
+        let stored_response = actor
+            .state
+            .as_ref()
+            .and_then(|state| state.session.as_ref())
+            .and_then(|session| session.mutation_requests.requests_by_id.get(request_id))
+            .and_then(|request| request.completed_response.as_ref())
+            .expect("唯一会话必须保留首次最终响应");
+        assert!(Arc::ptr_eq(stored_response, &batch.direct_responses[0]));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paper_necessary_empty_prefix_reduces_logs_and_projects_once_without_market_body() {
+        let (_directory, mut actor) =
+            active_market_actor(SimCallerRoleV1::Paper, "run-empty-prefix-group-v2").await;
+        let initial_events = decoded_initial_market_events("2");
+        let condition_id = initial_events[0].market.condition_id.clone();
+        actor
+            .drive_closed_market_bucket(AcceptedClosedMarketBucketV2 {
+                reference: crate::runtime_v2::DurableMarketBucketReferenceV2 {
+                    path: MarketEventPathV1::PublicVisibility,
+                    bucket_at_utc_ms: 1_100,
+                    start_index_position: 0,
+                    next_index_position: 2,
+                    closure: crate::market::MillisecondBucketClosureV1::NextEventAt(1_200),
+                },
+                events: Arc::from(initial_events),
+            })
+            .expect("Paper 初始公开桶必须受理");
+
+        let request_id = "empty-prefix-gtd-request";
+        let platform_arrived_at_utc_ms = 1_200;
+        let session_seed = actor
+            .state
+            .as_ref()
+            .and_then(|state| state.session.as_ref())
+            .expect("空前缀测试会话存在")
+            .session_seed
+            .clone();
+        let outbound_delay_ms = actor._latency_profile.sample_delay_ms(
+            session_seed.0.as_bytes(),
+            request_id,
+            DelaySampleDomainV1::RequestOutbound,
+        );
+        let cutoff_at_utc_ms = platform_arrived_at_utc_ms
+            - i64::try_from(outbound_delay_ms).expect("测试出站时延可表示");
+        actor
+            .register_request(
+                request_cutoff(cutoff_at_utc_ms),
+                BusinessRequestV2::PostOrder(PostOrderRequestV2 {
+                    context: RequestContextV2 {
+                        global_request_id: request_id.to_owned(),
+                        caller_correlation_id: None,
+                    },
+                    item: post_item(
+                        "empty-prefix-gtd-item",
+                        &condition_id,
+                        &TokenId("1".to_owned()),
+                        SimBuyOrderKindV1::GtdLimit {
+                            limit_price_pusd_per_share: "0.1".parse().expect("空前缀 GTD 价格"),
+                            size_shares: "20".parse().expect("空前缀 GTD 数量"),
+                            post_only: true,
+                            expires_at_utc_ms: 300_999,
+                        },
+                    ),
+                }),
+            )
+            .expect("登记空前缀 GTD 请求");
+        actor
+            .drive_closed_market_bucket(AcceptedClosedMarketBucketV2 {
+                reference: crate::runtime_v2::DurableMarketBucketReferenceV2 {
+                    path: MarketEventPathV1::PublicVisibility,
+                    bucket_at_utc_ms: platform_arrived_at_utc_ms,
+                    start_index_position: 2,
+                    next_index_position: 3,
+                    closure: crate::market::MillisecondBucketClosureV1::NextEventAt(400_000),
+                },
+                events: Arc::from(vec![decoded_level_market_event(
+                    platform_arrived_at_utc_ms,
+                    platform_arrived_at_utc_ms + 10,
+                    3,
+                    "2",
+                    "1.5",
+                )]),
+            })
+            .expect("请求到达时正文桶必须形成 GTD 订单");
+        let session = actor
+            .state
+            .as_ref()
+            .and_then(|state| state.session.as_ref())
+            .expect("正文桶处理后唯一会话存在");
+        let first_due_at_utc_ms = [
+            session.execution_state.next_gtd_deadline_at_utc_ms(),
+            session.execution_state.next_scheduled_finality_at_utc_ms(),
+            session.execution_state.next_rebate_clock_at_utc_ms(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .expect("正文桶处理后必须排定到期义务");
+
+        reset_group_commit_counts_for_tests();
+        crate::event_log::reset_event_log_counts_for_tests();
+        crate::event_log::reset_group_append_counts_for_tests();
+        actor
+            .drive_platform_prefix(PlatformPrefixAdvanceV2 {
+                path: MarketEventPathV1::PublicVisibility,
+                closed_through_utc_ms: first_due_at_utc_ms,
+                next_index_position: 3,
+            })
+            .expect("到期时必要空前缀必须受理");
+        assert_eq!(group_commit_counts_for_tests(), (1, 1, 1));
+        assert_eq!(crate::event_log::group_append_counts_for_tests(), (1, 1));
+        assert_eq!(crate::event_log::event_log_counts_for_tests(), (1, 1));
+        assert_eq!(crate::event_log::sync_attempt_count_for_tests(), 1);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -9268,6 +12475,7 @@ mod tests {
                 Arc::clone(&finality_policy),
                 Arc::clone(&scenario),
                 Arc::clone(&latency_profile),
+                accepting_projection_port(),
                 MAX_GROUP_BYTES,
             ),
             Err(SimRunActorErrorV2::RuleSnapshotIdentityMismatch)
@@ -9291,6 +12499,7 @@ mod tests {
                 Arc::clone(&finality_policy),
                 Arc::clone(&scenario),
                 Arc::clone(&latency_profile),
+                accepting_projection_port(),
                 MAX_GROUP_BYTES,
             ),
             Err(SimRunActorErrorV2::FinalityPolicyIdentityMismatch)
@@ -9314,6 +12523,7 @@ mod tests {
                 Arc::clone(&finality_policy),
                 Arc::clone(&scenario),
                 Arc::clone(&latency_profile),
+                accepting_projection_port(),
                 MAX_GROUP_BYTES,
             ),
             Err(SimRunActorErrorV2::ScenarioIdentityMismatch)
@@ -9337,6 +12547,7 @@ mod tests {
                 finality_policy,
                 scenario,
                 latency_profile,
+                accepting_projection_port(),
                 MAX_GROUP_BYTES,
             ),
             Err(SimRunActorErrorV2::LatencyProfileIdentityMismatch)

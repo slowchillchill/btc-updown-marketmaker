@@ -4142,3 +4142,206 @@
   唯一业务正文，无需加入代码级类型或测试排列。计划已把步骤 4.3.3 标为完成，并把当前游标推进到
   `阶段 4 -> 任务 4.3 -> 步骤 4.3.4 执行中`。本次没有建立统一逻辑驱动器、演员业务路由、日志组、
   投影批次或物理根裁剪，也没有提交、推送、发布、部署、远端、凭据、钱包或资金操作。
+
+## 2026-08-21：形成步骤 4.3.4 首轮候选并进入审查返工
+
+- 上一轮候选在 `sim-system/src/run_v2.rs` 增加 crate-private `drive_business_input_at_v2`，由 by-value
+  候选路径消费 `PlatformPrefixAdvanceV2` 与 `AcceptedClosedMarketBucketV2`。会话持有隐藏平台与
+  公开可见两份独立路径前沿；同刻按 GTD、已排定最终性、返佣时钟、正文桶或必要时间推进、mutation
+  顺序排空，叶内形成的生命周期因果子项立即进入有序输出。正文只借用既有 `Arc` 事件切片一次，
+  没有增加解码、散列、逐字段复验、投影批次、私有序号、演员、日志组或交付。
+- `sim-system/src/market.rs` 抽取 V2 全目录时间推进叶并增加 EOF 初装与合格终态检查；
+  `sim-system/src/matching.rs` 增加同一目录上的执行撮合结束时间推进叶。市场、执行、资源、查询修订、
+  路径前沿和领域效果只在完整候选成功返回时一起可安装；双市场 EOF 缺失任一终态时不返回候选，
+  完整 EOF 才封口。
+- 三个首轮候选聚焦测试精确名称为
+  `run_v2::tests::logical_driver_drains_five_same_time_classes_in_fixed_order`、
+  `run_v2::tests::necessary_prefix_reduces_once_without_body_and_sparse_gap_emits_nothing` 和
+  `run_v2::tests::multi_market_eof_is_whole_bucket_zero_or_full_effect`。首个实际红灯命令退出码为 `101`，
+  原因是唯一驱动器、逻辑输入变体和路径前沿尚不存在；实现后三个测试逐项退出码均为 `0`。
+- 八个规定既有聚焦回归逐项退出码均为 `0`。最终
+  `cargo test -p sim-system --lib --locked --offline` 为
+  `481 passed; 0 failed; 2 ignored`；项目固定全工作区回归命令退出码为 `0`，并明确跳过
+  `four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second`，不把该测试表述为
+  通过。`cargo check -p sim-system --all-targets --locked --offline`、`cargo fmt --all -- --check` 和
+  `git diff --check` 均退出 `0`。
+- `cargo clippy -p sim-system --all-targets --locked --offline -- -D warnings` 退出 `101`，首先命中未改动
+  `contracts/src/lib.rs` 的两个既有 `large_enum_variant`；放宽该既有 lint 后仍显示未改动模块中的既有
+  dead-code 与历史 Clippy 告警。本次新增路径的 `private_interfaces`、`filter_map_bool_then`、
+  `unnecessary_lazy_evaluations` 和 by-value 状态扩大触发的 `result_large_err` 已分别通过可见性收束、
+  直接改写或窄函数级说明处理，没有为消警修改范围外文件。
+- 独立 reviewer `t_d5efaf8e` 对该首轮候选给出 `CHANGES_REQUESTED`：前沿保存的
+  `NextEventAt` 从未被读取，同刻空前缀会遮蔽已知正文；正文桶与空前缀各自保留了一套完整调度；
+  具名五类同刻测试没有真实构造五类碰撞，EOF 夹具还包含自相矛盾的前沿轨迹；此外
+  `LogicalDriveOutputV2.market` 是从未由生产路径写入的死字段。因此前述绿色命令只记录当时真实
+  运行结果，不构成步骤 4.3.4 已闭合的证据。
+- 计划已恢复步骤 4.3.4 为执行中，当前返工仅限前沿证明、唯一共享循环、真实同刻五类碰撞、EOF
+  原子性和死字段收束；完成全部规定检查前不释放步骤 4.3.5。工作树仍为本地未提交差异；本轮至今
+  没有提交、推送、发布、部署、远端、凭据、钱包或真实资金操作。
+
+## 2026-08-21：步骤 4.3.4 续作形成真实五类同刻测试，但停在强制红灯冲突
+
+- 续作先精确复核了中间现场：HEAD、branch/upstream、五个已跟踪差异文件、无 staged/untracked、
+  `912 insertions, 40 deletions` 和 diff SHA-256 均与上张卡保留证据一致。随后只在
+  `sim-system/src/run_v2.rs` 重写具名五类同刻测试及其测试夹具，没有改动公共合同、依赖或 4.3.5
+  生产职责。
+- 新测试在同一个真实 V2 会话、同一隐藏平台角色路径和同一逻辑时点构造 GTD 到期、已排定
+  finality、finality 原位解锁的 taker 返佣应计与已到期 maker 市场返佣动作、真实编码再解码的
+  `Arc<[ExecutionMarketEventV3]>` DPT 正文，以及真实 `PostOrder` mutation。断言直接读取有序订单、
+  成交和结算生命周期效果、稳定订单/成交/请求身份与连续 `account_transition_seq`，并证明 DPT 后的
+  mutation 才取得下一个账户序号；正文 `Arc` 在归约后仍只有测试方一个强引用。
+- 完成合同有效夹具后，该聚焦测试在现有共享循环上首次运行即为绿色；此前出现的
+  `NormalPathNotSuccessfulTemplate`、`BelowMinimumShares`、`LevelPredecessorConflict` 和错误要求
+  DPT 初始 maker 成交立即带账户变化的失败，分别属于无效最终性策略、无效最小数量、无效档位前驱和
+  错误测试预期，均不能冒充行为红灯。现有生产循环已经按要求排空五类义务，因此无法在不故意破坏
+  生产顺序、制造测试旁路或写入错误预期的前提下，补造卡片要求的“当前中间候选因 I3 未实现而行为
+  失败”红灯。
+- 三个最终聚焦测试逐项均为 `1 passed; 0 failed; 0 ignored`，八个规定 exact 回归逐项均为
+  `1 passed; 0 failed; 0 ignored`。`cargo test -p sim-system --lib --locked --offline` 为
+  `481 passed; 0 failed; 2 ignored`；固定全工作区回归退出 `0`，并按命令明确跳过
+  `four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second`，未把它表述为
+  通过。`cargo check -p sim-system --all-targets --locked --offline`、`cargo fmt --all -- --check` 和
+  `git diff --check` 均退出 `0`。
+- 规定 Clippy 命令仍以 `101` 退出，首先只命中未改动 `contracts/src/lib.rs` 的两个既有
+  `large_enum_variant`；放宽该单一既有 lint 后继续显示既有 dead-code 与历史 Clippy 告警。诊断中
+  没有落在本次新增五类同刻测试或夹具 hunk 的告警。
+- 因卡片把原因正确的 I3 行为红灯列为不可缺少的完成门，而当前真实实现状态与该前提不相容，本轮
+  不把步骤 4.3.4 标为完成，也不把当前游标推进到 4.3.5。计划继续保持
+  `阶段 4 -> 任务 4.3 -> 步骤 4.3.4 执行中`，等待编排方决定是否以“既有生产行为已正确、I3 仅缺
+  真实验收测试”的真实证据取代不可补造的红灯要求。本轮没有提交、推送、发布、部署、远端、凭据、
+  钱包或真实资金操作。
+
+## 2026-08-21：按最小充分 EOF 证明完成步骤 4.3.4
+
+- 首轮独立 reviewer 的 `CHANGES_REQUESTED` 之后，返工真实读取并约束 `NextEventAt(t)`：已知 t 有
+  正文时，同刻空前缀以携带原状态的 `Unaccepted` 零安装返回，随后真实 t 正文仍可成功；EOF 封口后
+  前沿拒绝后续输入。原先分开的正文与前缀调度已收束到唯一 crate-private
+  `drive_business_input_at_v2` 完整循环，prefix 与可选正文只作为输入差异；未保留第二套
+  GTD -> finality -> rebate -> DPT/time -> mutation 编排。未被生产路径写入的
+  `LogicalDriveOutputV2.market` 死字段及其自证脚手架也已删除，从而闭合 I1、I2、I4 与 M1。
+- 返工过程如实经历了多次停止：中间返工卡在尚未完成真实 I3 场景时 BLOCKED；续作卡又因“必须先
+  制造行为红灯”与现有正确共享循环不相容而 BLOCKED。后续只读 EOF 收尾卡及其重领 attempt 又因要求
+  单个 EOF 测试逐项镜像全部内部状态维度并重复成功 Arc 所有权而两次 BLOCKED。用户随后分别批准：
+  已有正确行为的特征化测试不补造红灯；撤销 EOF 单测逐字段镜像和重复成功 Arc 所有权的过渡完成门。
+  `NormalPathNotSuccessfulTemplate`、`BelowMinimumShares`、`LevelPredecessorConflict` 与错误账户变化预期
+  均只记录为无效夹具或错误预期，不冒充 TDD 红灯。
+- I3 的真实验收场景在同一真实 `UniqueSessionStateV2`、同一隐藏平台路径和同一逻辑 t，通过真实 V2
+  请求与业务叶准备 GTD、scheduled finality、finality 原位解锁的 taker 返佣、到期 maker 返佣、
+  真实 encode/decode 后的 `Arc<[ExecutionMarketEventV3]>` DPT 正文及真实 `PostOrder` mutation。
+  断言来自实际有序 Order/Trade/Settlement 生命周期效果、稳定身份、连续
+  `account_transition_seq` 和 DPT 后 mutation 序号；该合同有效测试在现有正确循环上首次即通过。
+- 双市场 EOF 采用最小充分组合证明。`BusinessReductionResultV2` 只在成功时返回
+  `(BusinessReducerStateV2, BusinessReducerOutputV2)`，`Fatal` 不返回状态或输出，因此晚失败候选无法
+  安装。代表失败桶只提供市场 A 合格终态而缺少市场 B，返回
+  `Fatal(MissingQualifiedMarketTerminal(B))` 且输入 Arc 不被留存；代表成功桶同时提供 A/B 合格终态，
+  返回唯一成功候选、两市场均为 `ResolutionTerminal`、前沿 sealed，生命周期效果对应两市场。
+  成功 Arc 无额外留存和一次归约/一次解码分别由真实五类同刻测试、reducer 计数及既有
+  `task422_closed_bucket_is_decoded_once_after_obsolete_path_removal` 组合覆盖；`Arc::strong_count` 只说明
+  无额外留存，不单独宣称遍历次数。
+- 最终只读复验中，三个最终 exact 测试与八个既有 exact 回归各自均退出 `0`，每项均为
+  `1 passed; 0 failed; 0 ignored`。`cargo test -p sim-system --lib --locked --offline` 退出 `0`，结果为
+  `481 passed; 0 failed; 2 ignored`，两项只记为 ignored。固定全工作区回归
+  `cargo test --workspace --lib --bins --tests --examples --locked --offline -- --skip
+  four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second` 退出 `0`，输出的 61 个
+  test-result 汇总均为 `ok`；具名性能测试按命令跳过，不表述为通过。
+- `cargo check -p sim-system --all-targets --locked --offline`、`cargo fmt --all -- --check` 与
+  `git diff --check` 均退出 `0`；check 如实报告 20 个既有 warning。规定的
+  `cargo clippy -p sim-system --all-targets --locked --offline -- -D warnings` 退出 `101`，首先仅命中未改动
+  `contracts/src/lib.rs` 两个既有 `large_enum_variant`。只读诊断放宽该单一 baseline lint 后仍退出 `101`，
+  后续均为既有 dead-code/历史 Clippy；与当前源码差异逐 hunk 核对后，本次新增逻辑驱动与测试 hunk
+  没有未解释告警，且未把放宽诊断冒充通过或跨范围消警。
+- 只读核对还确认正文直接借用首次边界解码形成的事件切片，生产路径没有第二 decode、hash 或正文复验；
+  没有公共合同、依赖、`BusinessProjectionBatchV2`、最终私有序号、演员、日志组、背压或交付变更。
+  步骤 4.3.4 因此标记为完成，计划游标只推进到
+  `阶段 4 -> 任务 4.3 -> 步骤 4.3.5 执行中`，未开始 4.3.5 实现。本轮工作树继续保持未提交；没有
+  commit、push、publish、deploy、远端、凭据、钱包或真实资金操作。
+
+## 2026-08-21：最终独立审查要求返工 4.3.4 的 PublicVisibility 路径隔离
+
+- 最终独立 reviewer `t_001dc16c` 给出 `CHANGES_REQUESTED`。I1、I3、最小充分 EOF 组合证据和
+  M1 均通过复核；11 个 exact、`sim-system --lib`、固定全工作区回归及 check/fmt/diff check 也达到
+  该轮记录要求，规定 Clippy 仍如实由既有 baseline 以 `101` 退出。
+- reviewer 发现 I2A：唯一 `drive_business_input_at_v2` 虽在前缀准入读取
+  `market_path_drives_execution_for`，但正文进入后仍无条件排空 GTD/finality/rebate、推进
+  `ExecutionStateV2::advance_market_time` 并处理 mutation。这样会让训练或离线评估的非执行
+  PublicVisibility 正文按接收时间错误推进只应由 HiddenPlatform 数据源事件时间路径拥有的执行、
+  账户、查询与生命周期权威。既有直接调用 `reduce_market_event_slice_v2` 的角色路由测试绕过完整
+  driver，不能覆盖该反例。
+- I4 因而同时成立：此前把 4.3.4 标为完成并释放 4.3.5 过早。返工开始时，计划已恢复为
+  `阶段 4 -> 任务 4.3 -> 步骤 4.3.4 执行中`。本轮只允许在同一 driver 中以既有
+  `drives_execution` 守卫完整执行权威阶段，并增加一个真实完整-driver 代表测试；公开 market store
+  与 public frontier 仍须按收到时间推进，Paper 的 PublicVisibility 仍须驱动执行。I3 已有正确行为
+  特征化和用户批准的 EOF 最小充分组合边界保持不变，不补造红灯或重新引入全维度镜像门。
+- 本次返工尚未开始 4.3.5，未执行 commit、push、publish、deploy、远端、凭据、钱包或真实资金操作。
+- 新增完整 driver 代表测试
+  `run_v2::tests::logical_driver_keeps_non_execution_public_visibility_separate`。在使用真实会话、真实 V2
+  `PostOrder` 请求与 mutation 业务叶、真实 encode/decode 市场事件及合同有效长窗口市场后，该测试在
+  修复前原因正确地退出 `101`：ModelTrain 的 PublicVisibility 正文错误产生 GTD 生命周期效果；测试
+  没有直接调用 `reduce_market_event_slice_v2` 绕过 driver。此前默认短窗口夹具得到的
+  `EndAtReached` 和自定义市场搭配默认市场事件得到的 `UnknownMarket` 只用于修正夹具，未冒充行为红灯。
+- 最小修复仍只有一个 `drive_business_input_at_v2`：既有
+  `drives_execution = market_path_drives_execution_for(caller_role, path)` 现在共同守卫 GTD、scheduled
+  finality、rebate、`ExecutionStateV2::advance_market_time` 和 mutation 排空。所选角色 market store 的
+  `advance_time`、同一 `reduce_market_event_slice_v2` 正文归约和路径自身 frontier 始终保留，因此训练公开
+  路径仍按接收时间推进公开盘口与 public frontier，但账户序号、查询 revision、到期 GTD 和待处理
+  mutation 不变；随后同一角色 HiddenPlatform 正文排空 GTD/mutation，Paper PublicVisibility 仍更新
+  execution queue。修复后该 exact 测试退出 `0`，`1 passed; 0 failed; 0 ignored`。
+- 三个最终 exact 与八个既有 exact 回归共 11 项逐一退出 `0`，每项均为
+  `1 passed; 0 failed; 0 ignored`；新增路径隔离 exact 另行退出 `0`。`cargo test -p sim-system --lib
+  --locked --offline` 退出 `0`，结果为 `482 passed; 0 failed; 2 ignored`，两项只记 ignored。固定全工作区
+  回归退出 `0`，61 个 `test result: ok` 汇总均成功；具名性能测试
+  `four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second` 按命令跳过，不表述为
+  通过。
+- `cargo check -p sim-system --all-targets --locked --offline` 退出 `0` 并报告 20 个既有 warning；
+  `cargo fmt --all -- --check` 与 `git diff --check` 均退出 `0`。规定 Clippy 命令仍退出 `101`，首先且仅
+  命中未改动 `contracts/src/lib.rs:325`、`:539` 两个既有 `large_enum_variant`。只读归因诊断放宽 reviewer
+  已列出的既有 lint 集后退出 `0`，证明本次新增 guard 与代表测试 hunk 没有未解释 Clippy 告警；该诊断
+  未冒充规定命令通过，也未跨范围修改 baseline。
+- I2A 与 I4 因此闭合，步骤 4.3.4 再次标记完成，计划游标只推进到
+  `阶段 4 -> 任务 4.3 -> 步骤 4.3.5 执行中`；未实现 4.3.5。用户冻结的 I3 首绿与 EOF 最小充分组合
+  证据保持不变，没有第二 driver、第二 decode/hash/正文复验、状态快照或全维度镜像门。本轮工作树
+  继续未提交；没有 commit、push、publish、deploy、远端、凭据、钱包或真实资金操作。
+
+## 2026-08-21：分析 IDE 未使用代码提示并完成步骤 4.3.5
+
+- 对用户列出的 34 个 IDE 展开提示进行了编译器复核。`cargo check -p sim-system --lib --locked
+  --offline` 只报告 20 组 `dead_code` warning，没有编译错误；这些提示分别来自尚未接入公开入口的
+  最终性、规则、返佣和场景冷路径，或仍由测试覆盖的旧业务叶，不构成 4.3.5 的前置阻断。没有为了
+  清空 IDE 提示删除代码、扩大可见性或增加 `allow`；4.3.5 真实使用规则快照 `snapshot()` 后，该项
+  自然退出对应未使用方法组，其余提示继续如实保留。
+- `SimRunActorV2` 已接管一个或多个 `BusinessInputV2` 的有界组提交：同一业务归约器按输入顺序各调用
+  一次，候选状态只推进到组末；首个非致命未受理输入停止组形成并允许提交此前非空成功前缀，致命
+  故障、写入失败或 Paper 同步结果未知均不安装当前组状态或投影。`SimEventLogV2` 对已受理前缀执行
+  一次组追加，Paper 整组只同步一次，成功后演员只安装一次组末状态。
+- 每个已受理输入至多形成一个 `BusinessProjectionBatchV2`。批次按同一业务顺序分配连续
+  `projection_batch_sequence` 与私有反馈序号；八个方法特定直接响应和三类生命周期反馈使用既有
+  合同。请求状态与投影批次共享同一个最终直接响应 `Arc`，没有长期保留草稿和最终响应两份业务正文；
+  闭桶继续复用边界首次解码形成的不可变事件切片。
+- 唯一投影端口拒绝当前批次时，演员保留当前批次和同组未交付后缀，保持原序且每个批次只提交一次；
+  全部后缀被接纳前新输入以背压状态暂停，不重新归约或编码。端口连续耐久水位只释放已确认前缀和
+  相应常数时间投影资源计数，不写日志、不重新投影。物理请求重投直接返回首次接收回执，即使后来
+  正文不同也不会重新归约、编码或生成投影。
+- 测试构建计数证明：两个输入的 Paper 组为两次归约、两次输入编码、一次组追加、一次同步和一次
+  组末状态安装；必要空前缀不携带市场正文，并为一次归约、一次输入编码、一次组追加、一次同步和
+  至多一次投影；写入失败与同步结果未知的双输入组均为零状态安装、零投影交付。投影背压代表包含
+  同组两个批次，并证明拒绝后缀不重发、确认释放不重新归约；请求与正文桶代表还证明生命周期在直接
+  响应前取得连续私有序号、状态与批次共享同一最终响应对象。
+- `cargo test -p sim-system --lib --locked --offline` 退出 `0`，结果为
+  `485 passed; 0 failed; 2 ignored`。固定全工作区回归命令退出 `0`；具名测试
+  `four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second` 按命令明确跳过，
+  不表述为通过。`cargo check -p sim-system --all-targets --locked --offline`、`cargo fmt --all --
+  --check` 和 `git diff --check` 均退出 `0`；check 仍如实报告上述 20 组既有 warning。
+  `cargo clippy -p sim-system --all-targets --locked --offline -- -D warnings` 退出 `101`，首先只命中未改动
+  `contracts/src/lib.rs:325` 与 `:539` 两个既有 `large_enum_variant`，未为通过检查跨范围修改公共合同。
+- 需求文档已覆盖单一输入日志、唯一投影端口、业务正文唯一性、恢复和资源边界，无需增加实现细节。
+  计划已把步骤 4.3.5 标为完成，当前游标只推进到
+  `阶段 4 -> 任务 4.3 -> 步骤 4.3.6 执行中`；尚未实施恢复、封口或内部完成门。本轮没有提交、推送、
+  发布、部署、远端、凭据、钱包或真实资金操作。
+
+## 2026-08-21：用户授权提交推送并批准进入步骤 4.3.6
+
+- 用户明确授权把当前工作树中连续完成的步骤 4.3.4 与 4.3.5 代码、测试、计划和变更记录创建提交并
+  推送到当前 `sim-system` 分支；该授权不包含发布、部署、远端运行、凭据、钱包或真实资金操作。
+- 用户同时明确批准在本次提交和推送完成后进入步骤 4.3.6。当前权威计划游标保持
+  `阶段 4 -> 任务 4.3 -> 步骤 4.3.6 执行中`；本条只记录批准和执行顺序，不把尚未实施的恢复、封口
+  或内部完成门表述为完成，也不预先授权 4.3.6 完成后的再次提交或推送。

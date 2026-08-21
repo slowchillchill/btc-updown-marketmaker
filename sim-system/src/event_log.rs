@@ -116,6 +116,8 @@ impl SimEventLogV2 {
         let next = start
             .checked_add(inputs.len() as u64)
             .expect("有界事件日志的输入序号不会溢出");
+        #[cfg(test)]
+        record_group_append_for_tests(inputs.len() as u64);
         let encoded = encode_line(
             &SimEventLogLineRefV2::AcceptedInputs(inputs),
             self.max_group_bytes,
@@ -166,6 +168,8 @@ impl SimEventLogV2 {
     }
 
     fn sync_data(&mut self) -> Result<(), SimEventLogErrorV2> {
+        #[cfg(test)]
+        record_sync_attempt_for_tests();
         #[cfg(test)]
         if std::mem::take(&mut self.fail_next_sync) {
             return Err(io_error(
@@ -449,6 +453,9 @@ fn io_error(operation: &'static str, error: io::Error) -> SimEventLogErrorV2 {
 thread_local! {
     static LINE_ENCODE_COUNT_FOR_TESTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static SYNC_COUNT_FOR_TESTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static GROUP_APPEND_COUNT_FOR_TESTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static INPUT_ENCODE_COUNT_FOR_TESTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static SYNC_ATTEMPT_COUNT_FOR_TESTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -462,13 +469,44 @@ fn record_sync_for_tests() {
 }
 
 #[cfg(test)]
-fn reset_event_log_counts_for_tests() {
+fn record_sync_attempt_for_tests() {
+    SYNC_ATTEMPT_COUNT_FOR_TESTS.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+fn record_group_append_for_tests(input_count: u64) {
+    GROUP_APPEND_COUNT_FOR_TESTS.with(|count| count.set(count.get() + 1));
+    INPUT_ENCODE_COUNT_FOR_TESTS.with(|count| count.set(count.get() + input_count));
+}
+
+#[cfg(test)]
+pub(crate) fn reset_group_append_counts_for_tests() {
+    GROUP_APPEND_COUNT_FOR_TESTS.with(|count| count.set(0));
+    INPUT_ENCODE_COUNT_FOR_TESTS.with(|count| count.set(0));
+    SYNC_ATTEMPT_COUNT_FOR_TESTS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn group_append_counts_for_tests() -> (u64, u64) {
+    (
+        GROUP_APPEND_COUNT_FOR_TESTS.with(std::cell::Cell::get),
+        INPUT_ENCODE_COUNT_FOR_TESTS.with(std::cell::Cell::get),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn sync_attempt_count_for_tests() -> u64 {
+    SYNC_ATTEMPT_COUNT_FOR_TESTS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_event_log_counts_for_tests() {
     LINE_ENCODE_COUNT_FOR_TESTS.with(|count| count.set(0));
     SYNC_COUNT_FOR_TESTS.with(|count| count.set(0));
 }
 
 #[cfg(test)]
-fn event_log_counts_for_tests() -> (u64, u64) {
+pub(crate) fn event_log_counts_for_tests() -> (u64, u64) {
     (
         LINE_ENCODE_COUNT_FOR_TESTS.with(std::cell::Cell::get),
         SYNC_COUNT_FOR_TESTS.with(std::cell::Cell::get),

@@ -3519,6 +3519,22 @@ impl ExecutionStateV2 {
         Ok(effects)
     }
 
+    pub(crate) fn advance_market_time(
+        &mut self,
+        directory: &SessionMarketDirectoryV1,
+        platform_effective_at_utc_ms: i64,
+    ) -> Result<ExecutionMarketEventEffectsV2, MatchingStateErrorV1> {
+        let mut effects = ExecutionMarketEventEffectsV2::default();
+        for market in directory.markets() {
+            if platform_effective_at_utc_ms >= market.market().window.end_at_utc_ms {
+                effects
+                    .resources
+                    .merge(self.queues.end_matching(&market.market().condition_id.0)?);
+            }
+        }
+        Ok(effects)
+    }
+
     pub(crate) fn apply_qualified_resolution(
         &mut self,
         condition_id: &str,

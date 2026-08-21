@@ -157,7 +157,7 @@ pub(crate) struct DurableMarketBucketReferenceV2 {
     pub(crate) closure: MillisecondBucketClosureV1,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct AcceptedClosedMarketBucketV2 {
     pub(crate) reference: DurableMarketBucketReferenceV2,
     #[serde(skip_serializing)]
