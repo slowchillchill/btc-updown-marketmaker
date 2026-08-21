@@ -1,5 +1,5 @@
 id	类别	项目路径	证据位置	证据摘要	重构含义
-N001	用户需求	/home/chillchill/btc-updown-marketmaker	/home/chillchill/btc-updown-marketmaker/demand/rebuild-core-demand.md:10	用户要求汇总六个项目中 5090 训练硬件性能无法正确使用、训练效率低下及相关错误/changelog/问题。	本报告的需求来源。
+N001	用户需求	GitHub 历史提交	https://github.com/qiuqiuaiweb3/btc-updown-marketmaker/blob/47989de80373f8640a1f37d5d4366793d49946e7/demand/rebuild-core-demand.md#L10	用户要求汇总六个项目中 5090 训练硬件性能无法正确使用、训练效率低下及相关错误/changelog/问题。	本报告的历史需求来源。
 N002	V2 5090 Python 规则	/home/chillchill/V2	/home/chillchill/V2/AGENTS.md:24-28	5090 非交互 shell 可能解析到缺少 pyarrow/torch 的系统 Python，默认使用 /root/miniconda3/bin/python3。	固定解释器是训练运行合同的第一项。
 N003	V2 硬件利用率规则	/home/chillchill/V2	/home/chillchill/V2/AGENTS.md:54-57	长任务必须可观测；训练/验证方案必须考虑 25 vCPU、90GB RAM、5090 GPU；page cache 不应因 dashboard memory 上升被误清理；长训练保留命令、wall time、利用率样本。	性能判断必须 profiler/resource artifact first。
 N004	V2 profiler-first/执行规则	/home/chillchill/V2	/home/chillchill/V2/AGENTS.md:109-120	训练效率优化必须 profiler-first；远端只用于 staging/运行/读取产物；5090 远端 Python 用 /root/miniconda3/bin/python3；真实回放/采集优先 release。	禁止无证据固定 CPU cache/GPU cache/DDP/AMP 方案。
