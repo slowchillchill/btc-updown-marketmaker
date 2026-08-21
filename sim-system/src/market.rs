@@ -1079,9 +1079,7 @@ impl MarketStateStoreV2 {
         let missing_terminal = self
             .markets
             .iter()
-            .filter(|(_, market)| {
-                market.lifecycle_phase != MarketLifecyclePhaseV1::ResolutionTerminal
-            })
+            .filter(|(_, market)| market.source_qualified_resolution.is_none())
             .map(|(condition_id, _)| condition_id.clone())
             .collect::<Vec<_>>();
         if !missing_terminal.is_empty() {
@@ -1090,6 +1088,13 @@ impl MarketStateStoreV2 {
             ));
         }
         Ok(())
+    }
+
+    pub(crate) fn all_qualified_resolutions_terminal(&self) -> bool {
+        self.markets.values().all(|market| {
+            market.source_qualified_resolution.is_some()
+                && market.lifecycle_phase == MarketLifecyclePhaseV1::ResolutionTerminal
+        })
     }
 
     pub(crate) fn mark_resolution_terminal_if_qualified(
