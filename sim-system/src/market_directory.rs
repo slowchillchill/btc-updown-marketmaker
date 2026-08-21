@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::scenario::{PlatformMarketV1, PlatformScenarioV1};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum SessionMarketDirectoryErrorV1 {
+pub enum SessionMarketDirectoryErrorV1 {
     Condition(String),
     ClobMarket(String),
     Token(String),

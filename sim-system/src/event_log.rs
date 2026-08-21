@@ -30,7 +30,7 @@ enum SimEventLogLineRefV2<'a> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum SimEventLogErrorV2 {
+pub enum SimEventLogErrorV2 {
     Io {
         operation: &'static str,
         message: String,

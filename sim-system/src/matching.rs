@@ -60,7 +60,7 @@ const VENUE_DUST_ID_DOMAIN_V1: &[u8] = b"SIM_VENUE_DUST_TERMINAL_V1\0";
 const MARKET_RESOLUTION_ORDER_ID_DOMAIN_V1: &[u8] = b"SIM_MARKET_RESOLUTION_ORDER_V1\0";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MatchingMathErrorV1 {
+pub enum MatchingMathErrorV1 {
     NegativeAmount,
     InvalidPrice,
     InvalidSegment,
@@ -81,7 +81,7 @@ impl fmt::Display for MatchingMathErrorV1 {
 impl std::error::Error for MatchingMathErrorV1 {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum MatchingStateErrorV1 {
+pub enum MatchingStateErrorV1 {
     Math(MatchingMathErrorV1),
     Account(PlatformAccountErrorV1),
     Decode(String),

@@ -49,19 +49,19 @@ use crate::scenario::{PlatformMarketV1, SealedPlatformScenarioV1};
 use crate::session::MarketEnrollmentRequestV1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CreateSessionDispositionV2 {
+pub enum CreateSessionDispositionV2 {
     NewPrepared,
     ExistingPrepared,
 }
 
 #[derive(Debug)]
-pub(crate) struct CreateSessionControlResultV2 {
-    pub(crate) disposition: CreateSessionDispositionV2,
-    pub(crate) opening_fact: Arc<AccountOpeningFactV2>,
+pub struct CreateSessionControlResultV2 {
+    pub disposition: CreateSessionDispositionV2,
+    pub opening_fact: Arc<AccountOpeningFactV2>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SessionInitializationControlResultV2 {
+pub enum SessionInitializationControlResultV2 {
     Activated,
     ExistingActive,
     FailedClosed,
@@ -220,7 +220,7 @@ impl std::ops::Deref for StoredDirectResponseV2 {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum BusinessDirectResponseV2 {
+pub enum BusinessDirectResponseV2 {
     PostOrder(PostOrderDirectResponseV2),
     PostOrders(PostOrdersDirectResponseV2),
     CancelOrder(CancelOrderDirectResponseV2),
@@ -232,18 +232,29 @@ pub(crate) enum BusinessDirectResponseV2 {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct BusinessProjectionBatchV2 {
-    pub(crate) run_id: String,
-    pub(crate) projection_batch_sequence: u64,
-    pub(crate) account_opening: Option<Arc<AccountOpeningFactV2>>,
-    pub(crate) market_enrollment: Option<MarketEnrollmentV2>,
+pub struct BusinessProjectionBatchV2 {
+    pub run_id: String,
+    pub projection_batch_sequence: u64,
+    pub account_opening: Option<Arc<AccountOpeningFactV2>>,
+    pub market_enrollment: Option<MarketEnrollmentV2>,
     direct_responses: Vec<Arc<StoredDirectResponseV2>>,
-    pub(crate) order_lifecycle: Vec<OrderLifecycleFeedbackV2>,
-    pub(crate) trade_lifecycle: Vec<TradeLifecycleFeedbackV2>,
-    pub(crate) settlement_lifecycle: Vec<SettlementLifecycleFeedbackV2>,
+    pub order_lifecycle: Vec<OrderLifecycleFeedbackV2>,
+    pub trade_lifecycle: Vec<TradeLifecycleFeedbackV2>,
+    pub settlement_lifecycle: Vec<SettlementLifecycleFeedbackV2>,
 }
 
-pub(crate) trait BusinessProjectionPortV2 {
+impl BusinessProjectionBatchV2 {
+    pub fn direct_responses(&self) -> impl Iterator<Item = &BusinessDirectResponseV2> {
+        self.direct_responses
+            .iter()
+            .filter_map(|response| match response.as_ref() {
+                StoredDirectResponseV2::Final(response) => Some(response),
+                StoredDirectResponseV2::Draft(_) => None,
+            })
+    }
+}
+
+pub trait BusinessProjectionPortV2 {
     fn try_accept(&mut self, batch: Arc<BusinessProjectionBatchV2>) -> bool;
 
     fn durable_through(&self, run_id: &str) -> u64;
@@ -490,10 +501,24 @@ fn trades_page_from_root_v2(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct MutationRequestReceiptV2 {
+pub struct MutationRequestReceiptV2 {
     input_sequence: u64,
     platform_arrived_at_utc_ms: i64,
     scheduled_action_count: u64,
+}
+
+impl MutationRequestReceiptV2 {
+    pub fn input_sequence(&self) -> u64 {
+        self.input_sequence
+    }
+
+    pub fn platform_arrived_at_utc_ms(&self) -> i64 {
+        self.platform_arrived_at_utc_ms
+    }
+
+    pub fn scheduled_action_count(&self) -> u64 {
+        self.scheduled_action_count
+    }
 }
 
 type PostOrderItemBusinessEffectV2 = SubmissionResponseItemV2;
@@ -1637,7 +1662,7 @@ fn settlement_lifecycle_owned_bytes_v2(feedback: &SettlementLifecycleFeedbackV2)
 }
 
 #[derive(Debug)]
-pub(crate) struct UnpublishedRunArtifactCandidateV2 {
+pub struct UnpublishedRunArtifactCandidateV2 {
     opened: RunOpenedV2,
     state: BusinessReducerStateV2,
     log_path: PathBuf,
@@ -1645,7 +1670,19 @@ pub(crate) struct UnpublishedRunArtifactCandidateV2 {
 }
 
 impl UnpublishedRunArtifactCandidateV2 {
-    pub(crate) fn delete_after_retention(&self) -> Result<(), SimRunActorErrorV2> {
+    pub fn run_id(&self) -> &str {
+        &self.opened.run_id
+    }
+
+    pub fn accepted_input_count(&self) -> u64 {
+        self.accepted_input_count
+    }
+
+    pub fn log_path(&self) -> &Path {
+        &self.log_path
+    }
+
+    pub fn delete_after_retention(&self) -> Result<(), SimRunActorErrorV2> {
         crate::event_log::delete_retained_run_log_v2(&self.log_path)
             .map_err(SimRunActorErrorV2::Log)
     }
@@ -1666,8 +1703,12 @@ pub(crate) struct SimRunActorV2 {
     pending_projection_resources: ResourceQuantityV1,
 }
 
+pub struct SimExecution {
+    actor: SimRunActorV2,
+}
+
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum SimRunActorErrorV2 {
+pub enum SimRunActorErrorV2 {
     Closed,
     InvalidRunId,
     RuleSnapshotIdentityMismatch,
@@ -1910,6 +1951,237 @@ where
         pending_projection_resources,
         accepted_input_count: input_sequence - 1,
     })
+}
+
+impl SimExecution {
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_new(
+        path: &Path,
+        opened: RunOpenedV2,
+        rule_snapshot: Arc<SealedProcessRuleSnapshotV3>,
+        finality_policy: Arc<TradeFinalityPolicyV2>,
+        scenario: Arc<SealedPlatformScenarioV1>,
+        latency_profile: Arc<EmpiricalDelayProfile>,
+        projection_port: Box<dyn BusinessProjectionPortV2>,
+        max_group_bytes: usize,
+    ) -> Result<Self, SimRunActorErrorV2> {
+        SimRunActorV2::create_new(
+            path,
+            opened,
+            rule_snapshot,
+            finality_policy,
+            scenario,
+            latency_profile,
+            projection_port,
+            max_group_bytes,
+        )
+        .map(|actor| Self { actor })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn recover_paper<F>(
+        path: &Path,
+        rule_snapshot: Arc<SealedProcessRuleSnapshotV3>,
+        finality_policy: Arc<TradeFinalityPolicyV2>,
+        scenario: Arc<SealedPlatformScenarioV1>,
+        latency_profile: Arc<EmpiricalDelayProfile>,
+        projection_port: Box<dyn BusinessProjectionPortV2>,
+        max_group_bytes: usize,
+        read_bucket: F,
+    ) -> Result<Self, SimRunActorErrorV2>
+    where
+        F: FnMut(
+            &DurableMarketBucketReferenceV2,
+        ) -> Result<Arc<[ExecutionMarketEventV3]>, SimRunActorErrorV2>,
+    {
+        SimRunActorV2::recover_paper(
+            path,
+            rule_snapshot,
+            finality_policy,
+            scenario,
+            latency_profile,
+            projection_port,
+            max_group_bytes,
+            read_bucket,
+        )
+        .map(|actor| Self { actor })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn recover_sealed_clean_run<F>(
+        path: &Path,
+        rule_snapshot: Arc<SealedProcessRuleSnapshotV3>,
+        finality_policy: Arc<TradeFinalityPolicyV2>,
+        scenario: Arc<SealedPlatformScenarioV1>,
+        latency_profile: Arc<EmpiricalDelayProfile>,
+        max_group_bytes: usize,
+        read_bucket: F,
+    ) -> Result<UnpublishedRunArtifactCandidateV2, SimRunActorErrorV2>
+    where
+        F: FnMut(
+            &DurableMarketBucketReferenceV2,
+        ) -> Result<Arc<[ExecutionMarketEventV3]>, SimRunActorErrorV2>,
+    {
+        SimRunActorV2::recover_sealed_clean_run(
+            path,
+            rule_snapshot,
+            finality_policy,
+            scenario,
+            latency_profile,
+            max_group_bytes,
+            read_bucket,
+        )
+    }
+
+    pub fn create_session(
+        &mut self,
+        spec: SessionSpecV3,
+    ) -> Result<CreateSessionControlResultV2, SimRunActorErrorV2> {
+        self.actor.create_session(spec)
+    }
+
+    pub fn retry_create_session(
+        &mut self,
+        spec: SessionSpecV3,
+    ) -> Result<CreateSessionControlResultV2, SimRunActorErrorV2> {
+        self.actor.create_session(spec)
+    }
+
+    pub fn activate_session(
+        &mut self,
+        activation_id: String,
+    ) -> Result<SessionInitializationControlResultV2, SimRunActorErrorV2> {
+        self.actor.activate_session(activation_id)
+    }
+
+    pub fn fail_session_initialization(
+        &mut self,
+        failure_id: String,
+    ) -> Result<SessionInitializationControlResultV2, SimRunActorErrorV2> {
+        self.actor.fail_session_initialization(failure_id)
+    }
+
+    pub fn enroll_market(
+        &mut self,
+        request: MarketEnrollmentRequestV1,
+    ) -> Result<MarketEnrollmentV2, SimRunActorErrorV2> {
+        self.actor.enroll_market(request)
+    }
+
+    pub fn post_order(
+        &mut self,
+        cutoff: TrustedDecisionCutoffV2,
+        request: crate::runtime_v2::PostOrderRequestV2,
+    ) -> Result<MutationRequestReceiptV2, SimRunActorErrorV2> {
+        self.actor
+            .register_request(cutoff, BusinessRequestV2::PostOrder(request))
+    }
+
+    pub fn post_orders(
+        &mut self,
+        cutoff: TrustedDecisionCutoffV2,
+        request: crate::runtime_v2::PostOrdersRequestV2,
+    ) -> Result<MutationRequestReceiptV2, SimRunActorErrorV2> {
+        self.actor
+            .register_request(cutoff, BusinessRequestV2::PostOrders(request))
+    }
+
+    pub fn cancel_order(
+        &mut self,
+        cutoff: TrustedDecisionCutoffV2,
+        request: crate::runtime_v2::CancelOrderRequestV2,
+    ) -> Result<MutationRequestReceiptV2, SimRunActorErrorV2> {
+        self.actor
+            .register_request(cutoff, BusinessRequestV2::CancelOrder(request))
+    }
+
+    pub fn cancel_orders(
+        &mut self,
+        cutoff: TrustedDecisionCutoffV2,
+        request: crate::runtime_v2::CancelOrdersRequestV2,
+    ) -> Result<MutationRequestReceiptV2, SimRunActorErrorV2> {
+        self.actor
+            .register_request(cutoff, BusinessRequestV2::CancelOrders(request))
+    }
+
+    pub fn cancel_all_orders(
+        &mut self,
+        cutoff: TrustedDecisionCutoffV2,
+        request: crate::runtime_v2::CancelAllOrdersRequestV2,
+    ) -> Result<MutationRequestReceiptV2, SimRunActorErrorV2> {
+        self.actor
+            .register_request(cutoff, BusinessRequestV2::CancelAllOrders(request))
+    }
+
+    pub fn order(
+        &mut self,
+        cutoff: TrustedDecisionCutoffV2,
+        request: crate::runtime_v2::OrderRequestV2,
+    ) -> Result<MutationRequestReceiptV2, SimRunActorErrorV2> {
+        self.actor
+            .register_request(cutoff, BusinessRequestV2::Order(request))
+    }
+
+    pub fn orders(
+        &mut self,
+        cutoff: TrustedDecisionCutoffV2,
+        request: crate::runtime_v2::OrdersRequestV2,
+    ) -> Result<MutationRequestReceiptV2, SimRunActorErrorV2> {
+        self.actor
+            .register_request(cutoff, BusinessRequestV2::Orders(request))
+    }
+
+    pub fn trades(
+        &mut self,
+        cutoff: TrustedDecisionCutoffV2,
+        request: crate::runtime_v2::TradesRequestV2,
+    ) -> Result<MutationRequestReceiptV2, SimRunActorErrorV2> {
+        self.actor
+            .register_request(cutoff, BusinessRequestV2::Trades(request))
+    }
+
+    pub fn drive_platform_prefix(
+        &mut self,
+        advance: PlatformPrefixAdvanceV2,
+    ) -> Result<(), SimRunActorErrorV2> {
+        self.actor.drive_platform_prefix(advance)
+    }
+
+    pub fn drive_closed_market_bucket(
+        &mut self,
+        bucket: AcceptedClosedMarketBucketV2,
+    ) -> Result<(), SimRunActorErrorV2> {
+        self.actor.drive_closed_market_bucket(bucket)
+    }
+
+    pub fn advance_retention(
+        &mut self,
+        advance: RetentionAdvanceV2,
+    ) -> Result<(), SimRunActorErrorV2> {
+        self.actor.advance_retention(advance)
+    }
+
+    pub fn complete_clean_run<F>(
+        self,
+        read_bucket: F,
+    ) -> Result<UnpublishedRunArtifactCandidateV2, SimRunActorErrorV2>
+    where
+        F: FnMut(
+            &DurableMarketBucketReferenceV2,
+        ) -> Result<Arc<[ExecutionMarketEventV3]>, SimRunActorErrorV2>,
+    {
+        self.actor.complete_clean_run(read_bucket)
+    }
+
+    #[cfg(test)]
+    fn inject_log_write_failure_for_tests(&mut self) {
+        self.actor.inject_log_write_failure_for_tests();
+    }
+
+    #[cfg(test)]
+    fn inject_log_sync_failure_for_tests(&mut self) {
+        self.actor.inject_log_sync_failure_for_tests();
+    }
 }
 
 impl SimRunActorV2 {
@@ -5282,7 +5554,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::artifacts::SimulationScenarioArtifactV1;
+
     use crate::event_log::{SIM_EVENT_LOG_FILE_NAME_V2, SimEventLogRecoveryV2};
     use crate::finality::successful_policy_v2_for_tests;
     use crate::latency_profile::load_embedded_proxy_latency_profile;
@@ -5296,7 +5568,7 @@ mod tests {
         PostOrderBatchItemV2, PostOrderRequestV2, PostOrdersRequestV2, RequestContextV2,
         RunDurabilityRoleV2, TradesRequestV2,
     };
-    use crate::scenario::PLATFORM_SCENARIO_SCHEMA_V1;
+    use crate::scenario::{PLATFORM_SCENARIO_SCHEMA_V1, SimulationScenarioArtifactV1};
     use crate::session::PublicVisibilityCursorV1;
 
     const MAX_GROUP_BYTES: usize = 64 * 1024;
@@ -12450,6 +12722,191 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn public_facade_routes_control_enrollment_and_all_eight_methods_to_one_actor() {
+        let directory = tempfile::tempdir().expect("创建公开综合轨迹目录");
+        let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
+        let rule_snapshot = successful_snapshot_v3_for_sim_tests().await;
+        let finality_policy = successful_policy_v2_for_tests();
+        let scenario = sealed_scenario();
+        let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
+        let mut execution = SimExecution::create_new(
+            &path,
+            opened(
+                "run-public-golden-v2",
+                &rule_snapshot,
+                &finality_policy,
+                &scenario,
+                &latency_profile,
+            ),
+            rule_snapshot,
+            finality_policy,
+            scenario,
+            latency_profile,
+            accepting_projection_port(),
+            MAX_GROUP_BYTES,
+        )
+        .expect("创建公开综合轨迹根");
+        let session_spec = spec("run-public-golden-v2", "create-public-golden");
+        assert_eq!(
+            execution
+                .create_session(session_spec.clone())
+                .expect("公开创建会话")
+                .disposition,
+            CreateSessionDispositionV2::NewPrepared
+        );
+        assert_eq!(
+            execution
+                .retry_create_session(session_spec)
+                .expect("公开物理重试创建")
+                .disposition,
+            CreateSessionDispositionV2::ExistingPrepared
+        );
+        execution
+            .activate_session("activate-public-golden".to_owned())
+            .expect("公开激活会话");
+        let enrolled_market = market('2', "456", "3", "4");
+        execution
+            .enroll_market(MarketEnrollmentRequestV1 {
+                enrollment_request_id: "enroll-public-golden".to_owned(),
+                market: enrolled_market.clone(),
+            })
+            .expect("公开登记市场");
+
+        let condition_id = enrolled_market.market().condition_id.clone();
+        let token_id = enrolled_market.assets()[0].token_id.clone();
+        let context = |id: &str| RequestContextV2 {
+            global_request_id: id.to_owned(),
+            caller_correlation_id: Some(format!("correlation-{id}")),
+        };
+        let cutoff = request_cutoff(1_200);
+        let post = |id: &str| {
+            post_item(
+                id,
+                &condition_id,
+                &token_id,
+                SimBuyOrderKindV1::GtcLimit {
+                    limit_price_pusd_per_share: "0.3".parse().expect("公开轨迹价格"),
+                    size_shares: "5".parse().expect("公开轨迹数量"),
+                    post_only: false,
+                },
+            )
+        };
+        let receipts = [
+            execution
+                .post_order(
+                    cutoff.clone(),
+                    PostOrderRequestV2 {
+                        context: context("public-post-order"),
+                        item: post("public-post-order-item"),
+                    },
+                )
+                .expect("公开 post_order"),
+            execution
+                .post_orders(
+                    cutoff.clone(),
+                    PostOrdersRequestV2 {
+                        context: context("public-post-orders"),
+                        items: vec![PostOrderBatchItemV2 {
+                            batch_item_ordinal: 0,
+                            item: post("public-post-orders-item"),
+                        }],
+                    },
+                )
+                .expect("公开 post_orders"),
+            execution
+                .cancel_order(
+                    cutoff.clone(),
+                    CancelOrderRequestV2 {
+                        context: context("public-cancel-order"),
+                        item: CancelOrderItemV1 {
+                            item_id: "public-cancel-order-item".to_owned(),
+                            platform_order_id: "sim-1".to_owned(),
+                        },
+                    },
+                )
+                .expect("公开 cancel_order"),
+            execution
+                .cancel_orders(
+                    cutoff.clone(),
+                    CancelOrdersRequestV2 {
+                        context: context("public-cancel-orders"),
+                        items: vec![CancelOrderBatchItemV2 {
+                            batch_item_ordinal: 0,
+                            item: CancelOrderItemV1 {
+                                item_id: "public-cancel-orders-item".to_owned(),
+                                platform_order_id: "sim-2".to_owned(),
+                            },
+                        }],
+                    },
+                )
+                .expect("公开 cancel_orders"),
+            execution
+                .cancel_all_orders(
+                    cutoff.clone(),
+                    CancelAllOrdersRequestV2 {
+                        context: context("public-cancel-all-orders"),
+                    },
+                )
+                .expect("公开 cancel_all_orders"),
+            execution
+                .order(
+                    cutoff.clone(),
+                    OrderRequestV2 {
+                        context: context("public-order"),
+                        platform_order_id: "sim-1".to_owned(),
+                    },
+                )
+                .expect("公开 order"),
+            execution
+                .orders(
+                    cutoff.clone(),
+                    OrdersRequestV2 {
+                        context: context("public-orders"),
+                        filter: OrdersFilterV1::default(),
+                        cursor: None,
+                    },
+                )
+                .expect("公开 orders"),
+            execution
+                .trades(
+                    cutoff,
+                    TradesRequestV2 {
+                        context: context("public-trades"),
+                        filter: TradesFilterV1::default(),
+                        cursor: None,
+                    },
+                )
+                .expect("公开 trades"),
+        ];
+        assert_eq!(
+            receipts
+                .iter()
+                .map(MutationRequestReceiptV2::input_sequence)
+                .collect::<Vec<_>>(),
+            (4..=11).collect::<Vec<_>>()
+        );
+        assert!(
+            receipts
+                .iter()
+                .all(|receipt| receipt.scheduled_action_count() == 1)
+        );
+
+        drop(execution);
+        let (_, mut recovery) =
+            SimEventLogRecoveryV2::open(&path, MAX_GROUP_BYTES).expect("打开公开综合轨迹日志");
+        let mut groups = 0_u64;
+        loop {
+            let (next, group) = recovery.next_group().expect("读取公开综合轨迹组");
+            recovery = next;
+            if group.is_none() {
+                break;
+            }
+            groups += 1;
+        }
+        assert_eq!(groups, 11, "公开入口必须各自只追加一个完整组");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn enrollment_log_failure_publishes_no_candidate_and_leaves_no_complete_input() {
         let directory = tempfile::tempdir().expect("创建登记日志失败测试目录");
         let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
@@ -12592,6 +13049,142 @@ mod tests {
             CreateSessionDispositionV2::NewPrepared
         );
         assert_eq!(healthy.next_input_sequence_for_tests(), Some(2));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn public_write_failure_reduces_once_installs_nothing_and_closes_the_root() {
+        let directory = tempfile::tempdir().expect("创建公开写失败测试目录");
+        let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
+        let rule_snapshot = successful_snapshot_v3_for_sim_tests().await;
+        let finality_policy = successful_policy_v2_for_tests();
+        let scenario = sealed_scenario();
+        let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
+        let mut execution = SimExecution::create_new(
+            &path,
+            opened(
+                "run-public-write-failure-v2",
+                &rule_snapshot,
+                &finality_policy,
+                &scenario,
+                &latency_profile,
+            ),
+            rule_snapshot,
+            finality_policy,
+            scenario,
+            latency_profile,
+            accepting_projection_port(),
+            MAX_GROUP_BYTES,
+        )
+        .expect("创建公开写失败根");
+
+        reset_group_commit_counts_for_tests();
+        crate::event_log::reset_group_append_counts_for_tests();
+        execution.inject_log_write_failure_for_tests();
+        assert!(matches!(
+            execution.create_session(spec(
+                "run-public-write-failure-v2",
+                "create-public-write-failure",
+            )),
+            Err(SimRunActorErrorV2::Log(_))
+        ));
+        assert_eq!(group_commit_counts_for_tests(), (1, 1, 0));
+        assert_eq!(crate::event_log::group_append_counts_for_tests(), (1, 1));
+        assert_eq!(
+            execution
+                .retry_create_session(spec(
+                    "run-public-write-failure-v2",
+                    "retry-after-public-write-failure",
+                ))
+                .expect_err("公开日志写失败后运行根必须关闭"),
+            SimRunActorErrorV2::Closed
+        );
+        drop(execution);
+
+        let (_, recovery) =
+            SimEventLogRecoveryV2::open(&path, MAX_GROUP_BYTES).expect("打开公开写失败日志");
+        let (_, first) = recovery.next_group().expect("读取公开写失败日志末尾");
+        assert!(first.is_none(), "公开写失败不得留下完整受理输入");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn public_paper_sync_unknown_recovers_actual_group_and_reattaches_the_unique_session() {
+        let directory = tempfile::tempdir().expect("创建公开同步结果未知测试目录");
+        let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
+        let rule_snapshot = successful_snapshot_v3_for_sim_tests().await;
+        let finality_policy = successful_policy_v2_for_tests();
+        let scenario = sealed_scenario();
+        let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
+        let mut paper_opened = opened(
+            "run-public-sync-unknown-v2",
+            &rule_snapshot,
+            &finality_policy,
+            &scenario,
+            &latency_profile,
+        );
+        paper_opened.durability_role = RunDurabilityRoleV2::RecoverablePaper;
+        let mut execution = SimExecution::create_new(
+            &path,
+            paper_opened,
+            Arc::clone(&rule_snapshot),
+            Arc::clone(&finality_policy),
+            Arc::clone(&scenario),
+            Arc::clone(&latency_profile),
+            accepting_projection_port(),
+            MAX_GROUP_BYTES,
+        )
+        .expect("创建公开 Paper 根");
+
+        reset_group_commit_counts_for_tests();
+        crate::event_log::reset_event_log_counts_for_tests();
+        crate::event_log::reset_group_append_counts_for_tests();
+        execution.inject_log_sync_failure_for_tests();
+        let session_spec = spec("run-public-sync-unknown-v2", "create-public-sync-unknown");
+        assert!(matches!(
+            execution.create_session(session_spec.clone()),
+            Err(SimRunActorErrorV2::Log(_))
+        ));
+        assert_eq!(group_commit_counts_for_tests(), (1, 1, 0));
+        assert_eq!(crate::event_log::group_append_counts_for_tests(), (1, 1));
+        assert_eq!(crate::event_log::event_log_counts_for_tests(), (1, 0));
+        assert_eq!(crate::event_log::sync_attempt_count_for_tests(), 1);
+        assert_eq!(
+            execution
+                .retry_create_session(session_spec.clone())
+                .expect_err("同步结果未知后当前公开根必须关闭"),
+            SimRunActorErrorV2::Closed
+        );
+        drop(execution);
+
+        let mut recovered = SimExecution::recover_paper(
+            &path,
+            rule_snapshot,
+            finality_policy,
+            scenario,
+            latency_profile,
+            accepting_projection_port(),
+            MAX_GROUP_BYTES,
+            |_| panic!("公开创建组恢复不得读取市场桶"),
+        )
+        .expect("公开恢复按实际完整组裁决");
+        assert_eq!(
+            recovered
+                .retry_create_session(session_spec)
+                .expect("公开重附着稳定会话")
+                .disposition,
+            CreateSessionDispositionV2::ExistingPrepared
+        );
+        recovered
+            .activate_session("activate-after-public-recovery".to_owned())
+            .expect("公开恢复后继续唯一演员");
+        assert_eq!(
+            recovered
+                .create_session(spec(
+                    "run-public-sync-unknown-v2",
+                    "conflicting-public-attachment",
+                ))
+                .expect_err("冲突重附着必须由同一演员拒绝"),
+            SimRunActorErrorV2::SessionAlreadyCreated
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -12963,12 +13556,176 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn paper_necessary_empty_prefix_reduces_logs_and_projects_once_without_market_body() {
-        let (_directory, mut actor) =
+    async fn public_post_order_and_body_bucket_emit_method_result_with_continuous_sequences() {
+        let directory = tempfile::tempdir().expect("创建请求投影测试目录");
+        let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
+        let rule_snapshot = successful_snapshot_v3_for_sim_tests().await;
+        let finality_policy = successful_policy_v2_for_tests();
+        let scenario = sealed_scenario();
+        let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
+        let port_state = Rc::new(RefCell::new(ControllableProjectionPortStateV2 {
+            accept_limit: usize::MAX,
+            ..ControllableProjectionPortStateV2::default()
+        }));
+        let mut run_opened = opened(
+            "run-request-projection-v2",
+            &rule_snapshot,
+            &finality_policy,
+            &scenario,
+            &latency_profile,
+        );
+        run_opened.durability_role = RunDurabilityRoleV2::RecoverablePaper;
+        let mut execution = SimExecution::create_new(
+            &path,
+            run_opened,
+            rule_snapshot,
+            finality_policy,
+            scenario,
+            Arc::clone(&latency_profile),
+            Box::new(ControllableProjectionPortV2 {
+                state: Rc::clone(&port_state),
+            }),
+            MAX_GROUP_BYTES,
+        )
+        .expect("创建请求投影演员");
+        let mut session_spec = spec("run-request-projection-v2", "create-request-projection");
+        session_spec.caller_role = SimCallerRoleV1::Paper;
+        execution
+            .create_session(session_spec)
+            .expect("创建请求投影会话");
+        execution
+            .activate_session("activate-request-projection".to_owned())
+            .expect("激活请求投影会话");
+        port_state.borrow_mut().durable_through = 1;
+        execution.actor.deliver_pending_projections();
+
+        let request_id = "projection-post-order";
+        let target_arrival_at_utc_ms = 1_100;
+        let session_seed = execution
+            .actor
+            .state
+            .as_ref()
+            .and_then(|state| state.session.as_ref())
+            .expect("请求投影会话存在")
+            .session_seed
+            .clone();
+        let outbound_delay_ms = latency_profile.sample_delay_ms(
+            session_seed.0.as_bytes(),
+            request_id,
+            DelaySampleDomainV1::RequestOutbound,
+        );
+        let cutoff_at_utc_ms = target_arrival_at_utc_ms
+            - i64::try_from(outbound_delay_ms).expect("测试出站时延可表示");
+        let initial_events = decoded_initial_market_events("10");
+        reset_group_commit_counts_for_tests();
+        crate::event_log::reset_event_log_counts_for_tests();
+        crate::event_log::reset_group_append_counts_for_tests();
+        let receipt = execution
+            .post_order(
+                request_cutoff(cutoff_at_utc_ms),
+                PostOrderRequestV2 {
+                    context: RequestContextV2 {
+                        global_request_id: request_id.to_owned(),
+                        caller_correlation_id: Some("projection-correlation".to_owned()),
+                    },
+                    item: post_item(
+                        "projection-post-item",
+                        &ConditionId(format!("0x{}", "1".repeat(64))),
+                        &TokenId("1".to_owned()),
+                        SimBuyOrderKindV1::GtcLimit {
+                            limit_price_pusd_per_share: "0.1".parse().expect("测试价格"),
+                            size_shares: "20".parse().expect("测试数量"),
+                            post_only: true,
+                        },
+                    ),
+                },
+            )
+            .expect("公开 post_order 必须返回登记回执");
+        assert_eq!(receipt.scheduled_action_count(), 1);
+        execution
+            .drive_closed_market_bucket(AcceptedClosedMarketBucketV2 {
+                reference: crate::runtime_v2::DurableMarketBucketReferenceV2 {
+                    path: MarketEventPathV1::PublicVisibility,
+                    bucket_at_utc_ms: target_arrival_at_utc_ms,
+                    start_index_position: 0,
+                    next_index_position: initial_events.len() as u64,
+                    closure: crate::market::MillisecondBucketClosureV1::NextEventAt(1_200),
+                },
+                events: Arc::from(initial_events),
+            })
+            .expect("公开正文桶必须形成方法特定结果");
+        assert_eq!(group_commit_counts_for_tests(), (2, 1, 2));
+        assert_eq!(crate::event_log::group_append_counts_for_tests(), (2, 2));
+        assert_eq!(crate::event_log::event_log_counts_for_tests(), (2, 2));
+
+        execution
+            .post_order(
+                request_cutoff(cutoff_at_utc_ms + 10_000),
+                PostOrderRequestV2 {
+                    context: RequestContextV2 {
+                        global_request_id: request_id.to_owned(),
+                        caller_correlation_id: Some("later-body-is-ignored".to_owned()),
+                    },
+                    item: post_item(
+                        "later-item-is-ignored",
+                        &ConditionId(format!("0x{}", "1".repeat(64))),
+                        &TokenId("1".to_owned()),
+                        SimBuyOrderKindV1::GtcLimit {
+                            limit_price_pusd_per_share: "0.2".parse().expect("重投测试价格"),
+                            size_shares: "10".parse().expect("重投测试数量"),
+                            post_only: false,
+                        },
+                    ),
+                },
+            )
+            .expect("公开物理重投必须直接返回首次接收回执");
+        assert_eq!(group_commit_counts_for_tests(), (2, 1, 2));
+        assert_eq!(crate::event_log::group_append_counts_for_tests(), (2, 2));
+        assert_eq!(crate::event_log::event_log_counts_for_tests(), (2, 2));
+
+        let port = port_state.borrow();
+        let batch = port.accepted.last().expect("请求投影批次已被接纳");
+        assert_eq!(batch.projection_batch_sequence, 2);
+        assert_eq!(
+            batch.order_lifecycle.len(),
+            1,
+            "投影正文：{:?}",
+            batch.direct_responses
+        );
+        assert!(batch.trade_lifecycle.is_empty());
+        assert!(batch.settlement_lifecycle.is_empty());
+        assert_eq!(batch.direct_responses.len(), 1);
+        assert_eq!(
+            batch.order_lifecycle[0].metadata.private_feedback_sequence,
+            1
+        );
+        let StoredDirectResponseV2::Final(BusinessDirectResponseV2::PostOrder(response)) =
+            batch.direct_responses[0].as_ref()
+        else {
+            panic!("请求投影必须形成 PostOrder 方法特定响应")
+        };
+        assert_eq!(response.metadata.private_feedback_sequence, 2);
+        assert_eq!(response.metadata.global_request_id, request_id);
+        assert_eq!(response.item.item_id, "projection-post-item");
+        let stored_response = execution
+            .actor
+            .state
+            .as_ref()
+            .and_then(|state| state.session.as_ref())
+            .and_then(|session| session.mutation_requests.requests_by_id.get(request_id))
+            .and_then(|request| request.completed_response.as_ref())
+            .expect("唯一会话必须保留首次最终响应");
+        assert!(Arc::ptr_eq(stored_response, &batch.direct_responses[0]));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn public_paper_necessary_prefix_logs_and_projects_once_without_market_body() {
+        let (_directory, actor) =
             active_market_actor(SimCallerRoleV1::Paper, "run-empty-prefix-group-v2").await;
+        let mut execution = SimExecution { actor };
         let initial_events = decoded_initial_market_events("2");
         let condition_id = initial_events[0].market.condition_id.clone();
-        actor
+        execution
             .drive_closed_market_bucket(AcceptedClosedMarketBucketV2 {
                 reference: crate::runtime_v2::DurableMarketBucketReferenceV2 {
                     path: MarketEventPathV1::PublicVisibility,
@@ -12983,24 +13740,25 @@ mod tests {
 
         let request_id = "empty-prefix-gtd-request";
         let platform_arrived_at_utc_ms = 1_200;
-        let session_seed = actor
+        let session_seed = execution
+            .actor
             .state
             .as_ref()
             .and_then(|state| state.session.as_ref())
             .expect("空前缀测试会话存在")
             .session_seed
             .clone();
-        let outbound_delay_ms = actor._latency_profile.sample_delay_ms(
+        let outbound_delay_ms = execution.actor._latency_profile.sample_delay_ms(
             session_seed.0.as_bytes(),
             request_id,
             DelaySampleDomainV1::RequestOutbound,
         );
         let cutoff_at_utc_ms = platform_arrived_at_utc_ms
             - i64::try_from(outbound_delay_ms).expect("测试出站时延可表示");
-        actor
-            .register_request(
+        execution
+            .post_order(
                 request_cutoff(cutoff_at_utc_ms),
-                BusinessRequestV2::PostOrder(PostOrderRequestV2 {
+                PostOrderRequestV2 {
                     context: RequestContextV2 {
                         global_request_id: request_id.to_owned(),
                         caller_correlation_id: None,
@@ -13016,10 +13774,10 @@ mod tests {
                             expires_at_utc_ms: 300_999,
                         },
                     ),
-                }),
+                },
             )
-            .expect("登记空前缀 GTD 请求");
-        actor
+            .expect("通过公开 post_order 登记空前缀 GTD 请求");
+        execution
             .drive_closed_market_bucket(AcceptedClosedMarketBucketV2 {
                 reference: crate::runtime_v2::DurableMarketBucketReferenceV2 {
                     path: MarketEventPathV1::PublicVisibility,
@@ -13037,7 +13795,8 @@ mod tests {
                 )]),
             })
             .expect("请求到达时正文桶必须形成 GTD 订单");
-        let session = actor
+        let session = execution
+            .actor
             .state
             .as_ref()
             .and_then(|state| state.session.as_ref())
@@ -13055,7 +13814,7 @@ mod tests {
         reset_group_commit_counts_for_tests();
         crate::event_log::reset_event_log_counts_for_tests();
         crate::event_log::reset_group_append_counts_for_tests();
-        actor
+        execution
             .drive_platform_prefix(PlatformPrefixAdvanceV2 {
                 path: MarketEventPathV1::PublicVisibility,
                 closed_through_utc_ms: first_due_at_utc_ms,
@@ -13429,14 +14188,18 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn clean_run_seals_once_and_cold_replays_to_unpublished_candidate() {
+    async fn public_clean_run_drives_body_eof_retention_and_seals_to_cold_candidate() {
         let directory = tempfile::tempdir().expect("创建 CleanRun 完成测试目录");
         let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
         let rule_snapshot = successful_snapshot_v3_for_sim_tests().await;
         let finality_policy = successful_policy_v2_for_tests();
         let scenario = sealed_scenario();
         let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
-        let mut actor = SimRunActorV2::create_new(
+        let port_state = Rc::new(RefCell::new(ControllableProjectionPortStateV2 {
+            accept_limit: usize::MAX,
+            ..ControllableProjectionPortStateV2::default()
+        }));
+        let mut execution = SimExecution::create_new(
             &path,
             opened(
                 "run-clean-candidate-v2",
@@ -13449,14 +14212,16 @@ mod tests {
             Arc::clone(&finality_policy),
             Arc::clone(&scenario),
             Arc::clone(&latency_profile),
-            accepting_projection_port(),
+            Box::new(ControllableProjectionPortV2 {
+                state: Rc::clone(&port_state),
+            }),
             MAX_GROUP_BYTES,
         )
         .expect("创建 CleanRun 完成测试运行根");
-        actor
+        execution
             .create_session(spec("run-clean-candidate-v2", "create-clean-candidate"))
             .expect("创建 CleanRun 会话");
-        actor
+        execution
             .activate_session("activate-clean-candidate".to_owned())
             .expect("激活 CleanRun 会话");
 
@@ -13465,7 +14230,7 @@ mod tests {
         let condition_id = initial_events[0].market.condition_id.0.clone();
         let resolution_events: Arc<[ExecutionMarketEventV3]> =
             Arc::from(vec![decoded_resolution_market_event(4_000, 4_100, 3)]);
-        let buckets = vec![
+        let buckets = [
             (
                 DurableMarketBucketReferenceV2 {
                     path: MarketEventPathV1::HiddenPlatform,
@@ -13508,14 +14273,14 @@ mod tests {
             ),
         ];
         for (reference, events) in &buckets[..2] {
-            actor
+            execution
                 .drive_closed_market_bucket(AcceptedClosedMarketBucketV2 {
                     reference: reference.clone(),
                     events: Arc::clone(events),
                 })
                 .expect("驱动 CleanRun 双路径市场桶");
         }
-        actor
+        execution
             .drive_platform_prefix(PlatformPrefixAdvanceV2 {
                 path: MarketEventPathV1::HiddenPlatform,
                 closed_through_utc_ms: 2_000,
@@ -13523,14 +14288,15 @@ mod tests {
             })
             .expect("EOF 前必须先闭合既有 maker 时钟");
         for (reference, events) in &buckets[2..] {
-            actor
+            execution
                 .drive_closed_market_bucket(AcceptedClosedMarketBucketV2 {
                     reference: reference.clone(),
                     events: Arc::clone(events),
                 })
                 .expect("驱动 CleanRun 双路径 EOF 桶");
         }
-        let session = actor
+        let session = execution
+            .actor
             .state
             .as_ref()
             .and_then(|state| state.session.as_ref())
@@ -13559,7 +14325,7 @@ mod tests {
                 .and_then(|markets| markets.lifecycle_phase_for_tests(&condition_id))
         );
         let retention_revision = session.query_state.current_revision;
-        actor
+        execution
             .advance_retention(RetentionAdvanceV2 {
                 earliest_retained_root_sequence: retention_revision,
                 order_history_retained_from_utc_ms: Some(4_100),
@@ -13567,8 +14333,24 @@ mod tests {
             })
             .expect("关闭前沿同一日志推进既有保留水位");
 
+        let projection_sequences = port_state
+            .borrow()
+            .accepted
+            .iter()
+            .map(|batch| batch.projection_batch_sequence)
+            .collect::<Vec<_>>();
+        assert!(!projection_sequences.is_empty());
+        assert_eq!(
+            projection_sequences,
+            (1..=projection_sequences.len() as u64).collect::<Vec<_>>(),
+            "公开正文、EOF 与保留入口必须连续交付同一投影水位"
+        );
+        port_state.borrow_mut().durable_through = *projection_sequences
+            .last()
+            .expect("公开 CleanRun 至少交付一个投影批次");
+
         crate::event_log::reset_event_log_counts_for_tests();
-        let candidate = actor
+        let candidate = execution
             .complete_clean_run(|reference| {
                 buckets
                     .iter()
@@ -13614,6 +14396,49 @@ mod tests {
             .delete_after_retention()
             .unwrap_or_else(|error| panic!("保留期结束后必须删除精确运行文件：{error}"));
         assert!(!path.exists());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn public_failed_initialization_clean_run_seals_to_a_cold_candidate() {
+        let directory = tempfile::tempdir().expect("创建公开初始化失败封口目录");
+        let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
+        let rule_snapshot = successful_snapshot_v3_for_sim_tests().await;
+        let finality_policy = successful_policy_v2_for_tests();
+        let scenario = sealed_scenario();
+        let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
+        let mut execution = SimExecution::create_new(
+            &path,
+            opened(
+                "run-public-failed-init-seal-v2",
+                &rule_snapshot,
+                &finality_policy,
+                &scenario,
+                &latency_profile,
+            ),
+            rule_snapshot,
+            finality_policy,
+            scenario,
+            latency_profile,
+            accepting_projection_port(),
+            MAX_GROUP_BYTES,
+        )
+        .expect("创建公开初始化失败封口根");
+        execution
+            .create_session(spec(
+                "run-public-failed-init-seal-v2",
+                "create-public-failed-init-seal",
+            ))
+            .expect("公开创建待初始化会话");
+        execution
+            .fail_session_initialization("public-ledger-rejected".to_owned())
+            .expect("公开记录稳定初始化失败决定");
+
+        let candidate = execution
+            .complete_clean_run(|_| panic!("初始化失败的公开 CleanRun 没有市场桶引用"))
+            .expect("公开初始化失败终态必须允许冷封口");
+        assert_eq!(candidate.run_id(), "run-public-failed-init-seal-v2");
+        assert_eq!(candidate.accepted_input_count(), 2);
+        assert_eq!(candidate.log_path(), path.as_path());
     }
 
     #[tokio::test(flavor = "current_thread")]
