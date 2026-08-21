@@ -13556,12 +13556,176 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn paper_necessary_empty_prefix_reduces_logs_and_projects_once_without_market_body() {
-        let (_directory, mut actor) =
+    async fn public_post_order_and_body_bucket_emit_method_result_with_continuous_sequences() {
+        let directory = tempfile::tempdir().expect("创建请求投影测试目录");
+        let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
+        let rule_snapshot = successful_snapshot_v3_for_sim_tests().await;
+        let finality_policy = successful_policy_v2_for_tests();
+        let scenario = sealed_scenario();
+        let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
+        let port_state = Rc::new(RefCell::new(ControllableProjectionPortStateV2 {
+            accept_limit: usize::MAX,
+            ..ControllableProjectionPortStateV2::default()
+        }));
+        let mut run_opened = opened(
+            "run-request-projection-v2",
+            &rule_snapshot,
+            &finality_policy,
+            &scenario,
+            &latency_profile,
+        );
+        run_opened.durability_role = RunDurabilityRoleV2::RecoverablePaper;
+        let mut execution = SimExecution::create_new(
+            &path,
+            run_opened,
+            rule_snapshot,
+            finality_policy,
+            scenario,
+            Arc::clone(&latency_profile),
+            Box::new(ControllableProjectionPortV2 {
+                state: Rc::clone(&port_state),
+            }),
+            MAX_GROUP_BYTES,
+        )
+        .expect("创建请求投影演员");
+        let mut session_spec = spec("run-request-projection-v2", "create-request-projection");
+        session_spec.caller_role = SimCallerRoleV1::Paper;
+        execution
+            .create_session(session_spec)
+            .expect("创建请求投影会话");
+        execution
+            .activate_session("activate-request-projection".to_owned())
+            .expect("激活请求投影会话");
+        port_state.borrow_mut().durable_through = 1;
+        execution.actor.deliver_pending_projections();
+
+        let request_id = "projection-post-order";
+        let target_arrival_at_utc_ms = 1_100;
+        let session_seed = execution
+            .actor
+            .state
+            .as_ref()
+            .and_then(|state| state.session.as_ref())
+            .expect("请求投影会话存在")
+            .session_seed
+            .clone();
+        let outbound_delay_ms = latency_profile.sample_delay_ms(
+            session_seed.0.as_bytes(),
+            request_id,
+            DelaySampleDomainV1::RequestOutbound,
+        );
+        let cutoff_at_utc_ms = target_arrival_at_utc_ms
+            - i64::try_from(outbound_delay_ms).expect("测试出站时延可表示");
+        let initial_events = decoded_initial_market_events("10");
+        reset_group_commit_counts_for_tests();
+        crate::event_log::reset_event_log_counts_for_tests();
+        crate::event_log::reset_group_append_counts_for_tests();
+        let receipt = execution
+            .post_order(
+                request_cutoff(cutoff_at_utc_ms),
+                PostOrderRequestV2 {
+                    context: RequestContextV2 {
+                        global_request_id: request_id.to_owned(),
+                        caller_correlation_id: Some("projection-correlation".to_owned()),
+                    },
+                    item: post_item(
+                        "projection-post-item",
+                        &ConditionId(format!("0x{}", "1".repeat(64))),
+                        &TokenId("1".to_owned()),
+                        SimBuyOrderKindV1::GtcLimit {
+                            limit_price_pusd_per_share: "0.1".parse().expect("测试价格"),
+                            size_shares: "20".parse().expect("测试数量"),
+                            post_only: true,
+                        },
+                    ),
+                },
+            )
+            .expect("公开 post_order 必须返回登记回执");
+        assert_eq!(receipt.scheduled_action_count(), 1);
+        execution
+            .drive_closed_market_bucket(AcceptedClosedMarketBucketV2 {
+                reference: crate::runtime_v2::DurableMarketBucketReferenceV2 {
+                    path: MarketEventPathV1::PublicVisibility,
+                    bucket_at_utc_ms: target_arrival_at_utc_ms,
+                    start_index_position: 0,
+                    next_index_position: initial_events.len() as u64,
+                    closure: crate::market::MillisecondBucketClosureV1::NextEventAt(1_200),
+                },
+                events: Arc::from(initial_events),
+            })
+            .expect("公开正文桶必须形成方法特定结果");
+        assert_eq!(group_commit_counts_for_tests(), (2, 1, 2));
+        assert_eq!(crate::event_log::group_append_counts_for_tests(), (2, 2));
+        assert_eq!(crate::event_log::event_log_counts_for_tests(), (2, 2));
+
+        execution
+            .post_order(
+                request_cutoff(cutoff_at_utc_ms + 10_000),
+                PostOrderRequestV2 {
+                    context: RequestContextV2 {
+                        global_request_id: request_id.to_owned(),
+                        caller_correlation_id: Some("later-body-is-ignored".to_owned()),
+                    },
+                    item: post_item(
+                        "later-item-is-ignored",
+                        &ConditionId(format!("0x{}", "1".repeat(64))),
+                        &TokenId("1".to_owned()),
+                        SimBuyOrderKindV1::GtcLimit {
+                            limit_price_pusd_per_share: "0.2".parse().expect("重投测试价格"),
+                            size_shares: "10".parse().expect("重投测试数量"),
+                            post_only: false,
+                        },
+                    ),
+                },
+            )
+            .expect("公开物理重投必须直接返回首次接收回执");
+        assert_eq!(group_commit_counts_for_tests(), (2, 1, 2));
+        assert_eq!(crate::event_log::group_append_counts_for_tests(), (2, 2));
+        assert_eq!(crate::event_log::event_log_counts_for_tests(), (2, 2));
+
+        let port = port_state.borrow();
+        let batch = port.accepted.last().expect("请求投影批次已被接纳");
+        assert_eq!(batch.projection_batch_sequence, 2);
+        assert_eq!(
+            batch.order_lifecycle.len(),
+            1,
+            "投影正文：{:?}",
+            batch.direct_responses
+        );
+        assert!(batch.trade_lifecycle.is_empty());
+        assert!(batch.settlement_lifecycle.is_empty());
+        assert_eq!(batch.direct_responses.len(), 1);
+        assert_eq!(
+            batch.order_lifecycle[0].metadata.private_feedback_sequence,
+            1
+        );
+        let StoredDirectResponseV2::Final(BusinessDirectResponseV2::PostOrder(response)) =
+            batch.direct_responses[0].as_ref()
+        else {
+            panic!("请求投影必须形成 PostOrder 方法特定响应")
+        };
+        assert_eq!(response.metadata.private_feedback_sequence, 2);
+        assert_eq!(response.metadata.global_request_id, request_id);
+        assert_eq!(response.item.item_id, "projection-post-item");
+        let stored_response = execution
+            .actor
+            .state
+            .as_ref()
+            .and_then(|state| state.session.as_ref())
+            .and_then(|session| session.mutation_requests.requests_by_id.get(request_id))
+            .and_then(|request| request.completed_response.as_ref())
+            .expect("唯一会话必须保留首次最终响应");
+        assert!(Arc::ptr_eq(stored_response, &batch.direct_responses[0]));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn public_paper_necessary_prefix_logs_and_projects_once_without_market_body() {
+        let (_directory, actor) =
             active_market_actor(SimCallerRoleV1::Paper, "run-empty-prefix-group-v2").await;
+        let mut execution = SimExecution { actor };
         let initial_events = decoded_initial_market_events("2");
         let condition_id = initial_events[0].market.condition_id.clone();
-        actor
+        execution
             .drive_closed_market_bucket(AcceptedClosedMarketBucketV2 {
                 reference: crate::runtime_v2::DurableMarketBucketReferenceV2 {
                     path: MarketEventPathV1::PublicVisibility,
@@ -13576,24 +13740,25 @@ mod tests {
 
         let request_id = "empty-prefix-gtd-request";
         let platform_arrived_at_utc_ms = 1_200;
-        let session_seed = actor
+        let session_seed = execution
+            .actor
             .state
             .as_ref()
             .and_then(|state| state.session.as_ref())
             .expect("空前缀测试会话存在")
             .session_seed
             .clone();
-        let outbound_delay_ms = actor._latency_profile.sample_delay_ms(
+        let outbound_delay_ms = execution.actor._latency_profile.sample_delay_ms(
             session_seed.0.as_bytes(),
             request_id,
             DelaySampleDomainV1::RequestOutbound,
         );
         let cutoff_at_utc_ms = platform_arrived_at_utc_ms
             - i64::try_from(outbound_delay_ms).expect("测试出站时延可表示");
-        actor
-            .register_request(
+        execution
+            .post_order(
                 request_cutoff(cutoff_at_utc_ms),
-                BusinessRequestV2::PostOrder(PostOrderRequestV2 {
+                PostOrderRequestV2 {
                     context: RequestContextV2 {
                         global_request_id: request_id.to_owned(),
                         caller_correlation_id: None,
@@ -13609,10 +13774,10 @@ mod tests {
                             expires_at_utc_ms: 300_999,
                         },
                     ),
-                }),
+                },
             )
-            .expect("登记空前缀 GTD 请求");
-        actor
+            .expect("通过公开 post_order 登记空前缀 GTD 请求");
+        execution
             .drive_closed_market_bucket(AcceptedClosedMarketBucketV2 {
                 reference: crate::runtime_v2::DurableMarketBucketReferenceV2 {
                     path: MarketEventPathV1::PublicVisibility,
@@ -13630,7 +13795,8 @@ mod tests {
                 )]),
             })
             .expect("请求到达时正文桶必须形成 GTD 订单");
-        let session = actor
+        let session = execution
+            .actor
             .state
             .as_ref()
             .and_then(|state| state.session.as_ref())
@@ -13648,7 +13814,7 @@ mod tests {
         reset_group_commit_counts_for_tests();
         crate::event_log::reset_event_log_counts_for_tests();
         crate::event_log::reset_group_append_counts_for_tests();
-        actor
+        execution
             .drive_platform_prefix(PlatformPrefixAdvanceV2 {
                 path: MarketEventPathV1::PublicVisibility,
                 closed_through_utc_ms: first_due_at_utc_ms,
@@ -14022,14 +14188,18 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn clean_run_seals_once_and_cold_replays_to_unpublished_candidate() {
+    async fn public_clean_run_drives_body_eof_retention_and_seals_to_cold_candidate() {
         let directory = tempfile::tempdir().expect("创建 CleanRun 完成测试目录");
         let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
         let rule_snapshot = successful_snapshot_v3_for_sim_tests().await;
         let finality_policy = successful_policy_v2_for_tests();
         let scenario = sealed_scenario();
         let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
-        let mut actor = SimRunActorV2::create_new(
+        let port_state = Rc::new(RefCell::new(ControllableProjectionPortStateV2 {
+            accept_limit: usize::MAX,
+            ..ControllableProjectionPortStateV2::default()
+        }));
+        let mut execution = SimExecution::create_new(
             &path,
             opened(
                 "run-clean-candidate-v2",
@@ -14042,14 +14212,16 @@ mod tests {
             Arc::clone(&finality_policy),
             Arc::clone(&scenario),
             Arc::clone(&latency_profile),
-            accepting_projection_port(),
+            Box::new(ControllableProjectionPortV2 {
+                state: Rc::clone(&port_state),
+            }),
             MAX_GROUP_BYTES,
         )
         .expect("创建 CleanRun 完成测试运行根");
-        actor
+        execution
             .create_session(spec("run-clean-candidate-v2", "create-clean-candidate"))
             .expect("创建 CleanRun 会话");
-        actor
+        execution
             .activate_session("activate-clean-candidate".to_owned())
             .expect("激活 CleanRun 会话");
 
@@ -14058,7 +14230,7 @@ mod tests {
         let condition_id = initial_events[0].market.condition_id.0.clone();
         let resolution_events: Arc<[ExecutionMarketEventV3]> =
             Arc::from(vec![decoded_resolution_market_event(4_000, 4_100, 3)]);
-        let buckets = vec![
+        let buckets = [
             (
                 DurableMarketBucketReferenceV2 {
                     path: MarketEventPathV1::HiddenPlatform,
@@ -14101,14 +14273,14 @@ mod tests {
             ),
         ];
         for (reference, events) in &buckets[..2] {
-            actor
+            execution
                 .drive_closed_market_bucket(AcceptedClosedMarketBucketV2 {
                     reference: reference.clone(),
                     events: Arc::clone(events),
                 })
                 .expect("驱动 CleanRun 双路径市场桶");
         }
-        actor
+        execution
             .drive_platform_prefix(PlatformPrefixAdvanceV2 {
                 path: MarketEventPathV1::HiddenPlatform,
                 closed_through_utc_ms: 2_000,
@@ -14116,14 +14288,15 @@ mod tests {
             })
             .expect("EOF 前必须先闭合既有 maker 时钟");
         for (reference, events) in &buckets[2..] {
-            actor
+            execution
                 .drive_closed_market_bucket(AcceptedClosedMarketBucketV2 {
                     reference: reference.clone(),
                     events: Arc::clone(events),
                 })
                 .expect("驱动 CleanRun 双路径 EOF 桶");
         }
-        let session = actor
+        let session = execution
+            .actor
             .state
             .as_ref()
             .and_then(|state| state.session.as_ref())
@@ -14152,7 +14325,7 @@ mod tests {
                 .and_then(|markets| markets.lifecycle_phase_for_tests(&condition_id))
         );
         let retention_revision = session.query_state.current_revision;
-        actor
+        execution
             .advance_retention(RetentionAdvanceV2 {
                 earliest_retained_root_sequence: retention_revision,
                 order_history_retained_from_utc_ms: Some(4_100),
@@ -14160,8 +14333,24 @@ mod tests {
             })
             .expect("关闭前沿同一日志推进既有保留水位");
 
+        let projection_sequences = port_state
+            .borrow()
+            .accepted
+            .iter()
+            .map(|batch| batch.projection_batch_sequence)
+            .collect::<Vec<_>>();
+        assert!(!projection_sequences.is_empty());
+        assert_eq!(
+            projection_sequences,
+            (1..=projection_sequences.len() as u64).collect::<Vec<_>>(),
+            "公开正文、EOF 与保留入口必须连续交付同一投影水位"
+        );
+        port_state.borrow_mut().durable_through = *projection_sequences
+            .last()
+            .expect("公开 CleanRun 至少交付一个投影批次");
+
         crate::event_log::reset_event_log_counts_for_tests();
-        let candidate = actor
+        let candidate = execution
             .complete_clean_run(|reference| {
                 buckets
                     .iter()

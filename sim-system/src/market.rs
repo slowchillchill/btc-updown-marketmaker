@@ -6,7 +6,7 @@ use contracts::{
     AssetIdentityV1, BestBidAskV2, BookSide, CanonicalEventId, ExecutionMarketEventPayloadV3,
     ExecutionMarketEventV3, LevelExecutionBasis, MappedMarketLifecycleStateV1, MarketDataQuality,
     MarketIdentityV2, MarketResolutionTerminalV3, MarketTradingStateV2, PublicTradeIdSourceV1,
-    QualityScopeV1, ResyncQuality, Sha256Hex,
+    QualityScopeV1, ResyncQuality, Sha256Hex, SimCallerRoleV1,
 };
 use data_pipeline_core::{decode_execution_market_event_v3, parse_canonical_decimal};
 use rust_decimal::Decimal;
@@ -14,10 +14,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::market_directory::SessionMarketDirectoryV1;
-use crate::matching::{AuthorizedMarketEventEffectsV1, MatchingStateErrorV1};
+use crate::matching::MatchingStateErrorV1;
 use crate::resource::{BusinessResourceDeltaV2, ResourceQuantityV1};
 use crate::scenario::PlatformMarketV1;
-use crate::session::{InputPathSealOutcomeV1, SessionError, SimCallerRoleV1, SimSession};
+use crate::session::InputPathSealOutcomeV1;
 
 const CLOSED_BUCKET_HASH_DOMAIN_V1: &[u8] = b"SIM_CLOSED_MARKET_EVENT_BUCKET_V1\0";
 
@@ -76,17 +76,17 @@ pub(crate) struct DurableMarketBucketReferenceV1 {
 impl ClosedMarketEventBucketV1 {
     pub(crate) fn resource_input_quantity(&self) -> Result<ResourceQuantityV1, MarketEventErrorV1> {
         let records = u64::try_from(self.encoded_events.len())
-            .map_err(|_| SessionError::ExecutionState("输入桶事件数量超出 u64".to_owned()))?;
+            .map_err(|_| MarketEventErrorV1::ExecutionState("输入桶事件数量超出 u64".to_owned()))?;
         let bytes = self
             .encoded_events
             .iter()
             .try_fold(0_u64, |total, encoded| {
                 let encoded = u64::try_from(encoded.len()).map_err(|_| {
-                    SessionError::ExecutionState("输入桶事件字节超出 u64".to_owned())
+                    MarketEventErrorV1::ExecutionState("输入桶事件字节超出 u64".to_owned())
                 })?;
-                total
-                    .checked_add(encoded)
-                    .ok_or_else(|| SessionError::ExecutionState("输入桶事件总字节溢出".to_owned()))
+                total.checked_add(encoded).ok_or_else(|| {
+                    MarketEventErrorV1::ExecutionState("输入桶事件总字节溢出".to_owned())
+                })
             })?;
         Ok(ResourceQuantityV1::new(records, bytes))
     }
@@ -229,7 +229,6 @@ pub enum MarketEventErrorV1 {
     InputPathAlreadySealed,
     BucketStartPositionConflict { expected: u64, actual: u64 },
     ExecutionState(String),
-    Session(SessionError),
 }
 
 impl fmt::Display for MarketEventErrorV1 {
@@ -296,18 +295,11 @@ impl fmt::Display for MarketEventErrorV1 {
                 "市场事件桶起始索引位置不连续：期望 {expected}，实际 {actual}"
             ),
             Self::ExecutionState(message) => write!(formatter, "执行队列状态非法：{message}"),
-            Self::Session(error) => error.fmt(formatter),
         }
     }
 }
 
 impl std::error::Error for MarketEventErrorV1 {}
-
-impl From<SessionError> for MarketEventErrorV1 {
-    fn from(value: SessionError) -> Self {
-        Self::Session(value)
-    }
-}
 
 impl From<MatchingStateErrorV1> for MarketEventErrorV1 {
     fn from(value: MatchingStateErrorV1) -> Self {
@@ -3023,350 +3015,6 @@ fn bucket_sha256_from_parts(
         write!(&mut encoded, "{byte:02x}").expect("写入 String 不会失败");
     }
     Sha256Hex(encoded)
-}
-
-impl SimSession {
-    pub(crate) fn preview_failed_input_seal(
-        &self,
-        bucket: &ClosedMarketEventBucketV1,
-    ) -> Result<Option<InputPathSealOutcomeV1>, MarketEventErrorV1> {
-        if bucket.closure != MillisecondBucketClosureV1::EndOfInput {
-            return Ok(None);
-        }
-        if bucket.path == MarketEventPathV1::HiddenPlatform
-            && self.session_spec().caller_role == SimCallerRoleV1::Paper
-        {
-            return Err(SessionError::HiddenPlatformReplayForbidden.into());
-        }
-        let (events, identity) = decode_bucket(bucket)?;
-        let current_store = match bucket.path {
-            MarketEventPathV1::HiddenPlatform => self
-                .hidden_platform_markets()
-                .expect("非模拟盘会话必须持有隐藏平台状态"),
-            MarketEventPathV1::PublicVisibility => self.public_markets(),
-        };
-        if let Some((failed_path, _)) = self.failed_input_seal()
-            && (failed_path != bucket.path || !current_store.last_applied_bucket_is(&identity))
-        {
-            return Err(MarketEventErrorV1::InputPathAlreadySealed);
-        }
-        if let Some(outcome) = self.input_path_seal(bucket.path) {
-            if !current_store.last_applied_bucket_is(&identity) {
-                return Err(MarketEventErrorV1::InputPathAlreadySealed);
-            }
-            return Ok(matches!(
-                outcome,
-                InputPathSealOutcomeV1::FailedMissingQualifiedMarketTerminal { .. }
-            )
-            .then(|| outcome.clone()));
-        }
-        let prepared = if let Some(previous) = &current_store.last_applied_bucket
-            && previous.bucket_at_utc_ms == identity.bucket_at_utc_ms
-            && previous.next_index_position == identity.next_index_position
-        {
-            if previous.start_index_position != identity.start_index_position
-                || previous.sha256 != identity.sha256
-            {
-                return Err(MarketEventErrorV1::BucketIdentityConflict);
-            }
-            PreparedMarketEventsV1::default()
-        } else {
-            let expected_start = match bucket.path {
-                MarketEventPathV1::HiddenPlatform => self
-                    .platform_prefix_cursor()
-                    .next_event_time_index_position(),
-                MarketEventPathV1::PublicVisibility => self
-                    .public_visibility_cursor()
-                    .next_visibility_index_position(),
-            };
-            if bucket.start_index_position != expected_start {
-                return Err(MarketEventErrorV1::BucketStartPositionConflict {
-                    expected: expected_start,
-                    actual: bucket.start_index_position,
-                });
-            }
-            current_store.prepare_events(&events, bucket.path, bucket.bucket_at_utc_ms)?
-        };
-        current_store.validate_initial_load_complete(&prepared)?;
-        let condition_ids = current_store.missing_qualified_terminal_condition_ids(&prepared);
-        Ok((!condition_ids.is_empty()).then_some(
-            InputPathSealOutcomeV1::FailedMissingQualifiedMarketTerminal { condition_ids },
-        ))
-    }
-
-    pub(crate) fn mark_redeemed_resolution_terminal(
-        &mut self,
-        condition_id: &str,
-        resolution: &MarketResolutionTerminalV3,
-    ) {
-        let mut terminalized = false;
-        if let Some(hidden_platform_markets) = self.hidden_platform_markets_mut() {
-            terminalized |= hidden_platform_markets
-                .mark_resolution_terminal_if_qualified(condition_id, resolution);
-        }
-        terminalized |= self
-            .public_markets_mut()
-            .mark_resolution_terminal_if_qualified(condition_id, resolution);
-        if terminalized {
-            self.record_terminal_projection_pending(condition_id);
-        }
-    }
-
-    pub(crate) fn last_applied_bucket_coordinates_match(
-        &self,
-        bucket: &ClosedMarketEventBucketV1,
-    ) -> bool {
-        let current_store = match bucket.path {
-            MarketEventPathV1::HiddenPlatform => {
-                let Some(store) = self.hidden_platform_markets() else {
-                    return false;
-                };
-                store
-            }
-            MarketEventPathV1::PublicVisibility => self.public_markets(),
-        };
-        current_store
-            .last_applied_bucket
-            .as_ref()
-            .is_some_and(|previous| {
-                previous.bucket_at_utc_ms == bucket.bucket_at_utc_ms
-                    && previous.next_index_position == bucket.next_index_position
-            })
-    }
-
-    pub(crate) fn last_applied_bucket_identity_matches(
-        &self,
-        bucket: &ClosedMarketEventBucketV1,
-    ) -> bool {
-        let store = match bucket.path {
-            MarketEventPathV1::HiddenPlatform => {
-                let Some(store) = self.hidden_platform_markets() else {
-                    return false;
-                };
-                store
-            }
-            MarketEventPathV1::PublicVisibility => self.public_markets(),
-        };
-        store.last_applied_bucket.as_ref().is_some_and(|previous| {
-            previous.bucket_at_utc_ms == bucket.bucket_at_utc_ms
-                && previous.start_index_position == bucket.start_index_position
-                && previous.next_index_position == bucket.next_index_position
-                && previous.closure == bucket.closure
-                && previous.sha256 == bucket.bucket_sha256
-        })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn apply_closed_market_event_bucket(
-        &mut self,
-        bucket: ClosedMarketEventBucketV1,
-    ) -> Result<MarketBucketApplyDispositionV1, MarketEventErrorV1> {
-        self.apply_closed_market_event_bucket_with_lifecycle_effects(bucket)
-            .map(|(disposition, _)| disposition)
-    }
-
-    pub(crate) fn apply_closed_market_event_bucket_with_lifecycle_effects(
-        &mut self,
-        bucket: ClosedMarketEventBucketV1,
-    ) -> Result<
-        (
-            MarketBucketApplyDispositionV1,
-            AuthorizedMarketEventEffectsV1,
-        ),
-        MarketEventErrorV1,
-    > {
-        if bucket.path == MarketEventPathV1::HiddenPlatform
-            && self.session_spec().caller_role == SimCallerRoleV1::Paper
-        {
-            return Err(SessionError::HiddenPlatformReplayForbidden.into());
-        }
-        let (events, identity) = decode_bucket(&bucket)?;
-        let current_store = match bucket.path {
-            MarketEventPathV1::HiddenPlatform => self
-                .hidden_platform_markets()
-                .expect("非模拟盘会话必须持有隐藏平台状态"),
-            MarketEventPathV1::PublicVisibility => self.public_markets(),
-        };
-        if let Some((failed_path, _)) = self.failed_input_seal()
-            && (failed_path != bucket.path
-                || bucket.closure != MillisecondBucketClosureV1::EndOfInput
-                || !current_store.last_applied_bucket_is(&identity))
-        {
-            return Err(MarketEventErrorV1::InputPathAlreadySealed);
-        }
-        if self.input_path_seal(bucket.path).is_some()
-            && (bucket.closure != MillisecondBucketClosureV1::EndOfInput
-                || !current_store.last_applied_bucket_is(&identity))
-        {
-            return Err(MarketEventErrorV1::InputPathAlreadySealed);
-        }
-        if let Some(previous) = &current_store.last_applied_bucket
-            && previous.bucket_at_utc_ms == identity.bucket_at_utc_ms
-            && previous.next_index_position == identity.next_index_position
-        {
-            if previous.start_index_position != identity.start_index_position
-                || previous.sha256 != identity.sha256
-            {
-                return Err(MarketEventErrorV1::BucketIdentityConflict);
-            }
-            match (previous.closure, identity.closure) {
-                (before, after) if before == after => {}
-                (
-                    MillisecondBucketClosureV1::NextEventAt(_),
-                    MillisecondBucketClosureV1::EndOfInput,
-                ) => {
-                    current_store
-                        .validate_initial_load_complete(&PreparedMarketEventsV1::default())?;
-                    if self.input_path_seal(bucket.path).is_none() {
-                        let outcome = current_store.expected_input_seal_outcome();
-                        self.commit_input_path_seal(bucket.path, outcome);
-                    }
-                    let store = match bucket.path {
-                        MarketEventPathV1::HiddenPlatform => self
-                            .hidden_platform_markets_mut()
-                            .expect("非模拟盘会话必须持有隐藏平台状态"),
-                        MarketEventPathV1::PublicVisibility => self.public_markets_mut(),
-                    };
-                    store.last_applied_bucket = Some(identity);
-                }
-                _ => return Err(MarketEventErrorV1::BucketIdentityConflict),
-            }
-            return Ok((
-                MarketBucketApplyDispositionV1::PhysicalRetry,
-                AuthorizedMarketEventEffectsV1::default(),
-            ));
-        }
-
-        let expected_start = match bucket.path {
-            MarketEventPathV1::HiddenPlatform => self
-                .platform_prefix_cursor()
-                .next_event_time_index_position(),
-            MarketEventPathV1::PublicVisibility => self
-                .public_visibility_cursor()
-                .next_visibility_index_position(),
-        };
-        if bucket.start_index_position != expected_start {
-            return Err(MarketEventErrorV1::BucketStartPositionConflict {
-                expected: expected_start,
-                actual: bucket.start_index_position,
-            });
-        }
-
-        let mut prepared =
-            current_store.prepare_events(&events, bucket.path, bucket.bucket_at_utc_ms)?;
-        if bucket.closure == MillisecondBucketClosureV1::EndOfInput {
-            current_store.validate_initial_load_complete(&prepared)?;
-        }
-        let prepared_input_seal = (bucket.closure == MillisecondBucketClosureV1::EndOfInput)
-            .then(|| current_store.input_seal_outcome(&prepared));
-        let authorized_events = events
-            .iter()
-            .filter(|event| !current_store.is_evicted(event.market.condition_id.0.as_str()))
-            .cloned()
-            .collect::<Vec<_>>();
-        let qualified_resolution_event_ids = prepared.qualified_resolution_event_ids.clone();
-        let prepared_input_failed = prepared_input_seal.as_ref().is_some_and(|outcome| {
-            matches!(
-                outcome,
-                InputPathSealOutcomeV1::FailedMissingQualifiedMarketTerminal { .. }
-            )
-        });
-        let authorized_execution_path =
-            bucket.drives_execution_for(self.session_spec().caller_role);
-        let prepared_execution = if authorized_execution_path && !prepared_input_failed {
-            let mut state = self.execution_state().clone();
-            let lifecycle_effects = state.apply_authorized_market_events(
-                self.market_directory(),
-                bucket.bucket_at_utc_ms,
-                &authorized_events,
-                self.finality_policy(),
-                &self
-                    .rule_snapshot()
-                    .snapshot()
-                    .project_account_rules
-                    .lifecycle_account_behavior
-                    .value,
-                &qualified_resolution_event_ids,
-            )?;
-            let query_projection_changed =
-                state.query_projection_changed_from(self.execution_state());
-            Some((state, query_projection_changed, lifecycle_effects))
-        } else if authorized_execution_path {
-            let mut state = self.execution_state().clone();
-            state.release_initialized_matching_buffers_through(
-                self.market_directory(),
-                bucket.bucket_at_utc_ms,
-            )?;
-            Some((state, false, AuthorizedMarketEventEffectsV1::default()))
-        } else {
-            None
-        };
-        let prepared_query_projection_revision = match &prepared_execution {
-            Some((_, true, _)) => Some(self.prepare_next_platform_state_revision()?),
-            Some((_, false, _)) | None => None,
-        };
-        let execution_with_current_bucket = prepared_execution
-            .as_ref()
-            .map(|(state, _, _)| state)
-            .unwrap_or_else(|| self.execution_state());
-        let mut observed_redeemed_resolutions = Vec::new();
-        if !prepared_input_failed {
-            for (condition_id, market) in &mut prepared.hot_markets {
-                let Some(resolution) =
-                    execution_with_current_bucket.redeemed_market_resolution(condition_id)
-                else {
-                    continue;
-                };
-                if market.mark_resolution_terminal_if_qualified(resolution) {
-                    observed_redeemed_resolutions.push((condition_id.clone(), resolution.clone()));
-                }
-            }
-        }
-        match bucket.path {
-            MarketEventPathV1::HiddenPlatform => {
-                self.validate_platform_prefix_closure(
-                    bucket.bucket_at_utc_ms,
-                    bucket.next_index_position,
-                )?;
-                self.hidden_platform_markets_mut()
-                    .expect("非模拟盘会话必须持有隐藏平台状态")
-                    .commit_prepared_events(prepared, identity);
-                self.commit_platform_prefix_closure(
-                    bucket.bucket_at_utc_ms,
-                    bucket.next_index_position,
-                );
-            }
-            MarketEventPathV1::PublicVisibility => {
-                self.validate_public_visibility_closure(
-                    bucket.bucket_at_utc_ms,
-                    bucket.next_index_position,
-                )?;
-                self.public_markets_mut()
-                    .commit_prepared_events(prepared, identity);
-                self.commit_public_visibility_closure(
-                    bucket.bucket_at_utc_ms,
-                    bucket.next_index_position,
-                );
-            }
-        }
-        let lifecycle_effects = if let Some((state, _, lifecycle_effects)) = prepared_execution {
-            if let Some(next_revision) = prepared_query_projection_revision {
-                self.commit_prepared_platform_state_revision(next_revision);
-            }
-            self.replace_execution_state(state);
-            lifecycle_effects
-        } else {
-            AuthorizedMarketEventEffectsV1::default()
-        };
-        for (condition_id, resolution) in observed_redeemed_resolutions {
-            self.mark_redeemed_resolution_terminal(&condition_id, &resolution);
-        }
-        if let Some(outcome) = prepared_input_seal {
-            self.commit_input_path_seal(bucket.path, outcome);
-        }
-        self.record_successful_market_input();
-        Ok((MarketBucketApplyDispositionV1::Applied, lifecycle_effects))
-    }
 }
 
 #[cfg(test)]

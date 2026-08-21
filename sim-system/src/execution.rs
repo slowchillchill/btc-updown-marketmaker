@@ -23,7 +23,7 @@ pub use crate::runtime_v2::{
     RetentionAdvanceV2, RunDurabilityRoleV2, RunOpenedV2, SessionSpecV3, TradesRequestV2,
     TrustedDecisionCutoffV2,
 };
-pub use crate::session::{MarketEnrollmentRequestV1, PublicVisibilityCursorV1, SessionError};
+pub use crate::session::{MarketEnrollmentRequestV1, PublicVisibilityCursorV1};
 pub use contracts::{ConditionId, TokenId};
 
 pub const SIM_QUERY_PAGE_SIZE_V1: usize = 100;
