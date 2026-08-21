@@ -4,51 +4,25 @@
 >
 > 当前路由 authority：`self`
 >
-> 当前需求：`demand/data-collect-external-disk-guard-demand.md`
+> 当前任务事实源：`https://github.com/qiuqiuaiweb3/btc-updown-marketmaker/issues/21`
 >
-> 当前规范计划：`plan/data-collect-external-disk-guard-plan.md`
->
-> 当前 changelog：`changelog/data-collect-external-disk-guard-changelog.md`
+> 外部磁盘保护事项：`https://github.com/qiuqiuaiweb3/btc-updown-marketmaker/issues/24`
 >
 > 历史读取入口：`data-collect/docs/archive-manifest.tsv`
 >
-> 执行授权：`阶段 2 / 任务 2.7：最终 10 份文档提交、推送并向 main 创建草稿 PR`
+> 执行授权：`none`
 
-这是所有 `data-collect` 需求、代码、测试、运行和部署问题的强制首读路由，不直接规定业务或
-技术语义。`plan/data-collect-external-disk-guard-plan.md` 是当前活动事项的唯一规范来源；
-`plan/data-collect-plan.md` 继续拥有尚未改变的合同和已部署事实。需求只描述宏观业务目标和
-验收，changelog 只保存当时事实与取代关系，`data-collect/docs/current/` 只提供由计划派生的
-操作、接口、验收和限制参考。本入口不授权任何代码、数据、部署或远端状态变化。
+这是所有 `data-collect` 代码、测试、运行和部署问题的技术路由入口，不直接规定任务目标、范围、
+状态或游标。GitHub 模块 Issue #21 是该模块的任务事实源；`data-collect/docs/current/` 只保存需要
+随代码版本维护的操作、接口、验收和限制参考。本入口不授权任何代码、数据、部署或远端状态变化。
 
-## 当前状态路由
+## 当前任务路由
 
-- 主模块既有事项已完成并由用户验收；本事项阶段 1、任务 2.1、任务 2.2 和任务 2.3 已完成。
-  任务 2.4 已正常停止旧服务、永久删除当前 UTC 日目录并安装四个冻结产物；首次候选启动被
-  错误的 `NRestarts` 验收门主动停止。第二次启动在 180 秒内保持候选进程稳定且没有重启，但
-  尚未完成启动恢复，随后按获批验收门停止。取消该硬时限后，同一候选已完成启动恢复和就绪后
-  182 秒稳定写入验收，当前长期运行。
-- 事项 `DATA-COLLECT-EXTERNAL-DISK-GUARD-20260807` 的需求和计划已经获得用户批准。当前获批
-  范围只有两个目标：根文件系统达到 30GB 时由每日外部任务删除最早一个历史日，
-  同时只移除采集器运行期间每 60 秒的容量扫描；修复 `real_source_alignment_probe` 原 bench
-  事故。启动时 50GB 检查、容量参数和退出码 `75` 保留，不新增清理协调锁，清理脚本不控制
-  采集服务且执行后只验收服务仍为 `active`。路由为
-  `demand/data-collect-external-disk-guard-demand.md`、
-  `plan/data-collect-external-disk-guard-plan.md` 和
-  `changelog/data-collect-external-disk-guard-changelog.md`。当前主需求已经完成窄范围同步；
-  阶段 0 的批准后文档同步、最终独立复审、提交和首次分支推送已经完成；阶段 1 两个目标的
-  实现、完整验证、独立阶段复审、提交和推送也已经完成。阶段 2 的发布候选从干净且已推送的
-  提交隔离构建并完成生产换版；当前日清单为候选身份、`open/active`，采集服务为
-  `active/running`、`MainPID=1315799`、`NRestarts=0`。生产事实文档同步和两路独立
-  审查已经通过。用户随后授权把 timer 调度更新为每日 UTC `12:00:00` 并首次启用；提交
-  `800bca07b98605339d0929eccbb2d9c8b156cb53` 已推送，生产 timer 当前为
-  `enabled/active/waiting`，下一次名义触发为 `2026-08-08T12:00:00Z`。启用没有立即运行清理
-  服务，采集服务和日期目录均未变化；首次自然调度结果尚未发生。生产证据文档同步与独立复审
-  已通过；用户现已授权提交并推送当前 10 份最终证据文档，再向 `main` 创建草稿 PR。不授权
-  合并、转为正式评审、其他 Git/PR、手动运行清理服务、其他产物重装或额外手动删除。
-- 已完成的模型训练消费边界修正由
-  `plan/data-collect-model-train-consumer-boundary-plan.md` 规范；该计划执行授权为 `none`。
-- 当前获批的后续开发事项是 `plan/data-pipeline-training-plan.md`，它不重开
-  `data-collect`。模拟盘和实盘真实适配器仍须在用户决定返回本模块后另立需求与计划。
+- 模块状态、需求、计划、事项目录和执行游标只读取 GitHub Issue #21；本文件不复制任务状态。
+- 专项合同与证据分别读取 GitHub Issue #22、#23、#24。
+- 后续开发必须创建新的 GitHub Issue；不得从本文件、归档清单或 Git 历史取得执行授权。
+- 当前后续模块 `data-pipeline(training)` 的任务事实源为 GitHub Issue #25，它不重开
+  `data-collect`。模拟盘和实盘真实适配器仍须由用户另行批准。
 
 ## 当前派生参考
 
@@ -60,7 +34,7 @@
 | 当前验收边界与测试命令 | `data-collect/docs/current/acceptance.md` |
 | 未实现、不声明和外部条件限制 | `data-collect/docs/current/known-limitations.md` |
 
-以上参考不得新增或改变计划中的语义。`data-collect/README.md` 和旧文档原路径只提供入口
+以上参考不得新增或改变 GitHub Issue 中的任务语义。`data-collect/README.md` 和旧文档原路径只提供入口
 兼容，不拥有独立执行权威。
 
 ## 历史读取规则
@@ -72,10 +46,10 @@
 
 归档只用于回答“当时发生了什么”，不得从其中的当前、下一步、状态词或命令推导动作，也
 不得为搜索方便恢复到活动树。读取 `historical` 或 `snapshot` 对象时，必须按归档清单核对
-类别、生命周期和替代关系，再回到当前计划、代码、数据与测试复核。
+类别、生命周期和替代关系，再回到当前适用 Issue、代码、数据与测试复核。
 
 ## 冲突与权限门
 
-当前计划、真实代码、数据、产物、运行结果或用户最新决定不能同时成立时，必须停止相关
-判断和执行，列出精确位置、语义和影响交由用户决定。changelog 的旧事实不参与当前语义
+当前适用 Issue、真实代码、数据、产物、运行结果或用户最新决定不能同时成立时，必须停止相关
+判断和执行，列出精确位置、语义和影响交由用户决定。Git 历史中的旧事实不参与当前语义
 裁决。部署、启停服务、替换二进制文件、删除数据、推送或其他外部状态变化仍需具体授权。

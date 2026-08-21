@@ -4,19 +4,13 @@
 >
 > 当前执行 authority：`none`
 >
-> 当前规范来源：`plan/data-collect-plan.md`
->
-> 当前需求：`demand/data-collect-demand.md`
->
-> 当前计划：`plan/data-collect-plan.md`
->
-> 当前 changelog：`changelog/data-collect-changelog.md`
+> 当前任务事实源：`https://github.com/qiuqiuaiweb3/btc-updown-marketmaker/issues/21`
 >
 > 历史读取入口：`data-collect/docs/archive-manifest.tsv`
 >
 > 执行授权：`none`
 
-本文是从主计划和真实实现派生的非权威参考，不得新增或改变计划语义；出现不一致时按
+本文是从 GitHub 模块 Issue #21 和真实实现派生的非权威参考，不得新增或改变 Issue 语义；出现不一致时按
 `data-collect/docs/CURRENT.md` 的冲突门处理。
 
 以下内容是边界，不是隐含“下一步”或执行计划：
@@ -32,7 +26,7 @@
    任何后续部署必须先另立事项修复并补负例，不能把输出根目录限制写成已验收。
 6. 模拟盘和实盘真实适配器不属于 `model-train`，并继续保持延期。必须先完成
    `model-train`（模型训练模块，不是 `data-collect-training-collector`）；之后仍
-   只有在用户决定返回 `data-collect` 时，才另立需求、计划和变更记录开发，并重新核对
+   只有在用户决定返回 `data-collect` 时，才创建新的 GitHub Issue，并重新核对
    当前代码和外部环境。
 7. 真实 UTC 日切换与完整健康 UTC 日运行证据不作已取得声明，但不再阻断当前模块完成；
    确定性 UTC 日切换合同测试仍是当前验收的一部分。

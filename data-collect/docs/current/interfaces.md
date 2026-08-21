@@ -4,19 +4,13 @@
 >
 > 当前执行 authority：`none`
 >
-> 当前规范来源：`plan/data-collect-plan.md`
->
-> 当前需求：`demand/data-collect-demand.md`
->
-> 当前计划：`plan/data-collect-plan.md`
->
-> 当前 changelog：`changelog/data-collect-changelog.md`
+> 当前任务事实源：`https://github.com/qiuqiuaiweb3/btc-updown-marketmaker/issues/21`
 >
 > 历史读取入口：`data-collect/docs/archive-manifest.tsv`
 >
 > 执行授权：`none`
 
-本文是从主计划和真实实现派生的非权威参考，不得新增或改变计划语义；出现不一致时按
+本文是从 GitHub 模块 Issue #21 和真实实现派生的非权威参考，不得新增或改变 Issue 语义；出现不一致时按
 `data-collect/docs/CURRENT.md` 的冲突门处理。
 
 ## 1. 训练程序 CLI
@@ -37,7 +31,7 @@ data-collect-training-collector
 
 ## 2. 训练数据源与产物
 
-六个数据源及当前 schema 由主计划唯一规定，`current/contracts.md` 只提供派生参考。输出布局为：
+六个数据源及当前 schema 由 GitHub Issue #21 与真实实现共同约束，`current/contracts.md` 只提供派生参考。输出布局为：
 
 ```text
 <dataset-root>/training/typed_raw/
@@ -130,5 +124,5 @@ target/release/data-collect-paper-hot
 target/release/data-collect-live-hot
 ```
 
-`real_source_alignment_probe` 不属于发布或部署产物。构建和远端状态变更边界以主计划为
+`real_source_alignment_probe` 不属于发布或部署产物。构建和远端状态变更边界以当前适用 Issue 为
 规范，`current/operations.md` 只提供派生参考。
