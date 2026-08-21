@@ -1,0 +1,175 @@
+schema_version = "platform_rules_config_v1"
+
+[documented_platform_rules.taker_delay.value]
+enabled_only_when_itode = true
+applies_only_to_fok_fak_market_buy = true
+delay_ms = 250
+
+[documented_platform_rules.taker_delay.evidence]
+category = "OFFICIAL_PLATFORM_RULE"
+source = "https://docs.polymarket.com/api-reference/markets/get-clob-market-info"
+reviewed_on_utc_date = "2026-08-09"
+scope = "FOK/FAK market BUY when itode is enabled"
+limitation = "Does not represent geographic network latency"
+version = "CLOB_V2_2026-08-09"
+failure_semantics = "Missing itode means false; invalid wire values reject cold start"
+
+[documented_platform_rules.post_orders_batch.value]
+max_items = 15
+per_item_results = true
+request_is_atomic = false
+
+[documented_platform_rules.post_orders_batch.evidence]
+category = "OFFICIAL_SDK_CONTRACT"
+source = "third_party/polymarket_client_sdk_v2-0.7.0-p1/src/clob/client.rs"
+reviewed_on_utc_date = "2026-08-09"
+scope = "post_orders"
+limitation = "Applies only to the frozen V1 simulation execution contract"
+version = "polymarket_client_sdk_v2_0.7.0-p1"
+failure_semantics = "More than 15 items reject before state change"
+
+[documented_platform_rules.cancel_orders_batch.value]
+max_items = 1000
+per_item_results = true
+request_is_atomic = false
+
+[documented_platform_rules.cancel_orders_batch.evidence]
+category = "UNCERTAINTY_PROFILE"
+source = "user-decision:2026-08-02:conservative-cancel-batch-limit"
+reviewed_on_utc_date = "2026-08-09"
+scope = "cancel_orders"
+limitation = "Official sources conflict between 1000 and 3000"
+version = "SIM_CANCEL_BATCH_LIMIT_V1"
+failure_semantics = "More than 1000 items reject before state change"
+
+[documented_platform_rules.gtd_timing.value]
+minimum_lead_seconds = 180
+safety_offset_seconds = 60
+
+[documented_platform_rules.gtd_timing.evidence]
+category = "OFFICIAL_SDK_CONTRACT"
+source = "third_party/polymarket_client_sdk_v2-0.7.0-p1/src/clob/types"
+reviewed_on_utc_date = "2026-08-09"
+scope = "GTD expiration admission"
+limitation = "Does not define business wall-clock scheduling"
+version = "polymarket_client_sdk_v2_0.7.0-p1"
+failure_semantics = "Insufficient lead time rejects before state change"
+
+[documented_platform_rules.fee_computation.value]
+formula_version = "POLYMARKET_FEE_CURVE_V1"
+precision_decimal_places = 5
+minimum_nonzero_fee_pusd = "0.00001"
+
+[documented_platform_rules.fee_computation.evidence]
+category = "OFFICIAL_PLATFORM_RULE"
+source = "https://docs.polymarket.com/trading/fees"
+reviewed_on_utc_date = "2026-08-09"
+scope = "fee-enabled market fills"
+limitation = "Rate and exponent come from the sealed reference-market observation"
+version = "POLYMARKET_FEE_CURVE_V1"
+failure_semantics = "Unsupported schedule versions block the affected operation"
+
+[documented_platform_rules.maker_rebate_payment.value]
+attribution_day_boundary = "UTC"
+minimum_payment_pusd = "1"
+
+[documented_platform_rules.maker_rebate_payment.evidence]
+category = "OFFICIAL_PLATFORM_RULE"
+source = "https://docs.polymarket.com/programs/maker-rebates"
+reviewed_on_utc_date = "2026-08-09"
+scope = "maker rebate attribution and payment eligibility"
+limitation = "Cash availability time is a separate project assumption"
+version = "POLYMARKET_MAKER_REBATE_V1"
+failure_semantics = "Below-threshold daily accrual does not pay"
+
+[documented_platform_rules.immediate_gtc_buy_minimum.value]
+minimum_principal_pusd = "1"
+applies_to_marketable_limit_buy = true
+applies_to_non_marketable_limit_buy = false
+applies_to_fok_or_fak = false
+
+[documented_platform_rules.immediate_gtc_buy_minimum.evidence]
+category = "OBSERVED_PLATFORM_BEHAVIOR"
+source = "mistake-log/online-feedback/platform_shadow_rules.jsonl"
+reviewed_on_utc_date = "2026-08-09"
+scope = "immediately marketable GTC BUY"
+limitation = "Not promoted to a permanent official guarantee"
+version = "OBSERVED_MARKETABLE_GTC_MIN_V1"
+failure_semantics = "Principal below 1 pUSD rejects before state change"
+
+[documented_platform_rules.immediate_gtd_buy_minimum.value]
+minimum_principal_pusd = "1"
+applies_to_marketable_limit_buy = true
+applies_to_non_marketable_limit_buy = false
+applies_to_fok_or_fak = false
+
+[documented_platform_rules.immediate_gtd_buy_minimum.evidence]
+category = "RULE_DERIVATION"
+source = "user-decision:2026-08-04:marketable-gtd-derived-from-gtc"
+reviewed_on_utc_date = "2026-08-09"
+scope = "immediately marketable GTD BUY"
+limitation = "Derived mechanically from the observed GTC behavior"
+version = "DERIVED_MARKETABLE_GTD_MIN_V1"
+failure_semantics = "Principal below 1 pUSD rejects before state change"
+
+[documented_platform_rules.resolved_order_status.value]
+raw_status = "ORDER_STATUS_CANCELED_MARKET_RESOLVED"
+
+[documented_platform_rules.resolved_order_status.evidence]
+category = "OFFICIAL_SDK_CONTRACT"
+source = "third_party/polymarket_client_sdk_v2-0.7.0-p1/src/clob/types"
+reviewed_on_utc_date = "2026-08-09"
+scope = "open remainder closed by a qualified market resolution"
+limitation = "The status spelling does not itself prove resolution eligibility"
+version = "polymarket_client_sdk_v2_0.7.0-p1"
+failure_semantics = "Unknown status versions are not guessed"
+
+[project_account_rules.l2_queue_model.value]
+model_version = "L2_BOOK_DELTA_FIFO_ESTIMATE_V1"
+
+[project_account_rules.l2_queue_model.evidence]
+category = "PROJECT_ASSUMPTION"
+source = "user-decision:2026-08-01:l2-queue-estimate"
+reviewed_on_utc_date = "2026-08-09"
+scope = "deterministic external L2 queue estimate"
+limitation = "Does not claim true per-order FIFO or market impact"
+version = "L2_BOOK_DELTA_FIFO_ESTIMATE_V1"
+failure_semantics = "Invalid conservation evidence isolates the affected market"
+
+[project_account_rules.lifecycle_account_behavior.value]
+venue_dust_upper_exclusive_shares = "0.01"
+venue_dust_requires_positive_fill = true
+reject_new_orders_at_end_at = true
+existing_orders_queryable_after_end_at = true
+existing_orders_cancelable_after_end_at = true
+existing_orders_matchable_after_end_at = false
+auto_redeem_only_after_qualified_market_resolved = true
+
+[project_account_rules.lifecycle_account_behavior.evidence]
+category = "USER_CONFIRMED_PLATFORM_BEHAVIOR"
+source = "user-decisions:2026-08-01..2026-08-04:lifecycle-account-behavior"
+reviewed_on_utc_date = "2026-08-09"
+scope = "venue dust, end_at, qualified resolution, and auto redemption"
+limitation = "Applies only to the approved btc-updown-5m simulation scope"
+version = "SIM_LIFECYCLE_ACCOUNT_V1"
+failure_semantics = "Missing or conflicting evidence fails or isolates without guessing"
+
+[project_account_rules.rebate_settlement.value]
+fixed_taker_rebate_rate = "0.08"
+fixed_maker_rebate_rate = "0.20"
+dynamic_rebate_tiers_enabled = false
+one_time_bonuses_enabled = false
+liquidity_rewards_enabled = false
+taker_cash_available_at_utc = "00:10:00"
+maker_cash_available_at_utc = "00:45:00"
+payment_floor_decimal_places = 4
+truncated_remainder_stays_locked = true
+
+[project_account_rules.rebate_settlement.evidence]
+category = "PROJECT_ASSUMPTION"
+source = "user-decision:2026-08-09:fixed-process-rebate-policy"
+reviewed_on_utc_date = "2026-08-09"
+scope = "Fixed 8 percent taker and 20 percent maker rebate policy with normal settlement"
+limitation = "Does not query or accumulate wV, re-tier, or model bonuses or Liquidity Rewards"
+version = "SIM_REBATE_SETTLEMENT_V1"
+failure_semantics = "Unclosed contributions remain non-spendable and do not pay early"

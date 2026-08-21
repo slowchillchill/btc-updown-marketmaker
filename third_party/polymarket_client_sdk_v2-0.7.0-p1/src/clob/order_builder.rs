@@ -24,6 +24,42 @@ use crate::types::{Address, Decimal};
 /// Maximum number of decimal places for `size`
 pub(crate) const LOT_SIZE_SCALE: u32 = 2;
 
+/// Final decimal values used to encode a BUY order payload.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BuyOrderEncoding {
+    pub price: Decimal,
+    pub maker_amount: Decimal,
+    pub taker_amount: Decimal,
+}
+
+/// Validates and encodes a limit BUY using the same decimal rules as [`OrderBuilder`].
+pub fn encode_limit_buy_order(
+    price: Decimal,
+    size: Decimal,
+    minimum_tick_size: Decimal,
+) -> Result<BuyOrderEncoding> {
+    validate_limit_order_inputs(price, size, minimum_tick_size)?;
+    encode_limit_buy_amounts(price, size, minimum_tick_size)
+}
+
+/// Validates and encodes a quote-denominated market BUY using the same decimal rules as
+/// [`OrderBuilder`].
+pub fn encode_market_buy_order(
+    price: Decimal,
+    spend: Decimal,
+    minimum_tick_size: Decimal,
+) -> Result<BuyOrderEncoding> {
+    let spend = Amount::usdc(spend)?.as_inner();
+    if spend.is_sign_negative() {
+        return Err(Error::validation(format!(
+            "Unable to encode market BUY due to negative USDC amount {spend}"
+        )));
+    }
+    let price = validate_market_order_price(price, minimum_tick_size)?;
+    encode_market_buy_amounts(price, spend, minimum_tick_size)
+}
+
 /// Placeholder type for compile-time checks on limit order builders
 #[non_exhaustive]
 #[derive(Clone, Debug)]
@@ -265,12 +301,7 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
                 "Unable to build Order due to missing price",
             ));
         };
-
-        if price.is_sign_negative() {
-            return Err(Error::validation(format!(
-                "Unable to build Order due to negative price {price}"
-            )));
-        }
+        validate_limit_price_sign(price)?;
 
         let minimum_tick_size = self
             .client
@@ -278,48 +309,16 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
             .await?
             .minimum_tick_size
             .as_decimal();
-
-        let decimals = minimum_tick_size.scale();
-
-        if price.scale() > minimum_tick_size.scale() {
-            return Err(Error::validation(format!(
-                "Unable to build Order: Price {price} has {} decimal places. Minimum tick size \
-                {minimum_tick_size} has {} decimal places. Price decimal places <= minimum tick size decimal places",
-                price.scale(),
-                minimum_tick_size.scale()
-            )));
-        }
-
-        if price < minimum_tick_size || price > Decimal::ONE - minimum_tick_size {
-            return Err(Error::validation(format!(
-                "Price {price} is too small or too large for the minimum tick size {minimum_tick_size}"
-            )));
-        }
-
-        if !price_aligned_to_tick_size(price, minimum_tick_size) {
-            return Err(Error::validation(format!(
-                "Price {price} is not aligned to the minimum tick size {minimum_tick_size}"
-            )));
-        }
+        validate_limit_price_with_tick(price, minimum_tick_size)?;
 
         let Some(size) = self.size else {
             return Err(Error::validation(
                 "Unable to build Order due to missing size",
             ));
         };
+        validate_limit_size(size)?;
 
-        if size.scale() > LOT_SIZE_SCALE {
-            return Err(Error::validation(format!(
-                "Unable to build Order: Size {size} has {} decimal places. Maximum lot size is {LOT_SIZE_SCALE}",
-                size.scale()
-            )));
-        }
-
-        if size.is_zero() || size.is_sign_negative() {
-            return Err(Error::validation(format!(
-                "Unable to build Order due to negative size {size}"
-            )));
-        }
+        let decimals = minimum_tick_size.scale();
 
         let expiration = self.expiration.unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
         let order_type = self.order_type.clone().unwrap_or(OrderType::GTC);
@@ -338,10 +337,10 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
         }
 
         let (taker_amount, maker_amount) = match side {
-            Side::Buy => (
-                size,
-                (size * price).trunc_with_scale(decimals + LOT_SIZE_SCALE),
-            ),
+            Side::Buy => {
+                let encoding = encode_limit_buy_order(price, size, minimum_tick_size)?;
+                (encoding.taker_amount, encoding.maker_amount)
+            }
             Side::Sell => (
                 (size * price).trunc_with_scale(decimals + LOT_SIZE_SCALE),
                 size,
@@ -549,18 +548,7 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
         let decimals = minimum_tick_size.scale();
 
         // Ensure that the market price returned internally is truncated to our tick size
-        let price = price.trunc_with_scale(decimals);
-        if price < minimum_tick_size || price > Decimal::ONE - minimum_tick_size {
-            return Err(Error::validation(format!(
-                "Price {price} is too small or too large for the minimum tick size {minimum_tick_size}"
-            )));
-        }
-
-        if !price_aligned_to_tick_size(price, minimum_tick_size) {
-            return Err(Error::validation(format!(
-                "Price {price} is not aligned to the minimum tick size {minimum_tick_size}"
-            )));
-        }
+        let price = validate_market_order_price(price, minimum_tick_size)?;
 
         let amount = match (side, amount.0, self.user_usdc_balance) {
             (Side::Buy, AmountInner::Usdc(raw), Some(balance)) => {
@@ -594,8 +582,8 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
 
         let (taker_amount, maker_amount) = match (side, amount.0) {
             (Side::Buy, AmountInner::Usdc(_)) => {
-                let shares = (raw_amount / price).trunc_with_scale(decimals + LOT_SIZE_SCALE);
-                (shares, raw_amount)
+                let encoding = encode_market_buy_order(price, raw_amount, minimum_tick_size)?;
+                (encoding.taker_amount, encoding.maker_amount)
             }
             (Side::Buy, AmountInner::Shares(_)) => {
                 let usdc = (raw_amount * price).trunc_with_scale(decimals + LOT_SIZE_SCALE);
@@ -672,8 +660,7 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
 /// Removes trailing zeros, truncates to [`USDC_DECIMALS`] decimal places, and quanitizes as an
 /// integer.
 fn to_fixed_u128(d: Decimal) -> u128 {
-    d.normalize()
-        .trunc_with_scale(USDC_DECIMALS)
+    quantize_order_amount(d)
         .mantissa()
         .to_u128()
         .expect("The `build` call in `OrderBuilder<S, OrderKind, K>` ensures that only positive values are being multiplied/divided")
@@ -686,6 +673,137 @@ const JS_SAFE_INTEGER_MAX: u64 = (1 << 53) - 1;
 
 fn to_ieee_754_int(value: u64) -> u64 {
     value & JS_SAFE_INTEGER_MAX
+}
+
+fn validate_minimum_tick_size(minimum_tick_size: Decimal) -> Result<()> {
+    if minimum_tick_size.is_zero() || minimum_tick_size.is_sign_negative() {
+        return Err(Error::validation(format!(
+            "Minimum tick size must be positive, received {minimum_tick_size}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_price_range_and_alignment(price: Decimal, minimum_tick_size: Decimal) -> Result<()> {
+    if price < minimum_tick_size || price > Decimal::ONE - minimum_tick_size {
+        return Err(Error::validation(format!(
+            "Price {price} is too small or too large for the minimum tick size {minimum_tick_size}"
+        )));
+    }
+
+    if !price_aligned_to_tick_size(price, minimum_tick_size) {
+        return Err(Error::validation(format!(
+            "Price {price} is not aligned to the minimum tick size {minimum_tick_size}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_limit_order_inputs(
+    price: Decimal,
+    size: Decimal,
+    minimum_tick_size: Decimal,
+) -> Result<()> {
+    validate_limit_price_sign(price)?;
+    validate_limit_price_with_tick(price, minimum_tick_size)?;
+    validate_limit_size(size)
+}
+
+fn validate_limit_price_sign(price: Decimal) -> Result<()> {
+    if price.is_sign_negative() {
+        return Err(Error::validation(format!(
+            "Unable to build Order due to negative price {price}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_limit_price_with_tick(price: Decimal, minimum_tick_size: Decimal) -> Result<()> {
+    validate_minimum_tick_size(minimum_tick_size)?;
+    if price.scale() > minimum_tick_size.scale() {
+        return Err(Error::validation(format!(
+            "Unable to build Order: Price {price} has {} decimal places. Minimum tick size \
+            {minimum_tick_size} has {} decimal places. Price decimal places <= minimum tick size decimal places",
+            price.scale(),
+            minimum_tick_size.scale()
+        )));
+    }
+    validate_price_range_and_alignment(price, minimum_tick_size)
+}
+
+fn validate_limit_size(size: Decimal) -> Result<()> {
+    if size.scale() > LOT_SIZE_SCALE {
+        return Err(Error::validation(format!(
+            "Unable to build Order: Size {size} has {} decimal places. Maximum lot size is {LOT_SIZE_SCALE}",
+            size.scale()
+        )));
+    }
+    if size.is_zero() || size.is_sign_negative() {
+        return Err(Error::validation(format!(
+            "Unable to build Order due to negative size {size}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_market_order_price(price: Decimal, minimum_tick_size: Decimal) -> Result<Decimal> {
+    validate_minimum_tick_size(minimum_tick_size)?;
+    let price = price.trunc_with_scale(minimum_tick_size.scale());
+    validate_price_range_and_alignment(price, minimum_tick_size)?;
+    Ok(price)
+}
+
+fn intermediate_amount_scale(minimum_tick_size: Decimal) -> u32 {
+    minimum_tick_size
+        .scale()
+        .saturating_add(LOT_SIZE_SCALE)
+        .min(Decimal::MAX_SCALE)
+}
+
+fn quantize_order_amount(amount: Decimal) -> Decimal {
+    amount.normalize().trunc_with_scale(USDC_DECIMALS)
+}
+
+fn final_buy_order_amount(amount: Decimal) -> Result<Decimal> {
+    let amount = quantize_order_amount(amount);
+    if amount.scale() != USDC_DECIMALS {
+        return Err(Error::validation(format!(
+            "Unable to encode order amount {amount} at {USDC_DECIMALS} decimal places"
+        )));
+    }
+    Ok(amount)
+}
+
+fn encode_limit_buy_amounts(
+    price: Decimal,
+    size: Decimal,
+    minimum_tick_size: Decimal,
+) -> Result<BuyOrderEncoding> {
+    let maker_amount = size
+        .checked_mul(price)
+        .ok_or_else(|| Error::validation("Limit BUY amount multiplication overflowed"))?
+        .trunc_with_scale(intermediate_amount_scale(minimum_tick_size));
+    Ok(BuyOrderEncoding {
+        price,
+        maker_amount: final_buy_order_amount(maker_amount)?,
+        taker_amount: final_buy_order_amount(size)?,
+    })
+}
+
+fn encode_market_buy_amounts(
+    price: Decimal,
+    spend: Decimal,
+    minimum_tick_size: Decimal,
+) -> Result<BuyOrderEncoding> {
+    let taker_amount = spend
+        .checked_div(price)
+        .ok_or_else(|| Error::validation("Market BUY share division overflowed"))?
+        .trunc_with_scale(intermediate_amount_scale(minimum_tick_size));
+    Ok(BuyOrderEncoding {
+        price,
+        maker_amount: final_buy_order_amount(spend)?,
+        taker_amount: final_buy_order_amount(taker_amount)?,
+    })
 }
 
 fn price_aligned_to_tick_size(price: Decimal, tick_size: Decimal) -> bool {
@@ -734,6 +852,65 @@ mod tests {
     )]
     fn to_fixed_u128_panics() {
         to_fixed_u128(dec!(-123.456));
+    }
+
+    #[test]
+    fn pure_buy_encoding_supports_dynamic_decimal_tick_and_final_fixed_quantization() {
+        let limit = encode_limit_buy_order(dec!(0.54321), dec!(5), dec!(0.00001))
+            .expect("five-decimal dynamic tick");
+        assert_eq!(limit.price, dec!(0.54321));
+        assert_eq!(limit.maker_amount, dec!(2.71605));
+        assert_eq!(limit.taker_amount, dec!(5));
+        assert_eq!(limit.maker_amount.scale(), USDC_DECIMALS);
+        assert_eq!(limit.taker_amount.scale(), USDC_DECIMALS);
+        assert_eq!(to_fixed_u128(limit.maker_amount), 2_716_050);
+        assert_eq!(to_fixed_u128(limit.taker_amount), 5_000_000);
+
+        let exact_market = encode_market_buy_order(dec!(0.6), dec!(3), dec!(0.00001))
+            .expect("market BUY at mos boundary");
+        assert_eq!(exact_market.price, dec!(0.6));
+        assert_eq!(exact_market.maker_amount, dec!(3));
+        assert_eq!(exact_market.taker_amount, dec!(5));
+        assert_eq!(exact_market.maker_amount.scale(), USDC_DECIMALS);
+        assert_eq!(exact_market.taker_amount.scale(), USDC_DECIMALS);
+
+        let quantized_market = encode_market_buy_order(dec!(0.3), dec!(1), dec!(0.00001))
+            .expect("market BUY final fixed quantization");
+        assert_eq!(quantized_market.taker_amount, dec!(3.333333));
+        assert_eq!(to_fixed_u128(quantized_market.taker_amount), 3_333_333);
+    }
+
+    #[test]
+    fn pure_buy_encoding_preserves_limit_and_market_price_rules() {
+        assert!(encode_limit_buy_order(dec!(0.50001), dec!(5), dec!(0.00001)).is_ok());
+        assert!(encode_limit_buy_order(dec!(0.500015), dec!(5), dec!(0.00001)).is_err());
+        assert!(encode_limit_buy_order(dec!(0.5001), dec!(5), dec!(0.0025)).is_err());
+
+        let market = encode_market_buy_order(dec!(0.300009), dec!(1), dec!(0.00001))
+            .expect("market price truncates before validation");
+        assert_eq!(market.price, dec!(0.3));
+    }
+
+    #[test]
+    fn pure_buy_encoding_rejects_non_positive_dynamic_tick() {
+        assert!(encode_limit_buy_order(dec!(0.5), dec!(5), Decimal::ZERO).is_err());
+        assert!(encode_market_buy_order(dec!(0.5), dec!(3), dec!(-0.01)).is_err());
+        let zero = encode_market_buy_order(dec!(0.5), Decimal::ZERO, dec!(0.01))
+            .expect("preserve the existing zero-amount builder boundary");
+        assert!(zero.maker_amount.is_zero());
+        assert!(zero.taker_amount.is_zero());
+        assert_eq!(zero.maker_amount.scale(), USDC_DECIMALS);
+        assert_eq!(zero.taker_amount.scale(), USDC_DECIMALS);
+        assert!(encode_market_buy_order(dec!(0.5), dec!(-1), dec!(0.01)).is_err());
+    }
+
+    #[test]
+    fn pure_market_buy_encoding_reports_decimal_overflow() {
+        assert!(
+            encode_market_buy_order(Decimal::new(1, 28), Decimal::MAX, Decimal::new(1, 28))
+                .is_err()
+        );
+        assert!(encode_limit_buy_order(dec!(0.99), Decimal::MAX, dec!(0.01)).is_err());
     }
 
     #[test]

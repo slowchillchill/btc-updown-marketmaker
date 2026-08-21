@@ -8,8 +8,780 @@ pub const GATE_A_CAPABILITY_MATRIX_SCHEMA_V2: &str = "gate_a_capability_matrix_v
 pub const GATE_A_RECEIPT_SCHEMA_V3: &str = "real_execution_tape_receipt_v3";
 pub const EVENT_TIME_INDEX_SCHEMA_V2: &str = "event_time_index_v2";
 pub const VISIBILITY_INDEX_SCHEMA_V2: &str = "visibility_index_v2";
+pub const ACCOUNT_INSTANCE_KEY_SCHEMA_V1: &str = "account_instance_key_v1";
+pub const ACCOUNT_OPENING_ANCHOR_SCHEMA_V1: &str = "account_opening_anchor_v1";
+pub const PLATFORM_ACCOUNT_DELTA_SCHEMA_V1: &str = "platform_account_delta_v1";
+pub const MARKET_ENROLLMENT_SCHEMA_V1: &str = "market_enrollment_v1";
+pub const SIM_EXECUTION_CONTRACT_V2: &str = "sim_execution_contract_v2";
 pub const DATASET_LINEAGE_ROOT: &str = "/home/chillchill/new-datasets";
 pub const DATASET_DATE_FLOOR: &str = "2026-07-30";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum SimCallerRoleV1 {
+    ModelTrain,
+    OfflineEvaluation,
+    Paper,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum PlatformSourceV1 {
+    Simulated,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountInstanceKeyV1 {
+    pub run_id: String,
+    pub caller_role: SimCallerRoleV1,
+    pub caller_instance_id: String,
+    pub account_id: String,
+    pub platform_source: PlatformSourceV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InitialAccountStateV2 {
+    pub available_pusd: ExactDecimal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountOpeningFactV2 {
+    pub creation_request_id: String,
+    pub account_instance_key: AccountInstanceKeyV1,
+    pub session_id: String,
+    pub initial_platform_scenario_file_sha256: Sha256Hex,
+    pub initial_account_state: InitialAccountStateV2,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlatformOutcomeBalanceV1 {
+    pub token_id: TokenId,
+    pub balance_shares: ExactDecimal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlatformAccountSnapshotV1 {
+    pub cash_pusd: ExactDecimal,
+    pub available_pusd: ExactDecimal,
+    pub principal_encumbrance_pusd: ExactDecimal,
+    pub immediate_taker_fee_encumbrance_pusd: ExactDecimal,
+    pub outcome_balances: Vec<PlatformOutcomeBalanceV1>,
+    pub maker_rebate_receivable_pusd: ExactDecimal,
+    pub taker_rebate_receivable_pusd: ExactDecimal,
+    pub maker_rebate_locked_remainder_pusd: ExactDecimal,
+    pub taker_rebate_locked_remainder_pusd: ExactDecimal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountOpeningAnchorV1 {
+    pub schema_version: String,
+    pub anchor_id: String,
+    pub anchor_sha256: Sha256Hex,
+    pub account_instance_key: AccountInstanceKeyV1,
+    pub session_id: String,
+    pub initial_scenario_sha256: Sha256Hex,
+    pub initial_market_set_sha256: Sha256Hex,
+    pub initial_account_state_sha256: Sha256Hex,
+    pub initial_platform_account: PlatformAccountSnapshotV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    deny_unknown_fields,
+    tag = "predecessor_type",
+    rename_all = "SCREAMING_SNAKE_CASE"
+)]
+pub enum PlatformAccountDeltaPredecessorV1 {
+    OpeningAnchor {
+        anchor_id: String,
+        anchor_sha256: Sha256Hex,
+    },
+    AccountDelta {
+        delta_id: String,
+        delta_sha256: Sha256Hex,
+        account_transition_seq: u64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum PlatformAccountDeltaReasonV1 {
+    OrderAcceptedEncumbranceApplied,
+    FakUnspentEncumbranceReleased,
+    CallerCancellationEncumbranceReleased,
+    GtdExpirationEncumbranceReleased,
+    VenueDustEncumbranceReleased,
+    MarketResolutionEncumbranceReleased,
+    FillFinalityEconomicApplied,
+    FillFinalityUnappliedFailureReleased,
+    FillFinalityCompensationApplied,
+    MakerRebateAccrualFinalized,
+    TakerRebateAccrualApplied,
+    MakerRebateDayFinalized,
+    TakerRebateDayFinalized,
+    MakerRebatePaid,
+    TakerRebatePaid,
+    AutoRedeemApplied,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlatformOutcomeBalanceDeltaV1 {
+    pub token_id: TokenId,
+    pub balance_shares_delta: ExactDecimal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlatformAccountBalanceDeltaV1 {
+    pub cash_pusd_delta: ExactDecimal,
+    pub available_pusd_delta: ExactDecimal,
+    pub principal_encumbrance_pusd_delta: ExactDecimal,
+    pub immediate_taker_fee_encumbrance_pusd_delta: ExactDecimal,
+    pub outcome_balance_deltas: Vec<PlatformOutcomeBalanceDeltaV1>,
+    pub maker_rebate_receivable_pusd_delta: ExactDecimal,
+    pub taker_rebate_receivable_pusd_delta: ExactDecimal,
+    pub maker_rebate_locked_remainder_pusd_delta: ExactDecimal,
+    pub taker_rebate_locked_remainder_pusd_delta: ExactDecimal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlatformAccountDeltaV1 {
+    pub schema_version: String,
+    pub delta_id: String,
+    pub delta_sha256: Sha256Hex,
+    pub account_instance_key: AccountInstanceKeyV1,
+    pub account_transition_seq: u64,
+    pub predecessor: PlatformAccountDeltaPredecessorV1,
+    pub reason: PlatformAccountDeltaReasonV1,
+    pub reason_identity: String,
+    pub condition_id: Option<ConditionId>,
+    pub platform_effective_at_utc_ms: i64,
+    pub balance_delta: PlatformAccountBalanceDeltaV1,
+    pub account_summary_before_sha256: Sha256Hex,
+    pub account_summary_after_sha256: Sha256Hex,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum PlatformAccountDeltaReasonV2 {
+    OrderAcceptedEncumbranceApplied {
+        platform_order_id: String,
+    },
+    FakUnspentEncumbranceReleased {
+        platform_order_id: String,
+    },
+    CallerCancellationEncumbranceReleased {
+        platform_order_id: String,
+    },
+    GtdExpirationEncumbranceReleased {
+        platform_order_id: String,
+        encoded_expires_at_utc_ms: i64,
+    },
+    VenueDustEncumbranceReleased {
+        platform_order_id: String,
+    },
+    MarketResolutionEncumbranceReleased {
+        resolution_event_id: String,
+        platform_order_id: String,
+    },
+    FillFinalityEconomicApplied {
+        trade_id: String,
+        path_ordinal: u32,
+    },
+    FillFinalityUnappliedFailureReleased {
+        trade_id: String,
+        path_ordinal: u32,
+    },
+    FillFinalityCompensationApplied {
+        trade_id: String,
+        path_ordinal: u32,
+    },
+    MakerRebateAccrualFinalized,
+    TakerRebateAccrualApplied {
+        trade_id: String,
+    },
+    MakerRebateDayFinalized {
+        attribution_day_utc_ms: i64,
+    },
+    TakerRebateDayFinalized {
+        attribution_day_utc_ms: i64,
+    },
+    MakerRebatePaid {
+        attribution_day_utc_ms: i64,
+    },
+    TakerRebatePaid {
+        attribution_day_utc_ms: i64,
+    },
+    AutoRedeemApplied {
+        resolution_event_id: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformAccountDeltaV2 {
+    pub account_instance_key: AccountInstanceKeyV1,
+    pub account_transition_seq: u64,
+    pub reason: PlatformAccountDeltaReasonV2,
+    pub condition_id: Option<ConditionId>,
+    pub platform_effective_at_utc_ms: i64,
+    pub balance_delta: PlatformAccountBalanceDeltaV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MarketEnrollmentIdentityV1 {
+    pub enrollment_id: String,
+    pub enrollment_sha256: Sha256Hex,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MarketEnrollmentV1 {
+    pub schema_version: String,
+    pub enrollment_id: String,
+    pub enrollment_sha256: Sha256Hex,
+    pub enrollment_request_id: String,
+    pub account_instance_key: AccountInstanceKeyV1,
+    pub opening_anchor_id: String,
+    pub opening_anchor_sha256: Sha256Hex,
+    pub previous_enrollment: Option<MarketEnrollmentIdentityV1>,
+    pub market: MarketIdentityV2,
+    pub assets: [AssetIdentityV1; 2],
+    pub enrollment_chain_length: u64,
+    pub enrollment_chain_sha256: Sha256Hex,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarketEnrollmentV2 {
+    pub enrollment_request_id: String,
+    pub enrollment_sequence: u64,
+    pub market: MarketIdentityV2,
+    pub assets: [AssetIdentityV1; 2],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryCursorV2 {
+    pub root_sequence: u64,
+    pub next_offset: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SimulatedOrderKnownStatusV2 {
+    Live,
+    Matched,
+    VenueDustTerminal,
+    CanceledMarketResolved,
+    Canceled,
+    Expired,
+    Delayed,
+    Unmatched,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimulatedOrderStatusV2 {
+    pub raw: String,
+    pub known: Option<SimulatedOrderKnownStatusV2>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SimulatedTradeKnownStatusV2 {
+    MatchedNotBroadcasted,
+    Matched,
+    Mined,
+    Confirmed,
+    Retrying,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimulatedTradeStatusV2 {
+    pub raw: String,
+    pub known: Option<SimulatedTradeKnownStatusV2>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OrderKindProjectionV2 {
+    Gtc,
+    Gtd,
+    Fok,
+    Fak,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SimOrderTerminalReasonV2 {
+    FakCompleted,
+    VenueDustTerminal,
+    MarketResolvedCanceled,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "measurement", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum OrderQuantityProjectionV2 {
+    Base {
+        accepted_base_quantity_shares: ExactDecimal,
+        matched_base_quantity_shares: ExactDecimal,
+        active_unfilled_base_quantity_shares: ExactDecimal,
+        venue_dust_closed_base_quantity_shares: ExactDecimal,
+        market_resolved_canceled_base_quantity_shares: ExactDecimal,
+        canceled_base_quantity_shares: ExactDecimal,
+        expired_base_quantity_shares: ExactDecimal,
+        accepted_quote_amount_pusd: ExactDecimal,
+        matched_quote_amount_pusd: ExactDecimal,
+        open_encumbered_quote_amount_pusd: ExactDecimal,
+        venue_dust_released_quote_amount_pusd: ExactDecimal,
+        market_resolved_released_quote_amount_pusd: ExactDecimal,
+        released_price_improvement_quote_amount_pusd: ExactDecimal,
+        canceled_released_quote_amount_pusd: ExactDecimal,
+        expired_released_quote_amount_pusd: ExactDecimal,
+    },
+    QuoteBudget {
+        accepted_quote_budget_pusd: ExactDecimal,
+        matched_quote_amount_pusd: ExactDecimal,
+        released_or_unspent_quote_amount_pusd: ExactDecimal,
+        actual_matched_base_quantity_shares: ExactDecimal,
+        sdk_taker_amount_audit_base_quantity_shares: ExactDecimal,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrderProjectionV2 {
+    pub platform_order_id: String,
+    pub global_request_id: String,
+    pub item_id: String,
+    pub condition_id: ConditionId,
+    pub token_id: TokenId,
+    pub created_at_utc_ms: i64,
+    pub kind: OrderKindProjectionV2,
+    pub expires_at_utc_ms: Option<i64>,
+    pub source_price_pusd_per_share: ExactDecimal,
+    pub status: SimulatedOrderStatusV2,
+    pub terminal_reason: Option<SimOrderTerminalReasonV2>,
+    pub quantities: OrderQuantityProjectionV2,
+    pub immediate_taker_fee_encumbered_pusd: ExactDecimal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TradeLiquidityRoleV2 {
+    Taker,
+    MakerInferred,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TradeEconomicDispositionV2 {
+    PendingUnapplied,
+    PendingApplied,
+    FinalSuccess,
+    FinalFailureUnapplied,
+    FinalFailureCompensated,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TradeProjectionV2 {
+    pub trade_id: String,
+    pub platform_order_id: String,
+    pub condition_id: ConditionId,
+    pub token_id: TokenId,
+    pub matched_at_utc_ms: i64,
+    pub status: SimulatedTradeStatusV2,
+    pub liquidity_role: TradeLiquidityRoleV2,
+    pub source_price_pusd_per_share: ExactDecimal,
+    pub base_quantity_shares: ExactDecimal,
+    pub quote_amount_pusd: ExactDecimal,
+    pub immediate_taker_fee_pusd: ExactDecimal,
+    pub economic_disposition: TradeEconomicDispositionV2,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QueryOutOfRetentionV2 {
+    OrderHistory {
+        retained_from_utc_ms: i64,
+    },
+    TradeHistory {
+        retained_from_utc_ms: i64,
+    },
+    RootSnapshot {
+        requested_root_sequence: u64,
+        earliest_retained_root_sequence: u64,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OrderQueryResultV2 {
+    Found(Box<OrderProjectionV2>),
+    NotFound,
+    OutOfRetention(QueryOutOfRetentionV2),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrdersPageV2 {
+    pub root_sequence: u64,
+    pub items: Vec<OrderProjectionV2>,
+    pub next_cursor: Option<QueryCursorV2>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TradesPageV2 {
+    pub root_sequence: u64,
+    pub items: Vec<TradeProjectionV2>,
+    pub next_cursor: Option<QueryCursorV2>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OrdersQueryResultV2 {
+    Page(OrdersPageV2),
+    InvalidCursor,
+    OutOfRetention(QueryOutOfRetentionV2),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TradesQueryResultV2 {
+    Page(TradesPageV2),
+    InvalidCursor,
+    OutOfRetention(QueryOutOfRetentionV2),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMethodV2 {
+    PostOrder,
+    PostOrders,
+    CancelOrder,
+    CancelOrders,
+    CancelAllOrders,
+    Order,
+    Orders,
+    Trades,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectResponseMetadataV2 {
+    pub global_request_id: String,
+    pub caller_correlation_id: Option<String>,
+    pub method: ExecutionMethodV2,
+    pub platform_responded_at_utc_ms: i64,
+    pub response_received_at_utc_ms: i64,
+    pub private_feedback_sequence: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubmissionRejectedReasonV2 {
+    EndAtReached,
+    ExplicitTradingStateVeto,
+    MarketNotInScenario,
+    AssetNotInMarket,
+    OrderEncodingRejected,
+    BelowMinimumShares,
+    PostOnlyWouldTake,
+    BelowMarketableLimitBuyMinimumPrincipal,
+    GtdExpirationTooSoon,
+    InsufficientAvailablePusd,
+    FokNotFullyFilled,
+    FakNoMatch,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubmissionEvidenceUnknownReasonV2 {
+    Preloading,
+    TargetAssetNotFresh(MarketDataQuality),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubmissionFillV2 {
+    pub trade_id: String,
+    pub source_price_pusd_per_share: ExactDecimal,
+    pub base_quantity_shares: ExactDecimal,
+    pub quote_amount_pusd: ExactDecimal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "measurement", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum SubmissionMeasurementV2 {
+    Base {
+        accepted_base_quantity_shares: ExactDecimal,
+        matched_base_quantity_shares: ExactDecimal,
+        open_base_quantity_shares: ExactDecimal,
+        venue_dust_closed_base_quantity_shares: ExactDecimal,
+        order_type_terminated_base_quantity_shares: ExactDecimal,
+        accepted_quote_amount_pusd: ExactDecimal,
+        matched_quote_amount_pusd: ExactDecimal,
+        open_encumbered_quote_amount_pusd: ExactDecimal,
+        venue_dust_released_quote_amount_pusd: ExactDecimal,
+        released_price_improvement_quote_amount_pusd: ExactDecimal,
+        immediate_taker_fee_encumbered_pusd: ExactDecimal,
+    },
+    QuoteBudget {
+        accepted_quote_budget_pusd: ExactDecimal,
+        used_quote_amount_pusd: ExactDecimal,
+        released_or_unspent_quote_amount_pusd: ExactDecimal,
+        actual_matched_base_quantity_shares: ExactDecimal,
+        sdk_taker_amount_audit_base_quantity_shares: ExactDecimal,
+        immediate_taker_fee_encumbered_pusd: ExactDecimal,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcceptedSubmissionItemV2 {
+    pub platform_order_id: String,
+    pub platform_order_status: SimulatedOrderStatusV2,
+    pub fills: Vec<SubmissionFillV2>,
+    pub terminal_reason: Option<SimOrderTerminalReasonV2>,
+    pub measurement: SubmissionMeasurementV2,
+    pub account_transition_sequences: Vec<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubmissionItemOutcomeV2 {
+    Accepted(AcceptedSubmissionItemV2),
+    RejectedNoEffect(SubmissionRejectedReasonV2),
+    EvidenceUnknownNoEffect(SubmissionEvidenceUnknownReasonV2),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubmissionResponseItemV2 {
+    pub item_id: String,
+    pub batch_item_ordinal: u16,
+    pub condition_id: ConditionId,
+    pub token_id: TokenId,
+    pub effective_processing_at_utc_ms: i64,
+    pub outcome: SubmissionItemOutcomeV2,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelInputItemRefV2 {
+    pub item_id: String,
+    pub batch_item_ordinal: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CanceledTargetMeasurementV2 {
+    pub canceled_base_quantity_shares: ExactDecimal,
+    pub released_quote_amount_pusd: ExactDecimal,
+    pub account_transition_seq: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CancelNotCanceledReasonV2 {
+    NotFoundOrNotOwned,
+    NoCancellableRemainder,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CancelTargetOutcomeV2 {
+    Canceled(CanceledTargetMeasurementV2),
+    NotCanceledNoEffect(CancelNotCanceledReasonV2),
+    EvidenceUnknownNoEffect,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelTargetResponseV2 {
+    pub target_ordinal: u64,
+    pub platform_order_id: String,
+    pub input_item_refs: Vec<CancelInputItemRefV2>,
+    pub effective_processing_at_utc_ms: i64,
+    pub outcome: CancelTargetOutcomeV2,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostOrderDirectResponseV2 {
+    pub metadata: DirectResponseMetadataV2,
+    pub item: SubmissionResponseItemV2,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostOrdersDirectResponseV2 {
+    pub metadata: DirectResponseMetadataV2,
+    pub items: Vec<SubmissionResponseItemV2>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelOrderDirectResponseV2 {
+    pub metadata: DirectResponseMetadataV2,
+    pub target: CancelTargetResponseV2,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelOrdersDirectResponseV2 {
+    pub metadata: DirectResponseMetadataV2,
+    pub targets: Vec<CancelTargetResponseV2>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelAllOrdersDirectResponseV2 {
+    pub metadata: DirectResponseMetadataV2,
+    pub targets: Vec<CancelTargetResponseV2>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrderDirectResponseV2 {
+    pub metadata: DirectResponseMetadataV2,
+    pub result: OrderQueryResultV2,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrdersDirectResponseV2 {
+    pub metadata: DirectResponseMetadataV2,
+    pub result: OrdersQueryResultV2,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TradesDirectResponseV2 {
+    pub metadata: DirectResponseMetadataV2,
+    pub result: TradesQueryResultV2,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifecycleFeedbackMetadataV2 {
+    pub account_instance_key: AccountInstanceKeyV1,
+    pub platform_event_at_utc_ms: i64,
+    pub feedback_received_at_utc_ms: i64,
+    pub private_feedback_sequence: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OrderLifecycleEventV2 {
+    OrderAccepted {
+        status: SimulatedOrderStatusV2,
+        account_delta: PlatformAccountDeltaV2,
+    },
+    FakUnspentReleased {
+        released_quote_amount_pusd: ExactDecimal,
+        account_delta: PlatformAccountDeltaV2,
+    },
+    VenueDustTerminal {
+        closed_base_quantity_shares: ExactDecimal,
+        released_quote_amount_pusd: ExactDecimal,
+        account_delta: Option<PlatformAccountDeltaV2>,
+    },
+    MarketResolvedCanceled {
+        resolution_event_id: String,
+        canceled_base_quantity_shares: ExactDecimal,
+        released_quote_amount_pusd: ExactDecimal,
+        account_delta: Option<PlatformAccountDeltaV2>,
+    },
+    CallerCanceled {
+        canceled_base_quantity_shares: ExactDecimal,
+        released_quote_amount_pusd: ExactDecimal,
+        account_delta: Option<PlatformAccountDeltaV2>,
+    },
+    GtdExpired {
+        encoded_expires_at_utc_ms: i64,
+        expired_base_quantity_shares: ExactDecimal,
+        released_quote_amount_pusd: ExactDecimal,
+        account_delta: Option<PlatformAccountDeltaV2>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrderLifecycleFeedbackV2 {
+    pub metadata: LifecycleFeedbackMetadataV2,
+    pub platform_order_id: String,
+    pub condition_id: ConditionId,
+    pub token_id: TokenId,
+    pub event: OrderLifecycleEventV2,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TradeLifecycleFeedbackV2 {
+    pub metadata: LifecycleFeedbackMetadataV2,
+    pub trade_id: String,
+    pub platform_order_id: String,
+    pub condition_id: ConditionId,
+    pub token_id: TokenId,
+    pub status: SimulatedTradeStatusV2,
+    pub economic_disposition: TradeEconomicDispositionV2,
+    pub liquidity_role: TradeLiquidityRoleV2,
+    pub source_price_pusd_per_share: ExactDecimal,
+    pub base_quantity_shares: ExactDecimal,
+    pub quote_amount_pusd: ExactDecimal,
+    pub immediate_taker_fee_pusd: ExactDecimal,
+    pub economic_application_account_transition_seq: Option<u64>,
+    pub account_delta: Option<PlatformAccountDeltaV2>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MakerRebateAccrualStatusV2 {
+    Calculated,
+    ZeroNoEligibleMakerFill,
+    UnknownIncomplete,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MakerRebateFillContributionV2 {
+    pub trade_id: String,
+    pub matched_at_utc_ms: i64,
+    pub attribution_day_start_utc_ms: i64,
+    pub base_quantity_shares: ExactDecimal,
+    pub price_pusd_per_share: ExactDecimal,
+    pub maker_fee_equivalent_pusd: ExactDecimal,
+    pub rebate_rate: ExactDecimal,
+    pub rebate_contribution_pusd: ExactDecimal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SettlementLifecycleEventV2 {
+    MakerRebateAccrualFinalized {
+        condition_id: ConditionId,
+        status: MakerRebateAccrualStatusV2,
+        contributions: Vec<MakerRebateFillContributionV2>,
+        accrual_pusd: ExactDecimal,
+        account_delta: Option<PlatformAccountDeltaV2>,
+    },
+    TakerRebateAccrualApplied {
+        trade_id: String,
+        condition_id: ConditionId,
+        matched_at_utc_ms: i64,
+        attribution_day_start_utc_ms: i64,
+        actual_taker_fee_pusd: ExactDecimal,
+        rebate_rate: ExactDecimal,
+        accrual_pusd: ExactDecimal,
+        account_delta: PlatformAccountDeltaV2,
+    },
+    MakerRebateDayFinalized {
+        attribution_day_start_utc_ms: i64,
+        accrual_pusd: ExactDecimal,
+        payable_pusd: ExactDecimal,
+        locked_remainder_pusd: ExactDecimal,
+        account_delta: Option<PlatformAccountDeltaV2>,
+    },
+    TakerRebateDayFinalized {
+        attribution_day_start_utc_ms: i64,
+        accrual_pusd: ExactDecimal,
+        payable_pusd: ExactDecimal,
+        locked_remainder_pusd: ExactDecimal,
+        account_delta: Option<PlatformAccountDeltaV2>,
+    },
+    MakerRebatePaid {
+        attribution_day_start_utc_ms: i64,
+        paid_pusd: ExactDecimal,
+        account_delta: PlatformAccountDeltaV2,
+    },
+    TakerRebatePaid {
+        attribution_day_start_utc_ms: i64,
+        paid_pusd: ExactDecimal,
+        account_delta: PlatformAccountDeltaV2,
+    },
+    AutoRedeemApplied {
+        condition_id: ConditionId,
+        resolution_event_id: String,
+        resolution_source_event_at_utc_ms: i64,
+        resolution: MarketResolutionTerminalV3,
+        redeemed_outcome_balances: Vec<PlatformOutcomeBalanceV1>,
+        redeemed_pusd: ExactDecimal,
+        account_delta: Option<PlatformAccountDeltaV2>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettlementLifecycleFeedbackV2 {
+    pub metadata: LifecycleFeedbackMetadataV2,
+    pub event: SettlementLifecycleEventV2,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]

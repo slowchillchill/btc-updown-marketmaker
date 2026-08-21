@@ -1897,12 +1897,14 @@ impl<K: Kind> Client<Authenticated<K>> {
     /// Posts multiple signed orders to the orderbook in a single request.
     ///
     /// This is the batch version of [`Self::post_order`], allowing efficient
-    /// submission of multiple orders at once. All orders are validated and
-    /// processed atomically.
+    /// submission of multiple orders at once. Orders are processed in parallel
+    /// and returned as item-level results; one rejected item does not roll back
+    /// successfully processed items.
     ///
     /// # Errors
     ///
-    /// Returns an error if any order fails validation or the request fails.
+    /// Returns an error if the request as a whole fails. Individual order
+    /// failures are returned in the corresponding [`PostOrderResponse`].
     pub async fn post_orders(&self, orders: Vec<SignedOrder>) -> Result<Vec<PostOrderResponse>> {
         let defer_exec: Vec<bool> = orders
             .iter()

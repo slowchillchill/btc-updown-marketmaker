@@ -56,7 +56,15 @@ Polymarket 当前依赖固定为
 `third_party/polymarket_client_sdk_v2-0.7.0-p1` 一个补丁。
 未经用户批准，不得改用 Polymarket 原始 REST、手动签名、自建 SDK 或影子实现。
 
-相对 crates.io `0.7.0`，`0.7.0-p1` 的生产 `src/` 差异横跨四个文件：
+相对 crates.io `0.7.0`，`0.7.0-p1` 的生产 `src/` 共有六个差异文件：其中五个包含可执行
+行为补丁，另一个只修正文档注释：
+
+- `clob/client.rs`：只把 `post_orders` 的批量语义注释修正为并行处理和逐项结果，明确单项
+  失败不回滚成功项；此项不改变方法签名、方法体、请求、响应解析或任何运行行为。
+- `clob/order_builder.rs`：增加公共无状态的 Decimal BUY 价格校验与数量编码原语，保留限价单
+  的严格小数位、市场单先截断价格、价格范围、tick 对齐、中间数量截断和最终 6 位数量量化，
+  并由既有订单构造器复用同一路径。此项不增加 `Client`、网络、签名、钱包或提交能力；
+  `data-collect` 当前没有订单构造器或该原语调用点，现有采集调用行为和启用特性不变。
 
 - `clob/ws/types/response.rs`：保留 `book`、`price_change`、`tick_size_change`、
   `last_trade_price`、`best_bid_ask`、`new_market`、`market_resolved` 的当前
@@ -95,10 +103,10 @@ Polymarket 当前依赖固定为
 也不得把六类数据源降级成不透明宽表。
 
 模拟器低频平台规则不属于当前采集 schema：CLOB `min_order_size`、完整
-`feeSchedule`、`itode` 由 `sim-system` 面向当前平台时点的新运行在首个业务请求前通过固定的
-官方公开 HTTPS 窄加载器查询并冻结；历史运行只绑定适用时点合法的 `HISTORICAL_AS_OF`
-快照，不得查询当前平台回填。当前查询响应缺少必需字段、字段非法、身份不一致或来源冲突时，
-由模拟器事项失败即关闭。首版未消费的 `oas` 只进入未消费字段清单，也不属于采集任务。
+`feeSchedule`、`itode` 由 `sim-system` 进程在首个会话和业务请求前，通过固定官方公开 HTTPS
+窄加载器对一个参考市场同步一次并冻结；进程内全部会话共享，历史进程只绑定适用既有快照，
+不得查询当前平台回填。当前查询响应缺少必需字段、字段非法、身份不一致或来源冲突时，由
+模拟器事项整体失败即关闭。首版不消费 `oas`，它也不属于采集任务。
 该模拟器例外不授权 `data-collect` 使用原始 REST，且不改变本节前述官方 Rust SDK 合同。
 当前 metadata v5 没有这些规则专用列，也不为此新增。其
 `source_evidence_payload_json` 中的 `orderMinSize`、`feesEnabled`、旧手续费及其他同名或
@@ -142,9 +150,10 @@ Polymarket 当前依赖固定为
 的类型化专用列。逐键反事实如下；“估算压缩字节”只表示从这些载荷移除单键后以相同 ZSTD-3
 条件重压的近似差额，不能相加后当作可安全回收空间：
 
-语义上必须再分三类：`orderMinSize`、`feesEnabled`、`negRisk` 是与冷启动快照直接对应但
-来源时点不同的三个重叠候选；`orderPriceMinTickSize` 是只供上游规范事件链建立初始 tick
-的采集证据，不是冷启动规则。`makerBaseFee`、`takerBaseFee`、
+语义上必须再分三类：`feesEnabled` 与参考市场快照直接对应但来源时点不同；`orderMinSize`
+名称和值可能与权威 CLOB `mos` 重叠但不能替代；`negRisk` 没有首版模拟器消费者。
+`orderPriceMinTickSize` 是只供上游规范事件链建立初始 tick 的采集证据，不是冷启动规则。
+`makerBaseFee`、`takerBaseFee`、
 `makerRebatesFeeShareBps` 只是名称或主题近似，不能替代当前手续费/返佣参数；
 `secondsDelay`、`enableOrderBook`、`rfqEnabled` 不属于本次可执行配置，只为完整说明载荷中的
 近似市场规则键及空间上限而纳入反事实。不得把十键合计误写成十个真正重复字段。
@@ -153,12 +162,12 @@ Polymarket 当前依赖固定为
 | --- | --- | ---: | ---: | --- |
 | `orderMinSize` | 1,167 项均为字符串 `"5"` | 22,173 | 1,070 | 名称和值可能与 `min_order_size_shares` 重叠，但不是权威 CLOB `mos`；保留原始证据 |
 | `orderPriceMinTickSize` | 1,158 项为 `"0.01"`，9 项为 `"0.001"` | 36,186 | 2,054 | 采集时点的初始 tick 源证据；须经 `data-pipeline` 进入规范事件链，不属于模拟器冷启动规则；保留原始证据 |
-| `feesEnabled` | 1,167 项均为 `true` | 22,173 | 1,245 | 是冷启动需要交叉绑定的 Gamma 值，但采集时点不同；保留原始证据 |
+| `feesEnabled` | 1,167 项均为 `true` | 22,173 | 1,245 | 与参考快照同名但来源时点不同，不能替代或跨模块交叉校验；保留原始证据 |
 | `makerBaseFee` | 1,167 项均为 `1000` | 23,340 | 797 | 旧 Gamma 手续费键，不等于 CLOB V2 `fd` 或完整 `feeSchedule`；不纳入可执行配置，保留证据 |
 | `takerBaseFee` | 1,167 项均为 `1000` | 23,340 | 1,152 | 旧 Gamma 手续费键，不等于 CLOB V2 `fd` 或完整 `feeSchedule`；不纳入可执行配置，保留证据 |
 | `makerRebatesFeeShareBps` | 1,167 项均为 `10000` | 37,344 | 2,940 | 名称近似返佣，但不是当前 `feeSchedule.rebateRate`；不得替代或删除 |
 | `secondsDelay` | 1,167 项均为 `null` | 23,340 | 1,852 | 体育/赛事秒级延迟字段，不是 `itode`；本项目不消费，仍保留原始证据 |
-| `negRisk` | 1,167 项均为 `false` | 18,672 | 875 | 与冷启动 Gamma `negRisk` 同名但采集时点不同；CLOB `nr` 仅在响应自然提供时作诊断，不作为规则来源；保留原始证据 |
+| `negRisk` | 1,167 项均为 `false` | 18,672 | 875 | 首版模拟器不消费，也不进入规则快照或诊断门；仍保留采集原始证据 |
 | `enableOrderBook` | 1,167 项均为 `true` | 26,841 | 1,095 | 市场接单/生命周期事实，不是静态模拟规则；保留原始证据 |
 | `rfqEnabled` | 1,167 项均为 `false` | 22,173 | 1,118 | RFQ 不在首版范围，且该值仍是采集时点证据；保留原始证据 |
 | **十键合计反事实** | 1,167 个载荷 | **255,582** | **约 9,317** | 需改写载荷及其 SHA-256，安全可删除量仍为 **0 字节** |

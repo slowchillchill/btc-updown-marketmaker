@@ -4,6 +4,7 @@ members = [
     "data-collect",
     "data-pipeline/core",
     "data-pipeline/training",
+    "sim-system",
 ]
 exclude = ["third_party/polymarket_client_sdk_v2-0.7.0-p1"]
 resolver = "3"
