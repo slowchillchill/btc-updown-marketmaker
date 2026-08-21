@@ -1,4 +1,4 @@
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::Path;
@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 use crate::runtime_v2::{BusinessInputV2, LoggedBusinessInputV2, RunDurabilityRoleV2, RunOpenedV2};
 
 pub(crate) const SIM_EVENT_LOG_FILE_NAME_V2: &str = "sim-event-log-v2.jsonl";
+
+pub(crate) fn delete_retained_run_log_v2(path: &Path) -> Result<(), SimEventLogErrorV2> {
+    fs::remove_file(path).map_err(|error| io_error("删除已关闭运行的单一事件日志", error))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(tag = "kind", content = "body", rename_all = "SCREAMING_SNAKE_CASE")]

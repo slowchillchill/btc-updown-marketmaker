@@ -43,7 +43,7 @@ use crate::resource::{BusinessResourceDeltaV2, ResourceQuantityV1};
 use crate::runtime_v2::{
     AcceptedClosedMarketBucketV2, BusinessInputV2, BusinessRequestV2,
     DurableMarketBucketReferenceV2, LoggedBusinessInputV2, PlatformPrefixAdvanceV2,
-    RunDurabilityRoleV2, RunOpenedV2, SessionSpecV3, TrustedDecisionCutoffV2,
+    RetentionAdvanceV2, RunDurabilityRoleV2, RunOpenedV2, SessionSpecV3, TrustedDecisionCutoffV2,
 };
 use crate::scenario::{PlatformMarketV1, SealedPlatformScenarioV1};
 use crate::session::MarketEnrollmentRequestV1;
@@ -348,6 +348,57 @@ impl QueryStateV2 {
             .current_revision
             .checked_add(1)
             .expect("V2 查询可观察修订不得溢出");
+    }
+
+    fn advance_retention(
+        &mut self,
+        advance: RetentionAdvanceV2,
+    ) -> Result<BusinessResourceDeltaV2, SimRunActorErrorV2> {
+        let advances_optional_floor = |current: Option<i64>, next: Option<i64>| match current {
+            None => true,
+            Some(current) => next.is_some_and(|next| next >= current),
+        };
+        if advance.earliest_retained_root_sequence < self.earliest_retained_root_sequence
+            || advance.earliest_retained_root_sequence > self.current_revision
+            || !advances_optional_floor(
+                self.order_history_retained_from_utc_ms,
+                advance.order_history_retained_from_utc_ms,
+            )
+            || !advances_optional_floor(
+                self.trade_history_retained_from_utc_ms,
+                advance.trade_history_retained_from_utc_ms,
+            )
+        {
+            return Err(SimRunActorErrorV2::InvalidRetentionAdvance);
+        }
+
+        let mut resources = BusinessResourceDeltaV2::default();
+        while self
+            .order_roots
+            .first_key_value()
+            .is_some_and(|((root_sequence, _), _)| {
+                *root_sequence < advance.earliest_retained_root_sequence
+            })
+        {
+            let (_, root) = self.order_roots.pop_first().expect("待释放订单查询根存在");
+            resources.removed_records += root.resources.records;
+            resources.removed_bytes += root.resources.bytes;
+        }
+        while self
+            .trade_roots
+            .first_key_value()
+            .is_some_and(|((root_sequence, _), _)| {
+                *root_sequence < advance.earliest_retained_root_sequence
+            })
+        {
+            let (_, root) = self.trade_roots.pop_first().expect("待释放成交查询根存在");
+            resources.removed_records += root.resources.records;
+            resources.removed_bytes += root.resources.bytes;
+        }
+        self.earliest_retained_root_sequence = advance.earliest_retained_root_sequence;
+        self.order_history_retained_from_utc_ms = advance.order_history_retained_from_utc_ms;
+        self.trade_history_retained_from_utc_ms = advance.trade_history_retained_from_utc_ms;
+        Ok(resources)
     }
 }
 
@@ -684,6 +735,7 @@ pub(crate) enum BusinessReducerInputV2<'a> {
         rules: &'a PlatformRuleSnapshotV3,
         finality_policy: &'a TradeFinalityPolicyV2,
     },
+    RetentionAdvance(RetentionAdvanceV2),
 }
 
 pub(crate) enum BusinessReducerOutputV2 {
@@ -693,6 +745,7 @@ pub(crate) enum BusinessReducerOutputV2 {
     RequestRegistration(MutationRequestReceiptV2),
     MutationAction(Option<MutationActionTransitionEffectsV2>),
     LogicalDrive(LogicalDriveOutputV2),
+    RetentionAdvanced,
 }
 
 fn execution_method_v2(method: MutationMethodV2) -> ExecutionMethodV2 {
@@ -932,6 +985,7 @@ fn finalize_projection_batch_v2(
             CommittedBusinessOutputV2::RequestRegistration(result)
         }
         BusinessReducerOutputV2::MutationAction(None) => CommittedBusinessOutputV2::Driven,
+        BusinessReducerOutputV2::RetentionAdvanced => CommittedBusinessOutputV2::Driven,
     };
     if account_opening.is_none() && market_enrollment.is_none() && drafts.is_empty() {
         return Ok((state, committed, None));
@@ -1082,6 +1136,12 @@ fn reduce_actor_input_v2(
                 rules,
                 finality_policy,
             },
+        ),
+        BusinessInputV2::RetentionAdvance(advance) => reduce_business_input_v2(
+            opened,
+            initial_market_directory,
+            state,
+            BusinessReducerInputV2::RetentionAdvance(*advance),
         ),
         BusinessInputV2::ClosedMarketBucket(bucket) => drive_business_input_at_v2(
             state,
@@ -1584,6 +1644,13 @@ pub(crate) struct UnpublishedRunArtifactCandidateV2 {
     accepted_input_count: u64,
 }
 
+impl UnpublishedRunArtifactCandidateV2 {
+    pub(crate) fn delete_after_retention(&self) -> Result<(), SimRunActorErrorV2> {
+        crate::event_log::delete_retained_run_log_v2(&self.log_path)
+            .map_err(SimRunActorErrorV2::Log)
+    }
+}
+
 pub(crate) struct SimRunActorV2 {
     opened: RunOpenedV2,
     _rule_snapshot: Arc<SealedProcessRuleSnapshotV3>,
@@ -1618,6 +1685,7 @@ pub(crate) enum SimRunActorErrorV2 {
     MarketEnrollmentDirectory(SessionMarketDirectoryErrorV1),
     MarketEnrollmentSequenceOverflow,
     InvalidBusinessRequest(&'static str),
+    InvalidRetentionAdvance,
     RequestTimeOverflow,
     MissingCurrentTick(String),
     HiddenPlatformReplayForbidden,
@@ -1664,6 +1732,9 @@ impl std::fmt::Display for SimRunActorErrorV2 {
             }
             Self::MarketEnrollmentSequenceOverflow => write!(formatter, "市场登记序号溢出"),
             Self::InvalidBusinessRequest(message) => write!(formatter, "业务请求非法：{message}"),
+            Self::InvalidRetentionAdvance => {
+                write!(formatter, "保留水位必须单调且不得越过当前查询修订")
+            }
             Self::RequestTimeOverflow => write!(formatter, "请求逻辑时点溢出"),
             Self::MissingCurrentTick(token_id) => {
                 write!(formatter, "活动资产缺少当前 tick：{token_id}")
@@ -1740,6 +1811,9 @@ where
         }
         LoggedBusinessInputV2::PlatformPrefixAdvance(advance) => {
             BusinessInputV2::PlatformPrefixAdvance(advance)
+        }
+        LoggedBusinessInputV2::RetentionAdvance(advance) => {
+            BusinessInputV2::RetentionAdvance(advance)
         }
         LoggedBusinessInputV2::ClosedMarketBucket(bucket) => {
             let events = read_bucket(&bucket.reference)?;
@@ -2217,6 +2291,20 @@ impl SimRunActorV2 {
         }
         let Some(CommittedBusinessOutputV2::Driven) = committed.outputs.pop() else {
             unreachable!("已封口市场桶归约只能返回驱动完成")
+        };
+        Ok(())
+    }
+
+    pub(crate) fn advance_retention(
+        &mut self,
+        advance: RetentionAdvanceV2,
+    ) -> Result<(), SimRunActorErrorV2> {
+        let mut committed = self.commit_group(vec![BusinessInputV2::RetentionAdvance(advance)])?;
+        if let Some(error) = committed.unaccepted {
+            return Err(error);
+        }
+        let Some(CommittedBusinessOutputV2::Driven) = committed.outputs.pop() else {
+            unreachable!("保留水位归约只能返回推进完成")
         };
         Ok(())
     }
@@ -4774,6 +4862,24 @@ fn reduce_business_input_v2(
             )?;
             state = reduced;
             BusinessReducerOutputV2::MutationAction(effect)
+        }
+        BusinessReducerInputV2::RetentionAdvance(advance) => {
+            let Some(session) = state.session.as_mut() else {
+                return Err(unaccepted_business_input_v2(
+                    state,
+                    SimRunActorErrorV2::SessionNotCreated,
+                ));
+            };
+            let resources = match session.query_state.advance_retention(advance) {
+                Ok(resources) => resources,
+                Err(error) => return Err(unaccepted_business_input_v2(state, error)),
+            };
+            state.business_resources = resources.apply_to(state.business_resources).ok_or(
+                BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(
+                    MatchingStateErrorV1::QueuePredecessorConflict,
+                )),
+            )?;
+            BusinessReducerOutputV2::RetentionAdvanced
         }
         logical @ (BusinessReducerInputV2::PlatformPrefixAdvance { .. }
         | BusinessReducerInputV2::ClosedMarketBucket { .. }) => {
@@ -13080,6 +13186,249 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn retention_advance_releases_query_roots_and_replays_the_same_watermarks() {
+        let (directory, mut actor) =
+            active_market_actor(SimCallerRoleV1::Paper, "run-retention-release-v2").await;
+        let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
+
+        let query_id = "retention-empty-orders";
+        let query_arrival_at_utc_ms = 1_100;
+        let query_delay_ms = actor._latency_profile.sample_delay_ms(
+            actor
+                .state
+                .as_ref()
+                .and_then(|state| state.session.as_ref())
+                .expect("保留测试会话存在")
+                .session_seed
+                .0
+                .as_bytes(),
+            query_id,
+            DelaySampleDomainV1::RequestOutbound,
+        );
+        actor
+            .register_request(
+                request_cutoff(
+                    query_arrival_at_utc_ms
+                        - i64::try_from(query_delay_ms).expect("查询出站时延可表示"),
+                ),
+                BusinessRequestV2::Orders(OrdersRequestV2 {
+                    context: RequestContextV2 {
+                        global_request_id: query_id.to_owned(),
+                        caller_correlation_id: None,
+                    },
+                    filter: OrdersFilterV1::default(),
+                    cursor: None,
+                }),
+            )
+            .expect("登记保留测试空订单查询");
+        let initial_events: Arc<[ExecutionMarketEventV3]> =
+            Arc::from(decoded_initial_market_events("2"));
+        let bucket_reference = DurableMarketBucketReferenceV2 {
+            path: MarketEventPathV1::PublicVisibility,
+            bucket_at_utc_ms: 1_100,
+            start_index_position: 0,
+            next_index_position: 2,
+            closure: crate::market::MillisecondBucketClosureV1::NextEventAt(1_200),
+        };
+        actor
+            .drive_closed_market_bucket(AcceptedClosedMarketBucketV2 {
+                reference: bucket_reference.clone(),
+                events: Arc::clone(&initial_events),
+            })
+            .expect("首个真实公开桶同时形成修订零查询根");
+
+        let post_id = "retention-revision-post";
+        let post_arrival_at_utc_ms = 1_200;
+        let post_delay_ms = actor._latency_profile.sample_delay_ms(
+            actor
+                .state
+                .as_ref()
+                .and_then(|state| state.session.as_ref())
+                .expect("保留测试会话存在")
+                .session_seed
+                .0
+                .as_bytes(),
+            post_id,
+            DelaySampleDomainV1::RequestOutbound,
+        );
+        actor
+            .register_request(
+                request_cutoff(
+                    post_arrival_at_utc_ms
+                        - i64::try_from(post_delay_ms).expect("提交出站时延可表示"),
+                ),
+                BusinessRequestV2::PostOrder(PostOrderRequestV2 {
+                    context: RequestContextV2 {
+                        global_request_id: post_id.to_owned(),
+                        caller_correlation_id: None,
+                    },
+                    item: post_item(
+                        "retention-revision-item",
+                        &initial_events[0].market.condition_id,
+                        &TokenId("1".to_owned()),
+                        SimBuyOrderKindV1::GtcLimit {
+                            limit_price_pusd_per_share: "0.1".parse().expect("保留测试价格"),
+                            size_shares: "20".parse().expect("保留测试数量"),
+                            post_only: true,
+                        },
+                    ),
+                }),
+            )
+            .expect("登记推进查询修订的订单");
+        let post_events: Arc<[ExecutionMarketEventV3]> =
+            Arc::from(vec![decoded_level_market_event(
+                post_arrival_at_utc_ms,
+                post_arrival_at_utc_ms + 10,
+                3,
+                "2",
+                "1.5",
+            )]);
+        let post_bucket_reference = DurableMarketBucketReferenceV2 {
+            path: MarketEventPathV1::PublicVisibility,
+            bucket_at_utc_ms: post_arrival_at_utc_ms,
+            start_index_position: 2,
+            next_index_position: 3,
+            closure: crate::market::MillisecondBucketClosureV1::NextEventAt(2_000),
+        };
+        actor
+            .drive_closed_market_bucket(AcceptedClosedMarketBucketV2 {
+                reference: post_bucket_reference.clone(),
+                events: Arc::clone(&post_events),
+            })
+            .expect("真实正文桶接纳订单并推进查询修订");
+
+        let (revision, root_resources, resources_before) = {
+            let state = actor.state.as_ref().expect("保留推进前状态存在");
+            let session = state.session.as_ref().expect("保留推进前会话存在");
+            let root = session
+                .query_state
+                .order_roots
+                .get(&(0, OrdersQueryKeyV2::from(&OrdersFilterV1::default())))
+                .expect("真实查询入口形成修订零查询根");
+            (
+                session.query_state.current_revision,
+                root.resources,
+                state.business_resources,
+            )
+        };
+        assert_eq!(revision, 1);
+        actor
+            .advance_retention(RetentionAdvanceV2 {
+                earliest_retained_root_sequence: revision,
+                order_history_retained_from_utc_ms: Some(1_000),
+                trade_history_retained_from_utc_ms: Some(1_000),
+            })
+            .expect("单调保留水位推进必须受理");
+        let state = actor.state.as_ref().expect("保留推进后状态存在");
+        let session = state.session.as_ref().expect("保留推进后会话存在");
+        assert!(session.query_state.order_roots.is_empty());
+        assert_eq!(
+            state.business_resources,
+            ResourceQuantityV1::new(
+                resources_before.records - root_resources.records,
+                resources_before.bytes - root_resources.bytes,
+            )
+        );
+        let rule_snapshot = Arc::clone(&actor._rule_snapshot);
+        let finality_policy = Arc::clone(&actor._finality_policy);
+        let scenario = Arc::clone(&actor.scenario);
+        let latency_profile = Arc::clone(&actor._latency_profile);
+        drop(actor);
+
+        let recovered = SimRunActorV2::recover_paper(
+            &path,
+            rule_snapshot,
+            finality_policy,
+            scenario,
+            latency_profile,
+            accepting_projection_port(),
+            MAX_GROUP_BYTES,
+            move |reference| {
+                if reference == &bucket_reference {
+                    Ok(Arc::clone(&initial_events))
+                } else if reference == &post_bucket_reference {
+                    Ok(Arc::clone(&post_events))
+                } else {
+                    panic!("恢复只应读取两条已记录市场桶引用：{reference:?}")
+                }
+            },
+        )
+        .expect("恢复带保留推进的 Paper 运行根");
+        let recovered_state = recovered.state.as_ref().expect("恢复后状态存在");
+        let recovered_session = recovered_state.session.as_ref().expect("恢复后会话存在");
+        assert_eq!(recovered_session.query_state.current_revision, revision);
+        assert_eq!(
+            recovered_session
+                .query_state
+                .earliest_retained_root_sequence,
+            revision
+        );
+        assert_eq!(
+            recovered_session
+                .query_state
+                .order_history_retained_from_utc_ms,
+            Some(1_000)
+        );
+        assert_eq!(
+            recovered_session
+                .query_state
+                .trade_history_retained_from_utc_ms,
+            Some(1_000)
+        );
+        assert!(recovered_session.query_state.order_roots.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn oversized_group_keeps_the_existing_typed_error_and_no_partial_business_result() {
+        let directory = tempfile::tempdir().expect("创建组上限测试目录");
+        let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
+        let rule_snapshot = successful_snapshot_v3_for_sim_tests().await;
+        let finality_policy = successful_policy_v2_for_tests();
+        let scenario = sealed_scenario();
+        let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
+        let max_group_bytes = 1_024;
+        let mut actor = SimRunActorV2::create_new(
+            &path,
+            opened(
+                "run-group-limit-v2",
+                &rule_snapshot,
+                &finality_policy,
+                &scenario,
+                &latency_profile,
+            ),
+            rule_snapshot,
+            finality_policy,
+            scenario,
+            latency_profile,
+            accepting_projection_port(),
+            max_group_bytes,
+        )
+        .expect("创建组上限运行根");
+        actor
+            .create_session(spec("run-group-limit-v2", "create-group-limit"))
+            .expect("组上限测试先形成唯一会话");
+        assert_eq!(
+            actor
+                .activate_session("x".repeat(max_group_bytes * 2))
+                .expect_err("超大控制组必须由既有日志上限拒绝"),
+            SimRunActorErrorV2::Log(SimEventLogErrorV2::GroupTooLarge {
+                limit_bytes: max_group_bytes,
+            })
+        );
+        drop(actor);
+
+        let (_, recovery) =
+            SimEventLogRecoveryV2::open(&path, max_group_bytes).expect("打开组上限日志");
+        let (recovery, first) = recovery.next_group().expect("读取唯一已受理组");
+        assert!(matches!(
+            first.as_deref(),
+            Some([LoggedBusinessInputV2::CreateSession(_)])
+        ));
+        let (_, end) = recovery.next_group().expect("超大组没有形成完整日志输入");
+        assert!(end.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn clean_run_seals_once_and_cold_replays_to_unpublished_candidate() {
         let directory = tempfile::tempdir().expect("创建 CleanRun 完成测试目录");
         let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
@@ -13209,6 +13558,14 @@ mod tests {
                 .as_ref()
                 .and_then(|markets| markets.lifecycle_phase_for_tests(&condition_id))
         );
+        let retention_revision = session.query_state.current_revision;
+        actor
+            .advance_retention(RetentionAdvanceV2 {
+                earliest_retained_root_sequence: retention_revision,
+                order_history_retained_from_utc_ms: Some(4_100),
+                trade_history_retained_from_utc_ms: Some(4_100),
+            })
+            .expect("关闭前沿同一日志推进既有保留水位");
 
         crate::event_log::reset_event_log_counts_for_tests();
         let candidate = actor
@@ -13225,7 +13582,7 @@ mod tests {
         assert_eq!(crate::event_log::event_log_counts_for_tests(), (1, 1));
         assert_eq!(candidate.opened.run_id, "run-clean-candidate-v2");
         assert_eq!(candidate.log_path, path);
-        assert_eq!(candidate.accepted_input_count, 7);
+        assert_eq!(candidate.accepted_input_count, 8);
         let session = candidate
             .state
             .session
@@ -13234,6 +13591,18 @@ mod tests {
         assert!(session.hidden_platform_frontier.sealed);
         assert!(session.public_visibility_frontier.sealed);
         assert!(session.public_markets.all_qualified_resolutions_terminal());
+        assert_eq!(
+            session.query_state.earliest_retained_root_sequence,
+            retention_revision
+        );
+        assert_eq!(
+            session.query_state.order_history_retained_from_utc_ms,
+            Some(4_100)
+        );
+        assert_eq!(
+            session.query_state.trade_history_retained_from_utc_ms,
+            Some(4_100)
+        );
         assert!(
             session
                 .hidden_platform_markets
@@ -13241,6 +13610,10 @@ mod tests {
                 .expect("训练会话保留隐藏市场状态")
                 .all_qualified_resolutions_terminal()
         );
+        candidate
+            .delete_after_retention()
+            .unwrap_or_else(|error| panic!("保留期结束后必须删除精确运行文件：{error}"));
+        assert!(!path.exists());
     }
 
     #[tokio::test(flavor = "current_thread")]

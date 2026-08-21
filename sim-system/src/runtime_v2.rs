@@ -176,6 +176,13 @@ pub(crate) struct PlatformPrefixAdvanceV2 {
     pub(crate) next_index_position: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RetentionAdvanceV2 {
+    pub(crate) earliest_retained_root_sequence: u64,
+    pub(crate) order_history_retained_from_utc_ms: Option<i64>,
+    pub(crate) trade_history_retained_from_utc_ms: Option<i64>,
+}
+
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "input", content = "body", rename_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum BusinessInputV2 {
@@ -192,6 +199,7 @@ pub(crate) enum BusinessInputV2 {
         request: BusinessRequestV2,
     },
     PlatformPrefixAdvance(PlatformPrefixAdvanceV2),
+    RetentionAdvance(RetentionAdvanceV2),
     ClosedMarketBucket(AcceptedClosedMarketBucketV2),
 }
 
@@ -211,5 +219,6 @@ pub(crate) enum LoggedBusinessInputV2 {
         request: BusinessRequestV2,
     },
     PlatformPrefixAdvance(PlatformPrefixAdvanceV2),
+    RetentionAdvance(RetentionAdvanceV2),
     ClosedMarketBucket(LoggedClosedMarketBucketV2),
 }
