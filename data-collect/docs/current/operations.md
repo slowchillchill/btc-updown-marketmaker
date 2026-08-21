@@ -4,24 +4,18 @@
 >
 > 当前执行 authority：`none`
 >
-> 当前规范来源：`plan/data-collect-plan.md`
->
-> 当前需求：`demand/data-collect-demand.md`
->
-> 当前计划：`plan/data-collect-plan.md`
->
-> 当前 changelog：`changelog/data-collect-changelog.md`
+> 当前任务事实源：`https://github.com/qiuqiuaiweb3/btc-updown-marketmaker/issues/21`
 >
 > 历史读取入口：`data-collect/docs/archive-manifest.tsv`
 >
 > 执行授权：`none`
 
-本文是从主计划和真实实现派生的非权威参考，不得新增或改变计划语义；出现不一致时按
+本文是从 GitHub 模块 Issue #21 和真实实现派生的非权威参考，不得新增或改变 Issue 语义；出现不一致时按
 `data-collect/docs/CURRENT.md` 的冲突门处理。
 
 本文只汇总当前构建、路径、进程与观察参考。它不证明远端服务当前状态，也不授权部署、
 上传、替换二进制文件、启停服务、删除数据或其他远端变更；这些动作必须由届时真实状态
-支持，并有另行批准的活动需求、计划与变更记录。
+支持，并有另行批准的 GitHub Issue。
 
 ## 1. 构建合同
 
@@ -61,9 +55,8 @@ data-collect/deploy/systemd/data-collect-prune-oldest-day.timer
 ```
 
 安装路径为 `/home/ubuntu/btc-updown-marketmaker/data-collect/bin/prune-oldest-utc-day.sh` 及
-`/home/ubuntu/.config/systemd/user/` 下的同名单元。生产 timer 已按活动计划更新为每日 UTC
-`12:00:00`，当前为 `enabled/active/waiting`；下一次名义触发为
-`2026-08-08T12:00:00Z`。清理服务仍为 `inactive`，脚本尚无生产运行或真实删除证据。
+`/home/ubuntu/.config/systemd/user/` 下的同名单元。版本化 timer 配置为每日 UTC
+`12:00:00`；实际启用状态和下一次触发时间必须从目标主机只读核对，不由本文声明。
 
 ## 3. 训练程序退出与容量
 

@@ -4,19 +4,13 @@
 >
 > 当前执行 authority：`none`
 >
-> 当前规范来源：`plan/data-collect-plan.md`
->
-> 当前需求：`demand/data-collect-demand.md`
->
-> 当前计划：`plan/data-collect-plan.md`
->
-> 当前 changelog：`changelog/data-collect-changelog.md`
+> 当前任务事实源：`https://github.com/qiuqiuaiweb3/btc-updown-marketmaker/issues/21`
 >
 > 历史读取入口：`data-collect/docs/archive-manifest.tsv`
 >
 > 执行授权：`none`
 
-本文是从主计划和真实实现派生的非权威参考，不得新增或改变计划语义；出现不一致时按
+本文是从 GitHub 模块 Issue #21 和真实实现派生的非权威参考，不得新增或改变 Issue 语义；出现不一致时按
 `data-collect/docs/CURRENT.md` 的冲突门处理。
 
 ## 1. 模块边界
@@ -87,7 +81,7 @@ Polymarket 当前依赖固定为
   这些通道不具备内存硬上限。
 
 以上是当前供应商源代码、`polymarket_sdk_patch_contract` 与
-`polymarket_sdk_runtime_contract` 的证据摘要；规范归属仍是主计划，不得只凭版本名推断
+`polymarket_sdk_runtime_contract` 的证据摘要；任务规范归属仍是 GitHub Issue #21，不得只凭版本名推断
 补丁行为。
 
 | `source_kind` | 当前新写入 schema |

@@ -4,19 +4,13 @@
 >
 > 当前执行 authority：`none`
 >
-> 当前规范来源：`plan/data-collect-plan.md`
->
-> 当前需求：`demand/data-collect-demand.md`
->
-> 当前计划：`plan/data-collect-plan.md`
->
-> 当前 changelog：`changelog/data-collect-changelog.md`
+> 当前任务事实源：`https://github.com/qiuqiuaiweb3/btc-updown-marketmaker/issues/21`
 >
 > 历史读取入口：`data-collect/docs/archive-manifest.tsv`
 >
 > 执行授权：`none`
 
-本文是从主计划和真实实现派生的非权威参考，不得新增或改变计划语义；出现不一致时按
+本文是从 GitHub 模块 Issue #21 和真实实现派生的非权威参考，不得新增或改变 Issue 语义；出现不一致时按
 `data-collect/docs/CURRENT.md` 的冲突门处理。
 
 ## 1. 当前状态矩阵
@@ -91,7 +85,7 @@ cargo test -p data-collect --locked \
   -- --test-threads=1
 ```
 
-测试数量不是永久验收门；验收以当前计划要求的真实业务行为和实际运行结果为准。
+测试数量不是永久验收门；验收以当前适用 Issue 要求的真实业务行为和实际运行结果为准。
 
 ## 4. 库回归测试
 
@@ -120,4 +114,4 @@ cargo test -p data-collect --locked --lib \
 
 Rust 测试只验证可执行合同与可观察业务行为，不得读取或搜索 Markdown 固定文本，也不建立
 文档守卫。文档由任务自审和阶段独立审查核对；带日期验证快照和取代关系只保留在
-changelog 与 Git 历史中，不混入当前验收参考。
+GitHub 记录与 Git 历史中，不混入当前验收参考。
