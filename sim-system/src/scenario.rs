@@ -6,7 +6,6 @@ use contracts::{AssetIdentityV1, MarketIdentityV2, Sha256Hex};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::artifacts::SimulationScenarioArtifactV1;
 use crate::market_directory::{SessionMarketDirectoryErrorV1, SessionMarketDirectoryV1};
 
 pub const PLATFORM_SCENARIO_SCHEMA_V1: &str = "platform_scenario_v1";
@@ -49,7 +48,7 @@ impl fmt::Display for PlatformScenarioErrorV1 {
 impl std::error::Error for PlatformScenarioErrorV1 {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum PlatformScenarioFileErrorV1 {
+pub enum PlatformScenarioFileErrorV1 {
     Json(String),
     InvalidSchema,
     Scenario(PlatformScenarioErrorV1),
@@ -70,14 +69,14 @@ impl fmt::Display for PlatformScenarioFileErrorV1 {
 impl std::error::Error for PlatformScenarioFileErrorV1 {}
 
 #[derive(Clone, Debug)]
-pub(crate) struct SealedPlatformScenarioV1 {
+pub struct SealedPlatformScenarioV1 {
     file_sha256: Sha256Hex,
     scenario: PlatformScenarioV1,
     initial_market_directory: SessionMarketDirectoryV1,
 }
 
 impl SealedPlatformScenarioV1 {
-    pub(crate) fn decode_and_seal(bytes: &[u8]) -> Result<Self, PlatformScenarioFileErrorV1> {
+    pub fn decode_and_seal(bytes: &[u8]) -> Result<Self, PlatformScenarioFileErrorV1> {
         let artifact: SimulationScenarioArtifactV1 = serde_json::from_slice(bytes)
             .map_err(|error| PlatformScenarioFileErrorV1::Json(error.to_string()))?;
         let SimulationScenarioArtifactV1 {
@@ -105,17 +104,26 @@ impl SealedPlatformScenarioV1 {
         })
     }
 
-    pub(crate) fn file_sha256(&self) -> &Sha256Hex {
+    pub fn file_sha256(&self) -> &Sha256Hex {
         &self.file_sha256
     }
 
-    pub(crate) fn scenario(&self) -> &PlatformScenarioV1 {
+    pub fn scenario(&self) -> &PlatformScenarioV1 {
         &self.scenario
     }
 
     pub(crate) fn initial_market_directory(&self) -> &SessionMarketDirectoryV1 {
         &self.initial_market_directory
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SimulationScenarioArtifactV1 {
+    pub schema_version: String,
+    pub scenario_sha256: Sha256Hex,
+    pub market_set_sha256: Sha256Hex,
+    pub markets: Vec<PlatformMarketV1>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -4845,7 +4845,7 @@ pub enum SessionError {
     ResponseDeliveryIdentityConflict,
     InputFailedSealed,
     RetentionBarrierNotSatisfied(&'static str),
-    ResourceLimitReached(crate::resource::ResourceLimitReachedV1),
+
     RunArtifactInputsSealed,
     Durability(String),
     DurabilityRecoveryRequired(String),
@@ -5021,7 +5021,7 @@ impl fmt::Display for SessionError {
             Self::RetentionBarrierNotSatisfied(message) => {
                 write!(formatter, "保留期删除屏障尚未满足：{message}")
             }
-            Self::ResourceLimitReached(limit) => write!(formatter, "{limit:?}"),
+
             Self::RunArtifactInputsSealed => {
                 write!(formatter, "运行产物输入已经封口，不能继续提交业务变化")
             }

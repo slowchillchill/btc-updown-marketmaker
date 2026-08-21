@@ -2267,7 +2267,7 @@ impl PlatformAccountStateV2 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum PlatformAccountError {
+pub enum PlatformAccountError {
     InvalidInitialAccountState,
     InvalidOpeningAnchor(&'static str),
     InvalidAmount(&'static str),

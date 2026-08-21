@@ -135,7 +135,7 @@ impl SealedProcessRuleSnapshot {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SealedProcessRuleSnapshotV3 {
+pub struct SealedProcessRuleSnapshotV3 {
     path: PathBuf,
     file_sha256: Sha256Hex,
     access_mode: SnapshotAccessMode,
@@ -144,17 +144,17 @@ pub(crate) struct SealedProcessRuleSnapshotV3 {
 
 impl SealedProcessRuleSnapshotV3 {
     #[must_use]
-    pub(crate) fn path(&self) -> &Path {
+    pub fn path(&self) -> &Path {
         &self.path
     }
 
     #[must_use]
-    pub(crate) fn file_sha256(&self) -> &Sha256Hex {
+    pub fn file_sha256(&self) -> &Sha256Hex {
         &self.file_sha256
     }
 
     #[must_use]
-    pub(crate) fn access_mode(&self) -> SnapshotAccessMode {
+    pub fn access_mode(&self) -> SnapshotAccessMode {
         self.access_mode
     }
 
@@ -164,7 +164,7 @@ impl SealedProcessRuleSnapshotV3 {
     }
 
     #[must_use]
-    pub(crate) fn synchronized_rules(&self) -> &SynchronizedPlatformRulesV1 {
+    pub fn synchronized_rules(&self) -> &SynchronizedPlatformRulesV1 {
         &self.snapshot.synchronized_platform_rules
     }
 }
@@ -973,7 +973,7 @@ pub async fn query_and_seal_current_process_snapshot(
 }
 
 #[allow(dead_code)]
-pub(crate) async fn query_and_seal_current_process_snapshot_v3(
+pub async fn query_and_seal_current_process_snapshot_v3(
     request: CurrentProcessSnapshotRequestV1,
 ) -> Result<Arc<SealedProcessRuleSnapshotV3>, RuleSnapshotError> {
     query_and_seal_current_process_snapshot_v3_with(

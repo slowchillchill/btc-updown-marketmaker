@@ -322,7 +322,7 @@ impl TradeFinalityPolicyV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct TradeFinalityPolicyV2 {
+pub struct TradeFinalityPolicyV2 {
     policy_id: Sha256Hex,
     normal_path: TradeFinalityPathV1,
     override_selector_domain: Option<TradeFinalitySelectorDomainV1>,
@@ -336,7 +336,7 @@ pub(crate) enum SelectedTradeFinalityPathV2 {
 }
 
 impl TradeFinalityPolicyV2 {
-    pub(crate) fn decode_and_seal(bytes: &[u8]) -> Result<Self, TradeFinalityPolicyErrorV1> {
+    pub fn decode_and_seal(bytes: &[u8]) -> Result<Self, TradeFinalityPolicyErrorV1> {
         let wire: TradeFinalityPolicyWireV2 = serde_json::from_slice(bytes)
             .map_err(|error| TradeFinalityPolicyErrorV1::Json(error.to_string()))?;
         if wire.schema_version != TRADE_FINALITY_POLICY_SCHEMA_V2 {
@@ -359,7 +359,7 @@ impl TradeFinalityPolicyV2 {
     }
 
     #[must_use]
-    pub(crate) fn policy_id(&self) -> &Sha256Hex {
+    pub fn policy_id(&self) -> &Sha256Hex {
         &self.policy_id
     }
 

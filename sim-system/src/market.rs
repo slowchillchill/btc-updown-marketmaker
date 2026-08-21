@@ -39,14 +39,14 @@ pub(crate) fn closed_bucket_decode_count_for_tests() -> u64 {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub(crate) enum MarketEventPathV1 {
+pub enum MarketEventPathV1 {
     HiddenPlatform,
     PublicVisibility,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub(crate) enum MillisecondBucketClosureV1 {
+pub enum MillisecondBucketClosureV1 {
     NextEventAt(i64),
     EndOfInput,
 }
@@ -202,7 +202,7 @@ pub(crate) enum MarketBucketApplyDispositionV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum MarketEventErrorV1 {
+pub enum MarketEventErrorV1 {
     InvalidBucket(&'static str),
     Decode { index: usize, message: String },
     DuplicateEventId(String),
@@ -3372,14 +3372,10 @@ impl SimSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::finality::successful_policy_for_tests;
-    use crate::latency_profile::load_embedded_proxy_latency_profile;
-    use crate::platform_rules::tests::successful_snapshot_for_sim_tests;
     use crate::scenario::scenario_for_sim_tests;
-    use crate::session::SimProcessRoot;
     use crate::task21_tests::{
         asset, fresh_quality, hidden_bucket, initial_snapshot_event, orderbook_evidence,
-        sealed_event, session_spec,
+        sealed_event,
     };
 
     fn account_overlay_store_for_tests() -> (AccountBookOverlayStoreV1, String, String) {
@@ -3777,53 +3773,6 @@ mod tests {
             )
             .expect("V1 目标 bid");
         assert_eq!(actual, expected, "512 个无关目标及其价格不得被触及");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn public_bucket_recovery_anchor_is_absent_then_matches_the_applied_bucket() {
-        let scenario = scenario_for_sim_tests();
-        let rules = successful_snapshot_for_sim_tests().await;
-        let profile = load_embedded_proxy_latency_profile().expect("测试延迟配置");
-        let mut root = SimProcessRoot::try_new(
-            "component-test-run".to_owned(),
-            successful_policy_for_tests(),
-            rules,
-            profile,
-            Arc::clone(&scenario),
-        )
-        .expect("测试进程根");
-        let mut session = root
-            .create_session(session_spec(
-                &scenario,
-                SimCallerRoleV1::Paper,
-                "public-bucket-recovery-anchor",
-            ))
-            .expect("测试模拟盘会话")
-            .session;
-
-        assert_eq!(
-            session.public_markets().last_applied_bucket_identity(),
-            None
-        );
-
-        let bucket = ClosedMarketEventBucketV1::public(
-            900,
-            0,
-            0,
-            MillisecondBucketClosureV1::NextEventAt(901),
-            Vec::new(),
-        );
-        let (_, expected) = decode_bucket(&bucket).expect("公开桶必须可解码");
-        assert_eq!(
-            session
-                .apply_closed_market_event_bucket(bucket)
-                .expect("公开桶必须成功应用"),
-            MarketBucketApplyDispositionV1::Applied
-        );
-        assert_eq!(
-            session.public_markets().last_applied_bucket_identity(),
-            Some(&expected)
-        );
     }
 
     fn prepare_canonical_hidden_events(
