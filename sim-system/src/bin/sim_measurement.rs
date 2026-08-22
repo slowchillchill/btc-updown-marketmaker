@@ -967,6 +967,11 @@ mod enabled {
                 &targeted_manifest_value(
                     &args.argv,
                     command_output("git", &["rev-parse", "HEAD"]),
+                    binary_sha256,
+                    args.identity.source_identity_sha256.0,
+                    args.identity.cargo_lock_sha256.0,
+                    identities.rule_snapshot_sha256,
+                    identities.workload_identity,
                     artifacts,
                 ),
             )
@@ -1393,6 +1398,11 @@ mod enabled {
     pub(super) fn targeted_manifest_value(
         argv: &[String],
         git_head: String,
+        binary_sha256: String,
+        source_identity_sha256: String,
+        cargo_lock_sha256: String,
+        rule_snapshot_sha256: String,
+        workload_identity: String,
         artifacts: Vec<Value>,
     ) -> Value {
         json!({
@@ -1402,6 +1412,11 @@ mod enabled {
             "command": argv,
             "exit_code": 0,
             "git_head": git_head,
+            "binary_sha256": binary_sha256,
+            "source_identity_sha256": source_identity_sha256,
+            "cargo_lock_sha256": cargo_lock_sha256,
+            "rule_snapshot_sha256": rule_snapshot_sha256,
+            "workload_identity": workload_identity,
             "no_failures": true,
             "artifacts": artifacts,
             "inventory_excludes_manifest_itself": true
@@ -3355,6 +3370,11 @@ mod tests {
                 "--targeted-retention-24h".to_owned(),
             ],
             "a".repeat(40),
+            "b".repeat(64),
+            "c".repeat(64),
+            "d".repeat(64),
+            "e".repeat(64),
+            "public-sim-execution-two-market-256x8-v1".to_owned(),
             artifacts,
         );
         std::fs::write(
@@ -3386,6 +3406,14 @@ mod tests {
         assert_eq!(
             manifest["schema_version"],
             "sim_targeted_retention_manifest_v1"
+        );
+        assert_eq!(manifest["binary_sha256"], "b".repeat(64));
+        assert_eq!(manifest["source_identity_sha256"], "c".repeat(64));
+        assert_eq!(manifest["cargo_lock_sha256"], "d".repeat(64));
+        assert_eq!(manifest["rule_snapshot_sha256"], "e".repeat(64));
+        assert_eq!(
+            manifest["workload_identity"],
+            "public-sim-execution-two-market-256x8-v1"
         );
         assert_eq!(manifest["inventory_excludes_manifest_itself"], true);
         let inventory = manifest["artifacts"]
