@@ -9,11 +9,15 @@ pub use crate::event_log::SimEventLogErrorV2;
 pub use crate::market::{MarketEventErrorV1, MarketEventPathV1, MillisecondBucketClosureV1};
 pub use crate::market_directory::SessionMarketDirectoryErrorV1;
 pub use crate::matching::{MatchingMathErrorV1, MatchingStateErrorV1};
+#[cfg(feature = "measurement")]
+pub use crate::measurement_probe::{
+    MeasurementContext, MeasurementObservation, MeasurementPhase, MeasurementResourceSnapshot,
+};
 pub use crate::run_v2::{
     BusinessDirectResponseV2, BusinessProjectionBatchV2, BusinessProjectionPortV2,
     CreateSessionControlResultV2, CreateSessionDispositionV2, MutationRequestReceiptV2,
-    SessionInitializationControlResultV2, SimExecution, SimRunActorErrorV2,
-    UnpublishedRunArtifactCandidateV2,
+    NextRequiredLogicalDriveV2, SessionInitializationControlResultV2, SimExecution,
+    SimRunActorErrorV2, UnpublishedRunArtifactCandidateV2,
 };
 pub use crate::runtime_v2::{
     AcceptedClosedMarketBucketV2, BusinessRequestV2, CancelAllOrdersRequestV2,

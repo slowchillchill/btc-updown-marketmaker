@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(feature = "measurement")]
+use std::time::Instant;
 
 use contracts::{
     AccountInstanceKeyV1, AccountOpeningFactV2, CancelAllOrdersDirectResponseV2,
@@ -37,6 +39,11 @@ use crate::matching::{
     CallerCancelDispositionV2, ExecutionMarketEventEffectsV2, ExecutionStateV2,
     LifecycleFeedbackEffectV2, MatchingStateErrorV1, micro_units_v1,
     order_projection_owned_bytes_v2, trade_projection_owned_bytes_v2,
+};
+#[cfg(feature = "measurement")]
+use crate::measurement_probe::{
+    MeasurementContext, MeasurementObservation, MeasurementPhase, MeasurementProbe,
+    MeasurementResourceSnapshot,
 };
 use crate::platform_rules::{PlatformRuleSnapshotV3, SealedProcessRuleSnapshotV3};
 use crate::resource::{BusinessResourceDeltaV2, ResourceQuantityV1};
@@ -1667,6 +1674,8 @@ pub struct UnpublishedRunArtifactCandidateV2 {
     state: BusinessReducerStateV2,
     log_path: PathBuf,
     accepted_input_count: u64,
+    #[cfg(feature = "measurement")]
+    measurement_observations: Vec<MeasurementObservation>,
 }
 
 impl UnpublishedRunArtifactCandidateV2 {
@@ -1686,6 +1695,11 @@ impl UnpublishedRunArtifactCandidateV2 {
         crate::event_log::delete_retained_run_log_v2(&self.log_path)
             .map_err(SimRunActorErrorV2::Log)
     }
+
+    #[cfg(feature = "measurement")]
+    pub fn measurement_observations(&self) -> &[MeasurementObservation] {
+        &self.measurement_observations
+    }
 }
 
 pub(crate) struct SimRunActorV2 {
@@ -1701,10 +1715,36 @@ pub(crate) struct SimRunActorV2 {
     projection_port: Box<dyn BusinessProjectionPortV2>,
     pending_projections: VecDeque<PendingProjectionBatchV2>,
     pending_projection_resources: ResourceQuantityV1,
+    #[cfg(feature = "measurement")]
+    measurement_probe: Arc<MeasurementProbe>,
 }
 
 pub struct SimExecution {
     actor: SimRunActorV2,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NextRequiredLogicalDriveV2 {
+    pub path: MarketEventPathV1,
+    pub gtd_at_utc_ms: Option<i64>,
+    pub finality_at_utc_ms: Option<i64>,
+    pub rebate_at_utc_ms: Option<i64>,
+    pub mutation_at_utc_ms: Option<i64>,
+}
+
+impl NextRequiredLogicalDriveV2 {
+    pub fn earliest_at_utc_ms(&self) -> i64 {
+        [
+            self.gtd_at_utc_ms,
+            self.finality_at_utc_ms,
+            self.rebate_at_utc_ms,
+            self.mutation_at_utc_ms,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .expect("下一必要逻辑推进必须至少含一类工作")
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1994,7 +2034,9 @@ impl SimExecution {
             &DurableMarketBucketReferenceV2,
         ) -> Result<Arc<[ExecutionMarketEventV3]>, SimRunActorErrorV2>,
     {
-        SimRunActorV2::recover_paper(
+        #[cfg(feature = "measurement")]
+        let recovery_started = Instant::now();
+        let actor = SimRunActorV2::recover_paper(
             path,
             rule_snapshot,
             finality_policy,
@@ -2003,8 +2045,14 @@ impl SimExecution {
             projection_port,
             max_group_bytes,
             read_bucket,
-        )
-        .map(|actor| Self { actor })
+        )?;
+        #[cfg(feature = "measurement")]
+        actor.measurement_probe.record(
+            MeasurementContext::Recovery,
+            MeasurementPhase::RecoveryReplay,
+            elapsed_ns_v2(recovery_started),
+        );
+        Ok(Self { actor })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2147,6 +2195,10 @@ impl SimExecution {
         self.actor.drive_platform_prefix(advance)
     }
 
+    pub fn next_required_logical_drive(&self) -> Option<NextRequiredLogicalDriveV2> {
+        self.actor.next_required_logical_drive()
+    }
+
     pub fn drive_closed_market_bucket(
         &mut self,
         bucket: AcceptedClosedMarketBucketV2,
@@ -2173,6 +2225,16 @@ impl SimExecution {
         self.actor.complete_clean_run(read_bucket)
     }
 
+    #[cfg(feature = "measurement")]
+    pub fn drain_measurement_observations(&self) -> Vec<MeasurementObservation> {
+        self.actor.measurement_probe.drain()
+    }
+
+    #[cfg(feature = "measurement")]
+    pub fn measurement_resource_snapshot(&self) -> MeasurementResourceSnapshot {
+        self.actor.measurement_resource_snapshot()
+    }
+
     #[cfg(test)]
     fn inject_log_write_failure_for_tests(&mut self) {
         self.actor.inject_log_write_failure_for_tests();
@@ -2185,6 +2247,10 @@ impl SimExecution {
 }
 
 impl SimRunActorV2 {
+    fn next_required_logical_drive(&self) -> Option<NextRequiredLogicalDriveV2> {
+        next_required_logical_drive_v2(self.state.as_ref()?)
+    }
+
     pub(crate) fn create_new(
         path: &Path,
         opened: RunOpenedV2,
@@ -2204,6 +2270,8 @@ impl SimRunActorV2 {
         )?;
         let log = SimEventLogV2::create(path, &opened, max_group_bytes)
             .map_err(SimRunActorErrorV2::Log)?;
+        #[cfg(feature = "measurement")]
+        let measurement_probe = log.measurement_probe();
         Ok(Self {
             opened,
             _rule_snapshot: rule_snapshot,
@@ -2220,6 +2288,8 @@ impl SimRunActorV2 {
             projection_port,
             pending_projections: VecDeque::new(),
             pending_projection_resources: ResourceQuantityV1::default(),
+            #[cfg(feature = "measurement")]
+            measurement_probe,
         })
     }
 
@@ -2258,6 +2328,8 @@ impl SimRunActorV2 {
             .recovery
             .resume_paper()
             .map_err(SimRunActorErrorV2::Log)?;
+        #[cfg(feature = "measurement")]
+        let measurement_probe = log.measurement_probe();
         let mut actor = Self {
             opened: replayed.opened,
             _rule_snapshot: rule_snapshot,
@@ -2271,6 +2343,8 @@ impl SimRunActorV2 {
             projection_port,
             pending_projections: replayed.pending_projections,
             pending_projection_resources: replayed.pending_projection_resources,
+            #[cfg(feature = "measurement")]
+            measurement_probe,
         };
         actor.deliver_pending_projections();
         Ok(actor)
@@ -2291,6 +2365,8 @@ impl SimRunActorV2 {
             &DurableMarketBucketReferenceV2,
         ) -> Result<Arc<[ExecutionMarketEventV3]>, SimRunActorErrorV2>,
     {
+        #[cfg(feature = "measurement")]
+        let recovery_started = Instant::now();
         let replayed = replay_event_log_v2(
             path,
             &rule_snapshot,
@@ -2315,6 +2391,12 @@ impl SimRunActorV2 {
             state: replayed.state,
             log_path: path.to_path_buf(),
             accepted_input_count: replayed.accepted_input_count,
+            #[cfg(feature = "measurement")]
+            measurement_observations: vec![MeasurementObservation {
+                context: MeasurementContext::Recovery,
+                phase: MeasurementPhase::RecoveryReplay,
+                elapsed_ns: elapsed_ns_v2(recovery_started),
+            }],
         })
     }
 
@@ -2392,7 +2474,9 @@ impl SimRunActorV2 {
             .ok_or(SimRunActorErrorV2::Closed)?
             .seal_clean_run()
             .map_err(SimRunActorErrorV2::Log)?;
-        Self::recover_sealed_clean_run(
+        #[cfg(feature = "measurement")]
+        let seal_observations = self.measurement_probe.drain();
+        let candidate = Self::recover_sealed_clean_run(
             &self.log_path,
             self._rule_snapshot,
             self._finality_policy,
@@ -2400,7 +2484,16 @@ impl SimRunActorV2 {
             self._latency_profile,
             self.max_group_bytes,
             read_bucket,
-        )
+        )?;
+        #[cfg(feature = "measurement")]
+        let candidate = {
+            let mut candidate = candidate;
+            let mut combined = seal_observations;
+            combined.append(&mut candidate.measurement_observations);
+            candidate.measurement_observations = combined;
+            candidate
+        };
+        Ok(candidate)
     }
 
     pub(crate) fn create_session(
@@ -2520,10 +2613,18 @@ impl SimRunActorV2 {
         cutoff: TrustedDecisionCutoffV2,
         request: BusinessRequestV2,
     ) -> Result<MutationRequestReceiptV2, SimRunActorErrorV2> {
+        #[cfg(feature = "measurement")]
+        let public_started = Instant::now();
         if let Some(existing) = existing_mutation_request_receipt_v2(
             self.state.as_ref().ok_or(SimRunActorErrorV2::Closed)?,
             &request.context().global_request_id,
         ) {
+            #[cfg(feature = "measurement")]
+            self.measurement_probe.record(
+                MeasurementContext::PublicRequest,
+                MeasurementPhase::PublicEndToEnd,
+                elapsed_ns_v2(public_started),
+            );
             return Ok(existing);
         }
         let mut committed =
@@ -2535,6 +2636,12 @@ impl SimRunActorV2 {
         else {
             unreachable!("Request 归约只能返回首次接收回执")
         };
+        #[cfg(feature = "measurement")]
+        self.measurement_probe.record(
+            MeasurementContext::PublicRequest,
+            MeasurementPhase::PublicEndToEnd,
+            elapsed_ns_v2(public_started),
+        );
         Ok(result)
     }
 
@@ -2606,6 +2713,8 @@ impl SimRunActorV2 {
             let input_sequence = start_sequence
                 .checked_add(index as u64)
                 .expect("有界输入组序号不得溢出");
+            #[cfg(feature = "measurement")]
+            let reducer_started = Instant::now();
             let reduced = reduce_actor_input_v2(
                 &self.opened,
                 self.scenario.initial_market_directory(),
@@ -2615,6 +2724,12 @@ impl SimRunActorV2 {
                 &self._latency_profile,
                 self._rule_snapshot.snapshot(),
                 &self._finality_policy,
+            );
+            #[cfg(feature = "measurement")]
+            self.measurement_probe.record(
+                MeasurementContext::CommitGroup,
+                MeasurementPhase::Reducer,
+                elapsed_ns_v2(reducer_started),
             );
             let (next_state, output) = match reduced {
                 Ok(result) => result,
@@ -2628,12 +2743,20 @@ impl SimRunActorV2 {
                 }
                 Err(BusinessReductionErrorV2::Fatal(error)) => return Err(error),
             };
+            #[cfg(feature = "measurement")]
+            let projection_started = Instant::now();
             let (next_state, output, projection) = finalize_projection_batch_v2(
                 &self.opened.run_id,
                 next_state,
                 output,
                 &self._latency_profile,
             )?;
+            #[cfg(feature = "measurement")]
+            self.measurement_probe.record(
+                MeasurementContext::CommitGroup,
+                MeasurementPhase::ProjectionFinalize,
+                elapsed_ns_v2(projection_started),
+            );
             state = next_state;
             outputs.push(output);
             if let Some(projection) = projection {
@@ -2656,6 +2779,8 @@ impl SimRunActorV2 {
         self.state = Some(state);
         #[cfg(test)]
         record_group_state_install_for_tests();
+        #[cfg(feature = "measurement")]
+        let had_projections = !projections.is_empty();
         for projection in projections {
             let resources = projection_resource_quantity_v2(&projection);
             self.pending_projection_resources =
@@ -2667,7 +2792,17 @@ impl SimRunActorV2 {
                     accepted: false,
                 });
         }
+        #[cfg(feature = "measurement")]
+        let delivery_started = had_projections.then(Instant::now);
         self.deliver_pending_projections();
+        #[cfg(feature = "measurement")]
+        if let Some(started) = delivery_started {
+            self.measurement_probe.record(
+                MeasurementContext::CommitGroup,
+                MeasurementPhase::ProjectionDelivery,
+                elapsed_ns_v2(started),
+            );
+        }
         Ok(BusinessGroupCommitV2 {
             outputs,
             unaccepted,
@@ -2708,6 +2843,26 @@ impl SimRunActorV2 {
         }
     }
 
+    #[cfg(feature = "measurement")]
+    fn measurement_resource_snapshot(&self) -> MeasurementResourceSnapshot {
+        let business = self
+            .state
+            .as_ref()
+            .map_or(ResourceQuantityV1::default(), |state| {
+                state.business_resources
+            });
+        let (log_byte_count, next_input_sequence) = self
+            .log
+            .as_ref()
+            .map_or((0, 0), |log| (log.byte_count(), log.next_input_sequence()));
+        MeasurementResourceSnapshot::new(
+            business,
+            self.pending_projection_resources,
+            log_byte_count,
+            next_input_sequence,
+        )
+    }
+
     fn take_state(&mut self) -> Result<BusinessReducerStateV2, SimRunActorErrorV2> {
         if self.log.is_none() {
             return Err(SimRunActorErrorV2::Closed);
@@ -2741,6 +2896,11 @@ fn checked_add_delay_v2(base_utc_ms: i64, delay_ms: u64) -> Result<i64, SimRunAc
     base_utc_ms
         .checked_add(i64::try_from(delay_ms).map_err(|_| SimRunActorErrorV2::RequestTimeOverflow)?)
         .ok_or(SimRunActorErrorV2::RequestTimeOverflow)
+}
+
+#[cfg(feature = "measurement")]
+fn elapsed_ns_v2(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
 fn validate_request_context_v2(request: &BusinessRequestV2) -> Result<(), SimRunActorErrorV2> {
@@ -4559,6 +4719,44 @@ fn next_scheduled_obligation_at_v2(state: &BusinessReducerStateV2) -> Option<i64
     .min()
 }
 
+fn next_required_logical_drive_v2(
+    state: &BusinessReducerStateV2,
+) -> Option<NextRequiredLogicalDriveV2> {
+    let session = state.session.as_ref()?;
+    if !matches!(
+        session.initialization,
+        SessionInitializationV2::Active { .. }
+    ) {
+        return None;
+    }
+    let required = NextRequiredLogicalDriveV2 {
+        path: match session.opening_fact.account_instance_key.caller_role {
+            SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation => {
+                MarketEventPathV1::HiddenPlatform
+            }
+            SimCallerRoleV1::Paper => MarketEventPathV1::PublicVisibility,
+        },
+        gtd_at_utc_ms: session.execution_state.next_gtd_deadline_at_utc_ms(),
+        finality_at_utc_ms: session.execution_state.next_scheduled_finality_at_utc_ms(),
+        rebate_at_utc_ms: session.execution_state.next_rebate_clock_at_utc_ms(),
+        mutation_at_utc_ms: session
+            .mutation_requests
+            .pending_actions
+            .first_key_value()
+            .map(|(key, _)| key.effective_processing_at_utc_ms),
+    };
+    [
+        required.gtd_at_utc_ms,
+        required.finality_at_utc_ms,
+        required.rebate_at_utc_ms,
+        required.mutation_at_utc_ms,
+    ]
+    .into_iter()
+    .flatten()
+    .next()
+    .map(|_| required)
+}
+
 #[allow(clippy::result_large_err)]
 fn drain_scheduled_obligations_at_v2(
     mut state: BusinessReducerStateV2,
@@ -4783,14 +4981,8 @@ pub(crate) fn drive_business_input_at_v2(
             MarketEventPathV1::HiddenPlatform => session.hidden_platform_frontier,
             MarketEventPathV1::PublicVisibility => session.public_visibility_frontier,
         };
-        let first_due = [
-            session.execution_state.next_gtd_deadline_at_utc_ms(),
-            session.execution_state.next_scheduled_finality_at_utc_ms(),
-            session.execution_state.next_rebate_clock_at_utc_ms(),
-        ]
-        .into_iter()
-        .flatten()
-        .min();
+        let first_due =
+            next_required_logical_drive_v2(&state).map(|required| required.earliest_at_utc_ms());
         (
             session.opening_fact.account_instance_key.caller_role,
             frontier,
@@ -12722,6 +12914,113 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[cfg(feature = "measurement")]
+    async fn measurement_probe_observes_public_commit_and_current_resources() {
+        let directory = tempfile::tempdir().expect("创建测量探针测试目录");
+        let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
+        let rule_snapshot = successful_snapshot_v3_for_sim_tests().await;
+        let finality_policy = successful_policy_v2_for_tests();
+        let scenario = sealed_scenario();
+        let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
+        let mut execution = SimExecution::create_new(
+            &path,
+            opened(
+                "run-measurement-probe-v2",
+                &rule_snapshot,
+                &finality_policy,
+                &scenario,
+                &latency_profile,
+            ),
+            rule_snapshot,
+            finality_policy,
+            scenario,
+            latency_profile,
+            accepting_projection_port(),
+            MAX_GROUP_BYTES,
+        )
+        .expect("创建测量探针测试根");
+        execution.drain_measurement_observations();
+
+        execution
+            .create_session(spec("run-measurement-probe-v2", "create-measurement-probe"))
+            .expect("公开创建测量探针测试会话");
+
+        let observations = execution.drain_measurement_observations();
+        assert_eq!(
+            observations
+                .iter()
+                .map(|observation| observation.phase)
+                .collect::<Vec<_>>(),
+            vec![
+                crate::measurement_probe::MeasurementPhase::Reducer,
+                crate::measurement_probe::MeasurementPhase::ProjectionFinalize,
+                crate::measurement_probe::MeasurementPhase::LogEncode,
+                crate::measurement_probe::MeasurementPhase::LogWrite,
+                crate::measurement_probe::MeasurementPhase::ProjectionDelivery,
+            ]
+        );
+        assert!(observations.iter().all(|observation| {
+            observation.context == crate::measurement_probe::MeasurementContext::CommitGroup
+        }));
+        let resources = execution.measurement_resource_snapshot();
+        assert!(resources.business.records > 0);
+        assert_eq!(resources.pending_projection, ResourceQuantityV1::default());
+        assert_eq!(
+            resources.log_byte_count,
+            std::fs::metadata(path).unwrap().len()
+        );
+        assert_eq!(resources.next_input_sequence, 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(feature = "measurement")]
+    async fn measurement_probe_keeps_clean_seal_separate_from_recovery() {
+        let directory = tempfile::tempdir().expect("创建测量封口测试目录");
+        let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
+        let rule_snapshot = successful_snapshot_v3_for_sim_tests().await;
+        let finality_policy = successful_policy_v2_for_tests();
+        let scenario = sealed_scenario();
+        let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
+        let mut execution = SimExecution::create_new(
+            &path,
+            opened(
+                "run-measurement-seal-v2",
+                &rule_snapshot,
+                &finality_policy,
+                &scenario,
+                &latency_profile,
+            ),
+            rule_snapshot,
+            finality_policy,
+            scenario,
+            latency_profile,
+            accepting_projection_port(),
+            MAX_GROUP_BYTES,
+        )
+        .expect("创建测量封口根");
+        execution
+            .create_session(spec("run-measurement-seal-v2", "create-measurement-seal"))
+            .expect("创建测量封口会话");
+        execution
+            .fail_session_initialization("failed-measurement-seal".to_owned())
+            .expect("关闭测量封口会话");
+        execution.drain_measurement_observations();
+
+        let candidate = execution
+            .complete_clean_run(|_| unreachable!("初始化失败根没有市场桶"))
+            .expect("形成测量冷候选");
+        let observations = candidate.measurement_observations();
+        assert!(observations.iter().any(|observation| {
+            observation.context == crate::measurement_probe::MeasurementContext::CleanSeal
+                && observation.phase == crate::measurement_probe::MeasurementPhase::LogSync
+        }));
+        assert!(observations.iter().any(|observation| {
+            observation.context == crate::measurement_probe::MeasurementContext::Recovery
+                && observation.phase == crate::measurement_probe::MeasurementPhase::RecoveryReplay
+        }));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn public_facade_routes_control_enrollment_and_all_eight_methods_to_one_actor() {
         let directory = tempfile::tempdir().expect("创建公开综合轨迹目录");
         let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
@@ -13825,6 +14124,280 @@ mod tests {
         assert_eq!(crate::event_log::group_append_counts_for_tests(), (1, 1));
         assert_eq!(crate::event_log::event_log_counts_for_tests(), (1, 1));
         assert_eq!(crate::event_log::sync_attempt_count_for_tests(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn public_sparse_request_exposes_and_drives_pending_mutation_before_next_bucket() {
+        let (_directory, actor) =
+            active_market_actor(SimCallerRoleV1::Paper, "run-sparse-request-prefix-v2").await;
+        let mut execution = SimExecution { actor };
+        execution
+            .drive_closed_market_bucket(AcceptedClosedMarketBucketV2 {
+                reference: DurableMarketBucketReferenceV2 {
+                    path: MarketEventPathV1::PublicVisibility,
+                    bucket_at_utc_ms: 1_100,
+                    start_index_position: 0,
+                    next_index_position: 2,
+                    closure: crate::market::MillisecondBucketClosureV1::NextEventAt(2_000),
+                },
+                events: Arc::from(decoded_initial_market_events("2")),
+            })
+            .expect("Paper 初始公开桶必须受理");
+
+        let request_id = "sparse-orders-request";
+        let platform_arrived_at_utc_ms = 1_200;
+        let outbound_delay_ms = execution.actor._latency_profile.sample_delay_ms(
+            execution
+                .actor
+                .state
+                .as_ref()
+                .and_then(|state| state.session.as_ref())
+                .expect("稀疏请求测试会话存在")
+                .session_seed
+                .0
+                .as_bytes(),
+            request_id,
+            DelaySampleDomainV1::RequestOutbound,
+        );
+        execution
+            .orders(
+                request_cutoff(
+                    platform_arrived_at_utc_ms
+                        - i64::try_from(outbound_delay_ms).expect("测试出站时延可表示"),
+                ),
+                OrdersRequestV2 {
+                    context: RequestContextV2 {
+                        global_request_id: request_id.to_owned(),
+                        caller_correlation_id: None,
+                    },
+                    filter: OrdersFilterV1::default(),
+                    cursor: None,
+                },
+            )
+            .expect("公开稀疏查询必须先登记 pending mutation");
+
+        let required = execution
+            .next_required_logical_drive()
+            .expect("pending mutation 必须形成下一必要逻辑推进");
+        assert_eq!(required.path, MarketEventPathV1::PublicVisibility);
+        assert_eq!(required.gtd_at_utc_ms, None);
+        assert_eq!(required.finality_at_utc_ms, None);
+        assert_eq!(required.rebate_at_utc_ms, Some(2_000));
+        assert_eq!(
+            required.mutation_at_utc_ms,
+            Some(platform_arrived_at_utc_ms)
+        );
+        assert_eq!(required.earliest_at_utc_ms(), platform_arrived_at_utc_ms);
+
+        execution
+            .drive_platform_prefix(PlatformPrefixAdvanceV2 {
+                path: required.path,
+                closed_through_utc_ms: required.earliest_at_utc_ms(),
+                next_index_position: 2,
+            })
+            .expect("早于下一真实桶的 pending mutation 必须由必要空前缀闭合");
+        assert_eq!(
+            execution
+                .next_required_logical_drive()
+                .and_then(|required| required.mutation_at_utc_ms),
+            None
+        );
+        assert!(
+            execution
+                .actor
+                .state
+                .as_ref()
+                .and_then(|state| state.session.as_ref())
+                .and_then(|session| session.mutation_requests.requests_by_id.get(request_id))
+                .and_then(|request| request.completed_response.as_ref())
+                .is_some(),
+            "稀疏 Request + prefix 必须形成方法特定响应"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn public_request_due_at_next_bucket_requires_the_real_bucket() {
+        let (_directory, actor) =
+            active_market_actor(SimCallerRoleV1::Paper, "run-request-bucket-tie-v2").await;
+        let mut execution = SimExecution { actor };
+        execution
+            .drive_closed_market_bucket(AcceptedClosedMarketBucketV2 {
+                reference: DurableMarketBucketReferenceV2 {
+                    path: MarketEventPathV1::PublicVisibility,
+                    bucket_at_utc_ms: 1_100,
+                    start_index_position: 0,
+                    next_index_position: 2,
+                    closure: crate::market::MillisecondBucketClosureV1::NextEventAt(1_200),
+                },
+                events: Arc::from(decoded_initial_market_events("2")),
+            })
+            .expect("Paper 初始公开桶必须受理");
+        let request_id = "request-bucket-tie";
+        let outbound_delay_ms = execution.actor._latency_profile.sample_delay_ms(
+            execution
+                .actor
+                .state
+                .as_ref()
+                .and_then(|state| state.session.as_ref())
+                .expect("同刻测试会话存在")
+                .session_seed
+                .0
+                .as_bytes(),
+            request_id,
+            DelaySampleDomainV1::RequestOutbound,
+        );
+        execution
+            .orders(
+                request_cutoff(
+                    1_200 - i64::try_from(outbound_delay_ms).expect("测试出站时延可表示"),
+                ),
+                OrdersRequestV2 {
+                    context: RequestContextV2 {
+                        global_request_id: request_id.to_owned(),
+                        caller_correlation_id: None,
+                    },
+                    filter: OrdersFilterV1::default(),
+                    cursor: None,
+                },
+            )
+            .expect("登记与下一真实桶同刻的请求");
+        let required = execution
+            .next_required_logical_drive()
+            .expect("同刻 pending mutation 仍可观察");
+        assert_eq!(required.earliest_at_utc_ms(), 1_200);
+        assert!(
+            execution
+                .drive_platform_prefix(PlatformPrefixAdvanceV2 {
+                    path: required.path,
+                    closed_through_utc_ms: 1_200,
+                    next_index_position: 2,
+                })
+                .is_err(),
+            "同刻真实桶必须优先，空前缀不得越过"
+        );
+        execution
+            .drive_closed_market_bucket(AcceptedClosedMarketBucketV2 {
+                reference: DurableMarketBucketReferenceV2 {
+                    path: MarketEventPathV1::PublicVisibility,
+                    bucket_at_utc_ms: 1_200,
+                    start_index_position: 2,
+                    next_index_position: 3,
+                    closure: crate::market::MillisecondBucketClosureV1::NextEventAt(2_000),
+                },
+                events: Arc::from(vec![decoded_level_market_event(
+                    1_200, 1_210, 3, "2", "1.5",
+                )]),
+            })
+            .expect("同刻真实桶必须处理 pending mutation");
+        assert_eq!(
+            execution
+                .next_required_logical_drive()
+                .and_then(|required| required.mutation_at_utc_ms),
+            None
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn public_sparse_request_prefix_recovers_the_same_result_and_next_drive() {
+        let (directory, actor) =
+            active_market_actor(SimCallerRoleV1::Paper, "run-sparse-prefix-recovery-v2").await;
+        let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
+        let mut execution = SimExecution { actor };
+        let initial_events: Arc<[ExecutionMarketEventV3]> =
+            Arc::from(decoded_initial_market_events("2"));
+        let reference = DurableMarketBucketReferenceV2 {
+            path: MarketEventPathV1::PublicVisibility,
+            bucket_at_utc_ms: 1_100,
+            start_index_position: 0,
+            next_index_position: 2,
+            closure: crate::market::MillisecondBucketClosureV1::NextEventAt(2_000),
+        };
+        execution
+            .drive_closed_market_bucket(AcceptedClosedMarketBucketV2 {
+                reference: reference.clone(),
+                events: Arc::clone(&initial_events),
+            })
+            .expect("Paper 恢复代表初始桶必须受理");
+        let request_id = "sparse-prefix-recovery-request";
+        let outbound_delay_ms = execution.actor._latency_profile.sample_delay_ms(
+            execution
+                .actor
+                .state
+                .as_ref()
+                .and_then(|state| state.session.as_ref())
+                .expect("恢复代表会话存在")
+                .session_seed
+                .0
+                .as_bytes(),
+            request_id,
+            DelaySampleDomainV1::RequestOutbound,
+        );
+        execution
+            .orders(
+                request_cutoff(
+                    1_200 - i64::try_from(outbound_delay_ms).expect("测试出站时延可表示"),
+                ),
+                OrdersRequestV2 {
+                    context: RequestContextV2 {
+                        global_request_id: request_id.to_owned(),
+                        caller_correlation_id: None,
+                    },
+                    filter: OrdersFilterV1::default(),
+                    cursor: None,
+                },
+            )
+            .expect("登记恢复代表稀疏查询");
+        let required = execution
+            .next_required_logical_drive()
+            .expect("恢复代表 pending mutation 可观察");
+        execution
+            .drive_platform_prefix(PlatformPrefixAdvanceV2 {
+                path: required.path,
+                closed_through_utc_ms: required.earliest_at_utc_ms(),
+                next_index_position: 2,
+            })
+            .expect("恢复代表必要空前缀必须受理");
+        let live_result = Arc::clone(
+            execution
+                .actor
+                .state
+                .as_ref()
+                .and_then(|state| state.session.as_ref())
+                .and_then(|session| session.mutation_requests.requests_by_id.get(request_id))
+                .and_then(|request| request.completed_response.as_ref())
+                .expect("live 稀疏查询结果存在"),
+        );
+        let live_next = execution.next_required_logical_drive();
+        let rule_snapshot = Arc::clone(&execution.actor._rule_snapshot);
+        let finality_policy = Arc::clone(&execution.actor._finality_policy);
+        let scenario = Arc::clone(&execution.actor.scenario);
+        let latency_profile = Arc::clone(&execution.actor._latency_profile);
+        drop(execution);
+
+        let recovered = SimExecution::recover_paper(
+            &path,
+            rule_snapshot,
+            finality_policy,
+            scenario,
+            latency_profile,
+            accepting_projection_port(),
+            MAX_GROUP_BYTES,
+            move |logged_reference| {
+                assert_eq!(logged_reference, &reference);
+                Ok(Arc::clone(&initial_events))
+            },
+        )
+        .expect("Request + prefix 必须从同一日志恢复");
+        let recovered_result = recovered
+            .actor
+            .state
+            .as_ref()
+            .and_then(|state| state.session.as_ref())
+            .and_then(|session| session.mutation_requests.requests_by_id.get(request_id))
+            .and_then(|request| request.completed_response.as_ref())
+            .expect("恢复后的稀疏查询结果存在");
+        assert_eq!(recovered_result.as_ref(), live_result.as_ref());
+        assert_eq!(recovered.next_required_logical_drive(), live_next);
     }
 
     #[tokio::test(flavor = "current_thread")]
