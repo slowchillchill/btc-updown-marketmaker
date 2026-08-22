@@ -209,6 +209,12 @@ mod enabled {
     const BODY_ONE_SOURCE: i64 = 1_785_715_750_000;
     const BODY_TWO_SOURCE: i64 = 1_785_715_760_000;
 
+    pub(super) const COMPONENT_CAUSAL_START_UTC_MS: i64 = 1_787_400_000_000;
+    pub(super) const COMPONENT_TIME_SHIFT_MS: i64 =
+        COMPONENT_CAUSAL_START_UTC_MS - (MARKET_ONE_START + 10);
+    pub(super) const COMPONENT_REQUEST_CUTOFF_BASE: i64 =
+        REQUEST_CUTOFF_BASE + COMPONENT_TIME_SHIFT_MS;
+
     const RESOLUTION_ONE_SOURCE: i64 = MARKET_END + 10;
     const RESOLUTION_TWO_SOURCE: i64 = MARKET_END + 20;
     const FINAL_EOF_SOURCE: i64 = RESOLUTION_TWO_SOURCE + 86_500_000;
@@ -753,10 +759,10 @@ mod enabled {
                 load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
                     snapshot_path: component.rule_snapshot.clone(),
                     expected_file_sha256: component.rule_snapshot_sha256.clone(),
-                    replay_causal_start_utc_ms: REQUEST_CUTOFF_BASE,
+                    replay_causal_start_utc_ms: COMPONENT_CAUSAL_START_UTC_MS,
                 })
                 .map_err(|error| format!("离线加载 V3 历史规则失败：{error}"))?;
-            let scenario = fixed_scenario()?;
+            let scenario = component_fixed_scenario()?;
             let finality = successful_finality()?;
             let latency = load_embedded_proxy_latency_profile()
                 .map_err(|error| format!("加载嵌入时延档失败：{error}"))?;
@@ -770,7 +776,7 @@ mod enabled {
             )?;
             fs::write(
                 candidate.join("inputs/platform-scenario-v1.json"),
-                fixed_scenario_bytes()?,
+                component_fixed_scenario_bytes()?,
             )
             .map_err(|error| format!("写组件场景输入失败：{error}"))?;
             fs::write(
@@ -787,7 +793,7 @@ mod enabled {
             )
             .map_err(|error| format!("写组件时延输入失败：{error}"))?;
 
-            let template_buckets = golden_buckets(&scenario)?;
+            let template_buckets = golden_buckets_with_shift(&scenario, COMPONENT_TIME_SHIFT_MS)?;
             let golden_path = candidate.join("inputs/component-golden-events-v3.jsonl");
             let buckets = write_and_read_component_events(&golden_path, &template_buckets)?;
             let golden_sha256 = sha256_file(&golden_path)?;
@@ -1008,7 +1014,8 @@ mod enabled {
         });
         let mut next_bucket = 0;
         while next_bucket < ordered.len()
-            && ordered[next_bucket].0.bucket_at_utc_ms <= MARKET_TWO_START + 10 + PUBLIC_DELAY_MS
+            && ordered[next_bucket].0.bucket_at_utc_ms
+                <= MARKET_TWO_START + 10 + PUBLIC_DELAY_MS + COMPONENT_TIME_SHIFT_MS
         {
             drive_real_bucket(&mut execution, ordered[next_bucket])?;
             next_bucket += 1;
@@ -1018,7 +1025,7 @@ mod enabled {
         }
         let cancelled = AtomicBool::new(false);
         let mut resources = measurement_resources(&execution)?;
-        let mut decision = REQUEST_CUTOFF_BASE;
+        let mut decision = COMPONENT_REQUEST_CUTOFF_BASE;
         drive_fixed_request_range(
             &mut execution,
             &scenario,
@@ -1031,6 +1038,7 @@ mod enabled {
             &cancelled,
             &mut resources,
             &mut decision,
+            COMPONENT_TIME_SHIFT_MS,
         )?;
         if perturb {
             std::thread::yield_now();
@@ -1303,13 +1311,22 @@ mod enabled {
         paths
             .into_iter()
             .map(|path| {
-                Ok(json!({
-                    "path":path.strip_prefix(root).map_err(|error| format!("计算组件相对路径失败：{error}"))?,
-                    "bytes":fs::metadata(&path).map_err(|error| format!("读取组件产物大小失败：{error}"))?.len(),
-                    "sha256":sha256_file(&path)?
-                }))
+                let relative_path = path
+                    .strip_prefix(root)
+                    .map_err(|error| format!("计算组件相对路径失败：{error}"))?;
+                let bytes = fs::read(&path)
+                    .map_err(|error| format!("读取组件产物字节快照失败：{error}"))?;
+                Ok(component_inventory_member(relative_path, &bytes))
             })
             .collect()
+    }
+
+    pub(super) fn component_inventory_member(relative_path: &Path, bytes: &[u8]) -> Value {
+        json!({
+            "path":relative_path,
+            "bytes":bytes.len(),
+            "sha256":format!("{:x}", Sha256::digest(bytes))
+        })
     }
 
     pub(super) fn sync_tree(root: &Path) -> Result<(), String> {
@@ -1809,6 +1826,7 @@ mod enabled {
             &cancelled,
             &mut resource_high_water,
             &mut next_decision_at_utc_ms,
+            0,
         )?;
         check_safety(run_started, trial_started, &root_dir)?;
 
@@ -1897,6 +1915,7 @@ mod enabled {
             &cancelled,
             &mut resource_high_water,
             &mut next_decision_at_utc_ms,
+            0,
         )?;
         while next_bucket < public_buckets.len() {
             drive_required_before_next_bucket(&mut execution, &public_buckets, &mut next_bucket)?;
@@ -2411,8 +2430,24 @@ mod enabled {
         )>,
         String,
     > {
+        golden_buckets_with_shift(scenario, 0)
+    }
+
+    pub(super) fn golden_buckets_with_shift(
+        scenario: &SealedPlatformScenarioV1,
+        time_shift_ms: i64,
+    ) -> Result<
+        Vec<(
+            DurableMarketBucketReferenceV2,
+            Arc<[ExecutionMarketEventV3]>,
+        )>,
+        String,
+    > {
         let markets = scenario.scenario().market_set().markets();
-        let source_times = [MARKET_ONE_START + 10, MARKET_TWO_START + 10];
+        let source_times = [
+            MARKET_ONE_START + 10 + time_shift_ms,
+            MARKET_TWO_START + 10 + time_shift_ms,
+        ];
         let mut hidden_events = Vec::new();
         let mut public_events = Vec::new();
         for (index, market) in markets.iter().enumerate() {
@@ -2431,8 +2466,8 @@ mod enabled {
             Arc::from(
                 vec![body_event(
                     &markets[0],
-                    BODY_ONE_SOURCE,
-                    BODY_ONE_SOURCE + PUBLIC_DELAY_MS,
+                    BODY_ONE_SOURCE + time_shift_ms,
+                    BODY_ONE_SOURCE + PUBLIC_DELAY_MS + time_shift_ms,
                     5,
                 )?]
                 .into_boxed_slice(),
@@ -2440,8 +2475,8 @@ mod enabled {
             Arc::from(
                 vec![body_event(
                     &markets[1],
-                    BODY_TWO_SOURCE,
-                    BODY_TWO_SOURCE + PUBLIC_DELAY_MS,
+                    BODY_TWO_SOURCE + time_shift_ms,
+                    BODY_TWO_SOURCE + PUBLIC_DELAY_MS + time_shift_ms,
                     6,
                 )?]
                 .into_boxed_slice(),
@@ -2451,8 +2486,8 @@ mod enabled {
             Arc::from(
                 vec![resolution_event(
                     &markets[0],
-                    RESOLUTION_ONE_SOURCE,
-                    RESOLUTION_ONE_SOURCE + PUBLIC_DELAY_MS,
+                    RESOLUTION_ONE_SOURCE + time_shift_ms,
+                    RESOLUTION_ONE_SOURCE + PUBLIC_DELAY_MS + time_shift_ms,
                     7,
                 )?]
                 .into_boxed_slice(),
@@ -2460,8 +2495,8 @@ mod enabled {
             Arc::from(
                 vec![resolution_event(
                     &markets[1],
-                    RESOLUTION_TWO_SOURCE,
-                    RESOLUTION_TWO_SOURCE + PUBLIC_DELAY_MS,
+                    RESOLUTION_TWO_SOURCE + time_shift_ms,
+                    RESOLUTION_TWO_SOURCE + PUBLIC_DELAY_MS + time_shift_ms,
                     8,
                 )?]
                 .into_boxed_slice(),
@@ -2470,8 +2505,8 @@ mod enabled {
         let final_events: Arc<[ExecutionMarketEventV3]> = Arc::from(
             vec![body_event(
                 &markets[0],
-                FINAL_EOF_SOURCE,
-                FINAL_EOF_SOURCE + PUBLIC_DELAY_MS,
+                FINAL_EOF_SOURCE + time_shift_ms,
+                FINAL_EOF_SOURCE + PUBLIC_DELAY_MS + time_shift_ms,
                 9,
             )?]
             .into_boxed_slice(),
@@ -2485,20 +2520,20 @@ mod enabled {
                 MarketEventPathV1::HiddenPlatform => [
                     source_times[0],
                     source_times[1],
-                    BODY_ONE_SOURCE,
-                    BODY_TWO_SOURCE,
-                    RESOLUTION_ONE_SOURCE,
-                    RESOLUTION_TWO_SOURCE,
-                    FINAL_EOF_SOURCE,
+                    BODY_ONE_SOURCE + time_shift_ms,
+                    BODY_TWO_SOURCE + time_shift_ms,
+                    RESOLUTION_ONE_SOURCE + time_shift_ms,
+                    RESOLUTION_TWO_SOURCE + time_shift_ms,
+                    FINAL_EOF_SOURCE + time_shift_ms,
                 ],
                 MarketEventPathV1::PublicVisibility => [
                     source_times[0] + PUBLIC_DELAY_MS,
                     source_times[1] + PUBLIC_DELAY_MS,
-                    BODY_ONE_SOURCE + PUBLIC_DELAY_MS,
-                    BODY_TWO_SOURCE + PUBLIC_DELAY_MS,
-                    RESOLUTION_ONE_SOURCE + PUBLIC_DELAY_MS,
-                    RESOLUTION_TWO_SOURCE + PUBLIC_DELAY_MS,
-                    FINAL_EOF_SOURCE + PUBLIC_DELAY_MS,
+                    BODY_ONE_SOURCE + PUBLIC_DELAY_MS + time_shift_ms,
+                    BODY_TWO_SOURCE + PUBLIC_DELAY_MS + time_shift_ms,
+                    RESOLUTION_ONE_SOURCE + PUBLIC_DELAY_MS + time_shift_ms,
+                    RESOLUTION_TWO_SOURCE + PUBLIC_DELAY_MS + time_shift_ms,
+                    FINAL_EOF_SOURCE + PUBLIC_DELAY_MS + time_shift_ms,
                 ],
             };
             let events = [
@@ -2698,6 +2733,7 @@ mod enabled {
             cancelled,
             resource_high_water,
             &mut next_decision_at_utc_ms,
+            0,
         )
     }
 
@@ -2717,10 +2753,11 @@ mod enabled {
         cancelled: &AtomicBool,
         resource_high_water: &mut Value,
         decision_cursor: &mut i64,
+        time_shift_ms: i64,
     ) -> Result<(), String> {
         let markets = scenario.scenario().market_set().markets();
         let public_visibility: PublicVisibilityCursorV1 = serde_json::from_value(json!({
-            "closed_through_received_at_utc_ms": MARKET_TWO_START + 10 + PUBLIC_DELAY_MS,
+            "closed_through_received_at_utc_ms": MARKET_TWO_START + 10 + PUBLIC_DELAY_MS + time_shift_ms,
             "next_visibility_index_position": 4
         }))
         .map_err(|error| format!("构造公开可见游标失败：{error}"))?;
@@ -3661,22 +3698,37 @@ mod enabled {
             .map_err(|error| format!("密封固定场景失败：{error}"))
     }
 
+    pub(super) fn component_fixed_scenario() -> Result<Arc<SealedPlatformScenarioV1>, String> {
+        let bytes = component_fixed_scenario_bytes()?;
+        SealedPlatformScenarioV1::decode_and_seal(&bytes)
+            .map(Arc::new)
+            .map_err(|error| format!("密封固定 component 场景失败：{error}"))
+    }
+
     fn fixed_scenario_bytes() -> Result<Vec<u8>, String> {
+        fixed_scenario_bytes_with_shift(0)
+    }
+
+    fn component_fixed_scenario_bytes() -> Result<Vec<u8>, String> {
+        fixed_scenario_bytes_with_shift(COMPONENT_TIME_SHIFT_MS)
+    }
+
+    fn fixed_scenario_bytes_with_shift(time_shift_ms: i64) -> Result<Vec<u8>, String> {
         let first = market(
             CONDITION,
             "3278040",
             TOKEN_UP,
             TOKEN_DOWN,
-            MARKET_ONE_START,
-            MARKET_END,
+            MARKET_ONE_START + time_shift_ms,
+            MARKET_END + time_shift_ms,
         )?;
         let second = market(
             &format!("0x{}", "e".repeat(64)),
             "3278041",
             "10000000000000000000000000000000000000000000000000000000000000001",
             "10000000000000000000000000000000000000000000000000000000000000002",
-            MARKET_TWO_START,
-            MARKET_END,
+            MARKET_TWO_START + time_shift_ms,
+            MARKET_END + time_shift_ms,
         )?;
         let scenario = PlatformScenarioV1::try_new(vec![first, second])
             .map_err(|error| format!("构造固定双市场场景失败：{error}"))?;
@@ -4066,6 +4118,12 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "measurement")]
+    use std::path::Path;
+
+    #[cfg(feature = "measurement")]
+    use sha2::Digest;
+
     use super::*;
 
     #[cfg(feature = "measurement")]
@@ -4231,6 +4289,81 @@ mod tests {
         let sha = enabled::sha256_file(&path).expect("component golden file SHA");
         assert_ne!(sha, "7".repeat(64));
         assert_eq!(sha.len(), 64);
+    }
+
+    #[cfg(feature = "measurement")]
+    #[test]
+    fn component_timeline_keeps_rules_events_requests_and_scenario_causally_aligned() {
+        let default_scenario = enabled::fixed_scenario().expect("fixed default scenario");
+        let component_scenario =
+            enabled::component_fixed_scenario().expect("fixed component scenario");
+        let default_buckets =
+            enabled::golden_buckets(&default_scenario).expect("fixed default buckets");
+        let component_buckets = enabled::golden_buckets_with_shift(
+            &component_scenario,
+            enabled::COMPONENT_TIME_SHIFT_MS,
+        )
+        .expect("fixed component buckets");
+
+        let default_market_start = default_scenario.scenario().market_set().markets()[0]
+            .market()
+            .window
+            .start_at_utc_ms;
+        let component_market_start = component_scenario.scenario().market_set().markets()[0]
+            .market()
+            .window
+            .start_at_utc_ms;
+        assert_eq!(
+            component_market_start - default_market_start,
+            enabled::COMPONENT_TIME_SHIFT_MS
+        );
+
+        let earliest_component_source = component_buckets
+            .iter()
+            .flat_map(|(_, events)| events.iter())
+            .filter_map(|event| event.time.source_event_at_utc_ms)
+            .min()
+            .expect("component source time");
+        let earliest_component_received = component_buckets
+            .iter()
+            .flat_map(|(_, events)| events.iter())
+            .map(|event| event.time.received_at_utc_ms)
+            .min()
+            .expect("component received time");
+        let earliest_default_source = default_buckets
+            .iter()
+            .flat_map(|(_, events)| events.iter())
+            .filter_map(|event| event.time.source_event_at_utc_ms)
+            .min()
+            .expect("default source time");
+
+        assert_eq!(
+            enabled::COMPONENT_CAUSAL_START_UTC_MS,
+            earliest_component_source
+        );
+        assert!(earliest_component_received >= enabled::COMPONENT_CAUSAL_START_UTC_MS);
+        assert_eq!(
+            enabled::COMPONENT_REQUEST_CUTOFF_BASE - earliest_component_source,
+            199_990
+        );
+        assert_eq!(
+            earliest_component_source - earliest_default_source,
+            enabled::COMPONENT_TIME_SHIFT_MS
+        );
+        assert!(earliest_component_source > 1_787_398_441_633);
+    }
+
+    #[cfg(feature = "measurement")]
+    #[test]
+    fn component_inventory_member_derives_length_and_sha_from_one_byte_snapshot() {
+        let bytes = b"same component inventory byte snapshot";
+        let member = enabled::component_inventory_member(Path::new("proof.bin"), bytes);
+        assert_eq!(member["path"], "proof.bin");
+        assert_eq!(member["bytes"], bytes.len());
+        assert_eq!(
+            member["sha256"],
+            format!("{:x}", sha2::Sha256::digest(bytes))
+        );
     }
 
     #[cfg(not(feature = "measurement"))]

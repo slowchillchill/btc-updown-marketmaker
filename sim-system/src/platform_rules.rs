@@ -3539,6 +3539,61 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn official_v3_shape_is_applicable_at_component_causal_start_but_not_one_ms_before() {
+        const COMPONENT_CAUSAL_START_UTC_MS: i64 = 1_787_400_000_000;
+
+        let server = ScriptedServer::start(successful_responses()).await;
+        let directory = tempfile::tempdir().expect("tempdir");
+        let generated_path = directory.path().join("generated-v3.json");
+        let sealed = create_successful_snapshot_v3(&server, generated_path).await;
+        let mut official = sealed.snapshot().clone();
+        let shift = COMPONENT_CAUSAL_START_UTC_MS - official.provenance.rules_observed_at_utc_ms;
+        official.provenance.query_started_at_utc_ms += shift;
+        official.provenance.query_completed_at_utc_ms += shift;
+        official.provenance.rules_observed_at_utc_ms += shift;
+        for request in &mut official.provenance.http_requests {
+            request.request_url = match request.endpoint_kind {
+                HttpEndpointKindV1::ClobMarketInfo => {
+                    format!("{OFFICIAL_CLOB_MARKET_BASE}/{CONDITION}")
+                }
+                HttpEndpointKindV1::GammaMarketsKeyset => format!(
+                    "{OFFICIAL_GAMMA_KEYSET_URL}?limit=100&condition_ids={CONDITION}&closed={}",
+                    request.closed.expect("Gamma request has closed flag")
+                ),
+            };
+            for attempt in &mut request.attempts {
+                attempt.started_at_utc_ms += shift;
+                attempt.completed_at_utc_ms += shift;
+            }
+        }
+        let mut bytes = serde_json::to_vec_pretty(&official).expect("serialize official V3 shape");
+        bytes.push(b'\n');
+        let path = directory.path().join("official-v3.json");
+        std::fs::write(&path, &bytes).expect("write official V3 shape");
+        let file_sha256 = sha256_hex(&bytes);
+
+        load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
+            snapshot_path: path.clone(),
+            expected_file_sha256: file_sha256.clone(),
+            replay_causal_start_utc_ms: COMPONENT_CAUSAL_START_UTC_MS,
+        })
+        .expect("official V3 shape observed at component causal start must load");
+        let late = load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
+            snapshot_path: path,
+            expected_file_sha256: file_sha256,
+            replay_causal_start_utc_ms: COMPONENT_CAUSAL_START_UTC_MS - 1,
+        })
+        .expect_err("official V3 shape observed one ms later must be inapplicable");
+        assert_eq!(
+            late,
+            RuleSnapshotError::HistoricalNotApplicable {
+                observed_at_utc_ms: COMPONENT_CAUSAL_START_UTC_MS,
+                causal_start_utc_ms: COMPONENT_CAUSAL_START_UTC_MS - 1,
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn v3_offline_loader_rejects_sha_schema_time_and_recovery_identity_mismatch() {
         let server = ScriptedServer::start(successful_responses()).await;
         let directory = tempfile::tempdir().expect("tempdir");
