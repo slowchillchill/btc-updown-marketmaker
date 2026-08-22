@@ -5810,6 +5810,107 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "measurement")]
+    #[derive(Default)]
+    struct CapturingProjectionPortStateV2 {
+        durable_through: u64,
+        accepted: Vec<Arc<BusinessProjectionBatchV2>>,
+    }
+
+    #[cfg(feature = "measurement")]
+    struct CapturingProjectionPortV2 {
+        state: Rc<RefCell<CapturingProjectionPortStateV2>>,
+    }
+
+    #[cfg(feature = "measurement")]
+    impl BusinessProjectionPortV2 for CapturingProjectionPortV2 {
+        fn try_accept(&mut self, batch: Arc<BusinessProjectionBatchV2>) -> bool {
+            let mut state = self.state.borrow_mut();
+            state.durable_through = batch.projection_batch_sequence;
+            state.accepted.push(batch);
+            true
+        }
+
+        fn durable_through(&self, _run_id: &str) -> u64 {
+            self.state.borrow().durable_through
+        }
+    }
+
+    #[cfg(feature = "measurement")]
+    fn direct_response_request_id(response: &BusinessDirectResponseV2) -> &str {
+        match response {
+            BusinessDirectResponseV2::PostOrder(response) => &response.metadata.global_request_id,
+            BusinessDirectResponseV2::PostOrders(response) => &response.metadata.global_request_id,
+            BusinessDirectResponseV2::CancelOrder(response) => &response.metadata.global_request_id,
+            BusinessDirectResponseV2::CancelOrders(response) => {
+                &response.metadata.global_request_id
+            }
+            BusinessDirectResponseV2::CancelAllOrders(response) => {
+                &response.metadata.global_request_id
+            }
+            BusinessDirectResponseV2::Order(response) => &response.metadata.global_request_id,
+            BusinessDirectResponseV2::Orders(response) => &response.metadata.global_request_id,
+            BusinessDirectResponseV2::Trades(response) => &response.metadata.global_request_id,
+        }
+    }
+
+    #[cfg(feature = "measurement")]
+    fn captured_direct_response_json(
+        state: &Rc<RefCell<CapturingProjectionPortStateV2>>,
+        request_id: &str,
+    ) -> serde_json::Value {
+        let state = state.borrow();
+        let response = state
+            .accepted
+            .iter()
+            .rev()
+            .flat_map(|batch| batch.direct_responses())
+            .find(|response| direct_response_request_id(response) == request_id)
+            .unwrap_or_else(|| panic!("未捕获公开请求响应：{request_id}"));
+        match response {
+            BusinessDirectResponseV2::PostOrder(response) => serde_json::to_value(response),
+            BusinessDirectResponseV2::PostOrders(response) => serde_json::to_value(response),
+            BusinessDirectResponseV2::CancelOrder(response) => serde_json::to_value(response),
+            BusinessDirectResponseV2::CancelOrders(response) => serde_json::to_value(response),
+            BusinessDirectResponseV2::CancelAllOrders(response) => serde_json::to_value(response),
+            BusinessDirectResponseV2::Order(response) => serde_json::to_value(response),
+            BusinessDirectResponseV2::Orders(response) => serde_json::to_value(response),
+            BusinessDirectResponseV2::Trades(response) => serde_json::to_value(response),
+        }
+        .expect("编码公开请求响应")
+    }
+
+    #[cfg(feature = "measurement")]
+    fn drive_public_until_response(
+        execution: &mut SimExecution,
+        state: &Rc<RefCell<CapturingProjectionPortStateV2>>,
+        request_id: &str,
+        next_index_position: u64,
+    ) {
+        for _ in 0..16 {
+            if state
+                .borrow()
+                .accepted
+                .iter()
+                .flat_map(|batch| batch.direct_responses())
+                .any(|response| direct_response_request_id(response) == request_id)
+            {
+                return;
+            }
+            let required = execution
+                .next_required_logical_drive()
+                .unwrap_or_else(|| panic!("请求 {request_id} 尚未完成却无必要逻辑推进"));
+            execution
+                .drive_platform_prefix(PlatformPrefixAdvanceV2 {
+                    path: required.path,
+                    closed_through_utc_ms: required.required_at_utc_ms,
+                    next_index_position,
+                })
+                .unwrap_or_else(|error| panic!("推进请求 {request_id} 失败：{error}"));
+        }
+        panic!("请求 {request_id} 在固定推进次数内未完成");
+    }
+
     fn sha(byte: char) -> Sha256Hex {
         Sha256Hex(std::iter::repeat_n(byte, 64).collect())
     }
@@ -14405,6 +14506,354 @@ mod tests {
             .expect("恢复后的稀疏查询结果存在");
         assert_eq!(recovered_result.as_ref(), live_result.as_ref());
         assert_eq!(recovered.next_required_logical_drive(), live_next);
+    }
+
+    #[cfg(feature = "measurement")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn public_paper_retention_releases_history_and_cold_recovery_preserves_semantics() {
+        let directory = tempfile::tempdir().expect("创建公开 retention 代表目录");
+        let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
+        let rule_snapshot = successful_snapshot_v3_for_sim_tests().await;
+        let finality_policy = successful_policy_v2_for_tests();
+        let test_market = market_with_window('1', "123", "1", "2", 1_000, 100_000);
+        let scenario = sealed_scenario_for_markets(vec![test_market.clone()]);
+        let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
+        let live_capture = Rc::new(RefCell::new(CapturingProjectionPortStateV2::default()));
+        let mut run_opened = opened(
+            "run-public-retention-recovery-v2",
+            &rule_snapshot,
+            &finality_policy,
+            &scenario,
+            &latency_profile,
+        );
+        run_opened.durability_role = RunDurabilityRoleV2::RecoverablePaper;
+        let mut execution = SimExecution::create_new(
+            &path,
+            run_opened,
+            Arc::clone(&rule_snapshot),
+            Arc::clone(&finality_policy),
+            Arc::clone(&scenario),
+            Arc::clone(&latency_profile),
+            Box::new(CapturingProjectionPortV2 {
+                state: Rc::clone(&live_capture),
+            }),
+            MAX_GROUP_BYTES,
+        )
+        .expect("创建公开 Paper retention 代表根");
+        let mut session_spec = spec(
+            "run-public-retention-recovery-v2",
+            "create-public-retention-recovery",
+        );
+        session_spec.caller_role = SimCallerRoleV1::Paper;
+        execution
+            .create_session(session_spec)
+            .expect("创建公开 Paper retention 会话");
+        execution
+            .activate_session("activate-public-retention-recovery".to_owned())
+            .expect("激活公开 Paper retention 会话");
+
+        let initial_events: Arc<[ExecutionMarketEventV3]> = Arc::from(
+            decoded_initial_events_for_market_with_quantity(&test_market, 1_100, 1_110, 1, "10"),
+        );
+        let condition_id = initial_events[0].market.condition_id.clone();
+        let token_id = TokenId("1".to_owned());
+        let bucket_reference = DurableMarketBucketReferenceV2 {
+            path: MarketEventPathV1::PublicVisibility,
+            bucket_at_utc_ms: 1_100,
+            start_index_position: 0,
+            next_index_position: 2,
+            closure: crate::market::MillisecondBucketClosureV1::NextEventAt(200_000),
+        };
+        execution
+            .drive_closed_market_bucket(AcceptedClosedMarketBucketV2 {
+                reference: bucket_reference.clone(),
+                events: Arc::clone(&initial_events),
+            })
+            .expect("公开 retention 代表初始盘口桶必须受理");
+        let context = |request_id: &str| RequestContextV2 {
+            global_request_id: request_id.to_owned(),
+            caller_correlation_id: None,
+        };
+
+        execution
+            .post_order(
+                request_cutoff(10_000),
+                PostOrderRequestV2 {
+                    context: context("retention-first-fok"),
+                    item: post_item(
+                        "retention-first-fok-item",
+                        &condition_id,
+                        &token_id,
+                        SimBuyOrderKindV1::FokMarket {
+                            spend_pusd: "3".parse().expect("首个 FOK 预算"),
+                            worst_price_pusd_per_share: "0.6".parse().expect("首个 FOK 最差价"),
+                        },
+                    ),
+                },
+            )
+            .expect("登记首个公开 FOK");
+        drive_public_until_response(&mut execution, &live_capture, "retention-first-fok", 2);
+        let first_fok: PostOrderDirectResponseV2 = serde_json::from_value(
+            captured_direct_response_json(&live_capture, "retention-first-fok"),
+        )
+        .expect("解码首个公开 FOK 响应");
+        let SubmissionItemOutcomeV2::Accepted(first_accepted) = &first_fok.item.outcome else {
+            panic!("首个公开 FOK 必须 accepted terminal")
+        };
+        assert_eq!(first_accepted.platform_order_id, "sim-1");
+        assert_eq!(first_accepted.fills.len(), 1);
+        let first_trade_id = first_accepted.fills[0].trade_id.clone();
+
+        execution
+            .orders(
+                request_cutoff(20_000),
+                OrdersRequestV2 {
+                    context: context("retention-old-orders-root"),
+                    filter: OrdersFilterV1::default(),
+                    cursor: None,
+                },
+            )
+            .expect("登记旧 orders 根查询");
+        drive_public_until_response(
+            &mut execution,
+            &live_capture,
+            "retention-old-orders-root",
+            2,
+        );
+        execution
+            .trades(
+                request_cutoff(30_000),
+                TradesRequestV2 {
+                    context: context("retention-old-trades-root"),
+                    filter: TradesFilterV1::default(),
+                    cursor: None,
+                },
+            )
+            .expect("登记旧 trades 根查询");
+        drive_public_until_response(
+            &mut execution,
+            &live_capture,
+            "retention-old-trades-root",
+            2,
+        );
+        let old_orders: OrdersDirectResponseV2 = serde_json::from_value(
+            captured_direct_response_json(&live_capture, "retention-old-orders-root"),
+        )
+        .expect("解码旧 orders 根响应");
+        let old_trades: TradesDirectResponseV2 = serde_json::from_value(
+            captured_direct_response_json(&live_capture, "retention-old-trades-root"),
+        )
+        .expect("解码旧 trades 根响应");
+        let (
+            OrdersQueryResultV2::Page(old_orders_page),
+            TradesQueryResultV2::Page(old_trades_page),
+        ) = (&old_orders.result, &old_trades.result)
+        else {
+            panic!("公开 retention 代表必须形成旧 orders/trades Page")
+        };
+        assert_eq!(old_orders_page.root_sequence, old_trades_page.root_sequence);
+        let old_root_sequence = old_orders_page.root_sequence;
+
+        execution
+            .post_order(
+                request_cutoff(40_000),
+                PostOrderRequestV2 {
+                    context: context("retention-current-order"),
+                    item: post_item(
+                        "retention-current-order-item",
+                        &condition_id,
+                        &token_id,
+                        SimBuyOrderKindV1::GtcLimit {
+                            limit_price_pusd_per_share: "0.3".parse().expect("当前 GTC 价格"),
+                            size_shares: "5".parse().expect("当前 GTC 数量"),
+                            post_only: false,
+                        },
+                    ),
+                },
+            )
+            .expect("登记当前公开订单");
+        drive_public_until_response(&mut execution, &live_capture, "retention-current-order", 2);
+        let current_order: PostOrderDirectResponseV2 = serde_json::from_value(
+            captured_direct_response_json(&live_capture, "retention-current-order"),
+        )
+        .expect("解码当前公开订单响应");
+        let SubmissionItemOutcomeV2::Accepted(current_accepted) = &current_order.item.outcome
+        else {
+            panic!("当前公开订单必须 accepted")
+        };
+        assert_eq!(current_accepted.platform_order_id, "sim-2");
+        assert!(current_accepted.fills.is_empty());
+        let retained_from_utc_ms = current_order.item.effective_processing_at_utc_ms;
+
+        execution
+            .orders(
+                request_cutoff(50_000),
+                OrdersRequestV2 {
+                    context: context("retention-current-orders-root"),
+                    filter: OrdersFilterV1::default(),
+                    cursor: None,
+                },
+            )
+            .expect("登记当前 orders 根查询");
+        drive_public_until_response(
+            &mut execution,
+            &live_capture,
+            "retention-current-orders-root",
+            2,
+        );
+        let current_orders: OrdersDirectResponseV2 = serde_json::from_value(
+            captured_direct_response_json(&live_capture, "retention-current-orders-root"),
+        )
+        .expect("解码当前 orders 根响应");
+        let OrdersQueryResultV2::Page(current_orders_page) = &current_orders.result else {
+            panic!("公开 retention 代表必须形成当前 orders Page")
+        };
+        assert!(current_orders_page.root_sequence > old_root_sequence);
+
+        let resources_before = execution.measurement_resource_snapshot();
+        execution
+            .advance_retention(RetentionAdvanceV2 {
+                earliest_retained_root_sequence: old_root_sequence + 1,
+                order_history_retained_from_utc_ms: Some(retained_from_utc_ms),
+                trade_history_retained_from_utc_ms: Some(retained_from_utc_ms),
+            })
+            .expect("公开 retention 推进必须受理");
+        let resources_after = execution.measurement_resource_snapshot();
+        assert!(resources_after.business.records < resources_before.business.records);
+        assert!(resources_after.business.bytes < resources_before.business.bytes);
+        assert_eq!(
+            resources_after.next_input_sequence,
+            resources_before.next_input_sequence + 1,
+            "一次公开 retention 只能新增一项耐久输入"
+        );
+
+        execution
+            .orders(
+                request_cutoff(60_000),
+                OrdersRequestV2 {
+                    context: context("retention-expired-root"),
+                    filter: OrdersFilterV1::default(),
+                    cursor: Some(QueryCursorV2 {
+                        root_sequence: old_root_sequence,
+                        next_offset: 0,
+                    }),
+                },
+            )
+            .expect("登记旧 root 续读");
+        execution
+            .order(
+                request_cutoff(70_000),
+                OrderRequestV2 {
+                    context: context("retention-expired-order"),
+                    platform_order_id: "sim-1".to_owned(),
+                },
+            )
+            .expect("登记 cutoff 前 order 查询");
+        execution
+            .trades(
+                request_cutoff(80_000),
+                TradesRequestV2 {
+                    context: context("retention-expired-trade"),
+                    filter: TradesFilterV1 {
+                        trade_id: Some(first_trade_id),
+                        ..TradesFilterV1::default()
+                    },
+                    cursor: None,
+                },
+            )
+            .expect("登记 cutoff 前 trade 查询");
+        execution
+            .orders(
+                request_cutoff(90_000),
+                OrdersRequestV2 {
+                    context: context("retention-current-range"),
+                    filter: OrdersFilterV1::default(),
+                    cursor: None,
+                },
+            )
+            .expect("登记 retention 后当前范围查询");
+        for request_id in [
+            "retention-expired-root",
+            "retention-expired-order",
+            "retention-expired-trade",
+            "retention-current-range",
+        ] {
+            drive_public_until_response(&mut execution, &live_capture, request_id, 2);
+        }
+
+        let expired_root: OrdersDirectResponseV2 = serde_json::from_value(
+            captured_direct_response_json(&live_capture, "retention-expired-root"),
+        )
+        .expect("解码旧 root 响应");
+        assert_eq!(
+            expired_root.result,
+            OrdersQueryResultV2::OutOfRetention(QueryOutOfRetentionV2::RootSnapshot {
+                requested_root_sequence: old_root_sequence,
+                earliest_retained_root_sequence: old_root_sequence + 1,
+            })
+        );
+        let expired_order: OrderDirectResponseV2 = serde_json::from_value(
+            captured_direct_response_json(&live_capture, "retention-expired-order"),
+        )
+        .expect("解码过期 order 响应");
+        assert_eq!(
+            expired_order.result,
+            OrderQueryResultV2::OutOfRetention(QueryOutOfRetentionV2::OrderHistory {
+                retained_from_utc_ms,
+            })
+        );
+        let expired_trade: TradesDirectResponseV2 = serde_json::from_value(
+            captured_direct_response_json(&live_capture, "retention-expired-trade"),
+        )
+        .expect("解码过期 trade 响应");
+        assert_eq!(
+            expired_trade.result,
+            TradesQueryResultV2::OutOfRetention(QueryOutOfRetentionV2::TradeHistory {
+                retained_from_utc_ms,
+            })
+        );
+        let current_range: OrdersDirectResponseV2 = serde_json::from_value(
+            captured_direct_response_json(&live_capture, "retention-current-range"),
+        )
+        .expect("解码当前范围响应");
+        assert!(matches!(current_range.result, OrdersQueryResultV2::Page(_)));
+
+        let live_semantics = [
+            "retention-expired-root",
+            "retention-expired-order",
+            "retention-expired-trade",
+            "retention-current-range",
+        ]
+        .map(|request_id| captured_direct_response_json(&live_capture, request_id));
+        let live_resources = execution.measurement_resource_snapshot();
+        drop(execution);
+
+        let recovery_capture = Rc::new(RefCell::new(CapturingProjectionPortStateV2::default()));
+        let recovered = SimExecution::recover_paper(
+            &path,
+            rule_snapshot,
+            finality_policy,
+            scenario,
+            latency_profile,
+            Box::new(CapturingProjectionPortV2 {
+                state: Rc::clone(&recovery_capture),
+            }),
+            MAX_GROUP_BYTES,
+            move |reference| {
+                assert_eq!(reference, &bucket_reference);
+                Ok(Arc::clone(&initial_events))
+            },
+        )
+        .expect("从同一 Paper 日志冷恢复 retention 代表");
+        assert_eq!(recovered.measurement_resource_snapshot(), live_resources);
+        let recovery_semantics = [
+            "retention-expired-root",
+            "retention-expired-order",
+            "retention-expired-trade",
+            "retention-current-range",
+        ]
+        .map(|request_id| captured_direct_response_json(&recovery_capture, request_id));
+        assert_eq!(recovery_semantics, live_semantics);
     }
 
     #[tokio::test(flavor = "current_thread")]
