@@ -964,17 +964,11 @@ mod enabled {
             let artifacts = artifact_inventory(&args.output_dir)?;
             write_json(
                 args.output_dir.join("retention-manifest.json"),
-                &json!({
-                    "schema_version": "sim_targeted_retention_manifest_v1",
-                    "runner_identity": TARGETED_RUNNER_IDENTITY,
-                    "exploratory_input_only": true,
-                    "command": args.argv,
-                    "exit_code": 0,
-                    "git_head": command_output("git", &["rev-parse", "HEAD"]),
-                    "no_failures": true,
-                    "artifacts": artifacts,
-                    "inventory_excludes_manifest_itself": true
-                }),
+                &targeted_manifest_value(
+                    &args.argv,
+                    command_output("git", &["rev-parse", "HEAD"]),
+                    artifacts,
+                ),
             )
         }
     }
@@ -1396,7 +1390,25 @@ mod enabled {
             .unwrap_or_default()
     }
 
-    fn artifact_inventory(output_dir: &Path) -> Result<Vec<Value>, String> {
+    pub(super) fn targeted_manifest_value(
+        argv: &[String],
+        git_head: String,
+        artifacts: Vec<Value>,
+    ) -> Value {
+        json!({
+            "schema_version": "sim_targeted_retention_manifest_v1",
+            "runner_identity": TARGETED_RUNNER_IDENTITY,
+            "exploratory_input_only": true,
+            "command": argv,
+            "exit_code": 0,
+            "git_head": git_head,
+            "no_failures": true,
+            "artifacts": artifacts,
+            "inventory_excludes_manifest_itself": true
+        })
+    }
+
+    pub(super) fn artifact_inventory(output_dir: &Path) -> Result<Vec<Value>, String> {
         let mut paths = Vec::new();
         let mut pending = vec![output_dir.to_path_buf()];
         while let Some(directory) = pending.pop() {
@@ -3118,7 +3130,7 @@ mod enabled {
         u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
     }
 
-    fn sha256_file(path: &Path) -> Result<String, String> {
+    pub(super) fn sha256_file(path: &Path) -> Result<String, String> {
         let mut file =
             File::open(path).map_err(|error| format!("打开二进制计算 SHA-256 失败：{error}"))?;
         let mut digest = Sha256::new();
@@ -3299,6 +3311,137 @@ mod tests {
         assert_eq!(summary.released_business_records.median, 2);
         assert_eq!(summary.released_business_bytes.median, 200);
         assert_eq!(summary.semantic_pass_count, 3);
+    }
+
+    #[cfg(feature = "measurement")]
+    #[test]
+    fn targeted_output_inventory_has_four_schemas_and_hashes_only_the_other_three_files() {
+        let directory = tempfile::tempdir().expect("创建 targeted 产物代表目录");
+        let samples_path = directory.path().join("retention-samples.jsonl");
+        let environment_path = directory.path().join("retention-environment.json");
+        let summary_path = directory.path().join("retention-summary.json");
+        std::fs::write(
+            &samples_path,
+            [true, false, false, false]
+                .into_iter()
+                .map(|warmup| {
+                    serde_json::to_string(&serde_json::json!({
+                        "schema_version": "sim_targeted_retention_sample_v1",
+                        "warmup": warmup
+                    }))
+                    .expect("编码 targeted sample 代表")
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .expect("写入 targeted sample 代表");
+        std::fs::write(
+            &environment_path,
+            br#"{"schema_version":"sim_targeted_retention_environment_v1"}"#,
+        )
+        .expect("写入 targeted environment 代表");
+        std::fs::write(
+            &summary_path,
+            br#"{"schema_version":"sim_targeted_retention_summary_v1","measured_trial_count":3,"warmup_trial_count":1}"#,
+        )
+        .expect("写入 targeted summary 代表");
+
+        let artifacts = enabled::artifact_inventory(directory.path())
+            .expect("读取 targeted 三项 manifest inventory");
+        let manifest = enabled::targeted_manifest_value(
+            &[
+                "sim_measurement".to_owned(),
+                "--targeted-retention-24h".to_owned(),
+            ],
+            "a".repeat(40),
+            artifacts,
+        );
+        std::fs::write(
+            directory.path().join("retention-manifest.json"),
+            serde_json::to_vec(&manifest).expect("编码 targeted manifest 代表"),
+        )
+        .expect("写入 targeted manifest 代表");
+
+        let mut names = std::fs::read_dir(directory.path())
+            .expect("读取 targeted 产物目录")
+            .map(|entry| {
+                entry
+                    .expect("读取 targeted 产物项")
+                    .file_name()
+                    .into_string()
+                    .expect("targeted 产物名必须为 UTF-8")
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "retention-environment.json",
+                "retention-manifest.json",
+                "retention-samples.jsonl",
+                "retention-summary.json",
+            ]
+        );
+        assert_eq!(
+            manifest["schema_version"],
+            "sim_targeted_retention_manifest_v1"
+        );
+        assert_eq!(manifest["inventory_excludes_manifest_itself"], true);
+        let inventory = manifest["artifacts"]
+            .as_array()
+            .expect("manifest artifacts 必须为数组");
+        assert_eq!(inventory.len(), 3);
+        for entry in inventory {
+            let path = entry["path"].as_str().expect("inventory path");
+            assert_ne!(path, "retention-manifest.json");
+            assert_eq!(
+                entry["bytes"].as_u64().expect("inventory bytes"),
+                std::fs::metadata(directory.path().join(path))
+                    .expect("读取 inventory 文件")
+                    .len()
+            );
+            assert_eq!(
+                entry["sha256"].as_str().expect("inventory sha"),
+                enabled::sha256_file(&directory.path().join(path)).expect("复核 inventory sha")
+            );
+        }
+        let sample_lines = std::fs::read_to_string(samples_path)
+            .expect("读取 targeted sample 代表")
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("解析 sample 行"))
+            .collect::<Vec<_>>();
+        assert_eq!(sample_lines.len(), 4);
+        assert!(
+            sample_lines
+                .iter()
+                .all(|sample| { sample["schema_version"] == "sim_targeted_retention_sample_v1" })
+        );
+        assert_eq!(
+            sample_lines
+                .iter()
+                .filter(|sample| sample["warmup"] == true)
+                .count(),
+            1
+        );
+        let environment: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(environment_path).expect("读取 targeted environment 代表"),
+        )
+        .expect("解析 targeted environment 代表");
+        assert_eq!(
+            environment["schema_version"],
+            "sim_targeted_retention_environment_v1"
+        );
+        let summary: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(summary_path).expect("读取 targeted summary 代表"),
+        )
+        .expect("解析 targeted summary 代表");
+        assert_eq!(
+            summary["schema_version"],
+            "sim_targeted_retention_summary_v1"
+        );
+        assert_eq!(summary["measured_trial_count"], 3);
+        assert_eq!(summary["warmup_trial_count"], 1);
     }
 
     #[test]
