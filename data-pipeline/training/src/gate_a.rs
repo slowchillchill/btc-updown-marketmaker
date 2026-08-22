@@ -2903,6 +2903,13 @@ struct PlatformReplayRequest {
     page_position: usize,
 }
 
+#[derive(Clone)]
+struct VisibilityReplayRequest {
+    sequence: u64,
+    entry: VisibilityIndexEntryV2,
+    page_position: usize,
+}
+
 /// 绑定已完整复核候选的唯一事件存储与事件时间索引，按数据源事件时间返回规范记录。
 ///
 /// 每页只保留至多 `max_page_rows` 个索引请求与对应载荷；不会要求下游重建事件映射或自行排序。
@@ -3058,6 +3065,167 @@ impl PlatformReplayCursor {
             .map(|record| {
                 record.ok_or_else(|| {
                     GateAError::ArtifactMismatch("平台回放页存在未解析索引".to_owned())
+                })
+            })
+            .collect()
+    }
+}
+
+/// 绑定已完整复核候选的唯一事件存储与模型可见索引，按接收时间返回规范记录。
+///
+/// 每页只保留至多 `max_page_rows` 个索引请求与对应载荷；reference record 保持原样返回，
+/// 由消费方在完成全局逻辑位置闭合后过滤。
+pub struct VisibilityReplayCursor {
+    store_path: PathBuf,
+    visibility: TypedArtifactCursor<VisibilityIndexEntryV2>,
+    received_time_range: Option<(i64, i64)>,
+    finished: bool,
+    batch_rows: usize,
+    max_batch_bytes: usize,
+}
+
+impl VisibilityReplayCursor {
+    pub fn open(
+        candidate: &ValidatedGateACandidate,
+        received_time_range: Option<(i64, i64)>,
+        batch_rows: usize,
+        max_batch_bytes: usize,
+        max_page_rows: usize,
+    ) -> Result<Self, GateAError> {
+        validate_optional_range(received_time_range, "模型可见回放接收时间范围无效")?;
+        let store = validate_gate_a_artifact(
+            candidate.canonical_event_store.manifest_path(),
+            GateAArtifactKind::CanonicalEventStore,
+            batch_rows,
+            max_batch_bytes,
+        )?;
+        let visibility = TypedArtifactCursor::open(
+            candidate.visibility_index.manifest_path(),
+            GateAArtifactKind::VisibilityIndex,
+            decode_visibility_index_entry,
+            batch_rows,
+            max_batch_bytes,
+            max_page_rows,
+        )?;
+        if store.manifest_sha256() != candidate.canonical_event_store.manifest_sha256()
+            || visibility.validated.manifest_sha256()
+                != candidate.visibility_index.manifest_sha256()
+            || store.root() != visibility.validated.root()
+            || dependency_digest(
+                visibility.validated.manifest(),
+                GateAArtifactKind::CanonicalEventStore,
+            ) != Some(store.manifest_sha256())
+        {
+            return Err(GateAError::ArtifactMismatch(
+                "模型可见回放读取器未绑定已完整复核的事件存储与模型可见索引".to_owned(),
+            ));
+        }
+        Ok(Self {
+            store_path: store.artifact_path().to_path_buf(),
+            visibility,
+            received_time_range,
+            finished: false,
+            batch_rows,
+            max_batch_bytes,
+        })
+    }
+
+    pub fn canonical_event_store_manifest_sha256(&self) -> &Sha256Hex {
+        dependency_digest(
+            self.visibility.validated.manifest(),
+            GateAArtifactKind::CanonicalEventStore,
+        )
+        .expect("已验证模型可见索引必须绑定唯一事件存储")
+    }
+
+    pub fn visibility_index_manifest_sha256(&self) -> &Sha256Hex {
+        self.visibility.validated.manifest_sha256()
+    }
+
+    pub const fn next_logical_position(&self) -> u64 {
+        self.visibility.next_logical_position
+    }
+
+    pub fn next_page(&mut self, limit: usize) -> Result<Vec<CanonicalEventRecordV1>, GateAError> {
+        let limit = self.visibility.checked_limit(limit)?;
+        let mut requests = Vec::with_capacity(limit);
+        while requests.len() < limit && !self.finished {
+            let Some((sort_key, entry)) = self.visibility.next_keyed_value()? else {
+                self.finished = true;
+                break;
+            };
+            if let Some((start, end)) = self.received_time_range {
+                if entry.received_at_utc_ms < start {
+                    continue;
+                }
+                if entry.received_at_utc_ms >= end {
+                    self.finished = true;
+                    break;
+                }
+            }
+            let sequence = sequence_from_time_key(&sort_key, entry.received_at_utc_ms)?;
+            requests.push(VisibilityReplayRequest {
+                sequence,
+                entry,
+                page_position: requests.len(),
+            });
+        }
+        self.resolve_page(requests)
+    }
+
+    fn resolve_page(
+        &self,
+        requests: Vec<VisibilityReplayRequest>,
+    ) -> Result<Vec<CanonicalEventRecordV1>, GateAError> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut scan_order = requests.clone();
+        scan_order.sort_by_key(|request| request.sequence);
+        if scan_order
+            .windows(2)
+            .any(|pair| pair[0].sequence == pair[1].sequence)
+        {
+            return Err(GateAError::ArtifactMismatch(
+                "模型可见索引重复引用同一规范发射位置".to_owned(),
+            ));
+        }
+
+        let mut resolved = vec![None; requests.len()];
+        let mut store = RunCursor::open(&self.store_path, self.batch_rows, self.max_batch_bytes)?;
+        let mut store_position = 0u64;
+        let mut request_position = 0usize;
+        while request_position < scan_order.len() {
+            let row = store.next_row()?.ok_or_else(|| {
+                GateAError::ArtifactMismatch(
+                    "模型可见索引引用了唯一事件存储范围外的位置".to_owned(),
+                )
+            })?;
+            if row.sort_key_bytes() != store_position.to_be_bytes() {
+                return Err(GateAError::ArtifactMismatch(
+                    "唯一事件存储发射位置不连续".to_owned(),
+                ));
+            }
+            let request = &scan_order[request_position];
+            if store_position == request.sequence {
+                let record = decode_canonical_event_record_v1(row.payload())?;
+                if project_record_visibility_index_entry(&record)? != request.entry {
+                    return Err(GateAError::ArtifactMismatch(
+                        "模型可见索引无法解析为唯一事件存储中的同一规范记录".to_owned(),
+                    ));
+                }
+                resolved[request.page_position] = Some(record);
+                request_position += 1;
+            }
+            store_position = store_position.checked_add(1).ok_or_else(|| {
+                GateAError::ArtifactMismatch("唯一事件存储发射位置溢出".to_owned())
+            })?;
+        }
+        resolved
+            .into_iter()
+            .map(|record| {
+                record.ok_or_else(|| {
+                    GateAError::ArtifactMismatch("模型可见回放页存在未解析索引".to_owned())
                 })
             })
             .collect()
@@ -3260,13 +3428,24 @@ fn validate_optional_range(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use data_pipeline_core::encode_canonical_event_record_v1;
+    use contracts::{
+        AssetIdentityV1, CanonicalSourceKind, ClobMarketId, ConditionId,
+        EXECUTION_MARKET_EVENT_SCHEMA_V3, EventLineageV2, EventQualityV2, EventTimeV2,
+        KnownMarketLifecycleState, MappedMarketLifecycleStateV1, MarketIdentityV2,
+        MarketLifecycleTransitionV2, MarketWindowV2, OutcomeIdentityV1, SourceEvidenceRefV2,
+        SourceNativeIdentityV1, TokenId,
+    };
     use data_pipeline_core::reduction::{
-        build_chainlink_reference_outcome_v1, encode_reduction_report_entry_v1,
+        REDUCTION_REPORT_SCHEMA_V1, ReductionOperationKindV1, build_chainlink_reference_outcome_v1,
+        encode_reduction_report_entry_v1,
     };
     use data_pipeline_core::typed_raw::{
         POLYMARKET_RTDS_CHAINLINK_BTC_USD_SCHEMA, PolymarketRtdsChainlinkBtcUsdRow,
         RtdsFreshnessStatus,
+    };
+    use data_pipeline_core::{
+        derive_execution_market_event_v3_id, encode_canonical_event_record_v1,
+        validate_execution_market_event_v3,
     };
     use rustix::fs::{CWD, Mode, mkfifoat};
     use tempfile::TempDir;
@@ -3452,6 +3631,87 @@ mod tests {
         )
     }
 
+    fn market_lifecycle_outcome(
+        source_event_at_utc_ms: i64,
+        received_at_utc_ms: i64,
+    ) -> (CanonicalEventRecordV1, ReductionReportEntryV1) {
+        let mut event = ExecutionMarketEventV3 {
+            schema_version: EXECUTION_MARKET_EVENT_SCHEMA_V3.to_owned(),
+            event_id: CanonicalEventId("0".repeat(64)),
+            market: MarketIdentityV2 {
+                condition_id: ConditionId(format!("0x{}", "1".repeat(64))),
+                clob_market_id: ClobMarketId("3195576".to_owned()),
+                window: MarketWindowV2 {
+                    start_at_utc_ms: 900,
+                    end_at_utc_ms: 10_000,
+                },
+            },
+            time: EventTimeV2 {
+                source_event_at_utc_ms: Some(source_event_at_utc_ms),
+                received_at_utc_ms,
+            },
+            lineage: EventLineageV2 {
+                canonical_rule_version: "canonical-test-v1".to_owned(),
+                source_evidence: vec![SourceEvidenceRefV2 {
+                    source_kind: CanonicalSourceKind::PolymarketMarketMetadata,
+                    source_native_identity: Some(SourceNativeIdentityV1::SemanticEvidenceSha256 {
+                        sha256: Sha256Hex("8".repeat(64)),
+                    }),
+                    source_event_at_utc_ms: Some(source_event_at_utc_ms),
+                    received_at_utc_ms,
+                    collector_admission: None,
+                    input_manifest_sha256: Sha256Hex("a".repeat(64)),
+                    input_file_sha256: Sha256Hex("b".repeat(64)),
+                }],
+            },
+            quality: EventQualityV2 {
+                availability: MarketDataQuality::Fresh,
+                resync: ResyncQuality::NotRequired,
+            },
+            payload: ExecutionMarketEventPayloadV3::MarketLifecycleTransition(
+                MarketLifecycleTransitionV2 {
+                    previous_state: None,
+                    current_state: MappedMarketLifecycleStateV1::Known {
+                        value: KnownMarketLifecycleState::Active,
+                    },
+                    assets: vec![
+                        AssetIdentityV1 {
+                            token_id: TokenId("1001".to_owned()),
+                            outcome: OutcomeIdentityV1 {
+                                index: 0,
+                                label: "Up".to_owned(),
+                            },
+                        },
+                        AssetIdentityV1 {
+                            token_id: TokenId("1002".to_owned()),
+                            outcome: OutcomeIdentityV1 {
+                                index: 1,
+                                label: "Down".to_owned(),
+                            },
+                        },
+                    ],
+                },
+            ),
+        };
+        event.event_id = derive_execution_market_event_v3_id(&event).unwrap();
+        validate_execution_market_event_v3(&event).unwrap();
+        let event_id = event.event_id.clone();
+        (
+            CanonicalEventRecordV1::ExecutionMarketEvent(Box::new(event)),
+            ReductionReportEntryV1 {
+                schema_version: REDUCTION_REPORT_SCHEMA_V1.to_owned(),
+                canonical_rule_version: "canonical-test-v1".to_owned(),
+                scope: "market_lifecycle:test".to_owned(),
+                operation: ReductionOperationKindV1::Merge,
+                reason_code: "POLYMARKET_MARKET_LIFECYCLE_TRANSITION".to_owned(),
+                quantity_conservation: None,
+                disposition: ReductionDispositionV1::Produced {
+                    result_event_id: event_id,
+                },
+            },
+        )
+    }
+
     fn build_micro_candidate() -> MicroCandidate {
         let temporary = TempDir::new().unwrap();
         let candidate_path = temporary.path().join("candidate");
@@ -3460,9 +3720,9 @@ mod tests {
         let (config, output_config) = micro_configs();
         let scope = CanonicalRunScope::new(format!("0x{}", "1".repeat(64)), 3_000, 7_000).unwrap();
         let outcomes = [
-            chainlink_outcome(0, 3_000, 4_000),
-            chainlink_outcome(1, 1_000, 5_000),
-            chainlink_outcome(2, 1_000, 6_000),
+            chainlink_outcome(0, 3_000, 6_000),
+            chainlink_outcome(1, 1_000, 4_000),
+            market_lifecycle_outcome(2_000, 5_000),
         ];
         let records = outcomes
             .iter()
@@ -3525,7 +3785,8 @@ mod tests {
             },
             metrics: CanonicalRunMetrics {
                 canonical_records: 3,
-                reference_events: 3,
+                execution_market_events: 1,
+                reference_events: 2,
                 event_time_projections: 3,
                 visibility_projections: 3,
                 reduction_reports: 3,
@@ -3694,10 +3955,97 @@ mod tests {
             actual,
             vec![
                 (1_000, fixture.event_ids[1].clone()),
-                (1_000, fixture.event_ids[2].clone()),
+                (2_000, fixture.event_ids[2].clone()),
                 (3_000, fixture.event_ids[0].clone()),
             ]
         );
+    }
+
+    #[test]
+    fn visibility_replay_preserves_index_order_and_page_closure() {
+        let fixture = build_micro_candidate();
+        let mut replay = VisibilityReplayCursor::open(
+            &fixture.validated,
+            None,
+            fixture.output_config.sort.batch_rows,
+            fixture.output_config.sort.max_run_bytes,
+            2,
+        )
+        .unwrap();
+
+        let first = replay.next_page(2).unwrap();
+        assert_eq!(replay.next_logical_position(), 2);
+        assert_eq!(
+            first
+                .iter()
+                .map(record_event_id)
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![fixture.event_ids[1].clone(), fixture.event_ids[2].clone()]
+        );
+        assert!(matches!(
+            first[0],
+            CanonicalEventRecordV1::ReferenceEvent(_)
+        ));
+        assert!(matches!(
+            first[1],
+            CanonicalEventRecordV1::ExecutionMarketEvent(_)
+        ));
+
+        let second = replay.next_page(2).unwrap();
+        assert_eq!(replay.next_logical_position(), 3);
+        assert_eq!(
+            second
+                .iter()
+                .map(record_event_id)
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![fixture.event_ids[0].clone()]
+        );
+        assert!(replay.next_page(2).unwrap().is_empty());
+
+        let market_ids = first
+            .into_iter()
+            .chain(second)
+            .filter_map(|record| {
+                record
+                    .as_execution_market_event()
+                    .map(|event| event.event_id.clone())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(market_ids, vec![fixture.event_ids[2].clone()]);
+    }
+
+    #[test]
+    fn visibility_replay_rejects_entry_that_does_not_project_from_store_record() {
+        let fixture = build_micro_candidate();
+        let replay = VisibilityReplayCursor::open(
+            &fixture.validated,
+            None,
+            fixture.output_config.sort.batch_rows,
+            fixture.output_config.sort.max_run_bytes,
+            1,
+        )
+        .unwrap();
+        let mut store = CanonicalEventStoreCursor::open(
+            fixture.validated.canonical_event_store.manifest_path(),
+            fixture.output_config.sort.batch_rows,
+            fixture.output_config.sort.max_run_bytes,
+            2,
+        )
+        .unwrap();
+        let records = store.next_page(2).unwrap();
+        let wrong_entry = project_record_visibility_index_entry(&records[1]).unwrap();
+
+        assert!(matches!(
+            replay.resolve_page(vec![VisibilityReplayRequest {
+                sequence: 0,
+                entry: wrong_entry,
+                page_position: 0,
+            }]),
+            Err(GateAError::ArtifactMismatch(message))
+                if message == "模型可见索引无法解析为唯一事件存储中的同一规范记录"
+        ));
     }
 
     #[test]
