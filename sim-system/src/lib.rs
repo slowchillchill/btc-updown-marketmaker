@@ -14,6 +14,8 @@ pub(crate) mod market;
 pub(crate) mod market_directory;
 #[allow(dead_code)]
 pub(crate) mod matching;
+#[cfg(feature = "measurement")]
+mod measurement_probe;
 
 pub mod platform_rules;
 pub(crate) mod rebate;

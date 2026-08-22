@@ -2,9 +2,15 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::Path;
+#[cfg(feature = "measurement")]
+use std::sync::Arc;
+#[cfg(feature = "measurement")]
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "measurement")]
+use crate::measurement_probe::{MeasurementContext, MeasurementPhase, MeasurementProbe};
 use crate::runtime_v2::{BusinessInputV2, LoggedBusinessInputV2, RunDurabilityRoleV2, RunOpenedV2};
 
 pub(crate) const SIM_EVENT_LOG_FILE_NAME_V2: &str = "sim-event-log-v2.jsonl";
@@ -72,6 +78,8 @@ pub(crate) struct SimEventLogV2 {
     byte_count: u64,
     next_input_sequence: u64,
     max_group_bytes: usize,
+    #[cfg(feature = "measurement")]
+    measurement_probe: Arc<MeasurementProbe>,
     #[cfg(test)]
     fail_next_write: bool,
     #[cfg(test)]
@@ -84,7 +92,17 @@ impl SimEventLogV2 {
         opened: &RunOpenedV2,
         max_group_bytes: usize,
     ) -> Result<Self, SimEventLogErrorV2> {
+        #[cfg(feature = "measurement")]
+        let measurement_probe = Arc::new(MeasurementProbe::default());
+        #[cfg(feature = "measurement")]
+        let encode_started = Instant::now();
         let encoded = encode_line(&SimEventLogLineRefV2::RunOpened(opened), max_group_bytes)?;
+        #[cfg(feature = "measurement")]
+        measurement_probe.record(
+            MeasurementContext::CommitGroup,
+            MeasurementPhase::LogEncode,
+            elapsed_ns(encode_started),
+        );
         let file = OpenOptions::new()
             .create_new(true)
             .read(true)
@@ -97,13 +115,21 @@ impl SimEventLogV2 {
             byte_count: 0,
             next_input_sequence: 1,
             max_group_bytes,
+            #[cfg(feature = "measurement")]
+            measurement_probe,
             #[cfg(test)]
             fail_next_write: false,
             #[cfg(test)]
             fail_next_sync: false,
         };
+        #[cfg(feature = "measurement")]
+        log.write_encoded(&encoded, MeasurementContext::CommitGroup)?;
+        #[cfg(not(feature = "measurement"))]
         log.write_encoded(&encoded)?;
         if opened.durability_role == RunDurabilityRoleV2::RecoverablePaper {
+            #[cfg(feature = "measurement")]
+            log.sync_data(MeasurementContext::CommitGroup)?;
+            #[cfg(not(feature = "measurement"))]
             log.sync_data()?;
         }
         Ok(log)
@@ -122,12 +148,26 @@ impl SimEventLogV2 {
             .expect("有界事件日志的输入序号不会溢出");
         #[cfg(test)]
         record_group_append_for_tests(inputs.len() as u64);
+        #[cfg(feature = "measurement")]
+        let encode_started = Instant::now();
         let encoded = encode_line(
             &SimEventLogLineRefV2::AcceptedInputs(inputs),
             self.max_group_bytes,
         )?;
+        #[cfg(feature = "measurement")]
+        self.measurement_probe.record(
+            MeasurementContext::CommitGroup,
+            MeasurementPhase::LogEncode,
+            elapsed_ns(encode_started),
+        );
+        #[cfg(feature = "measurement")]
+        self.write_encoded(&encoded, MeasurementContext::CommitGroup)?;
+        #[cfg(not(feature = "measurement"))]
         self.write_encoded(&encoded)?;
         if self.durability_role == RunDurabilityRoleV2::RecoverablePaper {
+            #[cfg(feature = "measurement")]
+            self.sync_data(MeasurementContext::CommitGroup)?;
+            #[cfg(not(feature = "measurement"))]
             self.sync_data()?;
         }
         self.next_input_sequence = next;
@@ -140,8 +180,22 @@ impl SimEventLogV2 {
                 "RecoverablePaper 不使用 RunSeal",
             ));
         }
+        #[cfg(feature = "measurement")]
+        let encode_started = Instant::now();
         let encoded = encode_line(&SimEventLogLineRefV2::RunSeal, self.max_group_bytes)?;
+        #[cfg(feature = "measurement")]
+        self.measurement_probe.record(
+            MeasurementContext::CleanSeal,
+            MeasurementPhase::LogEncode,
+            elapsed_ns(encode_started),
+        );
+        #[cfg(feature = "measurement")]
+        self.write_encoded(&encoded, MeasurementContext::CleanSeal)?;
+        #[cfg(not(feature = "measurement"))]
         self.write_encoded(&encoded)?;
+        #[cfg(feature = "measurement")]
+        return self.sync_data(MeasurementContext::CleanSeal);
+        #[cfg(not(feature = "measurement"))]
         self.sync_data()
     }
 
@@ -153,7 +207,16 @@ impl SimEventLogV2 {
         self.next_input_sequence
     }
 
-    fn write_encoded(&mut self, encoded: &[u8]) -> Result<(), SimEventLogErrorV2> {
+    #[cfg(feature = "measurement")]
+    pub(crate) fn measurement_probe(&self) -> Arc<MeasurementProbe> {
+        Arc::clone(&self.measurement_probe)
+    }
+
+    fn write_encoded(
+        &mut self,
+        encoded: &[u8],
+        #[cfg(feature = "measurement")] context: MeasurementContext,
+    ) -> Result<(), SimEventLogErrorV2> {
         #[cfg(test)]
         if std::mem::take(&mut self.fail_next_write) {
             return Err(io_error(
@@ -161,9 +224,14 @@ impl SimEventLogV2 {
                 io::Error::other("测试注入写入失败"),
             ));
         }
+        #[cfg(feature = "measurement")]
+        let started = Instant::now();
         self.file
             .write_all(encoded)
             .map_err(|error| io_error("追加单一事件日志组", error))?;
+        #[cfg(feature = "measurement")]
+        self.measurement_probe
+            .record(context, MeasurementPhase::LogWrite, elapsed_ns(started));
         self.byte_count = self
             .byte_count
             .checked_add(encoded.len() as u64)
@@ -171,7 +239,10 @@ impl SimEventLogV2 {
         Ok(())
     }
 
-    fn sync_data(&mut self) -> Result<(), SimEventLogErrorV2> {
+    fn sync_data(
+        &mut self,
+        #[cfg(feature = "measurement")] context: MeasurementContext,
+    ) -> Result<(), SimEventLogErrorV2> {
         #[cfg(test)]
         record_sync_attempt_for_tests();
         #[cfg(test)]
@@ -181,9 +252,14 @@ impl SimEventLogV2 {
                 io::Error::other("测试注入同步失败"),
             ));
         }
+        #[cfg(feature = "measurement")]
+        let started = Instant::now();
         self.file
             .sync_data()
             .map_err(|error| io_error("同步单一事件日志", error))?;
+        #[cfg(feature = "measurement")]
+        self.measurement_probe
+            .record(context, MeasurementPhase::LogSync, elapsed_ns(started));
         #[cfg(test)]
         record_sync_for_tests();
         Ok(())
@@ -333,6 +409,8 @@ impl SimEventLogRecoveryV2 {
             byte_count: self.last_complete_offset,
             next_input_sequence: self.next_input_sequence,
             max_group_bytes: self.max_group_bytes,
+            #[cfg(feature = "measurement")]
+            measurement_probe: Arc::new(MeasurementProbe::default()),
             #[cfg(test)]
             fail_next_write: false,
             #[cfg(test)]
@@ -366,6 +444,11 @@ fn encode_line(
     #[cfg(test)]
     record_line_encode_for_tests();
     Ok(buffer.into_inner())
+}
+
+#[cfg(feature = "measurement")]
+fn elapsed_ns(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
 fn read_complete_line(
