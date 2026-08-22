@@ -1,7 +1,9 @@
 use serde::Serialize;
 
 const RUNNER_IDENTITY: &str = "sim-task-4-5-1-golden-v1";
+const TARGETED_RUNNER_IDENTITY: &str = "sim-task-4-5-2-retention-24h-v1";
 const WORKLOAD_IDENTITY: &str = "public-sim-execution-two-market-256x8-v1";
+const TARGETED_RETENTION_WINDOW_MS: i64 = 86_400_000;
 const LOOPS_PER_ROOT: usize = 256;
 const REQUESTS_PER_ROOT: usize = LOOPS_PER_ROOT * 8;
 const GIB: u64 = 1024 * 1024 * 1024;
@@ -133,10 +135,11 @@ mod enabled {
     use std::collections::BTreeMap;
     use std::fs::{self, File, OpenOptions};
     use std::io::{BufWriter, Read, Write};
+    use std::ops::Range;
     use std::path::{Path, PathBuf};
     use std::process::Command;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use contracts::{
@@ -144,8 +147,10 @@ mod enabled {
         CollectorAdmissionCoordinateV1, ConditionId, EventLineageV2, EventQualityV2, EventTimeV2,
         ExactDecimal, ExecutionMarketEventPayloadV3, ExecutionMarketEventV3, InitialAccountStateV2,
         InitialL2SnapshotV2, MarketDataQuality, MarketIdentityV2, MarketResolutionTerminalV3,
-        MarketWindowV2, OutcomeIdentityV1, PayoutEntryV1, PriceLevelV1, ResyncQuality, Sha256Hex,
-        SimCallerRoleV1, SourceEvidenceRefV2, TokenId,
+        MarketWindowV2, OrderQueryResultV2, OrdersQueryResultV2, OutcomeIdentityV1, PayoutEntryV1,
+        PriceLevelV1, QueryCursorV2, QueryOutOfRetentionV2, ResyncQuality, Sha256Hex,
+        SimCallerRoleV1, SourceEvidenceRefV2, SubmissionItemOutcomeV2, TokenId,
+        TradesQueryResultV2,
     };
     use data_pipeline_core::{
         decode_execution_market_event_v3, derive_execution_market_event_v3_id,
@@ -155,13 +160,14 @@ mod enabled {
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use sim_system::execution::{
-        AcceptedClosedMarketBucketV2, BusinessProjectionBatchV2, BusinessProjectionPortV2,
-        CancelAllOrdersRequestV2, CancelOrderBatchItemV2, CancelOrderItemV1, CancelOrderRequestV2,
-        CancelOrdersRequestV2, DurableMarketBucketReferenceV2, OrderRequestV2, OrdersFilterV1,
-        OrdersRequestV2, PostOrderBatchItemV2, PostOrderItemV1, PostOrderRequestV2,
-        PostOrdersRequestV2, PublicVisibilityCursorV1, RequestContextV2, RetentionAdvanceV2,
-        RunDurabilityRoleV2, RunOpenedV2, SessionSpecV3, SimBuyOrderKindV1, SimBuyOrderV1,
-        SimExecution, SimRunActorErrorV2, TradesFilterV1, TradesRequestV2, TrustedDecisionCutoffV2,
+        AcceptedClosedMarketBucketV2, BusinessDirectResponseV2, BusinessProjectionBatchV2,
+        BusinessProjectionPortV2, CancelAllOrdersRequestV2, CancelOrderBatchItemV2,
+        CancelOrderItemV1, CancelOrderRequestV2, CancelOrdersRequestV2,
+        DurableMarketBucketReferenceV2, OrderRequestV2, OrdersFilterV1, OrdersRequestV2,
+        PostOrderBatchItemV2, PostOrderItemV1, PostOrderRequestV2, PostOrdersRequestV2,
+        PublicVisibilityCursorV1, RequestContextV2, RetentionAdvanceV2, RunDurabilityRoleV2,
+        RunOpenedV2, SessionSpecV3, SimBuyOrderKindV1, SimBuyOrderV1, SimExecution,
+        SimRunActorErrorV2, TradesFilterV1, TradesRequestV2, TrustedDecisionCutoffV2,
     };
     use sim_system::execution::{MarketEventPathV1, MillisecondBucketClosureV1};
     use sim_system::finality::TradeFinalityPolicyV2;
@@ -178,8 +184,8 @@ mod enabled {
 
     use super::{
         DistributionSummary, LOOPS_PER_ROOT, PairKey, REQUESTS_PER_ROOT, RUNNER_IDENTITY,
-        SafetyLimits, SafetyUsage, WORKLOAD_IDENTITY, distribution_summary, safety_violation,
-        validate_feature_pair,
+        SafetyLimits, SafetyUsage, TARGETED_RETENTION_WINDOW_MS, TARGETED_RUNNER_IDENTITY,
+        WORKLOAD_IDENTITY, distribution_summary, safety_violation, validate_feature_pair,
     };
 
     const CONDITION: &str = "0xd4346bcf419856fa3261d3c0705597d5c909ead020b9f1a0de468092704fc65f";
@@ -202,17 +208,33 @@ mod enabled {
     const RESOLUTION_TWO_SOURCE: i64 = MARKET_END + 20;
     const FINAL_EOF_SOURCE: i64 = RESOLUTION_TWO_SOURCE + 86_500_000;
     const PUBLIC_DELAY_MS: i64 = 10;
+    const TARGETED_FINAL_CUTOFF_UTC_MS: i64 = FINAL_EOF_SOURCE + PUBLIC_DELAY_MS;
 
     #[cfg(feature = "measurement")]
     const BUILD: &str = "measurement_on";
     #[cfg(not(feature = "measurement"))]
     const BUILD: &str = "measurement_off";
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum RunMode {
+        GoldenMatrix,
+        TargetedRetention24h,
+    }
+
+    #[cfg(test)]
+    pub(super) const fn runner_identity(mode: RunMode) -> &'static str {
+        match mode {
+            RunMode::GoldenMatrix => RUNNER_IDENTITY,
+            RunMode::TargetedRetention24h => TARGETED_RUNNER_IDENTITY,
+        }
+    }
+
     #[derive(Debug)]
-    struct Args {
+    pub(super) struct Args {
         output_dir: PathBuf,
         identity: ImplementationIdentityV1,
         baseline_summary: Option<PathBuf>,
+        pub(super) mode: RunMode,
         argv: Vec<String>,
     }
 
@@ -424,6 +446,176 @@ mod enabled {
         candidate_status: &'static str,
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+    pub(super) struct MinMedianMax {
+        pub(super) min: u64,
+        pub(super) median: u64,
+        pub(super) max: u64,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) struct TargetedSummaryInput {
+        warmup: bool,
+        retention_elapsed_ns: u64,
+        released_business_records: u64,
+        released_business_bytes: u64,
+        semantics_passed: bool,
+    }
+
+    impl TargetedSummaryInput {
+        pub(super) const fn new(
+            warmup: bool,
+            retention_elapsed_ns: u64,
+            released_business_records: u64,
+            released_business_bytes: u64,
+            semantics_passed: bool,
+        ) -> Self {
+            Self {
+                warmup,
+                retention_elapsed_ns,
+                released_business_records,
+                released_business_bytes,
+                semantics_passed,
+            }
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq, Serialize)]
+    pub(super) struct TargetedSummary {
+        schema_version: &'static str,
+        runner_identity: &'static str,
+        exploratory_input_only: bool,
+        window_ms: i64,
+        pub(super) measured_trial_count: usize,
+        pub(super) warmup_trial_count: usize,
+        pub(super) retention_elapsed_ns: MinMedianMax,
+        pub(super) released_business_records: MinMedianMax,
+        pub(super) released_business_bytes: MinMedianMax,
+        pub(super) semantic_pass_count: usize,
+    }
+
+    fn min_median_max(mut values: Vec<u64>) -> Result<MinMedianMax, String> {
+        if values.is_empty() {
+            return Err("targeted 汇总需要非空正式 trial".to_owned());
+        }
+        values.sort_unstable();
+        Ok(MinMedianMax {
+            min: values[0],
+            median: values[values.len() / 2],
+            max: values[values.len() - 1],
+        })
+    }
+
+    pub(super) fn summarize_targeted(
+        samples: &[TargetedSummaryInput],
+    ) -> Result<TargetedSummary, String> {
+        let measured = samples
+            .iter()
+            .filter(|sample| !sample.warmup)
+            .collect::<Vec<_>>();
+        if measured.len() != TRIALS || samples.iter().filter(|sample| sample.warmup).count() != 1 {
+            return Err("targeted 必须恰有 1 次 warmup 和 3 次正式 trial".to_owned());
+        }
+        Ok(TargetedSummary {
+            schema_version: "sim_targeted_retention_summary_v1",
+            runner_identity: TARGETED_RUNNER_IDENTITY,
+            exploratory_input_only: true,
+            window_ms: TARGETED_RETENTION_WINDOW_MS,
+            measured_trial_count: measured.len(),
+            warmup_trial_count: 1,
+            retention_elapsed_ns: min_median_max(
+                measured
+                    .iter()
+                    .map(|sample| sample.retention_elapsed_ns)
+                    .collect(),
+            )?,
+            released_business_records: min_median_max(
+                measured
+                    .iter()
+                    .map(|sample| sample.released_business_records)
+                    .collect(),
+            )?,
+            released_business_bytes: min_median_max(
+                measured
+                    .iter()
+                    .map(|sample| sample.released_business_bytes)
+                    .collect(),
+            )?,
+            semantic_pass_count: measured
+                .iter()
+                .filter(|sample| sample.semantics_passed)
+                .count(),
+        })
+    }
+
+    #[derive(Clone, Debug)]
+    struct CapturedResponse {
+        method: &'static str,
+        body: Value,
+    }
+
+    #[derive(Default)]
+    struct CapturingProjectionState {
+        durable_through: u64,
+        responses: BTreeMap<String, CapturedResponse>,
+    }
+
+    struct CapturingProjectionPort {
+        state: Arc<Mutex<CapturingProjectionState>>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct TargetedQueryPlan {
+        old_root_sequence: u64,
+        retained_from_utc_ms: i64,
+        trade_id: String,
+    }
+
+    impl BusinessProjectionPortV2 for CapturingProjectionPort {
+        fn try_accept(&mut self, batch: Arc<BusinessProjectionBatchV2>) -> bool {
+            let mut state = self.state.lock().expect("targeted 投影状态锁未损坏");
+            state.durable_through = batch.projection_batch_sequence;
+            for response in batch.direct_responses() {
+                let (global_request_id, method, body) = match response {
+                    BusinessDirectResponseV2::PostOrder(response) => (
+                        &response.metadata.global_request_id,
+                        "post_order",
+                        serde_json::to_value(response),
+                    ),
+                    BusinessDirectResponseV2::Order(response) => (
+                        &response.metadata.global_request_id,
+                        "order",
+                        serde_json::to_value(response),
+                    ),
+                    BusinessDirectResponseV2::Orders(response) => (
+                        &response.metadata.global_request_id,
+                        "orders",
+                        serde_json::to_value(response),
+                    ),
+                    BusinessDirectResponseV2::Trades(response) => (
+                        &response.metadata.global_request_id,
+                        "trades",
+                        serde_json::to_value(response),
+                    ),
+                    _ => continue,
+                };
+                if let Ok(body) = body {
+                    state
+                        .responses
+                        .insert(global_request_id.clone(), CapturedResponse { method, body });
+                }
+            }
+            true
+        }
+
+        fn durable_through(&self, _run_id: &str) -> u64 {
+            self.state
+                .lock()
+                .expect("targeted 投影状态锁未损坏")
+                .durable_through
+        }
+    }
+
     #[derive(Default)]
     struct AcceptingProjectionPort {
         durable_through: u64,
@@ -443,6 +635,13 @@ mod enabled {
     pub fn main() -> Result<(), String> {
         let run_started = Instant::now();
         let args = parse_args()?;
+        match args.mode {
+            RunMode::GoldenMatrix => run_golden_matrix(args, run_started),
+            RunMode::TargetedRetention24h => run_targeted_retention(args, run_started),
+        }
+    }
+
+    fn run_golden_matrix(args: Args, run_started: Instant) -> Result<(), String> {
         fs::create_dir_all(&args.output_dir)
             .map_err(|error| format!("创建输出目录失败：{error}"))?;
         check_safety(run_started, run_started, &args.output_dir)?;
@@ -593,6 +792,649 @@ mod enabled {
         Ok(())
     }
 
+    fn run_targeted_retention(args: Args, run_started: Instant) -> Result<(), String> {
+        #[cfg(not(feature = "measurement"))]
+        {
+            let _ = (args, run_started);
+            return Err(
+                "--targeted-retention-24h 只允许 measurement feature 构建；未装配探针".to_owned(),
+            );
+        }
+
+        #[cfg(feature = "measurement")]
+        {
+            if args.output_dir.exists()
+                && fs::read_dir(&args.output_dir)
+                    .map_err(|error| format!("读取 targeted 输出目录失败：{error}"))?
+                    .next()
+                    .is_some()
+            {
+                return Err("targeted 输出目录必须为空，拒绝混入陈旧产物".to_owned());
+            }
+            fs::create_dir_all(&args.output_dir)
+                .map_err(|error| format!("创建 targeted 输出目录失败：{error}"))?;
+            check_safety(run_started, run_started, &args.output_dir)?;
+            let started_at_unix_ms = unix_ms()?;
+            let started_at_utc = utc_now()?;
+            let evidence_root = std::env::temp_dir().join(format!(
+                "sim-targeted-retention-{}-{started_at_unix_ms}",
+                std::process::id()
+            ));
+            fs::create_dir(&evidence_root)
+                .map_err(|error| format!("创建 targeted 临时证据根失败：{error}"))?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| format!("创建 Tokio 运行时失败：{error}"))?;
+            let snapshot = runtime
+                .block_on(query_and_seal_current_process_snapshot_v3(
+                    CurrentProcessSnapshotRequestV1 {
+                        reference_market: reference_market(),
+                        target_path: evidence_root.join("platform-rule-snapshot-v3.json"),
+                        implementation_identity: args.identity.clone(),
+                    },
+                ))
+                .map_err(|error| format!("查询并封存进程规则快照失败：{error}"))?;
+            let scenario = fixed_scenario()?;
+            let finality = successful_finality()?;
+            let latency = load_embedded_proxy_latency_profile()
+                .map_err(|error| format!("加载嵌入时延档失败：{error}"))?;
+            let identities = identities(&snapshot, &scenario, &finality, &latency);
+            let current_exe =
+                std::env::current_exe().map_err(|error| format!("定位当前二进制失败：{error}"))?;
+            let binary_sha256 = sha256_file(&current_exe)?;
+            let samples_path = args.output_dir.join("retention-samples.jsonl");
+            if samples_path.exists() {
+                fs::remove_file(&samples_path)
+                    .map_err(|error| format!("清理旧 retention-samples.jsonl 失败：{error}"))?;
+            }
+
+            let mut summary_inputs = Vec::with_capacity(WARMUP_TRIALS + TRIALS);
+            for trial in 0..(WARMUP_TRIALS + TRIALS) {
+                let trial_started = Instant::now();
+                check_safety(run_started, trial_started, &args.output_dir)?;
+                let warmup = trial < WARMUP_TRIALS;
+                let root_dir = evidence_root.join(format!("retention-root-{trial}"));
+                let trial_snapshot = Arc::clone(&snapshot);
+                let trial_scenario = Arc::clone(&scenario);
+                let trial_finality = Arc::clone(&finality);
+                let trial_latency = Arc::clone(&latency);
+                let trial_identity = args.identity.clone();
+                let trial_identities = identities.clone();
+                let trial_binary = current_exe.clone();
+                let trial_binary_sha256 = binary_sha256.clone();
+                let cancelled = Arc::new(AtomicBool::new(false));
+                let worker_cancelled = Arc::clone(&cancelled);
+                let handle = std::thread::spawn(move || {
+                    run_targeted_root(
+                        root_dir,
+                        trial,
+                        warmup,
+                        trial_snapshot,
+                        trial_scenario,
+                        trial_finality,
+                        trial_latency,
+                        trial_identity,
+                        &trial_identities,
+                        &trial_binary,
+                        &trial_binary_sha256,
+                        run_started,
+                        trial_started,
+                        worker_cancelled,
+                    )
+                });
+                let mut safety_error = None;
+                while !handle.is_finished() {
+                    if let Err(error) = check_safety(run_started, trial_started, &args.output_dir) {
+                        cancelled.store(true, Ordering::Relaxed);
+                        safety_error = Some(error);
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                let sample = handle
+                    .join()
+                    .map_err(|_| "targeted trial 线程异常退出".to_owned())??;
+                if let Some(error) = safety_error {
+                    return Err(error);
+                }
+                check_safety(run_started, trial_started, &args.output_dir)?;
+                summary_inputs.push(TargetedSummaryInput::new(
+                    warmup,
+                    sample["retention_elapsed_ns"]
+                        .as_u64()
+                        .ok_or_else(|| "targeted sample 缺少 retention_elapsed_ns".to_owned())?,
+                    sample["released_resources"]["business_records"]
+                        .as_u64()
+                        .ok_or_else(|| "targeted sample 缺少释放 records".to_owned())?,
+                    sample["released_resources"]["business_bytes"]
+                        .as_u64()
+                        .ok_or_else(|| "targeted sample 缺少释放 bytes".to_owned())?,
+                    sample["semantics_passed"].as_bool() == Some(true),
+                ));
+                append_json_line(&samples_path, &sample)?;
+            }
+
+            write_json(
+                args.output_dir.join("retention-summary.json"),
+                &summarize_targeted(&summary_inputs)?,
+            )?;
+            let completed_at_unix_ms = unix_ms()?;
+            let completed_at_utc = utc_now()?;
+            write_json(
+                args.output_dir.join("retention-environment.json"),
+                &json!({
+                    "schema_version": "sim_targeted_retention_environment_v1",
+                    "runner_identity": TARGETED_RUNNER_IDENTITY,
+                    "build": BUILD,
+                    "exploratory_input_only": true,
+                    "argv": args.argv,
+                    "started_at_unix_ms": started_at_unix_ms,
+                    "started_at_utc": started_at_utc,
+                    "completed_at_unix_ms": completed_at_unix_ms,
+                    "completed_at_utc": completed_at_utc,
+                    "uname": command_output("uname", &["-a"]),
+                    "cpu_model": cpu_model()?,
+                    "logical_cores": std::thread::available_parallelism()
+                        .map(|count| count.get())
+                        .map_err(|error| format!("读取逻辑核心数失败：{error}"))?,
+                    "git_identity": args.identity,
+                    "git_head": command_output("git", &["rev-parse", "HEAD"]),
+                    "binary": {"path": current_exe, "sha256": binary_sha256},
+                    "identities": identities,
+                    "fixed_mode": {
+                        "window_ms": TARGETED_RETENTION_WINDOW_MS,
+                        "durability": "recoverable_paper",
+                        "shape": "single_root",
+                        "loops_per_root": LOOPS_PER_ROOT,
+                        "methods_per_loop": 8,
+                        "requests_per_root": REQUESTS_PER_ROOT,
+                        "warmup_trials": WARMUP_TRIALS,
+                        "measured_trials": TRIALS,
+                        "targeted_first_post_order": {
+                            "kind": "fok_market",
+                            "spend_pusd": "3",
+                            "worst_price_pusd_per_share": "0.6"
+                        }
+                    }
+                }),
+            )?;
+            fs::remove_dir_all(&evidence_root)
+                .map_err(|error| format!("清理 targeted 临时证据根失败：{error}"))?;
+            let artifacts = artifact_inventory(&args.output_dir)?;
+            write_json(
+                args.output_dir.join("retention-manifest.json"),
+                &json!({
+                    "schema_version": "sim_targeted_retention_manifest_v1",
+                    "runner_identity": TARGETED_RUNNER_IDENTITY,
+                    "exploratory_input_only": true,
+                    "command": args.argv,
+                    "exit_code": 0,
+                    "git_head": command_output("git", &["rev-parse", "HEAD"]),
+                    "no_failures": true,
+                    "artifacts": artifacts,
+                    "inventory_excludes_manifest_itself": true
+                }),
+            )
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_targeted_root(
+        root_dir: PathBuf,
+        trial: usize,
+        warmup: bool,
+        snapshot: Arc<SealedProcessRuleSnapshotV3>,
+        scenario: Arc<SealedPlatformScenarioV1>,
+        finality: Arc<TradeFinalityPolicyV2>,
+        latency: Arc<EmpiricalDelayProfile>,
+        identity: ImplementationIdentityV1,
+        identities: &IdentityBundle,
+        binary_path: &Path,
+        binary_sha256: &str,
+        run_started: Instant,
+        trial_started: Instant,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<Value, String> {
+        fs::create_dir_all(&root_dir).map_err(|error| format!("创建 targeted 根失败：{error}"))?;
+        let log_path = root_dir.join("sim-event-log-v2.jsonl");
+        if log_path.exists() {
+            fs::remove_file(&log_path)
+                .map_err(|error| format!("清理旧 targeted 日志失败：{error}"))?;
+        }
+        let run_id = format!("{TARGETED_RUNNER_IDENTITY}-trial-{trial}");
+        let capture = Arc::new(Mutex::new(CapturingProjectionState::default()));
+        let mut execution = SimExecution::create_new(
+            &log_path,
+            RunOpenedV2 {
+                run_id: run_id.clone(),
+                durability_role: RunDurabilityRoleV2::RecoverablePaper,
+                platform_rule_snapshot_file_sha256: snapshot.file_sha256().clone(),
+                trade_finality_policy_file_sha256: finality.policy_id().clone(),
+                platform_scenario_file_sha256: scenario.file_sha256().clone(),
+                proxy_latency_profile_file_sha256: latency.file_sha256().clone(),
+                implementation_identity: identity.clone(),
+                market_event_source_identity_sha256: Sha256Hex("7".repeat(64)),
+            },
+            Arc::clone(&snapshot),
+            Arc::clone(&finality),
+            Arc::clone(&scenario),
+            Arc::clone(&latency),
+            Box::new(CapturingProjectionPort {
+                state: Arc::clone(&capture),
+            }),
+            MAX_GROUP_BYTES,
+        )
+        .map_err(|error| format!("创建 targeted Paper 根失败：{error}"))?;
+        let spec = SessionSpecV3 {
+            run_id: run_id.clone(),
+            session_id: format!("retention-session-{trial}"),
+            account_id: "shared-account".to_owned(),
+            caller_role: SimCallerRoleV1::Paper,
+            caller_instance_id: "targeted-retention-runner".to_owned(),
+            creation_request_id: format!("retention-create-{trial}"),
+            response_bridge_binding_id: "targeted-retention-bridge".to_owned(),
+            initial_account_state: InitialAccountStateV2 {
+                available_pusd: ExactDecimal("2000".to_owned()),
+            },
+            session_seed: Sha256Hex("8".repeat(64)),
+        };
+        execution
+            .create_session(spec.clone())
+            .map_err(|error| format!("创建 targeted 会话失败：{error}"))?;
+        execution
+            .retry_create_session(spec)
+            .map_err(|error| format!("重试 targeted 会话失败：{error}"))?;
+        execution
+            .activate_session(format!("retention-activate-{trial}"))
+            .map_err(|error| format!("激活 targeted 会话失败：{error}"))?;
+
+        let buckets = golden_buckets(&scenario)?;
+        let public_buckets = buckets
+            .iter()
+            .filter(|(reference, _)| reference.path == MarketEventPathV1::PublicVisibility)
+            .collect::<Vec<_>>();
+        let mut next_bucket = 0;
+        while next_bucket < 2 {
+            drive_real_bucket(&mut execution, public_buckets[next_bucket])?;
+            next_bucket += 1;
+        }
+        let mut resource_high_water = measurement_resources(&execution)?;
+        let mut next_decision_at_utc_ms = REQUEST_CUTOFF_BASE;
+        drive_fixed_request_range(
+            &mut execution,
+            &scenario,
+            0,
+            true,
+            0..253,
+            None,
+            &public_buckets,
+            &mut next_bucket,
+            &cancelled,
+            &mut resource_high_water,
+            &mut next_decision_at_utc_ms,
+        )?;
+        check_safety(run_started, trial_started, &root_dir)?;
+
+        let first_post: contracts::PostOrderDirectResponseV2 =
+            captured_response(&capture, "r0-i0-post-order", "post_order")?;
+        let SubmissionItemOutcomeV2::Accepted(accepted) = &first_post.item.outcome else {
+            return Err("targeted 首个 FOK 未形成 accepted terminal order".to_owned());
+        };
+        if accepted.fills.len() != 1 || accepted.platform_order_id != "sim-1" {
+            return Err("targeted 首个 FOK 必须恰好形成 sim-1 和一笔成交".to_owned());
+        }
+        let trade_id = accepted.fills[0].trade_id.clone();
+        let old_orders: contracts::OrdersDirectResponseV2 =
+            captured_response(&capture, "r0-i0-orders", "orders")?;
+        let old_trades: contracts::TradesDirectResponseV2 =
+            captured_response(&capture, "r0-i0-trades", "trades")?;
+        let (
+            OrdersQueryResultV2::Page(old_orders_page),
+            TradesQueryResultV2::Page(old_trades_page),
+        ) = (old_orders.result, old_trades.result)
+        else {
+            return Err("targeted iteration 0 的 orders/trades 未物化 Page 根".to_owned());
+        };
+        if old_orders_page.root_sequence != old_trades_page.root_sequence {
+            return Err("targeted iteration 0 的 orders/trades 未物化同一旧根".to_owned());
+        }
+        let old_root_sequence = old_orders_page.root_sequence;
+        let current_before_retention: contracts::OrdersDirectResponseV2 =
+            captured_response(&capture, "r0-i252-orders", "orders")?;
+        let OrdersQueryResultV2::Page(current_before_retention_page) =
+            current_before_retention.result
+        else {
+            return Err("targeted retention 前当前 orders 未返回 Page".to_owned());
+        };
+        let retained_from_utc_ms = TARGETED_FINAL_CUTOFF_UTC_MS - TARGETED_RETENTION_WINDOW_MS;
+        let earliest_retained_root_sequence = old_root_sequence
+            .checked_add(1)
+            .ok_or_else(|| "旧 query root sequence 溢出".to_owned())?;
+        if current_before_retention_page.root_sequence < earliest_retained_root_sequence {
+            return Err("公开 orders Page 不能证明当前 revision 已越过旧 root".to_owned());
+        }
+        let retention_input = RetentionAdvanceV2 {
+            earliest_retained_root_sequence,
+            order_history_retained_from_utc_ms: Some(retained_from_utc_ms),
+            trade_history_retained_from_utc_ms: Some(retained_from_utc_ms),
+        };
+        let retention_before = measurement_resources(&execution)?;
+        let log_bytes_before = fs::metadata(&log_path)
+            .map_err(|error| format!("读取 retention 前日志大小失败：{error}"))?
+            .len();
+        let retention_started = Instant::now();
+        execution
+            .advance_retention(retention_input)
+            .map_err(|error| format!("推进 targeted retention 失败：{error}"))?;
+        let retention_elapsed_ns = elapsed_ns(retention_started);
+        let retention_after = measurement_resources(&execution)?;
+        let log_bytes_after = fs::metadata(&log_path)
+            .map_err(|error| format!("读取 retention 后日志大小失败：{error}"))?
+            .len();
+        let released_business_records = numeric_at(&retention_before, &["business", "records"])
+            .saturating_sub(numeric_at(&retention_after, &["business", "records"]));
+        let released_business_bytes = numeric_at(&retention_before, &["business", "bytes"])
+            .saturating_sub(numeric_at(&retention_after, &["business", "bytes"]));
+        if released_business_records == 0 || released_business_bytes == 0 {
+            return Err("targeted retention 未释放旧 query/history 业务资源".to_owned());
+        }
+        let log_sequence_before = numeric_at(&retention_before, &["next_input_sequence"]);
+        let log_sequence_after = numeric_at(&retention_after, &["next_input_sequence"]);
+        if log_sequence_after != log_sequence_before.saturating_add(1) {
+            return Err("targeted retention 必须只新增一项 RetentionAdvance 耐久输入".to_owned());
+        }
+        let query_plan = TargetedQueryPlan {
+            old_root_sequence,
+            retained_from_utc_ms,
+            trade_id: trade_id.clone(),
+        };
+        drive_fixed_request_range(
+            &mut execution,
+            &scenario,
+            0,
+            true,
+            253..LOOPS_PER_ROOT,
+            Some(&query_plan),
+            &public_buckets,
+            &mut next_bucket,
+            &cancelled,
+            &mut resource_high_water,
+            &mut next_decision_at_utc_ms,
+        )?;
+        while next_bucket < public_buckets.len() {
+            drive_required_before_next_bucket(&mut execution, &public_buckets, &mut next_bucket)?;
+            drive_real_bucket(&mut execution, public_buckets[next_bucket])?;
+            next_bucket += 1;
+        }
+        let live_semantics = read_retention_semantics(
+            &capture,
+            old_root_sequence,
+            earliest_retained_root_sequence,
+            retained_from_utc_ms,
+        )?;
+        let resources_before_drop = measurement_resources(&execution)?;
+        drop(execution);
+        let recovered_capture = Arc::new(Mutex::new(CapturingProjectionState::default()));
+        let recovered = SimExecution::recover_paper(
+            &log_path,
+            snapshot,
+            finality,
+            scenario,
+            Arc::clone(&latency),
+            Box::new(CapturingProjectionPort {
+                state: Arc::clone(&recovered_capture),
+            }),
+            MAX_GROUP_BYTES,
+            bucket_reader(&buckets),
+        )
+        .map_err(|error| format!("targeted Paper 冷恢复失败：{error}"))?;
+        let recovered_resources = measurement_resources(&recovered)?;
+        if recovered_resources != resources_before_drop {
+            return Err("targeted 冷恢复后的资源/日志序号未复现 retention 后状态".to_owned());
+        }
+        let recovery_semantics = read_retention_semantics(
+            &recovered_capture,
+            old_root_sequence,
+            earliest_retained_root_sequence,
+            retained_from_utc_ms,
+        )?;
+        if recovery_semantics != live_semantics {
+            return Err("targeted 冷恢复语义未与 live 结果精确一致".to_owned());
+        }
+        let recovered_final_resources = recovered_resources.clone();
+        drop(recovered);
+        check_safety(run_started, trial_started, &root_dir)?;
+        let log_bytes_final = fs::metadata(&log_path)
+            .map_err(|error| format!("读取 targeted 最终日志大小失败：{error}"))?
+            .len();
+        let log_sha256 = sha256_file(&log_path)?;
+
+        Ok(json!({
+            "schema_version": "sim_targeted_retention_sample_v1",
+            "runner_identity": TARGETED_RUNNER_IDENTITY,
+            "workload_identity": WORKLOAD_IDENTITY,
+            "build": BUILD,
+            "durability": "recoverable_paper",
+            "shape": "single_root",
+            "trial": trial,
+            "warmup": warmup,
+            "requests_in_fixed_workload": REQUESTS_PER_ROOT,
+            "window_ms": TARGETED_RETENTION_WINDOW_MS,
+            "final_logical_cutoff_utc_ms": TARGETED_FINAL_CUTOFF_UTC_MS,
+            "retention_input": retention_input,
+            "retention_elapsed_ns": retention_elapsed_ns,
+            "resources_before": retention_before,
+            "resources_after": retention_after,
+            "released_resources": {
+                "business_records": released_business_records,
+                "business_bytes": released_business_bytes
+            },
+            "log": {
+                "path": log_path,
+                "bytes_before_retention": log_bytes_before,
+                "bytes_after_retention": log_bytes_after,
+                "bytes_added_by_retention": log_bytes_after.saturating_sub(log_bytes_before),
+                "next_input_sequence_before_retention": log_sequence_before,
+                "next_input_sequence_after_retention": log_sequence_after,
+                "retention_input_sequence_delta": log_sequence_after.saturating_sub(log_sequence_before),
+                "bytes_final": log_bytes_final,
+                "sha256": log_sha256
+            },
+            "old_public_root": {
+                "orders_root_sequence": old_root_sequence,
+                "trades_root_sequence": old_root_sequence,
+                "earliest_retained_root_sequence": earliest_retained_root_sequence
+            },
+            "accepted_terminal_order": {
+                "platform_order_id": accepted.platform_order_id,
+                "trade_id": trade_id,
+                "terminal_reason": accepted.terminal_reason
+            },
+            "live_semantics": live_semantics,
+            "recovery": {
+                "resource_state_reproduced_before_new_queries": true,
+                "resources_before_new_queries": recovered_resources,
+                "resources_after_semantic_queries": recovered_final_resources,
+                "semantics": recovery_semantics
+            },
+            "semantics_passed": true,
+            "identity": {
+                "implementation": identity,
+                "rule_snapshot_sha256": identities.rule_snapshot_sha256,
+                "scenario_sha256": identities.scenario_sha256,
+                "finality_policy_sha256": identities.finality_policy_sha256,
+                "latency_profile_sha256": identities.latency_profile_sha256,
+                "market_event_source_identity_sha256": "7".repeat(64),
+                "binary_path": binary_path,
+                "binary_sha256": binary_sha256
+            }
+        }))
+    }
+
+    fn captured_response<T: serde::de::DeserializeOwned>(
+        state: &Arc<Mutex<CapturingProjectionState>>,
+        request_id: &str,
+        expected_method: &str,
+    ) -> Result<T, String> {
+        let response = state
+            .lock()
+            .map_err(|_| "targeted 投影状态锁损坏".to_owned())?
+            .responses
+            .get(request_id)
+            .cloned()
+            .ok_or_else(|| format!("targeted 缺少公开方法响应：{request_id}"))?;
+        if response.method != expected_method {
+            return Err(format!(
+                "targeted 方法响应类型不一致：{request_id}: {}",
+                response.method
+            ));
+        }
+        serde_json::from_value(response.body)
+            .map_err(|error| format!("解码 targeted 公开响应失败：{request_id}: {error}"))
+    }
+
+    fn read_retention_semantics(
+        capture: &Arc<Mutex<CapturingProjectionState>>,
+        old_root_sequence: u64,
+        earliest_retained_root_sequence: u64,
+        retained_from_utc_ms: i64,
+    ) -> Result<Value, String> {
+        let old_orders: contracts::OrdersDirectResponseV2 =
+            captured_response(capture, "r0-i253-orders", "orders")?;
+        if old_orders.result
+            != OrdersQueryResultV2::OutOfRetention(QueryOutOfRetentionV2::RootSnapshot {
+                requested_root_sequence: old_root_sequence,
+                earliest_retained_root_sequence,
+            })
+        {
+            return Err("旧 orders root 未返回 OutOfRetention".to_owned());
+        }
+        let old_trades: contracts::TradesDirectResponseV2 =
+            captured_response(capture, "r0-i253-trades", "trades")?;
+        if old_trades.result
+            != TradesQueryResultV2::OutOfRetention(QueryOutOfRetentionV2::RootSnapshot {
+                requested_root_sequence: old_root_sequence,
+                earliest_retained_root_sequence,
+            })
+        {
+            return Err("旧 trades root 未返回 OutOfRetention".to_owned());
+        }
+        let order: contracts::OrderDirectResponseV2 =
+            captured_response(capture, "r0-i253-order", "order")?;
+        if order.result
+            != OrderQueryResultV2::OutOfRetention(QueryOutOfRetentionV2::OrderHistory {
+                retained_from_utc_ms,
+            })
+        {
+            return Err("旧终态 order history 未返回 OutOfRetention".to_owned());
+        }
+        let trade: contracts::TradesDirectResponseV2 =
+            captured_response(capture, "r0-i254-trades", "trades")?;
+        if trade.result
+            != TradesQueryResultV2::OutOfRetention(QueryOutOfRetentionV2::TradeHistory {
+                retained_from_utc_ms,
+            })
+        {
+            return Err("旧终态 trade history 未返回 OutOfRetention".to_owned());
+        }
+        let old_orders_result = serde_json::to_value(&old_orders.result)
+            .map_err(|error| format!("编码旧 orders 结果失败：{error}"))?;
+        let old_trades_result = serde_json::to_value(&old_trades.result)
+            .map_err(|error| format!("编码旧 trades 结果失败：{error}"))?;
+        let terminal_order_result = serde_json::to_value(&order.result)
+            .map_err(|error| format!("编码终态 order 结果失败：{error}"))?;
+        let terminal_trade_result = serde_json::to_value(&trade.result)
+            .map_err(|error| format!("编码终态 trade 结果失败：{error}"))?;
+        let current_orders: contracts::OrdersDirectResponseV2 =
+            captured_response(capture, "r0-i254-orders", "orders")?;
+        let current_orders_result = serde_json::to_value(&current_orders.result)
+            .map_err(|error| format!("编码当前 orders 结果失败：{error}"))?;
+        let OrdersQueryResultV2::Page(current_orders_page) = current_orders.result else {
+            return Err("当前 orders 范围未返回 Page".to_owned());
+        };
+        if current_orders_page.root_sequence < earliest_retained_root_sequence {
+            return Err("当前 orders root 低于保留水位".to_owned());
+        }
+        let current_trades: contracts::TradesDirectResponseV2 =
+            captured_response(capture, "r0-i255-trades", "trades")?;
+        let current_trades_result = serde_json::to_value(&current_trades.result)
+            .map_err(|error| format!("编码当前 trades 结果失败：{error}"))?;
+        let TradesQueryResultV2::Page(current_trades_page) = current_trades.result else {
+            return Err("当前 trades 范围未返回 Page".to_owned());
+        };
+        if current_trades_page.root_sequence < earliest_retained_root_sequence {
+            return Err("当前 trades root 低于保留水位".to_owned());
+        }
+        Ok(json!({
+            "old_orders_root_out_of_retention": true,
+            "old_trades_root_out_of_retention": true,
+            "terminal_order_history_out_of_retention": true,
+            "terminal_trade_history_out_of_retention": true,
+            "current_orders_query_succeeded": true,
+            "current_trades_query_succeeded": true,
+            "current_orders_root_sequence": current_orders_page.root_sequence,
+            "current_trades_root_sequence": current_trades_page.root_sequence,
+            "earliest_retained_root_sequence": earliest_retained_root_sequence,
+            "order_history_retained_from_utc_ms": retained_from_utc_ms,
+            "trade_history_retained_from_utc_ms": retained_from_utc_ms,
+            "business_results": {
+                "old_orders": old_orders_result,
+                "old_trades": old_trades_result,
+                "terminal_order": terminal_order_result,
+                "terminal_trade": terminal_trade_result,
+                "current_orders": current_orders_result,
+                "current_trades": current_trades_result
+            }
+        }))
+    }
+
+    fn numeric_at(value: &Value, path: &[&str]) -> u64 {
+        path.iter()
+            .try_fold(value, |current, key| current.get(*key))
+            .and_then(Value::as_u64)
+            .unwrap_or_default()
+    }
+
+    fn artifact_inventory(output_dir: &Path) -> Result<Vec<Value>, String> {
+        let mut paths = Vec::new();
+        let mut pending = vec![output_dir.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in fs::read_dir(&directory)
+                .map_err(|error| format!("遍历 targeted 产物失败：{error}"))?
+            {
+                let entry = entry.map_err(|error| format!("读取 targeted 产物项失败：{error}"))?;
+                let metadata = entry
+                    .metadata()
+                    .map_err(|error| format!("读取 targeted 产物 metadata 失败：{error}"))?;
+                if metadata.is_dir() {
+                    pending.push(entry.path());
+                } else if metadata.is_file()
+                    && entry.file_name() != std::ffi::OsStr::new("retention-manifest.json")
+                {
+                    paths.push(entry.path());
+                }
+            }
+        }
+        paths.sort();
+        paths
+            .into_iter()
+            .map(|path| {
+                let bytes = fs::metadata(&path)
+                    .map_err(|error| format!("读取产物大小失败：{error}"))?
+                    .len();
+                let relative = path
+                    .strip_prefix(output_dir)
+                    .map_err(|error| format!("计算产物相对路径失败：{error}"))?;
+                Ok(json!({
+                    "path": relative,
+                    "bytes": bytes,
+                    "sha256": sha256_file(&path)?
+                }))
+            })
+            .collect()
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn run_root(
         root_dir: PathBuf,
@@ -679,6 +1521,7 @@ mod enabled {
             &mut execution,
             &scenario,
             root,
+            false,
             &public_buckets,
             &mut next_bucket,
             &cancelled,
@@ -1064,10 +1907,12 @@ mod enabled {
             .map_err(|error| format!("解码固定强类型事件失败：{error}"))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn drive_fixed_requests(
         execution: &mut SimExecution,
         scenario: &SealedPlatformScenarioV1,
         root: usize,
+        targeted_retention: bool,
         buckets: &[&(
             DurableMarketBucketReferenceV2,
             Arc<[ExecutionMarketEventV3]>,
@@ -1076,14 +1921,47 @@ mod enabled {
         cancelled: &AtomicBool,
         resource_high_water: &mut Value,
     ) -> Result<(), String> {
+        let mut next_decision_at_utc_ms = REQUEST_CUTOFF_BASE;
+        drive_fixed_request_range(
+            execution,
+            scenario,
+            root,
+            targeted_retention,
+            0..LOOPS_PER_ROOT,
+            None,
+            buckets,
+            next_bucket,
+            cancelled,
+            resource_high_water,
+            &mut next_decision_at_utc_ms,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn drive_fixed_request_range(
+        execution: &mut SimExecution,
+        scenario: &SealedPlatformScenarioV1,
+        root: usize,
+        targeted_retention: bool,
+        iterations: Range<usize>,
+        targeted_queries: Option<&TargetedQueryPlan>,
+        buckets: &[&(
+            DurableMarketBucketReferenceV2,
+            Arc<[ExecutionMarketEventV3]>,
+        )],
+        next_bucket: &mut usize,
+        cancelled: &AtomicBool,
+        resource_high_water: &mut Value,
+        decision_cursor: &mut i64,
+    ) -> Result<(), String> {
         let markets = scenario.scenario().market_set().markets();
         let public_visibility: PublicVisibilityCursorV1 = serde_json::from_value(json!({
             "closed_through_received_at_utc_ms": MARKET_TWO_START + 10 + PUBLIC_DELAY_MS,
             "next_visibility_index_position": 4
         }))
         .map_err(|error| format!("构造公开可见游标失败：{error}"))?;
-        let mut next_decision_at_utc_ms = REQUEST_CUTOFF_BASE;
-        for iteration in 0..LOOPS_PER_ROOT {
+        let mut next_decision_at_utc_ms = *decision_cursor;
+        for iteration in iterations {
             if cancelled.load(Ordering::Relaxed) {
                 return Err("安全停止边界触发，固定请求循环已取消".to_owned());
             }
@@ -1112,12 +1990,33 @@ mod enabled {
                     },
                 },
             };
+            let first_post = || PostOrderItemV1 {
+                item_id: format!("{prefix}-post-item"),
+                order: SimBuyOrderV1 {
+                    condition_id: condition_id.clone(),
+                    token_id: token_id.clone(),
+                    kind: if targeted_retention && iteration == 0 {
+                        SimBuyOrderKindV1::FokMarket {
+                            spend_pusd: "3".parse().expect("固定 targeted FOK 预算"),
+                            worst_price_pusd_per_share: "0.6"
+                                .parse()
+                                .expect("固定 targeted FOK 最差价"),
+                        }
+                    } else {
+                        SimBuyOrderKindV1::GtcLimit {
+                            limit_price_pusd_per_share: "0.7".parse().expect("固定价格"),
+                            size_shares: "5".parse().expect("固定数量"),
+                            post_only: true,
+                        }
+                    },
+                },
+            };
             let receipt = execution
                 .post_order(
                     cutoff(next_decision_at_utc_ms),
                     PostOrderRequestV2 {
                         context: context("post-order"),
-                        item: post(&format!("{prefix}-post-item")),
+                        item: first_post(),
                     },
                 )
                 .map_err(request_error)?;
@@ -1225,16 +2124,29 @@ mod enabled {
                 next_bucket,
                 request_required_at_utc_ms,
             )?;
+            let (orders_filter, orders_cursor) = match (targeted_queries, iteration) {
+                (Some(plan), 253) => (
+                    OrdersFilterV1::default(),
+                    Some(QueryCursorV2 {
+                        root_sequence: plan.old_root_sequence,
+                        next_offset: 0,
+                    }),
+                ),
+                _ => (
+                    OrdersFilterV1 {
+                        condition_id: Some(condition_id.clone()),
+                        token_id: Some(token_id.clone()),
+                    },
+                    None,
+                ),
+            };
             let receipt = execution
                 .orders(
                     cutoff(next_decision_at_utc_ms),
                     OrdersRequestV2 {
                         context: context("orders"),
-                        filter: OrdersFilterV1 {
-                            condition_id: Some(condition_id.clone()),
-                            token_id: Some(token_id.clone()),
-                        },
-                        cursor: None,
+                        filter: orders_filter,
+                        cursor: orders_cursor,
                     },
                 )
                 .map_err(request_error)?;
@@ -1246,17 +2158,45 @@ mod enabled {
                 next_bucket,
                 request_required_at_utc_ms,
             )?;
+            let (trades_filter, trades_cursor) = match (targeted_queries, iteration) {
+                (Some(plan), 253) => (
+                    TradesFilterV1::default(),
+                    Some(QueryCursorV2 {
+                        root_sequence: plan.old_root_sequence,
+                        next_offset: 0,
+                    }),
+                ),
+                (Some(plan), 254) => (
+                    TradesFilterV1 {
+                        trade_id: Some(plan.trade_id.clone()),
+                        ..TradesFilterV1::default()
+                    },
+                    None,
+                ),
+                (Some(plan), 255) => (
+                    TradesFilterV1 {
+                        after_utc_ms: Some(plan.retained_from_utc_ms - 1),
+                        before_utc_ms: Some(plan.retained_from_utc_ms + 1),
+                        ..TradesFilterV1::default()
+                    },
+                    None,
+                ),
+                _ => (
+                    TradesFilterV1 {
+                        condition_id: Some(condition_id),
+                        token_id: Some(token_id),
+                        ..Default::default()
+                    },
+                    None,
+                ),
+            };
             let receipt = execution
                 .trades(
                     cutoff(next_decision_at_utc_ms),
                     TradesRequestV2 {
                         context: context("trades"),
-                        filter: TradesFilterV1 {
-                            condition_id: Some(condition_id),
-                            token_id: Some(token_id),
-                            ..Default::default()
-                        },
-                        cursor: None,
+                        filter: trades_filter,
+                        cursor: trades_cursor,
                     },
                 )
                 .map_err(request_error)?;
@@ -1270,6 +2210,7 @@ mod enabled {
             )?;
             merge_numeric_max(resource_high_water, &measurement_resources(execution)?);
         }
+        *decision_cursor = next_decision_at_utc_ms;
         Ok(())
     }
 
@@ -1335,7 +2276,11 @@ mod enabled {
                     closed_through_utc_ms: required.required_at_utc_ms,
                     next_index_position: next_reference.start_index_position,
                 })
-                .map_err(|error| format!("驱动桶前必要空前缀失败：{error}"))?;
+                .map_err(|error| {
+                    format!(
+                        "驱动桶前必要空前缀失败：required={required:?}, next_bucket={next_reference:?}: {error}"
+                    )
+                })?;
         }
         Ok(())
     }
@@ -2213,15 +3158,30 @@ mod enabled {
     }
 
     fn parse_args() -> Result<Args, String> {
-        let argv = std::env::args().collect::<Vec<_>>();
-        let mut values = argv.iter().skip(1);
+        parse_args_from(std::env::args().collect())
+    }
+
+    pub(super) fn parse_args_from(argv: Vec<String>) -> Result<Args, String> {
         let mut output_dir = None;
         let mut git_commit = None;
         let mut source = None;
         let mut lock = None;
         let mut baseline = None;
-        while let Some(flag) = values.next() {
-            let value = values.next().ok_or_else(|| format!("参数 {flag} 缺少值"))?;
+        let mut mode = RunMode::GoldenMatrix;
+        let mut index = 1;
+        while index < argv.len() {
+            let flag = &argv[index];
+            if flag == "--targeted-retention-24h" {
+                if mode == RunMode::TargetedRetention24h {
+                    return Err("--targeted-retention-24h 不得重复".to_owned());
+                }
+                mode = RunMode::TargetedRetention24h;
+                index += 1;
+                continue;
+            }
+            let value = argv
+                .get(index + 1)
+                .ok_or_else(|| format!("参数 {flag} 缺少值"))?;
             match flag.as_str() {
                 "--output-dir" => output_dir = Some(PathBuf::from(value)),
                 "--git-commit" => git_commit = Some(value.clone()),
@@ -2230,12 +3190,21 @@ mod enabled {
                 "--baseline-summary" => baseline = Some(PathBuf::from(value)),
                 _ => return Err(format!("未知参数：{flag}")),
             }
+            index += 2;
         }
         let git_commit = git_commit.ok_or_else(|| "缺少 --git-commit".to_owned())?;
         let source = source.ok_or_else(|| "缺少 --source-identity-sha256".to_owned())?;
         let lock = lock.ok_or_else(|| "缺少 --cargo-lock-sha256".to_owned())?;
         if git_commit.len() != 40 || source.len() != 64 || lock.len() != 64 {
             return Err("git commit 必须为 40 位，SHA-256 必须为 64 位".to_owned());
+        }
+        if mode == RunMode::TargetedRetention24h && baseline.is_some() {
+            return Err("固定 targeted 模式不接受 --baseline-summary".to_owned());
+        }
+        if mode == RunMode::TargetedRetention24h && !cfg!(feature = "measurement") {
+            return Err(
+                "--targeted-retention-24h 只允许 measurement feature 构建；未装配探针".to_owned(),
+            );
         }
         Ok(Args {
             output_dir: output_dir.ok_or_else(|| "缺少 --output-dir".to_owned())?,
@@ -2245,6 +3214,7 @@ mod enabled {
                 cargo_lock_sha256: Sha256Hex(lock),
             },
             baseline_summary: baseline,
+            mode,
             argv,
         })
     }
@@ -2260,6 +3230,76 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "measurement")]
+    #[test]
+    fn targeted_parser_fixes_identity_and_default_mode_is_unchanged() {
+        let common = [
+            "sim_measurement",
+            "--output-dir",
+            "/tmp/out",
+            "--git-commit",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--source-identity-sha256",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "--cargo-lock-sha256",
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        ];
+        let default = enabled::parse_args_from(common.map(str::to_owned).to_vec())
+            .expect("既有默认参数必须继续解析");
+        assert_eq!(default.mode, enabled::RunMode::GoldenMatrix);
+        assert_eq!(enabled::runner_identity(default.mode), RUNNER_IDENTITY);
+
+        let mut targeted = common.map(str::to_owned).to_vec();
+        targeted.push("--targeted-retention-24h".to_owned());
+        let targeted = enabled::parse_args_from(targeted).expect("固定 targeted flag 必须解析");
+        assert_eq!(targeted.mode, enabled::RunMode::TargetedRetention24h);
+        assert_eq!(
+            enabled::runner_identity(targeted.mode),
+            "sim-task-4-5-2-retention-24h-v1"
+        );
+    }
+
+    #[cfg(not(feature = "measurement"))]
+    #[test]
+    fn feature_off_rejects_targeted_flag_at_cli_boundary() {
+        let args = vec![
+            "sim_measurement",
+            "--output-dir",
+            "/tmp/out",
+            "--git-commit",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--source-identity-sha256",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "--cargo-lock-sha256",
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "--targeted-retention-24h",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let error = enabled::parse_args_from(args).expect_err("feature-off 必须拒绝 targeted");
+        assert!(error.contains("未装配探针"));
+    }
+
+    #[test]
+    fn targeted_summary_uses_only_three_measured_trials() {
+        let samples = [
+            enabled::TargetedSummaryInput::new(true, 999, 999, 999, true),
+            enabled::TargetedSummaryInput::new(false, 30, 3, 300, true),
+            enabled::TargetedSummaryInput::new(false, 10, 1, 100, true),
+            enabled::TargetedSummaryInput::new(false, 20, 2, 200, true),
+        ];
+        let summary = enabled::summarize_targeted(&samples).expect("固定 targeted 汇总必须成功");
+        assert_eq!(summary.measured_trial_count, 3);
+        assert_eq!(summary.warmup_trial_count, 1);
+        assert_eq!(summary.retention_elapsed_ns.min, 10);
+        assert_eq!(summary.retention_elapsed_ns.median, 20);
+        assert_eq!(summary.retention_elapsed_ns.max, 30);
+        assert_eq!(summary.released_business_records.median, 2);
+        assert_eq!(summary.released_business_bytes.median, 200);
+        assert_eq!(summary.semantic_pass_count, 3);
+    }
 
     #[test]
     fn nearest_rank_uses_ceil_p_times_n_minus_one() {
