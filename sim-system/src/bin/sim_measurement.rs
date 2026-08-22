@@ -2,6 +2,8 @@ use serde::Serialize;
 
 const RUNNER_IDENTITY: &str = "sim-task-4-5-1-golden-v1";
 const TARGETED_RUNNER_IDENTITY: &str = "sim-task-4-5-2-retention-24h-v1";
+const COMPONENT_RUNNER_IDENTITY: &str = "sim-stage-5-component-conformance-v1";
+const COMPONENT_WORKLOAD_IDENTITY: &str = "offline-evaluation-two-market-single-root-v1";
 const WORKLOAD_IDENTITY: &str = "public-sim-execution-two-market-256x8-v1";
 const TARGETED_RETENTION_WINDOW_MS: i64 = 86_400_000;
 const LOOPS_PER_ROOT: usize = 256;
@@ -156,6 +158,7 @@ mod enabled {
         decode_execution_market_event_v3, derive_execution_market_event_v3_id,
         encode_execution_market_event_v3,
     };
+    use rustix::fs::{RenameFlags, renameat_with};
     use serde::{Deserialize, Serialize};
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
@@ -173,8 +176,9 @@ mod enabled {
     use sim_system::finality::TradeFinalityPolicyV2;
     use sim_system::latency_profile::{EmpiricalDelayProfile, load_embedded_proxy_latency_profile};
     use sim_system::platform_rules::{
-        CurrentProcessSnapshotRequestV1, ImplementationIdentityV1, ReferenceMarketSpecV1,
-        ReferenceOutcomeSpecV1, SealedProcessRuleSnapshotV3,
+        CurrentProcessSnapshotRequestV1, HistoricalProcessSnapshotRequestV1,
+        ImplementationIdentityV1, ReferenceMarketSpecV1, ReferenceOutcomeSpecV1,
+        SealedProcessRuleSnapshotV3, load_historical_process_snapshot_v3,
         query_and_seal_current_process_snapshot_v3,
     };
     use sim_system::scenario::{
@@ -183,9 +187,10 @@ mod enabled {
     };
 
     use super::{
-        DistributionSummary, LOOPS_PER_ROOT, PairKey, REQUESTS_PER_ROOT, RUNNER_IDENTITY,
-        SafetyLimits, SafetyUsage, TARGETED_RETENTION_WINDOW_MS, TARGETED_RUNNER_IDENTITY,
-        WORKLOAD_IDENTITY, distribution_summary, safety_violation, validate_feature_pair,
+        COMPONENT_RUNNER_IDENTITY, COMPONENT_WORKLOAD_IDENTITY, DistributionSummary,
+        LOOPS_PER_ROOT, PairKey, REQUESTS_PER_ROOT, RUNNER_IDENTITY, SafetyLimits, SafetyUsage,
+        TARGETED_RETENTION_WINDOW_MS, TARGETED_RUNNER_IDENTITY, WORKLOAD_IDENTITY,
+        distribution_summary, safety_violation, validate_feature_pair,
     };
 
     const CONDITION: &str = "0xd4346bcf419856fa3261d3c0705597d5c909ead020b9f1a0de468092704fc65f";
@@ -204,6 +209,12 @@ mod enabled {
     const BODY_ONE_SOURCE: i64 = 1_785_715_750_000;
     const BODY_TWO_SOURCE: i64 = 1_785_715_760_000;
 
+    pub(super) const COMPONENT_CAUSAL_START_UTC_MS: i64 = 1_787_400_000_000;
+    pub(super) const COMPONENT_TIME_SHIFT_MS: i64 =
+        COMPONENT_CAUSAL_START_UTC_MS - (MARKET_ONE_START + 10);
+    pub(super) const COMPONENT_REQUEST_CUTOFF_BASE: i64 =
+        REQUEST_CUTOFF_BASE + COMPONENT_TIME_SHIFT_MS;
+
     const RESOLUTION_ONE_SOURCE: i64 = MARKET_END + 10;
     const RESOLUTION_TWO_SOURCE: i64 = MARKET_END + 20;
     const FINAL_EOF_SOURCE: i64 = RESOLUTION_TWO_SOURCE + 86_500_000;
@@ -219,6 +230,7 @@ mod enabled {
     pub(super) enum RunMode {
         GoldenMatrix,
         TargetedRetention24h,
+        ComponentConformance,
     }
 
     #[cfg(test)]
@@ -226,7 +238,20 @@ mod enabled {
         match mode {
             RunMode::GoldenMatrix => RUNNER_IDENTITY,
             RunMode::TargetedRetention24h => TARGETED_RUNNER_IDENTITY,
+            RunMode::ComponentConformance => COMPONENT_RUNNER_IDENTITY,
         }
+    }
+
+    #[derive(Debug)]
+    struct ComponentEvidenceArgs {
+        rule_snapshot: PathBuf,
+        rule_snapshot_sha256: Sha256Hex,
+        stage4_formal_audit: PathBuf,
+        stage4_formal_audit_sha256: Sha256Hex,
+        retention_manifest: PathBuf,
+        retention_manifest_sha256: Sha256Hex,
+        test_evidence: PathBuf,
+        test_evidence_sha256: Sha256Hex,
     }
 
     #[derive(Debug)]
@@ -234,6 +259,7 @@ mod enabled {
         output_dir: PathBuf,
         identity: ImplementationIdentityV1,
         baseline_summary: Option<PathBuf>,
+        component: Option<ComponentEvidenceArgs>,
         pub(super) mode: RunMode,
         argv: Vec<String>,
     }
@@ -558,6 +584,7 @@ mod enabled {
     struct CapturingProjectionState {
         durable_through: u64,
         responses: BTreeMap<String, CapturedResponse>,
+        semantic_batches: Vec<Value>,
     }
 
     struct CapturingProjectionPort {
@@ -575,6 +602,9 @@ mod enabled {
         fn try_accept(&mut self, batch: Arc<BusinessProjectionBatchV2>) -> bool {
             let mut state = self.state.lock().expect("targeted 投影状态锁未损坏");
             state.durable_through = batch.projection_batch_sequence;
+            state
+                .semantic_batches
+                .push(semantic_projection_batch(&batch));
             for response in batch.direct_responses() {
                 let (global_request_id, method, body) = match response {
                     BusinessDirectResponseV2::PostOrder(response) => (
@@ -616,6 +646,47 @@ mod enabled {
         }
     }
 
+    fn semantic_projection_batch(batch: &BusinessProjectionBatchV2) -> Value {
+        let direct_responses = batch
+            .direct_responses()
+            .map(|response| match response {
+                BusinessDirectResponseV2::PostOrder(value) => {
+                    json!({"method":"post_order","value":value})
+                }
+                BusinessDirectResponseV2::PostOrders(value) => {
+                    json!({"method":"post_orders","value":value})
+                }
+                BusinessDirectResponseV2::CancelOrder(value) => {
+                    json!({"method":"cancel_order","value":value})
+                }
+                BusinessDirectResponseV2::CancelOrders(value) => {
+                    json!({"method":"cancel_orders","value":value})
+                }
+                BusinessDirectResponseV2::CancelAllOrders(value) => {
+                    json!({"method":"cancel_all_orders","value":value})
+                }
+                BusinessDirectResponseV2::Order(value) => {
+                    json!({"method":"order","value":value})
+                }
+                BusinessDirectResponseV2::Orders(value) => {
+                    json!({"method":"orders","value":value})
+                }
+                BusinessDirectResponseV2::Trades(value) => {
+                    json!({"method":"trades","value":value})
+                }
+            })
+            .collect::<Vec<_>>();
+        json!({
+            "projection_batch_sequence": batch.projection_batch_sequence,
+            "account_opening": batch.account_opening,
+            "market_enrollment": batch.market_enrollment,
+            "direct_responses": direct_responses,
+            "order_lifecycle": batch.order_lifecycle,
+            "trade_lifecycle": batch.trade_lifecycle,
+            "settlement_lifecycle": batch.settlement_lifecycle,
+        })
+    }
+
     #[derive(Default)]
     struct AcceptingProjectionPort {
         durable_through: u64,
@@ -638,7 +709,690 @@ mod enabled {
         match args.mode {
             RunMode::GoldenMatrix => run_golden_matrix(args, run_started),
             RunMode::TargetedRetention24h => run_targeted_retention(args, run_started),
+            RunMode::ComponentConformance => run_component_conformance(args),
         }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+    pub(super) struct ComponentAttemptEvidence {
+        pub(super) accepted_input_count: u64,
+        pub(super) projection_batches: Vec<Value>,
+        pub(super) log_sha256: String,
+        pub(super) log_bytes: u64,
+        pub(super) cold_candidate_run_id: String,
+    }
+
+    fn run_component_conformance(args: Args) -> Result<(), String> {
+        #[cfg(not(feature = "measurement"))]
+        {
+            let _ = args;
+            return Err("--component-conformance 只允许 measurement feature 构建".to_owned());
+        }
+        #[cfg(feature = "measurement")]
+        {
+            let component = args
+                .component
+                .as_ref()
+                .expect("parser 已绑定 component 参数");
+            if args.output_dir.exists() {
+                return Err(format!("组件最终目标已存在：{}", args.output_dir.display()));
+            }
+            let parent = args
+                .output_dir
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            fs::create_dir_all(parent).map_err(|error| format!("创建组件父目录失败：{error}"))?;
+            let final_name = args
+                .output_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| "组件输出目标必须以 UTF-8 文件名结束".to_owned())?;
+            let candidate = parent.join(format!(".{final_name}.candidate"));
+            if candidate.exists() {
+                return Err(format!("组件 candidate 已存在：{}", candidate.display()));
+            }
+            fs::create_dir(&candidate)
+                .map_err(|error| format!("创建组件 candidate 失败：{error}"))?;
+
+            let snapshot =
+                load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
+                    snapshot_path: component.rule_snapshot.clone(),
+                    expected_file_sha256: component.rule_snapshot_sha256.clone(),
+                    replay_causal_start_utc_ms: COMPONENT_CAUSAL_START_UTC_MS,
+                })
+                .map_err(|error| format!("离线加载 V3 历史规则失败：{error}"))?;
+            let scenario = component_fixed_scenario()?;
+            let finality = successful_finality()?;
+            let latency = load_embedded_proxy_latency_profile()
+                .map_err(|error| format!("加载嵌入时延档失败：{error}"))?;
+
+            fs::create_dir_all(candidate.join("inputs"))
+                .map_err(|error| format!("创建组件输入目录失败：{error}"))?;
+            copy_verified(
+                &component.rule_snapshot,
+                &component.rule_snapshot_sha256.0,
+                &candidate.join("inputs/platform-rule-snapshot-v3.json"),
+            )?;
+            fs::write(
+                candidate.join("inputs/platform-scenario-v1.json"),
+                component_fixed_scenario_bytes()?,
+            )
+            .map_err(|error| format!("写组件场景输入失败：{error}"))?;
+            fs::write(
+                candidate.join("inputs/trade-finality-policy-v2.json"),
+                successful_finality_bytes()?,
+            )
+            .map_err(|error| format!("写组件最终性输入失败：{error}"))?;
+            let latency_source = include_bytes!(
+                "../../config/latency-profiles/98fd40f843275db8994a29cec1de6a72f95bbaa4309df9779c7ed1285cdff596/profile.json"
+            );
+            fs::write(
+                candidate.join("inputs/proxy-latency-profile-v1.json"),
+                latency_source,
+            )
+            .map_err(|error| format!("写组件时延输入失败：{error}"))?;
+
+            let template_buckets = golden_buckets_with_shift(&scenario, COMPONENT_TIME_SHIFT_MS)?;
+            let golden_path = candidate.join("inputs/component-golden-events-v3.jsonl");
+            let buckets = write_and_read_component_events(&golden_path, &template_buckets)?;
+            let golden_sha256 = sha256_file(&golden_path)?;
+
+            let attempts_root = candidate.join("validation-attempts");
+            fs::create_dir_all(&attempts_root)
+                .map_err(|error| format!("创建组件验证目录失败：{error}"))?;
+            let baseline = run_component_attempt(
+                "canonical",
+                &attempts_root.join("canonical"),
+                Arc::clone(&snapshot),
+                Arc::clone(&scenario),
+                Arc::clone(&finality),
+                Arc::clone(&latency),
+                args.identity.clone(),
+                &golden_sha256,
+                &buckets,
+                false,
+            )?;
+            let rerun = run_component_attempt(
+                "clean-rerun",
+                &attempts_root.join("clean-rerun"),
+                Arc::clone(&snapshot),
+                Arc::clone(&scenario),
+                Arc::clone(&finality),
+                Arc::clone(&latency),
+                args.identity.clone(),
+                &golden_sha256,
+                &buckets,
+                false,
+            )?;
+            let perturbed = run_component_attempt(
+                "schedule-perturbed",
+                &attempts_root.join("schedule-perturbed"),
+                Arc::clone(&snapshot),
+                Arc::clone(&scenario),
+                Arc::clone(&finality),
+                Arc::clone(&latency),
+                args.identity.clone(),
+                &golden_sha256,
+                &buckets,
+                true,
+            )?;
+            let comparison = component_comparison(&baseline, &rerun, &perturbed);
+            write_json(candidate.join("component-comparison.json"), &comparison)?;
+            if comparison["status"] != "PASS" {
+                write_json(candidate.join("failure.json"), &comparison)?;
+                sync_tree(&candidate)?;
+                publish_candidate(&candidate, &failed_output_path(&args.output_dir))?;
+                return Err("组件语义比较失败；已原子发布 .failed 证据".to_owned());
+            }
+
+            fs::create_dir_all(candidate.join("evidence"))
+                .map_err(|error| format!("创建复用证据目录失败：{error}"))?;
+            copy_verified(
+                &component.stage4_formal_audit,
+                &component.stage4_formal_audit_sha256.0,
+                &candidate.join("evidence/stage4-formal-gate-audit.json"),
+            )?;
+            copy_verified(
+                &component.retention_manifest,
+                &component.retention_manifest_sha256.0,
+                &candidate.join("evidence/stage4-retention-manifest.json"),
+            )?;
+            copy_verified(
+                &component.test_evidence,
+                &component.test_evidence_sha256.0,
+                &candidate.join("evidence/stage5-test-evidence.json"),
+            )?;
+            write_json(
+                candidate.join("component-resource-summary.json"),
+                &json!({
+                    "schema_version":"component_resource_summary_v1",
+                    "canonical_log_bytes":baseline.log_bytes,
+                    "stage4_formal_audit_sha256":component.stage4_formal_audit_sha256,
+                    "stage4_retention_manifest_sha256":component.retention_manifest_sha256,
+                }),
+            )?;
+
+            let binary_sha256 = sha256_file(
+                &std::env::current_exe().map_err(|error| format!("定位当前二进制失败：{error}"))?,
+            )?;
+            let inventory = component_artifact_inventory(&candidate)?;
+            let content = json!({
+                "schema_version":"simulation_run_manifest_v2",
+                "component_scope":{
+                    "COMPONENT_GOLDEN":true,
+                    "REAL_DPT":"NOT_CLAIMED",
+                    "REAL_PAPER_RECOVERY":"NOT_CLAIMED",
+                    "TRAINING_LOOP":"NOT_CLAIMED",
+                    "FINAL_TRAINING_RETENTION_POLICY":"NOT_CLAIMED",
+                    "PRODUCTION_SLA":"NOT_CLAIMED"
+                },
+                "canonical_run":{
+                    "run_id":COMPONENT_RUNNER_IDENTITY,
+                    "caller_role":"OFFLINE_EVALUATION",
+                    "durability":"CLEAN_RUN",
+                    "shape":"single_root",
+                    "account_id":"component-account",
+                    "session_id":"component-session",
+                    "trajectory_count":1,
+                    "session_seed":"8".repeat(64),
+                    "accepted_input_count":baseline.accepted_input_count,
+                    "log":"validation-attempts/canonical/sim-event-log-v2.jsonl",
+                    "projection":"validation-attempts/canonical/component-projection.json"
+                },
+                "implementation_identity":{
+                    "git_commit":args.identity.git_commit,
+                    "source_identity_sha256":args.identity.source_identity_sha256,
+                    "cargo_lock_sha256":args.identity.cargo_lock_sha256,
+                    "binary_sha256":binary_sha256
+                },
+                "input_identity":{
+                    "rule_snapshot_sha256":component.rule_snapshot_sha256,
+                    "scenario_sha256":scenario.file_sha256(),
+                    "finality_policy_sha256":finality.policy_id(),
+                    "latency_profile_sha256":latency.file_sha256(),
+                    "golden_events_file_sha256":golden_sha256,
+                    "workload_identity":COMPONENT_WORKLOAD_IDENTITY,
+                    "market_count":2
+                },
+                "reused_evidence":{
+                    "stage4_formal_audit_sha256":component.stage4_formal_audit_sha256,
+                    "stage4_retention_manifest_sha256":component.retention_manifest_sha256,
+                    "stage5_test_evidence_sha256":component.test_evidence_sha256
+                },
+                "validation_evidence":{
+                    "clean_rerun":"component-comparison.json",
+                    "schedule_perturbed":"component-comparison.json",
+                    "attempts_are_not_formal_run_roots":true
+                },
+                "artifact_inventory":inventory
+            });
+            let content_bytes = serde_json::to_vec(&content)
+                .map_err(|error| format!("编码组件 manifest content 失败：{error}"))?;
+            let receipt_id = format!("{:x}", Sha256::digest(&content_bytes));
+            write_json(
+                candidate.join("simulation-run-manifest-v2.json"),
+                &json!({
+                    "schema_version":"simulation_run_manifest_v2_envelope",
+                    "component_receipt_id":receipt_id,
+                    "content":content
+                }),
+            )?;
+            sync_tree(&candidate)?;
+            publish_candidate(&candidate, &args.output_dir)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_component_attempt(
+        attempt: &str,
+        root_dir: &Path,
+        snapshot: Arc<SealedProcessRuleSnapshotV3>,
+        scenario: Arc<SealedPlatformScenarioV1>,
+        finality: Arc<TradeFinalityPolicyV2>,
+        latency: Arc<EmpiricalDelayProfile>,
+        identity: ImplementationIdentityV1,
+        golden_sha256: &str,
+        buckets: &[(
+            DurableMarketBucketReferenceV2,
+            Arc<[ExecutionMarketEventV3]>,
+        )],
+        perturb: bool,
+    ) -> Result<ComponentAttemptEvidence, String> {
+        fs::create_dir_all(root_dir).map_err(|error| format!("创建组件运行根失败：{error}"))?;
+        let log_path = root_dir.join("sim-event-log-v2.jsonl");
+        let capture = Arc::new(Mutex::new(CapturingProjectionState::default()));
+        let mut execution = SimExecution::create_new(
+            &log_path,
+            RunOpenedV2 {
+                run_id: COMPONENT_RUNNER_IDENTITY.to_owned(),
+                durability_role: RunDurabilityRoleV2::CleanRun,
+                platform_rule_snapshot_file_sha256: snapshot.file_sha256().clone(),
+                trade_finality_policy_file_sha256: finality.policy_id().clone(),
+                platform_scenario_file_sha256: scenario.file_sha256().clone(),
+                proxy_latency_profile_file_sha256: latency.file_sha256().clone(),
+                implementation_identity: identity,
+                market_event_source_identity_sha256: Sha256Hex(golden_sha256.to_owned()),
+            },
+            Arc::clone(&snapshot),
+            Arc::clone(&finality),
+            Arc::clone(&scenario),
+            Arc::clone(&latency),
+            Box::new(CapturingProjectionPort {
+                state: Arc::clone(&capture),
+            }),
+            MAX_GROUP_BYTES,
+        )
+        .map_err(|error| format!("创建组件单根失败：{error}"))?;
+        execution
+            .create_session(SessionSpecV3 {
+                run_id: COMPONENT_RUNNER_IDENTITY.to_owned(),
+                session_id: "component-session".to_owned(),
+                account_id: "component-account".to_owned(),
+                caller_role: SimCallerRoleV1::OfflineEvaluation,
+                caller_instance_id: "component-caller".to_owned(),
+                creation_request_id: "component-create".to_owned(),
+                response_bridge_binding_id: "component-bridge".to_owned(),
+                initial_account_state: InitialAccountStateV2 {
+                    available_pusd: ExactDecimal("2000".to_owned()),
+                },
+                session_seed: Sha256Hex("8".repeat(64)),
+            })
+            .map_err(|error| format!("创建组件会话失败：{error}"))?;
+        execution
+            .activate_session("component-activate".to_owned())
+            .map_err(|error| format!("激活组件会话失败：{error}"))?;
+        let mut ordered = buckets.iter().collect::<Vec<_>>();
+        ordered.sort_by_key(|(reference, _)| {
+            (
+                reference.bucket_at_utc_ms,
+                match reference.path {
+                    MarketEventPathV1::HiddenPlatform => 0_u8,
+                    MarketEventPathV1::PublicVisibility => 1_u8,
+                },
+            )
+        });
+        let mut next_bucket = 0;
+        while next_bucket < ordered.len()
+            && ordered[next_bucket].0.bucket_at_utc_ms
+                <= MARKET_TWO_START + 10 + PUBLIC_DELAY_MS + COMPONENT_TIME_SHIFT_MS
+        {
+            drive_real_bucket(&mut execution, ordered[next_bucket])?;
+            next_bucket += 1;
+        }
+        if perturb {
+            std::thread::yield_now();
+        }
+        let cancelled = AtomicBool::new(false);
+        let mut resources = measurement_resources(&execution)?;
+        let mut decision = COMPONENT_REQUEST_CUTOFF_BASE;
+        drive_fixed_request_range(
+            &mut execution,
+            &scenario,
+            0,
+            false,
+            0..2,
+            None,
+            &ordered,
+            &mut next_bucket,
+            &cancelled,
+            &mut resources,
+            &mut decision,
+            COMPONENT_TIME_SHIFT_MS,
+        )?;
+        if perturb {
+            std::thread::yield_now();
+        }
+        while next_bucket < ordered.len() {
+            drive_required_before_next_bucket(&mut execution, &ordered, &mut next_bucket)?;
+            drive_real_bucket(&mut execution, ordered[next_bucket])?;
+            next_bucket += 1;
+            if perturb {
+                std::thread::yield_now();
+            }
+        }
+        let candidate = execution
+            .complete_clean_run(bucket_reader(buckets))
+            .map_err(|error| format!("组件 CleanRun 封口/冷恢复失败：{error}"))?;
+        let projection_batches = capture
+            .lock()
+            .map_err(|_| "组件投影状态锁损坏".to_owned())?
+            .semantic_batches
+            .clone();
+        write_json(
+            root_dir.join("component-projection.json"),
+            &json!({
+                "schema_version":"component_projection_evidence_v1",
+                "attempt":attempt,
+                "validation_evidence_only":attempt != "canonical",
+                "batches":projection_batches
+            }),
+        )?;
+        Ok(ComponentAttemptEvidence {
+            accepted_input_count: candidate.accepted_input_count(),
+            projection_batches,
+            log_sha256: sha256_file(&log_path)?,
+            log_bytes: fs::metadata(&log_path)
+                .map_err(|error| format!("读取组件日志大小失败：{error}"))?
+                .len(),
+            cold_candidate_run_id: candidate.run_id().to_owned(),
+        })
+    }
+
+    pub(super) fn write_and_read_component_events(
+        path: &Path,
+        buckets: &[(
+            DurableMarketBucketReferenceV2,
+            Arc<[ExecutionMarketEventV3]>,
+        )],
+    ) -> Result<
+        Vec<(
+            DurableMarketBucketReferenceV2,
+            Arc<[ExecutionMarketEventV3]>,
+        )>,
+        String,
+    > {
+        let mut writer = BufWriter::new(
+            File::create(path).map_err(|error| format!("创建组件黄金事件文件失败：{error}"))?,
+        );
+        for (_, events) in buckets {
+            for event in events.iter() {
+                let encoded = encode_execution_market_event_v3(event)
+                    .map_err(|error| format!("编码组件黄金事件失败：{error}"))?;
+                writer
+                    .write_all(&encoded)
+                    .and_then(|()| writer.write_all(b"\n"))
+                    .map_err(|error| format!("写组件黄金事件失败：{error}"))?;
+            }
+        }
+        writer
+            .flush()
+            .map_err(|error| format!("刷新组件黄金事件失败：{error}"))?;
+        let bytes = fs::read(path).map_err(|error| format!("回读组件黄金事件失败：{error}"))?;
+        let decoded = bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                decode_execution_market_event_v3(line)
+                    .map_err(|error| format!("窄入口解码组件黄金事件失败：{error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut cursor = 0;
+        let restored = buckets
+            .iter()
+            .map(|(reference, events)| {
+                let end = cursor + events.len();
+                let restored = decoded
+                    .get(cursor..end)
+                    .ok_or_else(|| "组件黄金事件文件条目数不足".to_owned())?
+                    .to_vec();
+                cursor = end;
+                Ok((reference.clone(), Arc::from(restored.into_boxed_slice())))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        if cursor != decoded.len() {
+            return Err("组件黄金事件文件含未消费的额外条目".to_owned());
+        }
+        Ok(restored)
+    }
+
+    pub(super) fn component_comparison(
+        canonical: &ComponentAttemptEvidence,
+        rerun: &ComponentAttemptEvidence,
+        perturbed: &ComponentAttemptEvidence,
+    ) -> Value {
+        for (run, candidate) in [("clean-rerun", rerun), ("schedule-perturbed", perturbed)] {
+            let divergence = if canonical.accepted_input_count != candidate.accepted_input_count {
+                Some((
+                    "accepted_inputs",
+                    "$/accepted_input_count".to_owned(),
+                    None,
+                    json!(canonical.accepted_input_count),
+                    json!(candidate.accepted_input_count),
+                ))
+            } else if canonical.projection_batches != candidate.projection_batches {
+                let input_sequence = first_changed_batch(
+                    &canonical.projection_batches,
+                    &candidate.projection_batches,
+                );
+                let path = first_json_divergence(
+                    &Value::Array(canonical.projection_batches.clone()),
+                    &Value::Array(candidate.projection_batches.clone()),
+                    "$/projection_batches".to_owned(),
+                )
+                .unwrap_or_else(|| "$/projection_batches".to_owned());
+                Some((
+                    "semantic_projection",
+                    path,
+                    input_sequence,
+                    narrow_projection_summary(canonical, input_sequence),
+                    narrow_projection_summary(candidate, input_sequence),
+                ))
+            } else if canonical.cold_candidate_run_id != candidate.cold_candidate_run_id {
+                Some((
+                    "cold_recovery",
+                    "$/cold_candidate_run_id".to_owned(),
+                    None,
+                    json!(canonical.cold_candidate_run_id),
+                    json!(candidate.cold_candidate_run_id),
+                ))
+            } else if canonical.log_sha256 != candidate.log_sha256
+                || canonical.log_bytes != candidate.log_bytes
+            {
+                Some((
+                    "canonical_log",
+                    if canonical.log_sha256 != candidate.log_sha256 {
+                        "$/log_sha256".to_owned()
+                    } else {
+                        "$/log_bytes".to_owned()
+                    },
+                    None,
+                    json!({"sha256":canonical.log_sha256,"bytes":canonical.log_bytes}),
+                    json!({"sha256":candidate.log_sha256,"bytes":candidate.log_bytes}),
+                ))
+            } else {
+                None
+            };
+            if let Some((group, path, input_sequence, left, right)) = divergence {
+                return json!({
+                    "schema_version":"component_comparison_v1",
+                    "status":"FAIL",
+                    "first_divergence":{
+                        "run":run,
+                        "path":path,
+                        "input_sequence":input_sequence,
+                        "group":group,
+                        "item":"first unequal narrow evidence",
+                        "left":left,
+                        "right":right
+                    }
+                });
+            }
+        }
+        json!({
+            "schema_version":"component_comparison_v1",
+            "status":"PASS",
+            "first_divergence":Value::Null,
+            "canonical_equals_clean_rerun":true,
+            "canonical_equals_schedule_perturbed":true,
+            "validation_attempts_are_not_formal_runs":true
+        })
+    }
+
+    fn first_changed_batch(left: &[Value], right: &[Value]) -> Option<usize> {
+        left.iter()
+            .zip(right)
+            .position(|(left, right)| left != right)
+            .or_else(|| (left.len() != right.len()).then_some(left.len().min(right.len())))
+    }
+
+    fn first_json_divergence(left: &Value, right: &Value, path: String) -> Option<String> {
+        match (left, right) {
+            (Value::Array(left), Value::Array(right)) => {
+                for index in 0..left.len().max(right.len()) {
+                    let next = format!("{path}/{index}");
+                    match (left.get(index), right.get(index)) {
+                        (Some(left), Some(right)) => {
+                            if let Some(found) = first_json_divergence(left, right, next) {
+                                return Some(found);
+                            }
+                        }
+                        _ => return Some(next),
+                    }
+                }
+                None
+            }
+            (Value::Object(left), Value::Object(right)) => {
+                let keys = left
+                    .keys()
+                    .chain(right.keys())
+                    .collect::<std::collections::BTreeSet<_>>();
+                for key in keys {
+                    let next = format!("{path}/{key}");
+                    match (left.get(key), right.get(key)) {
+                        (Some(left), Some(right)) => {
+                            if let Some(found) = first_json_divergence(left, right, next) {
+                                return Some(found);
+                            }
+                        }
+                        _ => return Some(next),
+                    }
+                }
+                None
+            }
+            _ => (left != right).then_some(path),
+        }
+    }
+
+    fn narrow_projection_summary(
+        evidence: &ComponentAttemptEvidence,
+        input_sequence: Option<usize>,
+    ) -> Value {
+        input_sequence
+            .and_then(|index| evidence.projection_batches.get(index))
+            .cloned()
+            .unwrap_or(Value::Null)
+    }
+
+    fn copy_verified(source: &Path, expected_sha256: &str, target: &Path) -> Result<(), String> {
+        let bytes = fs::read(source).map_err(|error| format!("读取待复制证据文件失败：{error}"))?;
+        let actual = format!("{:x}", Sha256::digest(&bytes));
+        if actual != expected_sha256 {
+            return Err(format!(
+                "证据文件 SHA-256 不匹配：{} expected={expected_sha256} actual={actual}",
+                source.display()
+            ));
+        }
+        fs::write(target, bytes).map_err(|error| format!("写入已核验证据文件失败：{error}"))
+    }
+
+    fn component_artifact_inventory(root: &Path) -> Result<Vec<Value>, String> {
+        let mut paths = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in
+                fs::read_dir(&directory).map_err(|error| format!("遍历组件产物失败：{error}"))?
+            {
+                let entry = entry.map_err(|error| format!("读取组件产物项失败：{error}"))?;
+                if entry
+                    .file_type()
+                    .map_err(|error| format!("读取组件产物类型失败：{error}"))?
+                    .is_dir()
+                {
+                    pending.push(entry.path());
+                } else if entry.file_name()
+                    != std::ffi::OsStr::new("simulation-run-manifest-v2.json")
+                {
+                    paths.push(entry.path());
+                }
+            }
+        }
+        paths.sort();
+        paths
+            .into_iter()
+            .map(|path| {
+                let relative_path = path
+                    .strip_prefix(root)
+                    .map_err(|error| format!("计算组件相对路径失败：{error}"))?;
+                let bytes = fs::read(&path)
+                    .map_err(|error| format!("读取组件产物字节快照失败：{error}"))?;
+                Ok(component_inventory_member(relative_path, &bytes))
+            })
+            .collect()
+    }
+
+    pub(super) fn component_inventory_member(relative_path: &Path, bytes: &[u8]) -> Value {
+        json!({
+            "path":relative_path,
+            "bytes":bytes.len(),
+            "sha256":format!("{:x}", Sha256::digest(bytes))
+        })
+    }
+
+    pub(super) fn sync_tree(root: &Path) -> Result<(), String> {
+        let mut directories = vec![root.to_path_buf()];
+        let mut index = 0;
+        while index < directories.len() {
+            let directory = directories[index].clone();
+            for entry in fs::read_dir(&directory)
+                .map_err(|error| format!("遍历待同步组件目录失败：{error}"))?
+            {
+                let entry = entry.map_err(|error| format!("读取待同步组件项失败：{error}"))?;
+                if entry
+                    .file_type()
+                    .map_err(|error| format!("读取待同步组件项类型失败：{error}"))?
+                    .is_dir()
+                {
+                    directories.push(entry.path());
+                } else {
+                    File::open(entry.path())
+                        .and_then(|file| file.sync_all())
+                        .map_err(|error| format!("同步组件文件失败：{error}"))?;
+                }
+            }
+            index += 1;
+        }
+        for directory in directories.into_iter().rev() {
+            File::open(directory)
+                .and_then(|file| file.sync_all())
+                .map_err(|error| format!("同步组件目录失败：{error}"))?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn publish_candidate(candidate: &Path, target: &Path) -> Result<(), String> {
+        if target.exists() {
+            return Err(format!("组件发布目标已存在：{}", target.display()));
+        }
+        let candidate_parent = candidate.parent().unwrap_or(Path::new("."));
+        if target.parent().unwrap_or(Path::new(".")) != candidate_parent {
+            return Err("组件 candidate 与发布目标必须同级".to_owned());
+        }
+        let parent = File::open(candidate_parent)
+            .map_err(|error| format!("打开组件发布父目录失败：{error}"))?;
+        let candidate_name = candidate
+            .file_name()
+            .ok_or_else(|| "组件 candidate 缺少文件名".to_owned())?;
+        let target_name = target
+            .file_name()
+            .ok_or_else(|| "组件目标缺少文件名".to_owned())?;
+        renameat_with(
+            &parent,
+            candidate_name,
+            &parent,
+            target_name,
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(|error| format!("NOREPLACE 原子发布组件 bundle 失败：{error}"))?;
+        parent
+            .sync_all()
+            .map_err(|error| format!("同步组件发布父目录失败：{error}"))
+    }
+
+    pub(super) fn failed_output_path(output: &Path) -> PathBuf {
+        let mut path = output.as_os_str().to_os_string();
+        path.push(".failed");
+        PathBuf::from(path)
     }
 
     fn run_golden_matrix(args: Args, run_started: Instant) -> Result<(), String> {
@@ -1072,6 +1826,7 @@ mod enabled {
             &cancelled,
             &mut resource_high_water,
             &mut next_decision_at_utc_ms,
+            0,
         )?;
         check_safety(run_started, trial_started, &root_dir)?;
 
@@ -1160,6 +1915,7 @@ mod enabled {
             &cancelled,
             &mut resource_high_water,
             &mut next_decision_at_utc_ms,
+            0,
         )?;
         while next_bucket < public_buckets.len() {
             drive_required_before_next_bucket(&mut execution, &public_buckets, &mut next_bucket)?;
@@ -1665,7 +2421,7 @@ mod enabled {
         }
     }
 
-    fn golden_buckets(
+    pub(super) fn golden_buckets(
         scenario: &SealedPlatformScenarioV1,
     ) -> Result<
         Vec<(
@@ -1674,8 +2430,24 @@ mod enabled {
         )>,
         String,
     > {
+        golden_buckets_with_shift(scenario, 0)
+    }
+
+    pub(super) fn golden_buckets_with_shift(
+        scenario: &SealedPlatformScenarioV1,
+        time_shift_ms: i64,
+    ) -> Result<
+        Vec<(
+            DurableMarketBucketReferenceV2,
+            Arc<[ExecutionMarketEventV3]>,
+        )>,
+        String,
+    > {
         let markets = scenario.scenario().market_set().markets();
-        let source_times = [MARKET_ONE_START + 10, MARKET_TWO_START + 10];
+        let source_times = [
+            MARKET_ONE_START + 10 + time_shift_ms,
+            MARKET_TWO_START + 10 + time_shift_ms,
+        ];
         let mut hidden_events = Vec::new();
         let mut public_events = Vec::new();
         for (index, market) in markets.iter().enumerate() {
@@ -1694,8 +2466,8 @@ mod enabled {
             Arc::from(
                 vec![body_event(
                     &markets[0],
-                    BODY_ONE_SOURCE,
-                    BODY_ONE_SOURCE + PUBLIC_DELAY_MS,
+                    BODY_ONE_SOURCE + time_shift_ms,
+                    BODY_ONE_SOURCE + PUBLIC_DELAY_MS + time_shift_ms,
                     5,
                 )?]
                 .into_boxed_slice(),
@@ -1703,8 +2475,8 @@ mod enabled {
             Arc::from(
                 vec![body_event(
                     &markets[1],
-                    BODY_TWO_SOURCE,
-                    BODY_TWO_SOURCE + PUBLIC_DELAY_MS,
+                    BODY_TWO_SOURCE + time_shift_ms,
+                    BODY_TWO_SOURCE + PUBLIC_DELAY_MS + time_shift_ms,
                     6,
                 )?]
                 .into_boxed_slice(),
@@ -1714,8 +2486,8 @@ mod enabled {
             Arc::from(
                 vec![resolution_event(
                     &markets[0],
-                    RESOLUTION_ONE_SOURCE,
-                    RESOLUTION_ONE_SOURCE + PUBLIC_DELAY_MS,
+                    RESOLUTION_ONE_SOURCE + time_shift_ms,
+                    RESOLUTION_ONE_SOURCE + PUBLIC_DELAY_MS + time_shift_ms,
                     7,
                 )?]
                 .into_boxed_slice(),
@@ -1723,8 +2495,8 @@ mod enabled {
             Arc::from(
                 vec![resolution_event(
                     &markets[1],
-                    RESOLUTION_TWO_SOURCE,
-                    RESOLUTION_TWO_SOURCE + PUBLIC_DELAY_MS,
+                    RESOLUTION_TWO_SOURCE + time_shift_ms,
+                    RESOLUTION_TWO_SOURCE + PUBLIC_DELAY_MS + time_shift_ms,
                     8,
                 )?]
                 .into_boxed_slice(),
@@ -1733,8 +2505,8 @@ mod enabled {
         let final_events: Arc<[ExecutionMarketEventV3]> = Arc::from(
             vec![body_event(
                 &markets[0],
-                FINAL_EOF_SOURCE,
-                FINAL_EOF_SOURCE + PUBLIC_DELAY_MS,
+                FINAL_EOF_SOURCE + time_shift_ms,
+                FINAL_EOF_SOURCE + PUBLIC_DELAY_MS + time_shift_ms,
                 9,
             )?]
             .into_boxed_slice(),
@@ -1748,20 +2520,20 @@ mod enabled {
                 MarketEventPathV1::HiddenPlatform => [
                     source_times[0],
                     source_times[1],
-                    BODY_ONE_SOURCE,
-                    BODY_TWO_SOURCE,
-                    RESOLUTION_ONE_SOURCE,
-                    RESOLUTION_TWO_SOURCE,
-                    FINAL_EOF_SOURCE,
+                    BODY_ONE_SOURCE + time_shift_ms,
+                    BODY_TWO_SOURCE + time_shift_ms,
+                    RESOLUTION_ONE_SOURCE + time_shift_ms,
+                    RESOLUTION_TWO_SOURCE + time_shift_ms,
+                    FINAL_EOF_SOURCE + time_shift_ms,
                 ],
                 MarketEventPathV1::PublicVisibility => [
                     source_times[0] + PUBLIC_DELAY_MS,
                     source_times[1] + PUBLIC_DELAY_MS,
-                    BODY_ONE_SOURCE + PUBLIC_DELAY_MS,
-                    BODY_TWO_SOURCE + PUBLIC_DELAY_MS,
-                    RESOLUTION_ONE_SOURCE + PUBLIC_DELAY_MS,
-                    RESOLUTION_TWO_SOURCE + PUBLIC_DELAY_MS,
-                    FINAL_EOF_SOURCE + PUBLIC_DELAY_MS,
+                    BODY_ONE_SOURCE + PUBLIC_DELAY_MS + time_shift_ms,
+                    BODY_TWO_SOURCE + PUBLIC_DELAY_MS + time_shift_ms,
+                    RESOLUTION_ONE_SOURCE + PUBLIC_DELAY_MS + time_shift_ms,
+                    RESOLUTION_TWO_SOURCE + PUBLIC_DELAY_MS + time_shift_ms,
+                    FINAL_EOF_SOURCE + PUBLIC_DELAY_MS + time_shift_ms,
                 ],
             };
             let events = [
@@ -1961,6 +2733,7 @@ mod enabled {
             cancelled,
             resource_high_water,
             &mut next_decision_at_utc_ms,
+            0,
         )
     }
 
@@ -1980,10 +2753,11 @@ mod enabled {
         cancelled: &AtomicBool,
         resource_high_water: &mut Value,
         decision_cursor: &mut i64,
+        time_shift_ms: i64,
     ) -> Result<(), String> {
         let markets = scenario.scenario().market_set().markets();
         let public_visibility: PublicVisibilityCursorV1 = serde_json::from_value(json!({
-            "closed_through_received_at_utc_ms": MARKET_TWO_START + 10 + PUBLIC_DELAY_MS,
+            "closed_through_received_at_utc_ms": MARKET_TWO_START + 10 + PUBLIC_DELAY_MS + time_shift_ms,
             "next_visibility_index_position": 4
         }))
         .map_err(|error| format!("构造公开可见游标失败：{error}"))?;
@@ -2917,22 +3691,44 @@ mod enabled {
         }
     }
 
-    fn fixed_scenario() -> Result<Arc<SealedPlatformScenarioV1>, String> {
+    pub(super) fn fixed_scenario() -> Result<Arc<SealedPlatformScenarioV1>, String> {
+        let bytes = fixed_scenario_bytes()?;
+        SealedPlatformScenarioV1::decode_and_seal(&bytes)
+            .map(Arc::new)
+            .map_err(|error| format!("密封固定场景失败：{error}"))
+    }
+
+    pub(super) fn component_fixed_scenario() -> Result<Arc<SealedPlatformScenarioV1>, String> {
+        let bytes = component_fixed_scenario_bytes()?;
+        SealedPlatformScenarioV1::decode_and_seal(&bytes)
+            .map(Arc::new)
+            .map_err(|error| format!("密封固定 component 场景失败：{error}"))
+    }
+
+    fn fixed_scenario_bytes() -> Result<Vec<u8>, String> {
+        fixed_scenario_bytes_with_shift(0)
+    }
+
+    fn component_fixed_scenario_bytes() -> Result<Vec<u8>, String> {
+        fixed_scenario_bytes_with_shift(COMPONENT_TIME_SHIFT_MS)
+    }
+
+    fn fixed_scenario_bytes_with_shift(time_shift_ms: i64) -> Result<Vec<u8>, String> {
         let first = market(
             CONDITION,
             "3278040",
             TOKEN_UP,
             TOKEN_DOWN,
-            MARKET_ONE_START,
-            MARKET_END,
+            MARKET_ONE_START + time_shift_ms,
+            MARKET_END + time_shift_ms,
         )?;
         let second = market(
             &format!("0x{}", "e".repeat(64)),
             "3278041",
             "10000000000000000000000000000000000000000000000000000000000000001",
             "10000000000000000000000000000000000000000000000000000000000000002",
-            MARKET_TWO_START,
-            MARKET_END,
+            MARKET_TWO_START + time_shift_ms,
+            MARKET_END + time_shift_ms,
         )?;
         let scenario = PlatformScenarioV1::try_new(vec![first, second])
             .map_err(|error| format!("构造固定双市场场景失败：{error}"))?;
@@ -2942,11 +3738,7 @@ mod enabled {
             market_set_sha256: scenario.market_set_sha256().clone(),
             markets: scenario.market_set().markets().to_vec(),
         };
-        let bytes =
-            serde_json::to_vec(&artifact).map_err(|error| format!("编码固定场景失败：{error}"))?;
-        SealedPlatformScenarioV1::decode_and_seal(&bytes)
-            .map(Arc::new)
-            .map_err(|error| format!("密封固定场景失败：{error}"))
+        serde_json::to_vec(&artifact).map_err(|error| format!("编码固定场景失败：{error}"))
     }
 
     fn market(
@@ -2987,7 +3779,14 @@ mod enabled {
     }
 
     fn successful_finality() -> Result<Arc<TradeFinalityPolicyV2>, String> {
-        let bytes = serde_json::to_vec(&json!({
+        let bytes = successful_finality_bytes()?;
+        TradeFinalityPolicyV2::decode_and_seal(&bytes)
+            .map(Arc::new)
+            .map_err(|error| format!("密封成功最终性策略失败：{error}"))
+    }
+
+    fn successful_finality_bytes() -> Result<Vec<u8>, String> {
+        serde_json::to_vec(&json!({
             "schema_version": "trade_finality_policy_v2",
             "normal_path": { "steps": [
                 {"state":"MATCHED","offset_ms":0},
@@ -2996,10 +3795,7 @@ mod enabled {
             ], "economic_application_ordinal": 1 },
             "failure_overrides": []
         }))
-        .map_err(|error| format!("编码成功最终性策略失败：{error}"))?;
-        TradeFinalityPolicyV2::decode_and_seal(&bytes)
-            .map(Arc::new)
-            .map_err(|error| format!("密封成功最终性策略失败：{error}"))
+        .map_err(|error| format!("编码成功最终性策略失败：{error}"))
     }
 
     fn proc_snapshot() -> Result<ProcSnapshot, String> {
@@ -3194,15 +3990,31 @@ mod enabled {
         let mut source = None;
         let mut lock = None;
         let mut baseline = None;
+        let mut rule_snapshot = None;
+        let mut rule_snapshot_sha256 = None;
+        let mut stage4_formal_audit = None;
+        let mut stage4_formal_audit_sha256 = None;
+        let mut retention_manifest = None;
+        let mut retention_manifest_sha256 = None;
+        let mut test_evidence = None;
+        let mut test_evidence_sha256 = None;
         let mut mode = RunMode::GoldenMatrix;
         let mut index = 1;
         while index < argv.len() {
             let flag = &argv[index];
             if flag == "--targeted-retention-24h" {
-                if mode == RunMode::TargetedRetention24h {
-                    return Err("--targeted-retention-24h 不得重复".to_owned());
+                if mode != RunMode::GoldenMatrix {
+                    return Err("固定运行 mode 不得重复或组合".to_owned());
                 }
                 mode = RunMode::TargetedRetention24h;
+                index += 1;
+                continue;
+            }
+            if flag == "--component-conformance" {
+                if mode != RunMode::GoldenMatrix {
+                    return Err("固定运行 mode 不得重复或组合".to_owned());
+                }
+                mode = RunMode::ComponentConformance;
                 index += 1;
                 continue;
             }
@@ -3215,6 +4027,18 @@ mod enabled {
                 "--source-identity-sha256" => source = Some(value.clone()),
                 "--cargo-lock-sha256" => lock = Some(value.clone()),
                 "--baseline-summary" => baseline = Some(PathBuf::from(value)),
+                "--rule-snapshot" => rule_snapshot = Some(PathBuf::from(value)),
+                "--rule-snapshot-sha256" => rule_snapshot_sha256 = Some(value.clone()),
+                "--stage4-formal-audit" => stage4_formal_audit = Some(PathBuf::from(value)),
+                "--stage4-formal-audit-sha256" => {
+                    stage4_formal_audit_sha256 = Some(value.clone());
+                }
+                "--retention-manifest" => retention_manifest = Some(PathBuf::from(value)),
+                "--retention-manifest-sha256" => {
+                    retention_manifest_sha256 = Some(value.clone());
+                }
+                "--test-evidence" => test_evidence = Some(PathBuf::from(value)),
+                "--test-evidence-sha256" => test_evidence_sha256 = Some(value.clone()),
                 _ => return Err(format!("未知参数：{flag}")),
             }
             index += 2;
@@ -3225,14 +4049,51 @@ mod enabled {
         if git_commit.len() != 40 || source.len() != 64 || lock.len() != 64 {
             return Err("git commit 必须为 40 位，SHA-256 必须为 64 位".to_owned());
         }
-        if mode == RunMode::TargetedRetention24h && baseline.is_some() {
-            return Err("固定 targeted 模式不接受 --baseline-summary".to_owned());
+        if mode != RunMode::GoldenMatrix && baseline.is_some() {
+            return Err("固定 mode 不接受 --baseline-summary".to_owned());
         }
-        if mode == RunMode::TargetedRetention24h && !cfg!(feature = "measurement") {
-            return Err(
-                "--targeted-retention-24h 只允许 measurement feature 构建；未装配探针".to_owned(),
-            );
+        if mode != RunMode::GoldenMatrix && !cfg!(feature = "measurement") {
+            return Err("固定 mode 只允许 measurement feature 构建；未装配探针".to_owned());
         }
+        let component = if mode == RunMode::ComponentConformance {
+            let values = [
+                rule_snapshot_sha256.as_deref(),
+                stage4_formal_audit_sha256.as_deref(),
+                retention_manifest_sha256.as_deref(),
+                test_evidence_sha256.as_deref(),
+            ];
+            if values
+                .iter()
+                .any(|value| value.is_none_or(|value| value.len() != 64))
+            {
+                return Err("component evidence SHA-256 必须完整且为 64 位".to_owned());
+            }
+            Some(ComponentEvidenceArgs {
+                rule_snapshot: rule_snapshot.ok_or_else(|| "缺少 --rule-snapshot".to_owned())?,
+                rule_snapshot_sha256: Sha256Hex(rule_snapshot_sha256.expect("已检查")),
+                stage4_formal_audit: stage4_formal_audit
+                    .ok_or_else(|| "缺少 --stage4-formal-audit".to_owned())?,
+                stage4_formal_audit_sha256: Sha256Hex(stage4_formal_audit_sha256.expect("已检查")),
+                retention_manifest: retention_manifest
+                    .ok_or_else(|| "缺少 --retention-manifest".to_owned())?,
+                retention_manifest_sha256: Sha256Hex(retention_manifest_sha256.expect("已检查")),
+                test_evidence: test_evidence.ok_or_else(|| "缺少 --test-evidence".to_owned())?,
+                test_evidence_sha256: Sha256Hex(test_evidence_sha256.expect("已检查")),
+            })
+        } else {
+            if rule_snapshot.is_some()
+                || rule_snapshot_sha256.is_some()
+                || stage4_formal_audit.is_some()
+                || stage4_formal_audit_sha256.is_some()
+                || retention_manifest.is_some()
+                || retention_manifest_sha256.is_some()
+                || test_evidence.is_some()
+                || test_evidence_sha256.is_some()
+            {
+                return Err("component evidence 参数只允许 --component-conformance".to_owned());
+            }
+            None
+        };
         Ok(Args {
             output_dir: output_dir.ok_or_else(|| "缺少 --output-dir".to_owned())?,
             identity: ImplementationIdentityV1 {
@@ -3241,6 +4102,7 @@ mod enabled {
                 cargo_lock_sha256: Sha256Hex(lock),
             },
             baseline_summary: baseline,
+            component,
             mode,
             argv,
         })
@@ -3256,6 +4118,12 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "measurement")]
+    use std::path::Path;
+
+    #[cfg(feature = "measurement")]
+    use sha2::Digest;
+
     use super::*;
 
     #[cfg(feature = "measurement")]
@@ -3284,6 +4152,217 @@ mod tests {
         assert_eq!(
             enabled::runner_identity(targeted.mode),
             "sim-task-4-5-2-retention-24h-v1"
+        );
+    }
+
+    #[cfg(feature = "measurement")]
+    #[test]
+    fn component_parser_selects_the_only_fixed_component_mode() {
+        let args = vec![
+            "sim_measurement",
+            "--output-dir",
+            "/tmp/component-final",
+            "--git-commit",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--source-identity-sha256",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "--cargo-lock-sha256",
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "--component-conformance",
+            "--rule-snapshot",
+            "/tmp/rules-v3.json",
+            "--rule-snapshot-sha256",
+            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "--stage4-formal-audit",
+            "/tmp/stage4-audit.json",
+            "--stage4-formal-audit-sha256",
+            "22ae1c4a36803c2367fec81472e3ab5b7ecf6c65b78159866f41ed92aed1e5b7",
+            "--retention-manifest",
+            "/tmp/retention.json",
+            "--retention-manifest-sha256",
+            "d3d5b7d615dfcc6b76e393f384739c72fee52fea71707f01d7a42006b58bef16",
+            "--test-evidence",
+            "/tmp/tests.json",
+            "--test-evidence-sha256",
+            "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let parsed = enabled::parse_args_from(args).expect("固定 component 参数必须解析");
+        assert_eq!(parsed.mode, enabled::RunMode::ComponentConformance);
+        assert_eq!(
+            enabled::runner_identity(parsed.mode),
+            "sim-stage-5-component-conformance-v1"
+        );
+    }
+
+    #[cfg(not(feature = "measurement"))]
+    #[test]
+    fn feature_off_rejects_component_flag_at_cli_boundary() {
+        let args = vec![
+            "sim_measurement",
+            "--output-dir",
+            "/tmp/out",
+            "--git-commit",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--source-identity-sha256",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "--cargo-lock-sha256",
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "--component-conformance",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let error = enabled::parse_args_from(args).expect_err("feature-off 必须拒绝 component");
+        assert!(error.contains("未装配探针"));
+    }
+
+    #[cfg(feature = "measurement")]
+    #[test]
+    fn component_comparison_is_equal_and_reports_the_first_changed_batch() {
+        let baseline = enabled::ComponentAttemptEvidence {
+            accepted_input_count: 9,
+            projection_batches: vec![serde_json::json!({"value":1})],
+            log_sha256: "a".repeat(64),
+            log_bytes: 100,
+            cold_candidate_run_id: COMPONENT_RUNNER_IDENTITY.to_owned(),
+        };
+        let pass = enabled::component_comparison(&baseline, &baseline, &baseline);
+        assert_eq!(pass["status"], "PASS");
+        assert!(pass["first_divergence"].is_null());
+        let mut changed = baseline.clone();
+        changed.projection_batches[0] = serde_json::json!({"value":2});
+        let fail = enabled::component_comparison(&baseline, &changed, &baseline);
+        assert_eq!(fail["status"], "FAIL");
+        assert_eq!(fail["first_divergence"]["run"], "clean-rerun");
+        assert_eq!(fail["first_divergence"]["group"], "semantic_projection");
+        assert_eq!(fail["first_divergence"]["input_sequence"], 0);
+        assert!(
+            fail["first_divergence"]["path"]
+                .as_str()
+                .expect("divergence path")
+                .contains("projection_batches/0/value")
+        );
+
+        let mut changed_count = baseline.clone();
+        changed_count.accepted_input_count += 1;
+        let fail = enabled::component_comparison(&baseline, &changed_count, &baseline);
+        assert_eq!(fail["first_divergence"]["group"], "accepted_inputs");
+        assert!(fail["first_divergence"]["input_sequence"].is_null());
+    }
+
+    #[cfg(feature = "measurement")]
+    #[test]
+    fn component_publish_is_noreplace_and_candidate_never_masquerades_as_final() {
+        let directory = tempfile::tempdir().expect("component publish tempdir");
+        let candidate = directory.path().join(".bundle.candidate");
+        let final_path = directory.path().join("bundle");
+        std::fs::create_dir(&candidate).expect("create component candidate");
+        std::fs::write(candidate.join("proof.json"), b"{}\n").expect("write component proof");
+        enabled::sync_tree(&candidate).expect("sync component candidate");
+        assert!(!final_path.exists());
+        enabled::publish_candidate(&candidate, &final_path).expect("publish component candidate");
+        assert!(final_path.join("proof.json").is_file());
+        assert!(!candidate.exists());
+        let second = directory.path().join(".bundle.candidate");
+        std::fs::create_dir(&second).expect("create second candidate");
+        assert!(enabled::publish_candidate(&second, &final_path).is_err());
+        assert!(second.exists());
+        assert_eq!(
+            enabled::failed_output_path(&directory.path().join("bundle.v2")),
+            directory.path().join("bundle.v2.failed")
+        );
+    }
+
+    #[cfg(feature = "measurement")]
+    #[test]
+    fn component_golden_file_round_trips_through_the_v3_decoder_and_has_real_sha() {
+        let directory = tempfile::tempdir().expect("component golden tempdir");
+        let scenario = enabled::fixed_scenario().expect("fixed component scenario");
+        let buckets = enabled::golden_buckets(&scenario).expect("fixed component buckets");
+        let path = directory.path().join("component-golden-events-v3.jsonl");
+        let restored = enabled::write_and_read_component_events(&path, &buckets)
+            .expect("round-trip component golden events");
+        assert_eq!(restored, buckets);
+        let sha = enabled::sha256_file(&path).expect("component golden file SHA");
+        assert_ne!(sha, "7".repeat(64));
+        assert_eq!(sha.len(), 64);
+    }
+
+    #[cfg(feature = "measurement")]
+    #[test]
+    fn component_timeline_keeps_rules_events_requests_and_scenario_causally_aligned() {
+        let default_scenario = enabled::fixed_scenario().expect("fixed default scenario");
+        let component_scenario =
+            enabled::component_fixed_scenario().expect("fixed component scenario");
+        let default_buckets =
+            enabled::golden_buckets(&default_scenario).expect("fixed default buckets");
+        let component_buckets = enabled::golden_buckets_with_shift(
+            &component_scenario,
+            enabled::COMPONENT_TIME_SHIFT_MS,
+        )
+        .expect("fixed component buckets");
+
+        let default_market_start = default_scenario.scenario().market_set().markets()[0]
+            .market()
+            .window
+            .start_at_utc_ms;
+        let component_market_start = component_scenario.scenario().market_set().markets()[0]
+            .market()
+            .window
+            .start_at_utc_ms;
+        assert_eq!(
+            component_market_start - default_market_start,
+            enabled::COMPONENT_TIME_SHIFT_MS
+        );
+
+        let earliest_component_source = component_buckets
+            .iter()
+            .flat_map(|(_, events)| events.iter())
+            .filter_map(|event| event.time.source_event_at_utc_ms)
+            .min()
+            .expect("component source time");
+        let earliest_component_received = component_buckets
+            .iter()
+            .flat_map(|(_, events)| events.iter())
+            .map(|event| event.time.received_at_utc_ms)
+            .min()
+            .expect("component received time");
+        let earliest_default_source = default_buckets
+            .iter()
+            .flat_map(|(_, events)| events.iter())
+            .filter_map(|event| event.time.source_event_at_utc_ms)
+            .min()
+            .expect("default source time");
+
+        assert_eq!(
+            enabled::COMPONENT_CAUSAL_START_UTC_MS,
+            earliest_component_source
+        );
+        assert!(earliest_component_received >= enabled::COMPONENT_CAUSAL_START_UTC_MS);
+        assert_eq!(
+            enabled::COMPONENT_REQUEST_CUTOFF_BASE - earliest_component_source,
+            199_990
+        );
+        assert_eq!(
+            earliest_component_source - earliest_default_source,
+            enabled::COMPONENT_TIME_SHIFT_MS
+        );
+        assert!(earliest_component_source > 1_787_398_441_633);
+    }
+
+    #[cfg(feature = "measurement")]
+    #[test]
+    fn component_inventory_member_derives_length_and_sha_from_one_byte_snapshot() {
+        let bytes = b"same component inventory byte snapshot";
+        let member = enabled::component_inventory_member(Path::new("proof.bin"), bytes);
+        assert_eq!(member["path"], "proof.bin");
+        assert_eq!(member["bytes"], bytes.len());
+        assert_eq!(
+            member["sha256"],
+            format!("{:x}", sha2::Sha256::digest(bytes))
         );
     }
 
