@@ -401,6 +401,7 @@ pub struct HttpRequestEvidenceV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct HttpAttemptEvidenceV2 {
     pub(crate) attempt: u8,
     pub(crate) started_at_utc_ms: i64,
@@ -411,6 +412,7 @@ pub(crate) struct HttpAttemptEvidenceV2 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct HttpRequestEvidenceV2 {
     pub(crate) endpoint_kind: HttpEndpointKindV1,
     pub(crate) method: String,
@@ -429,6 +431,7 @@ pub struct StaticConfigEvidenceV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct StaticConfigEvidenceV2 {
     pub(crate) path: String,
     pub(crate) schema_version: String,
@@ -479,6 +482,7 @@ pub struct PlatformRuleSnapshotV2 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct PlatformRuleProvenanceV3 {
     pub(crate) created_via: SnapshotCreationModeV1,
     pub(crate) query_started_at_utc_ms: i64,
@@ -494,6 +498,7 @@ pub(crate) struct PlatformRuleProvenanceV3 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct PlatformRuleSnapshotV3 {
     pub(crate) schema_version: String,
     pub(crate) synchronized_platform_rules: SynchronizedPlatformRulesV1,
@@ -1021,6 +1026,42 @@ pub fn recover_process_snapshot(
     Ok(Arc::new(loaded))
 }
 
+pub fn load_historical_process_snapshot_v3(
+    request: HistoricalProcessSnapshotRequestV1,
+) -> Result<Arc<SealedProcessRuleSnapshotV3>, RuleSnapshotError> {
+    let loaded = read_and_validate_snapshot_v3(
+        &request.snapshot_path,
+        &request.expected_file_sha256,
+        SnapshotAccessMode::HistoricalAsOf,
+        MAX_RULE_SNAPSHOT_BYTES,
+    )?;
+    if loaded.snapshot.provenance.rules_observed_at_utc_ms > request.replay_causal_start_utc_ms {
+        return Err(RuleSnapshotError::HistoricalNotApplicable {
+            observed_at_utc_ms: loaded.snapshot.provenance.rules_observed_at_utc_ms,
+            causal_start_utc_ms: request.replay_causal_start_utc_ms,
+        });
+    }
+    Ok(Arc::new(loaded))
+}
+
+pub fn recover_process_snapshot_v3(
+    request: RecoveryProcessSnapshotRequestV1,
+) -> Result<Arc<SealedProcessRuleSnapshotV3>, RuleSnapshotError> {
+    validate_implementation_identity(&request.expected_implementation_identity)?;
+    let loaded = read_and_validate_snapshot_v3(
+        &request.snapshot_path,
+        &request.expected_file_sha256,
+        SnapshotAccessMode::Recovery,
+        MAX_RULE_SNAPSHOT_BYTES,
+    )?;
+    if loaded.snapshot.provenance.implementation_identity
+        != request.expected_implementation_identity
+    {
+        return Err(RuleSnapshotError::IncompatibleImplementation);
+    }
+    Ok(Arc::new(loaded))
+}
+
 async fn query_and_seal_current_process_snapshot_with(
     request: CurrentProcessSnapshotRequestV1,
     options: LoaderOptions,
@@ -1118,6 +1159,7 @@ async fn query_and_seal_current_process_snapshot_v3_with(
             dependencies: direct_dependency_identities(),
         },
     };
+    validate_snapshot_v3(&snapshot)?;
     let (file_sha256, path, _) =
         seal_snapshot(&request.target_path, &snapshot, MAX_RULE_SNAPSHOT_BYTES)?;
     Ok(Arc::new(SealedProcessRuleSnapshotV3 {
@@ -1845,6 +1887,176 @@ fn validate_snapshot(snapshot: &PlatformRuleSnapshotV2) -> Result<(), RuleSnapsh
     )
 }
 
+fn validate_snapshot_v3(snapshot: &PlatformRuleSnapshotV3) -> Result<(), RuleSnapshotError> {
+    if snapshot.schema_version != PLATFORM_RULE_SNAPSHOT_SCHEMA_V3 {
+        return Err(RuleSnapshotError::SnapshotIntegrity(format!(
+            "unexpected schema {}",
+            snapshot.schema_version
+        )));
+    }
+    let canonical_reference =
+        canonical_reference_market(snapshot.provenance.reference_market.clone())
+            .map_err(|error| RuleSnapshotError::SnapshotIntegrity(error.to_string()))?;
+    if canonical_reference != snapshot.provenance.reference_market {
+        return Err(RuleSnapshotError::SnapshotIntegrity(
+            "reference market is not canonical".to_owned(),
+        ));
+    }
+    validate_implementation_identity(&snapshot.provenance.implementation_identity)
+        .map_err(|error| RuleSnapshotError::SnapshotIntegrity(error.to_string()))?;
+    let config = PlatformRulesConfigV1 {
+        schema_version: snapshot.provenance.static_config.schema_version.clone(),
+        documented_platform_rules: snapshot.documented_platform_rules.clone(),
+        project_account_rules: snapshot.project_account_rules.clone(),
+    };
+    validate_config(&config)
+        .map_err(|error| RuleSnapshotError::SnapshotIntegrity(error.to_string()))?;
+    if snapshot.provenance.static_config.path != PLATFORM_RULE_CONFIG_PATH {
+        return Err(RuleSnapshotError::SnapshotIntegrity(
+            "static config path is invalid".to_owned(),
+        ));
+    }
+    validate_synchronized_rules(
+        &snapshot.synchronized_platform_rules,
+        &snapshot.project_account_rules,
+    )?;
+    if snapshot.provenance.created_via != SnapshotCreationModeV1::CurrentQuery
+        || snapshot.provenance.query_started_at_utc_ms < 0
+        || snapshot.provenance.query_completed_at_utc_ms
+            < snapshot.provenance.query_started_at_utc_ms
+        || snapshot.provenance.rules_observed_at_utc_ms
+            != snapshot.provenance.query_completed_at_utc_ms
+    {
+        return Err(RuleSnapshotError::SnapshotIntegrity(
+            "reference provenance invariants are invalid".to_owned(),
+        ));
+    }
+    if snapshot.provenance.application_policy != process_rule_application_policy() {
+        return Err(RuleSnapshotError::SnapshotIntegrity(
+            "process rule application policy is invalid".to_owned(),
+        ));
+    }
+    if snapshot.provenance.reference_observation_evidence != reference_observation_evidence() {
+        return Err(RuleSnapshotError::SnapshotIntegrity(
+            "reference observation evidence is invalid".to_owned(),
+        ));
+    }
+    validate_dependency_identities(&snapshot.provenance.dependencies)?;
+    validate_http_provenance_v3(
+        &snapshot.provenance.http_requests,
+        &snapshot.provenance.reference_market,
+        snapshot.provenance.query_started_at_utc_ms,
+        snapshot.provenance.query_completed_at_utc_ms,
+    )
+}
+
+fn validate_http_provenance_v3(
+    requests: &[HttpRequestEvidenceV2],
+    reference: &ReferenceMarketSpecV1,
+    query_started_at_utc_ms: i64,
+    query_completed_at_utc_ms: i64,
+) -> Result<(), RuleSnapshotError> {
+    if requests.len() != 3 {
+        return Err(RuleSnapshotError::SnapshotIntegrity(
+            "exactly three reference-market requests are required".to_owned(),
+        ));
+    }
+    let expected = [
+        (HttpEndpointKindV1::ClobMarketInfo, None),
+        (HttpEndpointKindV1::GammaMarketsKeyset, Some(false)),
+        (HttpEndpointKindV1::GammaMarketsKeyset, Some(true)),
+    ];
+    for (request, (endpoint, closed)) in requests.iter().zip(expected) {
+        if request.endpoint_kind != endpoint
+            || request.method != "GET"
+            || request.condition_id != reference.condition_id
+            || request.closed != closed
+            || request.attempts.is_empty()
+            || request.attempts.len() > 2
+        {
+            return Err(RuleSnapshotError::SnapshotIntegrity(
+                "HTTP request provenance is invalid".to_owned(),
+            ));
+        }
+        let url = reqwest::Url::parse(&request.request_url).map_err(|error| {
+            RuleSnapshotError::SnapshotIntegrity(format!("invalid request URL: {error}"))
+        })?;
+        let valid_origin = official_or_test_endpoint_origin(&url, endpoint);
+        let valid_route = match endpoint {
+            HttpEndpointKindV1::ClobMarketInfo => {
+                url.path() == format!("/clob-markets/{}", reference.condition_id.0)
+                    && url.query().is_none()
+            }
+            HttpEndpointKindV1::GammaMarketsKeyset => {
+                let pairs = url.query_pairs().collect::<Vec<_>>();
+                url.path() == "/markets/keyset"
+                    && pairs.len() == 3
+                    && pairs[0] == ("limit".into(), "100".into())
+                    && pairs[1]
+                        == (
+                            "condition_ids".into(),
+                            reference.condition_id.0.as_str().into(),
+                        )
+                    && pairs[2]
+                        == (
+                            "closed".into(),
+                            if closed == Some(true) {
+                                "true".into()
+                            } else {
+                                "false".into()
+                            },
+                        )
+            }
+        };
+        if !valid_origin || !valid_route {
+            return Err(RuleSnapshotError::SnapshotIntegrity(
+                "HTTP request origin or route does not match the approved reference endpoint"
+                    .to_owned(),
+            ));
+        }
+        for (index, attempt) in request.attempts.iter().enumerate() {
+            if attempt.attempt as usize != index + 1
+                || attempt.completed_at_utc_ms < attempt.started_at_utc_ms
+                || attempt.started_at_utc_ms < query_started_at_utc_ms
+                || attempt.completed_at_utc_ms > query_completed_at_utc_ms
+                || attempt
+                    .response_bytes
+                    .is_some_and(|bytes| bytes > MAX_RULE_HTTP_RESPONSE_BYTES as u64)
+                || index > 0
+                    && request.attempts[index - 1].completed_at_utc_ms > attempt.started_at_utc_ms
+            {
+                return Err(RuleSnapshotError::SnapshotIntegrity(
+                    "HTTP attempt provenance is invalid".to_owned(),
+                ));
+            }
+        }
+        for retryable in &request.attempts[..request.attempts.len() - 1] {
+            let retryable_status = matches!(retryable.status_code, Some(500 | 503))
+                && retryable.response_bytes.is_some()
+                && retryable.transport_error_kind.is_none();
+            let retryable_transport = retryable.transport_error_kind.is_some();
+            if !retryable_status && !retryable_transport {
+                return Err(RuleSnapshotError::SnapshotIntegrity(
+                    "HTTP retry provenance is invalid".to_owned(),
+                ));
+            }
+        }
+        let final_attempt = request
+            .attempts
+            .last()
+            .expect("non-empty attempts checked above");
+        if final_attempt.status_code != Some(StatusCode::OK.as_u16())
+            || final_attempt.response_bytes.is_none_or(|bytes| bytes == 0)
+            || final_attempt.transport_error_kind.is_some()
+        {
+            return Err(RuleSnapshotError::SnapshotIntegrity(
+                "sealed snapshot lacks a complete successful response".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_synchronized_rules(
     rules: &SynchronizedPlatformRulesV1,
     project: &ProjectAccountRulesV1,
@@ -2220,6 +2432,68 @@ fn read_and_validate_snapshot(
         path: path.to_path_buf(),
         file_sha256: actual_file_sha256,
         file_bytes: Arc::from(bytes),
+        access_mode,
+        snapshot,
+    })
+}
+
+fn read_and_validate_snapshot_v3(
+    path: &Path,
+    expected_file_sha256: &Sha256Hex,
+    access_mode: SnapshotAccessMode,
+    max_snapshot_bytes: usize,
+) -> Result<SealedProcessRuleSnapshotV3, RuleSnapshotError> {
+    validate_sha256(expected_file_sha256)?;
+    let (parent_path, target_name) = split_snapshot_path(path)?;
+    let parent_fd = open(
+        parent_path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| io_error("open snapshot parent", error))?;
+    let parent = File::from(parent_fd);
+    let snapshot_fd = openat(
+        &parent,
+        target_name.as_str(),
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| io_error("open sealed snapshot", error))?;
+    let mut file = File::from(snapshot_fd);
+    let metadata = file.metadata().map_err(|error| RuleSnapshotError::Io {
+        operation: "inspect sealed snapshot",
+        message: error.to_string(),
+    })?;
+    if !metadata.is_file() || metadata.len() > max_snapshot_bytes as u64 {
+        return Err(RuleSnapshotError::SnapshotIntegrity(
+            "snapshot is not a bounded regular file".to_owned(),
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    (&mut file)
+        .take(max_snapshot_bytes as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| RuleSnapshotError::Io {
+            operation: "read sealed snapshot",
+            message: error.to_string(),
+        })?;
+    if bytes.len() > max_snapshot_bytes {
+        return Err(RuleSnapshotError::SnapshotTooLarge {
+            limit: max_snapshot_bytes,
+        });
+    }
+    let actual_file_sha256 = sha256_hex(&bytes);
+    if &actual_file_sha256 != expected_file_sha256 {
+        return Err(RuleSnapshotError::SnapshotIntegrity(
+            "file SHA-256 mismatch".to_owned(),
+        ));
+    }
+    let snapshot: PlatformRuleSnapshotV3 = serde_json::from_slice(&bytes)
+        .map_err(|error| RuleSnapshotError::SnapshotIntegrity(error.to_string()))?;
+    validate_snapshot_v3(&snapshot)?;
+    Ok(SealedProcessRuleSnapshotV3 {
+        path: path.to_path_buf(),
+        file_sha256: actual_file_sha256,
         access_mode,
         snapshot,
     })
@@ -2941,6 +3215,28 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn v3_body_transport_retry_publishes_a_snapshot_that_offline_loader_accepts() {
+        let server = ScriptedServer::start(vec![
+            ResponseSpec::truncated(200, CLOB_REAL, CLOB_REAL.len() + 1),
+            ResponseSpec::json(200, CLOB_REAL),
+            ResponseSpec::json(200, GAMMA_OPEN_EMPTY),
+            ResponseSpec::json(200, GAMMA_CLOSED_REAL),
+        ])
+        .await;
+        let directory = tempfile::tempdir().expect("tempdir");
+        let target = directory.path().join("platform-rule-snapshot-v3.json");
+        let sealed = create_successful_snapshot_v3(&server, target.clone()).await;
+        assert_eq!(server.request_count(), 4);
+        let loaded = load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
+            snapshot_path: target,
+            expected_file_sha256: sealed.file_sha256().clone(),
+            replay_causal_start_utc_ms: fixed_now_utc_ms().expect("fixed time"),
+        })
+        .expect("V3 offline loader must accept the published retry provenance");
+        assert_eq!(loaded.snapshot(), sealed.snapshot());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn omitted_itode_is_the_official_false_encoding() {
         let text = std::str::from_utf8(CLOB_REAL).expect("CLOB 测试夹具必须是 UTF-8");
         let omitted = text.replacen("\"itode\":true,", "", 1);
@@ -3211,6 +3507,83 @@ pub(crate) mod tests {
         })
         .expect_err("an unapproved endpoint origin must not become trusted provenance");
         assert!(matches!(error, RuleSnapshotError::SnapshotIntegrity(_)));
+        assert_eq!(server.request_count(), request_count);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn v3_historical_and_recovery_load_the_exact_offline_snapshot() {
+        let server = ScriptedServer::start(successful_responses()).await;
+        let directory = tempfile::tempdir().expect("tempdir");
+        let target = directory.path().join("platform-rule-snapshot-v3.json");
+        let sealed = create_successful_snapshot_v3(&server, target.clone()).await;
+        let request_count = server.request_count();
+
+        let historical = load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
+            snapshot_path: target.clone(),
+            expected_file_sha256: sealed.file_sha256().clone(),
+            replay_causal_start_utc_ms: fixed_now_utc_ms().expect("fixed time"),
+        })
+        .expect("V3 historical load");
+        assert_eq!(historical.access_mode(), SnapshotAccessMode::HistoricalAsOf);
+        assert_eq!(historical.snapshot(), sealed.snapshot());
+
+        let recovered = recover_process_snapshot_v3(RecoveryProcessSnapshotRequestV1 {
+            snapshot_path: target,
+            expected_file_sha256: sealed.file_sha256().clone(),
+            expected_implementation_identity: test_implementation_identity(),
+        })
+        .expect("V3 recovery load");
+        assert_eq!(recovered.access_mode(), SnapshotAccessMode::Recovery);
+        assert_eq!(recovered.snapshot(), sealed.snapshot());
+        assert_eq!(server.request_count(), request_count);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn v3_offline_loader_rejects_sha_schema_time_and_recovery_identity_mismatch() {
+        let server = ScriptedServer::start(successful_responses()).await;
+        let directory = tempfile::tempdir().expect("tempdir");
+        let target = directory.path().join("platform-rule-snapshot-v3.json");
+        let sealed = create_successful_snapshot_v3(&server, target.clone()).await;
+        let request_count = server.request_count();
+        let wrong_sha = load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
+            snapshot_path: target.clone(),
+            expected_file_sha256: Sha256Hex("f".repeat(64)),
+            replay_causal_start_utc_ms: fixed_now_utc_ms().expect("fixed time"),
+        })
+        .expect_err("V3 file SHA mismatch must fail");
+        assert!(matches!(wrong_sha, RuleSnapshotError::SnapshotIntegrity(_)));
+        let late = load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
+            snapshot_path: target.clone(),
+            expected_file_sha256: sealed.file_sha256().clone(),
+            replay_causal_start_utc_ms: fixed_now_utc_ms().expect("fixed time") - 1,
+        })
+        .expect_err("future V3 observation must not enter historical replay");
+        assert!(matches!(
+            late,
+            RuleSnapshotError::HistoricalNotApplicable { .. }
+        ));
+        let mut incompatible = test_implementation_identity();
+        incompatible.git_commit = "f".repeat(40);
+        let identity = recover_process_snapshot_v3(RecoveryProcessSnapshotRequestV1 {
+            snapshot_path: target.clone(),
+            expected_file_sha256: sealed.file_sha256().clone(),
+            expected_implementation_identity: incompatible,
+        })
+        .expect_err("V3 recovery implementation identity mismatch must fail");
+        assert_eq!(identity, RuleSnapshotError::IncompatibleImplementation);
+        let mut wrong_schema = sealed.snapshot().clone();
+        wrong_schema.schema_version = "platform_rule_snapshot_v4".to_owned();
+        let mut wrong_schema_bytes = serde_json::to_vec_pretty(&wrong_schema).expect("serialize");
+        wrong_schema_bytes.push(b'\n');
+        let wrong_schema_path = directory.path().join("wrong-schema-v3.json");
+        std::fs::write(&wrong_schema_path, &wrong_schema_bytes).expect("write wrong schema");
+        let schema = load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
+            snapshot_path: wrong_schema_path,
+            expected_file_sha256: sha256_hex(&wrong_schema_bytes),
+            replay_causal_start_utc_ms: fixed_now_utc_ms().expect("fixed time"),
+        })
+        .expect_err("wrong V3 schema must fail");
+        assert!(matches!(schema, RuleSnapshotError::SnapshotIntegrity(_)));
         assert_eq!(server.request_count(), request_count);
     }
 
