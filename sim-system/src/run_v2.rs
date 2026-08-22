@@ -1726,14 +1726,19 @@ pub struct SimExecution {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NextRequiredLogicalDriveV2 {
     pub path: MarketEventPathV1,
-    pub gtd_at_utc_ms: Option<i64>,
-    pub finality_at_utc_ms: Option<i64>,
-    pub rebate_at_utc_ms: Option<i64>,
-    pub mutation_at_utc_ms: Option<i64>,
+    pub required_at_utc_ms: i64,
 }
 
-impl NextRequiredLogicalDriveV2 {
-    pub fn earliest_at_utc_ms(&self) -> i64 {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RequiredLogicalDriveScheduleV2 {
+    gtd_at_utc_ms: Option<i64>,
+    finality_at_utc_ms: Option<i64>,
+    rebate_at_utc_ms: Option<i64>,
+    mutation_at_utc_ms: Option<i64>,
+}
+
+impl RequiredLogicalDriveScheduleV2 {
+    fn earliest_at_utc_ms(self) -> Option<i64> {
         [
             self.gtd_at_utc_ms,
             self.finality_at_utc_ms,
@@ -1743,7 +1748,6 @@ impl NextRequiredLogicalDriveV2 {
         .into_iter()
         .flatten()
         .min()
-        .expect("下一必要逻辑推进必须至少含一类工作")
     }
 }
 
@@ -4729,13 +4733,7 @@ fn next_required_logical_drive_v2(
     ) {
         return None;
     }
-    let required = NextRequiredLogicalDriveV2 {
-        path: match session.opening_fact.account_instance_key.caller_role {
-            SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation => {
-                MarketEventPathV1::HiddenPlatform
-            }
-            SimCallerRoleV1::Paper => MarketEventPathV1::PublicVisibility,
-        },
+    let schedule = RequiredLogicalDriveScheduleV2 {
         gtd_at_utc_ms: session.execution_state.next_gtd_deadline_at_utc_ms(),
         finality_at_utc_ms: session.execution_state.next_scheduled_finality_at_utc_ms(),
         rebate_at_utc_ms: session.execution_state.next_rebate_clock_at_utc_ms(),
@@ -4745,16 +4743,17 @@ fn next_required_logical_drive_v2(
             .first_key_value()
             .map(|(key, _)| key.effective_processing_at_utc_ms),
     };
-    [
-        required.gtd_at_utc_ms,
-        required.finality_at_utc_ms,
-        required.rebate_at_utc_ms,
-        required.mutation_at_utc_ms,
-    ]
-    .into_iter()
-    .flatten()
-    .next()
-    .map(|_| required)
+    schedule
+        .earliest_at_utc_ms()
+        .map(|required_at_utc_ms| NextRequiredLogicalDriveV2 {
+            path: match session.opening_fact.account_instance_key.caller_role {
+                SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation => {
+                    MarketEventPathV1::HiddenPlatform
+                }
+                SimCallerRoleV1::Paper => MarketEventPathV1::PublicVisibility,
+            },
+            required_at_utc_ms,
+        })
 }
 
 #[allow(clippy::result_large_err)]
@@ -4982,7 +4981,7 @@ pub(crate) fn drive_business_input_at_v2(
             MarketEventPathV1::PublicVisibility => session.public_visibility_frontier,
         };
         let first_due =
-            next_required_logical_drive_v2(&state).map(|required| required.earliest_at_utc_ms());
+            next_required_logical_drive_v2(&state).map(|required| required.required_at_utc_ms);
         (
             session.opening_fact.account_instance_key.caller_role,
             frontier,
@@ -14126,8 +14125,20 @@ mod tests {
         assert_eq!(crate::event_log::sync_attempt_count_for_tests(), 1);
     }
 
+    #[test]
+    fn next_required_schedule_selects_the_earliest_of_all_four_categories() {
+        let schedule = RequiredLogicalDriveScheduleV2 {
+            gtd_at_utc_ms: Some(1_400),
+            finality_at_utc_ms: Some(1_300),
+            rebate_at_utc_ms: Some(1_500),
+            mutation_at_utc_ms: Some(1_200),
+        };
+
+        assert_eq!(schedule.earliest_at_utc_ms(), Some(1_200));
+    }
+
     #[tokio::test(flavor = "current_thread")]
-    async fn public_sparse_request_exposes_and_drives_pending_mutation_before_next_bucket() {
+    async fn public_sparse_request_exposes_earliest_drive_and_completes_before_next_bucket() {
         let (_directory, actor) =
             active_market_actor(SimCallerRoleV1::Paper, "run-sparse-request-prefix-v2").await;
         let mut execution = SimExecution { actor };
@@ -14179,29 +14190,20 @@ mod tests {
         let required = execution
             .next_required_logical_drive()
             .expect("pending mutation 必须形成下一必要逻辑推进");
-        assert_eq!(required.path, MarketEventPathV1::PublicVisibility);
-        assert_eq!(required.gtd_at_utc_ms, None);
-        assert_eq!(required.finality_at_utc_ms, None);
-        assert_eq!(required.rebate_at_utc_ms, Some(2_000));
-        assert_eq!(
-            required.mutation_at_utc_ms,
-            Some(platform_arrived_at_utc_ms)
-        );
-        assert_eq!(required.earliest_at_utc_ms(), platform_arrived_at_utc_ms);
+        let NextRequiredLogicalDriveV2 {
+            path,
+            required_at_utc_ms,
+        } = required;
+        assert_eq!(path, MarketEventPathV1::PublicVisibility);
+        assert_eq!(required_at_utc_ms, platform_arrived_at_utc_ms);
 
         execution
             .drive_platform_prefix(PlatformPrefixAdvanceV2 {
-                path: required.path,
-                closed_through_utc_ms: required.earliest_at_utc_ms(),
+                path,
+                closed_through_utc_ms: required_at_utc_ms,
                 next_index_position: 2,
             })
             .expect("早于下一真实桶的 pending mutation 必须由必要空前缀闭合");
-        assert_eq!(
-            execution
-                .next_required_logical_drive()
-                .and_then(|required| required.mutation_at_utc_ms),
-            None
-        );
         assert!(
             execution
                 .actor
@@ -14264,7 +14266,7 @@ mod tests {
         let required = execution
             .next_required_logical_drive()
             .expect("同刻 pending mutation 仍可观察");
-        assert_eq!(required.earliest_at_utc_ms(), 1_200);
+        assert_eq!(required.required_at_utc_ms, 1_200);
         assert!(
             execution
                 .drive_platform_prefix(PlatformPrefixAdvanceV2 {
@@ -14289,11 +14291,16 @@ mod tests {
                 )]),
             })
             .expect("同刻真实桶必须处理 pending mutation");
-        assert_eq!(
+        assert!(
             execution
-                .next_required_logical_drive()
-                .and_then(|required| required.mutation_at_utc_ms),
-            None
+                .actor
+                .state
+                .as_ref()
+                .and_then(|state| state.session.as_ref())
+                .and_then(|session| session.mutation_requests.requests_by_id.get(request_id))
+                .and_then(|request| request.completed_response.as_ref())
+                .is_some(),
+            "同刻真实桶必须形成方法特定响应"
         );
     }
 
@@ -14353,7 +14360,7 @@ mod tests {
         execution
             .drive_platform_prefix(PlatformPrefixAdvanceV2 {
                 path: required.path,
-                closed_through_utc_ms: required.earliest_at_utc_ms(),
+                closed_through_utc_ms: required.required_at_utc_ms,
                 next_index_position: 2,
             })
             .expect("恢复代表必要空前缀必须受理");

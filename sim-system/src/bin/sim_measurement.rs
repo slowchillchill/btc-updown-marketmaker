@@ -1121,8 +1121,14 @@ mod enabled {
                     },
                 )
                 .map_err(request_error)?;
+            let request_required_at_utc_ms = receipt.platform_arrived_at_utc_ms();
             next_decision_at_utc_ms = receipt.platform_arrived_at_utc_ms().saturating_add(1);
-            drive_until_current_request_is_complete(execution, buckets, next_bucket)?;
+            drive_until_current_request_is_complete(
+                execution,
+                buckets,
+                next_bucket,
+                request_required_at_utc_ms,
+            )?;
             let receipt = execution
                 .post_orders(
                     cutoff(next_decision_at_utc_ms),
@@ -1135,8 +1141,14 @@ mod enabled {
                     },
                 )
                 .map_err(request_error)?;
+            let request_required_at_utc_ms = receipt.platform_arrived_at_utc_ms();
             next_decision_at_utc_ms = receipt.platform_arrived_at_utc_ms().saturating_add(1);
-            drive_until_current_request_is_complete(execution, buckets, next_bucket)?;
+            drive_until_current_request_is_complete(
+                execution,
+                buckets,
+                next_bucket,
+                request_required_at_utc_ms,
+            )?;
             let receipt = execution
                 .cancel_order(
                     cutoff(next_decision_at_utc_ms),
@@ -1149,8 +1161,14 @@ mod enabled {
                     },
                 )
                 .map_err(request_error)?;
+            let request_required_at_utc_ms = receipt.platform_arrived_at_utc_ms();
             next_decision_at_utc_ms = receipt.platform_arrived_at_utc_ms().saturating_add(1);
-            drive_until_current_request_is_complete(execution, buckets, next_bucket)?;
+            drive_until_current_request_is_complete(
+                execution,
+                buckets,
+                next_bucket,
+                request_required_at_utc_ms,
+            )?;
             let receipt = execution
                 .cancel_orders(
                     cutoff(next_decision_at_utc_ms),
@@ -1166,8 +1184,14 @@ mod enabled {
                     },
                 )
                 .map_err(request_error)?;
+            let request_required_at_utc_ms = receipt.platform_arrived_at_utc_ms();
             next_decision_at_utc_ms = receipt.platform_arrived_at_utc_ms().saturating_add(1);
-            drive_until_current_request_is_complete(execution, buckets, next_bucket)?;
+            drive_until_current_request_is_complete(
+                execution,
+                buckets,
+                next_bucket,
+                request_required_at_utc_ms,
+            )?;
             let receipt = execution
                 .cancel_all_orders(
                     cutoff(next_decision_at_utc_ms),
@@ -1176,8 +1200,14 @@ mod enabled {
                     },
                 )
                 .map_err(request_error)?;
+            let request_required_at_utc_ms = receipt.platform_arrived_at_utc_ms();
             next_decision_at_utc_ms = receipt.platform_arrived_at_utc_ms().saturating_add(1);
-            drive_until_current_request_is_complete(execution, buckets, next_bucket)?;
+            drive_until_current_request_is_complete(
+                execution,
+                buckets,
+                next_bucket,
+                request_required_at_utc_ms,
+            )?;
             let receipt = execution
                 .order(
                     cutoff(next_decision_at_utc_ms),
@@ -1187,8 +1217,14 @@ mod enabled {
                     },
                 )
                 .map_err(request_error)?;
+            let request_required_at_utc_ms = receipt.platform_arrived_at_utc_ms();
             next_decision_at_utc_ms = receipt.platform_arrived_at_utc_ms().saturating_add(1);
-            drive_until_current_request_is_complete(execution, buckets, next_bucket)?;
+            drive_until_current_request_is_complete(
+                execution,
+                buckets,
+                next_bucket,
+                request_required_at_utc_ms,
+            )?;
             let receipt = execution
                 .orders(
                     cutoff(next_decision_at_utc_ms),
@@ -1202,8 +1238,14 @@ mod enabled {
                     },
                 )
                 .map_err(request_error)?;
+            let request_required_at_utc_ms = receipt.platform_arrived_at_utc_ms();
             next_decision_at_utc_ms = receipt.platform_arrived_at_utc_ms().saturating_add(1);
-            drive_until_current_request_is_complete(execution, buckets, next_bucket)?;
+            drive_until_current_request_is_complete(
+                execution,
+                buckets,
+                next_bucket,
+                request_required_at_utc_ms,
+            )?;
             let receipt = execution
                 .trades(
                     cutoff(next_decision_at_utc_ms),
@@ -1218,8 +1260,14 @@ mod enabled {
                     },
                 )
                 .map_err(request_error)?;
+            let request_required_at_utc_ms = receipt.platform_arrived_at_utc_ms();
             next_decision_at_utc_ms = receipt.platform_arrived_at_utc_ms().saturating_add(1);
-            drive_until_current_request_is_complete(execution, buckets, next_bucket)?;
+            drive_until_current_request_is_complete(
+                execution,
+                buckets,
+                next_bucket,
+                request_required_at_utc_ms,
+            )?;
             merge_numeric_max(resource_high_water, &measurement_resources(execution)?);
         }
         Ok(())
@@ -1232,26 +1280,27 @@ mod enabled {
             Arc<[ExecutionMarketEventV3]>,
         )],
         next_bucket: &mut usize,
+        request_required_at_utc_ms: i64,
     ) -> Result<(), String> {
         while execution
             .next_required_logical_drive()
-            .is_some_and(|required| required.mutation_at_utc_ms.is_some())
+            .is_some_and(|required| required.required_at_utc_ms <= request_required_at_utc_ms)
         {
             if *next_bucket >= buckets.len() {
-                return Err("固定请求在 EOF 前仍有 pending mutation".to_owned());
+                return Err("固定请求在 EOF 前仍有必要逻辑工作".to_owned());
             }
             let required = execution
                 .next_required_logical_drive()
                 .expect("循环已经确认下一必要推进存在");
             let next_reference = &buckets[*next_bucket].0;
-            if next_reference.bucket_at_utc_ms <= required.earliest_at_utc_ms() {
+            if next_reference.bucket_at_utc_ms <= required.required_at_utc_ms {
                 drive_real_bucket(execution, buckets[*next_bucket])?;
                 *next_bucket += 1;
             } else {
                 execution
                     .drive_platform_prefix(sim_system::execution::PlatformPrefixAdvanceV2 {
                         path: required.path,
-                        closed_through_utc_ms: required.earliest_at_utc_ms(),
+                        closed_through_utc_ms: required.required_at_utc_ms,
                         next_index_position: next_reference.start_index_position,
                     })
                     .map_err(|error| {
@@ -1275,7 +1324,7 @@ mod enabled {
         let next_reference = &buckets[*next_bucket].0;
         while execution
             .next_required_logical_drive()
-            .is_some_and(|required| required.earliest_at_utc_ms() < next_reference.bucket_at_utc_ms)
+            .is_some_and(|required| required.required_at_utc_ms < next_reference.bucket_at_utc_ms)
         {
             let required = execution
                 .next_required_logical_drive()
@@ -1283,7 +1332,7 @@ mod enabled {
             execution
                 .drive_platform_prefix(sim_system::execution::PlatformPrefixAdvanceV2 {
                     path: required.path,
-                    closed_through_utc_ms: required.earliest_at_utc_ms(),
+                    closed_through_utc_ms: required.required_at_utc_ms,
                     next_index_position: next_reference.start_index_position,
                 })
                 .map_err(|error| format!("驱动桶前必要空前缀失败：{error}"))?;
