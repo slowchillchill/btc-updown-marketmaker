@@ -7,12 +7,16 @@ pub mod canonical_run;
 mod dpt_gate_a_cli;
 pub mod gate_a;
 mod gate_a_publication;
+mod gate_a_sim_adapter;
 pub mod observation;
 pub mod typed_raw;
 
 pub use gate_a_publication::{
     GateAPublicationError, GateARunManifestV2, ValidatedPublishedGateAFinal,
     gate_a_formal_canonical_config, gate_a_formal_output_config, open_published_gate_a_final,
+};
+pub use gate_a_sim_adapter::{
+    ClosedExecutionMarketIndexBucketV1, GateASimulationReplayAdapter, ReplayIndexClosureV1,
 };
 
 /// 运行唯一正式门 A 命令入口；参数解析、测量和签发检查均在库内私有实现中完成。
