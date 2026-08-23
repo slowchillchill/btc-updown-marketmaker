@@ -223,6 +223,12 @@ pub enum NormalizationConflictScopeV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EconomicAliasDecisionV1 {
+    EconomicEvidence,
+    LateEconomicCoverage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NormalizationRecordV1 {
     Evidence {
         logical_identity: StableLogicalIdentityV1,
@@ -244,6 +250,7 @@ pub enum NormalizationRecordV1 {
         logical_identity: StableLogicalIdentityV1,
         source_order: SourceOrderV1,
         source_reference: SimV2SourceReferenceV1,
+        decision: EconomicAliasDecisionV1,
         economic_identity: SourceNeutralEconomicIdentityV1,
         primary_logical_identity: StableLogicalIdentityV1,
         fact_reference: NoeEconomicFactReferenceV1,
@@ -392,6 +399,9 @@ struct StoredLogicalV1 {
 #[derive(Clone, Debug)]
 enum StoredEvidenceV1 {
     Evidence(SourceNeutralEvidenceKindV1),
+    EconomicAlias {
+        economic_identity: SourceNeutralEconomicIdentityV1,
+    },
     Economic {
         economic_identity: SourceNeutralEconomicIdentityV1,
         disposition: SourceNeutralEconomicDispositionV1,
@@ -484,9 +494,72 @@ impl NormalizationCoreV1 {
                         .economic
                         .insert(fact.economic_identity.clone(), fact.clone());
                 }
+                NormalizationRecordV1::EconomicAlias {
+                    logical_identity,
+                    source_reference,
+                    decision,
+                    economic_identity,
+                    ..
+                } => {
+                    let evidence = match decision {
+                        EconomicAliasDecisionV1::EconomicEvidence => {
+                            StoredEvidenceV1::EconomicAlias {
+                                economic_identity: economic_identity.clone(),
+                            }
+                        }
+                        EconomicAliasDecisionV1::LateEconomicCoverage => {
+                            StoredEvidenceV1::Evidence(
+                                SourceNeutralEvidenceKindV1::LateEconomicCoverage {
+                                    economic_key: Self::economic_key(economic_identity),
+                                },
+                            )
+                        }
+                    };
+                    core.state.logical.insert(
+                        logical_identity.clone(),
+                        StoredLogicalV1 {
+                            evidence,
+                            cancellation_input_item_refs: Self::cancellation_input_item_refs(
+                                source_reference,
+                            )
+                            .map(<[CancelInputItemRefV2]>::to_vec),
+                            source_reference: source_reference.clone(),
+                        },
+                    );
+                }
+                NormalizationRecordV1::Conflict {
+                    logical_identity,
+                    source_reference,
+                    scope: NormalizationConflictScopeV1::EconomicIdentity { .. },
+                    conflicting_evidence,
+                    ..
+                } => {
+                    let evidence = match conflicting_evidence {
+                        SourceNeutralEvidenceKindV1::Economic { evidence } => {
+                            StoredEvidenceV1::Economic {
+                                economic_identity: core.economic_identity(&evidence.key()),
+                                disposition: evidence.disposition(),
+                            }
+                        }
+                        evidence => StoredEvidenceV1::Evidence(evidence.clone()),
+                    };
+                    core.state.logical.insert(
+                        logical_identity.clone(),
+                        StoredLogicalV1 {
+                            evidence,
+                            cancellation_input_item_refs: Self::cancellation_input_item_refs(
+                                source_reference,
+                            )
+                            .map(<[CancelInputItemRefV2]>::to_vec),
+                            source_reference: source_reference.clone(),
+                        },
+                    );
+                }
                 NormalizationRecordV1::Duplicate { .. }
-                | NormalizationRecordV1::EconomicAlias { .. }
-                | NormalizationRecordV1::Conflict { .. } => {}
+                | NormalizationRecordV1::Conflict {
+                    scope: NormalizationConflictScopeV1::LogicalIdentity { .. },
+                    ..
+                } => {}
             }
         }
         core
@@ -625,7 +698,7 @@ impl NormalizationCoreV1 {
             .get(&logical_identity)
             .or_else(|| self.state.logical.get(&logical_identity))
         {
-            if self.stored_evidence_matches(&existing.evidence, &evidence.kind)
+            if self.stored_evidence_matches(state_delta, &existing.evidence, &evidence.kind)
                 && existing.cancellation_input_item_refs.as_deref()
                     == cancellation_input_item_refs.as_deref()
             {
@@ -638,7 +711,8 @@ impl NormalizationCoreV1 {
                         .get(&economic_identity)
                         .or_else(|| self.state.economic.get(&economic_identity))
                     {
-                        return Ok(self.economic_alias(logical_identity, evidence, fact));
+                        let decision = EconomicAliasDecisionV1::LateEconomicCoverage;
+                        return Ok(self.economic_alias(logical_identity, evidence, fact, decision));
                     }
                 }
                 return Ok(NormalizationRecordV1::Duplicate {
@@ -671,8 +745,34 @@ impl NormalizationCoreV1 {
                     .or_else(|| self.state.economic.get(&economic_identity))
                 {
                     if existing.disposition == disposition {
-                        return Ok(self.economic_alias(logical_identity, evidence, existing));
+                        state_delta.logical.insert(
+                            logical_identity.clone(),
+                            StoredLogicalV1 {
+                                evidence: StoredEvidenceV1::EconomicAlias {
+                                    economic_identity: economic_identity.clone(),
+                                },
+                                cancellation_input_item_refs,
+                                source_reference: evidence.source_reference.clone(),
+                            },
+                        );
+                        return Ok(self.economic_alias(
+                            logical_identity,
+                            evidence,
+                            existing,
+                            EconomicAliasDecisionV1::EconomicEvidence,
+                        ));
                     }
+                    state_delta.logical.insert(
+                        logical_identity.clone(),
+                        StoredLogicalV1 {
+                            evidence: StoredEvidenceV1::Economic {
+                                economic_identity: economic_identity.clone(),
+                                disposition: disposition.clone(),
+                            },
+                            cancellation_input_item_refs,
+                            source_reference: evidence.source_reference.clone(),
+                        },
+                    );
                     return Ok(NormalizationRecordV1::Conflict {
                         scope: NormalizationConflictScopeV1::EconomicIdentity { economic_identity },
                         logical_identity,
@@ -715,7 +815,12 @@ impl NormalizationCoreV1 {
                     .get(&economic_identity)
                     .or_else(|| self.state.economic.get(&economic_identity))
                 {
-                    self.economic_alias(logical_identity.clone(), evidence.clone(), fact)
+                    self.economic_alias(
+                        logical_identity.clone(),
+                        evidence.clone(),
+                        fact,
+                        EconomicAliasDecisionV1::LateEconomicCoverage,
+                    )
                 } else {
                     NormalizationRecordV1::Pending {
                         logical_identity: logical_identity.clone(),
@@ -793,11 +898,13 @@ impl NormalizationCoreV1 {
         logical_identity: StableLogicalIdentityV1,
         evidence: OrderedEvidenceV1,
         fact: &SourceNeutralEconomicFactV1,
+        decision: EconomicAliasDecisionV1,
     ) -> NormalizationRecordV1 {
         NormalizationRecordV1::EconomicAlias {
             logical_identity,
             source_order: evidence.source_order,
             source_reference: evidence.source_reference,
+            decision,
             economic_identity: fact.economic_identity.clone(),
             primary_logical_identity: fact.logical_identity.clone(),
             fact_reference: fact.fact_reference.clone(),
@@ -824,13 +931,42 @@ impl NormalizationCoreV1 {
         }
     }
 
+    fn economic_key(identity: &SourceNeutralEconomicIdentityV1) -> SourceNeutralEconomicKeyV1 {
+        match identity {
+            SourceNeutralEconomicIdentityV1::AccountOpening {
+                opening_evidence_identity,
+                ..
+            } => SourceNeutralEconomicKeyV1::AccountOpening {
+                opening_evidence_identity: opening_evidence_identity.clone(),
+            },
+            SourceNeutralEconomicIdentityV1::AccountTransition {
+                account_transition_seq,
+                ..
+            } => SourceNeutralEconomicKeyV1::AccountTransition {
+                account_transition_seq: *account_transition_seq,
+            },
+        }
+    }
+
     fn stored_evidence_matches(
         &self,
+        state_delta: &CoreStateDeltaV1,
         stored: &StoredEvidenceV1,
         incoming: &SourceNeutralEvidenceKindV1,
     ) -> bool {
         match (stored, incoming) {
             (StoredEvidenceV1::Evidence(stored), incoming) => stored == incoming,
+            (
+                StoredEvidenceV1::EconomicAlias { economic_identity },
+                SourceNeutralEvidenceKindV1::Economic { evidence },
+            ) => {
+                economic_identity == &self.economic_identity(&evidence.key())
+                    && state_delta
+                        .economic
+                        .get(economic_identity)
+                        .or_else(|| self.state.economic.get(economic_identity))
+                        .is_some_and(|fact| fact.disposition == evidence.disposition())
+            }
             (
                 StoredEvidenceV1::Economic {
                     economic_identity,
@@ -841,7 +977,9 @@ impl NormalizationCoreV1 {
                 economic_identity == &self.economic_identity(&evidence.key())
                     && disposition == &evidence.disposition()
             }
-            (StoredEvidenceV1::Economic { .. }, _) => false,
+            (StoredEvidenceV1::EconomicAlias { .. } | StoredEvidenceV1::Economic { .. }, _) => {
+                false
+            }
         }
     }
 

@@ -10,8 +10,9 @@ use contracts::execution_normalization::{
 use contracts::{AccountInstanceKeyV1, ExactDecimal, PlatformSourceV1, SimCallerRoleV1};
 use execution_normalization::{
     DurableCommitOutcomeV1, DurableContextStoreV1, DurableErrorV1, NormalizationBatchInputV1,
-    NormalizationRecordV1, SourceNeutralEconomicEvidenceV1, SourceNeutralEvidenceKindV1,
-    SourceNeutralEvidenceV1, SourceNeutralLogicalKeyV1, SubmissionDispositionV1,
+    NormalizationConflictScopeV1, NormalizationRecordV1, SourceNeutralEconomicEvidenceV1,
+    SourceNeutralEconomicKeyV1, SourceNeutralEvidenceKindV1, SourceNeutralEvidenceV1,
+    SourceNeutralLogicalKeyV1, SubmissionDispositionV1,
 };
 use tempfile::TempDir;
 
@@ -112,6 +113,22 @@ fn economic_evidence_record(
     evidence_identity: &str,
     available_pusd: &str,
 ) -> SourceNeutralEvidenceV1 {
+    opening_economic_evidence_record(
+        sequence,
+        source_ordinal,
+        evidence_identity,
+        "opening-55-durable",
+        available_pusd,
+    )
+}
+
+fn opening_economic_evidence_record(
+    sequence: u64,
+    source_ordinal: u32,
+    evidence_identity: &str,
+    opening_evidence_identity: &str,
+    available_pusd: &str,
+) -> SourceNeutralEvidenceV1 {
     let source_watermark = watermark(sequence);
     SourceNeutralEvidenceV1 {
         source_reference: SimV2SourceReferenceV1 {
@@ -127,8 +144,38 @@ fn economic_evidence_record(
         },
         kind: SourceNeutralEvidenceKindV1::Economic {
             evidence: SourceNeutralEconomicEvidenceV1::AccountOpening {
-                opening_evidence_identity: "opening-55-durable".to_owned(),
+                opening_evidence_identity: opening_evidence_identity.to_owned(),
                 available_pusd: ExactDecimal(available_pusd.to_owned()),
+            },
+        },
+    }
+}
+
+fn late_opening_coverage_record(
+    sequence: u64,
+    source_ordinal: u32,
+    evidence_identity: &str,
+    opening_evidence_identity: &str,
+) -> SourceNeutralEvidenceV1 {
+    SourceNeutralEvidenceV1 {
+        source_reference: SimV2SourceReferenceV1 {
+            context_reference: ExecutionNormalizationContextReferenceV1(
+                "context-55-durable".to_owned(),
+            ),
+            watermark: watermark(sequence),
+            record: SimV2SourceRecordReferenceV1::OrderLifecycle {
+                private_feedback_sequence: 500 + sequence,
+                platform_event_at_utc_ms: 2_500 + sequence as i64,
+                feedback_received_at_utc_ms: 2_600 + sequence as i64,
+            },
+        },
+        source_ordinal,
+        logical_key: SourceNeutralLogicalKeyV1::AuditEvidence {
+            evidence_identity: evidence_identity.to_owned(),
+        },
+        kind: SourceNeutralEvidenceKindV1::LateEconomicCoverage {
+            economic_key: SourceNeutralEconomicKeyV1::AccountOpening {
+                opening_evidence_identity: opening_evidence_identity.to_owned(),
             },
         },
     }
@@ -142,6 +189,16 @@ fn economic_classification_batch(sequence: u64) -> NormalizationBatchInputV1 {
             economic_evidence_record(sequence, 1, &format!("opening-alias-{sequence}"), "100"),
             economic_evidence_record(sequence, 2, &format!("opening-conflict-{sequence}"), "101"),
         ],
+    }
+}
+
+fn normalization_batch(
+    sequence: u64,
+    evidence: Vec<SourceNeutralEvidenceV1>,
+) -> NormalizationBatchInputV1 {
+    NormalizationBatchInputV1 {
+        source_watermark: watermark(sequence),
+        evidence,
     }
 }
 
@@ -317,6 +374,102 @@ fn reopen_rebuilds_the_owned_core_before_economic_replay() {
             account_identity: account_identity(),
             opening_evidence_identity: "opening-55-durable".to_owned(),
         }
+    );
+}
+
+#[test]
+fn reopen_restores_alias_and_economic_conflict_logical_decisions() {
+    let temporary = TempDir::new().unwrap();
+    let mut store = DurableContextStoreV1::create(temporary.path(), context()).unwrap();
+    store
+        .commit_batch(
+            normalization_batch(
+                1,
+                vec![opening_economic_evidence_record(1, 0, "A", "E1", "100")],
+            ),
+            3_000,
+        )
+        .unwrap();
+    store
+        .commit_batch(
+            normalization_batch(
+                2,
+                vec![
+                    opening_economic_evidence_record(2, 0, "B", "E1", "100"),
+                    opening_economic_evidence_record(2, 1, "C", "E1", "101"),
+                    late_opening_coverage_record(2, 0, "L", "E1"),
+                ],
+            ),
+            3_100,
+        )
+        .unwrap();
+    assert!(matches!(
+        store.commits()[1].records.as_slice(),
+        [
+            NormalizationRecordV1::EconomicAlias { .. },
+            NormalizationRecordV1::Conflict {
+                scope: NormalizationConflictScopeV1::EconomicIdentity { .. },
+                ..
+            },
+            NormalizationRecordV1::EconomicAlias { .. },
+        ]
+    ));
+    let economic_alias = serde_json::to_value(&store.commits()[1].records[0]).unwrap();
+    assert_eq!(
+        economic_alias["EconomicAlias"]["decision"],
+        "EconomicEvidence"
+    );
+    assert!(economic_alias["EconomicAlias"].get("evidence").is_none());
+    let late_alias = serde_json::to_value(&store.commits()[1].records[2]).unwrap();
+    assert_eq!(
+        late_alias["EconomicAlias"]["decision"],
+        "LateEconomicCoverage"
+    );
+    assert!(late_alias["EconomicAlias"].get("evidence").is_none());
+    drop(store);
+
+    let mut reopened = DurableContextStoreV1::open(
+        temporary.path(),
+        &ExecutionNormalizationContextReferenceV1("context-55-durable".to_owned()),
+    )
+    .unwrap();
+    reopened
+        .commit_batch(
+            normalization_batch(
+                3,
+                vec![
+                    opening_economic_evidence_record(3, 0, "B", "E1", "100"),
+                    opening_economic_evidence_record(3, 1, "B", "E2", "200"),
+                    opening_economic_evidence_record(3, 2, "C", "E1", "101"),
+                    opening_economic_evidence_record(3, 3, "C", "E2", "200"),
+                    late_opening_coverage_record(3, 0, "L", "E1"),
+                ],
+            ),
+            3_200,
+        )
+        .unwrap();
+
+    assert!(matches!(
+        reopened.commits()[2].records.as_slice(),
+        [
+            NormalizationRecordV1::Duplicate { .. },
+            NormalizationRecordV1::Conflict {
+                scope: NormalizationConflictScopeV1::LogicalIdentity { .. },
+                ..
+            },
+            NormalizationRecordV1::Duplicate { .. },
+            NormalizationRecordV1::Conflict {
+                scope: NormalizationConflictScopeV1::LogicalIdentity { .. },
+                ..
+            },
+            NormalizationRecordV1::EconomicAlias { .. },
+        ]
+    ));
+    assert!(
+        reopened.commits()[2]
+            .records
+            .iter()
+            .all(|record| record.economic_fact().is_none())
     );
 }
 

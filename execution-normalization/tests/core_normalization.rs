@@ -421,6 +421,100 @@ fn economic_identity_is_applied_once_and_late_coverage_becomes_alias() {
 }
 
 #[test]
+fn alias_and_economic_conflict_claim_their_new_logical_identity_in_the_same_batch() {
+    let core = NormalizationCoreV1::new(context());
+    let alias_logical_key = SourceNeutralLogicalKeyV1::EconomicEvidence {
+        evidence_identity: "same-batch-alias-55".to_owned(),
+    };
+    let conflict_logical_key = SourceNeutralLogicalKeyV1::EconomicEvidence {
+        evidence_identity: "same-batch-economic-conflict-55".to_owned(),
+    };
+    let prepared = core
+        .prepare_batch(NormalizationBatchInputV1 {
+            source_watermark: watermark(0),
+            evidence: vec![
+                evidence(
+                    0,
+                    30,
+                    0,
+                    SourceNeutralLogicalKeyV1::EconomicEvidence {
+                        evidence_identity: "same-batch-primary-55".to_owned(),
+                    },
+                    SourceNeutralEvidenceKindV1::Economic {
+                        evidence: economic_evidence(41, "-10"),
+                    },
+                ),
+                evidence(
+                    0,
+                    31,
+                    0,
+                    alias_logical_key.clone(),
+                    SourceNeutralEvidenceKindV1::Economic {
+                        evidence: economic_evidence(41, "-10"),
+                    },
+                ),
+                evidence(
+                    0,
+                    33,
+                    0,
+                    alias_logical_key,
+                    SourceNeutralEvidenceKindV1::Economic {
+                        evidence: economic_evidence(42, "-20"),
+                    },
+                ),
+                evidence(
+                    0,
+                    34,
+                    0,
+                    conflict_logical_key.clone(),
+                    SourceNeutralEvidenceKindV1::Economic {
+                        evidence: economic_evidence(41, "-9"),
+                    },
+                ),
+                evidence(
+                    0,
+                    36,
+                    0,
+                    conflict_logical_key,
+                    SourceNeutralEvidenceKindV1::Economic {
+                        evidence: economic_evidence(42, "-20"),
+                    },
+                ),
+            ],
+        })
+        .unwrap();
+
+    assert!(matches!(
+        prepared.batch().records.as_slice(),
+        [
+            NormalizationRecordV1::EconomicFact { .. },
+            NormalizationRecordV1::EconomicAlias { .. },
+            NormalizationRecordV1::Conflict {
+                scope: NormalizationConflictScopeV1::LogicalIdentity { .. },
+                ..
+            },
+            NormalizationRecordV1::Conflict {
+                scope: NormalizationConflictScopeV1::EconomicIdentity { .. },
+                ..
+            },
+            NormalizationRecordV1::Conflict {
+                scope: NormalizationConflictScopeV1::LogicalIdentity { .. },
+                ..
+            },
+        ]
+    ));
+    assert_eq!(
+        prepared
+            .batch()
+            .records
+            .iter()
+            .filter(|record| record.economic_fact().is_some())
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn late_coverage_stays_pending_until_the_economic_fact_is_committed() {
     let core = NormalizationCoreV1::new(context());
     let economic_key = SourceNeutralEconomicKeyV1::AccountTransition {
