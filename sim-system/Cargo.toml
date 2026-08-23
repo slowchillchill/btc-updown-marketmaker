@@ -7,10 +7,12 @@ publish = false
 [features]
 default = []
 measurement = ["tokio/rt"]
+gate-a-measurement = ["measurement", "dep:data-pipeline-training"]
 
 [dependencies]
 contracts = { path = "../contracts" }
 data-pipeline-core = { path = "../data-pipeline/core" }
+data-pipeline-training = { path = "../data-pipeline/training", optional = true }
 execution-normalization = { path = "../execution-normalization" }
 num-bigint = "=0.4.8"
 num-integer = "=0.1.46"

@@ -5738,6 +5738,7 @@ fn add_resource_quantity_v2(
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::fs;
     use std::io::Write;
     use std::rc::Rc;
 
@@ -5758,6 +5759,7 @@ mod tests {
     use crate::event_log::{SIM_EVENT_LOG_FILE_NAME_V2, SimEventLogRecoveryV2};
     use crate::finality::successful_policy_v2_for_tests;
     use crate::latency_profile::load_embedded_proxy_latency_profile;
+    use crate::market::MillisecondBucketClosureV1;
     use crate::matching::BuyOrderAcceptedV2;
     use crate::platform_rules::{
         CurrentProcessSnapshotRequestV1, ImplementationIdentityV1, ReferenceMarketSpecV1,
@@ -6114,6 +6116,148 @@ mod tests {
             .activate_session(format!("activate-{run_id}"))
             .expect("激活市场事件测试会话");
         (directory, actor)
+    }
+
+    struct TrainingReplayTestProducer<'a> {
+        actor: &'a mut SimRunActorV2,
+    }
+
+    impl TrainingReplayTestProducer<'_> {
+        fn push(
+            &mut self,
+            path: MarketEventPathV1,
+            at_utc_ms: i64,
+            start_index_position: u64,
+            next_index_position: u64,
+            next_event_at_utc_ms: i64,
+            events: Arc<[ExecutionMarketEventV3]>,
+        ) {
+            self.actor
+                .drive_closed_market_bucket(AcceptedClosedMarketBucketV2 {
+                    reference: DurableMarketBucketReferenceV2 {
+                        path,
+                        bucket_at_utc_ms: at_utc_ms,
+                        start_index_position,
+                        next_index_position,
+                        closure: MillisecondBucketClosureV1::NextEventAt(next_event_at_utc_ms),
+                    },
+                    events,
+                })
+                .unwrap_or_else(|error| panic!("训练测试生产器驱动失败：{error}"));
+        }
+
+        fn advance_required(
+            &mut self,
+            hidden_next_index_position: u64,
+            public_next_index_position: u64,
+        ) {
+            let required = self
+                .actor
+                .next_required_logical_drive()
+                .expect("训练私有响应尚未完成时必须有必要推进");
+            let next_index_position = match required.path {
+                MarketEventPathV1::HiddenPlatform => hidden_next_index_position,
+                MarketEventPathV1::PublicVisibility => public_next_index_position,
+            };
+            self.actor
+                .drive_platform_prefix(PlatformPrefixAdvanceV2 {
+                    path: required.path,
+                    closed_through_utc_ms: required.required_at_utc_ms,
+                    next_index_position,
+                })
+                .unwrap_or_else(|error| panic!("训练必要前缀推进失败：{error}"));
+        }
+    }
+
+    struct PublicVisibilityTestBucket {
+        at_utc_ms: i64,
+        start_index_position: u64,
+        next_index_position: u64,
+        next_event_at_utc_ms: i64,
+        events: Arc<[ExecutionMarketEventV3]>,
+    }
+
+    struct PaperVisibilityReplayTestProducer<'a> {
+        actor: &'a mut SimRunActorV2,
+    }
+
+    impl PaperVisibilityReplayTestProducer<'_> {
+        fn push(&mut self, bucket: PublicVisibilityTestBucket) {
+            self.actor
+                .drive_closed_market_bucket(AcceptedClosedMarketBucketV2 {
+                    reference: DurableMarketBucketReferenceV2 {
+                        path: MarketEventPathV1::PublicVisibility,
+                        bucket_at_utc_ms: bucket.at_utc_ms,
+                        start_index_position: bucket.start_index_position,
+                        next_index_position: bucket.next_index_position,
+                        closure: MillisecondBucketClosureV1::NextEventAt(
+                            bucket.next_event_at_utc_ms,
+                        ),
+                    },
+                    events: bucket.events,
+                })
+                .unwrap_or_else(|error| panic!("Paper 可见性测试生产器驱动失败：{error}"));
+        }
+
+        fn advance_required(&mut self, next_index_position: u64) {
+            let required = self
+                .actor
+                .next_required_logical_drive()
+                .expect("Paper 私有响应尚未完成时必须有必要推进");
+            assert_eq!(required.path, MarketEventPathV1::PublicVisibility);
+            self.actor
+                .drive_platform_prefix(PlatformPrefixAdvanceV2 {
+                    path: MarketEventPathV1::PublicVisibility,
+                    closed_through_utc_ms: required.required_at_utc_ms,
+                    next_index_position,
+                })
+                .unwrap_or_else(|error| panic!("Paper 必要可见性前缀推进失败：{error}"));
+        }
+    }
+
+    fn completed_post_response<'a>(
+        actor: &'a SimRunActorV2,
+        request_id: &str,
+    ) -> Option<&'a PostOrderDirectResponseV2> {
+        let response = actor
+            .state
+            .as_ref()?
+            .session
+            .as_ref()?
+            .mutation_requests
+            .requests_by_id
+            .get(request_id)?
+            .completed_response
+            .as_ref()?;
+        match response.as_ref() {
+            StoredDirectResponseV2::Final(BusinessDirectResponseV2::PostOrder(response)) => {
+                Some(response)
+            }
+            _ => None,
+        }
+    }
+
+    fn public_replay_witness(
+        actor: &SimRunActorV2,
+        condition_id: &str,
+    ) -> (Decimal, LogicalPathFrontierV2) {
+        let session = actor
+            .state
+            .as_ref()
+            .and_then(|state| state.session.as_ref())
+            .expect("测试生产器唯一会话存在");
+        (
+            session
+                .public_markets
+                .external_quantity_for_tests(
+                    condition_id,
+                    "1",
+                    BookSide::Bid,
+                    "0.4".parse().expect("固定公开见证价格"),
+                )
+                .expect("固定公开见证档位存在"),
+            session.public_visibility_frontier,
+        )
     }
 
     async fn active_market_actor_with_scenario_and_policy(
@@ -11868,6 +12012,272 @@ mod tests {
             ),
             2_000_000
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn training_and_paper_producers_share_only_the_public_prefix() {
+        let (_training_directory, mut training) = active_market_actor(
+            SimCallerRoleV1::OfflineEvaluation,
+            "run-training-producer-public-prefix",
+        )
+        .await;
+        let (_paper_directory, mut paper) =
+            active_market_actor(SimCallerRoleV1::Paper, "run-paper-producer-public-prefix").await;
+        let initial: Arc<[ExecutionMarketEventV3]> = Arc::from(decoded_initial_market_events("2"));
+        let condition_id = initial[0].market.condition_id.0.clone();
+        {
+            let mut producer = TrainingReplayTestProducer {
+                actor: &mut training,
+            };
+            producer.push(
+                MarketEventPathV1::HiddenPlatform,
+                1_100,
+                0,
+                2,
+                1_200,
+                Arc::clone(&initial),
+            );
+            assert_eq!(
+                public_replay_witness(producer.actor, &condition_id).0,
+                Decimal::ZERO,
+                "训练隐藏首桶不得提前改变公开市场"
+            );
+            producer.push(
+                MarketEventPathV1::PublicVisibility,
+                1_110,
+                0,
+                2,
+                2_000,
+                Arc::clone(&initial),
+            );
+        }
+        {
+            let mut producer = PaperVisibilityReplayTestProducer { actor: &mut paper };
+            producer.push(PublicVisibilityTestBucket {
+                at_utc_ms: 1_110,
+                start_index_position: 0,
+                next_index_position: 2,
+                next_event_at_utc_ms: 2_000,
+                events: Arc::clone(&initial),
+            });
+        }
+        let initial_training_public = public_replay_witness(&training, &condition_id);
+        let initial_paper_public = public_replay_witness(&paper, &condition_id);
+        assert_eq!(initial_training_public, initial_paper_public);
+        assert_eq!(initial_training_public.0, "2".parse::<Decimal>().unwrap());
+        assert_eq!(initial_training_public.1.next_index_position, 2);
+
+        let update: Arc<[ExecutionMarketEventV3]> =
+            Arc::from(vec![decoded_level_market_event(1_200, 2_000, 3, "2", "1")]);
+        let paper_resources_before_hidden = paper
+            .state
+            .as_ref()
+            .expect("Paper 隐藏拒绝前状态存在")
+            .business_resources;
+        let paper_input_before_hidden = paper.next_input_sequence_for_tests();
+        let paper_public_before_hidden = public_replay_witness(&paper, &condition_id);
+        let paper_log_before_hidden = fs::metadata(&paper.log_path)
+            .expect("Paper 隐藏拒绝前日志存在")
+            .len();
+        assert_eq!(
+            paper
+                .drive_closed_market_bucket(AcceptedClosedMarketBucketV2 {
+                    reference: DurableMarketBucketReferenceV2 {
+                        path: MarketEventPathV1::HiddenPlatform,
+                        bucket_at_utc_ms: 1_200,
+                        start_index_position: 2,
+                        next_index_position: 3,
+                        closure: MillisecondBucketClosureV1::NextEventAt(2_500),
+                    },
+                    events: Arc::clone(&update),
+                })
+                .expect_err("Paper 隐藏路径必须拒绝"),
+            SimRunActorErrorV2::HiddenPlatformReplayForbidden
+        );
+        assert_eq!(
+            paper
+                .state
+                .as_ref()
+                .expect("Paper 隐藏拒绝后状态存在")
+                .business_resources,
+            paper_resources_before_hidden
+        );
+        assert_eq!(
+            paper.next_input_sequence_for_tests(),
+            paper_input_before_hidden
+        );
+        assert_eq!(
+            fs::metadata(&paper.log_path)
+                .expect("Paper 隐藏拒绝后日志存在")
+                .len(),
+            paper_log_before_hidden
+        );
+        assert_eq!(
+            public_replay_witness(&paper, &condition_id),
+            paper_public_before_hidden
+        );
+
+        {
+            let mut producer = TrainingReplayTestProducer {
+                actor: &mut training,
+            };
+            producer.push(
+                MarketEventPathV1::HiddenPlatform,
+                1_200,
+                2,
+                3,
+                2_500,
+                Arc::clone(&update),
+            );
+        }
+        let training_session = training
+            .state
+            .as_ref()
+            .and_then(|state| state.session.as_ref())
+            .expect("训练隐藏更新后会话存在");
+        assert_eq!(
+            training_session
+                .hidden_platform_markets
+                .as_ref()
+                .expect("训练生产器持有隐藏状态")
+                .external_quantity_for_tests(
+                    &condition_id,
+                    "1",
+                    BookSide::Bid,
+                    "0.4".parse().unwrap(),
+                ),
+            Some("1".parse().unwrap())
+        );
+        assert_eq!(
+            public_replay_witness(&training, &condition_id).0,
+            "2".parse::<Decimal>().unwrap(),
+            "隐藏更新后公开市场必须保持旧值"
+        );
+
+        for (actor, request_id) in [
+            (&mut training, "training-private-before-public"),
+            (&mut paper, "paper-private-before-public"),
+        ] {
+            let session_seed = actor
+                .state
+                .as_ref()
+                .and_then(|state| state.session.as_ref())
+                .expect("私有响应测试会话存在")
+                .session_seed
+                .clone();
+            let outbound_delay = i64::try_from(actor._latency_profile.sample_delay_ms(
+                session_seed.0.as_bytes(),
+                request_id,
+                DelaySampleDomainV1::RequestOutbound,
+            ))
+            .expect("私有响应测试时延可表示");
+            actor
+                .register_request(
+                    request_cutoff(1_500 - outbound_delay),
+                    BusinessRequestV2::PostOrder(PostOrderRequestV2 {
+                        context: RequestContextV2 {
+                            global_request_id: request_id.to_owned(),
+                            caller_correlation_id: Some("public-prefix-only".to_owned()),
+                        },
+                        item: post_item(
+                            &format!("{request_id}-item"),
+                            &ConditionId(condition_id.clone()),
+                            &TokenId("1".to_owned()),
+                            SimBuyOrderKindV1::GtcLimit {
+                                limit_price_pusd_per_share: "0.4".parse().unwrap(),
+                                size_shares: actor
+                                    ._rule_snapshot
+                                    .synchronized_rules()
+                                    .minimum_order_size_shares
+                                    .value(),
+                                post_only: true,
+                            },
+                        ),
+                    }),
+                )
+                .unwrap_or_else(|error| panic!("登记私有响应测试请求失败：{error}"));
+        }
+        for _ in 0..16 {
+            if completed_post_response(&training, "training-private-before-public").is_some() {
+                break;
+            }
+            let mut producer = TrainingReplayTestProducer {
+                actor: &mut training,
+            };
+            assert!(
+                producer
+                    .actor
+                    .next_required_logical_drive()
+                    .expect("训练响应必要推进存在")
+                    .required_at_utc_ms
+                    < 2_000
+            );
+            producer.advance_required(3, 2);
+        }
+        for _ in 0..16 {
+            if completed_post_response(&paper, "paper-private-before-public").is_some() {
+                break;
+            }
+            let mut producer = PaperVisibilityReplayTestProducer { actor: &mut paper };
+            assert!(
+                producer
+                    .actor
+                    .next_required_logical_drive()
+                    .expect("Paper 响应必要推进存在")
+                    .required_at_utc_ms
+                    < 2_000
+            );
+            producer.advance_required(2);
+        }
+        let training_response =
+            completed_post_response(&training, "training-private-before-public")
+                .expect("训练私有响应必须在公开更新前形成");
+        let paper_response = completed_post_response(&paper, "paper-private-before-public")
+            .expect("Paper 私有响应必须在公开更新前形成");
+        assert!(training_response.metadata.response_received_at_utc_ms < 2_000);
+        assert!(paper_response.metadata.response_received_at_utc_ms < 2_000);
+        for witness in [
+            public_replay_witness(&training, &condition_id),
+            public_replay_witness(&paper, &condition_id),
+        ] {
+            assert_eq!(witness.0, "2".parse::<Decimal>().unwrap());
+            assert_eq!(witness.1.next_index_position, 2);
+            assert!(witness.1.closed_through_utc_ms.unwrap_or_default() < 2_000);
+        }
+
+        {
+            let mut producer = TrainingReplayTestProducer {
+                actor: &mut training,
+            };
+            producer.push(
+                MarketEventPathV1::PublicVisibility,
+                2_000,
+                2,
+                3,
+                2_500,
+                Arc::clone(&update),
+            );
+        }
+        {
+            let mut producer = PaperVisibilityReplayTestProducer { actor: &mut paper };
+            producer.push(PublicVisibilityTestBucket {
+                at_utc_ms: 2_000,
+                start_index_position: 2,
+                next_index_position: 3,
+                next_event_at_utc_ms: 2_500,
+                events: update,
+            });
+        }
+        let training_public = public_replay_witness(&training, &condition_id);
+        let paper_public = public_replay_witness(&paper, &condition_id);
+        assert_eq!(training_public, paper_public);
+        assert_eq!(
+            training_public.0,
+            Decimal::ZERO,
+            "公开更新与此前私有订单执行合并后必须得到双方相同的新公开状态"
+        );
+        assert_eq!(training_public.1.next_index_position, 3);
+        assert_eq!(training_public.1.closed_through_utc_ms, Some(2_000));
     }
 
     #[tokio::test(flavor = "current_thread")]

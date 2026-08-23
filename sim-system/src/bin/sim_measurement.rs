@@ -3,7 +3,9 @@ use serde::Serialize;
 const RUNNER_IDENTITY: &str = "sim-task-4-5-1-golden-v1";
 const TARGETED_RUNNER_IDENTITY: &str = "sim-task-4-5-2-retention-24h-v1";
 const COMPONENT_RUNNER_IDENTITY: &str = "sim-stage-5-component-conformance-v1";
+const GATE_A_RUNNER_IDENTITY: &str = "sim-stage-6-gate-a-real-vertical-v1";
 const COMPONENT_WORKLOAD_IDENTITY: &str = "offline-evaluation-two-market-single-root-v1";
+const GATE_A_WORKLOAD_IDENTITY: &str = "gate-a-real-vertical-two-path-single-root-v1";
 const WORKLOAD_IDENTITY: &str = "public-sim-execution-two-market-256x8-v1";
 const TARGETED_RETENTION_WINDOW_MS: i64 = 86_400_000;
 const LOOPS_PER_ROOT: usize = 256;
@@ -135,6 +137,8 @@ fn distribution_summary(mut values: Vec<u64>) -> DistributionSummary {
 
 mod enabled {
     use std::collections::BTreeMap;
+    #[cfg(feature = "gate-a-measurement")]
+    use std::collections::HashSet;
     use std::fs::{self, File, OpenOptions};
     use std::io::{BufWriter, Read, Write};
     use std::ops::Range;
@@ -158,6 +162,11 @@ mod enabled {
         decode_execution_market_event_v3, derive_execution_market_event_v3_id,
         encode_execution_market_event_v3,
     };
+    #[cfg(feature = "gate-a-measurement")]
+    use data_pipeline_training::{
+        ClosedExecutionMarketIndexBucketV1, GateASimulationReplayAdapter, ReplayIndexClosureV1,
+        ValidatedPublishedGateAFinal, open_published_gate_a_final,
+    };
     use rustix::fs::{RenameFlags, renameat_with};
     use serde::{Deserialize, Serialize};
     use serde_json::{Value, json};
@@ -174,7 +183,9 @@ mod enabled {
     };
     use sim_system::execution::{MarketEventPathV1, MillisecondBucketClosureV1};
     use sim_system::finality::TradeFinalityPolicyV2;
-    use sim_system::latency_profile::{EmpiricalDelayProfile, load_embedded_proxy_latency_profile};
+    use sim_system::latency_profile::{
+        DelaySampleDomainV1, EmpiricalDelayProfile, load_embedded_proxy_latency_profile,
+    };
     use sim_system::platform_rules::{
         CurrentProcessSnapshotRequestV1, HistoricalProcessSnapshotRequestV1,
         ImplementationIdentityV1, ReferenceMarketSpecV1, ReferenceOutcomeSpecV1,
@@ -188,7 +199,8 @@ mod enabled {
 
     use super::{
         COMPONENT_RUNNER_IDENTITY, COMPONENT_WORKLOAD_IDENTITY, DistributionSummary,
-        LOOPS_PER_ROOT, PairKey, REQUESTS_PER_ROOT, RUNNER_IDENTITY, SafetyLimits, SafetyUsage,
+        GATE_A_RUNNER_IDENTITY, GATE_A_WORKLOAD_IDENTITY, LOOPS_PER_ROOT, PairKey,
+        REQUESTS_PER_ROOT, RUNNER_IDENTITY, SafetyLimits, SafetyUsage,
         TARGETED_RETENTION_WINDOW_MS, TARGETED_RUNNER_IDENTITY, WORKLOAD_IDENTITY,
         distribution_summary, safety_violation, validate_feature_pair,
     };
@@ -208,6 +220,10 @@ mod enabled {
     const REQUEST_CUTOFF_BASE: i64 = 1_785_715_700_000;
     const BODY_ONE_SOURCE: i64 = 1_785_715_750_000;
     const BODY_TWO_SOURCE: i64 = 1_785_715_760_000;
+    const GATE_A_MARKET_END: i64 = 1_785_715_800_000;
+    const GATE_A_REPRESENTATIVE_TRADE_EVENT_ID: &str =
+        "0ba3871e7c0b1b6356f2e70f679ff250a4fe1a7c343289711ea05cd06c69f830";
+    const GATE_A_REQUEST_ID: &str = "stage-6-gate-a-representative-post";
 
     pub(super) const COMPONENT_CAUSAL_START_UTC_MS: i64 = 1_787_400_000_000;
     pub(super) const COMPONENT_TIME_SHIFT_MS: i64 =
@@ -231,6 +247,7 @@ mod enabled {
         GoldenMatrix,
         TargetedRetention24h,
         ComponentConformance,
+        GateARealVertical,
     }
 
     #[cfg(test)]
@@ -239,6 +256,7 @@ mod enabled {
             RunMode::GoldenMatrix => RUNNER_IDENTITY,
             RunMode::TargetedRetention24h => TARGETED_RUNNER_IDENTITY,
             RunMode::ComponentConformance => COMPONENT_RUNNER_IDENTITY,
+            RunMode::GateARealVertical => GATE_A_RUNNER_IDENTITY,
         }
     }
 
@@ -255,11 +273,20 @@ mod enabled {
     }
 
     #[derive(Debug)]
+    struct GateARealVerticalArgs {
+        gate_a_root: PathBuf,
+        stage5_component_manifest: PathBuf,
+        stage5_component_manifest_sha256: Sha256Hex,
+        stage5_component_receipt_id: Sha256Hex,
+    }
+
+    #[derive(Debug)]
     pub(super) struct Args {
         output_dir: PathBuf,
         identity: ImplementationIdentityV1,
         baseline_summary: Option<PathBuf>,
         component: Option<ComponentEvidenceArgs>,
+        gate_a: Option<GateARealVerticalArgs>,
         pub(super) mode: RunMode,
         argv: Vec<String>,
     }
@@ -710,6 +737,7 @@ mod enabled {
             RunMode::GoldenMatrix => run_golden_matrix(args, run_started),
             RunMode::TargetedRetention24h => run_targeted_retention(args, run_started),
             RunMode::ComponentConformance => run_component_conformance(args),
+            RunMode::GateARealVertical => run_gate_a_real_vertical(args, run_started),
         }
     }
 
@@ -720,6 +748,967 @@ mod enabled {
         pub(super) log_sha256: String,
         pub(super) log_bytes: u64,
         pub(super) cold_candidate_run_id: String,
+    }
+
+    #[cfg(feature = "gate-a-measurement")]
+    #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+    struct GateAPathStats {
+        buckets: u64,
+        index_rows_scanned: u64,
+        execution_market_events: u64,
+        first_index_at_utc_ms: Option<i64>,
+        last_index_at_utc_ms: Option<i64>,
+        first_source_event_at_utc_ms: Option<i64>,
+        last_source_event_at_utc_ms: Option<i64>,
+        first_received_at_utc_ms: Option<i64>,
+        last_received_at_utc_ms: Option<i64>,
+        max_execution_market_events_per_ms: u64,
+        initial_l2_snapshots: u64,
+        tick_size_changes: u64,
+        public_trades: u64,
+        book_resync_delta_inferences: u64,
+        market_resolutions: u64,
+        end_of_input_seen: bool,
+        final_next_logical_position: u64,
+    }
+
+    #[cfg(feature = "gate-a-measurement")]
+    impl GateAPathStats {
+        fn observe(&mut self, bucket: &ClosedExecutionMarketIndexBucketV1) {
+            self.buckets = self.buckets.saturating_add(1);
+            self.index_rows_scanned = self.index_rows_scanned.saturating_add(
+                bucket
+                    .next_logical_position()
+                    .saturating_sub(bucket.start_logical_position()),
+            );
+            let event_count = u64::try_from(bucket.events().len()).unwrap_or(u64::MAX);
+            self.execution_market_events = self.execution_market_events.saturating_add(event_count);
+            self.max_execution_market_events_per_ms =
+                self.max_execution_market_events_per_ms.max(event_count);
+            self.first_index_at_utc_ms
+                .get_or_insert(bucket.index_at_utc_ms());
+            self.last_index_at_utc_ms = Some(bucket.index_at_utc_ms());
+            self.final_next_logical_position = bucket.next_logical_position();
+            self.end_of_input_seen |= bucket.closure() == ReplayIndexClosureV1::EndOfInput;
+            for event in bucket.events().iter() {
+                if let Some(at) = event.time.source_event_at_utc_ms {
+                    self.first_source_event_at_utc_ms.get_or_insert(at);
+                    self.last_source_event_at_utc_ms = Some(at);
+                }
+                self.first_received_at_utc_ms
+                    .get_or_insert(event.time.received_at_utc_ms);
+                self.last_received_at_utc_ms = Some(event.time.received_at_utc_ms);
+                match &event.payload {
+                    ExecutionMarketEventPayloadV3::InitialL2Snapshot(_) => {
+                        self.initial_l2_snapshots += 1;
+                    }
+                    ExecutionMarketEventPayloadV3::TickSizeChange(_) => {
+                        self.tick_size_changes += 1;
+                    }
+                    ExecutionMarketEventPayloadV3::PublicTrade(_) => {
+                        self.public_trades += 1;
+                    }
+                    ExecutionMarketEventPayloadV3::LevelExecutionTransition(transition)
+                        if transition.basis
+                            == contracts::LevelExecutionBasis::BookResyncDeltaInference =>
+                    {
+                        self.book_resync_delta_inferences += 1;
+                    }
+                    ExecutionMarketEventPayloadV3::MarketResolutionTerminal(_) => {
+                        self.market_resolutions += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        fn logical_span_ms(&self) -> u64 {
+            match (self.first_index_at_utc_ms, self.last_index_at_utc_ms) {
+                (Some(first), Some(last)) => {
+                    u64::try_from(last.saturating_sub(first)).unwrap_or_default()
+                }
+                _ => 0,
+            }
+        }
+
+        fn average_events_per_second(&self) -> u64 {
+            self.execution_market_events
+                .saturating_mul(1_000)
+                .checked_div(self.logical_span_ms().max(1))
+                .unwrap_or_default()
+        }
+    }
+
+    #[cfg(feature = "gate-a-measurement")]
+    #[derive(Default)]
+    struct GateALatencySamples {
+        by_phase: BTreeMap<String, Vec<u64>>,
+        count: u64,
+    }
+
+    #[cfg(feature = "gate-a-measurement")]
+    impl GateALatencySamples {
+        fn record(
+            &mut self,
+            writer: &mut BufWriter<File>,
+            input_ordinal: u64,
+            execution: &SimExecution,
+        ) -> Result<(), String> {
+            for observation in execution.drain_measurement_observations() {
+                let encoded = serde_json::to_value(&observation)
+                    .map_err(|error| format!("编码 Gate A 测量观察失败：{error}"))?;
+                let phase = encoded
+                    .get("phase")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "Gate A 测量观察缺少 phase".to_owned())?;
+                self.by_phase
+                    .entry(phase.to_owned())
+                    .or_default()
+                    .push(observation.elapsed_ns);
+                self.count = self.count.saturating_add(1);
+                write_json_line(
+                    writer,
+                    &json!({
+                        "schema_version":"gate_a_real_vertical_measurement_sample_v1",
+                        "sample_kind":"sim_measurement_observation",
+                        "input_ordinal":input_ordinal,
+                        "observation":encoded
+                    }),
+                )?;
+            }
+            Ok(())
+        }
+
+        fn summaries(&self) -> BTreeMap<String, DistributionSummary> {
+            self.by_phase
+                .iter()
+                .filter(|(_, values)| !values.is_empty())
+                .map(|(phase, values)| (phase.clone(), distribution_summary(values.clone())))
+                .collect()
+        }
+    }
+
+    #[cfg(feature = "gate-a-measurement")]
+    fn write_json_line(writer: &mut BufWriter<File>, value: &Value) -> Result<(), String> {
+        serde_json::to_writer(&mut *writer, value)
+            .map_err(|error| format!("编码 Gate A JSONL 样本失败：{error}"))?;
+        writer
+            .write_all(b"\n")
+            .map_err(|error| format!("写 Gate A JSONL 样本失败：{error}"))
+    }
+
+    #[cfg(feature = "gate-a-measurement")]
+    fn record_stage_sample(
+        writer: &mut BufWriter<File>,
+        phase: &str,
+        elapsed_ns: u64,
+    ) -> Result<(), String> {
+        write_json_line(
+            writer,
+            &json!({
+                "schema_version":"gate_a_real_vertical_measurement_sample_v1",
+                "sample_kind":"stage_timing",
+                "phase":phase,
+                "elapsed_ns":elapsed_ns
+            }),
+        )
+    }
+
+    #[cfg(feature = "gate-a-measurement")]
+    fn record_resource_checkpoint(
+        writer: &mut BufWriter<File>,
+        label: &str,
+        input_ordinal: u64,
+        snapshot: &sim_system::execution::MeasurementResourceSnapshot,
+        high_water: &mut Value,
+    ) -> Result<(), String> {
+        let value = serde_json::to_value(snapshot)
+            .map_err(|error| format!("编码 Gate A 业务资源检查点失败：{error}"))?;
+        merge_numeric_max(high_water, &value);
+        write_json_line(
+            writer,
+            &json!({
+                "schema_version":"gate_a_real_vertical_measurement_sample_v1",
+                "sample_kind":"business_resource_checkpoint",
+                "label":label,
+                "input_ordinal":input_ordinal,
+                "resources":value
+            }),
+        )
+    }
+
+    #[cfg(feature = "gate-a-measurement")]
+    fn proc_max(left: ProcSnapshot, right: ProcSnapshot) -> ProcSnapshot {
+        ProcSnapshot {
+            cpu_ticks: left.cpu_ticks.max(right.cpu_ticks),
+            rss_bytes: left.rss_bytes.max(right.rss_bytes),
+            rss_high_water_bytes: left.rss_high_water_bytes.max(right.rss_high_water_bytes),
+            io_read_bytes: left.io_read_bytes.max(right.io_read_bytes),
+            io_write_bytes: left.io_write_bytes.max(right.io_write_bytes),
+        }
+    }
+
+    #[cfg(feature = "gate-a-measurement")]
+    pub(super) fn observe_unique_gate_a_event_ids<'a>(
+        unique_event_ids: &mut HashSet<String>,
+        event_ids: impl IntoIterator<Item = &'a str>,
+    ) {
+        unique_event_ids.extend(event_ids.into_iter().map(str::to_owned));
+    }
+
+    #[cfg(feature = "gate-a-measurement")]
+    fn real_gate_a_scenario() -> Result<Arc<SealedPlatformScenarioV1>, String> {
+        let scenario = PlatformScenarioV1::try_new(vec![market(
+            CONDITION,
+            "3278040",
+            TOKEN_UP,
+            TOKEN_DOWN,
+            MARKET_ONE_START,
+            GATE_A_MARKET_END,
+        )?])
+        .map_err(|error| format!("构造 Gate A 代表市场场景失败：{error}"))?;
+        let artifact = SimulationScenarioArtifactV1 {
+            schema_version: PLATFORM_SCENARIO_SCHEMA_V1.to_owned(),
+            scenario_sha256: scenario.scenario_sha256().clone(),
+            market_set_sha256: scenario.market_set_sha256().clone(),
+            markets: scenario.market_set().markets().to_vec(),
+        };
+        let bytes = serde_json::to_vec(&artifact)
+            .map_err(|error| format!("编码 Gate A 代表市场场景失败：{error}"))?;
+        SealedPlatformScenarioV1::decode_and_seal(&bytes)
+            .map(Arc::new)
+            .map_err(|error| format!("密封 Gate A 代表市场场景失败：{error}"))
+    }
+
+    #[cfg(feature = "gate-a-measurement")]
+    fn gate_a_bucket(
+        path: MarketEventPathV1,
+        bucket: &ClosedExecutionMarketIndexBucketV1,
+    ) -> AcceptedClosedMarketBucketV2 {
+        AcceptedClosedMarketBucketV2 {
+            reference: DurableMarketBucketReferenceV2 {
+                path,
+                bucket_at_utc_ms: bucket.index_at_utc_ms(),
+                start_index_position: bucket.start_logical_position(),
+                next_index_position: bucket.next_logical_position(),
+                closure: match bucket.closure() {
+                    ReplayIndexClosureV1::NextGlobalEventAt(at) => {
+                        MillisecondBucketClosureV1::NextEventAt(at)
+                    }
+                    ReplayIndexClosureV1::EndOfInput => MillisecondBucketClosureV1::EndOfInput,
+                },
+            },
+            events: Arc::clone(bucket.events()),
+        }
+    }
+
+    #[cfg(feature = "gate-a-measurement")]
+    fn stage5_component_binding(args: &GateARealVerticalArgs) -> Result<Value, String> {
+        let actual_sha = sha256_file(&args.stage5_component_manifest)?;
+        if actual_sha != args.stage5_component_manifest_sha256.0 {
+            return Err(format!(
+                "阶段 5 component manifest SHA-256 不匹配：expected={}, actual={actual_sha}",
+                args.stage5_component_manifest_sha256.0
+            ));
+        }
+        let value: Value = serde_json::from_slice(
+            &fs::read(&args.stage5_component_manifest)
+                .map_err(|error| format!("读取阶段 5 component manifest 失败：{error}"))?,
+        )
+        .map_err(|error| format!("解析阶段 5 component manifest 失败：{error}"))?;
+        if value.get("schema_version").and_then(Value::as_str)
+            != Some("simulation_run_manifest_v2_envelope")
+            || value.get("component_receipt_id").and_then(Value::as_str)
+                != Some(args.stage5_component_receipt_id.0.as_str())
+            || value.pointer("/content/component_scope/COMPONENT_GOLDEN")
+                != Some(&Value::Bool(true))
+        {
+            return Err("阶段 5 component manifest 身份或 COMPONENT_GOLDEN 范围不匹配".to_owned());
+        }
+        Ok(json!({
+            "path":args.stage5_component_manifest,
+            "manifest_file_sha256":actual_sha,
+            "component_receipt_id":args.stage5_component_receipt_id,
+            "implementation_identity":value.pointer("/content/implementation_identity"),
+            "component_scope":value.pointer("/content/component_scope")
+        }))
+    }
+
+    #[cfg(feature = "gate-a-measurement")]
+    fn gate_a_inventory(final_gate_a: &ValidatedPublishedGateAFinal) -> Result<Vec<Value>, String> {
+        let candidate = final_gate_a.candidate();
+        let mut inventory = Vec::new();
+        for artifact in [
+            &candidate.canonical_event_store,
+            &candidate.event_time_index,
+            &candidate.visibility_index,
+            &candidate.market_observations,
+            &candidate.reduction_reports,
+        ] {
+            let data_path = artifact
+                .artifact_path()
+                .strip_prefix(final_gate_a.root())
+                .map_err(|error| format!("计算 Gate A 数据相对路径失败：{error}"))?;
+            inventory.push(json!({
+                "path":data_path,
+                "bytes":artifact.manifest().file.bytes,
+                "sha256":artifact.manifest().file.sha256,
+                "rows":artifact.manifest().file.rows,
+                "logical_sha256":artifact.manifest().file.logical_sha256
+            }));
+            let manifest_path = artifact
+                .manifest_path()
+                .strip_prefix(final_gate_a.root())
+                .map_err(|error| format!("计算 Gate A manifest 相对路径失败：{error}"))?;
+            inventory.push(json!({
+                "path":manifest_path,
+                "bytes":fs::metadata(artifact.manifest_path())
+                    .map_err(|error| format!("读取 Gate A manifest metadata 失败：{error}"))?
+                    .len(),
+                "sha256":artifact.manifest_sha256()
+            }));
+        }
+        for relative in [
+            "gate-a-capability-matrix.json",
+            "gate-a-receipt.json",
+            "reports/quality-isolation-report.json",
+            "reports/resource-evidence.json",
+            "reports/test-evidence.json",
+            "run-manifest.json",
+        ] {
+            let path = final_gate_a.root().join(relative);
+            inventory.push(json!({
+                "path":relative,
+                "bytes":fs::metadata(&path)
+                    .map_err(|error| format!("读取 Gate A 控制文件 metadata 失败：{error}"))?
+                    .len(),
+                "sha256":sha256_file(&path)?
+            }));
+        }
+        inventory.sort_by(|left, right| left["path"].as_str().cmp(&right["path"].as_str()));
+        if inventory.len() != 16 {
+            return Err(format!(
+                "Gate A inventory 必须恰有 16 项，actual={}",
+                inventory.len()
+            ));
+        }
+        Ok(inventory)
+    }
+
+    #[cfg(feature = "gate-a-measurement")]
+    pub(super) fn joint_manifest_envelope(content: Value) -> Result<Value, String> {
+        let content_bytes = serde_json::to_vec(&content)
+            .map_err(|error| format!("编码联合 manifest content 失败：{error}"))?;
+        let receipt_id = format!("{:x}", Sha256::digest(content_bytes));
+        Ok(json!({
+            "schema_version":"joint_real_vertical_manifest_v1_envelope",
+            "joint_receipt_id":receipt_id,
+            "content":content
+        }))
+    }
+
+    fn run_gate_a_real_vertical(args: Args, run_started: Instant) -> Result<(), String> {
+        #[cfg(not(feature = "gate-a-measurement"))]
+        {
+            let _ = (args, run_started);
+            return Err("--gate-a-real-vertical 只允许 gate-a-measurement feature 构建".to_owned());
+        }
+        #[cfg(feature = "gate-a-measurement")]
+        {
+            let gate = args
+                .gate_a
+                .as_ref()
+                .expect("parser 已绑定 Gate A real vertical 参数");
+            if args.output_dir.exists() {
+                return Err(format!("联合最终目标已存在：{}", args.output_dir.display()));
+            }
+            let parent = args
+                .output_dir
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            fs::create_dir_all(parent).map_err(|error| format!("创建联合父目录失败：{error}"))?;
+            let final_name = args
+                .output_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| "联合输出目标必须以 UTF-8 文件名结束".to_owned())?;
+            let candidate = parent.join(format!(".{final_name}.candidate"));
+            if candidate.exists() {
+                return Err(format!("联合 candidate 已存在：{}", candidate.display()));
+            }
+            let current_head = command_output("git", &["rev-parse", "HEAD"]);
+            if current_head != args.identity.git_commit {
+                return Err(format!(
+                    "实现提交身份不匹配：arg={}, HEAD={current_head}",
+                    args.identity.git_commit
+                ));
+            }
+            let current_lock_sha = sha256_file(Path::new("Cargo.lock"))?;
+            if current_lock_sha != args.identity.cargo_lock_sha256.0 {
+                return Err(format!(
+                    "Cargo.lock 身份不匹配：arg={}, actual={current_lock_sha}",
+                    args.identity.cargo_lock_sha256.0
+                ));
+            }
+            let stage5_binding = stage5_component_binding(gate)?;
+            fs::create_dir(&candidate)
+                .map_err(|error| format!("创建联合 candidate 失败：{error}"))?;
+
+            let samples_path = candidate.join("measurement-samples.jsonl");
+            let mut samples_writer = BufWriter::new(
+                File::create(&samples_path)
+                    .map_err(|error| format!("创建 Gate A 测量样本失败：{error}"))?,
+            );
+            let proc_before = proc_snapshot()?;
+            let mut proc_high_water = proc_before;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| format!("创建 Gate A CURRENT_QUERY runtime 失败：{error}"))?;
+
+            let rule_sync_started = Instant::now();
+            let rule_snapshot = runtime
+                .block_on(query_and_seal_current_process_snapshot_v3(
+                    CurrentProcessSnapshotRequestV1 {
+                        reference_market: reference_market(),
+                        target_path: candidate.join("platform-rule-snapshot-v3.json"),
+                        implementation_identity: args.identity.clone(),
+                    },
+                ))
+                .map_err(|error| format!("Gate A runner 唯一 CURRENT_QUERY 失败：{error}"))?;
+            let rule_sync_elapsed_ns = elapsed_ns(rule_sync_started);
+            record_stage_sample(
+                &mut samples_writer,
+                "current_query_rule_sync",
+                rule_sync_elapsed_ns,
+            )?;
+            proc_high_water = proc_max(proc_high_water, proc_snapshot()?);
+
+            let gate_a_open_started = Instant::now();
+            let validation_work_path = parent.join(format!(
+                ".{final_name}.gate-a-final-validation-{}",
+                std::process::id()
+            ));
+            let final_gate_a =
+                open_published_gate_a_final(&gate.gate_a_root, &validation_work_path)
+                    .map_err(|error| format!("只读打开冻结 Gate A final 失败：{error}"))?;
+            if validation_work_path.exists() {
+                return Err("Gate A 外置 validation 工作目录未清理".to_owned());
+            }
+            let gate_a_open_elapsed_ns = elapsed_ns(gate_a_open_started);
+            record_stage_sample(
+                &mut samples_writer,
+                "open_and_validate_gate_a_final",
+                gate_a_open_elapsed_ns,
+            )?;
+            proc_high_water = proc_max(proc_high_water, proc_snapshot()?);
+
+            let output = &final_gate_a.run_manifest().output_config;
+            let mut adapter = GateASimulationReplayAdapter::open(
+                &final_gate_a,
+                output.sort.batch_rows,
+                output.sort.max_run_bytes,
+                output.sort.batch_rows,
+            )
+            .map_err(|error| format!("打开 Gate A 双路适配器失败：{error}"))?;
+            let scenario = real_gate_a_scenario()?;
+            let finality = successful_finality()?;
+            let latency = load_embedded_proxy_latency_profile()
+                .map_err(|error| format!("加载 Gate A runner 时延档失败：{error}"))?;
+            let log_path = candidate.join("sim-event-log-v2.working.jsonl");
+            let opened = RunOpenedV2 {
+                run_id: GATE_A_RUNNER_IDENTITY.to_owned(),
+                durability_role: RunDurabilityRoleV2::CleanRun,
+                platform_rule_snapshot_file_sha256: rule_snapshot.file_sha256().clone(),
+                trade_finality_policy_file_sha256: finality.policy_id().clone(),
+                platform_scenario_file_sha256: scenario.file_sha256().clone(),
+                proxy_latency_profile_file_sha256: latency.file_sha256().clone(),
+                implementation_identity: args.identity.clone(),
+                market_event_source_identity_sha256: adapter
+                    .canonical_event_store_manifest_sha256()
+                    .clone(),
+            };
+            let mut execution = SimExecution::create_new(
+                &log_path,
+                opened,
+                Arc::clone(&rule_snapshot),
+                Arc::clone(&finality),
+                Arc::clone(&scenario),
+                Arc::clone(&latency),
+                Box::<AcceptingProjectionPort>::default(),
+                MAX_GROUP_BYTES,
+            )
+            .map_err(|error| format!("创建 Gate A 真实驱动根失败：{error}"))?;
+            execution
+                .create_session(SessionSpecV3 {
+                    run_id: GATE_A_RUNNER_IDENTITY.to_owned(),
+                    session_id: "stage-6-gate-a-real-vertical-session".to_owned(),
+                    account_id: "stage-6-gate-a-real-vertical-account".to_owned(),
+                    caller_role: SimCallerRoleV1::OfflineEvaluation,
+                    caller_instance_id: "stage-6-gate-a-real-vertical-caller".to_owned(),
+                    creation_request_id: "stage-6-gate-a-real-vertical-create".to_owned(),
+                    response_bridge_binding_id: "stage-6-gate-a-real-vertical-bridge".to_owned(),
+                    initial_account_state: InitialAccountStateV2 {
+                        available_pusd: ExactDecimal("1000".to_owned()),
+                    },
+                    session_seed: Sha256Hex("8".repeat(64)),
+                })
+                .map_err(|error| format!("创建 Gate A 真实驱动会话失败：{error}"))?;
+            execution
+                .activate_session("stage-6-gate-a-real-vertical-activate".to_owned())
+                .map_err(|error| format!("激活 Gate A 真实驱动会话失败：{error}"))?;
+
+            let mut business_high_water = Value::Null;
+            let session_opened_resources = execution.measurement_resource_snapshot();
+            record_resource_checkpoint(
+                &mut samples_writer,
+                "session_opened",
+                0,
+                &session_opened_resources,
+                &mut business_high_water,
+            )?;
+            let log_bytes_after_session_open = fs::metadata(&log_path)
+                .map_err(|error| format!("读取会话开启日志大小失败：{error}"))?
+                .len();
+            let mut latency_samples = GateALatencySamples::default();
+            latency_samples.record(&mut samples_writer, 0, &execution)?;
+            let drive_started = Instant::now();
+            let mut platform = adapter
+                .next_platform_bucket()
+                .map_err(|error| format!("读取 Gate A 平台首桶失败：{error}"))?;
+            let mut visibility = adapter
+                .next_visibility_bucket()
+                .map_err(|error| format!("读取 Gate A 可见性首桶失败：{error}"))?;
+            let mut platform_stats = GateAPathStats::default();
+            let mut visibility_stats = GateAPathStats::default();
+            let mut drive_ordinal = 0_u64;
+            let mut prefix_advances = 0_u64;
+            let mut request_count = 0_u64;
+            let mut unique_event_ids = HashSet::new();
+            while platform.is_some() || visibility.is_some() {
+                let next_bucket_at = match (&platform, &visibility) {
+                    (Some(left), Some(right)) => {
+                        left.index_at_utc_ms().min(right.index_at_utc_ms())
+                    }
+                    (Some(bucket), None) | (None, Some(bucket)) => bucket.index_at_utc_ms(),
+                    (None, None) => unreachable!(),
+                };
+                if let Some(required) = execution.next_required_logical_drive()
+                    && required.required_at_utc_ms < next_bucket_at
+                {
+                    let next_index_position = match required.path {
+                        MarketEventPathV1::HiddenPlatform => platform.as_ref().map_or_else(
+                            || adapter.platform_next_logical_position(),
+                            ClosedExecutionMarketIndexBucketV1::start_logical_position,
+                        ),
+                        MarketEventPathV1::PublicVisibility => visibility.as_ref().map_or_else(
+                            || adapter.visibility_next_logical_position(),
+                            ClosedExecutionMarketIndexBucketV1::start_logical_position,
+                        ),
+                    };
+                    execution
+                        .drive_platform_prefix(sim_system::execution::PlatformPrefixAdvanceV2 {
+                            path: required.path,
+                            closed_through_utc_ms: required.required_at_utc_ms,
+                            next_index_position,
+                        })
+                        .map_err(|error| {
+                            format!(
+                                "Gate A 必要空前缀推进失败：ordinal={drive_ordinal}, required={required:?}, error={error}"
+                            )
+                        })?;
+                    drive_ordinal = drive_ordinal.saturating_add(1);
+                    prefix_advances = prefix_advances.saturating_add(1);
+                    latency_samples.record(&mut samples_writer, drive_ordinal, &execution)?;
+                    continue;
+                }
+
+                let path = match (&platform, &visibility) {
+                    (Some(left), Some(right))
+                        if left.index_at_utc_ms() <= right.index_at_utc_ms() =>
+                    {
+                        MarketEventPathV1::HiddenPlatform
+                    }
+                    (Some(_), None) => MarketEventPathV1::HiddenPlatform,
+                    _ => MarketEventPathV1::PublicVisibility,
+                };
+                let bucket = match path {
+                    MarketEventPathV1::HiddenPlatform => platform.take().expect("平台桶存在"),
+                    MarketEventPathV1::PublicVisibility => visibility.take().expect("可见性桶存在"),
+                };
+                observe_unique_gate_a_event_ids(
+                    &mut unique_event_ids,
+                    bucket
+                        .events()
+                        .iter()
+                        .map(|event| event.event_id.0.as_str()),
+                );
+                match path {
+                    MarketEventPathV1::HiddenPlatform => platform_stats.observe(&bucket),
+                    MarketEventPathV1::PublicVisibility => visibility_stats.observe(&bucket),
+                }
+                if path == MarketEventPathV1::HiddenPlatform
+                    && bucket
+                        .events()
+                        .iter()
+                        .any(|event| event.event_id.0 == GATE_A_REPRESENTATIVE_TRADE_EVENT_ID)
+                {
+                    if request_count != 0 {
+                        return Err("Gate A 代表订单触发事件重复".to_owned());
+                    }
+                    let outbound_delay = i64::try_from(latency.sample_delay_ms(
+                        "8".repeat(64).as_bytes(),
+                        GATE_A_REQUEST_ID,
+                        DelaySampleDomainV1::RequestOutbound,
+                    ))
+                    .map_err(|_| "Gate A 代表订单出站时延不可表示".to_owned())?;
+                    execution
+                        .post_order(
+                            TrustedDecisionCutoffV2 {
+                                logical_time_utc_ms: bucket.index_at_utc_ms() - outbound_delay,
+                                public_visibility: PublicVisibilityCursorV1::default(),
+                                private_feedback_sequence: 0,
+                            },
+                            PostOrderRequestV2 {
+                                context: RequestContextV2 {
+                                    global_request_id: GATE_A_REQUEST_ID.to_owned(),
+                                    caller_correlation_id: Some(
+                                        "stage-6-gate-a-real-vertical".to_owned(),
+                                    ),
+                                },
+                                item: PostOrderItemV1 {
+                                    item_id: "stage-6-gate-a-real-vertical-item".to_owned(),
+                                    order: SimBuyOrderV1 {
+                                        condition_id: ConditionId(CONDITION.to_owned()),
+                                        token_id: TokenId(TOKEN_UP.to_owned()),
+                                        kind: SimBuyOrderKindV1::GtcLimit {
+                                            limit_price_pusd_per_share: "0.01"
+                                                .parse()
+                                                .expect("固定 Gate A 代表价格"),
+                                            size_shares: rule_snapshot
+                                                .synchronized_rules()
+                                                .minimum_order_size_shares
+                                                .value(),
+                                            post_only: false,
+                                        },
+                                    },
+                                },
+                            },
+                        )
+                        .map_err(|error| format!("登记 Gate A 代表订单失败：{error}"))?;
+                    request_count = 1;
+                    drive_ordinal = drive_ordinal.saturating_add(1);
+                    latency_samples.record(&mut samples_writer, drive_ordinal, &execution)?;
+                }
+                execution
+                    .drive_closed_market_bucket(gate_a_bucket(path, &bucket))
+                    .map_err(|error| {
+                        let event_ids = bucket
+                            .events()
+                            .iter()
+                            .map(|event| event.event_id.0.as_str())
+                            .collect::<Vec<_>>();
+                        format!(
+                            "Gate A 真实驱动首分歧：ordinal={}, path={path:?}, time={}, event_ids={event_ids:?}, error={error}",
+                            drive_ordinal + 1,
+                            bucket.index_at_utc_ms()
+                        )
+                    })?;
+                drive_ordinal = drive_ordinal.saturating_add(1);
+                latency_samples.record(&mut samples_writer, drive_ordinal, &execution)?;
+                match path {
+                    MarketEventPathV1::HiddenPlatform => {
+                        platform = adapter
+                            .next_platform_bucket()
+                            .map_err(|error| format!("读取 Gate A 平台下一桶失败：{error}"))?;
+                    }
+                    MarketEventPathV1::PublicVisibility => {
+                        visibility = adapter
+                            .next_visibility_bucket()
+                            .map_err(|error| format!("读取 Gate A 可见性下一桶失败：{error}"))?;
+                    }
+                }
+                let total_buckets = platform_stats
+                    .buckets
+                    .saturating_add(visibility_stats.buckets);
+                if total_buckets.is_multiple_of(4_096) {
+                    let resources = execution.measurement_resource_snapshot();
+                    record_resource_checkpoint(
+                        &mut samples_writer,
+                        "periodic",
+                        drive_ordinal,
+                        &resources,
+                        &mut business_high_water,
+                    )?;
+                    proc_high_water = proc_max(proc_high_water, proc_snapshot()?);
+                }
+            }
+            let real_drive_elapsed_ns = elapsed_ns(drive_started);
+            record_stage_sample(
+                &mut samples_writer,
+                "real_dual_path_drive",
+                real_drive_elapsed_ns,
+            )?;
+            if !platform_stats.end_of_input_seen || !visibility_stats.end_of_input_seen {
+                return Err("Gate A 双路未同时到达 EndOfInput".to_owned());
+            }
+            if let Some(required) = execution.next_required_logical_drive() {
+                return Err(format!("Gate A 双路结束后仍有必要逻辑推进：{required:?}"));
+            }
+            if request_count != 1 {
+                return Err(format!("Gate A 代表请求数必须为 1，actual={request_count}"));
+            }
+            let unique_event_count = u64::try_from(unique_event_ids.len())
+                .expect("Gate A event_id 集合基数必须可表示为 u64");
+            let final_resources = execution.measurement_resource_snapshot();
+            record_resource_checkpoint(
+                &mut samples_writer,
+                "end_of_input",
+                drive_ordinal,
+                &final_resources,
+                &mut business_high_water,
+            )?;
+            proc_high_water = proc_max(proc_high_water, proc_snapshot()?);
+            let log_bytes = fs::metadata(&log_path)
+                .map_err(|error| format!("读取正式工作日志大小失败：{error}"))?
+                .len();
+            let log_sha256 = sha256_file(&log_path)?;
+            let log_growth_bytes = log_bytes.saturating_sub(log_bytes_after_session_open);
+            drop(execution);
+            fs::remove_file(&log_path)
+                .map_err(|error| format!("删除 bundle 外正式工作日志失败：{error}"))?;
+
+            let end_to_end_elapsed_ns = elapsed_ns(run_started);
+            let unique_events_per_second_drive = unique_event_count
+                .saturating_mul(1_000_000_000)
+                .checked_div(real_drive_elapsed_ns.max(1))
+                .unwrap_or_default();
+            let unique_events_per_second_end_to_end = unique_event_count
+                .saturating_mul(1_000_000_000)
+                .checked_div(end_to_end_elapsed_ns.max(1))
+                .unwrap_or_default();
+            let gate_a_input_inventory = gate_a_inventory(&final_gate_a)?;
+            let binary_path = std::env::current_exe()
+                .map_err(|error| format!("定位 Gate A runner 二进制失败：{error}"))?;
+            let binary_sha256 = sha256_file(&binary_path)?;
+            let report_path = candidate.join("representative-market-report.json");
+            let report = json!({
+                "schema_version":"representative_market_report_v1",
+                "runner_identity":GATE_A_RUNNER_IDENTITY,
+                "workload_identity":GATE_A_WORKLOAD_IDENTITY,
+                "representative_market":{
+                    "condition_id":CONDITION,
+                    "slug":SLUG,
+                    "clob_market_id":"3278040",
+                    "market_start_at_utc_ms":MARKET_ONE_START,
+                    "market_end_at_utc_ms":GATE_A_MARKET_END,
+                    "outcomes":[{"token_id":TOKEN_UP,"outcome":"Up"},{"token_id":TOKEN_DOWN,"outcome":"Down"}]
+                },
+                "input_counts":{
+                    "unique_execution_market_events":unique_event_count,
+                    "canonical_store_rows_including_reference":final_gate_a.candidate().canonical_event_store.manifest().file.rows,
+                    "platform_path":platform_stats,
+                    "visibility_path":visibility_stats,
+                    "raw_rows_are_not_reported_as_sim_events":true,
+                    "dual_path_sum_is_not_reported_as_unique_events":true
+                },
+                "throughput":{
+                    "real_drive_elapsed_ns":real_drive_elapsed_ns,
+                    "unique_events_per_second_real_drive":unique_events_per_second_drive,
+                    "end_to_end_through_input_completion_elapsed_ns":end_to_end_elapsed_ns,
+                    "unique_events_per_second_end_to_end":unique_events_per_second_end_to_end,
+                    "platform_average_events_per_logical_second":platform_stats.average_events_per_second(),
+                    "visibility_average_events_per_logical_second":visibility_stats.average_events_per_second(),
+                    "pr57_elapsed_seconds_not_reused_as_throughput":3057.73
+                },
+                "request_load":{
+                    "representative_requests":request_count,
+                    "request_id":GATE_A_REQUEST_ID,
+                    "source_event_trigger":GATE_A_REPRESENTATIVE_TRADE_EVENT_ID
+                },
+                "latency_ns_nearest_rank":latency_samples.summaries(),
+                "logical_terminal":{
+                    "platform_end_of_input":platform_stats.end_of_input_seen,
+                    "visibility_end_of_input":visibility_stats.end_of_input_seen,
+                    "platform_next_logical_position":adapter.platform_next_logical_position(),
+                    "visibility_next_logical_position":adapter.visibility_next_logical_position(),
+                    "next_required_logical_drive":Value::Null,
+                    "max_page_rows":adapter.max_page_rows()
+                },
+                "pr57_inherited_scale_facts":{
+                    "closed_buckets":156783,
+                    "public_trades":1918,
+                    "book_resync_delta_inferences":362,
+                    "resync_boundaries":362,
+                    "not_a_new_throughput_measurement":true
+                }
+            });
+            let report_seal_started = Instant::now();
+            write_json(report_path.clone(), &report)?;
+            File::open(&report_path)
+                .and_then(|file| file.sync_all())
+                .map_err(|error| format!("同步代表市场报告失败：{error}"))?;
+            let report_seal_elapsed_ns = elapsed_ns(report_seal_started);
+            record_stage_sample(
+                &mut samples_writer,
+                "seal_representative_market_report",
+                report_seal_elapsed_ns,
+            )?;
+            samples_writer
+                .flush()
+                .map_err(|error| format!("刷新 Gate A 测量样本失败：{error}"))?;
+            File::open(&samples_path)
+                .and_then(|file| file.sync_all())
+                .map_err(|error| format!("同步 Gate A 测量样本失败：{error}"))?;
+            drop(samples_writer);
+            let samples_sha256 = sha256_file(&samples_path)?;
+            let report_sha256 = sha256_file(&report_path)?;
+            let proc_after = proc_snapshot()?;
+            proc_high_water = proc_max(proc_high_water, proc_after);
+            let resource_path = candidate.join("resource-baseline.json");
+            write_json(
+                resource_path.clone(),
+                &json!({
+                    "schema_version":"joint_real_vertical_resource_baseline_v1",
+                    "hardware":{
+                        "uname":command_output("uname", &["-a"]),
+                        "cpu_model":cpu_model()?,
+                        "logical_cores":std::thread::available_parallelism()
+                            .map(|count| count.get())
+                            .map_err(|error| format!("读取逻辑核心数失败：{error}"))?
+                    },
+                    "build":{
+                        "profile":if cfg!(debug_assertions) { "debug" } else { "release" },
+                        "git_commit":args.identity.git_commit,
+                        "source_identity_sha256":args.identity.source_identity_sha256,
+                        "cargo_lock_sha256":args.identity.cargo_lock_sha256,
+                        "binary_path":binary_path,
+                        "binary_sha256":binary_sha256
+                    },
+                    "proc_before":proc_before,
+                    "proc_after":proc_after,
+                    "proc_high_water":proc_high_water,
+                    "proc_delta":{
+                        "cpu_ticks":proc_after.cpu_ticks.saturating_sub(proc_before.cpu_ticks),
+                        "io_read_bytes":proc_after.io_read_bytes.saturating_sub(proc_before.io_read_bytes),
+                        "io_write_bytes":proc_after.io_write_bytes.saturating_sub(proc_before.io_write_bytes)
+                    },
+                    "business_resource_high_water":business_high_water,
+                    "business_resource_final":final_resources,
+                    "input_sequence_final":final_resources.next_input_sequence,
+                    "working_log":{
+                        "included_in_bundle":false,
+                        "deleted_after_hashing":true,
+                        "bytes_after_session_open":log_bytes_after_session_open,
+                        "final_bytes":log_bytes,
+                        "growth_bytes":log_growth_bytes,
+                        "sha256":log_sha256
+                    },
+                    "phase_elapsed_ns":{
+                        "current_query_rule_sync":rule_sync_elapsed_ns,
+                        "open_and_validate_gate_a_final":gate_a_open_elapsed_ns,
+                        "real_dual_path_drive":real_drive_elapsed_ns,
+                        "seal_representative_market_report":report_seal_elapsed_ns,
+                        "end_to_end_through_input_completion":end_to_end_elapsed_ns
+                    },
+                    "measurement_observation_count":latency_samples.count,
+                    "measurement_samples_sha256":samples_sha256,
+                    "representative_market_report_sha256":report_sha256,
+                    "no_new_resource_threshold_or_acceptance_gate":true
+                }),
+            )?;
+            let resource_sha256 = sha256_file(&resource_path)?;
+            let local_inventory = artifact_inventory(&candidate)?;
+            let content = json!({
+                "schema_version":"joint_real_vertical_manifest_v1",
+                "scope":{
+                    "REAL_DPT":true,
+                    "COMPONENT_GOLDEN":true,
+                    "REAL_PAPER_RECOVERY":"NOT_CLAIMED",
+                    "TRAINING_LOOP":"NOT_CLAIMED",
+                    "FINAL_TRAINING_RETENTION_POLICY":"NOT_CLAIMED",
+                    "PRODUCTION_SLA":"NOT_CLAIMED"
+                },
+                "implementation_identity":{
+                    "git_commit":args.identity.git_commit,
+                    "source_identity_sha256":args.identity.source_identity_sha256,
+                    "cargo_lock_sha256":args.identity.cargo_lock_sha256,
+                    "binary_sha256":binary_sha256,
+                    "reader_pipeline_core_identity_sha256":final_gate_a.reader_pipeline_core_identity_sha256(),
+                    "adapter_identity":"data_pipeline_training::GateASimulationReplayAdapter",
+                    "runner_identity":GATE_A_RUNNER_IDENTITY
+                },
+                "gate_a":{
+                    "root":final_gate_a.root(),
+                    "receipt_id":final_gate_a.receipt().receipt_id,
+                    "receipt_file_sha256":sha256_file(&final_gate_a.root().join("gate-a-receipt.json"))?,
+                    "run_manifest_sha256":final_gate_a.receipt().run_manifest_sha256,
+                    "producer_pipeline_core_identity_sha256":final_gate_a.producer_pipeline_core_identity_sha256(),
+                    "input_set_identity_sha256":final_gate_a.receipt().input_set_identity_sha256,
+                    "input_manifest_set_sha256":final_gate_a.receipt().input_manifest_set_sha256,
+                    "artifact_manifests":{
+                        "canonical_event_store":final_gate_a.candidate().canonical_event_store.manifest_sha256(),
+                        "event_time_index":final_gate_a.candidate().event_time_index.manifest_sha256(),
+                        "visibility_index":final_gate_a.candidate().visibility_index.manifest_sha256(),
+                        "market_observations":final_gate_a.candidate().market_observations.manifest_sha256(),
+                        "reduction_reports":final_gate_a.candidate().reduction_reports.manifest_sha256()
+                    },
+                    "inventory_reference_not_copy":gate_a_input_inventory
+                },
+                "stage5_component":stage5_binding,
+                "current_query_rule_snapshot":{
+                    "path":"platform-rule-snapshot-v3.json",
+                    "file_sha256":rule_snapshot.file_sha256(),
+                    "access_mode":rule_snapshot.access_mode(),
+                    "query_count":1,
+                    "queried_before_gate_a_open_and_run_root":true,
+                    "shared_by_all_runs_in_process":true
+                },
+                "real_drive":{
+                    "workload_identity":GATE_A_WORKLOAD_IDENTITY,
+                    "unique_execution_market_events":unique_event_count,
+                    "platform_path":platform_stats,
+                    "visibility_path":visibility_stats,
+                    "prefix_advances":prefix_advances,
+                    "request_count":request_count,
+                    "max_page_rows":adapter.max_page_rows(),
+                    "platform_final_next_logical_position":adapter.platform_next_logical_position(),
+                    "visibility_final_next_logical_position":adapter.visibility_next_logical_position(),
+                    "platform_index_file_bytes_scanned":final_gate_a.candidate().event_time_index.manifest().file.bytes,
+                    "visibility_index_file_bytes_scanned":final_gate_a.candidate().visibility_index.manifest().file.bytes,
+                    "logical_terminal":true
+                },
+                "artifacts":{
+                    "measurement_samples":{"path":"measurement-samples.jsonl","sha256":samples_sha256},
+                    "representative_market_report":{"path":"representative-market-report.json","sha256":report_sha256},
+                    "resource_baseline":{"path":"resource-baseline.json","sha256":resource_sha256},
+                    "platform_rule_snapshot":{"path":"platform-rule-snapshot-v3.json","sha256":rule_snapshot.file_sha256()}
+                },
+                "local_inventory":local_inventory,
+                "local_inventory_excludes_manifest_itself":true,
+                "no_simulation_run_manifest_v2_generated":true,
+                "dpt_remained_offline_and_sim_used_only_public_readers":true
+            });
+            let envelope = joint_manifest_envelope(content)?;
+            let receipt_id = envelope["joint_receipt_id"]
+                .as_str()
+                .expect("联合 receipt ID 必须为字符串")
+                .to_owned();
+            write_json(
+                candidate.join("joint-real-vertical-manifest-v1.json"),
+                &envelope,
+            )?;
+            sync_tree(&candidate)?;
+            publish_candidate(&candidate, &args.output_dir)?;
+            eprintln!(
+                "Gate A joint real vertical PASS: receipt_id={receipt_id},output={},unique_events={unique_event_count},platform_buckets={},visibility_buckets={},drive_events_per_second={unique_events_per_second_drive},end_to_end_events_per_second={unique_events_per_second_end_to_end}",
+                args.output_dir.display(),
+                platform_stats.buckets,
+                visibility_stats.buckets,
+            );
+            Ok(())
+        }
     }
 
     fn run_component_conformance(args: Args) -> Result<(), String> {
@@ -3998,6 +4987,10 @@ mod enabled {
         let mut retention_manifest_sha256 = None;
         let mut test_evidence = None;
         let mut test_evidence_sha256 = None;
+        let mut gate_a_root = None;
+        let mut stage5_component_manifest = None;
+        let mut stage5_component_manifest_sha256 = None;
+        let mut stage5_component_receipt_id = None;
         let mut mode = RunMode::GoldenMatrix;
         let mut index = 1;
         while index < argv.len() {
@@ -4015,6 +5008,14 @@ mod enabled {
                     return Err("固定运行 mode 不得重复或组合".to_owned());
                 }
                 mode = RunMode::ComponentConformance;
+                index += 1;
+                continue;
+            }
+            if flag == "--gate-a-real-vertical" {
+                if mode != RunMode::GoldenMatrix {
+                    return Err("固定运行 mode 不得重复或组合".to_owned());
+                }
+                mode = RunMode::GateARealVertical;
                 index += 1;
                 continue;
             }
@@ -4039,6 +5040,16 @@ mod enabled {
                 }
                 "--test-evidence" => test_evidence = Some(PathBuf::from(value)),
                 "--test-evidence-sha256" => test_evidence_sha256 = Some(value.clone()),
+                "--gate-a-root" => gate_a_root = Some(PathBuf::from(value)),
+                "--stage5-component-manifest" => {
+                    stage5_component_manifest = Some(PathBuf::from(value));
+                }
+                "--stage5-component-manifest-sha256" => {
+                    stage5_component_manifest_sha256 = Some(value.clone());
+                }
+                "--stage5-component-receipt-id" => {
+                    stage5_component_receipt_id = Some(value.clone());
+                }
                 _ => return Err(format!("未知参数：{flag}")),
             }
             index += 2;
@@ -4054,6 +5065,9 @@ mod enabled {
         }
         if mode != RunMode::GoldenMatrix && !cfg!(feature = "measurement") {
             return Err("固定 mode 只允许 measurement feature 构建；未装配探针".to_owned());
+        }
+        if mode == RunMode::GateARealVertical && !cfg!(feature = "gate-a-measurement") {
+            return Err("--gate-a-real-vertical 只允许 gate-a-measurement feature 构建".to_owned());
         }
         let component = if mode == RunMode::ComponentConformance {
             let values = [
@@ -4094,6 +5108,31 @@ mod enabled {
             }
             None
         };
+        let gate_a = if mode == RunMode::GateARealVertical {
+            let manifest_sha = stage5_component_manifest_sha256
+                .ok_or_else(|| "缺少 --stage5-component-manifest-sha256".to_owned())?;
+            let receipt_id = stage5_component_receipt_id
+                .ok_or_else(|| "缺少 --stage5-component-receipt-id".to_owned())?;
+            if manifest_sha.len() != 64 || receipt_id.len() != 64 {
+                return Err("阶段 5 manifest SHA-256 与 receipt ID 必须为 64 位".to_owned());
+            }
+            Some(GateARealVerticalArgs {
+                gate_a_root: gate_a_root.ok_or_else(|| "缺少 --gate-a-root".to_owned())?,
+                stage5_component_manifest: stage5_component_manifest
+                    .ok_or_else(|| "缺少 --stage5-component-manifest".to_owned())?,
+                stage5_component_manifest_sha256: Sha256Hex(manifest_sha),
+                stage5_component_receipt_id: Sha256Hex(receipt_id),
+            })
+        } else {
+            if gate_a_root.is_some()
+                || stage5_component_manifest.is_some()
+                || stage5_component_manifest_sha256.is_some()
+                || stage5_component_receipt_id.is_some()
+            {
+                return Err("Gate A evidence 参数只允许 --gate-a-real-vertical".to_owned());
+            }
+            None
+        };
         Ok(Args {
             output_dir: output_dir.ok_or_else(|| "缺少 --output-dir".to_owned())?,
             identity: ImplementationIdentityV1 {
@@ -4103,6 +5142,7 @@ mod enabled {
             },
             baseline_summary: baseline,
             component,
+            gate_a,
             mode,
             argv,
         })
@@ -4195,6 +5235,114 @@ mod tests {
             enabled::runner_identity(parsed.mode),
             "sim-stage-5-component-conformance-v1"
         );
+    }
+
+    #[cfg(feature = "gate-a-measurement")]
+    #[test]
+    fn gate_a_parser_selects_the_narrow_real_vertical_mode() {
+        let args = vec![
+            "sim_measurement",
+            "--output-dir",
+            "/tmp/joint-bundle",
+            "--git-commit",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--source-identity-sha256",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "--cargo-lock-sha256",
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "--gate-a-real-vertical",
+            "--gate-a-root",
+            "/tmp/gate-a-final",
+            "--stage5-component-manifest",
+            "/tmp/simulation-run-manifest-v2.json",
+            "--stage5-component-manifest-sha256",
+            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "--stage5-component-receipt-id",
+            "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let parsed = enabled::parse_args_from(args).expect("固定 Gate A 参数必须解析");
+        assert_eq!(parsed.mode, enabled::RunMode::GateARealVertical);
+        assert_eq!(
+            enabled::runner_identity(parsed.mode),
+            "sim-stage-6-gate-a-real-vertical-v1"
+        );
+    }
+
+    #[cfg(feature = "gate-a-measurement")]
+    #[test]
+    fn gate_a_unique_count_is_the_union_with_visibility_only_events() {
+        let mut unique_event_ids = std::collections::HashSet::new();
+        let platform = ["shared-a", "shared-b"];
+        let visibility = ["shared-a", "shared-b", "visibility-only"];
+        enabled::observe_unique_gate_a_event_ids(&mut unique_event_ids, platform);
+        enabled::observe_unique_gate_a_event_ids(&mut unique_event_ids, visibility);
+
+        assert_ne!(platform.len(), visibility.len());
+        assert_eq!(unique_event_ids.len(), 3);
+    }
+
+    #[cfg(feature = "gate-a-measurement")]
+    #[test]
+    fn joint_manifest_content_identity_and_noreplace_publish_are_atomic() {
+        let directory = tempfile::tempdir().expect("联合 manifest 临时目录");
+        let candidate = directory.path().join(".joint-bundle.candidate");
+        let target = directory.path().join("joint-bundle");
+        std::fs::create_dir(&candidate).expect("创建联合 candidate");
+        for name in [
+            "platform-rule-snapshot-v3.json",
+            "measurement-samples.jsonl",
+            "representative-market-report.json",
+            "resource-baseline.json",
+        ] {
+            std::fs::write(candidate.join(name), format!("{name}\n")).expect("写联合代表成员");
+        }
+        let inventory =
+            enabled::artifact_inventory(&candidate).expect("联合 inventory 必须来自四个真实成员");
+        assert_eq!(inventory.len(), 4);
+        let content = serde_json::json!({
+            "schema_version":"joint_real_vertical_manifest_v1",
+            "local_inventory":inventory,
+            "local_inventory_excludes_manifest_itself":true
+        });
+        let content_bytes = serde_json::to_vec(&content).expect("编码联合 content");
+        let expected_receipt = format!("{:x}", sha2::Sha256::digest(content_bytes));
+        let envelope = enabled::joint_manifest_envelope(content).expect("构造联合 envelope");
+        assert_eq!(envelope["joint_receipt_id"], expected_receipt);
+        std::fs::write(
+            candidate.join("joint-real-vertical-manifest-v1.json"),
+            serde_json::to_vec_pretty(&envelope).expect("编码联合 envelope"),
+        )
+        .expect("写联合 manifest");
+        enabled::sync_tree(&candidate).expect("同步联合 candidate");
+        enabled::publish_candidate(&candidate, &target).expect("原子发布联合 candidate");
+        let mut names = std::fs::read_dir(&target)
+            .expect("读取联合 bundle")
+            .map(|entry| {
+                entry
+                    .expect("读取联合成员")
+                    .file_name()
+                    .into_string()
+                    .expect("联合成员名 UTF-8")
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "joint-real-vertical-manifest-v1.json",
+                "measurement-samples.jsonl",
+                "platform-rule-snapshot-v3.json",
+                "representative-market-report.json",
+                "resource-baseline.json",
+            ]
+        );
+        let second = directory.path().join(".joint-bundle.second");
+        std::fs::create_dir(&second).expect("创建第二联合 candidate");
+        assert!(enabled::publish_candidate(&second, &target).is_err());
+        assert!(second.exists());
     }
 
     #[cfg(not(feature = "measurement"))]
