@@ -3750,7 +3750,7 @@ pub(crate) mod tests {
             market_lifecycle_outcome(1_000, 5_500),
             chainlink_outcome(0, 1_000, 5_000),
             market_lifecycle_outcome(1_000, 6_000),
-            chainlink_outcome(1, 2_000, 5_000),
+            chainlink_outcome(1, 4_000, 5_000),
             market_lifecycle_outcome(3_000, 7_000),
         ];
         materialize_micro_candidate(

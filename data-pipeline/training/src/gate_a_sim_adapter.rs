@@ -356,35 +356,42 @@ mod tests {
         );
         assert_eq!(
             first.closure(),
-            ReplayIndexClosureV1::NextGlobalEventAt(2_000)
+            ReplayIndexClosureV1::NextGlobalEventAt(3_000)
         );
         assert_eq!(adapter.platform_next_logical_position(), 3);
 
-        let references_only = adapter.next_platform_bucket().unwrap().unwrap();
-        assert_eq!(references_only.index_at_utc_ms(), 2_000);
+        let market = adapter.next_platform_bucket().unwrap().unwrap();
+        assert_eq!(market.index_at_utc_ms(), 3_000);
         assert_eq!(
             (
-                references_only.start_logical_position(),
-                references_only.next_logical_position()
+                market.start_logical_position(),
+                market.next_logical_position()
             ),
             (3, 4)
         );
-        assert!(references_only.event_logical_positions().is_empty());
-        assert!(references_only.events().is_empty());
+        assert_eq!(market.event_logical_positions(), &[3]);
+        assert_eq!(event_ids(&market), vec![fixture.event_ids[4].0.as_str()]);
         assert_eq!(
-            references_only.closure(),
-            ReplayIndexClosureV1::NextGlobalEventAt(3_000)
+            market.closure(),
+            ReplayIndexClosureV1::NextGlobalEventAt(4_000)
         );
+        assert_eq!(adapter.platform_next_logical_position(), 4);
 
-        let last = adapter.next_platform_bucket().unwrap().unwrap();
-        assert_eq!(last.index_at_utc_ms(), 3_000);
+        let references_only_eof = adapter.next_platform_bucket().unwrap().unwrap();
+        assert_eq!(references_only_eof.index_at_utc_ms(), 4_000);
         assert_eq!(
-            (last.start_logical_position(), last.next_logical_position()),
+            (
+                references_only_eof.start_logical_position(),
+                references_only_eof.next_logical_position()
+            ),
             (4, 5)
         );
-        assert_eq!(last.event_logical_positions(), &[4]);
-        assert_eq!(event_ids(&last), vec![fixture.event_ids[4].0.as_str()]);
-        assert_eq!(last.closure(), ReplayIndexClosureV1::EndOfInput);
+        assert!(references_only_eof.event_logical_positions().is_empty());
+        assert!(references_only_eof.events().is_empty());
+        assert_eq!(
+            references_only_eof.closure(),
+            ReplayIndexClosureV1::EndOfInput
+        );
         assert_eq!(adapter.platform_next_logical_position(), 5);
         assert!(adapter.next_platform_bucket().unwrap().is_none());
     }
