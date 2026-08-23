@@ -1892,6 +1892,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "execution-normalization"
+version = "0.1.0"
+dependencies = [
+ "contracts",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
