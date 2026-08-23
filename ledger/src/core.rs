@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
+use std::path::Path;
 
 use contracts::execution_normalization::{
     NoeResultReferenceV1, SimV2DirectResponseAssociationV1, SimV2SourceRecordReferenceV1,
@@ -17,7 +18,11 @@ use execution_normalization::{
     DurableErrorV1, NormalizationRecordV1, SourceNeutralEvidenceKindV1, read_noe_result_v1,
 };
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 
+use crate::durable::{
+    DurableLedgerV1, DurablePayloadV1, LedgerDurableErrorV1, LedgerSealedSegmentReferenceV1,
+};
 use crate::lifecycle::{
     AppliedFillIndexV1, LedgerSubmissionItemIdentityV1, LifecycleStateV1, LifecycleTotalsV1,
     MarketLifecycleStateV1, OutcomeCostBasisV1, TradeLifecycleIndexV1,
@@ -49,6 +54,7 @@ pub enum LedgerApplyOutcomeV1 {
 #[derive(Debug)]
 pub enum LedgerErrorV1 {
     NoeRead(DurableErrorV1),
+    Durable(LedgerDurableErrorV1),
     NonEconomicRecord,
     AccountTransitionBeforeOpening,
     AccountNotOpened,
@@ -79,6 +85,7 @@ impl fmt::Display for LedgerErrorV1 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoeRead(error) => write!(formatter, "NOE 结果读取失败：{error}"),
+            Self::Durable(error) => write!(formatter, "Ledger 耐久写入失败：{error}"),
             Self::NonEconomicRecord => write!(formatter, "NOE 结果不是经济事实"),
             Self::AccountTransitionBeforeOpening => write!(formatter, "账户变化早于开户"),
             Self::AccountNotOpened => write!(formatter, "账户尚未开户"),
@@ -108,6 +115,7 @@ impl Error for LedgerErrorV1 {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::NoeRead(error) => Some(error),
+            Self::Durable(error) => Some(error),
             _ => None,
         }
     }
@@ -119,8 +127,14 @@ impl From<DurableErrorV1> for LedgerErrorV1 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct NoeReferenceKeyV1 {
+impl From<LedgerDurableErrorV1> for LedgerErrorV1 {
+    fn from(error: LedgerDurableErrorV1) -> Self {
+        Self::Durable(error)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(crate) struct NoeReferenceKeyV1 {
     location: String,
     boundary_sha256: String,
     record_ordinal: u64,
@@ -136,7 +150,7 @@ impl From<&NoeResultReferenceV1> for NoeReferenceKeyV1 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 enum LedgerAssetV1 {
     Pusd,
     Outcome(String),
@@ -151,7 +165,7 @@ impl LedgerAssetV1 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum LedgerAccountV1 {
     Cash,
     Available,
@@ -208,7 +222,7 @@ impl LedgerAccountV1 {
 
 type LedgerEntryV1 = (LedgerAccountV1, LedgerAssetV1, Decimal);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 enum LedgerTransactionSourceV1 {
     Noe(NoeResultReferenceV1),
     LocalReservation(LedgerRequestIdentityV1),
@@ -228,20 +242,20 @@ enum LedgerTransactionSourceV1 {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct LedgerTransactionV1 {
     ledger_entry_seq: u64,
     source: LedgerTransactionSourceV1,
     entries: Vec<LedgerEntryV1>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct OutcomeBalanceStateV1 {
     token_id: TokenId,
     balance: Decimal,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 struct BalanceStateV1 {
     cash_pusd: Decimal,
     available_pusd: Decimal,
@@ -274,13 +288,13 @@ impl BalanceStateV1 {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 struct MarketStateV1 {
     condition_id: ConditionId,
     balances: BalanceStateV1,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 struct OpenedAccountStateV1 {
     account_instance_key: AccountInstanceKeyV1,
     opening_evidence_identity: String,
@@ -303,7 +317,7 @@ struct ParsedBalanceDeltaV1 {
     taker_rebate_locked_remainder_pusd: Decimal,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 struct BalanceUpdateV1 {
     cash_pusd: Decimal,
     available_pusd: Decimal,
@@ -316,14 +330,47 @@ struct BalanceUpdateV1 {
     taker_rebate_locked_remainder_pusd: Decimal,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct MarketBalanceCommittedPatchV1 {
+    condition_id: ConditionId,
+    update: BalanceUpdateV1,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+enum AccountCommittedPatchV1 {
+    Open(OpenedAccountStateV1),
+    Update {
+        available_through_utc_ms: i64,
+        platform_source_prefix: Option<u64>,
+        global_balance_update: Option<BalanceUpdateV1>,
+        market_balance_update: Option<MarketBalanceCommittedPatchV1>,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct LedgerCommittedEffectV1 {
+    transaction: LedgerTransactionV1,
+    account: Option<AccountCommittedPatchV1>,
+    reservations: Option<ReservationStateV1>,
+    lifecycle: Option<LifecycleStateV1>,
+    ledger_local_prefix: Option<u64>,
+}
+
+impl LedgerCommittedEffectV1 {
+    pub(crate) fn ledger_entry_seq(&self) -> u64 {
+        self.transaction.ledger_entry_seq
+    }
+}
+
 pub struct LedgerWriterV1 {
     policy: AccountAdmissionPolicyV1,
     account: Option<OpenedAccountStateV1>,
     ledger_local_prefix: u64,
     reservations: ReservationStateV1,
     lifecycle: LifecycleStateV1,
-    transactions: Vec<LedgerTransactionV1>,
+    current_ledger_entry_seq: u64,
     applied_references: BTreeMap<NoeReferenceKeyV1, u64>,
+    durable: Option<DurableLedgerV1>,
 }
 
 impl LedgerWriterV1 {
@@ -334,9 +381,61 @@ impl LedgerWriterV1 {
             ledger_local_prefix: 0,
             reservations: ReservationStateV1::default(),
             lifecycle: LifecycleStateV1::default(),
-            transactions: Vec::new(),
+            current_ledger_entry_seq: 0,
             applied_references: BTreeMap::new(),
+            durable: None,
         }
+    }
+
+    pub fn create_durable(
+        policy: AccountAdmissionPolicyV1,
+        directory: impl AsRef<Path>,
+    ) -> Result<Self, LedgerErrorV1> {
+        let mut writer = Self::new(policy);
+        writer.durable = Some(DurableLedgerV1::create(directory.as_ref(), &writer.policy)?);
+        Ok(writer)
+    }
+
+    pub fn open_durable(directory: impl AsRef<Path>) -> Result<Self, LedgerErrorV1> {
+        let mut recovered = None;
+        let durable = DurableLedgerV1::open(directory.as_ref(), |payload| match payload {
+            DurablePayloadV1::Genesis { policy } => {
+                if recovered.is_some() {
+                    return Err(LedgerDurableErrorV1::InvalidStructure(
+                        "Ledger 耐久历史包含重复 genesis".to_owned(),
+                    ));
+                }
+                recovered = Some(Self::new(policy));
+                Ok(())
+            }
+            payload => recovered
+                .as_mut()
+                .ok_or_else(|| {
+                    LedgerDurableErrorV1::InvalidStructure(
+                        "Ledger 耐久历史在 genesis 前包含业务记录".to_owned(),
+                    )
+                })?
+                .apply_recovered_payload(payload),
+        })?;
+        let mut writer = recovered.ok_or_else(|| {
+            LedgerDurableErrorV1::InvalidStructure("Ledger 耐久历史缺少 genesis".to_owned())
+        })?;
+        writer.durable = Some(durable);
+        Ok(writer)
+    }
+
+    pub fn seal_active_segment(
+        &mut self,
+    ) -> Result<Option<LedgerSealedSegmentReferenceV1>, LedgerErrorV1> {
+        self.durable
+            .as_mut()
+            .ok_or_else(|| {
+                LedgerDurableErrorV1::InvalidStructure(
+                    "纯内存 Ledger 没有可封存的活动段".to_owned(),
+                )
+            })?
+            .seal_active_segment()
+            .map_err(Into::into)
     }
 
     pub fn admission_policy(&self) -> &AccountAdmissionPolicyV1 {
@@ -388,10 +487,10 @@ impl LedgerWriterV1 {
             "reservation.global_available_after_pending",
         )?;
         if requested_total > available_after_pending {
-            return Ok(self.cache_capacity_outcome(
+            return self.cache_capacity_outcome(
                 request_identity,
                 LedgerReservationOutcomeV1::InsufficientGlobalAvailableFunds,
-            ));
+            );
         }
 
         let platform_market = account.markets.get(&condition_id.0);
@@ -464,10 +563,10 @@ impl LedgerWriterV1 {
             "admission_policy.per_market_all_in_commitment_limit_pusd",
         )?;
         if market_commitment_after_request > market_limit {
-            return Ok(self.cache_capacity_outcome(
+            return self.cache_capacity_outcome(
                 request_identity,
                 LedgerReservationOutcomeV1::PerMarketLimitExceeded,
-            ));
+            );
         }
 
         let next_global_principal = checked_add(
@@ -546,12 +645,20 @@ impl LedgerWriterV1 {
         ensure_balanced(&transaction.entries)?;
 
         let outcome = LedgerReservationOutcomeV1::Reserved { ledger_entry_seq };
-        self.reservations.principal_pusd = next_global_principal;
-        self.reservations.immediate_fee_pusd = next_global_fee;
-        self.reservations.before_send_principal_pusd = next_before_send_principal;
-        self.reservations.before_send_immediate_fee_pusd = next_before_send_fee;
-        self.reservations.before_send_count = next_before_send_count;
-        self.reservations.markets.insert(
+        let mut reservations = ReservationStateV1 {
+            principal_pusd: next_global_principal,
+            immediate_fee_pusd: next_global_fee,
+            before_send_principal_pusd: next_before_send_principal,
+            before_send_immediate_fee_pusd: next_before_send_fee,
+            before_send_count: next_before_send_count,
+            after_send_unknown_principal_pusd: self.reservations.after_send_unknown_principal_pusd,
+            after_send_unknown_immediate_fee_pusd: self
+                .reservations
+                .after_send_unknown_immediate_fee_pusd,
+            after_send_unknown_count: self.reservations.after_send_unknown_count,
+            ..ReservationStateV1::default()
+        };
+        reservations.markets.insert(
             condition_id.0.clone(),
             MarketLocalPendingV1 {
                 condition_id: condition_id.clone(),
@@ -565,7 +672,7 @@ impl LedgerWriterV1 {
                 after_send_unknown_count: market_after_send_unknown_count,
             },
         );
-        self.reservations.requests.insert(
+        reservations.requests.insert(
             request_identity.clone(),
             CachedReservationRequestV1 {
                 outcome: outcome.clone(),
@@ -578,8 +685,13 @@ impl LedgerWriterV1 {
                 }),
             },
         );
-        self.ledger_local_prefix = ledger_local_prefix;
-        self.commit_transaction(transaction);
+        self.commit_effect(LedgerCommittedEffectV1 {
+            transaction,
+            account: None,
+            reservations: Some(reservations),
+            lifecycle: None,
+            ledger_local_prefix: Some(ledger_local_prefix),
+        })?;
         Ok(outcome)
     }
 
@@ -635,6 +747,13 @@ impl LedgerWriterV1 {
             request_identity,
             ledger_entry_seq,
         )?;
+        reservations
+            .applied_local_events
+            .insert(local_event_identity.clone(), ledger_entry_seq);
+        let mut lifecycle = lifecycle_state_slice(&self.lifecycle, &keys);
+        lifecycle
+            .submission_requests
+            .insert(submission_item_identity.clone(), request_identity.clone());
         let transaction = LedgerTransactionV1 {
             ledger_entry_seq,
             source: LedgerTransactionSourceV1::LocalSubmissionEvent {
@@ -646,15 +765,13 @@ impl LedgerWriterV1 {
         };
         ensure_balanced(&transaction.entries)?;
 
-        commit_reservation_slice(&mut self.reservations, reservations);
-        self.lifecycle
-            .submission_requests
-            .insert(submission_item_identity.clone(), request_identity.clone());
-        self.reservations
-            .applied_local_events
-            .insert(local_event_identity.clone(), ledger_entry_seq);
-        self.ledger_local_prefix = ledger_local_prefix;
-        self.commit_transaction(transaction);
+        self.commit_effect(LedgerCommittedEffectV1 {
+            transaction,
+            account: None,
+            reservations: Some(reservations),
+            lifecycle: Some(lifecycle),
+            ledger_local_prefix: Some(ledger_local_prefix),
+        })?;
         Ok(LedgerApplyOutcomeV1::NewlyApplied { ledger_entry_seq })
     }
 
@@ -680,6 +797,16 @@ impl LedgerWriterV1 {
 
         let ledger_entry_seq = self.next_ledger_entry_seq()?;
         let ledger_local_prefix = self.next_ledger_local_prefix()?;
+        let mut reservations =
+            reservation_state_slice(&self.reservations, &SparseLedgerStateKeysV1::default());
+        reservations
+            .applied_local_events
+            .insert(local_event_identity.clone(), ledger_entry_seq);
+        let mut lifecycle =
+            lifecycle_state_slice(&self.lifecycle, &SparseLedgerStateKeysV1::default());
+        lifecycle
+            .query_requests
+            .insert(query_global_request_id.to_owned(), request_identity.clone());
         let transaction = LedgerTransactionV1 {
             ledger_entry_seq,
             source: LedgerTransactionSourceV1::LocalQueryAssociationEvent {
@@ -691,14 +818,13 @@ impl LedgerWriterV1 {
         };
         ensure_balanced(&transaction.entries)?;
 
-        self.lifecycle
-            .query_requests
-            .insert(query_global_request_id.to_owned(), request_identity.clone());
-        self.reservations
-            .applied_local_events
-            .insert(local_event_identity.clone(), ledger_entry_seq);
-        self.ledger_local_prefix = ledger_local_prefix;
-        self.commit_transaction(transaction);
+        self.commit_effect(LedgerCommittedEffectV1 {
+            transaction,
+            account: None,
+            reservations: Some(reservations),
+            lifecycle: Some(lifecycle),
+            ledger_local_prefix: Some(ledger_local_prefix),
+        })?;
         Ok(LedgerApplyOutcomeV1::NewlyApplied { ledger_entry_seq })
     }
 
@@ -726,63 +852,22 @@ impl LedgerWriterV1 {
             });
         }
 
-        let next_global_principal = checked_sub(
-            self.reservations.principal_pusd,
-            reservation.principal_pusd,
-            "reservation.release_global_principal",
-        )?;
-        let next_global_fee = checked_sub(
-            self.reservations.immediate_fee_pusd,
-            reservation.immediate_fee_pusd,
-            "reservation.release_global_immediate_fee",
-        )?;
-        let next_before_send_principal = checked_sub(
-            self.reservations.before_send_principal_pusd,
-            reservation.principal_pusd,
-            "reservation.release_before_send_principal",
-        )?;
-        let next_before_send_fee = checked_sub(
-            self.reservations.before_send_immediate_fee_pusd,
-            reservation.immediate_fee_pusd,
-            "reservation.release_before_send_immediate_fee",
-        )?;
-        let next_before_send_count = checked_sub_u64(
-            self.reservations.before_send_count,
-            1,
-            "reservation.release_before_send_count",
-        )?;
-        let market = self
-            .reservations
-            .markets
-            .get(&reservation.condition_id.0)
-            .expect("活动预留拥有对应市场聚合");
-        let next_market_principal = checked_sub(
-            market.principal_pusd,
-            reservation.principal_pusd,
-            "reservation.release_market_principal",
-        )?;
-        let next_market_fee = checked_sub(
-            market.immediate_fee_pusd,
-            reservation.immediate_fee_pusd,
-            "reservation.release_market_immediate_fee",
-        )?;
-        let next_market_before_send_principal = checked_sub(
-            market.before_send_principal_pusd,
-            reservation.principal_pusd,
-            "reservation.release_market_before_send_principal",
-        )?;
-        let next_market_before_send_fee = checked_sub(
-            market.before_send_immediate_fee_pusd,
-            reservation.immediate_fee_pusd,
-            "reservation.release_market_before_send_immediate_fee",
-        )?;
-        let next_market_before_send_count = checked_sub_u64(
-            market.before_send_count,
-            1,
-            "reservation.release_market_before_send_count",
-        )?;
         let ledger_entry_seq = self.next_ledger_entry_seq()?;
         let ledger_local_prefix = self.next_ledger_local_prefix()?;
+        let mut keys = SparseLedgerStateKeysV1::default();
+        keys.add_request(&self.reservations, request_identity);
+        let mut reservations = reservation_state_slice(&self.reservations, &keys);
+        remove_local_pending_reservation(&mut reservations, &reservation)?;
+        let prepared_reservation = reservations
+            .requests
+            .get_mut(request_identity)
+            .and_then(|request| request.reservation.as_mut())
+            .expect("已读取的发送前预留保持存在");
+        prepared_reservation.status = ReservationStatusV1::Released;
+        prepared_reservation.last_applied_ledger_entry_seq = ledger_entry_seq;
+        reservations
+            .applied_local_events
+            .insert(local_event_identity.clone(), ledger_entry_seq);
         let released_principal = checked_sub(
             Decimal::ZERO,
             reservation.principal_pusd,
@@ -805,29 +890,13 @@ impl LedgerWriterV1 {
         };
         ensure_balanced(&transaction.entries)?;
 
-        self.reservations.principal_pusd = next_global_principal;
-        self.reservations.immediate_fee_pusd = next_global_fee;
-        self.reservations.before_send_principal_pusd = next_before_send_principal;
-        self.reservations.before_send_immediate_fee_pusd = next_before_send_fee;
-        self.reservations.before_send_count = next_before_send_count;
-        let market = self
-            .reservations
-            .markets
-            .get_mut(&reservation.condition_id.0)
-            .expect("活动预留拥有对应市场聚合");
-        market.principal_pusd = next_market_principal;
-        market.immediate_fee_pusd = next_market_fee;
-        market.before_send_principal_pusd = next_market_before_send_principal;
-        market.before_send_immediate_fee_pusd = next_market_before_send_fee;
-        market.before_send_count = next_market_before_send_count;
-        let reservation = self.reservation_for_event_mut(request_identity)?;
-        reservation.status = ReservationStatusV1::Released;
-        reservation.last_applied_ledger_entry_seq = ledger_entry_seq;
-        self.reservations
-            .applied_local_events
-            .insert(local_event_identity.clone(), ledger_entry_seq);
-        self.ledger_local_prefix = ledger_local_prefix;
-        self.commit_transaction(transaction);
+        self.commit_effect(LedgerCommittedEffectV1 {
+            transaction,
+            account: None,
+            reservations: Some(reservations),
+            lifecycle: None,
+            ledger_local_prefix: Some(ledger_local_prefix),
+        })?;
         Ok(LedgerApplyOutcomeV1::NewlyApplied { ledger_entry_seq })
     }
 
@@ -950,16 +1019,24 @@ impl LedgerWriterV1 {
         };
         ensure_balanced(&transaction.entries)?;
 
-        let account = self
+        let next_available_through_utc_ms = self
             .account
-            .as_mut()
-            .expect("NOE 生命周期证据应用前账户保持存在");
-        account.available_through_utc_ms = account
+            .as_ref()
+            .expect("NOE 生命周期证据应用前账户保持存在")
             .available_through_utc_ms
             .max(available_through_utc_ms);
-        commit_reservation_slice(&mut self.reservations, reservations);
-        commit_lifecycle_slice(&mut self.lifecycle, lifecycle);
-        self.commit_transaction(transaction);
+        self.commit_effect(LedgerCommittedEffectV1 {
+            transaction,
+            account: Some(AccountCommittedPatchV1::Update {
+                available_through_utc_ms: next_available_through_utc_ms,
+                platform_source_prefix: None,
+                global_balance_update: None,
+                market_balance_update: None,
+            }),
+            reservations: Some(reservations),
+            lifecycle: Some(lifecycle),
+            ledger_local_prefix: None,
+        })?;
         Ok(LedgerApplyOutcomeV1::NewlyApplied { ledger_entry_seq })
     }
 
@@ -979,14 +1056,24 @@ impl LedgerWriterV1 {
         };
         ensure_balanced(&transaction.entries)?;
 
-        let account = self
+        let next_available_through_utc_ms = self
             .account
-            .as_mut()
-            .expect("NOE 待定结果应用前账户保持存在");
-        account.available_through_utc_ms = account
+            .as_ref()
+            .expect("NOE 待定结果应用前账户保持存在")
             .available_through_utc_ms
             .max(available_through_utc_ms);
-        self.commit_transaction(transaction);
+        self.commit_effect(LedgerCommittedEffectV1 {
+            transaction,
+            account: Some(AccountCommittedPatchV1::Update {
+                available_through_utc_ms: next_available_through_utc_ms,
+                platform_source_prefix: None,
+                global_balance_update: None,
+                market_balance_update: None,
+            }),
+            reservations: None,
+            lifecycle: None,
+            ledger_local_prefix: None,
+        })?;
         Ok(LedgerApplyOutcomeV1::NewlyApplied { ledger_entry_seq })
     }
 
@@ -1175,15 +1262,20 @@ impl LedgerWriterV1 {
         };
         ensure_balanced(&transaction.entries)?;
 
-        self.account = Some(OpenedAccountStateV1 {
-            account_instance_key: account_instance_key.clone(),
-            opening_evidence_identity: opening_evidence_identity.to_owned(),
-            platform_source_prefix: 0,
-            available_through_utc_ms,
-            balances: BalanceStateV1::opened(available),
-            markets: BTreeMap::new(),
-        });
-        self.commit_transaction(transaction);
+        self.commit_effect(LedgerCommittedEffectV1 {
+            transaction,
+            account: Some(AccountCommittedPatchV1::Open(OpenedAccountStateV1 {
+                account_instance_key: account_instance_key.clone(),
+                opening_evidence_identity: opening_evidence_identity.to_owned(),
+                platform_source_prefix: 0,
+                available_through_utc_ms,
+                balances: BalanceStateV1::opened(available),
+                markets: BTreeMap::new(),
+            })),
+            reservations: None,
+            lifecycle: None,
+            ledger_local_prefix: None,
+        })?;
         Ok(LedgerApplyOutcomeV1::NewlyApplied { ledger_entry_seq })
     }
 
@@ -1271,34 +1363,30 @@ impl LedgerWriterV1 {
         };
         ensure_balanced(&transaction.entries)?;
 
-        let account = self
-            .account
-            .as_mut()
-            .expect("开户状态在无副作用准备期间保持存在");
-        global_update.commit(&mut account.balances);
-        if let (Some(condition_id), Some(market_update)) = (condition_id, market_update) {
-            let market = account
-                .markets
-                .entry(condition_id.0.clone())
-                .or_insert_with(|| MarketStateV1 {
+        let market_balance_update =
+            condition_id
+                .zip(market_update)
+                .map(|(condition_id, update)| MarketBalanceCommittedPatchV1 {
                     condition_id: condition_id.clone(),
-                    balances: BalanceStateV1::empty(),
+                    update,
                 });
-            market_update.commit(&mut market.balances);
-        }
-        account.platform_source_prefix = account_transition_seq;
-        account.available_through_utc_ms = available_through_utc_ms;
-        commit_reservation_slice(&mut self.reservations, reservations);
-        commit_lifecycle_slice(&mut self.lifecycle, lifecycle);
-        self.commit_transaction(transaction);
+        self.commit_effect(LedgerCommittedEffectV1 {
+            transaction,
+            account: Some(AccountCommittedPatchV1::Update {
+                available_through_utc_ms,
+                platform_source_prefix: Some(account_transition_seq),
+                global_balance_update: Some(global_update),
+                market_balance_update,
+            }),
+            reservations: Some(reservations),
+            lifecycle: Some(lifecycle),
+            ledger_local_prefix: None,
+        })?;
         Ok(LedgerApplyOutcomeV1::NewlyApplied { ledger_entry_seq })
     }
 
     fn current_ledger_entry_seq(&self) -> u64 {
-        self.transactions
-            .last()
-            .map(|transaction| transaction.ledger_entry_seq)
-            .unwrap_or(0)
+        self.current_ledger_entry_seq
     }
 
     fn next_ledger_entry_seq(&self) -> Result<u64, LedgerErrorV1> {
@@ -1321,15 +1409,27 @@ impl LedgerWriterV1 {
         &mut self,
         request_identity: &LedgerRequestIdentityV1,
         outcome: LedgerReservationOutcomeV1,
-    ) -> LedgerReservationOutcomeV1 {
-        self.reservations.requests.insert(
-            request_identity.clone(),
-            CachedReservationRequestV1 {
-                outcome: outcome.clone(),
-                reservation: None,
-            },
-        );
-        outcome
+    ) -> Result<LedgerReservationOutcomeV1, LedgerErrorV1> {
+        let request = CachedReservationRequestV1 {
+            outcome: outcome.clone(),
+            reservation: None,
+        };
+        let payload = DurablePayloadV1::ReservationDecision {
+            request_identity: request_identity.clone(),
+            request,
+        };
+        if let Some(durable) = &mut self.durable {
+            durable.append(&payload)?;
+        }
+        let DurablePayloadV1::ReservationDecision {
+            request_identity,
+            request,
+        } = payload
+        else {
+            unreachable!("刚构造的容量决定保持其耐久记录类型")
+        };
+        self.reservations.requests.insert(request_identity, request);
+        Ok(outcome)
     }
 
     fn reservation_for_event(
@@ -1345,25 +1445,97 @@ impl LedgerWriterV1 {
             })
     }
 
-    fn reservation_for_event_mut(
-        &mut self,
-        request_identity: &LedgerRequestIdentityV1,
-    ) -> Result<&mut LocalReservationV1, LedgerErrorV1> {
-        self.reservations
-            .requests
-            .get_mut(request_identity)
-            .and_then(|request| request.reservation.as_mut())
-            .ok_or_else(|| LedgerErrorV1::ReservationRequestNotFound {
-                request_identity: request_identity.clone(),
-            })
+    fn commit_effect(&mut self, effect: LedgerCommittedEffectV1) -> Result<(), LedgerErrorV1> {
+        let payload = DurablePayloadV1::Transaction(Box::new(effect));
+        if let Some(durable) = &mut self.durable {
+            durable.append(&payload)?;
+        }
+        let DurablePayloadV1::Transaction(effect) = payload else {
+            unreachable!("刚构造的 Ledger 交易保持其耐久记录类型")
+        };
+        self.apply_committed_effect(*effect);
+        Ok(())
     }
 
-    fn commit_transaction(&mut self, transaction: LedgerTransactionV1) {
-        match &transaction.source {
+    fn apply_recovered_payload(
+        &mut self,
+        payload: DurablePayloadV1,
+    ) -> Result<(), LedgerDurableErrorV1> {
+        match payload {
+            DurablePayloadV1::Genesis { .. } => Err(LedgerDurableErrorV1::InvalidStructure(
+                "Ledger 耐久历史包含非首条 genesis".to_owned(),
+            )),
+            DurablePayloadV1::ReservationDecision {
+                request_identity,
+                request,
+            } => {
+                self.reservations.requests.insert(request_identity, request);
+                Ok(())
+            }
+            DurablePayloadV1::Transaction(effect) => {
+                let expected = self
+                    .current_ledger_entry_seq
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        LedgerDurableErrorV1::InvalidStructure("Ledger 序号溢出".to_owned())
+                    })?;
+                if effect.ledger_entry_seq() != expected {
+                    return Err(LedgerDurableErrorV1::InvalidStructure(format!(
+                        "恢复的 Ledger 序号不连续：预期 {expected}，实际 {}",
+                        effect.ledger_entry_seq()
+                    )));
+                }
+                self.apply_committed_effect(*effect);
+                Ok(())
+            }
+        }
+    }
+
+    fn apply_committed_effect(&mut self, effect: LedgerCommittedEffectV1) {
+        if let Some(account_patch) = effect.account {
+            match account_patch {
+                AccountCommittedPatchV1::Open(account) => self.account = Some(account),
+                AccountCommittedPatchV1::Update {
+                    available_through_utc_ms,
+                    platform_source_prefix,
+                    global_balance_update,
+                    market_balance_update,
+                } => {
+                    let account = self.account.as_mut().expect("已准备的账户补丁拥有开户前驱");
+                    if let Some(update) = global_balance_update {
+                        update.commit(&mut account.balances);
+                    }
+                    if let Some(market_patch) = market_balance_update {
+                        let market = account
+                            .markets
+                            .entry(market_patch.condition_id.0.clone())
+                            .or_insert_with(|| MarketStateV1 {
+                                condition_id: market_patch.condition_id,
+                                balances: BalanceStateV1::empty(),
+                            });
+                        market_patch.update.commit(&mut market.balances);
+                    }
+                    if let Some(platform_source_prefix) = platform_source_prefix {
+                        account.platform_source_prefix = platform_source_prefix;
+                    }
+                    account.available_through_utc_ms = available_through_utc_ms;
+                }
+            }
+        }
+        if let Some(reservations) = effect.reservations {
+            commit_reservation_slice(&mut self.reservations, reservations);
+        }
+        if let Some(lifecycle) = effect.lifecycle {
+            commit_lifecycle_slice(&mut self.lifecycle, lifecycle);
+        }
+        if let Some(ledger_local_prefix) = effect.ledger_local_prefix {
+            self.ledger_local_prefix = ledger_local_prefix;
+        }
+        match &effect.transaction.source {
             LedgerTransactionSourceV1::Noe(reference) => {
                 self.applied_references.insert(
                     NoeReferenceKeyV1::from(reference),
-                    transaction.ledger_entry_seq,
+                    effect.transaction.ledger_entry_seq,
                 );
             }
             LedgerTransactionSourceV1::LocalReservation(request_identity) => {
@@ -1399,7 +1571,38 @@ impl LedgerWriterV1 {
                 );
             }
         }
-        self.transactions.push(transaction);
+        self.current_ledger_entry_seq = effect.transaction.ledger_entry_seq;
+    }
+
+    #[cfg(test)]
+    fn inject_durable_append_failure(&mut self) {
+        self.durable
+            .as_mut()
+            .expect("测试 Ledger 使用耐久句柄")
+            .inject_append_failure();
+    }
+
+    #[cfg(test)]
+    fn inject_durable_sync_failure(&mut self) {
+        self.durable
+            .as_mut()
+            .expect("测试 Ledger 使用耐久句柄")
+            .inject_sync_failure();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn baseline_hot_index_counts(
+        &self,
+    ) -> (usize, usize, usize, usize, usize, usize, usize) {
+        (
+            self.reservations.requests.len(),
+            self.reservations.markets.len(),
+            self.applied_references.len(),
+            self.lifecycle.orders.len(),
+            self.lifecycle.trades.len(),
+            self.lifecycle.applied_fills.len(),
+            self.lifecycle.outcome_cost_basis_pusd.len(),
+        )
     }
 }
 
@@ -1582,6 +1785,9 @@ fn commit_reservation_slice(target: &mut ReservationStateV1, slice: ReservationS
     target.after_send_unknown_immediate_fee_pusd = slice.after_send_unknown_immediate_fee_pusd;
     target.after_send_unknown_count = slice.after_send_unknown_count;
     target.requests.extend(slice.requests);
+    target
+        .applied_local_events
+        .extend(slice.applied_local_events);
     target.markets.extend(slice.markets);
 }
 
@@ -3722,5 +3928,120 @@ mod tests {
             LedgerTransactionSourceV1::Noe(found) => assert_eq!(found, reference),
             _ => panic!("NOE 交易必须只拥有结果引用来源"),
         }
+    }
+
+    #[test]
+    fn failed_durable_append_does_not_advance_memory_or_recovery() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let policy = AccountAdmissionPolicyV1 {
+            per_market_all_in_commitment_limit_pusd: ExactDecimal("100".to_owned()),
+        };
+        let reference = NoeResultReferenceV1 {
+            commit_container:
+                contracts::execution_normalization::NoePublishedContainerReferenceV1 {
+                    location: "deleted-noe-container.json".to_owned(),
+                    boundary_sha256: contracts::Sha256Hex("b".repeat(64)),
+                },
+            record_ordinal: 0,
+        };
+        let account_instance_key = AccountInstanceKeyV1 {
+            run_id: "durable-failure".to_owned(),
+            caller_role: contracts::SimCallerRoleV1::ModelTrain,
+            caller_instance_id: "caller-durable-failure".to_owned(),
+            account_id: "account-durable-failure".to_owned(),
+            platform_source: contracts::PlatformSourceV1::Simulated,
+        };
+        let mut writer = LedgerWriterV1::create_durable(policy, temporary.path()).unwrap();
+        writer.inject_durable_append_failure();
+        assert!(matches!(
+            writer.apply_opening(
+                &reference,
+                &account_instance_key,
+                "opening-durable-failure",
+                1,
+                &ExactDecimal("10".to_owned()),
+            ),
+            Err(LedgerErrorV1::Durable(LedgerDurableErrorV1::Io { .. }))
+        ));
+        assert_eq!(writer.projection(), None);
+
+        writer.inject_durable_sync_failure();
+        assert!(matches!(
+            writer.apply_opening(
+                &reference,
+                &account_instance_key,
+                "opening-durable-failure",
+                1,
+                &ExactDecimal("10".to_owned()),
+            ),
+            Err(LedgerErrorV1::Durable(LedgerDurableErrorV1::Io { .. }))
+        ));
+        assert_eq!(writer.projection(), None);
+        drop(writer);
+
+        let recovered = LedgerWriterV1::open_durable(temporary.path()).unwrap();
+        assert_eq!(recovered.projection(), None);
+        assert_eq!(
+            recovered
+                .admission_policy()
+                .per_market_all_in_commitment_limit_pusd,
+            ExactDecimal("100".to_owned())
+        );
+    }
+
+    #[test]
+    fn failed_durable_capacity_decision_is_not_cached_or_returned() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let policy = AccountAdmissionPolicyV1 {
+            per_market_all_in_commitment_limit_pusd: ExactDecimal("100".to_owned()),
+        };
+        let reference = NoeResultReferenceV1 {
+            commit_container:
+                contracts::execution_normalization::NoePublishedContainerReferenceV1 {
+                    location: "capacity-opening.json".to_owned(),
+                    boundary_sha256: contracts::Sha256Hex("c".repeat(64)),
+                },
+            record_ordinal: 0,
+        };
+        let account_instance_key = AccountInstanceKeyV1 {
+            run_id: "durable-capacity".to_owned(),
+            caller_role: contracts::SimCallerRoleV1::ModelTrain,
+            caller_instance_id: "caller-durable-capacity".to_owned(),
+            account_id: "account-durable-capacity".to_owned(),
+            platform_source: contracts::PlatformSourceV1::Simulated,
+        };
+        let request_identity = LedgerRequestIdentityV1("rejected-write-failure".to_owned());
+        let mut writer = LedgerWriterV1::create_durable(policy, temporary.path()).unwrap();
+        writer
+            .apply_opening(
+                &reference,
+                &account_instance_key,
+                "opening-durable-capacity",
+                1,
+                &ExactDecimal("10".to_owned()),
+            )
+            .unwrap();
+        writer.inject_durable_append_failure();
+        assert!(matches!(
+            writer.try_reserve_intent(
+                &request_identity,
+                &ConditionId("condition-capacity".to_owned()),
+                &ExactDecimal("20".to_owned()),
+                &ExactDecimal("0".to_owned()),
+            ),
+            Err(LedgerErrorV1::Durable(LedgerDurableErrorV1::Io { .. }))
+        ));
+        assert!(!writer.reservations.requests.contains_key(&request_identity));
+        assert_eq!(writer.projection().unwrap().ledger_entry_seq, 1);
+        drop(writer);
+
+        let recovered = LedgerWriterV1::open_durable(temporary.path()).unwrap();
+        assert!(
+            !recovered
+                .reservations
+                .requests
+                .contains_key(&request_identity)
+        );
+        assert_eq!(recovered.projection().unwrap().ledger_entry_seq, 1);
     }
 }

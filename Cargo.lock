@@ -2745,7 +2745,10 @@ dependencies = [
  "contracts",
  "execution-normalization",
  "rust_decimal",
+ "rustix",
  "serde",
+ "serde_json",
+ "sha2",
  "tempfile",
 ]
 
