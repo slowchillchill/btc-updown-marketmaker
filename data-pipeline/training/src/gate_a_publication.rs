@@ -757,6 +757,18 @@ pub fn build_quality_isolation_report(
     candidate: &GateACandidate,
     validated: &ValidatedGateACandidate,
 ) -> Result<GateAQualityIsolationReportV1, GateAPublicationError> {
+    build_quality_isolation_report_with_identity(
+        candidate,
+        validated,
+        &pipeline_core_identity_sha256(),
+    )
+}
+
+fn build_quality_isolation_report_with_identity(
+    candidate: &GateACandidate,
+    validated: &ValidatedGateACandidate,
+    producer_pipeline_core_identity_sha256: &Sha256Hex,
+) -> Result<GateAQualityIsolationReportV1, GateAPublicationError> {
     let artifact_manifests = GateAArtifactManifestBindingsV1::from_candidate(candidate);
     if artifact_manifests.canonical_event_store
         != *validated.canonical_event_store.manifest_sha256()
@@ -868,7 +880,7 @@ pub fn build_quality_isolation_report(
     let observation_witnesses = std::mem::take(&mut scan.observation_witnesses);
     let mut report = GateAQualityIsolationReportV1 {
         schema_version: GATE_A_QUALITY_ISOLATION_REPORT_SCHEMA_V1.to_owned(),
-        pipeline_core_identity_sha256: pipeline_core_identity_sha256(),
+        pipeline_core_identity_sha256: producer_pipeline_core_identity_sha256.clone(),
         input_set_identity_sha256: candidate.input_set_identity_sha256.clone(),
         input_manifest_set_sha256: candidate.input_manifest_set_sha256.clone(),
         scope: candidate.scope.clone(),
@@ -1141,7 +1153,6 @@ pub fn validate_quality_isolation_report(
     report: &GateAQualityIsolationReportV1,
 ) -> Result<(), GateAPublicationError> {
     if report.schema_version != GATE_A_QUALITY_ISOLATION_REPORT_SCHEMA_V1
-        || report.pipeline_core_identity_sha256 != pipeline_core_identity_sha256()
         || CanonicalRunScope::new(
             report.scope.condition_id(),
             report.scope.received_start_utc_ms(),
@@ -1748,7 +1759,6 @@ pub fn validate_resource_high_water_report(
 ) -> Result<(), GateAPublicationError> {
     let expected_pass = resource_report_limits_pass(report);
     if report.schema_version != GATE_A_RESOURCE_HIGH_WATER_REPORT_SCHEMA_V1
-        || report.pipeline_core_identity_sha256 != pipeline_core_identity_sha256()
         || report.evidence.evidence_id != "resource/formal-run"
         || report.evidence.passed != expected_pass
         || report.evidence.passed != report.evidence.blocking_reason.is_none()
@@ -1984,7 +1994,6 @@ pub fn validate_test_evidence_report(
     report: &GateATestEvidenceReportV1,
 ) -> Result<(), GateAPublicationError> {
     if report.schema_version != GATE_A_TEST_EVIDENCE_REPORT_SCHEMA_V1
-        || report.pipeline_core_identity_sha256 != pipeline_core_identity_sha256()
         || report.git_commit.len() != 40
         || !report
             .git_commit
@@ -2595,7 +2604,6 @@ pub fn validate_gate_a_run_manifest(
             .git_commit
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        || manifest.pipeline_core_identity_sha256 != pipeline_core_identity_sha256()
         || manifest.contract_versions != expected_contracts
         || manifest.canonical_rule_version.trim().is_empty()
         || manifest.dataset_lineage_root != DATASET_LINEAGE_ROOT
@@ -2804,6 +2812,136 @@ pub fn build_gate_a_receipt(
 pub struct PublishedGateA {
     pub root: PathBuf,
     pub receipt: GateAReceiptV3,
+}
+
+/// 已对不可变 Gate A final 执行完整机械闭包复核的只读句柄。
+#[derive(Debug)]
+pub struct ValidatedPublishedGateAFinal {
+    root: PathBuf,
+    receipt: GateAReceiptV3,
+    run_manifest: GateARunManifestV2,
+    producer_pipeline_core_identity_sha256: Sha256Hex,
+    reader_pipeline_core_identity_sha256: Sha256Hex,
+    candidate: ValidatedGateACandidate,
+}
+
+impl ValidatedPublishedGateAFinal {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn receipt(&self) -> &GateAReceiptV3 {
+        &self.receipt
+    }
+
+    pub fn run_manifest(&self) -> &GateARunManifestV2 {
+        &self.run_manifest
+    }
+
+    pub fn producer_pipeline_core_identity_sha256(&self) -> &Sha256Hex {
+        &self.producer_pipeline_core_identity_sha256
+    }
+
+    pub fn reader_pipeline_core_identity_sha256(&self) -> &Sha256Hex {
+        &self.reader_pipeline_core_identity_sha256
+    }
+
+    pub fn candidate(&self) -> &ValidatedGateACandidate {
+        &self.candidate
+    }
+}
+
+/// 只读打开并完整复核一个已经发布的 Gate A final。
+pub fn open_published_gate_a_final(
+    root: &Path,
+    validation_work_path: &Path,
+) -> Result<ValidatedPublishedGateAFinal, GateAPublicationError> {
+    require_final_layout(root)?;
+    let canonical_root = fs::canonicalize(root)?;
+    let validation_work_path =
+        require_external_validation_work_path(&canonical_root, validation_work_path)?;
+    let quality_bytes = read_regular_file(
+        &canonical_root.join("reports/quality-isolation-report.json"),
+        4 * 1024 * 1024,
+    )?;
+    let resource_bytes = read_regular_file(
+        &canonical_root.join("reports/resource-evidence.json"),
+        4 * 1024 * 1024,
+    )?;
+    let tests_bytes = read_regular_file(
+        &canonical_root.join("reports/test-evidence.json"),
+        16 * 1024 * 1024,
+    )?;
+    let matrix_bytes = read_regular_file(
+        &canonical_root.join("gate-a-capability-matrix.json"),
+        1024 * 1024,
+    )?;
+    let run_manifest_bytes =
+        read_regular_file(&canonical_root.join("run-manifest.json"), 16 * 1024 * 1024)?;
+    let receipt_bytes =
+        read_regular_file(&canonical_root.join("gate-a-receipt.json"), 1024 * 1024)?;
+
+    let matrix = decode_gate_a_capability_matrix(&matrix_bytes)
+        .map_err(|_| GateAPublicationError::Invalid("落盘能力矩阵无法解码"))?;
+    let run_manifest = decode_gate_a_run_manifest(&run_manifest_bytes)?;
+    let receipt = decode_gate_a_receipt_v3(&receipt_bytes, &matrix)
+        .map_err(|_| GateAPublicationError::Invalid("落盘门 A 回执无法解码"))?;
+    if canonical_root.file_name().and_then(|value| value.to_str())
+        != Some(receipt.receipt_id.0.as_str())
+    {
+        return Err(GateAPublicationError::Invalid(
+            "发布 final 目录名与回执 ID 不一致",
+        ));
+    }
+    let producer_pipeline_core_identity_sha256 = receipt.pipeline_core_identity_sha256.clone();
+    let candidate = verify_complete_publication(
+        &canonical_root,
+        &validation_work_path,
+        &quality_bytes,
+        &resource_bytes,
+        &tests_bytes,
+        &matrix_bytes,
+        &run_manifest_bytes,
+        &receipt_bytes,
+        &producer_pipeline_core_identity_sha256,
+    )?;
+
+    Ok(ValidatedPublishedGateAFinal {
+        root: canonical_root,
+        receipt,
+        run_manifest,
+        producer_pipeline_core_identity_sha256,
+        reader_pipeline_core_identity_sha256: pipeline_core_identity_sha256(),
+        candidate,
+    })
+}
+
+fn require_external_validation_work_path(
+    canonical_final_root: &Path,
+    validation_work_path: &Path,
+) -> Result<PathBuf, GateAPublicationError> {
+    if !validation_work_path.is_absolute() {
+        return Err(GateAPublicationError::Invalid(
+            "发布 final 的验证工作目录必须是绝对路径",
+        ));
+    }
+    let parent = validation_work_path
+        .parent()
+        .ok_or(GateAPublicationError::Invalid(
+            "发布 final 的验证工作目录必须具有父目录",
+        ))?;
+    let name = validation_work_path
+        .file_name()
+        .ok_or(GateAPublicationError::Invalid(
+            "发布 final 的验证工作目录必须具有目录名",
+        ))?;
+    let canonical_path = fs::canonicalize(parent)?.join(name);
+    if canonical_path.starts_with(canonical_final_root) {
+        return Err(GateAPublicationError::Invalid(
+            "发布 final 的验证工作目录必须位于 final 外部",
+        ));
+    }
+    Ok(canonical_path)
 }
 
 struct PublicationCandidateGuard {
@@ -3100,6 +3238,18 @@ pub fn finalize_and_publish_gate_a_candidate(
     stage_path: &Path,
     tests: &GateATestEvidenceReportV1,
 ) -> Result<PublishedGateA, GateAPublicationError> {
+    finalize_and_publish_gate_a_candidate_with_identity(
+        stage_path,
+        tests,
+        &pipeline_core_identity_sha256(),
+    )
+}
+
+fn finalize_and_publish_gate_a_candidate_with_identity(
+    stage_path: &Path,
+    tests: &GateATestEvidenceReportV1,
+    producer_pipeline_core_identity_sha256: &Sha256Hex,
+) -> Result<PublishedGateA, GateAPublicationError> {
     let guard = PublicationCandidateGuard::acquire(stage_path)?;
     let stage = guard.path.clone();
     require_prepublication_layout(&stage)?;
@@ -3141,7 +3291,11 @@ pub fn finalize_and_publish_gate_a_candidate(
         ));
     }
     let candidate = reconstructed_candidate(&quality, &resource, &validated);
-    let regenerated_quality = build_quality_isolation_report(&candidate, &validated)?;
+    let regenerated_quality = build_quality_isolation_report_with_identity(
+        &candidate,
+        &validated,
+        producer_pipeline_core_identity_sha256,
+    )?;
     if encode_quality_isolation_report(&regenerated_quality)? != quality_bytes {
         return Err(GateAPublicationError::Invalid(
             "质量报告无法从已验证产物机械重建",
@@ -3195,12 +3349,14 @@ pub fn finalize_and_publish_gate_a_candidate(
     require_final_layout(&stage)?;
     verify_complete_publication(
         &stage,
+        &stage.join(".final-validation"),
         &quality_bytes,
         &resource_bytes,
         &tests_bytes,
         &matrix_bytes,
         &run_manifest_bytes,
         &receipt_bytes,
+        producer_pipeline_core_identity_sha256,
     )?;
     sync_tree(&stage)?;
 
@@ -3212,15 +3368,18 @@ pub fn finalize_and_publish_gate_a_candidate(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn verify_complete_publication(
     stage: &Path,
+    validation_work_path: &Path,
     expected_quality_bytes: &[u8],
     expected_resource_bytes: &[u8],
     expected_tests_bytes: &[u8],
     expected_matrix_bytes: &[u8],
     expected_run_manifest_bytes: &[u8],
     expected_receipt_bytes: &[u8],
-) -> Result<(), GateAPublicationError> {
+    producer_pipeline_core_identity_sha256: &Sha256Hex,
+) -> Result<ValidatedGateACandidate, GateAPublicationError> {
     let quality_bytes = read_regular_file(
         &stage.join("reports/quality-isolation-report.json"),
         4 * 1024 * 1024,
@@ -3259,12 +3418,15 @@ fn verify_complete_publication(
     let artifacts_path = stage.join("artifacts");
     let validated = validate_gate_a_candidate(
         &artifacts_path,
-        &stage.join(".final-validation"),
+        validation_work_path,
         &resource.output_config,
     )?;
     let candidate = reconstructed_candidate(&quality, &resource, &validated);
-    if encode_quality_isolation_report(&build_quality_isolation_report(&candidate, &validated)?)?
-        != quality_bytes
+    if encode_quality_isolation_report(&build_quality_isolation_report_with_identity(
+        &candidate,
+        &validated,
+        producer_pipeline_core_identity_sha256,
+    )?)? != quality_bytes
         || regular_directory_bytes(&artifacts_path)? != resource.final_artifact_directory_bytes
     {
         return Err(GateAPublicationError::Invalid(
@@ -3304,7 +3466,8 @@ fn verify_complete_publication(
             "最终门 A 回执无法从同一运行清单机械重建",
         ));
     }
-    require_final_layout(stage)
+    require_final_layout(stage)?;
+    Ok(validated)
 }
 
 #[cfg(test)]
@@ -3312,6 +3475,201 @@ mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
     use tempfile::TempDir;
+
+    struct PublishedFinalFixture {
+        _candidate: crate::gate_a::tests::MicroCandidate,
+        root: PathBuf,
+        producer_pipeline_core_identity_sha256: Sha256Hex,
+    }
+
+    fn immutable_file_snapshot(root: &Path) -> BTreeMap<PathBuf, (u64, Sha256Hex)> {
+        fn visit(root: &Path, path: &Path, snapshot: &mut BTreeMap<PathBuf, (u64, Sha256Hex)>) {
+            let mut entries = fs::read_dir(path)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                let path = entry.path();
+                let metadata = fs::symlink_metadata(&path).unwrap();
+                assert!(!metadata.file_type().is_symlink());
+                if metadata.is_dir() {
+                    visit(root, &path, snapshot);
+                } else {
+                    assert!(metadata.is_file());
+                    let bytes = fs::read(&path).unwrap();
+                    snapshot.insert(
+                        path.strip_prefix(root).unwrap().to_path_buf(),
+                        (metadata.len(), sha256_bytes_value(&bytes)),
+                    );
+                }
+            }
+        }
+
+        let mut snapshot = BTreeMap::new();
+        visit(root, root, &mut snapshot);
+        snapshot
+    }
+
+    fn different_pipeline_identity() -> Sha256Hex {
+        let mut identity = pipeline_core_identity_sha256().0.into_bytes();
+        identity[0] = if identity[0] == b'0' { b'1' } else { b'0' };
+        Sha256Hex(String::from_utf8(identity).unwrap())
+    }
+
+    fn passing_external_resource_facts() -> GateAExternalResourceFactsV1 {
+        let time_v_output = "Maximum resident set size (kbytes): 1024\nExit status: 0\n".to_owned();
+        let memory_events = GateACgroupMemoryEventsV1 {
+            low: 0,
+            high: 0,
+            max: 0,
+            oom: 0,
+            oom_kill: 0,
+            oom_group_kill: 0,
+        };
+        GateAExternalResourceFactsV1 {
+            build_exit_code: 0,
+            maximum_resident_set_size_kib: 1_024,
+            publication_filesystem_type: "ext4".to_owned(),
+            publication_root_device_id: 1,
+            candidate_device_id: 1,
+            cgroup_v2_relative_path: "/fixture/dpt-gate-a-fixture.service".to_owned(),
+            cgroup_process_ids_before: vec![1, 2],
+            cgroup_process_ids_after: vec![1, 2],
+            memory_peak_bytes: 1,
+            memory_max_bytes: GATE_A_CGROUP_MEMORY_MAX_BYTES,
+            memory_swap_peak_bytes: 0,
+            memory_swap_max_bytes: 0,
+            memory_events_before: memory_events.clone(),
+            memory_events_after: memory_events,
+            network_namespace: "fixture".to_owned(),
+            network_interfaces: vec!["lo".to_owned()],
+            network_isolation_supervisor_pid: 1,
+            network_isolation_supervisor_name: "bwrap".to_owned(),
+            network_isolation_supervisor_argv: [
+                "/usr/bin/bwrap",
+                "--unshare-user",
+                "--uid",
+                "0",
+                "--gid",
+                "0",
+                "--unshare-net",
+                "--proc",
+                "/proc",
+                "fixture",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            time_v_output_sha256: sha256_bytes_value(time_v_output.as_bytes()),
+            time_v_output,
+        }
+    }
+
+    fn passing_test_evidence(
+        artifact_manifests: GateAArtifactManifestBindingsV1,
+    ) -> GateATestEvidenceReportV1 {
+        let command = |argv: Vec<String>, output: &str, covered_evidence_ids: Vec<String>| {
+            GateATestCommandEvidenceV1 {
+                argv,
+                working_directory: "/home/chillchill/sim-system".to_owned(),
+                exit_code: 0,
+                combined_output: output.to_owned(),
+                combined_output_sha256: sha256_bytes_value(output.as_bytes()),
+                covered_evidence_ids,
+            }
+        };
+        build_test_evidence_report(
+            "1".repeat(40),
+            artifact_manifests,
+            vec![
+                command(
+                    ["/usr/bin/time", "-v", "dpt-gate-a", "__build-child"]
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect(),
+                    "physical_perturbation=PASS\nruntime_network_isolation=PASS\n",
+                    vec![
+                        "test/offline-boundary".to_owned(),
+                        "test/physical-perturbation".to_owned(),
+                    ],
+                ),
+                command(
+                    GATE_A_WORKSPACE_TEST_ARGV
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect(),
+                    "workspace_regression=PASS\n",
+                    GATE_A_WORKSPACE_TEST_EVIDENCE_IDS
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect(),
+                ),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn build_published_final_fixture() -> PublishedFinalFixture {
+        let fixture = crate::gate_a::tests::build_published_final_fixture_candidate();
+        let stage = fixture.candidate_path.parent().unwrap();
+        let producer_pipeline_core_identity_sha256 = different_pipeline_identity();
+        let quality = build_quality_isolation_report_with_identity(
+            &fixture.candidate,
+            &fixture.validated,
+            &producer_pipeline_core_identity_sha256,
+        )
+        .unwrap();
+        assert!(quality.evidence.iter().all(|evidence| evidence.passed));
+        let quality_bytes = encode_quality_isolation_report(&quality).unwrap();
+        let quality_sha256 = sha256_bytes_value(&quality_bytes);
+        let state = build_measured_build_state(
+            &fixture.candidate,
+            quality_sha256,
+            regular_directory_bytes(&fixture.candidate_path).unwrap(),
+            "1".repeat(40),
+        )
+        .unwrap();
+        let mut resource = build_resource_high_water_report_from_state(
+            &state,
+            GateAHostFactsV1 {
+                operating_system: "fixture".to_owned(),
+                architecture: "x86_64".to_owned(),
+                cpu_model: "fixture".to_owned(),
+                logical_cpu_count: 1,
+                physical_memory_bytes: 1,
+            },
+            passing_external_resource_facts(),
+        )
+        .unwrap();
+        assert!(resource.evidence.passed);
+        resource.pipeline_core_identity_sha256 = producer_pipeline_core_identity_sha256.clone();
+        let mut tests = passing_test_evidence(GateAArtifactManifestBindingsV1::from_candidate(
+            &fixture.candidate,
+        ));
+        tests.pipeline_core_identity_sha256 = producer_pipeline_core_identity_sha256.clone();
+        fs::write(
+            stage.join("reports/quality-isolation-report.json"),
+            quality_bytes,
+        )
+        .unwrap();
+        fs::write(
+            stage.join("reports/resource-evidence.json"),
+            encode_resource_high_water_report(&resource).unwrap(),
+        )
+        .unwrap();
+        let published = finalize_and_publish_gate_a_candidate_with_identity(
+            stage,
+            &tests,
+            &producer_pipeline_core_identity_sha256,
+        )
+        .unwrap();
+        PublishedFinalFixture {
+            _candidate: fixture,
+            root: published.root,
+            producer_pipeline_core_identity_sha256,
+        }
+    }
 
     #[test]
     fn gate_a_run_manifest_scan_policies_bind_exact_filters_and_full_schema_projection() {
@@ -3484,6 +3842,113 @@ mod tests {
             revalidated_peak,
             Some(revalidated_peak),
         ));
+    }
+
+    #[test]
+    fn published_final_validation_work_path_must_be_outside_final() {
+        let temporary = TempDir::new().unwrap();
+        let final_root = temporary.path().join("final");
+        fs::create_dir(&final_root).unwrap();
+
+        assert!(matches!(
+            require_external_validation_work_path(
+                &fs::canonicalize(&final_root).unwrap(),
+                &final_root.join("validation"),
+            ),
+            Err(GateAPublicationError::Invalid(
+                "发布 final 的验证工作目录必须位于 final 外部"
+            ))
+        ));
+        assert!(
+            require_external_validation_work_path(
+                &fs::canonicalize(&final_root).unwrap(),
+                &temporary.path().join("validation"),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn published_final_public_opener_validates_complete_read_only_fixture() {
+        let fixture = build_published_final_fixture();
+        let before = immutable_file_snapshot(&fixture.root);
+        let validation_path = fixture
+            ._candidate
+            ._temporary
+            .path()
+            .join("successful-open-validation");
+
+        let opened = open_published_gate_a_final(&fixture.root, &validation_path).unwrap();
+
+        assert_eq!(opened.root(), fs::canonicalize(&fixture.root).unwrap());
+        assert_eq!(
+            opened.producer_pipeline_core_identity_sha256(),
+            &fixture.producer_pipeline_core_identity_sha256
+        );
+        assert_eq!(
+            opened.reader_pipeline_core_identity_sha256(),
+            &pipeline_core_identity_sha256()
+        );
+        assert_ne!(
+            opened.producer_pipeline_core_identity_sha256(),
+            opened.reader_pipeline_core_identity_sha256()
+        );
+        assert_eq!(
+            &opened.run_manifest().pipeline_core_identity_sha256,
+            opened.producer_pipeline_core_identity_sha256()
+        );
+        assert_eq!(
+            opened
+                .candidate()
+                .canonical_event_store
+                .manifest()
+                .file
+                .rows,
+            14
+        );
+        assert!(!validation_path.exists());
+        assert!(!fixture.root.join(".final-validation").exists());
+        assert_eq!(immutable_file_snapshot(&fixture.root), before);
+    }
+
+    #[test]
+    fn published_final_public_opener_rejects_run_manifest_binding_corruption() {
+        let fixture = build_published_final_fixture();
+        let before = immutable_file_snapshot(&fixture.root);
+        let run_manifest_path = fixture.root.join("run-manifest.json");
+        let mut run_manifest: GateARunManifestV2 =
+            serde_json::from_slice(&fs::read(&run_manifest_path).unwrap()).unwrap();
+        run_manifest.control_files.quality_isolation_report.sha256 = Sha256Hex("e".repeat(64));
+        fs::write(
+            &run_manifest_path,
+            serde_json::to_vec(&run_manifest).unwrap(),
+        )
+        .unwrap();
+        let validation_path = fixture
+            ._candidate
+            ._temporary
+            .path()
+            .join("failed-open-validation");
+
+        assert!(matches!(
+            open_published_gate_a_final(&fixture.root, &validation_path),
+            Err(GateAPublicationError::Invalid(
+                "最终运行清单无法从同一产物与报告机械重建"
+            ))
+        ));
+
+        assert!(!validation_path.exists());
+        assert!(!fixture.root.join(".final-validation").exists());
+        let mut before_without_perturbation = before;
+        let before_run_manifest = before_without_perturbation
+            .remove(Path::new("run-manifest.json"))
+            .unwrap();
+        let mut after_without_perturbation = immutable_file_snapshot(&fixture.root);
+        let after_run_manifest = after_without_perturbation
+            .remove(Path::new("run-manifest.json"))
+            .unwrap();
+        assert_ne!(after_run_manifest, before_run_manifest);
+        assert_eq!(after_without_perturbation, before_without_perturbation);
     }
 
     #[test]

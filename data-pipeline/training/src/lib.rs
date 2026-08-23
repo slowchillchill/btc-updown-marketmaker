@@ -10,7 +10,10 @@ mod gate_a_publication;
 pub mod observation;
 pub mod typed_raw;
 
-pub use gate_a_publication::{gate_a_formal_canonical_config, gate_a_formal_output_config};
+pub use gate_a_publication::{
+    GateAPublicationError, GateARunManifestV2, ValidatedPublishedGateAFinal,
+    gate_a_formal_canonical_config, gate_a_formal_output_config, open_published_gate_a_final,
+};
 
 /// 运行唯一正式门 A 命令入口；参数解析、测量和签发检查均在库内私有实现中完成。
 pub fn run_dpt_gate_a_cli() {
