@@ -3238,6 +3238,18 @@ pub fn finalize_and_publish_gate_a_candidate(
     stage_path: &Path,
     tests: &GateATestEvidenceReportV1,
 ) -> Result<PublishedGateA, GateAPublicationError> {
+    finalize_and_publish_gate_a_candidate_with_identity(
+        stage_path,
+        tests,
+        &pipeline_core_identity_sha256(),
+    )
+}
+
+fn finalize_and_publish_gate_a_candidate_with_identity(
+    stage_path: &Path,
+    tests: &GateATestEvidenceReportV1,
+    producer_pipeline_core_identity_sha256: &Sha256Hex,
+) -> Result<PublishedGateA, GateAPublicationError> {
     let guard = PublicationCandidateGuard::acquire(stage_path)?;
     let stage = guard.path.clone();
     require_prepublication_layout(&stage)?;
@@ -3279,7 +3291,11 @@ pub fn finalize_and_publish_gate_a_candidate(
         ));
     }
     let candidate = reconstructed_candidate(&quality, &resource, &validated);
-    let regenerated_quality = build_quality_isolation_report(&candidate, &validated)?;
+    let regenerated_quality = build_quality_isolation_report_with_identity(
+        &candidate,
+        &validated,
+        producer_pipeline_core_identity_sha256,
+    )?;
     if encode_quality_isolation_report(&regenerated_quality)? != quality_bytes {
         return Err(GateAPublicationError::Invalid(
             "质量报告无法从已验证产物机械重建",
@@ -3340,7 +3356,7 @@ pub fn finalize_and_publish_gate_a_candidate(
         &matrix_bytes,
         &run_manifest_bytes,
         &receipt_bytes,
-        &pipeline_core_identity_sha256(),
+        producer_pipeline_core_identity_sha256,
     )?;
     sync_tree(&stage)?;
 
@@ -3459,6 +3475,201 @@ mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
     use tempfile::TempDir;
+
+    struct PublishedFinalFixture {
+        _candidate: crate::gate_a::tests::MicroCandidate,
+        root: PathBuf,
+        producer_pipeline_core_identity_sha256: Sha256Hex,
+    }
+
+    fn immutable_file_snapshot(root: &Path) -> BTreeMap<PathBuf, (u64, Sha256Hex)> {
+        fn visit(root: &Path, path: &Path, snapshot: &mut BTreeMap<PathBuf, (u64, Sha256Hex)>) {
+            let mut entries = fs::read_dir(path)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                let path = entry.path();
+                let metadata = fs::symlink_metadata(&path).unwrap();
+                assert!(!metadata.file_type().is_symlink());
+                if metadata.is_dir() {
+                    visit(root, &path, snapshot);
+                } else {
+                    assert!(metadata.is_file());
+                    let bytes = fs::read(&path).unwrap();
+                    snapshot.insert(
+                        path.strip_prefix(root).unwrap().to_path_buf(),
+                        (metadata.len(), sha256_bytes_value(&bytes)),
+                    );
+                }
+            }
+        }
+
+        let mut snapshot = BTreeMap::new();
+        visit(root, root, &mut snapshot);
+        snapshot
+    }
+
+    fn different_pipeline_identity() -> Sha256Hex {
+        let mut identity = pipeline_core_identity_sha256().0.into_bytes();
+        identity[0] = if identity[0] == b'0' { b'1' } else { b'0' };
+        Sha256Hex(String::from_utf8(identity).unwrap())
+    }
+
+    fn passing_external_resource_facts() -> GateAExternalResourceFactsV1 {
+        let time_v_output = "Maximum resident set size (kbytes): 1024\nExit status: 0\n".to_owned();
+        let memory_events = GateACgroupMemoryEventsV1 {
+            low: 0,
+            high: 0,
+            max: 0,
+            oom: 0,
+            oom_kill: 0,
+            oom_group_kill: 0,
+        };
+        GateAExternalResourceFactsV1 {
+            build_exit_code: 0,
+            maximum_resident_set_size_kib: 1_024,
+            publication_filesystem_type: "ext4".to_owned(),
+            publication_root_device_id: 1,
+            candidate_device_id: 1,
+            cgroup_v2_relative_path: "/fixture/dpt-gate-a-fixture.service".to_owned(),
+            cgroup_process_ids_before: vec![1, 2],
+            cgroup_process_ids_after: vec![1, 2],
+            memory_peak_bytes: 1,
+            memory_max_bytes: GATE_A_CGROUP_MEMORY_MAX_BYTES,
+            memory_swap_peak_bytes: 0,
+            memory_swap_max_bytes: 0,
+            memory_events_before: memory_events.clone(),
+            memory_events_after: memory_events,
+            network_namespace: "fixture".to_owned(),
+            network_interfaces: vec!["lo".to_owned()],
+            network_isolation_supervisor_pid: 1,
+            network_isolation_supervisor_name: "bwrap".to_owned(),
+            network_isolation_supervisor_argv: [
+                "/usr/bin/bwrap",
+                "--unshare-user",
+                "--uid",
+                "0",
+                "--gid",
+                "0",
+                "--unshare-net",
+                "--proc",
+                "/proc",
+                "fixture",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            time_v_output_sha256: sha256_bytes_value(time_v_output.as_bytes()),
+            time_v_output,
+        }
+    }
+
+    fn passing_test_evidence(
+        artifact_manifests: GateAArtifactManifestBindingsV1,
+    ) -> GateATestEvidenceReportV1 {
+        let command = |argv: Vec<String>, output: &str, covered_evidence_ids: Vec<String>| {
+            GateATestCommandEvidenceV1 {
+                argv,
+                working_directory: "/home/chillchill/sim-system".to_owned(),
+                exit_code: 0,
+                combined_output: output.to_owned(),
+                combined_output_sha256: sha256_bytes_value(output.as_bytes()),
+                covered_evidence_ids,
+            }
+        };
+        build_test_evidence_report(
+            "1".repeat(40),
+            artifact_manifests,
+            vec![
+                command(
+                    ["/usr/bin/time", "-v", "dpt-gate-a", "__build-child"]
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect(),
+                    "physical_perturbation=PASS\nruntime_network_isolation=PASS\n",
+                    vec![
+                        "test/offline-boundary".to_owned(),
+                        "test/physical-perturbation".to_owned(),
+                    ],
+                ),
+                command(
+                    GATE_A_WORKSPACE_TEST_ARGV
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect(),
+                    "workspace_regression=PASS\n",
+                    GATE_A_WORKSPACE_TEST_EVIDENCE_IDS
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect(),
+                ),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn build_published_final_fixture() -> PublishedFinalFixture {
+        let fixture = crate::gate_a::tests::build_published_final_fixture_candidate();
+        let stage = fixture.candidate_path.parent().unwrap();
+        let producer_pipeline_core_identity_sha256 = different_pipeline_identity();
+        let quality = build_quality_isolation_report_with_identity(
+            &fixture.candidate,
+            &fixture.validated,
+            &producer_pipeline_core_identity_sha256,
+        )
+        .unwrap();
+        assert!(quality.evidence.iter().all(|evidence| evidence.passed));
+        let quality_bytes = encode_quality_isolation_report(&quality).unwrap();
+        let quality_sha256 = sha256_bytes_value(&quality_bytes);
+        let state = build_measured_build_state(
+            &fixture.candidate,
+            quality_sha256,
+            regular_directory_bytes(&fixture.candidate_path).unwrap(),
+            "1".repeat(40),
+        )
+        .unwrap();
+        let mut resource = build_resource_high_water_report_from_state(
+            &state,
+            GateAHostFactsV1 {
+                operating_system: "fixture".to_owned(),
+                architecture: "x86_64".to_owned(),
+                cpu_model: "fixture".to_owned(),
+                logical_cpu_count: 1,
+                physical_memory_bytes: 1,
+            },
+            passing_external_resource_facts(),
+        )
+        .unwrap();
+        assert!(resource.evidence.passed);
+        resource.pipeline_core_identity_sha256 = producer_pipeline_core_identity_sha256.clone();
+        let mut tests = passing_test_evidence(GateAArtifactManifestBindingsV1::from_candidate(
+            &fixture.candidate,
+        ));
+        tests.pipeline_core_identity_sha256 = producer_pipeline_core_identity_sha256.clone();
+        fs::write(
+            stage.join("reports/quality-isolation-report.json"),
+            quality_bytes,
+        )
+        .unwrap();
+        fs::write(
+            stage.join("reports/resource-evidence.json"),
+            encode_resource_high_water_report(&resource).unwrap(),
+        )
+        .unwrap();
+        let published = finalize_and_publish_gate_a_candidate_with_identity(
+            stage,
+            &tests,
+            &producer_pipeline_core_identity_sha256,
+        )
+        .unwrap();
+        PublishedFinalFixture {
+            _candidate: fixture,
+            root: published.root,
+            producer_pipeline_core_identity_sha256,
+        }
+    }
 
     #[test]
     fn gate_a_run_manifest_scan_policies_bind_exact_filters_and_full_schema_projection() {
@@ -3655,6 +3866,89 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn published_final_public_opener_validates_complete_read_only_fixture() {
+        let fixture = build_published_final_fixture();
+        let before = immutable_file_snapshot(&fixture.root);
+        let validation_path = fixture
+            ._candidate
+            ._temporary
+            .path()
+            .join("successful-open-validation");
+
+        let opened = open_published_gate_a_final(&fixture.root, &validation_path).unwrap();
+
+        assert_eq!(opened.root(), fs::canonicalize(&fixture.root).unwrap());
+        assert_eq!(
+            opened.producer_pipeline_core_identity_sha256(),
+            &fixture.producer_pipeline_core_identity_sha256
+        );
+        assert_eq!(
+            opened.reader_pipeline_core_identity_sha256(),
+            &pipeline_core_identity_sha256()
+        );
+        assert_ne!(
+            opened.producer_pipeline_core_identity_sha256(),
+            opened.reader_pipeline_core_identity_sha256()
+        );
+        assert_eq!(
+            &opened.run_manifest().pipeline_core_identity_sha256,
+            opened.producer_pipeline_core_identity_sha256()
+        );
+        assert_eq!(
+            opened
+                .candidate()
+                .canonical_event_store
+                .manifest()
+                .file
+                .rows,
+            14
+        );
+        assert!(!validation_path.exists());
+        assert!(!fixture.root.join(".final-validation").exists());
+        assert_eq!(immutable_file_snapshot(&fixture.root), before);
+    }
+
+    #[test]
+    fn published_final_public_opener_rejects_run_manifest_binding_corruption() {
+        let fixture = build_published_final_fixture();
+        let before = immutable_file_snapshot(&fixture.root);
+        let run_manifest_path = fixture.root.join("run-manifest.json");
+        let mut run_manifest: GateARunManifestV2 =
+            serde_json::from_slice(&fs::read(&run_manifest_path).unwrap()).unwrap();
+        run_manifest.control_files.quality_isolation_report.sha256 = Sha256Hex("e".repeat(64));
+        fs::write(
+            &run_manifest_path,
+            serde_json::to_vec(&run_manifest).unwrap(),
+        )
+        .unwrap();
+        let validation_path = fixture
+            ._candidate
+            ._temporary
+            .path()
+            .join("failed-open-validation");
+
+        assert!(matches!(
+            open_published_gate_a_final(&fixture.root, &validation_path),
+            Err(GateAPublicationError::Invalid(
+                "最终运行清单无法从同一产物与报告机械重建"
+            ))
+        ));
+
+        assert!(!validation_path.exists());
+        assert!(!fixture.root.join(".final-validation").exists());
+        let mut before_without_perturbation = before;
+        let before_run_manifest = before_without_perturbation
+            .remove(Path::new("run-manifest.json"))
+            .unwrap();
+        let mut after_without_perturbation = immutable_file_snapshot(&fixture.root);
+        let after_run_manifest = after_without_perturbation
+            .remove(Path::new("run-manifest.json"))
+            .unwrap();
+        assert_ne!(after_run_manifest, before_run_manifest);
+        assert_eq!(after_without_perturbation, before_without_perturbation);
     }
 
     #[test]
