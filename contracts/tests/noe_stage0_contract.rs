@@ -1,12 +1,12 @@
 use contracts::execution_normalization::{
     DurableSourceReferenceV1, EXECUTION_NORMALIZATION_CONTRACT_V1,
     ExecutionNormalizationContextReferenceV1, ExecutionNormalizationContextV1,
-    ImmutableSourceReferenceV1, LedgerEconomicFactReferenceV1, NoeEconomicFactReferenceV1,
-    NoeSourceCommitBoundaryV1, SimV2ContextSourceV1, SimV2DirectResponseAssociationV1,
-    SimV2SourceRecordReferenceV1, SimV2SourceReferenceV1, SimV2SourceWatermarkV1,
-    SourceNeutralAccountBalanceDeltaV1, SourceNeutralAccountIdentityV1,
-    SourceNeutralAccountTransitionKindV1, SourceNeutralEconomicDispositionV1,
-    SourceNeutralEconomicFactV1, SourceNeutralEconomicIdentityV1, StableLogicalIdentityV1,
+    ImmutableSourceReferenceV1, NoeEconomicFactReferenceV1, NoeSourceCommitBoundaryV1,
+    SimV2ContextSourceV1, SimV2DirectResponseAssociationV1, SimV2SourceRecordReferenceV1,
+    SimV2SourceReferenceV1, SimV2SourceWatermarkV1, SourceNeutralAccountBalanceDeltaV1,
+    SourceNeutralAccountIdentityV1, SourceNeutralAccountTransitionKindV1,
+    SourceNeutralEconomicDispositionV1, SourceNeutralEconomicFactV1,
+    SourceNeutralEconomicIdentityV1, StableLogicalIdentityV1,
 };
 use contracts::{
     AccountInstanceKeyV1, CancelInputItemRefV2, ExactDecimal, PlatformSourceV1, SimCallerRoleV1,
@@ -153,24 +153,15 @@ fn response_correlations_and_economic_identity_have_distinct_owners() {
         account_transition_seq: 41,
     };
     let fact_reference = NoeEconomicFactReferenceV1("economic-fact-41".to_owned());
-    let ledger_reference = LedgerEconomicFactReferenceV1 {
-        context_reference: ExecutionNormalizationContextReferenceV1("context-53".to_owned()),
-        economic_identity: economic_identity.clone(),
-        fact_reference: fact_reference.clone(),
-    };
-
-    assert_eq!(ledger_reference.economic_identity, economic_identity);
-    assert_eq!(ledger_reference.fact_reference, fact_reference);
-
     let logical_identity = StableLogicalIdentityV1("logical-order-53".to_owned());
-    assert_ne!(logical_identity.0, ledger_reference.fact_reference.0);
+    assert_ne!(logical_identity.0, fact_reference.0);
 
     let economic_fact = SourceNeutralEconomicFactV1 {
         fact_reference: fact_reference.clone(),
         logical_identity,
         economic_identity: economic_identity.clone(),
         source_reference: SimV2SourceReferenceV1 {
-            context_reference: ledger_reference.context_reference.clone(),
+            context_reference: ExecutionNormalizationContextReferenceV1("context-53".to_owned()),
             watermark: source_watermark(),
             record: SimV2SourceRecordReferenceV1::OrderLifecycle {
                 private_feedback_sequence: 99,
@@ -205,10 +196,7 @@ fn response_correlations_and_economic_identity_have_distinct_owners() {
             ..
         }
     ));
-    assert_eq!(
-        economic_fact.fact_reference,
-        ledger_reference.fact_reference
-    );
+    assert_eq!(economic_fact.fact_reference, fact_reference);
 }
 
 #[test]
@@ -234,18 +222,12 @@ fn account_opening_economics_exist_only_in_the_source_neutral_fact() {
             available_pusd: ExactDecimal("2000".to_owned()),
         },
     };
-    let ledger_reference = LedgerEconomicFactReferenceV1 {
-        context_reference,
-        economic_identity: opening_identity,
-        fact_reference: opening.fact_reference.clone(),
-    };
-
     let SourceNeutralEconomicDispositionV1::AccountOpening { available_pusd } = opening.disposition
     else {
         unreachable!("已构造来源中立开户经济事实")
     };
     assert_eq!(available_pusd.0, "2000");
-    assert_eq!(ledger_reference.fact_reference.0, "opening-fact-53");
+    assert_eq!(opening.fact_reference.0, "opening-fact-53");
 }
 
 #[test]

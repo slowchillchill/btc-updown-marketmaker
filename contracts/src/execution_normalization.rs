@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AccountInstanceKeyV1, CancelInputItemRefV2, ConditionId, ExactDecimal, Sha256Hex, TokenId,
+    AccountInstanceKeyV1, AssetIdentityV1, CancelInputItemRefV2, ConditionId, ExactDecimal,
+    MarketIdentityV2, Sha256Hex, TokenId,
 };
 
 pub const EXECUTION_NORMALIZATION_CONTRACT_V1: &str = "execution_normalization_v1";
@@ -222,15 +223,250 @@ pub struct SourceNeutralEconomicFactV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LedgerEconomicFactReferenceV1 {
-    pub context_reference: ExecutionNormalizationContextReferenceV1,
-    pub economic_identity: SourceNeutralEconomicIdentityV1,
-    pub fact_reference: NoeEconomicFactReferenceV1,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoeSourceCommitBoundaryV1 {
     pub context_reference: ExecutionNormalizationContextReferenceV1,
     pub source_watermark: SimV2SourceWatermarkV1,
     pub durable_available_at_utc_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoePublishedContainerReferenceV1 {
+    pub location: String,
+    pub boundary_sha256: Sha256Hex,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoeResultReferenceV1 {
+    pub commit_container: NoePublishedContainerReferenceV1,
+    pub record_ordinal: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceNeutralOrderStateV1 {
+    Open,
+    Matched,
+    VenueDustTerminal,
+    MarketResolvedCanceled,
+    Canceled,
+    Expired,
+    Delayed,
+    Unmatched,
+    Unknown { raw: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceNeutralOrderSnapshotV1 {
+    pub order_identity: StableLogicalIdentityV1,
+    pub condition_id: ConditionId,
+    pub token_id: TokenId,
+    pub state: SourceNeutralOrderStateV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceNeutralSubmissionOutcomeV1 {
+    Accepted { order: SourceNeutralOrderSnapshotV1 },
+    RejectedNoEffect,
+    EvidenceUnknownNoEffect,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceNeutralCancellationOutcomeV1 {
+    Canceled,
+    NotCanceledNoEffect,
+    EvidenceUnknownNoEffect,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceNeutralQueryCursorV1 {
+    pub root_sequence: u64,
+    pub next_offset: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceNeutralQueryOutOfRetentionV1 {
+    OrderHistory {
+        retained_from_utc_ms: i64,
+    },
+    TradeHistory {
+        retained_from_utc_ms: i64,
+    },
+    RootSnapshot {
+        requested_root_sequence: u64,
+        earliest_retained_root_sequence: u64,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceNeutralOrderQueryResultV1 {
+    Found { order: SourceNeutralOrderSnapshotV1 },
+    NotFound,
+    OutOfRetention(SourceNeutralQueryOutOfRetentionV1),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceNeutralOrdersPageV1 {
+    pub root_sequence: u64,
+    pub items: Vec<SourceNeutralOrderSnapshotV1>,
+    pub next_cursor: Option<SourceNeutralQueryCursorV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceNeutralOrdersQueryResultV1 {
+    Page(SourceNeutralOrdersPageV1),
+    InvalidCursor,
+    OutOfRetention(SourceNeutralQueryOutOfRetentionV1),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceNeutralTradeStateV1 {
+    MatchedNotBroadcasted,
+    Matched,
+    Mined,
+    Confirmed,
+    Retrying,
+    Failed,
+    Unknown { raw: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceNeutralTradeEconomicDispositionV1 {
+    PendingUnapplied,
+    PendingApplied,
+    FinalSuccess,
+    FinalFailureUnapplied,
+    FinalFailureCompensated,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceNeutralTradeLifecycleResultV1 {
+    pub trade_identity: StableLogicalIdentityV1,
+    pub order_identity: StableLogicalIdentityV1,
+    pub condition_id: ConditionId,
+    pub token_id: TokenId,
+    pub state: SourceNeutralTradeStateV1,
+    pub economic_disposition: SourceNeutralTradeEconomicDispositionV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceNeutralTradesPageV1 {
+    pub root_sequence: u64,
+    pub items: Vec<SourceNeutralTradeLifecycleResultV1>,
+    pub next_cursor: Option<SourceNeutralQueryCursorV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceNeutralTradesQueryResultV1 {
+    Page(SourceNeutralTradesPageV1),
+    InvalidCursor,
+    OutOfRetention(SourceNeutralQueryOutOfRetentionV1),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceNeutralControlResultV1 {
+    Submission {
+        outcome: SourceNeutralSubmissionOutcomeV1,
+    },
+    Cancellation {
+        order_identity: StableLogicalIdentityV1,
+        outcome: SourceNeutralCancellationOutcomeV1,
+    },
+    OrderQuery {
+        result: SourceNeutralOrderQueryResultV1,
+    },
+    OrdersQuery {
+        result: SourceNeutralOrdersQueryResultV1,
+    },
+    TradesQuery {
+        result: SourceNeutralTradesQueryResultV1,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceNeutralOrderLifecycleEventV1 {
+    Accepted {
+        state: SourceNeutralOrderStateV1,
+    },
+    FakUnspentReleased,
+    VenueDustTerminal,
+    MarketResolvedCanceled {
+        resolution_identity: StableLogicalIdentityV1,
+    },
+    CallerCanceled,
+    GtdExpired,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceNeutralOrderLifecycleResultV1 {
+    pub order_identity: StableLogicalIdentityV1,
+    pub condition_id: ConditionId,
+    pub token_id: TokenId,
+    pub event: SourceNeutralOrderLifecycleEventV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceNeutralMarketEnrollmentResultV1 {
+    pub enrollment_request_id: String,
+    pub market: MarketIdentityV2,
+    pub assets: [AssetIdentityV1; 2],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceNeutralMakerRebateAccrualStatusV1 {
+    Calculated,
+    ZeroNoEligibleMakerFill,
+    UnknownIncomplete,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceNeutralSettlementLifecycleResultV1 {
+    MakerRebateAccrualFinalized {
+        condition_id: ConditionId,
+        status: SourceNeutralMakerRebateAccrualStatusV1,
+    },
+    TakerRebateAccrualApplied {
+        trade_identity: StableLogicalIdentityV1,
+        condition_id: ConditionId,
+        attribution_day_start_utc_ms: i64,
+    },
+    MakerRebateDayFinalized {
+        attribution_day_start_utc_ms: i64,
+    },
+    TakerRebateDayFinalized {
+        attribution_day_start_utc_ms: i64,
+    },
+    MakerRebatePaid {
+        attribution_day_start_utc_ms: i64,
+    },
+    TakerRebatePaid {
+        attribution_day_start_utc_ms: i64,
+    },
+    AutoRedeemApplied {
+        condition_id: ConditionId,
+        resolution_identity: StableLogicalIdentityV1,
+        resolution_source_event_at_utc_ms: i64,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoeInclusiveSequenceRangeV1 {
+    pub first: u64,
+    pub last: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoeComponentCapabilityReceiptV1 {
+    pub contract_identity: String,
+    pub implementation_identity: String,
+    pub test_report: NoePublishedContainerReferenceV1,
+    pub resource_report: NoePublishedContainerReferenceV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoeRunConsumptionManifestV1 {
+    pub context_reference: ExecutionNormalizationContextReferenceV1,
+    pub input_projection_batch_range: NoeInclusiveSequenceRangeV1,
+    pub output_commit_range: NoeInclusiveSequenceRangeV1,
+    pub source_watermark: SimV2SourceWatermarkV1,
+    pub context_container: NoePublishedContainerReferenceV1,
+    pub commit_containers: Vec<NoePublishedContainerReferenceV1>,
 }
