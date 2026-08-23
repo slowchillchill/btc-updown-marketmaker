@@ -5,6 +5,7 @@ members = [
     "data-pipeline/core",
     "data-pipeline/training",
     "execution-normalization",
+    "ledger",
     "sim-system",
 ]
 exclude = ["third_party/polymarket_client_sdk_v2-0.7.0-p1"]
