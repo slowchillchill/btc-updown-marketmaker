@@ -17,7 +17,7 @@ pub use crate::run_v2::{
     BusinessDirectResponseV2, BusinessProjectionBatchV2, BusinessProjectionPortV2,
     CreateSessionControlResultV2, CreateSessionDispositionV2, MutationRequestReceiptV2,
     NextRequiredLogicalDriveV2, SessionInitializationControlResultV2, SimExecution,
-    SimRunActorErrorV2, UnpublishedRunArtifactCandidateV2,
+    SimRunActorErrorV2, SimV2NoeProjectionPortV1, UnpublishedRunArtifactCandidateV2,
 };
 pub use crate::runtime_v2::{
     AcceptedClosedMarketBucketV2, BusinessRequestV2, CancelAllOrdersRequestV2,

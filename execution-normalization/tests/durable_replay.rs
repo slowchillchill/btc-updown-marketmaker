@@ -5,14 +5,15 @@ use contracts::execution_normalization::{
     DurableSourceReferenceV1, ExecutionNormalizationContextReferenceV1,
     ExecutionNormalizationContextV1, ImmutableSourceReferenceV1, SimV2ContextSourceV1,
     SimV2SourceRecordReferenceV1, SimV2SourceReferenceV1, SimV2SourceWatermarkV1,
-    SourceNeutralAccountIdentityV1, SourceNeutralEconomicIdentityV1,
+    SourceNeutralAccountIdentityV1, SourceNeutralControlResultV1, SourceNeutralEconomicIdentityV1,
+    SourceNeutralSubmissionOutcomeV1,
 };
 use contracts::{AccountInstanceKeyV1, ExactDecimal, PlatformSourceV1, SimCallerRoleV1};
 use execution_normalization::{
     DurableCommitOutcomeV1, DurableContextStoreV1, DurableErrorV1, NormalizationBatchInputV1,
     NormalizationConflictScopeV1, NormalizationRecordV1, SourceNeutralEconomicEvidenceV1,
     SourceNeutralEconomicKeyV1, SourceNeutralEvidenceKindV1, SourceNeutralEvidenceV1,
-    SourceNeutralLogicalKeyV1, SubmissionDispositionV1,
+    SourceNeutralLogicalKeyV1,
 };
 use tempfile::TempDir;
 
@@ -88,8 +89,10 @@ fn batch(sequence: u64) -> NormalizationBatchInputV1 {
                 global_request_id: format!("request-{sequence}"),
                 batch_item_ordinal: 0,
             },
-            kind: SourceNeutralEvidenceKindV1::Submission {
-                disposition: SubmissionDispositionV1::Accepted,
+            kind: SourceNeutralEvidenceKindV1::Control {
+                result: SourceNeutralControlResultV1::Submission {
+                    outcome: SourceNeutralSubmissionOutcomeV1::RejectedNoEffect,
+                },
             },
         }],
     }
@@ -480,8 +483,10 @@ fn reopen_preserves_the_incoming_minimum_conflict_evidence() {
     let mut input = batch(1);
     let mut conflicting = input.evidence[0].clone();
     conflicting.source_ordinal = 1;
-    conflicting.kind = SourceNeutralEvidenceKindV1::Submission {
-        disposition: SubmissionDispositionV1::RejectedNoEffect,
+    conflicting.kind = SourceNeutralEvidenceKindV1::Control {
+        result: SourceNeutralControlResultV1::Submission {
+            outcome: SourceNeutralSubmissionOutcomeV1::EvidenceUnknownNoEffect,
+        },
     };
     input.evidence.push(conflicting);
     store.commit_batch(input, 3_000).unwrap();
@@ -495,8 +500,10 @@ fn reopen_preserves_the_incoming_minimum_conflict_evidence() {
     assert!(matches!(
         &reopened.commits()[0].records[1],
         NormalizationRecordV1::Conflict {
-            conflicting_evidence: SourceNeutralEvidenceKindV1::Submission {
-                disposition: SubmissionDispositionV1::RejectedNoEffect,
+            conflicting_evidence: SourceNeutralEvidenceKindV1::Control {
+                result: SourceNeutralControlResultV1::Submission {
+                    outcome: SourceNeutralSubmissionOutcomeV1::EvidenceUnknownNoEffect,
+                },
             },
             ..
         }

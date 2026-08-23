@@ -4227,6 +4227,7 @@ dependencies = [
  "contracts",
  "data-pipeline-core",
  "data-pipeline-training",
+ "execution-normalization",
  "num-bigint",
  "num-integer",
  "num-traits",
