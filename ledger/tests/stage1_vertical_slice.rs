@@ -346,8 +346,15 @@ fn real_noe_references_drive_idempotent_balanced_multi_market_projection() {
         global.outcome_balances[0].balance_shares,
         decimal(FILLED_SHARES_A)
     );
-    assert_eq!(global.position_cost_basis_pusd, decimal("0"));
-    assert_eq!(global.fees_pusd, decimal("0"));
+    assert_eq!(
+        global.outcome_balances[0].position_cost_basis_pusd,
+        decimal(ACCEPTED_PRINCIPAL_A)
+    );
+    assert_eq!(
+        global.position_cost_basis_pusd,
+        decimal(ACCEPTED_PRINCIPAL_A)
+    );
+    assert_eq!(global.fees_pusd, decimal(ACCEPTED_FEE_A));
     assert_eq!(global.realized_pnl_pusd, decimal("0"));
     assert_eq!(
         projection
@@ -371,10 +378,23 @@ fn real_noe_references_drive_idempotent_balanced_multi_market_projection() {
         decimal(FILLED_SHARES_A)
     );
     assert_eq!(
+        market_a.outcome_balances[0].position_cost_basis_pusd,
+        decimal(ACCEPTED_PRINCIPAL_A)
+    );
+    assert_eq!(
+        market_a.position_cost_basis_pusd,
+        decimal(ACCEPTED_PRINCIPAL_A)
+    );
+    assert_eq!(market_a.fees_pusd, decimal(ACCEPTED_FEE_A));
+    assert_eq!(market_a.realized_pnl_pusd, decimal("0"));
+    assert_eq!(
         market_b.principal_encumbrance_pusd,
         decimal(ACCEPTED_PRINCIPAL_B)
     );
     assert_eq!(market_b.outcome_balances.len(), 0);
+    assert_eq!(market_b.position_cost_basis_pusd, decimal("0"));
+    assert_eq!(market_b.fees_pusd, decimal("0"));
+    assert_eq!(market_b.realized_pnl_pusd, decimal("0"));
 
     let mut rebuilt = LedgerWriterV1::new(policy());
     for reference in [&opening, &accepted_a, &filled_a, &accepted_b] {

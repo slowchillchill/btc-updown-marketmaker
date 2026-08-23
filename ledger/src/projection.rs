@@ -10,6 +10,7 @@ pub struct AccountAdmissionPolicyV1 {
 pub struct LedgerOutcomeBalanceV1 {
     pub token_id: TokenId,
     pub balance_shares: ExactDecimal,
+    pub position_cost_basis_pusd: ExactDecimal,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,12 +28,25 @@ pub struct LedgerPlatformConfirmedProjectionV1 {
     pub fees_pusd: ExactDecimal,
     pub redeemable_receivable_pusd: ExactDecimal,
     pub realized_pnl_pusd: ExactDecimal,
+    pub platform_confirmation_pending_economic_principal_pusd: ExactDecimal,
+    pub platform_confirmation_pending_economic_immediate_fee_pusd: ExactDecimal,
+    pub platform_confirmation_pending_economic_count: u64,
+    pub open_order_count: u64,
+    pub pending_fill_count: u64,
+    pub cumulative_accepted_principal_pusd: ExactDecimal,
+    pub current_all_in_commitment_pusd: ExactDecimal,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LedgerLocalPendingReservationProjectionV1 {
     pub principal_pusd: ExactDecimal,
     pub immediate_fee_pusd: ExactDecimal,
+    pub before_send_principal_pusd: ExactDecimal,
+    pub before_send_immediate_fee_pusd: ExactDecimal,
+    pub before_send_count: u64,
+    pub after_send_unknown_principal_pusd: ExactDecimal,
+    pub after_send_unknown_immediate_fee_pusd: ExactDecimal,
+    pub after_send_unknown_count: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +56,17 @@ pub struct LedgerMarketProjectionV1 {
     pub immediate_taker_fee_encumbrance_pusd: ExactDecimal,
     pub local_pending_principal_pusd: ExactDecimal,
     pub local_pending_immediate_fee_pusd: ExactDecimal,
+    pub local_before_send_principal_pusd: ExactDecimal,
+    pub local_before_send_immediate_fee_pusd: ExactDecimal,
+    pub local_before_send_count: u64,
+    pub local_after_send_unknown_principal_pusd: ExactDecimal,
+    pub local_after_send_unknown_immediate_fee_pusd: ExactDecimal,
+    pub local_after_send_unknown_count: u64,
+    pub platform_confirmation_pending_economic_principal_pusd: ExactDecimal,
+    pub platform_confirmation_pending_economic_immediate_fee_pusd: ExactDecimal,
+    pub platform_confirmation_pending_economic_count: u64,
+    pub open_order_count: u64,
+    pub pending_fill_count: u64,
     pub outcome_balances: Vec<LedgerOutcomeBalanceV1>,
     pub maker_rebate_receivable_pusd: ExactDecimal,
     pub taker_rebate_receivable_pusd: ExactDecimal,
@@ -51,6 +76,8 @@ pub struct LedgerMarketProjectionV1 {
     pub fees_pusd: ExactDecimal,
     pub redeemable_receivable_pusd: ExactDecimal,
     pub realized_pnl_pusd: ExactDecimal,
+    pub cumulative_accepted_principal_pusd: ExactDecimal,
+    pub current_all_in_commitment_pusd: ExactDecimal,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

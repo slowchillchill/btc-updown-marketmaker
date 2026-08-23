@@ -14,14 +14,21 @@ use execution_normalization::{
 };
 use ledger::{
     AccountAdmissionPolicyV1, LedgerApplyOutcomeV1, LedgerErrorV1, LedgerLocalEventIdentityV1,
-    LedgerMarketProjectionV1, LedgerRequestIdentityV1, LedgerReservationOutcomeV1, LedgerWriterV1,
-    ReserveIntentV1,
+    LedgerMarketProjectionV1, LedgerRequestIdentityV1, LedgerReservationOutcomeV1,
+    LedgerSubmissionItemIdentityV1, LedgerWriterV1, ReserveIntentV1,
 };
 use tempfile::TempDir;
 
 const MARKET_A: &str = "condition-a";
 const MARKET_B: &str = "condition-b";
 const MARKET_C: &str = "condition-c";
+
+fn submission(global_request_id: &str) -> LedgerSubmissionItemIdentityV1 {
+    LedgerSubmissionItemIdentityV1 {
+        global_request_id: global_request_id.to_owned(),
+        batch_item_ordinal: 0,
+    }
+}
 
 struct NoeFixture {
     _temporary: TempDir,
@@ -404,7 +411,11 @@ fn pre_send_release_and_submission_boundary_are_idempotent_and_causal() {
     writer.apply_noe_result(&opening).unwrap();
     let platform_only = writer.projection().unwrap();
     assert!(matches!(
-        writer.record_submission_started(&event("missing-event"), &request("missing-request")),
+        writer.record_submission_started(
+            &event("missing-event"),
+            &request("missing-request"),
+            &submission("missing-submission"),
+        ),
         Err(LedgerErrorV1::ReservationRequestNotFound { .. })
     ));
     assert_eq!(writer.projection().unwrap(), platform_only);
@@ -461,7 +472,11 @@ fn pre_send_release_and_submission_boundary_are_idempotent_and_causal() {
     let submission_event = event("submission-started");
     assert_eq!(
         writer
-            .record_submission_started(&submission_event, &retained_request)
+            .record_submission_started(
+                &submission_event,
+                &retained_request,
+                &submission("retained-submission"),
+            )
             .unwrap(),
         LedgerApplyOutcomeV1::NewlyApplied {
             ledger_entry_seq: 5
@@ -470,7 +485,11 @@ fn pre_send_release_and_submission_boundary_are_idempotent_and_causal() {
     let after_submission = writer.projection().unwrap();
     assert_eq!(
         writer
-            .record_submission_started(&submission_event, &retained_request)
+            .record_submission_started(
+                &submission_event,
+                &retained_request,
+                &submission("retained-submission"),
+            )
             .unwrap(),
         LedgerApplyOutcomeV1::AlreadyApplied {
             ledger_entry_seq: 5
@@ -538,10 +557,18 @@ fn identical_local_sequences_rebuild_deterministically() {
     assert_eq!(first_reservation, second_reservation);
     assert_eq!(
         first
-            .record_submission_started(&local_event_identity, &request_identity)
+            .record_submission_started(
+                &local_event_identity,
+                &request_identity,
+                &submission("deterministic-submission"),
+            )
             .unwrap(),
         second
-            .record_submission_started(&local_event_identity, &request_identity)
+            .record_submission_started(
+                &local_event_identity,
+                &request_identity,
+                &submission("deterministic-submission"),
+            )
             .unwrap()
     );
     assert_eq!(first.projection().unwrap(), second.projection().unwrap());
