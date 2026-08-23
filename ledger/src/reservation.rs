@@ -28,7 +28,9 @@ pub enum LedgerReservationOutcomeV1 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReservationStatusV1 {
     ReservedBeforeSend,
-    RetainedAfterSubmissionBoundary,
+    SubmittedUnknown,
+    PlatformConfirmedPendingEconomicFact,
+    Converted,
     Released,
 }
 
@@ -52,6 +54,12 @@ pub(crate) struct MarketLocalPendingV1 {
     pub(crate) condition_id: ConditionId,
     pub(crate) principal_pusd: Decimal,
     pub(crate) immediate_fee_pusd: Decimal,
+    pub(crate) before_send_principal_pusd: Decimal,
+    pub(crate) before_send_immediate_fee_pusd: Decimal,
+    pub(crate) before_send_count: u64,
+    pub(crate) after_send_unknown_principal_pusd: Decimal,
+    pub(crate) after_send_unknown_immediate_fee_pusd: Decimal,
+    pub(crate) after_send_unknown_count: u64,
 }
 
 #[derive(Debug)]
@@ -60,6 +68,12 @@ pub(crate) struct ReservationStateV1 {
     pub(crate) applied_local_events: BTreeMap<LedgerLocalEventIdentityV1, u64>,
     pub(crate) principal_pusd: Decimal,
     pub(crate) immediate_fee_pusd: Decimal,
+    pub(crate) before_send_principal_pusd: Decimal,
+    pub(crate) before_send_immediate_fee_pusd: Decimal,
+    pub(crate) before_send_count: u64,
+    pub(crate) after_send_unknown_principal_pusd: Decimal,
+    pub(crate) after_send_unknown_immediate_fee_pusd: Decimal,
+    pub(crate) after_send_unknown_count: u64,
     pub(crate) markets: BTreeMap<String, MarketLocalPendingV1>,
 }
 
@@ -70,6 +84,12 @@ impl Default for ReservationStateV1 {
             applied_local_events: BTreeMap::new(),
             principal_pusd: Decimal::ZERO,
             immediate_fee_pusd: Decimal::ZERO,
+            before_send_principal_pusd: Decimal::ZERO,
+            before_send_immediate_fee_pusd: Decimal::ZERO,
+            before_send_count: 0,
+            after_send_unknown_principal_pusd: Decimal::ZERO,
+            after_send_unknown_immediate_fee_pusd: Decimal::ZERO,
+            after_send_unknown_count: 0,
             markets: BTreeMap::new(),
         }
     }
