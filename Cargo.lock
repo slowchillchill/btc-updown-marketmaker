@@ -2739,6 +2739,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4933f3f57a8e9d9da04db23fb153356ecaf00cbd14aee46279c33dc80925c37"
 
 [[package]]
+name = "ledger"
+version = "0.1.0"
+dependencies = [
+ "contracts",
+ "execution-normalization",
+ "rust_decimal",
+ "serde",
+ "tempfile",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
