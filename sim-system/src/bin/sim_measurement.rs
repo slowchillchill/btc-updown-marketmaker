@@ -137,6 +137,8 @@ fn distribution_summary(mut values: Vec<u64>) -> DistributionSummary {
 
 mod enabled {
     use std::collections::BTreeMap;
+    #[cfg(feature = "gate-a-measurement")]
+    use std::collections::HashSet;
     use std::fs::{self, File, OpenOptions};
     use std::io::{BufWriter, Read, Write};
     use std::ops::Range;
@@ -947,16 +949,11 @@ mod enabled {
     }
 
     #[cfg(feature = "gate-a-measurement")]
-    pub(super) fn gate_a_unique_event_count(
-        platform_events: u64,
-        visibility_events: u64,
-    ) -> Result<u64, String> {
-        if platform_events != visibility_events {
-            return Err(format!(
-                "Gate A 双路市场事件数不一致：platform={platform_events}, visibility={visibility_events}"
-            ));
-        }
-        Ok(platform_events)
+    pub(super) fn observe_unique_gate_a_event_ids<'a>(
+        unique_event_ids: &mut HashSet<String>,
+        event_ids: impl IntoIterator<Item = &'a str>,
+    ) {
+        unique_event_ids.extend(event_ids.into_iter().map(str::to_owned));
     }
 
     #[cfg(feature = "gate-a-measurement")]
@@ -1288,6 +1285,7 @@ mod enabled {
             let mut drive_ordinal = 0_u64;
             let mut prefix_advances = 0_u64;
             let mut request_count = 0_u64;
+            let mut unique_event_ids = HashSet::new();
             while platform.is_some() || visibility.is_some() {
                 let next_bucket_at = match (&platform, &visibility) {
                     (Some(left), Some(right)) => {
@@ -1339,6 +1337,13 @@ mod enabled {
                     MarketEventPathV1::HiddenPlatform => platform.take().expect("平台桶存在"),
                     MarketEventPathV1::PublicVisibility => visibility.take().expect("可见性桶存在"),
                 };
+                observe_unique_gate_a_event_ids(
+                    &mut unique_event_ids,
+                    bucket
+                        .events()
+                        .iter()
+                        .map(|event| event.event_id.0.as_str()),
+                );
                 match path {
                     MarketEventPathV1::HiddenPlatform => platform_stats.observe(&bucket),
                     MarketEventPathV1::PublicVisibility => visibility_stats.observe(&bucket),
@@ -1454,10 +1459,8 @@ mod enabled {
             if request_count != 1 {
                 return Err(format!("Gate A 代表请求数必须为 1，actual={request_count}"));
             }
-            let unique_event_count = gate_a_unique_event_count(
-                platform_stats.execution_market_events,
-                visibility_stats.execution_market_events,
-            )?;
+            let unique_event_count = u64::try_from(unique_event_ids.len())
+                .expect("Gate A event_id 集合基数必须可表示为 u64");
             let final_resources = execution.measurement_resource_snapshot();
             record_resource_checkpoint(
                 &mut samples_writer,
@@ -5270,9 +5273,15 @@ mod tests {
 
     #[cfg(feature = "gate-a-measurement")]
     #[test]
-    fn gate_a_unique_count_never_sums_the_two_replay_paths() {
-        assert_eq!(enabled::gate_a_unique_event_count(41, 41), Ok(41));
-        assert!(enabled::gate_a_unique_event_count(41, 82).is_err());
+    fn gate_a_unique_count_is_the_union_with_visibility_only_events() {
+        let mut unique_event_ids = std::collections::HashSet::new();
+        let platform = ["shared-a", "shared-b"];
+        let visibility = ["shared-a", "shared-b", "visibility-only"];
+        enabled::observe_unique_gate_a_event_ids(&mut unique_event_ids, platform);
+        enabled::observe_unique_gate_a_event_ids(&mut unique_event_ids, visibility);
+
+        assert_ne!(platform.len(), visibility.len());
+        assert_eq!(unique_event_ids.len(), 3);
     }
 
     #[cfg(feature = "gate-a-measurement")]
