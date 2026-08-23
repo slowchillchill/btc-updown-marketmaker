@@ -693,7 +693,7 @@ fn order_fill_release_fee_and_compensation_form_balanced_transactions() {
         partial.platform_confirmed_projection.fees_pusd,
         decimal("0.5")
     );
-    assert_eq!(partial.platform_confirmed_projection.pending_fill_count, 0);
+    assert_eq!(partial.platform_confirmed_projection.pending_fill_count, 1);
     assert_eq!(
         partial.platform_confirmed_projection.realized_pnl_pusd,
         decimal("0")
@@ -726,6 +726,24 @@ fn order_fill_release_fee_and_compensation_form_balanced_transactions() {
         compensated.platform_confirmed_projection.fees_pusd,
         decimal("0.0")
     );
+    assert_eq!(
+        compensated.platform_confirmed_projection.pending_fill_count,
+        1
+    );
+    let compensated_terminal = fixture.commit_trade(
+        "trade-partial",
+        "order-economic",
+        SourceNeutralTradeEconomicDispositionV1::FinalFailureCompensated,
+    );
+    writer.apply_noe_result(&compensated_terminal).unwrap();
+    assert_eq!(
+        writer
+            .projection()
+            .unwrap()
+            .platform_confirmed_projection
+            .pending_fill_count,
+        0
+    );
 
     let failed_pending = fixture.commit_trade(
         "trade-failed",
@@ -742,7 +760,37 @@ fn order_fill_release_fee_and_compensation_form_balanced_transactions() {
         money_delta("0", "5", "-5", "0", None),
     );
     writer.apply_noe_result(&failed_pending).unwrap();
+    assert_eq!(
+        writer
+            .projection()
+            .unwrap()
+            .platform_confirmed_projection
+            .pending_fill_count,
+        1
+    );
     writer.apply_noe_result(&failure).unwrap();
+    assert_eq!(
+        writer
+            .projection()
+            .unwrap()
+            .platform_confirmed_projection
+            .pending_fill_count,
+        1
+    );
+    let failed_terminal = fixture.commit_trade(
+        "trade-failed",
+        "order-economic",
+        SourceNeutralTradeEconomicDispositionV1::FinalFailureUnapplied,
+    );
+    writer.apply_noe_result(&failed_terminal).unwrap();
+    assert_eq!(
+        writer
+            .projection()
+            .unwrap()
+            .platform_confirmed_projection
+            .pending_fill_count,
+        0
+    );
 
     let full_pending = fixture.commit_trade(
         "trade-full",
@@ -762,9 +810,39 @@ fn order_fill_release_fee_and_compensation_form_balanced_transactions() {
         "order-economic",
         SourceNeutralOrderLifecycleEventV1::FakUnspentReleased,
     );
-    for reference in [&full_pending, &full_fill, &terminal] {
-        writer.apply_noe_result(reference).unwrap();
-    }
+    writer.apply_noe_result(&full_pending).unwrap();
+    assert_eq!(
+        writer
+            .projection()
+            .unwrap()
+            .platform_confirmed_projection
+            .pending_fill_count,
+        1
+    );
+    writer.apply_noe_result(&full_fill).unwrap();
+    assert_eq!(
+        writer
+            .projection()
+            .unwrap()
+            .platform_confirmed_projection
+            .pending_fill_count,
+        1
+    );
+    writer.apply_noe_result(&terminal).unwrap();
+    assert_eq!(
+        writer
+            .projection()
+            .unwrap()
+            .platform_confirmed_projection
+            .pending_fill_count,
+        1
+    );
+    let full_terminal = fixture.commit_trade(
+        "trade-full",
+        "order-economic",
+        SourceNeutralTradeEconomicDispositionV1::FinalSuccess,
+    );
+    writer.apply_noe_result(&full_terminal).unwrap();
     let final_projection = writer.projection().unwrap();
     assert_eq!(
         final_projection

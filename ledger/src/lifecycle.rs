@@ -23,7 +23,6 @@ pub(crate) struct LifecycleTotalsV1 {
     pub(crate) fees_pusd: Decimal,
     pub(crate) realized_pnl_pusd: Decimal,
     pub(crate) cumulative_accepted_principal_pusd: Decimal,
-    pub(crate) outcome_cost_basis_pusd: BTreeMap<String, OutcomeCostBasisV1>,
 }
 
 #[derive(Clone, Debug)]
@@ -36,6 +35,7 @@ pub(crate) struct OutcomeCostBasisV1 {
 pub(crate) struct MarketLifecycleStateV1 {
     pub(crate) condition_id: ConditionId,
     pub(crate) totals: LifecycleTotalsV1,
+    pub(crate) outcome_cost_basis_pusd: BTreeMap<String, OutcomeCostBasisV1>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -64,7 +64,7 @@ pub(crate) struct AppliedFillIndexV1 {
     pub(crate) active: bool,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct LifecycleStateV1 {
     pub(crate) submission_requests:
         BTreeMap<LedgerSubmissionItemIdentityV1, LedgerRequestIdentityV1>,
@@ -73,6 +73,7 @@ pub(crate) struct LifecycleStateV1 {
     pub(crate) trades: BTreeMap<String, TradeLifecycleIndexV1>,
     pub(crate) applied_fills: BTreeMap<(String, u32), AppliedFillIndexV1>,
     pub(crate) totals: LifecycleTotalsV1,
+    pub(crate) outcome_cost_basis_pusd: BTreeMap<String, OutcomeCostBasisV1>,
     pub(crate) markets: BTreeMap<String, MarketLifecycleStateV1>,
 }
 
@@ -83,6 +84,7 @@ impl LifecycleStateV1 {
             .or_insert_with(|| MarketLifecycleStateV1 {
                 condition_id: condition_id.clone(),
                 totals: LifecycleTotalsV1::default(),
+                outcome_cost_basis_pusd: BTreeMap::new(),
             })
     }
 }

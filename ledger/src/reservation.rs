@@ -62,7 +62,7 @@ pub(crate) struct MarketLocalPendingV1 {
     pub(crate) after_send_unknown_count: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct ReservationStateV1 {
     pub(crate) requests: BTreeMap<LedgerRequestIdentityV1, CachedReservationRequestV1>,
     pub(crate) applied_local_events: BTreeMap<LedgerLocalEventIdentityV1, u64>,

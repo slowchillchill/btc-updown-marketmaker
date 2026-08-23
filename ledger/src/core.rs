@@ -20,7 +20,7 @@ use rust_decimal::Decimal;
 
 use crate::lifecycle::{
     AppliedFillIndexV1, LedgerSubmissionItemIdentityV1, LifecycleStateV1, LifecycleTotalsV1,
-    OutcomeCostBasisV1, TradeLifecycleIndexV1,
+    MarketLifecycleStateV1, OutcomeCostBasisV1, TradeLifecycleIndexV1,
 };
 use crate::projection::{
     AccountAdmissionPolicyV1, LedgerLocalPendingReservationProjectionV1, LedgerMarketProjectionV1,
@@ -627,16 +627,14 @@ impl LedgerWriterV1 {
 
         let ledger_entry_seq = self.next_ledger_entry_seq()?;
         let ledger_local_prefix = self.next_ledger_local_prefix()?;
-        let mut reservations = self.reservations.clone();
+        let mut keys = SparseLedgerStateKeysV1::default();
+        keys.add_request(&self.reservations, request_identity);
+        let mut reservations = reservation_state_slice(&self.reservations, &keys);
         move_reservation_to_submitted_unknown(
             &mut reservations,
             request_identity,
             ledger_entry_seq,
         )?;
-        let mut lifecycle = self.lifecycle.clone();
-        lifecycle
-            .submission_requests
-            .insert(submission_item_identity.clone(), request_identity.clone());
         let transaction = LedgerTransactionV1 {
             ledger_entry_seq,
             source: LedgerTransactionSourceV1::LocalSubmissionEvent {
@@ -648,11 +646,13 @@ impl LedgerWriterV1 {
         };
         ensure_balanced(&transaction.entries)?;
 
-        reservations
+        commit_reservation_slice(&mut self.reservations, reservations);
+        self.lifecycle
+            .submission_requests
+            .insert(submission_item_identity.clone(), request_identity.clone());
+        self.reservations
             .applied_local_events
             .insert(local_event_identity.clone(), ledger_entry_seq);
-        self.reservations = reservations;
-        self.lifecycle = lifecycle;
         self.ledger_local_prefix = ledger_local_prefix;
         self.commit_transaction(transaction);
         Ok(LedgerApplyOutcomeV1::NewlyApplied { ledger_entry_seq })
@@ -911,8 +911,12 @@ impl LedgerWriterV1 {
     ) -> Result<LedgerApplyOutcomeV1, LedgerErrorV1> {
         self.ensure_noe_account(account_instance_key)?;
         let ledger_entry_seq = self.next_ledger_entry_seq()?;
-        let mut reservations = self.reservations.clone();
-        let mut lifecycle = self.lifecycle.clone();
+        let keys =
+            lifecycle_evidence_keys(&self.reservations, &self.lifecycle, source_record, evidence);
+        let before_reservations = reservation_state_slice(&self.reservations, &keys);
+        let mut reservations = reservation_state_slice(&self.reservations, &keys);
+        let before_lifecycle = lifecycle_state_slice(&self.lifecycle, &keys);
+        let mut lifecycle = lifecycle_state_slice(&self.lifecycle, &keys);
         match evidence {
             SourceNeutralEvidenceKindV1::Control { result } => apply_control_lifecycle(
                 &mut reservations,
@@ -934,9 +938,9 @@ impl LedgerWriterV1 {
         }
 
         let entries = lifecycle_change_entries(
-            &self.reservations,
+            &before_reservations,
             &reservations,
-            &self.lifecycle,
+            &before_lifecycle,
             &lifecycle,
         )?;
         let transaction = LedgerTransactionV1 {
@@ -953,8 +957,8 @@ impl LedgerWriterV1 {
         account.available_through_utc_ms = account
             .available_through_utc_ms
             .max(available_through_utc_ms);
-        self.reservations = reservations;
-        self.lifecycle = lifecycle;
+        commit_reservation_slice(&mut self.reservations, reservations);
+        commit_lifecycle_slice(&mut self.lifecycle, lifecycle);
         self.commit_transaction(transaction);
         Ok(LedgerApplyOutcomeV1::NewlyApplied { ledger_entry_seq })
     }
@@ -1005,8 +1009,11 @@ impl LedgerWriterV1 {
 
     pub fn projection(&self) -> Option<LedgerProjectionV1> {
         let account = self.account.as_ref()?;
-        let platform_confirmed_projection =
-            project_balances(&account.balances, &self.lifecycle.totals);
+        let platform_confirmed_projection = project_balances(
+            &account.balances,
+            &self.lifecycle.totals,
+            &self.lifecycle.outcome_cost_basis_pusd,
+        );
         let mut projected_conditions = BTreeMap::<String, ConditionId>::new();
         for market in account.markets.values() {
             projected_conditions.insert(market.condition_id.0.clone(), market.condition_id.clone());
@@ -1021,17 +1028,21 @@ impl LedgerWriterV1 {
             .into_values()
             .map(|condition_id| {
                 let empty_lifecycle = LifecycleTotalsV1::default();
-                let lifecycle = self
-                    .lifecycle
-                    .markets
-                    .get(&condition_id.0)
+                let lifecycle_market = self.lifecycle.markets.get(&condition_id.0);
+                let lifecycle = lifecycle_market
                     .map(|market| &market.totals)
                     .unwrap_or(&empty_lifecycle);
+                let empty_outcome_costs = BTreeMap::new();
+                let outcome_costs = lifecycle_market
+                    .map(|market| &market.outcome_cost_basis_pusd)
+                    .unwrap_or(&empty_outcome_costs);
                 let balances = account
                     .markets
                     .get(&condition_id.0)
-                    .map(|market| project_balances(&market.balances, lifecycle))
-                    .unwrap_or_else(|| project_balances(&BalanceStateV1::empty(), lifecycle));
+                    .map(|market| project_balances(&market.balances, lifecycle, outcome_costs))
+                    .unwrap_or_else(|| {
+                        project_balances(&BalanceStateV1::empty(), lifecycle, outcome_costs)
+                    });
                 let local = self.reservations.markets.get(&condition_id.0);
                 let local_principal = local
                     .map(|market| market.principal_pusd)
@@ -1228,8 +1239,18 @@ impl LedgerWriterV1 {
             .transpose()?;
 
         let ledger_entry_seq = self.next_ledger_entry_seq()?;
-        let mut reservations = self.reservations.clone();
-        let mut lifecycle = self.lifecycle.clone();
+        let keys = economic_transition_keys(
+            &self.reservations,
+            &self.lifecycle,
+            condition_id,
+            transition,
+            &parsed,
+            source_record,
+        );
+        let before_reservations = reservation_state_slice(&self.reservations, &keys);
+        let mut reservations = reservation_state_slice(&self.reservations, &keys);
+        let before_lifecycle = lifecycle_state_slice(&self.lifecycle, &keys);
+        let mut lifecycle = lifecycle_state_slice(&self.lifecycle, &keys);
         apply_economic_lifecycle(
             &mut reservations,
             &mut lifecycle,
@@ -1241,9 +1262,9 @@ impl LedgerWriterV1 {
         )?;
         let mut entries = transition_entries(condition_id, &parsed)?;
         entries.extend(lifecycle_change_entries(
-            &self.reservations,
+            &before_reservations,
             &reservations,
-            &self.lifecycle,
+            &before_lifecycle,
             &lifecycle,
         )?);
         let transaction = LedgerTransactionV1 {
@@ -1265,8 +1286,8 @@ impl LedgerWriterV1 {
         }
         account.platform_source_prefix = account_transition_seq;
         account.available_through_utc_ms = available_through_utc_ms;
-        self.reservations = reservations;
-        self.lifecycle = lifecycle;
+        commit_reservation_slice(&mut self.reservations, reservations);
+        commit_lifecycle_slice(&mut self.lifecycle, lifecycle);
         self.commit_transaction(transaction);
         Ok(LedgerApplyOutcomeV1::NewlyApplied { ledger_entry_seq })
     }
@@ -1384,6 +1405,205 @@ impl LedgerWriterV1 {
 struct ReservationTransitionDetailsV1 {
     condition_id: ConditionId,
     principal_pusd: Decimal,
+}
+
+#[derive(Default)]
+struct SparseLedgerStateKeysV1 {
+    requests: BTreeSet<LedgerRequestIdentityV1>,
+    conditions: BTreeSet<String>,
+    submission_items: BTreeSet<LedgerSubmissionItemIdentityV1>,
+    query_requests: BTreeSet<String>,
+    orders: BTreeSet<String>,
+    trades: BTreeSet<String>,
+    fills: BTreeSet<(String, u32)>,
+    outcome_tokens: BTreeSet<String>,
+}
+
+impl SparseLedgerStateKeysV1 {
+    fn add_condition(&mut self, condition_id: &ConditionId) {
+        self.conditions.insert(condition_id.0.clone());
+    }
+
+    fn add_request(
+        &mut self,
+        reservations: &ReservationStateV1,
+        request_identity: &LedgerRequestIdentityV1,
+    ) {
+        self.requests.insert(request_identity.clone());
+        if let Some(reservation) = reservations
+            .requests
+            .get(request_identity)
+            .and_then(|request| request.reservation.as_ref())
+        {
+            self.add_condition(&reservation.condition_id);
+        }
+    }
+
+    fn add_order(&mut self, lifecycle: &LifecycleStateV1, order_identity: &str) {
+        self.orders.insert(order_identity.to_owned());
+        if let Some(condition_id) = lifecycle
+            .orders
+            .get(order_identity)
+            .and_then(|order| order.condition_id.as_ref())
+        {
+            self.add_condition(condition_id);
+        }
+    }
+
+    fn add_trade(&mut self, lifecycle: &LifecycleStateV1, trade_identity: &str) {
+        self.trades.insert(trade_identity.to_owned());
+        if let Some(trade) = lifecycle.trades.get(trade_identity) {
+            self.add_condition(&trade.condition_id);
+        }
+    }
+
+    fn add_fill(&mut self, lifecycle: &LifecycleStateV1, trade_identity: &str, path_ordinal: u32) {
+        let key = (trade_identity.to_owned(), path_ordinal);
+        self.fills.insert(key.clone());
+        if let Some(fill) = lifecycle.applied_fills.get(&key) {
+            if let Some(condition_id) = &fill.condition_id {
+                self.add_condition(condition_id);
+            }
+            if let Some(token_id) = &fill.token_id {
+                self.outcome_tokens.insert(token_id.0.clone());
+            }
+        }
+    }
+}
+
+fn reservation_state_slice(
+    source: &ReservationStateV1,
+    keys: &SparseLedgerStateKeysV1,
+) -> ReservationStateV1 {
+    let mut slice = ReservationStateV1 {
+        principal_pusd: source.principal_pusd,
+        immediate_fee_pusd: source.immediate_fee_pusd,
+        before_send_principal_pusd: source.before_send_principal_pusd,
+        before_send_immediate_fee_pusd: source.before_send_immediate_fee_pusd,
+        before_send_count: source.before_send_count,
+        after_send_unknown_principal_pusd: source.after_send_unknown_principal_pusd,
+        after_send_unknown_immediate_fee_pusd: source.after_send_unknown_immediate_fee_pusd,
+        after_send_unknown_count: source.after_send_unknown_count,
+        ..ReservationStateV1::default()
+    };
+    for request_identity in &keys.requests {
+        if let Some(request) = source.requests.get(request_identity) {
+            slice
+                .requests
+                .insert(request_identity.clone(), request.clone());
+        }
+    }
+    for condition_id in &keys.conditions {
+        if let Some(market) = source.markets.get(condition_id) {
+            slice.markets.insert(condition_id.clone(), market.clone());
+        }
+    }
+    slice
+}
+
+fn lifecycle_state_slice(
+    source: &LifecycleStateV1,
+    keys: &SparseLedgerStateKeysV1,
+) -> LifecycleStateV1 {
+    let mut slice = LifecycleStateV1 {
+        totals: source.totals.clone(),
+        ..LifecycleStateV1::default()
+    };
+    for submission_item in &keys.submission_items {
+        if let Some(request_identity) = source.submission_requests.get(submission_item) {
+            slice
+                .submission_requests
+                .insert(submission_item.clone(), request_identity.clone());
+        }
+    }
+    for query_request in &keys.query_requests {
+        if let Some(request_identity) = source.query_requests.get(query_request) {
+            slice
+                .query_requests
+                .insert(query_request.clone(), request_identity.clone());
+        }
+    }
+    for order_identity in &keys.orders {
+        if let Some(order) = source.orders.get(order_identity) {
+            slice.orders.insert(order_identity.clone(), order.clone());
+        }
+    }
+    for trade_identity in &keys.trades {
+        if let Some(trade) = source.trades.get(trade_identity) {
+            slice.trades.insert(trade_identity.clone(), trade.clone());
+        }
+    }
+    for fill_key in &keys.fills {
+        if let Some(fill) = source.applied_fills.get(fill_key) {
+            slice.applied_fills.insert(fill_key.clone(), fill.clone());
+        }
+    }
+    for token_id in &keys.outcome_tokens {
+        if let Some(cost_basis) = source.outcome_cost_basis_pusd.get(token_id) {
+            slice
+                .outcome_cost_basis_pusd
+                .insert(token_id.clone(), cost_basis.clone());
+        }
+    }
+    for condition_id in &keys.conditions {
+        if let Some(market) = source.markets.get(condition_id) {
+            let outcome_cost_basis_pusd = keys
+                .outcome_tokens
+                .iter()
+                .filter_map(|token_id| {
+                    market
+                        .outcome_cost_basis_pusd
+                        .get(token_id)
+                        .map(|cost_basis| (token_id.clone(), cost_basis.clone()))
+                })
+                .collect();
+            slice.markets.insert(
+                condition_id.clone(),
+                MarketLifecycleStateV1 {
+                    condition_id: market.condition_id.clone(),
+                    totals: market.totals.clone(),
+                    outcome_cost_basis_pusd,
+                },
+            );
+        }
+    }
+    slice
+}
+
+fn commit_reservation_slice(target: &mut ReservationStateV1, slice: ReservationStateV1) {
+    target.principal_pusd = slice.principal_pusd;
+    target.immediate_fee_pusd = slice.immediate_fee_pusd;
+    target.before_send_principal_pusd = slice.before_send_principal_pusd;
+    target.before_send_immediate_fee_pusd = slice.before_send_immediate_fee_pusd;
+    target.before_send_count = slice.before_send_count;
+    target.after_send_unknown_principal_pusd = slice.after_send_unknown_principal_pusd;
+    target.after_send_unknown_immediate_fee_pusd = slice.after_send_unknown_immediate_fee_pusd;
+    target.after_send_unknown_count = slice.after_send_unknown_count;
+    target.requests.extend(slice.requests);
+    target.markets.extend(slice.markets);
+}
+
+fn commit_lifecycle_slice(target: &mut LifecycleStateV1, slice: LifecycleStateV1) {
+    target.totals = slice.totals;
+    target.submission_requests.extend(slice.submission_requests);
+    target.query_requests.extend(slice.query_requests);
+    target.orders.extend(slice.orders);
+    target.trades.extend(slice.trades);
+    target.applied_fills.extend(slice.applied_fills);
+    target
+        .outcome_cost_basis_pusd
+        .extend(slice.outcome_cost_basis_pusd);
+    for (condition_id, market_slice) in slice.markets {
+        if let Some(market) = target.markets.get_mut(&condition_id) {
+            market.condition_id = market_slice.condition_id;
+            market.totals = market_slice.totals;
+            market
+                .outcome_cost_basis_pusd
+                .extend(market_slice.outcome_cost_basis_pusd);
+        } else {
+            target.markets.insert(condition_id, market_slice);
+        }
+    }
 }
 
 fn move_reservation_to_submitted_unknown(
@@ -1718,6 +1938,131 @@ fn query_global_request_id(source_record: &SimV2SourceRecordReferenceV1) -> Opti
         return None;
     };
     Some(global_request_id)
+}
+
+fn lifecycle_evidence_keys(
+    reservations: &ReservationStateV1,
+    lifecycle: &LifecycleStateV1,
+    source_record: &SimV2SourceRecordReferenceV1,
+    evidence: &SourceNeutralEvidenceKindV1,
+) -> SparseLedgerStateKeysV1 {
+    let mut keys = SparseLedgerStateKeysV1::default();
+    match evidence {
+        SourceNeutralEvidenceKindV1::Control { result } => match result {
+            SourceNeutralControlResultV1::Submission { outcome } => {
+                if let Some(submission_item) = submission_item_identity(source_record) {
+                    if let Some(request_identity) =
+                        lifecycle.submission_requests.get(&submission_item)
+                    {
+                        keys.add_request(reservations, request_identity);
+                    }
+                    keys.submission_items.insert(submission_item);
+                }
+                if let SourceNeutralSubmissionOutcomeV1::Accepted { order } = outcome {
+                    keys.add_order(lifecycle, &order.order_identity.0);
+                    keys.add_condition(&order.condition_id);
+                }
+            }
+            SourceNeutralControlResultV1::OrderQuery { result } => {
+                if let Some(query_request) = query_global_request_id(source_record) {
+                    if let Some(request_identity) = lifecycle.query_requests.get(query_request) {
+                        keys.add_request(reservations, request_identity);
+                    }
+                    keys.query_requests.insert(query_request.to_owned());
+                }
+                if let SourceNeutralOrderQueryResultV1::Found { order } = result {
+                    keys.add_order(lifecycle, &order.order_identity.0);
+                    keys.add_condition(&order.condition_id);
+                }
+            }
+            SourceNeutralControlResultV1::Cancellation { order_identity, .. } => {
+                keys.add_order(lifecycle, &order_identity.0);
+            }
+            SourceNeutralControlResultV1::OrdersQuery { .. }
+            | SourceNeutralControlResultV1::TradesQuery { .. } => {}
+        },
+        SourceNeutralEvidenceKindV1::OrderLifecycle { result } => {
+            keys.add_order(lifecycle, &result.order_identity.0);
+            keys.add_condition(&result.condition_id);
+        }
+        SourceNeutralEvidenceKindV1::TradeLifecycle { result } => {
+            keys.add_trade(lifecycle, &result.trade_identity.0);
+            keys.add_condition(&result.condition_id);
+        }
+        _ => {}
+    }
+    keys
+}
+
+fn economic_transition_keys(
+    reservations: &ReservationStateV1,
+    lifecycle: &LifecycleStateV1,
+    condition_id: Option<&ConditionId>,
+    transition: &SourceNeutralAccountTransitionKindV1,
+    delta: &ParsedBalanceDeltaV1,
+    source_record: &SimV2SourceRecordReferenceV1,
+) -> SparseLedgerStateKeysV1 {
+    let mut keys = SparseLedgerStateKeysV1::default();
+    if let Some(condition_id) = condition_id {
+        keys.add_condition(condition_id);
+    }
+    match transition {
+        SourceNeutralAccountTransitionKindV1::OrderAcceptedEncumbranceApplied {
+            order_identity,
+        } => {
+            keys.add_order(lifecycle, &order_identity.0);
+            if let Some(submission_item) = submission_item_identity(source_record) {
+                if let Some(request_identity) = lifecycle.submission_requests.get(&submission_item)
+                {
+                    keys.add_request(reservations, request_identity);
+                }
+                keys.submission_items.insert(submission_item);
+            }
+            if let Some(request_identity) = lifecycle
+                .orders
+                .get(&order_identity.0)
+                .and_then(|order| order.request_identity.as_ref())
+            {
+                keys.add_request(reservations, request_identity);
+            }
+        }
+        SourceNeutralAccountTransitionKindV1::FakUnspentEncumbranceReleased { order_identity }
+        | SourceNeutralAccountTransitionKindV1::CallerCancellationEncumbranceReleased {
+            order_identity,
+        }
+        | SourceNeutralAccountTransitionKindV1::GtdExpirationEncumbranceReleased {
+            order_identity,
+            ..
+        }
+        | SourceNeutralAccountTransitionKindV1::VenueDustEncumbranceReleased { order_identity }
+        | SourceNeutralAccountTransitionKindV1::MarketResolutionEncumbranceReleased {
+            order_identity,
+            ..
+        } => keys.add_order(lifecycle, &order_identity.0),
+        SourceNeutralAccountTransitionKindV1::FillFinalityEconomicApplied {
+            trade_identity,
+            path_ordinal,
+        }
+        | SourceNeutralAccountTransitionKindV1::FillFinalityCompensationApplied {
+            trade_identity,
+            path_ordinal,
+        } => keys.add_fill(lifecycle, &trade_identity.0, *path_ordinal),
+        SourceNeutralAccountTransitionKindV1::FillFinalityUnappliedFailureReleased { .. }
+        | SourceNeutralAccountTransitionKindV1::MakerRebateAccrualFinalized
+        | SourceNeutralAccountTransitionKindV1::TakerRebateAccrualApplied { .. }
+        | SourceNeutralAccountTransitionKindV1::MakerRebateDayFinalized { .. }
+        | SourceNeutralAccountTransitionKindV1::TakerRebateDayFinalized { .. }
+        | SourceNeutralAccountTransitionKindV1::MakerRebatePaid { .. }
+        | SourceNeutralAccountTransitionKindV1::TakerRebatePaid { .. }
+        | SourceNeutralAccountTransitionKindV1::AutoRedeemApplied { .. } => {}
+    }
+    keys.outcome_tokens.extend(
+        delta
+            .outcome_balances
+            .values()
+            .map(|outcome| outcome.token_id.0.clone()),
+    );
+    keys
 }
 
 fn apply_control_lifecycle(
@@ -2118,30 +2463,8 @@ fn apply_economic_lifecycle(
                     active: true,
                 },
             );
-            if let Some(condition_id) = condition_id {
-                set_trade_pending(
-                    lifecycle,
-                    &trade_identity.0,
-                    condition_id,
-                    false,
-                    ledger_entry_seq,
-                )?;
-            }
         }
-        SourceNeutralAccountTransitionKindV1::FillFinalityUnappliedFailureReleased {
-            trade_identity,
-            ..
-        } => {
-            if let Some(condition_id) = condition_id {
-                set_trade_pending(
-                    lifecycle,
-                    &trade_identity.0,
-                    condition_id,
-                    false,
-                    ledger_entry_seq,
-                )?;
-            }
-        }
+        SourceNeutralAccountTransitionKindV1::FillFinalityUnappliedFailureReleased { .. } => {}
         SourceNeutralAccountTransitionKindV1::FillFinalityCompensationApplied {
             trade_identity,
             path_ordinal,
@@ -2167,15 +2490,6 @@ fn apply_economic_lifecycle(
                 if let Some(fill) = lifecycle.applied_fills.get_mut(&fill_key) {
                     fill.active = false;
                 }
-            }
-            if let Some(condition_id) = condition_id {
-                set_trade_pending(
-                    lifecycle,
-                    &trade_identity.0,
-                    condition_id,
-                    false,
-                    ledger_entry_seq,
-                )?;
             }
         }
         SourceNeutralAccountTransitionKindV1::MakerRebateAccrualFinalized => {
@@ -2207,7 +2521,6 @@ fn apply_economic_lifecycle(
                 .collect();
             for token_id in token_ids {
                 let cost_basis = lifecycle
-                    .totals
                     .outcome_cost_basis_pusd
                     .get(&token_id.0)
                     .map(|cost| cost.cost_basis_pusd)
@@ -2271,12 +2584,11 @@ fn change_outcome_cost_basis(
 ) -> Result<(), LedgerErrorV1> {
     change_position_cost_basis(lifecycle, condition_id, delta)?;
     let current = lifecycle
-        .totals
         .outcome_cost_basis_pusd
         .get(&token_id.0)
         .map(|cost| cost.cost_basis_pusd)
         .unwrap_or(Decimal::ZERO);
-    lifecycle.totals.outcome_cost_basis_pusd.insert(
+    lifecycle.outcome_cost_basis_pusd.insert(
         token_id.0.clone(),
         OutcomeCostBasisV1 {
             token_id: token_id.clone(),
@@ -2286,12 +2598,11 @@ fn change_outcome_cost_basis(
     if let Some(condition_id) = condition_id {
         let market = lifecycle.market_mut(condition_id);
         let current = market
-            .totals
             .outcome_cost_basis_pusd
             .get(&token_id.0)
             .map(|cost| cost.cost_basis_pusd)
             .unwrap_or(Decimal::ZERO);
-        market.totals.outcome_cost_basis_pusd.insert(
+        market.outcome_cost_basis_pusd.insert(
             token_id.0.clone(),
             OutcomeCostBasisV1 {
                 token_id: token_id.clone(),
@@ -2399,14 +2710,10 @@ fn lifecycle_change_entries(
     let mut market_fee_delta = Decimal::ZERO;
     let mut market_pnl_delta = Decimal::ZERO;
     for condition_id in lifecycle_markets {
-        let before = before_lifecycle
-            .markets
-            .get(condition_id)
-            .map(|market| &market.totals);
-        let after = after_lifecycle
-            .markets
-            .get(condition_id)
-            .map(|market| &market.totals);
+        let before_market = before_lifecycle.markets.get(condition_id);
+        let after_market = after_lifecycle.markets.get(condition_id);
+        let before = before_market.map(|market| &market.totals);
+        let after = after_market.map(|market| &market.totals);
         let platform_principal_delta = totals_decimal_delta(
             before,
             after,
@@ -2470,8 +2777,8 @@ fn lifecycle_change_entries(
             "lifecycle.market_platform_fee_entry",
         )?;
 
-        let before_outcomes = before.map(|totals| &totals.outcome_cost_basis_pusd);
-        let after_outcomes = after.map(|totals| &totals.outcome_cost_basis_pusd);
+        let before_outcomes = before_market.map(|market| &market.outcome_cost_basis_pusd);
+        let after_outcomes = after_market.map(|market| &market.outcome_cost_basis_pusd);
         let outcome_tokens: BTreeSet<&String> = before_outcomes
             .into_iter()
             .flat_map(|outcomes| outcomes.keys())
@@ -2484,12 +2791,12 @@ fn lifecycle_change_entries(
         let mut outcome_cost_delta = Decimal::ZERO;
         for token_id in outcome_tokens {
             let delta = checked_sub(
-                after
-                    .and_then(|totals| totals.outcome_cost_basis_pusd.get(token_id))
+                after_market
+                    .and_then(|market| market.outcome_cost_basis_pusd.get(token_id))
                     .map(|cost| cost.cost_basis_pusd)
                     .unwrap_or(Decimal::ZERO),
-                before
-                    .and_then(|totals| totals.outcome_cost_basis_pusd.get(token_id))
+                before_market
+                    .and_then(|market| market.outcome_cost_basis_pusd.get(token_id))
                     .map(|cost| cost.cost_basis_pusd)
                     .unwrap_or(Decimal::ZERO),
                 "lifecycle.market_outcome_cost_delta",
@@ -2962,6 +3269,7 @@ fn change_u64(
 fn project_balances(
     state: &BalanceStateV1,
     lifecycle: &LifecycleTotalsV1,
+    outcome_cost_basis_pusd: &BTreeMap<String, OutcomeCostBasisV1>,
 ) -> LedgerPlatformConfirmedProjectionV1 {
     let available_pusd = if lifecycle.platform_pending_principal_pusd.is_zero()
         && lifecycle.platform_pending_immediate_fee_pusd.is_zero()
@@ -3022,7 +3330,7 @@ fn project_balances(
         .outcome_balances
         .values()
         .map(|outcome| {
-            let cost_basis = lifecycle.outcome_cost_basis_pusd.get(&outcome.token_id.0);
+            let cost_basis = outcome_cost_basis_pusd.get(&outcome.token_id.0);
             LedgerOutcomeBalanceV1 {
                 token_id: cost_basis
                     .map(|cost| cost.token_id.clone())
@@ -3277,7 +3585,7 @@ mod tests {
         after.totals.position_cost_basis_pusd = "4".parse().unwrap();
         after.totals.fees_pusd = "0.2".parse().unwrap();
         after.totals.realized_pnl_pusd = "-1".parse().unwrap();
-        after.totals.outcome_cost_basis_pusd.insert(
+        after.outcome_cost_basis_pusd.insert(
             TOKEN.to_owned(),
             OutcomeCostBasisV1 {
                 token_id: TokenId(TOKEN.to_owned()),
@@ -3287,6 +3595,13 @@ mod tests {
         let totals = after.totals.clone();
         let market = after.market_mut(&ConditionId(CONDITION.to_owned()));
         market.totals = totals;
+        market.outcome_cost_basis_pusd.insert(
+            TOKEN.to_owned(),
+            OutcomeCostBasisV1 {
+                token_id: TokenId(TOKEN.to_owned()),
+                cost_basis_pusd: "4".parse().unwrap(),
+            },
+        );
 
         let entries = lifecycle_change_entries(
             &ReservationStateV1::default(),
