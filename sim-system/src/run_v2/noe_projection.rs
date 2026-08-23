@@ -110,9 +110,6 @@ impl SimV2NoeProjectionPortV1 {
         let Some(opening) = batch.account_opening.as_ref() else {
             return false;
         };
-        if opening.account_instance_key.run_id != self.opened.run_id {
-            return false;
-        }
         let seed = SimV2ContextSeedV1 {
             run_id: self.opened.run_id.clone(),
             account_instance_key: opening.account_instance_key.clone(),
