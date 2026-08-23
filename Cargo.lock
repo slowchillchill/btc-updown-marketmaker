@@ -4214,6 +4214,7 @@ version = "0.1.0"
 dependencies = [
  "contracts",
  "data-pipeline-core",
+ "data-pipeline-training",
  "num-bigint",
  "num-integer",
  "num-traits",
