@@ -4,19 +4,26 @@ use std::fmt;
 
 use contracts::execution_normalization::{
     ExecutionNormalizationContextReferenceV1, ExecutionNormalizationContextV1,
-    NoeEconomicFactReferenceV1, SimV2SourceReferenceV1, SimV2SourceWatermarkV1,
-    SourceNeutralAccountBalanceDeltaV1, SourceNeutralAccountTransitionKindV1,
-    SourceNeutralEconomicDispositionV1, SourceNeutralEconomicFactV1,
-    SourceNeutralEconomicIdentityV1, StableLogicalIdentityV1,
+    NoeEconomicFactReferenceV1, SimV2DirectResponseAssociationV1, SimV2SourceRecordReferenceV1,
+    SimV2SourceReferenceV1, SimV2SourceWatermarkV1, SourceNeutralAccountBalanceDeltaV1,
+    SourceNeutralAccountTransitionKindV1, SourceNeutralEconomicDispositionV1,
+    SourceNeutralEconomicFactV1, SourceNeutralEconomicIdentityV1, StableLogicalIdentityV1,
 };
-use contracts::{ConditionId, ExactDecimal};
+use contracts::{CancelInputItemRefV2, ConditionId, ExactDecimal};
 use serde::{Deserialize, Serialize};
 
 pub const NORMALIZATION_CORE_V1: &str = "normalization_core_v1";
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum SourceSequenceV1 {
+    AccountOpening,
+    MarketEnrollment { enrollment_sequence: u64 },
+    PrivateFeedback { private_feedback_sequence: u64 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SourceOrderV1 {
-    pub sequence: u64,
+    pub sequence: SourceSequenceV1,
     pub ordinal: u32,
 }
 
@@ -151,6 +158,16 @@ pub enum PendingScopeV1 {
     EvidenceGap {
         scope_identity: String,
     },
+    EconomicKey {
+        economic_key: SourceNeutralEconomicKeyV1,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NormalizationPendingScopeV1 {
+    EvidenceGap {
+        scope_identity: String,
+    },
     EconomicIdentity {
         economic_identity: SourceNeutralEconomicIdentityV1,
     },
@@ -184,7 +201,7 @@ pub enum SourceNeutralEvidenceKindV1 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceNeutralEvidenceV1 {
     pub source_reference: SimV2SourceReferenceV1,
-    pub source_order: SourceOrderV1,
+    pub source_ordinal: u32,
     pub logical_key: SourceNeutralLogicalKeyV1,
     pub kind: SourceNeutralEvidenceKindV1,
 }
@@ -236,13 +253,14 @@ pub enum NormalizationRecordV1 {
         source_order: SourceOrderV1,
         source_reference: SimV2SourceReferenceV1,
         evidence: SourceNeutralEvidenceKindV1,
-        scope: PendingScopeV1,
+        scope: NormalizationPendingScopeV1,
     },
     Conflict {
         logical_identity: StableLogicalIdentityV1,
         source_order: SourceOrderV1,
         source_reference: SimV2SourceReferenceV1,
         scope: NormalizationConflictScopeV1,
+        conflicting_evidence: SourceNeutralEvidenceKindV1,
     },
 }
 
@@ -352,31 +370,39 @@ impl fmt::Display for CoreErrorV1 {
 
 impl Error for CoreErrorV1 {}
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(crate) struct CoreStateV1 {
     logical: BTreeMap<StableLogicalIdentityV1, StoredLogicalV1>,
     economic: BTreeMap<SourceNeutralEconomicIdentityV1, SourceNeutralEconomicFactV1>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(crate) struct CoreStateDeltaV1 {
     logical: BTreeMap<StableLogicalIdentityV1, StoredLogicalV1>,
     economic: BTreeMap<SourceNeutralEconomicIdentityV1, SourceNeutralEconomicFactV1>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct StoredLogicalV1 {
     evidence: StoredEvidenceV1,
+    cancellation_input_item_refs: Option<Vec<CancelInputItemRefV2>>,
     source_reference: SimV2SourceReferenceV1,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum StoredEvidenceV1 {
     Evidence(SourceNeutralEvidenceKindV1),
     Economic {
         economic_identity: SourceNeutralEconomicIdentityV1,
         disposition: SourceNeutralEconomicDispositionV1,
     },
+}
+
+#[derive(Clone)]
+struct OrderedEvidenceV1 {
+    source_reference: SimV2SourceReferenceV1,
+    source_order: SourceOrderV1,
+    kind: SourceNeutralEvidenceKindV1,
 }
 
 pub struct PreparedNormalizationBatchV1 {
@@ -394,6 +420,7 @@ impl PreparedNormalizationBatchV1 {
     }
 }
 
+#[derive(Debug)]
 pub struct NormalizationCoreV1 {
     context: ExecutionNormalizationContextV1,
     state: CoreStateV1,
@@ -407,7 +434,7 @@ impl NormalizationCoreV1 {
         }
     }
 
-    pub fn restore<'a>(
+    pub(crate) fn restore<'a>(
         context: ExecutionNormalizationContextV1,
         records: impl IntoIterator<Item = &'a NormalizationRecordV1>,
     ) -> Self {
@@ -430,6 +457,10 @@ impl NormalizationCoreV1 {
                         logical_identity.clone(),
                         StoredLogicalV1 {
                             evidence: StoredEvidenceV1::Evidence(evidence.clone()),
+                            cancellation_input_item_refs: Self::cancellation_input_item_refs(
+                                source_reference,
+                            )
+                            .map(<[CancelInputItemRefV2]>::to_vec),
                             source_reference: source_reference.clone(),
                         },
                     );
@@ -442,6 +473,10 @@ impl NormalizationCoreV1 {
                                 economic_identity: fact.economic_identity.clone(),
                                 disposition: fact.disposition.clone(),
                             },
+                            cancellation_input_item_refs: Self::cancellation_input_item_refs(
+                                &fact.source_reference,
+                            )
+                            .map(<[CancelInputItemRefV2]>::to_vec),
                             source_reference: fact.source_reference.clone(),
                         },
                     );
@@ -469,7 +504,16 @@ impl NormalizationCoreV1 {
         for evidence in input.evidence {
             self.check_evidence_boundary(&input.source_watermark, &evidence)?;
             let logical_identity = self.logical_identity(&evidence.logical_key)?;
-            ordered.push((evidence.source_order.clone(), logical_identity, evidence));
+            let source_order = Self::source_order(&evidence);
+            ordered.push((
+                source_order.clone(),
+                logical_identity,
+                OrderedEvidenceV1 {
+                    source_reference: evidence.source_reference,
+                    source_order,
+                    kind: evidence.kind,
+                },
+            ));
         }
         ordered.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
 
@@ -485,11 +529,6 @@ impl NormalizationCoreV1 {
             },
             state_delta,
         })
-    }
-
-    pub fn accept_committed(&mut self, prepared: PreparedNormalizationBatchV1) {
-        let (_, state_delta) = prepared.into_parts();
-        self.accept_delta(state_delta);
     }
 
     pub(crate) fn accept_delta(&mut self, state_delta: CoreStateDeltaV1) {
@@ -515,6 +554,39 @@ impl NormalizationCoreV1 {
             });
         }
         Ok(())
+    }
+
+    fn source_order(evidence: &SourceNeutralEvidenceV1) -> SourceOrderV1 {
+        let sequence = match &evidence.source_reference.record {
+            SimV2SourceRecordReferenceV1::AccountOpening => SourceSequenceV1::AccountOpening,
+            SimV2SourceRecordReferenceV1::MarketEnrollment {
+                enrollment_sequence,
+            } => SourceSequenceV1::MarketEnrollment {
+                enrollment_sequence: *enrollment_sequence,
+            },
+            SimV2SourceRecordReferenceV1::DirectResponse {
+                private_feedback_sequence,
+                ..
+            }
+            | SimV2SourceRecordReferenceV1::OrderLifecycle {
+                private_feedback_sequence,
+                ..
+            }
+            | SimV2SourceRecordReferenceV1::TradeLifecycle {
+                private_feedback_sequence,
+                ..
+            }
+            | SimV2SourceRecordReferenceV1::SettlementLifecycle {
+                private_feedback_sequence,
+                ..
+            } => SourceSequenceV1::PrivateFeedback {
+                private_feedback_sequence: *private_feedback_sequence,
+            },
+        };
+        SourceOrderV1 {
+            sequence,
+            ordinal: evidence.source_ordinal,
+        }
     }
 
     fn logical_identity(
@@ -543,14 +615,20 @@ impl NormalizationCoreV1 {
         &self,
         state_delta: &mut CoreStateDeltaV1,
         logical_identity: StableLogicalIdentityV1,
-        evidence: SourceNeutralEvidenceV1,
+        evidence: OrderedEvidenceV1,
     ) -> Result<NormalizationRecordV1, CoreErrorV1> {
+        let cancellation_input_item_refs =
+            Self::cancellation_input_item_refs(&evidence.source_reference)
+                .map(<[CancelInputItemRefV2]>::to_vec);
         if let Some(existing) = state_delta
             .logical
             .get(&logical_identity)
             .or_else(|| self.state.logical.get(&logical_identity))
         {
-            if self.stored_evidence_matches(&existing.evidence, &evidence.kind) {
+            if self.stored_evidence_matches(&existing.evidence, &evidence.kind)
+                && existing.cancellation_input_item_refs.as_deref()
+                    == cancellation_input_item_refs.as_deref()
+            {
                 if let SourceNeutralEvidenceKindV1::LateEconomicCoverage { economic_key } =
                     &evidence.kind
                 {
@@ -577,6 +655,7 @@ impl NormalizationCoreV1 {
                 logical_identity,
                 source_order: evidence.source_order,
                 source_reference: evidence.source_reference,
+                conflicting_evidence: evidence.kind,
             });
         }
 
@@ -599,6 +678,7 @@ impl NormalizationCoreV1 {
                         logical_identity,
                         source_order: evidence.source_order,
                         source_reference: evidence.source_reference,
+                        conflicting_evidence: evidence.kind,
                     });
                 }
 
@@ -616,6 +696,7 @@ impl NormalizationCoreV1 {
                             economic_identity,
                             disposition: fact.disposition.clone(),
                         },
+                        cancellation_input_item_refs,
                         source_reference: evidence.source_reference.clone(),
                     },
                 );
@@ -641,30 +722,44 @@ impl NormalizationCoreV1 {
                         source_order: evidence.source_order.clone(),
                         source_reference: evidence.source_reference.clone(),
                         evidence: evidence.kind.clone(),
-                        scope: PendingScopeV1::EconomicIdentity { economic_identity },
+                        scope: NormalizationPendingScopeV1::EconomicIdentity { economic_identity },
                     }
                 };
                 state_delta.logical.insert(
                     logical_identity,
                     StoredLogicalV1 {
                         evidence: StoredEvidenceV1::Evidence(evidence.kind),
+                        cancellation_input_item_refs,
                         source_reference: evidence.source_reference,
                     },
                 );
                 Ok(record)
             }
             SourceNeutralEvidenceKindV1::Pending { scope } => {
+                let normalized_scope = match scope {
+                    PendingScopeV1::EvidenceGap { scope_identity } => {
+                        NormalizationPendingScopeV1::EvidenceGap {
+                            scope_identity: scope_identity.clone(),
+                        }
+                    }
+                    PendingScopeV1::EconomicKey { economic_key } => {
+                        NormalizationPendingScopeV1::EconomicIdentity {
+                            economic_identity: self.economic_identity(economic_key),
+                        }
+                    }
+                };
                 let record = NormalizationRecordV1::Pending {
                     logical_identity: logical_identity.clone(),
                     source_order: evidence.source_order.clone(),
                     source_reference: evidence.source_reference.clone(),
                     evidence: evidence.kind.clone(),
-                    scope: scope.clone(),
+                    scope: normalized_scope,
                 };
                 state_delta.logical.insert(
                     logical_identity,
                     StoredLogicalV1 {
                         evidence: StoredEvidenceV1::Evidence(evidence.kind),
+                        cancellation_input_item_refs,
                         source_reference: evidence.source_reference,
                     },
                 );
@@ -684,6 +779,7 @@ impl NormalizationCoreV1 {
                     logical_identity,
                     StoredLogicalV1 {
                         evidence: StoredEvidenceV1::Evidence(evidence.kind),
+                        cancellation_input_item_refs,
                         source_reference: evidence.source_reference,
                     },
                 );
@@ -695,7 +791,7 @@ impl NormalizationCoreV1 {
     fn economic_alias(
         &self,
         logical_identity: StableLogicalIdentityV1,
-        evidence: SourceNeutralEvidenceV1,
+        evidence: OrderedEvidenceV1,
         fact: &SourceNeutralEconomicFactV1,
     ) -> NormalizationRecordV1 {
         NormalizationRecordV1::EconomicAlias {
@@ -746,6 +842,21 @@ impl NormalizationCoreV1 {
                     && disposition == &evidence.disposition()
             }
             (StoredEvidenceV1::Economic { .. }, _) => false,
+        }
+    }
+
+    fn cancellation_input_item_refs(
+        source_reference: &SimV2SourceReferenceV1,
+    ) -> Option<&[CancelInputItemRefV2]> {
+        match &source_reference.record {
+            SimV2SourceRecordReferenceV1::DirectResponse {
+                association:
+                    SimV2DirectResponseAssociationV1::CancellationTarget {
+                        input_item_refs, ..
+                    },
+                ..
+            } => Some(input_item_refs),
+            _ => None,
         }
     }
 }
