@@ -5,17 +5,20 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use contracts::Sha256Hex;
 use contracts::execution_normalization::{
+    DurableSourceReferenceV1, EXECUTION_NORMALIZATION_CONTRACT_V1,
     ExecutionNormalizationContextReferenceV1, ExecutionNormalizationContextV1,
-    NoeSourceCommitBoundaryV1, SimV2SourceWatermarkV1,
+    NoePublishedContainerReferenceV1, NoeResultReferenceV1, NoeSourceCommitBoundaryV1,
+    SimV2ContextSourceV1, SimV2SourceWatermarkV1, SourceNeutralAccountIdentityV1,
 };
+use contracts::{AccountInstanceKeyV1, Sha256Hex};
 use rustix::fs::{RenameFlags, renameat_with};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::core::{
     CoreErrorV1, NormalizationBatchInputV1, NormalizationCoreV1, NormalizationRecordV1,
+    SourceNeutralEntityKeyV1,
 };
 
 pub const NOE_CONTEXT_CONTAINER_V1: &str = "noe_context_container_v1";
@@ -58,14 +61,30 @@ pub struct DurableCommitV1 {
     pub commit_sequence: u64,
     pub boundary: NoeSourceCommitBoundaryV1,
     pub records: Vec<NormalizationRecordV1>,
-    pub boundary_sha256: Sha256Hex,
+    pub container_reference: NoePublishedContainerReferenceV1,
+}
+
+impl DurableCommitV1 {
+    pub fn result_reference(&self, record_ordinal: u64) -> Option<NoeResultReferenceV1> {
+        (record_ordinal < self.records.len() as u64).then(|| NoeResultReferenceV1 {
+            commit_container: self.container_reference.clone(),
+            record_ordinal,
+        })
+    }
+
+    pub fn result_references(&self) -> impl Iterator<Item = NoeResultReferenceV1> + '_ {
+        (0..self.records.len() as u64).map(|record_ordinal| NoeResultReferenceV1 {
+            commit_container: self.container_reference.clone(),
+            record_ordinal,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DurableCommitOutcomeV1 {
     Committed {
         commit_sequence: u64,
-        boundary_sha256: Sha256Hex,
+        container_reference: NoePublishedContainerReferenceV1,
     },
     AlreadyDurable {
         source_watermark: SimV2SourceWatermarkV1,
@@ -117,6 +136,11 @@ pub enum DurableErrorV1 {
     },
     CommitAlreadyExists {
         commit_sequence: u64,
+    },
+    RecordOrdinalOutOfRange {
+        path: PathBuf,
+        record_ordinal: u64,
+        record_count: u64,
     },
     DurabilityUncertain {
         path: PathBuf,
@@ -180,6 +204,15 @@ impl fmt::Display for DurableErrorV1 {
             Self::CommitAlreadyExists { commit_sequence } => {
                 write!(formatter, "NOE 提交文件已经存在：{commit_sequence}")
             }
+            Self::RecordOrdinalOutOfRange {
+                path,
+                record_ordinal,
+                record_count,
+            } => write!(
+                formatter,
+                "NOE 结果记录序位越界：{}：序位 {record_ordinal}，记录数 {record_count}",
+                path.display()
+            ),
             Self::DurabilityUncertain { path, message } => write!(
                 formatter,
                 "NOE 提交发布后的耐久状态不确定：{}：{message}",
@@ -209,11 +242,29 @@ impl From<CoreErrorV1> for DurableErrorV1 {
 pub struct DurableContextStoreV1 {
     context_directory: PathBuf,
     context: ExecutionNormalizationContextV1,
+    context_container_reference: NoePublishedContainerReferenceV1,
     commits: Vec<DurableCommitV1>,
     core: NormalizationCoreV1,
     poison: Option<PoisonedStoreV1>,
     #[cfg(test)]
     publish_fault: PublishFaultV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SimV2ContextSeedV1 {
+    pub run_id: String,
+    pub account_instance_key: AccountInstanceKeyV1,
+    pub run_opened: DurableSourceReferenceV1,
+    pub account_opening: DurableSourceReferenceV1,
+    pub account_opening_evidence_identity: String,
+    pub implementation_identity: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedNoeResultV1 {
+    pub context: ExecutionNormalizationContextV1,
+    pub boundary: NoeSourceCommitBoundaryV1,
+    pub record: NormalizationRecordV1,
 }
 
 #[derive(Clone, Debug)]
@@ -230,6 +281,49 @@ struct PublishFaultV1 {
 }
 
 impl DurableContextStoreV1 {
+    pub fn open_or_create_sim_v2(
+        root: impl AsRef<Path>,
+        seed: SimV2ContextSeedV1,
+    ) -> Result<Self, DurableErrorV1> {
+        let root = root.as_ref();
+        let account_scope = serde_json::to_string(&seed.account_instance_key).map_err(|error| {
+            DurableErrorV1::Core(CoreErrorV1::IdentityEncoding {
+                message: error.to_string(),
+            })
+        })?;
+        let account_identity = SourceNeutralAccountIdentityV1 {
+            source_category: "platform".to_owned(),
+            environment: "simulation".to_owned(),
+            run_scope: seed.run_id,
+            account_scope,
+        };
+        let source = SimV2ContextSourceV1 {
+            account_instance_key: seed.account_instance_key,
+            run_opened: seed.run_opened,
+            account_opening_evidence_identity: seed.account_opening_evidence_identity,
+            account_opening: seed.account_opening,
+        };
+        let context_reference = derive_sim_v2_context_reference(
+            EXECUTION_NORMALIZATION_CONTRACT_V1,
+            &account_identity,
+            &source,
+            &seed.implementation_identity,
+        )?;
+        let context = ExecutionNormalizationContextV1 {
+            context_reference: context_reference.clone(),
+            account_identity,
+            source,
+            contract_version: EXECUTION_NORMALIZATION_CONTRACT_V1.to_owned(),
+            implementation_identity: seed.implementation_identity,
+        };
+
+        match Self::open(root, &context_reference) {
+            Ok(store) => Ok(store),
+            Err(DurableErrorV1::ContextNotFound { .. }) => Self::create(root, context),
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn create(
         root: impl AsRef<Path>,
         context: ExecutionNormalizationContextV1,
@@ -252,16 +346,21 @@ impl DurableContextStoreV1 {
         fs::create_dir(&commits_directory)
             .map_err(|error| io_error("创建提交目录", &commits_directory, error))?;
 
+        let context_path = context_directory.join(CONTEXT_FILE_NAME);
         let payload = ContextPayloadV1 {
             container_version: NOE_CONTEXT_CONTAINER_V1.to_owned(),
             encoding: NOE_CONTAINER_ENCODING_V1.to_owned(),
             context: context.clone(),
         };
         let container = ContextContainerV1 {
-            boundary_sha256: payload_digest(&payload, context_directory.join(CONTEXT_FILE_NAME))?,
+            boundary_sha256: payload_digest(&payload, &context_path)?,
             payload,
         };
-        let bytes = encode_container(&container, context_directory.join(CONTEXT_FILE_NAME))?;
+        let context_container_reference = NoePublishedContainerReferenceV1 {
+            location: context_path.to_string_lossy().into_owned(),
+            boundary_sha256: container.boundary_sha256.clone(),
+        };
+        let bytes = encode_container(&container, &context_path)?;
         publish_no_replace(
             &context_directory,
             ".context.json.tmp",
@@ -276,6 +375,7 @@ impl DurableContextStoreV1 {
         Ok(Self {
             context_directory,
             context,
+            context_container_reference,
             commits: Vec::new(),
             core,
             poison: None,
@@ -365,10 +465,17 @@ impl DurableContextStoreV1 {
                 commit_sequence: container.payload.commit_sequence,
                 boundary: container.payload.boundary,
                 records: container.payload.records,
-                boundary_sha256: container.boundary_sha256,
+                container_reference: NoePublishedContainerReferenceV1 {
+                    location: path.to_string_lossy().into_owned(),
+                    boundary_sha256: container.boundary_sha256,
+                },
             });
         }
 
+        let context_container_reference = NoePublishedContainerReferenceV1 {
+            location: context_path.to_string_lossy().into_owned(),
+            boundary_sha256: context_container.boundary_sha256,
+        };
         let context = context_container.payload.context;
         let core = NormalizationCoreV1::restore(
             context.clone(),
@@ -377,6 +484,7 @@ impl DurableContextStoreV1 {
         Ok(Self {
             context_directory,
             context,
+            context_container_reference,
             commits,
             core,
             poison: None,
@@ -389,8 +497,19 @@ impl DurableContextStoreV1 {
         &self.context
     }
 
+    pub fn context_container_reference(&self) -> &NoePublishedContainerReferenceV1 {
+        &self.context_container_reference
+    }
+
     pub fn commits(&self) -> &[DurableCommitV1] {
         &self.commits
+    }
+
+    pub fn entity_identity(
+        &self,
+        key: &SourceNeutralEntityKeyV1,
+    ) -> Result<contracts::execution_normalization::StableLogicalIdentityV1, DurableErrorV1> {
+        self.core.entity_identity(key).map_err(Into::into)
     }
 
     pub fn durable_through(&self) -> Option<&SimV2SourceWatermarkV1> {
@@ -488,19 +607,139 @@ impl DurableContextStoreV1 {
             return Err(error);
         }
 
+        let container_reference = NoePublishedContainerReferenceV1 {
+            location: target_path.to_string_lossy().into_owned(),
+            boundary_sha256,
+        };
         let commit = DurableCommitV1 {
             commit_sequence,
             boundary: container.payload.boundary,
             records: container.payload.records,
-            boundary_sha256: boundary_sha256.clone(),
+            container_reference: container_reference.clone(),
         };
         self.commits.push(commit);
         self.core.accept_delta(state_delta);
         Ok(DurableCommitOutcomeV1::Committed {
             commit_sequence,
-            boundary_sha256,
+            container_reference,
         })
     }
+}
+
+pub fn read_noe_result_v1(
+    reference: &NoeResultReferenceV1,
+) -> Result<ResolvedNoeResultV1, DurableErrorV1> {
+    let commit_path = PathBuf::from(&reference.commit_container.location);
+    let commits_directory = commit_path.parent().filter(|path| {
+        path.file_name()
+            .is_some_and(|name| name == COMMITS_DIRECTORY_NAME)
+    });
+    let Some(commits_directory) = commits_directory else {
+        return Err(DurableErrorV1::ContainerDecode {
+            path: commit_path,
+            message: "提交容器不在固定 commits 目录".to_owned(),
+        });
+    };
+    let context_directory = commits_directory
+        .parent()
+        .expect("固定 commits 目录必有上下文父目录");
+    let file_sequence = commit_sequence_from_path(&commit_path)?;
+    let container: CommitContainerV1 = decode_container(&commit_path)?;
+    check_container_header(
+        &commit_path,
+        &container.payload.container_version,
+        NOE_COMMIT_CONTAINER_V1,
+        &container.payload.encoding,
+    )?;
+    check_digest(&commit_path, &container.payload, &container.boundary_sha256)?;
+    if container.boundary_sha256 != reference.commit_container.boundary_sha256 {
+        return Err(DurableErrorV1::BoundaryDigestMismatch {
+            path: commit_path,
+            expected: reference.commit_container.boundary_sha256.clone(),
+            found: container.boundary_sha256,
+        });
+    }
+    if container.payload.commit_sequence != file_sequence {
+        return Err(DurableErrorV1::CommitSequenceMismatch {
+            expected: file_sequence,
+            found: container.payload.commit_sequence,
+        });
+    }
+
+    let record_count = container.payload.records.len() as u64;
+    let record = container
+        .payload
+        .records
+        .get(reference.record_ordinal as usize)
+        .cloned()
+        .ok_or_else(|| DurableErrorV1::RecordOrdinalOutOfRange {
+            path: commit_path.clone(),
+            record_ordinal: reference.record_ordinal,
+            record_count,
+        })?;
+
+    let context_path = context_directory.join(CONTEXT_FILE_NAME);
+    let context_container: ContextContainerV1 = decode_container(&context_path)?;
+    check_container_header(
+        &context_path,
+        &context_container.payload.container_version,
+        NOE_CONTEXT_CONTAINER_V1,
+        &context_container.payload.encoding,
+    )?;
+    check_digest(
+        &context_path,
+        &context_container.payload,
+        &context_container.boundary_sha256,
+    )?;
+    if context_container.payload.context.context_reference
+        != container.payload.boundary.context_reference
+    {
+        return Err(DurableErrorV1::ContextReferenceMismatch {
+            expected: container.payload.boundary.context_reference,
+            found: context_container.payload.context.context_reference,
+        });
+    }
+    let derived_context_reference = derive_sim_v2_context_reference(
+        &context_container.payload.context.contract_version,
+        &context_container.payload.context.account_identity,
+        &context_container.payload.context.source,
+        &context_container.payload.context.implementation_identity,
+    )?;
+    if context_container.payload.context.context_reference != derived_context_reference {
+        return Err(DurableErrorV1::ContextReferenceMismatch {
+            expected: derived_context_reference,
+            found: context_container.payload.context.context_reference,
+        });
+    }
+
+    Ok(ResolvedNoeResultV1 {
+        context: context_container.payload.context,
+        boundary: container.payload.boundary,
+        record,
+    })
+}
+
+fn derive_sim_v2_context_reference(
+    contract_version: &str,
+    account_identity: &SourceNeutralAccountIdentityV1,
+    source: &SimV2ContextSourceV1,
+    implementation_identity: &str,
+) -> Result<ExecutionNormalizationContextReferenceV1, DurableErrorV1> {
+    let encoded = serde_json::to_vec(&(
+        contract_version,
+        account_identity,
+        source,
+        implementation_identity,
+    ))
+    .map_err(|error| {
+        DurableErrorV1::Core(CoreErrorV1::IdentityEncoding {
+            message: error.to_string(),
+        })
+    })?;
+    Ok(ExecutionNormalizationContextReferenceV1(format!(
+        "noe-context-v1:{}",
+        sha256_hex(&encoded)
+    )))
 }
 
 fn context_directory(
@@ -646,6 +885,31 @@ fn publish_no_replace(
     Ok(())
 }
 
+pub(crate) fn publish_artifact_no_replace(path: &Path, bytes: &[u8]) -> Result<(), DurableErrorV1> {
+    let directory = path.parent().ok_or_else(|| DurableErrorV1::Io {
+        operation: "解析产物父目录",
+        path: path.to_path_buf(),
+        message: "路径没有父目录".to_owned(),
+    })?;
+    fs::create_dir_all(directory).map_err(|error| io_error("创建产物目录", directory, error))?;
+    let target_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| DurableErrorV1::Io {
+            operation: "解析产物文件名",
+            path: path.to_path_buf(),
+            message: "文件名不是 UTF-8".to_owned(),
+        })?;
+    publish_no_replace(
+        directory,
+        &format!(".{target_name}.tmp"),
+        target_name,
+        bytes,
+        None,
+        PublishFaultV1::default(),
+    )
+}
+
 fn injected_io_error(message: &'static str) -> std::io::Error {
     std::io::Error::other(message)
 }
@@ -740,7 +1004,8 @@ mod tests {
     use contracts::execution_normalization::{
         DurableSourceReferenceV1, ImmutableSourceReferenceV1, SimV2ContextSourceV1,
         SimV2DirectResponseAssociationV1, SimV2SourceRecordReferenceV1, SimV2SourceReferenceV1,
-        SourceNeutralAccountIdentityV1,
+        SourceNeutralAccountIdentityV1, SourceNeutralControlResultV1,
+        SourceNeutralSubmissionOutcomeV1,
     };
     use contracts::{AccountInstanceKeyV1, PlatformSourceV1, SimCallerRoleV1};
     use tempfile::TempDir;
@@ -748,7 +1013,7 @@ mod tests {
     use super::*;
     use crate::core::{
         NormalizationRecordV1, SourceNeutralEvidenceKindV1, SourceNeutralEvidenceV1,
-        SourceNeutralLogicalKeyV1, SubmissionDispositionV1,
+        SourceNeutralLogicalKeyV1,
     };
 
     fn context() -> ExecutionNormalizationContextV1 {
@@ -815,8 +1080,10 @@ mod tests {
                     global_request_id: "request-55-sync-fault".to_owned(),
                     batch_item_ordinal: 0,
                 },
-                kind: SourceNeutralEvidenceKindV1::Submission {
-                    disposition: SubmissionDispositionV1::Accepted,
+                kind: SourceNeutralEvidenceKindV1::Control {
+                    result: SourceNeutralControlResultV1::Submission {
+                        outcome: SourceNeutralSubmissionOutcomeV1::RejectedNoEffect,
+                    },
                 },
             }],
         }

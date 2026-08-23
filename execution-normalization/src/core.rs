@@ -6,8 +6,11 @@ use contracts::execution_normalization::{
     ExecutionNormalizationContextReferenceV1, ExecutionNormalizationContextV1,
     NoeEconomicFactReferenceV1, SimV2DirectResponseAssociationV1, SimV2SourceRecordReferenceV1,
     SimV2SourceReferenceV1, SimV2SourceWatermarkV1, SourceNeutralAccountBalanceDeltaV1,
-    SourceNeutralAccountTransitionKindV1, SourceNeutralEconomicDispositionV1,
-    SourceNeutralEconomicFactV1, SourceNeutralEconomicIdentityV1, StableLogicalIdentityV1,
+    SourceNeutralAccountTransitionKindV1, SourceNeutralControlResultV1,
+    SourceNeutralEconomicDispositionV1, SourceNeutralEconomicFactV1,
+    SourceNeutralEconomicIdentityV1, SourceNeutralMarketEnrollmentResultV1,
+    SourceNeutralOrderLifecycleResultV1, SourceNeutralSettlementLifecycleResultV1,
+    SourceNeutralTradeLifecycleResultV1, StableLogicalIdentityV1,
 };
 use contracts::{CancelInputItemRefV2, ConditionId, ExactDecimal};
 use serde::{Deserialize, Serialize};
@@ -40,6 +43,12 @@ pub enum SourceNeutralLogicalKeyV1 {
         global_request_id: String,
         target_ordinal: u64,
     },
+    DirectResponseRequest {
+        global_request_id: String,
+    },
+    MarketEnrollment {
+        enrollment_request_id: String,
+    },
     OrderLifecycle {
         order_identity: String,
         occurrence: u64,
@@ -49,11 +58,13 @@ pub enum SourceNeutralLogicalKeyV1 {
         occurrence: u64,
     },
     SettlementLifecycle {
-        settlement_identity: String,
-        occurrence: u64,
+        private_feedback_sequence: u64,
     },
     EconomicEvidence {
         evidence_identity: String,
+    },
+    AccountTransition {
+        account_transition_seq: u64,
     },
     AuditEvidence {
         evidence_identity: String,
@@ -122,35 +133,11 @@ impl SourceNeutralEconomicEvidenceV1 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SubmissionDispositionV1 {
-    Accepted,
-    RejectedNoEffect,
-    EvidenceUnknownNoEffect,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OrderLifecycleDispositionV1 {
-    Open,
-    PartiallyFilled {
-        cumulative_filled_shares: ExactDecimal,
-    },
-    Filled,
-    Cancelled,
-    Expired,
-    VenueDustClosed,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TradeLifecycleDispositionV1 {
-    Observed,
-    Finalized,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SettlementLifecycleDispositionV1 {
-    Resolved,
-    Redeemed,
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum SourceNeutralEntityKeyV1 {
+    Order { source_order_id: String },
+    Trade { source_trade_id: String },
+    Resolution { source_resolution_id: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,17 +162,20 @@ pub enum NormalizationPendingScopeV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SourceNeutralEvidenceKindV1 {
-    Submission {
-        disposition: SubmissionDispositionV1,
+    MarketEnrollment {
+        result: SourceNeutralMarketEnrollmentResultV1,
+    },
+    Control {
+        result: SourceNeutralControlResultV1,
     },
     OrderLifecycle {
-        disposition: OrderLifecycleDispositionV1,
+        result: SourceNeutralOrderLifecycleResultV1,
     },
     TradeLifecycle {
-        disposition: TradeLifecycleDispositionV1,
+        result: SourceNeutralTradeLifecycleResultV1,
     },
     SettlementLifecycle {
-        disposition: SettlementLifecycleDispositionV1,
+        result: SourceNeutralSettlementLifecycleResultV1,
     },
     Economic {
         evidence: SourceNeutralEconomicEvidenceV1,
@@ -569,6 +559,22 @@ impl NormalizationCoreV1 {
         &self.context
     }
 
+    pub(crate) fn entity_identity(
+        &self,
+        key: &SourceNeutralEntityKeyV1,
+    ) -> Result<StableLogicalIdentityV1, CoreErrorV1> {
+        serde_json::to_string(&(
+            NORMALIZATION_CORE_V1,
+            &self.context.account_identity,
+            "entity",
+            key,
+        ))
+        .map(|encoded| StableLogicalIdentityV1(format!("noe-entity-v1:{encoded}")))
+        .map_err(|error| CoreErrorV1::IdentityEncoding {
+            message: error.to_string(),
+        })
+    }
+
     pub fn prepare_batch(
         &self,
         input: NormalizationBatchInputV1,
@@ -870,7 +876,8 @@ impl NormalizationCoreV1 {
                 );
                 Ok(record)
             }
-            SourceNeutralEvidenceKindV1::Submission { .. }
+            SourceNeutralEvidenceKindV1::MarketEnrollment { .. }
+            | SourceNeutralEvidenceKindV1::Control { .. }
             | SourceNeutralEvidenceKindV1::OrderLifecycle { .. }
             | SourceNeutralEvidenceKindV1::TradeLifecycle { .. }
             | SourceNeutralEvidenceKindV1::SettlementLifecycle { .. } => {

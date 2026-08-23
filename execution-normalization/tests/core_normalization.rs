@@ -3,18 +3,20 @@ use contracts::execution_normalization::{
     ExecutionNormalizationContextV1, ImmutableSourceReferenceV1, SimV2ContextSourceV1,
     SimV2DirectResponseAssociationV1, SimV2SourceRecordReferenceV1, SimV2SourceReferenceV1,
     SimV2SourceWatermarkV1, SourceNeutralAccountBalanceDeltaV1, SourceNeutralAccountIdentityV1,
-    SourceNeutralAccountTransitionKindV1, SourceNeutralEconomicIdentityV1, StableLogicalIdentityV1,
+    SourceNeutralAccountTransitionKindV1, SourceNeutralCancellationOutcomeV1,
+    SourceNeutralControlResultV1, SourceNeutralEconomicIdentityV1,
+    SourceNeutralOrderLifecycleEventV1, SourceNeutralOrderLifecycleResultV1,
+    SourceNeutralOrderStateV1, SourceNeutralSubmissionOutcomeV1, StableLogicalIdentityV1,
 };
 use contracts::{
-    AccountInstanceKeyV1, CancelInputItemRefV2, ExactDecimal, PlatformSourceV1, SimCallerRoleV1,
-    TokenId,
+    AccountInstanceKeyV1, CancelInputItemRefV2, ConditionId, ExactDecimal, PlatformSourceV1,
+    SimCallerRoleV1, TokenId,
 };
 use execution_normalization::{
     NormalizationBatchInputV1, NormalizationConflictScopeV1, NormalizationCoreV1,
-    NormalizationPendingScopeV1, NormalizationRecordV1, OrderLifecycleDispositionV1,
-    PendingScopeV1, SourceNeutralEconomicEvidenceV1, SourceNeutralEconomicKeyV1,
-    SourceNeutralEvidenceKindV1, SourceNeutralEvidenceV1, SourceNeutralLogicalKeyV1,
-    SourceSequenceV1, SubmissionDispositionV1,
+    NormalizationPendingScopeV1, NormalizationRecordV1, PendingScopeV1,
+    SourceNeutralEconomicEvidenceV1, SourceNeutralEconomicKeyV1, SourceNeutralEvidenceKindV1,
+    SourceNeutralEvidenceV1, SourceNeutralLogicalKeyV1, SourceSequenceV1,
 };
 
 fn account_identity() -> SourceNeutralAccountIdentityV1 {
@@ -135,6 +137,23 @@ fn economic_evidence(
     }
 }
 
+fn submission(outcome: SourceNeutralSubmissionOutcomeV1) -> SourceNeutralEvidenceKindV1 {
+    SourceNeutralEvidenceKindV1::Control {
+        result: SourceNeutralControlResultV1::Submission { outcome },
+    }
+}
+
+fn order_lifecycle(event: SourceNeutralOrderLifecycleEventV1) -> SourceNeutralEvidenceKindV1 {
+    SourceNeutralEvidenceKindV1::OrderLifecycle {
+        result: SourceNeutralOrderLifecycleResultV1 {
+            order_identity: StableLogicalIdentityV1("order-55".to_owned()),
+            condition_id: ConditionId("condition-55".to_owned()),
+            token_id: TokenId("token-up-55".to_owned()),
+            event,
+        },
+    }
+}
+
 #[test]
 fn feedback_sorting_preserves_submission_layers_partial_fill_and_zero_effects() {
     let core = NormalizationCoreV1::new(context());
@@ -150,9 +169,7 @@ fn feedback_sorting_preserves_submission_layers_partial_fill_and_zero_effects() 
                         order_identity: "order-55".to_owned(),
                         occurrence: 14,
                     },
-                    SourceNeutralEvidenceKindV1::OrderLifecycle {
-                        disposition: OrderLifecycleDispositionV1::Cancelled,
-                    },
+                    order_lifecycle(SourceNeutralOrderLifecycleEventV1::CallerCanceled),
                 ),
                 evidence(
                     0,
@@ -162,9 +179,7 @@ fn feedback_sorting_preserves_submission_layers_partial_fill_and_zero_effects() 
                         global_request_id: "request-55".to_owned(),
                         batch_item_ordinal: 0,
                     },
-                    SourceNeutralEvidenceKindV1::Submission {
-                        disposition: SubmissionDispositionV1::EvidenceUnknownNoEffect,
-                    },
+                    submission(SourceNeutralSubmissionOutcomeV1::EvidenceUnknownNoEffect),
                 ),
                 evidence(
                     0,
@@ -174,9 +189,7 @@ fn feedback_sorting_preserves_submission_layers_partial_fill_and_zero_effects() 
                         order_identity: "order-55".to_owned(),
                         occurrence: 13,
                     },
-                    SourceNeutralEvidenceKindV1::OrderLifecycle {
-                        disposition: OrderLifecycleDispositionV1::VenueDustClosed,
-                    },
+                    order_lifecycle(SourceNeutralOrderLifecycleEventV1::VenueDustTerminal),
                 ),
                 evidence(
                     0,
@@ -186,11 +199,9 @@ fn feedback_sorting_preserves_submission_layers_partial_fill_and_zero_effects() 
                         order_identity: "order-55".to_owned(),
                         occurrence: 12,
                     },
-                    SourceNeutralEvidenceKindV1::OrderLifecycle {
-                        disposition: OrderLifecycleDispositionV1::PartiallyFilled {
-                            cumulative_filled_shares: ExactDecimal("1.25".to_owned()),
-                        },
-                    },
+                    order_lifecycle(SourceNeutralOrderLifecycleEventV1::Accepted {
+                        state: SourceNeutralOrderStateV1::Matched,
+                    }),
                 ),
                 evidence(
                     0,
@@ -200,9 +211,9 @@ fn feedback_sorting_preserves_submission_layers_partial_fill_and_zero_effects() 
                         order_identity: "order-55".to_owned(),
                         occurrence: 11,
                     },
-                    SourceNeutralEvidenceKindV1::OrderLifecycle {
-                        disposition: OrderLifecycleDispositionV1::Open,
-                    },
+                    order_lifecycle(SourceNeutralOrderLifecycleEventV1::Accepted {
+                        state: SourceNeutralOrderStateV1::Open,
+                    }),
                 ),
             ],
         })
@@ -228,8 +239,10 @@ fn feedback_sorting_preserves_submission_layers_partial_fill_and_zero_effects() 
     assert!(matches!(
         &prepared.batch().records[0],
         NormalizationRecordV1::Evidence {
-            evidence: SourceNeutralEvidenceKindV1::Submission {
-                disposition: SubmissionDispositionV1::EvidenceUnknownNoEffect
+            evidence: SourceNeutralEvidenceKindV1::Control {
+                result: SourceNeutralControlResultV1::Submission {
+                    outcome: SourceNeutralSubmissionOutcomeV1::EvidenceUnknownNoEffect
+                }
             },
             ..
         }
@@ -238,7 +251,12 @@ fn feedback_sorting_preserves_submission_layers_partial_fill_and_zero_effects() 
         &prepared.batch().records[2],
         NormalizationRecordV1::Evidence {
             evidence: SourceNeutralEvidenceKindV1::OrderLifecycle {
-                disposition: OrderLifecycleDispositionV1::PartiallyFilled { .. }
+                result: SourceNeutralOrderLifecycleResultV1 {
+                    event: SourceNeutralOrderLifecycleEventV1::Accepted {
+                        state: SourceNeutralOrderStateV1::Matched
+                    },
+                    ..
+                }
             },
             ..
         }
@@ -247,7 +265,10 @@ fn feedback_sorting_preserves_submission_layers_partial_fill_and_zero_effects() 
         &prepared.batch().records[3],
         NormalizationRecordV1::Evidence {
             evidence: SourceNeutralEvidenceKindV1::OrderLifecycle {
-                disposition: OrderLifecycleDispositionV1::VenueDustClosed
+                result: SourceNeutralOrderLifecycleResultV1 {
+                    event: SourceNeutralOrderLifecycleEventV1::VenueDustTerminal,
+                    ..
+                }
             },
             ..
         }
@@ -256,7 +277,10 @@ fn feedback_sorting_preserves_submission_layers_partial_fill_and_zero_effects() 
         &prepared.batch().records[4],
         NormalizationRecordV1::Evidence {
             evidence: SourceNeutralEvidenceKindV1::OrderLifecycle {
-                disposition: OrderLifecycleDispositionV1::Cancelled
+                result: SourceNeutralOrderLifecycleResultV1 {
+                    event: SourceNeutralOrderLifecycleEventV1::CallerCanceled,
+                    ..
+                }
             },
             ..
         }
@@ -288,27 +312,21 @@ fn stable_logical_identity_is_deterministic_idempotent_and_conflict_scoped() {
                     20,
                     0,
                     logical_key.clone(),
-                    SourceNeutralEvidenceKindV1::Submission {
-                        disposition: SubmissionDispositionV1::Accepted,
-                    },
+                    submission(SourceNeutralSubmissionOutcomeV1::RejectedNoEffect),
                 ),
                 evidence(
                     0,
                     21,
                     0,
                     logical_key.clone(),
-                    SourceNeutralEvidenceKindV1::Submission {
-                        disposition: SubmissionDispositionV1::Accepted,
-                    },
+                    submission(SourceNeutralSubmissionOutcomeV1::RejectedNoEffect),
                 ),
                 evidence(
                     0,
                     22,
                     0,
                     logical_key,
-                    SourceNeutralEvidenceKindV1::Submission {
-                        disposition: SubmissionDispositionV1::RejectedNoEffect,
-                    },
+                    submission(SourceNeutralSubmissionOutcomeV1::EvidenceUnknownNoEffect),
                 ),
             ],
         })
@@ -567,9 +585,9 @@ fn private_feedback_sequence_from_the_source_reference_is_authoritative() {
             order_identity: "source-order-10".to_owned(),
             occurrence: 0,
         },
-        SourceNeutralEvidenceKindV1::OrderLifecycle {
-            disposition: OrderLifecycleDispositionV1::Open,
-        },
+        order_lifecycle(SourceNeutralOrderLifecycleEventV1::Accepted {
+            state: SourceNeutralOrderStateV1::Open,
+        }),
     );
     let source_twenty = evidence(
         0,
@@ -579,9 +597,9 @@ fn private_feedback_sequence_from_the_source_reference_is_authoritative() {
             order_identity: "source-order-20".to_owned(),
             occurrence: 0,
         },
-        SourceNeutralEvidenceKindV1::OrderLifecycle {
-            disposition: OrderLifecycleDispositionV1::Open,
-        },
+        order_lifecycle(SourceNeutralOrderLifecycleEventV1::Accepted {
+            state: SourceNeutralOrderStateV1::Open,
+        }),
     );
     let prepared = core
         .prepare_batch(NormalizationBatchInputV1 {
@@ -636,8 +654,11 @@ fn cancellation_input_item_refs_participate_in_same_payload_decisions() {
         global_request_id: "cancel-request-55".to_owned(),
         target_ordinal: 3,
     };
-    let kind = SourceNeutralEvidenceKindV1::Submission {
-        disposition: SubmissionDispositionV1::RejectedNoEffect,
+    let kind = SourceNeutralEvidenceKindV1::Control {
+        result: SourceNeutralControlResultV1::Cancellation {
+            order_identity: StableLogicalIdentityV1("cancel-order-55".to_owned()),
+            outcome: SourceNeutralCancellationOutcomeV1::NotCanceledNoEffect,
+        },
     };
     let changed_association = core
         .prepare_batch(NormalizationBatchInputV1 {
@@ -690,18 +711,14 @@ fn conflict_record_keeps_the_incoming_minimum_evidence() {
                     60,
                     0,
                     logical_key.clone(),
-                    SourceNeutralEvidenceKindV1::Submission {
-                        disposition: SubmissionDispositionV1::Accepted,
-                    },
+                    submission(SourceNeutralSubmissionOutcomeV1::RejectedNoEffect),
                 ),
                 evidence(
                     0,
                     61,
                     0,
                     logical_key,
-                    SourceNeutralEvidenceKindV1::Submission {
-                        disposition: SubmissionDispositionV1::RejectedNoEffect,
-                    },
+                    submission(SourceNeutralSubmissionOutcomeV1::EvidenceUnknownNoEffect),
                 ),
             ],
         })
@@ -709,8 +726,8 @@ fn conflict_record_keeps_the_incoming_minimum_evidence() {
 
     let encoded = serde_json::to_value(&conflict.batch().records[1]).unwrap();
     assert_eq!(
-        encoded["Conflict"]["conflicting_evidence"]["Submission"]["disposition"],
-        "RejectedNoEffect"
+        encoded["Conflict"]["conflicting_evidence"]["Control"]["result"]["Submission"]["outcome"],
+        "EvidenceUnknownNoEffect"
     );
 }
 
