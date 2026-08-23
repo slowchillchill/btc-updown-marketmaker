@@ -5741,8 +5741,14 @@ mod tests {
     use contracts::{
         AssetIdentityV1, BookSide, ClobMarketId, ConditionId, ExactDecimal, InitialAccountStateV2,
         LevelExecutionBasis, LevelExecutionTransitionV3, MarketIdentityV2, MarketWindowV2,
-        OutcomeIdentityV1, QueueResultQuality, SimCallerRoleV1, SourceAttributionQuality, TokenId,
+        OutcomeIdentityV1, PublicTradeIdSourceV1, QueueResultQuality, ResyncQuality,
+        SimCallerRoleV1, SourceAttributionQuality, TokenId,
     };
+    use data_pipeline_training::{
+        ClosedExecutionMarketIndexBucketV1, GateASimulationReplayAdapter, ReplayIndexClosureV1,
+        gate_a_formal_output_config, open_published_gate_a_final,
+    };
+    use rust_decimal::Decimal;
 
     use super::*;
 
@@ -5751,7 +5757,9 @@ mod tests {
     use crate::latency_profile::load_embedded_proxy_latency_profile;
     use crate::matching::BuyOrderAcceptedV2;
     use crate::platform_rules::{
-        ImplementationIdentityV1, tests::successful_snapshot_v3_for_sim_tests,
+        CurrentProcessSnapshotRequestV1, ImplementationIdentityV1, ReferenceMarketSpecV1,
+        ReferenceOutcomeSpecV1, query_and_seal_current_process_snapshot_v3,
+        tests::successful_snapshot_v3_for_sim_tests,
     };
     use crate::runtime_v2::{
         CancelAllOrdersRequestV2, CancelOrderBatchItemV2, CancelOrderRequestV2,
@@ -15620,5 +15628,894 @@ mod tests {
             Err(SimRunActorErrorV2::LatencyProfileIdentityMismatch)
         ));
         assert!(!latency_path.exists());
+    }
+
+    const REAL_GATE_A_FINAL: &str = "/home/chillchill/sim-system/.local-artifacts/data-pipeline-training/gate-a/bc2fdeddd1ea9a6c931823be498591ccaf32dfad61ed969f86c92b16ae3cc574";
+    const REAL_CONDITION_ID: &str =
+        "0xd4346bcf419856fa3261d3c0705597d5c909ead020b9f1a0de468092704fc65f";
+    const REAL_UP_TOKEN_ID: &str =
+        "45253098770861975037434792771412818336165758089047645530470012231811628219325";
+    const REAL_DOWN_TOKEN_ID: &str =
+        "13103176462561566402126211408478811357460751704260150146723274072578196298541";
+    const REAL_TRADE_EVENT_ID: &str =
+        "0ba3871e7c0b1b6356f2e70f679ff250a4fe1a7c343289711ea05cd06c69f830";
+
+    #[derive(Default)]
+    struct RealGateAVerticalCoverage {
+        initial_tokens: [BTreeSet<String>; 2],
+        tick_tokens: [BTreeSet<String>; 2],
+        trade_count: [usize; 2],
+        book_resync_count: [usize; 2],
+        resync_boundary_count: [usize; 2],
+        trading_state_count: [usize; 2],
+        resolution_count: [usize; 2],
+        first_initial_bid: Option<(String, Decimal)>,
+        evidence_seen: [bool; 4],
+        golden_initial: Vec<ExecutionMarketEventV3>,
+        golden_resync: Option<ExecutionMarketEventV3>,
+        golden_resolution: Option<ExecutionMarketEventV3>,
+    }
+
+    impl RealGateAVerticalCoverage {
+        fn observe(
+            &mut self,
+            path: MarketEventPathV1,
+            bucket: &ClosedExecutionMarketIndexBucketV1,
+        ) {
+            let index = usize::from(path == MarketEventPathV1::PublicVisibility);
+            for event in bucket.events().iter() {
+                assert_eq!(event.market.condition_id.0, REAL_CONDITION_ID);
+                match path {
+                    MarketEventPathV1::HiddenPlatform => assert_eq!(
+                        event.time.source_event_at_utc_ms,
+                        Some(bucket.index_at_utc_ms())
+                    ),
+                    MarketEventPathV1::PublicVisibility => {
+                        assert_eq!(event.time.received_at_utc_ms, bucket.index_at_utc_ms())
+                    }
+                }
+                if event.quality.resync == ResyncQuality::ResyncBoundary {
+                    self.resync_boundary_count[index] += 1;
+                }
+                match &event.payload {
+                    ExecutionMarketEventPayloadV3::MarketTradingState(_) => {
+                        self.trading_state_count[index] += 1
+                    }
+                    ExecutionMarketEventPayloadV3::InitialL2Snapshot(snapshot) => {
+                        self.initial_tokens[index].insert(snapshot.asset.token_id.0.clone());
+                        if path == MarketEventPathV1::HiddenPlatform
+                            && self.first_initial_bid.is_none()
+                        {
+                            self.first_initial_bid = snapshot.bids.first().map(|level| {
+                                (
+                                    snapshot.asset.token_id.0.clone(),
+                                    level
+                                        .price_pusd_per_share
+                                        .0
+                                        .parse()
+                                        .expect("真实初始盘口价格必须可解析"),
+                                )
+                            });
+                        }
+                        self.evidence_seen[0] |= event.event_id.0
+                            == "88595520314550562534ca587f82b31caf82c651025e5d7e652d5695c4e70628";
+                        if path == MarketEventPathV1::HiddenPlatform
+                            && matches!(
+                                event.event_id.0.as_str(),
+                                "3e3208011d6de4a8eb363cd546f9f035ad1da6f03ed32c0ceb3b383d5ab802fe"
+                                    | "88595520314550562534ca587f82b31caf82c651025e5d7e652d5695c4e70628"
+                            )
+                        {
+                            self.golden_initial.push(event.clone());
+                        }
+                    }
+                    ExecutionMarketEventPayloadV3::TickSizeChange(change) => {
+                        self.tick_tokens[index].insert(change.asset.token_id.0.clone());
+                        self.evidence_seen[1] |= event.event_id.0
+                            == "b9893ed474c9c6fc688eadaf1626c45ba0f380508bd327a18d5f0588e007c338";
+                    }
+                    ExecutionMarketEventPayloadV3::PublicTrade(trade) => {
+                        assert!(!trade.trade_id.is_empty());
+                        assert_eq!(
+                            trade.trade_id_source,
+                            PublicTradeIdSourceV1::DerivedSourceEvidence
+                        );
+                        self.trade_count[index] += 1;
+                        if event.event_id.0 == REAL_TRADE_EVENT_ID {
+                            assert_eq!(
+                                trade.fee_rate_bps.as_ref().map(|fee| fee.0.as_str()),
+                                Some("0")
+                            );
+                            self.evidence_seen[2] = true;
+                        }
+                    }
+                    ExecutionMarketEventPayloadV3::LevelExecutionTransition(transition)
+                        if transition.basis == LevelExecutionBasis::BookResyncDeltaInference =>
+                    {
+                        self.book_resync_count[index] += 1;
+                        if path == MarketEventPathV1::HiddenPlatform
+                            && event.event_id.0
+                                == "c114c118d06b40f1bbca4a383fca55cf5b08ae8fffa8d083dd57e65e7389a355"
+                        {
+                            self.golden_resync = Some(event.clone());
+                        }
+                    }
+                    ExecutionMarketEventPayloadV3::MarketResolutionTerminal(_) => {
+                        self.resolution_count[index] += 1;
+                        self.evidence_seen[3] |= event.event_id.0
+                            == "2e70d5e3f9c369d8ea6b585843b594b5b166b9a7ff0902ade7405635fdd000c3";
+                        if path == MarketEventPathV1::HiddenPlatform {
+                            self.golden_resolution = Some(event.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn real_gate_a_market() -> PlatformMarketV1 {
+        PlatformMarketV1::try_new(
+            MarketIdentityV2 {
+                condition_id: ConditionId(REAL_CONDITION_ID.to_owned()),
+                clob_market_id: ClobMarketId("3278040".to_owned()),
+                window: MarketWindowV2 {
+                    start_at_utc_ms: 1_785_715_500_000,
+                    end_at_utc_ms: 1_785_715_800_000,
+                },
+            },
+            [
+                AssetIdentityV1 {
+                    token_id: TokenId(REAL_UP_TOKEN_ID.to_owned()),
+                    outcome: OutcomeIdentityV1 {
+                        index: 0,
+                        label: "Up".to_owned(),
+                    },
+                },
+                AssetIdentityV1 {
+                    token_id: TokenId(REAL_DOWN_TOKEN_ID.to_owned()),
+                    outcome: OutcomeIdentityV1 {
+                        index: 1,
+                        label: "Down".to_owned(),
+                    },
+                },
+            ],
+        )
+        .expect("构造唯一代表市场")
+    }
+
+    fn real_gate_a_reference_market() -> ReferenceMarketSpecV1 {
+        ReferenceMarketSpecV1 {
+            condition_id: ConditionId(REAL_CONDITION_ID.to_owned()),
+            clob_market_id: ClobMarketId("3278040".to_owned()),
+            slug: "btc-updown-5m-1785715500".to_owned(),
+            outcomes: vec![
+                ReferenceOutcomeSpecV1 {
+                    token_id: TokenId(REAL_UP_TOKEN_ID.to_owned()),
+                    outcome: "Up".to_owned(),
+                },
+                ReferenceOutcomeSpecV1 {
+                    token_id: TokenId(REAL_DOWN_TOKEN_ID.to_owned()),
+                    outcome: "Down".to_owned(),
+                },
+            ],
+        }
+    }
+
+    fn real_gate_a_bucket(
+        path: MarketEventPathV1,
+        bucket: &ClosedExecutionMarketIndexBucketV1,
+    ) -> AcceptedClosedMarketBucketV2 {
+        AcceptedClosedMarketBucketV2 {
+            reference: DurableMarketBucketReferenceV2 {
+                path,
+                bucket_at_utc_ms: bucket.index_at_utc_ms(),
+                start_index_position: bucket.start_logical_position(),
+                next_index_position: bucket.next_logical_position(),
+                closure: match bucket.closure() {
+                    ReplayIndexClosureV1::NextGlobalEventAt(at) => {
+                        crate::market::MillisecondBucketClosureV1::NextEventAt(at)
+                    }
+                    ReplayIndexClosureV1::EndOfInput => {
+                        crate::market::MillisecondBucketClosureV1::EndOfInput
+                    }
+                },
+            },
+            events: Arc::clone(bucket.events()),
+        }
+    }
+
+    fn real_gate_a_state_summary(execution: &SimExecution) -> String {
+        let Some(state) = execution.actor.state.as_ref() else {
+            return "actor_state=absent".to_owned();
+        };
+        let Some(session) = state.session.as_ref() else {
+            return "actor_state=present,session=absent".to_owned();
+        };
+        format!(
+            "public_phase={:?},hidden_phase={:?},public_levels={},hidden_levels={},execution_shape={:?},public_frontier={:?},hidden_frontier={:?},private_sequence={}",
+            session
+                .public_markets
+                .lifecycle_phase_for_tests(REAL_CONDITION_ID),
+            session
+                .hidden_platform_markets
+                .as_ref()
+                .and_then(|markets| markets.lifecycle_phase_for_tests(REAL_CONDITION_ID)),
+            session
+                .public_markets
+                .external_level_count_for_tests(REAL_CONDITION_ID),
+            session
+                .hidden_platform_markets
+                .as_ref()
+                .map_or(0, |markets| markets
+                    .external_level_count_for_tests(REAL_CONDITION_ID)),
+            session.execution_state.market_shape_for_tests(),
+            session.public_visibility_frontier,
+            session.hidden_platform_frontier,
+            session.next_private_feedback_sequence,
+        )
+    }
+
+    fn assert_real_gate_a_quantity(
+        execution: &SimExecution,
+        ordinal: u64,
+        path: MarketEventPathV1,
+        event_id: &str,
+        at_utc_ms: i64,
+        expected: (Decimal, Decimal, u128),
+    ) {
+        let (expected_public, expected_hidden, expected_queue) = expected;
+        let session = execution
+            .actor
+            .state
+            .as_ref()
+            .and_then(|state| state.session.as_ref())
+            .unwrap();
+        let price = Decimal::new(1, 2);
+        let public = session.public_markets.external_quantity_for_tests(
+            REAL_CONDITION_ID,
+            REAL_UP_TOKEN_ID,
+            BookSide::Bid,
+            price,
+        );
+        let hidden = session
+            .hidden_platform_markets
+            .as_ref()
+            .and_then(|markets| {
+                markets.external_quantity_for_tests(
+                    REAL_CONDITION_ID,
+                    REAL_UP_TOKEN_ID,
+                    BookSide::Bid,
+                    price,
+                )
+            });
+        let queue = session.execution_state.external_queue_base_units_for_tests(
+            REAL_CONDITION_ID,
+            REAL_UP_TOKEN_ID,
+            BookSide::Bid,
+            price,
+        );
+        if public != Some(expected_public)
+            || hidden != Some(expected_hidden)
+            || queue != expected_queue
+        {
+            panic!(
+                "独立金标首分歧：ordinal={ordinal},path={path:?},event_id={event_id},time={at_utc_ms},expected=({expected_public},{expected_hidden},{expected_queue}),actual=({public:?},{hidden:?},{queue}),state={}",
+                real_gate_a_state_summary(execution),
+            );
+        }
+    }
+
+    fn drive_real_gate_a_independent_golden(
+        golden: &mut SimExecution,
+        mut initial: Vec<ExecutionMarketEventV3>,
+        resync: ExecutionMarketEventV3,
+        resolution: ExecutionMarketEventV3,
+    ) {
+        initial.sort_by_key(|event| match &event.payload {
+            ExecutionMarketEventPayloadV3::InitialL2Snapshot(snapshot) => {
+                snapshot.asset.token_id.0.clone()
+            }
+            _ => unreachable!(),
+        });
+        assert_eq!(
+            initial
+                .iter()
+                .map(|event| event.event_id.0.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "3e3208011d6de4a8eb363cd546f9f035ad1da6f03ed32c0ceb3b383d5ab802fe",
+                "88595520314550562534ca587f82b31caf82c651025e5d7e652d5695c4e70628",
+            ])
+        );
+        let up_initial = initial
+            .iter()
+            .find_map(|event| match &event.payload {
+                ExecutionMarketEventPayloadV3::InitialL2Snapshot(snapshot)
+                    if snapshot.asset.token_id.0 == REAL_UP_TOKEN_ID =>
+                {
+                    Some(snapshot)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            (
+                initial[0].time.source_event_at_utc_ms,
+                initial[0].time.received_at_utc_ms,
+                up_initial.initial_tick_size_pusd_per_share.0.as_str(),
+                up_initial
+                    .bids
+                    .iter()
+                    .find(|level| level.price_pusd_per_share.0 == "0.01")
+                    .unwrap()
+                    .quantity_shares
+                    .0
+                    .as_str(),
+            ),
+            (
+                Some(1_785_715_201_804),
+                1_785_715_201_871,
+                "0.01",
+                "100040.33",
+            )
+        );
+        let ExecutionMarketEventPayloadV3::LevelExecutionTransition(real_resync) = &resync.payload
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            (
+                resync.event_id.0.as_str(),
+                resync.time.source_event_at_utc_ms,
+                resync.time.received_at_utc_ms,
+                real_resync.asset.token_id.0.as_str(),
+                real_resync.price_pusd_per_share.0.as_str(),
+                real_resync.quantity_before_shares.0.as_str(),
+                real_resync.quantity_after_shares.0.as_str(),
+                real_resync.basis,
+                resync.quality.resync,
+            ),
+            (
+                "c114c118d06b40f1bbca4a383fca55cf5b08ae8fffa8d083dd57e65e7389a355",
+                Some(1_785_715_387_835),
+                1_785_715_387_843,
+                REAL_UP_TOKEN_ID,
+                "0.01",
+                "99213.87",
+                "99193.87",
+                LevelExecutionBasis::BookResyncDeltaInference,
+                ResyncQuality::ResyncBoundary,
+            )
+        );
+        assert_eq!(
+            (
+                resolution.event_id.0.as_str(),
+                resolution.time.source_event_at_utc_ms,
+                resolution.time.received_at_utc_ms,
+            ),
+            (
+                "2e70d5e3f9c369d8ea6b585843b594b5b166b9a7ff0902ade7405635fdd000c3",
+                Some(1_785_715_888_402),
+                1_785_715_888_411,
+            )
+        );
+        let mut bridge = resync.clone();
+        bridge.quality.resync = ResyncQuality::NotRequired;
+        let ExecutionMarketEventPayloadV3::LevelExecutionTransition(transition) =
+            &mut bridge.payload
+        else {
+            unreachable!()
+        };
+        transition.causal_group_id = sha('4');
+        transition.quantity_before_shares = ExactDecimal("100040.33".to_owned());
+        transition.quantity_after_shares = real_resync.quantity_before_shares.clone();
+        transition.attributed_trade_quantity_shares = ExactDecimal("0".to_owned());
+        transition.already_covered_quantity_shares = ExactDecimal("0".to_owned());
+        transition.net_added_quantity_shares = ExactDecimal("0".to_owned());
+        transition.net_reduced_quantity_shares = ExactDecimal("826.46".to_owned());
+        transition.queue_consumption_quantity_shares = ExactDecimal("826.46".to_owned());
+        transition.basis = LevelExecutionBasis::LevelDeltaInference;
+        bridge.event_id = data_pipeline_core::derive_execution_market_event_v3_id(&bridge)
+            .expect("重建独立金标桥接事件身份");
+        let bridge = data_pipeline_core::decode_execution_market_event_v3(
+            &data_pipeline_core::encode_execution_market_event_v3(&bridge)
+                .expect("编码独立金标桥接事件"),
+        )
+        .expect("从真实边界解码独立金标桥接事件");
+        let initial: Arc<[ExecutionMarketEventV3]> = Arc::from(initial);
+        let resync: Arc<[ExecutionMarketEventV3]> = Arc::from(vec![bridge, resync]);
+        let resolution: Arc<[ExecutionMarketEventV3]> = Arc::from(vec![resolution]);
+        let buckets = [
+            (
+                MarketEventPathV1::HiddenPlatform,
+                1_785_715_201_804,
+                0,
+                2,
+                crate::market::MillisecondBucketClosureV1::NextEventAt(1_785_715_387_835),
+                Arc::clone(&initial),
+            ),
+            (
+                MarketEventPathV1::PublicVisibility,
+                1_785_715_201_871,
+                0,
+                2,
+                crate::market::MillisecondBucketClosureV1::NextEventAt(1_785_715_387_843),
+                initial,
+            ),
+            (
+                MarketEventPathV1::HiddenPlatform,
+                1_785_715_387_835,
+                2,
+                4,
+                crate::market::MillisecondBucketClosureV1::NextEventAt(1_785_715_888_402),
+                Arc::clone(&resync),
+            ),
+            (
+                MarketEventPathV1::PublicVisibility,
+                1_785_715_387_843,
+                2,
+                4,
+                crate::market::MillisecondBucketClosureV1::NextEventAt(1_785_715_888_411),
+                resync,
+            ),
+        ];
+        for (ordinal, (path, at, start, next, closure, events)) in buckets.into_iter().enumerate() {
+            let event_id = events[0].event_id.0.clone();
+            golden
+                .drive_closed_market_bucket(AcceptedClosedMarketBucketV2 {
+                    reference: DurableMarketBucketReferenceV2 {
+                        path,
+                        bucket_at_utc_ms: at,
+                        start_index_position: start,
+                        next_index_position: next,
+                        closure,
+                    },
+                    events,
+                })
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "独立金标驱动失败：ordinal={},path={path:?},event_id={event_id},time={at},error={error}",
+                        ordinal + 1
+                    )
+                });
+            let (public, hidden, queue) = match ordinal {
+                0 => (Decimal::ZERO, Decimal::new(10_004_033, 2), 100_040_330_000),
+                1 => (
+                    Decimal::new(10_004_033, 2),
+                    Decimal::new(10_004_033, 2),
+                    100_040_330_000,
+                ),
+                2 => (
+                    Decimal::new(10_004_033, 2),
+                    Decimal::new(9_919_387, 2),
+                    99_193_870_000,
+                ),
+                3 => (
+                    Decimal::new(9_919_387, 2),
+                    Decimal::new(9_919_387, 2),
+                    99_193_870_000,
+                ),
+                _ => unreachable!(),
+            };
+            assert_real_gate_a_quantity(
+                golden,
+                u64::try_from(ordinal + 1).unwrap(),
+                path,
+                &event_id,
+                at,
+                (public, hidden, queue),
+            );
+        }
+        let required = golden
+            .next_required_logical_drive()
+            .expect("独立金标必须暴露 market end 必要义务");
+        assert_eq!(required.path, MarketEventPathV1::HiddenPlatform);
+        assert_eq!(required.required_at_utc_ms, 1_785_715_800_000);
+        golden
+            .drive_platform_prefix(PlatformPrefixAdvanceV2 {
+                path: required.path,
+                closed_through_utc_ms: required.required_at_utc_ms,
+                next_index_position: 4,
+            })
+            .expect("独立金标推进唯一必要空前缀");
+        for (path, at) in [
+            (MarketEventPathV1::HiddenPlatform, 1_785_715_888_402),
+            (MarketEventPathV1::PublicVisibility, 1_785_715_888_411),
+        ] {
+            golden
+                .drive_closed_market_bucket(AcceptedClosedMarketBucketV2 {
+                    reference: DurableMarketBucketReferenceV2 {
+                        path,
+                        bucket_at_utc_ms: at,
+                        start_index_position: 4,
+                        next_index_position: 5,
+                        closure: crate::market::MillisecondBucketClosureV1::EndOfInput,
+                    },
+                    events: Arc::clone(&resolution),
+                })
+                .unwrap_or_else(|error| panic!("独立金标 resolution 失败：{error}"));
+        }
+        let session = golden
+            .actor
+            .state
+            .as_ref()
+            .unwrap()
+            .session
+            .as_ref()
+            .unwrap();
+        assert!(session.public_markets.all_qualified_resolutions_terminal());
+        assert!(
+            session
+                .hidden_platform_markets
+                .as_ref()
+                .unwrap()
+                .all_qualified_resolutions_terminal()
+        );
+    }
+
+    fn real_gate_a_post_response<'a>(
+        execution: &'a SimExecution,
+        request_id: &str,
+    ) -> Option<&'a PostOrderDirectResponseV2> {
+        let response = execution
+            .actor
+            .state
+            .as_ref()?
+            .session
+            .as_ref()?
+            .mutation_requests
+            .requests_by_id
+            .get(request_id)?
+            .completed_response
+            .as_ref()?;
+        match response.as_ref() {
+            StoredDirectResponseV2::Final(BusinessDirectResponseV2::PostOrder(response)) => {
+                Some(response)
+            }
+            _ => None,
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires frozen Gate A V2 final and official CURRENT_QUERY endpoints"]
+    async fn frozen_gate_a_representative_market_matches_golden_dual_time_execution_vertical() {
+        let directory = tempfile::tempdir().expect("创建真实纵向临时目录");
+        let implementation_identity = ImplementationIdentityV1 {
+            git_commit: "a".repeat(40),
+            source_identity_sha256: sha('5'),
+            cargo_lock_sha256: sha('6'),
+        };
+        let rule_snapshot =
+            query_and_seal_current_process_snapshot_v3(CurrentProcessSnapshotRequestV1 {
+                reference_market: real_gate_a_reference_market(),
+                target_path: directory.path().join("current-process-rules.json"),
+                implementation_identity: implementation_identity.clone(),
+            })
+            .await
+            .expect("唯一 CURRENT_QUERY 必须密封进程规则快照");
+        assert_eq!(
+            rule_snapshot.access_mode(),
+            crate::platform_rules::SnapshotAccessMode::CurrentQuery
+        );
+
+        let validation_path = directory.path().join("gate-a-final-validation");
+        let final_gate_a =
+            open_published_gate_a_final(Path::new(REAL_GATE_A_FINAL), &validation_path)
+                .expect("只读打开冻结 Gate A V2 final");
+        assert!(
+            !validation_path.exists(),
+            "外置 final validation 路径必须清理"
+        );
+        let output = gate_a_formal_output_config();
+        let mut adapter = GateASimulationReplayAdapter::open(
+            &final_gate_a,
+            output.sort.batch_rows,
+            output.sort.max_run_bytes,
+            output.sort.batch_rows,
+        )
+        .expect("用正式输出配置打开联合适配器");
+        assert_eq!(adapter.max_page_rows(), output.sort.batch_rows);
+        let canonical_manifest = adapter.canonical_event_store_manifest_sha256().clone();
+        let event_time_manifest = adapter.event_time_index_manifest_sha256().clone();
+        let visibility_manifest = adapter.visibility_index_manifest_sha256().clone();
+
+        let scenario = sealed_scenario_for_markets(vec![real_gate_a_market()]);
+        let finality_policy = successful_policy_v2_for_tests();
+        let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
+        let mut run_opened = opened(
+            "gate-a-real-vertical",
+            &rule_snapshot,
+            &finality_policy,
+            &scenario,
+            &latency_profile,
+        );
+        run_opened.implementation_identity = implementation_identity;
+        run_opened.market_event_source_identity_sha256 = canonical_manifest.clone();
+        assert_eq!(
+            run_opened.platform_rule_snapshot_file_sha256,
+            *rule_snapshot.file_sha256()
+        );
+        let mut golden_opened = run_opened.clone();
+        golden_opened.market_event_source_identity_sha256 = sha('9');
+        assert_ne!(
+            run_opened.market_event_source_identity_sha256,
+            golden_opened.market_event_source_identity_sha256
+        );
+        let mut real = SimExecution::create_new(
+            &directory.path().join("real.jsonl"),
+            run_opened,
+            Arc::clone(&rule_snapshot),
+            Arc::clone(&finality_policy),
+            Arc::clone(&scenario),
+            Arc::clone(&latency_profile),
+            accepting_projection_port(),
+            MAX_GROUP_BYTES,
+        )
+        .expect("创建真实回放执行根");
+        let mut golden = SimExecution::create_new(
+            &directory.path().join("golden.jsonl"),
+            golden_opened,
+            Arc::clone(&rule_snapshot),
+            finality_policy,
+            scenario,
+            Arc::clone(&latency_profile),
+            accepting_projection_port(),
+            MAX_GROUP_BYTES,
+        )
+        .expect("创建同语义金标执行根");
+        assert!(Arc::ptr_eq(
+            &real.actor._rule_snapshot,
+            &golden.actor._rule_snapshot
+        ));
+        for execution in [&mut real, &mut golden] {
+            let mut session = spec("gate-a-real-vertical", "create-gate-a-real-vertical");
+            session.initial_account_state.available_pusd = ExactDecimal("1000".to_owned());
+            execution.create_session(session).expect("创建真实纵向会话");
+            execution
+                .activate_session("activate-gate-a-real-vertical".to_owned())
+                .expect("激活真实纵向会话");
+        }
+        let mut platform = adapter.next_platform_bucket().expect("读取平台首桶");
+        let mut visibility = adapter.next_visibility_bucket().expect("读取可见性首桶");
+        let mut platform_done = platform.is_none();
+        let mut visibility_done = visibility.is_none();
+        let mut platform_eof = false;
+        let mut visibility_eof = false;
+        let mut ordinal = 0_u64;
+        let mut coverage = RealGateAVerticalCoverage::default();
+        let mut independent_trading_state = false;
+        let mut queue_observed = false;
+        let mut order_id = None;
+        let minimum_order_size = rule_snapshot
+            .synchronized_rules()
+            .minimum_order_size_shares
+            .value();
+        const REQUEST_ID: &str = "gate-a-real-vertical-post";
+
+        while platform.is_some() || visibility.is_some() {
+            let next_bucket_at = match (&platform, &visibility) {
+                (Some(left), Some(right)) => left.index_at_utc_ms().min(right.index_at_utc_ms()),
+                (Some(bucket), None) | (None, Some(bucket)) => bucket.index_at_utc_ms(),
+                (None, None) => unreachable!(),
+            };
+            let real_required = real.next_required_logical_drive();
+            if let Some(required) = real_required
+                && required.required_at_utc_ms < next_bucket_at
+            {
+                let next_position = match required.path {
+                    MarketEventPathV1::HiddenPlatform => platform.as_ref().map_or_else(
+                        || adapter.platform_next_logical_position(),
+                        ClosedExecutionMarketIndexBucketV1::start_logical_position,
+                    ),
+                    MarketEventPathV1::PublicVisibility => visibility.as_ref().map_or_else(
+                        || adapter.visibility_next_logical_position(),
+                        ClosedExecutionMarketIndexBucketV1::start_logical_position,
+                    ),
+                };
+                let advance = PlatformPrefixAdvanceV2 {
+                    path: required.path,
+                    closed_through_utc_ms: required.required_at_utc_ms,
+                    next_index_position: next_position,
+                };
+                real.drive_platform_prefix(advance)
+                    .expect("真实根推进必要空前缀");
+                ordinal += 1;
+                continue;
+            }
+
+            let path = match (&platform, &visibility) {
+                (Some(left), Some(right)) if left.index_at_utc_ms() <= right.index_at_utc_ms() => {
+                    MarketEventPathV1::HiddenPlatform
+                }
+                (Some(_), None) => MarketEventPathV1::HiddenPlatform,
+                _ => MarketEventPathV1::PublicVisibility,
+            };
+            let bucket = match path {
+                MarketEventPathV1::HiddenPlatform => platform.take().unwrap(),
+                MarketEventPathV1::PublicVisibility => visibility.take().unwrap(),
+            };
+            coverage.observe(path, &bucket);
+            let is_order_bucket = path == MarketEventPathV1::HiddenPlatform
+                && bucket
+                    .events()
+                    .iter()
+                    .any(|event| event.event_id.0 == REAL_TRADE_EVENT_ID);
+            let is_representative_resync = bucket.events().iter().any(|event| {
+                event.event_id.0
+                    == "c114c118d06b40f1bbca4a383fca55cf5b08ae8fffa8d083dd57e65e7389a355"
+            });
+            if is_order_bucket {
+                let outbound_delay = i64::try_from(latency_profile.sample_delay_ms(
+                    sha('8').0.as_bytes(),
+                    REQUEST_ID,
+                    DelaySampleDomainV1::RequestOutbound,
+                ))
+                .expect("请求时延可表示");
+                assert_eq!(outbound_delay, 11);
+                let receipt = real
+                    .post_order(
+                        request_cutoff(bucket.index_at_utc_ms() - outbound_delay),
+                        PostOrderRequestV2 {
+                            context: RequestContextV2 {
+                                global_request_id: REQUEST_ID.to_owned(),
+                                caller_correlation_id: Some("gate-a-real-vertical".to_owned()),
+                            },
+                            item: post_item(
+                                "gate-a-real-vertical-item",
+                                &ConditionId(REAL_CONDITION_ID.to_owned()),
+                                &TokenId(REAL_UP_TOKEN_ID.to_owned()),
+                                SimBuyOrderKindV1::GtcLimit {
+                                    limit_price_pusd_per_share: "0.01".parse().unwrap(),
+                                    size_shares: minimum_order_size,
+                                    post_only: false,
+                                },
+                            ),
+                        },
+                    )
+                    .expect("真实代表订单登记");
+                assert_eq!(receipt.platform_arrived_at_utc_ms(), 1_785_715_202_580);
+            }
+
+            let accepted = real_gate_a_bucket(path, &bucket);
+            assert!(Arc::ptr_eq(&accepted.events, bucket.events()));
+            real.drive_closed_market_bucket(accepted).unwrap_or_else(|error| {
+                let event_ids = bucket
+                    .events()
+                    .iter()
+                    .map(|event| event.event_id.0.as_str())
+                    .collect::<Vec<_>>();
+                panic!(
+                    "真实回放首分歧：ordinal={},path={path:?},event_ids={event_ids:?},time={},error={error},state={}",
+                    ordinal + 1,
+                    bucket.index_at_utc_ms(),
+                    real_gate_a_state_summary(&real),
+                )
+            });
+            ordinal += 1;
+
+            if path == MarketEventPathV1::PublicVisibility && is_representative_resync {
+                assert_real_gate_a_quantity(
+                    &real,
+                    ordinal,
+                    path,
+                    "c114c118d06b40f1bbca4a383fca55cf5b08ae8fffa8d083dd57e65e7389a355",
+                    bucket.index_at_utc_ms(),
+                    (
+                        Decimal::new(9_919_387, 2),
+                        Decimal::new(9_919_387, 2),
+                        99_193_870_000,
+                    ),
+                );
+            }
+
+            if path == MarketEventPathV1::HiddenPlatform {
+                let session = real.actor.state.as_ref().unwrap().session.as_ref().unwrap();
+                let hidden = session.hidden_platform_markets.as_ref().unwrap();
+                independent_trading_state |= hidden != &session.public_markets;
+                if let Some((token_id, price)) = &coverage.first_initial_bid {
+                    queue_observed |= session.execution_state.external_queue_base_units_for_tests(
+                        REAL_CONDITION_ID,
+                        token_id,
+                        BookSide::Bid,
+                        *price,
+                    ) > 0;
+                }
+                if is_order_bucket {
+                    let real_response = real_gate_a_post_response(&real, REQUEST_ID)
+                        .expect("真实代表订单必须形成私有响应");
+                    let SubmissionItemOutcomeV2::Accepted(accepted) = &real_response.item.outcome
+                    else {
+                        panic!("真实订单必须被有效接纳：{:?}", real_response.item.outcome);
+                    };
+                    assert_eq!(
+                        real_response.metadata.response_received_at_utc_ms,
+                        1_785_715_202_588
+                    );
+                    let public_closed = session
+                        .public_visibility_frontier
+                        .closed_through_utc_ms
+                        .unwrap_or(i64::MIN);
+                    assert!(public_closed < 1_785_715_202_623);
+                    order_id = Some(accepted.platform_order_id.clone());
+                }
+            }
+
+            match (path, bucket.closure()) {
+                (MarketEventPathV1::HiddenPlatform, ReplayIndexClosureV1::EndOfInput) => {
+                    platform_eof = true
+                }
+                (MarketEventPathV1::PublicVisibility, ReplayIndexClosureV1::EndOfInput) => {
+                    visibility_eof = true
+                }
+                _ => {}
+            }
+            match path {
+                MarketEventPathV1::HiddenPlatform if !platform_done => {
+                    platform = adapter.next_platform_bucket().expect("读取平台下一桶");
+                    platform_done = platform.is_none();
+                }
+                MarketEventPathV1::PublicVisibility if !visibility_done => {
+                    visibility = adapter.next_visibility_bucket().expect("读取可见性下一桶");
+                    visibility_done = visibility.is_none();
+                }
+                _ => {}
+            }
+        }
+
+        drive_real_gate_a_independent_golden(
+            &mut golden,
+            std::mem::take(&mut coverage.golden_initial),
+            coverage.golden_resync.take().expect("真实代表 resync 存在"),
+            coverage
+                .golden_resolution
+                .take()
+                .expect("真实代表 resolution 存在"),
+        );
+        assert!(platform_done && visibility_done && platform_eof && visibility_eof);
+        let expected_tokens =
+            BTreeSet::from([REAL_UP_TOKEN_ID.to_owned(), REAL_DOWN_TOKEN_ID.to_owned()]);
+        assert_eq!(
+            coverage.initial_tokens,
+            [expected_tokens.clone(), expected_tokens.clone()]
+        );
+        assert_eq!(
+            coverage.tick_tokens,
+            [expected_tokens.clone(), expected_tokens]
+        );
+        assert_eq!(coverage.trade_count, [1_918, 1_918]);
+        assert_eq!(coverage.book_resync_count, [362, 362]);
+        assert_eq!(coverage.resync_boundary_count, [362, 362]);
+        assert_eq!(coverage.trading_state_count, [0, 1]);
+        assert_eq!(coverage.resolution_count, [1, 1]);
+        assert!(coverage.evidence_seen.iter().all(|seen| *seen));
+        assert!(independent_trading_state && queue_observed);
+        let order_id = order_id.expect("真实路径必须完成一个有效订单响应");
+        let session = real.actor.state.as_ref().unwrap().session.as_ref().unwrap();
+        assert_eq!(
+            session
+                .execution_state
+                .base_order_quantities_for_tests(&order_id)
+                .map(|state| state.2),
+            Some(0),
+            "市场 resolution 后有效订单必须走完生命周期"
+        );
+        assert!(session.public_markets.all_qualified_resolutions_terminal());
+        assert!(
+            session
+                .hidden_platform_markets
+                .as_ref()
+                .unwrap()
+                .all_qualified_resolutions_terminal()
+        );
+        eprintln!(
+            "Gate A real vertical PASS: store={},event_time={},visibility={},buckets={ordinal},trades={},book_resync={},resync_boundaries={}",
+            canonical_manifest.0,
+            event_time_manifest.0,
+            visibility_manifest.0,
+            coverage.trade_count[0],
+            coverage.book_resync_count[0],
+            coverage.resync_boundary_count[0],
+        );
     }
 }
