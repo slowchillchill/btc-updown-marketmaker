@@ -3741,6 +3741,30 @@ pub(crate) mod tests {
         )
     }
 
+    pub(crate) fn build_sim_adapter_candidate() -> MicroCandidate {
+        let temporary = TempDir::new().unwrap();
+        let candidate_path = temporary.path().join("sim-adapter-candidate");
+        let (config, output_config) = micro_configs();
+        let scope = CanonicalRunScope::new(format!("0x{}", "1".repeat(64)), 4_000, 8_000).unwrap();
+        let outcomes = vec![
+            market_lifecycle_outcome(1_000, 5_500),
+            chainlink_outcome(0, 1_000, 5_000),
+            market_lifecycle_outcome(1_000, 6_000),
+            chainlink_outcome(1, 4_000, 5_000),
+            market_lifecycle_outcome(3_000, 7_000),
+        ];
+        materialize_micro_candidate(
+            temporary,
+            candidate_path,
+            config,
+            output_config,
+            scope,
+            outcomes,
+            Vec::new(),
+            crate::canonical_run::SourceRowCounts::default(),
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn materialize_micro_candidate(
         temporary: TempDir,
