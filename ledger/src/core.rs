@@ -241,7 +241,7 @@ struct OutcomeBalanceStateV1 {
     balance: Decimal,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct BalanceStateV1 {
     cash_pusd: Decimal,
     available_pusd: Decimal,
@@ -274,7 +274,7 @@ impl BalanceStateV1 {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct MarketStateV1 {
     condition_id: ConditionId,
     balances: BalanceStateV1,
@@ -290,7 +290,7 @@ struct OpenedAccountStateV1 {
     markets: BTreeMap<String, MarketStateV1>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct ParsedBalanceDeltaV1 {
     cash_pusd: Decimal,
     available_pusd: Decimal,
@@ -309,7 +309,7 @@ struct BalanceUpdateV1 {
     available_pusd: Decimal,
     principal_encumbrance_pusd: Decimal,
     immediate_taker_fee_encumbrance_pusd: Decimal,
-    outcome_balances: BTreeMap<String, OutcomeBalanceStateV1>,
+    outcome_balance_updates: BTreeMap<String, OutcomeBalanceStateV1>,
     maker_rebate_receivable_pusd: Decimal,
     taker_rebate_receivable_pusd: Decimal,
     maker_rebate_locked_remainder_pusd: Decimal,
@@ -1231,10 +1231,7 @@ impl LedgerWriterV1 {
                     .get(&condition_id.0)
                     .map(|market| &market.balances)
                     .unwrap_or(&empty);
-                prepare_market_balance_update(existing, &parsed).map(|balances| MarketStateV1 {
-                    condition_id: condition_id.clone(),
-                    balances: balances.into_state(),
-                })
+                prepare_market_balance_update(existing, &parsed)
             })
             .transpose()?;
 
@@ -1278,11 +1275,16 @@ impl LedgerWriterV1 {
             .account
             .as_mut()
             .expect("开户状态在无副作用准备期间保持存在");
-        account.balances = global_update.into_state();
-        if let Some(market) = market_update {
-            account
+        global_update.commit(&mut account.balances);
+        if let (Some(condition_id), Some(market_update)) = (condition_id, market_update) {
+            let market = account
                 .markets
-                .insert(market.condition_id.0.clone(), market);
+                .entry(condition_id.0.clone())
+                .or_insert_with(|| MarketStateV1 {
+                    condition_id: condition_id.clone(),
+                    balances: BalanceStateV1::empty(),
+                });
+            market_update.commit(&mut market.balances);
         }
         account.platform_source_prefix = account_transition_seq;
         account.available_through_utc_ms = available_through_utc_ms;
@@ -2917,18 +2919,18 @@ fn totals_decimal_delta(
 }
 
 impl BalanceUpdateV1 {
-    fn into_state(self) -> BalanceStateV1 {
-        BalanceStateV1 {
-            cash_pusd: self.cash_pusd,
-            available_pusd: self.available_pusd,
-            principal_encumbrance_pusd: self.principal_encumbrance_pusd,
-            immediate_taker_fee_encumbrance_pusd: self.immediate_taker_fee_encumbrance_pusd,
-            outcome_balances: self.outcome_balances,
-            maker_rebate_receivable_pusd: self.maker_rebate_receivable_pusd,
-            taker_rebate_receivable_pusd: self.taker_rebate_receivable_pusd,
-            maker_rebate_locked_remainder_pusd: self.maker_rebate_locked_remainder_pusd,
-            taker_rebate_locked_remainder_pusd: self.taker_rebate_locked_remainder_pusd,
-        }
+    fn commit(self, current: &mut BalanceStateV1) {
+        current.cash_pusd = self.cash_pusd;
+        current.available_pusd = self.available_pusd;
+        current.principal_encumbrance_pusd = self.principal_encumbrance_pusd;
+        current.immediate_taker_fee_encumbrance_pusd = self.immediate_taker_fee_encumbrance_pusd;
+        current
+            .outcome_balances
+            .extend(self.outcome_balance_updates);
+        current.maker_rebate_receivable_pusd = self.maker_rebate_receivable_pusd;
+        current.taker_rebate_receivable_pusd = self.taker_rebate_receivable_pusd;
+        current.maker_rebate_locked_remainder_pusd = self.maker_rebate_locked_remainder_pusd;
+        current.taker_rebate_locked_remainder_pusd = self.taker_rebate_locked_remainder_pusd;
     }
 }
 
@@ -2937,13 +2939,24 @@ fn prepare_balance_update(
     delta: &ParsedBalanceDeltaV1,
     scope: &'static str,
 ) -> Result<BalanceUpdateV1, LedgerErrorV1> {
-    let mut outcome_balances = current.outcome_balances.clone();
+    prepare_scoped_balance_update(current, delta, delta.cash_pusd, delta.available_pusd, scope)
+}
+
+fn prepare_scoped_balance_update(
+    current: &BalanceStateV1,
+    delta: &ParsedBalanceDeltaV1,
+    cash_delta: Decimal,
+    available_delta: Decimal,
+    scope: &'static str,
+) -> Result<BalanceUpdateV1, LedgerErrorV1> {
+    let mut outcome_balance_updates = BTreeMap::new();
     for (key, outcome_delta) in &delta.outcome_balances {
-        let existing = outcome_balances
+        let existing = current
+            .outcome_balances
             .get(key)
             .map(|outcome| outcome.balance)
             .unwrap_or(Decimal::ZERO);
-        outcome_balances.insert(
+        outcome_balance_updates.insert(
             key.clone(),
             OutcomeBalanceStateV1 {
                 token_id: outcome_delta.token_id.clone(),
@@ -2956,8 +2969,8 @@ fn prepare_balance_update(
         );
     }
     Ok(BalanceUpdateV1 {
-        cash_pusd: checked_add(current.cash_pusd, delta.cash_pusd, scope)?,
-        available_pusd: checked_add(current.available_pusd, delta.available_pusd, scope)?,
+        cash_pusd: checked_add(current.cash_pusd, cash_delta, scope)?,
+        available_pusd: checked_add(current.available_pusd, available_delta, scope)?,
         principal_encumbrance_pusd: checked_add(
             current.principal_encumbrance_pusd,
             delta.principal_encumbrance_pusd,
@@ -2968,7 +2981,7 @@ fn prepare_balance_update(
             delta.immediate_taker_fee_encumbrance_pusd,
             scope,
         )?,
-        outcome_balances,
+        outcome_balance_updates,
         maker_rebate_receivable_pusd: checked_add(
             current.maker_rebate_receivable_pusd,
             delta.maker_rebate_receivable_pusd,
@@ -2996,10 +3009,7 @@ fn prepare_market_balance_update(
     current: &BalanceStateV1,
     delta: &ParsedBalanceDeltaV1,
 ) -> Result<BalanceUpdateV1, LedgerErrorV1> {
-    let mut market_delta = delta.clone();
-    market_delta.cash_pusd = Decimal::ZERO;
-    market_delta.available_pusd = Decimal::ZERO;
-    prepare_balance_update(current, &market_delta, "market")
+    prepare_scoped_balance_update(current, delta, Decimal::ZERO, Decimal::ZERO, "market")
 }
 
 fn parse_balance_delta(
@@ -3492,6 +3502,84 @@ mod tests {
             ]
         );
         ensure_balanced(&entries).unwrap();
+    }
+
+    #[test]
+    fn sparse_balance_updates_preserve_untouched_outcome_tokens() {
+        const TOKEN_A: &str = "token-a";
+        const TOKEN_B: &str = "token-b";
+        let mut balances = BalanceStateV1::opened("10".parse().unwrap());
+        balances.outcome_balances.insert(
+            TOKEN_A.to_owned(),
+            OutcomeBalanceStateV1 {
+                token_id: TokenId(TOKEN_A.to_owned()),
+                balance: "3".parse().unwrap(),
+            },
+        );
+        let token_b_delta = ParsedBalanceDeltaV1 {
+            cash_pusd: Decimal::ZERO,
+            available_pusd: "-1".parse().unwrap(),
+            principal_encumbrance_pusd: Decimal::ZERO,
+            immediate_taker_fee_encumbrance_pusd: Decimal::ZERO,
+            outcome_balances: BTreeMap::from([(
+                TOKEN_B.to_owned(),
+                OutcomeBalanceStateV1 {
+                    token_id: TokenId(TOKEN_B.to_owned()),
+                    balance: "2".parse().unwrap(),
+                },
+            )]),
+            maker_rebate_receivable_pusd: Decimal::ZERO,
+            taker_rebate_receivable_pusd: Decimal::ZERO,
+            maker_rebate_locked_remainder_pusd: Decimal::ZERO,
+            taker_rebate_locked_remainder_pusd: Decimal::ZERO,
+        };
+
+        let token_b_update = prepare_balance_update(&balances, &token_b_delta, "test").unwrap();
+        assert_eq!(
+            token_b_update
+                .outcome_balance_updates
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec![TOKEN_B]
+        );
+        token_b_update.commit(&mut balances);
+        assert_eq!(balances.outcome_balances.len(), 2);
+        assert_eq!(
+            balances.outcome_balances[TOKEN_A].balance,
+            "3".parse::<Decimal>().unwrap()
+        );
+        assert_eq!(
+            balances.outcome_balances[TOKEN_B].balance,
+            "2".parse::<Decimal>().unwrap()
+        );
+        assert_eq!(balances.available_pusd, "9".parse::<Decimal>().unwrap());
+
+        let scalar_only_delta = ParsedBalanceDeltaV1 {
+            cash_pusd: "1".parse().unwrap(),
+            available_pusd: Decimal::ZERO,
+            principal_encumbrance_pusd: Decimal::ZERO,
+            immediate_taker_fee_encumbrance_pusd: Decimal::ZERO,
+            outcome_balances: BTreeMap::new(),
+            maker_rebate_receivable_pusd: Decimal::ZERO,
+            taker_rebate_receivable_pusd: Decimal::ZERO,
+            maker_rebate_locked_remainder_pusd: Decimal::ZERO,
+            taker_rebate_locked_remainder_pusd: Decimal::ZERO,
+        };
+        let scalar_update = prepare_balance_update(&balances, &scalar_only_delta, "test").unwrap();
+        assert!(scalar_update.outcome_balance_updates.is_empty());
+        scalar_update.commit(&mut balances);
+        assert_eq!(balances.outcome_balances.len(), 2);
+        assert_eq!(
+            balances.outcome_balances[TOKEN_A].balance,
+            "3".parse::<Decimal>().unwrap()
+        );
+        assert_eq!(
+            balances.outcome_balances[TOKEN_B].balance,
+            "2".parse::<Decimal>().unwrap()
+        );
+        assert_eq!(balances.cash_pusd, "11".parse::<Decimal>().unwrap());
+        assert_eq!(balances.available_pusd, "9".parse::<Decimal>().unwrap());
     }
 
     #[test]
