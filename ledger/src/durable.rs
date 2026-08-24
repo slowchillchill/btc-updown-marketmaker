@@ -2,6 +2,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
 use std::time::{Duration, Instant};
 
@@ -19,11 +20,12 @@ const SEGMENT_PREFIX: &str = "ledger-sealed-v1--";
 const SEGMENT_SUFFIX: &str = ".jsonl";
 const RECORD_VERSION: u16 = 1;
 const RECORD_ENCODING: &str = "ledger-jsonl-v1";
-const PROJECTION_CANDIDATE_FILE_NAME: &str = ".ledger-projection-v1.candidate";
+const PROJECTION_CANDIDATE_PREFIX: &str = ".ledger-projection-v1.candidate-";
 const PROJECTION_PREFIX: &str = "ledger-projection-v1--";
 const PROJECTION_SUFFIX: &str = ".json";
 const PROJECTION_VERSION: u16 = 1;
 const PROJECTION_ENCODING: &str = "ledger-projection-json-v1";
+static PROJECTION_CANDIDATE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LedgerDurableErrorV1 {
@@ -147,18 +149,8 @@ pub fn publish_ledger_projection_v1(
     let sha256 = sha256_bytes(&encoded);
     let file_name = projection_file_name(projection.ledger_entry_seq, &sha256);
     let final_path = directory.join(&file_name);
-    let candidate_path = directory.join(PROJECTION_CANDIDATE_FILE_NAME);
-
-    match fs::remove_file(&candidate_path) {
-        Ok(()) => sync_directory(directory, "同步清理 Ledger 投影候选")?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(io_error("清理 Ledger 投影候选", &candidate_path, error)),
-    }
-    let mut candidate = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&candidate_path)
-        .map_err(|error| io_error("创建 Ledger 投影候选", &candidate_path, error))?;
+    let (mut candidate, candidate_file_name, candidate_path) =
+        create_projection_candidate(directory)?;
     if let Err(error) = candidate
         .write_all(&encoded)
         .and_then(|()| candidate.sync_all())
@@ -183,7 +175,7 @@ pub fn publish_ledger_projection_v1(
     };
     if let Err(error) = renameat_with(
         &parent,
-        PROJECTION_CANDIDATE_FILE_NAME,
+        &candidate_file_name,
         &parent,
         &file_name,
         RenameFlags::NOREPLACE,
@@ -878,6 +870,24 @@ fn cleanup_projection_candidate<T>(
     Err(original_error)
 }
 
+fn create_projection_candidate(
+    directory: &Path,
+) -> Result<(File, String, PathBuf), LedgerDurableErrorV1> {
+    loop {
+        let sequence = PROJECTION_CANDIDATE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let file_name = format!(
+            "{PROJECTION_CANDIDATE_PREFIX}{}-{sequence}",
+            std::process::id()
+        );
+        let path = directory.join(&file_name);
+        match OpenOptions::new().create_new(true).write(true).open(&path) {
+            Ok(file) => return Ok((file, file_name, path)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(io_error("创建 Ledger 投影候选", &path, error)),
+        }
+    }
+}
+
 fn decode_segment(
     path: &Path,
     mut reader: impl BufRead,
@@ -1098,6 +1108,8 @@ fn io_error(operation: &'static str, path: &Path, error: std::io::Error) -> Ledg
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use contracts::ExactDecimal;
     use tempfile::TempDir;
 
@@ -1131,5 +1143,23 @@ mod tests {
         })
         .unwrap();
         assert_eq!(recovered_policy, Some(policy("80")));
+    }
+
+    #[test]
+    fn projection_candidates_are_owned_by_the_call_that_created_them() {
+        let directory = TempDir::new().unwrap();
+        let (mut first, first_name, first_path) =
+            create_projection_candidate(directory.path()).unwrap();
+        first.write_all(b"first").unwrap();
+        first.sync_all().unwrap();
+
+        let (mut second, second_name, second_path) =
+            create_projection_candidate(directory.path()).unwrap();
+        second.write_all(b"second").unwrap();
+        second.sync_all().unwrap();
+
+        assert_ne!(first_name, second_name);
+        assert_eq!(fs::read(first_path).unwrap(), b"first");
+        assert_eq!(fs::read(second_path).unwrap(), b"second");
     }
 }
