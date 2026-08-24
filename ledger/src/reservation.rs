@@ -25,7 +25,7 @@ pub enum LedgerReservationOutcomeV1 {
     PerMarketLimitExceeded,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum ReservationStatusV1 {
     ReservedBeforeSend,
     SubmittedUnknown,
@@ -34,7 +34,7 @@ pub(crate) enum ReservationStatusV1 {
     Released,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct LocalReservationV1 {
     pub(crate) condition_id: ConditionId,
     pub(crate) principal_pusd: Decimal,
@@ -43,13 +43,13 @@ pub(crate) struct LocalReservationV1 {
     pub(crate) last_applied_ledger_entry_seq: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct CachedReservationRequestV1 {
     pub(crate) outcome: LedgerReservationOutcomeV1,
     pub(crate) reservation: Option<LocalReservationV1>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct MarketLocalPendingV1 {
     pub(crate) condition_id: ConditionId,
     pub(crate) principal_pusd: Decimal,
@@ -62,7 +62,7 @@ pub(crate) struct MarketLocalPendingV1 {
     pub(crate) after_send_unknown_count: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct ReservationStateV1 {
     pub(crate) requests: BTreeMap<LedgerRequestIdentityV1, CachedReservationRequestV1>,
     pub(crate) applied_local_events: BTreeMap<LedgerLocalEventIdentityV1, u64>,
