@@ -337,6 +337,18 @@ mod enabled {
         argv: Vec<String>,
     }
 
+    #[cfg(all(test, feature = "gate-b-flow"))]
+    impl Args {
+        pub(super) fn gate_b_configuration_for_test(&self) -> (&str, &str, &str) {
+            let gate = self.gate_b.as_ref().expect("测试参数已选择 Gate B");
+            (
+                &gate.run_id,
+                &gate.initial_available_pusd.0,
+                &gate.per_market_all_in_commitment_limit_pusd.0,
+            )
+        }
+    }
+
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(rename_all = "snake_case")]
     enum Durability {
@@ -5075,6 +5087,12 @@ mod enabled {
         let mut historical_rule_snapshot = None;
         #[cfg(feature = "gate-b-flow")]
         let mut historical_rule_snapshot_sha256 = None;
+        #[cfg(feature = "gate-b-flow")]
+        let mut gate_b_run_id = None;
+        #[cfg(feature = "gate-b-flow")]
+        let mut initial_available_pusd = None;
+        #[cfg(feature = "gate-b-flow")]
+        let mut per_market_all_in_commitment_limit_pusd = None;
         let mut mode = RunMode::GoldenMatrix;
         let mut index = 1;
         while index < argv.len() {
@@ -5154,6 +5172,14 @@ mod enabled {
                 #[cfg(feature = "gate-b-flow")]
                 "--historical-rule-snapshot-sha256" => {
                     historical_rule_snapshot_sha256 = Some(value.clone());
+                }
+                #[cfg(feature = "gate-b-flow")]
+                "--run-id" => gate_b_run_id = Some(value.clone()),
+                #[cfg(feature = "gate-b-flow")]
+                "--initial-available-pusd" => initial_available_pusd = Some(value.clone()),
+                #[cfg(feature = "gate-b-flow")]
+                "--per-market-all-in-commitment-limit-pusd" => {
+                    per_market_all_in_commitment_limit_pusd = Some(value.clone());
                 }
                 _ => return Err(format!("未知参数：{flag}")),
             }
@@ -5281,10 +5307,25 @@ mod enabled {
                 historical_rule_snapshot: historical_rule_snapshot
                     .ok_or_else(|| "缺少 --historical-rule-snapshot".to_owned())?,
                 historical_rule_snapshot_sha256: Sha256Hex(snapshot_sha),
+                run_id: gate_b_run_id.ok_or_else(|| "缺少 --run-id".to_owned())?,
+                initial_available_pusd: ExactDecimal(
+                    initial_available_pusd
+                        .ok_or_else(|| "缺少 --initial-available-pusd".to_owned())?,
+                ),
+                per_market_all_in_commitment_limit_pusd: ExactDecimal(
+                    per_market_all_in_commitment_limit_pusd.ok_or_else(|| {
+                        "缺少 --per-market-all-in-commitment-limit-pusd".to_owned()
+                    })?,
+                ),
             })
         } else {
-            if historical_rule_snapshot.is_some() || historical_rule_snapshot_sha256.is_some() {
-                return Err("历史规则快照参数只允许 --gate-b-flow".to_owned());
+            if historical_rule_snapshot.is_some()
+                || historical_rule_snapshot_sha256.is_some()
+                || gate_b_run_id.is_some()
+                || initial_available_pusd.is_some()
+                || per_market_all_in_commitment_limit_pusd.is_some()
+            {
+                return Err("Gate B 参数只允许 --gate-b-flow".to_owned());
             }
             None
         };
@@ -5934,7 +5975,7 @@ mod tests {
     #[cfg(feature = "gate-b-flow")]
     #[test]
     fn gate_b_parser_requires_one_explicit_root_and_historical_rules() {
-        let arguments = vec![
+        let arguments: Vec<String> = vec![
             "sim_measurement",
             "--gate-b-flow",
             "--output-dir",
@@ -5951,16 +5992,43 @@ mod tests {
             "/tmp/historical-rules.json",
             "--historical-rule-snapshot-sha256",
             "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "--run-id",
+            "gate-b-user-run",
+            "--initial-available-pusd",
+            "2000",
+            "--per-market-all-in-commitment-limit-pusd",
+            "1000",
         ]
         .into_iter()
         .map(str::to_owned)
         .collect();
-        let parsed = enabled::parse_args_from(arguments).unwrap();
+        let parsed = enabled::parse_args_from(arguments.clone()).unwrap();
         assert_eq!(parsed.mode, enabled::RunMode::GateBFlow);
         assert_eq!(
             enabled::runner_identity(parsed.mode),
             "sim-gate-b-explicit-flow-v1"
         );
+        assert_eq!(
+            parsed.gate_b_configuration_for_test(),
+            ("gate-b-user-run", "2000", "1000")
+        );
+
+        for required in [
+            "--run-id",
+            "--initial-available-pusd",
+            "--per-market-all-in-commitment-limit-pusd",
+        ] {
+            let mut missing = arguments.clone();
+            let index = missing
+                .iter()
+                .position(|argument| argument == required)
+                .expect("固定 Gate B 参数存在");
+            missing.drain(index..=index + 1);
+            assert_eq!(
+                enabled::parse_args_from(missing).unwrap_err(),
+                format!("缺少 {required}")
+            );
+        }
 
         let missing_root = vec![
             "sim_measurement",

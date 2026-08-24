@@ -14,6 +14,9 @@ pub(super) struct GateBArgs {
     pub(super) gate_a_root: PathBuf,
     pub(super) historical_rule_snapshot: PathBuf,
     pub(super) historical_rule_snapshot_sha256: Sha256Hex,
+    pub(super) run_id: String,
+    pub(super) initial_available_pusd: ExactDecimal,
+    pub(super) per_market_all_in_commitment_limit_pusd: ExactDecimal,
 }
 
 pub(super) fn run(args: Args, _run_started: Instant) -> Result<(), String> {
@@ -63,10 +66,8 @@ pub(super) fn run(args: Args, _run_started: Instant) -> Result<(), String> {
 
     fs::create_dir(&args.output_dir)
         .map_err(|error| format!("创建 Gate B 运行目录失败：{error}"))?;
-    let run_id = format!(
-        "{GATE_B_RUNNER_IDENTITY}-{}",
-        gate_a.receipt().receipt_id.0
-    );
+    let run_id = gate.run_id.clone();
+    let creation_request_id = format!("{run_id}-create");
     let opened = RunOpenedV2 {
         run_id: run_id.clone(),
         durability_role: RunDurabilityRoleV2::CleanRun,
@@ -79,18 +80,14 @@ pub(super) fn run(args: Args, _run_started: Instant) -> Result<(), String> {
             .canonical_event_store_manifest_sha256()
             .clone(),
     };
-    let source_reference = |domain: &str| DurableSourceReferenceV1 {
-        source: ImmutableSourceReferenceV1::Sha256(Sha256Hex(format!(
-            "{:x}",
-            Sha256::digest(format!("{domain}\0{run_id}").as_bytes())
-        ))),
-    };
+    let (run_opened_reference, account_opening_reference, account_opening_evidence_identity) =
+        noe_context_sources(&run_id, &creation_request_id);
     let noe_port = sim_system::execution::SimV2NoeProjectionPortV1::new(
         args.output_dir.join("noe"),
         opened.clone(),
-        source_reference("run-opened"),
-        source_reference("account-opening"),
-        format!("{run_id}-opening"),
+        run_opened_reference,
+        account_opening_reference,
+        account_opening_evidence_identity,
         GATE_B_RUNNER_IDENTITY.to_owned(),
     );
     let noe_observation = noe_port.observation();
@@ -112,23 +109,35 @@ pub(super) fn run(args: Args, _run_started: Instant) -> Result<(), String> {
             account_id: format!("{run_id}-account"),
             caller_role: SimCallerRoleV1::ModelTrain,
             caller_instance_id: GATE_B_RUNNER_IDENTITY.to_owned(),
-            creation_request_id: format!("{run_id}-create"),
+            creation_request_id: creation_request_id.clone(),
             response_bridge_binding_id: format!("{run_id}-bridge"),
             initial_account_state: InitialAccountStateV2 {
-                available_pusd: ExactDecimal("1000".to_owned()),
+                available_pusd: gate.initial_available_pusd.clone(),
             },
             session_seed: Sha256Hex(format!("{:x}", Sha256::digest(run_id.as_bytes()))),
         })
         .map_err(|error| format!("创建 Gate B 会话失败：{error}"))?;
-    execution
-        .activate_session(format!("{run_id}-activate"))
-        .map_err(|error| format!("激活 Gate B 会话失败：{error}"))?;
-
-    let mut ledger = LedgerWriterV1::new(AccountAdmissionPolicyV1 {
-        per_market_all_in_commitment_limit_pusd: ExactDecimal("1000".to_owned()),
-    });
-    let mut applied_noe_count = 0_usize;
-    apply_new_noe_results(&noe_observation, &mut applied_noe_count, &mut ledger)?;
+    let (mut ledger, mut applied_noe_count) = initialize_before_activation(
+        || {
+            let mut ledger = LedgerWriterV1::new(AccountAdmissionPolicyV1 {
+                per_market_all_in_commitment_limit_pusd: gate
+                    .per_market_all_in_commitment_limit_pusd
+                    .clone(),
+            });
+            let mut applied_noe_count = 0_usize;
+            apply_new_noe_results(&noe_observation, &mut applied_noe_count, &mut ledger)?;
+            ledger
+                .projection()
+                .ok_or_else(|| "Gate B 开户 NOE 未形成 Ledger 初始化投影".to_owned())?;
+            Ok((ledger, applied_noe_count))
+        },
+        || {
+            execution
+                .activate_session(format!("{run_id}-activate"))
+                .map(|_| ())
+                .map_err(|error| format!("激活 Gate B 会话失败：{error}"))
+        },
+    )?;
 
     let mut platform = adapter
         .next_platform_bucket()
@@ -197,18 +206,89 @@ pub(super) fn run(args: Args, _run_started: Instant) -> Result<(), String> {
     if let Some(required) = execution.next_required_logical_drive() {
         return Err(format!("Gate B 双路结束后仍有必要逻辑推进：{required:?}"));
     }
+    let mut recovery_adapter = GateASimulationReplayAdapter::open(
+        &gate_a,
+        output.sort.batch_rows,
+        output.sort.max_run_bytes,
+        output.sort.batch_rows,
+    )
+    .map_err(|error| format!("重新打开 Gate A 冷恢复适配器失败：{error}"))?;
+    let candidate = require_clean_run_completion(execution.complete_clean_run(|reference| {
+        let bucket = match reference.path {
+            MarketEventPathV1::HiddenPlatform => recovery_adapter.next_platform_bucket(),
+            MarketEventPathV1::PublicVisibility => recovery_adapter.next_visibility_bucket(),
+        }
+        .map_err(|_| {
+            SimRunActorErrorV2::CompletionNotReady("冷恢复读取 Gate A 市场桶失败")
+        })?
+        .ok_or(SimRunActorErrorV2::CompletionNotReady(
+            "冷恢复缺少日志引用的 Gate A 市场桶",
+        ))?;
+        exact_recovery_bucket_body(reference, gate_a_bucket(reference.path, &bucket))
+    }))?;
+    apply_new_noe_results(&noe_observation, &mut applied_noe_count, &mut ledger)?;
     let references = noe_observation.result_references();
     let projection = ledger
         .projection()
         .ok_or_else(|| "Gate B 真实 NOE 流未形成 Ledger 投影".to_owned())?;
     println!(
-        "gate_b_flow=PASS receipt_id={} noe_result_references={} ledger_entry_seq={} output={}",
+        "gate_b_flow=PASS receipt_id={} noe_result_references={} ledger_entry_seq={} clean_run_accepted_inputs={} output={}",
         gate_a.receipt().receipt_id.0,
         references.len(),
         projection.ledger_entry_seq,
+        candidate.accepted_input_count(),
         args.output_dir.display()
     );
     Ok(())
+}
+
+fn noe_context_sources(
+    run_id: &str,
+    creation_request_id: &str,
+) -> (
+    DurableSourceReferenceV1,
+    DurableSourceReferenceV1,
+    String,
+) {
+    (
+        DurableSourceReferenceV1 {
+            source: ImmutableSourceReferenceV1::Identity(run_id.to_owned()),
+        },
+        DurableSourceReferenceV1 {
+            source: ImmutableSourceReferenceV1::Identity(creation_request_id.to_owned()),
+        },
+        creation_request_id.to_owned(),
+    )
+}
+
+fn initialize_before_activation<T>(
+    initialize: impl FnOnce() -> Result<T, String>,
+    activate: impl FnOnce() -> Result<(), String>,
+) -> Result<T, String> {
+    let initialized = initialize()?;
+    activate()?;
+    Ok(initialized)
+}
+
+fn require_clean_run_completion(
+    result: Result<
+        sim_system::execution::UnpublishedRunArtifactCandidateV2,
+        SimRunActorErrorV2,
+    >,
+) -> Result<sim_system::execution::UnpublishedRunArtifactCandidateV2, String> {
+    result.map_err(|error| format!("Gate B CleanRun 完成门失败：{error}"))
+}
+
+fn exact_recovery_bucket_body(
+    requested: &DurableMarketBucketReferenceV2,
+    accepted: AcceptedClosedMarketBucketV2,
+) -> Result<Arc<[ExecutionMarketEventV3]>, SimRunActorErrorV2> {
+    if &accepted.reference != requested {
+        return Err(SimRunActorErrorV2::CompletionNotReady(
+            "冷恢复 Gate A 市场桶引用不匹配",
+        ));
+    }
+    Ok(accepted.events)
 }
 
 fn scenario_from_gate_a(
@@ -280,4 +360,79 @@ fn apply_new_noe_results(
     }
     *applied_count = references.len();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    #[test]
+    fn public_context_identities_match_the_run_and_actual_opening_request() {
+        let (run_opened, account_opening, evidence_identity) =
+            noe_context_sources("user-run-id", "user-run-id-create");
+        assert_eq!(
+            run_opened.source,
+            ImmutableSourceReferenceV1::Identity("user-run-id".to_owned())
+        );
+        assert_eq!(
+            account_opening.source,
+            ImmutableSourceReferenceV1::Identity("user-run-id-create".to_owned())
+        );
+        assert_eq!(evidence_identity, "user-run-id-create");
+    }
+
+    #[test]
+    fn ledger_initialization_finishes_before_session_activation() {
+        let stage = Cell::new(0_u8);
+        let result = initialize_before_activation(
+            || {
+                assert_eq!(stage.get(), 0);
+                stage.set(1);
+                Ok("ledger-opened")
+            },
+            || {
+                assert_eq!(stage.get(), 1);
+                stage.set(2);
+                Ok(())
+            },
+        )
+        .expect("固定顺序必须成功");
+        assert_eq!(result, "ledger-opened");
+        assert_eq!(stage.get(), 2);
+    }
+
+    #[test]
+    fn clean_run_failure_cannot_be_reported_as_success() {
+        let result = require_clean_run_completion(Err(
+            SimRunActorErrorV2::CompletionNotReady("输入尚未封闭"),
+        ));
+        assert_eq!(
+            result.unwrap_err(),
+            "Gate B CleanRun 完成门失败：运行完成门尚未满足：输入尚未封闭"
+        );
+    }
+
+    #[test]
+    fn recovery_reader_rejects_a_substituted_bucket_reference() {
+        let requested = DurableMarketBucketReferenceV2 {
+            path: MarketEventPathV1::HiddenPlatform,
+            bucket_at_utc_ms: 100,
+            start_index_position: 0,
+            next_index_position: 1,
+            closure: MillisecondBucketClosureV1::EndOfInput,
+        };
+        let substituted = AcceptedClosedMarketBucketV2 {
+            reference: DurableMarketBucketReferenceV2 {
+                bucket_at_utc_ms: 101,
+                ..requested.clone()
+            },
+            events: Arc::from([]),
+        };
+        assert_eq!(
+            exact_recovery_bucket_body(&requested, substituted).unwrap_err(),
+            SimRunActorErrorV2::CompletionNotReady("冷恢复 Gate A 市场桶引用不匹配")
+        );
+    }
 }
