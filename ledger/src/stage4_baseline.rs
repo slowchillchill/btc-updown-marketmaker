@@ -302,6 +302,9 @@ fn durable_replay_resource_baseline() {
     let markets = (0..SETTLEMENT_CYCLES_PER_ACCOUNT)
         .map(|ordinal| ConditionId(format!("shared-market-cycle-{ordinal}")))
         .collect::<Vec<_>>();
+    let current_markets = (0..OVERLAPPING_MARKET_COUNT)
+        .map(|ordinal| ConditionId(format!("current-market-{ordinal}")))
+        .collect::<Vec<_>>();
     let mut latencies_ns = Vec::new();
     let append_started = Instant::now();
     let mut sealed_segment_bytes = 0_u64;
@@ -411,7 +414,7 @@ fn durable_replay_resource_baseline() {
 
     let mut local_tail_input_count = 0_usize;
     for (account_ordinal, writer) in writers.iter_mut().enumerate() {
-        for (market_ordinal, condition_id) in markets.iter().enumerate() {
+        for (market_ordinal, condition_id) in current_markets.iter().enumerate() {
             let request =
                 LedgerRequestIdentityV1(format!("tail-request-{account_ordinal}-{market_ordinal}"));
             writer

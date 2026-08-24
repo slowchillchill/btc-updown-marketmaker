@@ -202,8 +202,16 @@ impl DurableLedgerV1 {
         policy: &AccountAdmissionPolicyV1,
         fail_after_publish: bool,
     ) -> Result<Self, LedgerDurableErrorV1> {
-        fs::create_dir_all(directory)
-            .map_err(|error| io_error("创建 Ledger 耐久目录", directory, error))?;
+        match fs::create_dir(directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(io_error("创建 Ledger 耐久目录", directory, error)),
+        }
+        let parent_directory = directory
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        sync_directory(parent_directory, "同步 Ledger 耐久根目录项")?;
         for entry in fs::read_dir(directory)
             .map_err(|error| io_error("读取 Ledger 耐久目录", directory, error))?
         {
@@ -909,17 +917,19 @@ mod tests {
 
     #[test]
     fn genesis_publish_failure_leaves_one_complete_recoverable_policy() {
-        let directory = TempDir::new().unwrap();
+        let parent = TempDir::new().unwrap();
+        let directory = parent.path().join("ledger-instance");
+        assert!(!directory.exists());
         assert!(matches!(
-            DurableLedgerV1::create_with_publish_failure(directory.path(), &policy("80")),
+            DurableLedgerV1::create_with_publish_failure(&directory, &policy("80")),
             Err(LedgerDurableErrorV1::DurabilityUncertain { .. })
         ));
-        assert!(!directory.path().join(GENESIS_CANDIDATE_FILE_NAME).exists());
-        assert!(directory.path().join(ACTIVE_FILE_NAME).exists());
-        assert!(DurableLedgerV1::create(directory.path(), &policy("90")).is_err());
+        assert!(!directory.join(GENESIS_CANDIDATE_FILE_NAME).exists());
+        assert!(directory.join(ACTIVE_FILE_NAME).exists());
+        assert!(DurableLedgerV1::create(&directory, &policy("90")).is_err());
 
         let mut recovered_policy = None;
-        let _ledger = DurableLedgerV1::open(directory.path(), |payload| {
+        let _ledger = DurableLedgerV1::open(&directory, |payload| {
             if let DurablePayloadV1::Genesis { policy } = payload {
                 recovered_policy = Some(policy);
             }
