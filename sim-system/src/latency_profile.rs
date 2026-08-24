@@ -63,10 +63,6 @@ pub struct EmpiricalDelayProfile {
 }
 
 impl EmpiricalDelayProfile {
-    pub(crate) fn canonical_file_bytes(&self) -> &'static [u8] {
-        EMBEDDED_PROFILE_BYTES
-    }
-
     pub fn profile_id(&self) -> &str {
         &self.profile_id
     }

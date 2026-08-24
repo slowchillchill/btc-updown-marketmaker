@@ -114,10 +114,6 @@ impl SealedProcessRuleSnapshot {
         &self.file_sha256
     }
 
-    pub(crate) fn file_bytes(&self) -> &[u8] {
-        &self.file_bytes
-    }
-
     #[must_use]
     pub fn access_mode(&self) -> SnapshotAccessMode {
         self.access_mode
@@ -2929,10 +2925,6 @@ pub(crate) mod tests {
         .expect("当前查询必须密封 V3 进程规则快照")
     }
 
-    pub(crate) async fn successful_snapshot_for_sim_tests() -> Arc<SealedProcessRuleSnapshot> {
-        successful_snapshot_for_sim_tests_with_itode(true).await
-    }
-
     pub(crate) async fn successful_snapshot_v3_for_sim_tests() -> Arc<SealedProcessRuleSnapshotV3> {
         let server = ScriptedServer::start(successful_responses()).await;
         let directory = tempfile::tempdir().expect("创建 V3 规则测试目录");
@@ -2941,133 +2933,6 @@ pub(crate) mod tests {
             directory.path().join("platform-rule-snapshot-v3.json"),
         )
         .await
-    }
-
-    #[allow(dead_code)]
-    pub(crate) async fn recovery_snapshot_for_sim_tests() -> Arc<SealedProcessRuleSnapshot> {
-        let server = ScriptedServer::start(successful_responses()).await;
-        let directory = tempfile::tempdir().expect("tempdir");
-        let target = directory.path().join("platform-rule-snapshot.json");
-        let current = create_successful_snapshot(&server, target.clone()).await;
-        recover_process_snapshot(RecoveryProcessSnapshotRequestV1 {
-            snapshot_path: target,
-            expected_file_sha256: current.file_sha256().clone(),
-            expected_implementation_identity: test_implementation_identity(),
-        })
-        .expect("测试恢复入口必须重新核对规则快照实现身份")
-    }
-
-    pub(crate) async fn successful_snapshot_for_sim_tests_with_itode(
-        enabled: bool,
-    ) -> Arc<SealedProcessRuleSnapshot> {
-        let clob = if enabled {
-            CLOB_REAL.to_vec()
-        } else {
-            let text = std::str::from_utf8(CLOB_REAL).expect("CLOB test fixture is UTF-8");
-            let changed = text.replacen("\"itode\":true", "\"itode\":false", 1);
-            assert_ne!(changed, text, "test fixture must contain the itode field");
-            changed.into_bytes()
-        };
-        let server = ScriptedServer::start(vec![
-            ResponseSpec::json(200, clob),
-            ResponseSpec::json(200, GAMMA_OPEN_EMPTY),
-            ResponseSpec::json(200, GAMMA_CLOSED_REAL),
-        ])
-        .await;
-        let directory = tempfile::tempdir().expect("tempdir");
-        create_successful_snapshot(
-            &server,
-            directory.path().join("platform-rule-snapshot.json"),
-        )
-        .await
-    }
-
-    pub(crate) async fn historical_snapshot_for_sim_tests_with_fee_schedule(
-        rate: &str,
-        exponent: u32,
-    ) -> Arc<SealedProcessRuleSnapshot> {
-        historical_snapshot_for_sim_tests_with_fee_schedule_and_identity(
-            rate,
-            exponent,
-            test_implementation_identity(),
-        )
-        .await
-    }
-
-    pub(crate) async fn historical_snapshot_for_sim_tests_with_fee_schedule_and_identity(
-        rate: &str,
-        exponent: u32,
-        implementation_identity: ImplementationIdentityV1,
-    ) -> Arc<SealedProcessRuleSnapshot> {
-        historical_snapshot_for_sim_tests_with_fee_schedule_and_identity_at(
-            rate,
-            exponent,
-            implementation_identity,
-            fixed_now_utc_ms,
-        )
-        .await
-    }
-
-    async fn historical_snapshot_for_sim_tests_with_fee_schedule_and_identity_at(
-        rate: &str,
-        exponent: u32,
-        implementation_identity: ImplementationIdentityV1,
-        now_utc_ms: fn() -> Result<i64, RuleSnapshotError>,
-    ) -> Arc<SealedProcessRuleSnapshot> {
-        let rate = rate.parse::<Decimal>().expect("测试手续费率必须是十进制");
-        let mut gamma_rate = rate;
-        gamma_rate.rescale(4);
-        let clob = std::str::from_utf8(CLOB_REAL).expect("CLOB test fixture is UTF-8");
-        let changed_clob = clob.replacen(
-            "\"fd\":{\"r\":0.07,\"e\":1,\"to\":true}",
-            &format!(
-                "\"fd\":{{\"r\":{},\"e\":{exponent},\"to\":true}}",
-                rate.normalize()
-            ),
-            1,
-        );
-        if rate != Decimal::new(7, 2) || exponent != 1 {
-            assert_ne!(changed_clob, clob, "CLOB 夹具必须包含手续费表");
-        }
-        let gamma = std::str::from_utf8(GAMMA_CLOSED_REAL).expect("Gamma test fixture is UTF-8");
-        let changed_gamma = gamma.replacen(
-            "\"feeSchedule\":{\"exponent\":\"1.0\",\"rate\":\"0.0700\",\"takerOnly\":true,\"rebateRate\":0.20}",
-            &format!(
-                "\"feeSchedule\":{{\"exponent\":\"{exponent}.0\",\"rate\":\"{gamma_rate}\",\"takerOnly\":true,\"rebateRate\":0.20}}"
-            ),
-            1,
-        );
-        if rate != Decimal::new(7, 2) || exponent != 1 {
-            assert_ne!(changed_gamma, gamma, "Gamma 夹具必须包含手续费表");
-        }
-        let server = ScriptedServer::start(vec![
-            ResponseSpec::json(200, changed_clob.into_bytes()),
-            ResponseSpec::json(200, GAMMA_OPEN_EMPTY),
-            ResponseSpec::json(200, changed_gamma.into_bytes()),
-        ])
-        .await;
-        let directory = tempfile::tempdir().expect("tempdir");
-        let target = directory.path().join("platform-rule-snapshot.json");
-        let current = query_and_seal_current_process_snapshot_with(
-            CurrentProcessSnapshotRequestV1 {
-                reference_market: test_reference_market(),
-                target_path: target.clone(),
-                implementation_identity,
-            },
-            test_loader_options(&server),
-            PLATFORM_RULE_CONFIG_BYTES,
-            now_utc_ms,
-        )
-        .await
-        .expect("当前规则查询必须密封测试快照");
-        let historical = load_historical_process_snapshot(HistoricalProcessSnapshotRequestV1 {
-            snapshot_path: target,
-            expected_file_sha256: current.file_sha256().clone(),
-            replay_causal_start_utc_ms: now_utc_ms().expect("fixed time"),
-        })
-        .expect("历史规则快照必须可重载");
-        assert_eq!(historical.access_mode(), SnapshotAccessMode::HistoricalAsOf);
-        historical
     }
 
     #[tokio::test(flavor = "current_thread")]
