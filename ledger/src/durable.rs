@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::core::LedgerCommittedEffectV1;
-use crate::projection::AccountAdmissionPolicyV1;
+use crate::projection::{AccountAdmissionPolicyV1, LedgerProjectionV1};
 use crate::reservation::{CachedReservationRequestV1, LedgerRequestIdentityV1};
 
 const ACTIVE_FILE_NAME: &str = "ledger-active-v1.jsonl";
@@ -19,6 +19,11 @@ const SEGMENT_PREFIX: &str = "ledger-sealed-v1--";
 const SEGMENT_SUFFIX: &str = ".jsonl";
 const RECORD_VERSION: u16 = 1;
 const RECORD_ENCODING: &str = "ledger-jsonl-v1";
+const PROJECTION_CANDIDATE_FILE_NAME: &str = ".ledger-projection-v1.candidate";
+const PROJECTION_PREFIX: &str = "ledger-projection-v1--";
+const PROJECTION_SUFFIX: &str = ".json";
+const PROJECTION_VERSION: u16 = 1;
+const PROJECTION_ENCODING: &str = "ledger-projection-json-v1";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LedgerDurableErrorV1 {
@@ -35,6 +40,11 @@ pub enum LedgerDurableErrorV1 {
     },
     InvalidStructure(String),
     SealedSegmentHashMismatch {
+        path: PathBuf,
+        expected: String,
+        found: String,
+    },
+    ProjectionHashMismatch {
         path: PathBuf,
         expected: String,
         found: String,
@@ -74,6 +84,15 @@ impl fmt::Display for LedgerDurableErrorV1 {
                 "Ledger 封存段 SHA-256 不匹配 {}：预期 {expected}，实际 {found}",
                 path.display()
             ),
+            Self::ProjectionHashMismatch {
+                path,
+                expected,
+                found,
+            } => write!(
+                formatter,
+                "Ledger 投影 SHA-256 不匹配 {}：预期 {expected}，实际 {found}",
+                path.display()
+            ),
             Self::DurabilityUncertain { operation, message } => {
                 write!(formatter, "Ledger 耐久结果不确定（{operation}）：{message}")
             }
@@ -92,6 +111,146 @@ pub struct LedgerSealedSegmentReferenceV1 {
     pub last_durable_record_seq: u64,
     pub first_ledger_entry_seq: Option<u64>,
     pub last_ledger_entry_seq: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LedgerProjectionReferenceV1 {
+    pub location: String,
+    pub sha256: String,
+    pub ledger_entry_seq: u64,
+}
+
+#[derive(Deserialize)]
+struct LedgerProjectionContainerV1 {
+    version: u16,
+    encoding: String,
+    projection: LedgerProjectionV1,
+}
+
+#[derive(Serialize)]
+struct LedgerProjectionContainerRefV1<'a> {
+    version: u16,
+    encoding: &'static str,
+    projection: &'a LedgerProjectionV1,
+}
+
+pub fn publish_ledger_projection_v1(
+    directory: &Path,
+    projection: &LedgerProjectionV1,
+) -> Result<LedgerProjectionReferenceV1, LedgerDurableErrorV1> {
+    let encoded = serde_json::to_vec(&LedgerProjectionContainerRefV1 {
+        version: PROJECTION_VERSION,
+        encoding: PROJECTION_ENCODING,
+        projection,
+    })
+    .map_err(|error| LedgerDurableErrorV1::Encode(error.to_string()))?;
+    let sha256 = sha256_bytes(&encoded);
+    let file_name = projection_file_name(projection.ledger_entry_seq, &sha256);
+    let final_path = directory.join(&file_name);
+    let candidate_path = directory.join(PROJECTION_CANDIDATE_FILE_NAME);
+
+    match fs::remove_file(&candidate_path) {
+        Ok(()) => sync_directory(directory, "同步清理 Ledger 投影候选")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(io_error("清理 Ledger 投影候选", &candidate_path, error)),
+    }
+    let mut candidate = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&candidate_path)
+        .map_err(|error| io_error("创建 Ledger 投影候选", &candidate_path, error))?;
+    if let Err(error) = candidate
+        .write_all(&encoded)
+        .and_then(|()| candidate.sync_all())
+    {
+        drop(candidate);
+        return cleanup_projection_candidate(
+            directory,
+            &candidate_path,
+            io_error("写入并同步 Ledger 投影候选", &candidate_path, error),
+        );
+    }
+    drop(candidate);
+    let parent = match File::open(directory) {
+        Ok(parent) => parent,
+        Err(error) => {
+            return cleanup_projection_candidate(
+                directory,
+                &candidate_path,
+                io_error("打开 Ledger 投影目录", directory, error),
+            );
+        }
+    };
+    if let Err(error) = renameat_with(
+        &parent,
+        PROJECTION_CANDIDATE_FILE_NAME,
+        &parent,
+        &file_name,
+        RenameFlags::NOREPLACE,
+    ) {
+        return cleanup_projection_candidate(
+            directory,
+            &candidate_path,
+            LedgerDurableErrorV1::Io {
+                operation: "禁止覆盖地发布 Ledger 投影",
+                path: final_path,
+                message: error.to_string(),
+            },
+        );
+    }
+    sync_directory(directory, "同步 Ledger 投影发布").map_err(|error| {
+        LedgerDurableErrorV1::DurabilityUncertain {
+            operation: "发布 Ledger 投影",
+            message: error.to_string(),
+        }
+    })?;
+    Ok(LedgerProjectionReferenceV1 {
+        location: directory.join(file_name).to_string_lossy().into_owned(),
+        sha256,
+        ledger_entry_seq: projection.ledger_entry_seq,
+    })
+}
+
+pub fn read_ledger_projection_v1(
+    reference: &LedgerProjectionReferenceV1,
+) -> Result<LedgerProjectionV1, LedgerDurableErrorV1> {
+    let path = Path::new(&reference.location);
+    let expected_file_name = projection_file_name(reference.ledger_entry_seq, &reference.sha256);
+    if path.file_name().and_then(|value| value.to_str()) != Some(expected_file_name.as_str()) {
+        return Err(LedgerDurableErrorV1::InvalidStructure(format!(
+            "Ledger 投影引用文件名与序号或 SHA-256 不一致：{}",
+            path.display()
+        )));
+    }
+    let encoded = fs::read(path).map_err(|error| io_error("读取 Ledger 投影", path, error))?;
+    let found = sha256_bytes(&encoded);
+    if found != reference.sha256 {
+        return Err(LedgerDurableErrorV1::ProjectionHashMismatch {
+            path: path.to_path_buf(),
+            expected: reference.sha256.clone(),
+            found,
+        });
+    }
+    let container: LedgerProjectionContainerV1 =
+        serde_json::from_slice(&encoded).map_err(|error| {
+            LedgerDurableErrorV1::InvalidStructure(format!(
+                "Ledger 投影容器 {} 无法解码：{error}",
+                path.display()
+            ))
+        })?;
+    if container.version != PROJECTION_VERSION || container.encoding != PROJECTION_ENCODING {
+        return Err(LedgerDurableErrorV1::InvalidStructure(format!(
+            "Ledger 投影容器 {} 的版本或编码不受支持",
+            path.display()
+        )));
+    }
+    if container.projection.ledger_entry_seq != reference.ledger_entry_seq {
+        return Err(LedgerDurableErrorV1::InvalidStructure(format!(
+            "Ledger 投影容器 {} 的序号与引用不一致",
+            path.display()
+        )));
+    }
+    Ok(container.projection)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -695,6 +854,30 @@ fn cleanup_genesis_candidate<T>(
     Err(original_error)
 }
 
+fn cleanup_projection_candidate<T>(
+    directory: &Path,
+    candidate_path: &Path,
+    original_error: LedgerDurableErrorV1,
+) -> Result<T, LedgerDurableErrorV1> {
+    match fs::remove_file(candidate_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(LedgerDurableErrorV1::DurabilityUncertain {
+                operation: "清理失败的 Ledger 投影候选",
+                message: format!("原始错误：{original_error}；清理错误：{error}"),
+            });
+        }
+    }
+    if let Err(error) = sync_directory_io(directory) {
+        return Err(LedgerDurableErrorV1::DurabilityUncertain {
+            operation: "同步 Ledger 投影候选清理",
+            message: format!("原始错误：{original_error}；目录同步错误：{error}"),
+        });
+    }
+    Err(original_error)
+}
+
 fn decode_segment(
     path: &Path,
     mut reader: impl BufRead,
@@ -808,6 +991,10 @@ fn segment_file_name(
     )
 }
 
+fn projection_file_name(ledger_entry_seq: u64, sha256: &str) -> String {
+    format!("{PROJECTION_PREFIX}{ledger_entry_seq}--{sha256}{PROJECTION_SUFFIX}")
+}
+
 fn optional_seq(value: Option<u64>) -> String {
     value.map_or_else(|| "none".to_owned(), |value| value.to_string())
 }
@@ -884,6 +1071,13 @@ fn sha256_file(path: &Path) -> Result<String, LedgerDurableErrorV1> {
     }
     let digest = hasher.finalize();
     Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn sha256_bytes(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn sync_directory(path: &Path, operation: &'static str) -> Result<(), LedgerDurableErrorV1> {
