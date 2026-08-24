@@ -12,8 +12,7 @@ pub(super) const GATE_B_RUNNER_IDENTITY: &str = "sim-gate-b-explicit-flow-v1";
 #[derive(Debug)]
 pub(super) struct GateBArgs {
     pub(super) gate_a_root: PathBuf,
-    pub(super) historical_rule_snapshot: PathBuf,
-    pub(super) historical_rule_snapshot_sha256: Sha256Hex,
+    pub(super) reference_market: ReferenceMarketSpecV1,
     pub(super) run_id: String,
     pub(super) initial_available_pusd: ExactDecimal,
     pub(super) per_market_all_in_commitment_limit_pusd: ExactDecimal,
@@ -60,8 +59,6 @@ impl std::fmt::Display for FinishGateBFlowError {
 }
 
 fn prepare_gate_b_flow(input: GateBFlowPreparation<'_>) -> Result<PreparedGateBFlow, String> {
-    fs::create_dir(&input.output_dir)
-        .map_err(|error| format!("创建 Gate B 运行目录失败：{error}"))?;
     let creation_request_id = format!("{}-create", input.gate.run_id);
     let opened = RunOpenedV2 {
         run_id: input.gate.run_id.clone(),
@@ -179,6 +176,21 @@ pub(super) fn run(args: Args, _run_started: Instant) -> Result<(), String> {
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     fs::create_dir_all(parent).map_err(|error| format!("创建 Gate B 父目录失败：{error}"))?;
+    fs::create_dir(&args.output_dir)
+        .map_err(|error| format!("创建 Gate B 运行目录失败：{error}"))?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("创建 Gate B CURRENT_QUERY runtime 失败：{error}"))?;
+    let rule_snapshot = runtime
+        .block_on(query_and_seal_current_process_snapshot_v3(
+            CurrentProcessSnapshotRequestV1 {
+                reference_market: gate.reference_market.clone(),
+                target_path: args.output_dir.join("platform-rule-snapshot-v3.json"),
+                implementation_identity: args.identity.clone(),
+            },
+        ))
+        .map_err(|error| format!("Gate B runner 唯一 CURRENT_QUERY 失败：{error}"))?;
     let validation_work = parent.join(format!(
         ".gate-b-final-validation-{}",
         std::process::id()
@@ -188,12 +200,6 @@ pub(super) fn run(args: Args, _run_started: Instant) -> Result<(), String> {
     if validation_work.exists() {
         return Err("Gate A 外置 validation 工作目录未清理".to_owned());
     }
-    let rule_snapshot = load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
-        snapshot_path: gate.historical_rule_snapshot.clone(),
-        expected_file_sha256: gate.historical_rule_snapshot_sha256.clone(),
-        replay_causal_start_utc_ms: gate_a.run_manifest().received_start_utc_ms,
-    })
-    .map_err(|error| format!("加载显式历史规则快照失败：{error}"))?;
     let scenario = scenario_from_gate_a(&gate_a)?;
     let finality = successful_finality()?;
     let latency = load_embedded_proxy_latency_profile()
@@ -439,24 +445,26 @@ mod tests {
         // 复用既有 official-V3-shape 测试坐标；它不是 Gate A receipt 或 #30 正式数据证据。
         let gate = GateBArgs {
             gate_a_root: PathBuf::new(),
-            historical_rule_snapshot: Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/platform-rule-snapshot-v3-gate-b.json"),
-            historical_rule_snapshot_sha256: Sha256Hex(RULE_FIXTURE_SHA256.to_owned()),
+            reference_market: reference_market(),
             run_id: run_id.to_owned(),
             initial_available_pusd: ExactDecimal(initial_available_pusd.to_owned()),
             per_market_all_in_commitment_limit_pusd: ExactDecimal(
                 per_market_limit_pusd.to_owned(),
             ),
         };
-        let rule_snapshot =
-            load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
-                snapshot_path: gate.historical_rule_snapshot.clone(),
-                expected_file_sha256: gate.historical_rule_snapshot_sha256.clone(),
+        let rule_snapshot = load_historical_process_snapshot_v3(
+            HistoricalProcessSnapshotRequestV1 {
+                snapshot_path: Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/platform-rule-snapshot-v3-gate-b.json"),
+                expected_file_sha256: Sha256Hex(RULE_FIXTURE_SHA256.to_owned()),
                 replay_causal_start_utc_ms: COMPONENT_CAUSAL_START_UTC_MS,
-            })
-            .map_err(|error| format!("加载 Gate B 测试规则快照失败：{error}"))?;
-        prepare_gate_b_flow(GateBFlowPreparation {
-            output_dir,
+            },
+        )
+        .map_err(|error| format!("加载 Gate B 测试规则快照失败：{error}"))?;
+        let rule_snapshot_file_sha256 = rule_snapshot.file_sha256().clone();
+        fs::create_dir(&output_dir).map_err(|error| format!("创建 Gate B 测试目录失败：{error}"))?;
+        let prepared = prepare_gate_b_flow(GateBFlowPreparation {
+            output_dir: output_dir.clone(),
             gate: &gate,
             implementation_identity: ImplementationIdentityV1 {
                 git_commit: "1".repeat(40),
@@ -469,7 +477,76 @@ mod tests {
             scenario: component_fixed_scenario()?,
             latency: load_embedded_proxy_latency_profile()
                 .map_err(|error| format!("加载 Gate B 测试时延档失败：{error}"))?,
-        })
+        })?;
+        let first_line = fs::read_to_string(output_dir.join("sim-event-log-v2.working.jsonl"))
+            .map_err(|error| format!("读取 Gate B 测试运行日志失败：{error}"))?
+            .lines()
+            .next()
+            .ok_or_else(|| "Gate B 测试运行日志缺少 RunOpened".to_owned())?
+            .to_owned();
+        let envelope: Value = serde_json::from_str(&first_line)
+            .map_err(|error| format!("解码 Gate B 测试 RunOpened 信封失败：{error}"))?;
+        let opened: RunOpenedV2 = serde_json::from_value(
+            envelope
+                .get("body")
+                .cloned()
+                .ok_or_else(|| "Gate B 测试运行日志缺少 RunOpened body".to_owned())?,
+        )
+        .map_err(|error| format!("解码 Gate B 测试 RunOpened 失败：{error}"))?;
+        assert_eq!(
+            opened.platform_rule_snapshot_file_sha256,
+            rule_snapshot_file_sha256,
+            "Gate B RunOpened 必须绑定传入规则快照 SHA-256"
+        );
+        Ok(prepared)
+    }
+
+    #[test]
+    fn current_query_precedes_gate_a_open_and_run_artifacts() {
+        let temp = tempfile::tempdir().expect("创建 Gate B CURRENT_QUERY 临时目录");
+        let output = temp.path().join("run");
+        let missing_gate_a = temp.path().join("missing-gate-a");
+        let arguments = vec![
+            "sim_measurement".to_owned(),
+            "--gate-b-flow".to_owned(),
+            "--output-dir".to_owned(),
+            output.to_string_lossy().into_owned(),
+            "--git-commit".to_owned(),
+            "1".repeat(40),
+            "--source-identity-sha256".to_owned(),
+            "2".repeat(64),
+            "--cargo-lock-sha256".to_owned(),
+            "3".repeat(64),
+            "--gate-a-root".to_owned(),
+            missing_gate_a.to_string_lossy().into_owned(),
+            "--reference-condition-id".to_owned(),
+            "not-a-condition".to_owned(),
+            "--reference-clob-market-id".to_owned(),
+            "3278040".to_owned(),
+            "--reference-market-slug".to_owned(),
+            "btc-updown-5m-offline-order-check".to_owned(),
+            "--reference-up-token-id".to_owned(),
+            TOKEN_UP.to_owned(),
+            "--reference-up-outcome".to_owned(),
+            "Up".to_owned(),
+            "--reference-down-token-id".to_owned(),
+            TOKEN_DOWN.to_owned(),
+            "--reference-down-outcome".to_owned(),
+            "Down".to_owned(),
+            "--run-id".to_owned(),
+            "gate-b-query-order".to_owned(),
+            "--initial-available-pusd".to_owned(),
+            "2000".to_owned(),
+            "--per-market-all-in-commitment-limit-pusd".to_owned(),
+            "1000".to_owned(),
+        ];
+        let args = parse_args_from(arguments).expect("完整 Gate B 参数必须解析");
+        let error = run(args, Instant::now()).expect_err("非法参考身份必须在联网前拒绝");
+        assert!(error.contains("CURRENT_QUERY"), "unexpected error: {error}");
+        assert!(output.is_dir());
+        assert!(!output.join("platform-rule-snapshot-v3.json").exists());
+        assert!(!output.join("sim-event-log-v2.working.jsonl").exists());
+        assert!(!output.join("noe").exists());
     }
 
     #[test]

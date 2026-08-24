@@ -339,9 +339,12 @@ mod enabled {
 
     #[cfg(all(test, feature = "gate-b-flow"))]
     impl Args {
-        pub(super) fn gate_b_configuration_for_test(&self) -> (&str, &str, &str) {
+        pub(super) fn gate_b_configuration_for_test(
+            &self,
+        ) -> (&ReferenceMarketSpecV1, &str, &str, &str) {
             let gate = self.gate_b.as_ref().expect("测试参数已选择 Gate B");
             (
+                &gate.reference_market,
                 &gate.run_id,
                 &gate.initial_available_pusd.0,
                 &gate.per_market_all_in_commitment_limit_pusd.0,
@@ -5084,9 +5087,19 @@ mod enabled {
         let mut stage5_component_manifest_sha256 = None;
         let mut stage5_component_receipt_id = None;
         #[cfg(feature = "gate-b-flow")]
-        let mut historical_rule_snapshot = None;
+        let mut reference_condition_id = None;
         #[cfg(feature = "gate-b-flow")]
-        let mut historical_rule_snapshot_sha256 = None;
+        let mut reference_clob_market_id = None;
+        #[cfg(feature = "gate-b-flow")]
+        let mut reference_market_slug = None;
+        #[cfg(feature = "gate-b-flow")]
+        let mut reference_up_token_id = None;
+        #[cfg(feature = "gate-b-flow")]
+        let mut reference_up_outcome = None;
+        #[cfg(feature = "gate-b-flow")]
+        let mut reference_down_token_id = None;
+        #[cfg(feature = "gate-b-flow")]
+        let mut reference_down_outcome = None;
         #[cfg(feature = "gate-b-flow")]
         let mut gate_b_run_id = None;
         #[cfg(feature = "gate-b-flow")]
@@ -5166,13 +5179,19 @@ mod enabled {
                     stage5_component_receipt_id = Some(value.clone());
                 }
                 #[cfg(feature = "gate-b-flow")]
-                "--historical-rule-snapshot" => {
-                    historical_rule_snapshot = Some(PathBuf::from(value));
-                }
+                "--reference-condition-id" => reference_condition_id = Some(value.clone()),
                 #[cfg(feature = "gate-b-flow")]
-                "--historical-rule-snapshot-sha256" => {
-                    historical_rule_snapshot_sha256 = Some(value.clone());
-                }
+                "--reference-clob-market-id" => reference_clob_market_id = Some(value.clone()),
+                #[cfg(feature = "gate-b-flow")]
+                "--reference-market-slug" => reference_market_slug = Some(value.clone()),
+                #[cfg(feature = "gate-b-flow")]
+                "--reference-up-token-id" => reference_up_token_id = Some(value.clone()),
+                #[cfg(feature = "gate-b-flow")]
+                "--reference-up-outcome" => reference_up_outcome = Some(value.clone()),
+                #[cfg(feature = "gate-b-flow")]
+                "--reference-down-token-id" => reference_down_token_id = Some(value.clone()),
+                #[cfg(feature = "gate-b-flow")]
+                "--reference-down-outcome" => reference_down_outcome = Some(value.clone()),
                 #[cfg(feature = "gate-b-flow")]
                 "--run-id" => gate_b_run_id = Some(value.clone()),
                 #[cfg(feature = "gate-b-flow")]
@@ -5297,16 +5316,38 @@ mod enabled {
         };
         #[cfg(feature = "gate-b-flow")]
         let gate_b = if mode == RunMode::GateBFlow {
-            let snapshot_sha = historical_rule_snapshot_sha256
-                .ok_or_else(|| "缺少 --historical-rule-snapshot-sha256".to_owned())?;
-            if snapshot_sha.len() != 64 {
-                return Err("历史规则快照 SHA-256 必须为 64 位".to_owned());
-            }
             Some(gate_b::GateBArgs {
                 gate_a_root: gate_a_root.ok_or_else(|| "缺少 --gate-a-root".to_owned())?,
-                historical_rule_snapshot: historical_rule_snapshot
-                    .ok_or_else(|| "缺少 --historical-rule-snapshot".to_owned())?,
-                historical_rule_snapshot_sha256: Sha256Hex(snapshot_sha),
+                reference_market: ReferenceMarketSpecV1 {
+                    condition_id: ConditionId(
+                        reference_condition_id
+                            .ok_or_else(|| "缺少 --reference-condition-id".to_owned())?,
+                    ),
+                    clob_market_id: ClobMarketId(
+                        reference_clob_market_id
+                            .ok_or_else(|| "缺少 --reference-clob-market-id".to_owned())?,
+                    ),
+                    slug: reference_market_slug
+                        .ok_or_else(|| "缺少 --reference-market-slug".to_owned())?,
+                    outcomes: vec![
+                        ReferenceOutcomeSpecV1 {
+                            token_id: TokenId(
+                                reference_up_token_id
+                                    .ok_or_else(|| "缺少 --reference-up-token-id".to_owned())?,
+                            ),
+                            outcome: reference_up_outcome
+                                .ok_or_else(|| "缺少 --reference-up-outcome".to_owned())?,
+                        },
+                        ReferenceOutcomeSpecV1 {
+                            token_id: TokenId(
+                                reference_down_token_id
+                                    .ok_or_else(|| "缺少 --reference-down-token-id".to_owned())?,
+                            ),
+                            outcome: reference_down_outcome
+                                .ok_or_else(|| "缺少 --reference-down-outcome".to_owned())?,
+                        },
+                    ],
+                },
                 run_id: gate_b_run_id.ok_or_else(|| "缺少 --run-id".to_owned())?,
                 initial_available_pusd: ExactDecimal(
                     initial_available_pusd
@@ -5319,8 +5360,13 @@ mod enabled {
                 ),
             })
         } else {
-            if historical_rule_snapshot.is_some()
-                || historical_rule_snapshot_sha256.is_some()
+            if reference_condition_id.is_some()
+                || reference_clob_market_id.is_some()
+                || reference_market_slug.is_some()
+                || reference_up_token_id.is_some()
+                || reference_up_outcome.is_some()
+                || reference_down_token_id.is_some()
+                || reference_down_outcome.is_some()
                 || gate_b_run_id.is_some()
                 || initial_available_pusd.is_some()
                 || per_market_all_in_commitment_limit_pusd.is_some()
@@ -5974,7 +6020,7 @@ mod tests {
 
     #[cfg(feature = "gate-b-flow")]
     #[test]
-    fn gate_b_parser_requires_one_explicit_root_and_historical_rules() {
+    fn gate_b_parser_requires_one_explicit_root_and_complete_reference_market() {
         let arguments: Vec<String> = vec![
             "sim_measurement",
             "--gate-b-flow",
@@ -5988,10 +6034,20 @@ mod tests {
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             "--gate-a-root",
             "/tmp/gate-a",
-            "--historical-rule-snapshot",
-            "/tmp/historical-rules.json",
-            "--historical-rule-snapshot-sha256",
-            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "--reference-condition-id",
+            "0x07760d950eee192fc99eecdf9adc18e7dedf6764ec9ecbbc4e5489ba7ae45819",
+            "--reference-clob-market-id",
+            "3278040",
+            "--reference-market-slug",
+            "btc-updown-5m-parser-test",
+            "--reference-up-token-id",
+            "111",
+            "--reference-up-outcome",
+            "Up",
+            "--reference-down-token-id",
+            "222",
+            "--reference-down-outcome",
+            "Down",
             "--run-id",
             "gate-b-user-run",
             "--initial-available-pusd",
@@ -6008,12 +6064,31 @@ mod tests {
             enabled::runner_identity(parsed.mode),
             "sim-gate-b-explicit-flow-v1"
         );
+        let (reference, run_id, initial_available, per_market_limit) =
+            parsed.gate_b_configuration_for_test();
         assert_eq!(
-            parsed.gate_b_configuration_for_test(),
+            reference.condition_id.0,
+            "0x07760d950eee192fc99eecdf9adc18e7dedf6764ec9ecbbc4e5489ba7ae45819"
+        );
+        assert_eq!(reference.clob_market_id.0, "3278040");
+        assert_eq!(reference.slug, "btc-updown-5m-parser-test");
+        assert_eq!(reference.outcomes[0].token_id.0, "111");
+        assert_eq!(reference.outcomes[0].outcome, "Up");
+        assert_eq!(reference.outcomes[1].token_id.0, "222");
+        assert_eq!(reference.outcomes[1].outcome, "Down");
+        assert_eq!(
+            (run_id, initial_available, per_market_limit),
             ("gate-b-user-run", "2000", "1000")
         );
 
         for required in [
+            "--reference-condition-id",
+            "--reference-clob-market-id",
+            "--reference-market-slug",
+            "--reference-up-token-id",
+            "--reference-up-outcome",
+            "--reference-down-token-id",
+            "--reference-down-outcome",
             "--run-id",
             "--initial-available-pusd",
             "--per-market-all-in-commitment-limit-pusd",
@@ -6041,10 +6116,26 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "--cargo-lock-sha256",
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            "--historical-rule-snapshot",
-            "/tmp/historical-rules.json",
-            "--historical-rule-snapshot-sha256",
-            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "--reference-condition-id",
+            "condition",
+            "--reference-clob-market-id",
+            "market",
+            "--reference-market-slug",
+            "slug",
+            "--reference-up-token-id",
+            "up-token",
+            "--reference-up-outcome",
+            "Up",
+            "--reference-down-token-id",
+            "down-token",
+            "--reference-down-outcome",
+            "Down",
+            "--run-id",
+            "missing-root-run",
+            "--initial-available-pusd",
+            "2000",
+            "--per-market-all-in-commitment-limit-pusd",
+            "1000",
         ]
         .into_iter()
         .map(str::to_owned)
@@ -6065,10 +6156,26 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "--cargo-lock-sha256",
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            "--historical-rule-snapshot",
-            "/tmp/historical-rules.json",
-            "--historical-rule-snapshot-sha256",
-            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "--reference-condition-id",
+            "condition",
+            "--reference-clob-market-id",
+            "market",
+            "--reference-market-slug",
+            "slug",
+            "--reference-up-token-id",
+            "up-token",
+            "--reference-up-outcome",
+            "Up",
+            "--reference-down-token-id",
+            "down-token",
+            "--reference-down-outcome",
+            "Down",
+            "--run-id",
+            "duplicate-root-run",
+            "--initial-available-pusd",
+            "2000",
+            "--per-market-all-in-commitment-limit-pusd",
+            "1000",
         ]
         .into_iter()
         .map(str::to_owned)
@@ -6083,6 +6190,18 @@ mod tests {
             enabled::parse_args_from(duplicate_root).unwrap_err(),
             "--gate-a-root 不得重复"
         );
+
+        for obsolete in [
+            "--historical-rule-snapshot",
+            "--historical-rule-snapshot-sha256",
+        ] {
+            let mut rejected = arguments.clone();
+            rejected.extend([obsolete.to_owned(), "obsolete".to_owned()]);
+            assert_eq!(
+                enabled::parse_args_from(rejected).unwrap_err(),
+                format!("未知参数：{obsolete}")
+            );
+        }
     }
 
     #[cfg(not(feature = "measurement"))]
