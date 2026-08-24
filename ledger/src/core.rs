@@ -20,6 +20,8 @@ use execution_normalization::{
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+use crate::durable::RecoveryDurationsV1;
 use crate::durable::{
     DurableLedgerV1, DurablePayloadV1, LedgerDurableErrorV1, LedgerSealedSegmentReferenceV1,
 };
@@ -373,6 +375,47 @@ pub struct LedgerWriterV1 {
     durable: Option<DurableLedgerV1>,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub(crate) struct LedgerHotIndexCountsV1 {
+    pub(crate) account_markets: usize,
+    pub(crate) account_global_outcome_balances: usize,
+    pub(crate) account_market_outcome_balances: usize,
+    pub(crate) reservation_requests: usize,
+    pub(crate) reservation_applied_local_events: usize,
+    pub(crate) reservation_markets: usize,
+    pub(crate) lifecycle_submission_requests: usize,
+    pub(crate) lifecycle_query_requests: usize,
+    pub(crate) lifecycle_orders: usize,
+    pub(crate) lifecycle_trades: usize,
+    pub(crate) lifecycle_fills: usize,
+    pub(crate) lifecycle_global_outcome_costs: usize,
+    pub(crate) lifecycle_markets: usize,
+    pub(crate) lifecycle_market_outcome_costs: usize,
+    pub(crate) applied_noe_references: usize,
+}
+
+#[cfg(test)]
+impl LedgerHotIndexCountsV1 {
+    pub(crate) fn add_assign(&mut self, other: Self) {
+        self.account_markets += other.account_markets;
+        self.account_global_outcome_balances += other.account_global_outcome_balances;
+        self.account_market_outcome_balances += other.account_market_outcome_balances;
+        self.reservation_requests += other.reservation_requests;
+        self.reservation_applied_local_events += other.reservation_applied_local_events;
+        self.reservation_markets += other.reservation_markets;
+        self.lifecycle_submission_requests += other.lifecycle_submission_requests;
+        self.lifecycle_query_requests += other.lifecycle_query_requests;
+        self.lifecycle_orders += other.lifecycle_orders;
+        self.lifecycle_trades += other.lifecycle_trades;
+        self.lifecycle_fills += other.lifecycle_fills;
+        self.lifecycle_global_outcome_costs += other.lifecycle_global_outcome_costs;
+        self.lifecycle_markets += other.lifecycle_markets;
+        self.lifecycle_market_outcome_costs += other.lifecycle_market_outcome_costs;
+        self.applied_noe_references += other.applied_noe_references;
+    }
+}
+
 impl LedgerWriterV1 {
     pub fn new(policy: AccountAdmissionPolicyV1) -> Self {
         Self {
@@ -398,14 +441,35 @@ impl LedgerWriterV1 {
 
     pub fn open_durable(directory: impl AsRef<Path>) -> Result<Self, LedgerErrorV1> {
         let mut recovered = None;
-        let durable = DurableLedgerV1::open(directory.as_ref(), |payload| match payload {
+        let durable = DurableLedgerV1::open(directory.as_ref(), |payload| {
+            Self::apply_recovery_payload(&mut recovered, payload)
+        })?;
+        Self::finish_recovery(recovered, durable)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_durable_measured(
+        directory: impl AsRef<Path>,
+    ) -> Result<(Self, RecoveryDurationsV1), LedgerErrorV1> {
+        let mut recovered = None;
+        let (durable, durations) = DurableLedgerV1::open_measured(directory.as_ref(), |payload| {
+            Self::apply_recovery_payload(&mut recovered, payload)
+        })?;
+        Ok((Self::finish_recovery(recovered, durable)?, durations))
+    }
+
+    fn apply_recovery_payload(
+        recovered: &mut Option<Self>,
+        payload: DurablePayloadV1,
+    ) -> Result<(), LedgerDurableErrorV1> {
+        match payload {
             DurablePayloadV1::Genesis { policy } => {
                 if recovered.is_some() {
                     return Err(LedgerDurableErrorV1::InvalidStructure(
                         "Ledger 耐久历史包含重复 genesis".to_owned(),
                     ));
                 }
-                recovered = Some(Self::new(policy));
+                *recovered = Some(Self::new(policy));
                 Ok(())
             }
             payload => recovered
@@ -416,7 +480,13 @@ impl LedgerWriterV1 {
                     )
                 })?
                 .apply_recovered_payload(payload),
-        })?;
+        }
+    }
+
+    fn finish_recovery(
+        recovered: Option<Self>,
+        durable: DurableLedgerV1,
+    ) -> Result<Self, LedgerErrorV1> {
         let mut writer = recovered.ok_or_else(|| {
             LedgerDurableErrorV1::InvalidStructure("Ledger 耐久历史缺少 genesis".to_owned())
         })?;
@@ -1591,18 +1661,37 @@ impl LedgerWriterV1 {
     }
 
     #[cfg(test)]
-    pub(crate) fn baseline_hot_index_counts(
-        &self,
-    ) -> (usize, usize, usize, usize, usize, usize, usize) {
-        (
-            self.reservations.requests.len(),
-            self.reservations.markets.len(),
-            self.applied_references.len(),
-            self.lifecycle.orders.len(),
-            self.lifecycle.trades.len(),
-            self.lifecycle.applied_fills.len(),
-            self.lifecycle.outcome_cost_basis_pusd.len(),
-        )
+    pub(crate) fn baseline_hot_index_counts(&self) -> LedgerHotIndexCountsV1 {
+        let account = self.account.as_ref();
+        LedgerHotIndexCountsV1 {
+            account_markets: account.map_or(0, |account| account.markets.len()),
+            account_global_outcome_balances: account
+                .map_or(0, |account| account.balances.outcome_balances.len()),
+            account_market_outcome_balances: account.map_or(0, |account| {
+                account
+                    .markets
+                    .values()
+                    .map(|market| market.balances.outcome_balances.len())
+                    .sum()
+            }),
+            reservation_requests: self.reservations.requests.len(),
+            reservation_applied_local_events: self.reservations.applied_local_events.len(),
+            reservation_markets: self.reservations.markets.len(),
+            lifecycle_submission_requests: self.lifecycle.submission_requests.len(),
+            lifecycle_query_requests: self.lifecycle.query_requests.len(),
+            lifecycle_orders: self.lifecycle.orders.len(),
+            lifecycle_trades: self.lifecycle.trades.len(),
+            lifecycle_fills: self.lifecycle.applied_fills.len(),
+            lifecycle_global_outcome_costs: self.lifecycle.outcome_cost_basis_pusd.len(),
+            lifecycle_markets: self.lifecycle.markets.len(),
+            lifecycle_market_outcome_costs: self
+                .lifecycle
+                .markets
+                .values()
+                .map(|market| market.outcome_cost_basis_pusd.len())
+                .sum(),
+            applied_noe_references: self.applied_references.len(),
+        }
     }
 }
 

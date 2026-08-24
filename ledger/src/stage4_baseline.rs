@@ -5,7 +5,9 @@ use contracts::execution_normalization::{
     DurableSourceReferenceV1, ImmutableSourceReferenceV1, NoeResultReferenceV1,
     SimV2SourceRecordReferenceV1, SimV2SourceReferenceV1, SimV2SourceWatermarkV1,
     SourceNeutralAccountBalanceDeltaV1, SourceNeutralAccountTransitionKindV1,
-    SourceNeutralOutcomeBalanceDeltaV1, StableLogicalIdentityV1,
+    SourceNeutralOrderLifecycleEventV1, SourceNeutralOrderLifecycleResultV1,
+    SourceNeutralOutcomeBalanceDeltaV1, SourceNeutralTradeEconomicDispositionV1,
+    SourceNeutralTradeLifecycleResultV1, SourceNeutralTradeStateV1, StableLogicalIdentityV1,
 };
 use contracts::{
     AccountInstanceKeyV1, ConditionId, ExactDecimal, PlatformSourceV1, Sha256Hex, SimCallerRoleV1,
@@ -22,6 +24,7 @@ use tempfile::TempDir;
 use crate::{
     AccountAdmissionPolicyV1, LedgerLocalEventIdentityV1, LedgerRequestIdentityV1, LedgerWriterV1,
 };
+use crate::{LedgerSubmissionItemIdentityV1, core::LedgerHotIndexCountsV1};
 
 const ACCOUNT_COUNT: usize = 4;
 const OVERLAPPING_MARKET_COUNT: usize = 3;
@@ -92,10 +95,6 @@ impl BaselineNoeFixture {
 
     fn commit(&mut self, evidence: SourceNeutralEconomicEvidenceV1) -> NoeResultReferenceV1 {
         let sequence = self.next_sequence;
-        let watermark = SimV2SourceWatermarkV1 {
-            run_id: self.run_id.clone(),
-            projection_batch_sequence: sequence,
-        };
         let record = if sequence == 1 {
             SimV2SourceRecordReferenceV1::AccountOpening
         } else {
@@ -104,6 +103,89 @@ impl BaselineNoeFixture {
                 platform_event_at_utc_ms: 20_000 + sequence as i64,
                 feedback_received_at_utc_ms: 21_000 + sequence as i64,
             }
+        };
+        self.commit_kind(
+            record,
+            SourceNeutralLogicalKeyV1::EconomicEvidence {
+                evidence_identity: format!("baseline-{sequence}"),
+            },
+            SourceNeutralEvidenceKindV1::Economic { evidence },
+        )
+    }
+
+    fn trade(
+        &mut self,
+        condition_id: &ConditionId,
+        token_id: &str,
+        account_ordinal: usize,
+        market_ordinal: usize,
+        disposition: SourceNeutralTradeEconomicDispositionV1,
+    ) -> NoeResultReferenceV1 {
+        let sequence = self.next_sequence;
+        let trade_identity = identity("trade", account_ordinal, market_ordinal);
+        self.commit_kind(
+            SimV2SourceRecordReferenceV1::TradeLifecycle {
+                private_feedback_sequence: sequence,
+                platform_event_at_utc_ms: 20_000 + sequence as i64,
+                feedback_received_at_utc_ms: 21_000 + sequence as i64,
+            },
+            SourceNeutralLogicalKeyV1::TradeLifecycle {
+                trade_identity: trade_identity.0.clone(),
+                occurrence: sequence,
+            },
+            SourceNeutralEvidenceKindV1::TradeLifecycle {
+                result: SourceNeutralTradeLifecycleResultV1 {
+                    trade_identity,
+                    order_identity: identity("order", account_ordinal, market_ordinal),
+                    condition_id: condition_id.clone(),
+                    token_id: TokenId(token_id.to_owned()),
+                    state: SourceNeutralTradeStateV1::Matched,
+                    economic_disposition: disposition,
+                },
+            },
+        )
+    }
+
+    fn close_order(
+        &mut self,
+        condition_id: &ConditionId,
+        token_id: &str,
+        account_ordinal: usize,
+        market_ordinal: usize,
+    ) -> NoeResultReferenceV1 {
+        let sequence = self.next_sequence;
+        let order_identity = identity("order", account_ordinal, market_ordinal);
+        self.commit_kind(
+            SimV2SourceRecordReferenceV1::OrderLifecycle {
+                private_feedback_sequence: sequence,
+                platform_event_at_utc_ms: 20_000 + sequence as i64,
+                feedback_received_at_utc_ms: 21_000 + sequence as i64,
+            },
+            SourceNeutralLogicalKeyV1::OrderLifecycle {
+                order_identity: order_identity.0.clone(),
+                occurrence: sequence,
+            },
+            SourceNeutralEvidenceKindV1::OrderLifecycle {
+                result: SourceNeutralOrderLifecycleResultV1 {
+                    order_identity,
+                    condition_id: condition_id.clone(),
+                    token_id: TokenId(token_id.to_owned()),
+                    event: SourceNeutralOrderLifecycleEventV1::FakUnspentReleased,
+                },
+            },
+        )
+    }
+
+    fn commit_kind(
+        &mut self,
+        record: SimV2SourceRecordReferenceV1,
+        logical_key: SourceNeutralLogicalKeyV1,
+        kind: SourceNeutralEvidenceKindV1,
+    ) -> NoeResultReferenceV1 {
+        let sequence = self.next_sequence;
+        let watermark = SimV2SourceWatermarkV1 {
+            run_id: self.run_id.clone(),
+            projection_batch_sequence: sequence,
         };
         self.store
             .commit_batch(
@@ -116,10 +198,8 @@ impl BaselineNoeFixture {
                             record,
                         },
                         source_ordinal: 0,
-                        logical_key: SourceNeutralLogicalKeyV1::EconomicEvidence {
-                            evidence_identity: format!("baseline-{sequence}"),
-                        },
-                        kind: SourceNeutralEvidenceKindV1::Economic { evidence },
+                        logical_key,
+                        kind,
                     }],
                 },
                 30_000 + sequence as i64,
@@ -144,18 +224,17 @@ struct BaselineOutputV1 {
     overlapping_market_count: usize,
     settlement_cycles_per_account: usize,
     noe_input_count: usize,
-    local_tail_event_count: usize,
+    local_tail_input_count: usize,
     append_elapsed_ns: u64,
     append_throughput_per_second: f64,
     append_latency_p50_ns: u64,
     append_latency_p95_ns: u64,
     full_replay_elapsed_ns: u64,
-    active_tail_replay_elapsed_ns: u64,
+    sealed_replay_elapsed_ns: u64,
+    active_tail_scan_apply_elapsed_ns: u64,
     rss_kib: Option<u64>,
     hwm_kib: Option<u64>,
-    sealed_segment_bytes: u64,
-    active_tail_bytes: u64,
-    hot_indexes: HotIndexesV1,
+    hot_containers: HotContainersV1,
 }
 
 #[derive(Serialize)]
@@ -166,14 +245,52 @@ struct HardwareV1 {
 }
 
 #[derive(Serialize)]
-struct HotIndexesV1 {
-    reservation_requests: usize,
-    reservation_markets: usize,
+struct HotContainersV1 {
+    account: AccountHotContainersV1,
+    reservations: ReservationHotContainersV1,
+    lifecycle: LifecycleHotContainersV1,
     applied_noe_references: usize,
+    durable_history: DurableHistoryV1,
+    active_tail: ActiveTailV1,
+}
+
+#[derive(Serialize)]
+struct AccountHotContainersV1 {
+    markets: usize,
+    global_outcome_balances: usize,
+    per_market_outcome_balances: usize,
+}
+
+#[derive(Serialize)]
+struct ReservationHotContainersV1 {
+    requests: usize,
+    applied_local_events: usize,
+    markets: usize,
+}
+
+#[derive(Serialize)]
+struct LifecycleHotContainersV1 {
+    submission_requests: usize,
+    query_requests: usize,
     orders: usize,
     trades: usize,
     fills: usize,
-    outcome_cost_tokens: usize,
+    global_outcome_costs: usize,
+    markets: usize,
+    per_market_outcome_costs: usize,
+}
+
+#[derive(Serialize)]
+struct DurableHistoryV1 {
+    sealed_segment_count: usize,
+    sealed_record_count: usize,
+    sealed_segment_bytes: u64,
+}
+
+#[derive(Serialize)]
+struct ActiveTailV1 {
+    record_count: usize,
+    bytes: u64,
 }
 
 #[test]
@@ -182,8 +299,8 @@ fn durable_replay_resource_baseline() {
     let durable_roots = (0..ACCOUNT_COUNT)
         .map(|_| TempDir::new().unwrap())
         .collect::<Vec<_>>();
-    let markets = (0..OVERLAPPING_MARKET_COUNT)
-        .map(|ordinal| ConditionId(format!("shared-market-{ordinal}")))
+    let markets = (0..SETTLEMENT_CYCLES_PER_ACCOUNT)
+        .map(|ordinal| ConditionId(format!("shared-market-cycle-{ordinal}")))
         .collect::<Vec<_>>();
     let mut latencies_ns = Vec::new();
     let append_started = Instant::now();
@@ -200,49 +317,85 @@ fn durable_replay_resource_baseline() {
         .unwrap();
         apply_timed(&mut writer, &fixture.opening(), &mut latencies_ns);
         let mut account_transition_seq = 1_u64;
-        for cycle in 0..SETTLEMENT_CYCLES_PER_ACCOUNT {
-            let condition_id = &markets[cycle % markets.len()];
-            let token_id = format!("token-{}", cycle % markets.len());
-            apply_timed(
-                &mut writer,
-                &fixture.transition(
-                    condition_id,
-                    account_transition_seq,
-                    SourceNeutralAccountTransitionKindV1::OrderAcceptedEncumbranceApplied {
-                        order_identity: identity("order", account_ordinal, cycle),
-                    },
-                    delta("0", "-10", "10", None),
-                ),
-                &mut latencies_ns,
-            );
-            account_transition_seq += 1;
-            apply_timed(
-                &mut writer,
-                &fixture.transition(
-                    condition_id,
-                    account_transition_seq,
-                    SourceNeutralAccountTransitionKindV1::FillFinalityEconomicApplied {
-                        trade_identity: identity("trade", account_ordinal, cycle),
-                        path_ordinal: 0,
-                    },
-                    delta("-10", "0", "-10", Some((&token_id, "20"))),
-                ),
-                &mut latencies_ns,
-            );
-            account_transition_seq += 1;
-            apply_timed(
-                &mut writer,
-                &fixture.transition(
-                    condition_id,
-                    account_transition_seq,
-                    SourceNeutralAccountTransitionKindV1::AutoRedeemApplied {
-                        resolution_identity: identity("resolution", account_ordinal, cycle),
-                    },
-                    delta("12", "12", "0", Some((&token_id, "-20"))),
-                ),
-                &mut latencies_ns,
-            );
-            account_transition_seq += 1;
+        for wave in markets.chunks(OVERLAPPING_MARKET_COUNT) {
+            for condition_id in wave {
+                let market_ordinal = market_ordinal(condition_id);
+                apply_timed(
+                    &mut writer,
+                    &fixture.transition(
+                        condition_id,
+                        account_transition_seq,
+                        SourceNeutralAccountTransitionKindV1::OrderAcceptedEncumbranceApplied {
+                            order_identity: identity("order", account_ordinal, market_ordinal),
+                        },
+                        delta("0", "-10", "10", None),
+                    ),
+                    &mut latencies_ns,
+                );
+                account_transition_seq += 1;
+            }
+            for condition_id in wave {
+                let market_ordinal = market_ordinal(condition_id);
+                let token_id = format!("token-cycle-{market_ordinal}");
+                apply_timed(
+                    &mut writer,
+                    &fixture.trade(
+                        condition_id,
+                        &token_id,
+                        account_ordinal,
+                        market_ordinal,
+                        SourceNeutralTradeEconomicDispositionV1::PendingApplied,
+                    ),
+                    &mut latencies_ns,
+                );
+                apply_timed(
+                    &mut writer,
+                    &fixture.transition(
+                        condition_id,
+                        account_transition_seq,
+                        SourceNeutralAccountTransitionKindV1::FillFinalityEconomicApplied {
+                            trade_identity: identity("trade", account_ordinal, market_ordinal),
+                            path_ordinal: 0,
+                        },
+                        delta("-10", "0", "-10", Some((&token_id, "20"))),
+                    ),
+                    &mut latencies_ns,
+                );
+                account_transition_seq += 1;
+                apply_timed(
+                    &mut writer,
+                    &fixture.trade(
+                        condition_id,
+                        &token_id,
+                        account_ordinal,
+                        market_ordinal,
+                        SourceNeutralTradeEconomicDispositionV1::FinalSuccess,
+                    ),
+                    &mut latencies_ns,
+                );
+                apply_timed(
+                    &mut writer,
+                    &fixture.close_order(condition_id, &token_id, account_ordinal, market_ordinal),
+                    &mut latencies_ns,
+                );
+                apply_timed(
+                    &mut writer,
+                    &fixture.transition(
+                        condition_id,
+                        account_transition_seq,
+                        SourceNeutralAccountTransitionKindV1::AutoRedeemApplied {
+                            resolution_identity: identity(
+                                "resolution",
+                                account_ordinal,
+                                market_ordinal,
+                            ),
+                        },
+                        delta("12", "12", "0", Some((&token_id, "-20"))),
+                    ),
+                    &mut latencies_ns,
+                );
+                account_transition_seq += 1;
+            }
         }
         let sealed = writer.seal_active_segment().unwrap().unwrap();
         sealed_segment_bytes += fs::metadata(&sealed.location).unwrap().len();
@@ -256,7 +409,7 @@ fn durable_replay_resource_baseline() {
         .collect::<Vec<_>>();
     let full_replay_elapsed = full_replay_started.elapsed();
 
-    let mut local_tail_event_count = 0_usize;
+    let mut local_tail_input_count = 0_usize;
     for (account_ordinal, writer) in writers.iter_mut().enumerate() {
         for (market_ordinal, condition_id) in markets.iter().enumerate() {
             let request =
@@ -265,14 +418,29 @@ fn durable_replay_resource_baseline() {
                 .try_reserve_intent(&request, condition_id, &exact("1"), &exact("0.01"))
                 .unwrap();
             writer
-                .release_before_send(
+                .record_submission_started(
                     &LedgerLocalEventIdentityV1(format!(
-                        "tail-release-{account_ordinal}-{market_ordinal}"
+                        "tail-submission-{account_ordinal}-{market_ordinal}"
                     )),
+                    &request,
+                    &LedgerSubmissionItemIdentityV1 {
+                        global_request_id: format!(
+                            "tail-submission-request-{account_ordinal}-{market_ordinal}"
+                        ),
+                        batch_item_ordinal: 0,
+                    },
+                )
+                .unwrap();
+            writer
+                .record_order_query_association(
+                    &LedgerLocalEventIdentityV1(format!(
+                        "tail-query-{account_ordinal}-{market_ordinal}"
+                    )),
+                    &format!("tail-query-request-{account_ordinal}-{market_ordinal}"),
                     &request,
                 )
                 .unwrap();
-            local_tail_event_count += 2;
+            local_tail_input_count += 3;
         }
     }
     drop(writers);
@@ -285,16 +453,21 @@ fn durable_replay_resource_baseline() {
         })
         .sum();
 
-    let tail_replay_started = Instant::now();
+    let mut sealed_replay_elapsed = std::time::Duration::ZERO;
+    let mut active_tail_scan_apply_elapsed = std::time::Duration::ZERO;
     let recovered = durable_roots
         .iter()
-        .map(|root| LedgerWriterV1::open_durable(root.path()).unwrap())
+        .map(|root| {
+            let (writer, durations) = LedgerWriterV1::open_durable_measured(root.path()).unwrap();
+            sealed_replay_elapsed += durations.sealed_replay;
+            active_tail_scan_apply_elapsed += durations.active_replay;
+            writer
+        })
         .collect::<Vec<_>>();
-    let active_tail_replay_elapsed = tail_replay_started.elapsed();
-    let hot = recovered
-        .iter()
-        .map(LedgerWriterV1::baseline_hot_index_counts)
-        .fold((0, 0, 0, 0, 0, 0, 0), sum_hot_indexes);
+    let mut hot = LedgerHotIndexCountsV1::default();
+    for writer in &recovered {
+        hot.add_assign(writer.baseline_hot_index_counts());
+    }
     let noe_input_count = latencies_ns.len();
     latencies_ns.sort_unstable();
     let (rss_kib, hwm_kib) = process_memory_kib();
@@ -316,25 +489,47 @@ fn durable_replay_resource_baseline() {
         overlapping_market_count: OVERLAPPING_MARKET_COUNT,
         settlement_cycles_per_account: SETTLEMENT_CYCLES_PER_ACCOUNT,
         noe_input_count,
-        local_tail_event_count,
+        local_tail_input_count,
         append_elapsed_ns: nanos(append_elapsed),
         append_throughput_per_second: noe_input_count as f64 / append_elapsed.as_secs_f64(),
         append_latency_p50_ns: percentile(&latencies_ns, 50),
         append_latency_p95_ns: percentile(&latencies_ns, 95),
         full_replay_elapsed_ns: nanos(full_replay_elapsed),
-        active_tail_replay_elapsed_ns: nanos(active_tail_replay_elapsed),
+        sealed_replay_elapsed_ns: nanos(sealed_replay_elapsed),
+        active_tail_scan_apply_elapsed_ns: nanos(active_tail_scan_apply_elapsed),
         rss_kib,
         hwm_kib,
-        sealed_segment_bytes,
-        active_tail_bytes,
-        hot_indexes: HotIndexesV1 {
-            reservation_requests: hot.0,
-            reservation_markets: hot.1,
-            applied_noe_references: hot.2,
-            orders: hot.3,
-            trades: hot.4,
-            fills: hot.5,
-            outcome_cost_tokens: hot.6,
+        hot_containers: HotContainersV1 {
+            account: AccountHotContainersV1 {
+                markets: hot.account_markets,
+                global_outcome_balances: hot.account_global_outcome_balances,
+                per_market_outcome_balances: hot.account_market_outcome_balances,
+            },
+            reservations: ReservationHotContainersV1 {
+                requests: hot.reservation_requests,
+                applied_local_events: hot.reservation_applied_local_events,
+                markets: hot.reservation_markets,
+            },
+            lifecycle: LifecycleHotContainersV1 {
+                submission_requests: hot.lifecycle_submission_requests,
+                query_requests: hot.lifecycle_query_requests,
+                orders: hot.lifecycle_orders,
+                trades: hot.lifecycle_trades,
+                fills: hot.lifecycle_fills,
+                global_outcome_costs: hot.lifecycle_global_outcome_costs,
+                markets: hot.lifecycle_markets,
+                per_market_outcome_costs: hot.lifecycle_market_outcome_costs,
+            },
+            applied_noe_references: hot.applied_noe_references,
+            durable_history: DurableHistoryV1 {
+                sealed_segment_count: ACCOUNT_COUNT,
+                sealed_record_count: ACCOUNT_COUNT + noe_input_count,
+                sealed_segment_bytes,
+            },
+            active_tail: ActiveTailV1 {
+                record_count: local_tail_input_count,
+                bytes: active_tail_bytes,
+            },
         },
     };
     println!("{}", serde_json::to_string(&output).unwrap());
@@ -420,17 +615,6 @@ fn cpu_model() -> Option<String> {
         .find_map(|line| line.strip_prefix("model name\t: ").map(str::to_owned))
 }
 
-fn sum_hot_indexes(
-    left: (usize, usize, usize, usize, usize, usize, usize),
-    right: (usize, usize, usize, usize, usize, usize, usize),
-) -> (usize, usize, usize, usize, usize, usize, usize) {
-    (
-        left.0 + right.0,
-        left.1 + right.1,
-        left.2 + right.2,
-        left.3 + right.3,
-        left.4 + right.4,
-        left.5 + right.5,
-        left.6 + right.6,
-    )
+fn market_ordinal(condition_id: &ConditionId) -> usize {
+    condition_id.0.rsplit('-').next().unwrap().parse().unwrap()
 }
