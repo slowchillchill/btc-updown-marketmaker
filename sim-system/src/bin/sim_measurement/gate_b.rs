@@ -19,17 +19,15 @@ pub(super) struct GateBArgs {
     pub(super) per_market_all_in_commitment_limit_pusd: ExactDecimal,
 }
 
-struct GateBFlowPreparation {
+struct GateBFlowPreparation<'a> {
     output_dir: PathBuf,
-    run_id: String,
+    gate: &'a GateBArgs,
     implementation_identity: ImplementationIdentityV1,
     market_event_source_identity_sha256: Sha256Hex,
     rule_snapshot: Arc<SealedProcessRuleSnapshotV3>,
     finality: Arc<TradeFinalityPolicyV2>,
     scenario: Arc<SealedPlatformScenarioV1>,
     latency: Arc<EmpiricalDelayProfile>,
-    initial_available_pusd: ExactDecimal,
-    per_market_all_in_commitment_limit_pusd: ExactDecimal,
 }
 
 struct PreparedGateBFlow {
@@ -61,12 +59,12 @@ impl std::fmt::Display for FinishGateBFlowError {
     }
 }
 
-fn prepare_gate_b_flow(input: GateBFlowPreparation) -> Result<PreparedGateBFlow, String> {
+fn prepare_gate_b_flow(input: GateBFlowPreparation<'_>) -> Result<PreparedGateBFlow, String> {
     fs::create_dir(&input.output_dir)
         .map_err(|error| format!("创建 Gate B 运行目录失败：{error}"))?;
-    let creation_request_id = format!("{}-create", input.run_id);
+    let creation_request_id = format!("{}-create", input.gate.run_id);
     let opened = RunOpenedV2 {
-        run_id: input.run_id.clone(),
+        run_id: input.gate.run_id.clone(),
         durability_role: RunDurabilityRoleV2::CleanRun,
         platform_rule_snapshot_file_sha256: input.rule_snapshot.file_sha256().clone(),
         trade_finality_policy_file_sha256: input.finality.policy_id().clone(),
@@ -79,7 +77,7 @@ fn prepare_gate_b_flow(input: GateBFlowPreparation) -> Result<PreparedGateBFlow,
         input.output_dir.join("noe"),
         opened.clone(),
         DurableSourceReferenceV1 {
-            source: ImmutableSourceReferenceV1::Identity(input.run_id.clone()),
+            source: ImmutableSourceReferenceV1::Identity(input.gate.run_id.clone()),
         },
         DurableSourceReferenceV1 {
             source: ImmutableSourceReferenceV1::Identity(creation_request_id.clone()),
@@ -101,25 +99,27 @@ fn prepare_gate_b_flow(input: GateBFlowPreparation) -> Result<PreparedGateBFlow,
     .map_err(|error| format!("创建 Gate B SimExecution 失败：{error}"))?;
     let session = execution
         .create_session(SessionSpecV3 {
-            run_id: input.run_id.clone(),
-            session_id: format!("{}-session", input.run_id),
-            account_id: format!("{}-account", input.run_id),
+            run_id: input.gate.run_id.clone(),
+            session_id: format!("{}-session", input.gate.run_id),
+            account_id: format!("{}-account", input.gate.run_id),
             caller_role: SimCallerRoleV1::ModelTrain,
             caller_instance_id: GATE_B_RUNNER_IDENTITY.to_owned(),
             creation_request_id,
-            response_bridge_binding_id: format!("{}-bridge", input.run_id),
+            response_bridge_binding_id: format!("{}-bridge", input.gate.run_id),
             initial_account_state: InitialAccountStateV2 {
-                available_pusd: input.initial_available_pusd,
+                available_pusd: input.gate.initial_available_pusd.clone(),
             },
             session_seed: Sha256Hex(format!(
                 "{:x}",
-                Sha256::digest(input.run_id.as_bytes())
+                Sha256::digest(input.gate.run_id.as_bytes())
             )),
         })
         .map_err(|error| format!("创建 Gate B 会话失败：{error}"))?;
     let mut ledger = LedgerWriterV1::new(AccountAdmissionPolicyV1 {
         per_market_all_in_commitment_limit_pusd: input
-            .per_market_all_in_commitment_limit_pusd,
+            .gate
+            .per_market_all_in_commitment_limit_pusd
+            .clone(),
     });
     let mut applied_noe_count = 0_usize;
     apply_new_noe_results(&noe_observation, &mut applied_noe_count, &mut ledger)?;
@@ -207,10 +207,9 @@ pub(super) fn run(args: Args, _run_started: Instant) -> Result<(), String> {
     )
     .map_err(|error| format!("打开显式 Gate A 双路适配器失败：{error}"))?;
 
-    let run_id = gate.run_id.clone();
     let mut prepared = prepare_gate_b_flow(GateBFlowPreparation {
         output_dir: args.output_dir.clone(),
-        run_id: run_id.clone(),
+        gate,
         implementation_identity: args.identity.clone(),
         market_event_source_identity_sha256: adapter
             .canonical_event_store_manifest_sha256()
@@ -219,10 +218,6 @@ pub(super) fn run(args: Args, _run_started: Instant) -> Result<(), String> {
         finality: Arc::clone(&finality),
         scenario: Arc::clone(&scenario),
         latency: Arc::clone(&latency),
-        initial_available_pusd: gate.initial_available_pusd.clone(),
-        per_market_all_in_commitment_limit_pusd: gate
-            .per_market_all_in_commitment_limit_pusd
-            .clone(),
     })?;
     prepared
         .execution
@@ -442,18 +437,27 @@ mod tests {
         per_market_limit_pusd: &str,
     ) -> Result<PreparedGateBFlow, String> {
         // 复用既有 official-V3-shape 测试坐标；它不是 Gate A receipt 或 #30 正式数据证据。
+        let gate = GateBArgs {
+            gate_a_root: PathBuf::new(),
+            historical_rule_snapshot: Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/platform-rule-snapshot-v3-gate-b.json"),
+            historical_rule_snapshot_sha256: Sha256Hex(RULE_FIXTURE_SHA256.to_owned()),
+            run_id: run_id.to_owned(),
+            initial_available_pusd: ExactDecimal(initial_available_pusd.to_owned()),
+            per_market_all_in_commitment_limit_pusd: ExactDecimal(
+                per_market_limit_pusd.to_owned(),
+            ),
+        };
         let rule_snapshot =
             load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
-                snapshot_path: Path::new(env!("CARGO_MANIFEST_DIR")).join(
-                    "tests/fixtures/platform-rule-snapshot-v3-gate-b.json",
-                ),
-                expected_file_sha256: Sha256Hex(RULE_FIXTURE_SHA256.to_owned()),
+                snapshot_path: gate.historical_rule_snapshot.clone(),
+                expected_file_sha256: gate.historical_rule_snapshot_sha256.clone(),
                 replay_causal_start_utc_ms: COMPONENT_CAUSAL_START_UTC_MS,
             })
             .map_err(|error| format!("加载 Gate B 测试规则快照失败：{error}"))?;
         prepare_gate_b_flow(GateBFlowPreparation {
             output_dir,
-            run_id: run_id.to_owned(),
+            gate: &gate,
             implementation_identity: ImplementationIdentityV1 {
                 git_commit: "1".repeat(40),
                 source_identity_sha256: Sha256Hex("2".repeat(64)),
@@ -465,10 +469,6 @@ mod tests {
             scenario: component_fixed_scenario()?,
             latency: load_embedded_proxy_latency_profile()
                 .map_err(|error| format!("加载 Gate B 测试时延档失败：{error}"))?,
-            initial_available_pusd: ExactDecimal(initial_available_pusd.to_owned()),
-            per_market_all_in_commitment_limit_pusd: ExactDecimal(
-                per_market_limit_pusd.to_owned(),
-            ),
         })
     }
 
