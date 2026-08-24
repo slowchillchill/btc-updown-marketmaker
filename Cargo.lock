@@ -4242,6 +4242,7 @@ dependencies = [
  "data-pipeline-core",
  "data-pipeline-training",
  "execution-normalization",
+ "ledger",
  "num-bigint",
  "num-integer",
  "num-traits",

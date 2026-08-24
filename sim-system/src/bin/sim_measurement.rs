@@ -229,6 +229,11 @@ mod enabled {
     #[cfg(any(feature = "measurement", test))]
     use super::{TARGETED_RETENTION_WINDOW_MS, TARGETED_RUNNER_IDENTITY};
 
+    #[cfg(feature = "gate-b-flow")]
+    mod gate_b {
+        include!("sim_measurement/gate_b.rs");
+    }
+
     const CONDITION: &str = "0xd4346bcf419856fa3261d3c0705597d5c909ead020b9f1a0de468092704fc65f";
     const TOKEN_UP: &str =
         "45253098770861975037434792771412818336165758089047645530470012231811628219325";
@@ -279,6 +284,8 @@ mod enabled {
         TargetedRetention24h,
         ComponentConformance,
         GateARealVertical,
+        #[cfg(feature = "gate-b-flow")]
+        GateBFlow,
     }
 
     #[cfg(all(test, feature = "measurement"))]
@@ -288,6 +295,8 @@ mod enabled {
             RunMode::TargetedRetention24h => TARGETED_RUNNER_IDENTITY,
             RunMode::ComponentConformance => COMPONENT_RUNNER_IDENTITY,
             RunMode::GateARealVertical => GATE_A_RUNNER_IDENTITY,
+            #[cfg(feature = "gate-b-flow")]
+            RunMode::GateBFlow => gate_b::GATE_B_RUNNER_IDENTITY,
         }
     }
 
@@ -322,6 +331,8 @@ mod enabled {
         component: Option<ComponentEvidenceArgs>,
         #[cfg(feature = "gate-a-measurement")]
         gate_a: Option<GateARealVerticalArgs>,
+        #[cfg(feature = "gate-b-flow")]
+        gate_b: Option<gate_b::GateBArgs>,
         pub(super) mode: RunMode,
         argv: Vec<String>,
     }
@@ -784,6 +795,8 @@ mod enabled {
             RunMode::TargetedRetention24h => run_targeted_retention(args, run_started),
             RunMode::ComponentConformance => run_component_conformance(args),
             RunMode::GateARealVertical => run_gate_a_real_vertical(args, run_started),
+            #[cfg(feature = "gate-b-flow")]
+            RunMode::GateBFlow => gate_b::run(args, run_started),
         }
     }
 
@@ -5058,6 +5071,10 @@ mod enabled {
         let mut stage5_component_manifest = None;
         let mut stage5_component_manifest_sha256 = None;
         let mut stage5_component_receipt_id = None;
+        #[cfg(feature = "gate-b-flow")]
+        let mut historical_rule_snapshot = None;
+        #[cfg(feature = "gate-b-flow")]
+        let mut historical_rule_snapshot_sha256 = None;
         let mut mode = RunMode::GoldenMatrix;
         let mut index = 1;
         while index < argv.len() {
@@ -5086,6 +5103,15 @@ mod enabled {
                 index += 1;
                 continue;
             }
+            #[cfg(feature = "gate-b-flow")]
+            if flag == "--gate-b-flow" {
+                if mode != RunMode::GoldenMatrix {
+                    return Err("固定运行 mode 不得重复或组合".to_owned());
+                }
+                mode = RunMode::GateBFlow;
+                index += 1;
+                continue;
+            }
             let value = argv
                 .get(index + 1)
                 .ok_or_else(|| format!("参数 {flag} 缺少值"))?;
@@ -5107,7 +5133,11 @@ mod enabled {
                 }
                 "--test-evidence" => test_evidence = Some(PathBuf::from(value)),
                 "--test-evidence-sha256" => test_evidence_sha256 = Some(value.clone()),
-                "--gate-a-root" => gate_a_root = Some(PathBuf::from(value)),
+                "--gate-a-root" => {
+                    if gate_a_root.replace(PathBuf::from(value)).is_some() {
+                        return Err("--gate-a-root 不得重复".to_owned());
+                    }
+                }
                 "--stage5-component-manifest" => {
                     stage5_component_manifest = Some(PathBuf::from(value));
                 }
@@ -5116,6 +5146,14 @@ mod enabled {
                 }
                 "--stage5-component-receipt-id" => {
                     stage5_component_receipt_id = Some(value.clone());
+                }
+                #[cfg(feature = "gate-b-flow")]
+                "--historical-rule-snapshot" => {
+                    historical_rule_snapshot = Some(PathBuf::from(value));
+                }
+                #[cfg(feature = "gate-b-flow")]
+                "--historical-rule-snapshot-sha256" => {
+                    historical_rule_snapshot_sha256 = Some(value.clone());
                 }
                 _ => return Err(format!("未知参数：{flag}")),
             }
@@ -5199,26 +5237,54 @@ mod enabled {
         #[cfg(feature = "gate-a-measurement")]
         let gate_a = if mode == RunMode::GateARealVertical {
             let manifest_sha = stage5_component_manifest_sha256
+                .clone()
                 .ok_or_else(|| "缺少 --stage5-component-manifest-sha256".to_owned())?;
             let receipt_id = stage5_component_receipt_id
+                .clone()
                 .ok_or_else(|| "缺少 --stage5-component-receipt-id".to_owned())?;
             if manifest_sha.len() != 64 || receipt_id.len() != 64 {
                 return Err("阶段 5 manifest SHA-256 与 receipt ID 必须为 64 位".to_owned());
             }
             Some(GateARealVerticalArgs {
-                gate_a_root: gate_a_root.ok_or_else(|| "缺少 --gate-a-root".to_owned())?,
+                gate_a_root: gate_a_root
+                    .clone()
+                    .ok_or_else(|| "缺少 --gate-a-root".to_owned())?,
                 stage5_component_manifest: stage5_component_manifest
+                    .clone()
                     .ok_or_else(|| "缺少 --stage5-component-manifest".to_owned())?,
                 stage5_component_manifest_sha256: Sha256Hex(manifest_sha),
                 stage5_component_receipt_id: Sha256Hex(receipt_id),
             })
         } else {
-            if gate_a_root.is_some()
-                || stage5_component_manifest.is_some()
+            #[cfg(feature = "gate-b-flow")]
+            let used_by_gate_b = mode == RunMode::GateBFlow;
+            #[cfg(not(feature = "gate-b-flow"))]
+            let used_by_gate_b = false;
+            if stage5_component_manifest.is_some()
                 || stage5_component_manifest_sha256.is_some()
                 || stage5_component_receipt_id.is_some()
+                || (!used_by_gate_b && gate_a_root.is_some())
             {
                 return Err("Gate A evidence 参数只允许 --gate-a-real-vertical".to_owned());
+            }
+            None
+        };
+        #[cfg(feature = "gate-b-flow")]
+        let gate_b = if mode == RunMode::GateBFlow {
+            let snapshot_sha = historical_rule_snapshot_sha256
+                .ok_or_else(|| "缺少 --historical-rule-snapshot-sha256".to_owned())?;
+            if snapshot_sha.len() != 64 {
+                return Err("历史规则快照 SHA-256 必须为 64 位".to_owned());
+            }
+            Some(gate_b::GateBArgs {
+                gate_a_root: gate_a_root.ok_or_else(|| "缺少 --gate-a-root".to_owned())?,
+                historical_rule_snapshot: historical_rule_snapshot
+                    .ok_or_else(|| "缺少 --historical-rule-snapshot".to_owned())?,
+                historical_rule_snapshot_sha256: Sha256Hex(snapshot_sha),
+            })
+        } else {
+            if historical_rule_snapshot.is_some() || historical_rule_snapshot_sha256.is_some() {
+                return Err("历史规则快照参数只允许 --gate-b-flow".to_owned());
             }
             None
         };
@@ -5234,6 +5300,8 @@ mod enabled {
             component,
             #[cfg(feature = "gate-a-measurement")]
             gate_a,
+            #[cfg(feature = "gate-b-flow")]
+            gate_b,
             mode,
             argv,
         })
@@ -5861,6 +5929,92 @@ mod tests {
             assert_eq!(safety_violation(limits, usage), Some(expected));
         }
         assert_eq!(safety_violation(limits, SafetyUsage::safe()), None);
+    }
+
+    #[cfg(feature = "gate-b-flow")]
+    #[test]
+    fn gate_b_parser_requires_one_explicit_root_and_historical_rules() {
+        let arguments = vec![
+            "sim_measurement",
+            "--gate-b-flow",
+            "--output-dir",
+            "/tmp/gate-b-output",
+            "--git-commit",
+            "0123456789012345678901234567890123456789",
+            "--source-identity-sha256",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--cargo-lock-sha256",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "--gate-a-root",
+            "/tmp/gate-a",
+            "--historical-rule-snapshot",
+            "/tmp/historical-rules.json",
+            "--historical-rule-snapshot-sha256",
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let parsed = enabled::parse_args_from(arguments).unwrap();
+        assert_eq!(parsed.mode, enabled::RunMode::GateBFlow);
+        assert_eq!(
+            enabled::runner_identity(parsed.mode),
+            "sim-gate-b-explicit-flow-v1"
+        );
+
+        let missing_root = vec![
+            "sim_measurement",
+            "--gate-b-flow",
+            "--output-dir",
+            "/tmp/gate-b-missing-root",
+            "--git-commit",
+            "0123456789012345678901234567890123456789",
+            "--source-identity-sha256",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--cargo-lock-sha256",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "--historical-rule-snapshot",
+            "/tmp/historical-rules.json",
+            "--historical-rule-snapshot-sha256",
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        assert_eq!(
+            enabled::parse_args_from(missing_root).unwrap_err(),
+            "缺少 --gate-a-root"
+        );
+
+        let mut duplicate_root = vec![
+            "sim_measurement",
+            "--gate-b-flow",
+            "--output-dir",
+            "/tmp/gate-b-duplicate-root",
+            "--git-commit",
+            "0123456789012345678901234567890123456789",
+            "--source-identity-sha256",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--cargo-lock-sha256",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "--historical-rule-snapshot",
+            "/tmp/historical-rules.json",
+            "--historical-rule-snapshot-sha256",
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        duplicate_root.extend([
+            "--gate-a-root".to_owned(),
+            "/tmp/gate-a-one".to_owned(),
+            "--gate-a-root".to_owned(),
+            "/tmp/gate-a-two".to_owned(),
+        ]);
+        assert_eq!(
+            enabled::parse_args_from(duplicate_root).unwrap_err(),
+            "--gate-a-root 不得重复"
+        );
     }
 
     #[cfg(not(feature = "measurement"))]

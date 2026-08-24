@@ -56,7 +56,7 @@ use crate::scenario::{PlatformMarketV1, SealedPlatformScenarioV1};
 use crate::session::MarketEnrollmentRequestV1;
 
 mod noe_projection;
-pub use noe_projection::SimV2NoeProjectionPortV1;
+pub use noe_projection::{SimV2NoeObservationV1, SimV2NoeProjectionPortV1};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CreateSessionDispositionV2 {
