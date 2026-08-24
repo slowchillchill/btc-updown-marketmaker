@@ -99,6 +99,7 @@ impl SessionMarketDirectoryV1 {
         self.markets.values()
     }
 
+    #[cfg(test)]
     pub(crate) fn contains(&self, condition_id: &str) -> bool {
         self.markets.contains_key(condition_id)
     }

@@ -1,12 +1,18 @@
 use serde::Serialize;
 
 const RUNNER_IDENTITY: &str = "sim-task-4-5-1-golden-v1";
+#[cfg(any(feature = "measurement", test))]
 const TARGETED_RUNNER_IDENTITY: &str = "sim-task-4-5-2-retention-24h-v1";
+#[cfg(feature = "measurement")]
 const COMPONENT_RUNNER_IDENTITY: &str = "sim-stage-5-component-conformance-v1";
+#[cfg(any(feature = "gate-a-measurement", all(test, feature = "measurement")))]
 const GATE_A_RUNNER_IDENTITY: &str = "sim-stage-6-gate-a-real-vertical-v1";
+#[cfg(feature = "measurement")]
 const COMPONENT_WORKLOAD_IDENTITY: &str = "offline-evaluation-two-market-single-root-v1";
+#[cfg(feature = "gate-a-measurement")]
 const GATE_A_WORKLOAD_IDENTITY: &str = "gate-a-real-vertical-two-path-single-root-v1";
 const WORKLOAD_IDENTITY: &str = "public-sim-execution-two-market-256x8-v1";
+#[cfg(any(feature = "measurement", test))]
 const TARGETED_RETENTION_WINDOW_MS: i64 = 86_400_000;
 const LOOPS_PER_ROOT: usize = 256;
 const REQUESTS_PER_ROOT: usize = LOOPS_PER_ROOT * 8;
@@ -144,8 +150,10 @@ mod enabled {
     use std::ops::Range;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::Arc;
+    #[cfg(feature = "measurement")]
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use contracts::{
@@ -153,9 +161,12 @@ mod enabled {
         CollectorAdmissionCoordinateV1, ConditionId, EventLineageV2, EventQualityV2, EventTimeV2,
         ExactDecimal, ExecutionMarketEventPayloadV3, ExecutionMarketEventV3, InitialAccountStateV2,
         InitialL2SnapshotV2, MarketDataQuality, MarketIdentityV2, MarketResolutionTerminalV3,
-        MarketWindowV2, OrderQueryResultV2, OrdersQueryResultV2, OutcomeIdentityV1, PayoutEntryV1,
-        PriceLevelV1, QueryCursorV2, QueryOutOfRetentionV2, ResyncQuality, Sha256Hex,
-        SimCallerRoleV1, SourceEvidenceRefV2, SubmissionItemOutcomeV2, TokenId,
+        MarketWindowV2, OutcomeIdentityV1, PayoutEntryV1, PriceLevelV1, QueryCursorV2,
+        ResyncQuality, Sha256Hex, SimCallerRoleV1, SourceEvidenceRefV2, TokenId,
+    };
+    #[cfg(feature = "measurement")]
+    use contracts::{
+        OrderQueryResultV2, OrdersQueryResultV2, QueryOutOfRetentionV2, SubmissionItemOutcomeV2,
         TradesQueryResultV2,
     };
     use data_pipeline_core::{
@@ -167,43 +178,56 @@ mod enabled {
         ClosedExecutionMarketIndexBucketV1, GateASimulationReplayAdapter, ReplayIndexClosureV1,
         ValidatedPublishedGateAFinal, open_published_gate_a_final,
     };
+    #[cfg(feature = "measurement")]
     use rustix::fs::{RenameFlags, renameat_with};
     use serde::{Deserialize, Serialize};
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
+    #[cfg(feature = "measurement")]
+    use sim_system::execution::BusinessDirectResponseV2;
     use sim_system::execution::{
-        AcceptedClosedMarketBucketV2, BusinessDirectResponseV2, BusinessProjectionBatchV2,
-        BusinessProjectionPortV2, CancelAllOrdersRequestV2, CancelOrderBatchItemV2,
-        CancelOrderItemV1, CancelOrderRequestV2, CancelOrdersRequestV2,
-        DurableMarketBucketReferenceV2, OrderRequestV2, OrdersFilterV1, OrdersRequestV2,
-        PostOrderBatchItemV2, PostOrderItemV1, PostOrderRequestV2, PostOrdersRequestV2,
-        PublicVisibilityCursorV1, RequestContextV2, RetentionAdvanceV2, RunDurabilityRoleV2,
-        RunOpenedV2, SessionSpecV3, SimBuyOrderKindV1, SimBuyOrderV1, SimExecution,
-        SimRunActorErrorV2, TradesFilterV1, TradesRequestV2, TrustedDecisionCutoffV2,
+        AcceptedClosedMarketBucketV2, BusinessProjectionBatchV2, BusinessProjectionPortV2,
+        CancelAllOrdersRequestV2, CancelOrderBatchItemV2, CancelOrderItemV1, CancelOrderRequestV2,
+        CancelOrdersRequestV2, DurableMarketBucketReferenceV2, OrderRequestV2, OrdersFilterV1,
+        OrdersRequestV2, PostOrderBatchItemV2, PostOrderItemV1, PostOrderRequestV2,
+        PostOrdersRequestV2, PublicVisibilityCursorV1, RequestContextV2, RetentionAdvanceV2,
+        RunDurabilityRoleV2, RunOpenedV2, SessionSpecV3, SimBuyOrderKindV1, SimBuyOrderV1,
+        SimExecution, SimRunActorErrorV2, TradesFilterV1, TradesRequestV2, TrustedDecisionCutoffV2,
     };
     use sim_system::execution::{MarketEventPathV1, MillisecondBucketClosureV1};
     use sim_system::finality::TradeFinalityPolicyV2;
-    use sim_system::latency_profile::{
-        DelaySampleDomainV1, EmpiricalDelayProfile, load_embedded_proxy_latency_profile,
-    };
+    #[cfg(feature = "gate-a-measurement")]
+    use sim_system::latency_profile::DelaySampleDomainV1;
+    use sim_system::latency_profile::{EmpiricalDelayProfile, load_embedded_proxy_latency_profile};
     use sim_system::platform_rules::{
-        CurrentProcessSnapshotRequestV1, HistoricalProcessSnapshotRequestV1,
-        ImplementationIdentityV1, ReferenceMarketSpecV1, ReferenceOutcomeSpecV1,
-        SealedProcessRuleSnapshotV3, load_historical_process_snapshot_v3,
+        CurrentProcessSnapshotRequestV1, ImplementationIdentityV1, ReferenceMarketSpecV1,
+        ReferenceOutcomeSpecV1, SealedProcessRuleSnapshotV3,
         query_and_seal_current_process_snapshot_v3,
+    };
+    #[cfg(feature = "measurement")]
+    use sim_system::platform_rules::{
+        HistoricalProcessSnapshotRequestV1, load_historical_process_snapshot_v3,
     };
     use sim_system::scenario::{
         PLATFORM_SCENARIO_SCHEMA_V1, PlatformMarketV1, PlatformScenarioV1,
         SealedPlatformScenarioV1, SimulationScenarioArtifactV1,
     };
 
+    #[cfg(feature = "measurement")]
+    use super::COMPONENT_RUNNER_IDENTITY;
+    #[cfg(feature = "measurement")]
+    use super::COMPONENT_WORKLOAD_IDENTITY;
+    #[cfg(any(feature = "gate-a-measurement", all(test, feature = "measurement")))]
+    use super::GATE_A_RUNNER_IDENTITY;
+    #[cfg(feature = "gate-a-measurement")]
+    use super::GATE_A_WORKLOAD_IDENTITY;
     use super::{
-        COMPONENT_RUNNER_IDENTITY, COMPONENT_WORKLOAD_IDENTITY, DistributionSummary,
-        GATE_A_RUNNER_IDENTITY, GATE_A_WORKLOAD_IDENTITY, LOOPS_PER_ROOT, PairKey,
-        REQUESTS_PER_ROOT, RUNNER_IDENTITY, SafetyLimits, SafetyUsage,
-        TARGETED_RETENTION_WINDOW_MS, TARGETED_RUNNER_IDENTITY, WORKLOAD_IDENTITY,
-        distribution_summary, safety_violation, validate_feature_pair,
+        DistributionSummary, LOOPS_PER_ROOT, PairKey, REQUESTS_PER_ROOT, RUNNER_IDENTITY,
+        SafetyLimits, SafetyUsage, WORKLOAD_IDENTITY, distribution_summary, safety_violation,
+        validate_feature_pair,
     };
+    #[cfg(any(feature = "measurement", test))]
+    use super::{TARGETED_RETENTION_WINDOW_MS, TARGETED_RUNNER_IDENTITY};
 
     const CONDITION: &str = "0xd4346bcf419856fa3261d3c0705597d5c909ead020b9f1a0de468092704fc65f";
     const TOKEN_UP: &str =
@@ -220,14 +244,20 @@ mod enabled {
     const REQUEST_CUTOFF_BASE: i64 = 1_785_715_700_000;
     const BODY_ONE_SOURCE: i64 = 1_785_715_750_000;
     const BODY_TWO_SOURCE: i64 = 1_785_715_760_000;
+    #[cfg(feature = "gate-a-measurement")]
     const GATE_A_MARKET_END: i64 = 1_785_715_800_000;
+    #[cfg(feature = "gate-a-measurement")]
     const GATE_A_REPRESENTATIVE_TRADE_EVENT_ID: &str =
         "0ba3871e7c0b1b6356f2e70f679ff250a4fe1a7c343289711ea05cd06c69f830";
+    #[cfg(feature = "gate-a-measurement")]
     const GATE_A_REQUEST_ID: &str = "stage-6-gate-a-representative-post";
 
+    #[cfg(feature = "measurement")]
     pub(super) const COMPONENT_CAUSAL_START_UTC_MS: i64 = 1_787_400_000_000;
+    #[cfg(feature = "measurement")]
     pub(super) const COMPONENT_TIME_SHIFT_MS: i64 =
         COMPONENT_CAUSAL_START_UTC_MS - (MARKET_ONE_START + 10);
+    #[cfg(feature = "measurement")]
     pub(super) const COMPONENT_REQUEST_CUTOFF_BASE: i64 =
         REQUEST_CUTOFF_BASE + COMPONENT_TIME_SHIFT_MS;
 
@@ -235,6 +265,7 @@ mod enabled {
     const RESOLUTION_TWO_SOURCE: i64 = MARKET_END + 20;
     const FINAL_EOF_SOURCE: i64 = RESOLUTION_TWO_SOURCE + 86_500_000;
     const PUBLIC_DELAY_MS: i64 = 10;
+    #[cfg(feature = "measurement")]
     const TARGETED_FINAL_CUTOFF_UTC_MS: i64 = FINAL_EOF_SOURCE + PUBLIC_DELAY_MS;
 
     #[cfg(feature = "measurement")]
@@ -250,7 +281,7 @@ mod enabled {
         GateARealVertical,
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "measurement"))]
     pub(super) const fn runner_identity(mode: RunMode) -> &'static str {
         match mode {
             RunMode::GoldenMatrix => RUNNER_IDENTITY,
@@ -260,6 +291,7 @@ mod enabled {
         }
     }
 
+    #[cfg(feature = "measurement")]
     #[derive(Debug)]
     struct ComponentEvidenceArgs {
         rule_snapshot: PathBuf,
@@ -272,6 +304,7 @@ mod enabled {
         test_evidence_sha256: Sha256Hex,
     }
 
+    #[cfg(feature = "gate-a-measurement")]
     #[derive(Debug)]
     struct GateARealVerticalArgs {
         gate_a_root: PathBuf,
@@ -285,7 +318,9 @@ mod enabled {
         output_dir: PathBuf,
         identity: ImplementationIdentityV1,
         baseline_summary: Option<PathBuf>,
+        #[cfg(feature = "measurement")]
         component: Option<ComponentEvidenceArgs>,
+        #[cfg(feature = "gate-a-measurement")]
         gate_a: Option<GateARealVerticalArgs>,
         pub(super) mode: RunMode,
         argv: Vec<String>,
@@ -499,6 +534,7 @@ mod enabled {
         candidate_status: &'static str,
     }
 
+    #[cfg(any(feature = "measurement", test))]
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
     pub(super) struct MinMedianMax {
         pub(super) min: u64,
@@ -506,6 +542,7 @@ mod enabled {
         pub(super) max: u64,
     }
 
+    #[cfg(any(feature = "measurement", test))]
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(super) struct TargetedSummaryInput {
         warmup: bool,
@@ -515,6 +552,7 @@ mod enabled {
         semantics_passed: bool,
     }
 
+    #[cfg(any(feature = "measurement", test))]
     impl TargetedSummaryInput {
         pub(super) const fn new(
             warmup: bool,
@@ -533,6 +571,7 @@ mod enabled {
         }
     }
 
+    #[cfg(any(feature = "measurement", test))]
     #[derive(Debug, PartialEq, Eq, Serialize)]
     pub(super) struct TargetedSummary {
         schema_version: &'static str,
@@ -547,6 +586,7 @@ mod enabled {
         pub(super) semantic_pass_count: usize,
     }
 
+    #[cfg(any(feature = "measurement", test))]
     fn min_median_max(mut values: Vec<u64>) -> Result<MinMedianMax, String> {
         if values.is_empty() {
             return Err("targeted 汇总需要非空正式 trial".to_owned());
@@ -559,6 +599,7 @@ mod enabled {
         })
     }
 
+    #[cfg(any(feature = "measurement", test))]
     pub(super) fn summarize_targeted(
         samples: &[TargetedSummaryInput],
     ) -> Result<TargetedSummary, String> {
@@ -601,12 +642,14 @@ mod enabled {
         })
     }
 
+    #[cfg(feature = "measurement")]
     #[derive(Clone, Debug)]
     struct CapturedResponse {
         method: &'static str,
         body: Value,
     }
 
+    #[cfg(feature = "measurement")]
     #[derive(Default)]
     struct CapturingProjectionState {
         durable_through: u64,
@@ -614,6 +657,7 @@ mod enabled {
         semantic_batches: Vec<Value>,
     }
 
+    #[cfg(feature = "measurement")]
     struct CapturingProjectionPort {
         state: Arc<Mutex<CapturingProjectionState>>,
     }
@@ -625,6 +669,7 @@ mod enabled {
         trade_id: String,
     }
 
+    #[cfg(feature = "measurement")]
     impl BusinessProjectionPortV2 for CapturingProjectionPort {
         fn try_accept(&mut self, batch: Arc<BusinessProjectionBatchV2>) -> bool {
             let mut state = self.state.lock().expect("targeted 投影状态锁未损坏");
@@ -673,6 +718,7 @@ mod enabled {
         }
     }
 
+    #[cfg(feature = "measurement")]
     fn semantic_projection_batch(batch: &BusinessProjectionBatchV2) -> Value {
         let direct_responses = batch
             .direct_responses()
@@ -741,6 +787,7 @@ mod enabled {
         }
     }
 
+    #[cfg(feature = "measurement")]
     #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
     pub(super) struct ComponentAttemptEvidence {
         pub(super) accepted_input_count: u64,
@@ -1932,6 +1979,7 @@ mod enabled {
         }
     }
 
+    #[cfg(feature = "measurement")]
     #[allow(clippy::too_many_arguments)]
     fn run_component_attempt(
         attempt: &str,
@@ -2068,6 +2116,7 @@ mod enabled {
         })
     }
 
+    #[cfg(feature = "measurement")]
     pub(super) fn write_and_read_component_events(
         path: &Path,
         buckets: &[(
@@ -2125,6 +2174,7 @@ mod enabled {
         Ok(restored)
     }
 
+    #[cfg(feature = "measurement")]
     pub(super) fn component_comparison(
         canonical: &ComponentAttemptEvidence,
         rerun: &ComponentAttemptEvidence,
@@ -2208,6 +2258,7 @@ mod enabled {
         })
     }
 
+    #[cfg(feature = "measurement")]
     fn first_changed_batch(left: &[Value], right: &[Value]) -> Option<usize> {
         left.iter()
             .zip(right)
@@ -2215,6 +2266,7 @@ mod enabled {
             .or_else(|| (left.len() != right.len()).then_some(left.len().min(right.len())))
     }
 
+    #[cfg(feature = "measurement")]
     fn first_json_divergence(left: &Value, right: &Value, path: String) -> Option<String> {
         match (left, right) {
             (Value::Array(left), Value::Array(right)) => {
@@ -2253,6 +2305,7 @@ mod enabled {
         }
     }
 
+    #[cfg(feature = "measurement")]
     fn narrow_projection_summary(
         evidence: &ComponentAttemptEvidence,
         input_sequence: Option<usize>,
@@ -2263,6 +2316,7 @@ mod enabled {
             .unwrap_or(Value::Null)
     }
 
+    #[cfg(feature = "measurement")]
     fn copy_verified(source: &Path, expected_sha256: &str, target: &Path) -> Result<(), String> {
         let bytes = fs::read(source).map_err(|error| format!("读取待复制证据文件失败：{error}"))?;
         let actual = format!("{:x}", Sha256::digest(&bytes));
@@ -2275,6 +2329,7 @@ mod enabled {
         fs::write(target, bytes).map_err(|error| format!("写入已核验证据文件失败：{error}"))
     }
 
+    #[cfg(feature = "measurement")]
     fn component_artifact_inventory(root: &Path) -> Result<Vec<Value>, String> {
         let mut paths = Vec::new();
         let mut pending = vec![root.to_path_buf()];
@@ -2310,6 +2365,7 @@ mod enabled {
             .collect()
     }
 
+    #[cfg(feature = "measurement")]
     pub(super) fn component_inventory_member(relative_path: &Path, bytes: &[u8]) -> Value {
         json!({
             "path":relative_path,
@@ -2318,6 +2374,7 @@ mod enabled {
         })
     }
 
+    #[cfg(feature = "measurement")]
     pub(super) fn sync_tree(root: &Path) -> Result<(), String> {
         let mut directories = vec![root.to_path_buf()];
         let mut index = 0;
@@ -2349,6 +2406,7 @@ mod enabled {
         Ok(())
     }
 
+    #[cfg(feature = "measurement")]
     pub(super) fn publish_candidate(candidate: &Path, target: &Path) -> Result<(), String> {
         if target.exists() {
             return Err(format!("组件发布目标已存在：{}", target.display()));
@@ -2378,6 +2436,7 @@ mod enabled {
             .map_err(|error| format!("同步组件发布父目录失败：{error}"))
     }
 
+    #[cfg(feature = "measurement")]
     pub(super) fn failed_output_path(output: &Path) -> PathBuf {
         let mut path = output.as_os_str().to_os_string();
         path.push(".failed");
@@ -2721,6 +2780,7 @@ mod enabled {
         }
     }
 
+    #[cfg(feature = "measurement")]
     #[allow(clippy::too_many_arguments)]
     fn run_targeted_root(
         root_dir: PathBuf,
@@ -3016,6 +3076,7 @@ mod enabled {
         }))
     }
 
+    #[cfg(feature = "measurement")]
     fn captured_response<T: serde::de::DeserializeOwned>(
         state: &Arc<Mutex<CapturingProjectionState>>,
         request_id: &str,
@@ -3038,6 +3099,7 @@ mod enabled {
             .map_err(|error| format!("解码 targeted 公开响应失败：{request_id}: {error}"))
     }
 
+    #[cfg(feature = "measurement")]
     fn read_retention_semantics(
         capture: &Arc<Mutex<CapturingProjectionState>>,
         old_root_sequence: u64,
@@ -3133,6 +3195,7 @@ mod enabled {
         }))
     }
 
+    #[cfg(feature = "measurement")]
     fn numeric_at(value: &Value, path: &[&str]) -> u64 {
         path.iter()
             .try_fold(value, |current, key| current.get(*key))
@@ -3140,6 +3203,7 @@ mod enabled {
             .unwrap_or_default()
     }
 
+    #[cfg(feature = "measurement")]
     pub(super) fn targeted_manifest_value(
         argv: &[String],
         git_head: String,
@@ -3168,6 +3232,7 @@ mod enabled {
         })
     }
 
+    #[cfg(feature = "measurement")]
     pub(super) fn artifact_inventory(output_dir: &Path) -> Result<Vec<Value>, String> {
         let mut paths = Vec::new();
         let mut pending = vec![output_dir.to_path_buf()];
@@ -4687,6 +4752,7 @@ mod enabled {
             .map_err(|error| format!("密封固定场景失败：{error}"))
     }
 
+    #[cfg(feature = "measurement")]
     pub(super) fn component_fixed_scenario() -> Result<Arc<SealedPlatformScenarioV1>, String> {
         let bytes = component_fixed_scenario_bytes()?;
         SealedPlatformScenarioV1::decode_and_seal(&bytes)
@@ -4698,6 +4764,7 @@ mod enabled {
         fixed_scenario_bytes_with_shift(0)
     }
 
+    #[cfg(feature = "measurement")]
     fn component_fixed_scenario_bytes() -> Result<Vec<u8>, String> {
         fixed_scenario_bytes_with_shift(COMPONENT_TIME_SHIFT_MS)
     }
@@ -5069,6 +5136,19 @@ mod enabled {
         if mode == RunMode::GateARealVertical && !cfg!(feature = "gate-a-measurement") {
             return Err("--gate-a-real-vertical 只允许 gate-a-measurement feature 构建".to_owned());
         }
+        #[cfg(not(feature = "measurement"))]
+        if rule_snapshot.is_some()
+            || rule_snapshot_sha256.is_some()
+            || stage4_formal_audit.is_some()
+            || stage4_formal_audit_sha256.is_some()
+            || retention_manifest.is_some()
+            || retention_manifest_sha256.is_some()
+            || test_evidence.is_some()
+            || test_evidence_sha256.is_some()
+        {
+            return Err("component evidence 参数只允许 --component-conformance".to_owned());
+        }
+        #[cfg(feature = "measurement")]
         let component = if mode == RunMode::ComponentConformance {
             let values = [
                 rule_snapshot_sha256.as_deref(),
@@ -5108,6 +5188,15 @@ mod enabled {
             }
             None
         };
+        #[cfg(not(feature = "gate-a-measurement"))]
+        if gate_a_root.is_some()
+            || stage5_component_manifest.is_some()
+            || stage5_component_manifest_sha256.is_some()
+            || stage5_component_receipt_id.is_some()
+        {
+            return Err("Gate A evidence 参数只允许 --gate-a-real-vertical".to_owned());
+        }
+        #[cfg(feature = "gate-a-measurement")]
         let gate_a = if mode == RunMode::GateARealVertical {
             let manifest_sha = stage5_component_manifest_sha256
                 .ok_or_else(|| "缺少 --stage5-component-manifest-sha256".to_owned())?;
@@ -5141,7 +5230,9 @@ mod enabled {
                 cargo_lock_sha256: Sha256Hex(lock),
             },
             baseline_summary: baseline,
+            #[cfg(feature = "measurement")]
             component,
+            #[cfg(feature = "gate-a-measurement")]
             gate_a,
             mode,
             argv,

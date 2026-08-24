@@ -364,15 +364,18 @@ impl TradeFinalityPolicyV2 {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn normal_path(&self) -> &TradeFinalityPathV1 {
         &self.normal_path
     }
 
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn failure_overrides(&self) -> &[TradeFinalityFailureOverrideV2] {
         &self.failure_overrides
     }
 
+    #[cfg(test)]
     pub(crate) fn select_path_for_fill(
         &self,
         account_instance_key: &AccountInstanceKeyV1,
@@ -1082,177 +1085,6 @@ pub(crate) fn successful_policy_v2_for_tests() -> std::sync::Arc<TradeFinalityPo
     let bytes = serde_json::to_vec(&wire).expect("测试 V2 最终性策略必须可编码");
     std::sync::Arc::new(
         TradeFinalityPolicyV2::decode_and_seal(&bytes).expect("测试 V2 最终性策略必须合法"),
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn successful_policy_for_tests() -> std::sync::Arc<TradeFinalityPolicyV1> {
-    let normal_path = TradeFinalityPathWireV1 {
-        steps: vec![
-            TradeFinalityStepWireV1 {
-                state: TradeFinalityStateV1::Matched,
-                offset_ms: 0,
-            },
-            TradeFinalityStepWireV1 {
-                state: TradeFinalityStateV1::Mined,
-                offset_ms: 10,
-            },
-            TradeFinalityStepWireV1 {
-                state: TradeFinalityStateV1::Confirmed,
-                offset_ms: 20,
-            },
-        ],
-        economic_application_ordinal: Some(1),
-    };
-    seal_test_policy_wire(TradeFinalityPolicyWireV1 {
-        schema_version: TRADE_FINALITY_POLICY_SCHEMA_V1.to_owned(),
-        policy_id: "stage3-successful-test-policy-v1".to_owned(),
-        content_sha256: Sha256Hex("0".repeat(64)),
-        normal_path,
-        failure_overrides: Vec::new(),
-    })
-}
-
-#[cfg(test)]
-pub(crate) fn failure_policy_for_tests(
-    selector_run_id: &str,
-) -> std::sync::Arc<TradeFinalityPolicyV1> {
-    let normal_path = TradeFinalityPathWireV1 {
-        steps: vec![
-            TradeFinalityStepWireV1 {
-                state: TradeFinalityStateV1::Matched,
-                offset_ms: 0,
-            },
-            TradeFinalityStepWireV1 {
-                state: TradeFinalityStateV1::Mined,
-                offset_ms: 10,
-            },
-            TradeFinalityStepWireV1 {
-                state: TradeFinalityStateV1::Confirmed,
-                offset_ms: 20,
-            },
-        ],
-        economic_application_ordinal: Some(1),
-    };
-    let failure_override = TradeFinalityFailureOverrideWireV1 {
-        selector: TradeFinalitySelectorWireV1::Request {
-            account_instance_key: AccountInstanceKeyV1 {
-                run_id: selector_run_id.to_owned(),
-                caller_role: contracts::SimCallerRoleV1::ModelTrain,
-                caller_instance_id: "task30-test-caller".to_owned(),
-                account_id: "task30-test-account".to_owned(),
-                platform_source: contracts::PlatformSourceV1::Simulated,
-            },
-            global_request_id: "task30-test-request".to_owned(),
-        },
-        path: TradeFinalityPathWireV1 {
-            steps: vec![
-                TradeFinalityStepWireV1 {
-                    state: TradeFinalityStateV1::Matched,
-                    offset_ms: 0,
-                },
-                TradeFinalityStepWireV1 {
-                    state: TradeFinalityStateV1::Failed,
-                    offset_ms: 10,
-                },
-            ],
-            economic_application_ordinal: None,
-        },
-    };
-    seal_test_policy_wire(TradeFinalityPolicyWireV1 {
-        schema_version: TRADE_FINALITY_POLICY_SCHEMA_V1.to_owned(),
-        policy_id: "stage3-failure-test-policy-v1".to_owned(),
-        content_sha256: Sha256Hex("0".repeat(64)),
-        normal_path,
-        failure_overrides: vec![failure_override],
-    })
-}
-
-#[cfg(test)]
-pub(crate) type TestFinalityFailureOverrideV1 = (
-    TradeFinalitySelectorV1,
-    Vec<(TradeFinalityStateV1, i64)>,
-    Option<u32>,
-);
-
-#[cfg(test)]
-pub(crate) fn policy_for_tests(
-    policy_id: &str,
-    normal_steps: &[(TradeFinalityStateV1, i64)],
-    normal_economic_application_ordinal: u32,
-    failure_overrides: Vec<TestFinalityFailureOverrideV1>,
-) -> std::sync::Arc<TradeFinalityPolicyV1> {
-    let failure_overrides = failure_overrides
-        .into_iter()
-        .map(|(selector, steps, economic_application_ordinal)| {
-            let selector = match selector {
-                TradeFinalitySelectorV1::Request {
-                    account_instance_key,
-                    global_request_id,
-                } => TradeFinalitySelectorWireV1::Request {
-                    account_instance_key,
-                    global_request_id,
-                },
-                TradeFinalitySelectorV1::BatchItem {
-                    account_instance_key,
-                    item_idempotency_identity,
-                } => TradeFinalitySelectorWireV1::BatchItem {
-                    account_instance_key,
-                    item_idempotency_identity,
-                },
-                TradeFinalitySelectorV1::Fill {
-                    account_instance_key,
-                    fill_economic_delta_identity,
-                } => TradeFinalitySelectorWireV1::Fill {
-                    account_instance_key,
-                    fill_economic_delta_identity,
-                },
-            };
-            TradeFinalityFailureOverrideWireV1 {
-                selector,
-                path: TradeFinalityPathWireV1 {
-                    steps: steps
-                        .into_iter()
-                        .map(|(state, offset_ms)| TradeFinalityStepWireV1 { state, offset_ms })
-                        .collect(),
-                    economic_application_ordinal,
-                },
-            }
-        })
-        .collect();
-    seal_test_policy_wire(TradeFinalityPolicyWireV1 {
-        schema_version: TRADE_FINALITY_POLICY_SCHEMA_V1.to_owned(),
-        policy_id: policy_id.to_owned(),
-        content_sha256: Sha256Hex("0".repeat(64)),
-        normal_path: TradeFinalityPathWireV1 {
-            steps: normal_steps
-                .iter()
-                .map(|(state, offset_ms)| TradeFinalityStepWireV1 {
-                    state: *state,
-                    offset_ms: *offset_ms,
-                })
-                .collect(),
-            economic_application_ordinal: Some(normal_economic_application_ordinal),
-        },
-        failure_overrides,
-    })
-}
-
-#[cfg(test)]
-fn seal_test_policy_wire(
-    mut wire: TradeFinalityPolicyWireV1,
-) -> std::sync::Arc<TradeFinalityPolicyV1> {
-    let content = TradeFinalityPolicyHashContentV1 {
-        schema_version: &wire.schema_version,
-        policy_id: &wire.policy_id,
-        normal_path: &wire.normal_path,
-        failure_overrides: &wire.failure_overrides,
-    };
-    let canonical = serde_json::to_vec(&content).expect("测试最终性策略规范内容必须可序列化");
-    wire.content_sha256 = hash_canonical_content(&canonical);
-    let bytes = serde_json::to_vec(&wire).expect("测试最终性策略必须可序列化");
-    std::sync::Arc::new(
-        TradeFinalityPolicyV1::decode_and_seal(&bytes).expect("测试最终性策略必须合法"),
     )
 }
 

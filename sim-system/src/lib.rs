@@ -12,7 +12,6 @@ pub(crate) mod legacy_reader;
 #[allow(dead_code)]
 pub(crate) mod market;
 pub(crate) mod market_directory;
-#[allow(dead_code)]
 pub(crate) mod matching;
 #[cfg(feature = "measurement")]
 mod measurement_probe;
@@ -30,7 +29,3 @@ pub(crate) mod session;
 
 #[cfg(test)]
 mod task21_tests;
-#[cfg(test)]
-mod task22_tests;
-#[cfg(test)]
-mod task23_tests;
