@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use contracts::execution_normalization::{
@@ -44,6 +44,21 @@ pub struct SimV2NoeProjectionPortV1 {
     implementation_identity: String,
     seed: Option<SimV2ContextSeedV1>,
     store: Option<DurableContextStoreV1>,
+    observation: SimV2NoeObservationV1,
+}
+
+#[derive(Clone, Default)]
+pub struct SimV2NoeObservationV1 {
+    result_references: Arc<Mutex<Vec<NoeResultReferenceV1>>>,
+}
+
+impl SimV2NoeObservationV1 {
+    pub fn result_references(&self) -> Vec<NoeResultReferenceV1> {
+        self.result_references
+            .lock()
+            .expect("NOE 只读观察状态锁未损坏")
+            .clone()
+    }
 }
 
 impl SimV2NoeProjectionPortV1 {
@@ -64,7 +79,12 @@ impl SimV2NoeProjectionPortV1 {
             implementation_identity,
             seed: None,
             store: None,
+            observation: SimV2NoeObservationV1::default(),
         }
+    }
+
+    pub fn observation(&self) -> SimV2NoeObservationV1 {
+        self.observation.clone()
     }
 
     pub fn result_references(&self) -> Vec<NoeResultReferenceV1> {
@@ -100,6 +120,24 @@ impl SimV2NoeProjectionPortV1 {
         })
     }
 
+    fn refresh_observation(&self) {
+        *self
+            .observation
+            .result_references
+            .lock()
+            .expect("NOE 只读观察状态锁未损坏") = self.result_references();
+    }
+
+    fn append_latest_observation(&self) {
+        let store = self.store.as_ref().expect("提交后 NOE 耐久句柄存在");
+        let commit = store.commits().last().expect("提交后 NOE commit 存在");
+        self.observation
+            .result_references
+            .lock()
+            .expect("NOE 只读观察状态锁未损坏")
+            .extend(commit.result_references());
+    }
+
     fn open_from_first_batch(&mut self, batch: &BusinessProjectionBatchV2) -> bool {
         if self.store.is_some() {
             return true;
@@ -122,6 +160,7 @@ impl SimV2NoeProjectionPortV1 {
             Ok(store) => {
                 self.seed = Some(seed);
                 self.store = Some(store);
+                self.refresh_observation();
                 true
             }
             Err(_) => false,
@@ -141,6 +180,7 @@ impl SimV2NoeProjectionPortV1 {
                 && watermark.projection_batch_sequence >= target_sequence
         });
         self.store = Some(store);
+        self.refresh_observation();
         durable
     }
 }
@@ -169,8 +209,11 @@ impl BusinessProjectionPortV2 for SimV2NoeProjectionPortV1 {
             .expect("映射时已经确认耐久句柄存在")
             .commit_batch(input, durable_now_utc_ms());
         match outcome {
-            Ok(DurableCommitOutcomeV1::Committed { .. })
-            | Ok(DurableCommitOutcomeV1::AlreadyDurable { .. }) => true,
+            Ok(DurableCommitOutcomeV1::Committed { .. }) => {
+                self.append_latest_observation();
+                true
+            }
+            Ok(DurableCommitOutcomeV1::AlreadyDurable { .. }) => true,
             Err(DurableErrorV1::DurabilityUncertain { .. }) => {
                 self.reopen_after_uncertain(target_sequence)
             }
@@ -1064,6 +1107,8 @@ mod tests {
     use std::time::Instant;
 
     use contracts::execution_normalization::ImmutableSourceReferenceV1;
+    #[cfg(feature = "gate-b-flow")]
+    use contracts::execution_normalization::SourceNeutralEconomicDispositionV1;
     use contracts::{
         AcceptedSubmissionItemV2, AssetIdentityV1, CancelNotCanceledReasonV2,
         CancelOrderDirectResponseV2, CancelOrdersDirectResponseV2, CancelTargetResponseV2,
@@ -1077,6 +1122,8 @@ mod tests {
         TradeLifecycleFeedbackV2, TradeLiquidityRoleV2, TradesDirectResponseV2,
     };
     use execution_normalization::{NormalizationRecordV1, read_noe_result_v1};
+    #[cfg(feature = "gate-b-flow")]
+    use ledger::{AccountAdmissionPolicyV1, LedgerApplyOutcomeV1, LedgerErrorV1, LedgerWriterV1};
     use tempfile::TempDir;
 
     use super::*;
@@ -1619,12 +1666,15 @@ mod tests {
     fn representative_public_v2_batch_maps_all_current_families_once() {
         let temporary = TempDir::new().unwrap();
         let mut port = new_port(temporary.path());
+        let observation = port.observation();
+        assert!(observation.result_references().is_empty());
         assert!(port.try_accept(representative_batch("account-noe-58")));
         assert_eq!(port.durable_through("run-noe-58"), 1);
         assert!(port.try_accept(representative_batch("account-noe-58")));
         assert_eq!(port.durable_through("run-noe-58"), 1);
 
         let references = port.result_references();
+        assert_eq!(observation.result_references(), references);
         let records: Vec<_> = references
             .iter()
             .map(|reference| read_noe_result_v1(reference).unwrap().record)
@@ -1678,6 +1728,71 @@ mod tests {
         let manifest = port.run_consumption_manifest().unwrap();
         assert_eq!(manifest.commit_containers.len(), 1);
         assert_eq!(manifest.source_watermark.projection_batch_sequence, 1);
+    }
+
+    #[cfg(feature = "gate-b-flow")]
+    #[test]
+    fn real_noe_order_rejects_a_missing_predecessor_then_applies_the_original_prefix() {
+        let temporary = TempDir::new().unwrap();
+        let mut port = new_port(temporary.path());
+        assert!(port.try_accept(representative_batch("account-noe-58")));
+        let references = port.observation().result_references();
+        let transition_indices = references
+            .iter()
+            .enumerate()
+            .filter_map(|(index, reference)| {
+                matches!(
+                        read_noe_result_v1(reference).unwrap().record,
+                        NormalizationRecordV1::EconomicFact {
+                            fact: contracts::execution_normalization::SourceNeutralEconomicFactV1 {
+                                disposition:
+                                    SourceNeutralEconomicDispositionV1::AccountTransition { .. },
+                                ..
+                            },
+                            ..
+                        }
+                    )
+                    .then_some(index)
+            })
+            .take(2)
+            .collect::<Vec<_>>();
+        assert_eq!(transition_indices.len(), 2);
+        let first = transition_indices[0];
+        let second = transition_indices[1];
+        let policy = AccountAdmissionPolicyV1 {
+            per_market_all_in_commitment_limit_pusd: ExactDecimal("1000".to_owned()),
+        };
+        let mut recovered = LedgerWriterV1::new(policy.clone());
+        for reference in &references[..first] {
+            match recovered.apply_noe_result(reference) {
+                Ok(_) | Err(LedgerErrorV1::NonEconomicRecord) => {}
+                other => panic!("原序前缀必须可应用：{other:?}"),
+            }
+        }
+        let before = recovered.projection().unwrap();
+        assert_eq!(
+            recovered.apply_noe_result(&references[second]).unwrap(),
+            LedgerApplyOutcomeV1::MissingPlatformPredecessor {
+                expected_account_transition_seq: 1,
+                found_account_transition_seq: 2,
+            }
+        );
+        assert_eq!(recovered.projection().unwrap(), before);
+        for reference in &references[first..] {
+            match recovered.apply_noe_result(reference) {
+                Ok(_) | Err(LedgerErrorV1::NonEconomicRecord) => {}
+                other => panic!("恢复后的原序后缀必须可应用：{other:?}"),
+            }
+        }
+
+        let mut original = LedgerWriterV1::new(policy);
+        for reference in &references {
+            match original.apply_noe_result(reference) {
+                Ok(_) | Err(LedgerErrorV1::NonEconomicRecord) => {}
+                other => panic!("全新 Ledger 必须接受 NOE 原序：{other:?}"),
+            }
+        }
+        assert_eq!(recovered.projection(), original.projection());
     }
 
     #[test]

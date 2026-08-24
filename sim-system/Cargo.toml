@@ -8,12 +8,14 @@ publish = false
 default = []
 measurement = ["tokio/rt"]
 gate-a-measurement = ["measurement", "dep:data-pipeline-training"]
+gate-b-flow = ["gate-a-measurement", "dep:ledger"]
 
 [dependencies]
 contracts = { path = "../contracts" }
 data-pipeline-core = { path = "../data-pipeline/core" }
 data-pipeline-training = { path = "../data-pipeline/training", optional = true }
 execution-normalization = { path = "../execution-normalization" }
+ledger = { path = "../ledger", optional = true }
 num-bigint = "=0.4.8"
 num-integer = "=0.1.46"
 num-traits = "=0.2.19"
