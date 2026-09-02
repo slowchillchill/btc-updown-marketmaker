@@ -80,9 +80,6 @@ fn selects_exact_current_and_next_btc_updown_5m_pair() {
     assert_eq!(selection.next.down_asset_id, "202");
     assert_eq!(selection.current.fixed_identity_verified_at_utc_ms, NOW_MS);
     assert_eq!(selection.next.fixed_identity_verified_at_utc_ms, NOW_MS);
-    assert!(selection.relation.same_series_prefix);
-    assert!(selection.relation.windows_contiguous);
-    assert!(selection.relation.condition_ids_distinct);
 }
 
 #[test]
@@ -172,6 +169,67 @@ fn current_and_next_assets_must_be_disjoint() {
     assert!(matches!(
         select_btc_updown_markets(NOW_MS, &[current], &[next]),
         Err(DiscoverySelectionError::PairRelationInvalid)
+    ));
+}
+
+#[test]
+fn current_and_next_condition_ids_must_be_distinct() {
+    let windows = discovery_windows(NOW_MS);
+    let condition_id = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let current = candidate_for_window(
+        "current",
+        &windows.current.slug,
+        windows.current.target_ts_s,
+        windows.current.end_ts_s,
+        condition_id,
+        "101",
+        "102",
+    );
+    let next = candidate_for_window(
+        "next",
+        &windows.next.slug,
+        windows.next.target_ts_s,
+        windows.next.end_ts_s,
+        condition_id,
+        "201",
+        "202",
+    );
+
+    assert!(matches!(
+        select_btc_updown_markets(NOW_MS, &[current], &[next]),
+        Err(DiscoverySelectionError::PairRelationInvalid)
+    ));
+}
+
+#[test]
+fn next_window_must_keep_the_five_minute_cadence() {
+    let windows = discovery_windows(NOW_MS);
+    let current = candidate_for_window(
+        "current",
+        &windows.current.slug,
+        windows.current.target_ts_s,
+        windows.current.end_ts_s,
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "101",
+        "102",
+    );
+    let wrong_end = windows.next.end_ts_s + 60;
+    let next = candidate_for_window(
+        "next",
+        &windows.next.slug,
+        windows.next.target_ts_s,
+        wrong_end,
+        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "201",
+        "202",
+    );
+
+    assert!(matches!(
+        select_btc_updown_markets(NOW_MS, &[current], &[next]),
+        Err(DiscoverySelectionError::InvalidNext {
+            reason: CandidateRejectReason::WindowBoundsMismatch,
+            ..
+        })
     ));
 }
 

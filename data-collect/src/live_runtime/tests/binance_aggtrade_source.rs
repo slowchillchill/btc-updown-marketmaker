@@ -87,13 +87,20 @@ fn aggtrade_max_complete_invalid_capture_fits_the_typed_row_budget() {
         1,
     )
     .unwrap();
+    let event_payload = serde_json::from_str::<Value>(&event.raw_json).unwrap();
     assert!(
-        serde_json::from_str::<Value>(&event.raw_json)
-            .unwrap()
-            .get("websocket_timestamp_received")
-            .is_none(),
+        event_payload.get("websocket_timestamp_received").is_none(),
         "v7 invalid raw event must not carry the removed receive-time alias"
     );
+    let capture_sha256 = invalid.raw_capture.payload_sha256.as_deref().unwrap();
+    assert_eq!(event_payload["payload_sha256"], capture_sha256);
+    let source_evidence = serde_json::from_str::<Value>(
+        event_payload["source_native_payload_json"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(source_evidence["payload_sha256"], capture_sha256);
     assert!(
         owned_event_bytes(&event) <= MAX_TYPED_ROW_BYTES,
         "max complete capture owns {} bytes, above the typed-row limit {}",

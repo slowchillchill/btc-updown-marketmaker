@@ -47,12 +47,6 @@ pub struct DeploymentRuntimeConfig {
     pub max_runtime_secs: Option<u64>,
     pub collector_region_override: Option<String>,
     pub config_path: Option<PathBuf>,
-    pub requires_consumer_runtime_receive_timestamp: bool,
-    pub allows_training_cold_mirror: bool,
-    pub allows_hot_handoff: bool,
-    pub allows_training_reprocess: bool,
-    pub allows_parquet_full_discovery: bool,
-    pub requires_rust_toolchain_on_runtime_host: bool,
 }
 
 impl DeploymentRuntimeConfig {
@@ -74,18 +68,6 @@ impl DeploymentRuntimeConfig {
             max_runtime_secs: None,
             collector_region_override: None,
             config_path: None,
-            requires_consumer_runtime_receive_timestamp: matches!(
-                role,
-                CollectorBinaryRole::PaperHot | CollectorBinaryRole::LiveHot
-            ),
-            allows_training_cold_mirror: role == CollectorBinaryRole::TrainingCold,
-            allows_hot_handoff: matches!(
-                role,
-                CollectorBinaryRole::PaperHot | CollectorBinaryRole::LiveHot
-            ),
-            allows_training_reprocess: false,
-            allows_parquet_full_discovery: false,
-            requires_rust_toolchain_on_runtime_host: false,
         };
         validate_runtime_config(&config)?;
         Ok(config)
@@ -182,28 +164,6 @@ pub fn validate_runtime_config(config: &DeploymentRuntimeConfig) -> Result<()> {
             ))
             .into());
         }
-    }
-    match config.role {
-        CollectorBinaryRole::TrainingCold => {
-            if !config.allows_training_cold_mirror || config.allows_hot_handoff {
-                return Err(invalid_input("training role boundary mismatch").into());
-            }
-        }
-        CollectorBinaryRole::PaperHot | CollectorBinaryRole::LiveHot => {
-            if !config.allows_hot_handoff
-                || config.allows_training_cold_mirror
-                || !config.requires_consumer_runtime_receive_timestamp
-            {
-                return Err(invalid_input("paper/live role boundary mismatch").into());
-            }
-        }
-    }
-    if config.role == CollectorBinaryRole::LiveHot
-        && (config.allows_training_reprocess
-            || config.allows_parquet_full_discovery
-            || config.requires_rust_toolchain_on_runtime_host)
-    {
-        return Err(invalid_input("live role must not require build or training reprocess").into());
     }
     Ok(())
 }

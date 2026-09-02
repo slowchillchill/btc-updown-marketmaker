@@ -8,7 +8,7 @@ use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::time::timeout;
 
-use crate::publish::{PaperLiveEnvironment, Result, paper_live_handoff_boundary};
+use crate::publish::{PaperLiveEnvironment, Result, paper_live_handoff_root};
 use crate::source_hourly_layout::{
     BINANCE_AGGTRADE_INVALID_REASON_CODE_MAX_BYTES, BINANCE_AGGTRADE_RECORD_INVALID_INPUT,
     BINANCE_AGGTRADE_RECORD_TRADE, BINANCE_DEPTH_VERDICT_APPLIED,
@@ -816,11 +816,11 @@ pub struct HandoffRuntimeConfig {
 
 impl HandoffRuntimeConfig {
     pub fn for_environment(dataset_root: &Path, environment: PaperLiveEnvironment) -> Result<Self> {
-        let boundary = paper_live_handoff_boundary(dataset_root, environment)?;
+        let handoff_root = paper_live_handoff_root(dataset_root, environment)?;
         Ok(Self {
             environment,
-            socket_path: boundary.artifact_root.join("hot.sock"),
-            handoff_root: boundary.artifact_root,
+            socket_path: handoff_root.join("hot.sock"),
+            handoff_root,
             frame_schema_version: HANDOFF_FRAME_SCHEMA_VERSION.to_owned(),
         })
     }

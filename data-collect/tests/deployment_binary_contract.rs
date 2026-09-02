@@ -15,9 +15,6 @@ fn binary_roles_are_isolated_by_output_roots_and_runtime_contracts() {
     )
     .unwrap();
     assert!(training.output_root.ends_with("training/typed_raw"));
-    assert!(!training.requires_consumer_runtime_receive_timestamp);
-    assert!(training.allows_training_cold_mirror);
-    assert!(!training.allows_hot_handoff);
 
     let paper = DeploymentRuntimeConfig::for_role(
         CollectorBinaryRole::PaperHot,
@@ -26,20 +23,11 @@ fn binary_roles_are_isolated_by_output_roots_and_runtime_contracts() {
     )
     .unwrap();
     assert!(paper.output_root.ends_with("paper/data_collect_handoff"));
-    assert!(paper.requires_consumer_runtime_receive_timestamp);
-    assert!(paper.allows_hot_handoff);
-    assert!(!paper.allows_training_cold_mirror);
 
     let live =
         DeploymentRuntimeConfig::for_role(CollectorBinaryRole::LiveHot, dataset_root, "live-run")
             .unwrap();
     assert!(live.output_root.ends_with("live/data_collect_handoff"));
-    assert!(live.requires_consumer_runtime_receive_timestamp);
-    assert!(live.allows_hot_handoff);
-    assert!(!live.allows_training_cold_mirror);
-    assert!(!live.allows_training_reprocess);
-    assert!(!live.allows_parquet_full_discovery);
-    assert!(!live.requires_rust_toolchain_on_runtime_host);
 }
 
 #[test]

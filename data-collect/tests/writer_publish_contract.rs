@@ -1,13 +1,7 @@
 use std::fs;
 
-use data_collect::backpressure::BackpressureReceipt;
 use data_collect::{
-    ManifestDraft, QueueWatermark, RawEvent, RequiredFile, ResourceWatermark, SourceCoverage,
-    ValidationVerdict, manifest::TimeWindow, manifest::required_consumer_boundary_declarations,
-    resource::CgroupMemoryStat, resource::PsiSample, resource::ResourceAction,
-    resource::ResourceSeverity, resource::ResourceThresholdPolicyReceipt,
-    resource::ResourceThresholds, sha256_file, writer::ParquetSegmentWriter,
-    writer::write_segment_on_blocking_pool,
+    RawEvent, sha256_file, writer::ParquetSegmentWriter, writer::write_segment_on_blocking_pool,
 };
 use tempfile::tempdir;
 
@@ -25,88 +19,6 @@ fn synthetic_event(seq: u64) -> RawEvent {
         collector_admission: None,
         parquet_raw_layout_version: 1,
         parquet_raw_source_kind: "polymarket_market".to_owned(),
-    }
-}
-
-fn complete_resource_watermark() -> ResourceWatermark {
-    ResourceWatermark {
-        rss_bytes: Some(100),
-        cpu_percent: Some(1.0),
-        disk_free_bytes: Some(1024),
-        artifact_dir_bytes: Some(2048),
-        journal_log_bytes: Some(128),
-        journal_limit_status: Some("within_limit".to_owned()),
-        open_files: Some(16),
-        queue_bytes: Some(512),
-        queue_age_ms: Some(10),
-        parquet_writer_memory_estimate_bytes: Some(4096),
-        cgroup_memory_current_bytes: Some(8192),
-        cgroup_memory_stat: Some(CgroupMemoryStat {
-            anon_bytes: 100,
-            file_bytes: 200,
-            slab_bytes: 300,
-        }),
-        cgroup_memory_events: Some("low 0\nhigh 0\nmax 0\noom 0\noom_kill 0".to_owned()),
-        psi_cpu: Some(PsiSample {
-            some_avg10: 0.0,
-            full_avg10: 0.0,
-        }),
-        psi_memory: Some(PsiSample {
-            some_avg10: 0.0,
-            full_avg10: 0.0,
-        }),
-        psi_io: Some(PsiSample {
-            some_avg10: 0.0,
-            full_avg10: 0.0,
-        }),
-        stage_latency_ms: Some(3),
-        ttl_ms: Some(1000),
-        unavailable: Vec::new(),
-    }
-}
-
-fn complete_resource_threshold_policy_receipt() -> ResourceThresholdPolicyReceipt {
-    let thresholds = ResourceThresholds {
-        min_disk_free_bytes: 1,
-        max_rss_bytes: 1_000_000,
-        max_cpu_percent: 95.0,
-        max_artifact_dir_bytes: 1_000_000,
-        max_journal_log_bytes: 1_000_000,
-        max_open_files: 1_000,
-        max_queue_bytes: 1_000_000,
-        max_queue_age_ms: 1_000,
-        max_parquet_writer_memory_estimate_bytes: 1_000_000,
-        max_cgroup_memory_current_bytes: 1_000_000,
-        max_cgroup_memory_anon_bytes: 1_000_000,
-        max_cgroup_memory_file_bytes: 1_000_000,
-        max_cgroup_memory_slab_bytes: 1_000_000,
-        max_psi_some_avg10: 90.0,
-        max_psi_full_avg10: 50.0,
-        max_stage_latency_ms: 1_000,
-        max_ttl_ms: 10_000,
-    };
-
-    ResourceThresholdPolicyReceipt {
-        soft_thresholds: thresholds,
-        hard_thresholds: thresholds,
-        threshold_unit: "bytes/percent/count/milliseconds/psi_avg10".to_owned(),
-        hard_hysteresis_samples: 2,
-        recovery_hysteresis_samples: 2,
-        soft_actions: vec![
-            ResourceAction::RecordBackpressure,
-            ResourceAction::ObserveRecovery,
-        ],
-        hard_actions: vec![
-            ResourceAction::StopNewIntake,
-            ResourceAction::FinalizeOpenSegments,
-            ResourceAction::WriteIncompleteManifest,
-        ],
-        recovery_actions: vec![
-            ResourceAction::ObserveRecovery,
-            ResourceAction::ResumeIntake,
-        ],
-        recovery_condition: "below soft thresholds for recovery_hysteresis_samples".to_owned(),
-        last_result: ResourceSeverity::Healthy,
     }
 }
 
@@ -158,8 +70,6 @@ fn writer_finalize_atomic_rename_publishes_only_finalized() {
         published.sha256,
         sha256_file(&published.final_path).unwrap()
     );
-
-    assert!(published.final_path.exists());
 }
 
 #[tokio::test]
@@ -177,93 +87,4 @@ async fn writer_segment_can_run_on_blocking_pool() {
 
     assert!(published.final_path.exists());
     assert_eq!(published.row_count, 2);
-    assert!(published.final_path.exists());
-}
-
-#[test]
-fn manifest_requires_row_count_sha256_schema_source_coverage() {
-    let complete = ManifestDraft {
-        artifact_path: Some("probe.parquet".into()),
-        row_count: Some(2),
-        sha256: Some("0123456789abcdef".to_owned()),
-        schema_version: Some("parquet_raw_layout_v1".to_owned()),
-        code_version: Some("test-code-version".to_owned()),
-        collector_binary_sha256: Some("binary-sha256".to_owned()),
-        source_config_digest: Some("source-config-digest".to_owned()),
-        validation_verdict: ValidationVerdict::Complete,
-        consumer_boundary_declarations: required_consumer_boundary_declarations(),
-        source_coverage: vec![SourceCoverage {
-            source_kind: "polymarket_market".to_owned(),
-            first_recv_time_utc_ms: 1,
-            last_recv_time_utc_ms: 2,
-            rows: 2,
-        }],
-        source_gaps: Vec::new(),
-        manifest_source_gaps: Vec::new(),
-        coverage_incomplete_reason: None,
-        health_artifact_path: Some("health.jsonl".into()),
-        health_artifact_digest: None,
-        gap_artifact_path: Some("gap.jsonl".into()),
-        gap_artifact_digest: None,
-        reconnect_artifact_path: Some("reconnect.jsonl".into()),
-        reconnect_artifact_digest: None,
-        start_time_utc_ms: Some(1),
-        end_time_utc_ms: Some(2),
-        coverage_window: Some(TimeWindow {
-            start_utc_ms: 1,
-            end_utc_ms: 2,
-        }),
-        resource_watermark: Some(complete_resource_watermark()),
-        resource_threshold_policy_receipt: Some(complete_resource_threshold_policy_receipt()),
-        writer_queue_high_watermark: Some(QueueWatermark {
-            rows: 2,
-            bytes: 512,
-            oldest_event_age_ms: 10,
-            writer_lag_ms: 5,
-        }),
-        backpressure_receipt: Some(BackpressureReceipt::empty("polymarket_market")),
-        flush_latency_ms: Some(3),
-        collector_host_id: Some("collector-local".to_owned()),
-        collector_region: Some("local-dev".to_owned()),
-        required_files: vec![RequiredFile {
-            file_role: "typed_raw_parquet".to_owned(),
-            path: "probe.parquet".into(),
-            finalized: true,
-            row_count: Some(2),
-            sha256: Some("0123456789abcdef".to_owned()),
-            schema_version: Some("parquet_raw_layout_v1".to_owned()),
-            missing_reason: None,
-        }],
-    };
-
-    assert_eq!(complete.effective_verdict(), ValidationVerdict::Complete);
-
-    let mut missing_sha = complete.clone();
-    missing_sha.sha256 = None;
-    assert_eq!(
-        missing_sha.effective_verdict(),
-        ValidationVerdict::Incomplete
-    );
-
-    let mut missing_coverage = complete.clone();
-    missing_coverage.source_coverage.clear();
-    assert_eq!(
-        missing_coverage.effective_verdict(),
-        ValidationVerdict::Incomplete
-    );
-
-    let mut missing_resource_metric = complete.clone();
-    let resource_watermark = missing_resource_metric.resource_watermark.as_mut().unwrap();
-    resource_watermark.queue_bytes = None;
-    assert_eq!(
-        missing_resource_metric.effective_verdict(),
-        ValidationVerdict::Incomplete
-    );
-
-    let mut empty_required_file_role = complete;
-    empty_required_file_role.required_files[0].file_role.clear();
-    assert_eq!(
-        empty_required_file_role.effective_verdict(),
-        ValidationVerdict::Incomplete
-    );
 }

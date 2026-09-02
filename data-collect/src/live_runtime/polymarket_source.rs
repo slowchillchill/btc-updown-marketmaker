@@ -1652,7 +1652,6 @@ impl PolymarketProcessingContext {
         self.current.clone().map(|current| BtcUpdownDiscovery {
             current,
             next: self.next.clone(),
-            relation: None,
         })
     }
 

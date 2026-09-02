@@ -123,25 +123,15 @@ pub struct DiscoveredBtcUpdownMarket {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BtcUpdownPairRelation {
-    pub same_series_prefix: bool,
-    pub windows_contiguous: bool,
-    pub condition_ids_distinct: bool,
-    pub cadence_seconds: i64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BtcUpdownDiscoveryPair {
     pub current: DiscoveredBtcUpdownMarket,
     pub next: DiscoveredBtcUpdownMarket,
-    pub relation: BtcUpdownPairRelation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BtcUpdownDiscovery {
     pub current: DiscoveredBtcUpdownMarket,
     pub next: Option<DiscoveredBtcUpdownMarket>,
-    pub relation: Option<BtcUpdownPairRelation>,
 }
 
 impl BtcUpdownDiscovery {
@@ -166,13 +156,12 @@ impl BtcUpdownDiscovery {
         if self.next.is_some() {
             return Ok(false);
         }
-        let Some((next, relation)) =
+        let Some(next) =
             select_btc_updown_next(&self.current, candidates, fixed_identity_verified_at_utc_ms)?
         else {
             return Ok(false);
         };
         self.next = Some(next);
-        self.relation = Some(relation);
         Ok(true)
     }
 }
@@ -255,14 +244,9 @@ pub fn select_btc_updown_pair(
         .ok_or_else(|| DiscoverySelectionError::MissingNextCandidate {
             expected_slug: discovery_windows(now_ms).next.slug,
         })?;
-    let relation = selection
-        .relation
-        .expect("a selected next market has a validated relation");
-
     Ok(BtcUpdownDiscoveryPair {
         current: selection.current,
         next,
-        relation,
     })
 }
 
@@ -278,23 +262,16 @@ pub fn select_btc_updown_markets(
         CandidateKind::Current,
         now_ms,
     )?;
-    let selected_next = select_btc_updown_next(&current, next_candidates, now_ms)?;
-    let (next, relation) = selected_next.map_or((None, None), |(next, relation)| {
-        (Some(next), Some(relation))
-    });
+    let next = select_btc_updown_next(&current, next_candidates, now_ms)?;
 
-    Ok(BtcUpdownDiscovery {
-        current,
-        next,
-        relation,
-    })
+    Ok(BtcUpdownDiscovery { current, next })
 }
 
 pub fn select_btc_updown_next(
     current: &DiscoveredBtcUpdownMarket,
     next_candidates: &[BtcUpdownMarketCandidate],
     fixed_identity_verified_at_utc_ms: i64,
-) -> Result<Option<(DiscoveredBtcUpdownMarket, BtcUpdownPairRelation)>, DiscoverySelectionError> {
+) -> Result<Option<DiscoveredBtcUpdownMarket>, DiscoverySelectionError> {
     if next_candidates.is_empty() {
         return Ok(None);
     }
@@ -305,32 +282,26 @@ pub fn select_btc_updown_next(
         CandidateKind::Next,
         fixed_identity_verified_at_utc_ms,
     )?;
-    let relation = validated_pair_relation(current, &next)?;
-    Ok(Some((next, relation)))
+    validate_pair_relation(current, &next)?;
+    Ok(Some(next))
 }
 
-fn validated_pair_relation(
+fn validate_pair_relation(
     current: &DiscoveredBtcUpdownMarket,
     next: &DiscoveredBtcUpdownMarket,
-) -> Result<BtcUpdownPairRelation, DiscoverySelectionError> {
+) -> Result<(), DiscoverySelectionError> {
     let assets_disjoint = current.up_asset_id != next.up_asset_id
         && current.up_asset_id != next.down_asset_id
         && current.down_asset_id != next.up_asset_id
         && current.down_asset_id != next.down_asset_id;
-    let relation = BtcUpdownPairRelation {
-        same_series_prefix: current.slug.starts_with(BTC_UPDOWN_5M_SERIES_PREFIX)
-            && next.slug.starts_with(BTC_UPDOWN_5M_SERIES_PREFIX),
-        windows_contiguous: current.end_ts_s == next.start_ts_s,
-        condition_ids_distinct: current.condition_id != next.condition_id,
-        cadence_seconds: next.start_ts_s - current.start_ts_s,
-    };
-    if relation.same_series_prefix
-        && relation.windows_contiguous
-        && relation.condition_ids_distinct
+    if current.slug.starts_with(BTC_UPDOWN_5M_SERIES_PREFIX)
+        && next.slug.starts_with(BTC_UPDOWN_5M_SERIES_PREFIX)
+        && current.end_ts_s == next.start_ts_s
+        && current.condition_id != next.condition_id
         && assets_disjoint
-        && relation.cadence_seconds == BTC_UPDOWN_5M_STEP_SECONDS
+        && next.start_ts_s - current.start_ts_s == BTC_UPDOWN_5M_STEP_SECONDS
     {
-        Ok(relation)
+        Ok(())
     } else {
         Err(DiscoverySelectionError::PairRelationInvalid)
     }

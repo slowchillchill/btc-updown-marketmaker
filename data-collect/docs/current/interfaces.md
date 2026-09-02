@@ -58,13 +58,13 @@ cargo run --release --locked --offline -p data-collect --bin real_source_alignme
 使用 `create_new` 创建 `run_owner.json`，不会覆盖已有产物。普通 Cargo 回归只运行该目标的
 离线单元测试，不执行其真实网络业务入口。
 
-在离线训练链路中，上述直接消费方只允许是 `ConsumerKind::DataPipeline`。
-历史名称 `ConsumerKind::Training` 表示下游 `model-train`，不得直接读取该目录；它只能
-把经过唯一 `data-pipeline(training)` 规范化、准入和发布的版本化输出作为训练数据和模型
-输入。`model-train` 进程仍可直接读取 `manifest`、`source_coverage`、`source_health`、
-`source_gap`、`reconnect_trace`、`backpressure_state` 六类角色，但只能用于血缘、审计和
-质量诊断；这些元数据不得参与训练准入或放行，也不得进入 Observation、特征、标签、训练
-样本、训练切分、样本选择、模型输入或任何决策触发。
+在离线训练链路中，上述最终化 `typed_raw` 只允许由 `data-pipeline(training)` 直接读取。
+下游 `model-train` 不得直接读取该目录；它只能把经过唯一 `data-pipeline(training)`
+规范化、准入和发布的版本化输出作为训练数据和模型输入。每日 `manifest.json` 中持久化的
+`files`、`source_counters`、`gaps`、`collection_day_coverage` 等诊断事实可供
+`model-train` 读取，但只用于血缘、审计和质量诊断；这些事实不得参与训练准入或放行，
+也不得进入 Observation、特征、标签、训练样本、训练切分、样本选择、模型输入或任何决策
+触发。训练数据和模型输入只能来自版本化 `data-pipeline(training)`（DPT）输出。
 
 ## 3. 模拟盘、实盘 CLI 与当前输出
 
