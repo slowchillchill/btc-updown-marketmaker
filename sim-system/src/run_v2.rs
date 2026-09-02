@@ -6,17 +6,17 @@ use std::time::Instant;
 
 use contracts::{
     AccountInstanceKeyV1, AccountOpeningFactV2, CancelAllOrdersDirectResponseV2,
-    CancelInputItemRefV2, CancelNotCanceledReasonV2, CancelOrderDirectResponseV2,
-    CancelOrdersDirectResponseV2, CancelTargetOutcomeV2, CancelTargetResponseV2,
-    DirectResponseMetadataV2, ExecutionMarketEventPayloadV3, ExecutionMarketEventV3,
-    ExecutionMethodV2, MarketEnrollmentV2, OrderDirectResponseV2, OrderLifecycleFeedbackV2,
-    OrderProjectionV2, OrderQueryResultV2, OrdersDirectResponseV2, OrdersPageV2,
-    OrdersQueryResultV2, PlatformSourceV1, PostOrderDirectResponseV2, PostOrdersDirectResponseV2,
-    QueryCursorV2, QueryOutOfRetentionV2, SettlementLifecycleFeedbackV2, Sha256Hex,
-    SimCallerRoleV1, SimulatedOrderKnownStatusV2, SubmissionEvidenceUnknownReasonV2,
-    SubmissionItemOutcomeV2, SubmissionRejectedReasonV2, SubmissionResponseItemV2,
-    TradeLifecycleFeedbackV2, TradeProjectionV2, TradesDirectResponseV2, TradesPageV2,
-    TradesQueryResultV2,
+    CancelInputItemRefV2, CancelMarketOrdersDirectResponseV2, CancelNotCanceledReasonV2,
+    CancelOrderDirectResponseV2, CancelOrdersDirectResponseV2, CancelTargetOutcomeV2,
+    CancelTargetResponseV2, ConditionId, DirectResponseMetadataV2, ExecutionMarketEventPayloadV3,
+    ExecutionMarketEventV3, ExecutionMethodV2, MarketEnrollmentV2, OrderDirectResponseV2,
+    OrderLifecycleFeedbackV2, OrderProjectionV2, OrderQueryResultV2, OrdersDirectResponseV2,
+    OrdersPageV2, OrdersQueryResultV2, PlatformSourceV1, PostOrderDirectResponseV2,
+    PostOrdersDirectResponseV2, QueryCursorV2, QueryOutOfRetentionV2,
+    SettlementLifecycleFeedbackV2, Sha256Hex, SimCallerRoleV1, SimulatedOrderKnownStatusV2,
+    SubmissionEvidenceUnknownReasonV2, SubmissionItemOutcomeV2, SubmissionRejectedReasonV2,
+    SubmissionResponseItemV2, TradeLifecycleFeedbackV2, TradeProjectionV2, TradesDirectResponseV2,
+    TradesPageV2, TradesQueryResultV2,
 };
 
 use crate::account::{PlatformAccountError, PlatformAccountStateV2};
@@ -105,6 +105,10 @@ enum MutationActionV2 {
         platform_order_id: String,
         input_item_refs: Vec<CancelInputItemRefV2>,
     },
+    CancelMarket {
+        global_request_id: String,
+        condition_id: ConditionId,
+    },
     CancelAll {
         global_request_id: String,
     },
@@ -130,6 +134,7 @@ enum MutationMethodV2 {
     PostOrders,
     CancelOrder,
     CancelOrders,
+    CancelMarketOrders,
     CancelAllOrders,
     Order,
     Orders,
@@ -152,6 +157,9 @@ enum NewMutationItemsV2 {
     Cancel {
         method: MutationMethodV2,
         targets: Vec<CancelTargetRegistrationV2>,
+    },
+    CancelMarket {
+        condition_id: ConditionId,
     },
     CancelAll,
     OrderQuery {
@@ -195,6 +203,7 @@ enum DirectResponsePayloadDraftV2 {
     PostOrders(Vec<Arc<PostOrderItemBusinessEffectV2>>),
     CancelOrder(Arc<CancelTargetBusinessEffectV2>),
     CancelOrders(Vec<Arc<CancelTargetBusinessEffectV2>>),
+    CancelMarketOrders(Vec<Arc<CancelTargetBusinessEffectV2>>),
     CancelAllOrders(Vec<Arc<CancelTargetBusinessEffectV2>>),
     Order(Arc<QueryActionBusinessEffectV2>),
     Orders(Arc<QueryActionBusinessEffectV2>),
@@ -235,6 +244,7 @@ pub enum BusinessDirectResponseV2 {
     PostOrders(PostOrdersDirectResponseV2),
     CancelOrder(CancelOrderDirectResponseV2),
     CancelOrders(CancelOrdersDirectResponseV2),
+    CancelMarketOrders(CancelMarketOrdersDirectResponseV2),
     CancelAllOrders(CancelAllOrdersDirectResponseV2),
     Order(OrderDirectResponseV2),
     Orders(OrdersDirectResponseV2),
@@ -789,6 +799,7 @@ fn execution_method_v2(method: MutationMethodV2) -> ExecutionMethodV2 {
         MutationMethodV2::PostOrders => ExecutionMethodV2::PostOrders,
         MutationMethodV2::CancelOrder => ExecutionMethodV2::CancelOrder,
         MutationMethodV2::CancelOrders => ExecutionMethodV2::CancelOrders,
+        MutationMethodV2::CancelMarketOrders => ExecutionMethodV2::CancelMarketOrders,
         MutationMethodV2::CancelAllOrders => ExecutionMethodV2::CancelAllOrders,
         MutationMethodV2::Order => ExecutionMethodV2::Order,
         MutationMethodV2::Orders => ExecutionMethodV2::Orders,
@@ -829,6 +840,15 @@ fn finalize_direct_response_v2(
         }
         DirectResponsePayloadDraftV2::CancelOrders(targets) => {
             BusinessDirectResponseV2::CancelOrders(CancelOrdersDirectResponseV2 {
+                metadata,
+                targets: targets
+                    .iter()
+                    .map(|target| target.as_ref().clone())
+                    .collect(),
+            })
+        }
+        DirectResponsePayloadDraftV2::CancelMarketOrders(targets) => {
+            BusinessDirectResponseV2::CancelMarketOrders(CancelMarketOrdersDirectResponseV2 {
                 metadata,
                 targets: targets
                     .iter()
@@ -1452,6 +1472,14 @@ fn direct_response_owned_bytes_v2(response: &BusinessDirectResponseV2) -> u64 {
                 + cancel_target_owned_bytes_v2(&response.target)
         }
         BusinessDirectResponseV2::CancelOrders(response) => {
+            direct_metadata_owned_bytes_v2(&response.metadata)
+                + response
+                    .targets
+                    .iter()
+                    .map(cancel_target_owned_bytes_v2)
+                    .sum::<u64>()
+        }
+        BusinessDirectResponseV2::CancelMarketOrders(response) => {
             direct_metadata_owned_bytes_v2(&response.metadata)
                 + response
                     .targets
@@ -2157,6 +2185,15 @@ impl SimExecution {
     ) -> Result<MutationRequestReceiptV2, SimRunActorErrorV2> {
         self.actor
             .register_request(cutoff, BusinessRequestV2::CancelOrders(request))
+    }
+
+    pub fn cancel_market_orders(
+        &mut self,
+        cutoff: TrustedDecisionCutoffV2,
+        request: crate::runtime_v2::CancelMarketOrdersRequestV2,
+    ) -> Result<MutationRequestReceiptV2, SimRunActorErrorV2> {
+        self.actor
+            .register_request(cutoff, BusinessRequestV2::CancelMarketOrders(request))
     }
 
     pub fn cancel_all_orders(
@@ -3082,6 +3119,10 @@ fn cancel_action_owned_bytes_v2(
             .sum::<usize>()) as u64
 }
 
+fn cancel_market_action_owned_bytes_v2(global_request_id: &str, condition_id: &ConditionId) -> u64 {
+    (global_request_id.len() + condition_id.0.len()) as u64
+}
+
 fn cancel_result_owned_bytes_v2(effect: &CancelTargetBusinessEffectV2) -> u64 {
     let outcome_bytes = match &effect.outcome {
         CancelTargetOutcomeV2::Canceled(canceled) => {
@@ -3306,6 +3347,9 @@ fn register_new_request_v2(
                 targets,
             }
         }
+        BusinessRequestV2::CancelMarketOrders(request) => NewMutationItemsV2::CancelMarket {
+            condition_id: request.condition_id.clone(),
+        },
         BusinessRequestV2::CancelAllOrders(_) => NewMutationItemsV2::CancelAll,
         BusinessRequestV2::Order(request) => {
             if !validate_platform_order_id_v2(&request.platform_order_id) {
@@ -3487,6 +3531,24 @@ fn register_new_request_v2(
             }
             method
         }
+        NewMutationItemsV2::CancelMarket { condition_id } => {
+            resources.add_record(cancel_market_action_owned_bytes_v2(
+                &context.global_request_id,
+                &condition_id,
+            ));
+            pending.push((
+                MutationActionKeyV2 {
+                    effective_processing_at_utc_ms: platform_arrived_at_utc_ms,
+                    input_sequence,
+                    batch_item_ordinal: 0,
+                },
+                MutationActionV2::CancelMarket {
+                    global_request_id: context.global_request_id.clone(),
+                    condition_id,
+                },
+            ));
+            MutationMethodV2::CancelMarketOrders
+        }
         NewMutationItemsV2::CancelAll => {
             resources.add_record(context.global_request_id.len() as u64);
             pending.push((
@@ -3593,6 +3655,7 @@ fn register_new_request_v2(
                 }
                 MutationActionV2::PostItem { .. }
                 | MutationActionV2::CancelTarget { .. }
+                | MutationActionV2::CancelMarket { .. }
                 | MutationActionV2::CancelAll { .. }
                 | MutationActionV2::OrderQuery { .. } => None,
             };
@@ -3664,6 +3727,7 @@ fn register_new_request_v2(
         }
         MutationMethodV2::CancelOrder
         | MutationMethodV2::CancelOrders
+        | MutationMethodV2::CancelMarketOrders
         | MutationMethodV2::CancelAllOrders => (0, scheduled_action_count as usize),
         MutationMethodV2::Order | MutationMethodV2::Orders | MutationMethodV2::Trades => (0, 0),
     };
@@ -4035,8 +4099,9 @@ fn apply_cancel_target_action_v2(
     ))
 }
 
-fn apply_cancel_all_action_v2(
+fn apply_cancel_targets_action_v2(
     mut session: UniqueSessionStateV2,
+    target_ids: Vec<String>,
     platform_effective_at_utc_ms: i64,
 ) -> Result<
     (
@@ -4047,7 +4112,6 @@ fn apply_cancel_all_action_v2(
     ),
     SimRunActorErrorV2,
 > {
-    let target_ids = session.execution_state.active_platform_order_ids();
     let mut effects = Vec::with_capacity(target_ids.len());
     let mut lifecycle = Vec::with_capacity(target_ids.len());
     let mut resources = BusinessResourceDeltaV2::default();
@@ -4066,6 +4130,41 @@ fn apply_cancel_all_action_v2(
         lifecycle.append(&mut target_lifecycle);
     }
     Ok((session, effects, lifecycle, resources))
+}
+
+fn apply_cancel_all_action_v2(
+    session: UniqueSessionStateV2,
+    platform_effective_at_utc_ms: i64,
+) -> Result<
+    (
+        UniqueSessionStateV2,
+        Vec<CancelTargetBusinessEffectV2>,
+        Vec<LifecycleFeedbackEffectV2>,
+        BusinessResourceDeltaV2,
+    ),
+    SimRunActorErrorV2,
+> {
+    let target_ids = session.execution_state.active_platform_order_ids();
+    apply_cancel_targets_action_v2(session, target_ids, platform_effective_at_utc_ms)
+}
+
+fn apply_cancel_market_action_v2(
+    session: UniqueSessionStateV2,
+    condition_id: &ConditionId,
+    platform_effective_at_utc_ms: i64,
+) -> Result<
+    (
+        UniqueSessionStateV2,
+        Vec<CancelTargetBusinessEffectV2>,
+        Vec<LifecycleFeedbackEffectV2>,
+        BusinessResourceDeltaV2,
+    ),
+    SimRunActorErrorV2,
+> {
+    let target_ids = session
+        .execution_state
+        .active_platform_order_ids_for_condition(condition_id);
+    apply_cancel_targets_action_v2(session, target_ids, platform_effective_at_utc_ms)
 }
 
 fn apply_order_query_action_v2(
@@ -4406,6 +4505,18 @@ fn seal_completed_response_v2(
                 DirectResponsePayloadDraftV2::CancelOrders(targets),
             )
         }
+        MutationMethodV2::CancelMarketOrders => {
+            let targets = std::mem::take(&mut request.cancel_results);
+            let responded_at = targets
+                .iter()
+                .map(|target| target.effective_processing_at_utc_ms)
+                .max()
+                .unwrap_or(request.platform_arrived_at_utc_ms);
+            (
+                responded_at,
+                DirectResponsePayloadDraftV2::CancelMarketOrders(targets),
+            )
+        }
         MutationMethodV2::CancelAllOrders => {
             let targets = std::mem::take(&mut request.cancel_results);
             let responded_at = targets
@@ -4558,6 +4669,29 @@ fn advance_next_mutation_action_at_v2(
                     action_bytes,
                     session,
                     MutationActionBusinessEffectV2::Cancel(vec![effect]),
+                    lifecycle,
+                    resources,
+                )
+            }
+            MutationActionV2::CancelMarket {
+                global_request_id,
+                condition_id,
+            } => {
+                let action_bytes =
+                    cancel_market_action_owned_bytes_v2(&global_request_id, &condition_id);
+                let (session, effects, lifecycle, resources) = apply_cancel_market_action_v2(
+                    session,
+                    &condition_id,
+                    key.effective_processing_at_utc_ms,
+                )
+                .map_err(BusinessReductionErrorV2::Fatal)?;
+                (
+                    global_request_id,
+                    action_bytes,
+                    session,
+                    MutationActionBusinessEffectV2::Cancel(
+                        effects.into_iter().map(Arc::new).collect(),
+                    ),
                     lifecycle,
                     resources,
                 )
@@ -5767,10 +5901,10 @@ mod tests {
         tests::successful_snapshot_v3_for_sim_tests,
     };
     use crate::runtime_v2::{
-        CancelAllOrdersRequestV2, CancelOrderBatchItemV2, CancelOrderRequestV2,
-        CancelOrdersRequestV2, LoggedBusinessInputV2, OrderRequestV2, OrdersRequestV2,
-        PostOrderBatchItemV2, PostOrderRequestV2, PostOrdersRequestV2, RequestContextV2,
-        RunDurabilityRoleV2, TradesRequestV2,
+        CancelAllOrdersRequestV2, CancelMarketOrdersRequestV2, CancelOrderBatchItemV2,
+        CancelOrderRequestV2, CancelOrdersRequestV2, LoggedBusinessInputV2, OrderRequestV2,
+        OrdersRequestV2, PostOrderBatchItemV2, PostOrderRequestV2, PostOrdersRequestV2,
+        RequestContextV2, RunDurabilityRoleV2, TradesRequestV2,
     };
     use crate::scenario::{PLATFORM_SCENARIO_SCHEMA_V1, SimulationScenarioArtifactV1};
     use crate::session::PublicVisibilityCursorV1;
@@ -5858,6 +5992,9 @@ mod tests {
             BusinessDirectResponseV2::CancelOrders(response) => {
                 &response.metadata.global_request_id
             }
+            BusinessDirectResponseV2::CancelMarketOrders(response) => {
+                &response.metadata.global_request_id
+            }
             BusinessDirectResponseV2::CancelAllOrders(response) => {
                 &response.metadata.global_request_id
             }
@@ -5885,6 +6022,9 @@ mod tests {
             BusinessDirectResponseV2::PostOrders(response) => serde_json::to_value(response),
             BusinessDirectResponseV2::CancelOrder(response) => serde_json::to_value(response),
             BusinessDirectResponseV2::CancelOrders(response) => serde_json::to_value(response),
+            BusinessDirectResponseV2::CancelMarketOrders(response) => {
+                serde_json::to_value(response)
+            }
             BusinessDirectResponseV2::CancelAllOrders(response) => serde_json::to_value(response),
             BusinessDirectResponseV2::Order(response) => serde_json::to_value(response),
             BusinessDirectResponseV2::Orders(response) => serde_json::to_value(response),
@@ -11074,6 +11214,237 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn cancel_market_orders_filters_active_targets_and_keeps_other_market_reserved() {
+        let (_directory, mut actor) =
+            active_market_actor(SimCallerRoleV1::ModelTrain, "run-cancel-market-v2").await;
+        let other_market = market_with_window('2', "456", "3", "4", 1_000, 3_000);
+        actor
+            .enroll_market(MarketEnrollmentRequestV1 {
+                enrollment_request_id: "enroll-cancel-market-other".to_owned(),
+                market: other_market.clone(),
+            })
+            .expect("登记另一市场");
+
+        let target_events = decoded_initial_market_events("10");
+        let target_condition_id = target_events[0].market.condition_id.clone();
+        let target_token_id = TokenId("1".to_owned());
+        let other_events =
+            decoded_initial_events_for_market_with_quantity(&other_market, 1_100, 1_110, 10, "10");
+        let state = actor.state.take().expect("市场撤单测试初始状态");
+        let (state, _) = reduce_market_event_slice_v2(
+            state,
+            MarketEventPathV1::HiddenPlatform,
+            1_100,
+            &target_events,
+            actor._rule_snapshot.snapshot(),
+            actor._finality_policy.as_ref(),
+        )
+        .unwrap_or_else(|_| panic!("目标市场初始盘口必须成功"));
+        let (mut state, _) = reduce_market_event_slice_v2(
+            state,
+            MarketEventPathV1::HiddenPlatform,
+            1_100,
+            &other_events,
+            actor._rule_snapshot.snapshot(),
+            actor._finality_policy.as_ref(),
+        )
+        .unwrap_or_else(|_| panic!("另一市场初始盘口必须成功"));
+
+        let resting_order =
+            |batch_item_ordinal, item_id, condition_id: &ConditionId, token_id: &TokenId| {
+                PostOrderBatchItemV2 {
+                    batch_item_ordinal,
+                    item: post_item(
+                        item_id,
+                        condition_id,
+                        token_id,
+                        SimBuyOrderKindV1::GtcLimit {
+                            limit_price_pusd_per_share: "0.3".parse().expect("固定测试价格"),
+                            size_shares: "5".parse().expect("固定测试数量"),
+                            post_only: false,
+                        },
+                    ),
+                }
+            };
+        let post_request = BusinessRequestV2::PostOrders(PostOrdersRequestV2 {
+            context: RequestContextV2 {
+                global_request_id: "post-before-cancel-market".to_owned(),
+                caller_correlation_id: None,
+            },
+            items: vec![
+                resting_order(0, "target-first", &target_condition_id, &target_token_id),
+                resting_order(1, "target-second", &target_condition_id, &target_token_id),
+                resting_order(
+                    2,
+                    "other-market",
+                    &other_market.market().condition_id,
+                    &other_market.assets()[0].token_id,
+                ),
+            ],
+        });
+        let (next, post_receipt) = register_request_candidate(
+            &actor.opened,
+            actor.scenario.initial_market_directory(),
+            state,
+            &request_cutoff(1_200),
+            &post_request,
+            20,
+            actor._latency_profile.as_ref(),
+            actor._rule_snapshot.snapshot(),
+        );
+        state = next;
+        for _ in 0..3 {
+            let (next, effect) = advance_mutation_candidate(
+                &actor.opened,
+                actor.scenario.initial_market_directory(),
+                state,
+                post_receipt.platform_arrived_at_utc_ms,
+                actor._rule_snapshot.snapshot(),
+                actor._finality_policy.as_ref(),
+            );
+            state = next;
+            assert!(matches!(
+                effect,
+                Some(MutationActionBusinessEffectV2::Post(_))
+            ));
+        }
+        let request_id = "cancel-target-market";
+        let cancel_request = BusinessRequestV2::CancelMarketOrders(CancelMarketOrdersRequestV2 {
+            context: RequestContextV2 {
+                global_request_id: request_id.to_owned(),
+                caller_correlation_id: None,
+            },
+            condition_id: target_condition_id.clone(),
+        });
+        let resources_before_registration = state.business_resources;
+        let (next, receipt) = register_request_candidate(
+            &actor.opened,
+            actor.scenario.initial_market_directory(),
+            state,
+            &request_cutoff(1_300),
+            &cancel_request,
+            21,
+            actor._latency_profile.as_ref(),
+            actor._rule_snapshot.snapshot(),
+        );
+        state = next;
+        assert_eq!(receipt.scheduled_action_count, 1);
+        assert_eq!(
+            state.business_resources,
+            ResourceQuantityV1::new(
+                resources_before_registration.records + 2,
+                resources_before_registration.bytes
+                    + (request_id.len() * 2 + target_condition_id.0.len()) as u64,
+            ),
+            "市场身份必须随单个市场撤单动作进入资源计量"
+        );
+
+        let (next, effect) = advance_mutation_candidate_with_outputs(
+            &actor.opened,
+            actor.scenario.initial_market_directory(),
+            state,
+            receipt.platform_arrived_at_utc_ms,
+            actor._rule_snapshot.snapshot(),
+            actor._finality_policy.as_ref(),
+        );
+        state = next;
+        let effect = effect.expect("市场撤单必须形成目标结果");
+        assert_eq!(effect.lifecycle.len(), 2);
+        let MutationActionBusinessEffectV2::Cancel(targets) = effect.business else {
+            panic!("市场撤单必须形成撤单业务结果")
+        };
+        assert_eq!(
+            targets
+                .iter()
+                .map(|target| (target.target_ordinal, target.platform_order_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(0, "sim-1"), (1, "sim-2")]
+        );
+        assert!(
+            targets
+                .iter()
+                .all(|target| matches!(target.outcome, CancelTargetOutcomeV2::Canceled(_)))
+        );
+
+        let session = state.session.as_ref().expect("市场撤单后唯一会话存在");
+        assert_eq!(
+            session.execution_state.active_platform_order_ids(),
+            vec!["sim-3".to_owned()],
+            "另一市场活动订单必须保持开放"
+        );
+        let (other_order, active, _) = session
+            .execution_state
+            .order_query_projection_v2("sim-3")
+            .expect("读取另一市场订单")
+            .expect("另一市场订单必须保留");
+        assert!(active);
+        assert_eq!(other_order.condition_id, other_market.market().condition_id);
+        let contracts::OrderQuantityProjectionV2::Base {
+            active_unfilled_base_quantity_shares,
+            open_encumbered_quote_amount_pusd,
+            ..
+        } = other_order.quantities
+        else {
+            panic!("另一市场 GTC 必须使用 base 计量")
+        };
+        assert_eq!(active_unfilled_base_quantity_shares.0, "5");
+        assert_eq!(open_encumbered_quote_amount_pusd.0, "1.5");
+        let response = session.mutation_requests.requests_by_id[request_id]
+            .completed_response
+            .as_ref()
+            .expect("市场撤单必须一次密封直接响应");
+        let BusinessDirectResponseV2::CancelMarketOrders(response) =
+            finalize_direct_response_v2(response, 1)
+        else {
+            panic!("市场撤单必须保留方法特定响应身份")
+        };
+        assert_eq!(
+            response.metadata.method,
+            ExecutionMethodV2::CancelMarketOrders
+        );
+        assert_eq!(response.targets.len(), 2);
+
+        let empty_request = BusinessRequestV2::CancelMarketOrders(CancelMarketOrdersRequestV2 {
+            context: RequestContextV2 {
+                global_request_id: "cancel-missing-market".to_owned(),
+                caller_correlation_id: None,
+            },
+            condition_id: ConditionId("missing-market".to_owned()),
+        });
+        let (next, empty_receipt) = register_request_candidate(
+            &actor.opened,
+            actor.scenario.initial_market_directory(),
+            state,
+            &request_cutoff(1_400),
+            &empty_request,
+            22,
+            actor._latency_profile.as_ref(),
+            actor._rule_snapshot.snapshot(),
+        );
+        let (state, empty_effect) = advance_mutation_candidate(
+            &actor.opened,
+            actor.scenario.initial_market_directory(),
+            next,
+            empty_receipt.platform_arrived_at_utc_ms,
+            actor._rule_snapshot.snapshot(),
+            actor._finality_policy.as_ref(),
+        );
+        let Some(MutationActionBusinessEffectV2::Cancel(empty_targets)) = empty_effect else {
+            panic!("无匹配市场撤单必须形成空成功结果")
+        };
+        assert!(empty_targets.is_empty());
+        let session = state.session.as_ref().expect("空市场撤单后唯一会话存在");
+        let response = session.mutation_requests.requests_by_id["cancel-missing-market"]
+            .completed_response
+            .as_ref()
+            .expect("无匹配市场撤单必须密封直接响应");
+        assert!(matches!(
+            &response.payload,
+            DirectResponsePayloadDraftV2::CancelMarketOrders(targets) if targets.is_empty()
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn training_request_candidate_freezes_later_market_enrollment() {
         for (role, suffix) in [
             (SimCallerRoleV1::ModelTrain, "train"),
@@ -13542,7 +13913,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn public_facade_routes_control_enrollment_and_all_eight_methods_to_one_actor() {
+    async fn public_facade_routes_control_enrollment_and_all_nine_methods_to_one_actor() {
         let directory = tempfile::tempdir().expect("创建公开综合轨迹目录");
         let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
         let rule_snapshot = successful_snapshot_v3_for_sim_tests().await;
@@ -13661,6 +14032,15 @@ mod tests {
                 )
                 .expect("公开 cancel_orders"),
             execution
+                .cancel_market_orders(
+                    cutoff.clone(),
+                    CancelMarketOrdersRequestV2 {
+                        context: context("public-cancel-market-orders"),
+                        condition_id: condition_id.clone(),
+                    },
+                )
+                .expect("公开 cancel_market_orders"),
+            execution
                 .cancel_all_orders(
                     cutoff.clone(),
                     CancelAllOrdersRequestV2 {
@@ -13689,7 +14069,7 @@ mod tests {
                 .expect("公开 orders"),
             execution
                 .trades(
-                    cutoff,
+                    cutoff.clone(),
                     TradesRequestV2 {
                         context: context("public-trades"),
                         filter: TradesFilterV1::default(),
@@ -13703,12 +14083,25 @@ mod tests {
                 .iter()
                 .map(MutationRequestReceiptV2::input_sequence)
                 .collect::<Vec<_>>(),
-            (4..=11).collect::<Vec<_>>()
+            (4..=12).collect::<Vec<_>>()
         );
         assert!(
             receipts
                 .iter()
                 .all(|receipt| receipt.scheduled_action_count() == 1)
+        );
+        assert_eq!(
+            execution
+                .cancel_market_orders(
+                    cutoff,
+                    CancelMarketOrdersRequestV2 {
+                        context: context("public-cancel-market-orders"),
+                        condition_id: ConditionId("different-on-retry".to_owned()),
+                    },
+                )
+                .expect("公开 cancel_market_orders 物理重投"),
+            receipts[4],
+            "同一全局请求身份重投不得登记第二个市场撤单动作"
         );
 
         drop(execution);
@@ -13723,7 +14116,7 @@ mod tests {
             }
             groups += 1;
         }
-        assert_eq!(groups, 11, "公开入口必须各自只追加一个完整组");
+        assert_eq!(groups, 12, "公开入口必须各自只追加一个完整组");
     }
 
     #[tokio::test(flavor = "current_thread")]

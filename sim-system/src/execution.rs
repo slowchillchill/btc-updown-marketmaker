@@ -22,11 +22,11 @@ pub use crate::run_v2::{
 };
 pub use crate::runtime_v2::{
     AcceptedClosedMarketBucketV2, BusinessRequestV2, CancelAllOrdersRequestV2,
-    CancelOrderBatchItemV2, CancelOrderRequestV2, CancelOrdersRequestV2,
-    DurableMarketBucketReferenceV2, OrderRequestV2, OrdersRequestV2, PlatformPrefixAdvanceV2,
-    PostOrderBatchItemV2, PostOrderRequestV2, PostOrdersRequestV2, RequestContextV2,
-    RetentionAdvanceV2, RunDurabilityRoleV2, RunOpenedV2, SessionSpecV3, TradesRequestV2,
-    TrustedDecisionCutoffV2,
+    CancelMarketOrdersRequestV2, CancelOrderBatchItemV2, CancelOrderRequestV2,
+    CancelOrdersRequestV2, DurableMarketBucketReferenceV2, OrderRequestV2, OrdersRequestV2,
+    PlatformPrefixAdvanceV2, PostOrderBatchItemV2, PostOrderRequestV2, PostOrdersRequestV2,
+    RequestContextV2, RetentionAdvanceV2, RunDurabilityRoleV2, RunOpenedV2, SessionSpecV3,
+    TradesRequestV2, TrustedDecisionCutoffV2,
 };
 pub use crate::session::{MarketEnrollmentRequestV1, PublicVisibilityCursorV1};
 pub use contracts::{ConditionId, TokenId};

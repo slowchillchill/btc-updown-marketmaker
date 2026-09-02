@@ -9,7 +9,8 @@ use contracts::execution_normalization::{
     SourceNeutralEconomicIdentityV1, StableLogicalIdentityV1,
 };
 use contracts::{
-    AccountInstanceKeyV1, CancelInputItemRefV2, ExactDecimal, PlatformSourceV1, SimCallerRoleV1,
+    AccountInstanceKeyV1, CancelInputItemRefV2, ExactDecimal, ExecutionMethodV2, PlatformSourceV1,
+    SimCallerRoleV1,
 };
 
 fn account_identity() -> SourceNeutralAccountIdentityV1 {
@@ -127,6 +128,7 @@ fn response_correlations_and_economic_identity_have_distinct_owners() {
     };
     let cancellation = SimV2DirectResponseAssociationV1::CancellationTarget {
         global_request_id: "request-53".to_owned(),
+        method: ExecutionMethodV2::CancelMarketOrders,
         target_ordinal: 4,
         input_item_refs: vec![CancelInputItemRefV2 {
             item_id: "cancel-item-53".to_owned(),
@@ -137,6 +139,7 @@ fn response_correlations_and_economic_identity_have_distinct_owners() {
 
     let SimV2DirectResponseAssociationV1::CancellationTarget {
         global_request_id,
+        method,
         target_ordinal,
         input_item_refs,
     } = cancellation
@@ -144,6 +147,7 @@ fn response_correlations_and_economic_identity_have_distinct_owners() {
         unreachable!("已构造撤单目标关联")
     };
     assert_eq!(global_request_id, "request-53");
+    assert_eq!(method, ExecutionMethodV2::CancelMarketOrders);
     assert_eq!(target_ordinal, 4);
     assert_eq!(input_item_refs[0].item_id, "cancel-item-53");
     assert_eq!(input_item_refs[0].batch_item_ordinal, 9);

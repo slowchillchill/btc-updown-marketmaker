@@ -455,6 +455,7 @@ pub enum ExecutionMethodV2 {
     PostOrders,
     CancelOrder,
     CancelOrders,
+    CancelMarketOrders,
     CancelAllOrders,
     Order,
     Orders,
@@ -609,6 +610,12 @@ pub struct CancelOrderDirectResponseV2 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CancelOrdersDirectResponseV2 {
+    pub metadata: DirectResponseMetadataV2,
+    pub targets: Vec<CancelTargetResponseV2>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelMarketOrdersDirectResponseV2 {
     pub metadata: DirectResponseMetadataV2,
     pub targets: Vec<CancelTargetResponseV2>,
 }

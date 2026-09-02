@@ -761,6 +761,9 @@ mod enabled {
                 BusinessDirectResponseV2::CancelOrders(value) => {
                     json!({"method":"cancel_orders","value":value})
                 }
+                BusinessDirectResponseV2::CancelMarketOrders(value) => {
+                    json!({"method":"cancel_market_orders","value":value})
+                }
                 BusinessDirectResponseV2::CancelAllOrders(value) => {
                     json!({"method":"cancel_all_orders","value":value})
                 }

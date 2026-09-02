@@ -4216,6 +4216,20 @@ impl ExecutionStateV2 {
             .collect()
     }
 
+    pub(crate) fn active_platform_order_ids_for_condition(
+        &self,
+        condition_id: &ConditionId,
+    ) -> Vec<String> {
+        self.active_platform_order_ids()
+            .into_iter()
+            .filter(|platform_order_id| {
+                self.orders
+                    .get(platform_order_id)
+                    .is_some_and(|order| order.condition_id == *condition_id)
+            })
+            .collect()
+    }
+
     pub(crate) fn order_query_projection_v2(
         &self,
         platform_order_id: &str,

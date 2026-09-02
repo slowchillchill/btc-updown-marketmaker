@@ -341,6 +341,12 @@ impl<'a> BatchMapperV1<'a> {
                 }
                 Ok(())
             }
+            BusinessDirectResponseV2::CancelMarketOrders(response) => {
+                for target in &response.targets {
+                    self.push_cancellation(&response.metadata, target)?;
+                }
+                Ok(())
+            }
             BusinessDirectResponseV2::CancelAllOrders(response) => {
                 for target in &response.targets {
                     self.push_cancellation(&response.metadata, target)?;
@@ -435,6 +441,7 @@ impl<'a> BatchMapperV1<'a> {
                 metadata,
                 SimV2DirectResponseAssociationV1::CancellationTarget {
                     global_request_id: metadata.global_request_id.clone(),
+                    method: metadata.method,
                     target_ordinal: target.target_ordinal,
                     input_item_refs: target.input_item_refs.clone(),
                 },
@@ -1110,12 +1117,12 @@ mod tests {
     #[cfg(feature = "gate-b-flow")]
     use contracts::execution_normalization::SourceNeutralEconomicDispositionV1;
     use contracts::{
-        AcceptedSubmissionItemV2, AssetIdentityV1, CancelNotCanceledReasonV2,
-        CancelOrderDirectResponseV2, CancelOrdersDirectResponseV2, CancelTargetResponseV2,
-        CanceledTargetMeasurementV2, ClobMarketId, ConditionId, ExactDecimal, ExecutionMethodV2,
-        InitialAccountStateV2, LifecycleFeedbackMetadataV2, MarketEnrollmentV2, MarketIdentityV2,
-        MarketResolutionTerminalV3, MarketWindowV2, OrderDirectResponseV2,
-        OrderLifecycleFeedbackV2, OrdersDirectResponseV2, OutcomeIdentityV1,
+        AcceptedSubmissionItemV2, AssetIdentityV1, CancelMarketOrdersDirectResponseV2,
+        CancelNotCanceledReasonV2, CancelOrderDirectResponseV2, CancelOrdersDirectResponseV2,
+        CancelTargetResponseV2, CanceledTargetMeasurementV2, ClobMarketId, ConditionId,
+        ExactDecimal, ExecutionMethodV2, InitialAccountStateV2, LifecycleFeedbackMetadataV2,
+        MarketEnrollmentV2, MarketIdentityV2, MarketResolutionTerminalV3, MarketWindowV2,
+        OrderDirectResponseV2, OrderLifecycleFeedbackV2, OrdersDirectResponseV2, OutcomeIdentityV1,
         PlatformAccountBalanceDeltaV1, PlatformOutcomeBalanceDeltaV1, PlatformSourceV1,
         PostOrderDirectResponseV2, PostOrdersDirectResponseV2, SettlementLifecycleFeedbackV2,
         Sha256Hex, SimCallerRoleV1, SubmissionMeasurementV2, SubmissionResponseItemV2, TokenId,
@@ -1317,9 +1324,29 @@ mod tests {
                 }),
             )),
             Arc::new(StoredDirectResponseV2::Final(
+                BusinessDirectResponseV2::CancelMarketOrders(CancelMarketOrdersDirectResponseV2 {
+                    metadata: metadata("cancel-market", ExecutionMethodV2::CancelMarketOrders, 5),
+                    targets: vec![
+                        cancel_target(CancelTargetOutcomeV2::Canceled(
+                            CanceledTargetMeasurementV2 {
+                                canceled_base_quantity_shares: ExactDecimal("1".to_owned()),
+                                released_quote_amount_pusd: ExactDecimal("10".to_owned()),
+                                account_transition_seq: Some(3),
+                            },
+                        )),
+                        CancelTargetResponseV2 {
+                            target_ordinal: 1,
+                            ..cancel_target(CancelTargetOutcomeV2::NotCanceledNoEffect(
+                                CancelNotCanceledReasonV2::NoCancellableRemainder,
+                            ))
+                        },
+                    ],
+                }),
+            )),
+            Arc::new(StoredDirectResponseV2::Final(
                 BusinessDirectResponseV2::CancelAllOrders(
                     contracts::CancelAllOrdersDirectResponseV2 {
-                        metadata: metadata("cancel-all", ExecutionMethodV2::CancelAllOrders, 5),
+                        metadata: metadata("cancel-all", ExecutionMethodV2::CancelAllOrders, 6),
                         targets: vec![cancel_target(CancelTargetOutcomeV2::Canceled(
                             CanceledTargetMeasurementV2 {
                                 canceled_base_quantity_shares: ExactDecimal("1".to_owned()),
@@ -1332,19 +1359,19 @@ mod tests {
             )),
             Arc::new(StoredDirectResponseV2::Final(
                 BusinessDirectResponseV2::Order(OrderDirectResponseV2 {
-                    metadata: metadata("order", ExecutionMethodV2::Order, 6),
+                    metadata: metadata("order", ExecutionMethodV2::Order, 7),
                     result: OrderQueryResultV2::NotFound,
                 }),
             )),
             Arc::new(StoredDirectResponseV2::Final(
                 BusinessDirectResponseV2::Orders(OrdersDirectResponseV2 {
-                    metadata: metadata("orders", ExecutionMethodV2::Orders, 7),
+                    metadata: metadata("orders", ExecutionMethodV2::Orders, 8),
                     result: OrdersQueryResultV2::InvalidCursor,
                 }),
             )),
             Arc::new(StoredDirectResponseV2::Final(
                 BusinessDirectResponseV2::Trades(TradesDirectResponseV2 {
-                    metadata: metadata("trades", ExecutionMethodV2::Trades, 8),
+                    metadata: metadata("trades", ExecutionMethodV2::Trades, 9),
                     result: TradesQueryResultV2::OutOfRetention(
                         QueryOutOfRetentionV2::TradeHistory {
                             retained_from_utc_ms: 50,
@@ -1690,7 +1717,38 @@ mod tests {
                     }
                 ))
                 .count(),
-            8
+            10
+        );
+        let market_cancel_methods = records
+            .iter()
+            .filter_map(|record| match record {
+                NormalizationRecordV1::Evidence {
+                    source_reference:
+                        SimV2SourceReferenceV1 {
+                            record:
+                                SimV2SourceRecordReferenceV1::DirectResponse {
+                                    association:
+                                        SimV2DirectResponseAssociationV1::CancellationTarget {
+                                            global_request_id,
+                                            method,
+                                            ..
+                                        },
+                                    ..
+                                },
+                            ..
+                        },
+                    ..
+                } if global_request_id == "cancel-market" => Some(*method),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            market_cancel_methods,
+            vec![
+                ExecutionMethodV2::CancelMarketOrders,
+                ExecutionMethodV2::CancelMarketOrders,
+            ],
+            "市场撤单的混合逐目标结果必须机械保留同一方法身份"
         );
         assert_eq!(
             records
