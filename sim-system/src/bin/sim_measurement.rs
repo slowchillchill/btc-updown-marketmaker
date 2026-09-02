@@ -187,13 +187,12 @@ mod enabled {
     use sim_system::execution::BusinessDirectResponseV2;
     use sim_system::execution::{
         AcceptedClosedMarketBucketV2, BusinessProjectionBatchV2, BusinessProjectionPortV2,
-        CancelAllOrdersRequestV2, CancelMarketOrdersRequestV2, CancelOrderBatchItemV2,
-        CancelOrderItemV1, CancelOrderRequestV2, CancelOrdersRequestV2,
-        DurableMarketBucketReferenceV2, OrderRequestV2, OrdersFilterV1, OrdersRequestV2,
-        PostOrderBatchItemV2, PostOrderItemV1, PostOrderRequestV2, PostOrdersRequestV2,
-        PublicVisibilityCursorV1, RequestContextV2, RetentionAdvanceV2, RunDurabilityRoleV2,
-        RunOpenedV2, SessionSpecV3, SimBuyOrderKindV1, SimBuyOrderV1, SimExecution,
-        SimRunActorErrorV2, TradesFilterV1, TradesRequestV2, TrustedDecisionCutoffV2,
+        CancelAllOrdersRequestV2, CancelOrderBatchItemV2, CancelOrderItemV1, CancelOrderRequestV2,
+        CancelOrdersRequestV2, DurableMarketBucketReferenceV2, OrderRequestV2, OrdersFilterV1,
+        OrdersRequestV2, PostOrderBatchItemV2, PostOrderItemV1, PostOrderRequestV2,
+        PostOrdersRequestV2, PublicVisibilityCursorV1, RequestContextV2, RetentionAdvanceV2,
+        RunDurabilityRoleV2, RunOpenedV2, SessionSpecV3, SimBuyOrderKindV1, SimBuyOrderV1,
+        SimExecution, SimRunActorErrorV2, TradesFilterV1, TradesRequestV2, TrustedDecisionCutoffV2,
     };
     use sim_system::execution::{MarketEventPathV1, MillisecondBucketClosureV1};
     use sim_system::finality::TradeFinalityPolicyV2;
@@ -3967,23 +3966,6 @@ mod enabled {
                                 platform_order_id: "sim-2".to_owned(),
                             },
                         }],
-                    },
-                )
-                .map_err(request_error)?;
-            let request_required_at_utc_ms = receipt.platform_arrived_at_utc_ms();
-            next_decision_at_utc_ms = receipt.platform_arrived_at_utc_ms().saturating_add(1);
-            drive_until_current_request_is_complete(
-                execution,
-                buckets,
-                next_bucket,
-                request_required_at_utc_ms,
-            )?;
-            let receipt = execution
-                .cancel_market_orders(
-                    cutoff(next_decision_at_utc_ms),
-                    CancelMarketOrdersRequestV2 {
-                        context: context("cancel-market-orders"),
-                        condition_id: condition_id.clone(),
                     },
                 )
                 .map_err(request_error)?;
