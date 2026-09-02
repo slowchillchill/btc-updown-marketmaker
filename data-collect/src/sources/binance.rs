@@ -1,4 +1,3 @@
-use reqwest::Url;
 use serde_json::Value;
 
 use crate::event::{EventEnvelope, SourceKind};
@@ -8,64 +7,9 @@ use crate::source_format::{
 
 pub const BINANCE_DEPTH_STREAM: &str = "btcusdt@depth";
 pub const BINANCE_AGGTRADE_STREAM: &str = "btcusdt@aggTrade";
-pub const BINANCE_DEPTH_WS_ENDPOINT: &str = "wss://stream.binance.com:9443/ws/btcusdt@depth";
 pub const BINANCE_AGGTRADE_WS_ENDPOINT: &str = "wss://stream.binance.com:9443/ws/btcusdt@aggTrade";
 pub const BINANCE_DEPTH_SNAPSHOT_ENDPOINT: &str =
     "https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=1000";
-const BINANCE_OFFICIAL_WS_HOSTS: &[&str] = &["stream.binance.com", "data-stream.binance.vision"];
-const BINANCE_OFFICIAL_REST_HOSTS: &[&str] = &[
-    "api.binance.com",
-    "api-gcp.binance.com",
-    "api1.binance.com",
-    "api2.binance.com",
-    "api3.binance.com",
-    "api4.binance.com",
-    "data-api.binance.vision",
-];
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BinanceOfficialSourceConfig {
-    pub depth_ws_endpoint: String,
-    pub aggtrade_ws_endpoint: String,
-    pub depth_snapshot_endpoint: String,
-}
-
-impl Default for BinanceOfficialSourceConfig {
-    fn default() -> Self {
-        Self {
-            depth_ws_endpoint: BINANCE_DEPTH_WS_ENDPOINT.to_owned(),
-            aggtrade_ws_endpoint: BINANCE_AGGTRADE_WS_ENDPOINT.to_owned(),
-            depth_snapshot_endpoint: BINANCE_DEPTH_SNAPSHOT_ENDPOINT.to_owned(),
-        }
-    }
-}
-
-impl BinanceOfficialSourceConfig {
-    pub fn validate_official(&self) -> Result<(), String> {
-        validate_endpoint(
-            &self.depth_ws_endpoint,
-            "wss",
-            BINANCE_OFFICIAL_WS_HOSTS,
-            "/ws/btcusdt@depth",
-            None,
-        )?;
-        validate_endpoint(
-            &self.aggtrade_ws_endpoint,
-            "wss",
-            BINANCE_OFFICIAL_WS_HOSTS,
-            "/ws/btcusdt@aggTrade",
-            None,
-        )?;
-        validate_endpoint(
-            &self.depth_snapshot_endpoint,
-            "https",
-            BINANCE_OFFICIAL_REST_HOSTS,
-            "/api/v3/depth",
-            Some(("symbol", "BTCUSDT")),
-        )?;
-        Ok(())
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DepthUpdateVerdict {
@@ -73,6 +17,31 @@ pub enum DepthUpdateVerdict {
     NotAppliedStaleDuplicate,
     NotAppliedConfirmedHole,
     NotAppliedSnapshotUnavailable,
+}
+
+impl DepthUpdateVerdict {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::NotAppliedStaleDuplicate => "not_applied_stale_duplicate",
+            Self::NotAppliedConfirmedHole => "not_applied_confirmed_hole",
+            Self::NotAppliedSnapshotUnavailable => "not_applied_snapshot_unavailable",
+        }
+    }
+}
+
+impl TryFrom<&str> for DepthUpdateVerdict {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "applied" => Ok(Self::Applied),
+            "not_applied_stale_duplicate" => Ok(Self::NotAppliedStaleDuplicate),
+            "not_applied_confirmed_hole" => Ok(Self::NotAppliedConfirmedHole),
+            "not_applied_snapshot_unavailable" => Ok(Self::NotAppliedSnapshotUnavailable),
+            other => Err(format!("unsupported frozen Binance depth verdict: {other}")),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -166,7 +135,7 @@ pub fn assess_depth_update(
     local_u: Option<u64>,
     update: &BinanceDepthUpdateRaw,
 ) -> Result<DepthUpdateAssessment, String> {
-    if update.validate_contract().verdict != crate::ValidationVerdict::Complete {
+    if !update.validate_contract().is_complete() {
         return Err("invalid_depth_update_contract".to_owned());
     }
     if snapshot_last_update_id.is_none() {
@@ -412,31 +381,6 @@ fn parse_levels(value: &Value, field: &str) -> Result<Vec<BinanceDepthLevel>, St
             })
         })
         .collect()
-}
-
-fn validate_endpoint(
-    endpoint: &str,
-    expected_scheme: &str,
-    expected_hosts: &[&str],
-    expected_path: &str,
-    required_query: Option<(&str, &str)>,
-) -> Result<(), String> {
-    let url = Url::parse(endpoint).map_err(|err| format!("invalid_endpoint_url:{err}"))?;
-    if url.scheme() != expected_scheme
-        || url
-            .host_str()
-            .is_none_or(|host| !expected_hosts.contains(&host))
-        || url.path() != expected_path
-    {
-        return Err(format!("non_official_binance_source:{endpoint}"));
-    }
-    if let Some((key, value)) = required_query {
-        let found = url.query_pairs().any(|(k, v)| k == key && v == value);
-        if !found {
-            return Err(format!("missing_required_binance_query:{key}={value}"));
-        }
-    }
-    Ok(())
 }
 
 fn str_field(value: &Value, field: &str) -> Result<String, String> {

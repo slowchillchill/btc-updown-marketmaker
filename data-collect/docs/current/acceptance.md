@@ -19,7 +19,7 @@
 | --- | --- |
 | 训练程序真实采集六个数据源 | `IMPLEMENTED_AND_TESTED` |
 | Cargo 定义三个生产角色二进制程序并隔离角色、输出配置 | `IMPLEMENTED_AND_COMPONENT_TESTED` |
-| `real_source_alignment_probe` 为操作员显式二进制程序，不作为 bench 执行业务入口 | `IMPLEMENTED_AND_TESTED_LOCALLY` |
+| `real_source_alignment_probe` 调用生产训练采集入口并只独立汇总生产产物，不作为 bench 执行业务入口 | `IMPLEMENTED_AND_TESTED_LOCALLY` |
 | Polymarket SDK 0.7.0 加唯一补丁 | `IMPLEMENTED_AND_TESTED` |
 | 六个当前类型化 schema | `IMPLEMENTED_AND_TESTED` |
 | 每小时 Parquet 与每日清单 | `IMPLEMENTED_AND_TESTED` |
@@ -104,7 +104,7 @@ UTC 12:00 后可单独运行：
 
 ```bash
 cargo test -p data-collect --locked --lib \
-  'live_runtime::tests::four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second' \
+  'training_runtime::tests::four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second' \
   -- --exact --test-threads=1
 ```
 

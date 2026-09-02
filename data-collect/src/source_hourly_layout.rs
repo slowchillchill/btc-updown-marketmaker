@@ -21,11 +21,13 @@ pub const BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION: &str = "binance_depth_snapshot_
 pub const BINANCE_DEPTH_UPDATE_SCHEMA_VERSION: &str = "binance_depth_update_v4";
 pub const BINANCE_DEPTH_SNAPSHOT_LEGACY_SCHEMA_VERSION: &str = "binance_depth_snapshot_v2";
 pub const BINANCE_DEPTH_UPDATE_LEGACY_SCHEMA_VERSION: &str = "binance_depth_update_v3";
-pub const BINANCE_DEPTH_VERDICT_APPLIED: &str = "applied";
-pub const BINANCE_DEPTH_VERDICT_NOT_APPLIED_STALE_DUPLICATE: &str = "not_applied_stale_duplicate";
-pub const BINANCE_DEPTH_VERDICT_NOT_APPLIED_CONFIRMED_HOLE: &str = "not_applied_confirmed_hole";
+pub const BINANCE_DEPTH_VERDICT_APPLIED: &str = DepthUpdateVerdict::Applied.as_str();
+pub const BINANCE_DEPTH_VERDICT_NOT_APPLIED_STALE_DUPLICATE: &str =
+    DepthUpdateVerdict::NotAppliedStaleDuplicate.as_str();
+pub const BINANCE_DEPTH_VERDICT_NOT_APPLIED_CONFIRMED_HOLE: &str =
+    DepthUpdateVerdict::NotAppliedConfirmedHole.as_str();
 pub const BINANCE_DEPTH_VERDICT_NOT_APPLIED_SNAPSHOT_UNAVAILABLE: &str =
-    "not_applied_snapshot_unavailable";
+    DepthUpdateVerdict::NotAppliedSnapshotUnavailable.as_str();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BinanceDepthOrderingClassification {
@@ -137,7 +139,7 @@ impl BinanceDepthSnapshotHourlyRow {
         raw: &BinanceDepthSnapshotRaw,
         ordering: BinanceDepthOrdering,
     ) -> Result<Self, String> {
-        if raw.validate_contract().verdict != crate::ValidationVerdict::Complete {
+        if !raw.validate_contract().is_complete() {
             return Err("invalid_binance_depth_snapshot_contract".to_owned());
         }
         ordering.validate_contract()?;
@@ -312,23 +314,12 @@ impl BinanceDepthUpdateHourlyRow {
         assessment: &DepthUpdateAssessment,
         ordering: BinanceDepthOrdering,
     ) -> Result<Self, String> {
-        if raw.validate_contract().verdict != crate::ValidationVerdict::Complete {
+        if !raw.validate_contract().is_complete() {
             return Err("invalid_binance_depth_update_contract".to_owned());
         }
         validate_canonical_depth_assessment(raw, assessment)?;
         ordering.validate_contract()?;
-        let stitch_verdict = match assessment.verdict {
-            DepthUpdateVerdict::Applied => BINANCE_DEPTH_VERDICT_APPLIED,
-            DepthUpdateVerdict::NotAppliedStaleDuplicate => {
-                BINANCE_DEPTH_VERDICT_NOT_APPLIED_STALE_DUPLICATE
-            }
-            DepthUpdateVerdict::NotAppliedConfirmedHole => {
-                BINANCE_DEPTH_VERDICT_NOT_APPLIED_CONFIRMED_HOLE
-            }
-            DepthUpdateVerdict::NotAppliedSnapshotUnavailable => {
-                BINANCE_DEPTH_VERDICT_NOT_APPLIED_SNAPSHOT_UNAVAILABLE
-            }
-        };
+        let stitch_verdict = assessment.verdict.as_str();
         let row = Self {
             timestamp_received: recv_time(&raw.envelope),
             event_type: raw.event_type.clone(),
@@ -451,18 +442,9 @@ impl BinanceDepthUpdateHourlyRow {
     }
 
     fn validate_current_verdict(&self, report: &mut SourceHourlyValidation) {
-        let verdict = match self.stitch_verdict.as_str() {
-            BINANCE_DEPTH_VERDICT_APPLIED => DepthUpdateVerdict::Applied,
-            BINANCE_DEPTH_VERDICT_NOT_APPLIED_STALE_DUPLICATE => {
-                DepthUpdateVerdict::NotAppliedStaleDuplicate
-            }
-            BINANCE_DEPTH_VERDICT_NOT_APPLIED_CONFIRMED_HOLE => {
-                DepthUpdateVerdict::NotAppliedConfirmedHole
-            }
-            BINANCE_DEPTH_VERDICT_NOT_APPLIED_SNAPSHOT_UNAVAILABLE => {
-                DepthUpdateVerdict::NotAppliedSnapshotUnavailable
-            }
-            _ => {
+        let verdict = match DepthUpdateVerdict::try_from(self.stitch_verdict.as_str()) {
+            Ok(verdict) => verdict,
+            Err(_) => {
                 report
                     .missing_fields
                     .push("stitch_verdict_valid".to_owned());
@@ -562,8 +544,6 @@ impl BinanceDepthUpdateHourlyRow {
                     reason: "typed_hourly_row_validation".to_owned(),
                 },
                 raw_evidence: RawEvidence::Json("{}".to_owned()),
-                parquet_raw_layout_version: 1,
-                parquet_raw_source_kind: SourceKind::BinanceDepthUpdate,
             },
             event_type: self.event_type.clone(),
             event_time_ms: self.event_time,
@@ -1192,116 +1172,6 @@ impl RtdsChainlinkBtcUsdHourlyRow {
         report.require_non_empty("collector_region", &self.collector_region);
         report.require_non_empty("source_endpoint", &self.source_endpoint);
         report.require_non_empty("schema_version", &self.schema_version);
-        report
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BinanceDepthStitchReceipt {
-    pub snapshot_last_update_id: u64,
-    pub stale_update_rows: u64,
-    pub stitch_applied_rows: u64,
-    pub gap_rows: u64,
-    pub resnapshot_count: u64,
-    pub local_u_min: Option<u64>,
-    pub local_u_max: Option<u64>,
-    pub first_update_bridged_snapshot: bool,
-    pub gap_reasons: Vec<String>,
-}
-
-impl BinanceDepthStitchReceipt {
-    pub fn from_assessments(
-        snapshot_last_update_id: u64,
-        assessments: &[DepthUpdateAssessment],
-    ) -> Result<Self, String> {
-        let mut receipt = Self {
-            snapshot_last_update_id,
-            stale_update_rows: 0,
-            stitch_applied_rows: 0,
-            gap_rows: 0,
-            resnapshot_count: 0,
-            local_u_min: None,
-            local_u_max: None,
-            first_update_bridged_snapshot: false,
-            gap_reasons: Vec::new(),
-        };
-
-        for assessment in assessments {
-            assessment.validate_contract()?;
-            match assessment.verdict {
-                DepthUpdateVerdict::NotAppliedStaleDuplicate => {
-                    receipt.stale_update_rows = receipt
-                        .stale_update_rows
-                        .checked_add(1)
-                        .ok_or_else(|| "depth_stale_update_rows_overflow".to_owned())?;
-                }
-                DepthUpdateVerdict::Applied => {
-                    let local_u = assessment
-                        .local_u_after
-                        .ok_or_else(|| "applied_depth_update_missing_local_u_after".to_owned())?;
-                    receipt.stitch_applied_rows = receipt
-                        .stitch_applied_rows
-                        .checked_add(1)
-                        .ok_or_else(|| "depth_stitch_applied_rows_overflow".to_owned())?;
-                    receipt.local_u_min = Some(
-                        receipt
-                            .local_u_min
-                            .map_or(local_u, |current| current.min(local_u)),
-                    );
-                    receipt.local_u_max = Some(
-                        receipt
-                            .local_u_max
-                            .map_or(local_u, |current| current.max(local_u)),
-                    );
-                    if assessment.stitch_evidence.as_deref() == Some("U <= lastUpdateId + 1 <= u") {
-                        receipt.first_update_bridged_snapshot = true;
-                    }
-                }
-                DepthUpdateVerdict::NotAppliedConfirmedHole => {
-                    receipt.gap_rows = receipt
-                        .gap_rows
-                        .checked_add(1)
-                        .ok_or_else(|| "depth_gap_rows_overflow".to_owned())?;
-                    receipt.resnapshot_count = receipt
-                        .resnapshot_count
-                        .checked_add(1)
-                        .ok_or_else(|| "depth_resnapshot_count_overflow".to_owned())?;
-                    receipt.gap_reasons.push(
-                        assessment
-                            .gap_reason
-                            .clone()
-                            .ok_or_else(|| "confirmed_hole_missing_gap_reason".to_owned())?,
-                    );
-                }
-                DepthUpdateVerdict::NotAppliedSnapshotUnavailable => {}
-            }
-        }
-
-        Ok(receipt)
-    }
-
-    pub fn validate(&self) -> SourceHourlyValidation {
-        let mut report = SourceHourlyValidation {
-            missing_fields: Vec::new(),
-        };
-        if self.snapshot_last_update_id == 0 {
-            report
-                .missing_fields
-                .push("snapshot_last_update_id".to_owned());
-        }
-        if self.stitch_applied_rows == 0 {
-            report.missing_fields.push("stitch_applied_rows".to_owned());
-        }
-        if !self.first_update_bridged_snapshot {
-            report
-                .missing_fields
-                .push("first_update_bridged_snapshot".to_owned());
-        }
-        report.require_some("local_u_min", self.local_u_min);
-        report.require_some("local_u_max", self.local_u_max);
-        if self.gap_rows > 0 || self.resnapshot_count > 0 || !self.gap_reasons.is_empty() {
-            report.missing_fields.push("source_gap_absent".to_owned());
-        }
         report
     }
 }

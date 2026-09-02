@@ -20,8 +20,6 @@ fn synthetic_event(seq: u64) -> RawEvent {
         source_endpoint: "synthetic://polymarket-market".to_owned(),
         raw_json: format!(r#"{{"event_type":"book","asset_id":"asset-{seq}"}}"#),
         collector_admission: None,
-        parquet_raw_layout_version: 1,
-        parquet_raw_source_kind: "polymarket_market".to_owned(),
     }
 }
 

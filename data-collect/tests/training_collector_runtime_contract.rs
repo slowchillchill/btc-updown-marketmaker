@@ -1,10 +1,12 @@
 use std::fs;
 use std::process::Command;
 
-use data_collect::live_runtime::{LIVE_SOURCES, is_live_runtime_source_gap_reason};
 use data_collect::runtime::{
     DEFAULT_TRAINING_DATASET_MAX_BYTES, OPERATOR_INTERVENTION_REQUIRED_EXIT_CODE,
     RESOURCE_HARD_THRESHOLD_EXIT_CODE, collector_exit_code, parse_args,
+};
+use data_collect::training_runtime::{
+    TRAINING_SOURCE_KINDS, is_training_runtime_source_gap_reason,
 };
 use tempfile::tempdir;
 
@@ -116,25 +118,25 @@ fn startup_capacity_gate_exits_75_without_manifest_or_network_startup() {
 }
 
 #[test]
-fn live_runtime_sources_match_typed_raw_source_kind_contract() {
-    assert!(LIVE_SOURCES.contains(&"binance_depth_snapshot"));
-    assert!(LIVE_SOURCES.contains(&"binance_depth_update"));
-    assert!(LIVE_SOURCES.contains(&"polymarket_market_metadata"));
-    assert!(!LIVE_SOURCES.contains(&"binance_depth"));
+fn training_runtime_sources_match_typed_raw_source_kind_contract() {
+    assert!(TRAINING_SOURCE_KINDS.contains(&"binance_depth_snapshot"));
+    assert!(TRAINING_SOURCE_KINDS.contains(&"binance_depth_update"));
+    assert!(TRAINING_SOURCE_KINDS.contains(&"polymarket_market_metadata"));
+    assert!(!TRAINING_SOURCE_KINDS.contains(&"binance_depth"));
 }
 
 #[test]
 fn recoverable_backpressure_wait_is_not_a_live_source_gap() {
-    assert!(!is_live_runtime_source_gap_reason(
+    assert!(!is_training_runtime_source_gap_reason(
         "bounded_queue_backpressure_wait:binance_depth_update"
     ));
-    assert!(!is_live_runtime_source_gap_reason(
+    assert!(!is_training_runtime_source_gap_reason(
         "writer_queue_backpressure_wait:polymarket_market"
     ));
-    assert!(is_live_runtime_source_gap_reason(
+    assert!(is_training_runtime_source_gap_reason(
         "bounded_queue_backpressure_timeout:binance_depth_update"
     ));
-    assert!(is_live_runtime_source_gap_reason(
+    assert!(is_training_runtime_source_gap_reason(
         "writer_queue_disconnected:polymarket_market"
     ));
 }

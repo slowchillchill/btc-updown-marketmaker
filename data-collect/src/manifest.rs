@@ -1,11 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ValidationVerdict {
-    Complete,
-    Incomplete,
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SourceCoverage {
     pub source_kind: String,

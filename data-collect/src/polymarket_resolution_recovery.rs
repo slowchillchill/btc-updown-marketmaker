@@ -24,9 +24,9 @@ use crate::polymarket_market_metadata_layout::{
     POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
     POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION,
     PolymarketMarketMetadataV3Row, PolymarketMarketMetadataV4Row, PolymarketMarketMetadataV5Row,
-    PolymarketMetadataV3ReferenceRecord, ResolutionPollResult, SourceEvidenceOrigin,
+    PolymarketMetadataReferenceRecord, ResolutionPollResult, SourceEvidenceOrigin,
     polymarket_market_metadata_v3_schema, polymarket_market_metadata_v4_schema,
-    polymarket_market_metadata_v5_schema, validate_polymarket_metadata_v3_local_references,
+    polymarket_market_metadata_v5_schema, validate_polymarket_metadata_local_references,
 };
 use crate::polymarket_orderbook_v3::{
     POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION, polymarket_orderbook_v3_schema, same_outcome_label,
@@ -946,8 +946,8 @@ impl MetadataRecord {
         Ok(())
     }
 
-    fn reference_record(&self) -> PolymarketMetadataV3ReferenceRecord {
-        PolymarketMetadataV3ReferenceRecord {
+    fn reference_record(&self) -> PolymarketMetadataReferenceRecord {
+        PolymarketMetadataReferenceRecord {
             metadata_row_kind: self.kind.clone(),
             slug: self.slug.clone(),
             condition_id: self.condition_id.clone(),
@@ -1080,7 +1080,7 @@ pub fn restore_polymarket_resolution_recovery(
     for authority in &reference_authorities {
         authority.validate_recovery_eligibility()?;
     }
-    validate_polymarket_metadata_v3_local_references(
+    validate_polymarket_metadata_local_references(
         &grouped
             .values()
             .flatten()
@@ -2217,7 +2217,6 @@ mod tests {
         TerminalPredicateFailureReason, polymarket_market_metadata_v3_schema,
         polymarket_market_metadata_v4_schema, polymarket_market_metadata_v5_schema,
     };
-    use crate::polymarket_orderbook_layout::{PolymarketOrderbookContext, PolymarketOrderbookRow};
     use crate::polymarket_orderbook_v3::{
         PolymarketMarketResolvedV3, PolymarketOrderbookV3Envelope, PolymarketOrderbookV3Event,
         PolymarketOrderbookV3Message,
@@ -3082,33 +3081,48 @@ mod tests {
         write_metadata_v5_rows(path, &rows);
     }
 
-    fn write_relevant_legacy_v2_source(path: &Path, receive: i64) {
-        let row = PolymarketOrderbookRow::market_resolved(
-            CONDITION,
-            receive,
-            "101",
-            "Up",
-            None,
-            &["101".to_owned(), "102".to_owned()],
-            PolymarketOrderbookContext {
-                timestamp_received_ms: receive,
-                slug: Some(SLUG.to_owned()),
-                source_native_payload_json: ws_payload(),
-                collector_host_id: "recovery-fixture-host".to_owned(),
-                collector_region: "recovery-fixture-region".to_owned(),
-                source_endpoint: "wss://ws-subscriptions-clob.polymarket.com/ws/market".to_owned(),
-                schema_version: POLYMARKET_ORDERBOOK_V2_SCHEMA_VERSION.to_owned(),
-            },
-        );
-        let stem = path.file_stem().unwrap().to_str().unwrap();
-        let mut writer = TypedParquetSegmentWriter::create_polymarket_orderbook(
-            path.parent().unwrap(),
-            stem,
-            POLYMARKET_ORDERBOOK_V2_SCHEMA_VERSION,
+    fn write_relevant_legacy_v2_source(path: &Path, receive: i64, with_footer: bool) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "timestamp_received",
+                DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("market", DataType::Utf8, false),
+            Field::new("event_type", DataType::Utf8, false),
+            Field::new("slug", DataType::Utf8, true),
+            Field::new("schema_version", DataType::Utf8, false),
+            Field::new("source_native_payload_json", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(
+                    TimestampMillisecondArray::from_iter_values([receive]).with_timezone("UTC"),
+                ),
+                Arc::new(StringArray::from_iter_values([CONDITION])),
+                Arc::new(StringArray::from_iter_values(["market_resolved"])),
+                Arc::new(StringArray::from(vec![Some(SLUG)])),
+                Arc::new(StringArray::from_iter_values([
+                    POLYMARKET_ORDERBOOK_V2_SCHEMA_VERSION,
+                ])),
+                Arc::new(StringArray::from_iter_values([ws_payload()])),
+            ],
         )
         .unwrap();
-        writer.write_polymarket_orderbook_rows(&[row]).unwrap();
-        assert_eq!(writer.finalize().unwrap().final_path, path);
+        let properties = with_footer.then(|| {
+            WriterProperties::builder()
+                .set_key_value_metadata(Some(vec![KeyValue::new(
+                    "parquet_raw_layout_version".to_owned(),
+                    POLYMARKET_ORDERBOOK_V2_SCHEMA_VERSION.to_owned(),
+                )]))
+                .build()
+        });
+        let mut writer =
+            ArrowWriter::try_new(File::create(path).unwrap(), schema, properties).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
     }
 
     fn write_metadata_without_row_kind(path: &Path, layout_version: &str) {
@@ -3662,26 +3676,31 @@ mod tests {
                 .to_string();
         assert!(error.contains("no current metadata identity"), "{error}");
 
-        let v4_with_v2_source = tempdir().unwrap();
-        write_current_fixture(
-            v4_with_v2_source.path(),
-            recovery_time,
-            &[metadata_v5_fixture_row(&base_record(1), None)],
-            &[],
-        );
-        write_relevant_legacy_v2_source(
-            &day_dir(v4_with_v2_source.path(), recovery_time, "polymarket_market")
-                .join("polymarket_market_02.parquet"),
-            receive,
-        );
-        let error =
-            super::restore_polymarket_resolution_recovery(v4_with_v2_source.path(), recovery_time)
-                .unwrap_err()
-                .to_string();
-        assert!(
-            error.contains("source v2 cannot pair with current metadata"),
-            "{error}"
-        );
+        for with_footer in [true, false] {
+            let v5_with_v2_source = tempdir().unwrap();
+            write_current_fixture(
+                v5_with_v2_source.path(),
+                recovery_time,
+                &[metadata_v5_fixture_row(&base_record(1), None)],
+                &[],
+            );
+            write_relevant_legacy_v2_source(
+                &day_dir(v5_with_v2_source.path(), recovery_time, "polymarket_market")
+                    .join("polymarket_market_02.parquet"),
+                receive,
+                with_footer,
+            );
+            let error = super::restore_polymarket_resolution_recovery(
+                v5_with_v2_source.path(),
+                recovery_time,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.contains("source v2 cannot pair with current metadata"),
+                "with_footer={with_footer}:{error}"
+            );
+        }
 
         let v3_metadata_with_v3_source = tempdir().unwrap();
         write_metadata(

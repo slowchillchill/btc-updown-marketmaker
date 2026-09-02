@@ -24,7 +24,6 @@ use crate::polymarket_market_metadata_layout::{
     POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION, PolymarketMarketMetadataV3Row,
     PolymarketMarketMetadataV5Row, polymarket_market_metadata_v5_schema,
 };
-use crate::polymarket_orderbook_layout::{PolymarketOrderbookRow, polymarket_orderbook_schema};
 use crate::polymarket_orderbook_v3::{
     POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION, PolymarketOrderbookV3Message,
     polymarket_orderbook_v3_messages_to_batch, polymarket_orderbook_v3_schema,
@@ -62,8 +61,6 @@ pub struct RawEvent {
     pub collector_region: String,
     pub source_endpoint: String,
     pub raw_json: String,
-    pub parquet_raw_layout_version: u32,
-    pub parquet_raw_source_kind: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -105,12 +102,13 @@ pub struct PolymarketOrderbookV3WriteSequenceState {
 
 impl PolymarketOrderbookV3WriteSequenceState {
     fn preview(&self, messages: &[PolymarketOrderbookV3Message]) -> Result<HashMap<String, u64>> {
-        let mut next = self.last_by_epoch.clone();
+        let mut touched = HashMap::new();
         for message in messages {
             let epoch = &message.envelope.source_sequence_epoch_id;
             let sequence = message.envelope.collector_admission_sequence;
-            if next
+            if touched
                 .get(epoch)
+                .or_else(|| self.last_by_epoch.get(epoch))
                 .is_some_and(|previous| sequence <= *previous)
             {
                 return Err(io::Error::new(
@@ -121,13 +119,13 @@ impl PolymarketOrderbookV3WriteSequenceState {
                 )
                 .into());
             }
-            next.insert(epoch.clone(), sequence);
+            touched.insert(epoch.clone(), sequence);
         }
-        Ok(next)
+        Ok(touched)
     }
 
-    fn commit(&mut self, next: HashMap<String, u64>) {
-        self.last_by_epoch = next;
+    fn commit(&mut self, touched: HashMap<String, u64>) {
+        self.last_by_epoch.extend(touched);
     }
 }
 
@@ -237,24 +235,16 @@ impl ParquetSegmentWriter {
             });
         }
 
-        for event in events {
-            if self.parquet_raw_source_kind != "mixed"
-                && event.parquet_raw_source_kind != self.parquet_raw_source_kind
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "event source kind {} does not match segment source kind {}",
-                        event.parquet_raw_source_kind, self.parquet_raw_source_kind
-                    ),
-                )
-                .into());
-            }
-        }
-
         let write_started = Instant::now();
-        let estimated_event_bytes = events.iter().map(estimated_event_bytes).sum();
-        let batch = events_to_batch(Arc::clone(&self.schema), events)?;
+        let estimated_event_bytes = events
+            .iter()
+            .map(|event| estimated_event_bytes(event, &self.parquet_raw_source_kind))
+            .sum();
+        let batch = events_to_batch(
+            Arc::clone(&self.schema),
+            events,
+            &self.parquet_raw_source_kind,
+        )?;
         let writer = self
             .writer
             .as_mut()
@@ -330,31 +320,6 @@ pub struct TypedParquetSegmentWriter {
 }
 
 impl TypedParquetSegmentWriter {
-    pub fn create_polymarket_orderbook(
-        root: &Path,
-        stem: &str,
-        schema_version: &str,
-    ) -> Result<Self> {
-        Self::create_polymarket_orderbook_with_zstd_level(root, stem, schema_version, 3)
-    }
-
-    pub fn create_polymarket_orderbook_with_zstd_level(
-        root: &Path,
-        stem: &str,
-        schema_version: &str,
-        zstd_level: i32,
-    ) -> Result<Self> {
-        let schema = polymarket_orderbook_schema_for_version(schema_version)?;
-        Self::create_with_schema(
-            root,
-            stem,
-            schema_version,
-            "polymarket_market",
-            schema,
-            zstd_level,
-        )
-    }
-
     pub fn create_for_typed_source(
         root: &Path,
         stem: &str,
@@ -461,17 +426,6 @@ impl TypedParquetSegmentWriter {
             last_binance_depth_admission_sequence: None,
             last_polymarket_metadata_admission_sequence: None,
         })
-    }
-
-    pub fn write_polymarket_orderbook_rows(
-        &mut self,
-        rows: &[PolymarketOrderbookRow],
-    ) -> Result<()> {
-        if rows.is_empty() {
-            return Ok(());
-        }
-        let batch = polymarket_orderbook_rows_to_batch(Arc::clone(&self.schema), rows)?;
-        self.write_batch(&batch)
     }
 
     pub(crate) fn schema_version(&self) -> &str {
@@ -1013,8 +967,12 @@ fn validate_current_depth_schema_version(
 
 fn polymarket_orderbook_schema_for_version(schema_version: &str) -> Result<Arc<Schema>> {
     match schema_version {
-        "polymarket_orderbook_v2" => Ok(polymarket_orderbook_schema()),
         POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION => Ok(polymarket_orderbook_v3_schema()),
+        "polymarket_orderbook_v2" => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "read-only legacy Polymarket orderbook schema cannot be opened for writing:schema_version=polymarket_orderbook_v2",
+        )
+        .into()),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
@@ -1100,63 +1058,6 @@ fn validate_depth_admission_sequence(previous: Option<u64>, sequence: u64) -> Re
         .into());
     }
     Ok(())
-}
-
-fn polymarket_orderbook_rows_to_batch(
-    schema: Arc<Schema>,
-    rows: &[PolymarketOrderbookRow],
-) -> Result<RecordBatch> {
-    let columns: Vec<ArrayRef> = vec![
-        Arc::new(
-            TimestampMillisecondArray::from_iter_values(
-                rows.iter().map(|row| row.timestamp_received),
-            )
-            .with_timezone("UTC"),
-        ),
-        Arc::new(
-            TimestampMillisecondArray::from_iter(rows.iter().map(|row| row.timestamp))
-                .with_timezone("UTC"),
-        ),
-        string_values(rows.iter().map(|row| row.market.as_str())),
-        string_values(rows.iter().map(|row| row.event_type.as_str())),
-        string_values(
-            rows.iter()
-                .map(|row| row.source_native_payload_json.as_str()),
-        ),
-        optional_strings(rows.iter().map(|row| row.asset_id.as_deref())),
-        optional_strings(rows.iter().map(|row| row.bids.as_deref())),
-        optional_strings(rows.iter().map(|row| row.asks.as_deref())),
-        optional_strings(rows.iter().map(|row| row.price.as_deref())),
-        optional_strings(rows.iter().map(|row| row.size.as_deref())),
-        optional_strings(rows.iter().map(|row| row.side.as_deref())),
-        optional_strings(rows.iter().map(|row| row.best_bid.as_deref())),
-        optional_strings(rows.iter().map(|row| row.best_ask.as_deref())),
-        optional_strings(rows.iter().map(|row| row.hash.as_deref())),
-        optional_strings(rows.iter().map(|row| row.fee_rate_bps.as_deref())),
-        optional_strings(rows.iter().map(|row| row.transaction_hash.as_deref())),
-        optional_strings(rows.iter().map(|row| row.old_tick_size.as_deref())),
-        optional_strings(rows.iter().map(|row| row.new_tick_size.as_deref())),
-        optional_strings(rows.iter().map(|row| row.winning_asset_id.as_deref())),
-        optional_strings(rows.iter().map(|row| row.winning_outcome.as_deref())),
-        optional_strings(
-            rows.iter()
-                .map(|row| row.close_reason_if_present.as_deref()),
-        ),
-        optional_strings(
-            rows.iter()
-                .map(|row| row.subscribed_asset_ids_for_market.as_deref()),
-        ),
-        optional_strings(
-            rows.iter()
-                .map(|row| row.resolved_event_asset_ids.as_deref()),
-        ),
-        optional_strings(rows.iter().map(|row| row.slug.as_deref())),
-        string_values(rows.iter().map(|row| row.collector_host_id.as_str())),
-        string_values(rows.iter().map(|row| row.collector_region.as_str())),
-        string_values(rows.iter().map(|row| row.source_endpoint.as_str())),
-        string_values(rows.iter().map(|row| row.schema_version.as_str())),
-    ];
-    Ok(RecordBatch::try_new(schema, columns)?)
 }
 
 fn polymarket_market_metadata_v3_prefix_columns(
@@ -1619,7 +1520,11 @@ fn raw_event_schema() -> Arc<Schema> {
     ]))
 }
 
-fn events_to_batch(schema: Arc<Schema>, events: &[RawEvent]) -> Result<RecordBatch> {
+fn events_to_batch(
+    schema: Arc<Schema>,
+    events: &[RawEvent],
+    parquet_raw_source_kind: &str,
+) -> Result<RecordBatch> {
     let columns: Vec<ArrayRef> = vec![
         Arc::new(StringArray::from_iter_values(
             events.iter().map(|event| event.source_kind.as_str()),
@@ -1651,14 +1556,14 @@ fn events_to_batch(schema: Arc<Schema>, events: &[RawEvent]) -> Result<RecordBat
         Arc::new(StringArray::from_iter_values(
             events.iter().map(|event| event.raw_json.as_str()),
         )),
-        Arc::new(UInt32Array::from_iter_values(
-            events.iter().map(|event| event.parquet_raw_layout_version),
-        )),
-        Arc::new(StringArray::from_iter_values(
-            events
-                .iter()
-                .map(|event| event.parquet_raw_source_kind.as_str()),
-        )),
+        Arc::new(UInt32Array::from_iter_values(events.iter().map(|_| 1))),
+        Arc::new(StringArray::from_iter_values(events.iter().map(|event| {
+            if parquet_raw_source_kind == "mixed" {
+                event.source_kind.as_str()
+            } else {
+                parquet_raw_source_kind
+            }
+        }))),
     ];
 
     Ok(RecordBatch::try_new(schema, columns)?)
@@ -1680,7 +1585,12 @@ fn validate_segment_stem(stem: &str) -> Result<()> {
     Ok(())
 }
 
-fn estimated_event_bytes(event: &RawEvent) -> u64 {
+fn estimated_event_bytes(event: &RawEvent, parquet_raw_source_kind: &str) -> u64 {
+    let parquet_raw_source_kind = if parquet_raw_source_kind == "mixed" {
+        event.source_kind.as_str()
+    } else {
+        parquet_raw_source_kind
+    };
     [
         event.source_kind.as_str(),
         event.source_event_type.as_str(),
@@ -1690,7 +1600,7 @@ fn estimated_event_bytes(event: &RawEvent) -> u64 {
         event.collector_region.as_str(),
         event.source_endpoint.as_str(),
         event.raw_json.as_str(),
-        event.parquet_raw_source_kind.as_str(),
+        parquet_raw_source_kind,
     ]
     .iter()
     .map(|value| value.len() as u64)
@@ -1702,6 +1612,77 @@ fn estimated_event_bytes(event: &RawEvent) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::polymarket_orderbook_v3::{
+        PolymarketOrderbookV3Admission, PolymarketOrderbookV3Projection,
+    };
+    use polymarket_client_sdk_v2::clob::ws::WsMessage;
+    use tempfile::tempdir;
+
+    #[test]
+    fn polymarket_v3_sequence_state_does_not_advance_when_write_fails() {
+        let sdk_message = serde_json::from_str::<WsMessage>(
+            r#"{
+                "event_type":"book",
+                "market":"0x0000000000000000000000000000000000000000000000000000000000000002",
+                "asset_id":"101",
+                "timestamp":"1783392404600",
+                "bids":[{"price":"0.49","size":"10"}],
+                "asks":[],
+                "last_trade_price":"0.50"
+            }"#,
+        )
+        .unwrap();
+        let message =
+            PolymarketOrderbookV3Projection::from_target_admitted_sdk_message(&sdk_message)
+                .unwrap()
+                .unwrap()
+                .admit(PolymarketOrderbookV3Admission {
+                    timestamp_received: 1_783_392_404_599,
+                    collector_host_id: "collector-host".to_owned(),
+                    collector_region: "eu-west-1".to_owned(),
+                    source_endpoint: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+                        .to_owned(),
+                    source_sequence_epoch_id: "source-epoch-a".to_owned(),
+                    collector_admission_sequence: 1,
+                    collector_admission_time_utc_ms: 1_783_392_404_600,
+                })
+                .unwrap();
+        let tmp = tempdir().unwrap();
+        let mut sequence_state = PolymarketOrderbookV3WriteSequenceState::default();
+        let mut failed_writer = TypedParquetSegmentWriter::create_for_typed_source(
+            tmp.path(),
+            "failed-write",
+            POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,
+            "polymarket_market",
+        )
+        .unwrap();
+        failed_writer.writer.take();
+
+        let error = failed_writer
+            .write_polymarket_orderbook_v3_messages(
+                std::slice::from_ref(&message),
+                &mut sequence_state,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("typed parquet segment already finalized"),
+            "{error}"
+        );
+
+        let mut retry_writer = TypedParquetSegmentWriter::create_for_typed_source(
+            tmp.path(),
+            "retry-write",
+            POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,
+            "polymarket_market",
+        )
+        .unwrap();
+        retry_writer
+            .write_polymarket_orderbook_v3_messages(&[message], &mut sequence_state)
+            .unwrap();
+        assert_eq!(retry_writer.finalize().unwrap().row_count, 1);
+    }
 
     #[test]
     fn depth_writer_internal_factory_cannot_bypass_version_or_schema_guards() {

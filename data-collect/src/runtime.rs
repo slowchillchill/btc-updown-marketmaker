@@ -10,11 +10,14 @@ use sha2::{Digest as _, Sha256};
 
 use crate::collector_identity::resolve_collector_region;
 use crate::deployment::{
-    CollectorBinaryRole, DeploymentRuntimeConfig, Result, RuntimeReceipt, validate_runtime_config,
+    CollectorBinaryRole, CollectorStartupReceipt, DeploymentRuntimeConfig, Result,
+    validate_runtime_config,
 };
 use crate::handoff::{HandoffRuntimeConfig, run_heartbeat_handoff_server};
-use crate::live_runtime::{LiveTrainingRuntimeConfig, run_live_training_runtime};
 use crate::publish::PaperLiveEnvironment;
+use crate::training_runtime::{
+    TrainingRuntimeConfig, production_training_source_endpoints, run_training_runtime,
+};
 use crate::writer::sha256_file;
 
 pub const RESOURCE_HARD_THRESHOLD_EXIT_CODE: i32 = 75;
@@ -35,10 +38,10 @@ pub struct CliArgs {
 struct TrainingConfigDigest<'a> {
     contract_version: &'static str,
     args: &'a CliArgs,
-    polymarket_market_endpoint: &'static str,
-    polymarket_rtds_endpoint: &'static str,
-    binance_depth_endpoint: &'static str,
-    binance_aggtrade_endpoint: &'static str,
+    polymarket_market_endpoint: &'a str,
+    polymarket_rtds_endpoint: &'a str,
+    binance_depth_endpoint: &'a str,
+    binance_aggtrade_endpoint: &'a str,
 }
 
 #[derive(Debug)]
@@ -80,7 +83,7 @@ where
         None => resolve_collector_region().await,
     };
 
-    run_live_training_runtime(LiveTrainingRuntimeConfig {
+    run_training_runtime(TrainingRuntimeConfig {
         dataset_root: cli.dataset_root,
         duration_secs: cli.max_runtime_secs,
         run_forever: cli.run_forever,
@@ -204,13 +207,14 @@ fn validate_training_cli(cli: &CliArgs) -> io::Result<()> {
 }
 
 fn training_config_digest(cli: &CliArgs) -> Result<String> {
+    let endpoints = production_training_source_endpoints();
     let digest_input = TrainingConfigDigest {
         contract_version: "data_collect_training_config_v2",
         args: cli,
-        polymarket_market_endpoint: "wss://ws-subscriptions-clob.polymarket.com/ws/market",
-        polymarket_rtds_endpoint: "wss://ws-live-data.polymarket.com",
-        binance_depth_endpoint: "wss://stream.binance.com:9443/ws/btcusdt@depth@100ms",
-        binance_aggtrade_endpoint: "wss://stream.binance.com:9443/ws/btcusdt@aggTrade",
+        polymarket_market_endpoint: &endpoints.polymarket_market,
+        polymarket_rtds_endpoint: &endpoints.polymarket_rtds,
+        binance_depth_endpoint: &endpoints.binance_depth,
+        binance_aggtrade_endpoint: &endpoints.binance_aggtrade,
     };
     sha256_serialized(&digest_input)
 }
@@ -295,7 +299,7 @@ fn parse_hot_args(args: impl IntoIterator<Item = OsString>) -> Result<HotCliArgs
     })
 }
 
-async fn startup_receipt(config: &DeploymentRuntimeConfig) -> Result<RuntimeReceipt> {
+async fn startup_receipt(config: &DeploymentRuntimeConfig) -> Result<CollectorStartupReceipt> {
     let current_exe = env::current_exe()?;
     let binary_sha256 = sha256_file(&current_exe)?;
     let git_commit = option_env!("DATA_COLLECT_GIT_COMMIT")
@@ -306,7 +310,7 @@ async fn startup_receipt(config: &DeploymentRuntimeConfig) -> Result<RuntimeRece
         Some(region) if !region.trim().is_empty() => region.trim().to_owned(),
         _ => resolve_collector_region().await,
     };
-    RuntimeReceipt::new(
+    CollectorStartupReceipt::new(
         config,
         git_commit,
         binary_sha256,
@@ -317,7 +321,7 @@ async fn startup_receipt(config: &DeploymentRuntimeConfig) -> Result<RuntimeRece
     )
 }
 
-fn write_startup_receipt(output_root: &Path, receipt: &RuntimeReceipt) -> Result<()> {
+fn write_startup_receipt(output_root: &Path, receipt: &CollectorStartupReceipt) -> Result<()> {
     let path = output_root.join(format!("{}.startup_receipt.json", receipt.run_id));
     fs::write(path, serde_json::to_vec_pretty(receipt)?)?;
     Ok(())
@@ -374,4 +378,25 @@ fn os_string(value: OsString, label: &str) -> Result<String> {
 
 fn operator_intervention_error(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(format!("operator_intervention_required:{error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn production_source_spec_keeps_the_frozen_training_config_digest_bytes() {
+        let cli = CliArgs {
+            dataset_root: PathBuf::from("/tmp/data-collect-digest-fixture"),
+            max_runtime_secs: Some(45),
+            run_forever: false,
+            collector_region: Some("eu-west-1".to_owned()),
+            max_dataset_bytes: DEFAULT_TRAINING_DATASET_MAX_BYTES,
+        };
+
+        assert_eq!(
+            training_config_digest(&cli).unwrap(),
+            "a88b51d763d8079ce8fea18d2e6962c1a4fb74dab69d5be3081753eb68dd2ddd"
+        );
+    }
 }
