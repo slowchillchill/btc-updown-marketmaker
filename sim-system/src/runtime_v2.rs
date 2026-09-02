@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use contracts::{
-    ExecutionMarketEventV3, InitialAccountStateV2, QueryCursorV2, Sha256Hex, SimCallerRoleV1,
+    ConditionId, ExecutionMarketEventV3, InitialAccountStateV2, QueryCursorV2, Sha256Hex,
+    SimCallerRoleV1,
 };
 use serde::{Deserialize, Serialize};
 
@@ -92,6 +93,12 @@ pub struct CancelOrdersRequestV2 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelMarketOrdersRequestV2 {
+    pub context: RequestContextV2,
+    pub condition_id: ConditionId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CancelAllOrdersRequestV2 {
     pub context: RequestContextV2,
 }
@@ -127,6 +134,7 @@ pub enum BusinessRequestV2 {
     PostOrders(PostOrdersRequestV2),
     CancelOrder(CancelOrderRequestV2),
     CancelOrders(CancelOrdersRequestV2),
+    CancelMarketOrders(CancelMarketOrdersRequestV2),
     CancelAllOrders(CancelAllOrdersRequestV2),
     Order(OrderRequestV2),
     Orders(OrdersRequestV2),
@@ -140,6 +148,7 @@ impl BusinessRequestV2 {
             Self::PostOrders(request) => &request.context,
             Self::CancelOrder(request) => &request.context,
             Self::CancelOrders(request) => &request.context,
+            Self::CancelMarketOrders(request) => &request.context,
             Self::CancelAllOrders(request) => &request.context,
             Self::Order(request) => &request.context,
             Self::Orders(request) => &request.context,

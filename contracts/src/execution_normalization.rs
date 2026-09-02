@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AccountInstanceKeyV1, AssetIdentityV1, CancelInputItemRefV2, ConditionId, ExactDecimal,
-    MarketIdentityV2, Sha256Hex, TokenId,
+    ExecutionMethodV2, MarketIdentityV2, Sha256Hex, TokenId,
 };
 
 pub const EXECUTION_NORMALIZATION_CONTRACT_V1: &str = "execution_normalization_v1";
@@ -65,6 +65,7 @@ pub enum SimV2DirectResponseAssociationV1 {
     },
     CancellationTarget {
         global_request_id: String,
+        method: ExecutionMethodV2,
         target_ordinal: u64,
         input_item_refs: Vec<CancelInputItemRefV2>,
     },

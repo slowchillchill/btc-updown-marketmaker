@@ -9,8 +9,8 @@ use contracts::execution_normalization::{
     SourceNeutralOrderStateV1, SourceNeutralSubmissionOutcomeV1, StableLogicalIdentityV1,
 };
 use contracts::{
-    AccountInstanceKeyV1, CancelInputItemRefV2, ConditionId, ExactDecimal, PlatformSourceV1,
-    SimCallerRoleV1, TokenId,
+    AccountInstanceKeyV1, CancelInputItemRefV2, ConditionId, ExactDecimal, ExecutionMethodV2,
+    PlatformSourceV1, SimCallerRoleV1, TokenId,
 };
 use execution_normalization::{
     NormalizationBatchInputV1, NormalizationConflictScopeV1, NormalizationCoreV1,
@@ -637,6 +637,7 @@ fn cancellation_source_reference(
             response_received_at_utc_ms: 4_100,
             association: SimV2DirectResponseAssociationV1::CancellationTarget {
                 global_request_id: "cancel-request-55".to_owned(),
+                method: ExecutionMethodV2::CancelOrders,
                 target_ordinal: 3,
                 input_item_refs: vec![CancelInputItemRefV2 {
                     item_id: item_id.to_owned(),
