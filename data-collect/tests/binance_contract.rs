@@ -1,6 +1,7 @@
 use data_collect::event::{
     EventEnvelope, HostClockSyncStatus, RawEvidence, SourceKind, SourceTimestamp,
 };
+use data_collect::source_format::{BinanceDepthLevel, BinanceDepthUpdateRaw};
 use data_collect::sources::binance::{
     BINANCE_DEPTH_SNAPSHOT_ENDPOINT, DepthUpdateVerdict, assess_depth_update, parse_aggtrade_raw,
     parse_depth_snapshot_raw, parse_depth_update_raw,
@@ -34,6 +35,24 @@ fn envelope(source_kind: SourceKind, event_type: &str, raw_json: &str) -> EventE
     }
 }
 
+fn depth_update(first_update_id: u64, final_update_id: u64) -> BinanceDepthUpdateRaw {
+    BinanceDepthUpdateRaw {
+        envelope: envelope(SourceKind::BinanceDepthUpdate, "depthUpdate", "{}"),
+        event_type: "depthUpdate".to_owned(),
+        event_time_ms: 1_766_789_469_958,
+        symbol: "BTCUSDT".to_owned(),
+        stream_name: "btcusdt@depth".to_owned(),
+        first_update_id,
+        final_update_id,
+        bids: vec![BinanceDepthLevel {
+            price: "100.00".to_owned(),
+            quantity: "1.0".to_owned(),
+        }],
+        asks: Vec::new(),
+        combined_stream: None,
+    }
+}
+
 #[test]
 fn depth_update_verdict_uses_one_frozen_bidirectional_mapping() {
     for verdict in [
@@ -47,6 +66,22 @@ fn depth_update_verdict_uses_one_frozen_bidirectional_mapping() {
     assert_eq!(
         DepthUpdateVerdict::try_from("unknown").unwrap_err(),
         "unsupported frozen Binance depth verdict: unknown"
+    );
+}
+
+#[test]
+fn depth_assessment_rejects_invalid_state_instead_of_saturating_sequence_math() {
+    assert!(assess_depth_update(Some(0), None, &depth_update(1, 1)).is_err());
+    assert!(assess_depth_update(Some(100), Some(99), &depth_update(101, 103)).is_err());
+    assert!(assess_depth_update(None, Some(100), &depth_update(101, 103)).is_err());
+    assert_eq!(
+        assess_depth_update(Some(u64::MAX), None, &depth_update(u64::MAX, u64::MAX)).unwrap_err(),
+        "depth_update_sequence_overflow"
+    );
+    assert_eq!(
+        assess_depth_update(Some(100), Some(u64::MAX), &depth_update(u64::MAX, u64::MAX))
+            .unwrap_err(),
+        "depth_update_sequence_overflow"
     );
 }
 
